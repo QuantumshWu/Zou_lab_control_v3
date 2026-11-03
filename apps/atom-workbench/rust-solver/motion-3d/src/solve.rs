@@ -322,7 +322,7 @@ fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance
     if let Some(item)=ledger.items.iter_mut().find(|i|i.label==FOLD){
         item.action=format!("{}；计入沿轨迹实测的饱和参数 2η²{}（先验估计 {:.2}%{}）",item.action,if model.fourth{" 的平方"}else{""},100.*charge,if met>charge{"，实测高于先验估计"}else{""});item.estimate=met;
     }
-    let peak:f64=model.profiles.iter().map(|p|p.1).sum();let fixed=base.used()-peak-charge;
+    let peak:f64=model.profiles.iter().map(|p|p.1).sum();let fixed=base.used()-peak-charge-cut(base);
     let apriori:Vec<f64>=(0..estimates.len()).map(|i|if i==0{0.}else{fixed+peak.max(profiles[i])+dopplers[i]+measured[i]}).collect();
     let accounts=Accounts{apriori,excited:measured,bias};
     // The outputs beyond a target: (output, the quantity, its total, the a-priori share, the statistics).
@@ -335,7 +335,10 @@ fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance
     // population target, light near resonance somewhere the atoms go -- the measured η² can miss it.
     let resonance=(model.resonance>POPULATION_TARGET).then(||format!("光在原子所到之处接近共振：消去激发态的先验界（基态的激发态权重）达 {:.0}%（目标 {:.0}%），近共振处消去激发态不成立",
         100.*model.resonance,100.*POPULATION_TARGET));
-    ledger.flagged=resonance;
+    // The initial ensemble's cut beyond the budget, on its own: the loss and the populations depend on it.
+    let share=cut(base);
+    let initial=(share>BUDGET).then(||format!("初始热分布有 {:.0}% 落在势阱区之外（丢失与布居依赖这一截断）",100.*share));
+    ledger.flagged=match(resonance,initial){(Some(r),Some(i))=>Some(format!("{r}；{i}")),(r,i)=>r.or(i)};
     if !over.is_empty(){
         let(first,last_over)=(over[0].0,over[over.len()-1].0);
         let span=if over.len()==last_over-first+1&&last_over==estimates.len()-1{format!("{} 起",when(times[first]))}
@@ -467,7 +470,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let waiting=pilot as f64*duration/(jumps.max(1) as f64);let horizon=waiting.min(duration);
     // The first order in the Doppler shift: what the budget leaves after the model's other estimates
     // (the fold's charge takes its own share of the target), or the budget itself where they exceed it.
-    let left=BUDGET-(base.used()-fold_charge(&model,model.ground.charge));let allowance=if left>0.{left}else{BUDGET};
+    let left=BUDGET-(base.used()-cut(&base)-fold_charge(&model,model.ground.charge));let allowance=if left>0.{left}else{BUDGET};
     // The exponentials are summed to a share η of the step's own population budget, η² ε dt/waiting.
     let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=allowance;s.horizon=waiting;s};
     // The step (module documentation): by the bound's rule first -- from the first step, the next by
@@ -493,7 +496,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let candidates:Vec<Check>=bound.iter().chain(&measured).filter(|c|c.met()).copied().collect();
     // The a-priori total the steps' costs take: the ledger's estimates with the fold's charge as the
     // pilot measured it.
-    let apriori=base.used()-fold_charge(&model,model.ground.charge)+charge+pilot_beats*horizon;let parts=state_work(&model,&states);
+    let apriori=base.used()-cut(&base)-fold_charge(&model,model.ground.charge)+charge+pilot_beats*horizon;let parts=state_work(&model,&states);
     let chosen=if candidates.len()>1{
         // Against the bound rule's step, or where it missed the targets the smallest candidate step.
         let baseline=*candidates.iter().find(|c|c.steps==grown.steps).or(candidates.iter().max_by_key(|c|c.steps)).unwrap();
@@ -594,6 +597,14 @@ fn booked(base:&Ledger,bound:f64)->Ledger{
 
 /// The ledger's item of the drives' fold (its charge a priori; the solve's ledger charges it as measured).
 const FOLD:&str="消去激发态";
+/// The ledger's item of the initial ensemble's cut (lib.rs `thermal_position`): the share of the
+/// traps' thermal positions beyond their region. The temperature asked for against the trap sets it;
+/// no choice of the solve changes it, so it stays out of the totals the solve's choices take (the
+/// fold's room, the Doppler allowance, the statistics' room) and out of the population headline of
+/// the flag: beyond the budget it is flagged on its own (`ledger`).
+const CUT:&str="初始热分布（势阱区之外）";
+/// The cut's share in a ledger (`CUT`), zero without one.
+fn cut(ledger:&Ledger)->f64{ledger.items.iter().find(|i|i.label==CUT).map_or(0.,|i|i.estimate)}
 /// The fold's charge for the saturation S its folded drives meet: its populations' error bound, S at
 /// second order and S² at fourth (ground.rs; against the population core 0.2-1.0 S² where the series
 /// converges, S ≲ 0.5 -- beyond, the charge exceeds the target and the rule keeps the drives).
@@ -611,14 +622,14 @@ impl Candidate{
         let model=Model::with_order(request,allowance,fourth)?;let initial=Initial::new(&model,request)?;let mut base=model_ledger(&model,request);
         // The initial positions' region (lib.rs `thermal_position`): the share of the traps' thermal
         // positions it leaves out.
-        if initial.outside>0.{base.add("初始热分布（势阱区之外）",initial.outside,"位置取势阱区（谐振近似低于阱深处）内的玻尔兹曼分布".into());}
-        let rooms=TARGETS.map(|target|target-base.used()-A_PRIORI_SHARE*target);let(saturation,charge)=(model.ground.charge,fold_charge(&model,model.ground.charge));
+        if initial.outside>0.{base.add(CUT,initial.outside,"位置取势阱区（谐振近似低于阱深处）内的玻尔兹曼分布；丢失与布居依赖这一截断".into());}
+        let rooms=TARGETS.map(|target|target-(base.used()-cut(&base))-A_PRIORI_SHARE*target);let(saturation,charge)=(model.ground.charge,fold_charge(&model,model.ground.charge));
         Ok(Candidate{model,initial,base,allowance,saturation,charge,rooms})
     }
     /// Its rooms with the fold's charge for the saturation `saturation` met in place of the a-priori estimate.
     fn charged(&mut self,saturation:f64){let charge=fold_charge(&self.model,saturation);self.saturation=saturation;self.charge=charge;self.rooms=TARGETS.map(|target|target-self.others()-charge-A_PRIORI_SHARE*target);}
     /// Its ledger's estimates but the fold's.
-    fn others(&self)->f64{self.base.used()-fold_charge(&self.model,self.model.ground.charge)}
+    fn others(&self)->f64{self.base.used()-cut(&self.base)-fold_charge(&self.model,self.model.ground.charge)}
     /// Its estimates leave the statistics room.
     fn fits(&self)->bool{self.rooms.iter().all(|&r|r>0.)}
     /// Its estimates but the fold's leave the statistics room: a fold could still make it fit.
