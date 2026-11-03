@@ -557,8 +557,10 @@ export class DataEditorView {
     }
     const host = element("div", "form data-view-form");
     if (this.viewRows.firstElementChild?.classList.contains("data-view-form")) {
+      // The rows stay where they stand unless the axes changed: a row taken out and put back loses
+      // its focus, and with it an armed Scope's wheel (v2 keeps the row's widgets in its grid).
       const form = this.viewRows.firstElementChild as HTMLElement;
-      form.replaceChildren(...nodes);
+      if (nodes.length !== form.children.length || nodes.some((node, at) => form.children[at] !== node)) form.replaceChildren(...nodes);
     } else { host.append(...nodes); this.viewRows.replaceChildren(host); }
     this.viewRows.hidden = rows.length === 0;
   }
