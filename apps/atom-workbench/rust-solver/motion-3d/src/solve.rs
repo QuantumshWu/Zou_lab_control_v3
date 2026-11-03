@@ -84,15 +84,16 @@
 //! energy sloshes into potential energy and back twice a period, so over a period the spread of T
 //! between atoms is their energies' alone.
 //!
-//! The first batch is two groups per thread, at most the need the pilot predicts (its trajectories
-//! each a group of one, with the harmonic control, at the pilot's step): a machine of more threads
-//! runs it in fewer rounds, not with more trajectories than the scene needs. Each later batch is the
-//! predicted remaining need -- the trajectories the errors so far say the targets need, less those
-//! run --, at least the device's width and at most as many as have run: the need is the largest of
-//! many outputs' estimated errors, biased up while few groups stand behind it, so it is followed at
-//! most to twice the trajectories it rests on. No margin is added above the prediction: a batch more
-//! costs the device's tail and the statistics, a few trajectories' time, where a margin of the
-//! estimate's own noise would cost tens of percent of the trajectories.
+//! The first standard errors stand on `FIRST_GROUPS` groups on any machine: the pilot's trajectories,
+//! each a group of one (with the harmonic control, at the pilot's step), predict the need, and the
+//! first batch is that many groups of `TASK`, at most the need the pilot predicts, at least the
+//! device's width -- a machine of more threads runs it in fewer rounds, not with more trajectories.
+//! Each later batch is the predicted remaining need -- the trajectories the errors so far say the
+//! targets need, less those run --, at least the device's width and at most as many as have run: the
+//! need is the largest of many outputs' estimated errors, biased up while few groups stand behind it,
+//! so it is followed at most to twice the trajectories it rests on. No margin is added above the
+//! prediction: a batch more costs the device's tail and the statistics, a few trajectories' time,
+//! where a margin of the estimate's own noise would cost tens of percent of the trajectories.
 //!
 //! # Control variates
 //! Each output's κ² and populations are estimated with control variates of exactly known means
@@ -124,10 +125,11 @@
 //! which runs a batch's trajectories as the CPU does -- the same groups, initial states, random
 //! streams and sums. The two devices make a solve's choices alike: the model, the ledger, the pilot
 //! and the time step on the CPU in double precision either way, the statistics and their stopping
-//! rule. A batch is at least as wide as the device runs at once: two trajectories per thread on the
-//! CPU, and on the GPU a wave -- a group in each of its resident blocks --, which costs about what one
-//! trajectory does, so there the batches are whole waves and the first is usually the last. A GPU that cannot run (none, an older
-//! driver, a model beyond its kernel) leaves the solve on the CPU with the reason
+//! rule. A batch is whole groups: on the CPU at least one (its threads take the trajectories one at
+//! a time, so a batch costs its trajectories and one tail whatever its size), and on the GPU whole
+//! waves -- a group in each of its resident blocks --, a wave costing about what one trajectory does,
+//! so that there the first batch is usually the last. A GPU that cannot run (none, an older driver, a
+//! model beyond its kernel) leaves the solve on the CPU with the reason
 //! (`Solution::device_note`); one that fails during the batches has the solve redone on the CPU.
 use crate::engine::{Engine,Settings,Trajectory};
 use crate::gpu;
@@ -156,6 +158,10 @@ pub const CONFIDENCE:f64=2.;
 pub const CLASSICAL:f64=4.;
 /// The most trajectories a solve runs; a solve stopped there returns its result with the reason.
 pub const MOST_TRAJECTORIES:u64=1<<14;
+/// The jackknife's groups behind a solve's first standard errors, on any machine (# Batches): the
+/// pilot's trajectories, each a group of one, and at most the first batch's groups of `TASK` -- the
+/// twin's decision and the first prediction stand on them (formerly two per thread of 16 threads).
+pub const FIRST_GROUPS:u64=32;
 
 pub const NOT_CONFINED:&str="光镊不约束原子：3D 运动计算光镊中的单个原子，需要在焦点处形成势阱的光镊";
 
@@ -342,7 +348,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let pattern=model.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max)*thermal;
     let rate=if pattern>0.{pattern}else{trap.frequencies.iter().copied().fold(0.,f64::max)};
     let steps=((interval*rate/(A_PRIORI_SHARE*TEMPERATURE_TARGET).sqrt()).ceil() as usize).max(1);
-    let threads=rayon::current_num_threads() as u64;let pilot=2*threads;
+    let pilot=FIRST_GROUPS;
     let duration=times[outputs-1];
     let plain=|steps:usize,truncation:f64|Settings::new(interval/steps as f64,&trap,truncation,true);
     let pilot_harmonic=Harmonic::new(&model,&plain(steps,f64::EPSILON),&initial,steps,outputs);
@@ -415,13 +421,12 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
                 .map_err(Stop::Gpu),
         }
     };
-    // A batch is whole groups, at least as wide as the device runs at once: on the CPU two
-    // trajectories per thread, on the GPU a group in each of its resident blocks -- such a batch costs
-    // about what one trajectory does --, and there a whole number of its widths.
-    let width=match &gpu{Some((g,_))=>g.lock().unwrap_or_else(|e|e.into_inner()).width(1),None=>(2*threads).div_ceil(TASK)*TASK};
+    // A batch is whole groups: on the CPU at least one, on the GPU a group in each of its resident
+    // blocks -- such a batch costs about what one trajectory does --, a whole number of its widths.
+    let width=match &gpu{Some((g,_))=>g.lock().unwrap_or_else(|e|e.into_inner()).width(1),None=>TASK};
     let unit=if gpu.is_some(){width}else{TASK};
-    // The first batch: two groups per thread, at most the pilot's predicted need (its trajectories
-    // each a group, with the harmonic control), at least the device's width.
+    // The first batch: FIRST_GROUPS groups, at most the pilot's predicted need (its trajectories each
+    // a group, with the harmonic control), at least the device's width.
     let pilot_need={
         let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:pilot_harmonic.mean[i],twin:None}).collect();
         let mut e=summarize(&pilot_groups,&scales,&means);start(&mut e[0],&model,&initial);
@@ -429,7 +434,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         (pilot as f64*worst_ratio(&e,&accounts,trap.lab).powi(2)).min(MOST_TRAJECTORIES as f64).ceil() as u64
     };
     let clock=Instant::now();
-    let count=(2*threads*TASK).min(pilot_need).max(width).div_ceil(unit)*unit;
+    let count=(FIRST_GROUPS*TASK).min(pilot_need).max(width).div_ceil(unit)*unit;
     let first=batch(0,count,twin.as_ref())?;
     let wall=clock.elapsed().as_secs_f64();
     // The held twin is kept where its control pays for itself: the trajectories the first batch says
