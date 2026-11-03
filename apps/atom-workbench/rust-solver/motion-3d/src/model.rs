@@ -988,7 +988,8 @@ impl Model{
     /// force (`force`: the products once per group, a form per pair and slope, h0's slopes), a jump's
     /// photons (`photons`: per carrier, rank and axis J and J2 on the stencil and their sum) and the
     /// picked class's absorbed light (`Photons::absorption`: per photon and rank J and J2 along the
-    /// polarization and their slopes on the stencil), its classes' mean.
+    /// polarization and their slopes on the stencil), its classes' mean; at fourth order H^(4)'s slabs
+    /// in the generator and W3, the metric and Π in a jump.
     pub fn work(&self,cluster:usize)->Work{
         let layout=&self.layouts[cluster];let d=self.focused.len() as f64;let nodes=(1usize<<(2*self.focused.len())) as f64;
         let(n2,ng)=((layout.n*layout.n) as f64,self.ground.ground_states.len() as f64);
@@ -997,7 +998,15 @@ impl Model{
             let(e,pairs)=(gl.entries.len() as f64,gl.pairs.len() as f64);let added=if gl.hermitian{4.}else{2.};
             generator+=pairs*(nodes*(2.+d)+added+1.+d)*e;force+=e+pairs*(1.+d)*e;
         }
-        let photons=self.carriers.iter().map(|c|c.rank as f64*3.*ng*layout.n as f64*(2.*nodes+1.)).sum();
+        let mut photons=self.carriers.iter().map(|c|c.rank as f64*3.*ng*layout.n as f64*(2.*nodes+1.)).sum();
+        // The fourth order: H^(4)'s slabs per generator; per jump W3's tables and forms, the metric on the
+        // state and Π after the jump (`FourthLayout`).
+        if let Some(f)=&layout.fourth{
+            let r=|c:usize|self.carriers[c].rank as f64;let n=layout.n as f64;
+            generator+=f.quartic.len() as f64*nodes*n2+n2;
+            let pairs:f64=f.slow.iter().map(|s|r(s.carriers.0)*r(s.carriers.1)).sum();
+            photons+=f.jumps.iter().map(|j|r(j.inner)*3.*ng*ng*n*(nodes+1.)).sum::<f64>()+f.p.iter().map(|&(c2,c4,_)|r(c2)*r(c4)*ng*n*nodes).sum::<f64>()+3.*pairs*nodes*n2;
+        }
         let classes=&self.ground.clusters[cluster].classes;
         let absorption=classes.iter().map(|c|c.photons.iter().map(|(ph,_)|self.carriers[ph.carrier].rank as f64*(6.+nodes*(3.+d))).sum::<f64>()).sum::<f64>()/classes.len().max(1) as f64;
         Work{generator,force,photons,absorption,pairs:layout.groups.iter().map(|g|g.pairs.len()).sum()}
