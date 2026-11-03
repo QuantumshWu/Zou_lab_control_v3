@@ -50,15 +50,25 @@
 //!   molasses the atoms wait 50-140 us in dark states, and the bound over-counts the step's error
 //!   there several times;
 //! - the step's light impulse, relative, within η of the temperature target;
-//! - the light's friction, relative, within η of the temperature target: the sampled states' mean
-//!   change of the mechanical energy over the step, which the conservative forces leave alone --
-//!   the internal state's lag that carries the friction is a small share of its populations, so
-//!   their criterion alone lets T's step error grow past its share (the 3D PGC example: T 2–3 % high
-//!   at the populations' step, measured against half that step). Where the friction moves the
-//!   energy by less than its thermal value 3 k_B T over the run, T's step error is the energy's step
-//!   error summed over the run against that thermal energy, and the step's energy error is taken
-//!   against a step's share of it: the change there can be the integrator's own error, which falls
-//!   with the step as the step's error does (`step_excess`).
+//! - T's own step error, the orbits' (`orbits`): from one state per pilot trajectory bound to the trap
+//!   (the atoms whose T the step's error stays on: an unbound one leaves within a transit of the trap's
+//!   region) the jump-free flow over one period of the trap's slowest axis, the span of the solve's T
+//!   windows, in steps of dt against steps of dt/2, ψ kept normalized; per axis the mean κ² over it
+//!   compared, the probes' mean relative difference plus CONFIDENCE standard errors, within η of the
+//!   temperature target. The integrator keeps the conservative motion's energy error bounded rather
+//!   than accumulating, so that a step's energy error summed over the run (the former friction
+//!   criterion) over-counts T's error many times -- the tweezer alone at 0.45 us 0.99 of its share
+//!   against the orbits' 0.13, and the retro-reflected tweezer refined to 0.0076 us where T's measured
+//!   error asks 0.03–0.05 us --;
+//!   with the orbits, the impulse and the populations' criterion, the 3D PGC and the tetrahedral MOT
+//!   hold T within 0.4 % and 1.0 % of a quarter of their steps at the outputs where it binds (4096
+//!   trajectories on shared streams);
+//! - the loss, within η ε: an escape over the trap's top moves with the motion's energy -- the pilot's
+//!   escaped share times D/k_BT per relative error of it (`escape`) --, by the orbits' error.
+//! T's criteria take η of the temperature target where T binds (`Binding`) and the target itself where
+//! it is a reference only (`tolerances`): its share would refine for a value no target takes, while a
+//! step that leaves the motion unresolved still moves the loss (the retro-reflected tweezer over 10 us
+//! at the stiff axis' period, 1 us: 0.9 % of its atoms lost, T 160 % high, against 0.016 us).
 //! All scale as dt², so a step that misses is shrunk by the square root of its excess and checked
 //! again, and one that meets them with room is grown the same way, by whatever factor, until a step
 //! comes up twice: first by the population criterion's bound, then from the largest step that met
@@ -149,7 +159,7 @@ use crate::ground::{ExcitedKind,Ground,Kind};
 use crate::ledger::{Ledger,BUDGET};
 use crate::model::{Model,Trap};
 use crate::control::{Harmonic,Twin};
-use crate::stats::{summarize,Estimate,Means,Scales,KT_PER_UK};
+use crate::stats::{summarize,Estimate,Group,Means,Scales,KT_PER_UK};
 use crate::{sample_states,simulate,Initial,Outcome,Variates,TASK};
 use crate::{Complex,Request,STATES};
 use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
@@ -388,9 +398,6 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let listed=listed(outputs);let seed=0x3D_5EED;
     let pilot=FIRST_GROUPS;
     let duration=times[outputs-1];
-    // The drift that moves an atom's thermal energy 3 k_B T (a 3D harmonic trap's) over the run, per
-    // unit time: a step's share of it is the friction criterion's floor (`step_excess`).
-    let drift=3.*KT_PER_UK*request.temperature_uk/duration;
     // The fold of the excited states (module documentation): the rule's candidates from all folded
     // down, their order the a-priori estimates'; the pilot runs the first, and each candidate's
     // charge is what its folded drives meet at the pilot's states (`measured_charge`). The first
@@ -525,7 +532,13 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // population error measured where it decides and the motion's criteria are met (a step's
     // doubling taken once). Kept: of the checked steps that met the targets the one of least
     // predicted cost, or the last checked when none did.
-    let doubled=|steps:usize|{let r=step_excess(&Engine::new(&model,settings(steps)),&states,waiting,drift);Check{steps,population:r[0],motion:r[1]}};
+    // The motion's criteria hold T's step error within T's share where T binds (`Binding`, at the chosen model's
+    // pilot), and within the T target itself where T is a reference only: its share would refine for a value the
+    // targets do not take, while a step that leaves the motion unresolved still moves the loss (`tolerances`).
+    let binds=[true,Binding::of(&states,model.hbar_over_mass,trap.lab).temperature];let tolerances=tolerances(binds[1]);
+    let(probes,escape)=(bound_probes(&model,&states),escape(&model,&states,&pilot_groups,depth));
+    let period=std::f64::consts::TAU/trap.frequencies.iter().copied().fold(f64::INFINITY,f64::min);
+    let doubled=|steps:usize|{let r=step_excess(&Engine::new(&model,settings(steps)),&states,waiting,&probes,period,escape,tolerances);Check{steps,population:r[0],loss:r[1],motion:r[2]}};
     let search=|first:usize,measured:bool,known:&[Check],checked:&mut Vec<Check>|{
         let mut steps=first;
         for _ in 0..8{
@@ -549,7 +562,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let mut distinct:Vec<usize>=candidates.iter().map(|c|c.steps).filter(|&s|s!=baseline.steps).collect();distinct.sort();distinct.dedup();distinct.insert(0,baseline.steps);
         let work:Vec<f64>=distinct.iter().map(|&s|interval_work(&parts,&settings(s),interval,waiting)).collect();
         let work_of=|c:&Check|work[distinct.iter().position(|&s|s==c.steps).unwrap()]/work[0];
-        let cost=|c:&Check|predicted_cost(c,work_of(c),&baseline,apriori);
+        let cost=|c:&Check|predicted_cost(c,work_of(c),&baseline,apriori,binds);
         // The baseline is left only for a candidate predicted to cost less (ties keep it).
         candidates.iter().fold(baseline,|best,c|if cost(c)<cost(&best){*c}else{best})
     }else{candidates.first().copied().unwrap_or(grown)};
@@ -557,8 +570,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let dt=interval/steps as f64;let settings=settings(steps);
     // A step the work bound set that misses its shares: why, for the flag.
     let bounded=(steps==most&&!chosen.met()).then(||format!("步数已达上限（每条轨迹 {MOST_STEPS} 步）：步长 {dt:.3e} μs 的误差为其份额的 {:.1} 倍",chosen.excess()));
-    // The step's bias: its share of each target times its measured excess there.
-    let bias=[ratios[0]*A_PRIORI_SHARE*POPULATION_TARGET,ratios[1]*A_PRIORI_SHARE*TEMPERATURE_TARGET];
+    // The step's bias: per target its tolerance times its measured excess there.
+    let bias=[ratios[0]*tolerances[0],ratios[1]*tolerances[1]];
     // The device: the GPU when asked for and able, the model on it; else the CPU, with why.
     let(gpu,note)=match device{
         Device::Cpu=>(None,None),
@@ -818,41 +831,92 @@ impl Binding{
     }
 }
 
-/// A checked step (module documentation): its steps per interval and its ratios to the shares -- the
-/// population criterion's (its bound's, or where measured the upper confidence bound of its measured
-/// error) and the motion's (the impulse's and the friction's larger); 1 meets each.
+/// A checked step (module documentation): its steps per interval and its ratios to the tolerances
+/// (`tolerances`) -- the population criterion's (its bound's, or where measured the upper confidence bound
+/// of its measured error), the loss's (absolute as the populations') and the motion's (the impulse's and
+/// the orbits' larger); 1 meets each.
 #[derive(Clone,Copy,Debug)]
-struct Check{steps:usize,population:f64,motion:f64}
+struct Check{steps:usize,population:f64,loss:f64,motion:f64}
 impl Check{
-    fn ratios(&self)->[f64;2]{[self.population,self.motion]}
-    fn excess(&self)->f64{self.population.max(self.motion)}
+    /// Per target, the populations' (with the loss's) and T's.
+    fn ratios(&self)->[f64;2]{[self.population.max(self.loss),self.motion]}
+    fn excess(&self)->f64{self.population.max(self.loss).max(self.motion)}
     fn met(&self)->bool{self.excess()<=1.}
-    /// The population criterion decides the step: its ratio the larger, the motion's criteria met.
-    fn decided_by_population(&self)->bool{self.motion<=1.&&self.population>self.motion}
+    /// The population criterion decides the step: its ratio the largest, the others met.
+    fn decided_by_population(&self)->bool{self.motion.max(self.loss)<=1.&&self.population>self.motion.max(self.loss)}
 }
 
-/// The step-doubling excess of a step (module documentation), from one step against two halves on all
-/// the sampled states: the population criterion's bound -- one step's population error times the steps
-/// of a waiting time -- and the light impulse's and the friction's larger relative error, each over
-/// its share (1 meets it).
-///
-/// The friction's: the step's error of the mechanical energy's change, against that change where the
-/// friction moves the energy by more than its thermal value 3 k_B T over the run -- the equilibrium T
-/// it sets is off by the friction's relative error --, else against a step's share of that thermal
-/// energy, `drift` dt (`drift` = 3 k_B T/duration): there T is off by the step's energy error summed
-/// over the run, and the change is no measure of the step's error -- with the friction weak it is the
-/// integrator's own error, whose third order makes one step's difference from two halves three times
-/// their change (E₁ − E₂ = 3(E₂ − E₀)) at every step, so that their ratio never falls.
-fn step_excess(engine:&Engine,states:&[Trajectory],waiting:f64,drift:f64)->[f64;2]{
+/// The tolerances of a step's criteria (module documentation, # Time step): the populations' and the
+/// loss's, η of the population target; T's, η of the temperature target where T binds and the target itself
+/// where T is a reference only.
+fn tolerances(temperature:bool)->[f64;2]{[A_PRIORI_SHARE*POPULATION_TARGET,if temperature{A_PRIORI_SHARE*TEMPERATURE_TARGET}else{TEMPERATURE_TARGET}]}
+
+/// The step-doubling excess of a step (module documentation), each criterion over its tolerance
+/// (`tolerances`; 1 meets it): the population criterion's bound -- from all the sampled states one step
+/// against two halves, the populations' difference times the steps of a waiting time --; the loss's, the
+/// escape's sensitivity times the orbits' error (`escape`); and the motion's, the larger of the light
+/// impulse's relative error over one step (the same doublings) and the orbits' error over a trap period
+/// (`orbits`).
+fn step_excess(engine:&Engine,states:&[Trajectory],waiting:f64,probes:&[Trajectory],period:f64,escape:f64,tolerances:[f64;2])->[f64;3]{
     let dt=engine.settings.dt;let richardson=4./3.;let count=states.len().max(1) as f64;
     // The states' doublings on the threads, summed in their order (the sums do not depend on the threads).
-    let doubled:Vec<([f64;2],[f64;3],[f64;2])>=states.par_iter().map(|t|engine.doubling(t,dt)).collect();
-    let(mut population,mut difference,mut impulse,mut energy,mut friction)=(0.,0.,0.,0.,0.);
-    for(motion,internal,work)in &doubled{difference+=motion[0];impulse+=motion[1];population+=internal[0];energy+=work[0];friction+=work[1];}
+    let doubled:Vec<([f64;2],[f64;3])>=states.par_iter().map(|t|engine.doubling(t,dt)).collect();
+    let(mut population,mut difference,mut impulse)=(0.,0.,0.);
+    for(motion,internal)in &doubled{difference+=motion[0];impulse+=motion[1];population+=internal[0];}
     let bound=richardson*population/count*(waiting/dt).max(1.);
     let relative=if impulse>0.{richardson*difference/impulse}else{0.};
-    let dissipated=richardson*energy.abs()/friction.abs().max(count*drift*dt);
-    [bound/(A_PRIORI_SHARE*POPULATION_TARGET),relative.max(dissipated)/(A_PRIORI_SHARE*TEMPERATURE_TARGET)]
+    let orbit=orbits(engine,probes,period);
+    [bound/tolerances[0],escape*orbit/tolerances[0],relative.max(orbit)/tolerances[1]]
+}
+
+/// The loss's sensitivity to the motion's energy scale: the pilot's escape over the trap's top -- the
+/// share of its trajectories lost after a state of theirs was bound (atoms the light heated over the
+/// top; an unbound one leaving is no escape) -- times the trap's depth over the bound states' mean
+/// kinetic energy per axis, D/k_BT. An escape over a barrier from a thermal tail goes as e^{−D/k_BT}:
+/// a relative error δ of the motion's energy (its orbits', `orbits`) moves the trap's top by δD for the
+/// orbits that reach it, and the escaped share by D/k_BT δ of itself. Zero where none escaped.
+fn escape(model:&Model,states:&[Trajectory],groups:&[Group],depth:f64)->f64{
+    let(hm,outputs)=(model.hbar_over_mass,groups.first().map_or(0,|g|g.sums.len()));if outputs==0{return 0.;}
+    let bound:Vec<(u64,f64)>=states.par_iter().filter_map(|t|{let p=model.point(t.r,t.kappa);let k:f64=t.kappa.iter().map(|k|k*k).sum();
+        (0.5*hm*k+model.trap_potential(t.cluster,&p,&t.psi,t.time)<0.).then_some((t.index,hm*k/3.))}).collect();
+    if bound.is_empty(){return 0.;}
+    let kt=bound.iter().map(|b|b.1).sum::<f64>()/bound.len() as f64;
+    let escaped=groups.iter().enumerate().filter(|(k,g)|g.sums[outputs-1].held==0.&&bound.iter().any(|b|b.0==*k as u64)).count() as f64;
+    escaped/groups.len() as f64*depth/kt
+}
+
+/// The orbits' probes: per pilot trajectory its middle state among those bound to the trap -- their
+/// mechanical energy below the trap's far level (model.rs `Model::trap_potential`) --, the atoms whose T
+/// the step's error stays on (an unbound one leaves within a transit of the trap's region).
+fn bound_probes(model:&Model,states:&[Trajectory])->Vec<Trajectory>{
+    let hm=model.hbar_over_mass;
+    let bound:Vec<bool>=states.par_iter().map(|t|{let p=model.point(t.r,t.kappa);0.5*hm*t.kappa.iter().map(|k|k*k).sum::<f64>()+model.trap_potential(t.cluster,&p,&t.psi,t.time)<0.}).collect();
+    let mut indices:Vec<u64>=states.iter().map(|t|t.index).collect();indices.sort();indices.dedup();
+    indices.iter().filter_map(|&i|{let own:Vec<&Trajectory>=states.iter().zip(&bound).filter(|(t,&b)|t.index==i&&b).map(|(t,_)|t).collect();
+        (!own.is_empty()).then(||own[own.len()/2].clone())}).collect()
+}
+
+/// The conservative motion's step error on T (module documentation): from each probe the jump-free flow
+/// over one period of the trap's slowest axis (the solve's T windows' span, past the run where it is
+/// shorter: a window short of a period weighs the orbit's phase, not the step) in steps of dt and of dt/2, ψ kept
+/// normalized, the mean κ² per axis over it compared -- 4/3 their difference, the probe's orbit's own
+/// error, which the window means of T keep. Per axis the probes' mean difference relative to their mean
+/// κ², its magnitude plus CONFIDENCE standard errors; the largest axis. Zero without probes.
+fn orbits(engine:&Engine,probes:&[Trajectory],period:f64)->f64{
+    if probes.is_empty(){return 0.;}
+    let(dt,model)=(engine.settings.dt,engine.model);let steps=((period/dt).ceil() as usize).max(1);
+    let windows:Vec<[[f64;3];2]>=probes.par_iter().map(|t|{
+        let mean=|h:f64,n:usize|->[f64;3]{let mut x=t.clone();let mut sum=[0.;3];let size=model.dimension(x.cluster);
+            for _ in 0..n{x=engine.coast(&x,h,1);let norm=x.psi[..size].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();for z in x.psi[..size].iter_mut(){*z=*z*(1./norm);}
+                for a in 0..3{sum[a]+=x.kappa[a]*x.kappa[a];}}
+            sum.map(|v|v/n as f64)};
+        [mean(dt,steps),mean(0.5*dt,2*steps)]}).collect();
+    let n=windows.len() as f64;
+    (0..3).map(|a|{
+        let reference=windows.iter().map(|w|w[1][a]).sum::<f64>()/n;if !(reference>0.){return 0.;}
+        let d:Vec<f64>=windows.iter().map(|w|4./3.*(w[0][a]-w[1][a])/reference).collect();let m=d.iter().sum::<f64>()/n;
+        m.abs()+CONFIDENCE*(d.iter().map(|x|(x-m).powi(2)).sum::<f64>()/(n*(n-1.).max(1.))).sqrt()
+    }).fold(0.,f64::max)
 }
 
 /// The population error a step accumulates over `horizon` (module documentation), over its share:
@@ -942,11 +1006,15 @@ fn held_work(states:&[StateWork],s:&Settings,interval:f64,waiting:f64)->f64{
 /// reference's -- at most the largest over the targets of (the reference's room/its room)², the room
 /// what a target leaves past the a-priori estimates and the step's bias, as the ledger adds them:
 /// exact for the target that binds, whatever the trajectories' spreads.
-fn predicted_cost(c:&Check,work:f64,reference:&Check,apriori:[f64;2])->f64{
-    let rooms=|c:&Check|[POPULATION_TARGET-apriori[0]-c.population*A_PRIORI_SHARE*POPULATION_TARGET,TEMPERATURE_TARGET-apriori[1]-c.motion*A_PRIORI_SHARE*TEMPERATURE_TARGET];
+fn predicted_cost(c:&Check,work:f64,reference:&Check,apriori:[f64;2],binds:[bool;2])->f64{
+    let rooms=|c:&Check|{let r=c.ratios();std::array::from_fn::<f64,2,_>(|k|TARGETS[k]-apriori[k]-r[k]*A_PRIORI_SHARE*TARGETS[k])};
     let(mine,theirs)=(rooms(c),rooms(reference));
-    if mine.iter().any(|&r|!(r>0.)){return f64::INFINITY;}
-    work*(0..2).map(|k|(theirs[k].max(0.)/mine[k]).powi(2)).fold(0.,f64::max)
+    // The targets that weigh: those that bind, and that the a-priori estimates alone leave room in -- beyond, the
+    // statistics take the whole target whatever the step (`room`), and the need is every step's.
+    let weighed:Vec<usize>=(0..2).filter(|&k|binds[k]&&apriori[k]<TARGETS[k]).collect();
+    if weighed.is_empty(){return work;}
+    if weighed.iter().any(|&k|!(mine[k]>0.)){return f64::INFINITY;}
+    work*weighed.iter().map(|&k|(theirs[k].max(0.)/mine[k]).powi(2)).fold(0.,f64::max)
 }
 
 /// t = 0 is the request's initial state, exactly: per lab axis T is its thermal Wigner temperature

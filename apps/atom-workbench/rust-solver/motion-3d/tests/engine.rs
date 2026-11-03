@@ -10,9 +10,10 @@ use atom_motion_3d::ground::{Ground,Path};
 use atom_motion_3d::ledger::BUDGET;
 use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
-use atom_motion_3d::stats::{summarize,Scales,KT_PER_UK};
-use atom_motion_3d::{initial_trajectory,simulate,Initial,Stratum};
-use atom_motion_3d::solve::{solve,Device};
+use atom_motion_3d::stats::{summarize,Means,Scales,KT_PER_UK};
+use atom_motion_3d::{initial_trajectory,simulate,Initial,Stratum,Variates};
+use atom_motion_3d::solve::{solve,Device,TEMPERATURE_TARGET};
+use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
 #[path="../examples/scene/mod.rs"] mod scene;
@@ -450,6 +451,40 @@ fn a_shallow_trap_s_dark_atoms_stay_whatever_the_step(){
         println!("region {region:.1}: lost {} at 2 us ({dark} in the dark), {} at 0.5 us, {discordant} discordant",total(&coarse),total(&fine));
         if region==0.{assert!(dark<=4,"{dark} dark atoms lost at 2 us");}
         assert!((total(&coarse)-total(&fine)).abs()<=3.*discordant.sqrt(),"region {region}: lost {} at 2 us, {} at 0.5 us, {discordant} discordant",total(&coarse),total(&fine));
+    }
+}
+
+/// The same shallow trap's step (solve.rs, # Time step): the line took 2 us, where the impulse's and the
+/// populations' criteria are met and T is 2.1–2.7 % high against 0.25 us (4096 trajectories on shared
+/// streams, its share 1 %); T's own step error, the orbits' over a trap period (`orbits`), keeps the step at
+/// most 1 us (0.6–0.9 % there), and T over the outputs lies within its share (η of the temperature target)
+/// of a quarter of that step, plus three standard errors, on shared streams.
+#[test]
+fn a_shallow_trap_s_step_holds_t_within_its_share(){
+    let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/shallow_probe_motion.json")).unwrap();
+    let mut r=scene::request(&fixture["payload"]);let(duration,outputs,count)=(500.,26,1024u64);
+    r.times_us=(0..outputs).map(|i|duration*i as f64/(outputs-1) as f64).collect();
+    let dt=solve(&r,Device::Cpu,&mut |_,_|{}).unwrap().time_step_us;
+    assert!(dt<=1.+1e-9,"dt {dt} us");
+    let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();let trap=initial.traps[reference];
+    let interval=duration/(outputs-1) as f64;let steps=(interval/dt).round() as usize;
+    let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
+    // T per output at `steps` per interval, the solve's seed and groups (the same trajectories at either step).
+    let temperatures=|steps:usize|{
+        let mut s=Settings::new(interval/steps as f64,&trap,f64::EPSILON,true);s.region=initial.depths[reference];
+        let harmonic=Harmonic::new(&model,&s,&initial,steps,outputs);
+        let outcome=simulate(&model,&s,&initial,0x3D_5EED,0,count,8,steps,outputs,&[],Some(&Variates{harmonic:&harmonic,twin:None}));
+        let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:None}).collect();
+        summarize(&outcome.groups,&scales,&means)};
+    let(coarse,fine)=(temperatures(steps),temperatures(4*steps));
+    // Per axis the mean ΔT/T over the outputs and the mean of its standard errors (the outputs' errors are
+    // correlated along the trajectories: the mean's is at most theirs).
+    let share=A_PRIORI_SHARE*TEMPERATURE_TARGET;let n=(outputs-1) as f64;
+    for a in 0..3{
+        let(d,e)=(1..outputs).fold((0.,0.),|(d,e),i|{let t=fine[i].temperature[a];(d+(coarse[i].temperature[a]-t)/t,e+coarse[i].temperature_error[a].hypot(fine[i].temperature_error[a])/t)});
+        println!("axis {a}: dt {dt:.3} us against {:.3} us, mean ΔT/T {:+.2} % ± {:.2} %",dt/4.,100.*d/n,100.*e/n);
+        assert!((d/n).abs()<=share+3.*e/n,"axis {a}: mean ΔT/T {:.2} % ± {:.2} %",100.*d/n,100.*e/n);
     }
 }
 
