@@ -309,6 +309,18 @@ impl Segment{
     }
 }
 
+/// The fourth order's start from a bare ground state (after a jump, and at t = 0, into a cluster with
+/// its tables; model.rs `Model::slow_part`): ψ ← Π f/√A, its slow part, and the threshold θ ← θ/A,
+/// A = ‖Π f‖² -- the survival after the dressing's transient is A times the slow part's. A < 1 (far
+/// from resonance): with probability 1 − A the transient emits at once (θ/A ≥ 1, a jump at the step's
+/// start); A > 1 (near it): the dressing's rebuild delays the next jump.
+pub fn slow_start(model:&Model,t:&mut Trajectory,point:&Point,time:f64){
+    let Some(pi)=model.slow_part(t.cluster,point,time)else{return};let n=model.dimension(t.cluster);
+    let mut y=[Complex::ZERO;MOST_MIXED];for a in 0..n{for b in 0..n{y[a]+=pi[a*n+b]*t.psi[b];}}
+    let(w,before)=(norm2(&y,n),norm2(&t.psi,n));let a=w/before;
+    for z in y[..n].iter_mut(){*z=*z*(before/w).sqrt();}t.psi=y;t.threshold/=a;
+}
+
 /// A real orthonormal pair across the unit vector n.
 fn across(n:[f64;3])->[[f64;3];2]{
     let a=if n[0].abs()<=n[1].abs()&&n[0].abs()<=n[2].abs(){[1.,0.,0.]}else if n[1].abs()<=n[2].abs(){[0.,1.,0.]}else{[0.,0.,1.]};
@@ -539,6 +551,7 @@ impl<'a> Engine<'a>{
         let mut next=[Complex::ZERO;MOST_MIXED];for i in 0..nt{next[i]=f[i]*(1./size.sqrt());}
         t.cluster=class.target;t.psi=next;t.threshold=threshold;
         if let Some(draws)=transient{self.transient(t,&point,time,draws,&mut rng);}
+        if self.held.is_none(){slow_start(m,t,&point,time);}
     }
 
     /// A moving atom's recoils from a photon (direction n, wave number k, polarization ε, the state it

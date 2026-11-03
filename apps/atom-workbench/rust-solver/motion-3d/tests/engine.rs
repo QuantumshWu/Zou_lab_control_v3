@@ -80,6 +80,33 @@ fn the_tables_give_the_front_end_s_generator_and_the_photons_carry_the_decay(){
     }
 }
 
+/// The fourth order's tables (model.rs `FourthLayout`) against the dense fourth-order fold (ground.rs
+/// `Ground::fourth`) at random points and times, every drive folded, the kinetic shift off: H_eff's
+/// Hermitian part with H^(4), every class's photons with −C W3 − ½ C R R†R, and the post-jump slow part
+/// Π, to the tables' interpolation.
+#[test]
+fn the_fourth_order_tables_give_the_dense_fourth_order_fold(){
+    let mut model=Model::with_order(&request(&|_|true),f64::INFINITY,true).unwrap();model.doppler=false;let g=&model.ground;
+    let herm=|m:&dyn Fn(usize,usize)->Complex,a:usize,b:usize|(m(a,b)+m(b,a).conj())*0.5;
+    for(k,r,_,t,psi)in samples(&model,5){
+        let n=model.dimension(k);let p=model.point(r,[0.;3]);let local=model.local(k,&p,t);
+        let e=g.eliminate(&model.hamiltonian_at_point(r)).unwrap();let dense=g.fourth(&e,k,r,t).unwrap();
+        let scale=dense.effective.largest();
+        for a in 0..n{for b in 0..n{
+            let x=herm(&|i,j|local.hamiltonian[i*n+j]+if i==j{Complex::new(local.scalar,0.)}else{Complex::ZERO},a,b);let y=herm(&|i,j|dense.effective[(i,j)],a,b);
+            assert!((x-y).abs()<=2e-3*scale,"cluster {k} at {r:?}, ({a}, {b}): {x:?} against {y:?}");
+        }}
+        let photons=model.photons(k,&p,&psi,t,None);
+        for(c,(u,j))in photons.amplitude.iter().zip(&dense.jumps).enumerate(){let nt=model.ground_dimension(g.clusters[k].classes[c].target);
+            let norm:f64=j.iter().map(|m|(0..m.rows).map(|i|(0..n).fold(Complex::ZERO,|s,q|s+m[(i,q)]*psi[q]).norm_sqr()).sum::<f64>()).sum::<f64>().sqrt().max(1e-12);
+            for x in 0..3{for i in 0..nt{let v=(0..n).fold(Complex::ZERO,|s,q|s+j[x][(i,q)]*psi[q]);
+                assert!((u[x][i]-v).abs()<=2e-3*norm,"cluster {k} class {c} axis {x} row {i}: {:?} against {v:?}",u[x][i]);}}
+        }
+        let slow=model.slow_part(k,&p,t).unwrap();
+        for a in 0..n{for b in 0..n{assert!((slow[a*n+b]-dense.slow[(a,b)]).abs()<=2e-3,"cluster {k} Π ({a}, {b}): {:?} against {:?}",slow[a*n+b],dense.slow[(a,b)]);}}
+    }
+}
+
 /// The Ehrenfest force is minus the gradient of the energy Re⟨ψ|H_eff|ψ⟩ (central differences),
 /// the trap's and the light's -- with explicit excited states (the drives kept within the budget)
 /// their own potential and the kept drives' stimulated force --, the Doppler term's own gradient

@@ -242,8 +242,9 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
     let explicit:usize=g.clusters.iter().map(|c|c.excited.len()).sum();
     let count=|drive:bool|g.excited_items.iter().filter(|x|matches!(x.kind,ExcitedKind::Drive(_))==drive).fold((0,0),|(k,f),x|if x.folded{(k,f+1)}else{(k+1,f)});
     let(kept,fold)=count(true);
-    ledger.add(FOLD,g.charge,if explicit==0{format!("{fold} 个驱动全部二阶折叠（各基态被折叠驱动的饱和参数之和、按光场图样平均为布居误差之界）")}
-        else{format!("{fold} 个驱动二阶折叠（饱和参数之和按光场图样平均为布居误差之界），{kept} 个显式保留、{explicit} 个激发态精确传播：按预计总耗时选取")});
+    let order=if model.fourth{"四阶折叠（误差界为饱和参数之和的平方）"}else{"二阶折叠（误差界为饱和参数之和）"};
+    ledger.add(FOLD,fold_charge(model,g.charge),if explicit==0{format!("{fold} 个驱动全部{order}，饱和参数按光场图样平均")}
+        else{format!("{fold} 个驱动{order}，{kept} 个显式保留、{explicit} 个激发态精确传播：按预计总耗时选取")});
     let(kept,fold)=count(false);
     if kept+fold>0{ledger.add("激发态之间的耦合（光镊混合超精细能级）",statics,format!("{fold} 个二阶折叠，{kept} 个显式保留"));}
     let(kept,fold)=g.items.iter().filter(|i|matches!(i.kind,Kind::Static{..}|Kind::Raman{..})).fold((0,0),|(k,f),i|if i.folded{(k,f+1)}else{(k+1,f)});
@@ -266,20 +267,20 @@ struct Accounts{apriori:Vec<f64>,excited:Vec<f64>,bias:[f64;2]}
 /// total estimated error -- the a-priori total, the step's bias and the statistics -- exceeds a
 /// target are flagged; before it, those whose a-priori total and bias alone do.
 fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance:f64,bias:[f64;2],frequencies:[f64;3],last:bool)->(Ledger,Accounts){
-    let mut ledger=base.clone();let charge=model.ground.charge;
+    let mut ledger=base.clone();let charge=fold_charge(model,model.ground.charge);
     // The fold's error, charged as measured along the trajectories: the folded excited population's
     // 2η², the saturation the atoms met -- what the fold's bound takes on the paths they go (an atom
     // that gathers where the light is bright, as red-detuned molasses holds it at its lattice's
     // bright sites, meets more than the pattern's mean). The a-priori estimate over the reach decided
     // the fold (`Candidate`).
-    let measured:Vec<f64>=estimates.iter().map(|e|2.*e.folded).collect();
+    let measured:Vec<f64>=estimates.iter().map(|e|fold_charge(model,2.*e.folded)).collect();
     let profiles:Vec<f64>=estimates.iter().map(|e|e.profile).collect();let dopplers:Vec<f64>=estimates.iter().map(|e|e.doppler).collect();
     let largest=|v:&[f64]|v.iter().skip(1).copied().fold(0.,f64::max);
     ledger.add("多普勒与反冲频移",largest(&dopplers),format!("一阶（kv/σ）²；单步超过 {:.1e} 时用精确响应",allowance));
     if !model.profiles.is_empty(){ledger.add("聚焦光在原子处的强度（沿轨迹）",largest(&profiles),"按峰值强度的平面波".into());}
     let met=largest(&measured);
     if let Some(item)=ledger.items.iter_mut().find(|i|i.label==FOLD){
-        item.action=format!("{}；计入沿轨迹实测的 2η²（先验估计 {:.2}%{}）",item.action,100.*charge,if met>charge{"，实测高于先验估计"}else{""});item.estimate=met;
+        item.action=format!("{}；计入沿轨迹实测的饱和参数 2η²{}（先验估计 {:.2}%{}）",item.action,if model.fourth{" 的平方"}else{""},100.*charge,if met>charge{"，实测高于先验估计"}else{""});item.estimate=met;
     }
     let peak:f64=model.profiles.iter().map(|p|p.1).sum();let fixed=base.used()-peak-charge;
     let apriori:Vec<f64>=(0..estimates.len()).map(|i|if i==0{0.}else{fixed+peak.max(profiles[i])+dopplers[i]+measured[i]}).collect();
@@ -341,7 +342,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // whose charge leaves the statistics room is the reference, and a later one replaces it where its
     // work times the trajectories its room needs costs less in prediction.
     let mut ladder=Ground::allowances(request)?.into_iter();let mut failed=None;
-    let Some(mut pilot_candidate)=next_candidate(request,&mut ladder,&mut failed)else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
+    let fourth=device==Device::Cpu;
+    let Some(mut pilot_candidate)=next_candidate(request,&mut ladder,fourth,&mut failed)else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
     // The reference state: the largest initial population; its trap sets ω per axis.
     let trap=pilot_candidate.trap();
     if trap.frequencies.iter().any(|&w|!(w>0.)){return Err(Stop::Error(NOT_CONFINED.into()));}
@@ -356,7 +358,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let charge=measured_charge(&pilot_candidate.model,&pilot_candidate.model,&pilot_states);pilot_candidate.charged(charge);
     let mut reference:Option<Candidate>=None;
     if !pilot_candidate.fits(){
-        while let Some(mut c)=next_candidate(request,&mut ladder,&mut failed){
+        while let Some(mut c)=next_candidate(request,&mut ladder,fourth,&mut failed){
             let charge=measured_charge(&pilot_candidate.model,&c.model,&pilot_states);c.charged(charge);let fits=c.fits();reference=Some(c);if fits{break;}
         }
     }
@@ -368,7 +370,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             // at no a-priori estimate at all.
             let fewest=(0..2).map(|k|(rooms[k]/(TARGETS[k]-A_PRIORI_SHARE*TARGETS[k])).powi(2)).fold(0.,f64::max);
             while work*fewest<best{
-                let Some(mut c)=next_candidate(request,&mut ladder,&mut failed)else{break};
+                let Some(mut c)=next_candidate(request,&mut ladder,fourth,&mut failed)else{break};
                 let charge=measured_charge(&pilot_candidate.model,&c.model,&pilot_states);c.charged(charge);
                 if !c.fits(){continue;}
                 let trajectories=(0..2).map(|k|(rooms[k]/c.rooms[k]).powi(2)).fold(0.,f64::max);
@@ -389,7 +391,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let waiting=pilot as f64*duration/(jumps.max(1) as f64);let horizon=waiting.min(duration);
     // The first order in the Doppler shift: what the budget leaves after the model's other estimates
     // (the fold's charge takes its own share of the target), or the budget itself where they exceed it.
-    let left=BUDGET-(base.used()-model.ground.charge);let allowance=if left>0.{left}else{BUDGET};
+    let left=BUDGET-(base.used()-fold_charge(&model,model.ground.charge));let allowance=if left>0.{left}else{BUDGET};
     // The exponentials are summed to a share η of the step's own population budget, η² ε dt/waiting.
     let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=allowance;s};
     // The step (module documentation): by the bound's rule first -- from the first step, the next by
@@ -415,7 +417,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let candidates:Vec<Check>=bound.iter().chain(&measured).filter(|c|c.met()).copied().collect();
     // The a-priori total the steps' costs take: the ledger's estimates with the fold's charge as the
     // pilot measured it.
-    let apriori=base.used()-model.ground.charge+charge;
+    let apriori=base.used()-fold_charge(&model,model.ground.charge)+charge;
     let chosen=if candidates.len()>1{
         // Against the bound rule's step, or where it missed the targets the smallest candidate step.
         let baseline=*candidates.iter().find(|c|c.steps==grown.steps).or(candidates.iter().max_by_key(|c|c.steps)).unwrap();
@@ -497,6 +499,10 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
 
 /// The ledger's item of the drives' fold (its charge a priori; the solve's ledger charges it as measured).
 const FOLD:&str="消去激发态";
+/// The fold's charge for the saturation S its folded drives meet: its populations' error bound, S at
+/// second order and S² at fourth (ground.rs; against the population core 0.2-1.0 S² where the series
+/// converges, S ≲ 0.5 -- beyond, the charge exceeds the target and the rule keeps the drives).
+fn fold_charge(model:&Model,saturation:f64)->f64{if model.fourth{saturation*saturation}else{saturation}}
 /// The targets in the order of the rooms: the populations' (absolute) and T's (relative).
 const TARGETS:[f64;2]=[POPULATION_TARGET,TEMPERATURE_TARGET];
 
@@ -506,15 +512,15 @@ const TARGETS:[f64;2]=[POPULATION_TARGET,TEMPERATURE_TARGET];
 /// (its share).
 struct Candidate{model:Model,initial:Initial,base:Ledger,charge:f64,rooms:[f64;2]}
 impl Candidate{
-    fn new(request:&Request,allowance:f64)->Result<Candidate,String>{
-        let model=Model::with(request,allowance)?;let initial=Initial::new(&model,request)?;let base=model_ledger(&model,request);
-        let rooms=TARGETS.map(|target|target-base.used()-A_PRIORI_SHARE*target);let charge=model.ground.charge;
+    fn new(request:&Request,allowance:f64,fourth:bool)->Result<Candidate,String>{
+        let model=Model::with_order(request,allowance,fourth)?;let initial=Initial::new(&model,request)?;let base=model_ledger(&model,request);
+        let rooms=TARGETS.map(|target|target-base.used()-A_PRIORI_SHARE*target);let charge=fold_charge(&model,model.ground.charge);
         Ok(Candidate{model,initial,base,charge,rooms})
     }
-    /// Its rooms with the fold's charge `charge` in place of the a-priori estimate.
-    fn charged(&mut self,charge:f64){self.charge=charge;self.rooms=TARGETS.map(|target|target-self.others()-charge-A_PRIORI_SHARE*target);}
+    /// Its rooms with the fold's charge for the saturation `saturation` met in place of the a-priori estimate.
+    fn charged(&mut self,saturation:f64){let charge=fold_charge(&self.model,saturation);self.charge=charge;self.rooms=TARGETS.map(|target|target-self.others()-charge-A_PRIORI_SHARE*target);}
     /// Its ledger's estimates but the fold's.
-    fn others(&self)->f64{self.base.used()-self.model.ground.charge}
+    fn others(&self)->f64{self.base.used()-fold_charge(&self.model,self.model.ground.charge)}
     /// Its estimates leave the statistics room.
     fn fits(&self)->bool{self.rooms.iter().all(|&r|r>0.)}
     /// The trap of its reference state, the largest initial population: ω per axis.
@@ -522,13 +528,13 @@ impl Candidate{
 }
 /// The next candidate along the rule's allowances that builds (a model that fails, its tables not
 /// converging, is passed over with its error kept).
-fn next_candidate(request:&Request,ladder:&mut dyn Iterator<Item=f64>,failed:&mut Option<String>)->Option<Candidate>{
-    for a in ladder{match Candidate::new(request,a){Ok(c)=>return Some(c),Err(e)=>{failed.get_or_insert(e);}}}
+fn next_candidate(request:&Request,ladder:&mut dyn Iterator<Item=f64>,fourth:bool,failed:&mut Option<String>)->Option<Candidate>{
+    for a in ladder{match Candidate::new(request,a,fourth){Ok(c)=>return Some(c),Err(e)=>{failed.get_or_insert(e);}}}
     None
 }
-/// A candidate's fold charge as measured: at each of the pilot's states, carried into its clusters
-/// (`carried`), the saturation its folded drives meet there, 2η² (twice the folded excited
-/// population, the fold's error bound); per pilot trajectory their mean, and of those the mean plus
+/// The saturation a candidate's folded drives meet: at each of the pilot's states, carried into its
+/// clusters (`carried`), 2η² (twice the folded excited population, whose fold's charge bounds its
+/// error, `fold_charge`); per pilot trajectory their mean, and of those the mean plus
 /// CONFIDENCE standard errors -- what the atoms meet rather than the light's pattern extrapolated
 /// (an atom held in the dark states of a gray molasses meets little of its bright state's
 /// saturation; one gathered at a red-detuned lattice's bright sites meets more than its mean).

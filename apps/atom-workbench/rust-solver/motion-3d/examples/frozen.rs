@@ -22,7 +22,7 @@ fn main(){
     let out=arg(5,&format!("frozen_{name}.json"));
     let r=[arg(6,"0").parse::<f64>().unwrap(),arg(7,"0").parse::<f64>().unwrap(),arg(8,"0").parse::<f64>().unwrap()];
     let request=scene::scene(&name);
-    let clock=Instant::now();let model=Model::new(&request).unwrap();let g=&model.ground;
+    let clock=Instant::now();let model=Model::with_order(&request,f64::INFINITY,arg(10,"")=="fourth").unwrap();let g=&model.ground;
     println!("{name}: model {:.2} s; clusters {:?}; {} items ({} kept), cut {:.3e} rad/us, pole {:.3e} rad/us, scale {:.3e} rad/us; focused {:?}, table error {:.1e}, quartic {:.1e}",
         clock.elapsed().as_secs_f64(),g.clusters.iter().map(|c|c.dimension()).collect::<Vec<_>>(),g.items.len(),g.items.iter().filter(|i|!i.folded).count(),g.cut,g.pole,g.generator_scale,
         model.focused,model.table_error,model.quartic);
@@ -31,7 +31,7 @@ fn main(){
     let e=g.eliminate(&model.hamiltonian_at_point(r)).unwrap();
     let static_generator=g.clusters.iter().all(|c|c.groups.iter().all(|x|x.entries.iter().all(|e|e.2==0.))&&c.paths.iter().all(|p|p.residual==0.)
         &&c.classes.iter().all(|k|k.photons.iter().all(|p|p.1==0.)));
-    let fourth=arg(10,"")=="fourth";
+    let fourth=arg(10,"").starts_with("fourth");let readout2=arg(10,"")=="fourth2";
     // Each cluster's generator and jumps (the fourth order's for a cluster of ground states with
     // `fourth`), and its post-jump slow part Π there (None: the second order's σ − ½{Y, σ}).
     let locals=|t:f64|->Vec<atom_motion_3d::ground::Local>{(0..g.clusters.len()).map(|k|{let mut l=g.local_at(&e,k,r,t).unwrap();
@@ -86,7 +86,7 @@ fn main(){
                     for i in 0..ns{for j in 0..ns{rho[piece.target][(i,j)]+=m[(i,j)]*w;}}}}
         }
     }
-    let fourths:Vec<Option<atom_motion_3d::ground::Fourth>>=(0..g.clusters.len()).map(|k|(fourth&&g.clusters[k].excited.is_empty()).then(||g.fourth(&e,k,r,0.).unwrap())).collect();
+    let fourths:Vec<Option<atom_motion_3d::ground::Fourth>>=(0..g.clusters.len()).map(|k|(fourth&&!readout2&&g.clusters[k].excited.is_empty()).then(||g.fourth(&e,k,r,0.).unwrap())).collect();
     let readout=|rho:&[Dense],l:&[atom_motion_3d::ground::Local]|->Vec<f64>{let mut p=vec![0.;STATES];for(k,x)in l.iter().enumerate(){
         let q=match &fourths[k]{Some(f)=>g.populations_fourth(k,f,&rho[k]),None=>g.populations(k,x,&rho[k])};for(a,b)in p.iter_mut().zip(q){*a+=b;}
         // The transients under way: every class's jumps into a fourth-order cluster, its states' surplus.

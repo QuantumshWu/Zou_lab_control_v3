@@ -169,7 +169,16 @@ struct EffectiveLayout{row:usize,col:usize,carrier:usize,residual:f64,at:usize}
 /// dressed photons ĉ_a[to] (explicit × 3 axes × ng, at `emission`).
 #[derive(Clone,Debug)]
 pub(crate) struct Layout{pub(crate) n:usize,pub(crate) n0:usize,pub(crate) size:usize,pub(crate) h0:usize,pub(crate) groups:Vec<GroupLayout>,pub(crate) carriers:Vec<CarrierLayout>,crosses:Vec<CrossLayout>,drives:Vec<DriveLayout>,
-    decays:Vec<DecayLayout>,effective:Vec<EffectiveLayout>,emission:usize}
+    decays:Vec<DecayLayout>,effective:Vec<EffectiveLayout>,emission:usize,pub(crate) fourth:Option<FourthLayout>}
+/// The fourth order's tables of a cluster of ground states (module documentation, # Fourth order), on
+/// the carriers that drive it: per pair (c, d) H^(4)'s quartic part, the monomial
+/// E^c*_k1 E^c_k2 E^d*_k3 E^d_k4 (r_c² r_d² × n × n, at `quartic`), and per carrier c the metric's
+/// ½[R_c†R_c, H_g] (r_c² × n × n), R_c†R_c and YW_c (each r_c² × n × n); for the jumps, through every
+/// ground state b′, per pair (c, e) C_a G_b(ω_c) T^e_k[:,b′] (r_e × 3 × ng × ng × n: k, axis, row, b′, b)
+/// and P^{de} = U^d†T^e (r_d r_e × ng × n), per carrier R_c†R_c (r_c² × ng × n) and C_a T^c_k (r_c × 3 × ng × ng).
+#[derive(Clone,Debug)]
+pub(crate) struct FourthLayout{carriers:Vec<usize>,quartic:Vec<(usize,usize,usize)>,quadratic:Vec<(usize,usize)>,rr:Vec<(usize,usize)>,yw:Vec<(usize,usize)>,
+    jumps:Vec<(usize,usize,usize)>,p:Vec<(usize,usize,usize)>,rr_all:Vec<(usize,usize)>,photons:Vec<(usize,usize)>}
 
 /// The interpolation stencil at s: per focused beam the first of its four nodes, their cubic
 /// weights and the weights' derivatives in s_f; the nodes are their tensor product.
@@ -300,6 +309,8 @@ pub struct Model{
     reach:Vec<[f64;3]>,
     /// The processor has AVX2 and FMA: the generator is built with them.
     wide:bool,
+    /// Its clusters of ground states folded at fourth order (`Model::with_order`).
+    pub fourth:bool,
     /// The kinetic shift of absorption (`kinetic_shift`), always on in a solve; off only where a
     /// validation compares with the recoil-heating formula, which has no Doppler friction.
     pub doppler:bool,
@@ -346,7 +357,10 @@ impl Model{
     /// The model of a request: its front end, its drives kept until each ground state's folded rest is
     /// within `allowance` (ground.rs `Ground::with`), the focused beams, the carriers' bases and the
     /// tables.
-    pub fn with(request:&Request,allowance:f64)->Result<Model,String>{
+    pub fn with(request:&Request,allowance:f64)->Result<Model,String>{Model::with_order(request,allowance,false)}
+    /// The same with its clusters of ground states folded at fourth order where `fourth` (module
+    /// documentation, # Fourth order).
+    pub fn with_order(request:&Request,allowance:f64,fourth:bool)->Result<Model,String>{
         let ground=Ground::with(request,allowance)?;
         let geometry:Vec<Geometry>=ground.beams.iter().map(|b|Geometry{direction:b.direction,wave_number:b.wave_number_per_um,waist:b.waist_um}).collect();
         let trap_beam=request.trap_beam;
@@ -382,7 +396,7 @@ impl Model{
         if ground.clusters.iter().any(|c|c.excited.is_empty()&&c.states.len()>MOST_STATES){return Err("A cluster of ground states has more than eight states".into());}
         let mut model=Model{ground,geometry,trap_beam,focused:vec![trap_beam],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
             layouts:vec![],tables:Tables{nodes:1,data:vec![],resonance:0.},table_error:0.,quartic:0.,resonance:0.,reach:vec![[0.;3]],
-            wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true};
+            wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
         model.choose_profiles(request)?;
         model.layouts=model.layouts(&bases);
         model.tabulate(&bases)?;
@@ -502,7 +516,18 @@ impl Model{
             let emission=size;size+=3*ng*cl.excited.len();
             let drives=cl.drives.iter().map(|&(row,col,c,residual)|DriveLayout{row,col,carrier:c,residual,
                 u:std::array::from_fn(|k|if k<self.carriers[c].rank{basis[c][k][(cl.excited[row-n0],cl.states[col])]}else{Complex::ZERO})}).collect();
-            Layout{n,n0,size,h0,groups,carriers,crosses,drives,decays,effective,emission}
+            // The fourth order: a cluster of ground states, on the carriers whose folded drives reach it.
+            let fourth=(self.fourth&&cl.excited.is_empty()).then(||{
+                let on:Vec<usize>=(0..self.carriers.len()).filter(|&c|cl.states.iter().any(|&b|g.couples(c,b))).collect();
+                let r=|c:usize|self.carriers[c].rank;let square=n*n;
+                let mut f=FourthLayout{carriers:on.clone(),quartic:vec![],quadratic:vec![],rr:vec![],yw:vec![],jumps:vec![],p:vec![],rr_all:vec![],photons:vec![]};
+                for &c in &on{for &d in &on{f.quartic.push((c,d,size));size+=r(c)*r(c)*r(d)*r(d)*square;}}
+                for &c in &on{f.quadratic.push((c,size));size+=r(c)*r(c)*square;f.rr.push((c,size));size+=r(c)*r(c)*square;f.yw.push((c,size));size+=r(c)*r(c)*square;}
+                for &c in &on{for &e in &on{f.jumps.push((c,e,size));size+=r(e)*3*ng*ng*n;}}
+                for &d in &on{for &e in &on{f.p.push((d,e,size));size+=r(d)*r(e)*ng*n;}}
+                for &c in &on{f.rr_all.push((c,size));size+=r(c)*r(c)*ng*n;f.photons.push((c,size));size+=r(c)*3*ng*ng;}
+                f});
+            Layout{n,n0,size,h0,groups,carriers,crosses,drives,decays,effective,emission,fourth}
         }).collect()
     }
 
@@ -629,11 +654,79 @@ impl Model{
                     }
                 }
             }
+            if let Some(f)=&layout.fourth{self.fourth_node(&e,cl,layout,f,&u,&t,&mut node)?;}
             out.push(node);
         }
         // The elimination's excited weight per ground state, every near beam at its peak (`resonance`).
         let resonance=(0..ng).map(|b|self.carriers.iter().flat_map(|c|c.beams.iter()).map(|&l|(0..ne).map(|i|e.responses[l][(i,b)].norm_sqr()).sum::<f64>()).sum::<f64>()).fold(0.,f64::max);
         Ok((out,quartic,resonance))
+    }
+
+    /// A cluster of ground states' fourth-order tables at a node (`FourthLayout`), from the elimination
+    /// e there, the carriers' folded bases u and responses t (ne × ng per field index): with
+    /// G_b(ω_c) = (K − E_b − δ_c)⁻¹ and A^{ce}_{k1k2}(b)[a,b′] = U^c_k1[:,a]† G_b(ω_c) T^e_k2[:,b′],
+    /// P^{de}_{k3k4} = U^d_k3†T^e_k4 and RR^c_{k1k2} = T^c_k1†T^c_k2 (every ground state b′ between),
+    /// H^(4)'s (c, d) part Σ_b′ A^{cc}(b)[a,b′] P^{dd}[b′,b] + (d ≠ c) A^{cd}(b)[a,b′] P^{dc}[b′,b] (its
+    /// monomial reordered) − ½[RR^c, P^{dd}]; ½[RR^c, H_g]; RR^c and YW^c = −A^{cc}(a)[a,b] on the
+    /// cluster; and for the jumps, every ground state b′ between: C G_b(ω_c) T^e[:,b′], P^{de}[b′,b],
+    /// RR^c[b′,b] and C T^c[:,b′].
+    fn fourth_node(&self,e:&ground::Elimination,cl:&ground::Cluster,layout:&Layout,f:&FourthLayout,u:&[Vec<Dense>],t:&[Vec<Dense>],node:&mut [Complex])->Result<(),String>{
+        let g=&self.ground;let(n,ng,ne)=(cl.states.len(),g.ground_states.len(),g.excited_states.len());let st=&cl.states;let r=|c:usize|self.carriers[c].rank;
+        let _=layout;
+        // G_b(ω_c) T^e_k[:,b′] for every b of the cluster, every b′.
+        let mut gt:Vec<Vec<Vec<Vec<Vec<Vec<Complex>>>>>>=vec![];// [ci][ei][x][k][b′] → ne
+        for &c in &f.carriers{
+            let lus:Vec<Lu>=st.iter().map(|&b|ground::denominator(&e.excited_hamiltonian,-e.energies[b]-g.carriers[c].detuning)).collect::<Result<_,_>>()?;
+            gt.push(f.carriers.iter().map(|&e2|lus.iter().map(|lu|(0..r(e2)).map(|k|(0..ng).map(|bp|{let mut v:Vec<Complex>=(0..ne).map(|i|t[e2][k][(i,bp)]).collect();lu.solve(&mut v);v}).collect()).collect()).collect()).collect());
+        }
+        let dot=|m:&Dense,col:usize,v:&[Complex]|->Complex{(0..ne).fold(Complex::ZERO,|s,i|s+m[(i,col)].conj()*v[i])};
+        let cross=|a:&Dense,ca:usize,b:&Dense,cb:usize|->Complex{(0..ne).fold(Complex::ZERO,|s,i|s+a[(i,ca)].conj()*b[(i,cb)])};
+        let pos=|c:usize|f.carriers.iter().position(|&x|x==c).unwrap();
+        // A^{ce}_{k1k2}(x)[a][b′] for a, x on the cluster.
+        let a_of=|c:usize,e2:usize,k1:usize,k2:usize,x:usize,a:usize,bp:usize|->Complex{dot(&u[c][k1],st[a],&gt[pos(c)][pos(e2)][x][k2][bp])};
+        let p_of=|d:usize,e2:usize,k3:usize,k4:usize,row:usize,col:usize|->Complex{cross(&u[d][k3],row,&t[e2][k4],col)};
+        let rr_of=|c:usize,k1:usize,k2:usize,row:usize,col:usize|->Complex{cross(&t[c][k1],row,&t[c][k2],col)};
+        for &(c,d,at)in &f.quartic{
+            for k1 in 0..r(c){for k2 in 0..r(c){for k3 in 0..r(d){for k4 in 0..r(d){
+                let base=at+(((k1*r(c)+k2)*r(d)+k3)*r(d)+k4)*n*n;
+                for x in 0..n{for y in 0..n{
+                    let(a,b)=(st[x],st[y]);let mut z=Complex::ZERO;
+                    for bp in 0..ng{
+                        z+=a_of(c,c,k1,k2,y,x,bp)*p_of(d,d,k3,k4,bp,b);
+                        z-=(rr_of(c,k1,k2,a,bp)*p_of(d,d,k3,k4,bp,b)-p_of(d,d,k3,k4,a,bp)*rr_of(c,k1,k2,bp,b))*0.5;
+                    }
+                    node[base+x*n+y]+=z;
+                }}
+            }}}}
+            if d!=c{
+                // A^{cd}(b)[a,b′] P^{dc}[b′,b], its monomial E^c*_k1 E^d_k2 E^d*_k3 E^c_k4 → (k1, k4, k3, k2).
+                for k1 in 0..r(c){for k2 in 0..r(d){for k3 in 0..r(d){for k4 in 0..r(c){
+                    let base=at+(((k1*r(c)+k4)*r(d)+k3)*r(d)+k2)*n*n;
+                    for x in 0..n{for y in 0..n{let b=st[y];let mut z=Complex::ZERO;
+                        for bp in 0..ng{z+=a_of(c,d,k1,k2,y,x,bp)*p_of(d,c,k3,k4,bp,b);}
+                        node[base+x*n+y]+=z;}}
+                }}}}
+            }
+        }
+        for(i,&c)in f.carriers.iter().enumerate(){
+            let(qa,ra,ya)=(f.quadratic[i].1,f.rr[i].1,f.yw[i].1);
+            for k1 in 0..r(c){for k2 in 0..r(c){let base=(k1*r(c)+k2)*n*n;
+                for x in 0..n{for y in 0..n{let(a,b)=(st[x],st[y]);
+                    let mut z=Complex::ZERO;for bp in 0..ng{z+=(rr_of(c,k1,k2,a,bp)*e.ground[(bp,b)]-e.ground[(a,bp)]*rr_of(c,k1,k2,bp,b))*0.5;}
+                    node[qa+base+x*n+y]=z;node[ra+base+x*n+y]=rr_of(c,k1,k2,a,b);node[ya+base+x*n+y]=-a_of(c,c,k1,k2,x,x,b);
+                }}
+            }}
+        }
+        for &(c,e2,at)in &f.jumps{for k in 0..r(e2){for ax in 0..3{for row in 0..ng{for bp in 0..ng{for y in 0..n{
+            let v=&gt[pos(c)][pos(e2)][y][k][bp];
+            node[at+(((k*3+ax)*ng+row)*ng+bp)*n+y]=(0..ne).fold(Complex::ZERO,|s,i|s+g.emission[ax][(row,i)]*v[i]);
+        }}}}}}
+        for &(d,e2,at)in &f.p{for k3 in 0..r(d){for k4 in 0..r(e2){let base=at+(k3*r(e2)+k4)*ng*n;for bp in 0..ng{for y in 0..n{node[base+bp*n+y]=p_of(d,e2,k3,k4,bp,st[y]);}}}}}
+        for &(c,at)in &f.rr_all{for k1 in 0..r(c){for k2 in 0..r(c){let base=at+(k1*r(c)+k2)*ng*n;for bp in 0..ng{for y in 0..n{node[base+bp*n+y]=rr_of(c,k1,k2,bp,st[y]);}}}}}
+        for &(c,at)in &f.photons{for k in 0..r(c){for ax in 0..3{for row in 0..ng{for bp in 0..ng{
+            node[at+((k*3+ax)*ng+row)*ng+bp]=(0..ne).fold(Complex::ZERO,|s2,i|s2+g.emission[ax][(row,i)]*t[c][k][(i,bp)]);
+        }}}}}
+        Ok(())
     }
 
     /// The intensity points of a grid of n nodes per focused beam, in node order.
@@ -679,6 +772,15 @@ impl Model{
             kinds.extend(block(layout.decays.iter().map(|x|(x.at,1)).collect()));
             kinds.extend(block(layout.effective.iter().map(|x|(x.at,self.carriers[x.carrier].rank)).collect()));
             if layout.n>layout.n0{kinds.push((layout.emission,layout.emission+3*ng*(layout.n-layout.n0)));}
+            if let Some(f)=&layout.fourth{
+                let r=|c:usize|self.carriers[c].rank;let sq=n*n;
+                for &(c,d,at)in &f.quartic{kinds.push((at,at+r(c)*r(c)*r(d)*r(d)*sq));}
+                for x in f.quadratic.iter().chain(&f.rr).chain(&f.yw){kinds.push((x.1,x.1+r(x.0)*r(x.0)*sq));}
+                for &(_,e2,at)in &f.jumps{kinds.push((at,at+r(e2)*3*ng*ng*n));}
+                for &(d,e2,at)in &f.p{kinds.push((at,at+r(d)*r(e2)*ng*n));}
+                for &(c,at)in &f.rr_all{kinds.push((at,at+r(c)*r(c)*ng*n));}
+                for &(c,at)in &f.photons{kinds.push((at,at+r(c)*3*ng*ng));}
+            }
             for(start,end)in kinds{
                 let exact=|i:usize|&fine.data[b][2*(i*layout.size+start)..2*(i*layout.size+end)];
                 let modulus=|x:&[f64]|x.chunks_exact(2).map(|z|z[0].hypot(z[1])).fold(0_f64,f64::max);
@@ -862,8 +964,92 @@ impl Model{
     pub fn local(&self,cluster:usize,p:&Point,t:f64)->Local{
         assert!(!self.mixed(cluster),"a cluster with explicit excited states has no Local");
         macro_rules! sized{($($n:literal)*)=>{match self.dimension(cluster){$($n=>if self.wide{unsafe{self.local_wide::<$n,{2*$n*$n}>(cluster,p,t)}}else{self.local_body::<$n,{2*$n*$n}>(cluster,p,t)},)*_=>unreachable!("a cluster has 1 to 8 states")}}}
-        sized!(1 2 3 4 5 6 7 8)
+        let mut out=sized!(1 2 3 4 5 6 7 8);
+        // The fourth order: H^(4) in the cluster's frames (the force keeps the second order's: T's
+        // error stays the fold's S, the ledger's).
+        if let Some(h)=self.fourth_hamiltonian(cluster,p,t){let n=self.dimension(cluster);for i in 0..n*n{out.hamiltonian[i]+=h[i];}}
+        out
     }
+    /// A cluster's fourth-order part of H_eff at a point and time (n × n, row-major), None without its
+    /// tables: Σ_(c,d) Σ E^c*E^c E^d*E^d X + Σ_c Σ E^c*E^c ½[RR, H_g], each entry (a, b) in the frames' phase
+    /// e^{i(θ_a − θ_b)t} (every term's carriers cancel).
+    pub fn fourth_hamiltonian(&self,cluster:usize,p:&Point,t:f64)->Option<Vec<Complex>>{
+        let f=self.layouts[cluster].fourth.as_ref()?;let n=self.dimension(cluster);let cl=&self.ground.clusters[cluster];let r=|c:usize|self.carriers[c].rank;
+        let mut h=vec![Complex::ZERO;n*n];let mut buf=vec![Complex::ZERO;n*n];
+        for &(c,d,at)in &f.quartic{
+            let(ec,ed)=(&p.fields[c].e,&p.fields[d].e);
+            for k1 in 0..r(c){for k2 in 0..r(c){let x=ec[k1].conj()*ec[k2];if x==Complex::ZERO{continue;}for k3 in 0..r(d){for k4 in 0..r(d){
+                let m=x*ed[k3].conj()*ed[k4];if m==Complex::ZERO{continue;}
+                self.interpolate(cluster,&p.stencil,None,at+(((k1*r(c)+k2)*r(d)+k3)*r(d)+k4)*n*n,&mut buf);for i in 0..n*n{h[i]+=m*buf[i];}
+            }}}}
+        }
+        for &(c,at)in &f.quadratic{let ec=&p.fields[c].e;
+            for k1 in 0..r(c){for k2 in 0..r(c){let m=ec[k1].conj()*ec[k2];if m==Complex::ZERO{continue;}
+                self.interpolate(cluster,&p.stencil,None,at+(k1*r(c)+k2)*n*n,&mut buf);for i in 0..n*n{h[i]+=m*buf[i];}}}
+        }
+        for a in 0..n{for b in 0..n{if a!=b{h[a*n+b]=h[a*n+b]*Complex::cis((cl.frames[a]-cl.frames[b])*t);}}}
+        Some(h)
+    }
+    /// A cluster's quadratic form of a fourth-order table at a point (n × n): Σ_c Σ E^c*_k1 E^c_k2 M_k1k2
+    /// over the slices `slices` (carrier, start), in the frames' phases at t (none: the frame where every
+    /// ground state rotates at its energy).
+    fn fourth_quadratic(&self,cluster:usize,p:&Point,t:Option<f64>,slices:&[(usize,usize)])->Vec<Complex>{
+        let n=self.dimension(cluster);let cl=&self.ground.clusters[cluster];let r=|c:usize|self.carriers[c].rank;
+        let mut h=vec![Complex::ZERO;n*n];let mut buf=vec![Complex::ZERO;n*n];
+        for &(c,at)in slices{let ec=&p.fields[c].e;
+            for k1 in 0..r(c){for k2 in 0..r(c){let m=ec[k1].conj()*ec[k2];if m==Complex::ZERO{continue;}
+                self.interpolate(cluster,&p.stencil,None,at+(k1*r(c)+k2)*n*n,&mut buf);for i in 0..n*n{h[i]+=m*buf[i];}}}
+        }
+        if let Some(t)=t{for a in 0..n{for b in 0..n{if a!=b{h[a*n+b]=h[a*n+b]*Complex::cis((cl.frames[a]-cl.frames[b])*t);}}}}
+        h
+    }
+    /// After a jump into a cluster with fourth-order tables (and at t = 0), the bare state's slow part
+    /// Π = 1 + ½R†R + YW at the point (n × n, module documentation): ψ ← Π f, its weight A = ‖Π f‖² the
+    /// threshold's divisor (engine.rs). None without the tables.
+    pub fn slow_part(&self,cluster:usize,p:&Point,t:f64)->Option<Vec<Complex>>{
+        let f=self.layouts[cluster].fourth.as_ref()?;let n=self.dimension(cluster);
+        let rr=self.fourth_quadratic(cluster,p,Some(t),&f.rr);let yw=self.fourth_quadratic(cluster,p,Some(t),&f.yw);
+        Some((0..n*n).map(|i|rr[i]*0.5+yw[i]+if i%(n+1)==0{Complex::ONE}else{Complex::ZERO}).collect())
+    }
+    /// The fourth order's change of a cluster's photons at a point: per carrier c and axis the
+    /// matrix (ng × n, row-major) −C W3^c − ½ C R_c R†R, W3^c[:,b] = Σ_b′ [Σ_d G_b(ω_c) R_c[:,b′] P^{dd}_b′b
+    /// + Σ_{d≠c} G_b(ω_c) R_d[:,b′] P^{dc}_b′b] over the cluster's b′; None without the tables.
+    fn fourth_photons(&self,cluster:usize,p:&Point,t:f64)->Option<Vec<Vec<Complex>>>{
+        let f=self.layouts[cluster].fourth.as_ref()?;let(n,ng)=(self.dimension(cluster),self.ground.ground_states.len());
+        let r=|c:usize|self.carriers[c].rank;let nc=self.carriers.len();let _=t;
+        // A quadratic form on (every b′) × (the cluster's b) at the point, in the frame where every
+        // ground state rotates at its energy (the photon's own phase is applied per photon).
+        let form=|d:usize,e2:usize,at:usize|->Vec<Complex>{let(ed,ee)=(&p.fields[d].e,&p.fields[e2].e);
+            let mut m=vec![Complex::ZERO;ng*n];let mut buf=vec![Complex::ZERO;ng*n];
+            for k3 in 0..r(d){for k4 in 0..r(e2){let w=ed[k3].conj()*ee[k4];if w==Complex::ZERO{continue;}self.interpolate(cluster,&p.stencil,None,at+(k3*r(e2)+k4)*ng*n,&mut buf);for i in 0..ng*n{m[i]+=w*buf[i];}}}
+            m};
+        let p_at=|d:usize,e2:usize|form(d,e2,f.p.iter().find(|x|x.0==d&&x.1==e2).unwrap().2);
+        let mut rr=vec![Complex::ZERO;ng*n];for &(c,at)in &f.rr_all{let m=form(c,c,at);for i in 0..ng*n{rr[i]+=m[i];}}
+        let mut out=vec![vec![Complex::ZERO;3*ng*n];nc];
+        for &c in &f.carriers{
+            // −C W3^c, W3^c[:,b] = Σ_b′ G_b(ω_c)[Σ_d T^c(E) P^{dd}_b′b + Σ_{e≠c} T^e(E) P^{ec}_b′b].
+            for &(_,e2,at)in f.jumps.iter().filter(|x|x.0==c){
+                let mut weight=vec![Complex::ZERO;ng*n];
+                if e2==c{for &d in &f.carriers{let m=p_at(d,d);for i in 0..ng*n{weight[i]+=m[i];}}}else{weight=p_at(e2,c);}
+                let mut buf=vec![Complex::ZERO;3*ng*ng*n];let ee=&p.fields[e2].e;
+                for k in 0..r(e2){if ee[k]==Complex::ZERO{continue;}
+                    self.interpolate(cluster,&p.stencil,None,at+k*3*ng*ng*n,&mut buf);
+                    for ax in 0..3{for row in 0..ng{for y in 0..n{
+                        let z=(0..ng).fold(Complex::ZERO,|s,bp|s+buf[((ax*ng+row)*ng+bp)*n+y]*weight[bp*n+y]);
+                        out[c][(ax*ng+row)*n+y]-=ee[k]*z;
+                    }}}
+                }
+            }
+            // −½ C R_c R†R.
+            let at=f.photons.iter().find(|x|x.0==c).unwrap().1;let ec=&p.fields[c].e;let mut j=vec![Complex::ZERO;3*ng*ng];
+            for k in 0..r(c){if ec[k]==Complex::ZERO{continue;}
+                self.interpolate(cluster,&p.stencil,None,at+k*3*ng*ng,&mut j);
+                for ax in 0..3{for row in 0..ng{for y in 0..n{let z=(0..ng).fold(Complex::ZERO,|s,bp|s+j[(ax*ng+row)*ng+bp]*rr[bp*n+y]);out[c][(ax*ng+row)*n+y]-=ec[k]*z*0.5;}}}
+            }
+        }
+        Some(out)
+    }
+
     #[target_feature(enable="avx2,fma")]
     unsafe fn local_wide<const N:usize,const W:usize>(&self,cluster:usize,p:&Point,t:f64)->Local{self.local_body::<N,W>(cluster,p,t)}
     #[inline(always)]
@@ -985,6 +1171,8 @@ impl Model{
                         for row in 0..ng{for y in 0..n0{out[row*n0+y]+=m[(row,cl.states[y])]*amplitude;}}}}
             }
         }
+        // The fourth order's change of the folded photons (the Doppler's first order stays the second's).
+        if let Some(d4)=self.fourth_photons(cluster,p,t){for(c,m)in d4.iter().enumerate(){for a in 0..3{for i in 0..size{matrices[(c*3+a)*size+i]+=m[a*size+i];}}}}
         // The classes: each photon's entry into its target state's row from its source's column.
         let amplitude=cl.classes.iter().map(|class|{let target=&g.clusters[class.target];
             let mut u=[[Complex::ZERO;MOST_STATES];3];
