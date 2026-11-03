@@ -23,9 +23,10 @@ pub struct Beam{
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Carrier{rank:i32,beams:i32,first:i32,pad:i32,detuning:f64}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
-pub struct Cluster{n:i32,size:i32,table:i32,h0:i32,groups:i32,ngroups:i32,classes:i32,nclasses:i32,coherent:i32,ncoherent:i32,carriers:i32,pad:i32,states:[i32;MAXN]}
+pub struct Cluster{n:i32,size:i32,table:i32,h0:i32,groups:i32,ngroups:i32,classes:i32,nclasses:i32,coherent:i32,ncoherent:i32,carriers:i32,positions:i32,beats:i32,nbeats:i32,
+    pad:[i32;2],states:[i32;MAXN]}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
-pub struct Group{absorbed:i32,emitted:i32,hermitian:i32,pairs:i32,npairs:i32,s:i32,q:i32,pad:i32,residual:f64}
+pub struct Group{absorbed:i32,emitted:i32,hermitian:i32,pairs:i32,npairs:i32,s:i32,q:i32,count:i32,residual:f64}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Class{target:i32,photons:i32,nphotons:i32,carriers:i32,rows:i32,pad:i32,wave_number:f64}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
@@ -40,7 +41,7 @@ pub struct Channel{carrier:i32,col:i32,residual:f64}
 #[repr(C)]#[derive(Clone,Copy,Debug)]
 pub struct Params{
     beams:u64,beam_list:u64,carriers:u64,clusters:u64,groups:u64,pairs:u64,classes:u64,photons:u64,coherent:u64,channels:u64,carrier_tables:u64,tables:u64,
-    excited:u64,diagonal:u64,couplings:u64,emission:u64,class_rows:u64,
+    excited:u64,diagonal:u64,couplings:u64,emission:u64,class_rows:u64,item_first:u64,items:u64,residuals:u64,
     nbeams:i32,ncarriers:i32,nclusters:i32,focused:i32,nodes:i32,fields:i32,pub(crate) nnear:i32,doppler:i32,loss:i32,pad:i32,
     focused_beam:[i32;MOST_FOCUSED],stride:[i32;MOST_FOCUSED],
     field_carrier:[i32;MOST_CARRIERS*MOST_RANK],field_rank:[i32;MOST_CARRIERS*MOST_RANK],
@@ -125,17 +126,37 @@ impl Program{
         let nodes=model.tables.nodes;let points=nodes.pow(model.focused.len() as u32);
         let(mut clusters,mut groups,mut pairs,mut classes,mut photons,mut class_rows,mut coherent,mut channels,mut carrier_tables,mut tables)=
             (vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![]);
+        let(mut item_first,mut items,mut residuals):(Vec<i32>,Vec<[i32;4]>,Vec<f64>)=(vec![],vec![],vec![]);
         for(k,(layout,cl))in model.layouts.iter().zip(&g.clusters).enumerate(){
             let mut cluster=Cluster{n:layout.n as i32,size:layout.size as i32,table:(tables.len()) as i32,h0:layout.h0 as i32,groups:groups.len() as i32,ngroups:layout.groups.len() as i32,
-                classes:classes.len() as i32,nclasses:cl.classes.len() as i32,coherent:coherent.len() as i32,ncoherent:cl.coherent.len() as i32,carriers:carrier_tables.len() as i32,pad:0,states:[0;MAXN]};
+                classes:classes.len() as i32,nclasses:cl.classes.len() as i32,coherent:coherent.len() as i32,ncoherent:cl.coherent.len() as i32,carriers:carrier_tables.len() as i32,
+                positions:item_first.len() as i32,beats:residuals.len() as i32,nbeats:0,pad:[0;2],states:[0;MAXN]};
             for(x,&b)in cl.states.iter().enumerate(){cluster.states[x]=b as i32;}
             let data=&model.tables.data[k];assert_eq!(data.len(),2*points*layout.size);
             tables.extend(data.chunks_exact(2).map(|z|[z[0] as f32,z[1] as f32]));
             for gl in &layout.groups{
                 groups.push(Group{absorbed:gl.absorbed as i32,emitted:gl.emitted as i32,hermitian:gl.hermitian as i32,pairs:pairs.len() as i32,npairs:gl.pairs.len() as i32,
-                    s:gl.s as i32,q:gl.q as i32,pad:0,residual:gl.residual});
+                    s:gl.s as i32,q:gl.q as i32,count:gl.entries.len() as i32,residual:gl.residual});
                 pairs.extend(gl.pairs.iter().map(|&(k1,k)|[k1 as i32,k as i32]));
             }
+            // The sparse groups' entries by the place they land at (model.rs `scatter`): per place, in the
+            // groups' and pairs' order, (S's place, Q's place, kind, 0) -- the kernel's `items` -- and from
+            // a pair standing for two its adjoint at the mirror place; their beats.
+            let n=layout.n;let mut places:Vec<Vec<[i32;4]>>=vec![vec![];n*n];let mut beats:Vec<f64>=vec![];
+            for gl in layout.groups.iter().filter(|g|g.entries.len()<n*n){
+                let beat=match beats.iter().position(|&w|w==gl.residual){Some(b)=>b,None=>{beats.push(gl.residual);beats.len()-1}};
+                for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
+                    let twice=gl.hermitian&&k1<k;let kind=(k1|k<<2|gl.absorbed<<4|gl.emitted<<7|(twice as usize)<<10|beat<<12) as i32;
+                    for(j,&(a,b))in gl.entries.iter().enumerate(){
+                        let at=(pi*gl.entries.len()+j) as i32;let item=[gl.s as i32+at,gl.q as i32+at,kind,0];
+                        places[a*n+b].push(item);if twice{places[b*n+a].push([item[0],item[1],kind|1<<11,0]);}
+                    }
+                }
+            }
+            if beats.len()>64{return Err(beyond(format!("子空间的稀疏组有 {} 个剩余拍频",beats.len())));}
+            cluster.nbeats=beats.len() as i32;residuals.extend(beats);
+            for place in places{item_first.push(items.len() as i32);items.extend(place);}
+            item_first.push(items.len() as i32);
             // A class's photons by the row they land in and their carrier (each row's photons one run,
             // each carrier's a run within it), and where each row's run starts.
             for class in &cl.classes{
@@ -183,7 +204,8 @@ impl Program{
         let params=Params{
             beams:put!(beams),beam_list:put!(beam_list),carriers:put!(carriers),clusters:put!(clusters),groups:put!(groups),pairs:put!(pairs),classes:put!(classes),
             photons:put!(photons),coherent:put!(coherent),channels:put!(channels),carrier_tables:put!(carrier_tables),tables:put!(tables),
-            excited:put!(excited),diagonal:put!(diagonal),couplings:put!(couplings),emission:put!(emission),class_rows:put!(class_rows),
+            excited:put!(excited),diagonal:put!(diagonal),couplings:put!(couplings),emission:put!(emission),class_rows:put!(class_rows),item_first:put!(item_first),residuals:put!(if residuals.is_empty(){vec![0.]}else{residuals}),
+            items:put!(if items.is_empty(){vec![[0;4]]}else{items}),
             nbeams:model.geometry.len() as i32,ncarriers:model.carriers.len() as i32,nclusters:model.layouts.len() as i32,focused:model.focused.len() as i32,
             nodes:nodes as i32,fields:fields as i32,nnear:near,doppler:model.doppler as i32,loss:settings.loss as i32,pad:0,
             focused_beam:std::array::from_fn(|f|model.focused.get(f).map_or(0,|&l|l as i32)),stride:std::array::from_fn(|f|nodes.pow(f as u32) as i32),
