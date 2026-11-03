@@ -108,6 +108,9 @@ impl Program{
         if settings.free!=[true;3]{return Err(beyond("运动只沿部分坐标轴".into()));}
         if let Some(c)=g.clusters.iter().find(|c|!c.excited.is_empty()){return Err(beyond(format!("{} 个激发态显式、精确传播",c.excited.len())));}
         if let Some(k)=(0..model.clusters()).find(|&k|model.beating(k)){return Err(beyond(format!("子空间 {} 的 {} 个残余拍频按多速率精确步传播",k,model.beats(k).0.len()/2)));}
+        // The fourth order's tables are fourth2's slabs now (model.rs `FourthLayout`), which the kernel does
+        // not read yet: a fourth-order model stays on the CPU until it does.
+        if model.fourth{return Err(beyond("四阶折叠".into()));}
         if model.geometry.len()>MOST_BEAMS||model.carriers.len()>MOST_CARRIERS||model.focused.len()>MOST_FOCUSED{return Err(beyond("光束或强度维度太多".into()));}
         if let Some(c)=g.clusters.iter().find(|c|c.states.len()>MAXN||c.classes.len()>MOST_CLASSES){return Err(beyond(format!("子空间 {} 个态、{} 类光子",c.states.len(),c.classes.len())));}
         let hm=model.hbar_over_mass;
@@ -135,26 +138,15 @@ impl Program{
         let nodes=model.tables.nodes;let points=nodes.pow(model.focused.len() as u32);
         let(mut clusters,mut groups,mut pairs,mut classes,mut photons,mut class_rows,mut coherent,mut channels,mut carrier_tables,mut tables)=
             (vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![]);
-        let(mut fourths,mut frames,mut weights):(Vec<Fourth>,Vec<f64>,usize)=(vec![],vec![],0);
+        let(fourths,mut frames,weights):(Vec<Fourth>,Vec<f64>,usize)=(vec![],vec![],0);
         let(mut item_first,mut items,mut residuals):(Vec<i32>,Vec<[i32;4]>,Vec<f64>)=(vec![],vec![],vec![]);
         for(k,(layout,cl))in model.layouts.iter().zip(&g.clusters).enumerate(){
             let mut cluster=Cluster{n:layout.n as i32,size:layout.size as i32,table:(tables.len()) as i32,h0:layout.h0 as i32,groups:groups.len() as i32,ngroups:layout.groups.len() as i32,
                 classes:classes.len() as i32,nclasses:cl.classes.len() as i32,coherent:coherent.len() as i32,ncoherent:cl.coherent.len() as i32,carriers:carrier_tables.len() as i32,
                 fourth:-1,frames:0,positions:item_first.len() as i32,beats:residuals.len() as i32,nbeats:0,states:[0;MAXN]};
             for(x,&b)in cl.states.iter().enumerate(){cluster.states[x]=b as i32;}
-            // Its fourth-order tables' places and its frames.
+            // Its frames (its fourth-order tables: none the kernel reads yet, the model refused above).
             cluster.frames=frames.len() as i32;frames.extend(&cl.frames);
-            if let Some(f)=&layout.fourth{
-                let none=[-1;MOST_CARRIERS];
-                let mut x=Fourth{quartic:[none;MOST_CARRIERS],quadratic:none,rr:none,yw:none,jumps:[none;MOST_CARRIERS],p:[none;MOST_CARRIERS],rr_all:none,photons:none,
-                    on:f.carriers.len() as i32,carriers:none,pad:[0;3]};
-                for(i,&c)in f.carriers.iter().enumerate(){x.carriers[i]=c as i32;}
-                for &(c,d,at)in &f.quartic{x.quartic[c][d]=at as i32;}
-                for &(c,at)in &f.quadratic{x.quadratic[c]=at as i32;}for &(c,at)in &f.rr{x.rr[c]=at as i32;}for &(c,at)in &f.yw{x.yw[c]=at as i32;}
-                for &(c,e,at)in &f.jumps{x.jumps[c][e]=at as i32;}for &(d,e,at)in &f.p{x.p[d][e]=at as i32;}
-                for &(c,at)in &f.rr_all{x.rr_all[c]=at as i32;}for &(c,at)in &f.photons{x.photons[c]=at as i32;}
-                cluster.fourth=fourths.len() as i32;fourths.push(x);weights=weights.max((2+f.carriers.len()*f.carriers.len())*GROUND*layout.n);
-            }
             let data=&model.tables.data[k];assert_eq!(data.len(),2*points*layout.size);
             tables.extend(data.chunks_exact(2).map(|z|[z[0] as f32,z[1] as f32]));
             for gl in &layout.groups{
