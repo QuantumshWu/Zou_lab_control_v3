@@ -7,10 +7,11 @@
 //! counter-rotating one, R_l e^{+i2π(ν_l + ν_frame)t}, each with its amplitude a_l(r). The beams of
 //! one frequency drive one field, Σ_l a_l(r) V_l (and Σ_l a_l(r)* R_l): its components are one
 //! component each (`Component`, its size the beams' sum, every beam at its peak in phase),
-//! classified by the rule of the population core (`classify`) against the 3D solve's budget
-//! (ledger.rs): a component folds when it is far, |ν| ≥ FOLD_DISTANCE ‖L0‖ with its mixing
-//! m = size/(|ν| − ‖L0‖) within m² ≤ budget, beyond the largest frequency gap of at least
-//! `fold_gap` = 1/√budget above every component that may not fold. A folded component enters as
+//! classified by one rule against the 3D solve's budget (ledger.rs, `classify`): a component folds
+//! when it is far, |ν| ≥ FOLD_DISTANCE ‖L0‖ with its mixing m = size/(|ν| − ‖L0‖) within
+//! m² ≤ budget, its error booked -- whatever the frequencies of the others: a van Vleck fold's
+//! denominators are exact, and it needs no gap between what it keeps and what it folds (the
+//! population core's lattice does, for its own time scales). A folded component enters as
 //! its second-order (van Vleck) shift on the ground and the excited states, with the exact
 //! bare-energy denominators -- quadratic in its field, so that its beams interfere: a standing wave,
 //! a lattice of crossed beams --; the others are near carriers. Each beam's static shift through the
@@ -563,19 +564,25 @@ fn coherence(beams:&[usize],couplings:&[Dense],counters:&[Dense],outside:&[Dense
     (units,Some(Interference{beams:beams.to_vec(),bound,coherent,near:folded[0].is_none(),shift}))
 }
 
-/// The smallest ratio of a fold's frequency gap, far over near: the first order the fold leaves
-/// out, (ν_near/ν_far)², within the budget.
-pub fn fold_gap()->f64{1./BUDGET.sqrt()}
 /// m = size/(|ν| − l0), a coupling's mixing.
 pub fn mixing(nu:f64,size:f64,l0:f64)->f64{size/(nu.abs()-l0).max(f64::MIN_POSITIVE)}
-/// The rule of the population core (population-core lattice/classification.rs) against the 3D
-/// budget: an item of frequency ν and size g may fold when |ν| ≥ FOLD_DISTANCE l0 with
-/// m² = (g/(|ν| − l0))² ≤ budget; the significant frequencies are cut at their largest ratio gap of
-/// at least `fold_gap` above every one that may not fold, and the items that may fold beyond the
-/// cut fold (an item of size zero folds trivially). The verdicts (true: folded) and the cut.
+/// An item of frequency ν and size g may fold, at second order, when it is beyond the generator's scale l0,
+/// |ν| ≥ FOLD_DISTANCE l0 (the population core's distance: ‖(L0 − iν)⁻¹‖ ≤ 1/(|ν| − l0) with room), with
+/// its mixing m² = (g/(|ν| − l0))² within the budget, the error it leaves (booked: `Ground::fold_estimates`).
+pub fn foldable(nu:f64,size:f64,l0:f64)->bool{nu.abs()>=FOLD_DISTANCE*l0&&mixing(nu,size,l0).powi(2)<=BUDGET}
+/// The smallest ratio of the frequency gap the classes' photons interfere below, far over near: the population
+/// core's for its lattice (`classify`'s cut).
+pub fn fold_gap()->f64{1./BUDGET.sqrt()}
+/// The rule over items of frequency ν and size g: every item that may fold folds (`foldable`; one of size
+/// zero trivially) -- a van Vleck fold's denominators are exact, and it needs no gap between the
+/// frequencies it keeps and those it folds (the population core's lattice cuts its frequencies at a gap
+/// for its own time scales, which kept foldable items below the cut, and refused scenes for them where they
+/// could not stay: the validation's F2). The verdicts (true: folded) and the cut the classes' photons
+/// interfere below, kept the population core's: their largest ratio gap of at least `fold_gap` above every
+/// frequency that may not fold (FOLD_DISTANCE l0 or below where every one may), infinite without one --
+/// photons of frequencies closer than it share a class, their interference kept with its beat.
 pub fn classify(items:&[(f64,f64)],l0:f64)->(Vec<bool>,f64){
-    let foldable=|nu:f64,size:f64|nu.abs()>=FOLD_DISTANCE*l0&&mixing(nu,size,l0).powi(2)<=BUDGET;
-    let mut frequencies:Vec<(f64,bool)>=items.iter().filter(|i|i.1>0.).map(|&(nu,size)|(nu.abs(),foldable(nu,size))).collect();
+    let mut frequencies:Vec<(f64,bool)>=items.iter().filter(|i|i.1>0.).map(|&(nu,size)|(nu.abs(),foldable(nu,size,l0))).collect();
     frequencies.sort_by(|a,b|a.0.total_cmp(&b.0));
     frequencies.dedup_by(|a,b|{let same=a.0==b.0;if same{b.1&=a.1;}same});
     let first=frequencies.iter().rposition(|f|!f.1).map_or(0,|i|i+1);
@@ -586,7 +593,7 @@ pub fn classify(items:&[(f64,f64)],l0:f64)->(Vec<bool>,f64){
         if best.is_none_or(|(r,_)|ratio>r){best=Some((ratio,i));}
     }
     let cut=match best{None=>f64::INFINITY,Some((_,0))=>(FOLD_DISTANCE*l0).min(frequencies[0].0),Some((_,i))=>(frequencies[i-1].0*frequencies[i].0).sqrt()};
-    (items.iter().map(|&(nu,size)|size==0.||nu.abs()>=cut&&foldable(nu,size)).collect(),cut)
+    (items.iter().map(|&(nu,size)|size==0.||foldable(nu,size,l0)).collect(),cut)
 }
 /// The rule's estimates for a coupling of an excited state: k (g / max(d − dressing, 1/T))² and over
 /// the light's pattern k P/max(d − dressing, 1/T)², P its power, k = SATURATION for a drive and 1 for
@@ -707,8 +714,10 @@ impl Ground{
         let(verdicts,_)=classify(&components.iter().map(|c|(c.nu,c.size)).collect::<Vec<_>>(),l0);
         for(c,v)in components.iter_mut().zip(verdicts){c.folded=v;}
         let names=|beams:&[usize]|beams.iter().map(|&l|request.beams[l].name.as_str()).collect::<Vec<_>>().join(" + ");
+        // A counter-rotating component that may not fold has no other place: the near carriers co-rotate.
         if let Some(c)=components.iter().find(|c|c.counter&&!c.folded&&c.size>0.){
-            return Err(format!("The counter-rotating coupling of 「{}」 is too strong to fold (population core's rule): 3D motion cannot take it",names(&c.beams)));}
+            return Err(format!("「{}」的反旋耦合不能按 van Vleck 折叠：频率 {:.1} THz（生成元尺度的 {:.1} 倍，须至少 {FOLD_DISTANCE} 倍），混合 m² = {:.1e}（预算 {BUDGET:.0e}）；3D 运动的近共振载波只取同旋分量，无法保留它",
+                names(&c.beams),c.nu.abs()/TAU/1e6,c.nu.abs()/l0,mixing(c.nu,c.size,l0).powi(2)));}
         // The units (`Unit`) and their outside shifts and folds, and per frequency of several beams the
         // interference they leave out (`coherence`).
         let fold=|v:&Dense,nu:f64|van_vleck(&energies,v,nu,&ground_states,&excited_states);
@@ -1188,8 +1197,11 @@ impl Ground{
         }}}
         let(verdicts,cut)=classify(&items.iter().map(|i|(i.frequency,i.size)).collect::<Vec<_>>(),l0);
         for(item,v)in items.iter_mut().zip(verdicts){item.folded=v;}
+        // A static coupling between F = 1 and F = 2 that may not fold would join the hyperfine levels in one frame,
+        // the splitting on its diagonal: the kept static couplings carry no beat.
         if let Some(item)=items.iter().find(|i|!i.folded&&matches!(i.kind,Kind::Static{..})&&{let Kind::Static{a,b}=i.kind else{unreachable!()};self.levels[a]!=self.levels[b]}){
-            return Err(format!("光束在 F=1 与 F=2 之间的静态耦合不能忽略（混合 {:.1e}），3D 运动暂不支持",mixing(item.frequency,item.size,l0)));}
+            return Err(format!("光束在 F=1 与 F=2 之间的静态耦合不能按 van Vleck 折叠：间隔 {:.3} GHz（生成元尺度的 {:.1} 倍，须至少 {FOLD_DISTANCE} 倍），混合 m² = {:.1e}（预算 {BUDGET:.0e}）；保留它须在一个子空间里传播超精细分裂，3D 运动暂不支持",
+                item.frequency/TAU/1e3,item.frequency/l0,mixing(item.frequency,item.size,l0).powi(2)));}
         // The clusters: the components of the graph of kept couplings over the ground states (nodes
         // 0..ng) and the excited ones (ng + e).
         let mut union=Union::new(ng+ne);
