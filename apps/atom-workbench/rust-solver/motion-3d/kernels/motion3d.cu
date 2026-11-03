@@ -1046,8 +1046,10 @@ __device__ void hold_record(const Program& P,const Run& R,Warp& W,const Twin& h,
 // The step.
 
 // The trap's potential of ψ at the point (model.rs `trap_potential`, with `bound` its upper bound
-// `trap_bound`): Re⟨ψ|·|ψ⟩/⟨ψ|ψ⟩ of h0 at the point less with the trap beam off, and of −Φ (S less
-// S with the trap beam off); the bound takes twice the light shift's bound for the latter.
+// `trap_bound`): Re⟨ψ|·|ψ⟩/⟨ψ|ψ⟩ of h0 at the point less with the trap beam off, and of −Φ S less
+// −Φ_off S with the trap beam off -- Φ_off of the fields with the trap beam's own part a c_k taken
+// out of its carrier's, so that a tweezer that is a near carrier is in the depth as a folded one
+// is; the bound takes twice the light shift's bound for the latter.
 __device__ float trap(const Program& P,const Warp& W,const Cluster& C,const Entries& E,const float2 (&h0)[SLOTS],double t,bool bound,int lane){
     const float2* tables=P.tables+C.table;const Point& pt=W.pt;
     float2 difference[SLOTS],far[SLOTS],slope[MOST_FOCUSED][SLOTS];
@@ -1055,17 +1057,22 @@ __device__ float trap(const Program& P,const Warp& W,const Cluster& C,const Entr
     #pragma unroll
     for(int j=0;j<SLOTS;j++)difference[j]=h0[j]-far[j];
     if(bound)return quadratic(W,E,difference,lane)+P.light2;
+    // The trap beam (the first focused one), its carrier (−1 when folded) and its amplitude here.
+    const int trap_beam=P.focused_beam[0];const Beam& B=P.beams[trap_beam];const float2 a=pt.a[trap_beam];
     float2 here[SLOTS];
     for(int gi=0;gi<C.ngroups;gi++){
         const Group G=P.groups[C.groups+gi];const Fields& fa=pt.fields[G.absorbed];const Fields& fe=pt.fields[G.emitted];
         const float2 phase=residual(G.residual,t);
         for(int pi=0;pi<G.npairs;pi++){
-            const int2 pair=P.pairs[G.pairs+pi];const int k1=pair.x,k=pair.y;
-            const float2 ee=(G.hermitian&&k1<k?2.f:1.f)*(conj(fe.e[k1])*fa.e[k]);const float2 c=zero2()-ee*phase;
+            const int2 pair=P.pairs[G.pairs+pi];const int k1=pair.x,k=pair.y;const float both=G.hermitian&&k1<k?2.f:1.f;
+            float2 oa=fa.e[k],oe=fe.e[k1];
+            if(B.carrier==G.absorbed)oa=oa-a*make_float2(B.coefficients[k][0],B.coefficients[k][1]);
+            if(B.carrier==G.emitted)oe=oe-a*make_float2(B.coefficients[k1][0],B.coefficients[k1][1]);
+            const float2 c=zero2()-both*(conj(fe.e[k1])*fa.e[k])*phase,c0=both*(conj(oe)*oa)*phase;
             gather<false>(P,W,false,tables+G.s+pi*E.nn,C.size,E.nn,lane,here,slope);
             gather<false>(P,W,true,tables+G.s+pi*E.nn,C.size,E.nn,lane,far,slope);
             #pragma unroll
-            for(int j=0;j<SLOTS;j++)difference[j]+=c*(here[j]-far[j]);
+            for(int j=0;j<SLOTS;j++)difference[j]+=c*here[j]+c0*far[j];
         }
     }
     return quadratic(W,E,difference,lane);

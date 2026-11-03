@@ -27,9 +27,11 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 /// The initial internal states (cluster, position in it, probability), each one's trap (the
-/// harmonic trap its initial positions are drawn in) and the temperature.
+/// harmonic trap its initial positions are drawn in) and depth (`Model::depth`), the temperature,
+/// and the share of the traps' thermal positions beyond their regions (`thermal_position`), booked
+/// as an a-priori estimate: what a region twice as deep would add, the initial states' mean.
 #[derive(Clone,Debug)]
-pub struct Initial{pub states:Vec<(usize,usize,f64)>,pub traps:Vec<Trap>,pub temperature_uk:f64}
+pub struct Initial{pub states:Vec<(usize,usize,f64)>,pub traps:Vec<Trap>,pub depths:Vec<f64>,pub temperature_uk:f64,pub outside:f64}
 impl Initial{
     /// From the request's initial density: its ground populations (the density is diagonal in the
     /// model basis, as the app writes it).
@@ -42,15 +44,73 @@ impl Initial{
         let total:f64=states.iter().map(|s|s.2).sum();
         if !(total>0.){return Err("The initial density has no ground population".into());}
         for s in &mut states{s.2/=total;}
-        let traps=states.iter().map(|&(k,x,_)|model.trap(k,x)).collect();
-        Ok(Initial{states,traps,temperature_uk:request.temperature_uk})
+        let traps:Vec<Trap>=states.iter().map(|&(k,x,_)|model.trap(k,x)).collect();
+        let depths:Vec<f64>=states.iter().map(|&(k,x,_)|model.depth(k,x)).collect();
+        let kt=KT_PER_UK*request.temperature_uk;
+        let outside=states.iter().zip(&traps).zip(&depths).enumerate().map(|(i,((&(k,x,p),trap),&depth))|p*outside_share(model,k,x,trap,depth,kt,i as u64)).sum();
+        Ok(Initial{states,traps,depths,temperature_uk:request.temperature_uk,outside})
     }
 }
 
-/// The independence Metropolis chain's length for the initial positions: its proposal, the
-/// harmonic trap's Boltzmann distribution, is the target to a few percent, so the chain forgets
-/// its start within a few accepted moves.
-const METROPOLIS_STEPS:usize=32;
+/// The draws of a region's share (`outside_share`): where the share reaches the a-priori budget,
+/// to about a fifth of it.
+const REGION_DRAWS:u64=4096;
+
+/// A state's harmonic trap at 2T: the scales σ_i √2 of its trapped principal axes (√(2 k_BT ħ/m)/ω_i,
+/// zero along an untrapped one), in which its harmonic potential is U_h = k_BT |z|² (z = q/scale).
+fn doubled_scales(trap:&Trap,kt:f64,hm:f64)->[f64;3]{std::array::from_fn(|i|{let w=trap.frequencies[i];if w>0.{(2.*kt*hm).sqrt()/w}else{0.}})}
+
+/// The trap's thermal positions at T (`thermal_position`) that its region leaves out: the share of
+/// e^{−U/k_BT} over the region twice as deep (U_h ≤ 2D) that lies beyond the trap's (U_h ≤ D), by
+/// importance sampling from the proposal `thermal_position` takes there (on a fixed stream: the
+/// estimate is deterministic). One where the region holds nothing of it; zero for a state the trap
+/// does not hold (its positions are the focus).
+fn outside_share(model:&Model,cluster:usize,state:usize,trap:&Trap,depth:f64,kt:f64,index:u64)->f64{
+    let scales=doubled_scales(trap,kt,model.hbar_over_mass);let trapped=scales.iter().filter(|&&s|s>0.).count();
+    if trapped==0||!(depth>0.){return 0.;}
+    let(inner,outer)=(depth/kt,2.*depth/kt);let normal=outer>=trapped as f64;let edge=outer.sqrt();
+    let mut rng=Rng::new(0x3D_5EED,Purpose::Region,index,0);let(mut all,mut beyond)=(0.,0.);
+    for _ in 0..REGION_DRAWS{
+        let z:[f64;3]=std::array::from_fn(|i|if scales[i]>0.{if normal{normal_quantile(rng.interior())}else{edge*(2.*rng.uniform()-1.)}}else{0.});
+        let z2:f64=z.iter().map(|x|x*x).sum();if z2>outer{continue;}
+        let q:[f64;3]=std::array::from_fn(|i|z[i]*scales[i]);let lab=std::array::from_fn(|a|(0..3).map(|i|q[i]*trap.axes[i][a]).sum());
+        let w=(-model.potential(cluster,state,lab)/kt+if normal{0.5*z2}else{0.}).exp();
+        all+=w;if z2>inner{beyond+=w;}
+    }
+    if all>0.{beyond/all}else{1.}
+}
+
+/// A state's thermal position on its trap's principal axes: the trap's Boltzmann distribution at T,
+/// e^{−U/k_BT} (U the state's potential, `Model::potential`), over the trap's region, where its
+/// harmonic approximation lies below its depth, U_h ≤ D (`Model::depth`). A finite trap's Boltzmann
+/// factor does not fall off past its depth -- U saturates there --, so no region holds all of it: the
+/// region is the trap's, the share a twice as deep one would add booked (`outside_share`). Drawn
+/// exactly, by rejection, in the coordinates z of the harmonic trap at 2T (U_h = k_BT |z|², the
+/// region |z|² ≤ D/k_BT): from the normal distribution there, accepted with e^{−U/k_BT + |z|²/2} --
+/// at most one where U ≥ U_h/2, as on the region of a Gaussian beam (it lies below its harmonic
+/// potential by at most half, on the axis at U_h = D) and of its standing wave; or, where the region
+/// is shallower than the normal's mean |z|² (the trapped axes' number), uniformly over the cube
+/// about it, accepted with e^{−U/k_BT} on it. The first proposal's deviates are the member's of its
+/// group's Latin hypercube (`next`), the further ones its own stream's. Untrapped axes: zero; a state
+/// the trap does not hold: the focus.
+fn thermal_position(model:&Model,cluster:usize,state:usize,trap:&Trap,depth:f64,kt:f64,rng:&mut Rng,next:&mut dyn FnMut(&mut Rng)->[f64;3])->[f64;3]{
+    let scales=doubled_scales(trap,kt,model.hbar_over_mass);let trapped=scales.iter().filter(|&&s|s>0.).count();
+    // The member's Latin deviates are taken whatever follows, so that its group's stay in step.
+    let first=next(rng);
+    if trapped==0||!(depth>0.){return [0.;3];}
+    let region=depth/kt;let normal=region>=trapped as f64;let edge=region.sqrt();
+    let mut deviates=first;
+    loop{
+        let z:[f64;3]=std::array::from_fn(|i|if scales[i]>0.{if normal{normal_quantile(deviates[i])}else{edge*(2.*deviates[i]-1.)}}else{0.});
+        let z2:f64=z.iter().map(|x|x*x).sum();
+        if z2<=region{
+            let q:[f64;3]=std::array::from_fn(|i|z[i]*scales[i]);let lab=std::array::from_fn(|a|(0..3).map(|i|q[i]*trap.axes[i][a]).sum());
+            let accept=-model.potential(cluster,state,lab)/kt+if normal{0.5*z2}else{0.};
+            if rng.open_uniform().ln()<accept{return q;}
+        }
+        deviates=std::array::from_fn(|_|rng.interior());
+    }
+}
 
 /// A trajectory's group: its first trajectory and its size. A group's initial states form a Latin
 /// hypercube: every variable drawn from a uniform deviate -- the internal state's pick, each
@@ -84,10 +144,10 @@ impl Latin{
 
 /// A trajectory's initial state, its group's member (`Stratum`): an internal basis state drawn from
 /// the initial populations; the position from the Boltzmann distribution at T in that state's trap
-/// potential (independence Metropolis from its harmonic approximation, on the trap's principal
-/// axes); the momentum Maxwell; position and momentum along each principal axis scaled to the
-/// harmonic oscillator's thermal Wigner function, T* = (ħω/2k)coth(ħω/2kT). Along frozen lab axes (a
-/// validation's), nothing.
+/// over the trap's region (`thermal_position`, on the trap's principal axes); the momentum Maxwell,
+/// apart from the position -- an atom the trap cannot hold is lost at the first step --; position
+/// and momentum along each principal axis scaled to the harmonic oscillator's thermal Wigner
+/// function, T* = (ħω/2k)coth(ħω/2kT). Along frozen lab axes (a validation's), nothing.
 pub fn initial_trajectory(model:&Model,settings:&Settings,initial:&Initial,seed:u64,index:u64,stratum:Stratum)->Trajectory{
     initial_from(model,settings,initial,seed,Purpose::Initial,index,stratum)
 }
@@ -102,10 +162,10 @@ fn initial_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,purpos
     let kt=KT_PER_UK*initial.temperature_uk;let hm=model.hbar_over_mass;
     let sigma:[f64;3]=std::array::from_fn(|i|if frequencies[i]>0.{(kt*hm).sqrt()/frequencies[i]}else{0.});
     let lab=|q:[f64;3]|->[f64;3]{std::array::from_fn(|a|(0..3).map(|i|q[i]*axes[i][a]).sum())};
-    let draw=|rng:&mut Rng,latin:&mut Latin|->[f64;3]{std::array::from_fn(|i|sigma[i]*normal_quantile(latin.next(rng)))};
-    let weight=|q:[f64;3]|->f64{-model.potential(cluster,state,lab(q))/kt+(0..3).filter(|&i|sigma[i]>0.).map(|i|q[i]*q[i]/(2.*sigma[i]*sigma[i])).sum::<f64>()};
-    let mut q=draw(&mut rng,&mut latin);let mut w=weight(q);
-    for _ in 0..METROPOLIS_STEPS{let next=draw(&mut rng,&mut latin);let wn=weight(next);if rng.open_uniform().ln()<wn-w{q=next;w=wn;}}
+    // The position: along the trap's principal axes in the trap's region; along the free lab axes of
+    // a validation, that trap with the frozen axes' frequencies zero (none there).
+    let held=Trap{axes,frequencies,lab:trap.lab};
+    let mut q=thermal_position(model,cluster,state,&held,initial.depths[pick],kt,&mut rng,&mut |rng|std::array::from_fn(|_|latin.next(rng)));
     let quantum:[f64;3]=std::array::from_fn(|i|{let f=frequencies[i];if f>0.{let half=f/(2.*kt);(half/half.tanh()).sqrt()}else{1.}});
     for i in 0..3{q[i]*=quantum[i];}
     let p:[f64;3]=std::array::from_fn(|i|{let z=normal_quantile(latin.next(&mut rng));if sigma[i]>0.{(kt/hm).sqrt()*quantum[i]*z}else{0.}});

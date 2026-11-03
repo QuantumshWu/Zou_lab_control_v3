@@ -285,6 +285,63 @@ mod tests {
         let outside = rows.iter().flatten().filter(|&&p| !(0. ..=1.).contains(&p)).count();
         assert_eq!(outside, 0, "every published population lies in [0, 1]");
     }
+    /// The default scene with a weak D1 probe (tests/fixtures/weak_d1_probe_motion.json): the light's
+    /// friction is weak, and a step's change of the mechanical energy is the integrator's own error,
+    /// which the friction criterion took for the friction -- the released step search ran away, and
+    /// the harmonic control's sums per step asked for terabytes. The step is the one the light's
+    /// pattern needs (k v_T ≈ 0.35 rad/us at 20 uK: a few tenths of a microsecond), the result
+    /// within its targets.
+    #[test]
+    fn a_weak_light_s_motion_keeps_the_step_its_pattern_needs() {
+        let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/weak_d1_probe_motion.json")).unwrap();
+        let mut line = fixture["payload"].clone();
+        line["id"] = json!(9);
+        let out = request(line);
+        assert!(out["error"].is_null(), "{}", out["error"]);
+        let result = &out["result"];
+        let dt = result["motion"]["timeStepUs"].as_f64().unwrap();
+        assert!(dt >= 0.1, "the step is {dt:e} us");
+        let flagged = &result["diagnostics"]["approximations"]["flagged"];
+        assert!(flagged.is_null(), "{flagged}");
+    }
+    /// A hot atom in a shallow tweezer (tests/fixtures/total_loss_motion.json: 200 uK in a trap about
+    /// 5 uK deep): every atom is lost at the first step. The result says so -- the loss one from the
+    /// first sample after t = 0, the rows (no held atom to describe) the last held ones, each a
+    /// probability vector, outside the validated regime, and the flag from when -- where the
+    /// released engine's empty rows failed the adapter's trace gate.
+    #[test]
+    fn a_motion_whose_every_atom_is_lost_reports_the_loss() {
+        let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/total_loss_motion.json")).unwrap();
+        let mut line = fixture["payload"].clone();
+        line["id"] = json!(10);
+        let out = request(line);
+        assert!(out["error"].is_null(), "{}", out["error"]);
+        let result = &out["result"];
+        let loss: Vec<f64> = result["motion"]["lossProbability"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+        assert_eq!(loss[0], 0.);
+        assert!(loss[1..].iter().all(|&l| l == 1.), "{loss:?}");
+        let rows: Vec<Vec<f64>> = result["populations"].as_array().unwrap().iter().map(|row| row.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect()).collect();
+        assert!(rows.iter().all(|row| row == &rows[0]), "the rows after the loss carry t = 0's");
+        let classical = result["motion"]["classical"].as_array().unwrap();
+        assert!(classical[1..].iter().all(|c| c == false), "{classical:?}");
+        let flagged = result["diagnostics"]["approximations"]["flagged"].as_str().unwrap_or("");
+        assert!(flagged.contains("无原子被俘获"), "{flagged}");
+    }
+    /// The default scene's tweezer alone (tests/fixtures/tweezer_alone_motion.json: 30 uK in its
+    /// 830 uK deep trap, 1 ms): with no other light the light's frame rotates at the tweezer, a near
+    /// carrier whose shift lies in its field, and the loss criterion's trap less the trap beam off
+    /// kept that field -- a trap 36 uK deep, 84 % of the atoms lost at once. The depth is the
+    /// tweezer's whole shift: the atoms stay.
+    #[test]
+    fn the_tweezer_alone_holds_its_thermal_atom() {
+        let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/tweezer_alone_motion.json")).unwrap();
+        let mut line = fixture["payload"].clone();
+        line["id"] = json!(11);
+        let out = request(line);
+        assert!(out["error"].is_null(), "{}", out["error"]);
+        let loss: Vec<f64> = out["result"]["motion"]["lossProbability"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+        assert!(loss.iter().all(|&l| l < 0.01), "{loss:?}");
+    }
     /// A motion request is a trajectory alone of 3D motion, its trap one of its beams; a tweezer
     /// without light shift confines nothing. The device is the GPU (by default) or the CPU.
     #[test]

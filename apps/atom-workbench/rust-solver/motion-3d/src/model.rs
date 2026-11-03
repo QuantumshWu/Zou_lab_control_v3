@@ -1213,7 +1213,10 @@ impl Model{
         g
     }
     /// The trap's potential of ψ at a point (rad/us): Re⟨ψ|H_eff|ψ⟩ less the same with the trap beam
-    /// off, per ⟨ψ|ψ⟩ -- (h0 − M) at the point's stencil less at its far one, with the same fields.
+    /// off, per ⟨ψ|ψ⟩ -- (h0 − M) at the point's stencil and fields less at its far stencil with the
+    /// trap beam's field taken out of its carrier's: the tweezer's whole light shift whether it is
+    /// folded (in h0) or a near carrier (in M, through its field) -- a tweezer alone is always one, the
+    /// light's frame rotating at it.
     pub fn trap_potential(&self,cluster:usize,p:&Point,psi:&[Complex],t:f64)->f64{
         if self.mixed(cluster){return self.trap_mixed(cluster,p,psi,t,false);}
         macro_rules! sized{($($n:literal)*)=>{match self.dimension(cluster){$($n=>self.trap_sized::<$n,{2*$n*$n}>(cluster,p,psi,t,false),)*_=>unreachable!("a cluster has 1 to 8 states")}}}
@@ -1231,16 +1234,17 @@ impl Model{
         for j in 0..W{difference[j]=here[j]-far[j];}
         let norm:f64=psi[..N].iter().map(|z|z.norm_sqr()).sum();
         if bound{return quadratic::<N>(&difference,psi).re/norm+2.*self.ground.light;}
+        let off=self.fields_off(p);
         for gl in &layout.groups{
-            let(f,e)=(&p.fields[gl.absorbed],&p.fields[gl.emitted]);
+            let(f,e)=(&p.fields[gl.absorbed],&p.fields[gl.emitted]);let(f0,e0)=(&off[gl.absorbed],&off[gl.emitted]);let phase=Complex::cis(gl.residual*t);
             let count=gl.entries.len();
             for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
-                // −Φ (S(s) − S(far)) on the group's entries, the pair (k1, k) standing for (k, k1) in a
+                // −(Φ S(s) − Φ_off S(far)) on the group's entries, the pair (k1, k) standing for (k, k1) in a
                 // Hermitian group.
-                let ee=e.e[k1].conj()*f.e[k]*if gl.hermitian&&k1<k{2.}else{1.};let at=gl.s+pi*count;
+                let both=if gl.hermitian&&k1<k{2.}else{1.};let at=gl.s+pi*count;
                 self.gather_value(cluster,&p.stencil,at,2*count,&mut here);self.gather_value(cluster,&p.far,at,2*count,&mut far);
-                let c=-ee*Complex::cis(gl.residual*t);
-                for(j,&(a,b))in gl.entries.iter().enumerate(){let w=c*Complex::new(here[2*j]-far[2*j],here[2*j+1]-far[2*j+1]);let i=2*(a*N+b);difference[i]+=w.re;difference[i+1]+=w.im;}
+                let(c,c0)=(-(e.e[k1].conj()*f.e[k]*both*phase),e0.e[k1].conj()*f0.e[k]*both*phase);
+                for(j,&(a,b))in gl.entries.iter().enumerate(){let w=c*Complex::new(here[2*j],here[2*j+1])+c0*Complex::new(far[2*j],far[2*j+1]);let i=2*(a*N+b);difference[i]+=w.re;difference[i+1]+=w.im;}
             }
         }
         quadratic::<N>(&difference,psi).re/norm
@@ -1250,6 +1254,17 @@ impl Model{
     pub fn photon(&self,cluster:usize,stencil:&Stencil,p:usize,a:usize,to:usize)->Complex{
         let mut z=[Complex::ZERO];let ng=self.ground.ground_states.len();self.gather_dyn(cluster,stencil,self.layouts[cluster].emission+(p*3+a)*ng+to,&mut z,None);z[0]
     }
+    /// The carriers' fields at a point with the trap beam off (`trap_potential`): its carrier's less
+    /// its own part a(r) c_k.
+    fn fields_off(&self,p:&Point)->[CarrierField;MOST_CARRIERS]{
+        let mut off=p.fields;
+        for(c,carrier)in self.carriers.iter().enumerate(){
+            if let Some(j)=carrier.beams.iter().position(|&l|l==self.trap_beam){
+                let a=self.geometry[self.trap_beam].field(p.r).0;for k in 0..carrier.rank{off[c].e[k]-=a*carrier.coefficients[j][k];}
+            }
+        }
+        off
+    }
     /// `trap_sized` on any number of states.
     fn trap_mixed(&self,cluster:usize,p:&Point,psi:&[Complex],t:f64,bound:bool)->f64{
         let layout=&self.layouts[cluster];let n=layout.n;let nn=n*n;let(mut here,mut far)=(vec![Complex::ZERO;nn],vec![Complex::ZERO;nn]);
@@ -1258,12 +1273,14 @@ impl Model{
         let norm:f64=psi[..n].iter().map(|z|z.norm_sqr()).sum();
         let form=|x:&[Complex]|->f64{let mut s=Complex::ZERO;for a in 0..n{for b in 0..n{s+=psi[a].conj()*x[a*n+b]*psi[b];}}s.re};
         if bound{return form(&difference)/norm+2.*self.ground.light;}
+        let off=self.fields_off(p);
         for gl in &layout.groups{
-            let(f,e)=(&p.fields[gl.absorbed],&p.fields[gl.emitted]);let count=gl.entries.len();
+            let(f,e)=(&p.fields[gl.absorbed],&p.fields[gl.emitted]);let(f0,e0)=(&off[gl.absorbed],&off[gl.emitted]);let count=gl.entries.len();let phase=Complex::cis(gl.residual*t);
             for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
-                let ee=e.e[k1].conj()*f.e[k]*if gl.hermitian&&k1<k{2.}else{1.};let at=gl.s+pi*count;
+                let both=if gl.hermitian&&k1<k{2.}else{1.};let at=gl.s+pi*count;
                 self.gather_dyn(cluster,&p.stencil,at,&mut here[..count],None);self.gather_dyn(cluster,&p.far,at,&mut far[..count],None);
-                let c=-ee*Complex::cis(gl.residual*t);for(j,&(a,b))in gl.entries.iter().enumerate(){difference[a*n+b]+=c*(here[j]-far[j]);}
+                let(c,c0)=(-(e.e[k1].conj()*f.e[k]*both*phase),e0.e[k1].conj()*f0.e[k]*both*phase);
+                for(j,&(a,b))in gl.entries.iter().enumerate(){difference[a*n+b]+=c*here[j]+c0*far[j];}
             }
         }
         form(&difference)/norm
@@ -1419,25 +1436,34 @@ impl Model{
     /// lattice) left out. A tweezer folded at second order is in h0; one that is a near carrier
     /// (the only light): the trap is the same.
     pub fn potential(&self,cluster:usize,x:usize,r:[f64;3])->f64{
-        let at=|r:[f64;3]|->f64{
-            let layout=&self.layouts[cluster];let n=layout.n;
-            let s:Vec<f64>=self.focused.iter().map(|&l|self.geometry[l].intensity(r).min(1.)).collect();let stencil=self.stencil(&s);
-            let mut buf=vec![Complex::ZERO;n*n];self.interpolate(cluster,&stencil,None,layout.h0,&mut buf);let mut u=buf[x*n+x].re;
-            // The groups' S at the state's diagonal entry (none where it is not one of a group's).
-            for gl in layout.groups.iter().filter(|g|g.hermitian){
-                let Ok(diagonal)=gl.entries.binary_search(&(x,x)) else{continue};
-                let carrier=&self.carriers[gl.absorbed];let mut value=[Complex::ZERO];
-                for(j,&l)in carrier.beams.iter().enumerate(){
-                    let intensity=self.geometry[l].intensity(r);let coefficient=&carrier.coefficients[j];
-                    for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
-                        self.interpolate(cluster,&stencil,None,gl.s+pi*gl.entries.len()+diagonal,&mut value);
-                        u-=intensity*(coefficient[k1].conj()*coefficient[k]*value[0]).re*if k1<k{2.}else{1.};
-                    }
+        self.level(cluster,x,&|l|self.geometry[l].intensity(r))-self.level(cluster,x,&|l|self.geometry[l].intensity([0.;3]))
+    }
+    /// A cluster state's trap depth (rad/us): the level its potential tends to far from every
+    /// focused beam -- the Gaussian beams' intensities zero, the plane waves' as everywhere --,
+    /// relative to the focus; positive for a state the trap holds.
+    pub fn depth(&self,cluster:usize,x:usize)->f64{
+        let far=|l:usize|if self.geometry[l].waist.is_some(){0.}else{self.geometry[l].intensity([0.;3])};
+        self.level(cluster,x,&far)-self.level(cluster,x,&|l|self.geometry[l].intensity([0.;3]))
+    }
+    /// The diagonal of h0 and of every beam's own light shift for a cluster state, the beams at the
+    /// intensities `intensity(l)` (`potential`): the groups' S at the state's diagonal entry (none
+    /// where it is not one of a group's).
+    fn level(&self,cluster:usize,x:usize,intensity:&dyn Fn(usize)->f64)->f64{
+        let layout=&self.layouts[cluster];let n=layout.n;
+        let s:Vec<f64>=self.focused.iter().map(|&l|intensity(l).min(1.)).collect();let stencil=self.stencil(&s);
+        let mut buf=vec![Complex::ZERO;n*n];self.interpolate(cluster,&stencil,None,layout.h0,&mut buf);let mut u=buf[x*n+x].re;
+        for gl in layout.groups.iter().filter(|g|g.hermitian){
+            let Ok(diagonal)=gl.entries.binary_search(&(x,x)) else{continue};
+            let carrier=&self.carriers[gl.absorbed];let mut value=[Complex::ZERO];
+            for(j,&l)in carrier.beams.iter().enumerate(){
+                let at=intensity(l);let coefficient=&carrier.coefficients[j];
+                for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
+                    self.interpolate(cluster,&stencil,None,gl.s+pi*gl.entries.len()+diagonal,&mut value);
+                    u-=at*(coefficient[k1].conj()*coefficient[k]*value[0]).re*if k1<k{2.}else{1.};
                 }
             }
-            u
-        };
-        at(r)-at([0.;3])
+        }
+        u
     }
 }
 
