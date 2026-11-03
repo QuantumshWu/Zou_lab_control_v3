@@ -1149,11 +1149,11 @@ function solverDetails():string{
 }
 /** A ledger's total (`used`, the items' estimates summed) with its largest item named by its `label`
  * and the others summed, against the population target, and whether an output's total estimated
- * error -- approximations, step and statistics -- exceeds a target (`flagged`). */
+ * error exceeds a target, or the a-priori resonance bound does (`flagged`, its reason on the next line). */
 function approximationTotal(ledger:ApproximationLedger,target:number|undefined):string{
   const [largest,...others]=[...ledger.items].sort((a,b)=>b.estimate-a.estimate);
   const parts=largest?[`${largest.label} ${errorPercent(largest.estimate)}`,...(others.length?[`其余 ${others.length} 项 ${errorPercent(others.reduce((sum,item)=>sum+item.estimate,0))}`]:[])]:[];
-  return `合计 ${errorPercent(ledger.used)}${parts.length?`（${parts.join('，')}）`:''}${target!==undefined?`，布居目标 ${errorPercent(target)}`:''}，${ledger.flagged?'有时刻超出目标':'未超出'}`;
+  return `合计 ${errorPercent(ledger.used)}${parts.length?`（${parts.join('，')}）`:''}${target!==undefined?`，布居目标 ${errorPercent(target)}`:''}，${ledger.flagged?'超出目标（见下）':'未超出'}`;
 }
 /** A motion result's approximation ledger (solver-types.ts ApproximationLedger): each approximation,
  * its estimated error and what the engine did about it. */
