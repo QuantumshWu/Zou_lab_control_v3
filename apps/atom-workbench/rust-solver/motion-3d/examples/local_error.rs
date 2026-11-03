@@ -1,7 +1,6 @@
 //! The step-doubling error of the deterministic step on states sampled along trajectories: for each
 //! dt, the relative error of the step's non-harmonic impulse, Σ|Δκ|/Σ|kick|, the population error per
-//! step, the relative error of the norm's decay (the jumps' timing), of the friction and of the
-//! heating (the momentum's covariance increment).
+//! step and the relative error of the norm's decay (the jumps' timing).
 //! `cargo run --profile iterate -p atom-motion-3d --example local_error -- <scene> [trajectories] [t_end_us]`
 #[path="scene/mod.rs"] mod scene;
 use atom_motion_3d::engine::{Engine,Settings};
@@ -22,10 +21,8 @@ fn main(){
     println!("{name}: {} sampled states",states.len());
     for dt in [0.05,0.1,0.2,0.3,0.5,1.0]{
         let(mut dk,mut kick,mut dp,mut dl,mut l,mut de,mut e)=(0.,0.,0_f64,0.,0.,0.,0.);
-        let(mut dv,mut v,mut sum_dp)=(0.,0.,0.);
-        for t in &states{let d=engine.doubling(t,dt);dk+=d.momentum[0];kick+=d.momentum[1];dp=dp.max(d.internal[0]);sum_dp+=d.internal[0];dl+=d.internal[1];l+=d.internal[2];
-            de+=d.energy[0];e+=d.energy[1];dv+=d.heating[0];v+=d.heating[1];}
-        println!("dt {dt:4}: impulse {:.2e} (rel), population per step mean {:.2e} max {:.2e}, decay {:.2e} (rel), friction {:.2e} (rel; mean energy change {:.2e} rad/us per step), heating {:.2e} (rel)",
-            dk/kick,sum_dp/states.len() as f64,dp,dl/l,(de/e).abs(),e/states.len() as f64,dv/v);
+        for t in &states{let(a,b,w)=engine.doubling(t,dt);dk+=a[0];kick+=a[1];dp=dp.max(b[0]);dl+=b[1];l+=b[2];de+=w[0];e+=w[1];}
+        let mean_dp:f64=states.iter().map(|t|engine.doubling(t,dt).1[0]).sum::<f64>()/states.len() as f64;
+        println!("dt {dt:4}: impulse {:.2e} (rel), population per step mean {:.2e} max {:.2e}, decay {:.2e} (rel), friction {:.2e} (rel; mean energy change {:.2e} rad/us per step)",dk/kick,mean_dp,dp,dl/l,(de/e).abs(),e/states.len() as f64);
     }
 }
