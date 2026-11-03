@@ -133,21 +133,66 @@ fn at_fourth_order_a_step_and_a_jump_are_the_cpu_s(){
     }
 }
 
+/// The trajectories of a batch (`first`, `count` and `group` as lib.rs `simulate` takes them) whose
+/// jumps have fallen in different steps on the two devices after any of `after` steps (ascending),
+/// as (trajectory, steps): each device's own trajectories from the batch's initial states, the GPU's
+/// in a launch of that many steps from the start. The GPU's ln‖ψ‖² drifts from the CPU's at single
+/// precision (about 1e-7 a step); a crossing on a slowly decaying stretch moves by that drift over
+/// the decay rate, and the fast decay after its jump turns the move back into ln‖ψ‖² (the gray
+/// molasses' trajectory 44 from F7's initial positions on: 4.6e-6 after 26 steps, 1.2e-5 after its
+/// first jump, beyond the CPU's margin of 8.8e-4 two jumps later, in step 28 where the CPU's fell in
+/// 29). So now and then a crossing near a step's end falls in the next step on one of them, at any
+/// step -- a smaller step does not help, the drift does not shrink with it --: it is that and nothing
+/// else, the counts never differ by more than one.
+fn straddles(gpu:&gpu::Gpu,program:&program::Program,model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,after:&[usize])->Vec<(u64,usize)>{
+    let engine=Engine::new(model,settings.clone());
+    let start:Vec<Trajectory>=(first..first+count).map(|i|{let s=first+(i-first)/group*group;
+        initial_trajectory(model,settings,initial,seed,i,Stratum{first:s,size:(s+group).min(first+count)-s})}).collect();
+    let(mut cpu,mut done,mut out)=(start.clone(),0,vec![]);
+    for &k in after{
+        for _ in done..k{for t in cpu.iter_mut(){if t.alive{engine.step(t);}}}done=k;
+        for(c,g)in cpu.iter().zip(gpu.advance(program,settings,&start,k).unwrap()){
+            if(c.jumps,c.alive)!=(g.jumps,g.alive){
+                assert!(c.jumps.abs_diff(g.jumps)<=1,"trajectory {} after {k} steps: {} jumps against the CPU's {}",c.index,g.jumps,c.jumps);
+                out.push((c.index,k));
+            }
+        }
+    }
+    out
+}
+
 /// A batch on the GPU sums what the same batch sums on the CPU (lib.rs `simulate`), to single
 /// precision, with the control variates (control.rs): 20 trajectories in two groups -- tasks of 8, 2,
 /// 8 and 2 (blocks with idle warps) --, 3 steps between 6 outputs, the motion's means over each
 /// output's window of half a trap period (the windows closing up to the reach past the last output,
 /// over several launches), the samples kept at two outputs, every trajectory's harmonic control and,
-/// where the generator is static, its held twin.
+/// where the generator is static, its held twin. The batch is the first 20 trajectories from the
+/// 40th on, by 20, whose jumps fall in the same steps on both devices (`straddles`) wherever the
+/// sums can tell: after every step within the windows, and at the run's end, where the jumps are
+/// counted. A jump a step apart moves its recoil by a step in a window (1.6e-3 of the gray molasses'
+/// Σκ_x² at its last output, trajectory 44 from the 40th). The held twin's jumps are not checked so
+/// (no entry steps it alone on the GPU): each fixture's fall in the same steps.
 fn batch(fixture:&str,fourth:bool)->bool{
     let Some(gpu)=device()else{return false};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
     let r=request(fixture);let model=model(&r,fourth);let initial=Initial::new(&model,&r).unwrap();
     let settings=Settings::new(0.2,&initial.traps[0],1e-6,true);
-    let(seed,first,count,group,steps,outputs,listed)=(0x3D_5EED,40,20,10,3,6,[2,5]);
+    let(seed,count,group,steps,outputs,listed)=(0x3D_5EED,20,10,3,6,[2,5]);
+    let program=gpu.program(&model,&settings).unwrap();
+    // The run: the outputs, then the windows' reach past the last, half the slowest trap period
+    // (lib.rs `half_windows`). A window takes as many steps after its output as before it (lib.rs
+    // `Windows::means`), so the last output's ends `last` past it at most.
+    let last=(outputs-1)*steps;
+    let reach=settings.lab.iter().filter(|&&w|settings.average&&w>0.).map(|&w|(std::f64::consts::PI/w/settings.dt).round() as usize).max().unwrap_or(0);
+    let(windows,run)=(last+reach.min(last),last+reach);
+    let after:Vec<usize>=(1..=windows).chain((run>windows).then_some(run)).collect();
+    let first=(40u64..).step_by(20).take(8).find(|&first|{
+        let s=straddles(&gpu,&program,&model,&settings,&initial,seed,first,count,group,&after);
+        if !s.is_empty(){println!("trajectories {first} to {}: jumps a step apart (trajectory, step) {s:?}",first+count-1);}
+        s.is_empty()
+    }).expect("a batch whose jumps fall in the same steps on both devices");
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
     let twin=Twin::new(&model,0.5*model.geometry[model.trap_beam].intensity([0.;3]));
     let variates=Variates{harmonic:&harmonic,twin:twin.as_ref()};
-    let program=gpu.program(&model,&settings).unwrap();
     let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&variates)).unwrap();
     let c=atom_motion_3d::simulate(&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&variates));
     assert_eq!(g.groups.len(),c.groups.len());
@@ -169,7 +214,7 @@ fn batch(fixture:&str,fourth:bool)->bool{
         assert_eq!(gs.len(),cs.len());
         for(x,y)in gs.iter().zip(cs){for a in 0..3{close(x.0[a],y.0[a],1e-3,"a sample's r");close(x.1[a],y.1[a],1.,"a sample's κ");}}
     }
-    println!("{} groups of {} outputs, {} jumps, held twin {}",g.groups.len(),outputs,g.jumps,twin.is_some());
+    println!("trajectories {first} to {}: {} groups of {} outputs, {} jumps, held twin {}",first+count-1,g.groups.len(),outputs,g.jumps,twin.is_some());
     twin.is_some()
 }
 /// The batches of the tweezer PGC and the gray molasses; one of them has a held twin.
