@@ -2,6 +2,7 @@ import type { Analysis, AxisAngles, ComplexAmplitude, FrequencyExpr, MagneticFie
 import {laserIntensityMWcm2} from './laser-intensity.js';
 import {accurateSum,sinCosDegrees,sinCosSum,vectorAxis} from './angles.js';
 import {directionFrame,frameAxis,invert,referenceFrame,rotate,shortcutDirection,shortcutField,simplify,sphericalFrame,withoutTrailingZ,type Frame} from './direction.js';
+import {resolveReflections} from './reflection.js';
 export {laserIntensityMWcm2} from './laser-intensity.js';
 export {accurateSum,direction,sinCosDegrees} from './angles.js';
 
@@ -259,11 +260,13 @@ export function expressionKey(expr:FrequencyExpr,base?:{line:SpectralLine;offset
 const sameExpression=(viewKey:string,expr:FrequencyExpr):boolean=>{try{const key=JSON.parse(viewKey);return key[0]==='expr'&&JSON.stringify(key[1])===JSON.stringify(expr);}catch{return false;}};
 /** Resolves every defined frequency of the scene in dependency order (reference frequencies
  * and lasers may follow one another): each object's derived carrier, and a laser's D line.
- * A base that does not exist, a cycle, or a frequency that is not positive is refused. */
+ * A base that does not exist, a cycle, or a frequency that is not positive is refused. A
+ * reflection defines no frequency of its own (nothing follows one): once its source is resolved
+ * it takes its whole beam from it (reflection.ts). */
 export function resolveSceneFrequencies(scene:Pick<Scene,'lasers'|'referenceFrequencies'>):void{
   const objects=new Map<string,{object:FrequencyObject;laser?:Laser}>();
   for(const r of scene.referenceFrequencies)objects.set(`reference:${r.id}`,{object:r});
-  for(const l of scene.lasers)objects.set(`laser:${l.id}`,{object:l,laser:l});
+  for(const l of scene.lasers)if(!l.reflection)objects.set(`laser:${l.id}`,{object:l,laser:l});
   const done=new Map<string,{line:SpectralLine;offsetMHz:number}>(),visiting=new Set<string>();
   const visit=(key:string):{line:SpectralLine;offsetMHz:number}=>{
     const saved=done.get(key);if(saved)return saved;
@@ -281,6 +284,7 @@ export function resolveSceneFrequencies(scene:Pick<Scene,'lasers'|'referenceFreq
     done.set(key,anchor);return anchor;
   };
   for(const key of objects.keys())visit(key);
+  resolveReflections(scene);
 }
 export function captureLaserFrequencyAnchor(laser:Laser):LaserFrequencyAnchor {
   // An expression relative to another object is resolved with the scene (resolveSceneFrequencies).

@@ -2,8 +2,8 @@
 // against it: every required field present and in range, no other field. A file written by an
 // earlier version is refused with the reason -- nothing is migrated.
 import type {AxisName,Direction,DynamicsSettings,FrequencyDisplayUnit,FrequencyExpr,InitialStateSpec,Laser,LaserFrequencyAnchor,LaserIntensityAnchor,
-  MagneticField,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Scene} from './types.js';
-import {MAXIMUM_DURATION_US,MAXIMUM_SAMPLES,MEAN_HORIZONS_US,SCENE_VERSION,defaultScene} from './types.js';
+  LaserReflection,MagneticField,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Scene} from './types.js';
+import {MAXIMUM_DURATION_US,MAXIMUM_LASERS,MAXIMUM_SAMPLES,MEAN_HORIZONS_US,SCENE_VERSION,defaultScene} from './types.js';
 import {POPULATION_GROUPS} from './population-selection.js';
 import {DURATION_UNITS} from './duration.js';
 import {analyze,resolveSceneFrequencies} from './physics.js';
@@ -78,7 +78,12 @@ function intensityAnchor(value:unknown,path:string):LaserIntensityAnchor{
 }
 const LASER_REQUIRED=['id','name','enabled','line','frequency','frequencyUnit','showLightShift','intensityMode','intensityMWcm2','powerUnit','waistUnit','intensityUnit',
   'direction','polarizationAngleDeg','ellipticityDeg','phaseDeg'];
-const LASER_OPTIONAL=['referenceStateId','referenceProcess','frequencyAnchor','intensityAnchor','powerMW','waistUm','numericalAperture'];
+const LASER_OPTIONAL=['referenceStateId','referenceProcess','frequencyAnchor','intensityAnchor','powerMW','waistUm','numericalAperture','reflection'];
+/** A reflection's mirror (reflection.ts); that it reflects a laser of the scene is checked once every laser is known. */
+function mirror(value:unknown,path:string):LaserReflection{
+  const m=Reader.of(value,path,['of','reflectivity','phaseDeg','quarterWave']);
+  return {of:m.text('of'),reflectivity:m.number('reflectivity',0,1),phaseDeg:m.number('phaseDeg',-180,180),quarterWave:m.boolean('quarterWave')};
+}
 function laser(value:unknown,path:string,id:(r:Reader)=>string):Laser{
   const l=Reader.of(value,path,LASER_REQUIRED,LASER_OPTIONAL),mode=l.choice('intensityMode',INTENSITY_MODES);
   const result:Laser={id:id(l),name:l.text('name'),enabled:l.boolean('enabled'),line:l.choice('line',['D1','D2'] as const),...frequency(l),
@@ -92,6 +97,7 @@ function laser(value:unknown,path:string,id:(r:Reader)=>string):Laser{
   if(l.has('powerMW'))result.powerMW=l.number('powerMW',0);
   if(l.has('waistUm'))result.waistUm=l.number('waistUm',Number.MIN_VALUE);
   if(l.has('numericalAperture')){const na=l.number('numericalAperture');try{result.numericalAperture=checkNumericalAperture(na);}catch(error){fail(l.at('numericalAperture'),(error as Error).message);}}
+  if(l.has('reflection'))result.reflection=mirror(l.o.reflection,l.at('reflection'));
   // The mode's own inputs are there.
   if(mode==='power'&&(result.powerMW===undefined||result.waistUm===undefined))fail(path,'功率与束腰方式缺少 powerMW 或 waistUm');
   if(mode==='na'&&(result.powerMW===undefined||result.numericalAperture===undefined))fail(path,'功率与 NA 方式缺少 powerMW 或 numericalAperture');
@@ -134,9 +140,22 @@ function readScene(input:unknown):Scene {
   const ids=new Set<string>(),id=(r:Reader):string=>{const v=r.text('id');if(!/^[A-Za-z0-9_-]+$/.test(v)||['__proto__','constructor','prototype'].includes(v)||ids.has(v))fail(r.at('id'),'非法或重复');ids.add(v);return v;};
   const fields:MagneticField[]=s.list('fields',8).map((v,i)=>{const f=Reader.of(v,`fields[${i}]`,['id','name','enabled','magnitudeG','direction']);
     return {id:id(f),name:f.text('name'),enabled:f.boolean('enabled'),magnitudeG:f.number('magnitudeG',0,20),direction:direction(f.o.direction,f.at('direction'))};});
-  const lasers=s.list('lasers',8).map((v,i)=>laser(v,`lasers[${i}]`,id));
+  const lasers=s.list('lasers',MAXIMUM_LASERS).map((v,i)=>laser(v,`lasers[${i}]`,id));
   const referenceFrequencies=s.list('referenceFrequencies',8).map((v,i)=>referenceFrequency(v,`referenceFrequencies[${i}]`,id));
   const references=s.list('references',12).map((v,i)=>referenceLevel(v,`references[${i}]`,id));
+  // A reflection reflects another laser of the scene, one that is no reflection and has no other.
+  // Its beam, as the file writes it, is derived: it is taken from the source again below.
+  for(const [i,l] of lasers.entries()){
+    const of=l.reflection?.of;if(of===undefined)continue;
+    const source=lasers.find(s=>s.id===of),path=`lasers[${i}].reflection.of`;
+    if(!source||source===l)fail(path,'应为场景中另一束激光');
+    if(source.reflection)fail(path,'不能是反射光：反射光不再被反射');
+    if(lasers.findIndex(s=>s.reflection?.of===of)!==i)fail(path,`「${source.name}」已有反射光`);
+  }
+  // A reflection has no frequency of its own: what would follow it follows its source.
+  const reflections=new Set(lasers.filter(l=>l.reflection).map(l=>l.id)),followsReflection=(f:FrequencyExpr)=>'base' in f&&f.base.kind==='laser'&&reflections.has(f.base.id);
+  lasers.forEach((l,i)=>{if(followsReflection(l.frequency))fail(`lasers[${i}].frequency.base`,'不能跟随反射光：请跟随它的源');});
+  referenceFrequencies.forEach((r,i)=>{if(followsReflection(r.frequency))fail(`referenceFrequencies[${i}].frequency.base`,'不能跟随反射光：请跟随它的源');});
   // Every linked field exists and no link forms a cycle.
   for(const object of [...fields,...lasers])try{referenceAxis(fields,object.direction.reference);}catch(error){throw new Error(`「${object.name}」的参考轴无效：${(error as Error).message}`);}
   const d=Reader.of(s.o.dynamics,'dynamics',DYNAMICS_REQUIRED,['initialState','temperatureUnit','motion']),marks=s.o.marks;

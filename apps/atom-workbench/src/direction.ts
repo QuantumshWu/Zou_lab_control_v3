@@ -124,6 +124,14 @@ export function releaseLinks(fields:readonly FieldReference[],objects:readonly {
   for(const object of linkedTo(objects,fieldId))object.direction={...object.direction,reference:referenceOf(referenceAxis(fields,object.direction.reference))};
 }
 
+/** The opposite direction: the same reference axis, the offset (180° − θ′, φ′ ∓ 180°). Its frame is
+ * the direction's frame turned by 180° about its own x -- Rz(φ′ ± 180°) Ry(180° − θ′) = Rz(φ′) Ry(θ′)
+ * Rx(180°) -- so x stays where it was, and y and k reverse. */
+export function oppositeDirection(direction:Direction):Direction{
+  const {thetaDeg:theta,phiDeg:phi}=direction;
+  return {reference:{...direction.reference},thetaDeg:180-theta,phiDeg:phi>0?phi-180:phi+180};
+}
+
 export type DirectionShortcut='parallel'|'anti'|'perpendicular';
 /** The field the 沿 B shortcuts link to: the one the direction already links to, else the first
  * enabled field with a magnitude, else the first field. */
@@ -137,7 +145,7 @@ export function shortcutDirection(field:FieldReference|undefined,mode:DirectionS
   const own=field?.direction??{reference:{kind:'axis',axis:'+z'},thetaDeg:0,phiDeg:0},theta=own.thetaDeg,phi=own.phiDeg;
   const reference:ReferenceAxis=field?{kind:'field',id:field.id}:own.reference;
   if(mode==='parallel')return {reference,thetaDeg:theta,phiDeg:phi};
-  if(mode==='anti')return {reference,thetaDeg:180-theta,phiDeg:phi>0?phi-180:phi+180};
+  if(mode==='anti')return oppositeDirection({reference,thetaDeg:theta,phiDeg:phi});
   return {reference,thetaDeg:theta<=90?theta+90:theta-90,phiDeg:phi};
 }
 export function sameReference(a:ReferenceAxis,b:ReferenceAxis):boolean{

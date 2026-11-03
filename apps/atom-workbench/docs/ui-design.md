@@ -141,7 +141,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 
 ### 6.1 身份色（§0.2，已实现）
 
-- 激光的身份色由它在场景激光列表中的位置决定（`identity.ts` 的 `laserSlot`），取自 `style.css` 的 `--identity-0 … --identity-7`。调色板是 zlc-plot 的系列色（`crates/zlc-plot/src/style.rs` Palette::default）去掉其中的绿色，第 8 个为 ORANGE_DARK；磁场固定为 `--field-ink`（CONFIG_GREEN_DARK）。
+- 激光的身份色由它在场景激光列表中的位置决定（`identity.ts` 的 `laserSlot`；反射光取其源的颜色、不占序号，§6.23），取自 `style.css` 的 `--identity-0 … --identity-7`。调色板是 zlc-plot 的系列色（`crates/zlc-plot/src/style.rs` Palette::default）去掉其中的绿色，第 8 个为 ORANGE_DARK；磁场固定为 `--field-ink`（CONFIG_GREEN_DARK）。
 - 同一颜色出现在：场景面板列表与折叠栏中 λ 符号、能级图中该激光的光子箭头与标签、选中激光的跃迁连线（不透明度表示耦合强度）、3D 视图中的光束和偏振椭圆、3D 图例的色块。SVG 用 `var(--identity-n)`，画布读取 token 的计算值。
 
 ### 6.2 3D 视图（§2，已实现）
@@ -296,7 +296,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 - 场景只有一种格式：`types.ts` 的 `Scene`，`version: 2`（`SCENE_VERSION`）。`scene-file.ts` 严格按它校验：必需字段齐全且在范围内，没有任何其它字段。早先版本写的文件不再读入、也不迁移：导入时拒绝并写明原因（如"场景文件不符合当前格式（version 2）：version 为 1，应为 2"或"lasers[0] 缺少 showLightShift"）。
 - 场景只由操作者载入（导入、示例）。界面不自动保存场景，启动时总是默认场景（`scene-file.ts` 的 `startupScene`），早先版本存在本机浏览器存储里的场景、编辑基准和能级标签在启动时删除；本机只保留求解失败的诊断记录，它不是场景数据。能级标签 1、2 只在本次运行中有效。"替换当前场景"的确认只比较本次载入或导出之后的修改。
 - 必需：`name`、`fields`、`lasers`、`referenceFrequencies`、`references`、`marks`、`dynamics`；磁场的 `direction`；激光的 `frequency`、`frequencyUnit`、`line`（派生，读入后按频率重算）、`showLightShift`、`intensityMode`、`intensityMWcm2`、`powerUnit`、`waistUnit`、`intensityUnit`、`direction`、`polarizationAngleDeg`、`ellipticityDeg`、`phaseDeg`，以及所选强度方式的输入（功率与束腰：`powerMW`、`waistUm`；功率与 NA：`powerMW`、`numericalAperture`）；参考频率的 `frequency`、`frequencyUnit`；参考能级的 `anchorId`、`anchorMode`、`offsetMHz`、`offsetUnit`；`dynamics` 的 `initialStateId`、`monitoredStateIds`、`monitorMode`、`monitoredGroupIds`、`durationUs`、`durationUnit`、`samples`、`meanHorizonUs`。
-- 可选（本身就是可有可无的）：`display`（读数偏好）；`dynamics.motion`（1D 运动，§6.20）；激光的 `referenceStateId`、`referenceProcess`，以及别的强度方式留下的 `powerMW`、`waistUm`、`numericalAperture`；参考能级的 `photon`；混合初态的 `dynamics.initialState`，热分布时还有 `dynamics.temperatureUnit`（且只在热分布时有）；派生的 `frequencyAnchor`、`intensityAnchor`（没有时由输入算出，有时只在指纹相符时使用）。
+- 可选（本身就是可有可无的）：`display`（读数偏好）；`dynamics.motion`（1D 运动，§6.20）；激光的 `referenceStateId`、`referenceProcess`，以及别的强度方式留下的 `powerMW`、`waistUm`、`numericalAperture`；激光的 `reflection`（反射光的反射镜，§6.23）；参考能级的 `photon`；混合初态的 `dynamics.initialState`，热分布时还有 `dynamics.temperatureUnit`（且只在热分布时有）；派生的 `frequencyAnchor`、`intensityAnchor`（没有时由输入算出，有时只在指纹相符时使用）。
 - 取消的旧写法：`initialF/initialM`、`dynamics.laserId`、`dynamics.quality`、`dynamics.populationTolerance`、激光的 `regime`、`detuningMHz/referenceTransition/frequencyMode/wavelengthNm/detuningUnit`、以角度 `thetaDeg/phiDeg` 和 `directionAnchor` 写的方向、预设与跟随标记，以及缺省 `meanHorizonUs`、单位、`showLightShift`、`phaseDeg`、`intensityMode` 时的补齐。
 
 ### 6.18 两个时刻 T 一次算出，切换 T 即时显示（2026-10-28）
@@ -395,3 +395,22 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
   - 动量分布：工具栏的分段控件列出平面的两个轴，选沿哪个轴的分布；"对比时刻"另画该轴在更早时刻的分布（虚线）。图例写出时刻与该轴的 T。
   - 位置分布：平面内的概率密度图（μm⁻²），单一色相由浅到深（能级的布居色标延伸到深蓝），右侧是色条；"对比时刻"时两图按时间先后并排、共用色标；轴的分段控件不显示。悬停或方向键逐格读取位置与各图的概率密度；图例写出时刻与离焦点的均方根距离。
   - 详情：量子轨迹数与温度的最大相对标准误差；布居误差写作"布居标准误差"。
+
+### 6.23 反射光（2026-11-02）
+
+一束光可以加一束"反射光"：远处一面垂直于光束的反射镜把它沿原路反射回来（`reflection.ts`）。
+
+- **数据**：反射光是一束激光，多一个 `reflection: {of, reflectivity, phaseDeg, quarterWave}`——源激光的 ID、反射率 R（0–1）、反射光在原子处相对源的光学相位 φ（°，由反射镜的距离决定）、是否双次通过 λ/4 波片。只有反射镜（和名称、读数单位）是它自己的；其余物理参数在场景解析时（`resolveSceneFrequencies` 之后的 `resolveReflections`）由源算出，所以总随源改变：
+  - 频率：跟随源 +0 MHz（同一载频，逐位相同）；开关、"显示光移"与能级图参考态同源（源关闭即没有反射光）。
+  - 方向：与源相反——同一参考轴，偏移 (180° − θ′, φ′ ∓ 180°)（与"沿 −B"同一写法，`direction.ts` 的 `oppositeDirection`）。这个坐标系是源的坐标系绕自身 x 转 180°：x 不变，y 与 k 反向。
+  - 强度：功率与原子处强度为源的 R 倍（取源的精确强度乘 R），束腰或 NA 与源相同：平面波仍是平面波，聚焦在原子处的光理想化为反射后重新聚焦在原子处（相当于反射镜前有透镜或用曲面镜）。
+  - 偏振（物理约定见 `physics.ts`：E ∝ cos χ u + i sin χ v，v = k × u）：源的主轴 u 在反射光坐标系中是 ψ′ = −ψ。普通反射镜在实验室中保持电场不变（整体相位并入 φ），所以 χ′ = −χ：相对自身 k 的旋向反转（σ⁺ 回来是相对自身 k 的 σ⁻，相对原来的轴仍驱动 Δm = +1）。双次通过快轴沿 u 的 λ/4 波片使 v 分量反相，实验室中沿同一椭圆反向旋转，χ′ = χ：相对自身 k 的旋向保持（σ⁺ 回来仍是 σ⁺，即 MOT 的回反射）。线偏振两种情况都不变。初相位为源的初相位加 φ。
+- **约束**：反射光计入 8 束激光的上限；一束光至多一束反射光；反射光不能再被反射；任何频率都不能跟随反射光（它没有自己的频率，跟随它的源）。删除源时一并删除反射光；删除反射光不影响源。
+- **场景文件**：版本不变（`reflection` 是可选字段，旧文件照常读入）。反射光像其它激光一样写出全部字段；读入时严格校验反射镜（源存在、不是反射光、只有一束、R 与 φ 在范围内），并按源重新算出它的光束，文件中写的派生值不起作用。
+- **导出**：解析后的反射光就是一束普通的光：主方程、1D/2D/3D 运动都不区分反射光。同频的两束光共用一个相位坐标，在原子处相干叠加。
+- **界面**：
+  - 场景列表：反射光紧随其源、缩进，符号为源的身份色的 ↩，第二行写反射镜："R 50% · λ/4"（相位与激光的初相位一样只在检查器中）；它没有自己的开关，源关闭时一起变灰。
+  - 源的检查器："传播方向"一节有"添加反射光"（达到 8 束时禁用并说明）；已有反射光时改为"选中反射光"，并注明这束光有反射光。
+  - 反射光的检查器：顶部"↩ 反射自「源」"，源的名字可点击选中源；"反射镜"一节可编辑反射率 R（%）、相位 φ（°）和"双次通过 λ/4 波片（MOT 常用圆偏振）"开关；"由「源」决定"一节灰色只读：频率（与源相同）与 ν、方向（与源相反）与实际方向、强度（及功率、束腰）、ψ、χ、σ⁻/π/σ⁺ 与初相位；最后是"解除关联"：变为独立的激光，保留现在的光束，频率按源的定义写出（同一载频），并移到列表末尾（其它激光的身份色不变）。
+  - 身份色：反射光与源同色；它不占身份色序号，加或删反射光不改变其它激光的颜色。
+  - 方向与偏振：反射光画成虚线，在源的光线旁（偏向相机看得到的一侧；两束都过原子）从反射镜返回；反射镜是源箭头之外横跨两束光的小方板，标"镜"。选中其中一束时另一束一起突出显示并标出名称；偏振椭圆按反射光自己的偏振画出。图例中反射光的色块为虚线。

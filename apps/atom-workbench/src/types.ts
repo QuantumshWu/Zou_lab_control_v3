@@ -81,7 +81,24 @@ export interface Laser {
   ellipticityDeg: number;
   /** Optical phase at the atom; relevant when coherent beams share a carrier. */
   phaseDeg: number;
+  /** Present: this laser is the retro-reflection of another (reflection.ts). Its mirror is its own;
+   * every physical field above is derived from the source wherever the scene is resolved
+   * (resolveSceneFrequencies), so it always follows the source. */
+  reflection?: LaserReflection;
 }
+/** A mirror far away, perpendicular to the beam of laser `of`, that sends it straight back. */
+export interface LaserReflection {
+  of: string;
+  /** The reflected power over the incident, 0 to 1. */
+  reflectivity: number;
+  /** The reflected beam's optical phase at the atom relative to the source's: the mirror's distance. */
+  phaseDeg: number;
+  /** A double pass through a quarter-wave plate (the MOT retro-reflection): the handedness about the
+   * beam's own k stays, so σ⁺ comes back σ⁺. */
+  quarterWave: boolean;
+}
+/** The most lasers a scene holds; a reflection is one of them. */
+export const MAXIMUM_LASERS=8;
 /** The one scene schema (scene-file.ts validates files strictly against it). */
 export const SCENE_VERSION=2;
 export interface Scene {

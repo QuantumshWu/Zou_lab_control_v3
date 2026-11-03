@@ -4,7 +4,8 @@ import {SpaceDepthRenderer} from './space-depth-renderer.js';
 import {arrowGeometry,shadeArrow} from './space-arrow.js';
 import {direction} from './angles.js';
 import {directionVector,referenceAxis} from './direction.js';
-import {identityToken,resolveColour} from './identity.js';
+import {identityToken,laserSlot,resolveColour} from './identity.js';
+import {partnerOf} from './reflection.js';
 import {withUnit} from './format.js';
 
 /** What the window has selected: the 3D view shows it, never a selection of its own. */
@@ -38,6 +39,7 @@ const TAU = 2 * Math.PI, DEG = Math.PI / 180;
 const add = (a: Vec3, b: Vec3): Vec3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const mul = (a: Vec3, v: number): Vec3 => [a[0] * v, a[1] * v, a[2] * v];
 const dot = (a: Vec3, b: Vec3): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a: Vec3, b: Vec3): Vec3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const clamp = (n: number, a: number, b: number): number => Math.min(b, Math.max(a, n));
 const ZERO: Vec3 = [0, 0, 0];
 const FONT = '"Segoe UI", "Microsoft YaHei UI", sans-serif';
@@ -67,6 +69,10 @@ export function cameraAlong(d:Vec3):{yaw:number;pitch:number}{
  * of rotation. E(t) = Re[(cos(chi) u + i sin(chi) v) exp(i phi - i omega t)].
  * Beam width and vector lengths are schematic, not intensity / magnetic-field scales. The
  * selected field's or beam's reference axis is drawn dashed through the atom beside it.
+ * A retro-reflection (reflection.ts) is drawn dashed, just beside its source's line on the side
+ * the camera sees (both cross the atom), from a mirror -- a small plate across the beams beyond
+ * the source's arrow, labelled 镜 -- back through the atom; selecting either beam of the pair
+ * brings the other forward.
  */
 export function renderSpace3D(container: HTMLElement, scene: Scene, analysis: Analysis, selection: SpaceSelection, options: SpaceOptions = {}): SpaceView {
   let currentScene = scene, currentAnalysis = analysis, currentSelection = selection;
@@ -191,28 +197,43 @@ export function renderSpace3D(container: HTMLElement, scene: Scene, analysis: An
     if(chosen){
       try{
         const axis=referenceAxis(currentScene.fields,chosen.direction.reference),n=direction(axis.thetaDeg+(axis.thetaResidualDeg??0),axis.phiDeg+(axis.phiResidualDeg??0));
-        const colour=currentSelection.kind==='field'?ink.field:resolveColour(host,identityToken(currentScene.lasers.findIndex(l=>l.id===currentSelection.id)));
+        const colour=currentSelection.kind==='field'?ink.field:resolveColour(host,identityToken(laserSlot(currentScene,currentSelection.id)));
         dashed(mul(n,-1.75),mul(n,1.75),colour,1,.7);labels.push({p:mul(n,1.86),text:'参考轴',color:colour,alpha:.8,rank:4});
       }catch{/* An unresolvable reference is reported where it is edited. */}
     }
-    currentScene.lasers.forEach((laser,slot) => {
+    // The other beam of the selected one's source–reflection pair, drawn forward with it.
+    const partner=currentSelection.kind==='laser'&&chosen?partnerOf(currentScene,chosen as Laser):undefined;
+    currentScene.lasers.forEach(laser => {
       const pol = laser.enabled?currentAnalysis.polarizations[laser.id]:undefined;
       if (!pol) return;
-      const target:Target={kind:'laser',id:laser.id},selected=same(target,currentSelection),hovered=same(target,hover);
-      const color=resolveColour(host,identityToken(slot)),alpha=selected?1:hovered?.9:anySelected?.32:.75,lineWidth=selected?2.2:1.1;
-      const {k, u, v} = pol, start = mul(k, -2.05), end = mul(k, 1.95);
+      const target:Target={kind:'laser',id:laser.id},selected=same(target,currentSelection),hovered=same(target,hover),paired=laser===partner;
+      const color=resolveColour(host,identityToken(laserSlot(currentScene,laser.id))),alpha=selected?1:hovered?.9:paired?.75:anySelected?.32:.75,lineWidth=selected?2.2:paired?1.5:1.1;
+      const {k, u, v} = pol,reflected=!!laser.reflection;
+      // A reflection runs beside its source's line, off to the side the camera sees (seen along the
+      // beam, along u), so the two directions read apart.
+      const across=cross(k,camera.forward),reach=Math.hypot(...across),aside=!reflected?ZERO:reach>.15?mul(across,.1/reach):mul(u,.1);
+      const at=(t:number):Vec3=>add(mul(k,t),aside),start = at(-2.05), end = at(1.95);
       // A translucent, narrow cylinder makes a beam readable from every viewpoint.
       const side = (t: number): Vec3 => add(mul(u, Math.cos(t) * (selected?.085:.05)), mul(v, Math.sin(t) * (selected?.085:.05)));
       for (let n = 0; n < 8; n++) {
         const a = side(n * TAU / 8), b = side((n + 1) * TAU / 8);
         for(const [lo,hi]of splitSegment(start,end,.34))face({vertices: [add(lo, a), add(hi, a), add(hi, b), add(lo, b)], color, alpha: selected ? .052 : anySelected?.008:.02});
       }
-      segment({a: start, b: mul(k, -.08), color, width: lineWidth, alpha});
-      arrow(mul(k, .1), end, color, lineWidth, alpha,u);
+      if(reflected){
+        dashed(start,at(-.08),color,lineWidth,alpha);dashed(at(.1),at(1.82),color,lineWidth,alpha);arrow(at(1.82),end,color,lineWidth,alpha,u);
+        // The mirror it comes from: a small plate across both beams beyond the source's arrow.
+        const centre=add(at(-2.2),mul(aside,-.5)),corner=(s:number,t:number):Vec3=>add(centre,add(mul(u,.24*s),mul(v,.24*t)));
+        const plate=[corner(-1,-1),corner(1,-1),corner(1,1),corner(-1,1)];
+        face({vertices:plate,color,alpha:alpha*.3});curve([...plate,plate[0]!],color,selected?1.6:1.1,alpha);
+        labels.push({p:add(centre,mul(u,.34)),text:'镜',color,alpha:Math.max(alpha,.6),strong:selected,rank:selected||paired?2:4,target});
+      }else{
+        segment({a: start, b: mul(k, -.08), color, width: lineWidth, alpha});
+        arrow(mul(k, .1), end, color, lineWidth, alpha,u);
+      }
       // Short k-direction arrows on the incoming half remove ambiguity about propagation.
-      arrow(mul(k, -1.9), mul(k, -1.6), color, selected ? 1.8 : 1, alpha,u);
+      arrow(at(-1.9), at(-1.6), color, selected ? 1.8 : 1, alpha,u);
       hitRays.push({a:project(start),b:project(end),target});
-      if(selected||hovered)labels.push({p:mul(k,2.13),text:laser.name,color,strong:selected,rank:selected?1:3,target});
+      if(selected||hovered||paired)labels.push({p:at(2.13),text:laser.name,color,strong:selected,rank:selected?1:3,target});
       if (selected) {
         if(showPlane&&Math.abs(end[2])>.08){const foot:Vec3=[end[0],end[1],0];segment({a:end,b:foot,color,width:.8,alpha:.45});segment({a:add(foot,[-.06,0,0]),b:add(foot,[.06,0,0]),color,width:1,alpha:.6});segment({a:add(foot,[0,-.06,0]),b:add(foot,[0,.06,0]),color,width:1,alpha:.6});}
         // The polarization at the atom: its plane, the ellipse E traces, E now, and the sense of rotation.

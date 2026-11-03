@@ -29,7 +29,8 @@ import {CurrentResults} from './current-results.js';
 import {covers,delivers,horizonRecords,keptCheckpoint,plannedSolve,solveOptions,type SolveInputs,type SolveKind} from './solve-plan.js';
 import {STATIC_MIXING_LIMIT,displayMixing,modelScope,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
 import type {ScopeNote} from './spectroscopy.js';
-import {defaultMotion,defaultScene,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
+import {defaultMotion,defaultScene,MAXIMUM_LASERS,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
+import {addReflection,detachReflection,reflectionOf,sourceOf} from './reflection.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,MotionAxis,MotionChoice,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
 import type {Distributions,DynamicsResult,RunningReport} from './solver-types.js';
 import {SEMICLASSICAL_REGIME,continuedAt,isPlaneMotion} from './solver-types.js';
@@ -371,11 +372,14 @@ function applyLabels(next:StateLabels):void{stateLabels=next;renderResults(false
 function selectState(id:string):void{applyLabels(clickState(stateLabels,id));}
 
 // ---------------------------------------------------------------- scene list
+/** A scene list row. A laser's reflection (reflection.ts) stands indented under its source, ↩ in the
+ * source's colour for its symbol; it has no switch of its own -- it is on while its source is. */
 function item(kind:ObjectKind,id:string,index:number,name:string,sub:string,enabled:boolean,onToggle?:(v:boolean)=>void):HTMLElement{
-  const div=element('div',`scene-object${selection.kind===kind&&selection.id===id?' selected':''}${enabled?'':' disabled'}`);
+  const reflected=kind==='laser'&&!!scene.lasers.find(l=>l.id===id)?.reflection;
+  const div=element('div',`scene-object${reflected?' reflected':''}${selection.kind===kind&&selection.id===id?' selected':''}${enabled?'':' disabled'}`);
   const button=element('button','object-select');button.type='button';button.dataset.objectId=id;button.dataset.objectKind=kind;
   button.setAttribute('aria-label',`编辑${name}`);button.setAttribute('aria-pressed',String(selection.kind===kind&&selection.id===id));
-  const symbol=element('span',`object-symbol ${kind}`);symbol.append(kind==='field'?'B':kind==='laser'?'λ':kind==='reference'?'ν':'E',element('span','object-index',subscript(index)));if(kind==='laser'||kind==='reference')symbol.style.color=laserColour(scene,id);
+  const symbol=element('span',`object-symbol ${kind}`);symbol.append(...reflected?['↩']:[kind==='field'?'B':kind==='laser'?'λ':kind==='reference'?'ν':'E',element('span','object-index',subscript(index))]);if(kind==='laser'||kind==='reference')symbol.style.color=laserColour(scene,id);
   const copy=element('span','object-copy'),title=element('span','object-name'),subtitle=element('span','object-detail');
   setMiddle(title,name,'cut');setMiddle(subtitle,sub,'cut');copy.append(title,subtitle);button.append(symbol,copy);
   // In the collapsed rail only the symbol shows: the button says what it stands for.
@@ -390,13 +394,15 @@ function item(kind:ObjectKind,id:string,index:number,name:string,sub:string,enab
 async function removeObject(kind:ObjectKind,id:string):Promise<void>{
   if(kind==='reference'||kind==='level'){await removeReference(kind,id);return;}
   const object=(kind==='field'?scene.fields:scene.lasers).find(o=>o.id===id);if(!object)return;
-  const noun=kind==='field'?'磁场':'激光',following=kind==='laser'?[...scene.lasers,...scene.referenceFrequencies].filter(o=>o.frequency&&'base' in o.frequency&&o.frequency.base.kind==='laser'&&o.frequency.base.id===id).map(o=>o.name):[];
+  // A laser's reflection goes with it (reflection.ts); it follows the laser's frequency, so it is no follower to release.
+  const mirror=kind==='laser'?reflectionOf(scene,object as Laser):undefined;
+  const noun=kind==='field'?'磁场':(object as Laser).reflection?'反射光':'激光',following=kind==='laser'?[...scene.lasers,...scene.referenceFrequencies].filter(o=>o!==mirror&&o.frequency&&'base' in o.frequency&&o.frequency.base.kind==='laser'&&o.frequency.base.id===id).map(o=>o.name):[];
   const linked=kind==='field'?linkedTo<{name:string;direction:Direction}>([...scene.fields,...scene.lasers],id).map(o=>o.name):[];
   const released=following.length?`跟随它的${following.join('、')}将改为等效的零场或绝对定义，频率不变。`:linked.length?`链接它参考轴的${linked.join('、')}将改为等效的角度参考轴，方向不变。`:'';
-  if(!await confirm(`删除${noun}`,`删除${noun}「${object.name}」？${released}它的全部参数将一并删除，无法撤销。`,{confirmText:'删除',cancelText:'取消',kind:'warning'}))return;
-  if(kind==='laser')try{releaseFollowers(scene,object as Laser);unlinkPhotons('laser',id);}catch(error){note(message(error),'error');return;}
+  if(!await confirm(`删除${noun}`,`删除${noun}「${object.name}」${mirror?`和它的反射光「${mirror.name}」`:''}？${released}${mirror?'它们':'它'}的全部参数将一并删除，无法撤销。`,{confirmText:'删除',cancelText:'取消',kind:'warning'}))return;
+  if(kind==='laser')try{if(mirror){unlinkPhotons('laser',mirror.id);scene.lasers=scene.lasers.filter(o=>o!==mirror);}releaseFollowers(scene,object as Laser);unlinkPhotons('laser',id);}catch(error){note(message(error),'error');return;}
   if(kind==='field')try{releaseLinks(scene.fields,[...scene.fields,...scene.lasers],id);}catch(error){note(message(error),'error');return;}
-  const original=kind==='field'?scene.fields:scene.lasers,index=original.findIndex(o=>o.id===id),selected=selection.kind===kind&&selection.id===id;
+  const original=kind==='field'?scene.fields:scene.lasers,index=original.findIndex(o=>o.id===id),selected=selection.kind===kind&&(selection.id===id||selection.id===mirror?.id);
   if(kind==='field')scene.fields=scene.fields.filter(o=>o.id!==id);else scene.lasers=scene.lasers.filter(o=>o.id!==id);
   if(selected){const remaining=kind==='field'?scene.fields:scene.lasers,next=remaining[Math.min(index,remaining.length-1)];selection=next?{kind,id:next.id}:scene.lasers[0]?{kind:'laser',id:scene.lasers[0].id}:scene.fields[0]?{kind:'field',id:scene.fields[0].id}:{kind:'none',id:''};}
   controlsKey='';renderObjects();renderInspector();update();
@@ -410,6 +416,12 @@ function frequencyDetail(object:DefinedFrequency):string{
   return `跟随 ${objectOf(scene,`${f.base.kind}:${f.base.id}`)?.name??f.base.id} ${offset}`;
 }
 function laserDetail(l:Laser):string{return frequencyDetail(l);}
+/** A reflection in a list line (its ↩ says what it is): its mirror, as a laser's line is its frequency
+ * -- R 90% · λ/4; the phase, like a laser's, only in the inspector. */
+function reflectionDetail(l:Laser):string{
+  const m=l.reflection!;
+  return [`R ${formatNumber(m.reflectivity*100,{digits:4})}%`,...m.quarterWave?['λ/4']:[]].join(' · ');
+}
 /** A reference level in a list line: 5S₁/₂ · F=2 · m=0 + 探测光 −12 MHz. */
 function levelDetail(r:ReferenceLevel):string{
   const anchor=getLevel(r.anchorId),source=r.photon?objectOf(scene,`${r.photon.source.kind}:${r.photon.source.id}`)?.name:undefined;
@@ -439,11 +451,15 @@ function renderObjects():void{
   if(!sceneName.editing)sceneName.value=scene.name;
   const title=`${scene.name} — ${APP_TITLE}`;if(document.title!==title)document.title=title;
   $('field-list').replaceChildren(...scene.fields.map((f,i)=>item('field',f.id,i+1,f.name,`${withUnit(f.magnitudeG,'G',{digits:4})} · ${directionDetail(f.direction)}`,f.enabled,v=>f.enabled=v)));
-  $('laser-list').replaceChildren(...scene.lasers.map((l,i)=>item('laser',l.id,i+1,l.name,laserDetail(l),l.enabled,v=>l.enabled=v)));
+  // Each laser, then its reflection under it; a laser's switch also greys its reflection's row.
+  $('laser-list').replaceChildren(...scene.lasers.filter(l=>!l.reflection).flatMap((l,i)=>{
+    const mirror=reflectionOf(scene,l),mirrorRow=mirror&&item('laser',mirror.id,i+1,mirror.name,reflectionDetail(mirror),l.enabled);
+    return [item('laser',l.id,i+1,l.name,laserDetail(l),l.enabled,v=>{l.enabled=v;mirrorRow?.classList.toggle('disabled',!v);}),...mirrorRow?[mirrorRow]:[]];
+  }));
   const references=[...scene.referenceFrequencies.map((r,i)=>item('reference',r.id,i+1,r.name,frequencyDetail(r),true)),...scene.references.map((r,i)=>item('level',r.id,i+1,r.name,levelDetail(r),true))];
   $('reference-list').replaceChildren(...references);
   setText('field-count',String(scene.fields.length));setText('laser-count',String(scene.lasers.length));setText('reference-count',String(references.length));
-  addField.disabled=scene.fields.length>=8;addLaser.disabled=scene.lasers.length>=8;
+  addField.disabled=scene.fields.length>=8;addLaser.disabled=scene.lasers.length>=MAXIMUM_LASERS;
 }
 /** A direction in a list line: its reference axis, and its offset when there is one: +z · 链接 偏置磁场 · θ′ 10°. */
 function directionDetail(d:Direction):string{
@@ -460,7 +476,7 @@ function addObject(kind:ObjectKind):void{
     select({kind:'level',id});update();return;
   }
   if(kind==='field'){if(scene.fields.length>=8)return;const id=`field-${Date.now()}`;scene.fields.push({id,name:nextObjectName('磁场',scene.fields),enabled:true,magnitudeG:1,direction:{reference:{kind:'axis',axis:'+x'},thetaDeg:0,phiDeg:0}});select({kind:'field',id});update();}
-  else{if(scene.lasers.length>=8)return;const id=`laser-${Date.now()}`;scene.lasers.push({id,name:nextObjectName('激光',scene.lasers),enabled:true,showLightShift:false,line:spectral,frequency:{base:{kind:'transition',line:spectral,Fg:2,Fe:spectral==='D1'?2:3},offsetMHz:0},frequencyUnit:'MHz',intensityMode:'intensity',intensityMWcm2:.1,powerUnit:'mW',waistUnit:'μm',intensityUnit:'mW/cm²',direction:{reference:{kind:'axis',axis:'+x'},thetaDeg:0,phiDeg:0},polarizationAngleDeg:0,ellipticityDeg:0,phaseDeg:0});controlsKey='';select({kind:'laser',id});update();}
+  else{if(scene.lasers.length>=MAXIMUM_LASERS)return;const id=`laser-${Date.now()}`;scene.lasers.push({id,name:nextObjectName('激光',scene.lasers),enabled:true,showLightShift:false,line:spectral,frequency:{base:{kind:'transition',line:spectral,Fg:2,Fe:spectral==='D1'?2:3},offsetMHz:0},frequencyUnit:'MHz',intensityMode:'intensity',intensityMWcm2:.1,powerUnit:'mW',waistUnit:'μm',intensityUnit:'mW/cm²',direction:{reference:{kind:'axis',axis:'+x'},thetaDeg:0,phiDeg:0},polarizationAngleDeg:0,ellipticityDeg:0,phaseDeg:0});controlsKey='';select({kind:'laser',id});update();}
 
   update();
 }
@@ -602,8 +618,9 @@ function renderInspector():void{
   const object=selectedObject();
   setText('inspector-title',object?'':'未选中');$('inspector-title').hidden=!!object;inspectorName.root.hidden=!object;if(object&&!inspectorName.editing)inspectorName.value=object.name;
   if(selection.kind==='none'){host.append(element('p','note wrap inspector-empty','点选磁场、激光或参考以编辑。'));return;}
-  const fields=inspectorFields;
-  if(selection.kind==='reference'){
+  const fields=inspectorFields,reflected=selection.kind==='laser'?scene.lasers.find(l=>l.id===selection.id&&l.reflection):undefined;
+  if(reflected)reflectionInspector(reflected);
+  else if(selection.kind==='reference'){
     const r=scene.referenceFrequencies.find(r=>r.id===selection.id);if(!r)return;
     frequencySection(group('频率'),r,referenceReadout);
   }else if(selection.kind==='level'){
@@ -641,7 +658,7 @@ function renderInspector():void{
       {read:()=>intensityReading(l),write:(v,u)=>writeLaserIntensity(l,v,u as IntensityUnit),units:()=>unitChoices(INTENSITY_UNITS,'强度')});
     else bindDerived(fields,strength,'inspector',scope,{name:'intensity',label:'强度 I',description:'原子处的局域强度：高斯光束轴上的 I = 2P/(πw₀²)',from:'由功率和束腰算出：I = 2P/(πw₀²)'},
       ()=>attempt(()=>intensityReading(l),()=>l.intensityUnit),unitChoices(INTENSITY_UNITS,'强度'),u=>{l.intensityUnit=u as IntensityUnit;});
-    directionSection(group('传播方向'),l,'laser');
+    const direction=group('传播方向');directionSection(direction,l,'laser');reflectionAction(direction,l);
     const p=group('光束偏振');
     bindField(fields,p,'inspector',()=>numberSpec('polarization','主轴 ψ',l.polarizationAngleDeg,'°',{minimum:-90,maximum:90,step:1}),v=>{l.polarizationAngleDeg=Number(v);});
     bindField(fields,p,'inspector',()=>numberSpec('ellipticity','椭圆率 χ',l.ellipticityDeg,'°',{minimum:-45,maximum:45,step:1}),v=>{l.ellipticityDeg=Number(v);});
@@ -653,6 +670,54 @@ function renderInspector():void{
   }
   // One label column; within a section one unit width, so its number boxes share a right edge.
   requestAnimationFrame(()=>{shareLabelColumn(host);host.querySelectorAll<HTMLElement>('.control-section').forEach(alignUnitPickers);panel.scrollTop=scroll;});
+}
+/** 传播方向's 添加反射光 (reflection.ts): a mirror far away that sends this light straight back. A
+ * light with one selects it instead and says so; at the laser limit the command waits, saying why. */
+function reflectionAction(g:HTMLElement,l:Laser):void{
+  const mirror=reflectionOf(scene,l),full=!mirror&&scene.lasers.length>=MAXIMUM_LASERS;
+  const action=command(mirror?'选中反射光':'添加反射光',()=>{
+    if(mirror){pick({kind:'laser',id:mirror.id});return;}
+    try{const added=addReflection(scene,l);controlsKey='';select({kind:'laser',id:added.id});update();}catch(error){note(message(error),'warning');}
+  },{title:mirror?`选中「${mirror.name}」`:full?`最多 ${MAXIMUM_LASERS} 束激光，反射光也计入`:'在远处放一面垂直于光束的反射镜，把这束光沿原路反射回来：反射光的频率、强度与偏振随这束光'});
+  action.disabled=full;action.root.id='reflection-action';g.append(fieldRow('反射光',action.root));
+  if(mirror)g.append(element('p','note wrap form-note',`这束光有反射光「${mirror.name}」：它反向传播，频率、强度与偏振随这束光。`));
+}
+/** A reflection's inspector (reflection.ts): its source, a link that selects it; its mirror -- R, φ and
+ * the λ/4 double pass, its only inputs; then the beam its source gives it, read-only; 解除关联 last. */
+function reflectionInspector(l:Laser):void{
+  const host=$('inspector-controls'),fields=inspectorFields,mirror=l.reflection!,source=sourceOf(scene,l),scope=`laser:${l.id}`;if(!source)return;
+  const link=command(`「${source.name}」`,()=>pick({kind:'laser',id:source.id}),{role:'quiet',title:`选中「${source.name}」`});link.root.id='reflection-source';link.root.style.color=laserColour(scene,source.id);
+  const header=element('div','reflection-source');header.append(element('span','','↩ 反射自'),link.root);host.append(header);
+  const m=group('反射镜');
+  bindField(fields,m,'inspector',()=>numberSpec('reflectivity','反射率 R',Number((mirror.reflectivity*100).toPrecision(12)),'%',{minimum:0,maximum:100,step:1,description:'反射光的功率与原子处强度是源的 R 倍'}),
+    v=>{const r=Number(v);if(!(r>=0&&r<=100))throw new Error('反射率应为 0 至 100%');mirror.reflectivity=r/100;});
+  bindField(fields,m,'inspector',()=>numberSpec('mirror-phase','相位 φ',mirror.phaseDeg,'°',{minimum:-180,maximum:180,step:1,description:'反射光在原子处相对源的光学相位，由反射镜的距离决定；0° 时两束光在原子处同相'}),
+    v=>{const p=Number(v);if(!(Math.abs(p)<=180))throw new Error('相位应为 −180° 至 180°');mirror.phaseDeg=p;});
+  const plate=switchButton(on=>{mirror.quarterWave=on;setChecked(plate,on);renderObjects();update();},'双次通过 λ/4 波片（MOT 常用圆偏振）');
+  setChecked(plate,mirror.quarterWave);plate.classList.add('full-form-row');plate.id='quarter-wave';
+  plate.title='关：普通反射镜，实验室中偏振椭圆不变，相对自身 k 的旋向反转（σ⁺ 回来是 σ⁻）。开：光两次通过快轴沿偏振主轴的 λ/4 波片，相对自身 k 的旋向保持（σ⁺ 回来仍是 σ⁺），线偏振不变。';m.append(plate);
+  // What the source gives it: greyed, the tooltip saying where it comes from.
+  const d=group(`由「${source.name}」决定`),from=`由源「${source.name}」决定`;d.parentElement!.classList.add('derived-section');
+  const derived=(name:string,label:string,value:()=>number,unit:string,why:()=>string)=>bindField(fields,d,'inspector',()=>({...numberSpec(name,label,value(),unit),unavailable_reason:why()}),()=>{throw new Error(why());});
+  d.append(fieldRow('频率',element('span','derived-reading',`与源相同 · ${frequencyDetail(source)}`)),fieldRow('频率 ν',laserReadout.readout.root));
+  try{laserReadout.show(laserValue(l),scene);}catch{laserReadout.show(undefined,scene);}
+  d.append(fieldRow('传播方向',element('span','derived-reading','与源相反')),fieldRow('实际方向',actualDirection));refreshDirection(l);
+  const share='源的 R 倍（R 为反射率）';
+  if(l.intensityMode!=='intensity'){
+    bindDerived(fields,d,'inspector',scope,{name:'power',label:'功率 P',description:'反射光的功率',from:share},()=>attempt(()=>powerReading(l),()=>l.powerUnit),unitChoices(POWER_UNITS,'功率'),u=>{l.powerUnit=u as PowerUnit;});
+    bindDerived(fields,d,'inspector',scope,{name:'waist',label:'束腰 w₀',description:'反射光重新聚焦在原子处，束腰与源相同',from:'与源相同：反射光重新聚焦在原子处'},()=>attempt(()=>waistReading(l),()=>l.waistUnit),unitChoices(WAIST_UNITS,'长度'),u=>{l.waistUnit=u as WaistUnit;});
+  }
+  bindDerived(fields,d,'inspector',scope,{name:'intensity',label:'强度 I',description:'原子处的局域强度',from:share},()=>attempt(()=>intensityReading(l),()=>l.intensityUnit),unitChoices(INTENSITY_UNITS,'强度'),u=>{l.intensityUnit=u as IntensityUnit;});
+  const turned=()=>mirror.quarterWave?'双次通过 λ/4 波片：相对自身 k 的旋向保持':'普通反射镜：实验室中偏振不变，相对自身 k 的旋向反转';
+  derived('polarization','主轴 ψ',()=>l.polarizationAngleDeg,'°',()=>`${from}（${turned()}；ψ 在反射光自己的坐标系中读出）`);
+  derived('ellipticity','椭圆率 χ',()=>l.ellipticityDeg,'°',()=>`${from}（${turned()}）`);
+  const pol=element('div','polarization-bars full-form-row');pol.id='polarization-bars';d.append(pol);
+  derived('laser-phase','初相位 φ₀',()=>l.phaseDeg,'°',()=>'源的初相位加反射镜的相位 φ');
+  const detach=command('解除关联',()=>{
+    try{detachReflection(scene,l);}catch(error){note(message(error),'error');return;}
+    controlsKey='';renderObjects();renderInspector();update();note(`「${l.name}」已成为独立的激光`);
+  },{title:'变为独立的激光：保留现在的频率、方向、强度与偏振，之后不再随源改变'});
+  detach.root.id='detach-reflection';const actions=element('div','preset-actions full-form-row');actions.append(detach.root);d.append(actions);
 }
 /** 频率 (ui-design.md §1.3–1.4): the definition -- "相对" a base and the value against it -- then
  * the absolute frequency it defines. */
@@ -695,10 +760,10 @@ function levelSection(f:HTMLElement,r:ReferenceLevel):void{
 }
 function frequencySection(f:HTMLElement,object:DefinedFrequency,readout:FrequencyReadout):void{
   const fields=inspectorFields,key=objectKey(scene,object),following=new Set([key,...followers(scene,key)]);
-  // No base that is itself or follows it: no cycle can be chosen.
+  // No base that is itself or follows it: no cycle can be chosen. No reflection: it has no frequency of its own (follow its source).
   const offered=<T extends {id:string}>(kind:'laser'|'reference',list:readonly T[])=>list.filter(o=>!following.has(`${kind}:${o.id}`));
   bindField(fields,f,'inspector',()=>({name:'frequency-base',label:'相对',kind:'choice',
-    tree:frequencyBaseTree({absolute:'光频或真空波长',absoluteText:'绝对',follow:true,lasers:offered('laser',scene.lasers),references:offered('reference',scene.referenceFrequencies)}),
+    tree:frequencyBaseTree({absolute:'光频或真空波长',absoluteText:'绝对',follow:true,lasers:offered('laser',scene.lasers.filter(l=>!l.reflection)),references:offered('reference',scene.referenceFrequencies)}),
     value:baseKey(expressionBase(object.frequency!)),description:'换基准不改变光频；跟随另一对象时随它移动'}),
     v=>{const base=parseBase(String(v));if(!base)throw new Error('未知的频率基准');setFrequencyBase(scene,object,base);},{after:()=>{renderInspector();renderObjects();update();}});
   bindQuantity(fields,f,'inspector',key,()=>({name:'frequency-value',label:frequencyValueLabel(object),spin:true,inexact:true}),
@@ -1312,14 +1377,15 @@ function renderScope(a:Analysis):void{
  * and σ⁻/π/σ⁺ (as in the inspector), each number in a slot as wide as its longest value. */
 function renderSpaceLegend(a:Analysis):void{
   const fields=scene.fields.filter(f=>f.enabled&&f.magnitudeG>0),zero=a.fieldMagnitudeG===0;
-  const swatch=(colour:string,thick=false)=>`<span class="legend-swatch${thick?' thick':''}" style="background:${colour}"></span>`;
+  // A reflection's swatch is dashed, as its beam is drawn.
+  const swatch=(colour:string,thick=false,dashed=false)=>`<span class="legend-swatch${thick?' thick':''}" style="background:${dashed?`repeating-linear-gradient(90deg, ${colour} 0 3px, transparent 3px 5px)`:colour}"></span>`;
   const isSelected=(kind:'field'|'laser',id:string)=>selection.kind===kind&&selection.id===id;
   const items=[`<span class="legend-item total">${swatch('var(--field-ink)',true)}<span>${fields.length>1?'合成 B':'B'} <b class="slot field">${zero?'0 G':withUnit(a.fieldMagnitudeG,'G',{digits:4})}</b></span></span>`];
   if(fields.length>1)for(const f of fields)items.push(`<button class="quiet legend-item${isSelected('field',f.id)?' selected':''}" data-field-id="${esc(f.id)}">${swatch('var(--field-ink)')}<span>${esc(f.name)} <b class="slot field">${withUnit(f.magnitudeG,'G',{digits:4})}</b></span></button>`);
   for(const l of scene.lasers.filter(l=>l.enabled)){
     const p=a.polarizations[l.id],chosen=isSelected('laser',l.id),detail=chosen&&p?` · ∠(k, B) <b class="slot angle">${formatNumber(p.angleToBDeg,{places:1})}°</b> · σ⁻ <b class="slot percent">${populationPercent(p.minus)}</b> · π <b class="slot percent">${populationPercent(p.pi)}</b> · σ⁺ <b class="slot percent">${populationPercent(p.plus)}</b>`:'';
 
-    items.push(`<button class="quiet legend-item${chosen?' selected':''}" data-laser-id="${esc(l.id)}">${swatch(laserColour(scene,l.id))}<span>${esc(l.name)}${detail}</span></button>`);
+    items.push(`<button class="quiet legend-item${chosen?' selected':''}" data-laser-id="${esc(l.id)}">${swatch(laserColour(scene,l.id),false,!!l.reflection)}<span>${esc(l.name)}${detail}</span></button>`);
   }
   const markup=items.join('');if($('space-legend').innerHTML!==markup)$('space-legend').innerHTML=markup;
 }

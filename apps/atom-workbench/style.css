@@ -104,6 +104,8 @@ input[aria-invalid=true], input.invalid { border-color: var(--red-dark); }
 .scene-initial-shortcut { display: none; }
 /* A reference has no on/off switch: its place in the row stays. */
 .object-toggle-gap { width: var(--switch-width, 0); }
+/* A laser's reflection stands indented under it, its symbol ↩ (reflection.ts). */
+.scene-object.reflected { margin-left: calc(var(--control) * .45); }
 .object-symbol.reference { font-style: italic; }
 .object-symbol.level { color: var(--muted-ink); }
 .state-selector { margin-top: var(--section-gap); padding-top: var(--row-gap); border-top: var(--edge) solid var(--divider); }
@@ -135,6 +137,7 @@ input[aria-invalid=true], input.invalid { border-color: var(--red-dark); }
 .scene-compact .panel-heading, .scene-compact .object-heading { justify-content: center; }
 .scene-compact .scene-collapse .scene-chevron { rotate: -90deg; }
 .scene-compact .scene-object { justify-content: center; padding-left: 0; }
+.scene-compact .scene-object.reflected { margin-left: 0; }
 .scene-compact .object-select { justify-content: center; min-height: var(--control); }
 .scene-compact .object-symbol { min-width: 0; }
 .scene-compact .scene-initial-shortcut { display: inline-flex; margin-top: var(--section-gap); width: 100%; }
@@ -312,6 +315,15 @@ button.legend-item.selected { background: var(--selected); border-color: var(--s
 /* The actual direction: θ and φ in fixed slots, at a field's text inset. */
 .direction-reading { display: flex; align-items: center; gap: var(--section-gap); min-height: var(--control); padding: 0 0 var(--cap-lift) var(--field-text-inset); font-variant-numeric: tabular-nums; }
 .direction-angle { display: inline-flex; gap: var(--row-gap); }
+/* A reflection's inspector (reflection.ts): 反射自 and its source, a link in the source's colour;
+ * what the source gives it is read-only, greyed as an unavailable input is. */
+.reflection-source { display: flex; align-items: center; gap: var(--edge); min-height: var(--control); color: var(--muted-ink); }
+.reflection-source > button { min-width: 0; padding: 0 var(--field-text-inset) var(--cap-lift); }
+.reflection-source > button:hover { text-decoration: underline; }
+.derived-reading { display: flex; align-items: center; min-height: var(--control); padding: 0 0 var(--cap-lift) var(--field-text-inset); }
+.derived-section .derived-reading, .derived-section .readout-edit, .derived-section .direction-reading, .derived-section .direction-reading .slot { color: var(--disabled-ink); }
+/* A switch on a form row of its own stands at the row's start, its words beside it. */
+.form > .switch.full-form-row { justify-self: start; }
 /* A number with a unit picker takes the room the picker leaves, up to the number cap: beside a
  * kW/cm²-wide picker a computed intensity or an output waist still shows its digits. */
 .inspector-panel .field-control.capped:has(> select.unit-picker) > .spin { flex: 1 1 auto; }
