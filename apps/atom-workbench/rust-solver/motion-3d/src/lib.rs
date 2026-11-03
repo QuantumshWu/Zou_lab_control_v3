@@ -105,7 +105,8 @@ fn initial_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,purpos
     let p:[f64;3]=std::array::from_fn(|i|{let z=normal_quantile(latin.next(&mut rng));if sigma[i]>0.{(kt/hm).sqrt()*quantum[i]*z}else{0.}});
     let mut psi=[Complex::ZERO;model::MOST_STATES];psi[state]=Complex::ONE;
     let threshold=engine::jump_stream(seed,index,0).open_uniform();
-    Trajectory{cluster,psi,r:lab(q),kappa:lab(p),time:0.,threshold,alive:true,jumps:0,doppler:0.,seed,index}
+    Trajectory{cluster,psi,r:lab(q),kappa:lab(p),time:0.,threshold,alive:true,jumps:0,correlation:[[Complex::ZERO;engine::SQUARE];3],pending:[[0.;3];3],steps:0,
+        doppler:0.,seed,index}
 }
 
 /// The outputs of a run: one group per `group` trajectories, sums at every output time, the held

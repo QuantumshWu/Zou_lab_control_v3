@@ -23,9 +23,9 @@ fn main(){
     let point=clock.elapsed().as_secs_f64()/steps as f64;
     let p=model.point(t.r,t.kappa);
     let clock=Instant::now();
-    for _ in 0..steps{let l=model.local(t.cluster,&p,0.);sink+=l.hamiltonian[0].re;}
+    for _ in 0..steps{let l=model.local(t.cluster,&p,0.,false);sink+=l.hamiltonian[0].re;}
     let local=clock.elapsed().as_secs_f64()/steps as f64;
-    let l=model.local(t.cluster,&p,0.);
+    let l=model.local(t.cluster,&p,0.,false);
     let clock=Instant::now();
     for _ in 0..steps{let mut psi=t.psi;propagate(&l.hamiltonian,n,0.5*dt,&mut psi,truncation);sink+=psi[0].re;}
     let prop=clock.elapsed().as_secs_f64()/steps as f64;
@@ -33,7 +33,7 @@ fn main(){
     for _ in 0..steps{let f=model.force(t.cluster,&l,&t.psi);sink+=f[0];}
     let force=clock.elapsed().as_secs_f64()/steps as f64;
     let clock=Instant::now();
-    for _ in 0..steps/10{let ph=model.photons(t.cluster,&p,&t.psi,0.,None);sink+=ph.amplitude[0][0][0].re;}
+    for _ in 0..steps/10{let j=model.jumps(t.cluster,&p,0.,None,true);sink+=j.l(0,0)[0].re;}
     let photons=clock.elapsed().as_secs_f64()/(steps/10) as f64;
     let clock=Instant::now();
     for _ in 0..steps/10{let q=model.populations(t.cluster,&p,&t.psi,0.);sink+=q[0];}
@@ -42,6 +42,6 @@ fn main(){
     let clock=Instant::now();
     for _ in 0..steps{engine.step(&mut t);}
     let step=clock.elapsed().as_secs_f64()/steps as f64;
-    println!("{name}: point {:.2} us, local {:.2} us, propagate (dt/2) {:.2} us, force {:.2} us, photons {:.2} us, populations {:.2} us; whole step {:.2} us ({} jumps) [{sink:.1e}]",
+    println!("{name}: point {:.2} us, local {:.2} us, propagate (dt/2) {:.2} us, force {:.2} us, jumps with gradients {:.2} us, populations {:.2} us; whole step {:.2} us ({} jumps) [{sink:.1e}]",
         point*1e6,local*1e6,prop*1e6,force*1e6,photons*1e6,populations*1e6,step*1e6,t.jumps);
 }

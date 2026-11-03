@@ -37,7 +37,8 @@
 //! ODE solver's local error, QuTiP's way): states are sampled along a pilot of a few trajectories
 //! at a first step (the phase k_max v_T of the light's pattern at the initial temperature advancing
 //! sqrt(η) per step, η the a-priori share), and from each one step of dt is compared with two of
-//! dt/2, without jumps. The step is accepted when (4/3 of) the differences meet their shares:
+//! dt/2, without jumps and without noise. The step is accepted when (4/3 of) the differences meet
+//! their shares:
 //! - the internal state's populations, summed over the steps between two jumps (the pilot's mean
 //!   waiting time), within η ε of the population target ε;
 //! - the step's light impulse, relative, within η of the temperature target;
@@ -45,8 +46,10 @@
 //!   change of the mechanical energy over the step, which the conservative forces leave alone --
 //!   the internal state's lag that carries the friction is a small share of its populations, so
 //!   their criterion alone lets T's step error grow past its share (the 3D PGC example: T 2–3 % high
-//!   at the populations' step, measured against half that step).
-//! Both scale as dt², so a step that misses is shrunk by the square root of its excess and checked
+//!   at the populations' step, measured against half that step);
+//! - the heating, relative, within η of the temperature target: the sampled states' mean trace of
+//!   the momentum's covariance increment (engine.rs: the absorbed light's and the correlation's).
+//! All scale as dt², so a step that misses is shrunk by the square root of its excess and checked
 //! again; one that meets them with room is grown the same way. The step's exponentials are summed
 //! to a share η of its own population budget, η² ε dt/waiting, instead of to double precision.
 //!
@@ -301,18 +304,20 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
 }
 
 /// The step-doubling excess of a step (module documentation): the internal state's accumulated
-/// population error over η ε, and the larger of the light impulse's and the friction's relative
-/// errors over η × the temperature target, from one step against two halves on the sampled states;
-/// 1 meets each.
+/// population error over η ε, and the largest of the light impulse's, the friction's and the
+/// heating's relative errors over η × the temperature target, from one step against two halves on
+/// the sampled states; 1 meets each.
 fn step_excess(engine:&Engine,states:&[Trajectory],waiting:f64)->[f64;2]{
     let dt=engine.settings.dt;
-    let(mut population,mut difference,mut impulse,mut energy,mut friction)=(0.,0.,0.,0.,0.);
-    for t in states{let(motion,internal,work)=engine.doubling(t,dt);difference+=motion[0];impulse+=motion[1];population+=internal[0];energy+=work[0];friction+=work[1];}
+    let(mut population,mut difference,mut impulse,mut energy,mut friction,mut variance,mut heating)=(0.,0.,0.,0.,0.,0.,0.);
+    for t in states{let d=engine.doubling(t,dt);difference+=d.momentum[0];impulse+=d.momentum[1];population+=d.internal[0];energy+=d.energy[0];friction+=d.energy[1];
+        variance+=d.heating[0];heating+=d.heating[1];}
     let richardson=4./3.;
     let accumulated=richardson*population/states.len().max(1) as f64*(waiting/dt).max(1.);
     let relative=if impulse>0.{richardson*difference/impulse}else{0.};
     let dissipated=if friction!=0.{richardson*(energy/friction).abs()}else{0.};
-    [accumulated/(A_PRIORI_SHARE*POPULATION_TARGET),relative.max(dissipated)/(A_PRIORI_SHARE*TEMPERATURE_TARGET)]
+    let diffused=if heating>0.{richardson*variance/heating}else{0.};
+    [accumulated/(A_PRIORI_SHARE*POPULATION_TARGET),relative.max(dissipated).max(diffused)/(A_PRIORI_SHARE*TEMPERATURE_TARGET)]
 }
 
 /// t = 0 is the request's initial state, exactly: per lab axis T is its thermal Wigner temperature

@@ -51,20 +51,26 @@ fn samples(model:&Model,seed:u64)->Vec<(usize,[f64;3],[f64;3],f64,[Complex;MOST_
 fn expectation(m:&[Complex],psi:&[Complex],n:usize)->Complex{let mut s=Complex::ZERO;for a in 0..n{for b in 0..n{s+=psi[a].conj()*m[a*n+b]*psi[b];}}s}
 
 /// The model's tables against the front end's dense generator at random points and times (the
-/// kinetic shift off, the van Vleck paths the tables hold): H_eff and every class's photons, to the
-/// tables' interpolation; and the photons carry the whole decay but the paths' (their second order).
+/// kinetic shift off, the van Vleck paths the tables hold): H_eff and every class's jump operators,
+/// to the tables' interpolation; and the photons carry the whole decay but the paths' (their second
+/// order).
 #[test]
 fn the_tables_give_the_front_end_s_generator_and_the_photons_carry_the_decay(){
     let mut model=Model::new(&request(&|_|true)).unwrap();model.doppler=false;let g=&model.ground;
     let tabulated=|p:&Path|model.carriers[p.via.carrier].beams.len()==1;
     for(k,r,_,t,psi)in samples(&model,1){
-        let n=model.dimension(k);let p=model.point(r,[0.;3]);let local=model.local(k,&p,t);
+        let n=model.dimension(k);let p=model.point(r,[0.;3]);let local=model.local(k,&p,t,false);
         let e=g.eliminate(&model.hamiltonian_at_point(r)).unwrap();let dense=g.local_with(&e,k,r,t,&tabulated).unwrap();
         let scale=dense.effective.largest();
         for a in 0..n{for b in 0..n{let x=local.hamiltonian[a*n+b]+if a==b{Complex::new(local.scalar,0.)}else{Complex::ZERO};
             assert!((x-dense.effective[(a,b)]).abs()<=1e-3*scale,"cluster {k} at {r:?}, ({a}, {b}): {x:?} against {:?}",dense.effective[(a,b)]);}}
-        let photons=model.photons(k,&p,&psi,t,None);
-        let fast:f64=photons.amplitude.iter().zip(&g.clusters[k].classes).map(|(u,c)|{let nt=model.dimension(c.target);u.iter().map(|axis|axis[..nt].iter().map(|z|z.norm_sqr()).sum::<f64>()).sum::<f64>()}).sum();
+        let jumps=model.jumps(k,&p,t,None,false);
+        let largest=dense.jumps.iter().flat_map(|j|j.iter().map(|m|m.largest())).fold(0.,f64::max);
+        for(c,class)in jumps.classes.iter().enumerate(){for x in 0..3{let l=jumps.l(c,x);for i in 0..class.rows{for b in 0..n{
+            assert!((l[i*n+b]-dense.jumps[c][x][(i,b)]).abs()<=1e-3*largest,"cluster {k} class {c} axis {x} ({i}, {b}): {:?} against {:?}",l[i*n+b],dense.jumps[c][x][(i,b)]);
+        }}}}
+        let fast:f64=jumps.classes.iter().enumerate().map(|(c,class)|(0..3).map(|x|{let l=jumps.l(c,x);
+            (0..class.rows).map(|i|(0..n).fold(Complex::ZERO,|s,b|s+l[i*n+b]*psi[b]).norm_sqr()).sum::<f64>()}).sum::<f64>()).sum();
         let exact:f64=dense.jumps.iter().map(|j|j.iter().map(|m|{let v:Vec<Complex>=(0..m.rows).map(|i|(0..n).fold(Complex::ZERO,|s,b|s+m[(i,b)]*psi[b])).collect();v.iter().map(|z|z.norm_sqr()).sum::<f64>()}).sum::<f64>()).sum();
         assert!((fast-exact).abs()<=1e-3*exact.max(1e-12),"cluster {k}: photons {fast:e} against {exact:e}");
         let decay=-2.*expectation(&local.hamiltonian[..n*n],&psi,n).im;
@@ -79,14 +85,62 @@ fn the_tables_give_the_front_end_s_generator_and_the_photons_carry_the_decay(){
 fn the_force_is_the_energy_s_gradient(){
     let mut model=Model::new(&request(&|_|true)).unwrap();model.doppler=false;
     let energy=|cluster:usize,r:[f64;3],t:f64,psi:&[Complex;MOST_STATES]|->f64{
-        let n=model.dimension(cluster);let local=model.local(cluster,&model.point(r,[0.;3]),t);local.scalar+expectation(&local.hamiltonian[..n*n],psi,n).re
+        let n=model.dimension(cluster);let local=model.local(cluster,&model.point(r,[0.;3]),t,false);local.scalar+expectation(&local.hamiltonian[..n*n],psi,n).re
     };
     for(cluster,r,_,t,psi)in samples(&model,2){
-        let p=model.point(r,[0.;3]);let local=model.local(cluster,&p,t);let force=model.force(cluster,&local,&psi);let h=1e-5;
+        let p=model.point(r,[0.;3]);let local=model.local(cluster,&p,t,false);let force=model.force(cluster,&local,&psi);let h=1e-5;
         for a in 0..3{
             let(mut plus,mut minus)=(r,r);plus[a]+=h;minus[a]-=h;let numeric=-(energy(cluster,plus,t,&psi)-energy(cluster,minus,t,&psi))/(2.*h);
             assert!((force[a]-numeric).abs()<=1e-5*numeric.abs().max(1.),"cluster {cluster} at {r:?}, axis {a}: {} against {numeric}",force[a]);
         }
+    }
+}
+
+/// The gradients the second-order expansion takes (engine.rs): the decay's ∂_iΓ (the Hermitian part
+/// of `Local::decay_gradient`) and every class's ∂_i L, against central differences of
+/// Γ = i(H_eff − H_eff†) and of L at random points and times (the kinetic shift off).
+#[test]
+fn the_decay_s_and_the_jumps_gradients_are_their_finite_differences(){
+    let mut model=Model::new(&request(&|_|true)).unwrap();model.doppler=false;let h=1e-5;
+    for(k,r,_,t,_)in samples(&model,4){
+        let n=model.dimension(k);let p=model.point(r,[0.;3]);let local=model.local(k,&p,t,true);let jumps=model.jumps(k,&p,t,None,true);
+        let decay=|r:[f64;3]|{let l=model.local(k,&model.point(r,[0.;3]),t,false);let x=l.hamiltonian;
+            (0..n*n).map(|i|{let(a,b)=(i/n,i%n);(x[a*n+b]-x[b*n+a].conj())*Complex::new(0.,1.)}).collect::<Vec<Complex>>()};
+        for i in 0..3{
+            let(mut plus,mut minus)=(r,r);plus[i]+=h;minus[i]-=h;
+            let(dp,dm)=(decay(plus),decay(minus));let g=&local.decay_gradient[i];
+            let scale=dp.iter().zip(&dm).map(|(a,b)|((*a-*b)*(0.5/h)).abs()).fold(1e-9,f64::max);
+            for a in 0..n{for b in 0..n{
+                let analytic=(Complex::new(g[2*(a*n+b)],g[2*(a*n+b)+1])+Complex::new(g[2*(b*n+a)],-g[2*(b*n+a)+1]))*0.5;
+                let numeric=(dp[a*n+b]-dm[a*n+b])*(0.5/h);
+                assert!((analytic-numeric).abs()<=1e-4*scale,"cluster {k} at {r:?}, axis {i}, decay ({a}, {b}): {analytic:?} against {numeric:?}");
+            }}
+            let(jp,jm)=(model.jumps(k,&model.point(plus,[0.;3]),t,None,false),model.jumps(k,&model.point(minus,[0.;3]),t,None,false));
+            for(c,class)in jumps.classes.iter().enumerate(){for x in 0..3{
+                let(lp,lm,dl)=(jp.l(c,x),jm.l(c,x),jumps.dl(c,i,x));
+                let scale=lp.iter().zip(lm).map(|(a,b)|((*a-*b)*(0.5/h)).abs()).fold(1e-9,f64::max);
+                for e in 0..class.rows*n{let numeric=(lp[e]-lm[e])*(0.5/h);
+                    assert!((dl[e]-numeric).abs()<=1e-4*scale,"cluster {k} class {c} photon axis {x}, gradient {i} entry {e}: {:?} against {numeric:?}",dl[e]);}
+            }}
+        }
+    }
+}
+
+/// The correlation of κ with the internal state (engine.rs) stays traceless and Hermitian over
+/// steps with jumps, every axis free.
+#[test]
+fn the_correlation_stays_traceless_and_hermitian(){
+    let r=request(&|_|true);let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let engine=Engine{model:&model,settings:Settings::new(0.2,&initial.traps[0],f64::EPSILON,false)};
+    let mut t=initial_trajectory(&model,&engine.settings,&initial,3,0,Stratum::single(0));
+    for _ in 0..1000{engine.step(&mut t);}
+    assert!(t.jumps>4,"{} jumps",t.jumps);
+    for j in 0..3{
+        let m=&t.correlation[j];let scale=m.iter().map(|z|z.abs()).fold(0.,f64::max);assert!(scale>0.);
+        let trace:Complex=(0..model.clusters()).map(|k|{let(n,at)=(model.dimension(k),model.block(k));(0..n).fold(Complex::ZERO,|s,a|s+m[at+a*n+a])}).fold(Complex::ZERO,|s,x|s+x);
+        assert!(trace.abs()<=1e-9*scale,"axis {j}: tr M {trace:?} (largest entry {scale:e})");
+        for k in 0..model.clusters(){let(n,at)=(model.dimension(k),model.block(k));for a in 0..n{for b in 0..n{
+            assert!((m[at+a*n+b]-m[at+b*n+a].conj()).abs()<=1e-9*scale,"axis {j}, cluster {k} ({a}, {b})");}}}
     }
 }
 

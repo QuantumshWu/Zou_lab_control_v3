@@ -1,5 +1,6 @@
 //! Counter-based random streams: Philox4x32-10 (Salmon et al., Random123), each stream keyed by
-//! the run's seed and its purpose and counted by the trajectory and the event (the jump's number):
+//! the run's seed and its purpose and counted by the trajectory and the event (the jump's number,
+//! the noise's step):
 //! a draw depends on those alone, not on the order trajectories run in, so a port to another
 //! device draws the same numbers. Uniform doubles and directions; and the standard normal's
 //! quantile, for the normal deviate of a given uniform one.
@@ -29,6 +30,8 @@ pub enum Purpose{
     Jump=3,
     /// A pilot trajectory's initial state.
     Pilot=4,
+    /// A trajectory's momentum noise (event: the step's number).
+    Noise=5,
 }
 
 /// A stream: Philox blocks at the counter (block, event, trajectory) under the key (seed, purpose).
