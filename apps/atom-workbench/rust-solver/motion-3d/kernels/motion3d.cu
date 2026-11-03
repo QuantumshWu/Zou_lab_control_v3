@@ -162,10 +162,14 @@ struct Beam{
 struct Carrier{int rank,beams,first,pad;double detuning;};   // its beams: beam_list[first, first + beams)
 // A cluster: its tables' place (node 0 at tables[table], `size` entries per node) and slices, its
 // groups, classes and coherent groups, its carriers' photon tables (carrier_tables[carriers + 3c +
-// (0 J, 1 J2, 2 T)]) and its states' ground positions.
-struct Cluster{int n,size,table,h0,groups,ngroups,classes,nclasses,coherent,ncoherent,carriers,pad;int states[MAXN];};
-// A kept group (model.rs `GroupLayout`): its field pairs pairs[pairs, pairs + npairs) and the S and Q slices.
-struct Group{int absorbed,emitted,hermitian,pairs,npairs,s,q,pad;double residual;};
+// (0 J, 1 J2, 2 T)]), where its places' lists of its sparse groups' entries start
+// (item_first[positions + e] for the place e = row·n + col), its sparse groups' residual beats
+// (residuals[beats, beats + nbeats)) and its states' ground positions.
+struct Cluster{int n,size,table,h0,groups,ngroups,classes,nclasses,coherent,ncoherent,carriers,positions,beats,nbeats,pad[2];int states[MAXN];};
+// A kept group (model.rs `GroupLayout`): its field pairs pairs[pairs, pairs + npairs), the S and Q
+// slices and its entries' count (n² for a group of every entry, row-major; fewer for a sparse one,
+// its values per pair in its entries' order).
+struct Group{int absorbed,emitted,hermitian,pairs,npairs,s,q,count;double residual;};
 // A jump class (ground.rs `Class`): its photons photons[photons, photons + nphotons) by the row they
 // land in and their carrier, the carriers they come from (bits), and where each row's photons start
 // (class_rows[rows + r], r up to the target's size).
@@ -185,6 +189,12 @@ struct Program{
     // the emission C_a (3 × NG × NE).
     const float2* excited;const double* diagonal;const float2* couplings;const float2* emission;
     const int* class_rows;
+    // The sparse groups' entries by the place they land at: per cluster and place the items
+    // items[item_first[positions + e], item_first[positions + e + 1]) in the groups' and pairs' order,
+    // each (its S's and its Q's place in the cluster's node slice, its kind, 0): the kind's bits 0–1
+    // the pair's emitted field k1, 2–3 its absorbed k, 4–6 the absorbed carrier, 7–9 the emitted, 10
+    // a pair standing for two, 11 the adjoint at the mirror place, 12– the beat (`residuals`).
+    const int* item_first;const int4* items;const double* residuals;
     int nbeams,ncarriers,nclusters,focused,nodes,fields,nnear,doppler,loss,pad;
     int focused_beam[MOST_FOCUSED],stride[MOST_FOCUSED];
     int field_carrier[MOST_CARRIERS*MOST_RANK],field_rank[MOST_CARRIERS*MOST_RANK];
@@ -434,6 +444,19 @@ __device__ float2 entry(const Program& P,const Warp& W,const float2* x,int size,
     }
     return v;
 }
+// One entry of a cluster's tables at the stencil with the trap beam off (`gather`'s `far`).
+__device__ float2 far_entry(const Program& P,const Warp& W,const float2* x,int size){
+    const Point& pt=W.pt;float2 v=zero2();const float* w0=pt.far_weight[0];
+    for(int o=0;o<(1<<(2*(P.focused-1)));o++){
+        const Row r=stencil_row(P,pt,true,o);const float2* at=x+(size_t)r.index*size;
+        float2 u[4];
+        #pragma unroll
+        for(int m=0;m<4;m++)u[m]=__ldg(at+(size_t)m*size);
+        #pragma unroll
+        for(int m=0;m<4;m++)v+=(r.w*w0[m])*u[m];
+    }
+    return v;
+}
 // One entry of a cluster's tables at the stencil with its derivatives in every s_f (`gather`'s of one entry).
 __device__ float2 entry_slopes(const Program& P,const Warp& W,const float2* x,int size,float2 (&slope)[MOST_FOCUSED]){
     const Point& pt=W.pt;float2 v=zero2();const float* w0=pt.weight[0];const float* s0=pt.slope[0];
@@ -471,7 +494,8 @@ __device__ void local(const Program& P,Warp& W,const Cluster& C,const Entries& E
         for(int a=0;a<3;a++)L.grad[a][j]=zero2();
     }
     for(int gi=0;gi<C.ngroups;gi++){
-        const Group G=P.groups[C.groups+gi];const Fields& fa=pt.fields[G.absorbed];const Fields& fe=pt.fields[G.emitted];
+        const Group G=P.groups[C.groups+gi];if(G.count!=nn)continue;
+        const Fields& fa=pt.fields[G.absorbed];const Fields& fe=pt.fields[G.emitted];
         const float2 phase=residual(G.residual,t);
         for(int pi=0;pi<G.npairs;pi++){
             const int2 pair=P.pairs[G.pairs+pi];const int k1=pair.x,k=pair.y;
@@ -497,6 +521,33 @@ __device__ void local(const Program& P,Warp& W,const Cluster& C,const Entries& E
             gather<false>(P,W,false,tables+G.q+pi*nn,C.size,nn,lane,buf,slope);
             #pragma unroll
             for(int j=0;j<SLOTS;j++){g[j]+=ee*buf[j];if(twice)ga[j]+=ee*buf[j];}
+        }
+    }
+    // The sparse groups (fewer entries than places, model.rs `scatter`): each place's own entries, an
+    // entry and, from a pair standing for two, its adjoint at the mirror place; their beats' phases
+    // once (in W.m[2], free until the adjoint halves below).
+    float2* phases=W.m[2];
+    __syncwarp();
+    if(lane<C.nbeats)phases[lane]=residual(P.residuals[C.beats+lane],t);
+    __syncwarp();
+    #pragma unroll
+    for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){
+        const int e=lane+32*j,end=P.item_first[C.positions+e+1];
+        #pragma unroll 2
+        for(int i=P.item_first[C.positions+e];i<end;i++){
+            const int4 it=__ldg(P.items+i);
+            float2 ds[MOST_FOCUSED];const float2 s=entry_slopes(P,W,tables+it.x,C.size,ds);const float2 q=entry(P,W,tables+it.y,C.size,-1);
+            const int k1=it.z&3,k=(it.z>>2)&3;const Fields& fa=pt.fields[(it.z>>4)&7];const Fields& fe=pt.fields[(it.z>>7)&7];
+            const float2 phase=phases[it.z>>12];const float2 ee=phase*conj(fe.e[k1])*fa.e[k];
+            if((it.z>>11)&1){m[j]+=conj(ee*s);g[j]+=conj(ee*q);continue;}
+            m[j]+=ee*s;g[j]+=ee*q;
+            const float both=(it.z>>10)&1?2.f:1.f;
+            #pragma unroll
+            for(int a=0;a<3;a++){
+                L.grad[a][j]+=((-both)*(phase*(conj(fe.grad[k1][a])*fa.e[k]+conj(fe.e[k1])*fa.grad[k][a])))*s;
+                #pragma unroll
+                for(int f=0;f<MOST_FOCUSED;f++)if(f<D)L.grad[a][j]+=((-both*pt.grad_s[f][a])*ee)*ds[f];
+            }
         }
     }
     gather<true>(P,W,false,tables+C.h0,C.size,nn,lane,L.h0,slope);
@@ -1056,8 +1107,22 @@ __device__ float trap(const Program& P,const Warp& W,const Cluster& C,const Entr
     for(int j=0;j<SLOTS;j++)difference[j]=h0[j]-far[j];
     if(bound)return quadratic(W,E,difference,lane)+P.light2;
     float2 here[SLOTS];
+    // The sparse groups' entries at the lane's places (their adjoints none: the form takes a pair
+    // standing for two twice).
+    #pragma unroll
+    for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){
+        const int e=lane+32*j,end=P.item_first[C.positions+e+1];
+        for(int i=P.item_first[C.positions+e];i<end;i++){
+            const int4 it=__ldg(P.items+i);if((it.z>>11)&1)continue;
+            const int k1=it.z&3,k=(it.z>>2)&3;
+            const float2 ee=((it.z>>10)&1?2.f:1.f)*(conj(pt.fields[(it.z>>7)&7].e[k1])*pt.fields[(it.z>>4)&7].e[k]);
+            const float2* x=tables+it.x;
+            difference[j]+=(zero2()-ee*residual(P.residuals[C.beats+(it.z>>12)],t))*(entry(P,W,x,C.size,-1)-far_entry(P,W,x,C.size));
+        }
+    }
     for(int gi=0;gi<C.ngroups;gi++){
-        const Group G=P.groups[C.groups+gi];const Fields& fa=pt.fields[G.absorbed];const Fields& fe=pt.fields[G.emitted];
+        const Group G=P.groups[C.groups+gi];if(G.count!=E.nn)continue;
+        const Fields& fa=pt.fields[G.absorbed];const Fields& fe=pt.fields[G.emitted];
         const float2 phase=residual(G.residual,t);
         for(int pi=0;pi<G.npairs;pi++){
             const int2 pair=P.pairs[G.pairs+pi];const int k1=pair.x,k=pair.y;
