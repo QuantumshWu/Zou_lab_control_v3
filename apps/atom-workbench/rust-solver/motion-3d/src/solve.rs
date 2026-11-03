@@ -100,7 +100,10 @@
 //! takes -- are the corrected values' spread over the groups; where a control follows nothing, β ≈ 0.
 //! The held
 //! twin costs a trajectory of its own: it runs in the first batch, and is kept when the trajectories
-//! that batch says the populations need with it, times its share of the cost, are fewer than without.
+//! that batch says the targets need with it -- the populations' or T's, whichever needs more --,
+//! times its share of the cost, are fewer than without: where T decides the trajectories its control
+//! of the populations saves none. The first batch's groups are Latin hypercubes, so its T need is
+//! the run's, not inflated by independent draws' spread at early times.
 //!
 //! # Regime
 //! A point particle has no zero-point motion: below a few vibrational quanta per axis the method
@@ -419,10 +422,10 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let first=batch(0,count,twin.as_ref())?;
     let wall=clock.elapsed().as_secs_f64();
     // The held twin is kept where its control pays for itself: the trajectories the first batch says
-    // the populations need with it, times its share of the cost, against those they need without.
+    // the targets need with it, times its share of the cost, against those they need without.
     if twin.is_some(){
         let needed=|means:&[Means]|{let mut e=summarize(&first.groups,&scales,means);start(&mut e[0],&model,&initial);
-            let(_,accounts)=ledger(&model,&base,&e,times,allowance,bias,trap.lab,false);worst_ratios(&e,&accounts,trap.lab)[0].powi(2)};
+            let(_,accounts)=ledger(&model,&base,&e,times,allowance,bias,trap.lab,false);worst_ratio(&e,&accounts,trap.lab).powi(2)};
         if needed(&means(true))*(1.+first.seconds[1]/first.seconds[0])>=needed(&means(false)){twin=None;}
     }
     let means=means(twin.is_some());
