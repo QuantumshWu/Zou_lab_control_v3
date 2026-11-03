@@ -61,7 +61,7 @@ typedef unsigned long long u64;
 // the parts of its work, and the advances and jumps it makes, per trajectory into Run::profile.
 // Without PROFILE the spans are nothing.
 enum Span{SPAN_POINT,SPAN_GENERATOR,SPAN_EXPONENTIAL,SPAN_EVOLVE,SPAN_JUMP,SPAN_EXACT,SPAN_PHOTONS,SPAN_ABSORPTION,SPAN_LOSS,SPAN_STEP,SPAN_READOUT,SPAN_WINDOWS,
-    SPAN_SUMS,SPAN_TOTAL,COUNT_ADVANCES,COUNT_JUMPS,COUNT_EXACT,SPANS};
+    SPAN_SUMS,SPAN_TWIN,SPAN_TOTAL,COUNT_ADVANCES,COUNT_JUMPS,COUNT_EXACT,SPANS};
 #ifdef PROFILE
 #define SPAN_BEGIN(name) const long long name=clock64()
 #define SPAN_END(span,name) do{if(lane==0)W.profile[span]+=clock64()-name;}while(0)
@@ -1298,6 +1298,7 @@ extern "C" __global__ void __launch_bounds__(WARPS*32,2) motion3d(const Program 
     }
     SPAN_END(SPAN_SUMS,summing);
 #ifdef PROFILE
+    if(lane==0)W.profile[SPAN_TWIN]+=twin_cycles;
     SPAN_END(SPAN_TOTAL,launch);
     if(active&&lane<SPANS)R.profile[(size_t)slot*SPANS+lane]+=(unsigned long long)W.profile[lane];
 #endif

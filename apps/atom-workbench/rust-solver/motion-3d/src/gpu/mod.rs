@@ -62,9 +62,10 @@ pub(crate) const HARMONIC:usize=81;
 /// The profiled kernel's counters per trajectory (its SPANS): the cycles of the point, the generator,
 /// the exponential, the evolution with the kick, the jumps -- of them the exact responses, the
 /// photons' matrices with the classes' weights and the absorbed light --, the loss, the steps, the
-/// readouts, the windows, the block's sums at a launch's end with the wait for its slowest warp, and
-/// the launches; the advances, the jumps and the jumps with the exact responses.
-pub const SPANS:[&str;17]=["point","generator","exponential","evolve","jump","exact","photons","absorption","loss","step","readout","windows","sums","total","advances","jumps","exact jumps"];
+/// readouts, the windows, the block's sums at a launch's end with the wait for its slowest warp, the
+/// held twin's steps and records, and the launches; the advances, the jumps and the jumps with the
+/// exact responses.
+pub const SPANS:[&str;18]=["point","generator","exponential","evolve","jump","exact","photons","absorption","loss","step","readout","windows","sums","twin","total","advances","jumps","exact jumps"];
 
 /// The times the process's GPU took to start (ms): the driver, the context, the module (the driver's
 /// JIT compile of the PTX at its first load on a machine, its cache after).
