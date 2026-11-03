@@ -23,7 +23,15 @@ pub struct Beam{
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Carrier{rank:i32,beams:i32,first:i32,pad:i32,detuning:f64}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
-pub struct Cluster{n:i32,size:i32,table:i32,h0:i32,groups:i32,ngroups:i32,classes:i32,nclasses:i32,coherent:i32,ncoherent:i32,carriers:i32,pad:i32,states:[i32;MAXN]}
+pub struct Cluster{n:i32,size:i32,table:i32,h0:i32,groups:i32,ngroups:i32,classes:i32,nclasses:i32,coherent:i32,ncoherent:i32,carriers:i32,fourth:i32,frames:i32,pad:i32,
+    states:[i32;MAXN]}
+/// The kernel's `Fourth`: a cluster's fourth-order tables' places per carrier (−1: none).
+#[repr(C)]#[derive(Clone,Copy,Debug)]
+pub struct Fourth{
+    quartic:[[i32;MOST_CARRIERS];MOST_CARRIERS],quadratic:[i32;MOST_CARRIERS],rr:[i32;MOST_CARRIERS],yw:[i32;MOST_CARRIERS],
+    jumps:[[i32;MOST_CARRIERS];MOST_CARRIERS],p:[[i32;MOST_CARRIERS];MOST_CARRIERS],rr_all:[i32;MOST_CARRIERS],photons:[i32;MOST_CARRIERS],
+    on:i32,carriers:[i32;MOST_CARRIERS],pad:[i32;3],
+}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Group{absorbed:i32,emitted:i32,hermitian:i32,pairs:i32,npairs:i32,s:i32,q:i32,pad:i32,residual:f64}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
@@ -40,8 +48,8 @@ pub struct Channel{carrier:i32,col:i32,residual:f64}
 #[repr(C)]#[derive(Clone,Copy,Debug)]
 pub struct Params{
     beams:u64,beam_list:u64,carriers:u64,clusters:u64,groups:u64,pairs:u64,classes:u64,photons:u64,coherent:u64,channels:u64,carrier_tables:u64,tables:u64,
-    excited:u64,diagonal:u64,couplings:u64,emission:u64,class_rows:u64,
-    nbeams:i32,ncarriers:i32,nclusters:i32,focused:i32,nodes:i32,fields:i32,pub(crate) nnear:i32,doppler:i32,loss:i32,pad:i32,
+    excited:u64,diagonal:u64,couplings:u64,emission:u64,class_rows:u64,fourths:u64,frames:u64,
+    nbeams:i32,ncarriers:i32,nclusters:i32,focused:i32,nodes:i32,fields:i32,pub(crate) nnear:i32,doppler:i32,loss:i32,weights:i32,
     focused_beam:[i32;MOST_FOCUSED],stride:[i32;MOST_FOCUSED],
     field_carrier:[i32;MOST_CARRIERS*MOST_RANK],field_rank:[i32;MOST_CARRIERS*MOST_RANK],
     ground_states:[i32;GROUND],excited_states:[i32;NE],
@@ -76,17 +84,17 @@ pub struct Run{
 
 /// The sizes, offsets and constants the kernel's `layout` reports, for the check that the twins and
 /// the constants they share match.
-pub fn layout()->[u32;24]{
+pub fn layout()->[u32;25]{
     use std::mem::{offset_of,size_of};
     use super::{HARMONIC,MOST_INTERVALS,MOTION,RECORD,SLOT_RECORD,TWIN,WARPS};
     [size_of::<Beam>(),size_of::<Carrier>(),size_of::<Cluster>(),size_of::<Group>(),size_of::<Class>(),size_of::<Photon>(),size_of::<Coherent>(),size_of::<Channel>(),
         size_of::<Params>(),size_of::<State>(),size_of::<Run>(),offset_of!(Params,hm),offset_of!(Params,half_flow),offset_of!(Run,listed),offset_of!(State,psi),offset_of!(State,index),
-        MOST_INTERVALS,SLOT_RECORD,RECORD,WARPS,MAXN,TWIN,MOTION,HARMONIC].map(|x|x as u32)
+        MOST_INTERVALS,SLOT_RECORD,RECORD,WARPS,MAXN,TWIN,MOTION,HARMONIC,size_of::<Fourth>()].map(|x|x as u32)
 }
 
 /// The model on the device: the kernel's parameters, the buffers they point into, and the most
 /// photons of a cluster's jumps.
-pub struct Program{pub params:Params,photons:usize,_buffers:Vec<Buffer>}
+pub struct Program{pub params:Params,photons:usize,weights:usize,_buffers:Vec<Buffer>}
 
 fn c32(z:Complex)->[f32;2]{[z.re as f32,z.im as f32]}
 
@@ -100,7 +108,6 @@ impl Program{
         if settings.free!=[true;3]{return Err(beyond("运动只沿部分坐标轴".into()));}
         if let Some(c)=g.clusters.iter().find(|c|!c.excited.is_empty()){return Err(beyond(format!("{} 个激发态显式、精确传播",c.excited.len())));}
         if let Some(k)=(0..model.clusters()).find(|&k|model.beating(k)){return Err(beyond(format!("子空间 {} 的 {} 个残余拍频按多速率精确步传播",k,model.beats(k).0.len()/2)));}
-        if model.fourth{return Err(beyond("四阶折叠".into()));}
         if model.geometry.len()>MOST_BEAMS||model.carriers.len()>MOST_CARRIERS||model.focused.len()>MOST_FOCUSED{return Err(beyond("光束或强度维度太多".into()));}
         if let Some(c)=g.clusters.iter().find(|c|c.states.len()>MAXN||c.classes.len()>MOST_CLASSES){return Err(beyond(format!("子空间 {} 个态、{} 类光子",c.states.len(),c.classes.len())));}
         let hm=model.hbar_over_mass;
@@ -128,17 +135,33 @@ impl Program{
         let nodes=model.tables.nodes;let points=nodes.pow(model.focused.len() as u32);
         let(mut clusters,mut groups,mut pairs,mut classes,mut photons,mut class_rows,mut coherent,mut channels,mut carrier_tables,mut tables)=
             (vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![]);
+        let(mut fourths,mut frames,mut weights):(Vec<Fourth>,Vec<f64>,usize)=(vec![],vec![],0);
         for(k,(layout,cl))in model.layouts.iter().zip(&g.clusters).enumerate(){
             // The kernel takes every group's S and Q dense (n × n per pair): the model's, on their
             // groups' entries, scattered at each node; h0 before them and the carriers' tables after
-            // them as they are (a cluster of ground states has nothing past those).
+            // them as they are, the fourth order's after those (a cluster of ground states has
+            // nothing else past them).
             let(n,data)=(layout.n,&model.tables.data[k]);let nn=n*n;assert_eq!(data.len(),2*points*layout.size);
             let mut dense:Vec<(usize,usize)>=vec![];let mut size=nn;
             for gl in &layout.groups{let square=gl.pairs.len()*nn;dense.push((size,size+square));size+=2*square;}
             let from=layout.carriers.first().map_or(layout.size,|c|c.j);let carriers=size;let shift=|at:usize|(at-from+carriers) as i32;size+=layout.size-from;
             let mut cluster=Cluster{n:n as i32,size:size as i32,table:(tables.len()) as i32,h0:layout.h0 as i32,groups:groups.len() as i32,ngroups:layout.groups.len() as i32,
-                classes:classes.len() as i32,nclasses:cl.classes.len() as i32,coherent:coherent.len() as i32,ncoherent:cl.coherent.len() as i32,carriers:carrier_tables.len() as i32,pad:0,states:[0;MAXN]};
+                classes:classes.len() as i32,nclasses:cl.classes.len() as i32,coherent:coherent.len() as i32,ncoherent:cl.coherent.len() as i32,carriers:carrier_tables.len() as i32,
+                fourth:-1,frames:0,pad:0,states:[0;MAXN]};
             for(x,&b)in cl.states.iter().enumerate(){cluster.states[x]=b as i32;}
+            // Its fourth-order tables' places (moved with the carriers') and its frames.
+            cluster.frames=frames.len() as i32;frames.extend(&cl.frames);
+            if let Some(f)=&layout.fourth{
+                let none=[-1;MOST_CARRIERS];
+                let mut x=Fourth{quartic:[none;MOST_CARRIERS],quadratic:none,rr:none,yw:none,jumps:[none;MOST_CARRIERS],p:[none;MOST_CARRIERS],rr_all:none,photons:none,
+                    on:f.carriers.len() as i32,carriers:none,pad:[0;3]};
+                for(i,&c)in f.carriers.iter().enumerate(){x.carriers[i]=c as i32;}
+                for &(c,d,at)in &f.quartic{x.quartic[c][d]=shift(at);}
+                for &(c,at)in &f.quadratic{x.quadratic[c]=shift(at);}for &(c,at)in &f.rr{x.rr[c]=shift(at);}for &(c,at)in &f.yw{x.yw[c]=shift(at);}
+                for &(c,e,at)in &f.jumps{x.jumps[c][e]=shift(at);}for &(d,e,at)in &f.p{x.p[d][e]=shift(at);}
+                for &(c,at)in &f.rr_all{x.rr_all[c]=shift(at);}for &(c,at)in &f.photons{x.photons[c]=shift(at);}
+                cluster.fourth=fourths.len() as i32;fourths.push(x);weights=weights.max((2+f.carriers.len()*f.carriers.len())*GROUND*layout.n);
+            }
             let at=|node:usize,i:usize|[data[2*(node*layout.size+i)] as f32,data[2*(node*layout.size+i)+1] as f32];
             for node in 0..points{
                 let start=tables.len();tables.resize(start+size,[0_f32;2]);let out=&mut tables[start..];
@@ -201,8 +224,9 @@ impl Program{
             beams:put!(beams),beam_list:put!(beam_list),carriers:put!(carriers),clusters:put!(clusters),groups:put!(groups),pairs:put!(pairs),classes:put!(classes),
             photons:put!(photons),coherent:put!(coherent),channels:put!(channels),carrier_tables:put!(carrier_tables),tables:put!(tables),
             excited:put!(excited),diagonal:put!(diagonal),couplings:put!(couplings),emission:put!(emission),class_rows:put!(class_rows),
+            fourths:if fourths.is_empty(){0}else{put!(fourths)},frames:put!(frames),
             nbeams:model.geometry.len() as i32,ncarriers:model.carriers.len() as i32,nclusters:model.layouts.len() as i32,focused:model.focused.len() as i32,
-            nodes:nodes as i32,fields:fields as i32,nnear:near,doppler:model.doppler as i32,loss:settings.loss as i32,pad:0,
+            nodes:nodes as i32,fields:fields as i32,nnear:near,doppler:model.doppler as i32,loss:settings.loss as i32,weights:0,
             focused_beam:std::array::from_fn(|f|model.focused.get(f).map_or(0,|&l|l as i32)),stride:std::array::from_fn(|f|nodes.pow(f as u32) as i32),
             field_carrier,field_rank,ground_states:std::array::from_fn(|b|g.ground_states[b] as i32),excited_states:std::array::from_fn(|i|g.excited_states[i] as i32),
             hm:hm as f32,light2:(2.*g.light) as f32,allowance:settings.doppler as f32,truncation:settings.truncation as f32,
@@ -210,9 +234,11 @@ impl Program{
             hm64:hm,dt:settings.dt,axes:settings.axes,omega:settings.frequencies,stiffness:settings.frequencies.map(|w|w*w/hm),half_flow,
         };
         let photons=g.clusters.iter().map(|c|c.classes.iter().map(|k|k.photons.len()).sum::<usize>()).max().unwrap_or(0);
-        Ok(Program{params,photons,_buffers:buffers})
+        let mut program=Program{params,photons,weights,_buffers:buffers};program.params.weights=(program.scratch()-weights) as i32;
+        Ok(program)
     }
     /// A jump's working space per trajectory (float2): the exact response's -- every near beam's
-    /// photon tables at each cluster column -- and the photons' matrices per axis.
-    pub fn scratch(&self)->usize{self.params.nnear as usize*MAXN*3*GROUND+3*self.photons}
+    /// photon tables at each cluster column --, the photons' matrices per axis and the fourth order's
+    /// weights (the kernel's `Program::weights` is where they start).
+    pub fn scratch(&self)->usize{self.params.nnear as usize*MAXN*3*GROUND+3*self.photons+self.weights}
 }
