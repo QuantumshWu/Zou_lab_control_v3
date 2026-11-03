@@ -28,7 +28,7 @@ use crate::{Complex,Initial,STATES};
 
 /// The harmonic twin's control: per output and lab axis A and B (on the principal axes of the
 /// settings' trap) and its exact mean.
-pub struct Harmonic{axes:[[f64;3];3],a:Vec<[[[f64;3];3];3]>,b:Vec<[[[f64;3];3];3]>,pub mean:Vec<[f64;3]>}
+pub struct Harmonic{axes:[[f64;3];3],pub(crate) a:Vec<[[[f64;3];3];3]>,pub(crate) b:Vec<[[[f64;3];3];3]>,pub mean:Vec<[f64;3]>}
 impl Harmonic{
     /// The control of a run of `steps` steps of the settings' dt per output, `outputs` outputs, with
     /// the settings' T windows (lib.rs `Windows`: `half` steps per lab axis, cut at t = 0).
@@ -78,7 +78,7 @@ fn initial_momenta(model:&Model,settings:&Settings,initial:&Initial)->[[f64;3];3
 
 /// The held twin: its point, every cluster's generator and jumps there (engine.rs `Held`), and its
 /// populations' readout there, a linear map of the cluster's density.
-pub struct Twin{pub held:Held,readout:Vec<Vec<[f64;STATES]>>}
+pub struct Twin{pub held:Held,pub(crate) readout:Vec<Vec<[f64;STATES]>>}
 impl Twin{
     /// The twin where the trap beam's intensity is `intensity`, on the line through its focus across
     /// it; none when the generator has residual beats.

@@ -105,6 +105,19 @@ cools the atom with sigma+sigma- pairs along x, y and z; with motion on, the
 Raman-resonant Lambda of 光镊 + 探测光 + 回泵光 runs on one cluster spanning
 F = 1 and F = 2.
 
+The trajectories run on the device the request names (`options.device`, 计算设备):
+an NVIDIA GPU by default, or the CPU. The GPU engine (`motion-3d/src/gpu`,
+`kernels/motion3d.cu`) runs the CPU engine's steps, jumps, losses and readouts
+with the same initial states, random streams, ledger, time step and statistics,
+one warp per trajectory, single precision where a step is local and double where
+it accumulates. It needs compute capability 7.5 (Turing) or newer and a driver
+of CUDA 12.0 (R525, Windows 527.41) or newer: the EXE embeds PTX for compute_75,
+compiled by a pinned NVRTC 12.0 (`motion-3d/scripts/ptx.ps1`; a test checks it
+against the source), and loads `nvcuda.dll` at run time, the driver API alone.
+Without such a GPU, with an older driver or with a model beyond the kernel the
+solve runs on the CPU and `diagnostics.deviceNote` says why; `diagnostics.device`
+is the device used. The worker keeps its CUDA context for every later solve.
+
 Every request asks for the same absolute population error,
 `populationTolerance: 0.01` on the probability scale (1%); it is not a user
 setting. The estimates are calibrated a-posteriori estimates (checked against

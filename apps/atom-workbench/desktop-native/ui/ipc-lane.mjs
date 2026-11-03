@@ -38,7 +38,7 @@ export class IpcNativeLane {
         w.startup.capabilitiesRoundTripMs=performance.now()-w.capabilitySentAt;w.startup.capabilitiesNativeIoMs=event.transport?.nativeIoMs;
         try{w.capabilities=nativeCapabilities(message);}catch(error){this.failWorker(w,failure(error.message,503,'incompatible-native-protocol'));return;}
         w.warmSentAt=performance.now();
-        this.write(w,{id:-1,op:'warmup'});return;
+        this.write(w,{id:-1,op:'warmup',lane:this.name});return;
       }
       if(message.id!==-1||message.error||message.protocol!==NATIVE_PROTOCOL||message.ready!==true){
         this.failWorker(w,failure('Native numerical startup check failed.'));return;

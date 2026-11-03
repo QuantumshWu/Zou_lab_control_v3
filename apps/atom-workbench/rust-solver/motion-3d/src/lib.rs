@@ -5,6 +5,7 @@
 //! algebra of `linear`.
 pub mod control;
 pub mod engine;
+pub mod gpu;
 pub mod ground;
 pub mod ledger;
 pub mod linear;
@@ -122,7 +123,7 @@ pub struct Variates<'a>{pub harmonic:&'a Harmonic,pub twin:Option<&'a Twin>}
 
 /// The most trajectories a task runs one after another: a batch's work is cut this fine so the
 /// threads finish together, while its sums (one per output time) stay few.
-const TASK:u64=8;
+pub(crate) const TASK:u64=8;
 
 /// Trajectories [first, first + count) of the run `seed`, `steps` steps of the settings' dt between
 /// `outputs` output times (the first at t = 0), in groups of `group` (each a Latin hypercube of
