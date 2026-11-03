@@ -460,8 +460,10 @@ impl Check{
 /// its share (1 meets it).
 fn step_excess(engine:&Engine,states:&[Trajectory],waiting:f64)->[f64;2]{
     let dt=engine.settings.dt;let richardson=4./3.;
+    // The states' doublings on the threads, summed in their order (the sums do not depend on the threads).
+    let doubled:Vec<([f64;2],[f64;3],[f64;2])>=states.par_iter().map(|t|engine.doubling(t,dt)).collect();
     let(mut population,mut difference,mut impulse,mut energy,mut friction)=(0.,0.,0.,0.,0.);
-    for t in states{let(motion,internal,work)=engine.doubling(t,dt);difference+=motion[0];impulse+=motion[1];population+=internal[0];energy+=work[0];friction+=work[1];}
+    for(motion,internal,work)in &doubled{difference+=motion[0];impulse+=motion[1];population+=internal[0];energy+=work[0];friction+=work[1];}
     let bound=richardson*population/states.len().max(1) as f64*(waiting/dt).max(1.);
     let relative=if impulse>0.{richardson*difference/impulse}else{0.};
     let dissipated=if friction!=0.{richardson*(energy/friction).abs()}else{0.};
