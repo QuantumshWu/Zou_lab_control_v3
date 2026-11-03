@@ -45,6 +45,16 @@
 //! over the photons the two share). Only the Hermitian part acts on the motion: the Ehrenfest force
 //! is −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩, with the kept drives' gradients Σ_k ∇E_k U_k the stimulated force.
 //!
+//! # The generator's beats
+//! Every term's residual Ω̃ is a beat of the generator: H_eff(t) = H₀ + Σ_j e^{iΩ_j t} H_j (`Components`),
+//! H₀ the static part less its scalar (a phase), H_j the terms at Ω_j, the gradients alike. Residuals
+//! within `same_frame`'s tolerance at the cluster's largest frame and detuning (the frames' round-off)
+//! are static, and are one beat where within it of each other; the beats come in pairs ±Ω (a term and
+//! its adjoint), and the gradient's Hermitian part pairs them, G_{−Ω} = G_Ω†. Where the beats are
+//! integer multiples of one frequency ω₀ (Euclid's algorithm within the round-off) their period 2π/ω₀
+//! lets the exact step cache one period's propagators (engine.rs). A cluster with beats or explicit
+//! excited states takes the exact step; `local` is the release's static clusters of ground states'.
+//!
 //! # The folded pairs' van Vleck shift
 //! A folded pair's path (c, b) → (d, a) → (f, b̂) shifts H_eff by W̃ D U, U = −[V_d† G V_c]_ab and
 //! W̃ = −[V_f† G V_d]_b̂a at the cluster's path energy (ground.rs). Through a carrier d of one beam l,
@@ -172,7 +182,48 @@ struct EffectiveLayout{row:usize,col:usize,carrier:usize,residual:f64,at:usize}
 /// dressed photons ĉ_a[to] (explicit × 3 axes × ng, at `emission`).
 #[derive(Clone,Debug)]
 pub(crate) struct Layout{pub(crate) n:usize,pub(crate) n0:usize,pub(crate) size:usize,pub(crate) h0:usize,pub(crate) groups:Vec<GroupLayout>,pub(crate) carriers:Vec<CarrierLayout>,crosses:Vec<CrossLayout>,drives:Vec<DriveLayout>,
-    decays:Vec<DecayLayout>,effective:Vec<EffectiveLayout>,emission:usize,pub(crate) fourth:Option<FourthLayout>}
+    decays:Vec<DecayLayout>,effective:Vec<EffectiveLayout>,emission:usize,pub(crate) fourth:Option<FourthLayout>,beats:Beats}
+/// A cluster's beats (module documentation, # The generator's beats): the distinct frequencies of its terms'
+/// residuals, ascending and closed under negation (−Ω_max … −Ω_min, Ω_min … Ω_max); the round-off within
+/// which a residual is static or one of them; their common period where they are harmonics of one frequency.
+#[derive(Clone,Debug,Default)]
+pub(crate) struct Beats{pub(crate) omegas:Vec<f64>,round_off:f64,pub(crate) period:Option<f64>}
+impl Beats{
+    /// The beats of the residuals: those beyond the round-off, merged where within it of each other.
+    fn new(residuals:impl Iterator<Item=f64>,round_off:f64)->Beats{
+        let mut positive:Vec<f64>=residuals.map(f64::abs).filter(|&w|w>round_off).collect();positive.sort_by(f64::total_cmp);
+        let mut merged:Vec<f64>=vec![];for w in positive{if merged.last().map_or(true,|&m|w-m>round_off){merged.push(w);}}
+        let omegas:Vec<f64>=merged.iter().rev().map(|&w|-w).chain(merged.iter().copied()).collect();
+        let period=Beats::period_of(&merged,round_off);
+        Beats{omegas,round_off,period}
+    }
+    /// The period 2π/ω₀ of beats that are integer multiples of one frequency ω₀: Euclid's algorithm with
+    /// nearest-integer quotients on the positive beats, each remainder's bound of its round-off carried
+    /// along (|a − q b| errs by at most e_a + |q| e_b); a remainder within its bound ends it, one whose
+    /// divisor is within its own bound has no common frequency. Every beat is then checked to be its
+    /// multiple within the bounds. Within the round-off incommensurate beats are harmonics too, of a
+    /// fundamental far below them: a period too long for a step's cache, which declines it (engine.rs).
+    fn period_of(positive:&[f64],round_off:f64)->Option<f64>{
+        let(&first,rest)=positive.split_first()?;let(mut g,mut error)=(first,round_off);
+        for &w in rest{
+            let(mut a,mut ea,mut b,mut eb)=(w,round_off,g,error);
+            loop{
+                if b<=eb{return None;}
+                let q=(a/b).round();let(r,er)=((a-q*b).abs(),ea+q.abs()*eb);
+                if r<=er{break;}
+                (a,ea,b,eb)=(b,eb,r,er);
+            }
+            (g,error)=(b,eb);
+        }
+        positive.iter().all(|&w|{let q=(w/g).round();(w-q*g).abs()<=round_off+q*error}).then(||std::f64::consts::TAU/g)
+    }
+    /// The beat of a residual: None where it is static, else its index in `omegas`.
+    fn of(&self,residual:f64)->Option<usize>{
+        if residual.abs()<=self.round_off{return None;}
+        let half=self.omegas.len()/2;let i=self.omegas[half..].iter().position(|&w|(residual.abs()-w).abs()<=self.round_off).expect("every residual has its beat");
+        Some(if residual>0.{half+i}else{half-1-i})
+    }
+}
 /// The fourth order's tables of a cluster of ground states (module documentation, # Fourth order), on
 /// the carriers that drive it: per pair (c, d) H^(4)'s quartic part, the monomial
 /// E^c*_k1 E^c_k2 E^d*_k3 E^d_k4 (r_c² r_d² × n × n, at `quartic`), and per carrier c the metric's
@@ -252,6 +303,28 @@ impl Generator{
         std::array::from_fn(|a|-hermitian_form(&self.gradient[a],psi,n)/norm)
     }
 }
+/// A cluster's generator at a point split by its beats (`Model::components`): H(t) = H₀ + Σ_j e^{iΩ_j t} H_j
+/// and the Hermitian part's gradient G(t) = G₀ + Σ_j e^{iΩ_j t} G_j, Hermitian at every t (G_{−Ω} = G_Ω†); H₀
+/// less the static part's scalar; the beats' common period where they are harmonics of one frequency.
+#[derive(Clone,Debug)]
+pub struct Components{pub statics:Generator,pub beats:Vec<Beat>,pub period:Option<f64>}
+/// One beat of a generator: its frequency Ω (rad/us) and its parts of H and of the gradient (n × n).
+#[derive(Clone,Debug)]
+pub struct Beat{pub omega:f64,pub hamiltonian:Vec<Complex>,pub gradient:[Vec<Complex>;3]}
+impl Components{
+    pub fn n(&self)->usize{self.statics.n}
+    /// The generator at time t.
+    pub fn at(&self,t:f64)->Generator{
+        let mut g=self.statics.clone();
+        for b in &self.beats{
+            let phase=Complex::cis(b.omega*t);
+            for(o,x)in g.hamiltonian.iter_mut().zip(&b.hamiltonian){*o+=phase**x;}
+            for a in 0..3{for(o,x)in g.gradient[a].iter_mut().zip(&b.gradient[a]){*o+=phase**x;}}
+        }
+        g
+    }
+}
+
 /// Re⟨ψ|X|ψ⟩ of a Hermitian n × n matrix X (row-major).
 #[inline]
 pub fn hermitian_form(x:&[Complex],psi:&[Complex],n:usize)->f64{
@@ -530,7 +603,7 @@ impl Model{
                 }}
             }
             let emission=size;size+=3*ng*cl.excited.len();
-            let drives=cl.drives.iter().map(|&(row,col,c,residual)|DriveLayout{row,col,carrier:c,residual,
+            let drives:Vec<DriveLayout>=cl.drives.iter().map(|&(row,col,c,residual)|DriveLayout{row,col,carrier:c,residual,
                 u:std::array::from_fn(|k|if k<self.carriers[c].rank{basis[c][k][(cl.excited[row-n0],cl.states[col])]}else{Complex::ZERO})}).collect();
             // The fourth order: a cluster of ground states, on the carriers whose folded drives reach it.
             let fourth=(self.fourth&&cl.excited.is_empty()).then(||{
@@ -543,7 +616,15 @@ impl Model{
                 for &d in &on{for &e in &on{f.p.push((d,e,size));size+=r(d)*r(e)*ng*n;}}
                 for &c in &on{f.rr_all.push((c,size));size+=r(c)*r(c)*ng*n;f.photons.push((c,size));size+=r(c)*3*ng*ng;}
                 f});
-            Layout{n,n0,size,h0,groups,carriers,crosses,drives,decays,effective,emission,fourth}
+                        // The beats of every term's residual, a residual static within `same_frame`'s tolerance at the
+            // cluster's largest frame and detuning (the round-off of the frames' differences); the fourth order's
+            // entries beat at the frames' differences.
+            let largest=cl.frames.iter().chain(&cl.excited_frames).map(|x|x.abs()).fold(0.,f64::max)+g.carriers.iter().map(|c|c.detuning.abs()).fold(0.,f64::max);
+            let frames:Vec<f64>=if fourth.is_some(){cl.frames.iter().flat_map(|a|cl.frames.iter().map(move|b|a-b)).collect()}else{vec![]};
+            let residuals=groups.iter().map(|x|x.residual).chain(drives.iter().map(|x|x.residual)).chain(crosses.iter().map(|x|x.residual))
+                .chain(decays.iter().map(|x|x.residual)).chain(effective.iter().map(|x|x.residual)).chain(frames);
+            let beats=Beats::new(residuals,64.*f64::EPSILON*2.*largest);
+            Layout{n,n0,size,h0,groups,carriers,crosses,drives,decays,effective,emission,fourth,beats}
         }).collect()
     }
 
@@ -937,6 +1018,11 @@ impl Model{
     pub fn clusters(&self)->usize{self.layouts.len()}
     /// Whether a cluster has explicit excited states.
     pub fn mixed(&self,cluster:usize)->bool{self.layouts[cluster].n>self.layouts[cluster].n0}
+    /// Whether a cluster's generator beats: a term keeps a residual frequency in its frame.
+    pub fn beating(&self,cluster:usize)->bool{!self.layouts[cluster].beats.omegas.is_empty()}
+    /// A cluster's beats (rad/us), ascending and closed under negation, and their common period (us)
+    /// where they are harmonics of one frequency.
+    pub fn beats(&self,cluster:usize)->(&[f64],Option<f64>){let b=&self.layouts[cluster].beats;(&b.omegas,b.period)}
     /// A cluster's number of ground states (the first of its basis).
     pub fn ground_dimension(&self,cluster:usize)->usize{self.layouts[cluster].n0}
 
@@ -951,70 +1037,95 @@ impl Model{
             if let Some(s)=slopes.as_deref_mut(){for g in 0..d{for(o,z)in s[g].iter_mut().zip(x.chunks_exact(2)){o.re+=dw[g]*z[0];o.im+=dw[g]*z[1];}}}
         }
     }
-    /// A cluster's generator at a point and time t on its n states (`Generator`): through `local`
-    /// for a cluster of ground states; for one with explicit excited states, its tables' terms and
-    /// the kept drives, the decay cross terms and the explicit states' decay (module documentation).
+    /// A cluster's generator at a point and time t on its n states (`Generator`): a static cluster of
+    /// ground states' through `local`, every other one's through its beats' components (`components`).
     pub fn generator(&self,cluster:usize,p:&Point,t:f64)->Generator{
-        if !self.mixed(cluster){
+        if !self.mixed(cluster)&&!self.beating(cluster){
             let local=self.local(cluster,p,t);let n=self.dimension(cluster);
             return Generator{n,hamiltonian:local.hamiltonian[..n*n].to_vec(),scalar:local.scalar,gradient:self.gradients(cluster,&local)};
         }
-        let layout=&self.layouts[cluster];let(n,d)=(layout.n,self.focused.len());let nn=n*n;
-        let mut gradient:[Vec<Complex>;3]=std::array::from_fn(|_|vec![Complex::ZERO;nn]);
-        let(mut m,mut gamma,mut buf)=(vec![Complex::ZERO;nn],vec![Complex::ZERO;nn],vec![Complex::ZERO;nn]);let mut slope=vec![vec![Complex::ZERO;nn];d];
+        self.components(cluster,p).at(t)
+    }
+    /// A cluster's generator at a point split by its beats (`Components`): its tables' terms, the kept
+    /// drives, the decay cross terms and the explicit states' decay (module documentation), and a cluster
+    /// of ground states' fourth order, each into the part of its residual -- the static one, or its beat's.
+    pub fn components(&self,cluster:usize,p:&Point)->Components{
+        let layout=&self.layouts[cluster];let(n,d)=(layout.n,self.focused.len());let nn=n*n;let beats=&layout.beats;let parts=1+beats.omegas.len();
+        // The part of a residual: 0 the static one, 1 + j beat j's.
+        let part=|w:f64|beats.of(w).map_or(0,|j|j+1);
+        let zeros=||vec![Complex::ZERO;nn];
+        let mut gradient:Vec<[Vec<Complex>;3]>=(0..parts).map(|_|std::array::from_fn(|_|zeros())).collect();
+        let(mut m,mut gamma):(Vec<Vec<Complex>>,Vec<Vec<Complex>>)=((0..parts).map(|_|zeros()).collect(),(0..parts).map(|_|zeros()).collect());
+        let mut buf=zeros();let mut slope=vec![zeros();d];
         // acc += c X, and with `adjoint` c X + (c X)† (a Hermitian group's pair k1 < k standing for both);
         // a group's tables hold its entries alone (`scatter`).
         let add=|c:Complex,x:&[Complex],acc:&mut [Complex],adjoint:bool|{for a in 0..n{for b in 0..n{acc[a*n+b]+=c*x[a*n+b];if adjoint{acc[a*n+b]+=(c*x[b*n+a]).conj();}}}};
         let scatter=|c:Complex,x:&[Complex],entries:&[(usize,usize)],acc:&mut [Complex],adjoint:bool|{for(j,&(a,b))in entries.iter().enumerate(){acc[a*n+b]+=c*x[j];if adjoint{acc[b*n+a]+=(c*x[j]).conj();}}};
         for gl in &layout.groups{
-            let(f,e)=(&p.fields[gl.absorbed],&p.fields[gl.emitted]);let phase=Complex::cis(gl.residual*t);let count=gl.entries.len();
+            let(f,e)=(&p.fields[gl.absorbed],&p.fields[gl.emitted]);let q=part(gl.residual);let count=gl.entries.len();
             for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
-                let at=pi*count;let ee=phase*e.e[k1].conj()*f.e[k];let both=gl.hermitian&&k1<k;
+                let at=pi*count;let ee=e.e[k1].conj()*f.e[k];let both=gl.hermitian&&k1<k;
                 self.gather_dyn(cluster,&p.stencil,gl.s+at,&mut buf[..count],Some(&mut slope));
-                scatter(ee,&buf[..count],&gl.entries,&mut m,both);
+                scatter(ee,&buf[..count],&gl.entries,&mut m[q],both);
                 // ∇H_herm ∋ −∇(Φ) S − Φ Σ_f ∂_f S ∇s_f.
                 for a in 0..3{
-                    let c=phase*(e.grad[k1][a].conj()*f.e[k]+e.e[k1].conj()*f.grad[k][a]);scatter(-c,&buf[..count],&gl.entries,&mut gradient[a],both);
-                    for g in 0..d{scatter(-ee*p.intensity_gradient[g][a],&slope[g][..count],&gl.entries,&mut gradient[a],both);}
+                    let c=e.grad[k1][a].conj()*f.e[k]+e.e[k1].conj()*f.grad[k][a];scatter(-c,&buf[..count],&gl.entries,&mut gradient[q][a],both);
+                    for g in 0..d{scatter(-ee*p.intensity_gradient[g][a],&slope[g][..count],&gl.entries,&mut gradient[q][a],both);}
                 }
-                self.gather_dyn(cluster,&p.stencil,gl.q+at,&mut buf[..count],None);scatter(ee,&buf[..count],&gl.entries,&mut gamma,both);
+                self.gather_dyn(cluster,&p.stencil,gl.q+at,&mut buf[..count],None);scatter(ee,&buf[..count],&gl.entries,&mut gamma[q],both);
             }
         }
         self.gather_dyn(cluster,&p.stencil,layout.h0,&mut buf,Some(&mut slope));
-        for a in 0..3{for g in 0..d{let c=Complex::new(p.intensity_gradient[g][a],0.);add(c,&slope[g],&mut gradient[a],false);}}
-        let scalar=(0..n).map(|a|buf[a*n+a].re-m[a*n+a].re).sum::<f64>()/n as f64;
-        let mut h:Vec<Complex>=(0..nn).map(|i|buf[i]-m[i]-gamma[i]*Complex::new(0.,0.5)).collect();
-        for a in 0..n{h[a*n+a]-=Complex::new(scalar,0.);}
+        for a in 0..3{for g in 0..d{let c=Complex::new(p.intensity_gradient[g][a],0.);add(c,&slope[g],&mut gradient[0][a],false);}}
+        // The static part less its scalar (its Hermitian part's mean diagonal, a phase); a beat's diagonal,
+        // a phase that beats, stays in its part.
+        let scalar=(0..n).map(|a|buf[a*n+a].re-m[0][a*n+a].re).sum::<f64>()/n as f64;
+        let mut h:Vec<Vec<Complex>>=(0..parts).map(|q|(0..nn).map(|i|(if q==0{buf[i]}else{Complex::ZERO})-m[q][i]-gamma[q][i]*Complex::new(0.,0.5)).collect()).collect();
+        for a in 0..n{h[0][a*n+a]-=Complex::new(scalar,0.);}
+        // The fourth order (a cluster of ground states, `fourth_hamiltonian`): entry (a, b) at the frames'
+        // difference θ_a − θ_b (the force keeps the second order's).
+        if let Some(h4)=self.fourth_hamiltonian(cluster,p,0.){let frames=&self.ground.clusters[cluster].frames;
+            for a in 0..n{for b in 0..n{h[if a==b{0}else{part(frames[a]-frames[b])}][a*n+b]+=h4[a*n+b];}}}
         // The kept drives, Σ_k E_k U_k e^{iΩ̃t} and its adjoint; their gradients the stimulated force.
         for dr in &layout.drives{
-            let fl=&p.fields[dr.carrier];let phase=Complex::cis(dr.residual*t);let rank=self.carriers[dr.carrier].rank;
-            let v=(0..rank).fold(Complex::ZERO,|s,k|s+fl.e[k]*dr.u[k])*phase;h[dr.row*n+dr.col]+=v;h[dr.col*n+dr.row]+=v.conj();
-            for a in 0..3{let g=(0..rank).fold(Complex::ZERO,|s,k|s+fl.grad[k][a]*dr.u[k])*phase;gradient[a][dr.row*n+dr.col]+=g;gradient[a][dr.col*n+dr.row]+=g.conj();}
+            let fl=&p.fields[dr.carrier];let(q,mirror)=(part(dr.residual),part(-dr.residual));let rank=self.carriers[dr.carrier].rank;
+            let v=(0..rank).fold(Complex::ZERO,|s,k|s+fl.e[k]*dr.u[k]);h[q][dr.row*n+dr.col]+=v;h[mirror][dr.col*n+dr.row]+=v.conj();
+            for a in 0..3{let g=(0..rank).fold(Complex::ZERO,|s,k|s+fl.grad[k][a]*dr.u[k]);gradient[q][a][dr.row*n+dr.col]+=g;gradient[mirror][a][dr.col*n+dr.row]+=g.conj();}
         }
         // The decay cross terms, (i/2) e^{iΩ̃t} Σ_k E_k X_k and its mirror; the explicit states' decay.
         let mut x=[Complex::ZERO;MOST_RANK];
         for cr in &layout.crosses{
             let rank=self.carriers[cr.carrier].rank;self.gather_dyn(cluster,&p.stencil,cr.at,&mut x[..rank],None);
-            let z=(0..rank).fold(Complex::ZERO,|s,k|s+p.fields[cr.carrier].e[k]*x[k])*Complex::cis(cr.residual*t);
-            h[cr.row*n+cr.col]+=z*Complex::new(0.,0.5);h[cr.col*n+cr.row]+=z.conj()*Complex::new(0.,0.5);
+            let z=(0..rank).fold(Complex::ZERO,|s,k|s+p.fields[cr.carrier].e[k]*x[k]);
+            h[part(cr.residual)][cr.row*n+cr.col]+=z*Complex::new(0.,0.5);h[part(-cr.residual)][cr.col*n+cr.row]+=z.conj()*Complex::new(0.,0.5);
         }
         let mut z1=[Complex::ZERO];
-        for x in &layout.decays{self.gather_dyn(cluster,&p.stencil,x.at,&mut z1,None);h[x.row*n+x.col]+=z1[0]*Complex::cis(x.residual*t);}
+        for x in &layout.decays{self.gather_dyn(cluster,&p.stencil,x.at,&mut z1,None);h[part(x.residual)][x.row*n+x.col]+=z1[0];}
         // The drives the dressing brings: Σ_k E_k Y_k e^{iΩ̃t} and its adjoint, and their gradients.
         let(mut y,mut dy)=([Complex::ZERO;MOST_RANK],vec![vec![Complex::ZERO;MOST_RANK];d]);
         for x in &layout.effective{
-            let rank=self.carriers[x.carrier].rank;let fl=&p.fields[x.carrier];let phase=Complex::cis(x.residual*t);
+            let rank=self.carriers[x.carrier].rank;let fl=&p.fields[x.carrier];let(q,mirror)=(part(x.residual),part(-x.residual));
             self.gather_dyn(cluster,&p.stencil,x.at,&mut y[..rank],Some(&mut dy));
-            let v=(0..rank).fold(Complex::ZERO,|s,k|s+fl.e[k]*y[k])*phase;h[x.row*n+x.col]+=v;h[x.col*n+x.row]+=v.conj();
+            let v=(0..rank).fold(Complex::ZERO,|s,k|s+fl.e[k]*y[k]);h[q][x.row*n+x.col]+=v;h[mirror][x.col*n+x.row]+=v.conj();
             for a in 0..3{
                 let mut g=(0..rank).fold(Complex::ZERO,|s,k|s+fl.grad[k][a]*y[k]);
                 for f in 0..d{g+=(0..rank).fold(Complex::ZERO,|s,k|s+fl.e[k]*dy[f][k])*p.intensity_gradient[f][a];}
-                let g=g*phase;gradient[a][x.row*n+x.col]+=g;gradient[a][x.col*n+x.row]+=g.conj();
+                gradient[q][a][x.row*n+x.col]+=g;gradient[mirror][a][x.col*n+x.row]+=g.conj();
             }
         }
-        // The gradients Hermitian (the force reads Re⟨ψ|·|ψ⟩ alone).
-        for g in gradient.iter_mut(){for a in 0..n{for b in a..n{let z=(g[a*n+b]+g[b*n+a].conj())*0.5;g[a*n+b]=z;g[b*n+a]=z.conj();}}}
-        Generator{n,hamiltonian:h,scalar,gradient}
+        // The gradients' Hermitian parts (the force reads Re⟨ψ|·|ψ⟩ alone): the static one's, and per pair of
+        // beats ±Ω, (G_Ω + G_{−Ω}†)/2 at Ω and its adjoint at −Ω, so that G(t) is Hermitian at every t.
+        for g in gradient[0].iter_mut(){for a in 0..n{for b in a..n{let z=(g[a*n+b]+g[b*n+a].conj())*0.5;g[a*n+b]=z;g[b*n+a]=z.conj();}}}
+        let half=beats.omegas.len()/2;
+        for i in 0..half{
+            let(up,down)=(1+half+i,half-i);let(low,high)=gradient.split_at_mut(up);
+            for x in 0..3{let(u,v)=(&mut high[0][x],&mut low[down][x]);
+                for a in 0..n{for b in 0..n{let z=(u[a*n+b]+v[b*n+a].conj())*0.5;u[a*n+b]=z;v[b*n+a]=z.conj();}}}
+        }
+        let mut gradient=gradient.into_iter();let mut h=h.into_iter();
+        let statics=Generator{n,hamiltonian:h.next().unwrap(),scalar,gradient:gradient.next().unwrap()};
+        let beats_out=beats.omegas.iter().zip(h.zip(gradient)).map(|(&omega,(hamiltonian,gradient))|Beat{omega,hamiltonian,gradient}).collect();
+        Components{statics,beats:beats_out,period:beats.period}
     }
 
     /// A cluster's generator at a point and time t (`Local`): a cluster of ground states' (one with
@@ -1585,5 +1696,27 @@ impl Photons<'_>{
             if sum>0.{for(l,d)in drives{let share=total*d/sum;match shares.iter_mut().find(|x|x.0==l){Some(x)=>x.1+=share,None=>shares.push((l,share))}}}
         }
         (gradient,shares)
+    }
+}
+
+#[cfg(test)]
+mod tests{
+    use super::Beats;
+    use std::f64::consts::TAU;
+    /// Residuals within the round-off of zero are static and of each other one beat; the beats come in
+    /// pairs ±Ω; harmonics of one frequency have its period, incommensurate ones none.
+    #[test]
+    fn the_beats_merge_the_round_off_and_find_the_period(){
+        let w=228.702;let round_off=1e-10;
+        let b=Beats::new([0.,-5.7e-14,w,w*(1.+1e-15),-w,2.*w,-2.*w+3e-13,5.*w,0.].into_iter(),round_off);
+        assert_eq!(b.omegas.len(),6);
+        for(x,y)in b.omegas.iter().zip([-5.*w,-2.*w,-w,w,2.*w,5.*w]){assert!((x-y).abs()<=round_off,"{:?}",b.omegas);}
+        assert!((b.period.unwrap()-TAU/w).abs()<=1e-12*TAU/w,"{:?}",b.period);
+        assert_eq!(b.of(1e-13),None);assert_eq!(b.of(-2.*w),Some(1));assert_eq!(b.of(5.*w*(1.-1e-16)),Some(5));
+        // Incommensurate beats are harmonics only of a fundamental below their ratio's resolution in the
+        // round-off: a period far too long for a step's cache (engine.rs).
+        assert!(Beats::new([1.,2f64.sqrt()].into_iter(),1e-12).period.map_or(true,|t|TAU/t<1e-4));
+        assert!((Beats::new([3.,4.5,-7.5].into_iter(),1e-12).period.unwrap()-TAU/1.5).abs()<=1e-12);
+        assert!(Beats::new([0.,1e-11].into_iter(),1e-10).omegas.is_empty());
     }
 }

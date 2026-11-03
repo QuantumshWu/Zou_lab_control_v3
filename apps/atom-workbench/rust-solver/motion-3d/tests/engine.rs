@@ -397,7 +397,7 @@ fn the_held_twin_at_fourth_order_averages_to_its_master_equation(){
     let runs:Vec<Vec<[f64;STATES]>>=(0..count).map(|index|{
         let mut psi=[Complex::ZERO;MOST_MIXED];psi[state]=Complex::ONE;
         let mut t=atom_motion_3d::engine::Trajectory{cluster,psi,r:twin.held.point.r,kappa:[0.;3],time:0.,threshold:atom_motion_3d::engine::jump_stream(17,index,0).open_uniform(),
-            alive:true,jumps:0,doppler:0.,seed:17,index};
+            alive:true,jumps:0,doppler:0.,beats:0.,seed:17,index};
         twin.start(&mut t);
         let mut out=vec![twin.populations(t.cluster,&t.psi)];
         for _ in 1..outputs{for _ in 0..steps{held.step(&mut t);}out.push(twin.populations(t.cluster,&t.psi));}

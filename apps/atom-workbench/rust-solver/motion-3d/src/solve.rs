@@ -400,8 +400,11 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let most=(MOST_STEPS/(outputs-1)).max(1);
     let steps=((interval*rate/(A_PRIORI_SHARE*TEMPERATURE_TARGET).sqrt()).ceil() as usize).clamp(1,most);
     let plain=|steps:usize,truncation:f64|Settings::new(interval/steps as f64,&trap,truncation,true);
-    let pilot_harmonic=Harmonic::new(&pilot_candidate.model,&plain(steps,f64::EPSILON),&pilot_candidate.initial,steps,outputs);
-    let(pilot_states,pilot_jumps,pilot_groups)=sample_states(&pilot_candidate.model,&plain(steps,f64::EPSILON),&pilot_candidate.initial,seed,pilot,steps,outputs,&pilot_harmonic);
+    // The pilots' exponentials to double precision; the beats their exact steps leave out within the share
+    // the run's take at most, the step's population budget over the whole run (engine.rs `Segment::resolve`).
+    let piloting=|steps:usize|{let mut s=plain(steps,f64::EPSILON);s.beats=A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*s.dt/duration;s.horizon=duration;s};
+    let pilot_harmonic=Harmonic::new(&pilot_candidate.model,&piloting(steps),&pilot_candidate.initial,steps,outputs);
+    let(pilot_states,pilot_jumps,pilot_groups)=sample_states(&pilot_candidate.model,&piloting(steps),&pilot_candidate.initial,seed,pilot,steps,outputs,&pilot_harmonic);
     let charge=measured_charge(&pilot_candidate.model,&pilot_candidate.model,&pilot_states);pilot_candidate.charged(charge);
     let pilot_waiting=pilot as f64*duration/(pilot_jumps.max(1) as f64);
     let mut reference:Option<Candidate>=None;
@@ -428,7 +431,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
                     c.charged(base.saturation);
                     if c.fits(){
                         let trajectories=(0..2).map(|k|(rooms[k]/c.rooms[k]).powi(2)).fold(0.,f64::max);
-                        let(settings,limit)=(plain(steps,f64::EPSILON),best/trajectories);
+                        let(settings,limit)=(piloting(steps),best/trajectories);
                         let w=if !(counted_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,interval,pilot_waiting)<=limit){f64::INFINITY}
                             else{model_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,pilot as usize,interval,limit)};
                         if w*trajectories<best{best=w*trajectories;better=Some(c);}
@@ -442,7 +445,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
                 let charge=measured_charge(&pilot_candidate.model,&c.model,&pilot_states);c.charged(charge);
                 if !c.fits(){continue;}
                 let trajectories=(0..2).map(|k|(rooms[k]/c.rooms[k]).powi(2)).fold(0.,f64::max);
-                let(settings,limit)=(plain(steps,f64::EPSILON),best/fewest);
+                let(settings,limit)=(piloting(steps),best/fewest);
                 work=work.max(if !(counted_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,interval,pilot_waiting)<=limit){f64::INFINITY}
                     else{model_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,pilot as usize,interval,limit)});
                 if work*trajectories<best{best=work*trajectories;better=Some(c);}
@@ -452,18 +455,21 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     };
     // The pilot again where the choice is not its model (its trajectories' sums the first prediction's).
     let(chosen,(states,jumps,pilot_groups),pilot_harmonic)=match better.or(reference){
-        Some(c)=>{let h=Harmonic::new(&c.model,&plain(steps,f64::EPSILON),&c.initial,steps,outputs);
-            let pilot_run=sample_states(&c.model,&plain(steps,f64::EPSILON),&c.initial,seed,pilot,steps,outputs,&h);(c,pilot_run,h)}
+        Some(c)=>{let h=Harmonic::new(&c.model,&piloting(steps),&c.initial,steps,outputs);
+            let pilot_run=sample_states(&c.model,&piloting(steps),&c.initial,seed,pilot,steps,outputs,&h);(c,pilot_run,h)}
         None=>(pilot_candidate,(pilot_states,pilot_jumps,pilot_groups),pilot_harmonic),
     };
     let Candidate{model,initial,base,charge,..}=chosen;
+    // The beats the exact steps left out (engine.rs `Segment::resolve`), booked as their bound per unit time
+    // over the horizon: within the exponentials' share by construction.
+    let pilot_beats=states.iter().map(|t|t.beats).fold(0.,f64::max);
     let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
     let waiting=pilot as f64*duration/(jumps.max(1) as f64);let horizon=waiting.min(duration);
     // The first order in the Doppler shift: what the budget leaves after the model's other estimates
     // (the fold's charge takes its own share of the target), or the budget itself where they exceed it.
     let left=BUDGET-(base.used()-fold_charge(&model,model.ground.charge));let allowance=if left>0.{left}else{BUDGET};
     // The exponentials are summed to a share η of the step's own population budget, η² ε dt/waiting.
-    let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=allowance;s};
+    let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=allowance;s.horizon=waiting;s};
     // The step (module documentation): by the bound's rule first -- from the first step, the next by
     // the square root of the excess (both errors scale as dt²) until it suggests a step already
     // checked --, then, where the population criterion decides that rule's step, from it with the
@@ -487,7 +493,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let candidates:Vec<Check>=bound.iter().chain(&measured).filter(|c|c.met()).copied().collect();
     // The a-priori total the steps' costs take: the ledger's estimates with the fold's charge as the
     // pilot measured it.
-    let apriori=base.used()-fold_charge(&model,model.ground.charge)+charge;let parts=state_work(&model,&states);
+    let apriori=base.used()-fold_charge(&model,model.ground.charge)+charge+pilot_beats*horizon;let parts=state_work(&model,&states);
     let chosen=if candidates.len()>1{
         // Against the bound rule's step, or where it missed the targets the smallest candidate step.
         let baseline=*candidates.iter().find(|c|c.steps==grown.steps).or(candidates.iter().max_by_key(|c|c.steps)).unwrap();
@@ -537,7 +543,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let pilot_need={
         let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:pilot_harmonic.mean[i],twin:None}).collect();
         let mut e=summarize(&pilot_groups,&scales,&means);start(&mut e[0],&model,&initial);
-        let(_,accounts)=ledger(&model,&base,&e,times,allowance,bias,trap.lab,false);
+        let(_,accounts)=ledger(&model,&booked(&base,pilot_beats*horizon),&e,times,allowance,bias,trap.lab,false);
         (pilot as f64*worst_ratio(&e,&accounts,trap.lab).powi(2)).min(MOST_TRAJECTORIES as f64).ceil() as u64
     };
     let clock=Instant::now();
@@ -549,7 +555,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // against those they need without.
     if twin.is_some(){
         let needed=|means:&[Means]|{let mut e=summarize(&first.groups,&scales,means);start(&mut e[0],&model,&initial);
-            let(_,accounts)=ledger(&model,&base,&e,times,allowance,bias,trap.lab,false);worst_ratio(&e,&accounts,trap.lab).powi(2)};
+            let(_,accounts)=ledger(&model,&booked(&base,pilot_beats.max(first.beats)*horizon),&e,times,allowance,bias,trap.lab,false);worst_ratio(&e,&accounts,trap.lab).powi(2)};
         let share=held_work(&parts,&settings,interval,waiting)/interval_work(&parts,&settings,interval,waiting);
         if needed(&means(true))*(1.+share)>=needed(&means(false)){twin=None;}
     }
@@ -558,10 +564,10 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let mut outcome=first;let mut done=count;let mut per_trajectory=wall/count as f64;
     loop{
         let mut estimates=summarize(&outcome.groups,&scales,&means);start(&mut estimates[0],&model,&initial);
-        let(_,accounts)=ledger(&model,&base,&estimates,times,allowance,bias,trap.lab,false);
+        let(_,accounts)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,false);
         let ratio=worst_ratio(&estimates,&accounts,trap.lab);
         let wanted=(done as f64*ratio*ratio).ceil() as u64;let needed=wanted.min(MOST_TRAJECTORIES);
-        let(mut ledger,_)=ledger(&model,&base,&estimates,times,allowance,bias,trap.lab,needed<=done);
+        let(mut ledger,_)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,needed<=done);
         if let(Some(note),Some(flag))=(&bounded,&ledger.flagged){ledger.flagged=Some(format!("{note}；{flag}"));}
         let mut solution=assemble(&model,&estimates,&outcome,&listed,times,trap.lab,done,dt,&request.initial_density,ledger,twin.is_some());
         solution.device=used;solution.device_note=note.clone();solution.needed=wanted;
@@ -574,9 +580,16 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let clock=Instant::now();
         let more=batch(done,next,twin.as_ref())?;
         per_trajectory=clock.elapsed().as_secs_f64()/next as f64;
-        outcome.groups.extend(more.groups);for(a,b)in outcome.samples.iter_mut().zip(more.samples){a.extend(b);}outcome.jumps+=more.jumps;outcome.doppler=outcome.doppler.max(more.doppler);
+        outcome.groups.extend(more.groups);for(a,b)in outcome.samples.iter_mut().zip(more.samples){a.extend(b);}outcome.jumps+=more.jumps;outcome.doppler=outcome.doppler.max(more.doppler);outcome.beats=outcome.beats.max(more.beats);
         done+=next;
     }
+}
+
+/// The model's ledger with the beats the exact steps left out, `bound` their largest over the horizon.
+fn booked(base:&Ledger,bound:f64)->Ledger{
+    let mut ledger=base.clone();
+    if bound>0.{ledger.add("多速率步略去的残余拍频",bound,"整步影响之界（Duhamel 积分的分部积分）在指数截断份额内的拍频对略去，其余按 CF4 精确传播".into());}
+    ledger
 }
 
 /// The ledger's item of the drives' fold (its charge a priori; the solve's ledger charges it as measured).

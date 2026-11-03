@@ -175,13 +175,14 @@ fn initial_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,purpos
     let p:[f64;3]=std::array::from_fn(|i|{let z=normal_quantile(latin.next(&mut rng));if sigma[i]>0.{(kt/hm).sqrt()*quantum[i]*z}else{0.}});
     let mut psi=[Complex::ZERO;model::MOST_MIXED];psi[state]=Complex::ONE;
     let threshold=engine::jump_stream(seed,index,0).open_uniform();
-    Trajectory{cluster,psi,r:lab(q),kappa:lab(p),time:0.,threshold,alive:true,jumps:0,doppler:0.,seed,index}
+    Trajectory{cluster,psi,r:lab(q),kappa:lab(p),time:0.,threshold,alive:true,jumps:0,doppler:0.,beats:0.,seed,index}
 }
 
 /// The outputs of a run: one group per `group` trajectories, sums at every output time, the held
-/// atoms' (r, κ) at the listed outputs, the jumps made, the largest first-order (kv/σ_min)², and the
+/// atoms' (r, κ) at the listed outputs, the jumps made, the largest first-order (kv/σ_min)², the
+/// largest bound per unit time of the beats the exact steps left out (`Trajectory::beats`), and the
 /// seconds (summed over the threads) its trajectories and their held twins took.
-pub struct Outcome{pub groups:Vec<Group>,pub samples:Vec<Vec<([f64;3],[f64;3])>>,pub jumps:u64,pub doppler:f64,pub seconds:[f64;2]}
+pub struct Outcome{pub groups:Vec<Group>,pub samples:Vec<Vec<([f64;3],[f64;3])>>,pub jumps:u64,pub doppler:f64,pub beats:f64,pub seconds:[f64;2]}
 
 /// The control variates a run computes (control.rs): the harmonic twin's control of every trajectory
 /// and, with a held twin, the twin of every trajectory.
@@ -222,7 +223,7 @@ fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count
     let bounds=|g:u64|(first+g*group,(first+(g+1)*group).min(first+count));
     let tasks:Vec<(u64,u64,u64)>=(0..count.div_ceil(group)).flat_map(|g|{let(start,end)=bounds(g);(start..end).step_by(TASK as usize).map(move|s|(g,s,(s+TASK).min(end)))}).collect();
     let slots:Vec<Mutex<Slot>>=tasks.iter().map(|&(_,from,to)|Mutex::new(Slot{sums:Group::new(outputs,(to-from) as usize),samples:vec![vec![];listed.len()],next:from,
-        waiting:(from..to).map(|_|None).collect(),jumps:0,doppler:0.,seconds:[0.;2]})).collect();
+        waiting:(from..to).map(|_|None).collect(),jumps:0,doppler:0.,beats:0.,seconds:[0.;2]})).collect();
     (0..count as usize).into_par_iter().with_max_len(1).for_each_init(||(Windows::new(settings,steps,outputs),vec![None;outputs]),|(windows,held),n|{
         let index=first+n as u64;let k=tasks.partition_point(|t|t.1<=index)-1;let(g,from,to)=tasks[k];let(start,end)=bounds(g);
         let mut bare=initial_from(model,settings,initial,seed,Purpose::Initial,index,Stratum{first:start,size:end-start});
@@ -233,7 +234,7 @@ fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count
         let held_seconds=clock.elapsed().as_secs_f64();let clock=Instant::now();
         let mut t=dressed(model,bare);
         let(atoms,samples,_,_)=walk(model,&engine,&mut t,steps,outputs,listed,windows,held,None);
-        let record=Record{atoms,start:(r0,k0),twin,samples,jumps:t.jumps,doppler:t.doppler,seconds:[clock.elapsed().as_secs_f64(),held_seconds]};
+        let record=Record{atoms,start:(r0,k0),twin,samples,jumps:t.jumps,doppler:t.doppler,beats:t.beats,seconds:[clock.elapsed().as_secs_f64(),held_seconds]};
         // Into its task in order: it and every trajectory after it that already waits.
         let mut guard=slots[k].lock().unwrap_or_else(|e|e.into_inner());let slot=&mut *guard;slot.waiting[(index-from) as usize]=Some(record);
         while slot.next<to{
@@ -243,17 +244,17 @@ fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count
                 slot.sums.add(i,atom.as_ref().map(atom_of).as_ref(),&controls);
             }
             for(k,x)in r.samples.into_iter().enumerate(){if let Some(x)=x{slot.samples[k].push(x);}}
-            slot.jumps+=r.jumps;slot.doppler=slot.doppler.max(r.doppler);slot.seconds[0]+=r.seconds[0];slot.seconds[1]+=r.seconds[1];slot.next+=1;
+            slot.jumps+=r.jumps;slot.doppler=slot.doppler.max(r.doppler);slot.beats=slot.beats.max(r.beats);slot.seconds[0]+=r.seconds[0];slot.seconds[1]+=r.seconds[1];slot.next+=1;
         }
     });
     // A group's tasks merged in order: the sums do not depend on the threads.
-    let mut samples=vec![vec![];listed.len()];let(mut jumps,mut doppler,mut seconds)=(0,0_f64,[0.;2]);let mut out:Vec<Group>=vec![];let mut last=None;
+    let mut samples=vec![vec![];listed.len()];let(mut jumps,mut doppler,mut beats,mut seconds)=(0,0_f64,0_f64,[0.;2]);let mut out:Vec<Group>=vec![];let mut last=None;
     for(&(g,_,_),slot)in tasks.iter().zip(slots){
         let slot=slot.into_inner().unwrap_or_else(|e|e.into_inner());
         if last==Some(g){out.last_mut().unwrap().merge(&slot.sums);}else{out.push(slot.sums);last=Some(g);}
-        for(k,v)in slot.samples.into_iter().enumerate(){samples[k].extend(v);}jumps+=slot.jumps;doppler=doppler.max(slot.doppler);seconds[0]+=slot.seconds[0];seconds[1]+=slot.seconds[1];
+        for(k,v)in slot.samples.into_iter().enumerate(){samples[k].extend(v);}jumps+=slot.jumps;doppler=doppler.max(slot.doppler);beats=beats.max(slot.beats);seconds[0]+=slot.seconds[0];seconds[1]+=slot.seconds[1];
     }
-    Outcome{groups:out,samples,jumps,doppler,seconds}
+    Outcome{groups:out,samples,jumps,doppler,beats,seconds}
 }
 
 /// A held atom at an output: its motion's window means, populations, folded excited population (η²),
@@ -290,10 +291,10 @@ fn walk(model:&Model,engine:&Engine,t:&mut Trajectory,steps:usize,outputs:usize,
 /// profile error and (kv/σ)², its
 /// initial (r, κ) (the harmonic control's), its twin's populations, its (r, κ) at the listed outputs,
 /// its jumps, largest (kv/σ)² and seconds (its own and its twin's).
-struct Record{atoms:Vec<Option<Moment>>,start:([f64;3],[f64;3]),twin:Option<Vec<[f64;STATES]>>,samples:Vec<Option<([f64;3],[f64;3])>>,jumps:u64,doppler:f64,seconds:[f64;2]}
+struct Record{atoms:Vec<Option<Moment>>,start:([f64;3],[f64;3]),twin:Option<Vec<[f64;STATES]>>,samples:Vec<Option<([f64;3],[f64;3])>>,jumps:u64,doppler:f64,beats:f64,seconds:[f64;2]}
 /// A task's sums so far: its trajectories added in order up to `next`, the ones after it that
 /// finished early waiting.
-struct Slot{sums:Group,samples:Vec<Vec<([f64;3],[f64;3])>>,next:u64,waiting:Vec<Option<Record>>,jumps:u64,doppler:f64,seconds:[f64;2]}
+struct Slot{sums:Group,samples:Vec<Vec<([f64;3],[f64;3])>>,next:u64,waiting:Vec<Option<Record>>,jumps:u64,doppler:f64,beats:f64,seconds:[f64;2]}
 
 /// A trajectory's held twin (control.rs): the same bare initial internal state (at fourth order its
 /// slow part at the twin's point, `Twin::start`), thresholds and jumps' draws (its streams are the
@@ -389,7 +390,7 @@ mod tests{
         for(steps,half,outputs)in [(1,[0,3,419],50),(5,[7,10,0],20),(44,[5,110,113],6),(3,[2,2,2],10),(4,[8,1,4],9)]{
             let mut w=Windows::with(half,steps,outputs);let last=(outputs-1)*steps+w.reach;let lost=last-last/5;
             let values:Vec<([f64;3],[f64;3])>=(0..=last).map(|_|(std::array::from_fn(|_|rng.uniform()-0.5),std::array::from_fn(|_|rng.uniform()-0.5))).collect();
-            let mut t=Trajectory{cluster:0,psi:[Complex::ZERO;model::MOST_MIXED],r:[0.;3],kappa:[0.;3],time:0.,threshold:1.,alive:true,jumps:0,doppler:0.,seed:0,index:0};
+            let mut t=Trajectory{cluster:0,psi:[Complex::ZERO;model::MOST_MIXED],r:[0.;3],kappa:[0.;3],time:0.,threshold:1.,alive:true,jumps:0,doppler:0.,beats:0.,seed:0,index:0};
             for k in 0..=lost{(t.r,t.kappa)=values[k];w.add(k,&t);}
             for i in 0..outputs{
                 let at=i*steps;if at>lost{continue;}let m=w.means(i);

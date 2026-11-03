@@ -197,7 +197,7 @@ impl Gpu{
         }
         // The held twins' share of the time: their cycles in the warps' (lib.rs `Outcome::seconds`).
         let(wall,share)=(clock.elapsed().as_secs_f64(),if cycles[1]>0{cycles[0] as f64/cycles[1] as f64}else{0.});
-        Ok(Outcome{groups,samples,jumps,doppler,seconds:[wall*(1.-share),wall*share]})
+        Ok(Outcome{groups,samples,jumps,doppler,beats:0.,seconds:[wall*(1.-share),wall*share]})
     }
 
     /// The trajectories after `steps` steps of the settings' dt on the GPU (engine.rs `Engine::step`
@@ -336,7 +336,7 @@ impl program::State{
         let scale=(0.5*self.logn).exp();
         let mut psi=[Complex::ZERO;crate::model::MOST_MIXED];for(x,z)in self.psi.iter().enumerate(){psi[x]=Complex::new(z[0] as f64*scale,z[1] as f64*scale);}
         Trajectory{cluster:self.cluster as usize,psi,r:lab(self.q),kappa:lab(self.p),time:self.time,threshold:self.threshold,alive:self.death<0,
-            jumps:self.jumps as u64,doppler:self.doppler as f64,seed,index:self.index as u64}
+            jumps:self.jumps as u64,doppler:self.doppler as f64,beats:0.,seed,index:self.index as u64}
     }
 }
 const _:()=assert!(MAXN==crate::model::MOST_STATES);
