@@ -84,13 +84,15 @@
 //! energy sloshes into potential energy and back twice a period, so over a period the spread of T
 //! between atoms is their energies' alone.
 //!
-//! The first batch is two groups per thread. Each later one is the predicted remaining need -- the
-//! trajectories the errors so far say the targets need, less those run --, at least the device's
-//! width and at most as many as have run: the need is the largest of many outputs' estimated errors,
-//! biased up while few groups stand behind it, so it is followed at most to twice the trajectories it
-//! rests on. No margin is added above the prediction: a batch more costs the device's tail and the
-//! statistics, a few trajectories' time, where a margin of the estimate's own noise would cost tens of
-//! percent of the trajectories.
+//! The first batch is two groups per thread, at most the need the pilot predicts (its trajectories
+//! each a group of one, with the harmonic control, at the pilot's step): a machine of more threads
+//! runs it in fewer rounds, not with more trajectories than the scene needs. Each later batch is the
+//! predicted remaining need -- the trajectories the errors so far say the targets need, less those
+//! run --, at least the device's width and at most as many as have run: the need is the largest of
+//! many outputs' estimated errors, biased up while few groups stand behind it, so it is followed at
+//! most to twice the trajectories it rests on. No margin is added above the prediction: a batch more
+//! costs the device's tail and the statistics, a few trajectories' time, where a margin of the
+//! estimate's own noise would cost tens of percent of the trajectories.
 //!
 //! # Control variates
 //! Each output's κ² and populations are estimated with control variates of exactly known means
@@ -343,7 +345,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let threads=rayon::current_num_threads() as u64;let pilot=2*threads;
     let duration=times[outputs-1];
     let plain=|steps:usize,truncation:f64|Settings::new(interval/steps as f64,&trap,truncation,true);
-    let(states,jumps)=sample_states(&model,&plain(steps,f64::EPSILON),&initial,seed,pilot,steps,outputs);
+    let pilot_harmonic=Harmonic::new(&model,&plain(steps,f64::EPSILON),&initial,steps,outputs);
+    let(states,jumps,pilot_groups)=sample_states(&model,&plain(steps,f64::EPSILON),&initial,seed,pilot,steps,outputs,&pilot_harmonic);
     let waiting=pilot as f64*duration/(jumps.max(1) as f64);let horizon=waiting.min(duration);
     // The first order in the Doppler shift: what the budget leaves after the model and the pilot's
     // elimination, or the budget itself where the elimination alone exceeds it.
@@ -417,8 +420,16 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // about what one trajectory does --, and there a whole number of its widths.
     let width=match &gpu{Some((g,_))=>g.lock().unwrap_or_else(|e|e.into_inner()).width(1),None=>(2*threads).div_ceil(TASK)*TASK};
     let unit=if gpu.is_some(){width}else{TASK};
+    // The first batch: two groups per thread, at most the pilot's predicted need (its trajectories
+    // each a group, with the harmonic control), at least the device's width.
+    let pilot_need={
+        let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:pilot_harmonic.mean[i],twin:None}).collect();
+        let mut e=summarize(&pilot_groups,&scales,&means);start(&mut e[0],&model,&initial);
+        let(_,accounts)=ledger(&model,&base,&e,times,allowance,bias,trap.lab,false);
+        (pilot as f64*worst_ratio(&e,&accounts,trap.lab).powi(2)).min(MOST_TRAJECTORIES as f64).ceil() as u64
+    };
     let clock=Instant::now();
-    let count=(2*threads*TASK).max(width).div_ceil(unit)*unit;
+    let count=(2*threads*TASK).min(pilot_need).max(width).div_ceil(unit)*unit;
     let first=batch(0,count,twin.as_ref())?;
     let wall=clock.elapsed().as_secs_f64();
     // The held twin is kept where its control pays for itself: the trajectories the first batch says
