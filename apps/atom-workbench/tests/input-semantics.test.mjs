@@ -7,10 +7,11 @@ import {meanInputsKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 import {setLaserIntensityMode,setLaserLocalIntensity,setLaserPowerMW,setLaserWaistUm} from '../dist/js/atom-workbench/src/laser-intensity.js';
 import {expressionBase,setFrequencyBase,setFrequencyValue} from '../dist/js/atom-workbench/src/laser-frequency.js';
+import {keepTweezer} from '../dist/js/atom-workbench/src/tweezer.js';
 import {field,spherical} from './directions.mjs';
 const roundtrip=scene=>validateScene(JSON.parse(JSON.stringify(scene)));
 const key=scene=>meanInputsKey(scene,scene.dynamics);
-function cycling(){const s=defaultScene();s.fields=[field('b',3,61,19)];s.lasers=s.lasers.slice(0,1);Object.assign(s.lasers[0],{direction:spherical(61,19),ellipticityDeg:45});s.dynamics.initialStateId='ground-2-2';return s;}
+function cycling(){const s=defaultScene();s.fields=[field('b',3,61,19)];s.lasers=s.lasers.slice(0,1);keepTweezer(s);Object.assign(s.lasers[0],{direction:spherical(61,19),ellipticityDeg:45});s.dynamics.initialStateId='ground-2-2';return s;}
 function connected(model){const found=new Set([model.initialIndex]);for(let previous=-1;previous!==found.size;){previous=found.size;for(const i of found)for(let j=0;j<model.dimension;j++)if(model.hReal[j*model.dimension+i]!==0||model.hImag[j*model.dimension+i]!==0)found.add(j);}return [...found].sort((a,b)=>a-b);}
 
 test('power/intensity conversion preserves exact local I, edits replace the canonical value, and JSON roundtrips retain it',()=>{

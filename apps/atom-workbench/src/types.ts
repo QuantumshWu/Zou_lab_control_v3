@@ -100,9 +100,12 @@ export interface LaserReflection {
 /** The most lasers a scene holds; a reflection is one of them. */
 export const MAXIMUM_LASERS=8;
 /** The one scene schema (scene-file.ts validates files strictly against it). */
-export const SCENE_VERSION=2;
+export const SCENE_VERSION=3;
 export interface Scene {
   version: typeof SCENE_VERSION; name: string; fields: MagneticField[]; lasers: Laser[];
+  /** The laser the operator designates as the tweezer (设为光镊, tweezer.ts): the trap motion holds
+   * the atom in. One at most; absent, none is. */
+  tweezerId?: string;
   marks: Record<string,string>;
   references: ReferenceLevel[];
   referenceFrequencies: ReferenceFrequency[];
@@ -150,32 +153,28 @@ export interface DynamicsSettings {
   durationUnit:DurationUnit;
   /** A thermal initial state's temperature unit (as durationUnit); present exactly when it is thermal. */
   temperatureUnit?:TemperatureUnit;
-  /** Motion (ui-design.md §6.20–§6.22): absent, or off, the trajectory is the internal state's
-   * alone. Kept while off, as an inactive mode's inputs are. */
-  motion?:MotionSettings;
+  /** Motion (ui-design.md §6.20), on by default: the trajectory is the joint evolution of the
+   * internal state and the atom's motion in the tweezer; off, the internal state's alone (the atom
+   * at rest at the focus). Kept while off, as an inactive mode's inputs are. */
+  motion:MotionSettings;
 }
-/** A lab coordinate axis: the line of 1D motion, or the tweezer axis 2D motion is across. */
+/** A lab coordinate axis: motion's results come per axis, x, y and z. */
 export type MotionAxis='x'|'y'|'z';
-/** The plane of 2D motion through the tweezer focus perpendicular to the tweezer: named by its two
- * lab axes in the order of the frame of the tweezer's axis (motion.ts MOTION_PLANES). */
-export type MotionPlane='yz'|'zx'|'xy';
-/** The motion a solve computes: 1D along a lab axis, 2D in a plane (2D 径向), or '3d', the atom
- * moving in all three (semiclassical). */
-export type MotionChoice=MotionAxis|MotionPlane|'3d';
-/** A single atom in the tweezer: along `axis`, a lab axis through the focus perpendicular to every
- * focused beam (1D); in the plane `axis` through the focus perpendicular to the tweezer when every
- * focused beam runs along one lab axis (2D 径向); or in 3D. A choice the scene does not allow gives
- * way (motion.ts motionAxis). It starts in the internal initial state, its motion thermal at
- * temperatureUK (along each axis). The trajectory is the joint evolution of the internal state and
- * this motion. */
+/** Where a motion solve runs: an NVIDIA GPU, or the CPU. The engine falls back to the CPU, saying
+ * why, when the GPU cannot run it. */
+export type MotionDevice='gpu'|'cpu';
+/** A single atom in the tweezer (Scene.tweezerId) moving in 3D (semiclassical). It starts in the
+ * internal initial state, its motion thermal at temperatureUK along each axis. The trajectory is the
+ * joint evolution of the internal state and this motion, solved on `device`. */
 export interface MotionSettings {
-  enabled:boolean; axis:MotionChoice;
+  enabled:boolean;
   /** The initial temperature (μK, canonical) and the unit the operator writes it in (as durationUnit). */
   temperatureUK:number; temperatureUnit:TemperatureUnit;
+  device:MotionDevice;
 }
 export const DEFAULT_MOTION_TEMPERATURE_UK=30;
 /** The motion settings 运动 starts with. */
-export function defaultMotion():MotionSettings{return {enabled:true,axis:'x',temperatureUK:DEFAULT_MOTION_TEMPERATURE_UK,temperatureUnit:'μK'};}
+export function defaultMotion():MotionSettings{return {enabled:true,temperatureUK:DEFAULT_MOTION_TEMPERATURE_UK,temperatureUnit:'μK',device:'gpu'};}
 export type DurationUnit='ns'|'μs'|'ms'|'s';
 export type TemperatureUnit='K'|'mK'|'μK';
 export type IntensityMode='intensity'|'power'|'na';
@@ -204,9 +203,12 @@ export const DEFAULT_TWEEZER_WAVELENGTH_NM=852;
 /** The population accuracy of every solve: an absolute error of 0.01 in probability
  * units (1%), sent with each request. */
 export const POPULATION_TOLERANCE=.01;
+/** The default trajectory: motion on, 100 μs -- the probe's optical pumping and several radial
+ * periods of the default tweezer (about 13 μs each); its motion solves in about 0.4 s on the CPU. */
+export const DEFAULT_DURATION_US=100;
 export function defaultDynamics(): DynamicsSettings {
   return {initialStateId:'ground-2-0',monitoredStateIds:['ground-2-0','ground-1--1','ground-1-0','ground-1-1'],
-    durationUs:20,durationUnit:'μs',samples:DEFAULT_DYNAMICS_SAMPLES,meanHorizonUs:DEFAULT_MEAN_HORIZON_US,monitorMode:'auto',monitoredGroupIds:[]};
+    durationUs:DEFAULT_DURATION_US,durationUnit:'μs',samples:DEFAULT_DYNAMICS_SAMPLES,meanHorizonUs:DEFAULT_MEAN_HORIZON_US,monitorMode:'auto',monitoredGroupIds:[],motion:defaultMotion()};
 }
 export interface Level {
   id: string; manifold: 'ground' | 'D1' | 'D2'; F: number; m: number;
@@ -271,7 +273,7 @@ export interface Analysis {
 
 export function defaultScene(): Scene {
   return {
-    version:SCENE_VERSION,name:`探测光 + ${DEFAULT_TWEEZER_WAVELENGTH_NM} nm 光镊`,
+    version:SCENE_VERSION,name:`探测光 + ${DEFAULT_TWEEZER_WAVELENGTH_NM} nm 光镊`,tweezerId:'tweezer',
     marks:{},references:[],referenceFrequencies:[],dynamics:defaultDynamics(),
     fields: [{id:'bias',name:'偏置磁场',enabled:true,magnitudeG:3,direction:{reference:{kind:'axis',axis:'+z'},thetaDeg:0,phiDeg:0}}],
     // The probe runs along the bias field: its reference axis is linked to the field's.
@@ -280,6 +282,17 @@ export function defaultScene(): Scene {
       intensityMode:'intensity',intensityMWcm2:1,powerUnit:'mW',waistUnit:'μm',intensityUnit:'mW/cm²',
       direction:{reference:{kind:'field',id:'bias'},thetaDeg:0,phiDeg:0},polarizationAngleDeg:0,ellipticityDeg:0,phaseDeg:0}, defaultTweezer()],
   };
+}
+
+/** A new laser (＋): a cooling or probe beam given by power and waist -- a Gaussian beam focused at
+ * the atom, its waist on the millimetre scale of such beams: 50 μW in a 1 mm waist,
+ * I = 2P/(πw₀²) ≈ 3.2 mW/cm² at the atom, about twice the saturation intensity of the D2 cycling
+ * transition. On the `line`'s F=2 → F′=3 (F″=2 on D1), along +x. */
+export const NEW_LASER_POWER_MW=.05,NEW_LASER_WAIST_UM=1000;
+export function newLaser(id:string,name:string,line:SpectralLine): Laser {
+  return {id,name,enabled:true,showLightShift:false,line,frequency:{base:{kind:'transition',line,Fg:2,Fe:line==='D1'?2:3},offsetMHz:0},frequencyUnit:'MHz',
+    intensityMode:'power',powerMW:NEW_LASER_POWER_MW,waistUm:NEW_LASER_WAIST_UM,intensityMWcm2:2*NEW_LASER_POWER_MW/(Math.PI*NEW_LASER_WAIST_UM**2)*1e8,
+    powerUnit:'μW',waistUnit:'mm',intensityUnit:'mW/cm²',direction:{reference:{kind:'axis',axis:'+x'},thetaDeg:0,phiDeg:0},polarizationAngleDeg:0,ellipticityDeg:0,phaseDeg:0};
 }
 
 /** A tweezer is an ordinary enabled laser, with its physical optical frequency.

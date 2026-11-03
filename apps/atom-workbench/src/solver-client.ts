@@ -1,5 +1,5 @@
-import type {DynamicsResult,MeanResult,MeanStatus,MotionResult,PopulationAccuracy,RunningReport} from './solver-types.js';
-import {CONVERGED_MEAN_STATUSES,MEAN_STATUSES,SEMICLASSICAL_POPULATION_TARGET,readMotionResult,readPopulationAccuracy,readRunningReport} from './solver-types.js';
+import type {DynamicsResult,MeanResult,MeanStatus,MotionResult,PopulationAccuracy} from './solver-types.js';
+import {CONVERGED_MEAN_STATUSES,MEAN_STATUSES,SEMICLASSICAL_POPULATION_TARGET,readMotionResult,readPopulationAccuracy} from './solver-types.js';
 import type {DynamicsSettings,InitialStateSpec,Scene,Level} from './types.js';
 import {MEAN_HORIZONS_US,POPULATION_TOLERANCE,canonicalInitialState,resolveInitialState} from './types.js';
 import {initialPopulations} from './full-master-model.js';
@@ -11,7 +11,7 @@ import {motionRequest,type MotionRequest} from './motion.js';
 export interface SolverFailureRecord {time:string;request:{clientId:string;sequence:number};scene:Scene;options:object;attempt:number;willRetry:boolean;error:string;status?:number;code?:string;response?:unknown;page?:string;}
 class RequestFailure extends Error {constructor(message:string,readonly status:number,readonly code:string,readonly retryable:boolean){super(message);}}
 type Job={id:number;attempt:number;scene:Scene;settings:DynamicsSettings;meanOnly:boolean;includeMean:boolean;controller:AbortController;
-  resolve:(value:DynamicsResult)=>void;reject:(error:Error)=>void;onProgress?:(value:DynamicsResult)=>void;onRunning?:(value:RunningReport)=>void;started:number;timer?:ReturnType<typeof setTimeout>};
+  resolve:(value:DynamicsResult)=>void;reject:(error:Error)=>void;onProgress?:(value:DynamicsResult)=>void;started:number;timer?:ReturnType<typeof setTimeout>};
 type ClientOptions={baseUrl?:string;debounceMs?:number;fetch?:typeof fetch;clientId?:string;onFailure?:(record:SolverFailureRecord)=>void};
 
 /** The production solver is a native Rust process. QuTiP is an offline oracle only. */
@@ -29,25 +29,25 @@ export class DynamicsClient {
   }
   /** A solve: the trajectory with its mean (by default), the mean alone (`meanOnly`), or the
    * trajectory alone (`includeMean` false, its mean already at hand). */
-  solve(scene:Scene,settings:DynamicsSettings,control:{meanOnly?:boolean;includeMean?:boolean;onProgress?:(value:DynamicsResult)=>void;onRunning?:(value:RunningReport)=>void}={}):Promise<DynamicsResult>{
+  solve(scene:Scene,settings:DynamicsSettings,control:{meanOnly?:boolean;includeMean?:boolean;onProgress?:(value:DynamicsResult)=>void}={}):Promise<DynamicsResult>{
     if(this.disposed)return Promise.reject(new DOMException('Disposed.','AbortError'));
     if(control.meanOnly&&control.includeMean===false)return Promise.reject(new Error('A mean-only solve asks for its mean.'));
     this.abortCurrent('Superseded.');
     const id=++this.sequence;
     return new Promise((resolve,reject)=>{
       const job:Job={id,attempt:0,scene:structuredClone(scene),settings:structuredClone(settings),meanOnly:control.meanOnly??false,includeMean:control.includeMean??true,
-        controller:new AbortController(),resolve,reject,onProgress:control.onProgress,onRunning:control.onRunning,started:performance.now()};
+        controller:new AbortController(),resolve,reject,onProgress:control.onProgress,started:performance.now()};
       this.current=job;job.timer=setTimeout(()=>{job.timer=undefined;void this.run(job);},this.debounceMs);
     });
   }
   private async run(job:Job):Promise<void>{
     if(this.current!==job||job.controller.signal.aborted)return;
-    job.attempt++;let evidence:unknown;const motion=motionRequest(job.scene,job.settings);
+    job.attempt++;let evidence:unknown;const motion=motionOf(job);
     try{
       const response=await this.transport(this.base+'/api/solve',{method:'POST',signal:job.controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({modelSchema:FULL_MODEL_SCHEMA,stream:!!job.onProgress,request:{clientId:this.clientId,sequence:job.id},scene:job.scene,options:{
         initialStateId:job.settings.initialStateId,initialState:canonicalInitialState(resolveInitialState(job.settings)),durationUs:job.settings.durationUs,samples:job.settings.samples,
         populationTolerance:POPULATION_TOLERANCE,meanHorizonUs:job.settings.meanHorizonUs,
-        includeMean:job.includeMean,meanOnly:job.meanOnly,...(motion?{motion}:{}),
+        includeMean:job.includeMean,meanOnly:job.meanOnly,...(motion?{motion,device:job.settings.motion.device}:{}),
       }})}).catch(error=>{if(error instanceof TypeError)throw new RequestFailure('本机 Rust 求解服务连接暂时失败。',0,'network-error',true);throw error;});
       if(!response.ok){const detail=await response.json().catch(()=>({error:''}));evidence=detail;throw new RequestFailure(detail.error||`Local solver: ${response.status}`,response.status,detail.code??'',(response.status===502||response.status===503)&&!/invalid|incompatible|numerical/.test(detail.code??''));}
       const data=await this.readResponse(response,job);if(!data||typeof data!=='object'||Array.isArray(data))throw new Error('求解结果不完整或无效：响应对象。');
@@ -81,20 +81,14 @@ export class DynamicsClient {
       if(event.type==='error')throw new RequestFailure(event.data?.error??'时间演化失败。',event.status??422,event.data?.code??'numerical-failure',false);
       if(final!==undefined)throw new Error('求解流包含多余结果。');
       if(event.type==='result'){if(event.data?.progress!==undefined)throw new Error('最终结果带有进度标记。');final=event.data;return;}
-      if(event.type!=='checkpoint'&&event.type!=='running')throw new Error('未知求解进度。');
+      if(event.type!=='checkpoint')throw new Error('未知求解进度。');
       if(this.current!==job||job.controller.signal.aborted)return;
-      // A running report between checkpoints (a 2D motion solve's): how far its batch is and the
-      // time left once estimated.
-      if(event.type==='running'){
-        if(event.data?.request?.clientId!==this.clientId||event.data.request.sequence!==job.id)throw new Error('进度与当前请求不匹配。');
-        job.onRunning?.(readRunningReport(event.data.running));return;
-      }
       // A checkpoint: the result evaluated so far -- the trajectory on the requested samples (the
       // single t = 0 row of a mean request) with its per-sample errors, and the mean as far as it
       // has come (a full request's none before its mean's first checkpoint).
       const data=event.data;
       if(data?.progress!==true||data.request?.clientId!==this.clientId||data.request.sequence!==job.id||data.service?.protocol!==HTTP_PROTOCOL||data.service?.nativeProtocol!==NATIVE_PROTOCOL||!data.service?.capabilities?.includes(FULL_MODEL_SCHEMA))throw new Error('中间结果与当前请求不匹配。');
-      const checkpoint=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings),job.settings.meanHorizonUs,motionRequest(job.scene,job.settings));
+      const checkpoint=normalizeDynamicsResult(data,job.scene,resolveInitialState(job.settings),job.settings.meanHorizonUs,motionOf(job));
       this.checkMean(checkpoint,job,true);this.checkSamples(checkpoint,job);
       job.onProgress?.(checkpoint);
     };
@@ -123,8 +117,11 @@ export class DynamicsClient {
   dispose():void{this.disposed=true;this.cancel();}
 }
 
+/** The motion a solve asks for: with motion on, a trajectory alone carries it; a mean -- the levels'
+ * p̄(T) -- is the internal state's, the atom at rest at the focus, and carries none. */
+function motionOf(job:Pick<Job,'settings'|'includeMean'>):MotionRequest|undefined{return job.includeMean?undefined:motionRequest(job.settings);}
 /** Reads the one native result contract (documented in
- * rust-solver/src/lattice_core_adapter.rs, and its motion block in motion_core_adapter.rs) and
+ * rust-solver/src/lattice_core_adapter.rs, and its motion block in motion3d_adapter.rs) and
  * rejects anything else. `initial` is the requested initial state (an id is a single state),
  * `horizon` the requested time T of the mean (us: 1e5 or 1e6), `motion` the requested motion. */
 export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|InitialStateSpec=resolveInitialState(scene.dynamics),horizon:number=scene.dynamics.meanHorizonUs,motion?:MotionRequest):DynamicsResult{
@@ -154,17 +151,15 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
   if(Object.hasOwn(data,'densityReal')||Object.hasOwn(data,'densityImag'))invalid('布居结果契约');
   let populationAccuracy:PopulationAccuracy|undefined;
   if(timesUs.length>1&&typeof d.method!=='string')invalid('时间演化方法');
-  // A semiclassical 3D motion result states its own target; every other the population tolerance.
-  const tolerance=motion?.axis==='3d'?SEMICLASSICAL_POPULATION_TARGET:POPULATION_TOLERANCE;
+  // A motion result (semiclassical) states its own target; every other the population tolerance.
+  const tolerance=motion?SEMICLASSICAL_POPULATION_TARGET:POPULATION_TOLERANCE;
   if(timesUs.length>1||data.populationAccuracy!==undefined)try{populationAccuracy=readPopulationAccuracy(data.populationAccuracy,timesUs.length,tolerance);}catch{invalid('布居精度元数据');}
   if(data.progress!==undefined&&data.progress!==true)invalid('进度标记');
   // A checkpoint may carry its run's estimate of the wall time left (ms, finite, ≥ 0); a final
   // result never does.
-  const remaining=d.estimatedRemainingMs,atMost=d.estimatedRemainingAtMost;
+  const remaining=d.estimatedRemainingMs;
   if(remaining!==undefined&&data.progress!==true)invalid('最终结果带有剩余时间估计');
   if(remaining!==undefined&&!bounded(remaining))invalid('剩余时间估计');
-  // It may be an upper bound: the run may stop earlier (a motion run's continuation, not yet projected).
-  if(atMost!==undefined&&(atMost!==true||remaining===undefined))invalid('剩余时间估计');
   // The mean, when one was asked for: both standard T from the one mean run (`meanHorizons`,
   // one entry per T, in any order), each a computed p̄(T) -- with its estimated error and whether
   // that is within ε -- or 'not-converged', nothing usable computed. The run's method and
@@ -197,16 +192,21 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
   // The requested T's mean, or none requested.
   const mean:MeanResult=horizonMeans?horizonMeans.find(s=>s.horizonUs===horizon)??invalid('长期布居时刻 T')
     :{converged:false,status:'not-requested',populations:null,estimatedError:null,withinTolerance:false};
-  // A motion solve's result carries its motion as requested (1D along its axis, or 3D); any other result none.
+  // A motion solve's result carries its motion, and its diagnostics the device and the approximation
+  // ledger; any other result no motion.
   let motionResult:MotionResult|undefined;
-  if(motion)try{motionResult=readMotionResult(data.motion,timesUs,motion.axis);}catch{invalid('运动结果');}
+  if(motion)try{motionResult=readMotionResult(data.motion,d,timesUs);}catch{invalid('运动结果');}
   else if(data.motion!==undefined)invalid('运动结果');
   const assumptions=data.assumptions;
   if(!Array.isArray(assumptions)||assumptions.some((text:unknown)=>typeof text!=='string'))invalid('模型假设');
-  const populations=Object.fromEntries(states.map((state,i)=>[state.id,rows.map((row:number[])=>row[i]!)]));
+  // A motion result's rows are the held atom's internal populations: each becomes the probability
+  // that the atom is in that state and still held, p·(1 − L), so the 32 states and the loss L (丢失)
+  // add up to one.
+  const held=motionResult?.lossProbability.map(L=>1-L);
+  const populations=Object.fromEntries(states.map((state,i)=>[state.id,rows.map((row:number[],k:number)=>row[i]!*(held?held[k]!:1))]));
   const active=drivingLasers(scene);
   return {states,timesUs,populations,totalExcited:timesUs.map((_,i)=>states.filter(s=>s.manifold!=='ground').reduce((sum,s)=>sum+populations[s.id]![i]!,0)),
     activeLaserIds:active.map(l=>l.id),mean,...(horizonMeans?{horizonMeans}:{}),
-    metrics:{totalMs:d.elapsedMs,...(remaining!==undefined?{estimatedRemainingMs:remaining as number}:{}),...(atMost===true?{estimatedRemainingAtMost:true}:{})},validation:{maxTraceError:d.traceError,minPopulation:Math.min(...rows.flat())},
+    metrics:{totalMs:d.elapsedMs,...(remaining!==undefined?{estimatedRemainingMs:remaining as number}:{})},validation:{maxTraceError:d.traceError,minPopulation:Math.min(...rows.flat())},
     ...(populationAccuracy?{populationAccuracy,method:d.method}:{}),...(motionResult?{motion:motionResult}:{}),assumptions};
 }

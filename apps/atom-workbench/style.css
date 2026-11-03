@@ -104,6 +104,14 @@ input[aria-invalid=true], input.invalid { border-color: var(--red-dark); }
 .scene-initial-shortcut { display: none; }
 /* A reference has no on/off switch: its place in the row stays. */
 .object-toggle-gap { width: var(--switch-width, 0); }
+/* A row's name, and the tweezer's badge after it (tweezer.ts): the name gives way, the badge stays. */
+.object-heading-row { display: flex; align-items: baseline; gap: var(--row-gap); min-width: 0; }
+.object-heading-row > .object-name { flex: 0 1 auto; }
+.tweezer-badge { flex: none; display: inline-block; margin-left: var(--row-gap); padding: 0 var(--chip-pad-x); border-radius: var(--radius); background: var(--bg); color: var(--text); font-size: .85em; line-height: var(--font-line); white-space: nowrap; }
+.object-heading-row > .tweezer-badge { margin-left: 0; }
+.scene-object.disabled .tweezer-badge { color: var(--disabled-ink); }
+/* 运动 · 设为光镊: why the tweezer cannot hold the atom (off, dark or a plane wave). */
+.tweezer-warning { color: var(--orange-dark); }
 /* A laser's reflection stands indented under it, its symbol ↩ (reflection.ts). */
 .scene-object.reflected { margin-left: calc(var(--control) * .45); }
 .object-symbol.reference { font-style: italic; }
@@ -231,6 +239,11 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 .state-label { white-space: nowrap; }
 .solver-readouts.form { margin: var(--row-gap) 0; }
 .solver-error { margin: var(--row-gap) 0; color: var(--red-dark); white-space: normal; overflow-wrap: anywhere; }
+/* 计算详情's approximation ledger of a motion result: each approximation, its estimated error and what the engine did. */
+.ledger-table { width: 100%; margin-top: var(--row-gap); border-collapse: collapse; text-align: left; font-variant-numeric: tabular-nums; }
+.ledger-table th, .ledger-table td { height: var(--table-row-h); padding: 0 var(--table-cell-pad); border-bottom: var(--edge) solid var(--divider); }
+.ledger-table th { font-weight: 400; color: var(--muted-ink); white-space: nowrap; }
+.ledger-table .num { text-align: right; white-space: nowrap; }
 .solver-details > button { margin-top: var(--row-gap); }
 
 /* ---------- 布居演化 ------------------------------------------------------ */
@@ -261,19 +274,18 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 .readout-error { margin-left: var(--section-gap); font-weight: 400; color: var(--muted-ink); font-variant-numeric: tabular-nums; }
 .readout-error.outside, .readout-outside { color: var(--orange-dark); }
 .accuracy-swatch { display: inline-block; width: 18px; height: 10px; border-radius: 2px; background: #fbecdc; box-shadow: inset 0 0 0 1px #f0d3b4; }
-/* A 1D motion result's continuation (its prediction from the simulated history): the band's colour. */
-.continuation-swatch { display: inline-block; width: 18px; height: 10px; border-radius: 2px; background: #eef3f7; box-shadow: inset 0 0 0 1px #c9d6e3; }
-.readout-continued { font-weight: 400; color: #5d7891; }
-/* A 3D motion result's sample outside the validated regime, in a readout: a reference only. */
+/* A motion result's sample outside the validated regime, in a readout: a reference only. */
 .readout-reference { font-weight: 400; color: #8a8886; }
-/* A 3D motion result's samples outside the validated regime: the band's colour. */
+/* A motion result's samples outside the validated regime: the band's colour. */
 .accuracy-swatch.reference-swatch { background: #ecebea; box-shadow: inset 0 0 0 1px #d6d4d2; }
 .readout-row { display: grid; grid-template-columns: minmax(calc(3 * var(--control)), 1fr) calc(2.6 * var(--control)) calc(2.6 * var(--control)); gap: var(--row-gap); align-items: center; font-variant-numeric: tabular-nums; }
 .readout-row.two { grid-template-columns: minmax(calc(3 * var(--control)), 1fr) calc(2.6 * var(--control)); }
 .readout-row > span:not(.readout-name) { text-align: right; }
 .readout-name { min-width: 0; word-break: keep-all; }
 .readout-head, .readout-mean { color: var(--muted-ink); }
-/* 1D 运动 (ui-design.md §6.20): a motion readout's values carry their units, so its value column takes their width. */
+/* 运动 (ui-design.md §6.20): a motion readout's values carry their units (T ± 误差), so its value column takes their width. */
+/* Where a motion result's approximation ledger is not kept: said as the validated regime is. */
+.flagged-legend { color: var(--orange-dark); }
 .motion-readout .readout-row.two { grid-template-columns: minmax(calc(3 * var(--control)), 1fr) auto; }
 
 /* ---------- 方向与偏振 ---------------------------------------------------- */

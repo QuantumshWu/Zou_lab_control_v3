@@ -239,7 +239,7 @@ function labels(v:Matrix,n:number):number[]{
 }
 /** One laser's static correction alone (MHz, in the magnetic eigenbasis): its co- and
  * counter-rotating couplings to the states outside the model and its core shift, the share of
- * staticModelBackground's correction that scales with its intensity (1D motion, full-master-model.ts). */
+ * staticModelBackground's correction that scales with its intensity (motion, full-master-model.ts). */
 export function laserModelCorrection(scene:Scene,laser:Laser):Matrix{
   const analysis=analyze(scene);return modelCorrection(analysis,groups({...scene,lasers:[laser]},analysis)).matrix;
 }

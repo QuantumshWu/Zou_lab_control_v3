@@ -11,7 +11,7 @@ import {laserWaistUm,setLaserIntensityMode,writeLaserIntensity} from '../dist/js
 import {setFrequencyBase} from '../dist/js/atom-workbench/src/laser-frequency.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
-import {radialAxes,radialChoices} from '../dist/js/atom-workbench/src/motion.js';
+import {setTweezer} from '../dist/js/atom-workbench/src/tweezer.js';
 import {laserSlot} from '../dist/js/atom-workbench/src/identity.js';
 import {along,field} from './directions.mjs';
 
@@ -36,7 +36,8 @@ const plain=v=>v.map(x=>x+0);
 function pair(direction,{psi=0,chi=0,phase=0,quarterWave=false,reflectivity=1,mirrorPhase=0,fields}={}){
   const scene=defaultScene();if(fields)scene.fields=fields;
   const source=scene.lasers[0];Object.assign(source,{direction,polarizationAngleDeg:psi,ellipticityDeg:chi,phaseDeg:phase});
-  scene.lasers=[source];const reflection=addReflection(scene,source);
+  // The probe alone: no tweezer.
+  scene.lasers=[source];delete scene.tweezerId;const reflection=addReflection(scene,source);
   Object.assign(reflection.reflection,{quarterWave,reflectivity,phaseDeg:mirrorPhase});resolveSceneFrequencies(scene);
   return {scene,source,reflection};
 }
@@ -163,17 +164,17 @@ test('the export: a reflection is an ordinary beam -- its master model, with mot
     const hand=structuredClone(scene);hand.lasers[1]=byHand(source,reflection);
     assert.deepEqual(buildFullMasterModel(scene),buildFullMasterModel(hand),quarterWave?'λ/4':'plain');
   }
-  // A tweezer focused at the atom along +x and its reflection: both focused, exactly along x, so the
-  // atom still moves radially along y or z, or in the yz plane; each is a beam of the motion block.
+  // A tweezer focused at the atom along +x and its reflection: two Gaussian beams of the motion
+  // block, the tweezer the trap. The reflection may be the one designated: it traps as written by hand.
   const scene=defaultScene();scene.lasers=[scene.lasers[1]];const tweezer=scene.lasers[0],reflection=addReflection(scene,tweezer);
-  assert.deepEqual(radialAxes(scene),['y','z']);assert.deepEqual(radialChoices(scene),['y','z','yz']);
   const hand=structuredClone(scene);hand.lasers[1]=byHand(tweezer,reflection);
-  for(const motion of [{axis:'y',temperatureUK:30},{axis:'yz',temperatureUK:30},{axis:'3d',temperatureUK:30}]){
-    const model=buildFullMasterModel(scene,scene.dynamics,motion);
-    assert.deepEqual(model,buildFullMasterModel(hand,hand.dynamics,motion),motion.axis);
-    const [forward,back]=model.motion.beams;
-    assert.deepEqual(plain(back.direction),forward.direction.map(v=>0-v));assert.equal(back.waistUm,forward.waistUm);assert.equal(back.intensityMWcm2,forward.intensityMWcm2);
-  }
+  const motion={axis:'3d',temperatureUK:30},model=buildFullMasterModel(scene,scene.dynamics,motion);
+  assert.deepEqual(model,buildFullMasterModel(hand,hand.dynamics,motion));assert.equal(model.motion.trapBeamId,'tweezer');
+  const [forward,back]=model.motion.beams;
+  assert.deepEqual(plain(back.direction),forward.direction.map(v=>0-v));assert.equal(back.waistUm,forward.waistUm);assert.equal(back.intensityMWcm2,forward.intensityMWcm2);
+  setTweezer(scene,reflection);setTweezer(hand,hand.lasers[1]);
+  const mirrored=buildFullMasterModel(scene,scene.dynamics,motion);assert.equal(mirrored.motion.trapBeamId,reflection.id);
+  assert.deepEqual(mirrored,buildFullMasterModel(hand,hand.dynamics,motion));
 });
 
 test('the MOT pair written by hand -- σ⁺ about its own k along +z and along −z, the second at phase 180° in its own frame -- is the λ/4 reflection; σ⁻ along −z is the plain one',()=>{

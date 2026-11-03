@@ -1,7 +1,7 @@
 import {FULL_MODEL_SCHEMA,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {DEFAULT_DYNAMICS_SAMPLES,POPULATION_TOLERANCE} from '../dist/js/atom-workbench/src/types.js';
-import {readMotionRequest} from '../dist/js/atom-workbench/src/motion.js';
+import {readMotionDevice,readMotionRequest} from '../dist/js/atom-workbench/src/motion.js';
 
 const requestError=(message,code)=>Object.assign(new Error(message),{status:400,code});
 
@@ -15,18 +15,21 @@ export function nativeCapabilities(message){
 
 /** The one mapping from an HTTP/IPC solve request (scene + options) to the
  * native payload, and from the native result back to the client response. A
- * request with `options.motion` (1D or 2D motion) is a trajectory alone, and its model
- * carries the motion block (full-master-model.ts MotionModel). */
+ * request with `options.motion` (3D motion in the scene's tweezer) is a trajectory alone, its
+ * model carries the motion block (full-master-model.ts MotionModel), and `options.device` -- with
+ * a motion only -- says where it runs. */
 export function prepareNativeSolve(input){
   if(input.modelSchema!==undefined&&input.modelSchema!==FULL_MODEL_SCHEMA)throw requestError('Unsupported atomic model schema.','incompatible-model-schema');
   const settings={...input.scene.dynamics,...input.options};
-  let motion;if(input.options?.motion!==undefined)try{motion=readMotionRequest(input.options.motion);}catch(error){throw requestError(error.message,'invalid-options');}
+  let motion,device;
+  if(input.options?.motion!==undefined)try{motion=readMotionRequest(input.options.motion);device=readMotionDevice(input.options.device);}catch(error){throw requestError(error.message,'invalid-options');}
+  else if(input.options?.device!==undefined)throw requestError('A device is a motion option','invalid-options');
   const started=performance.now(),model=buildFullMasterModel(input.scene,settings,motion),modelBuildMs=performance.now()-started;
   // The population accuracy is fixed (POPULATION_TOLERANCE); a value in the scene or the options is not read.
   const options={durationUs:settings.durationUs??5,samples:settings.samples??DEFAULT_DYNAMICS_SAMPLES,populationTolerance:POPULATION_TOLERANCE,
     includeMean:input.options?.includeMean??true,meanOnly:input.options?.meanOnly??false,
     // The time T of the mean the app reads (us: 1e5 or 1e6; the solver's default 1e6 when absent).
-    ...(input.options&&Object.hasOwn(input.options,'meanHorizonUs')?{meanHorizonUs:input.options.meanHorizonUs}:{})};
+    ...(input.options&&Object.hasOwn(input.options,'meanHorizonUs')?{meanHorizonUs:input.options.meanHorizonUs}:{}),...(device?{device}:{})};
   if(typeof options.meanOnly!=='boolean'||typeof options.includeMean!=='boolean')throw requestError('Invalid solver options','invalid-options');
   if(motion&&(options.meanOnly||options.includeMean))throw requestError('A motion solve is a trajectory alone: meanOnly and includeMean are false','invalid-options');
   const payload={modelSchema:model.modelSchema,options,model:{dimension:model.dimension,states:model.states.map(state=>state.id),
@@ -38,16 +41,6 @@ export function prepareNativeSolve(input){
   return {payload,respond};
 }
 
-/** A running solve's report between its checkpoints (a 2D motion solve's, main.rs): the running
- * batch's simulated time of the duration (us), the trajectories done and, once estimated, the
- * wall time left (ms). Returned without any other key. */
-export function readRunning(value){
-  const finite=x=>typeof x==='number'&&Number.isFinite(x)&&x>=0;
-  if(!value||typeof value!=='object'||Array.isArray(value)||!finite(value.simulatedUs)||!finite(value.durationUs)||value.simulatedUs>value.durationUs*(1+1e-9)
-    ||!Number.isSafeInteger(value.trajectories)||value.trajectories<0||(value.estimatedRemainingMs!==undefined&&!finite(value.estimatedRemainingMs)))throw new Error('Invalid native running report.');
-  const{simulatedUs,durationUs,trajectories,estimatedRemainingMs}=value;
-  return {simulatedUs,durationUs,trajectories,...(estimatedRemainingMs===undefined?{}:{estimatedRemainingMs})};
-}
 export function validateAtomicResult(result,request){
   if(request.modelSchema!==FULL_MODEL_SCHEMA||request.model?.dimension!==32||!Array.isArray(request.model?.collapse))throw new Error('Atomic request is missing required physical model metadata.');
   if(result?.modelSchema!==request.modelSchema||result.protocol!==NATIVE_PROTOCOL)throw new Error('Native atomic response has missing or incompatible model identity.');

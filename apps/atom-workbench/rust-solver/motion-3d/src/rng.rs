@@ -1,25 +1,51 @@
-//! A small reproducible random stream per trajectory: xoshiro256++ seeded by SplitMix64 from
-//! (seed, stream), uniform doubles and directions; and the standard normal's quantile, for the
-//! normal deviate of a given uniform one.
+//! Counter-based random streams: Philox4x32-10 (Salmon et al., Random123), each stream keyed by
+//! the run's seed and its purpose and counted by the trajectory and the event (the jump's number):
+//! a draw depends on those alone, not on the order trajectories run in, so a port to another
+//! device draws the same numbers. Uniform doubles and directions; and the standard normal's
+//! quantile, for the normal deviate of a given uniform one.
 
-#[derive(Clone,Debug)]
-pub struct Rng{state:[u64;4]}
+/// Philox4x32's multipliers and Weyl key increments.
+const M0:u32=0xD251_1F53;const M1:u32=0xCD9E_8D57;const W0:u32=0x9E37_79B9;const W1:u32=0xBB67_AE85;
 
-fn splitmix(x:&mut u64)->u64{
-    *x=x.wrapping_add(0x9E37_79B9_7F4A_7C15);let mut z=*x;
-    z=(z^(z>>30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);z=(z^(z>>27)).wrapping_mul(0x94D0_49BB_1331_11EB);z^(z>>31)
+/// Philox4x32-10 of a counter and a key.
+pub fn philox(counter:[u32;4],key:[u32;2])->[u32;4]{
+    let(mut c,mut k)=(counter,key);
+    for round in 0..10{
+        if round>0{k[0]=k[0].wrapping_add(W0);k[1]=k[1].wrapping_add(W1);}
+        let(p0,p1)=((M0 as u64)*(c[0] as u64),(M1 as u64)*(c[2] as u64));
+        c=[((p1>>32) as u32)^c[1]^k[0],p1 as u32,((p0>>32) as u32)^c[3]^k[1],p0 as u32];
+    }
+    c
 }
 
+/// What a stream is for: the key's tag.
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum Purpose{
+    /// A trajectory's initial state.
+    Initial=1,
+    /// A group's Latin hypercube permutations (counted by the group's first trajectory).
+    Latin=2,
+    /// A trajectory's jump (event: the jump's number; 0 its initial threshold).
+    Jump=3,
+    /// A pilot trajectory's initial state.
+    Pilot=4,
+}
+
+/// A stream: Philox blocks at the counter (block, event, trajectory) under the key (seed, purpose).
+#[derive(Clone,Debug)]
+pub struct Rng{key:[u32;2],counter:[u32;4],block:[u32;4],used:usize}
+
 impl Rng{
-    /// The stream `stream` of the run seeded `seed`: streams of one seed are independent.
-    pub fn new(seed:u64,stream:u64)->Rng{
-        let mut x=seed^stream.wrapping_mul(0xD1B5_4A32_D192_ED03);let state=[splitmix(&mut x),splitmix(&mut x),splitmix(&mut x),splitmix(&mut x)];
-        Rng{state}
+    /// The stream of a purpose, a trajectory and an event (below 2^32) of the run seeded `seed`.
+    pub fn new(seed:u64,purpose:Purpose,trajectory:u64,event:u64)->Rng{
+        let key=[(seed as u32)^(purpose as u32).wrapping_mul(W0),(seed>>32) as u32];
+        Rng{key,counter:[0,event as u32,trajectory as u32,(trajectory>>32) as u32],block:[0;4],used:4}
     }
-    pub fn next_u64(&mut self)->u64{
-        let s=&mut self.state;let result=(s[0].wrapping_add(s[3])).rotate_left(23).wrapping_add(s[0]);let t=s[1]<<17;
-        s[2]^=s[0];s[3]^=s[1];s[1]^=s[2];s[0]^=s[3];s[2]^=t;s[3]=s[3].rotate_left(45);result
+    pub fn next_u32(&mut self)->u32{
+        if self.used==4{self.block=philox(self.counter,self.key);self.counter[0]=self.counter[0].wrapping_add(1);self.used=0;}
+        let x=self.block[self.used];self.used+=1;x
     }
+    pub fn next_u64(&mut self)->u64{let hi=self.next_u32() as u64;(hi<<32)|self.next_u32() as u64}
     /// Uniform in [0, 1).
     pub fn uniform(&mut self)->f64{(self.next_u64()>>11) as f64*(1./(1u64<<53) as f64)}
     /// Uniform in (0, 1]: a waiting time's threshold, never zero.
@@ -58,4 +84,16 @@ pub fn normal_quantile(p:f64)->f64{
             +1.48753612908506148525e-2)*r+1.36929880922735805310e-1)*r+5.99832206555887937690e-1)*r+1.)
     };
     if q<0.{-x}else{x}
+}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    /// Random123's known-answer vectors for Philox4x32-10.
+    #[test]
+    fn philox_gives_random123_s_known_answers(){
+        assert_eq!(philox([0;4],[0;2]),[0x6627e8d5,0xe169c58d,0xbc57ac4c,0x9b00dbd8]);
+        assert_eq!(philox([0xffff_ffff;4],[0xffff_ffff;2]),[0x408f276d,0x41c83b0e,0xa20bc7c6,0x6d5451fd]);
+        assert_eq!(philox([0x243f6a88,0x85a308d3,0x13198a2e,0x03707344],[0xa4093822,0x299f31d0]),[0xd16cfe09,0x94fdcceb,0x5001e420,0x24126ea1]);
+    }
 }
