@@ -225,15 +225,20 @@ fn listed(outputs:usize)->Vec<usize>{
 
 /// Histograms of a value of the samples (a coordinate along one axis) at the listed times on one
 /// grid symmetric about 0 that holds all of them (the bins' centres; an odd count, 0 at the centre).
+/// A listed time where no atom is held carries the one before (`assemble`); the first is t = 0,
+/// where every atom is.
 fn histograms(samples:&[Vec<([f64;3],[f64;3])>],listed:&[usize],value:&dyn Fn(&([f64;3],[f64;3]))->f64)->Distributions{
     let reach=samples.iter().flatten().map(|s|value(s).abs()).fold(0.,f64::max).max(f64::MIN_POSITIVE);
     let count=samples.iter().map(|s|s.len()).max().unwrap_or(0);
     // Bins: about the square root of the samples, odd, at least 21.
     let bins=(((count as f64).sqrt() as usize)|1).max(21);let width=2.*reach/(bins-1) as f64;
     let grid:Vec<f64>=(0..bins).map(|i|(i as f64-(bins/2) as f64)*width).collect();
+    let mut last:Option<Vec<f64>>=None;
     let probabilities=samples.iter().map(|s|{
-        let mut p=vec![0.;bins];if s.is_empty(){p[bins/2]=1.;return p;}
-        for x in s{let i=((value(x)/width).round() as isize+(bins/2) as isize).clamp(0,bins as isize-1) as usize;p[i]+=1./s.len() as f64;}p
+        if s.is_empty(){return last.clone().unwrap_or_else(||{let mut p=vec![0.;bins];p[bins/2]=1.;p});}
+        let mut p=vec![0.;bins];
+        for x in s{let i=((value(x)/width).round() as isize+(bins/2) as isize).clamp(0,bins as isize-1) as usize;p[i]+=1./s.len() as f64;}
+        last=Some(p.clone());p
     }).collect();
     Distributions{grid,samples:listed.to_vec(),probabilities}
 }
@@ -445,7 +450,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let needed=((done as f64*ratio*ratio).ceil() as u64).min(MOST_TRAJECTORIES);
         let(mut ledger,_)=ledger(&model,&base,&estimates,times,allowance,bias,trap.lab,needed<=done);
         if let(Some(note),Some(flag))=(&bounded,&ledger.flagged){ledger.flagged=Some(format!("{note}；{flag}"));}
-        let mut solution=assemble(&model,&estimates,&outcome,&listed,trap.lab,done,dt,&request.initial_density,ledger,twin.is_some());
+        let mut solution=assemble(&model,&estimates,&outcome,&listed,times,trap.lab,done,dt,&request.initial_density,ledger,twin.is_some());
         solution.device=used;solution.device_note=note.clone();
         if needed<=done{
             if ratio>1.{solution.reason=Some(format!("统计误差为目标的 {ratio:.1} 倍：轨迹数已达上限 {MOST_TRAJECTORIES}"));}
@@ -560,26 +565,37 @@ fn start(e:&mut Estimate,model:&Model,initial:&Initial){
 
 /// The solution of the estimates so far.
 /// At t = 0 the populations are the initial state's, as the request gives them (the light acts
-/// after), and so are T and the mean velocity (`start`).
-fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],frequencies:[f64;3],trajectories:u64,dt:f64,initial:&[Complex],ledger:Ledger,twin:bool)->Solution{
+/// after), and so are T and the mean velocity (`start`). An output where no atom is held (the loss
+/// one) has no held atom to describe: its populations, T, ⟨v⟩, n̄ and distributions are the last
+/// output's that had one -- each row still a probability vector, the app's p (1 − L) zero there --,
+/// outside the validated regime, and the flag says from when.
+fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],times:&[f64],frequencies:[f64;3],trajectories:u64,dt:f64,initial:&[Complex],mut ledger:Ledger,twin:bool)->Solution{
     let hm=model.hbar_over_mass;
     let velocity=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.1[a]*hm));
     let position=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.0[a]));
     let first:Vec<f64>=(0..STATES).map(|i|initial[i*STATES+i].re).collect();
     let sizes:Vec<String>=model.ground.clusters.iter().map(|c|c.states.len().to_string()).collect();
+    // Each output's source: itself where an atom is held (t = 0 always), else the last that held one.
+    let held=|i:usize|i==0||estimates[i].loss<1.;
+    let source:Vec<usize>=(0..estimates.len()).scan(0,|last,i|{if held(i){*last=i;}Some(*last)}).collect();
+    if let Some(gone)=(0..estimates.len()).find(|&i|!held(i)){
+        let note=format!("{} 起已无原子被俘获（丢失概率 1）：此后的布居、温度与分布沿用 {} 的值，仅供参考",when(times[gone]),when(times[source[gone]]));
+        ledger.flagged=Some(match ledger.flagged.take(){Some(r)=>format!("{note}；{r}"),None=>note});
+    }
+    let carried=|f:&dyn Fn(&Estimate)->[f64;3]|->Vec<[f64;3]>{source.iter().map(|&j|f(&estimates[j])).collect()};
     Solution{
-        populations:estimates.iter().enumerate().map(|(i,e)|if i==0{first.clone()}else{e.populations.clone()}).collect(),
+        populations:source.iter().map(|&j|if j==0{first.clone()}else{estimates[j].populations.clone()}).collect(),
         sample_errors:estimates.iter().enumerate().map(|(i,e)|if i==0{0.}else{e.population_errors.iter().fold(e.loss_error,|m,&x|m.max(x))}).collect(),
-        temperature_uk:estimates.iter().map(|e|e.temperature).collect(),
-        temperature_errors_uk:estimates.iter().map(|e|e.temperature_error).collect(),
-        temperature_total_uk:estimates.iter().map(|e|e.temperature_total).collect(),
-        temperature_total_errors_uk:estimates.iter().map(|e|e.temperature_total_error).collect(),
-        mean_velocity_mps:estimates.iter().map(|e|e.mean_velocity).collect(),
+        temperature_uk:carried(&|e|e.temperature),
+        temperature_errors_uk:carried(&|e|e.temperature_error),
+        temperature_total_uk:source.iter().map(|&j|estimates[j].temperature_total).collect(),
+        temperature_total_errors_uk:source.iter().map(|&j|estimates[j].temperature_total_error).collect(),
+        mean_velocity_mps:carried(&|e|e.mean_velocity),
         trap_frequency_khz:frequencies.map(|w|w/std::f64::consts::TAU*1e3),
-        mean_occupation:estimates.iter().map(|e|e.occupation).collect(),
+        mean_occupation:carried(&|e|e.occupation),
         loss_probability:{let mut worst=0.;estimates.iter().map(|e|{worst=e.loss.max(worst);worst}).collect()},
         velocity,position,
-        classical:estimates.iter().map(|e|classical(e,frequencies)).collect(),
+        classical:estimates.iter().enumerate().map(|(i,e)|held(i)&&classical(e,frequencies)).collect(),
         trajectories,time_step_us:dt,
         method:format!("半经典 3D：经典质点（位置、动量）携带消去激发态后的基态内态（子空间 {}），量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），机械能高于势阱深度即算损失，{trajectories} 条轨迹，步长 {dt:.3} μs；控制变量：谐振孪生（T）{}",sizes.join("+"),if twin{"与静止孪生（布居）"}else{""}),
         reason:None,
