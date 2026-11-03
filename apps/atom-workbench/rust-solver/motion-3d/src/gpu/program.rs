@@ -27,7 +27,7 @@ pub struct Cluster{n:i32,size:i32,table:i32,h0:i32,groups:i32,ngroups:i32,classe
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Group{absorbed:i32,emitted:i32,hermitian:i32,pairs:i32,npairs:i32,s:i32,q:i32,pad:i32,residual:f64}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
-pub struct Class{target:i32,photons:i32,nphotons:i32,carriers:i32,wave_number:f64}
+pub struct Class{target:i32,photons:i32,nphotons:i32,carriers:i32,rows:i32,pad:i32,wave_number:f64}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Photon{carrier:i32,col:i32,to:i32,row:i32,residual:f64}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
@@ -40,7 +40,7 @@ pub struct Channel{carrier:i32,col:i32,residual:f64}
 #[repr(C)]#[derive(Clone,Copy,Debug)]
 pub struct Params{
     beams:u64,beam_list:u64,carriers:u64,clusters:u64,groups:u64,pairs:u64,classes:u64,photons:u64,coherent:u64,channels:u64,carrier_tables:u64,tables:u64,
-    excited:u64,diagonal:u64,couplings:u64,emission:u64,
+    excited:u64,diagonal:u64,couplings:u64,emission:u64,class_rows:u64,
     nbeams:i32,ncarriers:i32,nclusters:i32,focused:i32,nodes:i32,fields:i32,pub(crate) nnear:i32,doppler:i32,loss:i32,pad:i32,
     focused_beam:[i32;MOST_FOCUSED],stride:[i32;MOST_FOCUSED],
     field_carrier:[i32;MOST_CARRIERS*MOST_RANK],field_rank:[i32;MOST_CARRIERS*MOST_RANK],
@@ -61,18 +61,22 @@ pub struct State{
 /// The kernel's `Run`: a launch's wave and output intervals.
 #[repr(C)]#[derive(Clone,Copy,Debug)]
 pub struct Run{
-    pub(crate) states:u64,pub(crate) rings:u64,pub(crate) samples:u64,pub(crate) sums:u64,pub(crate) scratch:u64,pub(crate) tasks:u64,pub(crate) profile:u64,pub(crate) seed:u64,
+    pub(crate) states:u64,pub(crate) rings:u64,pub(crate) samples:u64,pub(crate) sums:u64,pub(crate) scratch:u64,pub(crate) tasks:u64,pub(crate) profile:u64,
+    pub(crate) records:u64,pub(crate) seed:u64,
     pub(crate) outputs:i32,pub(crate) steps:i32,pub(crate) reach:i32,pub(crate) begin:i32,pub(crate) end:i32,
     pub(crate) half:[i32;3],pub(crate) ring:[i32;3],pub(crate) ring_at:[i32;3],
     pub(crate) ring_stride:i32,pub(crate) scratch_stride:i32,pub(crate) nlisted:i32,pub(crate) pad:i32,
     pub(crate) listed:[i32;MOST_LISTED],
 }
 
-/// The sizes and offsets the kernel's `layout` reports, for the check that the twins match.
-pub fn layout()->[u32;16]{
+/// The sizes, offsets and constants the kernel's `layout` reports, for the check that the twins and
+/// the constants they share match.
+pub fn layout()->[u32;21]{
     use std::mem::{offset_of,size_of};
+    use super::{MOST_INTERVALS,RECORD,SLOT_RECORD,WARPS};
     [size_of::<Beam>(),size_of::<Carrier>(),size_of::<Cluster>(),size_of::<Group>(),size_of::<Class>(),size_of::<Photon>(),size_of::<Coherent>(),size_of::<Channel>(),
-        size_of::<Params>(),size_of::<State>(),size_of::<Run>(),offset_of!(Params,hm),offset_of!(Params,half_flow),offset_of!(Run,listed),offset_of!(State,psi),offset_of!(State,index)].map(|x|x as u32)
+        size_of::<Params>(),size_of::<State>(),size_of::<Run>(),offset_of!(Params,hm),offset_of!(Params,half_flow),offset_of!(Run,listed),offset_of!(State,psi),offset_of!(State,index),
+        MOST_INTERVALS,SLOT_RECORD,RECORD,WARPS,MAXN].map(|x|x as u32)
 }
 
 /// The model on the device: the kernel's parameters, the buffers they point into, and the most
@@ -114,7 +118,8 @@ impl Program{
             Carrier{rank:carrier.rank as i32,beams:carrier.beams.len() as i32,first,pad:0,detuning:g.carriers[c].detuning}}).collect();
         // The clusters: their tables one after another, their groups, classes and coherent groups.
         let nodes=model.tables.nodes;let points=nodes.pow(model.focused.len() as u32);
-        let(mut clusters,mut groups,mut pairs,mut classes,mut photons,mut coherent,mut channels,mut carrier_tables,mut tables)=(vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![]);
+        let(mut clusters,mut groups,mut pairs,mut classes,mut photons,mut class_rows,mut coherent,mut channels,mut carrier_tables,mut tables)=
+            (vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![]);
         for(k,(layout,cl))in model.layouts.iter().zip(&g.clusters).enumerate(){
             let mut cluster=Cluster{n:layout.n as i32,size:layout.size as i32,table:(tables.len()) as i32,h0:layout.h0 as i32,groups:groups.len() as i32,ngroups:layout.groups.len() as i32,
                 classes:classes.len() as i32,nclasses:cl.classes.len() as i32,coherent:coherent.len() as i32,ncoherent:cl.coherent.len() as i32,carriers:carrier_tables.len() as i32,pad:0,states:[0;MAXN]};
@@ -126,12 +131,18 @@ impl Program{
                     s:gl.s as i32,q:gl.q as i32,pad:0,residual:gl.residual});
                 pairs.extend(gl.pairs.iter().map(|&(k1,k)|[k1 as i32,k as i32]));
             }
+            // A class's photons by the row they land in and their carrier (each row's photons one run,
+            // each carrier's a run within it), and where each row's run starts.
             for class in &cl.classes{
                 let target=&g.clusters[class.target];
                 let carriers=class.photons.iter().fold(0,|m,(ph,_)|m|1<<ph.carrier);
-                classes.push(Class{target:class.target as i32,photons:photons.len() as i32,nphotons:class.photons.len() as i32,carriers,wave_number:class.wave_number});
-                photons.extend(class.photons.iter().map(|&(ph,w)|Photon{carrier:ph.carrier as i32,col:cl.position(ph.from).unwrap() as i32,to:ph.to as i32,
-                    row:target.position(ph.to).unwrap() as i32,residual:w}));
+                let mut list:Vec<Photon>=class.photons.iter().map(|&(ph,w)|Photon{carrier:ph.carrier as i32,col:cl.position(ph.from).unwrap() as i32,to:ph.to as i32,
+                    row:target.position(ph.to).unwrap() as i32,residual:w}).collect();
+                list.sort_by_key(|p|(p.row,p.carrier));
+                classes.push(Class{target:class.target as i32,photons:photons.len() as i32,nphotons:list.len() as i32,carriers,rows:class_rows.len() as i32,pad:0,
+                    wave_number:class.wave_number});
+                for row in 0..=target.states.len() as i32{class_rows.push(photons.len() as i32+list.iter().take_while(|p|p.row<row).count() as i32);}
+                photons.extend(list);
             }
             for group in &cl.coherent{
                 coherent.push(Coherent{channels:channels.len() as i32,count:group.len() as i32});
@@ -167,7 +178,7 @@ impl Program{
         let params=Params{
             beams:put!(beams),beam_list:put!(beam_list),carriers:put!(carriers),clusters:put!(clusters),groups:put!(groups),pairs:put!(pairs),classes:put!(classes),
             photons:put!(photons),coherent:put!(coherent),channels:put!(channels),carrier_tables:put!(carrier_tables),tables:put!(tables),
-            excited:put!(excited),diagonal:put!(diagonal),couplings:put!(couplings),emission:put!(emission),
+            excited:put!(excited),diagonal:put!(diagonal),couplings:put!(couplings),emission:put!(emission),class_rows:put!(class_rows),
             nbeams:model.geometry.len() as i32,ncarriers:model.carriers.len() as i32,nclusters:model.layouts.len() as i32,focused:model.focused.len() as i32,
             nodes:nodes as i32,fields:fields as i32,nnear:near,doppler:model.doppler as i32,loss:settings.loss as i32,pad:0,
             focused_beam:std::array::from_fn(|f|model.focused.get(f).map_or(0,|&l|l as i32)),stride:std::array::from_fn(|f|nodes.pow(f as u32) as i32),
@@ -180,7 +191,6 @@ impl Program{
         Ok(Program{params,photons,_buffers:buffers})
     }
     /// A jump's working space per trajectory (float2): the exact response's -- every near beam's
-    /// photon tables at each cluster column, one augmented NE × (NE + 1) system -- and the photons'
-    /// matrices per axis.
-    pub fn scratch(&self)->usize{self.params.nnear as usize*MAXN*3*GROUND+NE*(NE+1)+3*self.photons}
+    /// photon tables at each cluster column -- and the photons' matrices per axis.
+    pub fn scratch(&self)->usize{self.params.nnear as usize*MAXN*3*GROUND+3*self.photons}
 }

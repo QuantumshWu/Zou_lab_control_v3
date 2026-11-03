@@ -18,8 +18,10 @@
 //! # Batches
 //! The initial states are drawn on the CPU (lib.rs `initial_trajectory`, exactly); the tasks run as
 //! blocks, as many at once as the device memory comfortably holds (a wave), each launch a range of
-//! output intervals of about `LAUNCH_MS` (well inside the display watchdog). The tasks' sums come
-//! back per output and are merged per group in order, as the CPU's are.
+//! output intervals of about `LAUNCH_MS` (well inside the display watchdog), at most
+//! `MOST_INTERVALS`: each trajectory through them on its own, its records of the intervals summed per
+//! task at the launch's end. The tasks' sums come back per output and are merged per group in
+//! order, as the CPU's are.
 pub mod driver;
 pub mod program;
 pub mod ptx;
@@ -31,6 +33,7 @@ use crate::{initial_trajectory,Complex,Initial,Outcome,Stratum,STATES,TASK};
 use driver::{Buffer,Context,DeviceInfo,Function,Module,Stream};
 use program::{Program,MAXN,MOST_LISTED};
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicU64,Ordering};
 use std::sync::{Condvar,Mutex};
 use std::time::{Duration,Instant};
 
@@ -43,13 +46,20 @@ const LAUNCH_MS:f64=60.;
 pub const START_WAIT:Duration=Duration::from_secs(2);
 /// Why a solve did not wait for a GPU still starting.
 pub const STARTING:&str="GPU 正在首次准备（驱动编译内核，新版本首次使用时一次）";
-/// A block's warps (the kernel's WARPS: lib.rs `TASK`) and an output's sums (its RECORD).
-const WARPS:usize=TASK as usize;
-const RECORD:usize=47;
+/// A block's warps (the kernel's WARPS: lib.rs `TASK`), an output's sums (its RECORD), a trajectory's
+/// record of an output interval (its SLOT_RECORD: the point record and per lab axis two closing
+/// windows' held flag and means) and the most intervals of a launch (its MOST_INTERVALS: the room of
+/// each trajectory's records, which the block sums at the launch's end).
+pub(crate) const WARPS:usize=TASK as usize;
+pub(crate) const RECORD:usize=47;
+pub(crate) const SLOT_RECORD:usize=35+30;
+pub(crate) const MOST_INTERVALS:usize=64;
 /// The profiled kernel's counters per trajectory (its SPANS): the cycles of the point, the generator,
-/// the exponential, the evolution with the kick, the jumps, the loss, the steps, the readouts, the
-/// windows with the block's sums and the launches; the advances and the jumps.
-pub const SPANS:[&str;12]=["point","generator","exponential","evolve","jump","loss","step","readout","windows","total","advances","jumps"];
+/// the exponential, the evolution with the kick, the jumps -- of them the exact responses, the
+/// photons' matrices with the classes' weights and the absorbed light --, the loss, the steps, the
+/// readouts, the windows, the block's sums at a launch's end with the wait for its slowest warp, and
+/// the launches; the advances, the jumps and the jumps with the exact responses.
+pub const SPANS:[&str;17]=["point","generator","exponential","evolve","jump","exact","photons","absorption","loss","step","readout","windows","sums","total","advances","jumps","exact jumps"];
 
 /// The times the process's GPU took to start (ms): the driver, the context, the module (the driver's
 /// JIT compile of the PTX at its first load on a machine, its cache after).
@@ -67,6 +77,8 @@ pub struct Gpu{
     merge:Function,
     /// The kernel was compiled with PROFILE: its counters summed over every trajectory run.
     profiled:Option<Mutex<Vec<u64>>>,
+    /// The motion kernel's launches, each waited for, summed (us): the solves' time on the GPU.
+    kernel_us:AtomicU64,
     module:Module,
     context:Context,
 }
@@ -124,7 +136,7 @@ impl Gpu{
         let module_ms=clock.elapsed().as_secs_f64()*1e3;
         let blocks_per_multiprocessor=motion.occupancy((WARPS*32) as i32)?.max(1);
         Ok(Gpu{info:device.clone(),startup:Startup{driver_ms,context_ms,module_ms},driver_version:version,motion,stream:Stream::new()?,blocks_per_multiprocessor,merge,
-            profiled:profiled.then(||Mutex::new(vec![0;SPANS.len()])),module,context})
+            profiled:profiled.then(||Mutex::new(vec![0;SPANS.len()])),kernel_us:AtomicU64::new(0),module,context})
     }
     /// A kernel of the module by name (the checks' kernels).
     pub fn function(&self,name:&str)->Result<Function,String>{self.context.make_current()?;self.module.function(name)}
@@ -134,6 +146,8 @@ impl Gpu{
     /// The widest batch of `groups` groups of whole tasks the GPU runs at once: as many tasks per
     /// group as its resident blocks hold (one at least).
     pub fn width(&self,groups:u64)->u64{groups*TASK*((self.info.multiprocessors*self.blocks_per_multiprocessor) as u64/groups).max(1)}
+    /// The motion kernel's time over every launch so far (s).
+    pub fn kernel_seconds(&self)->f64{self.kernel_us.load(Ordering::Relaxed) as f64*1e-6}
     /// The profiled kernel's counters summed over every trajectory it ran (`SPANS`); None unprofiled.
     pub fn spans(&self)->Option<Vec<u64>>{self.profiled.as_ref().map(|s|s.lock().unwrap_or_else(|e|e.into_inner()).clone())}
     /// A model and its step's settings on the device.
@@ -190,7 +204,7 @@ impl Gpu{
 
     /// The tasks a wave holds: as many as a quarter of the free memory takes (at most half a gigabyte).
     fn wave(&self,program:&Program,w:&Windows)->Result<usize,String>{
-        let slot=std::mem::size_of::<program::State>()+8*w.ring_stride+56*w.listed.len()+8*program.scratch();
+        let slot=std::mem::size_of::<program::State>()+8*w.ring_stride+56*w.listed.len()+8*program.scratch()+8*MOST_INTERVALS*SLOT_RECORD;
         let(free,_)=self.context.memory()?;
         Ok(((free/4).min(1<<29)/(WARPS*slot+8*w.outputs*RECORD)).max(1))
     }
@@ -204,21 +218,22 @@ impl Gpu{
         let tasks:Vec<i32>=(0..n).flat_map(|i|{let count=slots[WARPS*i..][..WARPS].iter().filter(|s|s.is_some()).count();[0,count as i32,(WARPS*i) as i32]}).collect();
         let state_buffer=Buffer::with(&self.stream,&states)?;let task_buffer=Buffer::with(&self.stream,&tasks)?;
         let rings=Buffer::new(8*w.ring_stride*WARPS*n)?;let samples=Buffer::new(56*w.listed.len().max(1)*WARPS*n)?;
-        let sums=Buffer::new(8*w.outputs*RECORD*n)?;let scratch=Buffer::new(8*program.scratch()*WARPS*n)?;
+        let sums=Buffer::new(8*w.outputs*RECORD*n)?;let scratch=Buffer::new(8*program.scratch()*WARPS*n)?;let records=Buffer::new(8*MOST_INTERVALS*SLOT_RECORD*WARPS*n)?;
         let profile=Buffer::new(if self.profiled.is_some(){8*SPANS.len()*WARPS*n}else{0})?;
         self.stream.zero(&rings)?;self.stream.zero(&samples)?;self.stream.zero(&sums)?;self.stream.zero(&profile)?;
         let mut run=program::Run{states:state_buffer.pointer,rings:rings.pointer,samples:samples.pointer,sums:sums.pointer,scratch:scratch.pointer,tasks:task_buffer.pointer,
-            profile:if self.profiled.is_some(){profile.pointer}else{0},
+            profile:if self.profiled.is_some(){profile.pointer}else{0},records:records.pointer,
             seed,outputs:w.outputs as i32,steps:w.steps as i32,reach:w.reach as i32,begin:0,end:0,half:w.half.map(|h|h as i32),ring:w.ring.map(|l|l as i32),
             ring_at:w.ring_at.map(|x|x as i32),ring_stride:w.ring_stride as i32,scratch_stride:program.scratch() as i32,nlisted:w.listed.len() as i32,pad:0,listed:[0;MOST_LISTED]};
         for(k,&l)in w.listed.iter().enumerate(){run.listed[k]=l as i32;}
-        let mut begin=0;let mut chunk=8usize.div_ceil(w.steps).max(1);
+        let mut begin=0;let mut chunk=8usize.div_ceil(w.steps).clamp(1,MOST_INTERVALS);
         while begin<w.intervals{
             run.begin=begin as i32;run.end=(begin+chunk).min(w.intervals) as i32;
             let clock=Instant::now();
             self.stream.launch(&self.motion,n as u32,(WARPS*32) as u32,&[&program.params,&run])?;self.stream.synchronize()?;
-            let ms=clock.elapsed().as_secs_f64()*1e3;let done=run.end as usize-begin;begin=run.end as usize;
-            chunk=((done as f64*LAUNCH_MS/ms.max(1e-3)).floor() as usize).clamp(1,(4*done).max(1));
+            let ms=clock.elapsed().as_secs_f64()*1e3;self.kernel_us.fetch_add((ms*1e3) as u64,Ordering::Relaxed);
+            let done=run.end as usize-begin;begin=run.end as usize;
+            chunk=((done as f64*LAUNCH_MS/ms.max(1e-3)).floor() as usize).clamp(1,(4*done).max(1)).min(MOST_INTERVALS);
         }
         let mut merged=vec![0f64;w.outputs*RECORD*runs.len()];
         if !runs.is_empty(){

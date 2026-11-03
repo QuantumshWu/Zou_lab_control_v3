@@ -15,15 +15,19 @@ fn main(){
     if args.get(4).is_some_and(|a|a=="warm"){let _=gpu::gpu();}
     let mut request=scene::scene(&name);
     request.times_us=(0..samples).map(|i|duration*i as f64/(samples-1) as f64).collect();
-    let run=|device:Device|->(Solution,f64){let clock=Instant::now();let s=solve(&request,device,&mut |_,_|{}).unwrap();(s,clock.elapsed().as_secs_f64())};
+    let run=|device:Device|->(Solution,f64,f64){
+        let(clock,cpu)=(Instant::now(),scene::cpu_seconds());let s=solve(&request,device,&mut |_,_|{}).unwrap();(s,clock.elapsed().as_secs_f64(),scene::cpu_seconds()-cpu)
+    };
     let order=if gpu_first{[Device::Gpu,Device::Cpu]}else{[Device::Cpu,Device::Gpu]};
     let mut out=vec![];for d in order{out.push(run(d));}
     let(cpu,gpu_run)=if gpu_first{(&out[1],&out[0])}else{(&out[0],&out[1])};
-    if let Ok(g)=gpu::gpu(){let g=g.lock().unwrap();let(r,l,b)=g.resources().unwrap();
+    let mut kernel=0.;
+    if let Ok(g)=gpu::gpu(){let g=g.lock().unwrap();let(r,l,b)=g.resources().unwrap();kernel=g.kernel_seconds();
         println!("GPU {} (compute {}.{}, {} SMs), driver CUDA {}: startup driver {:.0} ms, context {:.0} ms, module {:.0} ms; kernel {r} registers, {l} B spilled, {b} blocks/SM",
             g.info.name,g.info.compute_capability.0,g.info.compute_capability.1,g.info.multiprocessors,g.driver_version,g.startup.driver_ms,g.startup.context_ms,g.startup.module_ms);}
-    for(label,(s,wall))in [("CPU",cpu),("GPU",gpu_run)]{
-        println!("{name} {label}: {:.3} s, on {:?}{}, {} trajectories, dt {:.4} us",wall,s.device,s.device_note.as_ref().map_or(String::new(),|n|format!(" ({n})")),s.trajectories,s.time_step_us);
+    for(label,(s,wall,cpu_time))in [("CPU",cpu),("GPU",gpu_run)]{
+        let on_gpu=if label=="GPU"{format!(", GPU kernels {kernel:.3} s")}else{String::new()};
+        println!("{name} {label}: wall {wall:.3} s, CPU {cpu_time:.2} s{on_gpu}, on {:?}{}, {} trajectories, dt {:.4} us",s.device,s.device_note.as_ref().map_or(String::new(),|n|format!(" ({n})")),s.trajectories,s.time_step_us);
     }
     let(c,g)=(&cpu.0,&gpu_run.0);
     let z=|d:f64,a:f64,b:f64|d.abs()/(a*a+b*b).sqrt().max(1e-300);
