@@ -8,8 +8,9 @@
 //! traps the atom (its focus is the origin, its axes and depth the trap's); `temperatureUK`,
 //! `massKg`, `fieldVectorG`, `hamiltonian` (H0 without the beams' couplings), `frameFrequenciesMHz`,
 //! `emission` (three operators, one per lab axis) and `beams`, each with `waistUm` exactly when it
-//! is a Gaussian beam focused at the atom (a plane wave without). `options.device`, "cpu" or "gpu",
-//! the device asked for ("cpu" when absent).
+//! is a Gaussian beam focused at the atom (a plane wave without). `options.device`, "gpu" or "cpu",
+//! the device asked for ("gpu" when absent): the GPU when it can run (motion-3d gpu/mod.rs), else the
+//! CPU with the reason.
 //!
 //! # Result contract
 //! `states`, `timesUs`, `populations` (the held atom's, averaged over the trajectories),
@@ -37,7 +38,7 @@
 //! (`diagnostics.estimatedRemainingMs`).
 use crate::{Device,Model,Operator,Options,lattice_core_adapter};
 use atom_motion_3d::ledger::Ledger;
-use atom_motion_3d::solve::{Distributions,Solution,CONFIDENCE,POPULATION_TARGET};
+use atom_motion_3d::solve::{self as engine,Distributions,Solution,CONFIDENCE,POPULATION_TARGET};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use atom_population_core::Lapack;
 use atom_population_core::lattice::pipeline::{LONGEST_TIME_US,MOST_SAMPLES};
@@ -49,8 +50,10 @@ const ENGINE:&str="rust-motion-3d";
 const AXES:[&str;3]=["x","y","z"];
 /// Why a motion block along an axis or in a plane is refused: only 3D motion is served.
 pub const ONLY_3D:&str="运动只计算 3D（半经典）：运动轴需为 3d";
-/// Why a request for the GPU runs on the CPU.
-pub const GPU_PENDING:&str="尚无 GPU 版本：本次在 CPU 上计算";
+
+/// Starts the GPU in the background (the trajectory lane's worker at its start), so its first
+/// motion solve finds the context made and the kernels loaded.
+pub fn prepare(){atom_motion_3d::gpu::prepare();}
 
 /// The motion block of the model, as the TypeScript model writes it.
 #[derive(Clone,Deserialize)]
@@ -124,7 +127,7 @@ fn approximations(ledger:&Ledger)->Value{
 
 /// The result in the one contract; `remaining` marks a streamed checkpoint (with the engine's
 /// estimate of the wall time to the final result, ms).
-fn result(model:&Model,times:&[f64],initial:&[f64],solution:&Solution,groups:&[String],device:Device,remaining:Option<Option<f64>>,started:Instant)->Result<Value,String>{
+fn result(model:&Model,times:&[f64],initial:&[f64],solution:&Solution,groups:&[String],remaining:Option<Option<f64>>,started:Instant)->Result<Value,String>{
     if solution.populations.len()!=times.len()||solution.populations.iter().any(|row|row.len()!=STATES||row.iter().any(|x|!x.is_finite())){return Err("The 3D motion engine returned populations that are not 32 finite values per time".into());}
     let(trace,initial_error)=lattice_core_adapter::row_errors(&solution.populations,initial)?;
     let errors:Vec<f64>=solution.sample_errors.iter().map(|e|CONFIDENCE*e).collect();
@@ -133,7 +136,7 @@ fn result(model:&Model,times:&[f64],initial:&[f64],solution:&Solution,groups:&[S
         "populationAccuracy":{"status":if converged{"estimated-converged"}else{"estimated-partial"},"requestedTolerance":POPULATION_TARGET,
             "sampleErrors":errors,"estimatedMaximumError":estimated,"scope":{"states":STATES,"samples":times.len(),"groups":groups}},
         "diagnostics":{"engine":ENGINE,"traceError":trace,"initialStateError":initial_error,"elapsedMs":started.elapsed().as_secs_f64()*1000.,"method":solution.method,
-            "device":"cpu","approximations":approximations(&solution.approximations)},
+            "device":match solution.device{engine::Device::Gpu=>"gpu",engine::Device::Cpu=>"cpu"},"approximations":approximations(&solution.approximations)},
         "motion":{"axis":"3d","temperatureUK":per_axis(&solution.temperature_uk),"temperatureErrorUK":per_axis(&solution.temperature_errors_uk),
             "temperatureTotalUK":solution.temperature_total_uk,"temperatureTotalErrorUK":solution.temperature_total_errors_uk,
             "meanVelocityMps":per_axis(&solution.mean_velocity_mps),"meanOccupation":per_axis(&solution.mean_occupation),
@@ -141,8 +144,8 @@ fn result(model:&Model,times:&[f64],initial:&[f64],solution:&Solution,groups:&[S
             "lossProbability":solution.loss_probability,"classical":solution.classical,
             "momentum":distributions(&solution.velocity,"velocitiesMps"),"position":distributions(&solution.position,"positionsUm"),
             "trajectories":solution.trajectories,"timeStepUs":solution.time_step_us}});
-    // The engine runs on the CPU; a request for the GPU says why it did not get it.
-    if device==Device::Gpu{result["diagnostics"]["deviceNote"]=json!(GPU_PENDING);}
+    // A request for the GPU that ran on the CPU says why.
+    if let Some(note)=&solution.device_note{result["diagnostics"]["deviceNote"]=json!(note);}
     if !converged{result["populationAccuracy"]["reason"]=json!(solution.reason.clone()
         .unwrap_or_else(||format!("The statistical error is {estimated:.2e} against the target {POPULATION_TARGET:e}")));}
     if let Some(remaining)=remaining{
@@ -166,8 +169,9 @@ pub fn solve(model:&Model,motion:&MotionModel,options:&Options,publish:&mut dyn 
     let initial:Vec<f64>=(0..STATES).map(|i|request.initial_density[i*STATES+i].re).collect();
     let mut failure:Option<String>=None;
     let mut observe=|checkpoint:&Solution,remaining:Option<f64>|{if failure.is_some(){return;}
-        match result(model,&request.times_us,&initial,checkpoint,&names,options.device,Some(remaining),started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
-    let solution=atom_motion_3d::solve::solve(&request,&mut observe)?;
+        match result(model,&request.times_us,&initial,checkpoint,&names,Some(remaining),started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
+    let device=match options.device{Device::Gpu=>engine::Device::Gpu,Device::Cpu=>engine::Device::Cpu};
+    let solution=engine::solve(&request,device,&mut observe)?;
     if let Some(e)=failure{return Err(e);}
-    result(model,&request.times_us,&initial,&solution,&names,options.device,None,started)
+    result(model,&request.times_us,&initial,&solution,&names,None,started)
 }

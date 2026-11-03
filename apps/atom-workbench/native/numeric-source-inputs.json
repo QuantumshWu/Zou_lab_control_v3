@@ -3,7 +3,8 @@
   "trees": [
     { "path": "rust-solver/src", "extensions": ["rs"], "required": true },
     { "path": "rust-solver/population-core/src", "extensions": ["rs"], "required": true },
-    { "path": "rust-solver/motion-3d/src", "extensions": ["rs"], "required": true }
+    { "path": "rust-solver/motion-3d/src", "extensions": ["rs"], "required": true },
+    { "path": "rust-solver/motion-3d/kernels", "extensions": ["cu", "ptx"], "required": true }
   ],
   "files": [
     { "path": "native/numeric-source-inputs.json", "required": true },

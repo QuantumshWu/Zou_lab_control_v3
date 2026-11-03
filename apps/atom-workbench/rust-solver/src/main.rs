@@ -85,12 +85,12 @@ struct Options {
     #[serde(default)]
     device: Device,
 }
-/// A motion solve's device (`options.device`): "gpu" or "cpu", the CPU when absent.
+/// A motion solve's device (`options.device`): "gpu" or "cpu", the GPU when absent.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum Device {
-    Gpu,
     #[default]
+    Gpu,
     Cpu,
 }
 fn default_duration() -> f64 {
@@ -117,7 +117,7 @@ impl Default for Options {
             include_mean: true,
             mean_only: false,
             mean_horizon_us: default_mean_horizon(),
-            device: Device::Cpu,
+            device: Device::Gpu,
         }
     }
 }
@@ -136,6 +136,9 @@ struct Request {
     options: Options,
     #[serde(default)]
     progress: bool,
+    /// The lane a worker serves, told with its `warmup`: the trajectory lane's starts the GPU.
+    #[serde(default)]
+    lane: Option<String>,
 }
 
 fn write_line(message: &Value) -> bool {
@@ -144,14 +147,15 @@ fn write_line(message: &Value) -> bool {
 }
 
 /// One protocol response. `capabilities` and `warmup` (the worker start-up
-/// LAPACK self-check) are operations; anything else is an rb87-full/2 solve,
+/// LAPACK self-check; the trajectory lane's worker also starts the motion's
+/// GPU in the background) are operations; anything else is an rb87-full/2 solve,
 /// which with `progress` first streams every checkpoint's result as
 /// `checkpoint` progress (the same contract, marked `progress`).
 fn respond(request: Request) -> Value {
     let id = request.id;
     match request.op.as_deref() {
         Some("capabilities") => return json!({"id":id,"protocol":NATIVE_PROTOCOL,"capabilities":[FULL_MODEL_SCHEMA]}),
-        Some("warmup") => return match lattice_core_adapter::warmup() {
+        Some("warmup") => return match lattice_core_adapter::warmup().inspect(|_| if request.lane.as_deref() == Some("trajectory") { motion3d_adapter::prepare() }) {
             Ok(()) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"ready":true}),
             Err(error) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"error":error}),
         },
@@ -260,7 +264,7 @@ mod tests {
         model
     }
     /// A motion request is a trajectory alone of 3D motion, its trap one of its beams; a tweezer
-    /// without light shift confines nothing. The device is the CPU or the GPU.
+    /// without light shift confines nothing. The device is the GPU (by default) or the CPU.
     #[test]
     fn a_motion_request_is_3d_motion_in_the_trap_it_names() {
         let mut model = motion_model();
@@ -280,6 +284,6 @@ mod tests {
         let device = |name: &str| serde_json::from_value::<Options>(json!({"device":name})).map(|o| o.device);
         assert_eq!((device("gpu").unwrap(), device("cpu").unwrap()), (Device::Gpu, Device::Cpu));
         assert!(device("tpu").is_err());
-        assert_eq!(serde_json::from_value::<Options>(json!({})).unwrap().device, Device::Cpu);
+        assert_eq!(serde_json::from_value::<Options>(json!({})).unwrap().device, Device::Gpu);
     }
 }
