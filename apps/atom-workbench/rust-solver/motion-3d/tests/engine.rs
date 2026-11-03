@@ -213,6 +213,21 @@ fn the_harmonic_control_s_mean_is_exact(){
     }}
 }
 
+/// The harmonic control at any step (control.rs `Harmonic::new`: its window means in closed form): at
+/// 2⁴⁰ steps per output -- the running sums it once kept per step would have taken 10¹⁴ bytes -- its
+/// means are those of 2²⁴ steps, both the continuous time's window means to about the step's share of
+/// a trap period.
+#[test]
+fn the_harmonic_control_keeps_no_sums_per_step(){
+    let r=request(&|_|true);let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();let trap=initial.traps[0];
+    let(interval,outputs)=(2.,41);
+    let at=|steps:usize|Harmonic::new(&model,&Settings::new(interval/steps as f64,&trap,f64::EPSILON,true),&initial,steps,outputs);
+    let(fine,coarse)=(at(1<<40),at(1<<24));
+    for i in 0..outputs{for x in 0..3{
+        assert!(fine.mean[i][x].is_finite()&&(fine.mean[i][x]-coarse.mean[i][x]).abs()<=1e-6*coarse.mean[i][x].abs(),"output {i} axis {x}: {} against {}",fine.mean[i][x],coarse.mean[i][x]);
+    }}
+}
+
 /// The held twin's exact means (control.rs: the engine's generator and jumps at its point, by the
 /// superoperator's exponential) against the dense front end's master equation at the same point
 /// (ground.rs `local_at`, RK4), from the initial state over 20 us: within the tables' accuracy.

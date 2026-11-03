@@ -51,7 +51,11 @@
 //!   change of the mechanical energy over the step, which the conservative forces leave alone --
 //!   the internal state's lag that carries the friction is a small share of its populations, so
 //!   their criterion alone lets T's step error grow past its share (the 3D PGC example: T 2–3 % high
-//!   at the populations' step, measured against half that step).
+//!   at the populations' step, measured against half that step). Where the friction moves the
+//!   energy by less than its thermal value 3 k_B T over the run, T's step error is the energy's step
+//!   error summed over the run against that thermal energy, and the step's energy error is taken
+//!   against a step's share of it: the change there can be the integrator's own error, which falls
+//!   with the step as the step's error does (`step_excess`).
 //! All scale as dt², so a step that misses is shrunk by the square root of its excess and checked
 //! again, and one that meets them with room is grown the same way, by whatever factor, until a step
 //! comes up twice: first by the population criterion's bound, then from the largest step that met
@@ -69,7 +73,10 @@
 //! step grows with it (the exponentials' sub-steps, the jumps' redone steps) -- in the 3D PGC and the
 //! tetrahedral MOT the candidates' costs lie within a few per cent, in the D1 gray molasses the
 //! measured criterion halves it. The step's exponentials are summed to a share η of its own
-//! population budget, η² ε dt/waiting, instead of to double precision.
+//! population budget, η² ε dt/waiting, instead of to double precision. A trajectory takes at most
+//! `MOST_STEPS` steps over the run: neither the first step nor the search goes finer, and a step that
+//! bound sets is kept even where it misses its shares, its measured bias booked as any step's (the
+//! flag, where a total exceeds its target, says why).
 //!
 //! # Batches
 //! A batch is cut into two groups per thread (lib.rs `Stratum`): each group's initial states are a
@@ -138,6 +145,11 @@ pub const CONFIDENCE:f64=2.;
 pub const CLASSICAL:f64=4.;
 /// The most trajectories a solve runs; a solve stopped there returns its result with the reason.
 pub const MOST_TRAJECTORIES:u64=1<<14;
+/// The most steps a trajectory takes over the run, a bound on the work as `MOST_TRAJECTORIES` is (a
+/// solve takes at most their product): neither the first step nor the step search goes finer, and a
+/// step it bounds that misses its shares is kept with its measured bias, the reason in the flag where
+/// a total exceeds its target (`ledger`).
+pub const MOST_STEPS:usize=1<<24;
 /// A batch's group: a batch is cut into two groups per thread (jackknife groups and Latin
 /// hypercubes of initial states, lib.rs `Stratum`), so a batch's groups are as large as its size
 /// allows while the jackknife keeps at least that many.
@@ -327,9 +339,14 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let thermal=(KT_PER_UK*request.temperature_uk*model.hbar_over_mass).sqrt();
     let pattern=model.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max)*thermal;
     let rate=if pattern>0.{pattern}else{trap.frequencies.iter().copied().fold(0.,f64::max)};
-    let steps=((interval*rate/(A_PRIORI_SHARE*TEMPERATURE_TARGET).sqrt()).ceil() as usize).max(1);
+    // The finest step the work bound allows (`MOST_STEPS`), in steps per interval.
+    let most=(MOST_STEPS/(outputs-1)).max(1);
+    let steps=((interval*rate/(A_PRIORI_SHARE*TEMPERATURE_TARGET).sqrt()).ceil() as usize).clamp(1,most);
     let threads=rayon::current_num_threads() as u64;let pilot=2*threads;
     let duration=times[outputs-1];
+    // The drift that moves an atom's thermal energy 3 k_B T (a 3D harmonic trap's) over the run, per
+    // unit time: a step's share of it is the friction criterion's floor (`step_excess`).
+    let drift=3.*KT_PER_UK*request.temperature_uk/duration;
     let plain=|steps:usize,truncation:f64|Settings::new(interval/steps as f64,&trap,truncation,true);
     let(states,jumps)=sample_states(&model,&plain(steps,f64::EPSILON),&initial,seed,pilot,steps,outputs);
     let waiting=pilot as f64*duration/(jumps.max(1) as f64);let horizon=waiting.min(duration);
@@ -346,7 +363,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // population error measured where it decides and the motion's criteria are met (a step's
     // doubling taken once). Kept: of the checked steps that met the targets the one of least
     // predicted cost, or the last checked when none did.
-    let doubled=|steps:usize|{let r=step_excess(&Engine::new(&model,settings(steps)),&states,waiting);Check{steps,population:r[0],motion:r[1]}};
+    let doubled=|steps:usize|{let r=step_excess(&Engine::new(&model,settings(steps)),&states,waiting,drift);Check{steps,population:r[0],motion:r[1]}};
     let search=|first:usize,measured:bool,known:&[Check],checked:&mut Vec<Check>|{
         let mut steps=first;
         for _ in 0..8{
@@ -354,7 +371,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             let mut c=known.iter().find(|c|c.steps==steps).copied().unwrap_or_else(||doubled(steps));
             if measured&&c.decided_by_population(){c.population=accumulated_excess(&Engine::new(&model,settings(steps)),&states,horizon,pilot as usize);}
             checked.push(c);
-            steps=((steps as f64*c.excess().sqrt()).ceil() as usize).max(1);
+            steps=((steps as f64*c.excess().sqrt()).ceil() as usize).clamp(1,most);
         }
     };
     let mut bound=vec![];search(steps,false,&[],&mut bound);
@@ -374,6 +391,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     }else{candidates.first().copied().unwrap_or(grown)};
     let(steps,ratios)=(chosen.steps,chosen.ratios());
     let dt=interval/steps as f64;let settings=settings(steps);
+    // A step the work bound set that misses its shares: why, for the flag.
+    let bounded=(steps==most&&!chosen.met()).then(||format!("步数已达上限（每条轨迹 {MOST_STEPS} 步）：步长 {dt:.3e} μs 的误差为其份额的 {:.1} 倍",chosen.excess()));
     // The step's bias: its share of each target times its measured excess there.
     let bias=[ratios[0]*A_PRIORI_SHARE*POPULATION_TARGET,ratios[1]*A_PRIORI_SHARE*TEMPERATURE_TARGET];
     // The device: the GPU when asked for and able, the model on it; else the CPU, with why.
@@ -424,7 +443,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let(_,accounts)=ledger(&model,&base,&estimates,times,allowance,bias,trap.lab,false);
         let ratio=worst_ratio(&estimates,&accounts,trap.lab);
         let needed=((done as f64*ratio*ratio).ceil() as u64).min(MOST_TRAJECTORIES);
-        let(ledger,_)=ledger(&model,&base,&estimates,times,allowance,bias,trap.lab,needed<=done);
+        let(mut ledger,_)=ledger(&model,&base,&estimates,times,allowance,bias,trap.lab,needed<=done);
+        if let(Some(note),Some(flag))=(&bounded,&ledger.flagged){ledger.flagged=Some(format!("{note}；{flag}"));}
         let mut solution=assemble(&model,&estimates,&outcome,&listed,trap.lab,done,dt,&request.initial_density,ledger,twin.is_some());
         solution.device=used;solution.device_note=note.clone();
         if needed<=done{
@@ -458,15 +478,23 @@ impl Check{
 /// the sampled states: the population criterion's bound -- one step's population error times the steps
 /// of a waiting time -- and the light impulse's and the friction's larger relative error, each over
 /// its share (1 meets it).
-fn step_excess(engine:&Engine,states:&[Trajectory],waiting:f64)->[f64;2]{
-    let dt=engine.settings.dt;let richardson=4./3.;
+///
+/// The friction's: the step's error of the mechanical energy's change, against that change where the
+/// friction moves the energy by more than its thermal value 3 k_B T over the run -- the equilibrium T
+/// it sets is off by the friction's relative error --, else against a step's share of that thermal
+/// energy, `drift` dt (`drift` = 3 k_B T/duration): there T is off by the step's energy error summed
+/// over the run, and the change is no measure of the step's error -- with the friction weak it is the
+/// integrator's own error, whose third order makes one step's difference from two halves three times
+/// their change (E₁ − E₂ = 3(E₂ − E₀)) at every step, so that their ratio never falls.
+fn step_excess(engine:&Engine,states:&[Trajectory],waiting:f64,drift:f64)->[f64;2]{
+    let dt=engine.settings.dt;let richardson=4./3.;let count=states.len().max(1) as f64;
     // The states' doublings on the threads, summed in their order (the sums do not depend on the threads).
     let doubled:Vec<([f64;2],[f64;3],[f64;2])>=states.par_iter().map(|t|engine.doubling(t,dt)).collect();
     let(mut population,mut difference,mut impulse,mut energy,mut friction)=(0.,0.,0.,0.,0.);
     for(motion,internal,work)in &doubled{difference+=motion[0];impulse+=motion[1];population+=internal[0];energy+=work[0];friction+=work[1];}
-    let bound=richardson*population/states.len().max(1) as f64*(waiting/dt).max(1.);
+    let bound=richardson*population/count*(waiting/dt).max(1.);
     let relative=if impulse>0.{richardson*difference/impulse}else{0.};
-    let dissipated=if friction!=0.{richardson*(energy/friction).abs()}else{0.};
+    let dissipated=richardson*energy.abs()/friction.abs().max(count*drift*dt);
     [bound/(A_PRIORI_SHARE*POPULATION_TARGET),relative.max(dissipated)/(A_PRIORI_SHARE*TEMPERATURE_TARGET)]
 }
 

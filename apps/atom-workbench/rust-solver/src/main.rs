@@ -285,6 +285,25 @@ mod tests {
         let outside = rows.iter().flatten().filter(|&&p| !(0. ..=1.).contains(&p)).count();
         assert_eq!(outside, 0, "every published population lies in [0, 1]");
     }
+    /// The default scene with a weak D1 probe (tests/fixtures/weak_d1_probe_motion.json): the light's
+    /// friction is weak, and a step's change of the mechanical energy is the integrator's own error,
+    /// which the friction criterion took for the friction -- the released step search ran away, and
+    /// the harmonic control's sums per step asked for terabytes. The step is the one the light's
+    /// pattern needs (k v_T ≈ 0.35 rad/us at 20 uK: a few tenths of a microsecond), the result
+    /// within its targets.
+    #[test]
+    fn a_weak_light_s_motion_keeps_the_step_its_pattern_needs() {
+        let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/weak_d1_probe_motion.json")).unwrap();
+        let mut line = fixture["payload"].clone();
+        line["id"] = json!(9);
+        let out = request(line);
+        assert!(out["error"].is_null(), "{}", out["error"]);
+        let result = &out["result"];
+        let dt = result["motion"]["timeStepUs"].as_f64().unwrap();
+        assert!(dt >= 0.1, "the step is {dt:e} us");
+        let flagged = &result["diagnostics"]["approximations"]["flagged"];
+        assert!(flagged.is_null(), "{flagged}");
+    }
     /// A motion request is a trajectory alone of 3D motion, its trap one of its beams; a tweezer
     /// without light shift confines nothing. The device is the GPU (by default) or the CPU.
     #[test]

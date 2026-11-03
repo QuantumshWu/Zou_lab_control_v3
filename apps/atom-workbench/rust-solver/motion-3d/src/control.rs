@@ -32,17 +32,12 @@ use crate::{Complex,Initial,STATES};
 pub struct Harmonic{axes:[[f64;3];3],pub(crate) a:Vec<[[[f64;3];3];3]>,pub(crate) b:Vec<[[[f64;3];3];3]>,pub mean:Vec<[f64;3]>}
 impl Harmonic{
     /// The control of a run of `steps` steps of the settings' dt per output, `outputs` outputs, with
-    /// the settings' T windows (lib.rs `Windows`: `half` steps per lab axis, cut at t = 0).
+    /// the settings' T windows (lib.rs `Windows`: `half` steps per lab axis, cut at t = 0). Each
+    /// window's means of cos_p cos_q and cos_p sin_q over its steps in closed form (`window`): O(1)
+    /// time and memory per output whatever the step.
     pub fn new(model:&Model,settings:&Settings,initial:&Initial,steps:usize,outputs:usize)->Harmonic{
         let(hm,dt,w)=(model.hbar_over_mass,settings.dt,settings.frequencies);
         let half=crate::half_windows(settings);
-        let last=(outputs-1)*steps+half.into_iter().max().unwrap();
-        // Running sums over the steps of cos_i cos_j and cos_i sin_j (index 3 i + j), from step 0.
-        let mut prefix=vec![[[0.;9];2];last+2];
-        for k in 0..=last{
-            let t=k as f64*dt;let(s,c):([f64;3],[f64;3])=(std::array::from_fn(|i|(w[i]*t).sin()),std::array::from_fn(|i|(w[i]*t).cos()));
-            for i in 0..3{for j in 0..3{prefix[k+1][0][3*i+j]=prefix[k][0][3*i+j]+c[i]*c[j];prefix[k+1][1][3*i+j]=prefix[k][1][3*i+j]+c[i]*s[j];}}
-        }
         let sigma=initial_momenta(model,settings,initial);
         let(mut a,mut b,mut mean)=(vec![[[[0.;3];3];3];outputs],vec![[[[0.;3];3];3];outputs],vec![[0.;3];outputs]);
         for i in 0..outputs{
@@ -50,7 +45,9 @@ impl Harmonic{
             for x in 0..3{
                 let h=half[x].min(at);let(lo,hi)=(at-h,at+h);let n=(hi-lo+1) as f64;let u:[f64;3]=std::array::from_fn(|p|settings.axes[p][x]);
                 for p in 0..3{for q in 0..3{
-                    let(cc,cs)=((prefix[hi+1][0][3*p+q]-prefix[lo][0][3*p+q])/n,(prefix[hi+1][1][3*p+q]-prefix[lo][1][3*p+q])/n);
+                    // cos_p cos_q = (cos(ω_p − ω_q)t + cos(ω_p + ω_q)t)/2, cos_p sin_q = (sin(ω_q + ω_p)t + sin(ω_q − ω_p)t)/2.
+                    let(difference,sum)=(window((w[p]-w[q])*dt,lo,hi),window((w[p]+w[q])*dt,lo,hi));
+                    let(cc,cs)=(0.5*(difference.0+sum.0)/n,0.5*(sum.1-difference.1)/n);
                     a[i][x][p][q]=u[p]*u[q]*cc;b[i][x][p][q]=-u[p]*u[q]*w[q]/hm*cs;mean[i][x]+=a[i][x][p][q]*sigma[p][q];
                 }}
             }
@@ -63,6 +60,18 @@ impl Harmonic{
         std::array::from_fn(|x|{let(a,b)=(&self.a[i][x],&self.b[i][x]);let mut c=0.;
             for p in 0..3{for q in 0..3{c+=k[p]*(a[p][q]*k[q]+2.*b[p][q]*r[q]);}}c})
     }
+}
+
+/// Σ_{k=lo}^{hi} (cos θk, sin θk): e^{iθ(lo+hi)/2} D(θ) with the Dirichlet kernel D(θ) =
+/// sin(nθ/2)/sin(θ/2), n = hi − lo + 1 terms. θ/2 is taken as mπ + δ, |δ| ≤ π/2, where the kernel
+/// is (−1)^{m(n−1)} sin(nδ)/sin δ -- n at δ = 0 --, so it keeps its relative accuracy near every
+/// multiple of 2π that θ comes to.
+fn window(theta:f64,lo:usize,hi:usize)->(f64,f64){
+    let n=hi-lo+1;let m=(0.5*theta/std::f64::consts::PI).round();let delta=0.5*theta-m*std::f64::consts::PI;
+    let kernel=if delta==0.{n as f64}else{(n as f64*delta).sin()/delta.sin()};
+    let sign=if (m as i64).rem_euclid(2)==1&&(n-1)%2==1{-1.}else{1.};
+    let(s,c)=(0.5*theta*(lo+hi) as f64).sin_cos();
+    (sign*kernel*c,sign*kernel*s)
 }
 
 /// E[κ₀κ₀ᵀ] on the settings' principal axes: each initial state's Maxwell momenta along its own trap's
@@ -185,4 +194,23 @@ fn exponential(m:&Dense,tau:f64)->Dense{
     for k in 1..=30{term=term.product(&a).scaled(Complex::new(1./k as f64,0.));sum.add_scaled(Complex::ONE,&term);if term.largest()<=f64::EPSILON*sum.largest(){break;}}
     for _ in 0..squarings{sum=sum.product(&sum);}
     sum
+}
+
+#[cfg(test)]
+mod tests{
+    use super::window;
+    use crate::rng::{Purpose,Rng};
+    /// The closed-form window sums against the sums over the window's steps: angles at random and
+    /// next to multiples of 2π (where the kernel's sines vanish), windows at the start and far out.
+    #[test]
+    fn the_window_sums_are_the_sums_over_the_window_s_steps(){
+        let mut rng=Rng::new(5,Purpose::Initial,0,0);let tau=std::f64::consts::TAU;
+        let mut angles:Vec<f64>=(0..40).map(|_|8.*(rng.uniform()-0.5)).collect();
+        for m in [-2.,-1.,0.,1.,3.]{for offset in [0.,1e-13,-3e-9,2e-5]{angles.push(m*tau+offset);}}
+        for &theta in &angles{for(lo,hi)in [(0,0),(0,1),(0,2),(3,3),(7,20),(0,4097),(123_457,140_000),(1_000_000,1_000_513)]{
+            let(mut c,mut s)=(0.,0.);for k in lo..=hi{let(y,x)=(theta*k as f64).sin_cos();c+=x;s+=y;}
+            let(wc,ws)=window(theta,lo,hi);let scale=(hi-lo+1) as f64*(1.+(theta*hi as f64).abs())*1e-14;
+            assert!((wc-c).abs()<=scale&&(ws-s).abs()<=scale,"θ {theta:e}, {lo}..={hi}: ({wc}, {ws}) against ({c}, {s})");
+        }}
+    }
 }
