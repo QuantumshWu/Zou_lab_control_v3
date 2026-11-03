@@ -296,9 +296,13 @@ fn rotation(z:Complex,s:f64)->Complex{Complex::cis(-z.re*s)*(z.im*s).exp()}
 fn form(x:&[Complex],psi:&[Complex],n:usize)->Complex{
     let mut s=Complex::ZERO;for a in 0..n{let mut row=Complex::ZERO;for b in 0..n{row+=x[a*n+b]*psi[b];}s+=psi[a].conj()*row;}s
 }
-/// The product a b of n × n matrices (row-major).
+/// The product a b of n × n matrices (row-major), a's zero entries skipped (a beat's matrix is sparse).
 fn product(a:&[Complex],b:&[Complex],n:usize)->Vec<Complex>{
-    let mut out=vec![Complex::ZERO;n*n];for i in 0..n{for k in 0..n{let x=a[i*n+k];for j in 0..n{out[i*n+j]+=x*b[k*n+j];}}}out
+    let mut out=vec![Complex::ZERO;n*n];for i in 0..n{for k in 0..n{let x=a[i*n+k];if x==Complex::ZERO{continue;}for j in 0..n{out[i*n+j]+=x*b[k*n+j];}}}out
+}
+/// The product a b with b's zero entries skipped.
+fn product_right(a:&[Complex],b:&[Complex],n:usize)->Vec<Complex>{
+    let mut out=vec![Complex::ZERO;n*n];for k in 0..n{for j in 0..n{let y=b[k*n+j];if y==Complex::ZERO{continue;}for i in 0..n{out[i*n+j]+=a[i*n+k]*y;}}}out
 }
 
 /// A segment's state between its grid's nodes: ψ, or a spectral segment's coordinates R⁻¹ψ.
@@ -386,7 +390,7 @@ impl Segment{
         let all=c.beats.iter().map(|b|size(&b.hamiltonian)).sum::<f64>();let bound=size(h0)+all;
         let pace=c.beats.iter().map(|b|b.omega.abs()*size(&b.hamiltonian)).sum::<f64>();
         let scale=(0..3).map(|a|size(&c.statics.gradient[a])).fold(0.,f64::max)*tau;let once=(tau/horizon).min(1.);
-        let commutator=|x:&[Complex]|->Vec<Complex>{let(a,b)=(product(h0,x,n),product(x,h0,n));a.iter().zip(&b).map(|(p,q)|*p-*q).collect()};
+        let commutator=|x:&[Complex]|->Vec<Complex>{let(a,b)=(product_right(h0,x,n),product(x,h0,n));a.iter().zip(&b).map(|(p,q)|*p-*q).collect()};
         let state=|b:&[Complex],w:f64,others:f64|->f64{
             let m=size(b);let c1=commutator(b);let(x1,x2)=(size(&c1),size(&commutator(&c1)));
             let x=x1+3.*m*all;let y=x2+3.*x1*all+6.*bound*m*all+3.*m*all*all+2.*m*others+w*m*all;
