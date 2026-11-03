@@ -1083,6 +1083,19 @@ mod tests{
         assert_eq!(since_start([0.074,0.002,0.005,0.001].into_iter()),vec![0.074;4]);
         assert_eq!(since_start([0.,0.01,0.003,0.02].into_iter()),vec![0.,0.01,0.01,0.02]);
     }
+    /// A step's predicted cost weighs the targets that bind and that the a-priori estimates leave room in:
+    /// a model over the population target (GMD1C forced all-folded at 1 us outputs) compares its steps by T's
+    /// room and their work -- not by a tie of infinite costs that keeps the bound rule's step --, and one over
+    /// both, or with T a reference, by their work alone.
+    #[test]
+    fn a_step_s_cost_weighs_the_targets_that_leave_room(){
+        let(baseline,larger)=(Check{steps:11,population:0.935,loss:0.,motion:0.119},Check{steps:4,population:0.253,loss:0.,motion:0.926});
+        let cost=|apriori:[f64;2],binds:[bool;2]|predicted_cost(&larger,0.424,&baseline,apriori,binds);
+        let t=|a:f64|((TEMPERATURE_TARGET-a-0.119*A_PRIORI_SHARE*TEMPERATURE_TARGET)/(TEMPERATURE_TARGET-a-0.926*A_PRIORI_SHARE*TEMPERATURE_TARGET)).powi(2);
+        assert!((cost([0.0638;2],[true;2])-0.424*t(0.0638)).abs()<1e-12&&cost([0.0638;2],[true;2])<1.);
+        assert_eq!(cost([0.0638,0.12],[true;2]),0.424);assert_eq!(cost([0.0638;2],[true,false]),0.424);
+        assert!((cost([0.002;2],[true;2])-0.424*t(0.002)).abs()<1e-12);
+    }
     /// The batches: the remaining need in whole groups, at least the width, at most doubling; on the
     /// GPU whole waves.
     #[test]
