@@ -153,7 +153,11 @@ pub fn initial_trajectory(model:&Model,settings:&Settings,initial:&Initial,seed:
     dressed(model,initial_from(model,settings,initial,seed,Purpose::Initial,index,stratum))
 }
 /// A bare initial state's slow part at fourth order, where it starts (engine.rs `slow_start`).
-fn dressed(model:&Model,mut t:Trajectory)->Trajectory{let point=model.point(t.r,t.kappa);engine::slow_start(model,&mut t,&point,0.);t}
+pub(crate) fn dressed(model:&Model,mut t:Trajectory)->Trajectory{let point=model.point(t.r,t.kappa);engine::slow_start(model,&mut t,&point,0.);t}
+/// The bare initial state of a solve's trajectory, which a held twin starts from (`hold`; gpu/mod.rs).
+pub(crate) fn bare_trajectory(model:&Model,settings:&Settings,initial:&Initial,seed:u64,index:u64,stratum:Stratum)->Trajectory{
+    initial_from(model,settings,initial,seed,Purpose::Initial,index,stratum)
+}
 /// The bare initial state: the internal basis state, its position and momentum (`initial_trajectory`).
 fn initial_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,purpose:Purpose,index:u64,stratum:Stratum)->Trajectory{
     let mut rng=Rng::new(seed,purpose,index,0);let mut latin=Latin::new(seed,stratum,index);

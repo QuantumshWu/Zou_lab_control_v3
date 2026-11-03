@@ -1511,7 +1511,9 @@ impl Model{
     /// The photon amplitudes at a point of every class of a cluster's jumps (`Photons`), with the
     /// exact responses in a step beyond the first order's allowance (engine.rs): a folded photon's
     /// C_x A_c ψ = −C_x R_c ψ, an explicit state's C_x ψ_e.
-    pub fn photons<'a>(&'a self,cluster:usize,p:&Point,psi:&[Complex],t:f64,exact:Option<Exact>)->Photons<'a>{
+    pub fn photons<'a>(&'a self,cluster:usize,p:&Point,psi:&[Complex],t:f64,exact:Option<Exact>)->Photons<'a>{self.photons_to(cluster,p,psi,t,exact,true)}
+    /// `photons`, with the fourth order's corrections where `fourth` (else the second order's alone).
+    fn photons_to<'a>(&'a self,cluster:usize,p:&Point,psi:&[Complex],t:f64,exact:Option<Exact>,fourth:bool)->Photons<'a>{
         let g=&self.ground;let cl=&g.clusters[cluster];let layout=&self.layouts[cluster];let(n,n0)=(layout.n,layout.n0);let ng=g.ground_states.len();let size=ng*n0;
         // Per carrier, rank and axis the jump tables J_k and J2_k at the point (ng × n0), and per carrier
         // and axis M = Σ_k E_k J_k − E^D_k J2_k, or the exact responses' C_a Σ_l a_l R_l(w_l).
@@ -1534,8 +1536,8 @@ impl Model{
         }
         // The fourth order (the Doppler's first order stays the second's): the photons' W3 part on ψ and their
         // second order on ψ − ½Xψ, X the metric's coherent part (`coherent_metric`).
-        let w3=self.fourth_photons(cluster,p);
-        let bent:Option<[Complex;MOST_STATES]>=self.coherent_metric(cluster,p,t).map(|x|std::array::from_fn(|a|if a<n0{psi[a]-(0..n0).fold(Complex::ZERO,|s,b|s+x[a*n0+b]*psi[b])*0.5}else{Complex::ZERO}));
+        let w3=if fourth{self.fourth_photons(cluster,p)}else{None};
+        let bent:Option<[Complex;MOST_STATES]>=if !fourth{None}else{self.coherent_metric(cluster,p,t)}.map(|x|std::array::from_fn(|a|if a<n0{psi[a]-(0..n0).fold(Complex::ZERO,|s,b|s+x[a*n0+b]*psi[b])*0.5}else{Complex::ZERO}));
         // The classes: each photon's entry into its target state's row from its source's column.
         let amplitude=cl.classes.iter().map(|class|{let target=&g.clusters[class.target];
             let mut u=[[Complex::ZERO;MOST_STATES];3];let mut rotation=Rotation::new(t);
@@ -1557,18 +1559,24 @@ impl Model{
     /// A cluster's generator against its jumps at a point and time: D = i(H − H†) − Σ L†L over its classes'
     /// photons, which a Lindblad generator keeps positive semidefinite -- its no-jump decay at least its
     /// jumps' rate in every state -- at rest: the photons' first order in the Doppler and recoil shifts,
-    /// which the decay leaves out, aside (its own estimate). D's smallest eigenvalue, Σ L†L's largest and the
-    /// eigenvalues' scale, the largest of i(H − H†)'s and Σ L†L's (rad/us).
+    /// which the decay leaves out, aside (its own estimate). At fourth order Σ L̃†L̃ to that order, the decay's
+    /// (ground.rs, # Fourth order): L̃ = L + δ, δ the fourth order's corrections, less δ†δ, the sixth order
+    /// within the fold's charge. D's smallest eigenvalue, Σ L†L's largest and the eigenvalues' scale, the
+    /// largest of i(H − H†)'s and Σ L†L's (rad/us).
     pub fn decay_balance(&self,cluster:usize,p:&Point,t:f64)->(f64,f64,f64){
         let mut p=*p;for f in p.fields.iter_mut(){f.doppler=[Complex::ZERO;MOST_RANK];}let p=&p;
         let n=self.dimension(cluster);let h=self.generator(cluster,p,t).hamiltonian;
         let decay=Dense::from_fn(n,n,|a,b|(h[a*n+b]-h[b*n+a].conj())*Complex::I);
         // Column b: the photons of the basis state b.
-        let columns:Vec<Vec<[[Complex;MOST_STATES];3]>>=(0..n).map(|b|{let mut psi=[Complex::ZERO;MOST_MIXED];psi[b]=Complex::ONE;self.photons(cluster,p,&psi,t,None).amplitude}).collect();
+        let columns=|fourth:bool|->Vec<Vec<[[Complex;MOST_STATES];3]>>{(0..n).map(|b|{let mut psi=[Complex::ZERO;MOST_MIXED];psi[b]=Complex::ONE;self.photons_to(cluster,p,&psi,t,None,fourth).amplitude}).collect()};
+        let(full,second)=(columns(true),self.layouts[cluster].fourth.as_ref().map(|_|columns(false)));
         let mut jumps=Dense::zeros(n,n);
         // A photon lands in its target's ground states.
         for(c,class)in self.ground.clusters[cluster].classes.iter().enumerate(){let nt=self.ground_dimension(class.target);
-            for x in 0..3{for a in 0..n{for b in 0..n{jumps[(a,b)]+=(0..nt).fold(Complex::ZERO,|s,i|s+columns[a][c][x][i].conj()*columns[b][c][x][i]);}}}}
+            for x in 0..3{for a in 0..n{for b in 0..n{for i in 0..nt{
+                jumps[(a,b)]+=full[a][c][x][i].conj()*full[b][c][x][i];
+                if let Some(l)=&second{let(da,db)=(full[a][c][x][i]-l[a][c][x][i],full[b][c][x][i]-l[b][c][x][i]);jumps[(a,b)]-=da.conj()*db;}
+            }}}}}
         let mut d=decay.clone();d.add_scaled(-Complex::ONE,&jumps);
         let extreme=|m:&Dense|hermitian_eigenvalues(m).into_iter().fold((f64::INFINITY,f64::NEG_INFINITY),|(lo,hi),x|(lo.min(x),hi.max(x)));
         let((low,_),(_,rate),(g0,g1))=(extreme(&d),extreme(&jumps),extreme(&decay));

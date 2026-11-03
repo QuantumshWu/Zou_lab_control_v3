@@ -16,12 +16,12 @@
 //! the GPU at most `START_WAIT` (`gpu_within`): one still starting runs on the CPU, with the reason.
 //!
 //! # Batches
-//! The initial states are drawn on the CPU (lib.rs `initial_trajectory`, exactly); the tasks run as
-//! blocks, as many at once as the device memory comfortably holds (a wave), each launch a range of
-//! output intervals of about `LAUNCH_MS` (well inside the display watchdog), at most
-//! `MOST_INTERVALS`: each trajectory through them on its own, its records of the intervals summed per
-//! task at the launch's end. The tasks' sums come back per output and are merged per group in
-//! order, as the CPU's are.
+//! The initial states are drawn on the CPU (lib.rs `initial_trajectory` and a held twin's start,
+//! exactly); the tasks run as blocks, as many at once as the device memory comfortably holds (a
+//! wave), each launch a range of output intervals of about `LAUNCH_MS` (well inside the display
+//! watchdog), at most `MOST_INTERVALS`: each trajectory through them on its own, its records of the
+//! intervals summed per task at the launch's end. The tasks' sums come back per output and are
+//! merged per group in order, as the CPU's are.
 pub mod driver;
 pub mod program;
 pub mod ptx;
@@ -29,7 +29,7 @@ pub mod ptx;
 use crate::engine::{propagate,Settings,Trajectory};
 use crate::model::Model;
 use crate::stats::{Group,Sums};
-use crate::{initial_trajectory,Complex,Initial,Outcome,Stratum,Variates,STATES,TASK};
+use crate::{bare_trajectory,dressed,Complex,Initial,Outcome,Stratum,Variates,STATES,TASK};
 use driver::{Buffer,Context,DeviceInfo,Function,Module,Stream};
 use program::{Program,MAXN,MOST_LISTED};
 use rayon::prelude::*;
@@ -173,9 +173,16 @@ impl Gpu{
         let(mut groups,mut samples,mut jumps,mut doppler)=(Vec::<Group>::new(),vec![vec![];listed.len()],0u64,0f64);let mut last=None;
         for wave in tasks.chunks(self.wave(program,&windows)?){
             // The initial states, drawn on the CPU; each task's trajectories in its block's slots.
+            // The atom from its bare state's slow part (lib.rs `initial_trajectory`), the held twin from
+            // the bare state's at the twin's point (lib.rs `hold`, control.rs `Twin::start`).
+            let twin=variates.and_then(|v|v.twin);
             let states:Vec<Option<program::State>>=wave.par_iter().flat_map_iter(|&(g,from,to)|{
                 let(start,end)=bounds(g);
-                (0..WARPS as u64).map(move|w|{let index=from+w;(index<to).then(||program::State::new(&initial_trajectory(model,settings,initial,seed,index,Stratum{first:start,size:end-start}),settings))})
+                (0..WARPS as u64).map(move|w|{let index=from+w;(index<to).then(||{
+                    let bare=bare_trajectory(model,settings,initial,seed,index,Stratum{first:start,size:end-start});
+                    let held=twin.map(|h|{let mut x=bare.clone();h.start(&mut x);x});let atom=dressed(model,bare);
+                    program::State::new(&atom,held.as_ref().unwrap_or(&atom),settings)
+                })})
             }).collect();
             // The wave's runs of tasks of one group, merged on the device in order (lib.rs `run`).
             let mut runs:Vec<(u64,usize,usize)>=vec![];
@@ -208,7 +215,7 @@ impl Gpu{
         if trajectories.iter().any(|t|t.seed!=seed){return Err("the trajectories of a launch share their run's seed".into());}
         let mut plain=settings.clone();plain.average=false;
         let windows=Windows::new(&plain,steps,2,&[])?;
-        let states:Vec<Option<program::State>>=trajectories.iter().map(|t|Some(program::State::new(t,settings))).chain(std::iter::repeat(None)).take(trajectories.len().div_ceil(WARPS)*WARPS).collect();
+        let states:Vec<Option<program::State>>=trajectories.iter().map(|t|Some(program::State::new(t,t,settings))).chain(std::iter::repeat(None)).take(trajectories.len().div_ceil(WARPS)*WARPS).collect();
         let(_,_,finished,_)=self.run(program,&windows,&Controls::none(),seed,&states,&[])?;
         Ok(trajectories.iter().zip(&finished).map(|(t,s)|s.trajectory(settings,t.seed)).collect())
     }
@@ -320,15 +327,18 @@ impl Controls{
 }
 
 impl program::State{
-    /// A trajectory's initial state for the kernel: on the trap's principal axes, ψ normalized.
-    fn new(t:&crate::engine::Trajectory,settings:&Settings)->program::State{
+    /// A trajectory's initial state for the kernel, with its held twin's internal state and threshold
+    /// (`twin`: at fourth order the bare state's slow part at the twin's point, control.rs
+    /// `Twin::start`): on the trap's principal axes, ψ normalized.
+    fn new(t:&crate::engine::Trajectory,twin:&crate::engine::Trajectory,settings:&Settings)->program::State{
         let along=|v:[f64;3]|->[f64;3]{std::array::from_fn(|i|settings.axes[i][0]*v[0]+settings.axes[i][1]*v[1]+settings.axes[i][2]*v[2])};
-        let norm:f64=t.psi.iter().map(|z|z.norm_sqr()).sum();let scale=1./norm.sqrt();
-        let psi=std::array::from_fn(|x|[(t.psi[x].re*scale) as f32,(t.psi[x].im*scale) as f32]);
-        program::State{q:along(t.r),p:along(t.kappa),time:t.time,logn:norm.ln(),threshold:t.threshold,log_threshold:t.threshold.ln(),prefix:[0.;15],
-            q0:along(t.r),p0:along(t.kappa),twin_logn:norm.ln(),twin_threshold:t.threshold,twin_log_threshold:t.threshold.ln(),
-            psi,twin:psi,doppler:t.doppler as f32,cluster:t.cluster as i32,jumps:t.jumps as i32,death:if t.alive{-1}else{0},
-            index:t.index as u32,twin_cluster:t.cluster as i32,twin_jumps:t.jumps as i32,pad:0}
+        let unit=|t:&crate::engine::Trajectory|->(f64,[[f32;2];MAXN]){let norm:f64=t.psi.iter().map(|z|z.norm_sqr()).sum();let scale=1./norm.sqrt();
+            (norm.ln(),std::array::from_fn(|x|[(t.psi[x].re*scale) as f32,(t.psi[x].im*scale) as f32]))};
+        let((logn,psi),(twin_logn,held))=(unit(t),unit(twin));
+        program::State{q:along(t.r),p:along(t.kappa),time:t.time,logn,threshold:t.threshold,log_threshold:t.threshold.ln(),prefix:[0.;15],
+            q0:along(t.r),p0:along(t.kappa),twin_logn,twin_threshold:twin.threshold,twin_log_threshold:twin.threshold.ln(),
+            psi,twin:held,doppler:t.doppler as f32,cluster:t.cluster as i32,jumps:t.jumps as i32,death:if t.alive{-1}else{0},
+            index:t.index as u32,twin_cluster:twin.cluster as i32,twin_jumps:twin.jumps as i32,pad:0}
     }
     /// The trajectory of a state: on the lab axes, ψ with its norm e^{ln‖ψ‖²/2} as the CPU keeps it.
     fn trajectory(&self,settings:&Settings,seed:u64)->Trajectory{
