@@ -13,9 +13,12 @@
 //! CPU with the reason.
 //!
 //! # Result contract
-//! `states`, `timesUs`, `populations` (the held atom's, averaged over the trajectories),
-//! `populationAccuracy` against the method's own target (`POPULATION_TARGET`, two standard errors
-//! per sample), `diagnostics` (`engine`, `traceError`, `initialStateError`, `elapsedMs`, `method`,
+//! `states`, `timesUs`, `populations` (the held atom's, averaged over the trajectories, projected
+//! onto the probability simplex as the population core's rows are: the control variates' estimate
+//! is unbiased, so a population near zero can dip below it), `populationAccuracy` against the
+//! method's own target (`POPULATION_TARGET`, two standard errors per sample, each grown by its
+//! row's projection), `diagnostics` (`engine`, `traceError` and `initialStateError` of the rows
+//! before the projection, `elapsedMs`, `method`,
 //! `device` -- the device used -- with `deviceNote` when it is not the one asked for, and
 //! `approximations`: the ledger of the a-priori approximations, `budget`, `used`, `items` of
 //! `label`, `estimate` and `action`, and `flagged` when some output times lie beyond the budget),
@@ -41,7 +44,8 @@ use atom_motion_3d::ledger::Ledger;
 use atom_motion_3d::solve::{self as engine,Distributions,Solution,CONFIDENCE,POPULATION_TARGET};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use atom_population_core::Lapack;
-use atom_population_core::lattice::pipeline::{LONGEST_TIME_US,MOST_SAMPLES};
+use atom_population_core::lattice::accuracy;
+use atom_population_core::lattice::pipeline::{self,LONGEST_TIME_US,MOST_SAMPLES};
 use serde::Deserialize;
 use serde_json::{json,Value};
 use std::time::Instant;
@@ -127,14 +131,20 @@ fn approximations(ledger:&Ledger)->Value{
 
 /// The result in the one contract; `remaining` marks a streamed checkpoint (with the engine's
 /// estimate of the wall time to the final result, ms).
-fn result(model:&Model,times:&[f64],initial:&[f64],solution:&Solution,groups:&[String],remaining:Option<Option<f64>>,started:Instant)->Result<Value,String>{
+fn result(model:&Model,times:&[f64],initial:&[f64],solution:&Solution,groups:&[lattice_core_adapter::Group],remaining:Option<Option<f64>>,started:Instant)->Result<Value,String>{
     if solution.populations.len()!=times.len()||solution.populations.iter().any(|row|row.len()!=STATES||row.iter().any(|x|!x.is_finite())){return Err("The 3D motion engine returned populations that are not 32 finite values per time".into());}
+    // The trace gate checks the engine's rows as they are: a systematic trace error still fails.
     let(trace,initial_error)=lattice_core_adapter::row_errors(&solution.populations,initial)?;
-    let errors:Vec<f64>=solution.sample_errors.iter().map(|e|CONFIDENCE*e).collect();
+    // Published: each row projected onto the probability simplex, the projection's change (over the
+    // states and the groups) added to that sample's error, as the population core's rows are.
+    let indices:Vec<Vec<usize>>=groups.iter().map(|g|g.indices.clone()).collect();
+    let mut errors:Vec<f64>=solution.sample_errors.iter().map(|e|CONFIDENCE*e).collect();
+    let populations:Vec<Vec<f64>>=solution.populations.iter().zip(&mut errors).map(|(row,error)|{
+        let projected=pipeline::simplex(row);*error+=accuracy::metric(row,&projected,&indices);projected}).collect();
     let estimated=errors.iter().fold(0_f64,|a,&b|a.max(b));let converged=estimated<=POPULATION_TARGET;
-    let mut result=json!({"states":model.states,"timesUs":times,"populations":solution.populations,
+    let mut result=json!({"states":model.states,"timesUs":times,"populations":populations,
         "populationAccuracy":{"status":if converged{"estimated-converged"}else{"estimated-partial"},"requestedTolerance":POPULATION_TARGET,
-            "sampleErrors":errors,"estimatedMaximumError":estimated,"scope":{"states":STATES,"samples":times.len(),"groups":groups}},
+            "sampleErrors":errors,"estimatedMaximumError":estimated,"scope":{"states":STATES,"samples":times.len(),"groups":groups.iter().map(|g|&g.name).collect::<Vec<_>>()}},
         "diagnostics":{"engine":ENGINE,"traceError":trace,"initialStateError":initial_error,"elapsedMs":started.elapsed().as_secs_f64()*1000.,"method":solution.method,
             "device":match solution.device{engine::Device::Gpu=>"gpu",engine::Device::Cpu=>"cpu"},"approximations":approximations(&solution.approximations)},
         "motion":{"axis":"3d","temperatureUK":per_axis(&solution.temperature_uk),"temperatureErrorUK":per_axis(&solution.temperature_errors_uk),
@@ -164,14 +174,14 @@ pub fn solve(model:&Model,motion:&MotionModel,options:&Options,publish:&mut dyn 
     if options.duration_us>LONGEST_TIME_US{return Err(format!("The trajectory duration is limited to 10 s (requested {} s)",options.duration_us/1e6));}
     if !(2..=MOST_SAMPLES).contains(&options.samples){return Err(format!("A trajectory has 2 to {MOST_SAMPLES} samples (requested {})",options.samples));}
     if model.dimension!=STATES||model.states.len()!=STATES{return Err("rb87-full/2 requires the complete 32-state Rb87 model".into());}
-    let(_,groups)=lattice_core_adapter::groups(model)?;let names:Vec<String>=groups.into_iter().map(|g|g.name).collect();
+    let(_,groups)=lattice_core_adapter::groups(model)?;
     let request=request(model,motion,options)?;
     let initial:Vec<f64>=(0..STATES).map(|i|request.initial_density[i*STATES+i].re).collect();
     let mut failure:Option<String>=None;
     let mut observe=|checkpoint:&Solution,remaining:Option<f64>|{if failure.is_some(){return;}
-        match result(model,&request.times_us,&initial,checkpoint,&names,Some(remaining),started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
+        match result(model,&request.times_us,&initial,checkpoint,&groups,Some(remaining),started){Ok(value)=>publish(&value),Err(e)=>failure=Some(e)}};
     let device=match options.device{Device::Gpu=>engine::Device::Gpu,Device::Cpu=>engine::Device::Cpu};
     let solution=engine::solve(&request,device,&mut observe)?;
     if let Some(e)=failure{return Err(e);}
-    result(model,&request.times_us,&initial,&solution,&names,None,started)
+    result(model,&request.times_us,&initial,&solution,&groups,None,started)
 }
