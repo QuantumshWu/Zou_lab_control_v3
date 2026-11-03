@@ -1,13 +1,16 @@
 //! The engine's kernels: `kernels/motion3d.cu`, compiled once at development time by a pinned NVRTC
 //! (`scripts/ptx.ps1`, `examples/compile_ptx.rs`) to PTX for compute capability 7.5, which the
-//! driver's JIT compiles for the GPU it runs on. The PTX is committed and embedded; its header
-//! records the SHA-256 of the options and the source it was made from, which a test checks.
+//! driver's JIT compiles for the GPU it runs on. The PTX is committed, and embedded deflated
+//! (build.rs); its header records the SHA-256 of the options and the source it was made from, which
+//! a test checks.
 //!
 //! NVRTC 12.0 writes PTX ISA 8.0, which a driver of CUDA 12.0 or later loads: R525 (Windows
 //! 527.41) or newer. An older driver leaves the solve on the CPU (`mod.rs`).
 
-/// The embedded PTX.
-pub const PTX:&str=include_str!("../../kernels/motion3d.ptx");
+/// The embedded PTX, deflated by build.rs.
+const PACKED:&[u8]=include_bytes!(concat!(env!("OUT_DIR"),"/motion3d.ptx.deflate"));
+/// The PTX.
+pub fn ptx()->String{String::from_utf8(miniz_oxide::inflate::decompress_to_vec(PACKED).expect("the embedded PTX inflates")).expect("the embedded PTX is text")}
 /// The source, embedded only to check the PTX against it.
 pub const SOURCE:&str=include_str!("../../kernels/motion3d.cu");
 /// NVRTC's options: PTX for compute capability 7.5 (Turing, the oldest GPU the engine takes) with
@@ -72,7 +75,7 @@ mod tests{
     /// scripts/ptx.ps1 after editing kernels/motion3d.cu.
     #[test]
     fn the_ptx_is_compiled_from_the_source(){
-        let first=PTX.lines().next().unwrap_or("");
+        let ptx=ptx();let first=ptx.lines().next().unwrap_or("");
         assert_eq!(first,header(SOURCE).trim_end(),"kernels/motion3d.ptx is stale: run motion-3d/scripts/ptx.ps1");
     }
 }

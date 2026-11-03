@@ -104,8 +104,7 @@ impl Gpu{
         let driver_ms=clock.elapsed().as_secs_f64()*1e3;
         let clock=Instant::now();let context=Context::new(device)?;let context_ms=clock.elapsed().as_secs_f64()*1e3;
         let clock=Instant::now();
-        // The PTX as written (a checkout may have made its line endings CRLF).
-        let module=context.load(&ptx::PTX.replace("\r\n","\n")).map_err(|e|format!("驱动无法编译 GPU 内核（{e}）"))?;
+        let module=context.load(&ptx::ptx()).map_err(|e|format!("驱动无法编译 GPU 内核（{e}）"))?;
         let motion=module.function("motion3d")?;motion.prefer_shared()?;let merge=module.function("merge")?;
         let module_ms=clock.elapsed().as_secs_f64()*1e3;
         let blocks_per_multiprocessor=motion.occupancy((WARPS*32) as i32)?.max(1);
