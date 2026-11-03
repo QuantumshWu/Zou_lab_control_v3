@@ -6,7 +6,7 @@
 //! momenta, and a short solve whose t = 0 is the request's initial state.
 use atom_motion_3d::control::{Harmonic,Twin};
 use atom_motion_3d::engine::{dipole_direction,Engine,Settings};
-use atom_motion_3d::ground::Path;
+use atom_motion_3d::ground::{Ground,Path};
 use atom_motion_3d::ledger::BUDGET;
 use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
@@ -416,4 +416,60 @@ fn the_held_twin_at_fourth_order_averages_to_its_master_equation(){
     }}
     println!("largest |z| {:.2} (output {}, state {})",worst.0,worst.1,worst.2);
     assert!(worst.0<=4.,"output {} state {}: |z| {:.2}",worst.1,worst.2,worst.0);
+}
+
+/// The fixture's tweezer alone and with a reflection along its axis, in phase at the focus (F5): the
+/// reflection's field the tweezer's with `turn` of the cooling beam's polarization added (relative to
+/// the tweezer's coupling's size, its outside shift the tweezer's).
+fn retro(turn:f64)->(Request,Request){
+    let alone=request(&|b|b["id"]=="tweezer");let cool=request(&|b|b["id"]=="cool-plus").beams[0].clone();
+    let mut reflection=alone.beams[0].clone();(reflection.id,reflection.name)=("reflection".into(),"反射光".into());reflection.direction=reflection.direction.map(|x|-x);
+    let norm=|m:&Matrix|m.real.iter().zip(&m.imag).map(|(a,b)|a*a+b*b).sum::<f64>().sqrt();let scale=turn*norm(&reflection.coupling)/norm(&cool.coupling);
+    for(m,c)in [(&mut reflection.coupling,&cool.coupling),(&mut reflection.counter_coupling,&cool.counter_coupling)]{for k in 0..STATES*STATES{m.real[k]+=scale*c.real[k];m.imag[k]+=scale*c.imag[k];}}
+    let mut retro=alone.clone();retro.beams.push(reflection);(alone,retro)
+}
+
+/// A retro-reflected tweezer folds as its standing wave (F5, ground.rs `Unit`): the fixture's tweezer
+/// and its reflection, one field, shift the states as the tweezer alone at twice its amplitude does at
+/// their summed field's intensity |a₁ + a₂|²/4 -- four times the tweezer's own shift at the focus, where
+/// the release folded each beam on its own (twice), and cos²(kζ) along the axis --, to round-off at
+/// every point; their trap along the axis is the standing wave's lattice site, tens of times the
+/// tweezer's 19 kHz.
+#[test]
+fn a_retro_reflected_tweezer_folds_as_its_standing_wave(){
+    let(alone,retro)=retro(0.);
+    let mut double=alone.clone();
+    {let b=&mut double.beams[0];for(m,x)in [(&mut b.coupling,2.),(&mut b.counter_coupling,2.),(&mut b.outside_shift,4.)]{for v in m.real.iter_mut().chain(m.imag.iter_mut()){*v*=x;}}}
+    let(g,reference)=(Ground::new(&retro).unwrap(),Ground::new(&double).unwrap());
+    let n=retro.beams[0].direction;
+    for r in (0..9).map(|i|n.map(|x|0.05*i as f64*x)).chain([[0.3,0.1,0.2],[-0.2,0.37,0.1]]){
+        let a=g.amplitudes_at(r);let(h,expected)=(g.hamiltonian_at(r),reference.hamiltonian_with(&[(a[0]+a[1]).norm_sqr()/4.]));
+        let mut d=h.clone();d.add_scaled(-Complex::ONE,&expected);
+        assert!(d.largest()<=1e-12*expected.largest(),"r {r:?}: {:.2e} of {:.2e}",d.largest(),expected.largest());
+    }
+    let along=|r:&Request|{let model=Model::new(r).unwrap();Initial::new(&model,r).unwrap().traps[0].lab[1]/std::f64::consts::TAU*1e3};
+    let(single,lattice)=(along(&alone),along(&retro));
+    assert!(lattice>30.*single,"the trap along the beam: {lattice:.1} kHz against the tweezer's {single:.1} kHz");
+}
+
+/// A reflection a little off the tweezer's polarization (a millionth of the cooling beam's added) is
+/// the standing wave's unit with its remainder booked (ground.rs `coherence`), to its smallness: its
+/// shifts within 1e-5 of the exact reflection's at every point and its interference item far within
+/// the budget -- where the beams taken apart would book the whole interference. A polarization that
+/// differs (as much of the cooling beam's) books an interference beyond the budget: the solve is
+/// flagged, not silently wrong.
+#[test]
+fn a_reflection_a_little_off_the_tweezer_s_polarization_is_its_standing_wave_within_its_bound(){
+    let(_,exact)=retro(0.);let(_,turned)=retro(1e-6);let(_,crossed)=retro(1.);
+    let(e,g,c)=(Ground::new(&exact).unwrap(),Ground::new(&turned).unwrap(),Ground::new(&crossed).unwrap());
+    let estimate=|g:&Ground|g.interference.iter().map(|x|x.estimate(g)).fold(0.,f64::max);
+    assert!(g.units.iter().map(|u|u.beams.clone()).eq([vec![0,1]])&&g.interference[0].coherent,"{:?}",g.interference);
+    assert!(estimate(&g)<=1e-2*BUDGET,"the remainder's item {:.2e}",estimate(&g));
+    assert!(estimate(&c)>BUDGET,"the crossed polarizations' item {:.2e}",estimate(&c));
+    let n=exact.beams[0].direction;
+    for r in (0..9).map(|i|n.map(|x|0.05*i as f64*x)).chain([[0.3,0.1,0.2]]){
+        let(h,reference)=(g.hamiltonian_at(r),e.hamiltonian_at(r));let mut light=reference.clone();light.add_scaled(-Complex::ONE,&e.hamiltonian);
+        let mut d=h.clone();d.add_scaled(-Complex::ONE,&reference);
+        assert!(d.largest()<=1e-5*light.largest(),"r {r:?}: {:.2e} of {:.2e}",d.largest(),light.largest());
+    }
 }

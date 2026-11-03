@@ -297,10 +297,11 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
     let names=|beams:&[usize]|beams.iter().map(|&l|request.beams[l].name.as_str()).collect::<Vec<_>>().join(" + ");
     for &(u,error,_)in &model.profiles{ledger.add(&format!("「{}」的光强分布",names(&g.units[u].beams)),error,"取焦点处的光强".into());}
     for &u in &model.focused[1..]{ledger.add(&format!("「{}」的光强分布",names(&g.units[u].beams)),0.,"按位置插值（强度维度）".into());}
-    // The interference of beams of one frequency whose polarizations differ (ground.rs `Unit`): their
-    // shifts at their own intensities, the interference's bound against the poles, as a profile's.
-    let weight=(1./g.pole.max(f64::MIN_POSITIVE)).max(1./g.generator_scale.max(f64::MIN_POSITIVE));
-    for(beams,bound)in &g.incoherent{ledger.add(&format!("「{}」的干涉",names(beams)),bound*weight,"同频而偏振不同：光移按各光束的光强相加，干涉项（偏振光晶格）略去".into());}
+    // The interference the units of beams of one frequency leave out (ground.rs `coherence`).
+    for x in &g.interference{
+        let action=if x.coherent{"同频光束按主偏振合成一个光场（驻波精确）；偏离主偏振的剩余分量略去"}else{"同频而偏振不同：光移按各光束的光强相加，干涉项（偏振光晶格）略去"};
+        ledger.add(&format!("「{}」的干涉",names(&x.beams)),x.estimate(g),action.into());
+    }
     ledger.add("聚焦光的光强插值表",model.table_error,"三次插值".into());
     ledger
 }
