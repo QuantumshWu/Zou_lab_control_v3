@@ -157,7 +157,7 @@ use crate::engine::{column_norm,node_phase,series,Engine,Settings,Trajectory};
 use crate::gpu;
 use crate::ground::{ExcitedKind,Ground,Kind};
 use crate::ledger::{Ledger,BUDGET};
-use crate::model::{Model,Trap};
+use crate::model::{Model,Trap,NOT_LINDBLAD};
 use crate::control::{Harmonic,Twin};
 use crate::stats::{summarize,Estimate,Group,Means,Scales,KT_PER_UK};
 use crate::{sample_states,simulate,Initial,Outcome,Variates,TASK};
@@ -408,6 +408,9 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // gpu/program.rs).
     let fourth=device==Device::Cpu;
     let Some(mut pilot_candidate)=next_candidate(request,&mut ladder,false,&mut failed)else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
+    // A generator that gains on the ladder's first rung, every drive folded, is the fold's construction failing
+    // (model.rs `Model::lindblad`), not a regime to escalate into explicit states: the solve stops with why.
+    if let Some(e)=failed.as_ref().filter(|e|e.starts_with(NOT_LINDBLAD)){return Err(Stop::Error(e.clone()));}
     // The reference state: the largest initial population; its trap sets ω per axis.
     let(trap,depth)=pilot_candidate.reference();
     // A trap the model gives only where the model holds: a strong near beam whose light shift anti-traps the
