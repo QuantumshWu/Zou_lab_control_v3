@@ -51,14 +51,15 @@ pub const STARTING:&str="GPU 正在首次准备（驱动编译内核，新版本
 /// windows' held flag and means) and the most intervals of a launch (its MOST_INTERVALS: the room of
 /// each trajectory's records, which the block sums at the launch's end).
 pub(crate) const WARPS:usize=TASK as usize;
-pub(crate) const RECORD:usize=90;
-pub(crate) const SLOT_RECORD:usize=69+3*2*8;
+pub(crate) const RECORD:usize=91;
+pub(crate) const SLOT_RECORD:usize=70+3*2*8;
 pub(crate) const MOST_INTERVALS:usize=64;
-/// Where an output's sums (the kernel's record) keep the held twin's, the motion's and the harmonic
-/// control's (`sums_of`).
+/// Where an output's sums (the kernel's record) keep the held twin's, the folded excited population's,
+/// the motion's and the harmonic control's (`sums_of`).
 pub(crate) const TWIN:usize=35;
-pub(crate) const MOTION:usize=69;
-pub(crate) const HARMONIC:usize=81;
+pub(crate) const FOLDED:usize=69;
+pub(crate) const MOTION:usize=70;
+pub(crate) const HARMONIC:usize=82;
 /// The profiled kernel's counters per trajectory (its SPANS): the cycles of the point, the generator,
 /// the exponential, the evolution with the kick, the jumps -- of them the exact responses, the
 /// photons' matrices with the classes' weights and the absorbed light --, the loss, the steps, the
@@ -288,7 +289,7 @@ impl Windows{
 /// An output's sums of a task (the kernel's record: held, profile, doppler, the populations, the held
 /// twin's, the motion's means and the harmonic control's per axis) as stats.rs `Sums`.
 fn sums_of(x:&[f64],trajectories:f64)->Sums{
-    let mut s=Sums::zero();s.trajectories=trajectories;s.held=x[0];s.profile=x[1];s.doppler=x[2];
+    let mut s=Sums::zero();s.trajectories=trajectories;s.held=x[0];s.profile=x[1];s.doppler=x[2];s.folded=x[FOLDED];
     s.populations.copy_from_slice(&x[3..3+STATES]);s.twin.copy_from_slice(&x[TWIN..TWIN+STATES]);s.twin2=[x[TWIN+STATES],x[TWIN+STATES+1]];
     for a in 0..3{
         let m=&x[MOTION+4*a..][..4];s.kappa[a]=m[0];s.kappa2[a]=m[1];s.position[a]=m[2];s.position2[a]=m[3];
