@@ -62,6 +62,18 @@
 //! photon from the S_s (its class by ‖S_s ψ′‖², its kicks as a jump's), else ψ′ ← (1 − ½Y)ψ′. Its
 //! draws come from the jump's stream before the directions' loops.
 //!
+//! # What the kicks leave out
+//! The Ehrenfest force averages the dipole force over a superposition of ground states, and a kick
+//! drawn per beam is not correlated with the state the jump leaves: at a fixed point the momentum
+//! diffusion is a part of the second-order Wigner expansion's (0.23-0.27 of it at a lin-perp-lin
+//! focus). The expansion's own trajectory scheme -- a drift tr A(rho), a momentum-internal
+//! correlation M and Gaussian noise of rate 2 tr A(M) + B -- is exact on a prescribed path but not
+//! for an atom moving freely in the trap, where M shears into a position correlation that acts back
+//! through the force's gradient (part of the Sisyphus friction) and the variance it prescribes
+//! falls as well as rises: it heats the tweezer PGC far above the GMW reference
+//! (claude/motion3d-m-scheme). The trapped T of this engine stays within a few percent of the 1D
+//! GMW references in the validated regime (solve.rs).
+//!
 //! # First order in the Doppler shift
 //! The folded photon amplitudes take the kinetic shift of absorption to first order, R − w R2
 //! (model.rs), good to (kv/σ)², the largest (w_l/σ_c)² over the near beams, σ_c the nearest excited
@@ -432,6 +444,9 @@ impl<'a> Engine<'a>{
             let n=self.model.dimension(t.cluster);let n0=norm2(&t.psi,n);let kick=self.exact(t,dt,false,false);(n0,norm2(&t.psi,n),kick)
         }else{let(n0,_,n1,_,_,kick)=self.advance(t,dt);(n0,n1,kick)}
     }
+    /// A trajectory's state after `count` jump-free steps of dt (the deterministic flow the step check
+    /// compares): flow, kick and the internal state's no-jump evolution, no jump, no loss.
+    pub fn coast(&self,t:&Trajectory,dt:f64,count:usize)->Trajectory{let mut x=t.clone();for _ in 0..count{self.advance(&mut x,dt);}x}
     /// The step-doubling error of one step of dt from a trajectory's state, without jumps: one step
     /// against two of dt/2, as (|Δκ|, |kick|) -- the momentum's difference and the step's
     /// non-harmonic impulse (1/um) --, (max |Δp|, |Δ ln‖ψ‖²|, |ln‖ψ‖²|) -- the largest difference of

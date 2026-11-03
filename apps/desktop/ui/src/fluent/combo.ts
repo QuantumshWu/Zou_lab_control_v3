@@ -1,4 +1,5 @@
 import { assign, element, type Value } from "./dom.js";
+import { hidePopup, isShown, showPopup } from "./popover.js";
 
 export type Choice = {
   value: Value;
@@ -55,57 +56,30 @@ export function dropPlacement(natural: number, below: number, above: number): { 
 const windowHeight = (): number => document.documentElement.clientHeight;
 const px = (value: string): number => parseFloat(value) || 0;
 
-/** Place an open `list` (a fixed popover whose CSS margins are its popup gaps)
- * under `box` or over it, as dropPlacement says; given `up`, on that side (a
- * list that grows while open stays on the side it opened on), capped to it.
- * Returns the side. */
-export function placeDrop(list: HTMLElement, box: DOMRect, up?: boolean): boolean {
-  const style = list.style;
-  style.maxHeight = "";
+/** Which side of `box` an open `list` (a .drop popup bound to its box: fluent.css places it,
+ * its CSS margins its popup gaps) drops to, as dropPlacement says from the room the window
+ * leaves it when it opens: `.up` above, capped at `--drop-room` where the side is shorter
+ * than the list.  Given `up`, that side (a list that grows while open stays on the side it
+ * opened on), capped to it.  Returns the side. */
+export function placeDrop(list: HTMLElement, box: Element, up?: boolean): boolean {
+  list.classList.remove("up");
+  list.style.removeProperty("--drop-room");
   const css = getComputedStyle(list);
   const margins = px(css.marginTop) + px(css.marginBottom);
   const natural = list.getBoundingClientRect().height;
-  const view = windowHeight(), below = view - box.bottom - margins, above = box.top - margins;
+  const rect = box.getBoundingClientRect(), below = windowHeight() - rect.bottom - margins, above = rect.top - margins;
   const drop = up === undefined ? dropPlacement(natural, below, above) : { up, height: Math.max(0, Math.min(natural, up ? above : below)) };
-  style.top = drop.up ? "" : `${box.bottom}px`;
-  style.bottom = drop.up ? `${view - box.top}px` : "";
-  if (drop.height < natural) style.maxHeight = `${drop.height}px`;
+  list.classList.toggle("up", drop.up);
+  if (drop.height < natural) list.style.setProperty("--drop-room", `${drop.height}px`);
   return drop.up;
-}
-
-/** The select whose list was placed last: placed again when the window is resized while it is open. */
-let placedPicker: HTMLSelectElement | null = null;
-
-/** A select's list is the browser's ::picker(select): fluent.css opens it
- * above the box for `drop-up` and caps it at `--drop-room`; this sets them as
- * dropPlacement says, from the list's height before either applies. */
-function placePicker(select: HTMLSelectElement): void {
-  if (!select.matches(":open")) return;
-  select.classList.remove("drop-up");
-  select.style.removeProperty("--drop-room");
-  const picker = getComputedStyle(select, "::picker(select)");
-  const natural = px(picker.height) + (picker.boxSizing === "border-box" ? 0
-    : px(picker.paddingTop) + px(picker.paddingBottom) + px(picker.borderTopWidth) + px(picker.borderBottomWidth));
-  const margins = px(picker.marginTop) + px(picker.marginBottom);
-  const box = select.getBoundingClientRect();
-  const drop = dropPlacement(natural, windowHeight() - box.bottom - margins, box.top - margins);
-  select.classList.toggle("drop-up", drop.up);
-  if (drop.height < natural) select.style.setProperty("--drop-room", `${drop.height}px`);
-  // The row the list opened on stays in sight in the shorter list.
-  const focused = document.activeElement;
-  if (focused instanceof HTMLOptionElement && select.contains(focused)) focused.scrollIntoView({ block: "nearest" });
-  if (!placedPicker) addEventListener("resize", () => { if (placedPicker?.matches(":open")) placePicker(placedPicker); });
-  placedPicker = select;
 }
 
 /** The closed box's words: the picked row's, ending in an ellipsis where the
  * box is narrower (v2 paints elidedText); first child of `select`, kept there.
  * The platform copies the row only when the pick changes: a picked row whose own
  * words change (Scope's coordinate, a blank's words) is copied again here.
- * Its list opens below the box, or above it where it fits better (placePicker):
- * placed when the list opens and focuses a row (a move between rows is not an
- * opening), or, when no row can take the focus, after the press or key that opened it. */
-export function comboFace(select: HTMLSelectElement): HTMLButtonElement {
+ * `changed` hears every change of the select's rows. */
+export function selectedFace(select: HTMLSelectElement, changed: () => void = () => {}): HTMLButtonElement {
   const face = element("button", "combo-face");
   face.type = "button";
   const shown = document.createElement("selectedcontent");
@@ -113,14 +87,139 @@ export function comboFace(select: HTMLSelectElement): HTMLButtonElement {
   new MutationObserver(() => {
     const picked = select.selectedOptions[0];
     if (shown.textContent !== (picked?.textContent ?? "")) shown.replaceChildren(...[...picked?.childNodes ?? []].map(node => node.cloneNode(true)));
+    changed();
   }).observe(select, { subtree: true, childList: true, characterData: true });
-  select.addEventListener("focusin", event => {
-    const from = event.relatedTarget;
-    if (event.target instanceof HTMLOptionElement && !(from instanceof HTMLOptionElement && select.contains(from))) placePicker(select);
+  return face;
+}
+
+/** A select's face and its drop-down: the closed box says the picked row
+ * (selectedFace); its list is a .drop popup bound to the box (popover.ts),
+ * never the browser's own ::picker, which a drag of the frame around it would
+ * close.  The list shows the select's rows, a group's under its muted heading,
+ * the picked one SELECTED, the cursor's (the keys' or the pointer's)
+ * ACCENT_TINT.  It opens on a press of the box (a press while open closes it)
+ * or ↑ ↓ Home End Enter Space F4, and picks on a release over a row, Enter or
+ * Space.  A pick sets the select and says `change` when it changed it,
+ * `repick` when it picked the row already picked. */
+export function comboFace(select: HTMLSelectElement): HTMLButtonElement {
+  const list = element("div", "drop select-list");
+  list.setAttribute("role", "listbox");
+  let rows: HTMLOptionElement[] = [];
+  let cursor = -1;
+  let typed = "", typedAt = 0;
+  const open = (): boolean => isShown(list);
+  const nodes = (): HTMLElement[] => [...list.querySelectorAll<HTMLElement>(".select-row")];
+  const paint = (): void => {
+    nodes().forEach((node, index) => {
+      node.classList.toggle("cursor", index === cursor);
+      node.classList.toggle("picked", rows[index]!.selected);
+    });
+  };
+  const render = (): void => {
+    rows = [];
+    const children: HTMLElement[] = [];
+    const add = (option: HTMLOptionElement): void => {
+      if (option.hidden) return;
+      const node = element("div", "select-row");
+      node.append(...[...option.childNodes].map(child => child.cloneNode(true)));
+      node.dataset.index = String(rows.length);
+      if (option.title) node.title = option.title;
+      node.classList.toggle("disabled", option.disabled);
+      rows.push(option);
+      children.push(node);
+    };
+    for (const child of select.children) {
+      if (child instanceof HTMLOptionElement) add(child);
+      else if (child instanceof HTMLOptGroupElement) {
+        children.push(element("div", "select-heading", child.label));
+        for (const option of child.children) if (option instanceof HTMLOptionElement) add(option);
+      }
+    }
+    list.replaceChildren(...children);
+    cursor = Math.min(cursor, rows.length - 1);
+    paint();
+  };
+  const move = (index: number): void => {
+    if (index < 0 || index >= rows.length) return;
+    cursor = index;
+    paint();
+    nodes()[index]?.scrollIntoView({ block: "nearest" });
+  };
+  /** The next pickable row after `from` going `step` (±1); `from` itself when there is none. */
+  const pickable = (from: number, step: number): number => {
+    for (let at = from + step; at >= 0 && at < rows.length; at += step) if (!rows[at]!.disabled) return at;
+    return from;
+  };
+  const pick = (index: number): void => {
+    const option = rows[index];
+    if (!option || option.disabled) return;
+    hidePopup(list);
+    if (option.selected) { select.dispatchEvent(new Event("repick")); return; }
+    option.selected = true;
+    select.dispatchEvent(new Event("input", { bubbles: true }));
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  const show = (): void => {
+    if (select.disabled || open()) return;
+    cursor = -1;
+    render();
+    showPopup(list, select);
+    placeDrop(list, select);
+    move(rows.findIndex(option => option.selected));
+  };
+  const face = selectedFace(select, () => { if (open()) render(); });
+  list.addEventListener("toggle", event => select.classList.toggle("open", (event as ToggleEvent).newState === "open"));
+  // The list leaves the focus on the box; a row is picked where the press is let go.
+  list.addEventListener("pointerdown", event => event.preventDefault());
+  list.addEventListener("pointerup", event => {
+    const row = (event.target as Element).closest<HTMLElement>(".select-row");
+    if (row && event.button === 0) pick(Number(row.dataset.index));
   });
-  const opened = (): void => { requestAnimationFrame(() => { if (document.activeElement === select) placePicker(select); }); };
-  select.addEventListener("pointerdown", opened);
-  select.addEventListener("keydown", opened);
+  list.addEventListener("pointermove", event => {
+    const row = (event.target as Element).closest<HTMLElement>(".select-row");
+    const index = Number(row?.dataset.index ?? -1);
+    if (row && index !== cursor && !rows[index]?.disabled) { cursor = index; paint(); }
+  });
+  // An owner's own press that has already said no (a cycle box arming its wheel) opens nothing.
+  select.addEventListener("mousedown", event => {
+    if (event.button !== 0 || event.defaultPrevented) return;
+    event.preventDefault();
+    select.focus();
+    if (open()) hidePopup(list); else show();
+  });
+  select.addEventListener("keydown", event => {
+    if (event.defaultPrevented) return;
+    if (!open()) {
+      if (["ArrowUp", "ArrowDown", "Home", "End", "Enter", " ", "F4"].includes(event.key)) { event.preventDefault(); show(); }
+      // The closed box answers no letter (the browser's would pick behind the operator's back).
+      else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) event.preventDefault();
+      return;
+    }
+    switch (event.key) {
+      case "ArrowDown": move(pickable(cursor, 1)); break;
+      case "ArrowUp": move(pickable(cursor, -1)); break;
+      case "Home": move(pickable(-1, 1)); break;
+      case "End": move(pickable(rows.length, -1)); break;
+      case "Enter": case " ": pick(cursor); break;
+      case "F4": hidePopup(list); break;
+      case "Tab": hidePopup(list); return;
+      default: {
+        if (event.key.length !== 1 || event.ctrlKey || event.metaKey) return;
+        // QAbstractItemView.keyboardSearch: the next row starting with what was typed.
+        const now = performance.now();
+        typed = now - typedAt < 400 ? typed + event.key : event.key;
+        typedAt = now;
+        const wanted = typed.toLowerCase(), start = typed.length > 1 ? cursor : cursor + 1;
+        for (let step = 0; step < rows.length; step++) {
+          const index = (Math.max(0, start) + step) % rows.length;
+          if (!rows[index]!.disabled && rows[index]!.text.toLowerCase().startsWith(wanted)) { move(index); break; }
+        }
+      }
+    }
+    // The open list's key, not its owner's.
+    event.preventDefault();
+    event.stopPropagation();
+  });
   return face;
 }
 
@@ -134,23 +233,14 @@ export class ComboBox {
   /** `activated`: QComboBox.activated -- a pick of the row already shown is a pick too
    * (v2 PulsePreviewView: re-picking the drawn size pins it); the select reports only a change. */
   constructor(private changed: (value: Value) => void, private placeholder = "", activated = false) {
-    let picked = false;
     this.root.addEventListener("change", () => {
-      picked = true;
       const raw = this.root.value;
       const value = raw === "" ? null : JSON.parse(raw) as Value;
       this.current = value;
       this.root.classList.toggle("blank", value === null);
       this.changed(value);
     });
-    if (!activated) return;
-    // A press on a row starts a pick; its click ends it, after the change a new row reports.
-    this.root.addEventListener("pointerdown", event => { if ((event.target as Element).closest("option")) picked = false; });
-    this.root.addEventListener("click", event => {
-      const option = (event.target as Element).closest("option");
-      if (!option || picked || option.value === "" || option.value !== this.root.value) return;
-      this.changed(this.current);
-    });
+    if (activated) this.root.addEventListener("repick", () => { if (this.root.value !== "") this.changed(this.current); });
   }
 
   setChoices(choices: readonly ChoiceInput[]): void {
@@ -204,7 +294,7 @@ export class ComboBox {
 export class EditableCombo {
   readonly root = element("div", "edit-combo");
   readonly input = element("input");
-  private list = element("div", "edit-combo-list");
+  private list = element("div", "drop edit-combo-list");
   private names: string[] = [];
   private accepted = "";
   private draft = false;
@@ -216,23 +306,15 @@ export class EditableCombo {
     const open = element("button", "edit-combo-open");
     open.type = "button";
     open.tabIndex = -1;
-    this.list.popover = "auto";
     this.root.append(this.input, open);
-    // The list opens on the click, after the press's light dismiss (opened by the press, its
-    // release closed it again); a press while it is open closes it (the light dismiss).
-    let wasOpen = false;
-    open.addEventListener("pointerdown", event => { event.preventDefault(); wasOpen = this.listOpen; });
-    open.addEventListener("click", () => { if (!wasOpen) this.showList(); wasOpen = false; });
-    // Placed again when the window is resized while it is open.
-    this.list.addEventListener("toggle", event => {
-      if ((event as ToggleEvent).newState === "open") addEventListener("resize", this.place); else removeEventListener("resize", this.place);
-    });
+    // The chevron opens the list and, while it is open, closes it.
+    open.addEventListener("pointerdown", event => event.preventDefault());
+    open.addEventListener("click", () => { if (isShown(this.list)) hidePopup(this.list); else this.showList(); });
+    this.list.addEventListener("toggle", event => this.root.classList.toggle("open", (event as ToggleEvent).newState === "open"));
     this.input.addEventListener("input", () => { this.draft = true; });
     this.input.addEventListener("keydown", event => { if (event.key === "Enter") this.finish(); });
     this.input.addEventListener("blur", () => this.finish());
   }
-
-  private get listOpen(): boolean { return this.list.matches(":popover-open"); }
 
   private finish(): void {
     if (!this.draft) return;
@@ -247,26 +329,17 @@ export class EditableCombo {
       const row = element("div", "edit-combo-row", name);
       row.classList.toggle("picked", name === this.input.value);
       row.addEventListener("pointerup", () => {
-        this.list.hidePopover();
+        hidePopup(this.list);
         this.input.value = name;
         this.draft = false;
         if (name !== this.accepted) this.commit(name);
       });
       return row;
     }));
-    // Inside the field: a popup holding the field stays open under its list (popover ancestry).
-    if (!this.list.isConnected) this.root.append(this.list);
-    this.list.showPopover();
-    this.place();
+    // Below the field, or above it where the list fits better (placeDrop).
+    showPopup(this.list, this.root);
+    placeDrop(this.list, this.root);
   }
-
-  /** Below the field, or above it where the list fits better (placeDrop). */
-  private place = (): void => {
-    const rect = this.root.getBoundingClientRect();
-    this.list.style.minWidth = `${rect.width}px`;
-    this.list.style.left = `${rect.left}px`;
-    placeDrop(this.list, rect);
-  };
 
   /** v2 fill_editable_combo: offer `names`, show `key` (the accepted one) unless a draft is being typed. */
   fill(names: readonly string[], key: string, keepDraft = true): void {
@@ -276,6 +349,6 @@ export class EditableCombo {
     if (!typing) { this.draft = false; if (this.input.value !== key) this.input.value = key; }
   }
 
-  set disabled(disabled: boolean) { assign(this.input, "disabled", disabled); this.root.classList.toggle("disabled", disabled); }
+  set disabled(disabled: boolean) { assign(this.input, "disabled", disabled); this.root.classList.toggle("disabled", disabled); if (disabled) hidePopup(this.list); }
   set title(text: string) { if (this.input.title !== text) this.input.title = text; }
 }

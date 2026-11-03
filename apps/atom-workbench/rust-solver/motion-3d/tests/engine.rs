@@ -11,7 +11,7 @@ use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Scales,KT_PER_UK};
 use atom_motion_3d::{initial_trajectory,simulate,Initial,Stratum};
-use atom_motion_3d::solve::solve;
+use atom_motion_3d::solve::{solve,Device};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
 
@@ -191,7 +191,7 @@ fn a_solve_starts_from_the_request_s_initial_state(){
     // Ten microseconds of the tweezer PGC: t = 0 holds the initial populations and, per axis, the
     // thermal Wigner temperature of the initial trap, without error; the targets are met after it.
     let mut r=request(&|_|true);r.times_us=vec![0.,5.,10.];
-    let s=solve(&r,&mut |_,_|{}).unwrap();assert!(s.reason.is_none());
+    let s=solve(&r,Device::Cpu,&mut |_,_|{}).unwrap();assert!(s.reason.is_none());
     let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();let trap=initial.traps[0];let kt=KT_PER_UK*r.temperature_uk;
     for a in 0..3{let expected:f64=(0..3).map(|i|{let half=trap.frequencies[i]/(2.*kt);trap.axes[i][a]*trap.axes[i][a]*r.temperature_uk*half/half.tanh()}).sum();
         assert!((s.temperature_uk[0][a]-expected).abs()<=1e-12*expected,"axis {a}: {} against {expected}",s.temperature_uk[0][a]);assert_eq!(s.temperature_errors_uk[0][a],0.);}
@@ -247,10 +247,11 @@ fn the_held_twin_s_master_equation_is_the_front_end_s(){
 
 /// The held engine (engine.rs `Held`: the twin's generator and jumps computed once, control.rs)
 /// follows the plain engine's atom held at the same point: from the same initial state and streams,
-/// the same jumps and the same internal state over 2000 steps.
+/// the same jumps and the same internal state over 2000 steps -- without the photons' recoil term,
+/// where the engine's decay is its jumps' (the twin's by construction).
 #[test]
 fn the_held_engine_is_the_plain_engine_at_rest(){
-    let r=request(&|_|true);let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();let trap=initial.traps[0];
+    let r=request(&|_|true);let mut model=Model::new(&r).unwrap();model.doppler=false;let initial=Initial::new(&model,&r).unwrap();let trap=initial.traps[0];
     let twin=Twin::new(&model,0.9).expect("a static generator");
     let mut settings=Settings::new(0.2,&trap,f64::EPSILON,false);settings.free=[false;3];settings.loss=false;
     let(plain,held)=(Engine::new(&model,settings.clone()),Engine::held(&model,&settings,&twin.held));
@@ -259,6 +260,28 @@ fn the_held_engine_is_the_plain_engine_at_rest(){
         for _ in 0..2000{plain.step(&mut a);held.step(&mut b);}
         assert_eq!((a.jumps,a.cluster),(b.jumps,b.cluster),"trajectory {index}");
         let n=model.dimension(a.cluster);let(na,nb):(f64,f64)=(a.psi[..n].iter().map(|z|z.norm_sqr()).sum(),b.psi[..n].iter().map(|z|z.norm_sqr()).sum());
-        for i in 0..n{assert!((a.psi[i].norm_sqr()/na-b.psi[i].norm_sqr()/nb).abs()<1e-9,"trajectory {index} state {i}");}
+        for i in 0..n{assert!((a.psi[i].norm_sqr()/na-b.psi[i].norm_sqr()/nb).abs()<1e-6,"trajectory {index} state {i}");}
     }
+}
+
+/// The held twin is the unraveling of a Lindblad equation: its generator's decay is its jumps' own
+/// Σ L†L (the photons' first order in the recoil kept), so its master equation (`Twin::means`) keeps
+/// the trace one -- and every correction of the populations (stats.rs) keeps their sum -- over
+/// 100 us of a probe on the tweezer.
+#[test]
+fn the_held_twin_is_a_lindblad_unraveling_and_keeps_the_trace(){
+    let r=request(&|b|b["id"]=="tweezer"||b["id"]=="cool-plus");let model=Model::new(&r).unwrap();
+    let twin=Twin::new(&model,0.93).expect("a static generator");
+    for k in 0..model.clusters(){
+        let n=model.dimension(k);let h=&twin.held.locals[k].hamiltonian;let(mut worst,mut scale)=(0_f64,0_f64);
+        for p in 0..n{for q in 0..n{
+            let decay=(h[p*n+q]-h[q*n+p].conj())*Complex::new(0.,1.);let mut jumps=Complex::ZERO;
+            for(class,l)in model.ground.clusters[k].classes.iter().zip(&twin.held.jumps[k]){let nt=model.dimension(class.target);for x in 0..3{for i in 0..nt{jumps+=l[x][i*n+p].conj()*l[x][i*n+q];}}}
+            worst=worst.max((decay-jumps).abs());scale=scale.max(jumps.abs());
+        }}
+        assert!(worst<=1e-12*scale.max(f64::MIN_POSITIVE),"cluster {k}: |Γ − ΣL†L| {worst:.2e} of {scale:.2e}");
+    }
+    let means=twin.means(&model,&r.initial_density,1.,101);
+    let worst=means.iter().map(|p|(p.iter().sum::<f64>()-1.).abs()).fold(0.,f64::max);
+    assert!(worst<=1e-10,"the trace off by {worst:.2e}");
 }

@@ -113,22 +113,31 @@ pub struct Estimate{
 #[derive(Clone,Copy,Debug)]
 pub struct Scales{pub hbar_over_mass:f64,pub frequencies:[f64;3]}
 
-/// The estimates of sums, with the control variates where their means are given: the held atoms'
-/// κ² and populations less β times their controls' excess over those means, β the regression of each
-/// on its control over every trajectory of the sums (one β for all the populations, so they keep their
-/// sum) -- the same expectation, the variance less the part the control accounts for.
-pub fn estimate(g:&Sums,s:&Scales,means:Option<&Means>)->Estimate{
+/// A control variate's correction at one output: its means (`Means`) and β, the regression of the
+/// held atoms' κ² per lab axis and of their populations on the controls over every trajectory so far
+/// -- one β for all the populations, so they keep their sum.
+pub struct Correction<'a>{pub means:&'a Means,pub harmonic:[f64;3],pub twin:f64}
+impl Correction<'_>{
+    /// The regression of sums on their controls (none where a control does not vary).
+    pub fn new<'a>(g:&Sums,means:&'a Means)->Correction<'a>{
+        let all=g.trajectories;
+        let harmonic=std::array::from_fn(|a|{let[c,cc,cy]=g.harmonic[a];let variance=cc-c*c/all;if variance>0.{(cy-c*g.kappa2[a]/all)/variance}else{0.}});
+        let variance=g.twin2[0]-g.twin.iter().map(|c|c*c).sum::<f64>()/all;
+        let covariance=g.twin2[1]-g.twin.iter().zip(&g.populations).map(|(c,y)|c*y).sum::<f64>()/all;
+        Correction{means,harmonic,twin:if means.twin.is_some()&&variance>0.{covariance/variance}else{0.}}
+    }
+}
+
+/// The estimates of sums, with a correction by the control variates: the held atoms' κ² and
+/// populations less β times their controls' excess over their means -- the same expectation, the
+/// variance less the part the controls account for.
+pub fn estimate(g:&Sums,s:&Scales,correction:Option<&Correction>)->Estimate{
     let n=g.held;let all=g.trajectories;let mut e=Estimate{loss:1.-n/all,trajectories:all,..Default::default()};
     if n<=0.{e.populations=vec![0.;STATES];return e;}
     let(mut kappa2,mut populations)=(g.kappa2,g.populations);
-    if let Some(m)=means{
-        for a in 0..3{let[c,cc,cy]=g.harmonic[a];let variance=cc-c*c/all;
-            if variance>0.{kappa2[a]-=(cy-c*g.kappa2[a]/all)/variance*(c-all*m.harmonic[a]);}}
-        if let Some(mean)=&m.twin{
-            let variance=g.twin2[0]-g.twin.iter().map(|c|c*c).sum::<f64>()/all;
-            let covariance=g.twin2[1]-g.twin.iter().zip(&g.populations).map(|(c,y)|c*y).sum::<f64>()/all;
-            if variance>0.{for k in 0..STATES{populations[k]-=covariance/variance*(g.twin[k]-all*mean[k]);}}
-        }
+    if let Some(c)=correction{
+        for a in 0..3{kappa2[a]-=c.harmonic[a]*(g.harmonic[a][0]-all*c.means.harmonic[a]);}
+        if let Some(mean)=&c.means.twin{for k in 0..STATES{populations[k]-=c.twin*(g.twin[k]-all*mean[k]);}}
     }
     for a in 0..3{
         let(mean,second)=(g.kappa[a]/n,kappa2[a]/n);let variance=(second-mean*mean).max(0.);
@@ -141,14 +150,15 @@ pub fn estimate(g:&Sums,s:&Scales,means:Option<&Means>)->Estimate{
     e
 }
 
-/// The pooled estimates at every output time, with jackknife standard errors over the groups (each
-/// group left out in turn, the control variates' β with it), the control variates' means per output
-/// where given.
+/// The pooled estimates at every output time, with jackknife standard errors over the groups, the
+/// control variates' means per output where given: their β from every trajectory, held when a group
+/// is left out -- recomputed with it, a β that rests on a few trajectories at an early output (a few
+/// twins that have jumped) swings from group to group and its spread swamps the error.
 pub fn summarize(groups:&[Group],s:&Scales,means:&[Means])->Vec<Estimate>{
     let outputs=groups[0].sums.len();let count=groups.len();
     (0..outputs).map(|i|{
-        let m=means.get(i);
         let all=groups.iter().skip(1).fold(groups[0].sums[i].clone(),|acc,g|acc.combine(&g.sums[i],1.));
+        let correction=means.get(i).map(|m|Correction::new(&all,m));let m=correction.as_ref();
         let mut e=estimate(&all,s,m);
         if count<2{e.population_errors=vec![f64::INFINITY;STATES];e.temperature_error=[f64::INFINITY;3];e.temperature_total_error=f64::INFINITY;e.occupation_error=[f64::INFINITY;3];e.loss_error=f64::INFINITY;return e;}
         let leave:Vec<Estimate>=groups.iter().map(|g|estimate(&all.combine(&g.sums[i],-1.),s,m)).collect();

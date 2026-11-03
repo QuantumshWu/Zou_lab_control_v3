@@ -140,11 +140,11 @@ pub struct Carrier{
 /// A table group's place in a node's slice: a kept group of `ground::Group` with one residual beat,
 /// its field pairs (k′ ≤ k for a Hermitian one) and where its S and Q lie (n × n each per pair).
 #[derive(Clone,Debug)]
-struct GroupLayout{absorbed:usize,emitted:usize,residual:f64,hermitian:bool,pairs:Vec<(usize,usize)>,s:usize,q:usize}
+pub(crate) struct GroupLayout{pub(crate) absorbed:usize,pub(crate) emitted:usize,pub(crate) residual:f64,pub(crate) hermitian:bool,pub(crate) pairs:Vec<(usize,usize)>,pub(crate) s:usize,pub(crate) q:usize}
 /// Where a carrier's photon tables lie: J and J2 (3 axes × rank × ng × n0) and T (rank × ne × n0),
 /// on the cluster's n0 ground states.
 #[derive(Clone,Copy,Debug)]
-struct CarrierLayout{j:usize,j2:usize,t:usize}
+pub(crate) struct CarrierLayout{pub(crate) j:usize,pub(crate) j2:usize,pub(crate) t:usize}
 /// A kept drive: row (explicit state), column (ground state), carrier, residual beat and U_k[e,b]
 /// per rank at the focus.
 #[derive(Clone,Copy,Debug)]
@@ -168,7 +168,7 @@ struct EffectiveLayout{row:usize,col:usize,carrier:usize,residual:f64,at:usize}
 /// (without a table), the decays, the cross terms, the dressing's drives and the explicit states'
 /// dressed photons ĉ_a[to] (explicit × 3 axes × ng, at `emission`).
 #[derive(Clone,Debug)]
-struct Layout{n:usize,n0:usize,size:usize,h0:usize,groups:Vec<GroupLayout>,carriers:Vec<CarrierLayout>,crosses:Vec<CrossLayout>,drives:Vec<DriveLayout>,
+pub(crate) struct Layout{pub(crate) n:usize,pub(crate) n0:usize,pub(crate) size:usize,pub(crate) h0:usize,pub(crate) groups:Vec<GroupLayout>,pub(crate) carriers:Vec<CarrierLayout>,crosses:Vec<CrossLayout>,drives:Vec<DriveLayout>,
     decays:Vec<DecayLayout>,effective:Vec<EffectiveLayout>,emission:usize}
 
 /// The interpolation stencil at s: per focused beam the first of its four nodes, their cubic
@@ -251,9 +251,13 @@ fn quadratic<const N:usize>(x:&[f64;MOST_W],psi:&[Complex])->Complex{
     s
 }
 
-/// The tables on one grid.
+/// One node of the tables: every cluster's tables there, the quartic shifts' bound and the
+/// elimination's (`Model::resonance`).
+type Node=(Vec<Vec<Complex>>,f64,f64);
+
+/// The tables on one grid, and the elimination's bound over its nodes inside the reach (`Model::resonance`).
 #[derive(Clone,Debug)]
-struct Tables{nodes:usize,data:Vec<Vec<f64>>}
+pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,resonance:f64}
 
 /// The trap of the trap beam: its principal axes (unit rows on the lab axes) and frequencies
 /// (rad/us) at the focus for a reference state, and the frequencies per lab axis.
@@ -276,12 +280,22 @@ pub struct Model{
     /// ħ/m (um²/us).
     pub hbar_over_mass:f64,
     pub mass_kg:f64,
-    layouts:Vec<Layout>,
-    tables:Tables,
+    pub(crate) layouts:Vec<Layout>,
+    pub(crate) tables:Tables,
     /// The nodes per intensity axis and the interpolation's measured largest relative error.
     pub table_error:f64,
     /// The quartic van Vleck shifts left out: their bound relative to the eliminated generator's scale.
     pub quartic:f64,
+    /// The elimination's a-priori bound over the atoms' reach: the largest excited weight a ground
+    /// state b can take, Σ_l ‖R_l[:,b]‖² over the near beams at their peak amplitude (each one's
+    /// (Ω_l/2σ)², the beams' interference averaged out), over the tables' nodes inside the reach's
+    /// intensities (`reach`). Where it exceeds the population target the eliminated model is outside
+    /// its validity somewhere the atoms go -- light near resonance, which the excited population
+    /// measured along the trajectories can miss when the atoms sit in dark states (solve.rs flags it).
+    pub resonance:f64,
+    /// The reach the profiles and the bound are judged over: the focus and the points ±reach_a along
+    /// each principal axis of the trap (`choose_profiles`).
+    reach:Vec<[f64;3]>,
     /// The processor has AVX2 and FMA: the generator is built with them.
     wide:bool,
     /// The kinetic shift of absorption (`kinetic_shift`), always on in a solve; off only where a
@@ -363,7 +377,7 @@ impl Model{
         if ground.ground_states.len()!=GROUND{return Err(format!("The ground manifold has {} states, not {GROUND}",ground.ground_states.len()));}
         if ground.clusters.iter().any(|c|c.excited.is_empty()&&c.states.len()>MOST_STATES){return Err("A cluster of ground states has more than eight states".into());}
         let mut model=Model{ground,geometry,trap_beam,focused:vec![trap_beam],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
-            layouts:vec![],tables:Tables{nodes:1,data:vec![]},table_error:0.,quartic:0.,
+            layouts:vec![],tables:Tables{nodes:1,data:vec![],resonance:0.},table_error:0.,quartic:0.,resonance:0.,reach:vec![[0.;3]],
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true};
         model.choose_profiles(request)?;
         model.layouts=model.layouts(&bases);
@@ -383,6 +397,7 @@ impl Model{
         let trap=self.bare_trap(reference);
         let reach:[f64;3]=std::array::from_fn(|a|{let w=trap.frequencies[a];
             if w>0.{(2.*BUDGET.recip().ln()*KT_PER_UK*request.temperature_uk*self.hbar_over_mass).sqrt()/w}else{0.}});
+        for a in 0..3{for sign in [-1.,1.]{self.reach.push(trap.axes[a].map(|x|x*sign*reach[a]));}}
         let mut errors:Vec<(usize,f64,f64)>=vec![];
         for l in 0..self.geometry.len(){
             if l==self.trap_beam||self.geometry[l].waist.is_none(){continue;}
@@ -494,7 +509,7 @@ impl Model{
     }
 
     /// Every cluster's tables at the intensities s, and the quartic shifts' bound there.
-    fn node(&self,s:&[f64],mixing:&[Vec<Vec<Complex>>])->Result<(Vec<Vec<Complex>>,f64),String>{
+    fn node(&self,s:&[f64],mixing:&[Vec<Vec<Complex>>])->Result<Node,String>{
         let g=&self.ground;let e=g.eliminate(&self.hamiltonian_at(s))?;let(ne,ng)=(g.excited_states.len(),g.ground_states.len());
         // Per carrier: U^f_k (the folded basis), T_k, T2_k (ne × ng).
         let combine=|c:usize,matrices:&[Dense]|->Vec<Dense>{mixing[c].iter().map(|g_k|{let mut m=Dense::zeros(ne,ng);
@@ -612,19 +627,37 @@ impl Model{
             }
             out.push(node);
         }
-        Ok((out,quartic))
+        // The elimination's excited weight per ground state, every near beam at its peak (`resonance`).
+        let resonance=(0..ng).map(|b|self.carriers.iter().flat_map(|c|c.beams.iter()).map(|&l|(0..ne).map(|i|e.responses[l][(i,b)].norm_sqr()).sum::<f64>()).sum::<f64>()).fold(0.,f64::max);
+        Ok((out,quartic,resonance))
     }
 
     /// The intensity points of a grid of n nodes per focused beam, in node order.
     fn grid(&self,n:usize)->Vec<Vec<f64>>{
         let d=self.focused.len();(0..n.pow(d as u32)).map(|i|(0..d).map(|f|((i/n.pow(f as u32))%n) as f64/(n-1).max(1) as f64).collect()).collect()
     }
-    /// The tables on a grid of n nodes per focused beam, and the quartic shifts' bound over it.
-    fn build(&self,n:usize,mixing:&[Vec<Vec<Complex>>])->Result<(Tables,f64),String>{
-        let nodes:Vec<(Vec<Vec<Complex>>,f64)>=self.grid(n).par_iter().map(|s|self.node(s,mixing)).collect::<Result<_,_>>()?;
+    /// The nodes of a grid of n per focused beam: those it shares with the grid of (n + 1)/2 before
+    /// it (`coarse`: every other node along each beam, at the same intensities to the last bit)
+    /// taken from that grid, the others computed.
+    fn nodes(&self,n:usize,mixing:&[Vec<Vec<Complex>>],coarse:Option<&[Node]>)->Result<Vec<Node>,String>{
+        let(d,m)=(self.focused.len(),n.div_ceil(2));
+        self.grid(n).par_iter().enumerate().map(|(i,s)|{
+            let digits=(0..d).map(|f|(i/n.pow(f as u32))%n);
+            match coarse{
+                Some(c)if digits.clone().all(|x|x%2==0)=>Ok(c[digits.enumerate().map(|(f,x)|x/2*m.pow(f as u32)).sum::<usize>()].clone()),
+                _=>self.node(s,mixing),
+            }
+        }).collect()
+    }
+    /// The tables of a grid of n nodes per focused beam, and the quartic shifts' bound over it.
+    fn build(&self,n:usize,nodes:&[Node])->(Tables,f64){
         let quartic=nodes.iter().map(|x|x.1).fold(0.,f64::max);
+        // The bound over the nodes inside the reach's intensities: each focused beam's from its
+        // smallest over the reach (less one node, the interval holding it) to 1.
+        let low:Vec<f64>=self.focused.iter().map(|&l|self.reach.iter().map(|&r|self.geometry[l].intensity(r).min(1.)).fold(1.,f64::min)-1./(n-1).max(1) as f64).collect();
+        let resonance=self.grid(n).iter().zip(nodes).filter(|(s,_)|s.iter().zip(&low).all(|(x,l)|x>=l)).map(|(_,x)|x.2).fold(0.,f64::max);
         // data[cluster]: node-major, layout.size per node.
-        Ok((Tables{nodes:n,data:(0..self.layouts.len()).map(|k|nodes.iter().flat_map(|node|node.0[k].iter().flat_map(|z|[z.re,z.im])).collect()).collect()},quartic))
+        (Tables{nodes:n,data:(0..self.layouts.len()).map(|k|nodes.iter().flat_map(|node|node.0[k].iter().flat_map(|z|[z.re,z.im])).collect()).collect(),resonance},quartic)
     }
     /// The coarse grid's (`self.tables`) largest interpolation error at a finer grid's nodes, relative
     /// to the scale of each cluster's table kind.
@@ -658,15 +691,17 @@ impl Model{
         }
         worst
     }
-    /// The tables on grids of FIRST_NODES, then doubled, until the cubic interpolation from the
-    /// coarser grid meets TABLE_SHARE at the finer grid's nodes; the finer grid is kept.
+    /// The tables on grids of FIRST_NODES, then doubled (each grid's nodes computed once), until the
+    /// cubic interpolation from the coarser grid meets TABLE_SHARE at the finer grid's nodes; the
+    /// finer grid is kept.
     fn tabulate(&mut self,mixing:&[Vec<Vec<Complex>>])->Result<(),String>{
-        let(tables,quartic)=self.build(FIRST_NODES,mixing)?;self.tables=tables;self.quartic=quartic/self.ground.generator_scale.max(f64::MIN_POSITIVE);
+        let mut nodes=self.nodes(FIRST_NODES,mixing,None)?;
+        let(tables,quartic)=self.build(FIRST_NODES,&nodes);self.tables=tables;self.quartic=quartic/self.ground.generator_scale.max(f64::MIN_POSITIVE);
         loop{
-            let n=2*self.tables.nodes-1;let(fine,quartic)=self.build(n,mixing)?;
+            let n=2*self.tables.nodes-1;nodes=self.nodes(n,mixing,Some(&nodes))?;let(fine,quartic)=self.build(n,&nodes);
             let worst=self.interpolation_error(&fine);
             self.tables=fine;self.table_error=worst;self.quartic=self.quartic.max(quartic/self.ground.generator_scale.max(f64::MIN_POSITIVE));
-            if worst<=TABLE_SHARE{return Ok(());}
+            if worst<=TABLE_SHARE{self.resonance=self.tables.resonance;return Ok(());}
             if n>4097{return Err(format!("The elimination's tables over the focused beams' intensities do not converge (relative error {worst:.1e} at {n} nodes)"));}
         }
     }

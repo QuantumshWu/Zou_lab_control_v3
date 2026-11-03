@@ -714,8 +714,8 @@ export class PanelView {
         body.append(this.settingsStatus, this.form);
         this.settings.append(header, body);
         this.settings.addEventListener("keydown", event => {
-            // An open list's Esc closes the list only (v2 FluentComboBox.keyPressEvent).
-            if (event.key === "Escape" && !this.inlined && !(event.target instanceof HTMLInputElement) && !event.target.closest("select:open")) {
+            // An open list's Esc closes the list only (v2 FluentComboBox.keyPressEvent): popover.ts hears it first.
+            if (event.key === "Escape" && !this.inlined && !(event.target instanceof HTMLInputElement)) {
                 event.stopPropagation();
                 this.setSettingsOpen(false);
             }

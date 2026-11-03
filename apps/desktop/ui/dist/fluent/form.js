@@ -201,7 +201,8 @@ export class Field {
         // the coordinate while the box has the focus and the pointer; the arrow
         // opens the list and disarms it, as do Esc and leaving the box.
         select.addEventListener("mousedown", event => {
-            if (event.button !== 0 || !this.cycleSelected())
+            // A press while its list is open closes the list (comboFace).
+            if (event.button !== 0 || !this.cycleSelected() || select.classList.contains("open"))
                 return;
             const rect = select.getBoundingClientRect();
             if (event.clientX >= rect.right - parseFloat(getComputedStyle(select).paddingRight)) {
@@ -212,11 +213,9 @@ export class Field {
             select.focus();
             this.setCycleActive(!this.cycleActive);
         });
-        select.addEventListener("click", event => { if (this.cycleSelected() && document.activeElement === select && !select.matches(":open"))
-            event.preventDefault(); });
         // v2 wheelEvent: a notch down is the next coordinate, up the one before; the ends stop it (the owner clamps).
         select.addEventListener("wheel", event => {
-            if (!this.cycleActive || document.activeElement !== select || select.matches(":open") || event.deltaY === 0)
+            if (!this.cycleActive || document.activeElement !== select || select.classList.contains("open") || event.deltaY === 0)
                 return;
             event.preventDefault();
             const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 100 / 3 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 300 : 1;
@@ -228,7 +227,7 @@ export class Field {
             }
         }, { passive: false });
         select.addEventListener("keydown", event => {
-            if (!this.cycleActive || select.matches(":open"))
+            if (!this.cycleActive || select.classList.contains("open"))
                 return;
             if (event.key === "Escape") {
                 this.setCycleActive(false);

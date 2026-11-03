@@ -544,10 +544,10 @@ body.carrying, body.carrying * { cursor: grabbing !important; }
 .pulse-value[data-tone="api-applied"] > input { border-color: var(--api-violet); background: var(--api-violet-dark); color: var(--surface); }
 .pulse-value[data-tone="config"] > input { border-color: var(--config-green); color: var(--config-green-dark); }
 .pulse-value[data-tone="config-applied"] > input { border-color: var(--config-green); background: var(--config-green-tint); color: var(--config-green-dark); }
-.pulse-source-popup { position: fixed; margin: 0; padding: var(--card-inset); display: flex; flex-direction: column; gap: var(--row-gap); }
+.pulse-source-popup { padding: var(--card-inset); display: flex; flex-direction: column; gap: var(--row-gap); }
 /* v2 binding popup: one label column, five rows a control tall, then a two-line note across both columns. */
 .pulse-binding:not(.pulse-source-popup) {
-  position: fixed; margin: 0; padding: var(--card-inset); display: grid; gap: var(--row-gap);
+  padding: var(--card-inset); display: grid; gap: var(--row-gap);
   grid-template-columns: max-content minmax(round(calc(230px * var(--fluent) * var(--qt)), 1px), max-content);
   grid-auto-rows: var(--control); align-items: center; justify-items: start;
 }

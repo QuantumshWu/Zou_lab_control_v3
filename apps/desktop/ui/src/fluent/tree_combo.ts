@@ -1,5 +1,6 @@
-import { comboFace, hintWidest, placeDrop } from "./combo.js";
+import { hintWidest, placeDrop, selectedFace } from "./combo.js";
 import { assign, element } from "./dom.js";
+import { hidePopup, isShown, showPopup } from "./popover.js";
 import { flattenTree, type FlatTreeGroup, type TreeGroup, type TreeLeaf } from "./tree_model.js";
 export type { TreeGroup, TreeLeaf } from "./tree_model.js";
 
@@ -49,10 +50,10 @@ type Row = { kind: "heading"; group: number } | { kind: "leaf"; group: number; l
  * the operator's pick; `value =` / `setTree` project one and never emit. */
 export class TreeCombo {
   readonly root = element("select", "tree-combo");
-  private face = comboFace(this.root);
+  private face = selectedFace(this.root);
   /** The box's empty value: the none row's words, else the placeholder. */
   private blank = new Option("", "");
-  private list = element("div", "tree-combo-list");
+  private list = element("div", "drop tree-combo-list");
   private groups: FlatTreeGroup[] = [];
   private none: string | null = null;
   private current = "";
@@ -66,35 +67,22 @@ export class TreeCombo {
   private typedAt = 0;
   /** The side this opening chose (placeDrop): kept while a heading opens or closes. */
   private up: boolean | undefined;
-  /** A resized window chooses the side again. */
-  private resized = (): void => { this.up = undefined; this.place(); };
 
   constructor(private changed: (key: string) => void, private placeholder = "") {
     this.blank.hidden = true;
     this.root.replaceChildren(this.face, this.blank);
-    this.list.popover = "auto";
     this.list.setAttribute("role", "tree");
-    // The box's own list never opens: the tree is its drop-down, opened by the
-    // click (after the press's light dismiss), closed by a click while open.
-    let wasOpen = false;
-    this.root.addEventListener("pointerdown", event => {
+    // The box's own list never opens: the tree is its drop-down, opened by a
+    // press of the box and closed by a press while open.
+    this.root.addEventListener("mousedown", event => {
       if (event.button !== 0) return;
       event.preventDefault();
-      wasOpen = this.open;
-      if (!this.root.disabled) this.root.focus();
-    });
-    this.root.addEventListener("mousedown", event => event.preventDefault());
-    this.root.addEventListener("click", event => {
-      event.preventDefault();
-      if (wasOpen) { if (this.open) this.list.hidePopover(); } else this.show();
-      wasOpen = false;
+      if (this.root.disabled) return;
+      this.root.focus();
+      if (this.open) hidePopup(this.list); else this.show();
     });
     this.root.addEventListener("keydown", event => this.key(event));
-    this.list.addEventListener("toggle", event => {
-      const open = (event as ToggleEvent).newState === "open";
-      this.root.classList.toggle("open", open);
-      if (open) addEventListener("resize", this.resized); else removeEventListener("resize", this.resized);
-    });
+    this.list.addEventListener("toggle", event => this.root.classList.toggle("open", (event as ToggleEvent).newState === "open"));
     this.list.addEventListener("pointerdown", event => event.preventDefault());
     this.list.addEventListener("pointerup", event => {
       const row = (event.target as Element).closest<HTMLElement>(".tree-row");
@@ -102,7 +90,7 @@ export class TreeCombo {
     });
   }
 
-  private get open(): boolean { return this.list.matches(":popover-open"); }
+  private get open(): boolean { return isShown(this.list); }
 
   /** Reconcile the tree (v2 set_choice_tree): `none` is the blank row's words
    * ("Off", "(not selected)"), absent when a choice is required. */
@@ -135,9 +123,9 @@ export class TreeCombo {
     this.root.classList.toggle("blank", !leaf);
     if (this.open) this.render();
   }
-  set disabled(disabled: boolean) { assign(this.root, "disabled", disabled); if (disabled && this.open) this.list.hidePopover(); }
+  set disabled(disabled: boolean) { assign(this.root, "disabled", disabled); if (disabled) hidePopup(this.list); }
   set title(text: string) { if (this.root.title !== text) this.root.title = text; }
-  dispose(): void { if (this.open) this.list.hidePopover(); this.list.remove(); }
+  dispose(): void { hidePopup(this.list); this.list.remove(); }
   private openPath(index: number): void {
     for (let at: number | null = index; at !== null; at = this.groups[at]!.parent) this.expanded.add(this.groups[at]!.path);
   }
@@ -153,8 +141,7 @@ export class TreeCombo {
     if (this.root.disabled) return;
     const at = this.groups.findIndex(group => group.leaves.some(leaf => leaf.key === this.current));
     if (at >= 0) this.openPath(at);
-    if (!this.list.isConnected) document.body.append(this.list);
-    this.list.showPopover();
+    showPopup(this.list, this.root);
     this.cursor = -1;
     this.up = undefined;
     this.render();
@@ -202,16 +189,9 @@ export class TreeCombo {
     this.place();
   }
 
+  /** Every row it reveals, below the box or above it, as far as the window goes on that side; the rest scrolls. */
   private place(): void {
-    const field = this.root.getBoundingClientRect();
-    const style = this.list.style;
-    style.minWidth = `${field.width}px`;
-    style.maxWidth = `${innerWidth}px`;
-    // Every row it reveals, below the box or above it, as far as the window goes on that side; the rest scrolls.
-    this.up = placeDrop(this.list, field, this.up);
-    const width = this.list.offsetWidth;
-    const left = width <= field.width ? field.left : field.right - width;
-    style.left = `${Math.max(0, Math.min(left, innerWidth - width))}px`;
+    this.up = placeDrop(this.list, this.root, this.up);
   }
 
   private paintCursor(): void {
@@ -234,7 +214,7 @@ export class TreeCombo {
       return;
     }
     const key = row.kind === "leaf" ? row.leaf.key : "";
-    this.list.hidePopover();
+    hidePopup(this.list);
     const changed = key !== this.current;
     this.value = key;
     if (changed) this.changed(key);
@@ -278,8 +258,7 @@ export class TreeCombo {
         else if (row?.kind === "leaf") this.move(this.rows.findIndex(item => item.kind === "heading" && item.group === row.group));
         break;
       case "Enter": if (row) this.activate(this.cursor, false); break;
-      case "Escape": this.list.hidePopover(); break;
-      case "Tab": this.list.hidePopover(); return;
+      case "Tab": hidePopup(this.list); return;
       default:
         if (event.key.length !== 1 || event.ctrlKey || event.metaKey) return;
         this.search(event.key);

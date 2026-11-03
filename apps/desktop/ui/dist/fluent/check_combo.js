@@ -1,5 +1,6 @@
 import { placeDrop } from "./combo.js";
-import { element, setText, setTitle, token } from "./dom.js";
+import { element, setText, setTitle } from "./dom.js";
+import { hidePopup, isShown, showPopup } from "./popover.js";
 import { checkBox, setChecked } from "./toggles.js";
 /** FluentComboBox set_checkable: a field like a combo whose popup ticks
  * several of a list.  The closed box reads the ticked values; `edited`
@@ -9,7 +10,7 @@ export class CheckCombo {
     placeholder;
     root = element("button", "check-combo");
     words = element("span", "check-combo-text");
-    list = element("div", "menu check-menu");
+    list = element("div", "menu check-menu drop");
     items = [];
     lazy = null;
     checked = [];
@@ -22,22 +23,16 @@ export class CheckCombo {
         this.placeholder = placeholder;
         this.root.type = "button";
         this.root.append(this.words);
-        // A press while the list is open closes it (light dismiss): its click does not open it again.
-        let wasOpen = false;
-        this.root.addEventListener("pointerdown", () => { wasOpen = this.list.matches(":popover-open"); });
-        this.root.addEventListener("click", () => { if (!wasOpen)
-            this.open(); wasOpen = false; });
-        this.list.popover = "auto";
+        // A click while the list is open closes it.
+        this.root.addEventListener("click", () => { if (isShown(this.list))
+            hidePopup(this.list);
+        else
+            this.open(); });
         this.list.role = "listbox";
         this.list.addEventListener("toggle", event => {
             const open = event.newState === "open";
             // The field says it is open while its list is (v2: the ACCENT edge while its popup shows).
             this.root.classList.toggle("open", open);
-            // Placed again when the window is resized while it is open.
-            if (open)
-                addEventListener("resize", this.place);
-            else
-                removeEventListener("resize", this.place);
             if (open || !this.opened)
                 return;
             const before = this.opened;
@@ -48,7 +43,8 @@ export class CheckCombo {
             this.closed(changed);
         });
     }
-    set disabled(disabled) { this.root.disabled = disabled; }
+    set disabled(disabled) { this.root.disabled = disabled; if (disabled)
+        hidePopup(this.list); }
     /** The list and what is ticked; a tick the list lacks is kept and shown.
      * A lazy list is made when the popup next opens. */
     set(items, checked) {
@@ -80,17 +76,10 @@ export class CheckCombo {
         if (this.root.disabled || !this.items.length)
             return;
         this.opened = [...this.checked];
-        document.body.append(this.list);
-        this.list.showPopover();
-        this.place();
+        // Below the field, or above it where the list fits better (placeDrop).
+        showPopup(this.list, this.root);
+        placeDrop(this.list, this.root);
     }
-    /** Below the field, or above it where the list fits better (placeDrop); its left edge on the field's, inside the window. */
-    place = () => {
-        const rect = this.root.getBoundingClientRect(), pad = token("--window-pad");
-        this.list.style.minWidth = `${rect.width}px`;
-        placeDrop(this.list, rect);
-        this.list.style.left = `${Math.max(pad, Math.min(rect.left, innerWidth - pad - this.list.offsetWidth))}px`;
-    };
     build() {
         const rows = [];
         let group = [];

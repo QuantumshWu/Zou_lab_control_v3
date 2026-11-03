@@ -300,7 +300,7 @@ impl Panels {
     /// still shows the old kind: input intent follows the authored `targets`.
     /// A panel's Overlay (`overlays`, the board's) is read in the same front,
     /// so the picture is the one its judgement is of (v2 `_overlay_companions`):
-    /// only while that judgement is being made, or was made of this run.
+    /// whenever its signal is in the Runtime, a member of the picture's group.
     pub fn capture(&self, runtime: &Runtime, targets: &Value, accepted: &Value, overlays: &BTreeMap<String, String>) -> Vec<PanelInput> {
         let sources = runtime.signals();
         let mut inputs = Vec::with_capacity(self.bindings.len());
@@ -337,9 +337,10 @@ impl Panels {
                 let width = (history_capable && (binding.window > 1 || records)).then_some(binding.window);
                 positions.push((inputs.len(), false));
                 requests.push((binding.generation.as_ref().unwrap().clone(), binding.signal.clone(), width));
-                let image = sources.iter().find(|source| source.signal == binding.signal);
-                let judgement = overlays.get(panel).filter(|_| width.is_none()).and_then(|overlay| sources.iter()
-                    .find(|source| *source.signal == **overlay && source.published && (!source.sealed || image.is_some_and(|image| image.sealed))));
+                // The Overlay is a member of the picture's group whatever its run's state: the
+                // Runtime keeps the last shot both have until its judgement of a newer one comes.
+                let judgement = overlays.get(panel).filter(|_| width.is_none())
+                    .and_then(|overlay| sources.iter().find(|source| *source.signal == **overlay));
                 if let Some(judgement) = judgement {
                     positions.push((inputs.len(), true));
                     requests.push((judgement.generation.clone(), judgement.signal.clone(), None));
@@ -441,4 +442,344 @@ pub fn viewer_caption(panel: &str) -> Option<String> {
     viewer_of(panel)?;
     let (_, rest) = panel.strip_prefix(VIEWER_PREFIX)?.strip_prefix('-')?.split_once('-')?;
     Some(format!("panel-{rest}"))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    //! The same-shot group on a board, driven as the desktop drives it: Runtime runs
+    //! begin, commit, seal and leave; each turn syncs the bindings, captures the board
+    //! (`Panels::capture`) and builds the image's point layer (`LiveOverlays::layer`).
+    use super::*;
+    use crate::overlay::LiveOverlays;
+    use zlc_core::dataset::{DataBlock, Validity};
+    use zlc_core::runtime::{Bundle, Declaration, GenerationId, Input, Publication, Storage};
+    use zlc_core::schema::{Axis, Coordinates, DatasetSchema, Domain, DomainRole, ValidityContract, ValueSchema};
+    use zlc_core::{DType, OwnedBuffer};
+
+    const SITES: usize = 2;
+    fn axis(id: &str, role: &str, len: usize, frame: Option<&str>) -> Arc<Axis> {
+        Axis::new(id.into(), id.into(), role.into(), Coordinates::Index { origin: 0, len }, None, frame.map(Into::into), None, None).unwrap()
+    }
+    pub(crate) fn image_schema() -> Arc<DatasetSchema> {
+        DatasetSchema::new(Domain::dense(vec![1], vec![axis("repeat", "repeat", 1, None)]).unwrap(),
+            Domain::dense(vec![3], vec![axis("frame", "readout-event", 3, None)]).unwrap(),
+            Domain::dense(vec![2, 3], vec![axis("y", "spatial-y", 2, Some("camera")), axis("x", "spatial-x", 3, Some("camera"))]).unwrap(),
+            ValueSchema::new(DType::F64, None, None, ValidityContract::Value).unwrap()).unwrap()
+    }
+    pub(crate) fn status_schema() -> Arc<DatasetSchema> {
+        let image = image_schema();
+        DatasetSchema::new(image.domain(DomainRole::Repeat).clone(), image.domain(DomainRole::Point).clone(),
+            Domain::dense(vec![SITES], vec![axis("site", "site", SITES, None)]).unwrap(),
+            ValueSchema::new(DType::Bool, None, None, ValidityContract::Value).unwrap()).unwrap()
+    }
+    /// The run record of an Occupancy run: where its sites are on the camera's image.
+    pub(crate) fn geometry() -> Value {
+        json!({"image_point_overlay_geometry": {"coordinate_frame": "camera", "x_axis_id": "x", "y_axis_id": "y", "point_ids": ["a", "b"],
+            "coordinates_xy": [[0.0, 0.0], [1.0, 1.0]], "labels": ["a", "b"], "status_axis_id": "site", "status_coordinates": [0, 1]}})
+    }
+    pub(crate) fn event(schema: &Arc<DatasetSchema>, signal: &str, ordinal: u64, parents: Vec<Arc<Publication>>) -> Bundle {
+        let data: zlc_core::AnyBuffer = if schema.value().dtype() == DType::Bool { OwnedBuffer::from_vec(vec![true; schema.value_len()]).into() }
+            else { OwnedBuffer::from_vec(vec![ordinal as f64; schema.value_len()]).into() };
+        Bundle { inputs: vec![Input::Event { signal: signal.into(), ordinal, origin: None, shot_time: None,
+            data: DataBlock::new(schema.clone(), data, Validity::Uniform(true), None).unwrap() }], metadata: json!({}), parents }
+    }
+    pub(crate) fn latest(signal: &str, schema: &Arc<DatasetSchema>) -> Vec<Declaration> { vec![Declaration { signal: signal.into(), schema: schema.clone(), storage: Storage::Latest }] }
+
+    /// What the board's turns showed of `panel-1`, the image with its Overlay.
+    #[derive(Debug, Default, Clone, Copy, PartialEq)]
+    pub(crate) struct Counts {
+        /// Turns that drew the image.
+        pub shown: usize,
+        /// Turns whose image carried the rings of its judgement of that very shot.
+        pub paired: usize,
+        /// A new shot of the image drawn without its judgement while the Overlay is a member.
+        pub unpaired: usize,
+        /// The rings left a shot they had been drawn on (rings vanish, picture unchanged).
+        pub dropped: usize,
+        /// The image went back to an older shot (or an older run) than it showed.
+        pub regressions: usize,
+        /// The image went blank (nothing to draw) after it had shown a shot.
+        pub blanked: usize,
+        /// Turns after both runs ended that showed something else than the turn before.
+        pub changed_after_stop: usize,
+        /// Turns after the Overlay left (removed, its producer gone) that did not show the
+        /// camera's newest shot: a picture held by a member that left.
+        pub held_without_member: usize,
+        /// `panel-2` (a member downstream) at another shot than the image.
+        pub apart: usize,
+    }
+
+    pub(crate) struct Board {
+        pub runtime: Runtime,
+        panels: Panels,
+        pub overlays: BTreeMap<String, String>,
+        layers: LiveOverlays,
+        targets: Value,
+        runs: Vec<GenerationId>,
+        last: Option<((usize, u64), bool)>,
+        pub stopped: bool,
+        /// The Overlay has left: the picture must be the camera's newest.
+        pub alone: bool,
+        pub counts: Counts,
+        pub log: Vec<String>,
+    }
+
+    impl Board {
+        /// `panel-1` an image of `frames` with Overlay `occupied`; `panel-2`, if given, (signal, kind).
+        pub(crate) fn new(second: Option<(&str, &str)>) -> Self {
+            let runtime = Runtime::new();
+            let mut panels = Panels::new();
+            panels.add(&runtime, "frames", "image").unwrap();
+            let mut targets = json!({"panel-1": {"semantic": {"kind": "image"}}});
+            if let Some((signal, kind)) = second {
+                panels.add(&runtime, signal, kind).unwrap();
+                targets["panel-2"] = json!({"semantic": {"kind": kind}});
+            }
+            Self { runtime, panels, overlays: [("panel-1".to_owned(), "occupied".to_owned())].into(), layers: LiveOverlays::default(),
+                targets, runs: Vec::new(), last: None, stopped: false, alone: false, counts: Counts::default(), log: Vec::new() }
+        }
+
+        fn run_index(&mut self, generation: GenerationId) -> usize {
+            self.runs.iter().position(|run| *run == generation).unwrap_or_else(|| { self.runs.push(generation); self.runs.len() - 1 })
+        }
+
+        /// One board turn, counted.
+        pub(crate) fn turn(&mut self, label: &str) {
+            self.panels.sync_generations(&self.runtime);
+            let inputs = self.panels.capture(&self.runtime, &self.targets, &json!({"panels": [], "plot_kinds": []}), &self.overlays);
+            let sources = self.runtime.signals();
+            let member = self.overlays.get("panel-1").is_some_and(|overlay| sources.iter().any(|source| *source.signal == **overlay));
+            let image = inputs.iter().find(|input| input.panel == "panel-1").unwrap();
+            let second = inputs.iter().find(|input| input.panel == "panel-2");
+            let Some(read) = image.read.clone() else {
+                self.log.push(format!("{label}: none ({:?})", image.reason));
+                if self.stopped && self.last.is_some() { self.counts.changed_after_stop += 1; }
+                if self.last.is_some() { self.counts.blanked += 1; }
+                self.last = None;
+                return;
+            };
+            let overlay = image.overlay.clone();
+            let layer = self.layers.layer("panel-1", &read, overlay.as_ref()).unwrap();
+            let paired = overlay.as_ref().is_some_and(|status| status.shot_roots() == read.shot_roots()) && layer.is_some();
+            let shot = (self.run_index(read.key().generation), read.key().ordinal.unwrap());
+            self.counts.shown += 1;
+            if paired { self.counts.paired += 1; }
+            match self.last {
+                Some((before, rings)) => {
+                    if shot < before { self.counts.regressions += 1; }
+                    if shot != before && member && !paired { self.counts.unpaired += 1; }
+                    if shot == before && rings && !paired { self.counts.dropped += 1; }
+                    if self.stopped && (shot != before || rings != paired) { self.counts.changed_after_stop += 1; }
+                }
+                None => if member && !paired { self.counts.unpaired += 1; },
+            }
+            if self.alone {
+                let newest = sources.iter().find(|source| &*source.signal == "frames")
+                    .and_then(|source| self.runtime.read_latest(&source.generation, "frames").ok());
+                if newest.is_some_and(|newest| *newest.key() != *read.key()) { self.counts.held_without_member += 1; }
+            }
+            if let Some(read2) = second.and_then(|input| input.read.as_ref()) {
+                if read2.shot_roots() != read.shot_roots() { self.counts.apart += 1; }
+            }
+            self.log.push(format!("{label}: run{} #{} {} panel-2={:?}", shot.0, shot.1, if paired { "rings" } else { "no rings" },
+                second.map(|input| input.read.as_ref().map(|read| read.key().ordinal))));
+            self.last = Some((shot, paired));
+        }
+    }
+
+    fn frame(board: &mut Board, camera: &Generation, ordinal: u64) -> Arc<Publication> {
+        let shot = board.runtime.commit(camera, &event(&image_schema(), "frames", ordinal, vec![])).unwrap().publications[0].clone();
+        board.turn(&format!("cam{ordinal}"));
+        shot
+    }
+    fn judge(board: &mut Board, occupancy: &Generation, shot: &Arc<Publication>) -> Arc<Publication> {
+        let ordinal = shot.key().ordinal.unwrap();
+        let judged = board.runtime.commit(occupancy, &event(&status_schema(), "occupied", ordinal, vec![shot.clone()])).unwrap().publications[0].clone();
+        board.turn(&format!("occ{ordinal}"));
+        judged
+    }
+    fn camera(board: &Board) -> Generation { board.runtime.begin("camera", latest("frames", &image_schema()), json!({})).unwrap() }
+    fn occupancy(board: &Board, camera: &Generation) -> Generation {
+        board.runtime.begin_consuming("occupancy", latest("occupied", &status_schema()), geometry(), "frames".into(), Some(camera.id())).unwrap()
+    }
+
+    /// `shots` camera shots from `from`, each judged by Occupancy `lag` shots later.
+    fn acquire(board: &mut Board, camera: &Generation, occupancy: &Generation, from: u64, shots: u64, lag: usize) -> Vec<Arc<Publication>> {
+        let mut taken = Vec::new();
+        for ordinal in from..from + shots {
+            taken.push(frame(board, camera, ordinal));
+            if taken.len() > lag { let shot = taken[taken.len() - 1 - lag].clone(); judge(board, occupancy, &shot); }
+        }
+        taken
+    }
+    /// Both runs end, the camera's or the processor's first; the judgements still owed come between.
+    fn stop(board: &mut Board, camera: &Generation, occupancy: &Generation, owed: &[Arc<Publication>], camera_first: bool) {
+        if camera_first {
+            board.runtime.seal(camera, json!({})).unwrap();
+            board.turn("camera sealed");
+            for shot in owed { judge(board, occupancy, shot); }
+            board.runtime.seal(occupancy, json!({"status": "completed"})).unwrap();
+        } else {
+            for shot in owed { judge(board, occupancy, shot); }
+            board.runtime.seal(occupancy, json!({"status": "completed"})).unwrap();
+            board.turn("occupancy sealed");
+            board.runtime.seal(camera, json!({})).unwrap();
+        }
+        board.stopped = true;
+        for turn in 0..4 { board.turn(&format!("stopped {turn}")); }
+    }
+
+    /// Every sequence the same-shot group must come through, with what its board showed.
+    pub(crate) fn sequences() -> Vec<(&'static str, Counts, Vec<String>)> {
+        let mut results = Vec::new();
+        let mut done = |name: &'static str, board: Board| results.push((name, board.counts, board.log));
+
+        // Start: the camera runs, Occupancy begins late and its first judgement is slow.
+        let mut board = Board::new(None);
+        let cam = camera(&board);
+        let mut shots: Vec<_> = (0..3).map(|ordinal| frame(&mut board, &cam, ordinal)).collect();
+        let occ = occupancy(&board, &cam);
+        board.turn("occupancy began");
+        for ordinal in 3..5 { shots.push(frame(&mut board, &cam, ordinal)); }
+        for shot in &shots { judge(&mut board, &occ, shot); }
+        acquire(&mut board, &cam, &occ, 5, 4, 1);
+        done("start", board);
+
+        // Steady running, the judgement one shot behind.
+        let mut board = Board::new(None);
+        let cam = camera(&board);
+        let occ = occupancy(&board, &cam);
+        acquire(&mut board, &cam, &occ, 0, 12, 1);
+        done("steady", board);
+
+        // Stop, the camera's run ending first, or the processor's.
+        for (name, camera_first) in [("stop: camera first", true), ("stop: processor first", false)] {
+            let mut board = Board::new(None);
+            let cam = camera(&board);
+            let occ = occupancy(&board, &cam);
+            let shots = acquire(&mut board, &cam, &occ, 0, 6, 1);
+            stop(&mut board, &cam, &occ, &shots[5..], camera_first);
+            done(name, board);
+        }
+
+        // Restart: a stopped camera starts again; Occupancy's new run begins late, slow at first.
+        let mut board = Board::new(None);
+        let cam = camera(&board);
+        let occ = occupancy(&board, &cam);
+        let shots = acquire(&mut board, &cam, &occ, 0, 4, 1);
+        stop(&mut board, &cam, &occ, &shots[3..], true);
+        board.stopped = false;
+        let cam = camera(&board);
+        board.turn("camera began");
+        let mut shots: Vec<_> = (0..2).map(|ordinal| frame(&mut board, &cam, ordinal)).collect();
+        let occ = occupancy(&board, &cam);
+        board.turn("occupancy began");
+        shots.push(frame(&mut board, &cam, 2));
+        for shot in &shots { judge(&mut board, &occ, shot); }
+        acquire(&mut board, &cam, &occ, 3, 4, 1);
+        done("restart", board);
+
+        // An ROI of the camera (panel-2 shows it) across the camera's restart: the region
+        // answers at display cadence, every other shot, and begins again on the new run.
+        let roi_signal = "@logic/panel-1/roi_frame";
+        let mut board = Board::new(Some((roi_signal, "image")));
+        board.overlays.clear();
+        let roi_of = |board: &Board, shot: &Arc<Publication>| board.runtime.begin_derived("panel-1/roi",
+            latest(roi_signal, &image_schema()), json!({}), shot.key(), true).unwrap();
+        let answer = |board: &mut Board, roi: &Generation, shot: &Arc<Publication>| {
+            board.runtime.commit(roi, &event(&image_schema(), roi_signal, shot.key().ordinal.unwrap(), vec![shot.clone()])).unwrap();
+            board.turn(&format!("roi{}", shot.key().ordinal.unwrap()));
+        };
+        let cam = camera(&board);
+        let first = frame(&mut board, &cam, 0);
+        let roi = roi_of(&board, &first);
+        answer(&mut board, &roi, &first);
+        for ordinal in 1..7 { let shot = frame(&mut board, &cam, ordinal); if ordinal % 2 == 0 { answer(&mut board, &roi, &shot); } }
+        board.runtime.seal(&cam, json!({})).unwrap();
+        board.runtime.seal(&roi, json!({})).unwrap();
+        board.turn("stopped");
+        let cam = camera(&board);
+        board.turn("camera began");
+        let first = frame(&mut board, &cam, 0);
+        frame(&mut board, &cam, 1);
+        let roi = roi_of(&board, &first);
+        board.turn("roi began");
+        answer(&mut board, &roi, &first);
+        for ordinal in 2..7 { let shot = frame(&mut board, &cam, ordinal); if ordinal % 2 == 0 { answer(&mut board, &roi, &shot); } }
+        done("roi across a restart", board);
+
+        // A chain: Frame Survival of Occupancy's judgement (panel-2, its rolling history),
+        // through two rounds of all three runs.
+        let mut board = Board::new(Some(("survival", "rolling")));
+        for round in 0..2 {
+            let cam = camera(&board);
+            board.turn("camera began");
+            let first = frame(&mut board, &cam, 0);
+            let occ = occupancy(&board, &cam);
+            board.turn("occupancy began");
+            let mut judged = vec![judge(&mut board, &occ, &first)];
+            let survival = board.runtime.begin_consuming("survival", latest("survival", &status_schema()), json!({}), "occupied".into(), Some(occ.id())).unwrap();
+            board.turn("survival began");
+            board.runtime.commit(&survival, &event(&status_schema(), "survival", 0, vec![judged[0].clone()])).unwrap();
+            board.turn("surv0");
+            for ordinal in 1..6u64 {
+                let shot = frame(&mut board, &cam, ordinal);
+                judged.push(judge(&mut board, &occ, &shot));
+                let at = ordinal as usize - 1;
+                board.runtime.commit(&survival, &event(&status_schema(), "survival", at as u64, vec![judged[at].clone()])).unwrap();
+                board.turn(&format!("surv{at}"));
+            }
+            board.runtime.seal(&cam, json!({})).unwrap();
+            board.turn("camera sealed");
+            board.runtime.seal(&occ, json!({"status": "completed"})).unwrap();
+            board.turn("occupancy sealed");
+            board.runtime.commit(&survival, &event(&status_schema(), "survival", 5, vec![judged[5].clone()])).unwrap();
+            board.turn("surv5");
+            board.runtime.seal(&survival, json!({"status": "completed"})).unwrap();
+            board.stopped = true;
+            for turn in 0..3 { board.turn(&format!("round {round} stopped {turn}")); }
+            board.stopped = false;
+        }
+        done("chain occupancy -> frame survival", board);
+
+        // The Overlay removed while both run: the picture goes on at once.
+        let mut board = Board::new(None);
+        let cam = camera(&board);
+        let occ = occupancy(&board, &cam);
+        acquire(&mut board, &cam, &occ, 0, 4, 2);
+        board.overlays.clear();
+        board.alone = true;
+        board.turn("overlay removed");
+        acquire(&mut board, &cam, &occ, 4, 4, 2);
+        done("overlay removed", board);
+
+        // The processor fails while the camera runs: its host withdraws it (v2), and the
+        // picture goes on without it.
+        let mut board = Board::new(None);
+        let cam = camera(&board);
+        let occ = occupancy(&board, &cam);
+        acquire(&mut board, &cam, &occ, 0, 4, 2);
+        board.runtime.retire(&occ).unwrap();
+        board.alone = true;
+        board.turn("occupancy failed");
+        for ordinal in 4..8 { frame(&mut board, &cam, ordinal); }
+        done("processor fails", board);
+        results
+    }
+
+    #[test]
+    fn a_picture_and_its_judgement_are_one_shot_through_every_run_transition() {
+        let results = sequences();
+        let mut failures = Vec::new();
+        for (name, counts, log) in &results {
+            eprintln!("{name}: {counts:?}");
+            let bad = counts.unpaired + counts.dropped + counts.regressions + counts.blanked + counts.changed_after_stop
+                + counts.held_without_member + counts.apart;
+            if bad != 0 { failures.push(format!("{name}: {counts:?}\n  {}", log.join("\n  "))); }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        for (name, counts, _) in &results {
+            if *name != "roi across a restart" { assert!(counts.paired > 0, "{name} never showed its rings"); }
+        }
+    }
 }

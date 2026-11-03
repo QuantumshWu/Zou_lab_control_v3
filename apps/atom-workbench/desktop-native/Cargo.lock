@@ -47,6 +47,7 @@ name = "atom-motion-3d"
 version = "0.1.0"
 dependencies = [
  "atom-population-core",
+ "miniz_oxide",
  "rayon",
 ]
 
