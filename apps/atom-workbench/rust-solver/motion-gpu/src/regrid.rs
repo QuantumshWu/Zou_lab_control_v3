@@ -10,18 +10,20 @@ pub fn interpolation(from_n:usize,from_dx:f64,to_n:usize,to_dx:f64)->Vec<f64>{
     // The frequencies 2π m/(n dx) below both Nyquist limits (the Nyquist mode itself dropped).
     let cut=(std::f64::consts::PI/from_dx).min(std::f64::consts::PI/to_dx);
     let base=std::f64::consts::TAU/(from_n as f64*from_dx);
-    let modes:Vec<f64>=(1..from_n/2).map(|m|m as f64*base).filter(|&k|k<cut*(1.-1e-12)).collect();
+    let modes=(1..from_n/2).filter(|&m|(m as f64*base)<cut*(1.-1e-12)).count() as f64;
+    // (1 + 2 Σ_{m=1}^{M} cos m θ)/n, θ = base·d, summed in closed form (the Dirichlet kernel):
+    // sin((M + ½) θ)/(n sin(θ/2)), and (2M + 1)/n where sin(θ/2) vanishes.
+    let kernel=|d:f64|{let h=base*d/2.;let s=h.sin();if s.abs()<1e-12{(2.*modes+1.)/from_n as f64}else{((2.*modes+1.)*h).sin()/(from_n as f64*s)}};
     let mut a=vec![0.;to_n*from_n];
     for i in 0..to_n{
         let x=(i as f64-(to_n/2) as f64)*to_dx;
         if x< -half||x>=half{continue;}
-        for j in 0..from_n{
-            let d=x-(j as f64-(from_n/2) as f64)*from_dx;
-            a[i*from_n+j]=(1.+2.*modes.iter().map(|&k|(k*d).cos()).sum::<f64>())/from_n as f64;
-        }
+        for j in 0..from_n{a[i*from_n+j]=kernel(x-(j as f64-(from_n/2) as f64)*from_dx);}
     }
     a
 }
+/// A matrix of `rows` × `cols` (row-major) transposed.
+pub fn transpose(a:&[f64],rows:usize,cols:usize)->Vec<f64>{(0..cols*rows).map(|k|a[(k%rows)*cols+k/rows]).collect()}
 
 /// One plane resampled from grid `from` to grid `to` (both of the plane, or both one row).
 pub fn resample(from:&Grid,to:&Grid,plane:&[[f32;2]])->Vec<[f32;2]>{

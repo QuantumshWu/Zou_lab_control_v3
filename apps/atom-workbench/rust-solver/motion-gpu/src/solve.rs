@@ -242,8 +242,9 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution)->bool,running
             for s in 0..per{
                 ensemble.step(s+1==per,distributions&&s+1==per)?;
                 // Between checkpoints, a word at least every BEAT_SECONDS: how far the batch is,
-                // and the time left once the errors so far project the trajectories needed.
-                if s%64==63&&said.elapsed().as_secs_f64()>=BEAT_SECONDS{
+                // and the time left once the errors so far project the trajectories needed (the
+                // clock read every step: an output interval may hold only a few).
+                if said.elapsed().as_secs_f64()>=BEAT_SECONDS{
                     let done=((i-1)*per+s+1) as f64/steps as f64;
                     let remaining_ms=need.map(|n|{
                         let elapsed=begun.elapsed().as_secs_f64()-(ensemble.seconds[3]-built);

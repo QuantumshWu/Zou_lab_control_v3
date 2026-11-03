@@ -24,7 +24,7 @@ use crate::driver::Buffer;
 use crate::engine::{Engine,Internal,Settings,RECORD,REC_KX,REC_TAIL,REC_TAIL2,REC_X};
 use crate::gpu::Gpu;
 use crate::model::{Grid,Model};
-use crate::regrid::interpolation;
+use crate::regrid::{interpolation,transpose};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -62,7 +62,8 @@ pub struct Ensemble{
     /// Wall seconds spent: launching the steps, reading the records (waiting for the GPU), moving,
     /// and building the grids' tables.
     pub seconds:[f64;4],
-    /// Per pair of grids (from, to), the interpolation matrices along x and y on the device.
+    /// Per pair of grids (from, to), the interpolation matrices along x (transposed) and y on the
+    /// device.
     matrices:HashMap<(usize,usize),(Buffer,Buffer)>,
     /// The moves' scratch on the device (the list, the half-resampled planes, the norms), grown
     /// as needed.
@@ -218,33 +219,41 @@ impl Ensemble{
             pairs.entry((from,to)).or_default().push([slot as i32,target as i32]);
         }
         for c in 0..self.classes.len(){if let Some(e)=self.classes[c].as_mut(){e.active=self.occupant[c].iter().rposition(|x|x.is_some()).map_or(0,|i|i+1).max(e.active);}}
-        let(rows,cols,state)=(self.gpu.function("move_rows")?,self.gpu.function("move_cols")?,self.gpu.function("move_state")?);
+        let functions=["move_rows","move_cols","move_scale","move_finish"].map(|f|self.gpu.function(f));
+        let[rows,cols,scale,finish]=functions;let(rows,cols,scale,finish)=(rows?,cols?,scale?,finish?);
         // The moves run on the shared stream, in order: the engines' own work (the slots packed
         // after the records, a grown engine's copies) done first, the moves done before the
         // engines step on.
         if pairs.is_empty(){self.seconds[2]+=started.elapsed().as_secs_f64()-(self.seconds[3]-built);return Ok(());}
         for e in self.classes.iter().flatten(){e.synchronize()?;}
         let mut pairs:Vec<((usize,usize),Vec<[i32;2]>)>=pairs.into_iter().collect();pairs.sort_by_key(|p|p.0);
-        for((from,to),moves)in pairs{
+        // The interpolation matrices of pairs of grids not met before; then every move's list in
+        // one upload and the scratch sized for the largest pair, so that the pairs' kernels run
+        // one after another without waiting on the host.
+        for &((from,to),_)in &pairs{
+            if self.matrices.contains_key(&(from,to)){continue;}
             let(a,b)=(self.grids[from],self.grids[to]);
-            if !self.matrices.contains_key(&(from,to)){
-                let up=|m:Vec<f64>|->Result<Buffer,String>{let v:Vec<f32>=m.iter().map(|&x|x as f32).collect();let buf=Buffer::new(v.len()*4)?;self.gpu.stream.upload(&buf,&v)?;Ok(buf)};
-                let pair=(up(interpolation(a.nx,a.dx,b.nx,b.dx))?,up(interpolation(a.ny,a.dy,b.ny,b.dy))?);self.matrices.insert((from,to),pair);
-            }
-            let(ax,ay)=&self.matrices[&(from,to)];
-            let count=moves.len();
-            for(k,bytes)in [count*8,count*5*a.ny*b.nx*8,count*4].into_iter().enumerate(){
-                // A scratch too small is replaced once the moves before it have run.
-                if self.scratch[k].as_ref().is_none_or(|x|x.bytes<bytes){self.gpu.stream.synchronize()?;self.scratch[k]=Some(Buffer::new(bytes)?);}
-            }
-            let s=&self.gpu.stream;let[Some(list),Some(tmp),Some(norm)]=&self.scratch else{unreachable!()};
-            s.upload(list,&moves)?;s.zero_at(norm,0,count*4)?;
-            let(source,target)=(self.classes[from].as_ref().unwrap(),self.classes[to].as_ref().unwrap());
+            let up=|m:Vec<f64>|->Result<Buffer,String>{let v:Vec<f32>=m.iter().map(|&x|x as f32).collect();let buf=Buffer::new(v.len()*4)?;self.gpu.stream.upload(&buf,&v)?;Ok(buf)};
+            let pair=(up(transpose(&interpolation(a.nx,a.dx,b.nx,b.dx),b.nx,a.nx))?,up(interpolation(a.ny,a.dy,b.ny,b.dy))?);self.matrices.insert((from,to),pair);
+        }
+        let all:Vec<[i32;2]>=pairs.iter().flat_map(|p|p.1.iter().copied()).collect();
+        let half=pairs.iter().map(|((from,to),moves)|moves.len()*5*self.grids[*from].ny*self.grids[*to].nx*8).max().unwrap_or(0);
+        for(k,bytes)in [all.len()*8,half,all.len()*4].into_iter().enumerate(){
+            if self.scratch[k].as_ref().is_none_or(|x|x.bytes<bytes){self.scratch[k]=Some(Buffer::new(bytes)?);}
+        }
+        let s=&self.gpu.stream;let[Some(list),Some(tmp),Some(norm)]=&self.scratch else{unreachable!()};
+        s.upload(list,&all)?;s.zero_at(norm,0,all.len()*4)?;
+        let mut at=0usize;
+        for((from,to),moves)in &pairs{
+            let(a,b)=(self.grids[*from],self.grids[*to]);let(ax,ay)=&self.matrices[&(*from,*to)];
+            let count=moves.len();let(l,m)=(list.at(at*8),norm.at(at*4));at+=count;
+            let(source,target)=(self.classes[*from].as_ref().unwrap(),self.classes[*to].as_ref().unwrap());
             let(src_traj,src_state,src_weights,src_components)=source.device();let(dst_traj,dst_state,dst_weights,_)=target.device();
             let n=count as i32;let blocks=|total:usize|(total.div_ceil(256) as u32,1,1);
-            s.launch(&rows,blocks(count*5*a.ny*b.nx),256,0,&[&src_state,&(a.nx as i32),&(a.ny as i32),&src_components,&list.pointer,&n,&ax.pointer,&(b.nx as i32),&tmp.pointer])?;
-            s.launch(&cols,blocks(count*5*b.ny*b.nx),256,0,&[&tmp.pointer,&(a.ny as i32),&src_components,&list.pointer,&n,&ay.pointer,&(b.nx as i32),&(b.ny as i32),&dst_state,&norm.pointer])?;
-            s.launch(&state,(count as u32,1,1),256,0,&[&src_traj,&dst_traj,&src_weights,&dst_weights,&list.pointer,&norm.pointer,&dst_state,&(b.points() as i32)])?;
+            s.launch(&rows,blocks(count*5*a.ny*b.nx),256,0,&[&src_state,&(a.nx as i32),&(a.ny as i32),&src_components,&l,&n,&ax.pointer,&(b.nx as i32),&tmp.pointer])?;
+            s.launch(&cols,blocks(count*5*b.ny*b.nx),256,0,&[&tmp.pointer,&(a.ny as i32),&src_components,&l,&n,&ay.pointer,&(b.nx as i32),&(b.ny as i32),&dst_state,&m])?;
+            s.launch(&scale,((5*b.points()).div_ceil(256*8) as u32,count as u32,1),256,0,&[&src_components,&l,&m,&dst_state,&(b.points() as i32)])?;
+            s.launch(&finish,(count.div_ceil(64) as u32,1,1),64,0,&[&src_traj,&dst_traj,&src_weights,&dst_weights,&l,&n])?;
         }
         self.gpu.stream.synchronize()?;
         self.pack()?;

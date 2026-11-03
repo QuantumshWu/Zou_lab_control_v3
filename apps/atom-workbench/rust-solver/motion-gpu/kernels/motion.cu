@@ -924,15 +924,17 @@ extern "C" __global__ void __launch_bounds__(256,2) observe_points(const float2*
 // ---------------------------------------------------------------------------------------------
 // Trajectories moved between grids (src/regrid.rs): each listed move (source slot, destination
 // slot) resampled as A_y psi A_x^T with the real band-limited interpolation matrices A (n_to x
-// n_from, row-major), renormalized, and its per-trajectory state copied; the source slot emptied.
+// n_from, row-major; A_x given transposed), renormalized, and its per-trajectory state copied;
+// the source slot emptied.
 struct Move{int from;int to;};
-// tmp[m][c][y][x'] = sum_x A_x[x'][x] psi[from][c][y][x]; one thread per (move, component, y, x').
-extern "C" __global__ void move_rows(const float2* src,int nx,int ny,const int* components,const Move* moves,int count,const float* ax,int nx_to,float2* tmp){
+// tmp[m][c][y][x'] = sum_x A_x[x'][x] psi[from][c][y][x]; one thread per (move, component, y, x'):
+// a warp's threads share the row of psi and read A_x^T (`axt`, n_from x n_to) along x'.
+extern "C" __global__ void move_rows(const float2* src,int nx,int ny,const int* components,const Move* moves,int count,const float* axt,int nx_to,float2* tmp){
     const u64 i=(u64)blockIdx.x*blockDim.x+threadIdx.x,per=(u64)ny*nx_to,total=(u64)count*COMPONENTS*per;if(i>=total)return;
     const int m=(int)(i/(COMPONENTS*per)),c=(int)(i/per%COMPONENTS),y=(int)(i%per/nx_to),x=(int)(i%nx_to);
     if(c>=components[moves[m].from])return;
-    const float2* row=src+((u64)moves[m].from*COMPONENTS+c)*nx*ny+(u64)y*nx;const float* a=ax+(u64)x*nx;
-    float2 z=make_float2(0.f,0.f);for(int j=0;j<nx;j++)z=cadd(z,cscale(row[j],__ldg(a+j)));
+    const float2* row=src+((u64)moves[m].from*COMPONENTS+c)*nx*ny+(u64)y*nx;const float* a=axt+x;
+    float2 z=make_float2(0.f,0.f);for(int j=0;j<nx;j++)z=cadd(z,cscale(row[j],__ldg(a+(u64)j*nx_to)));
     tmp[i]=z;
 }
 // psi[to][c][y'][x'] = sum_y A_y[y'][y] tmp[m][c][y][x']; the moved planes' |psi|^2 into norm[m].
@@ -953,19 +955,21 @@ extern "C" __global__ void move_cols(const float2* tmp,int ny,const int* compone
     if(uniform){n2=warp_sum(n2);if((threadIdx.x&31)==0&&m0>=0)atomicAdd(norm+m0,n2);}
     else if(m>=0&&n2!=0.f)atomicAdd(norm+m,n2);
 }
-// The moved trajectories' state: renormalized planes, the per-trajectory scalars copied, the
-// source slot emptied. One block per move.
-extern "C" __global__ void move_state(Trajectories from,Trajectories to,const float* from_weights,float* to_weights,const Move* moves,const float* norm,
-        float2* dst,int points_to){
-    const int m=blockIdx.x;const Move mv=moves[m];
-    const int n=from.components[mv.from];const float s=rsqrtf(fmaxf(norm[m],1e-30f));
-    for(u64 i=threadIdx.x;i<(u64)n*points_to;i+=blockDim.x){float2* p=dst+(u64)mv.to*COMPONENTS*points_to+i;*p=cscale(*p,s);}
-    __syncthreads();
-    if(threadIdx.x==0){
-        to.ids[mv.to]=from.ids[mv.from];to.components[mv.to]=n;to.scale[mv.to]=1.f;to.log_norm[mv.to]=from.log_norm[mv.from];
-        to.threshold[mv.to]=from.threshold[mv.from];to.jumps[mv.to]=from.jumps[mv.from];to_weights[mv.to]=from_weights[mv.from];
-        from.components[mv.from]=0;
-    }
+// The moved planes renormalized; grid (stretches, moves): a block takes a stretch of one move's
+// planes, so a few moves still fill the device.
+extern "C" __global__ void move_scale(const int* from_components,const Move* moves,const float* norm,float2* dst,int points_to){
+    const Move mv=moves[blockIdx.y];
+    const u64 n=(u64)from_components[mv.from]*points_to;const float s=rsqrtf(fmaxf(norm[blockIdx.y],1e-30f));
+    float2* p=dst+(u64)mv.to*COMPONENTS*points_to;
+    for(u64 i=(u64)blockIdx.x*blockDim.x+threadIdx.x;i<n;i+=(u64)gridDim.x*blockDim.x)p[i]=cscale(p[i],s);
+}
+// Then the moved trajectories' per-trajectory state copied and the source slots emptied; a thread
+// per move.
+extern "C" __global__ void move_finish(Trajectories from,Trajectories to,const float* from_weights,float* to_weights,const Move* moves,int count){
+    const int m=blockIdx.x*blockDim.x+threadIdx.x;if(m>=count)return;const Move mv=moves[m];
+    to.ids[mv.to]=from.ids[mv.from];to.components[mv.to]=from.components[mv.from];to.scale[mv.to]=1.f;to.log_norm[mv.to]=from.log_norm[mv.from];
+    to.threshold[mv.to]=from.threshold[mv.from];to.jumps[mv.to]=from.jumps[mv.from];to_weights[mv.to]=from_weights[mv.from];
+    from.components[mv.from]=0;
 }
 
 // ---------------------------------------------------------------------------------------------

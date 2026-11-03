@@ -161,3 +161,61 @@ fn gpu_rows_fused_with_the_local_step_match_the_exact_product(){
         assert!(worst<4e-6&&worst_norm<4e-6,"{nx}x{ny}: {worst:e} {worst_norm:e}");
     }
 }
+
+/// The moves between grids (kernels `move_*`, as ensemble.rs runs them): two trajectories of a
+/// long narrow grid resampled onto a wider one -- against the CPU's band-limited resampling,
+/// renormalized over their components -- their per-trajectory state copied and the source slots
+/// emptied.
+#[test]
+fn gpu_moves_resample_renormalize_and_carry_the_trajectory_state(){
+    use atom_motion_gpu::model::Grid;use atom_motion_gpu::regrid::{interpolation,resample,transpose};
+    let gpu=Gpu::new().unwrap();
+    let(from,to)=(Grid{nx:32,ny:128,dx:0.0151,dy:0.0076},Grid{nx:64,ny:64,dx:0.0107,dy:0.0107});
+    let(pf,pt)=(from.points(),to.points());
+    let packet=|x:f64,y:f64,c:usize|{let(a,p)=((-(x*x/0.004+y*y/0.002)).exp()*(1.+0.3*c as f64),23.*x-17.*y+c as f64);[(a*p.cos()) as f32,(a*p.sin()) as f32]};
+    // Source slots 0 (F = 2) and 1 (F = 1); destination slots 2 and 0 of three.
+    let components=[5i32,3];let moves=[[0i32,2],[1,0]];
+    let mut source=vec![[0f32;2];2*5*pf];
+    for t in 0..2{for c in 0..components[t] as usize{for q in 0..pf{let r=from.position(q);source[(t*5+c)*pf+q]=packet(r[0]+0.01*t as f64,r[1],c);}}}
+    let up=|bytes:&[u8]|{let b=Buffer::new(bytes.len()).unwrap();gpu.stream.upload(&b,bytes).unwrap();b};
+    let raw=|v:&[[f32;2]]|->Vec<u8>{v.iter().flat_map(|z|[z[0].to_le_bytes(),z[1].to_le_bytes()].concat()).collect()};
+    let ints=|v:&[i32]|->Vec<u8>{v.iter().flat_map(|x|x.to_le_bytes()).collect()};
+    let floats=|v:&[f32]|->Vec<u8>{v.iter().flat_map(|x|x.to_le_bytes()).collect()};
+    let doubles=|v:&[f64]|->Vec<u8>{v.iter().flat_map(|x|x.to_le_bytes()).collect()};
+    let matrix=|m:Vec<f64>|up(&floats(&m.iter().map(|&x|x as f32).collect::<Vec<f32>>()));
+    // A_x transposed (ensemble.rs).
+    let(ax,ay)=(matrix(transpose(&interpolation(from.nx,from.dx,to.nx,to.dx),to.nx,from.nx)),matrix(interpolation(from.ny,from.dy,to.ny,to.dy)));
+    let src=up(&raw(&source));let dst=up(&raw(&vec![[0f32;2];3*5*pt]));
+    // Per-trajectory state: ids, components, scale, log_norm, threshold, jumps, weights.
+    let(src_ids,src_comp,src_scale,src_log,src_thr,src_jumps,src_w)=(up(&ints(&[7,9])),up(&ints(&components)),up(&floats(&[0.5,0.25])),up(&doubles(&[-0.1,-0.2])),up(&doubles(&[-1.5,-2.5])),up(&ints(&[3,4])),up(&floats(&[1.25,0.75])));
+    let(dst_ids,dst_comp,dst_scale,dst_log,dst_thr,dst_jumps,dst_w)=(up(&ints(&[0;3])),up(&ints(&[0;3])),up(&floats(&[0.;3])),up(&doubles(&[0.;3])),up(&doubles(&[0.;3])),up(&ints(&[0;3])),up(&floats(&[0.;3])));
+    #[repr(C)] struct Trajectories{ids:u64,components:u64,scale:u64,log_norm:u64,threshold:u64,jumps:u64}
+    impl driver::Arg for Trajectories{fn pointer(&self)->*mut std::ffi::c_void{self as *const Trajectories as *mut std::ffi::c_void}}
+    let src_traj=Trajectories{ids:src_ids.pointer,components:src_comp.pointer,scale:src_scale.pointer,log_norm:src_log.pointer,threshold:src_thr.pointer,jumps:src_jumps.pointer};
+    let dst_traj=Trajectories{ids:dst_ids.pointer,components:dst_comp.pointer,scale:dst_scale.pointer,log_norm:dst_log.pointer,threshold:dst_thr.pointer,jumps:dst_jumps.pointer};
+    let list=up(&ints(&moves.concat()));let norm=up(&floats(&[0.;2]));let tmp=Buffer::new(2*5*from.ny*to.nx*8).unwrap();
+    let f=|name:&str|gpu.function(name).unwrap();let n=2i32;let blocks=|total:usize|(total.div_ceil(256) as u32,1,1);
+    gpu.stream.launch(&f("move_rows"),blocks(2*5*from.ny*to.nx),256,0,&[&src.pointer,&(from.nx as i32),&(from.ny as i32),&src_comp.pointer,&list.pointer,&n,&ax.pointer,&(to.nx as i32),&tmp.pointer]).unwrap();
+    gpu.stream.launch(&f("move_cols"),blocks(2*5*to.ny*to.nx),256,0,&[&tmp.pointer,&(from.ny as i32),&src_comp.pointer,&list.pointer,&n,&ay.pointer,&(to.nx as i32),&(to.ny as i32),&dst.pointer,&norm.pointer]).unwrap();
+    gpu.stream.launch(&f("move_scale"),((5*pt).div_ceil(256*8) as u32,2,1),256,0,&[&src_comp.pointer,&list.pointer,&norm.pointer,&dst.pointer,&(pt as i32)]).unwrap();
+    gpu.stream.launch(&f("move_finish"),(1,1,1),64,0,&[&src_traj,&dst_traj,&src_w.pointer,&dst_w.pointer,&list.pointer,&n]).unwrap();
+    let mut out=vec![[0f32;2];3*5*pt];gpu.stream.download(&dst,&mut out).unwrap();
+    let mut worst=0f64;
+    for(m,&[a,b])in moves.iter().enumerate(){
+        let(a,b,k)=(a as usize,b as usize,components[m] as usize);
+        let planes:Vec<Vec<[f32;2]>>=(0..k).map(|c|resample(&from,&to,&source[(a*5+c)*pf..(a*5+c+1)*pf])).collect();
+        let total:f64=planes.iter().flatten().map(|z|(z[0] as f64).powi(2)+(z[1] as f64).powi(2)).sum();
+        let scale=planes.iter().flatten().fold(0f64,|x,z|x.max((z[0] as f64).hypot(z[1] as f64)))/total.sqrt();
+        for c in 0..k{for q in 0..pt{let(e,o)=(planes[c][q],out[(b*5+c)*pt+q]);
+            worst=worst.max(((o[0] as f64-e[0] as f64/total.sqrt()).hypot(o[1] as f64-e[1] as f64/total.sqrt()))/scale);}}
+    }
+    let read_i=|b:&Buffer,n:usize|{let mut v=vec![0i32;n];gpu.stream.download(b,&mut v).unwrap();v};
+    let read_f=|b:&Buffer,n:usize|{let mut v=vec![0f32;n];gpu.stream.download(b,&mut v).unwrap();v};
+    let read_d=|b:&Buffer,n:usize|{let mut v=vec![0f64;n];gpu.stream.download(b,&mut v).unwrap();v};
+    println!("{}x{} -> {}x{}: largest error {worst:.2e} of the largest value",from.nx,from.ny,to.nx,to.ny);
+    assert!(worst<2e-6,"{worst:e}");
+    assert_eq!(read_i(&dst_ids,3),[9,0,7]);assert_eq!(read_i(&dst_comp,3),[3,0,5]);assert_eq!(read_i(&dst_jumps,3),[4,0,3]);
+    assert_eq!(read_f(&dst_scale,3),[1.,0.,1.]);assert_eq!(read_f(&dst_w,3),[0.75,0.,1.25]);
+    assert_eq!(read_d(&dst_log,3),[-0.2,0.,-0.1]);assert_eq!(read_d(&dst_thr,3),[-2.5,0.,-1.5]);
+    assert_eq!(read_i(&src_comp,2),[0,0],"the source slots emptied");
+}
