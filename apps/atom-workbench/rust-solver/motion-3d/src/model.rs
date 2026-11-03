@@ -111,6 +111,18 @@ pub const MOST_RANK:usize=3;
 pub const TABLE_SHARE:f64=A_PRIORI_SHARE*BUDGET;
 /// The coarsest grid of each intensity axis (nodes), the fewest a cubic stencil takes doubled once.
 const FIRST_NODES:usize=5;
+/// The most a model's tables may take while a grid is refined, the coarse grid's and the fine one's
+/// together (bytes), and the most nodes one grid may have: the model's work bounds, as `MOST_STEPS`
+/// and `MOST_TRAJECTORIES` are a solve's (solve.rs). A resonance across the focused units'
+/// intensities -- a near probe crossing its line where far beams shift it, its ridge a tenth of the
+/// intensities wide -- can ask for a grid finer than a machine holds. A grid beyond either bound is
+/// not made: the tables keep the last one, its measured interpolation error booked
+/// (`Model::table_error`, the ledger's), the same on any machine.
+pub const MOST_TABLE_BYTES:usize=1<<32;
+pub const MOST_TABLE_NODES:usize=1<<20;
+/// The nodes of a grid computed at once, written into its tables before the next: a grid's nodes
+/// are held once, in its tables.
+const NODE_BATCH:usize=4096;
 
 /// A beam's geometry: its direction and wave number, and its waist when Gaussian.
 #[derive(Clone,Debug)]
@@ -385,9 +397,11 @@ fn quadratic<const N:usize>(x:&[f64;MOST_W],psi:&[Complex])->Complex{
 /// elimination's (`Model::resonance`).
 type Node=(Vec<Vec<Complex>>,f64,f64);
 
-/// The tables on one grid, and the elimination's bound over its nodes inside the reach (`Model::resonance`).
+/// The tables on one grid of n nodes per focused unit: per cluster, node-major, its layout's size per
+/// node (re/im interleaved); per node the quartic shifts' bound and the elimination's; and the
+/// elimination's bound over the nodes inside the reach (`Model::resonance`).
 #[derive(Clone,Debug)]
-pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,resonance:f64}
+pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,bounds:Vec<(f64,f64)>,resonance:f64}
 
 /// The trap of the trap beam: its principal axes (unit rows on the lab axes) and frequencies
 /// (rad/us) at the focus for a reference state, and the frequencies per lab axis.
@@ -413,8 +427,10 @@ pub struct Model{
     pub mass_kg:f64,
     pub(crate) layouts:Vec<Layout>,
     pub(crate) tables:Tables,
-    /// The nodes per intensity axis and the interpolation's measured largest relative error.
+    /// The interpolation's measured largest relative error, and where the work bounds stopped the
+    /// grid's refinement short of `TABLE_SHARE` the nodes per axis it kept.
     pub table_error:f64,
+    pub table_limit:Option<usize>,
     /// The quartic van Vleck shifts left out: their bound relative to the eliminated generator's scale.
     pub quartic:f64,
     /// The fourth order's H^(4) entries left out at beats the second order folds: their mixings' squares
@@ -492,7 +508,9 @@ impl Model{
     pub fn with(request:&Request,allowance:f64)->Result<Model,String>{Model::with_order(request,allowance,false)}
     /// The same with its clusters of ground states folded at fourth order where `fourth` (ground.rs,
     /// # Fourth order).
-    pub fn with_order(request:&Request,allowance:f64,fourth:bool)->Result<Model,String>{
+    pub fn with_order(request:&Request,allowance:f64,fourth:bool)->Result<Model,String>{Model::bounded(request,allowance,fourth,MOST_TABLE_BYTES,MOST_TABLE_NODES)}
+    /// The same within the given work bounds on its tables (`MOST_TABLE_BYTES`, `MOST_TABLE_NODES`).
+    pub(crate) fn bounded(request:&Request,allowance:f64,fourth:bool,most_bytes:usize,most_nodes:usize)->Result<Model,String>{
         let ground=Ground::with(request,allowance)?;
         let geometry:Vec<Geometry>=ground.beams.iter().map(|b|Geometry{direction:b.direction,wave_number:b.wave_number_per_um,waist:b.waist_um}).collect();
         let trap_beam=request.trap_beam;
@@ -528,11 +546,11 @@ impl Model{
         if ground.ground_states.len()!=GROUND{return Err(format!("The ground manifold has {} states, not {GROUND}",ground.ground_states.len()));}
         if ground.clusters.iter().any(|c|c.excited.is_empty()&&c.states.len()>MOST_STATES){return Err("A cluster of ground states has more than eight states".into());}
         let mut model=Model{ground,geometry,trap_beam,trap_beams,focused:vec![trap_unit],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
-            layouts:vec![],tables:Tables{nodes:1,data:vec![],resonance:0.},table_error:0.,quartic:0.,fourth_dropped:0.,resonance:0.,reach:vec![[0.;3]],
+            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],resonance:0.},table_error:0.,table_limit:None,quartic:0.,fourth_dropped:0.,resonance:0.,reach:vec![[0.;3]],
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
         model.choose_profiles(request)?;
         model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();
-        model.tabulate(&bases)?;
+        model.tabulate(&bases,most_bytes,most_nodes)?;
         Ok(model)
     }
 
@@ -941,37 +959,44 @@ impl Model{
         Ok(())
     }
 
-    /// The intensity points of a grid of n nodes per focused beam, in node order.
-    fn grid(&self,n:usize)->Vec<Vec<f64>>{
-        let d=self.focused.len();(0..n.pow(d as u32)).map(|i|(0..d).map(|f|((i/n.pow(f as u32))%n) as f64/(n-1).max(1) as f64).collect()).collect()
+    /// Node i's intensities on a grid of n nodes per focused unit (node order: the first unit's
+    /// fastest).
+    fn grid_point(&self,n:usize,i:usize)->[f64;MOST_FOCUSED]{
+        std::array::from_fn(|f|if f<self.focused.len(){((i/n.pow(f as u32))%n) as f64/(n-1).max(1) as f64}else{0.})
     }
-    /// The nodes of a grid of n per focused beam: those it shares with the grid of (n + 1)/2 before
-    /// it (`coarse`: every other node along each beam, at the same intensities to the last bit)
-    /// taken from that grid, the others computed.
-    fn nodes(&self,n:usize,mixing:&[Vec<Vec<Complex>>],coarse:Option<&[Node]>)->Result<Vec<Node>,String>{
-        let(d,m)=(self.focused.len(),n.div_ceil(2));
-        self.grid(n).par_iter().enumerate().map(|(i,s)|{
-            let digits=(0..d).map(|f|(i/n.pow(f as u32))%n);
-            match coarse{
-                Some(c)if digits.clone().all(|x|x%2==0)=>Ok(c[digits.enumerate().map(|(f,x)|x/2*m.pow(f as u32)).sum::<usize>()].clone()),
-                _=>self.node(s,mixing),
-            }
-        }).collect()
-    }
-    /// The tables of a grid of n nodes per focused beam, and the quartic shifts' bound over it.
-    fn build(&self,n:usize,nodes:&[Node])->(Tables,f64){
-        let quartic=nodes.iter().map(|x|x.1).fold(0.,f64::max);
-        // The bound over the nodes inside the reach's intensities: each focused unit's from its
-        // smallest over the reach (less one node, the interval holding it) to 1.
+    /// The tables of a grid of n nodes per focused unit: the nodes it shares with the grid of
+    /// (n + 1)/2 before it (`coarse`: every other node along each axis, at the same intensities to the
+    /// last bit) taken from that grid's tables, the others computed, `NODE_BATCH` at a time written
+    /// into the tables; and the elimination's bound over the nodes inside the reach's intensities --
+    /// each focused unit's from its smallest over the reach (less one node, the interval holding it)
+    /// to 1.
+    fn grid_tables(&self,n:usize,mixing:&[Vec<Vec<Complex>>],coarse:Option<&Tables>)->Result<Tables,String>{
+        let(d,m)=(self.focused.len(),n.div_ceil(2));let count=n.pow(d as u32);
+        let mut data:Vec<Vec<f64>>=self.layouts.iter().map(|l|Vec::with_capacity(2*count*l.size)).collect();let mut bounds=Vec::with_capacity(count);
+        // A node of the coarse grid it shares, or computed.
+        enum Made{Shared(usize),Computed(Node)}
+        for first in (0..count).step_by(NODE_BATCH){
+            let batch:Vec<Made>=(first..(first+NODE_BATCH).min(count)).into_par_iter().map(|i|{
+                let digits:Vec<usize>=(0..d).map(|f|(i/n.pow(f as u32))%n).collect();
+                match coarse{
+                    Some(_)if digits.iter().all(|x|x%2==0)=>Ok(Made::Shared(digits.iter().enumerate().map(|(f,x)|x/2*m.pow(f as u32)).sum())),
+                    _=>self.node(&self.grid_point(n,i)[..d],mixing).map(Made::Computed),
+                }
+            }).collect::<Result<_,_>>()?;
+            for made in batch{match made{
+                Made::Shared(j)=>{let c=coarse.unwrap();for(k,l)in self.layouts.iter().enumerate(){data[k].extend_from_slice(&c.data[k][2*j*l.size..2*(j+1)*l.size]);}bounds.push(c.bounds[j]);}
+                Made::Computed(node)=>{for(k,t)in node.0.iter().enumerate(){data[k].extend(t.iter().flat_map(|z|[z.re,z.im]));}bounds.push((node.1,node.2));}
+            }}
+        }
         let low:Vec<f64>=self.focused.iter().map(|&u|self.reach.iter().map(|&r|self.unit_intensity(u,r).min(1.)).fold(1.,f64::min)-1./(n-1).max(1) as f64).collect();
-        let resonance=self.grid(n).iter().zip(nodes).filter(|(s,_)|s.iter().zip(&low).all(|(x,l)|x>=l)).map(|(_,x)|x.2).fold(0.,f64::max);
-        // data[cluster]: node-major, layout.size per node.
-        (Tables{nodes:n,data:(0..self.layouts.len()).map(|k|nodes.iter().flat_map(|node|node.0[k].iter().flat_map(|z|[z.re,z.im])).collect()).collect(),resonance},quartic)
+        let resonance=(0..count).filter(|&i|self.grid_point(n,i).iter().zip(&low).all(|(x,l)|x>=l)).map(|i|bounds[i].1).fold(0.,f64::max);
+        Ok(Tables{nodes:n,data,bounds,resonance})
     }
     /// The coarse grid's (`self.tables`) largest interpolation error at a finer grid's nodes, relative
     /// to the scale of each cluster's table kind.
     fn interpolation_error(&self,fine:&Tables)->f64{
-        let(ng,ne)=(self.ground.ground_states.len(),self.ground.excited_states.len());let points=self.grid(fine.nodes);let mut worst=0_f64;
+        let(ng,ne)=(self.ground.ground_states.len(),self.ground.excited_states.len());let d=self.focused.len();
+        let count=fine.nodes.pow(d as u32);let mut worst=0_f64;
         for(b,layout)in self.layouts.iter().enumerate(){
             let n=layout.n;let mut kinds:Vec<(usize,usize)>=vec![(layout.h0,layout.h0+n*n)];
             for gl in &layout.groups{let square=gl.pairs.len()*gl.entries.len();kinds.extend([(gl.s,gl.s+square),(gl.q,gl.q+square)]);}
@@ -992,34 +1017,41 @@ impl Model{
                 for js in &f.jumps{kinds.push((js.at,js.at+r(js.inner)*3*ng*ng*n));}
                 for &(c2,c4,at)in &f.p{kinds.push((at,at+r(c2)*r(c4)*ng*n));}
             }
+            // Per kind its scale and the largest error, the fine grid's nodes on the threads.
             for(start,end)in kinds{
                 let exact=|i:usize|&fine.data[b][2*(i*layout.size+start)..2*(i*layout.size+end)];
                 let modulus=|x:&[f64]|x.chunks_exact(2).map(|z|z[0].hypot(z[1])).fold(0_f64,f64::max);
-                let scale=(0..points.len()).map(|i|modulus(exact(i))).fold(0_f64,f64::max);
+                let scale=(0..count).into_par_iter().map(|i|modulus(exact(i))).reduce(||0.,f64::max);
                 if scale==0.{continue;}
-                let mut out=vec![Complex::ZERO;end-start];
-                for(i,s)in points.iter().enumerate(){
-                    self.interpolate(b,&self.stencil(s),None,start,&mut out);
-                    let e=out.iter().zip(exact(i).chunks_exact(2)).fold(0_f64,|m,(x,y)|m.max((x.re-y[0]).hypot(x.im-y[1])))/scale;
-                    worst=worst.max(e);
-                }
+                let e=(0..count).into_par_iter().map_init(||vec![Complex::ZERO;end-start],|out,i|{
+                    self.interpolate(b,&self.stencil(&self.grid_point(fine.nodes,i)[..d]),None,start,out);
+                    out.iter().zip(exact(i).chunks_exact(2)).fold(0_f64,|m,(x,y)|m.max((x.re-y[0]).hypot(x.im-y[1])))
+                }).reduce(||0.,f64::max)/scale;
+                worst=worst.max(e);
             }
         }
         worst
     }
     /// The tables on grids of FIRST_NODES, then doubled (each grid's nodes computed once), until the
-    /// cubic interpolation from the coarser grid meets TABLE_SHARE at the finer grid's nodes; the
-    /// finer grid is kept.
-    fn tabulate(&mut self,mixing:&[Vec<Vec<Complex>>])->Result<(),String>{
-        let mut nodes=self.nodes(FIRST_NODES,mixing,None)?;
-        let(tables,quartic)=self.build(FIRST_NODES,&nodes);self.tables=tables;self.quartic=quartic/self.ground.generator_scale.max(f64::MIN_POSITIVE);
+    /// cubic interpolation from the coarser grid meets TABLE_SHARE at the finer grid's nodes, the
+    /// finer grid kept; or until the next grid would pass the work bounds (`MOST_TABLE_BYTES`,
+    /// `MOST_TABLE_NODES`), the last grid kept with its measured error (the coarser grid's against it,
+    /// an upper estimate of its own) -- once refined at least, so that the error is measured.
+    fn tabulate(&mut self,mixing:&[Vec<Vec<Complex>>],most_bytes:usize,most_nodes:usize)->Result<(),String>{
+        let(d,scale)=(self.focused.len() as u32,self.ground.generator_scale.max(f64::MIN_POSITIVE));
+        let entries:usize=self.layouts.iter().map(|l|l.size).sum();
+        let within=|n:usize,coarse:usize|n.pow(d)<=most_nodes&&16*entries*(n.pow(d)+coarse.pow(d))<=most_bytes;
+        if !within(2*FIRST_NODES-1,FIRST_NODES){return Err(format!("The elimination's tables take {entries} complex entries per node: beyond the work bounds"));}
+        self.tables=self.grid_tables(FIRST_NODES,mixing,None)?;self.quartic=self.tables.bounds.iter().map(|b|b.0).fold(0.,f64::max)/scale;
         loop{
-            let n=2*self.tables.nodes-1;nodes=self.nodes(n,mixing,Some(&nodes))?;let(fine,quartic)=self.build(n,&nodes);
-            let worst=self.interpolation_error(&fine);
-            self.tables=fine;self.table_error=worst;self.quartic=self.quartic.max(quartic/self.ground.generator_scale.max(f64::MIN_POSITIVE));
-            if worst<=TABLE_SHARE{self.resonance=self.tables.resonance;return Ok(());}
-            if n>4097{return Err(format!("The elimination's tables over the focused beams' intensities do not converge (relative error {worst:.1e} at {n} nodes)"));}
+            let n=2*self.tables.nodes-1;
+            if !within(n,self.tables.nodes){self.table_limit=Some(self.tables.nodes);break;}
+            let fine=self.grid_tables(n,mixing,Some(&self.tables))?;let worst=self.interpolation_error(&fine);let quartic=fine.bounds.iter().map(|b|b.0).fold(0.,f64::max);
+            self.tables=fine;self.table_error=worst;self.quartic=self.quartic.max(quartic/scale);
+            if worst<=TABLE_SHARE{break;}
         }
+        self.resonance=self.tables.resonance;
+        Ok(())
     }
 
     /// The stencil at intensities s (one per focused beam).
@@ -1846,8 +1878,27 @@ impl Photons<'_>{
 
 #[cfg(test)]
 mod tests{
-    use super::Beats;
+    use super::{Beats,Model,MOST_TABLE_BYTES,MOST_TABLE_NODES,TABLE_SHARE};
     use std::f64::consts::TAU;
+
+    /// The tables stop refining at the work bounds (F9): the tweezer PGC's (its tweezer one intensity
+    /// axis) within nine nodes, or within the bytes of the grids of nine and five, keep the grid of
+    /// nine, its error measured against the five before it and booked -- beyond TABLE_SHARE, where the
+    /// unbounded tables refine on to meet it --; a bound below the first refinement leaves no measured
+    /// error, and is refused.
+    #[test]
+    fn the_tables_stop_at_the_work_bounds_with_their_error_measured(){
+        let f:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/tweezer_pgc.json")).unwrap();
+        let r=crate::ground::tests::request(&f["request"]);
+        let free=Model::new(&r).unwrap();
+        assert!(free.table_limit.is_none()&&free.tables.nodes>9&&free.table_error<=TABLE_SHARE,"{:?} at {} nodes: {:e}",free.table_limit,free.tables.nodes,free.table_error);
+        let entries:usize=free.layouts.iter().map(|l|l.size).sum();
+        for(bytes,nodes)in [(MOST_TABLE_BYTES,9),(16*entries*(9+5),MOST_TABLE_NODES)]{
+            let m=Model::bounded(&r,f64::INFINITY,false,bytes,nodes).unwrap();
+            assert!(m.table_limit==Some(9)&&m.tables.nodes==9&&m.table_error>TABLE_SHARE,"{:?} at {} nodes: {:e}",m.table_limit,m.tables.nodes,m.table_error);
+        }
+        assert!(Model::bounded(&r,f64::INFINITY,false,MOST_TABLE_BYTES,5).is_err());
+    }
     /// Residuals within the round-off of zero are static and of each other one beat; the beats come in
     /// pairs ±Ω; harmonics of one frequency have its period, incommensurate ones none.
     #[test]
