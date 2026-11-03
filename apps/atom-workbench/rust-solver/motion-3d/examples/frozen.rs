@@ -23,13 +23,13 @@ fn main(){
     let r=[arg(6,"0").parse::<f64>().unwrap(),arg(7,"0").parse::<f64>().unwrap(),arg(8,"0").parse::<f64>().unwrap()];
     let request=scene::scene(&name);
     let clock=Instant::now();let model=Model::with_order(&request,f64::INFINITY,arg(10,"")=="fourth").unwrap();let g=&model.ground;
-    println!("{name}: model {:.2} s; clusters {:?}; {} items ({} kept), cut {:.3e} rad/us, pole {:.3e} rad/us, scale {:.3e} rad/us; focused {:?}, table error {:.1e}, quartic {:.1e}",
+    println!("{name}: model {:.2} s; clusters {:?}; {} items ({} kept), cut {:.3e} rad/us, pole {:.3e} rad/us, scale {:.3e} rad/us; focused {:?}, table error {:.1e}, dressing {:.1e}",
         clock.elapsed().as_secs_f64(),g.clusters.iter().map(|c|c.dimension()).collect::<Vec<_>>(),g.items.len(),g.items.iter().filter(|i|!i.folded).count(),g.cut,g.pole,g.generator_scale,
-        model.focused,model.table_error,model.quartic);
-    let(far,near,drives)=g.fold_estimates();println!("folds: far Σm² {far:.2e}, couplings Σm² {near:.2e}, drives {drives:.2e}; explicit {:?}; paths {}",g.clusters.iter().map(|c|c.excited.len()).collect::<Vec<_>>(),g.clusters.iter().map(|c|c.paths.len()).sum::<usize>());
+        model.focused,model.table_error,model.dressing);
+    let(far,near,drives)=g.fold_estimates();println!("folds: far Σm² {far:.2e}, couplings Σm² {near:.2e}, drives {drives:.2e}; explicit {:?}",g.clusters.iter().map(|c|c.excited.len()).collect::<Vec<_>>());
     // The eliminated master equation at r, from the initial ground populations (each in its cluster).
-    let e=g.eliminate(&model.hamiltonian_at_point(r)).unwrap();
-    let static_generator=g.clusters.iter().all(|c|c.groups.iter().all(|x|x.entries.iter().all(|e|e.2==0.))&&c.paths.iter().all(|p|p.residual==0.)
+    let e=g.eliminate(&model.intensities_at_point(r)).unwrap();
+    let static_generator=g.clusters.iter().all(|c|c.groups.iter().all(|x|x.entries.iter().all(|e|e.2==0.))
         &&c.classes.iter().all(|k|k.photons.iter().all(|p|p.1==0.)));
     let fourth=arg(10,"").starts_with("fourth");let readout2=arg(10,"")=="fourth2";
     // Each cluster's generator and jumps (the fourth order's for a cluster of ground states with

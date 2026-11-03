@@ -212,10 +212,10 @@ impl Twin{
     }
 }
 
-/// Whether the generator is static: no residual beat in the kept couplings, the paths, the photons or
+/// Whether the generator is static: no residual beat in the kept couplings, the photons or
 /// the readout's coherent sums (the frames make the strongest couplings static, ground.rs).
 pub fn static_generator(model:&Model)->bool{
-    model.ground.clusters.iter().all(|c|c.groups.iter().all(|x|x.entries.iter().all(|e|e.2==0.))&&c.paths.iter().all(|p|p.residual==0.)
+    model.ground.clusters.iter().all(|c|c.groups.iter().all(|x|x.entries.iter().all(|e|e.2==0.))
         &&c.classes.iter().all(|k|k.photons.iter().all(|p|p.1==0.))&&c.coherent.iter().all(|g|g.iter().all(|x|x.1==0.)))
 }
 

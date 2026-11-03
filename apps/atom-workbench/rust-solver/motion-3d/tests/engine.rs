@@ -6,7 +6,7 @@
 //! momenta, and a short solve whose t = 0 is the request's initial state.
 use atom_motion_3d::control::{Harmonic,Twin};
 use atom_motion_3d::engine::{dipole_direction,Engine,Settings};
-use atom_motion_3d::ground::{Ground,Path};
+use atom_motion_3d::ground::Ground;
 use atom_motion_3d::ledger::BUDGET;
 use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
@@ -54,19 +54,18 @@ fn samples(model:&Model,seed:u64)->Vec<(usize,[f64;3],[f64;3],f64,[Complex;MOST_
 fn expectation(m:&[Complex],psi:&[Complex],n:usize)->Complex{let mut s=Complex::ZERO;for a in 0..n{for b in 0..n{s+=psi[a].conj()*m[a*n+b]*psi[b];}}s}
 
 /// The model's tables against the front end's dense generator at random points and times (the
-/// kinetic shift off, the van Vleck paths the tables hold), for the clusters of ground states and
-/// those with explicit excited states alike: H_eff and every class's photons, to the tables'
-/// interpolation; and the photons carry the whole decay but the paths' (their second order).
+/// kinetic shift off), for the clusters of ground states and those with explicit excited states
+/// alike: H_eff and every class's photons, to the tables' interpolation; and the photons carry the
+/// whole decay (the dressed responses', ground.rs # The near light's dressing).
 #[test]
 fn the_tables_give_the_front_end_s_generator_and_the_photons_carry_the_decay(){
     // Every drive folded, and the drives kept until each ground state's folded rest is within the budget.
     for allowance in [f64::INFINITY,BUDGET]{
     let mut model=Model::with(&request(&|_|true),allowance).unwrap();model.doppler=false;let g=&model.ground;
-    let tabulated=|p:&Path|model.carriers[p.via.carrier].beams.len()==1;
     assert_eq!((0..model.clusters()).any(|k|model.mixed(k)),allowance<f64::INFINITY,"explicit excited states at the allowance {allowance}");
     for(k,r,_,t,psi)in samples(&model,1){
         let n=model.dimension(k);let p=model.point(r,[0.;3]);let local=model.generator(k,&p,t);
-        let e=g.eliminate(&model.hamiltonian_at_point(r)).unwrap();let dense=g.local_with(&e,k,r,t,&tabulated).unwrap();
+        let e=g.eliminate(&model.intensities_at_point(r)).unwrap();let dense=g.local_at(&e,k,r,t).unwrap();
         let scale=dense.effective.largest();
         for a in 0..n{for b in 0..n{let x=local.hamiltonian[a*n+b]+if a==b{Complex::new(local.scalar,0.)}else{Complex::ZERO};
             assert!((x-dense.effective[(a,b)]).abs()<=1e-3*scale,"cluster {k} at {r:?}, ({a}, {b}): {x:?} against {:?}",dense.effective[(a,b)]);}}
@@ -75,8 +74,7 @@ fn the_tables_give_the_front_end_s_generator_and_the_photons_carry_the_decay(){
         let exact:f64=dense.jumps.iter().map(|j|j.iter().map(|m|{let v:Vec<Complex>=(0..m.rows).map(|i|(0..n).fold(Complex::ZERO,|s,b|s+m[(i,b)]*psi[b])).collect();v.iter().map(|z|z.norm_sqr()).sum::<f64>()}).sum::<f64>()).sum();
         assert!((fast-exact).abs()<=1e-3*exact.max(1e-12),"cluster {k}: photons {fast:e} against {exact:e}");
         let decay=-2.*expectation(&local.hamiltonian[..n*n],&psi,n).im;
-        let shift=-2.*expectation(&dense.shift.entries,&psi,n).im;
-        assert!((decay-shift-fast).abs()<=1e-3*fast.max(1e-12),"cluster {k} at {r:?}: decay {decay:e} less the paths' {shift:e} against {fast:e}");
+        assert!((decay-fast).abs()<=1e-3*fast.max(1e-12),"cluster {k} at {r:?}: decay {decay:e} against {fast:e}");
     }
     }
 }
@@ -91,7 +89,7 @@ fn the_fourth_order_tables_give_the_dense_fourth_order_fold(){
     let herm=|m:&dyn Fn(usize,usize)->Complex,a:usize,b:usize|(m(a,b)+m(b,a).conj())*0.5;
     for(k,r,_,t,psi)in samples(&model,5){
         let n=model.dimension(k);let p=model.point(r,[0.;3]);let local=model.local(k,&p,t);
-        let e=g.eliminate(&model.hamiltonian_at_point(r)).unwrap();let dense=g.fourth(&e,k,r,t).unwrap();
+        let e=g.eliminate(&model.intensities_at_point(r)).unwrap();let dense=g.fourth(&e,k,r,t).unwrap();
         let scale=dense.effective.largest();
         // The local generator and the beats' components (`Model::generator`, a beating cluster's path).
         let generator=model.generator(k,&p,t);
@@ -318,7 +316,7 @@ fn the_held_twin_s_master_equation_is_the_front_end_s(){
     let r=request(&|_|true);let model=Model::new(&r).unwrap();let g=&model.ground;
     let twin=Twin::new(&model,0.9).expect("a static generator");let point=twin.held.point.r;
     let(interval,outputs)=(1.,21);let means=twin.means(&model,&r.initial_density,interval,outputs);
-    let e=g.eliminate(&model.hamiltonian_at_point(point)).unwrap();
+    let e=g.eliminate(&model.intensities_at_point(point)).unwrap();
     let locals:Vec<_>=(0..g.clusters.len()).map(|k|g.local_at(&e,k,point,0.).unwrap()).collect();
     let mut rho:Vec<atom_motion_3d::linear::Dense>=g.clusters.iter().map(|c|{let n=c.states.len();atom_motion_3d::linear::Dense::from_fn(n,n,|i,j|if i==j{let s=g.ground_states[c.states[i]];r.initial_density[s*STATES+s]}else{Complex::ZERO})}).collect();
     let derivative=|rho:&[atom_motion_3d::linear::Dense]|->Vec<atom_motion_3d::linear::Dense>{

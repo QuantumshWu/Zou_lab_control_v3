@@ -28,7 +28,7 @@ fn eigen(m:&Dense)->(Vec<f64>,Dense){
 
 fn main(){
     let name=std::env::args().nth(1).unwrap();let request=scene::scene(&name);let model=Model::new(&request).unwrap();let g=&model.ground;
-    let e=g.eliminate(&g.hamiltonian_with(&vec![1.;g.beams.len()])).unwrap();let ne=g.excited_states.len();
+    let e=g.eliminate(&g.focus_intensities()).unwrap();let ne=g.excited_states.len();
     let(_,vectors)=eigen(&e.excited);
     for(k,cl)in g.clusters.iter().enumerate(){
         let flags:Vec<bool>=(0..ne).map(|f|cl.excited.contains(&f)).collect();
