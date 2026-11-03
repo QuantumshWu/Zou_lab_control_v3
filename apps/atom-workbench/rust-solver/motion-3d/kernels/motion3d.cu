@@ -47,6 +47,20 @@ typedef unsigned long long u64;
 #define TAU 6.283185307179586
 #define PURPOSE_JUMP 3u                 // rng.rs `Purpose::Jump`
 
+// Profiling (examples/profile.rs compiles the kernels with -DPROFILE): the cycles each warp spends in
+// the parts of its work, and the advances and jumps it makes, per trajectory into Run::profile.
+// Without PROFILE the spans are nothing.
+enum Span{SPAN_POINT,SPAN_GENERATOR,SPAN_EXPONENTIAL,SPAN_EVOLVE,SPAN_JUMP,SPAN_LOSS,SPAN_STEP,SPAN_READOUT,SPAN_WINDOWS,SPAN_TOTAL,COUNT_ADVANCES,COUNT_JUMPS,SPANS};
+#ifdef PROFILE
+#define SPAN_BEGIN(name) const long long name=clock64()
+#define SPAN_END(span,name) do{if(lane==0)W.profile[span]+=clock64()-name;}while(0)
+#define COUNT(span) do{if(lane==0)W.profile[span]++;}while(0)
+#else
+#define SPAN_BEGIN(name) do{}while(0)
+#define SPAN_END(span,name) do{}while(0)
+#define COUNT(span) do{}while(0)
+#endif
+
 // ---------------------------------------------------------------------------------------------
 // Complex single precision.
 __device__ __forceinline__ float2 operator+(float2 a,float2 b){return make_float2(a.x+b.x,a.y+b.y);}
@@ -167,6 +181,7 @@ struct State{
 // A launch: a wave's tasks over the output intervals [begin, end).
 struct Run{
     State* states;double* rings;double* samples;double* sums;float2* scratch;const int* tasks;
+    unsigned long long* profile;        // per slot SPANS counters (with PROFILE)
     u64 seed;
     int outputs,steps,reach,begin,end;  // the output times, the steps between two, the steps past the last
     int half[3],ring[3],ring_at[3];     // per lab axis: the window's half-width, its ring's length (steps) and place (doubles)
@@ -196,6 +211,9 @@ struct Warp{
     union{float2 m[3][MAXN*MAXN];float2 gradient_a[MOST_BEAMS][3];JumpSpace jump;};
     double record[POINT_RECORD];
     double close[3][2][5];              // per lab axis, per window closing in the interval: held, ⟨κ⟩, ⟨κ²⟩, ⟨r⟩, ⟨r²⟩
+#ifdef PROFILE
+    long long profile[SPANS];
+#endif
 };
 
 // The trajectory's scalars (uniform over the warp).
@@ -548,11 +566,15 @@ __device__ void flow(const Program& P,Traj& t,double tau){
 // One step's flow, kick and internal evolution of length dt without jumps (engine.rs `advance`):
 // ln‖ψ‖² at the middle (`lh`) and the end (t.logn), the midpoint's point in W.pt and h0 there in L.
 __device__ void advance(const Program& P,Warp& W,Traj& t,double dt,int lane,double& lh,Local& L){
+    COUNT(COUNT_ADVANCES);SPAN_BEGIN(start);
     flow(P,t,0.5*dt);
     point(P,W,t,lane);
+    SPAN_END(SPAN_POINT,start);SPAN_BEGIN(generator);
     const Cluster C=P.clusters[t.cluster];const Entries E(C.n,lane);
     local(P,W,C,E,t.time+0.5*dt,lane,L);
+    SPAN_END(SPAN_GENERATOR,generator);SPAN_BEGIN(propagator);
     exponential(P,W,E,0.5*dt,lane);
+    SPAN_END(SPAN_EXPONENTIAL,propagator);SPAN_BEGIN(evolve);
     const float nh=apply(W,C.n,lane);lh=t.logn+(double)logf(nh);
     // The Ehrenfest force −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ at the middle, less the harmonic part the flow takes.
     float s[3]={0.f,0.f,0.f};
@@ -572,6 +594,7 @@ __device__ void advance(const Program& P,Warp& W,Traj& t,double dt,int lane,doub
     const float n1=apply(W,C.n,lane);t.logn=lh+(double)logf(n1);
     flow(P,t,0.5*dt);
     t.time+=dt;
+    SPAN_END(SPAN_EVOLVE,evolve);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -848,15 +871,18 @@ __device__ bool step(const Program& P,const Run& R,Warp& W,Traj& t,int lane,floa
         const double at=lb<la?fmin(fmax(ta+(t.log_threshold-la)/(lb-la)*(tb-ta),ta),tb):tb;
         t=start;__syncwarp();if(lane<MAXN)W.psi[lane]=W.start[lane];__syncwarp();
         if(at>0.){double unused;advance(P,W,t,at,lane,unused,L);}
-        jump(P,R,W,t,exact,lane,scratch);
+        {COUNT(COUNT_JUMPS);SPAN_BEGIN(jumping);jump(P,R,W,t,exact,lane,scratch);SPAN_END(SPAN_JUMP,jumping);}
         left-=at;
         if(!(left>0.)){point(P,W,t,lane);fresh=true;break;}
     }
     if(!P.loss)return false;
+    SPAN_BEGIN(loss);
     const double kinetic=0.5*P.hm64*(t.p[0]*t.p[0]+t.p[1]*t.p[1]+t.p[2]*t.p[2]);
     const Cluster C=P.clusters[t.cluster];const Entries E(C.n,lane);
     if(fresh){float2 slope[MOST_FOCUSED][SLOTS];gather<false>(P,W,false,P.tables+C.table+C.h0,C.size,E.nn,lane,L.h0,slope);}
-    return kinetic+(double)trap(P,W,C,E,L.h0,t.time,true,lane)>0.&&kinetic+(double)trap(P,W,C,E,L.h0,t.time,false,lane)>0.;
+    const bool lost=kinetic+(double)trap(P,W,C,E,L.h0,t.time,true,lane)>0.&&kinetic+(double)trap(P,W,C,E,L.h0,t.time,false,lane)>0.;
+    SPAN_END(SPAN_LOSS,loss);
+    return lost;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -943,7 +969,10 @@ extern "C" __global__ void __launch_bounds__(WARPS*32,2) motion3d(const Program 
         if(lane<15)prefix=S->prefix[lane];
         if(lane<MAXN)W.psi[lane]=S->psi[lane];
     }
-    __syncwarp();
+#ifdef PROFILE
+    if(lane<SPANS)W.profile[lane]=0;
+#endif
+    __syncwarp();SPAN_BEGIN(launch);
     const int last=(R.outputs-1)*R.steps+R.reach;
     // Per lab axis the first output whose window has not ended before this launch.
     int next[3];
@@ -954,7 +983,9 @@ extern "C" __global__ void __launch_bounds__(WARPS*32,2) motion3d(const Program 
         // The interval's steps, their windows' sums (while held) and rings.
         if(active)for(int k=lo+1;k<=hi;k++){
             if(t.death<0){
+                SPAN_BEGIN(stepping);
                 if(k>0&&step(P,R,W,t,lane,scratch))t.death=k;
+                SPAN_END(SPAN_STEP,stepping);
                 if(t.death<0&&lane<15){
                     const int a=lane/5,v=lane-5*a;float r[3],kappa[3];lab32(P,t.q,r);lab32(P,t.p,kappa);
                     const double x=(double)(v<3?kappa[a]:r[a]);prefix+=v==0?1.:v==1||v==3?x:x*x;
@@ -965,6 +996,7 @@ extern "C" __global__ void __launch_bounds__(WARPS*32,2) motion3d(const Program 
         // The record of output i.
         if(lane<POINT_RECORD)W.record[lane]=0.;
         __syncwarp();
+        SPAN_BEGIN(readout);
         if(active&&i<R.outputs&&t.death<0){
             record(P,W,t,lane);
             for(int k=0;k<R.nlisted;k++)if(R.listed[k]==i){
@@ -972,6 +1004,7 @@ extern "C" __global__ void __launch_bounds__(WARPS*32,2) motion3d(const Program 
                 if(lane<3){out[lane]=r[lane];out[3+lane]=kappa[lane];}if(lane==0)out[6]=1.;
             }
         }
+        SPAN_END(SPAN_READOUT,readout);SPAN_BEGIN(windows);
         // The windows ending in the interval: their means while held at their output.
         int outputs[3][2],closes[3];
         #pragma unroll
@@ -1008,7 +1041,12 @@ extern "C" __global__ void __launch_bounds__(WARPS*32,2) motion3d(const Program 
             }
         }
         __syncthreads();
+        SPAN_END(SPAN_WINDOWS,windows);
     }
+#ifdef PROFILE
+    SPAN_END(SPAN_TOTAL,launch);
+    if(active&&lane<SPANS)R.profile[(size_t)slot*SPANS+lane]+=(unsigned long long)W.profile[lane];
+#endif
     if(active){
         if(lane==0){
             #pragma unroll

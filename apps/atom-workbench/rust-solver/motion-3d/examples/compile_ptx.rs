@@ -1,5 +1,6 @@
 //! Compiles kernels/motion3d.cu to kernels/motion3d.ptx with the pinned NVRTC (scripts/ptx.ps1 runs
-//! this with it): `cargo run --example compile_ptx -- <nvrtc64_120_0.dll>`.
+//! this with it): `cargo run --example compile_ptx -- <nvrtc64_120_0.dll>`; with `--profile <file>`
+//! the kernels with their profiling spans (-DPROFILE) into that file instead, for examples/profile.rs.
 use atom_motion_3d::gpu::ptx::{header,NVRTC_OPTIONS,NVRTC_VERSION,SOURCE};
 use std::ffi::{c_char,c_void,CStr,CString};
 
@@ -8,7 +9,9 @@ type Handle=*mut c_void;
 extern "system"{fn LoadLibraryW(name:*const u16)->Handle;fn GetProcAddress(module:Handle,name:*const c_char)->Handle;}
 
 fn main(){
-    let dll=std::env::args().nth(1).expect("usage: compile_ptx <path to nvrtc64_120_0.dll>");
+    let args:Vec<String>=std::env::args().collect();
+    let dll=args.get(1).cloned().expect("usage: compile_ptx <path to nvrtc64_120_0.dll> [--profile <file>]");
+    let profile=(args.get(2).map(String::as_str)==Some("--profile")).then(||args[3].clone());
     let wide:Vec<u16>=dll.encode_utf16().chain([0]).collect();
     let library=unsafe{LoadLibraryW(wide.as_ptr())};assert!(!library.is_null(),"cannot load {dll}");
     macro_rules! entry{($name:literal,$t:ty)=>{unsafe{let p=GetProcAddress(library,concat!($name,"\0").as_ptr() as *const c_char);assert!(!p.is_null(),$name);std::mem::transmute::<Handle,$t>(p)}};}
@@ -22,7 +25,7 @@ fn main(){
     let(mut major,mut minor)=(0,0);unsafe{version(&mut major,&mut minor);}
     assert!(NVRTC_VERSION.starts_with(&format!("{major}.{minor}.")),"NVRTC {major}.{minor} is not the pinned {NVRTC_VERSION}");
     let source=CString::new(SOURCE.replace("\r\n","\n")).unwrap();let name=CString::new("motion3d.cu").unwrap();
-    let options:Vec<CString>=NVRTC_OPTIONS.iter().map(|o|CString::new(*o).unwrap()).collect();
+    let options:Vec<CString>=NVRTC_OPTIONS.iter().copied().chain(profile.as_ref().map(|_|"-DPROFILE")).map(|o|CString::new(o).unwrap()).collect();
     let pointers:Vec<*const c_char>=options.iter().map(|o|o.as_ptr()).collect();
     let mut program=std::ptr::null_mut();
     unsafe{
@@ -34,8 +37,9 @@ fn main(){
         assert_eq!(result,0,"NVRTC compilation failed");
         let mut size=0;ptx_size(program,&mut size);let mut ptx=vec![0 as c_char;size];get_ptx(program,ptx.as_mut_ptr());
         let ptx=CStr::from_ptr(ptx.as_ptr()).to_string_lossy().into_owned();
-        let out=concat!(env!("CARGO_MANIFEST_DIR"),"/kernels/motion3d.ptx");
-        std::fs::write(out,format!("{}{}",header(SOURCE),ptx.replace("\r\n","\n"))).unwrap();
+        let out=profile.clone().unwrap_or(concat!(env!("CARGO_MANIFEST_DIR"),"/kernels/motion3d.ptx").into());
+        let header=if profile.is_some(){"// atom-motion-3d PTX with the profiling spans (-DPROFILE): examples/profile.rs, not the EXE\n".to_string()}else{header(SOURCE)};
+        std::fs::write(&out,format!("{header}{}",ptx.replace("\r\n","\n"))).unwrap();
         println!("wrote {out}: {} bytes of PTX",ptx.len());
     }
 }

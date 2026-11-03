@@ -46,6 +46,10 @@ pub const STARTING:&str="GPU 正在首次准备（驱动编译内核，新版本
 /// A block's warps (the kernel's WARPS: lib.rs `TASK`) and an output's sums (its RECORD).
 const WARPS:usize=TASK as usize;
 const RECORD:usize=47;
+/// The profiled kernel's counters per trajectory (its SPANS): the cycles of the point, the generator,
+/// the exponential, the evolution with the kick, the jumps, the loss, the steps, the readouts, the
+/// windows with the block's sums and the launches; the advances and the jumps.
+pub const SPANS:[&str;12]=["point","generator","exponential","evolve","jump","loss","step","readout","windows","total","advances","jumps"];
 
 /// The times the process's GPU took to start (ms): the driver, the context, the module (the driver's
 /// JIT compile of the PTX at its first load on a machine, its cache after).
@@ -61,7 +65,9 @@ pub struct Gpu{
     stream:Stream,
     blocks_per_multiprocessor:i32,
     merge:Function,
-    _module:Module,
+    /// The kernel was compiled with PROFILE: its counters summed over every trajectory run.
+    profiled:Option<Mutex<Vec<u64>>>,
+    module:Module,
     context:Context,
 }
 
@@ -92,9 +98,18 @@ pub fn gpu_within(wait:Duration)->Result<&'static Mutex<Gpu>,String>{
 }
 /// The process's GPU, waiting for it to start.
 pub fn gpu()->Result<&'static Mutex<Gpu>,String>{gpu_within(Duration::MAX)}
+/// Makes the process's GPU from PTX compiled with PROFILE (examples/profile.rs), before anything
+/// starts it: its solves then sum the kernel's counters (`Gpu::spans`).
+pub fn install_profiled(ptx:&str)->Result<(),String>{
+    let mut start=START.lock().unwrap_or_else(|e|e.into_inner());
+    if !matches!(*start,Start::Idle){return Err("the GPU has started already".into());}
+    *start=Start::Done(Gpu::with(ptx,true).map(|g|&*Box::leak(Box::new(Mutex::new(g)))));
+    match &*start{Start::Done(Err(e))=>Err(e.clone()),_=>Ok(())}
+}
 
 impl Gpu{
-    fn new()->Result<Gpu,String>{
+    fn new()->Result<Gpu,String>{Gpu::with(&ptx::ptx(),false)}
+    fn with(ptx:&str,profiled:bool)->Result<Gpu,String>{
         let clock=Instant::now();
         let version=driver::driver_version()?;
         if version<ptx::DRIVER_VERSION{return Err(format!("NVIDIA 驱动太旧（CUDA {}.{}；需要 CUDA 12.0，即 R525 / 527.41 或更新）",version/1000,version%1000/10));}
@@ -104,20 +119,23 @@ impl Gpu{
         let driver_ms=clock.elapsed().as_secs_f64()*1e3;
         let clock=Instant::now();let context=Context::new(device)?;let context_ms=clock.elapsed().as_secs_f64()*1e3;
         let clock=Instant::now();
-        let module=context.load(&ptx::ptx()).map_err(|e|format!("驱动无法编译 GPU 内核（{e}）"))?;
+        let module=context.load(ptx).map_err(|e|format!("驱动无法编译 GPU 内核（{e}）"))?;
         let motion=module.function("motion3d")?;motion.prefer_shared()?;let merge=module.function("merge")?;
         let module_ms=clock.elapsed().as_secs_f64()*1e3;
         let blocks_per_multiprocessor=motion.occupancy((WARPS*32) as i32)?.max(1);
-        Ok(Gpu{info:device.clone(),startup:Startup{driver_ms,context_ms,module_ms},driver_version:version,motion,stream:Stream::new()?,blocks_per_multiprocessor,merge,_module:module,context})
+        Ok(Gpu{info:device.clone(),startup:Startup{driver_ms,context_ms,module_ms},driver_version:version,motion,stream:Stream::new()?,blocks_per_multiprocessor,merge,
+            profiled:profiled.then(||Mutex::new(vec![0;SPANS.len()])),module,context})
     }
     /// A kernel of the module by name (the checks' kernels).
-    pub fn function(&self,name:&str)->Result<Function,String>{self.context.make_current()?;self._module.function(name)}
+    pub fn function(&self,name:&str)->Result<Function,String>{self.context.make_current()?;self.module.function(name)}
     pub fn stream(&self)->&Stream{&self.stream}
     /// The kernel's registers and spilled bytes per thread, and its blocks per multiprocessor.
     pub fn resources(&self)->Result<(i32,i32,i32),String>{let(r,l)=self.motion.resources()?;Ok((r,l,self.blocks_per_multiprocessor))}
     /// The widest batch of `groups` groups of whole tasks the GPU runs at once: as many tasks per
     /// group as its resident blocks hold (one at least).
     pub fn width(&self,groups:u64)->u64{groups*TASK*((self.info.multiprocessors*self.blocks_per_multiprocessor) as u64/groups).max(1)}
+    /// The profiled kernel's counters summed over every trajectory it ran (`SPANS`); None unprofiled.
+    pub fn spans(&self)->Option<Vec<u64>>{self.profiled.as_ref().map(|s|s.lock().unwrap_or_else(|e|e.into_inner()).clone())}
     /// A model and its step's settings on the device.
     pub fn program(&self,model:&Model,settings:&Settings)->Result<Program,String>{self.context.make_current()?;Program::new(&self.stream,model,settings)}
 
@@ -187,8 +205,10 @@ impl Gpu{
         let state_buffer=Buffer::with(&self.stream,&states)?;let task_buffer=Buffer::with(&self.stream,&tasks)?;
         let rings=Buffer::new(8*w.ring_stride*WARPS*n)?;let samples=Buffer::new(56*w.listed.len().max(1)*WARPS*n)?;
         let sums=Buffer::new(8*w.outputs*RECORD*n)?;let scratch=Buffer::new(8*program.scratch()*WARPS*n)?;
-        self.stream.zero(&rings)?;self.stream.zero(&samples)?;self.stream.zero(&sums)?;
+        let profile=Buffer::new(if self.profiled.is_some(){8*SPANS.len()*WARPS*n}else{0})?;
+        self.stream.zero(&rings)?;self.stream.zero(&samples)?;self.stream.zero(&sums)?;self.stream.zero(&profile)?;
         let mut run=program::Run{states:state_buffer.pointer,rings:rings.pointer,samples:samples.pointer,sums:sums.pointer,scratch:scratch.pointer,tasks:task_buffer.pointer,
+            profile:if self.profiled.is_some(){profile.pointer}else{0},
             seed,outputs:w.outputs as i32,steps:w.steps as i32,reach:w.reach as i32,begin:0,end:0,half:w.half.map(|h|h as i32),ring:w.ring.map(|l|l as i32),
             ring_at:w.ring_at.map(|x|x as i32),ring_stride:w.ring_stride as i32,scratch_stride:program.scratch() as i32,nlisted:w.listed.len() as i32,pad:0,listed:[0;MOST_LISTED]};
         for(k,&l)in w.listed.iter().enumerate(){run.listed[k]=l as i32;}
@@ -208,6 +228,10 @@ impl Gpu{
         }
         let mut kept=vec![0f64;7*w.listed.len()*WARPS*n];self.stream.download(&samples,&mut kept)?;
         let mut finished=vec![program::State::default();WARPS*n];self.stream.download(&state_buffer,&mut finished)?;
+        if let Some(spans)=&self.profiled{
+            let mut counters=vec![0u64;SPANS.len()*WARPS*n];self.stream.download(&profile,&mut counters)?;
+            let mut spans=spans.lock().unwrap_or_else(|e|e.into_inner());for(i,c)in counters.iter().enumerate(){spans[i%SPANS.len()]+=c;}
+        }
         Ok((merged,kept,finished))
     }
 }
