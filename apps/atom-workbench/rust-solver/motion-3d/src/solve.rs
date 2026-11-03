@@ -72,12 +72,25 @@
 //! population budget, η² ε dt/waiting, instead of to double precision.
 //!
 //! # Batches
-//! A batch is cut into two groups per thread (lib.rs `Stratum`): each group's initial states are a
-//! Latin hypercube, so its mean of the initial energies, and of what they leave at early times,
-//! varies far less than independent draws'; the groups are independent, so the jackknife over them
-//! measures the error. T, ⟨v⟩, n̄ and ⟨r²⟩ are each atom's means over one trap period of the axis
-//! around each output (lib.rs `simulate`): its kinetic energy sloshes into potential energy and back
-//! twice a period, so over a period the spread of T between atoms is their energies' alone.
+//! Every batch is cut into groups of `TASK` trajectories (lib.rs `Stratum`), a task on the CPU and a
+//! block on the GPU: each group's initial states are a Latin hypercube, so its mean of the initial
+//! energies, and of what they leave at early times, varies far less than independent draws'; the
+//! groups are independent, so the jackknife over them measures the error. One size for every group
+//! gives every trajectory the same share of the variance, so the need that a batch's errors predict
+//! holds for the trajectories still to come; groups of 8 keep most of the hypercube's gain (the
+//! trajectories T needs at early times fall by 10-40% from groups of 1 to groups of 8, little more
+//! beyond) while the jackknife's groups grow with the trajectories. T, ⟨v⟩, n̄ and ⟨r²⟩ are each
+//! atom's means over one trap period of the axis around each output (lib.rs `simulate`): its kinetic
+//! energy sloshes into potential energy and back twice a period, so over a period the spread of T
+//! between atoms is their energies' alone.
+//!
+//! The first batch is two groups per thread. Each later one is the predicted remaining need -- the
+//! trajectories the errors so far say the targets need, less those run --, at least the device's
+//! width and at most as many as have run: the need is the largest of many outputs' estimated errors,
+//! biased up while few groups stand behind it, so it is followed at most to twice the trajectories it
+//! rests on. No margin is added above the prediction: a batch more costs the device's tail and the
+//! statistics, a few trajectories' time, where a margin of the estimate's own noise would cost tens of
+//! percent of the trajectories.
 //!
 //! # Control variates
 //! Each output's κ² and populations are estimated with control variates of exactly known means
@@ -106,9 +119,9 @@
 //! which runs a batch's trajectories as the CPU does -- the same groups, initial states, random
 //! streams and sums. The two devices make a solve's choices alike: the model, the ledger, the pilot
 //! and the time step on the CPU in double precision either way, the statistics and their stopping
-//! rule. A batch is at least as wide as the device runs at once: two groups per thread on the CPU,
-//! and on the GPU the same groups of as many whole tasks as its resident blocks hold, a batch that
-//! costs about what one trajectory does -- so there the first batch is usually the last. A GPU that cannot run (none, an older
+//! rule. A batch is at least as wide as the device runs at once: two trajectories per thread on the
+//! CPU, and on the GPU a wave -- a group in each of its resident blocks --, which costs about what one
+//! trajectory does, so there the batches are whole waves and the first is usually the last. A GPU that cannot run (none, an older
 //! driver, a model beyond its kernel) leaves the solve on the CPU with the reason
 //! (`Solution::device_note`); one that fails during the batches has the solve redone on the CPU.
 use crate::engine::{Engine,Settings,Trajectory};
@@ -118,7 +131,7 @@ use crate::ledger::{Ledger,BUDGET};
 use crate::model::{Model,Trap};
 use crate::control::{Harmonic,Twin};
 use crate::stats::{summarize,Estimate,Means,Scales,KT_PER_UK};
-use crate::{sample_states,simulate,Initial,Outcome,Variates};
+use crate::{sample_states,simulate,Initial,Outcome,Variates,TASK};
 use crate::{Complex,Request,STATES};
 use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
 use rayon::prelude::*;
@@ -138,10 +151,6 @@ pub const CONFIDENCE:f64=2.;
 pub const CLASSICAL:f64=4.;
 /// The most trajectories a solve runs; a solve stopped there returns its result with the reason.
 pub const MOST_TRAJECTORIES:u64=1<<14;
-/// A batch's group: a batch is cut into two groups per thread (jackknife groups and Latin
-/// hypercubes of initial states, lib.rs `Stratum`), so a batch's groups are as large as its size
-/// allows while the jackknife keeps at least that many.
-fn group(count:u64,threads:u64)->u64{(count/(2*threads)).max(1)}
 
 pub const NOT_CONFINED:&str="光镊不约束原子：3D 运动计算光镊中的单个原子，需要在焦点处形成势阱的光镊";
 
@@ -395,18 +404,18 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let batch=|first:u64,count:u64,twin:Option<&Twin>|->Result<Outcome,Stop>{
         let variates=Variates{harmonic:&harmonic,twin};
         match &gpu{
-            None=>Ok(simulate(&model,&settings,&initial,seed,first,count,group(count,threads),steps,outputs,&listed,Some(&variates))),
-            Some((g,program))=>g.lock().unwrap_or_else(|e|e.into_inner()).simulate(program,&model,&settings,&initial,seed,first,count,group(count,threads),steps,outputs,&listed,Some(&variates))
+            None=>Ok(simulate(&model,&settings,&initial,seed,first,count,TASK,steps,outputs,&listed,Some(&variates))),
+            Some((g,program))=>g.lock().unwrap_or_else(|e|e.into_inner()).simulate(program,&model,&settings,&initial,seed,first,count,TASK,steps,outputs,&listed,Some(&variates))
                 .map_err(Stop::Gpu),
         }
     };
-    // A batch is at least as wide as the device runs at once: on the CPU two groups per thread, on
-    // the GPU as many whole tasks per group as its resident blocks hold -- such a batch costs about
-    // what one trajectory does --, and there a whole number of its widths.
-    let width=match &gpu{Some((g,_))=>g.lock().unwrap_or_else(|e|e.into_inner()).width(2*threads),None=>2*threads};
-    let whole=|count:u64|if gpu.is_some(){count.div_ceil(width)*width}else{count};
+    // A batch is whole groups, at least as wide as the device runs at once: on the CPU two
+    // trajectories per thread, on the GPU a group in each of its resident blocks -- such a batch costs
+    // about what one trajectory does --, and there a whole number of its widths.
+    let width=match &gpu{Some((g,_))=>g.lock().unwrap_or_else(|e|e.into_inner()).width(1),None=>(2*threads).div_ceil(TASK)*TASK};
+    let whole=|count:u64|if gpu.is_some(){count.div_ceil(width)*width}else{count.div_ceil(TASK)*TASK};
     let clock=Instant::now();
-    let count=whole(pilot.max(width));
+    let count=whole((2*threads*TASK).max(width));
     let first=batch(0,count,twin.as_ref())?;
     let wall=clock.elapsed().as_secs_f64();
     // The held twin is kept where its control pays for itself: the trajectories the first batch says
@@ -432,7 +441,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             return Ok(solution);
         }
         checkpoint(&solution,Some(per_trajectory*(needed-done) as f64*1e3));
-        let next=whole((needed-done).clamp(width,(3*done).max(width)));
+        // The predicted remaining need, followed at most to twice the trajectories it rests on.
+        let next=whole((needed-done).clamp(width,done));
         let clock=Instant::now();
         let more=batch(done,next,twin.as_ref())?;
         per_trajectory=clock.elapsed().as_secs_f64()/next as f64;
