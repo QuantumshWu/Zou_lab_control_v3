@@ -44,13 +44,14 @@ typedef unsigned long long u64;
 #define MOST_LISTED 32
 #define WARPS 8                         // trajectories per block: lib.rs `TASK`
 // An output's sums (stats.rs `Sums`; src/gpu/mod.rs `sums_of`): held, profile, doppler, the 32
-// populations; the held twin's 32 populations, Σ_k c_k² and Σ_k c_k p_k; per lab axis the motion's
-// Σκ, Σκ², Σr, Σr²; per lab axis the harmonic control's Σc, Σc², Σc κ².
+// populations; the held twin's 32 populations, Σ_k c_k² and Σ_k c_k p_k; the folded excited population
+// (η²); per lab axis the motion's Σκ, Σκ², Σr, Σr²; per lab axis the harmonic control's Σc, Σc², Σc κ².
 #define TWIN 35                         // where the held twin's sums start
-#define POINT_RECORD 69                 // the part taken at the output time
-#define MOTION 69                       // where the motion windows' means start
-#define HARMONIC 81                     // where the harmonic control's sums start
-#define RECORD 90
+#define FOLDED 69                       // where the folded excited population's sum is
+#define POINT_RECORD 70                 // the part taken at the output time
+#define MOTION 70                       // where the motion windows' means start
+#define HARMONIC 82                     // where the harmonic control's sums start
+#define RECORD 91
 #define CLOSE 8                         // a closing window's record: held, ⟨κ⟩, ⟨κ²⟩, ⟨r⟩, ⟨r²⟩, the harmonic control's c, c², c ⟨κ²⟩
 #define SLOT_RECORD (POINT_RECORD+3*2*CLOSE)   // a trajectory's record of an interval: the point's, per lab axis two closing windows' 
 #define MOST_INTERVALS 64               // the most output intervals of a launch (the records' room)
@@ -154,12 +155,16 @@ struct Beam{
     float inv_w2,inv_rayleigh;          // 1/w² and 1/z_R of a Gaussian beam; 0 for a plane wave
     float recoil;                       // ħk²/2m (rad/us): the kinetic shift at rest
     float inv_pole;                     // 1/σ_c of its carrier (model.rs `doppler_ratio`); 0 when not near
-    float profile;                      // its weight when taken at its peak (model.rs `profile_error`); −1 otherwise
+    int trap;                           // one of the trap's beams (model.rs `trap_beams`): off far from the trap
     int carrier,near;                   // its carrier and its place among the near beams; −1 when not near
     u32 coupled;                        // the ground columns its coupling reaches (bit b)
     float coefficients[MOST_RANK][2];   // c_lk on its carrier's basis
 };
 struct Carrier{int rank,beams,first,pad;double detuning;};   // its beams: beam_list[first, first + beams)
+// A unit of the light's static shifts (ground.rs `Unit`): its beams unit_beams[first, first + count)
+// with their weights γ_l (unit_weights), N, its intensity at the focus s(0) and its weight when taken
+// at the focus (model.rs `profile_error`; −1 otherwise). Its intensity s = |Σ_l a_l γ_l|²/N.
+struct Unit{int first,count;float norm,focus,profile;int pad;};
 // A cluster: its tables' place (node 0 at tables[table], `size` entries per node) and slices, its
 // groups, classes and coherent groups, its carriers' photon tables (carrier_tables[carriers + 3c +
 // (0 J, 1 J2, 2 T)]), its fourth-order tables (fourths[fourth], −1: folded at second order), its
@@ -205,9 +210,11 @@ struct Program{
     // the pair's emitted field k1, 2–3 its absorbed k, 4–6 the absorbed carrier, 7–9 the emitted, 10
     // a pair standing for two, 11 the adjoint at the mirror place, 12– the beat (`residuals`).
     const int* item_first;const int4* items;const double* residuals;
+    const Unit* units;const int* unit_beams;const float2* unit_weights;
     int nbeams,ncarriers,nclusters,focused,nodes,fields,nnear,doppler,loss;
     int weights;                        // where a jump's scratch holds the fourth order's weights
-    int focused_beam[MOST_FOCUSED],stride[MOST_FOCUSED];
+    int nunits;
+    int focused_unit[MOST_FOCUSED],stride[MOST_FOCUSED];   // the focused units (the trap beam's first), the stencil's strides
     int field_carrier[MOST_CARRIERS*MOST_RANK],field_rank[MOST_CARRIERS*MOST_RANK];
     int ground_states[NG],excited_states[NE];
     float hm,light2,allowance,truncation;   // ħ/m (um²/us), twice the light shift's bound, the first order's allowance, the exponentials' truncation
@@ -263,6 +270,7 @@ struct Point{
     float weight[MOST_FOCUSED][4],slope[MOST_FOCUSED][4],far_weight[MOST_FOCUSED][4];
     float2 a[MOST_BEAMS];float shift[MOST_BEAMS];   // every beam's amplitude and kinetic shift w_l
     Fields fields[MOST_CARRIERS];
+    float2 off[MOST_CARRIERS][MOST_RANK];          // E_k with the trap's light off (model.rs `fields_off`)
 };
 // A jump's working space.
 struct JumpSpace{float2 u[3][MAXN],f[MAXN];float weights[MOST_CLASSES],shares[MOST_BEAMS];int beams[MOST_BEAMS];};
@@ -338,8 +346,8 @@ __device__ void cubic(int nodes,float s,int& first,float w[4],float d[4]){
 }
 
 // The point of the trajectory (model.rs `Model::point`): every beam's amplitude and kinetic shift,
-// the focused beams' intensities, their gradients and stencils (and with the trap beam off), the
-// carriers' fields.
+// the focused units' intensities s = |F|²/N (F = Σ_l a_l γ_l), their gradients 2 Re(F* ∇F)/N and
+// stencils (and with the trap's light off), the carriers' fields (and with the trap's light off).
 __device__ void point(const Program& P,Warp& W,const Traj& t,int lane){
     float r[3],kappa[3];lab32(P,t.q,r);lab32(P,t.p,kappa);
     Point& pt=W.pt;
@@ -353,22 +361,28 @@ __device__ void point(const Program& P,Warp& W,const Traj& t,int lane){
     }
     __syncwarp();
     if(lane<P.focused){
-        const int l=P.focused_beam[lane];const float2 a=pt.a[l];const float s=fminf(norm2(a),1.f);pt.s[lane]=s;
+        const Unit U=P.units[P.focused_unit[lane]];float2 F=zero2(),rest=zero2(),G[3]={zero2(),zero2(),zero2()};
+        for(int j=0;j<U.count;j++){
+            const int l=P.unit_beams[U.first+j];const float2 w=P.unit_weights[U.first+j],x=pt.a[l]*w;F+=x;if(!P.beams[l].trap)rest+=x;
+            #pragma unroll
+            for(int i=0;i<3;i++)G[i]+=W.gradient_a[l][i]*w;
+        }
+        const float s=fminf(norm2(F)/U.norm,1.f),off=fminf(norm2(rest)/U.norm,1.f);pt.s[lane]=s;
         #pragma unroll
-        for(int i=0;i<3;i++){const float2 g=W.gradient_a[l][i];pt.grad_s[lane][i]=2.f*(a.x*g.x+a.y*g.y);}
+        for(int i=0;i<3;i++)pt.grad_s[lane][i]=2.f*(F.x*G[i].x+F.y*G[i].y)/U.norm;
         cubic(P.nodes,s,pt.first[lane],pt.weight[lane],pt.slope[lane]);
-        float unused[4];cubic(P.nodes,lane==0?0.f:s,pt.far_first[lane],pt.far_weight[lane],unused);
+        float unused[4];cubic(P.nodes,off,pt.far_first[lane],pt.far_weight[lane],unused);
     }
     if(lane<P.fields){
         const int c=P.field_carrier[lane],k=P.field_rank[lane];const Carrier C=P.carriers[c];
-        float2 e=zero2(),d=zero2(),g[3]={zero2(),zero2(),zero2()};
+        float2 e=zero2(),o=zero2(),d=zero2(),g[3]={zero2(),zero2(),zero2()};
         for(int j=0;j<C.beams;j++){
             const int l=P.beam_list[C.first+j];const float2 x=make_float2(P.beams[l].coefficients[k][0],P.beams[l].coefficients[k][1]);
-            const float2 ax=pt.a[l]*x;e+=ax;d+=pt.shift[l]*ax;
+            const float2 ax=pt.a[l]*x;e+=ax;d+=pt.shift[l]*ax;if(!P.beams[l].trap)o+=ax;
             #pragma unroll
             for(int i=0;i<3;i++)g[i]+=W.gradient_a[l][i]*x;
         }
-        Fields& f=pt.fields[c];f.e[k]=e;f.doppler[k]=d;
+        Fields& f=pt.fields[c];f.e[k]=e;f.doppler[k]=d;pt.off[c][k]=o;
         #pragma unroll
         for(int i=0;i<3;i++)f.grad[k][i]=g[i];
     }
@@ -1254,8 +1268,7 @@ __device__ float trap(const Program& P,const Warp& W,const Cluster& C,const Entr
     #pragma unroll
     for(int j=0;j<SLOTS;j++)difference[j]=h0[j]-far[j];
     if(bound)return quadratic(W,E,difference,lane)+P.light2;
-    // The trap beam (the first focused one), its carrier (−1 when folded) and its amplitude here.
-    const int trap_beam=P.focused_beam[0];const Beam& B=P.beams[trap_beam];const float2 a=pt.a[trap_beam];
+    // The fields with the trap's light off (its beams' parts out of their carriers'): pt.off.
     float2 here[SLOTS];
     // The sparse groups' entries at the lane's places (their adjoints none: the form takes a pair
     // standing for two twice).
@@ -1265,9 +1278,7 @@ __device__ float trap(const Program& P,const Warp& W,const Cluster& C,const Entr
         for(int i=P.item_first[C.positions+e];i<end;i++){
             const int4 it=__ldg(P.items+i);if((it.z>>11)&1)continue;
             const int k1=it.z&3,k=(it.z>>2)&3,ca=(it.z>>4)&7,ce=(it.z>>7)&7;const float both=(it.z>>10)&1?2.f:1.f;
-            const float2 fa=pt.fields[ca].e[k],fe=pt.fields[ce].e[k1];float2 oa=fa,oe=fe;
-            if(B.carrier==ca)oa=oa-a*make_float2(B.coefficients[k][0],B.coefficients[k][1]);
-            if(B.carrier==ce)oe=oe-a*make_float2(B.coefficients[k1][0],B.coefficients[k1][1]);
+            const float2 fa=pt.fields[ca].e[k],fe=pt.fields[ce].e[k1],oa=pt.off[ca][k],oe=pt.off[ce][k1];
             const float2 phase=residual(P.residuals[C.beats+(it.z>>12)],t),c=zero2()-both*(conj(fe)*fa)*phase,c0=both*(conj(oe)*oa)*phase;
             const float2* x=tables+it.x;
             difference[j]+=c*entry(P,W,x,C.size,-1)+c0*far_entry(P,W,x,C.size);
@@ -1279,9 +1290,7 @@ __device__ float trap(const Program& P,const Warp& W,const Cluster& C,const Entr
         const float2 phase=residual(G.residual,t);
         for(int pi=0;pi<G.npairs;pi++){
             const int2 pair=P.pairs[G.pairs+pi];const int k1=pair.x,k=pair.y;const float both=G.hermitian&&k1<k?2.f:1.f;
-            float2 oa=fa.e[k],oe=fe.e[k1];
-            if(B.carrier==G.absorbed)oa=oa-a*make_float2(B.coefficients[k][0],B.coefficients[k][1]);
-            if(B.carrier==G.emitted)oe=oe-a*make_float2(B.coefficients[k1][0],B.coefficients[k1][1]);
+            const float2 oa=pt.off[G.absorbed][k],oe=pt.off[G.emitted][k1];
             const float2 c=zero2()-both*(conj(fe.e[k1])*fa.e[k])*phase,c0=both*(conj(oe)*oa)*phase;
             gather<false>(P,W,false,tables+G.s+pi*E.nn,C.size,E.nn,lane,here,slope);
             gather<false>(P,W,true,tables+G.s+pi*E.nn,C.size,E.nn,lane,far,slope);
@@ -1355,9 +1364,12 @@ __device__ void record(const Program& P,Warp& W,const Traj& t,int lane,double* o
     point(P,W,t,lane);
     const Cluster C=P.clusters[t.cluster];const int n=C.n;
     float profile=0.f,ratio=0.f;
+    if(lane<P.nunits){
+        const Unit U=P.units[lane];
+        if(U.profile>=0.f){float2 F=zero2();for(int j=0;j<U.count;j++)F+=W.pt.a[P.unit_beams[U.first+j]]*P.unit_weights[U.first+j];profile=fabsf(norm2(F)/U.norm-U.focus)*U.profile;}
+    }
     if(lane<P.nbeams){
         const Beam& b=P.beams[lane];
-        if(b.profile>=0.f)profile=fmaxf(1.f-norm2(W.pt.a[lane]),0.f)*b.profile;
         if(b.inv_pole>0.f){const float x=W.pt.shift[lane]*b.inv_pole;ratio=x*x;}
     }
     profile=warp_max(profile);ratio=warp_max(ratio);
@@ -1384,8 +1396,10 @@ __device__ void record(const Program& P,Warp& W,const Traj& t,int lane,double* o
         }
         excited+=dnorm2(e)/norm;
     }
+    const double folded=warp_sum(lane<NE?excited:0.);
     __syncwarp();
     if(lane<3)out[lane]=lane==0?1.:lane==1?(double)profile:(double)ratio;
+    if(lane==0)out[FOLDED]=folded;
     if(lane<NE)out[3+P.excited_states[lane]]=excited;
     if(lane<NG){
         const int x=lane<n?lane:-1;double v=0.;

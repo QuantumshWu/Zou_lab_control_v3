@@ -17,11 +17,14 @@ pub const MOST_LISTED:usize=32;
 
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Beam{
-    direction:[f32;3],k:f32,wave:[f32;3],inv_w2:f32,inv_rayleigh:f32,recoil:f32,inv_pole:f32,profile:f32,
+    direction:[f32;3],k:f32,wave:[f32;3],inv_w2:f32,inv_rayleigh:f32,recoil:f32,inv_pole:f32,trap:i32,
     carrier:i32,near:i32,coupled:u32,coefficients:[[f32;2];MOST_RANK],
 }
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Carrier{rank:i32,beams:i32,first:i32,pad:i32,detuning:f64}
+/// The kernel's `Unit` (ground.rs `Unit`): its beams and weights' place, N, s(0) and its profile weight.
+#[repr(C)]#[derive(Clone,Copy,Default,Debug)]
+pub struct Unit{first:i32,count:i32,norm:f32,focus:f32,profile:f32,pad:i32}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Cluster{n:i32,size:i32,table:i32,h0:i32,groups:i32,ngroups:i32,classes:i32,nclasses:i32,coherent:i32,ncoherent:i32,carriers:i32,fourth:i32,frames:i32,
     positions:i32,beats:i32,nbeats:i32,states:[i32;MAXN]}
@@ -49,8 +52,9 @@ pub struct Channel{carrier:i32,col:i32,residual:f64}
 pub struct Params{
     beams:u64,beam_list:u64,carriers:u64,clusters:u64,groups:u64,pairs:u64,classes:u64,photons:u64,coherent:u64,channels:u64,carrier_tables:u64,tables:u64,
     excited:u64,diagonal:u64,couplings:u64,emission:u64,class_rows:u64,fourths:u64,frames:u64,item_first:u64,items:u64,residuals:u64,
-    nbeams:i32,ncarriers:i32,nclusters:i32,focused:i32,nodes:i32,fields:i32,pub(crate) nnear:i32,doppler:i32,loss:i32,weights:i32,
-    focused_beam:[i32;MOST_FOCUSED],stride:[i32;MOST_FOCUSED],
+    units:u64,unit_beams:u64,unit_weights:u64,
+    nbeams:i32,ncarriers:i32,nclusters:i32,focused:i32,nodes:i32,fields:i32,pub(crate) nnear:i32,doppler:i32,loss:i32,weights:i32,nunits:i32,
+    focused_unit:[i32;MOST_FOCUSED],stride:[i32;MOST_FOCUSED],
     field_carrier:[i32;MOST_CARRIERS*MOST_RANK],field_rank:[i32;MOST_CARRIERS*MOST_RANK],
     ground_states:[i32;GROUND],excited_states:[i32;NE],
     hm:f32,light2:f32,allowance:f32,truncation:f32,
@@ -112,9 +116,6 @@ impl Program{
         // The fourth order's tables are fourth2's slabs now (model.rs `FourthLayout`), which the kernel does
         // not read yet: a fourth-order model stays on the CPU until it does.
         if model.fourth{return Err(beyond("四阶折叠".into()));}
-        // The kernel's intensity axes and its trap's far level are a beam's each (ground.rs `Unit`).
-        if let Some(u)=g.units.iter().find(|u|u.beams.len()>1){return Err(beyond(format!("同频同偏振的 {} 束光相互干涉（驻波）",u.beams.len())));}
-        if model.trap_beams.len()>1{return Err(beyond("光镊的反射光".into()));}
         if model.geometry.len()>MOST_BEAMS||model.carriers.len()>MOST_CARRIERS||model.focused.len()>MOST_FOCUSED{return Err(beyond("光束或强度维度太多".into()));}
         if let Some(c)=g.clusters.iter().find(|c|c.states.len()>MAXN||c.classes.len()>MOST_CLASSES){return Err(beyond(format!("子空间 {} 个态、{} 类光子",c.states.len(),c.classes.len())));}
         let hm=model.hbar_over_mass;
@@ -125,8 +126,7 @@ impl Program{
         let beams:Vec<Beam>=model.geometry.iter().enumerate().map(|(l,geometry)|{
             let k=geometry.wave_number;let(inv_w2,inv_rayleigh)=match geometry.waist{Some(w)=>(1./(w*w),2./(k*w*w)),None=>(0.,0.)};
             let mut beam=Beam{direction:geometry.direction.map(|x|x as f32),k:k as f32,wave:geometry.wave_vector().map(|x|x as f32),inv_w2:inv_w2 as f32,
-                inv_rayleigh:inv_rayleigh as f32,recoil:(0.5*hm*k*k) as f32,inv_pole:0.,profile:-1.,carrier:-1,near:-1,coupled:0,coefficients:[[0.;2];MOST_RANK]};
-            if let Some(&(_,_,weight))=model.profiles.iter().find(|p|p.0==l){beam.profile=weight as f32;}
+                inv_rayleigh:inv_rayleigh as f32,recoil:(0.5*hm*k*k) as f32,inv_pole:0.,trap:model.trap_beams.contains(&l) as i32,carrier:-1,near:-1,coupled:0,coefficients:[[0.;2];MOST_RANK]};
             if let Some((c,j))=owner[l]{
                 let pole=g.poles[c];beam.inv_pole=if pole>0.&&pole.is_finite(){(1./pole) as f32}else{0.};
                 beam.carrier=c as i32;beam.near=near;near+=1;
@@ -196,13 +196,19 @@ impl Program{
             for c in &layout.carriers{carrier_tables.extend([c.j as i32,c.j2 as i32,c.t as i32]);}
             clusters.push(cluster);
         }
-        // The exact response: H(s) = base + Σ_f s_f G_f over the focused beams (ground.rs
-        // `hamiltonian_with`: base = H0 + the other beams' folds − the focused beams' outside shifts,
-        // G_f = O_f + F_f); K = H_ee − (i/2)D. Off the diagonal in single precision, the diagonals in double.
+        // The exact response: H(s) = base + Σ_f s_f G_f over the focused units (ground.rs
+        // `hamiltonian_with`: base = H0 + the other units' folds at s(0) − the focused units' outside shifts
+        // at s(0), G_f = O_f + F_f); K = H_ee − (i/2)D. Off the diagonal in single precision, the diagonals in double.
         let mut base=g.hamiltonian.clone();
-        for l in 0..model.geometry.len(){if model.focused.contains(&l){base.add_scaled(Complex::new(-1.,0.),&g.outside[l]);}else{base.add_scaled(Complex::ONE,&g.folds[l]);}}
+        for(u,unit)in g.units.iter().enumerate(){let s0=Complex::new(unit.focus,0.);if model.focused.contains(&u){base.add_scaled(-s0,&g.outside[u]);}else{base.add_scaled(s0,&g.folds[u]);}}
         let mut blocks:Vec<Dense>=vec![base];
         for &f in &model.focused{let mut x=g.outside[f].clone();x.add_scaled(Complex::ONE,&g.folds[f]);blocks.push(x);}
+        // The units: their beams and weights, and the profile weight of those taken at the focus.
+        let(mut unit_beams,mut unit_weights)=(vec![],vec![]);
+        let units:Vec<Unit>=g.units.iter().enumerate().map(|(u,unit)|{let first=unit_beams.len() as i32;
+            unit_beams.extend(unit.beams.iter().map(|&l|l as i32));unit_weights.extend(unit.weights.iter().map(|&w|c32(w)));
+            let profile=model.profiles.iter().find(|p|p.0==u).map_or(-1.,|p|p.2 as f32);
+            Unit{first,count:unit.beams.len() as i32,norm:unit.norm as f32,focus:unit.focus as f32,profile,pad:0}}).collect();
         let(mut excited,mut diagonal)=(vec![],vec![]);
         for(i,block)in blocks.iter().enumerate(){
             for(x,&a)in g.excited_states.iter().enumerate(){for(y,&b)in g.excited_states.iter().enumerate(){
@@ -226,9 +232,10 @@ impl Program{
             excited:put!(excited),diagonal:put!(diagonal),couplings:put!(couplings),emission:put!(emission),class_rows:put!(class_rows),
             fourths:if fourths.is_empty(){0}else{put!(fourths)},frames:put!(frames),
             item_first:put!(item_first),items:put!(if items.is_empty(){vec![[0;4]]}else{items}),residuals:put!(if residuals.is_empty(){vec![0.]}else{residuals}),
+            units:put!(units),unit_beams:put!(unit_beams),unit_weights:put!(unit_weights),
             nbeams:model.geometry.len() as i32,ncarriers:model.carriers.len() as i32,nclusters:model.layouts.len() as i32,focused:model.focused.len() as i32,
-            nodes:nodes as i32,fields:fields as i32,nnear:near,doppler:model.doppler as i32,loss:settings.loss as i32,weights:0,
-            focused_beam:std::array::from_fn(|f|model.focused.get(f).map_or(0,|&l|l as i32)),stride:std::array::from_fn(|f|nodes.pow(f as u32) as i32),
+            nodes:nodes as i32,fields:fields as i32,nnear:near,doppler:model.doppler as i32,loss:settings.loss as i32,weights:0,nunits:g.units.len() as i32,
+            focused_unit:std::array::from_fn(|f|model.focused.get(f).map_or(0,|&u|u as i32)),stride:std::array::from_fn(|f|nodes.pow(f as u32) as i32),
             field_carrier,field_rank,ground_states:std::array::from_fn(|b|g.ground_states[b] as i32),excited_states:std::array::from_fn(|i|g.excited_states[i] as i32),
             hm:hm as f32,light2:(2.*g.light) as f32,allowance:settings.doppler as f32,truncation:settings.truncation as f32,
             axes32:settings.axes.map(|a|a.map(|x|x as f32)),stiffness32:settings.frequencies.map(|w|(w*w/hm) as f32),
