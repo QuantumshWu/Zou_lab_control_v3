@@ -3,7 +3,8 @@
 //! exact mean (z per output, jackknife over the groups); and the estimates with the controls against
 //! those without on the same trajectories -- their difference against its standard error, and the
 //! standard errors' ratio.
-//! `cargo run --profile release -p atom-motion-3d --example controls -- <scene> <duration_us> <samples> <trajectories> <dt_us>`
+//! `cargo run --profile release -p atom-motion-3d --example controls -- <scene> <duration_us> <samples> <trajectories> <dt_us> [fourth]`
+//! (`fourth`: every cluster of ground states folded at fourth order, the twin with its post-jump map).
 #[path="scene/mod.rs"] mod scene;
 use atom_motion_3d::control::{Harmonic,Twin};
 use atom_motion_3d::engine::Settings;
@@ -16,7 +17,7 @@ fn main(){
     let args:Vec<String>=std::env::args().collect();
     let name=args[1].clone();let duration:f64=args[2].parse().unwrap();let samples:usize=args[3].parse().unwrap();
     let count:u64=args[4].parse().unwrap();let dt:f64=args[5].parse().unwrap();
-    let request=scene::scene(&name);let model=Model::new(&request).unwrap();let initial=Initial::new(&model,&request).unwrap();
+    let request=scene::scene(&name);let model=Model::with_order(&request,f64::INFINITY,args.get(6).is_some_and(|a|a=="fourth")).unwrap();let initial=Initial::new(&model,&request).unwrap();
     let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();let trap=initial.traps[reference];
     let interval=duration/(samples-1) as f64;let steps=((interval/dt).round() as usize).max(1);let outputs=samples;
     let settings=Settings::new(interval/steps as f64,&trap,f64::EPSILON,true);let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};

@@ -147,10 +147,14 @@ impl Latin{
 /// over the trap's region (`thermal_position`, on the trap's principal axes); the momentum Maxwell,
 /// apart from the position -- an atom the trap cannot hold is lost at the first step --; position
 /// and momentum along each principal axis scaled to the harmonic oscillator's thermal Wigner
-/// function, T* = (ħω/2k)coth(ħω/2kT). Along frozen lab axes (a validation's), nothing.
+/// function, T* = (ħω/2k)coth(ħω/2kT). Along frozen lab axes (a validation's), nothing. At fourth
+/// order the internal state is the bare state's slow part (engine.rs `slow_start`).
 pub fn initial_trajectory(model:&Model,settings:&Settings,initial:&Initial,seed:u64,index:u64,stratum:Stratum)->Trajectory{
-    initial_from(model,settings,initial,seed,Purpose::Initial,index,stratum)
+    dressed(model,initial_from(model,settings,initial,seed,Purpose::Initial,index,stratum))
 }
+/// A bare initial state's slow part at fourth order, where it starts (engine.rs `slow_start`).
+fn dressed(model:&Model,mut t:Trajectory)->Trajectory{let point=model.point(t.r,t.kappa);engine::slow_start(model,&mut t,&point,0.);t}
+/// The bare initial state: the internal basis state, its position and momentum (`initial_trajectory`).
 fn initial_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,purpose:Purpose,index:u64,stratum:Stratum)->Trajectory{
     let mut rng=Rng::new(seed,purpose,index,0);let mut latin=Latin::new(seed,stratum,index);
     let mut x=latin.next(&mut rng);let mut pick=initial.states.len()-1;
@@ -171,10 +175,7 @@ fn initial_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,purpos
     let p:[f64;3]=std::array::from_fn(|i|{let z=normal_quantile(latin.next(&mut rng));if sigma[i]>0.{(kt/hm).sqrt()*quantum[i]*z}else{0.}});
     let mut psi=[Complex::ZERO;model::MOST_MIXED];psi[state]=Complex::ONE;
     let threshold=engine::jump_stream(seed,index,0).open_uniform();
-    let mut t=Trajectory{cluster,psi,r:lab(q),kappa:lab(p),time:0.,threshold,alive:true,jumps:0,doppler:0.,seed,index};
-    // The bare initial state's slow part at fourth order (engine.rs `slow_start`).
-    let point=model.point(t.r,t.kappa);engine::slow_start(model,&mut t,&point,0.);
-    t
+    Trajectory{cluster,psi,r:lab(q),kappa:lab(p),time:0.,threshold,alive:true,jumps:0,doppler:0.,seed,index}
 }
 
 /// The outputs of a run: one group per `group` trajectories, sums at every output time, the held
@@ -224,12 +225,13 @@ fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count
         waiting:(from..to).map(|_|None).collect(),jumps:0,doppler:0.,seconds:[0.;2]})).collect();
     (0..count as usize).into_par_iter().with_max_len(1).for_each_init(||(Windows::new(settings,steps,outputs),vec![None;outputs]),|(windows,held),n|{
         let index=first+n as u64;let k=tasks.partition_point(|t|t.1<=index)-1;let(g,from,to)=tasks[k];let(start,end)=bounds(g);
-        let mut t=initial_trajectory(model,settings,initial,seed,index,Stratum{first:start,size:end-start});
-        if let Some(r)=origin{t.r=r;t.kappa=[0.;3];}
-        let(r0,k0)=(t.r,t.kappa);
+        let mut bare=initial_from(model,settings,initial,seed,Purpose::Initial,index,Stratum{first:start,size:end-start});
+        if let Some(r)=origin{bare.r=r;bare.kappa=[0.;3];}
+        let(r0,k0)=(bare.r,bare.kappa);
         let clock=Instant::now();
-        let twin=twins.as_ref().map(|(e,twin)|hold(e,twin,&t,steps,outputs));
+        let twin=twins.as_ref().map(|(e,twin)|hold(e,twin,&bare,steps,outputs));
         let held_seconds=clock.elapsed().as_secs_f64();let clock=Instant::now();
+        let mut t=dressed(model,bare);
         let(atoms,samples,_,_)=walk(model,&engine,&mut t,steps,outputs,listed,windows,held,None);
         let record=Record{atoms,start:(r0,k0),twin,samples,jumps:t.jumps,doppler:t.doppler,seconds:[clock.elapsed().as_secs_f64(),held_seconds]};
         // Into its task in order: it and every trajectory after it that already waits.
@@ -293,11 +295,11 @@ struct Record{atoms:Vec<Option<Moment>>,start:([f64;3],[f64;3]),twin:Option<Vec<
 /// finished early waiting.
 struct Slot{sums:Group,samples:Vec<Vec<([f64;3],[f64;3])>>,next:u64,waiting:Vec<Option<Record>>,jumps:u64,doppler:f64,seconds:[f64;2]}
 
-/// A trajectory's held twin (control.rs): the same initial internal state, thresholds and jumps' draws
-/// (its streams are the trajectory's), at the twin's point without motion; its populations there at
-/// every output.
-fn hold(engine:&Engine,twin:&Twin,start:&Trajectory,steps:usize,outputs:usize)->Vec<[f64;STATES]>{
-    let mut t=start.clone();t.r=twin.held.point.r;t.kappa=[0.;3];
+/// A trajectory's held twin (control.rs): the same bare initial internal state (at fourth order its
+/// slow part at the twin's point, `Twin::start`), thresholds and jumps' draws (its streams are the
+/// trajectory's), at the twin's point without motion; its populations there at every output.
+fn hold(engine:&Engine,twin:&Twin,bare:&Trajectory,steps:usize,outputs:usize)->Vec<[f64;STATES]>{
+    let mut t=bare.clone();t.r=twin.held.point.r;t.kappa=[0.;3];twin.start(&mut t);
     let read=|t:&Trajectory|twin.populations(t.cluster,&t.psi);
     let mut out=Vec::with_capacity(outputs);out.push(read(&t));
     for _ in 1..outputs{for _ in 0..steps{engine.step(&mut t);}out.push(read(&t));}
@@ -365,7 +367,7 @@ pub fn sample_states(model:&Model,settings:&Settings,initial:&Initial,seed:u64,c
     let engine=Engine::new(model,settings.clone());
     let every=((count as usize*outputs)/4096).max(1);
     let runs:Vec<(Vec<Trajectory>,u64,Group)>=(0..count).into_par_iter().map_init(||(Windows::new(settings,steps,outputs),vec![None;outputs]),|(windows,held),index|{
-        let mut t=initial_from(model,settings,initial,seed,Purpose::Pilot,index,Stratum::single(index));let(r0,k0)=(t.r,t.kappa);
+        let mut t=dressed(model,initial_from(model,settings,initial,seed,Purpose::Pilot,index,Stratum::single(index)));let(r0,k0)=(t.r,t.kappa);
         let(atoms,_,kept,jumps)=walk(model,&engine,&mut t,steps,outputs,&[],windows,held,Some(every));
         let mut sums=Group::new(outputs,1);
         for(i,atom)in atoms.iter().enumerate(){sums.add(i,atom.as_ref().map(atom_of).as_ref(),&Controls{harmonic:harmonic.value(i,r0,k0),twin:None});}
