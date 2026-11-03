@@ -586,28 +586,30 @@ __device__ void local(const Program& P,Warp& W,const Cluster& C,const Entries& E
     }
     // The sparse groups (fewer entries than places, model.rs `scatter`): each place's own entries, an
     // entry and, from a pair standing for two, its adjoint at the mirror place; their beats' phases
-    // once (in W.m[2], free until the adjoint halves below).
-    float2* phases=W.m[2];
-    __syncwarp();
-    if(lane<C.nbeats)phases[lane]=residual(P.residuals[C.beats+lane],t);
-    __syncwarp();
-    #pragma unroll
-    for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){
-        const int e=lane+32*j,end=P.item_first[C.positions+e+1];
-        #pragma unroll 2
-        for(int i=P.item_first[C.positions+e];i<end;i++){
-            const int4 it=__ldg(P.items+i);
-            float2 ds[MOST_FOCUSED];const float2 s=entry_slopes(P,W,tables+it.x,C.size,ds);const float2 q=entry(P,W,tables+it.y,C.size,-1);
-            const int k1=it.z&3,k=(it.z>>2)&3;const Fields& fa=pt.fields[(it.z>>4)&7];const Fields& fe=pt.fields[(it.z>>7)&7];
-            const float2 phase=phases[it.z>>12];const float2 ee=phase*conj(fe.e[k1])*fa.e[k];
-            if((it.z>>11)&1){m[j]+=conj(ee*s);g[j]+=conj(ee*q);continue;}
-            m[j]+=ee*s;g[j]+=ee*q;
-            const float both=(it.z>>10)&1?2.f:1.f;
-            #pragma unroll
-            for(int a=0;a<3;a++){
-                L.grad[a][j]+=((-both)*(phase*(conj(fe.grad[k1][a])*fa.e[k]+conj(fe.e[k1])*fa.grad[k][a])))*s;
+    // once (in W.m[2], free until the adjoint halves below). A cluster of full groups alone has none.
+    if(C.nbeats>0){
+        float2* phases=W.m[2];
+        __syncwarp();
+        if(lane<C.nbeats)phases[lane]=residual(P.residuals[C.beats+lane],t);
+        __syncwarp();
+        #pragma unroll
+        for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){
+            const int e=lane+32*j,end=P.item_first[C.positions+e+1];
+            #pragma unroll 2
+            for(int i=P.item_first[C.positions+e];i<end;i++){
+                const int4 it=__ldg(P.items+i);
+                float2 ds[MOST_FOCUSED];const float2 s=entry_slopes(P,W,tables+it.x,C.size,ds);const float2 q=entry(P,W,tables+it.y,C.size,-1);
+                const int k1=it.z&3,k=(it.z>>2)&3;const Fields& fa=pt.fields[(it.z>>4)&7];const Fields& fe=pt.fields[(it.z>>7)&7];
+                const float2 phase=phases[it.z>>12];const float2 ee=phase*conj(fe.e[k1])*fa.e[k];
+                if((it.z>>11)&1){m[j]+=conj(ee*s);g[j]+=conj(ee*q);continue;}
+                m[j]+=ee*s;g[j]+=ee*q;
+                const float both=(it.z>>10)&1?2.f:1.f;
                 #pragma unroll
-                for(int f=0;f<MOST_FOCUSED;f++)if(f<D)L.grad[a][j]+=((-both*pt.grad_s[f][a])*ee)*ds[f];
+                for(int a=0;a<3;a++){
+                    L.grad[a][j]+=((-both)*(phase*(conj(fe.grad[k1][a])*fa.e[k]+conj(fe.e[k1])*fa.grad[k][a])))*s;
+                    #pragma unroll
+                    for(int f=0;f<MOST_FOCUSED;f++)if(f<D)L.grad[a][j]+=((-both*pt.grad_s[f][a])*ee)*ds[f];
+                }
             }
         }
     }
@@ -1248,7 +1250,7 @@ __device__ float trap(const Program& P,const Warp& W,const Cluster& C,const Entr
     // The sparse groups' entries at the lane's places (their adjoints none: the form takes a pair
     // standing for two twice).
     #pragma unroll
-    for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){
+    for(int j=0;j<SLOTS;j++)if(C.nbeats>0&&E.has(j,lane)){
         const int e=lane+32*j,end=P.item_first[C.positions+e+1];
         for(int i=P.item_first[C.positions+e];i<end;i++){
             const int4 it=__ldg(P.items+i);if((it.z>>11)&1)continue;
