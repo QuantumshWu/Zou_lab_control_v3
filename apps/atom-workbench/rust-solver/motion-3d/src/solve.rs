@@ -313,11 +313,11 @@ struct Accounts{apriori:Vec<[f64;2]>,excited:Vec<[f64;2]>,bias:[f64;2]}
 fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance:f64,bias:[f64;2],frequencies:[f64;3],last:bool)->(Ledger,Accounts){
     let mut ledger=base.clone();let charge=fold_charge(model,model.ground.charge);
     // The fold's error, charged as measured along the trajectories: the folded excited population's
-    // 2η², the saturation the atoms met -- what the fold's bound takes on the paths they go (an atom
+    // 2η², the largest the atoms met since t = 0 (`since_start`) -- what the fold's bound takes on the paths they go (an atom
     // that gathers where the light is bright, as red-detuned molasses holds it at its lattice's
     // bright sites, meets more than the pattern's mean). The a-priori estimate over the reach decided
     // the fold (`Candidate`).
-    let measured:Vec<[f64;2]>=estimates.iter().map(|e|fold_charges(model.fourth,2.*e.folded)).collect();
+    let measured:Vec<[f64;2]>=since_start(estimates.iter().map(|e|2.*e.folded)).into_iter().map(|s|fold_charges(model.fourth,s)).collect();
     let profiles:Vec<f64>=estimates.iter().map(|e|e.profile).collect();let dopplers:Vec<f64>=estimates.iter().map(|e|e.doppler).collect();
     let largest=|v:&[f64]|v.iter().skip(1).copied().fold(0.,f64::max);
     ledger.add("多普勒与反冲频移",largest(&dopplers),format!("一阶（kv/σ）²；单步超过 {:.1e} 时用精确响应",allowance));
@@ -705,20 +705,26 @@ fn next_candidate(request:&Request,ladder:&mut dyn Iterator<Item=f64>,fourth:boo
 }
 /// The saturation a candidate's folded drives meet: at each of the pilot's states, carried into its
 /// clusters (`carried`), 2η² (twice the folded excited population, whose fold's charge bounds its
-/// error, `fold_charge`); per pilot trajectory their mean, and of those the mean plus
-/// CONFIDENCE standard errors -- what the atoms meet rather than the light's pattern extrapolated
-/// (an atom held in the dark states of a gray molasses meets little of its bright state's
-/// saturation; one gathered at a red-detuned lattice's bright sites meets more than its mean).
+/// error, `fold_charge`); per output time the trajectories' mean plus CONFIDENCE standard errors, and of
+/// those the largest -- the ledger books the largest since t = 0 at every output (`since_start`). What the
+/// atoms meet rather than the light's pattern extrapolated (an atom held in the dark states of a gray
+/// molasses meets little of its bright state's saturation once there, all of it before; one gathered at
+/// a red-detuned lattice's bright sites meets more than its mean).
 fn measured_charge(from:&Model,to:&Model,states:&[Trajectory])->f64{
-    let mut sums:Vec<(u64,f64,f64)>=vec![];
+    // Per output time: the sum, the sum of squares and the count of 2η².
+    let mut sums:Vec<(f64,f64,f64,f64)>=vec![];
     for t in states{
         let x=carried(from,to,t);let p=to.point(x.r,x.kappa);let s=2.*to.readout(x.cluster,&p,&x.psi,x.time).1;
-        match sums.iter_mut().find(|e|e.0==t.index){Some(e)=>{e.1+=s;e.2+=1.;}None=>sums.push((t.index,s,1.))}
+        match sums.iter_mut().find(|e|e.0==t.time){Some(e)=>{e.1+=s;e.2+=s*s;e.3+=1.;}None=>sums.push((t.time,s,s*s,1.))}
     }
-    let means:Vec<f64>=sums.iter().map(|e|e.1/e.2).collect();let n=means.len() as f64;if n==0.{return to.ground.charge;}
-    let mean=means.iter().sum::<f64>()/n;let spread=(means.iter().map(|m|(m-mean).powi(2)).sum::<f64>()/(n*(n-1.).max(1.))).sqrt();
-    mean+CONFIDENCE*spread
+    if sums.is_empty(){return to.ground.charge;}
+    sums.iter().map(|&(_,sum,squares,n)|{let mean=sum/n;mean+CONFIDENCE*((squares/n-mean*mean).max(0.)/(n-1.).max(1.)).sqrt()}).fold(0.,f64::max)
 }
+
+/// The largest value since the first at every place of a sequence: the fold's charge at an output, the
+/// largest 2η² met since t = 0 -- an error the fold makes while the atoms are bright stays in their
+/// populations after they go dark (an optical pumping's transient, the validation's M1).
+fn since_start(values:impl Iterator<Item=f64>)->Vec<f64>{let mut most=0_f64;values.map(|x|{most=most.max(x);most}).collect()}
 
 /// A candidate's work relative to the reference's, at its upper confidence bound: from each of
 /// `subsample` of the pilot's states (of the model `from`), the same state carried into either's
@@ -987,6 +993,12 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
 #[cfg(test)]
 mod tests{
     use super::*;
+    /// The fold's charge keeps the largest 2η² since t = 0: a bright transient's, after the atoms went dark.
+    #[test]
+    fn the_fold_s_charge_keeps_the_largest_saturation_since_the_start(){
+        assert_eq!(since_start([0.074,0.002,0.005,0.001].into_iter()),vec![0.074;4]);
+        assert_eq!(since_start([0.,0.01,0.003,0.02].into_iter()),vec![0.,0.01,0.01,0.02]);
+    }
     /// The batches: the remaining need in whole groups, at least the width, at most doubling; on the
     /// GPU whole waves.
     #[test]
