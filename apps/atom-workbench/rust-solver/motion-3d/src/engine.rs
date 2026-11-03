@@ -239,6 +239,9 @@ impl<'a> Engine<'a>{
         let mut e=Complex::ZERO;for a in 0..n{for b in 0..n{e+=t.psi[a].conj()*local.hamiltonian[a*n+b]*t.psi[b];}}
         0.5*m.hbar_over_mass*t.kappa.iter().map(|k|k*k).sum::<f64>()+local.scalar+e.re/norm
     }
+    /// A trajectory's state after `count` jump-free steps of dt (the deterministic flow the step check
+    /// compares): flow, kick and the internal state's no-jump evolution, no jump, no loss.
+    pub fn coast(&self,t:&Trajectory,dt:f64,count:usize)->Trajectory{let mut x=t.clone();for _ in 0..count{self.advance(&mut x,dt);}x}
     /// The step-doubling error of one step of dt from a trajectory's state, without jumps: one step
     /// against two of dt/2, as (|Δκ|, |kick|) -- the momentum's difference and the step's
     /// non-harmonic impulse (1/um) --, (max |Δp|, |Δ ln‖ψ‖²|, |ln‖ψ‖²|) -- the largest difference of
