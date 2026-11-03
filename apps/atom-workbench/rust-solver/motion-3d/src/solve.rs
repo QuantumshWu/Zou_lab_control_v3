@@ -47,8 +47,9 @@
 //!   their criterion alone lets T's step error grow past its share (the 3D PGC example: T 2–3 % high
 //!   at the populations' step, measured against half that step).
 //! Both scale as dt², so a step that misses is shrunk by the square root of its excess and checked
-//! again; one that meets them with room is grown the same way. The step's exponentials are summed
-//! to a share η of its own population budget, η² ε dt/waiting, instead of to double precision.
+//! again; one that meets them with room is grown the same way, by whatever factor, and checked
+//! again; the step kept is the largest that met them. The step's exponentials are summed to a
+//! share η of its own population budget, η² ε dt/waiting, instead of to double precision.
 //!
 //! # Batches
 //! A batch is cut into two groups per thread (lib.rs `Stratum`): each group's initial states are a
@@ -263,14 +264,17 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
     let left=BUDGET-base.used()-eta;let allowance=if left>0.{left}else{BUDGET};
     // The exponentials are summed to a share η of the step's own population budget, η² ε dt/waiting.
     let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=allowance;s};
-    let mut ratios=[0.;2];
+    // From the first step, the next by the square root of the excess (both errors scale as dt²),
+    // until it suggests a step already checked; kept: the largest step that met the targets, or the
+    // last checked when none did.
+    let mut checked:Vec<(usize,[f64;2])>=vec![];
     for _ in 0..8{
-        let engine=Engine{model:&model,settings:settings(steps)};ratios=step_excess(&engine,&states,waiting);let excess=ratios[0].max(ratios[1]);
-        let next=((steps as f64*excess.sqrt()).ceil() as usize).max(1);
-        if excess<=1.&&next>=steps/2{break;}
-        if next==steps{break;}
+        let engine=Engine{model:&model,settings:settings(steps)};let ratios=step_excess(&engine,&states,waiting);checked.push((steps,ratios));
+        let next=((steps as f64*ratios[0].max(ratios[1]).sqrt()).ceil() as usize).max(1);
+        if checked.iter().any(|c|c.0==next){break;}
         steps=next;
     }
+    let(steps,ratios)=checked.iter().filter(|c|c.1[0].max(c.1[1])<=1.).min_by_key(|c|c.0).copied().unwrap_or(checked[checked.len()-1]);
     let dt=interval/steps as f64;let settings=settings(steps);
     // The step's bias: its share of each target times its measured excess there.
     let bias=[ratios[0]*A_PRIORI_SHARE*POPULATION_TARGET,ratios[1]*A_PRIORI_SHARE*TEMPERATURE_TARGET];
