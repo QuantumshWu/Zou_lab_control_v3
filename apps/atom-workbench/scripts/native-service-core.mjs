@@ -33,6 +33,5 @@ return class NativeService {
   finish(job,error,value){if(job.settled)return;job.settled=true;job.finishedAt=performance.now();clearTimeout(job.timer);if(this.current.get(job.token.clientId)===job)this.current.delete(job.token.clientId);if(error)job.reject(error);else job.resolve(value);}
   async close(){this.closed=true;for(const job of [...this.current.values()])this.cancel(job,failure('Local solver service is shutting down.'));await Promise.all(Object.values(this.lanes).map(lane=>lane.close()));}
 }
-
-;
+;
 }
