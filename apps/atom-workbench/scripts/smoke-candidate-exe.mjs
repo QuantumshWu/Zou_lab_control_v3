@@ -43,7 +43,7 @@ const baseEnv={...process.env};
 for(const key of Object.keys(baseEnv))if(key.toUpperCase().startsWith('ATOM_'))delete baseEnv[key];
 Object.assign(baseEnv,DESKTOP_SOLVER_DEFAULTS);
 const report={status:'starting',executable:exe,binarySha256,bytes:binary.length,windowOpened:false,
-  scope:'Candidate EXE/backend-info plus normal Worker/IPC/JSONL finite and mean requests, and the 3D tweezer PGC example's motion; no independent physics oracle',
+  scope:'Candidate EXE/backend-info plus normal Worker/IPC/JSONL finite and mean requests, and the 3D tweezer PGC example\'s motion; no independent physics oracle',
   requestSource:option('--request')?resolve(option('--request')):'Generated probe-only smoke fixture',
   requestSha256:sha(JSON.stringify({scene,settings})),options:settings,processes:[],workerRequests:[],historicalAnswerRead:false};
 const children=new Map(),pending=new Map();let worker,sequence=0;
