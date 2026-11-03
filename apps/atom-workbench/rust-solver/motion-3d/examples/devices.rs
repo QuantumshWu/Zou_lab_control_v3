@@ -2,7 +2,8 @@
 //! per output after t = 0, every population's and the loss's difference against the two solves'
 //! combined standard error (each the largest over the populations and the loss, `sample_errors`),
 //! and each T's (per axis and in total) against theirs.
-//! `cargo run --profile iterate -p atom-motion-3d --example devices -- <scene> <duration_us> <samples> [gpu-first]`
+//! `cargo run --profile iterate -p atom-motion-3d --example devices -- <scene> <duration_us> <samples> [gpu-first|warm]`
+//! (`warm`: the GPU started before either solve, as in a worker that has served one).
 #[path="scene/mod.rs"] mod scene;
 use atom_motion_3d::gpu;
 use atom_motion_3d::solve::{solve,Device,Solution};
@@ -11,6 +12,7 @@ use std::time::Instant;
 fn main(){
     let args:Vec<String>=std::env::args().collect();
     let name=args[1].clone();let duration:f64=args[2].parse().unwrap();let samples:usize=args[3].parse().unwrap();let gpu_first=args.get(4).is_some_and(|a|a=="gpu-first");
+    if args.get(4).is_some_and(|a|a=="warm"){let _=gpu::gpu();}
     let mut request=scene::scene(&name);
     request.times_us=(0..samples).map(|i|duration*i as f64/(samples-1) as f64).collect();
     let run=|device:Device|->(Solution,f64){let clock=Instant::now();let s=solve(&request,device,&mut |_,_|{}).unwrap();(s,clock.elapsed().as_secs_f64())};
