@@ -57,15 +57,16 @@
 //! comes up twice: first by the population criterion's bound, then from the largest step that met
 //! the targets by it with the population error measured. Every checked step that met the targets
 //! is a candidate; the one kept costs least in prediction (`predicted_cost`): its work per interval
-//! -- timed, an interval of steps (jumps and the steps they redo included) from each of the
-//! subsample's states at every candidate back to back --, times the trajectories the statistics
-//! need. Their spread is known only after a batch, but whatever it is, the trajectories a candidate
+//! -- counted on the sampled states (`interval_work`): its steps' advances, each the generator's and
+//! the force's multiply-adds and table pairs of the state's cluster and two half steps' series, and
+//! per jump its photons and the two advances it redoes, each unit at a cost measured once (no timing
+//! enters a solve: a request gives the same step and the same result on any machine and load) --,
+//! times the trajectories the statistics need. Their spread is known only after a batch, but whatever it is, the trajectories a candidate
 //! needs relative to the bound rule's step are at most the larger over the targets of (that step's
 //! room/the candidate's room)², the room what the target leaves past the a-priori estimates and the
 //! step's bias: exact for the target that binds where the candidate's bias is the larger. The bound
-//! rule's step is left only for a candidate that costs less even at its work's upper confidence
-//! bound, so that the timing's noise does not move the step between candidates of equal cost. A
-//! larger step is kept only where it pays: its bias takes room from the statistics and the work per
+//! rule's step is left only for a candidate predicted to cost less. A larger step is kept only where
+//! it pays: its bias takes room from the statistics and the work per
 //! step grows with it (the exponentials' sub-steps, the jumps' redone steps) -- in the 3D PGC and the
 //! tetrahedral MOT the candidates' costs lie within a few per cent, in the D1 gray molasses the
 //! measured criterion halves it. The step's exponentials are summed to a share η of its own
@@ -87,7 +88,8 @@
 //! takes -- are the corrected values' spread over the groups; where a control follows nothing, β ≈ 0.
 //! The held
 //! twin costs a trajectory of its own: it runs in the first batch, and is kept when the trajectories
-//! that batch says the populations need with it, times its share of the cost, are fewer than without.
+//! that batch says the populations need with it, times its share of the work (counted as the step's,
+//! `held_work`), are fewer than without.
 //!
 //! # Regime
 //! A point particle has no zero-point motion: below a few vibrational quanta per axis the method
@@ -111,7 +113,7 @@
 //! costs about what one trajectory does -- so there the first batch is usually the last. A GPU that cannot run (none, an older
 //! driver, a model beyond its kernel) leaves the solve on the CPU with the reason
 //! (`Solution::device_note`); one that fails during the batches has the solve redone on the CPU.
-use crate::engine::{Engine,Settings,Trajectory};
+use crate::engine::{column_norm,node_phase,series,Engine,Settings,Trajectory};
 use crate::gpu;
 use crate::ground::{ExcitedKind,Ground,Kind};
 use crate::ledger::{Ledger,BUDGET};
@@ -431,13 +433,13 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let candidates:Vec<Check>=bound.iter().chain(&measured).filter(|c|c.met()).copied().collect();
     // The a-priori total the steps' costs take: the ledger's estimates with the fold's charge as the
     // pilot measured it.
-    let apriori=base.used()-fold_charge(&model,model.ground.charge)+charge;
+    let apriori=base.used()-fold_charge(&model,model.ground.charge)+charge;let parts=state_work(&model,&states);
     let chosen=if candidates.len()>1{
         // Against the bound rule's step, or where it missed the targets the smallest candidate step.
         let baseline=*candidates.iter().find(|c|c.steps==grown.steps).or(candidates.iter().max_by_key(|c|c.steps)).unwrap();
         let mut distinct:Vec<usize>=candidates.iter().map(|c|c.steps).filter(|&s|s!=baseline.steps).collect();distinct.sort();distinct.dedup();distinct.insert(0,baseline.steps);
-        let work=relative_work(&model,&states,&distinct.iter().map(|&s|settings(s)).collect::<Vec<_>>(),pilot as usize,interval);
-        let work_of=|c:&Check|work[distinct.iter().position(|&s|s==c.steps).unwrap()];
+        let work:Vec<f64>=distinct.iter().map(|&s|interval_work(&parts,&settings(s),interval,waiting)).collect();
+        let work_of=|c:&Check|work[distinct.iter().position(|&s|s==c.steps).unwrap()]/work[0];
         let cost=|c:&Check|predicted_cost(c,work_of(c),&baseline,apriori);
         // The baseline is left only for a candidate predicted to cost less (ties keep it).
         candidates.iter().fold(baseline,|best,c|if cost(c)<cost(&best){*c}else{best})
@@ -480,11 +482,13 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let first=batch(0,count,twin.as_ref())?;
     let wall=clock.elapsed().as_secs_f64();
     // The held twin is kept where its control pays for itself: the trajectories the first batch says
-    // the populations need with it, times its share of the cost, against those they need without.
+    // the populations need with it, times its share of the work (counted as the step's, `held_work`),
+    // against those they need without.
     if twin.is_some(){
         let needed=|means:&[Means]|{let mut e=summarize(&first.groups,&scales,means);start(&mut e[0],&model,&initial);
             let(_,accounts)=ledger(&model,&base,&e,times,allowance,bias,trap.lab,false);worst_ratios(&e,&accounts,trap.lab)[0].powi(2)};
-        if needed(&means(true))*(1.+first.seconds[1]/first.seconds[0])>=needed(&means(false)){twin=None;}
+        let share=held_work(&parts,&settings,interval,waiting)/interval_work(&parts,&settings,interval,waiting);
+        if needed(&means(true))*(1.+share)>=needed(&means(false)){twin=None;}
     }
     let means=means(twin.is_some());
     // Batches until the targets are met.
@@ -642,21 +646,69 @@ fn accumulated_excess(engine:&Engine,states:&[Trajectory],horizon:f64,subsample:
     (mean+CONFIDENCE*spread)/(A_PRIORI_SHARE*POPULATION_TARGET)
 }
 
-/// Each candidate's work per interval relative to the first's, at its upper confidence bound: from each
-/// of `subsample` states spread over the sampled ones, an interval of steps (jumps and the steps they
-/// redo included) at every candidate back to back on one thread -- the machine's load and the core
-/// shared by the candidates a state compares --, the times' ratios to the first's; of their median
-/// the upper CONFIDENCE bound, the order statistic CONFIDENCE √n/2 ranks above the middle (the
-/// binomial's normal limit), so that the timing's noise does not move the step.
-fn relative_work(model:&Model,states:&[Trajectory],settings:&[Settings],subsample:usize,interval:f64)->Vec<f64>{
-    let engines:Vec<Engine>=settings.iter().map(|s|Engine::new(model,s.clone())).collect();
-    let every=(states.len()/subsample.max(1)).max(1);let picked:Vec<&Trajectory>=states.iter().step_by(every).collect();
-    let ratios:Vec<Vec<f64>>=picked.par_iter().map(|t|{
-        let times:Vec<f64>=engines.iter().map(|e|{let mut x=(*t).clone();let steps=(interval/e.settings.dt).round() as usize;
-            let clock=Instant::now();for _ in 0..steps{if x.alive{e.step(&mut x);}}clock.elapsed().as_secs_f64()}).collect();
-        times.iter().map(|x|x/times[0].max(f64::MIN_POSITIVE)).collect()}).collect();
-    let n=ratios.len();let rank=((0.5*n as f64+0.5*CONFIDENCE*(n as f64).sqrt()).ceil() as usize).clamp(1,n.max(1))-1;
-    (0..settings.len()).map(|k|{let mut r:Vec<f64>=ratios.iter().map(|v|v[k]).collect();r.sort_by(f64::total_cmp);r.get(rank).copied().unwrap_or(1.)}).collect()
+/// What a unit of each of the step's parts costs (ns), for the work model (`interval_work`): measured
+/// once on one performance core of the Core Ultra 7 265H (examples/bench_cost.rs) and fitted over
+/// DEFAULT, THREE, PGC3D, TET, GMD1C and PGCP_10, each part within 10–20 % of its measured time; only
+/// their ratios enter the choice. An advance without its propagation: per call (the point's fields,
+/// the flow, the kick), per multiply-add of the generator and the force (`Model::work`) and per table
+/// pair.
+const ADVANCE_NS:f64=374.;const MULTIPLY_ADD_NS:f64=0.247;const PAIR_NS:f64=29.9;
+/// A half step's propagation: per term of its series and per multiply-add (n² a term).
+const TERM_NS:f64=4.4;const TERM_MULTIPLY_ADD_NS:f64=0.469;
+/// A whole jump (`Engine::jump`): per call (its point, the class's and the polarization's draws, the
+/// dipole pattern, the kicks), per multiply-add of every class's photons and per multiply-add of the
+/// picked class's absorbed light (`Model::work`). Timed against the advance in the same interleaved
+/// rounds on the loaded machine (each the least of 30 rounds × 3 passes), taken at the advance's cost
+/// above: within 10 % but DEFAULT's (+21 %); a jump costs 1.5–2.1 times its photons alone.
+const JUMP_NS:f64=970.;const PHOTON_MULTIPLY_ADD_NS:f64=0.594;const ABSORPTION_MULTIPLY_ADD_NS:f64=1.48;
+/// The held twin's step besides its two products (control.rs): 30–190 ns over DEFAULT, THREE, PGC3D
+/// and GMD1C on the same core.
+const HELD_NS:f64=100.;
+
+/// A sampled state's parts of the work model (`interval_work`): its cluster's advance without the
+/// propagation and its jump (ns), its generator's norm, its dimension and whether its cluster takes
+/// the exact step (explicit excited states).
+struct StateWork{advance:f64,jump:f64,norm:f64,n:usize,exact:bool}
+fn state_work(model:&Model,states:&[Trajectory])->Vec<StateWork>{
+    states.par_iter().map(|t|{
+        let w=model.work(t.cluster);let n=model.dimension(t.cluster);let point=model.point(t.r,t.kappa);let exact=model.mixed(t.cluster);
+        let norm=if exact{column_norm(&model.generator(t.cluster,&point,t.time).hamiltonian,n)}else{column_norm(&model.local(t.cluster,&point,t.time).hamiltonian,n)};
+        StateWork{advance:ADVANCE_NS+MULTIPLY_ADD_NS*(w.generator+w.force)+PAIR_NS*w.pairs as f64,
+            jump:JUMP_NS+PHOTON_MULTIPLY_ADD_NS*w.photons+ABSORPTION_MULTIPLY_ADD_NS*w.absorption,norm,n,exact}
+    }).collect()
+}
+/// A step's advance at a state with its propagation (ns): two half steps' series; or the exact step
+/// (engine.rs `Engine::exact`), its propagator over the grid's spacing -- n³ per term of its series to
+/// double precision -- and per spacing a product and the force's forms (n² each), at the same costs
+/// per multiply-add as the series' (not timed on its own).
+fn advance_of(x:&StateWork,s:&Settings)->f64{
+    if !x.exact{return x.advance+2.*half_step(x,s);}
+    let spacings=(x.norm*s.dt/node_phase()).ceil().max(1.);let terms=series(x.norm,s.dt/spacings,f64::EPSILON).1 as f64;let n=x.n as f64;
+    x.advance+TERM_MULTIPLY_ADD_NS*(n*n*n*terms+4.*spacings*n*n)
+}
+/// A half step's propagation at a state (ns): its series' sub-steps × terms at its generator's norm,
+/// the step's dt and truncation.
+fn half_step(x:&StateWork,s:&Settings)->f64{let(sub,terms)=series(x.norm,0.5*s.dt,s.truncation);(sub*terms) as f64*(TERM_NS+TERM_MULTIPLY_ADD_NS*(x.n*x.n) as f64)}
+/// A step's work per interval (ns, `ADVANCE_NS` and the rest), counted on the sampled states -- the
+/// same whatever the machine and its load: its steps' advances, each the generator's and the force's
+/// multiply-adds and pairs of the state's cluster and two half steps' series; and per jump, one every
+/// waiting time, the jump itself -- every class's photons, the picked class's absorbed light and the
+/// rest -- and two more advances, the step redone to the jump and its rest. A readout per output is
+/// the same at every step and left out.
+fn interval_work(states:&[StateWork],s:&Settings,interval:f64,waiting:f64)->f64{
+    let(mut advance,mut jump)=(0.,0.);
+    for x in states{let a=advance_of(x,s);advance+=a;jump+=x.jump+2.*a;}
+    let count=states.len().max(1) as f64;
+    (interval/s.dt*advance+interval/waiting*jump)/count
+}
+/// The held twin's work per interval (control.rs, ns): per step its two products by the half step's
+/// propagator (n² multiply-adds each) and its step's own (`HELD_NS`); per jump the step redone to it
+/// and its rest by the series.
+fn held_work(states:&[StateWork],s:&Settings,interval:f64,waiting:f64)->f64{
+    let(mut step,mut jump)=(0.,0.);
+    for x in states{step+=HELD_NS+2.*TERM_MULTIPLY_ADD_NS*(x.n*x.n) as f64;jump+=4.*half_step(x,s);}
+    let count=states.len().max(1) as f64;
+    (interval/s.dt*step+interval/waiting*jump)/count
 }
 
 /// A candidate step's predicted cost relative to a reference's (module documentation): its work per

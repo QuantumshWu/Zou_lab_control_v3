@@ -128,14 +128,28 @@ impl Program{
         let(mut clusters,mut groups,mut pairs,mut classes,mut photons,mut class_rows,mut coherent,mut channels,mut carrier_tables,mut tables)=
             (vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![]);
         for(k,(layout,cl))in model.layouts.iter().zip(&g.clusters).enumerate(){
-            let mut cluster=Cluster{n:layout.n as i32,size:layout.size as i32,table:(tables.len()) as i32,h0:layout.h0 as i32,groups:groups.len() as i32,ngroups:layout.groups.len() as i32,
+            // The kernel takes every group's S and Q dense (n × n per pair): the model's, on their
+            // groups' entries, scattered at each node; h0 before them and the carriers' tables after
+            // them as they are (a cluster of ground states has nothing past those).
+            let(n,data)=(layout.n,&model.tables.data[k]);let nn=n*n;assert_eq!(data.len(),2*points*layout.size);
+            let mut dense:Vec<(usize,usize)>=vec![];let mut size=nn;
+            for gl in &layout.groups{let square=gl.pairs.len()*nn;dense.push((size,size+square));size+=2*square;}
+            let from=layout.carriers.first().map_or(layout.size,|c|c.j);let carriers=size;let shift=|at:usize|(at-from+carriers) as i32;size+=layout.size-from;
+            let mut cluster=Cluster{n:n as i32,size:size as i32,table:(tables.len()) as i32,h0:layout.h0 as i32,groups:groups.len() as i32,ngroups:layout.groups.len() as i32,
                 classes:classes.len() as i32,nclasses:cl.classes.len() as i32,coherent:coherent.len() as i32,ncoherent:cl.coherent.len() as i32,carriers:carrier_tables.len() as i32,pad:0,states:[0;MAXN]};
             for(x,&b)in cl.states.iter().enumerate(){cluster.states[x]=b as i32;}
-            let data=&model.tables.data[k];assert_eq!(data.len(),2*points*layout.size);
-            tables.extend(data.chunks_exact(2).map(|z|[z[0] as f32,z[1] as f32]));
-            for gl in &layout.groups{
+            let at=|node:usize,i:usize|[data[2*(node*layout.size+i)] as f32,data[2*(node*layout.size+i)+1] as f32];
+            for node in 0..points{
+                let start=tables.len();tables.resize(start+size,[0_f32;2]);let out=&mut tables[start..];
+                for i in 0..nn{out[layout.h0+i]=at(node,layout.h0+i);}
+                for(gl,&(s,q))in layout.groups.iter().zip(&dense){let count=gl.entries.len();
+                    for pi in 0..gl.pairs.len(){for(j,&(a,b))in gl.entries.iter().enumerate(){
+                        out[s+pi*nn+a*n+b]=at(node,gl.s+pi*count+j);out[q+pi*nn+a*n+b]=at(node,gl.q+pi*count+j);}}}
+                for i in from..layout.size{out[shift(i) as usize]=at(node,i);}
+            }
+            for(gl,&(s,q))in layout.groups.iter().zip(&dense){
                 groups.push(Group{absorbed:gl.absorbed as i32,emitted:gl.emitted as i32,hermitian:gl.hermitian as i32,pairs:pairs.len() as i32,npairs:gl.pairs.len() as i32,
-                    s:gl.s as i32,q:gl.q as i32,pad:0,residual:gl.residual});
+                    s:s as i32,q:q as i32,pad:0,residual:gl.residual});
                 pairs.extend(gl.pairs.iter().map(|&(k1,k)|[k1 as i32,k as i32]));
             }
             // A class's photons by the row they land in and their carrier (each row's photons one run,
@@ -155,7 +169,7 @@ impl Program{
                 coherent.push(Coherent{channels:channels.len() as i32,count:group.len() as i32});
                 channels.extend(group.iter().map(|&(x,w)|Channel{carrier:x.carrier as i32,col:cl.position(x.state).unwrap() as i32,residual:w}));
             }
-            for c in &layout.carriers{carrier_tables.extend([c.j as i32,c.j2 as i32,c.t as i32]);}
+            for c in &layout.carriers{carrier_tables.extend([shift(c.j),shift(c.j2),shift(c.t)]);}
             clusters.push(cluster);
         }
         // The exact response: H(s) = base + Σ_f s_f G_f over the focused beams (ground.rs
