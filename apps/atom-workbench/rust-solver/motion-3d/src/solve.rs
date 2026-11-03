@@ -172,6 +172,9 @@ pub struct Solution{
     /// Per time: in the validated regime (k_B T ≥ CLASSICAL ħω on every axis).
     pub classical:Vec<bool>,
     pub trajectories:u64,
+    /// The trajectories the statistics need by the latest batch's estimate: `trajectories` is the
+    /// first whole batch at or beyond it (a batch at most triples the trajectories run).
+    pub needed:u64,
     pub time_step_us:f64,
     pub method:String,
     pub reason:Option<String>,
@@ -460,10 +463,10 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let mut estimates=summarize(&outcome.groups,&scales,&means);start(&mut estimates[0],&model,&initial);
         let(_,accounts)=ledger(&model,&base,&estimates,times,allowance,bias,trap.lab,false);
         let ratio=worst_ratio(&estimates,&accounts,trap.lab);
-        let needed=((done as f64*ratio*ratio).ceil() as u64).min(MOST_TRAJECTORIES);
+        let wanted=(done as f64*ratio*ratio).ceil() as u64;let needed=wanted.min(MOST_TRAJECTORIES);
         let(ledger,_)=ledger(&model,&base,&estimates,times,allowance,bias,trap.lab,needed<=done);
         let mut solution=assemble(&model,&estimates,&outcome,&listed,trap.lab,done,dt,&request.initial_density,ledger,twin.is_some());
-        solution.device=used;solution.device_note=note.clone();
+        solution.device=used;solution.device_note=note.clone();solution.needed=wanted;
         if needed<=done{
             if ratio>1.{solution.reason=Some(format!("统计误差为目标的 {ratio:.1} 倍：轨迹数已达上限 {MOST_TRAJECTORIES}"));}
             return Ok(solution);
@@ -495,21 +498,24 @@ impl Candidate{
     fn fits(&self)->bool{self.rooms.iter().all(|&r|r>0.)}
 }
 
-/// A candidate's work per interval relative to the reference's, at its upper confidence bound (as
-/// `relative_work`): from each of `subsample` of the reference's pilot states, the same state carried
-/// into the candidate's clusters (`carried`), an interval of steps of either back to back on one
-/// thread; of the times' ratios their median's upper CONFIDENCE bound.
+/// A candidate's work relative to the reference's, at its upper confidence bound: from each of
+/// `subsample` of the reference's pilot states, the same state carried into the candidate's clusters
+/// (`carried`), an interval of steps of either back to back on one thread. The work is the ratio of
+/// the two totals -- a model's cost lies in the states it makes dear (a cluster with explicit states),
+/// which a median of the states' ratios would pass over --, its upper bound CONFIDENCE standard errors
+/// above it (the ratio's delta method over the states).
 fn model_work(reference:&Model,candidate:&Model,settings:&Settings,states:&[Trajectory],subsample:usize,interval:f64)->f64{
     let engines=[Engine::new(reference,settings.clone()),Engine::new(candidate,settings.clone())];
     let every=(states.len()/subsample.max(1)).max(1);let picked:Vec<&Trajectory>=states.iter().step_by(every).collect();
     let steps=(interval/settings.dt).round() as usize;
-    let mut ratios:Vec<f64>=picked.par_iter().map(|t|{
+    let times:Vec<[f64;2]>=picked.par_iter().map(|t|{
         let starts=[(*t).clone(),carried(reference,candidate,t)];
-        let times:Vec<f64>=engines.iter().zip(starts).map(|(e,mut x)|{let clock=Instant::now();for _ in 0..steps{if x.alive{e.step(&mut x);}}clock.elapsed().as_secs_f64()}).collect();
-        times[1]/times[0].max(f64::MIN_POSITIVE)}).collect();
-    ratios.sort_by(f64::total_cmp);let n=ratios.len();
-    let rank=((0.5*n as f64+0.5*CONFIDENCE*(n as f64).sqrt()).ceil() as usize).clamp(1,n.max(1))-1;
-    ratios.get(rank).copied().unwrap_or(1.)
+        let mut times=[0.;2];
+        for(time,(e,mut x))in times.iter_mut().zip(engines.iter().zip(starts)){let clock=Instant::now();for _ in 0..steps{if x.alive{e.step(&mut x);}}*time=clock.elapsed().as_secs_f64();}
+        times}).collect();
+    let n=times.len() as f64;let(a,b)=(times.iter().map(|t|t[1]).sum::<f64>(),times.iter().map(|t|t[0]).sum::<f64>().max(f64::MIN_POSITIVE));
+    let ratio=a/b;let spread=times.iter().map(|t|(t[1]-ratio*t[0]).powi(2)).sum::<f64>()/(n-1.).max(1.);
+    ratio+CONFIDENCE*(spread/n).sqrt()/(b/n)
 }
 
 /// A trajectory's state carried from one model into another's clusters: into the cluster of its
@@ -638,7 +644,7 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
         loss_probability:{let mut worst=0.;estimates.iter().map(|e|{worst=e.loss.max(worst);worst}).collect()},
         velocity,position,
         classical:estimates.iter().map(|e|classical(e,frequencies)).collect(),
-        trajectories,time_step_us:dt,
+        trajectories,needed:trajectories,time_step_us:dt,
         method:format!("半经典 3D：经典质点（位置、动量）携带{internal}，量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），机械能高于势阱深度即算损失，{trajectories} 条轨迹，步长 {dt:.3} μs；控制变量：谐振孪生（T）{}",if twin{"与静止孪生（布居）"}else{""}),
         reason:None,
         approximations:ledger,
