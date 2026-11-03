@@ -13,7 +13,7 @@
 //! - `doubling <scene> <candidate> <pilot trajectories> <pilot us> <dt,...>`: the step-doubling check's parts on a
 //!   short pilot's states: the momentum's and the impulse's sums, the populations', and the mechanical energy's
 //!   difference and change split into the kinetic and the internal (Re⟨ψ|H|ψ⟩/⟨ψ|ψ⟩ and the scalar) parts.
-//! - `profile <scene> <allowance> <dt> <truncation> <trajectories> <duration us> [horizon us]`: the exact step's cost on one thread
+//! - `profile <scene> <allowance> <dt> <truncation> <trajectories> <duration us> [horizon us] [beats' share]`: the exact step's cost on one thread
 //!   along trajectories from the solve's seed: per cluster its segments' paths, nodes and beats (each pair's bound
 //!   against the share, left out or not), and the microseconds of its components, its segment and the whole step.
 //! - `work <scene> <candidate> <trajectories> <duration us> <dt> <truncation>`: along the trajectories, the folded
@@ -62,7 +62,7 @@ fn main(){
         "held"=>held(&name,&request,&arg(3,"0"),arg(4,"2048").parse().unwrap(),arg(5,"200").parse().unwrap(),arg(6,"5").parse().unwrap(),arg(7,"0.2").parse().unwrap(),&arg(8,"held.json"),arg(9,"1e-12").parse().unwrap()),
         "solve"=>solve(&name,request,&arg(3,"x"),arg(4,"2000").parse().unwrap(),arg(5,"11").parse().unwrap(),arg(6,"512").parse().unwrap(),args.get(7).map(|x|x.parse().unwrap())),
         "moving"=>moving(&request,&arg(3,"0"),arg(4,"256").parse().unwrap(),arg(5,"40").parse().unwrap(),arg(6,"8").parse().unwrap(),&arg(7,"0.21739"),arg(8,"1e-12").parse().unwrap()),
-        "profile"=>profile(&request,arg(3,"0.0095").parse().unwrap(),arg(4,"0.2304").parse().unwrap(),arg(5,"1e-6").parse().unwrap(),arg(6,"32").parse().unwrap(),arg(7,"200").parse().unwrap(),args.get(8).map(|x|x.parse().unwrap())),
+        "profile"=>profile(&request,arg(3,"0.0095").parse().unwrap(),arg(4,"0.2304").parse().unwrap(),arg(5,"1e-6").parse().unwrap(),arg(6,"32").parse().unwrap(),arg(7,"200").parse().unwrap(),args.get(8).map(|x|x.parse().unwrap()),args.get(9).map(|x|x.parse().unwrap())),
         "work"=>work(&request,&arg(3,"0"),arg(4,"256").parse().unwrap(),arg(5,"2000").parse().unwrap(),arg(6,"0.2924").parse().unwrap(),arg(7,"1e-6").parse().unwrap()),
         "doubling"=>doubling(&request,&arg(3,"x"),arg(4,"16").parse().unwrap(),arg(5,"200").parse().unwrap(),&arg(6,"0.24,0.05,0.005,0.0005")),
         other=>panic!("unknown mode {other}"),
@@ -280,15 +280,15 @@ fn doubling(request:&Request,which:&str,count:u64,duration:f64,steps:&str){
 }
 
 /// The exact step's cost on one thread along trajectories of a model at `allowance` (`Engine::probe`).
-fn profile(request:&Request,allowance:f64,dt:f64,truncation:f64,count:u64,duration:f64,horizon:Option<f64>){
+fn profile(request:&Request,allowance:f64,dt:f64,truncation:f64,count:u64,duration:f64,horizon:Option<f64>,beats:Option<f64>){
     // The request over the duration (the fold's rule takes its 1/T floor), 21 outputs as the cost probe's.
     let mut request=request.clone();request.times_us=(0..21).map(|i|duration*i as f64/20.).collect();let request=&request;
     let model=Model::with(request,allowance).unwrap();println!("allowance {allowance:.3e}: {}",describe(&model));
     let initial=Initial::new(&model,request).unwrap();let trap=initial.traps[0];
-    let mut settings=Settings::new(dt,&trap,truncation,true);if let Some(h)=horizon{settings.horizon=h;}let engine=Engine::new(&model,settings.clone());let steps=(duration/dt).round() as usize;
+    let mut settings=Settings::new(dt,&trap,truncation,true);if let Some(h)=horizon{settings.horizon=h;}if let Some(b)=beats{settings.beats=b;}let engine=Engine::new(&model,settings.clone());let steps=(duration/dt).round() as usize;
     // Per cluster: steps, the step's, the components' and the segment's seconds, nodes, paths, and per beat (Ω) its largest bound and drops.
-    struct Acc{steps:usize,step:f64,components:f64,segment:f64,nodes:usize,paths:Vec<(&'static str,usize)>,beats:Vec<(f64,f64,usize,usize)>}
-    let mut acc:Vec<Acc>=(0..model.clusters()).map(|_|Acc{steps:0,step:0.,components:0.,segment:0.,nodes:0,paths:vec![],beats:vec![]}).collect();
+    struct Acc{steps:usize,step:f64,components:f64,segment:f64,nodes:usize,paths:Vec<(&'static str,usize)>,beats:Vec<(f64,f64,usize,usize)>,weighted:usize,counted:usize}
+    let mut acc:Vec<Acc>=(0..model.clusters()).map(|_|Acc{steps:0,step:0.,components:0.,segment:0.,nodes:0,paths:vec![],beats:vec![],weighted:0,counted:0}).collect();
     let mut share=0.;
     for index in 0..count{
         let mut t=initial_trajectory(&model,&settings,&initial,0x3D_5EED,index,Stratum::single(index));
@@ -296,7 +296,7 @@ fn profile(request:&Request,allowance:f64,dt:f64,truncation:f64,count:u64,durati
             if !t.alive{break;}let k=t.cluster;let a=&mut acc[k];
             if model.mixed(k)||model.beating(k){
                 // The probe at the step's half-step point is near the step's own; its build times stand for the step's.
-                let cpu=scene::cpu_seconds();let p=model.point(t.r,t.kappa);let probe=engine.probe(k,&p,t.time,dt);share=probe.share;
+                let cpu=scene::cpu_seconds();let p=model.point(t.r,t.kappa);let probe=engine.probe(k,&p,t.time,dt,&t.psi);share=probe.share;if let Some(w)=probe.weighted{a.weighted+=w;a.counted+=1;}
                 let built=scene::cpu_seconds()-cpu;let wall=probe.seconds[0]+probe.seconds[1];
                 // The probe's CPU time shared by its two parts as their wall times.
                 a.components+=built*probe.seconds[0]/wall.max(1e-300);a.segment+=built*probe.seconds[1]/wall.max(1e-300);a.nodes+=probe.nodes;
@@ -310,6 +310,7 @@ fn profile(request:&Request,allowance:f64,dt:f64,truncation:f64,count:u64,durati
         if a.steps==0{continue;}let m=a.steps as f64;
         println!("cluster {k} {}({}): {} steps, {:.1} CPU-us per step; components {:.1} us, segment {:.1} us, the rest {:.1} us; nodes {:.1} per step; paths {:?}",
             model.dimension(k),model.dimension(k)-model.ground_dimension(k),a.steps,1e6*a.step/m,1e6*a.components/m,1e6*a.segment/m,1e6*(a.step-a.components-a.segment)/m,a.nodes as f64/m,a.paths);
+        if a.counted>0{println!("    amplitude-weighted spacing: {:.1} nodes per step on average (the rule's {:.1})",a.weighted as f64/a.counted as f64,a.nodes as f64/m);}
         for &(w,bound,seen,left)in &a.beats{println!("    beat {:.4} MHz: largest bound {:.2e} (share {:.1e}), left out {}/{}",w/TAU,bound,share,left,seen);}
     }
 }
