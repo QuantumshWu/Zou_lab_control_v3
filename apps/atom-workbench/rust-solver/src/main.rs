@@ -327,6 +327,21 @@ mod tests {
         let flagged = result["diagnostics"]["approximations"]["flagged"].as_str().unwrap_or("");
         assert!(flagged.contains("无原子被俘获"), "{flagged}");
     }
+    /// The default scene's tweezer alone (tests/fixtures/tweezer_alone_motion.json: 30 uK in its
+    /// 830 uK deep trap, 1 ms): with no other light the light's frame rotates at the tweezer, a near
+    /// carrier whose shift lies in its field, and the loss criterion's trap less the trap beam off
+    /// kept that field -- a trap 36 uK deep, 84 % of the atoms lost at once. The depth is the
+    /// tweezer's whole shift: the atoms stay.
+    #[test]
+    fn the_tweezer_alone_holds_its_thermal_atom() {
+        let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/tweezer_alone_motion.json")).unwrap();
+        let mut line = fixture["payload"].clone();
+        line["id"] = json!(11);
+        let out = request(line);
+        assert!(out["error"].is_null(), "{}", out["error"]);
+        let loss: Vec<f64> = out["result"]["motion"]["lossProbability"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+        assert!(loss.iter().all(|&l| l < 0.01), "{loss:?}");
+    }
     /// A motion request is a trajectory alone of 3D motion, its trap one of its beams; a tweezer
     /// without light shift confines nothing. The device is the GPU (by default) or the CPU.
     #[test]

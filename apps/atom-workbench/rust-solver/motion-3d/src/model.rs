@@ -690,7 +690,10 @@ impl Model{
         sized!(1 2 3 4 5 6 7 8)
     }
     /// The trap's potential of ψ at a point (rad/us): Re⟨ψ|H_eff|ψ⟩ less the same with the trap beam
-    /// off, per ⟨ψ|ψ⟩ -- (h0 − M) at the point's stencil less at its far one, with the same fields.
+    /// off, per ⟨ψ|ψ⟩ -- (h0 − M) at the point's stencil and fields less at its far stencil with the
+    /// trap beam's field taken out of its carrier's: the tweezer's whole light shift whether it is
+    /// folded (in h0) or a near carrier (in M, through its field) -- a tweezer alone is always one, the
+    /// light's frame rotating at it.
     pub fn trap_potential(&self,cluster:usize,p:&Point,psi:&[Complex],t:f64)->f64{
         macro_rules! sized{($($n:literal)*)=>{match self.dimension(cluster){$($n=>self.trap_sized::<$n,{2*$n*$n}>(cluster,p,psi,t,false),)*_=>unreachable!("a cluster has 1 to 8 states")}}}
         sized!(1 2 3 4 5 6 7 8)
@@ -706,13 +709,20 @@ impl Model{
         for j in 0..W{difference[j]=here[j]-far[j];}
         let norm:f64=psi[..N].iter().map(|z|z.norm_sqr()).sum();
         if bound{return quadratic::<N>(&difference,psi).re/norm+2.*self.ground.light;}
+        // The carriers' fields with the trap beam off: its carrier's less its own part a(r) c_k.
+        let mut off=p.fields;
+        for(c,carrier)in self.carriers.iter().enumerate(){
+            if let Some(j)=carrier.beams.iter().position(|&l|l==self.trap_beam){
+                let a=self.geometry[self.trap_beam].field(p.r).0;for k in 0..carrier.rank{off[c].e[k]-=a*carrier.coefficients[j][k];}
+            }
+        }
         for gl in &layout.groups{
-            let(f,e)=(&p.fields[gl.absorbed],&p.fields[gl.emitted]);
+            let(f,e)=(&p.fields[gl.absorbed],&p.fields[gl.emitted]);let(f0,e0)=(&off[gl.absorbed],&off[gl.emitted]);let phase=Complex::cis(gl.residual*t);
             for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
-                // −Φ (S(s) − S(far)), the pair (k1, k) standing for (k, k1) in a Hermitian group.
-                let ee=e.e[k1].conj()*f.e[k]*if gl.hermitian&&k1<k{2.}else{1.};let at=gl.s+pi*N*N;
+                // −(Φ S(s) − Φ_off S(far)), the pair (k1, k) standing for (k, k1) in a Hermitian group.
+                let both=if gl.hermitian&&k1<k{2.}else{1.};let at=gl.s+pi*N*N;
                 self.gather_value::<W>(cluster,&p.stencil,at,&mut here);self.gather_value::<W>(cluster,&p.far,at,&mut far);
-                for j in 0..W{here[j]-=far[j];}caxpy::<W>(-ee*Complex::cis(gl.residual*t),&here,&mut difference);
+                caxpy::<W>(-(e.e[k1].conj()*f.e[k]*both*phase),&here,&mut difference);caxpy::<W>(e0.e[k1].conj()*f0.e[k]*both*phase,&far,&mut difference);
             }
         }
         quadratic::<N>(&difference,psi).re/norm
