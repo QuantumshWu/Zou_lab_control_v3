@@ -190,6 +190,10 @@ fn quadratic<const N:usize>(x:&[f64;MOST_W],psi:&[Complex])->Complex{
     s
 }
 
+/// One node of the tables: every cluster's tables there, the quartic shifts' bound and the
+/// elimination's (`Model::resonance`).
+type Node=(Vec<Vec<Complex>>,f64,f64);
+
 /// The tables on one grid, and the elimination's bound over its nodes inside the reach (`Model::resonance`).
 #[derive(Clone,Debug)]
 struct Tables{nodes:usize,data:Vec<Vec<f64>>,resonance:f64}
@@ -408,7 +412,7 @@ impl Model{
     }
 
     /// Every cluster's tables at the intensities s, and the quartic shifts' bound there.
-    fn node(&self,s:&[f64],mixing:&[Vec<Vec<Complex>>])->Result<(Vec<Vec<Complex>>,f64,f64),String>{
+    fn node(&self,s:&[f64],mixing:&[Vec<Vec<Complex>>])->Result<Node,String>{
         let g=&self.ground;let e=g.eliminate(&self.hamiltonian_at(s))?;let(ne,ng)=(g.excited_states.len(),g.ground_states.len());
         // Per carrier: U_k, T_k, T2_k (ne × ng).
         let combine=|c:usize,matrices:&[Dense]|->Vec<Dense>{mixing[c].iter().map(|g_k|{let mut m=Dense::zeros(ne,ng);
@@ -504,16 +508,28 @@ impl Model{
     fn grid(&self,n:usize)->Vec<Vec<f64>>{
         let d=self.focused.len();(0..n.pow(d as u32)).map(|i|(0..d).map(|f|((i/n.pow(f as u32))%n) as f64/(n-1).max(1) as f64).collect()).collect()
     }
-    /// The tables on a grid of n nodes per focused beam, and the quartic shifts' bound over it.
-    fn build(&self,n:usize,mixing:&[Vec<Vec<Complex>>])->Result<(Tables,f64),String>{
-        let nodes:Vec<(Vec<Vec<Complex>>,f64,f64)>=self.grid(n).par_iter().map(|s|self.node(s,mixing)).collect::<Result<_,_>>()?;
+    /// The nodes of a grid of n per focused beam: those it shares with the grid of (n + 1)/2 before
+    /// it (`coarse`: every other node along each beam, at the same intensities to the last bit)
+    /// taken from that grid, the others computed.
+    fn nodes(&self,n:usize,mixing:&[Vec<Vec<Complex>>],coarse:Option<&[Node]>)->Result<Vec<Node>,String>{
+        let(d,m)=(self.focused.len(),n.div_ceil(2));
+        self.grid(n).par_iter().enumerate().map(|(i,s)|{
+            let digits=(0..d).map(|f|(i/n.pow(f as u32))%n);
+            match coarse{
+                Some(c)if digits.clone().all(|x|x%2==0)=>Ok(c[digits.enumerate().map(|(f,x)|x/2*m.pow(f as u32)).sum::<usize>()].clone()),
+                _=>self.node(s,mixing),
+            }
+        }).collect()
+    }
+    /// The tables of a grid of n nodes per focused beam, and the quartic shifts' bound over it.
+    fn build(&self,n:usize,nodes:&[Node])->(Tables,f64){
         let quartic=nodes.iter().map(|x|x.1).fold(0.,f64::max);
         // The bound over the nodes inside the reach's intensities: each focused beam's from its
         // smallest over the reach (less one node, the interval holding it) to 1.
         let low:Vec<f64>=self.focused.iter().map(|&l|self.reach.iter().map(|&r|self.geometry[l].intensity(r).min(1.)).fold(1.,f64::min)-1./(n-1).max(1) as f64).collect();
-        let resonance=self.grid(n).iter().zip(&nodes).filter(|(s,_)|s.iter().zip(&low).all(|(x,l)|x>=l)).map(|(_,x)|x.2).fold(0.,f64::max);
+        let resonance=self.grid(n).iter().zip(nodes).filter(|(s,_)|s.iter().zip(&low).all(|(x,l)|x>=l)).map(|(_,x)|x.2).fold(0.,f64::max);
         // data[cluster]: node-major, layout.size per node.
-        Ok((Tables{nodes:n,data:(0..self.layouts.len()).map(|k|nodes.iter().flat_map(|node|node.0[k].iter().flat_map(|z|[z.re,z.im])).collect()).collect(),resonance},quartic))
+        (Tables{nodes:n,data:(0..self.layouts.len()).map(|k|nodes.iter().flat_map(|node|node.0[k].iter().flat_map(|z|[z.re,z.im])).collect()).collect(),resonance},quartic)
     }
     /// The coarse grid's (`self.tables`) largest interpolation error at a finer grid's nodes, relative
     /// to the scale of each cluster's table kind.
@@ -538,12 +554,14 @@ impl Model{
         }
         worst
     }
-    /// The tables on grids of FIRST_NODES, then doubled, until the cubic interpolation from the
-    /// coarser grid meets TABLE_SHARE at the finer grid's nodes; the finer grid is kept.
+    /// The tables on grids of FIRST_NODES, then doubled (each grid's nodes computed once), until the
+    /// cubic interpolation from the coarser grid meets TABLE_SHARE at the finer grid's nodes; the
+    /// finer grid is kept.
     fn tabulate(&mut self,mixing:&[Vec<Vec<Complex>>])->Result<(),String>{
-        let(tables,quartic)=self.build(FIRST_NODES,mixing)?;self.tables=tables;self.quartic=quartic/self.ground.generator_scale.max(f64::MIN_POSITIVE);
+        let mut nodes=self.nodes(FIRST_NODES,mixing,None)?;
+        let(tables,quartic)=self.build(FIRST_NODES,&nodes);self.tables=tables;self.quartic=quartic/self.ground.generator_scale.max(f64::MIN_POSITIVE);
         loop{
-            let n=2*self.tables.nodes-1;let(fine,quartic)=self.build(n,mixing)?;
+            let n=2*self.tables.nodes-1;nodes=self.nodes(n,mixing,Some(&nodes))?;let(fine,quartic)=self.build(n,&nodes);
             let worst=self.interpolation_error(&fine);
             self.tables=fine;self.table_error=worst;self.quartic=self.quartic.max(quartic/self.ground.generator_scale.max(f64::MIN_POSITIVE));
             if worst<=TABLE_SHARE{self.resonance=self.tables.resonance;return Ok(());}
