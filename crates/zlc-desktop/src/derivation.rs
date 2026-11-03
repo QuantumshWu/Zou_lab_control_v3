@@ -73,8 +73,8 @@ impl Output {
             "outputs":accepted.publications.iter().map(|event|crate::trace::key(event.key())).collect::<Vec<_>>()}));
         self.last_source=Some(source.key().clone());Ok(true)
     }
-    fn seal(&self,error:Option<&str>) {
-        if let Some(token)=&self.generation {let _=self.runtime.seal(token,json!({"error":error}));}
+    fn seal(&self) {
+        if let Some(token)=&self.generation {let _=self.runtime.seal(token,json!({}));}
     }
 }
 impl Drop for Output {
@@ -124,7 +124,7 @@ impl RoiWorker {
                         match subscription.next(if newest.is_some() {due} else {Duration::from_secs(3600)}) {
                             Ok(Some(delivery))=>{
                                 if delivery.kind!=DeliveryKind::Data {
-                                    if output.last_source.as_ref().is_some_and(|last|last.generation==delivery.generation) {output.seal(None);}
+                                    if output.last_source.as_ref().is_some_and(|last|last.generation==delivery.generation) {output.seal();}
                                     continue;
                                 }
                                 let read=delivery.reads[0].clone();
@@ -152,8 +152,10 @@ impl RoiWorker {
                         && !*authority.lock().unwrap_or_else(|error|error.into_inner()) {return Ok(());}
                 }
             })();
-            if let Err(error)=&result {report(format!("{owner}: {error}"));}
-            output.seal(result.as_ref().err().map(String::as_str));output
+            // A region that failed answers its source no more: its run leaves with its signals,
+            // and with them its source's same-shot group (v2 withdraws a consumer that ends early).
+            if let Err(error)=&result {report(format!("{owner}: {error}"));return roi_output(&runtime,&panel);}
+            output.seal();output
         }).map_err(|error|error.to_string())?;
         Ok(Self {cancel,subscription:wake,worker:Some(worker)})
     }
@@ -178,7 +180,7 @@ impl FitOutputs {
             let Some(source)=sources.iter().find(|item|item.signal==*signal && item.generation.id()==*generation) else{return false;};
             if source.sealed {
                 let current=self.runtime.read_views(&[(source.generation.clone(),signal.clone(),None)]).remove(0);
-                if current.as_ref().is_ok_and(|read|output.last_source.as_ref()==Some(read.key())) {output.seal(None);}
+                if current.as_ref().is_ok_and(|read|output.last_source.as_ref()==Some(read.key())) {output.seal();}
             }
             true
         });
@@ -195,7 +197,7 @@ impl FitOutputs {
         let output=outputs.entry(panel.into()).or_insert_with(||Output::new(&self.runtime,format!("{panel}/fit"),output_prefix(panel),false));
         let accepted=output.publish(source,values,records,metadata,authority)?;
         if self.runtime.signals().iter().any(|item|item.signal==source.key().signal && item.generation.id()==source.key().generation && item.sealed) {
-            output.seal(None);
+            output.seal();
         }
         Ok(accepted)
     }

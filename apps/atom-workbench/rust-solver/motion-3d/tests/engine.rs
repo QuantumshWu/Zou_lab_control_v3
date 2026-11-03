@@ -11,7 +11,7 @@ use atom_motion_3d::model::{Model,MOST_STATES};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Scales,KT_PER_UK};
 use atom_motion_3d::{initial_trajectory,simulate,Initial,Stratum};
-use atom_motion_3d::solve::solve;
+use atom_motion_3d::solve::{solve,Device};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
 
@@ -188,7 +188,7 @@ fn a_solve_starts_from_the_request_s_initial_state(){
     // Ten microseconds of the tweezer PGC: t = 0 holds the initial populations and, per axis, the
     // thermal Wigner temperature of the initial trap, without error; the targets are met after it.
     let mut r=request(&|_|true);r.times_us=vec![0.,5.,10.];
-    let s=solve(&r,&mut |_,_|{}).unwrap();assert!(s.reason.is_none());
+    let s=solve(&r,Device::Cpu,&mut |_,_|{}).unwrap();assert!(s.reason.is_none());
     let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();let trap=initial.traps[0];let kt=KT_PER_UK*r.temperature_uk;
     for a in 0..3{let expected:f64=(0..3).map(|i|{let half=trap.frequencies[i]/(2.*kt);trap.axes[i][a]*trap.axes[i][a]*r.temperature_uk*half/half.tanh()}).sum();
         assert!((s.temperature_uk[0][a]-expected).abs()<=1e-12*expected,"axis {a}: {} against {expected}",s.temperature_uk[0][a]);assert_eq!(s.temperature_errors_uk[0][a],0.);}

@@ -129,13 +129,13 @@ pub struct Carrier{
 /// ways in a Hermitian group); S and Q vanish elsewhere -- and where its S and Q lie (the entries'
 /// values per pair).
 #[derive(Clone,Debug)]
-struct GroupLayout{absorbed:usize,emitted:usize,residual:f64,hermitian:bool,pairs:Vec<(usize,usize)>,entries:Vec<(usize,usize)>,s:usize,q:usize}
+pub(crate) struct GroupLayout{pub(crate) absorbed:usize,pub(crate) emitted:usize,pub(crate) residual:f64,pub(crate) hermitian:bool,pub(crate) pairs:Vec<(usize,usize)>,pub(crate) entries:Vec<(usize,usize)>,pub(crate) s:usize,pub(crate) q:usize}
 /// Where a carrier's photon tables lie: J and J2 (3 axes × rank × ng × n) and T (rank × ne × n).
 #[derive(Clone,Copy,Debug)]
-struct CarrierLayout{j:usize,j2:usize,t:usize}
+pub(crate) struct CarrierLayout{pub(crate) j:usize,pub(crate) j2:usize,pub(crate) t:usize}
 /// Where one cluster's tables lie in a node's slice.
 #[derive(Clone,Debug)]
-struct Layout{n:usize,size:usize,h0:usize,groups:Vec<GroupLayout>,carriers:Vec<CarrierLayout>}
+pub(crate) struct Layout{pub(crate) n:usize,pub(crate) size:usize,pub(crate) h0:usize,pub(crate) groups:Vec<GroupLayout>,pub(crate) carriers:Vec<CarrierLayout>}
 
 /// The interpolation stencil at s: per focused beam the first of its four nodes, their cubic
 /// weights and the weights' derivatives in s_f; the nodes are their tensor product.
@@ -201,7 +201,7 @@ type Node=(Vec<Vec<Complex>>,f64,f64);
 
 /// The tables on one grid, and the elimination's bound over its nodes inside the reach (`Model::resonance`).
 #[derive(Clone,Debug)]
-struct Tables{nodes:usize,data:Vec<Vec<f64>>,resonance:f64}
+pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,resonance:f64}
 
 /// The trap of the trap beam: its principal axes (unit rows on the lab axes) and frequencies
 /// (rad/us) at the focus for a reference state, and the frequencies per lab axis.
@@ -224,8 +224,8 @@ pub struct Model{
     /// ħ/m (um²/us).
     pub hbar_over_mass:f64,
     pub mass_kg:f64,
-    layouts:Vec<Layout>,
-    tables:Tables,
+    pub(crate) layouts:Vec<Layout>,
+    pub(crate) tables:Tables,
     /// The nodes per intensity axis and the interpolation's measured largest relative error.
     pub table_error:f64,
     /// The quartic van Vleck shifts left out: their bound relative to the eliminated generator's scale.

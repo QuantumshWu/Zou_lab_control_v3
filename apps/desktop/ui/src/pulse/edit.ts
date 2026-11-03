@@ -4,7 +4,7 @@
 // column on one line per port; under it the Control, Connection and Ports
 // cards.  A click picks an item (Shift/Ctrl adds), a click between cards
 // picks that gap; dragging a card moves it.  Every change is a command.
-import { ComboBox, Readout, Segmented, SpinBox, assign, checkBox, command, element, setChecked, setElided, setMiddle, setState, setText, setTitle, statusDot, switchButton, token,
+import { ComboBox, Readout, Segmented, SpinBox, assign, checkBox, command, element, hidePopup, isShown, setChecked, setElided, setMiddle, setState, setText, setTitle, showPopup, statusDot, switchButton, token,
   type Command as Button } from "../fluent/index.js";
 import type { BracketVM, ComponentVM, FieldVM, Item, PeriodVM, PortRow, PulseState, Schedule } from "./types.js";
 import { type Owner, RepeatsBox, type Send, TextBox, ValueBox, confirmPulseDiscard, drawBadges, editCommand } from "./widgets.js";
@@ -208,10 +208,9 @@ class BracketPost {
 /** A Subpulse's source popup (ComponentCard._toggle_source): Source,
  * Default or Config, in a popup under the card's badge. */
 class SourcePopup {
-  readonly root = element("div", "card bordered pulse-binding pulse-source-popup");
+  readonly root = element("div", "card bordered pulse-binding pulse-source-popup beside");
   private choice: Segmented;
   constructor(private send: Send, private id: string, private current: string) {
-    this.root.popover = "auto";
     // v2 _commit_source: a new source is asked of the owner; the popup stays, showing what it holds.
     this.choice = new Segmented(value => {
       if (value !== this.current) this.send({ action: "pulse_subpulse", op: "source", component_id: this.id, source: value }, "Choosing the Subpulse source…");
@@ -227,16 +226,10 @@ class SourcePopup {
     this.root.append(row);
     this.root.addEventListener("toggle", event => { if ((event as ToggleEvent).newState === "closed") this.root.remove(); });
   }
-  get open(): boolean { return this.root.isConnected && this.root.matches(":popover-open"); }
+  get open(): boolean { return isShown(this.root); }
   project(current: string): void { this.current = current; this.choice.setCurrent(current); }
-  openBelow(anchor: HTMLElement): void {
-    document.body.append(this.root);
-    this.root.showPopover();
-    const rect = anchor.getBoundingClientRect(), gap = token("--popup-gap"), pad = token("--window-pad");
-    this.root.style.left = `${Math.max(pad, Math.min(rect.left, innerWidth - pad - this.root.offsetWidth))}px`;
-    const below = rect.bottom + gap;
-    this.root.style.top = `${below + this.root.offsetHeight <= innerHeight - pad ? below : Math.max(pad, rect.top - gap - this.root.offsetHeight)}px`;
-  }
+  /** Below the badge (above it where it fits better), bound to it (popover.ts). */
+  openBelow(anchor: HTMLElement): void { showPopup(this.root, anchor); }
 }
 
 /** A Subpulse on the strip (ComponentCard): closed, one card for the block
@@ -260,10 +253,10 @@ class ComponentCard {
     this.name.root.placeholder = "Name";
     this.badge.type = "button";
     this.badge.tabIndex = -1;
-    let wasOpen = false;
-    this.badge.addEventListener("pointerdown", () => { wasOpen = Boolean(this.popup?.open); });
+    // A click on the badge opens its popup and, while it is open, closes it.
     this.badge.addEventListener("click", () => {
-      if (!this.component || wasOpen) { wasOpen = false; return; }
+      if (this.popup?.open) { hidePopup(this.popup.root); return; }
+      if (!this.component) return;
       this.popup = new SourcePopup(send, id, this.component.source);
       this.popup.openBelow(this.badge);
     });

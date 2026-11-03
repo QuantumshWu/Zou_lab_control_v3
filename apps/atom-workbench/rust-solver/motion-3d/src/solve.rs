@@ -100,7 +100,19 @@
 //! (x and y free) within 8 % at 4.6 ħω and 15 % low at 3.1 ħω. Each output time says whether it
 //! is in the regime k_B T ≥ `CLASSICAL` ħω on every axis (with T the engine's own, which lies below
 //! the quantum T where the method cools too far, so the mark comes early rather than late).
+//!
+//! # Device
+//! The batches run on the device asked for (`Device`): the CPU's threads, or the GPU (gpu/mod.rs),
+//! which runs a batch's trajectories as the CPU does -- the same groups, initial states, random
+//! streams and sums. The two devices make a solve's choices alike: the model, the ledger, the pilot
+//! and the time step on the CPU in double precision either way, the statistics and their stopping
+//! rule. A batch is at least as wide as the device runs at once: two groups per thread on the CPU,
+//! and on the GPU the same groups of as many whole tasks as its resident blocks hold, a batch that
+//! costs about what one trajectory does -- so there the first batch is usually the last. A GPU that cannot run (none, an older
+//! driver, a model beyond its kernel) leaves the solve on the CPU with the reason
+//! (`Solution::device_note`); one that fails during the batches has the solve redone on the CPU.
 use crate::engine::{Engine,Settings,Trajectory};
+use crate::gpu;
 use crate::ground::Kind;
 use crate::ledger::{Ledger,BUDGET};
 use crate::model::{Model,Trap};
@@ -111,6 +123,10 @@ use crate::{Complex,Request,STATES};
 use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
 use rayon::prelude::*;
 use std::time::Instant;
+
+/// Where a solve's trajectories run (the request's `options.device`).
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum Device{Cpu,Gpu}
 
 /// The method's accuracy targets: T relative, populations and loss absolute.
 pub const TEMPERATURE_TARGET:f64=0.10;
@@ -161,6 +177,9 @@ pub struct Solution{
     pub reason:Option<String>,
     /// The a-priori approximations and their estimated errors (ledger.rs).
     pub approximations:Ledger,
+    /// The device the trajectories ran on, and why it is not the one asked for (Chinese).
+    pub device:Device,
+    pub device_note:Option<String>,
 }
 
 /// An estimate in the validated regime: k_B T ≥ CLASSICAL ħω along every axis (ω per axis).
@@ -270,19 +289,36 @@ fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance
     (ledger,accounts)
 }
 
-/// Solves a request. `checkpoint` receives every batch's complete result and the estimated wall
-/// time (ms) the rest will take.
-pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))->Result<Solution,String>{
+/// Solves a request on the device asked for (module documentation, # Device). `checkpoint` receives
+/// every batch's complete result and the estimated wall time (ms) the rest will take.
+pub fn solve(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))->Result<Solution,String>{
+    // The GPU starts in the background while the model is made.
+    if device==Device::Gpu{gpu::prepare();}
+    match run(request,device,checkpoint){
+        Err(Stop::Gpu(error))=>{
+            let mut solution=run(request,Device::Cpu,checkpoint).map_err(Stop::message)?;
+            solution.device_note=Some(format!("GPU 计算出错（{error}）：本次在 CPU 上计算"));Ok(solution)
+        }
+        other=>other.map_err(Stop::message),
+    }
+}
+
+/// Why a solve stopped: its own error, or its GPU's (the solve is then redone on the CPU).
+enum Stop{Error(String),Gpu(String)}
+impl From<String> for Stop{fn from(error:String)->Stop{Stop::Error(error)}}
+impl Stop{fn message(self)->String{match self{Stop::Error(e)|Stop::Gpu(e)=>e}}}
+
+fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))->Result<Solution,Stop>{
     let model=Model::new(request)?;
     let initial=Initial::new(&model,request)?;
     // The reference state: the largest initial population; its trap sets ω per axis.
     let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();
     let trap:Trap=initial.traps[reference];
-    if trap.frequencies.iter().any(|&w|!(w>0.)){return Err(NOT_CONFINED.into());}
+    if trap.frequencies.iter().any(|&w|!(w>0.)){return Err(Stop::Error(NOT_CONFINED.into()));}
     let times=&request.times_us;let outputs=times.len();
-    if outputs<2||times[0]!=0.{return Err("A 3D motion solve needs at least two times, the first at 0".into());}
+    if outputs<2||times[0]!=0.{return Err(Stop::Error("A 3D motion solve needs at least two times, the first at 0".into()));}
     let interval=times[1]-times[0];
-    if times.windows(2).any(|w|((w[1]-w[0])-interval).abs()>1e-9*interval){return Err("A 3D motion solve needs evenly spaced times".into());}
+    if times.windows(2).any(|w|((w[1]-w[0])-interval).abs()>1e-9*interval){return Err(Stop::Error("A 3D motion solve needs evenly spaced times".into()));}
     let listed=listed(outputs);let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
     let seed=0x3D_5EED;
     let base=model_ledger(&model,request);
@@ -340,6 +376,15 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
     let dt=interval/steps as f64;let settings=settings(steps);
     // The step's bias: its share of each target times its measured excess there.
     let bias=[ratios[0]*A_PRIORI_SHARE*POPULATION_TARGET,ratios[1]*A_PRIORI_SHARE*TEMPERATURE_TARGET];
+    // The device: the GPU when asked for and able, the model on it; else the CPU, with why.
+    let(gpu,note)=match device{
+        Device::Cpu=>(None,None),
+        Device::Gpu=>match gpu::gpu_within(gpu::START_WAIT).and_then(|g|{let program=g.lock().unwrap_or_else(|e|e.into_inner()).program(&model,&settings)?;Ok((g,program))}){
+            Ok(on)=>(Some(on),None),
+            Err(reason)=>(None,Some(format!("{reason}：本次在 CPU 上计算"))),
+        },
+    };
+    let used=if gpu.is_some(){Device::Gpu}else{Device::Cpu};
     // The control variates (control.rs): the harmonic twin's, and the held twin where the trap beam's
     // intensity is the pilot's mean, when the generator is static.
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
@@ -347,8 +392,22 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
     let mut twin=Twin::new(&model,intensity);
     let twin_means=twin.as_ref().map(|t|t.means(&model,&request.initial_density,interval,outputs));
     let means=|held:bool|->Vec<Means>{(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:twin_means.as_ref().filter(|_|held).map(|m|m[i])}).collect()};
+    let batch=|first:u64,count:u64,twin:Option<&Twin>|->Result<Outcome,Stop>{
+        let variates=Variates{harmonic:&harmonic,twin};
+        match &gpu{
+            None=>Ok(simulate(&model,&settings,&initial,seed,first,count,group(count,threads),steps,outputs,&listed,Some(&variates))),
+            Some((g,program))=>g.lock().unwrap_or_else(|e|e.into_inner()).simulate(program,&model,&settings,&initial,seed,first,count,group(count,threads),steps,outputs,&listed,Some(&variates))
+                .map_err(Stop::Gpu),
+        }
+    };
+    // A batch is at least as wide as the device runs at once: on the CPU two groups per thread, on
+    // the GPU as many whole tasks per group as its resident blocks hold -- such a batch costs about
+    // what one trajectory does --, and there a whole number of its widths.
+    let width=match &gpu{Some((g,_))=>g.lock().unwrap_or_else(|e|e.into_inner()).width(2*threads),None=>2*threads};
+    let whole=|count:u64|if gpu.is_some(){count.div_ceil(width)*width}else{count};
     let clock=Instant::now();
-    let first=simulate(&model,&settings,&initial,seed,0,pilot,group(pilot,threads),steps,outputs,&listed,Some(&Variates{harmonic:&harmonic,twin:twin.as_ref()}));
+    let count=whole(pilot.max(width));
+    let first=batch(0,count,twin.as_ref())?;
     let wall=clock.elapsed().as_secs_f64();
     // The held twin is kept where its control pays for itself: the trajectories the first batch says
     // the populations need with it, times its share of the cost, against those they need without.
@@ -357,24 +416,25 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
             let(_,accounts)=ledger(&model,&base,&e,times,allowance,bias,trap.lab,false);worst_ratios(&e,&accounts,trap.lab)[0].powi(2)};
         if needed(&means(true))*(1.+first.seconds[1]/first.seconds[0])>=needed(&means(false)){twin=None;}
     }
-    let means=means(twin.is_some());let variates=Variates{harmonic:&harmonic,twin:twin.as_ref()};
+    let means=means(twin.is_some());
     // Batches until the targets are met.
-    let mut outcome=first;let mut done=pilot;let mut per_trajectory=wall/pilot as f64;
+    let mut outcome=first;let mut done=count;let mut per_trajectory=wall/count as f64;
     loop{
         let mut estimates=summarize(&outcome.groups,&scales,&means);start(&mut estimates[0],&model,&initial);
         let(_,accounts)=ledger(&model,&base,&estimates,times,allowance,bias,trap.lab,false);
         let ratio=worst_ratio(&estimates,&accounts,trap.lab);
         let needed=((done as f64*ratio*ratio).ceil() as u64).min(MOST_TRAJECTORIES);
         let(ledger,_)=ledger(&model,&base,&estimates,times,allowance,bias,trap.lab,needed<=done);
-        let mut solution=assemble(&model,&estimates,&outcome,&listed,trap.lab,done,dt,&request.initial_density,ledger,variates.twin.is_some());
+        let mut solution=assemble(&model,&estimates,&outcome,&listed,trap.lab,done,dt,&request.initial_density,ledger,twin.is_some());
+        solution.device=used;solution.device_note=note.clone();
         if needed<=done{
             if ratio>1.{solution.reason=Some(format!("统计误差为目标的 {ratio:.1} 倍：轨迹数已达上限 {MOST_TRAJECTORIES}"));}
             return Ok(solution);
         }
         checkpoint(&solution,Some(per_trajectory*(needed-done) as f64*1e3));
-        let next=(needed-done).clamp(2*threads,3*done);
+        let next=whole((needed-done).clamp(width,(3*done).max(width)));
         let clock=Instant::now();
-        let more=simulate(&model,&settings,&initial,seed,done,next,group(next,threads),steps,outputs,&listed,Some(&variates));
+        let more=batch(done,next,twin.as_ref())?;
         per_trajectory=clock.elapsed().as_secs_f64()/next as f64;
         outcome.groups.extend(more.groups);for(a,b)in outcome.samples.iter_mut().zip(more.samples){a.extend(b);}outcome.jumps+=more.jumps;outcome.doppler=outcome.doppler.max(more.doppler);
         done+=next;
@@ -496,5 +556,6 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
         method:format!("半经典 3D：经典质点（位置、动量）携带消去激发态后的基态内态（子空间 {}），量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），机械能高于势阱深度即算损失，{trajectories} 条轨迹，步长 {dt:.3} μs；控制变量：谐振孪生（T）{}",sizes.join("+"),if twin{"与静止孪生（布居）"}else{""}),
         reason:None,
         approximations:ledger,
+        device:Device::Cpu,device_note:None,
     }
 }
