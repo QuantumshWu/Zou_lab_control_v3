@@ -6,7 +6,7 @@
 #[path="scene/mod.rs"] mod scene;
 use atom_motion_3d::engine::{Engine,Settings};
 use atom_motion_3d::model::Model;
-use atom_motion_3d::{initial_trajectory,Initial,Stratum};
+use atom_motion_3d::{initial_trajectory,Complex,Initial,Stratum};
 
 fn main(){
     let args:Vec<String>=std::env::args().collect();let arg=|i:usize,d:&str|args.get(i).cloned().unwrap_or(d.into());
@@ -21,7 +21,15 @@ fn main(){
     for index in 0..count{let mut t=initial_trajectory(&second,&settings,&initial,seed,index,Stratum::single(index));
         for _ in 0..(t_end/10.) as usize{for _ in 0..200{if t.alive{engine.step(&mut t);}}if t.alive{states.push(t.clone());}}}
     let tables:usize=(0..fourth.clusters()).filter(|&k|fourth.slow_part(k,&fourth.point([0.;3],[0.;3]),0.).is_some()).count();
-    println!("{name} seed {seed}: {} states; fourth-order clusters {tables}, H^(4) entries left out Σm² {:.2e}",states.len(),fourth.fourth_dropped);
+    println!("{name} seed {seed}: {} states; fourth-order clusters {tables}, H^(4) entries left out Σm² {:.2e}; beating {:?}",states.len(),fourth.fourth_dropped,
+        (0..fourth.clusters()).map(|k|fourth.beating(k)).collect::<Vec<_>>());
+    // The beats' components (a beating cluster's generator) against the local generator at the states' times.
+    let mut worst=0_f64;
+    for t in &states{let p=fourth.point(t.r,t.kappa);let n=fourth.dimension(t.cluster);
+        let(g,l)=(fourth.generator(t.cluster,&p,t.time),fourth.local(t.cluster,&p,t.time));
+        let scale=l.hamiltonian[..n*n].iter().map(|z|z.abs()).fold(0.,f64::max);
+        for a in 0..n{for b in 0..n{let shift=Complex::new(if a==b{g.scalar-l.scalar}else{0.},0.);worst=worst.max((g.hamiltonian[a*n+b]+shift-l.hamiltonian[a*n+b]).abs()/scale);}}}
+    println!("fourth order: components against the local generator, largest relative difference {worst:.1e}");
     for dt in dts{
         let mut line=format!("dt {dt:6.3}:");
         for(label,model)in [("second",&second),("fourth",&fourth)]{

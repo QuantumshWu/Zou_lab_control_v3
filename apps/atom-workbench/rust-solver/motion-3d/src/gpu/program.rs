@@ -99,6 +99,7 @@ impl Program{
         if ng!=GROUND||ne!=NE{return Err(beyond(format!("{ng} 个基态、{ne} 个激发态")));}
         if settings.free!=[true;3]{return Err(beyond("运动只沿部分坐标轴".into()));}
         if let Some(c)=g.clusters.iter().find(|c|!c.excited.is_empty()){return Err(beyond(format!("{} 个激发态显式、精确传播",c.excited.len())));}
+        if let Some(k)=(0..model.clusters()).find(|&k|model.beating(k)){return Err(beyond(format!("子空间 {} 的 {} 个残余拍频按多速率精确步传播",k,model.beats(k).0.len()/2)));}
         if model.fourth{return Err(beyond("四阶折叠".into()));}
         if model.geometry.len()>MOST_BEAMS||model.carriers.len()>MOST_CARRIERS||model.focused.len()>MOST_FOCUSED{return Err(beyond("光束或强度维度太多".into()));}
         if let Some(c)=g.clusters.iter().find(|c|c.states.len()>MAXN||c.classes.len()>MOST_CLASSES){return Err(beyond(format!("子空间 {} 个态、{} 类光子",c.states.len(),c.classes.len())));}

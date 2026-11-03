@@ -126,10 +126,11 @@
 //! cluster's coherent channel pairs (the readout's Y; the other pairs beat and average out), so that
 //! ‖y‖² is the survival probability, and
 //! - H̃'s Hermitian part is H_eff's and that of H^(4) = V†W3 − ½[X, V†R], on the entries the second
-//!   order keeps at their beat Ω = θ_a − θ_b + ν (ν the monomial's carriers'): below the cut, or a kept
-//!   coupling's residual on the entry. Another entry beats faster than the time step follows (between
-//!   F = 1 and F = 2 at the hyperfine splitting) and is left out like a folded coupling, its mixing
-//!   (b/(|Ω| − l0))² booked, b = S l0 the size of H^(4);
+//!   order would keep a coupling at their beat Ω = θ_a − θ_b + ν (ν the monomial's carriers'): static, below
+//!   the cut, a kept coupling's residual on the entry, or one the rule does not let fold (`fourth_keeps`).
+//!   Another entry beats faster than the time step follows (between F = 1 and F = 2 at the hyperfine
+//!   splitting) and is left out like a folded coupling, its mixing (b/(|Ω| − l0))² booked, b = S l0 the
+//!   size of H^(4);
 //! - its anti-Hermitian part is −(i/2) Σ L̃†L̃, the jumps' own -- the norm's loss is their rate by
 //!   construction --, L̃ = C_a (R_c (1 − ½X) − W3^c), W3^c the triples at δ_c (a photon of carrier c);
 //! - after a jump the bare state f has the slow part Π f, Π = 1 + ½X + YW,
@@ -1193,6 +1194,29 @@ impl Ground{
         let statics=self.excited_items.iter().filter(|x|x.folded&&matches!(x.kind,ExcitedKind::Static{..})).map(|x|x.estimate).fold(0.,f64::max);
         (far,near,statics)
     }
+    /// A carrier's saturation on a cluster's ground states over the light's pattern: the largest of their
+    /// folded drives' totals (`ExcitedItem::mean`).
+    pub fn carrier_saturation(&self,c:usize,cl:&Cluster)->f64{
+        cl.states.iter().map(|&b|self.excited_items.iter().filter(|x|x.folded).filter_map(|x|match x.kind{ExcitedKind::Drive(d)if d.carrier==c&&d.ground==b=>Some(x.mean),_=>None}).sum::<f64>()).fold(0.,f64::max)
+    }
+    /// The carriers the fourth order takes on a cluster, those beyond the budget's square (a carrier within it
+    /// adds at most that relatively to the others' rates, its bound in the ledger's quartic item, model.rs
+    /// `Model::quartic`), and the size of its H^(4), b = S l0 (S their saturations' sum, l0 the eliminated
+    /// generator's scale).
+    pub fn fourth_carriers(&self,cl:&Cluster)->(Vec<usize>,f64){
+        let on:Vec<usize>=(0..self.carriers.len()).filter(|&c|self.carrier_saturation(c,cl)>BUDGET*BUDGET).collect();
+        let b=on.iter().map(|&c|self.carrier_saturation(c,cl)).sum::<f64>()*self.generator_scale;(on,b)
+    }
+    /// Whether the fourth order keeps a cluster's entry (x, y) at its beat Ω (# Fourth order): where the second
+    /// order would keep a coupling at it -- static to the frames' round-off, below the cut, at a kept coupling's
+    /// residual on the entry, or one the rule does not let fold (|Ω| < FOLD_DISTANCE l0, or its mixing
+    /// b/(|Ω| − l0) beyond the budget, b the size of H^(4)).
+    pub fn fourth_keeps(&self,cl:&Cluster,x:usize,y:usize,omega:f64,b:f64)->bool{
+        let w=omega.abs();let l0=self.generator_scale;
+        let round_off=64.*f64::EPSILON*2.*(cl.frames.iter().chain(&cl.excited_frames).map(|f|f.abs()).fold(0.,f64::max)+self.carriers.iter().map(|c|c.detuning.abs()).fold(0.,f64::max));
+        w<=round_off||w<self.cut||!(w>=FOLD_DISTANCE*l0&&mixing(omega,b,l0).powi(2)<=BUDGET)
+            ||cl.groups.iter().any(|gr|gr.entries.iter().any(|&(a,c,r)|a==x&&c==y&&(r-omega).abs()<=round_off))
+    }
     /// The fourth-order fold of a cluster of ground states at r and t (module documentation, # Fourth
     /// order), dense: on the slow invariant subspace Ψ = (x, W x) of the no-jump generator, W = −R + W3,
     /// W3 per triple of carriers (c1, c2, c4) at ω = δ_c1 − δ_c2 + δ_c4, W3[:,b] = G_b(ω) Σ_b′ R_c1[:,b′](V_c2†R_c4)_b′b,
@@ -1210,10 +1234,8 @@ impl Ground{
         let v:Vec<Dense>=self.carriers.iter().map(|c|combine(&c.beams,&a,&self.folded)).collect();
         let rc:Vec<Dense>=self.carriers.iter().map(|c|combine(&c.beams,&a,&e.responses)).collect();
         let delta=|c:usize|self.carriers[c].detuning;let st=&cl.states;let theta=&cl.frames;
-        // An entry's beat Ω is kept where the second order keeps a coupling at it (model.rs `FourthLayout`).
-        let round_off=64.*f64::EPSILON*2.*(theta.iter().map(|x|x.abs()).fold(0.,f64::max)+self.carriers.iter().map(|c|c.detuning.abs()).fold(0.,f64::max));
-        let kept:Vec<(usize,usize,f64)>=cl.groups.iter().flat_map(|gr|gr.entries.iter().copied()).collect();
-        let keep=|i:usize,j:usize,omega:f64|omega.abs()<=round_off||omega.abs()<self.cut||kept.iter().any(|&(x,y,w)|x==i&&y==j&&(w-omega).abs()<=round_off);
+        // An entry's beat Ω is kept where the second order would keep a coupling at it (`fourth_keeps`).
+        let size=self.fourth_carriers(cl).1;let keep=|i:usize,j:usize,omega:f64|self.fourth_keeps(cl,i,j,omega,size);
         let resolvent=|b:usize,w:f64|denominator(&e.excited_hamiltonian,-e.energies[b]-w);
         // W3 per triple on the cluster's columns (ne × n).
         let mut w3:Vec<Dense>=vec![];
