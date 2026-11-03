@@ -12,9 +12,8 @@ fn main(){
     let name=arg(1,"TW2");let count:u64=arg(2,"64").parse().unwrap();let t_end:f64=arg(3,"1000").parse().unwrap();
     let request=scene::scene(&name);
     let model=Model::new(&request).unwrap();let initial=Initial::new(&model,&request).unwrap();
-    let(block,state,_)=*initial.states.iter().max_by(|a,b|a.2.total_cmp(&b.2)).unwrap();
-    let frequencies=model.trap_frequencies(block,state);
-    let settings=Settings{dt:0.1,free:[true;3],escape_intensity:1./20.,frequencies,truncation:f64::EPSILON,average:false};let engine=Engine{model:&model,settings:settings.clone()};
+    let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();
+    let settings=Settings::new(0.1,&initial.traps[reference],f64::EPSILON,false);let engine=Engine{model:&model,settings:settings.clone()};
     // States along trajectories (dt 0.1), every 10 us.
     let mut states=vec![];
     for index in 0..count{let mut t=initial_trajectory(&model,&settings,&initial,3,index,Stratum::single(index));

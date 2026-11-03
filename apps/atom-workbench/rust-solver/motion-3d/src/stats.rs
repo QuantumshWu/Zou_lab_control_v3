@@ -5,8 +5,10 @@ use crate::STATES;
 /// kB/ħ in rad/us per μK: a temperature T as the rate kT/ħ.
 pub const KT_PER_UK:f64=1.380649e-23/1.0545718176461565e-34*1e-12;
 
-/// Sums over the atoms still held at one output time: their number, Σκ, Σκ², Σr, Σr² per axis and
-/// Σ populations, with the number of trajectories they come from.
+/// Sums over the atoms still held at one output time: their number, Σκ, Σκ², Σr, Σr² per axis,
+/// Σ populations, Σ of the Gaussian beams' profile error at the atoms (model.rs
+/// `Model::profile_error`) and Σ (kv/σ)² (`Model::doppler_ratio`), with the number of trajectories
+/// they come from.
 #[derive(Clone,Debug)]
 pub struct Sums{
     pub trajectories:f64,
@@ -16,13 +18,16 @@ pub struct Sums{
     pub position:[f64;3],
     pub position2:[f64;3],
     pub populations:[f64;STATES],
+    pub profile:f64,
+    pub doppler:f64,
 }
 impl Sums{
-    pub fn zero()->Sums{Sums{trajectories:0.,held:0.,kappa:[0.;3],kappa2:[0.;3],position:[0.;3],position2:[0.;3],populations:[0.;STATES]}}
+    pub fn zero()->Sums{Sums{trajectories:0.,held:0.,kappa:[0.;3],kappa2:[0.;3],position:[0.;3],position2:[0.;3],populations:[0.;STATES],profile:0.,doppler:0.}}
     fn combine(&self,o:&Sums,sign:f64)->Sums{
         let mut out=self.clone();out.trajectories+=sign*o.trajectories;out.held+=sign*o.held;
         for a in 0..3{out.kappa[a]+=sign*o.kappa[a];out.kappa2[a]+=sign*o.kappa2[a];out.position[a]+=sign*o.position[a];out.position2[a]+=sign*o.position2[a];}
         for(x,y)in out.populations.iter_mut().zip(&o.populations){*x+=sign*y;}
+        out.profile+=sign*o.profile;out.doppler+=sign*o.doppler;
         out
     }
 }
@@ -37,9 +42,9 @@ impl Group{
     /// Another group's sums added in: the two as one group.
     pub fn merge(&mut self,o:&Group){for(s,x)in self.sums.iter_mut().zip(&o.sums){*s=s.combine(x,1.);}}
     /// One atom held at output i: its populations there and its motion's means about it -- κ, κ², r
-    /// and r² per axis, at the output time or over a window around it.
-    pub fn add(&mut self,i:usize,motion:&[[f64;4];3],populations:&[f64;STATES]){
-        let s=&mut self.sums[i];s.held+=1.;
+    /// and r² per axis, at the output time or over a window around it -- and its profile error.
+    pub fn add(&mut self,i:usize,motion:&[[f64;4];3],populations:&[f64;STATES],profile:f64,doppler:f64){
+        let s=&mut self.sums[i];s.held+=1.;s.profile+=profile;s.doppler+=doppler;
         for a in 0..3{s.kappa[a]+=motion[a][0];s.kappa2[a]+=motion[a][1];s.position[a]+=motion[a][2];s.position2[a]+=motion[a][3];}
         for(x,p)in s.populations.iter_mut().zip(populations){*x+=p;}
     }
@@ -66,6 +71,9 @@ pub struct Estimate{
     pub loss_error:f64,
     /// ⟨r²⟩ per axis (um²).
     pub position2:[f64;3],
+    /// The held atoms' mean profile error and mean (kv/σ)² of the first order in the Doppler shift.
+    pub profile:f64,
+    pub doppler:f64,
     /// The trajectories behind the estimate.
     pub trajectories:f64,
 }
@@ -84,7 +92,7 @@ pub fn estimate(g:&Sums,s:&Scales)->Estimate{
         let x2=g.position2[a]/n;e.position2[a]=x2;let w=s.frequencies[a];
         e.occupation[a]=if w>0.{(second*s.hbar_over_mass/2.+w*w/s.hbar_over_mass*x2/2.)/w-0.5}else{0.};
     }
-    e.temperature_total=e.temperature.iter().sum::<f64>()/3.;
+    e.temperature_total=e.temperature.iter().sum::<f64>()/3.;e.profile=g.profile/n;e.doppler=g.doppler/n;
     e.populations=g.populations.iter().map(|p|p/n).collect();
     e
 }

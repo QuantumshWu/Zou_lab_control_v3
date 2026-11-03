@@ -14,29 +14,29 @@ fn main(){
     let dt:f64=args.get(3).map_or(0.2,|s|s.parse().unwrap());let truncation:f64=args.get(4).map_or(f64::EPSILON,|s|s.parse().unwrap());
     let request=scene::scene(&name);
     let model=Model::new(&request).unwrap();
-    let settings=Settings{dt,free:[true;3],escape_intensity:1e-2,frequencies:[0.;3],truncation,average:false};
+    let trap=atom_motion_3d::model::Trap{axes:[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],frequencies:[0.;3],lab:[0.;3]};let mut settings=Settings::new(dt,&trap,truncation,false);settings.loss=false;
     let initial=Initial::new(&model,&request).unwrap();
     let mut t=initial_trajectory(&model,&settings,&initial,1,0,Stratum::single(0));
-    let n=model.dimension(t.block);
+    let n=model.dimension(t.cluster);
     let clock=Instant::now();let mut sink=0.;
     for i in 0..steps{let p=model.point([t.r[0]+1e-6*i as f64,t.r[1],t.r[2]],t.kappa);sink+=p.fields[0].e[0].re;}
     let point=clock.elapsed().as_secs_f64()/steps as f64;
     let p=model.point(t.r,t.kappa);
     let clock=Instant::now();
-    for _ in 0..steps{let l=model.local(t.block,&p);sink+=l.hamiltonian[0].re;}
+    for _ in 0..steps{let l=model.local(t.cluster,&p,0.);sink+=l.hamiltonian[0].re;}
     let local=clock.elapsed().as_secs_f64()/steps as f64;
-    let l=model.local(t.block,&p);
+    let l=model.local(t.cluster,&p,0.);
     let clock=Instant::now();
     for _ in 0..steps{let mut psi=t.psi;propagate(&l.hamiltonian,n,0.5*dt,&mut psi,truncation);sink+=psi[0].re;}
     let prop=clock.elapsed().as_secs_f64()/steps as f64;
     let clock=Instant::now();
-    for _ in 0..steps{let f=model.force(t.block,&p,&l,&t.psi);sink+=f[0];}
+    for _ in 0..steps{let f=model.force(t.cluster,&l,&t.psi);sink+=f[0];}
     let force=clock.elapsed().as_secs_f64()/steps as f64;
     let clock=Instant::now();
-    for _ in 0..steps/10{let ph=model.photons(t.block,&p,&t.psi);sink+=ph.amplitude[0][0][0].re;}
+    for _ in 0..steps/10{let ph=model.photons(t.cluster,&p,&t.psi,0.,None);sink+=ph.amplitude[0].0[0][0].re;}
     let photons=clock.elapsed().as_secs_f64()/(steps/10) as f64;
     let clock=Instant::now();
-    for _ in 0..steps/10{let q=model.populations(t.block,&p,&t.psi);sink+=q[0];}
+    for _ in 0..steps/10{let q=model.populations(t.cluster,&p,&t.psi,0.);sink+=q[0];}
     let populations=clock.elapsed().as_secs_f64()/(steps/10) as f64;
     let engine=Engine{model:&model,settings};
     let clock=Instant::now();

@@ -25,13 +25,13 @@ fn main(){
     let request=scene::scene(&name);
     let mut model=Model::new(&request).unwrap();model.doppler=kind!="one";
     let index=request.states.iter().position(|s|s=="ground-2-2").unwrap();let b22=model.ground.ground_states.iter().position(|&i|i==index).unwrap();
-    let(block22,state22)=model.blocks.iter().enumerate().find_map(|(k,blk)|blk.states.iter().position(|&x|x==b22).map(|x|(k,x))).unwrap();
-    let frequencies=model.trap_frequencies(block22,state22);
+    let(block22,state22)={let k=model.ground.cluster[b22];(k,model.ground.clusters[k].position(b22).unwrap())};
+    let trap=model.trap(block22,state22);let frequencies=trap.lab;
     println!("{name}: trap {:?} kHz (frame axes: lab y, z, x), table nodes error {:.1e}",frequencies.map(|f|f/std::f64::consts::TAU*1e3),model.table_error);
     // Optional: the free axes (a mask "yzx" of 0/1) and the harmonic flow (flow|drift).
     let mask:Vec<bool>=arg(6,"111").chars().map(|c|c=='1').collect();let free=[mask[0],mask[1],mask[2]];
     let flow=arg(7,"flow")=="flow";
-    let settings=Settings{dt,free,escape_intensity:1./20.,frequencies:if flow{frequencies}else{[0.;3]},truncation:f64::EPSILON,average:false};
+    let mut settings=Settings::new(dt,&trap,f64::EPSILON,false);settings.free=free;if !flow{settings.lab=[0.;3];settings.frequencies=[0.;3];}
     let initial=Initial::new(&model,&request).unwrap();
     let interval=10.;let steps=(interval/dt).round() as usize;let outputs=(t_end/interval).round() as usize+1;
     let clock=std::time::Instant::now();
@@ -58,7 +58,7 @@ fn main(){
             // The mechanical energy per atom (kinetic plus the reference state's trap potential, μK): it
             // rises by 2 E_r per scattering whatever the trap's anharmonicity (the absorbed ħk along x and
             // the emitted photon, ⟨n²⟩ = 1 summed over the axes).
-            let(block22,state22)=model.blocks.iter().enumerate().find_map(|(k,blk)|blk.states.iter().position(|&x|x==b22).map(|x|(k,x))).unwrap();
+            let(block22,state22)={let k=model.ground.cluster[b22];(k,model.ground.clusters[k].position(b22).unwrap())};
             let energy:Vec<f64>=outcome.samples.iter().map(|atoms|atoms.iter().map(|(r,kappa)|
                 (0..3).map(|a|model.hbar_over_mass*kappa[a]*kappa[a]/2.).sum::<f64>()+model.potential(block22,state22,*r)).sum::<f64>()/atoms.len() as f64/KT_PER_UK).collect();
             let at:Vec<f64>=listed.iter().map(|&i|times[i]).collect();

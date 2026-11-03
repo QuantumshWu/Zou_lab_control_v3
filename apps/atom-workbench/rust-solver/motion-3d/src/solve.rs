@@ -1,7 +1,7 @@
-﻿//! A 3D motion solve: the model, the time step from a step-doubling check, then trajectories in
-//! sequential batches until the standard errors meet the targets at every output time (as QuTiP's
-//! mcsolve does with its target tolerance), each batch's result handed out as a checkpoint with
-//! the wall time the remaining trajectories will take.
+﻿//! A 3D motion solve: the model, its approximations' ledger, the time step from a step-doubling
+//! check, then trajectories in sequential batches until the standard errors meet the targets at
+//! every output time (as QuTiP's mcsolve does with its target tolerance), each batch's result handed
+//! out as a checkpoint with the wall time the remaining trajectories will take.
 //!
 //! # Targets
 //! The semiclassical method is accurate to about `TEMPERATURE_TARGET` in T and
@@ -9,6 +9,18 @@
 //! standard errors of every population and the loss lie within those targets at every output
 //! time, and of every temperature (each axis, relative) at the output times in the regime --
 //! outside it the method's own error is larger and the temperature is a reference only.
+//!
+//! # Ledger
+//! Every a-priori approximation's estimate enters the solve's ledger (ledger.rs), against the
+//! budget, the a-priori share of the population target. The model's are fixed before the run: the
+//! far components' and the couplings' folds (ground.rs), the quartic van Vleck shifts left out, the
+//! Gaussian beams taken at their peak and the tables (model.rs). Two are measured along the
+//! trajectories: the elimination's η², each output's mean excited population (the local expansion
+//! parameter, ⟨Y⟩ of each atom's state), and the beams' profiles at the atoms. The first order in
+//! the Doppler shift takes what the budget leaves after the model's and the pilot's elimination
+//! (the exact response beyond it, engine.rs) -- or, where the elimination alone exceeds the budget,
+//! the budget on its own, as no refinement can bring that output within it. The output times whose
+//! total exceeds the budget are flagged (`Ledger::flagged`).
 //!
 //! # Time step
 //! The trap's harmonic part is moved exactly (engine.rs); what the step must resolve is the light's
@@ -19,12 +31,12 @@
 //! sqrt(η) per step, η the a-priori share), and from each one step of dt is compared with two of
 //! dt/2, without jumps. The step is accepted when (4/3 of) the differences meet their shares:
 //! - the internal state's populations, summed over the steps between two jumps (the pilot's mean
-//!   waiting time), within η ε of the app's population tolerance ε -- the internal state's lag
-//!   carries the friction, so this also keeps the temperature's step error near η of its target;
+//!   waiting time), within η ε of the population target ε -- the internal state's lag carries the
+//!   friction, so this also keeps the temperature's step error near η of its target;
 //! - the step's light impulse, relative, within η of the temperature target.
 //! Both scale as dt², so a step that misses is shrunk by the square root of its excess and checked
 //! again; one that meets them with room is grown the same way. The step's exponentials are summed
-//! to a share η of its own population budget, η ε dt/waiting, instead of to double precision.
+//! to a share η of its own population budget, η² ε dt/waiting, instead of to double precision.
 //!
 //! # Batches
 //! A batch is cut into two groups per thread (lib.rs `Stratum`): each group's initial states are a
@@ -45,12 +57,13 @@
 //! is in the regime k_B T ≥ `CLASSICAL` ħω on every axis (with T the engine's own, which lies below
 //! the quantum T where the method cools too far, so the mark comes early rather than late).
 use crate::engine::{Engine,Settings,Trajectory};
-use crate::model::Model;
-use crate::ledger::Ledger;
+use crate::ground::Kind;
+use crate::ledger::{Ledger,BUDGET};
+use crate::model::{Model,Trap};
 use crate::stats::{summarize,Estimate,Scales,KT_PER_UK};
 use crate::{sample_states,simulate,Initial,Outcome};
 use crate::{Complex,Request,STATES};
-use atom_population_core::lattice::accuracy::{A_PRIORI_SHARE,POPULATION_TOLERANCE};
+use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
 use std::time::Instant;
 
 /// The method's accuracy targets: T relative, populations and loss absolute.
@@ -58,8 +71,6 @@ pub const TEMPERATURE_TARGET:f64=0.10;
 pub const POPULATION_TARGET:f64=0.05;
 /// Statistics are run until this many standard errors lie within the targets.
 pub const CONFIDENCE:f64=2.;
-/// The trap ends where its depth has fallen to 1/ESCAPE of the focus's (the 1D engine's choice).
-pub const ESCAPE:f64=20.;
 /// The validated regime: k_B T ≥ CLASSICAL ħω along every axis (T the engine's own), where the 1D
 /// and 2D quantum references put T within about 10 % (validation, see the module documentation).
 pub const CLASSICAL:f64=4.;
@@ -70,13 +81,13 @@ pub const MOST_TRAJECTORIES:u64=1<<14;
 /// allows while the jackknife keeps at least that many.
 fn group(count:u64,threads:u64)->u64{(count/(2*threads)).max(1)}
 
-pub const NOT_CONFINED:&str="沿某个方向没有约束原子的势阱：3D 运动计算光镊中的单个原子，需要聚焦在原子处的光（光镊）";
+pub const NOT_CONFINED:&str="光镊不约束原子：3D 运动计算光镊中的单个原子，需要在焦点处形成势阱的光镊";
 
 /// Distributions along one axis on one grid, at some of the times.
 #[derive(Clone,Debug,PartialEq)]
 pub struct Distributions{pub grid:Vec<f64>,pub samples:Vec<usize>,pub probabilities:Vec<Vec<f64>>}
 
-/// A 3D motion solve's result, at every time of the request (per axis: the request's frame).
+/// A 3D motion solve's result, at every time of the request (per lab axis).
 /// Everything but `loss_probability` describes the atom still held.
 #[derive(Clone,Debug)]
 pub struct Solution{
@@ -89,7 +100,7 @@ pub struct Solution{
     pub temperature_total_uk:Vec<f64>,
     pub temperature_total_errors_uk:Vec<f64>,
     pub mean_velocity_mps:Vec<[f64;3]>,
-    /// ω_a/2π (kHz) at the focus of the reference state's trap, and n̄ per axis relative to it.
+    /// ω_a/2π (kHz) at the focus of the reference state's trap per lab axis, and n̄ per axis relative to it.
     pub trap_frequency_khz:[f64;3],
     pub mean_occupation:Vec<[f64;3]>,
     pub loss_probability:Vec<f64>,
@@ -141,37 +152,84 @@ fn histograms(samples:&[Vec<([f64;3],[f64;3])>],listed:&[usize],value:&dyn Fn(&(
     Distributions{grid,samples:listed.to_vec(),probabilities}
 }
 
+/// A time in the words of the app (μs below a millisecond, ms above).
+fn when(us:f64)->String{if us<1e3{format!("{us:.0} μs")}else{format!("{:.2} ms",us/1e3)}}
+
+/// The model's approximations (fixed before the run): the far components' fold, the couplings'
+/// fold, the quartic van Vleck shifts left out, the Gaussian beams' profiles and the tables.
+fn model_ledger(model:&Model,request:&Request)->Ledger{
+    let g=&model.ground;let mut ledger=Ledger::new();let(far,near)=g.fold_estimates();
+    let folded=g.components.iter().filter(|c|c.folded&&c.size>0.).count();
+    ledger.add("远失谐分量（光镊、反旋项）",far,format!("二阶折叠（van Vleck 能移），{folded} 个分量"));
+    let(kept,fold)=g.items.iter().filter(|i|!matches!(i.kind,Kind::Photons{..})).fold((0,0),|(k,f),i|if i.folded{(k,f+1)}else{(k+1,f)});
+    let sizes:Vec<String>=g.clusters.iter().map(|c|c.states.len().to_string()).collect();
+    ledger.add("基态之间的耦合（塞曼子能级、拉曼项、两组光的拍频）",near,format!("{fold} 对二阶折叠，{kept} 对显式保留；子空间 {}",sizes.join("+")));
+    if model.quartic>0.{ledger.add("经多束光的四阶能移",model.quartic,"略去（一阶折叠）".into());}
+    for &(l,error,_)in &model.profiles{ledger.add(&format!("「{}」的光强分布",request.beams[l].name),error,"按峰值强度的平面波".into());}
+    for &l in &model.focused[1..]{ledger.add(&format!("「{}」的光强分布",request.beams[l].name),0.,"按位置插值（强度维度）".into());}
+    ledger.add("聚焦光的光强插值表",model.table_error,"三次插值".into());
+    ledger
+}
+
+/// The ledger of a solve's estimates so far: the model's, the run's largest first-order Doppler
+/// term and, per output, the elimination's η² and the profiles at the atoms; the outputs whose total
+/// exceeds the budget flagged.
+fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance:f64)->Ledger{
+    let mut ledger=base.clone();let g=&model.ground;
+    let excited:Vec<f64>=estimates.iter().map(|e|g.excited_states.iter().map(|&i|e.populations[i]).sum::<f64>()).collect();
+    let profiles:Vec<f64>=estimates.iter().map(|e|e.profile).collect();let dopplers:Vec<f64>=estimates.iter().map(|e|e.doppler).collect();
+    let largest=|v:&[f64]|v.iter().skip(1).copied().fold(0.,f64::max);
+    ledger.add("消去激发态",largest(&excited),"零阶绝热消去（激发态布居 η²）".into());
+    ledger.add("多普勒与反冲频移",largest(&dopplers),format!("一阶（kv/σ）²；单步超过 {:.1e} 时用精确响应",allowance));
+    if !model.profiles.is_empty(){ledger.add("聚焦光在原子处的强度（沿轨迹）",largest(&profiles),"按峰值强度的平面波".into());}
+    // The outputs beyond the budget.
+    let fixed=base.used()-model.profiles.iter().map(|p|p.1).sum::<f64>();
+    let profile=|i:usize|model.profiles.iter().map(|p|p.1).sum::<f64>().max(profiles[i]);
+    let over:Vec<usize>=(1..estimates.len()).filter(|&i|fixed+profile(i)+dopplers[i]+excited[i]>BUDGET).collect();
+    if !over.is_empty(){
+        let(first,last)=(over[0],*over.last().unwrap());
+        let span=if over.len()==last-first+1&&last==estimates.len()-1{format!("{} 起",when(times[first]))}else{format!("{} 至 {} 之间 {} 个时刻",when(times[first]),when(times[last]),over.len())};
+        let worst=over.iter().copied().max_by(|&a,&b|excited[a].total_cmp(&excited[b])).unwrap();
+        ledger.flagged=Some(format!("{span}超出近似误差预算 {:.2}%：消去激发态的误差（激发态布居）最大 {:.2}%，合计 {:.2}%",
+            100.*BUDGET,100.*excited[worst],100.*(fixed+profile(worst)+dopplers[worst]+excited[worst])));
+    }
+    ledger
+}
+
 /// Solves a request. `checkpoint` receives every batch's complete result and the estimated wall
 /// time (ms) the rest will take.
 pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))->Result<Solution,String>{
     let model=Model::new(request)?;
-    if model.focused.is_empty(){return Err(NOT_CONFINED.into());}
-    let ledger=approximations(&model,request)?;
     let initial=Initial::new(&model,request)?;
-    // The reference state: the largest initial population; its trap sets ω per axis and the escape.
-    let(block,state,_)=*initial.states.iter().max_by(|a,b|a.2.total_cmp(&b.2)).unwrap();
-    let frequencies=model.trap_frequencies(block,state);
-    if frequencies.iter().any(|&w|!(w>0.)){return Err(NOT_CONFINED.into());}
+    // The reference state: the largest initial population; its trap sets ω per axis.
+    let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();
+    let trap:Trap=initial.traps[reference];
+    if trap.frequencies.iter().any(|&w|!(w>0.)){return Err(NOT_CONFINED.into());}
     let times=&request.times_us;let outputs=times.len();
     if outputs<2||times[0]!=0.{return Err("A 3D motion solve needs at least two times, the first at 0".into());}
     let interval=times[1]-times[0];
     if times.windows(2).any(|w|((w[1]-w[0])-interval).abs()>1e-9*interval){return Err("A 3D motion solve needs evenly spaced times".into());}
-    let escape=1./ESCAPE;
-    let listed=listed(outputs);let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies};
+    let listed=listed(outputs);let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
     let seed=0x3D_5EED;
+    let base=model_ledger(&model,request);
     // The first step: the light pattern's phase k_max v_T per step at sqrt(η × the temperature
     // target), or without light the trap's own ω.
     let thermal=(KT_PER_UK*request.temperature_uk*model.hbar_over_mass).sqrt();
     let pattern=model.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max)*thermal;
-    let rate=if pattern>0.{pattern}else{frequencies.iter().copied().fold(0.,f64::max)};
+    let rate=if pattern>0.{pattern}else{trap.frequencies.iter().copied().fold(0.,f64::max)};
     let mut steps=((interval*rate/(A_PRIORI_SHARE*TEMPERATURE_TARGET).sqrt()).ceil() as usize).max(1);
     let threads=rayon::current_num_threads() as u64;let pilot=2*threads;
-    let settings=|steps:usize,truncation:f64|Settings{dt:interval/steps as f64,free:[true;3],escape_intensity:escape,frequencies,truncation,average:true};
     let duration=times[outputs-1];
-    let(states,jumps)=sample_states(&model,&settings(steps,f64::EPSILON),&initial,seed,pilot,steps,outputs);
+    let plain=|steps:usize,truncation:f64|Settings::new(interval/steps as f64,&trap,truncation,true);
+    let(states,jumps)=sample_states(&model,&plain(steps,f64::EPSILON),&initial,seed,pilot,steps,outputs);
     let waiting=pilot as f64*duration/(jumps.max(1) as f64);
-    // The exponentials are summed to a share η of the step's own population budget, η ε dt/waiting.
-    let settings=|steps:usize|{let dt=interval/steps as f64;settings(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TOLERANCE*dt/waiting)};
+    // The first order in the Doppler shift: what the budget leaves after the model and the pilot's
+    // elimination, or the budget itself where the elimination alone exceeds it.
+    let eta=states.iter().map(|t|{let p=model.point(t.r,t.kappa);let q=model.populations(t.cluster,&p,&t.psi,t.time);
+        model.ground.excited_states.iter().map(|&i|q[i]).sum::<f64>()}).sum::<f64>()/states.len().max(1) as f64;
+    let left=BUDGET-base.used()-eta;let allowance=if left>0.{left}else{BUDGET};
+    // The exponentials are summed to a share η of the step's own population budget, η² ε dt/waiting.
+    let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=allowance;s};
     for _ in 0..8{
         let engine=Engine{model:&model,settings:settings(steps)};let excess=step_excess(&engine,&states,waiting);
         let next=((steps as f64*excess.sqrt()).ceil() as usize).max(1);
@@ -187,9 +245,10 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
     let mut outcome=first;let mut done=pilot;let mut per_trajectory=wall/pilot as f64;
     loop{
         let mut estimates=summarize(&outcome.groups,&scales);start(&mut estimates[0],&model,&initial);
-        let ratio=worst_ratio(&estimates,frequencies);
+        let ratio=worst_ratio(&estimates,trap.lab);
         let needed=((done as f64*ratio*ratio).ceil() as u64).min(MOST_TRAJECTORIES);
-        let mut solution=assemble(&model,&estimates,&outcome,&listed,frequencies,done,dt,&request.initial_density,&ledger);
+        let ledger=ledger(&model,&base,&estimates,times,allowance);
+        let mut solution=assemble(&model,&estimates,&outcome,&listed,trap.lab,done,dt,&request.initial_density,ledger);
         if needed<=done{
             if ratio>1.{solution.reason=Some(format!("统计误差为目标的 {ratio:.1} 倍：轨迹数已达上限 {MOST_TRAJECTORIES}"));}
             return Ok(solution);
@@ -199,27 +258,9 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
         let clock=Instant::now();
         let more=simulate(&model,&settings,&initial,seed,done,next,group(next,threads),steps,outputs,&listed);
         per_trajectory=clock.elapsed().as_secs_f64()/next as f64;
-        outcome.groups.extend(more.groups);for(a,b)in outcome.samples.iter_mut().zip(more.samples){a.extend(b);}outcome.jumps+=more.jumps;
+        outcome.groups.extend(more.groups);for(a,b)in outcome.samples.iter_mut().zip(more.samples){a.extend(b);}outcome.jumps+=more.jumps;outcome.doppler=outcome.doppler.max(more.doppler);
         done+=next;
     }
-}
-
-/// The ledger of the model's a-priori approximations (ledger.rs): the far components' fold (each
-/// one's m²), the secular step's largest dropped micromotion ε² (the Raman terms between and within
-/// the hyperfine blocks), the elimination's η², the first order in the Doppler shift at the initial
-/// thermal velocity, (k v_T/σ_min)², and the intensity tables' interpolation.
-fn approximations(model:&Model,request:&Request)->Result<Ledger,String>{
-    let g=&model.ground;let report=g.report()?;let mut ledger=Ledger::new();
-    let folded:f64=g.components.iter().filter(|c|c.folded).map(|c|(c.size/(c.nu.abs()-g.l0).max(f64::MIN_POSITIVE)).powi(2)).sum();
-    ledger.add("远失谐分量（光镊、反旋项）",folded,format!("二阶折叠（van Vleck 能移），{} 个分量",g.components.iter().filter(|c|c.folded).count()));
-    let raman=report.largest().map_or(0.,|t|t.micromotion.powi(2));
-    ledger.add("超精细块间与两组光之间的拉曼项",raman,"久期近似：略去".into());
-    ledger.add("消去激发态",report.eta.powi(2),"零阶绝热消去".into());
-    let thermal=(KT_PER_UK*request.temperature_uk*model.hbar_over_mass).sqrt();
-    let k=model.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max);
-    ledger.add("多普勒与反冲频移",(k*thermal/report.pole).powi(2),"一阶".into());
-    ledger.add("聚焦光的光强插值表",model.table_error,"三次插值".into());
-    Ok(ledger)
 }
 
 /// The step-doubling excess of a step (module documentation): the largest of the internal state's
@@ -232,17 +273,18 @@ fn step_excess(engine:&Engine,states:&[Trajectory],waiting:f64)->f64{
     let richardson=4./3.;
     let accumulated=richardson*population/states.len().max(1) as f64*(waiting/dt).max(1.);
     let relative=if impulse>0.{richardson*difference/impulse}else{0.};
-    (accumulated/(A_PRIORI_SHARE*POPULATION_TOLERANCE)).max(relative/(A_PRIORI_SHARE*TEMPERATURE_TARGET))
+    (accumulated/(A_PRIORI_SHARE*POPULATION_TARGET)).max(relative/(A_PRIORI_SHARE*TEMPERATURE_TARGET))
 }
 
-/// t = 0 is the request's initial state, exactly: per axis T is its thermal Wigner temperature
+/// t = 0 is the request's initial state, exactly: per lab axis T is its thermal Wigner temperature
 /// T* = (ħω/2k_B) coth(ħω/2k_B T) in each initial state's trap (lib.rs `initial_trajectory`), the
 /// mean velocity zero -- the trajectories' estimates there carry only the sampling's error.
 fn start(e:&mut Estimate,model:&Model,initial:&Initial){
-    let kt=KT_PER_UK*initial.temperature_uk;let mut t=[0.;3];
-    for&(block,state,p)in &initial.states{
-        let w=model.trap_frequencies(block,state);
-        for a in 0..3{let half=w[a]/(2.*kt);t[a]+=p*if half>0.{initial.temperature_uk*half/half.tanh()}else{initial.temperature_uk};}
+    let kt=KT_PER_UK*initial.temperature_uk;let mut t=[0.;3];let _=model;
+    for(&(_,_,p),trap)in initial.states.iter().zip(&initial.traps){
+        // Per lab axis: the principal axes' thermal Wigner temperatures, weighted by their share of it.
+        for a in 0..3{for i in 0..3{let w=trap.frequencies[i];let half=w/(2.*kt);
+            t[a]+=p*trap.axes[i][a]*trap.axes[i][a]*if half>0.{initial.temperature_uk*half/half.tanh()}else{initial.temperature_uk};}}
     }
     e.temperature=t;e.temperature_error=[0.;3];e.mean_velocity=[0.;3];
     e.temperature_total=t.iter().sum::<f64>()/3.;e.temperature_total_error=0.;
@@ -251,11 +293,12 @@ fn start(e:&mut Estimate,model:&Model,initial:&Initial){
 /// The solution of the estimates so far.
 /// At t = 0 the populations are the initial state's, as the request gives them (the light acts
 /// after), and so are T and the mean velocity (`start`).
-fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],frequencies:[f64;3],trajectories:u64,dt:f64,initial:&[Complex],ledger:&Ledger)->Solution{
+fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],frequencies:[f64;3],trajectories:u64,dt:f64,initial:&[Complex],ledger:Ledger)->Solution{
     let hm=model.hbar_over_mass;
     let velocity=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.1[a]*hm));
     let position=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.0[a]));
     let first:Vec<f64>=(0..STATES).map(|i|initial[i*STATES+i].re).collect();
+    let sizes:Vec<String>=model.ground.clusters.iter().map(|c|c.states.len().to_string()).collect();
     Solution{
         populations:estimates.iter().enumerate().map(|(i,e)|if i==0{first.clone()}else{e.populations.clone()}).collect(),
         sample_errors:estimates.iter().enumerate().map(|(i,e)|if i==0{0.}else{e.population_errors.iter().fold(e.loss_error,|m,&x|m.max(x))}).collect(),
@@ -270,8 +313,8 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
         velocity,position,
         classical:estimates.iter().map(|e|classical(e,frequencies)).collect(),
         trajectories,time_step_us:dt,
-        method:format!("半经典 3D：经典质点（位置、动量）携带消去激发态后的基态内态，量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），{trajectories} 条轨迹，步长 {dt:.3} μs"),
+        method:format!("半经典 3D：经典质点（位置、动量）携带消去激发态后的基态内态（子空间 {}），量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），机械能高于势阱深度即算损失，{trajectories} 条轨迹，步长 {dt:.3} μs",sizes.join("+")),
         reason:None,
-        approximations:ledger.clone(),
+        approximations:ledger,
     }
 }

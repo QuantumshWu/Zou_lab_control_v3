@@ -13,8 +13,8 @@ fn main(){
     let args:Vec<String>=std::env::args().collect();let arg=|i:usize,d:&str|args.get(i).cloned().unwrap_or(d.into());
     let name=arg(1,"TW2_3D");let count:u64=arg(2,"1024").parse().unwrap();let t_end:f64=arg(3,"300").parse().unwrap();let dt:f64=arg(4,"0.227").parse().unwrap();
     let request=scene::scene(&name);let model=Model::new(&request).unwrap();let initial=Initial::new(&model,&request).unwrap();
-    let(block,state,_)=*initial.states.iter().max_by(|a,b|a.2.total_cmp(&b.2)).unwrap();let frequencies=model.trap_frequencies(block,state);
-    let settings=|average:bool|Settings{dt,free:[true;3],escape_intensity:1./20.,frequencies,truncation:f64::EPSILON,average};
+    let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();let trap=initial.traps[reference];let frequencies=trap.lab;
+    let settings=|average:bool|Settings::new(dt,&trap,f64::EPSILON,average);
     let interval=20.;let steps=(interval/dt).round() as usize;let outputs=(t_end/interval).round() as usize+1;
     let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies};
     for(group,average)in [(1,false),(32,false),(1,true),(32,true)]{
