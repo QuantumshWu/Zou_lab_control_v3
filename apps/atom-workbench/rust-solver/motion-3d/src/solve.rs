@@ -327,7 +327,7 @@ fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance
         item.action=format!("{}；计入沿轨迹实测的饱和参数 2η²{}（先验估计 {:.2}%{}）{}",item.action,if model.fourth{" 的平方"}else{""},100.*charge,if met>charge{"，实测高于先验估计"}else{""},
             if model.fourth{"；温度仍计 2η²（力按二阶折叠）"}else{""});item.estimate=met;
     }
-    let peak:f64=model.profiles.iter().map(|p|p.1).sum();let fixed=base.used()-peak-charge;
+    let peak:f64=model.profiles.iter().map(|p|p.1).sum();let fixed=base.used()-peak-charge-cut(base);
     let apriori:Vec<[f64;2]>=(0..estimates.len()).map(|i|if i==0{[0.;2]}else{measured[i].map(|m|fixed+peak.max(profiles[i])+dopplers[i]+m)}).collect();
     let accounts=Accounts{apriori,excited:measured,bias};
     // The outputs beyond a target: (output, the quantity, its total, the a-priori share, the statistics).
@@ -340,7 +340,10 @@ fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance
     // population target, light near resonance somewhere the atoms go -- the measured η² can miss it.
     let resonance=(model.resonance>POPULATION_TARGET).then(||format!("光在原子所到之处接近共振：消去激发态的先验界（基态的激发态权重）达 {:.0}%（目标 {:.0}%），近共振处消去激发态不成立",
         100.*model.resonance,100.*POPULATION_TARGET));
-    ledger.flagged=resonance;
+    // The initial ensemble's cut beyond the budget, on its own: the loss and the populations depend on it.
+    let share=cut(base);
+    let initial=(share>BUDGET).then(||format!("初始热分布有 {:.0}% 落在势阱区之外（丢失与布居依赖这一截断）",100.*share));
+    ledger.flagged=match(resonance,initial){(Some(r),Some(i))=>Some(format!("{r}；{i}")),(r,i)=>r.or(i)};
     if !over.is_empty(){
         let(first,last_over)=(over[0].0,over[over.len()-1].0);
         let span=if over.len()==last_over-first+1&&last_over==estimates.len()-1{format!("{} 起",when(times[first]))}
@@ -411,35 +414,40 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let pilot_harmonic=Harmonic::new(&pilot_candidate.model,&piloting(steps),&pilot_candidate.initial,steps,outputs);
     let(pilot_states,pilot_jumps,pilot_groups)=sample_states(&pilot_candidate.model,&piloting(steps),&pilot_candidate.initial,seed,pilot,steps,outputs,&pilot_harmonic);
     let charge=measured_charge(&pilot_candidate.model,&pilot_candidate.model,&pilot_states);pilot_candidate.charged(charge);
+    // The targets the fold's choice weighs (`Binding`): the populations' always, T's where the pilot's atoms
+    // reach the method's regime -- elsewhere T is a reference only, and its charge must not choose.
+    let binds=[true,Binding::of(&pilot_states,pilot_candidate.model.hbar_over_mass,trap.lab).temperature];
+    // The trajectories `rooms` need relative to `reference`'s over the binding targets.
+    let need=|reference:&[f64;2],rooms:&[f64;2]|(0..2).filter(|&k|binds[k]).map(|k|if rooms[k]>0.{(reference[k]/rooms[k]).powi(2)}else{f64::INFINITY}).fold(0.,f64::max);
     let pilot_waiting=pilot as f64*duration/(pilot_jumps.max(1) as f64);
     let mut reference:Option<Candidate>=None;
     // The ladder is walked for a fit only where the fold's charge is what keeps the pilot's model from
     // one: estimates the fold does not touch (an initial ensemble beyond its trap, say) leave no
     // candidate room, and every rung would only cost its model.
-    if !pilot_candidate.fits()&&pilot_candidate.fits_unfolded(){
+    if !pilot_candidate.fits(binds)&&pilot_candidate.fits_unfolded(binds){
         while let Some(mut c)=next_candidate(request,&mut ladder,false,&mut failed){
-            let charge=measured_charge(&pilot_candidate.model,&c.model,&pilot_states);c.charged(charge);let fits=c.fits();reference=Some(c);if fits{break;}
+            let charge=measured_charge(&pilot_candidate.model,&c.model,&pilot_states);c.charged(charge);let fits=c.fits(binds);reference=Some(c);if fits{break;}
         }
     }
     let better={
         let base=reference.as_ref().unwrap_or(&pilot_candidate);let mut better=None;
         // A pilot whose atoms were all lost before its first output measures no candidate's work.
-        if base.fits()&&!pilot_states.is_empty(){
+        if base.fits(binds)&&!pilot_states.is_empty(){
             let rooms=base.rooms;let mut best=1.;let mut work=1_f64;
             // The fewest trajectories any later candidate can need relative to the reference: its rooms
             // at no a-priori estimate at all.
-            let fewest=(0..2).map(|k|(rooms[k]/(TARGETS[k]-A_PRIORI_SHARE*TARGETS[k])).powi(2)).fold(0.,f64::max);
+            let fewest=need(&rooms,&TARGETS.map(|target|target-A_PRIORI_SHARE*target));
             // The reference's own folds at fourth order, their charges the same saturation's at that order
             // and their work timed as any candidate's -- built only where they can pay: their rooms at the
             // reference's other estimates leave fewer trajectories than it needs, its step being the second
             // order's and more.
             let charge=fold_charges(true,base.saturation);let others=base.others();
-            let promise=(0..2).map(|k|{let room=TARGETS[k]-others-charge[k]-A_PRIORI_SHARE*TARGETS[k];if room>0.{(rooms[k]/room).powi(2)}else{f64::INFINITY}}).fold(0.,f64::max);
+            let promise=need(&rooms,&std::array::from_fn(|k|TARGETS[k]-others-charge[k]-A_PRIORI_SHARE*TARGETS[k]));
             if fourth&&promise<best&&base.model.ground.clusters.iter().any(|c|c.excited.is_empty()){
                 if let Ok(mut c)=Candidate::new(request,base.allowance,true){
                     c.charged(base.saturation);
-                    if c.fits(){
-                        let trajectories=(0..2).map(|k|(rooms[k]/c.rooms[k]).powi(2)).fold(0.,f64::max);
+                    if c.fits(binds){
+                        let trajectories=need(&rooms,&c.rooms);
                         let(settings,limit)=(piloting(steps),best/trajectories);
                         let w=if !(counted_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,interval,pilot_waiting)<=limit){f64::INFINITY}
                             else{model_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,pilot as usize,interval,limit)};
@@ -452,8 +460,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             while work*fewest<best{
                 let Some(mut c)=next_candidate(request,&mut ladder,false,&mut failed)else{break};
                 let charge=measured_charge(&pilot_candidate.model,&c.model,&pilot_states);c.charged(charge);
-                if !c.fits(){continue;}
-                let trajectories=(0..2).map(|k|(rooms[k]/c.rooms[k]).powi(2)).fold(0.,f64::max);
+                if !c.fits(binds){continue;}
+                let trajectories=need(&rooms,&c.rooms);
                 let(settings,limit)=(piloting(steps),best/fewest);
                 work=work.max(if !(counted_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,interval,pilot_waiting)<=limit){f64::INFINITY}
                     else{model_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,pilot as usize,interval,limit)});
@@ -480,7 +488,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let waiting=pilot as f64*duration/(jumps.max(1) as f64);let horizon=waiting.min(duration);
     // The first order in the Doppler shift: what the budget leaves after the model's other estimates
     // (the fold's charge takes its own share of the target), or the budget itself where they exceed it.
-    let left=BUDGET-(base.used()-fold_charge(&model,model.ground.charge));let allowance=if left>0.{left}else{BUDGET};
+    let left=BUDGET-(base.used()-cut(&base)-fold_charge(&model,model.ground.charge));let allowance=if left>0.{left}else{BUDGET};
     // The exponentials are summed to a share η of the step's own population budget, η² ε dt/waiting.
     let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=allowance;s.horizon=waiting;s};
     // The step (module documentation): by the bound's rule first -- from the first step, the next by
@@ -506,7 +514,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let candidates:Vec<Check>=bound.iter().chain(&measured).filter(|c|c.met()).copied().collect();
     // The a-priori total the steps' costs take: the ledger's estimates with the fold's charge as the
     // pilot measured it.
-    let apriori=charge.map(|c|base.used()-fold_charge(&model,model.ground.charge)+c+pilot_beats*horizon);let parts=state_work(&model,&states);
+    let apriori=charge.map(|c|base.used()-cut(&base)-fold_charge(&model,model.ground.charge)+c+pilot_beats*horizon);let parts=state_work(&model,&states);
     let chosen=if candidates.len()>1{
         // Against the bound rule's step, or where it missed the targets the smallest candidate step.
         let baseline=*candidates.iter().find(|c|c.steps==grown.steps).or(candidates.iter().max_by_key(|c|c.steps)).unwrap();
@@ -621,6 +629,14 @@ fn gain(model:&Model,states:&[Trajectory])->f64{
 
 /// The ledger's item of the drives' fold (its charge a priori; the solve's ledger charges it as measured).
 const FOLD:&str="消去激发态";
+/// The ledger's item of the initial ensemble's cut (lib.rs `thermal_position`): the share of the
+/// traps' thermal positions beyond their region. The temperature asked for against the trap sets it;
+/// no choice of the solve changes it, so it stays out of the totals the solve's choices take (the
+/// fold's room, the Doppler allowance, the statistics' room) and out of the population headline of
+/// the flag: beyond the budget it is flagged on its own (`ledger`).
+const CUT:&str="初始热分布（势阱区之外）";
+/// The cut's share in a ledger (`CUT`), zero without one.
+fn cut(ledger:&Ledger)->f64{ledger.items.iter().find(|i|i.label==CUT).map_or(0.,|i|i.estimate)}
 /// The fold's charge for the saturation S its folded drives meet: its populations' error bound, S at
 /// second order and S² at fourth (ground.rs; against the population core 0.2-1.0 S² where the series
 /// converges, S ≲ 0.5 -- beyond, the charge exceeds the target and the rule keeps the drives).
@@ -643,8 +659,8 @@ impl Candidate{
         let model=Model::with_order(request,allowance,fourth)?;let initial=Initial::new(&model,request)?;let mut base=model_ledger(&model,request);
         // The initial positions' region (lib.rs `thermal_position`): the share of the traps' thermal
         // positions it leaves out.
-        if initial.outside>0.{base.add("初始热分布（势阱区之外）",initial.outside,"位置取势阱区（谐振近似低于阱深处）内的玻尔兹曼分布".into());}
-        let(saturation,charge)=(model.ground.charge,fold_charges(model.fourth,model.ground.charge));let others=base.used()-charge[0];
+        if initial.outside>0.{base.add(CUT,initial.outside,"位置取势阱区（谐振近似低于阱深处）内的玻尔兹曼分布；丢失与布居依赖这一截断".into());}
+        let(saturation,charge)=(model.ground.charge,fold_charges(model.fourth,model.ground.charge));let others=base.used()-cut(&base)-charge[0];
         let rooms=std::array::from_fn(|k|TARGETS[k]-others-charge[k]-A_PRIORI_SHARE*TARGETS[k]);
         Ok(Candidate{model,initial,base,allowance,saturation,charge,rooms})
     }
@@ -652,11 +668,12 @@ impl Candidate{
     fn charged(&mut self,saturation:f64){let charge=fold_charges(self.model.fourth,saturation);self.saturation=saturation;self.charge=charge;
         let others=self.others();self.rooms=std::array::from_fn(|k|TARGETS[k]-others-charge[k]-A_PRIORI_SHARE*TARGETS[k]);}
     /// Its ledger's estimates but the fold's.
-    fn others(&self)->f64{self.base.used()-fold_charge(&self.model,self.model.ground.charge)}
-    /// Its estimates leave the statistics room.
-    fn fits(&self)->bool{self.rooms.iter().all(|&r|r>0.)}
-    /// Its estimates but the fold's leave the statistics room: a fold could still make it fit.
-    fn fits_unfolded(&self)->bool{TARGETS.iter().all(|&target|target-self.others()-A_PRIORI_SHARE*target>0.)}
+    fn others(&self)->f64{self.base.used()-cut(&self.base)-fold_charge(&self.model,self.model.ground.charge)}
+    /// Its estimates leave the statistics room on the binding targets (`binds`: the populations', T's).
+    fn fits(&self,binds:[bool;2])->bool{self.rooms.iter().zip(binds).all(|(&r,b)|!b||r>0.)}
+    /// Its estimates but the fold's leave the statistics room on the binding targets: a fold could still make
+    /// it fit.
+    fn fits_unfolded(&self,binds:[bool;2])->bool{TARGETS.iter().zip(binds).all(|(&target,b)|!b||target-self.others()-A_PRIORI_SHARE*target>0.)}
     /// The trap of its reference state, the largest initial population: ω per axis.
     fn trap(&self)->Trap{let i=&self.initial;i.traps[(0..i.states.len()).max_by(|&a,&b|i.states[a].2.total_cmp(&i.states[b].2)).unwrap()]}
 }
@@ -740,6 +757,24 @@ fn carried(from:&Model,to:&Model,t:&Trajectory)->Trajectory{
 /// need, at least the device's `width` and at most `done` -- the need followed at most to twice the
 /// trajectories it rests on --, in whole `unit`s (groups on the CPU, waves on the GPU).
 fn next_batch(needed:u64,done:u64,width:u64,unit:u64)->u64{needed.saturating_sub(done).clamp(width,done.max(width)).div_ceil(unit)*unit}
+
+/// The targets that bind a solve: the populations and the loss at every output; T only at the outputs
+/// in the method's regime (k_B T ≥ CLASSICAL ħω on every axis, as `classical`), outside which T is a
+/// reference only (仅供参考). Here from a pilot's states at the outputs: T binds where some output's
+/// states, their T per axis m⟨δv²⟩/k_B = ħ²⟨δκ²⟩/m, lie in the regime.
+#[derive(Clone,Copy,Debug)]
+pub struct Binding{pub temperature:bool}
+impl Binding{
+    pub fn of(states:&[Trajectory],hbar_over_mass:f64,frequencies:[f64;3])->Binding{
+        let mut times:Vec<f64>=states.iter().map(|t|t.time).collect();times.sort_by(f64::total_cmp);times.dedup();
+        let temperature=times.iter().any(|&time|{
+            let at:Vec<&Trajectory>=states.iter().filter(|t|t.time==time).collect();let n=at.len() as f64;
+            n>1.&&(0..3).all(|a|{let mean=at.iter().map(|t|t.kappa[a]).sum::<f64>()/n;
+                let variance=at.iter().map(|t|(t.kappa[a]-mean).powi(2)).sum::<f64>()/(n-1.);hbar_over_mass*variance>=CLASSICAL*frequencies[a]})
+        });
+        Binding{temperature}
+    }
+}
 
 /// A checked step (module documentation): its steps per interval and its ratios to the shares -- the
 /// population criterion's (its bound's, or where measured the upper confidence bound of its measured
