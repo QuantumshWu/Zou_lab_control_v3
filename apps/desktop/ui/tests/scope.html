@@ -55,7 +55,12 @@ try {
    assert([...select(REPEAT).options].every((option,at)=>option===rows[at]),'the list was refilled');
    // v2: the list's row is the one action "Scope"; its coordinate belongs to the closed box.
    const coordinate=node=>getComputedStyle(node.querySelector('.cycle-at')).display;
-   equal(coordinate([...select(REPEAT).options].find(option=>option.value==='@scope')),'none','the list row says the coordinate');
+   const box=select(REPEAT),r=box.getBoundingClientRect();
+   press(box,r.right-2);
+   const row=[...document.querySelectorAll('.select-list:popover-open .select-row')].find(node=>node.querySelector('.cycle-at'));
+   assert(row&&row.textContent.startsWith('Scope'),'the list has no Scope row');
+   equal(coordinate(row),'none','the list row says the coordinate');
+   key(box,'Escape');
    assert(coordinate(select(REPEAT).querySelector('selectedcontent'))!=='none','the box hides the coordinate');
  });
  await check('the strip names what the panel has pinned, in its axis\'s colour',async()=>{

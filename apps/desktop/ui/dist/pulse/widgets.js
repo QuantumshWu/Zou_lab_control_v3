@@ -3,7 +3,7 @@
 // with its binding badge and popup (FluentScanLineEdit): the badge says
 // where the next run's value comes from -- the Pulse default, a Scan slot,
 // an API caller or the Config file -- and opens the choice.
-import { EditableCombo, Segmented, SpinBox, assign, checked, confirm, element, glyphFont, inkText, metrics, pointPx, setChecked, setText, setTitle, switchButton, token } from "../fluent/index.js";
+import { EditableCombo, Segmented, SpinBox, assign, checked, confirm, element, glyphFont, hidePopup, inkText, isShown, metrics, pointPx, setChecked, setText, setTitle, showPopup, switchButton } from "../fluent/index.js";
 /** v2 confirm_pulse_discard: the one question Open, Clear all and a recorded pulse ask before the draft goes. */
 export const confirmPulseDiscard = () => confirm("Unsaved Pulse", "Discard unsaved Pulse edits?", { confirmText: "Discard" });
 /** What a page last drew from: a state keeps the identity of every part that
@@ -229,7 +229,7 @@ class BindingPopup {
     owner;
     field;
     shownText;
-    root = element("div", "card bordered pulse-binding");
+    root = element("div", "card bordered pulse-binding beside");
     scan;
     source;
     name;
@@ -241,7 +241,6 @@ class BindingPopup {
         this.owner = owner;
         this.field = field;
         this.shownText = shownText;
-        this.root.popover = "auto";
         this.scan = switchButton(on => this.commit(on, this.field.source));
         // A click on a source chooses it; the source already chosen asks nothing.
         this.source = new Segmented(value => { if (value !== this.field.source)
@@ -260,7 +259,7 @@ class BindingPopup {
             this.root.remove(); });
         this.project(field);
     }
-    get open() { return this.root.isConnected && this.root.matches(":popover-open"); }
+    get open() { return isShown(this.root); }
     commit(scan, source) {
         this.send(editCommand(this.owner, "binding", { ...bindingTarget(this.field.field_id), scan, source }), "Changing the field's source…");
     }
@@ -296,19 +295,8 @@ class BindingPopup {
         setText(this.note, note);
         setTitle(this.note, note);
     }
-    toggleBelow(anchor) {
-        if (this.open) {
-            this.root.hidePopover();
-            return;
-        }
-        document.body.append(this.root);
-        this.root.showPopover();
-        const rect = anchor.getBoundingClientRect(), gap = token("--popup-gap"), pad = token("--window-pad");
-        const left = Math.max(pad, Math.min(rect.left, innerWidth - pad - this.root.offsetWidth));
-        const below = rect.bottom + gap;
-        this.root.style.left = `${left}px`;
-        this.root.style.top = `${below + this.root.offsetHeight <= innerHeight - pad ? below : Math.max(pad, rect.top - gap - this.root.offsetHeight)}px`;
-    }
+    /** Below the badge (above it where it fits better), bound to it (popover.ts). */
+    openBelow(anchor) { showPopup(this.root, anchor); }
 }
 /** A value box with its binding badge inside, on the right (FluentScanLineEdit). */
 export class ValueBox {
@@ -327,18 +315,16 @@ export class ValueBox {
         this.box = new TextBox(commit);
         this.badge.type = "button";
         this.badge.tabIndex = -1;
-        // A press while the popup is open closes it (light dismiss would close it first and the click open it again).
-        let wasOpen = false;
-        this.badge.addEventListener("pointerdown", () => { wasOpen = Boolean(this.popup?.open); });
+        // A click on the badge opens its popup and, while it is open, closes it.
         this.badge.addEventListener("click", () => {
-            if (!this.field)
-                return;
-            if (wasOpen) {
-                wasOpen = false;
+            if (this.popup?.open) {
+                hidePopup(this.popup.root);
                 return;
             }
+            if (!this.field)
+                return;
             this.popup = new BindingPopup(this.send, this.owner, this.field, () => this.box.root.value);
-            this.popup.toggleBelow(this.badge);
+            this.popup.openBelow(this.badge);
         });
         this.root.append(this.box.root, this.badge);
     }
@@ -358,7 +344,7 @@ export class ValueBox {
         assign(this.badge, "disabled", !(bindable && (writable || field.config_active)));
         if (this.popup?.open) {
             if (this.badge.disabled || (!writable && !field.config_active))
-                this.popup.root.hidePopover();
+                hidePopup(this.popup.root);
             else
                 this.popup.project(field);
         }

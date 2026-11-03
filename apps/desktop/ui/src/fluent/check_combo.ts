@@ -1,5 +1,6 @@
 import { placeDrop } from "./combo.js";
-import { element, setText, setTitle, token } from "./dom.js";
+import { element, setText, setTitle } from "./dom.js";
+import { hidePopup, isShown, showPopup } from "./popover.js";
 import { checkBox, setChecked } from "./toggles.js";
 
 /** One row of a checkable list; a `header` row titles the rows under it
@@ -15,7 +16,7 @@ export type LazyItems = { key: string; items(): CheckItem[] };
 export class CheckCombo {
   readonly root = element("button", "check-combo");
   private words = element("span", "check-combo-text");
-  private list = element("div", "menu check-menu");
+  private list = element("div", "menu check-menu drop");
   private items: CheckItem[] = [];
   private lazy: (() => CheckItem[]) | null = null;
   private checked: string[] = [];
@@ -28,18 +29,13 @@ export class CheckCombo {
   constructor(private placeholder = "choose") {
     this.root.type = "button";
     this.root.append(this.words);
-    // A press while the list is open closes it (light dismiss): its click does not open it again.
-    let wasOpen = false;
-    this.root.addEventListener("pointerdown", () => { wasOpen = this.list.matches(":popover-open"); });
-    this.root.addEventListener("click", () => { if (!wasOpen) this.open(); wasOpen = false; });
-    this.list.popover = "auto";
+    // A click while the list is open closes it.
+    this.root.addEventListener("click", () => { if (isShown(this.list)) hidePopup(this.list); else this.open(); });
     this.list.role = "listbox";
     this.list.addEventListener("toggle", event => {
       const open = (event as ToggleEvent).newState === "open";
       // The field says it is open while its list is (v2: the ACCENT edge while its popup shows).
       this.root.classList.toggle("open", open);
-      // Placed again when the window is resized while it is open.
-      if (open) addEventListener("resize", this.place); else removeEventListener("resize", this.place);
       if (open || !this.opened) return;
       const before = this.opened;
       this.opened = null;
@@ -49,7 +45,7 @@ export class CheckCombo {
     });
   }
 
-  set disabled(disabled: boolean) { this.root.disabled = disabled; }
+  set disabled(disabled: boolean) { this.root.disabled = disabled; if (disabled) hidePopup(this.list); }
 
   /** The list and what is ticked; a tick the list lacks is kept and shown.
    * A lazy list is made when the popup next opens. */
@@ -69,18 +65,10 @@ export class CheckCombo {
     if (this.lazy) { this.items = this.lazy(); this.lazy = null; this.build(); }
     if (this.root.disabled || !this.items.length) return;
     this.opened = [...this.checked];
-    document.body.append(this.list);
-    this.list.showPopover();
-    this.place();
+    // Below the field, or above it where the list fits better (placeDrop).
+    showPopup(this.list, this.root);
+    placeDrop(this.list, this.root);
   }
-
-  /** Below the field, or above it where the list fits better (placeDrop); its left edge on the field's, inside the window. */
-  private place = (): void => {
-    const rect = this.root.getBoundingClientRect(), pad = token("--window-pad");
-    this.list.style.minWidth = `${rect.width}px`;
-    placeDrop(this.list, rect);
-    this.list.style.left = `${Math.max(pad, Math.min(rect.left, innerWidth - pad - this.list.offsetWidth))}px`;
-  };
 
   private build(): void {
     const rows: HTMLElement[] = [];

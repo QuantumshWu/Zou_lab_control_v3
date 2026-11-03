@@ -33,9 +33,10 @@ export class Dialog {
         this.root.remove();
         this.answer(value);
     }
-    /** The card is its own title bar: a press nothing inside wanted drags it. */
+    /** The card is its own title bar: a press nothing inside wanted drags it (a popup of one of
+     * its controls stands in it, popover.ts, and keeps its presses). */
     drag(event) {
-        if (event.button !== 0 || event.target.closest("button, input, select, textarea, .readout-text"))
+        if (event.button !== 0 || event.target.closest("button, input, select, textarea, .readout-text, [popover]"))
             return;
         const rect = this.root.getBoundingClientRect();
         const origin = { x: event.clientX - rect.left, y: event.clientY - rect.top };
