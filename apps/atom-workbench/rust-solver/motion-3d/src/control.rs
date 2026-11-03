@@ -15,7 +15,8 @@
 //! The same trajectory -- its initial internal state, thresholds and jumps' draws (common random
 //! numbers, engine.rs) -- held without motion at a point where the trap beam's intensity is the mean
 //! the moving atoms see (the pilot's states): its populations' mean is the eliminated master equation
-//! there (`Twin::means`), from the generator and jumps the engine itself uses there. While the moving
+//! there (`Twin::means`): the engine's generator there, its decay its own jumps' (so that its trace
+//! stays one, `Twin::new`), and the engine's jumps. While the moving
 //! atom's light differs little from the point's, its jumps follow the twin's; a light pattern on the
 //! scale of the motion decorrelates them at once. A twin exists when the generator is static (no
 //! residual beats): its exponentials are then computed once, and the master equation is one
@@ -91,13 +92,26 @@ impl Twin{
         let(mut lo,mut hi)=(0.,g.waist?);while g.intensity(at(hi))>intensity{hi*=2.;}
         for _ in 0..60{let mid=0.5*(lo+hi);if g.intensity(at(mid))>intensity{lo=mid;}else{hi=mid;}}
         let point=model.point(at(lo),[0.;3]);
-        let locals=(0..model.clusters()).map(|k|model.local(k,&point,0.)).collect();
         // Each class's jump operators: column j the photon amplitudes of the basis state j.
-        let jumps=(0..model.clusters()).map(|k|{
+        let jumps:Vec<Vec<[Vec<Complex>;3]>>=(0..model.clusters()).map(|k|{
             let n=model.dimension(k);let columns:Vec<Vec<[[Complex;MOST_STATES];3]>>=(0..n).map(|j|{let mut psi=[Complex::ZERO;MOST_STATES];psi[j]=Complex::ONE;
                 model.photons(k,&point,&psi,0.,None).amplitude}).collect();
             model.ground.clusters[k].classes.iter().enumerate().map(|(c,class)|{let nt=model.dimension(class.target);
                 std::array::from_fn(|x|(0..nt*n).map(|e|columns[e%n][c][x][e/n]).collect())}).collect()}).collect();
+        // Each cluster's generator: the Hermitian part of the engine's H_eff there, its decay its own
+        // jumps' Σ L†L. The engine's decay comes from the tables of the responses and its jumps from
+        // the photons, which take the recoil's (and the Doppler's) first order: the two differ by ~1e-4
+        // of the scattering rate, and a generator of the one with the jumps of the other leaks trace.
+        // With its jumps' decay the twin's unraveling is exactly the Lindblad equation of its H and L
+        // (`means`): its mean exact, its trace one, every correction's trace zero.
+        let locals=(0..model.clusters()).map(|k|{
+            let n=model.dimension(k);let mut local=model.local(k,&point,0.);let h=local.hamiltonian;
+            for p in 0..n{for q in 0..n{
+                let mut decay=Complex::ZERO;
+                for(class,l)in model.ground.clusters[k].classes.iter().zip(&jumps[k]){let nt=model.dimension(class.target);for x in 0..3{for i in 0..nt{decay+=l[x][i*n+p].conj()*l[x][i*n+q];}}}
+                local.hamiltonian[p*n+q]=(h[p*n+q]+h[q*n+p].conj())*0.5-decay*Complex::new(0.,0.5);
+            }}
+            local}).collect();
         // The readout's images of the density's basis: ψψ† for ψ = e_i, e_i + e_j and e_i + i e_j.
         let readout=(0..model.clusters()).map(|k|{
             let n=model.dimension(k);let pure=|psi:&[Complex;MOST_STATES]|->[f64;STATES]{let norm:f64=psi[..n].iter().map(|z|z.norm_sqr()).sum();model.populations(k,&point,psi,0.).map(|x|x*norm)};
