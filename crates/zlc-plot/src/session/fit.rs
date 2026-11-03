@@ -372,7 +372,7 @@ impl PlotSession {
                 let valid = outcome.is_some_and(|outcome| outcome.success);
                 let value = outcome.map(|outcome| outcome.parameter_values[parameter_index]);
                 let is_fixed = match outcome { None => fixed_authored.contains(&parameter.name), Some(outcome) => outcome.fixed_parameter_names.contains(&parameter.name) };
-                let error_valid = valid && outcome.is_some_and(|outcome| outcome.covariance_valid && !outcome.fixed_parameter_names.contains(&parameter.name));
+                let error_valid = valid && outcome.is_some_and(|outcome| outcome.covariance_valid && !outcome.fixed_parameter_names.contains(&parameter.name) && outcome.standard_errors[parameter_index].is_finite());
                 values.push(value.filter(|v| v.is_finite()).map_or(Json::Null, |v| json!(v)));
                 validities.push(valid && value.is_some_and(f64::is_finite));
                 errors.push(if error_valid { json!(outcome.unwrap().standard_errors[parameter_index]) } else { Json::Null });

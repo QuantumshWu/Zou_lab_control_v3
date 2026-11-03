@@ -34,19 +34,19 @@ the numeric tolerance says.
 | Cold seeds, data-derived bounds, histogram confinement, sigma weights, binned sufficient statistics, peak finding, Poisson deviance residuals, `_authored_seed` / candidate de-duplication | bit-exact | bit-exact (see "Reductions" for the sorts, sums and medians) |
 | Warm starts | a warm start is a whole previous solution (what the product passes: `tuple(result.parameter_values)`), checked as `_initial_values` checks a row | exact.  A *partial* (named) warm start -- which made Python complete it with its Python-lane initializer -- is not reachable from the product and is not accepted (see "Open gaps") |
 | Trust-region solve (compiled lane): free parameters, cost, raw RSS, status, `nfev`, `njev`, iterations, winning seed | bit-exact | bit-exact |
-| Covariance, standard errors, `covariance_valid` (compiled lane: `dgeqrf` of the scaled Jacobian, `dgesdd` of R) | bit-exact target, 1e-10 interim bound | bit-exact; the interim bound was never needed |
+| Covariance, standard errors, `covariance_valid` (compiled lane: `dgeqrf` of the scaled Jacobian, `dgesdd` of R) | a deliberate departure: R's columns are equilibrated before the SVD and the rank is read per parameter ("Identifiable covariance" below); the oracle's values to rounding where it called the fit full rank | not re-measured against the golden records since the departure |
 | Reduced chi-square, final fitted values and residuals, `parameter_units`, `batch_revision`, array lengths | bit-exact | bit-exact |
 | BIC gain (`evidence`), reduction verdict, settled one-population parameters | bit-exact | bit-exact |
 | Classifier threshold, fractions, fidelity (`_bimodal_classifier_metrics`), component curves | bit-exact | bit-exact |
 | Regular-image fits (`_fit_radial`): crop, proxy subsample, seeds, both stages, RSS, status, solver diagnostics, deferred per-pixel arrays | bit-exact target, 1e-9 interim bound | bit-exact (u8/u16/i16/f32/f64 storage, masks, crops, NaN samples, every robust loss through the striped objective, radial and anisotropic, up to 1200x1920 and 2048-wide frames) |
-| Regular-image covariance (`_covariance_from_information`: NumPy `eigh` of the normalised information, then a matmul) | bit-exact target, 1e-10 interim bound | bit-exact |
+| Regular-image covariance (`_covariance_from_information`: NumPy `eigh` of the normalised information, then a matmul) | bit-exact where the oracle calls the information full rank (the same arithmetic); per-parameter below its tolerance ("Identifiable covariance") | bit-exact before the departure; the full-rank arithmetic is unchanged |
 | Unit crossings of parameters and errors, expression parse and text (`fit_expression_target` / `fit_expression_text`) | exact bits / exact text | exact (8 unit contexts, every model; CPython's `float(str)` -- any Unicode decimal digit, Unicode spaces, underscores --, `str.strip` and `repr(str)` from CPython's own Unicode 15.1 tables: `crate::pystr`) |
 | Target resolution (`resolve_fit_target`, `fit_request_target`, `prepare_fit_request`) | exact (structure, values, failure text) | exact (6720 resolutions: 8 unit contexts x 3 previous requests x 2 previous expression failures) |
 | `evaluate_fit` (per-target results, failure texts, units; only cancellation propagates) | exact | exact (2804 targets of 221 session evaluations) |
 | Success / failure classification of every cell (result vs failure message, status code, message text) | exact | exact |
 | Cancellation | the same checks, in the same order, at the same points | exact: check counts equal Python's (single Gaussian 4, bimodal 8, 64-cell bimodal 134, 256-cell Gaussian 259, camera frame 9, circular mask 17), and every cancel-after-k case matches |
 | Deadlines | the same clock starts (per `_fit_compiled_batch`, per image batch) and propagation (`FitDeadlineExceeded` is a `TimeoutError`: it fails a mixed batch's image cell, not the batch) | exact semantics; *which* call runs out of time is wall-clock, so a faster port can finish where Python times out |
-| Fallback solver for models with no compiled descriptor (SciPy `least_squares` lane) | semantics exact (seed set, candidate ranking and tie rule, invalid-residual sentinel, warm shortcut, covariance rank test); numbers: relative 1e-8 of `max(|p|, sigma_p)` on converged well-posed fits | the port solves with the compiled lane's TRF, not SciPy's (an SVD of the full Jacobian per step), so iterates differ in the last bits; its covariance step (`np.linalg.svd(J, full_matrices=False)`) is reproduced bit for bit.  No registered model reaches this lane; it exists for caller-built models |
+| Fallback solver for models with no compiled descriptor (SciPy `least_squares` lane) | semantics exact (seed set, candidate ranking and tie rule, invalid-residual sentinel, warm shortcut, covariance rank test, now per parameter on equilibrated columns as in the compiled lane); numbers: relative 1e-8 of `max(|p|, sigma_p)` on converged well-posed fits | the port solves with the compiled lane's TRF, not SciPy's (an SVD of the full Jacobian per step), so iterates differ in the last bits; its covariance step (`np.linalg.svd(J, full_matrices=False)`) was reproduced bit for bit before the identifiable covariance (below) equilibrated its columns.  No registered model reaches this lane; it exists for caller-built models |
 
 Evidence for the "measured" column (all run by `cargo test --release --test
 fit --test fit_api`; the large sets with `ZLC_FIT_GOLDEN_LARGE`):
@@ -132,8 +132,9 @@ the same order, as the scalar loop it replaces.
 
 ## Decisions that sit on a threshold
 
-`evidence > min_bic_gain`, `covariance_valid` (a strict singular-value rank
-test), `status` (ftol/xtol/gtol tests) and the classifier's minimum component
+`evidence > min_bic_gain`, `covariance_valid` and each parameter's
+identifiability (a strict eigen- or singular-value rank test on the
+equilibrated information), `status` (ftol/xtol/gtol tests) and the classifier's minimum component
 shots are discontinuous.  Where the numbers are bit-exact so are the
 decisions -- which is everywhere except the fallback lane, whose decisions
 can differ only when the Python operand lies within 1e-8 of the threshold.
@@ -199,6 +200,41 @@ caller chose, and custom models (fallback lane) are unchanged.  No golden
 record carries degrees of freedom, so every golden comparison is unchanged
 (bit-exact); live sessions whose curves are means of repeats fit differently
 from the oracle, which is the point.
+
+## Identifiable covariance (a deliberate departure)
+
+The oracle tests the covariance's rank on the raw information (singular
+values of the weighted Jacobian, or eigenvalues of the Student-t sandwich's
+bread) and on failure makes every error NaN.  The raw values compare
+parameters in their own units: a decay time far beyond a Rabi scan's
+window, in microseconds, has a Jacobian column some 1e-12 of the
+frequency's; the test calls the matrix singular and the frequency, which
+the data determine to 1e-4, is shown as NA too (27 of 35 per-site fits of
+one seamless Rabi scan).
+
+v3 reads rank and identifiability from the information equilibrated by its
+diagonal (`identify.rs`; for a factor, its columns at unit norm): the test
+is exactly invariant under a change of any parameter's unit, with the
+oracle's tolerance (`EPSILON * max(n, p) * largest`) on the equilibrated
+values.  A value below it is a genuine null direction.  A parameter whose
+unit vector has a component in that null space beyond the computed
+vectors' resolution (`tolerance / gap`, the eigenvector perturbation bound)
+is undetermined: its standard error and its covariance row and column are
+NaN, `covariance_valid` stays true, and the table and the overlay show NA
+for that parameter alone.  A parameter with no influence (a zero or
+non-finite diagonal) is a null direction.  The others' covariance is the
+pseudo-inverse on the identified subspace (for the sandwich, `A^+ B A^+`),
+the exact variance of a functional the data determine; a weakly determined
+parameter gets a large, finite error.  Nothing is identified, or an
+indefinite bread: `covariance_valid` is false and every free error NaN, as
+before.  Fixed parameters keep error 0.
+
+Equilibrating changes the compiled lane's and the fallback lane's
+covariance arithmetic, so their errors and covariances differ from the
+golden records in the last bits, and where the oracle called a fit
+singular that is not, in validity.  The regular-image route already
+normalised its information by the diagonal: where the oracle calls it full
+rank its arithmetic is unchanged.
 
 ## CPU dependence (decision)
 

@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use super::blas;
 use super::engine::{Check, CellOutcome, FitRequest};
 use super::models::{point_terms, Kernel, LOSS_LINEAR};
-use super::num::{div, fsum, numpy_sum, pmax, Zr, EPSILON, TINY};
+use super::num::{div, fsum, numpy_sum, pmax, Zr, EPSILON};
 pub use super::plane::Samples;
 use super::plane::{centred_context, plane_products, residual_rss};
 use super::prepare::Seeds;
@@ -1058,57 +1058,19 @@ fn pmax_np(a: f64, b: f64) -> f64 {
     }
 }
 
-/// `_covariance_from_information` for one matrix (NumPy `eigh`).
+/// `_covariance_from_information` for one matrix (NumPy `eigh` of the
+/// matrix normalised by its diagonal): rank and identifiability on that
+/// equilibrated matrix (identify.rs), an undetermined parameter's row and
+/// column NaN, the rest standing.
 fn covariance_from_information(matrix: &[f64], count: usize, reduced: f64, observations: usize) -> (Vec<f64>, bool) {
     let invalid = (vec![f64::NAN; count * count], false);
-    if count == 0 || observations <= count || matrix.iter().any(|v| !v.is_finite()) || !reduced.is_finite() || reduced < 0.0 {
+    if count == 0 || observations <= count || !reduced.is_finite() || reduced < 0.0 {
         return invalid;
     }
-    let norms: Vec<f64> = (0..count).map(|i| pmax_np(matrix[i * count + i], 0.0).sqrt()).collect();
-    if !norms.iter().all(|&n| n > TINY) {
-        return invalid;
-    }
-    let mut normalized = vec![0.0; count * count];
-    let mut divisor = vec![0.0; count * count];
-    for i in 0..count {
-        for j in 0..count {
-            divisor[i * count + j] = norms[i] * norms[j];
-            normalized[i * count + j] = matrix[i * count + j] / divisor[i * count + j];
-        }
-    }
-    let mut symmetric = vec![0.0; count * count];
-    for i in 0..count {
-        for j in 0..count {
-            symmetric[i * count + j] = (normalized[i * count + j] + normalized[j * count + i]) / 2.0;
-        }
-    }
-    let Ok((values, vectors)) = super::linalg::eigh_lower(count, &symmetric) else { return invalid };
-    let top = values.iter().copied().fold(f64::NEG_INFINITY, |a, b| if b > a { b } else { a });
-    let tolerance = EPSILON * count as f64 * top;
-    if !(values[0] > tolerance) {
-        return invalid;
-    }
-    let mut computed = vec![0.0; count * count];
-    for i in 0..count {
-        for j in 0..count {
-            let mut value = 0.0;
-            for k in 0..count {
-                // NumPy matmul: OpenBLAS dgemm, one FMA accumulator per element.
-                value = (vectors[i * count + k] / values[k]).mul_add(vectors[j * count + k], value);
-            }
-            computed[i * count + j] = value;
-        }
-    }
-    for i in 0..count * count {
-        computed[i] *= reduced / divisor[i];
-    }
-    let mut result = vec![0.0; count * count];
-    for i in 0..count {
-        for j in 0..count {
-            result[i * count + j] = (computed[i * count + j] + computed[j * count + i]) / 2.0;
-        }
-    }
-    if result.iter().any(|v| !v.is_finite()) || (0..count).any(|i| result[i * count + i] < 0.0) {
+    let Ok(Some(identified)) = super::identify::from_information(count, matrix, count) else { return invalid };
+    let result = identified.covariance(reduced);
+    let defined = &identified.defined;
+    if (0..count).any(|i| defined[i] && (result[i * count + i] < 0.0 || (0..count).any(|j| defined[j] && !result[i * count + j].is_finite()))) {
         return invalid;
     }
     (result, true)
