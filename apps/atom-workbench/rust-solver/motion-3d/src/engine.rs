@@ -36,8 +36,9 @@
 //!   hyperfine splitting, a red molasses' of 10⁻⁵; the solve books them in its ledger.
 //! The impulse is the conditional force's time integral along that evolution, ∫ ⟨ψ|F|ψ⟩/⟨ψ|ψ⟩ dt
 //! (composite Simpson on the grid, its error within `QUADRATURE` of the impulse: (ν·2δ)⁴/2880 bounds
-//! it, ν the integrand's largest frequency -- the spectrum's largest difference |λ_a* − λ_b| through the
-//! eigendecomposition, 2‖H‖₁ else, and with beats 2(‖H₀‖₁ + Σ_j ‖H_j‖₁) + max|Ω_j|), applied with the
+//! it, ν the integrand's largest frequency -- 2‖H‖₁, and with beats 2(‖H₀‖₁ + Σ_j ‖H_j‖₁) + max|Ω_j|;
+//! through the eigendecomposition each frequency λ_a* − λ_b weighted by its amplitude in the state,
+//! `Segment::weighted`), applied with the
 //! jumps' kicks and less dt F_harmonic(r_h) before the flow for dt/2 again. CF4's own error at that
 //! grid is of fourth order in the beats' derivatives, far below the quadrature's (validated against a
 //! fine CF4, the master equation and the population core: examples/multirate.rs). What is left is the
