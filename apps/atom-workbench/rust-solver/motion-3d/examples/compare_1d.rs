@@ -27,18 +27,18 @@ fn main(){
     let axis=2;let mut free=[false;3];free[axis]=true;
     let w=model.geometry[model.focused[0]].waist.unwrap();let cap=1.1606160660169471;
     let index=request.states.iter().position(|s|s=="ground-2-2").unwrap();let b22=model.ground.ground_states.iter().position(|&i|i==index).unwrap();
-    let(block22,state22)=model.blocks.iter().enumerate().find_map(|(k,blk)|blk.states.iter().position(|&x|x==b22).map(|x|(k,x))).unwrap();
-    let frequencies=model.trap_frequencies(block22,state22);
+    let(block22,state22)={let k=model.ground.cluster[b22];(k,model.ground.clusters[k].position(b22).unwrap())};
+    let trap=model.trap(block22,state22);let frequencies=trap.lab;let _=cap;
     // The trap's harmonic part moved exactly (flow), or free flight with the whole trap as kicks (drift).
     let flow=arg(7,"flow")=="flow";let truncation:f64=arg(8,"2.2e-16").parse().unwrap();let group:u64=arg(9,"8").parse().unwrap();let average=arg(10,"average")=="average";
-    let settings=Settings{dt,free,escape_intensity:(-2.*cap*cap/(w*w)).exp(),frequencies:if flow{frequencies}else{[0.;3]},truncation,average};
+    let mut settings=Settings::new(dt,&trap,truncation,average);settings.free=free;if !flow{settings.lab=[0.;3];}let _=w;
     let initial=Initial::new(&model,&request).unwrap();
     println!("trap {:?} kHz",frequencies.map(|f|f/std::f64::consts::TAU*1e3));
     let interval=10.;let steps=(interval/dt).round() as usize;let outputs=(t_end/interval).round() as usize+1;
     let run=std::time::Instant::now();
-    let outcome=simulate(&model,&settings,&initial,seed,0,count,group,steps,outputs,&[outputs-1]);
+    let outcome=simulate(&model,&settings,&initial,seed,0,count,group,steps,outputs,&[outputs-1],None);
     let wall=run.elapsed().as_secs_f64();
-    let estimates=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies});
+    let estimates=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies},&[]);
     let labels=["ground-1--1","ground-1-0","ground-1-1","ground-2--2","ground-2--1","ground-2-0","ground-2-1","ground-2-2"];
     let ground_index:Vec<usize>=labels.iter().map(|l|request.states.iter().position(|s|s==l).unwrap()).collect();
     let report_every=((t_end/10.)/interval).round().max(1.) as usize;

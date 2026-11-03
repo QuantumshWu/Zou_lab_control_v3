@@ -19,8 +19,7 @@ export function createModelWorker(post){
       if(!token||typeof token.clientId!=='string'||!/^[-\w]{1,96}$/.test(token.clientId)||!Number.isSafeInteger(token.sequence)||token.sequence<1)throw Error('Invalid request identity');
       if(input.stream!==undefined&&typeof input.stream!=='boolean')throw Error('Invalid stream option');
       const native=prepareNativeSolve(input);
-      task=service.submit(native.payload,token,input.stream?result=>event('checkpoint',native.respond(result,token)):undefined,
-        input.stream?running=>event('running',{request:token,running}):undefined);active.set(channel,task);
+      task=service.submit(native.payload,token,input.stream?result=>event('checkpoint',native.respond(result,token)):undefined);active.set(channel,task);
       const result=await task.promise;
       if(active.get(channel)!==task)return;
       const data=native.respond(result,token);if(input.stream)event('result',data);else finish(channel,200,data);

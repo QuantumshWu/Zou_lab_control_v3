@@ -16,9 +16,10 @@ export function meanInputsKey(scene:Scene,settings:DynamicsSettings):string {
   return JSON.stringify({field:fieldVector,fieldAxis,frame,lasers:scene.lasers.filter(l=>l.enabled).map(l=>{const anchor=captureLaserFrequencyAnchor(l);return [l.id,anchor.line,anchor.offsetMHz,laserIntensityMWcm2(l),directionFrame(scene.fields,l.direction),l.polarizationAngleDeg,l.ellipticityDeg,l.phaseDeg??0];}),initialState:canonicalInitialState(resolveInitialState(settings))});
 }
 /** What a finite trajectory depends on: the mean's inputs, the duration and the samples (not T),
- * and with 1D motion on its axis, its initial temperature and each laser's waist (a focused beam's
- * profile along the axis; none for a plane wave). A motion that is off is no part of it. */
+ * and with motion on its initial temperature, the device it runs on, the tweezer and each laser's
+ * waist (a Gaussian beam's profile; none for a plane wave). A motion that is off is no part of it. */
 export function trajectoryInputsKey(scene:Scene,settings:DynamicsSettings):string {
-  const motion=motionRequest(scene,settings),waists=()=>scene.lasers.filter(l=>l.enabled).map(l=>l.intensityMode==='intensity'?null:laserWaistUm(l));
-  return JSON.stringify({mean:meanInputsKey(scene,settings),durationUs:settings.durationUs,samples:settings.samples,...(motion?{motion,waists:waists()}:{})});
+  const motion=motionRequest(settings),waists=()=>scene.lasers.filter(l=>l.enabled).map(l=>l.intensityMode==='intensity'?null:laserWaistUm(l));
+  return JSON.stringify({mean:meanInputsKey(scene,settings),durationUs:settings.durationUs,samples:settings.samples,
+    ...(motion?{motion,device:settings.motion.device,tweezer:scene.tweezerId??null,waists:waists()}:{})});
 }

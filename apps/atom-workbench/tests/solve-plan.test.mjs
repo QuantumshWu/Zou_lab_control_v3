@@ -63,7 +63,8 @@ function answer(scene,options){
 
 test('request flow: a horizon switch makes no request; a new duration asks for the trajectory alone and keeps the mean',async t=>{
   const mock=transport(),client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'horizon-flow'});t.after(()=>client.dispose());
-  const scene=defaultScene();scene.dynamics.samples=3;scene.dynamics.durationUs=.2;scene.dynamics.meanHorizonUs=1e6;
+  // The internal state alone (motion off): its trajectory and its mean.
+  const scene=defaultScene();scene.dynamics.motion.enabled=false;scene.dynamics.samples=3;scene.dynamics.durationUs=.2;scene.dynamics.meanHorizonUs=1e6;
   const trajectories=new CurrentResults(),means=new CurrentResults();
   const inputs=()=>({trajectoryKey:trajectoryInputsKey(scene,scene.dynamics),meanKey:meanInputsKey(scene,scene.dynamics)});
   // The app on every change (app.ts invalidateObsoletePopulation, requestSolve): the current

@@ -93,7 +93,6 @@ test('while a solve runs the status line counts its latest estimate of the time 
   assert.deepEqual(remainingWords(13000,0),{words:'预计剩余约 15 s',changesInMs:501});
   assert.deepEqual(remainingWords(58000,0),{words:'预计剩余约 1 min',changesInMs:501});
   assert.deepEqual(remainingWords(100000,0),{words:'预计剩余约 2 min',changesInMs:10001});
-  assert.deepEqual(remainingWords(100000,0,true),{words:'预计剩余不超过 2 min',changesInMs:10001},'an upper bound says so');
   // The run stops at its checkpoint: the result is on its way.
   assert.deepEqual(remainingWords(0,5000),{words:'即将完成'});
   // A countdown that has run out says nothing until the next checkpoint brings an estimate.

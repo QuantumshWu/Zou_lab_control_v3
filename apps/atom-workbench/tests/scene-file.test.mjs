@@ -37,7 +37,9 @@ test('a file in an older format is refused cleanly, naming what does not match',
   // A version-1 file: an F/m initial state, a laser given by its detuning, a field by its angles.
   const old={version:1,name:'old',initialF:2,initialM:2,fields:[{id:'b',name:'b',enabled:true,magnitudeG:3,thetaDeg:0,phiDeg:0}],
     lasers:[{id:'probe',name:'probe',enabled:true,line:'D2',detuningMHz:0,intensityMWcm2:1,referenceTransition:{line:'D2',Fg:2,Fe:2},thetaDeg:0,phiDeg:0,polarizationAngleDeg:0,ellipticityDeg:0}]};
-  assert.throws(()=>validateScene(old),/^Error: 场景文件不符合当前格式（version 2）：version 为 1，应为 2$/);
+  assert.throws(()=>validateScene(old),/^Error: 场景文件不符合当前格式（version 3）：version 为 1，应为 3$/);
+  // A version-2 file (before the designated tweezer and 3D-only motion) is refused the same way.
+  assert.throws(()=>validateScene({...file(),version:2}),/^Error: 场景文件不符合当前格式（version 3）：version 为 2，应为 3$/);
   for(const [label,change,reason] of [
     ['no dynamics (an F/m-only file)',f=>{delete f.dynamics;},/场景 缺少 dynamics/],
     ['an initial F and m',f=>{f.initialF=2;f.initialM=0;},/场景 含有未知字段 initialF/],

@@ -1,17 +1,18 @@
-// Motion (ui-design.md §6.20–§6.22): the radial axis through the tweezer focus, the plane across the
-// tweezer or 3D, the model's motion block, the scene file, the request and the strict reader of a
-// motion result.
+// Motion (ui-design.md §6.20–§6.21): the tweezer the operator designates, the scene file, the model's
+// motion block, the request with its device, the strict reader of a motion result (populations of the
+// held atom with 丢失 beside them), the temperature chart and the examples.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {setTimeout as pause} from 'node:timers/promises';
-import {DEFAULT_MOTION_TEMPERATURE_UK,defaultMotion} from '../dist/js/atom-workbench/src/types.js';
-import {RB87,composeMagneticField,laserFrequencyMHz,laserIntensityMWcm2,polarization,resolveSceneFrequencies} from '../dist/js/atom-workbench/src/physics.js';
-import {laserWaistUm,setLaserIntensityMode} from '../dist/js/atom-workbench/src/laser-intensity.js';
+import {DEFAULT_MOTION_TEMPERATURE_UK,NEW_LASER_POWER_MW,NEW_LASER_WAIST_UM,defaultMotion,defaultScene,newLaser} from '../dist/js/atom-workbench/src/types.js';
+import {RB87,composeMagneticField,laserFrequencyMHz,laserIntensityMWcm2,polarization} from '../dist/js/atom-workbench/src/physics.js';
+import {laserWaistUm,normalizeLaserIntensity,setLaserIntensityMode,writeLaserPower} from '../dist/js/atom-workbench/src/laser-intensity.js';
 import {directionVector,invert,rotate} from '../dist/js/atom-workbench/src/direction.js';
-import {MOTION_FRAME,focusedBeams,motionAxis,radialChoices,motionRefusal,motionRequest,motionTemperatureReading,radialAxes,readMotionRequest,setMotionTemperature} from '../dist/js/atom-workbench/src/motion.js';
+import {MOTION_FRAME,motionRefusal,motionRequest,motionTemperatureReading,readMotionDevice,readMotionRequest,setMotionTemperature} from '../dist/js/atom-workbench/src/motion.js';
+import {keepTweezer,setTweezer,tweezerOf,tweezerRefusal} from '../dist/js/atom-workbench/src/tweezer.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
-import {TWEEZER_PGC,exampleScene} from '../dist/js/atom-workbench/src/examples.js';
+import {EXAMPLES,LAMBDA_TWEEZER,TWEEZER_PGC,exampleScene} from '../dist/js/atom-workbench/src/examples.js';
 import {meanInputsKey,trajectoryInputsKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
 import {plannedSolve} from '../dist/js/atom-workbench/src/solve-plan.js';
 import {DynamicsClient,normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
@@ -19,57 +20,80 @@ import {solverText} from '../dist/js/atom-workbench/src/solver-words.js';
 import {typedDigits} from '../dist/js/atom-workbench/src/unit-input.js';
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 import {prepareNativeSolve} from '../scripts/native-protocol.mjs';
-import {populationChart} from '../dist/js/atom-workbench/src/population-chart.js';
-import {motionSeries,seriesChart} from '../dist/js/atom-workbench/src/motion-chart.js';
-import {nativeResult} from './native-result.mjs';
+import {populationChart,populationColor} from '../dist/js/atom-workbench/src/population-chart.js';
+import {LOSS_CURVE,recommendedCurves,withPopulationGroups} from '../dist/js/atom-workbench/src/population-selection.js';
+import {TOTAL_INK,TOTAL_WIDTH,lineReading,motionSeries,seriesChart} from '../dist/js/atom-workbench/src/motion-chart.js';
+import {MOTION_DIAGNOSTICS,motionBlock,motionResult} from './native-result.mjs';
 import {spherical} from './directions.mjs';
 import {readFileSync} from 'node:fs';
 
 const N=32,C=299792458;
 const axis=name=>({reference:{kind:'axis',axis:name},thetaDeg:0,phiDeg:0});
-/** The tweezer PGC example: the 852 nm tweezer along z, the cooling and repump pairs along ±x, B = 0, motion along x. */
-const pgc=()=>exampleScene('pgc').scene;
-/** The standard-error bands of a series chart, by their ink. */
-const errorBands=svg=>[...svg.matchAll(/<polygon points="[^"]+" fill="(#[0-9A-Fa-f]+)" fill-opacity="0.16"/g)].map(m=>m[1]);
-/** Another focused beam: a copy of the example's tweezer along `direction`. */
-const tweezer=(scene,id,name,direction)=>({...structuredClone(scene.lasers.find(l=>l.id==='tweezer')),id,name,direction});
+/** The 3D tweezer PGC example: the 852 nm tweezer along z, σ+σ− cooling pairs along x, y and z, a repump, B = 0, motion on. */
+const pgc=()=>exampleScene('pgc3d').scene;
+const roundtrip=scene=>validateScene(JSON.parse(JSON.stringify(scene)));
+/** The motion request of a scene's settings. */
+const request=scene=>motionRequest(scene.dynamics);
 
-test('the atom moves along a lab axis through the focus perpendicular to every focused beam; refused by name when there is none',()=>{
-  const scene=pgc();
-  assert.deepEqual(focusedBeams(scene).map(l=>l.id),['tweezer']);assert.deepEqual(radialAxes(scene),['x','y']);
-  // The chosen axis when it is radial, else the first radial one.
-  scene.dynamics.motion.axis='y';assert.equal(motionAxis(scene,scene.dynamics.motion),'y');
-  scene.dynamics.motion.axis='z';assert.equal(motionAxis(scene,scene.dynamics.motion),'x');assert.deepEqual(motionRequest(scene,scene.dynamics),{axis:'x',temperatureUK:30});
-  // Plane waves take part at any angle.
-  scene.lasers[1].direction=spherical(37,21);resolveSceneFrequencies(scene);assert.deepEqual(radialAxes(scene),['x','y']);assert.equal(motionRefusal(scene),'');
-  // A tweezer off the lab axes: the axes perpendicular to it, exactly; none at all is refused, naming it.
-  const tilted=pgc();tilted.lasers[0].direction=spherical(90,30);assert.deepEqual(radialAxes(tilted),['z']);
-  tilted.lasers[0].direction=spherical(40,30);assert.throws(()=>radialAxes(tilted),/^Error: 径向运动沿穿过焦点、与聚焦光垂直的坐标轴：没有垂直于「光镊」的坐标轴。$/);
-  assert.match(motionRefusal(tilted),/「光镊」/);
-  // Every focused beam: two leave one axis, three none.
-  const two=pgc();two.lasers.push(tweezer(two,'tweezer-x','光镊 x',axis('+x')));assert.deepEqual(radialAxes(two),['y']);
-  two.lasers.push(tweezer(two,'tweezer-y','光镊 y',axis('-y')));assert.throws(()=>radialAxes(two),/没有同时垂直于「光镊」、「光镊 x」、「光镊 y」的坐标轴/);
-  // No focused beam: no tweezer. Off, nothing is refused.
-  const plain=pgc();setLaserIntensityMode(plain.lasers[0],'intensity');assert.throws(()=>radialAxes(plain),/没有聚焦在原子处的光/);
-  plain.dynamics.motion.enabled=false;assert.equal(motionRefusal(plain),'');
+test('motion is on by default: the default scene\'s 852 nm tweezer is designated and on, new lasers are given by power and waist',()=>{
+  const scene=defaultScene();
+  assert.deepEqual(scene.dynamics.motion,{enabled:true,temperatureUK:DEFAULT_MOTION_TEMPERATURE_UK,temperatureUnit:'μK',device:'gpu'});
+  assert.equal(tweezerOf(scene)?.id,'tweezer');assert.equal(tweezerOf(scene).enabled,true);assert.equal(motionRefusal(scene),'');
+  // A new laser: a cooling or probe beam, 50 μW in a 1 mm waist -- about 3.2 mW/cm² at the atom.
+  const laser=normalizeLaserIntensity(newLaser('new','激光 1','D2'));
+  assert.deepEqual([laser.intensityMode,laser.powerMW,laser.waistUm,laser.powerUnit,laser.waistUnit,laser.intensityUnit],['power',NEW_LASER_POWER_MW,NEW_LASER_WAIST_UM,'μW','mm','mW/cm²']);
+  assert.ok(Math.abs(laserIntensityMWcm2(laser)-2*.05/(Math.PI*.1**2))<1e-12,`${laserIntensityMWcm2(laser)}`);
+  assert.deepEqual(laser.frequency,{base:{kind:'transition',line:'D2',Fg:2,Fe:3},offsetMHz:0});
+  assert.deepEqual(newLaser('d1','激光 2','D1').frequency,{base:{kind:'transition',line:'D1',Fg:2,Fe:2},offsetMHz:0});
 });
 
-test('the atom moves in the plane across the tweezer when every focused beam runs along one lab axis, the plane named in its frame\'s order',()=>{
-  const scene=pgc();assert.deepEqual(radialChoices(scene),['x','y','xy']);
-  scene.dynamics.motion.axis='xy';assert.equal(motionAxis(scene,scene.dynamics.motion),'xy');assert.deepEqual(motionRequest(scene,scene.dynamics),{axis:'xy',temperatureUK:30});
-  // Another plane gives way to the scene's; with no plane, to the first radial axis.
-  scene.dynamics.motion.axis='yz';assert.equal(motionAxis(scene,scene.dynamics.motion),'xy');
-  for(const [direction,choices] of [[axis('+x'),['y','z','yz']],[axis('-y'),['x','z','zx']],[spherical(90,30),['z']]]){
-    const turned=pgc();turned.lasers[0].direction=direction;assert.deepEqual(radialChoices(turned),choices);
-    turned.dynamics.motion.axis='xy';assert.equal(motionAxis(turned,turned.dynamics.motion),choices.at(-1).length===2?choices.at(-1):choices[0]);
-  }
-  // Two tweezers along z keep the plane; one across them leaves a line.
-  const two=pgc();two.lasers.push(tweezer(two,'tweezer-2','光镊 2',axis('-z')));assert.deepEqual(radialChoices(two),['x','y','xy']);
-  two.lasers.push(tweezer(two,'tweezer-x','光镊 x',axis('+x')));assert.deepEqual(radialChoices(two),['y']);
-  const none=pgc();none.lasers[0].direction=spherical(40,30);assert.deepEqual(radialChoices(none),[]);
+test('the tweezer is the one laser designated: designating another moves it, removing it drops it, and motion needs it',()=>{
+  const scene=defaultScene(),[probe,tweezer]=scene.lasers;
+  setTweezer(scene,probe);assert.equal(tweezerOf(scene),probe,'designating another moves it');
+  setTweezer(scene,undefined);assert.equal(scene.tweezerId,undefined);assert.equal(tweezerOf(scene),undefined);
+  assert.throws(()=>setTweezer(scene,{...tweezer,id:'elsewhere'}),/不是场景中的激光/);
+  // Motion needs it, on, bright and focused at the atom; each refusal names the laser.
+  assert.equal(motionRefusal(scene),'运动需要光镊：请在一束激光的参数中打开“设为光镊”，或在布居演化页关闭“运动”。');
+  setTweezer(scene,tweezer);assert.equal(motionRefusal(scene),'');
+  tweezer.enabled=false;assert.equal(tweezerRefusal(scene),'运动需要光镊：光镊「光镊」已关闭。');tweezer.enabled=true;
+  writeLaserPower(tweezer,0,'mW');assert.equal(tweezerRefusal(scene),'运动需要光镊：光镊「光镊」的强度为零。');writeLaserPower(tweezer,4,'mW');
+  setLaserIntensityMode(tweezer,'intensity');assert.match(tweezerRefusal(scene),/^运动需要光镊：光镊「光镊」按局域强度给出，是平面波；/);
+  setLaserIntensityMode(tweezer,'na');assert.equal(tweezerRefusal(scene),'','NA mode is a Gaussian beam focused at the atom');
+  // The model refuses motion with the same words; off, nothing is refused.
+  delete scene.tweezerId;assert.throws(()=>buildFullMasterModel(scene,scene.dynamics,{axis:'3d',temperatureUK:30}),/^Error: 运动需要光镊：请在一束激光的参数中打开“设为光镊”/);
+  scene.dynamics.motion.enabled=false;assert.equal(motionRefusal(scene),'');
+  // A laser leaving the scene takes its designation with it; another leaving keeps it.
+  const kept=defaultScene();kept.lasers=kept.lasers.filter(l=>l.id!=='probe');keepTweezer(kept);assert.equal(kept.tweezerId,'tweezer');
+  kept.lasers=[];keepTweezer(kept);assert.equal(kept.tweezerId,undefined);
 });
 
-/** Σ_j drive.cos + (H0 − H0 without beams) = H(t = 0, x = 0), from the model; and from the beams. */
+test('the scene file keeps the tweezer and the motion with its device; another file is refused with the field named',()=>{
+  const scene=defaultScene(),loaded=roundtrip(scene);
+  assert.equal(loaded.tweezerId,'tweezer');assert.deepEqual(loaded.dynamics.motion,scene.dynamics.motion);
+  scene.dynamics.motion={enabled:false,temperatureUK:1500,temperatureUnit:'mK',device:'cpu'};assert.deepEqual(roundtrip(scene).dynamics.motion,scene.dynamics.motion);
+  const none=defaultScene();delete none.tweezerId;assert.equal(Object.hasOwn(roundtrip(none),'tweezerId'),false,'no tweezer: none');
+  const file=()=>JSON.parse(JSON.stringify(defaultScene()));
+  for(const [label,change,reason] of [
+    ['a tweezer that is no laser',f=>{f.tweezerId='nowhere';},/tweezerId 应为场景中一束激光的 ID/],['a tweezer that is no text',f=>{f.tweezerId=7;},/tweezerId 应为 1 至 64 个字符的文本/],
+    ['no motion',f=>{delete f.dynamics.motion;},/dynamics 缺少 motion/],['a motion axis',f=>{f.dynamics.motion.axis='x';},/dynamics\.motion 含有未知字段 axis/],
+    ['no device',f=>{delete f.dynamics.motion.device;},/dynamics\.motion 缺少 device/],['another device',f=>{f.dynamics.motion.device='tpu';},/dynamics\.motion\.device/],
+    ['no temperature',f=>{f.dynamics.motion.temperatureUK=0;},/dynamics\.motion\.temperatureUK/],['a temperature unit',f=>{f.dynamics.motion.temperatureUnit='nK';},/dynamics\.motion\.temperatureUnit/],
+    ['a version-2 file',f=>{f.version=2;},/^Error: 场景文件不符合当前格式（version 3）：version 为 2，应为 3$/],
+  ]){const f=file();change(f);assert.throws(()=>validateScene(f),reason,label);}
+  // 丢失 is a curve a scene may show.
+  const curves=defaultScene();curves.dynamics.monitorMode='manual';curves.dynamics.monitoredGroupIds=[LOSS_CURVE.id,'F:ground:1'];
+  assert.deepEqual(roundtrip(curves).dynamics.monitoredGroupIds,['loss','F:ground:1']);
+});
+
+test('the initial temperature keeps its digits when its unit changes (§0.4); it is finite and positive',()=>{
+  const motion=defaultMotion();assert.deepEqual(motionTemperatureReading(motion),{value:30,unit:'μK'});
+  setMotionTemperature(motion,typedDigits(motionTemperatureReading(motion).value),'mK');
+  assert.deepEqual([motion.temperatureUK,motion.temperatureUnit],[30000,'mK']);assert.deepEqual(motionTemperatureReading(motion),{value:30,unit:'mK'});
+  for(const value of [0,-1,NaN,Infinity])assert.throws(()=>setMotionTemperature(motion,value,'μK'),/温度必须是有限正数/);
+  assert.deepEqual([motion.temperatureUK,motion.temperatureUnit],[30000,'mK'],'a refused temperature leaves it as it was');
+});
+
+/** Σ_j drive.cos + (H0 − H0 without beams) = H(t = 0, r = 0), from the model; and from the beams. */
 function hamiltonianAtOrigin(model){
   const re=model.hReal.map((h,k)=>h-model.motion.hamiltonian.real[k]+model.drives.reduce((s,d)=>s+d.cos.real[k],0));
   const im=model.hImag.map((h,k)=>h-model.motion.hamiltonian.imag[k]+model.drives.reduce((s,d)=>s+d.cos.imag[k],0));
@@ -81,29 +105,28 @@ function hamiltonianAtOrigin(model){
 }
 const largest=(a,b)=>Math.max(...a.re.map((x,k)=>Math.hypot(x-(b?b.re[k]:0),a.im[k]-(b?b.im[k]:0))));
 
-test('the motion block keeps the beams apart with their geometry; at the atom they add up to the model\'s drives',()=>{
-  // Two lasers of one frequency per pair: merged in the drives, two beams each here.
-  const scene=pgc(),model=buildFullMasterModel(scene,scene.dynamics,{axis:'x',temperatureUK:30}),m=model.motion,f=model.frequencyCoordinates.frequenciesMHz;
-  assert.deepEqual(m.beams.map(b=>b.id).sort(),['cool-minus','cool-plus','repump-minus','repump-plus','tweezer']);
+test('the motion block: 3D in the lab frame, the trap beam named, a waist exactly on the Gaussian beams; at the atom the beams add up to the drives',()=>{
+  // A cooling beam given by power and waist is a Gaussian beam too: it carries its waist, and is no trap.
+  const scene=pgc(),cooling=scene.lasers.find(l=>l.id==='cool-plus-x');setLaserIntensityMode(cooling,'power');
+  const model=buildFullMasterModel(scene,scene.dynamics,request(scene)),m=model.motion,f=model.frequencyCoordinates.frequenciesMHz;
+  assert.deepEqual([m.axis,m.trapBeamId],['3d','tweezer']);assert.equal(m.beams.length,8);
   const {model:h,beams}=hamiltonianAtOrigin(model);assert.ok(largest(h,beams)<=1e-12*largest(beams),`${largest(h,beams)}`);
   const reference=scene.lasers.find(l=>l.id===model.referenceLaserId);assert.equal(f.at(-1),laserFrequencyMHz(reference));
   for(const b of m.beams){
-    const laser=scene.lasers.find(l=>l.id===b.id),detuning=b.frequencyIndex.reduce((s,n,k)=>s+n*f[k],0),k=directionVector(scene.fields,laser.direction);
+    const laser=scene.lasers.find(l=>l.id===b.id),detuning=b.frequencyIndex.reduce((s,n,k)=>s+n*f[k],0);
     assert.ok(Math.abs(detuning-(laserFrequencyMHz(laser)-laserFrequencyMHz(reference)))<1e-6,b.id);
     assert.deepEqual([b.name,b.waveNumberPerUm,b.intensityMWcm2],[laser.name,2*Math.PI*laserFrequencyMHz(laser)/C,laserIntensityMWcm2(laser)]);
-    // The direction in the motion frame (MOTION_FRAME.x: y, z, then x); a waist for a beam focused at the atom, none for a plane wave.
-    assert.deepEqual(b.direction,[k[1],k[2],k[0]],b.id);assert.equal(b.waistUm,laser.intensityMode==='intensity'?undefined:laserWaistUm(laser),b.id);
-    // Only excited ← ground entries.
+    // The direction on the lab axes; a waist for a beam given by power and waist or NA, none for a plane wave.
+    assert.deepEqual(b.direction,directionVector(scene.fields,laser.direction),b.id);assert.equal(b.waistUm,laser.intensityMode==='intensity'?undefined:laserWaistUm(laser),b.id);
     assert.ok(b.coupling.real.every((x,k)=>x===0&&b.coupling.imag[k]===0||(Math.floor(k/N)>=8&&k%N<8)),b.id);
   }
-  assert.deepEqual(m.beams.filter(b=>b.waistUm!==undefined).map(b=>[b.id,b.direction,b.waistUm]),[['tweezer',[0,1,0],1]]);
-  assert.deepEqual(m.beams.find(b=>b.id==='cool-minus').direction,[0,0,-1]);
+  assert.deepEqual(m.beams.filter(b=>b.waistUm!==undefined).map(b=>[b.id,b.waistUm]),[['tweezer',1],['cool-plus-x',laserWaistUm(cooling)]]);
+  assert.deepEqual(m.beams.find(b=>b.id==='tweezer').direction,[0,0,1]);assert.deepEqual(m.beams.find(b=>b.id==='cool-minus-x').direction,[-1,0,0]);
   // H0 without beams is diagonal; the excited states' frame is the reference carrier.
   assert.ok(m.hamiltonian.real.every((x,k)=>x===0||k%(N+1)===0)&&m.hamiltonian.imag.every(x=>x===0));
   assert.deepEqual(m.frameFrequenciesMHz,model.frameFrequenciesMHz);assert.equal(m.massKg,RB87.massKg);assert.equal(m.temperatureUK,30);
-  // An axis that is not radial is refused.
-  assert.throws(()=>buildFullMasterModel(scene,scene.dynamics,{axis:'z',temperatureUK:30}),/1D 运动的运动轴 z 不与每束聚焦光都垂直（可选：x、y）/);
-  // Without motion the model is as before: no motion block, the same matrices.
+  // Another laser designated moves the trap; without motion the model is as before.
+  setTweezer(scene,cooling);assert.equal(buildFullMasterModel(scene,scene.dynamics,request(scene)).motion.trapBeamId,'cool-plus-x');
   const plain=buildFullMasterModel(scene,scene.dynamics);assert.equal(plain.motion,undefined);
   assert.deepEqual({h:plain.hReal,d:plain.drives,c:plain.collapse},{h:model.hReal,d:model.drives,c:model.collapse});
 });
@@ -118,18 +141,16 @@ function dissipated(operators,rho){
   }
   return out;
 }
-test('the Cartesian emission operators are the model\'s spontaneous emission, in the drives\' polarization convention',()=>{
-  // A tilted field: the quantization frame is not the lab's. Each axis with the tweezer across it.
-  for(const [along,direction] of [['x','+z'],['y','+z'],['z','+x']]){
-    const scene=pgc();Object.assign(scene.fields[0],{magnitudeG:2.5,direction:{reference:{kind:'angles',thetaDeg:37,phiDeg:-21},thetaDeg:0,phiDeg:0}});scene.lasers[0].direction=axis(direction);
-    const model=buildFullMasterModel(scene,scene.dynamics,{axis:along,temperatureUK:30}),rho={re:Array(N*N).fill(0),im:Array(N*N).fill(0)};
-    for(let i=0;i<N;i++)for(let j=0;j<=i;j++){const a=Math.sin(3*i+7*j),b=i===j?0:Math.cos(5*i-2*j);rho.re[i*N+j]=rho.re[j*N+i]=a;rho.im[i*N+j]=b;rho.im[j*N+i]=-b;}
-    const cartesian=dissipated(model.motion.emission,rho),spherical$=dissipated(model.collapse,rho);
-    assert.ok(largest(cartesian,spherical$)<=1e-13*largest(spherical$),along);
-  }
+test('the Cartesian emission operators on the lab axes are the model\'s spontaneous emission, in the drives\' polarization convention',()=>{
+  // A tilted field: the quantization frame is not the lab's.
+  const scene=pgc();Object.assign(scene.fields[0],{magnitudeG:2.5,direction:{reference:{kind:'angles',thetaDeg:37,phiDeg:-21},thetaDeg:0,phiDeg:0}});
+  const model=buildFullMasterModel(scene,scene.dynamics,request(scene)),rho={re:Array(N*N).fill(0),im:Array(N*N).fill(0)};
+  for(let i=0;i<N;i++)for(let j=0;j<=i;j++){const a=Math.sin(3*i+7*j),b=i===j?0:Math.cos(5*i-2*j);rho.re[i*N+j]=rho.re[j*N+i]=a;rho.im[i*N+j]=b;rho.im[j*N+i]=-b;}
+  const cartesian=dissipated(model.motion.emission,rho),spherical$=dissipated(model.collapse,rho);
+  assert.ok(largest(cartesian,spherical$)<=1e-13*largest(spherical$));
   // The convention: a laser's amplitudes are e_q*·ε on the quantization axis (q = −1, 0, +1), the
   // basis the emission operators are combined in.
-  const scene=pgc(),frame=composeMagneticField(scene.fields).frame;
+  const frame=composeMagneticField(scene.fields).frame;
   for(const [theta,phi,psi,chi] of [[0,0,0,45],[90,30,10,-20],[133,-71,-40,7],[180,0,25,45]]){
     const laser={...structuredClone(scene.lasers[1]),direction:spherical(theta,phi),polarizationAngleDeg:psi,ellipticityDeg:chi},p=polarization(laser,scene.fields);
     const c=Math.cos(chi*Math.PI/180),s=Math.sin(chi*Math.PI/180),re=p.u.map(x=>c*x),im=p.v.map(x=>s*x);
@@ -137,209 +158,37 @@ test('the Cartesian emission operators are the model\'s spontaneous emission, in
     const expected=[{re:h*(xr-yi),im:h*(xi+yr)},{re:zr,im:zi},{re:-h*(xr+yi),im:-h*(xi-yr)}];
     expected.forEach((e,q)=>assert.ok(Math.hypot(e.re-p.amplitudes[q].re,e.im-p.amplitudes[q].im)<1e-12,`${theta},${phi},${psi},${chi}: q=${q-1}`));
   }
-  // Along the field (here z, at B along z; the tweezer along x) the axial component is the π operator itself.
-  const along=pgc();Object.assign(along.fields[0],{magnitudeG:3,direction:axis('+z')});along.lasers[0].direction=axis('+x');
-  const model=buildFullMasterModel(along,along.dynamics,{axis:'z',temperatureUK:30});
-  const pi=model.collapse[1],axial=model.motion.emission[2];
-  assert.ok(axial.real.every((x,k)=>x===pi.real[k])&&axial.imag.every((x,k)=>x===pi.imag[k]));
-  assert.deepEqual(MOTION_FRAME.z,[[1,0,0],[0,1,0],[0,0,1]]);
+  // Along the field (z, at B along z) the z component is the π operator itself.
+  const along=pgc();Object.assign(along.fields[0],{magnitudeG:3,direction:axis('+z')});
+  const pi=buildFullMasterModel(along,along.dynamics,request(along)),axial=pi.motion.emission[2];
+  assert.ok(axial.real.every((x,k)=>x===pi.collapse[1].real[k])&&axial.imag.every((x,k)=>x===pi.collapse[1].imag[k]));
+  assert.deepEqual(MOTION_FRAME,[[1,0,0],[0,1,0],[0,0,1]]);
 });
 
-test('a plane\'s motion block is in the frame of the tweezer\'s axis: the plane\'s two axes, then the tweezer\'s; a plane not across every focused beam is refused',()=>{
-  // The tweezer along x: the plane yz, the frame y, z, x.
-  const scene=pgc();Object.assign(scene.fields[0],{magnitudeG:2.5,direction:{reference:{kind:'angles',thetaDeg:37,phiDeg:-21},thetaDeg:0,phiDeg:0}});scene.lasers[0].direction=axis('+x');
-  const model=buildFullMasterModel(scene,scene.dynamics,{axis:'yz',temperatureUK:30}),m=model.motion;
-  assert.equal(m.axis,'yz');
-  for(const b of m.beams){const k=directionVector(scene.fields,scene.lasers.find(l=>l.id===b.id).direction);assert.deepEqual(b.direction,[k[1],k[2],k[0]],b.id);}
-  assert.deepEqual(m.beams.find(b=>b.id==='tweezer').direction,[0,0,1]);
-  // Σ_a D[C_a] over the frame's axes is the model's spontaneous emission.
-  const rho={re:Array(N*N).fill(0),im:Array(N*N).fill(0)};
-  for(let i=0;i<N;i++)for(let j=0;j<=i;j++){const a=Math.cos(2*i+5*j),b=i===j?0:Math.sin(3*i-j);rho.re[i*N+j]=rho.re[j*N+i]=a;rho.im[i*N+j]=b;rho.im[j*N+i]=-b;}
-  const cartesian=dissipated(m.emission,rho),spherical$=dissipated(model.collapse,rho);assert.ok(largest(cartesian,spherical$)<=1e-13*largest(spherical$));
-  assert.throws(()=>buildFullMasterModel(scene,scene.dynamics,{axis:'xy',temperatureUK:30}),/^Error: 2D 径向运动的运动平面 xy 不垂直于每束聚焦光（可选：yz）。$/);
-  const tilted=pgc();tilted.lasers[0].direction=spherical(90,30);
-  assert.throws(()=>buildFullMasterModel(tilted,tilted.dynamics,{axis:'xy',temperatureUK:30}),/2D 径向运动的运动平面 xy 不垂直于每束聚焦光（聚焦光不都沿同一坐标轴）/);
-  assert.match(buildFullMasterModel(pgc(),pgc().dynamics,{axis:'xy',temperatureUK:30}).assumptions.at(-2),/^2D 运动：光镊中单个原子在 xy 平面（穿过焦点、垂直于光镊）内径向运动/);
-});
-
-test('the scene keeps its motion, on or off, along an axis or in a plane, with its unit; an invalid one is refused with the field named',()=>{
-  const roundtrip=scene=>validateScene(JSON.parse(JSON.stringify(scene)));
-  const scene=pgc();assert.deepEqual(roundtrip(scene).dynamics.motion,{enabled:true,axis:'x',temperatureUK:DEFAULT_MOTION_TEMPERATURE_UK,temperatureUnit:'μK'});
-  scene.dynamics.motion={enabled:false,axis:'y',temperatureUK:1500,temperatureUnit:'mK'};assert.deepEqual(roundtrip(scene).dynamics.motion,scene.dynamics.motion);
-  scene.dynamics.motion={enabled:true,axis:'xy',temperatureUK:20,temperatureUnit:'μK'};assert.deepEqual(roundtrip(scene).dynamics.motion,scene.dynamics.motion);
-  for(const [change,reason] of [
-    [m=>{m.axis='w';},/dynamics\.motion\.axis/],[m=>{m.axis='yx';},/dynamics\.motion\.axis/],[m=>{m.temperatureUK=0;},/dynamics\.motion\.temperatureUK/],[m=>{m.temperatureUnit='nK';},/dynamics\.motion\.temperatureUnit/],
-    [m=>{delete m.enabled;},/dynamics\.motion 缺少 enabled/],[m=>{m.trajectories=64;},/dynamics\.motion 含有未知字段 trajectories/],
-  ]){const bad=pgc();change(bad.dynamics.motion);assert.throws(()=>roundtrip(bad),reason);}
-});
-
-test('the initial temperature keeps its digits when its unit changes (§0.4); it is finite and positive',()=>{
-  const motion=defaultMotion();assert.deepEqual(motionTemperatureReading(motion),{value:30,unit:'μK'});
-  setMotionTemperature(motion,typedDigits(motionTemperatureReading(motion).value),'mK');
-  assert.deepEqual([motion.temperatureUK,motion.temperatureUnit],[30000,'mK']);assert.deepEqual(motionTemperatureReading(motion),{value:30,unit:'mK'});
-  for(const value of [0,-1,NaN,Infinity])assert.throws(()=>setMotionTemperature(motion,value,'μK'),/温度必须是有限正数/);
-  assert.deepEqual([motion.temperatureUK,motion.temperatureUnit],[30000,'mK'],'a refused temperature leaves it as it was');
-});
-
-test('a motion trajectory is its own request: its own key with the beams\' waists, no long-time mean, the mean\'s key unchanged',()=>{
+test('a motion trajectory is its own request: its key holds the motion, the device, the tweezer and the waists; the mean\'s key does not',()=>{
   const scene=pgc(),off=structuredClone(scene);off.dynamics.motion.enabled=false;
-  const none=structuredClone(scene);delete none.dynamics.motion;
-  assert.equal(trajectoryInputsKey(off,off.dynamics),trajectoryInputsKey(none,none.dynamics),'motion off is no part of the key');
-  assert.notEqual(trajectoryInputsKey(scene,scene.dynamics),trajectoryInputsKey(off,off.dynamics));
-  const hotter=structuredClone(scene);hotter.dynamics.motion.temperatureUK=40;assert.notEqual(trajectoryInputsKey(hotter,hotter.dynamics),trajectoryInputsKey(scene,scene.dynamics));
+  const key=s=>trajectoryInputsKey(s,s.dynamics),changed=change=>{const s=structuredClone(scene);change(s);return key(s);};
+  assert.notEqual(key(scene),key(off));
+  for(const [label,change] of [['the temperature',s=>{s.dynamics.motion.temperatureUK=40;}],['the device',s=>{s.dynamics.motion.device='cpu';}],
+    ['the tweezer',s=>{s.tweezerId='cool-plus-x';}],['a waist',s=>{s.lasers[0].waistUm=1.5;s.lasers[0].intensityAnchor=undefined;}]])assert.notEqual(changed(change),key(scene),label);
   // The same intensity at the atom as a plane wave: the internal model is the same, the motion's is not.
   const plane=structuredClone(scene),offPlane=structuredClone(off);for(const s of [plane,offPlane])setLaserIntensityMode(s.lasers[0],'intensity');
   assert.equal(laserIntensityMWcm2(plane.lasers[0]),laserIntensityMWcm2(scene.lasers[0]));
-  assert.notEqual(trajectoryInputsKey(plane,plane.dynamics),trajectoryInputsKey(scene,scene.dynamics));
-  assert.equal(trajectoryInputsKey(offPlane,offPlane.dynamics),trajectoryInputsKey(off,off.dynamics));
+  assert.notEqual(key(plane),key(scene));assert.equal(key(offPlane),key(off));
+  // Off, the device and the tweezer are no part of it; the mean is the internal state's either way.
+  assert.equal(changed(s=>{s.dynamics.motion.enabled=false;s.dynamics.motion.device='cpu';delete s.tweezerId;}),key(off));
   assert.equal(meanInputsKey(scene,scene.dynamics),meanInputsKey(off,off.dynamics));
-  assert.deepEqual(motionRequest(scene,scene.dynamics),{axis:'x',temperatureUK:30});assert.equal(motionRequest(off,off.dynamics),undefined);
+  assert.deepEqual(request(scene),{axis:'3d',temperatureUK:30});assert.equal(request(off),undefined);
   assert.equal(plannedSolve(true,{trajectory:false,mean:false},true),'trajectory');
   assert.equal(plannedSolve(true,{trajectory:true,mean:false},true),undefined);
-  assert.equal(plannedSolve(false,{trajectory:false,mean:false},true),'mean','the levels\' long-time mode keeps its internal mean');
+  assert.equal(plannedSolve(false,{trajectory:false,mean:false},true),'mean','the levels\' p̄: the atom at rest, the internal state');
 });
 
-/** A contract-valid motion block: per sample T, ⟨v⟩, n̄ and the loss; distributions at the first and last sample. */
-function motionBlock(samples,axis='x'){
-  const velocities=[-.1,-.05,0,.05,.1],positions=[-.4,-.2,0,.2,.4],p=[.1,.2,.4,.2,.1];
-  return {axis,temperatureUK:Array(samples).fill(30),meanVelocityMps:Array(samples).fill(0),trapFrequencyKHz:123.4,meanOccupation:Array(samples).fill(4.5),
-    lossProbability:Array.from({length:samples},(_,i)=>i*.01),momentum:{velocitiesMps:velocities,samples:[0,samples-1],probabilities:[p,p]},
-    position:{positionsUm:positions,samples:[0,samples-1],probabilities:[p,p]}};
-}
-/** A contract-valid 2D block in the plane xy: per axis and sample T with its standard error, ⟨v⟩
- * and n̄; the loss; the two velocity marginals on one grid and the 3 × 3 position maps, at the first
- * and last sample. */
-function planeBlock(samples){
-  const velocities=[-.1,-.05,0,.05,.1],p=[.1,.2,.4,.2,.1],map=[.05,.1,.05,.1,.4,.1,.05,.1,.05],series=value=>Array(samples).fill(value);
-  return {axis:'xy',axes:['x','y'],temperatureUK:[series(30),series(28)],temperatureErrorUK:[series(.5),series(.6)],meanVelocityMps:[series(0),series(.001)],
-    trapFrequencyKHz:[100.5,98.2],meanOccupation:[series(5.9),series(5.7)],lossProbability:Array.from({length:samples},(_,i)=>i*.01),
-    momentum:[{velocitiesMps:velocities,samples:[0,samples-1],probabilities:[p,p]},{velocitiesMps:velocities,samples:[0,samples-1],probabilities:[p,p]}],
-    position:{positionsUm:[-.2,0,.2],samples:[0,samples-1],probabilities:[map,map]},trajectories:512};
-}
-function motionResult(scene,samples=3,block=motionBlock(samples)){
-  const timesUs=Array.from({length:samples},(_,i)=>scene.dynamics.durationUs*i/(samples-1)),model=buildFullMasterModel(scene,scene.dynamics);
-  const data=nativeResult({states:model.states,initialIndex:model.states.findIndex(s=>s.id===scene.dynamics.initialStateId),timesUs,mean:false});
-  return {...data,motion:block,assumptions:['test']};
-}
-test('a motion result is read strictly: its block is there exactly when asked, on the request\'s axis and samples',()=>{
-  const scene=pgc(),request=motionRequest(scene,scene.dynamics),read=data=>normalizeDynamicsResult(data,scene,undefined,undefined,request);
-  const result=read(motionResult(scene)),block=motionBlock(3);
-  // Read per axis: the one motion axis.
-  assert.deepEqual(result.motion,{axis:'x',axes:['x'],temperatureUK:[block.temperatureUK],meanVelocityMps:[block.meanVelocityMps],trapFrequencyKHz:[block.trapFrequencyKHz],
-    meanOccupation:[block.meanOccupation],lossProbability:block.lossProbability,
-    momentum:[{grid:block.momentum.velocitiesMps,samples:[0,2],probabilities:block.momentum.probabilities}],
-    position:[{grid:block.position.positionsUm,samples:[0,2],probabilities:block.position.probabilities}]});
-  assert.equal(result.mean.status,'not-requested');
-  // The 1D engine's T has no standard error: no band.
-  assert.deepEqual(errorBands(seriesChart(result.timesUs,motionSeries(result.motion,'temperature'),'ms')),[]);
-  const without=motionResult(scene);delete without.motion;assert.throws(()=>read(without),/运动结果/);
-  assert.throws(()=>normalizeDynamicsResult(motionResult(scene),scene),/运动结果/,'a block nobody asked for');
-  for(const [label,change] of [
-    ['another axis',m=>{m.axis='y';}],['a temperature short of a sample',m=>{m.temperatureUK.pop();}],['a negative temperature',m=>{m.temperatureUK[1]=-1;}],
-    ['a nonfinite velocity',m=>{m.meanVelocityMps[0]=NaN;}],['no trap frequency',m=>{delete m.trapFrequencyKHz;}],['a trap frequency of zero',m=>{m.trapFrequencyKHz=0;}],
-    ['an occupation short of a sample',m=>{m.meanOccupation.pop();}],['a loss above one',m=>{m.lossProbability[2]=1.5;}],['a loss that decreases',m=>{m.lossProbability[2]=0;}],
-    ['a grid out of order',m=>{m.momentum.velocitiesMps[1]=-.2;}],['a position grid out of order',m=>{m.position.positionsUm[1]=-.5;}],
-    ['no distribution at the last sample',m=>{m.momentum.samples=[0,1];}],['no position at the last sample',m=>{m.position.samples=[0,1];}],
-    ['a distribution not summing to one',m=>{m.momentum.probabilities[1]=[.1,.2,.4,.2,.2];}],['a negative probability',m=>{m.position.probabilities[0]=[-.1,.4,.4,.2,.1];}],
-    ['no position',m=>{delete m.position;}],['an unknown field',m=>{m.trajectories=64;}],
-  ]){const data=motionResult(scene);change(data.motion);assert.throws(()=>read(data),/运动结果/,label);}
-});
-
-test('a 2D motion result is read strictly: per axis of the requested plane, the marginals on one grid, the maps on a uniform one',()=>{
-  const scene=pgc();scene.dynamics.motion.axis='xy';
-  const request=motionRequest(scene,scene.dynamics),read=data=>normalizeDynamicsResult(data,scene,undefined,undefined,request),block=planeBlock(3);
-  const read2d=read(motionResult(scene,3,block)),motion=read2d.motion;
-  // Its T carries its standard error: a band of ±1 around each axis's line.
-  assert.deepEqual(errorBands(seriesChart(read2d.timesUs,motionSeries(motion,'temperature'),'ms')),['#517FA6','#B17D4B']);
-  // Read per axis of the plane; the maps are kept, their marginals (each summed over the other axis) are the positions.
-  const map=block.position.probabilities[0],marginal=along=>[0,1,2].map(i=>[0,1,2].reduce((sum,j)=>sum+map[along===0?j*3+i:i*3+j],0));
-  assert.deepEqual(motion,{...block,momentum:block.momentum.map(m=>({grid:m.velocitiesMps,samples:m.samples,probabilities:m.probabilities})),
-    position:[0,1].map(along=>({grid:block.position.positionsUm,samples:block.position.samples,probabilities:[marginal(along),marginal(along)]})),
-    positionMap:{grid:block.position.positionsUm,samples:block.position.samples,probabilities:block.position.probabilities}});
-  // A 1D block where a plane was asked for, and a 2D one where an axis was, are refused.
-  assert.throws(()=>read(motionResult(scene)),/运动结果/);
-  assert.throws(()=>normalizeDynamicsResult(motionResult(scene,3,planeBlock(3)),scene,undefined,undefined,{axis:'x',temperatureUK:30}),/运动结果/);
-  for(const [label,change] of [
-    ['another plane',m=>{m.axis='yz';}],['axes out of order',m=>{m.axes=['y','x'];}],['one axis\' temperatures',m=>{m.temperatureUK.pop();}],
-    ['a temperature short of a sample',m=>{m.temperatureUK[1].pop();}],['a negative standard error',m=>{m.temperatureErrorUK[0][2]=-.1;}],
-    ['no standard errors',m=>{delete m.temperatureErrorUK;}],['one trap frequency',m=>{m.trapFrequencyKHz=[100.5];}],['a trap frequency of zero',m=>{m.trapFrequencyKHz[1]=0;}],
-    ['a nonfinite velocity',m=>{m.meanVelocityMps[1][0]=NaN;}],['a loss that decreases',m=>{m.lossProbability[2]=0;}],
-    ['one velocity marginal',m=>{m.momentum.pop();}],['marginals at other times',m=>{m.momentum[1].samples=[1,2];}],
-    ['marginals on other grids',m=>{m.momentum[1].velocitiesMps=[-.2,-.05,0,.05,.1];}],
-    ['a map of the wrong size',m=>{m.position.probabilities[1]=[.1,.2,.4,.2,.1];}],['a map not summing to one',m=>{m.position.probabilities[0]=[.05,.1,.05,.1,.5,.1,.05,.1,.05];}],
-    ['a nonuniform map grid',m=>{m.position.positionsUm=[-.3,0,.2];}],['no trajectories',m=>{m.trajectories=0;}],['a fractional trajectory count',m=>{m.trajectories=1.5;}],
-  ]){const data=motionResult(scene,3,planeBlock(3));change(data.motion);assert.throws(()=>read(data),/运动结果/,label);}
-});
-
-test('the client asks for the motion with a trajectory alone, along the radial axis, and reads its result',async t=>{
-  const calls=[],client=new DynamicsClient({fetch:async(url,init)=>new Promise(resolve=>calls.push({resolve,body:JSON.parse(init.body)})),debounceMs:0,clientId:'motion'});t.after(()=>client.dispose());
-  const scene=pgc();scene.dynamics.samples=3;scene.dynamics.motion.axis='z';
-  const pending=client.solve(scene,scene.dynamics,{includeMean:false});
-  for(let i=0;i<100&&!calls.length;i++)await pause(2);
-  const call=calls[0];assert.deepEqual(call.body.options.motion,{axis:'x',temperatureUK:30});assert.equal(call.body.options.includeMean,false);
-  call.resolve(new Response(JSON.stringify({...motionResult(scene),request:call.body.request,service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA]}}),{status:200,headers:{'Content-Type':'application/json'}}));
-  const result=await pending;assert.deepEqual([result.motion.temperatureUK,result.motion.trapFrequencyKHz],[[[30,30,30]],[123.4]]);
-  // Off, no motion is asked for.
-  scene.dynamics.motion.enabled=false;const plain=client.solve(scene,scene.dynamics).catch(e=>e);for(let i=0;i<100&&calls.length<2;i++)await pause(2);
-  assert.equal(calls[1].body.options.motion,undefined);client.cancel();await plain;
-});
-
-/** A contract-valid 3D motion block (motion3d_adapter.rs): per lab axis T, its standard error, ⟨v⟩, n̄,
- * the trap frequency and the distributions; the loss and the regime per sample. */
-function motion3dBlock(samples){
-  const velocities=[-.1,-.05,0,.05,.1],positions=[-.4,-.2,0,.2,.4],p=[.1,.2,.4,.2,.1],axes=v=>({x:structuredClone(v),y:structuredClone(v),z:structuredClone(v)});
-  return {axis:'3d',temperatureUK:axes(Array(samples).fill(30)),temperatureErrorUK:axes(Array(samples).fill(1.5)),meanVelocityMps:axes(Array(samples).fill(0)),
-    meanOccupation:axes(Array(samples).fill(4.5)),trapFrequencyKHz:{x:100.5,y:100.5,z:19.3},lossProbability:Array.from({length:samples},(_,i)=>i*.01),
-    classical:Array.from({length:samples},(_,i)=>i<samples-1),momentum:axes({velocitiesMps:velocities,samples:[0,samples-1],probabilities:[p,p]}),
-    position:axes({positionsUm:positions,samples:[0,samples-1],probabilities:[p,p]}),trajectories:512,timeStepUs:.25};
-}
-test('3D motion (semiclassical): asked for with a tweezer, its block on the lab axes, its result read per axis against its own target',()=>{
-  const scene=pgc();scene.dynamics.motion.axis='3d';
-  assert.equal(motionAxis(scene,scene.dynamics.motion),'3d');assert.deepEqual(motionRequest(scene,scene.dynamics),{axis:'3d',temperatureUK:30});
-  assert.deepEqual(readMotionRequest({axis:'3d',temperatureUK:12.5}),{axis:'3d',temperatureUK:12.5});assert.equal(motionRefusal(scene),'');
-  // The block's frame is the lab's: the cooling beams along ±x, the tweezer along z.
-  const model=buildFullMasterModel(scene,scene.dynamics,{axis:'3d',temperatureUK:30}).motion;assert.equal(model.axis,'3d');
-  assert.deepEqual(model.beams.find(b=>b.id==='tweezer').direction,[0,0,1]);assert.deepEqual(model.beams.find(b=>b.id==='cool-plus').direction,[1,0,0]);
-  // A tilted tweezer has no radial axis but still a trap: 3D is asked for; without any focused beam it is refused, naming why.
-  const tilted=pgc();tilted.dynamics.motion.axis='3d';tilted.lasers[0].direction=spherical(40,30);resolveSceneFrequencies(tilted);assert.equal(motionRefusal(tilted),'');
-  const loose=pgc();loose.dynamics.motion.axis='3d';loose.lasers=loose.lasers.filter(l=>l.id!=='tweezer');assert.match(motionRefusal(loose),/没有聚焦在原子处的光/);
-  // The scene keeps it.
-  assert.deepEqual(validateScene(JSON.parse(JSON.stringify(scene))).dynamics.motion,{enabled:true,axis:'3d',temperatureUK:30,temperatureUnit:'μK'});
-  // The result: per axis, the method's own population target (two standard errors against 5 %), the regime per sample.
-  const timesUs=[0,5000,10000],built=buildFullMasterModel(scene,scene.dynamics);
-  const data={...nativeResult({states:built.states,initialIndex:built.states.findIndex(s=>s.id===scene.dynamics.initialStateId),timesUs,mean:false}),motion:motion3dBlock(3),assumptions:['test']};
-  data.populationAccuracy={...data.populationAccuracy,requestedTolerance:.05};
-  const read=d=>normalizeDynamicsResult(d,scene,undefined,undefined,{axis:'3d',temperatureUK:30});
-  const result=read(data);
-  assert.deepEqual(result.motion.axes,['x','y','z']);assert.deepEqual(result.motion.trapFrequencyKHz,[100.5,100.5,19.3]);
-  assert.deepEqual(result.motion.classical,[true,true,false]);assert.equal(result.populationAccuracy.requestedTolerance,.05);
-  assert.deepEqual(result.motion.temperatureErrorUK,[[1.5,1.5,1.5],[1.5,1.5,1.5],[1.5,1.5,1.5]]);
-  // A sample outside the validated regime lies on the grey band of every time view (from half-way
-  // to its neighbour), a reference only.
-  const reference=result.motion.classical.map(inside=>!inside),bands=svg=>[...svg.matchAll(/<rect class="reference-band" x="([\d.]+)" y="(\d+)" width="([\d.]+)" height="(\d+)"/g)].map(m=>m.slice(1).map(Number));
-  for(const kind of ['temperature','trap']){
-    const chart=seriesChart(timesUs,motionSeries(result.motion,kind),'ms',{reference});
-    assert.deepEqual(bands(chart).map(([x,y,w,h])=>[x,x+w,y,y+h]),[[599.5,778,32,176],[599.5,778,212,300]],kind);assert.match(chart,/k_BT ≥ 4ħω 才验证过/);
-    assert.deepEqual(bands(seriesChart(timesUs,motionSeries(result.motion,kind),'ms')),[],`${kind}: none unmarked`);
-  }
-  // A trajectory method's T carries its standard error, a band of ±1 around each axis's line; n̄'s
-  // panel has none.
-  assert.deepEqual(errorBands(seriesChart(timesUs,motionSeries(result.motion,'temperature'),'ms')),['#517FA6','#B17D4B','#568C79']);
-  assert.deepEqual(errorBands(seriesChart(timesUs,motionSeries(result.motion,'trap'),'ms')),[]);
-  const id=scene.dynamics.initialStateId;
-  assert.deepEqual(bands(populationChart(result,[id],{[id]:'初态'},{showTotalExcited:false,reference})).map(([x,y,w,h])=>[x,x+w,y,y+h]),[[599.5,778,32,300]]);
-  for(const [label,change] of [
-    ['one axis missing',m=>{delete m.temperatureUK.z;}],['no regime',m=>{delete m.classical;}],['a regime short of a sample',m=>{m.classical.pop();}],
-    ['no trajectories',m=>{m.trajectories=0;}],['a 1D block',m=>{Object.assign(m,motionBlock(3));}],
-  ]){const bad=structuredClone(data);change(bad.motion);assert.throws(()=>read(bad),/运动结果/,label);}
-  const tight=structuredClone(data);tight.populationAccuracy.requestedTolerance=.01;assert.throws(()=>read(tight),/布居精度/);
-});
-
-test('the native payload of a motion solve carries the motion block; a malformed motion, one with a mean or no radial axis is refused',()=>{
-  const scene=pgc(),options={...scene.dynamics,samples:3,includeMean:false,meanOnly:false,motion:{axis:'x',temperatureUK:30}};
+test('the native payload carries the motion block with its trap beam, and the device; a malformed motion or device is refused',()=>{
+  const scene=pgc(),{motion:_,...dynamics}=scene.dynamics,options={...dynamics,samples:3,includeMean:false,meanOnly:false,motion:request(scene),device:'gpu'};
   const {payload}=prepareNativeSolve({scene,options});
-  assert.deepEqual(Object.keys(payload.model.motion).sort(),['axis','beams','emission','fieldVectorG','frameFrequenciesMHz','hamiltonian','massKg','temperatureUK']);
-  assert.equal(payload.model.motion.beams.length,5);assert.equal(payload.model.motion.emission.length,3);
+  assert.deepEqual(Object.keys(payload.model.motion).sort(),['axis','beams','emission','fieldVectorG','frameFrequenciesMHz','hamiltonian','massKg','temperatureUK','trapBeamId']);
+  assert.deepEqual([payload.model.motion.axis,payload.model.motion.trapBeamId,payload.options.device],['3d','tweezer','gpu']);
   assert.deepEqual(Object.keys(payload.model.motion.beams.find(b=>b.id==='tweezer')).sort(),
     ['counterCoupling','coupling','direction','frequencyIndex','id','intensityMWcm2','name','outsideShift','waistUm','waveNumberPerUm']);
   // Each beam's static shift through the states outside the model: Hermitian; the tweezer's on |2,+2⟩ about −0.11 MHz at its focus.
@@ -347,72 +196,135 @@ test('the native payload of a motion solve carries the motion block; a malformed
   const size=Math.max(...shift.real.map(Math.abs)),transposed=k=>(k%N)*N+Math.floor(k/N);
   assert.ok(shift.real.every((x,k)=>Math.abs(x-shift.real[transposed(k)])<=1e-12*size)&&shift.imag.every((x,k)=>Math.abs(x+shift.imag[transposed(k)])<=1e-12*size));
   assert.ok(Math.abs(shift.real[two*N+two]/(2*Math.PI)+.113)<.01,`${shift.real[two*N+two]/(2*Math.PI)} MHz`);
-  assert.equal(prepareNativeSolve({scene,options:{...options,motion:undefined}}).payload.model.motion,undefined);
-  for(const motion of [{axis:'w',temperatureUK:30},{axis:'x',temperatureUK:-1},{axis:'x',temperatureUK:30,trajectories:64},null]){
-    assert.throws(()=>prepareNativeSolve({scene,options:{...options,motion}}),error=>error.code==='invalid-options');
+  assert.equal(prepareNativeSolve({scene,options:{...options,device:'cpu'}}).payload.options.device,'cpu');
+  // No motion: no block and no device.
+  const plain=prepareNativeSolve({scene,options:{...options,motion:undefined,device:undefined}}).payload;
+  assert.equal(plain.model.motion,undefined);assert.equal(Object.hasOwn(plain.options,'device'),false);
+  for(const [label,change] of [['an axis',o=>{o.motion={axis:'x',temperatureUK:30};}],['a plane',o=>{o.motion={axis:'xy',temperatureUK:30};}],['no temperature',o=>{o.motion={axis:'3d',temperatureUK:-1};}],
+    ['an unknown motion key',o=>{o.motion={axis:'3d',temperatureUK:30,trajectories:64};}],['no motion object',o=>{o.motion=null;}],['no device',o=>{delete o.device;}],['another device',o=>{o.device='tpu';}],
+    ['a device without motion',o=>{delete o.motion;}],['a mean',o=>{o.includeMean=true;}]]){
+    const o=structuredClone(options);change(o);assert.throws(()=>prepareNativeSolve({scene,options:o}),error=>error.code==='invalid-options',label);
   }
-  assert.throws(()=>prepareNativeSolve({scene,options:{...options,includeMean:true}}),error=>error.code==='invalid-options');
-  assert.deepEqual(readMotionRequest({axis:'y',temperatureUK:12.5}),{axis:'y',temperatureUK:12.5});
-  // A plane: named in its frame's order; its block in the frame of the tweezer's axis.
-  assert.deepEqual(readMotionRequest({axis:'zx',temperatureUK:5}),{axis:'zx',temperatureUK:5});
-  assert.throws(()=>prepareNativeSolve({scene,options:{...options,motion:{axis:'xz',temperatureUK:30}}}),error=>error.code==='invalid-options');
-  const planar=prepareNativeSolve({scene,options:{...options,motion:{axis:'xy',temperatureUK:30}}}).payload.model.motion;
-  assert.equal(planar.axis,'xy');assert.deepEqual(planar.beams.find(b=>b.id==='tweezer').direction,[0,0,1]);assert.deepEqual(planar.beams.find(b=>b.id==='cool-minus').direction,[-1,0,0]);
-  // A plane wave at any angle takes part; a tweezer with no lab axis across it refuses the motion, naming it.
-  const oblique=pgc();oblique.lasers[1].direction=spherical(30,0);assert.equal(prepareNativeSolve({scene:oblique,options}).payload.model.motion.beams.length,5);
-  oblique.lasers[0].direction=spherical(40,30);assert.throws(()=>prepareNativeSolve({scene:oblique,options}),/没有垂直于「光镊」的坐标轴/);
+  assert.deepEqual(readMotionRequest({axis:'3d',temperatureUK:12.5}),{axis:'3d',temperatureUK:12.5});assert.equal(readMotionDevice('cpu'),'cpu');
+  // Without a tweezer the model is refused, saying why.
+  const loose=pgc();delete loose.tweezerId;assert.throws(()=>prepareNativeSolve({scene:loose,options}),/运动需要光镊/);
 });
 
-test('the tweezer PGC example: the 852 nm tweezer along z (π to the x quantization axis), lin⊥lin cooling and repump pairs along ±x, B = 0, |2,+2⟩ at 30 μK, motion along x',()=>{
-  const {scene,view}=exampleScene('pgc');assert.equal(view,'dynamics');
-  const loaded=validateScene(JSON.parse(JSON.stringify(scene)));
-  assert.equal(loaded.fields[0].magnitudeG,0);assert.equal(loaded.dynamics.initialStateId,'ground-2-2');
-  assert.deepEqual(directionVector(loaded.fields,loaded.fields[0].direction),[1,0,0],'the quantization axis is the motion axis');
-  assert.deepEqual([loaded.dynamics.durationUs,loaded.dynamics.durationUnit,loaded.dynamics.samples],[TWEEZER_PGC.durationUs,'ms',1001]);
-  assert.deepEqual(loaded.dynamics.motion,{enabled:true,axis:'x',temperatureUK:30,temperatureUnit:'μK'});
-  const [trap,plus,minus,repumpPlus,repumpMinus]=loaded.lasers;
-  assert.deepEqual([trap.id,trap.frequency,trap.intensityMode,trap.powerMW,trap.waistUm,directionVector(loaded.fields,trap.direction)],['tweezer',{wavelengthNm:852},'power',3.5,1,[0,0,1]]);
-  assert.deepEqual(polarization(trap,loaded.fields).u.map(x=>Math.round(x*1e12)/1e12+0),[1,0,0]);
-  assert.deepEqual([plus,minus,repumpPlus,repumpMinus].map(l=>directionVector(loaded.fields,l.direction)[0]),[1,-1,1,-1]);
-  assert.deepEqual([plus.intensityMWcm2,minus.intensityMWcm2,repumpPlus.intensityMWcm2,repumpMinus.intensityMWcm2],[3,3,.5,.5]);
-  const gamma=RB87.D2.gammaHz/(2*Math.PI*1e6);
-  assert.deepEqual(plus.frequency,{base:{kind:'transition',line:'D2',Fg:2,Fe:3},offsetMHz:TWEEZER_PGC.coolingDetuningGamma*gamma});
-  assert.deepEqual(repumpPlus.frequency,{base:{kind:'transition',line:'D2',Fg:1,Fe:2},offsetMHz:0});
-  // lin⊥lin: the two cooling beams' linear polarizations are perpendicular, both across x.
-  const u=l=>polarization(l,loaded.fields).u;const dot=(a,b)=>a.reduce((s,x,i)=>s+x*b[i],0);
-  assert.ok(Math.abs(dot(u(plus),u(minus)))<1e-12&&Math.abs(u(plus)[0])<1e-12&&Math.abs(u(minus)[0])<1e-12);
-  assert.deepEqual(radialAxes(loaded),['x','y']);
+test('the client sends the motion and its device with a trajectory alone; neither with a mean (the atom at rest) or without motion',async t=>{
+  const calls=[],client=new DynamicsClient({fetch:async(url,init)=>new Promise(resolve=>calls.push({resolve,body:JSON.parse(init.body)})),debounceMs:0,clientId:'motion'});t.after(()=>client.dispose());
+  const scene=pgc();scene.dynamics.samples=3;scene.dynamics.motion.device='cpu';
+  const pending=client.solve(scene,scene.dynamics,{includeMean:false});
+  for(let i=0;i<100&&!calls.length;i++)await pause(2);
+  const call=calls[0];assert.deepEqual([call.body.options.motion,call.body.options.device,call.body.options.includeMean],[{axis:'3d',temperatureUK:30},'cpu',false]);
+  const states=buildFullMasterModel(scene,scene.dynamics).states,timesUs=[0,scene.dynamics.durationUs/2,scene.dynamics.durationUs];
+  const data=motionResult({states,initialIndex:states.findIndex(s=>s.id===scene.dynamics.initialStateId),timesUs});
+  call.resolve(new Response(JSON.stringify({...data,request:call.body.request,service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA]}}),{status:200,headers:{'Content-Type':'application/json'}}));
+  const result=await pending;assert.deepEqual([result.motion.temperatureTotalUK,result.motion.device],[[31,31,31],'cpu']);
+  // The levels' p̄(T) with motion on: the internal state's mean, no motion asked for.
+  const mean=client.solve(scene,scene.dynamics,{meanOnly:true}).catch(e=>e);for(let i=0;i<100&&calls.length<2;i++)await pause(2);
+  assert.deepEqual([calls[1].body.options.meanOnly,calls[1].body.options.motion,calls[1].body.options.device],[true,undefined,undefined]);client.cancel();await mean;
+  scene.dynamics.motion.enabled=false;const plain=client.solve(scene,scene.dynamics).catch(e=>e);for(let i=0;i<100&&calls.length<3;i++)await pause(2);
+  assert.deepEqual([calls[2].body.options.motion,calls[2].body.options.device],[undefined,undefined]);client.cancel();await plain;
 });
 
-test('the 3D tweezer PGC example: the same tweezer, σ+σ− cooling pairs along x, y and z at the 1D example\'s detuning and intensity, one repump beam, motion in 3D',()=>{
-  const {scene,view}=exampleScene('pgc3d');assert.equal(view,'dynamics');
-  const loaded=validateScene(JSON.parse(JSON.stringify(scene))),one=exampleScene('pgc').scene;
-  assert.deepEqual(loaded.dynamics.motion,{enabled:true,axis:'3d',temperatureUK:30,temperatureUnit:'μK'});assert.equal(motionAxis(loaded,loaded.dynamics.motion),'3d');
+/** The 3D example's motion result on three samples (0, 5 and 10 ms), changed by `change`, read as the client reads it. */
+function readMotion(change=()=>{}){
+  const scene=pgc();scene.dynamics.samples=3;const states=buildFullMasterModel(scene,scene.dynamics).states;
+  const data=motionResult({states,initialIndex:states.findIndex(s=>s.id===scene.dynamics.initialStateId),timesUs:[0,5000,10000]});change(data);
+  return normalizeDynamicsResult(data,scene,undefined,undefined,request(scene));
+}
+test('a motion result is read strictly: the 3D block with the total temperature, the device, a fallback\'s note and the approximation ledger',()=>{
+  const result=readMotion(),m=result.motion,block=motionBlock(3);
+  assert.deepEqual([m.temperatureUK,m.temperatureErrorUK],[[block.temperatureUK.x,block.temperatureUK.y,block.temperatureUK.z],[[1.5,1.5,1.5],[1.5,1.5,1.5],[1.5,1.5,1.5]]]);
+  assert.deepEqual([m.temperatureTotalUK,m.temperatureTotalErrorUK,m.trapFrequencyKHz,m.classical],[[31,31,31],[.9,.9,.9],[100.5,100.5,19.3],[true,true,false]]);
+  assert.deepEqual([m.device,m.deviceNote,m.approximations],[MOTION_DIAGNOSTICS.device,MOTION_DIAGNOSTICS.deviceNote,MOTION_DIAGNOSTICS.approximations]);
+  assert.equal(result.populationAccuracy.requestedTolerance,.05);assert.equal(result.mean.status,'not-requested');
+  const flagged=readMotion(d=>{d.diagnostics.approximations.flagged='t ≥ 8 ms 的输出超出近似误差预算';delete d.diagnostics.deviceNote;}).motion;
+  assert.equal(flagged.approximations.flagged,'t ≥ 8 ms 的输出超出近似误差预算');assert.equal(Object.hasOwn(flagged,'deviceNote'),false);
+  for(const [label,change] of [
+    ['no block',d=>{delete d.motion;}],['an axis',d=>{d.motion.axis='x';}],['no total temperature',d=>{delete d.motion.temperatureTotalUK;}],
+    ['a total short of a sample',d=>{d.motion.temperatureTotalUK.pop();}],['a negative total error',d=>{d.motion.temperatureTotalErrorUK[1]=-.1;}],
+    ['one axis missing',d=>{delete d.motion.temperatureUK.z;}],['no regime',d=>{delete d.motion.classical;}],['no trajectories',d=>{d.motion.trajectories=0;}],
+    ['a loss that decreases',d=>{d.motion.lossProbability[2]=0;}],['an unknown key',d=>{d.motion.axes=['x','y','z'];}],
+    ['no device',d=>{delete d.diagnostics.device;}],['another device',d=>{d.diagnostics.device='tpu';}],['an empty note',d=>{d.diagnostics.deviceNote=' ';}],
+    ['no ledger',d=>{delete d.diagnostics.approximations;}],['a ledger key',d=>{d.diagnostics.approximations.total=1;}],['a negative estimate',d=>{d.diagnostics.approximations.items[0].estimate=-1;}],
+    ['an item without its action',d=>{delete d.diagnostics.approximations.items[1].action;}],['an empty flag',d=>{d.diagnostics.approximations.flagged='';}],
+  ])assert.throws(()=>readMotion(change),/运动结果/,label);
+  assert.throws(()=>readMotion(d=>{d.populationAccuracy.requestedTolerance=.01;}),/布居精度/);
+  // A block nobody asked for is refused.
+  const scene=pgc(),states=buildFullMasterModel(scene,scene.dynamics).states;
+  const unasked=motionResult({states,initialIndex:states.findIndex(s=>s.id===scene.dynamics.initialStateId),timesUs:[0,1,2]});unasked.populationAccuracy.requestedTolerance=.01;
+  assert.throws(()=>normalizeDynamicsResult(unasked,scene),/运动结果/);
+});
+
+test('the populations of a motion result are the held atom\'s times 1 − L: with 丢失 they add up to one',()=>{
+  const result=readMotion(),loss=result.motion.lossProbability,initial=pgc().dynamics.initialStateId;
+  assert.deepEqual(loss,[0,.1,.2]);
+  result.timesUs.forEach((_,k)=>{
+    const states=result.states.reduce((sum,s)=>sum+result.populations[s.id][k],0);
+    assert.ok(Math.abs(states+loss[k]-1)<1e-12,`sample ${k}: ${states} + ${loss[k]}`);
+  });
+  assert.deepEqual(result.populations[initial],[1,.9,.8]);assert.deepEqual(result.totalExcited,[0,0,0]);
+  // 丢失 is a curve: shown when asked for, ranked among the states for 初末各 3 态, drawn in the neutral ink.
+  const shown=withPopulationGroups(result,[LOSS_CURVE.id]);assert.deepEqual(shown.populations.loss,loss);assert.equal(result.populations.loss,undefined,'the solver\'s data stay');
+  assert.deepEqual(recommendedCurves(result,initial),[initial,'loss']);
+  const svg=populationChart(shown,[initial,'loss'],{[initial]:'初态',loss:'丢失'},{showTotalExcited:false});
+  assert.match(svg,/<polyline data-series-id="loss"[^>]* stroke="#6a6866"/);assert.equal(populationColor('loss'),'#6a6866');
+  // Without motion there is no loss to show.
+  const plain={...result};delete plain.motion;assert.equal(withPopulationGroups(plain,[LOSS_CURVE.id]).populations.loss,undefined);
+});
+
+test('温度与 n̄: a line per axis and the total temperature apart from them; no standard-error band, the readout says T ± 误差',()=>{
+  const result=readMotion(),[temperature,occupation]=motionSeries(result.motion),chart=seriesChart(result.timesUs,[temperature,occupation],'ms');
+  assert.deepEqual(temperature.lines.map(l=>[l.name,l.ink,l.width]),[['T（x 轴）','#517FA6',undefined],['T（y 轴）','#B17D4B',undefined],['T（z 轴）','#568C79',undefined],['总温度',TOTAL_INK,TOTAL_WIDTH]]);
+  assert.deepEqual(occupation.lines.map(l=>l.name),['n̄（x 轴）','n̄（y 轴）','n̄（z 轴）']);assert.match(occupation.title,/x 100\.5、y 100\.5、z 19\.3 kHz/);
+  assert.match(chart,new RegExp(`<polyline points="[^"]+" fill="none" stroke="${TOTAL_INK}" stroke-width="${TOTAL_WIDTH}" data-series-id="temperature-3"`));
+  assert.doesNotMatch(chart,/<polygon/,'no band');assert.doesNotMatch(chart,/⟨v⟩|平均速度/,'no velocity');
+  assert.equal(lineReading(temperature.lines[3],1,temperature.unit),'31 ± 0.9 μK');assert.equal(lineReading(temperature.lines[0],1,temperature.unit),'30 ± 1.5 μK');
+  assert.equal(lineReading(occupation.lines[2],1,occupation.unit),'4.5');
+  // A sample outside the validated regime lies on the grey band of both panels, from half-way to its neighbour.
+  const bands=svg=>[...svg.matchAll(/<rect class="reference-band" x="([\d.]+)" y="(\d+)" width="([\d.]+)" height="(\d+)"/g)].map(m=>m.slice(1).map(Number));
+  const reference=result.motion.classical.map(inside=>!inside);
+  assert.deepEqual(bands(seriesChart(result.timesUs,[temperature,occupation],'ms',{reference})).map(([x,y,w,h])=>[x,x+w,y,y+h]),[[599.5,778,32,176],[599.5,778,212,300]]);
+  assert.deepEqual(bands(chart),[]);
+});
+
+test('the examples: 3D PGC and 光镊 + 探测光 + 回泵光 run motion in their designated tweezer; the internal examples switch it off',()=>{
+  assert.equal(EXAMPLES.some(e=>e.key==='pgc'||/径向|1D/.test(e.label)),false,'no 1D example');
+  // 3D PGC: the 852 nm tweezer along z, its six σ+σ− cooling beams and one repump, |2,+2⟩ at 30 μK for 10 ms.
+  const {scene:pgc3d,view}=exampleScene('pgc3d'),loaded=roundtrip(pgc3d);assert.equal(view,'dynamics');
+  assert.equal(loaded.tweezerId,'tweezer');assert.deepEqual(loaded.dynamics.motion,defaultMotion());assert.equal(motionRefusal(loaded),'');
+  const trap=loaded.lasers[0];assert.deepEqual([trap.id,trap.frequency,trap.intensityMode,trap.powerMW,trap.waistUm,directionVector(loaded.fields,trap.direction)],['tweezer',{wavelengthNm:852},'power',3.5,1,[0,0,1]]);
   assert.deepEqual([loaded.fields[0].magnitudeG,loaded.dynamics.initialStateId,loaded.dynamics.durationUs,loaded.dynamics.samples],[0,'ground-2-2',TWEEZER_PGC.durationUs,1001]);
-  assert.equal(motionRefusal(loaded),'');
-  // The 1D example's tweezer; its repump pair's light in one beam along +x (a scene holds eight lasers).
-  const strip=l=>({...l,id:'',name:''});assert.equal(loaded.lasers.length,8);
-  assert.deepEqual(strip(loaded.lasers[0]),strip(one.lasers[0]));
-  const light=l=>[l.frequency,l.direction,l.polarizationAngleDeg,l.ellipticityDeg];
-  assert.deepEqual([...light(loaded.lasers.at(-1)),loaded.lasers.at(-1).intensityMWcm2],[...light(one.lasers.at(-2)),2*TWEEZER_PGC.repumpMWcm2]);
-  // Six cooling beams along ±x, ±y, ±z, each at the 1D cooling beam's frequency and intensity.
-  const cooling=loaded.lasers.filter(l=>l.id.startsWith('cool-')),k=l=>directionVector(loaded.fields,l.direction);
-  assert.deepEqual(cooling.map(k),[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]);
-  for(const l of cooling)assert.deepEqual([l.frequency,l.intensityMWcm2],[one.lasers[1].frequency,TWEEZER_PGC.coolingMWcm2]);
-  // σ+σ−: both beams of a pair circular of one helicity about their own k, the z pair of the other;
-  // about the x quantization axis the x pair is σ+ along +x and σ− along −x.
+  const cooling=loaded.lasers.filter(l=>l.id.startsWith('cool-')),gamma=RB87.D2.gammaHz/(2*Math.PI*1e6);
+  assert.deepEqual(cooling.map(l=>directionVector(loaded.fields,l.direction)),[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]);
+  for(const l of cooling)assert.deepEqual([l.frequency,l.intensityMWcm2],[{base:{kind:'transition',line:'D2',Fg:2,Fe:3},offsetMHz:TWEEZER_PGC.coolingDetuningGamma*gamma},TWEEZER_PGC.coolingMWcm2]);
   assert.deepEqual(cooling.map(l=>l.ellipticityDeg),[45,45,45,45,-45,-45]);
-  const [plus,minus]=cooling.map(l=>polarization(l,loaded.fields));
-  assert.ok(Math.abs(plus.plus-1)<1e-12&&Math.abs(minus.minus-1)<1e-12,`${plus.plus} ${minus.minus}`);
+  const [plus,minus]=cooling.map(l=>polarization(l,loaded.fields));assert.ok(Math.abs(plus.plus-1)<1e-12&&Math.abs(minus.minus-1)<1e-12,`${plus.plus} ${minus.minus}`);
+  const repump=loaded.lasers.at(-1);assert.deepEqual([repump.frequency,repump.intensityMWcm2],[{base:{kind:'transition',line:'D2',Fg:1,Fe:2},offsetMHz:0},TWEEZER_PGC.repumpMWcm2]);
+  // 光镊 + 探测光 + 回泵光: a Raman-resonant Λ -- the probe on F=2 → F′=2, the repump on F=1 → F′=2, both on resonance -- in the default tweezer, in 3D.
+  const three=exampleScene('three'),lambda=roundtrip(three.scene);assert.equal(three.view,'dynamics');assert.equal(lambda.name,'光镊 + 探测光 + 回泵光');
+  assert.equal(lambda.tweezerId,'tweezer');assert.equal(tweezerOf(lambda).enabled,true);assert.deepEqual(lambda.dynamics.motion,defaultMotion());assert.equal(motionRefusal(lambda),'');
+  assert.deepEqual(lambda.lasers.map(l=>[l.id,l.enabled]),[['probe',true],['tweezer',true],['repump',true]]);
+  assert.deepEqual(lambda.lasers.find(l=>l.id==='probe').frequency,{base:{kind:'transition',line:'D2',Fg:2,Fe:2},offsetMHz:0});
+  assert.deepEqual(lambda.lasers.find(l=>l.id==='repump').frequency,{base:{kind:'transition',line:'D2',Fg:1,Fe:2},offsetMHz:0});
+  assert.deepEqual([lambda.dynamics.durationUs,lambda.dynamics.durationUnit,lambda.dynamics.samples],[LAMBDA_TWEEZER.durationUs,LAMBDA_TWEEZER.durationUnit,LAMBDA_TWEEZER.samples]);
+  assert.equal(buildFullMasterModel(lambda,lambda.dynamics,request(lambda)).motion.trapBeamId,'tweezer');
+  // The internal physics: the tweezer off, and motion with it.
+  for(const key of ['open','cycling','f3-linear','rabi','dark','both','tilted']){
+    const s=roundtrip(exampleScene(key).scene);assert.equal(s.dynamics.motion.enabled,false,key);assert.equal(s.lasers.find(l=>l.id==='tweezer')?.enabled,false,key);
+  }
 });
-test('the motion engines\' sentences are shown in Chinese',()=>{
-  const adapter=readFileSync(new URL('../rust-solver/src/motion_core_adapter.rs',import.meta.url),'utf8');
-  const partial=[...adapter.matchAll(/format!\("(The error bound is[^"]*)"/g)].map(m=>m[1].replace(/\{[A-Za-z_]*(?::[^}]*)?\}/g,'1'));
-  assert.equal(partial.length,1);assert.match(solverText(partial[0]),/^误差界为 1，误差目标 1。$/);
+
+test('the motion engine\'s sentences are shown in Chinese',()=>{
   assert.equal(solverText('A motion request is a trajectory alone: meanOnly and includeMean are false'),'运动只计算时间演化，不计算长期布居。');
-  // The cores' refusals are written in Chinese: the 1D core's, and the 2D engine's without a trap or a GPU.
-  const core=readFileSync(new URL('../rust-solver/motion-core/src/lib.rs',import.meta.url),'utf8');
-  for(const name of ['NO_TRAP','NOT_CONFINED'])assert.match(new RegExp(`pub const ${name}:&str="([^"]+)";`).exec(core)?.[1]??'',/^[一-鿿]/,name);
-  const gpu=readFileSync(new URL('../rust-solver/motion-gpu/src/solve.rs',import.meta.url),'utf8'),device=readFileSync(new URL('../rust-solver/motion-gpu/src/gpu.rs',import.meta.url),'utf8');
-  assert.match(/pub const NO_TRAP:&str="([^"]+)";/.exec(gpu)?.[1]??'',/^[一-鿿]/);assert.match(/format!\("(2D 径向运动需要 NVIDIA 显卡[^"]*)"/.exec(device)?.[1]??'',/^2D 径向运动需要 NVIDIA 显卡/);
+  // The 3D engine's refusals and its device note are written in Chinese: motion along an axis or in
+  // a plane, a request for the GPU, and a scene whose light does not confine the atom.
+  const adapter=readFileSync(new URL('../rust-solver/src/motion3d_adapter.rs',import.meta.url),'utf8');
+  for(const name of ['ONLY_3D','GPU_PENDING'])assert.match(new RegExp(`pub const ${name}:&str="([^"]+)";`).exec(adapter)?.[1]??'',/^[一-鿿]/,name);
+  const solve=readFileSync(new URL('../rust-solver/motion-3d/src/solve.rs',import.meta.url),'utf8');
+  assert.match(/pub const NOT_CONFINED:&str="([^"]+)";/.exec(solve)?.[1]??'',/^[一-鿿]/);
+  // A result short of its statistical target says why in Chinese.
+  const partial=[...adapter.matchAll(/format!\("(The statistical error is[^"]*)"\)/g)].map(m=>m[1].replace(/\{[A-Za-z_]*(?::[^}]*)?\}/g,'1'));
+  assert.equal(partial.length,1);assert.equal(solverText(partial[0]),'统计误差为 1，目标 1。');
 });

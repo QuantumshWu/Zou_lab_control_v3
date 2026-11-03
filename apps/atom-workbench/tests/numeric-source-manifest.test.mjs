@@ -17,9 +17,6 @@ async function fixture(){
   await put(root,'rust-solver/src/nested/operator.rs','pub fn operator() {}\n');
   await put(root,'rust-solver/src/nested/ignored.txt','not Rust source\n');
   await put(root,'rust-solver/population-core/src/lib.rs','pub fn core() {}\n');
-  await put(root,'rust-solver/motion-core/src/lib.rs','pub fn motion() {}\n');
-  await put(root,'rust-solver/motion-gpu/src/lib.rs','pub fn plane() {}\n');
-  await put(root,'rust-solver/motion-gpu/kernels/motion.cu','// kernels\n');
   await put(root,'rust-solver/motion-3d/src/lib.rs','pub fn space() {}\n');
   return root;
 }

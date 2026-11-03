@@ -9,8 +9,9 @@ import {entryAt,nativeResult} from './native-result.mjs';
 
 const response=data=>({...data,assumptions:['test assumption'],
   service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA],binarySha256:'binary',buildSha256:'build'}});
+/** The default scene's internal state alone (motion off), on three samples. */
 function fixture(){
-  const scene=defaultScene();scene.dynamics.samples=3;scene.dynamics.durationUs=.2;
+  const scene=defaultScene();scene.dynamics.motion.enabled=false;scene.dynamics.samples=3;scene.dynamics.durationUs=.2;
   const states=buildFullMasterModel(scene,scene.dynamics).states,index=states.findIndex(s=>s.id===scene.dynamics.initialStateId);
   const data=response(nativeResult({states,initialIndex:index,timesUs:[0,.1,.2],error:.003,mean:false}));
   return {scene,data,index,states};

@@ -2,15 +2,15 @@
 // against it: every required field present and in range, no other field. A file written by an
 // earlier version is refused with the reason -- nothing is migrated.
 import type {AxisName,Direction,DynamicsSettings,FrequencyDisplayUnit,FrequencyExpr,InitialStateSpec,Laser,LaserFrequencyAnchor,LaserIntensityAnchor,
-  LaserReflection,MagneticField,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Scene} from './types.js';
+  LaserReflection,MagneticField,MotionSettings,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Scene} from './types.js';
 import {MAXIMUM_DURATION_US,MAXIMUM_LASERS,MAXIMUM_SAMPLES,MEAN_HORIZONS_US,SCENE_VERSION,defaultScene} from './types.js';
-import {POPULATION_GROUPS} from './population-selection.js';
+import {DERIVED_CURVE_IDS} from './population-selection.js';
 import {DURATION_UNITS} from './duration.js';
 import {analyze,resolveSceneFrequencies} from './physics.js';
 import {DETUNING_UNITS} from './laser-frequency.js';
 import {INTENSITY_MODES,INTENSITY_UNITS,POWER_UNITS,WAIST_UNITS,checkNumericalAperture,normalizeLaserIntensity} from './laser-intensity.js';
 import {TEMPERATURE_UNITS} from './temperature.js';
-import {MOTION_CHOICES} from './motion.js';
+import {MOTION_DEVICES} from './motion.js';
 import {AXIS_NAMES,referenceAxis} from './direction.js';
 import {initialPopulations} from './full-master-model.js';
 
@@ -127,7 +127,12 @@ function initialState(value:unknown,path:string,physical:Set<string>):InitialSta
   if(!Object.keys(weights).length||!(Object.values(weights).reduce((a,b)=>a+b,0)>0))fail(w.path,'至少一个态的权重应为正');
   return {kind,weights};
 }
-const DYNAMICS_REQUIRED=['initialStateId','monitoredStateIds','monitorMode','monitoredGroupIds','durationUs','durationUnit','samples','meanHorizonUs'];
+/** Motion, on or off: its initial temperature with the unit it is written in, and the device it runs on. */
+function motion(value:unknown):MotionSettings{
+  const m=Reader.of(value,'dynamics.motion',['enabled','temperatureUK','temperatureUnit','device']);
+  return {enabled:m.boolean('enabled'),temperatureUK:m.number('temperatureUK',Number.MIN_VALUE),temperatureUnit:m.choice('temperatureUnit',TEMPERATURE_UNITS),device:m.choice('device',MOTION_DEVICES)};
+}
+const DYNAMICS_REQUIRED=['initialStateId','monitoredStateIds','monitorMode','monitoredGroupIds','durationUs','durationUnit','samples','meanHorizonUs','motion'];
 
 /** A scene file, validated strictly against the current schema; throws why it is not one. */
 export function validateScene(input:unknown):Scene {
@@ -136,7 +141,7 @@ export function validateScene(input:unknown):Scene {
 function readScene(input:unknown):Scene {
   // A file of another version is said to be one, before anything it lacks or has more.
   if(input&&typeof input==='object'&&!Array.isArray(input)&&(input as Obj).version!==SCENE_VERSION)fail('version',`为 ${JSON.stringify((input as Obj).version)}，应为 ${SCENE_VERSION}`);
-  const s=Reader.of(input,'场景',['version','name','fields','lasers','referenceFrequencies','references','marks','dynamics'],['display']);
+  const s=Reader.of(input,'场景',['version','name','fields','lasers','referenceFrequencies','references','marks','dynamics'],['display','tweezerId']);
   const ids=new Set<string>(),id=(r:Reader):string=>{const v=r.text('id');if(!/^[A-Za-z0-9_-]+$/.test(v)||['__proto__','constructor','prototype'].includes(v)||ids.has(v))fail(r.at('id'),'非法或重复');ids.add(v);return v;};
   const fields:MagneticField[]=s.list('fields',8).map((v,i)=>{const f=Reader.of(v,`fields[${i}]`,['id','name','enabled','magnitudeG','direction']);
     return {id:id(f),name:f.text('name'),enabled:f.boolean('enabled'),magnitudeG:f.number('magnitudeG',0,20),direction:direction(f.o.direction,f.at('direction'))};});
@@ -158,12 +163,15 @@ function readScene(input:unknown):Scene {
   referenceFrequencies.forEach((r,i)=>{if(followsReflection(r.frequency))fail(`referenceFrequencies[${i}].frequency.base`,'不能跟随反射光：请跟随它的源');});
   // Every linked field exists and no link forms a cycle.
   for(const object of [...fields,...lasers])try{referenceAxis(fields,object.direction.reference);}catch(error){throw new Error(`「${object.name}」的参考轴无效：${(error as Error).message}`);}
-  const d=Reader.of(s.o.dynamics,'dynamics',DYNAMICS_REQUIRED,['initialState','temperatureUnit','motion']),marks=s.o.marks;
+  const d=Reader.of(s.o.dynamics,'dynamics',DYNAMICS_REQUIRED,['initialState','temperatureUnit']),marks=s.o.marks;
   if(!marks||typeof marks!=='object'||Array.isArray(marks))fail('marks','应为对象');
-  const scene:Scene={version:SCENE_VERSION,name:s.text('name',100),fields,lasers,referenceFrequencies,references,marks:{},
+  // The tweezer (设为光镊) is one of the scene's lasers.
+  const tweezerId=s.has('tweezerId')?s.text('tweezerId'):undefined;
+  if(tweezerId!==undefined&&!lasers.some(l=>l.id===tweezerId))fail('tweezerId','应为场景中一束激光的 ID');
+  const scene:Scene={version:SCENE_VERSION,name:s.text('name',100),fields,lasers,...(tweezerId===undefined?{}:{tweezerId}),referenceFrequencies,references,marks:{},
     dynamics:{initialStateId:d.text('initialStateId'),monitoredStateIds:[],monitorMode:d.choice('monitorMode',['auto','manual'] as const),monitoredGroupIds:[],
       durationUs:d.number('durationUs',Number.MIN_VALUE,MAXIMUM_DURATION_US),durationUnit:d.choice('durationUnit',DURATION_UNITS),samples:d.integer('samples',2,MAXIMUM_SAMPLES),
-      meanHorizonUs:d.choice('meanHorizonUs',MEAN_HORIZONS_US)}};
+      meanHorizonUs:d.choice('meanHorizonUs',MEAN_HORIZONS_US),motion:motion(d.o.motion)}};
   if(s.has('display')){
     const display=Reader.of(s.o.display,'display',['readouts']),readouts=display.o.readouts;
     if(!readouts||typeof readouts!=='object'||Array.isArray(readouts)||Object.keys(readouts).length>16)fail('display.readouts','应为至多 16 项的对象');
@@ -187,8 +195,8 @@ function readScene(input:unknown):Scene {
   const monitored=d.list('monitoredStateIds',32);
   if(new Set(monitored).size!==monitored.length||monitored.some(v=>typeof v!=='string'||!physical.has(v)))fail('dynamics.monitoredStateIds','应为不重复的真实态');
   dynamics.monitoredStateIds=[...monitored] as string[];
-  const groups=d.list('monitoredGroupIds',POPULATION_GROUPS.length);
-  if(new Set(groups).size!==groups.length||groups.some(v=>!POPULATION_GROUPS.some(g=>g.id===v)))fail('dynamics.monitoredGroupIds','应为不重复的 F 布居分组');
+  const groups=d.list('monitoredGroupIds',DERIVED_CURVE_IDS.length);
+  if(new Set(groups).size!==groups.length||groups.some(v=>!DERIVED_CURVE_IDS.includes(v as string)))fail('dynamics.monitoredGroupIds','应为不重复的 F 布居分组或“丢失”');
   dynamics.monitoredGroupIds=[...groups] as string[];
   if(d.has('initialState')){
     const spec=initialState(d.o.initialState,'dynamics.initialState',physical);
@@ -198,11 +206,6 @@ function readScene(input:unknown):Scene {
   // A thermal initial state has its temperature's unit, and only it has one.
   if((dynamics.initialState?.kind==='thermal')!==d.has('temperatureUnit'))fail('dynamics.temperatureUnit',dynamics.initialState?.kind==='thermal'?'热分布初态缺少温度单位':'只用于热分布初态');
   if(d.has('temperatureUnit'))dynamics.temperatureUnit=d.choice('temperatureUnit',TEMPERATURE_UNITS);
-  // Motion, on or off: its axis, plane or 3D and its initial temperature with the unit it is written in.
-  if(d.has('motion')){
-    const m=Reader.of(d.o.motion,'dynamics.motion',['enabled','axis','temperatureUK','temperatureUnit']);
-    dynamics.motion={enabled:m.boolean('enabled'),axis:m.choice('axis',MOTION_CHOICES),temperatureUK:m.number('temperatureUK',Number.MIN_VALUE),temperatureUnit:m.choice('temperatureUnit',TEMPERATURE_UNITS)};
-  }
   return scene;
 }
 

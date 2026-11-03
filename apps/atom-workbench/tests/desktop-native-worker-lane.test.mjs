@@ -28,14 +28,12 @@ test('IPC lane preserves handshake, cancellation and stale-generation isolation'
   lane.receive({kind:'closed',generation:2});await lane.close();
 });
 
-test('IPC lane hands a running report to its job, read strictly; a malformed one fails the worker',async()=>{
-  const commands=[],finished=[],reports=[];const owner={binarySha256:'binary',build:{sha256:'build'},startupTimeoutMs:1000,workerIdleMs:1000,sendNative:c=>commands.push(c),finish:(job,error,value)=>{job.settled=true;finished.push({job,error,value});}};
+test('IPC lane fails the worker on any progress but a checkpoint: the deleted 2D engine\'s running report is no message',async()=>{
+  const commands=[],finished=[];const owner={binarySha256:'binary',build:{sha256:'build'},startupTimeoutMs:1000,workerIdleMs:1000,sendNative:c=>commands.push(c),finish:(job,error,value)=>{job.settled=true;finished.push({job,error,value});}};
   const lane=new IpcNativeLane(owner,'trajectory');
-  const job={nativeId:5,payload:{},settled:false,onProgress:()=>{},onRunning:report=>reports.push(report)};lane.enqueue(job);await tick();
+  const job={nativeId:5,payload:{},settled:false,onProgress:()=>{}};lane.enqueue(job);await tick();
   lane.receive({kind:'opened',generation:1,binarySha256:'binary',pid:123});lane.receive({kind:'message',generation:1,message:capabilities});lane.receive({kind:'message',generation:1,message:warm});await tick();
   lane.receive({kind:'message',generation:1,message:{id:5,protocol:NATIVE_PROTOCOL,progress:'running',running:{simulatedUs:250,durationUs:1000,trajectories:16,estimatedRemainingMs:4200}}});
-  assert.deepEqual(reports,[{simulatedUs:250,durationUs:1000,trajectories:16,estimatedRemainingMs:4200}]);assert.equal(finished.length,0);
-  lane.receive({kind:'message',generation:1,message:{id:5,protocol:NATIVE_PROTOCOL,progress:'running',running:{simulatedUs:2000,durationUs:1000,trajectories:16}}});
   assert.equal(finished[0].error.code,'invalid-native-response');assert.equal(commands.at(-1).op,'close');
   lane.receive({kind:'closed',generation:1});await lane.close();
 });

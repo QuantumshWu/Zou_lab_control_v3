@@ -75,44 +75,48 @@ because it is small or labelled forbidden.
   errors propagated through the dressed blocks; beyond 1 ms the trajectory
   continues as the expansion in the slow eigenmodes.
 
-1D motion (布居演化 · 运动, docs/ui-design.md §6.20): a single atom in an
-optical tweezer moving radially, along a lab axis through the focus
-perpendicular to every focused beam. A request whose model carries the
-`motion` block is a trajectory alone, served by the motion core in
-`rust-solver/motion-core` (`motion_core_adapter.rs`). In that block the beams
-are kept apart, each with its direction, wave number, waist and intensity at
-the atom, and the emission is resolved on the axis. The engine
-(`motion-core/src/engine.rs`) evolves the ground manifold's density ρ(x1, x2)
-with the excited states eliminated at every position (GMW-o1 in a box): Strang
-steps with exact per-point exponentials, grids and time step chosen for 1%
-populations and 10% in T and n̄, continued by dynamic mode decomposition once
-its prediction agrees with the one made at half the run (the decomposition's
-eigen-solver is the engine's own, so every build gives the same continuation).
-A request without light, or whose light does not confine the initial state
-along the axis, is refused.
+Motion (运动, on by default; docs/ui-design.md §6.20–§6.21): a single atom moving in 3D
+in the optical tweezer the operator designates (设为光镊; the motion block's
+`trapBeamId`), semiclassically, served
+by `rust-solver/motion-3d` (`motion3d_adapter.rs`; its front end `ground.rs`
+eliminates the excited states). A request whose model carries the `motion`
+block is a trajectory alone; only 3D motion is served. Each trajectory is a
+classical point carrying the internal state of the eliminated ground manifold
+on one cluster of states, evolved by quantum jumps: dipole-pattern emission
+recoil, beam-resolved absorption recoil with the exact mean force, the
+Ehrenfest force between jumps. Every coupling between ground states is folded
+at second order (van Vleck) or kept by one rule; the states kept couplings join
+form the clusters (whole hyperfine levels near B = 0, single sublevels at large
+fields, F = 1 and F = 2 together through a Raman-resonant pair). The trap's
+harmonic part is moved exactly, the time step comes from step doubling
+(populations, impulse and friction), and trajectories run in batches until each
+output's total estimated error -- the approximation ledger
+(`diagnostics.approximations`), the step's bias and two standard errors --
+meets 5% in the populations and 10% in T; an output that cannot is flagged. An
+atom is lost when its mechanical energy in the trap is positive. A point
+particle has no zero-point motion: results are validated for k_B T >= 4 hbar
+omega on every axis and marked reference-only below. The Ehrenfest force averages
+the dipole force's fluctuations in a superposition of ground states, so the
+momentum diffusion at a fixed point of a polarization gradient is low (0.23-0.27
+of the second-order expansion's at a lin-perp-lin focus); in the tweezer the
+trapped T stays within a few percent of the 1D GMW references in the validated
+regime. The example 光镊 · 3D PGC
+cools the atom with sigma+sigma- pairs along x, y and z; with motion on, the
+Raman-resonant Lambda of 光镊 + 探测光 + 回泵光 runs on one cluster spanning
+F = 1 and F = 2.
 
-3D motion (运动轴 3D（半经典）, docs/ui-design.md §6.21): the same atom moving in
-3D, semiclassically, whenever a beam is focused at the atom, served by
-`rust-solver/motion-3d` (`motion3d_adapter.rs`). Each trajectory is a classical
-point carrying the internal state of the eliminated ground manifold, evolved by
-quantum jumps: dipole-pattern emission recoil, beam-resolved absorption recoil
-with the exact mean force, the Ehrenfest force between jumps. The trap's
-harmonic part is moved exactly, the time step comes from step doubling, and
-trajectories run in batches until two standard errors meet 5% in the
-populations and 10% in T. A point particle has no zero-point motion: results
-are validated for k_B T >= 4 hbar omega on every axis and marked reference-only
-below. The example 光镊 · 3D PGC cools the same atom with sigma+sigma- pairs along
-x, y and z.
-
-2D motion (运动轴 2D 径向, docs/ui-design.md §6.22): the same atom moving in the
-plane across the tweezer when every focused beam runs along one lab axis,
-served on an NVIDIA GPU by `rust-solver/motion-gpu` (`motion_gpu_adapter.rs`).
-Quantum trajectories of the eliminated ground manifold run on grids of the
-plane sized along each axis apart (Strang steps, waiting-time jumps with
-dipole-pattern emission recoil) in batches until the standard errors meet 1% in
-the populations and 10% in T, as QuTiP's mcsolve with a target tolerance. A
-running batch reports its progress at least every 10 s, which restarts the
-app's deadline. Without a suitable GPU or driver the engine's reason is shown.
+The trajectories run on the device the request names (`options.device`, 计算设备):
+an NVIDIA GPU by default, or the CPU. The GPU engine (`motion-3d/src/gpu`,
+`kernels/motion3d.cu`) runs the CPU engine's steps, jumps, losses and readouts
+with the same initial states, random streams, ledger, time step and statistics,
+one warp per trajectory, single precision where a step is local and double where
+it accumulates. It needs compute capability 7.5 (Turing) or newer and a driver
+of CUDA 12.0 (R525, Windows 527.41) or newer: the EXE embeds PTX for compute_75,
+compiled by a pinned NVRTC 12.0 (`motion-3d/scripts/ptx.ps1`; a test checks it
+against the source), and loads `nvcuda.dll` at run time, the driver API alone.
+Without such a GPU, with an older driver or with a model beyond the kernel the
+solve runs on the CPU and `diagnostics.deviceNote` says why; `diagnostics.device`
+is the device used. The worker keeps its CUDA context for every later solve.
 
 Every request asks for the same absolute population error,
 `populationTolerance: 0.01` on the probability scale (1%); it is not a user

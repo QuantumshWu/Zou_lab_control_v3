@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {recommendedPopulationStates,withPopulationGroups,populationDisplayIds} from '../dist/js/atom-workbench/src/population-selection.js';
+import {recommendedCurves,withPopulationGroups,populationDisplayIds} from '../dist/js/atom-workbench/src/population-selection.js';
 import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {validateScene} from '../dist/js/atom-workbench/src/scene-file.js';
 import {trajectoryInputsKey} from '../dist/js/atom-workbench/src/dynamics-cache-key.js';
@@ -9,9 +9,9 @@ import {populationChart} from '../dist/js/atom-workbench/src/population-chart.js
 test('automatic curves use occupied initial/final top three, not intermediate peaks or mean ranking',()=>{
  const populations={a:[.6,0,.1],b:[.3,0,.2],c:[.1,0,.3],d:[0,0,.4],peak:[0,1,0],noise:[1e-12,0,1e-12]};
  const result={states:Object.keys(populations).map(id=>({id})),timesUs:[0,1,2],populations,mean:{populations:{peak:1}}};
- assert.deepEqual(recommendedPopulationStates(result,'a'),['a','b','c','d']);
- assert.deepEqual(recommendedPopulationStates(undefined,'a'),['a']);
- result.populations={a:[1,1,1]};assert.deepEqual(recommendedPopulationStates(result,'a'),['a']);
+ assert.deepEqual(recommendedCurves(result,'a'),['a','b','c','d']);
+ assert.deepEqual(recommendedCurves(undefined,'a'),['a']);
+ result.populations={a:[1,1,1]};assert.deepEqual(recommendedCurves(result,'a'),['a']);
 });
 
 test('F curves sum all constituent states, including hidden ones, without modifying solver data',()=>{
