@@ -112,6 +112,9 @@ impl Program{
         // The fourth order's tables are fourth2's slabs now (model.rs `FourthLayout`), which the kernel does
         // not read yet: a fourth-order model stays on the CPU until it does.
         if model.fourth{return Err(beyond("四阶折叠".into()));}
+        // The kernel's intensity axes and its trap's far level are a beam's each (ground.rs `Unit`).
+        if let Some(u)=g.units.iter().find(|u|u.beams.len()>1){return Err(beyond(format!("同频同偏振的 {} 束光相互干涉（驻波）",u.beams.len())));}
+        if model.trap_beams.len()>1{return Err(beyond("光镊的反射光".into()));}
         if model.geometry.len()>MOST_BEAMS||model.carriers.len()>MOST_CARRIERS||model.focused.len()>MOST_FOCUSED{return Err(beyond("光束或强度维度太多".into()));}
         if let Some(c)=g.clusters.iter().find(|c|c.states.len()>MAXN||c.classes.len()>MOST_CLASSES){return Err(beyond(format!("子空间 {} 个态、{} 类光子",c.states.len(),c.classes.len())));}
         let hm=model.hbar_over_mass;

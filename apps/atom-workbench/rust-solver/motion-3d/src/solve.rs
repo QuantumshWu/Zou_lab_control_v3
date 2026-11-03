@@ -294,8 +294,14 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
     ledger.add("基态之间的耦合（塞曼子能级、拉曼项、两组光的拍频）",near,format!("{fold} 对二阶折叠，{kept} 对显式保留；子空间 {}",sizes.join("+")));
     if model.quartic>0.{ledger.add("经多束光的四阶能移",model.quartic,"略去（一阶折叠）".into());}
     if model.fourth_dropped>0.{ledger.add("四阶折叠的快拍频项",model.fourth_dropped,"略去（与二阶相同的截断频率）".into());}
-    for &(l,error,_)in &model.profiles{ledger.add(&format!("「{}」的光强分布",request.beams[l].name),error,"按峰值强度的平面波".into());}
-    for &l in &model.focused[1..]{ledger.add(&format!("「{}」的光强分布",request.beams[l].name),0.,"按位置插值（强度维度）".into());}
+    let names=|beams:&[usize]|beams.iter().map(|&l|request.beams[l].name.as_str()).collect::<Vec<_>>().join(" + ");
+    for &(u,error,_)in &model.profiles{ledger.add(&format!("「{}」的光强分布",names(&g.units[u].beams)),error,"取焦点处的光强".into());}
+    for &u in &model.focused[1..]{ledger.add(&format!("「{}」的光强分布",names(&g.units[u].beams)),0.,"按位置插值（强度维度）".into());}
+    // The interference the units of beams of one frequency leave out (ground.rs `coherence`).
+    for x in &g.interference{
+        let action=if x.coherent{"同频光束按主偏振合成一个光场（驻波精确）；偏离主偏振的剩余分量略去"}else{"同频而偏振不同：光移按各光束的光强相加，干涉项（偏振光晶格）略去"};
+        ledger.add(&format!("「{}」的干涉",names(&x.beams)),x.estimate(g),action.into());
+    }
     ledger.add("聚焦光的光强插值表",model.table_error,"三次插值".into());
     ledger
 }
@@ -313,11 +319,11 @@ struct Accounts{apriori:Vec<[f64;2]>,excited:Vec<[f64;2]>,bias:[f64;2]}
 fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance:f64,bias:[f64;2],frequencies:[f64;3],last:bool)->(Ledger,Accounts){
     let mut ledger=base.clone();let charge=fold_charge(model,model.ground.charge);
     // The fold's error, charged as measured along the trajectories: the folded excited population's
-    // 2η², the saturation the atoms met -- what the fold's bound takes on the paths they go (an atom
+    // 2η², the largest the atoms met since t = 0 (`since_start`) -- what the fold's bound takes on the paths they go (an atom
     // that gathers where the light is bright, as red-detuned molasses holds it at its lattice's
     // bright sites, meets more than the pattern's mean). The a-priori estimate over the reach decided
     // the fold (`Candidate`).
-    let measured:Vec<[f64;2]>=estimates.iter().map(|e|fold_charges(model.fourth,2.*e.folded)).collect();
+    let measured:Vec<[f64;2]>=since_start(estimates.iter().map(|e|2.*e.folded)).into_iter().map(|s|fold_charges(model.fourth,s)).collect();
     let profiles:Vec<f64>=estimates.iter().map(|e|e.profile).collect();let dopplers:Vec<f64>=estimates.iter().map(|e|e.doppler).collect();
     let largest=|v:&[f64]|v.iter().skip(1).copied().fold(0.,f64::max);
     ledger.add("多普勒与反冲频移",largest(&dopplers),format!("一阶（kv/σ）²；单步超过 {:.1e} 时用精确响应",allowance));
@@ -336,10 +342,8 @@ fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance
         let population=(a[0]+bias[0]+p>POPULATION_TARGET).then_some((i,"布居",a[0]+bias[0]+p,a[0]+bias[0],p));
         let temperature=t.and_then(|t|(a[1]+bias[1]+t>TEMPERATURE_TARGET).then_some((i,"温度",a[1]+bias[1]+t,a[1]+bias[1],t)));
         population.or(temperature)}).collect();
-    // The elimination's a-priori bound over the atoms' reach (model.rs `Model::resonance`): beyond the
-    // population target, light near resonance somewhere the atoms go -- the measured η² can miss it.
-    let resonance=(model.resonance>POPULATION_TARGET).then(||format!("光在原子所到之处接近共振：消去激发态的先验界（基态的激发态权重）达 {:.0}%（目标 {:.0}%），近共振处消去激发态不成立",
-        100.*model.resonance,100.*POPULATION_TARGET));
+    // Light near resonance where the atoms go (`resonance`).
+    let resonance=resonance(model);
     // The initial ensemble's cut beyond the budget, on its own: the loss and the populations depend on it.
     let share=cut(base);
     let initial=(share>BUDGET).then(||format!("初始热分布有 {:.0}% 落在势阱区之外（丢失与布居依赖这一截断）",100.*share));
@@ -399,7 +403,9 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let Some(mut pilot_candidate)=next_candidate(request,&mut ladder,false,&mut failed)else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
     // The reference state: the largest initial population; its trap sets ω per axis.
     let(trap,depth)=pilot_candidate.reference();
-    if trap.frequencies.iter().any(|&w|!(w>0.)){return Err(Stop::Error(NOT_CONFINED.into()));}
+    // A trap the model gives only where the model holds: a strong near beam whose light shift anti-traps the
+    // reference state is the elimination's resonance first (the validation's F8).
+    if trap.frequencies.iter().any(|&w|!(w>0.)){return Err(Stop::Error(match resonance(&pilot_candidate.model){Some(r)=>format!("{r}：光镊的势阱无从判断"),None=>NOT_CONFINED.into()}));}
     // The first step: the light pattern's phase k_max v_T per step at sqrt(η × the temperature
     // target), or without light the trap's own ω.
     let thermal=(KT_PER_UK*request.temperature_uk*pilot_candidate.model.hbar_over_mass).sqrt();
@@ -635,6 +641,14 @@ fn booked(base:&Ledger,bound:f64)->Ledger{
     ledger
 }
 
+/// The elimination's a-priori bound over the atoms' reach (model.rs `Model::resonance`) beyond the population
+/// target: light near resonance somewhere the atoms go -- the measured η² can miss it, and the model's
+/// trap there is no trap's.
+fn resonance(model:&Model)->Option<String>{
+    (model.resonance>POPULATION_TARGET).then(||format!("光在原子所到之处接近共振：消去激发态的先验界（基态的激发态权重）达 {:.0}%（目标 {:.0}%），近共振处消去激发态不成立",
+        100.*model.resonance,100.*POPULATION_TARGET))
+}
+
 /// The ledger's item of a generator whose decay falls below its jumps' rate (`gain`).
 const GAIN:&str="生成元的增益";
 /// A model's gain at sampled states (model.rs `Model::decay_balance`, at most FIRST_GROUPS × 8 of them): the
@@ -707,20 +721,26 @@ fn next_candidate(request:&Request,ladder:&mut dyn Iterator<Item=f64>,fourth:boo
 }
 /// The saturation a candidate's folded drives meet: at each of the pilot's states, carried into its
 /// clusters (`carried`), 2η² (twice the folded excited population, whose fold's charge bounds its
-/// error, `fold_charge`); per pilot trajectory their mean, and of those the mean plus
-/// CONFIDENCE standard errors -- what the atoms meet rather than the light's pattern extrapolated
-/// (an atom held in the dark states of a gray molasses meets little of its bright state's
-/// saturation; one gathered at a red-detuned lattice's bright sites meets more than its mean).
+/// error, `fold_charge`); per output time the trajectories' mean plus CONFIDENCE standard errors, and of
+/// those the largest -- the ledger books the largest since t = 0 at every output (`since_start`). What the
+/// atoms meet rather than the light's pattern extrapolated (an atom held in the dark states of a gray
+/// molasses meets little of its bright state's saturation once there, all of it before; one gathered at
+/// a red-detuned lattice's bright sites meets more than its mean).
 fn measured_charge(from:&Model,to:&Model,states:&[Trajectory])->f64{
-    let mut sums:Vec<(u64,f64,f64)>=vec![];
+    // Per output time: the sum, the sum of squares and the count of 2η².
+    let mut sums:Vec<(f64,f64,f64,f64)>=vec![];
     for t in states{
         let x=carried(from,to,t);let p=to.point(x.r,x.kappa);let s=2.*to.readout(x.cluster,&p,&x.psi,x.time).1;
-        match sums.iter_mut().find(|e|e.0==t.index){Some(e)=>{e.1+=s;e.2+=1.;}None=>sums.push((t.index,s,1.))}
+        match sums.iter_mut().find(|e|e.0==t.time){Some(e)=>{e.1+=s;e.2+=s*s;e.3+=1.;}None=>sums.push((t.time,s,s*s,1.))}
     }
-    let means:Vec<f64>=sums.iter().map(|e|e.1/e.2).collect();let n=means.len() as f64;if n==0.{return to.ground.charge;}
-    let mean=means.iter().sum::<f64>()/n;let spread=(means.iter().map(|m|(m-mean).powi(2)).sum::<f64>()/(n*(n-1.).max(1.))).sqrt();
-    mean+CONFIDENCE*spread
+    if sums.is_empty(){return to.ground.charge;}
+    sums.iter().map(|&(_,sum,squares,n)|{let mean=sum/n;mean+CONFIDENCE*((squares/n-mean*mean).max(0.)/(n-1.).max(1.)).sqrt()}).fold(0.,f64::max)
 }
+
+/// The largest value since the first at every place of a sequence: the fold's charge at an output, the
+/// largest 2η² met since t = 0 -- an error the fold makes while the atoms are bright stays in their
+/// populations after they go dark (an optical pumping's transient, the validation's M1).
+fn since_start(values:impl Iterator<Item=f64>)->Vec<f64>{let mut most=0_f64;values.map(|x|{most=most.max(x);most}).collect()}
 
 /// A candidate's work relative to the reference's, at its upper confidence bound: from each of
 /// `subsample` of the pilot's states (of the model `from`), the same state carried into either's
@@ -989,6 +1009,12 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
 #[cfg(test)]
 mod tests{
     use super::*;
+    /// The fold's charge keeps the largest 2η² since t = 0: a bright transient's, after the atoms went dark.
+    #[test]
+    fn the_fold_s_charge_keeps_the_largest_saturation_since_the_start(){
+        assert_eq!(since_start([0.074,0.002,0.005,0.001].into_iter()),vec![0.074;4]);
+        assert_eq!(since_start([0.,0.01,0.003,0.02].into_iter()),vec![0.,0.01,0.01,0.02]);
+    }
     /// The batches: the remaining need in whole groups, at least the width, at most doubling; on the
     /// GPU whole waves.
     #[test]
