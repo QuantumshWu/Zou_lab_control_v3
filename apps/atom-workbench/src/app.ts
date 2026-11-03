@@ -4,7 +4,7 @@
 import {Field,alignUnitPickers,form,row as fieldRow,sectionTitle,shareLabelColumn,type FieldSpec} from '../../desktop/ui/src/fluent/form.js';
 import {Dialog,confirm} from '../../desktop/ui/src/fluent/dialog.js';
 import {command,type Command} from '../../desktop/ui/src/fluent/button.js';
-import {element,reconcileChildren,setTitle,type Value} from '../../desktop/ui/src/fluent/dom.js';
+import {element,reconcileChildren,setElided,setTitle,type Value} from '../../desktop/ui/src/fluent/dom.js';
 import {comboFace} from '../../desktop/ui/src/fluent/combo.js';
 import {TreeCombo,type TreeGroup} from '../../desktop/ui/src/fluent/tree_combo.js';
 import {StatusStrip,type StatusWord} from '../../desktop/ui/src/fluent/status.js';
@@ -1137,12 +1137,23 @@ function solverDetails():string{
     readout('概率守恒误差',small(result.validation.maxTraceError)),readout('最小布居',small(result.validation.minPopulation)),
     // p̄(T) at a T shorter than this is still relaxing.
     ...(result.mean?.slowestRelaxationUs!=null?[readout('最慢弛豫时间',(()=>{const unit=timeDisplayUnit(result.mean.slowestRelaxationUs!);return withUnit(result.mean.slowestRelaxationUs!*unit.factor,unit.name,{digits:3});})())]:[]),
-    // Its approximation ledger: the error its approximations use of their budget, and where it is not kept.
-    ...(motion?[readout('近似误差',`已用 ${errorPercent(motion.approximations.used)}，预算 ${errorPercent(motion.approximations.budget)}`),
+    // Its approximation ledger: the approximations' total against the population target, and whether
+    // an output's total error exceeds a target (`flagged`); then the budget its a-priori choices are
+    // made against, which does not bound the total (the η² of the excited states' elimination is in it).
+    ...(motion?[readout('近似误差',approximationTotal(motion.approximations,accuracy?.requestedTolerance)),
+      readout('取舍预算',`${errorPercent(motion.approximations.budget)}（折叠或保留、平面波或强度维度、一阶或精确多普勒）`),
       ...(motion.approximations.flagged?[`<p class="horizon-note">${esc(motion.approximations.flagged)}</p>`]:[])]:[]),
   ].join(''):'';
   const notes=result?[...(result.method?[`时间演化：${solverText(result.method)}`]:[]),...(result.mean.method?[`长期布居：${solverText(result.mean.method)}`]:[]),...(result.mean.reason?[solverText(result.mean.reason)]:[]),...result.assumptions.map(labelStateIds)]:[];
   return `<section class="solver-details"><h4>计算详情</h4>${error?`<p class="solver-error">${esc(solverText(error))}</p>`:''}${result?`<div class="form solver-readouts">${rows}</div>${motion?approximationLedger(motion.approximations):''}${notes.map(text=>`<p>${esc(text)}</p>`).join('')}`:'<p>没有当前参数的求解结果。</p>'}${failureRecords.length?'<button data-export-solver-failures>导出失败记录</button>':''}</section>`;
+}
+/** A ledger's total (`used`, the items' estimates summed) with its largest item named by its `label`
+ * and the others summed, against the population target, and whether an output's total estimated
+ * error -- approximations, step and statistics -- exceeds a target (`flagged`). */
+function approximationTotal(ledger:ApproximationLedger,target:number|undefined):string{
+  const [largest,...others]=[...ledger.items].sort((a,b)=>b.estimate-a.estimate);
+  const parts=largest?[`${largest.label} ${errorPercent(largest.estimate)}`,...(others.length?[`其余 ${others.length} 项 ${errorPercent(others.reduce((sum,item)=>sum+item.estimate,0))}`]:[])]:[];
+  return `合计 ${errorPercent(ledger.used)}${parts.length?`（${parts.join('，')}）`:''}${target!==undefined?`，布居目标 ${errorPercent(target)}`:''}，${ledger.flagged?'有时刻超出目标':'未超出'}`;
 }
 /** A motion result's approximation ledger (solver-types.ts ApproximationLedger): each approximation,
  * its estimated error and what the engine did about it. */
@@ -1219,7 +1230,8 @@ function renderDynamicsControls(a:Analysis):void{
   const d=dynamics(),enabled=drivingLasers(scene);
   const states=allLevels(a);d.monitoredGroupIds??=[];
   if(!states.some(l=>l.id===d.initialStateId))d.initialStateId=initialId();d.monitoredStateIds=d.monitoredStateIds.filter(id=>states.some(l=>l.id===id));
-  setText('dynamics-beams',enabled.length?`驱动：${enabled.map(l=>l.name).join(' + ')}`:'驱动：无光束');
+  // One line, eliding when the title row is narrow; the whole list in its tooltip (v3 ElidedLabel).
+  setElided($('dynamics-beams'),enabled.length?`驱动：${enabled.map(l=>l.name).join(' + ')}`:'驱动：无光束');
   const key=JSON.stringify({states:states.map(l=>l.id),motion:motionOn()}),parent=$('dynamics-controls');
   if(key===controlsKey){
     refreshFields(dynamicsFields);fitDynamicsForms(parent);
