@@ -137,6 +137,10 @@ struct CarrierLayout{j:usize,j2:usize,t:usize}
 #[derive(Clone,Debug)]
 struct Layout{n:usize,size:usize,h0:usize,groups:Vec<GroupLayout>,carriers:Vec<CarrierLayout>}
 
+/// A cluster's work per call in complex multiply-adds (`Model::work`), and its table pairs.
+#[derive(Clone,Copy,Debug)]
+pub struct Work{pub generator:f64,pub force:f64,pub photons:f64,pub pairs:usize}
+
 /// The interpolation stencil at s: per focused beam the first of its four nodes, their cubic
 /// weights and the weights' derivatives in s_f; the nodes are their tensor product.
 #[derive(Clone,Copy,Debug)]
@@ -650,6 +654,22 @@ impl Model{
 
     /// A cluster's dimension.
     pub fn dimension(&self,cluster:usize)->usize{self.layouts[cluster].n}
+    /// A cluster's work per call in complex multiply-adds, from its tables' layout (the step choice's
+    /// cost, solve.rs): the generator (`local`: per pair its S with the slopes and its Q gathered on the
+    /// stencil's nodes, added -- twice in a Hermitian group -- and kept for the force; h0 likewise), the
+    /// force (`force`: the products once per group, a form per pair and slope, h0's slopes) and a
+    /// jump's photons (`photons`: per carrier, rank and axis J and J2 on the stencil and their sum).
+    pub fn work(&self,cluster:usize)->Work{
+        let layout=&self.layouts[cluster];let d=self.focused.len() as f64;let nodes=(1usize<<(2*self.focused.len())) as f64;
+        let(n2,ng)=((layout.n*layout.n) as f64,self.ground.ground_states.len() as f64);
+        let(mut generator,mut force)=(nodes*(1.+d)*n2+n2,d*n2);
+        for gl in &layout.groups{
+            let(e,pairs)=(gl.entries.len() as f64,gl.pairs.len() as f64);let added=if gl.hermitian{4.}else{2.};
+            generator+=pairs*(nodes*(2.+d)+added+1.+d)*e;force+=e+pairs*(1.+d)*e;
+        }
+        let photons=self.carriers.iter().map(|c|c.rank as f64*3.*ng*layout.n as f64*(2.*nodes+1.)).sum();
+        Work{generator,force,photons,pairs:layout.groups.iter().map(|g|g.pairs.len()).sum()}
+    }
     /// The number of clusters.
     pub fn clusters(&self)->usize{self.layouts.len()}
 

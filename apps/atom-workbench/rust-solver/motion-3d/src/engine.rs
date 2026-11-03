@@ -128,12 +128,22 @@ pub fn propagate(h:&[Complex;MOST_STATES*MOST_STATES],n:usize,tau:f64,psi:&mut [
     macro_rules! sized{($($n:literal)*)=>{match n{$($n=>propagate_sized::<$n>(h,tau,psi,truncation),)*_=>unreachable!("a cluster has 1 to 8 states")}}}
     sized!(1 2 3 4 5 6 7 8)
 }
-fn propagate_sized<const N:usize>(h:&[Complex;MOST_STATES*MOST_STATES],tau:f64,psi:&mut [Complex;MOST_STATES],truncation:f64){
-    let mut norm=0_f64;for b in 0..N{let mut column=0.;for a in 0..N{column+=h[a*N+b].re.abs()+h[a*N+b].im.abs();}norm=norm.max(column);}
-    let x=norm*tau.abs();let parts=((x/0.5).ceil() as usize).max(1);let step=tau/parts as f64;
-    // The terms for this step's y = ‖H‖τ/parts ≤ ½: through the first whose bound y^m/m! is within
-    // the sub-step's share of the truncation bound.
+/// The largest column sum of |re| + |im| of an n × n matrix (row-major in an 8 × 8 array): the bound
+/// of its 1-norm the series takes.
+pub fn column_norm(h:&[Complex;MOST_STATES*MOST_STATES],n:usize)->f64{
+    let mut norm=0_f64;for b in 0..n{let mut column=0.;for a in 0..n{column+=h[a*n+b].re.abs()+h[a*n+b].im.abs();}norm=norm.max(column);}
+    norm
+}
+/// The series of exp(−iHτ) for a generator of that norm (`propagate`): its sub-steps of ‖H‖τ ≤ ½ and
+/// each one's terms, through the first whose bound y^m/m! is within the sub-step's share of the
+/// truncation bound.
+pub fn series(norm:f64,tau:f64,truncation:f64)->(usize,usize){
+    let x=norm*tau.abs();let parts=((x/0.5).ceil() as usize).max(1);
     let y=x/parts as f64;let share=truncation/parts as f64;let mut terms=1;let mut size=y;while size>share&&terms<40{terms+=1;size*=y/terms as f64;}
+    (parts,terms)
+}
+fn propagate_sized<const N:usize>(h:&[Complex;MOST_STATES*MOST_STATES],tau:f64,psi:&mut [Complex;MOST_STATES],truncation:f64){
+    let(parts,terms)=series(column_norm(h,N),tau,truncation);let step=tau/parts as f64;
     let mut v=[Complex::ZERO;N];v.copy_from_slice(&psi[..N]);
     for _ in 0..parts{
         let mut term=v;let mut sum=v;
