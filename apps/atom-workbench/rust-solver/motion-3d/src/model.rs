@@ -44,7 +44,11 @@
 //! them (`decays`) and linear in the fields between one and a ground state (`crosses`: the folded
 //! amplitude A_c = −R_c of the class's photons, X_k = w·T_k[:,b] with w = Σ_{to,a} C_a[to,e]* C_a[to,·]
 //! over the photons the two share). Only the Hermitian part acts on the motion: the Ehrenfest force
-//! is −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩, with the kept drives' gradients Σ_k ∇E_k U_k the stimulated force.
+//! is −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩, with the kept drives' gradients Σ_k ∇E_k U_k the stimulated force. The
+//! decay is the jumps' product by construction: where a class joins two folded photons of channels
+//! without a kept coupling (through an explicit state's photon of their frequency), their cross term
+//! Q = Σ_{to,a} (C_a T^d)[to,a]†(C_a T^c)[to,b] over the landing states they share enters alone, in a
+//! group of its own without S (ground.rs `FoldedCross`).
 //!
 //! # The generator's beats
 //! Every term's residual Ω̃ is a beat of the generator: H_eff(t) = H₀ + Σ_j e^{iΩ_j t} H_j (`Components`),
@@ -166,9 +170,11 @@ pub struct Carrier{
 /// its field pairs (k′ ≤ k for a Hermitian one), its entries -- the (row, column) places of the
 /// cluster's generator its couplings at this beat reach, and those its van Vleck paths add (both
 /// ways in a Hermitian group); S and Q vanish elsewhere -- and where its S and Q lie (the entries'
-/// values per pair).
+/// values per pair). A `decay` group holds the decay alone, its S zero: the cross terms of folded
+/// photons a class joins without a kept coupling (`ground::FoldedCross`).
 #[derive(Clone,Debug)]
-pub(crate) struct GroupLayout{pub(crate) absorbed:usize,pub(crate) emitted:usize,pub(crate) residual:f64,pub(crate) hermitian:bool,pub(crate) pairs:Vec<(usize,usize)>,pub(crate) entries:Vec<(usize,usize)>,pub(crate) s:usize,pub(crate) q:usize}
+pub(crate) struct GroupLayout{pub(crate) absorbed:usize,pub(crate) emitted:usize,pub(crate) residual:f64,pub(crate) hermitian:bool,pub(crate) pairs:Vec<(usize,usize)>,pub(crate) entries:Vec<(usize,usize)>,pub(crate) s:usize,pub(crate) q:usize,
+    pub(crate) decay:bool}
 /// Where a carrier's photon tables lie: J and J2 (3 axes × rank × ng × n0) and T (rank × ne × n0),
 /// on the cluster's n0 ground states.
 #[derive(Clone,Copy,Debug)]
@@ -644,8 +650,18 @@ impl Model{
                         let(x,y)=(cl.position(p.back.state).unwrap(),cl.position(p.from.state).unwrap());entries.push((x,y));if hermitian{entries.push((y,x));}
                     }
                     entries.sort();entries.dedup();
-                    let square=pairs.len()*entries.len();groups.push(GroupLayout{absorbed:gr.absorbed,emitted:gr.emitted,residual,hermitian,pairs,entries,s:size,q:size+square});size+=2*square;
+                    let square=pairs.len()*entries.len();groups.push(GroupLayout{absorbed:gr.absorbed,emitted:gr.emitted,residual,hermitian,pairs,entries,s:size,q:size+square,decay:false});size+=2*square;
                 }
+            }
+            // The folded photons a class joins without a kept coupling (ground.rs `FoldedCross`): their decay,
+            // in groups of their own per carrier pair and beat.
+            let mut keyed:Vec<(usize,usize,f64,Vec<(usize,usize)>)>=vec![];
+            for x in &cl.folded_crosses{match keyed.iter_mut().find(|k|k.0==x.absorbed&&k.1==x.emitted&&k.2==x.residual){
+                Some(k)=>k.3.push((x.row,x.col)),None=>keyed.push((x.absorbed,x.emitted,x.residual,vec![(x.row,x.col)]))}}
+            for(absorbed,emitted,residual,mut entries)in keyed{
+                entries.sort();entries.dedup();let hermitian=absorbed==emitted&&residual==0.;
+                let pairs=field_pairs(hermitian,self.carriers[emitted].rank,self.carriers[absorbed].rank);
+                let square=pairs.len()*entries.len();groups.push(GroupLayout{absorbed,emitted,residual,hermitian,pairs,entries,s:size,q:size+square,decay:true});size+=2*square;
             }
             let carriers=self.carriers.iter().map(|c|{let jump=3*c.rank*ng*n0;let l=CarrierLayout{j:size,j2:size+jump,t:size+2*jump};size+=2*jump+c.rank*ne*n0;l}).collect();
             // The explicit states' decay, −(i/2) Σ_φ J_φ†J_φ on their rows: between two of them, and
@@ -725,8 +741,18 @@ impl Model{
             for &(x,y)in &cl.excited_statics{node[layout.h0+x*n+y]+=e.excited[(cl.excited[x-n0],cl.excited[y-n0])];}
             for &(x,y,f)in &cl.excited_paths{let(a,b)=(cl.excited[x-n0],cl.excited[y-n0]);let ee=&e.excited_energies;
                 node[layout.h0+x*n+y]+=e.excited[(a,f)]*e.excited[(f,b)]*(0.5*(1./(ee[a]-ee[f])+1./(ee[b]-ee[f])));}
-            // The kept groups: S and Q on their entries.
-            for gl in &layout.groups{
+            // The kept groups: S and Q on their entries; the decay groups: Q, the photons' product over the landing
+            // states their class shares.
+            for gl in layout.groups.iter().filter(|g|g.decay){
+                let(c,d)=(gl.absorbed,gl.emitted);
+                for(p,&(k1,k0))in gl.pairs.iter().enumerate(){let base=p*gl.entries.len();
+                    for(at,&(x,y))in gl.entries.iter().enumerate(){
+                        let tos=&cl.folded_crosses.iter().find(|i|i.row==x&&i.col==y&&i.absorbed==c&&i.emitted==d&&i.residual==gl.residual).unwrap().tos;let(a,b)=(states[x],states[y]);
+                        node[gl.q+base+at]=(0..3).fold(Complex::ZERO,|s,ax|tos.iter().fold(s,|s,&to|s+j[d][k1][ax][(to,a)].conj()*j[c][k0][ax][(to,b)]));
+                    }
+                }
+            }
+            for gl in layout.groups.iter().filter(|g|!g.decay){
                 let(c,d)=(gl.absorbed,gl.emitted);
                 let entries:Vec<(usize,usize)>=cl.groups.iter().find(|x|x.absorbed==c&&x.emitted==d).unwrap().entries.iter().filter(|x|x.2==gl.residual).map(|x|(x.0,x.1)).collect();
                 for(p,&(k1,k0))in gl.pairs.iter().enumerate(){
@@ -766,7 +792,7 @@ impl Model{
                         let ubar:Vec<Complex>=(0..self.carriers[c].rank).map(|k0|-dot(&g.folded[l],p.via.state,&solve(&u[c][k0],p.from.state))).collect();
                         let wbar:Vec<Complex>=(0..self.carriers[f].rank).map(|q|-dot(&u[f][q],p.back.state,&gv)).collect();
                         // M_qk = |a_l|² D W̄_q Ū_k, into the group (c → f) at the path's residual.
-                        let gl=layout.groups.iter().find(|x|x.absorbed==c&&x.emitted==f&&x.residual==p.residual).ok_or("A van Vleck path without its group")?;
+                        let gl=layout.groups.iter().find(|x|!x.decay&&x.absorbed==c&&x.emitted==f&&x.residual==p.residual).ok_or("A van Vleck path without its group")?;
                         let m=|q:usize,k0:usize|wbar[q]*ubar[k0]*(intensity*denominator);
                         let place=|x:usize,y:usize|gl.entries.binary_search(&(x,y)).unwrap();
                         for(pi,&(k1,k0))in gl.pairs.iter().enumerate(){
