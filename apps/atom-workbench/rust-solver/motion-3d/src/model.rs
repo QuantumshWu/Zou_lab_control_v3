@@ -2,16 +2,17 @@
 //! ħκ, from tables over the focused beams' intensities and the near carriers' fields at r.
 //!
 //! # Where the generator depends on r
-//! H(r) = H0 + Σ_l (|a_l(r)|² − 1) O_l + Σ_l |a_l(r)|² F_l (ground.rs) depends on r only through
-//! the beams' intensities |a_l(r)|², and so does the elimination: the energies, K and every near
-//! beam's responses. The near beams enter through their amplitudes a_l(r) (phase and profile, a
-//! Gaussian beam's exact), linearly per carrier. The tables hold the elimination on a uniform grid
-//! of the focused beams' intensities s ∈ [0, 1]^D, cubic in each s_f, the grid doubled until the
-//! interpolation at the new nodes agrees with the exact elimination to the tables' share of the
-//! budget (`TABLE_SHARE`) of every table's scale. The focused beams are the trap beam and every
-//! Gaussian beam whose profile matters (`Model::new`): one whose intensity changes over the atom's
-//! reach by more than the budget leaves -- its shifts O_l + F_l against the excited poles -- gets an
-//! axis; the others' shifts are taken at their peak.
+//! H(r) = H0 + Σ_u (s_u(r) − s_u(0)) O_u + Σ_u s_u(r) F_u (ground.rs) depends on r only through
+//! the units' intensities s_u(r) -- a beam's |a_l(r)|², or the summed field's of beams of one
+//! frequency and polarization, their standing wave --, and so does the elimination: the energies, K
+//! and every near beam's responses. The near beams enter through their amplitudes a_l(r) (phase and
+//! profile, a Gaussian beam's exact), linearly per carrier. The tables hold the elimination on a
+//! uniform grid of the focused units' intensities s ∈ [0, 1]^D, cubic in each s_f, the grid doubled
+//! until the interpolation at the new nodes agrees with the exact elimination to the tables' share
+//! of the budget (`TABLE_SHARE`) of every table's scale. The focused units are the trap beam's and
+//! every varying unit whose profile matters (`Model::new`): one whose intensity changes over the
+//! atom's reach by more than the budget leaves -- its shifts O_u + F_u against the excited poles --
+//! gets an axis; the others' shifts are taken at the focus.
 //!
 //! # A carrier's field basis
 //! Each near beam's coupling V_l is the dipole operator contracted with the beam's field, so the
@@ -77,12 +78,13 @@
 //! order, (kv/σ_min)², as the photons' (engine.rs).
 //!
 //! # The trap
-//! The trap beam's focus is the origin. Its trap is each state's potential with the beams'
-//! interference left out (`Model::potential`); its Hessian at the focus gives the trap's principal
-//! axes and frequencies (`Trap`). An atom is held while its mechanical energy, ħ²κ²/2m plus its
-//! potential relative to far from the trap beam, is negative: the potential the engine's force
-//! derives from, Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ of its current internal state, less the same with the trap beam
-//! off (`Local::trap`).
+//! The trap beam's focus is the origin. Its trap is each state's potential with the near beams'
+//! interference left out (`Model::potential`; a unit's standing wave is in it); its Hessian at the
+//! focus gives the trap's principal axes and frequencies (`Trap`). An atom is held while its
+//! mechanical energy, ħ²κ²/2m plus its potential relative to far from the trap, is negative: the
+//! potential the engine's force derives from, Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ of its current internal state, less
+//! the same with the trap's light off (`Model::trap_potential`) -- the trap beam and the beams of its
+//! mode, along its axis with its waist and frequency (its reflections, `Model::trap_beams`).
 use crate::ground::{self,Ground};
 use crate::ledger::BUDGET;
 use crate::linear::{Dense,Lu};
@@ -364,12 +366,13 @@ pub struct Trap{pub axes:[[f64;3];3],pub frequencies:[f64;3],pub lab:[f64;3]}
 pub struct Model{
     pub ground:Ground,
     pub geometry:Vec<Geometry>,
-    /// The trap beam, and the focused beams (indices into the beams), one intensity axis each, the
-    /// trap beam's first.
+    /// The trap beam and the trap's beams (the trap beam and the beams of its mode, `trap_beams`), and
+    /// the focused units (indices into `Ground::units`), one intensity axis each, the trap beam's first.
     pub trap_beam:usize,
+    pub trap_beams:Vec<usize>,
     pub focused:Vec<usize>,
-    /// Each Gaussian beam taken at its peak: the beam, its estimated error over the reach and its
-    /// shifts' weight, the error per unit of intensity lost (`choose_profiles`).
+    /// Each varying unit taken at the focus: the unit, its estimated error over the reach and its
+    /// shifts' weight, the error per unit of intensity changed (`choose_profiles`).
     pub profiles:Vec<(usize,f64,f64)>,
     pub carriers:Vec<Carrier>,
     /// ħ/m (um²/us).
@@ -418,6 +421,15 @@ fn field_pairs(hermitian:bool,emitted:usize,absorbed:usize)->Vec<(usize,usize)>{
     if hermitian{(0..absorbed).flat_map(|k1|(k1..absorbed).map(move|k|(k1,k))).collect()}else{(0..emitted).flat_map(|k1|(0..absorbed).map(move|k|(k1,k))).collect()}
 }
 
+/// The trap's beams: the trap beam and the beams of its mode -- of its frequency, along its axis
+/// either way, with its waist: its reflections --, whose light falls off with its own far from the
+/// focus (`Model::trap_potential`).
+fn trap_beams(ground:&Ground,geometry:&[Geometry],trap_beam:usize)->Vec<usize>{
+    let(t,index)=(&geometry[trap_beam],&ground.beams[trap_beam].frequency_index);
+    (0..geometry.len()).filter(|&l|l==trap_beam||(ground.beams[l].frequency_index==*index&&geometry[l].waist==t.waist&&{
+        let c:f64=(0..3).map(|i|geometry[l].direction[i]*t.direction[i]).sum();(c.abs()-1.).abs()<=1e-12})).collect()
+}
+
 /// The largest eigenvalue's eigenvector of a real symmetric 3 × 3 matrix's eigen-decomposition:
 /// its eigenvalues and orthonormal eigenvectors (rows), by Jacobi rotations.
 pub(crate) fn symmetric_eigen(m:[[f64;3];3])->([f64;3],[[f64;3];3]){
@@ -450,6 +462,7 @@ impl Model{
         let trap_beam=request.trap_beam;
         if trap_beam>=geometry.len()||geometry[trap_beam].waist.is_none(){return Err("光镊（trapBeamId 所指的光束）需要束腰：3D 运动计算聚焦在原子处的光镊中的单个原子".into());}
         let hbar_over_mass=HBAR/request.mass_kg*1e6;
+        let trap_unit=ground.units.iter().position(|u|u.beams.contains(&trap_beam)).unwrap();let trap_beams=trap_beams(&ground,&geometry,trap_beam);
         // Each carrier's couplings: an orthonormal basis and the beams' coefficients on it.
         let mut carriers=vec![];let mut bases:Vec<Vec<Vec<Complex>>>=vec![];
         for c in &ground.carriers{
@@ -478,7 +491,7 @@ impl Model{
         if carriers.len()>MOST_CARRIERS||geometry.len()>MOST_BEAMS{return Err(format!("3D 运动最多支持 {MOST_CARRIERS} 个近共振频率、{MOST_BEAMS} 束光"));}
         if ground.ground_states.len()!=GROUND{return Err(format!("The ground manifold has {} states, not {GROUND}",ground.ground_states.len()));}
         if ground.clusters.iter().any(|c|c.excited.is_empty()&&c.states.len()>MOST_STATES){return Err("A cluster of ground states has more than eight states".into());}
-        let mut model=Model{ground,geometry,trap_beam,focused:vec![trap_beam],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
+        let mut model=Model{ground,geometry,trap_beam,trap_beams,focused:vec![trap_unit],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
             layouts:vec![],tables:Tables{nodes:1,data:vec![],resonance:0.},table_error:0.,quartic:0.,resonance:0.,reach:vec![[0.;3]],
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
         model.choose_profiles(request)?;
@@ -487,38 +500,44 @@ impl Model{
         Ok(model)
     }
 
-    /// The Gaussian beams other than the trap beam: each one's profile is judged over the atom's
-    /// reach, the region of the trap within ln(1/budget) k_B T of its bottom (the harmonic trap's
-    /// thermal ellipsoid holding all but the budget of a Boltzmann ensemble), T the request's: its
-    /// intensity falls there to 1 − ε at worst, and its shifts O_l + F_l, taken at the peak, err
-    /// by ε ‖O_l + F_l‖ against the nearest excited pole and the generator's scale. Within the budget
-    /// the beam keeps its exact profile in its field (a near beam) and its shifts at the peak; beyond,
-    /// an intensity axis (at most `MOST_FOCUSED` in all, the largest errors first).
+    /// The varying units other than the trap beam's (ground.rs `Unit`): each one's profile is judged
+    /// over the atom's reach, the region of the trap within ln(1/budget) k_B T of its bottom (the
+    /// harmonic trap's thermal ellipsoid holding all but the budget of a Boltzmann ensemble), T the
+    /// request's -- at its ends along the principal axes, and inside it for interfering beams
+    /// (ground.rs `reach_points`): its intensity changes there by ε from the focus's at worst, and its
+    /// shifts O_u + F_u, taken at the focus, err by ε ‖O_u + F_u‖ against the nearest excited pole and
+    /// the generator's scale. Within the budget the unit keeps its beams' exact profiles in their
+    /// fields (near beams) and its shifts at the focus; beyond, an intensity axis (at most
+    /// `MOST_FOCUSED` in all, the largest errors first).
     fn choose_profiles(&mut self,request:&Request)->Result<(),String>{
         let g=&self.ground;let reference=self.reference_state(request)?;
         let trap=self.bare_trap(reference);
         let reach:[f64;3]=std::array::from_fn(|a|{let w=trap.frequencies[a];
             if w>0.{(2.*BUDGET.recip().ln()*KT_PER_UK*request.temperature_uk*self.hbar_over_mass).sqrt()/w}else{0.}});
-        for a in 0..3{for sign in [-1.,1.]{self.reach.push(trap.axes[a].map(|x|x*sign*reach[a]));}}
+        self.reach.extend(ground::reach_points(&trap.axes,reach,g.units.iter().any(|u|u.beams.len()>1)));
         let mut errors:Vec<(usize,f64,f64)>=vec![];
-        for l in 0..self.geometry.len(){
-            if l==self.trap_beam||self.geometry[l].waist.is_none(){continue;}
-            let fall=(0..3).flat_map(|a|[-1.,1.].map(move|s|(a,s))).map(|(a,s)|{let r=trap.axes[a].map(|x|x*s*reach[a]);1.-self.geometry[l].intensity(r)}).fold(0_f64,f64::max).max(0.);
-            let mut shift=g.outside[l].clone();shift.add_scaled(Complex::ONE,&g.folds[l]);
+        for(u,unit)in g.units.iter().enumerate(){
+            if u==self.focused[0]||!unit.varies(&g.beams){continue;}
+            let fall=self.reach.iter().map(|&r|(self.unit_intensity(u,r)-unit.focus).abs()).fold(0_f64,f64::max);
+            let mut shift=g.outside[u].clone();shift.add_scaled(Complex::ONE,&g.folds[u]);
             let size=shift.spectral_norm();
             let weight=size*(1./g.pole.max(f64::MIN_POSITIVE)).max(1./g.generator_scale.max(f64::MIN_POSITIVE));
-            errors.push((l,fall*weight,weight));
+            errors.push((u,fall*weight,weight));
         }
         errors.sort_by(|a,b|b.1.total_cmp(&a.1));
-        for(l,error,weight)in errors{
-            if error>BUDGET&&self.focused.len()<MOST_FOCUSED{self.focused.push(l);}else{self.profiles.push((l,error,weight));}
+        for(u,error,weight)in errors{
+            if error>BUDGET&&self.focused.len()<MOST_FOCUSED{self.focused.push(u);}else{self.profiles.push((u,error,weight));}
         }
         Ok(())
     }
-    /// The profile error at r: over the Gaussian beams taken at their peak, the largest intensity
-    /// lost there times its weight.
+    /// The profile error at r: over the units taken at the focus, the largest intensity changed there
+    /// times its weight.
     pub fn profile_error(&self,r:[f64;3])->f64{
-        self.profiles.iter().map(|&(l,_,weight)|(1.-self.geometry[l].intensity(r)).max(0.)*weight).fold(0.,f64::max)
+        self.profiles.iter().map(|&(u,_,weight)|(self.unit_intensity(u,r)-self.ground.units[u].focus).abs()*weight).fold(0.,f64::max)
+    }
+    /// A unit's intensity at r (ground.rs `Unit`), from the beams' geometry.
+    pub fn unit_intensity(&self,u:usize,r:[f64;3])->f64{
+        let unit=&self.ground.units[u];unit.beams.iter().zip(&unit.weights).fold(Complex::ZERO,|s,(&l,&w)|s+self.geometry[l].field(r).0*w).norm_sqr()/unit.norm
     }
 
     /// The reference state: the request's largest initial population, a ground state (its position
@@ -628,9 +647,9 @@ impl Model{
         }).collect()
     }
 
-    /// H at the focused beams' intensities s, the others at their peak.
+    /// H at the focused units' intensities s, the others at the focus.
     pub fn hamiltonian_at(&self,s:&[f64])->Dense{
-        let mut intensities=vec![1.;self.geometry.len()];for(i,&l)in self.focused.iter().enumerate(){intensities[l]=s[i];}
+        let mut intensities=self.ground.focus_intensities();for(i,&u)in self.focused.iter().enumerate(){intensities[u]=s[i];}
         self.ground.hamiltonian_with(&intensities)
     }
 
@@ -693,9 +712,9 @@ impl Model{
                     let(x,y)=(cl.position(p.back.state).unwrap(),cl.position(p.from.state).unwrap());
                     let solve=|m:&Dense,col:usize|->Vec<Complex>{let mut v:Vec<Complex>=(0..ne).map(|i|m[(i,col)]).collect();lu.solve(&mut v);v};
                     let dot=|m:&Dense,col:usize,v:&[Complex]|->Complex{(0..ne).fold(Complex::ZERO,|s,i|s+m[(i,col)].conj()*v[i])};
-                    if self.carriers[d].beams.len()==1{
+                    if self.carriers[d].beams.len()==1&&g.units[g.unit_of(self.carriers[d].beams[0])].beams.len()==1{
                         let l=self.carriers[d].beams[0];
-                        let intensity=self.focused.iter().position(|&x|x==l).map_or(1.,|i|s[i]);
+                        let intensity=self.focused.iter().position(|&x|x==g.unit_of(l)).map_or(1.,|i|s[i]);
                         let gv=solve(&g.folded[l],p.via.state);
                         let ubar:Vec<Complex>=(0..self.carriers[c].rank).map(|k0|-dot(&g.folded[l],p.via.state,&solve(&u[c][k0],p.from.state))).collect();
                         let wbar:Vec<Complex>=(0..self.carriers[f].rank).map(|q|-dot(&u[f][q],p.back.state,&gv)).collect();
@@ -863,9 +882,9 @@ impl Model{
     /// The tables of a grid of n nodes per focused beam, and the quartic shifts' bound over it.
     fn build(&self,n:usize,nodes:&[Node])->(Tables,f64){
         let quartic=nodes.iter().map(|x|x.1).fold(0.,f64::max);
-        // The bound over the nodes inside the reach's intensities: each focused beam's from its
+        // The bound over the nodes inside the reach's intensities: each focused unit's from its
         // smallest over the reach (less one node, the interval holding it) to 1.
-        let low:Vec<f64>=self.focused.iter().map(|&l|self.reach.iter().map(|&r|self.geometry[l].intensity(r).min(1.)).fold(1.,f64::min)-1./(n-1).max(1) as f64).collect();
+        let low:Vec<f64>=self.focused.iter().map(|&u|self.reach.iter().map(|&r|self.unit_intensity(u,r).min(1.)).fold(1.,f64::min)-1./(n-1).max(1) as f64).collect();
         let resonance=self.grid(n).iter().zip(nodes).filter(|(s,_)|s.iter().zip(&low).all(|(x,l)|x>=l)).map(|(_,x)|x.2).fold(0.,f64::max);
         // data[cluster]: node-major, layout.size per node.
         (Tables{nodes:n,data:(0..self.layouts.len()).map(|k|nodes.iter().flat_map(|node|node.0[k].iter().flat_map(|z|[z.re,z.im])).collect()).collect(),resonance},quartic)
@@ -966,10 +985,16 @@ impl Model{
         for i in 0..stencil.count(){let(node,w,_)=stencil.node(i);if w==0.{continue;}let at=node*size+base;for(o,x)in value[..len].iter_mut().zip(&data[at..at+len]){*o+=w*x;}}
     }
 
-    /// Everything at (r, κ) but the internal state.
+    /// Everything at (r, κ) but the internal state: per focused unit its intensity s = |F|²/N
+    /// (F = Σ_l a_l γ_l, ground.rs `Unit`), its gradient 2 Re(F* ∇F)/N and its intensity with the
+    /// trap's light off (`trap_beams`).
     pub fn point(&self,r:[f64;3],kappa:[f64;3])->Point{
-        let mut s=[0.;MOST_FOCUSED];let mut gradient=[[0.;3];MOST_FOCUSED];
-        for(i,&l)in self.focused.iter().enumerate(){let(a,g)=self.geometry[l].field(r);s[i]=a.norm_sqr().min(1.);gradient[i]=g.map(|x|2.*(a.conj()*x).re);}
+        let(mut s,mut off)=([0.;MOST_FOCUSED],[0.;MOST_FOCUSED]);let mut gradient=[[0.;3];MOST_FOCUSED];
+        for(i,&u)in self.focused.iter().enumerate(){
+            let unit=&self.ground.units[u];let(mut field,mut slope,mut rest)=(Complex::ZERO,[Complex::ZERO;3],Complex::ZERO);
+            for(&l,&w)in unit.beams.iter().zip(&unit.weights){let(a,g)=self.geometry[l].field(r);let x=a*w;field+=x;for d in 0..3{slope[d]+=g[d]*w;}if !self.trap_beams.contains(&l){rest+=x;}}
+            s[i]=(field.norm_sqr()/unit.norm).min(1.);off[i]=(rest.norm_sqr()/unit.norm).min(1.);gradient[i]=slope.map(|x|2.*(field.conj()*x).re/unit.norm);
+        }
         let mut fields=[CarrierField::default();MOST_CARRIERS];
         for(c,f)in self.carriers.iter().zip(fields.iter_mut()){
             for(j,&l)in c.beams.iter().enumerate(){
@@ -977,7 +1002,7 @@ impl Model{
                 for k in 0..c.rank{let x=c.coefficients[j][k];let ax=a*x;f.e[k]+=ax;f.doppler[k]+=ax*w;for d in 0..3{f.grad[k][d]+=g[d]*x;}}
             }
         }
-        let d=self.focused.len();let stencil=self.stencil(&s[..d]);let mut off=s;off[0]=0.;
+        let d=self.focused.len();let stencil=self.stencil(&s[..d]);
         Point{r,kappa,stencil,far:self.stencil(&off[..d]),intensity_gradient:gradient,fields}
     }
 
@@ -1323,11 +1348,11 @@ impl Model{
         for m in g.iter_mut(){for x in 0..n{for y in x..n{let z=(m[x*n+y]+m[y*n+x].conj())*0.5;m[x*n+y]=z;m[y*n+x]=z.conj();}}}
         g
     }
-    /// The trap's potential of ψ at a point (rad/us): Re⟨ψ|H_eff|ψ⟩ less the same with the trap beam
-    /// off, per ⟨ψ|ψ⟩ -- (h0 − M) at the point's stencil and fields less at its far stencil with the
-    /// trap beam's field taken out of its carrier's: the tweezer's whole light shift whether it is
-    /// folded (in h0) or a near carrier (in M, through its field) -- a tweezer alone is always one, the
-    /// light's frame rotating at it.
+    /// The trap's potential of ψ at a point (rad/us): Re⟨ψ|H_eff|ψ⟩ less the same with the trap's light
+    /// off (`trap_beams`), per ⟨ψ|ψ⟩ -- (h0 − M) at the point's stencil and fields less at its far
+    /// stencil with the trap beams' fields taken out of their units' and carriers': the tweezer's
+    /// whole light shift whether it is folded (in h0) or a near carrier (in M, through its field) -- a
+    /// tweezer alone is always one, the light's frame rotating at it.
     pub fn trap_potential(&self,cluster:usize,p:&Point,psi:&[Complex],t:f64)->f64{
         if self.mixed(cluster){return self.trap_mixed(cluster,p,psi,t,false);}
         macro_rules! sized{($($n:literal)*)=>{match self.dimension(cluster){$($n=>self.trap_sized::<$n,{2*$n*$n}>(cluster,p,psi,t,false),)*_=>unreachable!("a cluster has 1 to 8 states")}}}
@@ -1365,13 +1390,14 @@ impl Model{
     pub fn photon(&self,cluster:usize,stencil:&Stencil,p:usize,a:usize,to:usize)->Complex{
         let mut z=[Complex::ZERO];let ng=self.ground.ground_states.len();self.gather_dyn(cluster,stencil,self.layouts[cluster].emission+(p*3+a)*ng+to,&mut z,None);z[0]
     }
-    /// The carriers' fields at a point with the trap beam off (`trap_potential`): its carrier's less
-    /// its own part a(r) c_k.
+    /// The carriers' fields at a point with the trap's light off (`trap_potential`): each one's less
+    /// its trap beams' parts a_l(r) c_lk.
     fn fields_off(&self,p:&Point)->[CarrierField;MOST_CARRIERS]{
         let mut off=p.fields;
         for(c,carrier)in self.carriers.iter().enumerate(){
-            if let Some(j)=carrier.beams.iter().position(|&l|l==self.trap_beam){
-                let a=self.geometry[self.trap_beam].field(p.r).0;for k in 0..carrier.rank{off[c].e[k]-=a*carrier.coefficients[j][k];}
+            for(j,&l)in carrier.beams.iter().enumerate(){
+                if !self.trap_beams.contains(&l){continue;}
+                let a=self.geometry[l].field(p.r).0;for k in 0..carrier.rank{off[c].e[k]-=a*carrier.coefficients[j][k];}
             }
         }
         off
@@ -1542,32 +1568,34 @@ impl Model{
         (u,du,beams)
     }
 
-    /// A cluster state's potential at r relative to the focus (rad/us): the diagonal of h0 and of
-    /// every beam's own light shift, |a_l(r)|² Σ c_lk′* c_lk S_k′k -- the beams' interference (their
-    /// lattice) left out. A tweezer folded at second order is in h0; one that is a near carrier
-    /// (the only light): the trap is the same.
+    /// A cluster state's potential at r relative to the focus (rad/us): the diagonal of h0 (the units'
+    /// intensities there, a standing wave's in it) and of every near beam's own light shift,
+    /// |a_l(r)|² Σ c_lk′* c_lk S_k′k -- the near beams' interference (their lattice) left out. A tweezer
+    /// folded at second order is in h0; one that is a near carrier (the only light): the trap is the
+    /// same.
     pub fn potential(&self,cluster:usize,x:usize,r:[f64;3])->f64{
-        self.level(cluster,x,&|l|self.geometry[l].intensity(r))-self.level(cluster,x,&|l|self.geometry[l].intensity([0.;3]))
+        self.level(cluster,x,&|u|self.unit_intensity(u,r),&|l|self.geometry[l].intensity(r))-self.level(cluster,x,&|u|self.ground.units[u].focus,&|l|self.geometry[l].intensity([0.;3]))
     }
     /// A cluster state's trap depth (rad/us): the level its potential tends to far from every
-    /// focused beam -- the Gaussian beams' intensities zero, the plane waves' as everywhere --,
+    /// focused beam -- the Gaussian beams' amplitudes zero, the plane waves' as at the focus --,
     /// relative to the focus; positive for a state the trap holds.
     pub fn depth(&self,cluster:usize,x:usize)->f64{
-        let far=|l:usize|if self.geometry[l].waist.is_some(){0.}else{self.geometry[l].intensity([0.;3])};
-        self.level(cluster,x,&far)-self.level(cluster,x,&|l|self.geometry[l].intensity([0.;3]))
+        let far=|l:usize|if self.geometry[l].waist.is_some(){Complex::ZERO}else{self.geometry[l].field([0.;3]).0};
+        let units=|u:usize|{let unit=&self.ground.units[u];unit.beams.iter().zip(&unit.weights).fold(Complex::ZERO,|s,(&l,&w)|s+far(l)*w).norm_sqr()/unit.norm};
+        self.level(cluster,x,&units,&|l|far(l).norm_sqr())-self.level(cluster,x,&|u|self.ground.units[u].focus,&|l|self.geometry[l].intensity([0.;3]))
     }
-    /// The diagonal of h0 and of every beam's own light shift for a cluster state, the beams at the
-    /// intensities `intensity(l)` (`potential`): the groups' S at the state's diagonal entry (none
-    /// where it is not one of a group's).
-    fn level(&self,cluster:usize,x:usize,intensity:&dyn Fn(usize)->f64)->f64{
+    /// The diagonal of h0 and of every near beam's own light shift for a cluster state, the units at
+    /// the intensities `units(u)` and the near beams at `beams(l)` (`potential`): the groups' S at the
+    /// state's diagonal entry (none where it is not one of a group's).
+    fn level(&self,cluster:usize,x:usize,units:&dyn Fn(usize)->f64,beams:&dyn Fn(usize)->f64)->f64{
         let layout=&self.layouts[cluster];let n=layout.n;
-        let s:Vec<f64>=self.focused.iter().map(|&l|intensity(l).min(1.)).collect();let stencil=self.stencil(&s);
+        let s:Vec<f64>=self.focused.iter().map(|&u|units(u).min(1.)).collect();let stencil=self.stencil(&s);
         let mut buf=vec![Complex::ZERO;n*n];self.interpolate(cluster,&stencil,None,layout.h0,&mut buf);let mut u=buf[x*n+x].re;
         for gl in layout.groups.iter().filter(|g|g.hermitian){
             let Ok(diagonal)=gl.entries.binary_search(&(x,x)) else{continue};
             let carrier=&self.carriers[gl.absorbed];let mut value=[Complex::ZERO];
             for(j,&l)in carrier.beams.iter().enumerate(){
-                let at=intensity(l);let coefficient=&carrier.coefficients[j];
+                let at=beams(l);let coefficient=&carrier.coefficients[j];
                 for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
                     self.interpolate(cluster,&stencil,None,gl.s+pi*gl.entries.len()+diagonal,&mut value);
                     u-=at*(coefficient[k1].conj()*coefficient[k]*value[0]).re*if k1<k{2.}else{1.};
@@ -1592,9 +1620,9 @@ impl Exact{
     }
 }
 impl Model{
-    /// H at a point: the focused beams at their intensities there, the others at their peak.
+    /// H at a point: the focused units at their intensities there, the others at the focus.
     pub fn hamiltonian_at_point(&self,r:[f64;3])->Dense{
-        let s:Vec<f64>=self.focused.iter().map(|&l|self.geometry[l].intensity(r).min(1.)).collect();self.hamiltonian_at(&s)
+        let s:Vec<f64>=self.focused.iter().map(|&u|self.unit_intensity(u,r).min(1.)).collect();self.hamiltonian_at(&s)
     }
 }
 

@@ -101,6 +101,9 @@ impl Program{
         if let Some(c)=g.clusters.iter().find(|c|!c.excited.is_empty()){return Err(beyond(format!("{} 个激发态显式、精确传播",c.excited.len())));}
         if let Some(k)=(0..model.clusters()).find(|&k|model.beating(k)){return Err(beyond(format!("子空间 {} 的 {} 个残余拍频按多速率精确步传播",k,model.beats(k).0.len()/2)));}
         if model.fourth{return Err(beyond("四阶折叠".into()));}
+        // The kernel's intensity axes and its trap's far level are a beam's each (ground.rs `Unit`).
+        if let Some(u)=g.units.iter().find(|u|u.beams.len()>1){return Err(beyond(format!("同频同偏振的 {} 束光相互干涉（驻波）",u.beams.len())));}
+        if model.trap_beams.len()>1{return Err(beyond("光镊的反射光".into()));}
         if model.geometry.len()>MOST_BEAMS||model.carriers.len()>MOST_CARRIERS||model.focused.len()>MOST_FOCUSED{return Err(beyond("光束或强度维度太多".into()));}
         if let Some(c)=g.clusters.iter().find(|c|c.states.len()>MAXN||c.classes.len()>MOST_CLASSES){return Err(beyond(format!("子空间 {} 个态、{} 类光子",c.states.len(),c.classes.len())));}
         let hm=model.hbar_over_mass;

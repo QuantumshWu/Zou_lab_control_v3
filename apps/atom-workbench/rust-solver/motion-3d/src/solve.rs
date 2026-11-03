@@ -291,8 +291,13 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
     let sizes:Vec<String>=g.clusters.iter().map(|c|c.dimension().to_string()).collect();
     ledger.add("基态之间的耦合（塞曼子能级、拉曼项、两组光的拍频）",near,format!("{fold} 对二阶折叠，{kept} 对显式保留；子空间 {}",sizes.join("+")));
     if model.quartic>0.{ledger.add("经多束光的四阶能移",model.quartic,"略去（一阶折叠）".into());}
-    for &(l,error,_)in &model.profiles{ledger.add(&format!("「{}」的光强分布",request.beams[l].name),error,"按峰值强度的平面波".into());}
-    for &l in &model.focused[1..]{ledger.add(&format!("「{}」的光强分布",request.beams[l].name),0.,"按位置插值（强度维度）".into());}
+    let names=|beams:&[usize]|beams.iter().map(|&l|request.beams[l].name.as_str()).collect::<Vec<_>>().join(" + ");
+    for &(u,error,_)in &model.profiles{ledger.add(&format!("「{}」的光强分布",names(&g.units[u].beams)),error,"取焦点处的光强".into());}
+    for &u in &model.focused[1..]{ledger.add(&format!("「{}」的光强分布",names(&g.units[u].beams)),0.,"按位置插值（强度维度）".into());}
+    // The interference of beams of one frequency whose polarizations differ (ground.rs `Unit`): their
+    // shifts at their own intensities, the interference's bound against the poles, as a profile's.
+    let weight=(1./g.pole.max(f64::MIN_POSITIVE)).max(1./g.generator_scale.max(f64::MIN_POSITIVE));
+    for(beams,bound)in &g.incoherent{ledger.add(&format!("「{}」的干涉",names(beams)),bound*weight,"同频而偏振不同：光移按各光束的光强相加，干涉项（偏振光晶格）略去".into());}
     ledger.add("聚焦光的光强插值表",model.table_error,"三次插值".into());
     ledger
 }
