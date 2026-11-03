@@ -51,22 +51,28 @@ pub const BOLTZMANN:f64=1.380649e-23;
 /// precision.
 pub const RADIAL_TOLERANCE:f64=1e-8;
 
-/// A square grid of the plane: nx × ny points spaced dx (um), x_i = (i − nx/2) dx, so the focus is
-/// the point (nx/2, ny/2). One row (ny = 1) is the line y = 0.
+/// A grid of the plane: nx × ny points spaced dx along x and dy along y (um), x_i = (i − nx/2) dx,
+/// y_j = (j − ny/2) dy, so the focus is the point (nx/2, ny/2). One row (ny = 1) is the line y = 0.
 #[derive(Clone,Copy,Debug,PartialEq)]
-pub struct Grid{pub nx:usize,pub ny:usize,pub dx:f64}
+pub struct Grid{pub nx:usize,pub ny:usize,pub dx:f64,pub dy:f64}
 impl Grid{
     pub fn points(&self)->usize{self.nx*self.ny}
     pub fn x(&self,i:usize)->f64{(i as f64-(self.nx/2) as f64)*self.dx}
-    pub fn y(&self,j:usize)->f64{if self.ny==1{0.}else{(j as f64-(self.ny/2) as f64)*self.dx}}
+    pub fn y(&self,j:usize)->f64{if self.ny==1{0.}else{(j as f64-(self.ny/2) as f64)*self.dy}}
     /// The point of index p (row-major: p = j nx + i).
     pub fn position(&self,p:usize)->[f64;3]{[self.x(p%self.nx),self.y(p/self.nx),0.]}
-    /// The wave number (rad/um) of frequency m of n points, m in FFT order.
-    pub fn wave_number(&self,m:usize,n:usize)->f64{let s=if m<n/2{m as f64}else{m as f64-n as f64};std::f64::consts::TAU*s/(n as f64*self.dx)}
-    /// Half the box (um).
-    pub fn half_width(&self)->f64{self.nx as f64*self.dx/2.}
+    /// The points and the spacing along axis a (0: x, 1: y).
+    pub fn axis(&self,a:usize)->(usize,f64){if a==0{(self.nx,self.dx)}else{(self.ny,self.dy)}}
+    /// The wave number (rad/um) of frequency m along axis a, m in FFT order (0 across one row).
+    pub fn wave_number(&self,m:usize,a:usize)->f64{
+        let(n,d)=self.axis(a);if n==1{return 0.;}let s=if m<n/2{m as f64}else{m as f64-n as f64};std::f64::consts::TAU*s/(n as f64*d)
+    }
+    /// Half the box along axis a (um; 0 across one row).
+    pub fn half_width(&self,a:usize)->f64{let(n,d)=self.axis(a);if n==1{0.}else{n as f64*d/2.}}
+    /// The largest wave number along axis a (rad/um; 0 across one row).
+    pub fn largest_wave_number(&self,a:usize)->f64{let(n,d)=self.axis(a);if n==1{0.}else{std::f64::consts::PI/d}}
     /// The farthest any point (and its difference stencil) lies from the focus (um).
-    pub fn reach(&self)->f64{let x=self.half_width();let y=if self.ny==1{0.}else{x};(x*x+y*y).sqrt()}
+    pub fn reach(&self)->f64{self.half_width(0).hypot(self.half_width(1))}
 }
 
 /// The 2D model of a request: its front end and the plane's constants.

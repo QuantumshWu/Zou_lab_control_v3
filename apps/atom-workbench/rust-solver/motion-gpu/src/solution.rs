@@ -38,9 +38,9 @@ pub struct Solution{
     /// Velocity marginals along each axis, and the position distribution in the plane.
     pub velocity:[Distributions;2],
     pub position:Map,
-    /// The grids (points per axis) and, per output time, how many trajectories of the last batch
-    /// each held.
-    pub grids:Vec<usize>,
+    /// The grids (points along x and y) and, per output time, how many trajectories of the last
+    /// batch each held.
+    pub grids:Vec<(usize,usize)>,
     pub census:Vec<Vec<usize>>,
     /// Wall seconds: launching the steps, waiting for the observations, moving trajectories between
     /// grids, building the grids' tables.

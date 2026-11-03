@@ -32,7 +32,7 @@ fn main(){
     // The grid balanced for the trap: half the box and the largest momentum the same number of
     // thermal widths, (L/2)/x_T = κ_max/κ_T, so dx² = 2π ħ/(N m ω).
     let dx=if free{0.0075378}else{(std::f64::consts::TAU*model.hbar_over_mass/(n as f64*omega)).sqrt()};
-    let grid=Grid{nx:n,ny:n,dx};
+    let grid=Grid{nx:n,ny:n,dx,dy:dx};
     // DIAGNOSTIC: a magic tweezer -- its fold and outside shift kept on the ground states only.
     if std::env::var("ATOM_GPU_MAGIC").is_ok(){
         let excited=model.ground.excited_states.clone();
@@ -60,13 +60,13 @@ fn main(){
         }
     }
     let g=&model.ground;
-    let doppler_every=(1./dt).round() as usize;
-    let settings=Settings{grid,dt,doppler_every,trajectories:b,seed,cap:None,scene:0};
+    let period=std::f64::consts::TAU/omega;
+    let settings=Settings{grid,dt,period,trajectories:b,seed,cap:None,scene:0};
     let start=std::time::Instant::now();
     let mut engine=Engine::new(std::rc::Rc::new(Gpu::new().unwrap()),&model,settings).unwrap();
     let thermal=|t_uk:f64|((t_uk*1e-6*atom_motion_gpu::model::BOLTZMANN/(atom_motion_gpu::model::HBAR*omega*1e6))*model.hbar_over_mass/omega).sqrt();
-    println!("{n} x {n}, dx {:.2} nm, box ±{:.0} nm ({:.1} x_T at 30 uK), k_max {:.1} hbar k, dt {dt}, o1 every {doppler_every}, {b} trajectories, swap {swap}; tables {:.2} s",
-        dx*1e3,grid.half_width()*1e3,grid.half_width()/thermal(30.),std::f64::consts::PI/dx/8.0528,start.elapsed().as_secs_f64());
+    println!("{n} x {n}, dx {:.2} nm, box ±{:.0} nm ({:.1} x_T at 30 uK), k_max {:.1} hbar k, dt {dt}, o1 kick every {period:.2} us, {b} trajectories, swap {swap}; tables {:.2} s",
+        dx*1e3,grid.half_width(0)*1e3,grid.half_width(0)/thermal(30.),std::f64::consts::PI/dx/8.0528,start.elapsed().as_secs_f64());
     let c22=model.block_states[1].iter().position(|&s|s==b22).unwrap();
     let mut amplitudes=vec![Complex::ZERO;5];amplitudes[c22]=Complex::ONE;
     engine.initialize(&vec![Internal{block:1,amplitudes};b],30.,&model).unwrap();
@@ -88,7 +88,7 @@ fn main(){
     engine.observe_initial(false).unwrap();report(&engine,0.);
     if std::env::var("PROFILE").is_ok(){engine.set_profiling(true).unwrap();}
     let run=std::time::Instant::now();
-    for o in 1..=outputs{for s in 0..interval{engine.step(s+1==interval,false).unwrap();}report(&engine,o as f64*interval_us);}
+    for o in 1..=outputs{for s in 0..interval{engine.step(((o-1)*interval+s) as u64,s+1==interval,false).unwrap();}report(&engine,o as f64*interval_us);}
     for(phase,ms)in engine.profile(){println!("  {phase}: {:.3} ms per step",ms/(outputs*interval) as f64);}
     println!("{} steps: {:.1} s ({:.3} us per trajectory-step)",outputs*interval,run.elapsed().as_secs_f64(),run.elapsed().as_secs_f64()*1e6/(outputs*interval*b) as f64);
 }

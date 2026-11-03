@@ -1271,6 +1271,11 @@ function distributionToolbar(listed:Pick<Distributions,'samples'>|undefined,time
   if(distributionTime.max!==String(earlier-1))distributionTime.max=String(earlier-1);if(distributionTime.value!==String(motionCompare??0))distributionTime.value=String(motionCompare??0);
   distributionTimeValue.textContent=motionCompare===undefined?'':durationText(timesUs[listed!.samples[motionCompare]!]!,dynamics().durationUnit);
 }
+/** The legend entry of a trajectory method's temperature band: ±1 standard error, and over how
+ * many trajectories. */
+function errorBandLegend(trajectories:number|undefined):string{
+  return `<span class="population-legend"><svg width="18" height="10" aria-hidden="true"><rect width="18" height="10" rx="2" fill="#6a6866" fill-opacity="0.24"/></svg>${esc(`阴影：T 的 ±1 标准误差${trajectories?`（${trajectories} 条轨迹）`:''}`)}</span>`;
+}
 /** A legend entry: a line in its colour (dashed when asked) and its words. */
 function legendEntry(colour:string,words:string,dashed=false):string{
   return `<span class="population-legend"><svg width="18" height="5" aria-hidden="true"><line x1="0" y1="2.5" x2="18" y2="2.5" stroke="${colour}" stroke-width="2"${dashed?' stroke-dasharray="4 3"':''}/></svg>${esc(words)}</span>`;
@@ -1304,7 +1309,7 @@ function renderDynamics(a:Analysis):void{
     host.innerHTML=series?seriesChart(raw!.timesUs,series,d.durationUnit,marks):waiting;if(series)unbindPopulation=bindSeries(host,raw!.timesUs,series,d.durationUnit,marks);
     const kHz=(f:number)=>`${formatNumber(f,{digits:4})} kHz`,perAxis=!!motion&&motion.axes.length>1;
     caption(!motion?'':(perAxis?(shown==='temperature'
-        ?motion.axes.map(a=>legendEntry(AXIS_INKS[a],`${a} 轴`)).join('')+'<span class="population-legend">上：温度 T = m·Var(v)/k_B；下：平均速度 ⟨v⟩</span>'
+        ?motion.axes.map(a=>legendEntry(AXIS_INKS[a],`${a} 轴`)).join('')+'<span class="population-legend">上：温度 T = m·Var(v)/k_B；下：平均速度 ⟨v⟩</span>'+(motion.temperatureErrorUK?errorBandLegend(motion.trajectories):'')
         :motion.axes.map(a=>legendEntry(AXIS_INKS[a],`${a} 轴`)).join('')+legendEntry('#6a6866','累计损失概率'))
       :shown==='temperature'?legendEntry(MOTION_INKS[0],`温度 T = m·Var(v)/k_B（沿 ${motion.axis} 轴）`)+legendEntry(MOTION_INKS[1],'平均速度 ⟨v⟩')
       :legendEntry(MOTION_INKS[0],`平均振动量子数 n̄（相对焦点处的阱频 ω/2π = ${kHz(motion.trapFrequencyKHz[0]!)}）`)+legendEntry(MOTION_INKS[1],'累计损失概率（原子离开光阱）'))+referenceLegend+continuation);return;
