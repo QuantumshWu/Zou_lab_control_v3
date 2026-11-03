@@ -147,7 +147,7 @@ impl Rotation{
 
 /// A cluster's work per call in complex multiply-adds (`Model::work`), and its table pairs.
 #[derive(Clone,Copy,Debug)]
-pub struct Work{pub generator:f64,pub force:f64,pub photons:f64,pub pairs:usize}
+pub struct Work{pub generator:f64,pub force:f64,pub photons:f64,pub absorption:f64,pub pairs:usize}
 
 /// The interpolation stencil at s: per focused beam the first of its four nodes, their cubic
 /// weights and the weights' derivatives in s_f; the nodes are their tensor product.
@@ -665,8 +665,10 @@ impl Model{
     /// A cluster's work per call in complex multiply-adds, from its tables' layout (the step choice's
     /// cost, solve.rs): the generator (`local`: per pair its S with the slopes and its Q gathered on the
     /// stencil's nodes, added -- twice in a Hermitian group -- and kept for the force; h0 likewise), the
-    /// force (`force`: the products once per group, a form per pair and slope, h0's slopes) and a
-    /// jump's photons (`photons`: per carrier, rank and axis J and J2 on the stencil and their sum).
+    /// force (`force`: the products once per group, a form per pair and slope, h0's slopes), a jump's
+    /// photons (`photons`: per carrier, rank and axis J and J2 on the stencil and their sum) and the
+    /// picked class's absorbed light (`Photons::absorption`: per photon and rank J and J2 along the
+    /// polarization and their slopes on the stencil), its classes' mean.
     pub fn work(&self,cluster:usize)->Work{
         let layout=&self.layouts[cluster];let d=self.focused.len() as f64;let nodes=(1usize<<(2*self.focused.len())) as f64;
         let(n2,ng)=((layout.n*layout.n) as f64,self.ground.ground_states.len() as f64);
@@ -676,7 +678,9 @@ impl Model{
             generator+=pairs*(nodes*(2.+d)+added+1.+d)*e;force+=e+pairs*(1.+d)*e;
         }
         let photons=self.carriers.iter().map(|c|c.rank as f64*3.*ng*layout.n as f64*(2.*nodes+1.)).sum();
-        Work{generator,force,photons,pairs:layout.groups.iter().map(|g|g.pairs.len()).sum()}
+        let classes=&self.ground.clusters[cluster].classes;
+        let absorption=classes.iter().map(|c|c.photons.iter().map(|(ph,_)|self.carriers[ph.carrier].rank as f64*(6.+nodes*(3.+d))).sum::<f64>()).sum::<f64>()/classes.len().max(1) as f64;
+        Work{generator,force,photons,absorption,pairs:layout.groups.iter().map(|g|g.pairs.len()).sum()}
     }
     /// The number of clusters.
     pub fn clusters(&self)->usize{self.layouts.len()}

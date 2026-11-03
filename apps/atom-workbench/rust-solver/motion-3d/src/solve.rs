@@ -440,20 +440,25 @@ fn accumulated_excess(engine:&Engine,states:&[Trajectory],horizon:f64,subsample:
 const ADVANCE_NS:f64=374.;const MULTIPLY_ADD_NS:f64=0.247;const PAIR_NS:f64=29.9;
 /// A half step's propagation: per term of its series and per multiply-add (n² a term).
 const TERM_NS:f64=4.4;const TERM_MULTIPLY_ADD_NS:f64=0.469;
-/// A jump's photons: per call and per multiply-add.
-const PHOTONS_NS:f64=480.;const PHOTON_MULTIPLY_ADD_NS:f64=0.565;
+/// A whole jump (`Engine::jump`): per call (its point, the class's and the polarization's draws, the
+/// dipole pattern, the kicks), per multiply-add of every class's photons and per multiply-add of the
+/// picked class's absorbed light (`Model::work`). Timed against the advance in the same interleaved
+/// rounds on the loaded machine (each the least of 30 rounds × 3 passes), taken at the advance's cost
+/// above: within 10 % but DEFAULT's (+21 %); a jump costs 1.5–2.1 times its photons alone.
+const JUMP_NS:f64=970.;const PHOTON_MULTIPLY_ADD_NS:f64=0.594;const ABSORPTION_MULTIPLY_ADD_NS:f64=1.48;
 /// The held twin's step besides its two products (control.rs): 30–190 ns over DEFAULT, THREE, PGC3D
 /// and GMD1C on the same core.
 const HELD_NS:f64=100.;
 
 /// A sampled state's parts of the work model (`interval_work`): its cluster's advance without the
-/// propagation and its jump's photons (ns), its generator's norm and its dimension.
-struct StateWork{advance:f64,photons:f64,norm:f64,n:usize}
+/// propagation and its jump (ns), its generator's norm and its dimension.
+struct StateWork{advance:f64,jump:f64,norm:f64,n:usize}
 fn state_work(model:&Model,states:&[Trajectory])->Vec<StateWork>{
     states.par_iter().map(|t|{
         let w=model.work(t.cluster);let n=model.dimension(t.cluster);
         let norm=column_norm(&model.local(t.cluster,&model.point(t.r,t.kappa),t.time).hamiltonian,n);
-        StateWork{advance:ADVANCE_NS+MULTIPLY_ADD_NS*(w.generator+w.force)+PAIR_NS*w.pairs as f64,photons:PHOTONS_NS+PHOTON_MULTIPLY_ADD_NS*w.photons,norm,n}
+        StateWork{advance:ADVANCE_NS+MULTIPLY_ADD_NS*(w.generator+w.force)+PAIR_NS*w.pairs as f64,
+            jump:JUMP_NS+PHOTON_MULTIPLY_ADD_NS*w.photons+ABSORPTION_MULTIPLY_ADD_NS*w.absorption,norm,n}
     }).collect()
 }
 /// A half step's propagation at a state (ns): its series' sub-steps × terms at its generator's norm,
@@ -462,11 +467,12 @@ fn half_step(x:&StateWork,s:&Settings)->f64{let(sub,terms)=series(x.norm,0.5*s.d
 /// A step's work per interval (ns, `ADVANCE_NS` and the rest), counted on the sampled states -- the
 /// same whatever the machine and its load: its steps' advances, each the generator's and the force's
 /// multiply-adds and pairs of the state's cluster and two half steps' series; and per jump, one every
-/// waiting time, its photons and two more advances, the step redone to the jump and its rest. A
-/// readout per output is the same at every step and left out.
+/// waiting time, the jump itself -- every class's photons, the picked class's absorbed light and the
+/// rest -- and two more advances, the step redone to the jump and its rest. A readout per output is
+/// the same at every step and left out.
 fn interval_work(states:&[StateWork],s:&Settings,interval:f64,waiting:f64)->f64{
     let(mut advance,mut jump)=(0.,0.);
-    for x in states{let a=x.advance+2.*half_step(x,s);advance+=a;jump+=x.photons+2.*a;}
+    for x in states{let a=x.advance+2.*half_step(x,s);advance+=a;jump+=x.jump+2.*a;}
     let count=states.len().max(1) as f64;
     (interval/s.dt*advance+interval/waiting*jump)/count
 }
