@@ -506,3 +506,53 @@ fn a_reflection_a_little_off_the_tweezer_s_polarization_is_its_standing_wave_wit
         assert!(d.largest()<=1e-5*light.largest(),"r {r:?}: {:.2e} of {:.2e}",d.largest(),light.largest());
     }
 }
+
+/// A fixture's motion request, its matrices sparse ([row, column, re, im]), its initial state diagonal
+/// (tests/fixtures/*_probe_motion.json: validate/probe_scan payloads with the population core's rows
+/// recorded at the focus).
+fn sparse_request(v:&Value)->Request{
+    let beams=v["beams"].as_array().unwrap().iter().map(|b|{let d=floats(&b["direction"]);Beam{id:b["id"].as_str().unwrap().into(),name:b["name"].as_str().unwrap().into(),
+        direction:[d[0],d[1],d[2]],wave_number_per_um:b["waveNumberPerUm"].as_f64().unwrap(),waist_um:b["waistUm"].as_f64(),intensity_mw_cm2:b["intensityMWcm2"].as_f64().unwrap(),
+        frequency_index:b["frequencyIndex"].as_array().unwrap().iter().map(|n|n.as_i64().unwrap() as i32).collect(),coupling:matrix(&b["coupling"]),
+        counter_coupling:matrix(&b["counterCoupling"]),outside_shift:matrix(&b["outsideShift"])}}).collect::<Vec<Beam>>();
+    let trap_beam=beams.iter().position(|b|b.id==v["trapBeamId"].as_str().unwrap()).unwrap();
+    let initial=floats(&v["initial"]);let mut density=vec![Complex::ZERO;STATES*STATES];for i in 0..STATES{density[i*STATES+i]=Complex::new(initial[i],0.);}
+    let(e,f)=(v["emission"].as_array().unwrap(),floats(&v["fieldVectorG"]));
+    Request{states:v["states"].as_array().unwrap().iter().map(|s|s.as_str().unwrap().into()).collect(),hamiltonian:matrix(&v["hamiltonian"]),
+        frame_frequencies_mhz:floats(&v["frameFrequenciesMHz"]),frequencies_mhz:floats(&v["frequenciesMHz"]),beams,emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],
+        field_vector_g:[f[0],f[1],f[2]],mass_kg:v["massKg"].as_f64().unwrap(),initial_density:density,temperature_uk:v["temperatureUK"].as_f64().unwrap(),trap_beam,times_us:vec![]}
+}
+/// The frozen atom's F = 1 population each microsecond, its eliminated master equation's at the focus:
+/// the held twin's exact means there (control.rs), every drive folded.
+fn frozen_f1(r:&Request)->Vec<f64>{
+    let model=Model::new(r).unwrap();let twin=Twin::new(&model,1.).expect("a static generator");assert_eq!(twin.held.point.r,[0.;3]);
+    twin.means(&model,&r.initial_density,1.,11).iter().map(|row|(0..STATES).filter(|&i|r.states[i].starts_with("ground-1-")).map(|i|row[i]).sum()).collect()
+}
+
+/// A strong beam 3 GHz off a probe's line dresses the probe (F10; ground.rs, # The near light's
+/// dressing): with the folded pairs' far channels in the responses' denominators the eliminated
+/// generator is a Lindblad generator -- no gain, i(H − H†) − Σ L†L ⪰ 0 to round-off at the focus and off
+/// it to the tables' interpolation, where the release added their first order outside the jumps (3.2
+/// rad/us of gain) -- and the
+/// frozen atom's F = 1 population, the strong beam's Raman scattering, is the population core's at
+/// every microsecond to 0.005 (0.2008 at 10 us; the release's 0.000).
+#[test]
+fn a_strong_beam_s_dressing_keeps_the_generator_lindblad_and_the_core_s_raman_rate(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/far_beam_probe_motion.json")).unwrap();let r=sparse_request(&v);
+    let model=Model::new(&r).unwrap();
+    // At the focus, a node of the tables, to round-off; between nodes to their interpolation's error.
+    for(x,tolerance)in [([0.;3],1e-12),([0.05,0.1,0.],model.table_error),([0.,0.,0.3],model.table_error)]{let p=model.point(x,[0.;3]);for k in 0..model.clusters(){
+        let(low,_,scale)=model.decay_balance(k,&p,0.37);assert!(low>=-tolerance*scale,"cluster {k} at {x:?}: {low:e} of {scale:e}");
+    }}
+    for(i,(a,b))in frozen_f1(&r).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
+}
+
+/// An 808 nm tweezer, a near carrier, moves a D1 probe's line by its light shift (F1; ground.rs, # The
+/// near light's dressing): the probe 32 MHz above the bare line is on the shifted one, and the frozen
+/// atom's F = 1 population is the population core's at every microsecond to 0.005 (0.549 at 10 us;
+/// the release's line sat at +8 MHz, 0.98 here).
+#[test]
+fn a_near_tweezer_s_shift_moves_a_probe_s_line_to_the_core_s(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/near_tweezer_probe_motion.json")).unwrap();let r=sparse_request(&v);
+    for(i,(a,b))in frozen_f1(&r).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
+}

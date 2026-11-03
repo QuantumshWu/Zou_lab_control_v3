@@ -292,7 +292,7 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
     let(kept,fold)=g.items.iter().filter(|i|matches!(i.kind,Kind::Static{..}|Kind::Raman{..})).fold((0,0),|(k,f),i|if i.folded{(k,f+1)}else{(k+1,f)});
     let sizes:Vec<String>=g.clusters.iter().map(|c|c.dimension().to_string()).collect();
     ledger.add("基态之间的耦合（塞曼子能级、拉曼项、两组光的拍频）",near,format!("{fold} 对二阶折叠，{kept} 对显式保留；子空间 {}",sizes.join("+")));
-    if model.dressing>0.{ledger.add("近共振光的相互缀饰（彼此的光移）",2.*model.dressing,"各近共振光的光移全阶计入彼此的分母；同频多束光的干涉与缀饰的下一阶略去".into());}
+    if model.dressing>0.{ledger.add("近共振光的相互缀饰（彼此的光移）",model.dressing,"各近共振光的光移全阶计入彼此的分母；同频多束光的干涉与缀饰的下一阶略去".into());}
     if model.fourth_dropped>0.{ledger.add("四阶折叠的快拍频项",model.fourth_dropped,"略去（与二阶相同的截断频率）".into());}
     let names=|beams:&[usize]|beams.iter().map(|&l|request.beams[l].name.as_str()).collect::<Vec<_>>().join(" + ");
     for &(u,error,_)in &model.profiles{ledger.add(&format!("「{}」的光强分布",names(&g.units[u].beams)),error,"取焦点处的光强".into());}
@@ -572,6 +572,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         },
     };
     let used=if gpu.is_some(){Device::Gpu}else{Device::Cpu};
+    // On the GPU the exact response leaves the near light's dressing out (gpu/program.rs): its bound.
+    if gpu.is_some()&&model.undressed>0.{base.add("GPU 精确响应中的近共振光彼此光移",model.undressed,"多普勒一阶之外的精确响应未含彼此的光移（GPU）；其界".into());}
     // The control variates (control.rs): the harmonic twin's, and the held twin where the trap beam's
     // intensity is the pilot's mean, when the generator is static.
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
