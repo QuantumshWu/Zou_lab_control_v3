@@ -115,7 +115,7 @@ try{
   const motionSettings={...dynamics,durationUs:50,samples:6,meanOnly:false,includeMean:false,motion,device:moves.device};
   const moving=await request('motion',motionSettings,tweezer);
   const movingParsed=normalizeDynamicsResult(moving,tweezer,motionSettings.initialStateId,motionSettings.meanHorizonUs,motion);
-  assert.equal(movingParsed.timesUs.length,6);assert.ok(movingParsed.motion&&movingParsed.motion.temperatureUK.every(Number.isFinite),'The motion core answers with temperatures');
+  assert.equal(movingParsed.timesUs.length,6);assert.ok(movingParsed.motion&&movingParsed.motion.temperatureUK.every(axis=>axis.length===6&&axis.every(Number.isFinite)),'The motion core answers with temperatures');
   assert.equal(report.workerRequests.length,3);assert.deepEqual(report.workerRequests.map(r=>r.lane),['trajectory','mean','trajectory']);
   assert.equal(report.workerRequests[0].modelSha256,report.workerRequests[1].modelSha256,'Both fresh results must use the identical current Model');
   // Both means are p(T) of the same equation, each within its own bound.
