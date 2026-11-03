@@ -342,8 +342,9 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // whose charge leaves the statistics room is the reference, and a later one replaces it where its
     // work times the trajectories its room needs costs less in prediction.
     let mut ladder=Ground::allowances(request)?.into_iter();let mut failed=None;
+    // The fourth order is a candidate on the CPU (the GPU's kernel folds at second order).
     let fourth=device==Device::Cpu;
-    let Some(mut pilot_candidate)=next_candidate(request,&mut ladder,fourth,&mut failed)else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
+    let Some(mut pilot_candidate)=next_candidate(request,&mut ladder,false,&mut failed)else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
     // The reference state: the largest initial population; its trap sets ω per axis.
     let trap=pilot_candidate.trap();
     if trap.frequencies.iter().any(|&w|!(w>0.)){return Err(Stop::Error(NOT_CONFINED.into()));}
@@ -358,7 +359,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let charge=measured_charge(&pilot_candidate.model,&pilot_candidate.model,&pilot_states);pilot_candidate.charged(charge);
     let mut reference:Option<Candidate>=None;
     if !pilot_candidate.fits(){
-        while let Some(mut c)=next_candidate(request,&mut ladder,fourth,&mut failed){
+        while let Some(mut c)=next_candidate(request,&mut ladder,false,&mut failed){
             let charge=measured_charge(&pilot_candidate.model,&c.model,&pilot_states);c.charged(charge);let fits=c.fits();reference=Some(c);if fits{break;}
         }
     }
@@ -369,12 +370,25 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             // The fewest trajectories any later candidate can need relative to the reference: its rooms
             // at no a-priori estimate at all.
             let fewest=(0..2).map(|k|(rooms[k]/(TARGETS[k]-A_PRIORI_SHARE*TARGETS[k])).powi(2)).fold(0.,f64::max);
+            // The reference's own folds at fourth order: their charge the square of the same saturation,
+            // their work timed as any candidate's.
+            if fourth&&base.model.ground.clusters.iter().any(|c|c.excited.is_empty()){
+                if let Ok(mut c)=Candidate::new(request,base.allowance,true){
+                    c.charged(base.saturation);
+                    if c.fits(){
+                        let trajectories=(0..2).map(|k|(rooms[k]/c.rooms[k]).powi(2)).fold(0.,f64::max);
+                        let w=model_work(&pilot_candidate.model,&base.model,&c.model,&plain(steps,f64::EPSILON),&pilot_states,pilot as usize,interval);
+                        if w*trajectories<best{best=w*trajectories;better=Some(c);}
+                    }
+                }
+            }
+            // Every later candidate's work is at least the last one timed (it keeps more states explicit):
+            // each feasible one is timed while even the fewest trajectories could pay for it.
             while work*fewest<best{
-                let Some(mut c)=next_candidate(request,&mut ladder,fourth,&mut failed)else{break};
+                let Some(mut c)=next_candidate(request,&mut ladder,false,&mut failed)else{break};
                 let charge=measured_charge(&pilot_candidate.model,&c.model,&pilot_states);c.charged(charge);
                 if !c.fits(){continue;}
                 let trajectories=(0..2).map(|k|(rooms[k]/c.rooms[k]).powi(2)).fold(0.,f64::max);
-                if work*trajectories>=best{continue;}
                 work=work.max(model_work(&pilot_candidate.model,&base.model,&c.model,&plain(steps,f64::EPSILON),&pilot_states,pilot as usize,interval));
                 if work*trajectories<best{best=work*trajectories;better=Some(c);}
             }
@@ -510,15 +524,15 @@ const TARGETS:[f64;2]=[POPULATION_TARGET,TEMPERATURE_TARGET];
 /// initial state, its ledger and the rooms its estimates leave the statistics -- each target less the
 /// ledger's total, the fold's charge as measured (`Candidate::charged`), and the step's bias at most
 /// (its share).
-struct Candidate{model:Model,initial:Initial,base:Ledger,charge:f64,rooms:[f64;2]}
+struct Candidate{model:Model,initial:Initial,base:Ledger,allowance:f64,saturation:f64,charge:f64,rooms:[f64;2]}
 impl Candidate{
     fn new(request:&Request,allowance:f64,fourth:bool)->Result<Candidate,String>{
         let model=Model::with_order(request,allowance,fourth)?;let initial=Initial::new(&model,request)?;let base=model_ledger(&model,request);
-        let rooms=TARGETS.map(|target|target-base.used()-A_PRIORI_SHARE*target);let charge=fold_charge(&model,model.ground.charge);
-        Ok(Candidate{model,initial,base,charge,rooms})
+        let rooms=TARGETS.map(|target|target-base.used()-A_PRIORI_SHARE*target);let(saturation,charge)=(model.ground.charge,fold_charge(&model,model.ground.charge));
+        Ok(Candidate{model,initial,base,allowance,saturation,charge,rooms})
     }
     /// Its rooms with the fold's charge for the saturation `saturation` met in place of the a-priori estimate.
-    fn charged(&mut self,saturation:f64){let charge=fold_charge(&self.model,saturation);self.charge=charge;self.rooms=TARGETS.map(|target|target-self.others()-charge-A_PRIORI_SHARE*target);}
+    fn charged(&mut self,saturation:f64){let charge=fold_charge(&self.model,saturation);self.saturation=saturation;self.charge=charge;self.rooms=TARGETS.map(|target|target-self.others()-charge-A_PRIORI_SHARE*target);}
     /// Its ledger's estimates but the fold's.
     fn others(&self)->f64{self.base.used()-fold_charge(&self.model,self.model.ground.charge)}
     /// Its estimates leave the statistics room.

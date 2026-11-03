@@ -518,7 +518,7 @@ impl Model{
                 u:std::array::from_fn(|k|if k<self.carriers[c].rank{basis[c][k][(cl.excited[row-n0],cl.states[col])]}else{Complex::ZERO})}).collect();
             // The fourth order: a cluster of ground states, on the carriers whose folded drives reach it.
             let fourth=(self.fourth&&cl.excited.is_empty()).then(||{
-                let on:Vec<usize>=(0..self.carriers.len()).filter(|&c|cl.states.iter().any(|&b|g.couples(c,b))).collect();
+                let on:Vec<usize>=(0..self.carriers.len()).filter(|&c|self.fourth_saturation(c,cl)>BUDGET*BUDGET).collect();
                 let r=|c:usize|self.carriers[c].rank;let square=n*n;
                 let mut f=FourthLayout{carriers:on.clone(),quartic:vec![],quadratic:vec![],rr:vec![],yw:vec![],jumps:vec![],p:vec![],rr_all:vec![],photons:vec![]};
                 for &c in &on{for &d in &on{f.quartic.push((c,d,size));size+=r(c)*r(c)*r(d)*r(d)*square;}}
@@ -662,6 +662,13 @@ impl Model{
         Ok((out,quartic,resonance))
     }
 
+    /// A carrier's saturation on a cluster's ground states over the light's pattern: the largest of
+    /// their folded drives' totals (ground.rs `ExcitedItem::mean`). The fourth order takes the carriers
+    /// beyond the budget's square; a carrier within it adds at most that relatively to the others'
+    /// rates, its bound in the ledger's quartic item (`Model::quartic`).
+    fn fourth_saturation(&self,c:usize,cl:&ground::Cluster)->f64{
+        cl.states.iter().map(|&b|self.ground.excited_items.iter().filter(|x|x.folded).filter_map(|x|match x.kind{ground::ExcitedKind::Drive(d)if d.carrier==c&&d.ground==b=>Some(x.mean),_=>None}).sum::<f64>()).fold(0.,f64::max)
+    }
     /// A cluster of ground states' fourth-order tables at a node (`FourthLayout`), from the elimination
     /// e there, the carriers' folded bases u and responses t (ne × ng per field index): with
     /// G_b(ω_c) = (K − E_b − δ_c)⁻¹ and A^{ce}_{k1k2}(b)[a,b′] = U^c_k1[:,a]† G_b(ω_c) T^e_k2[:,b′],
@@ -679,13 +686,21 @@ impl Model{
             let lus:Vec<Lu>=st.iter().map(|&b|ground::denominator(&e.excited_hamiltonian,-e.energies[b]-g.carriers[c].detuning)).collect::<Result<_,_>>()?;
             gt.push(f.carriers.iter().map(|&e2|lus.iter().map(|lu|(0..r(e2)).map(|k|(0..ng).map(|bp|{let mut v:Vec<Complex>=(0..ne).map(|i|t[e2][k][(i,bp)]).collect();lu.solve(&mut v);v}).collect()).collect()).collect()).collect());
         }
-        let dot=|m:&Dense,col:usize,v:&[Complex]|->Complex{(0..ne).fold(Complex::ZERO,|s,i|s+m[(i,col)].conj()*v[i])};
         let cross=|a:&Dense,ca:usize,b:&Dense,cb:usize|->Complex{(0..ne).fold(Complex::ZERO,|s,i|s+a[(i,ca)].conj()*b[(i,cb)])};
-        let pos=|c:usize|f.carriers.iter().position(|&x|x==c).unwrap();
-        // A^{ce}_{k1k2}(x)[a][b′] for a, x on the cluster.
-        let a_of=|c:usize,e2:usize,k1:usize,k2:usize,x:usize,a:usize,bp:usize|->Complex{dot(&u[c][k1],st[a],&gt[pos(c)][pos(e2)][x][k2][bp])};
-        let p_of=|d:usize,e2:usize,k3:usize,k4:usize,row:usize,col:usize|->Complex{cross(&u[d][k3],row,&t[e2][k4],col)};
-        let rr_of=|c:usize,k1:usize,k2:usize,row:usize,col:usize|->Complex{cross(&t[c][k1],row,&t[c][k2],col)};
+        let pos=|c:usize|f.carriers.iter().position(|&x|x==c).unwrap();let nf=f.carriers.len();
+        // A^{ce}_{k1k2}(x)[a][b′] = U^c_k1[:,a]† G_x(ω_c) T^e_k2[:,b′] (x, a on the cluster), P^{de}_{k3k4} and
+        // RR^c_{k1k2} on every ground state, computed once.
+        let mut a_t=vec![vec![vec![vec![Complex::ZERO;n*n*ng];r(0).max(MOST_RANK)*MOST_RANK];nf];nf];
+        for(ci,&c)in f.carriers.iter().enumerate(){for(ei,&e2)in f.carriers.iter().enumerate(){for k1 in 0..r(c){for k2 in 0..r(e2){
+            let m=&mut a_t[ci][ei][k1*MOST_RANK+k2];
+            for x in 0..n{for a in 0..n{for bp in 0..ng{let v=&gt[ci][ei][x][k2][bp];m[(x*n+a)*ng+bp]=(0..ne).fold(Complex::ZERO,|s2,i|s2+u[c][k1][(i,st[a])].conj()*v[i]);}}}
+        }}}}
+        let full=|x:&Dense,y:&Dense|->Vec<Complex>{let mut m=vec![Complex::ZERO;ng*ng];for i in 0..ng{for j in 0..ng{m[i*ng+j]=cross(x,i,y,j);}}m};
+        let p_t:Vec<Vec<Vec<Vec<Complex>>>>=f.carriers.iter().map(|&d|f.carriers.iter().map(|&e2|(0..r(d)*MOST_RANK).map(|q|{let(k3,k4)=(q/MOST_RANK,q%MOST_RANK);if k3<r(d)&&k4<r(e2){full(&u[d][k3],&t[e2][k4])}else{vec![]}}).collect()).collect()).collect();
+        let rr_t:Vec<Vec<Vec<Complex>>>=f.carriers.iter().map(|&c|(0..r(c)*MOST_RANK).map(|q|{let(k1,k2)=(q/MOST_RANK,q%MOST_RANK);if k1<r(c)&&k2<r(c){full(&t[c][k1],&t[c][k2])}else{vec![]}}).collect()).collect();
+        let a_of=|c:usize,e2:usize,k1:usize,k2:usize,x:usize,a:usize,bp:usize|->Complex{a_t[pos(c)][pos(e2)][k1*MOST_RANK+k2][(x*n+a)*ng+bp]};
+        let p_of=|d:usize,e2:usize,k3:usize,k4:usize,row:usize,col:usize|->Complex{p_t[pos(d)][pos(e2)][k3*MOST_RANK+k4][row*ng+col]};
+        let rr_of=|c:usize,k1:usize,k2:usize,row:usize,col:usize|->Complex{rr_t[pos(c)][k1*MOST_RANK+k2][row*ng+col]};
         for &(c,d,at)in &f.quartic{
             for k1 in 0..r(c){for k2 in 0..r(c){for k3 in 0..r(d){for k4 in 0..r(d){
                 let base=at+(((k1*r(c)+k2)*r(d)+k3)*r(d)+k4)*n*n;
@@ -973,19 +988,19 @@ impl Model{
     /// A cluster's fourth-order part of H_eff at a point and time (n × n, row-major), None without its
     /// tables: Σ_(c,d) Σ E^c*E^c E^d*E^d X + Σ_c Σ E^c*E^c ½[RR, H_g], each entry (a, b) in the frames' phase
     /// e^{i(θ_a − θ_b)t} (every term's carriers cancel).
-    pub fn fourth_hamiltonian(&self,cluster:usize,p:&Point,t:f64)->Option<Vec<Complex>>{
+    pub fn fourth_hamiltonian(&self,cluster:usize,p:&Point,t:f64)->Option<[Complex;MOST_STATES*MOST_STATES]>{
         let f=self.layouts[cluster].fourth.as_ref()?;let n=self.dimension(cluster);let cl=&self.ground.clusters[cluster];let r=|c:usize|self.carriers[c].rank;
-        let mut h=vec![Complex::ZERO;n*n];let mut buf=vec![Complex::ZERO;n*n];
-        for &(c,d,at)in &f.quartic{
-            let(ec,ed)=(&p.fields[c].e,&p.fields[d].e);
-            for k1 in 0..r(c){for k2 in 0..r(c){let x=ec[k1].conj()*ec[k2];if x==Complex::ZERO{continue;}for k3 in 0..r(d){for k4 in 0..r(d){
-                let m=x*ed[k3].conj()*ed[k4];if m==Complex::ZERO{continue;}
-                self.interpolate(cluster,&p.stencil,None,at+(((k1*r(c)+k2)*r(d)+k3)*r(d)+k4)*n*n,&mut buf);for i in 0..n*n{h[i]+=m*buf[i];}
-            }}}}
-        }
-        for &(c,at)in &f.quadratic{let ec=&p.fields[c].e;
-            for k1 in 0..r(c){for k2 in 0..r(c){let m=ec[k1].conj()*ec[k2];if m==Complex::ZERO{continue;}
-                self.interpolate(cluster,&p.stencil,None,at+(k1*r(c)+k2)*n*n,&mut buf);for i in 0..n*n{h[i]+=m*buf[i];}}}
+        // The monomials' coefficients and their tables' starts, then one pass over the stencil's nodes.
+        let mut terms:Vec<(usize,Complex)>=Vec::with_capacity(96);
+        for &(c,d,at)in &f.quartic{let(ec,ed)=(&p.fields[c].e,&p.fields[d].e);
+            for k1 in 0..r(c){for k2 in 0..r(c){let x=ec[k1].conj()*ec[k2];for k3 in 0..r(d){for k4 in 0..r(d){
+                terms.push((at+(((k1*r(c)+k2)*r(d)+k3)*r(d)+k4)*n*n,x*ed[k3].conj()*ed[k4]));}}}}}
+        for &(c,at)in &f.quadratic{let ec=&p.fields[c].e;for k1 in 0..r(c){for k2 in 0..r(c){terms.push((at+(k1*r(c)+k2)*n*n,ec[k1].conj()*ec[k2]));}}}
+        let size=2*self.layouts[cluster].size;let data=&self.tables.data[cluster];let mut h=[Complex::ZERO;MOST_STATES*MOST_STATES];let nn=n*n;
+        for i in 0..p.stencil.count(){
+            let(node,w,_)=p.stencil.node(i);let row=&data[node*size..(node+1)*size];
+            for &(at,m)in &terms{let c=m*w;let x=&row[2*at..2*(at+nn)];
+                for(o,z)in h[..nn].iter_mut().zip(x.chunks_exact(2)){o.re+=c.re*z[0]-c.im*z[1];o.im+=c.re*z[1]+c.im*z[0];}}
         }
         for a in 0..n{for b in 0..n{if a!=b{h[a*n+b]=h[a*n+b]*Complex::cis((cl.frames[a]-cl.frames[b])*t);}}}
         Some(h)
