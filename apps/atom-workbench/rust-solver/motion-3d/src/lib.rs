@@ -177,25 +177,50 @@ fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count
 /// One trajectory's motion sums about every output time: per output and lab axis the steps counted
 /// and Σκ, Σκ², Σr, Σr² over its window -- the steps within `half` of the output's (at most as many
 /// as the output's own, so a window stays centred), one step without averaging.
-struct Windows{half:[usize;3],steps:usize,reach:usize,sums:Vec<[[f64;5];3]>}
+///
+/// Each step is added once, to the output interval it lies in (interval j holds steps
+/// (j − 1)·steps + 1 ..= j·steps; interval 0 the step at t = 0): to the running total through that
+/// interval, and, when it lies there, to the interval's first `half mod steps` steps or its last
+/// `half mod steps + 1` -- a window's edges fall at those places of every interval. A window is the
+/// whole intervals it covers, the difference of two running totals, and the two partial intervals
+/// at its ends: O(1) per step and per output, O(outputs) memory.
+struct Windows{half:[usize;3],steps:usize,reach:usize,total:Vec<[[f64;5];3]>,head:Vec<[[f64;5];3]>,tail:Vec<[[f64;5];3]>}
 impl Windows{
     fn new(settings:&Settings,steps:usize,outputs:usize)->Windows{
         let half:[usize;3]=std::array::from_fn(|a|{let w=settings.lab[a];if settings.average&&w>0.{(std::f64::consts::PI/w/settings.dt).round() as usize}else{0}});
-        Windows{half,steps,reach:half.into_iter().max().unwrap(),sums:vec![[[0.;5];3];outputs]}
+        Windows::with(half,steps,outputs)
     }
-    fn clear(&mut self){for s in &mut self.sums{*s=[[0.;5];3];}}
-    /// The trajectory at step k (from t = 0) into every window holding it.
+    /// Windows of `half` steps per axis around outputs `steps` apart.
+    fn with(half:[usize;3],steps:usize,outputs:usize)->Windows{
+        let reach=half.into_iter().max().unwrap();let intervals=outputs+reach.div_ceil(steps);
+        Windows{half,steps,reach,total:Vec::with_capacity(intervals),head:vec![[[0.;5];3];intervals],tail:vec![[[0.;5];3];intervals]}
+    }
+    fn clear(&mut self){self.total.clear();self.head.fill([[0.;5];3]);self.tail.fill([[0.;5];3]);}
+    /// The trajectory at step k (from t = 0): into its interval's sums.
     fn add(&mut self,k:usize,t:&Trajectory){
-        let last=self.sums.len()-1;
+        let(j,m)=if k==0{(0,self.steps)}else{let j=k.div_ceil(self.steps);(j,k-(j-1)*self.steps)};
+        let last=self.total.last().copied().unwrap_or([[0.;5];3]);while self.total.len()<=j{self.total.push(last);}
         for a in 0..3{
-            let h=self.half[a];let(x,q)=(t.r[a],t.kappa[a]);
-            for i in k.saturating_sub(h).div_ceil(self.steps)..=((k+h)/self.steps).min(last){
-                let at=i*self.steps;if k.abs_diff(at)<=h.min(at){let s=&mut self.sums[i][a];s[0]+=1.;s[1]+=q;s[2]+=q*q;s[3]+=x;s[4]+=x*x;}
-            }
+            let(x,q)=(t.r[a],t.kappa[a]);let v=[1.,q,q*q,x,x*x];let r=self.half[a]%self.steps;
+            for(s,y)in self.total[j][a].iter_mut().zip(v){*s+=y;}
+            if m<=r{for(s,y)in self.head[j][a].iter_mut().zip(v){*s+=y;}}
+            if m+r>=self.steps{for(s,y)in self.tail[j][a].iter_mut().zip(v){*s+=y;}}
         }
     }
     /// Output i's means: κ, κ², r, r² per axis.
-    fn means(&self,i:usize)->[[f64;4];3]{std::array::from_fn(|a|{let s=&self.sums[i][a];[s[1]/s[0],s[2]/s[0],s[3]/s[0],s[4]/s[0]]})}
+    fn means(&self,i:usize)->[[f64;4];3]{
+        let at=i*self.steps;let total=|j:usize,a:usize|self.total[j.min(self.total.len()-1)][a];
+        std::array::from_fn(|a|{
+            let h=self.half[a];
+            // Within half a window of t = 0 the window is cut there: the whole intervals 0 ..= 2i.
+            let s:[f64;5]=if at<h{total(2*i,a)}else{
+                let(lo,hi)=(i-h/self.steps,i+h/self.steps);let(whole,first)=((total(hi,a),total(lo,a)),self.tail[lo][a]);
+                let end=self.head.get(hi+1).map_or([0.;5],|x|x[a]);
+                std::array::from_fn(|v|whole.0[v]-whole.1[v]+first[v]+end[v])
+            };
+            [s[1]/s[0],s[2]/s[0],s[3]/s[0],s[4]/s[0]]
+        })
+    }
 }
 
 /// A pilot: `count` trajectories over the outputs, the held atoms' states at every output kept (at
@@ -209,4 +234,29 @@ pub fn sample_states(model:&Model,settings:&Settings,initial:&Initial,seed:u64,c
         (kept,t.jumps)
     }).collect();
     let jumps=runs.iter().map(|r|r.1).sum();(runs.into_iter().flat_map(|r|r.0).collect(),jumps)
+}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    /// The windows' means against the sums over each window's steps, with the atom lost before the
+    /// end: windows cut at t = 0, half a window shorter than an interval, a whole number of them, none.
+    #[test]
+    fn the_windows_sum_each_window_s_steps(){
+        let mut rng=Rng::new(9,Purpose::Initial,0,0);
+        for(steps,half,outputs)in [(1,[0,3,419],50),(5,[7,10,0],20),(44,[5,110,113],6),(3,[2,2,2],10),(4,[8,1,4],9)]{
+            let mut w=Windows::with(half,steps,outputs);let last=(outputs-1)*steps+w.reach;let lost=last-last/5;
+            let values:Vec<([f64;3],[f64;3])>=(0..=last).map(|_|(std::array::from_fn(|_|rng.uniform()-0.5),std::array::from_fn(|_|rng.uniform()-0.5))).collect();
+            let mut t=Trajectory{cluster:0,psi:[Complex::ZERO;model::MOST_STATES],r:[0.;3],kappa:[0.;3],time:0.,threshold:1.,alive:true,jumps:0,doppler:0.,seed:0,index:0};
+            for k in 0..=lost{(t.r,t.kappa)=values[k];w.add(k,&t);}
+            for i in 0..outputs{
+                let at=i*steps;if at>lost{continue;}let m=w.means(i);
+                for a in 0..3{
+                    let h=half[a].min(at);let(mut n,mut s)=(0.,[0.;4]);
+                    for k in at-h..=(at+h).min(lost){let(r,q)=values[k];n+=1.;s[0]+=q[a];s[1]+=q[a]*q[a];s[2]+=r[a];s[3]+=r[a]*r[a];}
+                    for v in 0..4{assert!((m[a][v]-s[v]/n).abs()<=1e-12,"steps {steps} half {half:?} output {i} axis {a}: {} against {}",m[a][v],s[v]/n);}
+                }
+            }
+        }
+    }
 }
