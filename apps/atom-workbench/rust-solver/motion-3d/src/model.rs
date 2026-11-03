@@ -44,7 +44,11 @@
 //! them (`decays`) and linear in the fields between one and a ground state (`crosses`: the folded
 //! amplitude A_c = −R_c of the class's photons, X_k = w·T_k[:,b] with w = Σ_{to,a} C_a[to,e]* C_a[to,·]
 //! over the photons the two share). Only the Hermitian part acts on the motion: the Ehrenfest force
-//! is −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩, with the kept drives' gradients Σ_k ∇E_k U_k the stimulated force.
+//! is −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩, with the kept drives' gradients Σ_k ∇E_k U_k the stimulated force. The
+//! decay is the jumps' product by construction: where a class joins two folded photons of channels
+//! without a kept coupling (through an explicit state's photon of their frequency), their cross term
+//! Q = Σ_{to,a} (C_a T^d)[to,a]†(C_a T^c)[to,b] over the landing states they share enters alone, in a
+//! group of its own without S (ground.rs `FoldedCross`).
 //!
 //! # The generator's beats
 //! Every term's residual Ω̃ is a beat of the generator: H_eff(t) = H₀ + Σ_j e^{iΩ_j t} H_j (`Components`),
@@ -110,6 +114,12 @@ pub const MOST_RANK:usize=3;
 pub const TABLE_SHARE:f64=A_PRIORI_SHARE*BUDGET;
 /// The coarsest grid of each intensity axis (nodes), the fewest a cubic stencil takes doubled once.
 const FIRST_NODES:usize=5;
+/// An instant at which the generator's beats take generic phases (us, the golden ratio's inverse: no
+/// rational multiple of a period), where `Model::lindblad` checks it besides t = 0.
+const GENERIC:f64=0.618_033_988_749_894_8;
+/// The head of a model's refusal for a generator that gains beyond the budget (`Model::lindblad`): solve.rs stops
+/// with it where the ladder's first rung, every drive folded, meets it.
+pub const NOT_LINDBLAD:&str="消去激发态后的生成元不是 Lindblad 形式";
 /// The most a model's tables may take while a grid is refined, the coarse grid's and the fine one's
 /// together (bytes), and the most nodes one grid may have: the model's work bounds, as `MOST_STEPS`
 /// and `MOST_TRAJECTORIES` are a solve's (solve.rs). A resonance across the focused units'
@@ -163,9 +173,11 @@ pub struct Carrier{
 /// A table group's place in a node's slice: a kept group of `ground::Group` with one residual beat,
 /// its field pairs (k′ ≤ k for a Hermitian one), its entries -- the (row, column) places of the
 /// cluster's generator its couplings at this beat reach; S and Q vanish elsewhere -- and where its S
-/// and Q lie (the entries' values per pair).
+/// and Q lie (the entries' values per pair). A `decay` group holds the decay alone, its S zero: the
+/// cross terms of folded photons a class joins without a kept coupling (`ground::FoldedCross`).
 #[derive(Clone,Debug)]
-pub(crate) struct GroupLayout{pub(crate) absorbed:usize,pub(crate) emitted:usize,pub(crate) residual:f64,pub(crate) hermitian:bool,pub(crate) pairs:Vec<(usize,usize)>,pub(crate) entries:Vec<(usize,usize)>,pub(crate) s:usize,pub(crate) q:usize}
+pub(crate) struct GroupLayout{pub(crate) absorbed:usize,pub(crate) emitted:usize,pub(crate) residual:f64,pub(crate) hermitian:bool,pub(crate) pairs:Vec<(usize,usize)>,pub(crate) entries:Vec<(usize,usize)>,pub(crate) s:usize,pub(crate) q:usize,
+    pub(crate) decay:bool}
 /// Where a carrier's photon tables lie: J and J2 (3 axes × rank × ng × n0) and T (rank × ne × n0),
 /// on the cluster's n0 ground states.
 #[derive(Clone,Copy,Debug)]
@@ -285,6 +297,26 @@ struct Rotation{t:f64,last:u64,value:Complex}
 impl Rotation{
     fn new(t:f64)->Rotation{Rotation{t,last:f64::NAN.to_bits(),value:Complex::ONE}}
     fn at(&mut self,w:f64)->Complex{if w.to_bits()!=self.last{self.last=w.to_bits();self.value=Complex::cis(w*self.t);}self.value}
+}
+
+/// A cluster's generator against its jumps at a point and time (`Model::decay_balance`): D = i(H − H†) − Σ L†L
+/// (at fourth order less the corrections' δ†δ), the jumps' whole Σ L̃†L̃, D's smallest eigenvalue, Σ L†L's largest
+/// and D's round-off scale.
+struct Balance{d:Dense,jumps:Dense,low:f64,rate:f64,scale:f64}
+/// The largest ε with −D ≤ ε M, M = J + floor (Hermitian, J ⪰ 0): the largest eigenvalue of L⁻¹(−D − round)L⁻†,
+/// M = LL† (Cholesky); 0 where none is positive, and infinite where M is not positive definite.
+fn excess(d:&Dense,j:&Dense,round:f64,floor:f64)->f64{
+    let n=d.rows;let mut l=Dense::zeros(n,n);
+    for c in 0..n{
+        let mut diagonal=j[(c,c)].re+floor;for k in 0..c{diagonal-=l[(c,k)].norm_sqr();}
+        if !(diagonal>0.){return f64::INFINITY;}let diagonal=diagonal.sqrt();l[(c,c)]=Complex::new(diagonal,0.);
+        for i in c+1..n{let mut z=j[(i,c)];for k in 0..c{z-=l[(i,k)]*l[(c,k)].conj();}l[(i,c)]=z*(1./diagonal);}
+    }
+    // L⁻¹ B, column by column (forward substitution).
+    let solve=|b:&Dense|->Dense{let mut x=b.clone();for c in 0..n{for i in 0..n{let mut z=x[(i,c)];for k in 0..i{z-=l[(i,k)]*x[(k,c)];}x[(i,c)]=z*(1./l[(i,i)].re);}}x};
+    let a=Dense::from_fn(n,n,|i,k|-d[(i,k)]-if i==k{Complex::new(round,0.)}else{Complex::ZERO});
+    let y=solve(&a);let x=solve(&y.adjoint()).adjoint();
+    hermitian_eigenvalues(&x).into_iter().fold(0_f64,f64::max)
 }
 
 /// A cluster's work per call in complex multiply-adds (`Model::work`), and its table pairs.
@@ -553,6 +585,7 @@ impl Model{
         model.choose_profiles(request)?;
         model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();
         model.tabulate(&bases,most_bytes,most_nodes)?;
+        model.lindblad()?;
         Ok(model)
     }
 
@@ -642,8 +675,18 @@ impl Model{
                     let pairs=field_pairs(hermitian,self.carriers[gr.emitted].rank,self.carriers[gr.absorbed].rank);
                     let mut entries:Vec<(usize,usize)>=gr.entries.iter().filter(|x|x.2==residual).map(|x|(x.0,x.1)).collect();
                     entries.sort();entries.dedup();
-                    let square=pairs.len()*entries.len();groups.push(GroupLayout{absorbed:gr.absorbed,emitted:gr.emitted,residual,hermitian,pairs,entries,s:size,q:size+square});size+=2*square;
+                    let square=pairs.len()*entries.len();groups.push(GroupLayout{absorbed:gr.absorbed,emitted:gr.emitted,residual,hermitian,pairs,entries,s:size,q:size+square,decay:false});size+=2*square;
                 }
+            }
+            // The folded photons a class joins without a kept coupling (ground.rs `FoldedCross`): their decay,
+            // in groups of their own per carrier pair and beat.
+            let mut keyed:Vec<(usize,usize,f64,Vec<(usize,usize)>)>=vec![];
+            for x in &cl.folded_crosses{match keyed.iter_mut().find(|k|k.0==x.absorbed&&k.1==x.emitted&&k.2==x.residual){
+                Some(k)=>k.3.push((x.row,x.col)),None=>keyed.push((x.absorbed,x.emitted,x.residual,vec![(x.row,x.col)]))}}
+            for(absorbed,emitted,residual,mut entries)in keyed{
+                entries.sort();entries.dedup();let hermitian=absorbed==emitted&&residual==0.;
+                let pairs=field_pairs(hermitian,self.carriers[emitted].rank,self.carriers[absorbed].rank);
+                let square=pairs.len()*entries.len();groups.push(GroupLayout{absorbed,emitted,residual,hermitian,pairs,entries,s:size,q:size+square,decay:true});size+=2*square;
             }
             let carriers=self.carriers.iter().map(|c|{let jump=3*c.rank*ng*n0;let l=CarrierLayout{j:size,j2:size+jump,t:size+2*jump};size+=2*jump+c.rank*ne*n0;l}).collect();
             // The explicit states' decay, −(i/2) Σ_φ J_φ†J_φ on their rows: between two of them, and
@@ -723,8 +766,18 @@ impl Model{
             for &(x,y)in &cl.excited_statics{node[layout.h0+x*n+y]+=e.excited[(cl.excited[x-n0],cl.excited[y-n0])];}
             for &(x,y,f)in &cl.excited_paths{let(a,b)=(cl.excited[x-n0],cl.excited[y-n0]);let ee=&e.excited_energies;
                 node[layout.h0+x*n+y]+=e.excited[(a,f)]*e.excited[(f,b)]*(0.5*(1./(ee[a]-ee[f])+1./(ee[b]-ee[f])));}
-            // The kept groups: S and Q on their entries.
-            for gl in &layout.groups{
+            // The kept groups: S and Q on their entries; the decay groups: Q, the photons' product over the landing
+            // states their class shares.
+            for gl in layout.groups.iter().filter(|g|g.decay){
+                let(c,d)=(gl.absorbed,gl.emitted);
+                for(p,&(k1,k0))in gl.pairs.iter().enumerate(){let base=p*gl.entries.len();
+                    for(at,&(x,y))in gl.entries.iter().enumerate(){
+                        let tos=&cl.folded_crosses.iter().find(|i|i.row==x&&i.col==y&&i.absorbed==c&&i.emitted==d&&i.residual==gl.residual).unwrap().tos;let(a,b)=(states[x],states[y]);
+                        node[gl.q+base+at]=(0..3).fold(Complex::ZERO,|s,ax|tos.iter().fold(s,|s,&to|s+j[d][k1][ax][(to,a)].conj()*j[c][k0][ax][(to,b)]));
+                    }
+                }
+            }
+            for gl in layout.groups.iter().filter(|g|!g.decay){
                 let(c,d)=(gl.absorbed,gl.emitted);
                 let entries:Vec<(usize,usize)>=cl.groups.iter().find(|x|x.absorbed==c&&x.emitted==d).unwrap().entries.iter().filter(|x|x.2==gl.residual).map(|x|(x.0,x.1)).collect();
                 for(p,&(k1,k0))in gl.pairs.iter().enumerate(){
@@ -1550,26 +1603,60 @@ impl Model{
     /// jumps' rate in every state -- at rest: the photons' first order in the Doppler and recoil shifts,
     /// which the decay leaves out, aside (its own estimate). At fourth order Σ L̃†L̃ to that order, the decay's
     /// (ground.rs, # Fourth order): L̃ = L + δ, δ the fourth order's corrections, less δ†δ, the sixth order
-    /// within the fold's charge. D's smallest eigenvalue, Σ L†L's largest and the eigenvalues' scale, the
-    /// largest of i(H − H†)'s and Σ L†L's (rad/us).
-    pub fn decay_balance(&self,cluster:usize,p:&Point,t:f64)->(f64,f64,f64){
+    /// within the fold's charge. D's smallest eigenvalue, Σ L†L's largest and D's round-off scale, the largest of
+    /// i(H − H†)'s and Σ L†L's eigenvalues and of H's entries, whose Hermitian part i(H − H†) cancels (rad/us).
+    pub fn decay_balance(&self,cluster:usize,p:&Point,t:f64)->(f64,f64,f64){let b=self.balance(cluster,p,t);(b.low,b.rate,b.scale)}
+    /// `decay_balance` with D and the jumps' whole Σ L̃†L̃ (`Balance`).
+    fn balance(&self,cluster:usize,p:&Point,t:f64)->Balance{
         let mut p=*p;for f in p.fields.iter_mut(){f.doppler=[Complex::ZERO;MOST_RANK];}let p=&p;
-        let n=self.dimension(cluster);let h=self.generator(cluster,p,t).hamiltonian;
+        let n=self.dimension(cluster);let h=self.generator(cluster,p,t).hamiltonian;let largest=h.iter().map(|z|z.abs()).fold(0.,f64::max);
         let decay=Dense::from_fn(n,n,|a,b|(h[a*n+b]-h[b*n+a].conj())*Complex::I);
         // Column b: the photons of the basis state b.
         let columns=|fourth:bool|->Vec<Vec<[[Complex;MOST_STATES];3]>>{(0..n).map(|b|{let mut psi=[Complex::ZERO;MOST_MIXED];psi[b]=Complex::ONE;self.photons_to(cluster,p,&psi,t,None,fourth).amplitude}).collect()};
         let(full,second)=(columns(true),self.layouts[cluster].fourth.as_ref().map(|_|columns(false)));
-        let mut jumps=Dense::zeros(n,n);
+        let(mut jumps,mut whole)=(Dense::zeros(n,n),Dense::zeros(n,n));
         // A photon lands in its target's ground states.
         for(c,class)in self.ground.clusters[cluster].classes.iter().enumerate(){let nt=self.ground_dimension(class.target);
             for x in 0..3{for a in 0..n{for b in 0..n{for i in 0..nt{
-                jumps[(a,b)]+=full[a][c][x][i].conj()*full[b][c][x][i];
+                let z=full[a][c][x][i].conj()*full[b][c][x][i];jumps[(a,b)]+=z;whole[(a,b)]+=z;
                 if let Some(l)=&second{let(da,db)=(full[a][c][x][i]-l[a][c][x][i],full[b][c][x][i]-l[b][c][x][i]);jumps[(a,b)]-=da.conj()*db;}
             }}}}}
         let mut d=decay.clone();d.add_scaled(-Complex::ONE,&jumps);
         let extreme=|m:&Dense|hermitian_eigenvalues(m).into_iter().fold((f64::INFINITY,f64::NEG_INFINITY),|(lo,hi),x|(lo.min(x),hi.max(x)));
         let((low,_),(_,rate),(g0,g1))=(extreme(&d),extreme(&jumps),extreme(&decay));
-        (low,rate,rate.abs().max(g0.abs()).max(g1.abs()))
+        Balance{d,jumps:whole,low,rate,scale:rate.abs().max(g0.abs()).max(g1.abs()).max(largest)}
+    }
+    /// A Lindblad generator where the atoms go, or why not (`balance` at rest, at the focus and the reach's
+    /// points -- `reach`, the ends of the trap's principal axes --, at t = 0 and at a generic instant `GENERIC`,
+    /// the beats' phases), the tables at their node nearest each point with the point's fields: there they are
+    /// the elimination's own, while between nodes D carries their interpolation's error too, the tables' booked
+    /// one. A generator gains where its no-jump decay falls below its jumps' rate, D = i(H − H†) − Σ L̃†L̃ < 0: a
+    /// decay no jump carries (the validation's F10 before the near light's dressing: the folded pairs' van Vleck
+    /// paths outside the responses, ground.rs). Its error is the
+    /// largest ε with −D ≤ ε (Σ L̃†L̃ + 1/T) beyond D's round-off, T the solve's duration (`excess`): in a state
+    /// the jumps leave bright, the relative error of its no-jump decay against its jump rate; in a dark one
+    /// (rate below 1/T), the norm the gain adds over the run -- a decay below zero grows it and stops the
+    /// jumps; a model without a run (no duration) takes its largest rate for 1/T. Beyond the budget the rates
+    /// or the norm err beyond what the ledger takes: the model is refused (`NOT_LINDBLAD`), and the fold's
+    /// ladder (solve.rs) passes over it -- the solve stops where it is the ladder's first rung, every drive
+    /// folded. A gain within it is booked as the solve meets it along its pilot's states (solve.rs `gain`).
+    fn lindblad(&self)->Result<(),String>{
+        let last=(self.tables.nodes-1).max(1) as f64;
+        for &r in &self.reach{
+            let mut p=self.point(r,[0.;3]);
+            let s:Vec<f64>=(0..p.stencil.dimensions).map(|f|{let w=&p.stencil.weights[f];
+                let k=(0..4).max_by(|&a,&b|w[a].abs().total_cmp(&w[b].abs())).unwrap();(p.stencil.first[f]+k) as f64/last}).collect();
+            p.stencil=self.stencil(&s);
+            for t in [0.,GENERIC]{for k in 0..self.clusters(){
+                let b=self.balance(k,&p,t);let round=64.*f64::EPSILON*self.dimension(k) as f64*b.scale;
+                if -b.low<=round{continue;}
+                let floor=if self.ground.duration>0.{1./self.ground.duration}else{b.rate.max(round)};
+                let error=excess(&b.d,&b.jumps,round,floor);
+                if error>BUDGET{return Err(format!("{NOT_LINDBLAD}：子空间 {k} 在 r = ({:.2}, {:.2}, {:.2}) μm、t = {t:.3} μs 处，无跳跃的衰减低于跳跃率（i(H − H†) − ΣL†L 的最小本征值 {:.2e} rad/μs，最大跳跃率 {:.2e} rad/μs），其相对误差达 {:.2}%，超出预算 {:.1}%——这部分衰减没有跳跃承载，轨迹的范数会增长",
+                    r[0],r[1],r[2],b.low,b.rate,100.*error,100.*BUDGET));}
+            }}
+        }
+        Ok(())
     }
     /// The 32 populations (request order) of a cluster's state ψ at a point and time: the bare
     /// ground ones, ρ − ½{Y, ρ}, and the excited ones, Σ |Σ_coherent e^{−iε̃t} (R ψ)_i|² and ρ_ee of

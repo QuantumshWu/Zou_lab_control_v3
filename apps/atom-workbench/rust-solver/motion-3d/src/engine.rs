@@ -773,19 +773,16 @@ impl<'a> Engine<'a>{
     pub fn coast(&self,t:&Trajectory,dt:f64,count:usize)->Trajectory{let mut x=t.clone();for _ in 0..count{self.free_step(&mut x,dt);}x}
     /// The step-doubling error of one step of dt from a trajectory's state, without jumps: one step
     /// against two of dt/2, as (|Δκ|, |kick|) -- the momentum's difference and the step's
-    /// non-harmonic impulse (1/um) --, (max |Δp|, |Δ ln‖ψ‖²|, |ln‖ψ‖²|) -- the largest difference of
-    /// the cluster's state populations, of the norm's decay and the decay itself -- and (ΔE, E₂ − E₀),
-    /// the mechanical energy's difference and its change over the two half steps: conserved by the
-    /// trap's and the light's conservative forces, it changes by the light's friction alone.
-    pub fn doubling(&self,t:&Trajectory,dt:f64)->([f64;2],[f64;3],[f64;2]){
+    /// non-harmonic impulse (1/um) -- and (max |Δp|, |Δ ln‖ψ‖²|, |ln‖ψ‖²|) -- the largest difference of
+    /// the cluster's state populations, of the norm's decay and the decay itself.
+    pub fn doubling(&self,t:&Trajectory,dt:f64)->([f64;2],[f64;3]){
         let n=self.model.dimension(t.cluster);
         let mut one=t.clone();let(n0,n1,kick)=self.free_step(&mut one,dt);
         let mut two=t.clone();self.free_step(&mut two,0.5*dt);let(_,n2,_)=self.free_step(&mut two,0.5*dt);
         let dk=(0..3).map(|a|(one.kappa[a]-two.kappa[a]).powi(2)).sum::<f64>().sqrt();let impulse=kick.iter().map(|x|x*x).sum::<f64>().sqrt();
         let(a,b)=(norm2(&one.psi,n),norm2(&two.psi,n));
         let dp=(0..n).map(|i|(one.psi[i].norm_sqr()/a-two.psi[i].norm_sqr()/b).abs()).fold(0.,f64::max);
-        let(e0,e1,e2)=(self.energy(t),self.energy(&one),self.energy(&two));
-        ([dk,impulse],[dp,((n1/n0).ln()-(n2/n0).ln()).abs(),(n1/n0).ln().abs()],[e1-e2,e2-e0])
+        ([dk,impulse],[dp,((n1/n0).ln()-(n2/n0).ln()).abs(),(n1/n0).ln().abs()])
     }
 
     /// One step of dt: flow, kick and flow (`advance`), or the exact step in a cluster with explicit

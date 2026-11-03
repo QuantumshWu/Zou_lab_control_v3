@@ -143,7 +143,10 @@
 //! J_{a,φ} = Σ_{(c,b→b′)∈φ} e^{iω̃t} [C_a R_c]_{b′b} |b′⟩⟨b| − Σ_{(e→b′)∈φ} e^{iω̃t} [C_a]_{b′e} |b′⟩⟨e|
 //! ```
 //!
-//! ω̃ = θ_b′ − θ_e for an explicit state's photon, θ_b′ − θ_b − δ_c for a folded one.
+//! ω̃ = θ_b′ − θ_e for an explicit state's photon, θ_b′ − θ_b − δ_c for a folded one. The decay between
+//! ground states is X's on the kept pairs of channels; a class that joins two folded photons landing in one
+//! state from channels without a kept coupling -- through an explicit state's photon of their frequency --
+//! adds their cross term alone (`FoldedCross`): the decay is the jumps' product on every entry.
 //!
 //! Readout: the bare ground density is ρ − ½{Y, ρ}, Y = Σ R′†R over the co-resonant channel
 //! pairs, and an excited state's population tr(E_i ρ), E_i = Σ R′†|i⟩⟨i|R, plus ρ_ee when explicit.
@@ -284,6 +287,13 @@ pub struct Group{pub absorbed:usize,pub emitted:usize,pub entries:Vec<(usize,usi
 /// residual ω̃ − ω̃₀ (rad/us), and their wave number.
 #[derive(Clone,Debug)]
 pub struct Class{pub target:usize,pub photons:Vec<(Photon,f64)>,pub direct:Vec<(usize,usize,f64)>,pub wave_number:f64}
+/// Two folded photons of a class landing in one state from channels without a kept coupling between them (a
+/// class joins them through an explicit state's photon of their frequency): their jump's cross term is the
+/// decay's, Σ_{to,a} (C_a R_d)[to,a]* (C_a R_c)[to,b] over the landing states they share, on the entry (row:
+/// the state of the channel `emitted` d, column: the one of `absorbed` c) at their residual beat w_c − w_d in
+/// the class -- the folded pair's Hermitian part stays its van Vleck shift.
+#[derive(Clone,Debug)]
+pub struct FoldedCross{pub row:usize,pub col:usize,pub absorbed:usize,pub emitted:usize,pub residual:f64,pub tos:Vec<usize>}
 /// A cluster: its ground states (positions in `Ground::ground_states`) and explicit excited states
 /// (positions in `Ground::excited_states`), its basis in that order, and each one's frame θ (rad/us);
 /// its kept couplings between ground states (per carrier pair, and H's static ones: row, column),
@@ -306,6 +316,7 @@ pub struct Cluster{
     pub excited_paths:Vec<(usize,usize,usize)>,
     pub classes:Vec<Class>,
     pub coherent:Vec<Vec<(Channel,f64)>>,
+    pub folded_crosses:Vec<FoldedCross>,
 }
 impl Cluster{
     /// A ground state's place in the cluster.
@@ -1215,7 +1226,8 @@ impl Ground{
     }
 
     /// Each cluster's machinery from the rule's partition: its states and frames, its kept couplings
-    /// and drives, its van Vleck paths and shifts, its jump classes and co-resonant channels.
+    /// and drives, its folded static couplings' van Vleck paths, its jump classes and co-resonant
+    /// channels; and the near light's dressing (its far channels, units and poles).
     fn assemble(&mut self,b:&Bounds,partition:Partition,excited:Vec<ExcitedItem>)->Result<(),String>{
         let(ng,ne,nc)=(self.ground_states.len(),self.excited_states.len(),self.carriers.len());
         let Partition{items,cut,sets,set,frames}=partition;
@@ -1234,7 +1246,7 @@ impl Ground{
         let mut clusters:Vec<Cluster>=sets.iter().map(|nodes|{
             let states:Vec<usize>=nodes.iter().copied().filter(|&x|x<ng).collect();let excited:Vec<usize>=nodes.iter().filter(|&&x|x>=ng).map(|&x|x-ng).collect();
             Cluster{frames:states.iter().map(|&s|theta(s)).collect(),excited_frames:excited.iter().map(|&e|theta(ng+e)).collect(),states,excited,
-                groups:vec![],statics:vec![],static_paths:vec![],drives:vec![],excited_statics:vec![],excited_paths:vec![],classes:vec![],coherent:vec![]}}).collect();
+                groups:vec![],statics:vec![],static_paths:vec![],drives:vec![],excited_statics:vec![],excited_paths:vec![],classes:vec![],coherent:vec![],folded_crosses:vec![]}}).collect();
         for(k,cl)in clusters.iter_mut().enumerate(){
             let inside:Vec<Channel>=channels.iter().copied().filter(|ch|cluster[ch.state]==k).collect();
             let n0=cl.states.len();
@@ -1319,8 +1331,17 @@ impl Ground{
                 let(mut folded,mut direct)=(vec![],vec![]);
                 for &i in &set{match photons[i]{Source::Folded(p)=>folded.push((p,match p0{Source::Folded(_)=>rate(&photons[i])-r0,_=>residual(&photons[i])})),
                     Source::Direct(e,t)=>direct.push((clusters[k].excited_position(e).unwrap(),t,residual(&photons[i])))}}
-                Class{target:cluster[to(&p0)],photons:folded,direct,wave_number:wave}}).collect();
-            clusters[k].classes=classes;
+                Class{target:cluster[to(&p0)],photons:folded,direct,wave_number:wave}}).collect::<Vec<Class>>();
+            // The folded photons a class joins without a kept coupling between their channels: the decay's
+            // cross terms the jumps make (`FoldedCross`).
+            let mut crosses:Vec<FoldedCross>=vec![];
+            for class in &classes{for &(p,wp)in &class.photons{for &(q,wq)in &class.photons{
+                if p.to!=q.to||coresonant(Channel{carrier:p.carrier,state:p.from},Channel{carrier:q.carrier,state:q.from}){continue;}
+                let(row,col)=(clusters[k].position(p.from).unwrap(),clusters[k].position(q.from).unwrap());
+                match crosses.iter_mut().find(|x|x.row==row&&x.col==col&&x.absorbed==q.carrier&&x.emitted==p.carrier&&x.residual==wq-wp){
+                    Some(x)=>x.tos.push(p.to),None=>crosses.push(FoldedCross{row,col,absorbed:q.carrier,emitted:p.carrier,residual:wq-wp,tos:vec![p.to]})}
+            }}}
+            clusters[k].classes=classes;clusters[k].folded_crosses=crosses;
         }
         // The excited states in groups of nearly one energy at the focus: consecutive ones whose
         // separation ΔE has (Γ/ΔE)² beyond the budget ring together after a jump (`transient`).
@@ -1390,6 +1411,14 @@ impl Ground{
                     h[(i,j)]+=Complex::cis(w*t)*v[c][(ex,b)]*v[c][(fx,b)].conj()*(0.5*(1./(e.excited_energies[ex]-delta-e.energies[b])+1./(e.excited_energies[fx]-delta-e.energies[b])));
                 }
             }
+        }
+        // The folded photons a class joins without a kept coupling between their channels: their jumps' cross
+        // terms in the decay (`FoldedCross`).
+        for x in &cl.folded_crosses{
+            let(a,b)=(cl.states[x.row],cl.states[x.col]);
+            let z=(0..3).fold(Complex::ZERO,|s,ax|{let(jd,jc)=(self.emission[ax].product(&rc[x.emitted]),self.emission[ax].product(&rc[x.absorbed]));
+                x.tos.iter().fold(s,|s,&to|s+jd[(to,a)].conj()*jc[(to,b)])});
+            h[(x.row,x.col)]+=Complex::cis(x.residual*t)*z*Complex::new(0.,-0.5);
         }
         // The kept drives, H's kept couplings between explicit states and the van Vleck paths of
         // their folded ones; the explicit states' dressing by those (`dressing`) and the drives it
