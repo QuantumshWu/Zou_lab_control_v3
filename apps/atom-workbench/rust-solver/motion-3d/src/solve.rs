@@ -413,9 +413,9 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // trajectories per thread, on the GPU a group in each of its resident blocks -- such a batch costs
     // about what one trajectory does --, and there a whole number of its widths.
     let width=match &gpu{Some((g,_))=>g.lock().unwrap_or_else(|e|e.into_inner()).width(1),None=>(2*threads).div_ceil(TASK)*TASK};
-    let whole=|count:u64|if gpu.is_some(){count.div_ceil(width)*width}else{count.div_ceil(TASK)*TASK};
+    let unit=if gpu.is_some(){width}else{TASK};
     let clock=Instant::now();
-    let count=whole((2*threads*TASK).max(width));
+    let count=(2*threads*TASK).max(width).div_ceil(unit)*unit;
     let first=batch(0,count,twin.as_ref())?;
     let wall=clock.elapsed().as_secs_f64();
     // The held twin is kept where its control pays for itself: the trajectories the first batch says
@@ -441,8 +441,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             return Ok(solution);
         }
         checkpoint(&solution,Some(per_trajectory*(needed-done) as f64*1e3));
-        // The predicted remaining need, followed at most to twice the trajectories it rests on.
-        let next=whole((needed-done).clamp(width,done));
+        let next=next_batch(needed,done,width,unit);
         let clock=Instant::now();
         let more=batch(done,next,twin.as_ref())?;
         per_trajectory=clock.elapsed().as_secs_f64()/next as f64;
@@ -450,6 +449,11 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         done+=next;
     }
 }
+
+/// The batch after `done` trajectories (module documentation, # Batches): the predicted remaining
+/// need, at least the device's `width` and at most `done` -- the need followed at most to twice the
+/// trajectories it rests on --, in whole `unit`s (groups on the CPU, waves on the GPU).
+fn next_batch(needed:u64,done:u64,width:u64,unit:u64)->u64{needed.saturating_sub(done).clamp(width,done.max(width)).div_ceil(unit)*unit}
 
 /// A checked step (module documentation): its steps per interval and its ratios to the shares -- the
 /// population criterion's (its bound's, or where measured the upper confidence bound of its measured
@@ -567,5 +571,21 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
         reason:None,
         approximations:ledger,
         device:Device::Cpu,device_note:None,
+    }
+}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    /// The batches: the remaining need in whole groups, at least the width, at most doubling; on the
+    /// GPU whole waves.
+    #[test]
+    fn a_batch_is_the_remaining_need_within_its_bounds(){
+        assert_eq!(next_batch(300,256,32,TASK),48);
+        assert_eq!(next_batch(260,256,32,TASK),32);
+        assert_eq!(next_batch(845,256,32,TASK),256);
+        assert_eq!(next_batch(700,640,640,640),640);
+        assert_eq!(next_batch(4000,1280,640,640),1280);
+        assert_eq!(next_batch(1700,1280,640,640),640);
     }
 }
