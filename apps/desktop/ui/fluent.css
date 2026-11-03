@@ -146,7 +146,8 @@ input.elide-right { text-overflow: ellipsis; }
 ::selection { background: var(--selected); color: var(--text); }
 
 /* ---------- FluentComboBox (customizable select) ----------------------- */
-select, ::picker(select) { appearance: base-select; }
+/* The box is a customizable select; its list is combo.ts's own .select-list, never ::picker(select). */
+select { appearance: base-select; }
 select {
   position: relative; display: flex; align-items: center;
   /* --combo-min: FluentComboBox.sizeHint, its widest choice (combo.ts hintWidest). */
@@ -159,14 +160,14 @@ select {
 /* The field says its states as an edit does: the accent edge under the
  * pointer or while open (a tree combo's list: .open); no fill change, and
  * nothing for focus alone (v2 paints no focus). */
-select:hover, select:open, select.open { border-color: var(--accent); }
+select:hover, select.open { border-color: var(--accent); }
 select:disabled { background: var(--bg); color: var(--disabled-ink); border-color: var(--placeholder); }
 select.blank { color: var(--muted-ink); }
 select.blank:disabled { color: var(--disabled-ink); }
 /* An active cycle choice takes the SELECTED fill; its edge stays the field's. */
 select.cycle-active { background: var(--selected); }
 /* FluentCycleComboBox: the list's row says "Scope", the closed box "Scope: <coordinate>". */
-option > .cycle-at { display: none; }
+.select-row > .cycle-at { display: none; }
 selectedcontent > .cycle-at { display: inline; }
 select > button.combo-face { all: unset; display: block; flex: 1; min-width: 0; overflow: hidden; }
 selectedcontent { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -178,56 +179,58 @@ select::picker-icon {
   background: var(--graphite); -webkit-mask: var(--chevron-drop) 0 0 / 100% 100% no-repeat; mask: var(--chevron-drop) 0 0 / 100% 100% no-repeat;
   transition: none; rotate: none;
 }
-select:open::picker-icon { rotate: none; }
 select.cycle-active::picker-icon { background: var(--text); }
 select:disabled::picker-icon { background: var(--placeholder); }
+/* A popup bound to its box (popover.ts): showPopover's source is its anchor
+ * and the box's place is its place, in the same layout -- a dragged frame, a
+ * scrolled form or a moved card takes it along.  A box scrolled out of sight
+ * hides it.  A .drop list (a combo's) hangs below the box, or above it (.up)
+ * capped at --drop-room, as combo.ts placeDrop chooses when it opens; at least
+ * as wide as the box, flipped sideways to stay in the window.  A .beside popup
+ * (a menu, a settings popup) stands a popup gap below its command, or above it
+ * where the window has no room below, its left edge on the command's. */
+.drop, .beside { position: fixed; inset: auto; position-visibility: anchors-visible; }
+/* Its side is chosen once (placeDrop): carried toward the window's edge it stays on the box (unsafe), never slid over it. */
+.drop {
+  position-area: block-end span-inline-end; position-try-fallbacks: flip-inline; align-self: unsafe start;
+  min-width: anchor-size(width); max-width: 100vw;
+}
+.drop.up { position-area: block-start span-inline-end; align-self: unsafe end; }
 /* FluentPopup + _combo_popup_stylesheet: a white card, DIVIDER edge, the
- * picked row SELECTED, the row under the pointer ACCENT_TINT.  It opens below
- * the box, or above it (.drop-up) capped at --drop-room, as combo.ts
- * dropPlacement chooses; the browser flips it only sideways. */
-::picker(select) {
-  border: var(--edge) solid var(--divider); border-radius: var(--radius);
-  background: var(--surface); padding: var(--popup-gap); margin: var(--popup-gap) 0;
-  box-shadow: none; color: var(--text);
+ * picked row SELECTED, the row under the pointer or the keys' cursor ACCENT_TINT. */
+.select-list {
+  box-sizing: border-box; border: var(--edge) solid var(--divider); border-radius: var(--radius);
+  background: var(--surface); padding: var(--popup-gap); margin: var(--popup-gap) 0; color: var(--text);
   max-height: var(--drop-room, calc(12 * (var(--font-line) + 2 * var(--popup-item-pad-v) + 2 * var(--edge)) + 2 * var(--popup-gap) + 2 * var(--edge)));
   overflow-y: auto;
-  position-area: block-end span-inline-end;
-  position-try-order: normal; position-try-fallbacks: flip-inline;
 }
-select.drop-up::picker(select) { position-area: block-start span-inline-end; }
 /* A choice row of a popup (a select's option, an editable combo's, a tree's
  * item, a check list's): its face drawn one device pixel inside the row, so the
  * picked and the hovered rows' faces stand apart as v2's item views draw them,
  * and its words after the item view's text margin (PM_FocusFrameHMargin + 1). */
-option, .edit-combo-row, .tree-item {
+.select-row, .edit-combo-row, .tree-item {
   padding: calc(var(--popup-item-pad-v) + var(--edge) - var(--dpx)) calc(var(--popup-item-pad-h) + var(--edge) - var(--dpx) + 2px * var(--qt))
     calc(var(--popup-item-pad-v) + var(--edge) - var(--dpx) + var(--cap-lift));
   border: var(--dpx) solid transparent; border-radius: var(--radius); background-clip: padding-box;
 }
-option {
-  display: block; min-height: 0;
-  background-color: transparent; color: var(--text); white-space: nowrap; cursor: default;
-}
+.select-row { background-color: transparent; color: var(--text); white-space: nowrap; cursor: default; }
 /* A choice wider than its popup (bounded by the window) ends in an ellipsis, as an item view elides its rows. */
-option, .edit-combo-row, .tree-item { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-::picker(select), .edit-combo-list { max-width: 100vw; }
-option::checkmark { display: none; }
-option:hover, option:focus, option:focus-visible { background-color: var(--accent-tint); outline: none; }
-option:checked { background-color: var(--selected); font-weight: 400; }
-/* Opening focuses the picked row; it is SELECTED until the pointer is over it (Qt's popup). */
-option:checked:hover { background-color: var(--selected-hover); }
-option:disabled { color: var(--disabled-ink); background-color: transparent; }
+.select-row, .edit-combo-row, .tree-item { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.select-row.cursor { background-color: var(--accent-tint); }
+.select-row.picked { background-color: var(--selected); }
+/* Opening puts the cursor on the picked row; it is SELECTED until the pointer is over it (Qt's popup). */
+.select-row.picked:hover { background-color: var(--selected-hover); }
+.select-row.disabled { color: var(--disabled-ink); background-color: transparent; }
 /* A family of choices (a unit's prefixes, a device domain) under its own
  * muted heading; its rows are not indented (FluentTreeComboBox reads as one list). */
-optgroup { display: block; }
-optgroup::label, optgroup legend {
+.select-heading {
   display: block; color: var(--muted-ink); font-weight: 400;
   padding: var(--popup-item-pad-v) var(--popup-item-pad-h) calc(var(--popup-item-pad-v) + var(--cap-lift));
 }
 /* An editable FluentComboBox: its field, the chevron in the same stepper column, its list the combo popup. */
 .edit-combo { position: relative; width: 100%; min-width: 0; }
 .edit-combo input { padding-right: calc(var(--combo-width) + var(--edge) + var(--edit-pad-h)); }
-.edit-combo:hover input:not(:disabled), .edit-combo:has(> .edit-combo-list:popover-open) input:not(:disabled) { border-color: var(--accent); }
+.edit-combo:hover input:not(:disabled), .edit-combo.open input:not(:disabled) { border-color: var(--accent); }
 /* Its chevron cell is part of the field, never a command face (a button's hover and press fills lose to the unset). */
 .edit-combo > .edit-combo-open { all: unset; position: absolute; top: 0; right: 0; bottom: 0; width: calc(var(--combo-width) + var(--edge)); cursor: default; }
 .edit-combo-open::after {
@@ -237,9 +240,9 @@ optgroup::label, optgroup legend {
 .edit-combo.disabled .edit-combo-open { pointer-events: none; }
 .edit-combo.disabled .edit-combo-open::after { background: var(--placeholder); }
 .edit-combo-list {
-  position: fixed; inset: auto; margin: var(--popup-gap) 0; box-sizing: border-box;
+  margin: var(--popup-gap) 0; box-sizing: border-box;
   border: var(--edge) solid var(--divider); border-radius: var(--radius); background: var(--surface); padding: var(--popup-gap); color: var(--text);
-  max-height: calc(12 * (var(--font-line) + 2 * var(--popup-item-pad-v) + 2 * var(--edge)) + 2 * var(--popup-gap) + 2 * var(--edge)); overflow-y: auto;
+  max-height: var(--drop-room, calc(12 * (var(--font-line) + 2 * var(--popup-item-pad-v) + 2 * var(--edge)) + 2 * var(--popup-gap) + 2 * var(--edge))); overflow-y: auto;
 }
 .edit-combo-row { white-space: nowrap; cursor: default; }
 .edit-combo-row:hover { background-color: var(--accent-tint); }
@@ -250,10 +253,13 @@ optgroup::label, optgroup legend {
  * its own) then its item box, which takes the hover and SELECTED faces.  A
  * heading reads bold; it opens and closes, it is never picked. */
 .tree-combo-list {
-  position: fixed; inset: auto; margin: var(--popup-gap) 0; box-sizing: border-box; width: max-content;
+  margin: var(--popup-gap) 0; box-sizing: border-box; width: max-content; max-height: var(--drop-room, none);
   border: var(--edge) solid var(--divider); border-radius: var(--radius); background: var(--surface);
   padding: calc(2 * var(--popup-gap)) var(--popup-gap) var(--popup-gap); color: var(--text); overflow-y: auto;
 }
+/* Wider than its box, it ends on the box's right edge. */
+.tree-combo-list.drop { position-area: block-end span-inline-start; }
+.tree-combo-list.drop.up { position-area: block-start span-inline-start; }
 .tree-row { display: flex; align-items: stretch; white-space: nowrap; cursor: default; padding-left: calc((1 + var(--tree-depth, 0)) * var(--tree-indent)); }
 .tree-row.leaf { padding-left: calc((1 + var(--tree-depth, 1)) * var(--tree-indent)); }
 .tree-branch {
@@ -681,7 +687,7 @@ dialog.dialog::backdrop { background: transparent; }
   background: var(--graphite); -webkit-mask: var(--chevron-drop) 0 0 / 100% 100% no-repeat; mask: var(--chevron-drop) 0 0 / 100% 100% no-repeat;
 }
 .check-combo:disabled::after { background: var(--placeholder); }
-.check-menu { margin: var(--popup-gap) 0; padding: var(--popup-gap); gap: 0; max-height: calc(12 * (var(--control)) + 2 * var(--popup-gap)); overflow-y: auto; }
+.check-menu { margin: var(--popup-gap) 0; padding: var(--popup-gap); gap: 0; max-height: var(--drop-room, calc(12 * (var(--control)) + 2 * var(--popup-gap))); overflow-y: auto; }
 .check-menu-item, .check-menu-header {
   height: auto; border: var(--dpx) solid transparent; border-radius: var(--radius); background-clip: padding-box;
   padding: calc(var(--popup-item-pad-v) + var(--edge) - var(--dpx)) calc(var(--popup-item-pad-h) + var(--edge) - var(--dpx)) calc(var(--popup-item-pad-v) + var(--edge) - var(--dpx) + var(--cap-lift));
@@ -694,3 +700,8 @@ dialog.dialog::backdrop { background: transparent; }
 /* ---------- FluentPopup beside its FluentSettingsPopupAnchor ----------- */
 .popup { position: fixed; inset: auto; margin: 0; padding: 0; color: var(--text); box-shadow: none; overflow: auto; }
 .popup:popover-open { display: flex; flex-direction: column; }
+/* A .beside popup's gap from its command; flipped above it (and sideways) where the window has no room. */
+.beside {
+  margin: var(--popup-gap) 0; position-area: block-end span-inline-end;
+  position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
+}
