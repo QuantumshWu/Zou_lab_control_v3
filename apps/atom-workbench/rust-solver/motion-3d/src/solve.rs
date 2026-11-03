@@ -63,8 +63,9 @@
 //! Each output's κ² and populations are estimated with control variates of exactly known means
 //! (control.rs, stats.rs `estimate`): the harmonic twin's for T, always (it costs a few products per
 //! output), and the held twin's for the populations. β is the regression on the control over every
-//! trajectory so far, recomputed with each group left out, so the jackknife's errors -- what the
-//! stopping rule takes -- hold the β's own spread; where a control follows nothing, β ≈ 0. The held
+//! trajectory so far, held when the jackknife leaves a group out: its errors -- what the stopping rule
+//! takes -- are the corrected values' spread over the groups; where a control follows nothing, β ≈ 0.
+//! The held
 //! twin costs a trajectory of its own: it runs in the first batch, and is kept when the trajectories
 //! that batch says the populations need with it, times its share of the cost, are fewer than without.
 //!
