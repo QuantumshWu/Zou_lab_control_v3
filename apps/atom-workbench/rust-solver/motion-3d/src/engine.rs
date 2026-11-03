@@ -205,23 +205,23 @@ impl<'a> Engine<'a>{
     }
 
     /// One step's flow, kick and internal evolution of length dt without jumps: the norms of ψ at
-    /// the start, the middle and the end, ψ at the start, the generator and point of the middle,
-    /// and the kick's momentum (the light's and the trap's anharmonic part).
-    fn advance(&self,t:&mut Trajectory,dt:f64)->(f64,f64,f64,[Complex;MOST_STATES],Local,crate::model::Point,[f64;3]){
+    /// the start, the middle and the end, the point of the middle, and the kick's momentum (the
+    /// light's and the trap's anharmonic part).
+    fn advance(&self,t:&mut Trajectory,dt:f64)->(f64,f64,f64,crate::model::Point,[f64;3]){
         let(m,s)=(self.model,&self.settings);
         if let Some((h,half))=&self.held{
             // Held: the internal state alone, by the generator there -- a whole step by the half
             // step's propagator, a step's part by the series.
-            let n=m.dimension(t.cluster);let local=&h.locals[t.cluster];let psi0=t.psi;let n0=norm2(&t.psi,n);let mut psi=t.psi;
+            let n=m.dimension(t.cluster);let local=&h.locals[t.cluster];let n0=norm2(&t.psi,n);let mut psi=t.psi;
             let half_step=|psi:&mut [Complex;MOST_STATES]|if dt==s.dt{let u=&half[t.cluster];let v=*psi;for i in 0..n{let mut z=Complex::ZERO;for j in 0..n{z+=u[i*n+j]*v[j];}psi[i]=z;}}
                 else{propagate(&local.hamiltonian,n,0.5*dt,psi,s.truncation);};
             half_step(&mut psi);let nh=norm2(&psi,n);half_step(&mut psi);let n1=norm2(&psi,n);
-            t.psi=psi;t.time+=dt;return(n0,nh,n1,psi0,*local,h.point,[0.;3]);
+            t.psi=psi;t.time+=dt;return(n0,nh,n1,h.point,[0.;3]);
         }
         self.flow(t,0.5*dt);
         let point=m.point(t.r,t.kappa);
         let n=m.dimension(t.cluster);let local=m.local(t.cluster,&point,t.time+0.5*dt);
-        let psi0=t.psi;let n0=norm2(&t.psi,n);
+        let n0=norm2(&t.psi,n);
         let mut psi=t.psi;propagate(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let nh=norm2(&psi,n);
         let force=m.force(t.cluster,&local,&psi);let harmonic=self.harmonic(t.r);let mut kick=[0.;3];
         for a in 0..3{if s.free[a]{kick[a]=dt*(force[a]-harmonic[a]);t.kappa[a]+=kick[a];}}
@@ -229,7 +229,7 @@ impl<'a> Engine<'a>{
         t.psi=psi;
         self.flow(t,0.5*dt);
         t.time+=dt;
-        (n0,nh,n1,psi0,local,point,kick)
+        (n0,nh,n1,point,kick)
     }
 
     /// The mechanical energy of a trajectory's state (rad/us): ħ²κ²/2m and its potential, the
@@ -250,8 +250,8 @@ impl<'a> Engine<'a>{
     /// trap's and the light's conservative forces, it changes by the light's friction alone.
     pub fn doubling(&self,t:&Trajectory,dt:f64)->([f64;2],[f64;3],[f64;2]){
         let n=self.model.dimension(t.cluster);
-        let mut one=t.clone();let(n0,_,n1,_,_,_,kick)=self.advance(&mut one,dt);
-        let mut two=t.clone();self.advance(&mut two,0.5*dt);let(_,_,n2,_,_,_,_)=self.advance(&mut two,0.5*dt);
+        let mut one=t.clone();let(n0,_,n1,_,kick)=self.advance(&mut one,dt);
+        let mut two=t.clone();self.advance(&mut two,0.5*dt);let(_,_,n2,_,_)=self.advance(&mut two,0.5*dt);
         let dk=(0..3).map(|a|(one.kappa[a]-two.kappa[a]).powi(2)).sum::<f64>().sqrt();let impulse=kick.iter().map(|x|x*x).sum::<f64>().sqrt();
         let(a,b)=(norm2(&one.psi,n),norm2(&two.psi,n));
         let dp=(0..n).map(|i|(one.psi[i].norm_sqr()/a-two.psi[i].norm_sqr()/b).abs()).fold(0.,f64::max);
@@ -271,7 +271,7 @@ impl<'a> Engine<'a>{
         let mut left=s.dt;
         let point=loop{
             let start=t.clone();
-            let(n0,nh,n1,_,_,point,_)=self.advance(t,left);
+            let(n0,nh,n1,point,_)=self.advance(t,left);
             if n1>t.threshold{break point;}
             // The crossing on ln‖ψ‖², linear on the half where it lies; the step redone to it.
             let(ta,tb,la,lb)=if nh<=t.threshold{(0.,0.5*left,n0.ln(),nh.ln())}else{(0.5*left,left,nh.ln(),n1.ln())};
