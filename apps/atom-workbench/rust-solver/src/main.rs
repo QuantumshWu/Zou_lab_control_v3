@@ -305,25 +305,29 @@ mod tests {
         assert!(flagged.is_null(), "{flagged}");
     }
     /// A hot atom in a shallow tweezer (tests/fixtures/total_loss_motion.json: 200 uK in a trap about
-    /// 5 uK deep): every atom is lost at the first step. The result says so -- the loss one from the
-    /// first sample after t = 0, the rows (no held atom to describe) the last held ones, each a
-    /// probability vector, outside the validated regime, and the flag from when -- where the
-    /// released engine's empty rows failed the adapter's trace gate.
+    /// 5 uK deep), here over 1 ms: no atom is bound at t = 0, and each is lost as it leaves the trap's
+    /// region (motion-3d engine.rs # Loss) -- every one within the run. The result says so -- the loss
+    /// one from the sample every atom has left by, the rows there (no held atom to describe) the last
+    /// held ones, each a probability vector, outside the validated regime, and the flag from when --
+    /// where the released engine's empty rows failed the adapter's trace gate.
     #[test]
     fn a_motion_whose_every_atom_is_lost_reports_the_loss() {
         let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/total_loss_motion.json")).unwrap();
         let mut line = fixture["payload"].clone();
         line["id"] = json!(10);
+        line["options"]["durationUs"] = json!(1000.);
         let out = request(line);
         assert!(out["error"].is_null(), "{}", out["error"]);
         let result = &out["result"];
         let loss: Vec<f64> = result["motion"]["lossProbability"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
         assert_eq!(loss[0], 0.);
-        assert!(loss[1..].iter().all(|&l| l == 1.), "{loss:?}");
+        assert!(loss.windows(2).all(|w| w[1] >= w[0]), "{loss:?}");
+        let gone = loss.iter().position(|&l| l == 1.).unwrap_or_else(|| panic!("every atom leaves within 1 ms: {loss:?}"));
+        assert!(loss[gone..].iter().all(|&l| l == 1.), "{loss:?}");
         let rows: Vec<Vec<f64>> = result["populations"].as_array().unwrap().iter().map(|row| row.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect()).collect();
-        assert!(rows.iter().all(|row| row == &rows[0]), "the rows after the loss carry t = 0's");
+        assert!(rows[gone..].iter().all(|row| row == &rows[gone - 1]), "the rows after the loss carry the last held one's");
         let classical = result["motion"]["classical"].as_array().unwrap();
-        assert!(classical[1..].iter().all(|c| c == false), "{classical:?}");
+        assert!(classical[gone..].iter().all(|c| c == false), "{classical:?}");
         let flagged = result["diagnostics"]["approximations"]["flagged"].as_str().unwrap_or("");
         assert!(flagged.contains("无原子被俘获"), "{flagged}");
     }

@@ -80,9 +80,9 @@
 //! The trap beam's focus is the origin. Its trap is each state's potential with the beams'
 //! interference left out (`Model::potential`); its Hessian at the focus gives the trap's principal
 //! axes and frequencies (`Trap`). An atom is held while its mechanical energy, ħ²κ²/2m plus its
-//! potential relative to far from the trap beam, is negative: the potential the engine's force
-//! derives from, Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ of its current internal state, less the same with the trap beam
-//! off (`Local::trap`).
+//! potential relative to far from the trap beam, is negative -- or, unbound, until it leaves the trap's
+//! region (engine.rs # Loss): the potential the engine's force derives from, Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ of its
+//! current internal state, less the same with the trap beam off (`Local::trap`).
 use crate::ground::{self,Ground};
 use crate::ledger::BUDGET;
 use crate::linear::{hermitian_eigenvalues,Dense,Lu};

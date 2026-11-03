@@ -107,9 +107,18 @@
 //! its Doppler shift.
 //!
 //! # Loss
-//! An atom is lost when it is no longer bound to the trap beam: its mechanical energy, ħ²κ²/2m plus
-//! its potential (model.rs `Model::trap_potential`: Re⟨ψ|H_eff|ψ⟩ of its current internal state
-//! less the same with the trap beam off, so U → 0 far from it), is positive at the end of a step.
+//! An atom is lost when it is no longer bound to the trap beam and has left the trap's region: its
+//! mechanical energy, ħ²κ²/2m plus its potential (model.rs `Model::trap_potential`: Re⟨ψ|H_eff|ψ⟩ of its
+//! current internal state less the same with the trap beam off, so U → 0 far from it), is positive, and
+//! the trap's harmonic part there lies above the region's depth (`Settings::region`, a solve's the
+//! reference state's depth: the region its initial positions are drawn in). An unbound atom inside the
+//! region is held until it leaves -- it may be bound again before it does, as an atom that a photon's
+//! recoil or a bright state's light shift lifts above the trap's top for a moment is: judged at every
+//! step's end alone, those moments were caught or missed as the step fell, and the loss converged with
+//! the step only as fast as it resolved them. The energy is of one state at one time: of a step without
+//! a jump, its middle -- the point the flow's first half reached, κ there with half the kick, ψ after
+//! the first half step --, else its end. (The middle's point with the end's κ errs by ∇U·v dt/2, first
+//! order: on a shallow trap's dark atoms it lost 2 % more of them at a 2 μs step.)
 //!
 //! # Randomness
 //! Every jump draws from its own counter-based stream (rng.rs: the run's seed, the trajectory, the
@@ -188,12 +197,17 @@ pub struct Settings{
     /// solve's waiting time, its pilots' run; a beat left out costs its boundary terms once over it
     /// (`Segment::resolve`). The step by default.
     pub horizon:f64,
+    /// The trap's region the loss takes (`Engine::step`): an unbound atom is lost once outside it, where
+    /// the trap's harmonic part (`axes`, `frequencies`) lies above this depth (rad/us) -- a solve's is its
+    /// initial positions' region, U_h ≤ D (lib.rs `thermal_position`). 0, the default, is none: an atom
+    /// is lost as soon as it is unbound.
+    pub region:f64,
 }
 impl Settings{
     /// The settings of a trap (model.rs `Trap`), every axis free, the loss on, the first order in
     /// the Doppler shift everywhere.
     pub fn new(dt:f64,trap:&crate::model::Trap,truncation:f64,average:bool)->Settings{
-        Settings{dt,free:[true;3],axes:trap.axes,frequencies:trap.frequencies,lab:trap.lab,truncation,average,loss:true,doppler:f64::INFINITY,beats:truncation,horizon:dt}
+        Settings{dt,free:[true;3],axes:trap.axes,frequencies:trap.frequencies,lab:trap.lab,truncation,average,loss:true,doppler:f64::INFINITY,beats:truncation,horizon:dt,region:0.}
     }
 }
 
@@ -658,6 +672,12 @@ impl<'a> Engine<'a>{
             (t.r,t.kappa)=(r,kappa);
         }else{for a in 0..3{if s.free[a]{(t.r[a],t.kappa[a])=flow(t.r[a],t.kappa[a],s.lab[a],hm,tau);}}}
     }
+    /// The harmonic part's potential at r (rad/us): along the trap's principal axes, or the free lab axes.
+    fn harmonic_potential(&self,r:[f64;3])->f64{
+        let(s,hm)=(&self.settings,self.model.hbar_over_mass);
+        if s.free==[true;3]{(0..3).map(|i|{let x=dot(s.axes[i],r);s.frequencies[i]*s.frequencies[i]*x*x}).sum::<f64>()/(2.*hm)}
+        else{(0..3).filter(|&a|s.free[a]).map(|a|s.lab[a]*s.lab[a]*r[a]*r[a]).sum::<f64>()/(2.*hm)}
+    }
     /// The harmonic part's force on κ at r (1/um per us).
     fn harmonic(&self,r:[f64;3])->[f64;3]{
         let(s,hm)=(&self.settings,self.model.hbar_over_mass);let mut f=[0.;3];
@@ -667,9 +687,10 @@ impl<'a> Engine<'a>{
     }
 
     /// One step's flow, kick and internal evolution of length dt without jumps: the norms of ψ at
-    /// the start, the middle and the end, the point of the middle, and the kick's momentum (the
-    /// light's and the trap's anharmonic part). A cluster of ground states (`exact` takes the others).
-    fn advance(&self,t:&mut Trajectory,dt:f64)->(f64,f64,f64,crate::model::Point,[f64;3]){
+    /// the start, the middle and the end, the point of the middle, the kick's momentum (the light's
+    /// and the trap's anharmonic part) and ψ at the middle. A cluster of ground states (`exact` takes
+    /// the others).
+    fn advance(&self,t:&mut Trajectory,dt:f64)->(f64,f64,f64,crate::model::Point,[f64;3],[Complex;MOST_MIXED]){
         let(m,s)=(self.model,&self.settings);
         if let Some((h,half))=&self.held{
             // Held: the internal state alone, by the generator there -- a whole step by the half
@@ -677,21 +698,21 @@ impl<'a> Engine<'a>{
             let n=m.dimension(t.cluster);let local=&h.locals[t.cluster];let n0=norm2(&t.psi,n);let mut psi=t.psi;
             let half_step=|psi:&mut [Complex;MOST_MIXED]|if dt==s.dt{let u=&half[t.cluster];let v=*psi;for i in 0..n{let mut z=Complex::ZERO;for j in 0..n{z+=u[i*n+j]*v[j];}psi[i]=z;}}
                 else{propagate(&local.hamiltonian,n,0.5*dt,psi,s.truncation);};
-            half_step(&mut psi);let nh=norm2(&psi,n);half_step(&mut psi);let n1=norm2(&psi,n);
-            t.psi=psi;t.time+=dt;return(n0,nh,n1,h.point,[0.;3]);
+            half_step(&mut psi);let nh=norm2(&psi,n);let middle=psi;half_step(&mut psi);let n1=norm2(&psi,n);
+            t.psi=psi;t.time+=dt;return(n0,nh,n1,h.point,[0.;3],middle);
         }
         self.flow(t,0.5*dt);
         let point=m.point(t.r,t.kappa);
         let n=m.dimension(t.cluster);let local=m.local(t.cluster,&point,t.time+0.5*dt);
         let n0=norm2(&t.psi,n);
-        let mut psi=t.psi;propagate(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let nh=norm2(&psi,n);
+        let mut psi=t.psi;propagate(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let nh=norm2(&psi,n);let middle=psi;
         let force=m.force(t.cluster,&local,&psi);let harmonic=self.harmonic(t.r);let mut kick=[0.;3];
         for a in 0..3{if s.free[a]{kick[a]=dt*(force[a]-harmonic[a]);t.kappa[a]+=kick[a];}}
         propagate(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let n1=norm2(&psi,n);
         t.psi=psi;
         self.flow(t,0.5*dt);
         t.time+=dt;
-        (n0,nh,n1,point,kick)
+        (n0,nh,n1,point,kick,middle)
     }
 
     /// The exact step of τ (module documentation): the flow for τ/2; at the held point every
@@ -745,7 +766,7 @@ impl<'a> Engine<'a>{
     fn free_step(&self,t:&mut Trajectory,dt:f64)->(f64,f64,[f64;3]){
         if self.takes_exact(t.cluster){
             let n=self.model.dimension(t.cluster);let n0=norm2(&t.psi,n);let kick=self.exact(t,dt,false,false);(n0,norm2(&t.psi,n),kick)
-        }else{let(n0,_,n1,_,kick)=self.advance(t,dt);(n0,n1,kick)}
+        }else{let(n0,_,n1,_,kick,_)=self.advance(t,dt);(n0,n1,kick)}
     }
     /// A trajectory's state after `count` jump-free steps of dt (the deterministic flow the step check
     /// compares): flow, kick and the internal state's no-jump evolution, no jump, no loss.
@@ -777,26 +798,31 @@ impl<'a> Engine<'a>{
         // The first order in the Doppler shift where it holds; the exact response beyond.
         let doppler=m.doppler_ratio(t.kappa);let exact=doppler>s.doppler;
         if !exact{t.doppler=t.doppler.max(doppler);}
-        let point=if self.takes_exact(t.cluster){self.exact(t,s.dt,exact,true);m.point(t.r,t.kappa)}else{
+        // The state the loss is judged at: the step's middle where it went without a jump -- the point
+        // the flow's first half reached, κ there with half the kick, ψ after the first half step, the
+        // middle's time --, else its end.
+        let(point,middle)=if self.takes_exact(t.cluster){self.exact(t,s.dt,exact,true);(m.point(t.r,t.kappa),None)}else{
             let mut left=s.dt;
             loop{
                 let start=t.clone();
-                let(n0,nh,n1,point,_)=self.advance(t,left);
-                if n1>t.threshold{break point;}
+                let(n0,nh,n1,point,kick,half)=self.advance(t,left);
+                if n1>t.threshold{let kappa:[f64;3]=std::array::from_fn(|a|point.kappa[a]+0.5*kick[a]);break(point,Some((kappa,half,t.time-0.5*left)));}
                 // The crossing on ln‖ψ‖², linear on the half where it lies; the step redone to it.
                 let(ta,tb,la,lb)=if nh<=t.threshold{(0.,0.5*left,n0.ln(),nh.ln())}else{(0.5*left,left,nh.ln(),n1.ln())};
                 let at=if lb<la{(ta+(t.threshold.ln()-la)/(lb-la)*(tb-ta)).clamp(ta,tb)}else{tb};
                 *t=start;if at>0.{self.advance(t,at);}
                 self.jump(t,t.r,t.time,exact);
                 left-=at;
-                if !(left>0.){break m.point(t.r,t.kappa);}
-                if self.takes_exact(t.cluster){self.exact(t,left,exact,true);break m.point(t.r,t.kappa);}
+                if !(left>0.){break(m.point(t.r,t.kappa),None);}
+                if self.takes_exact(t.cluster){self.exact(t,left,exact,true);break(m.point(t.r,t.kappa),None);}
             }
         };
-        // The loss: the mechanical energy above the trap's far level.
-        if s.loss{
-            let kinetic=0.5*m.hbar_over_mass*t.kappa.iter().map(|k|k*k).sum::<f64>();
-            if kinetic+m.trap_bound(t.cluster,&point,&t.psi)>0.&&kinetic+m.trap_potential(t.cluster,&point,&t.psi,t.time)>0.{t.alive=false;}
+        // The loss: an atom unbound -- its mechanical energy above the trap's far level -- outside the trap's
+        // region (`Settings::region`), of that one state.
+        if s.loss&&self.harmonic_potential(point.r)>s.region{
+            let(kappa,psi,time)=match &middle{Some((kappa,psi,time))=>(*kappa,psi,*time),None=>(t.kappa,&t.psi,t.time)};
+            let kinetic=0.5*m.hbar_over_mass*kappa.iter().map(|k|k*k).sum::<f64>();
+            if kinetic+m.trap_bound(t.cluster,&point,psi)>0.&&kinetic+m.trap_potential(t.cluster,&point,psi,time)>0.{t.alive=false;}
         }
     }
 

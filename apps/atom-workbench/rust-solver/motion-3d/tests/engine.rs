@@ -15,6 +15,7 @@ use atom_motion_3d::{initial_trajectory,simulate,Initial,Stratum};
 use atom_motion_3d::solve::{solve,Device};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
+#[path="../examples/scene/mod.rs"] mod scene;
 
 fn fixture()->Value{serde_json::from_str(include_str!("fixtures/tweezer_pgc.json")).unwrap()}
 fn matrix(v:&Value)->Matrix{
@@ -416,4 +417,38 @@ fn the_held_twin_at_fourth_order_averages_to_its_master_equation(){
     }}
     println!("largest |z| {:.2} (output {}, state {})",worst.0,worst.1,worst.2);
     assert!(worst.0<=4.,"output {} state {}: |z| {:.2}",worst.1,worst.2,worst.0);
+}
+
+/// A shallow trap's loss against the step (rust-solver/tests/fixtures/shallow_probe_motion.json: the
+/// default scene's tweezer at 0.6 mW, 128 uK deep, its probe on F = 2 → F' = 2 at 1 mW/cm², the atom
+/// at 30 uK, 500 us): the probe pumps every atom into F = 1 within the first sample, dark from then on
+/// and its energy kept, so that past it an atom is lost only by the step. 1024 trajectories on shared
+/// streams at the step the line took (2 us) and at a quarter of it. The loss was judged on the end's κ
+/// with the middle's potential -- first order in dt: 2.7 % of the atoms lost in the dark at 2 us --; on
+/// the middle's state alone the dark atoms stay, and the losses at the two steps differ by no more than
+/// their discordant trajectories' spread (three standard errors of the sign test), with the trap's
+/// region (the solve's, engine.rs `Settings::region`) as without.
+#[test]
+fn a_shallow_trap_s_dark_atoms_stay_whatever_the_step(){
+    use rayon::prelude::*;
+    let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/shallow_probe_motion.json")).unwrap();
+    let mut r=scene::request(&fixture["payload"]);let(duration,outputs,count)=(500.,26,1024u64);
+    r.times_us=(0..outputs).map(|i|duration*i as f64/(outputs-1) as f64).collect();
+    let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();
+    let interval=duration/(outputs-1) as f64;
+    // Each trajectory's first sample it is lost by (None: held to the end), `steps` steps per sample.
+    let lost=|steps:usize,region:f64|->Vec<Option<usize>>{
+        let mut s=Settings::new(interval/steps as f64,&initial.traps[reference],f64::EPSILON,true);s.region=region;let engine=Engine::new(&model,s.clone());
+        (0..count).into_par_iter().map(|index|{let mut t=initial_trajectory(&model,&s,&initial,0x3D_5EED,index,Stratum::single(index));
+            for i in 1..outputs{for _ in 0..steps{if t.alive{engine.step(&mut t);}}if !t.alive{return Some(i);}}None}).collect()};
+    for region in [0.,initial.depths[reference]]{
+        let(coarse,fine)=(lost(10,region),lost(40,region));
+        let total=|v:&[Option<usize>]|v.iter().filter(|x|x.is_some()).count() as f64;
+        let dark=coarse.iter().filter(|x|x.map_or(false,|i|i>=2)).count();
+        let discordant=coarse.iter().zip(&fine).filter(|(a,b)|a.is_some()!=b.is_some()).count() as f64;
+        println!("region {region:.1}: lost {} at 2 us ({dark} in the dark), {} at 0.5 us, {discordant} discordant",total(&coarse),total(&fine));
+        if region==0.{assert!(dark<=4,"{dark} dark atoms lost at 2 us");}
+        assert!((total(&coarse)-total(&fine)).abs()<=3.*discordant.sqrt(),"region {region}: lost {} at 2 us, {} at 0.5 us, {discordant} discordant",total(&coarse),total(&fine));
+    }
 }

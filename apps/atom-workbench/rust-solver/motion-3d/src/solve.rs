@@ -398,7 +398,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let fourth=device==Device::Cpu;
     let Some(mut pilot_candidate)=next_candidate(request,&mut ladder,false,&mut failed)else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
     // The reference state: the largest initial population; its trap sets ω per axis.
-    let trap=pilot_candidate.trap();
+    let(trap,depth)=pilot_candidate.reference();
     if trap.frequencies.iter().any(|&w|!(w>0.)){return Err(Stop::Error(NOT_CONFINED.into()));}
     // The first step: the light pattern's phase k_max v_T per step at sqrt(η × the temperature
     // target), or without light the trap's own ω.
@@ -408,7 +408,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // The finest step the work bound allows (`MOST_STEPS`), in steps per interval.
     let most=(MOST_STEPS/(outputs-1)).max(1);
     let steps=((interval*rate/(A_PRIORI_SHARE*TEMPERATURE_TARGET).sqrt()).ceil() as usize).clamp(1,most);
-    let plain=|steps:usize,truncation:f64|Settings::new(interval/steps as f64,&trap,truncation,true);
+    // The loss's region is the reference trap's (engine.rs `Settings::region`): its initial positions' region.
+    let plain=|steps:usize,truncation:f64|{let mut s=Settings::new(interval/steps as f64,&trap,truncation,true);s.region=depth;s};
     // The pilots' exponentials to double precision; the beats their exact steps leave out within the share
     // the run's take at most, the step's population budget over the whole run (engine.rs `Segment::resolve`).
     let piloting=|steps:usize|{let mut s=plain(steps,f64::EPSILON);s.beats=A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*s.dt/duration;s.horizon=duration;s};
@@ -695,8 +696,8 @@ impl Candidate{
     /// Its estimates but the fold's leave the statistics room on the binding targets: a fold could still make
     /// it fit.
     fn fits_unfolded(&self,binds:[bool;2])->bool{TARGETS.iter().zip(binds).all(|(&target,b)|!b||target-self.others()-A_PRIORI_SHARE*target>0.)}
-    /// The trap of its reference state, the largest initial population: ω per axis.
-    fn trap(&self)->Trap{let i=&self.initial;i.traps[(0..i.states.len()).max_by(|&a,&b|i.states[a].2.total_cmp(&i.states[b].2)).unwrap()]}
+    /// Its reference state, the largest initial population: its trap (ω per axis) and depth.
+    fn reference(&self)->(Trap,f64){let i=&self.initial;let k=(0..i.states.len()).max_by(|&a,&b|i.states[a].2.total_cmp(&i.states[b].2)).unwrap();(i.traps[k],i.depths[k])}
 }
 /// The next candidate along the rule's allowances that builds (a model that fails, its tables not
 /// converging, is passed over with its error kept).
@@ -978,7 +979,7 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
         velocity,position,
         classical:estimates.iter().enumerate().map(|(i,e)|held(i)&&classical(e,frequencies)).collect(),
         trajectories,needed:trajectories,time_step_us:dt,
-        method:format!("半经典 3D：经典质点（位置、动量）携带{internal}，量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），机械能高于势阱深度即算损失，{trajectories} 条轨迹，步长 {dt:.3} μs；控制变量：谐振孪生（T）{}",if twin{"与静止孪生（布居）"}else{""}),
+        method:format!("半经典 3D：经典质点（位置、动量）携带{internal}，量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），机械能高于势阱深度且已离开势阱区即算损失，{trajectories} 条轨迹，步长 {dt:.3} μs；控制变量：谐振孪生（T）{}",if twin{"与静止孪生（布居）"}else{""}),
         reason:None,
         approximations:ledger,
         device:Device::Cpu,device_note:None,
