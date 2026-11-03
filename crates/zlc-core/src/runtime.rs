@@ -578,7 +578,12 @@ fn ancestry(publication:&Arc<Publication>) -> Option<HashMap<Arc<str>,Read>> {
 /// it keeps showing while a component's new shot is still being derived. Each
 /// board owns its own, so what another surface reads never changes this one.
 #[derive(Default)]
-pub struct Front(HashMap<Arc<str>,Read>);
+pub struct Front {
+    selected: HashMap<Arc<str>,Read>,
+    /// The windows it was shown in: a group kept at a run its signal has replaced since
+    /// is shown in them again (that run's history went with it).
+    windows: HashMap<(Arc<str>,usize),Read>,
+}
 
 /// The shot a group's leaves are shown at: theirs when they agree; else, when each
 /// stems from one shot of one source run, the slowest leaf's.
@@ -607,15 +612,15 @@ fn coherent_front(state:&State,requests:&[(Generation,Arc<str>,Option<usize>)],p
         let names=Arc::new(run.signals.iter().filter(|(_,signal)|!run.sealed || signal.latest.is_some())
             .map(|(name,_)|name.clone()).collect::<HashSet<_>>());
         for name in names.iter() {bundle_of.insert(name.clone(),names.clone());}
-        // A route is of its source's current shots: one bound to a source run only while
-        // that run is the source's current one, and once ended only beside a source run
-        // that has ended too (v2 seals a processor at its source's end and withdraws it
-        // otherwise); one following the signal across runs only while it runs.
-        let route=run.source.as_ref().filter(|source|source.coherent && match source.generation {
-            Some(generation) => state.signals.get(&source.signal)==Some(&generation)
-                && (!run.sealed || state.runs.get(&generation).is_some_and(|source|source.sealed)),
-            None => !run.sealed,
-        });
+        // Membership is declared, not read off run state: a consumer bound to a run of its
+        // source (a processor's subscription, a panel's derivation) is a member of that
+        // signal's group from its begin until its owner releases the route or leaves,
+        // whether it has published, ended, or is of a replaced source run -- its group
+        // then has no newer complete shot and keeps the one it showed. A run following
+        // the signal across runs is one only while it runs (v2: only a processor stays a
+        // route once ended).
+        let route=run.source.as_ref().filter(|source|source.coherent && source.declared
+            && (source.generation.is_some() || !run.sealed));
         for (name,signal) in &run.signals {
             retained.insert(name.clone(),signal);
             if let Some(event)=&signal.latest {
@@ -680,23 +685,28 @@ fn coherent_front(state:&State,requests:&[(Generation,Arc<str>,Option<usize>)],p
                 if !joined.contains_key(name) { if let Some(read)=at_shot(name,shot) {joined.insert(name.clone(),read);} }
             }
         }
-        coherent &= required.iter().all(|name|joined.get(name)
-            .is_some_and(|read|state.signals.get(name)==Some(&read.key().generation)));
+        // Every member at that shot. Its run may be one its signal has replaced since: the
+        // group's newest complete shot is still the previous run's while a member has no
+        // result of the new one.
+        coherent &= required.iter().all(|name|joined.contains_key(name));
         // A board never goes back to an older shot of a source run than it showed (a panel
         // never regresses): a group behind it -- a member that joined late, a processor
         // replaying its source's run -- keeps what it showed until it has caught up.
         if let Some(shot)=shot.as_ref().filter(|_|coherent) {
-            coherent &= !previous.0.iter().filter(|(name,_)|component.contains(*name)).any(|(_,read)|
+            coherent &= !previous.selected.iter().filter(|(name,_)|component.contains(*name)).any(|(_,read)|
                 read.shot_roots().iter().any(|shown|shot.iter().any(|root|root.0==shown.0 && root.1<shown.1)));
         }
+        // No newer complete shot: the group keeps the one it showed (v2 previous_front), of
+        // whichever runs. A member that never had a result has none to keep; one whose
+        // signal left the Runtime has left the group.
         if !coherent {
-            joined=previous.0.iter().filter(|(name,read)|component.contains(*name)
-                && state.signals.get(*name)==Some(&read.key().generation)).map(|(name,read)|(name.clone(),read.clone())).collect();
+            joined=previous.selected.iter().filter(|(name,_)|component.contains(*name) && state.signals.contains_key(*name))
+                .map(|(name,read)|(name.clone(),read.clone())).collect();
             let roots:HashSet<_>=required.iter().filter_map(|name|joined.get(name)).map(|read| {
                 let mut roots:Vec<_>=causal_events(&read.anchor().key,&read.anchor().event,true).into_iter().collect();
                 roots.sort_unstable_by_key(|(generation,revision)|(generation.as_uuid(),*revision));roots
             }).collect();
-            if !required.iter().all(|name|joined.contains_key(name)) || roots.len()!=1 {joined.clear();}
+            if roots.len()!=1 {joined.clear();}
         }
         for name in component {selected.remove(&name);if let Some(read)=joined.remove(&name) {selected.insert(name,read);}}
     }
@@ -713,8 +723,9 @@ struct Run {
 }
 /// The signal a run's commits derive from (v2 `source_name`): one run of it
 /// (`generation`), or the signal across its runs. A guarded route is a derived
-/// owner's: it ends when that source run is replaced.
-struct DerivedSource { signal: Arc<str>, generation: Option<GenerationId>, coherent: bool, guarded: bool }
+/// owner's: it ends when that source run is replaced. A declared route is a member
+/// of its source's same-shot group until its owner releases it (`release_route`).
+struct DerivedSource { signal: Arc<str>, generation: Option<GenerationId>, coherent: bool, guarded: bool, declared: bool }
 struct Subscriber {
     generation: Option<GenerationId>, follow_owner: Option<Arc<str>>,
     requests: Vec<ReadRequest>, policy: DeliveryPolicy,
@@ -926,19 +937,20 @@ impl Runtime {
     pub fn begin_derived(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value,
                          source:&PublicationKey, coherent:bool) -> Result<Generation> {
         self.begin_run(owner.into(),outputs,metadata,Some(DerivedSource {signal:source.signal.clone(),
-            generation:Some(source.generation),coherent,guarded:true}))
+            generation:Some(source.generation),coherent,guarded:true,declared:true}))
     }
 
     /// A plugin run that consumes `source` and commits each result with the
     /// source event it is of: a same-shot route of that signal like a derived
     /// owner (v2 processors and source-reading producers), so a picture and a
     /// judgement of it are selected as one shot whoever else consumes either.
-    /// It is bound to the one run of `source` it subscribed (`generation`), or
-    /// follows the signal across its runs (None), and keeps committing a
-    /// replaced run's remaining queue.
+    /// It is bound to the one run of `source` it subscribed (`generation`): a member
+    /// of that signal's group until it is released (`release_route`) or leaves,
+    /// whatever its runs' states; or follows the signal across its runs (None), a
+    /// member while it runs. It keeps committing a replaced run's remaining queue.
     pub fn begin_consuming(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value,
                            source: Arc<str>, generation: Option<GenerationId>) -> Result<Generation> {
-        self.begin_run(owner.into(),outputs,metadata,Some(DerivedSource {signal:source,generation,coherent:true,guarded:false}))
+        self.begin_run(owner.into(),outputs,metadata,Some(DerivedSource {signal:source,generation,coherent:true,guarded:false,declared:true}))
     }
 
     fn begin_run(&self, owner:Arc<str>, outputs:Vec<Declaration>, metadata:Value,
@@ -1212,22 +1224,34 @@ impl Runtime {
     pub fn read_coherent_views(&self, requests:&[(Generation,Arc<str>,Option<usize>)], front:&mut Front) -> Vec<Result<Read>> {
         let mut state=self.inner.state.lock().unwrap();
         let mut selected=coherent_front(&state,requests,front);
-        let answers=requests.iter().map(|(generation,name,width)| {
-            let read=selected.get(name).filter(|read|read.key().generation==generation.id)
-                .ok_or(RuntimeError::NoData)?;
-            let signal=signal_mut(&mut state,generation.id,name)?;
-            if let Some(width)=width {window_read_at(signal,*width,read.anchor()).map(Read::from_window)}
-            else {Ok(read.clone())}
+        let current:Vec<bool>=requests.iter().map(|(generation,name,_)|state.signals.get(name)==Some(&generation.id)).collect();
+        let answers:Vec<Result<Read>>=requests.iter().map(|(generation,name,width)| {
+            let read=selected.get(name).ok_or(RuntimeError::NoData)?;
+            match width {
+                None => Ok(read.clone()),
+                Some(width) if read.key().generation==generation.id =>
+                    window_read_at(signal_mut(&mut state,generation.id,name)?,*width,read.anchor()).map(Read::from_window),
+                // Kept at a replaced run: the window it was shown in.
+                Some(width) => front.windows.get(&(name.clone(),*width)).filter(|shown|shown.key()==read.key()).cloned().ok_or(RuntimeError::NoData),
+            }
         }).collect();
         drop(state);
         // A panel given nothing new keeps showing what it showed: that stays its board's.
-        let mut previous=std::mem::take(&mut front.0);
-        for (generation,name,_) in requests {
-            if let Some(read)=previous.remove(name).filter(|read|!selected.contains_key(name) && read.key().generation==generation.id) {
+        let mut previous=std::mem::take(&mut front.selected);
+        let mut windows=std::mem::take(&mut front.windows);
+        for (((_,name,width),answer),current) in requests.iter().zip(&answers).zip(current) {
+            if let Some(read)=previous.remove(name).filter(|_|current && !selected.contains_key(name)) {
                 selected.insert(name.clone(),read);
             }
+            if let Some(width)=width {
+                let key=(name.clone(),*width);
+                match answer {
+                    Ok(read) => {front.windows.insert(key,read.clone());}
+                    Err(_) => if let Some(shown)=windows.remove(&key) {front.windows.insert(key,shown);},
+                }
+            }
         }
-        front.0=selected;
+        front.selected=selected;
         answers
     }
 
@@ -1359,6 +1383,17 @@ impl Runtime {
 
     /// Withdraw an owner's run, ended or not (v2 withdraw_owner): its signals leave.
     pub fn withdraw(&self, owner: &str) -> Result<()> { self.remove(|state| state.owners.get(owner).copied()) }
+
+    /// The owner no longer consumes its source (a processor no longer following it):
+    /// its run keeps its signals and their lineage, but is no member of its source's
+    /// same-shot group any more. Its next consuming run declares itself again.
+    pub fn release_route(&self, owner: &str) -> Result<()> {
+        let mut state = self.inner.state.lock().unwrap();
+        let id = state.owners.get(owner).copied().ok_or(RuntimeError::UnknownGeneration)?;
+        if let Some(source) = state.runs.get_mut(&id).and_then(|run| run.source.as_mut()) { source.declared = false; }
+        notify_changes(&state);
+        Ok(())
+    }
 
     fn remove(&self, run: impl FnOnce(&State) -> Option<GenerationId>) -> Result<()> {
         let old;
@@ -1743,10 +1778,17 @@ mod tests {
         assert!(matches!(plane.commit(&terminal,&terminal_bundle),Err(RuntimeError::SourceSuperseded)));
         assert!(matches!(plane.begin_derived("expired",declaration("expired"),json!({}),final_shot.key(),true),Err(RuntimeError::SourceSuperseded)));
         assert_eq!(plane.read_latest(&terminal,"terminal").unwrap().key.ordinal,Some(3));
-        // A route of the replaced run holds none of the next run's pictures (v2 retires it).
-        let front=plane.read_coherent_views(&[(next_camera,"image".into(),None),(roi,"roi".into(),None)],&mut board);
-        assert_eq!(front[0].as_ref().unwrap().key().ordinal,Some(0));
-        assert!(front[1].is_ok());
+        // A region bound to the replaced run is still its panel's derivation: the picture keeps
+        // the last shot it showed until the region answers the next run, then both move on.
+        let front=plane.read_coherent_views(&[(next_camera.clone(),"image".into(),None),(roi.clone(),"roi".into(),None)],&mut board);
+        assert_eq!((front[0].as_ref().unwrap().key().generation,front[0].as_ref().unwrap().key().ordinal),(camera.id(),Some(3)));
+        let next0=plane.read_latest(&next_camera,"image").unwrap();
+        plane.seal(&roi,json!({"reason":"replaced"})).unwrap();
+        let roi=plane.begin_derived("roi",declaration("roi"),json!({}),next0.key(),true).unwrap();
+        plane.commit(&roi,&Bundle {parents:vec![next0.clone()],..bundle(&schema,&["roi"],0)}).unwrap();
+        let front=plane.read_coherent_views(&[(next_camera.clone(),"image".into(),None),(roi,"roi".into(),None)],&mut board);
+        assert!(front.iter().all(|read|read.as_ref().unwrap().shot_roots().iter().all(|root|root.0==next_camera.id())
+            && read.as_ref().unwrap().key().ordinal==Some(0)));
     }
 
     #[test]
@@ -1805,15 +1847,21 @@ mod tests {
         let mut with_fit=tree.clone();with_fit.push((fit.clone(),"amplitude".into(),None));
         assert_eq!(ordinals(plane.read_coherent_views(&with_fit,&mut Front::default())),[2,2,2,2,2,2,3]);
         assert_eq!(ordinals(plane.read_coherent_views(&[tree[0].clone(),tree[1].clone(),tree[4].clone(),tree[5].clone()],&mut Front::default())),[4;4]);
-        // A processor is no derived owner: it still commits its replaced source
-        // run's queue, and once finished it holds none of the next run's pictures.
+        // A processor is no derived owner: it still commits its replaced source run's
+        // queue. Finished, it is still its source's member: the next run's pictures wait
+        // at the last shot both have until its next run judges one, then move on with it.
         plane.seal(&camera,json!({})).unwrap();
         let next=plane.begin("camera",declaration(&["frames"]),json!({})).unwrap();
-        plane.commit(&next,&bundle(&schema,&["frames"],0)).unwrap();
+        let next0=plane.commit(&next,&bundle(&schema,&["frames"],0)).unwrap().publications[0].clone();
         plane.commit(&occupancy,&of(&frames3,&["occupied","counts"],5)).unwrap();
         plane.seal(&occupancy,json!({})).unwrap();
-        let pair=vec![(next,"frames".into(),None),(occupancy,"occupied".into(),None)];
-        assert_eq!(ordinals(plane.read_coherent_views(&pair,&mut board)),[0,5]);
+        let pair=vec![(next.clone(),"frames".into(),None),(occupancy,"occupied".into(),None)];
+        assert_eq!(ordinals(plane.read_coherent_views(&pair,&mut board)),[3,5]);
+        let occupancy=plane.begin_consuming("occupancy",declaration(&["occupied","counts"]),json!({}),"frames".into(),Some(next.id())).unwrap();
+        let pair=vec![(next.clone(),"frames".into(),None),(occupancy.clone(),"occupied".into(),None)];
+        assert_eq!(ordinals(plane.read_coherent_views(&pair,&mut board)),[3,5]);
+        plane.commit(&occupancy,&of(&next0,&["occupied","counts"],0)).unwrap();
+        assert_eq!(ordinals(plane.read_coherent_views(&pair,&mut board)),[0,0]);
     }
 
     #[test]
@@ -2148,47 +2196,61 @@ mod tests {
     }
 
     #[test]
-    fn a_route_holds_its_sources_shot_only_while_it_is_of_that_run() {
-        // v2 seals a processor at its source's end and withdraws it otherwise (Stop,
-        // failure, a replaced source run): a route that ended before its source, or is
-        // bound to a replaced run, holds none of the source's pictures, sealed or not.
+    fn a_consumer_is_its_sources_member_while_it_is_declared() {
+        // A processor's subscription declares it a member of its source's group from its
+        // begin, whatever its own or its source's run state: while it has no result of the
+        // source's newest shots -- not begun on the new run, not published, still taking a
+        // replaced run's queue -- the board keeps the last shot both have; all flip together.
+        // It leaves when it is no longer declared: withdrawn with its signals (v2: a
+        // processor that ends before its source -- failed, stopped -- is), or released
+        // when it no longer follows its source (its completed run keeps its signals).
         let plane=Runtime::new();let schema=schema();
         let declaration=|name:&str|vec![Declaration {signal:name.into(),schema:schema.clone(),storage:Storage::Latest}];
-        let of=|source:&Arc<Delivery>,ordinal|Bundle {parents:vec![source.publications[0].clone()],..bundle(&schema,&["occupied"],ordinal)};
-        let shown=|camera:&Generation,occupancy:&Generation| plane.read_coherent_views(&[(camera.clone(),"frames".into(),None),
-            (occupancy.clone(),"occupied".into(),None)],&mut Front::default()).into_iter().map(|read|read.map(|read|read.key().ordinal.unwrap())).collect::<Vec<_>>();
+        let of=|source:&Arc<Publication>,ordinal|Bundle {parents:vec![source.clone()],..bundle(&schema,&["occupied"],ordinal)};
+        let frame=|camera:&Generation,ordinal|plane.commit(camera,&bundle(&schema,&["frames"],ordinal)).unwrap().publications[0].clone();
+        let mut board=Front::default();
+        let mut shown=|camera:&Generation,occupancy:&Generation| plane.read_coherent_views(&[(camera.clone(),"frames".into(),None),
+            (occupancy.clone(),"occupied".into(),None)],&mut board).into_iter()
+            .map(|read|read.map(|read|(read.shot_roots().iter().next().unwrap().0==camera.id(),read.key().ordinal.unwrap()))).collect::<Vec<_>>();
         let camera=plane.begin("camera",declaration("frames"),json!({})).unwrap();
-        let shot0=plane.commit(&camera,&bundle(&schema,&["frames"],0)).unwrap();
+        let shot0=frame(&camera,0);
         let occupancy=plane.begin_consuming("occupancy",declaration("occupied"),json!({}),"frames".into(),Some(camera.id())).unwrap();
         plane.commit(&occupancy,&of(&shot0,0)).unwrap();
-        plane.commit(&camera,&bundle(&schema,&["frames"],1)).unwrap();
-        assert_eq!(shown(&camera,&occupancy),[Ok(0),Ok(0)]);
-        // Ended while its source runs: the camera goes on.
-        plane.seal(&occupancy,json!({"status":"failed"})).unwrap();
-        assert_eq!(shown(&camera,&occupancy),[Ok(1),Ok(0)]);
-        // Bound to a replaced run and still taking that run's queue: the new run goes on.
+        let shot1=frame(&camera,1);
+        assert_eq!(shown(&camera,&occupancy),[Ok((true,0)),Ok((true,0))]);
+        // Failed while its source runs: its host withdraws it, and the picture goes on.
+        plane.retire(&occupancy).unwrap();
+        assert_eq!(shown(&camera,&occupancy),[Ok((true,1)),Err(RuntimeError::NoData)]);
+        // Begun again: no result yet, the picture keeps what it shows.
         let occupancy=plane.begin_consuming("occupancy",declaration("occupied"),json!({}),"frames".into(),Some(camera.id())).unwrap();
+        frame(&camera,2);
+        assert_eq!(shown(&camera,&occupancy),[Ok((true,1)),Err(RuntimeError::NoData)]);
+        plane.commit(&occupancy,&of(&shot1,1)).unwrap();
+        assert_eq!(shown(&camera,&occupancy),[Ok((true,1)),Ok((true,1))]);
+        // The camera starts again while the processor still takes the replaced run's queue,
+        // completes, and begins on the new run: the last shot both have stays until it judges one.
         plane.seal(&camera,json!({})).unwrap();
+        let old=camera;
         let camera=plane.begin("camera",declaration("frames"),json!({})).unwrap();
-        let next0=plane.commit(&camera,&bundle(&schema,&["frames"],0)).unwrap();
-        plane.commit(&occupancy,&of(&shot0,0)).unwrap();
-        plane.commit(&camera,&bundle(&schema,&["frames"],1)).unwrap();
-        assert_eq!(shown(&camera,&occupancy),[Ok(1),Ok(0)]);
-        plane.seal(&occupancy,json!({"status":"stopped"})).unwrap();
-        // Of the current run: the picture waits for its judgement, also after the camera
-        // ends; one that ended with its source keeps the final group.
-        let occupancy=plane.begin_consuming("occupancy",declaration("occupied"),json!({}),"frames".into(),Some(camera.id())).unwrap();
-        plane.commit(&occupancy,&of(&next0,0)).unwrap();
-        plane.seal(&camera,json!({})).unwrap();
-        assert_eq!(shown(&camera,&occupancy),[Ok(0),Ok(0)]);
-        let last=plane.read_views(&[(camera.clone(),"frames".into(),None)]).remove(0).unwrap();
-        plane.commit(&occupancy,&Bundle {parents:vec![last.anchor().clone()],..bundle(&schema,&["occupied"],1)}).unwrap();
+        let next0=frame(&camera,0);
+        frame(&camera,1);
+        assert_eq!(shown(&camera,&occupancy),[Ok((false,1)),Ok((false,1))]);
         plane.seal(&occupancy,json!({"status":"completed"})).unwrap();
-        assert_eq!(shown(&camera,&occupancy),[Ok(1),Ok(1)]);
+        assert_eq!(shown(&camera,&occupancy),[Ok((false,1)),Ok((false,1))]);
+        let occupancy=plane.begin_consuming("occupancy",declaration("occupied"),json!({}),"frames".into(),Some(camera.id())).unwrap();
+        assert_eq!(shown(&camera,&occupancy),[Ok((false,1)),Ok((false,1))]);
+        plane.commit(&occupancy,&of(&next0,0)).unwrap();
+        assert_eq!(shown(&camera,&occupancy),[Ok((true,0)),Ok((true,0))]);
+        drop(old);
+        // No longer following its source: released, it holds no picture, and keeps its signals.
+        plane.release_route("occupancy").unwrap();
+        frame(&camera,2);
+        assert_eq!(shown(&camera,&occupancy),[Ok((true,2)),Ok((true,0))]);
         // Withdrawn (a stopped processor, a removed node): its signals leave.
         plane.withdraw("occupancy").unwrap();
         assert!(plane.signals().iter().all(|signal|signal.signal.as_ref()!="occupied"));
         assert!(matches!(plane.withdraw("occupancy"),Err(RuntimeError::UnknownGeneration)));
+        assert!(matches!(plane.release_route("occupancy"),Err(RuntimeError::UnknownGeneration)));
     }
 
     #[test]
@@ -2252,9 +2314,11 @@ mod tests {
         assert_eq!(shown(&mut board,&occupancy),[Some(3),Some(3)]);
         plane.retire(&occupancy).unwrap();
         let occupancy=plane.begin_consuming("occupancy",declaration("occupied"),json!({}),"frames".into(),Some(camera.id())).unwrap();
+        // Behind what the board shows, the replay shows nothing new: the board keeps shot 3
+        // with the judgement it had of it.
         for ordinal in 0..3 {
             judge(&occupancy,ordinal);
-            assert_eq!(shown(&mut board,&occupancy),[None,None],"replaying shot {ordinal}");
+            assert_eq!(shown(&mut board,&occupancy),[Some(3),Some(3)],"replaying shot {ordinal}");
         }
         judge(&occupancy,3);
         assert_eq!(shown(&mut board,&occupancy),[Some(3),Some(3)]);

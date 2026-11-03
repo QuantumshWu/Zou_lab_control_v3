@@ -4,7 +4,7 @@
 // column on one line per port; under it the Control, Connection and Ports
 // cards.  A click picks an item (Shift/Ctrl adds), a click between cards
 // picks that gap; dragging a card moves it.  Every change is a command.
-import { ComboBox, Readout, Segmented, SpinBox, assign, checkBox, command, element, setChecked, setElided, setMiddle, setState, setText, setTitle, statusDot, switchButton, token } from "../fluent/index.js";
+import { ComboBox, Readout, Segmented, SpinBox, assign, checkBox, command, element, hidePopup, isShown, setChecked, setElided, setMiddle, setState, setText, setTitle, showPopup, statusDot, switchButton, token } from "../fluent/index.js";
 import { RepeatsBox, TextBox, ValueBox, confirmPulseDiscard, drawBadges, editCommand } from "./widgets.js";
 const itemKey = (item) => `${item[0]}|${item[1]}`;
 const parseKey = (key) => { const at = key.indexOf("|"); return [key.slice(0, at), key.slice(at + 1)]; };
@@ -222,13 +222,12 @@ class SourcePopup {
     send;
     id;
     current;
-    root = element("div", "card bordered pulse-binding pulse-source-popup");
+    root = element("div", "card bordered pulse-binding pulse-source-popup beside");
     choice;
     constructor(send, id, current) {
         this.send = send;
         this.id = id;
         this.current = current;
-        this.root.popover = "auto";
         // v2 _commit_source: a new source is asked of the owner; the popup stays, showing what it holds.
         this.choice = new Segmented(value => {
             if (value !== this.current)
@@ -246,16 +245,10 @@ class SourcePopup {
         this.root.addEventListener("toggle", event => { if (event.newState === "closed")
             this.root.remove(); });
     }
-    get open() { return this.root.isConnected && this.root.matches(":popover-open"); }
+    get open() { return isShown(this.root); }
     project(current) { this.current = current; this.choice.setCurrent(current); }
-    openBelow(anchor) {
-        document.body.append(this.root);
-        this.root.showPopover();
-        const rect = anchor.getBoundingClientRect(), gap = token("--popup-gap"), pad = token("--window-pad");
-        this.root.style.left = `${Math.max(pad, Math.min(rect.left, innerWidth - pad - this.root.offsetWidth))}px`;
-        const below = rect.bottom + gap;
-        this.root.style.top = `${below + this.root.offsetHeight <= innerHeight - pad ? below : Math.max(pad, rect.top - gap - this.root.offsetHeight)}px`;
-    }
+    /** Below the badge (above it where it fits better), bound to it (popover.ts). */
+    openBelow(anchor) { showPopup(this.root, anchor); }
 }
 /** A Subpulse on the strip (ComponentCard): closed, one card for the block
  * -- Duration, its total with the source badge, what it holds, its name --
@@ -286,13 +279,14 @@ class ComponentCard {
         this.name.root.placeholder = "Name";
         this.badge.type = "button";
         this.badge.tabIndex = -1;
-        let wasOpen = false;
-        this.badge.addEventListener("pointerdown", () => { wasOpen = Boolean(this.popup?.open); });
+        // A click on the badge opens its popup and, while it is open, closes it.
         this.badge.addEventListener("click", () => {
-            if (!this.component || wasOpen) {
-                wasOpen = false;
+            if (this.popup?.open) {
+                hidePopup(this.popup.root);
                 return;
             }
+            if (!this.component)
+                return;
             this.popup = new SourcePopup(send, id, this.component.source);
             this.popup.openBelow(this.badge);
         });

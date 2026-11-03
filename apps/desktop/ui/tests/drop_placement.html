@@ -6,9 +6,10 @@
 <pre id="result">pending</pre>
 <script type="module">
 // Run with tools/test_ui.ps1. Where a combo box's list opens (fluent/combo.ts dropPlacement): below unless it fits
-// better above, and the tree, editable and checkable combos' lists placed by it in this window. A select's own
-// ::picker opens only on a user's gesture, so its placement is looked at in the running app.
-import {dropPlacement, EditableCombo} from '../dist/fluent/combo.js';
+// better above, and the tree, editable and checkable combos' lists placed by it in this window; every popup bound
+// to its box (fluent/popover.ts): moved with it in the same layout, left open by a drag elsewhere.
+import {ComboBox, dropPlacement, EditableCombo} from '../dist/fluent/combo.js';
+import {Menu} from '../dist/fluent/menu.js';
 import {TreeCombo} from '../dist/fluent/tree_combo.js';
 import {CheckCombo} from '../dist/fluent/check_combo.js';
 const assert = (condition, message) => { if (!condition) throw Error(message); };
@@ -32,6 +33,8 @@ const leaves=(n,prefix)=>Array.from({length:n},(_,i)=>({key:`${prefix}${i}`,labe
 function tree(groups,current){const combo=new TreeCombo(()=>{});combo.setTree(groups,current);return combo}
 const openTree=combo=>combo.root.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));
 const close=list=>{if(list.matches(':popover-open'))list.hidePopover()};
+const pointer=(type,x,y)=>document.body.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,button:0,buttons:type==='pointerup'?0:1,pointerId:1,pointerType:'mouse',clientX:x,clientY:y}));
+const offset=(list,box)=>{const l=list.getBoundingClientRect(),b=box.getBoundingClientRect();return [Math.round(l.left-b.left),Math.round(l.top-b.bottom)]};
 try {
  await check('the rule: below when the whole list fits there, else the side with more room',()=>{
    equal(dropPlacement(100,300,50),{up:false,height:100},'fits below');
@@ -79,7 +82,7 @@ try {
  await check('an editable combo and a checkable combo near the bottom open above',async()=>{
    const edit=new EditableCombo(()=>{});edit.fill(['one','two','three'],'one');const host=stand(edit.root,-8);await settle();
    const opener=edit.root.querySelector('.edit-combo-open');opener.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true}));opener.click();await settle();
-   const list=edit.root.querySelector('.edit-combo-list');assert(list.matches(':popover-open'),'opened');
+   const list=document.querySelector('.edit-combo-list');assert(list.matches(':popover-open'),'opened');
    equal(side(list,edit.root),{up:true,scrolls:false},'editable');
    close(list);host.remove();
    const ticks=new CheckCombo();ticks.set([{value:'a',label:'A'},{value:'b',label:'B'}],['a']);const tickHost=stand(ticks.root,-8);await settle();
@@ -91,6 +94,38 @@ try {
    top.open();await settle();
    equal(side(document.querySelector('.check-menu:popover-open'),top.root),{up:false,scrolls:false},'checkable near the top');
    close(document.querySelector('.check-menu:popover-open'));topHost.remove();
+ });
+ await check('a list moves with its box in the same layout, and a drag elsewhere leaves it open',async()=>{
+   const combo=new ComboBox(()=>{});combo.setChoices([['a','Alpha'],['b','Beta']]);combo.value='a';
+   const host=stand(combo.root,120);await settle();
+   combo.root.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0}));
+   const list=document.querySelector('.select-list:popover-open');assert(list,'opened');
+   assert(!combo.root.matches(':open'),"the browser's own picker never opens");
+   const at=offset(list,combo.root);
+   for(const [x,y] of [[90,160],[300,140],[20,400]]){host.style.left=`${x}px`;host.style.top=`${y}px`;equal(offset(list,combo.root),at,`moved to ${x},${y}`)}
+   // A press, a drag and its release outside it: still open.  A press and release in place: closed.
+   pointer('pointerdown',600,500);pointer('pointermove',640,520);pointer('pointerup',640,520);
+   assert(list.matches(':popover-open'),'a drag closed it');
+   pointer('pointerdown',600,500);pointer('pointerup',600,500);
+   assert(!list.matches(':popover-open'),'a click elsewhere left it open');
+   host.remove();
+ });
+ await check('a pick and Esc close it; Esc goes to the list alone',async()=>{
+   let picked=null;const combo=new ComboBox(value=>{picked=value});combo.setChoices([['a','Alpha'],['b','Beta']]);combo.value='a';
+   const host=stand(combo.root,120);await settle();
+   const open=()=>{combo.root.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0}));return document.querySelector('.select-list:popover-open')};
+   let list=open();
+   list.querySelectorAll('.select-row')[1].dispatchEvent(new PointerEvent('pointerup',{bubbles:true,button:0}));
+   equal(picked,'b','picked');assert(!list.matches(':popover-open'),'open after a pick');
+   list=open();let heard=false;host.addEventListener('keydown',()=>{heard=true});
+   combo.root.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+   assert(!list.matches(':popover-open')&&!heard,'Esc');
+   host.remove();
+   // A menu's command pressed again closes its menu.
+   const anchor=document.createElement('button');const menuHost=stand(anchor,300);
+   new Menu([{label:'One',action:()=>{}}]).openBelow(anchor);assert(document.querySelector('.menu:popover-open'),'menu');
+   new Menu([{label:'One',action:()=>{}}]).openBelow(anchor);assert(!document.querySelector('.menu:popover-open'),'menu toggled');
+   menuHost.remove();
  });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
 } catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}

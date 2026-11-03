@@ -21,3 +21,4 @@ export * from "./flow_graph.js";
 export * from "./readout.js";
 export * from "./elide.js";
 export * from "./popup.js";
+export * from "./popover.js";

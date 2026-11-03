@@ -729,11 +729,17 @@ impl PluginHost {
 
     /// A processor follows `signal` (None: no longer): each generation of it that begins is
     /// subscribed at its run.begin, before its first commit, for the run started on it.
+    /// One that no longer follows is no member of its source's same-shot group: a run of
+    /// it that already completed keeps its signals, but holds no picture any more.
     pub fn follow(&self, instance: &str, signal: Option<&str>) {
         let mut state = self.inner.state.lock().unwrap();
         match signal {
             Some(signal) => { state.awaiting.insert(instance.to_owned(), (signal.to_owned(), None)); }
-            None => { state.awaiting.remove(instance); }
+            None => {
+                state.awaiting.remove(instance);
+                drop(state);
+                let _ = self.inner.runtime.release_route(public_instance(instance));
+            }
         }
     }
 

@@ -312,3 +312,71 @@ impl Science {
 impl Drop for Science {
     fn drop(&mut self) { self.derivatives.clear(); }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::panels::tests::{event, geometry, image_schema, latest, status_schema};
+    use crate::panels::Panels;
+
+    /// The document draws what the board captured: once the camera and its Occupancy have
+    /// both ended, every later sync (held or not) shows the same last shot with its rings,
+    /// and across a restart the new run's picture comes only with its judgement.
+    #[test]
+    fn the_document_shows_the_last_judged_shot_steadily_after_stop_and_across_a_restart() {
+        let runtime = Runtime::new();
+        let (image, status) = (image_schema(), status_schema());
+        let mut panels = Panels::new();
+        panels.add(&runtime, "frames", "image").unwrap();
+        let overlays: BTreeMap<String, String> = [("panel-1".to_owned(), "occupied".to_owned())].into();
+        let mut layers = LiveOverlays::default();
+        let mut document = FigureDocument::new(crate::pulse_host::services(), None);
+        let all: BTreeSet<String> = ["panel-1".to_owned()].into();
+        document.execute(r#"{"id": 0, "action": "ready", "dpr": 1.0}"#, Default::default(), None, None).unwrap();
+        document.finish_presentation(&all, &all);
+        let mut last: Option<Vec<u8>> = None;
+        // (image ordinal, its run, whether rings are drawn, whether the pixels changed)
+        let mut sync = |held: bool| -> (u64, zlc_core::runtime::GenerationId, bool, bool) {
+            panels.sync_generations(&runtime);
+            let targets = json!({"panel-1": {"semantic": {"kind": "image"}}});
+            let input = panels.capture(&runtime, &targets, &json!({"panels": [], "plot_kinds": []}), &overlays).remove(0);
+            let source = input.read.clone().expect("the board shows a picture");
+            let mut read = HostRead::new(source.clone()).unwrap();
+            let layer = layers.layer("panel-1", &source, input.overlay.as_ref()).unwrap();
+            read.overlay = Some(layer.clone());
+            let command = json!({"id": 0, "action": "sync_panels", "held": if held { json!(["panel-1"]) } else { json!([]) },
+                "inputs": [{"panel": "panel-1", "kind": "image", "window": 1, "signal": "frames", "epoch": input.epoch}], "targets": targets});
+            let execution = document.execute(&command.to_string(), [("panel-1".to_owned(), read)].into(), None, None).unwrap();
+            assert!(execution.state["panels"][0]["error"].is_null(), "{}", execution.state["panels"][0]["error"]);
+            let front = execution.fronts.get("panel-1").map(|front| front.pixels.as_slice().to_vec());
+            let changed = front.as_ref().is_some_and(|pixels| last.as_ref() != Some(pixels));
+            if let Some(pixels) = front { last = Some(pixels); }
+            let fronts: BTreeSet<String> = execution.fronts.keys().cloned().collect();
+            document.finish_presentation(&all, &fronts);
+            (source.key().ordinal.unwrap(), source.key().generation, input.overlay.is_some() && layer.is_some(), changed)
+        };
+        let camera = runtime.begin("camera", latest("frames", &image), json!({})).unwrap();
+        let occupancy = runtime.begin_consuming("occupancy", latest("occupied", &status), geometry(), "frames".into(), Some(camera.id())).unwrap();
+        let mut shots = Vec::new();
+        for ordinal in 0..3u64 {
+            shots.push(runtime.commit(&camera, &event(&image, "frames", ordinal, vec![])).unwrap().publications[0].clone());
+            runtime.commit(&occupancy, &event(&status, "occupied", ordinal, vec![shots[ordinal as usize].clone()])).unwrap();
+            let (shown, run, rings, _) = sync(false);
+            assert_eq!((shown, run, rings), (ordinal, camera.id(), true));
+        }
+        runtime.seal(&camera, json!({})).unwrap();
+        runtime.seal(&occupancy, json!({"status": "completed"})).unwrap();
+        for turn in 0..6 { assert_eq!(sync(turn % 2 == 1), (2, camera.id(), true, false), "stopped turn {turn}"); }
+        // Restart: the old picture with its rings stays until the new run's first judgement.
+        let next = runtime.begin("camera", latest("frames", &image), json!({})).unwrap();
+        let first = runtime.commit(&next, &event(&image, "frames", 0, vec![])).unwrap().publications[0].clone();
+        assert_eq!(sync(false), (2, camera.id(), true, false));
+        let occupancy = runtime.begin_consuming("occupancy", latest("occupied", &status), geometry(), "frames".into(), Some(next.id())).unwrap();
+        runtime.commit(&next, &event(&image, "frames", 1, vec![])).unwrap();
+        assert_eq!(sync(false), (2, camera.id(), true, false));
+        runtime.commit(&occupancy, &event(&status, "occupied", 0, vec![first])).unwrap();
+        let (ordinal, run, rings, changed) = sync(false);
+        assert_eq!((ordinal, run, rings), (0, next.id(), true));
+        assert!(changed);
+    }
+}

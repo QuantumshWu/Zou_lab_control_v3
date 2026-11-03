@@ -85,12 +85,12 @@ struct Options {
     #[serde(default)]
     device: Device,
 }
-/// A motion solve's device (`options.device`): "gpu" or "cpu", the CPU when absent.
+/// A motion solve's device (`options.device`): "gpu" or "cpu", the GPU when absent.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum Device {
-    Gpu,
     #[default]
+    Gpu,
     Cpu,
 }
 fn default_duration() -> f64 {
@@ -117,7 +117,7 @@ impl Default for Options {
             include_mean: true,
             mean_only: false,
             mean_horizon_us: default_mean_horizon(),
-            device: Device::Cpu,
+            device: Device::Gpu,
         }
     }
 }
@@ -136,6 +136,9 @@ struct Request {
     options: Options,
     #[serde(default)]
     progress: bool,
+    /// The lane a worker serves, told with its `warmup`: the trajectory lane's starts the GPU.
+    #[serde(default)]
+    lane: Option<String>,
 }
 
 fn write_line(message: &Value) -> bool {
@@ -144,14 +147,15 @@ fn write_line(message: &Value) -> bool {
 }
 
 /// One protocol response. `capabilities` and `warmup` (the worker start-up
-/// LAPACK self-check) are operations; anything else is an rb87-full/2 solve,
+/// LAPACK self-check; the trajectory lane's worker also starts the motion's
+/// GPU in the background) are operations; anything else is an rb87-full/2 solve,
 /// which with `progress` first streams every checkpoint's result as
 /// `checkpoint` progress (the same contract, marked `progress`).
 fn respond(request: Request) -> Value {
     let id = request.id;
     match request.op.as_deref() {
         Some("capabilities") => return json!({"id":id,"protocol":NATIVE_PROTOCOL,"capabilities":[FULL_MODEL_SCHEMA]}),
-        Some("warmup") => return match lattice_core_adapter::warmup() {
+        Some("warmup") => return match lattice_core_adapter::warmup().inspect(|_| if request.lane.as_deref() == Some("trajectory") { motion3d_adapter::prepare() }) {
             Ok(()) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"ready":true}),
             Err(error) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"error":error}),
         },
@@ -260,9 +264,10 @@ mod tests {
         model
     }
     /// The default scene's motion as the app sends it (tests/fixtures/default_scene_motion.json), with
-    /// the held twin kept (motion-3d control.rs): the result passes the adapter's checks -- every
-    /// row's populations sum to one (`lattice_core_adapter::row_errors`) -- with the twin's control
-    /// variate correcting them.
+    /// the held twin kept (motion-3d control.rs): the result passes the adapter's checks -- the
+    /// engine's rows, before the projection, sum to one (`lattice_core_adapter::row_errors`, the
+    /// trace it reports) -- with the twin's control variate correcting them, and every published
+    /// population lies in [0, 1] (the rows projected onto the probability simplex).
     #[test]
     fn the_default_scene_s_motion_keeps_every_row_s_sum_with_the_held_twin() {
         let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/default_scene_motion.json")).unwrap();
@@ -272,11 +277,16 @@ mod tests {
         assert!(out["error"].is_null(), "{}", out["error"]);
         let result = &out["result"];
         assert!(result["diagnostics"]["method"].as_str().unwrap().contains("静止孪生"), "the held twin is kept: {}", result["diagnostics"]["method"]);
-        let worst = result["populations"].as_array().unwrap().iter().map(|row| (row.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).sum::<f64>() - 1.).abs()).fold(0., f64::max);
-        assert!(worst <= 1e-7, "a row's sum is off by {worst:.2e}");
+        let trace = result["diagnostics"]["traceError"].as_f64().unwrap();
+        assert!(trace <= 1e-7, "a row's sum before the projection is off by {trace:.2e}");
+        let rows: Vec<Vec<f64>> = result["populations"].as_array().unwrap().iter().map(|row| row.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect()).collect();
+        let worst = rows.iter().map(|row| (row.iter().sum::<f64>() - 1.).abs()).fold(0., f64::max);
+        assert!(worst <= 1e-7, "a published row's sum is off by {worst:.2e}");
+        let outside = rows.iter().flatten().filter(|&&p| !(0. ..=1.).contains(&p)).count();
+        assert_eq!(outside, 0, "every published population lies in [0, 1]");
     }
     /// A motion request is a trajectory alone of 3D motion, its trap one of its beams; a tweezer
-    /// without light shift confines nothing. The device is the CPU or the GPU.
+    /// without light shift confines nothing. The device is the GPU (by default) or the CPU.
     #[test]
     fn a_motion_request_is_3d_motion_in_the_trap_it_names() {
         let mut model = motion_model();
@@ -296,6 +306,6 @@ mod tests {
         let device = |name: &str| serde_json::from_value::<Options>(json!({"device":name})).map(|o| o.device);
         assert_eq!((device("gpu").unwrap(), device("cpu").unwrap()), (Device::Gpu, Device::Cpu));
         assert!(device("tpu").is_err());
-        assert_eq!(serde_json::from_value::<Options>(json!({})).unwrap().device, Device::Cpu);
+        assert_eq!(serde_json::from_value::<Options>(json!({})).unwrap().device, Device::Gpu);
     }
 }

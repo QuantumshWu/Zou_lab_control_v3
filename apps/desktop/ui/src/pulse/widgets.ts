@@ -3,7 +3,7 @@
 // with its binding badge and popup (FluentScanLineEdit): the badge says
 // where the next run's value comes from -- the Pulse default, a Scan slot,
 // an API caller or the Config file -- and opens the choice.
-import { EditableCombo, Segmented, SpinBox, assign, checked, confirm, element, glyphFont, inkText, metrics, pointPx, setChecked, setText, setTitle, switchButton, token } from "../fluent/index.js";
+import { EditableCombo, Segmented, SpinBox, assign, checked, confirm, element, glyphFont, hidePopup, inkText, isShown, metrics, pointPx, setChecked, setText, setTitle, showPopup, switchButton } from "../fluent/index.js";
 import type { FieldVM } from "./types.js";
 
 /** v2 confirm_pulse_discard: the one question Open, Clear all and a recorded pulse ask before the draft goes. */
@@ -218,7 +218,7 @@ const SOURCES: [string, string][] = [["default", "Default"], ["api", "API"], ["c
  * values, and a two-line note.  A choice is asked of the owner and the popup
  * stays open, showing what the owner accepted. */
 class BindingPopup {
-  readonly root = element("div", "card bordered pulse-binding");
+  readonly root = element("div", "card bordered pulse-binding beside");
   private scan: HTMLButtonElement;
   private source: Segmented;
   private name: EditableCombo;
@@ -226,7 +226,6 @@ class BindingPopup {
   private effectiveValue = element("span", "pulse-binding-value elided");
   private note = element("p", "pulse-binding-note");
   constructor(private send: Send, private owner: Owner, private field: FieldVM, private shownText: () => string) {
-    this.root.popover = "auto";
     this.scan = switchButton(on => this.commit(on, this.field.source));
     // A click on a source chooses it; the source already chosen asks nothing.
     this.source = new Segmented(value => { if (value !== this.field.source) this.commit(checked(this.scan), String(value)); });
@@ -243,7 +242,7 @@ class BindingPopup {
     this.root.addEventListener("toggle", event => { if ((event as ToggleEvent).newState === "closed") this.root.remove(); });
     this.project(field);
   }
-  get open(): boolean { return this.root.isConnected && this.root.matches(":popover-open"); }
+  get open(): boolean { return isShown(this.root); }
   private commit(scan: boolean, source: string): void {
     this.send(editCommand(this.owner, "binding", { ...bindingTarget(this.field.field_id), scan, source }), "Changing the field's source…");
   }
@@ -278,16 +277,8 @@ class BindingPopup {
     setText(this.note, note);
     setTitle(this.note, note);
   }
-  toggleBelow(anchor: HTMLElement): void {
-    if (this.open) { this.root.hidePopover(); return; }
-    document.body.append(this.root);
-    this.root.showPopover();
-    const rect = anchor.getBoundingClientRect(), gap = token("--popup-gap"), pad = token("--window-pad");
-    const left = Math.max(pad, Math.min(rect.left, innerWidth - pad - this.root.offsetWidth));
-    const below = rect.bottom + gap;
-    this.root.style.left = `${left}px`;
-    this.root.style.top = `${below + this.root.offsetHeight <= innerHeight - pad ? below : Math.max(pad, rect.top - gap - this.root.offsetHeight)}px`;
-  }
+  /** Below the badge (above it where it fits better), bound to it (popover.ts). */
+  openBelow(anchor: HTMLElement): void { showPopup(this.root, anchor); }
 }
 
 /** A value box with its binding badge inside, on the right (FluentScanLineEdit). */
@@ -303,14 +294,12 @@ export class ValueBox {
     this.box = new TextBox(commit);
     this.badge.type = "button";
     this.badge.tabIndex = -1;
-    // A press while the popup is open closes it (light dismiss would close it first and the click open it again).
-    let wasOpen = false;
-    this.badge.addEventListener("pointerdown", () => { wasOpen = Boolean(this.popup?.open); });
+    // A click on the badge opens its popup and, while it is open, closes it.
     this.badge.addEventListener("click", () => {
+      if (this.popup?.open) { hidePopup(this.popup.root); return; }
       if (!this.field) return;
-      if (wasOpen) { wasOpen = false; return; }
       this.popup = new BindingPopup(this.send, this.owner, this.field, () => this.box.root.value);
-      this.popup.toggleBelow(this.badge);
+      this.popup.openBelow(this.badge);
     });
     this.root.append(this.box.root, this.badge);
   }
@@ -328,7 +317,7 @@ export class ValueBox {
     // A read-only card's binding is not editable either (v2 _read_only).
     const bindable = field.binding_editable && editable;
     assign(this.badge, "disabled", !(bindable && (writable || field.config_active)));
-    if (this.popup?.open) { if (this.badge.disabled || (!writable && !field.config_active)) this.popup.root.hidePopover(); else this.popup.project(field); }
+    if (this.popup?.open) { if (this.badge.disabled || (!writable && !field.config_active)) hidePopup(this.popup.root); else this.popup.project(field); }
     const shade = tone(field, writable);
     if (shade) this.root.dataset.tone = shade; else delete this.root.dataset.tone;
     // v2: the tooltip, then the binding said in words, then what the owner says of it.

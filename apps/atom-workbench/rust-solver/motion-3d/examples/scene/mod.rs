@@ -39,3 +39,11 @@ pub fn reference(name:&str)->Value{
     serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_else(|e|panic!("{}: {e}",path.display()))).unwrap()
 }
 fn folder(variable:&str)->String{std::env::var(variable).unwrap_or_else(|_|panic!("set {variable} to the validation folder"))}
+/// The process's CPU time so far (s): its threads' user and kernel time.
+pub fn cpu_seconds()->f64{
+    #[link(name="kernel32")]
+    extern "system"{fn GetCurrentProcess()->*mut std::ffi::c_void;fn GetProcessTimes(process:*mut std::ffi::c_void,creation:*mut u64,exit:*mut u64,kernel:*mut u64,user:*mut u64)->i32;}
+    let(mut creation,mut exit,mut kernel,mut user)=(0u64,0u64,0u64,0u64);
+    unsafe{GetProcessTimes(GetCurrentProcess(),&mut creation,&mut exit,&mut kernel,&mut user);}
+    (kernel+user) as f64*1e-7
+}

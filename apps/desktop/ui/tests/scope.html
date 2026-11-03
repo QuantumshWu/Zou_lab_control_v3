@@ -12,6 +12,7 @@
 import {PanelBoard} from '../dist/views/board.js';
 import {ComboBox} from '../dist/fluent/combo.js';
 import {TreeCombo} from '../dist/fluent/tree_combo.js';
+import {DataEditorView} from '../dist/views/data_editor.js';
 const assert = (condition, message) => { if (!condition) throw Error(message); };
 const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
 const results=[];
@@ -55,7 +56,12 @@ try {
    assert([...select(REPEAT).options].every((option,at)=>option===rows[at]),'the list was refilled');
    // v2: the list's row is the one action "Scope"; its coordinate belongs to the closed box.
    const coordinate=node=>getComputedStyle(node.querySelector('.cycle-at')).display;
-   equal(coordinate([...select(REPEAT).options].find(option=>option.value==='@scope')),'none','the list row says the coordinate');
+   const box=select(REPEAT),r=box.getBoundingClientRect();
+   press(box,r.right-2);
+   const row=[...document.querySelectorAll('.select-list:popover-open .select-row')].find(node=>node.querySelector('.cycle-at'));
+   assert(row&&row.textContent.startsWith('Scope'),'the list has no Scope row');
+   equal(coordinate(row),'none','the list row says the coordinate');
+   key(box,'Escape');
    assert(coordinate(select(REPEAT).querySelector('selectedcontent'))!=='none','the box hides the coordinate');
  });
  await check('the strip names what the panel has pinned, in its axis\'s colour',async()=>{
@@ -130,6 +136,23 @@ try {
    equal(tree.root.querySelector('selectedcontent').textContent,'Off','none row');
    tree.setTree([{heading:'h',leaves:[{key:'a',label:'a',text:'h · a'}]}],'','(none)');await settle();
    equal(tree.root.querySelector('selectedcontent').textContent,'(none)','none row renamed');
+ });
+ await check("the Figure Viewer's armed Scope stays armed as each step is projected (v2 keeps the row)",async()=>{
+   const LABELS=['0.5','1','1.5'];let index=1;
+   const projection=()=>({dataset:{name:'d',dtype:'float64',unit:'',note:'',source:'',dtype_choices:[['float64','float64']]},domain_choices:[['point','Point']],
+     axes:[{id:'f',name:'freq',size:3,unit:'',domain:'point',domain_label:'Point'}],selected_axis:'f',axis_values:{values:LABELS,blank_hint:''},
+     table:{component:'value',component_choices:[['value','Value',true]],sigma_enabled:false,shape:[1,1],block:{row:0,column:0,cells:[['1']]},blank_help:'',
+       row_headers:['0'],column_headers:['v'],structure:[[['freq',3]]],axes:[{axis_id:'f',name:'freq',size:3,unit:'',mode:'scope',index,scope_label:LABELS[index]}]},
+     dirty:false,modified:false,can_apply:false,can_save:true,save_suggested:'d.npz',message:'',message_severity:''});
+   const view=new DataEditorView('data-1',()=>{});document.body.append(view.root);view.update(projection());
+   [...view.root.querySelectorAll('.segmented button')].find(button=>button.textContent==='Data').click();await settle();
+   const box=view.root.querySelector('.data-view-form select');
+   press(box);
+   assert(box.classList.contains('cycle-active')&&document.activeElement===box,'not armed');
+   index=2;view.update(projection());await settle();
+   equal(box.querySelector('selectedcontent').textContent,'Scope: 1.5','the step projected');
+   assert(box.isConnected&&document.activeElement===box&&box.classList.contains('cycle-active'),'the projection disarmed it');
+   view.root.remove();
  });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
 } catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
