@@ -35,8 +35,10 @@ use rayon::prelude::*;
 use std::f64::consts::TAU;
 use std::time::Instant;
 
-/// The candidate's model: its index in the ladder, or the first with explicit excited states.
+/// The candidate's model: its index in the ladder, or the first with explicit excited states; a trailing
+/// `f` folds its clusters of ground states at fourth order.
 fn candidate(request:&Request,which:&str)->(f64,Model){
+    if let Some(which)=which.strip_suffix('f'){let a=Ground::allowances(request).unwrap()[which.parse::<usize>().unwrap()];return(a,Model::with_order(request,a,true).unwrap());}
     let ladder=Ground::allowances(request).unwrap();
     if which=="x"{for &a in &ladder{let m=Model::with(request,a).unwrap();if (0..m.clusters()).any(|k|m.mixed(k)){return(a,m);}}panic!("no candidate keeps explicit states");}
     let a=ladder[which.parse::<usize>().unwrap()];(a,Model::with(request,a).unwrap())
@@ -99,7 +101,7 @@ fn check(request:&Request,which:&str){
                 let dense=g.local_with(&e,k,r,t,&tabulated).unwrap();let scale=dense.effective.largest();
                 for a in 0..n{for b in 0..n{worst_dense=worst_dense.max((full(&x,a,b)-dense.effective[(a,b)]).abs()/scale);}}
                 if !model.mixed(k){
-                    let l=Generator::of(&model.local(k,&p,t),n);let gs=l.gradient.iter().flat_map(|v|v.iter()).map(|z|z.abs()).fold(0.,f64::max);
+                    let local=model.local(k,&p,t);let l=Generator{n,hamiltonian:local.hamiltonian[..n*n].to_vec(),scalar:local.scalar,gradient:model.gradients(k,&local)};let gs=l.gradient.iter().flat_map(|v|v.iter()).map(|z|z.abs()).fold(0.,f64::max);
                     for a in 0..n{for b in 0..n{worst_local=worst_local.max((full(&x,a,b)-full(&l,a,b)).abs()/scale);
                         for q in 0..3{worst_gradient=worst_gradient.max((x.gradient[q][a*n+b]-l.gradient[q][a*n+b]).abs()/gs);}}}
                 }

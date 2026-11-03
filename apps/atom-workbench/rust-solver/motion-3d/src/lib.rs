@@ -111,7 +111,10 @@ fn initial_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,purpos
     let p:[f64;3]=std::array::from_fn(|i|{let z=normal_quantile(latin.next(&mut rng));if sigma[i]>0.{(kt/hm).sqrt()*quantum[i]*z}else{0.}});
     let mut psi=[Complex::ZERO;model::MOST_MIXED];psi[state]=Complex::ONE;
     let threshold=engine::jump_stream(seed,index,0).open_uniform();
-    Trajectory{cluster,psi,r:lab(q),kappa:lab(p),time:0.,threshold,alive:true,jumps:0,doppler:0.,beats:0.,seed,index}
+    let mut t=Trajectory{cluster,psi,r:lab(q),kappa:lab(p),time:0.,threshold,alive:true,jumps:0,doppler:0.,beats:0.,seed,index};
+    // The bare initial state's slow part at fourth order (engine.rs `slow_start`).
+    let point=model.point(t.r,t.kappa);engine::slow_start(model,&mut t,&point,0.);
+    t
 }
 
 /// The outputs of a run: one group per `group` trajectories, sums at every output time, the held

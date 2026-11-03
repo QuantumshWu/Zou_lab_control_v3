@@ -4,7 +4,10 @@
 //! on the clusters' densities, its step within a fraction of the generators' scale), from the same
 //! initial state: the populations over time. Writes both, with the trajectories' standard errors, to <out>.json for the comparison with
 //! the population core's internal solve of the same scene.
-//! `cargo run --profile iterate -p atom-motion-3d --example frozen -- <scene> [trajectories] [t_end_us] [interval_us] [out.json] [x y z (um)] [dt_us]`
+//! With `fourth` the clusters of ground states take the fourth-order fold (ground.rs `Ground::fourth`):
+//! H̃, L̃ and, after each jump into such a cluster, its slow part Π σ Π† with the transient's photon
+//! Σ S σ S† (the far-detuned form, trace one to O(S²)); 0 trajectories leave the engine out.
+//! `cargo run --profile iterate -p atom-motion-3d --example frozen -- <scene> [trajectories] [t_end_us] [interval_us] [out.json] [x y z (um)] [dt_us] [fourth]`
 #[path="scene/mod.rs"] mod scene;
 use atom_motion_3d::engine::Settings;
 use atom_motion_3d::linear::Dense;
@@ -19,7 +22,7 @@ fn main(){
     let out=arg(5,&format!("frozen_{name}.json"));
     let r=[arg(6,"0").parse::<f64>().unwrap(),arg(7,"0").parse::<f64>().unwrap(),arg(8,"0").parse::<f64>().unwrap()];
     let request=scene::scene(&name);
-    let clock=Instant::now();let model=Model::new(&request).unwrap();let g=&model.ground;
+    let clock=Instant::now();let model=Model::with_order(&request,f64::INFINITY,arg(10,"")=="fourth").unwrap();let g=&model.ground;
     println!("{name}: model {:.2} s; clusters {:?}; {} items ({} kept), cut {:.3e} rad/us, pole {:.3e} rad/us, scale {:.3e} rad/us; focused {:?}, table error {:.1e}, quartic {:.1e}",
         clock.elapsed().as_secs_f64(),g.clusters.iter().map(|c|c.dimension()).collect::<Vec<_>>(),g.items.len(),g.items.iter().filter(|i|!i.folded).count(),g.cut,g.pole,g.generator_scale,
         model.focused,model.table_error,model.quartic);
@@ -28,27 +31,72 @@ fn main(){
     let e=g.eliminate(&model.hamiltonian_at_point(r)).unwrap();
     let static_generator=g.clusters.iter().all(|c|c.groups.iter().all(|x|x.entries.iter().all(|e|e.2==0.))&&c.paths.iter().all(|p|p.residual==0.)
         &&c.classes.iter().all(|k|k.photons.iter().all(|p|p.1==0.)));
-    let locals=|t:f64|->Vec<atom_motion_3d::ground::Local>{(0..g.clusters.len()).map(|k|g.local_at(&e,k,r,t).unwrap()).collect()};
+    let fourth=arg(10,"").starts_with("fourth");let readout2=arg(10,"")=="fourth2";
+    // Each cluster's generator and jumps (the fourth order's for a cluster of ground states with
+    // `fourth`), and its post-jump slow part Π there (None: the second order's σ − ½{Y, σ}).
+    let locals=|t:f64|->Vec<atom_motion_3d::ground::Local>{(0..g.clusters.len()).map(|k|{let mut l=g.local_at(&e,k,r,t).unwrap();
+        if fourth&&g.clusters[k].excited.is_empty(){let f=g.fourth(&e,k,r,t).unwrap();l.effective=f.effective;l.jumps=f.jumps;}l}).collect()};
+    let slows=|t:f64|->Vec<Option<Dense>>{(0..g.clusters.len()).map(|k|(fourth&&g.clusters[k].excited.is_empty()).then(||g.fourth(&e,k,r,t).unwrap().slow)).collect()};
     let mut rho:Vec<Dense>=g.clusters.iter().map(|c|{let n=c.dimension();Dense::from_fn(n,n,|i,j|if i==j&&i<c.states.len(){let s=g.ground_states[c.states[i]];request.initial_density[s*STATES+s]}else{Complex::ZERO})}).collect();
     let point=model.point(r,[0.;3]);
     let transients=|t:f64|->Vec<atom_motion_3d::model::Transient>{(0..g.clusters.len()).map(|k|model.transient(k,&point,t)).collect()};
     // dρ/dt: −i(Hρ − ρH†), and each class's σ = Σ J ρ J† into its target's ground states through the
     // jump's transient: σ − ½{Y, σ} there, Σ_a S σ S† into each piece's target.
+    let fixed_slow=slows(0.);
+    let q0=transients(0.);
+    // A transient piece's trace factor at fourth order: its photons per jump, κ = 1 − Γ²/(Δ² + Γ²/4) of
+    // ‖S f‖², Δ the ringing of its excited group against its channels (far detuned an extra photon, at
+    // resonance −3: the dressing's rebuild delays the next).
+    let kappa=|b:usize,piece:&atom_motion_3d::model::Piece|->f64{if !fourth||!g.clusters[b].excited.is_empty(){return 1.;}
+        let(ch,_)=g.clusters[b].coherent[piece.coherent][0];let i=g.excited_groups[piece.excited][0];let gamma=g.decay[(i,i)].re;
+        let delta=e.excited_energies[i]-e.energies[ch.state]-g.carriers[ch.carrier].detuning;1.-gamma*gamma/(delta*delta+0.25*gamma*gamma)};
+    // The slow part's trace balance per cluster: D = 1 − Π†Π − Σ κ S†S (O(S²)), taken as ½{D, σ}.
+    let balance:Vec<Option<Dense>>=(0..g.clusters.len()).map(|b|fixed_slow[b].as_ref().map(|slow|{let nt=slow.rows;
+        let mut d=Dense::from_fn(nt,nt,|i,j|if i==j{Complex::ONE}else{Complex::ZERO});d.add_scaled(-Complex::ONE,&slow.adjoint_product(slow));
+        for piece in &q0[b].pieces{let ns=g.clusters[piece.target].states.len();let w=kappa(b,piece);
+            for a in 0..3{let s=Dense::from_fn(ns,nt,|i,j|piece.ops[a][i*nt+j]);d.add_scaled(Complex::new(-w,0.),&s.adjoint_product(&s));}}
+        d})).collect();
     let derivative=|rho:&[Dense],l:&[atom_motion_3d::ground::Local],q:&[atom_motion_3d::model::Transient]|->Vec<Dense>{
         let mut out:Vec<Dense>=rho.iter().zip(l).map(|(p,x)|{let h=&x.effective;let mut d=h.product(p).scaled(Complex::new(0.,-1.));d.add_scaled(Complex::new(0.,1.),&p.product(&h.adjoint()));d}).collect();
         for(k,x)in l.iter().enumerate(){for(class,jumps)in g.clusters[k].classes.iter().zip(&x.jumps){
             let b=class.target;let nt=g.clusters[b].states.len();let mut sigma=Dense::zeros(nt,nt);
             for j in jumps{sigma.add_scaled(Complex::ONE,&j.product(&rho[k]).product(&j.adjoint()));}
             let y=Dense::from_fn(nt,nt,|i,j|q[b].y[i*nt+j]);let mut kept=sigma.clone();
-            kept.add_scaled(Complex::new(-0.5,0.),&y.product(&sigma));kept.add_scaled(Complex::new(-0.5,0.),&sigma.product(&y));
+            // A cluster of ground states: the second order's jump as it is (the release's), or the fourth
+            // order's slow part and the transient's photon; a mixed cluster: σ − ½{Y, σ} and the photon.
+            let transient=fixed_slow[b].is_some()||!g.clusters[b].excited.is_empty();
+            if let Some(slow)=&fixed_slow[b]{kept=slow.product(&sigma).product(&slow.adjoint());let d=balance[b].as_ref().unwrap();
+                kept.add_scaled(Complex::new(0.5,0.),&d.product(&sigma));kept.add_scaled(Complex::new(0.5,0.),&sigma.product(d));}
+            else if transient{kept.add_scaled(Complex::new(-0.5,0.),&y.product(&sigma));kept.add_scaled(Complex::new(-0.5,0.),&sigma.product(&y));}
             for i in 0..nt{for j in 0..nt{out[b][(i,j)]+=kept[(i,j)];}}
-            for piece in &q[b].pieces{let ns=g.clusters[piece.target].states.len();
+            for piece in q[b].pieces.iter().filter(|_|transient){let ns=g.clusters[piece.target].states.len();
+                let w=kappa(b,piece);
                 for a in 0..3{let s=Dense::from_fn(ns,nt,|i,j|piece.ops[a][i*nt+j]);let m=s.product(&sigma).product(&s.adjoint());
-                    for i in 0..ns{for j in 0..ns{out[piece.target][(i,j)]+=m[(i,j)];}}}}
+                    for i in 0..ns{for j in 0..ns{out[piece.target][(i,j)]+=m[(i,j)]*w;}}}}
         }}
         out
     };
-    let readout=|rho:&[Dense],l:&[atom_motion_3d::ground::Local]|->Vec<f64>{let mut p=vec![0.;STATES];for(k,x)in l.iter().enumerate(){for(a,b)in p.iter_mut().zip(g.populations(k,x,&rho[k])){*a+=b;}}p};
+    if fourth{
+        let q=transients(0.);let bare=rho.clone();
+        for(b,x)in bare.iter().enumerate(){let Some(slow)=&fixed_slow[b]else{continue};let nt=x.rows;
+            rho[b]=slow.product(x).product(&slow.adjoint());let d=balance[b].as_ref().unwrap();
+            rho[b].add_scaled(Complex::new(0.5,0.),&d.product(x));rho[b].add_scaled(Complex::new(0.5,0.),&x.product(d));
+            for piece in &q[b].pieces{let ns=g.clusters[piece.target].states.len();let w=kappa(b,piece);
+                for a in 0..3{let s=Dense::from_fn(ns,nt,|i,j|piece.ops[a][i*nt+j]);let m=s.product(x).product(&s.adjoint());
+                    for i in 0..ns{for j in 0..ns{rho[piece.target][(i,j)]+=m[(i,j)]*w;}}}}
+        }
+    }
+    let fourths:Vec<Option<atom_motion_3d::ground::Fourth>>=(0..g.clusters.len()).map(|k|(fourth&&!readout2&&g.clusters[k].excited.is_empty()).then(||g.fourth(&e,k,r,0.).unwrap())).collect();
+    let readout=|rho:&[Dense],l:&[atom_motion_3d::ground::Local]|->Vec<f64>{let mut p=vec![0.;STATES];for(k,x)in l.iter().enumerate(){
+        let q=match &fourths[k]{Some(f)=>g.populations_fourth(k,f,&rho[k]),None=>g.populations(k,x,&rho[k])};for(a,b)in p.iter_mut().zip(q){*a+=b;}
+        // The transients under way: every class's jumps into a fourth-order cluster, its states' surplus.
+        for(class,jumps)in g.clusters[k].classes.iter().zip(&x.jumps){let b=class.target;let Some(f)=&fourths[b]else{continue};
+            let nt=g.clusters[b].states.len();let mut sigma=Dense::zeros(nt,nt);for j in jumps{sigma.add_scaled(Complex::ONE,&j.product(&rho[k]).product(&j.adjoint()));}
+            for(i,m)in &f.surplus{let z:f64=(0..nt).map(|a|(0..nt).map(|c|m[(a,c)]*sigma[(c,a)]).fold(Complex::ZERO,|u,v|u+v).re).sum();if z==0.{continue;}
+                p[g.excited_states[*i]]+=z;
+                // The ground state it came from: ½{Q, σ}'s diagonal.
+                let qs=m.product(&sigma);for(a,&s2)in g.clusters[b].states.iter().enumerate(){p[g.ground_states[s2]]-=qs[(a,a)].re;}}
+        }}p};
     let fixed=locals(0.);let at=|t:f64|if static_generator{fixed.clone()}else{locals(t)};
     let fixed_q=transients(0.);let at_q=|t:f64|if static_generator{fixed_q.clone()}else{transients(t)};
     // RK4's step: a tenth of the generators' scale (the largest column sum of H), 5 ns at most.
@@ -91,7 +139,7 @@ fn main(){
     let engine_steps=(interval/arg(9,"0.2").parse::<f64>().unwrap()).round().max(1.) as usize;
     let mut settings=Settings::new(interval/engine_steps as f64,&trap,f64::EPSILON,false);settings.free=[false;3];settings.loss=false;
     let clock=Instant::now();
-    let outcome=simulate_from(&model,&settings,&initial,7,0,count,8,engine_steps,outputs,&[],r);
+    let outcome=simulate_from(&model,&settings,&initial,7,0,count.max(16),8,engine_steps,outputs,&[],r);
     let est=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:[1.;3]},&[]);
     if engine_only{exact=est.iter().map(|e|e.populations.clone()).collect();}
     println!("engine: {count} trajectories, {:.1} s, {} jumps",clock.elapsed().as_secs_f64(),outcome.jumps);
