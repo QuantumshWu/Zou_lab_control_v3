@@ -33,7 +33,7 @@ fn main(){
     for _ in 0..steps{let f=model.force(t.cluster,&l,&t.psi);sink+=f[0];}
     let force=clock.elapsed().as_secs_f64()/steps as f64;
     let clock=Instant::now();
-    for _ in 0..steps/10{let ph=model.photons(t.cluster,&p,&t.psi,0.,None);sink+=ph.amplitude[0].0[0][0].re;}
+    for _ in 0..steps/10{let ph=model.photons(t.cluster,&p,&t.psi,0.,None);sink+=ph.amplitude[0][0][0].re;}
     let photons=clock.elapsed().as_secs_f64()/(steps/10) as f64;
     let clock=Instant::now();
     for _ in 0..steps/10{let q=model.populations(t.cluster,&p,&t.psi,0.);sink+=q[0];}

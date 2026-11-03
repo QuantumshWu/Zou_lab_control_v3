@@ -5,22 +5,30 @@
 //!
 //! # Targets
 //! The semiclassical method is accurate to about `TEMPERATURE_TARGET` in T and
-//! `POPULATION_TARGET` in the populations in its regime; the trajectories are run until two
-//! standard errors of every population and the loss lie within those targets at every output
-//! time, and of every temperature (each axis, relative) at the output times in the regime --
-//! outside it the method's own error is larger and the temperature is a reference only.
+//! `POPULATION_TARGET` in the populations in its regime; the trajectories are run until each
+//! output's total estimated error (below) lies within those targets: every population's and the
+//! loss's at every output time, and every temperature's (each axis, relative) at the output times
+//! in the regime -- outside it the method's own error is larger and the temperature is a reference
+//! only.
 //!
-//! # Ledger
-//! Every a-priori approximation's estimate enters the solve's ledger (ledger.rs), against the
-//! budget, the a-priori share of the population target. The model's are fixed before the run: the
-//! far components' and the couplings' folds (ground.rs), the quartic van Vleck shifts left out, the
-//! Gaussian beams taken at their peak and the tables (model.rs). Two are measured along the
-//! trajectories: the elimination's η², each output's mean excited population (the local expansion
-//! parameter, ⟨Y⟩ of each atom's state), and the beams' profiles at the atoms. The first order in
-//! the Doppler shift takes what the budget leaves after the model's and the pilot's elimination
-//! (the exact response beyond it, engine.rs) -- or, where the elimination alone exceeds the budget,
-//! the budget on its own, as no refinement can bring that output within it. The output times whose
-//! total exceeds the budget are flagged (`Ledger::flagged`).
+//! # Ledger and the total error
+//! Every a-priori approximation's estimate enters the solve's ledger (ledger.rs), reported against
+//! its budget, the a-priori share of the population target. The decisions take that share: the
+//! couplings' and the far components' folds (ground.rs), a Gaussian beam's intensity axis (model.rs)
+//! and, per step, the first order in the Doppler shift -- what the budget leaves after the model's
+//! estimates and the pilot's elimination, or the budget on its own where the elimination alone
+//! exceeds it (the exact response beyond, engine.rs). The elimination's η² -- each output's mean
+//! excited population, the local expansion parameter ⟨Y⟩ of each atom's state -- is measured along
+//! the trajectories and is no decision yet: it enters the total (validated on resonant probes against
+//! the population core: optical pumping's population error 0.4–1.1 η², a cycling transition's 2η⁴).
+//!
+//! An output's total estimated error is the ledger's total there (its η², its mean (kv/σ)² and the
+//! profiles at the atoms with the model's estimates), the time step's bias (its step-doubling share)
+//! and CONFIDENCE standard errors: the populations' against the population target (absolute), T's
+//! against the temperature target (relative, where the method holds). The trajectories are run until
+//! the totals meet the targets -- the statistics within what the ledger and the step leave -- and an
+//! output whose total exceeds a target all the same, its a-priori share beyond it, is flagged
+//! (`Ledger::flagged`; a checkpoint's statistics still run, so only its a-priori excess is).
 //!
 //! # Time step
 //! The trap's harmonic part is moved exactly (engine.rs); what the step must resolve is the light's
@@ -31,9 +39,13 @@
 //! sqrt(η) per step, η the a-priori share), and from each one step of dt is compared with two of
 //! dt/2, without jumps. The step is accepted when (4/3 of) the differences meet their shares:
 //! - the internal state's populations, summed over the steps between two jumps (the pilot's mean
-//!   waiting time), within η ε of the population target ε -- the internal state's lag carries the
-//!   friction, so this also keeps the temperature's step error near η of its target;
-//! - the step's light impulse, relative, within η of the temperature target.
+//!   waiting time), within η ε of the population target ε;
+//! - the step's light impulse, relative, within η of the temperature target;
+//! - the light's friction, relative, within η of the temperature target: the sampled states' mean
+//!   change of the mechanical energy over the step, which the conservative forces leave alone --
+//!   the internal state's lag that carries the friction is a small share of its populations, so
+//!   their criterion alone lets T's step error grow past its share (the 3D PGC example: T 2–3 % high
+//!   at the populations' step, measured against half that step).
 //! Both scale as dt², so a step that misses is shrunk by the square root of its excess and checked
 //! again; one that meets them with room is grown the same way. The step's exponentials are summed
 //! to a share η of its own population budget, η² ε dt/waiting, instead of to double precision.
@@ -49,7 +61,8 @@
 //! # Regime
 //! A point particle has no zero-point motion: below a few vibrational quanta per axis the method
 //! cools too far. Against the 1D GMW references of the tweezer PGC (the atom on the line through
-//! the focus): heating (TW1, k_B T from 6 to 16 ħω over 10 ms) T within 6 % (mean +2 %) and the
+//! the focus; measured with v2026.11.2.6's engine, whose 3D PGC example this one reproduces within
+//! its standard errors): heating (TW1, k_B T from 6 to 16 ħω over 10 ms) T within 6 % (mean +2 %) and the
 //! populations within 0.03; cooling (TW2) T within 4.5 % down to k_B T ≈ 5 ħω, 6 % low at 4.6 ħω,
 //! 7-10 % low at 4 ħω and 10-55 % low below 3.5 ħω, the populations within 0.045 but for the first
 //! 50 µs of optical pumping (up to 0.066). Against the 2D quantum trajectories of the same scene
@@ -120,15 +133,22 @@ pub struct Solution{
 /// An estimate in the validated regime: k_B T ≥ CLASSICAL ħω along every axis (ω per axis).
 fn classical(e:&Estimate,frequencies:[f64;3])->bool{(0..3).all(|a|KT_PER_UK*e.temperature[a]>=CLASSICAL*frequencies[a])}
 
-/// The largest ratio of CONFIDENCE standard errors to the targets over every output after t = 0
-/// (the request's initial state, `start`): the populations and the loss everywhere, the
-/// temperatures where the method holds.
-fn worst_ratio(estimates:&[Estimate],frequencies:[f64;3])->f64{
-    estimates.iter().skip(1).map(|e|{
-        // The temperature to its target where the method holds; outside, a reference only.
-        let t=if classical(e,frequencies){(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a]/(TEMPERATURE_TARGET*e.temperature[a])}else{0.}).fold(0.,f64::max)}else{0.};
-        let p=e.population_errors.iter().fold(e.loss_error,|m,&x|m.max(x))/POPULATION_TARGET;
-        CONFIDENCE*t.max(p)
+/// An output's statistical errors at CONFIDENCE: the populations' and the loss's largest (absolute)
+/// and, where the method holds, T's largest relative one over the axes (None outside: a reference).
+fn statistics(e:&Estimate,frequencies:[f64;3])->(f64,Option<f64>){
+    let p=CONFIDENCE*e.population_errors.iter().fold(e.loss_error,|m,&x|m.max(x));
+    let t=classical(e,frequencies).then(||CONFIDENCE*(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a]/e.temperature[a]}else{0.}).fold(0.,f64::max));
+    (p,t)
+}
+/// What the a-priori estimates (`Accounts::apriori`) and the step's bias leave of a target: the room
+/// the statistics may take -- the whole target where nothing is left (that output is flagged).
+fn room(target:f64,taken:f64)->f64{if taken<target{target-taken}else{target}}
+/// The largest ratio of the statistical errors to their room over every output after t = 0 (the
+/// request's initial state, `start`): 1 meets the targets.
+fn worst_ratio(estimates:&[Estimate],accounts:&Accounts,frequencies:[f64;3])->f64{
+    estimates.iter().enumerate().skip(1).map(|(i,e)|{
+        let(p,t)=statistics(e,frequencies);let a=accounts.apriori[i];
+        (p/room(POPULATION_TARGET,a+accounts.bias[0])).max(t.map_or(0.,|t|t/room(TEMPERATURE_TARGET,a+accounts.bias[1])))
     }).fold(0.,f64::max)
 }
 
@@ -171,29 +191,42 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
     ledger
 }
 
-/// The ledger of a solve's estimates so far: the model's, the run's largest first-order Doppler
-/// term and, per output, the elimination's η² and the profiles at the atoms; the outputs whose total
-/// exceeds the budget flagged.
-fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance:f64)->Ledger{
+/// A solve's error accounts so far: per output the a-priori estimates' total (the model's, and there
+/// the elimination's η², the mean (kv/σ)² and the profiles at the atoms) and its η², and the time
+/// step's bias on the populations and on T.
+struct Accounts{apriori:Vec<f64>,excited:Vec<f64>,bias:[f64;2]}
+
+/// The ledger of a solve's estimates so far, and its accounts: the model's items, the elimination's
+/// largest η², the largest mean (kv/σ)² and the profiles at the atoms. With `last`, the outputs whose
+/// total estimated error -- the a-priori total, the step's bias and the statistics -- exceeds a
+/// target are flagged; before it, those whose a-priori total and bias alone do.
+fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance:f64,bias:[f64;2],frequencies:[f64;3],last:bool)->(Ledger,Accounts){
     let mut ledger=base.clone();let g=&model.ground;
     let excited:Vec<f64>=estimates.iter().map(|e|g.excited_states.iter().map(|&i|e.populations[i]).sum::<f64>()).collect();
     let profiles:Vec<f64>=estimates.iter().map(|e|e.profile).collect();let dopplers:Vec<f64>=estimates.iter().map(|e|e.doppler).collect();
     let largest=|v:&[f64]|v.iter().skip(1).copied().fold(0.,f64::max);
-    ledger.add("消去激发态",largest(&excited),"零阶绝热消去（激发态布居 η²）".into());
+    ledger.add("消去激发态",largest(&excited),"零阶绝热消去（激发态布居 η²），计入总误差".into());
     ledger.add("多普勒与反冲频移",largest(&dopplers),format!("一阶（kv/σ）²；单步超过 {:.1e} 时用精确响应",allowance));
     if !model.profiles.is_empty(){ledger.add("聚焦光在原子处的强度（沿轨迹）",largest(&profiles),"按峰值强度的平面波".into());}
-    // The outputs beyond the budget.
-    let fixed=base.used()-model.profiles.iter().map(|p|p.1).sum::<f64>();
-    let profile=|i:usize|model.profiles.iter().map(|p|p.1).sum::<f64>().max(profiles[i]);
-    let over:Vec<usize>=(1..estimates.len()).filter(|&i|fixed+profile(i)+dopplers[i]+excited[i]>BUDGET).collect();
+    let peak:f64=model.profiles.iter().map(|p|p.1).sum();let fixed=base.used()-peak;
+    let apriori:Vec<f64>=(0..estimates.len()).map(|i|if i==0{0.}else{fixed+peak.max(profiles[i])+dopplers[i]+excited[i]}).collect();
+    let accounts=Accounts{apriori,excited,bias};
+    // The outputs beyond a target: (output, the quantity, its total, the a-priori share, the statistics).
+    let over:Vec<(usize,&str,f64,f64,f64)>=(1..estimates.len()).filter_map(|i|{
+        let(p,t)=statistics(&estimates[i],frequencies);let a=accounts.apriori[i];let(p,t)=if last{(p,t)}else{(0.,t.map(|_|0.))};
+        let population=(a+bias[0]+p>POPULATION_TARGET).then_some((i,"布居",a+bias[0]+p,a+bias[0],p));
+        let temperature=t.and_then(|t|(a+bias[1]+t>TEMPERATURE_TARGET).then_some((i,"温度",a+bias[1]+t,a+bias[1],t)));
+        population.or(temperature)}).collect();
     if !over.is_empty(){
-        let(first,last)=(over[0],*over.last().unwrap());
-        let span=if over.len()==last-first+1&&last==estimates.len()-1{format!("{} 起",when(times[first]))}else{format!("{} 至 {} 之间 {} 个时刻",when(times[first]),when(times[last]),over.len())};
-        let worst=over.iter().copied().max_by(|&a,&b|excited[a].total_cmp(&excited[b])).unwrap();
-        ledger.flagged=Some(format!("{span}超出近似误差预算 {:.2}%：消去激发态的误差（激发态布居）最大 {:.2}%，合计 {:.2}%",
-            100.*BUDGET,100.*excited[worst],100.*(fixed+profile(worst)+dopplers[worst]+excited[worst])));
+        let(first,last_over)=(over[0].0,over[over.len()-1].0);
+        let span=if over.len()==last_over-first+1&&last_over==estimates.len()-1{format!("{} 起",when(times[first]))}
+            else{format!("{} 至 {} 之间 {} 个时刻",when(times[first]),when(times[last_over]),over.len())};
+        let worst=over.iter().max_by(|a,b|(a.2/if a.1=="布居"{POPULATION_TARGET}else{TEMPERATURE_TARGET}).total_cmp(&(b.2/if b.1=="布居"{POPULATION_TARGET}else{TEMPERATURE_TARGET}))).unwrap();
+        let target=if worst.1=="布居"{POPULATION_TARGET}else{TEMPERATURE_TARGET};
+        ledger.flagged=Some(format!("{span}估计误差超出目标：{}误差最大 {:.1}%（目标 {:.0}%；近似与步长 {:.1}%，其中消去激发态 {:.1}%；统计 {:.1}%）",
+            worst.1,100.*worst.2,100.*target,100.*worst.3,100.*accounts.excited[worst.0],100.*worst.4));
     }
-    ledger
+    (ledger,accounts)
 }
 
 /// Solves a request. `checkpoint` receives every batch's complete result and the estimated wall
@@ -230,14 +263,17 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
     let left=BUDGET-base.used()-eta;let allowance=if left>0.{left}else{BUDGET};
     // The exponentials are summed to a share η of the step's own population budget, η² ε dt/waiting.
     let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=allowance;s};
+    let mut ratios=[0.;2];
     for _ in 0..8{
-        let engine=Engine{model:&model,settings:settings(steps)};let excess=step_excess(&engine,&states,waiting);
+        let engine=Engine{model:&model,settings:settings(steps)};ratios=step_excess(&engine,&states,waiting);let excess=ratios[0].max(ratios[1]);
         let next=((steps as f64*excess.sqrt()).ceil() as usize).max(1);
         if excess<=1.&&next>=steps/2{break;}
         if next==steps{break;}
         steps=next;
     }
     let dt=interval/steps as f64;let settings=settings(steps);
+    // The step's bias: its share of each target times its measured excess there.
+    let bias=[ratios[0]*A_PRIORI_SHARE*POPULATION_TARGET,ratios[1]*A_PRIORI_SHARE*TEMPERATURE_TARGET];
     let clock=Instant::now();
     let first=simulate(&model,&settings,&initial,seed,0,pilot,group(pilot,threads),steps,outputs,&listed);
     let wall=clock.elapsed().as_secs_f64();
@@ -245,9 +281,10 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
     let mut outcome=first;let mut done=pilot;let mut per_trajectory=wall/pilot as f64;
     loop{
         let mut estimates=summarize(&outcome.groups,&scales);start(&mut estimates[0],&model,&initial);
-        let ratio=worst_ratio(&estimates,trap.lab);
+        let(_,accounts)=ledger(&model,&base,&estimates,times,allowance,bias,trap.lab,false);
+        let ratio=worst_ratio(&estimates,&accounts,trap.lab);
         let needed=((done as f64*ratio*ratio).ceil() as u64).min(MOST_TRAJECTORIES);
-        let ledger=ledger(&model,&base,&estimates,times,allowance);
+        let(ledger,_)=ledger(&model,&base,&estimates,times,allowance,bias,trap.lab,needed<=done);
         let mut solution=assemble(&model,&estimates,&outcome,&listed,trap.lab,done,dt,&request.initial_density,ledger);
         if needed<=done{
             if ratio>1.{solution.reason=Some(format!("统计误差为目标的 {ratio:.1} 倍：轨迹数已达上限 {MOST_TRAJECTORIES}"));}
@@ -263,17 +300,19 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
     }
 }
 
-/// The step-doubling excess of a step (module documentation): the largest of the internal state's
-/// accumulated population error over η ε and the light impulse's relative error over η × the
-/// temperature target, from one step against two halves on the sampled states; 1 meets them.
-fn step_excess(engine:&Engine,states:&[Trajectory],waiting:f64)->f64{
+/// The step-doubling excess of a step (module documentation): the internal state's accumulated
+/// population error over η ε, and the larger of the light impulse's and the friction's relative
+/// errors over η × the temperature target, from one step against two halves on the sampled states;
+/// 1 meets each.
+fn step_excess(engine:&Engine,states:&[Trajectory],waiting:f64)->[f64;2]{
     let dt=engine.settings.dt;
-    let(mut population,mut difference,mut impulse)=(0.,0.,0.);
-    for t in states{let(motion,internal)=engine.doubling(t,dt);difference+=motion[0];impulse+=motion[1];population+=internal[0];}
+    let(mut population,mut difference,mut impulse,mut energy,mut friction)=(0.,0.,0.,0.,0.);
+    for t in states{let(motion,internal,work)=engine.doubling(t,dt);difference+=motion[0];impulse+=motion[1];population+=internal[0];energy+=work[0];friction+=work[1];}
     let richardson=4./3.;
     let accumulated=richardson*population/states.len().max(1) as f64*(waiting/dt).max(1.);
     let relative=if impulse>0.{richardson*difference/impulse}else{0.};
-    (accumulated/(A_PRIORI_SHARE*POPULATION_TARGET)).max(relative/(A_PRIORI_SHARE*TEMPERATURE_TARGET))
+    let dissipated=if friction!=0.{richardson*(energy/friction).abs()}else{0.};
+    [accumulated/(A_PRIORI_SHARE*POPULATION_TARGET),relative.max(dissipated)/(A_PRIORI_SHARE*TEMPERATURE_TARGET)]
 }
 
 /// t = 0 is the request's initial state, exactly: per lab axis T is its thermal Wigner temperature

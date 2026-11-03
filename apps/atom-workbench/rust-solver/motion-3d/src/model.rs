@@ -172,10 +172,10 @@ pub struct Point{
 }
 
 /// A cluster's generator at a point and a time: H_eff less `scalar`, the scalar part of its
-/// Hermitian part (a phase); the gradient of its Hermitian part per axis, and its Hermitian part
-/// less the same with the trap beam off (the trap's potential), all n × n, re/im interleaved.
+/// Hermitian part (a phase), and the gradient of its Hermitian part per axis, n × n, re/im
+/// interleaved.
 #[derive(Clone,Copy,Debug)]
-pub struct Local{pub hamiltonian:[Complex;MOST_STATES*MOST_STATES],pub scalar:f64,pub gradient:[[f64;MOST_W];3],pub trap:[f64;MOST_W]}
+pub struct Local{pub hamiltonian:[Complex;MOST_STATES*MOST_STATES],pub scalar:f64,pub gradient:[[f64;MOST_W];3]}
 
 /// acc += c x for interleaved complex vectors of W/2 entries.
 #[inline(always)]
@@ -616,13 +616,12 @@ impl Model{
     #[inline(always)]
     fn local_body<const N:usize,const W:usize>(&self,cluster:usize,p:&Point,t:f64)->Local{
         let layout=&self.layouts[cluster];let d=self.focused.len();
-        let mut out=Local{hamiltonian:[Complex::ZERO;MOST_STATES*MOST_STATES],scalar:0.,gradient:[[0.;MOST_W];3],trap:[0.;MOST_W]};
-        let mut buf=[0.;MOST_W];let mut slope=[[0.;MOST_W];MOST_FOCUSED];let mut far=[0.;MOST_W];
+        let mut out=Local{hamiltonian:[Complex::ZERO;MOST_STATES*MOST_STATES],scalar:0.,gradient:[[0.;MOST_W];3]};
+        let mut buf=[0.;MOST_W];let mut slope=[[0.;MOST_W];MOST_FOCUSED];
         let(mut m,mut gamma)=([0.;MOST_W],[0.;MOST_W]);
         // The pair (k, k1)'s tables are (k1, k)'s adjoints in a Hermitian group: c X + (c X)† for k1 < k.
         // The force reads only Re⟨ψ|·|ψ⟩, so its matrices take 2 c X for the two.
         let adjoint=|c:Complex,x:&[f64;MOST_W],acc:&mut [f64;MOST_W]|{for a in 0..N{for b in 0..N{let(i,j)=(2*(a*N+b),2*(b*N+a));let(u,v)=(x[j],-x[j+1]);acc[i]+=c.re*u+c.im*v;acc[i+1]+=c.re*v-c.im*u;}}};
-        let mut trap=[0.;MOST_W];
         for gl in &layout.groups{
             let(f,e)=(&p.fields[gl.absorbed],&p.fields[gl.emitted]);let phase=Complex::cis(gl.residual*t);
             for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
@@ -635,18 +634,12 @@ impl Model{
                     caxpy::<W>(c*(-both),&buf,&mut out.gradient[a]);
                     for g in 0..d{c=ee*(-both*p.intensity_gradient[g][a]);caxpy::<W>(c,&slope[g],&mut out.gradient[a]);}
                 }
-                // The trap beam off: the same fields at the far stencil.
-                self.gather_value::<W>(cluster,&p.far,gl.s+at,&mut far);
-                caxpy::<W>(ee*both,&buf,&mut trap);caxpy::<W>(-ee*both,&far,&mut trap);
                 self.gather_value::<W>(cluster,&p.stencil,gl.q+at,&mut buf);
                 caxpy::<W>(ee,&buf,&mut gamma);if gl.hermitian&&k1<k{adjoint(ee,&buf,&mut gamma);}
             }
         }
         self.gather::<W>(cluster,&p.stencil,layout.h0,&mut buf,&mut slope);
         for a in 0..3{for g in 0..d{let c=Complex::new(p.intensity_gradient[g][a],0.);caxpy::<W>(c,&slope[g],&mut out.gradient[a]);}}
-        self.gather_value::<W>(cluster,&p.far,layout.h0,&mut far);
-        // The trap: (h0 − M)(s) − (h0 − M)(far): M's share was gathered with the sign of M, so it is subtracted.
-        for j in 0..W{out.trap[j]=buf[j]-far[j]-trap[j];}
         let at=|v:&[f64;MOST_W],a:usize,b:usize|Complex::new(v[2*(a*N+b)],v[2*(a*N+b)+1]);
         let mut scalar=0.;for a in 0..N{scalar+=buf[2*(a*N+a)]-m[2*(a*N+a)];}scalar/=N as f64;out.scalar=scalar;
         for a in 0..N{for b in 0..N{
@@ -661,71 +654,68 @@ impl Model{
         macro_rules! sized{($($n:literal)*)=>{match self.dimension(cluster){$($n=>force_sized::<$n>(local,psi),)*_=>unreachable!("a cluster has 1 to 8 states")}}}
         sized!(1 2 3 4 5 6 7 8)
     }
-    /// The trap's potential of ψ at the point the local generator was made (rad/us): Re⟨ψ|H_eff|ψ⟩
-    /// less the same with the trap beam off, per ⟨ψ|ψ⟩.
-    pub fn trap_potential(&self,cluster:usize,local:&Local,psi:&[Complex])->f64{
-        macro_rules! sized{($($n:literal)*)=>{match self.dimension(cluster){$($n=>{let norm:f64=psi[..$n].iter().map(|z|z.norm_sqr()).sum();quadratic::<$n>(&local.trap,psi).re/norm},)*_=>unreachable!("a cluster has 1 to 8 states")}}}
+    /// The trap's potential of ψ at a point (rad/us): Re⟨ψ|H_eff|ψ⟩ less the same with the trap beam
+    /// off, per ⟨ψ|ψ⟩ -- (h0 − M) at the point's stencil less at its far one, with the same fields.
+    pub fn trap_potential(&self,cluster:usize,p:&Point,psi:&[Complex],t:f64)->f64{
+        macro_rules! sized{($($n:literal)*)=>{match self.dimension(cluster){$($n=>self.trap_sized::<$n,{2*$n*$n}>(cluster,p,psi,t,false),)*_=>unreachable!("a cluster has 1 to 8 states")}}}
         sized!(1 2 3 4 5 6 7 8)
     }
-
-    /// The photon amplitudes at a point of every class of a cluster's jumps (`Photons`).
-    pub fn photons(&self,cluster:usize,p:&Point,psi:&[Complex],t:f64,exact:Option<&Exact>)->Photons{
-        let g=&self.ground;let cl=&g.clusters[cluster];let layout=&self.layouts[cluster];let n=layout.n;let ng=g.ground_states.len();
-        // Per carrier and axis: M = Σ_k E_k J_k − E^D_k J2_k (ng × n) and its gradient (the fields' and
-        // the intensities'), and per beam its own share a_l Σ_k c_lk (J_k − w_l J2_k).
-        let mut buf=vec![Complex::ZERO;ng*n];
-        let mut total:Vec<[Vec<Complex>;3]>=vec![];let mut gradient:Vec<[[Vec<Complex>;3];3]>=vec![];let mut beams:Vec<Vec<[Vec<Complex>;3]>>=vec![];
-        for(c,cl2)in layout.carriers.iter().enumerate(){
-            let r=self.carriers[c].rank;let fl=&p.fields[c];
-            let mut tc:[Vec<Complex>;3]=std::array::from_fn(|_|vec![Complex::ZERO;ng*n]);let mut gc:[[Vec<Complex>;3];3]=std::array::from_fn(|_|std::array::from_fn(|_|vec![Complex::ZERO;ng*n]));
-            let mut bc:Vec<[Vec<Complex>;3]>=self.carriers[c].beams.iter().map(|_|std::array::from_fn(|_|vec![Complex::ZERO;ng*n])).collect();
-            for k in 0..r{for a in 0..3{
-                let at=(k*3+a)*ng*n;
-                let mut jk=vec![Complex::ZERO;ng*n];self.interpolate(cluster,&p.stencil,None,cl2.j+at,&mut jk);
-                let mut j2k=vec![Complex::ZERO;ng*n];self.interpolate(cluster,&p.stencil,None,cl2.j2+at,&mut j2k);
-                for i in 0..ng*n{
-                    tc[a][i]+=fl.e[k]*jk[i]-fl.doppler[k]*j2k[i];
-                    for x in 0..3{gc[a][x][i]+=fl.grad[k][x]*jk[i];}
-                }
-                for f in 0..self.focused.len(){
-                    self.interpolate(cluster,&p.stencil,Some(f),cl2.j+at,&mut buf);
-                    for i in 0..ng*n{for x in 0..3{gc[a][x][i]+=fl.e[k]*buf[i]*p.intensity_gradient[f][x];}}
-                }
-                for(j,&l)in self.carriers[c].beams.iter().enumerate(){
-                    let(amplitude,w)=(self.geometry[l].field(p.r).0,self.kinetic_shift(l,p.kappa));let z=amplitude*self.carriers[c].coefficients[j][k];
-                    for i in 0..ng*n{bc[j][a][i]+=z*(jk[i]-j2k[i]*w);}
-                }
-            }}
-            // The exact response in a segment beyond the first order's allowance (engine.rs).
-            if let Some(exact)=exact{
-                tc=std::array::from_fn(|_|vec![Complex::ZERO;ng*n]);
-                for(j,&l)in self.carriers[c].beams.iter().enumerate(){
-                    let amplitude=self.geometry[l].field(p.r).0;bc[j]=std::array::from_fn(|_|vec![Complex::ZERO;ng*n]);
-                    for a in 0..3{let m=g.emission[a].product(&exact.responses[l]);
-                        for row in 0..ng{for y in 0..n{let v=m[(row,cl.states[y])]*amplitude;tc[a][row*n+y]+=v;bc[j][a][row*n+y]=v;}}}
-                }
+    /// An upper bound of it: h0's share, and the light shift's change at most twice its bound.
+    pub fn trap_bound(&self,cluster:usize,p:&Point,psi:&[Complex])->f64{
+        macro_rules! sized{($($n:literal)*)=>{match self.dimension(cluster){$($n=>self.trap_sized::<$n,{2*$n*$n}>(cluster,p,psi,0.,true),)*_=>unreachable!("a cluster has 1 to 8 states")}}}
+        sized!(1 2 3 4 5 6 7 8)
+    }
+    fn trap_sized<const N:usize,const W:usize>(&self,cluster:usize,p:&Point,psi:&[Complex],t:f64,bound:bool)->f64{
+        let layout=&self.layouts[cluster];let(mut here,mut far,mut difference)=([0.;MOST_W],[0.;MOST_W],[0.;MOST_W]);
+        self.gather_value::<W>(cluster,&p.stencil,layout.h0,&mut here);self.gather_value::<W>(cluster,&p.far,layout.h0,&mut far);
+        for j in 0..W{difference[j]=here[j]-far[j];}
+        let norm:f64=psi[..N].iter().map(|z|z.norm_sqr()).sum();
+        if bound{return quadratic::<N>(&difference,psi).re/norm+2.*self.ground.light;}
+        for gl in &layout.groups{
+            let(f,e)=(&p.fields[gl.absorbed],&p.fields[gl.emitted]);
+            for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
+                // −Φ (S(s) − S(far)), the pair (k1, k) standing for (k, k1) in a Hermitian group.
+                let ee=e.e[k1].conj()*f.e[k]*if gl.hermitian&&k1<k{2.}else{1.};let at=gl.s+pi*N*N;
+                self.gather_value::<W>(cluster,&p.stencil,at,&mut here);self.gather_value::<W>(cluster,&p.far,at,&mut far);
+                for j in 0..W{here[j]-=far[j];}caxpy::<W>(-ee*Complex::cis(gl.residual*t),&here,&mut difference);
             }
-            total.push(tc);gradient.push(gc);beams.push(bc);
+        }
+        quadratic::<N>(&difference,psi).re/norm
+    }
+
+    /// The photon amplitudes at a point of every class of a cluster's jumps (`Photons`), with the
+    /// exact responses in a step beyond the first order's allowance (engine.rs).
+    pub fn photons<'a>(&'a self,cluster:usize,p:&Point,psi:&[Complex],t:f64,exact:Option<Exact>)->Photons<'a>{
+        let g=&self.ground;let cl=&g.clusters[cluster];let layout=&self.layouts[cluster];let n=layout.n;let ng=g.ground_states.len();let size=ng*n;
+        // Per carrier, rank and axis the jump tables J_k and J2_k at the point (ng × n), and per carrier
+        // and axis M = Σ_k E_k J_k − E^D_k J2_k, or the exact responses' C_a Σ_l a_l R_l(w_l).
+        let ranks:usize=self.carriers.iter().map(|c|c.rank).sum();
+        let(mut jumps,mut doppler)=(vec![Complex::ZERO;3*ranks*size],vec![Complex::ZERO;3*ranks*size]);let mut matrices=vec![Complex::ZERO;3*self.carriers.len()*size];
+        let mut at=0;
+        for(c,cl2)in layout.carriers.iter().enumerate(){
+            let fl=&p.fields[c];
+            for k in 0..self.carriers[c].rank{for a in 0..3{
+                let offset=(k*3+a)*size;
+                self.interpolate(cluster,&p.stencil,None,cl2.j+offset,&mut jumps[at..at+size]);self.interpolate(cluster,&p.stencil,None,cl2.j2+offset,&mut doppler[at..at+size]);
+                if exact.is_none(){let m=&mut matrices[(c*3+a)*size..(c*3+a+1)*size];for i in 0..size{m[i]+=fl.e[k]*jumps[at+i]-fl.doppler[k]*doppler[at+i];}}
+                at+=size;
+            }}
+            if let Some(exact)=&exact{
+                for &l in &self.carriers[c].beams{let amplitude=self.geometry[l].field(p.r).0;
+                    for a in 0..3{let m=g.emission[a].product(&exact.responses[l]);let out=&mut matrices[(c*3+a)*size..(c*3+a+1)*size];
+                        for row in 0..ng{for y in 0..n{out[row*n+y]+=m[(row,cl.states[y])]*amplitude;}}}}
+            }
         }
         // The classes: each photon's entry into its target state's row from its source's column.
-        let amplitude=cl.classes.iter().map(|class|{let target=&g.clusters[class.target];let nt=target.states.len();
-            let mut u=[[Complex::ZERO;MOST_STATES];3];let mut du=[[[Complex::ZERO;MOST_STATES];3];3];
+        let amplitude=cl.classes.iter().map(|class|{let target=&g.clusters[class.target];
+            let mut u=[[Complex::ZERO;MOST_STATES];3];
             for &(ph,w)in &class.photons{
-                let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());let phase=Complex::cis(w*t);let at=ph.to*n+col;let _=nt;
-                for a in 0..3{u[a][row]+=phase*total[ph.carrier][a][at]*psi[col];for x in 0..3{du[a][x][row]+=phase*gradient[ph.carrier][a][x][at]*psi[col];}}
+                let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());let phase=Complex::cis(w*t);
+                for a in 0..3{u[a][row]+=phase*matrices[(ph.carrier*3+a)*size+ph.to*n+col]*psi[col];}
             }
-            (u,du)}).collect::<Vec<_>>();
-        let shares=cl.classes.iter().map(|class|{
-            let target=&g.clusters[class.target];
-            let carriers:Vec<usize>={let mut v:Vec<usize>=class.photons.iter().map(|x|x.0.carrier).collect();v.sort();v.dedup();v};
-            carriers.iter().flat_map(|&c|self.carriers[c].beams.iter().enumerate().map(move|(j,&l)|(c,j,l))).map(|(c,j,l)|{
-                let mut v=[[Complex::ZERO;MOST_STATES];3];
-                for &(ph,w)in class.photons.iter().filter(|x|x.0.carrier==c){
-                    let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());let phase=Complex::cis(w*t);
-                    for a in 0..3{v[a][row]+=phase*beams[c][j][a][ph.to*n+col]*psi[col];}
-                }
-                (l,v)}).collect::<Vec<_>>()}).collect();
-        Photons{cluster,amplitude,shares}
+            u}).collect();
+        let mut state=[Complex::ZERO;MOST_STATES];state[..n].copy_from_slice(&psi[..n]);
+        Photons{model:self,cluster,point:*p,psi:state,time:t,jumps,doppler,exact,amplitude}
     }
 
     /// The 32 populations (request order) of a cluster's state ψ at a point and time: the bare
@@ -802,7 +792,57 @@ fn force_sized<const N:usize>(local:&Local,psi:&[Complex])->[f64;3]{
 }
 
 /// The photon amplitudes of every class of a cluster's jumps at a point: per class and axis the
-/// target cluster's amplitude u_a and its gradient ∇u_a [a][axis], and per beam of the class its
-/// share (beam, its amplitudes per axis).
-#[derive(Clone,Debug)]
-pub struct Photons{pub cluster:usize,pub amplitude:Vec<([[Complex;MOST_STATES];3],[[[Complex;MOST_STATES];3];3])>,pub shares:Vec<Vec<(usize,[[Complex;MOST_STATES];3])>>}
+/// target cluster's amplitude u_a; for a class drawn, its gradient and its beams' shares
+/// (`Photons::gradient`, `Photons::shares`) from the jump tables at the point, kept.
+pub struct Photons<'a>{
+    model:&'a Model,cluster:usize,point:Point,psi:[Complex;MOST_STATES],time:f64,
+    /// Per carrier, rank and axis (carrier-major): J_k and J2_k at the point, ng × n.
+    jumps:Vec<Complex>,doppler:Vec<Complex>,
+    exact:Option<Exact>,
+    pub amplitude:Vec<[[Complex;MOST_STATES];3]>,
+}
+impl Photons<'_>{
+    /// Where carrier c's rank k and axis a's tables start in `jumps`.
+    fn offset(&self,c:usize,k:usize,a:usize)->usize{
+        let m=self.model;let size=m.ground.ground_states.len()*m.dimension(self.cluster);
+        (m.carriers[..c].iter().map(|x|x.rank).sum::<usize>()*3+k*3+a)*size
+    }
+    /// ∇u_a [a][axis] of a class: the fields' dependence on r and the intensities' (the Doppler
+    /// term's own gradient left out).
+    pub fn gradient(&self,class:usize)->[[[Complex;MOST_STATES];3];3]{
+        let m=self.model;let g=&m.ground;let cl=&g.clusters[self.cluster];let class=&cl.classes[class];let target=&g.clusters[class.target];
+        let(n,p)=(m.dimension(self.cluster),&self.point);let cl2=&m.layouts[self.cluster].carriers;let size=g.ground_states.len()*n;
+        let mut out=[[[Complex::ZERO;MOST_STATES];3];3];let mut entry=[Complex::ZERO];
+        for &(ph,w)in &class.photons{
+            let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());let phase=Complex::cis(w*self.time)*self.psi[col];let fl=&p.fields[ph.carrier];
+            for k in 0..m.carriers[ph.carrier].rank{for a in 0..3{
+                let j=self.jumps[self.offset(ph.carrier,k,a)+ph.to*n+col];
+                for x in 0..3{out[a][x][row]+=phase*fl.grad[k][x]*j;}
+                for f in 0..m.focused.len(){
+                    m.interpolate(self.cluster,&p.stencil,Some(f),cl2[ph.carrier].j+(k*3+a)*size+ph.to*n+col,&mut entry);
+                    for x in 0..3{out[a][x][row]+=phase*fl.e[k]*entry[0]*p.intensity_gradient[f][x];}
+                }
+            }}
+        }
+        out
+    }
+    /// Each beam l of a class's carriers: its share a_l Σ_k c_lk (J_k − w_l J2_k) of the class's
+    /// amplitudes per axis (its exact response's in a step beyond the first order).
+    pub fn shares(&self,class:usize)->Vec<(usize,[[Complex;MOST_STATES];3])>{
+        let m=self.model;let g=&m.ground;let cl=&g.clusters[self.cluster];let class=&cl.classes[class];let target=&g.clusters[class.target];
+        let(n,p)=(m.dimension(self.cluster),&self.point);
+        let carriers:Vec<usize>={let mut v:Vec<usize>=class.photons.iter().map(|x|x.0.carrier).collect();v.sort();v.dedup();v};
+        carriers.iter().flat_map(|&c|m.carriers[c].beams.iter().enumerate().map(move|(j,&l)|(c,j,l))).map(|(c,j,l)|{
+            let(amplitude,w)=(m.geometry[l].field(p.r).0,m.kinetic_shift(l,p.kappa));let mut v=[[Complex::ZERO;MOST_STATES];3];
+            let exact:Option<[Dense;3]>=self.exact.as_ref().map(|e|std::array::from_fn(|a|g.emission[a].product(&e.responses[l])));
+            for &(ph,phase)in class.photons.iter().filter(|x|x.0.carrier==c){
+                let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());let phase=Complex::cis(phase*self.time)*self.psi[col]*amplitude;
+                for a in 0..3{
+                    let z=match &exact{Some(e)=>e[a][(ph.to,cl.states[col])],None=>(0..m.carriers[c].rank).fold(Complex::ZERO,|s,k|{let at=self.offset(c,k,a)+ph.to*n+col;
+                        s+m.carriers[c].coefficients[j][k]*(self.jumps[at]-self.doppler[at]*w)})};
+                    v[a][row]+=phase*z;
+                }
+            }
+            (l,v)}).collect()
+    }
+}

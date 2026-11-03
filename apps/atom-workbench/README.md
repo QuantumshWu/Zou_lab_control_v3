@@ -80,15 +80,24 @@ the optical tweezer the request names (`trapBeamId`), semiclassically, served
 by `rust-solver/motion-3d` (`motion3d_adapter.rs`; its front end `ground.rs`
 eliminates the excited states). A request whose model carries the `motion`
 block is a trajectory alone; only 3D motion is served. Each trajectory is a
-classical point carrying the internal state of the eliminated ground manifold,
-evolved by quantum jumps: dipole-pattern emission recoil, beam-resolved
-absorption recoil with the exact mean force, the Ehrenfest force between jumps.
-The trap's harmonic part is moved exactly, the time step comes from step
-doubling, and trajectories run in batches until two standard errors meet 5% in
-the populations and 10% in T. A point particle has no zero-point motion:
-results are validated for k_B T >= 4 hbar omega on every axis and marked
-reference-only below. The example 光镊 · 3D PGC cools the same atom with
-sigma+sigma- pairs along x, y and z.
+classical point carrying the internal state of the eliminated ground manifold
+on one cluster of states, evolved by quantum jumps: dipole-pattern emission
+recoil, beam-resolved absorption recoil with the exact mean force, the
+Ehrenfest force between jumps. Every coupling between ground states is folded
+at second order (van Vleck) or kept by one rule; the states kept couplings join
+form the clusters (whole hyperfine levels near B = 0, single sublevels at large
+fields, F = 1 and F = 2 together through a Raman-resonant pair). The trap's
+harmonic part is moved exactly, the time step comes from step doubling
+(populations, impulse and friction), and trajectories run in batches until each
+output's total estimated error -- the approximation ledger
+(`diagnostics.approximations`), the step's bias and two standard errors --
+meets 5% in the populations and 10% in T; an output that cannot is flagged. An
+atom is lost when its mechanical energy in the trap is positive. A point
+particle has no zero-point motion: results are validated for k_B T >= 4 hbar
+omega on every axis and marked reference-only below. The example 光镊 · 3D PGC
+cools the atom with sigma+sigma- pairs along x, y and z; with motion on, the
+Raman-resonant Lambda of 光镊 + 探测光 + 回泵光 runs on one cluster spanning
+F = 1 and F = 2.
 
 Every request asks for the same absolute population error,
 `populationTolerance: 0.01` on the probability scale (1%); it is not a user

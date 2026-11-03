@@ -12,13 +12,16 @@
 //!
 //! # Jumps
 //! When ‖ψ‖² falls to the trajectory's threshold θ (uniform in (0, 1]), the crossing time t* is
-//! found on ln‖ψ‖² (linear on the half step where it lies), ψ(t*) re-propagated from the step's
-//! start and the jump made at r(t*): the class φ of photons of one frequency -- and the cluster it
+//! found on ln‖ψ‖² (linear on the half step where it lies), the step redone from its start to t*
+//! (flow, kick and flow of that length) and the jump made there; the rest of the step is taken from
+//! the state the jump left, so the force follows the internal state on either side of the jump --
+//! with the jump inside a step the force of the state before it would act on the whole step, an
+//! error first order in dt that the jump-free step doubling cannot see. The jump draws the class φ
+//! of photons of one frequency -- and the cluster it
 //! lands the atom in -- is drawn with probability Σ_a ‖u_a‖², u_a = L_{a,φ} ψ (ground.rs); the
 //! photon's direction n from the dipole pattern tr G − n·Re(G)·n, G_ab = ⟨u_a|u_b⟩, exactly
 //! (rejection from the uniform sphere); its polarization ε across n from ‖Σ_a ε_a u_a‖² on a real
-//! orthonormal pair; then ψ ← f = Σ_a ε_a u_a and the emission recoil κ −= k_φ n. The rest of the
-//! step is propagated in the new cluster.
+//! orthonormal pair; then ψ ← f = Σ_a ε_a u_a and the emission recoil κ −= k_φ n.
 //!
 //! # Absorption
 //! The light absorbed with the photon moves the atom too: by ħ k_l of the beam l it came from,
@@ -32,9 +35,9 @@
 //! # First order in the Doppler shift
 //! The photon amplitudes take the kinetic shift of absorption to first order, R − w R2 (model.rs),
 //! good to (kv/σ)², the largest (w_l/σ_c)² over the near beams, σ_c the nearest excited pole of
-//! beam l's carrier (model.rs `Model::doppler_ratio`). A step whose (kv/σ_min)² exceeds the solve's allowance (`Settings::doppler`) takes
-//! the exact response at its jumps (model.rs `Exact`); the largest first-order (kv/σ_min)² a
-//! trajectory used is its share of the ledger (`Trajectory::doppler`).
+//! beam l's carrier (model.rs `Model::doppler_ratio`). A step whose (kv/σ)² exceeds the solve's
+//! allowance (`Settings::doppler`) takes the exact response at its jumps (model.rs `Exact`); the
+//! largest first-order (kv/σ)² a trajectory used is its share of the ledger (`Trajectory::doppler`).
 //!
 //! # Loss
 //! An atom is lost when it is no longer bound to the trap beam: its mechanical energy, ħ²κ²/2m plus
@@ -199,47 +202,56 @@ impl<'a> Engine<'a>{
         (n0,nh,n1,psi0,local,point,kick)
     }
 
+    /// The mechanical energy of a trajectory's state (rad/us): ħ²κ²/2m and its potential, the
+    /// Hermitian part of its generator's expectation (the trap's and the light's, the force's).
+    pub fn energy(&self,t:&Trajectory)->f64{
+        let m=self.model;let n=m.dimension(t.cluster);let local=m.local(t.cluster,&m.point(t.r,t.kappa),t.time);let norm=norm2(&t.psi,n);
+        let mut e=Complex::ZERO;for a in 0..n{for b in 0..n{e+=t.psi[a].conj()*local.hamiltonian[a*n+b]*t.psi[b];}}
+        0.5*m.hbar_over_mass*t.kappa.iter().map(|k|k*k).sum::<f64>()+local.scalar+e.re/norm
+    }
     /// The step-doubling error of one step of dt from a trajectory's state, without jumps: one step
     /// against two of dt/2, as (|Δκ|, |kick|) -- the momentum's difference and the step's
-    /// non-harmonic impulse (1/um) -- and (max |Δp|, |Δ ln‖ψ‖²|, |ln‖ψ‖²|) -- the largest difference of
-    /// the cluster's state populations, of the norm's decay and the decay itself.
-    pub fn doubling(&self,t:&Trajectory,dt:f64)->([f64;2],[f64;3]){
+    /// non-harmonic impulse (1/um) --, (max |Δp|, |Δ ln‖ψ‖²|, |ln‖ψ‖²|) -- the largest difference of
+    /// the cluster's state populations, of the norm's decay and the decay itself -- and (ΔE, E₂ − E₀),
+    /// the mechanical energy's difference and its change over the two half steps: conserved by the
+    /// trap's and the light's conservative forces, it changes by the light's friction alone.
+    pub fn doubling(&self,t:&Trajectory,dt:f64)->([f64;2],[f64;3],[f64;2]){
         let n=self.model.dimension(t.cluster);
         let mut one=t.clone();let(n0,_,n1,_,_,_,kick)=self.advance(&mut one,dt);
         let mut two=t.clone();self.advance(&mut two,0.5*dt);let(_,_,n2,_,_,_,_)=self.advance(&mut two,0.5*dt);
         let dk=(0..3).map(|a|(one.kappa[a]-two.kappa[a]).powi(2)).sum::<f64>().sqrt();let impulse=kick.iter().map(|x|x*x).sum::<f64>().sqrt();
         let(a,b)=(norm2(&one.psi,n),norm2(&two.psi,n));
         let dp=(0..n).map(|i|(one.psi[i].norm_sqr()/a-two.psi[i].norm_sqr()/b).abs()).fold(0.,f64::max);
-        ([dk,impulse],[dp,((n1/n0).ln()-(n2/n0).ln()).abs(),(n1/n0).ln().abs()])
+        let(e0,e1,e2)=(self.energy(t),self.energy(&one),self.energy(&two));
+        ([dk,impulse],[dp,((n1/n0).ln()-(n2/n0).ln()).abs(),(n1/n0).ln().abs()],[e1-e2,e2-e0])
     }
 
-    /// One step of dt: flow, kick and flow (`advance`); a jump where ‖ψ‖² crosses the threshold, the
-    /// rest of the step after it; the loss.
+    /// One step of dt: flow, kick and flow (`advance`). Where ‖ψ‖² crosses the threshold, the step
+    /// is redone to the crossing, the jump made there and the rest of the step taken from it in the
+    /// state the jump left: the force and the motion follow the internal state on either side of
+    /// the jump. Then the loss.
     pub fn step(&self,t:&mut Trajectory){
-        let(m,s)=(self.model,&self.settings);let dt=s.dt;
-        let(r0,start)=(t.r,t.time);
+        let(m,s)=(self.model,&self.settings);
         // The first order in the Doppler shift where it holds; the exact response beyond.
         let doppler=m.doppler_ratio(t.kappa);let exact=doppler>s.doppler;
         if !exact{t.doppler=t.doppler.max(doppler);}
-        let(n0,nh,n1,psi0,mut local,point,_)=self.advance(t,dt);let n=m.dimension(t.cluster);
-        if n1<=t.threshold{
-            // The crossing on ln‖ψ‖², linear on the half where it lies.
-            let(ta,tb,la,lb)=if nh<=t.threshold{(0.,0.5*dt,n0.ln(),nh.ln())}else{(0.5*dt,dt,nh.ln(),n1.ln())};
+        let mut left=s.dt;
+        let point=loop{
+            let start=t.clone();
+            let(n0,nh,n1,_,_,point,_)=self.advance(t,left);
+            if n1>t.threshold{break point;}
+            // The crossing on ln‖ψ‖², linear on the half where it lies; the step redone to it.
+            let(ta,tb,la,lb)=if nh<=t.threshold{(0.,0.5*left,n0.ln(),nh.ln())}else{(0.5*left,left,nh.ln(),n1.ln())};
             let at=if lb<la{(ta+(t.threshold.ln()-la)/(lb-la)*(tb-ta)).clamp(ta,tb)}else{tb};
-            let mut before=psi0;propagate(&local.hamiltonian,n,at,&mut before,s.truncation);
-            let rj:[f64;3]=std::array::from_fn(|a|r0[a]+(t.r[a]-r0[a])*at/dt);
-            let cluster=t.cluster;t.psi=before;self.jump(t,rj,start+at,exact);
-            // The rest of the step in the cluster the jump left the atom in.
-            let rest=dt-at;
-            if rest>0.{let nb=m.dimension(t.cluster);if t.cluster!=cluster{local=m.local(t.cluster,&point,start+0.5*dt);}
-                propagate(&local.hamiltonian,nb,rest,&mut t.psi,s.truncation);
-                // A second crossing within the step (rare): made at the step's end.
-                if norm2(&t.psi,nb)<=t.threshold{let c=t.cluster;self.jump(t,t.r,start+dt,exact);if t.cluster!=c{local=m.local(t.cluster,&point,start+0.5*dt);}}}
-        }
+            *t=start;if at>0.{self.advance(t,at);}
+            self.jump(t,t.r,t.time,exact);
+            left-=at;
+            if !(left>0.){break m.point(t.r,t.kappa);}
+        };
         // The loss: the mechanical energy above the trap's far level.
         if s.loss{
-            let energy=0.5*m.hbar_over_mass*t.kappa.iter().map(|k|k*k).sum::<f64>()+m.trap_potential(t.cluster,&local,&t.psi);
-            if energy>0.{t.alive=false;}
+            let kinetic=0.5*m.hbar_over_mass*t.kappa.iter().map(|k|k*k).sum::<f64>();
+            if kinetic+m.trap_bound(t.cluster,&point,&t.psi)>0.&&kinetic+m.trap_potential(t.cluster,&point,&t.psi,t.time)>0.{t.alive=false;}
         }
     }
 
@@ -250,15 +262,15 @@ impl<'a> Engine<'a>{
         let point=m.point(r,t.kappa);let n=m.dimension(t.cluster);let norm=norm2(&t.psi,n).sqrt();
         let mut psi=t.psi;for z in psi[..n].iter_mut(){*z=*z*(1./norm);}
         let responses=if exact{Exact::new(m,r,t.kappa).ok()}else{None};
-        let photons=m.photons(t.cluster,&point,&psi,time,responses.as_ref());
+        let photons=m.photons(t.cluster,&point,&psi,time,responses);
         let classes=&m.ground.clusters[t.cluster].classes;
         // The class, and the cluster it lands the atom in.
-        let weights:Vec<f64>=classes.iter().zip(&photons.amplitude).map(|(c,(u,_))|{let nt=m.dimension(c.target);(0..3).map(|a|norm2(&u[a],nt)).sum()}).collect();
+        let weights:Vec<f64>=classes.iter().zip(&photons.amplitude).map(|(c,u)|{let nt=m.dimension(c.target);(0..3).map(|a|norm2(&u[a],nt)).sum()}).collect();
         let total:f64=weights.iter().sum();
         if !(total>0.){t.threshold=rng.open_uniform();return;}
         let mut x=rng.uniform()*total;let mut pick=weights.len()-1;
         for(i,&w)in weights.iter().enumerate(){if x<w{pick=i;break;}x-=w;}
-        let class=&classes[pick];let nt=m.dimension(class.target);let(u,du)=&photons.amplitude[pick];
+        let class=&classes[pick];let nt=m.dimension(class.target);let(u,du)=(&photons.amplitude[pick],photons.gradient(pick));
         let gram:[[Complex;3];3]=std::array::from_fn(|a|std::array::from_fn(|b|(0..nt).fold(Complex::ZERO,|acc,i|acc+u[a][i].conj()*u[b][i])));
         let direction=dipole_direction(&mut rng,&gram);
         // The polarization across it.
@@ -270,7 +282,7 @@ impl<'a> Engine<'a>{
         // The recoils: the photon's, the absorbed beam's and the exact conditional mean's correction.
         let k=class.wave_number;let mut kick=direction.map(|x|-k*x);
         let mean:[f64;3]=std::array::from_fn(|x|{let mut s=0.;for i in 0..nt{let mut g=Complex::ZERO;for a in 0..3{g+=du[a][x][i]*e[a];}s+=(f[i].conj()*g).im;}s/size});
-        let shares:Vec<(usize,f64)>=photons.shares[pick].iter().map(|(l,v)|(*l,norm2(&combine(v,&e),nt))).collect();
+        let shares:Vec<(usize,f64)>=photons.shares(pick).iter().map(|(l,v)|(*l,norm2(&combine(v,&e),nt))).collect();
         let sum:f64=shares.iter().map(|x|x.1).sum();
         if sum>0.{
             let mut x=rng.uniform()*sum;let mut l=shares[shares.len()-1].0;

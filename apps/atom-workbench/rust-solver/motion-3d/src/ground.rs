@@ -211,6 +211,8 @@ pub struct Ground{
     pub items:Vec<Item>,
     pub cut:f64,
     pub generator_scale:f64,
+    /// The light shift's bound over the trap (rad/us), part of that scale.
+    pub light:f64,
     /// The nearest excited pole any coupled ground state sees over the trap, min σ_min(K − E_b − δ_c),
     /// overall and per carrier.
     pub pole:f64,
@@ -361,7 +363,7 @@ impl Ground{
         }).collect();
         let levels=ground_states.iter().map(|&i|labels[i].1).collect();
         let mut ground=Ground{ground_states,excited_states,levels,decay,emission,beams:request.beams.clone(),couplings,hamiltonian,outside,folds,components,l0,carriers,
-            items:vec![],cut:f64::INFINITY,generator_scale:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![]};
+            items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![]};
         ground.cluster_states()?;
         Ok(ground)
     }
@@ -457,7 +459,7 @@ impl Ground{
         let b=self.bounds()?;self.pole=b.poles.iter().copied().fold(f64::INFINITY,f64::min);self.poles=b.poles.clone();
         // ‖L0‖ of the eliminated generator without the states' energies: its Hermitian part on both
         // sides, its decay and its jumps.
-        let l0=2.*b.light+2.*b.scattering;self.generator_scale=l0;
+        let l0=2.*b.light+2.*b.scattering;self.generator_scale=l0;self.light=b.light;
         // The worst separation of a pair over the trap with a constant beat added: the separation's
         // range [low, high] of E_a − E_b, shifted.
         let separation=|a:usize,c:usize,beat:f64|->f64{
