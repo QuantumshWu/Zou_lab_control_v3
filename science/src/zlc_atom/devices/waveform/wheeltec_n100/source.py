@@ -48,7 +48,7 @@ from uuid import uuid4
 
 import numpy as np
 
-from zlc_atom.devices import RecordQueue
+from zlc_atom.devices import RecordQueue, free_serial_ports
 from zlc_atom.authoring import (
     AuthoringChoice,
     AuthoringField,
@@ -1201,28 +1201,6 @@ def _listen_for_packets(port, listen_seconds: float) -> int:
     return packets
 
 
-def serial_name(port: object) -> str:
-    """A COM port as the core names one in ``serial:COM3``: upper-case, without ``\\\\.\\``."""
-
-    text = str(port).strip()
-    return (text[4:] if text.startswith("\\\\.\\") else text).upper()
-
-
-def free_serial_ports(excluded: frozenset[str] = frozenset()) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """This machine's serial ports in order: (those free to listen to, those bound and passed over).
-
-    ``excluded`` is the core's bound resources (``serial:COM3``); a port an
-    open device or another row of the apparatus binds is never opened -- the
-    pulse board's UART while its server starts, an IMU that is opening.
-    """
-
-    from serial.tools import list_ports
-
-    bound = {serial_name(item.split(":", 1)[1]) for item in excluded if item.lower().startswith("serial:")}
-    ports = [info.device for info in sorted(list_ports.comports(), key=lambda item: item.device)]
-    return tuple(port for port in ports if serial_name(port) not in bound), tuple(port for port in ports if serial_name(port) in bound)
-
-
 def discover_n100(
     *,
     baud: int = DEFAULT_BAUD,
@@ -1281,9 +1259,7 @@ __all__ = [
     "WheeltecN100WaveformSource",
     "discover_n100",
     "drain_imu_samples",
-    "free_serial_ports",
     "header_crc8",
     "payload_crc16",
-    "serial_name",
     "wake_from_config_mode",
 ]

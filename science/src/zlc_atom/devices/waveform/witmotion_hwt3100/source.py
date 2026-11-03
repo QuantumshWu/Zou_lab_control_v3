@@ -40,7 +40,7 @@ from uuid import uuid4
 import numpy as np
 
 from zlc_atom.authoring import AuthoringField, TunableField, TuneRefused
-from zlc_atom.devices import RecordQueue
+from zlc_atom.devices import RecordQueue, free_serial_ports
 from zlc_atom.devices.waveform.contract import (
     WaveformAcquisitionMode,
     WaveformCaptureTerminalRecord,
@@ -48,8 +48,6 @@ from zlc_atom.devices.waveform.contract import (
     WaveformRecord,
     WaveformWorkingPoint,
 )
-# Generic serial-port helpers; they live in the N100's module today.
-from zlc_atom.devices.waveform.wheeltec_n100.source import free_serial_ports
 
 from . import modbus
 from .modbus import (

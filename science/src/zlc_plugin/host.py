@@ -299,9 +299,10 @@ class Process:
         if instance.abandoned:
             self.reply(identity, error=PluginError("refused", f"{name} is still releasing its previous operation; retry after cleanup completes"))
             return None
-        if op == "spi" and instance.concurrent(str(params.get("method", ""))):
+        if instance.concurrent(op, params):
             # A call the device declared it answers beside its lane (a cancel
-            # while a playback holds the lane): on a thread of its own.
+            # while a playback holds the lane, a stage's Stop while a move does):
+            # on a thread of its own.
             instance.dispatch_concurrent(message)
             return None
         instance.lane.put(message)
@@ -441,9 +442,14 @@ class Instance:
         if self.process.instances.get(self.name) is self:
             self.process.instances.pop(self.name)
 
-    def concurrent(self, method: str) -> bool:
+    def concurrent(self, op: str, params: dict[str, Any]) -> bool:
+        """Whether this request is an adapter call the device answers beside its lane:
+        an SPI method, a command (by name) or ``make_safe`` it declared ``concurrent``."""
         declared = self.declared
-        return isinstance(declared, DeviceType) and self.adapter is not None and method in declared.concurrent
+        if not isinstance(declared, DeviceType) or self.adapter is None:
+            return False
+        call = {"spi": params.get("method"), "command": params.get("name"), "make_safe": "make_safe"}.get(op)
+        return call is not None and str(call) in declared.concurrent
 
     def dispatch_concurrent(self, message: dict[str, Any]) -> None:
         with self._calls:

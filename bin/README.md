@@ -89,8 +89,8 @@ the committed JS, HTML and CSS directly after a pull and restart.
    Miniforge and python.org folders). A machine with none gets a 64-bit CPython
    3.13 from python.org (3.13.12 is the tested release).
 2. `installation.exe` (`install_requirements.bat`): numpy, scipy and Pillow and
-   the instrument links (pyserial for the N100; PyVISA, PyVISA-py, pyusb and
-   libusb-package for the Rigol and Tek) at `science\constraints.txt`'s versions.
+   the instrument links (pyserial for the N100, HWT3100 and SMC100; PyVISA, PyVISA-py,
+   pyusb and libusb-package for the Rigol and Tek) at `science\constraints.txt`'s versions.
    When that Python already has them all (a v2 machine does), it is the
    environment as it is, as v2 runs on it: nothing is made or downloaded, and the
    plugins run on it. Else pip installs what is missing into a venv of it,

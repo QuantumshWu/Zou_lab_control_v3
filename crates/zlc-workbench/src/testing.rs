@@ -1250,6 +1250,25 @@ mod tests {
                    "gain: Protected by camera_measurement");
     }
 
+    /// A derived field (a stage's state) is a reading: Device Control shows it and never tunes it.
+    #[test]
+    fn a_derived_device_field_is_read_only() {
+        let (_root, mut workbench, calls, mut host) = rig("audit-derived", catalog());
+        workbench.apply("read_device", &json!({"device": "mot_camera"}), &Origin::Operator, 2, &mut host);
+        event(&mut workbench,Event::Answered { ticket: asked(&calls, "fields"), result: Ok(json!([
+            {"field": {"name": "state", "type": "str", "label": "State", "default": null, "derived": true}, "current": "READY from MOVING",
+             "live_write": false, "dependency_group": ["state"]},
+            {"field": {"name": "position", "type": "float", "label": "Position", "default": null, "minimum": 0.0, "maximum": 25.0, "unit": "mm"},
+             "current": 12.0, "live_write": true, "dependency_group": ["position"]}])) }, &mut host);
+        let row = workbench.device_rows().into_iter().find(|row| row["instance_id"] == "mot_camera").unwrap();
+        let fields = row["fields"].as_array().unwrap();
+        assert_eq!((&fields[0]["current_text"], &fields[0]["editable"], &fields[0]["reason"], &fields[0]["status"]),
+                   (&json!("READY from MOVING"), &json!(false), &json!("Read from the device"), &json!("Read only")));
+        assert_eq!((&fields[1]["editable"], &fields[1]["status"]), (&json!(true), &json!("Ready")));
+        assert_eq!(apply(&mut workbench, &mut host, "tune_device", json!({"device": "mot_camera", "field": "state", "value": "READY"})).unwrap_err(),
+                   "state: Read from the device");
+    }
+
     /// v2 InstallationConfig, v2 discover: two devices of one name do not open; a scan waits for a device change.
     #[test]
     fn a_draft_with_two_devices_of_one_name_does_not_open_and_a_scan_waits_for_init() {

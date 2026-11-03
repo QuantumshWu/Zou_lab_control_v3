@@ -58,6 +58,9 @@ export class DeviceControlView {
   readonly root = element("section", "device-control");
   private owner: HTMLElement;
   private refresh = command("Refresh", () => this.read());
+  /** The device's own commands (a stage's Home and Stop), one button each, and the names they stand for. */
+  private actions = element("span", "device-actions");
+  private actionNames = "";
   private risk: HTMLButtonElement;
   private reason = element("p", "note wrap");
   private table = element("div", "control-table");
@@ -82,7 +85,7 @@ export class DeviceControlView {
   constructor(readonly id: string, private ctx: ViewContext) {
     this.risk = switchButton(on => ctx.transport.send({ action: "accept_device_risk", device: id, accepted: on }, on ? "Accepting the risk…" : "Withdrawing the risk…"), "Accept risk");
     this.risk.classList.add("row-switch");
-    const title = titleRow("Owner: none", [this.refresh.root, this.risk]);
+    const title = titleRow("Owner: none", [this.actions, this.refresh.root, this.risk]);
     this.owner = title.querySelector(".heading")!;
     const headings = ["Field", "Current", "Desired", "Device limits", "Live", "Apply", "Status"]
       .map((words, index) => element("span", `column-heading${index === 1 ? " right" : index === 2 ? " field" : index === 4 || index === 5 ? " centre" : ""}`, words));
@@ -111,6 +114,7 @@ export class DeviceControlView {
     this.reason.textContent = control?.reason ?? "Reading the device…";
     setChecked(this.risk, Boolean(device.risk_accepted));
     this.risk.disabled = !control?.risk_enabled;
+    this.showActions(device.state === "open" ? device.commands ?? [] : []);
     const fields: TunableField[] = device.fields ?? [];
     const alive = new Set(fields.map(field => field.name));
     for (const [name, row] of this.rows) if (!alive.has(name)) { this.dropRow(row); this.rows.delete(name); }
@@ -191,6 +195,26 @@ export class DeviceControlView {
     const held = Boolean(control?.owners.length);
     if (this.held && !held) this.reread();
     this.held = held;
+  }
+
+  /** One button per command the device declares (its catalogue names, `<id>__<command>`); never disabled while
+   * another is in flight, so a Stop reaches a stage whose move is still running.  Its answer is the page's note;
+   * the reading is then taken again, since a command moves what the rows show. */
+  private showActions(names: readonly string[]): void {
+    const key = names.join("\n");
+    if (key === this.actionNames) return;
+    this.actionNames = key;
+    this.actions.replaceChildren(...names.map(name => {
+      const word = name.slice(name.lastIndexOf("__") + 2).replace(/_/g, " ");
+      const label = word.charAt(0).toUpperCase() + word.slice(1);
+      return command(label, () => {
+        this.ctx.transport.request({ action: name }, `${label}…`).then(answer => {
+          this.read();
+          this.note = typeof answer === "string" && answer ? `${label}: ${answer}` : `${label} done`;
+          this.status();
+        }, () => this.read());
+      }).root;
+    }));
   }
 
   status(): void {

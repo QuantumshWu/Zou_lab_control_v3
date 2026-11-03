@@ -170,7 +170,7 @@ without an instance: `discover` (its hardware scan; an SDK `discover` that takes
 resolved before it opens, one row at a time in the operator's order while the other
 rows open, and what it finds is pinned into the apparatus (WORKBENCH_COMMANDS §4.2).
 
-Capabilities name a device SPI by token (`camera.adapter`, `rf.source`,
+Capabilities name a device SPI by token (`camera.adapter`, `motion.axis`, `rf.source`,
 `slm.phase`, `waveform.source`; the pulse board is native and no plugin claims it:
 a node plays a pulse through the core's `pulse_*` commands). `zlc_plugin.capabilities`
 maps each token to its Protocol class by *dotted path*, so importing the table
@@ -266,12 +266,16 @@ handled by the reader thread and never wait for the lane. A node's `execute` run
 run thread, so `query`, `run.stop` and device-call replies stay responsive while
 a run is in progress. Long operations take bounded timeouts and check
 `ctx.cancel_requested()` (v2's rule: a blocking read is interrupted between reads).
-A device type may name SPI methods its adapter answers concurrently
-(`DeviceType(concurrent=(...))`, descriptor `concurrent`): an `spi` request for one
-of them runs on its own thread, beside the lane. An SLM's `play_phase_sequence`
+A device type may name adapter calls its adapter answers concurrently
+(`DeviceType(concurrent=(...))`, descriptor `concurrent`): an `spi` request for a
+named method, a `command` of a named command, or `make_safe` when it is named, runs
+on its own thread, beside the lane. An SLM's `play_phase_sequence`
 holds the lane for the whole movie while the caller streams `submit_phase_frame`
 and may `cancel_phase_sequence`; a callable (v2's `stop_requested`) cannot cross
-processes, so the caller cancels instead.
+processes, so the caller cancels instead. A motion axis's `tune` of its position
+holds the lane until the stage stops; its `stop` command and Stop all's `make_safe`
+are concurrent, so they reach the controller during the move, which then reports
+where it stopped (`zlc_atom/devices/motion/contract.py`).
 
 ## 5. Operations
 
