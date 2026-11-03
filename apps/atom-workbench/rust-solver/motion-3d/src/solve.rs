@@ -354,7 +354,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let plain=|steps:usize,truncation:f64|Settings::new(interval/steps as f64,&trap,truncation,true);
     // The pilots' exponentials to double precision; the beats their exact steps leave out within the share
     // the run's take at most, the step's population budget over the whole run (engine.rs `Segment::resolve`).
-    let piloting=|steps:usize|{let mut s=plain(steps,f64::EPSILON);s.beats=A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*s.dt/duration;s};
+    let piloting=|steps:usize|{let mut s=plain(steps,f64::EPSILON);s.beats=A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*s.dt/duration;s.horizon=duration;s};
     let(pilot_states,pilot_jumps)=sample_states(&pilot_candidate.model,&piloting(steps),&pilot_candidate.initial,seed,pilot,steps,outputs);
     let charge=measured_charge(&pilot_candidate.model,&pilot_candidate.model,&pilot_states);pilot_candidate.charged(charge);
     let mut reference:Option<Candidate>=None;
@@ -397,7 +397,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // (the fold's charge takes its own share of the target), or the budget itself where they exceed it.
     let left=BUDGET-(base.used()-model.ground.charge);let allowance=if left>0.{left}else{BUDGET};
     // The exponentials are summed to a share η of the step's own population budget, η² ε dt/waiting.
-    let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=allowance;s};
+    let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=allowance;s.horizon=waiting;s};
     // The step (module documentation): by the bound's rule first -- from the first step, the next by
     // the square root of the excess (both errors scale as dt²) until it suggests a step already
     // checked --, then, where the population criterion decides that rule's step, from it with the

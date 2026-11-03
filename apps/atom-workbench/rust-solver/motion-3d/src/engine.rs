@@ -31,9 +31,9 @@
 //!   the grid T/k, and the period's k propagators and node gradients are built once where the step
 //!   holds more than k n spacings. A pair of beats ±Ω whose whole effect on the step is within the
 //!   exponentials' share is left out (`Segment::resolve`: Duhamel's formula integrated by parts bounds
-//!   it, by 2‖H_Ω‖(1 + ‖H‖τ)/|Ω| and for a beat faster than the generator by about 2‖H_Ω‖/|Ω|) -- a
-//!   gray molasses' explicit states keep terms of 10⁻⁹ of its generator at the hyperfine splitting;
-//!   the solve books them in its ledger.
+//!   it, its boundary terms paid once over the time to the next jump, `Settings::horizon`, and its
+//!   integral per step) -- a gray molasses' explicit states keep terms of 10⁻⁹ of its generator at the
+//!   hyperfine splitting, a red molasses' of 10⁻⁵; the solve books them in its ledger.
 //! The impulse is the conditional force's time integral along that evolution, ∫ ⟨ψ|F|ψ⟩/⟨ψ|ψ⟩ dt
 //! (composite Simpson on the grid, its error within `QUADRATURE` of the impulse: (ν·2δ)⁴/2880 bounds
 //! it, ν the integrand's largest frequency -- the spectrum's largest difference |λ_a* − λ_b| through the
@@ -183,12 +183,16 @@ pub struct Settings{
     /// (`Segment::resolve`): the exponentials' share in a solve, also in its pilot, whose exponentials
     /// are summed to double precision; `truncation` by default.
     pub beats:f64,
+    /// The time (us) over which a trajectory's per-step errors accumulate until a jump resets them: the
+    /// solve's waiting time, its pilots' run; a beat left out costs its boundary terms once over it
+    /// (`Segment::resolve`). The step by default.
+    pub horizon:f64,
 }
 impl Settings{
     /// The settings of a trap (model.rs `Trap`), every axis free, the loss on, the first order in
     /// the Doppler shift everywhere.
     pub fn new(dt:f64,trap:&crate::model::Trap,truncation:f64,average:bool)->Settings{
-        Settings{dt,free:[true;3],axes:trap.axes,frequencies:trap.frequencies,lab:trap.lab,truncation,average,loss:true,doppler:f64::INFINITY,beats:truncation}
+        Settings{dt,free:[true;3],axes:trap.axes,frequencies:trap.frequencies,lab:trap.lab,truncation,average,loss:true,doppler:f64::INFINITY,beats:truncation,horizon:dt}
     }
 }
 
@@ -312,9 +316,9 @@ struct Cache{propagators:Vec<Vec<Complex>>,gradients:Vec<[Vec<Complex>;3]>}
 
 impl Segment{
     /// The segment of a cluster's components over a step of τ from `start`, its exponentials within
-    /// `truncation` and the beats it leaves out within `beats` (`Settings`).
-    fn new(mut components:Components,start:f64,tau:f64,truncation:f64,beats:f64)->Segment{
-        let dropped=Segment::resolve(&mut components,tau,beats);
+    /// `truncation` and the beats it leaves out within `beats` over `horizon` (`Settings`).
+    fn new(mut components:Components,start:f64,tau:f64,truncation:f64,beats:f64,horizon:f64)->Segment{
+        let dropped=Segment::resolve(&mut components,tau,beats,horizon);
         let mut segment=Segment::build(components,start,tau,truncation);segment.dropped=dropped;segment
     }
     fn build(components:Components,start:f64,tau:f64,truncation:f64)->Segment{
@@ -345,30 +349,42 @@ impl Segment{
         let steps=((tau/widest).ceil() as usize).max(1);
         Segment{components,start,spacing:tau/steps as f64,how:How::Beating{cache:None},dropped:0.}
     }
-    /// The beats a step resolves: the pairs ±Ω whose whole effect on the step is within the exponentials'
-    /// share are left out, the weakest first while their bounds' sum stays within it, against the share of
-    /// ‖ψ‖ and of the static force's integral ‖G₀‖τ. Dropping B e^{iΩt} from H moves the propagator by
-    /// ‖∫ U_rest(τ,s) B U(s) e^{iΩs} ds‖ (Duhamel's formula): integrated by parts once at most
-    /// (b/|Ω|)·2(1 + hτ), twice (b/|Ω|)·(2 + τb′ + (2(2h + b′) + τ(2h(2h + b′) + 2h″))/|Ω|) -- the bound of a
-    /// beat faster than the generator --, with b = ‖B‖, h the generator's bound, b′ all the beats' and h″ their
-    /// derivative's, Σ|Ω_j|‖H_j‖ (norms above the spectral one). The force's integral alike, its integrand's
-    /// derivatives ⟨ψ|G|ψ⟩/⟨ψ|ψ⟩ within 4h g and (24h² + 4h″) g: (g/|Ω|)·2(1 + 2hτ), (g/|Ω|)·(2 + (8h +
-    /// τ(24h² + 4h″))/|Ω|). The bound of those left out.
-    fn resolve(c:&mut Components,tau:f64,truncation:f64)->f64{
-        let n=c.n();let size=|h:&[Complex]|column_norm(h,n).max(row_norm(h,n));let half=c.beats.len()/2;
-        let all=c.beats.iter().map(|b|size(&b.hamiltonian)).sum::<f64>();let bound=size(&c.statics.hamiltonian)+all;
-        let pace=c.beats.iter().map(|b|b.omega.abs()*size(&b.hamiltonian)).sum::<f64>();
-        let scale=(0..3).map(|a|size(&c.statics.gradient[a])).fold(0.,f64::max)*tau;
-        let state=|b:f64,w:f64|b/w*(2.*(1.+bound*tau)).min(2.+tau*all+(2.*(2.*bound+all)+tau*(2.*bound*(2.*bound+all)+2.*pace))/w);
-        let force=|g:f64,w:f64|g/w*(2.*(1.+2.*bound*tau)).min(2.+(8.*bound+tau*(24.*bound*bound+4.*pace))/w);
-        let mut pairs:Vec<(usize,f64,f64)>=(0..half).map(|i|{let(down,up)=(&c.beats[half-1-i],&c.beats[half+i]);let w=up.omega;
-            (i,state(size(&down.hamiltonian),w)+state(size(&up.hamiltonian),w),(0..3).map(|a|force(size(&down.gradient[a]),w)+force(size(&up.gradient[a]),w)).fold(0.,f64::max))}).collect();
+    /// The beats a step resolves: the pairs ±Ω whose cost on the step (`bounds`) is within the share are
+    /// left out, the cheapest first while their costs' sum stays within it -- on ‖ψ‖ and on the static
+    /// force's integral ‖G₀‖τ. Their cost.
+    fn resolve(c:&mut Components,tau:f64,truncation:f64,horizon:f64)->f64{
+        let half=c.beats.len()/2;let(mut pairs,scale)=Segment::bounds(c,tau,horizon);
         pairs.sort_by(|a,b|a.1.total_cmp(&b.1));
         let(mut moved,mut pushed)=(0.,0.);let mut dropped=vec![false;half];
         for &(i,x,f)in &pairs{if moved+x<=truncation&&pushed+f<=truncation*scale{moved+=x;pushed+=f;dropped[i]=true;}else{break;}}
         let beats=std::mem::take(&mut c.beats);
         c.beats=beats.into_iter().enumerate().filter(|&(j,_)|!dropped[if j<half{half-1-j}else{j-half}]).map(|(_,b)|b).collect();
         moved
+    }
+    /// Per pair of beats ±Ω (`resolve`): its index and what leaving it out costs a step, on the state and
+    /// on the force's integral; and the static force's integral ‖G₀‖τ. Dropping B e^{iΩt} from H moves the
+    /// propagator by ‖∫ U_rest(τ,s) B U(s) e^{iΩs} ds‖ (Duhamel's formula); integrated by parts it splits
+    /// into boundary terms, which successive steps' cancel -- a trajectory pays them once over its horizon H,
+    /// until a jump --, and an integral that accumulates: the cost is boundary·τ/H + integral, the smaller
+    /// of two bounds. Once: boundary 2b/|Ω|, integral 2hbτ/|Ω|; twice: boundary 2b/|Ω| + 2x/Ω² and integral
+    /// τy/Ω², x = ‖[H₀,B]‖ + 3b b′, y = ‖[H₀,[H₀,B]]‖ + 3‖[H₀,B]‖ b′ + 6h b b′ + 3b b′² + 2b h″ + |Ω| b b′ --
+    /// b = ‖B‖, h the generator's bound, b′ all the beats' sizes, h″ the other beats' Σ|Ω_k|‖H_k‖ (norms
+    /// above the spectral one). The force's integral alike, its integrand's derivatives ⟨ψ|G|ψ⟩/⟨ψ|ψ⟩
+    /// within 4hg and (24h² + 4h″)g (h″ every beat's).
+    fn bounds(c:&Components,tau:f64,horizon:f64)->(Vec<(usize,f64,f64)>,f64){
+        let n=c.n();let size=|h:&[Complex]|column_norm(h,n).max(row_norm(h,n));let half=c.beats.len()/2;let h0=&c.statics.hamiltonian;
+        let all=c.beats.iter().map(|b|size(&b.hamiltonian)).sum::<f64>();let bound=size(h0)+all;
+        let pace=c.beats.iter().map(|b|b.omega.abs()*size(&b.hamiltonian)).sum::<f64>();
+        let scale=(0..3).map(|a|size(&c.statics.gradient[a])).fold(0.,f64::max)*tau;let once=(tau/horizon).min(1.);
+        let commutator=|x:&[Complex]|->Vec<Complex>{let(a,b)=(product(h0,x,n),product(x,h0,n));a.iter().zip(&b).map(|(p,q)|*p-*q).collect()};
+        let state=|b:&[Complex],w:f64,others:f64|->f64{
+            let m=size(b);let c1=commutator(b);let(x1,x2)=(size(&c1),size(&commutator(&c1)));
+            let x=x1+3.*m*all;let y=x2+3.*x1*all+6.*bound*m*all+3.*m*all*all+2.*m*others+w*m*all;
+            (2.*m/w*once+2.*bound*m*tau/w).min((2.*m/w+2.*x/(w*w))*once+tau*y/(w*w))};
+        let force=|g:f64,w:f64|(2.*g/w*once+4.*bound*g*tau/w).min((2.*g/w+8.*bound*g/(w*w))*once+tau*(24.*bound*bound+4.*pace)*g/(w*w));
+        ((0..half).map(|i|{let(down,up)=(&c.beats[half-1-i],&c.beats[half+i]);let w=up.omega;
+            let others=pace-w*(size(&down.hamiltonian)+size(&up.hamiltonian));
+            (i,state(&down.hamiltonian,w,others)+state(&up.hamiltonian,w,others),(0..3).map(|a|force(size(&down.gradient[a]),w)+force(size(&up.gradient[a]),w)).fold(0.,f64::max))}).collect(),scale)
     }
     /// A static segment through its eigendecomposition: Simpson's frequencies are the spectrum's
     /// differences λ_a* − λ_b, so the grid's spacing has (spread·2δ)⁴/2880 within `QUADRATURE`.
@@ -518,6 +534,12 @@ impl Segment{
     }
 }
 
+/// What the exact step does with a cluster at a point (`Engine::probe`, examples/multirate.rs): its
+/// segment's path ("spectral", "taylor", "beating", "cached"), the grid's spacing and nodes, per pair of
+/// beats ±Ω its frequency, its bound and whether it was left out (`Segment::resolve`), the share, and
+/// the seconds its components and its segment take to build.
+pub struct Probe{pub path:&'static str,pub spacing:f64,pub nodes:usize,pub beats:Vec<(f64,f64,bool)>,pub share:f64,pub seconds:[f64;2]}
+
 /// A real orthonormal pair across the unit vector n.
 fn across(n:[f64;3])->[[f64;3];2]{
     let a=if n[0].abs()<=n[1].abs()&&n[0].abs()<=n[2].abs(){[1.,0.,0.]}else if n[1].abs()<=n[2].abs(){[0.,1.,0.]}else{[0.,0.,1.]};
@@ -629,7 +651,7 @@ impl<'a> Engine<'a>{
         let mut segments:Vec<(usize,Segment)>=vec![];let mut impulse=[0.;3];let mut elapsed=0.;
         while elapsed<tau{
             let k=t.cluster;
-            if !segments.iter().any(|x|x.0==k){let segment=Segment::new(m.components(k,&point),start,tau,s.truncation,s.beats);t.beats=t.beats.max(segment.dropped/tau);segments.push((k,segment));}
+            if !segments.iter().any(|x|x.0==k){let segment=Segment::new(m.components(k,&point),start,tau,s.truncation,s.beats,s.horizon);t.beats=t.beats.max(segment.dropped/tau);segments.push((k,segment));}
             let segment=&segments.iter().find(|x|x.0==k).unwrap().1;
             let(taken,jumped,part)=segment.evolve(&mut t.psi,start+elapsed,tau-elapsed,if jumps{t.threshold}else{0.});
             for a in 0..3{impulse[a]+=part[a];}elapsed+=taken;
@@ -644,6 +666,15 @@ impl<'a> Engine<'a>{
         kick
     }
 
+    /// The exact step's segment of a cluster at a point over τ from `start` (`Probe`).
+    pub fn probe(&self,cluster:usize,point:&Point,start:f64,tau:f64)->Probe{
+        let clock=std::time::Instant::now();let c=self.model.components(cluster,point);let built=clock.elapsed().as_secs_f64();
+        let(pairs,_)=Segment::bounds(&c,tau,self.settings.horizon);let half=c.beats.len()/2;let omegas:Vec<f64>=c.beats[half..].iter().map(|b|b.omega).collect();
+        let clock=std::time::Instant::now();let s=Segment::new(c,start,tau,self.settings.truncation,self.settings.beats,self.settings.horizon);let segment=clock.elapsed().as_secs_f64();
+        let kept:Vec<f64>=s.components.beats.iter().map(|b|b.omega).collect();
+        let path=match &s.how{How::Spectral{..}=>"spectral",How::Taylor{..}=>"taylor",How::Beating{cache:Some(_)}=>"cached",How::Beating{cache:None}=>"beating"};
+        Probe{path,spacing:s.spacing,nodes:(tau/s.spacing).round() as usize,beats:pairs.iter().map(|&(i,x,_)|(omegas[i],x,!kept.contains(&omegas[i]))).collect(),share:self.settings.beats,seconds:[built,segment]}
+    }
     /// Whether a cluster takes the exact step: one with explicit excited states or a beating generator
     /// (a held atom's clusters are of ground states and static, control.rs).
     fn takes_exact(&self,cluster:usize)->bool{self.held.is_none()&&(self.model.mixed(cluster)||self.model.beating(cluster))}
@@ -856,14 +887,14 @@ mod tests{
     fn cf4_is_exact_for_a_static_generator_and_of_fourth_order_with_beats(){
         let n=5;let tau=0.1;let psi=state(n,3);
         let still=random(n,&[],None,7);
-        let exact=Segment::new(still.clone(),0.,tau,0.,0.);let mut a=psi;exact.evolve(&mut a,0.,tau,0.);
+        let exact=Segment::new(still.clone(),0.,tau,0.,0.,tau);let mut a=psi;exact.evolve(&mut a,0.,tau,0.);
         let cf4=Segment{components:still,start:0.,spacing:tau/8.,how:How::Beating{cache:None},dropped:0.};let mut b=psi;cf4.evolve(&mut b,0.,tau,0.);
         assert!(distance(&b,&a,n)<=1e-12,"static: {:e}",distance(&b,&a,n));
         let c=random(n,&[150.,300.],None,11);let(target,_)=reference(&c,&psi,0.,tau,20000);
         let error=|steps:usize|{let s=Segment{components:c.clone(),start:0.,spacing:tau/steps as f64,how:How::Beating{cache:None},dropped:0.};let mut x=psi;s.evolve(&mut x,0.,tau,0.);distance(&x,&target,n)};
         let e:Vec<f64>=[32,64,128].iter().map(|&s|error(s)).collect();
         assert!(e[1]/e[2]>12.&&e[1]/e[2]<20.,"errors {e:?}: ratio {}",e[1]/e[2]);
-        let rule=Segment::new(c.clone(),0.,tau,0.,0.);let mut x=psi;rule.evolve(&mut x,0.,tau,0.);
+        let rule=Segment::new(c.clone(),0.,tau,0.,0.,tau);let mut x=psi;rule.evolve(&mut x,0.,tau,0.);
         assert!(distance(&x,&target,n)<=1e-6,"at the node rule's spacing {}: {:e}",rule.spacing,distance(&x,&target,n));
     }
 
@@ -872,7 +903,7 @@ mod tests{
     #[test]
     fn a_period_s_cache_gives_the_uncached_grid_s_evolution(){
         let n=4;let w=230.;let c=random(n,&[w,2.*w],Some(TAU/w),5);let(start,tau)=(0.37,0.4);
-        let cached=Segment::new(c.clone(),start,tau,1e-9,1e-9);
+        let cached=Segment::new(c.clone(),start,tau,1e-9,1e-9,tau);
         assert!(matches!(cached.how,How::Beating{cache:Some(_)}),"the step holds {} spacings",tau/cached.spacing);
         let plain=Segment{components:c,start,spacing:cached.spacing,how:How::Beating{cache:None},dropped:0.};
         for offset in [0.,0.0123]{
@@ -889,7 +920,7 @@ mod tests{
     #[test]
     fn the_spectral_and_the_taylor_segments_agree(){
         let n=6;let tau=0.1;let c=random(n,&[],None,13);let psi=state(n,17);
-        let spectral=Segment::new(c.clone(),0.,tau,1e-9,1e-9);let taylor=Segment::new(c.clone(),0.,tau,0.,0.);
+        let spectral=Segment::new(c.clone(),0.,tau,1e-9,1e-9,tau);let taylor=Segment::new(c.clone(),0.,tau,0.,0.,tau);
         assert!(matches!(spectral.how,How::Spectral{..})&&matches!(taylor.how,How::Taylor{..}));
         // The norm at the end, and a threshold between it and 1.
         let mut end=psi;let(_,_,whole)=taylor.evolve(&mut end,0.,tau,0.);let threshold=0.5*(1.+norm2(&end,n));
@@ -917,8 +948,8 @@ mod tests{
         for b in c.beats.iter_mut(){for z in b.hamiltonian.iter_mut(){*z=*z*1e-5;}for g in b.gradient.iter_mut(){for z in g.iter_mut(){*z=*z*1e-5;}}}
         let size=|h:&[Complex]|column_norm(h,n).max(row_norm(h,n));
         let bound=2.*c.beats.iter().map(|b|size(&b.hamiltonian)).sum::<f64>()*(1.+(size(&c.statics.hamiltonian)+c.beats.iter().map(|b|size(&b.hamiltonian)).sum::<f64>())*tau)/w;
-        let left=Segment::new(c.clone(),0.,tau,1e-6,1e-6);assert!(matches!(left.how,How::Spectral{..}),"the beat left out");
-        assert!(matches!(Segment::new(c.clone(),0.,tau,1e-12,1e-12).how,How::Beating{..}),"a smaller share keeps it");
+        let left=Segment::new(c.clone(),0.,tau,1e-6,1e-6,tau);assert!(matches!(left.how,How::Spectral{..}),"the beat left out");
+        assert!(matches!(Segment::new(c.clone(),0.,tau,1e-12,1e-12,tau).how,How::Beating{..}),"a smaller share keeps it");
         let resolved=Segment{components:c,start:0.,spacing:TAU/w/16.,how:How::Beating{cache:None},dropped:0.};
         let psi=state(n,31);let(mut a,mut b)=(psi,psi);left.evolve(&mut a,0.,tau,0.);resolved.evolve(&mut b,0.,tau,0.);
         assert!(distance(&a,&b,n)<=bound,"{:e} against the bound {bound:e}",distance(&a,&b,n));
@@ -929,7 +960,7 @@ mod tests{
     #[test]
     fn a_beating_segment_finds_the_norm_s_root(){
         let n=5;let tau=0.12;let c=random(n,&[170.,410.],None,19);let psi=state(n,23);
-        let rule=Segment::new(c.clone(),0.,tau,0.,0.);let fine=Segment{components:c,start:0.,spacing:rule.spacing/8.,how:How::Beating{cache:None},dropped:0.};
+        let rule=Segment::new(c.clone(),0.,tau,0.,0.,tau);let fine=Segment{components:c,start:0.,spacing:rule.spacing/8.,how:How::Beating{cache:None},dropped:0.};
         let mut end=psi;rule.evolve(&mut end,0.,tau,0.);let threshold=0.5*(1.+norm2(&end,n));
         let(mut a,mut b)=(psi,psi);let(sa,ja,ia)=rule.evolve(&mut a,0.,tau,threshold);let(sb,jb,ib)=fine.evolve(&mut b,0.,tau,threshold);
         assert!(ja&&jb);

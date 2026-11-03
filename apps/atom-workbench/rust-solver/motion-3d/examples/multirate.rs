@@ -8,11 +8,18 @@
 //! - `solve <scene> <candidate> <duration> <samples> <trajectories> [dt]`: the solve's step choice (its pilot,
 //!   the bound rule and the measured criterion, solve.rs) for the candidate, then its trajectories with the
 //!   harmonic twin: T and the populations; with dt, that step instead of the choice;
-//! - `moving <scene> <candidate> <trajectories> <t_end> <outputs> <dt,...>`: atoms from the same initial
+//! - `moving <scene> <candidate> <trajectories> <t_end> <outputs> <dt,...> [truncation]`: atoms from the same initial
 //!   states and jump streams per step (common random numbers): T per axis from ⟨κ²⟩ and F = 1, 2.
 //! - `doubling <scene> <candidate> <pilot trajectories> <pilot us> <dt,...>`: the step-doubling check's parts on a
 //!   short pilot's states: the momentum's and the impulse's sums, the populations', and the mechanical energy's
 //!   difference and change split into the kinetic and the internal (Re⟨ψ|H|ψ⟩/⟨ψ|ψ⟩ and the scalar) parts.
+//! - `profile <scene> <allowance> <dt> <truncation> <trajectories> <duration us> [horizon us]`: the exact step's cost on one thread
+//!   along trajectories from the solve's seed: per cluster its segments' paths, nodes and beats (each pair's bound
+//!   against the share, left out or not), and the microseconds of its components, its segment and the whole step.
+//! - `work <scene> <candidate> <trajectories> <duration us> <dt> <truncation>`: along the trajectories, the folded
+//!   saturation S = 2η² (the readout's folded excited population, twice) weighted by the force's work |F·v| per
+//!   step, ⟨S |F·v|⟩/⟨|F·v|⟩, against its plain mean, per tenth of the run; the explicit states' population; and
+//!   the kinetic energy's change per atom and us over the steps with jumps and those without.
 //! `cargo run --profile iterate -p atom-motion-3d --example multirate -- <mode> <scene> ...`
 #[path="scene/mod.rs"] mod scene;
 use atom_motion_3d::control::Harmonic;
@@ -54,7 +61,9 @@ fn main(){
         "check"=>check(&request,&arg(3,"0")),
         "held"=>held(&name,&request,&arg(3,"0"),arg(4,"2048").parse().unwrap(),arg(5,"200").parse().unwrap(),arg(6,"5").parse().unwrap(),arg(7,"0.2").parse().unwrap(),&arg(8,"held.json"),arg(9,"1e-12").parse().unwrap()),
         "solve"=>solve(&name,request,&arg(3,"x"),arg(4,"2000").parse().unwrap(),arg(5,"11").parse().unwrap(),arg(6,"512").parse().unwrap(),args.get(7).map(|x|x.parse().unwrap())),
-        "moving"=>moving(&request,&arg(3,"0"),arg(4,"256").parse().unwrap(),arg(5,"40").parse().unwrap(),arg(6,"8").parse().unwrap(),&arg(7,"0.21739")),
+        "moving"=>moving(&request,&arg(3,"0"),arg(4,"256").parse().unwrap(),arg(5,"40").parse().unwrap(),arg(6,"8").parse().unwrap(),&arg(7,"0.21739"),arg(8,"1e-12").parse().unwrap()),
+        "profile"=>profile(&request,arg(3,"0.0095").parse().unwrap(),arg(4,"0.2304").parse().unwrap(),arg(5,"1e-6").parse().unwrap(),arg(6,"32").parse().unwrap(),arg(7,"200").parse().unwrap(),args.get(8).map(|x|x.parse().unwrap())),
+        "work"=>work(&request,&arg(3,"0"),arg(4,"256").parse().unwrap(),arg(5,"2000").parse().unwrap(),arg(6,"0.2924").parse().unwrap(),arg(7,"1e-6").parse().unwrap()),
         "doubling"=>doubling(&request,&arg(3,"x"),arg(4,"16").parse().unwrap(),arg(5,"200").parse().unwrap(),&arg(6,"0.24,0.05,0.005,0.0005")),
         other=>panic!("unknown mode {other}"),
     }
@@ -165,11 +174,11 @@ fn solve(name:&str,mut request:Request,which:&str,duration:f64,samples:usize,cou
     let clock=Instant::now();
     // The pilot as the solve takes it: its exponentials to double precision, the beats left out within the
     // step's population budget over the whole run.
-    let piloting=|steps:usize|{let mut s=plain(steps,f64::EPSILON);s.beats=A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*s.dt/duration;s};
+    let piloting=|steps:usize|{let mut s=plain(steps,f64::EPSILON);s.beats=A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*s.dt/duration;s.horizon=duration;s};
     let(states,jumps)=sample_states(&model,&piloting(first),&initial,seed,pilot,first,outputs);
     let waiting=pilot as f64*duration/(jumps.max(1) as f64);let horizon=waiting.min(duration);
     println!("pilot: {pilot} trajectories at dt {:.4} us, {:.1} s; waiting {waiting:.2} us; {} states",interval/first as f64,clock.elapsed().as_secs_f64(),states.len());
-    let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=BUDGET;s};
+    let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=BUDGET;s.horizon=waiting;s};
     let clock=Instant::now();
     let doubled=|steps:usize|{let r=step_excess(&Engine::new(&model,settings(steps)),&states,waiting);Check{steps,population:r[0],motion:r[1]}};
     let search=|first:usize,measured:bool,known:&[Check],checked:&mut Vec<Check>|{
@@ -204,9 +213,9 @@ fn solve(name:&str,mut request:Request,which:&str,duration:f64,samples:usize,cou
 }
 
 /// Atoms from the same initial states and jump streams at each step (the research's floquet_motion
-/// setup: seed 0xF10, one stratum each, exponentials to 1e-12): T per axis from ⟨κ²⟩, F = 1 and F = 2,
+/// setup: seed 0xF10, one stratum each, exponentials to 1e-12 by default): T per axis from ⟨κ²⟩, F = 1 and F = 2,
 /// and against the first step's the differences of the same atoms.
-fn moving(request:&Request,which:&str,count:u64,t_end:f64,outputs:usize,steps:&str){
+fn moving(request:&Request,which:&str,count:u64,t_end:f64,outputs:usize,steps:&str,truncation:f64){
     let(a,model)=candidate(request,which);println!("candidate {which} (allowance {a:.3e}): {}",describe(&model));
     let initial=Initial::new(&model,request).unwrap();
     let trap=initial.traps[(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap()];
@@ -216,7 +225,7 @@ fn moving(request:&Request,which:&str,count:u64,t_end:f64,outputs:usize,steps:&s
     let to_t=|k2:f64|k2*model.hbar_over_mass/KT_PER_UK;
     let mut runs:Vec<Vec<Vec<([f64;3],f64,f64,bool)>>>=vec![];
     for dt in steps.split(',').map(|x|x.parse::<f64>().unwrap()){
-        let n=(interval/dt).round().max(1.) as usize;let settings=Settings::new(interval/n as f64,&trap,1e-12,false);
+        let n=(interval/dt).round().max(1.) as usize;let settings=Settings::new(interval/n as f64,&trap,truncation,false);
         let clock=Instant::now();
         let rows:Vec<Vec<([f64;3],f64,f64,bool)>>=(0..count).into_par_iter().map(|index|{
             let engine=Engine::new(&model,settings.clone());let mut t=initial_trajectory(&model,&settings,&initial,seed,index,Stratum::single(index));
@@ -268,4 +277,68 @@ fn doubling(request:&Request,which:&str,count:u64,duration:f64,steps:&str){
         println!("dt {dt:.5} ({:.1} s): |Δκ|/|kick| {:.3e} ({:.2e}/{:.2e}); mean max|Δp| {:.2e}; ΔE kinetic Σ {:+.2e} (Σ|·| {:.2e}), internal Σ {:+.2e} (Σ|·| {:.2e}); E2−E0 kinetic Σ {:+.2e} (Σ|·| {:.2e}), internal Σ {:+.2e} (Σ|·| {:.2e})",
             clock.elapsed().as_secs_f64(),sum(0)/sum(1),sum(0)/m,sum(1)/m,sum(2)/m,sum(3),abs(3),sum(4),abs(4),sum(5),abs(5),sum(6),abs(6));
     }
+}
+
+/// The exact step's cost on one thread along trajectories of a model at `allowance` (`Engine::probe`).
+fn profile(request:&Request,allowance:f64,dt:f64,truncation:f64,count:u64,duration:f64,horizon:Option<f64>){
+    // The request over the duration (the fold's rule takes its 1/T floor), 21 outputs as the cost probe's.
+    let mut request=request.clone();request.times_us=(0..21).map(|i|duration*i as f64/20.).collect();let request=&request;
+    let model=Model::with(request,allowance).unwrap();println!("allowance {allowance:.3e}: {}",describe(&model));
+    let initial=Initial::new(&model,request).unwrap();let trap=initial.traps[0];
+    let mut settings=Settings::new(dt,&trap,truncation,true);if let Some(h)=horizon{settings.horizon=h;}let engine=Engine::new(&model,settings.clone());let steps=(duration/dt).round() as usize;
+    // Per cluster: steps, the step's, the components' and the segment's seconds, nodes, paths, and per beat (Ω) its largest bound and drops.
+    struct Acc{steps:usize,step:f64,components:f64,segment:f64,nodes:usize,paths:Vec<(&'static str,usize)>,beats:Vec<(f64,f64,usize,usize)>}
+    let mut acc:Vec<Acc>=(0..model.clusters()).map(|_|Acc{steps:0,step:0.,components:0.,segment:0.,nodes:0,paths:vec![],beats:vec![]}).collect();
+    let mut share=0.;
+    for index in 0..count{
+        let mut t=initial_trajectory(&model,&settings,&initial,0x3D_5EED,index,Stratum::single(index));
+        for _ in 0..steps{
+            if !t.alive{break;}let k=t.cluster;let a=&mut acc[k];
+            if model.mixed(k)||model.beating(k){
+                // The probe at the step's half-step point is near the step's own; its build times stand for the step's.
+                let cpu=scene::cpu_seconds();let p=model.point(t.r,t.kappa);let probe=engine.probe(k,&p,t.time,dt);share=probe.share;
+                let built=scene::cpu_seconds()-cpu;let wall=probe.seconds[0]+probe.seconds[1];
+                // The probe's CPU time shared by its two parts as their wall times.
+                a.components+=built*probe.seconds[0]/wall.max(1e-300);a.segment+=built*probe.seconds[1]/wall.max(1e-300);a.nodes+=probe.nodes;
+                match a.paths.iter_mut().find(|x|x.0==probe.path){Some(x)=>x.1+=1,None=>a.paths.push((probe.path,1))}
+                for(w,bound,left)in probe.beats{match a.beats.iter_mut().find(|x|(x.0-w).abs()<=1e-9*w){Some(x)=>{x.1=x.1.max(bound);x.2+=1;x.3+=left as usize;}None=>a.beats.push((w,bound,1,left as usize))}}
+            }
+            let cpu=scene::cpu_seconds();engine.step(&mut t);a.step+=scene::cpu_seconds()-cpu;a.steps+=1;
+        }
+    }
+    for(k,a)in acc.iter().enumerate(){
+        if a.steps==0{continue;}let m=a.steps as f64;
+        println!("cluster {k} {}({}): {} steps, {:.1} CPU-us per step; components {:.1} us, segment {:.1} us, the rest {:.1} us; nodes {:.1} per step; paths {:?}",
+            model.dimension(k),model.dimension(k)-model.ground_dimension(k),a.steps,1e6*a.step/m,1e6*a.components/m,1e6*a.segment/m,1e6*(a.step-a.components-a.segment)/m,a.nodes as f64/m,a.paths);
+        for &(w,bound,seen,left)in &a.beats{println!("    beat {:.4} MHz: largest bound {:.2e} (share {:.1e}), left out {}/{}",w/TAU,bound,share,left,seen);}
+    }
+}
+
+/// The fold's saturation where the force works (`work` mode): per tenth of the run Σ S|F·v|, Σ|F·v|, Σ S and the
+/// explicit states' population over every step of every trajectory, F the Ehrenfest force after the step at its point.
+fn work(request:&Request,which:&str,count:u64,duration:f64,dt:f64,truncation:f64){
+    let(a,model)=candidate(request,which);println!("candidate {which} (allowance {a:.3e}): {}",describe(&model));
+    let initial=Initial::new(&model,request).unwrap();let trap=initial.traps[0];
+    let settings=Settings::new(dt,&trap,truncation,true);let steps=(duration/dt).round() as usize;let hm=model.hbar_over_mass;let bins=10;
+    let clock=Instant::now();
+    let sums:Vec<Vec<[f64;10]>>=(0..count).into_par_iter().map(|index|{
+        let engine=Engine::new(&model,settings.clone());let mut t=initial_trajectory(&model,&settings,&initial,0x3D_5EED,index,Stratum::single(index));
+        let mut out=vec![[0.;10];bins];let kinetic=|t:&Trajectory|0.5*hm*t.kappa.iter().map(|k|k*k).sum::<f64>();
+        for i in 0..steps{
+            if !t.alive{break;}let(e0,j0)=(kinetic(&t),t.jumps);engine.step(&mut t);let de=kinetic(&t)-e0;
+            {let b=&mut out[(i*bins/steps).min(bins-1)];if t.jumps>j0{b[6]+=de;b[7]+=(t.jumps-j0) as f64;}else{b[8]+=de;b[9]+=1.;}}
+            let p=model.point(t.r,t.kappa);let g=model.generator(t.cluster,&p,t.time);let f=g.force(&t.psi);
+            let w=(0..3).map(|x|f[x]*hm*t.kappa[x]).sum::<f64>().abs();
+            let(pops,folded)=model.readout(t.cluster,&p,&t.psi,t.time);let s=2.*folded;
+            let explicit:f64=model.ground.excited_states.iter().map(|&e|pops[e]).sum::<f64>()-folded;
+            let b=&mut out[(i*bins/steps).min(bins-1)];b[0]+=s*w;b[1]+=w;b[2]+=s;b[3]+=1.;b[4]+=explicit*w;b[5]+=explicit;
+        }
+        out}).collect();
+    println!("{count} trajectories, {:.1} s wall",clock.elapsed().as_secs_f64());
+    let mut total=[0.;10];let uk=|e:f64|e/KT_PER_UK;
+    for b in 0..bins{let mut x=[0.;10];for s in &sums{for k in 0..10{x[k]+=s[b][k];}}for k in 0..10{total[k]+=x[k];}
+        let span=duration/bins as f64*count as f64;
+        println!("  t {:6.0}-{:6.0} us: S work-weighted {:.4}, mean {:.4}; explicit excited work-weighted {:.4}, mean {:.4}; kinetic energy per atom-us: steps with jumps {:+.4} uK ({:.4} jumps), without {:+.4} uK",
+            duration*b as f64/bins as f64,duration*(b+1) as f64/bins as f64,x[0]/x[1],x[2]/x[3],x[4]/x[1],x[5]/x[3],uk(x[6]/span),x[7]/span,uk(x[8]/span));}
+    println!("  whole run: S work-weighted {:.4}, mean {:.4}; explicit excited work-weighted {:.4}, mean {:.4}",total[0]/total[1],total[2]/total[3],total[4]/total[1],total[5]/total[3]);
 }
