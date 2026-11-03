@@ -37,6 +37,13 @@ fn request(fixture:&str)->Request{
         emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],field_vector_g:[0.;3],mass_kg:r["massKg"].as_f64().unwrap(),initial_density:density,
         temperature_uk:r["temperatureUK"].as_f64().unwrap(),trap_beam,times_us:vec![]}
 }
+/// The tweezer PGC with the tweezer's reflection along its axis, in phase at the focus (F5, ground.rs
+/// `Unit`): the two one unit, their standing wave's intensity |a₁ + a₂|²/4 an axis of the tables, both
+/// the trap's beams (its far level with the two off).
+fn retro()->Request{
+    let mut r=request(PGC);let mut reflection=r.beams[r.trap_beam].clone();
+    (reflection.id,reflection.name)=("reflection".into(),"反射光".into());reflection.direction=reflection.direction.map(|x|-x);r.beams.push(reflection);r
+}
 /// The GPU, or None (said) on a machine without one.
 fn device()->Option<&'static std::sync::Mutex<gpu::Gpu>>{match gpu::gpu(){Ok(g)=>Some(g),Err(e)=>{println!("no GPU ({e}): nothing to check");None}}}
 
@@ -67,8 +74,8 @@ fn the_kernel_s_streams_are_the_cpu_s(){
 fn model(r:&Request,fourth:bool)->Model{Model::with_order(r,f64::INFINITY,fourth).unwrap()}
 /// A batch of the fixture's thermal trajectories and the step's settings (a solve's: the truncation
 /// a share of the step's budget, the loss on), with `threshold` (when given) as every one's.
-fn setup(fixture:&str,threshold:Option<f64>,allowance:f64,fourth:bool)->(Model,Settings,Vec<Trajectory>){
-    let r=request(fixture);let model=model(&r,fourth);let initial=Initial::new(&model,&r).unwrap();
+fn setup(r:&Request,threshold:Option<f64>,allowance:f64,fourth:bool)->(Model,Settings,Vec<Trajectory>){
+    let model=model(r,fourth);let initial=Initial::new(&model,r).unwrap();
     let mut settings=Settings::new(0.2,&initial.traps[0],1e-6,false);settings.doppler=allowance;
     let trajectories=(0..64).map(|index|{let mut t=initial_trajectory(&model,&settings,&initial,0x3D_5EED,index,Stratum::single(index));if let Some(x)=threshold{t.threshold=x;}t}).collect();
     (model,settings,trajectories)
@@ -76,9 +83,9 @@ fn setup(fixture:&str,threshold:Option<f64>,allowance:f64,fourth:bool)->(Model,S
 /// The CPU's and the GPU's trajectories after one step from the same states agree to single
 /// precision: the same jumps (the same choices), positions, momenta, internal states and norms; the
 /// new threshold the stream's (at fourth order divided by the slow start's A, single precision).
-fn compare(fixture:&str,threshold:Option<f64>,allowance:f64,jumps:bool,fourth:bool){
+fn compare(r:&Request,threshold:Option<f64>,allowance:f64,jumps:bool,fourth:bool){
     let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
-    let(model,settings,trajectories)=setup(fixture,threshold,allowance,fourth);
+    let(model,settings,trajectories)=setup(r,threshold,allowance,fourth);
     let program=gpu.program(&model,&settings).unwrap();
     let got=gpu.advance(&program,&settings,&trajectories,1).unwrap();
     let engine=Engine::new(&model,settings.clone());
@@ -104,19 +111,27 @@ fn compare(fixture:&str,threshold:Option<f64>,allowance:f64,jumps:bool,fourth:bo
 
 /// One step from thermal states, the jumps where their thresholds fall.
 #[test]
-fn a_step_is_the_cpu_s(){compare(PGC,None,f64::INFINITY,false,false);}
+fn a_step_is_the_cpu_s(){compare(&request(PGC),None,f64::INFINITY,false,false);}
 /// A jump in the first step (every threshold just below one): the class, the photon's direction and
 /// polarization, the recoils and the new threshold are the CPU's.
 #[test]
-fn a_jump_is_the_cpu_s(){compare(PGC,Some(0.999),f64::INFINITY,true,false);}
+fn a_jump_is_the_cpu_s(){compare(&request(PGC),Some(0.999),f64::INFINITY,true,false);}
 /// The same with the exact response (an allowance of zero: every step beyond the first order).
 #[test]
-fn a_jump_with_the_exact_response_is_the_cpu_s(){compare(PGC,Some(0.999),0.,true,false);}
+fn a_jump_with_the_exact_response_is_the_cpu_s(){compare(&request(PGC),Some(0.999),0.,true,false);}
 /// On a cluster of all 8 ground states (two entries of each matrix per lane): a step, and a jump with
 /// the first-order and the exact response.
 #[test]
 fn on_eight_states_a_step_and_a_jump_are_the_cpu_s(){
-    compare(MOLASSES,None,f64::INFINITY,false,false);compare(MOLASSES,Some(0.999),f64::INFINITY,true,false);compare(MOLASSES,Some(0.999),0.,true,false);
+    let r=request(MOLASSES);compare(&r,None,f64::INFINITY,false,false);compare(&r,Some(0.999),f64::INFINITY,true,false);compare(&r,Some(0.999),0.,true,false);
+}
+/// With a retro-reflected tweezer (`retro`): a step, and a jump with the first-order and the exact
+/// response (its base and the standing wave's block per unit, gpu/program.rs).
+#[test]
+fn with_a_retro_reflected_tweezer_a_step_and_a_jump_are_the_cpu_s(){
+    let r=retro();let m=model(&r,false);
+    assert!(m.ground.units.iter().any(|u|u.beams.len()==2)&&m.trap_beams.len()==2,"the tweezer and its reflection one unit, both the trap's");
+    compare(&r,None,f64::INFINITY,false,false);compare(&r,Some(0.999),f64::INFINITY,true,false);compare(&r,Some(0.999),0.,true,false);
 }
 /// The same at fourth order (model.rs # Fourth order): H^(4) in the generator; at a jump the photons'
 /// −C W3 − ½ C R R†R and the slow start ψ ← Π f/√A, θ ← θ/A; the first order's and the exact response.
@@ -126,7 +141,7 @@ fn on_eight_states_a_step_and_a_jump_are_the_cpu_s(){
 #[test]
 #[ignore="fourth2's FourthLayout (slabs, slow pairs, jump slabs): the kernel's port is pending"]
 fn at_fourth_order_a_step_and_a_jump_are_the_cpu_s(){
-    compare(PGC,None,f64::INFINITY,false,true);compare(PGC,Some(0.999),f64::INFINITY,true,true);compare(PGC,Some(0.999),0.,true,true);
+    let r=request(PGC);compare(&r,None,f64::INFINITY,false,true);compare(&r,Some(0.999),f64::INFINITY,true,true);compare(&r,Some(0.999),0.,true,true);
 }
 
 /// The trajectories of a batch (`first`, `count` and `group` as lib.rs `simulate` takes them) whose
@@ -168,9 +183,9 @@ fn straddles(gpu:&gpu::Gpu,program:&program::Program,model:&Model,settings:&Sett
 /// counted. A jump a step apart moves its recoil by a step in a window (1.6e-3 of the gray molasses'
 /// Σκ_x² at its last output, trajectory 44 from the 40th). The held twin's jumps are not checked so
 /// (no entry steps it alone on the GPU): each fixture's fall in the same steps.
-fn batch(fixture:&str,fourth:bool)->bool{
+fn batch(r:&Request,fourth:bool)->bool{
     let Some(gpu)=device()else{return false};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
-    let r=request(fixture);let model=model(&r,fourth);let initial=Initial::new(&model,&r).unwrap();
+    let model=model(r,fourth);let initial=Initial::new(&model,r).unwrap();
     let settings=Settings::new(0.2,&initial.traps[0],1e-6,true);
     let(seed,count,group,steps,outputs,listed)=(0x3D_5EED,20,10,3,6,[2,5]);
     let program=gpu.program(&model,&settings).unwrap();
@@ -204,6 +219,7 @@ fn batch(fixture:&str,fourth:bool)->bool{
         for s in 0..STATES{close(x.populations[s],y.populations[s],y.held,&format!("{at}: Σp[{s}]"));close(x.twin[s],y.twin[s],y.trajectories,&format!("{at}: twin Σc[{s}]"));}
         for j in 0..2{close(x.twin2[j],y.twin2[j],y.trajectories,&format!("{at}: twin2[{j}]"));}
         close(x.profile,y.profile,1e-6*y.held,&format!("{at}: profile"));close(x.doppler,y.doppler,1e-9*y.held,&format!("{at}: (kv/σ)²"));
+        close(x.folded,y.folded,1e-9*y.held,&format!("{at}: folded η²"));
     }}
     assert_eq!(g.jumps,c.jumps,"jumps");
     for(gs,cs)in g.samples.iter().zip(&c.samples){
@@ -213,17 +229,18 @@ fn batch(fixture:&str,fourth:bool)->bool{
     println!("trajectories {first} to {}: {} groups of {} outputs, {} jumps, held twin {}",first+count-1,g.groups.len(),outputs,g.jumps,twin.is_some());
     twin.is_some()
 }
-/// The batches of the tweezer PGC and the gray molasses; one of them has a held twin.
+/// The batches of the tweezer PGC, the gray molasses and the retro-reflected tweezer; one of them has
+/// a held twin.
 #[test]
 fn a_batch_s_sums_are_the_cpu_s(){
-    let twins=[batch(PGC,false),batch(MOLASSES,false)];
+    let twins=[batch(&request(PGC),false),batch(&request(MOLASSES),false),batch(&retro(),false)];
     if device().is_some(){assert!(twins.iter().any(|&t|t),"a fixture with a held twin");}
 }
 /// The same at fourth order, on the tweezer PGC, with the held twin's start and post-jump map (control.rs
 /// # The twin at fourth order).
 #[test]
 #[ignore="fourth2's FourthLayout (slabs, slow pairs, jump slabs): the kernel's port is pending"]
-fn at_fourth_order_a_batch_s_sums_are_the_cpu_s(){batch(PGC,true);}
+fn at_fourth_order_a_batch_s_sums_are_the_cpu_s(){batch(&request(PGC),true);}
 
 /// The default scene's motion as the app sends it (rust-solver/tests/fixtures/default_scene_motion.json)
 /// with the held twin kept: a GPU batch's estimates, the twin's control correcting the populations,

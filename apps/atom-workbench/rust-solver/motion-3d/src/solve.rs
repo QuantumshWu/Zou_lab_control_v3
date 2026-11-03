@@ -312,7 +312,7 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
         let action=if x.coherent{"同频光束按主偏振合成一个光场（驻波精确）；偏离主偏振的剩余分量略去"}else{"同频而偏振不同：光移按各光束的光强相加，干涉项（偏振光晶格）略去"};
         ledger.add(&format!("「{}」的干涉",names(&x.beams)),x.estimate(g),action.into());
     }
-    ledger.add("聚焦光的光强插值表",model.table_error,"三次插值".into());
+    ledger.add("聚焦光的光强插值表",model.table_error,match model.table_limit{Some(n)=>format!("三次插值；网格细化到工作量上限（每维 {n} 个节点）为止"),None=>"三次插值".into()});
     ledger
 }
 
