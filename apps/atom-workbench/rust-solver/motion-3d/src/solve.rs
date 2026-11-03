@@ -469,6 +469,10 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         None=>(pilot_candidate,(pilot_states,pilot_jumps,pilot_groups),pilot_harmonic),
     };
     let Candidate{model,initial,base,charge,..}=chosen;
+    // The generator against its jumps at the pilot's states (`gain`): booked where its decay falls below
+    // the jumps' rate.
+    let mut base=base;let gain=gain(&model,&states);
+    if gain>0.{base.add(GAIN,gain,"沿试探轨迹测得：无跳跃的衰减低于跳跃率（i(H − H†) − ΣL†L 的负本征值对最大跳跃率之比）".into());}
     // The beats the exact steps left out (engine.rs `Segment::resolve`), booked as their bound per unit time
     // over the horizon: within the exponentials' share by construction.
     let pilot_beats=states.iter().map(|t|t.beats).fold(0.,f64::max);
@@ -599,6 +603,20 @@ fn booked(base:&Ledger,bound:f64)->Ledger{
     let mut ledger=base.clone();
     if bound>0.{ledger.add("多速率步略去的残余拍频",bound,"整步影响之界（Duhamel 积分的分部积分）在指数截断份额内的拍频对略去，其余按 CF4 精确传播".into());}
     ledger
+}
+
+/// The ledger's item of a generator whose decay falls below its jumps' rate (`gain`).
+const GAIN:&str="生成元的增益";
+/// A model's gain at sampled states (model.rs `Model::decay_balance`, at most FIRST_GROUPS × 8 of them): the
+/// largest −λ of D = i(H − H†) − Σ L†L beyond its eigenvalues' round-off, relative to the largest jump rate
+/// met -- the relative error of the jump rate where the no-jump decay misses it (a van Vleck path's
+/// dissipative part that no jump carries, the validation's F10); 0 for a Lindblad generator, unbounded
+/// for a gain without jumps.
+fn gain(model:&Model,states:&[Trajectory])->f64{
+    let every=(states.len()/(FIRST_GROUPS as usize*8)).max(1);
+    let(gain,rate)=states.par_iter().step_by(every).map(|t|{let(low,rate,scale)=model.decay_balance(t.cluster,&model.point(t.r,t.kappa),t.time);
+        let n=model.dimension(t.cluster) as f64;((-low-64.*f64::EPSILON*n*scale).max(0.),rate)}).reduce(||(0.,0.),|a,b|(a.0.max(b.0),a.1.max(b.1)));
+    if gain==0.{0.}else if rate>0.{gain/rate}else{f64::INFINITY}
 }
 
 /// The ledger's item of the drives' fold (its charge a priori; the solve's ledger charges it as measured).

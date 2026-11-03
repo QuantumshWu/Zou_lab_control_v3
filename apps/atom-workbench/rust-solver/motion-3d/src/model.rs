@@ -85,7 +85,7 @@
 //! off (`Local::trap`).
 use crate::ground::{self,Ground};
 use crate::ledger::BUDGET;
-use crate::linear::{Dense,Lu};
+use crate::linear::{hermitian_eigenvalues,Dense,Lu};
 use crate::stats::KT_PER_UK;
 use crate::{Complex,Request,STATES};
 use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
@@ -1522,6 +1522,24 @@ impl Model{
         Photons{model:self,cluster,point:*p,psi:state,time:t,jumps,doppler,exact,amplitude}
     }
 
+    /// A cluster's generator against its jumps at a point and time: D = i(H − H†) − Σ L†L over its classes'
+    /// photons, which a Lindblad generator keeps positive semidefinite -- its no-jump decay at least its
+    /// jumps' rate in every state. D's smallest eigenvalue, Σ L†L's largest and the eigenvalues' scale, the
+    /// largest of i(H − H†)'s and Σ L†L's (rad/us).
+    pub fn decay_balance(&self,cluster:usize,p:&Point,t:f64)->(f64,f64,f64){
+        let n=self.dimension(cluster);let h=self.generator(cluster,p,t).hamiltonian;
+        let decay=Dense::from_fn(n,n,|a,b|(h[a*n+b]-h[b*n+a].conj())*Complex::I);
+        // Column b: the photons of the basis state b.
+        let columns:Vec<Vec<[[Complex;MOST_STATES];3]>>=(0..n).map(|b|{let mut psi=[Complex::ZERO;MOST_MIXED];psi[b]=Complex::ONE;self.photons(cluster,p,&psi,t,None).amplitude}).collect();
+        let mut jumps=Dense::zeros(n,n);
+        // A photon lands in its target's ground states.
+        for(c,class)in self.ground.clusters[cluster].classes.iter().enumerate(){let nt=self.ground_dimension(class.target);
+            for x in 0..3{for a in 0..n{for b in 0..n{jumps[(a,b)]+=(0..nt).fold(Complex::ZERO,|s,i|s+columns[a][c][x][i].conj()*columns[b][c][x][i]);}}}}
+        let mut d=decay.clone();d.add_scaled(-Complex::ONE,&jumps);
+        let extreme=|m:&Dense|hermitian_eigenvalues(m).into_iter().fold((f64::INFINITY,f64::NEG_INFINITY),|(lo,hi),x|(lo.min(x),hi.max(x)));
+        let((low,_),(_,rate),(g0,g1))=(extreme(&d),extreme(&jumps),extreme(&decay));
+        (low,rate,rate.abs().max(g0.abs()).max(g1.abs()))
+    }
     /// The 32 populations (request order) of a cluster's state ψ at a point and time: the bare
     /// ground ones, ρ − ½{Y, ρ}, and the excited ones, Σ |Σ_coherent e^{−iε̃t} (R ψ)_i|² and ρ_ee of
     /// the explicit ones, for ρ = ψψ†/‖ψ‖² (ground.rs's readout).
