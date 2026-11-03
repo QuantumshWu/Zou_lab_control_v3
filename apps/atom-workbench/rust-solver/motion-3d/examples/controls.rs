@@ -26,6 +26,7 @@ fn main(){
     let intensity=states.iter().map(|t|model.geometry[model.trap_beam].intensity(t.r)).sum::<f64>()/states.len().max(1) as f64;
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);let twin=Twin::new(&model,intensity);
     let clock=Instant::now();let exact=twin.as_ref().map(|t|t.means(&model,&request.initial_density,interval,outputs));
+    if let Some(e)=&exact{println!("master equation: largest |Σ populations − 1| over the outputs {:.2e}",e.iter().map(|p|(p.iter().sum::<f64>()-1.).abs()).fold(0.,f64::max));}
     println!("{name}: dt {:.4} us, {count} trajectories; twin {} (intensity {intensity:.4}), master equation {:.3} s",settings.dt,
         twin.as_ref().map_or("none (beats)".into(),|t|format!("at {:?}",t.held.point.r)),clock.elapsed().as_secs_f64());
     let clock=Instant::now();

@@ -19,6 +19,7 @@ fn main(){
     let wall=started.elapsed().as_secs_f64();
     println!("{name}: {:.1} s wall on {:?}{}, {} trajectories, dt {:.4} us, trap {:?} kHz; {}",wall,s.device,s.device_note.as_ref().map_or(String::new(),|n|format!(" ({n})")),
         s.trajectories,s.time_step_us,s.trap_frequency_khz,s.reason.clone().unwrap_or_default());
+    let a=&s.approximations;println!("ledger: budget {:.3e}, used {:.3e}{}",a.budget,a.used(),a.flagged.as_ref().map_or(String::new(),|f|format!(", flagged: {f}")));
     let pick=|label:&str|request.states.iter().position(|x|x==label).unwrap();
     let(m22,f1)=(pick("ground-2-2"),[pick("ground-1--1"),pick("ground-1-0"),pick("ground-1-1")]);
     for i in (0..samples).step_by((samples/10).max(1)).chain([samples-1]){
