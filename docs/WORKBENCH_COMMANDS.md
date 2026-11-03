@@ -270,8 +270,13 @@ outputs the panel publishes as `@logic/<panel>/<output>` (absent = published).
 image is drawn with; `overlay_choices` are the outputs of the overlay contract
 (`zlc_plot.image-point-overlay-status`) of nodes reading the same measurement as the
 panel's signal (v2 `overlay_signal_groups`). The desktop reads the judgement in the same
-coherent front as the image (the picture waits for its judgement while its producer runs
-or once both runs are sealed; a judgement of another shot is not drawn), builds the rings from the judgement run's
+coherent front as the image, a member of the picture's same-shot group whenever its signal
+is in the Runtime, whatever its run's state: the image shows the newest shot that has its
+judgement, and while the judgement of a newer one is missing (its producer's run not begun,
+not published, still of the replaced camera run) it keeps the shot it shows with its rings,
+then both flip together; a judgement of another shot is not drawn. A producer that leaves
+(failed, stopped, its node removed) or no longer follows its source, and an Overlay set to
+none, hold nothing. It builds the rings from the judgement run's
 `image_point_overlay_geometry` record and their colours from its data; without an
 Overlay a geometry recorded with the image's own run draws passive rings. The row shows
 for a panel whose surfaces are images (v2 paints_images): an Image, or a FacetGrid of
