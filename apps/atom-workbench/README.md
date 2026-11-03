@@ -95,7 +95,12 @@ output's total estimated error -- the approximation ledger
 meets 5% in the populations and 10% in T; an output that cannot is flagged. An
 atom is lost when its mechanical energy in the trap is positive. A point
 particle has no zero-point motion: results are validated for k_B T >= 4 hbar
-omega on every axis and marked reference-only below. The example 光镊 · 3D PGC
+omega on every axis and marked reference-only below. The Ehrenfest force averages
+the dipole force's fluctuations in a superposition of ground states, so the
+momentum diffusion at a fixed point of a polarization gradient is low (0.23-0.27
+of the second-order expansion's at a lin-perp-lin focus); in the tweezer the
+trapped T stays within a few percent of the 1D GMW references in the validated
+regime. The example 光镊 · 3D PGC
 cools the atom with sigma+sigma- pairs along x, y and z; with motion on, the
 Raman-resonant Lambda of 光镊 + 探测光 + 回泵光 runs on one cluster spanning
 F = 1 and F = 2.
