@@ -22,9 +22,22 @@
 //! residual beats) and every cluster is of ground states (the exact step's clusters with explicit
 //! excited states have none yet): its exponentials are then computed once, and the master equation is
 //! one exponential of the superoperator per output interval.
-use crate::engine::{Held,Settings};
+//!
+//! # The twin at fourth order
+//! A jump leaves the bare state f, and at fourth order the atom goes on from its slow part: Πf/√A,
+//! A = ‖Πf‖², its threshold θ/A (engine.rs `slow_start`). That unraveling is no master equation's:
+//! where A < 1 the jump it makes at once with probability 1 − A draws its class by the slow part's
+//! own photons, normalized by their total, and where A > 1 none comes until A‖ψ‖² falls to 1 -- the
+//! waiting time's law is not linear in the state. The twin takes the post-jump map into its jumps
+//! instead: K = Π L̃ for each class, Π its target cluster's at the twin's point, so that the jump term
+//! is Σ K ρ K† = Σ Π (L̃ ρ L̃†) Π† -- the map ρ ↦ Π ρ Π† after every jump --, and its decay is their
+//! own Σ K†K = Σ L̃†Π†ΠL̃, so that the equation stays Lindblad's with trace one. Its unraveling goes on
+//! after a jump from Π f/√A, as the atom does, with the plain threshold, and starts from Π e/√A
+//! (`Twin::start`); its decay differs from the atom's by Σ L̃†(Π†Π − 1)L̃, a share of order η² of the
+//! jumps' rate, which in the atom's unraveling the threshold's scaling carries.
+use crate::engine::{Held,Settings,Trajectory};
 use crate::linear::Dense;
-use crate::model::{Model,MOST_STATES};
+use crate::model::{Model,MOST_MIXED,MOST_STATES};
 use crate::stats::KT_PER_UK;
 use crate::{Complex,Initial,STATES};
 
@@ -78,14 +91,15 @@ fn initial_momenta(model:&Model,settings:&Settings,initial:&Initial)->[[f64;3];3
     std::array::from_fn(|p|std::array::from_fn(|q|(0..3).map(|x|(0..3).map(|y|settings.axes[p][x]*lab[x][y]*settings.axes[q][y]).sum::<f64>()).sum()))
 }
 
-/// The held twin: its point, every cluster's generator and jumps there (engine.rs `Held`), and its
-/// populations' readout there, a linear map of the cluster's density.
-pub struct Twin{pub held:Held,pub(crate) readout:Vec<Vec<[f64;STATES]>>}
+/// The held twin: its point, every cluster's generator and jumps there (engine.rs `Held`), its
+/// populations' readout there, a linear map of the cluster's density, and at fourth order each
+/// cluster's post-jump map Π there (n × n, row-major; none without the fourth order's tables).
+pub struct Twin{pub held:Held,pub(crate) readout:Vec<Vec<[f64;STATES]>>,pub slow:Vec<Option<Vec<Complex>>>}
 impl Twin{
     /// The twin where the trap beam's intensity is `intensity`, on the line through its focus across
     /// it; none when the generator has residual beats.
     pub fn new(model:&Model,intensity:f64)->Option<Twin>{
-        if !static_generator(model)||model.fourth||(0..model.clusters()).any(|k|model.mixed(k)){return None;}
+        if !static_generator(model)||(0..model.clusters()).any(|k|model.mixed(k)){return None;}
         let g=&model.geometry[model.trap_beam];let n=g.direction;
         let pick=if n[0].abs()<0.9{[1.,0.,0.]}else{[0.,1.,0.]};let along=pick[0]*n[0]+pick[1]*n[1]+pick[2]*n[2];
         let across:[f64;3]=std::array::from_fn(|i|pick[i]-along*n[i]);let l=(across[0]*across[0]+across[1]*across[1]+across[2]*across[2]).sqrt();
@@ -93,12 +107,17 @@ impl Twin{
         let(mut lo,mut hi)=(0.,g.waist?);while g.intensity(at(hi))>intensity{hi*=2.;}
         for _ in 0..60{let mid=0.5*(lo+hi);if g.intensity(at(mid))>intensity{lo=mid;}else{hi=mid;}}
         let point=model.point(at(lo),[0.;3]);
-        // Each class's jump operators: column j the photon amplitudes of the basis state j.
+        // At fourth order each cluster's post-jump map Π (the module documentation, # The twin at
+        // fourth order).
+        let slow:Vec<Option<Vec<Complex>>>=(0..model.clusters()).map(|k|model.slow_part(k,&point,0.)).collect();
+        // Each class's jump operators: column j the photon amplitudes of the basis state j, then the
+        // target's Π: K = Π L̃.
         let jumps:Vec<Vec<[Vec<Complex>;3]>>=(0..model.clusters()).map(|k|{
             let n=model.dimension(k);let columns:Vec<Vec<[[Complex;MOST_STATES];3]>>=(0..n).map(|j|{let mut psi=[Complex::ZERO;MOST_STATES];psi[j]=Complex::ONE;
                 model.photons(k,&point,&psi,0.,None).amplitude}).collect();
             model.ground.clusters[k].classes.iter().enumerate().map(|(c,class)|{let nt=model.dimension(class.target);
-                std::array::from_fn(|x|(0..nt*n).map(|e|columns[e%n][c][x][e/n]).collect())}).collect()}).collect();
+                std::array::from_fn(|x|{let l:Vec<Complex>=(0..nt*n).map(|e|columns[e%n][c][x][e/n]).collect();
+                    match &slow[class.target]{None=>l,Some(pi)=>(0..nt*n).map(|e|{let(i,j)=(e/n,e%n);(0..nt).fold(Complex::ZERO,|z,m|z+pi[i*nt+m]*l[m*n+j])}).collect()}})}).collect()}).collect();
         // Each cluster's generator: the Hermitian part of the engine's H_eff there, its decay its own
         // jumps' Σ L†L. The engine's decay comes from the tables of the responses and its jumps from
         // the photons, which take the recoil's (and the Doppler's) first order: the two differ by ~1e-4
@@ -125,7 +144,15 @@ impl Twin{
                 out[i*n+j]=std::array::from_fn(|s|px[s]-diagonal[i][s]-diagonal[j][s]);out[j*n+i]=std::array::from_fn(|s|diagonal[i][s]+diagonal[j][s]-py[s]);
             }}
             out}).collect();
-        Some(Twin{held:Held{point,locals,jumps},readout})
+        Some(Twin{held:Held{point,locals,jumps},readout,slow})
+    }
+    /// A twin's start from the bare initial state of its trajectory: at fourth order its slow part at the
+    /// twin's point, Π e/√A, with the plain threshold (the module documentation).
+    pub fn start(&self,t:&mut Trajectory){
+        let Some(pi)=&self.slow[t.cluster] else{return};let n=(pi.len() as f64).sqrt().round() as usize;
+        let mut y=[Complex::ZERO;MOST_MIXED];for a in 0..n{for b in 0..n{y[a]+=pi[a*n+b]*t.psi[b];}}
+        let(w,before):(f64,f64)=(y[..n].iter().map(|z|z.norm_sqr()).sum(),t.psi[..n].iter().map(|z|z.norm_sqr()).sum());
+        for z in y[..n].iter_mut(){*z=*z*(before/w).sqrt();}t.psi=y;
     }
     /// A twin's populations: those of its state ψ (in cluster k) at its point.
     pub fn populations(&self,k:usize,psi:&[Complex])->[f64;STATES]{
@@ -141,7 +168,8 @@ impl Twin{
     }
     /// The populations' exact means at `outputs` outputs `interval` apart: the eliminated master
     /// equation at the twin's point -- H_eff and the jumps of the engine's tables there -- from the
-    /// initial density's ground populations, by the exponential of its superoperator over an interval.
+    /// initial density's ground populations (at fourth order each basis state's slow part Π e/√A, as
+    /// the twins start), by the exponential of its superoperator over an interval.
     pub fn means(&self,model:&Model,initial_density:&[Complex],interval:f64,outputs:usize)->Vec<[f64;STATES]>{
         let g=&model.ground;let sizes:Vec<usize>=(0..model.clusters()).map(|k|model.dimension(k)).collect();
         let offsets:Vec<usize>=sizes.iter().scan(0,|o,&n|{let x=*o;*o+=n*n;Some(x)}).collect();let d:usize=sizes.iter().map(|n|n*n).sum();
@@ -163,7 +191,11 @@ impl Twin{
         }
         let propagator=exponential(&generator,interval);
         let mut rho=vec![Complex::ZERO;d];
-        for(k,c)in g.clusters.iter().enumerate(){for(x,&b)in c.states.iter().enumerate(){let s=g.ground_states[b];rho[offsets[k]+x*sizes[k]+x]=initial_density[s*STATES+s];}}
+        for(k,c)in g.clusters.iter().enumerate(){let n=sizes[k];for(x,&b)in c.states.iter().enumerate(){let s=g.ground_states[b];let p=initial_density[s*STATES+s];
+            match &self.slow[k]{
+                None=>rho[offsets[k]+x*n+x]=p,
+                Some(pi)=>{let a:f64=(0..n).map(|i|pi[i*n+x].norm_sqr()).sum();for i in 0..n{for j in 0..n{rho[offsets[k]+i*n+j]+=p*pi[i*n+x]*pi[j*n+x].conj()*(1./a);}}}
+            }}}
         let read=|rho:&[Complex]|->[f64;STATES]{let mut p=[0.;STATES];for k in 0..sizes.len(){let x=self.density(k,&rho[offsets[k]..offsets[k]+sizes[k]*sizes[k]]);for s in 0..STATES{p[s]+=x[s];}}p};
         let mut out=vec![read(&rho)];
         for _ in 1..outputs{rho=(0..d).map(|i|(0..d).fold(Complex::ZERO,|z,j|z+propagator[(i,j)]*rho[j])).collect();out.push(read(&rho));}

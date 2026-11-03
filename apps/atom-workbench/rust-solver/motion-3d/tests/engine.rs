@@ -299,13 +299,17 @@ fn the_held_engine_is_the_plain_engine_at_rest(){
 }
 
 /// The held twin is the unraveling of a Lindblad equation: its generator's decay is its jumps' own
-/// Σ L†L (the photons' first order in the recoil kept), so its master equation (`Twin::means`) keeps
-/// the trace one -- and every correction of the populations (stats.rs) keeps their sum -- over
-/// 100 us of a probe on the tweezer.
+/// Σ L†L (the photons' first order in the recoil kept; at fourth order K = Π L̃, the post-jump map
+/// in its jumps, control.rs), so its master equation (`Twin::means`) keeps the trace one -- and every
+/// correction of the populations (stats.rs) keeps their sum -- over 100 us of a probe on the
+/// tweezer, at second and at fourth order.
 #[test]
 fn the_held_twin_is_a_lindblad_unraveling_and_keeps_the_trace(){
-    let r=request(&|b|b["id"]=="tweezer"||b["id"]=="cool-plus");let model=Model::new(&r).unwrap();
+    let r=request(&|b|b["id"]=="tweezer"||b["id"]=="cool-plus");
+    for fourth in [false,true]{
+    let model=Model::with_order(&r,f64::INFINITY,fourth).unwrap();
     let twin=Twin::new(&model,0.93).expect("a static generator");
+    assert_eq!(twin.slow.iter().any(|s|s.is_some()),fourth,"the post-jump map at fourth order only");
     for k in 0..model.clusters(){
         let n=model.dimension(k);let h=&twin.held.locals[k].hamiltonian;let(mut worst,mut scale)=(0_f64,0_f64);
         for p in 0..n{for q in 0..n{
@@ -318,4 +322,39 @@ fn the_held_twin_is_a_lindblad_unraveling_and_keeps_the_trace(){
     let means=twin.means(&model,&r.initial_density,1.,101);
     let worst=means.iter().map(|p|(p.iter().sum::<f64>()-1.).abs()).fold(0.,f64::max);
     assert!(worst<=1e-10,"the trace off by {worst:.2e}");
+    }
+}
+
+/// The held twin's populations average to its master equation's at fourth order: 4096 twins of a
+/// probe on the tweezer (their bare initial state's slow part at the twin's point, their streams the
+/// trajectories'), held 30 us in steps of 0.2 us, against `Twin::means` at every output within four
+/// standard errors -- the post-jump map in the jumps, K = Π L̃, and the plain threshold make the
+/// unraveling exactly that Lindblad equation's (control.rs, # The twin at fourth order).
+#[test]
+fn the_held_twin_at_fourth_order_averages_to_its_master_equation(){
+    let r=request(&|b|b["id"]=="tweezer"||b["id"]=="cool-plus");let model=Model::with_order(&r,f64::INFINITY,true).unwrap();
+    let initial=Initial::new(&model,&r).unwrap();let twin=Twin::new(&model,0.93).expect("a static generator");
+    assert!(twin.slow.iter().any(|s|s.is_some()),"fourth-order tables");
+    let mut settings=Settings::new(0.2,&initial.traps[0],f64::EPSILON,false);settings.free=[false;3];settings.loss=false;
+    let held=Engine::held(&model,&settings,&twin.held);
+    let(steps,outputs,count)=(5,31,4096u64);let means=twin.means(&model,&r.initial_density,1.,outputs);
+    let(cluster,state,_)=initial.states[0];
+    let runs:Vec<Vec<[f64;STATES]>>=(0..count).map(|index|{
+        let mut psi=[Complex::ZERO;MOST_MIXED];psi[state]=Complex::ONE;
+        let mut t=atom_motion_3d::engine::Trajectory{cluster,psi,r:twin.held.point.r,kappa:[0.;3],time:0.,threshold:atom_motion_3d::engine::jump_stream(17,index,0).open_uniform(),
+            alive:true,jumps:0,doppler:0.,seed:17,index};
+        twin.start(&mut t);
+        let mut out=vec![twin.populations(t.cluster,&t.psi)];
+        for _ in 1..outputs{for _ in 0..steps{held.step(&mut t);}out.push(twin.populations(t.cluster,&t.psi));}
+        out}).collect();
+    let mut worst=(0_f64,0usize,0usize);
+    for i in 0..outputs{for s in 0..STATES{
+        let v:Vec<f64>=runs.iter().map(|x|x[i][s]).collect();let n=v.len() as f64;let m=v.iter().sum::<f64>()/n;
+        // The spread at least a rare event's (the exact mean's share of the twins once each), where
+        // few twins or none have jumped yet.
+        let se=(v.iter().map(|x|(x-m).powi(2)).sum::<f64>()/(n-1.)/n).sqrt().max((means[i][s].abs()/n).sqrt());
+        if se>0.{let z=(m-means[i][s]).abs()/se;if z>worst.0{worst=(z,i,s);}}
+    }}
+    println!("largest |z| {:.2} (output {}, state {})",worst.0,worst.1,worst.2);
+    assert!(worst.0<=4.,"output {} state {}: |z| {:.2}",worst.1,worst.2,worst.0);
 }
