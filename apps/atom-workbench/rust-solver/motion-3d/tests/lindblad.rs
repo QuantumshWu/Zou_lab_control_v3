@@ -1,10 +1,14 @@
 //! The eliminated generator against its jumps: a Lindblad generator's no-jump decay is its jumps' rate in every
-//! state, i(H − H†) = Σ L†L, which keeps the trajectories' norm the survival probability.
+//! state, i(H − H†) = Σ L†L, which keeps the trajectories' norm the survival probability. A model whose decay
+//! falls below its jumps' rate beyond the budget is refused (model.rs `Model::lindblad`); where every drive
+//! folds, the solve stops with why.
 use atom_motion_3d::ground::Ground;
 use atom_motion_3d::linear::Dense;
-use atom_motion_3d::model::Model;
+use atom_motion_3d::model::{Model,NOT_LINDBLAD};
+use atom_motion_3d::solve::{solve,Device};
 use atom_motion_3d::{Complex,Request};
 use serde_json::Value;
+use std::time::Instant;
 #[path="../examples/scene/mod.rs"] mod scene;
 
 /// A payload of tests/fixtures as the app sends it, on its own times.
@@ -38,4 +42,26 @@ fn the_explicit_clusters_decay_is_their_photons(){
         }
     }
     assert!(checked>0,"the second rung keeps explicit states");
+}
+
+/// The validation's F10 at +28 MHz: every drive folded, the folded probe–strong-beam Raman pairs' van Vleck paths
+/// add a decay no jump carries, below zero at the focus (−3.2 rad/us): the trajectories' norm grew and the solve
+/// ran away (killed after 7 CPU-minutes). The model is refused, and the solve stops with why at once -- the
+/// ladder's next rung keeps all 24 excited states explicit, valid but beyond any practical step.
+#[test]
+fn a_generator_that_gains_where_every_drive_folds_stops_the_solve(){
+    let r=request(include_str!("../../tests/fixtures/far_d2_beam_probe_motion.json"));
+    let e=Model::new(&r).err().expect("the gaining model is refused");assert!(e.starts_with(NOT_LINDBLAD),"{e}");
+    let clock=Instant::now();let e=solve(&r,Device::Cpu,&mut |_,_|{}).err().expect("the solve stops");
+    println!("stopped after {:.1} s: {e}",clock.elapsed().as_secs_f64());assert!(e.starts_with(NOT_LINDBLAD),"{e}");
+}
+
+/// The default scene's first rungs, either order, are Lindblad generators within the budget (their van Vleck
+/// paths' gain, 1e-5 of the jumps' rate, is booked by the solve): none is refused.
+#[test]
+fn the_default_scene_s_rungs_are_not_refused(){
+    let r=request(include_str!("../../tests/fixtures/default_scene_motion.json"));
+    for allowance in Ground::allowances(&r).unwrap().into_iter().take(3){for fourth in [false,true]{
+        if let Err(e)=Model::with_order(&r,allowance,fourth){panic!("the rung at {allowance:.3e} (fourth {fourth}) is refused: {e}");}
+    }}
 }
