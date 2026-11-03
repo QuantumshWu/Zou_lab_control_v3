@@ -63,10 +63,11 @@
 //! Each output's κ² and populations are estimated with control variates of exactly known means
 //! (control.rs, stats.rs `estimate`): the harmonic twin's for T, always (it costs a few products per
 //! output), and the held twin's for the populations. β is the regression on the control over every
-//! trajectory so far, recomputed with each group left out, so the jackknife's errors -- what the
-//! stopping rule takes -- hold the β's own spread; where a control follows nothing, β ≈ 0. The held
+//! trajectory so far, held when the jackknife leaves a group out: its errors -- what the stopping rule
+//! takes -- are the corrected values' spread over the groups; where a control follows nothing, β ≈ 0.
+//! The held
 //! twin costs a trajectory of its own: it runs in the first batch, and is kept when the trajectories
-//! that batch says are needed with it, times its share of the cost, are fewer than without it.
+//! that batch says the populations need with it, times its share of the cost, are fewer than without.
 //!
 //! # Regime
 //! A point particle has no zero-point motion: below a few vibrational quanta per axis the method
@@ -156,11 +157,13 @@ fn statistics(e:&Estimate,frequencies:[f64;3])->(f64,Option<f64>){
 fn room(target:f64,taken:f64)->f64{if taken<target{target-taken}else{target}}
 /// The largest ratio of the statistical errors to their room over every output after t = 0 (the
 /// request's initial state, `start`): 1 meets the targets.
-fn worst_ratio(estimates:&[Estimate],accounts:&Accounts,frequencies:[f64;3])->f64{
+fn worst_ratio(estimates:&[Estimate],accounts:&Accounts,frequencies:[f64;3])->f64{let[p,t]=worst_ratios(estimates,accounts,frequencies);p.max(t)}
+/// The same per kind: the populations' and the loss's, and T's.
+fn worst_ratios(estimates:&[Estimate],accounts:&Accounts,frequencies:[f64;3])->[f64;2]{
     estimates.iter().enumerate().skip(1).map(|(i,e)|{
         let(p,t)=statistics(e,frequencies);let a=accounts.apriori[i];
-        (p/room(POPULATION_TARGET,a+accounts.bias[0])).max(t.map_or(0.,|t|t/room(TEMPERATURE_TARGET,a+accounts.bias[1])))
-    }).fold(0.,f64::max)
+        [p/room(POPULATION_TARGET,a+accounts.bias[0]),t.map_or(0.,|t|t/room(TEMPERATURE_TARGET,a+accounts.bias[1]))]
+    }).fold([0.;2],|w,r|[w[0].max(r[0]),w[1].max(r[1])])
 }
 
 /// The distribution sample indices: evenly spread over the outputs, the first and last among them.
@@ -298,11 +301,11 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
     let clock=Instant::now();
     let first=simulate(&model,&settings,&initial,seed,0,pilot,group(pilot,threads),steps,outputs,&listed,Some(&Variates{harmonic:&harmonic,twin:twin.as_ref()}));
     let wall=clock.elapsed().as_secs_f64();
-    // The held twin is kept where it pays: the trajectories the first batch says are needed with its
-    // control, times its share of the cost, against those needed without it.
+    // The held twin is kept where its control pays for itself: the trajectories the first batch says
+    // the populations need with it, times its share of the cost, against those they need without.
     if twin.is_some(){
         let needed=|means:&[Means]|{let mut e=summarize(&first.groups,&scales,means);start(&mut e[0],&model,&initial);
-            let(_,accounts)=ledger(&model,&base,&e,times,allowance,bias,trap.lab,false);worst_ratio(&e,&accounts,trap.lab).powi(2)};
+            let(_,accounts)=ledger(&model,&base,&e,times,allowance,bias,trap.lab,false);worst_ratios(&e,&accounts,trap.lab)[0].powi(2)};
         if needed(&means(true))*(1.+first.seconds[1]/first.seconds[0])>=needed(&means(false)){twin=None;}
     }
     let means=means(twin.is_some());let variates=Variates{harmonic:&harmonic,twin:twin.as_ref()};
