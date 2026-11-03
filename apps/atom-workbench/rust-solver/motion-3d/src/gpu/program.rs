@@ -75,8 +75,9 @@ pub fn layout()->[u32;16]{
         size_of::<Params>(),size_of::<State>(),size_of::<Run>(),offset_of!(Params,hm),offset_of!(Params,half_flow),offset_of!(Run,listed),offset_of!(State,psi),offset_of!(State,index)].map(|x|x as u32)
 }
 
-/// The model on the device: the kernel's parameters and the buffers they point into.
-pub struct Program{pub params:Params,_buffers:Vec<Buffer>}
+/// The model on the device: the kernel's parameters, the buffers they point into, and the most
+/// photons of a cluster's jumps.
+pub struct Program{pub params:Params,photons:usize,_buffers:Vec<Buffer>}
 
 fn c32(z:Complex)->[f32;2]{[z.re as f32,z.im as f32]}
 
@@ -175,9 +176,11 @@ impl Program{
             axes32:settings.axes.map(|a|a.map(|x|x as f32)),stiffness32:settings.frequencies.map(|w|(w*w/hm) as f32),
             hm64:hm,dt:settings.dt,axes:settings.axes,omega:settings.frequencies,stiffness:settings.frequencies.map(|w|w*w/hm),half_flow,
         };
-        Ok(Program{params,_buffers:buffers})
+        let photons=g.clusters.iter().map(|c|c.classes.iter().map(|k|k.photons.len()).sum::<usize>()).max().unwrap_or(0);
+        Ok(Program{params,photons,_buffers:buffers})
     }
-    /// The exact response's working space per trajectory (float2): every near beam's photon tables
-    /// at each cluster column, and one augmented NE × (NE + 1) system.
-    pub fn scratch(&self)->usize{self.params.nnear as usize*MAXN*3*GROUND+NE*(NE+1)}
+    /// A jump's working space per trajectory (float2): the exact response's -- every near beam's
+    /// photon tables at each cluster column, one augmented NE × (NE + 1) system -- and the photons'
+    /// matrices per axis.
+    pub fn scratch(&self)->usize{self.params.nnear as usize*MAXN*3*GROUND+NE*(NE+1)+3*self.photons}
 }

@@ -189,10 +189,10 @@ struct Point{
     Fields fields[MOST_CARRIERS];
 };
 // A jump's working space.
-struct JumpSpace{float2 u[3][MAXN],f[MAXN],y[MAXN];float weights[MOST_CLASSES],shares[MOST_BEAMS];int beams[MOST_BEAMS];};
+struct JumpSpace{float2 u[3][MAXN],f[MAXN];float weights[MOST_CLASSES],shares[MOST_BEAMS];int beams[MOST_BEAMS];};
 struct Warp{
     Point pt;
-    float2 psi[MAXN],start[MAXN];
+    float2 psi[MAXN],start[MAXN],readout[MAXN];   // ψ, ψ at a step's start, the readout's Y ψ
     union{float2 m[3][MAXN*MAXN];float2 gradient_a[MOST_BEAMS][3];JumpSpace jump;};
     double record[POINT_RECORD];
     double close[3][2][5];              // per lab axis, per window closing in the interval: held, ⟨κ⟩, ⟨κ²⟩, ⟨r⟩, ⟨r²⟩
@@ -632,19 +632,30 @@ __device__ __noinline__ bool exact_responses(const Program& P,const Warp& W,cons
     return true;
 }
 
-// The amplitude u_a of a class at a row of its target cluster (model.rs `Model::photons`): over its
-// photons landing in that row, e^{iω̃t} M_a[to, from] ψ[from] with M = Σ_k E_k J_k − E^D_k J2_k, or
-// the exact responses' Σ_l a_l C_a R_l(w_l).
-__device__ float2 amplitude(const Program& P,const Warp& W,const Cluster& C,const Class& K,int a,int row,double t,const float2* X){
-    const float2* tables=P.tables+C.table;float2 u=zero2();
-    for(int i=0;i<K.nphotons;i++){
-        const Photon ph=P.photons[K.photons+i];if(ph.row!=row)continue;
-        float2 m=zero2();const Carrier R=P.carriers[ph.carrier];
+// Every photon's matrix element of the cluster's jumps at the point (model.rs `Model::photons`),
+// interpolated once per jump: M_a[to, from] = Σ_k E_k J_k − E^D_k J2_k, or the exact responses'
+// Σ_l a_l C_a R_l(w_l), per photon and axis (the cluster's photons, all its classes', in order).
+__device__ void photon_matrices(const Program& P,const Warp& W,const Cluster& C,int lane,const float2* X,float2* out){
+    const float2* tables=P.tables+C.table;const int first=P.classes[C.classes].photons;
+    const Class last=P.classes[C.classes+C.nclasses-1];const int count=3*(last.photons+last.nphotons-first);
+    for(int j=lane;j<count;j+=32){
+        const int a=j%3;const Photon ph=P.photons[first+j/3];const Carrier R=P.carriers[ph.carrier];float2 m=zero2();
         if(X==nullptr){
             const Fields& f=W.pt.fields[ph.carrier];const int j1=P.carrier_tables[C.carriers+3*ph.carrier],j2=P.carrier_tables[C.carriers+3*ph.carrier+1];
-            for(int k=0;k<R.rank;k++){const int at=((k*3+a)*NG+ph.to)*C.n+ph.col;m+=f.e[k]*entry(P,W,tables+j1+at,C.size,-1)-f.doppler[k]*entry(P,W,tables+j2+at,C.size,-1);}
-        }else for(int j=0;j<R.beams;j++){const int l=P.beam_list[R.first+j];m+=X[exact_at(P.beams[l].near,ph.col,a,ph.to)]*W.pt.a[l];}
-        u+=cis(ph.residual*t)*m*W.psi[ph.col];
+            #pragma unroll
+            for(int k=0;k<MOST_RANK;k++)if(k<R.rank){const int at=((k*3+a)*NG+ph.to)*C.n+ph.col;m+=f.e[k]*entry(P,W,tables+j1+at,C.size,-1)-f.doppler[k]*entry(P,W,tables+j2+at,C.size,-1);}
+        }else for(int b=0;b<R.beams;b++){const int l=P.beam_list[R.first+b];m+=X[exact_at(P.beams[l].near,ph.col,a,ph.to)]*W.pt.a[l];}
+        out[j]=m;
+    }
+    __syncwarp();
+}
+// The amplitude u_a of a class at a row of its target cluster (model.rs `Model::photons`): over its
+// photons landing in that row, e^{iω̃t} M_a[to, from] ψ[from], M from the photons' matrices.
+__device__ float2 amplitude(const Program& P,const Warp& W,const Cluster& C,const Class& K,int a,int row,double t,const float2* M){
+    const int first=P.classes[C.classes].photons;float2 u=zero2();
+    for(int i=0;i<K.nphotons;i++){
+        const Photon ph=P.photons[K.photons+i];if(ph.row!=row)continue;
+        u+=cis(ph.residual*t)*M[3*(K.photons+i-first)+a]*W.psi[ph.col];
     }
     return u;
 }
@@ -718,12 +729,13 @@ __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,
         __syncwarp();if(lane<C.n)W.psi[lane]=scale*W.psi[lane];__syncwarp();
     }
     const float2* X=exact&&exact_responses(P,W,C,lane,scratch)?scratch:nullptr;
+    float2* M=scratch+P.nnear*MAXN*3*NG+NE*(NE+1);photon_matrices(P,W,C,lane,X,M);
     JumpSpace& J=W.jump;
     // The class, and the cluster it lands the atom in: by Σ_a ‖u_a‖².
     double total=0.;
     for(int c=0;c<C.nclasses;c++){
         const Class K=P.classes[C.classes+c];const int nt=P.clusters[K.target].n;
-        float v=0.f;if(lane<3*nt)v=norm2(amplitude(P,W,C,K,lane%3,lane/3,t.time,X));
+        float v=0.f;if(lane<3*nt)v=norm2(amplitude(P,W,C,K,lane%3,lane/3,t.time,M));
         const float w=warp_sum(v);if(lane==0)J.weights[c]=w;total+=(double)w;
     }
     __syncwarp();
@@ -731,7 +743,7 @@ __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,
     int pick=C.nclasses-1;
     {double x=rng.uniform()*total;for(int c=0;c<C.nclasses;c++){const double w=(double)J.weights[c];if(x<w){pick=c;break;}x-=w;}}
     const Class K=P.classes[C.classes+pick];const int nt=P.clusters[K.target].n;
-    if(lane<3*nt)J.u[lane%3][lane/3]=amplitude(P,W,C,K,lane%3,lane/3,t.time,X);
+    if(lane<3*nt)J.u[lane%3][lane/3]=amplitude(P,W,C,K,lane%3,lane/3,t.time,M);
     __syncwarp();
     // The photon's direction from the dipole pattern tr G − n·Re(G)·n of G_ab = ⟨u_a|u_b⟩.
     double gram[3][3];
@@ -871,16 +883,21 @@ __device__ void record(const Program& P,Warp& W,const Traj& t,int lane){
     }
     profile=warp_max(profile);ratio=warp_max(ratio);
     float norm=0.f;for(int b=0;b<n;b++)norm+=norm2(W.psi[b]);
-    float2* y=W.jump.y;
+    float2* y=W.readout;
     if(lane<MAXN)y[lane]=zero2();
     __syncwarp();
+    // Each channel's response in its excited row, once: the first CACHED of a group in the matrices' space.
+    constexpr int CACHED=3*MAXN*MAXN/NE;float2* cache=W.m[0];
     float excited=0.f;
     for(int gi=0;gi<C.ncoherent;gi++){
         const Coherent G=P.coherent[C.coherent+gi];float2 e=zero2();
-        if(lane<NE)for(int h=0;h<G.count;h++){const Channel ch=P.channels[G.channels+h];e+=cis(-ch.residual*t.time)*response(P,W,C,ch.carrier,lane,ch.col)*W.psi[ch.col];}
+        if(lane<NE)for(int h=0;h<G.count;h++){
+            const Channel ch=P.channels[G.channels+h];const float2 r=response(P,W,C,ch.carrier,lane,ch.col);if(h<CACHED)cache[h*NE+lane]=r;
+            e+=cis(-ch.residual*t.time)*r*W.psi[ch.col];
+        }
         for(int h=0;h<G.count;h++){
             const Channel ch=P.channels[G.channels+h];float2 z=zero2();
-            if(lane<NE)z=cis(ch.residual*t.time)*conj(response(P,W,C,ch.carrier,lane,ch.col))*e;
+            if(lane<NE)z=cis(ch.residual*t.time)*conj(h<CACHED?cache[h*NE+lane]:response(P,W,C,ch.carrier,lane,ch.col))*e;
             z=warp_sum(z);if(lane==0)y[ch.col]+=z;
             __syncwarp();
         }
