@@ -177,7 +177,7 @@ fn solve(name:&str,mut request:Request,which:&str,duration:f64,samples:usize,cou
     // The pilot as the solve takes it: its exponentials to double precision, the beats left out within the
     // step's population budget over the whole run.
     let piloting=|steps:usize|{let mut s=plain(steps,f64::EPSILON);s.beats=A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*s.dt/duration;s.horizon=duration;s};
-    let(states,jumps)=sample_states(&model,&piloting(first),&initial,seed,pilot,first,outputs);
+    let(states,jumps,_)=sample_states(&model,&piloting(first),&initial,seed,pilot,first,outputs,&Harmonic::new(&model,&piloting(first),&initial,first,outputs));
     let waiting=pilot as f64*duration/(jumps.max(1) as f64);let horizon=waiting.min(duration);
     println!("pilot: {pilot} trajectories at dt {:.4} us, {:.1} s; waiting {waiting:.2} us; {} states",interval/first as f64,clock.elapsed().as_secs_f64(),states.len());
     let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=BUDGET;s.horizon=waiting;s};
@@ -259,7 +259,7 @@ fn doubling(request:&Request,which:&str,count:u64,duration:f64,steps:&str){
     let trap=initial.traps[(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap()];
     let outputs=11;let interval=duration/(outputs-1) as f64;let first=((interval/0.24).ceil() as usize).max(1);
     let mut pilot=Settings::new(interval/first as f64,&trap,f64::EPSILON,true);pilot.beats=A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*pilot.dt/duration;
-    let clock=Instant::now();let(states,jumps)=sample_states(&model,&pilot,&initial,0x3D_5EED,count,first,outputs);
+    let clock=Instant::now();let(states,jumps,_)=sample_states(&model,&pilot,&initial,0x3D_5EED,count,first,outputs,&Harmonic::new(&model,&pilot,&initial,first,outputs));
     let waiting=count as f64*duration/(jumps.max(1) as f64);
     println!("pilot: {count} x {duration} us at dt {:.4}, {:.1} s; waiting {waiting:.1} us; {} states",pilot.dt,clock.elapsed().as_secs_f64(),states.len());
     let hm=model.hbar_over_mass;let kinetic=|t:&Trajectory|0.5*hm*t.kappa.iter().map(|k|k*k).sum::<f64>();
