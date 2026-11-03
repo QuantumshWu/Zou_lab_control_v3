@@ -166,7 +166,7 @@ fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count
         let clock=Instant::now();
         let twin=twins.as_ref().map(|(e,twin)|hold(e,twin,&t,steps,outputs));
         let held_seconds=clock.elapsed().as_secs_f64();let clock=Instant::now();
-        let(atoms,samples,_)=walk(model,&engine,&mut t,steps,outputs,listed,windows,held,None);
+        let(atoms,samples,_,_)=walk(model,&engine,&mut t,steps,outputs,listed,windows,held,None);
         let record=Record{atoms,start:(r0,k0),twin,samples,jumps:t.jumps,doppler:t.doppler,seconds:[clock.elapsed().as_secs_f64(),held_seconds]};
         // Into its task in order: it and every trajectory after it that already waits.
         let mut guard=slots[k].lock().unwrap_or_else(|e|e.into_inner());let slot=&mut *guard;slot.waiting[(index-from) as usize]=Some(record);
@@ -196,10 +196,10 @@ fn atom_of(m:&Moment)->Atom<'_>{Atom{motion:m.0,populations:&m.1,profile:m.2,dop
 
 /// A trajectory's walk through the outputs (`run`, `sample_states`): `steps` steps between outputs and
 /// half a period past the last (its windows' far halves); per output its atom if held, its (r, κ) at
-/// the listed outputs, and with `keep` its state at every keep-th output after t = 0 (staggered by its
-/// index).
+/// the listed outputs, with `keep` its state at every keep-th output after t = 0 (staggered by its
+/// index), and the jumps it made up to the last output.
 fn walk(model:&Model,engine:&Engine,t:&mut Trajectory,steps:usize,outputs:usize,listed:&[usize],windows:&mut Windows,held:&mut [Option<([f64;STATES],f64,f64)>],keep:Option<usize>)
-    ->(Vec<Option<Moment>>,Vec<Option<([f64;3],[f64;3])>>,Vec<Trajectory>){
+    ->(Vec<Option<Moment>>,Vec<Option<([f64;3],[f64;3])>>,Vec<Trajectory>,u64){
     windows.clear();held.fill(None);let mut samples=vec![None;listed.len()];let mut kept=vec![];
     let mut record=|t:&Trajectory,i:usize,held:&mut [Option<([f64;STATES],f64,f64)>]|{
         if !t.alive{return;}
@@ -213,8 +213,9 @@ fn walk(model:&Model,engine:&Engine,t:&mut Trajectory,steps:usize,outputs:usize,
         record(t,i,held);
         if let Some(every)=keep{if t.alive&&(i+t.index as usize)%every==0{kept.push(t.clone());}}
     }
+    let jumps=t.jumps;
     for k in 1..=windows.reach{if t.alive{engine.step(t);if t.alive{windows.add((outputs-1)*steps+k,t);}}}
-    (held.iter().enumerate().map(|(i,p)|p.map(|(populations,profile,doppler)|(windows.means(i),populations,profile,doppler))).collect(),samples,kept)
+    (held.iter().enumerate().map(|(i,p)|p.map(|(populations,profile,doppler)|(windows.means(i),populations,profile,doppler))).collect(),samples,kept,jumps)
 }
 
 /// A trajectory's part of its task's sums, kept until the trajectories before it in the task are added
@@ -299,10 +300,10 @@ pub fn sample_states(model:&Model,settings:&Settings,initial:&Initial,seed:u64,c
     let every=((count as usize*outputs)/4096).max(1);
     let runs:Vec<(Vec<Trajectory>,u64,Group)>=(0..count).into_par_iter().map_init(||(Windows::new(settings,steps,outputs),vec![None;outputs]),|(windows,held),index|{
         let mut t=initial_from(model,settings,initial,seed,Purpose::Pilot,index,Stratum::single(index));let(r0,k0)=(t.r,t.kappa);
-        let(atoms,_,kept)=walk(model,&engine,&mut t,steps,outputs,&[],windows,held,Some(every));
+        let(atoms,_,kept,jumps)=walk(model,&engine,&mut t,steps,outputs,&[],windows,held,Some(every));
         let mut sums=Group::new(outputs,1);
         for(i,atom)in atoms.iter().enumerate(){sums.add(i,atom.as_ref().map(atom_of).as_ref(),&Controls{harmonic:harmonic.value(i,r0,k0),twin:None});}
-        (kept,t.jumps,sums)
+        (kept,jumps,sums)
     }).collect();
     let jumps=runs.iter().map(|r|r.1).sum();let mut states=vec![];let mut groups=vec![];
     for(kept,_,sums)in runs{states.extend(kept);groups.push(sums);}
