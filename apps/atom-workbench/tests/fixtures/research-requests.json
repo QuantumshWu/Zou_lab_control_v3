@@ -1,9 +1,9 @@
 {
- "source": "claude/atom-research 435f6fa, apps/atom-workbench/research/population/inputs/<scene>.scene.json and the <scene>_new.request.json that research/population/models/gen_model.mjs wrote from it (the lattice core's validation requests); scenes rewritten in the version-2 scene schema (the requests are unchanged)",
+ "source": "claude/atom-research 435f6fa, apps/atom-workbench/research/population/inputs/<scene>.scene.json and the <scene>_new.request.json that research/population/models/gen_model.mjs wrote from it (the lattice core's validation requests); scenes rewritten in the version-3 scene schema (motion off: the requests are of the internal state) (the requests are unchanged)",
  "scenes": {
   "probeTweezer": {
    "scene": {
-    "version": 2,
+    "version": 3,
     "name": "probe + tweezer (UI default-like)",
     "fields": [
      {
@@ -119,7 +119,13 @@
      "durationUs": 20,
      "samples": 200,
      "meanHorizonUs": 1000000,
-     "durationUnit": "μs"
+     "durationUnit": "μs",
+     "motion": {
+      "enabled": false,
+      "temperatureUK": 30,
+      "temperatureUnit": "μK",
+      "device": "gpu"
+     }
     }
    },
    "request": {
@@ -197,7 +203,7 @@
   },
   "twoNearNoTrap": {
    "scene": {
-    "version": 2,
+    "version": 3,
     "name": "验证矩阵 · 两近光/微偏离几何与偏振",
     "fields": [
      {
@@ -415,7 +421,13 @@
      "durationUs": 20,
      "durationUnit": "μs",
      "samples": 161,
-     "meanHorizonUs": 1000000
+     "meanHorizonUs": 1000000,
+     "motion": {
+      "enabled": false,
+      "temperatureUK": 30,
+      "temperatureUnit": "μK",
+      "device": "gpu"
+     }
     }
    },
    "request": {
@@ -493,7 +505,7 @@
   },
   "fourNear": {
    "scene": {
-    "version": 2,
+    "version": 3,
     "name": "验证样本 · 四近共振光/新频率",
     "fields": [
      {
@@ -757,7 +769,13 @@
      "durationUs": 20,
      "durationUnit": "μs",
      "samples": 161,
-     "meanHorizonUs": 1000000
+     "meanHorizonUs": 1000000,
+     "motion": {
+      "enabled": false,
+      "temperatureUK": 30,
+      "temperatureUnit": "μK",
+      "device": "gpu"
+     }
     }
    },
    "request": {

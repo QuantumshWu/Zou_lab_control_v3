@@ -7,7 +7,7 @@ import {DynamicsClient,normalizeDynamicsResult} from '../dist/js/atom-workbench/
 import {POPULATION_TOLERANCE,defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {buildFullMasterModel} from '../dist/js/atom-workbench/src/full-master-model.js';
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
-import {HORIZONS,entryAt,nativeResult} from './native-result.mjs';
+import {HORIZONS,entryAt,motionResult,nativeResult} from './native-result.mjs';
 import {CurrentResults} from '../dist/js/atom-workbench/src/current-results.js';
 import {horizonRecords,keptCheckpoint} from '../dist/js/atom-workbench/src/solve-plan.js';
 import {exampleScene} from '../dist/js/atom-workbench/src/examples.js';
@@ -21,7 +21,8 @@ function fixture(scene=defaultScene(),settings=scene.dynamics,timesUs=[0,setting
 }
 /** A trajectory alone (includeMean false): no mean. */
 const trajectoryOnly=data=>{delete data.meanHorizons;return data;};
-function scenario(){const s=defaultScene();s.dynamics.samples=3;s.dynamics.durationUs=.2;return s;}
+/** The default scene's internal state alone (motion off), on three samples. */
+function scenario(){const s=defaultScene();s.dynamics.motion.enabled=false;s.dynamics.samples=3;s.dynamics.durationUs=.2;return s;}
 
 function streamReply(call){let controller;const body=new ReadableStream({start(c){controller=c;}});call.resolve(new Response(body,{headers:{'Content-Type':'application/x-ndjson'}}));const encoder=new TextEncoder();return {send:event=>controller.enqueue(encoder.encode(JSON.stringify(event)+'\n')),close:()=>controller.close()};}
 function meanFixture(scene,request){return {...fixture(scene,scene.dynamics,[0]),request};}
@@ -96,13 +97,11 @@ test('the stream speaks checkpoints and one final result only',async t=>{
  }
 });
 test('a checkpoint may carry its run\'s estimate of the time left; a final result, or anything but a finite number ≥ 0, is refused',()=>{
- // One reader for both: a population checkpoint and a 1D motion checkpoint.
+ // One reader for both: a population checkpoint and a motion checkpoint.
  const scene=scenario(),request={clientId:'eta',sequence:1},population=()=>checkpoint(scene,request,[0,.02,.01]);
- const pgc=exampleScene('pgc').scene;pgc.dynamics.samples=3;const motion=motionRequest(pgc,pgc.dynamics),p=[.1,.2,.4,.2,.1];
+ const pgc=exampleScene('pgc3d').scene;pgc.dynamics.samples=3;const motion=motionRequest(pgc.dynamics);
  const moving=()=>{const states=buildFullMasterModel(pgc,pgc.dynamics).states,timesUs=[0,pgc.dynamics.durationUs/2,pgc.dynamics.durationUs];
-   return {...nativeResult({states,initialIndex:states.findIndex(s=>s.id===pgc.dynamics.initialStateId),timesUs,mean:false}),assumptions:['test assumption'],progress:true,
-     motion:{axis:motion.axis,temperatureUK:[30,30,30],meanVelocityMps:[0,0,0],trapFrequencyKHz:120,meanOccupation:[4,4,4],lossProbability:[0,0,.01],
-       momentum:{velocitiesMps:[-.1,-.05,0,.05,.1],samples:[0,2],probabilities:[p,p]},position:{positionsUm:[-.4,-.2,0,.2,.4],samples:[0,2],probabilities:[p,p]}}};};
+   return {...motionResult({states,initialIndex:states.findIndex(s=>s.id===pgc.dynamics.initialStateId),timesUs}),progress:true};};
  const left=(data,ms)=>{data.diagnostics.estimatedRemainingMs=ms;return data;};
  for(const [what,make,read] of [['population',population,data=>normalizeDynamicsResult(data,scene)],['motion',moving,data=>normalizeDynamicsResult(data,pgc,undefined,undefined,motion)]]){
    assert.equal(read(make()).metrics.estimatedRemainingMs,undefined,`${what}: none before the run's history supports one`);
@@ -110,29 +109,6 @@ test('a checkpoint may carry its run\'s estimate of the time left; a final resul
    assert.equal(read(left(make(),0)).metrics.estimatedRemainingMs,0,`${what}: the run stops there`);
    const final=left(make(),800);delete final.progress;assert.throws(()=>read(final),/最终结果带有剩余时间估计/,`${what}: a final result`);
    for(const bad of [-1,NaN,Infinity,null,'800'])assert.throws(()=>read(left(make(),bad)),/求解结果不完整或无效：剩余时间估计/,`${what}: ${bad}`);
-   // An upper bound (the run may stop earlier) is marked, only with an estimate.
-   const bound=left(make(),90000);bound.diagnostics.estimatedRemainingAtMost=true;assert.equal(read(bound).metrics.estimatedRemainingAtMost,true,`${what}: an upper bound`);
-   assert.equal(read(left(make(),900)).metrics.estimatedRemainingAtMost,undefined,`${what}: an estimate`);
-   for(const bad of [false,1,'true'])assert.throws(()=>read(Object.assign(left(make(),900),{diagnostics:{...left(make(),900).diagnostics,estimatedRemainingAtMost:bad}})),/剩余时间估计/,`${what}: at most ${bad}`);
-   const alone=make();alone.diagnostics.estimatedRemainingAtMost=true;assert.throws(()=>read(alone),/剩余时间估计/,`${what}: a bound without an estimate`);
- }
-});
-test('a running report between checkpoints is read strictly and handed on; one for another request, or malformed, is refused',async t=>{
- const mock=transport(),reports=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-running'});t.after(()=>client.dispose());
- const scene=scenario(),pending=client.solve(scene,scene.dynamics,{onProgress:()=>{},onRunning:value=>reports.push(value)});await waitCalls(mock,1);
- const stream=streamReply(mock.calls[0]),request=mock.calls[0].body.request;
- stream.send({type:'running',data:{request,running:{simulatedUs:40,durationUs:200,trajectories:0}}});
- stream.send({type:'running',data:{request,running:{simulatedUs:120,durationUs:200,trajectories:8,estimatedRemainingMs:3500}}});
- const final=checkpoint(scene,request,[0,.002,.001]);delete final.progress;stream.send({type:'result',data:final});stream.close();
- await pending;
- assert.deepEqual(reports,[{simulatedUs:40,durationUs:200,trajectories:0},{simulatedUs:120,durationUs:200,trajectories:8,estimatedRemainingMs:3500}]);
- for(const [label,data] of [['another request',r=>({request:{...r,sequence:r.sequence+1},running:{simulatedUs:1,durationUs:2,trajectories:0}})],
-   ['a negative estimate',r=>({request:r,running:{simulatedUs:1,durationUs:2,trajectories:0,estimatedRemainingMs:-1}})],
-   ['an unknown key',r=>({request:r,running:{simulatedUs:1,durationUs:2,trajectories:0,extra:1}})]]){
-   const mock=transport(),client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stream-running-bad'});
-   const pending=client.solve(scene,scene.dynamics,{onProgress:()=>{},onRunning:()=>{}});await waitCalls(mock,1);const stream=streamReply(mock.calls[0]);
-   stream.send({type:'running',data:data(mock.calls[0].body.request)});stream.close();
-   await assert.rejects(pending,/不匹配|Invalid running report/,label);client.dispose();
  }
 });
 test('a mean request streams checkpoints of its single t = 0 row',async t=>{

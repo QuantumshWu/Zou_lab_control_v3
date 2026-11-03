@@ -31,17 +31,19 @@ let scene=defaultScene(),settings;
 if(option('--request')){
   const value=JSON.parse(await readFile(resolve(option('--request')),'utf8'));
   if(!value.scene)throw Error('--request must contain a current HTTP scene request, not a stored numerical answer');
-  scene=validateScene(value.scene);settings={...scene.dynamics,...value.options};
+  // The scene's motion settings are no request options: a motion request says its motion itself.
+  scene=validateScene(value.scene);const {motion:_motion,...dynamics}=scene.dynamics;settings={...dynamics,...value.options};
 }else{
-  scene.lasers=scene.lasers.filter(laser=>laser.id==='probe');
-  settings={...scene.dynamics,durationUs:.02,samples:3};
+  // The probe alone: the internal state only.
+  scene.lasers=scene.lasers.filter(laser=>laser.id==='probe');delete scene.tweezerId;scene.dynamics.motion.enabled=false;
+  const {motion:_motion,...dynamics}=scene.dynamics;settings={...dynamics,durationUs:.02,samples:3};
 }
 const baseEnv={...process.env};
 // Use the release defaults, not inherited research experiment switches.
 for(const key of Object.keys(baseEnv))if(key.toUpperCase().startsWith('ATOM_'))delete baseEnv[key];
 Object.assign(baseEnv,DESKTOP_SOLVER_DEFAULTS);
 const report={status:'starting',executable:exe,binarySha256,bytes:binary.length,windowOpened:false,
-  scope:'Candidate EXE/backend-info plus normal Worker/IPC/JSONL finite and mean requests, and the tweezer 1D-motion example (refused until the motion engine is implemented); no independent physics oracle',
+  scope:'Candidate EXE/backend-info plus normal Worker/IPC/JSONL finite and mean requests, and the 3D tweezer PGC example's motion; no independent physics oracle',
   requestSource:option('--request')?resolve(option('--request')):'Generated probe-only smoke fixture',
   requestSha256:sha(JSON.stringify({scene,settings})),options:settings,processes:[],workerRequests:[],historicalAnswerRead:false};
 const children=new Map(),pending=new Map();let worker,sequence=0;
@@ -108,9 +110,9 @@ try{
   const mean=await request('mean',{...settings,meanOnly:true,includeMean:true});
   const meanParsed=normalizeDynamicsResult(mean,scene,settings.initialStateId,settings.meanHorizonUs);
   assert.equal(meanParsed.mean.converged,true,'Smoke mean must be qualified, never the finite endpoint');
-  // 1D motion: the tweezer example's motion request, its first 50 us, through the same path.
-  const tweezer=exampleScene('pgc').scene,motion=motionRequest(tweezer,tweezer.dynamics);
-  const motionSettings={...tweezer.dynamics,durationUs:50,samples:6,meanOnly:false,includeMean:false,motion};
+  // Motion: the 3D tweezer PGC example's motion request, its first 50 us, through the same path.
+  const tweezer=exampleScene('pgc3d').scene,motion=motionRequest(tweezer.dynamics),{motion:moves,...dynamics}=tweezer.dynamics;
+  const motionSettings={...dynamics,durationUs:50,samples:6,meanOnly:false,includeMean:false,motion,device:moves.device};
   const moving=await request('motion',motionSettings,tweezer);
   const movingParsed=normalizeDynamicsResult(moving,tweezer,motionSettings.initialStateId,motionSettings.meanHorizonUs,motion);
   assert.equal(movingParsed.timesUs.length,6);assert.ok(movingParsed.motion&&movingParsed.motion.temperatureUK.every(Number.isFinite),'The motion core answers with temperatures');

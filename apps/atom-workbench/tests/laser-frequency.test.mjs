@@ -6,6 +6,7 @@ import { analyze, atomicSystem, couplingBetweenStates, laserCarrierOffsetMHz, la
 import { frequencyValue, setFrequencyBase, setFrequencyValue, zeroFieldTransitionOptions } from '../dist/js/atom-workbench/src/laser-frequency.js';
 import { validateScene } from '../dist/js/atom-workbench/src/scene-file.js';
 import { buildFullMasterModel } from '../dist/js/atom-workbench/src/full-master-model.js';
+import { keepTweezer } from '../dist/js/atom-workbench/src/tweezer.js';
 
 const near=(actual,expected,tol=1e-8)=>assert.ok(Math.abs(actual-expected)<=tol,`${actual} != ${expected} (tol ${tol})`);
 /** The default scene, resolved: the probe (D2 F=2 → F′=2, Δ = 0) and the 852 nm tweezer. */
@@ -101,7 +102,7 @@ test('every beam acts on both D manifolds and a base change cannot alter physica
 
 test('100 cross-line base changes and scene-file round trips keep the carrier bit for bit and create no false beat',()=>{
   for(const index of [0,1]){
-    let s=scene();const original=s.lasers[index];s.lasers=[original,{...structuredClone(original),id:'converted',phaseDeg:180}];resolveSceneFrequencies(s);
+    let s=scene();const original=s.lasers[index];s.lasers=[original,{...structuredClone(original),id:'converted',phaseDeg:180}];keepTweezer(s);resolveSceneFrequencies(s);
     const offset=laserCarrierOffsetMHz(original,'D2'),absolute=laserFrequencyMHz(original);
     for(let i=0;i<100;i++){
       const converted=s.lasers[1],line=i%2?'D2':'D1';

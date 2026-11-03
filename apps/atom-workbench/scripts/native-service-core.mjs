@@ -5,7 +5,7 @@ const cancelled=()=>failure("已取消被更新参数替代的求解。",409,"su
 export function createNativeServiceClass(NativeLane){
 return class NativeService {
   constructor(options){Object.assign(this,options);this.sequence=0;this.closed=false;this.verified=false;this.current=new Map();this.seen=new Map();this.lanes={mean:new NativeLane(this,'mean'),trajectory:new NativeLane(this,'trajectory')};}
-  submit(payload,token,onProgress,onRunning){
+  submit(payload,token,onProgress){
     if(this.closed)return {promise:Promise.reject(failure('Service is shutting down.')),cancel:()=>{}};
     const previousSequence=this.seen.get(token.clientId);
     if(previousSequence!==undefined&&token.sequence<=previousSequence)return {promise:Promise.reject(cancelled()),cancel:()=>{}};
@@ -18,10 +18,9 @@ return class NativeService {
     const lane=this.lanes[payload.options.meanOnly?'mean':'trajectory'];
     let job;const promise=new Promise((resolve,reject)=>{
       const expire=()=>lane.cancel(job,failure('求解超时，已终止对应 Rust 进程；可修改参数后重试。',504,'solver-timeout'));
-      // A motion solve runs as long as its checkpoints and running reports keep coming: each one
-      // restarts its deadline.
+      // A motion solve runs as long as its checkpoints keep coming: each one restarts its deadline.
       const alive=report=>report&&payload.model?.motion?value=>{clearTimeout(job.timer);job.timer=setTimeout(expire,this.solveTimeoutMs);report(value);}:report;
-      job={token,nativeId:++this.sequence,payload,lane,resolve,reject,onProgress:alive(onProgress),onRunning:alive(onRunning),settled:false,timer:null};this.current.set(token.clientId,job);
+      job={token,nativeId:++this.sequence,payload,lane,resolve,reject,onProgress:alive(onProgress),settled:false,timer:null};this.current.set(token.clientId,job);
       job.timer=setTimeout(expire,this.solveTimeoutMs);
       lane.enqueue(job);
     });
@@ -34,5 +33,6 @@ return class NativeService {
   finish(job,error,value){if(job.settled)return;job.settled=true;job.finishedAt=performance.now();clearTimeout(job.timer);if(this.current.get(job.token.clientId)===job)this.current.delete(job.token.clientId);if(error)job.reject(error);else job.resolve(value);}
   async close(){this.closed=true;for(const job of [...this.current.values()])this.cancel(job,failure('Local solver service is shutting down.'));await Promise.all(Object.values(this.lanes).map(lane=>lane.close()));}
 }
-;
+
+;
 }
