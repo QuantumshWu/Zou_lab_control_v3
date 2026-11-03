@@ -92,9 +92,13 @@ fn the_fourth_order_tables_give_the_dense_fourth_order_fold(){
         let n=model.dimension(k);let p=model.point(r,[0.;3]);let local=model.local(k,&p,t);
         let e=g.eliminate(&model.hamiltonian_at_point(r)).unwrap();let dense=g.fourth(&e,k,r,t).unwrap();
         let scale=dense.effective.largest();
+        // The local generator and the beats' components (`Model::generator`, a beating cluster's path).
+        let generator=model.generator(k,&p,t);
         for a in 0..n{for b in 0..n{
             let x=herm(&|i,j|local.hamiltonian[i*n+j]+if i==j{Complex::new(local.scalar,0.)}else{Complex::ZERO},a,b);let y=herm(&|i,j|dense.effective[(i,j)],a,b);
             assert!((x-y).abs()<=2e-3*scale,"cluster {k} at {r:?}, ({a}, {b}): {x:?} against {y:?}");
+            let z=herm(&|i,j|generator.hamiltonian[i*n+j]+if i==j{Complex::new(generator.scalar,0.)}else{Complex::ZERO},a,b);
+            assert!((z-y).abs()<=2e-3*scale,"cluster {k} at {r:?}, ({a}, {b}), components: {z:?} against {y:?}");
         }}
         let photons=model.photons(k,&p,&psi,t,None);
         for(c,(u,j))in photons.amplitude.iter().zip(&dense.jumps).enumerate(){let nt=model.ground_dimension(g.clusters[k].classes[c].target);
