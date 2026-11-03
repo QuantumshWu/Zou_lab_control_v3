@@ -4,6 +4,7 @@
 //! its front end, the generator with the excited states eliminated, on the small dense linear
 //! algebra of `linear`.
 pub mod control;
+pub mod eigen;
 pub mod engine;
 pub mod ground;
 pub mod ledger;
@@ -106,7 +107,7 @@ fn initial_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,purpos
     let quantum:[f64;3]=std::array::from_fn(|i|{let f=frequencies[i];if f>0.{let half=f/(2.*kt);(half/half.tanh()).sqrt()}else{1.}});
     for i in 0..3{q[i]*=quantum[i];}
     let p:[f64;3]=std::array::from_fn(|i|{let z=normal_quantile(latin.next(&mut rng));if sigma[i]>0.{(kt/hm).sqrt()*quantum[i]*z}else{0.}});
-    let mut psi=[Complex::ZERO;model::MOST_STATES];psi[state]=Complex::ONE;
+    let mut psi=[Complex::ZERO;model::MOST_MIXED];psi[state]=Complex::ONE;
     let threshold=engine::jump_stream(seed,index,0).open_uniform();
     Trajectory{cluster,psi,r:lab(q),kappa:lab(p),time:0.,threshold,alive:true,jumps:0,doppler:0.,seed,index}
 }
@@ -163,10 +164,10 @@ fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count
             let twin=twins.as_ref().map(|(e,twin)|hold(e,twin,&t,steps,outputs));
             seconds[1]+=clock.elapsed().as_secs_f64();let clock=Instant::now();
             windows.clear();held.fill(None);
-            let mut record=|t:&Trajectory,i:usize,held:&mut Vec<Option<([f64;STATES],f64,f64)>>|{
+            let mut record=|t:&Trajectory,i:usize,held:&mut Vec<Option<([f64;STATES],f64,f64,f64)>>|{
                 if !t.alive{return;}
                 let point=model.point(t.r,t.kappa);
-                held[i]=Some((model.populations(t.cluster,&point,&t.psi,t.time),model.profile_error(t.r),model.doppler_ratio(t.kappa)));
+                let(populations,folded)=model.readout(t.cluster,&point,&t.psi,t.time);held[i]=Some((populations,folded,model.profile_error(t.r),model.doppler_ratio(t.kappa)));
                 if let Some(k)=listed.iter().position(|&l|l==i){samples[k].push((t.r,t.kappa));}
             };
             record(&t,0,&mut held);windows.add(0,&t);
@@ -177,7 +178,7 @@ fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count
             // Half a period past the last output: its windows' far halves.
             for k in 1..=windows.reach{if t.alive{engine.step(&mut t);if t.alive{windows.add((outputs-1)*steps+k,&t);}}}
             for(i,p)in held.iter().enumerate(){
-                let atom=p.as_ref().map(|(populations,profile,doppler)|Atom{motion:windows.means(i),populations,profile:*profile,doppler:*doppler});
+                let atom=p.as_ref().map(|(populations,folded,profile,doppler)|Atom{motion:windows.means(i),populations,folded:*folded,profile:*profile,doppler:*doppler});
                 let controls=Controls{harmonic:variates.map_or([0.;3],|v|v.harmonic.value(i,r0,k0)),twin:twin.as_ref().map(|p|&p[i])};
                 sums.add(i,atom.as_ref(),&controls);
             }
@@ -283,7 +284,7 @@ mod tests{
         for(steps,half,outputs)in [(1,[0,3,419],50),(5,[7,10,0],20),(44,[5,110,113],6),(3,[2,2,2],10),(4,[8,1,4],9)]{
             let mut w=Windows::with(half,steps,outputs);let last=(outputs-1)*steps+w.reach;let lost=last-last/5;
             let values:Vec<([f64;3],[f64;3])>=(0..=last).map(|_|(std::array::from_fn(|_|rng.uniform()-0.5),std::array::from_fn(|_|rng.uniform()-0.5))).collect();
-            let mut t=Trajectory{cluster:0,psi:[Complex::ZERO;model::MOST_STATES],r:[0.;3],kappa:[0.;3],time:0.,threshold:1.,alive:true,jumps:0,doppler:0.,seed:0,index:0};
+            let mut t=Trajectory{cluster:0,psi:[Complex::ZERO;model::MOST_MIXED],r:[0.;3],kappa:[0.;3],time:0.,threshold:1.,alive:true,jumps:0,doppler:0.,seed:0,index:0};
             for k in 0..=lost{(t.r,t.kappa)=values[k];w.add(k,&t);}
             for i in 0..outputs{
                 let at=i*steps;if at>lost{continue;}let m=w.means(i);

@@ -7,7 +7,7 @@
 use atom_motion_3d::control::{Harmonic,Twin};
 use atom_motion_3d::engine::{dipole_direction,Engine,Settings};
 use atom_motion_3d::ground::Path;
-use atom_motion_3d::model::{Model,MOST_STATES};
+use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Scales,KT_PER_UK};
 use atom_motion_3d::{initial_trajectory,simulate,Initial,Stratum};
@@ -40,11 +40,11 @@ fn request(keep:&dyn Fn(&Value)->bool)->Request{
 /// A reproducible uniform stream in [−½, ½).
 fn uniform(seed:u64)->impl FnMut()->f64{let mut rng=Rng::new(seed,Purpose::Initial,0,0);move||rng.uniform()-0.5}
 /// Random points within the trap, momenta and times, and normalized states of each cluster.
-fn samples(model:&Model,seed:u64)->Vec<(usize,[f64;3],[f64;3],f64,[Complex;MOST_STATES])>{
+fn samples(model:&Model,seed:u64)->Vec<(usize,[f64;3],[f64;3],f64,[Complex;MOST_MIXED])>{
     let mut next=uniform(seed);
     (0..12).map(|i|{let cluster=i%model.clusters();let n=model.dimension(cluster);
         let r=[0.3*next(),0.8*next(),0.3*next()];let kappa=[60.*next(),60.*next(),60.*next()];let t=10.*(next()+0.5);
-        let mut psi=[Complex::ZERO;MOST_STATES];for z in psi[..n].iter_mut(){*z=Complex::new(next(),next());}
+        let mut psi=[Complex::ZERO;MOST_MIXED];for z in psi[..n].iter_mut(){*z=Complex::new(next(),next());}
         let norm:f64=psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();for z in psi[..n].iter_mut(){*z=*z*(1./norm);}
         (cluster,r,kappa,t,psi)}).collect()
 }
@@ -52,20 +52,22 @@ fn samples(model:&Model,seed:u64)->Vec<(usize,[f64;3],[f64;3],f64,[Complex;MOST_
 fn expectation(m:&[Complex],psi:&[Complex],n:usize)->Complex{let mut s=Complex::ZERO;for a in 0..n{for b in 0..n{s+=psi[a].conj()*m[a*n+b]*psi[b];}}s}
 
 /// The model's tables against the front end's dense generator at random points and times (the
-/// kinetic shift off, the van Vleck paths the tables hold): H_eff and every class's photons, to the
-/// tables' interpolation; and the photons carry the whole decay but the paths' (their second order).
+/// kinetic shift off, the van Vleck paths the tables hold), for the clusters of ground states and
+/// those with explicit excited states alike: H_eff and every class's photons, to the tables'
+/// interpolation; and the photons carry the whole decay but the paths' (their second order).
 #[test]
 fn the_tables_give_the_front_end_s_generator_and_the_photons_carry_the_decay(){
     let mut model=Model::new(&request(&|_|true)).unwrap();model.doppler=false;let g=&model.ground;
     let tabulated=|p:&Path|model.carriers[p.via.carrier].beams.len()==1;
+    assert!((0..model.clusters()).any(|k|model.mixed(k)),"the fixture has explicit excited states");
     for(k,r,_,t,psi)in samples(&model,1){
-        let n=model.dimension(k);let p=model.point(r,[0.;3]);let local=model.local(k,&p,t);
+        let n=model.dimension(k);let p=model.point(r,[0.;3]);let local=model.generator(k,&p,t);
         let e=g.eliminate(&model.hamiltonian_at_point(r)).unwrap();let dense=g.local_with(&e,k,r,t,&tabulated).unwrap();
         let scale=dense.effective.largest();
         for a in 0..n{for b in 0..n{let x=local.hamiltonian[a*n+b]+if a==b{Complex::new(local.scalar,0.)}else{Complex::ZERO};
             assert!((x-dense.effective[(a,b)]).abs()<=1e-3*scale,"cluster {k} at {r:?}, ({a}, {b}): {x:?} against {:?}",dense.effective[(a,b)]);}}
         let photons=model.photons(k,&p,&psi,t,None);
-        let fast:f64=photons.amplitude.iter().zip(&g.clusters[k].classes).map(|(u,c)|{let nt=model.dimension(c.target);u.iter().map(|axis|axis[..nt].iter().map(|z|z.norm_sqr()).sum::<f64>()).sum::<f64>()}).sum();
+        let fast:f64=photons.amplitude.iter().zip(&g.clusters[k].classes).map(|(u,c)|{let nt=model.ground_dimension(c.target);u.iter().map(|axis|axis[..nt].iter().map(|z|z.norm_sqr()).sum::<f64>()).sum::<f64>()}).sum();
         let exact:f64=dense.jumps.iter().map(|j|j.iter().map(|m|{let v:Vec<Complex>=(0..m.rows).map(|i|(0..n).fold(Complex::ZERO,|s,b|s+m[(i,b)]*psi[b])).collect();v.iter().map(|z|z.norm_sqr()).sum::<f64>()}).sum::<f64>()).sum();
         assert!((fast-exact).abs()<=1e-3*exact.max(1e-12),"cluster {k}: photons {fast:e} against {exact:e}");
         let decay=-2.*expectation(&local.hamiltonian[..n*n],&psi,n).im;
@@ -75,15 +77,16 @@ fn the_tables_give_the_front_end_s_generator_and_the_photons_carry_the_decay(){
 }
 
 /// The Ehrenfest force is minus the gradient of the energy Re⟨ψ|H_eff|ψ⟩ (central differences),
-/// the trap's and the light's, the Doppler term's own gradient aside (the kinetic shift off).
+/// the trap's and the light's -- with explicit excited states their own potential and the kept
+/// drives' stimulated force --, the Doppler term's own gradient aside (the kinetic shift off).
 #[test]
 fn the_force_is_the_energy_s_gradient(){
     let mut model=Model::new(&request(&|_|true)).unwrap();model.doppler=false;
-    let energy=|cluster:usize,r:[f64;3],t:f64,psi:&[Complex;MOST_STATES]|->f64{
-        let n=model.dimension(cluster);let local=model.local(cluster,&model.point(r,[0.;3]),t);local.scalar+expectation(&local.hamiltonian[..n*n],psi,n).re
+    let energy=|cluster:usize,r:[f64;3],t:f64,psi:&[Complex;MOST_MIXED]|->f64{
+        let n=model.dimension(cluster);let local=model.generator(cluster,&model.point(r,[0.;3]),t);local.scalar+expectation(&local.hamiltonian[..n*n],psi,n).re
     };
     for(cluster,r,_,t,psi)in samples(&model,2){
-        let p=model.point(r,[0.;3]);let local=model.local(cluster,&p,t);let force=model.force(cluster,&local,&psi);let h=1e-5;
+        let p=model.point(r,[0.;3]);let force=model.generator(cluster,&p,t).force(&psi);let h=1e-5;
         for a in 0..3{
             let(mut plus,mut minus)=(r,r);plus[a]+=h;minus[a]-=h;let numeric=-(energy(cluster,plus,t,&psi)-energy(cluster,minus,t,&psi))/(2.*h);
             assert!((force[a]-numeric).abs()<=1e-5*numeric.abs().max(1.),"cluster {cluster} at {r:?}, axis {a}: {} against {numeric}",force[a]);

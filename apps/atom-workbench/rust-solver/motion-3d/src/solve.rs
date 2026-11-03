@@ -189,11 +189,16 @@ fn when(us:f64)->String{if us<1e3{format!("{us:.0} μs")}else{format!("{:.2} ms"
 /// The model's approximations (fixed before the run): the far components' fold, the couplings'
 /// fold, the quartic van Vleck shifts left out, the Gaussian beams' profiles and the tables.
 fn model_ledger(model:&Model,request:&Request)->Ledger{
-    let g=&model.ground;let mut ledger=Ledger::new();let(far,near)=g.fold_estimates();
+    let g=&model.ground;let mut ledger=Ledger::new();let(far,near,drives)=g.fold_estimates();
     let folded=g.components.iter().filter(|c|c.folded&&c.size>0.).count();
     ledger.add("远失谐分量（光镊、反旋项）",far,format!("二阶折叠（van Vleck 能移），{folded} 个分量"));
-    let(kept,fold)=g.items.iter().filter(|i|!matches!(i.kind,Kind::Photons{..})).fold((0,0),|(k,f),i|if i.folded{(k,f+1)}else{(k+1,f)});
-    let sizes:Vec<String>=g.clusters.iter().map(|c|c.states.len().to_string()).collect();
+    // The excited states' couplings: the drives and H's couplings between excited states.
+    let explicit:usize=g.clusters.iter().map(|c|c.excited.len()).sum();
+    let(kept,fold,promoted)=g.excited_items.iter().fold((0,0,0),|(k,f,p),x|if x.folded{(k,f+1,p)}else{(k+1,f,p+usize::from(x.promoted))});
+    ledger.add("激发态的耦合（近共振光的驱动、光镊混合的激发态）",drives,
+        format!("{fold} 个二阶折叠（2(g/|ΔE|)² 不超过预算，闭包检查扣除子空间的光缀饰），{kept} 个显式保留（其中闭包检查提升 {promoted} 个）；显式激发态 {explicit} 个"));
+    let(kept,fold)=g.items.iter().filter(|i|matches!(i.kind,Kind::Static{..}|Kind::Raman{..})).fold((0,0),|(k,f),i|if i.folded{(k,f+1)}else{(k+1,f)});
+    let sizes:Vec<String>=g.clusters.iter().map(|c|c.dimension().to_string()).collect();
     ledger.add("基态之间的耦合（塞曼子能级、拉曼项、两组光的拍频）",near,format!("{fold} 对二阶折叠，{kept} 对显式保留；子空间 {}",sizes.join("+")));
     if model.quartic>0.{ledger.add("经多束光的四阶能移",model.quartic,"略去（一阶折叠）".into());}
     for &(l,error,_)in &model.profiles{ledger.add(&format!("「{}」的光强分布",request.beams[l].name),error,"按峰值强度的平面波".into());}
@@ -213,10 +218,10 @@ struct Accounts{apriori:Vec<f64>,excited:Vec<f64>,bias:[f64;2]}
 /// target are flagged; before it, those whose a-priori total and bias alone do.
 fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance:f64,bias:[f64;2],frequencies:[f64;3],last:bool)->(Ledger,Accounts){
     let mut ledger=base.clone();let g=&model.ground;
-    let excited:Vec<f64>=estimates.iter().map(|e|g.excited_states.iter().map(|&i|e.populations[i]).sum::<f64>()).collect();
+    let excited:Vec<f64>=estimates.iter().map(|e|e.folded).collect();let _=g;
     let profiles:Vec<f64>=estimates.iter().map(|e|e.profile).collect();let dopplers:Vec<f64>=estimates.iter().map(|e|e.doppler).collect();
     let largest=|v:&[f64]|v.iter().skip(1).copied().fold(0.,f64::max);
-    ledger.add("消去激发态",largest(&excited),"零阶绝热消去（激发态布居 η²），计入总误差".into());
+    ledger.add("消去激发态",largest(&excited),"零阶绝热消去（折叠的激发态布居 η²），计入总误差".into());
     ledger.add("多普勒与反冲频移",largest(&dopplers),format!("一阶（kv/σ）²；单步超过 {:.1e} 时用精确响应",allowance));
     if !model.profiles.is_empty(){ledger.add("聚焦光在原子处的强度（沿轨迹）",largest(&profiles),"按峰值强度的平面波".into());}
     let peak:f64=model.profiles.iter().map(|p|p.1).sum();let fixed=base.used()-peak;
@@ -269,8 +274,7 @@ pub fn solve(request:&Request,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))-
     let waiting=pilot as f64*duration/(jumps.max(1) as f64);
     // The first order in the Doppler shift: what the budget leaves after the model and the pilot's
     // elimination, or the budget itself where the elimination alone exceeds it.
-    let eta=states.iter().map(|t|{let p=model.point(t.r,t.kappa);let q=model.populations(t.cluster,&p,&t.psi,t.time);
-        model.ground.excited_states.iter().map(|&i|q[i]).sum::<f64>()}).sum::<f64>()/states.len().max(1) as f64;
+    let eta=states.iter().map(|t|{let p=model.point(t.r,t.kappa);model.readout(t.cluster,&p,&t.psi,t.time).1}).sum::<f64>()/states.len().max(1) as f64;
     let left=BUDGET-base.used()-eta;let allowance=if left>0.{left}else{BUDGET};
     // The exponentials are summed to a share η of the step's own population budget, η² ε dt/waiting.
     let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=allowance;s};
@@ -366,7 +370,9 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
     let velocity=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.1[a]*hm));
     let position=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.0[a]));
     let first:Vec<f64>=(0..STATES).map(|i|initial[i*STATES+i].re).collect();
-    let sizes:Vec<String>=model.ground.clusters.iter().map(|c|c.states.len().to_string()).collect();
+    let sizes:Vec<String>=model.ground.clusters.iter().map(|c|c.dimension().to_string()).collect();
+    let explicit:usize=model.ground.clusters.iter().map(|c|c.excited.len()).sum();
+    let internal=if explicit>0{format!("内态（子空间 {}，其中 {explicit} 个激发态显式、精确传播，其余激发态二阶消去）",sizes.join("+"))}else{format!("消去激发态后的基态内态（子空间 {}）",sizes.join("+"))};
     Solution{
         populations:estimates.iter().enumerate().map(|(i,e)|if i==0{first.clone()}else{e.populations.clone()}).collect(),
         sample_errors:estimates.iter().enumerate().map(|(i,e)|if i==0{0.}else{e.population_errors.iter().fold(e.loss_error,|m,&x|m.max(x))}).collect(),
@@ -381,7 +387,7 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
         velocity,position,
         classical:estimates.iter().map(|e|classical(e,frequencies)).collect(),
         trajectories,time_step_us:dt,
-        method:format!("半经典 3D：经典质点（位置、动量）携带消去激发态后的基态内态（子空间 {}），量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），机械能高于势阱深度即算损失，{trajectories} 条轨迹，步长 {dt:.3} μs；控制变量：谐振孪生（T）{}",sizes.join("+"),if twin{"与静止孪生（布居）"}else{""}),
+        method:format!("半经典 3D：经典质点（位置、动量）携带{internal}，量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），机械能高于势阱深度即算损失，{trajectories} 条轨迹，步长 {dt:.3} μs；控制变量：谐振孪生（T）{}",if twin{"与静止孪生（布居）"}else{""}),
         reason:None,
         approximations:ledger,
     }
