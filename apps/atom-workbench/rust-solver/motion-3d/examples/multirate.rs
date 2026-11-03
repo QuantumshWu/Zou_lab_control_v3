@@ -5,11 +5,14 @@
 //!   tables' `local` (a cluster of ground states) and the front end's dense generator;
 //! - `held <scene> <candidate> <trajectories> <t_end> <interval> <dt> <out.json> [truncation]`: the atom
 //!   held at the focus, its populations (the frozen example's JSON, for the population core's);
-//! - `solve <scene> <candidate> <duration> <samples> <trajectories>`: the solve's step choice (its pilot,
+//! - `solve <scene> <candidate> <duration> <samples> <trajectories> [dt]`: the solve's step choice (its pilot,
 //!   the bound rule and the measured criterion, solve.rs) for the candidate, then its trajectories with the
-//!   harmonic twin: T and the populations;
+//!   harmonic twin: T and the populations; with dt, that step instead of the choice;
 //! - `moving <scene> <candidate> <trajectories> <t_end> <outputs> <dt,...>`: atoms from the same initial
 //!   states and jump streams per step (common random numbers): T per axis from ⟨κ²⟩ and F = 1, 2.
+//! - `doubling <scene> <candidate> <pilot trajectories> <pilot us> <dt,...>`: the step-doubling check's parts on a
+//!   short pilot's states: the momentum's and the impulse's sums, the populations', and the mechanical energy's
+//!   difference and change split into the kinetic and the internal (Re⟨ψ|H|ψ⟩/⟨ψ|ψ⟩ and the scalar) parts.
 //! `cargo run --profile iterate -p atom-motion-3d --example multirate -- <mode> <scene> ...`
 #[path="scene/mod.rs"] mod scene;
 use atom_motion_3d::control::Harmonic;
@@ -50,8 +53,9 @@ fn main(){
         }
         "check"=>check(&request,&arg(3,"0")),
         "held"=>held(&name,&request,&arg(3,"0"),arg(4,"2048").parse().unwrap(),arg(5,"200").parse().unwrap(),arg(6,"5").parse().unwrap(),arg(7,"0.2").parse().unwrap(),&arg(8,"held.json"),arg(9,"1e-12").parse().unwrap()),
-        "solve"=>solve(&name,request,&arg(3,"x"),arg(4,"2000").parse().unwrap(),arg(5,"11").parse().unwrap(),arg(6,"512").parse().unwrap()),
+        "solve"=>solve(&name,request,&arg(3,"x"),arg(4,"2000").parse().unwrap(),arg(5,"11").parse().unwrap(),arg(6,"512").parse().unwrap(),args.get(7).map(|x|x.parse().unwrap())),
         "moving"=>moving(&request,&arg(3,"0"),arg(4,"256").parse().unwrap(),arg(5,"40").parse().unwrap(),arg(6,"8").parse().unwrap(),&arg(7,"0.21739")),
+        "doubling"=>doubling(&request,&arg(3,"x"),arg(4,"16").parse().unwrap(),arg(5,"200").parse().unwrap(),&arg(6,"0.24,0.05,0.005,0.0005")),
         other=>panic!("unknown mode {other}"),
     }
 }
@@ -147,7 +151,7 @@ fn accumulated_excess(engine:&Engine,states:&[Trajectory],horizon:f64,subsample:
 /// The solve's step choice for a candidate (solve.rs `run`: its pilot, the bound rule, the measured
 /// population criterion where it decides; the largest step that met the targets kept), then its
 /// trajectories in one batch with the harmonic twin.
-fn solve(name:&str,mut request:Request,which:&str,duration:f64,samples:usize,count:u64){
+fn solve(name:&str,mut request:Request,which:&str,duration:f64,samples:usize,count:u64,forced:Option<f64>){
     request.times_us=(0..samples).map(|i|duration*i as f64/(samples-1) as f64).collect();
     let clock=Instant::now();let(a,model)=candidate(&request,which);let initial=Initial::new(&model,&request).unwrap();
     println!("{name} candidate {which} (allowance {a:.3e}, model {:.1} s): {}",clock.elapsed().as_secs_f64(),describe(&model));
@@ -178,7 +182,7 @@ fn solve(name:&str,mut request:Request,which:&str,duration:f64,samples:usize,cou
             checked.push(c);steps=((steps as f64*c.excess().sqrt()).ceil() as usize).max(1);
         }
     };
-    let mut bound=vec![];search(first,false,&[],&mut bound);
+    let mut bound=vec![];if let Some(dt)=forced{let steps=(interval/dt).round().max(1.) as usize;bound.push(Check{steps,population:0.,motion:0.});println!("  forced dt {:.4} us",interval/steps as f64);}else{search(first,false,&[],&mut bound);}
     let grown=*bound.iter().filter(|c|c.met()).min_by_key(|c|c.steps).unwrap_or(&bound[bound.len()-1]);
     let mut measured=vec![];if grown.decided_by_population(){search(grown.steps,true,&bound,&mut measured);}
     let chosen=bound.iter().chain(&measured).filter(|c|c.met()).min_by_key(|c|c.steps).copied().unwrap_or(grown);
@@ -234,5 +238,34 @@ fn moving(request:&Request,which:&str,count:u64,t_end:f64,outputs:usize,steps:&s
             println!("{line}");
         }
         runs.push(rows);
+    }
+}
+
+/// The step-doubling check's parts per step (solve.rs `step_excess`) on a short pilot's states.
+fn doubling(request:&Request,which:&str,count:u64,duration:f64,steps:&str){
+    let(a,model)=candidate(request,which);println!("candidate {which} (allowance {a:.3e}): {}",describe(&model));
+    let initial=Initial::new(&model,request).unwrap();
+    let trap=initial.traps[(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap()];
+    let outputs=11;let interval=duration/(outputs-1) as f64;let first=((interval/0.24).ceil() as usize).max(1);
+    let mut pilot=Settings::new(interval/first as f64,&trap,f64::EPSILON,true);pilot.beats=A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*pilot.dt/duration;
+    let clock=Instant::now();let(states,jumps)=sample_states(&model,&pilot,&initial,0x3D_5EED,count,first,outputs);
+    let waiting=count as f64*duration/(jumps.max(1) as f64);
+    println!("pilot: {count} x {duration} us at dt {:.4}, {:.1} s; waiting {waiting:.1} us; {} states",pilot.dt,clock.elapsed().as_secs_f64(),states.len());
+    let hm=model.hbar_over_mass;let kinetic=|t:&Trajectory|0.5*hm*t.kappa.iter().map(|k|k*k).sum::<f64>();
+    for dt in steps.split(',').map(|x|x.parse::<f64>().unwrap()){
+        let mut s=Settings::new(dt,&trap,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting,true);s.doppler=BUDGET;let engine=Engine::new(&model,s);
+        let clock=Instant::now();
+        // Per state: |Δκ|, |kick|, max |Δp|, and (one − two, two − start) of the kinetic and the internal energy.
+        let rows:Vec<[f64;7]>=states.par_iter().map(|t|{
+            let(one,two)=(engine.coast(t,dt,1),engine.coast(t,0.5*dt,2));
+            let dk=(0..3).map(|a|(one.kappa[a]-two.kappa[a]).powi(2)).sum::<f64>().sqrt();
+            let kick=(0..3).map(|a|(two.kappa[a]-t.kappa[a]).powi(2)).sum::<f64>().sqrt();
+            let n=model.dimension(t.cluster);let(x,y)=(one.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>(),two.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>());
+            let dp=(0..n).map(|i|(one.psi[i].norm_sqr()/x-two.psi[i].norm_sqr()/y).abs()).fold(0.,f64::max);
+            let(e0,e1,e2)=(engine.energy(t),engine.energy(&one),engine.energy(&two));let(k0,k1,k2)=(kinetic(t),kinetic(&one),kinetic(&two));
+            [dk,kick,dp,k1-k2,(e1-k1)-(e2-k2),k2-k0,(e2-k2)-(e0-k0)]}).collect();
+        let sum=|i:usize|rows.iter().map(|r|r[i]).sum::<f64>();let abs=|i:usize|rows.iter().map(|r|r[i].abs()).sum::<f64>();let m=rows.len() as f64;
+        println!("dt {dt:.5} ({:.1} s): |Δκ|/|kick| {:.3e} ({:.2e}/{:.2e}); mean max|Δp| {:.2e}; ΔE kinetic Σ {:+.2e} (Σ|·| {:.2e}), internal Σ {:+.2e} (Σ|·| {:.2e}); E2−E0 kinetic Σ {:+.2e} (Σ|·| {:.2e}), internal Σ {:+.2e} (Σ|·| {:.2e})",
+            clock.elapsed().as_secs_f64(),sum(0)/sum(1),sum(0)/m,sum(1)/m,sum(2)/m,sum(3),abs(3),sum(4),abs(4),sum(5),abs(5),sum(6),abs(6));
     }
 }

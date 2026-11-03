@@ -31,8 +31,9 @@
 //!   the grid T/k, and the period's k propagators and node gradients are built once where the step
 //!   holds more than k n spacings. A pair of beats ±Ω whose whole effect on the step is within the
 //!   exponentials' share is left out (`Segment::resolve`: Duhamel's formula integrated by parts bounds
-//!   it by 2‖H_Ω‖(1 + ‖H‖τ)/|Ω|) -- a gray molasses' explicit states keep terms of 10⁻⁹ of its
-//!   generator at the hyperfine splitting.
+//!   it, by 2‖H_Ω‖(1 + ‖H‖τ)/|Ω| and for a beat faster than the generator by about 2‖H_Ω‖/|Ω|) -- a
+//!   gray molasses' explicit states keep terms of 10⁻⁹ of its generator at the hyperfine splitting;
+//!   the solve books them in its ledger.
 //! The impulse is the conditional force's time integral along that evolution, ∫ ⟨ψ|F|ψ⟩/⟨ψ|ψ⟩ dt
 //! (composite Simpson on the grid, its error within `QUADRATURE` of the impulse: (ν·2δ)⁴/2880 bounds
 //! it, ν the integrand's largest frequency -- the spectrum's largest difference |λ_a* − λ_b| through the
@@ -345,24 +346,29 @@ impl Segment{
         Segment{components,start,spacing:tau/steps as f64,how:How::Beating{cache:None},dropped:0.}
     }
     /// The beats a step resolves: the pairs ±Ω whose whole effect on the step is within the exponentials'
-    /// share are left out, the weakest first while their bounds' sum stays within it -- dropping B e^{iΩt}
-    /// moves the propagator by at most 2‖B‖(1 + ‖H‖τ)/|Ω| and the force's integral by 2‖G_B‖(1 + 2‖H‖τ)/|Ω|
-    /// (Duhamel's formula integrated by parts, ‖H‖ the generator's bound), against the share of ‖ψ‖ and of the
-    /// static force's integral ‖G₀‖τ. The bound of those left out.
+    /// share are left out, the weakest first while their bounds' sum stays within it, against the share of
+    /// ‖ψ‖ and of the static force's integral ‖G₀‖τ. Dropping B e^{iΩt} from H moves the propagator by
+    /// ‖∫ U_rest(τ,s) B U(s) e^{iΩs} ds‖ (Duhamel's formula): integrated by parts once at most
+    /// (b/|Ω|)·2(1 + hτ), twice (b/|Ω|)·(2 + τb′ + (2(2h + b′) + τ(2h(2h + b′) + 2h″))/|Ω|) -- the bound of a
+    /// beat faster than the generator --, with b = ‖B‖, h the generator's bound, b′ all the beats' and h″ their
+    /// derivative's, Σ|Ω_j|‖H_j‖ (norms above the spectral one). The force's integral alike, its integrand's
+    /// derivatives ⟨ψ|G|ψ⟩/⟨ψ|ψ⟩ within 4h g and (24h² + 4h″) g: (g/|Ω|)·2(1 + 2hτ), (g/|Ω|)·(2 + (8h +
+    /// τ(24h² + 4h″))/|Ω|). The bound of those left out.
     fn resolve(c:&mut Components,tau:f64,truncation:f64)->f64{
         let n=c.n();let size=|h:&[Complex]|column_norm(h,n).max(row_norm(h,n));let half=c.beats.len()/2;
-        let bound=size(&c.statics.hamiltonian)+c.beats.iter().map(|b|size(&b.hamiltonian)).sum::<f64>();
+        let all=c.beats.iter().map(|b|size(&b.hamiltonian)).sum::<f64>();let bound=size(&c.statics.hamiltonian)+all;
+        let pace=c.beats.iter().map(|b|b.omega.abs()*size(&b.hamiltonian)).sum::<f64>();
         let scale=(0..3).map(|a|size(&c.statics.gradient[a])).fold(0.,f64::max)*tau;
-        let mut pairs:Vec<(usize,f64,f64)>=(0..half).map(|i|{let(down,up)=(&c.beats[half-1-i],&c.beats[half+i]);
-            let state=2.*(size(&down.hamiltonian)+size(&up.hamiltonian))*(1.+bound*tau)/up.omega;
-            let force=2.*(0..3).map(|a|size(&down.gradient[a])+size(&up.gradient[a])).fold(0.,f64::max)*(1.+2.*bound*tau)/up.omega;
-            (i,state,force)}).collect();
+        let state=|b:f64,w:f64|b/w*(2.*(1.+bound*tau)).min(2.+tau*all+(2.*(2.*bound+all)+tau*(2.*bound*(2.*bound+all)+2.*pace))/w);
+        let force=|g:f64,w:f64|g/w*(2.*(1.+2.*bound*tau)).min(2.+(8.*bound+tau*(24.*bound*bound+4.*pace))/w);
+        let mut pairs:Vec<(usize,f64,f64)>=(0..half).map(|i|{let(down,up)=(&c.beats[half-1-i],&c.beats[half+i]);let w=up.omega;
+            (i,state(size(&down.hamiltonian),w)+state(size(&up.hamiltonian),w),(0..3).map(|a|force(size(&down.gradient[a]),w)+force(size(&up.gradient[a]),w)).fold(0.,f64::max))}).collect();
         pairs.sort_by(|a,b|a.1.total_cmp(&b.1));
-        let(mut state,mut force)=(0.,0.);let mut dropped=vec![false;half];
-        for &(i,x,f)in &pairs{if state+x<=truncation&&force+f<=truncation*scale{state+=x;force+=f;dropped[i]=true;}else{break;}}
+        let(mut moved,mut pushed)=(0.,0.);let mut dropped=vec![false;half];
+        for &(i,x,f)in &pairs{if moved+x<=truncation&&pushed+f<=truncation*scale{moved+=x;pushed+=f;dropped[i]=true;}else{break;}}
         let beats=std::mem::take(&mut c.beats);
         c.beats=beats.into_iter().enumerate().filter(|&(j,_)|!dropped[if j<half{half-1-j}else{j-half}]).map(|(_,b)|b).collect();
-        state
+        moved
     }
     /// A static segment through its eigendecomposition: Simpson's frequencies are the spectrum's
     /// differences λ_a* − λ_b, so the grid's spacing has (spread·2δ)⁴/2880 within `QUADRATURE`.
@@ -912,7 +918,7 @@ mod tests{
         let size=|h:&[Complex]|column_norm(h,n).max(row_norm(h,n));
         let bound=2.*c.beats.iter().map(|b|size(&b.hamiltonian)).sum::<f64>()*(1.+(size(&c.statics.hamiltonian)+c.beats.iter().map(|b|size(&b.hamiltonian)).sum::<f64>())*tau)/w;
         let left=Segment::new(c.clone(),0.,tau,1e-6,1e-6);assert!(matches!(left.how,How::Spectral{..}),"the beat left out");
-        assert!(matches!(Segment::new(c.clone(),0.,tau,0.1*bound,0.1*bound).how,How::Beating{..}),"a smaller share keeps it");
+        assert!(matches!(Segment::new(c.clone(),0.,tau,1e-12,1e-12).how,How::Beating{..}),"a smaller share keeps it");
         let resolved=Segment{components:c,start:0.,spacing:TAU/w/16.,how:How::Beating{cache:None},dropped:0.};
         let psi=state(n,31);let(mut a,mut b)=(psi,psi);left.evolve(&mut a,0.,tau,0.);resolved.evolve(&mut b,0.,tau,0.);
         assert!(distance(&a,&b,n)<=bound,"{:e} against the bound {bound:e}",distance(&a,&b,n));
