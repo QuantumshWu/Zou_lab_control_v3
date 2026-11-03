@@ -30,6 +30,12 @@ fn main(){
         let scale=l.hamiltonian[..n*n].iter().map(|z|z.abs()).fold(0.,f64::max);
         for a in 0..n{for b in 0..n{let shift=Complex::new(if a==b{g.scalar-l.scalar}else{0.},0.);worst=worst.max((g.hamiltonian[a*n+b]+shift-l.hamiltonian[a*n+b]).abs()/scale);}}}
     println!("fourth order: components against the local generator, largest relative difference {worst:.1e}");
+    // The generator against its jumps at the states (model.rs `Model::decay_balance`), either order.
+    for(label,model)in [("second",&second),("fourth",&fourth)]{
+        let(mut gain,mut rate)=(0_f64,0_f64);
+        for t in &states{let(low,r,_)=model.decay_balance(t.cluster,&model.point(t.r,t.kappa),t.time);gain=gain.max(-low);rate=rate.max(r);}
+        println!("{label} order: largest −λ(i(H − H†) − ΣL†L) {gain:.2e} rad/us, largest jump rate {rate:.2e}: relative {:.1e}",gain/rate.max(f64::MIN_POSITIVE));
+    }
     for dt in dts{
         let mut line=format!("dt {dt:6.3}:");
         for(label,model)in [("second",&second),("fourth",&fourth)]{

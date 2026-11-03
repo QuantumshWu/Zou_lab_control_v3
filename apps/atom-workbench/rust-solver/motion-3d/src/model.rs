@@ -854,7 +854,10 @@ impl Model{
         let tt:Vec<Vec<Vec<Complex>>>=fl.iter().map(|&(c,k)|fl.iter().map(|&(c2,k2)|full(&t[c][k],&t[c2][k2])).collect()).collect();
         let tdt:Vec<Vec<Vec<Complex>>>=fl.iter().map(|&(c,k)|dt.iter().map(|d|full(&t[c][k],d)).collect()).collect();
         // X on the cluster: T_f†T_f′ on the coherent entries of the carriers' pair.
-        let xs:Vec<Vec<Vec<Complex>>>=(0..nf).map(|i|(0..nf).map(|j|{let mask=&f.slow.iter().find(|s|s.carriers==(fl[i].0,fl[j].0)).unwrap().coherent;
+        // Two photon channels (carrier, state) interfere in the jumps where they are coherent (the classes);
+        // the decay takes their products there alone, as the jumps do.
+        let coherent=|c1:usize,c2:usize|&f.slow.iter().find(|s|s.carriers==(c1,c2)).unwrap().coherent;
+        let xs:Vec<Vec<Vec<Complex>>>=(0..nf).map(|i|(0..nf).map(|j|{let mask=coherent(fl[i].0,fl[j].0);
             (0..n*n).map(|q|if mask[q]{tt[i][j][st[q/n]*ng+st[q%n]]}else{Complex::ZERO}).collect()}).collect()).collect();
         // A(ω)[f3][f1][(b n + a) ng + b′] = U_f3[:,a]† G_b(ω) T_f1[:,b′], and with D T_f3 at a carrier's ω.
         let tensor=|left:&dyn Fn(usize,usize)->Complex,w:usize,f1:usize|->Vec<Complex>{let mut m=vec![Complex::ZERO;n*n*ng];
@@ -870,6 +873,8 @@ impl Model{
         let(mut x,mut l,mut m)=(vec![Complex::ZERO;n*n],vec![Complex::ZERO;n*n],vec![Complex::ZERO;n*n]);
         for &c1 in &f.carriers{for &c2 in &f.carriers{for &c4 in &f.carriers{
             let w=omega_of(delta(c1)-delta(c2)+delta(c4));let jumps=photon(omegas[w]);
+            // The photon's carrier at the triple's frequency (the jumps' W3^c).
+            let carrier=f.carriers.iter().copied().find(|&c|crate::ground::same_frame(delta(c),omegas[w]));
             for f1 in (0..nf).filter(|&i|fl[i].0==c1){for f2 in (0..nf).filter(|&i|fl[i].0==c2){for f4 in (0..nf).filter(|&i|fl[i].0==c4){
                 let p24=&ut[f2][f4];
                 for f3 in 0..nf{
@@ -881,9 +886,10 @@ impl Model{
                         let(mut zx,mut zl)=(Complex::ZERO,Complex::ZERO);
                         for q in 0..n{
                             z-=(xs[f3][f1][a*n+q]*p24[st[q]*ng+st[b]]-p24[st[a]*ng+st[q]]*xs[f3][f1][q*n+b])*0.5;
-                            zx+=xs[f3][f1][a*n+q]*tdt[f2][f4][st[q]*ng+st[b]]+tdt[f3][f1][st[a]*ng+st[q]]*xs[f2][f4][q*n+b];
+                            if coherent(fl[f2].0,fl[f4].0)[q*n+b]{zx+=xs[f3][f1][a*n+q]*tdt[f2][f4][st[q]*ng+st[b]];}
+                            if coherent(fl[f3].0,fl[f1].0)[a*n+q]{zx+=tdt[f3][f1][st[a]*ng+st[q]]*xs[f2][f4][q*n+b];}
                         }
-                        if jumps{let at=&d_t[w][f3][f1][(b*n+a)*ng..(b*n+a+1)*ng];for bp in 0..ng{zl+=at[bp]*p24[bp*ng+st[b]];}}
+                        if jumps&&carrier.is_some_and(|c|coherent(fl[f3].0,c)[a*n+b]){let at=&d_t[w][f3][f1][(b*n+a)*ng..(b*n+a+1)*ng];for bp in 0..ng{zl+=at[bp]*p24[bp*ng+st[b]];}}
                         x[a*n+b]=z;m[a*n+b]=zx;l[a*n+b]=zl;
                     }}
                     // The Hermitian half: ½X here, ½X† on the swapped slab; −(i/2) of Σ L̃†L̃'s −½{X, T†DT} here.

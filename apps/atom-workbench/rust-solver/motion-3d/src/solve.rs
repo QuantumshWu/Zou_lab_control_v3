@@ -469,22 +469,29 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
                 }
             }
             // Every later candidate's work is at least the last one timed (it keeps more states explicit):
-            // each feasible one is timed while even the fewest trajectories could pay for it.
-            while work*fewest<best{
+            // each feasible one is timed while even the fewest trajectories could pay for it. It also pays a
+            // pilot of its own (its states for the step's check, its clusters not the pilot's): the pilot's
+            // trajectories at its work, relative to the reference's need in pilots (`need_at`).
+            let own=if need_at(&rooms)>0.{1./need_at(&rooms)}else{0.};
+            while work*(fewest+own)<best{
                 let Some(mut c)=next_candidate(request,&mut ladder,false,&mut failed)else{break};
                 let charge=measured_charge(&pilot_candidate.model,&c.model,&pilot_states);c.charged(charge);
                 if !c.fits(binds){continue;}
                 let trajectories=need(&rooms,&c.rooms);
-                let(settings,limit)=(piloting(steps),best/fewest);
+                let(settings,limit)=(piloting(steps),best/(fewest+own));
                 work=work.max(if !(counted_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,interval,pilot_waiting)<=limit){f64::INFINITY}
                     else{model_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,pilot as usize,interval,limit)});
-                if work*trajectories<best{best=work*trajectories;better=Some(c);}
+                if work*(trajectories+own)<best{best=work*(trajectories+own);better=Some(c);}
             }
         }
         better
     };
-    // The pilot again where the choice is not its model (its trajectories' sums the first prediction's).
+    // The pilot again where the choice is not its model (its trajectories' sums the first prediction's) --
+    // but for the fourth order on the pilot's own clusters: the same states, carried over, its statistics and
+    // jumps the prediction's (the orders' rates differ by the fold's S).
     let(chosen,(states,jumps,pilot_groups),pilot_harmonic)=match better.or(reference){
+        Some(c)if c.model.fourth&&c.allowance==pilot_candidate.allowance=>{
+            let carried_states=pilot_states.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect();(c,(carried_states,pilot_jumps,pilot_groups),pilot_harmonic)}
         Some(c)=>{let h=Harmonic::new(&c.model,&piloting(steps),&c.initial,steps,outputs);
             let pilot_run=sample_states(&c.model,&piloting(steps),&c.initial,seed,pilot,steps,outputs,&h);(c,pilot_run,h)}
         None=>(pilot_candidate,(pilot_states,pilot_jumps,pilot_groups),pilot_harmonic),
