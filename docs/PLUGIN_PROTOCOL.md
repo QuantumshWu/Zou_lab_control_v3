@@ -430,6 +430,15 @@ processor that ends before its source (stopped, failed, its source run replaced)
 withdrawn with its signals (v2); one completed with its source is sealed. Closing a
 node instance withdraws its last run.
 
+A processor's subscription declares it a member of its source signal's same-shot group
+(`Runtime::begin_consuming` with the source run): from its run's begin until it is
+withdrawn, or released when the node no longer follows its source (Stop:
+`Runtime::release_route`; its completed run keeps its signals), whether it has published,
+has ended with its source, or is still of a replaced source run. While it has no result
+of the source's newest shots, a board showing both keeps the last shot both have; they
+flip together. A run following its source signal across runs (no source run) is a member
+only while it runs.
+
 `ctx` (the SDK's `RunContext`) keeps v2's `NodeExecutionContext` surface:
 `instance_id`, `generation`, `cancel_requested()`, `report_ready()`,
 `report_progress()`, `set_run_record()`, `commit_live(outputs, source_publication=)`,
