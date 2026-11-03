@@ -177,8 +177,8 @@ pub(crate) struct Layout{pub(crate) n:usize,pub(crate) n0:usize,pub(crate) size:
 /// ground state b′, per pair (c, e) C_a G_b(ω_c) T^e_k[:,b′] (r_e × 3 × ng × ng × n: k, axis, row, b′, b)
 /// and P^{de} = U^d†T^e (r_d r_e × ng × n), per carrier R_c†R_c (r_c² × ng × n) and C_a T^c_k (r_c × 3 × ng × ng).
 #[derive(Clone,Debug)]
-pub(crate) struct FourthLayout{carriers:Vec<usize>,quartic:Vec<(usize,usize,usize)>,quadratic:Vec<(usize,usize)>,rr:Vec<(usize,usize)>,yw:Vec<(usize,usize)>,
-    jumps:Vec<(usize,usize,usize)>,p:Vec<(usize,usize,usize)>,rr_all:Vec<(usize,usize)>,photons:Vec<(usize,usize)>}
+pub(crate) struct FourthLayout{pub(crate) carriers:Vec<usize>,pub(crate) quartic:Vec<(usize,usize,usize)>,pub(crate) quadratic:Vec<(usize,usize)>,pub(crate) rr:Vec<(usize,usize)>,
+    pub(crate) yw:Vec<(usize,usize)>,pub(crate) jumps:Vec<(usize,usize,usize)>,pub(crate) p:Vec<(usize,usize,usize)>,pub(crate) rr_all:Vec<(usize,usize)>,pub(crate) photons:Vec<(usize,usize)>}
 
 /// The interpolation stencil at s: per focused beam the first of its four nodes, their cubic
 /// weights and the weights' derivatives in s_f; the nodes are their tensor product.

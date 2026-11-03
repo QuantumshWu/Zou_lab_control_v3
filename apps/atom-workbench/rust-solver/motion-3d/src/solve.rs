@@ -343,7 +343,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // whose charge leaves the statistics room is the reference, and a later one replaces it where its
     // work times the trajectories its room needs costs less in prediction.
     let mut ladder=Ground::allowances(request)?.into_iter();let mut failed=None;
-    let fourth=device==Device::Cpu;
+    // Both devices fold at fourth order (the GPU's kernel carries its tables, gpu/program.rs).
+    let fourth=true;
     let Some(mut pilot_candidate)=next_candidate(request,&mut ladder,fourth,&mut failed)else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
     // The reference state: the largest initial population; its trap sets ω per axis.
     let trap=pilot_candidate.trap();

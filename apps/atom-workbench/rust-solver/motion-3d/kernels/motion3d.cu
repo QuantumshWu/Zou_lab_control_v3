@@ -162,8 +162,17 @@ struct Beam{
 struct Carrier{int rank,beams,first,pad;double detuning;};   // its beams: beam_list[first, first + beams)
 // A cluster: its tables' place (node 0 at tables[table], `size` entries per node) and slices, its
 // groups, classes and coherent groups, its carriers' photon tables (carrier_tables[carriers + 3c +
-// (0 J, 1 J2, 2 T)]) and its states' ground positions.
-struct Cluster{int n,size,table,h0,groups,ngroups,classes,nclasses,coherent,ncoherent,carriers,pad;int states[MAXN];};
+// (0 J, 1 J2, 2 T)]), its fourth-order tables (fourths[fourth], −1: folded at second order), its
+// states' frame frequencies (frames[frames + x]) and their ground positions.
+struct Cluster{int n,size,table,h0,groups,ngroups,classes,nclasses,coherent,ncoherent,carriers,fourth,frames,pad;int states[MAXN];};
+// A cluster's fourth-order tables (model.rs `FourthLayout`, # Fourth order): their places in its node
+// slice per carrier (−1: none), the carriers that drive it carriers[0, on). H^(4)'s quartic part per
+// pair (c, d), r_c² r_d² matrices n × n of the monomials E^c*_k1 E^c_k2 E^d*_k3 E^d_k4; per carrier
+// ½[R†R, H_g], R†R and YW, r_c² matrices n × n of E^c*_k1 E^c_k2; for the jumps per pair (c, e)
+// C_a G_b(ω_c) T^e_k[:, b′] (r_e × 3 axes × ng rows × ng b′ × n), per pair (d, e) P^{de} (r_d r_e × ng × n),
+// per carrier R†R on every ground state (r_c² × ng × n) and C_a T^c_k (r_c × 3 × ng × ng).
+struct Fourth{int quartic[MOST_CARRIERS][MOST_CARRIERS],quadratic[MOST_CARRIERS],rr[MOST_CARRIERS],yw[MOST_CARRIERS],
+    jumps[MOST_CARRIERS][MOST_CARRIERS],p[MOST_CARRIERS][MOST_CARRIERS],rr_all[MOST_CARRIERS],photons[MOST_CARRIERS],on,carriers[MOST_CARRIERS],pad[3];};
 // A kept group (model.rs `GroupLayout`): its field pairs pairs[pairs, pairs + npairs) and the S and Q slices.
 struct Group{int absorbed,emitted,hermitian,pairs,npairs,s,q,pad;double residual;};
 // A jump class (ground.rs `Class`): its photons photons[photons, photons + nphotons) by the row they
@@ -185,7 +194,9 @@ struct Program{
     // the emission C_a (3 × NG × NE).
     const float2* excited;const double* diagonal;const float2* couplings;const float2* emission;
     const int* class_rows;
-    int nbeams,ncarriers,nclusters,focused,nodes,fields,nnear,doppler,loss,pad;
+    const Fourth* fourths;const double* frames;
+    int nbeams,ncarriers,nclusters,focused,nodes,fields,nnear,doppler,loss;
+    int weights;                        // where a jump's scratch holds the fourth order's weights
     int focused_beam[MOST_FOCUSED],stride[MOST_FOCUSED];
     int field_carrier[MOST_CARRIERS*MOST_RANK],field_rank[MOST_CARRIERS*MOST_RANK];
     int ground_states[NG],excited_states[NE];
@@ -457,6 +468,56 @@ __device__ float2 entry_slopes(const Program& P,const Warp& W,const float2* x,in
 // ---------------------------------------------------------------------------------------------
 // The generator.
 
+__device__ __forceinline__ bool zero(float2 z){return z.x==0.f&&z.y==0.f;}
+
+// Σ over a cluster's carriers c of Σ_k1k2 E^c*_k1 E^c_k2 X^c_k1k2 at the lane's entries, X^c the r_c²
+// matrices n × n from slices[c] (−1: none) of its fourth-order tables, at the point: a quadratic form
+// of the fields (model.rs `fourth_quadratic`).
+__device__ void fourth_quadratic(const Program& P,const Warp& W,const Cluster& C,const Fourth& F,const int (&slices)[MOST_CARRIERS],float scale,int lane,float2 (&out)[SLOTS]){
+    const float2* tables=P.tables+C.table;const int nn=C.n*C.n;float2 buf[SLOTS],unused[MOST_FOCUSED][SLOTS];
+    for(int ci=0;ci<F.on;ci++){
+        const int c=F.carriers[ci],rc=P.carriers[c].rank,at=slices[c];if(at<0)continue;const Fields& fc=W.pt.fields[c];
+        for(int k1=0;k1<rc;k1++)for(int k2=0;k2<rc;k2++){
+            const float2 m=scale*(conj(fc.e[k1])*fc.e[k2]);if(zero(m))continue;
+            gather<false>(P,W,false,tables+at+(k1*rc+k2)*nn,C.size,nn,lane,buf,unused);
+            #pragma unroll
+            for(int j=0;j<SLOTS;j++)out[j]+=m*buf[j];
+        }
+    }
+}
+// The lane's entries of an n × n matrix in the cluster's frames at t: entry (a, b) times e^{i(θ_a − θ_b)t}.
+__device__ void in_frames(const Program& P,const Cluster& C,const Entries& E,double t,int lane,float2 (&x)[SLOTS]){
+    #pragma unroll
+    for(int j=0;j<SLOTS;j++)if(E.has(j,lane)&&E.row[j]!=E.col[j])x[j]=x[j]*cis((P.frames[C.frames+E.row[j]]-P.frames[C.frames+E.col[j]])*t);
+}
+// A cluster's fourth-order part of H_eff at the point and t at the lane's entries (model.rs
+// `fourth_hamiltonian`): Σ_(c,d) Σ E^c*E^c E^d*E^d X over its quartic tables and Σ_c Σ E^c*E^c ½[R†R, H_g],
+// in the cluster's frames; zero for a cluster folded at second order.
+__device__ void fourth_hamiltonian(const Program& P,const Warp& W,const Cluster& C,const Entries& E,double t,int lane,float2 (&h)[SLOTS]){
+    #pragma unroll
+    for(int j=0;j<SLOTS;j++)h[j]=zero2();
+    if(C.fourth<0)return;
+    const Fourth& F=P.fourths[C.fourth];const float2* tables=P.tables+C.table;const int nn=E.nn;const Point& pt=W.pt;
+    float2 buf[SLOTS],unused[MOST_FOCUSED][SLOTS];
+    for(int ci=0;ci<F.on;ci++){
+        const int c=F.carriers[ci],rc=P.carriers[c].rank;const Fields& fc=pt.fields[c];
+        for(int di=0;di<F.on;di++){
+            const int d=F.carriers[di],rd=P.carriers[d].rank,at=F.quartic[c][d];if(at<0)continue;const Fields& fd=pt.fields[d];
+            for(int k1=0;k1<rc;k1++)for(int k2=0;k2<rc;k2++){
+                const float2 x=conj(fc.e[k1])*fc.e[k2];if(zero(x))continue;
+                for(int k3=0;k3<rd;k3++)for(int k4=0;k4<rd;k4++){
+                    const float2 m=x*(conj(fd.e[k3])*fd.e[k4]);if(zero(m))continue;
+                    gather<false>(P,W,false,tables+at+(((k1*rc+k2)*rd+k3)*rd+k4)*nn,C.size,nn,lane,buf,unused);
+                    #pragma unroll
+                    for(int j=0;j<SLOTS;j++)h[j]+=m*buf[j];
+                }
+            }
+        }
+    }
+    fourth_quadratic(P,W,C,F,F.quadratic,1.f,lane,h);
+    in_frames(P,C,E,t,lane,h);
+}
+
 // A cluster's generator at the point and time t: H_eff less its scalar part into W.m[0] (row-major,
 // model.rs `Local::hamiltonian`), and in the lane's entries h0 and the gradient of the Hermitian
 // part per axis (`Local::gradient`).
@@ -521,12 +582,16 @@ __device__ void local(const Program& P,Warp& W,const Cluster& C,const Entries& E
         if(E.row[j]==E.col[j])diagonal+=L.h0[j].x-m[j].x;
     }
     const float scalar=warp_sum(diagonal)/(float)E.n;
+    // The fourth order's part (model.rs `fourth_hamiltonian`), in the cluster's frames; the force keeps
+    // the second order's.
+    float2 h4[SLOTS];
+    fourth_hamiltonian(P,W,C,E,t,lane,h4);
     __syncwarp();
     #pragma unroll
     for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){
         float2 h=make_float2(L.h0[j].x-m[j].x+0.5f*g[j].y,L.h0[j].y-m[j].y-0.5f*g[j].x);
         if(E.row[j]==E.col[j])h.x-=scalar;
-        W.m[0][lane+32*j]=h;
+        W.m[0][lane+32*j]=h+h4[j];
     }
     __syncwarp();
 }
@@ -739,12 +804,60 @@ __device__ __noinline__ bool exact_responses(const Program& P,const Warp& W,cons
     return true;
 }
 
+// The fourth order's weights of a jump's photons (model.rs `fourth_photons`), the forms
+// Σ E^d*_k3 E^e_k4 P^{de}_k3k4 on every ground state b′ × the cluster (ng × n): Σ_d P^{dd} at weights[0],
+// R†R's Σ_c Σ E^c*E^c RR^c at weights[NG·n], P^{ec} (e ≠ c) at weights[(2 + e_i·on + c_i)·NG·n].
+__device__ void fourth_weights(const Program& P,const Warp& W,const Cluster& C,int lane,float2* weights){
+    const Fourth& F=P.fourths[C.fourth];const float2* tables=P.tables+C.table;const int n=C.n,size=NG*n;const Point& pt=W.pt;
+    const int count=(2+F.on*F.on)*size;
+    for(int i=lane;i<count;i+=32){
+        const int which=i/size,at=i-which*size;float2 w=zero2();
+        auto form=[&](int d,int e,int slice){
+            const int rd=P.carriers[d].rank,re=P.carriers[e].rank;
+            for(int k3=0;k3<rd;k3++)for(int k4=0;k4<re;k4++){
+                const float2 c=conj(pt.fields[d].e[k3])*pt.fields[e].e[k4];if(zero(c))continue;
+                w+=c*entry(P,W,tables+slice+(k3*re+k4)*size+at,C.size,-1);
+            }
+        };
+        if(which==0){for(int di=0;di<F.on;di++){const int d=F.carriers[di];form(d,d,F.p[d][d]);}}
+        else if(which==1){for(int ci=0;ci<F.on;ci++){const int c=F.carriers[ci];form(c,c,F.rr_all[c]);}}
+        else{const int ei=(which-2)/F.on,ci=(which-2)-ei*F.on;if(ei!=ci){const int e=F.carriers[ei],c=F.carriers[ci];form(e,c,F.p[e][c]);}}
+        weights[i]=w;
+    }
+    __syncwarp();
+}
+// The fourth order's change of a photon's matrix element along an axis (model.rs `fourth_photons`):
+// −C W3 − ½ C R R†R through every ground state b′, W3^c[:, b] = Σ_b′ G_b(ω_c)[Σ_d T^c(E) P^{dd} + Σ_{e≠c} T^e(E) P^{ec}].
+__device__ float2 fourth_photon(const Program& P,const Warp& W,const Cluster& C,const Photon& ph,int a,const float2* weights){
+    const Fourth& F=P.fourths[C.fourth];const float2* tables=P.tables+C.table;const int n=C.n,c=ph.carrier,size=NG*n;const Point& pt=W.pt;
+    int ci=-1;for(int i=0;i<F.on;i++)if(F.carriers[i]==c)ci=i;
+    if(ci<0)return zero2();
+    float2 z=zero2();
+    for(int ei=0;ei<F.on;ei++){
+        const int e=F.carriers[ei],at=F.jumps[c][e],re=P.carriers[e].rank;if(at<0)continue;
+        const float2* weight=weights+(e==c?0:(2+ei*F.on+ci)*size);
+        for(int k=0;k<re;k++){
+            const float2 ek=pt.fields[e].e[k];if(zero(ek))continue;float2 s=zero2();
+            for(int b=0;b<NG;b++)s+=entry(P,W,tables+at+(((k*3+a)*NG+ph.to)*NG+b)*n+ph.col,C.size,-1)*weight[b*n+ph.col];
+            z-=ek*s;
+        }
+    }
+    const int at=F.photons[c],rc=P.carriers[c].rank;const float2* rr=weights+size;
+    for(int k=0;k<rc;k++){
+        const float2 ck=pt.fields[c].e[k];if(zero(ck))continue;float2 s=zero2();
+        for(int b=0;b<NG;b++)s+=entry(P,W,tables+at+((k*3+a)*NG+ph.to)*NG+b,C.size,-1)*rr[b*n+ph.col];
+        z-=0.5f*(ck*s);
+    }
+    return z;
+}
+
 // Every photon's matrix element of the cluster's jumps at the point (model.rs `Model::photons`),
 // interpolated once per jump: M_a[to, from] = Σ_k E_k J_k − E^D_k J2_k, or the exact responses'
 // Σ_l a_l C_a R_l(w_l), per photon and axis (the cluster's photons, all its classes', in order).
-__device__ void photon_matrices(const Program& P,const Warp& W,const Cluster& C,int lane,const float2* X,float2* out){
+__device__ void photon_matrices(const Program& P,const Warp& W,const Cluster& C,int lane,const float2* X,float2* out,float2* weights){
     const float2* tables=P.tables+C.table;const int first=P.classes[C.classes].photons;
     const Class last=P.classes[C.classes+C.nclasses-1];const int count=3*(last.photons+last.nphotons-first);
+    if(C.fourth>=0)fourth_weights(P,W,C,lane,weights);
     for(int j=lane;j<count;j+=32){
         const int a=j%3;const Photon ph=P.photons[first+j/3];const Carrier R=P.carriers[ph.carrier];float2 m=zero2();
         if(X==nullptr){
@@ -752,6 +865,7 @@ __device__ void photon_matrices(const Program& P,const Warp& W,const Cluster& C,
             #pragma unroll
             for(int k=0;k<MOST_RANK;k++)if(k<R.rank){const int at=((k*3+a)*NG+ph.to)*C.n+ph.col;m+=f.e[k]*entry(P,W,tables+j1+at,C.size,-1)-f.doppler[k]*entry(P,W,tables+j2+at,C.size,-1);}
         }else for(int b=0;b<R.beams;b++){const int l=P.beam_list[R.first+b];m+=X[exact_at(P.beams[l].near,ph.col,a,ph.to)]*W.pt.a[l];}
+        if(C.fourth>=0)m+=fourth_photon(P,W,C,ph,a,weights);
         out[j]=m;
     }
     __syncwarp();
@@ -857,6 +971,25 @@ __device__ int absorption(const Program& P,Warp& W,const Cluster& C,const Class&
     return count;
 }
 
+// The fourth order's start from a bare ground state after a jump (engine.rs `slow_start`; the initial
+// states have theirs from the CPU): ψ ← Π f/√A, the threshold θ ← θ/A, A = ‖Π f‖², Π = 1 + ½R†R + YW at
+// the point in the cluster's frames -- A < 1: the transient emits at once with probability 1 − A (θ/A
+// ≥ 1, a jump at the step's start); A > 1: the dressing's rebuild delays the next jump. No draws.
+__device__ void slow_start(const Program& P,Warp& W,Traj& t,int lane){
+    const Cluster C=P.clusters[t.cluster];if(C.fourth<0)return;
+    const Fourth& F=P.fourths[C.fourth];const Entries E(C.n,lane);float2 pi[SLOTS];
+    #pragma unroll
+    for(int j=0;j<SLOTS;j++)pi[j]=zero2();
+    fourth_quadratic(P,W,C,F,F.rr,0.5f,lane,pi);fourth_quadratic(P,W,C,F,F.yw,1.f,lane,pi);
+    in_frames(P,C,E,t.time,lane,pi);
+    __syncwarp();
+    #pragma unroll
+    for(int j=0;j<SLOTS;j++)if(E.has(j,lane))W.m[0][lane+32*j]=pi[j]+make_float2(E.row[j]==E.col[j]?1.f:0.f,0.f);
+    __syncwarp();
+    const float a=apply(W.m[0],W.psi,C.n,lane);
+    t.threshold/=(double)a;t.log_threshold=log(t.threshold);
+}
+
 // A real orthonormal pair across the unit vector n (engine.rs `across`).
 __device__ void across(const double n[3],double pair[2][3]){
     double a[3]={0.,0.,0.};
@@ -914,7 +1047,7 @@ __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,
     if(exact)COUNT(COUNT_EXACT);
     const float2* X=exact&&exact_responses(P,W,C,lane,scratch)?scratch:nullptr;
     SPAN_END(SPAN_EXACT,responses);SPAN_BEGIN(photons);
-    float2* M=scratch+P.nnear*MAXN*3*NG;photon_matrices(P,W,C,lane,X,M);
+    float2* M=scratch+P.nnear*MAXN*3*NG;photon_matrices(P,W,C,lane,X,M,scratch+P.weights);
     JumpSpace& J=W.jump;
     // The class, and the cluster it lands the atom in: by Σ_a ‖u_a‖².
     double total=0.;
@@ -952,6 +1085,7 @@ __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,
     const float scale=1.f/sqrtf(size);
     __syncwarp();if(lane<MAXN)W.psi[lane]=lane<nt?scale*J.f[lane]:zero2();__syncwarp();
     t.cluster=K.target;t.logn=0.;t.threshold=d.threshold;t.log_threshold=log(d.threshold);
+    slow_start(P,W,t,lane);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1351,5 +1485,5 @@ extern "C" __global__ void layout(u32* out){
     out[6]=sizeof(Coherent);out[7]=sizeof(Channel);out[8]=sizeof(Program);out[9]=sizeof(State);out[10]=sizeof(Run);
     out[11]=(u32)OFFSET(Program,hm);out[12]=(u32)OFFSET(Program,half_flow);out[13]=(u32)OFFSET(Run,listed);
     out[14]=(u32)OFFSET(State,psi);out[15]=(u32)OFFSET(State,index);
-    out[16]=MOST_INTERVALS;out[17]=SLOT_RECORD;out[18]=RECORD;out[19]=WARPS;out[20]=MAXN;out[21]=TWIN;out[22]=MOTION;out[23]=HARMONIC;
+    out[16]=MOST_INTERVALS;out[17]=SLOT_RECORD;out[18]=RECORD;out[19]=WARPS;out[20]=MAXN;out[21]=TWIN;out[22]=MOTION;out[23]=HARMONIC;out[24]=sizeof(Fourth);
 }
