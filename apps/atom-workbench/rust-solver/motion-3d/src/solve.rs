@@ -14,10 +14,11 @@
 //! # Ledger and the total error
 //! Every a-priori approximation's estimate enters the solve's ledger (ledger.rs), reported against
 //! its budget, the a-priori share of the population target. The decisions take that share: the
-//! couplings' and the far components' folds (ground.rs), a Gaussian beam's intensity axis (model.rs)
-//! and, per step, the first order in the Doppler shift -- what the budget leaves after the model's
-//! estimates and the pilot's elimination, or the budget on its own where the elimination alone
-//! exceeds it (the exact response beyond, engine.rs). The elimination's η² -- each output's mean
+//! couplings' and the far components' folds (ground.rs), a Gaussian beam's intensity axis (model.rs),
+//! the region the initial positions are drawn in (lib.rs `thermal_position`) and, per step, the
+//! first order in the Doppler shift -- what the budget leaves after the model's estimates and the
+//! pilot's elimination, or the budget on its own where the elimination alone exceeds it (the exact
+//! response beyond, engine.rs). The elimination's η² -- each output's mean
 //! excited population, the local expansion parameter ⟨Y⟩ of each atom's state -- is measured along
 //! the trajectories and is no decision yet: it enters the total (validated on resonant probes against
 //! the population core: optical pumping's population error 0.4–1.1 η², a cycling transition's 2η⁴).
@@ -51,7 +52,11 @@
 //!   change of the mechanical energy over the step, which the conservative forces leave alone --
 //!   the internal state's lag that carries the friction is a small share of its populations, so
 //!   their criterion alone lets T's step error grow past its share (the 3D PGC example: T 2–3 % high
-//!   at the populations' step, measured against half that step).
+//!   at the populations' step, measured against half that step). Where the friction moves the
+//!   energy by less than its thermal value 3 k_B T over the run, T's step error is the energy's step
+//!   error summed over the run against that thermal energy, and the step's energy error is taken
+//!   against a step's share of it: the change there can be the integrator's own error, which falls
+//!   with the step as the step's error does (`step_excess`).
 //! All scale as dt², so a step that misses is shrunk by the square root of its excess and checked
 //! again, and one that meets them with room is grown the same way, by whatever factor, until a step
 //! comes up twice: first by the population criterion's bound, then from the largest step that met
@@ -70,7 +75,10 @@
 //! step grows with it (the exponentials' sub-steps, the jumps' redone steps) -- in the 3D PGC and the
 //! tetrahedral MOT the candidates' costs lie within a few per cent, in the D1 gray molasses the
 //! measured criterion halves it. The step's exponentials are summed to a share η of its own
-//! population budget, η² ε dt/waiting, instead of to double precision.
+//! population budget, η² ε dt/waiting, instead of to double precision. A trajectory takes at most
+//! `MOST_STEPS` steps over the run: neither the first step nor the search goes finer, and a step that
+//! bound sets is kept even where it misses its shares, its measured bias booked as any step's (the
+//! flag, where a total exceeds its target, says why).
 //!
 //! # Batches
 //! A batch is cut into two groups per thread (lib.rs `Stratum`): each group's initial states are a
@@ -140,6 +148,11 @@ pub const CONFIDENCE:f64=2.;
 pub const CLASSICAL:f64=4.;
 /// The most trajectories a solve runs; a solve stopped there returns its result with the reason.
 pub const MOST_TRAJECTORIES:u64=1<<14;
+/// The most steps a trajectory takes over the run, a bound on the work as `MOST_TRAJECTORIES` is (a
+/// solve takes at most their product): neither the first step nor the step search goes finer, and a
+/// step it bounds that misses its shares is kept with its measured bias, the reason in the flag where
+/// a total exceeds its target (`ledger`).
+pub const MOST_STEPS:usize=1<<24;
 /// A batch's group: a batch is cut into two groups per thread (jackknife groups and Latin
 /// hypercubes of initial states, lib.rs `Stratum`), so a batch's groups are as large as its size
 /// allows while the jackknife keeps at least that many.
@@ -218,15 +231,20 @@ fn listed(outputs:usize)->Vec<usize>{
 
 /// Histograms of a value of the samples (a coordinate along one axis) at the listed times on one
 /// grid symmetric about 0 that holds all of them (the bins' centres; an odd count, 0 at the centre).
+/// A listed time where no atom is held carries the one before (`assemble`); the first is t = 0,
+/// where every atom is.
 fn histograms(samples:&[Vec<([f64;3],[f64;3])>],listed:&[usize],value:&dyn Fn(&([f64;3],[f64;3]))->f64)->Distributions{
     let reach=samples.iter().flatten().map(|s|value(s).abs()).fold(0.,f64::max).max(f64::MIN_POSITIVE);
     let count=samples.iter().map(|s|s.len()).max().unwrap_or(0);
     // Bins: about the square root of the samples, odd, at least 21.
     let bins=(((count as f64).sqrt() as usize)|1).max(21);let width=2.*reach/(bins-1) as f64;
     let grid:Vec<f64>=(0..bins).map(|i|(i as f64-(bins/2) as f64)*width).collect();
+    let mut last:Option<Vec<f64>>=None;
     let probabilities=samples.iter().map(|s|{
-        let mut p=vec![0.;bins];if s.is_empty(){p[bins/2]=1.;return p;}
-        for x in s{let i=((value(x)/width).round() as isize+(bins/2) as isize).clamp(0,bins as isize-1) as usize;p[i]+=1./s.len() as f64;}p
+        if s.is_empty(){return last.clone().unwrap_or_else(||{let mut p=vec![0.;bins];p[bins/2]=1.;p});}
+        let mut p=vec![0.;bins];
+        for x in s{let i=((value(x)/width).round() as isize+(bins/2) as isize).clamp(0,bins as isize-1) as usize;p[i]+=1./s.len() as f64;}
+        last=Some(p.clone());p
     }).collect();
     Distributions{grid,samples:listed.to_vec(),probabilities}
 }
@@ -338,6 +356,9 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let listed=listed(outputs);let seed=0x3D_5EED;
     let threads=rayon::current_num_threads() as u64;let pilot=2*threads;
     let duration=times[outputs-1];
+    // The drift that moves an atom's thermal energy 3 k_B T (a 3D harmonic trap's) over the run, per
+    // unit time: a step's share of it is the friction criterion's floor (`step_excess`).
+    let drift=3.*KT_PER_UK*request.temperature_uk/duration;
     // The fold of the excited states (module documentation): the rule's candidates from all folded
     // down, their order the a-priori estimates'; the pilot runs the first, and each candidate's
     // charge is what its folded drives meet at the pilot's states (`measured_charge`). The first
@@ -355,22 +376,29 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let thermal=(KT_PER_UK*request.temperature_uk*pilot_candidate.model.hbar_over_mass).sqrt();
     let pattern=pilot_candidate.model.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max)*thermal;
     let rate=if pattern>0.{pattern}else{trap.frequencies.iter().copied().fold(0.,f64::max)};
-    let steps=((interval*rate/(A_PRIORI_SHARE*TEMPERATURE_TARGET).sqrt()).ceil() as usize).max(1);
+    // The finest step the work bound allows (`MOST_STEPS`), in steps per interval.
+    let most=(MOST_STEPS/(outputs-1)).max(1);
+    let steps=((interval*rate/(A_PRIORI_SHARE*TEMPERATURE_TARGET).sqrt()).ceil() as usize).clamp(1,most);
     let plain=|steps:usize,truncation:f64|Settings::new(interval/steps as f64,&trap,truncation,true);
     // The pilots' exponentials to double precision; the beats their exact steps leave out within the share
     // the run's take at most, the step's population budget over the whole run (engine.rs `Segment::resolve`).
     let piloting=|steps:usize|{let mut s=plain(steps,f64::EPSILON);s.beats=A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*s.dt/duration;s.horizon=duration;s};
     let(pilot_states,pilot_jumps)=sample_states(&pilot_candidate.model,&piloting(steps),&pilot_candidate.initial,seed,pilot,steps,outputs);
     let charge=measured_charge(&pilot_candidate.model,&pilot_candidate.model,&pilot_states);pilot_candidate.charged(charge);
+    let pilot_waiting=pilot as f64*duration/(pilot_jumps.max(1) as f64);
     let mut reference:Option<Candidate>=None;
-    if !pilot_candidate.fits(){
+    // The ladder is walked for a fit only where the fold's charge is what keeps the pilot's model from
+    // one: estimates the fold does not touch (an initial ensemble beyond its trap, say) leave no
+    // candidate room, and every rung would only cost its model.
+    if !pilot_candidate.fits()&&pilot_candidate.fits_unfolded(){
         while let Some(mut c)=next_candidate(request,&mut ladder,false,&mut failed){
             let charge=measured_charge(&pilot_candidate.model,&c.model,&pilot_states);c.charged(charge);let fits=c.fits();reference=Some(c);if fits{break;}
         }
     }
     let better={
         let base=reference.as_ref().unwrap_or(&pilot_candidate);let mut better=None;
-        if base.fits(){
+        // A pilot whose atoms were all lost before its first output measures no candidate's work.
+        if base.fits()&&!pilot_states.is_empty(){
             let rooms=base.rooms;let mut best=1.;let mut work=1_f64;
             // The fewest trajectories any later candidate can need relative to the reference: its rooms
             // at no a-priori estimate at all.
@@ -382,7 +410,9 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
                     c.charged(base.saturation);
                     if c.fits(){
                         let trajectories=(0..2).map(|k|(rooms[k]/c.rooms[k]).powi(2)).fold(0.,f64::max);
-                        let w=model_work(&pilot_candidate.model,&base.model,&c.model,&piloting(steps),&pilot_states,pilot as usize,interval);
+                        let(settings,limit)=(piloting(steps),best/trajectories);
+                        let w=if !(counted_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,interval,pilot_waiting)<=limit){f64::INFINITY}
+                            else{model_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,pilot as usize,interval,limit)};
                         if w*trajectories<best{best=w*trajectories;better=Some(c);}
                     }
                 }
@@ -394,7 +424,9 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
                 let charge=measured_charge(&pilot_candidate.model,&c.model,&pilot_states);c.charged(charge);
                 if !c.fits(){continue;}
                 let trajectories=(0..2).map(|k|(rooms[k]/c.rooms[k]).powi(2)).fold(0.,f64::max);
-                work=work.max(model_work(&pilot_candidate.model,&base.model,&c.model,&piloting(steps),&pilot_states,pilot as usize,interval));
+                let(settings,limit)=(piloting(steps),best/fewest);
+                work=work.max(if !(counted_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,interval,pilot_waiting)<=limit){f64::INFINITY}
+                    else{model_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,pilot as usize,interval,limit)});
                 if work*trajectories<best{best=work*trajectories;better=Some(c);}
             }
         }
@@ -422,7 +454,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // population error measured where it decides and the motion's criteria are met (a step's
     // doubling taken once). Kept: of the checked steps that met the targets the one of least
     // predicted cost, or the last checked when none did.
-    let doubled=|steps:usize|{let r=step_excess(&Engine::new(&model,settings(steps)),&states,waiting);Check{steps,population:r[0],motion:r[1]}};
+    let doubled=|steps:usize|{let r=step_excess(&Engine::new(&model,settings(steps)),&states,waiting,drift);Check{steps,population:r[0],motion:r[1]}};
     let search=|first:usize,measured:bool,known:&[Check],checked:&mut Vec<Check>|{
         let mut steps=first;
         for _ in 0..8{
@@ -430,7 +462,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             let mut c=known.iter().find(|c|c.steps==steps).copied().unwrap_or_else(||doubled(steps));
             if measured&&c.decided_by_population(){c.population=accumulated_excess(&Engine::new(&model,settings(steps)),&states,horizon,pilot as usize);}
             checked.push(c);
-            steps=((steps as f64*c.excess().sqrt()).ceil() as usize).max(1);
+            steps=((steps as f64*c.excess().sqrt()).ceil() as usize).clamp(1,most);
         }
     };
     let mut bound=vec![];search(steps,false,&[],&mut bound);
@@ -452,6 +484,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     }else{candidates.first().copied().unwrap_or(grown)};
     let(steps,ratios)=(chosen.steps,chosen.ratios());
     let dt=interval/steps as f64;let settings=settings(steps);
+    // A step the work bound set that misses its shares: why, for the flag.
+    let bounded=(steps==most&&!chosen.met()).then(||format!("步数已达上限（每条轨迹 {MOST_STEPS} 步）：步长 {dt:.3e} μs 的误差为其份额的 {:.1} 倍",chosen.excess()));
     // The step's bias: its share of each target times its measured excess there.
     let bias=[ratios[0]*A_PRIORI_SHARE*POPULATION_TARGET,ratios[1]*A_PRIORI_SHARE*TEMPERATURE_TARGET];
     // The device: the GPU when asked for and able, the model on it; else the CPU, with why.
@@ -504,8 +538,9 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let(_,accounts)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,false);
         let ratio=worst_ratio(&estimates,&accounts,trap.lab);
         let wanted=(done as f64*ratio*ratio).ceil() as u64;let needed=wanted.min(MOST_TRAJECTORIES);
-        let(ledger,_)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,needed<=done);
-        let mut solution=assemble(&model,&estimates,&outcome,&listed,trap.lab,done,dt,&request.initial_density,ledger,twin.is_some());
+        let(mut ledger,_)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,needed<=done);
+        if let(Some(note),Some(flag))=(&bounded,&ledger.flagged){ledger.flagged=Some(format!("{note}；{flag}"));}
+        let mut solution=assemble(&model,&estimates,&outcome,&listed,times,trap.lab,done,dt,&request.initial_density,ledger,twin.is_some());
         solution.device=used;solution.device_note=note.clone();solution.needed=wanted;
         if needed<=done{
             if ratio>1.{solution.reason=Some(format!("统计误差为目标的 {ratio:.1} 倍：轨迹数已达上限 {MOST_TRAJECTORIES}"));}
@@ -544,7 +579,10 @@ const TARGETS:[f64;2]=[POPULATION_TARGET,TEMPERATURE_TARGET];
 struct Candidate{model:Model,initial:Initial,base:Ledger,allowance:f64,saturation:f64,charge:f64,rooms:[f64;2]}
 impl Candidate{
     fn new(request:&Request,allowance:f64,fourth:bool)->Result<Candidate,String>{
-        let model=Model::with_order(request,allowance,fourth)?;let initial=Initial::new(&model,request)?;let base=model_ledger(&model,request);
+        let model=Model::with_order(request,allowance,fourth)?;let initial=Initial::new(&model,request)?;let mut base=model_ledger(&model,request);
+        // The initial positions' region (lib.rs `thermal_position`): the share of the traps' thermal
+        // positions it leaves out.
+        if initial.outside>0.{base.add("初始热分布（势阱区之外）",initial.outside,"位置取势阱区（谐振近似低于阱深处）内的玻尔兹曼分布".into());}
         let rooms=TARGETS.map(|target|target-base.used()-A_PRIORI_SHARE*target);let(saturation,charge)=(model.ground.charge,fold_charge(&model,model.ground.charge));
         Ok(Candidate{model,initial,base,allowance,saturation,charge,rooms})
     }
@@ -554,6 +592,8 @@ impl Candidate{
     fn others(&self)->f64{self.base.used()-fold_charge(&self.model,self.model.ground.charge)}
     /// Its estimates leave the statistics room.
     fn fits(&self)->bool{self.rooms.iter().all(|&r|r>0.)}
+    /// Its estimates but the fold's leave the statistics room: a fold could still make it fit.
+    fn fits_unfolded(&self)->bool{TARGETS.iter().all(|&target|target-self.others()-A_PRIORI_SHARE*target>0.)}
     /// The trap of its reference state, the largest initial population: ω per axis.
     fn trap(&self)->Trap{let i=&self.initial;i.traps[(0..i.states.len()).max_by(|&a,&b|i.states[a].2.total_cmp(&i.states[b].2)).unwrap()]}
 }
@@ -585,19 +625,39 @@ fn measured_charge(from:&Model,to:&Model,states:&[Trajectory])->f64{
 /// clusters (`carried`), an interval of steps of either back to back on one thread. The work is the
 /// ratio of the two totals -- a model's cost lies in the states it makes dear (a cluster with explicit
 /// states), which a median of the states' ratios would pass over --, its upper bound CONFIDENCE
-/// standard errors above it (the ratio's delta method over the states).
-fn model_work(from:&Model,reference:&Model,candidate:&Model,settings:&Settings,states:&[Trajectory],subsample:usize,interval:f64)->f64{
+/// standard errors above it (the ratio's delta method over the states). The reference's states are
+/// timed first; the candidate's stop as soon as their total passes `limit` times the reference's --
+/// the most work worth knowing, the choice's -- and its work is then infinite: a candidate whose
+/// explicit states take a thousand times the reference's steps is not run to the end to be refused.
+fn model_work(from:&Model,reference:&Model,candidate:&Model,settings:&Settings,states:&[Trajectory],subsample:usize,interval:f64,limit:f64)->f64{
+    use std::sync::atomic::{AtomicBool,AtomicU64,Ordering};
     let engines=[Engine::new(reference,settings.clone()),Engine::new(candidate,settings.clone())];
     let every=(states.len()/subsample.max(1)).max(1);let picked:Vec<&Trajectory>=states.iter().step_by(every).collect();
     let steps=(interval/settings.dt).round() as usize;
-    let times:Vec<[f64;2]>=picked.par_iter().map(|t|{
-        let starts=[carried(from,reference,t),carried(from,candidate,t)];
-        let mut times=[0.;2];
-        for(time,(e,mut x))in times.iter_mut().zip(engines.iter().zip(starts)){let clock=Instant::now();for _ in 0..steps{if x.alive{e.step(&mut x);}}*time=clock.elapsed().as_secs_f64();}
-        times}).collect();
-    let n=times.len() as f64;let(a,b)=(times.iter().map(|t|t[1]).sum::<f64>(),times.iter().map(|t|t[0]).sum::<f64>().max(f64::MIN_POSITIVE));
-    let ratio=a/b;let spread=times.iter().map(|t|(t[1]-ratio*t[0]).powi(2)).sum::<f64>()/(n-1.).max(1.);
+    let run=|e:&Engine,mut x:Trajectory,spent:Option<(&AtomicU64,u64,&AtomicBool)>|->f64{
+        let clock=Instant::now();
+        for _ in 0..steps{
+            if let Some((total,most,stop))=spent{if stop.load(Ordering::Relaxed)||total.load(Ordering::Relaxed)+clock.elapsed().as_nanos() as u64>most{stop.store(true,Ordering::Relaxed);break;}}
+            if x.alive{e.step(&mut x);}
+        }
+        let time=clock.elapsed();if let Some((total,_,_))=spent{total.fetch_add(time.as_nanos() as u64,Ordering::Relaxed);}time.as_secs_f64()
+    };
+    let base:Vec<f64>=picked.par_iter().map(|t|run(&engines[0],carried(from,reference,t),None)).collect();
+    let b=base.iter().sum::<f64>().max(f64::MIN_POSITIVE);
+    let(total,stop)=(AtomicU64::new(0),AtomicBool::new(false));let most=(limit*b*1e9).min(u64::MAX as f64) as u64;
+    let work:Vec<f64>=picked.par_iter().map(|t|run(&engines[1],carried(from,candidate,t),Some((&total,most,&stop)))).collect();
+    if stop.load(Ordering::Relaxed){return f64::INFINITY;}
+    let n=base.len() as f64;let a=work.iter().sum::<f64>();
+    let ratio=a/b;let spread=work.iter().zip(&base).map(|(x,y)|(x-ratio*y).powi(2)).sum::<f64>()/(n-1.).max(1.);
     ratio+CONFIDENCE*(spread/n).sqrt()/(b/n)
+}
+
+/// A candidate's counted work relative to the reference's (`interval_work`) on the pilot's states
+/// carried into each: a candidate this count puts beyond the work worth knowing is not timed
+/// (`model_work`) -- its explicit states' exact steps can take a thousand times the reference's.
+fn counted_work(from:&Model,reference:&Model,candidate:&Model,settings:&Settings,states:&[Trajectory],interval:f64,waiting:f64)->f64{
+    let into=|m:&Model|->Vec<Trajectory>{states.iter().map(|t|carried(from,m,t)).collect()};
+    interval_work(&state_work(candidate,&into(candidate)),settings,interval,waiting)/interval_work(&state_work(reference,&into(reference)),settings,interval,waiting).max(f64::MIN_POSITIVE)
 }
 
 /// A trajectory's state carried from one model into another's clusters: into the cluster of its
@@ -630,15 +690,23 @@ impl Check{
 /// the sampled states: the population criterion's bound -- one step's population error times the steps
 /// of a waiting time -- and the light impulse's and the friction's larger relative error, each over
 /// its share (1 meets it).
-fn step_excess(engine:&Engine,states:&[Trajectory],waiting:f64)->[f64;2]{
-    let dt=engine.settings.dt;let richardson=4./3.;
+///
+/// The friction's: the step's error of the mechanical energy's change, against that change where the
+/// friction moves the energy by more than its thermal value 3 k_B T over the run -- the equilibrium T
+/// it sets is off by the friction's relative error --, else against a step's share of that thermal
+/// energy, `drift` dt (`drift` = 3 k_B T/duration): there T is off by the step's energy error summed
+/// over the run, and the change is no measure of the step's error -- with the friction weak it is the
+/// integrator's own error, whose third order makes one step's difference from two halves three times
+/// their change (E₁ − E₂ = 3(E₂ − E₀)) at every step, so that their ratio never falls.
+fn step_excess(engine:&Engine,states:&[Trajectory],waiting:f64,drift:f64)->[f64;2]{
+    let dt=engine.settings.dt;let richardson=4./3.;let count=states.len().max(1) as f64;
     // The states' doublings on the threads, summed in their order (the sums do not depend on the threads).
     let doubled:Vec<([f64;2],[f64;3],[f64;2])>=states.par_iter().map(|t|engine.doubling(t,dt)).collect();
     let(mut population,mut difference,mut impulse,mut energy,mut friction)=(0.,0.,0.,0.,0.);
     for(motion,internal,work)in &doubled{difference+=motion[0];impulse+=motion[1];population+=internal[0];energy+=work[0];friction+=work[1];}
-    let bound=richardson*population/states.len().max(1) as f64*(waiting/dt).max(1.);
+    let bound=richardson*population/count*(waiting/dt).max(1.);
     let relative=if impulse>0.{richardson*difference/impulse}else{0.};
-    let dissipated=if friction!=0.{richardson*(energy/friction).abs()}else{0.};
+    let dissipated=richardson*energy.abs()/friction.abs().max(count*drift*dt);
     [bound/(A_PRIORI_SHARE*POPULATION_TARGET),relative.max(dissipated)/(A_PRIORI_SHARE*TEMPERATURE_TARGET)]
 }
 
@@ -752,8 +820,11 @@ fn start(e:&mut Estimate,model:&Model,initial:&Initial){
 
 /// The solution of the estimates so far.
 /// At t = 0 the populations are the initial state's, as the request gives them (the light acts
-/// after), and so are T and the mean velocity (`start`).
-fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],frequencies:[f64;3],trajectories:u64,dt:f64,initial:&[Complex],ledger:Ledger,twin:bool)->Solution{
+/// after), and so are T and the mean velocity (`start`). An output where no atom is held (the loss
+/// one) has no held atom to describe: its populations, T, ⟨v⟩, n̄ and distributions are the last
+/// output's that had one -- each row still a probability vector, the app's p (1 − L) zero there --,
+/// outside the validated regime, and the flag says from when.
+fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],times:&[f64],frequencies:[f64;3],trajectories:u64,dt:f64,initial:&[Complex],mut ledger:Ledger,twin:bool)->Solution{
     let hm=model.hbar_over_mass;
     let velocity=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.1[a]*hm));
     let position=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.0[a]));
@@ -761,19 +832,27 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
     let sizes:Vec<String>=model.ground.clusters.iter().map(|c|c.dimension().to_string()).collect();
     let explicit:usize=model.ground.clusters.iter().map(|c|c.excited.len()).sum();
     let internal=if explicit>0{format!("内态（子空间 {}，其中 {explicit} 个激发态显式、精确传播，其余激发态二阶消去）",sizes.join("+"))}else{format!("消去激发态后的基态内态（子空间 {}）",sizes.join("+"))};
+    // Each output's source: itself where an atom is held (t = 0 always), else the last that held one.
+    let held=|i:usize|i==0||estimates[i].loss<1.;
+    let source:Vec<usize>=(0..estimates.len()).scan(0,|last,i|{if held(i){*last=i;}Some(*last)}).collect();
+    if let Some(gone)=(0..estimates.len()).find(|&i|!held(i)){
+        let note=format!("{} 起已无原子被俘获（丢失概率 1）：此后的布居、温度与分布沿用 {} 的值，仅供参考",when(times[gone]),when(times[source[gone]]));
+        ledger.flagged=Some(match ledger.flagged.take(){Some(r)=>format!("{note}；{r}"),None=>note});
+    }
+    let carried=|f:&dyn Fn(&Estimate)->[f64;3]|->Vec<[f64;3]>{source.iter().map(|&j|f(&estimates[j])).collect()};
     Solution{
-        populations:estimates.iter().enumerate().map(|(i,e)|if i==0{first.clone()}else{e.populations.clone()}).collect(),
+        populations:source.iter().map(|&j|if j==0{first.clone()}else{estimates[j].populations.clone()}).collect(),
         sample_errors:estimates.iter().enumerate().map(|(i,e)|if i==0{0.}else{e.population_errors.iter().fold(e.loss_error,|m,&x|m.max(x))}).collect(),
-        temperature_uk:estimates.iter().map(|e|e.temperature).collect(),
-        temperature_errors_uk:estimates.iter().map(|e|e.temperature_error).collect(),
-        temperature_total_uk:estimates.iter().map(|e|e.temperature_total).collect(),
-        temperature_total_errors_uk:estimates.iter().map(|e|e.temperature_total_error).collect(),
-        mean_velocity_mps:estimates.iter().map(|e|e.mean_velocity).collect(),
+        temperature_uk:carried(&|e|e.temperature),
+        temperature_errors_uk:carried(&|e|e.temperature_error),
+        temperature_total_uk:source.iter().map(|&j|estimates[j].temperature_total).collect(),
+        temperature_total_errors_uk:source.iter().map(|&j|estimates[j].temperature_total_error).collect(),
+        mean_velocity_mps:carried(&|e|e.mean_velocity),
         trap_frequency_khz:frequencies.map(|w|w/std::f64::consts::TAU*1e3),
-        mean_occupation:estimates.iter().map(|e|e.occupation).collect(),
+        mean_occupation:carried(&|e|e.occupation),
         loss_probability:{let mut worst=0.;estimates.iter().map(|e|{worst=e.loss.max(worst);worst}).collect()},
         velocity,position,
-        classical:estimates.iter().map(|e|classical(e,frequencies)).collect(),
+        classical:estimates.iter().enumerate().map(|(i,e)|held(i)&&classical(e,frequencies)).collect(),
         trajectories,needed:trajectories,time_step_us:dt,
         method:format!("半经典 3D：经典质点（位置、动量）携带{internal}，量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），机械能高于势阱深度即算损失，{trajectories} 条轨迹，步长 {dt:.3} μs；控制变量：谐振孪生（T）{}",if twin{"与静止孪生（布居）"}else{""}),
         reason:None,

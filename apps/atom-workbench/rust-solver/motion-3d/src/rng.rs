@@ -29,6 +29,8 @@ pub enum Purpose{
     Jump=3,
     /// A pilot trajectory's initial state.
     Pilot=4,
+    /// The draws of an initial state's region share (lib.rs `outside_share`; counted by the state).
+    Region=5,
 }
 
 /// A stream: Philox blocks at the counter (block, event, trajectory) under the key (seed, purpose).
