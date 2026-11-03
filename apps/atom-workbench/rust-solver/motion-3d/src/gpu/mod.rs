@@ -31,7 +31,7 @@ use crate::model::Model;
 use crate::stats::{Group,Sums};
 use crate::{bare_trajectory,dressed,Complex,Initial,Outcome,Stratum,Variates,STATES,TASK};
 use driver::{Buffer,Context,DeviceInfo,Function,Module,Stream};
-use program::{Program,MAXN,MOST_LISTED};
+use program::{Program,MAXM,MAXN,MOST_LISTED};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64,Ordering};
 use std::sync::{Condvar,Mutex};
@@ -171,7 +171,7 @@ impl Gpu{
         let bounds=|g:u64|(first+g*group,(first+(g+1)*group).min(first+count));
         let tasks:Vec<(u64,u64,u64)>=(0..count.div_ceil(group)).flat_map(|g|{let(start,end)=bounds(g);(start..end).step_by(TASK as usize).map(move|s|(g,s,(s+TASK).min(end)))}).collect();
         let windows=Windows::new(settings,steps,outputs,listed)?;
-        let(mut groups,mut samples,mut jumps,mut doppler)=(Vec::<Group>::new(),vec![vec![];listed.len()],0u64,0f64);let mut last=None;
+        let(mut groups,mut samples,mut jumps,mut doppler,mut beats)=(Vec::<Group>::new(),vec![vec![];listed.len()],0u64,0f64,0f64);let mut last=None;
         for wave in tasks.chunks(self.wave(program,&windows)?){
             // The initial states, drawn on the CPU; each task's trajectories in its block's slots.
             // The atom from its bare state's slow part (lib.rs `initial_trajectory`), the held twin from
@@ -198,14 +198,14 @@ impl Gpu{
             // The samples in the trajectories' order.
             for(i,&(_,from,to))in wave.iter().enumerate(){
                 for w in 0..(to-from) as usize{
-                    let slot=WARPS*i+w;let state=&finished[slot];jumps+=state.jumps as u64;doppler=doppler.max(state.doppler as f64);
+                    let slot=WARPS*i+w;let state=&finished[slot];jumps+=state.jumps as u64;doppler=doppler.max(state.doppler as f64);beats=beats.max(state.beats as f64);
                     for(k,kept_k)in samples.iter_mut().enumerate(){let x=&kept[(slot*listed.len()+k)*7..][..7];if x[6]>0.{kept_k.push(([x[0],x[1],x[2]],[x[3],x[4],x[5]]));}}
                 }
             }
         }
         // The held twins' share of the time: their cycles in the warps' (lib.rs `Outcome::seconds`).
         let(wall,share)=(clock.elapsed().as_secs_f64(),if cycles[1]>0{cycles[0] as f64/cycles[1] as f64}else{0.});
-        Ok(Outcome{groups,samples,jumps,doppler,beats:0.,seconds:[wall*(1.-share),wall*share]})
+        Ok(Outcome{groups,samples,jumps,doppler,beats,seconds:[wall*(1.-share),wall*share]})
     }
 
     /// The trajectories after `steps` steps of the settings' dt on the GPU (engine.rs `Engine::step`
@@ -333,13 +333,13 @@ impl program::State{
     /// `Twin::start`): on the trap's principal axes, ψ normalized.
     fn new(t:&crate::engine::Trajectory,twin:&crate::engine::Trajectory,settings:&Settings)->program::State{
         let along=|v:[f64;3]|->[f64;3]{std::array::from_fn(|i|settings.axes[i][0]*v[0]+settings.axes[i][1]*v[1]+settings.axes[i][2]*v[2])};
-        let unit=|t:&crate::engine::Trajectory|->(f64,[[f32;2];MAXN]){let norm:f64=t.psi.iter().map(|z|z.norm_sqr()).sum();let scale=1./norm.sqrt();
-            (norm.ln(),std::array::from_fn(|x|[(t.psi[x].re*scale) as f32,(t.psi[x].im*scale) as f32]))};
-        let((logn,psi),(twin_logn,held))=(unit(t),unit(twin));
+        fn unit<const N:usize>(t:&crate::engine::Trajectory)->(f64,[[f32;2];N]){let norm:f64=t.psi.iter().map(|z|z.norm_sqr()).sum();let scale=1./norm.sqrt();
+            (norm.ln(),std::array::from_fn(|x|[(t.psi[x].re*scale) as f32,(t.psi[x].im*scale) as f32]))}
+        let((logn,psi),(twin_logn,held))=(unit::<MAXM>(t),unit::<MAXN>(twin));
         program::State{q:along(t.r),p:along(t.kappa),time:t.time,logn,threshold:t.threshold,log_threshold:t.threshold.ln(),prefix:[0.;15],
             q0:along(t.r),p0:along(t.kappa),twin_logn,twin_threshold:twin.threshold,twin_log_threshold:twin.threshold.ln(),
             psi,twin:held,doppler:t.doppler as f32,cluster:t.cluster as i32,jumps:t.jumps as i32,death:if t.alive{-1}else{0},
-            index:t.index as u32,twin_cluster:twin.cluster as i32,twin_jumps:twin.jumps as i32,pad:0}
+            index:t.index as u32,twin_cluster:twin.cluster as i32,twin_jumps:twin.jumps as i32,beats:t.beats as f32}
     }
     /// The trajectory of a state: on the lab axes, ψ with its norm e^{ln‖ψ‖²/2} as the CPU keeps it.
     fn trajectory(&self,settings:&Settings,seed:u64)->Trajectory{
@@ -347,7 +347,7 @@ impl program::State{
         let scale=(0.5*self.logn).exp();
         let mut psi=[Complex::ZERO;crate::model::MOST_MIXED];for(x,z)in self.psi.iter().enumerate(){psi[x]=Complex::new(z[0] as f64*scale,z[1] as f64*scale);}
         Trajectory{cluster:self.cluster as usize,psi,r:lab(self.q),kappa:lab(self.p),time:self.time,threshold:self.threshold,alive:self.death<0,
-            jumps:self.jumps as u64,doppler:self.doppler as f64,beats:0.,seed,index:self.index as u64}
+            jumps:self.jumps as u64,doppler:self.doppler as f64,beats:self.beats as f64,seed,index:self.index as u64}
     }
 }
 const _:()=assert!(MAXN==crate::model::MOST_STATES);

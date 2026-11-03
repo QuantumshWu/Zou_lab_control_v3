@@ -1170,6 +1170,20 @@ impl Model{
     pub fn beats(&self,cluster:usize)->(&[f64],Option<f64>){let b=&self.layouts[cluster].beats;(&b.omegas,b.period)}
     /// A cluster's number of ground states (the first of its basis).
     pub fn ground_dimension(&self,cluster:usize)->usize{self.layouts[cluster].n0}
+    /// The part of a cluster's components a residual goes into (`components`): 0 the static one, 1 + j beat j's.
+    pub(crate) fn part(&self,cluster:usize,residual:f64)->usize{self.layouts[cluster].beats.of(residual).map_or(0,|j|j+1)}
+    /// A cluster's terms of its explicit states for the GPU's components (gpu/program.rs `Term`), in
+    /// `components`' order: per kept drive (kind 0), decay cross term (1), decay (2) and dressing's drive
+    /// (3) its row, column, carrier, part, its mirror's part (the residual's negative), its tables' place
+    /// and a drive's U_k; and where the explicit states' dressed photons lie (`photon`).
+    pub(crate) fn exact_terms(&self,cluster:usize)->(Vec<[usize;7]>,Vec<[Complex;MOST_RANK]>,usize){
+        let l=&self.layouts[cluster];let part=|w:f64|self.part(cluster,w);let(mut terms,mut u)=(vec![],vec![]);
+        for d in &l.drives{terms.push([0,d.row,d.col,d.carrier,part(d.residual),part(-d.residual),0]);u.push(d.u);}
+        for c in &l.crosses{terms.push([1,c.row,c.col,c.carrier,part(c.residual),part(-c.residual),c.at]);u.push([Complex::ZERO;MOST_RANK]);}
+        for d in &l.decays{terms.push([2,d.row,d.col,0,part(d.residual),part(-d.residual),d.at]);u.push([Complex::ZERO;MOST_RANK]);}
+        for e in &l.effective{terms.push([3,e.row,e.col,e.carrier,part(e.residual),part(-e.residual),e.at]);u.push([Complex::ZERO;MOST_RANK]);}
+        (terms,u,l.emission)
+    }
 
     /// The table slice [start, start + value.len()) of a cluster at a stencil, and with `slopes` its
     /// derivatives in every s_f, in one pass over the stencil's nodes.
