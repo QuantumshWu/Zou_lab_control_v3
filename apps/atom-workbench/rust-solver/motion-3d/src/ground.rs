@@ -112,6 +112,33 @@
 //! Readout: the bare ground density is ρ − ½{Y, ρ}, Y = Σ R′†R over the co-resonant channel
 //! pairs, and an excited state's population tr(E_i ρ), E_i = Σ R′†|i⟩⟨i|R, plus ρ_ee when explicit.
 //!
+//! # Fourth order
+//! A cluster of ground states folds its drives at fourth order where that costs less (solve.rs): its
+//! error is S² instead of S (`Ground::fourth` dense, model.rs `FourthLayout` its tables). On the slow
+//! invariant subspace Ψ = (x, W x) of the no-jump generator, i Ẇ = V + K W − W (H_g + V†W), W = −R + W3
+//! with, per triple of carriers (c1, c2, c4) at ω = δ_c1 − δ_c2 + δ_c4,
+//!
+//! ```text
+//! W3[:,b] = G_b(ω) Σ_b′ R_c1[:,b′] (V_c2†R_c4)[b′,b]        G_b(ω) = (K − E_b − ω)⁻¹
+//! ```
+//!
+//! (every ground state b′ between). The state is y = M^{1/2} x, M = 1 + X with X = R†R on the
+//! cluster's coherent channel pairs (the readout's Y; the other pairs beat and average out), so that
+//! ‖y‖² is the survival probability, and
+//! - H̃'s Hermitian part is H_eff's and that of H^(4) = V†W3 − ½[X, V†R], on the entries the second
+//!   order keeps at their beat Ω = θ_a − θ_b + ν (ν the monomial's carriers'): below the cut, or a kept
+//!   coupling's residual on the entry. Another entry beats faster than the time step follows (between
+//!   F = 1 and F = 2 at the hyperfine splitting) and is left out like a folded coupling, its mixing
+//!   (b/(|Ω| − l0))² booked, b = S l0 the size of H^(4);
+//! - its anti-Hermitian part is −(i/2) Σ L̃†L̃, the jumps' own -- the norm's loss is their rate by
+//!   construction --, L̃ = C_a (R_c (1 − ½X) − W3^c), W3^c the triples at δ_c (a photon of carrier c);
+//! - after a jump the bare state f has the slow part Π f, Π = 1 + ½X + YW,
+//!   (YW)_ab = −Σ_{c1,c2} V_c1[:,a]† G_a(δ_c1) R_c2[:,b] at its beat: a map at the jump's instant, every
+//!   entry kept (a fast entry pairs with the photon's own into a slow product); the weight A = ‖Π f‖²
+//!   divides the waiting time's threshold (engine.rs `slow_start`);
+//! - the engine's readout (metric 1 + X) and the force stay the second order's: the readout errs
+//!   within S², T by the force's fold S.
+//!
 //! # First order in the Doppler and recoil shifts
 //! Absorbing from beam l shifts the excited state by the kinetic energy w_l = (ħ/m)(k_l·κ + k_l²/2);
 //! to first order R_l → R_l − w_l R2_l, and `Ground::response` gives the shifted response to all
@@ -1167,80 +1194,93 @@ impl Ground{
         (far,near,statics)
     }
     /// The fourth-order fold of a cluster of ground states at r and t (module documentation, # Fourth
-    /// order), dense: on the slow invariant subspace Ψ = (x, W x) of the no-jump generator,
-    /// W = −R + W3, W3[:,b] = G_b(ω_c) Σ_b′ [Σ_d R_c[:,b′](V_d†R_d)_b′b + Σ_{d≠c} R_d[:,b′](V_d†R_c)_b′b]
-    /// for the photons of carrier c (the secular triples), G_b(ω) = (K − E_b − ω)⁻¹; in y = M^{1/2} x,
-    /// M = 1 + Σ_c R_c†R_c: H̃ = H_eff + Σ_c V_c†W3^c − ½[R†R, V†R] + ½[R†R, H_g] (its Hermitian part;
-    /// the anti-Hermitian part −(i/2) Σ L̃†L̃) and L̃ = C_a (R_c − W3^c − ½ R_c R†R) (the jumps' sign
-    /// the module's); after a jump into this cluster the slow part Π = 1 + ½R†R + YW of the bare
-    /// state, (YW)_ab = −Σ_c V_c[:,a]† G_a(ω_c) R_c[:,b]. Everything in the frame where each ground
-    /// state rotates at its energy, the cluster's frames applied at the end (e^{i(θ_a − θ_b)t}).
+    /// order), dense: on the slow invariant subspace Ψ = (x, W x) of the no-jump generator, W = −R + W3,
+    /// W3 per triple of carriers (c1, c2, c4) at ω = δ_c1 − δ_c2 + δ_c4, W3[:,b] = G_b(ω) Σ_b′ R_c1[:,b′](V_c2†R_c4)_b′b,
+    /// G_b(ω) = (K − E_b − ω)⁻¹; in y = M^{1/2} x, M = 1 + X with X = R†R on the cluster's coherent entries (the
+    /// readout's metric; the rest beats and averages out): H̃'s Hermitian part that of H_eff + V†W3 − ½[X, V†R]
+    /// on the entries the second order keeps at their beat (model.rs `FourthLayout`), its anti-Hermitian
+    /// part −(i/2) Σ L̃†L̃ of the jumps L̃ = C_a (R_c (1 − ½X) − W3^c) (W3^c the triples at δ_c; the jumps' sign
+    /// the module's); after a jump into this cluster the slow part Π = 1 + ½X + YW of the bare state,
+    /// (YW)_ab = −Σ_{c1,c2} V_c1[:,a]† G_a(δ_c1) R_c2[:,b]. Everything in the cluster's frames, each term at
+    /// its beat e^{iΩt}.
     pub fn fourth(&self,e:&Elimination,k:usize,r:[f64;3],t:f64)->Result<Fourth,String>{
-        let cl=&self.clusters[k];let(n,ng,nc)=(cl.states.len(),self.ground_states.len(),self.carriers.len());
+        let cl=&self.clusters[k];let(n,nc,ne)=(cl.states.len(),self.carriers.len(),self.excited_states.len());
         if !cl.excited.is_empty(){return Err("The fourth-order fold takes a cluster of ground states".into());}
         let local=self.local_at(e,k,r,t)?;let a=self.amplitudes_at(r);
         let v:Vec<Dense>=self.carriers.iter().map(|c|combine(&c.beams,&a,&self.folded)).collect();
         let rc:Vec<Dense>=self.carriers.iter().map(|c|combine(&c.beams,&a,&e.responses)).collect();
-        // R†R and V†R over every ground state, each carrier with itself (the cross terms beat).
-        let mut rr=Dense::zeros(ng,ng);let mut vr=Dense::zeros(ng,ng);
-        for c in 0..nc{rr.add_scaled(Complex::ONE,&rc[c].adjoint_product(&rc[c]));vr.add_scaled(Complex::ONE,&v[c].adjoint_product(&rc[c]));}
-        let resolve=|b:usize,c:usize,column:&mut [Complex]|->Result<(),String>{denominator(&e.excited_hamiltonian,-e.energies[b]-self.carriers[c].detuning)?.solve(column);Ok(())};
-        // W3^c per carrier (ne × ng).
+        let delta=|c:usize|self.carriers[c].detuning;let st=&cl.states;let theta=&cl.frames;
+        // An entry's beat Ω is kept where the second order keeps a coupling at it (model.rs `FourthLayout`).
+        let round_off=64.*f64::EPSILON*2.*(theta.iter().map(|x|x.abs()).fold(0.,f64::max)+self.carriers.iter().map(|c|c.detuning.abs()).fold(0.,f64::max));
+        let kept:Vec<(usize,usize,f64)>=cl.groups.iter().flat_map(|gr|gr.entries.iter().copied()).collect();
+        let keep=|i:usize,j:usize,omega:f64|omega.abs()<=round_off||omega.abs()<self.cut||kept.iter().any(|&(x,y,w)|x==i&&y==j&&(w-omega).abs()<=round_off);
+        let resolvent=|b:usize,w:f64|denominator(&e.excited_hamiltonian,-e.energies[b]-w);
+        // W3 per triple on the cluster's columns (ne × n).
         let mut w3:Vec<Dense>=vec![];
-        for c in 0..nc{
-            let mut u=Dense::zeros(self.excited_states.len(),ng);
-            for d in 0..nc{
-                u.add_scaled(Complex::ONE,&rc[c].product(&v[d].adjoint_product(&rc[d])));
-                if d!=c{u.add_scaled(Complex::ONE,&rc[d].product(&v[d].adjoint_product(&rc[c])));}
-            }
-            for b in 0..ng{let mut col:Vec<Complex>=(0..u.rows).map(|i|u[(i,b)]).collect();resolve(b,c,&mut col)?;for i in 0..u.rows{u[(i,b)]=col[i];}}
-            w3.push(u);
-        }
-        // H^(4) over the ground states: Σ_c V_c†W3^c − ½[R†R, V†R] + ½[R†R, H_g].
-        let mut h4=Dense::zeros(ng,ng);
-        for c in 0..nc{h4.add_scaled(Complex::ONE,&v[c].adjoint_product(&w3[c]));}
-        let commutator=|x:&Dense,y:&Dense|{let mut m=x.product(y);m.add_scaled(-Complex::ONE,&y.product(x));m};
-        h4.add_scaled(Complex::new(-0.5,0.),&commutator(&rr,&vr));h4.add_scaled(Complex::new(0.5,0.),&commutator(&rr,&e.ground));
-        // The jumps: each class's photons from the corrected response R̂_c = R_c − W3^c − ½ R_c R†R.
-        let corrected:Vec<Dense>=(0..nc).map(|c|{let mut m=rc[c].clone();m.add_scaled(-Complex::ONE,&w3[c]);m.add_scaled(Complex::new(-0.5,0.),&rc[c].product(&rr));m}).collect();
+        for c1 in 0..nc{for c2 in 0..nc{for c4 in 0..nc{
+            let w=delta(c1)-delta(c2)+delta(c4);let m=rc[c1].product(&v[c2].adjoint_product(&rc[c4]));let mut out=Dense::zeros(ne,n);
+            for(j,&b)in st.iter().enumerate(){let mut col:Vec<Complex>=(0..ne).map(|i|m[(i,b)]).collect();resolvent(b,w)?.solve(&mut col);for i in 0..ne{out[(i,j)]=col[i];}}
+            w3.push(out);
+        }}}
+        let triple=|c1:usize,c2:usize,c4:usize|&w3[(c1*nc+c2)*nc+c4];
+        // X on the cluster at t, and its parts (row, column, beat, value).
+        let mut xs=Dense::zeros(n,n);let mut parts:Vec<(usize,usize,f64,Complex)>=vec![];
+        for group in &cl.coherent{for &(y,wy)in group{for &(x,wx)in group{
+            let(i,j)=(cl.position(y.state).unwrap(),cl.position(x.state).unwrap());
+            let value=(0..ne).fold(Complex::ZERO,|s,q|s+rc[y.carrier][(q,y.state)].conj()*rc[x.carrier][(q,x.state)]);
+            xs[(i,j)]+=Complex::cis((wy-wx)*t)*value;parts.push((i,j,wy-wx,value));
+        }}}
+        // H^(4) on the cluster: V_c3†W3 per triple and −½[X, V†R] per carrier pair, on the kept entries.
+        let mut h4=Dense::zeros(n,n);
+        for c1 in 0..nc{for c2 in 0..nc{for c4 in 0..nc{let w=triple(c1,c2,c4);let omega=delta(c1)-delta(c2)+delta(c4);
+            for c3 in 0..nc{for i in 0..n{for j in 0..n{let beat=theta[i]-theta[j]+delta(c3)-omega;if !keep(i,j,beat){continue;}
+                h4[(i,j)]+=Complex::cis(beat*t)*(0..ne).fold(Complex::ZERO,|s,q|s+v[c3][(q,st[i])].conj()*w[(q,j)]);}}}
+        }}}
+        for d in 0..nc{for c in 0..nc{let vr=v[d].adjoint_product(&rc[c]);let nu=delta(d)-delta(c);
+            for &(i,q,w,x)in &parts{for j in 0..n{let beat=w+theta[q]-theta[j]+nu;if keep(i,j,beat){h4[(i,j)]-=Complex::cis(beat*t)*x*vr[(st[q],st[j])]*0.5;}}}
+            for &(q,j,w,x)in &parts{for i in 0..n{let beat=theta[i]-theta[q]+nu+w;if keep(i,j,beat){h4[(i,j)]+=Complex::cis(beat*t)*vr[(st[i],st[q])]*x*0.5;}}}
+        }}
+        // The jumps: each class's photons from R_c on (1 − ½X)ψ and −W3^c on ψ.
+        let mut w3c:Vec<Dense>=vec![Dense::zeros(ne,n);nc];
+        for c in 0..nc{for c1 in 0..nc{for c2 in 0..nc{for c4 in 0..nc{if same_frame(delta(c1)+delta(c4),delta(c)+delta(c2)){w3c[c].add_scaled(Complex::ONE,triple(c1,c2,c4));}}}}}
+        let bend=Dense::from_fn(n,n,|i,j|(if i==j{Complex::ONE}else{Complex::ZERO})-xs[(i,j)]*0.5);
         let jumps:Vec<[Dense;3]>=cl.classes.iter().map(|class|{let target=&self.clusters[class.target];
             std::array::from_fn(|x|{let mut m=Dense::zeros(target.dimension(),n);
-                for &(p,w)in &class.photons{let j=self.emission[x].product(&corrected[p.carrier]);
-                    m[(target.position(p.to).unwrap(),cl.position(p.from).unwrap())]+=Complex::cis(w*t)*j[(p.to,p.from)];}
+                for &(p,w)in &class.photons{
+                    let(row,col)=(target.position(p.to).unwrap(),cl.position(p.from).unwrap());let phase=Complex::cis(w*t);
+                    let r=(0..ne).fold(Complex::ZERO,|s,q|s+self.emission[x][(p.to,q)]*rc[p.carrier][(q,p.from)]);
+                    let r4=(0..ne).fold(Complex::ZERO,|s,q|s+self.emission[x][(p.to,q)]*w3c[p.carrier][(q,col)]);
+                    for j in 0..n{m[(row,j)]+=phase*r*bend[(col,j)];}
+                    m[(row,col)]-=phase*r4;
+                }
                 m})}).collect();
-        // H̃: the second order's Hermitian part with H^(4)'s, in the cluster's frames, and −(i/2) Σ L̃†L̃.
-        let mut effective=Dense::zeros(n,n);
-        for i in 0..n{for j in 0..n{
-            let(a,b)=(cl.states[i],cl.states[j]);let phase=Complex::cis((cl.frames[i]-cl.frames[j])*t);
-            let x=(local.effective[(i,j)]+local.effective[(j,i)].conj())*0.5;
-            let y=(h4[(a,b)]+h4[(b,a)].conj())*0.5;
-            effective[(i,j)]=x+phase*y;
-        }}
+        // H̃: the Hermitian parts of the second order's and of H^(4), and −(i/2) Σ L̃†L̃.
+        let effective_hermitian=Dense::from_fn(n,n,|i,j|(local.effective[(i,j)]+local.effective[(j,i)].conj())*0.5+(h4[(i,j)]+h4[(j,i)].conj())*0.5);
+        let mut effective=effective_hermitian;
         let mut decay=Dense::zeros(n,n);for j in &jumps{for m in j{decay.add_scaled(Complex::ONE,&m.adjoint_product(m));}}
         effective.add_scaled(Complex::new(0.,-0.5),&decay);
-        // Π = 1 + ½R†R + YW on the cluster.
-        let mut slow=Dense::zeros(n,n);
-        for(i,&a)in cl.states.iter().enumerate(){
-            slow[(i,i)]+=Complex::ONE;
-            for(j,&b)in cl.states.iter().enumerate(){
-                let mut z=rr[(a,b)]*0.5;
-                for c in 0..nc{let mut col:Vec<Complex>=(0..rc[c].rows).map(|q|rc[c][(q,b)]).collect();resolve(a,c,&mut col)?;
-                    z-=(0..col.len()).fold(Complex::ZERO,|acc,q|acc+v[c][(q,a)].conj()*col[q]);}
-                slow[(i,j)]+=Complex::cis((cl.frames[i]-cl.frames[j])*t)*z;
-            }
-        }
-        // The readout: M = 1 + Σ_c W_c†W_c on the cluster (W_c = −R_c + W3_c), M^{−1/2} = 1 − ½Δ + ⅜Δ².
-        let w:Vec<Dense>=(0..nc).map(|c|{let mut m=w3[c].clone();m.add_scaled(-Complex::ONE,&rc[c]);Dense::from_fn(m.rows,n,|q,j|m[(q,cl.states[j])])}).collect();
-        let phases=Dense::from_fn(n,n,|i,j|Complex::cis((cl.frames[i]-cl.frames[j])*t));
-        let framed=|m:&Dense|Dense::from_fn(n,n,|i,j|m[(i,j)]*phases[(i,j)]);
-        let mut delta=Dense::zeros(n,n);for wc in &w{delta.add_scaled(Complex::ONE,&wc.adjoint_product(wc));}let delta=framed(&delta);
-        let mut root=Dense::from_fn(n,n,|i,j|if i==j{Complex::ONE}else{Complex::ZERO});root.add_scaled(Complex::new(-0.5,0.),&delta);root.add_scaled(Complex::new(0.375,0.),&delta.product(&delta));
-        let excited=(0..self.excited_states.len()).map(|i|{let mut m=Dense::zeros(n,n);
-            for wc in &w{let row=Dense::from_fn(1,n,|_,j|wc[(i,j)]);m.add_scaled(Complex::ONE,&row.adjoint_product(&row));}
-            root.product(&framed(&m)).product(&root)}).collect();
+        // Π = 1 + ½X + YW on the cluster.
+        let mut slow=Dense::from_fn(n,n,|i,j|(if i==j{Complex::ONE}else{Complex::ZERO})+xs[(i,j)]*0.5);
+        for c1 in 0..nc{for(i,&a0)in st.iter().enumerate(){let lu=resolvent(a0,delta(c1))?;
+            for c2 in 0..nc{for(j,&b)in st.iter().enumerate(){
+                let mut col:Vec<Complex>=(0..ne).map(|q|rc[c2][(q,b)]).collect();lu.solve(&mut col);
+                let z=(0..ne).fold(Complex::ZERO,|s,q|s+v[c1][(q,a0)].conj()*col[q]);
+                slow[(i,j)]-=Complex::cis((theta[i]-theta[j]+delta(c1)-delta(c2))*t)*z;
+            }}
+        }}
+        // The readout: M = 1 + Σ_g W_g†W_g over the coherent groups g (W_g's columns its channels' R_c − W3^c at
+        // their beats), M^{−1/2} = 1 − ½Δ + ⅜Δ²; the excited populations from the same amplitudes.
+        let amplitudes:Vec<Dense>=cl.coherent.iter().map(|group|{let mut m=Dense::zeros(ne,n);
+            for &(ch,w)in group{let col=cl.position(ch.state).unwrap();let phase=Complex::cis(-w*t);for q in 0..ne{m[(q,col)]+=phase*(rc[ch.carrier][(q,ch.state)]-w3c[ch.carrier][(q,col)]);}}
+            m}).collect();
+        let mut metric=Dense::zeros(n,n);for m in &amplitudes{metric.add_scaled(Complex::ONE,&m.adjoint_product(m));}
+        let mut root=Dense::from_fn(n,n,|i,j|if i==j{Complex::ONE}else{Complex::ZERO});root.add_scaled(Complex::new(-0.5,0.),&metric);root.add_scaled(Complex::new(0.375,0.),&metric.product(&metric));
+        let excited=(0..ne).map(|q|{let mut m=Dense::zeros(n,n);
+            for a in &amplitudes{let row=Dense::from_fn(1,n,|_,j|a[(q,j)]);m.add_scaled(Complex::ONE,&row.adjoint_product(&row));}
+            root.product(&m).product(&root)}).collect();
         // The transient after a jump into the cluster: per coherent group X (ne × n) and per excited group
         // its trace factor κ and its excited states' surplus.
-        let ne=self.excited_states.len();let mut surplus:Vec<(usize,Dense)>=(0..ne).map(|i|(i,Dense::zeros(n,n))).collect();let mut kappa=vec![];
+        let mut surplus:Vec<(usize,Dense)>=(0..ne).map(|i|(i,Dense::zeros(n,n))).collect();let mut kappa=vec![];
         for group in &cl.coherent{
             let mut x=Dense::zeros(ne,n);
             for &(ch,w)in group{let col=cl.position(ch.state).unwrap();let phase=Complex::cis(-w*t);for i in 0..ne{x[(i,col)]+=phase*rc[ch.carrier][(i,ch.state)];}}
