@@ -137,6 +137,14 @@ struct CarrierLayout{j:usize,j2:usize,t:usize}
 #[derive(Clone,Debug)]
 struct Layout{n:usize,size:usize,h0:usize,groups:Vec<GroupLayout>,carriers:Vec<CarrierLayout>}
 
+/// e^{iωt} of a run of residuals ω at one time, a value's rotation computed once while it repeats (the
+/// photons of a class share theirs): the same rotation as Complex::cis of each.
+struct Rotation{t:f64,last:u64,value:Complex}
+impl Rotation{
+    fn new(t:f64)->Rotation{Rotation{t,last:f64::NAN.to_bits(),value:Complex::ONE}}
+    fn at(&mut self,w:f64)->Complex{if w.to_bits()!=self.last{self.last=w.to_bits();self.value=Complex::cis(w*self.t);}self.value}
+}
+
 /// A cluster's work per call in complex multiply-adds (`Model::work`), and its table pairs.
 #[derive(Clone,Copy,Debug)]
 pub struct Work{pub generator:f64,pub force:f64,pub photons:f64,pub pairs:usize}
@@ -816,9 +824,9 @@ impl Model{
         }
         // The classes: each photon's entry into its target state's row from its source's column.
         let amplitude=cl.classes.iter().map(|class|{let target=&g.clusters[class.target];
-            let mut u=[[Complex::ZERO;MOST_STATES];3];
+            let mut u=[[Complex::ZERO;MOST_STATES];3];let mut rotation=Rotation::new(t);
             for &(ph,w)in &class.photons{
-                let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());let phase=Complex::cis(w*t);
+                let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());let phase=rotation.at(w);
                 for a in 0..3{u[a][row]+=phase*matrices[(ph.carrier*3+a)*size+ph.to*n+col]*psi[col];}
             }
             u}).collect();
@@ -912,42 +920,62 @@ impl Photons<'_>{
         let m=self.model;let size=m.ground.ground_states.len()*m.dimension(self.cluster);
         (m.carriers[..c].iter().map(|x|x.rank).sum::<usize>()*3+k*3+a)*size
     }
-    /// ∇u_a [a][axis] of a class: the fields' dependence on r and the intensities' (the Doppler
-    /// term's own gradient left out).
-    pub fn gradient(&self,class:usize)->[[[Complex;MOST_STATES];3];3]{
+    /// A class's absorbed light along a photon's polarization e (`Engine::jump`), in one pass over its
+    /// photons: per carrier of the class and target row, A_k = Σ e^{iω̃t} ψ[from] Σ_a e_a J_k[a][to, from],
+    /// B_k the same of J2_k and ∂_f A_k the slopes of A_k in each s_f (the axes' entries combined at
+    /// each node of the stencil). Of them, per row the gradient of the class's amplitude along e,
+    /// Σ_k ∇E_k A_k + E_k Σ_f ∂_f A_k ∇s_f (the Doppler term's own gradient left out); and per beam l
+    /// of the class's carriers its share Σ_rows |a_l Σ_k c_lk (A_k − w_l B_k)|² -- beyond the first
+    /// order its exact response's |a_l Σ e^{iω̃t} ψ[from] Σ_a e_a (C_a R_l)[to, from]|².
+    pub fn absorption(&self,class:usize,e:[f64;3])->([[Complex;3];MOST_STATES],Vec<(usize,f64)>){
         let m=self.model;let g=&m.ground;let cl=&g.clusters[self.cluster];let class=&cl.classes[class];let target=&g.clusters[class.target];
-        let(n,p)=(m.dimension(self.cluster),&self.point);let cl2=&m.layouts[self.cluster].carriers;let size=g.ground_states.len()*n;
-        let mut out=[[[Complex::ZERO;MOST_STATES];3];3];let mut entry=[Complex::ZERO];
-        for &(ph,w)in &class.photons{
-            let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());let phase=Complex::cis(w*self.time)*self.psi[col];let fl=&p.fields[ph.carrier];
-            for k in 0..m.carriers[ph.carrier].rank{for a in 0..3{
-                let j=self.jumps[self.offset(ph.carrier,k,a)+ph.to*n+col];
-                for x in 0..3{out[a][x][row]+=phase*fl.grad[k][x]*j;}
-                for f in 0..m.focused.len(){
-                    m.interpolate(self.cluster,&p.stencil,Some(f),cl2[ph.carrier].j+(k*3+a)*size+ph.to*n+col,&mut entry);
-                    for x in 0..3{out[a][x][row]+=phase*fl.e[k]*entry[0]*p.intensity_gradient[f][x];}
-                }
-            }}
-        }
-        out
-    }
-    /// Each beam l of a class's carriers: its share a_l Σ_k c_lk (J_k − w_l J2_k) of the class's
-    /// amplitudes per axis (its exact response's in a step beyond the first order).
-    pub fn shares(&self,class:usize)->Vec<(usize,[[Complex;MOST_STATES];3])>{
-        let m=self.model;let g=&m.ground;let cl=&g.clusters[self.cluster];let class=&cl.classes[class];let target=&g.clusters[class.target];
-        let(n,p)=(m.dimension(self.cluster),&self.point);
+        let(n,nt,p,d)=(m.dimension(self.cluster),target.states.len(),&self.point,m.focused.len());
+        let(layout,size)=(&m.layouts[self.cluster],g.ground_states.len()*m.dimension(self.cluster));let(data,slice)=(&m.tables.data[self.cluster],2*layout.size);
         let carriers:Vec<usize>={let mut v:Vec<usize>=class.photons.iter().map(|x|x.0.carrier).collect();v.sort();v.dedup();v};
-        carriers.iter().flat_map(|&c|m.carriers[c].beams.iter().enumerate().map(move|(j,&l)|(c,j,l))).map(|(c,j,l)|{
-            let(amplitude,w)=(m.geometry[l].field(p.r).0,m.kinetic_shift(l,p.kappa));let mut v=[[Complex::ZERO;MOST_STATES];3];
-            let exact:Option<[Dense;3]>=self.exact.as_ref().map(|e|std::array::from_fn(|a|g.emission[a].product(&e.responses[l])));
-            for &(ph,phase)in class.photons.iter().filter(|x|x.0.carrier==c){
-                let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());let phase=Complex::cis(phase*self.time)*self.psi[col]*amplitude;
-                for a in 0..3{
-                    let z=match &exact{Some(e)=>e[a][(ph.to,cl.states[col])],None=>(0..m.carriers[c].rank).fold(Complex::ZERO,|s,k|{let at=self.offset(c,k,a)+ph.to*n+col;
-                        s+m.carriers[c].coefficients[j][k]*(self.jumps[at]-self.doppler[at]*w)})};
-                    v[a][row]+=phase*z;
+        // Per carrier of the class and row, per rank: A, B and ∂_f A.
+        let mut sums=vec![[[Complex::ZERO;2+MOST_FOCUSED];MOST_RANK];carriers.len()*MOST_STATES];let mut rotation=Rotation::new(self.time);
+        for &(ph,w)in &class.photons{
+            let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());let phase=rotation.at(w)*self.psi[col];
+            let sum=&mut sums[carriers.binary_search(&ph.carrier).unwrap()*MOST_STATES+row];
+            for k in 0..m.carriers[ph.carrier].rank{
+                let(mut a,mut b)=(Complex::ZERO,Complex::ZERO);let mut slope=[Complex::ZERO;MOST_FOCUSED];
+                for x in 0..3{let at=self.offset(ph.carrier,k,x)+ph.to*n+col;a+=self.jumps[at]*e[x];b+=self.doppler[at]*e[x];}
+                if d>0{
+                    let starts:[usize;3]=std::array::from_fn(|x|2*(layout.carriers[ph.carrier].j+(k*3+x)*size+ph.to*n+col));
+                    for i in 0..p.stencil.count(){
+                        let(node,_,dw)=p.stencil.node(i);let base=node*slice;
+                        let v=(0..3).fold(Complex::ZERO,|v,x|v+Complex::new(data[base+starts[x]],data[base+starts[x]+1])*e[x]);
+                        for f in 0..d{slope[f]+=v*dw[f];}
+                    }
                 }
+                sum[k][0]+=phase*a;sum[k][1]+=phase*b;for f in 0..d{sum[k][2+f]+=phase*slope[f];}
             }
-            (l,v)}).collect()
+        }
+        let mut gradient=[[Complex::ZERO;3];MOST_STATES];
+        for(ci,&c)in carriers.iter().enumerate(){
+            let fl=&p.fields[c];
+            for(row,out)in gradient[..nt].iter_mut().enumerate(){
+                let sum=&sums[ci*MOST_STATES+row];
+                for x in 0..3{for k in 0..m.carriers[c].rank{
+                    out[x]+=fl.grad[k][x]*sum[k][0];for f in 0..d{out[x]+=fl.e[k]*sum[k][2+f]*p.intensity_gradient[f][x];}
+                }}
+            }
+        }
+        let shares=carriers.iter().enumerate().flat_map(|(ci,&c)|m.carriers[c].beams.iter().enumerate().map(move|(j,&l)|(ci,c,j,l))).map(|(ci,c,j,l)|{
+            let(amplitude,w)=(m.geometry[l].field(p.r).0,m.kinetic_shift(l,p.kappa));
+            let share:f64=match &self.exact{
+                Some(exact)=>{
+                    let product:[Dense;3]=std::array::from_fn(|a|g.emission[a].product(&exact.responses[l]));let mut rows=[Complex::ZERO;MOST_STATES];let mut rotation=Rotation::new(self.time);
+                    for &(ph,w)in class.photons.iter().filter(|x|x.0.carrier==c){
+                        let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());
+                        let z=(0..3).fold(Complex::ZERO,|z,a|z+product[a][(ph.to,cl.states[col])]*e[a]);rows[row]+=rotation.at(w)*self.psi[col]*amplitude*z;
+                    }
+                    rows[..nt].iter().map(|z|z.norm_sqr()).sum()
+                }
+                None=>(0..nt).map(|row|{let sum=&sums[ci*MOST_STATES+row];
+                    ((0..m.carriers[c].rank).fold(Complex::ZERO,|z,k|z+m.carriers[c].coefficients[j][k]*(sum[k][0]-sum[k][1]*w))*amplitude).norm_sqr()}).sum(),
+            };
+            (l,share)}).collect();
+        (gradient,shares)
     }
 }

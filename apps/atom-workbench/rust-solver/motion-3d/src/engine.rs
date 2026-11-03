@@ -333,9 +333,8 @@ impl<'a> Engine<'a>{
         // The recoils of a moving atom: the photon's, the absorbed beam's and the exact conditional
         // mean's correction.
         if let Some(photons)=&photons{
-            let du=photons.gradient(pick);let k=class.wave_number;let mut kick=direction.map(|x|-k*x);
-            let mean:[f64;3]=std::array::from_fn(|x|{let mut s=0.;for i in 0..nt{let mut g=Complex::ZERO;for a in 0..3{g+=du[a][x][i]*e[a];}s+=(f[i].conj()*g).im;}s/size});
-            let shares:Vec<(usize,f64)>=photons.shares(pick).iter().map(|(l,v)|(*l,norm2(&combine(v,&e),nt))).collect();
+            let(gradient,shares)=photons.absorption(pick,e);let k=class.wave_number;let mut kick=direction.map(|x|-k*x);
+            let mean:[f64;3]=std::array::from_fn(|x|{let mut s=0.;for i in 0..nt{s+=(f[i].conj()*gradient[i][x]).im;}s/size});
             let sum:f64=shares.iter().map(|x|x.1).sum();
             if sum>0.{
                 let mut x=absorbed*sum;let mut l=shares[shares.len()-1].0;
