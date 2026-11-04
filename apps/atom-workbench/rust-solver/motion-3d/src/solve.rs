@@ -1497,6 +1497,12 @@ fn paired_error(windows:&[[[f64;3];2]])->[[f64;2];3]{
 /// What of an error stands beyond its errors: their squares' difference, as the budget's quadrature; zero at the noise, the magnitude far above it.
 fn standing(error:[f64;2])->f64{(error[0]*error[0]-error[1]*error[1]).max(0.).sqrt()}
 
+/// The spans in succession on which nothing stands that stop T's step error over the run (`drift`). A real error x, its errors at a span e (`CONFIDENCE` standard errors), reads quiet with the
+/// chance Φ(z (1 − x/e)), z = `CONFIDENCE`; a span's errors are two or three times its last's, so that the spans are nearly independent and n of them leave that chance to the n-th power. It comes to
+/// Φ(−z), the 2.3 % every other statistic here leaves on one side, at x/e = 2, 1.52, 1.29, 1.14 for n = 1, 2, 3, 4. Each span doubles the read, and doubling the probes instead would lower that x by √2 = 1.41:
+/// a second span lowers it by 1.32, a third by 1.18, so two is the last that pays about as much. (The retro-reflected tweezer's error on the first layer of probes stands 1.2-2.6 times its errors at
+/// 0.05-0.10 us; with the step forced to 0.104, 0.078, 0.069 and 0.062 us the read moves it on 12, 11, 11 and 8 of 12 seeds with one quiet span, 12, 12, 11 and 8 with two, 12, 12, 12 and 8 with three.)
+const QUIET_SPANS:usize=2;
 /// What of T's step error over the run stands (`drift`): at the span where it comes closest to or furthest past its limit there, its share of that limit, its size and the span.
 #[derive(Clone,Copy,Debug,Default)]
 pub struct Drift{pub excess:f64,pub stands:f64,pub span:f64}
@@ -1506,8 +1512,7 @@ pub struct Drift{pub excess:f64,pub stands:f64,pub span:f64}
 /// tolerances' harmonic mean: the pooled error is the mean of theirs). A span reads the probes' first layer, more only for what could raise the largest stand beyond the limit, which sets the new step --
 /// a stand beyond it, or a size that the errors of all the layers would leave beyond it --: until, on more probes than the first layer's, the largest stand's errors lie within the step's share of
 /// its size and it lies beyond the limit by them (the pairs' differences are heavy-tailed: 39 ± 26 % on 64 probes of the retro-reflected tweezer's quiet axis, ±7 % on all), or nothing is left that could,
-/// or no layers are left. The spans go on until nothing stands (`standing`) on two in succession, a stand hid in one span's noise showing in the next, and at least `through`: a step checked
-/// again as far as the coarser step's stood.
+/// or no layers are left. The spans go on until nothing stands (`standing`) on `QUIET_SPANS` in succession, and at least `through`: a step checked again as far as the coarser step's stood.
 pub fn drift(model:&Model,settings:&dyn Fn(usize)->Settings,steps:usize,probes:&Probes,period:f64,duration:f64,limit:&dyn Fn(f64)->f64,through:f64)->Drift{
     if probes.states.is_empty(){return Drift::default();}
     let(coarse,fine)=(Engine::new(model,settings(steps)),Engine::new(model,settings(2*steps)));let dt=coarse.settings.dt;
@@ -1535,7 +1540,7 @@ pub fn drift(model:&Model,settings:&dyn Fn(usize)->Settings,steps:usize,probes:&
         let stands=standing(largest);
         if stands/at>most.excess{most=Drift{excess:stands/at,stands,span:reach as f64*dt};}
         quiet=if stands>0.{0}else{quiet+1};
-        if reach>=end||(quiet==2&&reach as f64*dt>=through){return most;}
+        if reach>=end||(quiet==QUIET_SPANS&&reach as f64*dt>=through){return most;}
         reach=(2*reach).min(end).max(reach+window);
     }
 }
