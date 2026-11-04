@@ -492,15 +492,24 @@ pub struct Model{
 
 fn frobenius_inner(a:&Dense,b:&Dense)->Complex{a.entries.iter().zip(&b.entries).fold(Complex::ZERO,|s,(x,y)|s+x.conj()**y)}
 
-/// Cubic Lagrange weights on four consecutive nodes of a uniform grid of `nodes` points on [0, 1],
-/// and their derivatives in s: the stencil's first node and the weights.
+/// The interpolation weights at s on a uniform grid of `nodes` points on [0, 1], on four consecutive nodes from `first`,
+/// and their derivatives in s: the cubic Hermite interpolant with Catmull-Rom's central slopes, (f_{i+1} − f_{i−1})/2h,
+/// and at the grid's ends the second-order one-sided ones -- C¹, so that the force the tables' derivative gives is
+/// continuous. (The piecewise 4-point Lagrange cubic before it was C⁰: its force jumped at every node by O(h³), and a
+/// step that straddles a jump errs at first order in dt -- the 3D PGC's cold atoms crossed so many that the step
+/// doubling read twice T's step error on 65 nodes per axis, its excess over 513 nodes falling as n⁻².) Its error is
+/// O(h³) (`tabulate`'s first prediction 2⁻³ per doubling).
 fn cubic(nodes:usize,s:f64)->(usize,[f64;4],[f64;4]){
-    let h=1./(nodes-1) as f64;let x=s.clamp(0.,1.)/h;
-    let first=((x.floor() as isize)-1).clamp(0,nodes as isize-4) as usize;let t=x-first as f64;
-    let w=[-(t-1.)*(t-2.)*(t-3.)/6.,t*(t-2.)*(t-3.)/2.,-t*(t-1.)*(t-3.)/2.,t*(t-1.)*(t-2.)/6.];
-    let d=[-((t-2.)*(t-3.)+(t-1.)*(t-3.)+(t-1.)*(t-2.))/6.,((t-2.)*(t-3.)+t*(t-3.)+t*(t-2.))/2.,
-        -((t-1.)*(t-3.)+t*(t-3.)+t*(t-1.))/2.,((t-1.)*(t-2.)+t*(t-2.)+t*(t-1.))/6.];
-    (first,w,d.map(|x|x/h))
+    let h=1./(nodes-1) as f64;let x=s.clamp(0.,1.)/h;let i=(x.floor() as usize).min(nodes-2);let u=x-i as f64;
+    // The Hermite basis on the interval [i, i + 1] and its derivatives in u.
+    let(h00,h10,h01,h11)=(2.*u*u*u-3.*u*u+1.,u*u*u-2.*u*u+u,-2.*u*u*u+3.*u*u,u*u*u-u*u);
+    let(d00,d10,d01,d11)=(6.*u*u-6.*u,3.*u*u-4.*u+1.,-6.*u*u+6.*u,3.*u*u-2.*u);
+    // The values' weights on the stencil from the end slopes h m_i: the first interval's (−3f₀ + 4f₁ − f₂)/2 and
+    // (f₂ − f₀)/2, an inner one's central pair, the last one's (f₃ − f₁)/2 and (3f₃ − 4f₂ + f₁)/2.
+    let weights=|a:f64,b:f64,c:f64,d:f64|->[f64;4]{if i==0{[a-1.5*b-0.5*d,2.*b+c,-0.5*b+0.5*d,0.]}
+        else if i==nodes-2{[0.,-0.5*b+0.5*d,a-2.*d,0.5*b+c+1.5*d]}else{[-0.5*b,a-0.5*d,c+0.5*b,0.5*d]}};
+    let first=if i==0{0}else if i==nodes-2{nodes-4}else{i-1};
+    (first,weights(h00,h10,h01,h11),weights(d00,d10,d01,d11).map(|x|x/h))
 }
 
 /// The pairs k′ ≤ k of a Hermitian group of rank r, or every (k′, k) of ranks (r′, r).
@@ -596,7 +605,7 @@ impl Model{
     /// (`MOST_TRAJECTORIES`), each the pilot's first steps over the run (the light's pattern, solve.rs `run`)
     /// at an advance's counted work in the model's dearest cluster (solve.rs `advance_work`), against the
     /// whole population target. A run that takes fewer pays for at most a doubling beyond its own optimum,
-    /// each cutting the error about 2⁴-fold at 2^D times the work of the last.
+    /// each cutting the error about 2³-fold at 2^D times the work of the last.
     fn stake(&self,request:&Request)->f64{
         let thermal=(KT_PER_UK*request.temperature_uk*self.hbar_over_mass).sqrt();
         let pattern=self.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max)*thermal;
@@ -1074,7 +1083,7 @@ impl Model{
     /// work per node (linear.rs `counted`) and its error's measure, `MATRIX_NS` a complex multiply-add -- is
     /// below what its smaller error saves the run at `stake` per unit of booked error (`stake`). Its error
     /// is predicted by the last doubling's rate, and by the cubic interpolation's order before one is seen,
-    /// 2⁻⁴ a doubling: a doubling that did not shrink the error predicts no saving, and stops it
+    /// 2⁻³ a doubling (`cubic`): a doubling that did not shrink the error predicts no saving, and stops it
     /// (`table_stalled`: the tabulated function is not smooth on the grids' scale where the atoms go -- a
     /// folded drive's pole, PGCP_10's every-drive-folded model 0.8 to 1.3 from 9 to 32769 nodes there, which
     /// no grid resolves). A grid beyond the work bounds (`MOST_TABLE_BYTES`, `MOST_TABLE_NODES`) is not made
@@ -1091,7 +1100,7 @@ impl Model{
         loop{
             let(coarse,n)=(self.tables.nodes,2*self.tables.nodes-1);
             if let Some(&error)=errors.last(){
-                let rate:f64=if errors.len()>1{error/errors[errors.len()-2]}else{0.0625};
+                let rate:f64=if errors.len()>1{error/errors[errors.len()-2]}else{0.125};
                 if !(rate<1.){self.table_stalled=true;self.table_limit=Some(coarse);break;}
                 let work=MATRIX_NS*((n.pow(d)-coarse.pow(d)) as f64*per_node+(n.pow(d)*entries*4_usize.pow(d)) as f64);
                 if !(work<stake*error*(1.-rate)){break;}
@@ -1968,8 +1977,25 @@ impl Photons<'_>{
 
 #[cfg(test)]
 mod tests{
-    use super::{Beats,Model,MOST_TABLE_BYTES,MOST_TABLE_NODES};
+    use super::{cubic,Beats,Model,MOST_TABLE_BYTES,MOST_TABLE_NODES};
     use std::f64::consts::TAU;
+
+    /// The interpolant (`cubic`) is C¹ -- its derivative, the force the tables give, the same from either side of every
+    /// node, the grid's ends included --, reproduces a quadratic exactly, and converges at third order: a smooth
+    /// function's largest error falls about eightfold per doubling of the grid.
+    #[test]
+    fn the_interpolant_is_c1_and_third_order(){
+        let at=|n:usize,s:f64,f:&dyn Fn(f64)->f64|{let(first,w,d)=cubic(n,s);let h=1./(n-1) as f64;
+            (0..4).fold((0.,0.),|(v,g),k|{let y=f((first+k) as f64*h);(v+w[k]*y,g+d[k]*y)})};
+        let quadratic=|x:f64|3.*x*x-2.*x+0.5;
+        for n in [4,5,9,17]{let h=1./(n-1) as f64;
+            for i in 0..=200{let s=i as f64/200.;let(v,g)=at(n,s,&quadratic);assert!((v-quadratic(s)).abs()<1e-12&&(g-(6.*s-2.)).abs()<1e-10,"{n} {s}: {v} {g}");}
+            for node in 1..n-1{let s=node as f64*h;let f=|x:f64|(7.*x).sin()+x*x*x;
+                let(left,right)=(at(n,s-1e-12,&f).1,at(n,s+1e-12,&f).1);assert!((left-right).abs()<1e-8*(1.+left.abs()),"{n} node {node}: {left} {right}");}
+        }
+        let worst=|n:usize|(0..=1000).map(|i|{let s=i as f64/1000.;(at(n,s,&|x:f64|(5.*x).sin()).0-(5.*s).sin()).abs()}).fold(0.,f64::max);
+        let(a,b,c)=(worst(33),worst(65),worst(129));assert!(a/b>6.&&b/c>6.&&a/b<10.&&b/c<10.,"{a} {b} {c}");
+    }
 
     /// The tables stop refining at the work bounds (F9): the tweezer PGC's (its tweezer one intensity
     /// axis) within nine nodes, or within the bytes of the grids of nine and five, keep the grid of

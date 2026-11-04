@@ -101,9 +101,9 @@ fn compare(r:&Request,threshold:Option<f64>,allowance:f64,jumps:bool,fourth:bool
             assert!((g.kappa[a]-c.kappa[a]).abs()<=2e-5*scale,"{at}: κ {:?} against {:?}",g.kappa,c.kappa);
         }
         let n=model.dimension(c.cluster);let(gn,cn)=(g.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>(),c.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>());
-        // Each jump redoes part of the step from a crossing found in single precision.
+        // Each jump redoes part of the step from a crossing found in single precision: the norm and the state alike.
         assert!((gn.ln()-cn.ln()).abs()<=2e-5*(1+c.jumps) as f64,"{at}: ln‖ψ‖² {} against {}",gn.ln(),cn.ln());
-        for x in 0..n{let(a,b)=(g.psi[x]*(1./gn.sqrt()),c.psi[x]*(1./cn.sqrt()));assert!((a-b).abs()<=2e-5,"{at}: ψ[{x}] {a:?} against {b:?}");}
+        for x in 0..n{let(a,b)=(g.psi[x]*(1./gn.sqrt()),c.psi[x]*(1./cn.sqrt()));assert!((a-b).abs()<=2e-5*(1+c.jumps) as f64,"{at}: ψ[{x}] {a:?} against {b:?}");}
     }
     if jumps{assert_eq!(jumped,trajectories.len(),"every trajectory jumps in the step");}
     println!("{} trajectories, {jumped} jumped",trajectories.len());
