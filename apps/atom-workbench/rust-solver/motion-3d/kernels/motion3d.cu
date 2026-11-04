@@ -73,10 +73,12 @@ enum Span{SPAN_POINT,SPAN_GENERATOR,SPAN_EXPONENTIAL,SPAN_EVOLVE,SPAN_JUMP,SPAN_
 #define SPAN_BEGIN(name) const long long name=clock64()
 #define SPAN_END(span,name) do{if(lane==0)W.profile[span]+=clock64()-name;}while(0)
 #define COUNT(span) do{if(lane==0)W.profile[span]++;}while(0)
+#define COUNT_BY(span,n) do{if(lane==0)W.profile[span]+=(n);}while(0)
 #else
 #define SPAN_BEGIN(name) do{}while(0)
 #define SPAN_END(span,name) do{}while(0)
 #define COUNT(span) do{}while(0)
+#define COUNT_BY(span,n) do{}while(0)
 #endif
 
 // ---------------------------------------------------------------------------------------------
@@ -2186,7 +2188,7 @@ __device__ float exact_evolve(const Program& P,Warp& W,const Segment& S,const fl
         const float width=b-t,half=0.5f*width;
         float2 middle,last;seg_advances(S,X,t,half,x,lane,middle,last);
         SPAN_BEGIN(forcesp);float fm[3],fb[3],nm,nb;seg_forces(S,X,t+half,b,middle,last,lane,fm,fb,nm,nb);SPAN_END(SPAN_FORCES,forcesp);
-        if(lane==0){W.profile[COUNT_NODES]+=2;W.profile[COUNT_PRODUCTS]+=2*(S.beating?2:1)*S.series.parts*S.series.terms;}
+        COUNT_BY(COUNT_NODES,2);COUNT_BY(COUNT_PRODUCTS,2*(S.beating?2:1)*S.series.parts*S.series.terms);
         if(logf(nb)<=target){
             const float s=exact_root(S,X,x,middle,t,na,nm,nb,width,target,lane);
             const float2 h=seg_advance(S,X,t,0.5f*s,x,lane),y=seg_advance(S,X,t+0.5f*s,0.5f*s,h,lane);
