@@ -933,14 +933,13 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let mut twin=if twin_can_pay(count as f64,pilot_needs,0.){Twin::new(&model,intensity).filter(|_|twin_can_pay(count as f64,pilot_needs,twin_share()))}else{None};
     let twin_means=twin.as_ref().map(|t|t.means(&model,&request.initial_density,interval,outputs));
     let means=|held:bool|->Vec<Means>{(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:twin_means.as_ref().filter(|_|held).map(|m|m[i])}).collect()};
-    // A batch's trajectories, each group through its output `ends` -- on the GPU all through the farthest: a launch's
-    // intervals are the wave's.
+    // A batch's trajectories, each group through its output `ends`.
     let batch=|first:u64,count:u64,ends:&[usize],twin:Option<&Twin>|->Result<Outcome,Stop>{
         let variates=Variates{harmonic:&harmonic,twin};
         match &gpu{
             None=>Ok(simulate_to(&model,&settings,&initial,seed,first,count,TASK,steps,outputs,&listed,Some(&variates),ends)),
             Some((g,program))=>{let last=ends.iter().copied().max().unwrap_or(outputs-1);let short:Vec<usize>=listed.iter().copied().filter(|&l|l<=last).collect();
-                let mut out=g.lock().unwrap_or_else(|e|e.into_inner()).simulate(program,&model,&settings,&initial,seed,first,count,TASK,steps,last+1,&short,Some(&variates)).map_err(Stop::Gpu)?;
+                let mut out=g.lock().unwrap_or_else(|e|e.into_inner()).simulate(program,&model,&settings,&initial,seed,first,count,TASK,steps,last+1,&short,Some(&variates),Some(ends)).map_err(Stop::Gpu)?;
                 for group in &mut out.groups{group.sums.resize(outputs,Sums::zero());}out.samples.resize(listed.len(),vec![]);Ok(out)}
         }
     };

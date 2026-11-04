@@ -462,7 +462,7 @@ fn batch(r:&Request,fourth:bool,dt:f64)->bool{
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
     let twin=Twin::new(&model,0.5*model.geometry[model.trap_beam].intensity([0.;3]));
     let variates=Variates{harmonic:&harmonic,twin:twin.as_ref()};
-    let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&variates)).unwrap();
+    let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&variates),None).unwrap();
     let c=atom_motion_3d::simulate(&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&variates));
     assert_eq!(g.groups.len(),c.groups.len());
     let close=|a:f64,b:f64,scale:f64,what:&str|assert!((a-b).abs()<=1e-3*b.abs().max(scale),"{what}: {a} against {b}");
@@ -500,6 +500,27 @@ fn a_batch_s_sums_are_the_cpu_s(){
     let twins=[batch(&request(PGC),false,0.1),batch(&request(MOLASSES),false,0.1),batch(&retro(),false,0.05)];
     if device().is_some(){assert!(twins.iter().any(|&t|t),"a fixture with a held twin");}
 }
+/// A batch's groups each through its own last output (lib.rs `simulate_to`, solve.rs # Batches) on the GPU are the CPU's: the same sums at the outputs a group reaches -- with its windows' far halves
+/// past its last --, none counted beyond, and the samples of those that reach a listed output.
+#[test]
+fn a_group_stops_at_its_last_output_as_on_the_cpu(){
+    let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
+    let r=request(PGC);let model=model(&r,false);let initial=Initial::new(&model,&r).unwrap();
+    let mut settings=Settings::new(0.1,&initial.traps[0],1e-6,true);settings.region=initial.depths[0];
+    let(seed,first,count,group,steps,outputs,listed,ends)=(0x3D_5EED,40,32,8,3,6,[2,5],[5,3,1,5]);
+    let program=gpu.program(&model,&settings).unwrap();
+    let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);let variates=Variates{harmonic:&harmonic,twin:None};
+    let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&variates),Some(&ends)).unwrap();
+    let c=atom_motion_3d::simulate_to(&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&variates),&ends);
+    let close=|a:f64,b:f64,what:&str|assert!((a-b).abs()<=1e-3*b.abs().max(1.),"{what}: {a} against {b}");
+    for(k,(gg,cg))in g.groups.iter().zip(&c.groups).enumerate(){for(i,(x,y))in gg.sums.iter().zip(&cg.sums).enumerate(){
+        let at=format!("group {k}, output {i}");assert_eq!((x.trajectories,x.held),(y.trajectories,y.held),"{at}");
+        for a in 0..3{close(x.kappa2[a],y.kappa2[a],&format!("{at}: Σκ²[{a}]"));close(x.position2[a],y.position2[a],&format!("{at}: Σr²[{a}]"));for j in 0..3{close(x.harmonic[a][j],y.harmonic[a][j],&format!("{at}: harmonic[{a}][{j}]"));}}
+        for s in 0..STATES{close(x.populations[s],y.populations[s],&format!("{at}: Σp[{s}]"));}
+        if i>ends[k]{assert_eq!(x.held,0.,"{at}: none beyond its last output");}
+    }}
+    for(gs,cs)in g.samples.iter().zip(&c.samples){assert_eq!(gs.len(),cs.len());}
+}
 /// The same at fourth order, on the tweezer PGC, with the held twin's start and post-jump map (control.rs
 /// # The twin at fourth order).
 #[test]
@@ -521,7 +542,7 @@ fn the_default_scene_s_rows_sum_to_one_with_the_held_twin(){
     let twin=Twin::new(&model,0.5*model.geometry[model.trap_beam].intensity([0.;3])).expect("the default scene's generator is static");
     let means:Vec<Means>=twin.means(&model,&r.initial_density,interval,outputs).into_iter().enumerate().map(|(i,m)|Means{harmonic:harmonic.mean[i],twin:Some(m)}).collect();
     let program=gpu.program(&model,&settings).unwrap();
-    let out=gpu.simulate(&program,&model,&settings,&initial,0x3D_5EED,0,256,32,steps,outputs,&[],Some(&Variates{harmonic:&harmonic,twin:Some(&twin)})).unwrap();
+    let out=gpu.simulate(&program,&model,&settings,&initial,0x3D_5EED,0,256,32,steps,outputs,&[],Some(&Variates{harmonic:&harmonic,twin:Some(&twin)}),None).unwrap();
     let estimates=summarize(&out.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab},&means);
     let worst=estimates.iter().filter(|e|e.loss<1.).map(|e|(e.populations.iter().sum::<f64>()-1.).abs()).fold(0.,f64::max);
     println!("the rows' largest |sum - 1|: {worst:.2e}");

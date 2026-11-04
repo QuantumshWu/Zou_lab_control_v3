@@ -19,7 +19,7 @@
 //! The initial states are drawn on the CPU (lib.rs `initial_trajectory` and a held twin's start,
 //! exactly); the tasks run as blocks, as many at once as the device memory comfortably holds (a
 //! wave), each launch of about `LAUNCH_MS` (well inside the display watchdog) by a cycle budget: every trajectory on
-//! from where it stands, on its own, at most `MOST_INTERVALS` past the first interval not yet summed; a warp of cheap steps
+//! from where it stands, on its own, at most `MOST_INTERVALS` past the first interval not yet summed, and only as far as its group's last output (lib.rs `simulate_to`); a warp of cheap steps
 //! does not wait for one of dear ones. The intervals every slot has passed are summed per task after the launch; the
 //! tasks' sums come back per output and are merged per group in order, as the CPU's are.
 pub mod driver;
@@ -158,15 +158,16 @@ impl Gpu{
 
     /// Trajectories [first, first + count) of the run `seed` (lib.rs `simulate`): `steps` steps of the
     /// settings' dt between `outputs` output times, in groups of `group`, as tasks of at most `TASK`
-    /// trajectories inside a group, (r, κ) kept at `listed`, with the control variates of `variates`.
+    /// trajectories inside a group, (r, κ) kept at `listed`, with the control variates of `variates`; with `ends`, the g-th group's
+    /// trajectories only through the output `ends[g]` (lib.rs `simulate_to`), half a period past it, its sums counting none beyond.
     pub fn simulate(&self,program:&Program,model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],
-        variates:Option<&Variates>)->Result<Outcome,String>{
+        variates:Option<&Variates>,ends:Option<&[usize]>)->Result<Outcome,String>{
         self.context.make_current()?;let clock=Instant::now();
         let controls=Controls::new(&self.stream,model,settings,variates)?;let mut cycles=[0u64;2];
         // The tasks in order: (their group, their first trajectory, the one after their last), as lib.rs `run`.
         let bounds=|g:u64|(first+g*group,(first+(g+1)*group).min(first+count));
         let tasks:Vec<(u64,u64,u64)>=(0..count.div_ceil(group)).flat_map(|g|{let(start,end)=bounds(g);(start..end).step_by(TASK as usize).map(move|s|(g,s,(s+TASK).min(end)))}).collect();
-        let windows=Windows::new(settings,steps,outputs,listed)?;
+        let windows=Windows::new(settings,steps,outputs,listed)?;let through=|g:u64|ends.map_or(outputs-1,|e|e[g as usize]);
         let(mut groups,mut samples,mut jumps,mut doppler,mut beats)=(Vec::<Group>::new(),vec![vec![];listed.len()],0u64,0f64,0f64);let mut last=None;
         for wave in tasks.chunks(self.wave(program,&windows)?){
             // The initial states, drawn on the CPU; each task's trajectories in its block's slots.
@@ -184,11 +185,11 @@ impl Gpu{
             // The wave's runs of tasks of one group, merged on the device in order (lib.rs `run`).
             let mut runs:Vec<(u64,usize,usize)>=vec![];
             for(i,&(g,_,_))in wave.iter().enumerate(){match runs.last_mut(){Some(r)if r.0==g=>r.2+=1,_=>runs.push((g,i,1))}}
-            let(group_sums,kept,finished,costs)=self.run(program,&windows,&controls,seed,&states,&runs.iter().map(|r|[r.1 as i32,r.2 as i32]).collect::<Vec<_>>())?;
+            let(group_sums,kept,finished,costs)=self.run(program,&windows,&controls,seed,&states,&wave.iter().map(|t|through(t.0) as i32).collect::<Vec<_>>(),&runs.iter().map(|r|[r.1 as i32,r.2 as i32]).collect::<Vec<_>>())?;
             cycles[0]+=costs[0];cycles[1]+=costs[1];
             for(k,&(g,i,count))in runs.iter().enumerate(){
                 let trajectories=wave[i..i+count].iter().map(|t|t.2-t.1).sum::<u64>() as f64;
-                let sums=Group{sums:(0..outputs).map(|o|sums_of(&group_sums[(k*outputs+o)*RECORD..][..RECORD],trajectories)).collect()};
+                let sums=Group{sums:(0..outputs).map(|o|sums_of(&group_sums[(k*outputs+o)*RECORD..][..RECORD],if o<=through(g){trajectories}else{0.})).collect()};
                 if last==Some(g){groups.last_mut().unwrap().merge(&sums);}else{groups.push(sums);last=Some(g);}
             }
             // The samples in the trajectories' order.
@@ -213,7 +214,7 @@ impl Gpu{
         let mut plain=settings.clone();plain.average=false;
         let windows=Windows::new(&plain,steps,2,&[])?;
         let states:Vec<Option<program::State>>=trajectories.iter().map(|t|Some(program::State::new(t,t,settings))).chain(std::iter::repeat(None)).take(trajectories.len().div_ceil(WARPS)*WARPS).collect();
-        let(_,_,finished,_)=self.run(program,&windows,&Controls::none(),seed,&states,&[])?;
+        let(_,_,finished,_)=self.run(program,&windows,&Controls::none(),seed,&states,&vec![1;states.len()/WARPS],&[])?;
         Ok(trajectories.iter().zip(&finished).map(|(t,s)|s.trajectory(settings,t.seed)).collect())
     }
 
@@ -258,22 +259,22 @@ impl Gpu{
         let(free,_)=self.context.memory()?;
         Ok(((free/4).min(1<<29)/(WARPS*slot+8*w.outputs*RECORD)).max(1))
     }
-    /// One wave: blocks of `WARPS` slots (None: no trajectory), its trajectories through every output interval in launches
+    /// One wave: blocks of `WARPS` slots (None: no trajectory), per block its last output, its trajectories through that output's interval and its reach in launches
     /// of about LAUNCH_MS: the first a step per warp (its budget zero), each next one's budget the cycles the slowest warp's clock
     /// made in the last per millisecond of it on the device, times LAUNCH_MS. Two launches stand in the stream at a time, each
     /// reporting into its own words of host memory, so that the device does not wait for the host's turn between them. The sums per
     /// output of each run of tasks ([first task, tasks]), the samples kept per slot, the slots' final
     /// states, and the held twins' cycles and all the warps'.
-    fn run(&self,program:&Program,w:&Windows,controls:&Controls,seed:u64,slots:&[Option<program::State>],runs:&[[i32;2]])->Result<(Vec<f64>,Vec<f64>,Vec<program::State>,[u64;2]),String>{
+    fn run(&self,program:&Program,w:&Windows,controls:&Controls,seed:u64,slots:&[Option<program::State>],through:&[i32],runs:&[[i32;2]])->Result<(Vec<f64>,Vec<f64>,Vec<program::State>,[u64;2]),String>{
         let n=slots.len()/WARPS;
         let states:Vec<program::State>=slots.iter().map(|s|s.unwrap_or_default()).collect();
-        let tasks:Vec<i32>=(0..n).flat_map(|i|{let count=slots[WARPS*i..][..WARPS].iter().filter(|s|s.is_some()).count();[0,count as i32,(WARPS*i) as i32]}).collect();
+        let tasks:Vec<i32>=(0..n).flat_map(|i|{let count=slots[WARPS*i..][..WARPS].iter().filter(|s|s.is_some()).count();[through[i],count as i32,(WARPS*i) as i32]}).collect();
         let state_buffer=Buffer::with(&self.stream,&states)?;let task_buffer=Buffer::with(&self.stream,&tasks)?;
         let rings=Buffer::new(8*w.ring_stride*WARPS*n)?;let samples=Buffer::new(56*w.listed.len().max(1)*WARPS*n)?;
         let sums=Buffer::new(8*w.outputs*RECORD*n)?;let scratch=Buffer::new(8*program.scratch()*WARPS*n)?;let records=Buffer::new(8*MOST_INTERVALS*SLOT_RECORD*WARPS*n)?;
         let profile=Buffer::new(if self.profiled.is_some(){8*SPANS.len()*WARPS*n}else{0})?;
         // A launch's report per slot: the held twin's cycles, all its cycles, and the interval it stands in (a slot without a
-        // trajectory past them all, and it writes none).
+        // trajectory, or past its task's last, past them all).
         let mut cycles:Vec<u64>=slots.iter().flat_map(|s|[0,0,if s.is_some(){0}else{u64::MAX}]).collect();
         let reports=[HostWords::new(&cycles)?,HostWords::new(&cycles)?];
         self.stream.zero(&rings)?;self.stream.zero(&samples)?;self.stream.zero(&sums)?;self.stream.zero(&profile)?;
