@@ -143,7 +143,7 @@ LOGIC_NODE = NodeType(
     NodeKind.PROCESSOR,
     DERIVE_SCHEMA,
     description=(
-        "Within-evaluation algebra on one producer's synchronized bundle: live, each publication; at "
+        "Algebra on one producer's synchronized bundle: live, each publication; at "
         "the end of a finite run, the run's Dataset. values.variables has one row per variable: name; "
         "publish (default true; false keeps a helper internal: other variables read it, nothing "
         "publishes it); terms, the formula, one row per line; optional statistic + over. A term names "
@@ -174,7 +174,7 @@ LOGIC_NODE = NodeType(
         "[{\"name\":\"same\",\"publish\":false,\"terms\":[{\"of\":\"occupied\",\"at\":\"frame\","
         "\"labels\":[\"0\"]},{\"op\":\"==\",\"of\":\"occupied\",\"at\":\"frame\",\"labels\":[\"2\"]}]},"
         "{\"name\":\"kept\",\"terms\":[{\"of\":\"counts\"},{\"op\":\"where\",\"of\":\"same\"}]}]. "
-        "Shot averages with error bars and per-site probabilities belong in a plot panel."
+        "A mean carries its standard error as sigma; a pick and where keep it, arithmetic drops it."
     ),
     input_specs=(DatasetInput("bundle", None, "exact", select_bundle=True),),
     declare_outputs=_draft_outputs,

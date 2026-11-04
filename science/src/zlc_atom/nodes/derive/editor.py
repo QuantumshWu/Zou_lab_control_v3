@@ -30,7 +30,7 @@ from .expression import (
 #: The field the cards write; the Edit page's plain form leaves it out.
 DERIVE_EDITOR_FIELDS = ("variables",)
 _STRIPS = dict(CATEGORIES)
-_FOOTER = "Averages over shots with error bars, per-site probabilities and fits belong in a plot panel."
+_FOOTER = "A mean carries its standard error and a fit each parameter's; a pick or a mask keeps it, arithmetic drops it."
 _EMPTY = ("No variables yet. A variable picks values of an input, combines them line by line, can mask and "
           "reduce them; Publish makes it a signal.")
 #: The operand list's constants.  A member or variable name never starts
@@ -375,17 +375,27 @@ def _card(row, answer, context) -> dict:
     # axis of the value (v2 _statistic_chosen).
     cells = [] if reducible is None else [axis.name for word, _domain, axes in axis_groups(reducible)
                                          if word == "Cell" for axis in axes]
+    # What picking each statistic writes.  A fit's x is one axis; a group is not offered it.
+    reducing = {"row": {"over": list(row["over"]) or cells, "model": ""},
+                "opens_over": not row["over"] and not cells and bool(over)}
+    fitting = {"row": {"over": list(row["over"]) if len(row["over"]) == 1 else [], "by": "", "every": 0},
+               "opens_over": False}
+    fit = row["statistic"] == "fit"
+    axes = [] if not fit or reducible is None else _fit_axes(reducible)
     statistic = {
         "current": row["statistic"] or None,
         "choices": [[name, reducible is None or name in STATISTICS_FOR[_boolean(reducible)]
                      or name == row["statistic"]] for name in STATISTICS],
-        "over": list(row["over"]), "over_choices": over, "default_over": cells,
-        # Groups: blank every is the whole axis; by is one of over_choices.
+        "over": list(row["over"]), "over_choices": over,
+        "chosen": {name: fitting if name == "fit" else reducing for name in STATISTICS},
+        # Groups: blank every is the whole axis; by is one of the axes reduced.
+        "every_axes": [] if fit or not row["statistic"] else list(row["over"]),
         "by": row["by"], "every": row["every"],
-        # A fit: the model's list once fit is chosen, the one x axis it may take, what it publishes.
-        "model": row["model"],
-        "models": [] if row["statistic"] != "fit" else [[model["id"], model["label"]] for model in fit_models().values()],
-        "fit_axes": [] if row["statistic"] != "fit" or reducible is None else _fit_axes(reducible),
+        # A fit: the model's list once fit is chosen, the one x axis it may take
+        # (and the one the row names, whatever is said of it), what it publishes.
+        "fit": fit, "model": row["model"],
+        "models": [] if not fit else [[model["id"], model["label"]] for model in fit_models().values()],
+        "fit_axes": [*axes, *(name for name in row["over"] if fit and name not in axes)],
         "publishes": [[name.removeprefix(row["name"] + "_"), item.value_schema.value_unit or "1"]
                       for name, item in (answer.get("fit") or {}).items()],
         "error": "", "muted": False,
