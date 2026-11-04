@@ -251,7 +251,8 @@
 //!
 //! # First order in the Doppler and recoil shifts
 //! Absorbing from beam l shifts the excited state by the kinetic energy w_l = (ħ/m)(k_l·κ + k_l²/2);
-//! to first order R_l → R_l − w_l R2_l, and `Ground::response` gives the shifted response to all
+//! to first order R_l → R_l − w_l R2_l, in the generator and the jumps alike (model.rs, # The photons and the
+//! Doppler term), and `Ground::response` gives the shifted response to all
 //! orders. An explicit drive needs neither: the moving atom's phase e^{ik_l·r(t)} is its Doppler shift.
 //!
 //! # Approximations and their estimates (the solve's ledger)

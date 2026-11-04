@@ -146,12 +146,13 @@
 //! GMW references in the validated regime (solve.rs).
 //!
 //! # First order in the Doppler shift
-//! The folded photon amplitudes take the kinetic shift of absorption to first order, R − w R2
-//! (model.rs), good to (kv/σ)², the largest (w_l/σ_c)² over the near beams, σ_c the nearest excited
+//! The folded responses take the kinetic shift of absorption to first order, R − w R2, in the generator as in the jumps'
+//! photons (model.rs, # The photons and the Doppler term: the mean force on a state then the adiabatic expansion's to that
+//! order), good to (kv/σ)², the largest (w_l/σ_c)² over the near beams, σ_c the nearest excited
 //! pole of beam l's carrier (model.rs `Model::doppler_ratio`). A step whose (kv/σ)² exceeds the
-//! solve's allowance (`Settings::doppler`) takes the exact response at its jumps (model.rs `Exact`);
-//! the largest first-order (kv/σ)² a trajectory used is its share of the ledger
-//! (`Trajectory::doppler`). An explicit drive needs neither: the atom's motion through e^{ik_l·r} is
+//! solve's allowance (`Settings::doppler`) takes the exact response at its jumps (model.rs `Exact`), its hazard still the
+//! generator's first order, its error of that (kv/σ)² on the few atoms that hot;
+//! the atoms' mean (kv/σ)² is the ledger's. An explicit drive needs neither: the atom's motion through e^{ik_l·r} is
 //! its Doppler shift.
 //!
 //! # Loss
@@ -234,7 +235,7 @@ pub struct Settings{
     pub average:bool,
     /// The loss by the mechanical energy (a solve's); off where a validation holds the atom.
     pub loss:bool,
-    /// The largest (kv/σ_min)² the first order in the Doppler shift is kept to.
+    /// The largest (kv/σ_min)² a jump keeps the first order in the Doppler shift to (# First order in the Doppler shift).
     pub doppler:f64,
     /// The share of ‖ψ‖ per step within which the exact step leaves out a generator's beats
     /// (`Segment::resolve`): the exponentials' share in a solve, also in its pilot, whose exponentials
