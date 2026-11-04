@@ -184,10 +184,15 @@ def variable_outputs(row: Mapping[str, object]) -> tuple[str, ...]:
 
 
 def _parameter_unit(relation: str, x_unit: str, y_unit: str) -> str:
-    """A parameter's unit by the catalogue's relation to the x and y units."""
+    """A parameter's unit by the catalogue's relation to the x and y units: an
+    inverse axis reads as a panel's fit names it, the registry's reciprocal unit
+    (µs: MHz) when it declares one."""
 
+    if relation == "inverse_axis_0":
+        inverse = DEFAULT_UNITS.inverse_for(x_unit)
+        return _unit_power(x_unit, -1) if inverse is None else inverse.symbol
     return {"dimensionless": "1", "value": y_unit, "value_times_axis_0": _unit_power(f"{y_unit}*{x_unit}", 1),
-            "axis_0": x_unit, "inverse_axis_0": _unit_power(x_unit, -1), "radian": "rad"}[relation]
+            "axis_0": x_unit, "radian": "rad"}[relation]
 
 
 # -- schemas -----------------------------------------------------------------

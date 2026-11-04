@@ -390,10 +390,10 @@ class Fit(unittest.TestCase):
         answers = typed_variables(self.rows, {'counts': self.schema})
         self.assertIsNone(answers[1]['error'])
         self.assertEqual(tuple(answers[1]['fit']), ('rabi_slope', 'rabi_offset'))
-        self.assertEqual(answers[1]['fit']['rabi_slope'].value_schema.value_unit, 'µs^-1')
+        self.assertEqual(answers[1]['fit']['rabi_slope'].value_schema.value_unit, 'MHz')
         self.assertEqual(answers[1]['fit']['rabi_offset'].value_schema.value_unit, 'V')
         self.assertEqual(answers[1]['fit']['rabi_offset'].repeat_domain.size, 3)
-        self.assertEqual(answers[2]['schema'].value_schema.value_unit, 'µs^-1')
+        self.assertEqual(answers[2]['schema'].value_schema.value_unit, 'MHz')
         self.assertEqual(published(self.rows), ('rabi_slope', 'rabi_offset', 'twice'))
 
     def test_fit_per_group_once_each_and_routes_agree(self):
@@ -475,9 +475,9 @@ class Fit(unittest.TestCase):
         statistic = cards[1]['statistic']
         self.assertEqual(statistic['model'], 'line')
         self.assertEqual(statistic['models'], [['line', 'Line']])
-        self.assertEqual(statistic['publishes'], [['slope', 'µs^-1'], ['offset', 'V']])
+        self.assertEqual(statistic['publishes'], [['slope', 'MHz'], ['offset', 'V']])
         self.assertIn('duration', statistic['fit_axes'])
-        self.assertEqual(cards[1]['preview'], '→ publishes slope (µs^-1), offset (V)')
+        self.assertEqual(cards[1]['preview'], '→ publishes slope (MHz), offset (V)')
         self.assertTrue(any(item['value'] == 'rabi_slope' for item in cards[2]['lines'][0]['operands']))
         self.assertIn('fit', [choice[0] for choice in statistic['choices']])
         self.assertEqual(facts['defaults']['variable']['every'], 0)
