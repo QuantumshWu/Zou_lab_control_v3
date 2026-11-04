@@ -596,6 +596,18 @@ impl Model{
     pub fn with_order(request:&Request,allowance:f64,fourth:bool)->Result<Model,String>{Model::bounded(request,allowance,fourth,MOST_TABLE_BYTES,MOST_TABLE_NODES)}
     /// The same within the given work bounds on its tables (`MOST_TABLE_BYTES`, `MOST_TABLE_NODES`).
     pub(crate) fn bounded(request:&Request,allowance:f64,fourth:bool,most_bytes:usize,most_nodes:usize)->Result<Model,String>{
+        let(mut model,bases)=Model::laid_out(request,allowance,fourth)?;
+        let stake=model.stake(request);model.tabulate(&bases,most_bytes,most_nodes,stake)?;
+        model.lindblad()?;
+        Ok(model)
+    }
+    /// Each cluster's counted work (`work`) in the model at this allowance and order, from its layout alone: its tables
+    /// unbuilt (solve.rs: the fourth order's tables are worth their build only for a saving beyond it).
+    pub(crate) fn layout_work(request:&Request,allowance:f64,fourth:bool)->Result<Vec<Work>,String>{
+        let(model,_)=Model::laid_out(request,allowance,fourth)?;Ok((0..model.clusters()).map(|k|model.work(k)).collect())
+    }
+    /// The model at this allowance and order but for its tables, and each carrier's coefficients on its basis.
+    fn laid_out(request:&Request,allowance:f64,fourth:bool)->Result<(Model,Vec<Vec<Vec<Complex>>>),String>{
         let ground=Ground::with(request,allowance)?;
         let geometry:Vec<Geometry>=ground.beams.iter().map(|b|Geometry{direction:b.direction,wave_number:b.wave_number_per_um,waist:b.waist_um}).collect();
         let trap_beam=request.trap_beam;
@@ -636,9 +648,7 @@ impl Model{
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
         model.choose_profiles(request)?;
         model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();
-        let stake=model.stake(request);model.tabulate(&bases,most_bytes,most_nodes,stake)?;
-        model.lindblad()?;
-        Ok(model)
+        Ok((model,bases))
     }
 
     /// What a unit of booked population error costs the run (ns), the tables' stake (`tabulate`): the run's
