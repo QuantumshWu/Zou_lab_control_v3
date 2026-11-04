@@ -267,8 +267,8 @@ impl Beats{
 /// keeps it where the second order keeps a coupling at that beat (below the cut, or at a kept coupling's
 /// residual on the entry); the others are zero in the tables, their mixings' squares booked (`dropped`).
 #[derive(Clone,Debug)]
-pub(crate) struct FourthLayout{carriers:Vec<usize>,fields:Vec<(usize,usize)>,quartic:Vec<QuarticSlab>,slow:Vec<SlowSlab>,jumps:Vec<JumpSlab>,
-    p:Vec<(usize,usize,Middle,usize)>,landing:Vec<u32>,pub(crate) dropped:f64}
+pub(crate) struct FourthLayout{pub(crate) carriers:Vec<usize>,pub(crate) fields:Vec<(usize,usize)>,pub(crate) quartic:Vec<QuarticSlab>,pub(crate) slow:Vec<SlowSlab>,pub(crate) jumps:Vec<JumpSlab>,
+    pub(crate) p:Vec<(usize,usize,Middle,usize)>,landing:Vec<u32>,pub(crate) dropped:f64}
 /// A W3 triple (c1, c2, c4)'s middle factor (V_c2†R_c4)[b′, b] (ground.rs `Ground::excluded`): whole; less the far channels
 /// of (c4, b) through c2 (c1 = c2, Σ's first order); or less c2's light shift (c2 = c4 ≠ c1) that c1's block holds:
 /// b's own, an unmixed block's (`Shift`, ground.rs `Ground::unmixed`), or between the cluster's states (`Shifts`).
@@ -281,7 +281,7 @@ impl Middle{
 /// lab frequency ν (rad/us), its kept entries, their parts among the cluster's beats (`Model::components`:
 /// 0 the static part, 1 + j beat j's) and where it lies.
 #[derive(Clone,Debug)]
-pub(crate) struct QuarticSlab{conj:(usize,usize),plain:(usize,usize),nu:f64,keep:Vec<bool>,part:Vec<usize>,at:usize}
+pub(crate) struct QuarticSlab{pub(crate) conj:(usize,usize),pub(crate) plain:(usize,usize),pub(crate) nu:f64,pub(crate) keep:Vec<bool>,pub(crate) part:Vec<usize>,pub(crate) at:usize}
 impl FourthLayout{
     /// Its slabs' kept entries' beats Ω = θ_x − θ_y + ν in a cluster's frames.
     fn residuals(&self,frames:&[f64])->Vec<f64>{
@@ -296,12 +296,12 @@ impl FourthLayout{
 /// One carrier pair's slabs: R_c1†R_c2 on the coherent entries (`coherent`) at `rr`, YW_c1c2 at `yw`; their
 /// lab frequency δ_c1 − δ_c2.
 #[derive(Clone,Debug)]
-pub(crate) struct SlowSlab{carriers:(usize,usize),nu:f64,coherent:Vec<bool>,rr:usize,yw:usize}
+pub(crate) struct SlowSlab{pub(crate) carriers:(usize,usize),pub(crate) nu:f64,coherent:Vec<bool>,pub(crate) rr:usize,pub(crate) yw:usize}
 /// The jumps' W3 at a photon carrier's frequency through one inner carrier c1: its table -- each column from every source
 /// place, or from its own alone where the photon carrier's block is unmixed (`diagonal`, ground.rs `Ground::unmixed`) --
 /// and the middle factors of the triples (c1, c2, c4) at that frequency (into `FourthLayout::p`).
 #[derive(Clone,Debug)]
-pub(crate) struct JumpSlab{photon:usize,inner:usize,pairs:Vec<usize>,diagonal:bool,at:usize}
+pub(crate) struct JumpSlab{pub(crate) photon:usize,pub(crate) inner:usize,pub(crate) pairs:Vec<usize>,pub(crate) diagonal:bool,pub(crate) at:usize}
 impl JumpSlab{
     /// The source places per column: all n of the cluster's, or the column's own.
     fn sources(&self,n:usize)->usize{if self.diagonal{1}else{n}}

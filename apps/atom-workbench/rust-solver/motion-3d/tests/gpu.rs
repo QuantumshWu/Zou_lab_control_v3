@@ -255,11 +255,30 @@ fn with_a_retro_reflected_tweezer_a_step_and_a_jump_are_the_cpu_s(){
 /// −C W3 − ½ C R R†R and the slow start ψ ← Π f/√A, θ ← θ/A; the first order's and the exact response.
 /// On the tweezer PGC, whose clusters each lie in one hyperfine level: the gray molasses' spans F = 1
 /// and F = 2, and at fourth order H^(4)'s entries between them beat at the hyperfine splitting, which
-/// the multirate exact step takes on the CPU (gpu/program.rs refuses it).
+/// the multirate exact step takes.
 #[test]
-#[ignore="fourth2's FourthLayout (slabs, slow pairs, jump slabs): the kernel's port is pending"]
 fn at_fourth_order_a_step_and_a_jump_are_the_cpu_s(){
     let r=request(PGC);compare(&r,None,f64::INFINITY,false,true);compare(&r,Some(0.999),f64::INFINITY,true,true);compare(&r,Some(0.999),0.,true,true);
+}
+
+/// The same on the gray molasses, whose H^(4) beats at the hyperfine splitting: its slabs in the parts of the exact step. A jump-free
+/// step, and a jump at each thermal state (the step's own crossing moves with the single-precision norm, the state by as much).
+#[test]
+fn at_fourth_order_a_beating_step_and_jump_are_the_cpu_s(){
+    let Some(gpu)=device()else{return};
+    let r=request(MOLASSES);let m=model(&r,true);assert!((0..m.clusters()).any(|k|m.beating(k)),"its fourth order beats");
+    compare_model(&r,m.clone(),0.2,Some(1e-300),f64::INFINITY,false);
+    let(model,settings,trajectories)=setup(&r,m,0.2,None,f64::INFINITY);
+    let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());let program=gpu.program(&model,&settings).unwrap();let engine=Engine::new(&model,settings.clone());
+    for t in &trajectories{
+        let mut c=t.clone();let(r0,t0)=(c.r,c.time);engine.jump(&mut c,r0,t0,false);let g=gpu.jump_probe(&program,&settings,t,false).unwrap();
+        let at=format!("the jump of trajectory {} (cluster {} → {})",t.index,t.cluster,c.cluster);
+        assert_eq!((g.cluster,g.jumps),(c.cluster,c.jumps),"{at}");assert!((g.threshold-c.threshold).abs()<=1e-5*c.threshold,"{at}: the threshold {} against {}",g.threshold,c.threshold);
+        let scale=c.kappa.iter().map(|x|x.abs()).fold(1.,f64::max);
+        for a in 0..3{assert!((g.kappa[a]-c.kappa[a]).abs()<=5e-6*scale,"{at}: κ {:?} against {:?}",g.kappa,c.kappa);}
+        let n=model.dimension(c.cluster);let(gn,cn)=(g.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt(),c.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt());
+        for x in 0..n{let(u,v)=(g.psi[x]*(1./gn),c.psi[x]*(1./cn));assert!((u-v).abs()<=1e-5,"{at}: ψ[{x}] {u:?} against {v:?}");}
+    }
 }
 
 /// The trajectories of a batch (`first`, `count` and `group` as lib.rs `simulate` takes them) whose
@@ -363,7 +382,6 @@ fn a_batch_s_sums_are_the_cpu_s(){
 /// The same at fourth order, on the tweezer PGC, with the held twin's start and post-jump map (control.rs
 /// # The twin at fourth order).
 #[test]
-#[ignore="fourth2's FourthLayout (slabs, slow pairs, jump slabs): the kernel's port is pending"]
 fn at_fourth_order_a_batch_s_sums_are_the_cpu_s(){batch(&request(PGC),true,0.2);}
 
 /// The default scene's motion as the app sends it (rust-solver/tests/fixtures/default_scene_motion.json)
