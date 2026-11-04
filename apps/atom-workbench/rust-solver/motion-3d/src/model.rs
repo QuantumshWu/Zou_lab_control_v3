@@ -119,9 +119,9 @@
 //! Y's and Y†'s coefficients join Φ's on the Q the generator gathers anyway. λ on a group of one pair and one entry is exact, a resonant shell's among them; what it leaves elsewhere --
 //! a group of states of different energies, whose poles differ (B ≠ 0), the far share where no pole is near -- is kept entry by entry where it can reach `FIRST_SHARE` of T
 //! (`Model::transfer_tables`: the friction its error makes against the recoil heating, 2 k_B T/ħ |ΔW|/|Q|), W − λ Q in a table of those entries alone, and the rest bounded (`Model::first_error`).
-//! The tables' slope of W in the force, −Re ξ ∇s_f ⟨∂_f W^S⟩, is left out, and in the photon's gradient the slope of J2. Of Re ξ the first is W^S's large part Q/Γ, ∇(k·v L) with L the light shift over its pole: it
-//! does no net work over a path that returns (only with the path's −(v·∇)L k would it do none at all, which the force does not hold either); of Im ξ, as the second, the envelope's ∇_env/k of the Doppler force, of
-//! the order the amplitude's lag leaves out below (measured on the control cycle: L at 300 us and T within their errors, 0.0008 ± 0.005 and 0.1 ± 0.4 uK).
+//! The tables' slope of W in the force, −Re ξ ∇s_f ⟨∂_f W^S⟩, is left out, and with it in the photon's gradient the slope of J2: on a pole's term the two sum to −2 |u|² Re(ξ G*∂_f G) ∇s_f, for one beam's ξ = w |E|² −w ∇ρ_e,
+//! the excited population's gradient times the shift, which does no net work over a path that returns (the adiabatic expansion's force holds no derivative of the denominators: the rest is the amplitude's lag above, of
+//! its order). Measured on the control cycle, on one seed's streams: L at 300 us −0.0010 ± 0.0002, T's second half within 0.12 %.
 //!
 //! # The trap
 //! The trap beam's focus is the origin. Its trap is each state's potential with the near beams'
