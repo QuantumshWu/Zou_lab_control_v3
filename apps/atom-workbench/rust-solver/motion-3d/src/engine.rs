@@ -220,8 +220,6 @@ pub struct Trajectory{
     pub threshold:f64,
     pub alive:bool,
     pub jumps:u64,
-    /// The largest (kv/σ_min)² of its first-order steps.
-    pub doppler:f64,
     /// The largest bound per unit time (1/us) of the beats its exact steps left out (`Segment::resolve`):
     /// over the waiting time, its share of the ledger.
     pub beats:f64,
@@ -1033,13 +1031,12 @@ impl<'a> Engine<'a>{
     /// on either side of the jump. Then the loss.
     pub fn step(&self,t:&mut Trajectory){
         let(m,s)=(self.model,&self.settings);
-        // The first order in the Doppler shift where it holds; the exact response beyond.
-        let doppler=m.doppler_ratio(t.kappa);let exact=doppler>s.doppler;
-        if !exact{t.doppler=t.doppler.max(doppler);}
+        // The first order in the Doppler shift where it holds, by the step's start; the exact response beyond: read at its jumps and by an exact step alone.
+        let kappa=t.kappa;let exact=||m.doppler_ratio(kappa)>s.doppler;
         // The state the loss is judged at: the step's middle where it went without a jump -- the point
         // the flow's first half reached, κ there with half the kick, ψ after the first half step, the
         // middle's time --, else its end.
-        let(place,middle)=if self.takes_exact(t.cluster){self.exact(t,s.dt,exact,true);((t.r,t.kappa),None)}else{
+        let(place,middle)=if self.takes_exact(t.cluster){self.exact(t,s.dt,exact(),true);((t.r,t.kappa),None)}else{
             let mut left=s.dt;
             loop{
                 let start=t.clone();
@@ -1049,10 +1046,10 @@ impl<'a> Engine<'a>{
                 let(ta,tb,la,lb)=if nh<=t.threshold{(0.,0.5*left,n0.ln(),nh.ln())}else{(0.5*left,left,nh.ln(),n1.ln())};
                 let at=if lb<la{(ta+(t.threshold.ln()-la)/(lb-la)*(tb-ta)).clamp(ta,tb)}else{tb};
                 *t=start;if at>0.{self.advance(t,at);}
-                self.jump(t,t.r,t.time,exact);
+                self.jump(t,t.r,t.time,exact());
                 left-=at;
                 if !(left>0.){break((t.r,t.kappa),None);}
-                if self.takes_exact(t.cluster){self.exact(t,left,exact,true);break((t.r,t.kappa),None);}
+                if self.takes_exact(t.cluster){self.exact(t,left,exact(),true);break((t.r,t.kappa),None);}
             }
         };
         // The loss: an atom unbound -- its mechanical energy above the trap's far level -- outside the trap's

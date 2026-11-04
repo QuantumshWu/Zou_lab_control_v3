@@ -306,7 +306,7 @@ struct State{
     double twin_logn,twin_threshold,twin_log_threshold;   // the held twin's (control.rs)
     float2 psi[MAXM];                   // ψ/‖ψ‖ on its cluster
     float2 twin[MAXN];                  // the held twin's
-    float doppler;int cluster,jumps,death;  // death: the step it was lost at, −1 while held
+    int cluster,jumps,death;            // death: the step it was lost at, −1 while held
     u32 index;int twin_cluster,twin_jumps;float beats;   // beats: the largest bound per unit time of the beats its exact steps left out
     int interval,step;                  // where it stands: the output interval it is in, its last step (−1 before the first)
 };
@@ -369,7 +369,7 @@ struct Warp{
 static_assert(sizeof(FirstPair)*MOST_FIRST<=2*MAXN*MAXN*sizeof(float2),"a generator's first orders lie clear of W.m[2]");
 
 // The trajectory's scalars (uniform over the warp).
-struct Traj{double q[3],p[3],time,logn,threshold,log_threshold;float doppler;int cluster,jumps,death;u32 index;float beats;};
+struct Traj{double q[3],p[3],time,logn,threshold,log_threshold;int cluster,jumps,death;u32 index;float beats;};
 // The held twin's (control.rs): it does not move.
 struct Twin{double logn,threshold,log_threshold;int cluster,jumps;};
 
@@ -2583,16 +2583,16 @@ __device__ __noinline__ void transient(const Program& P,Warp& W,Traj& t,const do
 // outside the trap's region, judged at the step's middle where it went without a jump, else at its
 // end.
 __device__ bool step(const Program& P,const Run& R,Warp& W,Traj& t,int lane,float2* scratch){
-    const float ratio=doppler_ratio(P,t,lane);const bool exact=ratio>P.allowance;
-    if(!exact)t.doppler=fmaxf(t.doppler,ratio);
-    double left=P.dt;Local L;Middle M;bool fresh=false;
-    if(P.clusters[t.cluster].exact){exact_step(P,R,W,t,left,exact,lane,scratch);point<false>(P,W,t,lane);fresh=true;}
+    // The first order in the Doppler shift where it holds, by the step's start; the exact response beyond: read at its jumps and by an exact step alone.
+    double left=P.dt;Local L;Middle M;bool fresh=false,exact=false,asked=false;
+    if(P.clusters[t.cluster].exact){exact=doppler_ratio(P,t,lane)>P.allowance;exact_step(P,R,W,t,left,exact,lane,scratch);point<false>(P,W,t,lane);fresh=true;}
     else for(;;){
         const Traj start=t;
         if(lane<MAXN)W.start[lane]=W.psi[lane];
         double lh;advance(P,W,t,left,lane,lh,L,M);
         if(t.logn>t.log_threshold)break;
         // The crossing on ln‖ψ‖², linear on the half where it lies; the step redone to it.
+        if(!asked){exact=doppler_ratio(P,start,lane)>P.allowance;asked=true;}
         double ta,tb,la,lb;
         if(lh<=t.log_threshold){ta=0.;tb=0.5*left;la=start.logn;lb=lh;}else{ta=0.5*left;tb=left;la=lh;lb=t.logn;}
         const double at=lb<la?fmin(fmax(ta+(t.log_threshold-la)/(lb-la)*(tb-ta),ta),tb):tb;
@@ -2729,7 +2729,7 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Program P,con
         #pragma unroll
         for(int i=0;i<3;i++){t.q[i]=S->q[i];t.p[i]=S->p[i];q0[i]=S->q0[i];p0[i]=S->p0[i];}
         t.time=S->time;t.logn=S->logn;t.threshold=S->threshold;t.log_threshold=S->log_threshold;
-        t.doppler=S->doppler;t.cluster=S->cluster;t.jumps=S->jumps;t.death=S->death;t.index=S->index;t.beats=S->beats;
+        t.cluster=S->cluster;t.jumps=S->jumps;t.death=S->death;t.index=S->index;t.beats=S->beats;
         h.logn=S->twin_logn;h.threshold=S->twin_threshold;h.log_threshold=S->twin_log_threshold;h.cluster=S->twin_cluster;h.jumps=S->twin_jumps;
         if(lane<15)prefix=S->prefix[lane];
         if(lane<MAXM)W.psi[lane]=S->psi[lane];
@@ -2827,7 +2827,7 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Program P,con
             #pragma unroll
             for(int a=0;a<3;a++){S->q[a]=t.q[a];S->p[a]=t.p[a];}
             S->time=t.time;S->logn=t.logn;S->threshold=t.threshold;S->log_threshold=t.log_threshold;
-            S->doppler=t.doppler;S->cluster=t.cluster;S->jumps=t.jumps;S->death=t.death;S->beats=t.beats;S->interval=i;S->step=k;
+            S->cluster=t.cluster;S->jumps=t.jumps;S->death=t.death;S->beats=t.beats;S->interval=i;S->step=k;
         }
         if(lane<15)S->prefix[lane]=prefix;
         if(lane<MAXM)S->psi[lane]=W.psi[lane];
@@ -2923,7 +2923,7 @@ extern "C" __global__ void jump_probe(const Program P,const Run R,State* S,float
     Traj t;
     #pragma unroll
     for(int i=0;i<3;i++){t.q[i]=S->q[i];t.p[i]=S->p[i];}
-    t.time=S->time;t.logn=S->logn;t.threshold=S->threshold;t.log_threshold=S->log_threshold;t.doppler=S->doppler;t.cluster=S->cluster;t.jumps=S->jumps;
+    t.time=S->time;t.logn=S->logn;t.threshold=S->threshold;t.log_threshold=S->log_threshold;t.cluster=S->cluster;t.jumps=S->jumps;
     t.death=S->death;t.index=S->index;t.beats=S->beats;
     if(lane<MAXM)W.psi[lane]=S->psi[lane];
     __syncwarp();jump(P,R,W,t,exact!=0,lane,scratch);__syncwarp();
