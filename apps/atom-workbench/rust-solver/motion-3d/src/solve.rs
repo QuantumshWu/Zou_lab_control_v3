@@ -588,8 +588,6 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         },
     };
     let used=if gpu.is_some(){Device::Gpu}else{Device::Cpu};
-    // On the GPU the exact response leaves the near light's dressing out (gpu/program.rs): its bound.
-    if gpu.is_some()&&model.undressed>0.{base.add("GPU 精确响应中的近共振光彼此光移",model.undressed,"多普勒一阶之外的精确响应未含彼此的光移（GPU）；其界".into());}
     // The control variates (control.rs): the harmonic twin's, and the held twin where the trap beam's
     // intensity is the pilot's mean, when the generator is static.
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);

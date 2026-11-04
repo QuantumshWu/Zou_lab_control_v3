@@ -232,13 +232,26 @@ impl Gpu{
         Ok(words[..4*q*n*n].iter().map(|z|Complex::new(z[0] as f64,z[1] as f64)).collect())
     }
 
+    /// A trajectory's cluster's exact responses at its point (the kernel's `exact_responses`, a check's
+    /// entry): per near beam (in the beams' order), cluster column, axis a and ground state `to`, (C_a R_l)[to, b];
+    /// Err where a resolvent is singular.
+    pub fn response_probe(&self,program:&Program,settings:&Settings,t:&Trajectory)->Result<Vec<Complex>,String>{
+        self.context.make_current()?;
+        let size=program.params.nnear as usize*program::MAXN*3*crate::model::GROUND;
+        let state=Buffer::with(&self.stream,&[program::State::new(t,t,settings)])?;let out=Buffer::new(8*(size+program::NE*32))?;
+        let f=self.function("response_probe")?;self.stream.launch(&f,1,32,&[&program.params,&state.pointer,&out.pointer])?;
+        let mut words=vec![[0f32;2];size];self.stream.download(&out,&mut words)?;
+        if words[0][0].is_nan(){return Err("The excited states' resolvent is singular".into());}
+        Ok(words.iter().map(|z|Complex::new(z[0] as f64,z[1] as f64)).collect())
+    }
+
     /// A trajectory after a jump at its position and time on the GPU (engine.rs `Engine::jump`, the first
-    /// order in the Doppler shift; a check's entry): the kernel's `jump_probe`.
-    pub fn jump_probe(&self,program:&Program,settings:&Settings,t:&Trajectory)->Result<Trajectory,String>{
+    /// order in the Doppler shift or, where `exact`, the exact response; a check's entry): the kernel's `jump_probe`.
+    pub fn jump_probe(&self,program:&Program,settings:&Settings,t:&Trajectory,exact:bool)->Result<Trajectory,String>{
         self.context.make_current()?;
         let state=Buffer::with(&self.stream,&[program::State::new(t,t,settings)])?;let scratch=Buffer::new(8*program.scratch())?;
         let mut run=program::Run::empty();run.seed=t.seed;
-        let f=self.function("jump_probe")?;self.stream.launch(&f,1,32,&[&program.params,&run,&state.pointer,&scratch.pointer])?;
+        let f=self.function("jump_probe")?;self.stream.launch(&f,1,32,&[&program.params,&run,&state.pointer,&scratch.pointer,&(exact as i32)])?;
         let mut out=[program::State::default()];self.stream.download(&state,&mut out)?;
         Ok(out[0].trajectory(settings,t.seed))
     }

@@ -5,7 +5,6 @@
 use super::driver::{Buffer,Stream};
 use crate::engine::Settings;
 use crate::linear::Dense;
-use crate::ledger::BUDGET;
 use crate::model::{Model,GROUND,MOST_BEAMS,MOST_CARRIERS,MOST_FOCUSED,MOST_RANK,MOST_STATES};
 use crate::Complex;
 
@@ -32,7 +31,12 @@ pub struct Carrier{rank:i32,beams:i32,first:i32,pad:i32,detuning:f64,wave:f64}
 pub struct Unit{first:i32,count:i32,norm:f32,focus:f32,profile:f32,pad:i32}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Cluster{n:i32,size:i32,table:i32,h0:i32,groups:i32,ngroups:i32,classes:i32,nclasses:i32,coherent:i32,ncoherent:i32,carriers:i32,fourth:i32,frames:i32,
-    positions:i32,beats:i32,nbeats:i32,n0:i32,exact:i32,parts:i32,omegas:i32,terms:i32,nterms:i32,emission:i32,excited:i32,group_parts:i32,residual_parts:i32,states:[i32;MAXM]}
+    positions:i32,beats:i32,nbeats:i32,n0:i32,exact:i32,parts:i32,omegas:i32,terms:i32,nterms:i32,emission:i32,excited:i32,group_parts:i32,residual_parts:i32,states:[i32;MAXM],
+    shifts:u64}
+/// The kernel's `NearUnit` (ground.rs `NearUnit`): its carrier, its place among the focused units (−1: at its
+/// focus intensity), N and s(0).
+#[repr(C)]#[derive(Clone,Copy,Default,Debug)]
+pub struct NearUnit{carrier:i32,focused:i32,norm:f32,focus:f32}
 /// The kernel's `Term`: a term of a cluster's explicit states (model.rs `exact_terms`): a kept drive (0), a
 /// decay cross term (1), a decay (2) or a dressing's drive (3), its row, column, carrier, part, its
 /// mirror's part, its tables' place, a drive's U_k.
@@ -68,11 +72,13 @@ pub struct Params{
     excited:u64,diagonal:u64,couplings:u64,emission:u64,class_rows:u64,fourths:u64,frames:u64,item_first:u64,items:u64,residuals:u64,
     units:u64,unit_beams:u64,unit_weights:u64,
     terms:u64,omegas:u64,group_parts:u64,residual_parts:u64,excited_list:u64,directs:u64,levels:u64,level_first:u64,decay_root:u64,
+    kept:u64,decay:u64,near_units:u64,unit_couplings:u64,vias:u64,via_first:u64,
     nbeams:i32,ncarriers:i32,nclusters:i32,focused:i32,nodes:i32,fields:i32,pub(crate) nnear:i32,doppler:i32,loss:i32,weights:i32,nunits:i32,
-    exact_at:i32,transient_at:i32,nlevels:i32,
+    exact_at:i32,transient_at:i32,nlevels:i32,rows_at:i32,
     focused_unit:[i32;MOST_FOCUSED],stride:[i32;MOST_FOCUSED],
     field_carrier:[i32;MOST_CARRIERS*MOST_RANK],field_rank:[i32;MOST_CARRIERS*MOST_RANK],
     ground_states:[i32;GROUND],excited_states:[i32;NE],ground_cluster:[i32;GROUND],ground_position:[i32;GROUND],
+    near_first:[i32;MOST_CARRIERS+1],explicit_of:[u32;GROUND],partners:[u32;NE],
     hm:f32,light2:f32,allowance:f32,truncation:f32,
     axes32:[[f32;3];3],stiffness32:[f32;3],
     hm64:f64,dt:f64,
@@ -112,17 +118,17 @@ impl Run{
 
 /// The sizes, offsets and constants the kernel's `layout` reports, for the check that the twins and
 /// the constants they share match.
-pub fn layout()->[u32;25]{
+pub fn layout()->[u32;26]{
     use std::mem::{offset_of,size_of};
     use super::{HARMONIC,MOST_INTERVALS,MOTION,RECORD,SLOT_RECORD,TWIN,WARPS};
     [size_of::<Beam>(),size_of::<Carrier>(),size_of::<Cluster>(),size_of::<Group>(),size_of::<Class>(),size_of::<Photon>(),size_of::<Coherent>(),size_of::<Channel>(),
         size_of::<Params>(),size_of::<State>(),size_of::<Run>(),offset_of!(Params,hm),offset_of!(Params,half_flow),offset_of!(Run,listed),offset_of!(State,psi),offset_of!(State,index),
-        MOST_INTERVALS,SLOT_RECORD,RECORD,WARPS,MAXN,TWIN,MOTION,HARMONIC,size_of::<Fourth>()].map(|x|x as u32)
+        MOST_INTERVALS,SLOT_RECORD,RECORD,WARPS,MAXN,TWIN,MOTION,HARMONIC,size_of::<Fourth>(),size_of::<NearUnit>()].map(|x|x as u32)
 }
 
 /// The model on the device: the kernel's parameters, the buffers they point into, and the most
 /// photons of a cluster's jumps.
-pub struct Program{pub params:Params,photons:usize,weights:usize,exact:usize,transient:usize,_buffers:Vec<Buffer>}
+pub struct Program{pub params:Params,photons:usize,weights:usize,exact:usize,transient:usize,rows:usize,_buffers:Vec<Buffer>}
 
 fn c32(z:Complex)->[f32;2]{[z.re as f32,z.im as f32]}
 
@@ -141,10 +147,6 @@ impl Program{
         // The fourth order's tables are fourth2's slabs now (model.rs `FourthLayout`), which the kernel does
         // not read yet: a fourth-order model stays on the CPU until it does.
         if model.fourth{return Err(beyond("四阶折叠".into()));}
-        // The kernel's exact response (beyond the Doppler first order's allowance) is the undressed one
-        // (ground.rs, # The near light's dressing): within the budget its bound is booked (solve.rs), beyond
-        // it the device would compute another model.
-        if model.undressed>BUDGET{return Err(beyond(format!("近共振光彼此的光移使响应改变 {:.1}%，GPU 的精确响应尚未计入",100.*model.undressed)));}
         if model.geometry.len()>MOST_BEAMS||model.carriers.len()>MOST_CARRIERS||model.focused.len()>MOST_FOCUSED{return Err(beyond("光束或强度维度太多".into()));}
         if let Some(c)=g.clusters.iter().find(|c|c.states.len()>MAXN||c.classes.len()>MOST_CLASSES){return Err(beyond(format!("子空间 {} 个态、{} 类光子",c.states.len(),c.classes.len())));}
         let hm=model.hbar_over_mass;
@@ -159,7 +161,7 @@ impl Program{
             if let Some((c,j))=owner[l]{
                 let pole=g.poles[c];beam.inv_pole=if pole>0.&&pole.is_finite(){(1./pole) as f32}else{0.};
                 beam.carrier=c as i32;beam.near=near;near+=1;
-                for b in 0..ng{if (0..ne).any(|i|g.couplings[l][(i,b)]!=Complex::ZERO){beam.coupled|=1<<b;}}
+                for b in 0..ng{if (0..ne).any(|i|g.folded[l][(i,b)]!=Complex::ZERO){beam.coupled|=1<<b;}}
                 for k in 0..model.carriers[c].rank{beam.coefficients[k]=c32(model.carriers[c].coefficients[j][k]);}
             }
             beam}).collect();
@@ -177,6 +179,17 @@ impl Program{
         // The exact step's room in a trajectory's scratch: per cluster its parts' H and G, their working
         // room and its norms (the kernel's `exact_segment`), the largest of every cluster's where one takes it.
         let takes=(0..model.clusters()).any(|k|model.mixed(k)||model.beating(k));let mut exact=0;
+        // The near light's shifts ΔE_a^d a cluster's exact responses take (the kernel's `exact_responses`, ground.rs
+        // `Ground::dress_light`), bit d·NG + a: from each of its channels (c, b) the other near carriers' on b and
+        // every near carrier's on the intermediates a of its far channels; none where the model is undressed.
+        let nc=g.carriers.len();
+        let shifts=|states:&[usize]|->u64{
+            let mut bits=0u64;if !g.dressing{return bits;}
+            for &b in states{for c in (0..nc).filter(|&c|g.couples(c,b)){
+                for d in (0..nc).filter(|&d|d!=c&&g.couples(d,b)){bits|=1<<(d*GROUND+b);}
+                for via in &g.vias[c][b]{for d in (0..nc).filter(|&d|g.couples(d,via.state)){bits|=1<<(d*GROUND+via.state);}}
+            }}
+            bits};
         for(k,(layout,cl))in model.layouts.iter().zip(&g.clusters).enumerate(){
             let parts=1+model.beats(k).0.len();let(n,n0)=(layout.n,layout.n0);
             if takes{exact=exact.max((5*parts+4)*n*n+4*parts);}
@@ -185,7 +198,7 @@ impl Program{
                 classes:classes.len() as i32,nclasses:cl.classes.len() as i32,coherent:coherent.len() as i32,ncoherent:cl.coherent.len() as i32,carriers:carrier_tables.len() as i32,
                 fourth:-1,frames:0,positions:item_first.len() as i32,beats:residuals.len() as i32,nbeats:0,n0:n0 as i32,exact:(model.mixed(k)||model.beating(k)) as i32,
                 parts:parts as i32,omegas:omegas.len() as i32,terms:terms.len() as i32,nterms:list.len() as i32,emission:emission as i32,excited:excited_list.len() as i32,
-                group_parts:group_parts.len() as i32,residual_parts:residual_parts.len() as i32,states:[0;MAXM]};
+                group_parts:group_parts.len() as i32,residual_parts:residual_parts.len() as i32,states:[0;MAXM],shifts:shifts(&cl.states)};
             for(x,&b)in cl.states.iter().enumerate(){cluster.states[x]=b as i32;}
             // Its beats (their period last, 0 without one), its explicit states and its terms (model.rs `exact_terms`).
             let(beats_k,period)=model.beats(k);omegas.extend(beats_k);omegas.push(period.unwrap_or(0.));excited_list.extend(cl.excited.iter().map(|&e|e as i32));
@@ -261,7 +274,21 @@ impl Program{
             }}
             diagonal.extend(g.ground_states.iter().map(|&a|block[(a,a)].re));diagonal.extend(g.excited_states.iter().map(|&a|block[(a,a)].re));
         }
-        let couplings:Vec<[f32;2]>=g.couplings.iter().flat_map(|v|v.entries.iter().map(|&z|c32(z))).collect();
+        let couplings:Vec<[f32;2]>=g.folded.iter().flat_map(|v|v.entries.iter().map(|&z|c32(z))).collect();
+        // The exact response's dressing (the kernel's `exact_responses`): every beam's kept drives V_l − V_l^f and D;
+        // the near units by carrier (in the units' order within one) with their folded fields W^f, NG columns of NE;
+        // every channel's far channels -- none where the model is undressed.
+        let kept:Vec<[f32;2]>=g.couplings.iter().zip(&g.folded).flat_map(|(v,f)|v.entries.iter().zip(&f.entries).map(|(&a,&b)|c32(a-b))).collect();
+        let decay:Vec<[f32;2]>=g.decay.entries.iter().map(|&z|c32(z)).collect();
+        let mut order:Vec<(usize,&crate::ground::NearUnit)>=g.near_units.iter().enumerate().filter_map(|(u,x)|x.as_ref().filter(|_|g.dressing).map(|x|(u,x))).collect();
+        order.sort_by_key(|(_,x)|x.carrier);
+        let near_first:[i32;MOST_CARRIERS+1]=std::array::from_fn(|d|order.iter().filter(|(_,x)|x.carrier<d).count() as i32);
+        let near_units:Vec<NearUnit>=order.iter().map(|&(u,x)|NearUnit{carrier:x.carrier as i32,focused:model.focused.iter().position(|&f|f==u).map_or(-1,|f|f as i32),
+            norm:g.units[u].norm as f32,focus:g.units[u].focus as f32}).collect();
+        let unit_couplings:Vec<[f32;2]>=order.iter().flat_map(|(_,x)|(0..ng).flat_map(move|a|(0..ne).map(move|i|c32(x.coupling[(i,a)])))).collect();
+        let(mut vias,mut via_first):(Vec<[i32;2]>,Vec<i32>)=(vec![],vec![]);
+        for c in 0..nc{for b in 0..ng{via_first.push(vias.len() as i32);if g.dressing{vias.extend(g.vias[c][b].iter().map(|v|[v.carrier as i32,v.state as i32]));}}}
+        via_first.push(vias.len() as i32);
         let emission:Vec<[f32;2]>=g.emission.iter().flat_map(|c|c.entries.iter().map(|&z|c32(z))).collect();
         // The settings: the trap's principal axes, their flow for dt/2 and stiffness.
         let tau=0.5*settings.dt;
@@ -287,12 +314,16 @@ impl Program{
             terms:put!(if terms.is_empty(){vec![Term::default()]}else{terms}),omegas:put!(omegas),group_parts:put!(if group_parts.is_empty(){vec![0]}else{group_parts}),
             residual_parts:put!(if residual_parts.is_empty(){vec![0]}else{residual_parts}),excited_list:put!(if excited_list.is_empty(){vec![0]}else{excited_list}),
             directs:put!(if directs.is_empty(){vec![Direct::default()]}else{directs}),levels:put!(levels),level_first:put!(level_first),decay_root:put!(decay_root),
+            kept:put!(kept),decay:put!(decay),near_units:put!(if near_units.is_empty(){vec![NearUnit::default()]}else{near_units}),
+            unit_couplings:put!(if unit_couplings.is_empty(){vec![[0.;2]]}else{unit_couplings}),vias:put!(if vias.is_empty(){vec![[0;2]]}else{vias}),via_first:put!(via_first),
             nbeams:model.geometry.len() as i32,ncarriers:model.carriers.len() as i32,nclusters:model.layouts.len() as i32,focused:model.focused.len() as i32,
             nodes:nodes as i32,fields:fields as i32,nnear:near,doppler:model.doppler as i32,loss:settings.loss as i32,weights:0,nunits:g.units.len() as i32,
-            exact_at:0,transient_at:0,nlevels:g.excited_groups.len() as i32,
+            exact_at:0,transient_at:0,nlevels:g.excited_groups.len() as i32,rows_at:0,
             focused_unit:std::array::from_fn(|f|model.focused.get(f).map_or(0,|&u|u as i32)),stride:std::array::from_fn(|f|nodes.pow(f as u32) as i32),
             field_carrier,field_rank,ground_states:std::array::from_fn(|b|g.ground_states[b] as i32),excited_states:std::array::from_fn(|i|g.excited_states[i] as i32),
             ground_cluster:std::array::from_fn(|b|g.cluster[b] as i32),ground_position:std::array::from_fn(|b|g.clusters[g.cluster[b]].position(b).unwrap() as i32),
+            near_first,explicit_of:std::array::from_fn(|b|g.explicit_of.get(b).map_or(0,|p|p.iter().enumerate().fold(0,|m,(e,&x)|m|(x as u32)<<e))),
+            partners:std::array::from_fn(|e|g.dressed.get(e).map_or(0,|f|f.iter().fold(0,|m,&x|m|1u32<<x))),
             hm:hm as f32,light2:(2.*g.light) as f32,allowance:settings.doppler as f32,truncation:settings.truncation as f32,
             axes32:settings.axes.map(|a|a.map(|x|x as f32)),stiffness32:settings.frequencies.map(|w|(w*w/hm) as f32),
             hm64:hm,dt:settings.dt,axes:settings.axes,omega:settings.frequencies,stiffness:settings.frequencies.map(|w|w*w/hm),half_flow,region:settings.region,
@@ -301,14 +332,18 @@ impl Program{
         let photons=g.clusters.iter().map(|c|c.classes.iter().map(|k|k.photons.len()).sum::<usize>()).max().unwrap_or(0);
         // The transient's room: every coherent group's folded amplitude on the excited states (the kernel's `transient`).
         let transient=if takes{g.clusters.iter().map(|c|c.coherent.len()*NE).max().unwrap_or(0)}else{0};
-        let mut program=Program{params,photons,weights,exact,transient,_buffers:buffers};program.params.weights=(program.scratch()-weights-exact-transient) as i32;
-        program.params.exact_at=(program.scratch()-exact-transient) as i32;program.params.transient_at=(program.scratch()-transient) as i32;
+        // The exact responses' rows: a channel's K + Σ − z, lane-major (the kernel's `exact_responses`).
+        let rows=if near>0{NE*32}else{0};
+        let mut program=Program{params,photons,weights,exact,transient,rows,_buffers:buffers};program.params.weights=(program.scratch()-weights-exact-transient-rows) as i32;
+        program.params.exact_at=(program.scratch()-exact-transient-rows) as i32;program.params.transient_at=(program.scratch()-transient-rows) as i32;
+        program.params.rows_at=(program.scratch()-rows) as i32;
         Ok(program)
     }
     /// The tables' nodes per intensity axis.
     pub fn nodes(&self)->usize{self.params.nodes as usize}
     /// A jump's working space per trajectory (float2): the exact response's -- every near beam's
     /// photon tables at each cluster column --, the photons' matrices per axis and the fourth order's
-    /// weights (the kernel's `Program::weights` is where they start).
-    pub fn scratch(&self)->usize{self.params.nnear as usize*MAXN*3*GROUND+3*self.photons+self.weights+self.exact+self.transient}
+    /// weights (the kernel's `Program::weights` is where they start), the exact step's and the transient's
+    /// room, and the exact responses' channel rows (`Program::rows_at`).
+    pub fn scratch(&self)->usize{self.params.nnear as usize*MAXN*3*GROUND+3*self.photons+self.weights+self.exact+self.transient+self.rows}
 }
