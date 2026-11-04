@@ -958,7 +958,7 @@ fn the_t_error_over_the_run_adds_up_on_a_heating_axis_and_goes_with_the_step(){
     let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();let waiting=0.47;
     let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=Settings::new(dt,&initial.traps[reference],NUMERICAL_SHARE*POPULATION_TARGET*dt/waiting,true);s.doppler=0.02;s.region=initial.depths[reference];s.horizon=waiting;s};
     let steps=48;let harmonic=Harmonic::new(&model,&settings(steps),&initial,steps,outputs);
-    let(states,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,32,steps,outputs,&harmonic);let probes=bound_probes(&model,&states);
+    let(states,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,32,steps,outputs,&harmonic);let probes=bound_probes(&model,&states,&vec![1.;states.len()]);
     let period=std::f64::consts::TAU/initial.traps[reference].frequencies.iter().copied().fold(f64::INFINITY,f64::min);
     let tolerance=BIAS_SHARE*TEMPERATURE_TARGET;let limit=|_:f64|tolerance;
     let(one,whole)=(drift(&model,&settings,steps,&probes,period,period,&limit,0.),drift(&model,&settings,steps,&probes,period,100.,&limit,0.));let half=drift(&model,&settings,2*steps,&probes,period,100.,&limit,whole.span);
