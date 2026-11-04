@@ -369,22 +369,18 @@ impl Windows{
 
 /// A pilot: `count` trajectories over the outputs, the held atoms' states at every output kept (at
 /// most a few thousand, evenly thinned), the jumps they made, and each trajectory's sums (a group of
-/// one, with its harmonic control): the statistics' first prediction (solve.rs, # Batches). Its first
-/// `TASK` trajectories run whole, the others through the first 1/`TASK` of the outputs, where the transient
-/// asks for the statistics: beyond, the outputs' errors stand on each other (solve.rs `steady`), and a third of
-/// the work leaves the choices within their spread between seeds. The shorter trajectories keep every `TASK`/2-th
-/// state of theirs, so that the states weigh the run's early part little more than its time; the jumps are the whole ones'.
+/// one, with its harmonic control): the statistics' first prediction (solve.rs, # Batches).
 pub fn sample_states(model:&Model,settings:&Settings,initial:&Initial,seed:u64,count:u64,steps:usize,outputs:usize,harmonic:&Harmonic)->(Vec<Trajectory>,u64,Vec<Group>){
     let engine=Engine::new(model,settings.clone());
-    let every=((count as usize*outputs)/4096).max(1);let whole=TASK.min(count);let through=|index:u64|if index<whole{outputs}else{((outputs-1).div_ceil(TASK as usize)+1).min(outputs)};
+    let every=((count as usize*outputs)/4096).max(1);
     let runs:Vec<(Vec<Trajectory>,u64,Group)>=(0..count).into_par_iter().map_init(||(Windows::new(settings,steps,outputs),vec![None;outputs]),|(windows,held),index|{
         let mut t=pilot_start(model,settings,initial,seed,index);let(r0,k0)=(settings.about_site(t.r),t.kappa);
-        let reach=through(index);let(mut atoms,_,kept,jumps)=walk(model,&engine,&mut t,steps,reach,&[],windows,held,Some(if reach==outputs{every}else{every*TASK as usize/2}));atoms.truncate(reach);
-        let mut sums=Group::reaching(outputs,reach,1);
+        let(atoms,_,kept,jumps)=walk(model,&engine,&mut t,steps,outputs,&[],windows,held,Some(every));
+        let mut sums=Group::new(outputs,1);
         for(i,atom)in atoms.iter().enumerate(){sums.add(i,atom.as_ref().map(atom_of).as_ref(),&Controls{harmonic:harmonic.value(i,r0,k0),twin:None});}
         (kept,jumps,sums)
     }).collect();
-    let jumps=runs.iter().take(whole as usize).map(|r|r.1).sum::<u64>()*(count/whole.max(1));let mut states=vec![];let mut groups=vec![];
+    let jumps=runs.iter().map(|r|r.1).sum();let mut states=vec![];let mut groups=vec![];
     for(kept,_,sums)in runs{states.extend(kept);groups.push(sums);}
     (states,jumps,groups)
 }
