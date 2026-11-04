@@ -1281,11 +1281,11 @@ fn kept(candidates:&[Check],cost:&dyn Fn(&Check)->f64,error:f64)->Option<Check>{
 /// regime's), so twice that statistic's relative error, its jackknife over the groups. Zero where fewer than three groups or no
 /// statistic stand.
 fn need_error(groups:&[Group],scales:&Scales,means:&[Means],model:&Model,initial:&Initial,frequencies:[f64;3])->f64{
-    let statistic=|groups:&[Group]|->f64{let mut e=summarize(groups,scales,means);start(&mut e[0],model,initial);
+    let statistic=|groups:&[&Group]|->f64{let mut e=summarize(groups,scales,means);start(&mut e[0],model,initial);
         statistics_of(&e,frequencies).iter().skip(1).map(|s|(s.population/POPULATION_TARGET).max(s.weight*s.temperature/TEMPERATURE_TARGET)).fold(0.,f64::max)};
     let n=groups.len();if n<3{return 0.;}
-    let all=statistic(groups);if !(all>0.){return 0.;}
-    let left:Vec<f64>=(0..n).into_par_iter().map(|g|statistic(&groups.iter().enumerate().filter(|&(i,_)|i!=g).map(|(_,x)|x.clone()).collect::<Vec<Group>>())).collect();
+    let all=statistic(&groups.iter().collect::<Vec<&Group>>());if !(all>0.){return 0.;}
+    let left:Vec<f64>=(0..n).into_par_iter().map(|g|statistic(&groups.iter().enumerate().filter(|&(i,_)|i!=g).map(|(_,x)|x).collect::<Vec<&Group>>())).collect();
     let mean=left.iter().sum::<f64>()/n as f64;
     2.*((n-1) as f64/n as f64*left.iter().map(|x|(x-mean).powi(2)).sum::<f64>()).sqrt()/all
 }
