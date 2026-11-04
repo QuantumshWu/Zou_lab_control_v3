@@ -1,6 +1,7 @@
 // The wire: commands the window sends on the bus and the accepted state it
 // is told.  Every UI action is one of these commands; the window keeps no
 // state of its own beyond drafts, focus and which page it shows.
+import type { LogicRow } from "./workbench.js";
 import type { FieldSpec } from "./fluent/index.js";
 export type { Value } from "./fluent/index.js";
 
@@ -47,7 +48,9 @@ export type State = {
   plot_kinds?: PlotKind[];
   acquisition?: { state: "idle" | "starting" | "running" | "stopping" | "stopped" | "error"; produced?: number; error?: string };
   /** The Figure Viewer's own document: the opened archive, its panels and the Data it offers. */
-  viewer?: { document: { path: string; title: string }; panels: Panel[]; signals: Signal[]; plot_kinds?: PlotKind[]; error?: string | null };
+  viewer?: { document: { path: string; title: string }; panels: Panel[]; signals: Signal[]; plot_kinds?: PlotKind[]; error?: string | null;
+    /** Its processors' rows (the same as a Logic page's), and the types its chooser offers. */
+    logic?: LogicRow[]; processor_types?: { type_id: string; label: string; description: string }[] };
   /** Its Figure's record (info pane tabs and Flow); sent only when it changes. */
   record?: { info?: unknown; flow?: unknown };
   error?: string;

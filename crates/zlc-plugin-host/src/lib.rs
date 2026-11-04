@@ -658,6 +658,8 @@ impl PluginHost {
             state.instances.get(instance).map(|entry| (entry.serving.clone(), entry.descriptor.clone()))
         };
         let Some((serving, descriptor)) = serving else {
+            // A node whose process was lost is closed all the same: what its finished runs published goes with it.
+            if instance.starts_with(zlc_core::control::NODE_INSTANCE) { let _ = inner.runtime.withdraw(public_instance(instance)); }
             // Init can fail after acquiring a handle but before admission. Its
             // SDK lane owns that cleanup even though no live host entry exists.
             let processes: Vec<_> = inner.processes.lock().unwrap().values()
@@ -1585,7 +1587,8 @@ impl Inner {
         let members = signals.iter().filter(|item| item.generation.id() == anchor.generation.id()
             && (bundle || item.signal == anchor.signal));
         let name = input["name"].as_str().unwrap_or("source").to_owned();
-        if anchor.sealed && anchor.finite {
+        // Sealed, a finite run and a Snapshot (a saved Figure's dataset, one complete state) are one whole dataset.
+        if anchor.sealed && (anchor.finite || !anchor.history_capable) {
             let views: Vec<_> = members.filter(|item| item.published).map(|item| (item.generation.clone(), item.signal.clone(), None)).collect();
             let reads = self.runtime.read_views(&views).into_iter().collect::<Result<Vec<_>, _>>()
                 .map_err(|error| CallError::from(format!("{signal}: {error}")))?;

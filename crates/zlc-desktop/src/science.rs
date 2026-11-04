@@ -120,7 +120,7 @@ impl Science {
             overlay_errors: BTreeMap::new(), pending: None, report, selected, held: BTreeMap::new() }
     }
 
-    fn open(&self, path: &str) -> Result<DecodedArchive,String> {
+    pub(crate) fn open(&self, path: &str) -> Result<DecodedArchive,String> {
         // Every entry point (Browse, typed path, refresh, CLI or remote open)
         // resolves a preview to its data before decoding or replacing a figure.
         let path = crate::figure_file::archive_path(std::path::Path::new(path))?;

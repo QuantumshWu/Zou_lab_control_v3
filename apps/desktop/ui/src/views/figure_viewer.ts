@@ -1,8 +1,10 @@
 // FigureViewer@Zou lab: the saved figure's information pane on the left
 // (File, Browse…, Refresh; its record as tabs of names and values; a status
 // line) and its panels on the right: the Data chooser with Edit data / New
-// data, then the Monitor page with Plot + Add panel over the board, and a
-// closable tab per open data working copy or panel Edit.  It is its own
+// data and Add processor, then the Monitor page with Plot + Add panel over the
+// board, and a closable tab per open data working copy, panel Edit or processor
+// on the data (the Logic page's own editor, its rows from the Viewer's own
+// workbench; closing its tab removes it).  It is its own
 // document (state.viewer, v2's FigureViewer window): its board holds the
 // opened Figure's panels and its Data lists that Figure's datasets, while the
 // Task Console's live board runs on.
@@ -12,11 +14,15 @@ import type { Panel, State } from "../protocol.js";
 import { queueStatus, saveImage, type View, type ViewContext } from "../shell.js";
 import type { PanelBoard } from "./board.js";
 import { DataEditorView, saveDataAs, type DataProjection } from "./data_editor.js";
+import { LogicEditorView, projectRow, type EditorIntents, type NodeProjection } from "./logic.js";
 import { PanelEditView, type EditInfo } from "./panel_edit.js";
+import type { LogicRow } from "../workbench.js";
 
 const baseName = (path: string): string => path.split(/[\\/]/).pop() ?? path;
 /** The record's tabs bound the InfoPane width and stand empty until the host sends them. */
 const INFO_TABS = ["Plot", "Logic", "Devices", "Flow"];
+/** No Task runs on a saved Figure: nothing holds a Viewer's nodes back. */
+const FREE = { active: false, owns: false };
 
 /** One data working copy as the host lists it: its tab's title, whether it holds unsaved work, what it shows. */
 type DataTab = { id: string; title: string; dirty: boolean; projection: DataProjection };
@@ -41,6 +47,12 @@ export class FigureViewerView implements View {
   // v2: the button beside the chooser acts on what it holds; the one after it does something else.
   private editData = command("Edit data", () => { if (this.data.value) this.ctx.transport.send({ action: "edit_data", signal: this.data.value }, "Opening the data…"); });
   private newData = command("New data", () => this.ctx.transport.send({ action: "new_data" }, "Making new data…"));
+  /** What can run on saved data: the types whose declarations need nothing else. */
+  private processor = new ComboBox(() => {}, "").minimumContents(12);
+  private addProcessor = command("Add processor", () => this.addNode(), { title: "Run a processor on the chosen data: its outputs are this window's signals, and the data stays as saved" });
+  private nodes = new Map<string, LogicEditorView>();
+  /** A processor asked for: its Edit tab comes forward when it arrives. */
+  private addingNode = false;
   private editors = new Map<string, DataEditorView>();
   private editorTitles = new Map<string, string>();
   private panelEdits = new Map<string, PanelEditView>();
@@ -69,7 +81,7 @@ export class FigureViewerView implements View {
     // v2: the right half is one white work surface -- the data bar, then the tabs.
     const right = element("div", "card figure-main");
     const dataRow = element("div", "header figure-data");
-    dataRow.append(element("label", "row-label", "Data"), this.data.root, this.editData.root, this.newData.root);
+    dataRow.append(element("label", "row-label", "Data"), this.data.root, this.editData.root, this.newData.root, this.processor.root, this.addProcessor.root);
     this.data.root.id = "add-signal";
     this.kind.root.id = "add-kind";
     this.add.root.id = "add-panel";
@@ -130,6 +142,7 @@ export class FigureViewerView implements View {
     this.editData.disabled = !datasets.length;
     this.updateEditors();
     this.updatePanelEdits();
+    this.updateNodes(state, datasets.length > 0);
     // v2: the viewer offers the console's five kinds, by their own names, "image" first.
     const offered = new Set((latest.viewer?.plot_kinds ?? latest.plot_kinds ?? []).map(kind => kind.id));
     const kinds = ["image", "curve", "rolling", "histogram", "facet_grid"].filter(id => offered.has(id)).map(id => ({ id }));
@@ -216,12 +229,13 @@ export class FigureViewerView implements View {
       const name = this.panelName(row.edit!.panel);
       let page = this.panelEdits.get(row.id);
       if (!page) {
-        page = new PanelEditView(row.id, row.edit!.panel, this.board, (command, feedback) => this.ctx.transport.send(command, feedback), () => {}, this.ctx.transport);
+        page = new PanelEditView(row.id, row.edit!.panel, this.board, (command, feedback) => this.ctx.transport.send(command, feedback),
+          node => this.tabs.setCurrent(`node:${node}`), this.ctx.transport);
         this.panelEdits.set(row.id, page);
         this.tabs.addClosable(`edit:${row.id}`, `Edit panel · ${name}`, page.root, () => this.closePanelEdit(row.id), this.editFocus === row.id);
         if (this.editFocus === row.id) this.editFocus = null;
       }
-      page.update(row, name, [], String((this.ctx.latest.workspace as { today?: string } | undefined)?.today ?? ""));
+      page.update(row, name, this.nodeRows(), String((this.ctx.latest.workspace as { today?: string } | undefined)?.today ?? ""));
       this.tabs.setTitle(`edit:${row.id}`, `Edit panel · ${name}`);
     }
   }
@@ -230,6 +244,70 @@ export class FigureViewerView implements View {
     this.panelEdits.delete(edit);
     this.tabs.remove(`edit:${edit}`);
     this.ctx.transport.send({ action: "close_panel", panel: edit }, "Closing the Edit…");
+  }
+
+  private nodeRows(): LogicRow[] { return this.ctx.latest.viewer?.logic ?? []; }
+
+  private readonly nodeIntents: EditorIntents = {
+    start: id => {
+      const row = this.nodeRows().find(item => item.node_id === id);
+      this.ctx.transport.send({ action: "start_node", node: id, ...(row ? { expected_draft_revision: row.draft_revision } : {}) }, `Starting ${row?.name ?? id}…`);
+    },
+    stop: id => { this.ctx.transport.send({ action: "stop_node", node: id }, "Stopping…"); },
+    edit: id => this.tabs.setCurrent(`node:${id}`),
+    remove: id => { this.ctx.transport.send({ action: "remove_node", node: id }, "Removing…"); },
+    preview: () => {},
+    rename: (id, name) => this.ctx.transport.send({ action: "rename_node", node: id, name }, "Renaming…"),
+    editDraft: (id, change, label) => this.ctx.transport.send({ action: "edit_node", node: id, ...change }, `Updating ${label}…`),
+    revert: id => this.ctx.transport.send({ action: "revert_node", node: id }, "Reverting…"),
+    check: id => { this.ctx.transport.send({ action: "check_node", node: id }, "Checking files…"); },
+    choose: ask => this.ctx.transport.choosePath(ask),
+  };
+
+  /** A Viewer's node as its Edit page draws it: no Plot switch here, its outputs are bound in a panel's Setting. */
+  private projection(row: LogicRow): NodeProjection { return { ...projectRow(row), previewOffered: false }; }
+
+  /** The chooser, and one closable tab per processor, "Edit · name" as on the Logic page. */
+  private updateNodes(state: State, hasData: boolean): void {
+    const offered = this.ctx.latest.viewer?.processor_types ?? [];
+    this.processor.setChoices(offered.map(type => ({ value: type.type_id, label: `Processor: ${type.label}`, title: type.description })));
+    if (this.processor.value === null || !offered.some(type => type.type_id === this.processor.value)) this.processor.value = offered[0]?.type_id ?? null;
+    this.processor.disabled = !offered.length;
+    this.addProcessor.disabled = !offered.length || !hasData;
+    const rows = this.nodeRows();
+    for (const [id] of this.nodes) {
+      if (rows.some(row => row.node_id === id)) continue;
+      this.tabs.remove(`node:${id}`);
+      this.nodes.delete(id);
+    }
+    for (const row of rows) {
+      const projection = this.projection(row);
+      let editor = this.nodes.get(row.node_id);
+      if (!editor) {
+        editor = new LogicEditorView(row.node_id, this.nodeIntents);
+        this.nodes.set(row.node_id, editor);
+        editor.update(row, projection, FREE);
+        this.tabs.addClosable(`node:${row.node_id}`, `Edit · ${row.name}`, editor.root, () => void this.closeNode(row.node_id), this.addingNode);
+        this.addingNode = false;
+      } else {
+        editor.update(row, projection, FREE, state.request, Boolean(state.error));
+        this.tabs.setTitle(`node:${row.node_id}`, `Edit · ${row.name}`);
+      }
+    }
+  }
+
+  /** A processor on the data the chooser names. */
+  private addNode(): void {
+    if (this.addProcessor.disabled || this.processor.value === null || this.data.value === null) return;
+    this.addingNode = true;
+    this.ctx.transport.send({ action: "add_node", type_id: this.processor.value, source_signal: this.data.value }, "Adding the processor…");
+  }
+
+  /** Closing its tab removes it: nowhere else stands a Viewer's node. Its outputs leave the panels showing them. */
+  private async closeNode(id: string): Promise<void> {
+    const row = this.nodeRows().find(item => item.node_id === id);
+    if (row?.phase !== "idle" && !await confirm("Remove the processor", `${row?.name ?? id} and its outputs go from this window. The saved data stays.`, { confirmText: "Remove", cancelText: "Keep it" })) return;
+    this.ctx.transport.send({ action: "remove_node", node: id }, "Removing…");
   }
 
   private async openRecorded(key: string, discard = false): Promise<void> {

@@ -28,6 +28,7 @@ mod share;
 mod slm_host;
 mod readers;
 mod run_fit;
+mod viewer_logic;
 mod cadence;
 mod pointer_queue;
 mod installer;
@@ -40,7 +41,10 @@ use zlc_core::runtime::Runtime;
 
 /// `window`: the page a command came from (None: a remote client or the host itself).
 enum AppEvent { Command { window: Option<windows::Kind>, command: Value }, Completed(science::Completion), Plugin(zlc_plugin_host::HostEvent),
-    Workbench(zlc_workbench::Event), CatalogReady, RuntimeChanged, RebaseNeeded, WorkerError(String), InvalidMessage(String), DerivationError(String),
+    Workbench(zlc_workbench::Event),
+    /// A Figure Viewer's node's plugin call answered (viewer_logic.rs).
+    ViewerWorkbench { viewer: u32, event: zlc_workbench::Event },
+    CatalogReady, RuntimeChanged, RebaseNeeded, WorkerError(String), InvalidMessage(String), DerivationError(String),
     Remote(remote::RemoteCall), WaitExpired(u64), Title { window: windows::Kind, title: String },
     /// A Figure's record has been read on its own thread: its tabs can be shown.
     RecordRead { document: u32, saved: Arc<archive::SavedRecord> },
@@ -106,11 +110,19 @@ struct Viewer {
     /// Its board (v2 FigureViewer's ConsoleBoardView, panel_only): the panels in the order shown, each one's
     /// name, update interval and Overlay -- what Setting's Panel rows edit and a carried title reorders.
     board: Vec<ViewerPanel>,
+    /// Its processors on the opened data, once it has one (viewer_logic.rs).
+    logic: Option<viewer_logic::Logic>,
 }
 
 /// One panel of a viewer's board: its title (v2 PanelState.title: a dataset's label, a blank panel's
 /// kind, the operator's name), its update interval and its Overlay ("": off).
 struct ViewerPanel { panel: String, title: Option<String>, interval_ms: u64, overlay: String }
+
+/// What a Viewer's Data offers: its Figure's datasets, what its panels and nodes publish, and the working copies it applied.
+fn viewer_offers(number: u32, archive: Option<&archive::MountedArchive>, manual: &[(String, String)], signal: &str) -> bool {
+    signal.starts_with(&format!("@logic/{}-", panels::viewer_prefix(number))) || archive.is_some_and(|archive| archive.offers(signal, number))
+        || manual.iter().any(|(applied, _)| applied == signal)
+}
 
 /// Where a Figure Viewer's file dialogs start without a Figure: today's folder, made as v2's viewer makes it.
 fn viewer_folder(workspace: &zlc_workbench::Workspace) -> PathBuf { workspace.day_folder().unwrap_or_else(|_| workspace.data()) }
@@ -155,11 +167,49 @@ fn settle_board(board: &mut Vec<ViewerPanel>, state: &mut Value) {
 impl Viewer {
     fn new(number: u32) -> Self {
         Self { bindings: panels::Panels::with_prefix(panels::viewer_prefix(number)), error: None, pending: false, archive: None, closing: false,
-            drafts: manual::Drafts::default(), waiting: None, targets: BTreeMap::new(), generations: BTreeMap::new(), derived: Vec::new(), board: Vec::new(),
+            drafts: manual::Drafts::default(), waiting: None, targets: BTreeMap::new(), generations: BTreeMap::new(), derived: Vec::new(), board: Vec::new(), logic: None,
             state: json!({"type":"state", "request":0, "document":{"path":"", "title":"Figure Viewer"}, "panels":[], "signals":[], "error":null}) }
     }
 
     fn settle_board(&mut self) { settle_board(&mut self.board, &mut self.state); }
+
+    /// Its logic with the signals this Viewer offers in reach: `work`, then whatever it makes known goes to the page.
+    fn logic_turn(&mut self, number: u32, runtime: &Runtime, windows: &mut windows::Windows, remote_pending: &mut BTreeMap<u64, remote::Pending>,
+                  work: impl FnOnce(&mut viewer_logic::Logic, &mut viewer_logic::Scope)) -> Result<(), String> {
+        let Some(mut logic) = self.logic.take() else { return Ok(()) };
+        let (archive, manual) = (self.archive.clone(), self.drafts.offered());
+        let offers = move |signal: &str| viewer_offers(number, archive.as_deref(), &manual, signal);
+        let mut scope = viewer_logic::Scope { runtime, offers: &offers };
+        work(&mut logic, &mut scope);
+        let (replies, rows) = (logic.take_replies(), logic.rows(&scope));
+        self.logic = Some(logic);
+        let changed = self.state["logic"] != rows;
+        self.state["logic"] = rows;
+        let window = windows::Kind::FigureViewer(number);
+        if replies.is_empty() {
+            if !changed { return Ok(()); }
+            self.state["request"] = json!(0);
+            return viewer_message(&mut self.state, |message| windows.send_to(&window, message));
+        }
+        for (request, result) in replies {
+            self.state["request"] = json!(request);
+            match result {
+                Ok(value) => { self.state["result"] = value; self.state["error"] = Value::Null; }
+                Err(error) => { self.state["result"] = Value::Null; self.state["error"] = json!(error); }
+            }
+            viewer_message(&mut self.state, |message| { remote::settle(message, remote_pending); windows.send_to(&window, message) })?;
+        }
+        Ok(())
+    }
+
+    /// Its nodes go: with its window, or with the Figure they read.
+    fn close_logic(&mut self, number: u32, runtime: &Runtime) {
+        let Some(logic) = self.logic.take() else { return };
+        let (archive, manual) = (self.archive.clone(), self.drafts.offered());
+        let offers = move |signal: &str| viewer_offers(number, archive.as_deref(), &manual, signal);
+        logic.close(&mut viewer_logic::Scope { runtime, offers: &offers });
+        self.state["logic"] = json!([]);
+    }
 
     /// Setting's Panel rows and a carried title, on this viewer's board (v2 panel_only ConsolePresenter).
     fn board_command(&mut self, action: &str, command: &Value) -> Result<Value, String> {
@@ -551,8 +601,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     // Their Python is the checkout's science environment (ZLC_PLUGIN_PYTHON overrides),
     // its environment set by the host: started from Explorer, nothing else is needed.
     // Devices@ lists the plugin types: discovery runs beside its window (from the
-    // catalogue kept for these sources and this environment, else Python). Nothing
-    // else is started ahead: a plugin process starts when its device opens.
+    // catalogue kept for these sources and this environment, else Python). A Figure Viewer
+    // offers the pure processors from it. Nothing else is started ahead: a plugin process
+    // starts when its device or node opens.
     let science_src = zlc_core::checkout::path("science/src");
     let plugin_proxy = std::sync::Mutex::new(event_loop.create_proxy());
     let plugins = zlc_plugin_host::HostConfig::from_env(science_src).map(|mut config| {
@@ -566,7 +617,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
             if let Ok(proxy) = plugin_proxy.lock() { let _ = proxy.send_event(AppEvent::Plugin(event)); }
         }));
     match &plugins {
-        Ok(host) if !standalone => {
+        Ok(host) if !matches!(mode, Mode::PulseEditor(_)) => {
             let (warming, ready) = (host.clone(), std::sync::Mutex::new(event_loop.create_proxy()));
             std::thread::Builder::new().name("zlc-plugin-warm".into()).spawn(move || {
                 let discovery = trace::span("startup.discovery", || json!({}));
@@ -581,10 +632,11 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     // The application composition (devices, logic, runs, board), driving the
     // plugin host through workbench_host::Builtin.
     let (reply_proxy, core_proxy) = (std::sync::Mutex::new(event_loop.create_proxy()), std::sync::Mutex::new(event_loop.create_proxy()));
+    let core_calls: Arc<dyn Fn(remote::RemoteCall) -> Result<(), String> + Send + Sync> = Arc::new(move |call| core_proxy.lock().map_err(|_| "instrument closing".to_owned())?
+        .send_event(AppEvent::Remote(call)).map_err(|_| "the instrument window has closed".to_owned()));
     let builtin = workbench_host::Builtin::new(runtime.clone(), plugins.as_ref().ok().cloned(), Arc::new(move |event| {
         if let Ok(proxy) = reply_proxy.lock() { let _ = proxy.send_event(AppEvent::Workbench(event)); }
-    }), Arc::new(move |call| core_proxy.lock().map_err(|_| "instrument closing".to_owned())?
-        .send_event(AppEvent::Remote(call)).map_err(|_| "the instrument window has closed".to_owned())));
+    }), core_calls.clone());
     // No science environment: the Device Manager says so for every plugin family.
     if let Err(error) = &plugins { builtin.host_missing(error.clone()); }
     // Each open SLM Editor's pictures, drawn off the window's turn.
@@ -665,6 +717,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             let windows::Kind::FigureViewer(number) = kind else { unreachable!() };
                             if let Some(viewer) = viewers.get_mut(&number) {
                                 viewer.closing = true;
+                                viewer.close_logic(number, &runtime);
                                 for panel in panel_ids(&viewer.state) { queue.push_back(json!({"id":0,"action":"close_panel","panel":panel,"document":number})); }
                                 queue.push_back(json!({"id":0,"action":"drop_document","document":number}));
                             }
@@ -961,6 +1014,26 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 remote::settle(message, &mut remote_pending);
                                 windows.send_to(&windows::Kind::FigureViewer(number), message)
                             });
+                        }
+                    }
+                    // A node of a Figure Viewer is its Viewer's: from its window, or named (MCP).
+                    if viewer_logic::COMMANDS.contains(&action.as_str()) {
+                        let viewer_number = match &from {
+                            Some(windows::Kind::FigureViewer(number)) => Some(*number),
+                            _ => command["node"].as_str().and_then(panels::viewer_of),
+                        };
+                        if let Some(number) = viewer_number {
+                            let viewer = viewers.get_mut(&number).filter(|viewer| !viewer.closing).ok_or_else(|| format!("FigureViewer {number} is not open"))?;
+                            if viewer.logic.is_none() {
+                                if zlc_workbench::Plugins::discovering(&builtin) { return Err("The plugin types are still being discovered".into()); }
+                                let proxy = std::sync::Mutex::new(self_proxy.clone());
+                                viewer.logic = Some(viewer_logic::Logic::new(runtime.clone(), plugins.as_ref().map_err(Clone::clone)?.clone(), &root, Arc::new(move |event| {
+                                    if let Ok(proxy) = proxy.lock() { let _ = proxy.send_event(AppEvent::ViewerWorkbench { viewer: number, event }); }
+                                }), core_calls.clone())?);
+                            }
+                            let (params, request) = (remote::parameters(&command), command["id"].as_u64().unwrap_or(0));
+                            return viewer.logic_turn(number, &runtime, &mut windows, &mut remote_pending,
+                                |logic, scope| logic.command(number, &action, &params, &origin, request, scope));
                         }
                     }
                     if matches!(action.as_str(), "start_camera" | "stop_camera") || zlc_workbench::Workbench::handles(&action)
@@ -1310,7 +1383,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             windows.send_to(&kind, &slm.message(device))?;
                             for (panel, sequence, front) in slm.fronts(device) { windows.submit(panel, sequence, front)?; }
                         }
-                        if let windows::Kind::FigureViewer(number) = &kind { if let Some(viewer) = viewers.get_mut(number) { viewer.state[RECORD_UNSENT] = json!(true); viewer_message(&mut viewer.state, |message| windows.send_to(&kind, message))?; } }
+                        if let windows::Kind::FigureViewer(number) = &kind { if let Some(viewer) = viewers.get_mut(number) { viewer.state["processor_types"] = workbench.pure_processors(); viewer.state[RECORD_UNSENT] = json!(true); viewer_message(&mut viewer.state, |message| windows.send_to(&kind, message))?; } }
                         if kind == windows::Kind::PulseEditor {
                             let mut state = json!({"type": "state"});
                             state["pulse"] = pulse.state();
@@ -1405,6 +1478,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         else {
                             // The opened Figure replaces its viewer's panels only; the live board runs on.
                             if let Some(viewer) = viewers.get_mut(&document) {
+                                // Its processors read the Figure it replaces, and go with it.
+                                viewer.close_logic(document, &runtime);
                                 let mut next=candidate.bindings;next.continue_ids_from(&viewer.bindings);
                                 viewer.bindings=next;
                                 drop(viewer.archive.replace(candidate.data));
@@ -1480,8 +1555,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             // Each document offers its own data: the opened Figure's, or the apparatus's.
-                            bindings.decorate(&mut state,&runtime,|signal| if in_viewer { archive.as_ref().is_some_and(|archive| archive.offers(signal, document))
-                                    || manual_data.iter().any(|(applied, _)| applied == signal) }
+                            bindings.decorate(&mut state,&runtime,|signal| if in_viewer { viewer_offers(document, archive.as_deref(), &manual_data, signal) }
                                 else { !archive::viewer_owned(signal) });
                             let previous = accepted["panels"].as_array().ok_or("Accepted state has no panels")?;
                             let rows = state["panels"].as_array_mut().ok_or("Scientific response has no panels")?;
@@ -1585,6 +1659,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 // A preview's document now holds the recipe it started from.
                                 targets.retain(|panel, _| !ids.contains(panel));
+                                // Its processors' rows stay as their last turn made them; what can be added, as the catalogue says.
+                                state["logic"] = accepted["logic"].take();
+                                state["processor_types"] = workbench.pure_processors();
                                 if let Some((_, editor, applies, path)) = drafts.saving.take_if(|(request, ..)| *request == completion.request) {
                                     if state["saved"]["exists"].is_array() {
                                         // Nothing written: the window names those files and asks, and Overwrite saves this archive again, told to.
@@ -1790,6 +1867,11 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             if owned != viewer.derived { viewer.derived = owned; viewer.pending = true; }
                         }
                     }
+                    if !closing {
+                        for (number, viewer) in viewers.iter_mut().filter(|(_, viewer)| viewer.logic.is_some()) {
+                            viewer.logic_turn(*number, &runtime, &mut windows, &mut remote_pending, |logic, scope| logic.runtime_changed(scope))?;
+                        }
+                    }
                     // Following processors and previews start on new publications.
                     let mut host = workbench_host::DesktopHost { runtime: &runtime, bindings: &mut bindings, accepted: &accepted,
                         queue: &mut queue, targets: &mut pending_targets };
@@ -1816,6 +1898,23 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                // A process lost under the board's nodes and a Viewer's: each hears of its own.
+                Event::UserEvent(AppEvent::Plugin(event)) if viewer_logic::split_failed(&event).is_some() => {
+                    for event in viewer_logic::split_failed(&event).unwrap_or_default() { let _ = self_proxy.send_event(AppEvent::Plugin(event)); }
+                }
+                // A Viewer's node's facts are its Viewer's; a Viewer already gone hears nothing, and its run asks in vain.
+                Event::UserEvent(AppEvent::Plugin(event)) if viewer_logic::viewer_of_event(&event).is_some() => {
+                    let number = viewer_logic::viewer_of_event(&event).expect("the guard");
+                    match viewers.get_mut(&number).filter(|viewer| viewer.logic.is_some() && !closing) {
+                        Some(viewer) => viewer.logic_turn(number, &runtime, &mut windows, &mut remote_pending, |logic, scope| logic.host_event(event, scope))?,
+                        None => if let zlc_plugin_host::HostEvent::Request { ticket, .. } = event { builtin.respond(ticket, Err("its Figure Viewer has closed".into())); },
+                    }
+                }
+                Event::UserEvent(AppEvent::ViewerWorkbench { viewer: number, event }) => {
+                    if let Some(viewer) = viewers.get_mut(&number).filter(|_| !closing) {
+                        viewer.logic_turn(number, &runtime, &mut windows, &mut remote_pending, |logic, scope| logic.answered(event, scope))?;
+                    }
+                }
                 // Plugin facts (host events, answers of calls made off this turn) reach the workbench here.
                 Event::UserEvent(event @ (AppEvent::Plugin(_) | AppEvent::Workbench(_) | AppEvent::CatalogReady)) => {
                     let events = match event {
@@ -1825,7 +1924,18 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             if let zlc_workbench::Event::Failed { instance, .. } = &event { pulse.lose_device(instance); }
                             std::iter::once(event).chain(builtin.replay()).collect()
                         }
-                        _ => { trace::point("startup.catalog", || json!({})); builtin.catalog_ready(); workbench.refresh_catalog(); Vec::new() }
+                        _ => {
+                            trace::point("startup.catalog", || json!({}));
+                            builtin.catalog_ready();
+                            workbench.refresh_catalog();
+                            // What the open Viewers can add is known now.
+                            for (number, viewer) in viewers.iter_mut().filter(|(_, viewer)| !viewer.closing) {
+                                viewer.state["processor_types"] = workbench.pure_processors();
+                                viewer.state["request"] = json!(0);
+                                if !closing { viewer_message(&mut viewer.state, |message| windows.send_to(&windows::Kind::FigureViewer(*number), message))?; }
+                            }
+                            Vec::new()
+                        }
                     };
                     let mut host = workbench_host::DesktopHost { runtime: &runtime, bindings: &mut bindings, accepted: &accepted,
                         queue: &mut queue, targets: &mut pending_targets };

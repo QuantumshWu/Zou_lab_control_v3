@@ -442,7 +442,8 @@ delivery `describe_run(inputs)` as the run record, commits the returned outputs
 with the anchor as parent and its ordinal, and only then answers, so the next
 delivery waits (v2's follow processor). `kind: "sealed"` completes the run (it
 fails if nothing was delivered), `"retired"` stops it (the source moved on),
-`"failed"` fails it with the core's reason. A finite source that has sealed is
+`"failed"` fails it with the core's reason. A finite source that has sealed, or a
+sealed Snapshot (a saved Figure's dataset in a Figure Viewer), is
 delivered whole, once, then `sealed` (v2's frozen processor): each member is its
 run's complete dataset (`segments` as placed), its own `canonical_schema` with
 `cell_origin` (0, 0); a sealed live source delivers its current event.

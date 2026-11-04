@@ -139,6 +139,12 @@ impl TypeDescriptor {
     pub fn discoverable(&self) -> bool { self.is_device() && self.queries.iter().any(|query| query == "discover") }
     /// A device type that finds what a row leaves blank before it opens (Init's resolve phase).
     pub fn resolvable(&self) -> bool { self.is_device() && self.queries.iter().any(|query| query == "resolve") }
+    /// A processor that needs nothing but its dataset input, by its declaration: no device, no file,
+    /// no workspace resource, no acquisition it restarts. It can run on any dataset, a saved one too.
+    pub fn pure_processor(&self) -> bool {
+        self.node.as_ref().is_some_and(|node| node.node_kind == "processor" && !node.inputs.is_empty() && node.devices.is_empty()
+            && node.artifact_inputs.is_empty() && node.workspace_resources.is_empty() && node.acquisition_input.is_none())
+    }
     /// What views list: everything except the authoring schema.
     pub fn summary(&self) -> Value {
         let mut row = json!({"type_id": self.type_id, "kind": self.kind, "family": self.family, "label": self.label(),

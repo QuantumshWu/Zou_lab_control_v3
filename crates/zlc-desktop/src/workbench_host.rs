@@ -25,8 +25,13 @@ pub fn shape_text(schema: &zlc_core::schema::DatasetSchema) -> String {
 }
 
 pub fn signals(runtime: &Runtime) -> Vec<SignalInfo> {
-    // The Figure Viewer's data is not the apparatus's: no node reads it.
-    runtime.signals().into_iter().filter(|source| !crate::archive::viewer_owned(&source.signal)).map(|source| {
+    // The Figure Viewer's data is not the apparatus's: no node of the apparatus reads it.
+    offered_signals(runtime, &|signal| !crate::archive::viewer_owned(signal))
+}
+
+/// The Runtime's signals a document offers.
+pub fn offered_signals(runtime: &Runtime, offered: &dyn Fn(&str) -> bool) -> Vec<SignalInfo> {
+    runtime.signals().into_iter().filter(|source| offered(&source.signal)).map(|source| {
         SignalInfo { name: source.signal.to_string(), generation: source.generation.id().as_uuid().to_string(), owner: source.generation.owner().to_owned(),
                      published: source.published, sealed: source.sealed, shape: shape_text(&source.schema) }
     }).collect()
@@ -90,12 +95,15 @@ impl Host for DesktopHost<'_> {
             self.targets.remove(&panel);
         }
     }
-    fn schemas(&self, signal: &str) -> Option<(Value, Value)> {
-        let source = self.runtime.signals().into_iter().find(|source| &*source.signal == signal)?;
-        let event = self.runtime.read_latest(&source.generation, signal).ok()
-            .and_then(|publication| publication.data().map(|block| zlc_plugin_host::wire::schema_tree(block.schema())));
-        Some((zlc_plugin_host::wire::schema_tree(&source.schema), event.unwrap_or(Value::Null)))
-    }
+    fn schemas(&self, signal: &str) -> Option<(Value, Value)> { schemas(self.runtime, signal) }
+}
+
+/// A signal's dataset schema and its latest event's (`Host::schemas`).
+pub fn schemas(runtime: &Runtime, signal: &str) -> Option<(Value, Value)> {
+    let source = runtime.signals().into_iter().find(|source| &*source.signal == signal)?;
+    let event = runtime.read_latest(&source.generation, signal).ok()
+        .and_then(|publication| publication.data().map(|block| zlc_plugin_host::wire::schema_tree(block.schema())));
+    Some((zlc_plugin_host::wire::schema_tree(&source.schema), event.unwrap_or(Value::Null)))
 }
 
 /// A read-only view for decorating a state message.
@@ -413,7 +421,7 @@ impl Builtin {
         held.into_iter().flat_map(|event| self.host_event(event)).collect()
     }
 
-    fn respond(&self, ticket: u64, result: Result<Value, String>) {
+    pub(crate) fn respond(&self, ticket: u64, result: Result<Value, String>) {
         if let Some(host) = &self.0.borrow().host { host.respond(ticket, result.map_err(refused)); }
     }
 
