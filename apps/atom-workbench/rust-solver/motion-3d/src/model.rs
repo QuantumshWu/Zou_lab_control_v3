@@ -408,11 +408,11 @@ pub struct Point{
 /// Hermitian part (a phase); and what the gradient of its Hermitian part takes, for the force on the
 /// state of the step's middle (`Model::force`): per table pair, in the groups' order, its S and every
 /// ∂S/∂s_f at the point on its group's entries (`values`, re/im interleaved) and its coefficients
-/// −∇_aΦ and −Φ (each twice for a pair standing for two); per first-order pair its W^S and every ∂W^S/∂s_f
-/// and its coefficients ∇_aξ and ξ (module documentation, # The photons and the Doppler term); h0's ∂/∂s_f
-/// (n × n); and ∇s_f. A cluster of ground states' (`Model::local`; its gradients as matrices `Model::gradients`).
+/// −∇_aΦ and −Φ (each twice for a pair standing for two), then per first-order pair the same of its W^S with its coefficients ∇_aξ and ξ
+/// (module documentation, # The photons and the Doppler term); h0's ∂/∂s_f (n × n); and ∇s_f. A cluster of
+/// ground states' (`Model::local`; its gradients as matrices `Model::gradients`).
 #[derive(Clone,Debug)]
-pub struct Local{pub hamiltonian:[Complex;MOST_STATES*MOST_STATES],pub scalar:f64,values:Vec<f64>,coefficients:Vec<[Complex;4]>,first:Vec<f64>,first_coefficients:Vec<[Complex;4]>,h0:[[f64;MOST_W];MOST_FOCUSED],intensity_gradient:[[f64;3];MOST_FOCUSED]}
+pub struct Local{pub hamiltonian:[Complex;MOST_STATES*MOST_STATES],pub scalar:f64,values:Vec<f64>,coefficients:Vec<[Complex;4]>,h0:[[f64;MOST_W];MOST_FOCUSED],intensity_gradient:[[f64;3];MOST_FOCUSED]}
 /// A cluster's generator at a point and a time on any number of states, row-major n × n: H_eff
 /// less `scalar` (the scalar part of its Hermitian part) and the gradient of its Hermitian part per
 /// axis -- the explicit excited states' clusters', and any cluster's in the exact step (engine.rs).
@@ -1606,12 +1606,11 @@ impl Model{
     #[inline(always)]
     fn local_body<const N:usize,const W:usize>(&self,cluster:usize,p:&Point,t:f64)->Local{
         let layout=&self.layouts[cluster];let d=self.focused.len();
-        let pairs:usize=layout.groups.iter().map(|g|g.pairs.len()).sum();let values:usize=layout.groups.iter().map(|g|g.pairs.len()*2*g.entries.len()).sum();
-        let firsts:usize=layout.groups.iter().map(|g|g.first.len()).sum();let first:usize=layout.groups.iter().map(|g|g.first.len()*2*g.entries.len()).sum();
+        let pairs:usize=layout.groups.iter().map(|g|g.pairs.len()+g.first.len()).sum();let values:usize=layout.groups.iter().map(|g|(g.pairs.len()+g.first.len())*2*g.entries.len()).sum();
         let mut out=Local{hamiltonian:[Complex::ZERO;MOST_STATES*MOST_STATES],scalar:0.,values:Vec::with_capacity((1+d)*values),coefficients:Vec::with_capacity(pairs),
-            first:Vec::with_capacity((1+d)*first),first_coefficients:Vec::with_capacity(firsts),h0:[[0.;MOST_W];MOST_FOCUSED],intensity_gradient:p.intensity_gradient};
+            h0:[[0.;MOST_W];MOST_FOCUSED],intensity_gradient:p.intensity_gradient};
         let mut buf=[0.;MOST_W];let mut slope=[[0.;MOST_W];MOST_FOCUSED];
-        let(mut m,mut gamma)=([0.;MOST_W],[0.;MOST_W]);
+        let(mut m,mut gamma)=([0.;MOST_W],[0.;MOST_W]);let(mut first_s,mut first_q)=([0.;MOST_W],[0.;MOST_W]);
         // The pair (k, k1)'s tables are (k1, k)'s adjoints in a Hermitian group: c X + (c X)† for k1 < k
         // (all of c X added first). The force reads only Re⟨ψ|·|ψ⟩, so its coefficients take 2 c for
         // the two. A group's tables hold its entries alone: a group of every entry is added as
@@ -1644,20 +1643,23 @@ impl Model{
                     scatter(ee,&buf,&gl.entries,mirror,&mut gamma);
                 }
             }
-            // The first order: ξ = e^{iΩ̃t} E^d_k′* E^D_k of each pair, its Hermitian part −½(ξ W^S + h.c.) in m and its decay
-            // −(ξ W^Q + h.c.) in Γ, W^S, its slopes and the coefficients ∇_aξ and ξ kept for the force.
+            // The first order: ξ = e^{iΩ̃t} E^d_k′* E^D_k of each pair, the sums Σ ξ W^S and Σ ξ W^Q (each with its adjoint below, once
+            // for all the pairs), W^S, its slopes and the coefficients ∇_aξ and ξ kept for the force.
             for(pi,&(k1,k))in gl.first.iter().enumerate(){
                 let at=gl.w+2*pi*count;let xi=phase*e.e[k1].conj()*f.doppler[k];let len=2*count;
                 let c=|a:usize|phase*(e.grad[k1][a].conj()*f.doppler[k]+e.e[k1].conj()*f.doppler_grad[k][a]);
-                let whole=count==N*N;let span=if whole{W}else{len};let half=-xi*0.5;
+                let whole=count==N*N;let span=if whole{W}else{len};
                 self.gather(cluster,&p.stencil,at,span,&mut buf,&mut slope);
-                if whole{caxpy::<W>(half,&buf,&mut m);adjoint(half,&buf,&mut m);}else{scatter(half,&buf,&gl.entries,true,&mut m);}
-                out.first_coefficients.push([c(0),c(1),c(2),xi]);
-                out.first.extend_from_slice(&buf[..len]);for g in 0..d{out.first.extend_from_slice(&slope[g][..len]);}
+                if whole{caxpy::<W>(xi,&buf,&mut first_s);}else{scatter(xi,&buf,&gl.entries,false,&mut first_s);}
+                out.coefficients.push([c(0),c(1),c(2),xi]);
+                out.values.extend_from_slice(&buf[..len]);for g in 0..d{out.values.extend_from_slice(&slope[g][..len]);}
                 self.gather_value(cluster,&p.stencil,at+count,span,&mut buf);
-                if whole{caxpy::<W>(-xi,&buf,&mut gamma);adjoint(-xi,&buf,&mut gamma);}else{scatter(-xi,&buf,&gl.entries,true,&mut gamma);}
+                if whole{caxpy::<W>(xi,&buf,&mut first_q);}else{scatter(xi,&buf,&gl.entries,false,&mut first_q);}
             }
         }
+        // The first order's sums and their adjoints: −½(Σ ξ W^S + h.c.) in m and −(Σ ξ W^Q + h.c.) in Γ.
+        caxpy::<W>(Complex::new(-0.5,0.),&first_s,&mut m);adjoint(Complex::new(-0.5,0.),&first_s,&mut m);
+        caxpy::<W>(Complex::new(-1.,0.),&first_q,&mut gamma);adjoint(Complex::new(-1.,0.),&first_q,&mut gamma);
         self.gather(cluster,&p.stencil,layout.h0,W,&mut buf,&mut out.h0);
         let at=|v:&[f64;MOST_W],a:usize,b:usize|Complex::new(v[2*(a*N+b)],v[2*(a*N+b)+1]);
         let mut scalar=0.;for a in 0..N{scalar+=buf[2*(a*N+a)]-m[2*(a*N+a)];}scalar/=N as f64;out.scalar=scalar;
@@ -1680,23 +1682,17 @@ impl Model{
         // Per group the products ψ_a* ψ_b on its entries (row-major for a group of every entry); a
         // pair's ⟨ψ|X|ψ⟩ is then their sum weighted by its table X there.
         let mut products=[Complex::ZERO;MOST_STATES*MOST_STATES];
-        let mut g=[0.;3];let(mut at,mut pair,mut first_at,mut first_pair)=(0,0,0,0);
+        let mut g=[0.;3];let(mut at,mut pair)=(0,0);
         for gl in &layout.groups{
             let count=gl.entries.len();let len=2*count;
             if count==N*N{for a in 0..N{for b in 0..N{products[a*N+b]=psi[a].conj()*psi[b];}}}
             else{for(j,&(a,b))in gl.entries.iter().enumerate(){products[j]=psi[a].conj()*psi[b];}}
             let form=|x:&[f64]|->Complex{let mut s=Complex::ZERO;for j in 0..count{s+=products[j]*Complex::new(x[2*j],x[2*j+1]);}s};
-            for _ in &gl.pairs{
+            for _ in 0..gl.pairs.len()+gl.first.len(){
                 let[c0,c1,c2,b]=local.coefficients[pair];let sigma=form(&local.values[at..at+len]);
                 g[0]+=(c0*sigma).re;g[1]+=(c1*sigma).re;g[2]+=(c2*sigma).re;
                 for f in 0..d{let tau=b*form(&local.values[at+(1+f)*len..at+(2+f)*len]);for a in 0..3{g[a]+=tau.re*local.intensity_gradient[f][a];}}
                 at+=(1+d)*len;pair+=1;
-            }
-            for _ in &gl.first{
-                let[c0,c1,c2,xi]=local.first_coefficients[first_pair];let sigma=form(&local.first[first_at..first_at+len]);
-                g[0]+=(c0*sigma).re;g[1]+=(c1*sigma).re;g[2]+=(c2*sigma).re;
-                for f in 0..d{let tau=xi*form(&local.first[first_at+(1+f)*len..first_at+(2+f)*len]);for a in 0..3{g[a]+=tau.re*local.intensity_gradient[f][a];}}
-                first_at+=(1+d)*len;first_pair+=1;
             }
         }
         for f in 0..d{let eta=quadratic::<N>(&local.h0[f],psi).re;for a in 0..3{g[a]+=local.intensity_gradient[f][a]*eta;}}
@@ -1707,10 +1703,10 @@ impl Model{
     /// slopes on its entries with its coefficients, h0's slopes --, for the exact step's `Generator`.
     pub fn gradients(&self,cluster:usize,local:&Local)->[Vec<Complex>;3]{
         let layout=&self.layouts[cluster];let(n,d)=(layout.n,self.focused.len());
-        let mut g:[Vec<Complex>;3]=std::array::from_fn(|_|vec![Complex::ZERO;n*n]);let(mut at,mut pair,mut first_at,mut first_pair)=(0,0,0,0);
+        let mut g:[Vec<Complex>;3]=std::array::from_fn(|_|vec![Complex::ZERO;n*n]);let(mut at,mut pair)=(0,0);
         for gl in &layout.groups{
             let len=2*gl.entries.len();
-            for _ in &gl.pairs{
+            for _ in 0..gl.pairs.len()+gl.first.len(){
                 let[c0,c1,c2,b]=local.coefficients[pair];let c=[c0,c1,c2];
                 let value=|start:usize,j:usize|Complex::new(local.values[start+2*j],local.values[start+2*j+1]);
                 for(j,&(x,y))in gl.entries.iter().enumerate(){
@@ -1718,15 +1714,6 @@ impl Model{
                     for a in 0..3{let mut z=c[a]*s;for f in 0..d{z+=b*value(at+(1+f)*len,j)*local.intensity_gradient[f][a];}g[a][x*n+y]+=z;}
                 }
                 at+=(1+d)*len;pair+=1;
-            }
-            for _ in &gl.first{
-                let[c0,c1,c2,xi]=local.first_coefficients[first_pair];let c=[c0,c1,c2];
-                let value=|start:usize,j:usize|Complex::new(local.first[start+2*j],local.first[start+2*j+1]);
-                for(j,&(x,y))in gl.entries.iter().enumerate(){
-                    let s=value(first_at,j);
-                    for a in 0..3{let mut z=c[a]*s;for f in 0..d{z+=xi*value(first_at+(1+f)*len,j)*local.intensity_gradient[f][a];}g[a][x*n+y]+=z;}
-                }
-                first_at+=(1+d)*len;first_pair+=1;
             }
         }
         for a in 0..3{for f in 0..d{let w=local.intensity_gradient[f][a];for k in 0..n*n{g[a][k]+=Complex::new(local.h0[f][2*k],local.h0[f][2*k+1])*w;}}}
