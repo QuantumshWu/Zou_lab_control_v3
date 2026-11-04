@@ -14,10 +14,9 @@
 //! # Ledger and the total error
 //! Every a-priori approximation's estimate enters the solve's ledger (ledger.rs), reported against
 //! its budget, the a-priori share of the population target. The decisions take that share: the
-//! couplings' and the far components' folds (ground.rs), a Gaussian beam's intensity axis (model.rs),
-//! the region the initial positions are drawn in (lib.rs `thermal_position`) and, per step, the
-//! first order in the Doppler shift -- what the budget leaves after the model's estimates and the
-//! pilot's elimination, or the budget on its own where the elimination alone exceeds it (the exact
+//! couplings' and the far components' folds (ground.rs), a Gaussian beam's intensity axis (model.rs)
+//! and, per step, the first order in the Doppler shift -- what the budget leaves after the model's
+//! estimates and the pilot's elimination, or the budget on its own where the elimination alone exceeds it (the exact
 //! response beyond, engine.rs). The elimination's η² -- each output's mean
 //! excited population, the local expansion parameter ⟨Y⟩ of each atom's state -- is measured along
 //! the trajectories and is no decision yet: it enters the total (validated on resonant probes against
@@ -502,9 +501,9 @@ fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance
         population.or(temperature)}).collect();
     // Light near resonance where the atoms go (`resonance`).
     let resonance=resonance(model);
-    // The initial ensemble's cut beyond the budget, on its own: the loss and the populations depend on it.
-    let share=cut(base);
-    let initial=(share>STEP_SHARE*POPULATION_TARGET).then(||format!("初始热分布有 {:.0}% 落在势阱区之外（丢失与布居依赖这一截断）",100.*share));
+    // The initial ensemble's flag, on its own (`initial_flag`, the base ledger's): the loss and the populations
+    // depend on its cut, T on its kinetic temperature.
+    let initial=base.flagged.clone();
     ledger.flagged=match(resonance,initial){(Some(r),Some(i))=>Some(format!("{r}；{i}")),(r,i)=>r.or(i)};
     if !over.is_empty(){
         let(first,last_over)=(over[0].0,over[over.len()-1].0);
@@ -555,6 +554,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // gpu/program.rs).
     let fourth=device==Device::Cpu;
     let Some(mut pilot_candidate)=next_candidate(request,&mut ladder,false,&mut failed)else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
+    pilot_candidate.settle();
     // A generator that gains on the ladder's first rung, every drive folded, is the fold's construction failing
     // (model.rs `Model::lindblad`), not a regime to escalate into explicit states: the solve stops with why.
     if let Some(e)=failed.as_ref().filter(|e|e.starts_with(NOT_LINDBLAD)){return Err(Stop::Error(e.clone()));}
@@ -571,7 +571,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // The finest step the work bound allows (`MOST_STEPS`), in steps per interval.
     let most=(MOST_STEPS/(outputs-1)).max(1);
     let first=((interval*rate/first_phase()).ceil() as usize).clamp(1,most);
-    // The loss's region is the reference trap's (engine.rs `Settings::region`): its initial positions' region.
+    // The loss's region is the reference trap's (engine.rs `Settings::region`).
     let plain=|steps:usize,truncation:f64|{let mut s=Settings::new(interval/steps as f64,&trap,truncation,true);s.region=depth;s};
     // The pilot's exponentials to double precision; the beats its exact steps leave out within the run's share,
     // the step's population budget over a waiting time between jumps (engine.rs `Segment::resolve`, `running`):
@@ -737,6 +737,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         else if fourth_wins{let(f,c,states,begun)=fourth_cost.unwrap();(c,states,begun,f.checked)}
         else{(pilot_candidate,pilot_states,starts,pilot_cost.and_then(|p|p.checked))};
     let(jumps,pilot_groups)=(pilot_jumps,pilot_groups);
+    let mut chosen=chosen;chosen.settle();
     let Candidate{model,initial,base,charges,phase,..}=chosen;
     // The generator against its jumps at the pilot's states (`gain`): booked where its decay falls below
     // the jumps' rate.
@@ -893,12 +894,28 @@ fn gain(model:&Model,states:&[Trajectory])->f64{
 
 /// The ledger's item of the drives' fold (its charge a priori; the solve's ledger charges it as measured).
 const FOLD:&str="消去激发态";
-/// The ledger's item of the initial ensemble's cut (lib.rs `thermal_position`): the share of the
-/// traps' thermal positions beyond their region. The temperature asked for against the trap sets it;
-/// no choice of the solve changes it, so it stays out of the totals the solve's choices take (the
-/// fold's room, the Doppler allowance, the statistics' room) and out of the population headline of
-/// the flag: beyond the budget it is flagged on its own (`ledger`).
-const CUT:&str="初始热分布（势阱区之外）";
+/// The ledger's item of the initial ensemble's cut (ensemble.rs): the share of the traps' thermal
+/// distributions over their regions (U_h ≤ D, Maxwell's momenta) that the bound ensembles leave out --
+/// the unbound atoms and the lowering near the trap's top. The temperature asked for against the trap
+/// sets it; no choice of the solve changes it, so it stays out of the totals the solve's choices take
+/// (the fold's room, the Doppler allowance, the statistics' room) and out of the population headline of
+/// the flag: beyond the budget it is flagged on its own (`initial_flag`).
+const CUT:&str="初始热分布（束缚态之外）";
+/// The initial ensemble's flag, every output's (carried by the base ledger, `Candidate::new`): its cut
+/// beyond the budget (`CUT`), and its kinetic temperature where it departs from T by more than T's share
+/// -- a trap a few k_BT deep holds no bound ensemble as hot as T (none of a Gaussian beam's is hotter
+/// than 0.166 D/k_B, ensemble.rs), the reference state's depth in k_BT.
+fn initial_flag(initial:&Initial)->Option<String>{
+    let cut=(initial.cut>STEP_SHARE*POPULATION_TARGET).then(||format!("初始热分布中能量高于阱顶（未束缚）及阱顶附近的 {:.0}% 原子不计入（取束缚原子的降低等温分布）",100.*initial.cut));
+    let ratio=initial.kinetic();let set=initial.temperature_uk;
+    let shallow=((ratio-1.).abs()>STEP_SHARE*TEMPERATURE_TARGET).then(||{
+        let k=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();
+        let depth=initial.ensembles[k].as_ref().map_or(initial.depths[k],|e|e.depth)/(KT_PER_UK*set);let t=initial.temperature();
+        // One decimal from one up (none for the setting's whole numbers), two significant digits below.
+        let digits=|x:f64|if (x-x.round()).abs()<=1e-9*x.abs(){format!("{x:.0}")}else if x>=0.95{format!("{x:.1}")}else{let d=(-x.log10()).ceil().max(0.) as usize+1;format!("{x:.d$}")};
+        format!("势阱较浅（D ≈ {} k_BT）：束缚的热分布动能温度为 {} μK，{}设定的 {} μK",digits(depth),digits(t.iter().sum::<f64>()/3.),if ratio<1.{"低于"}else{"高于"},digits(set))});
+    match(cut,shallow){(Some(c),Some(s))=>Some(format!("{c}；{s}")),(c,s)=>c.or(s)}
+}
 /// The cut's share in a ledger (`CUT`), zero without one.
 fn cut(ledger:&Ledger)->f64{ledger.items.iter().find(|i|i.label==CUT).map_or(0.,|i|i.estimate)}
 /// The fold's charge for the saturation S its folded drives meet: its populations' error bound, S at
@@ -917,19 +934,24 @@ const TARGETS:[f64;2]=[POPULATION_TARGET,TEMPERATURE_TARGET];
 /// A candidate of the fold (module documentation, # The fold's choice): the model at one of the rule's
 /// allowances, its initial state, its ledger, and the fold's charge per output and target (`fold_charges`) -- a
 /// priori at every output, or as measured (`Candidate::charged`); its beating grid's phase (`grid_phase`).
-struct Candidate{model:Model,initial:Initial,base:Ledger,allowance:f64,charges:Vec<[f64;2]>,phase:f64}
+struct Candidate{model:Model,initial:Initial,base:Ledger,allowance:f64,charges:Vec<[f64;2]>,settled:bool,phase:f64}
 /// A candidate's weighed cost (`evaluate` in `run`): at the step its check keeps, its work over the run times the weight of
 /// its totals (`predicted`), its check's own work, its work per interval there, that step, its bias and the a-priori totals per output.
 /// The check itself (`Steps`); none yet where it was put off, beyond the targets whatever its step (`evaluate`).
 struct Costed{cost:f64,check:f64,work:f64,steps:usize,bias:[f64;2],apriori:Vec<[f64;2]>,checked:Option<Steps>}
 impl Candidate{
     fn new(request:&Request,allowance:f64,fourth:bool)->Result<Candidate,String>{
-        let model=Model::with_order(request,allowance,fourth)?;let initial=Initial::new(&model,request)?;let mut base=model_ledger(&model,request);
-        // The initial positions' region (lib.rs `thermal_position`): the share of the traps' thermal
-        // positions it leaves out.
-        if initial.outside>0.{base.add(CUT,initial.outside,"位置取势阱区（谐振近似低于阱深处）内的玻尔兹曼分布；丢失与布居依赖这一截断".into());}
+        let model=Model::with_order(request,allowance,fourth)?;let initial=Initial::deferred(&model,request)?;let base=model_ledger(&model,request);
         let charges=vec![fold_charges(model.fourth,model.ground.charge);request.times_us.len()];
-        Ok(Candidate{model,initial,base,allowance,charges,phase:node_phase()})
+        Ok(Candidate{model,initial,base,allowance,charges,settled:false,phase:node_phase()})
+    }
+    /// The initial ensemble's quadrature (ensemble.rs), which none of the fold's choices reads, for the pilot's and
+    /// the chosen model alone: the share of the traps' thermal distributions it leaves out, and its flag
+    /// (`initial_flag`) on the base ledger, every output's.
+    fn settle(&mut self){
+        if self.settled{return;}self.settled=true;self.initial.integrate(&self.model);let(initial,base)=(&self.initial,&mut self.base);
+        if initial.cut>0.{base.add(CUT,initial.cut,"取势阱中束缚原子的降低等温分布 f ∝ e^(−E/k_BT) − 1（E 为相对阱外的机械能，E < 0）：相对势阱区（谐振近似低于阱深处）内的热分布，未束缚与阱顶附近的原子不计入；丢失与布居依赖这一截断".into());}
+        base.flagged=initial_flag(&initial);
     }
     /// Its fold's charges as measured (`measured_charge`) in place of the a-priori estimate.
     fn charged(&mut self,charges:Vec<[f64;2]>){self.charges=charges;}
@@ -1462,16 +1484,11 @@ fn held_work(states:&[StateWork],s:&Settings,interval:f64,waiting:f64)->f64{
     (interval/s.dt*step+interval/waiting*jump)/count
 }
 
-/// t = 0 is the request's initial state, exactly: per lab axis T is its thermal Wigner temperature
-/// T* = (ħω/2k_B) coth(ħω/2k_B T) in each initial state's trap (lib.rs `initial_trajectory`), the
-/// mean velocity zero -- the trajectories' estimates there carry only the sampling's error.
+/// t = 0 is the request's initial state, exactly: per lab axis T is its bound ensembles' kinetic
+/// temperature with each trap's thermal Wigner factor (lib.rs `Initial::temperature`), the mean
+/// velocity zero -- the trajectories' estimates there carry only the sampling's error.
 fn start(e:&mut Estimate,model:&Model,initial:&Initial){
-    let kt=KT_PER_UK*initial.temperature_uk;let mut t=[0.;3];let _=model;
-    for(&(_,_,p),trap)in initial.states.iter().zip(&initial.traps){
-        // Per lab axis: the principal axes' thermal Wigner temperatures, weighted by their share of it.
-        for a in 0..3{for i in 0..3{let w=trap.frequencies[i];let half=w/(2.*kt);
-            t[a]+=p*trap.axes[i][a]*trap.axes[i][a]*if half>0.{initial.temperature_uk*half/half.tanh()}else{initial.temperature_uk};}}
-    }
+    let t=initial.temperature();let _=model;
     e.temperature=t;e.temperature_error=[0.;3];e.mean_velocity=[0.;3];
     e.temperature_total=t.iter().sum::<f64>()/3.;e.temperature_total_error=0.;
 }
