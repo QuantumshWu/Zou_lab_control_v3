@@ -319,7 +319,7 @@ QUERY_PARAMETERS: dict[str, tuple[str, ...]] = {
     "declare_outputs": ("values", "devices"),
     "declare_previews": ("values", "devices"),
     "resolve_field_availability": ("devices",),
-    "resolve_field_choices": ("values", "resources"),
+    "resolve_field_choices": ("values", "resources", "devices"),
     "resolve_device_claims": ("values",),
     "editor_facts": ("values", "resources", "devices", "source", "bundle", "artifacts"),
     "resolve_defaults": ("values", "resources"),
@@ -367,8 +367,9 @@ class NodeType:
     selection_mappings: tuple[object, ...] = ()
     workspace_resources: tuple[object, ...] = ()
     resolve_field_availability: Callable[..., Any] | None = None
-    #: ``(values, resources) -> {field: [(value, label), ...]}``: the choices of
-    #: a field whose options come from the draft (a chosen pulse's periods).
+    #: ``(values, resources, devices) -> {field: [(value, label), ...]}``: the choices
+    #: of a field whose options come from the draft (a chosen pulse's periods, a
+    #: bound source's channels).
     resolve_field_choices: Callable[..., Any] | None = None
     #: ``(values) -> {argument: {"instance": key, "fields": [...]}}``: devices a
     #: draft names (a scan's device axes) beside the declared requirements;

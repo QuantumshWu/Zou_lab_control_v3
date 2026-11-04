@@ -81,11 +81,11 @@ SLM_REARRANGEMENT_SCHEMA = AuthoringSchema(
 )
 
 
-def _period_choices(values, resources):
+def _period_choices(values, resources, devices=None):
     """The chosen pulse's Periods, each by its id with its operator label, for
     every field that names an imaging Period."""
 
-    del values
+    del values, devices
     try:
         pulse = pulse_description((resources or {}).get(PULSE_RESOURCE.field_name))
     except TypeError:

@@ -73,7 +73,9 @@ the pulse in the Pulse Editor first, then in one batch: `start_node {node}`, `wa
 Calibration and Seamless Scan run their own acquisition and Pulse: start them once, not the camera by hand.
 Processors (Occupancy, Frame Survival, Derive, ...) can start before their source publishes: they follow
 it (`phase: following`) and run on each new acquisition. `waveform_measurement` does the same for
-waveform devices; read the source's actual axes in `list_signals`.
+waveform devices; read the source's actual axes in `list_signals`. Its `trigger_slope` (`rising`/`falling`,
+default `off`) with `trigger_channel`, `trigger_level`, `trigger_record_samples` and `trigger_position` locks a
+slow free-running source in software: each trigger is one record, time zero at the trigger.
 
 ## pulse
 

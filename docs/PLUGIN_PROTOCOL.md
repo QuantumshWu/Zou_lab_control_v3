@@ -142,9 +142,10 @@ requirements; the core claims those fields for the run (Device Control cannot
 move them meanwhile) and passes each device as `argument` (a tunable proxy). Such a
 claim shares the device (v2's runtime claim, `RunRequest.shared`): it conflicts with
 no other run's claim, while two exclusive claims never hold one device.
-`resolve_field_choices(values, resources)` answers `{field: [[value, label], ...]}`
+`resolve_field_choices(values, resources, devices)` answers `{field: [[value, label], ...]}`
 for fields whose options come from the draft (an SLM rearrangement's imaging
-periods are the chosen pulse's periods); the form shows that field as a choice,
+periods are the chosen pulse's periods, a waveform trigger's channels the bound
+source's); the form shows that field as a choice,
 and a value it holds that is not among them as unavailable, never replaced.
 
 A node's page draws the newest answers it has, never an empty draft: a node just

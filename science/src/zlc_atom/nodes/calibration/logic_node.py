@@ -315,12 +315,12 @@ def _default_api_fields(values, resources):
     }
 
 
-def _api_field_choices(values, resources):
+def _api_field_choices(values, resources, devices=None):
     """The chosen pulse's API fields, each by its id with its label, for the
     three windows (v2 CalibrationForm): the form offers them as a choice and
     keeps a field the pulse lacks, unavailable."""
 
-    del values
+    del values, devices
     try:
         description = pulse_description((resources or {}).get("pulse_template"))
     except TypeError:
