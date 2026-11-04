@@ -101,7 +101,14 @@ impl Lu{
 
 /// The eigenvalues of a Hermitian matrix: cyclic Jacobi rotations until the off-diagonal part is
 /// below the double precision of the matrix or stops shrinking.
-pub fn hermitian_eigenvalues(matrix:&Dense)->Vec<f64>{
+pub fn hermitian_eigenvalues(matrix:&Dense)->Vec<f64>{jacobi(matrix,None)}
+/// The eigendecomposition of a Hermitian matrix, H = U diag(λ) U†: the same rotations, U their product --
+/// its columns orthonormal to round-off, in a degenerate eigenspace too.
+pub fn hermitian_eigen(matrix:&Dense)->(Vec<f64>,Dense){
+    let mut u=Dense::zeros(matrix.rows,matrix.rows);for i in 0..matrix.rows{u[(i,i)]=Complex::ONE;}
+    let values=jacobi(matrix,Some(&mut u));(values,u)
+}
+fn jacobi(matrix:&Dense,mut vectors:Option<&mut Dense>)->Vec<f64>{
     let n=matrix.rows;let mut a=matrix.clone();
     let total:f64=a.entries.iter().map(|x|x.norm_sqr()).sum();
     let mut previous=f64::INFINITY;
@@ -115,10 +122,12 @@ pub fn hermitian_eigenvalues(matrix:&Dense)->Vec<f64>{
             // The phase divides by the modulus, whose reciprocal overflows when it is subnormal.
             let phase=Complex::new(a[(p,q)].re/modulus,a[(p,q)].im/modulus);
             for k in 0..n{a[(k,q)]=a[(k,q)]*phase.conj();a[(q,k)]=a[(q,k)]*phase;}
+            if let Some(u)=vectors.as_deref_mut(){for k in 0..n{u[(k,q)]=u[(k,q)]*phase.conj();}}
             let tau=(a[(q,q)].re-a[(p,p)].re)/(2.*modulus);
             let t=tau.signum()/(tau.abs()+(1.+tau*tau).sqrt());let c=1./(1.+t*t).sqrt();let s=t*c;
             for k in 0..n{let(x,y)=(a[(k,p)],a[(k,q)]);a[(k,p)]=x*c-y*s;a[(k,q)]=x*s+y*c;}
             for k in 0..n{let(x,y)=(a[(p,k)],a[(q,k)]);a[(p,k)]=x*c-y*s;a[(q,k)]=x*s+y*c;}
+            if let Some(u)=vectors.as_deref_mut(){for k in 0..n{let(x,y)=(u[(k,p)],u[(k,q)]);u[(k,p)]=x*c-y*s;u[(k,q)]=x*s+y*c;}}
             a[(p,q)]=Complex::ZERO;a[(q,p)]=Complex::ZERO;
         }}
     }

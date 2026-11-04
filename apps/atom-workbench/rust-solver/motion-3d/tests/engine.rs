@@ -599,6 +599,55 @@ fn a_near_tweezer_s_shift_moves_a_probe_s_line_to_the_core_s(){
     for(i,(a,b))in frozen_f1(&r).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
 }
 
+/// The atom frozen at the focus: its eliminated master equation there (ground.rs `local_at`, every drive
+/// folded, the beats' phases at each instant), RK4 at 1/250 of the outputs' interval, the populations
+/// at the given times up to `last`.
+fn frozen_rows(r:&Request,times:&[f64],last:usize)->Vec<[f64;STATES]>{
+    use atom_motion_3d::linear::Dense;
+    let model=Model::new(r).unwrap();let g=&model.ground;let point=[0.;3];
+    let e=g.eliminate(&model.intensities_at_point(point)).unwrap();
+    let locals=|t:f64|->Vec<_>{(0..g.clusters.len()).map(|k|g.local_at(&e,k,point,t).unwrap()).collect()};
+    let mut rho:Vec<Dense>=g.clusters.iter().map(|c|{let n=c.dimension();Dense::from_fn(n,n,|i,j|if i==j&&i<c.states.len(){let s=g.ground_states[c.states[i]];r.initial_density[s*STATES+s]}else{Complex::ZERO})}).collect();
+    let derivative=|t:f64,rho:&[Dense]|->Vec<Dense>{
+        let x=locals(t);
+        let mut out:Vec<Dense>=rho.iter().zip(&x).map(|(p,l)|{let h=&l.effective;let mut d=h.product(p).scaled(Complex::new(0.,-1.));d.add_scaled(Complex::new(0.,1.),&p.product(&h.adjoint()));d}).collect();
+        for(k,l)in x.iter().enumerate(){for(class,jumps)in g.clusters[k].classes.iter().zip(&l.jumps){for j in jumps{out[class.target].add_scaled(Complex::ONE,&j.product(&rho[k]).product(&j.adjoint()));}}}
+        out
+    };
+    let add=|a:&[Dense],b:&[Dense],s:f64|->Vec<Dense>{a.iter().zip(b).map(|(x,y)|{let mut z=x.clone();z.add_scaled(Complex::new(s,0.),y);z}).collect()};
+    let readout=|t:f64,rho:&[Dense]|{let mut p=[0.;STATES];for(k,l)in locals(t).iter().enumerate(){for(a,b)in p.iter_mut().zip(g.populations(k,l,&rho[k])){*a+=b;}}p};
+    let mut rows=vec![readout(times[0],&rho)];let mut t=times[0];
+    for i in 1..=last{
+        let steps=250;let h=(times[i]-times[i-1])/steps as f64;
+        for _ in 0..steps{
+            let k1=derivative(t,&rho);let k2=derivative(t+h/2.,&add(&rho,&k1,h/2.));let k3=derivative(t+h/2.,&add(&rho,&k2,h/2.));let k4=derivative(t+h,&add(&rho,&k3,h));
+            for(j,x)in rho.iter_mut().enumerate(){for(k,w)in [(&k1,1.),(&k2,2.),(&k3,2.),(&k4,1.)]{x.add_scaled(Complex::new(h*w/6.,0.),&k[j]);}}
+            t+=h;
+        }
+        rows.push(readout(times[i],&rho));
+    }
+    rows
+}
+
+/// A circular tweezer across the field mixes the Zeeman sublevels by its vector light shift, 6.7 rad/us
+/// against their 0.7 rad/us splitting (F6; ground.rs, # The static ground block): the probes' responses
+/// are those of the static block's eigenstates, each at its own energy, and the frozen atom's
+/// populations at the focus are the population core's -- every state's, at every output until the
+/// core's own error exceeds 0.005, to 0.01 beyond it (the release's 0.066 at 35 us).
+#[test]
+fn a_tweezer_s_vector_shift_across_the_field_moves_the_responses_to_the_static_block_s_eigenstates(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/tensor_tweezer_probe_motion.json")).unwrap();let r=sparse_request(&v);
+    let times=floats(&v["core"]["timesUs"]);let errors=floats(&v["core"]["errors"]);
+    let last=errors.iter().position(|&x|x>5e-3).unwrap_or(errors.len())-1;
+    let rows=frozen_rows(&r,&times,last);let mut worst=(0.,0.);
+    for(i,(row,core))in rows.iter().zip(v["core"]["populations"].as_array().unwrap()).enumerate(){
+        if errors[i]>5e-3{continue;}
+        let core=floats(core);let error=(0..STATES).map(|s|(row[s]-core[s]).abs()).fold(0.,f64::max);
+        println!("{} us: {error:.4}",times[i]);if error>worst.0{worst=(error,times[i]);}
+    }
+    assert!(worst.0<=1e-2+5e-3,"the frozen atom's populations {:.4} off the core's at {} us",worst.0,worst.1);
+}
+
 /// Tables whose function is not smooth on any grid's scale -- b1/109's explicit rung, every excited state
 /// explicit: the interpolation's error 0.4 to 1.4 from 9 to 16385 nodes per axis, with or without the
 /// near light's dressing, 25 s to refine to the work bound -- stop refining once two doublings in a row

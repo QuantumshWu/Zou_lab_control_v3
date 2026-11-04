@@ -675,7 +675,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let Candidate{model,initial,base,charges,..}=chosen;
     // The generator against its jumps at the pilot's states (`gain`): booked where its decay falls below
     // the jumps' rate.
-    let base=gained(&base,&model,&states);
+    let mut base=gained(&base,&model,&states);
     // The beats the exact steps left out (engine.rs `Segment::resolve`), booked as their bound per unit time
     // over the horizon: within the exponentials' share by construction (`booked_beats`).
     let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
@@ -710,6 +710,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         },
     };
     let used=if gpu.is_some(){Device::Gpu}else{Device::Cpu};
+    // On the GPU the exact response leaves the near light's dressing out (gpu/program.rs): its bound.
+    if gpu.is_some()&&model.undressed>0.{base.add("GPU 精确响应中的基态静态耦合与近共振光彼此光移",model.undressed,"多普勒一阶之外的精确响应按各基态自身能量、未缀饰计算（GPU）".into());}
     // The control variates (control.rs): the harmonic twin's, and the held twin where the trap beam's
     // intensity is the pilot's mean, when the generator is static.
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);

@@ -465,8 +465,10 @@ pub struct Model{
     pub table_limit:Option<usize>,
     pub table_stalled:bool,
     /// The near light's dressing (ground.rs `Ground::dressing_bounds`), relative to the generator's
-    /// scale, its largest over the tables' nodes inside the reach's intensities (as `resonance`): what it
-    /// leaves out, and what an undressed response would err by (the GPU's exact response, gpu/program.rs).
+    /// scale, its largest over the tables' nodes inside the reach's intensities (as `resonance`): the bound
+    /// of what it leaves out, and what a bare
+    /// response -- each ground state at its own energy, undressed -- errs by, measured (the GPU's exact
+    /// response, gpu/program.rs).
     pub dressing:f64,
     pub undressed:f64,
     /// The fourth order's H^(4) entries left out at beats the second order folds: their mixings' squares
