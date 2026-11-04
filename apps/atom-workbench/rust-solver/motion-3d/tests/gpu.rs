@@ -99,6 +99,8 @@ fn beating_twice(r:&Request)->Model{
 /// sends it: its folds' saturation far beyond one, its first rung keeps 5 excited states explicit with the 5
 /// ground states of F = 2, a cluster beating at 36.4 MHz that its exact step takes by CF4.
 fn probed()->Request{let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=vec![0.,1.];r}
+/// The same with its cooling beam along the probe a line of its own, at twice the cooling light's offset from the probe: three carriers, and rungs that beat at 36.4 and 72.8 MHz.
+fn probed_twice()->Request{let mut r=probed();let beam=r.beams.iter_mut().find(|b|b.id=="cool-plus-x").unwrap();beam.frequency_index[0]*=2;r}
 /// A batch of the fixture's thermal trajectories and the step's settings (a solve's: the truncation
 /// a share of the step's budget, the loss on), with `threshold` (when given) as every one's.
 fn setup(r:&Request,model:Model,dt:f64,threshold:Option<f64>,allowance:f64)->(Model,Settings,Vec<Trajectory>){
@@ -175,7 +177,7 @@ fn on_eight_states_a_step_and_a_jump_are_the_cpu_s(){let r=request(MOLASSES);ste
 fn on_eight_states_a_jump_with_the_exact_response_is_the_cpu_s(){let r=request(MOLASSES);steps_and_jumps(&r,model(&r,false),0.2,&[true]);}
 /// With explicit excited states (engine.rs # The exact step), on the tweezer PGC's first explicit rung
 /// (clusters of 3 ground and 4 explicit states and of 2 and 3, their hyperfine beat left out: the static
-/// path, the CPU's eigendecomposition against the GPU's series), the gray molasses', and the probed PGC's first
+/// path, the CPU's eigendecomposition against the GPU's series), the gray molasses', and the probed PGC's (`probed_twice`) first
 /// beating at two frequencies (5 explicit states at 36.4 and 72.8 MHz: CF4, at its solve's 0.1 us):
 /// - a jump-free step is the CPU's to single precision;
 /// - a jump at each thermal state -- the explicit states' photons and their share of the absorbed light,
@@ -191,7 +193,7 @@ fn on_eight_states_a_jump_with_the_exact_response_is_the_cpu_s(){let r=request(M
 ///   explicit rung) its time moves by 1e-3 of itself, and the state after it by as much (unbiased).
 #[test]
 fn with_explicit_states_a_step_and_a_jump_are_the_cpu_s(){
-    let(pgc,molasses,probe)=(request(PGC),request(MOLASSES),probed());
+    let(pgc,molasses,probe)=(request(PGC),request(MOLASSES),probed_twice());
     explicit_rung(&pgc,explicit(&pgc),0.2,&[false,true]);
     explicit_rung(&molasses,explicit(&molasses),0.2,&[false]);
     explicit_rung(&probe,beating_twice(&probe),0.1,&[false,true]);
@@ -309,8 +311,8 @@ fn with_what_the_transfer_leaves_a_step_and_a_jump_are_the_cpu_s(){
 fn the_exact_components_are_the_cpu_s(){
     let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
     let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/default_scene_motion.json")).unwrap();
-    let(default,pgc,molasses,probe)=(scene::request(&fixture["payload"]),request(PGC),request(MOLASSES),probed());
-    for(r,m)in [(&default,explicit(&default)),(&pgc,explicit(&pgc)),(&molasses,explicit(&molasses)),(&probe,model(&probe,false)),(&probe,explicit(&probe)),(&probe,beating_twice(&probe))]{
+    let(default,pgc,molasses,probe,twice)=(scene::request(&fixture["payload"]),request(PGC),request(MOLASSES),probed(),probed_twice());
+    for(r,m)in [(&default,explicit(&default)),(&pgc,explicit(&pgc)),(&molasses,explicit(&molasses)),(&probe,model(&probe,false)),(&probe,explicit(&probe)),(&twice,beating_twice(&twice))]{
         let(model,settings,thermal)=setup(r,m,0.1,None,f64::INFINITY);let program=gpu.program(&model,&settings).unwrap();let mut worst=[0_f64;2];
         for(i,t)in thermal.iter().enumerate(){
             let k=i%model.clusters();let mut x=t.clone();x.cluster=k;
@@ -390,10 +392,10 @@ fn a_tensor_split_line_s_ringing_photon_is_the_cpu_s(){
     let r=tetrahedral();
     for fourth in [false,true]{ringing_photons(&r,model(&r,fourth),0.2,false);}
 }
-/// With explicit states, the folded amplitude's H decoupled from them: on the tweezer PGC's first explicit rung and the probed PGC's beating at two frequencies (the gray molasses' has explicit what drives it: p below the draw).
+/// With explicit states, the folded amplitude's H decoupled from them: on the tweezer PGC's first explicit rung and the probed PGC's (`probed_twice`) beating at two frequencies (the gray molasses' has explicit what drives it: p below the draw).
 #[test]
 fn with_explicit_states_a_ringing_photon_is_the_cpu_s(){
-    let(pgc,probe)=(request(PGC),probed());
+    let(pgc,probe)=(request(PGC),probed_twice());
     ringing_photons(&pgc,explicit(&pgc),0.2,false);ringing_photons(&probe,beating_twice(&probe),0.1,false);
 }
 

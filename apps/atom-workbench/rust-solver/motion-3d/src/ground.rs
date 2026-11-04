@@ -68,6 +68,17 @@
 //! The couplings between explicit states and the pairs are judged once the drives stand. The rungs then keep more as the allowance
 //! falls. When every drive folds, the clusters are the ground states' alone.
 //!
+//! A folded drive into an explicit state and a kept drive into it are a pair of channels too, and their coupling through that state,
+//! −V′[e,a]* G V[e,b], lies in neither part: X takes V^f, zero on the kept entry, and the state's amplitude does not feel a folded drive. So each
+//! such pair is judged as the ground states' are, by `foldable` at its worst separation over the trap, within one cluster with its dressing taken from
+//! that, its size g g′ (1/d + 1/d′ + Γ/(d d′)), and the folded drive is kept where the pair may not fold (`Ground::keep_partners`), a residual beat in the
+//! cluster's frames or none. Read off the frames alone, a kept pair's partner fell out wherever a probe's and a cooling drive's one state split the
+//! ground states' frames by the 36 MHz between them: on PGCP_10 the rungs of 7 explicit states lost Raman couplings between sublevels of 0.3-1.1 rad/us beside
+//! the largest's 4-5, and their T stood 2.9 ± 0.9 % and 10.1 ± 0.9 % high at a fold's charge of 0.28 % and 0.07 %, against 15 explicit states (8192 trajectories at 100 us); on
+//! those rungs now 1.3 ± 0.8 % and 0.9 ± 0.9 %. The pairs at the beat of two carriers fold beyond the dressing's reach: on the first rung, whose cooling drives into the probe's states
+//! lie within it, a frozen atom's p(2,2) went from 0.515 to 0.541 and its photons from 1.281 to 1.312 /us, against 0.539 and 1.309 in the master equation of F = 2 and all the
+//! D2 states without any fold, and T from −2.0 ± 0.9 % to +0.4 ± 0.9 %.
+//!
 //! # Elimination of the folded drives
 //! Each beam's folded coupling V_l^f is V_l with every kept drive's entry zeroed (`Ground::folded`).
 //! With the ground energies E_b, the diagonal of H(r)'s ground block, and the excited states'
@@ -192,7 +203,10 @@
 //! J_{a,φ} = Σ_{(c,b→b′)∈φ} e^{iω̃t} [C_a R_c]_{b′b} |b′⟩⟨b| − Σ_{(e→b′)∈φ} e^{iω̃t} [C_a]_{b′e} |b′⟩⟨e|
 //! ```
 //!
-//! ω̃ = θ_b′ − θ_e for an explicit state's photon, θ_b′ − θ_b − δ_c for a folded one. The decay between
+//! ω̃ = θ_b′ − θ_e for an explicit state's photon, θ_b′ − θ_b − δ_c for a folded one. An explicit state's amplitude holds the frequency of every kept drive
+//! that reaches it, through H's kept couplings too, whatever its frame: its photon shares a class with the folded photons of those frequencies and with the explicit states that hold
+//! one of them, each at its residual. Classes by the frame alone dropped the interference of a probe-driven state's photon with the probe's folded photons through F′ = 2 (on PGCP_10 a rate between
+//! sublevels 11 % low, against the second order of every excited state) and what two frames' explicit states land coherently (a frozen atom's p(2,2) 0.46, against 0.54). The decay between
 //! ground states is X's on the kept pairs of channels; a class that joins two folded photons landing in one
 //! state from channels without a kept coupling -- through an explicit state's photon of their frequency --
 //! adds their cross term alone (`FoldedCross`): the decay is the jumps' product on every entry.
@@ -355,7 +369,7 @@ pub struct ExcitedItem{pub kind:ExcitedKind,pub size:f64,pub power:f64,pub dista
 /// Vleck shift.
 #[derive(Clone,Debug)]
 pub struct Group{pub absorbed:usize,pub emitted:usize,pub entries:Vec<(usize,usize,f64)>}
-/// A jump channel from a cluster: the photons of one frequency landing in cluster `target` -- the
+/// A jump channel from a cluster: the photons that share a frequency landing in cluster `target` -- the
 /// folded drives' (`photons`) and the explicit states' (`direct`: the explicit state's place in the
 /// cluster, the ground state it lands in, a position in `Ground::ground_states`) -- each with its
 /// residual ω̃ − ω̃₀ (rad/us), and their wave number.
@@ -740,6 +754,10 @@ struct Bounds{
     /// The eliminated generator's light shift and scattering (rad/us): bounds over the trap.
     light:f64,scattering:f64,
     poles:Vec<f64>,
+}
+impl Bounds{
+    /// The worst separation of a pair of states over the trap with a constant beat added: E_a − E_c + beat over its range, zero where that holds zero.
+    fn separation(&self,a:usize,c:usize,beat:f64)->f64{let(lo,hi)=(beat-self.high[c][a],beat+self.high[a][c]);if lo<=0.&&hi>=0.{0.}else{lo.abs().min(hi.abs())}}
 }
 
 /// The corners of the varying units' intensities (`Unit::varies`) and the levels between them,
@@ -1441,6 +1459,8 @@ impl Ground{
                     if inside[i]||(matches!(x.kind,ExcitedKind::Static{..})&&x.estimate>BUDGET){x.folded=false;x.promoted=true;changed=true;}
                 }
             }
+            // A folded drive into an explicit state against the drives kept into it.
+            if !changed{changed=self.keep_partners(&mut excited,&explicit,&b,&partition.set,&dressing);}
             // A folded pair of channels between two states of one cluster, judged again with its dressing taken from its
             // separation: the cluster's static block mixes its states by up to that much, and a pair that is not far
             // beyond it would beat between the block's eigenstates at their nearness -- kept.
@@ -1454,6 +1474,26 @@ impl Ground{
         }
     }
 
+    /// The pairs of channels through an explicit state (module documentation, # One rule over the ground and the excited states): each folded drive
+    /// into one, against every drive kept into it -- those whose admixture g/d lies above double precision's round-off --, by the ground states' pairs' rule, within
+    /// one cluster with its dressing taken from their separation: kept where one may not fold. Whether any was.
+    fn keep_partners(&self,excited:&mut [ExcitedItem],explicit:&[bool],b:&Bounds,set:&[Option<usize>],dressing:&[f64])->bool{
+        let(ng,l0)=(self.ground_states.len(),self.generator_scale);
+        let mixes=|x:&ExcitedItem|x.size/x.distance>f64::EPSILON;
+        let kept:Vec<(Drive,f64,f64)>=excited.iter().filter(|x|!x.folded&&mixes(x)).filter_map(|x|match x.kind{ExcitedKind::Drive(d)=>Some((d,x.size,x.distance)),_=>None}).collect();
+        let mut changed=false;
+        for x in excited.iter_mut().filter(|x|x.folded&&mixes(x)){
+            let ExcitedKind::Drive(d)=x.kind else{continue};if !explicit[d.excited]{continue;}
+            let gamma=self.decay[(d.excited,d.excited)].re;
+            let within=if set[d.ground]==set[ng+d.excited]{set[d.ground].map_or(0.,|k|dressing[k])}else{0.};
+            if kept.iter().filter(|p|p.0.excited==d.excited).any(|&(p,size,distance)|{
+                let frequency=b.separation(p.ground,d.ground,self.carriers[p.carrier].detuning-self.carriers[d.carrier].detuning);
+                !foldable((frequency-within).max(0.),x.size*size*(1./x.distance+1./distance+gamma/(x.distance*distance)),l0)
+            }){x.folded=false;x.promoted=true;changed=true;}
+        }
+        changed
+    }
+
     /// The couplings between ground states classified (`classify`) with the folded drives, and the
     /// clusters they make with the kept excited couplings, and the frames.
     fn partition(&mut self,b:&Bounds,excited:&[ExcitedItem],explicit:&[bool],kept:&[Kind])->Result<Partition,String>{
@@ -1462,11 +1502,7 @@ impl Ground{
         // ‖L0‖ of the eliminated generator without the states' energies: its Hermitian part on both
         // sides, its decay and its jumps.
         let l0=2.*b.light+2.*b.scattering;self.generator_scale=l0;self.light=b.light;
-        // The worst separation of a pair over the trap with a constant beat added: the separation's
-        // range [low, high] of E_a − E_b, shifted.
-        let separation=|a:usize,c:usize,beat:f64|->f64{
-            let(lo,hi)=(beat-b.high[c][a],beat+b.high[a][c]);if lo<=0.&&hi>=0.{0.}else{lo.abs().min(hi.abs())}
-        };
+        let separation=|a:usize,c:usize,beat:f64|b.separation(a,c,beat);
         let mut items:Vec<Item>=vec![];
         for a in 0..ng{for c in a+1..ng{if b.statics[a][c]>0.{
             items.push(Item{kind:Kind::Static{a,b:c},frequency:separation(a,c,0.),size:2.*b.statics[a][c].max(b.statics[c][a]),folded:false});}}}
@@ -1619,10 +1655,20 @@ impl Ground{
             .max_by(|a,b|a.0.total_cmp(&b.0)).map_or(self.carriers.first().map_or(0.,|c|c.wave_number),|(_,c)|self.carriers[c].wave_number)};
         // The jump classes: the photons from a cluster, joined when they land in one cluster with
         // coherent amplitudes -- in one state from co-resonant sources (channels: the same or a kept
-        // pair; an explicit state: one label within the cut), in two states as a kept pair of photons
-        // of one source (or from two sources, at a residual beat below the cut).
+        // pair), in two states as a kept pair of photons of one source, or from two sources whose
+        // frequencies meet within the cut: a folded photon's its carrier's, an explicit state's every one its amplitude holds.
         #[derive(Clone,Copy)]
         enum Source{Folded(Photon),Direct(usize,usize)}
+        // The frequencies an explicit state's amplitude holds: its frame's and each kept drive's reaching it, through H's kept couplings too.
+        let mut holds:Vec<Vec<Vec<i32>>>=(0..ne).map(|e|vec![combination(&[(ng+e,1)],&[])]).collect();
+        for x in excited.iter().filter(|x|!x.folded&&x.size/x.distance>f64::EPSILON){if let ExcitedKind::Drive(d)=x.kind{
+            let f=combination(&[(d.ground,1)],&[(d.carrier,1)]);if !holds[d.excited].contains(&f){holds[d.excited].push(f);}
+        }}
+        loop{
+            let mut grew=false;
+            for x in excited.iter().filter(|x|!x.folded){if let ExcitedKind::Static{a,b}=x.kind{for(u,v)in [(a,b),(b,a)]{for f in holds[u].clone(){if !holds[v].contains(&f){holds[v].push(f);grew=true;}}}}}
+            if !grew{break;}
+        }
         for k in 0..clusters.len(){
             let mut photons:Vec<Source>=(0..nc).flat_map(|c|clusters[k].states.iter().flat_map(move|&from|(0..ng).map(move|to|Photon{carrier:c,from,to})))
                 .filter(|p|b.photons[p.carrier][p.from][p.to].iter().any(|&n|n>0.)).map(Source::Folded).collect();
@@ -1633,12 +1679,14 @@ impl Ground{
                 for to in 0..ng{if reached.iter().any(|&f|(0..3).any(|a|self.emission[a][(to,f)]!=Complex::ZERO)){photons.push(Source::Direct(e,to));}}
             }
             let to=|p:&Source|match *p{Source::Folded(p)=>p.to,Source::Direct(_,t)=>t};
-            // A photon's label (its source's frame and carrier) and rate (its target's frame less the label),
-            // as combinations; between two photons from this cluster landing in one cluster their difference
-            // (the clusters' first energies cancel), evaluated once.
-            let label=|p:&Source|->Vec<i32>{match *p{Source::Folded(p)=>combination(&[(p.from,1)],&[(p.carrier,1)]),Source::Direct(e,_)=>combination(&[(ng+e,1)],&[])}};
+            // A photon's rate (its target's frame less its source's frame and carrier) as a combination; between two photons from this
+            // cluster landing in one cluster their difference (the clusters' first energies cancel), evaluated once.
             let rate=|p:&Source|->Vec<i32>{match *p{Source::Folded(p)=>combination(&[(p.to,1),(p.from,-1)],&[(p.carrier,-1)]),Source::Direct(e,t)=>combination(&[(t,1),(ng+e,-1)],&[])}};
             let apart=|x:Vec<i32>,y:Vec<i32>|->f64{self.beat(0.,&x.iter().zip(&y).map(|(a,b)|a-b).collect::<Vec<i32>>())};
+            // A photon's frequencies: the one rate of a folded photon, an explicit state's per frequency its amplitude holds.
+            let frequencies=|p:&Source|->Vec<Vec<i32>>{match *p{Source::Folded(_)=>vec![rate(p)],
+                Source::Direct(e,t)=>{let to=combination(&[(t,1)],&[]);holds[e].iter().map(|f|to.iter().zip(f).map(|(a,b)|a-b).collect()).collect()}}};
+            let meet=|p:&Source,q:&Source|frequencies(p).into_iter().any(|x|frequencies(q).into_iter().any(|y|apart(x.clone(),y).abs()<cut));
             let mut union=Union::new(photons.len());
             for i in 0..photons.len(){for j in i+1..photons.len(){
                 let(p,q)=(photons[i],photons[j]);
@@ -1648,7 +1696,7 @@ impl Ground{
                         else if p.from==q.from{items.iter().any(|it|!it.folded&&matches!(it.kind,Kind::Photons{first,second}if(first==p&&second==q)||(first==q&&second==p)))}
                         else{apart(rate(&Source::Folded(p)),rate(&Source::Folded(q))).abs()<cut},
                     (Source::Direct(e,a),Source::Direct(f,b))if e==f=>items.iter().any(|it|!it.folded&&it.kind==Kind::Direct{excited:e,first:a.min(b),second:a.max(b)}),
-                    _=>if to(&p)==to(&q){apart(label(&p),label(&q)).abs()<cut}else{apart(rate(&p),rate(&q)).abs()<cut},
+                    _=>meet(&p,&q),
                 };
                 if joined{union.join(i,j);}
             }}

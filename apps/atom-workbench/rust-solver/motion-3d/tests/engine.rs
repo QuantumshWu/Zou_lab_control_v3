@@ -832,7 +832,7 @@ fn an_explicit_rung_s_frames_are_exact(){
 
 /// The phase a solve measures for a beating grid (solve.rs `grid_phase`) lies far above the quadrature's bound, and a step
 /// at it meets both shares against a grid far finer than the bound's, by another path than the doubling that chose it: the
-/// whole step from thermal states a few microseconds into the PGC with a resonant probe, its 12-state cluster's beats at 36.4 and 72.8 MHz.
+/// whole step from thermal states a few microseconds into the PGC with a resonant probe, its 10-state cluster's beat at 36.4 MHz.
 #[test]
 fn a_beating_grid_s_measured_phase_meets_its_shares(){
     let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..101).map(|i|i as f64).collect();
@@ -855,8 +855,8 @@ fn a_beating_grid_s_measured_phase_meets_its_shares(){
 }
 
 /// The ladder's rungs keep more as the allowance falls, and the closure keeps what it must first: on the PGC with a resonant probe
-/// the first rung holds the probe's five drives and the strongest cooling drive, the cooling beams' others folded. (With the
-/// closure's estimates taken under the folded probe's light, and no rung above each ground state's first kept drive, the first rung
+/// the first rung holds the probe's five drives and, into those five states, the cooling beams' (their pairs with the probe's lie within the dressing's reach of their 36 MHz, `Ground::keep_partners`),
+/// the cooling beams' others folded. (With the closure's estimates taken under the folded probe's light, and no rung above each ground state's first kept drive, the first rung
 /// held 7 excited states, its T 5 % above the fully explicit F = 2 cluster's at 100 us, where this rung's is within its 2 % of statistics.)
 #[test]
 fn the_ladder_keeps_more_as_the_allowance_falls_and_the_near_drives_first(){
@@ -866,8 +866,78 @@ fn the_ladder_keeps_more_as_the_allowance_falls_and_the_near_drives_first(){
     let explicit:Vec<usize>=grounds.iter().map(|g|g.clusters.iter().map(|c|c.excited.len()).sum()).collect();
     assert!(explicit[0]==0&&explicit.windows(2).all(|w|w[0]<=w[1]),"explicit states along the ladder: {explicit:?}");
     let g=&grounds[1];let drives:Vec<usize>=g.excited_items.iter().filter(|x|!x.folded&&x.size>1e-6).filter_map(|x|match x.kind{ExcitedKind::Drive(d)=>Some(d.carrier),_=>None}).collect();
-    let probe=drives.iter().filter(|&&c|c==drives[0]).count();
-    assert!(explicit[1]==5&&drives.len()==6&&(probe==5||probe==1),"the first rung: {} explicit states, its drives' carriers {drives:?}",explicit[1]);
+    let probe=drives.iter().filter(|&&c|c==drives[0]).count().min(drives.iter().filter(|&&c|c!=drives[0]).count());
+    assert!(explicit[1]==5&&probe==5,"the first rung: {} explicit states, its drives' carriers {drives:?}",explicit[1]);
+}
+
+/// What a rung holds between its ground states, its explicit states eliminated at second order, against the second order of every excited state at a point:
+/// the largest difference of H_eff's Hermitian part (less each one's mean diagonal), and of the rates between the bare ground states, each frequency's photons as the rung's classes
+/// join them. In the frameless picture a cluster's entry at residual Ω beats at ν = Ω − (θ_x − θ_y), a drive of carrier c at −δ_c.
+fn second_order_gaps(model:&Model,k:usize,point:[f64;3])->(f64,f64){
+    use atom_motion_3d::linear::{Dense,Lu};
+    let g=&model.ground;let cl=&g.clusters[k];let(n0,n)=(cl.states.len(),cl.dimension());let(ng,ne)=(g.ground_states.len(),g.excited_states.len());
+    let a=g.amplitudes_at(point);let e=g.eliminate(&model.intensities_at_point(point)).unwrap();
+    let c=model.components(k,&model.point(point,[0.;3]));
+    let entry=|x:usize,y:usize,nu:f64|->Complex{let apart=cl.frame(x)-cl.frame(y);let mut s=Complex::ZERO;
+        if (apart+nu).abs()<1e-6{s+=c.statics.hamiltonian[x*n+y];}
+        for b in &c.beats{if (b.omega-apart-nu).abs()<1e-6{s+=b.hamiltonian[x*n+y];}}s};
+    let diagonal=|x:usize|c.statics.scalar+cl.frame(x);
+    let shifted=|m:&Dense,z:f64|Lu::new(&Dense::from_fn(m.rows,m.cols,|i,j|if i==j{m[(i,j)]-Complex::new(z,0.)}else{m[(i,j)]})).unwrap();
+    let block=Dense::from_fn(n-n0,n-n0,|i,j|entry(n0+i,n0+j,0.)+Complex::new(if i==j{diagonal(n0+i)}else{0.},0.));
+    let(mut exact,mut held)=(Dense::zeros(n0,n0),Dense::zeros(n0,n0));let mut worst=0_f64;
+    for i in 0..n0{exact[(i,i)]=Complex::new(e.energies[cl.states[i]],0.);for j in 0..n0{held[(i,j)]=entry(i,j,0.);}held[(i,i)]+=Complex::new(diagonal(i),0.);}
+    let own:Vec<f64>=(0..n0).map(|i|held[(i,i)].re).collect();
+    // An explicit state's photon, dressed by H's folded couplings (ground.rs `Ground::dressing`).
+    let flags:Vec<bool>=(0..ne).map(|f|cl.excited.contains(&f)).collect();
+    let dressed:Vec<Vec<Complex>>=cl.excited.iter().map(|&f|g.dressing(&e,f,&flags).unwrap()).collect();
+    let photon=|f:usize,ax:usize,to:usize|(0..ne).fold(g.emission[ax][(to,cl.excited[f])],|s,q|s+g.emission[ax][(to,q)]*dressed[f][q]);
+    for(j,&b)in cl.states.iter().enumerate(){
+        let(mut rates,mut photons)=(vec![0.;ng],vec![0.;ng]);
+        for carrier in &g.carriers{
+            let d=carrier.detuning;
+            let field=|m:&[Dense],i:usize,b:usize|carrier.beams.iter().fold(Complex::ZERO,|s,&l|s+a[l]*m[l][(i,b)]);
+            let mut x:Vec<Complex>=(0..ne).map(|i|field(&g.couplings,i,b)).collect();shifted(&e.excited_hamiltonian,e.energies[b]+d).solve(&mut x);
+            for(i,&t)in cl.states.iter().enumerate(){exact[(i,j)]=exact[(i,j)]-(0..ne).fold(Complex::ZERO,|s,q|s+field(&g.couplings,q,t).conj()*x[q]);}
+            for to in 0..ng{rates[to]+=(0..3).map(|ax|(0..ne).fold(Complex::ZERO,|s,q|s+g.emission[ax][(to,q)]*x[q]).norm_sqr()).sum::<f64>();}
+            let mut y:Vec<Complex>=(n0..n).map(|f|entry(f,j,-d)).collect();
+            if n>n0{shifted(&block,own[j]+d).solve(&mut y);}
+            for i in 0..n0{held[(i,j)]=held[(i,j)]-(n0..n).fold(Complex::ZERO,|s,f|s+entry(i,f,d)*y[f-n0]);}
+            for class in &cl.classes{for to in 0..ng{for ax in 0..3{
+                let mut u=Complex::ZERO;
+                if class.photons.iter().any(|p|std::ptr::eq(&g.carriers[p.0.carrier],carrier)&&p.0.from==b&&p.0.to==to){for q in 0..ne{u+=g.emission[ax][(to,q)]*field(&e.responses,q,b);}}
+                for &(f,t,_)in &class.direct{if t==to{u+=photon(f-n0,ax,to)*y[f-n0];}}
+                photons[to]+=u.norm_sqr();
+            }}}
+        }
+        for to in 0..ng{worst=worst.max((rates[to]-photons[to]).abs());}
+    }
+    let hermitian=|m:&Dense,i:usize,j:usize|(m[(i,j)]+m[(j,i)].conj())*0.5;let mean=|m:&Dense|(0..n0).map(|i|m[(i,i)].re).sum::<f64>()/n0 as f64;
+    let(m0,m1)=(mean(&exact),mean(&held));
+    let mut gap=0_f64;for i in 0..n0{for j in 0..n0{
+        let shift=|m:f64|Complex::new(if i==j{m}else{0.},0.);gap=gap.max(((hermitian(&exact,i,j)-shift(m0))-(hermitian(&held,i,j)-shift(m1))).abs());
+    }}
+    (gap,worst)
+}
+
+/// Every rung of the PGC with a resonant probe holds the Raman couplings and the rates of the second order of every excited state, whatever its frames. The folded partner of a
+/// kept drive into one state, its pair near, and an explicit state's photon of a frequency its frame does not carry, were lost where a probe's and a cooling drive's one state split the
+/// ground states' frames: couplings 1.09 rad/us off of the largest 4-5, a rate 0.040 /us off of 0.30 (T up to 10 % high at a fold's charge of 0.07 %, ground.rs); here within 0.052 and 0.011.
+#[test]
+fn a_rung_holds_the_raman_couplings_and_the_photons_of_the_second_order(){
+    let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..101).map(|i|i as f64).collect();
+    for(i,&allowance)in Ground::allowances(&r).unwrap().iter().enumerate().skip(1).take(8){
+        let model=Model::with(&r,allowance).unwrap();let g=&model.ground;
+        let k=(0..model.clusters()).max_by_key(|&k|model.dimension(k)).unwrap();let cl=&g.clusters[k];
+        // No explicit state takes a kept and a folded drive of one carrier from the cluster's ground states.
+        for &e in &cl.excited{for c in 0..g.carriers.len(){
+            let verdicts:Vec<bool>=g.excited_items.iter().filter_map(|x|match x.kind{ExcitedKind::Drive(d)if d.carrier==c&&d.excited==e&&cl.states.contains(&d.ground)&&x.size/x.distance>f64::EPSILON=>Some(x.folded),_=>None}).collect();
+            assert!(verdicts.iter().all(|&v|v)||verdicts.iter().all(|&v|!v),"rung {i}: carrier {c} into {}: {verdicts:?}",r.states[g.excited_states[e]]);
+        }}
+        for point in [[0.1,0.05,0.2],[0.3,-0.1,0.5],[-0.2,0.2,-0.4]]{
+            let(coupling,rate)=second_order_gaps(&model,k,point);
+            assert!(coupling<0.1&&rate<0.015,"rung {i} at {point:?}: H_eff {coupling:.3} rad/us off, a rate {rate:.4} /us off");
+        }
+    }
 }
 
 /// The atom frozen at the focus: its eliminated master equation there (ground.rs `local_at`, every drive
