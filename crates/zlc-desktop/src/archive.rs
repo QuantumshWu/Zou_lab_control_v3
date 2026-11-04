@@ -1,6 +1,6 @@
 //! An archive is an ordinary sealed Runtime source. Mounting is a candidate:
 //! the caller keeps the old document until every replacement front accepts.
-use std::{collections::HashSet, sync::{Arc, atomic::{AtomicU64, Ordering}}};
+use std::{collections::HashSet, sync::{Arc, OnceLock, atomic::{AtomicBool, AtomicU64, Ordering}}};
 
 use zlc_plot::session::ImagePointOverlay;
 use serde_json::{Map, Value, json};
@@ -8,6 +8,7 @@ use zlc_core::{store::Snapshot,
     runtime::{Bundle, Declaration, Generation, ImportedRun, Input, Read, Runtime, Storage}};
 
 use crate::panels::PanelInput;
+use crate::record::Record;
 
 static NEXT_ARCHIVE: AtomicU64 = AtomicU64::new(1);
 
@@ -32,12 +33,21 @@ fn dataset_segment(key: &str, index: usize) -> String {
     if safe.is_empty() { format!("dataset-{}", index + 1) } else { safe.to_owned() }
 }
 
-/// The saved source and lineage what an archive's runs publish descends from: one, whatever
-/// the number of its datasets, and asked for only when a descendant is saved.
-struct SavedHistory { source: Value, lineage: Value }
+/// An opened Figure's saved metadata: one, whatever the number of its datasets. Drawing and
+/// working with its panels never touch it. What the viewer's record tabs show of it is built
+/// when they are first looked at, a descendant's saved history when one is saved.
+pub struct SavedRecord { info: Value, read: OnceLock<Record>, asked: AtomicBool }
 
-impl ImportedRun for SavedHistory {
-    fn saved_history(&self) -> Value { json!({"source": self.source, "lineage": self.lineage}) }
+impl SavedRecord {
+    fn read(&self) -> &Record { self.read.get_or_init(|| crate::record::describe(&self.info)) }
+}
+
+impl ImportedRun for SavedRecord {
+    fn saved_history(&self) -> Value {
+        let sections = &self.info["sections"];
+        json!({"source": sections.get("source").cloned().unwrap_or_else(|| json!({})),
+               "lineage": sections.get("lineage").cloned().unwrap_or_else(|| json!({"root":null,"nodes":[],"device_settings":[]}))})
+    }
 }
 
 pub struct ArchiveItem {
@@ -76,8 +86,9 @@ pub struct MountedArchive {
     runtime: Runtime,
     path: String,
     items: Vec<MountedItem>,
-    /// What the Figure Viewer's info pane shows of it (read once, at mount).
-    pub record: crate::record::Record,
+    saved: Arc<SavedRecord>,
+    /// How its datasets read in the Data chooser.
+    label: String,
 }
 
 impl MountedArchive {
@@ -113,15 +124,13 @@ impl MountedArchive {
         }).collect::<Result<Vec<_>, String>>()?;
         let serial = NEXT_ARCHIVE.try_update(Ordering::Relaxed, Ordering::Relaxed, |next| next.checked_add(1))
             .map_err(|_| "Archive import identity counter exhausted")?;
-        let record = crate::record::describe(&decoded.info);
-        let mut mounted = Self { runtime, path: decoded.path, items: Vec::new(), record };
-        let mut info = decoded.info;
-        let source = info["sections"].get_mut("source").map_or_else(|| json!({}), Value::take);
-        let lineage = info["sections"].get_mut("lineage").map_or_else(|| json!({"root":null,"nodes":[],"device_settings":[]}), Value::take);
-        if !source.is_object() || !lineage.is_object() {
+        let sections = &decoded.info["sections"];
+        if !sections.get("source").is_none_or(Value::is_object) || !sections.get("lineage").is_none_or(Value::is_object) {
             return Err("Imported Figure source and lineage must be objects".into());
         }
-        let history: Arc<dyn ImportedRun> = Arc::new(SavedHistory { source, lineage });
+        let label = crate::record::label(&sections["source"]);
+        let saved = Arc::new(SavedRecord { info: decoded.info, read: OnceLock::new(), asked: AtomicBool::new(false) });
+        let mut mounted = Self { runtime, path: decoded.path, items: Vec::new(), saved, label };
         for (index, ((item, kind, window), panel)) in prepared.into_iter().zip(panel_ids).enumerate() {
             // Each dataset is its own sealed producer, as in v2. Independent
             // archived datasets must not become one artificial atomic event.
@@ -143,7 +152,7 @@ impl MountedArchive {
                 inputs.push(Input::Dataset { signal:status_signal, ordinal:None, snapshot:status });
             }
             let generation = mounted.runtime.begin_imported(owner, declarations,
-                metadata, history.clone()).map_err(|error| error.to_string())?;
+                metadata, mounted.saved.clone()).map_err(|error| error.to_string())?;
             // Register ownership before either fallible write. On any error
             // Drop retires only these candidate generations, never the old UI.
             mounted.items.push(MountedItem { panel, key:item.key, signal:signal.clone(), generation:generation.clone(), plane, publication:None,
@@ -199,9 +208,29 @@ impl MountedArchive {
     }
     /// How a signal this archive mounted reads in the Data chooser.
     pub fn label(&self, signal: &str) -> Option<&str> {
-        (!self.record.label.is_empty() && self.items.iter().any(|item| &*item.signal == signal)).then_some(self.record.label.as_str())
+        (!self.label.is_empty() && self.items.iter().any(|item| &*item.signal == signal)).then_some(self.label.as_str())
     }
     pub fn path(&self) -> &str { &self.path }
+    /// The record, when something has already read it.
+    pub fn record_if_read(&self) -> Option<&Record> { self.saved.read.get() }
+    /// The record, read here if nothing has yet.
+    pub fn record(&self) -> &Record { self.saved.read() }
+    /// Read the record on a thread of its own, once; `done` is told when it can be shown.
+    pub fn read_record(&self, done: impl FnOnce(Arc<SavedRecord>) + Send + 'static) {
+        if self.saved.asked.swap(true, Ordering::Relaxed) { return; }
+        let saved = self.saved.clone();
+        std::thread::spawn(move || { saved.read(); done(saved); });
+    }
+    /// Whether this archive is the one that `saved` is the record of.
+    pub fn holds(&self, saved: &Arc<SavedRecord>) -> bool { Arc::ptr_eq(&self.saved, saved) }
+    /// The info pane's tabs, its Flow and how far the record is read ("unread", "reading", "read").
+    pub fn record_view(&self) -> (Value, Value, &'static str) {
+        match self.record_if_read() {
+            Some(record) => (record.tabs.clone(), record.flow.clone(), "read"),
+            None => (crate::record::unread_tabs(&self.saved.info), json!({"nodes": [], "edges": []}),
+                     if self.saved.asked.load(Ordering::Relaxed) { "reading" } else { "unread" }),
+        }
+    }
 }
 
 impl Drop for MountedArchive {

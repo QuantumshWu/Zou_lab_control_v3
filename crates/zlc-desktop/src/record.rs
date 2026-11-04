@@ -21,8 +21,7 @@ const SEPARATOR: &str = " · ";
 pub struct PlayedPulse { pub key: String, pub name: String, pub tree: Value }
 
 /// What the info pane shows of one archive.
-/// `label` is how its datasets read in the Data chooser (v2: `title — signal`, or either).
-pub struct Record { pub tabs: Value, pub flow: Value, pub pulses: Vec<PlayedPulse>, pub label: String }
+pub struct Record { pub tabs: Value, pub flow: Value, pub pulses: Vec<PlayedPulse> }
 
 type Rows = Vec<(String, Value)>;
 
@@ -608,6 +607,18 @@ fn plot_rows(info: &Value, plot: &Value) -> Rows {
 
 fn rows_json(rows: Rows) -> Value { Value::Array(rows.into_iter().map(|(label, value)| json!([label, value])).collect()) }
 
+/// The info pane's tabs before the record is read: what the file holds, which no lineage is needed for.
+pub fn unread_tabs(info: &Value) -> Value {
+    json!([["Plot", rows_json(plot_rows(info, &info["sections"]["plot"]))], ["Logic", [["record", "reading this figure's record\u{2026}"]]], ["Devices", []], ["Flow", []]])
+}
+
+/// How an archive's datasets read in the Data chooser (v2: `title — signal`, or either).
+pub fn label(source: &Value) -> String {
+    let (title, signal) = (text(source, "title"), text(source, "signal"));
+    if !title.is_empty() && !signal.is_empty() && title != signal { format!("{title} — {signal}") }
+    else if !title.is_empty() { title.to_owned() } else { signal.to_owned() }
+}
+
 /// The archive's record for the info pane. A lineage the viewer cannot read
 /// leaves its Logic, Devices and Flow empty and says why on the Logic tab;
 /// the file's arrays and plot configuration are still shown.
@@ -625,10 +636,7 @@ pub fn describe(info: &Value) -> Record {
         Vec::new(), json!({"nodes": [], "edges": []}), Vec::new()));
     let tabs = json!([["Plot", rows_json(plot_rows(info, plot))], ["Logic", rows_json(logic)], ["Devices", rows_json(devices)],
                       ["Flow", []]]);
-    let (title, signal) = (text(source, "title"), text(source, "signal"));
-    let label = if !title.is_empty() && !signal.is_empty() && title != signal { format!("{title} — {signal}") }
-        else if !title.is_empty() { title.to_owned() } else { signal.to_owned() };
-    Record { tabs, flow, pulses, label }
+    Record { tabs, flow, pulses }
 }
 
 #[cfg(test)]
@@ -738,6 +746,18 @@ mod tests {
         }
         assert_eq!(field(&snapshots[0][1], "state")["values"]["frequency"], "80 MHz");
         assert!(!snapshots.to_string().contains("Before acquisition"));
+    }
+
+    /// Before the record is read the pane shows what the file holds, and the chooser its label,
+    /// whatever the lineage: an unreadable one is not looked at.
+    #[test]
+    fn what_the_file_holds_reads_without_the_lineage() {
+        let info = json!({"members": {"data": {"dtype": "<f4", "shape": [2, 3]}}, "sections": {"plot": {"data": {"size": "2x2"}}, "lineage": "not a lineage",
+            "source": {"signal": "@logic/camera/frames", "title": "a scan"}}});
+        let tabs = unread_tabs(&info);
+        assert_eq!(tabs[0][1], describe(&info).tabs[0][1], "the Plot tab is the record's own");
+        assert_eq!(tabs.as_array().unwrap().iter().map(|tab| tab[0].as_str().unwrap()).collect::<Vec<_>>(), ["Plot", "Logic", "Devices", "Flow"]);
+        assert_eq!(label(&info["sections"]["source"]), "a scan — @logic/camera/frames");
     }
 
     #[test]

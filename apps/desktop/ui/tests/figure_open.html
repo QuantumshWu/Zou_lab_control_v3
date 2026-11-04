@@ -26,6 +26,16 @@ try {
  check('the information pane has no duplicate Raw metadata page',()=>{
   equal([...viewer.info.tabs.strip.querySelectorAll('.tab-label')].map(label=>label.textContent),['Plot','Logic','Devices','Flow'],'info tabs');
  });
+ check('a Figure\'s record is asked for when a tab that shows it is looked at, not before',()=>{
+  const shown=record=>{ctx.latest.viewer.document={path:ARCHIVE,record};viewer.update({type:'state',request:0,error:null})};
+  const before=sent.length;
+  shown('unread');equal(sent.length,before,'opening on the Plot tab reads nothing');
+  viewer.info.tabs.setCurrent('Logic');equal(sent.at(-1),{action:'read_record'},'looking at Logic');
+  shown('reading');viewer.info.tabs.setCurrent('Devices');equal(sent.length,before+1,'asked once');
+  shown('read');viewer.info.tabs.setCurrent('Flow');equal(sent.length,before+1,'nothing more to read');
+  shown('unread');equal(sent.at(-1),{action:'read_record'},'a Figure opened while a record tab shows');equal(sent.length,before+2,'asked at once');
+  viewer.info.tabs.setCurrent('Plot');accept('',0);
+ });
  check('Browse requests the native visual picker without guessing a path',()=>{
   assert(browse.title.includes('thumbnails')&&browse.title.includes('same-named'),'visual matching guidance missing');
   browse.click();equal(sent.at(-1),{action:'open'},'Browse');
