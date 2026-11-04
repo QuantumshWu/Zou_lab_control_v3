@@ -2505,7 +2505,7 @@ mod tests{
         let free=Model::new(&r).unwrap();
         assert!(free.table_limit.is_none()&&!free.table_stalled&&free.tables.nodes>9,"{:?} at {} nodes: {:e}",free.table_limit,free.tables.nodes,free.table_error);
         // A node's entries while the tables are refined: W^S and W^Q among them (`transfer_tables`).
-        let entries:usize=Model::laid_out(&r,f64::INFINITY,false).unwrap().0.layouts.iter().map(|l|l.size).sum();
+        let entries:usize=Model::laid_out(&r,crate::ground::Ground::new(&r).unwrap(),false).unwrap().0.layouts.iter().map(|l|l.size).sum();
         for(bytes,nodes)in [(MOST_TABLE_BYTES,9),(16*entries*(9+5),MOST_TABLE_NODES)]{
             let m=Model::bounded(&r,f64::INFINITY,false,bytes,nodes).unwrap();
             assert!(m.table_limit==Some(9)&&m.tables.nodes==9&&m.table_error>free.table_error,"{:?} at {} nodes: {:e}",m.table_limit,m.tables.nodes,m.table_error);
