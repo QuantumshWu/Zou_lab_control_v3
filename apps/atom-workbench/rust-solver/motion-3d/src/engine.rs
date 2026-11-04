@@ -950,8 +950,8 @@ impl<'a> Engine<'a>{
     /// One step's flow, kick and internal evolution of length dt without jumps: the norms of ψ at
     /// the start, the middle and the end, the place and momentum of the middle, the kick's momentum (the light's
     /// and the trap's anharmonic part) and ψ at the middle. A cluster of ground states (`exact` takes
-    /// the others).
-    fn advance(&self,t:&mut Trajectory,dt:f64)->(f64,f64,f64,([f64;3],[f64;3]),[f64;3],[Complex;MOST_MIXED]){
+    /// the others). Where ‖ψ‖² ends at or below `threshold` the step is to be redone to its crossing (`step`): the norms, the place and the middle's ψ alone, the rest of `t` for its caller to restore.
+    fn advance(&self,t:&mut Trajectory,dt:f64,threshold:f64)->(f64,f64,f64,([f64;3],[f64;3]),[f64;3],[Complex;MOST_MIXED]){
         let(m,s)=(self.model,&self.settings);
         if let Some((h,half))=&self.held{
             // Held: the internal state alone, by the generator there -- a whole step by the half
@@ -968,11 +968,12 @@ impl<'a> Engine<'a>{
         let n=m.dimension(t.cluster);let local=m.local(t.cluster,&point,t.time+0.5*dt);
         let n0=norm2(&t.psi,n);let half=HalfStep::new(&local.hamiltonian,n,0.5*dt,s.truncation);
         let mut psi=t.psi;half.apply(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let nh=norm2(&psi,n);let middle=psi;
-        let force=m.force(t.cluster,&local,&point,&psi);let harmonic=self.harmonic(std::array::from_fn(|a|t.r[a]-c[a]));let mut kick=[0.;3];
-        for a in 0..3{if s.free[a]{kick[a]=dt*(force[a]-w*harmonic[a]);t.kappa[a]+=kick[a];}}
         half.apply(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let n1=norm2(&psi,n);
+        let place=(point.r,point.kappa);let mut kick=[0.;3];
+        if !(n1>threshold){return(n0,nh,n1,place,kick,middle);}
+        let force=m.force(t.cluster,&local,&point,&middle);let harmonic=self.harmonic(std::array::from_fn(|a|t.r[a]-c[a]));
+        for a in 0..3{if s.free[a]{kick[a]=dt*(force[a]-w*harmonic[a]);t.kappa[a]+=kick[a];}}
         t.psi=psi;
-        let place=(point.r,point.kappa);
         self.flow(t,0.5*dt,reference);
         t.time+=dt;
         (n0,nh,n1,place,kick,middle)
@@ -1043,7 +1044,7 @@ impl<'a> Engine<'a>{
     fn free_step(&self,t:&mut Trajectory,dt:f64)->(f64,f64,[f64;3]){
         if self.takes_exact(t.cluster){
             let n=self.model.dimension(t.cluster);let n0=norm2(&t.psi,n);let kick=self.exact(t,dt,false,false);(n0,norm2(&t.psi,n),kick)
-        }else{let(n0,_,n1,_,kick,_)=self.advance(t,dt);(n0,n1,kick)}
+        }else{let(n0,_,n1,_,kick,_)=self.advance(t,dt,0.);(n0,n1,kick)}
     }
     /// A trajectory's state after `count` jump-free steps of dt (the deterministic flow the step check
     /// compares): flow, kick and the internal state's no-jump evolution, no jump, no loss.
@@ -1078,12 +1079,12 @@ impl<'a> Engine<'a>{
             let mut left=s.dt;
             loop{
                 let start=t.clone();
-                let(n0,nh,n1,place,kick,half)=self.advance(t,left);
+                let threshold=t.threshold;let(n0,nh,n1,place,kick,half)=self.advance(t,left,threshold);
                 if n1>t.threshold{let kappa:[f64;3]=std::array::from_fn(|a|place.1[a]+0.5*kick[a]);break(place,Some((kappa,half,t.time-0.5*left)));}
                 // The crossing on ln‖ψ‖², linear on the half where it lies; the step redone to it.
                 let(ta,tb,la,lb)=if nh<=t.threshold{(0.,0.5*left,n0.ln(),nh.ln())}else{(0.5*left,left,nh.ln(),n1.ln())};
                 let at=if lb<la{(ta+(t.threshold.ln()-la)/(lb-la)*(tb-ta)).clamp(ta,tb)}else{tb};
-                *t=start;if at>0.{self.advance(t,at);}
+                *t=start;if at>0.{self.advance(t,at,0.);}
                 self.jump(t,t.r,t.time,exact());
                 left-=at;
                 if !(left>0.){break((t.r,t.kappa),None);}
