@@ -86,7 +86,7 @@ pub struct Params{
     half_flow:[[f64;3];3],
     region:f64,
     lattice_axis:[f64;3],lattice_k:f64,lattice_inv_rayleigh:f64,lattice_phase:f64,
-    node_phase:f64,beats:f64,horizon:f64,
+    node_phase:f64,grid_phase:f64,beats:f64,horizon:f64,
 }
 
 /// The kernel's `State`: a trajectory between launches.
@@ -205,8 +205,8 @@ impl Program{
                 parts:parts as i32,omegas:omegas.len() as i32,terms:terms.len() as i32,nterms:list.len() as i32,emission:emission as i32,excited:excited_list.len() as i32,
                 group_parts:group_parts.len() as i32,residual_parts:residual_parts.len() as i32,states:[0;MAXM],shifts:shifts(k,&cl.states),mixed:mixed(k,&cl.states),pad:0};
             for(x,&b)in cl.states.iter().enumerate(){cluster.states[x]=b as i32;}
-            // Its beats (their period last, 0 without one), its explicit states and its terms (model.rs `exact_terms`).
-            let(beats_k,period)=model.beats(k);omegas.extend(beats_k);omegas.push(period.unwrap_or(0.));excited_list.extend(cl.excited.iter().map(|&e|e as i32));
+            // Its beats, its explicit states and its terms (model.rs `exact_terms`).
+            omegas.extend(model.beats(k).0);excited_list.extend(cl.excited.iter().map(|&e|e as i32));
             terms.extend(list.iter().zip(&u).map(|(t,u)|Term{kind:t[0] as i32,row:t[1] as i32,col:t[2] as i32,carrier:t[3] as i32,part:t[4] as i32,mirror:t[5] as i32,at:t[6] as i32,pad:0,
                 u:u.map(|z|[z.re as f32,z.im as f32])}));
             group_parts.extend(layout.groups.iter().map(|gl|model.part(k,gl.residual) as i32));
@@ -348,7 +348,7 @@ impl Program{
             axes32:settings.axes.map(|a|a.map(|x|x as f32)),stiffness32:settings.frequencies.map(|w|(w*w/hm) as f32),
             hm64:hm,dt:settings.dt,axes:settings.axes,omega:settings.frequencies,stiffness:settings.frequencies.map(|w|w*w/hm),half_flow,region:settings.region,
             lattice_axis:settings.lattice.map_or([0.;3],|l|std::array::from_fn(|i|(0..3).map(|a|settings.axes[i][a]*l.axis[a]).sum())),lattice_k:settings.lattice.map_or(0.,|l|l.wave_number),lattice_inv_rayleigh:settings.lattice.map_or(0.,|l|1./l.rayleigh),lattice_phase:settings.lattice.map_or(0.,|l|l.phase),
-            node_phase:crate::engine::node_phase(),beats:settings.beats,horizon:settings.horizon,
+            node_phase:crate::engine::node_phase(),grid_phase:settings.node_phase,beats:settings.beats,horizon:settings.horizon,
         };
         let photons=g.clusters.iter().map(|c|c.classes.iter().map(|k|k.photons.len()).sum::<usize>()).max().unwrap_or(0);
         // The transient's room: every coherent group's folded amplitude on the excited states (the kernel's `transient`).
