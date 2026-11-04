@@ -304,25 +304,25 @@ mod tests {
         let flagged = &result["diagnostics"]["approximations"]["flagged"];
         assert!(flagged.is_null(), "{flagged}");
     }
-    /// A hot atom in a shallow tweezer (tests/fixtures/total_loss_motion.json: 200 uK in a trap about
-    /// 5 uK deep), here over 1 ms: no atom is bound at t = 0, and each is lost as it leaves the trap's
-    /// region (motion-3d engine.rs # Loss) -- every one within the run. The result says so -- the loss
-    /// one from the sample every atom has left by, the rows there (no held atom to describe) the last
-    /// held ones, each a probability vector, outside the validated regime, and the flag from when --
-    /// where the released engine's empty rows failed the adapter's trace gate.
+    /// Every atom lost (tests/fixtures/total_loss_motion.json: the three-beam scene's tweezer at a
+    /// millionth of its power, a trap 1 nK deep, its probe and repump, the atom at 30 uK, 100 us): the
+    /// initial atoms are the trap's bound ones (motion-3d ensemble.rs), and the light, scattering on,
+    /// unbinds every one and pushes it out of the trap's region (motion-3d engine.rs # Loss) within the
+    /// run. The result says so -- the loss one from the sample every atom has left by, the rows there (no
+    /// held atom to describe) the last held ones, each a probability vector, outside the validated regime,
+    /// and the flag from when -- where the released engine's empty rows failed the adapter's trace gate.
     #[test]
     fn a_motion_whose_every_atom_is_lost_reports_the_loss() {
         let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/total_loss_motion.json")).unwrap();
         let mut line = fixture["payload"].clone();
         line["id"] = json!(10);
-        line["options"]["durationUs"] = json!(1000.);
         let out = request(line);
         assert!(out["error"].is_null(), "{}", out["error"]);
         let result = &out["result"];
         let loss: Vec<f64> = result["motion"]["lossProbability"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
         assert_eq!(loss[0], 0.);
         assert!(loss.windows(2).all(|w| w[1] >= w[0]), "{loss:?}");
-        let gone = loss.iter().position(|&l| l == 1.).unwrap_or_else(|| panic!("every atom leaves within 1 ms: {loss:?}"));
+        let gone = loss.iter().position(|&l| l == 1.).unwrap_or_else(|| panic!("every atom leaves within the run: {loss:?}"));
         assert!(loss[gone..].iter().all(|&l| l == 1.), "{loss:?}");
         let rows: Vec<Vec<f64>> = result["populations"].as_array().unwrap().iter().map(|row| row.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect()).collect();
         assert!(rows[gone..].iter().all(|row| row == &rows[gone - 1]), "the rows after the loss carry the last held one's");

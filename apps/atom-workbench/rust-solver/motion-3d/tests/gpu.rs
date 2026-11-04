@@ -297,11 +297,13 @@ fn straddles(gpu:&gpu::Gpu,program:&program::Program,model:&Model,settings:&Sett
 /// sums can tell: after every step within the windows, and at the run's end, where the jumps are
 /// counted. A jump a step apart moves its recoil by a step in a window (1.6e-3 of the gray molasses'
 /// Σκ_x² at its last output, trajectory 44 from the 40th). The held twin's jumps are not checked so
-/// (no entry steps it alone on the GPU): each fixture's fall in the same steps.
-fn batch(r:&Request,fourth:bool)->bool{
+/// (no entry steps it alone on the GPU): each fixture's fall in the same steps. The trap's region is
+/// the solve's (its depth: the loss's, and the harmonic part's weight beyond it, engine.rs), the step
+/// `dt` one the batch's trajectories converge at: the devices' precisions part where they do not.
+fn batch(r:&Request,fourth:bool,dt:f64)->bool{
     let Some(gpu)=device()else{return false};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
     let model=model(r,fourth);let initial=Initial::new(&model,r).unwrap();
-    let settings=Settings::new(0.2,&initial.traps[0],1e-6,true);
+    let mut settings=Settings::new(dt,&initial.traps[0],1e-6,true);settings.region=initial.depths[0];
     let(seed,count,group,steps,outputs,listed)=(0x3D_5EED,20,10,3,6,[2,5]);
     let program=gpu.program(&model,&settings).unwrap();
     // The run: the outputs, then the windows' reach past the last, half the slowest trap period
@@ -345,17 +347,21 @@ fn batch(r:&Request,fourth:bool)->bool{
     twin.is_some()
 }
 /// The batches of the tweezer PGC, the gray molasses and the retro-reflected tweezer; one of them has
-/// a held twin.
+/// a held twin. The retro-reflected tweezer's at 0.05 us: its initial atoms fill the standing wave's
+/// neighbouring sites too (ensemble.rs, 40 % of them), whose own wells are as stiff as the central
+/// site's while the harmonic part about the focus there is ten times the depth (weighted down,
+/// engine.rs) -- their κ after 3 us moves by up to 14 % between 0.2 and 0.05 us, by 1 % between 0.1
+/// and 0.05 us, the central site's by 10⁻⁴.
 #[test]
 fn a_batch_s_sums_are_the_cpu_s(){
-    let twins=[batch(&request(PGC),false),batch(&request(MOLASSES),false),batch(&retro(),false)];
+    let twins=[batch(&request(PGC),false,0.1),batch(&request(MOLASSES),false,0.1),batch(&retro(),false,0.05)];
     if device().is_some(){assert!(twins.iter().any(|&t|t),"a fixture with a held twin");}
 }
 /// The same at fourth order, on the tweezer PGC, with the held twin's start and post-jump map (control.rs
 /// # The twin at fourth order).
 #[test]
 #[ignore="fourth2's FourthLayout (slabs, slow pairs, jump slabs): the kernel's port is pending"]
-fn at_fourth_order_a_batch_s_sums_are_the_cpu_s(){batch(&request(PGC),true);}
+fn at_fourth_order_a_batch_s_sums_are_the_cpu_s(){batch(&request(PGC),true,0.2);}
 
 /// The default scene's motion as the app sends it (rust-solver/tests/fixtures/default_scene_motion.json)
 /// with the held twin kept: a GPU batch's estimates, the twin's control correcting the populations,

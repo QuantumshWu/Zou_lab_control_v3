@@ -10,6 +10,35 @@
 //! Only the anharmonic rest and the light are split, so the step is not bound to the trap period.
 //! The scalar part of H_herm (the trap's depth) is a phase and left out of U.
 //!
+//! # Beyond the trap's region
+//! A splitting about an integrable reference is accurate while the rest is a small perturbation of it
+//! (Wisdom–Holman's mixed-variable splittings); where the system leaves the reference's domain the
+//! field's practice is a smooth changeover of what the reference takes (Chambers' hybrid integrator,
+//! its changeover function; r-RESPA's switching functions), not a hard switch. The harmonic part about
+//! the focus is no model of the trap past its region (U_h > D, `Settings::region`): there it grows as
+//! ζ² while the trap's potential saturates at its depth, and the kick cancels its rotation -- an atom
+//! barely bound far out on a shallow trap's axis took an energy error (ω dt)² U_h, many times its
+//! binding (SHALLOW_PROBE's tweezer alone, light off: 4 of 1024 such atoms lost over 2 ms at 0.25 us,
+//! none at any step from 0.5 us down with the weight below), and a retro-reflected tweezer's
+//! neighbouring sites, ten times the depth up the central site's parabola, moved their κ by 50-190 %
+//! between 0.2 and 0.05 us (2-14 % with it). So each step's flow takes the harmonic part weighted by
+//! w = 1 within the region and (2u − 1)/u² beyond it, u = U_h/D, at the step's start (`reference`;
+//! continuous with its slope, its potential below 2D), the kick the rest: a step of any w is a
+//! second-order splitting of the same Hamiltonian, so the weight moves the step's error, not what it
+//! integrates, and an atom within the region (every one of a trap many k_BT deep) takes the step as
+//! before, bit for bit.
+//!
+//! # A standing wave's sites
+//! A retro-reflected tweezer's neighbouring sites are as stiff as the central one, and the region's weight leaves
+//! their stiffness to the kick: the step resolves ω dt there, while the harmonic part's rotation is exact at the
+//! centre. So where the trap is a standing wave (model.rs `Lattice`) the harmonic part is the atom's own site's at the
+//! step's start (`reference`): about the nearest antinode z_n on the axis, its stiffness the site's, A(z_n) = 1/(1 +
+//! z_n²/z_R²) of the centre's, u = U_h⊥/(A D) + tan²Φ -- Φ the distance from the site in the standing wave's phase,
+//! tan²Φ the atom's level above its site's bottom over its depth below the far level, (kx)² near the bottom, the
+//! across part as before --, so that w falls to zero at the node between two sites: the reference is continuous
+//! through it, with no switch, though its centre changes there. An atom within its site's region takes the same
+//! symmetric step about its site as the central site's atoms about the focus.
+//!
 //! # The exact step (explicit excited states, beats)
 //! An explicit excited state rotates at its detuning in the frame, and its saturation, Rabi
 //! oscillation and decay set the internal state's pace; a beating generator (two colours on one line,
@@ -126,8 +155,8 @@
 //! mechanical energy, ħ²κ²/2m plus its potential (model.rs `Model::trap_potential`: Re⟨ψ|H_eff|ψ⟩ of its
 //! current internal state less the same with the trap beam off, so U → 0 far from it), is positive, and
 //! the trap's harmonic part there lies above the region's depth (`Settings::region`, a solve's the
-//! reference state's depth: the region its initial positions are drawn in). An unbound atom inside the
-//! region is held until it leaves -- it may be bound again before it does, as an atom that a photon's
+//! reference state's depth). An unbound atom inside the region is held until it leaves -- it may be
+//! bound again before it does, as an atom that a photon's
 //! recoil or a bright state's light shift lifts above the trap's top for a moment is: judged at every
 //! step's end alone, those moments were caught or missed as the step fell, and the loss converged with
 //! the step only as fast as it resolved them. The energy is of one state at one time: of a step without
@@ -212,16 +241,26 @@ pub struct Settings{
     /// (`Segment::resolve`). The step by default.
     pub horizon:f64,
     /// The trap's region the loss takes (`Engine::step`): an unbound atom is lost once outside it, where
-    /// the trap's harmonic part (`axes`, `frequencies`) lies above this depth (rad/us) -- a solve's is its
-    /// initial positions' region, U_h ≤ D (lib.rs `thermal_position`). 0, the default, is none: an atom
+    /// the trap's harmonic part (`axes`, `frequencies`) lies above this depth (rad/us) -- a solve's is the
+    /// reference state's, U_h ≤ D (model.rs `Model::depth`). 0, the default, is none: an atom
     /// is lost as soon as it is unbound.
     pub region:f64,
+    /// The trap's standing wave (model.rs `Lattice`): the harmonic part is the atom's own site's (`Engine::reference`).
+    pub lattice:Option<crate::model::Lattice>,
 }
 impl Settings{
     /// The settings of a trap (model.rs `Trap`), every axis free, the loss on, the first order in
     /// the Doppler shift everywhere.
     pub fn new(dt:f64,trap:&crate::model::Trap,truncation:f64,average:bool)->Settings{
-        Settings{dt,free:[true;3],axes:trap.axes,frequencies:trap.frequencies,lab:trap.lab,truncation,average,loss:true,doppler:f64::INFINITY,beats:truncation,horizon:dt,region:0.}
+        Settings{dt,free:[true;3],axes:trap.axes,frequencies:trap.frequencies,lab:trap.lab,truncation,average,loss:true,doppler:f64::INFINITY,beats:truncation,horizon:dt,region:0.,lattice:trap.lattice}
+    }
+    /// r less its own site's place where the harmonic part is the atom's own site's (`Engine::reference`): the start of
+    /// the harmonic control's twin (control.rs), which turns about that site as the atom does.
+    pub fn about_site(&self,r:[f64;3])->[f64;3]{
+        match self.lattice{
+            Some(l)if self.free==[true;3]&&self.region>0.=>{let z=l.site(l.nearest(dot(l.axis,r)).0);std::array::from_fn(|a|r[a]-z*l.axis[a])}
+            _=>r,
+        }
     }
 }
 
@@ -749,15 +788,31 @@ impl<'a> Engine<'a>{
             for j in 0..n{let mut e=[Complex::ZERO;MOST_STATES];e[j]=Complex::ONE;propagate(&local.hamiltonian,n,0.5*s.dt,&mut e,s.truncation);for i in 0..n{u[i*n+j]=e[i];}}u}).collect();
         Engine{model,settings:s,held:Some((held,half)),diffusion:None}
     }
-    /// The trap's harmonic flow for τ: along its principal axes when every lab axis is free, else
-    /// along the free lab axes.
-    fn flow(&self,t:&mut Trajectory,tau:f64){
-        let(s,hm)=(&self.settings,self.model.hbar_over_mass);
+    /// The trap's harmonic flow for τ about c, its part weighted by w (`reference`): along its principal axes
+    /// when every lab axis is free, else along the free lab axes, at the frequencies ω √w.
+    fn flow(&self,t:&mut Trajectory,tau:f64,(c,w):([f64;3],f64)){
+        let(s,hm)=(&self.settings,self.model.hbar_over_mass);let scale=if w==1.{1.}else{w.sqrt()};
         if s.free==[true;3]{
             let(mut r,mut kappa)=([0.;3],[0.;3]);
-            for i in 0..3{let(x,q)=flow(dot(s.axes[i],t.r),dot(s.axes[i],t.kappa),s.frequencies[i],hm,tau);for a in 0..3{r[a]+=x*s.axes[i][a];kappa[a]+=q*s.axes[i][a];}}
-            (t.r,t.kappa)=(r,kappa);
-        }else{for a in 0..3{if s.free[a]{(t.r[a],t.kappa[a])=flow(t.r[a],t.kappa[a],s.lab[a],hm,tau);}}}
+            for i in 0..3{let(x,q)=flow(dot(s.axes[i],t.r)-dot(s.axes[i],c),dot(s.axes[i],t.kappa),s.frequencies[i]*scale,hm,tau);for a in 0..3{r[a]+=x*s.axes[i][a];kappa[a]+=q*s.axes[i][a];}}
+            (t.r,t.kappa)=(std::array::from_fn(|a|r[a]+c[a]),kappa);
+        }else{for a in 0..3{if s.free[a]{(t.r[a],t.kappa[a])=flow(t.r[a],t.kappa[a],s.lab[a]*scale,hm,tau);}}}
+    }
+    /// The harmonic part's centre and weight at a step's start r (module documentation, # Beyond the trap's region,
+    /// # A standing wave's sites): one within the region, U_h ≤ D (`Settings::region`), and (2u − 1)/u² beyond it, u =
+    /// U_h/D -- continuous with its slope at the region's edge, the weighted part's potential below 2D
+    /// everywhere --, about the focus or the atom's own site; one without a region.
+    fn reference(&self,r:[f64;3])->([f64;3],f64){
+        let s=&self.settings;let depth=s.region;if !(depth>0.){return([0.;3],1.);}
+        let changeover=|u:f64|if u<=1.{1.}else{(2.*u-1.)/(u*u)};
+        match s.lattice.filter(|_|s.free==[true;3]){
+            None=>([0.;3],changeover(self.harmonic_potential(r)/depth)),
+            Some(l)=>{
+                let(n,phase)=l.nearest(dot(l.axis,r));let z=l.site(n);let c=l.axis.map(|x|x*z);let share=1./(1.+(z/l.rayleigh).powi(2));
+                let along=dot(l.axis,r)-z;let across:[f64;3]=std::array::from_fn(|a|r[a]-c[a]-along*l.axis[a]);
+                let tangent=phase.tan();(c,share*changeover(self.harmonic_potential(across)/(depth*share)+tangent*tangent))
+            }
+        }
     }
     /// The harmonic part's potential at r (rad/us): along the trap's principal axes, or the free lab axes.
     fn harmonic_potential(&self,r:[f64;3])->f64{
@@ -788,16 +843,17 @@ impl<'a> Engine<'a>{
             half_step(&mut psi);let nh=norm2(&psi,n);let middle=psi;half_step(&mut psi);let n1=norm2(&psi,n);
             t.psi=psi;t.time+=dt;return(n0,nh,n1,h.point,[0.;3],middle);
         }
-        self.flow(t,0.5*dt);
+        let reference=self.reference(t.r);let(c,w)=reference;
+        self.flow(t,0.5*dt,reference);
         let point=m.point(t.r,t.kappa);
         let n=m.dimension(t.cluster);let local=m.local(t.cluster,&point,t.time+0.5*dt);
         let n0=norm2(&t.psi,n);
         let mut psi=t.psi;propagate(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let nh=norm2(&psi,n);let middle=psi;
-        let force=m.force(t.cluster,&local,&psi);let harmonic=self.harmonic(t.r);let mut kick=[0.;3];
-        for a in 0..3{if s.free[a]{kick[a]=dt*(force[a]-harmonic[a]);t.kappa[a]+=kick[a];}}
+        let force=m.force(t.cluster,&local,&psi);let harmonic=self.harmonic(std::array::from_fn(|a|t.r[a]-c[a]));let mut kick=[0.;3];
+        for a in 0..3{if s.free[a]{kick[a]=dt*(force[a]-w*harmonic[a]);t.kappa[a]+=kick[a];}}
         propagate(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let n1=norm2(&psi,n);
         t.psi=psi;
-        self.flow(t,0.5*dt);
+        self.flow(t,0.5*dt,reference);
         t.time+=dt;
         (n0,nh,n1,point,kick,middle)
     }
@@ -808,7 +864,8 @@ impl<'a> Engine<'a>{
     /// flow for τ/2. The kick's momentum (the light's and the trap's anharmonic part).
     fn exact(&self,t:&mut Trajectory,tau:f64,exact:bool,jumps:bool)->[f64;3]{
         let(m,s)=(self.model,&self.settings);
-        self.flow(t,0.5*tau);
+        let reference=self.reference(t.r);let(c,w)=reference;
+        self.flow(t,0.5*tau,reference);
         let point=m.point(t.r,t.kappa);let start=t.time;
         let mut segments:Vec<(usize,Segment)>=vec![];let mut impulse=[0.;3];let mut elapsed=0.;
         while elapsed<tau{
@@ -820,10 +877,10 @@ impl<'a> Engine<'a>{
             if !jumped{break;}
             t.time=start+elapsed;self.jump(t,point.r,t.time,exact);
         }
-        let harmonic=self.harmonic(t.r);let mut kick=[0.;3];
-        for a in 0..3{if s.free[a]{kick[a]=impulse[a]-tau*harmonic[a];t.kappa[a]+=kick[a];}}
+        let harmonic=self.harmonic(std::array::from_fn(|a|t.r[a]-c[a]));let mut kick=[0.;3];
+        for a in 0..3{if s.free[a]{kick[a]=impulse[a]-tau*w*harmonic[a];t.kappa[a]+=kick[a];}}
         if let Some(d)=self.diffusion{d.step(m,t,&point,tau);}
-        self.flow(t,0.5*tau);
+        self.flow(t,0.5*tau,reference);
         t.time=start+tau;
         kick
     }
