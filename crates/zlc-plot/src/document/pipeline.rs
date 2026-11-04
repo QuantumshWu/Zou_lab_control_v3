@@ -130,7 +130,6 @@ impl<R: DocumentRead> FigureDocument<R> {
             self.close();
             let initial = command.get("initial_document");
             self.path = initial.and_then(|initial| initial.get("path")).and_then(Json::as_str).unwrap_or("").to_owned();
-            self.info = initial.and_then(|initial| initial.get("info")).cloned().unwrap_or_else(|| serde_json::json!({}));
         }
         let bindings = Self::bindings(command)?;
         for binding in &bindings {

@@ -196,7 +196,6 @@ impl MountedArchive {
         (!self.record.label.is_empty() && self.items.iter().any(|item| &*item.signal == signal)).then_some(self.record.label.as_str())
     }
     pub fn path(&self) -> &str { &self.path }
-    pub fn info(&self) -> &Value { &self.info }
 }
 
 impl Drop for MountedArchive {

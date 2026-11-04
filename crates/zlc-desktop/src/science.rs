@@ -189,7 +189,7 @@ impl Science {
         if let Some(archive)=&job.archive {
             command["action"]=json!("sync_panels");
             command["reset_document"]=json!(true);
-            command["initial_document"]=json!({"path":archive.path(),"info":archive.info()});
+            command["initial_document"]=json!({"path":archive.path()});
             let mut items = BTreeMap::new();
             for item in archive.items() {
                 let mut overlay=item.overlay.clone();
