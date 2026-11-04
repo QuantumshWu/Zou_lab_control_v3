@@ -1843,9 +1843,14 @@ pub struct Transient{pub n0:usize,pub y:Vec<Complex>,pub pieces:Vec<Piece>}
 /// operators per axis (the target's ground states × the cluster's, row-major) and wave number.
 #[derive(Clone,Debug)]
 pub struct Piece{pub coherent:usize,pub excited:usize,pub target:usize,pub ops:[Vec<Complex>;3],pub wave_number:f64}
+/// A photon's absorbed light by its parts (`Photons::absorption`, engine.rs # Absorption): per near beam of its class's
+/// carriers its folded share, and its explicit states' part -- its weight and the beams' weights by their drives into the
+/// explicit states.
+#[derive(Clone,Debug,Default)]
+pub struct Absorption{pub beams:Vec<(usize,f64)>,pub explicit:Option<(f64,Vec<(usize,f64)>)>}
 /// The photon amplitudes of every class of a cluster's jumps at a point: per class and axis the
-/// target cluster's amplitude u_a; for a class drawn, its gradient and its beams' shares
-/// (`Photons::gradient`, `Photons::shares`) from the jump tables at the point, kept.
+/// target cluster's amplitude u_a; for a class drawn, its gradient and its absorbed light's parts
+/// (`Photons::absorption`) from the jump tables at the point, kept.
 pub struct Photons<'a>{
     model:&'a Model,cluster:usize,point:Point,psi:[Complex;MOST_MIXED],time:f64,
     /// Per carrier, rank and axis (carrier-major): J_k and J2_k at the point, ng × n0.
@@ -1863,10 +1868,11 @@ impl Photons<'_>{
     /// photons: per carrier of the class and target row, A_k = Σ e^{iω̃t} ψ[from] Σ_a e_a J_k[a][to, from],
     /// B_k the same of J2_k and ∂_f A_k the slopes of A_k in each s_f (the axes' entries combined at
     /// each node of the stencil). Of them, per row the gradient of the class's amplitude along e,
-    /// Σ_k ∇E_k A_k + E_k Σ_f ∂_f A_k ∇s_f (the Doppler term's own gradient left out); and per beam l
-    /// of the class's carriers its share Σ_rows |a_l Σ_k c_lk (A_k − w_l B_k)|² -- beyond the first
-    /// order its exact response's |a_l Σ e^{iω̃t} ψ[from] Σ_a e_a (C_a R_l)[to, from]|².
-    pub fn absorption(&self,class:usize,e:[f64;3])->([[Complex;3];MOST_STATES],Vec<(usize,f64)>){
+    /// Σ_k ∇E_k A_k + E_k Σ_f ∂_f A_k ∇s_f (the Doppler term's own gradient left out); and the parts
+    /// (`Absorption`): per beam l of the class's carriers its share Σ_rows |a_l Σ_k c_lk (A_k − w_l B_k)|² --
+    /// beyond the first order its exact response's |a_l Σ e^{iω̃t} ψ[from] Σ_a e_a (C_a R_l)[to, from]|² --, and
+    /// the explicit states' part.
+    pub fn absorption(&self,class:usize,e:[f64;3])->([[Complex;3];MOST_STATES],Absorption){
         let m=self.model;let g=&m.ground;let cl=&g.clusters[self.cluster];let class=&cl.classes[class];let target=&g.clusters[class.target];
         let(n0,nt,p,d)=(m.ground_dimension(self.cluster),target.states.len(),&self.point,m.focused.len());
         let(layout,size)=(&m.layouts[self.cluster],g.ground_states.len()*n0);let(data,slice)=(&m.tables.data[self.cluster],2*layout.size);
@@ -1900,7 +1906,7 @@ impl Photons<'_>{
                 }}
             }
         }
-        let mut shares:Vec<(usize,f64)>=carriers.iter().enumerate().flat_map(|(ci,&c)|m.carriers[c].beams.iter().enumerate().map(move|(j,&l)|(ci,c,j,l))).map(|(ci,c,j,l)|{
+        let beams:Vec<(usize,f64)>=carriers.iter().enumerate().flat_map(|(ci,&c)|m.carriers[c].beams.iter().enumerate().map(move|(j,&l)|(ci,c,j,l))).map(|(ci,c,j,l)|{
             let(amplitude,w)=(m.geometry[l].field(p.r).0,m.kinetic_shift(l,p.kappa));
             let share:f64=match &self.exact{
                 Some(exact)=>{
@@ -1915,9 +1921,9 @@ impl Photons<'_>{
                     ((0..m.carriers[c].rank).fold(Complex::ZERO,|z,k|z+m.carriers[c].coefficients[j][k]*(sum[k][0]-sum[k][1]*w))*amplitude).norm_sqr()}).sum(),
             };
             (l,share)}).collect();
-        // The explicit states' part of the photon: its weight along e, shared by the beams in proportion
-        // to their drives' amplitude into the explicit states, Σ |a_l Σ_k c_lk U_k[e,b] ψ_b|².
-        if !class.direct.is_empty(){
+        // The explicit states' part of the photon: its weight along e, and the beams' weights by their drives'
+        // amplitude into the explicit states, Σ |a_l Σ_k c_lk U_k[e,b] ψ_b|².
+        let explicit=(!class.direct.is_empty()).then(||{
             let mut v=[Complex::ZERO;MOST_STATES];
             for &(i,to,w)in &class.direct{let row=target.position(to).unwrap();let phase=Complex::cis(w*self.time)*self.psi[i];
                 for a in 0..3{v[row]+=phase*m.photon(self.cluster,&p.stencil,i-n0,a,to)*e[a];}}
@@ -1930,10 +1936,8 @@ impl Photons<'_>{
                     match drives.iter_mut().find(|x|x.0==l){Some(x)=>x.1+=z.norm_sqr(),None=>drives.push((l,z.norm_sqr()))}
                 }
             }
-            let sum:f64=drives.iter().map(|x|x.1).sum();
-            if sum>0.{for(l,d)in drives{let share=total*d/sum;match shares.iter_mut().find(|x|x.0==l){Some(x)=>x.1+=share,None=>shares.push((l,share))}}}
-        }
-        (gradient,shares)
+            (total,drives)});
+        (gradient,Absorption{beams,explicit})
     }
 }
 
