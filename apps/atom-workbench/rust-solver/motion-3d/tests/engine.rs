@@ -467,16 +467,17 @@ fn a_shallow_trap_s_dark_atoms_stay_whatever_the_step(){
 
 /// The same shallow trap's step (solve.rs, # Time step): the line took 2 us, where the impulse's and the
 /// populations' criteria are met and T is 2.1–2.7 % high against 0.25 us (4096 trajectories on shared
-/// streams, its share 1 %); T's own step error, the orbits' over a trap period (`orbits`), keeps the step at
-/// most 1 us (0.6–0.9 % there), and T over the outputs lies within its share (at most s of the temperature target)
-/// of a quarter of that step, plus three standard errors, on shared streams.
+/// streams, its share 1 %); T's own step error, the orbits' over a trap period (`orbits`), keeps the step below
+/// the line's 2 us (0.6–0.9 % at 1 us, as dt²; the step's share s of T's room beside its a-priori estimates,
+/// solve.rs # Shares, now about 2 % there), and T over the outputs lies within its share (at most s of the
+/// temperature target) of a quarter of that step, plus three standard errors, on shared streams.
 #[test]
 fn a_shallow_trap_s_step_holds_t_within_its_share(){
     let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/shallow_probe_motion.json")).unwrap();
     let mut r=scene::request(&fixture["payload"]);let(duration,outputs,count)=(500.,26,1024u64);
     r.times_us=(0..outputs).map(|i|duration*i as f64/(outputs-1) as f64).collect();
     let dt=solve(&r,Device::Cpu,&mut |_,_|{}).unwrap().time_step_us;
-    assert!(dt<=1.+1e-9,"dt {dt} us");
+    assert!(dt<2.-1e-9,"dt {dt} us");
     let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
     let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();let trap=initial.traps[reference];
     let interval=duration/(outputs-1) as f64;let steps=(interval/dt).round() as usize;
