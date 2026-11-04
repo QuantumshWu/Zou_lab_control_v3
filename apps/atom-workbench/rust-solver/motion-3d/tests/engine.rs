@@ -558,9 +558,9 @@ fn sparse_request(v:&Value)->Request{
         field_vector_g:[f[0],f[1],f[2]],mass_kg:v["massKg"].as_f64().unwrap(),initial_density:density,temperature_uk:v["temperatureUK"].as_f64().unwrap(),trap_beam,times_us:vec![]}
 }
 /// The frozen atom's F = 1 population each microsecond, its eliminated master equation's at the focus:
-/// the held twin's exact means there (control.rs), every drive folded.
-fn frozen_f1(r:&Request)->Vec<f64>{
-    let model=Model::new(r).unwrap();let twin=Twin::new(&model,1.).expect("a static generator");assert_eq!(twin.held.point.r,[0.;3]);
+/// the held twin's exact means there (control.rs), every drive folded, at second or fourth order.
+fn frozen_f1(r:&Request,fourth:bool)->Vec<f64>{
+    let model=Model::with_order(r,f64::INFINITY,fourth).unwrap();let twin=Twin::new(&model,1.).expect("a static generator");assert_eq!(twin.held.point.r,[0.;3]);
     twin.means(&model,&r.initial_density,1.,11).iter().map(|row|(0..STATES).filter(|&i|r.states[i].starts_with("ground-1-")).map(|i|row[i]).sum()).collect()
 }
 
@@ -572,7 +572,7 @@ fn frozen_f1(r:&Request)->Vec<f64>{
 #[test]
 fn a_strong_beam_s_raman_rate_through_its_dressing_is_the_core_s(){
     let v:Value=serde_json::from_str(include_str!("fixtures/far_beam_probe_motion.json")).unwrap();let r=sparse_request(&v);
-    for(i,(a,b))in frozen_f1(&r).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
+    for(i,(a,b))in frozen_f1(&r,false).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
 }
 
 /// An 808 nm tweezer, a near carrier, moves a D1 probe's line by its light shift (F1; ground.rs, # The
@@ -582,7 +582,56 @@ fn a_strong_beam_s_raman_rate_through_its_dressing_is_the_core_s(){
 #[test]
 fn a_near_tweezer_s_shift_moves_a_probe_s_line_to_the_core_s(){
     let v:Value=serde_json::from_str(include_str!("fixtures/near_tweezer_probe_motion.json")).unwrap();let r=sparse_request(&v);
-    for(i,(a,b))in frozen_f1(&r).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
+    for(i,(a,b))in frozen_f1(&r,false).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
+}
+
+/// The fourth order on a dressed probe (ground.rs, # Fourth order): its W3 without what the near light's dressing
+/// already holds -- Σ's first order through the far channels, z's light shifts by the other carriers -- and with the
+/// dressed denominators, the frozen atom's F = 1 population is the population core's at every microsecond to 0.005,
+/// as the second order's: the strong beam 3 GHz off the probe's line (F10, a carrier of the fourth order: 0.0013 at
+/// most) and the 808 nm tweezer (F1, below the budget's square, the probe's dressing alone: 0.0029). The line's fourth
+/// order counted the dressing twice where the dressing's carrier is the fourth order's: F10's 0.0100 off at 2 us.
+#[test]
+fn a_dressed_probe_at_fourth_order_is_the_core_s(){
+    for fixture in [include_str!("fixtures/far_beam_probe_motion.json"),include_str!("fixtures/near_tweezer_probe_motion.json")]{
+        let v:Value=serde_json::from_str(fixture).unwrap();let r=sparse_request(&v);
+        for(i,(a,b))in frozen_f1(&r,true).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
+    }
+}
+
+/// b1/109's fourth order, every drive folded (its F = 2 sublevels −2..0 one cluster, the strong beam's Zeeman pairs
+/// folded): the folded photons a class joins without a kept coupling (ground.rs `FoldedCross`) meet in the jumps' products
+/// at fourth order too -- through the metric's bend and W3 --, and so do the photons of the carriers below the budget's
+/// square sharing their classes. The tables' decay takes them over the landing states the class shares
+/// (model.rs `FourthLayout::landing`), the triples' frequencies from their carriers' integer combinations: at the focus,
+/// a node, the generator is a Lindblad one to round-off at t = 0 and at a generic instant. It lacked 2.4e-3 rad/us of the
+/// jumps' cross terms (of 1.1).
+#[test]
+fn a_fourth_order_decay_holds_its_folded_photons_cross_terms(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/explicit_rung_motion.json")).unwrap();let r=sparse_request(&v);
+    let model=Model::with_order(&r,f64::INFINITY,true).unwrap();let p=model.point([0.;3],[0.;3]);
+    for k in 0..model.clusters(){for t in [0.,0.618]{
+        let(low,_,scale)=model.decay_balance(k,&p,t);let round=64.*f64::EPSILON*model.dimension(k) as f64*scale;
+        assert!(low>=-round,"cluster {k} at t = {t}: i(H − H†) − Σ L̃†L̃ reaches {low:.3e} rad/us (round-off {round:.1e})");
+    }}
+}
+
+/// b1/109's explicit rung: its F = 2 sublevels joined through D1 and D2 explicit states whose frames carry the D1
+/// carrier's detuning, −4.5e7 rad/us in the D2-framed excited manifold. Each frame is its first state's energy plus an
+/// integer combination of the carriers' detunings (ground.rs `Cluster::combinations`): two sublevels' frames along
+/// θ + δ − δ are equal, not 3.2e-9 rad/us apart, and the residuals the photons rotate at are the generator's beats.
+/// At the focus, a node, the generator is a Lindblad one to round-off at a generic instant; the drift was 3.7e-9
+/// rad/us (of 38) at t = 0.618 us, growing with t.
+#[test]
+fn an_explicit_rung_s_frames_are_exact(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/explicit_rung_motion.json")).unwrap();let mut r=sparse_request(&v);
+    // The case's own run, 100 us in 21 samples: its duration sets the rule's resonance floor and the rung.
+    r.times_us=(0..21).map(|i|5.*i as f64).collect();
+    let allowance=Ground::allowances(&r).unwrap()[1];let model=Model::with(&r,allowance).unwrap();let p=model.point([0.;3],[0.;3]);
+    for k in 0..model.clusters(){for t in [0.618,61.8]{
+        let(low,_,scale)=model.decay_balance(k,&p,t);let round=64.*f64::EPSILON*model.dimension(k) as f64*scale;
+        assert!(low>=-round,"cluster {k} at t = {t}: i(H − H†) − Σ L†L reaches {low:.3e} rad/us (round-off {round:.1e})");
+    }}
 }
 
 /// Tables whose function is not smooth on any grid's scale -- b1/109's explicit rung, every excited state

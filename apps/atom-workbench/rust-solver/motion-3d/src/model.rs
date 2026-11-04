@@ -258,14 +258,25 @@ impl Beats{
 /// - per carrier pair (c1, c2) R_c1†R_c2 on the coherent entries (X's) and YW_c1c2 on all (`SlowSlab`,
 ///   r_c1 r_c2 × n × n each);
 /// - for the jumps' W3^c at a carrier c's frequency, per carrier c1 inside it C_a G_b(δ_c) T^c1_k[:,b′]
-///   (`JumpSlab`, r_c1 × 3 × ng × ng × n: k, axis, row, b′, b) and the pairs (c2, c4) it takes, each
-///   P^{c2c4} = U^c2†T^c4 (r_c2 r_c4 × ng × n, at `p`).
+///   (`JumpSlab`, r_c1 × 3 × ng × ng × n: k, axis, row, b′, b) and the middle factors of the triples (c1, c2, c4)
+///   it takes, each P^{c2c4} = U^c2†T^c4 less what the dressing holds (`Middle`, r_c2 r_c4 × ng × n, at `p`: one
+///   table per pair and kind);
+/// - where two photon channels' jumps meet: per pair of channels (carrier, place) the landing states their photons
+///   share a class in (`landing`, a bit per ground state), where the fourth order's decay takes their products.
+/// Every G_b(ω) at a carrier c's frequency is channel (c, b)'s dressed denominator (ground.rs `fourth_resolvent`).
 /// An entry (x, y) of a slab of lab frequency ν beats at Ω = θ_x − θ_y + ν in the cluster's frames. H^(4)
 /// keeps it where the second order keeps a coupling at that beat (below the cut, or at a kept coupling's
 /// residual on the entry); the others are zero in the tables, their mixings' squares booked (`dropped`).
 #[derive(Clone,Debug)]
 pub(crate) struct FourthLayout{carriers:Vec<usize>,fields:Vec<(usize,usize)>,quartic:Vec<QuarticSlab>,slow:Vec<SlowSlab>,jumps:Vec<JumpSlab>,
-    p:Vec<(usize,usize,usize)>,pub(crate) dropped:f64}
+    p:Vec<(usize,usize,Middle,usize)>,landing:Vec<u32>,pub(crate) dropped:f64}
+/// A W3 triple (c1, c2, c4)'s middle factor (V_c2†R_c4)[b′, b] (ground.rs `Ground::excluded`): whole; less the far channels
+/// of (c4, b) through c2 (c1 = c2, Σ's first order); or less b's light shift by c2 (c2 = c4 ≠ c1, z's).
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub(crate) enum Middle{Whole,Vias,Shift}
+impl Middle{
+    fn of(c1:usize,c2:usize,c4:usize)->Middle{if c1==c2{Middle::Vias}else if c2==c4{Middle::Shift}else{Middle::Whole}}
+}
 /// One monomial's slab of H^(4): its conjugated and plain field pairs (into `FourthLayout::fields`), its
 /// lab frequency ν (rad/us), its kept entries, their parts among the cluster's beats (`Model::components`:
 /// 0 the static part, 1 + j beat j's) and where it lies.
@@ -286,10 +297,10 @@ impl FourthLayout{
 /// lab frequency δ_c1 − δ_c2.
 #[derive(Clone,Debug)]
 pub(crate) struct SlowSlab{carriers:(usize,usize),nu:f64,coherent:Vec<bool>,rr:usize,yw:usize}
-/// The jumps' W3 at a photon carrier's frequency through one inner carrier c1: its table and the pairs
-/// (c2, c4) of the triples (c1, c2, c4) at that frequency.
+/// The jumps' W3 at a photon carrier's frequency through one inner carrier c1: its table and the middle factors
+/// of the triples (c1, c2, c4) at that frequency (into `FourthLayout::p`).
 #[derive(Clone,Debug)]
-pub(crate) struct JumpSlab{photon:usize,inner:usize,pairs:Vec<(usize,usize)>,at:usize}
+pub(crate) struct JumpSlab{photon:usize,inner:usize,pairs:Vec<usize>,at:usize}
 
 /// e^{iωt} of a run of residuals ω at one time, a value's rotation computed once while it repeats (the
 /// photons of a class share theirs): the same rotation as Complex::cis of each.
@@ -715,7 +726,8 @@ impl Model{
                 if reached.is_empty(){continue;}
                 for(x,&b)in cl.states.iter().enumerate(){for(c,carrier)in self.carriers.iter().enumerate(){
                     if !reached.iter().any(|&f|carrier.beams.iter().any(|&l|g.folded[l][(f,b)]!=Complex::ZERO)){continue;}
-                    let delta=g.carriers[c].detuning;let w=cl.excited_frames[p]-cl.frames[x]-delta;let residual=if crate::ground::same_frame(cl.excited_frames[p],cl.frames[x]+delta){0.}else{w};
+                    let(m,mx)=(&cl.combinations[n0+p],&cl.combinations[x]);
+                    let residual=g.beat(0.,&(0..m.len()).map(|i|m[i]-mx[i]-i32::from(i==c)).collect::<Vec<i32>>());
                     effective.push(EffectiveLayout{row:n0+p,col:x,carrier:c,residual,at:size});size+=carrier.rank;
                 }}
             }
@@ -853,7 +865,7 @@ impl Model{
             false}).collect()};
         let mut quartic=vec![];
         for &(p1,p2)in &pairs{for &(q1,q2)in &pairs{
-            let nu=delta(fields[p1].0)+delta(fields[p2].0)-delta(fields[q1].0)-delta(fields[q2].0);let k=keep(nu);
+            let nu=g.frequency(&[fields[p1].0,fields[p2].0],&[fields[q1].0,fields[q2].0]);let k=keep(nu);
             if k.iter().any(|&x|x){quartic.push(QuarticSlab{conj:(p1,p2),plain:(q1,q2),nu,keep:k,part:vec![],at:*size});*size+=n*n;}
         }}
         let dropped=left.iter().fold(0.,|s,&(_,_,w)|s+crate::ground::mixing(w,b,l0).powi(2));
@@ -864,53 +876,77 @@ impl Model{
             let coherent=(0..n*n).map(|i|{let(x,y)=(cl.states[i/n],cl.states[i%n]);let gx=group(c1,x);gx.is_some()&&gx==group(c2,y)}).collect();
             let square=r(c1)*r(c2)*n*n;slow.push(SlowSlab{carriers:(c1,c2),nu:delta(c1)-delta(c2),coherent,rr:*size,yw:*size+square});*size+=2*square;
         }}
-        // The jumps' W3 at each carrier's frequency, through the triples (c1, c2, c4) at it.
-        let(mut jumps,mut p)=(vec![],Vec::<(usize,usize,usize)>::new());
+        // The jumps' W3 at each carrier's frequency, through the triples (c1, c2, c4) at it, each middle factor
+        // less what the dressing holds (`Middle`).
+        let(mut jumps,mut p)=(vec![],Vec::<(usize,usize,Middle,usize)>::new());
         for &c in &on{for &c1 in &on{
-            let pairs:Vec<(usize,usize)>=on.iter().flat_map(|&c2|on.iter().map(move|&c4|(c2,c4))).filter(|&(c2,c4)|crate::ground::same_frame(delta(c1)+delta(c4),delta(c)+delta(c2))).collect();
-            if pairs.is_empty(){continue;}
-            for &(c2,c4)in &pairs{if !p.iter().any(|x|x.0==c2&&x.1==c4){p.push((c2,c4,*size));*size+=r(c2)*r(c4)*ng*n;}}
+            let triples:Vec<(usize,usize)>=on.iter().flat_map(|&c2|on.iter().map(move|&c4|(c2,c4))).filter(|&(c2,c4)|crate::ground::same_frame(g.frequency(&[c1,c4],&[c2]),delta(c))).collect();
+            if triples.is_empty(){continue;}
+            let pairs=triples.into_iter().map(|(c2,c4)|{let kind=Middle::of(c1,c2,c4);
+                p.iter().position(|x|x.0==c2&&x.1==c4&&x.2==kind).unwrap_or_else(||{p.push((c2,c4,kind,*size));*size+=r(c2)*r(c4)*ng*n;p.len()-1})}).collect();
             jumps.push(JumpSlab{photon:c,inner:c1,pairs,at:*size});*size+=r(c1)*3*ng*ng*n;
         }}
-        FourthLayout{carriers:on,fields,quartic,slow,jumps,p,dropped}
+        // Where two photon channels' jumps meet: the landing states their photons share a class in (ground.rs `Class`)
+        // -- a coherent pair's every one, a folded cross's (`FoldedCross`) --, as the jumps make their products.
+        let nc=g.carriers.len();let mut landing=vec![0u32;nc*n*nc*n];
+        for class in &cl.classes{for &(x,_)in &class.photons{for &(y,_)in &class.photons{if x.to!=y.to{continue;}
+            let(a,b)=(cl.position(x.from).unwrap(),cl.position(y.from).unwrap());landing[((x.carrier*n+a)*nc+y.carrier)*n+b]|=1<<x.to;}}}
+        FourthLayout{carriers:on,fields,quartic,slow,jumps,p,landing,dropped}
     }
     /// A cluster of ground states' fourth-order tables at a node (`FourthLayout`), from the elimination e
-    /// there and the carriers' folded bases u and responses t (ne × ng per field index). With
-    /// G_b(ω) = (K − E_b − ω)⁻¹, the fields f3, f1, f2, f4 (carriers c3, c1, c2, c4), ω = δ_c1 − δ_c2 + δ_c4 and
-    /// every ground state b′ between: the van Vleck form's U_f3[:,a]† G_b(ω) T_f1[:,b′] (U_f2†T_f4)[b′,b] and
-    /// −½[X_f3f1, U_f2†T_f4] (X = T†T on the cluster's coherent entries), its Hermitian half on the slab of
-    /// the conjugated pair {f3, f2} and the plain {f1, f4} and the adjoint's on the swapped one; the jumps'
-    /// fourth order of Σ L̃†L̃ -- −(D T_f3)[:,a]† G_b(ω) T_f1[:,b′] (U_f2†T_f4)[b′,b] at a carrier's frequency ω
-    /// and its adjoint, −½{X, T†D T} --, times −i/2, on the same slabs; R_c1†R_c2 on the coherent entries and
-    /// YW_c1c2 = −U_c1[:,a]† G_a(δ_c1) T_c2[:,b]; and the jumps' tables.
+    /// there and the carriers' folded bases u and responses t (ne × ng per field index). With G_b(ω) the
+    /// fourth order's denominators (ground.rs `fourth_resolvent`: at a carrier's frequency its channel's
+    /// dressed one), the fields f3, f1, f2, f4 (carriers c3, c1, c2, c4), ω = δ_c1 − δ_c2 + δ_c4, every ground
+    /// state b′ between and the middle factor M_f2f4 = U_f2†T_f4 less what the dressing holds (`Middle`): the van
+    /// Vleck form's U_f3[:,a]† G_b(ω) T_f1[:,b′] M_f2f4[b′,b] and −½[X_f3f1, U_f2†T_f4] (X = T†T on the cluster's
+    /// coherent entries), its Hermitian half on the slab of the conjugated pair {f3, f2} and the plain {f1, f4}
+    /// and the adjoint's on the swapped one; the jumps' fourth order of Σ L̃†L̃ -- −(C T_f3)[to,a]* (C G_b(ω) T_f1
+    /// M_f2f4)[to,b] at a carrier's frequency ω and its adjoint, −½{X, T†C†C T} --, over the landing states the two
+    /// photons share a class in (`FourthLayout::landing`), times −i/2, on the same slabs; R_c1†R_c2 on the
+    /// coherent entries and YW_c1c2 = −U_c1[:,a]† G_a(δ_c1) T_c2[:,b]; and the jumps' tables.
     fn fourth_node(&self,e:&ground::Elimination,cl:&ground::Cluster,f:&FourthLayout,u:&[Vec<Dense>],t:&[Vec<Dense>],node:&mut [Complex])->Result<(),String>{
-        let g=&self.ground;let(n,ng,ne)=(cl.states.len(),g.ground_states.len(),g.excited_states.len());let st=&cl.states;let fl=&f.fields;let nf=fl.len();
+        let g=&self.ground;let(n,ng,ne,nc)=(cl.states.len(),g.ground_states.len(),g.excited_states.len(),g.carriers.len());let st=&cl.states;let fl=&f.fields;let nf=fl.len();
         let delta=|c:usize|g.carriers[c].detuning;let field=|c:usize,k:usize|fl.iter().position(|&x|x==(c,k)).unwrap();
         let photon=|w:f64|f.carriers.iter().any(|&c|crate::ground::same_frame(delta(c),w));
         // The triples' frequencies, each once, and G_b(ω) T_f[:,b′] for the cluster's b and every b′.
         let mut omegas:Vec<f64>=vec![];
-        for &c1 in &f.carriers{for &c2 in &f.carriers{for &c4 in &f.carriers{let w=delta(c1)-delta(c2)+delta(c4);if !omegas.iter().any(|&x|crate::ground::same_frame(x,w)){omegas.push(w);}}}}
+        for &c1 in &f.carriers{for &c2 in &f.carriers{for &c4 in &f.carriers{let w=g.frequency(&[c1,c4],&[c2]);if !omegas.iter().any(|&x|crate::ground::same_frame(x,w)){omegas.push(w);}}}}
         let omega_of=|w:f64|omegas.iter().position(|&x|crate::ground::same_frame(x,w)).unwrap();
         let gt:Vec<Vec<Vec<Vec<Vec<Complex>>>>>=omegas.iter().map(|&w|st.iter().map(|&b|->Result<Vec<Vec<Vec<Complex>>>,String>{
-            let lu=ground::denominator(&e.excited_hamiltonian,-e.energies[b]-w)?;
+            let lu=g.fourth_resolvent(e,b,w)?;
             Ok(fl.iter().map(|&(c,k)|(0..ng).map(|bp|{let mut v:Vec<Complex>=(0..ne).map(|i|t[c][k][(i,bp)]).collect();lu.solve(&mut v);v}).collect()).collect())
         }).collect::<Result<Vec<_>,_>>()).collect::<Result<Vec<_>,_>>()?;// [ω][x][f][b′] → ne
-        let dt:Vec<Dense>=fl.iter().map(|&(c,k)|g.decay.product(&t[c][k])).collect();
+        // The photons' amplitudes on every axis and landing state (axis-major, 3 ng): C T_f[:,s], and at a carrier's
+        // frequency C G_b(ω) T_f[:,b′].
+        let emit=|v:&[Complex]|->Vec<Complex>{(0..3*ng).map(|q|{let(ax,to)=(q/ng,q%ng);(0..ne).fold(Complex::ZERO,|s,i|s+g.emission[ax][(to,i)]*v[i])}).collect()};
+        let ct:Vec<Vec<Vec<Complex>>>=fl.iter().map(|&(c,k)|(0..ng).map(|s|emit(&(0..ne).map(|i|t[c][k][(i,s)]).collect::<Vec<_>>())).collect()).collect();// [f][s]
+        let cgt:Vec<Vec<Vec<Vec<Vec<Complex>>>>>=omegas.iter().enumerate().map(|(w,&om)|if photon(om){
+            (0..n).map(|x|(0..nf).map(|fi|(0..ng).map(|bp|emit(&gt[w][x][fi][bp])).collect()).collect()).collect()}else{vec![]}).collect();// [ω][x][f][b′]
         let full=|x:&Dense,y:&Dense|->Vec<Complex>{let mut m=vec![Complex::ZERO;ng*ng];for i in 0..ng{for j in 0..ng{m[i*ng+j]=(0..ne).fold(Complex::ZERO,|s,q|s+x[(q,i)].conj()*y[(q,j)]);}}m};
         let ut:Vec<Vec<Vec<Complex>>>=fl.iter().map(|&(c,k)|fl.iter().map(|&(c2,k2)|full(&u[c][k],&t[c2][k2])).collect()).collect();
         let tt:Vec<Vec<Vec<Complex>>>=fl.iter().map(|&(c,k)|fl.iter().map(|&(c2,k2)|full(&t[c][k],&t[c2][k2])).collect()).collect();
-        let tdt:Vec<Vec<Vec<Complex>>>=fl.iter().map(|&(c,k)|dt.iter().map(|d|full(&t[c][k],d)).collect()).collect();
+        // Two photon channels' product in the decay: over the landing states their photons share a class in, as the
+        // jumps make it (`FourthLayout::landing`).
+        let shared=|ca:usize,a:usize,cb:usize,b:usize|f.landing[((ca*n+a)*nc+cb)*n+b];
+        let meet=|mask:u32,x:&[Complex],y:&[Complex]|->Complex{(0..3*ng).filter(|q|(mask>>(q%ng))&1==1).fold(Complex::ZERO,|s,q|s+x[q].conj()*y[q])};
+        let tdt:Vec<Vec<Vec<Complex>>>=(0..nf).map(|i|(0..nf).map(|j|(0..n*n).map(|q|{let(a,b)=(q/n,q%n);
+            meet(shared(fl[i].0,a,fl[j].0,b),&ct[i][st[a]],&ct[j][st[b]])}).collect()).collect()).collect();// [f][f′][a n + b]
         // X on the cluster: T_f†T_f′ on the coherent entries of the carriers' pair.
-        // Two photon channels (carrier, state) interfere in the jumps where they are coherent (the classes);
-        // the decay takes their products there alone, as the jumps do.
         let coherent=|c1:usize,c2:usize|&f.slow.iter().find(|s|s.carriers==(c1,c2)).unwrap().coherent;
         let xs:Vec<Vec<Vec<Complex>>>=(0..nf).map(|i|(0..nf).map(|j|{let mask=coherent(fl[i].0,fl[j].0);
             (0..n*n).map(|q|if mask[q]{tt[i][j][st[q/n]*ng+st[q%n]]}else{Complex::ZERO}).collect()}).collect()).collect();
-        // A(ω)[f3][f1][(b n + a) ng + b′] = U_f3[:,a]† G_b(ω) T_f1[:,b′], and with D T_f3 at a carrier's ω.
+        // The middle factor of a triple (c1, c2, c4) for the fields f2, f4 on column b, over b′ (`Middle`).
+        let middle=|kind:Middle,f2:usize,f4:usize,b:usize|->Vec<Complex>{let s=st[b];let(c2,c4)=(fl[f2].0,fl[f4].0);
+            let mut m:Vec<Complex>=(0..ng).map(|bp|ut[f2][f4][bp*ng+s]).collect();
+            match kind{Middle::Whole=>{},
+                Middle::Vias=>{for via in &g.vias[c4][s]{if via.carrier==c2{m[via.state]=Complex::ZERO;}}},
+                // The field's Hermitian part of (V_c2†R_c2)_bb, b's light shift by c2, out: its anti-Hermitian part stays.
+                Middle::Shift=>{m[s]=(ut[f2][f4][s*ng+s]-ut[f4][f2][s*ng+s].conj())*0.5;}}
+            m};
+        // A(ω)[f3][f1][(b n + a) ng + b′] = U_f3[:,a]† G_b(ω) T_f1[:,b′].
         let tensor=|left:&dyn Fn(usize,usize)->Complex,w:usize,f1:usize|->Vec<Complex>{let mut m=vec![Complex::ZERO;n*n*ng];
             for b in 0..n{for a in 0..n{for bp in 0..ng{let v=&gt[w][b][f1][bp];m[(b*n+a)*ng+bp]=(0..ne).fold(Complex::ZERO,|s,i|s+left(i,st[a])*v[i]);}}}m};
         let a_t:Vec<Vec<Vec<Vec<Complex>>>>=(0..omegas.len()).map(|w|(0..nf).map(|f3|{let(c3,k3)=fl[f3];(0..nf).map(|f1|tensor(&|i,a|u[c3][k3][(i,a)].conj(),w,f1)).collect()}).collect()).collect();
-        let d_t:Vec<Vec<Vec<Vec<Complex>>>>=(0..omegas.len()).map(|w|(0..nf).map(|f3|(0..nf).map(|f1|if photon(omegas[w]){tensor(&|i,a|dt[f3][(i,a)].conj(),w,f1)}else{vec![]}).collect()).collect()).collect();
         // The slabs by their pairs' indices (i ≤ j of nf fields).
         let pair=|i:usize,j:usize|{let(i,j)=(i.min(j),i.max(j));i*nf-i*(i+1)/2+j};let np=nf*(nf+1)/2;
         let mut index=vec![usize::MAX;np*np];for(s,q)in f.quartic.iter().enumerate(){index[pair(q.conj.0,q.conj.1)*np+pair(q.plain.0,q.plain.1)]=s;}
@@ -919,24 +955,26 @@ impl Model{
         let add=|acc:&mut Vec<Vec<Complex>>,conj:usize,plain:usize,x:&[Complex],z:Complex|{let s=index[conj*np+plain];if s!=usize::MAX{for q in 0..n*n{acc[s][q]+=x[q]*z;}}};
         let(mut x,mut l,mut m)=(vec![Complex::ZERO;n*n],vec![Complex::ZERO;n*n],vec![Complex::ZERO;n*n]);
         for &c1 in &f.carriers{for &c2 in &f.carriers{for &c4 in &f.carriers{
-            let w=omega_of(delta(c1)-delta(c2)+delta(c4));let jumps=photon(omegas[w]);
+            let w=omega_of(g.frequency(&[c1,c4],&[c2]));let jumps=photon(omegas[w]);let kind=Middle::of(c1,c2,c4);
             // The photon's carrier at the triple's frequency (the jumps' W3^c).
             let carrier=f.carriers.iter().copied().find(|&c|crate::ground::same_frame(delta(c),omegas[w]));
             for f1 in (0..nf).filter(|&i|fl[i].0==c1){for f2 in (0..nf).filter(|&i|fl[i].0==c2){for f4 in (0..nf).filter(|&i|fl[i].0==c4){
-                let p24=&ut[f2][f4];
+                let p24=&ut[f2][f4];let middles:Vec<Vec<Complex>>=(0..n).map(|b|middle(kind,f2,f4,b)).collect();
+                // C G_b(ω) T_f1 M on column b: this triple's W3 photons.
+                let photons:Vec<Vec<Complex>>=if jumps{(0..n).map(|b|{let mut v=vec![Complex::ZERO;3*ng];
+                    for(bp,&z)in middles[b].iter().enumerate(){if z==Complex::ZERO{continue;}for(o,&y)in v.iter_mut().zip(&cgt[w][b][f1][bp]){*o+=y*z;}}v}).collect()}else{vec![]};
                 for f3 in 0..nf{
                     let(conj,plain)=(pair(f3,f2),pair(f1,f4));
                     if index[conj*np+plain]==usize::MAX&&index[plain*np+conj]==usize::MAX{continue;}
                     for a in 0..n{for b in 0..n{
                         let at=&a_t[w][f3][f1][(b*n+a)*ng..(b*n+a+1)*ng];let mut z=Complex::ZERO;
-                        for bp in 0..ng{z+=at[bp]*p24[bp*ng+st[b]];}
+                        for(bp,&y)in middles[b].iter().enumerate(){z+=at[bp]*y;}
                         let(mut zx,mut zl)=(Complex::ZERO,Complex::ZERO);
                         for q in 0..n{
                             z-=(xs[f3][f1][a*n+q]*p24[st[q]*ng+st[b]]-p24[st[a]*ng+st[q]]*xs[f3][f1][q*n+b])*0.5;
-                            if coherent(fl[f2].0,fl[f4].0)[q*n+b]{zx+=xs[f3][f1][a*n+q]*tdt[f2][f4][st[q]*ng+st[b]];}
-                            if coherent(fl[f3].0,fl[f1].0)[a*n+q]{zx+=tdt[f3][f1][st[a]*ng+st[q]]*xs[f2][f4][q*n+b];}
+                            zx+=xs[f3][f1][a*n+q]*tdt[f2][f4][q*n+b]+tdt[f3][f1][a*n+q]*xs[f2][f4][q*n+b];
                         }
-                        if jumps&&carrier.is_some_and(|c|coherent(fl[f3].0,c)[a*n+b]){let at=&d_t[w][f3][f1][(b*n+a)*ng..(b*n+a+1)*ng];for bp in 0..ng{zl+=at[bp]*p24[bp*ng+st[b]];}}
+                        if let Some(c)=carrier.filter(|_|jumps){zl=meet(shared(fl[f3].0,a,c,b),&ct[f3][st[a]],&photons[b]);}
                         x[a*n+b]=z;m[a*n+b]=zx;l[a*n+b]=zl;
                     }}
                     // The Hermitian half: ½X here, ½X† on the swapped slab; −(i/2) of Σ L̃†L̃'s −½{X, T†DT} here.
@@ -957,18 +995,18 @@ impl Model{
                 }}
             }}
         }
-        // The jumps' tables.
+        // The jumps' tables: C G_b(δ_c) T_f[:,b′], and the middle factors.
         for js in &f.jumps{let w=omega_of(delta(js.photon));
             for k in 0..self.carriers[js.inner].rank{let fi=field(js.inner,k);for ax in 0..3{for row in 0..ng{for bp in 0..ng{for y in 0..n{
-                let v=&gt[w][y][fi][bp];node[js.at+(((k*3+ax)*ng+row)*ng+bp)*n+y]=(0..ne).fold(Complex::ZERO,|s,i|s+g.emission[ax][(row,i)]*v[i]);
+                node[js.at+(((k*3+ax)*ng+row)*ng+bp)*n+y]=cgt[w][y][fi][bp][ax*ng+row];
             }}}}}
         }
-        for &(c2,c4,at)in &f.p{let r4=self.carriers[c4].rank;for k2 in 0..self.carriers[c2].rank{for k4 in 0..r4{
-            let(f2,f4)=(field(c2,k2),field(c4,k4));let base=at+(k2*r4+k4)*ng*n;for bp in 0..ng{for y in 0..n{node[base+bp*n+y]=ut[f2][f4][bp*ng+st[y]];}}
+        for &(c2,c4,kind,at)in &f.p{let r4=self.carriers[c4].rank;for k2 in 0..self.carriers[c2].rank{for k4 in 0..r4{
+            let(f2,f4)=(field(c2,k2),field(c4,k4));let base=at+(k2*r4+k4)*ng*n;
+            for y in 0..n{let m=middle(kind,f2,f4,y);for bp in 0..ng{node[base+bp*n+y]=m[bp];}}
         }}}
         Ok(())
     }
-
     /// Node i's intensities on a grid of n nodes per focused unit (node order: the first unit's
     /// fastest).
     fn grid_point(&self,n:usize,i:usize)->[f64;MOST_FOCUSED]{
@@ -1026,7 +1064,7 @@ impl Model{
                 if let(Some(a),Some(b))=(f.quartic.first(),f.quartic.last()){kinds.push((a.at,b.at+sq));}
                 for sl in &f.slow{let square=r(sl.carriers.0)*r(sl.carriers.1)*sq;kinds.push((sl.rr,sl.rr+square));kinds.push((sl.yw,sl.yw+square));}
                 for js in &f.jumps{kinds.push((js.at,js.at+r(js.inner)*3*ng*ng*n));}
-                for &(c2,c4,at)in &f.p{kinds.push((at,at+r(c2)*r(c4)*ng*n));}
+                for &(c2,c4,_,at)in &f.p{kinds.push((at,at+r(c2)*r(c4)*ng*n));}
             }
             // Per kind its scale and the largest error, the fine grid's nodes on the threads.
             for(start,end)in kinds{
@@ -1171,7 +1209,7 @@ impl Model{
             let r=|c:usize|self.carriers[c].rank as f64;let n=layout.n as f64;
             generator+=f.quartic.len() as f64*nodes*n2+n2;
             let pairs:f64=f.slow.iter().map(|s|r(s.carriers.0)*r(s.carriers.1)).sum();
-            photons+=f.jumps.iter().map(|j|r(j.inner)*3.*ng*ng*n*(nodes+1.)).sum::<f64>()+f.p.iter().map(|&(c2,c4,_)|r(c2)*r(c4)*ng*n*nodes).sum::<f64>()+3.*pairs*nodes*n2;
+            photons+=f.jumps.iter().map(|j|r(j.inner)*3.*ng*ng*n*(nodes+1.)).sum::<f64>()+f.p.iter().map(|&(c2,c4,_,_)|r(c2)*r(c4)*ng*n*nodes).sum::<f64>()+3.*pairs*nodes*n2;
         }
         let classes=&self.ground.clusters[cluster].classes;
         let absorption=classes.iter().map(|c|c.photons.iter().map(|(ph,_)|self.carriers[ph.carrier].rank as f64*(6.+nodes*(3.+d))).sum::<f64>()).sum::<f64>()/classes.len().max(1) as f64;
@@ -1364,11 +1402,11 @@ impl Model{
             let mut m=vec![Complex::ZERO;ng*n];let mut buf=vec![Complex::ZERO;ng*n];
             for k3 in 0..r(d){for k4 in 0..r(e2){let w=ed[k3].conj()*ee[k4];if w==Complex::ZERO{continue;}self.interpolate(cluster,&p.stencil,None,at+(k3*r(e2)+k4)*ng*n,&mut buf);for i in 0..ng*n{m[i]+=w*buf[i];}}}
             m};
-        let forms:Vec<Vec<Complex>>=f.p.iter().map(|&(c2,c4,at)|form(c2,c4,at)).collect();
+        let forms:Vec<Vec<Complex>>=f.p.iter().map(|&(c2,c4,_,at)|form(c2,c4,at)).collect();
         let mut out=vec![vec![Complex::ZERO;3*ng*n];self.carriers.len()];let mut buf=vec![Complex::ZERO;3*ng*ng*n];
         for js in &f.jumps{
             let mut weight=vec![Complex::ZERO;ng*n];
-            for &(c2,c4)in &js.pairs{let i=f.p.iter().position(|x|x.0==c2&&x.1==c4).unwrap();for q in 0..ng*n{weight[q]+=forms[i][q];}}
+            for &i in &js.pairs{for q in 0..ng*n{weight[q]+=forms[i][q];}}
             let ee=&p.fields[js.inner].e;
             for k in 0..r(js.inner){if ee[k]==Complex::ZERO{continue;}
                 self.interpolate(cluster,&p.stencil,None,js.at+k*3*ng*ng*n,&mut buf);
@@ -1586,15 +1624,17 @@ impl Model{
             }
         }
         // The fourth order (the Doppler's first order stays the second's): the photons' W3 part on ψ and their
-        // second order on ψ − ½Xψ, X the metric's coherent part (`coherent_metric`).
+        // second order on ψ − ½Xψ, X the metric's coherent part (`coherent_metric`) -- the photons of the fourth
+        // order's carriers (ground.rs `fourth_carriers`), whose products the tables' decay holds.
         let w3=if fourth{self.fourth_photons(cluster,p)}else{None};
+        let bends=|c:usize|layout.fourth.as_ref().is_some_and(|f|f.carriers.contains(&c));
         let bent:Option<[Complex;MOST_STATES]>=if !fourth{None}else{self.coherent_metric(cluster,p,t)}.map(|x|std::array::from_fn(|a|if a<n0{psi[a]-(0..n0).fold(Complex::ZERO,|s,b|s+x[a*n0+b]*psi[b])*0.5}else{Complex::ZERO}));
         // The classes: each photon's entry into its target state's row from its source's column.
         let amplitude=cl.classes.iter().map(|class|{let target=&g.clusters[class.target];
             let mut u=[[Complex::ZERO;MOST_STATES];3];let mut rotation=Rotation::new(t);
             for &(ph,w)in &class.photons{
                 let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());let phase=rotation.at(w);
-                let state=bent.as_ref().map_or(psi[col],|b|b[col]);
+                let state=match &bent{Some(b)if bends(ph.carrier)=>b[col],_=>psi[col]};
                 for a in 0..3{u[a][row]+=phase*matrices[(ph.carrier*3+a)*size+ph.to*n0+col]*state;}
                 if let Some(w3)=&w3{for a in 0..3{u[a][row]+=phase*w3[ph.carrier][a*size+ph.to*n0+col]*psi[col];}}
             }
@@ -1639,16 +1679,16 @@ impl Model{
     /// points -- `reach`, the ends of the trap's principal axes --, at t = 0 and at a generic instant `GENERIC`,
     /// the beats' phases), the tables at their node nearest each point with the point's fields: there they are
     /// the elimination's own, while between nodes D carries their interpolation's error too, the tables' booked
-    /// one. A generator gains where its no-jump decay falls below its jumps' rate, D = i(H − H†) − Σ L̃†L̃ < 0: a
-    /// decay no jump carries (the validation's F10 before the near light's dressing: the folded pairs' van Vleck
-    /// paths outside the responses, ground.rs). Its error is the
-    /// largest ε with −D ≤ ε (Σ L̃†L̃ + 1/T) beyond D's round-off, T the solve's duration (`excess`): in a state
-    /// the jumps leave bright, the relative error of its no-jump decay against its jump rate; in a dark one
-    /// (rate below 1/T), the norm the gain adds over the run -- a decay below zero grows it and stops the
-    /// jumps; a model without a run (no duration) takes its largest rate for 1/T. Beyond the budget the rates
-    /// or the norm err beyond what the ledger takes: the model is refused (`NOT_LINDBLAD`), and the fold's
-    /// ladder (solve.rs) passes over it -- the solve stops where it is the ladder's first rung, every drive
-    /// folded. A gain within it is booked as the solve meets it along its pilot's states (solve.rs `gain`).
+    /// one. The eliminated generator is a Lindblad one by construction at either order (ground.rs: the decay its
+    /// jumps' product, the folded photons' cross terms and the fourth order's alike, every frame and beat an exact
+    /// combination of the carriers' detunings), so D = i(H − H†) − Σ L̃†L̃ is zero to round-off at a node: below
+    /// its round-off it gains -- a decay no jump carries, the norm growing and the jumps stopping (the validation's
+    /// F10 before the near light's dressing; b1/109's fourth order before the folded crosses met its W3, 2.4e-3
+    /// rad/us) --, a defect of the model, not an approximation the ledger could take: it is refused
+    /// (`NOT_LINDBLAD`), with its relative error, the largest ε with −D ≤ ε (Σ L̃†L̃ + 1/T) beyond D's round-off
+    /// (`excess`), and the fold's ladder (solve.rs) passes over it -- the solve stops where it is the ladder's first
+    /// rung, every drive folded. Between nodes the interpolation's D the solve meets along its pilot's states is
+    /// booked (solve.rs `gain`).
     fn lindblad(&self)->Result<(),String>{
         let last=(self.tables.nodes-1).max(1) as f64;
         for &r in &self.reach{
@@ -1661,8 +1701,8 @@ impl Model{
                 if -b.low<=round{continue;}
                 let floor=if self.ground.duration>0.{1./self.ground.duration}else{b.rate.max(round)};
                 let error=excess(&b.d,&b.jumps,round,floor);
-                if error>BUDGET{return Err(format!("{NOT_LINDBLAD}：子空间 {k} 在 r = ({:.2}, {:.2}, {:.2}) μm、t = {t:.3} μs 处，无跳跃的衰减低于跳跃率（i(H − H†) − ΣL†L 的最小本征值 {:.2e} rad/μs，最大跳跃率 {:.2e} rad/μs），其相对误差达 {:.2}%，超出预算 {:.1}%——这部分衰减没有跳跃承载，轨迹的范数会增长",
-                    r[0],r[1],r[2],b.low,b.rate,100.*error,100.*BUDGET));}
+                return Err(format!("{NOT_LINDBLAD}：子空间 {k} 在 r = ({:.2}, {:.2}, {:.2}) μm、t = {t:.3} μs 处，无跳跃的衰减低于跳跃率（i(H − H†) − ΣL†L 的最小本征值 {:.2e} rad/μs，超出舍入误差 {round:.1e} rad/μs；最大跳跃率 {:.2e} rad/μs，相对误差 {:.2e}）——这部分衰减没有跳跃承载，轨迹的范数会增长",
+                    r[0],r[1],r[2],b.low,b.rate,error));
             }}
         }
         Ok(())
@@ -1934,7 +1974,7 @@ impl Photons<'_>{
 
 #[cfg(test)]
 mod tests{
-    use super::{Beats,Model,MOST_TABLE_BYTES,MOST_TABLE_NODES,TABLE_SHARE};
+    use super::{Beats,Model,MOST_TABLE_BYTES,MOST_TABLE_NODES,NOT_LINDBLAD,TABLE_SHARE};
     use std::f64::consts::TAU;
 
     /// The tables stop refining at the work bounds (F9): the tweezer PGC's (its tweezer one intensity
@@ -1954,6 +1994,19 @@ mod tests{
             assert!(m.table_limit==Some(9)&&m.tables.nodes==9&&m.table_error>TABLE_SHARE,"{:?} at {} nodes: {:e}",m.table_limit,m.tables.nodes,m.table_error);
         }
         assert!(Model::bounded(&r,f64::INFINITY,false,MOST_TABLE_BYTES,5).is_err());
+    }
+    /// A generator whose no-jump decay misses its jumps' rate beyond round-off is refused (`Model::lindblad`): the
+    /// tweezer PGC's model, a Lindblad one to round-off, with one kept group's decay Q a millionth smaller at every
+    /// node of its tables -- a decay no jump carries, a millionth of that group's rate.
+    #[test]
+    fn a_generator_whose_decay_misses_its_jumps_is_refused(){
+        let f:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/tweezer_pgc.json")).unwrap();
+        let r=crate::ground::tests::request(&f["request"]);
+        let mut model=Model::new(&r).unwrap();assert!(model.lindblad().is_ok());
+        let(k,q,square)=model.layouts.iter().enumerate().find_map(|(k,l)|l.groups.iter().find(|g|!g.decay).map(|g|(k,g.q,g.pairs.len()*g.entries.len()))).unwrap();
+        let size=model.layouts[k].size;
+        for node in 0..model.tables.data[k].len()/(2*size){for i in q..q+square{for c in 0..2{model.tables.data[k][2*(node*size+i)+c]*=1.-1e-6;}}}
+        let e=model.lindblad().expect_err("a gain of a millionth of a rate");assert!(e.starts_with(NOT_LINDBLAD),"{e}");
     }
     /// Residuals within the round-off of zero are static and of each other one beat; the beats come in
     /// pairs ±Ω; harmonics of one frequency have its period, incommensurate ones none.
