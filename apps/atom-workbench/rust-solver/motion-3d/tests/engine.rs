@@ -8,12 +8,11 @@ use atom_motion_3d::control::{Harmonic,Twin};
 use atom_motion_3d::engine::{dipole_direction,Engine,Settings};
 use atom_motion_3d::ground::Ground;
 use atom_motion_3d::ledger::BUDGET;
-use atom_motion_3d::model::{Model,MOST_MIXED,TABLE_SHARE};
+use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Means,Scales,KT_PER_UK};
 use atom_motion_3d::{initial_trajectory,sample_states,simulate,Initial,Stratum,Variates};
-use atom_motion_3d::solve::{jumps,solve,Device,TEMPERATURE_TARGET};
-use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
+use atom_motion_3d::solve::{jumps,solve,Device,STEP_SHARE,TEMPERATURE_TARGET};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
 #[path="../examples/scene/mod.rs"] mod scene;
@@ -469,7 +468,7 @@ fn a_shallow_trap_s_dark_atoms_stay_whatever_the_step(){
 /// The same shallow trap's step (solve.rs, # Time step): the line took 2 us, where the impulse's and the
 /// populations' criteria are met and T is 2.1–2.7 % high against 0.25 us (4096 trajectories on shared
 /// streams, its share 1 %); T's own step error, the orbits' over a trap period (`orbits`), keeps the step at
-/// most 1 us (0.6–0.9 % there), and T over the outputs lies within its share (η of the temperature target)
+/// most 1 us (0.6–0.9 % there), and T over the outputs lies within its share (at most s of the temperature target)
 /// of a quarter of that step, plus three standard errors, on shared streams.
 #[test]
 fn a_shallow_trap_s_step_holds_t_within_its_share(){
@@ -492,7 +491,7 @@ fn a_shallow_trap_s_step_holds_t_within_its_share(){
     let(coarse,fine)=(temperatures(steps),temperatures(4*steps));
     // Per axis the mean ΔT/T over the outputs and the mean of its standard errors (the outputs' errors are
     // correlated along the trajectories: the mean's is at most theirs).
-    let share=A_PRIORI_SHARE*TEMPERATURE_TARGET;let n=(outputs-1) as f64;
+    let share=STEP_SHARE*TEMPERATURE_TARGET;let n=(outputs-1) as f64;
     for a in 0..3{
         let(d,e)=(1..outputs).fold((0.,0.),|(d,e),i|{let t=fine[i].temperature[a];(d+(coarse[i].temperature[a]-t)/t,e+coarse[i].temperature_error[a].hypot(fine[i].temperature_error[a])/t)});
         println!("axis {a}: dt {dt:.3} us against {:.3} us, mean ΔT/T {:+.2} % ± {:.2} %",dt/4.,100.*d/n,100.*e/n);
@@ -599,18 +598,18 @@ fn a_near_tweezer_s_shift_moves_a_probe_s_line_to_the_core_s(){
     for(i,(a,b))in frozen_f1(&r).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
 }
 
-/// Tables whose function is not smooth on any grid's scale -- b1/109's explicit rung, every excited state
-/// explicit: the interpolation's error 0.4 to 1.4 from 9 to 16385 nodes per axis, with or without the
-/// near light's dressing, 25 s to refine to the work bound -- stop refining once two doublings in a row
-/// leave the error above its smallest so far (model.rs `tabulate`), the last grid kept and its error
-/// booked: 33 nodes per axis.
+/// Tables whose function is not smooth on any grid's scale where the atoms go -- b1/109's explicit rung, every
+/// excited state explicit: the interpolation's error 0.4 to 1.4 from 9 to 16385 nodes per axis, with or without
+/// the near light's dressing, 25 s to refine to the work bound -- stop refining at the first doubling that does
+/// not shrink the error, whose next one is predicted to save nothing (model.rs `tabulate`), the last grid kept
+/// and its error booked: 17 nodes per axis (its error 1.1 inside the reach's intensities).
 #[test]
 fn tables_that_do_not_converge_stop_refining_with_their_error_booked(){
     let v:Value=serde_json::from_str(include_str!("fixtures/explicit_rung_motion.json")).unwrap();let r=sparse_request(&v);
     let allowance=Ground::allowances(&r).unwrap()[1];let model=Model::with(&r,allowance).unwrap();
     assert!(model.ground.clusters.iter().any(|c|c.excited.len()==24),"the explicit rung");
-    assert!(model.table_stalled&&model.table_limit.is_some_and(|n|n<=33),"refined to {:?} nodes per axis (stalled {})",model.table_limit,model.table_stalled);
-    assert!(model.table_error>TABLE_SHARE,"the error booked: {:.2e}",model.table_error);
+    assert!(model.table_stalled&&model.table_limit.is_some_and(|n|n<=17),"refined to {:?} nodes per axis (stalled {})",model.table_limit,model.table_stalled);
+    assert!(model.table_error>0.,"the error booked: {:.2e}",model.table_error);
 }
 
 /// The retro-reflected tweezer with a resonant probe (tests/fixtures/retro_probe_motion.json, the validation's F3
@@ -629,7 +628,7 @@ fn the_jumps_heating_on_a_retro_reflected_tweezer_exceeds_its_share_at_the_line_
     let settings=|steps:usize|{let mut s=Settings::new(interval/steps as f64,&initial.traps[reference],f64::EPSILON,true);s.doppler=BUDGET;s.region=initial.depths[reference];s};
     let steps=93;let harmonic=Harmonic::new(&model,&settings(steps),&initial,steps,outputs);
     let(states,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,32,steps,outputs,&harmonic);
-    let share=A_PRIORI_SHARE*TEMPERATURE_TARGET;
+    let share=STEP_SHARE*TEMPERATURE_TARGET;
     let(line,quarter)=(jumps(&Engine::new(&model,settings(steps)),&states)/share,jumps(&Engine::new(&model,settings(4*steps)),&states)/share);
     println!("the jumps' criterion over T's share: {line:.2} at 0.054 us, {quarter:.2} at 0.0134 us ({} states)",states.len());
     assert!(line>1.&&quarter<1.,"{line:.3} at the line's step, {quarter:.3} at a quarter");

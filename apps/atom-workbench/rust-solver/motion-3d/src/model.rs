@@ -8,8 +8,9 @@
 //! and every near beam's responses. The near beams enter through their amplitudes a_l(r) (phase and
 //! profile, a Gaussian beam's exact), linearly per carrier. The tables hold the elimination on a
 //! uniform grid of the focused units' intensities s ∈ [0, 1]^D, cubic in each s_f, the grid doubled
-//! until the interpolation at the new nodes agrees with the exact elimination to the tables' share
-//! of the budget (`TABLE_SHARE`) of every table's scale. The focused units are the trap beam's and
+//! while a finer grid costs less than the trajectories its smaller error saves (`tabulate`), the error
+//! the interpolation's at the new nodes where the atoms go, against the exact elimination, relative to
+//! every table's scale there. The focused units are the trap beam's and
 //! every varying unit whose profile matters (`Model::new`): one whose intensity changes over the
 //! atom's reach by more than the budget leaves -- its shifts O_u + F_u against the excited poles --
 //! gets an axis; the others' shifts are taken at the focus.
@@ -91,9 +92,9 @@
 use crate::ground::{self,Ground};
 use crate::ledger::BUDGET;
 use crate::linear::{hermitian_eigenvalues,Dense};
+use crate::solve::{MATRIX_NS,MOST_TRAJECTORIES,POPULATION_TARGET};
 use crate::stats::KT_PER_UK;
 use crate::{Complex,Request,STATES};
-use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
 use rayon::prelude::*;
 
 pub const HBAR:f64=1.0545718176461565e-34;
@@ -109,9 +110,6 @@ const MOST_W:usize=2*MOST_STATES*MOST_STATES;
 pub const MOST_MIXED:usize=STATES;
 /// The largest rank of a carrier's couplings (the dipole operator's three components).
 pub const MOST_RANK:usize=3;
-/// The tables' interpolation error at the refined nodes, relative to each table's scale: a numerical
-/// discretization, held to the a-priori share of the budget.
-pub const TABLE_SHARE:f64=A_PRIORI_SHARE*BUDGET;
 /// The coarsest grid of each intensity axis (nodes), the fewest a cubic stencil takes doubled once.
 const FIRST_NODES:usize=5;
 /// An instant at which the generator's beats take generic phases (us, the golden ratio's inverse: no
@@ -125,8 +123,8 @@ pub const NOT_LINDBLAD:&str="消去激发态后的生成元不是 Lindblad 形�
 /// and `MOST_TRAJECTORIES` are a solve's (solve.rs). A resonance across the focused units'
 /// intensities -- a near probe crossing its line where far beams shift it, its ridge a tenth of the
 /// intensities wide -- can ask for a grid finer than a machine holds. A grid beyond either bound is
-/// not made: the tables keep the last one, its measured interpolation error booked
-/// (`Model::table_error`, the ledger's), the same on any machine.
+/// not made, whatever it would save (`tabulate`): the tables keep the last one, its measured
+/// interpolation error booked (`Model::table_error`, the ledger's), the same on any machine.
 pub const MOST_TABLE_BYTES:usize=1<<32;
 pub const MOST_TABLE_NODES:usize=1<<20;
 /// The nodes of a grid computed at once, written into its tables before the next: a grid's nodes
@@ -430,9 +428,10 @@ type Node=(Vec<Vec<Complex>>,[f64;3]);
 
 /// The tables on one grid of n nodes per focused unit: per cluster, node-major, its layout's size per
 /// node (re/im interleaved); per node its bounds (`Node`); and each bound's largest over the nodes
-/// inside the reach (`Model::dressing`, `Model::resonance`, `Model::undressed`).
+/// inside the reach (`Model::dressing`, `Model::resonance`, `Model::undressed`); the work its computed
+/// nodes took, counted (linear.rs `counted`: complex multiply-adds).
 #[derive(Clone,Debug)]
-pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,bounds:Vec<[f64;3]>,reach:[f64;3]}
+pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,bounds:Vec<[f64;3]>,reach:[f64;3],work:f64}
 
 /// The trap of the trap beam: its principal axes (unit rows on the lab axes) and frequencies
 /// (rad/us) at the focus for a reference state, and the frequencies per lab axis.
@@ -458,9 +457,9 @@ pub struct Model{
     pub mass_kg:f64,
     pub(crate) layouts:Vec<Layout>,
     pub(crate) tables:Tables,
-    /// The interpolation's measured largest relative error, and where the work bounds -- or doublings
-    /// that did not shrink the error (`table_stalled`) -- stopped the grid's refinement short of
-    /// `TABLE_SHARE` the nodes per axis it kept.
+    /// The interpolation's measured largest relative error where the atoms go (`tabulate`), and where the
+    /// work bounds -- or a doubling that did not shrink the error (`table_stalled`), whose next one is
+    /// predicted to save nothing -- stopped the grid's refinement the nodes per axis it kept.
     pub table_error:f64,
     pub table_limit:Option<usize>,
     pub table_stalled:bool,
@@ -582,13 +581,29 @@ impl Model{
         if ground.ground_states.len()!=GROUND{return Err(format!("The ground manifold has {} states, not {GROUND}",ground.ground_states.len()));}
         if ground.clusters.iter().any(|c|c.excited.is_empty()&&c.states.len()>MOST_STATES){return Err("A cluster of ground states has more than eight states".into());}
         let mut model=Model{ground,geometry,trap_beam,trap_beams,focused:vec![trap_unit],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
-            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3]},table_error:0.,table_limit:None,table_stalled:false,dressing:0.,undressed:0.,fourth_dropped:0.,resonance:0.,reach:vec![[0.;3]],
+            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3],work:0.},table_error:0.,table_limit:None,table_stalled:false,dressing:0.,undressed:0.,fourth_dropped:0.,resonance:0.,reach:vec![[0.;3]],
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
         model.choose_profiles(request)?;
         model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();
-        model.tabulate(&bases,most_bytes,most_nodes)?;
+        let stake=model.stake(request);model.tabulate(&bases,most_bytes,most_nodes,stake)?;
         model.lindblad()?;
         Ok(model)
+    }
+
+    /// What a unit of booked population error costs the run (ns), the tables' stake (`tabulate`): the run's
+    /// trajectories go as the inverse square of the room its estimates leave the statistics, so that an error
+    /// e of the room R costs it 2e/R of itself at first order -- here at the most trajectories a run takes
+    /// (`MOST_TRAJECTORIES`), each the pilot's first steps over the run (the light's pattern, solve.rs `run`)
+    /// at an advance's counted work in the model's dearest cluster (solve.rs `advance_work`), against the
+    /// whole population target. A run that takes fewer pays for at most a doubling beyond its own optimum,
+    /// each cutting the error about 2⁴-fold at 2^D times the work of the last.
+    fn stake(&self,request:&Request)->f64{
+        let thermal=(KT_PER_UK*request.temperature_uk*self.hbar_over_mass).sqrt();
+        let pattern=self.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max)*thermal;
+        let rate=if pattern>0.{pattern}else{self.reference_state(request).map_or(0.,|s|self.bare_trap(s).frequencies.iter().copied().fold(0.,f64::max))};
+        let steps=(self.ground.duration*rate/crate::solve::first_phase()).max(1.);
+        let advance=(0..self.layouts.len()).map(|k|crate::solve::advance_work(&self.work(k))).fold(0.,f64::max);
+        2.*MOST_TRAJECTORIES as f64*steps*advance/POPULATION_TARGET
     }
 
     /// The varying units other than the trap beam's (ground.rs `Unit`): each one's profile is judged
@@ -983,31 +998,40 @@ impl Model{
     fn grid_tables(&self,n:usize,mixing:&[Vec<Vec<Complex>>],coarse:Option<&Tables>)->Result<Tables,String>{
         let(d,m)=(self.focused.len(),n.div_ceil(2));let count=n.pow(d as u32);
         let mut data:Vec<Vec<f64>>=self.layouts.iter().map(|l|Vec::with_capacity(2*count*l.size)).collect();let mut bounds=Vec::with_capacity(count);
-        // A node of the coarse grid it shares, or computed.
-        enum Made{Shared(usize),Computed(Node)}
+        // A node of the coarse grid it shares, or computed (with its counted work: a node is one thread's).
+        enum Made{Shared(usize),Computed(Node,f64)}let mut work=0.;
         for first in (0..count).step_by(NODE_BATCH){
             let batch:Vec<Made>=(first..(first+NODE_BATCH).min(count)).into_par_iter().map(|i|{
                 let digits:Vec<usize>=(0..d).map(|f|(i/n.pow(f as u32))%n).collect();
                 match coarse{
                     Some(_)if digits.iter().all(|x|x%2==0)=>Ok(Made::Shared(digits.iter().enumerate().map(|(f,x)|x/2*m.pow(f as u32)).sum())),
-                    _=>self.node(&self.grid_point(n,i)[..d],mixing).map(Made::Computed),
+                    _=>{let before=crate::linear::counted();self.node(&self.grid_point(n,i)[..d],mixing).map(|x|Made::Computed(x,crate::linear::counted()-before))}
                 }
             }).collect::<Result<_,_>>()?;
             for made in batch{match made{
                 Made::Shared(j)=>{let c=coarse.unwrap();for(k,l)in self.layouts.iter().enumerate(){data[k].extend_from_slice(&c.data[k][2*j*l.size..2*(j+1)*l.size]);}bounds.push(c.bounds[j]);}
-                Made::Computed(node)=>{for(k,t)in node.0.iter().enumerate(){data[k].extend(t.iter().flat_map(|z|[z.re,z.im]));}bounds.push(node.1);}
+                Made::Computed(node,w)=>{for(k,t)in node.0.iter().enumerate(){data[k].extend(t.iter().flat_map(|z|[z.re,z.im]));}bounds.push(node.1);work+=w;}
             }}
         }
-        let low:Vec<f64>=self.focused.iter().map(|&u|self.reach.iter().map(|&r|self.unit_intensity(u,r).min(1.)).fold(1.,f64::min)-1./(n-1).max(1) as f64).collect();
-        let inside:Vec<usize>=(0..count).filter(|&i|self.grid_point(n,i).iter().zip(&low).all(|(x,l)|x>=l)).collect();
+        let inside=self.inside(n);
         let reach=std::array::from_fn(|k|inside.iter().map(|&i|bounds[i][k]).fold(0.,f64::max));
-        Ok(Tables{nodes:n,data,bounds,reach})
+        Ok(Tables{nodes:n,data,bounds,reach,work})
     }
-    /// The coarse grid's (`self.tables`) largest interpolation error at a finer grid's nodes, relative
-    /// to the scale of each cluster's table kind.
+    /// The nodes of a grid of n per focused unit inside the reach's intensities: each focused unit's from its
+    /// smallest over the reach (less one node, the interval holding it) to 1.
+    fn inside(&self,n:usize)->Vec<usize>{
+        let low:Vec<f64>=self.focused.iter().map(|&u|self.reach.iter().map(|&r|self.unit_intensity(u,r).min(1.)).fold(1.,f64::min)-1./(n-1).max(1) as f64).collect();
+        (0..n.pow(self.focused.len() as u32)).filter(|&i|self.grid_point(n,i).iter().zip(&low).all(|(x,l)|x>=l)).collect()
+    }
+    /// The coarse grid's (`self.tables`) largest interpolation error at a finer grid's nodes where the atoms go,
+    /// relative to the scale of each cluster's table kind there: the nodes inside the reach's intensities (`inside`),
+    /// as the elimination's bounds are taken (`grid_tables`). Beyond them -- a Gaussian beam's edge, where its
+    /// intensity falls to 0 and the function bends its sharpest (the 3D PGC's error 2e-4 at 257 nodes there, 8e-10
+    /// inside; F9's 7.5e-4 at 513 nodes per axis, 1.4e-12 inside) -- an atom is far beyond its thermal
+    /// ellipsoid, and the estimates over the reach do not take it either.
     fn interpolation_error(&self,fine:&Tables)->f64{
         let(ng,ne)=(self.ground.ground_states.len(),self.ground.excited_states.len());let d=self.focused.len();
-        let count=fine.nodes.pow(d as u32);let mut worst=0_f64;
+        let inside=self.inside(fine.nodes);let mut worst=0_f64;
         for(b,layout)in self.layouts.iter().enumerate(){
             let n=layout.n;let mut kinds:Vec<(usize,usize)>=vec![(layout.h0,layout.h0+n*n)];
             for gl in &layout.groups{let square=gl.pairs.len()*gl.entries.len();kinds.extend([(gl.s,gl.s+square),(gl.q,gl.q+square)]);}
@@ -1032,9 +1056,9 @@ impl Model{
             for(start,end)in kinds{
                 let exact=|i:usize|&fine.data[b][2*(i*layout.size+start)..2*(i*layout.size+end)];
                 let modulus=|x:&[f64]|x.chunks_exact(2).map(|z|z[0].hypot(z[1])).fold(0_f64,f64::max);
-                let scale=(0..count).into_par_iter().map(|i|modulus(exact(i))).reduce(||0.,f64::max);
+                let scale=inside.par_iter().map(|&i|modulus(exact(i))).reduce(||0.,f64::max);
                 if scale==0.{continue;}
-                let e=(0..count).into_par_iter().map_init(||vec![Complex::ZERO;end-start],|out,i|{
+                let e=inside.par_iter().map_init(||vec![Complex::ZERO;end-start],|out,&i|{
                     self.interpolate(b,&self.stencil(&self.grid_point(fine.nodes,i)[..d]),None,start,out);
                     out.iter().zip(exact(i).chunks_exact(2)).fold(0_f64,|m,(x,y)|m.max((x.re-y[0]).hypot(x.im-y[1])))
                 }).reduce(||0.,f64::max)/scale;
@@ -1043,31 +1067,41 @@ impl Model{
         }
         worst
     }
-    /// The tables on grids of FIRST_NODES, then doubled (each grid's nodes computed once), until the
-    /// cubic interpolation from the coarser grid meets TABLE_SHARE at the finer grid's nodes, the
-    /// finer grid kept; or until the next grid would pass the work bounds (`MOST_TABLE_BYTES`,
-    /// `MOST_TABLE_NODES`), the last grid kept with its measured error (the coarser grid's against it,
-    /// an upper estimate of its own) -- once refined at least, so that the error is measured; or until two
-    /// doublings in a row leave that error above its smallest so far -- the tabulated function is not
-    /// smooth on the grids' scale (a crossing, a pole: b1/109's explicit rung, 0.4 to 1.4 from 9 to 16385
-    /// nodes), where finer grids do not approach the share; a feature the first grids miss shrinks the
-    /// error again within one --, the last grid kept with its error.
-    fn tabulate(&mut self,mixing:&[Vec<Vec<Complex>>],most_bytes:usize,most_nodes:usize)->Result<(),String>{
+    /// The tables on grids of FIRST_NODES, then doubled (each grid's nodes computed once), the finer grid
+    /// kept with the coarser one's measured error against it (`interpolation_error`, an upper estimate of
+    /// its own) -- once refined at least, so that the error is measured --, and doubled again while that
+    /// pays: while the next grid's counted work -- its new nodes' eliminations at the last grid's counted
+    /// work per node (linear.rs `counted`) and its error's measure, `MATRIX_NS` a complex multiply-add -- is
+    /// below what its smaller error saves the run at `stake` per unit of booked error (`stake`). Its error
+    /// is predicted by the last doubling's rate, and by the cubic interpolation's order before one is seen,
+    /// 2⁻⁴ a doubling: a doubling that did not shrink the error predicts no saving, and stops it
+    /// (`table_stalled`: the tabulated function is not smooth on the grids' scale where the atoms go -- a
+    /// folded drive's pole, PGCP_10's every-drive-folded model 0.8 to 1.3 from 9 to 32769 nodes there, which
+    /// no grid resolves). A grid beyond the work bounds (`MOST_TABLE_BYTES`, `MOST_TABLE_NODES`) is not made
+    /// whatever it saves (`table_limit`). Its error is booked (the ledger's), the room it takes from the
+    /// statistics like any estimate's (solve.rs).
+    fn tabulate(&mut self,mixing:&[Vec<Vec<Complex>>],most_bytes:usize,most_nodes:usize,stake:f64)->Result<(),String>{
         let d=self.focused.len() as u32;
         let entries:usize=self.layouts.iter().map(|l|l.size).sum();
         let within=|n:usize,coarse:usize|n.pow(d)<=most_nodes&&16*entries*(n.pow(d)+coarse.pow(d))<=most_bytes;
         if !within(2*FIRST_NODES-1,FIRST_NODES){return Err(format!("The elimination's tables take {entries} complex entries per node: beyond the work bounds"));}
         self.tables=self.grid_tables(FIRST_NODES,mixing,None)?;(self.dressing,self.undressed)=(self.tables.reach[0],self.tables.reach[2]);
-        let(mut best,mut stalls)=(f64::INFINITY,0);
+        // The counted work per computed node, and the errors measured so far.
+        let(mut per_node,mut errors)=(self.tables.work/FIRST_NODES.pow(d) as f64,vec![]);
         loop{
-            let n=2*self.tables.nodes-1;
-            if !within(n,self.tables.nodes){self.table_limit=Some(self.tables.nodes);break;}
+            let(coarse,n)=(self.tables.nodes,2*self.tables.nodes-1);
+            if let Some(&error)=errors.last(){
+                let rate:f64=if errors.len()>1{error/errors[errors.len()-2]}else{0.0625};
+                if !(rate<1.){self.table_stalled=true;self.table_limit=Some(coarse);break;}
+                let work=MATRIX_NS*((n.pow(d)-coarse.pow(d)) as f64*per_node+(n.pow(d)*entries*4_usize.pow(d)) as f64);
+                if !(work<stake*error*(1.-rate)){break;}
+            }
+            if !within(n,coarse){self.table_limit=Some(coarse);break;}
             let fine=self.grid_tables(n,mixing,Some(&self.tables))?;let worst=self.interpolation_error(&fine);
+            per_node=fine.work/(n.pow(d)-coarse.pow(d)) as f64;
             (self.dressing,self.undressed)=(self.dressing.max(fine.reach[0]),self.undressed.max(fine.reach[2]));
-            self.tables=fine;self.table_error=worst;
-            if worst<=TABLE_SHARE{break;}
-            if worst<best{(best,stalls)=(worst,0);}else{stalls+=1;}
-            if stalls==2{self.table_limit=Some(self.tables.nodes);self.table_stalled=true;break;}
+            self.tables=fine;self.table_error=worst;errors.push(worst);
+            if worst==0.{break;}
         }
         self.resonance=self.tables.reach[1];
         Ok(())
@@ -1661,8 +1695,8 @@ impl Model{
                 if -b.low<=round{continue;}
                 let floor=if self.ground.duration>0.{1./self.ground.duration}else{b.rate.max(round)};
                 let error=excess(&b.d,&b.jumps,round,floor);
-                if error>BUDGET{return Err(format!("{NOT_LINDBLAD}：子空间 {k} 在 r = ({:.2}, {:.2}, {:.2}) μm、t = {t:.3} μs 处，无跳跃的衰减低于跳跃率（i(H − H†) − ΣL†L 的最小本征值 {:.2e} rad/μs，最大跳跃率 {:.2e} rad/μs），其相对误差达 {:.2}%，超出预算 {:.1}%——这部分衰减没有跳跃承载，轨迹的范数会增长",
-                    r[0],r[1],r[2],b.low,b.rate,100.*error,100.*BUDGET));}
+                if error>POPULATION_TARGET{return Err(format!("{NOT_LINDBLAD}：子空间 {k} 在 r = ({:.2}, {:.2}, {:.2}) μm、t = {t:.3} μs 处，无跳跃的衰减低于跳跃率（i(H − H†) − ΣL†L 的最小本征值 {:.2e} rad/μs，最大跳跃率 {:.2e} rad/μs），其相对误差达 {:.2}%，超出目标 {:.1}%——这部分衰减没有跳跃承载，轨迹的范数会增长",
+                    r[0],r[1],r[2],b.low,b.rate,100.*error,100.*POPULATION_TARGET));}
             }}
         }
         Ok(())
@@ -1934,24 +1968,24 @@ impl Photons<'_>{
 
 #[cfg(test)]
 mod tests{
-    use super::{Beats,Model,MOST_TABLE_BYTES,MOST_TABLE_NODES,TABLE_SHARE};
+    use super::{Beats,Model,MOST_TABLE_BYTES,MOST_TABLE_NODES};
     use std::f64::consts::TAU;
 
     /// The tables stop refining at the work bounds (F9): the tweezer PGC's (its tweezer one intensity
     /// axis) within nine nodes, or within the bytes of the grids of nine and five, keep the grid of
-    /// nine, its error measured against the five before it and booked -- beyond TABLE_SHARE, where the
-    /// unbounded tables refine on to meet it --; a bound below the first refinement leaves no measured
-    /// error, and is refused.
+    /// nine, its error measured against the five before it and booked -- where the unbounded tables
+    /// refine on, the next grid paying for itself, to a smaller one --; a bound below the first
+    /// refinement leaves no measured error, and is refused.
     #[test]
     fn the_tables_stop_at_the_work_bounds_with_their_error_measured(){
         let f:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/tweezer_pgc.json")).unwrap();
         let r=crate::ground::tests::request(&f["request"]);
         let free=Model::new(&r).unwrap();
-        assert!(free.table_limit.is_none()&&free.tables.nodes>9&&free.table_error<=TABLE_SHARE,"{:?} at {} nodes: {:e}",free.table_limit,free.tables.nodes,free.table_error);
+        assert!(free.table_limit.is_none()&&!free.table_stalled&&free.tables.nodes>9,"{:?} at {} nodes: {:e}",free.table_limit,free.tables.nodes,free.table_error);
         let entries:usize=free.layouts.iter().map(|l|l.size).sum();
         for(bytes,nodes)in [(MOST_TABLE_BYTES,9),(16*entries*(9+5),MOST_TABLE_NODES)]{
             let m=Model::bounded(&r,f64::INFINITY,false,bytes,nodes).unwrap();
-            assert!(m.table_limit==Some(9)&&m.tables.nodes==9&&m.table_error>TABLE_SHARE,"{:?} at {} nodes: {:e}",m.table_limit,m.tables.nodes,m.table_error);
+            assert!(m.table_limit==Some(9)&&m.tables.nodes==9&&m.table_error>free.table_error,"{:?} at {} nodes: {:e}",m.table_limit,m.tables.nodes,m.table_error);
         }
         assert!(Model::bounded(&r,f64::INFINITY,false,MOST_TABLE_BYTES,5).is_err());
     }
