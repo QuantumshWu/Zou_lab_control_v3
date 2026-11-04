@@ -167,9 +167,13 @@
 //! tolerance, 4.5 %, and T is −23 ± 2 % where it binds, against 0.0245 us (8192 trajectories on shared streams). So from the orbits' probes
 //! a run's own flow, its jumps in on the same streams, in steps of dt and of dt/2, over 1, 2, 4... periods while an error stands beyond
 //! its errors (`standing`, their squares' difference: continuous from zero at the noise, the magnitude far above it), up to the run: there
-//! 24.6 % with errors of 4.3 % at 0.104 us. More than T's tolerance standing, the step where it would come to it, as dt², is checked
-//! again: 0.049-0.052 us over the pilot's seeds, T −6.0 ± 1.9 % at 0.052 us. On the other scenes the noise stops the spans within their first few and no
-//! step moves (over the pilot's seeds the shallow probe's 3.0-4.25 % within its 4.3 %, the others' at most 2.1 %).
+//! about 25 % with errors of 10 % on 32 probes at 0.104 us, 24.6 % with errors of 4.3 % on 256: a steady rate's error stands as far above its errors at every span, each span's cost going with its
+//! length, while on a chaotic orbit a pair's errors outgrow every other error within two periods (the 3D PGC's and the D1 molasses's ±3 % on 256 probes over one period, ±10 % over two, ±20-30 % over
+//! eight: no count of probes reads T's tolerance there, and proving that nothing stands took most of the read). So the read is the probes' first layer, the others only to confirm what stands beyond
+//! its limit, T's tolerance at the probes' times by then (`tolerances`) or the loss's: a stand there moves the whole run's step. It is needed only where the error could add up: with the kept step's
+//! motion's error per period, summed over the periods up to each output, within that output's limit (a run of few periods, PGCP_10's two at 2 %), no read can change the step. More than the limit
+//! standing, the step where it would come to it, as dt², is checked again, at least as far as that span: 0.041-0.052 us over the pilot's seeds, T −3.7 ± 1.9 % at
+//! 0.045 us and −5.7 ± 1.8 % at 0.052 us where it binds, against 0.013 us (8192 trajectories on shared streams). On the other scenes the noise stops the spans within their first few and no step moves.
 //!
 //! # Shares
 //! The targets are the totals, each output's estimated error E² = A² + b² + S²: A the a-priori estimates (the ledger's, each
@@ -863,14 +867,18 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             interval_work(&model,&parts,&settings(k.steps),interval,waiting)*n*weight};
         step_check(&model,&states,&settings,steps,most,waiting,horizon,pilot as usize,&pilot_groups,period,tolerances,&cost,need,&[])}};
     let tolerances=checked.tolerances;
-    // The kept step against T's error over the run (`drift`): where more than the tolerance stands, as dt² the step where it would come to it, checked again.
-    let chosen={let(probes,sensitivity)=(bound_probes(&model,&states),escape(&model,&states,&pilot_groups));let limit=tolerances[1].min(if sensitivity>0.{tolerances[0]/sensitivity}else{f64::INFINITY});
-        let mut kept=checked.chosen;
-        loop{let error=drift(&model,&settings,kept.steps,&probes,period,duration,limit);let stands=standing(error);
-            if stands<=limit||kept.steps==most{break Check{motion:kept.motion.max(stands/tolerances[1]),loss:kept.loss.max(sensitivity*stands/tolerances[0]),..kept};}
-            let finer=((kept.steps as f64*(error[0]/limit.hypot(error[1])).powf(1./ORDER)).ceil() as usize).clamp(kept.steps+1,most);let x=(kept.steps as f64/finer as f64).powf(ORDER);
-            kept=Check{steps:finer,population:kept.population*x,loss:kept.loss*x,motion:kept.motion*x};
-        }};
+    // The kept step against T's error over the run (`drift`), each output against T's tolerance there and the loss's: read where its error per period could add up past that;
+    // where more stands than that, as dt² the step where it would come to it, checked again at least as far as that span.
+    let chosen={let(probes,sensitivity)=(bound_probes(&model,&states),escape(&model,&states,&pilot_groups));
+        let limits:Vec<f64>=apriori.iter().zip(&weights).map(|(a,&w)|temperature_tolerance(w,a[1]).min(if sensitivity>0.{tolerances[0]/sensitivity}else{f64::INFINITY})).collect();
+        let limit=|t:f64|limits[((t/interval).round() as usize).clamp(1,outputs-1)];
+        let mut kept=checked.chosen;let mut through=0.;
+        if !(1..outputs).any(|i|kept.motion*tolerances[1]*(times[i]/period).max(1.)>limits[i]){kept}else{loop{
+            let d=drift(&model,&settings,kept.steps,&probes,period,duration,&limit,through);
+            if d.excess<=1.||kept.steps==most{break Check{motion:kept.motion.max(d.excess),loss:kept.loss.max(sensitivity*d.stands/tolerances[0]),..kept};}
+            let finer=((kept.steps as f64*d.excess.powf(1./ORDER)).ceil() as usize).clamp(kept.steps+1,most);let x=(kept.steps as f64/finer as f64).powf(ORDER);
+            kept=Check{steps:finer,population:kept.population*x,loss:kept.loss*x,motion:kept.motion*x};through=d.span;
+        }}};
     let(steps,ratios)=(chosen.steps,chosen.ratios());
     let dt=interval/steps as f64;let settings=settings(steps);
     // A step the work bound set that misses its shares: why, for the flag.
@@ -1344,8 +1352,10 @@ fn checked_step(states:usize,probes:usize,steps:usize,interval:f64,period:f64)->
 /// there (`weights`, `regime`), at most ε_T: a step that leaves the motion unresolved still moves the loss.
 fn tolerances(weights:&[f64],apriori:&[[f64;2]])->[f64;2]{
     let population=BIAS_SHARE*apriori.iter().skip(1).map(|a|run_room(POPULATION_TARGET,a[0])).fold(POPULATION_TARGET,f64::min);
-    let temperature=apriori.iter().zip(weights).skip(1).map(|(a,&w)|(BIAS_SHARE*run_room(TEMPERATURE_TARGET/w,a[1])).min(TEMPERATURE_TARGET)).fold(TEMPERATURE_TARGET,f64::min);
+    let temperature=apriori.iter().zip(weights).skip(1).map(|(a,&w)|temperature_tolerance(w,a[1])).fold(TEMPERATURE_TARGET,f64::min);
     [population,temperature]}
+/// T's tolerance at an output (`tolerances`): the step's share of the run's room at its target there, ε_T/w (`regime`), beside its a-priori total, at most ε_T.
+fn temperature_tolerance(weight:f64,apriori:f64)->f64{(BIAS_SHARE*run_room(TEMPERATURE_TARGET/weight,apriori)).min(TEMPERATURE_TARGET)}
 
 /// The step-doubling excess of a step (module documentation), each criterion over its tolerance
 /// (`tolerances`; 1 meets it): the population criterion's bound -- from all the sampled states one step
@@ -1485,15 +1495,21 @@ fn paired_error(windows:&[[[f64;3];2]])->[[f64;2];3]{
 }
 
 /// What of an error stands beyond its errors: their squares' difference, as the budget's quadrature; zero at the noise, the magnitude far above it.
-pub fn standing(error:[f64;2])->f64{(error[0]*error[0]-error[1]*error[1]).max(0.).sqrt()}
+fn standing(error:[f64;2])->f64{(error[0]*error[0]-error[1]*error[1]).max(0.).sqrt()}
 
+/// What of T's step error over the run stands (`drift`): at the span where it comes closest to or furthest past its limit there, its share of that limit, its size and the span.
+#[derive(Clone,Copy,Debug,Default)]
+pub struct Drift{pub excess:f64,pub stands:f64,pub span:f64}
 /// T's step error over the run (module documentation): from each probe a run's own flow, its jumps in on the same streams, in
-/// steps of dt and of dt/2, over 1, 2, 4... periods of the trap's slowest axis up to the run, each span carried on from the last, the
-/// mean κ² per axis over its last period compared (`paired_error`), with the probes' layers added until the magnitude plus its errors
-/// lies within `tolerance` or none are left. The spans go on while an error stands (`standing`): on most scenes they stop at the
-/// first, the noise there at less work than a check's `orbits`. The error of the axis and span where the most stands.
-pub fn drift(model:&Model,settings:&dyn Fn(usize)->Settings,steps:usize,probes:&Probes,period:f64,duration:f64,tolerance:f64)->[f64;2]{
-    if probes.states.is_empty(){return [0.;2];}
+/// steps of dt and of dt/2, over 1, 2, 4... periods of the trap's slowest axis up to the run, each pair carried on from where it
+/// stopped, the mean κ² per axis over its last period compared (`paired_error`), against `limit` at the probes' times by then (their
+/// tolerances' harmonic mean: the pooled error is the mean of theirs). A span reads the probes' first layer, more only for what could raise the largest stand beyond the limit, which sets the new step --
+/// a stand beyond it, or a size that the errors of all the layers would leave beyond it --: until, on more probes than the first layer's, the largest stand's errors lie within the step's share of
+/// its size and it lies beyond the limit by them (the pairs' differences are heavy-tailed: 39 ± 26 % on 64 probes of the retro-reflected tweezer's quiet axis, ±7 % on all), or nothing is left that could,
+/// or no layers are left. The spans go on until nothing stands (`standing`) on two in succession, a stand hid in one span's noise showing in the next, and at least `through`: a step checked
+/// again as far as the coarser step's stood.
+pub fn drift(model:&Model,settings:&dyn Fn(usize)->Settings,steps:usize,probes:&Probes,period:f64,duration:f64,limit:&dyn Fn(f64)->f64,through:f64)->Drift{
+    if probes.states.is_empty(){return Drift::default();}
     let(coarse,fine)=(Engine::new(model,settings(steps)),Engine::new(model,settings(2*steps)));let dt=coarse.settings.dt;
     let window=((period.min(duration)/dt).ceil() as usize).max(1);let end=((duration/dt).ceil() as usize).max(window);
     struct Pair{coarse:Trajectory,fine:Trajectory,done:usize,window:Option<[[f64;3];2]>}
@@ -1501,20 +1517,26 @@ pub fn drift(model:&Model,settings:&dyn Fn(usize)->Settings,steps:usize,probes:&
     let flow=|e:&Engine,x:&mut Trajectory,count:usize,tail:usize|->Option<[f64;3]>{let mut sum=[0.;3];
         for i in 0..count{if !x.alive{return None;}e.step(x);if i+tail>=count{for a in 0..3{sum[a]+=x.kappa[a]*x.kappa[a];}}}
         x.alive.then(||sum.map(|v|v/tail as f64))};
-    let mut pairs:Vec<Pair>=vec![];let mut count=probes.first.min(probes.states.len());let mut reach=window;let mut most=[0.;2];
+    let(total,first)=(probes.states.len(),probes.first.min(probes.states.len()));
+    let mut pairs:Vec<Pair>=vec![];let(mut reach,mut most,mut quiet)=(window,Drift::default(),0);
     loop{
-        let axes=loop{
-            pairs.extend(probes.states[pairs.len()..count].iter().map(|t|Pair{coarse:t.clone(),fine:t.clone(),done:0,window:None}));
-            pairs.par_iter_mut().for_each(|p|{let left=reach-p.done;let tail=window.min(left);
+        let mut count=first;
+        let(largest,at)=loop{
+            if pairs.len()<count{pairs.extend(probes.states[pairs.len()..count].iter().map(|t|Pair{coarse:t.clone(),fine:t.clone(),done:0,window:None}));}
+            pairs[..count].par_iter_mut().for_each(|p|{let left=reach-p.done;let tail=window.min(left);
                 if left>0{let(a,b)=(flow(&coarse,&mut p.coarse,left,tail),flow(&fine,&mut p.fine,2*left,2*tail));p.done=reach;p.window=a.zip(b).map(|(a,b)|[a,b]);}});
-            let windows:Vec<[[f64;3];2]>=pairs.iter().filter_map(|p|p.window).collect();let axes=if windows.len()<2{[[0.;2];3]}else{paired_error(&windows)};
-            if axes.iter().all(|x|x[0]+x[1]<=tolerance)||count==probes.states.len(){break axes;}
-            count=(2*count).min(probes.states.len());
+            let windows:Vec<[[f64;3];2]>=pairs[..count].iter().filter_map(|p|p.window).collect();let axes=if windows.len()<2{[[0.;2];3]}else{paired_error(&windows)};
+            let largest=axes.into_iter().max_by(|a,b|standing(*a).total_cmp(&standing(*b))).unwrap();
+            let at=count as f64/probes.states[..count].iter().map(|t|1./limit(t.time+reach as f64*dt)).sum::<f64>();
+            let(layers,top)=((count as f64/total as f64).sqrt(),at.max(most.excess*at));let open=standing(largest)>top||axes.iter().any(|x|x[0]-x[1]*layers>top);
+            if !open||count==total||(largest[0]-largest[1]>at&&largest[1]<=BIAS_SHARE*largest[0]&&count>first){break(largest,at);}
+            count=(2*count).min(total);
         };
-        let largest=axes.into_iter().max_by(|a,b|standing(*a).total_cmp(&standing(*b))).unwrap();
-        if standing(largest)>standing(most){most=largest;}
-        if !(standing(largest)>0.)||reach>=end{return most;}
-        reach=(2*reach).min(end);
+        let stands=standing(largest);
+        if stands/at>most.excess{most=Drift{excess:stands/at,stands,span:reach as f64*dt};}
+        quiet=if stands>0.{0}else{quiet+1};
+        if reach>=end||(quiet==2&&reach as f64*dt>=through){return most;}
+        reach=(2*reach).min(end).max(reach+window);
     }
 }
 
