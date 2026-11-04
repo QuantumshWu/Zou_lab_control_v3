@@ -6,7 +6,8 @@
 use atom_motion_3d::engine::{Engine,Settings,Trajectory};
 use atom_motion_3d::gpu::{self,driver::Buffer,program};
 use atom_motion_3d::ground::Ground;
-use atom_motion_3d::model::Model;
+use atom_motion_3d::linear::Dense;
+use atom_motion_3d::model::{Exact,Model,GROUND};
 use atom_motion_3d::rng::{Purpose,Rng};
 #[path="../examples/scene/mod.rs"] mod scene;
 use atom_motion_3d::control::{Harmonic,Twin};
@@ -53,7 +54,7 @@ fn device()->Option<&'static std::sync::Mutex<gpu::Gpu>>{match gpu::gpu(){Ok(g)=
 fn the_kernel_s_structs_match_their_twins(){
     let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
     let f=gpu.function("layout").unwrap();let out=Buffer::new(128).unwrap();gpu.stream().launch(&f,1,32,&[&out.pointer]).unwrap();
-    let mut words=[0u32;25];gpu.stream().download(&out,&mut words).unwrap();
+    let mut words=[0u32;26];gpu.stream().download(&out,&mut words).unwrap();
     assert_eq!(words,program::layout());
 }
 
@@ -156,7 +157,11 @@ fn on_eight_states_a_jump_with_the_exact_response_is_the_cpu_s(){compare(&reques
 /// explicit states beating at 36.4 and 72.8 MHz: CF4, at its solve's 0.1 us):
 /// - a jump-free step is the CPU's to single precision;
 /// - a jump at each thermal state -- the explicit states' photons and their share of the absorbed light,
-///   and into a cluster with explicit states its transient -- is the CPU's to single precision;
+///   and into a cluster with explicit states its transient --, with the first-order and with the exact
+///   response (K decoupled from the explicit states, their dressing in the source), is the CPU's to single
+///   precision: with the exact response, the resolvents' error (`the_exact_responses_are_the_cpu_s`, 5e-7
+///   of a column's largest entry here) times the cancellation in a class's amplitude, Σ|terms|/|u| up to 19
+///   on the PGC's explicit rung, whose beams all lie along one axis (κ 5e-6 off at most);
 /// - a step with its jumps where their thresholds fall makes the same jumps, landings and losses. Its
 ///   crossing is found on the single-precision norm: in a slowly decaying state (0.02/us on the PGC's
 ///   explicit rung) its time moves by 1e-3 of itself, and the state after it by as much (unbiased).
@@ -170,12 +175,12 @@ fn with_explicit_states_a_step_and_a_jump_are_the_cpu_s(){
         let(model,settings,trajectories)=setup(&r,m.clone(),dt,None,f64::INFINITY);
         {
             let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());let program=gpu.program(&model,&settings).unwrap();let engine=Engine::new(&model,settings.clone());
-            for t in &trajectories{
-                let mut c=t.clone();let(r0,t0)=(c.r,c.time);engine.jump(&mut c,r0,t0,false);let g=gpu.jump_probe(&program,&settings,t).unwrap();
-                let at=format!("the jump of trajectory {} (cluster {} → {})",t.index,t.cluster,c.cluster);
+            for(t,exact)in trajectories.iter().flat_map(|t|[(t,false),(t,true)]){
+                let mut c=t.clone();let(r0,t0)=(c.r,c.time);engine.jump(&mut c,r0,t0,exact);let g=gpu.jump_probe(&program,&settings,t,exact).unwrap();
+                let at=format!("the jump of trajectory {} (cluster {} → {}, exact {exact})",t.index,t.cluster,c.cluster);
                 assert_eq!((g.cluster,g.jumps),(c.cluster,c.jumps),"{at}");assert_eq!(g.threshold,c.threshold,"{at}");
                 let scale=c.kappa.iter().map(|x|x.abs()).fold(1.,f64::max);
-                for a in 0..3{assert!((g.kappa[a]-c.kappa[a]).abs()<=1e-6*scale,"{at}: κ {:?} against {:?}",g.kappa,c.kappa);}
+                for a in 0..3{assert!((g.kappa[a]-c.kappa[a]).abs()<=if exact{2e-5}else{1e-6}*scale,"{at}: κ {:?} against {:?}",g.kappa,c.kappa);}
                 let n=model.dimension(c.cluster);let(gn,cn)=(g.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt(),c.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt());
                 for x in 0..n{let(a,b)=(g.psi[x]*(1./gn),c.psi[x]*(1./cn));assert!((a-b).abs()<=1e-5,"{at}: ψ[{x}] {a:?} against {b:?}");}
             }
@@ -185,6 +190,38 @@ fn with_explicit_states_a_step_and_a_jump_are_the_cpu_s(){
                 assert_eq!((g.cluster,g.jumps,g.alive),(c.cluster,c.jumps,c.alive),"trajectory {}",t.index);}
             println!("{} jumps in a step, the same on both devices",jumped);
         }
+    }
+}
+/// The exact responses at thermal states (the kernel's `exact_responses`, model.rs `Exact`): every near
+/// beam's C_a R_l at each cluster column, dressed by the near light (ground.rs, # The near light's
+/// dressing), within 1e-5 of the column's largest entry of the CPU's -- single precision's resolvent, NE ε =
+/// 1.4e-6 times its condition (3.2e-6 at most here) --; on the gray molasses (one cluster of all 8 ground
+/// states) and the probed PGC's explicit rung (K decoupled from 7 explicit states, their dressing in the
+/// source), where the dressing moves them by 9.6e-4 and 1.8e-3.
+#[test]
+fn the_exact_responses_are_the_cpu_s(){
+    let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
+    for(r,m)in [(request(MOLASSES),model(&request(MOLASSES),false)),(probed(),explicit(&probed()))]{
+        let mut bare=m.clone();bare.ground.dressing=false;
+        let(model,settings,trajectories)=setup(&r,m,0.2,None,0.);let program=gpu.program(&model,&settings).unwrap();
+        let g=&model.ground;let near:Vec<usize>=(0..g.beams.len()).filter(|&l|g.carriers.iter().any(|c|c.beams.contains(&l))).collect();
+        let(mut worst,mut dressing)=(0_f64,0_f64);
+        for t in &trajectories{
+            let got=gpu.response_probe(&program,&settings,t).unwrap();
+            let(cpu,undressed)=(Exact::new(&model,t.r,t.kappa).unwrap(),Exact::new(&bare,t.r,t.kappa).unwrap());
+            for(j,&l)in near.iter().enumerate(){
+                let(c,u):(Vec<Dense>,Vec<Dense>)=(0..3).map(|a|(g.emission[a].product(&cpu.responses[l]),g.emission[a].product(&undressed.responses[l]))).unzip();
+                for(col,&b)in g.clusters[t.cluster].states.iter().enumerate(){
+                    let scale=(0..3).flat_map(|a|(0..GROUND).map(move|to|(a,to))).map(|(a,to)|c[a][(to,b)].abs()).fold(0.,f64::max);if scale==0.{continue;}
+                    for a in 0..3{for to in 0..GROUND{
+                        let x=got[((j*program::MAXN+col)*3+a)*GROUND+to];
+                        worst=worst.max((x-c[a][(to,b)]).abs()/scale);dressing=dressing.max((u[a][(to,b)]-c[a][(to,b)]).abs()/scale);
+                    }}
+                }
+            }
+        }
+        println!("{} states: the GPU's {worst:.1e} off, the dressing {dressing:.1e}",trajectories.len());
+        assert!(worst<=1e-5,"the exact responses {worst:.2e} off the CPU's");assert!(dressing>=10.*1e-5,"the dressing ({dressing:.1e}) within the check's reach");
     }
 }
 /// With a retro-reflected tweezer (`retro`): a step, and a jump with the first-order and the exact

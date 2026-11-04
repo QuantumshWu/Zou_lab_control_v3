@@ -279,6 +279,20 @@ fn a_solve_starts_from_the_request_s_initial_state(){
     for(t,e)in s.temperature_total_uk.iter().zip(&s.temperature_total_errors_uk).skip(1){assert!(*t>0.&&*e>0.);}
 }
 
+/// The fold's choice on the shallow trap's cycling control (solve.rs, # The fold's choice): every drive stays
+/// folded, the cheapest by the candidates' counted costs. The line took the first explicit rung uncosted (6
+/// excited states exact, dt 0.094 us, 2.6 times the folded model's CPU time): the pilot's fold charge was the
+/// extreme of its states grouped by their times' last bits (6.3 % against their mean 2.9 %), and left the
+/// folded model no room.
+#[test]
+fn the_shallow_cycle_keeps_its_drives_folded(){
+    let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/shallow_cycle_motion.json")).unwrap();
+    let mut r=scene::request(&fixture["payload"]);r.times_us=(0..31).map(|i|10.*i as f64).collect();
+    let s=solve(&r,Device::Cpu,&mut |_,_|{}).unwrap();
+    println!("{} trajectories, dt {:.4} us; {}",s.trajectories,s.time_step_us,s.method);
+    assert!(s.method.contains("消去激发态后的基态内态"),"{}",s.method);
+}
+
 /// The harmonic control's mean (control.rs) against the initial states' own: its value from 4096
 /// drawn initial states at outputs over a trap period, within four standard errors of its exact mean.
 #[test]
