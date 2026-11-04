@@ -175,7 +175,7 @@ const NODE_BATCH:usize=4096;
 /// What the first order's transfer may leave out on T, relative (`Model::transfer_tables`): the numerical tolerances' share of T's target (solve.rs, # Shares).
 const FIRST_SHARE:f64=crate::solve::NUMERICAL_SHARE*crate::solve::TEMPERATURE_TARGET;
 /// What a coupling within an excited manifold may move a ringing photon's amplitude by and be left out (`Model::ringing`): the numerical tolerances' share of the rule's budget.
-const RINGING_SHARE:f64=crate::solve::NUMERICAL_SHARE*BUDGET;
+pub(crate) const RINGING_SHARE:f64=crate::solve::NUMERICAL_SHARE*BUDGET;
 
 /// A beam's geometry: its direction and wave number, and its waist when Gaussian.
 #[derive(Clone,Debug)]

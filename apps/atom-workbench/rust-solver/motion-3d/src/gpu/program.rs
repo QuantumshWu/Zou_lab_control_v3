@@ -5,7 +5,7 @@
 use super::driver::{Buffer,Stream};
 use crate::engine::Settings;
 use crate::linear::Dense;
-use crate::model::{Model,GROUND,MOST_BEAMS,MOST_CARRIERS,MOST_FOCUSED,MOST_RANK,MOST_STATES};
+use crate::model::{Model,GROUND,MOST_BEAMS,MOST_CARRIERS,MOST_FOCUSED,MOST_RANK,MOST_STATES,RINGING_SHARE};
 use crate::Complex;
 
 /// The most states of a cluster of ground states the kernel holds (its bucket), of a cluster its exact
@@ -91,7 +91,7 @@ pub struct Params{
     beams:u64,beam_list:u64,carriers:u64,clusters:u64,groups:u64,pairs:u64,classes:u64,photons:u64,coherent:u64,channels:u64,carrier_tables:u64,tables:u64,
     excited:u64,diagonal:u64,couplings:u64,emission:u64,class_rows:u64,fourths:u64,quartics:u64,quartic_parts:u64,slows:u64,jump_tables:u64,jump_pairs:u64,factors:u64,frames:u64,item_first:u64,items:u64,residuals:u64,
     units:u64,unit_beams:u64,unit_weights:u64,
-    terms:u64,omegas:u64,group_parts:u64,residual_parts:u64,excited_list:u64,directs:u64,levels:u64,level_first:u64,decay_root:u64,
+    terms:u64,omegas:u64,group_parts:u64,residual_parts:u64,excited_list:u64,directs:u64,levels:u64,level_first:u64,level_width:u64,
     kept:u64,decay:u64,near_units:u64,unit_couplings:u64,vias:u64,via_first:u64,ground_block:u64,term_floor:u64,powers:u64,first_fields:u64,
     nbeams:i32,pub(crate) ncarriers:i32,nclusters:i32,focused:i32,nodes:i32,fields:i32,pub(crate) nnear:i32,doppler:i32,loss:i32,weights:i32,nunits:i32,
     exact_at:i32,transient_at:i32,nlevels:i32,rows_at:i32,between_at:i32,
@@ -99,7 +99,7 @@ pub struct Params{
     field_carrier:[i32;MOST_CARRIERS*MOST_RANK],field_rank:[i32;MOST_CARRIERS*MOST_RANK],
     ground_states:[i32;GROUND],excited_states:[i32;NE],ground_cluster:[i32;GROUND],ground_position:[i32;GROUND],
     near_first:[i32;MOST_CARRIERS+1],explicit_of:[u32;GROUND],partners:[u32;NE],near_focused:u32,
-    hm:f32,light2:f32,allowance:f32,truncation:f32,
+    hm:f32,light2:f32,allowance:f32,truncation:f32,ringing:f32,
     axes32:[[f32;3];3],stiffness32:[f32;3],
     hm64:f64,dt:f64,
     axes:[[f64;3];3],omega:[f64;3],stiffness:[f64;3],
@@ -368,12 +368,10 @@ impl Program{
         let half_flow:[[f64;3];3]=std::array::from_fn(|i|{let w=settings.frequencies[i];if w==0.{[1.,hm*tau,0.]}else{let(s,c)=(w*tau).sin_cos();[c,hm/w*s,w/hm*s]}});
         let mut field_carrier=[0;MOST_CARRIERS*MOST_RANK];let mut field_rank=[0;MOST_CARRIERS*MOST_RANK];let mut fields=0;
         for(c,carrier)in model.carriers.iter().enumerate(){for k in 0..carrier.rank{field_carrier[fields]=c as i32;field_rank[fields]=k as i32;fields+=1;}}
-        // The groups of nearly degenerate excited states (ground.rs `excited_groups`) and each excited state's
-        // 1/√Γ_ii (the transient's pieces, model.rs `transient`).
+        // The excited manifolds (ground.rs `excited_groups`) and each one's width, its states' mean decay (the ringing's photon, model.rs `ringing`).
         let(mut levels,mut level_first)=(vec![],vec![0i32]);
         for x in &g.excited_groups{levels.extend(x.iter().map(|&i|i as i32));level_first.push(levels.len() as i32);}
-        if levels.is_empty(){levels.push(0);}
-        let decay_root:Vec<f32>=(0..ne).map(|i|{let d=g.decay[(i,i)].re;if d>0.{(1./d.sqrt()) as f32}else{0.}}).collect();
+        let level_width:Vec<f64>=g.excited_groups.iter().map(|x|x.iter().map(|&i|g.decay[(i,i)].re).sum::<f64>()/x.len() as f64).collect();
         fn upload<T:Copy>(stream:&Stream,buffers:&mut Vec<Buffer>,data:&[T])->Result<u64,String>{let b=Buffer::with(stream,data)?;let p=b.pointer;buffers.push(b);Ok(p)}
         let mut buffers:Vec<Buffer>=vec![];
         macro_rules! put{($v:expr)=>{upload(stream,&mut buffers,&$v)?};}
@@ -386,7 +384,7 @@ impl Program{
             units:put!(units),unit_beams:put!(unit_beams),unit_weights:put!(unit_weights),
             terms:put!(if terms.is_empty(){vec![Term::default()]}else{terms}),omegas:put!(omegas),group_parts:put!(if group_parts.is_empty(){vec![0]}else{group_parts}),
             residual_parts:put!(if residual_parts.is_empty(){vec![0]}else{residual_parts}),excited_list:put!(if excited_list.is_empty(){vec![0]}else{excited_list}),
-            directs:put!(if directs.is_empty(){vec![Direct::default()]}else{directs}),levels:put!(levels),level_first:put!(level_first),decay_root:put!(decay_root),
+            directs:put!(if directs.is_empty(){vec![Direct::default()]}else{directs}),levels:put!(levels),level_first:put!(level_first),level_width:put!(level_width),
             kept:put!(kept),decay:put!(decay),near_units:put!(if near_units.is_empty(){vec![NearUnit::default()]}else{near_units}),
             unit_couplings:put!(if unit_couplings.is_empty(){vec![[0.;2]]}else{unit_couplings}),vias:put!(if vias.is_empty(){vec![[0;2]]}else{vias}),via_first:put!(via_first),
             ground_block:put!(ground_block),term_floor:put!(term_floor),powers:put!(powers),first_fields:put!(if first_fields.is_empty(){vec![FirstField::default()]}else{first_fields}),
@@ -398,15 +396,17 @@ impl Program{
             ground_cluster:std::array::from_fn(|b|g.cluster[b] as i32),ground_position:std::array::from_fn(|b|g.clusters[g.cluster[b]].position(b).unwrap() as i32),
             near_first,explicit_of:std::array::from_fn(|b|g.explicit_of.get(b).map_or(0,|p|p.iter().enumerate().fold(0,|m,(e,&x)|m|(x as u32)<<e))),
             partners:std::array::from_fn(|e|g.dressed.get(e).map_or(0,|f|f.iter().fold(0,|m,&x|m|1u32<<x))),near_focused,
-            hm:hm as f32,light2:(2.*g.light) as f32,allowance:settings.doppler as f32,truncation:settings.truncation as f32,
+            hm:hm as f32,light2:(2.*g.light) as f32,allowance:settings.doppler as f32,truncation:settings.truncation as f32,ringing:RINGING_SHARE as f32,
             axes32:settings.axes.map(|a|a.map(|x|x as f32)),stiffness32:settings.frequencies.map(|w|(w*w/hm) as f32),
             hm64:hm,dt:settings.dt,axes:settings.axes,omega:settings.frequencies,stiffness:settings.frequencies.map(|w|w*w/hm),half_flow,region:settings.region,
             lattice_axis:settings.lattice.map_or([0.;3],|l|std::array::from_fn(|i|(0..3).map(|a|settings.axes[i][a]*l.axis[a]).sum())),lattice_k:settings.lattice.map_or(0.,|l|l.wave_number),lattice_inv_rayleigh:settings.lattice.map_or(0.,|l|1./l.rayleigh),lattice_phase:settings.lattice.map_or(0.,|l|l.phase),
             node_phase:crate::engine::node_phase(),grid_phase:settings.node_phase,beats:settings.beats,horizon:settings.horizon,
         };
         let photons=g.clusters.iter().map(|c|c.classes.iter().map(|k|k.photons.len()).sum::<usize>()).max().unwrap_or(0);
-        // The transient's room: every coherent group's folded amplitude on the excited states (the kernel's `transient`).
-        let transient=if takes{g.clusters.iter().map(|c|c.coherent.len()*NE).max().unwrap_or(0)}else{0};
+        // The transient's room (the kernel's `transient`, `ringing_photon`): every coherent group's folded amplitude on the excited states, and for a photon on the largest manifold's
+        // m states its operators (3 axes × ng × m), per carrier and rank its channels' amplitudes (m), H's off-diagonal part or propagator and its eigenvectors (m × m), its diagonal and its phases (m).
+        let most=g.excited_groups.iter().map(|x|x.len()).max().unwrap_or(0);
+        let transient=g.clusters.iter().map(|c|c.coherent.len()*NE).max().unwrap_or(0)+(3*GROUND+nc*MOST_RANK+2*most+2)*most;
         // The exact responses' rows: a channel's K + Σ − z, lane-major (the kernel's `exact_responses`).
         let rows=if near>0{NE*32}else{0};
         // The mixed blocks' light shifts between a cluster's places, per carrier (the kernel's `light_shifts`).
