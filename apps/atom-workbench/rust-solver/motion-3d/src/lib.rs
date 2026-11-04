@@ -218,20 +218,27 @@ pub(crate) const TASK:u64=8;
 ///
 /// With `variates`, every trajectory's control variates at every output (stats.rs `Controls`).
 pub fn simulate(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],variates:Option<&Variates>)->Outcome{
-    run(model,settings,initial,seed,first,count,group,steps,outputs,listed,None,variates)
+    run(model,settings,initial,seed,first,count,group,steps,outputs,listed,None,variates,None)
+}
+/// The same with the g-th group's trajectories run only through the output `ends[g]` (solve.rs # Batches): half a period past
+/// it, as past a run's last, so that T's windows there are whole; its sums count no trajectories beyond.
+pub fn simulate_to(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],variates:Option<&Variates>,ends:&[usize])->Outcome{
+    run(model,settings,initial,seed,first,count,group,steps,outputs,listed,None,variates,Some(ends))
 }
 /// The same with every atom started at rest at r.
 pub fn simulate_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],r:[f64;3])->Outcome{
-    run(model,settings,initial,seed,first,count,group,steps,outputs,listed,Some(r),None)
+    run(model,settings,initial,seed,first,count,group,steps,outputs,listed,Some(r),None,None)
 }
-fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],origin:Option<[f64;3]>,variates:Option<&Variates>)->Outcome{
+fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],origin:Option<[f64;3]>,variates:Option<&Variates>,ends:Option<&[usize]>)->Outcome{
     let engine=Engine::new(model,settings.clone());
     // The held twins' engine: the same settings and the twin's generator and jumps.
     let twins=variates.and_then(|v|v.twin).map(|twin|(Engine::held(model,settings,&twin.held),twin));
     // The tasks in order: (their group, their first trajectory, the one after their last).
     let bounds=|g:u64|(first+g*group,(first+(g+1)*group).min(first+count));
     let tasks:Vec<(u64,u64,u64)>=(0..count.div_ceil(group)).flat_map(|g|{let(start,end)=bounds(g);(start..end).step_by(TASK as usize).map(move|s|(g,s,(s+TASK).min(end)))}).collect();
-    let slots:Vec<Mutex<Slot>>=tasks.iter().map(|&(_,from,to)|Mutex::new(Slot{sums:Group::new(outputs,(to-from) as usize),samples:vec![vec![];listed.len()],next:from,
+    // How many outputs a group's trajectories run through.
+    let through=|g:u64|ends.map_or(outputs,|e|e[g as usize]+1);
+    let slots:Vec<Mutex<Slot>>=tasks.iter().map(|&(g,from,to)|Mutex::new(Slot{sums:Group::reaching(outputs,through(g),(to-from) as usize),samples:vec![vec![];listed.len()],next:from,
         waiting:(from..to).map(|_|None).collect(),jumps:0,doppler:0.,beats:0.,seconds:[0.;2]})).collect();
     (0..count as usize).into_par_iter().with_max_len(1).for_each_init(||(Windows::new(settings,steps,outputs),vec![None;outputs]),|(windows,held),n|{
         let index=first+n as u64;let k=tasks.partition_point(|t|t.1<=index)-1;let(g,from,to)=tasks[k];let(start,end)=bounds(g);
@@ -239,10 +246,10 @@ fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count
         if let Some(r)=origin{bare.r=r;bare.kappa=[0.;3];}
         let(r0,k0)=(bare.r,bare.kappa);
         let clock=Instant::now();
-        let twin=twins.as_ref().map(|(e,twin)|hold(e,twin,&bare,steps,outputs));
+        let reach=through(g);let twin=twins.as_ref().map(|(e,twin)|hold(e,twin,&bare,steps,reach));
         let held_seconds=clock.elapsed().as_secs_f64();let clock=Instant::now();
         let mut t=dressed(model,bare);
-        let(atoms,samples,_,_)=walk(model,&engine,&mut t,steps,outputs,listed,windows,held,None);
+        let(mut atoms,samples,_,_)=walk(model,&engine,&mut t,steps,reach,listed,windows,held,None);atoms.truncate(reach);
         let record=Record{atoms,start:(r0,k0),twin,samples,jumps:t.jumps,doppler:t.doppler,beats:t.beats,seconds:[clock.elapsed().as_secs_f64(),held_seconds]};
         // Into its task in order: it and every trajectory after it that already waits.
         let mut guard=slots[k].lock().unwrap_or_else(|e|e.into_inner());let slot=&mut *guard;slot.waiting[(index-from) as usize]=Some(record);

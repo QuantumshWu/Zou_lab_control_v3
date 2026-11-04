@@ -11,7 +11,7 @@ use atom_motion_3d::ledger::BUDGET;
 use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Means,Scales,KT_PER_UK};
-use atom_motion_3d::{initial_trajectory,sample_states,simulate,Initial,Stratum,Variates};
+use atom_motion_3d::{initial_trajectory,sample_states,simulate,simulate_to,Initial,Stratum,Variates};
 use atom_motion_3d::solve::{jumps,solve,Device,STEP_SHARE,STEP_VARIANCE,TEMPERATURE_TARGET};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
@@ -731,4 +731,24 @@ fn the_jumps_heating_on_a_retro_reflected_tweezer_exceeds_its_share_at_the_line_
     let(line,quarter)=(jumps(&Engine::new(&model,settings(steps)),&states)/share,jumps(&Engine::new(&model,settings(4*steps)),&states)/share);
     println!("the jumps' criterion over T's share: {line:.2} at 0.054 us, {quarter:.2} at 0.0134 us ({} states)",states.len());
     assert!(line>1.&&quarter<1.,"{line:.3} at the line's step, {quarter:.3} at a quarter");
+}
+
+/// A group run only through an output (solve.rs # Batches) sums what the whole run sums there -- T's windows half a period past it
+/// included --, and counts no trajectories beyond; the estimates at an output rest on the groups that reach it.
+#[test]
+fn a_group_run_only_through_an_output_sums_what_the_whole_run_sums_there(){
+    let fixture:Value=serde_json::from_str(include_str!("fixtures/retro_probe_motion.json")).unwrap();
+    let(outputs,interval,steps)=(11,5.,20);let mut r=scene::request(&fixture);r.times_us=(0..outputs).map(|i|interval*i as f64).collect();
+    let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();let trap=initial.traps[reference];
+    let mut s=Settings::new(interval/steps as f64,&trap,f64::EPSILON,true);s.doppler=BUDGET;s.region=initial.depths[reference];
+    let harmonic=Harmonic::new(&model,&s,&initial,steps,outputs);let v=Variates{harmonic:&harmonic,twin:None};
+    let whole=simulate(&model,&s,&initial,0x3D_5EED,0,24,8,steps,outputs,&[],Some(&v));
+    let ends=[10,7,3];let cut=simulate_to(&model,&s,&initial,0x3D_5EED,0,24,8,steps,outputs,&[],Some(&v),&ends);
+    for(g,&end)in ends.iter().enumerate(){for i in 0..outputs{let(a,b)=(&whole.groups[g].sums[i],&cut.groups[g].sums[i]);
+        if i<=end{assert!(a.held==b.held&&a.kappa2==b.kappa2&&a.populations==b.populations&&a.harmonic==b.harmonic&&a.trajectories==b.trajectories,"group {g} output {i}");}
+        else{assert!(b.trajectories==0.&&b.held==0.,"group {g} output {i}");}}}
+    let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:None}).collect();let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
+    let e=summarize(&cut.groups,&scales,&means);
+    assert_eq!(e[3].trajectories,24.);assert_eq!(e[4].trajectories,16.);assert_eq!(e[10].trajectories,8.);
 }

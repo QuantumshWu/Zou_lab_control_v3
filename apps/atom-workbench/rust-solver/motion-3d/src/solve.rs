@@ -219,12 +219,17 @@
 //! each a group of one (with the harmonic control, at the pilot's step), predict the need, and the
 //! first batch is that many groups of `TASK`, at most the need the pilot predicts, at least the
 //! device's width -- a machine of more threads runs it in fewer rounds, not with more trajectories.
-//! Each later batch is the predicted remaining need -- the trajectories the errors so far say the
-//! targets need, less those run --, at least the device's width and at most as many as have run: the
-//! need is the largest of many outputs' estimated errors, biased up while few groups stand behind it,
-//! so it is followed at most to twice the trajectories it rests on. No margin is added above the
-//! prediction: a batch more costs the device's tail and the statistics, a few trajectories' time,
-//! where a margin of the estimate's own noise would cost tens of percent of the trajectories.
+//! An output's need is its trajectories so far times its worst ratio squared (the statistics over their rooms); a trajectory
+//! that reaches an output passes every earlier one, so that the trajectories an output must be passed by -- its reach -- are the
+//! largest need from it on, and a batch's trajectories run only as far as the outputs that still want them, half a period past
+//! the last (lib.rs `simulate_to`): the outputs where T binds or the fold's memory leaves the populations little room are often
+//! the first few (the D1 gray molasses' first 0.4 ms of 10 ms; the 3D PGC's T at its first output alone), and those alone
+//! paid for the whole run. On the CPU each group of a batch runs as far as its place in the reach (at most doubling each
+//! output's trajectories: the need is the largest of many outputs' estimated errors, biased up while few groups stand behind it);
+//! on the GPU a wave takes the last output that wants trajectories, and its width at no further cost. The estimates at an output
+//! rest on the groups that reach it (stats.rs `summarize`), a standard error's rise at the point where they thin out what the
+//! targets allow. No margin is added above the prediction: a batch more costs the device's tail and the statistics, a few
+//! trajectories' time, where a margin of the estimate's own noise would cost tens of percent of the trajectories.
 //!
 //! # Control variates
 //! Each output's κ² and populations are estimated with control variates of exactly known means
@@ -274,8 +279,8 @@ use crate::ground::{ExcitedKind,Ground,Kind};
 use crate::ledger::Ledger;
 use crate::model::{Exact,Model,Trap,MOST_MIXED,MOST_STATES,NOT_LINDBLAD};
 use crate::control::{Harmonic,Twin};
-use crate::stats::{summarize,Estimate,Group,Means,Scales,KT_PER_UK};
-use crate::{pilot_start,sample_states,simulate,Initial,Outcome,Variates,TASK};
+use crate::stats::{summarize,Estimate,Group,Means,Scales,Sums,KT_PER_UK};
+use crate::{pilot_start,sample_states,simulate_to,Initial,Outcome,Variates,TASK};
 use crate::{Complex,Request,STATES};
 use rayon::prelude::*;
 use std::time::Instant;
@@ -393,33 +398,38 @@ fn room(target:f64,floor:f64)->f64{room_of(target,floor,2.)}
 fn floor(apriori:f64,bias:f64)->f64{apriori.hypot(bias)}
 /// The weight of a total at its target (module documentation, # Shares): 1 within it, (E/ε)^k beyond.
 fn beyond(target:f64,total:f64)->f64{(total/target).max(1.).powf(BEYOND)}
-/// What a run predicts at a candidate step (module documentation, # Shares): the trajectories its rooms need --
-/// per output after t = 0 and target (T's at its regime's weight, `regime`) the pilot's statistic over its
-/// room beside the a-priori total there and the step's bias, the largest squared, times the pilot's trajectories, at least a
-/// group (`TASK`, a run's least) and at most `MOST_TRAJECTORIES` -- and the weight of the largest total at that need, its
-/// statistics the pilot's scaled to it, and of the model's resonance (`resonance`, the elimination's a-priori bound over
+/// What a run predicts at a candidate step (module documentation, # Shares, # Batches): the trajectories its rooms need --
+/// per output after t = 0 and target (T's at its regime's weight, `regime`) the pilot's statistic over its room beside the a-priori
+/// total there and the step's bias, squared, times the pilot's trajectories; per output the largest of its own and every later
+/// output's, its reach (`reaches`), at least a first batch (`FIRST_GROUPS` groups, at most the run's need) and at most
+/// `MOST_TRAJECTORIES` -- their mean over the outputs, and the weight of the largest total at those trajectories, its
+/// statistics the pilot's scaled to them, and of the model's resonance (`resonance`, the elimination's a-priori bound over
 /// the reach, which the ledger flags beyond the population target: the measured charge can miss where the light nears
 /// resonance -- F5's retro-reflected tweezer folded whole at a 9 % bound, its charge 3 %, against its explicit rung).
 fn predicted(statistics:&[Statistic],apriori:&[[f64;2]],bias:[f64;2],pilot:f64,resonance:f64)->(f64,f64){
-    let terms:Vec<(f64,f64,f64,f64)>=(1..statistics.len()).flat_map(|i|{let s=statistics[i];let a=apriori[i];
-        [(POPULATION_TARGET,s.population,floor(a[0],bias[0]),1.),(TEMPERATURE_TARGET,s.temperature,floor(a[1],bias[1]),s.weight)]}).collect();
-    let need=(pilot*terms.iter().map(|&(target,s,floor,w)|(w*s/room(target,floor)).powi(2)).fold(0.,f64::max)).clamp(TASK as f64,MOST_TRAJECTORIES as f64);
-    let weight=terms.iter().map(|&(target,s,floor,w)|beyond(target,w*floor.hypot(s*(pilot/need).sqrt()))).fold(beyond(POPULATION_TARGET,resonance),f64::max);
-    (need,weight)
+    let terms=|i:usize|{let s=statistics[i];let a=apriori[i];[(POPULATION_TARGET,s.population,floor(a[0],bias[0]),1.),(TEMPERATURE_TARGET,s.temperature,floor(a[1],bias[1]),s.weight)]};
+    let needs:Vec<f64>=(0..statistics.len()).map(|i|if i==0{0.}else{pilot*terms(i).iter().map(|&(target,s,floor,w)|(w*s/room(target,floor)).powi(2)).fold(0.,f64::max)}).collect();
+    let reach=reaches(&needs);let largest=reach.get(1).copied().unwrap_or(0.).clamp(TASK as f64,MOST_TRAJECTORIES as f64);let first=((FIRST_GROUPS*TASK) as f64).min(largest);
+    let run=|i:usize|reach[i].clamp(first,MOST_TRAJECTORIES as f64);let n=(statistics.len()-1).max(1) as f64;
+    let weight=(1..statistics.len()).flat_map(|i|terms(i).map(|(target,s,floor,w)|beyond(target,w*floor.hypot(s*(pilot/run(i)).sqrt())))).fold(beyond(POPULATION_TARGET,resonance),f64::max);
+    ((1..statistics.len()).map(run).sum::<f64>()/n,weight)
 }
+/// The trajectories each output must be passed by (module documentation, # Batches): the largest of its need and every later
+/// output's.
+fn reaches(needs:&[f64])->Vec<f64>{let mut most=0_f64;let mut out:Vec<f64>=needs.iter().rev().map(|&x|{most=most.max(x);most}).collect();out.reverse();out}
 /// The run's room beside the a-priori estimates -- the step's bias and the statistics together, their work going as
 /// R^−(2+1/p) at their cost-optimal split, in quadrature (module documentation, # Shares): what the estimates leave of the
 /// target's square, or beyond (1 − s²) of it their balance αA²/(k − α), α = 2 + 1/p; at most the target. The step takes its share s (`tolerances`).
 fn run_room(target:f64,apriori:f64)->f64{room_of(target,apriori,2.+1./ORDER)}
 /// The largest ratio of the statistical errors to their room over every output after t = 0 (the
 /// request's initial state, `start`): 1 meets the targets.
-fn worst_ratio(estimates:&[Estimate],accounts:&Accounts,frequencies:[f64;3])->f64{let[p,t]=worst_ratios(estimates,accounts,frequencies);p.max(t)}
-/// The same per kind: the populations' and the loss's, and T's.
-fn worst_ratios(estimates:&[Estimate],accounts:&Accounts,frequencies:[f64;3])->[f64;2]{
-    estimates.iter().enumerate().skip(1).map(|(i,e)|{
+fn worst_ratio(estimates:&[Estimate],accounts:&Accounts,frequencies:[f64;3])->f64{output_ratios(estimates,accounts,frequencies).into_iter().fold(0.,|m,r|m.max(r[0]).max(r[1]))}
+/// The same per output and kind: the populations' and the loss's, and T's (zero at t = 0).
+fn output_ratios(estimates:&[Estimate],accounts:&Accounts,frequencies:[f64;3])->Vec<[f64;2]>{
+    estimates.iter().enumerate().map(|(i,e)|{if i==0{return [0.;2];}
         let s=statistics(e,frequencies);let a=accounts.apriori[i];
         [s.population/room(POPULATION_TARGET,floor(a[0],accounts.bias[0])),s.weight*s.temperature/room(TEMPERATURE_TARGET,floor(a[1],accounts.bias[1]))]
-    }).fold([0.;2],|w,r|[w[0].max(r[0]),w[1].max(r[1])])
+    }).collect()
 }
 
 /// The distribution sample indices: evenly spread over the outputs, the first and last among them.
@@ -788,12 +798,15 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let mut twin=Twin::new(&model,intensity);
     let twin_means=twin.as_ref().map(|t|t.means(&model,&request.initial_density,interval,outputs));
     let means=|held:bool|->Vec<Means>{(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:twin_means.as_ref().filter(|_|held).map(|m|m[i])}).collect()};
-    let batch=|first:u64,count:u64,twin:Option<&Twin>|->Result<Outcome,Stop>{
+    // A batch's trajectories, each group through its output `ends` -- on the GPU all through the farthest: a launch's
+    // intervals are the wave's.
+    let batch=|first:u64,count:u64,ends:&[usize],twin:Option<&Twin>|->Result<Outcome,Stop>{
         let variates=Variates{harmonic:&harmonic,twin};
         match &gpu{
-            None=>Ok(simulate(&model,&settings,&initial,seed,first,count,TASK,steps,outputs,&listed,Some(&variates))),
-            Some((g,program))=>g.lock().unwrap_or_else(|e|e.into_inner()).simulate(program,&model,&settings,&initial,seed,first,count,TASK,steps,outputs,&listed,Some(&variates))
-                .map_err(Stop::Gpu),
+            None=>Ok(simulate_to(&model,&settings,&initial,seed,first,count,TASK,steps,outputs,&listed,Some(&variates),ends)),
+            Some((g,program))=>{let last=ends.iter().copied().max().unwrap_or(outputs-1);let short:Vec<usize>=listed.iter().copied().filter(|&l|l<=last).collect();
+                let mut out=g.lock().unwrap_or_else(|e|e.into_inner()).simulate(program,&model,&settings,&initial,seed,first,count,TASK,steps,last+1,&short,Some(&variates)).map_err(Stop::Gpu)?;
+                for group in &mut out.groups{group.sums.resize(outputs,Sums::zero());}out.samples.resize(listed.len(),vec![]);Ok(out)}
         }
     };
     // A batch is whole groups: on the CPU at least one, on the GPU a group in each of its resident
@@ -810,7 +823,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     };
     let clock=Instant::now();
     let count=(FIRST_GROUPS*TASK).min(pilot_need).max(width).div_ceil(unit)*unit;
-    let first=batch(0,count,twin.as_ref())?;
+    let first=batch(0,count,&vec![outputs-1;count.div_ceil(TASK) as usize],twin.as_ref())?;
     let wall=clock.elapsed().as_secs_f64();
     // The held twin is kept where its control pays for itself: the trajectories the first batch says
     // the targets need with it, times its share of the work (counted as the step's, `held_work`),
@@ -822,26 +835,32 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         if needed(&means(true))*(1.+share)>=needed(&means(false)){twin=None;}
     }
     let means=means(twin.is_some());
-    // Batches until the targets are met.
-    let mut outcome=first;let mut done=count;let mut per_trajectory=wall/count as f64;
+    // Batches until the targets are met, each output's own (module documentation, # Batches). The pace: a batch's seconds per
+    // trajectory and output interval it ran.
+    let mut outcome=first;let mut done=count;let mut pace=wall/(count*(outputs-1) as u64) as f64;
     loop{
         let mut estimates=summarize(&outcome.groups,&scales,&means);start(&mut estimates[0],&model,&initial);
         let(_,accounts)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,false,&memory);
-        let ratio=worst_ratio(&estimates,&accounts,trap.lab);
-        let wanted=(done as f64*ratio*ratio).ceil() as u64;let needed=wanted.min(MOST_TRAJECTORIES);
-        let(mut ledger,_)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,needed<=done,&memory);
+        let counts:Vec<u64>=estimates.iter().map(|e|e.trajectories as u64).collect();
+        let worst=output_ratios(&estimates,&accounts,trap.lab);let ratio=worst.iter().fold(0_f64,|m,r|m.max(r[0]).max(r[1]));
+        let reach=reaches(&worst.iter().zip(&counts).map(|(r,&n)|n as f64*r[0].max(r[1]).powi(2)).collect::<Vec<f64>>());
+        let wanted=reach[1].ceil() as u64;let reach:Vec<u64>=reach.iter().map(|x|(x.ceil() as u64).min(MOST_TRAJECTORIES)).collect();
+        let last=(1..outputs).rev().find(|&i|reach[i]>counts[i]);
+        let(mut ledger,_)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,last.is_none(),&memory);
         if let(Some(note),Some(flag))=(&bounded,&ledger.flagged){ledger.flagged=Some(format!("{note}；{flag}"));}
-        let mut solution=assemble(&model,&estimates,&outcome,&listed,times,trap.lab,done,dt,&request.initial_density,ledger,twin.is_some());
+        let mut solution=assemble(&model,&estimates,&outcome,&listed,times,trap.lab,done,counts[outputs-1],dt,&request.initial_density,ledger,twin.is_some());
         solution.device=used;solution.device_note=note.clone();solution.needed=wanted;
-        if needed<=done{
+        let Some(last)=last else{
             if ratio>1.{solution.reason=Some(format!("统计误差为目标的 {ratio:.1} 倍：轨迹数已达上限 {MOST_TRAJECTORIES}"));}
             return Ok(solution);
-        }
-        checkpoint(&solution,Some(per_trajectory*(needed-done) as f64*1e3));
-        let next=next_batch(needed,done,width,unit);
+        };
+        let remaining:u64=(1..outputs).map(|i|reach[i].saturating_sub(counts[i])).sum();
+        checkpoint(&solution,Some(pace*remaining as f64*1e3));
+        let ends=if gpu.is_some(){vec![last;(next_batch(reach[last],counts[last],width,unit)/TASK) as usize]}else{next_groups(&reach,&counts)};
+        let next=ends.len() as u64*TASK;
         let clock=Instant::now();
-        let more=batch(done,next,twin.as_ref())?;
-        per_trajectory=clock.elapsed().as_secs_f64()/next as f64;
+        let more=batch(done,next,&ends,twin.as_ref())?;
+        pace=clock.elapsed().as_secs_f64()/ends.iter().map(|&e|TASK*e as u64).sum::<u64>().max(1) as f64;
         outcome.groups.extend(more.groups);for(a,b)in outcome.samples.iter_mut().zip(more.samples){a.extend(b);}outcome.jumps+=more.jumps;outcome.doppler=outcome.doppler.max(more.doppler);outcome.beats=outcome.beats.max(more.beats);
         done+=next;
     }
@@ -1048,10 +1067,17 @@ fn relaxed(model:&Model,settings:&Settings,states:Vec<Trajectory>)->Vec<Trajecto
         let norm=x.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();for z in x.psi[..n].iter_mut(){*z=*z*(1./norm);}x}).collect()
 }
 
-/// The batch after `done` trajectories (module documentation, # Batches): the predicted remaining
+/// The batch after `done` trajectories at an output (module documentation, # Batches): the predicted remaining
 /// need, at least the device's `width` and at most `done` -- the need followed at most to twice the
-/// trajectories it rests on --, in whole `unit`s (groups on the CPU, waves on the GPU).
+/// trajectories it rests on --, in whole `unit`s (waves on the GPU).
 fn next_batch(needed:u64,done:u64,width:u64,unit:u64)->u64{needed.saturating_sub(done).clamp(width,done.max(width)).div_ceil(unit)*unit}
+/// A batch's groups on the CPU (module documentation, # Batches), each its last output: the g-th, after its `TASK` g trajectories
+/// before it, as far as an output still wants it -- its reach beyond its trajectories so far, at most doubled.
+fn next_groups(reach:&[u64],counts:&[u64])->Vec<usize>{
+    let mut ends=vec![];
+    loop{let before=ends.len() as u64*TASK;
+        match (1..reach.len()).rev().find(|&i|counts[i]+before<reach[i].min(2*counts[i])){Some(i)=>ends.push(i),None=>return ends}}
+}
 
 /// The step search (module documentation): from `first` each step's check (`check`, or the `known` one where
 /// it was checked) and the next step from it (`next_step`), until a step comes up twice, at most 8 checks;
@@ -1460,7 +1486,7 @@ fn start(e:&mut Estimate,model:&Model,initial:&Initial){
 /// one) has no held atom to describe: its populations, T, ⟨v⟩, n̄ and distributions are the last
 /// output's that had one -- each row still a probability vector, the app's p (1 − L) zero there --,
 /// outside the validated regime, and the flag says from when.
-fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],times:&[f64],frequencies:[f64;3],trajectories:u64,dt:f64,initial:&[Complex],mut ledger:Ledger,twin:bool)->Solution{
+fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],times:&[f64],frequencies:[f64;3],trajectories:u64,through:u64,dt:f64,initial:&[Complex],mut ledger:Ledger,twin:bool)->Solution{
     let hm=model.hbar_over_mass;
     let velocity=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.1[a]*hm));
     let position=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.0[a]));
@@ -1490,7 +1516,7 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
         velocity,position,
         classical:estimates.iter().enumerate().map(|(i,e)|held(i)&&classical(e,frequencies)).collect(),
         trajectories,needed:trajectories,time_step_us:dt,
-        method:format!("半经典 3D：经典质点（位置、动量）携带{internal}，量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），机械能高于势阱深度且已离开势阱区即算损失，{trajectories} 条轨迹，步长 {dt:.3} μs；控制变量：谐振孪生（T）{}",if twin{"与静止孪生（布居）"}else{""}),
+        method:format!("半经典 3D：经典质点（位置、动量）携带{internal}，量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），机械能高于势阱深度且已离开势阱区即算损失，{trajectories} 条轨迹{}，步长 {dt:.3} μs；控制变量：谐振孪生（T）{}",if through<trajectories{format!("（走完全程的 {through} 条）")}else{String::new()},if twin{"与静止孪生（布居）"}else{""}),
         reason:None,
         approximations:ledger,
         device:Device::Cpu,device_note:None,
@@ -1614,5 +1640,10 @@ mod tests{
         assert_eq!(next_batch(700,640,640,640),640);
         assert_eq!(next_batch(4000,1280,640,640),1280);
         assert_eq!(next_batch(1700,1280,640,640),640);
+        // Each output's own need: the reach is the largest need from an output on; the groups go as far as an output wants them.
+        assert_eq!(reaches(&[0.,500.,100.,300.,50.]),vec![500.,500.,300.,300.,50.]);
+        assert_eq!(next_groups(&[0,276,276,264,256],&[0,256,256,256,256]),vec![3,2,2]);
+        assert_eq!(next_groups(&[0,1000,300,256],&[0,256,256,256]),(0..32).map(|g|if g<6{2}else{1}).collect::<Vec<usize>>());
+        assert!(next_groups(&[0,256,100],&[0,256,256]).is_empty());
     }
 }

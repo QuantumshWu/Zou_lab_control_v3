@@ -57,6 +57,10 @@ impl Group{
     pub fn new(outputs:usize,trajectories:usize)->Group{
         let mut s=Sums::zero();s.trajectories=trajectories as f64;Group{sums:vec![s;outputs]}
     }
+    /// A group whose trajectories run through its first `reach` outputs alone: none are counted beyond.
+    pub fn reaching(outputs:usize,reach:usize,trajectories:usize)->Group{
+        let mut g=Group::new(outputs,trajectories);for s in g.sums.iter_mut().skip(reach){s.trajectories=0.;}g
+    }
     /// Another group's sums added in: the two as one group.
     pub fn merge(&mut self,o:&Group){for(s,x)in self.sums.iter_mut().zip(&o.sums){*s=s.combine(x,1.);}}
     /// One trajectory at output i: the atom when it is held there, and its control variates.
@@ -150,18 +154,20 @@ pub fn estimate(g:&Sums,s:&Scales,correction:Option<&Correction>)->Estimate{
     e
 }
 
-/// The pooled estimates at every output time, with jackknife standard errors over the groups, the
+/// The pooled estimates at every output time, with jackknife standard errors over the groups that reach it (a batch's
+/// trajectories run only as far as the outputs need them, solve.rs # Batches), the
 /// control variates' means per output where given: their β from every trajectory, held when a group
 /// is left out -- recomputed with it, a β that rests on a few trajectories at an early output (a few
 /// twins that have jumped) swings from group to group and its spread swamps the error.
 pub fn summarize(groups:&[Group],s:&Scales,means:&[Means])->Vec<Estimate>{
-    let outputs=groups[0].sums.len();let count=groups.len();
+    let outputs=groups[0].sums.len();
     (0..outputs).map(|i|{
-        let all=groups.iter().skip(1).fold(groups[0].sums[i].clone(),|acc,g|acc.combine(&g.sums[i],1.));
+        let present:Vec<&Sums>=groups.iter().map(|g|&g.sums[i]).filter(|x|x.trajectories>0.).collect();let count=present.len();
+        let all=present.iter().fold(Sums::zero(),|acc,x|acc.combine(x,1.));
         let correction=means.get(i).map(|m|Correction::new(&all,m));let m=correction.as_ref();
         let mut e=estimate(&all,s,m);
         if count<2{e.population_errors=vec![f64::INFINITY;STATES];e.temperature_error=[f64::INFINITY;3];e.temperature_total_error=f64::INFINITY;e.occupation_error=[f64::INFINITY;3];e.loss_error=f64::INFINITY;return e;}
-        let leave:Vec<Estimate>=groups.iter().map(|g|estimate(&all.combine(&g.sums[i],-1.),s,m)).collect();
+        let leave:Vec<Estimate>=present.iter().map(|x|estimate(&all.combine(x,-1.),s,m)).collect();
         let factor=(count-1) as f64/count as f64;
         let spread=|f:&dyn Fn(&Estimate)->f64|->f64{let m=leave.iter().map(|x|f(x)).sum::<f64>()/count as f64;(factor*leave.iter().map(|x|(f(x)-m).powi(2)).sum::<f64>()).sqrt()};
         for a in 0..3{e.temperature_error[a]=spread(&|x|x.temperature[a]);e.occupation_error[a]=spread(&|x|x.occupation[a]);}
