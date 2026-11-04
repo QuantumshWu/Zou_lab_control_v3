@@ -866,7 +866,10 @@ impl Subscriber {
             if matches!(start,Start::Replay) && request.mode == ReadMode::Event && signal.store.is_some() {
                 for event in signal.replay(run.token.id,&request.signal,&run.record) { replayed.entry(event.key.revision).or_default().push(event); }
             } else if !matches!(start,Start::Next) {
-                current.extend(signal.latest.iter().filter(|event|!matches!(request.mode,ReadMode::Event) || event.data.is_some()).cloned());
+                // A Latest subscriber takes what a board shows: not an event past the mark.
+                let shown = signal.front(run.sealed).map(|event| event.key.clone());
+                current.extend(signal.latest.iter().filter(|event|(!matches!(request.mode,ReadMode::Event) || event.data.is_some())
+                    && (!matches!(self.policy,DeliveryPolicy::Latest) || shown.as_ref() == Some(&event.key))).cloned());
             }
         }
         let result = (|| {
@@ -931,9 +934,9 @@ fn release_demands(run: &mut Run, requests: &[ReadRequest], ticket: u64, garbage
 #[derive(Default)]
 struct Garbage { publications: Vec<Arc<Publication>>, deliveries: Vec<Arc<Delivery>>, heads: Vec<Arc<PayloadLineage>> }
 
-/// One event, under the lock. `shown`: a board's front may stand at it. `last`: the
-/// last of what is committed together, the one a Latest subscriber takes.
-fn commit_locked(state: &mut State, generation: &Generation, bundle: &Bundle, shown: bool, last: bool, garbage: &mut Garbage) -> Result<Arc<Delivery>> {
+/// One event, under the lock. `shown`: a board's front may stand at it. `newest_marked`:
+/// the newest such of what is committed together, the one a Latest subscriber takes.
+fn commit_locked(state: &mut State, generation: &Generation, bundle: &Bundle, shown: bool, newest_marked: bool, garbage: &mut Garbage) -> Result<Arc<Delivery>> {
     if bundle.inputs.is_empty() { return Err(RuntimeError::EmptyBundle); }
     if !bundle.metadata.is_object() { return Err(RuntimeError::InvalidMetadata); }
     if state.closed { return Err(RuntimeError::Closed); }
@@ -1079,7 +1082,7 @@ fn commit_locked(state: &mut State, generation: &Generation, bundle: &Bundle, sh
     let run = runs.get_mut(&generation.id).unwrap();
     for ticket in subscriber_ids.iter() {
         let Some(subscriber) = subscribers.get_mut(ticket).filter(|s| s.terminal.is_none()) else { continue; };
-        if !last && matches!(subscriber.policy, DeliveryPolicy::Latest) { continue; }
+        if !newest_marked && matches!(subscriber.policy, DeliveryPolicy::Latest) { continue; }
         let publications: Arc<[_]> = committed.publications.iter().filter(|p|
             subscriber.requests.iter().any(|request| request.signal == p.key.signal
                 && (!matches!(request.mode,ReadMode::Event) || p.data.is_some()))).cloned().collect();
@@ -1227,20 +1230,21 @@ impl Runtime {
 
     /// Commit consecutive event bundles under one lock, each its own event in order
     /// as `commit` would make it: every Exact and Follow subscriber takes each, a
-    /// Latest subscriber and the change watch only the last, as they would have
-    /// coalesced them. `shown` says of each whether a board's front may stand at it
-    /// (`Front`); None marks them all. Answers the last delivery.
+    /// Latest subscriber the newest marked, which is what a board shows, and the
+    /// change watch one wake. `shown` says of each whether a board's front may stand
+    /// at it (`Front`); None marks them all. Answers the last delivery.
     pub fn commit_events(&self, generation: &Generation, bundles: &[Bundle], shown: Option<&[bool]>) -> Result<Arc<Delivery>> {
         let count = bundles.len();
         if count == 0 { return Err(RuntimeError::EmptyBundle); }
         if shown.is_some_and(|shown| shown.len() != count) { return Err(RuntimeError::InvalidLayout("One mark per event".into())); }
         let mut garbage = Garbage::default();
+        let newest_marked = shown.map_or(Some(count - 1), |shown| shown.iter().rposition(|marked| *marked));
         let (mut last, mut failed) = (None, None);
         {
             let mut state = self.inner.state.lock().unwrap();
             for (index, bundle) in bundles.iter().enumerate() {
                 let marked = shown.is_none_or(|shown| shown[index]);
-                match commit_locked(&mut state, generation, bundle, marked, index + 1 == count, &mut garbage) {
+                match commit_locked(&mut state, generation, bundle, marked, newest_marked == Some(index), &mut garbage) {
                     Ok(delivery) => last = Some(delivery),
                     Err(error) => { failed = Some(error); break; }
                 }
@@ -2446,13 +2450,18 @@ mod tests {
         // The next mark moves the window, and lets the old one go.
         plane.commit_events(&generation,&events(27,2),Some(&[true,false])).unwrap();
         assert_eq!(ordinals(&plane.read_coherent_views(&request,&mut front).remove(0).unwrap()),[24,25,26,27]);
-        // Every event reached the follower in order; a Latest subscriber was given each commit's last.
+        // Every event reached the follower in order; a Latest subscriber was given the newest
+        // mark, so what derives from it is of the shot a board shows.
         let mut followed = Vec::new();
         while let Some(delivery) = follower.next(Duration::ZERO).unwrap() { followed.push(delivery.publications[0].key().ordinal.unwrap()); }
         assert_eq!(followed,(0..29).collect::<Vec<_>>());
-        assert_eq!(latest.next(Duration::ZERO).unwrap().unwrap().publications[0].key().ordinal,Some(28));
+        assert_eq!(latest.next(Duration::ZERO).unwrap().unwrap().publications[0].key().ordinal,Some(27));
+        // Attached past the mark, it waits for the next one.
+        let late = plane.subscribe(&generation,vec!["value".into()],DeliveryPolicy::Latest,Start::Current).unwrap();
+        assert!(late.next(Duration::ZERO).unwrap().is_none());
         // Commits that mark nothing mark everything: a board reads the newest, as ever.
         plane.commit_events(&generation,&events(29,2),None).unwrap();
+        assert_eq!(late.next(Duration::ZERO).unwrap().unwrap().publications[0].key().ordinal,Some(30));
         assert_eq!(ordinals(&plane.read_coherent_views(&request,&mut front).remove(0).unwrap()),[27,28,29,30]);
         plane.commit(&generation,&bundle(&schema,&["value"],31)).unwrap();
         assert_eq!(ordinals(&plane.read_coherent_views(&request,&mut front).remove(0).unwrap()),[28,29,30,31]);

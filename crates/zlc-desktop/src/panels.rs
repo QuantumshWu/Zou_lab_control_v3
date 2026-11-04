@@ -395,7 +395,7 @@ impl Panels {
                     if let Some(frozen) = &binding.frozen {
                         let key = frozen.read.key();
                         let newest = sources.iter().find(|source| source.signal == binding.signal)
-                            .and_then(|source| runtime.read_views(&[(source.generation.clone(), source.signal.clone(), None)]).remove(0).ok());
+                            .and_then(|source| runtime.read_coherent_views(&[(source.generation.clone(), source.signal.clone(), None)], &mut Default::default()).remove(0).ok());
                         // v2 _snapshot_text: what the held picture is to Save, in v2's words.
                         let moved = self.bindings.get(&frozen.of).is_some_and(|live| live.signal != binding.signal);
                         let status = if moved { "Stale: this panel now shows another signal; refresh before saving" }
