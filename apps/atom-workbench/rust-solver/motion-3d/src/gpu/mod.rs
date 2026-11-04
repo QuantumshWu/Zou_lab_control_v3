@@ -366,7 +366,7 @@ impl program::State{
             (norm.ln(),std::array::from_fn(|x|[(t.psi[x].re*scale) as f32,(t.psi[x].im*scale) as f32]))}
         let((logn,psi),(twin_logn,held))=(unit::<MAXM>(t),unit::<MAXN>(twin));
         program::State{q:along(t.r),p:along(t.kappa),time:t.time,logn,threshold:t.threshold,log_threshold:t.threshold.ln(),prefix:[0.;15],
-            q0:along(t.r),p0:along(t.kappa),twin_logn,twin_threshold:twin.threshold,twin_log_threshold:twin.threshold.ln(),
+            q0:along(settings.about_site(t.r)),p0:along(t.kappa),twin_logn,twin_threshold:twin.threshold,twin_log_threshold:twin.threshold.ln(),
             psi,twin:held,doppler:t.doppler as f32,cluster:t.cluster as i32,jumps:t.jumps as i32,death:if t.alive{-1}else{0},
             index:t.index as u32,twin_cluster:twin.cluster as i32,twin_jumps:twin.jumps as i32,beats:t.beats as f32}
     }

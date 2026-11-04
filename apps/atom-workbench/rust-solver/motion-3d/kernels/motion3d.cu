@@ -267,6 +267,7 @@ struct Program{
     double axes[3][3],omega[3],stiffness[3];// the trap's principal axes (rows), ω_i (rad/us), ω_i²/(ħ/m)
     double half_flow[3][3];                 // the flow for dt/2 per axis: cos ωτ, (ħ/m) sin ωτ/ω, (m/ħ) ω sin ωτ
     double region;                          // the trap's region the loss takes (engine.rs `Settings::region`), rad/us
+    double lattice_axis[3],lattice_k,lattice_inv_rayleigh,lattice_phase; // the trap's standing wave (model.rs `Lattice`): its axis on the principal axes, k (0: none), 1/z_R, its phase
     double node_phase,beats,horizon;        // the exact step's node phase, its beats' share and their horizon (engine.rs `Settings`)
 };
 
@@ -833,17 +834,46 @@ __device__ float quadratic(const Warp& W,const Entries& E,const float2 (&x)[SLOT
 // ---------------------------------------------------------------------------------------------
 // The motion.
 
-// The harmonic flow for τ along each principal axis (engine.rs `flow`): (x, κ) turned by ωτ in
-// phase space; free flight when ω is 0.
-__device__ void flow(const Program& P,Traj& t,double tau){
-    const bool half=tau==0.5*P.dt;
+// The harmonic part's centre (on the principal axes) and weight at a step's start (engine.rs
+// `Engine::reference`): one within the trap's region, U_h ≤ D, (2u − 1)/u² beyond it, u = U_h/D, about the
+// focus or, in a standing wave, the atom's own site; one without a region.
+struct Reference{double c[3],w;};
+__device__ Reference reference(const Program& P,const double* q){
+    Reference R;R.w=1.;
+    #pragma unroll
+    for(int i=0;i<3;i++)R.c[i]=0.;
+    if(!(P.region>0.))return R;
+    double harmonic=0.,share=1.,tangent=0.,along=0.;
+    if(P.lattice_k>0.){
+        double z=0.;
+        #pragma unroll
+        for(int i=0;i<3;i++)z+=q[i]*P.lattice_axis[i];
+        const double phase=P.lattice_k*z-atan(z*P.lattice_inv_rayleigh)+P.lattice_phase,n=round(phase/(0.5*TAU)),target=n*0.5*TAU-P.lattice_phase;
+        // Site n's place (model.rs `Lattice::site`).
+        double site=target/P.lattice_k;
+        for(;;){const double x=site*P.lattice_inv_rayleigh,dz=(P.lattice_k*site-atan(x)-target)/(P.lattice_k-P.lattice_inv_rayleigh/(1.+x*x));site-=dz;if(fabs(dz)<=8.881784197001252e-16*(fabs(site)+1./P.lattice_k))break;}
+        tangent=tan(phase-n*0.5*TAU);share=1./(1.+site*site*P.lattice_inv_rayleigh*P.lattice_inv_rayleigh);along=z-site;
+        #pragma unroll
+        for(int i=0;i<3;i++)R.c[i]=site*P.lattice_axis[i];
+    }
+    #pragma unroll
+    for(int i=0;i<3;i++){const double x=q[i]-R.c[i]-along*P.lattice_axis[i];harmonic+=P.omega[i]*P.omega[i]*x*x;}
+    const double u=0.5*harmonic/P.hm64/(P.region*share)+tangent*tangent;
+    R.w=share*(u<=1.?1.:(2.*u-1.)/(u*u));
+    return R;
+}
+
+// The harmonic flow for τ along each principal axis about the centre c, its part weighted by w (`reference`,
+// engine.rs `flow`): (x − c, κ) turned by ω√w τ in phase space; free flight when ω is 0.
+__device__ void flow(const Program& P,Traj& t,double tau,const Reference& R){
+    const bool half=tau==0.5*P.dt&&R.w==1.;const double scale=R.w==1.?1.:sqrt(R.w);
     #pragma unroll
     for(int i=0;i<3;i++){
-        const double w=P.omega[i];double c,sh,sw;
+        const double w=P.omega[i]*scale;double c,sh,sw;
         if(half){c=P.half_flow[i][0];sh=P.half_flow[i][1];sw=P.half_flow[i][2];}
         else if(w==0.){c=1.;sh=P.hm64*tau;sw=0.;}
         else{double s;sincos(w*tau,&s,&c);sh=P.hm64/w*s;sw=w/P.hm64*s;}
-        const double x=t.q[i],k=t.p[i];t.q[i]=x*c+k*sh;t.p[i]=k*c-x*sw;
+        const double x=t.q[i]-R.c[i],k=t.p[i];t.q[i]=x*c+k*sh+R.c[i];t.p[i]=k*c-x*sw;
     }
 }
 
@@ -856,7 +886,8 @@ struct Middle{double q[3],p[3];float2 psi;};
 // middle state in M.
 __device__ void advance(const Program& P,Warp& W,Traj& t,double dt,int lane,double& lh,Local& L,Middle& M){
     COUNT(COUNT_ADVANCES);SPAN_BEGIN(start);
-    flow(P,t,0.5*dt);
+    const Reference R=reference(P,t.q);
+    flow(P,t,0.5*dt,R);
     point(P,W,t,lane);
     SPAN_END(SPAN_POINT,start);SPAN_BEGIN(generator);
     const Cluster C=P.clusters[t.cluster];const Entries E(C.n,lane);
@@ -866,7 +897,7 @@ __device__ void advance(const Program& P,Warp& W,Traj& t,double dt,int lane,doub
     SPAN_END(SPAN_EXPONENTIAL,propagator);SPAN_BEGIN(evolve);
     const float nh=apply(W.m[2],W.psi,C.n,lane);lh=t.logn+(double)logf(nh);
     if(lane<MAXN)M.psi=W.psi[lane];
-    // The Ehrenfest force −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ at the middle, less the harmonic part the flow takes.
+    // The Ehrenfest force −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ at the middle, less the weighted harmonic part the flow takes.
     float s[3]={0.f,0.f,0.f};
     #pragma unroll
     for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){
@@ -881,11 +912,11 @@ __device__ void advance(const Program& P,Warp& W,Traj& t,double dt,int lane,doub
     const float tau=(float)dt;
     #pragma unroll
     for(int i=0;i<3;i++){
-        const double kick=(double)(tau*(P.axes32[i][0]*force[0]+P.axes32[i][1]*force[1]+P.axes32[i][2]*force[2]+P.stiffness32[i]*(float)t.q[i]));
+        const double kick=(double)(tau*(P.axes32[i][0]*force[0]+P.axes32[i][1]*force[1]+P.axes32[i][2]*force[2]+(float)R.w*P.stiffness32[i]*(float)(t.q[i]-R.c[i])));
         M.q[i]=t.q[i];M.p[i]=t.p[i]+0.5*kick;t.p[i]+=kick;
     }
     const float n1=apply(W.m[2],W.psi,C.n,lane);t.logn=lh+(double)logf(n1);
-    flow(P,t,0.5*dt);
+    flow(P,t,0.5*dt,R);
     t.time+=dt;
     SPAN_END(SPAN_EVOLVE,evolve);
 }
@@ -2163,12 +2194,13 @@ __device__ float exact_evolve(const Segment& S,const float2* X,float2& x,float a
     return remaining;
 }
 
-// The exact step of τ (engine.rs `Engine::exact`): the flow for τ/2; at the point there every cluster the
+// The exact step of τ (engine.rs `Engine::exact`): the flow for τ/2 at the step's reference H (`reference`, at its start); at the point there every cluster the
 // trajectory visits takes its segment once (`exact_segment`), ψ through the step with the jumps at their
-// roots and the impulse along it; the kick, less τ times the harmonic force at the point; the flow for τ/2.
+// roots and the impulse along it; the kick, less τ w times the harmonic force about the centre at the point; the flow for τ/2 at H.
 __device__ __noinline__ void exact_step(const Program& P,const Run& R,Warp& W,Traj& t,double tau,bool exact,int lane,float2* scratch){
     COUNT(COUNT_ADVANCES);
-    flow(P,t,0.5*tau);point(P,W,t,lane);
+    const Reference H=reference(P,t.q);
+    flow(P,t,0.5*tau,H);point(P,W,t,lane);
     const double start=t.time,ph[3]={t.p[0],t.p[1],t.p[2]};float2* X=scratch+P.exact_at;
     double impulse[3]={0.,0.,0.},elapsed=0.;int built=-1;Segment S;
     __syncwarp();float2 x=W.psi[lane&15];
@@ -2191,8 +2223,8 @@ __device__ __noinline__ void exact_step(const Program& P,const Run& R,Warp& W,Tr
     const float norm=vnorm(x,lane);t.logn+=log((double)norm);
     __syncwarp();if(lane<16)W.psi[lane]=(1.f/sqrtf(norm))*x;__syncwarp();
     #pragma unroll
-    for(int i=0;i<3;i++)t.p[i]+=P.axes[i][0]*impulse[0]+P.axes[i][1]*impulse[1]+P.axes[i][2]*impulse[2]+tau*P.stiffness[i]*t.q[i];
-    flow(P,t,0.5*tau);t.time=start+tau;
+    for(int i=0;i<3;i++)t.p[i]+=P.axes[i][0]*impulse[0]+P.axes[i][1]*impulse[1]+P.axes[i][2]*impulse[2]+tau*H.w*P.stiffness[i]*(t.q[i]-H.c[i]);
+    flow(P,t,0.5*tau,H);t.time=start+tau;
 }
 
 // The trap's potential of ψ (W.psi) at the point for a cluster with explicit states (model.rs
