@@ -58,10 +58,11 @@ pub(crate) const HARMONIC:usize=82;
 /// The profiled kernel's counters per trajectory (its SPANS): the cycles of the point, the generator,
 /// the exponential, the evolution with the kick, the jumps -- of them the exact responses, the
 /// photons' matrices with the classes' weights and the absorbed light --, the loss, the steps, the
-/// readouts, the windows, the block's sums at a launch's end with the wait for its slowest warp, the
-/// held twin's steps and records, and the launches; the advances, the jumps and the jumps with the
-/// exact responses.
-pub const SPANS:[&str;18]=["point","generator","exponential","evolve","jump","exact","photons","absorption","loss","step","readout","windows","sums","twin","total","advances","jumps","exact jumps"];
+/// readouts, the windows, the held twin's steps and records, and the launches; the advances, the jumps and
+/// the jumps with the exact responses; of the jumps the point, the draws, the emission's direction and polarization,
+/// the kicks and the transient with the slow start; of the photons the matrices and the classes' weights, of the absorbed light
+/// its items and its beams.
+pub const SPANS:[&str;26]=["point","generator","exponential","evolve","jump","exact","photons","absorption","loss","step","readout","windows","twin","total","advances","jumps","exact jumps","jump point","draw","emit","kick","transient","items","beams","matrices","weights"];
 
 /// The times the process's GPU took to start (ms): the driver, the context, the module (the driver's
 /// JIT compile of the PTX at its first load on a machine, its cache after).
@@ -77,6 +78,7 @@ pub struct Gpu{
     stream:Stream,
     blocks_per_multiprocessor:i32,
     merge:Function,
+    sums:Function,
     /// The kernel was compiled with PROFILE: its counters summed over every trajectory run.
     profiled:Option<Mutex<Vec<u64>>>,
     /// The motion kernel's launches, each waited for, summed (us): the solves' time on the GPU.
@@ -131,10 +133,10 @@ impl Gpu{
         let clock=Instant::now();let context=Context::new(device)?;let context_ms=clock.elapsed().as_secs_f64()*1e3;
         let clock=Instant::now();
         let module=context.load(ptx).map_err(|e|format!("驱动无法编译 GPU 内核（{e}）"))?;
-        let motion=module.function("motion3d")?;motion.prefer_shared()?;let merge=module.function("merge")?;
+        let motion=module.function("motion3d")?;motion.prefer_shared()?;let merge=module.function("merge")?;let sums=module.function("task_sums")?;
         let module_ms=clock.elapsed().as_secs_f64()*1e3;
-        let blocks_per_multiprocessor=motion.occupancy((WARPS*32) as i32)?.max(1);
-        Ok(Gpu{info:device.clone(),startup:Startup{driver_ms,context_ms,module_ms},driver_version:version,motion,stream:Stream::new()?,blocks_per_multiprocessor,merge,
+        let blocks_per_multiprocessor=(motion.occupancy(32)?/WARPS as i32).max(1);
+        Ok(Gpu{info:device.clone(),startup:Startup{driver_ms,context_ms,module_ms},driver_version:version,motion,stream:Stream::new()?,blocks_per_multiprocessor,merge,sums,
             profiled:profiled.then(||Mutex::new(vec![0;SPANS.len()])),kernel_us:AtomicU64::new(0),module,context})
     }
     /// A kernel of the module by name (the checks' kernels).
@@ -277,7 +279,7 @@ impl Gpu{
         while begin<w.intervals{
             run.begin=begin as i32;run.end=(begin+chunk).min(w.intervals) as i32;
             let clock=Instant::now();
-            self.stream.launch(&self.motion,n as u32,(WARPS*32) as u32,&[&program.params,&run])?;self.stream.synchronize()?;
+            self.stream.launch(&self.motion,(WARPS*n) as u32,32,&[&program.params,&run])?;self.stream.launch(&self.sums,n as u32,(WARPS*32) as u32,&[&run])?;self.stream.synchronize()?;
             let ms=clock.elapsed().as_secs_f64()*1e3;self.kernel_us.fetch_add((ms*1e3) as u64,Ordering::Relaxed);
             let done=run.end as usize-begin;begin=run.end as usize;
             chunk=((done as f64*LAUNCH_MS/ms.max(1e-3)).floor() as usize).clamp(1,(4*done).max(1)).min(MOST_INTERVALS);
