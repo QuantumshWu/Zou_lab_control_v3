@@ -352,7 +352,7 @@ pub struct Elimination{
 /// the bound of z's error (the other carriers' shifts' left-out parts, rad/us) and its shift from
 /// E_b + δ_c; and the intermediates, each far channel with its D_a and D_a² times its energy's error.
 #[derive(Clone,Debug)]
-pub struct Dressing{pub sigma:Dense,pub z:f64,pub doubt:f64,pub shift:f64,pub vias:Vec<(Channel,f64,f64)>}
+pub struct Dressing{pub sigma:Dense,pub z:f64,pub doubt:f64,pub shift:f64,pub vias:Vec<(Channel,f64,f64)>,pub lu:Option<Lu>}
 /// A near carrier's unit for the dressing (`Ground::dress_light`): its carrier, its folded coupling (the
 /// dominant polarization's W^f = Σ_l u_l V_l^f, a beam alone its own V_l^f) and its beams' remainders
 /// off it, V_l^f − γ_l W^f.
@@ -816,7 +816,7 @@ impl Ground{
         let mut column=vec![Complex::ZERO;ne];
         let decoupled:Vec<Option<Dense>>=self.explicit_of.iter().map(|p|p.iter().any(|&x|x).then(||self.decoupled(&excited_hamiltonian,p))).collect();
         let dressings=self.dressings(&excited,&excited_hamiltonian);
-        let dressing=if self.dressing{self.dress_light(intensities,&energies,&excited_hamiltonian,&decoupled)?}else{vec![vec![None;ng];nc]};
+        let mut dressing=if self.dressing{self.dress_light(intensities,&energies,&excited_hamiltonian,&decoupled)?}else{vec![vec![None;ng];nc]};
         for(c,carrier)in self.carriers.iter().enumerate(){for b in 0..ng{
             if !self.couples(c,b){continue;}
             let k=decoupled.get(b).and_then(|x|x.as_ref()).unwrap_or(&excited_hamiltonian);
@@ -825,6 +825,8 @@ impl Ground{
                     let dressed=match self.explicit_of.get(b).filter(|p|p.iter().any(|&x|x)){Some(p)=>self.decoupled(&dressed,p),None=>dressed};denominator(&dressed,-d.z)?}
                 None=>denominator(k,-energies[b]-carrier.detuning)?,
             };
+            // Its factorization, for the dressing's bounds at this elimination (`Ground::dressing_bounds`).
+            if let Some(d)=dressing[c][b].as_mut(){d.lu=Some(lu.clone());}
             for &l in &carrier.beams{
                 self.source(l,b,dressings.get(b).map_or(&[][..],|d|d),&mut column);lu.solve(&mut column);for i in 0..ne{responses[l][(i,b)]=column[i];}
                 lu.solve(&mut column);for i in 0..ne{derivatives[l][(i,b)]=column[i];}
@@ -855,8 +857,11 @@ impl Ground{
         // The ground shifts ΔE_b^d, what they leave out (the units' interference, their next order:
         // b's admixture under d times the shift).
         let(mut shift,mut left)=(vec![vec![0.;ng];nc],vec![vec![0.;ng];nc]);
+        let intermediate:Vec<bool>=(0..ng).map(|a|self.vias.iter().flatten().flatten().any(|v|v.state==a)).collect();
         for d in 0..nc{for b in 0..ng{
             if !self.couples(d,b){continue;}
+            // Wanted where it dresses another carrier's channel from b, or an intermediate's energy.
+            if !intermediate[b]&&!(0..nc).any(|c|c!=d&&self.couples(c,b)){continue;}
             let lu=denominator(decoupled.get(b).and_then(|x|x.as_ref()).unwrap_or(k),-energies[b]-self.carriers[d].detuning)?;
             let solved=|v:&[Complex]|{let mut g=v.to_vec();lu.solve(&mut g);g};
             let fields:Vec<(f64,Vec<Complex>,Vec<Vec<Complex>>)>=units[d].iter().map(|(a,x)|(*a,column(&x.coupling,b),x.remainders.iter().map(|r|column(r,b)).collect())).collect();
@@ -883,7 +888,7 @@ impl Ground{
                 for(amp,x)in &units[d]{let w=column(&x.coupling,a);let scale=amp*amp*denominator;for p in 0..ne{for q in 0..ne{sigma[(p,q)]+=w[p]*w[q].conj()*scale;}}}
                 vias.push((via,denominator,denominator*denominator*doubt[a]));
             }
-            out[c][b]=Some(Dressing{shift:(z-energies[b]-self.carriers[c].detuning).abs(),sigma,z,doubt:error,vias});
+            out[c][b]=Some(Dressing{shift:(z-energies[b]-self.carriers[c].detuning).abs(),sigma,z,doubt:error,vias,lu:None});
         }}
         Ok(out)
     }
@@ -904,9 +909,13 @@ impl Ground{
         let(mut error,mut undressed)=(0_f64,0_f64);
         for(c,carrier)in self.carriers.iter().enumerate(){for b in 0..ng{
             let Some(d)=&e.dressing[c][b] else{continue};
-            let mut k=e.excited_hamiltonian.clone();k.add_scaled(Complex::ONE,&d.sigma);
-            if let Some(p)=self.explicit_of.get(b).filter(|p|p.iter().any(|&x|x)){k=self.decoupled(&k,p);}
-            let lu=denominator(&k,-d.z)?;let solved=|v:&[Complex]|{let mut g=v.to_vec();lu.solve(&mut g);norm(&g)};
+            // Nothing dresses the channel: no other near carrier, no far channel.
+            if d.vias.is_empty()&&d.doubt==0.&&d.shift==0.{continue;}
+            let owned;let lu=match &d.lu{Some(lu)=>lu,None=>{
+                let mut k=e.excited_hamiltonian.clone();k.add_scaled(Complex::ONE,&d.sigma);
+                if let Some(p)=self.explicit_of.get(b).filter(|p|p.iter().any(|&x|x)){k=self.decoupled(&k,p);}
+                owned=denominator(&k,-d.z)?;&owned}};
+            let solved=|v:&[Complex]|{let mut g=v.to_vec();lu.solve(&mut g);norm(&g)};
             let responses:Vec<Vec<Complex>>=carrier.beams.iter().map(|&l|column(&e.responses[l],b)).collect();
             let projection=|w:&[Complex]|responses.iter().map(|r|dot(w,r)).sum::<f64>();
             let second:f64=carrier.beams.iter().map(|&l|norm(&column(&e.derivatives[l],b))).sum();
