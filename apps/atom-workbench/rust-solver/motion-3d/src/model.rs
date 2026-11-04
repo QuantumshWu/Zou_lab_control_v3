@@ -134,7 +134,7 @@
 //! waist and frequency (its reflections, `Model::trap_beams`).
 use crate::ground::{self,Ground};
 use crate::ledger::BUDGET;
-use crate::linear::{hermitian_eigenvalues,Dense};
+use crate::linear::{hermitian_eigen_within,hermitian_eigenvalues,Dense};
 use crate::solve::{MATRIX_NS,POPULATION_TARGET};
 use crate::stats::KT_PER_UK;
 use crate::{Complex,Request,STATES};
@@ -174,6 +174,8 @@ pub const MOST_TABLE_NODES:usize=1<<20;
 const NODE_BATCH:usize=4096;
 /// What the first order's transfer may leave out on T, relative (`Model::transfer_tables`): the numerical tolerances' share of T's target (solve.rs, # Shares).
 const FIRST_SHARE:f64=crate::solve::NUMERICAL_SHARE*crate::solve::TEMPERATURE_TARGET;
+/// What a coupling within an excited manifold may move a ringing photon's amplitude by and be left out (`Model::ringing`): the numerical tolerances' share of the rule's budget.
+pub(crate) const RINGING_SHARE:f64=crate::solve::NUMERICAL_SHARE*BUDGET;
 
 /// A beam's geometry: its direction and wave number, and its waist when Gaussian.
 #[derive(Clone,Debug)]
@@ -227,10 +229,10 @@ pub(crate) struct GroupLayout{pub(crate) absorbed:usize,pub(crate) emitted:usize
 /// and where their W^S − λ^S Q, then their W^Q − λ^Q Q lie.
 #[derive(Clone,Debug)]
 pub(crate) struct Kept{pub(crate) pair:(usize,usize),pub(crate) entries:Vec<(usize,usize)>,pub(crate) at:usize}
-/// Where a carrier's photon tables lie: J and J2 (3 axes × rank × ng × n0) and T (rank × ne × n0),
-/// on the cluster's n0 ground states.
+/// Where a carrier's photon tables lie: J and J2 (3 axes × rank × ng × n0), T (rank × ne × n0) and, right after it, its columns' norms
+/// ‖T_k[:,b]‖ (rank × n0, `Model::ringing_bound`), on the cluster's n0 ground states.
 #[derive(Clone,Copy,Debug)]
-pub(crate) struct CarrierLayout{pub(crate) j:usize,pub(crate) j2:usize,pub(crate) t:usize}
+pub(crate) struct CarrierLayout{pub(crate) j:usize,pub(crate) j2:usize,pub(crate) t:usize,pub(crate) norm:usize}
 /// A kept drive: row (explicit state), column (ground state), carrier, residual beat and U_k[e,b]
 /// per rank at the focus.
 #[derive(Clone,Copy,Debug)]
@@ -498,15 +500,15 @@ fn quadratic<const N:usize>(x:&[f64],psi:&[Complex])->Complex{
 }
 
 /// One node of the tables: every cluster's tables there, and its bounds: the dressing's (what it leaves
-/// out, `Model::dressing`) and the elimination's (`Model::resonance`).
-type Node=(Vec<Vec<Complex>>,[f64;2]);
+/// out, `Model::dressing`), the elimination's (`Model::resonance`) and the transient's (`Model::ringing_spread`).
+type Node=(Vec<Vec<Complex>>,[f64;3]);
 
 /// The tables on one grid of n nodes per focused unit: per cluster, node-major, its layout's size per
 /// node (re/im interleaved); per node its bounds (`Node`); and each bound's largest over the nodes
-/// inside the reach (`Model::dressing`, `Model::resonance`); the work its computed
+/// inside the reach (`Model::dressing`, `Model::resonance`, `Model::ringing_spread`); the work its computed
 /// nodes took, counted (linear.rs `counted`: complex multiply-adds).
 #[derive(Clone,Debug)]
-pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,bounds:Vec<[f64;2]>,reach:[f64;2],work:f64}
+pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,bounds:Vec<[f64;3]>,reach:[f64;3],work:f64}
 
 /// The trap of the trap beam: its principal axes (unit rows on the lab axes) and frequencies
 /// (rad/us) at the focus for a reference state, and the frequencies per lab axis.
@@ -571,6 +573,10 @@ pub struct Model{
     /// its validity somewhere the atoms go -- light near resonance, which the excited population
     /// measured along the trajectories can miss when the atoms sit in dark states (solve.rs flags it).
     pub resonance:f64,
+    /// What the transient's delay leaves of its interference (engine.rs, # The transient), relative to the photons' weight: the spread of
+    /// Γ_i/z_i over the excited amplitudes a cluster's channels drive, every near beam at its peak, its largest over the tables' nodes inside
+    /// the reach's intensities (as `resonance`).
+    pub ringing_spread:f64,
     /// The reach the profiles and the bound are judged over: the focus and the points ±reach_a along
     /// each principal axis of the trap (`choose_profiles`).
     reach:Vec<[f64;3]>,
@@ -717,7 +723,7 @@ impl Model{
         if ground.clusters.iter().any(|c|c.excited.is_empty()&&c.states.len()>MOST_STATES){return Err("A cluster of ground states has more than eight states".into());}
         let trap_light=trap_light(&ground,&geometry,&trap_beams);
         let mut model=Model{ground,geometry,trap_beam,trap_beams,trap_light,focused:vec![trap_unit],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
-            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;2],work:0.},table_error:0.,table_limit:None,table_stalled:false,dressing:0.,fourth_dropped:0.,first_error:0.,resonance:0.,reach:vec![[0.;3]],
+            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3],work:0.},table_error:0.,table_limit:None,table_stalled:false,dressing:0.,fourth_dropped:0.,first_error:0.,resonance:0.,ringing_spread:0.,reach:vec![[0.;3]],
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
         model.choose_profiles(request)?;
         model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();
@@ -847,7 +853,7 @@ impl Model{
                 let square=pairs.len()*entries.len();let first=field_pairs(false,self.carriers[emitted].rank,self.carriers[absorbed].rank);
                 let transfer=size+2*square;groups.push(GroupLayout{absorbed,emitted,residual,hermitian,pairs,entries,s:size,q:size+square,decay:true,first,transfer,kept:vec![],w:0});size=transfer+2;
             }
-            let carriers=self.carriers.iter().map(|c|{let jump=3*c.rank*ng*n0;let l=CarrierLayout{j:size,j2:size+jump,t:size+2*jump};size+=2*jump+c.rank*ne*n0;l}).collect();
+            let carriers=self.carriers.iter().map(|c|{let jump=3*c.rank*ng*n0;let l=CarrierLayout{j:size,j2:size+jump,t:size+2*jump,norm:size+2*jump+c.rank*ne*n0};size+=2*jump+c.rank*ne*n0+c.rank*n0;l}).collect();
             // The explicit states' decay, −(i/2) Σ_φ J_φ†J_φ on their rows: between two of them, and
             // between one and a ground state whose folded photons share its class and landing state.
             let(mut decays,mut crosses):(Vec<DecayLayout>,Vec<CrossLayout>)=(vec![],vec![]);
@@ -985,7 +991,7 @@ impl Model{
                 for kk in 0..self.carriers[c].rank{for ax in 0..3{for row in 0..ng{for y in 0..n0{
                     let at=((kk*3+ax)*ng+row)*n0+y;node[cl2.j+at]=j[c][kk][ax][(row,states[y])];node[cl2.j2+at]=j2[c][kk][ax][(row,states[y])];
                 }}}}
-                for kk in 0..self.carriers[c].rank{for i in 0..ne{for y in 0..n0{node[cl2.t+(kk*ne+i)*n0+y]=t[c][kk][(i,states[y])];}}}
+                for kk in 0..self.carriers[c].rank{for y in 0..n0{let mut norm=0.;for i in 0..ne{let z=t[c][kk][(i,states[y])];node[cl2.t+(kk*ne+i)*n0+y]=z;norm+=z.norm_sqr();}node[cl2.norm+kk*n0+y]=Complex::new(norm.sqrt(),0.);}}
             }
             // The explicit states: their dressing x (ground.rs `Ground::dressing`) and dressed photons
             // ĉ_a[to] = C_a[to,e] + Σ_f C_a[to,f] x_f; the decays and cross terms of those; the drives
@@ -1015,7 +1021,7 @@ impl Model{
         // The elimination's excited weight per ground state, every near beam at its peak (`resonance`).
         let resonance=(0..ng).map(|b|self.carriers.iter().flat_map(|c|c.beams.iter()).map(|&l|(0..ne).map(|i|e.responses[l][(i,b)].norm_sqr()).sum::<f64>()).sum::<f64>()).fold(0.,f64::max);
         let dressing=g.dressing_bounds(&e,&intensities)?;
-        Ok((out,[dressing,resonance]))
+        Ok((out,[dressing,resonance,g.ringing_spread(&e)]))
     }
 
     /// A cluster of ground states' fourth-order layout (`FourthLayout`), its tables from `size` on: H^(4)'s
@@ -1306,7 +1312,7 @@ impl Model{
             self.tables=fine;self.table_error=worst;errors.push(worst);
             if worst==0.{break;}
         }
-        self.resonance=self.tables.reach[1];
+        self.resonance=self.tables.reach[1];self.ringing_spread=self.tables.reach[2];
         Ok(())
     }
 
@@ -1479,7 +1485,7 @@ impl Model{
     /// cost, solve.rs): the generator (`local`: per pair its S with the slopes and its Q gathered on the
     /// stencil's nodes, added -- twice in a Hermitian group -- and kept for the force; h0 likewise), the
     /// force (`force`: the products once per group, a form per pair, slope and, with a first order, Q, h0's slopes), a jump's
-    /// photons (`photons`: per carrier, rank and axis J and J2 on the stencil and their sum) and the
+    /// photons (`photons`: per carrier, rank and axis J and J2 on the stencil and their sum, and the transient's) and the
     /// picked class's absorbed light (`Photons::absorption`: per photon and rank J and J2 along the
     /// polarization and J's slope on the stencil), its classes' mean; at fourth order H^(4)'s slabs
     /// in the generator and W3, the metric and Π in a jump.
@@ -1495,6 +1501,8 @@ impl Model{
             for k in &gl.kept{let x=k.entries.len() as f64;generator+=2.*x*(nodes+2.)+4.;force+=x+4.;}
         }
         let mut photons=self.carriers.iter().map(|c|c.rank as f64*3.*ng*layout.n as f64*(2.*nodes+1.)).sum();
+        // The transient after a jump (engine.rs `transient`, its target's taken for this cluster's): the columns' norms on the stencil and their sums.
+        photons+=self.carriers.iter().map(|c|c.rank as f64*layout.n0 as f64*(nodes+1.)).sum::<f64>();
         // The fourth order: H^(4)'s slabs per generator; per jump W3's tables and forms, the metric on the
         // state and Π after the jump (`FourthLayout`).
         if let Some(f)=&layout.fourth{
@@ -1735,10 +1743,12 @@ impl Model{
     /// After a jump into a cluster with fourth-order tables (and at t = 0), the bare state's slow part
     /// Π = 1 + ½X + YW at the point (n × n, module documentation): ψ ← Π f, its weight A = ‖Π f‖² the
     /// threshold's divisor (engine.rs). None without the tables.
-    pub fn slow_part(&self,cluster:usize,p:&Point,t:f64)->Option<Vec<Complex>>{
+    pub fn slow_part(&self,cluster:usize,p:&Point,t:f64)->Option<Vec<Complex>>{self.slow_and_metric(cluster,p,t).map(|x|x.0)}
+    /// `slow_part` and the metric's coherent part X it holds (`coherent_metric`), whose form on a bare state is the ringing's probability (engine.rs, # The transient).
+    pub fn slow_and_metric(&self,cluster:usize,p:&Point,t:f64)->Option<(Vec<Complex>,Vec<Complex>)>{
         let f=self.layouts[cluster].fourth.as_ref()?;let n=self.dimension(cluster);let(mut x,mut yw)=(vec![Complex::ZERO;n*n],vec![Complex::ZERO;n*n]);
         for sl in &f.slow{self.fourth_pair(cluster,p,t,sl,sl.rr,&mut x);self.fourth_pair(cluster,p,t,sl,sl.yw,&mut yw);}
-        Some((0..n*n).map(|i|x[i]*0.5+yw[i]+if i%(n+1)==0{Complex::ONE}else{Complex::ZERO}).collect())
+        Some(((0..n*n).map(|i|x[i]*0.5+yw[i]+if i%(n+1)==0{Complex::ONE}else{Complex::ZERO}).collect(),x))
     }
     /// The fourth order's W3 part of a cluster's photons at a point: per carrier c and axis −C W3^c (ng × n,
     /// row-major), W3^c[:,b] = Σ over the triples (c1, c2, c4) at δ_c of G_b(δ_c) Σ_b′ R_c1[:,b′] (V_c2†R_c4)[b′,b]
@@ -2144,65 +2154,131 @@ impl Model{
             rc}).collect()
     }
 
-    /// The post-jump transient's operators of a cluster at a point and time (engine.rs `transient`):
-    /// the folded amplitude of its ground states, X = Σ e^{−iε̃t} A_c|b⟩ per coherent group (label),
-    /// split by the groups of nearly degenerate excited states (`Ground::excited_groups`), which ring
-    /// apart; per piece and target cluster its photon's S_a = P_B C_a D_g^{−1/2} X_g (rows: the target's
-    /// ground states, columns: the cluster's); and Y = Σ X†X, the readout's admixture.
+    /// The post-jump transient's amplitudes of a cluster at a point and time (engine.rs, # The transient): per coherent
+    /// group of channels X = −Σ e^{−iε̃t} R_c|b⟩, the folded amplitude of its ground states (ne × n0).
     pub fn transient(&self,cluster:usize,p:&Point,t:f64)->Transient{
-        let g=&self.ground;let cl=&g.clusters[cluster];let(n0,ne,ng)=(self.ground_dimension(cluster),g.excited_states.len(),g.ground_states.len());
+        let g=&self.ground;let cl=&g.clusters[cluster];let(n0,ne)=(self.ground_dimension(cluster),g.excited_states.len());
         let responses=self.responses(cluster,p);
-        let mut y=vec![Complex::ZERO;n0*n0];let mut pieces=vec![];
-        for(k,group)in cl.coherent.iter().enumerate(){
-            // X (ne × n0): the group's channels' folded amplitudes.
-            let mut x=vec![Complex::ZERO;ne*n0];
+        let groups=cl.coherent.iter().map(|group|{let mut x=vec![Complex::ZERO;ne*n0];
             for &(ch,w)in group{let col=cl.position(ch.state).unwrap();let phase=-Complex::cis(-w*t);for i in 0..ne{x[i*n0+col]+=phase*responses[ch.carrier][i*n0+col];}}
-            for a in 0..n0{for b in 0..n0{y[a*n0+b]+=(0..ne).fold(Complex::ZERO,|s,i|s+x[i*n0+a].conj()*x[i*n0+b]);}}
-            for(e,levels)in g.excited_groups.iter().enumerate(){
-                if levels.iter().all(|&i|(0..n0).all(|b|x[i*n0+b]==Complex::ZERO)){continue;}
-                // The piece's photon per axis on every ground state, then per target cluster.
-                let s:[Vec<Complex>;3]=std::array::from_fn(|a|{let mut m=vec![Complex::ZERO;ng*n0];
-                    for to in 0..ng{for &i in levels{let c=g.emission[a][(to,i)]*(1./g.decay[(i,i)].re.sqrt());if c==Complex::ZERO{continue;}
-                        for b in 0..n0{m[to*n0+b]+=c*x[i*n0+b];}}}m});
-                let mut targets:Vec<usize>=(0..ng).filter(|&to|(0..3).any(|a|s[a][to*n0..(to+1)*n0].iter().any(|z|*z!=Complex::ZERO))).map(|to|g.cluster[to]).collect();
-                targets.sort();targets.dedup();
-                for target in targets{let rows=&g.clusters[target].states;
-                    let ops=std::array::from_fn(|a|rows.iter().flat_map(|&to|s[a][to*n0..(to+1)*n0].iter().copied()).collect());
-                    pieces.push(Piece{coherent:k,excited:e,target,ops,wave_number:self.carriers[group[0].0.carrier].wave_number});}
+            x}).collect();
+        Transient{n0,ne,groups}
+    }
+    /// The transient's amplitudes of a ground state ψ′: per coherent group v = X ψ′ on every excited state (`transient`), through the carriers' responses at the point (`responses`).
+    pub fn ringing_amplitudes(&self,cluster:usize,responses:&[Vec<Complex>],psi:&[Complex],t:f64)->Vec<Vec<Complex>>{
+        let g=&self.ground;let cl=&g.clusters[cluster];let(n0,ne)=(self.ground_dimension(cluster),g.excited_states.len());let mut rotation=Rotation::new(t);
+        cl.coherent.iter().map(|group|{let mut v=vec![Complex::ZERO;ne];
+            for &(ch,w)in group{let col=cl.position(ch.state).unwrap();let z=-(rotation.at(-w)*psi[col]);let r=&responses[ch.carrier];for i in 0..ne{v[i]+=z*r[i*n0+col];}}
+            v}).collect()
+    }
+    /// A bound of the ringing's probability p = Σ ‖X ψ′‖² from the columns' norms (`CarrierLayout`), Σ_groups (Σ_channels |ψ′_b| Σ_k |E_k| ‖T_k[:,b]‖)²: only a draw
+    /// within it asks for the amplitudes (engine.rs `transient`).
+    pub fn ringing_bound(&self,cluster:usize,p:&Point,psi:&[Complex])->f64{
+        let cl=&self.ground.clusters[cluster];let layout=&self.layouts[cluster];let n0=layout.n0;let mut norms=[[Complex::ZERO;MOST_RANK*MOST_STATES];MOST_CARRIERS];
+        for(c,carrier)in layout.carriers.iter().enumerate(){let rank=self.carriers[c].rank;self.interpolate(cluster,&p.stencil,None,carrier.norm,&mut norms[c][..rank*n0]);}
+        cl.coherent.iter().map(|group|{let mut s=0.;
+            for &(ch,_)in group{let col=cl.position(ch.state).unwrap();let a=psi[col].abs();
+                for k in 0..self.carriers[ch.carrier].rank{s+=a*p.fields[ch.carrier].e[k].abs()*norms[ch.carrier][k*n0+col].re;}}
+            s*s}).sum()
+    }
+    /// How a folded excited amplitude rings after a jump into a cluster at r (engine.rs, # The transient), on one excited manifold (ground.rs `excited_groups`):
+    /// the eigenstates of H's block there, decoupled from the cluster's explicit states as its folded responses are, as far as a coupling moves a photon's amplitude
+    /// over the ringing's width beyond the numerical share.
+    pub fn ringing(&self,cluster:usize,r:[f64;3],manifold:usize)->Ringing{
+        let g=&self.ground;let block=g.ringing_block(&self.intensities_at_point(r),cluster);let levels=&g.excited_groups[manifold];
+        let width=levels.iter().map(|&i|g.decay[(i,i)].re).sum::<f64>()/levels.len() as f64;
+        let(energies,vectors)=hermitian_eigen_within(&Dense::from_fn(levels.len(),levels.len(),|a,b|block[(levels[a],levels[b])]),width,RINGING_SHARE);
+        Ringing{levels:levels.clone(),energies,vectors,width}
+    }
+    /// The photon's operators of one manifold's ringing τ after a jump at t (engine.rs, # The transient), per axis
+    /// (every ground state × every excited state, its other manifolds' columns zero): C_a e^{−iHτ} on the manifold, each row
+    /// at its cluster's frame at t + τ, relative to its cluster's first state.
+    pub fn ringing_photon(&self,ring:&Ringing,tau:f64,t:f64)->[Dense;3]{
+        let g=&self.ground;let(ng,ne,m)=(g.ground_states.len(),g.excited_states.len(),ring.levels.len());
+        let phases:Vec<Complex>=ring.energies.iter().map(|&e|Complex::cis(-e*tau)).collect();
+        let frame:Vec<Complex>=(0..ng).map(|to|{let cl=&g.clusters[g.cluster[to]];Complex::cis((cl.frames[cl.position(to).unwrap()]-cl.frames[0])*(t+tau))}).collect();
+        std::array::from_fn(|a|{let mut out=Dense::zeros(ng,ne);let mut row=vec![Complex::ZERO;m];
+            for to in 0..ng{
+                row.fill(Complex::ZERO);let mut reached=false;
+                for(j,&i)in ring.levels.iter().enumerate(){let c=g.emission[a][(to,i)];if c==Complex::ZERO{continue;}reached=true;for l in 0..m{row[l]+=c*ring.vectors[(j,l)];}}
+                if !reached{continue;}
+                for l in 0..m{row[l]=row[l]*phases[l];}
+                for(j,&i)in ring.levels.iter().enumerate(){out[(to,i)]=frame[to]*(0..m).fold(Complex::ZERO,|s,l|s+row[l]*ring.vectors[(j,l)].conj());}
+            }
+            out})
+    }
+    /// The ringing photon's landing from a density σ on a cluster's ground states, dense (examples/frozen.rs, its ensemble's mean): per cluster of
+    /// ground states Σ_a C_a Z C_a† over the manifolds and the coherent groups, Z the ringing's whole, ∫ e^{−iKτ} X σ X† e^{iK†τ} dτ, each pair of eigenstates' (and of landing states' frames') coherence Γ/(Γ + iδ).
+    pub fn ringing_landing(&self,transient:&Transient,rings:&[Ringing],sigma:&Dense,t:f64)->Vec<Dense>{
+        let g=&self.ground;let(n0,ne)=(transient.n0,transient.ne);let mut out:Vec<Dense>=g.clusters.iter().map(|c|Dense::zeros(c.states.len(),c.states.len())).collect();
+        for x in &transient.groups{
+            let x=Dense::from_fn(ne,n0,|i,b|x[i*n0+b]);let rho=x.product(sigma).product(&x.adjoint());
+            for ring in rings{
+                let m=ring.levels.len();
+                // ρ on the manifold's eigenstates, the photon's amplitude per axis, landing state and eigenstate.
+                let block=Dense::from_fn(m,m,|a,b|rho[(ring.levels[a],ring.levels[b])]);let turned=ring.vectors.adjoint().product(&block).product(&ring.vectors);
+                let photon:[Dense;3]=std::array::from_fn(|a|Dense::from_fn(g.ground_states.len(),m,|to,l|ring.levels.iter().enumerate().fold(Complex::ZERO,|s,(j,&i)|s+g.emission[a][(to,i)]*ring.vectors[(j,l)])));
+                for(c,cluster)in g.clusters.iter().enumerate(){for(r,&to)in cluster.states.iter().enumerate(){for(q,&from)in cluster.states.iter().enumerate(){
+                    let apart=cluster.frames[r]-cluster.frames[q];let mut z=Complex::ZERO;
+                    for w in &photon{for j in 0..m{for k in 0..m{z+=w[(to,j)]*turned[(j,k)]*w[(from,k)].conj()/Complex::new(ring.width,ring.energies[j]-ring.energies[k]-apart);}}}
+                    out[c][(r,q)]+=z*Complex::cis(apart*t);
+                }}}
             }
         }
-        Transient{n0,y,pieces}
+        out
     }
-    /// The photon of a transient's piece from the ground state ψ′ (`transient`), for the kicks of a
-    /// moving atom: its amplitude u_a on the target's ground states, the amplitude's gradient
-    /// [axis a][lab axis] through the fields and the intensities, and each beam's part of it.
-    pub fn transient_photon(&self,cluster:usize,p:&Point,t:f64,piece:&Piece,psi:&[Complex])->([[Complex;MOST_STATES];3],[[[Complex;MOST_STATES];3];3],Vec<(usize,[[Complex;MOST_STATES];3])>){
+    /// A jump's map on the bare density σ it leaves on cluster b at r and t, dense: per cluster its image, the mean of the engine's transient (engine.rs, # The transient), `q` and
+    /// `rings` the cluster's there (`transient`, `ringing`), `slow` its Π at fourth order. The ringing's landing (`ringing_landing`) and at fourth order what the engine's delay stands for, the
+    /// interference −Σ_a C_a (a v† + v a†) C_a†, a = i R2 ψ′, with the slow part Π σ Π† and the trace's balance ½{1 − Π†Π − Y′, σ}, Y′ the landing's trace (O(S²)); else what keeps the trace
+    /// linearly, σ − ½{Y, σ}, where the engine's atom stays in its state.
+    pub fn after_jump(&self,e:&ground::Elimination,r:[f64;3],b:usize,sigma:&Dense,q:&Transient,rings:&[Ringing],slow:Option<&Dense>,t:f64)->Vec<Dense>{
+        let g=&self.ground;let cluster=&g.clusters[b];let(nt,ne)=(q.n0,q.ne);let mut out=self.ringing_landing(q,rings,sigma,t);
+        let square=|x:&[Complex],rows:usize,cols:usize|Dense::from_fn(rows,cols,|i,j|x[i*cols+j]);
+        let mut y=square(&q.admixture(),nt,nt);
+        let mut kept=match slow{
+            Some(slow)=>{
+                let a=g.amplitudes_at(r);
+                for(x,group)in q.groups.iter().zip(&cluster.coherent){
+                    let x=square(x,ne,nt);let mut x2=Dense::zeros(ne,nt);
+                    for &(ch,w)in group{let col=cluster.position(ch.state).unwrap();let phase=Complex::cis(-w*t);for &l in &self.carriers[ch.carrier].beams{for i in 0..ne{x2[(i,col)]+=phase*a[l]*e.derivatives[l][(i,ch.state)];}}}
+                    let cross=x2.scaled(Complex::I).product(sigma).product(&x.adjoint());
+                    let share=x.adjoint().product(&g.decay).product(&x2).scaled(Complex::I);y.add_scaled(-Complex::ONE,&share);y.add_scaled(-Complex::ONE,&share.adjoint());
+                    for c in &g.emission{let m=c.product(&cross).product(&c.adjoint());
+                        for(k,cl)in g.clusters.iter().enumerate(){for(i,&to)in cl.states.iter().enumerate(){for(j,&from)in cl.states.iter().enumerate(){out[k][(i,j)]-=m[(to,from)]+m[(from,to)].conj();}}}}
+                }
+                let mut d=Dense::from_fn(nt,nt,|i,j|if i==j{Complex::ONE}else{Complex::ZERO});d.add_scaled(-Complex::ONE,&slow.adjoint_product(slow));d.add_scaled(-Complex::ONE,&y);
+                let mut kept=slow.product(sigma).product(&slow.adjoint());kept.add_scaled(Complex::new(0.5,0.),&d.product(sigma));kept.add_scaled(Complex::new(0.5,0.),&sigma.product(&d));kept
+            }
+            None=>{let mut kept=sigma.clone();kept.add_scaled(Complex::new(-0.5,0.),&y.product(sigma));kept.add_scaled(Complex::new(-0.5,0.),&sigma.product(&y));kept}
+        };
+        std::mem::swap(&mut out[b],&mut kept);out[b].add_scaled(Complex::ONE,&kept);
+        out
+    }
+    /// The ringing photon of a coherent group from the ground state ψ′ (engine.rs `ringing_photon`), for the kicks of a
+    /// moving atom: on `target`'s ground states, through the photon's operators on `levels` (`ringing_photon`), its amplitude
+    /// Σ_a ops_a (Σ e^{−iε̃t} R ψ′), the amplitude's gradient [axis a][lab axis] through the fields and the intensities, and each beam's part of it.
+    pub fn transient_photon(&self,cluster:usize,p:&Point,t:f64,coherent:usize,levels:&[usize],target:usize,ops:&[Dense;3],psi:&[Complex])->([[Complex;MOST_STATES];3],[[[Complex;MOST_STATES];3];3],Vec<(usize,[[Complex;MOST_STATES];3])>){
         let g=&self.ground;let cl=&g.clusters[cluster];let layout=&self.layouts[cluster];let(n0,ne)=(layout.n0,g.excited_states.len());
-        let group=&cl.coherent[piece.coherent];let levels=&g.excited_groups[piece.excited];let target=&g.clusters[piece.target];
-        // The piece's folded amplitude on its excited states from a carrier's response matrices M_k (rank × ne × n0) weighted by w_k.
-        let photon=|amplitudes:&dyn Fn(usize,usize)->Complex|->[[Complex;MOST_STATES];3]{
-            let mut u=[[Complex::ZERO;MOST_STATES];3];
-            for(row,&to)in target.states.iter().enumerate(){for a in 0..3{for &i in levels{
-                let c=g.emission[a][(to,i)]*(1./g.decay[(i,i)].re.sqrt());if c!=Complex::ZERO{u[a][row]+=c*amplitudes(i,0);}}}}
-            u};
+        let group=&cl.coherent[coherent];let target=&g.clusters[target];
         // T_k (and ∂_f T_k) at the point, per carrier and rank.
         let table=|c:usize,k:usize,f:Option<usize>|->Vec<Complex>{let mut buf=vec![Complex::ZERO;ne*n0];self.interpolate(cluster,&p.stencil,f,layout.carriers[c].t+k*ne*n0,&mut buf);buf};
         let tables:Vec<Vec<Vec<Complex>>>=(0..self.carriers.len()).map(|c|(0..self.carriers[c].rank).map(|k|table(c,k,None)).collect()).collect();
-        // Σ e^{−iε̃t} Σ_k w_k M_k[i, b] ψ_b over the group's channels (the jumps' sign, ground.rs), M the
-        // tables or their slopes.
-        let folded=|weights:&dyn Fn(usize,usize)->Complex,matrices:&[Vec<Vec<Complex>>],i:usize|->Complex{
-            let mut z=Complex::ZERO;
+        // The photon's amplitude per axis and row of Σ e^{−iε̃t} Σ_k w_k M_k[i, b] ψ_b on the levels, over the group's channels (the jumps' sign, ground.rs), M the tables or their slopes.
+        let photon=|weights:&dyn Fn(usize,usize)->Complex,matrices:&[Vec<Vec<Complex>>]|->[[Complex;MOST_STATES];3]{
+            let mut folded=vec![Complex::ZERO;levels.len()];
             for &(ch,w)in group{let col=cl.position(ch.state).unwrap();let phase=Complex::cis(-w*t)*psi[col];
-                for k in 0..self.carriers[ch.carrier].rank{let wk=weights(ch.carrier,k);if wk!=Complex::ZERO{z+=phase*wk*matrices[ch.carrier][k][i*n0+col];}}}
-            z};
-        let u=photon(&|i,_|folded(&|c,k|p.fields[c].e[k],&tables,i));
+                for k in 0..self.carriers[ch.carrier].rank{let wk=weights(ch.carrier,k);if wk==Complex::ZERO{continue;}let z=phase*wk;let m=&matrices[ch.carrier][k];
+                    for(o,&i)in folded.iter_mut().zip(levels){*o+=z*m[i*n0+col];}}}
+            std::array::from_fn(|a|{let mut u=[Complex::ZERO;MOST_STATES];
+                for(row,&to)in target.states.iter().enumerate(){for(o,&i)in folded.iter().zip(levels){u[row]+=ops[a][(to,i)]**o;}}u})};
+        let u=photon(&|c,k|p.fields[c].e[k],&tables);
         let mut du=[[[Complex::ZERO;MOST_STATES];3];3];
         let slopes:Vec<Vec<Vec<Vec<Complex>>>>=(0..self.focused.len()).map(|f|(0..self.carriers.len()).map(|c|(0..self.carriers[c].rank).map(|k|table(c,k,Some(f))).collect()).collect()).collect();
         for x in 0..3{
-            let field=photon(&|i,_|folded(&|c,k|p.fields[c].grad[k][x],&tables,i));
+            let field=photon(&|c,k|p.fields[c].grad[k][x],&tables);
             for a in 0..3{for r in 0..MOST_STATES{du[a][x][r]+=field[a][r];}}
             for(f,slope)in slopes.iter().enumerate(){
-                let part=photon(&|i,_|folded(&|c,k|p.fields[c].e[k]*p.intensity_gradient[f][x],slope,i));
+                let part=photon(&|c,k|p.fields[c].e[k]*p.intensity_gradient[f][x],slope);
                 for a in 0..3{for r in 0..MOST_STATES{du[a][x][r]+=part[a][r];}}
             }
         }
@@ -2210,7 +2286,7 @@ impl Model{
             let mut carriers:Vec<usize>=group.iter().map(|x|x.0.carrier).collect();carriers.sort();carriers.dedup();
             carriers.iter().flat_map(|&c|self.carriers[c].beams.iter().enumerate().map(move|(j,&l)|(c,j,l))).map(|(c,j,l)|{
                 let amplitude=self.geometry[l].field(p.r).0;let coefficients=self.carriers[c].coefficients[j];
-                (l,photon(&|i,_|folded(&|d,k|if d==c{amplitude*coefficients[k]}else{Complex::ZERO},&tables,i)))}).collect()
+                (l,photon(&|d,k|if d==c{amplitude*coefficients[k]}else{Complex::ZERO},&tables))}).collect()
         };
         (u,du,beams)
     }
@@ -2357,13 +2433,20 @@ impl Model{
     pub fn hamiltonian_at_point(&self,r:[f64;3])->Dense{self.ground.hamiltonian_with(&self.intensities_at_point(r))}
 }
 
-/// A cluster's post-jump transient operators (`Model::transient`): Y (n0 × n0) and the pieces.
+/// A cluster's post-jump transient amplitudes (`Model::transient`): per coherent group of channels X (ne × n0, row-major).
 #[derive(Clone,Debug)]
-pub struct Transient{pub n0:usize,pub y:Vec<Complex>,pub pieces:Vec<Piece>}
-/// A piece of the transient: its coherent group and excited group, its target cluster, its photon's
-/// operators per axis (the target's ground states × the cluster's, row-major) and wave number.
+pub struct Transient{pub n0:usize,pub ne:usize,pub groups:Vec<Vec<Complex>>}
+impl Transient{
+    /// Y = Σ X†X, the readout's admixture (n0 × n0).
+    pub fn admixture(&self)->Vec<Complex>{
+        let(n0,ne)=(self.n0,self.ne);let mut y=vec![Complex::ZERO;n0*n0];
+        for x in &self.groups{for a in 0..n0{for b in 0..n0{y[a*n0+b]+=(0..ne).fold(Complex::ZERO,|s,i|s+x[i*n0+a].conj()*x[i*n0+b]);}}}
+        y
+    }
+}
+/// One excited manifold's ringing at a point (`Model::ringing`): its states, the eigenstates of H's block on them, H = U diag(E) U†, and its width, its states' mean decay (they agree to 1e-4 of it).
 #[derive(Clone,Debug)]
-pub struct Piece{pub coherent:usize,pub excited:usize,pub target:usize,pub ops:[Vec<Complex>;3],pub wave_number:f64}
+pub struct Ringing{pub levels:Vec<usize>,pub energies:Vec<f64>,pub vectors:Dense,pub width:f64}
 /// A photon's absorbed light by its parts (`Photons::absorption`, engine.rs # Absorption): per near beam of its class's
 /// carriers its folded share and its amplitude's projection on the photon, and its explicit states' part -- its share and
 /// the beams' weights by their drives into the explicit states.

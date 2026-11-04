@@ -3,7 +3,7 @@
 //! the exact response, on the app's tweezer PGC example (tests/fixtures/tweezer_pgc.json: clusters of
 //! 3 and 5 states) and on a D1 gray molasses (tests/fixtures/tweezer_gray_molasses.json: one cluster
 //! of all 8 ground states, the kernel's largest).
-use atom_motion_3d::engine::{Engine,Settings,Trajectory,QUADRATURE};
+use atom_motion_3d::engine::{jump_stream,Engine,Settings,Trajectory,QUADRATURE};
 use atom_motion_3d::gpu::{self,driver::Buffer,program};
 use atom_motion_3d::ground::Ground;
 use atom_motion_3d::linear::Dense;
@@ -45,6 +45,20 @@ fn request(fixture:&str)->Request{
 fn retro()->Request{
     let mut r=request(PGC);let mut reflection=r.beams[r.trap_beam].clone();
     (reflection.id,reflection.name)=("reflection".into(),"反射光".into());reflection.direction=reflection.direction.map(|x|-x);r.beams.push(reflection);r
+}
+/// The tetrahedral MOT on a tweezer (tests/fixtures/tetrahedral_mot_motion.json): its near beams 11 Γ off the F′ = 3 the tweezer's tensor shift splits by 2.3 Γ, from |2,2⟩.
+fn tetrahedral()->Request{
+    let v:Value=serde_json::from_str(include_str!("fixtures/tetrahedral_mot_motion.json")).unwrap();
+    let beams=v["beams"].as_array().unwrap().iter().map(|b|{let d=floats(&b["direction"]);Beam{id:b["id"].as_str().unwrap().into(),name:b["name"].as_str().unwrap().into(),
+        direction:[d[0],d[1],d[2]],wave_number_per_um:b["waveNumberPerUm"].as_f64().unwrap(),waist_um:b["waistUm"].as_f64(),intensity_mw_cm2:b["intensityMWcm2"].as_f64().unwrap(),
+        frequency_index:b["frequencyIndex"].as_array().unwrap().iter().map(|n|n.as_i64().unwrap() as i32).collect(),coupling:matrix(&b["coupling"]),
+        counter_coupling:matrix(&b["counterCoupling"]),outside_shift:matrix(&b["outsideShift"])}}).collect::<Vec<Beam>>();
+    let trap_beam=beams.iter().position(|b|b.id==v["trapBeamId"].as_str().unwrap()).unwrap();
+    let initial=floats(&v["initial"]);let mut density=vec![Complex::ZERO;STATES*STATES];for i in 0..STATES{density[i*STATES+i]=Complex::new(initial[i],0.);}
+    let(e,f)=(v["emission"].as_array().unwrap(),floats(&v["fieldVectorG"]));
+    Request{states:v["states"].as_array().unwrap().iter().map(|s|s.as_str().unwrap().into()).collect(),hamiltonian:matrix(&v["hamiltonian"]),
+        frame_frequencies_mhz:floats(&v["frameFrequenciesMHz"]),frequencies_mhz:floats(&v["frequenciesMHz"]),beams,emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],
+        field_vector_g:[f[0],f[1],f[2]],mass_kg:v["massKg"].as_f64().unwrap(),initial_density:density,temperature_uk:v["temperatureUK"].as_f64().unwrap(),trap_beam,times_us:vec![]}
 }
 /// The GPU, or None (said) on a machine without one.
 fn device()->Option<&'static std::sync::Mutex<gpu::Gpu>>{match gpu::gpu(){Ok(g)=>Some(g),Err(e)=>{println!("no GPU ({e}): nothing to check");None}}}
@@ -101,7 +115,7 @@ fn setup(r:&Request,model:Model,dt:f64,threshold:Option<f64>,allowance:f64)->(Mo
 fn compare(r:&Request,threshold:Option<f64>,allowance:f64,jumps:bool,fourth:bool){compare_model(r,model(r,fourth),0.2,threshold,allowance,jumps);}
 /// The CPU's and the GPU's trajectories after one step from the same states agree to single
 /// precision: the same jumps (the same choices), positions, momenta, internal states and norms; the
-/// new threshold the stream's (at fourth order divided by the slow start's A, single precision). The
+/// new threshold the stream's (at fourth order scaled by the transient's (1 − p)/A, single precision). The
 /// exact step (explicit states, beats) takes ψ through hundreds of exponentials and a static cluster's
 /// propagator as many times, in single precision -- its ψ, norm and momentum to 5e-4, 5e-4 and 5e-5.
 fn compare_model(r:&Request,model:Model,dt:f64,threshold:Option<f64>,allowance:f64,jumps:bool){
@@ -149,23 +163,23 @@ fn a_jump_is_the_cpu_s(){compare(&request(PGC),Some(0.999),f64::INFINITY,true,fa
 /// The same with the exact response (an allowance of zero: every step beyond the first order).
 #[test]
 fn a_jump_with_the_exact_response_is_the_cpu_s(){compare(&request(PGC),Some(0.999),0.,true,false);}
-/// On a cluster of all 8 ground states (two entries of each matrix per lane): a step, and a jump with
-/// the first-order response.
+/// On a cluster of all 8 ground states (two entries of each matrix per lane): a jump-free step, a jump at each thermal state with the first-order response, and a step with its jumps where
+/// their thresholds fall, which makes the same jumps, landings and losses (`steps_and_jumps`). Past a step's own crossing the continuous quantities cannot agree to single precision here: the crossing lies on the
+/// single-precision norm and a ringing photon lands at its cluster's frames at the crossing's time, F = 1 and F = 2 4.3e4 rad/us apart. A threshold moved by that round-off (6e-8) on the CPU alone moves 10 of trajectories
+/// 0 to 63 (at a threshold of 0.999) by 4e-5 to 3e-4 in the state and up to 1.5e-3 in the momentum, the others by 1.4e-7 and 8e-7; the phase is as good as the photon's own draw, its mixture over τ the coherence Γ/(Γ + iδ) of 8e-4.
 #[test]
-fn on_eight_states_a_step_and_a_jump_are_the_cpu_s(){
-    let r=request(MOLASSES);compare(&r,None,f64::INFINITY,false,false);compare(&r,Some(0.999),f64::INFINITY,true,false);
-}
+fn on_eight_states_a_step_and_a_jump_are_the_cpu_s(){let r=request(MOLASSES);steps_and_jumps(&r,model(&r,false),0.2,&[false]);}
 /// The same jump with the exact response: the gray molasses' static ground block mixes its responses (ground.rs,
 /// # The static ground block), the kernel's by its eigenstates (`carrier_responses`).
 #[test]
-fn on_eight_states_a_jump_with_the_exact_response_is_the_cpu_s(){compare(&request(MOLASSES),Some(0.999),0.,true,false);}
+fn on_eight_states_a_jump_with_the_exact_response_is_the_cpu_s(){let r=request(MOLASSES);steps_and_jumps(&r,model(&r,false),0.2,&[true]);}
 /// With explicit excited states (engine.rs # The exact step), on the tweezer PGC's first explicit rung
 /// (clusters of 3 ground and 4 explicit states and of 2 and 3, their hyperfine beat left out: the static
 /// path, the CPU's eigendecomposition against the GPU's series), the gray molasses', and the probed PGC's first
 /// beating at two frequencies (5 explicit states at 36.4 and 72.8 MHz: CF4, at its solve's 0.1 us):
 /// - a jump-free step is the CPU's to single precision;
 /// - a jump at each thermal state -- the explicit states' photons and their share of the absorbed light,
-///   and into a cluster with explicit states its transient --, with the first-order and with the exact
+///   and its transient --, with the first-order and with the exact
 ///   response (K decoupled from the explicit states, their dressing in the source), is the CPU's to single
 ///   precision: with the exact response, the resolvents' error (`the_exact_responses_are_the_cpu_s`, 5e-7
 ///   of a column's largest entry here) times the cancellation in a class's amplitude, Σ|terms|/|u| up to 19
@@ -188,21 +202,30 @@ fn with_explicit_states_a_jump_with_a_mixed_block_s_exact_response_is_the_cpu_s(
 /// A request's explicit rung (`with_explicit_states_a_step_and_a_jump_are_the_cpu_s`), its jumps with the responses
 /// `exact` lists: true, the exact one; false, the first order's.
 fn explicit_rung(r:&Request,m:Model,dt:f64,exact:&[bool]){
-    let Some(gpu)=device()else{return};
     assert!((0..m.clusters()).any(|k|m.mixed(k)),"explicit states");
     println!("clusters {:?}",(0..m.clusters()).map(|k|(m.dimension(k),m.ground_dimension(k),m.beating(k))).collect::<Vec<_>>());
+    steps_and_jumps(r,m,dt,exact);
+}
+/// A jump at a state on both devices, at its own position and time, so at one crossing, with the first-order or the exact response: the same landing, the same threshold (at fourth order
+/// scaled by the transient's (1 − p)/A in single precision), its momentum within `kappa` of its largest and the state it leaves within `psi`. What they lie apart by.
+fn same_jump(gpu:&gpu::Gpu,program:&program::Program,engine:&Engine,model:&Model,settings:&Settings,t:&Trajectory,exact:bool,kappa:f64,psi:f64)->[f64;2]{
+    let mut c=t.clone();let(r0,t0)=(c.r,c.time);engine.jump(&mut c,r0,t0,exact);let g=gpu.jump_probe(program,settings,t,exact).unwrap();
+    let at=format!("the jump of trajectory {} (cluster {} → {}, exact {exact})",t.index,t.cluster,c.cluster);
+    assert_eq!((g.cluster,g.jumps),(c.cluster,c.jumps),"{at}");
+    assert!((g.threshold-c.threshold).abs()<=if model.fourth{1e-5*c.threshold}else{0.},"{at}: the threshold {} against {}",g.threshold,c.threshold);
+    let scale=c.kappa.iter().map(|x|x.abs()).fold(1.,f64::max);let mut off=[0_f64;2];
+    for a in 0..3{off[0]=off[0].max((g.kappa[a]-c.kappa[a]).abs()/scale);assert!((g.kappa[a]-c.kappa[a]).abs()<=kappa*scale,"{at}: κ {:?} against {:?}",g.kappa,c.kappa);}
+    let n=model.dimension(c.cluster);let(gn,cn)=(g.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt(),c.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt());
+    for x in 0..n{let(a,b)=(g.psi[x]*(1./gn),c.psi[x]*(1./cn));off[1]=off[1].max((a-b).abs());assert!((a-b).abs()<=psi,"{at}: ψ[{x}] {a:?} against {b:?}");}
+    off
+}
+/// A model's jump-free step, its jump at each thermal state with the responses `exact` lists, and a step with its jumps where their thresholds fall.
+fn steps_and_jumps(r:&Request,m:Model,dt:f64,exact:&[bool]){
+    let Some(gpu)=device()else{return};
     compare_model(r,m.clone(),dt,Some(1e-300),f64::INFINITY,false);
     let(model,settings,trajectories)=setup(r,m,dt,None,f64::INFINITY);
     let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());let program=gpu.program(&model,&settings).unwrap();let engine=Engine::new(&model,settings.clone());
-    for(t,&exact)in trajectories.iter().flat_map(|t|exact.iter().map(move|e|(t,e))){
-        let mut c=t.clone();let(r0,t0)=(c.r,c.time);engine.jump(&mut c,r0,t0,exact);let g=gpu.jump_probe(&program,&settings,t,exact).unwrap();
-        let at=format!("the jump of trajectory {} (cluster {} → {}, exact {exact})",t.index,t.cluster,c.cluster);
-        assert_eq!((g.cluster,g.jumps),(c.cluster,c.jumps),"{at}");assert_eq!(g.threshold,c.threshold,"{at}");
-        let scale=c.kappa.iter().map(|x|x.abs()).fold(1.,f64::max);
-        for a in 0..3{assert!((g.kappa[a]-c.kappa[a]).abs()<=if exact{2e-5}else{5e-6}*scale,"{at}: κ {:?} against {:?}",g.kappa,c.kappa);}
-        let n=model.dimension(c.cluster);let(gn,cn)=(g.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt(),c.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt());
-        for x in 0..n{let(a,b)=(g.psi[x]*(1./gn),c.psi[x]*(1./cn));assert!((a-b).abs()<=1e-5,"{at}: ψ[{x}] {a:?} against {b:?}");}
-    }
+    for(t,&exact)in trajectories.iter().flat_map(|t|exact.iter().map(move|e|(t,e))){same_jump(&gpu,&program,&engine,&model,&settings,t,exact,if exact{2e-5}else{5e-6},1e-5);}
     // A step with its jumps where their thresholds fall: the same jumps, landings and losses.
     let got=gpu.advance(&program,&settings,&trajectories,1).unwrap();let mut jumped=0;
     for(t,g)in trajectories.iter().zip(&got){let mut c=t.clone();engine.step(&mut c);jumped+=c.jumps as usize;
@@ -314,7 +337,7 @@ fn with_a_retro_reflected_tweezer_a_step_and_a_jump_are_the_cpu_s(){
     compare(&r,None,f64::INFINITY,false,false);compare(&r,Some(0.999),f64::INFINITY,true,false);compare(&r,Some(0.999),0.,true,false);
 }
 /// The same at fourth order (model.rs # Fourth order): H^(4) in the generator; at a jump the photons'
-/// −C W3 − ½ C R R†R and the slow start ψ ← Π f/√A, θ ← θ/A; the first order's and the exact response.
+/// −C W3 − ½ C R R†R and the slow part ψ ← Π f/√A, θ ← θ (1 − p)/A; the first order's and the exact response.
 /// On the tweezer PGC, whose clusters each lie in one hyperfine level: the gray molasses' spans F = 1
 /// and F = 2, and at fourth order H^(4)'s entries between them beat at the hyperfine splitting, which
 /// the multirate exact step takes.
@@ -332,15 +355,46 @@ fn at_fourth_order_a_beating_step_and_jump_are_the_cpu_s(){
     compare_model(&r,m.clone(),0.2,Some(1e-300),f64::INFINITY,false);
     let(model,settings,trajectories)=setup(&r,m,0.2,None,f64::INFINITY);
     let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());let program=gpu.program(&model,&settings).unwrap();let engine=Engine::new(&model,settings.clone());
-    for t in &trajectories{
-        let mut c=t.clone();let(r0,t0)=(c.r,c.time);engine.jump(&mut c,r0,t0,false);let g=gpu.jump_probe(&program,&settings,t,false).unwrap();
-        let at=format!("the jump of trajectory {} (cluster {} → {})",t.index,t.cluster,c.cluster);
-        assert_eq!((g.cluster,g.jumps),(c.cluster,c.jumps),"{at}");assert!((g.threshold-c.threshold).abs()<=1e-5*c.threshold,"{at}: the threshold {} against {}",g.threshold,c.threshold);
-        let scale=c.kappa.iter().map(|x|x.abs()).fold(1.,f64::max);
-        for a in 0..3{assert!((g.kappa[a]-c.kappa[a]).abs()<=5e-6*scale,"{at}: κ {:?} against {:?}",g.kappa,c.kappa);}
-        let n=model.dimension(c.cluster);let(gn,cn)=(g.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt(),c.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt());
-        for x in 0..n{let(u,v)=(g.psi[x]*(1./gn),c.psi[x]*(1./cn));assert!((u-v).abs()<=1e-5,"{at}: ψ[{x}] {u:?} against {v:?}");}
+    for t in &trajectories{same_jump(&gpu,&program,&engine,&model,&settings,t,false,5e-6,1e-5);}
+}
+
+/// The ringing's photon (engine.rs, # The transient; the kernel's `ringing_photon`), a jump's as its draw falls within its probability p (1e-3 to 5e-3 on the tweezer PGC, so no jump above takes it there): each
+/// thermal state on the first jump number of its stream whose draw lies under `RINGING_DRAW`, below p on most: the group and manifold by their weights, the eigenstates of H on the manifold, the photon's time, its landing cluster,
+/// direction and polarization, its kicks through the channels' tables, and the slow start of the state it leaves; the devices at one crossing, within 4.1e-7 of the momentum and 3.8e-6 of the state at most (`same_jump`).
+fn ringing_photons(r:&Request,m:Model,dt:f64,exact:bool){
+    let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
+    let(model,settings,thermal)=setup(r,m,dt,None,f64::INFINITY);let program=gpu.program(&model,&settings).unwrap();let engine=Engine::new(&model,settings.clone());
+    let(mut off,mut reached)=([0_f64;2],0);
+    for t in &thermal{
+        let mut x=t.clone();x.jumps=(1..).find(|&j|{let mut rng=jump_stream(t.seed,t.index,j);for _ in 0..4{rng.uniform();}rng.uniform()<RINGING_DRAW}).unwrap()-1;
+        let o=same_jump(&gpu,&program,&engine,&model,&settings,&x,exact,2e-6,1e-5);off=[off[0].max(o[0]),off[1].max(o[1])];
+        // The state it leaves has about as large a p: most of them went through the photon.
+        let mut c=x.clone();let(r0,t0)=(c.r,c.time);engine.jump(&mut c,r0,t0,exact);let point=model.point(c.r,c.kappa);
+        let p:f64=model.ringing_amplitudes(c.cluster,&model.responses(c.cluster,&point),&c.psi,c.time).iter().map(|v|v.iter().map(|z|z.norm_sqr()).sum::<f64>()).sum();reached+=(p>RINGING_DRAW) as usize;
     }
+    println!("clusters {:?}, manifolds {:?}, exact {exact}: {reached} of {} states with p over the draw; κ {:.1e}, ψ {:.1e} off",(0..model.clusters()).map(|k|(model.dimension(k),model.ground_dimension(k))).collect::<Vec<_>>(),model.ground.excited_groups.iter().map(|x|x.len()).collect::<Vec<_>>(),thermal.len(),off[0],off[1]);
+    assert!(2*reached>=thermal.len(),"{reached} of {} states with p over the draw",thermal.len());
+}
+/// The draw `ringing_photons` takes.
+const RINGING_DRAW:f64=1e-4;
+/// On the tweezer PGC at either order, each cluster in one hyperfine level, and on the gray molasses, a cluster over both, its landing states' frames apart.
+#[test]
+fn a_ringing_photon_is_the_cpu_s(){
+    let(pgc,molasses)=(request(PGC),request(MOLASSES));
+    for fourth in [false,true]{ringing_photons(&pgc,model(&pgc,fourth),0.2,false);ringing_photons(&molasses,model(&molasses,fourth),0.2,false);}
+    ringing_photons(&pgc,model(&pgc,false),0.2,true);
+}
+/// On the tetrahedral MOT, whose tweezer's tensor shift the photon's eigenstates take: H's couplings across F′ mix 3 % there, and a jump's photon lands 66 % back in the mode with them, 96 % coherent over the split (engine.rs, # The transient).
+#[test]
+fn a_tensor_split_line_s_ringing_photon_is_the_cpu_s(){
+    let r=tetrahedral();
+    for fourth in [false,true]{ringing_photons(&r,model(&r,fourth),0.2,false);}
+}
+/// With explicit states, the folded amplitude's H decoupled from them: on the tweezer PGC's first explicit rung and the probed PGC's beating at two frequencies (the gray molasses' has explicit what drives it: p below the draw).
+#[test]
+fn with_explicit_states_a_ringing_photon_is_the_cpu_s(){
+    let(pgc,probe)=(request(PGC),probed());
+    ringing_photons(&pgc,explicit(&pgc),0.2,false);ringing_photons(&probe,beating_twice(&probe),0.1,false);
 }
 
 /// The trajectories of a batch (`first`, `count` and `group` as lib.rs `simulate` takes them) whose
@@ -381,7 +435,8 @@ fn straddles(gpu:&gpu::Gpu,program:&program::Program,model:&Model,settings:&Sett
 /// where the generator is static, its held twin. The batch is the first 20 trajectories from the
 /// 40th on, by 20, whose jumps fall in the same steps on both devices (`straddles`) wherever the
 /// sums can tell: after every step within the windows, and at the run's end, where the jumps are
-/// counted. A jump a step apart moves its recoil by a step in a window (1.6e-3 of the gray molasses'
+/// counted -- but where a cluster's states' frames lie apart (`frames_apart`): there a ringing photon's landing takes their phase at its crossing's time, in single precision (`on_eight_states_a_step_and_a_jump_are_the_cpu_s`),
+/// and over the half trap period past the windows 1 to 3 of every 20 trajectories part by a jump (the gray molasses' batches from the 40th to the 180th), so that its total is left out. A jump a step apart moves its recoil by a step in a window (1.6e-3 of the gray molasses'
 /// Σκ_x² at its last output, trajectory 44 from the 40th). The held twin's jumps are not checked so
 /// (no entry steps it alone on the GPU): each fixture's fall in the same steps. The trap's region is
 /// the solve's (its depth: the loss's, and the harmonic part's weight beyond it, engine.rs), the step
@@ -398,7 +453,7 @@ fn batch(r:&Request,fourth:bool,dt:f64)->bool{
     let last=(outputs-1)*steps;
     let reach=settings.lab.iter().filter(|&&w|settings.average&&w>0.).map(|&w|(std::f64::consts::PI/w/settings.dt).round() as usize).max().unwrap_or(0);
     let(windows,run)=(last+reach.min(last),last+reach);
-    let after:Vec<usize>=(1..=windows).chain((run>windows).then_some(run)).collect();
+    let apart=frames_apart(&model);let after:Vec<usize>=(1..=windows).chain((run>windows&&!apart).then_some(run)).collect();
     let first=(40u64..).step_by(20).take(8).find(|&first|{
         let s=straddles(&gpu,&program,&model,&settings,&initial,seed,first,count,group,&after,windows);
         if !s.is_empty(){println!("trajectories {first} to {}: jumps a step apart (trajectory, step) {s:?}",first+count-1);}
@@ -424,7 +479,7 @@ fn batch(r:&Request,fourth:bool,dt:f64)->bool{
         close(x.profile,y.profile,1e-6*y.held,&format!("{at}: profile"));close(x.doppler,y.doppler,1e-9*y.held,&format!("{at}: (kv/σ)²"));
         close(x.folded,y.folded,1e-9*y.held,&format!("{at}: folded η²"));
     }}
-    assert_eq!(g.jumps,c.jumps,"jumps");
+    if !apart{assert_eq!(g.jumps,c.jumps,"jumps");}
     for(gs,cs)in g.samples.iter().zip(&c.samples){
         assert_eq!(gs.len(),cs.len());
         for(x,y)in gs.iter().zip(cs){for a in 0..3{close(x.0[a],y.0[a],1e-3,"a sample's r");close(x.1[a],y.1[a],1.,"a sample's κ");}}
@@ -432,6 +487,8 @@ fn batch(r:&Request,fourth:bool,dt:f64)->bool{
     println!("trajectories {first} to {}: {} groups of {} outputs, {} jumps, held twin {}",first+count-1,g.groups.len(),outputs,g.jumps,twin.is_some());
     twin.is_some()
 }
+/// Whether a cluster's ground states' frames lie apart.
+fn frames_apart(model:&Model)->bool{model.ground.clusters.iter().any(|c|c.frames[..c.states.len()].iter().any(|&w|w!=c.frames[0]))}
 /// The batches of the tweezer PGC, the gray molasses and the retro-reflected tweezer; one of them has
 /// a held twin. The retro-reflected tweezer's at 0.05 us: its initial atoms fill the standing wave's
 /// neighbouring sites too (ensemble.rs, 40 % of them), whose own wells are as stiff as the central

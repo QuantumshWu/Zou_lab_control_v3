@@ -383,10 +383,10 @@ fn the_held_twin_s_master_equation_is_the_front_end_s(){
     assert!(worst<=2e-3,"largest |Δp| {worst:.2e}");
 }
 
-/// The held engine (engine.rs `Held`: the twin's generator and jumps computed once, control.rs)
-/// follows the plain engine's atom held at the same point: from the same initial state and streams,
-/// the same jumps and the same internal state over 2000 steps, to the tables' interpolation between the plain engine's
-/// decay and its jumps' Σ L†L (the twin's by construction) -- without the photons' recoil term, where the two are one at the nodes.
+/// The held engine (engine.rs `Held`: the twin's generator and jumps computed once, control.rs) is the plain engine's atom held at the
+/// same point, but for the jump's transient, which the twin leaves out: along the atom's states over 2000 steps the same internal state after a step without a jump and the same
+/// photon of every class, to the tables' interpolation between the plain engine's decay and its jumps' Σ L†L (the twin's by construction) --
+/// without the photons' recoil term, where the two are one at the nodes.
 #[test]
 fn the_held_engine_is_the_plain_engine_at_rest(){
     let r=request(&|_|true);let mut model=Model::new(&r).unwrap();model.doppler=false;let initial=Initial::new(&model,&r).unwrap();let trap=initial.traps[0];
@@ -394,11 +394,18 @@ fn the_held_engine_is_the_plain_engine_at_rest(){
     let mut settings=Settings::new(0.2,&trap,f64::EPSILON,false);settings.free=[false;3];settings.loss=false;
     let(plain,held)=(Engine::new(&model,settings.clone()),Engine::held(&model,&settings,&twin.held));
     for index in 0..8{
-        let mut a=initial_trajectory(&model,&settings,&initial,13,index,Stratum::single(index));a.r=twin.held.point.r;a.kappa=[0.;3];let mut b=a.clone();
-        for _ in 0..2000{plain.step(&mut a);held.step(&mut b);}
-        assert_eq!((a.jumps,a.cluster),(b.jumps,b.cluster),"trajectory {index}");
-        let n=model.dimension(a.cluster);let(na,nb):(f64,f64)=(a.psi[..n].iter().map(|z|z.norm_sqr()).sum(),b.psi[..n].iter().map(|z|z.norm_sqr()).sum());
-        for i in 0..n{assert!((a.psi[i].norm_sqr()/na-b.psi[i].norm_sqr()/nb).abs()<=model.table_error,"trajectory {index} state {i}: {} against the tables' error {}",(a.psi[i].norm_sqr()/na-b.psi[i].norm_sqr()/nb).abs(),model.table_error);}
+        let mut a=initial_trajectory(&model,&settings,&initial,13,index,Stratum::single(index));a.r=twin.held.point.r;a.kappa=[0.;3];
+        for step in 0..2000{
+            plain.step(&mut a);if step%100!=0{continue;}
+            let(k,n)=(a.cluster,model.dimension(a.cluster));let norm:f64=a.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();let mut from=a.clone();for z in from.psi[..n].iter_mut(){*z=*z*(1./norm);}from.threshold=0.;
+            let(mut x,mut y)=(from.clone(),from.clone());plain.step(&mut x);held.step(&mut y);
+            let(nx,ny):(f64,f64)=(x.psi[..n].iter().map(|z|z.norm_sqr()).sum(),y.psi[..n].iter().map(|z|z.norm_sqr()).sum());
+            for i in 0..n{assert!((x.psi[i].norm_sqr()/nx-y.psi[i].norm_sqr()/ny).abs()<=model.table_error,"trajectory {index} state {i}: {} against the tables' error {}",(x.psi[i].norm_sqr()/nx-y.psi[i].norm_sqr()/ny).abs(),model.table_error);}
+            let photons=model.photons(k,&twin.held.point,&from.psi,from.time,None);let rate:f64=photons.amplitude.iter().zip(&model.ground.clusters[k].classes).map(|(u,c)|u.iter().map(|v|v[..model.ground_dimension(c.target)].iter().map(|z|z.norm_sqr()).sum::<f64>()).sum::<f64>()).sum();
+            for(c,(u,class))in photons.amplitude.iter().zip(&model.ground.clusters[k].classes).enumerate(){let nt=model.ground_dimension(class.target);
+                for axis in 0..3{for i in 0..nt{let z=(0..n).fold(Complex::ZERO,|s,b|s+twin.held.jumps[k][c][axis][i*n+b]*from.psi[b]);
+                    assert!((z-u[axis][i]).abs()<=model.table_error*rate.sqrt(),"trajectory {index} class {c} axis {axis} row {i}: {z:?} against {:?}",u[axis][i]);}}}
+        }
     }
 }
 
@@ -472,10 +479,10 @@ fn the_held_twin_at_fourth_order_averages_to_its_master_equation(){
 /// the middle's state alone the losses at the two steps differ by no more than their discordant
 /// trajectories' spread (three standard errors of the sign test), with the trap's region (the solve's,
 /// engine.rs `Settings::region`) as without. The bound initial ensemble (ensemble.rs) holds atoms up to
-/// the trap's top, some far out on its axis: the dark atoms the step loses each started within 5 % of
-/// the depth below the top -- with the region (the harmonic part weighted down beyond it, engine.rs # Beyond
-/// the trap's region) 3 at 1.25 us and 1 at 0.31 us, the one at every step down to 0.125 us; without it
-/// 9 and 3, none at 0.125 us; 20 at the 2 us the line took with the thermal ensemble before it.
+/// the trap's top, some far out on its axis: the dark atoms lost start within 5 % of the depth below the top, but for at most
+/// three of the 1024 on a stream (0-3 over six seeds, as far down as 34 % of the depth with the region, most of those at every step:
+/// the region's, the harmonic part weighted down beyond it, engine.rs # Beyond the trap's region, rather than the step's) --
+/// with the region 1 at 1.25, 0.31 and 0.125 us, the same atom's; without it 7, 1 and none; 20 at the 2 us the line took with the thermal ensemble before it.
 #[test]
 fn a_shallow_trap_s_dark_atoms_stay_whatever_the_step(){
     use rayon::prelude::*;
@@ -499,7 +506,7 @@ fn a_shallow_trap_s_dark_atoms_stay_whatever_the_step(){
         let dark:Vec<f64>=coarse.iter().filter(|x|x.0.map_or(false,|i|i>=2)).map(|x|x.1).collect();
         let discordant=coarse.iter().zip(&fine).filter(|(a,b)|a.0.is_some()!=b.0.is_some()).count() as f64;
         println!("region {region:.1}: lost {} at 1.25 us ({} in the dark, from E/D {dark:.3?}), {} at 0.31 us, {discordant} discordant",total(&coarse),dark.len(),total(&fine));
-        assert!(dark.iter().all(|&e|e>-0.05),"region {region}: dark atoms lost from below 5 % of the depth: {dark:?}");
+        assert!(dark.iter().filter(|&&e|e<=-0.05).count()<=3,"region {region}: dark atoms lost from below 5 % of the depth: {dark:?}");
         assert!((total(&coarse)-total(&fine)).abs()<=3.*discordant.sqrt(),"region {region}: lost {} at 1.25 us, {} at 0.31 us, {discordant} discordant",total(&coarse),total(&fine));
     }
 }
@@ -1205,4 +1212,122 @@ fn the_mean_force_on_a_state_is_the_adiabatic_expansion_s(){
         for x in 0..3{let residual=odd[x]-exact[x];
             assert!((residual-held[x]).abs()<=1e-2*size+1e-7,"cluster {k} at {at:?}, v {v:?}, axis {x}: engine {} less exact {} is {residual}, against the amplitude's momentum {}",odd[x],exact[x],held[x]);}
     }}
+}
+
+// The transient after a jump (engine.rs, # The transient).
+
+/// The tetrahedral MOT on a tweezer (tests/fixtures/tetrahedral_mot_motion.json): its near beams 11 Γ off the tensor-split F′ = 3 at the focus, 88.6 rad/us (2.3 Γ) across it.
+fn tetrahedral()->(Value,Request){
+    let v:Value=serde_json::from_str(include_str!("fixtures/tetrahedral_mot_motion.json")).unwrap();let mut r=sparse_request(&v);
+    r.times_us=(0..41).map(|i|5.*i as f64).collect();(v,r)
+}
+/// The steady ground populations of a frozen atom's master equation at the focus with every jump's transient (model.rs `Model::after_jump`): the null vector of its superoperator on the clusters' densities; and its folded excited population (the elimination's η²).
+fn frozen_steady(model:&Model)->(Vec<f64>,f64){
+    use atom_motion_3d::linear::{Dense,Lu};
+    let g=&model.ground;let r=[0.;3];let e=g.eliminate(&model.intensities_at_point(r)).unwrap();let point=model.point(r,[0.;3]);let count=g.clusters.len();
+    let fourths:Vec<_>=(0..count).map(|k|(model.fourth&&!g.mixed(k)).then(||g.fourth(&e,k,r,0.).unwrap())).collect();
+    let locals:Vec<_>=(0..count).map(|k|{let mut l=g.local_at(&e,k,r,0.).unwrap();if let Some(f)=&fourths[k]{l.effective=f.effective.clone();l.jumps=f.jumps.clone();}l}).collect();
+    let transients:Vec<_>=(0..count).map(|k|model.transient(k,&point,0.)).collect();
+    let rings:Vec<Vec<_>>=(0..count).map(|k|(0..g.excited_groups.len()).map(|m|model.ringing(k,r,m)).collect()).collect();
+    let sizes:Vec<usize>=g.clusters.iter().map(|c|c.dimension()).collect();let offsets:Vec<usize>=sizes.iter().scan(0,|o,&n|{let x=*o;*o+=n*n;Some(x)}).collect();let d:usize=sizes.iter().map(|n|n*n).sum();
+    let mut generator=Dense::zeros(d,d);
+    for(k,&n)in sizes.iter().enumerate(){for column in 0..n*n{
+        let rho=Dense::from_fn(n,n,|a,b|if a*n+b==column{Complex::ONE}else{Complex::ZERO});
+        let h=&locals[k].effective;let mut image:Vec<Dense>=sizes.iter().map(|&m|Dense::zeros(m,m)).collect();
+        image[k].add_scaled(Complex::new(0.,-1.),&h.product(&rho));image[k].add_scaled(Complex::I,&rho.product(&h.adjoint()));
+        for(class,jumps)in g.clusters[k].classes.iter().zip(&locals[k].jumps){
+            let b=class.target;let nt=g.clusters[b].states.len();let mut sigma=Dense::zeros(nt,nt);
+            for j in jumps{sigma.add_scaled(Complex::ONE,&j.product(&rho).product(&j.adjoint()));}
+            for(c,m)in model.after_jump(&e,r,b,&sigma,&transients[b],&rings[b],fourths[b].as_ref().map(|f|&f.slow),0.).iter().enumerate(){for i in 0..m.rows{for j in 0..m.cols{image[c][(i,j)]+=m[(i,j)];}}}
+        }
+        for(j,x)in image.iter().enumerate(){for(q,z)in x.entries.iter().enumerate(){generator[(offsets[j]+q,offsets[k]+column)]=*z;}}
+    }}
+    // The trace's row in the place of the first, the singular generator's one dependent row.
+    for j in 0..d{generator[(0,j)]=Complex::ZERO;}for(k,&n)in sizes.iter().enumerate(){for a in 0..n{generator[(0,offsets[k]+a*n+a)]=Complex::ONE;}}
+    let mut x=vec![Complex::ZERO;d];x[0]=Complex::ONE;Lu::new(&generator).unwrap().solve(&mut x);
+    let(mut populations,mut excited)=(vec![0.;STATES],0.);
+    for(k,&n)in sizes.iter().enumerate(){let rho=Dense::from_fn(n,n,|a,b|x[offsets[k]+a*n+b]);
+        let p=match &fourths[k]{Some(f)=>g.populations_fourth(k,f,&rho),None=>g.populations(k,&locals[k],&rho)};for(a,b)in populations.iter_mut().zip(p){*a+=b;}}
+    for &i in &g.excited_states{excited+=populations[i];}
+    (populations,excited)
+}
+/// The defect these fix (engine.rs, # The transient): TET's frozen atom in its slow mode, |2,1⟩, against the rung with F′ = 3 explicit. The ringing photon at each pair's true coherence takes
+/// the second order from 0.0134 to 0.0029 and the fourth from 0.0150 to 0.0004 (the bare line's second photon, fully coherent over the tensor split, came back into the mode 96 % of the time, the explicit rung's 66 %),
+/// and the fourth is within its booking, S² + ς S, S = 2η² (the fold's charge, solve.rs `fold_charges`).
+#[test]
+fn a_tensor_split_line_s_second_photon_lands_as_the_explicit_rung_s(){
+    let(_,r)=tetrahedral();let ladder=Ground::allowances(&r).unwrap();
+    let(explicit,_)=frozen_steady(&Model::with(&r,ladder[4]).unwrap());let ground:Vec<usize>=(0..STATES).filter(|&i|r.states[i].starts_with("ground")).collect();
+    let error=|p:&[f64]|ground.iter().map(|&i|(p[i]-explicit[i]).abs()).fold(0.,f64::max);
+    let(second,_)=frozen_steady(&Model::with_order(&r,f64::INFINITY,false).unwrap());assert!(error(&second)<=0.0035,"second order: {}",error(&second));
+    let model=Model::with_order(&r,f64::INFINITY,true).unwrap();let(fourth,excited)=frozen_steady(&model);let s=2.*excited;
+    assert!(error(&fourth)<=0.0006,"fourth order: {}",error(&fourth));
+    assert!(error(&fourth)<=s*s+model.ringing_spread*s,"fourth order: {} against S {s} and the spread {}",error(&fourth),model.ringing_spread);
+}
+/// The engine's unraveling of the transient keeps its master equation's populations: TET's frozen atom over t ≥ 100 us against the population core's, its |2,1⟩ at either order within 0.006 --
+/// 0.7987, the engine without this photon 0.8134 at second order and with a photon coherent over the tensor split 0.8139 at fourth --, its statistics about 0.0015.
+#[test]
+fn a_tetrahedral_mot_s_frozen_atom_keeps_the_core_s_populations(){
+    use atom_motion_3d::simulate_from;
+    let(v,r)=tetrahedral();let states:Vec<&str>=v["core"]["states"].as_array().unwrap().iter().map(|s|s.as_str().unwrap()).collect();let core=floats(&v["core"]["populations"]);
+    let at=r.states.iter().position(|s|s=="ground-2-1").unwrap();let expected=core[states.iter().position(|&s|s=="ground-2-1").unwrap()];
+    for fourth in [false,true]{
+        let model=Model::with_order(&r,f64::INFINITY,fourth).unwrap();let initial=Initial::new(&model,&r).unwrap();
+        let mut s=Settings::new(0.5,&initial.traps[0],1e-6,false);s.free=[false;3];s.loss=false;
+        let outcome=simulate_from(&model,&s,&initial,7,0,16384,8,10,41,&[],[0.;3]);
+        let means=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:[1.;3]},&[]);
+        let p:f64=means[20..].iter().map(|e|e.populations[at]).sum::<f64>()/(means.len()-20) as f64;
+        assert!((p-expected).abs()<=0.006,"fourth {fourth}: {p} against the core's {expected}");
+    }
+}
+/// The ringing photon's mean over its time (`Model::ringing_photon`, τ ~ Γ e^{−Γτ}) is its landing (`Model::ringing_landing`): each pair's coherence Γ/(Γ + iδ), through H's off-diagonal part
+/// and the landing states' frames -- on the tetrahedral MOT and on a molasses with a probe, whose cluster's frames differ --, and its trace the excited amplitude ‖v‖².
+#[test]
+fn the_ringing_photon_s_mean_over_its_time_is_its_landing(){
+    let probe:Value=serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap();let mut with_probe=scene::request(&probe);with_probe.times_us=vec![0.,1.];
+    for r in [tetrahedral().1,with_probe]{
+        let model=Model::new(&r).unwrap();let g=&model.ground;let mut next=uniform(3);let time=0.37;let p=model.point([0.05,0.1,0.2],[0.;3]);
+        for k in 0..model.clusters(){
+            let q=model.transient(k,&p,time);let(n0,ne)=(q.n0,q.ne);let mut psi=vec![Complex::ZERO;n0];for z in psi.iter_mut(){*z=Complex::new(next(),next());}
+            let norm:f64=psi.iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();for z in psi.iter_mut(){*z=*z*(1./norm);}
+            let sigma=atom_motion_3d::linear::Dense::from_fn(n0,n0,|a,b|psi[a]*psi[b].conj());let rings:Vec<_>=(0..g.excited_groups.len()).map(|m|model.ringing(k,p.r,m)).collect();
+            let landing=model.ringing_landing(&q,&rings,&sigma,time);
+            // The photon's density over the quantiles of its time, each group's and manifold's.
+            let mut mean:Vec<atom_motion_3d::linear::Dense>=g.clusters.iter().map(|c|atom_motion_3d::linear::Dense::zeros(c.states.len(),c.states.len())).collect();let count=4096;
+            for x in &q.groups{
+                let v:Vec<Complex>=(0..ne).map(|i|(0..n0).fold(Complex::ZERO,|s,b|s+x[i*n0+b]*psi[b])).collect();
+                for ring in &rings{
+                    for j in 0..count{
+                        let tau=-(1.-(j as f64+0.5)/count as f64).ln()/ring.width;let ops=model.ringing_photon(ring,tau,time);
+                        for op in &ops{for(c,cluster)in g.clusters.iter().enumerate(){
+                            let u:Vec<Complex>=cluster.states.iter().map(|&to|ring.levels.iter().fold(Complex::ZERO,|s,&i|s+op[(to,i)]*v[i])).collect();
+                            for a in 0..u.len(){for b in 0..u.len(){mean[c][(a,b)]+=u[a]*u[b].conj()*(1./(ring.width*count as f64));}}
+                        }}
+                    }
+                }
+            }
+            let total=|m:&[atom_motion_3d::linear::Dense]|m.iter().map(|x|(0..x.rows).map(|a|x[(a,a)].re).sum::<f64>()).sum::<f64>();
+            let amplitude:f64=q.groups.iter().map(|x|(0..ne).map(|i|(0..n0).fold(Complex::ZERO,|s,b|s+x[i*n0+b]*psi[b]).norm_sqr()).sum::<f64>()).sum();
+            assert!((total(&landing)-amplitude).abs()<=1e-3*amplitude,"cluster {k}: trace {} against ‖v‖² {amplitude}",total(&landing));
+            assert!(amplitude<=model.ringing_bound(k,&p,&psi)*(1.+model.table_error),"cluster {k}: ‖v‖² {amplitude} beyond the bound {}",model.ringing_bound(k,&p,&psi));
+            for(c,(a,b))in landing.iter().zip(&mean).enumerate(){for i in 0..a.rows{for j in 0..a.cols{
+                assert!((a[(i,j)]-b[(i,j)]).abs()<=3e-3*amplitude,"cluster {k}, landing {c} ({i}, {j}): {:?} against the photon's mean {:?}, of ‖v‖² {amplitude}",a[(i,j)],b[(i,j)]);}}}
+        }
+    }
+}
+/// The delay's weight (engine.rs, # The transient): at fourth order the slow part's weight and the ringing's probability exceed one by what the steady amplitude's photons lose while it builds, A + p − 1 = Σ (1 − κ_i) |v_i|²,
+/// 1 − κ_i = Γ_i²/(Δ_i² + Γ_i²/4) (ground.rs `state_factor`), within the fold's next order and never below it.
+#[test]
+fn the_slow_part_s_weight_and_the_ringing_s_sum_to_the_delay(){
+    let(_,r)=tetrahedral();let model=Model::with_order(&r,f64::INFINITY,true).unwrap();let g=&model.ground;let e=g.eliminate(&model.intensities_at_point([0.;3])).unwrap();let point=model.point([0.;3],[0.;3]);
+    for k in 0..model.clusters(){
+        let n=model.dimension(k);let f=g.fourth(&e,k,[0.;3],0.).unwrap();let q=model.transient(k,&point,0.);let ne=q.ne;
+        for b in 0..n{
+            let a:f64=(0..n).map(|i|f.slow[(i,b)].norm_sqr()).sum();
+            let(mut p,mut w)=(0.,0.);
+            for(x,group)in q.groups.iter().zip(&g.clusters[k].coherent){let(ch,_)=group[0];for i in 0..ne{let v=x[i*n+b].norm_sqr();p+=v;w+=(1.-g.state_factor(&e,i,ch.carrier,ch.state))*v;}}
+            let excess=a+p-1.;
+            assert!(excess>=0.&&(excess-w).abs()<=0.05*p*p.max(0.1),"cluster {k} state {b}: A {a} + p {p} − 1 = {excess} against Σ (1 − κ)|v|² {w}");
+        }
+    }
 }

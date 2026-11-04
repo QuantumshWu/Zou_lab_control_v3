@@ -17,7 +17,8 @@
 //! numbers, engine.rs) -- held without motion at a point where the trap beam's intensity is the mean
 //! the moving atoms see (the pilot's states): its populations' mean is the eliminated master equation
 //! there (`Twin::means`): the engine's generator there, its decay its own jumps' (so that its trace
-//! stays one, `Twin::new`), and the engine's jumps. While the moving
+//! stays one, `Twin::new`), and the engine's jumps, without their transient's photon (engine.rs, # The transient): a twin need not be the atom,
+//! only correlate with it and know its own mean, and p of the atom's jumps part from it for a few photons. While the moving
 //! atom's light differs little from the point's, its jumps follow the twin's; a light pattern on the
 //! scale of the motion decorrelates them at once. A twin exists when the generator is static (no
 //! residual beats) and every cluster is of ground states (the exact step's clusters with explicit
@@ -26,9 +27,9 @@
 //!
 //! # The twin at fourth order
 //! A jump leaves the bare state f, and at fourth order the atom goes on from its slow part: Πf/√A,
-//! A = ‖Πf‖², its threshold θ/A (engine.rs `slow_start`). That unraveling is no master equation's:
-//! where A < 1 the jump it makes at once with probability 1 − A draws its class by the slow part's
-//! own photons, normalized by their total, and where A > 1 none comes until A‖ψ‖² falls to 1 -- the
+//! A = ‖Πf‖², its threshold scaled with the ringing's photon (engine.rs, # The transient). That unraveling is no master equation's:
+//! where the scale exceeds one the jump it makes at once draws its class by the slow part's
+//! own photons, normalized by their total, and below one none comes until the scale's inverse times ‖ψ‖² falls to 1 -- the
 //! waiting time's law is not linear in the state. The twin takes the post-jump map into its jumps
 //! instead: K = Π L̃ for each class, Π its target cluster's at the twin's point, so that the jump term
 //! is Σ K ρ K† = Σ Π (L̃ ρ L̃†) Π† -- the map ρ ↦ Π ρ Π† after every jump --, and its decay is their
