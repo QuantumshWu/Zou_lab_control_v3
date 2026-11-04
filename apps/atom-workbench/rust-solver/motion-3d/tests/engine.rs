@@ -961,7 +961,7 @@ fn the_t_error_over_the_run_adds_up_on_a_heating_axis_and_goes_with_the_step(){
     let(states,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,32,steps,outputs,&harmonic);let probes=bound_probes(&model,&states,&vec![1.;states.len()]);
     let period=std::f64::consts::TAU/initial.traps[reference].frequencies.iter().copied().fold(f64::INFINITY,f64::min);
     let tolerance=BIAS_SHARE*TEMPERATURE_TARGET;let limit=|_:f64|tolerance;
-    let(one,whole)=(drift(&model,&settings,steps,&probes,period,period,&limit,0.),drift(&model,&settings,steps,&probes,period,100.,&limit,0.));let half=drift(&model,&settings,2*steps,&probes,period,100.,&limit,whole.span);
+    let(one,whole)=(drift(&model,&settings,steps,&probes,period,period,&limit,0.,f64::INFINITY),drift(&model,&settings,steps,&probes,period,100.,&limit,0.,f64::INFINITY));let half=drift(&model,&settings,2*steps,&probes,period,100.,&limit,whole.span,f64::INFINITY);
     println!("over a period {one:?}, over the run {whole:?}, at half the step {half:?} ({} us period)",period);
     assert!(one.excess<1.&&whole.excess>1.&&half.stands<0.5*whole.stands,"{one:?} {whole:?} {half:?}");
 }
