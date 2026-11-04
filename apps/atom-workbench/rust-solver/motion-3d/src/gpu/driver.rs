@@ -56,6 +56,8 @@ api!{
     cuOccupancyMaxActiveBlocksPerMultiprocessor:fn(*mut i32,Handle,i32,usize);
     cuMemAlloc_v2:fn(*mut DevicePtr,usize);
     cuMemFree_v2:fn(DevicePtr);
+    cuMemAllocHost_v2:fn(*mut *mut c_void,usize);
+    cuMemFreeHost:fn(*mut c_void);
     cuMemcpyHtoDAsync_v2:fn(DevicePtr,*const c_void,usize,Handle);
     cuMemcpyDtoHAsync_v2:fn(*mut c_void,DevicePtr,usize,Handle);
     cuMemsetD8Async:fn(DevicePtr,u8,usize,Handle);
@@ -254,3 +256,17 @@ impl Buffer{
     pub fn with<T:Copy>(stream:&Stream,data:&[T])->Result<Buffer,String>{let b=Buffer::new(std::mem::size_of_val(data))?;stream.upload(&b,data)?;Ok(b)}
 }
 impl Drop for Buffer{fn drop(&mut self){if let Ok(d)=driver(){unsafe{(d.api.cuMemFree_v2)(self.pointer);}}}}
+
+/// Words in host memory the device writes (a launch's report, read without a copy once an event says it is done).
+pub struct HostWords{pointer:*mut u64,len:usize}
+impl HostWords{
+    pub fn new(data:&[u64])->Result<HostWords,String>{
+        let mut pointer=std::ptr::null_mut();check(&format!("cuMemAllocHost({} words)",data.len()),unsafe{(driver()?.api.cuMemAllocHost_v2)(&mut pointer,8*data.len().max(1))})?;
+        let out=HostWords{pointer:pointer as *mut u64,len:data.len()};unsafe{std::ptr::copy_nonoverlapping(data.as_ptr(),out.pointer,data.len());}Ok(out)
+    }
+    /// The device's address of the words.
+    pub fn address(&self)->u64{self.pointer as u64}
+    /// The words: to be read only when no launch that writes them is running.
+    pub fn read(&self,out:&mut [u64]){unsafe{std::ptr::copy_nonoverlapping(self.pointer as *const u64,out.as_mut_ptr(),self.len.min(out.len()));}}
+}
+impl Drop for HostWords{fn drop(&mut self){if let Ok(d)=driver(){unsafe{(d.api.cuMemFreeHost)(self.pointer as *mut c_void);}}}}
