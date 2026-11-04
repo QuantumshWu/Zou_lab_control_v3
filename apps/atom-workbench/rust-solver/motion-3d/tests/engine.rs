@@ -6,7 +6,7 @@
 //! momenta, and a short solve whose t = 0 is the request's initial state.
 use atom_motion_3d::control::{Harmonic,Twin};
 use atom_motion_3d::engine::{dipole_direction,Engine,Settings,Trajectory,QUADRATURE};
-use atom_motion_3d::ground::Ground;
+use atom_motion_3d::ground::{ExcitedKind,Ground};
 use atom_motion_3d::ledger::BUDGET;
 use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
@@ -670,6 +670,22 @@ fn a_beating_grid_s_measured_phase_meets_its_shares(){
     }
     let m=states.len() as f64;assert!(populations/m<=share,"populations {:e} against the share {share:e}",populations/m);
     assert!(impulse/size<=QUADRATURE,"the impulse {:e} against {QUADRATURE:e}",impulse/size);
+}
+
+/// The ladder's rungs keep more as the allowance falls, and the closure keeps what it must first: on the PGC with a resonant probe
+/// the first rung holds the probe's five drives and the strongest cooling drive, the cooling beams' others folded. (With the
+/// closure's estimates taken under the folded probe's light, and no rung above each ground state's first kept drive, the first rung
+/// held 7 excited states, its T 5 % above the fully explicit F = 2 cluster's at 100 us, where this rung's is within its 2 % of statistics.)
+#[test]
+fn the_ladder_keeps_more_as_the_allowance_falls_and_the_near_drives_first(){
+    let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..101).map(|i|i as f64).collect();
+    let ladder=Ground::allowances(&r).unwrap();assert!(ladder[0]==f64::INFINITY&&ladder.windows(2).all(|w|w[0]>w[1]),"{ladder:?}");
+    let grounds:Vec<Ground>=ladder.iter().take(12).map(|&a|Ground::with(&r,a).unwrap()).collect();
+    let explicit:Vec<usize>=grounds.iter().map(|g|g.clusters.iter().map(|c|c.excited.len()).sum()).collect();
+    assert!(explicit[0]==0&&explicit.windows(2).all(|w|w[0]<=w[1]),"explicit states along the ladder: {explicit:?}");
+    let g=&grounds[1];let drives:Vec<usize>=g.excited_items.iter().filter(|x|!x.folded&&x.size>1e-6).filter_map(|x|match x.kind{ExcitedKind::Drive(d)=>Some(d.carrier),_=>None}).collect();
+    let probe=drives.iter().filter(|&&c|c==drives[0]).count();
+    assert!(explicit[1]==5&&drives.len()==6&&(probe==5||probe==1),"the first rung: {} explicit states, its drives' carriers {drives:?}",explicit[1]);
 }
 
 /// The atom frozen at the focus: its eliminated master equation there (ground.rs `local_at`, every drive
