@@ -224,11 +224,11 @@ pub struct Carrier{
 /// beyond its share (`kept`), and while the tables are refined at `w` per pair its W^S and W^Q on the entries.
 #[derive(Clone,Debug)]
 pub(crate) struct GroupLayout{pub(crate) absorbed:usize,pub(crate) emitted:usize,pub(crate) residual:f64,pub(crate) hermitian:bool,pub(crate) pairs:Vec<(usize,usize)>,pub(crate) entries:Vec<(usize,usize)>,pub(crate) s:usize,pub(crate) q:usize,
-    pub(crate) decay:bool,first:Vec<(usize,usize)>,transfer:usize,kept:Vec<Kept>,w:usize}
+    pub(crate) decay:bool,pub(crate) first:Vec<(usize,usize)>,pub(crate) transfer:usize,pub(crate) kept:Vec<Kept>,w:usize}
 /// What the first order's transfer leaves of one field pair (k′, k) beyond its share (`Model::transfer_tables`): the entries (row, column)
 /// and where their W^S − λ^S Q, then their W^Q − λ^Q Q lie.
 #[derive(Clone,Debug)]
-struct Kept{pair:(usize,usize),entries:Vec<(usize,usize)>,at:usize}
+pub(crate) struct Kept{pub(crate) pair:(usize,usize),pub(crate) entries:Vec<(usize,usize)>,pub(crate) at:usize}
 /// Where a carrier's photon tables lie: J and J2 (3 axes × rank × ng × n0), T (rank × ne × n0) and, right after it, its columns' norms
 /// ‖T_k[:,b]‖ (rank × n0, `Model::ringing_bound`), on the cluster's n0 ground states.
 #[derive(Clone,Copy,Debug)]
@@ -671,21 +671,23 @@ impl Model{
     /// # Fourth order).
     pub fn with_order(request:&Request,allowance:f64,fourth:bool)->Result<Model,String>{Model::bounded(request,allowance,fourth,MOST_TABLE_BYTES,MOST_TABLE_NODES)}
     /// The same within the given work bounds on its tables (`MOST_TABLE_BYTES`, `MOST_TABLE_NODES`).
-    pub(crate) fn bounded(request:&Request,allowance:f64,fourth:bool,most_bytes:usize,most_nodes:usize)->Result<Model,String>{
-        let(mut model,bases)=Model::laid_out(request,allowance,fourth)?;
+    pub(crate) fn bounded(request:&Request,allowance:f64,fourth:bool,most_bytes:usize,most_nodes:usize)->Result<Model,String>{Model::built(request,Ground::with(request,allowance)?,fourth,most_bytes,most_nodes)}
+    /// The model of a request on its front end at an allowance (ground.rs `Ground::with`), which the orders of an allowance share (solve.rs: a solve builds it once).
+    pub(crate) fn of_ground(request:&Request,ground:Ground,fourth:bool)->Result<Model,String>{Model::built(request,ground,fourth,MOST_TABLE_BYTES,MOST_TABLE_NODES)}
+    fn built(request:&Request,ground:Ground,fourth:bool,most_bytes:usize,most_nodes:usize)->Result<Model,String>{
+        let(mut model,bases)=Model::laid_out(request,ground,fourth)?;
         let stake=model.stake(request);model.tabulate(&bases,most_bytes,most_nodes,stake)?;
         model.transfer_tables(request.temperature_uk);
         model.lindblad()?;
         Ok(model)
     }
-    /// Each cluster's counted work (`work`) in the model at this allowance and order, from its layout alone: its tables
+    /// Each cluster's counted work (`work`) in the model on this front end at this order, from its layout alone: its tables
     /// unbuilt (solve.rs: the fourth order's tables are worth their build only for a saving beyond it).
-    pub(crate) fn layout_work(request:&Request,allowance:f64,fourth:bool)->Result<Vec<Work>,String>{
-        let(model,_)=Model::laid_out(request,allowance,fourth)?;Ok((0..model.clusters()).map(|k|model.work(k)).collect())
+    pub(crate) fn layout_work(request:&Request,ground:Ground,fourth:bool)->Result<Vec<Work>,String>{
+        let(model,_)=Model::laid_out(request,ground,fourth)?;Ok((0..model.clusters()).map(|k|model.work(k)).collect())
     }
-    /// The model at this allowance and order but for its tables, and each carrier's coefficients on its basis.
-    fn laid_out(request:&Request,allowance:f64,fourth:bool)->Result<(Model,Vec<Vec<Vec<Complex>>>),String>{
-        let ground=Ground::with(request,allowance)?;
+    /// The model on this front end at this order but for its tables, and each carrier's coefficients on its basis.
+    fn laid_out(request:&Request,ground:Ground,fourth:bool)->Result<(Model,Vec<Vec<Vec<Complex>>>),String>{
         let geometry:Vec<Geometry>=ground.beams.iter().map(|b|Geometry{direction:b.direction,wave_number:b.wave_number_per_um,waist:b.waist_um}).collect();
         let trap_beam=request.trap_beam;
         if trap_beam>=geometry.len()||geometry[trap_beam].waist.is_none(){return Err("光镊（trapBeamId 所指的光束）需要束腰：3D 运动计算聚焦在原子处的光镊中的单个原子".into());}
@@ -1516,7 +1518,8 @@ impl Model{
     /// A cluster's work in the GPU's kernel, a warp's cycles (solve.rs `kernel_interval`): a step, its table pairs' gathers and the
     /// fourth order's slabs beside its fixed parts, and a jump, every class's photons at the second order and the fourth's W3 and forms
     /// at their own rates. A static cluster's: against a wave of 576 at both orders on PGC3D, TET, THREE, GMD1C and DEFAULT, on a laptop's RTX 5070, the
-    /// counts' totals within 15 % of the cycles and their ratios between the orders within 10 %; another device's clock scales them alike.
+    /// counts' totals within 15 % of the cycles and their ratios between the orders within about 20 % (PGC3D 1.81 against 1.87, GMD1C 2.55 against
+    /// 2.85, THREE 1.73 against 2.17). Fixed numbers, one GPU's: another's own ratios change no choice here, only how well it fits that GPU.
     pub fn kernel_work(&self,cluster:usize)->[f64;2]{
         let layout=&self.layouts[cluster];let w=self.work(cluster);let nodes=(1usize<<(2*self.focused.len())) as f64;
         let second:f64=self.carriers.iter().map(|c|c.rank as f64*3.*self.ground.ground_states.len() as f64*layout.n as f64*(2.*nodes+1.)).sum();
@@ -1532,6 +1535,8 @@ impl Model{
     /// A cluster's beats (rad/us), ascending and closed under negation, and their common period (us)
     /// where they are harmonics of one frequency.
     pub fn beats(&self,cluster:usize)->(&[f64],Option<f64>){let b=&self.layouts[cluster].beats;(&b.omegas,b.period)}
+    /// The entries of a cluster's groups the first order's transfer leaves (`transfer_tables`).
+    pub fn kept_entries(&self,cluster:usize)->usize{self.layouts[cluster].groups.iter().map(|g|g.kept.iter().map(|k|k.entries.len()).sum::<usize>()).sum()}
     /// A cluster's number of ground states (the first of its basis).
     pub fn ground_dimension(&self,cluster:usize)->usize{self.layouts[cluster].n0}
     /// The part of a cluster's components a residual goes into (`components`): 0 the static one, 1 + j beat j's.
@@ -1539,13 +1544,13 @@ impl Model{
     /// A cluster's terms of its explicit states for the GPU's components (gpu/program.rs `Term`), in
     /// `components`' order: per kept drive (kind 0), decay cross term (1), decay (2) and dressing's drive
     /// (3) its row, column, carrier, part, its mirror's part (the residual's negative), its tables' place
-    /// and a drive's U_k; and where the explicit states' dressed photons lie (`photon`).
-    pub(crate) fn exact_terms(&self,cluster:usize)->(Vec<[usize;7]>,Vec<[Complex;MOST_RANK]>,usize){
+    /// (a cross term's X_k, then its X2_k's) and a drive's U_k; and where the explicit states' dressed photons lie (`photon`).
+    pub(crate) fn exact_terms(&self,cluster:usize)->(Vec<[usize;8]>,Vec<[Complex;MOST_RANK]>,usize){
         let l=&self.layouts[cluster];let part=|w:f64|self.part(cluster,w);let(mut terms,mut u)=(vec![],vec![]);
-        for d in &l.drives{terms.push([0,d.row,d.col,d.carrier,part(d.residual),part(-d.residual),0]);u.push(d.u);}
-        for c in &l.crosses{terms.push([1,c.row,c.col,c.carrier,part(c.residual),part(-c.residual),c.at]);u.push([Complex::ZERO;MOST_RANK]);}
-        for d in &l.decays{terms.push([2,d.row,d.col,0,part(d.residual),part(-d.residual),d.at]);u.push([Complex::ZERO;MOST_RANK]);}
-        for e in &l.effective{terms.push([3,e.row,e.col,e.carrier,part(e.residual),part(-e.residual),e.at]);u.push([Complex::ZERO;MOST_RANK]);}
+        for d in &l.drives{terms.push([0,d.row,d.col,d.carrier,part(d.residual),part(-d.residual),0,0]);u.push(d.u);}
+        for c in &l.crosses{terms.push([1,c.row,c.col,c.carrier,part(c.residual),part(-c.residual),c.at,c.at2]);u.push([Complex::ZERO;MOST_RANK]);}
+        for d in &l.decays{terms.push([2,d.row,d.col,0,part(d.residual),part(-d.residual),d.at,0]);u.push([Complex::ZERO;MOST_RANK]);}
+        for e in &l.effective{terms.push([3,e.row,e.col,e.carrier,part(e.residual),part(-e.residual),e.at,0]);u.push([Complex::ZERO;MOST_RANK]);}
         (terms,u,l.emission)
     }
 
@@ -2583,7 +2588,7 @@ mod tests{
         let free=Model::new(&r).unwrap();
         assert!(free.table_limit.is_none()&&!free.table_stalled&&free.tables.nodes>9,"{:?} at {} nodes: {:e}",free.table_limit,free.tables.nodes,free.table_error);
         // A node's entries while the tables are refined: W^S and W^Q among them (`transfer_tables`).
-        let entries:usize=Model::laid_out(&r,f64::INFINITY,false).unwrap().0.layouts.iter().map(|l|l.size).sum();
+        let entries:usize=Model::laid_out(&r,crate::ground::Ground::new(&r).unwrap(),false).unwrap().0.layouts.iter().map(|l|l.size).sum();
         for(bytes,nodes)in [(MOST_TABLE_BYTES,9),(16*entries*(9+5),MOST_TABLE_NODES)]{
             let m=Model::bounded(&r,f64::INFINITY,false,bytes,nodes).unwrap();
             assert!(m.table_limit==Some(9)&&m.tables.nodes==9&&m.table_error>free.table_error,"{:?} at {} nodes: {:e}",m.table_limit,m.tables.nodes,m.table_error);

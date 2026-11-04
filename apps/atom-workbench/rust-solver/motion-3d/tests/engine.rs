@@ -13,7 +13,7 @@ use atom_motion_3d::model::{Model,MOST_MIXED,MOST_STATES};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Means,Scales,KT_PER_UK};
 use atom_motion_3d::{initial_trajectory,sample_states,simulate,simulate_to,Initial,Stratum,Variates};
-use atom_motion_3d::solve::{bound_probes,drift,grid_phase,jumps,solve,standing,Device,BIAS_SHARE,NUMERICAL_SHARE,POPULATION_TARGET,TEMPERATURE_TARGET};
+use atom_motion_3d::solve::{bound_probes,drift,grid_phase,jumps,solve,Device,BIAS_SHARE,NUMERICAL_SHARE,POPULATION_TARGET,TEMPERATURE_TARGET};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
 #[path="../examples/scene/mod.rs"] mod scene;
@@ -956,7 +956,6 @@ fn the_jumps_criterion_on_a_retro_reflected_tweezer_reads_the_step_as_its_square
 
 /// T's step error over the run (solve.rs `drift`): the retro-reflected tweezer's lattice axis heats all run long and a rate's error adds up,
 /// so at a step whose error over one period lies within T's tolerance more than the tolerance stands over the 100 us, and at half that step less than half of that.
-/// From 64 pilot trajectories' probes: from 32, on one stream in eight the first period's noise covers its error and ends the spans (over the run 0.18-0.32 on the others, tolerance 0.045).
 #[test]
 fn the_t_error_over_the_run_adds_up_on_a_heating_axis_and_goes_with_the_step(){
     let fixture:Value=serde_json::from_str(include_str!("fixtures/retro_probe_motion.json")).unwrap();
@@ -966,12 +965,12 @@ fn the_t_error_over_the_run_adds_up_on_a_heating_axis_and_goes_with_the_step(){
     let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();let waiting=0.47;
     let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=Settings::new(dt,&initial.traps[reference],NUMERICAL_SHARE*POPULATION_TARGET*dt/waiting,true);s.doppler=0.02;s.region=initial.depths[reference];s.horizon=waiting;s};
     let steps=48;let harmonic=Harmonic::new(&model,&settings(steps),&initial,steps,outputs);
-    let(states,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,64,steps,outputs,&harmonic);let probes=bound_probes(&model,&states);
+    let(states,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,32,steps,outputs,&harmonic);let probes=bound_probes(&model,&states);
     let period=std::f64::consts::TAU/initial.traps[reference].frequencies.iter().copied().fold(f64::INFINITY,f64::min);
-    let tolerance=BIAS_SHARE*TEMPERATURE_TARGET;
-    let(one,whole)=(drift(&model,&settings,steps,&probes,period,period,tolerance),drift(&model,&settings,steps,&probes,period,100.,tolerance));let half=drift(&model,&settings,2*steps,&probes,period,100.,tolerance);
+    let tolerance=BIAS_SHARE*TEMPERATURE_TARGET;let limit=|_:f64|tolerance;
+    let(one,whole)=(drift(&model,&settings,steps,&probes,period,period,&limit,0.),drift(&model,&settings,steps,&probes,period,100.,&limit,0.));let half=drift(&model,&settings,2*steps,&probes,period,100.,&limit,whole.span);
     println!("over a period {one:?}, over the run {whole:?}, at half the step {half:?} ({} us period)",period);
-    assert!(one[0]<tolerance&&standing(whole)>tolerance&&standing(half)<0.5*standing(whole),"{one:?} {whole:?} {half:?}");
+    assert!(one.excess<1.&&whole.excess>1.&&half.stands<0.5*whole.stands,"{one:?} {whole:?} {half:?}");
 }
 
 /// A group run only through an output (solve.rs # Batches) sums what the whole run sums there -- T's windows half a period past it

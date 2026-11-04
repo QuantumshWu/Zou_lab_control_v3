@@ -32,14 +32,14 @@ pub struct Sums{
 impl Sums{
     pub fn zero()->Sums{Sums{trajectories:0.,held:0.,kappa:[0.;3],kappa2:[0.;3],position:[0.;3],position2:[0.;3],populations:[0.;STATES],folded:0.,profile:0.,doppler:0.,
         harmonic:[[0.;3];3],twin:[0.;STATES],twin2:[0.;2]}}
-    fn combine(&self,o:&Sums,sign:f64)->Sums{
-        let mut out=self.clone();out.trajectories+=sign*o.trajectories;out.held+=sign*o.held;
-        for a in 0..3{out.kappa[a]+=sign*o.kappa[a];out.kappa2[a]+=sign*o.kappa2[a];out.position[a]+=sign*o.position[a];out.position2[a]+=sign*o.position2[a];
-            for j in 0..3{out.harmonic[a][j]+=sign*o.harmonic[a][j];}}
-        for(x,y)in out.populations.iter_mut().zip(&o.populations){*x+=sign*y;}
-        for(x,y)in out.twin.iter_mut().zip(&o.twin){*x+=sign*y;}
-        out.folded+=sign*o.folded;out.profile+=sign*o.profile;out.doppler+=sign*o.doppler;out.twin2[0]+=sign*o.twin2[0];out.twin2[1]+=sign*o.twin2[1];
-        out
+    fn combine(&self,o:&Sums,sign:f64)->Sums{let mut out=self.clone();out.add(o,sign);out}
+    fn add(&mut self,o:&Sums,sign:f64){
+        self.trajectories+=sign*o.trajectories;self.held+=sign*o.held;
+        for a in 0..3{self.kappa[a]+=sign*o.kappa[a];self.kappa2[a]+=sign*o.kappa2[a];self.position[a]+=sign*o.position[a];self.position2[a]+=sign*o.position2[a];
+            for j in 0..3{self.harmonic[a][j]+=sign*o.harmonic[a][j];}}
+        for(x,y)in self.populations.iter_mut().zip(&o.populations){*x+=sign*y;}
+        for(x,y)in self.twin.iter_mut().zip(&o.twin){*x+=sign*y;}
+        self.folded+=sign*o.folded;self.profile+=sign*o.profile;self.doppler+=sign*o.doppler;self.twin2[0]+=sign*o.twin2[0];self.twin2[1]+=sign*o.twin2[1];
     }
 }
 
@@ -138,8 +138,16 @@ impl Correction<'_>{
 /// populations less β times their controls' excess over their means -- the same expectation, the
 /// variance less the part the controls account for.
 pub fn estimate(g:&Sums,s:&Scales,correction:Option<&Correction>)->Estimate{
-    let n=g.held;let all=g.trajectories;let mut e=Estimate{loss:1.-n/all,trajectories:all,..Default::default()};
-    if n<=0.{e.populations=vec![0.;STATES];return e;}
+    let n=g.held;let m=moments(g,s,correction);
+    Estimate{temperature:m.temperature,temperature_total:m.temperature_total,occupation:m.occupation,populations:m.populations.to_vec(),loss:m.loss,trajectories:g.trajectories,
+        mean_velocity:if n>0.{std::array::from_fn(|a|g.kappa[a]/n*s.hbar_over_mass)}else{[0.;3]},position2:if n>0.{std::array::from_fn(|a|g.position2[a]/n)}else{[0.;3]},
+        folded:if n>0.{g.folded/n}else{0.},profile:if n>0.{g.profile/n}else{0.},doppler:if n>0.{g.doppler/n}else{0.},..Default::default()}
+}
+/// What the jackknife spreads (`summarize`), of `estimate`: no allocation per group left out.
+struct Moments{temperature:[f64;3],temperature_total:f64,occupation:[f64;3],populations:[f64;STATES],loss:f64}
+fn moments(g:&Sums,s:&Scales,correction:Option<&Correction>)->Moments{
+    let n=g.held;let all=g.trajectories;let mut e=Moments{temperature:[0.;3],temperature_total:0.,occupation:[0.;3],populations:[0.;STATES],loss:1.-n/all};
+    if n<=0.{return e;}
     let(mut kappa2,mut populations)=(g.kappa2,g.populations);
     if let Some(c)=correction{
         for a in 0..3{kappa2[a]-=c.harmonic[a]*(g.harmonic[a][0]-all*c.means.harmonic[a]);}
@@ -147,35 +155,36 @@ pub fn estimate(g:&Sums,s:&Scales,correction:Option<&Correction>)->Estimate{
     }
     for a in 0..3{
         let(mean,second)=(g.kappa[a]/n,kappa2[a]/n);let variance=(second-mean*mean).max(0.);
-        e.temperature[a]=variance*s.hbar_over_mass/KT_PER_UK;e.mean_velocity[a]=mean*s.hbar_over_mass;
-        let x2=g.position2[a]/n;e.position2[a]=x2;let w=s.frequencies[a];
+        e.temperature[a]=variance*s.hbar_over_mass/KT_PER_UK;
+        let x2=g.position2[a]/n;let w=s.frequencies[a];
         e.occupation[a]=if w>0.{(second*s.hbar_over_mass/2.+w*w/s.hbar_over_mass*x2/2.)/w-0.5}else{0.};
     }
-    e.temperature_total=e.temperature.iter().sum::<f64>()/3.;e.folded=g.folded/n;e.profile=g.profile/n;e.doppler=g.doppler/n;
-    e.populations=populations.iter().map(|p|p/n).collect();
+    e.temperature_total=e.temperature.iter().sum::<f64>()/3.;
+    for k in 0..STATES{e.populations[k]=populations[k]/n;}
     e
 }
+/// The jackknife's standard error of a value over the groups left out.
+fn spread(leave:&[Moments],factor:f64,f:impl Fn(&Moments)->f64)->f64{let m=leave.iter().map(&f).sum::<f64>()/leave.len() as f64;(factor*leave.iter().map(|x|(f(x)-m).powi(2)).sum::<f64>()).sqrt()}
 
 /// The pooled estimates at every output time, with jackknife standard errors over the groups that reach it (a batch's
 /// trajectories run only as far as the outputs need them, solve.rs # Batches), the
 /// control variates' means per output where given: their β from every trajectory, held when a group
 /// is left out -- recomputed with it, a β that rests on a few trajectories at an early output (a few
 /// twins that have jumped) swings from group to group and its spread swamps the error.
-pub fn summarize(groups:&[Group],s:&Scales,means:&[Means])->Vec<Estimate>{
-    let outputs=groups[0].sums.len();
+pub fn summarize<G:std::borrow::Borrow<Group>+Sync>(groups:&[G],s:&Scales,means:&[Means])->Vec<Estimate>{
+    let outputs=groups[0].borrow().sums.len();
     (0..outputs).into_par_iter().map(|i|{
-        let present:Vec<&Sums>=groups.iter().map(|g|&g.sums[i]).filter(|x|x.trajectories>0.).collect();let count=present.len();
-        let all=present.iter().fold(Sums::zero(),|acc,x|acc.combine(x,1.));
+        let present:Vec<&Sums>=groups.iter().map(|g|&g.borrow().sums[i]).filter(|x|x.trajectories>0.).collect();let count=present.len();
+        let mut all=Sums::zero();for x in &present{all.add(x,1.);}
         let correction=means.get(i).map(|m|Correction::new(&all,m));let m=correction.as_ref();
         let mut e=estimate(&all,s,m);e.groups=count as f64;
         if count<2{e.population_errors=vec![f64::INFINITY;STATES];e.temperature_error=[f64::INFINITY;3];e.temperature_total_error=f64::INFINITY;e.occupation_error=[f64::INFINITY;3];e.loss_error=f64::INFINITY;return e;}
-        let leave:Vec<Estimate>=present.iter().map(|x|estimate(&all.combine(x,-1.),s,m)).collect();
+        let leave:Vec<Moments>=present.iter().map(|x|moments(&all.combine(x,-1.),s,m)).collect();
         let factor=(count-1) as f64/count as f64;
-        let spread=|f:&dyn Fn(&Estimate)->f64|->f64{let m=leave.iter().map(|x|f(x)).sum::<f64>()/count as f64;(factor*leave.iter().map(|x|(f(x)-m).powi(2)).sum::<f64>()).sqrt()};
-        for a in 0..3{e.temperature_error[a]=spread(&|x|x.temperature[a]);e.occupation_error[a]=spread(&|x|x.occupation[a]);}
-        e.temperature_total_error=spread(&|x|x.temperature_total);
-        e.population_errors=(0..STATES).map(|k|spread(&|x|x.populations[k])).collect();
-        e.loss_error=spread(&|x|x.loss);
+        for a in 0..3{e.temperature_error[a]=spread(&leave,factor,|x|x.temperature[a]);e.occupation_error[a]=spread(&leave,factor,|x|x.occupation[a]);}
+        e.temperature_total_error=spread(&leave,factor,|x|x.temperature_total);
+        e.population_errors=(0..STATES).map(|k|spread(&leave,factor,|x|x.populations[k])).collect();
+        e.loss_error=spread(&leave,factor,|x|x.loss);
         e
     }).collect()
 }

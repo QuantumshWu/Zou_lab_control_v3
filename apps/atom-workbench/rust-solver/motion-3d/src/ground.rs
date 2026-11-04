@@ -796,13 +796,11 @@ impl Ground{
     /// `allowance` (its total saturation over the light's pattern, the fold's charge), or why it has
     /// none: a counter-rotating component that may not fold, or a static coupling between ground
     /// states that may not.
-    pub fn with(request:&Request,allowance:f64)->Result<Ground,String>{
-        let mut ground=Ground::bare(request)?;
-        ground.cluster_states(allowance)?;
-        Ok(ground)
-    }
+    pub fn with(request:&Request,allowance:f64)->Result<Ground,String>{Ground::bare(request)?.clustered(allowance)}
+    /// The rule at an allowance on a generator before it (`bare`), which a solve's candidates share.
+    pub(crate) fn clustered(&self,allowance:f64)->Result<Ground,String>{let mut ground=self.clone();ground.cluster_states(allowance)?;Ok(ground)}
     /// A request's generator before the rule: its states, components, carriers and reach.
-    fn bare(request:&Request)->Result<Ground,String>{
+    pub(crate) fn bare(request:&Request)->Result<Ground,String>{
         let labels=request.states.iter().map(|s|level(s)).collect::<Result<Vec<_>,_>>()?;
         let ground_states:Vec<usize>=(0..STATES).filter(|&i|labels[i].0=="ground").collect();
         let excited_states:Vec<usize>=(0..STATES).filter(|&i|labels[i].0!="ground").collect();
@@ -1370,8 +1368,10 @@ impl Ground{
     /// states before the closure: the totals of a ground state's folded drives as it keeps them from
     /// the most saturated down, its total with none kept among them -- its first kept drive lies below that, with
     /// other ground states' still folded (PGCP_10: the near probe's drives alone, its cooling beams folded).
-    pub fn allowances(request:&Request)->Result<Vec<f64>,String>{
-        let g=Ground::bare(request)?;let ne=g.excited_states.len();
+    pub fn allowances(request:&Request)->Result<Vec<f64>,String>{Ok(Ground::bare(request)?.rungs())}
+    /// The allowances of a generator before the rule (`allowances`, `bare`).
+    pub(crate) fn rungs(&self)->Vec<f64>{
+        let g=self;let ne=g.excited_states.len();
         let excited=g.judged(f64::INFINITY);
         let mut totals:Vec<f64>=vec![];
         for b in 0..g.ground_states.len(){
@@ -1385,7 +1385,7 @@ impl Ground{
             let explicit=Ground::explicit_states(&g.judged(t),ne);
             if explicit!=last{out.push(t);last=explicit;}
         }
-        Ok(out)
+        out
     }
 
     /// The rule over every coupling (module documentation): the excited couplings judged, the
