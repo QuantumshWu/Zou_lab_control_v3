@@ -370,14 +370,22 @@ __device__ void field(const Beam& b,const float r[3],float2& a,float2 g[3]){
     for(int i=0;i<3;i++)g[i]=a*(b.direction[i]*along+(r[i]-zeta*b.direction[i])*across);
 }
 
-// Cubic Lagrange weights on four consecutive nodes of a uniform grid of `nodes` points on [0, 1]
-// at s, and their derivatives in s (model.rs `cubic`).
+// The C1 cubic Hermite weights with Catmull-Rom's central slopes (one-sided at the grid's ends) on four consecutive
+// nodes of a uniform grid of `nodes` points on [0, 1] at s, and their derivatives in s (model.rs `cubic`).
 __device__ void cubic(int nodes,float s,int& first,float w[4],float d[4]){
     const float h=(float)(nodes-1);const float x=fminf(fmaxf(s,0.f),1.f)*h;
-    first=min(max((int)floorf(x)-1,0),nodes-4);const float t=x-(float)first;
-    w[0]=-(t-1.f)*(t-2.f)*(t-3.f)/6.f;w[1]=t*(t-2.f)*(t-3.f)/2.f;w[2]=-t*(t-1.f)*(t-3.f)/2.f;w[3]=t*(t-1.f)*(t-2.f)/6.f;
-    d[0]=-((t-2.f)*(t-3.f)+(t-1.f)*(t-3.f)+(t-1.f)*(t-2.f))/6.f*h;d[1]=((t-2.f)*(t-3.f)+t*(t-3.f)+t*(t-2.f))/2.f*h;
-    d[2]=-((t-1.f)*(t-3.f)+t*(t-3.f)+t*(t-1.f))/2.f*h;d[3]=((t-1.f)*(t-2.f)+t*(t-2.f)+t*(t-1.f))/6.f*h;
+    const int i=min((int)floorf(x),nodes-2);const float u=x-(float)i;
+    const float a=2.f*u*u*u-3.f*u*u+1.f,b=u*u*u-2.f*u*u+u,c=-2.f*u*u*u+3.f*u*u,e=u*u*u-u*u;
+    const float da=6.f*u*u-6.f*u,db=3.f*u*u-4.f*u+1.f,dc=-6.f*u*u+6.f*u,de=3.f*u*u-2.f*u;
+    if(i==0){first=0;
+        w[0]=a-1.5f*b-0.5f*e;w[1]=2.f*b+c;w[2]=-0.5f*b+0.5f*e;w[3]=0.f;
+        d[0]=(da-1.5f*db-0.5f*de)*h;d[1]=(2.f*db+dc)*h;d[2]=(-0.5f*db+0.5f*de)*h;d[3]=0.f;}
+    else if(i==nodes-2){first=nodes-4;
+        w[0]=0.f;w[1]=-0.5f*b+0.5f*e;w[2]=a-2.f*e;w[3]=0.5f*b+c+1.5f*e;
+        d[0]=0.f;d[1]=(-0.5f*db+0.5f*de)*h;d[2]=(da-2.f*de)*h;d[3]=(0.5f*db+dc+1.5f*de)*h;}
+    else{first=i-1;
+        w[0]=-0.5f*b;w[1]=a-0.5f*e;w[2]=c+0.5f*b;w[3]=0.5f*e;
+        d[0]=-0.5f*db*h;d[1]=(da-0.5f*de)*h;d[2]=(dc+0.5f*db)*h;d[3]=0.5f*de*h;}
 }
 
 // The point of the trajectory (model.rs `Model::point`): every beam's amplitude and kinetic shift,

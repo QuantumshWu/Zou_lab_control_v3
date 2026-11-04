@@ -166,11 +166,10 @@ use crate::eigen::{eigen,Eigen};
 use crate::model::{Components,Exact,Local,Model,Point,MOST_MIXED,MOST_STATES};
 use crate::rng::{Purpose,Rng};
 use crate::Complex;
-use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
 
 /// The impulse's quadrature share in the exact step: its grid has ν δ ≤ 2 `node_phase`, ν the force's
 /// largest frequency, so that composite Simpson's error, (ν·2δ)⁴/2880 of the impulse at most, is within it.
-pub const QUADRATURE:f64=A_PRIORI_SHARE*A_PRIORI_SHARE*crate::solve::TEMPERATURE_TARGET;
+pub const QUADRATURE:f64=crate::solve::STEP_SHARE*crate::solve::STEP_SHARE*crate::solve::TEMPERATURE_TARGET;
 pub(crate) fn node_phase()->f64{(2880.*QUADRATURE).powf(0.25)/4.}
 
 /// A trajectory's state.

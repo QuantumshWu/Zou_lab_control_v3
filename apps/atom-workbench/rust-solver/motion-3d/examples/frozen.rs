@@ -45,11 +45,10 @@ fn main(){
     let fixed_slow=slows(0.);
     let q0=transients(0.);
     // A transient piece's trace factor at fourth order: its photons per jump, κ = 1 − Γ²/(Δ² + Γ²/4) of
-    // ‖S f‖², Δ the ringing of its excited group against its channels (far detuned an extra photon, at
-    // resonance −3: the dressing's rebuild delays the next).
+    // ‖S f‖², Δ the ringing of its excited group against its channels' dressed energy (far detuned an extra
+    // photon, at resonance −3: the dressing's rebuild delays the next; ground.rs `transient_factor`).
     let kappa=|b:usize,piece:&atom_motion_3d::model::Piece|->f64{if !fourth||!g.clusters[b].excited.is_empty(){return 1.;}
-        let(ch,_)=g.clusters[b].coherent[piece.coherent][0];let i=g.excited_groups[piece.excited][0];let gamma=g.decay[(i,i)].re;
-        let delta=e.excited_energies[i]-e.energies[ch.state]-g.carriers[ch.carrier].detuning;1.-gamma*gamma/(delta*delta+0.25*gamma*gamma)};
+        let(ch,_)=g.clusters[b].coherent[piece.coherent][0];g.transient_factor(&e,r,&g.excited_groups[piece.excited],ch.carrier,ch.state)};
     // The slow part's trace balance per cluster: D = 1 − Π†Π − Σ κ S†S (O(S²)), taken as ½{D, σ}.
     let balance:Vec<Option<Dense>>=(0..g.clusters.len()).map(|b|fixed_slow[b].as_ref().map(|slow|{let nt=slow.rows;
         let mut d=Dense::from_fn(nt,nt,|i,j|if i==j{Complex::ONE}else{Complex::ZERO});d.add_scaled(-Complex::ONE,&slow.adjoint_product(slow));
@@ -77,9 +76,12 @@ fn main(){
         out
     };
     if fourth{
+        // Every cluster's slow part, then the transients' photons into their targets (an earlier cluster's into a
+        // later one's kept).
         let q=transients(0.);let bare=rho.clone();
+        for(b,x)in bare.iter().enumerate(){if fixed_slow[b].is_some(){rho[b]=Dense::zeros(x.rows,x.cols);}}
         for(b,x)in bare.iter().enumerate(){let Some(slow)=&fixed_slow[b]else{continue};let nt=x.rows;
-            rho[b]=slow.product(x).product(&slow.adjoint());let d=balance[b].as_ref().unwrap();
+            let mut part=slow.product(x).product(&slow.adjoint());part.add_scaled(Complex::ONE,&rho[b]);rho[b]=part;let d=balance[b].as_ref().unwrap();
             rho[b].add_scaled(Complex::new(0.5,0.),&d.product(x));rho[b].add_scaled(Complex::new(0.5,0.),&x.product(d));
             for piece in &q[b].pieces{let ns=g.clusters[piece.target].states.len();let w=kappa(b,piece);
                 for a in 0..3{let s=Dense::from_fn(ns,nt,|i,j|piece.ops[a][i*nt+j]);let m=s.product(x).product(&s.adjoint());
