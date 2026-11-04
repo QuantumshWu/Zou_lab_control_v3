@@ -445,6 +445,8 @@ select.unit-picker { flex: none; width: auto; field-sizing: content; }
 .field-error, .fit-error { grid-column: 1 / -1; margin: 0; color: var(--red-dark); white-space: normal; overflow-wrap: anywhere; }
 /* A field's own problem: one sentence under its line, in the control column. */
 .field > .field-error { grid-column: 2 / -1; }
+/* Why the row cannot be edited, said as plainly but not as a fault. */
+.field > .field-error.field-note { color: var(--muted-ink); }
 .form-note { grid-column: 1 / -1; margin: 0; }
 .form-actions { grid-column: 1 / -1; display: flex; gap: var(--row-gap); margin-top: calc(var(--section-gap) - var(--row-gap)); }
 .spacer { flex: 1; }

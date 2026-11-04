@@ -9,7 +9,6 @@ from zlc_plugin import DeviceRequirement, NodeKind, NodeType
 from zlc_atom.devices.waveform.contract import WaveformAcquisitionMode
 
 from .measurement import (
-    TRIGGER_FIELDS,
     TRIGGER_OFF,
     WAVEFORM_MEASUREMENT_SCHEMA,
     WaveformMeasurementNode,
@@ -17,7 +16,7 @@ from .measurement import (
     waveform_outputs,
     waveform_preview,
 )
-from .trigger import TriggerSettings, channel_choices
+from .trigger import TriggerSettings, channel_choices, channel_output, unit_text
 
 
 def _outputs(values: Mapping[str, object], devices: Mapping[str, object] | None = None) -> tuple:
@@ -28,12 +27,12 @@ def _outputs(values: Mapping[str, object], devices: Mapping[str, object] | None 
     return () if source is None else waveform_outputs(source.outputs)
 
 
-def _previews(values: Mapping[str, object], devices: Mapping[str, object] | None = None) -> tuple:
+def _previews(values: Mapping[str, object], devices: Mapping[str, object] | None = None, node: str | None = None) -> tuple:
     source = (devices or {}).get("sampler")
     if source is None:
         return ()
     triggered = values.get("trigger_slope", TRIGGER_OFF) != TRIGGER_OFF
-    return (waveform_preview(source, trigger_channel=values.get("trigger_channel", "") if triggered else None),)
+    return (waveform_preview(source, trigger_channel=values.get("trigger_channel", "") if triggered else None, node=node),)
 
 
 def _trigger_availability(devices: Mapping[str, object] | None) -> dict[str, str]:
@@ -42,7 +41,8 @@ def _trigger_availability(devices: Mapping[str, object] | None) -> dict[str, str
     source = (devices or {}).get("sampler")
     if source is None or source.working_point().acquisition_mode == WaveformAcquisitionMode.FREE_RUNNING.value:
         return {}
-    return {name: "this source has its own hardware trigger" for name in TRIGGER_FIELDS}
+    # Off, the rows below it are out of use already.
+    return {"trigger_slope": "This source has its own hardware trigger; a software trigger is for free-running sources."}
 
 
 def _trigger_channels(values: object, resources: object, devices: Mapping[str, object] | None = None) -> dict[str, list]:
@@ -51,6 +51,14 @@ def _trigger_channels(values: object, resources: object, devices: Mapping[str, o
     del values, resources
     source = (devices or {}).get("sampler")
     return {} if source is None else {"trigger_channel": channel_choices(source.outputs, source.working_point().time_basis)}
+
+
+def _trigger_level_unit(values: Mapping[str, object], devices: Mapping[str, object] | None = None) -> dict[str, str]:
+    """The level is typed in the chosen channel's unit."""
+
+    source = (devices or {}).get("sampler")
+    chosen = None if source is None else channel_output(values.get("trigger_channel"), source.outputs)
+    return {} if chosen is None else {"trigger_level": unit_text(chosen.unit)}
 
 
 def _build(
@@ -67,7 +75,6 @@ def _build(
             repeat=int(authored["repeat"]),
             trigger=None if authored["trigger_slope"] == TRIGGER_OFF else TriggerSettings(
                 str(authored["trigger_channel"]), float(authored["trigger_level"]), str(authored["trigger_slope"]),
-                int(authored["trigger_record_samples"]), float(authored["trigger_position"]),
             ),
         ),
         producer="waveform_measurement",
@@ -84,7 +91,7 @@ LOGIC_NODE = NodeType(
         "are dynamic: one signal per quantity declared by the selected source "
         "(for example scope voltage or IMU acceleration), not a fixed output list. A slow "
         "free-running source can be locked by a software trigger on a channel, level and "
-        "slope: each trigger is one record, timed from its level crossing."
+        "slope: every sample is its own event, and a plot's newest data ends on the latest crossing."
     ),
     reports_ready=True,
     # What it publishes is what its instrument carries: four quantities off
@@ -95,6 +102,7 @@ LOGIC_NODE = NodeType(
     declare_previews=_previews,
     resolve_field_availability=_trigger_availability,
     resolve_field_choices=_trigger_channels,
+    resolve_field_units=_trigger_level_unit,
     device_requirements=(DeviceRequirement("waveform.source", "sampler", None),),
     build=_build,
 )

@@ -202,7 +202,7 @@ pub fn signal_key(producer: &str, output: &str) -> String { format!("@logic/{pro
 
 /// The draft queries asked whenever a draft changes (PLUGIN_PROTOCOL §2);
 /// admission that needs data or files runs in the plugin at Start.
-const DRAFT_QUERIES: [&str; 9] = ["declare_outputs", "declare_previews", "resolve_field_availability", "resolve_field_choices", "resolve_defaults",
+const DRAFT_QUERIES: [&str; 10] = ["declare_outputs", "declare_previews", "resolve_field_availability", "resolve_field_choices", "resolve_field_units", "resolve_defaults",
                                   "resolve_device_claims", "editor_facts", ADMIT_SOURCE, ADMIT];
 /// What the draft cannot compute from what its source published (v2 admit_source): asked
 /// once every member of the source bundle has a schema; its answers are draft issues.
@@ -1670,6 +1670,11 @@ impl Workbench {
                 let reason = unavailable.and_then(|reasons| reasons.get(&field.name)).and_then(Value::as_str).filter(|reason| !reason.trim().is_empty())
                     .map(str::to_owned).or_else(|| field.derived.then(|| field.description.clone().unwrap_or_default()));
                 if let Some(reason) = reason { control["unavailable_reason"] = json!(reason); }
+            }
+            // A unit the draft decides (a trigger level is typed in its channel's).
+            let units = node.answers.get("resolve_field_units").and_then(|(_, answer)| answer.as_ref().ok()).and_then(Value::as_object);
+            for (name, unit) in units.into_iter().flatten() {
+                if let Some(control) = controls.iter_mut().find(|control| control["name"] == name.as_str()) { control["unit"] = unit.clone(); }
             }
             // Options the draft decides (an SLM rearrangement's imaging periods are its pulse's
             // periods): the field is a choice of them; a held value not among them stays, unavailable.

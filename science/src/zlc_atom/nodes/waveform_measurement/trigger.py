@@ -1,14 +1,10 @@
-"""A software trigger over the records a free-running source already delivers.
+"""A software trigger over the samples a free-running source already delivers.
 
-Oscilloscope-style locking for slow streams (about 1 kHz sampling, records of
-tens of points); a fast signal belongs on a scope with a hardware trigger.  The
-stream goes in as the source's records, cut however the source cuts them, and
-what comes out is one record per trigger: the same raw samples, never
-resampled, with the sub-sample time of the level crossing beside them.
-
-There is no dead time: a scope's is a limit of its hardware.  Every edge fires,
-an edge inside the record before it included, so records overlap and the same
-sample can sit in several, each record its own copy.
+Oscilloscope-style locking for slow streams (about 1 kHz sampling); a fast signal
+belongs on a scope with a hardware trigger.  It holds nothing and changes nothing:
+every sample is published as it arrives, and an edge is a mark on the event it fell
+on, which is where a board's view may stand (``RunContext.commit_events``).  Each
+view then ends on an edge, so the phase on screen is the same at every refresh.
 """
 
 from __future__ import annotations
@@ -16,11 +12,12 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from math import ceil, floor, inf
+from math import ceil, inf
 
 import numpy as np
+from zlc_data.units import resolve_unit
 
-from zlc_atom.devices.waveform.contract import WaveformOutput, WaveformRecord
+from zlc_atom.devices.waveform.contract import WaveformOutput
 
 SLOPES = ("rising", "falling")
 
@@ -38,31 +35,17 @@ EXTREMES_WINDOW_SECONDS = 2.0
 #: sample is compared with does not depend on how the stream was cut into reads.
 _EXTREMES_RUNS = 16
 
-#: The time axis travels as JSON coordinates in each output's schema, about
-#: 25 bytes a point, inside one 16 MiB channel frame.
-_MAX_SCHEMA_COORDINATES = 500_000
 
+def unit_text(unit: str) -> str:
+    """A unit as a person reads it: ``µT``, ``rad/s``, ``m/s²``."""
 
-@dataclass(frozen=True)
-class WaveformTrigger:
-    """The trigger of one run, frozen: which record column, where and how long."""
-
-    column: int
-    level: float
-    slope: str
-    record_samples: int
-    pre_samples: int
-
-
-@dataclass(frozen=True, eq=False)
-class TriggeredRecord(WaveformRecord):
-    """One triggered record: ``time_seconds`` is the interpolated level crossing.
-
-    ``crossing_offset_seconds`` (at most 0, within one sample) is where that
-    crossing lies from the sample at time zero of the record's time axis.
-    """
-
-    crossing_offset_seconds: float = 0.0
+    symbol = resolve_unit(unit).symbol
+    above, below = [], []
+    for part in symbol.split("*"):
+        base, _, power = part.partition("^")
+        exponent = int(power) if power else 1
+        (above if exponent > 0 else below).append(base + {1: "", 2: "²", 3: "³"}.get(abs(exponent), f"^{abs(exponent)}"))
+    return "/".join(["·".join(above) or "1", *below])
 
 
 def channel_value(output: WaveformOutput, label: str) -> str:
@@ -75,8 +58,29 @@ def channel_choices(outputs: Sequence[WaveformOutput], time_basis: str) -> list[
     """Every channel with its unit, the unit its trigger level is typed in."""
 
     note = " - timed by host receipt, limited precision" if time_basis == "host_receive" else ""
-    return [[channel_value(output, label), f"{output.name} {label} ({output.unit}){note}"]
+    return [[channel_value(output, label), f"{output.name} {label} ({unit_text(output.unit)}){note}"]
             for output in outputs for label in output.channel_labels]
+
+
+def channel_output(channel: object, outputs: Sequence[WaveformOutput]) -> WaveformOutput | None:
+    """The quantity a form's channel belongs to, when the source has that channel."""
+
+    for output in outputs:
+        if any(channel_value(output, label) == channel for label in output.channel_labels):
+            return output
+    return None
+
+
+@dataclass(frozen=True)
+class WaveformTrigger:
+    """The trigger of one run, frozen: which record column, at what level, which way."""
+
+    column: int
+    level: float
+    slope: str
+    #: How the status names this channel, and its unit.
+    name: str
+    unit: str
 
 
 @dataclass(frozen=True)
@@ -86,90 +90,50 @@ class TriggerSettings:
     channel: str
     level: float
     slope: str
-    record_samples: int
-    position_percent: float
 
     def __post_init__(self) -> None:
         if self.slope not in SLOPES:
             raise ValueError(f"trigger slope must be one of {SLOPES}, not {self.slope!r}")
         if not str(self.channel).strip():
             raise ValueError("a trigger needs its channel")
-        if int(self.record_samples) < 2:
-            raise ValueError("a triggered record needs at least 2 samples")
-        if not 0.0 <= float(self.position_percent) <= 100.0:
-            raise ValueError("the pre-trigger share must lie between 0 and 100 %")
-
-    def output_name(self) -> str:
-        return str(self.channel).partition("/")[0]
 
     def resolve(self, outputs: Sequence[WaveformOutput]) -> WaveformTrigger:
         """This trigger on this source's columns, or why it cannot be."""
 
-        samples = int(self.record_samples)
-        if samples * len(outputs) > _MAX_SCHEMA_COORDINATES:
-            raise ValueError(
-                f"a triggered record of {samples} samples is too long for this source: at most "
-                f"{_MAX_SCHEMA_COORDINATES // len(outputs)} samples with {len(outputs)} outputs"
-            )
         for output in outputs:
             for label, column in zip(output.channel_labels, output.columns):
                 if channel_value(output, label) == self.channel:
-                    pre = min(samples - 1, floor(samples * float(self.position_percent) / 100.0))
-                    return WaveformTrigger(column, float(self.level), self.slope, samples, pre)
+                    return WaveformTrigger(column, float(self.level), self.slope, f"{output.name} {label}", unit_text(output.unit))
         offered = [channel_value(output, label) for output in outputs for label in output.channel_labels]
         raise ValueError(f"the source has no channel {self.channel!r}; it offers {offered}")
 
 
 class TriggerDetector:
-    """The stream in, triggered records out; holds at most about one record of it.
+    """One channel's samples in, in order; which of them are trigger edges out.
 
-    Whether the signal is armed runs over every sample, whatever records are
-    being filled.  An edge within the first pre-trigger share of the stream has
-    no record to go in, and it arms and fires like any other otherwise.
-
-    One ordinal gap in the stream ends what lies before it: the records being
-    filled are lost (``broken_records``), never stitched across the gap, and the
-    pre-trigger share refills before the next record.
+    Every edge of an armed signal fires, and arming runs over every sample.  What
+    was scanned leaves nothing behind but the running extremes and the last sample.
     """
 
     def __init__(self, trigger: WaveformTrigger, sample_interval_seconds: float) -> None:
-        self._trigger = trigger
-        self._interval = float(sample_interval_seconds)
         # Falling is rising on the negated signal, the level and the extreme with it.
         self._sign = 1.0 if trigger.slope == "rising" else -1.0
         self._level = self._sign * trigger.level
-        self._run_samples = max(1, ceil(EXTREMES_WINDOW_SECONDS / self._interval / _EXTREMES_RUNS))
+        self._run_samples = max(1, ceil(EXTREMES_WINDOW_SECONDS / float(sample_interval_seconds) / _EXTREMES_RUNS))
         self._run_minima: deque[float] = deque(maxlen=_EXTREMES_RUNS)
         self._run_minimum = inf
         self._run_filled = 0
         self._armed = False
-        self._expected_ordinal: int | None = None
-        self._produced = 0
-        #: Records a gap in the stream cut short: the one way a trigger is lost.
-        self.broken_records = 0
-        self._clear_stream()
+        self._last: float | None = None
+        #: The range seen since ``take_range``: what a waiting status reports.
+        self._low, self._high = inf, -inf
 
-    def _clear_stream(self) -> None:
-        self._samples: np.ndarray | None = None
-        self._times: np.ndarray | None = None
-        #: (index of the trigger sample, crossing time, offset) of each record being filled.
-        self._pending: deque[tuple[int, float, float]] = deque()
+    def take_range(self) -> tuple[float, float] | None:
+        """The channel's range since the last call (None: no finite sample came)."""
 
-    def feed(self, records: Sequence[WaveformRecord]) -> list[TriggeredRecord]:
-        """The records these complete, in order; the stream continues in the next call."""
-
-        fired: list[TriggeredRecord] = []
-        run: list[WaveformRecord] = []
-        for record in records:
-            if self._expected_ordinal is not None and record.source_ordinal != self._expected_ordinal:
-                self._scan(run, fired)
-                run = []
-                self.broken_records += len(self._pending)
-                self._clear_stream()
-            self._expected_ordinal = record.source_ordinal + 1
-            run.append(record)
-        self._scan(run, fired)
-        return fired
+        seen = None if self._low > self._high else (self._low, self._high)
+        self._low, self._high = inf, -inf
+        return seen
 
     def _running_minimum(self, fresh: np.ndarray) -> np.ndarray:
         """The signal's minimum over the look-back, up to and including each sample."""
@@ -188,23 +152,23 @@ class TriggerDetector:
             at += part.size
         return minima
 
-    def _scan(self, run: list[WaveformRecord], fired: list[TriggeredRecord]) -> None:
-        if not run:
-            return
-        trigger = self._trigger
-        held = () if self._samples is None else (self._samples,)
-        held_times = () if self._times is None else (self._times,)
-        scanned = 0 if self._samples is None else self._samples.shape[0]
-        self._samples = np.concatenate([*held, *(record.samples for record in run)])
-        self._times = np.concatenate([*held_times, *(
-            record.time_seconds + self._interval * np.arange(record.samples.shape[0]) for record in run)])
-        signal = self._sign * self._samples[:, trigger.column].astype(np.float64)
+    def scan(self, samples: np.ndarray) -> np.ndarray:
+        """One bool per sample: it is a trigger edge."""
+
+        marks = np.zeros(samples.size, dtype=bool)
+        if not samples.size:
+            return marks
+        fresh = np.asarray(samples, dtype=np.float64)
+        if np.isfinite(fresh).any():
+            self._low = min(self._low, float(np.nanmin(fresh)))
+            self._high = max(self._high, float(np.nanmax(fresh)))
+        fresh = self._sign * fresh
         level = self._level
-        fresh = signal[scanned:]
-        arming = np.flatnonzero((fresh < 0.5 * (level + self._running_minimum(fresh))) & (fresh < level)) + scanned
-        first = max(scanned, 1)
-        edges = np.flatnonzero((signal[first - 1:-1] < level) & (signal[first:] >= level)) + first
-        position = scanned
+        arming = np.flatnonzero((fresh < 0.5 * (level + self._running_minimum(fresh))) & (fresh < level))
+        previous = np.concatenate(((np.nan if self._last is None else self._last,), fresh[:-1]))
+        edges = np.flatnonzero((previous < level) & (fresh >= level))
+        self._last = float(fresh[-1])
+        position = 0
         # Jumps from one condition to the next, so the cost is per trigger
         # however many times noise crosses the level.
         while True:
@@ -220,29 +184,9 @@ class TriggerDetector:
             index = int(edges[found])
             self._armed = False
             position = index + 1
-            if index >= trigger.pre_samples:
-                share = (level - signal[index - 1]) / (signal[index] - signal[index - 1])
-                before, at = self._times[index - 1], self._times[index]
-                crossing = float(before + share * (at - before))
-                self._pending.append((index, crossing, crossing - float(at)))
-        length = signal.size
-        while self._pending and self._pending[0][0] - trigger.pre_samples + trigger.record_samples <= length:
-            (index, crossing, offset) = self._pending.popleft()
-            start = index - trigger.pre_samples
-            fired.append(TriggeredRecord(
-                self._samples[start:start + trigger.record_samples], self._produced, crossing,
-                run[-1].host_received_at_ns, crossing_offset_seconds=offset,
-            ))
-            self._produced += 1
-        # Keep what the records being filled, the next pre-trigger share and the
-        # next crossing's previous sample can still need.
-        keep = max(0, length - max(trigger.pre_samples, 1))
-        if self._pending:
-            keep = min(keep, self._pending[0][0] - trigger.pre_samples)
-            self._pending = deque((index - keep, crossing, offset) for index, crossing, offset in self._pending)
-        self._samples = self._samples[keep:].copy()
-        self._times = self._times[keep:].copy()
+            marks[index] = True
+        return marks
 
 
-__all__ = ["EXTREMES_WINDOW_SECONDS", "SLOPES", "TriggerDetector", "TriggerSettings", "TriggeredRecord",
-           "WaveformTrigger", "channel_choices", "channel_value"]
+__all__ = ["EXTREMES_WINDOW_SECONDS", "SLOPES", "TriggerDetector", "TriggerSettings", "WaveformTrigger",
+           "channel_choices", "channel_output", "channel_value", "unit_text"]

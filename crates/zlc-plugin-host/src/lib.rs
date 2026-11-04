@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use zlc_core::AnyBuffer;
 use zlc_core::control::{Origin, SafeActions, public_instance};
 use zlc_core::runtime::{Bundle, Declaration, DeliveryKind, DeliveryPolicy, Generation, GenerationId, HistoryLease, Input, Read, ReadKind,
     ReadMode, ReadRequest, RunRecord, Runtime, RuntimeError, Start, Storage, Subscription};
@@ -1192,6 +1193,7 @@ impl Inner {
         let answer = match op.as_str() {
             "run.begin" => self.run_begin(&message["p"]).map(|value| (value, Vec::new())),
             "run.commit" => self.run_commit(&message["p"], &lends).map(|value| (value, Vec::new())),
+            "run.commit_events" => self.run_commit_events(&message["p"], &lends).map(|value| (value, Vec::new())),
             "runtime.read" => self.runtime_read(process, &message["p"]),
             "run.operator_input" | "run.artifact" | "run.figure" | "run.animation" | "run.acquire" | "run.snapshot" | "core" => {
                 // The application answers these (respond); the run's thread waits.
@@ -1335,6 +1337,77 @@ impl Inner {
                           "revision": key.revision, "ordinal": key.ordinal}))
         }).collect();
         Ok(Value::Object(keys))
+    }
+
+    /// Consecutive events of a run in one message (PLUGIN_PROTOCOL.md §5): each the
+    /// event `run_commit` would make of it, and any of them possibly not shown.
+    fn run_commit_events(&self, params: &Value, lends: &[Arc<Lend>]) -> Result<Value, CallError> {
+        let invalid = |message: String| CallError::new(ErrorKind::Invalid, message);
+        let column = |field: &str, expected: usize| -> Result<Option<AnyBuffer>, CallError> {
+            if params[field].is_null() { return Ok(None); }
+            let column = wire::array(&params[field], lends).map_err(|error| invalid(format!("{field}: {error}")))?;
+            if column.shape.first() != Some(&expected) { return Err(invalid(format!("{field} needs one row per event"))); }
+            Ok(Some(column.values))
+        };
+        let count = params["count"].as_u64().filter(|count| *count > 0).ok_or_else(|| invalid("run.commit_events needs a count".into()))? as usize;
+        let Some(AnyBuffer::U64(ordinals)) = column("ordinals", count)? else { return Err(invalid("run.commit_events needs u64 ordinals".into())); };
+        let times = match column("shot_times", count)? {
+            None => None, Some(AnyBuffer::F64(times)) => Some(times),
+            Some(_) => return Err(invalid("shot times are float64 seconds".into())),
+        };
+        let origins = match column("origins", count)? {
+            None => None, Some(AnyBuffer::U64(origins)) if origins.len() == 2 * count => Some(origins),
+            Some(_) => return Err(invalid("origins are (count, 2) u64".into())),
+        };
+        let shown = match column("shown", count)? {
+            None => None, Some(AnyBuffer::Bool(shown)) => Some(shown),
+            Some(_) => return Err(invalid("shown is one bool per event".into())),
+        };
+        let records = match &params["records"] {
+            Value::Null => None,
+            Value::Array(records) if records.len() == count => Some(records),
+            _ => return Err(invalid("records needs one record per event".into())),
+        };
+        let entries = params["inputs"].as_array().filter(|entries| !entries.is_empty()).ok_or_else(|| invalid("run.commit_events needs inputs".into()))?;
+        let (generation, outputs) = {
+            let mut state = self.state.lock().unwrap();
+            let run = Self::run_of(&mut state, params)?;
+            let generation = run.generation.clone().ok_or_else(|| invalid("run.commit_events before run.begin".into()))?;
+            let mut outputs = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let name = entry["output"].as_str().unwrap_or("");
+                let output = run.outputs.get_mut(name).ok_or_else(|| invalid(format!("{name} was not declared at run.begin")))?;
+                if let Some(tree) = entry.get("schema").filter(|tree| !tree.is_null()) {
+                    output.chunk = Some(wire::schema_from_tree(tree).map_err(|error| invalid(format!("{name}: {error}")))?);
+                }
+                let schema = if output.finite {
+                    output.chunk.clone().ok_or_else(|| invalid(format!("{name}: a finite event needs its chunk schema")))?
+                } else { output.chunk.clone().unwrap_or_else(|| output.schema.clone()) };
+                let blocks = wire::decode_events(&entry["data"], &schema, count, lends).map_err(|error| invalid(format!("{name}: {error}")))?;
+                outputs.push((name.to_owned(), output.signal.clone(), blocks));
+            }
+            (generation, outputs)
+        };
+        let mut blocks: Vec<_> = outputs.iter().map(|(.., blocks)| blocks.iter()).collect();
+        let bundles: Vec<Bundle> = (0..count).map(|index| {
+            let mut metadata = serde_json::Map::new();
+            if let Some(records) = records {
+                metadata.insert("records".into(), Value::Object(outputs.iter().map(|(name, ..)| (name.clone(), records[index].clone())).collect()));
+            }
+            let time = times.as_ref().map(|times| times.as_slice()[index]);
+            if let Some(time) = time {
+                metadata.insert("shot_time_seconds".into(), Value::Object(outputs.iter().map(|(name, ..)| (name.clone(), json!(time))).collect()));
+            }
+            let inputs = outputs.iter().zip(&mut blocks).map(|((_, signal, _), blocks)| Input::Event {
+                signal: signal.clone(), ordinal: ordinals.as_slice()[index], data: blocks.next().expect("one block per event").clone(),
+                origin: origins.as_ref().map(|origins| [origins.as_slice()[2 * index] as usize, origins.as_slice()[2 * index + 1] as usize]),
+                shot_time: time,
+            }).collect();
+            Bundle { inputs, metadata: Value::Object(metadata), parents: Vec::new() }
+        }).collect();
+        self.runtime.commit_events(&generation, &bundles, shown.as_ref().map(|shown| shown.as_slice()))
+            .map_err(|error| CallError::from(error.to_string()))?;
+        Ok(Value::Null)
     }
 
     fn runtime_read(&self, process: &Arc<PluginProcess>, params: &Value) -> Result<(Value, Vec<String>), CallError> {

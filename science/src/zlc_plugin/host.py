@@ -27,7 +27,7 @@ import numpy as np
 
 from . import capabilities, tunable
 from .blocks import Arena, Attachments
-from .declare import ADMIT, QUERY_PARAMETERS, DeviceType, NodeKind, NodeType, Opened, field_json
+from .declare import ADMIT, NODE_INSTANCE, QUERY_PARAMETERS, DeviceType, NodeKind, NodeType, Opened, field_json
 from .describe import describe, find
 from .wire import (PROTOCOL, Channel, Decoder, Encoder, PluginError, error_payload, plain, raise_remote)
 
@@ -766,6 +766,7 @@ def _query(instance: Instance, params: dict[str, Any]) -> Any:
             # The core names the facts; the v2 callable takes them positionally.
             facts = dict(params)
             facts["devices"] = Run.proxies(instance, dict(params.get("devices") or {}), run=None)
+            facts["node"] = instance.name.removeprefix(NODE_INSTANCE)
             _QUERYING.instance = instance
             try:
                 return function(*(facts.get(parameter) for parameter in QUERY_PARAMETERS[name]))

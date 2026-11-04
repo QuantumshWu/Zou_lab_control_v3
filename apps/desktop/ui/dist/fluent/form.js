@@ -266,13 +266,17 @@ export class Field {
         }
         // A row with no unit picker says its unit in its label; a picker says it itself (_shown_label).
         const label = spec.unit && spec.unit !== "1" && !spec.units?.length ? `${spec.label} (${spec.unit})` : spec.label;
-        const words = this.marked && (spec.required ?? !spec.allow_none) ? `${label} *` : label;
+        // A row out of use asks for nothing.
+        const words = this.marked && spec.enabled !== false && (spec.required ?? !spec.allow_none) ? `${label} *` : label;
         // _fit_label: a label wider than the column the form gives it keeps its start and its end.
         setMiddle(this.label, words, "none");
         setTitle(this.label, spec.description || spec.label);
         const reason = this.reason();
-        setText(this.problem, spec.problem || "");
-        assign(this.problem, "hidden", !spec.problem);
+        // What the row must say: what is wrong with it, or why this device cannot do it.
+        const message = spec.problem || spec.unavailable_reason || "";
+        setText(this.problem, message);
+        assign(this.problem, "hidden", !message);
+        this.problem.classList.toggle("field-note", !spec.problem && Boolean(message));
         if (this.input instanceof Segmented) {
             setTitle(this.input.root, reason);
             this.input.disabled = Boolean(reason);

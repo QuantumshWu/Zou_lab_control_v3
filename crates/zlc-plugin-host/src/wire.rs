@@ -144,6 +144,46 @@ pub fn decode_block(data: &Value, schema: Arc<DatasetSchema>, lends: &[Arc<Lend>
     DataBlock::new(schema, values.values, validity, sigma)
 }
 
+/// One output's `count` consecutive events, each `schema`'s block: the planes hold
+/// them one after another (first axis the event), and each block borrows its part.
+pub fn decode_events(data: &Value, schema: &Arc<DatasetSchema>, count: usize, lends: &[Arc<Lend>]) -> Result<Vec<Arc<DataBlock>>, String> {
+    let planned = |shape: &[usize]| std::iter::once(count).chain(shape.iter().copied()).collect::<Vec<_>>();
+    let values = array(&data["values"], lends)?;
+    if values.shape != planned(schema.physical_shape()) {
+        return Err(format!("Events of shape {:?} do not match {count} of the declared {:?}", values.shape, schema.physical_shape()));
+    }
+    let (owner, offset) = values.values.foreign().ok_or("Event values must be borrowed")?;
+    let stride = values.values.as_bytes().len() / count.max(1);
+    let (kind, len) = (values.values.dtype(), schema.value_len());
+    let masks = match &data["validity"] {
+        Value::Bool(_) | Value::Null => None,
+        reference => {
+            let mask = array(reference, lends)?;
+            if !matches!(mask.values, AnyBuffer::Bool(_)) { return Err("A validity mask must be bool".into()); }
+            if mask.shape != planned(&mask_shape(schema)) {
+                return Err(format!("A validity mask of shape {:?} does not match {count} of {:?}", mask.shape, mask_shape(schema)));
+            }
+            Some(mask.values)
+        }
+    };
+    let uniform = data["validity"].as_bool().unwrap_or(true);
+    (0..count).map(|index| {
+        let part = AnyBuffer::from_foreign(kind, owner.clone(), offset + index * stride, len)?;
+        let validity = match &masks {
+            None => Validity::Uniform(uniform),
+            Some(mask) => {
+                let (owner, offset) = mask.foreign().ok_or("A validity mask must be borrowed")?;
+                let cells = schema.component_mask_len();
+                match AnyBuffer::from_foreign(DType::Bool, owner.clone(), offset + index * cells, cells)? {
+                    AnyBuffer::Bool(mask) => Validity::Mask(mask),
+                    _ => unreachable!("asked for bool"),
+                }
+            }
+        };
+        DataBlock::new(schema.clone(), part, validity, None)
+    }).collect()
+}
+
 /// One complete dataset with its identity (`zlc_plugin.figures.dataset_to_wire`).
 pub struct Dataset { pub block: Arc<DataBlock>, pub block_id: String, pub revision: u64, pub generation: String }
 

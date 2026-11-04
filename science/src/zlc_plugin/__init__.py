@@ -15,14 +15,14 @@ NodeExecutionContext methods (commit_live, report_ready, cancel_requested, ...);
 its device arguments are proxies implementing the capability's Protocol.
 """
 
-from .context import LiveDatasetOutput, Read, RunContext
+from .context import LiveDatasetOutput, LiveEvents, Read, RunContext
 from .declare import (Command, DatasetInput, DatasetOutputDeclaration, DeviceRequirement, DeviceType, FileParam,
                       NodeKind, NodeType, Opened, PhysicalOutput)
 from .host import allocate, core, notifier, share, simulation_parameters
 from .wire import PluginError, Refused
 
 __all__ = [
-    "Command", "DatasetInput", "DatasetOutputDeclaration", "DeviceRequirement", "DeviceType", "FileParam", "LiveDatasetOutput",
+    "Command", "DatasetInput", "DatasetOutputDeclaration", "DeviceRequirement", "DeviceType", "FileParam", "LiveDatasetOutput", "LiveEvents",
     "NodeKind", "NodeType", "Opened", "PhysicalOutput", "PluginError", "Read", "Refused", "RunContext", "allocate", "core",
     "notifier", "share", "simulation_parameters",
 ]
