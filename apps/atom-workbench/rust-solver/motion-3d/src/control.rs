@@ -128,7 +128,7 @@ impl Twin{
         // target's Π: K = Π L̃.
         let jumps:Vec<Vec<[Vec<Complex>;3]>>=(0..model.clusters()).map(|k|{
             let n=model.dimension(k);let columns:Vec<Vec<[[Complex;MOST_STATES];3]>>=(0..n).map(|j|{let mut psi=[Complex::ZERO;MOST_STATES];psi[j]=Complex::ONE;
-                model.photons(k,&point,&psi,0.,None).amplitude}).collect();
+                std::mem::take(&mut model.photons(k,&point,&psi,0.,None).amplitude)}).collect();
             model.ground.clusters[k].classes.iter().enumerate().map(|(c,class)|{let nt=model.dimension(class.target);
                 std::array::from_fn(|x|{let l:Vec<Complex>=(0..nt*n).map(|e|columns[e%n][c][x][e/n]).collect();
                     match &slow[class.target]{None=>l,Some(pi)=>(0..nt*n).map(|e|{let(i,j)=(e/n,e%n);(0..nt).fold(Complex::ZERO,|z,m|z+pi[i*nt+m]*l[m*n+j])}).collect()}})}).collect()}).collect();
