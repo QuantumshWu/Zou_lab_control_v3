@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use zlc_core::AnyBuffer;
 use zlc_core::control::{Origin, SafeActions};
 use zlc_core::runtime::{Publication, Runtime, SignalDescription};
+use zlc_core::schema::DomainRole;
 use zlc_plugin_host::{HostConfig, HostEvent, PluginHost, RunRequest};
 
 type Host = (PluginHost, Runtime, mpsc::Receiver<HostEvent>);
@@ -122,6 +123,131 @@ fn groups_reach_runtime_as_write_once_placements_beside_a_per_event_latest() {
     let flat: Vec<f64> = expected.iter().flatten().copied().collect();
     for (got, want) in placed[0].1.iter().zip(&flat) {
         assert!((got - want).abs() < 1e-12, "{:?}", placed[0].1);
+    }
+    host.shutdown();
+}
+
+/// What a finite output holds, by (Repeat row, Point row) of its segments: rows x points x sites
+/// values, and how many segments were written.
+fn plane(runtime: &Runtime, signal: &str) -> (Vec<f64>, Vec<f64>, usize, usize) {
+    let item = published(runtime, signal);
+    assert!(item.finite && item.sealed, "{signal}");
+    let latest = runtime.read_latest(&item.generation, signal).unwrap();
+    let dataset = latest.canonical().expect("finite dataset");
+    let schema = dataset.schema();
+    let [rows, points, cells] = [schema.domain(DomainRole::Repeat), schema.domain(DomainRole::Point), schema.domain(DomainRole::Cell)].map(|domain| domain.physical_shape().iter().product::<usize>());
+    let (mut values, mut sigmas) = (vec![f64::NAN; rows * points * cells], vec![f64::NAN; rows * points * cells]);
+    for segment in dataset.segments() {
+        let [row, point] = segment.origin();
+        let block = floats(segment.data().values());
+        let (high, wide) = (segment.data().schema().domain(DomainRole::Repeat).physical_shape()[0], segment.data().schema().domain(DomainRole::Point).physical_shape()[0]);
+        assert_eq!(block.len(), high * wide * cells);
+        for r in 0..high {
+            for p in 0..wide {
+                for c in 0..cells {
+                    let (from, to) = ((r * wide + p) * cells + c, ((row + r) * points + point + p) * cells + c);
+                    assert!(values[to].is_nan(), "{signal} wrote a cell twice");
+                    values[to] = block[from];
+                    if let Some(sigma) = segment.data().sigma() { sigmas[to] = sigma.as_slice()[from]; }
+                }
+            }
+        }
+    }
+    (values, sigmas, dataset.segment_count(), rows)
+}
+
+fn close(got: &[f64], want: &[f64]) {
+    assert_eq!(got.len(), want.len());
+    for (got, want) in got.iter().zip(want) { assert!((got - want).abs() < 1e-9, "{got} against {want}"); }
+}
+
+/// The repeater's source, sealed; each `(node, variables, outputs)` running while it publishes.
+/// Then the same variables over what it sealed, as `<node>_sealed`.
+fn both_routes(host: &PluginHost, events: &mpsc::Receiver<HostEvent>, runtime: &Runtime, values: Value, node: &str, variables: &Value, outputs: &[&str]) {
+    let source = "@logic/repeater/counts";
+    let named = |node: &str| outputs.iter().map(|name| ((*name).to_owned(), format!("@logic/{node}/{name}"))).collect::<Vec<_>>();
+    let start = |node: &str| {
+        host.open(node, "derive", json!({}), json!({})).unwrap();
+        let names = named(node);
+        let names: Vec<(&str, &str)> = names.iter().map(|(name, signal)| (name.as_str(), signal.as_str())).collect();
+        host.start_run(node, request(json!({"variables": variables}), Some(source), &names)).unwrap()
+    };
+    if host.instances().iter().all(|(name, _, _)| name != "repeater") { host.open("repeater", "repeater", json!({}), json!({})).unwrap(); }
+    let repeater = host.start_run("repeater", request(values, None, &[("counts", source)])).unwrap();
+    published(runtime, source);
+    let live = start(node);
+    await_end(events, &[&repeater, &live]);
+    let sealed = start(&format!("{node}_sealed"));
+    await_end(events, &[&sealed]);
+}
+
+#[test]
+fn a_point_axis_group_closes_per_kept_repeat_on_both_routes() {
+    let Some((host, runtime, events)) = host() else { return };
+    let variables = json!([{"name": "a", "terms": [{"of": "counts"}], "statistic": "mean", "over": ["duration"], "by": "duration", "every": 2}]);
+    both_routes(&host, &events, &runtime, json!({"repeats": 2, "points": 5, "pause": 0.01}), "points", &variables, &["a"]);
+    let (values, sigmas, segments, rows) = plane(&runtime, "@logic/points/a");
+    // Each kept repeat's groups (p 0-1, 2-3, 4), site by site; each closed by itself, the last one full at one point.
+    assert_eq!((segments, rows), (6, 2));
+    let want: Vec<f64> = [0.0, 10.0].iter().flat_map(|r| [0.5, 2.5, 4.0].map(|p| r + p)).flat_map(|v| [0.0, 0.1, 0.2].map(|c| v + c)).collect();
+    close(&values, &want);
+    let half = (0.5f64 / 2.0).sqrt();
+    assert!((sigmas[0] - half).abs() < 1e-9 && sigmas[6].is_nan(), "two points state their standard error; one has none: {sigmas:?}");
+    let (sealed, _sigmas, segments, _rows) = plane(&runtime, "@logic/points_sealed/a");
+    assert_eq!(segments, 1, "a sealed source is one delivery and one commit");
+    close(&sealed, &want);
+    host.shutdown();
+}
+
+#[test]
+fn one_delivery_that_closes_two_rectangles_makes_two_commits() {
+    let Some((host, runtime, events)) = host() else { return };
+    let variables = json!([{"name": "a", "terms": [{"of": "counts"}], "statistic": "sum", "over": ["duration"], "by": "duration", "every": 2}]);
+    // The fourth publication closes (0, 0), (0, 1) and (1, 0): rows of different lengths; the last one (1, 1).
+    let places = "[[0,0,1,1],[0,3,1,1],[1,0,1,1],[0,1,2,2],[1,3,1,1]]";
+    both_routes(&host, &events, &runtime, json!({"repeats": 2, "points": 4, "pause": 0.01, "places": places}), "many", &variables, &["a"]);
+    let (values, _sigmas, segments, rows) = plane(&runtime, "@logic/many/a");
+    assert_eq!((segments, rows), (3, 2), "the rectangles, then the last group");
+    let want: Vec<f64> = [0.0, 10.0].iter().flat_map(|r| [2.0 * r + 1.0, 2.0 * r + 5.0]).flat_map(|v| [0.0, 0.2, 0.4].map(|c| v + c)).collect();
+    close(&values, &want);
+    close(&plane(&runtime, "@logic/many_sealed/a").0, &want);
+    host.shutdown();
+}
+
+#[test]
+fn a_group_of_groups_closes_with_what_it_reads() {
+    let Some((host, runtime, events)) = host() else { return };
+    let variables = json!([
+        {"name": "a", "publish": false, "terms": [{"of": "counts"}], "statistic": "mean", "over": ["repeat"], "by": "repeat", "every": 2},
+        {"name": "b", "terms": [{"of": "a"}], "statistic": "mean", "over": ["repeat", "Site"], "by": "repeat", "every": 2},
+    ]);
+    both_routes(&host, &events, &runtime, json!({"repeats": 7, "points": 2, "pause": 0.01}), "second", &variables, &["b"]);
+    let (values, sigmas, segments, rows) = plane(&runtime, "@logic/second/b");
+    // a: repeats 0-1, 2-3, 4-5, 6; b: a's 0-1 (repeats 0-3), a's 2-3: a mean of two means, 45 and 60; site mean 0.1.
+    assert_eq!((segments, rows), (2, 2));
+    let want = [15.1, 16.1, 52.6, 53.6];
+    close(&values, &want);
+    assert!(sigmas.iter().all(|sigma| sigma.is_finite() && *sigma > 0.0), "{sigmas:?}");
+    let (sealed, sealed_sigmas, _segments, _rows) = plane(&runtime, "@logic/second_sealed/b");
+    close(&sealed, &want);
+    close(&sealed_sigmas, &sigmas);
+    host.shutdown();
+}
+
+#[test]
+fn a_repeat_group_beside_a_kept_repeat_axis_closes_by_its_own_axis() {
+    let Some((host, runtime, events)) = host() else { return };
+    let variables = json!([{"name": "a", "terms": [{"of": "counts"}], "statistic": "mean", "over": ["repeat", "Site"], "by": "repeat", "every": 2}]);
+    for (node, slow) in [("fast", false), ("slow", true)] {
+        both_routes(&host, &events, &runtime, json!({"repeats": 5, "points": 2, "shots": 2, "shots_slow": slow, "pause": 0.005}), node, &variables, &["a"]);
+        let (values, _sigmas, _segments, rows) = plane(&runtime, &format!("@logic/{node}/a"));
+        assert_eq!(rows, 6, "three groups of repeat beside two shots");
+        // Group means of r (0-1, 2-3, 4) x 10 + shot x 100 + p + site mean 0.1, each in its group whole.
+        let order: Vec<(f64, f64)> = if slow { [0.0, 100.0].iter().flat_map(|s| [5.0, 25.0, 40.0].map(|r| (r, *s))).collect() }
+                                     else { [5.0, 25.0, 40.0].iter().flat_map(|r| [0.0, 100.0].map(|s| (*r, s))).collect() };
+        let want: Vec<f64> = order.iter().flat_map(|(r, s)| [0.1, 1.1].map(|p| r + s + p)).collect();
+        close(&values, &want);
+        close(&plane(&runtime, &format!("@logic/{node}_sealed/a")).0, &want);
     }
     host.shutdown();
 }

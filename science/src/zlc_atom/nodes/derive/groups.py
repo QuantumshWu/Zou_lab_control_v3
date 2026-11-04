@@ -8,8 +8,9 @@ many.  There is no other path, and a closed group is given once and never
 changes.
 
 A group closes when every cell it expects has arrived, or -- repeats run in
-order, Point scans may be shuffled -- when a later Repeat group arrived, or
-when the source sealed.  A variable that groups starts a clock; what reads it
+order, Point scans may be shuffled -- when a later group of its axis arrived
+beside the same coordinates of the other kept Repeat axes, or when the source
+sealed.  A variable that groups starts a clock; what reads it
 evaluates only on what just closed (:func:`.expression._clock`), each closed
 run of groups as one :class:`Chunk`.
 """
@@ -23,7 +24,7 @@ from zlc_data import DatasetSchema, DomainSpec
 from zlc_data.snapshot_projection import _subset_mapped_domain
 
 from .expression import (
-    Operand, _answering, _apply_reduction_plans, _axis, _axis_labels, _domains, _reduce_plan, _schema, _structure,
+    Operand, _answering, _apply_reduction_plans, _axis, _axis_labels, _domains, _primary, _reduce_plan, _schema, _structure,
     _unit, centred, evaluate, fit_cells, fit_operands, fit_schemas, fit_target, formula, group_domain, reads_for_fit,
     stated_square, standard_error, statistic_of, typed_variables,
 )
@@ -147,7 +148,10 @@ class Accumulator:
         self._tallies: dict[tuple[int, int], dict] = {}
         self._arrived: dict[tuple[int, int], int] = {}
         self._closed: set[tuple[int, int]] = set()
-        self._latest = -1
+        #: Each kept Repeat row's (line, place along the axis in groups): a line is
+        #: one set of coordinates of the other kept Repeat axes, in order on its own.
+        self._line, self._step = _repeat_lines(self.schema, row["by"]) if self.domain == 0 and not spanning else (None, None)
+        self._latest: dict[int, int] = {}
         #: Each kept row's identity, by its axes' codes (filled when a pick needs it).
         self._rows: list[dict | None] = [None, None]
         self._same: list[bool | None] = [None, None]
@@ -200,11 +204,25 @@ class Accumulator:
             else:
                 units = tuple(((row, group), i, j, int(hit_r[i]) * int(hit_p[j])) for j, group in enumerate(unique_p.tolist()))
             touched.extend(self._add(*unit, part, unique_p) for unit in units)
-        self._latest = max(self._latest, max(unit[0] for unit in touched))
+        if self.domain == 0:
+            for unit in touched:
+                line, step = self._place(unit)
+                self._latest[line] = max(self._latest.get(line, step), step)
         return self._close(self._due(touched))
 
+    def _place(self, unit) -> tuple[int, int]:
+        """A monitor's rows are its groups, in one line."""
+
+        return (0, unit[0]) if self._line is None else (int(self._line[unit[0]]), int(self._step[unit[0]]))
+
+    def _followed(self, unit) -> bool:
+        """Whether a later group stands in this unit's line: nothing more comes to it."""
+
+        line, step = self._place(unit)
+        return step < self._latest.get(line, step)
+
     def _add(self, unit, i, j, arrivals, part, unique_p):
-        if unit in self._closed or (self.domain == 0 and unit[0] < self._latest and unit not in self._tallies):
+        if unit in self._closed or (self.domain == 0 and self._followed(unit) and unit not in self._tallies):
             raise ValueError(f"{self.row['name']}: a {self.row['by']} sample arrived after its group closed; "
                              "repeats run in order")
         slices = {key: plane[i, j] for key, plane in part.items()}
@@ -220,8 +238,7 @@ class Accumulator:
     def _due(self, touched) -> list:
         due = [unit for unit in dict.fromkeys(touched) if self._arrived[unit] >= self._expected(unit)]
         if self.domain == 0:
-            # Repeats run in order: nothing more comes to a group a later one follows.
-            due.extend(unit for unit in self._tallies if unit[0] < self._latest and unit not in due)
+            due.extend(unit for unit in self._tallies if self._followed(unit) and unit not in due)
         return due
 
     def close_all(self) -> tuple[Chunk, ...]:
@@ -238,7 +255,7 @@ class Accumulator:
             del self._arrived[unit]
         self._closed.update(units)
         if self.domain == 0:
-            self._closed = {unit for unit in self._closed if unit[0] >= self._latest}
+            self._closed = {unit for unit in self._closed if not self._followed(unit)}
         return tuple(self._chunk(block, results) for block in _rectangles(units, spanning=self.spanning))
 
     def _chunk(self, block, results) -> Chunk:
@@ -258,6 +275,16 @@ class Accumulator:
                                     for row in rows], axis=0)
         dtype = schema.value_schema.dtype
         return Chunk(Operand(schema, planes[0].astype(dtype, copy=False), planes[1], sigma), origin, ordinal)
+
+
+def _repeat_lines(schema: DatasetSchema, by: str) -> tuple[np.ndarray, np.ndarray]:
+    """(line, place along ``by``) of each Repeat row of a schema grouped by it."""
+
+    domain = _domains(schema)[0]
+    axes = _primary(domain)
+    others = [domain.codes(axis.axis_id) for axis in axes if axis.name != by]
+    line = np.unique(np.column_stack(others), axis=0, return_inverse=True)[1].reshape(-1) if others else np.zeros(domain.size, np.int64)
+    return line, np.asarray(domain.codes(next(axis for axis in axes if axis.name == by).axis_id))
 
 
 def _rectangles(units, *, spanning) -> list[tuple[tuple[int, ...], tuple[int, ...]]]:
