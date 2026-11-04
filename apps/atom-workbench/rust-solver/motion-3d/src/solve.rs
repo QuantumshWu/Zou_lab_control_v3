@@ -23,6 +23,19 @@
 //! the trajectories and is no decision yet: it enters the total (validated on resonant probes against
 //! the population core: optical pumping's population error 0.4–1.1 η², a cycling transition's 2η⁴).
 //!
+//! The fold's charge at an output is its error over the populations' memory before it. A step's defect
+//! reaches a later time through the problem's own propagator (the error transport of an ODE's global
+//! error; a dissipative problem's propagator decays with its relaxation, and the a-posteriori estimates
+//! weigh each defect by that decay): an error the fold makes while the atoms are bright stays in their
+//! populations until they relax, and an atom's populations relax through the photons it scatters. An atom
+//! pumped into a dark state keeps its transient's error (an optical pumping's, the validation's M1: 0.028
+//! at 5 µs), one that scatters forgets it within a few photons. So the charge at output i is the largest
+//! over j ≤ i of output j's 2η² -- its error over the interval after j, where the larger of the interval's
+//! two ends bounds it -- times the mean over the atoms held at i of e^{−n}, n an atom's jumps since the
+//! end of that interval (`Memory`, the pilot's atoms): at least its own 2η², and at most the largest since
+//! t = 0. (QuTiP's solvers control a step's local error and leave the global error, as an elimination's
+//! validity, to the user's convergence checks.)
+//!
 //! An output's total estimated error is the ledger's total there (its η², its mean (kv/σ)² and the
 //! profiles at the atoms with the model's estimates), the time step's bias (its step-doubling share)
 //! and CONFIDENCE standard errors: the populations' against the population target (absolute), T's
@@ -32,6 +45,16 @@
 //! the totals meet the targets -- the statistics within what the ledger and the step leave -- and an
 //! output whose total exceeds a target all the same, its a-priori share beyond it, is flagged
 //! (`Ledger::flagged`; a checkpoint's statistics still run, so only its a-priori excess is).
+//!
+//! # The fold's choice
+//! The rule's candidates (ground.rs `Ground::allowances`) from all folded down, and on the CPU the
+//! first's fourth order, are costed on the pilot's states carried into their clusters (`carried`): each
+//! with its fold's charge as measured (`measured_charge`: the charge per output the run's ledger books, with
+//! the memory, its mean over the outputs). A candidate's cost is its step check's (below) on those states --
+//! the step it would take -- its counted work per interval there times the trajectories its rooms at that
+//! step's bias need, over the run: continuous in its estimates up to and past the edge of its room, where
+//! the run's own limit of trajectories bounds it. The least cost is taken, and the run goes on from those
+//! states (no pilot runs again); no timing enters, so a request gives the same choice on any machine.
 //!
 //! # Time step
 //! The trap's harmonic part is moved exactly (engine.rs); what the step must resolve is the light's
@@ -75,7 +98,8 @@
 //! the targets by it with the population error measured. Every checked step that met the targets
 //! is a candidate; the one kept costs least in prediction (`predicted_cost`): its work per interval
 //! -- counted on the sampled states (`interval_work`): its steps' advances, each the generator's and
-//! the force's multiply-adds and table pairs of the state's cluster and two half steps' series, and
+//! the force's multiply-adds and table pairs of the state's cluster and two half steps' series, or in a
+//! cluster that takes the exact step the segment it builds and its grid's nodes (`exact_step`), and
 //! per jump its photons and the two advances it redoes, each unit at a cost measured once (no timing
 //! enters a solve: a request gives the same step and the same result on any machine and load) --,
 //! times the trajectories the statistics need. Their spread is known only after a batch, but whatever it is, the trajectories a candidate
@@ -160,7 +184,7 @@ use crate::ledger::{Ledger,BUDGET};
 use crate::model::{Model,Trap,NOT_LINDBLAD};
 use crate::control::{Harmonic,Twin};
 use crate::stats::{summarize,Estimate,Group,Means,Scales,KT_PER_UK};
-use crate::{sample_states,simulate,Initial,Outcome,Variates,TASK};
+use crate::{pilot_start,sample_states,simulate,Initial,Outcome,Variates,TASK};
 use crate::{Complex,Request,STATES};
 use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
 use rayon::prelude::*;
@@ -330,14 +354,14 @@ struct Accounts{apriori:Vec<[f64;2]>,excited:Vec<[f64;2]>,bias:[f64;2]}
 /// largest η², the largest mean (kv/σ)² and the profiles at the atoms. With `last`, the outputs whose
 /// total estimated error -- the a-priori total, the step's bias and the statistics -- exceeds a
 /// target are flagged; before it, those whose a-priori total and bias alone do.
-fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance:f64,bias:[f64;2],frequencies:[f64;3],last:bool)->(Ledger,Accounts){
+fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance:f64,bias:[f64;2],frequencies:[f64;3],last:bool,memory:&Memory)->(Ledger,Accounts){
     let mut ledger=base.clone();let charge=fold_charge(model,model.ground.charge);
-    // The fold's error, charged as measured along the trajectories: the folded excited population's
-    // 2η², the largest the atoms met since t = 0 (`since_start`) -- what the fold's bound takes on the paths they go (an atom
-    // that gathers where the light is bright, as red-detuned molasses holds it at its lattice's
-    // bright sites, meets more than the pattern's mean). The a-priori estimate over the reach decided
-    // the fold (`Candidate`).
-    let measured:Vec<[f64;2]>=since_start(estimates.iter().map(|e|2.*e.folded)).into_iter().map(|s|fold_charges(model.fourth,s)).collect();
+    // The fold's error, charged as measured along the trajectories: the folded excited population's 2η² at
+    // each output with the populations' memory of the earlier ones (`Memory::charges`) -- what the fold's
+    // bound takes on the paths they go (an atom that gathers where the light is bright, as red-detuned
+    // molasses holds it at its lattice's bright sites, meets more than the pattern's mean). The a-priori
+    // estimate over the reach decided the fold (`Candidate`).
+    let measured=memory.charges(&estimates.iter().map(|e|fold_charges(model.fourth,2.*e.folded)).collect::<Vec<_>>());
     let profiles:Vec<f64>=estimates.iter().map(|e|e.profile).collect();let dopplers:Vec<f64>=estimates.iter().map(|e|e.doppler).collect();
     let largest=|v:&[f64]|v.iter().skip(1).copied().fold(0.,f64::max);
     ledger.add("多普勒与反冲频移",largest(&dopplers),format!("一阶（kv/σ）²；单步超过 {:.1e} 时用精确响应",allowance));
@@ -402,11 +426,10 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let listed=listed(outputs);let seed=0x3D_5EED;
     let pilot=FIRST_GROUPS;
     let duration=times[outputs-1];
-    // The fold of the excited states (module documentation): the rule's candidates from all folded
-    // down, their order the a-priori estimates'; the pilot runs the first, and each candidate's
-    // charge is what its folded drives meet at the pilot's states (`measured_charge`). The first
-    // whose charge leaves the statistics room is the reference, and a later one replaces it where its
-    // work times the trajectories its room needs costs less in prediction.
+    // The fold of the excited states (module documentation, # The fold's choice): the rule's candidates from
+    // all folded down, their order the a-priori estimates'; the pilot runs the first, each candidate's charge
+    // is what its folded drives meet at the pilot's states (`measured_charge`), and of those whose charge
+    // leaves the statistics room the one of least predicted cost is taken.
     let mut ladder=Ground::allowances(request)?.into_iter();let mut failed=None;
     // The fourth order is a candidate on the CPU (the GPU's kernel does not read its tables' slabs yet,
     // gpu/program.rs).
@@ -430,12 +453,26 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let steps=((interval*rate/(A_PRIORI_SHARE*TEMPERATURE_TARGET).sqrt()).ceil() as usize).clamp(1,most);
     // The loss's region is the reference trap's (engine.rs `Settings::region`): its initial positions' region.
     let plain=|steps:usize,truncation:f64|{let mut s=Settings::new(interval/steps as f64,&trap,truncation,true);s.region=depth;s};
-    // The pilots' exponentials to double precision; the beats their exact steps leave out within the share
-    // the run's take at most, the step's population budget over the whole run (engine.rs `Segment::resolve`).
-    let piloting=|steps:usize|{let mut s=plain(steps,f64::EPSILON);s.beats=A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*s.dt/duration;s.horizon=duration;s};
-    let pilot_harmonic=Harmonic::new(&pilot_candidate.model,&piloting(steps),&pilot_candidate.initial,steps,outputs);
-    let(pilot_states,pilot_jumps,pilot_groups)=sample_states(&pilot_candidate.model,&piloting(steps),&pilot_candidate.initial,seed,pilot,steps,outputs,&pilot_harmonic);
-    let charge=measured_charge(&pilot_candidate.model,&pilot_candidate.model,&pilot_states);pilot_candidate.charged(charge);
+    // The pilot's exponentials to double precision; the beats its exact steps leave out within the run's share,
+    // the step's population budget over a waiting time between jumps (engine.rs `Segment::resolve`, `running`):
+    // before it measures one, the one its atoms start with -- the inverse of its initial states' mean jump rate,
+    // the no-jump decay ⟨ψ|i(H − H†)|ψ⟩/⟨ψ|ψ⟩ at their points, at most the run. Where the atoms then go dark the
+    // waiting grows and the pilot's share is looser by as much: a beat it leaves out errs by at most that growth
+    // times the run's share in an atom's populations, which the pilot's uses take far coarser -- its states
+    // sample the step's check (at the run's settings), its fold's charge is the percent of its 2η², its jumps and
+    // statistics their counts' --, and the run takes the waiting time the pilot measures.
+    let piloting=|steps:usize,waiting:f64|{let mut s=plain(steps,f64::EPSILON);s.beats=A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*s.dt/waiting;s.horizon=waiting;s};
+    let starts:Vec<Trajectory>=(0..pilot).map(|index|pilot_start(&pilot_candidate.model,&plain(steps,f64::EPSILON),&pilot_candidate.initial,seed,index)).collect();
+    let start_rate=starts.iter().map(|t|{let m=&pilot_candidate.model;let g=m.generator(t.cluster,&m.point(t.r,t.kappa),0.);let n=g.n;
+        let(mut form,mut norm)=(Complex::ZERO,0.);for a in 0..n{norm+=t.psi[a].norm_sqr();for b in 0..n{form+=t.psi[a].conj()*g.hamiltonian[a*n+b]*t.psi[b];}}-2.*form.im/norm}).sum::<f64>()/pilot as f64;
+    let start_waiting=if start_rate>0.{(1./start_rate).min(duration)}else{duration};
+    let pilot_harmonic=Harmonic::new(&pilot_candidate.model,&piloting(steps,start_waiting),&pilot_candidate.initial,steps,outputs);
+    let(pilot_states,pilot_jumps,pilot_groups)=sample_states(&pilot_candidate.model,&piloting(steps,start_waiting),&pilot_candidate.initial,seed,pilot,steps,outputs,&pilot_harmonic);
+    // The fold's memory (module documentation, # Ledger): per pilot atom its jumps at the outputs; the pilot's
+    // initial states, where the charge starts.
+    let memory=Memory::of(&pilot_states,interval,outputs);
+    let charge_of=|from:&Model,m:&Model|measured_charge(from,m,&pilot_states,&starts,&memory,interval,outputs);
+    let charge=charge_of(&pilot_candidate.model,&pilot_candidate.model);pilot_candidate.charged(&charge);
     // The targets the fold's choice weighs (`Binding`): the populations' always, T's where the pilot's atoms
     // reach the method's regime -- elsewhere T is a reference only, and its charge must not choose.
     let binds=[true,Binding::of(&pilot_states,pilot_candidate.model.hbar_over_mass,trap.lab).temperature];
@@ -450,129 +487,104 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         e.iter().skip(1).map(|x|statistics(x,trap.lab)).fold([0.;2],|m,(p,t)|[m[0].max(p),m[1].max(t.unwrap_or(0.))])
     };
     let need_at=|rooms:&[f64;2]|(0..2).filter(|&k|binds[k]&&stats[k]>0.).map(|k|if rooms[k]>0.{(stats[k]/rooms[k]).powi(2)}else{f64::INFINITY}).fold(0.,f64::max);
-    // The trajectories `rooms` need relative to `reference`'s; without statistics (none spread), the larger
-    // ratio of the binding targets' rooms.
-    let need=|reference:&[f64;2],rooms:&[f64;2]|{let at=need_at(reference);
-        if at>0.{need_at(rooms)/at}else{(0..2).filter(|&k|binds[k]).map(|k|if rooms[k]>0.{(reference[k]/rooms[k]).powi(2)}else{f64::INFINITY}).fold(0.,f64::max)}};
-    let pilot_waiting=pilot as f64*duration/(pilot_jumps.max(1) as f64);
-    let mut reference:Option<Candidate>=None;
-    // The ladder is walked for a fit only where the fold's charge is what keeps the pilot's model from
-    // one: estimates the fold does not touch (an initial ensemble beyond its trap, say) leave no
-    // candidate room, and every rung would only cost its model.
-    if !pilot_candidate.fits(binds)&&pilot_candidate.fits_unfolded(binds){
+    // The trajectories a model's rooms need: the pilot's times `need_at`, at most the run's own limit
+    // (`MOST_TRAJECTORIES`) -- what a run whose rooms close takes --, so that a candidate's cost moves
+    // continuously with its charge up to and past the edge of its room.
+    let trajectories=|rooms:&[f64;2]|(pilot as f64*need_at(rooms)).min(MOST_TRAJECTORIES as f64);
+    let pilot_waiting=pilot as f64*duration/(pilot_jumps.max(1) as f64);let pilot_horizon=pilot_waiting.min(duration);
+    // The trap's slowest axis's period: the span of T's step error (`orbits`).
+    let period=std::f64::consts::TAU/trap.frequencies.iter().copied().fold(f64::INFINITY,f64::min);
+    // The beats the pilot's exact steps left out (engine.rs `Segment::resolve`): their bound per unit time, at
+    // most the run's share over its waiting time (`booked_beats`).
+    let pilot_beats=booked_beats(&pilot_states,pilot_waiting);
+    // A run's settings at `steps` per interval: its exponentials summed to a share η of its step's own
+    // population budget, η² ε dt/waiting, and the beats left out within it over the waiting time; the first
+    // order in the Doppler shift within `allowance` (`doppler_allowance`).
+    let running=|steps:usize,waiting:f64,allowance:f64|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=allowance;s.horizon=waiting;s};
+    // A candidate's predicted cost on the pilot's states carried into its clusters (module documentation, # The
+    // fold's choice): its step check there (`step_check`); at the step it keeps, its counted work per interval
+    // times the trajectories its rooms at that step's bias need (`trajectories`) over the run; the check's own
+    // work; its work per interval and its rooms there.
+    let evaluate=|c:&Candidate,states:&[Trajectory]|->(f64,f64,f64,[f64;2],Steps){
+        let base=gained(&c.base,&c.model,states);let(others,allowance)=(unfolded(&base,&c.model),doppler_allowance(&base,&c.model));
+        let settings=|s:usize|running(s,pilot_waiting,allowance);let parts=state_work(&c.model,states);
+        let counted:std::cell::RefCell<Vec<(usize,f64)>>=Default::default();
+        let work=|s:usize|->f64{if let Some(&(_,w))=counted.borrow().iter().find(|x|x.0==s){return w;}
+            let w=interval_work(&c.model,&parts,&settings(s),interval,pilot_waiting);counted.borrow_mut().push((s,w));w};
+        let apriori=c.charge.map(|x|others+x+pilot_beats*pilot_horizon);
+        let checked=step_check(&c.model,states,&settings,steps,most,pilot_waiting,pilot_horizon,pilot as usize,&pilot_groups,depth,period,binds,&work,apriori);
+        let(r,tolerances)=(checked.chosen.ratios(),tolerances(binds[1]));let rooms:[f64;2]=std::array::from_fn(|k|TARGETS[k]-apriori[k]-r[k]*tolerances[k]);
+        let at=work(checked.chosen.steps);
+        (at*trajectories(&rooms)*(outputs-1) as f64,checked_work(&checked,states.len(),pilot as usize,pilot_horizon,interval,period,&work),at,rooms,checked)
+    };
+    // The candidates (module documentation, # The fold's choice), each costed where the pilot kept states
+    // (atoms all lost before the first output measure none): the pilot's model and its fourth order on the
+    // pilot's own states, then the ladder's on them carried into its clusters (`relaxed`). A rung is costed while
+    // its step check's least work and the least work any step leaves it -- the multirate grid's nodes and the
+    // jumps (`least_work`), or a costed earlier rung's work at its step where larger: a later rung keeps more
+    // states explicit, and costs more per step and per node -- times the fewest trajectories it can need (its
+    // rooms with no step bias) could still cost less: its check is spent whether it is taken or not.
+    let measured=!pilot_states.is_empty();
+    let pilot_cost=measured.then(||{let(cost,check,work,rooms,checked)=evaluate(&pilot_candidate,&pilot_states);(cost,check,work,rooms,checked)});
+    // The fourth order is built where it can pay its check and run: its work per interval at least the pilot's
+    // model's at its step (its generator adds the fourth order's), its check's at least that model's, its rooms
+    // at most those of its least charges -- the pilot's charge squared for the populations (`fold_charges`; a
+    // mean of squares is at least the square of the mean) with no step bias, and T's the second order's with the
+    // pilot's model's T bias: the fourth order folds the force at the second, so that T's charge and the
+    // motion's step error are the second order's.
+    let promise=pilot_cost.as_ref().map_or(true,|p|{let(rooms,r,tolerances)=(p.3,p.4.chosen.ratios(),tolerances(binds[1]));let s=pilot_candidate.charge[1];
+        p.2*trajectories(&[rooms[0]+r[0]*tolerances[0]+pilot_candidate.charge[0]-fold_charges(true,s)[0],rooms[1]])*((outputs-1) as f64)+p.1<p.0});
+    let fourth_cost=if fourth&&measured&&promise{Candidate::new(request,pilot_candidate.allowance,true).ok().map(|mut c|{c.charged(&charge_of(&pilot_candidate.model,&c.model));
+        let states:Vec<Trajectory>=pilot_states.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect();let(cost,_,_,_,checked)=evaluate(&c,&states);(cost,c,states,checked)})}else{None};
+    let mut least=pilot_cost.as_ref().map_or(f64::INFINITY,|p|p.0).min(fourth_cost.as_ref().map_or(f64::INFINITY,|f|f.0));
+    let(mut rung,mut seen,mut shape)=(None,0_f64,vec![]);
+    if measured&&pilot_candidate.fits_unfolded(binds){
         while let Some(mut c)=next_candidate(request,&mut ladder,false,&mut failed){
-            let charge=measured_charge(&pilot_candidate.model,&c.model,&pilot_states);c.charged(charge);let fits=c.fits(binds);reference=Some(c);if fits{break;}
+            // A rung whose closure folds the same drives as the last one's is the same model.
+            let folds:Vec<bool>=c.model.ground.excited_items.iter().map(|x|x.folded).collect();if folds==shape{continue;}shape=folds;
+            c.charged(&charge_of(&pilot_candidate.model,&c.model));
+            let at=running(steps,pilot_waiting,doppler_allowance(&c.base,&c.model));
+            let states=relaxed(&c.model,&at,pilot_states.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect());let parts=state_work(&c.model,&states);
+            let fewest=trajectories(&std::array::from_fn(|k|TARGETS[k]-c.others()-c.charge[k]));
+            let floor=least_work(&c.model,&parts,&at,interval,pilot_waiting).max(seen)*fewest*(outputs-1) as f64;
+            // Its check's least: one doubling at the first step (`checked_step`).
+            let check=checked_step(states.len(),bound_probes(&c.model,&states).len(),steps,interval,period)*interval_work(&c.model,&parts,&at,interval,pilot_waiting)/steps as f64;
+            if floor+check>=least{break;}
+            let(cost,_,work,_,checked)=evaluate(&c,&states);seen=seen.max(work);
+            if cost<least{least=cost;rung=Some((c,states,checked));}
         }
     }
-    let better={
-        let base=reference.as_ref().unwrap_or(&pilot_candidate);let mut better=None;
-        // A pilot whose atoms were all lost before its first output measures no candidate's work.
-        if base.fits(binds)&&!pilot_states.is_empty(){
-            let rooms=base.rooms;let mut best=1.;let mut work=1_f64;
-            // The fewest trajectories any later candidate can need relative to the reference: its rooms
-            // at no a-priori estimate at all.
-            let fewest=need(&rooms,&TARGETS.map(|target|target-A_PRIORI_SHARE*target));
-            // The reference's own folds at fourth order, their charges the same saturation's at that order
-            // and their work timed as any candidate's -- built only where they can pay: their rooms at the
-            // reference's other estimates leave fewer trajectories than it needs, its step being the second
-            // order's and more.
-            let charge=fold_charges(true,base.saturation);let others=base.others();
-            let promise=need(&rooms,&std::array::from_fn(|k|TARGETS[k]-others-charge[k]-A_PRIORI_SHARE*TARGETS[k]));
-            if fourth&&promise<best&&base.model.ground.clusters.iter().any(|c|c.excited.is_empty()){
-                if let Ok(mut c)=Candidate::new(request,base.allowance,true){
-                    c.charged(base.saturation);
-                    if c.fits(binds){
-                        let trajectories=need(&rooms,&c.rooms);
-                        let(settings,limit)=(piloting(steps),best/trajectories);
-                        let w=if !(counted_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,interval,pilot_waiting)<=limit){f64::INFINITY}
-                            else{model_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,pilot as usize,interval,limit)};
-                        if w*trajectories<best{best=w*trajectories;better=Some(c);}
-                    }
-                }
-            }
-            // Every later candidate's work is at least the last one timed (it keeps more states explicit):
-            // each feasible one is timed while even the fewest trajectories could pay for it. It also pays a
-            // pilot of its own (its states for the step's check, its clusters not the pilot's): the pilot's
-            // trajectories at its work, relative to the reference's need in pilots (`need_at`).
-            let own=if need_at(&rooms)>0.{1./need_at(&rooms)}else{0.};
-            while work*(fewest+own)<best{
-                let Some(mut c)=next_candidate(request,&mut ladder,false,&mut failed)else{break};
-                let charge=measured_charge(&pilot_candidate.model,&c.model,&pilot_states);c.charged(charge);
-                if !c.fits(binds){continue;}
-                let trajectories=need(&rooms,&c.rooms);
-                let(settings,limit)=(piloting(steps),best/(fewest+own));
-                work=work.max(if !(counted_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,interval,pilot_waiting)<=limit){f64::INFINITY}
-                    else{model_work(&pilot_candidate.model,&base.model,&c.model,&settings,&pilot_states,pilot as usize,interval,limit)});
-                if work*(trajectories+own)<best{best=work*(trajectories+own);better=Some(c);}
-            }
-        }
-        better
+    // The choice: the least predicted cost, ties keeping the earlier; with none costed, the pilot's model. Its
+    // run takes the pilot's states carried into its clusters, the pilot's statistics and jumps the prediction's
+    // (the models' rates differ by the fold's S, the physical atoms' jumps alike), and the step its check took
+    // on them: no pilot runs again.
+    let(chosen,states,known)=match(rung,fourth_cost,pilot_cost){
+        (Some((c,states,checked)),_,_)=>(c,states,Some(checked)),
+        (None,Some((cost,c,states,checked)),p)if p.as_ref().map_or(true,|p|cost<p.0)=>(c,states,Some(checked)),
+        (None,_,p)=>(pilot_candidate,pilot_states,p.map(|p|p.4)),
     };
-    // The pilot again where the choice is not its model (its trajectories' sums the first prediction's) --
-    // but for the fourth order on the pilot's own clusters: the same states, carried over, its statistics and
-    // jumps the prediction's (the orders' rates differ by the fold's S).
-    let(chosen,(states,jumps,pilot_groups),pilot_harmonic)=match better.or(reference){
-        Some(c)if c.model.fourth&&c.allowance==pilot_candidate.allowance=>{
-            let carried_states=pilot_states.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect();(c,(carried_states,pilot_jumps,pilot_groups),pilot_harmonic)}
-        Some(c)=>{let h=Harmonic::new(&c.model,&piloting(steps),&c.initial,steps,outputs);
-            let pilot_run=sample_states(&c.model,&piloting(steps),&c.initial,seed,pilot,steps,outputs,&h);(c,pilot_run,h)}
-        None=>(pilot_candidate,(pilot_states,pilot_jumps,pilot_groups),pilot_harmonic),
-    };
+    let(jumps,pilot_groups)=(pilot_jumps,pilot_groups);
     let Candidate{model,initial,base,charge,..}=chosen;
     // The generator against its jumps at the pilot's states (`gain`): booked where its decay falls below
     // the jumps' rate.
-    let mut base=base;let gain=gain(&model,&states);
-    if gain>0.{base.add(GAIN,gain,"沿试探轨迹测得：无跳跃的衰减低于跳跃率（i(H − H†) − ΣL†L 的负本征值对最大跳跃率之比）".into());}
+    let mut base=gained(&base,&model,&states);
     // The beats the exact steps left out (engine.rs `Segment::resolve`), booked as their bound per unit time
-    // over the horizon: within the exponentials' share by construction.
-    let pilot_beats=states.iter().map(|t|t.beats).fold(0.,f64::max);
+    // over the horizon: within the exponentials' share by construction (`booked_beats`).
     let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
     let waiting=pilot as f64*duration/(jumps.max(1) as f64);let horizon=waiting.min(duration);
-    // The first order in the Doppler shift: what the budget leaves after the model's other estimates
-    // (the fold's charge takes its own share of the target), or the budget itself where they exceed it.
-    let left=BUDGET-(base.used()-cut(&base)-fold_charge(&model,model.ground.charge));let allowance=if left>0.{left}else{BUDGET};
-    // The exponentials are summed to a share η of the step's own population budget, η² ε dt/waiting.
-    let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=plain(steps,A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=allowance;s.horizon=waiting;s};
-    // The step (module documentation): by the bound's rule first -- from the first step, the next by
-    // the square root of the excess (both errors scale as dt²) until it suggests a step already
-    // checked --, then, where the population criterion decides that rule's step, from it with the
-    // population error measured where it decides and the motion's criteria are met (a step's
-    // doubling taken once). Kept: of the checked steps that met the targets the one of least
-    // predicted cost, or the last checked when none did.
-    // The motion's criteria hold T's step error within T's share where T binds (`Binding`, at the chosen model's
-    // pilot), and within the T target itself where T is a reference only: its share would refine for a value the
-    // targets do not take, while a step that leaves the motion unresolved still moves the loss (`tolerances`).
+    let pilot_beats=booked_beats(&states,waiting);
+    let allowance=doppler_allowance(&base,&model);
+    let settings=|steps:usize|running(steps,waiting,allowance);
+    // The step (`step_check`; on the pilot's states as the choice checked it): the a-priori total the steps'
+    // costs take -- the ledger's estimates with the fold's charge as the pilot measured it. The motion's criteria
+    // hold T's step error within T's share where T binds (`Binding`, at the chosen model's pilot), and within the
+    // T target itself where T is a reference only: its share would refine for a value the targets do not take,
+    // while a step that leaves the motion unresolved still moves the loss (`tolerances`).
     let binds=[true,Binding::of(&states,model.hbar_over_mass,trap.lab).temperature];let tolerances=tolerances(binds[1]);
-    let(probes,escape)=(bound_probes(&model,&states),escape(&model,&states,&pilot_groups,depth));
-    let period=std::f64::consts::TAU/trap.frequencies.iter().copied().fold(f64::INFINITY,f64::min);
-    let doubled=|steps:usize|{let r=step_excess(&Engine::new(&model,settings(steps)),&states,waiting,&probes,period,escape,tolerances);Check{steps,population:r[0],loss:r[1],motion:r[2]}};
-    let search=|first:usize,measured:bool,known:&[Check],checked:&mut Vec<Check>|{
-        let mut steps=first;
-        for _ in 0..8{
-            if checked.iter().any(|c|c.steps==steps){break;}
-            let mut c=known.iter().find(|c|c.steps==steps).copied().unwrap_or_else(||doubled(steps));
-            if measured&&c.decided_by_population(){c.population=accumulated_excess(&Engine::new(&model,settings(steps)),&states,horizon,pilot as usize);}
-            checked.push(c);
-            steps=((steps as f64*c.excess().sqrt()).ceil() as usize).clamp(1,most);
-        }
-    };
-    let mut bound=vec![];search(steps,false,&[],&mut bound);
-    let grown=*bound.iter().filter(|c|c.met()).min_by_key(|c|c.steps).unwrap_or(&bound[bound.len()-1]);
-    let mut measured=vec![];if grown.decided_by_population(){search(grown.steps,true,&bound,&mut measured);}
-    let candidates:Vec<Check>=bound.iter().chain(&measured).filter(|c|c.met()).copied().collect();
-    // The a-priori total the steps' costs take: the ledger's estimates with the fold's charge as the
-    // pilot measured it.
-    let apriori=charge.map(|c|base.used()-cut(&base)-fold_charge(&model,model.ground.charge)+c+pilot_beats*horizon);let parts=state_work(&model,&states);
-    let chosen=if candidates.len()>1{
-        // Against the bound rule's step, or where it missed the targets the smallest candidate step.
-        let baseline=*candidates.iter().find(|c|c.steps==grown.steps).or(candidates.iter().max_by_key(|c|c.steps)).unwrap();
-        let mut distinct:Vec<usize>=candidates.iter().map(|c|c.steps).filter(|&s|s!=baseline.steps).collect();distinct.sort();distinct.dedup();distinct.insert(0,baseline.steps);
-        let work:Vec<f64>=distinct.iter().map(|&s|interval_work(&parts,&settings(s),interval,waiting)).collect();
-        let work_of=|c:&Check|work[distinct.iter().position(|&s|s==c.steps).unwrap()]/work[0];
-        let cost=|c:&Check|predicted_cost(c,work_of(c),&baseline,apriori,binds);
-        // The baseline is left only for a candidate predicted to cost less (ties keep it).
-        candidates.iter().fold(baseline,|best,c|if cost(c)<cost(&best){*c}else{best})
-    }else{candidates.first().copied().unwrap_or(grown)};
+    let apriori=charge.map(|c|unfolded(&base,&model)+c+pilot_beats*horizon);let parts=state_work(&model,&states);
+    let checked=match known{Some(checked)=>checked,None=>step_check(&model,&states,&settings,steps,most,waiting,horizon,pilot as usize,&pilot_groups,depth,period,binds,
+        &|s|interval_work(&model,&parts,&settings(s),interval,waiting),apriori)};
+    let chosen=checked.chosen;
     let(steps,ratios)=(chosen.steps,chosen.ratios());
     let dt=interval/steps as f64;let settings=settings(steps);
     // A step the work bound set that misses its shares: why, for the flag.
@@ -614,7 +626,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let pilot_need={
         let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:pilot_harmonic.mean[i],twin:None}).collect();
         let mut e=summarize(&pilot_groups,&scales,&means);start(&mut e[0],&model,&initial);
-        let(_,accounts)=ledger(&model,&booked(&base,pilot_beats*horizon),&e,times,allowance,bias,trap.lab,false);
+        let(_,accounts)=ledger(&model,&booked(&base,pilot_beats*horizon),&e,times,allowance,bias,trap.lab,false,&memory);
         (pilot as f64*worst_ratio(&e,&accounts,trap.lab).powi(2)).min(MOST_TRAJECTORIES as f64).ceil() as u64
     };
     let clock=Instant::now();
@@ -626,8 +638,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // against those they need without.
     if twin.is_some(){
         let needed=|means:&[Means]|{let mut e=summarize(&first.groups,&scales,means);start(&mut e[0],&model,&initial);
-            let(_,accounts)=ledger(&model,&booked(&base,pilot_beats.max(first.beats)*horizon),&e,times,allowance,bias,trap.lab,false);worst_ratio(&e,&accounts,trap.lab).powi(2)};
-        let share=held_work(&parts,&settings,interval,waiting)/interval_work(&parts,&settings,interval,waiting);
+            let(_,accounts)=ledger(&model,&booked(&base,pilot_beats.max(first.beats)*horizon),&e,times,allowance,bias,trap.lab,false,&memory);worst_ratio(&e,&accounts,trap.lab).powi(2)};
+        let share=held_work(&parts,&settings,interval,waiting)/interval_work(&model,&parts,&settings,interval,waiting);
         if needed(&means(true))*(1.+share)>=needed(&means(false)){twin=None;}
     }
     let means=means(twin.is_some());
@@ -635,10 +647,10 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let mut outcome=first;let mut done=count;let mut per_trajectory=wall/count as f64;
     loop{
         let mut estimates=summarize(&outcome.groups,&scales,&means);start(&mut estimates[0],&model,&initial);
-        let(_,accounts)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,false);
+        let(_,accounts)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,false,&memory);
         let ratio=worst_ratio(&estimates,&accounts,trap.lab);
         let wanted=(done as f64*ratio*ratio).ceil() as u64;let needed=wanted.min(MOST_TRAJECTORIES);
-        let(mut ledger,_)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,needed<=done);
+        let(mut ledger,_)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,needed<=done,&memory);
         if let(Some(note),Some(flag))=(&bounded,&ledger.flagged){ledger.flagged=Some(format!("{note}；{flag}"));}
         let mut solution=assemble(&model,&estimates,&outcome,&listed,times,trap.lab,done,dt,&request.initial_density,ledger,twin.is_some());
         solution.device=used;solution.device_note=note.clone();solution.needed=wanted;
@@ -655,6 +667,11 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         done+=next;
     }
 }
+
+/// The bound per unit time of the beats a pilot's exact steps left out (engine.rs `Segment::resolve`), at most the
+/// run's share over its waiting time: the run leaves out beats within that share by construction, and the pilot's
+/// share is looser where its horizon was shorter than the waiting time it measured (`piloting`).
+fn booked_beats(states:&[Trajectory],waiting:f64)->f64{states.iter().map(|t|t.beats).fold(0.,f64::max).min(A_PRIORI_SHARE*A_PRIORI_SHARE*POPULATION_TARGET/waiting)}
 
 /// The model's ledger with the beats the exact steps left out, `bound` their largest over the horizon.
 fn booked(base:&Ledger,bound:f64)->Ledger{
@@ -673,6 +690,18 @@ fn resonance(model:&Model)->Option<String>{
 
 /// The ledger's item of a generator whose decay falls below its jumps' rate (`gain`).
 const GAIN:&str="生成元的增益";
+/// A model's ledger with its gain at sampled states booked where it has one (`gain`).
+fn gained(base:&Ledger,model:&Model,states:&[Trajectory])->Ledger{
+    let mut ledger=base.clone();let gain=gain(model,states);
+    if gain>0.{ledger.add(GAIN,gain,"沿试探轨迹测得：无跳跃的衰减低于跳跃率（i(H − H†) − ΣL†L 的负本征值对最大跳跃率之比）".into());}
+    ledger
+}
+/// A model's ledger's estimates but the fold's charge and the initial ensemble's cut: what the fold's charge
+/// and the step's bias add to (`Accounts::apriori`).
+fn unfolded(base:&Ledger,model:&Model)->f64{base.used()-cut(base)-fold_charge(model,model.ground.charge)}
+/// The first order in the Doppler shift's allowance: what the budget leaves after the model's other estimates
+/// (the fold's charge takes its own share of the target), or the budget itself where they exceed it.
+fn doppler_allowance(base:&Ledger,model:&Model)->f64{let left=BUDGET-unfolded(base,model);if left>0.{left}else{BUDGET}}
 /// A model's gain at sampled states (model.rs `Model::decay_balance`, at most FIRST_GROUPS × 8 of them): the
 /// largest −λ of D = i(H − H†) − Σ L†L beyond its eigenvalues' round-off, relative to the largest jump rate
 /// met -- the relative error of the jump rate where the no-jump decay misses it (a decay no jump carries,
@@ -707,28 +736,23 @@ fn fold_charges(fourth:bool,saturation:f64)->[f64;2]{[if fourth{saturation*satur
 /// The targets in the order of the rooms: the populations' (absolute) and T's (relative).
 const TARGETS:[f64;2]=[POPULATION_TARGET,TEMPERATURE_TARGET];
 
-/// A candidate of the fold (module documentation): the model at one of the rule's allowances, its
-/// initial state, its ledger and the rooms its estimates leave the statistics -- each target less the
-/// ledger's total, the fold's charge as measured (`Candidate::charged`), and the step's bias at most
-/// (its share).
-struct Candidate{model:Model,initial:Initial,base:Ledger,allowance:f64,saturation:f64,charge:[f64;2],rooms:[f64;2]}
+/// A candidate of the fold (module documentation, # The fold's choice): the model at one of the rule's
+/// allowances, its initial state, its ledger, and the fold's charge per target (`fold_charges`) -- a priori,
+/// or as measured (`Candidate::charged`).
+struct Candidate{model:Model,initial:Initial,base:Ledger,allowance:f64,charge:[f64;2]}
 impl Candidate{
     fn new(request:&Request,allowance:f64,fourth:bool)->Result<Candidate,String>{
         let model=Model::with_order(request,allowance,fourth)?;let initial=Initial::new(&model,request)?;let mut base=model_ledger(&model,request);
         // The initial positions' region (lib.rs `thermal_position`): the share of the traps' thermal
         // positions it leaves out.
         if initial.outside>0.{base.add(CUT,initial.outside,"位置取势阱区（谐振近似低于阱深处）内的玻尔兹曼分布；丢失与布居依赖这一截断".into());}
-        let(saturation,charge)=(model.ground.charge,fold_charges(model.fourth,model.ground.charge));let others=base.used()-cut(&base)-charge[0];
-        let rooms=std::array::from_fn(|k|TARGETS[k]-others-charge[k]-A_PRIORI_SHARE*TARGETS[k]);
-        Ok(Candidate{model,initial,base,allowance,saturation,charge,rooms})
+        let charge=fold_charges(model.fourth,model.ground.charge);
+        Ok(Candidate{model,initial,base,allowance,charge})
     }
-    /// Its rooms with the fold's charge for the saturation `saturation` met in place of the a-priori estimate.
-    fn charged(&mut self,saturation:f64){let charge=fold_charges(self.model.fourth,saturation);self.saturation=saturation;self.charge=charge;
-        let others=self.others();self.rooms=std::array::from_fn(|k|TARGETS[k]-others-charge[k]-A_PRIORI_SHARE*TARGETS[k]);}
+    /// Its fold's charge as measured (`measured_charge`) in place of the a-priori estimate.
+    fn charged(&mut self,charge:&[f64;2]){self.charge=*charge;}
     /// Its ledger's estimates but the fold's.
-    fn others(&self)->f64{self.base.used()-cut(&self.base)-fold_charge(&self.model,self.model.ground.charge)}
-    /// Its estimates leave the statistics room on the binding targets (`binds`: the populations', T's).
-    fn fits(&self,binds:[bool;2])->bool{self.rooms.iter().zip(binds).all(|(&r,b)|!b||r>0.)}
+    fn others(&self)->f64{unfolded(&self.base,&self.model)}
     /// Its estimates but the fold's leave the statistics room on the binding targets: a fold could still make
     /// it fit.
     fn fits_unfolded(&self,binds:[bool;2])->bool{TARGETS.iter().zip(binds).all(|(&target,b)|!b||target-self.others()-A_PRIORI_SHARE*target>0.)}
@@ -741,67 +765,70 @@ fn next_candidate(request:&Request,ladder:&mut dyn Iterator<Item=f64>,fourth:boo
     for a in ladder{match Candidate::new(request,a,fourth){Ok(c)=>return Some(c),Err(e)=>{failed.get_or_insert(e);}}}
     None
 }
-/// The saturation a candidate's folded drives meet: at each of the pilot's states, carried into its
-/// clusters (`carried`), 2η² (twice the folded excited population, whose fold's charge bounds its
-/// error, `fold_charge`); per output time the trajectories' mean plus CONFIDENCE standard errors, and of
-/// those the largest -- the ledger books the largest since t = 0 at every output (`since_start`). What the
-/// atoms meet rather than the light's pattern extrapolated (an atom held in the dark states of a gray
-/// molasses meets little of its bright state's saturation once there, all of it before; one gathered at
+/// The fold's charge a candidate's folded drives would take per target (`fold_charges`), at the pilot's states
+/// carried into its clusters (`carried`) and at its initial ones: per output their mean 2η² (twice the folded
+/// excited population) with the memory (`Memory::charges`) -- what the run's ledger books there --, its mean over
+/// the outputs after t = 0 (each output holds few of the pilot's states, and their largest is their extreme, not
+/// the run's). What the atoms meet rather than the light's pattern extrapolated (an atom held in the dark states
+/// of a gray molasses meets little of its bright state's saturation once there, all of it before; one gathered at
 /// a red-detuned lattice's bright sites meets more than its mean).
-fn measured_charge(from:&Model,to:&Model,states:&[Trajectory])->f64{
-    // Per output time: the sum, the sum of squares and the count of 2η².
-    let mut sums:Vec<(f64,f64,f64,f64)>=vec![];
-    for t in states{
-        let x=carried(from,to,t);let p=to.point(x.r,x.kappa);let s=2.*to.readout(x.cluster,&p,&x.psi,x.time).1;
-        match sums.iter_mut().find(|e|e.0==t.time){Some(e)=>{e.1+=s;e.2+=s*s;e.3+=1.;}None=>sums.push((t.time,s,s*s,1.))}
+fn measured_charge(from:&Model,to:&Model,states:&[Trajectory],starts:&[Trajectory],memory:&Memory,interval:f64,outputs:usize)->[f64;2]{
+    let charge=|t:&Trajectory|{let x=carried(from,to,t);let p=to.point(x.r,x.kappa);fold_charges(to.fourth,2.*to.readout(x.cluster,&p,&x.psi,x.time).1)};
+    // Per output the states' mean charges.
+    let(mut profile,mut held)=(vec![[0.;2];outputs],vec![false;outputs]);
+    for group in by_output(starts).into_iter().chain(by_output(states)){
+        let i=((group[0].time/interval).round() as usize).min(outputs-1);let n=group.len() as f64;held[i]=true;
+        let charges:Vec<[f64;2]>=group.par_iter().map(|&t|charge(t)).collect();
+        for c in &charges{for k in 0..2{profile[i][k]+=c[k]/n;}}
     }
-    if sums.is_empty(){return to.ground.charge;}
-    sums.iter().map(|&(_,sum,squares,n)|{let mean=sum/n;mean+CONFIDENCE*((squares/n-mean*mean).max(0.)/(n-1.).max(1.)).sqrt()}).fold(0.,f64::max)
+    let kept=memory.charges(&profile);let after:Vec<usize>=(1..outputs).filter(|&i|held[i]).collect();
+    if after.is_empty(){return fold_charges(to.fourth,to.ground.charge);}
+    std::array::from_fn(|k|after.iter().map(|&i|kept[i][k]).sum::<f64>()/after.len() as f64)
 }
 
-/// The largest value since the first at every place of a sequence: the fold's charge at an output, the
-/// largest 2η² met since t = 0 -- an error the fold makes while the atoms are bright stays in their
-/// populations after they go dark (an optical pumping's transient, the validation's M1).
-fn since_start(values:impl Iterator<Item=f64>)->Vec<f64>{let mut most=0_f64;values.map(|x|{most=most.max(x);most}).collect()}
-
-/// A candidate's work relative to the reference's, at its upper confidence bound: from each of
-/// `subsample` of the pilot's states (of the model `from`), the same state carried into either's
-/// clusters (`carried`), an interval of steps of either back to back on one thread. The work is the
-/// ratio of the two totals -- a model's cost lies in the states it makes dear (a cluster with explicit
-/// states), which a median of the states' ratios would pass over --, its upper bound CONFIDENCE
-/// standard errors above it (the ratio's delta method over the states). The reference's states are
-/// timed first; the candidate's stop as soon as their total passes `limit` times the reference's --
-/// the most work worth knowing, the choice's -- and its work is then infinite: a candidate whose
-/// explicit states take a thousand times the reference's steps is not run to the end to be refused.
-fn model_work(from:&Model,reference:&Model,candidate:&Model,settings:&Settings,states:&[Trajectory],subsample:usize,interval:f64,limit:f64)->f64{
-    use std::sync::atomic::{AtomicBool,AtomicU64,Ordering};
-    let engines=[Engine::new(reference,settings.clone()),Engine::new(candidate,settings.clone())];
-    let every=(states.len()/subsample.max(1)).max(1);let picked:Vec<&Trajectory>=states.iter().step_by(every).collect();
-    let steps=(interval/settings.dt).round() as usize;
-    let run=|e:&Engine,mut x:Trajectory,spent:Option<(&AtomicU64,u64,&AtomicBool)>|->f64{
-        let clock=Instant::now();
-        for _ in 0..steps{
-            if let Some((total,most,stop))=spent{if stop.load(Ordering::Relaxed)||total.load(Ordering::Relaxed)+clock.elapsed().as_nanos() as u64>most{stop.store(true,Ordering::Relaxed);break;}}
-            if x.alive{e.step(&mut x);}
+/// The fold's memory (module documentation, # Ledger), from a pilot's atoms: per atom its jumps up to each
+/// output (at its last state kept there or before) and from each output on (at its first state kept there or
+/// after: where the pilot keeps every few outputs' states, the jumps in between are at most their difference),
+/// and the last output it was kept at -- held there.
+struct Memory{upto:Vec<Vec<u64>>,from:Vec<Vec<u64>>,last:Vec<usize>}
+impl Memory{
+    fn of(states:&[Trajectory],interval:f64,outputs:usize)->Memory{
+        let mut atoms:Vec<(u64,Vec<(usize,u64)>)>=vec![];
+        for t in states{let at=(((t.time/interval).round() as usize).min(outputs-1),t.jumps);
+            match atoms.iter_mut().find(|a|a.0==t.index){Some(a)=>a.1.push(at),None=>atoms.push((t.index,vec![(0,0),at]))}}
+        let(mut upto,mut from,mut last)=(vec![],vec![],vec![]);
+        for(_,mut kept)in atoms{
+            kept.sort();let u:Vec<u64>=(0..outputs).map(|i|kept.iter().rev().find(|x|x.0<=i).map_or(0,|x|x.1)).collect();
+            from.push((0..outputs).map(|j|kept.iter().find(|x|x.0>=j).map_or(u[j],|x|x.1)).collect());upto.push(u);last.push(kept[kept.len()-1].0);
         }
-        let time=clock.elapsed();if let Some((total,_,_))=spent{total.fetch_add(time.as_nanos() as u64,Ordering::Relaxed);}time.as_secs_f64()
-    };
-    let base:Vec<f64>=picked.par_iter().map(|t|run(&engines[0],carried(from,reference,t),None)).collect();
-    let b=base.iter().sum::<f64>().max(f64::MIN_POSITIVE);
-    let(total,stop)=(AtomicU64::new(0),AtomicBool::new(false));let most=(limit*b*1e9).min(u64::MAX as f64) as u64;
-    let work:Vec<f64>=picked.par_iter().map(|t|run(&engines[1],carried(from,candidate,t),Some((&total,most,&stop)))).collect();
-    if stop.load(Ordering::Relaxed){return f64::INFINITY;}
-    let n=base.len() as f64;let a=work.iter().sum::<f64>();
-    let ratio=a/b;let spread=work.iter().zip(&base).map(|(x,y)|(x-ratio*y).powi(2)).sum::<f64>()/(n-1.).max(1.);
-    ratio+CONFIDENCE*(spread/n).sqrt()/(b/n)
+        Memory{upto,from,last}
+    }
+    /// The share of an error made by output j that the atoms held at output i ≥ j still carry: per atom e^{−n}, n
+    /// its jumps in between, their mean; all of it where none is held at i.
+    fn kept(&self,i:usize,j:usize)->f64{
+        let(mut sum,mut count)=(0.,0.);
+        for a in (0..self.last.len()).filter(|&a|self.last[a]>=i){sum+=(-(self.upto[a][i].saturating_sub(self.from[a][j]) as f64)).exp();count+=1.;}
+        if count>0.{sum/count}else{1.}
+    }
+    /// The fold's charges per output and target with the memory: at each output the largest of its own and each
+    /// earlier output's times the share kept since the end of the interval after it, over which that one's
+    /// error is made.
+    fn charges(&self,values:&[[f64;2]])->Vec<[f64;2]>{
+        let top:[f64;2]=std::array::from_fn(|k|values.iter().map(|v|v[k]).fold(0.,f64::max));
+        (0..values.len()).map(|i|{let mut most=values[i];
+            for j in (0..i).rev(){let kept=self.kept(i,j+1);if (0..2).all(|k|top[k]*kept<=most[k]){break;}for k in 0..2{most[k]=most[k].max(values[j][k]*kept);}}
+            most}).collect()
+    }
 }
 
-/// A candidate's counted work relative to the reference's (`interval_work`) on the pilot's states
-/// carried into each: a candidate this count puts beyond the work worth knowing is not timed
-/// (`model_work`) -- its explicit states' exact steps can take a thousand times the reference's.
-fn counted_work(from:&Model,reference:&Model,candidate:&Model,settings:&Settings,states:&[Trajectory],interval:f64,waiting:f64)->f64{
-    let into=|m:&Model|->Vec<Trajectory>{states.iter().map(|t|carried(from,m,t)).collect()};
-    interval_work(&state_work(candidate,&into(candidate)),settings,interval,waiting)/interval_work(&state_work(reference,&into(reference)),settings,interval,waiting).max(f64::MIN_POSITIVE)
+/// A pilot's states grouped by the output they were kept at, in time order: a trajectory's time is the sum of its
+/// steps, so one output's times differ between trajectories in their last bits -- within the rounding of
+/// `MOST_STEPS` additions, far below an interval (`measured_charge`, `Binding::of`).
+pub fn by_output(states:&[Trajectory])->Vec<Vec<&Trajectory>>{
+    let mut sorted:Vec<&Trajectory>=states.iter().collect();sorted.sort_by(|a,b|a.time.total_cmp(&b.time));
+    let mut groups:Vec<Vec<&Trajectory>>=vec![];
+    for t in sorted{match groups.last_mut(){Some(g)if t.time-g[0].time<=MOST_STEPS as f64*f64::EPSILON*t.time.abs()=>g.push(t),_=>groups.push(vec![t])}}
+    groups
 }
 
 /// A trajectory's state carried from one model into another's clusters: into the cluster of its
@@ -817,6 +844,21 @@ fn carried(from:&Model,to:&Model,t:&Trajectory)->Trajectory{
     out
 }
 
+/// A rung's pilot states carried into its clusters (`carried`), let settle where they hold explicit excited
+/// states: those start bare, and the exact step's dressing transient -- the excited amplitudes' build-up,
+/// ringing at the detuning and damped at half the excited states' decay -- is no step's error, while the run's
+/// states between their jumps are dressed. Each evolves without jumps (`Engine::coast` at `settings`) until the
+/// transient's amplitude is within the share η of itself, e^{−Γτ/2} ≤ η at the slowest decay Γ of its cluster's
+/// explicit states (the generator's −2 Im of their diagonal), its norm restored.
+fn relaxed(model:&Model,settings:&Settings,states:Vec<Trajectory>)->Vec<Trajectory>{
+    let slowest:Vec<f64>=(0..model.clusters()).map(|k|{if !model.mixed(k){return 0.;}let(n,n0)=(model.dimension(k),model.ground_dimension(k));
+        let g=model.generator(k,&model.point([0.;3],[0.;3]),0.);(n0..n).map(|e|-2.*g.hamiltonian[e*n+e].im).fold(f64::INFINITY,f64::min)}).collect();
+    let engine=Engine::new(model,settings.clone());
+    states.into_par_iter().map(|t|{let decay=slowest[t.cluster];if !(decay>0.&&decay.is_finite()){return t;}
+        let mut x=engine.coast(&t,2.*(1./A_PRIORI_SHARE).ln()/decay,1);let n=model.dimension(x.cluster);
+        let norm=x.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();for z in x.psi[..n].iter_mut(){*z=*z*(1./norm);}x}).collect()
+}
+
 /// The batch after `done` trajectories (module documentation, # Batches): the predicted remaining
 /// need, at least the device's `width` and at most `done` -- the need followed at most to twice the
 /// trajectories it rests on --, in whole `unit`s (groups on the CPU, waves on the GPU).
@@ -830,9 +872,7 @@ fn next_batch(needed:u64,done:u64,width:u64,unit:u64)->u64{needed.saturating_sub
 pub struct Binding{pub temperature:bool}
 impl Binding{
     pub fn of(states:&[Trajectory],hbar_over_mass:f64,frequencies:[f64;3])->Binding{
-        let mut times:Vec<f64>=states.iter().map(|t|t.time).collect();times.sort_by(f64::total_cmp);times.dedup();
-        let temperature=times.iter().any(|&time|{
-            let at:Vec<&Trajectory>=states.iter().filter(|t|t.time==time).collect();let n=at.len() as f64;
+        let temperature=by_output(states).iter().any(|at|{let n=at.len() as f64;
             n>1.&&(0..3).all(|a|{let mean=at.iter().map(|t|t.kappa[a]).sum::<f64>()/n;
                 let variance=at.iter().map(|t|(t.kappa[a]-mean).powi(2)).sum::<f64>()/(n-1.);hbar_over_mass*variance>=CLASSICAL*frequencies[a]})
         });
@@ -854,6 +894,58 @@ impl Check{
     /// The population criterion decides the step: its ratio the largest, the others met.
     fn decided_by_population(&self)->bool{self.motion.max(self.loss)<=1.&&self.population>self.motion.max(self.loss)}
 }
+
+/// A model's step check on sampled states (module documentation, # Time step): the bound rule's search from
+/// `first` -- the next step by the square root of the excess (both errors scale as dt²) until it suggests a step
+/// already checked --, then, where the population criterion decides that rule's step, the search from it with
+/// the population error measured where it decides and the motion's criteria are met (a step's doubling taken
+/// once). Kept: of the checked steps that met the targets the one of least predicted cost (`predicted_cost`) at
+/// `work` per interval and the a-priori totals `apriori`, or the last checked when none did.
+struct Steps{bound:Vec<Check>,measured:Vec<Check>,chosen:Check,probes:usize}
+fn step_check(model:&Model,states:&[Trajectory],settings:&dyn Fn(usize)->Settings,first:usize,most:usize,waiting:f64,horizon:f64,subsample:usize,groups:&[Group],depth:f64,period:f64,binds:[bool;2],
+    work:&dyn Fn(usize)->f64,apriori:[f64;2])->Steps{
+    // The orbits' probes and the loss's sensitivity (`bound_probes`, `escape`), at the pilot's groups; the
+    // tolerances where T binds or not (`tolerances`).
+    let(probes,escape,tolerances)=(bound_probes(model,states),escape(model,states,groups,depth),tolerances(binds[1]));
+    let doubled=|steps:usize|{let r=step_excess(&Engine::new(model,settings(steps)),states,waiting,&probes,period,escape,tolerances);Check{steps,population:r[0],loss:r[1],motion:r[2]}};
+    let search=|first:usize,measured:bool,known:&[Check],checked:&mut Vec<Check>|{
+        let mut steps=first;
+        for _ in 0..8{
+            if checked.iter().any(|c|c.steps==steps){break;}
+            let mut c=known.iter().find(|c|c.steps==steps).copied().unwrap_or_else(||doubled(steps));
+            if measured&&c.decided_by_population(){c.population=accumulated_excess(&Engine::new(model,settings(steps)),states,horizon,subsample);}
+            checked.push(c);
+            steps=((steps as f64*c.excess().sqrt()).ceil() as usize).clamp(1,most);
+        }
+    };
+    let mut bound=vec![];search(first,false,&[],&mut bound);
+    let grown=*bound.iter().filter(|c|c.met()).min_by_key(|c|c.steps).unwrap_or(&bound[bound.len()-1]);
+    let mut measured=vec![];if grown.decided_by_population(){search(grown.steps,true,&bound,&mut measured);}
+    let candidates:Vec<Check>=bound.iter().chain(&measured).filter(|c|c.met()).copied().collect();
+    let chosen=if candidates.len()>1{
+        // Against the bound rule's step, or where it missed the targets the smallest candidate step.
+        let baseline=*candidates.iter().find(|c|c.steps==grown.steps).or(candidates.iter().max_by_key(|c|c.steps)).unwrap();
+        let mut distinct:Vec<usize>=candidates.iter().map(|c|c.steps).filter(|&s|s!=baseline.steps).collect();distinct.sort();distinct.dedup();distinct.insert(0,baseline.steps);
+        let work:Vec<f64>=distinct.iter().map(|&s|work(s)).collect();
+        let work_of=|c:&Check|work[distinct.iter().position(|&s|s==c.steps).unwrap()]/work[0];
+        let cost=|c:&Check|predicted_cost(c,work_of(c),&baseline,apriori,binds);
+        // The baseline is left only for a candidate predicted to cost less (ties keep it).
+        candidates.iter().fold(baseline,|best,c|if cost(c)<cost(&best){*c}else{best})
+    }else{candidates.first().copied().unwrap_or(grown)};
+    Steps{bound,measured,chosen,probes:probes.len()}
+}
+/// A step check's own work (ns, `step_check`) at `work`'s work per step (per interval over the steps): per
+/// checked step a step and two halves on every state and the orbits' jump-free flow over the trap's `period` in
+/// steps of dt and of dt/2 from every probe (`checked_step`), and where the population error was measured the
+/// jump-free flow over the horizon in steps of dt and of dt/2 from the subsample.
+fn checked_work(checked:&Steps,states:usize,subsample:usize,horizon:f64,interval:f64,period:f64,work:&dyn Fn(usize)->f64)->f64{
+    let doubled=|c:&Check|checked_step(states,checked.probes,c.steps,interval,period)*work(c.steps)/c.steps as f64;
+    checked.bound.iter().map(doubled).sum::<f64>()+checked.measured.iter().map(|c|if checked.bound.iter().any(|b|b.steps==c.steps){0.}else{doubled(c)}
+        +3.*subsample.min(states) as f64*(horizon/interval).max(1./c.steps as f64)*work(c.steps)).sum::<f64>()
+}
+/// The steps a step check's doubling takes at `steps` per interval (`step_excess`): a step and two halves on every
+/// state, and from every probe the orbits' over the trap's period in steps of dt and of dt/2.
+fn checked_step(states:usize,probes:usize,steps:usize,interval:f64,period:f64)->f64{3.*states as f64+3.*probes as f64*(period*steps as f64/interval).ceil()}
 
 /// The tolerances of a step's criteria (module documentation, # Time step): the populations' and the
 /// loss's, η of the population target; T's, η of the temperature target where T binds and the target itself
@@ -965,40 +1057,83 @@ const JUMP_NS:f64=970.;const PHOTON_MULTIPLY_ADD_NS:f64=0.594;const ABSORPTION_M
 const HELD_NS:f64=100.;
 
 /// A sampled state's parts of the work model (`interval_work`): its cluster's advance without the
-/// propagation and its jump (ns), its generator's norm, its dimension and whether its cluster takes
-/// the exact step (explicit excited states).
-struct StateWork{advance:f64,jump:f64,norm:f64,n:usize,exact:bool}
+/// propagation and its jump (ns), its generator's norm and its dimension; in a cluster that takes the exact
+/// step (explicit excited states, beats), the state itself -- its step's segment is probed at each step
+/// (`exact_step`).
+struct StateWork{advance:f64,jump:f64,norm:f64,n:usize,exact:Option<Trajectory>}
 fn state_work(model:&Model,states:&[Trajectory])->Vec<StateWork>{
     states.par_iter().map(|t|{
-        let w=model.work(t.cluster);let n=model.dimension(t.cluster);let point=model.point(t.r,t.kappa);let exact=model.mixed(t.cluster);
-        let norm=if exact{column_norm(&model.generator(t.cluster,&point,t.time).hamiltonian,n)}else{column_norm(&model.local(t.cluster,&point,t.time).hamiltonian,n)};
+        let w=model.work(t.cluster);let n=model.dimension(t.cluster);let exact=model.mixed(t.cluster)||model.beating(t.cluster);
+        let norm=if exact{0.}else{column_norm(&model.local(t.cluster,&model.point(t.r,t.kappa),t.time).hamiltonian,n)};
         StateWork{advance:ADVANCE_NS+MULTIPLY_ADD_NS*(w.generator+w.force)+PAIR_NS*w.pairs as f64,
-            jump:JUMP_NS+PHOTON_MULTIPLY_ADD_NS*w.photons+ABSORPTION_MULTIPLY_ADD_NS*w.absorption,norm,n,exact}
+            jump:JUMP_NS+PHOTON_MULTIPLY_ADD_NS*w.photons+ABSORPTION_MULTIPLY_ADD_NS*w.absorption,norm,n,exact:exact.then(||t.clone())}
     }).collect()
 }
-/// A step's advance at a state with its propagation (ns): two half steps' series; or the exact step
-/// (engine.rs `Engine::exact`), its propagator over the grid's spacing -- n³ per term of its series to
-/// double precision -- and per spacing a product and the force's forms (n² each), at the same costs
-/// per multiply-add as the series' (not timed on its own).
-fn advance_of(x:&StateWork,s:&Settings)->f64{
-    if !x.exact{return x.advance+2.*half_step(x,s);}
-    let spacings=(x.norm*s.dt/node_phase()).ceil().max(1.);let terms=series(x.norm,s.dt/spacings,f64::EPSILON).1 as f64;let n=x.n as f64;
-    x.advance+TERM_MULTIPLY_ADD_NS*(n*n*n*terms+4.*spacings*n*n)
+/// The exact step's work (`exact_step`, ns): per complex multiply-add of n × n matrices, per n³ of the spectral
+/// path's eigendecomposition with its forms, and per complex exponential of a beat's phase (at the large
+/// arguments a run's times give). Against the step's CPU time on one core of the Core Ultra 7 265H (the jump-free
+/// step at each of a candidate's states along its trajectories, as examples/multirate.rs `profile` times it):
+/// PGC3D's 10-state cluster (spectral at the run's beats share, cached at the old pilot's), PGCP_10's 12-state
+/// and 5-state beating clusters and PGC3D's folded one take 1.8-3.3 times their counts on the loaded machine --
+/// the counts' ratios, which alone choose, within about ±30 %.
+const MATRIX_NS:f64=0.469;const SPECTRAL_N3:f64=60.;const CIS_NS:f64=25.;
+/// The exact step's work at a state (ns, engine.rs `Engine::exact`), from the segment the step builds there
+/// (`Engine::probe`): per step, every step's -- its advance (the components' gather, the flows and the kick),
+/// the beats' bounds (`Segment::resolve`: per pair two commutators, n³ each, of either beat) and the segment's
+/// build (the spectral path's eigendecomposition and forms, the Taylor path's propagator, n³ per term of its
+/// series to double precision, or a period's cache, per spacing two exponentials and their product) --, and
+/// the grid's: per node (amplitude-weighted on the spectral path) its propagation (a phase per state, a
+/// propagator's product, or CF4's two combinations of the beats and their series) and the force's and the
+/// norm's forms, n² each.
+fn exact_step(model:&Model,s:&Settings,t:&Trajectory,x:&StateWork)->[f64;2]{
+    let p=Engine::new(model,s.clone()).probe(t.cluster,&model.point(t.r,t.kappa),t.time,s.dt,&t.psi);
+    let n=x.n as f64;let(n2,n3)=(n*n,n*n*n);let pairs=p.beats.len() as f64;let kept=2.*p.beats.iter().filter(|b|!b.2).count() as f64;
+    let terms=series(1.,node_phase(),f64::EPSILON).1 as f64;let nodes=p.weighted.unwrap_or(p.nodes) as f64;
+    // Per path: the build's multiply-adds and phases, a node's multiply-adds and phases (CF4's two combinations
+    // take two phases a beat each, the force one a pair).
+    let(build,phases,node,turns)=match p.path{
+        "spectral"=>(SPECTRAL_N3*n3,0.,4.*n2+n,0.),
+        "taylor"=>(terms*n3,0.,5.*n2,0.),
+        "cached"=>{let k=model.beats(t.cluster).1.map_or(1.,|period|(period/p.spacing).round().max(1.));(k*((2.*terms+1.)*n3+18.*(1.+kept)*n2),5.*k*kept,5.*n2,0.)}
+        _=>(0.,0.,(2.*(1.+kept+terms)+4.+1.5*kept)*n2,4.5*kept),
+    };
+    [x.advance+MATRIX_NS*(8.*pairs*n3+build)+CIS_NS*phases,nodes*(TERM_MULTIPLY_ADD_NS*node+CIS_NS*turns)]
+}
+/// The exact states a work count probes at most (`steps_parts`): each probe builds its segment.
+const PROBED:usize=256;
+/// A step's parts at every state (ns): what every step pays -- the advance with, in a cluster of ground states,
+/// its two half steps' series, or the exact step's per step (`exact_step`) -- and what the multirate grid takes
+/// over the step, whose nodes per unit time no step changes. The exact states' from at most `PROBED` of them,
+/// evenly spread, their mean for the rest.
+fn steps_parts(model:&Model,states:&[StateWork],s:&Settings)->Vec<[f64;2]>{
+    let exact:Vec<usize>=(0..states.len()).filter(|&i|states[i].exact.is_some()).collect();
+    let probed:Vec<[f64;2]>=exact.par_iter().step_by((exact.len()/PROBED).max(1)).map(|&i|exact_step(model,s,states[i].exact.as_ref().unwrap(),&states[i])).collect();
+    let mean:[f64;2]=std::array::from_fn(|k|probed.iter().map(|p|p[k]).sum::<f64>()/probed.len().max(1) as f64);
+    states.iter().map(|x|if x.exact.is_some(){mean}else{[x.advance+2.*half_step(x,s),0.]}).collect()
 }
 /// A half step's propagation at a state (ns): its series' sub-steps × terms at its generator's norm,
 /// the step's dt and truncation.
 fn half_step(x:&StateWork,s:&Settings)->f64{let(sub,terms)=series(x.norm,0.5*s.dt,s.truncation);(sub*terms) as f64*(TERM_NS+TERM_MULTIPLY_ADD_NS*(x.n*x.n) as f64)}
 /// A step's work per interval (ns, `ADVANCE_NS` and the rest), counted on the sampled states -- the
-/// same whatever the machine and its load: its steps' advances, each the generator's and the force's
-/// multiply-adds and pairs of the state's cluster and two half steps' series; and per jump, one every
-/// waiting time, the jump itself -- every class's photons, the picked class's absorbed light and the
-/// rest -- and two more advances, the step redone to the jump and its rest. A readout per output is
-/// the same at every step and left out.
-fn interval_work(states:&[StateWork],s:&Settings,interval:f64,waiting:f64)->f64{
-    let(mut advance,mut jump)=(0.,0.);
-    for x in states{let a=advance_of(x,s);advance+=a;jump+=x.jump+2.*a;}
+/// same whatever the machine and its load: its steps (`steps_parts`), each the generator's and the force's
+/// multiply-adds and pairs of the state's cluster and two half steps' series, or the exact step's; and per
+/// jump, one every waiting time, the jump itself -- every class's photons, the picked class's absorbed light
+/// and the rest -- and two more advances, the step redone to the jump and its rest (an exact step goes on
+/// from the jump: its segment in the cluster it lands in). A readout per output is the same at every step and
+/// left out.
+fn interval_work(model:&Model,states:&[StateWork],s:&Settings,interval:f64,waiting:f64)->f64{
+    let parts=steps_parts(model,states,s);let(mut advance,mut jump)=(0.,0.);
+    for(x,p)in states.iter().zip(&parts){let a=p[0]+p[1];advance+=a;jump+=x.jump+if x.exact.is_some(){p[0]}else{2.*a};}
     let count=states.len().max(1) as f64;
     (interval/s.dt*advance+interval/waiting*jump)/count
+}
+/// The least work per interval any step leaves (ns, `interval_work`): the multirate grid's nodes, whose number
+/// per unit time is the generator's and not the step's, and the jumps.
+fn least_work(model:&Model,states:&[StateWork],s:&Settings,interval:f64,waiting:f64)->f64{
+    let parts=steps_parts(model,states,s);let(mut grid,mut jump)=(0.,0.);
+    for(x,p)in states.iter().zip(&parts){grid+=p[1];jump+=x.jump;}
+    let count=states.len().max(1) as f64;
+    (interval/s.dt*grid+interval/waiting*jump)/count
 }
 /// The held twin's work per interval (control.rs, ns): per step its two products by the half step's
 /// propagator (n² multiply-adds each) and its step's own (`HELD_NS`); per jump the step redone to it
@@ -1086,11 +1221,26 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
 #[cfg(test)]
 mod tests{
     use super::*;
-    /// The fold's charge keeps the largest 2η² since t = 0: a bright transient's, after the atoms went dark.
+    /// The fold's charge with the memory: a bright transient's charge stays with atoms that go dark (b1/128's
+    /// optical pumping, the validation's M1), and atoms that scatter forget it within their next photons.
     #[test]
-    fn the_fold_s_charge_keeps_the_largest_saturation_since_the_start(){
-        assert_eq!(since_start([0.074,0.002,0.005,0.001].into_iter()),vec![0.074;4]);
-        assert_eq!(since_start([0.,0.01,0.003,0.02].into_iter()),vec![0.,0.01,0.01,0.02]);
+    fn the_fold_s_charge_stays_with_dark_atoms_and_relaxes_with_the_photons(){
+        let atom=|index:u64,jumps:&[u64]|->Vec<Trajectory>{jumps.iter().enumerate().map(|(i,&n)|Trajectory{cluster:0,psi:[Complex::ZERO;crate::model::MOST_MIXED],r:[0.;3],kappa:[0.;3],
+            time:(i+1) as f64*5.,threshold:1.,alive:true,jumps:n,doppler:0.,beats:0.,seed:0,index}).collect()};
+        let charges=|s:&[f64]|s.iter().map(|&x|[x,x]).collect::<Vec<[f64;2]>>();let first=|c:Vec<[f64;2]>|c.iter().map(|x|x[0]).collect::<Vec<f64>>();
+        // Pumped dark within the first interval: two photons, then none.
+        let dark=Memory::of(&[atom(0,&[2,2,2,2]),atom(1,&[3,3,3,3])].concat(),5.,5);
+        assert_eq!(first(dark.charges(&charges(&[0.076,0.006,0.003,0.001,0.]))),vec![0.076;5]);
+        // Scattering on: ten photons an interval, the transient forgotten after the next.
+        let bright=Memory::of(&[atom(0,&[10,20,30,40]),atom(1,&[10,20,30,40])].concat(),5.,5);
+        let c=first(bright.charges(&charges(&[0.076,0.02,0.02,0.02,0.02])));
+        assert_eq!(c[1],0.076);assert!((c[2]-0.02).abs()<=0.076*(-10_f64).exp());assert_eq!(c[4],0.02);
+        // Half the atoms dark: half the transient's charge stays.
+        let mixed=Memory::of(&[atom(0,&[1,1,1,1]),atom(1,&[10,20,30,40])].concat(),5.,5);
+        assert!((first(mixed.charges(&charges(&[0.076,0.,0.,0.,0.])))[4]-0.038).abs()<=0.076*(-10_f64).exp());
+        // An output's states differ in their times' last bits: one group each.
+        let mut a=atom(0,&[0]);a[0].time=5.000000000000002;let states=[atom(1,&[0]),a,atom(2,&[0,0])].concat();let groups=by_output(&states);
+        assert_eq!(groups.iter().map(|g|g.len()).collect::<Vec<_>>(),vec![3,1]);
     }
     /// A step's predicted cost weighs the targets that bind and that the a-priori estimates leave room in:
     /// a model over the population target (GMD1C forced all-folded at 1 us outputs) compares its steps by T's
