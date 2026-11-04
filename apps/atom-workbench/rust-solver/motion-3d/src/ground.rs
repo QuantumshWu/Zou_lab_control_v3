@@ -242,9 +242,8 @@
 //!   states they share a class in, the folded crosses' (`FoldedCross`) with the coherent pairs';
 //! - after a jump the bare state f has the slow part Π f, Π = 1 + ½X + YW,
 //!   (YW)_ab = −Σ_{c1,c2} V_c1[:,a]† G_a(δ_c1) R_c2[:,b] at its beat: a map at the jump's instant, every
-//!   entry kept (a fast entry pairs with the photon's own into a slow product); the weight A = ‖Π f‖²
-//!   divides the waiting time's threshold (engine.rs `slow_start`). The transient's trace factor per excited
-//!   state, κ = 1 − Γ²/(Δ² + Γ²/4), takes Δ from the channel's dressed energy (`state_factor`): the 808 nm
+//!   entry kept (a fast entry pairs with the photon's own into a slow product); with the ringing's photon of probability p
+//!   its weight A = ‖Π f‖² sets the waiting time's threshold, θ (1 − p)/A (engine.rs, # The transient), A + p − 1 the excited states' 1 − κ, κ = 1 − Γ²/(Δ² + Γ²/4), Δ from the channel's dressed energy (`state_factor`): the 808 nm
 //!   tweezer's probe is on its shifted line, a delay (κ = −3), not 32 MHz off;
 //! - the engine's readout (metric 1 + X) and the force stay the second order's: the readout errs
 //!   within S², T by the force's fold S.
@@ -464,12 +463,11 @@ pub struct NearUnit{pub carrier:usize,pub coupling:Dense,pub remainders:Vec<Dens
 /// the slow part M^{1/2}(1 + YW) of a bare ground state, its weight A = ‖Π f‖²), and the readout to
 /// fourth order: M^{−1/2} (the bare ground density M^{−1/2} ρ M^{−1/2}) and per excited state the
 /// operator M^{−1/2} Σ_c W_c[i,:]† W_c[i,:] M^{−1/2} of its population; and per excited state i the
-/// transient's population after a jump into the cluster, Q_i = Σ_g (κ_g/Γ_g) X_g[i,:]†X_g[i,:] of the
-/// bare state f (per coherent group of channels and excited group, κ = 1 − Γ²/(Δ² + Γ²/4): the
-/// dressing rings above its mean far from resonance, and rebuilds below it at resonance), with the
-/// pieces' trace factors κ (in the order of model.rs `Transient`'s pieces' groups).
+/// transient's population after a jump into the cluster, Q_i = Σ_g (κ_i/Γ_i) X_g[i,:]†X_g[i,:] of the
+/// bare state f (per coherent group of channels, κ = 1 − Γ²/(Δ² + Γ²/4): the
+/// dressing rings above its mean far from resonance, and rebuilds below it at resonance).
 #[derive(Clone,Debug)]
-pub struct Fourth{pub effective:Dense,pub jumps:Vec<[Dense;3]>,pub slow:Dense,pub root:Dense,pub excited:Vec<Dense>,pub surplus:Vec<(usize,Dense)>,pub kappa:Vec<f64>}
+pub struct Fourth{pub effective:Dense,pub jumps:Vec<[Dense;3]>,pub slow:Dense,pub root:Dense,pub excited:Vec<Dense>,pub surplus:Vec<(usize,Dense)>}
 
 /// A cluster's generator at a point and a time (the dense reference of model.rs): H_eff, every class's
 /// jumps per axis (target cluster's ground states × cluster), the readout's Y and E_i (per excited
@@ -534,7 +532,7 @@ pub struct Ground{
     /// Per ground state, its cluster's explicit excited states (flags over `excited_states`): the
     /// folded amplitudes it drives do not pass through them (`Ground::eliminate`).
     pub explicit_of:Vec<Vec<bool>>,
-    /// The excited states in groups of nearly one energy at the focus (`transient_groups`).
+    /// The excited states by manifold (a line's, D1 or D2): a folded amplitude's ringing after a jump keeps to its manifold (engine.rs, # The transient).
     pub excited_groups:Vec<Vec<usize>>,
     /// The near light's dressing (`Ground::dress_light`): per carrier and ground state the far channels of
     /// its folded pairs, per unit of a near carrier its fields, and whether the eliminations are dressed --
@@ -864,10 +862,12 @@ impl Ground{
             let first=&request.beams[beams[0]];Carrier{beams,detuning:TAU*detuning(first),wave_number:first.wave_number_per_um}
         }).collect();
         let levels=ground_states.iter().map(|&i|labels[i].1).collect();
+        let mut excited_groups:Vec<Vec<usize>>=vec![];let mut manifolds:Vec<&str>=vec![];
+        for(i,&s)in excited_states.iter().enumerate(){match manifolds.iter().position(|&m|m==labels[s].0){Some(m)=>excited_groups[m].push(i),None=>{manifolds.push(labels[s].0);excited_groups.push(vec![i]);}}}
         let duration=request.times_us.last().copied().unwrap_or(0.).max(0.);
         let mut ground=Ground{ground_states,excited_states,levels,decay,emission,beams:request.beams.clone(),folded:couplings.clone(),couplings,hamiltonian,units,outside:unit_outside,folds:unit_folds,interference,
             components,l0,carriers,duration,reach:vec![],excited_items:vec![],charge:0.,items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![],
-            explicit_of:vec![],excited_groups:vec![],dressed:vec![],vias:vec![],near_units:vec![],dressing:false,floors:vec![],unmixed:vec![],unmixed_error:0.,channel_poles:vec![]};
+            explicit_of:vec![],excited_groups,dressed:vec![],vias:vec![],near_units:vec![],dressing:false,floors:vec![],unmixed:vec![],unmixed_error:0.,channel_poles:vec![]};
         ground.reach=ground.reach(request);
         Ok(ground)
     }
@@ -1670,16 +1670,6 @@ impl Ground{
             }}}
             clusters[k].classes=classes;clusters[k].folded_crosses=crosses;
         }
-        // The excited states in groups of nearly one energy at the focus: consecutive ones whose
-        // separation ΔE has (Γ/ΔE)² beyond the budget ring together after a jump (`transient`).
-        let focus=self.eliminate(&self.focus_intensities())?;
-        let mut order:Vec<usize>=(0..ne).collect();order.sort_by(|&a,&b|focus.excited_energies[a].total_cmp(&focus.excited_energies[b]));
-        let mut groups:Vec<Vec<usize>>=vec![];
-        for e in order{
-            let joined=groups.last().is_some_and(|g:&Vec<usize>|{let f=*g.last().unwrap();let width=self.decay[(e,e)].re.max(self.decay[(f,f)].re);
-                width*width>BUDGET*(focus.excited_energies[e]-focus.excited_energies[f]).powi(2)});
-            if joined{groups.last_mut().unwrap().push(e);}else{groups.push(vec![e]);}
-        }
         // The near light's dressing from here on (`Ground::dress_light`): every channel's far channels, every
         // near unit's fields, each cluster's resolvents' floor and the carriers' poles dressed.
         self.vias=(0..nc).map(|c|(0..ng).map(|b|{let x=Channel{carrier:c,state:b};
@@ -1688,7 +1678,7 @@ impl Ground{
             let mut coupling=Dense::zeros(ne,ng);for(&l,&x)in u.beams.iter().zip(&u.combination){coupling.add_scaled(x,&self.folded[l]);}
             let remainders=if u.beams.len()>1{u.beams.iter().zip(&u.weights).map(|(&l,&g)|{let mut r=self.folded[l].clone();r.add_scaled(-g,&coupling);r}).collect()}else{vec![]};
             Some(NearUnit{carrier:c,coupling,remainders})}).collect();
-        self.items=items;self.cut=cut;self.clusters=clusters;self.cluster=cluster;self.excited_items=excited;self.excited_groups=groups;self.dressed=dressed;
+        self.items=items;self.cut=cut;self.clusters=clusters;self.cluster=cluster;self.excited_items=excited;self.dressed=dressed;
         self.floors=self.clusters.iter().map(|cl|0.5*hermitian_eigenvalues(&self.cluster_hamiltonian(&self.decay,cl)).into_iter().fold(f64::INFINITY,f64::min).max(0.)).collect();
         self.dressing=true;self.unmixed_blocks()?;self.channel_poles=self.dressed_poles()?;
         self.poles=self.channel_poles.iter().map(|p|p.iter().copied().fold(f64::INFINITY,f64::min)).collect();self.pole=self.poles.iter().copied().fold(f64::INFINITY,f64::min);
@@ -1999,20 +1989,16 @@ impl Ground{
         let excited=(0..ne).map(|q|{let mut m=Dense::zeros(n,n);
             for a in &amplitudes{let row=Dense::from_fn(1,n,|_,j|a[(q,j)]);m.add_scaled(Complex::ONE,&row.adjoint_product(&row));}
             root.product(&m).product(&root)}).collect();
-        // The transient after a jump into the cluster: per coherent group X (ne × n) and per excited group
-        // its trace factor κ and its excited states' surplus.
-        let mut surplus:Vec<(usize,Dense)>=(0..ne).map(|i|(i,Dense::zeros(n,n))).collect();let mut kappa=vec![];
+        // The transient after a jump into the cluster: per coherent group X (ne × n) its excited states' surplus.
+        let mut surplus:Vec<(usize,Dense)>=(0..ne).map(|i|(i,Dense::zeros(n,n))).collect();
         for group in &cl.coherent{
             let mut x=Dense::zeros(ne,n);
             for &(ch,w)in group{let col=cl.position(ch.state).unwrap();let phase=Complex::cis(-w*t);for i in 0..ne{x[(i,col)]+=phase*rc[ch.carrier][(i,ch.state)];}}
             let(ch,_)=group[0];
-            for levels in &self.excited_groups{
-                kappa.push(self.transient_factor(e,r,levels,ch.carrier,ch.state));
-                for &i in levels{let(k,gamma)=(self.state_factor(e,i,ch.carrier,ch.state),self.decay[(i,i)].re);
-                    let row=Dense::from_fn(1,n,|_,j|x[(i,j)]);surplus[i].1.add_scaled(Complex::new(k/gamma,0.),&row.adjoint_product(&row));}
-            }
+            for i in 0..ne{let(k,gamma)=(self.state_factor(e,i,ch.carrier,ch.state),self.decay[(i,i)].re);
+                let row=Dense::from_fn(1,n,|_,j|x[(i,j)]);surplus[i].1.add_scaled(Complex::new(k/gamma,0.),&row.adjoint_product(&row));}
         }
-        Ok(Fourth{effective,jumps,slow,root,excited,surplus,kappa})
+        Ok(Fourth{effective,jumps,slow,root,excited,surplus})
     }
     /// The carrier whose frequency a fourth-order triple's ω is (a photon's), if any.
     pub(crate) fn photon_carrier(&self,w:f64)->Option<usize>{(0..self.carriers.len()).find(|&c|same_frame(self.carriers[c].detuning,w))}
@@ -2060,13 +2046,25 @@ impl Ground{
             _=>e.excited_energies[i]-e.energies[b]-self.carriers[c].detuning};
         1.-gamma*gamma/(delta*delta+0.25*gamma*gamma)
     }
-    /// An excited group's post-jump trace factor from channel (c, b) at r: its states' `state_factor`s weighted by the
-    /// channel's excited amplitude there, |R_c[i, b]|² -- the dressing splits a group's states (a near tweezer's tensor
-    /// shift), the driven one's detuning counts.
-    pub fn transient_factor(&self,e:&Elimination,r:[f64;3],levels:&[usize],c:usize,b:usize)->f64{
-        let rc=combine(&self.carriers[c].beams,&self.amplitudes_at(r),&e.responses);
-        let(num,den)=levels.iter().fold((0.,0.),|(x,y),&i|{let w=rc[(i,b)].norm_sqr();(x+w*self.state_factor(e,i,c,b),y+w)});
-        if den>0.{num/den}else{self.state_factor(e,levels[0],c,b)}
+    /// H's excited block at the units' intensities, decoupled from a cluster's explicit states as its folded responses are (`decoupled`): where a folded amplitude rings after a jump (engine.rs, # The transient).
+    pub fn ringing_block(&self,intensities:&[f64],cluster:usize)->Dense{
+        self.cluster_hamiltonian(&sub(&self.hamiltonian_with(intensities),&self.excited_states,&self.excited_states),&self.clusters[cluster])
+    }
+    /// What the transient's delay leaves of its interference at an elimination (engine.rs, # The transient), relative to the photons' weight: the largest
+    /// over the clusters of the spread of ξ_i = Γ_i/z_i over the excited amplitudes their channels drive, per coherent group about its mean, √(Σ w_i |ξ_i − ξ̄|²/Σ w_i), every
+    /// near beam at its peak, w_i = Σ |R[i,b]|² (ξ_i the channels' mean, −iΓ_i Σ R2[i,b] R[i,b]*/w_i: R2 = G R, z = i G⁻¹).
+    pub fn ringing_spread(&self,e:&Elimination)->f64{
+        let ne=self.excited_states.len();
+        self.clusters.iter().map(|cl|{let(mut spread,mut total)=(0.,0.);
+            for group in &cl.coherent{
+                let(mut w,mut xi)=(vec![0.;ne],vec![Complex::ZERO;ne]);
+                for &(ch,_)in group{for &l in &self.carriers[ch.carrier].beams{for i in 0..ne{let r=e.responses[l][(i,ch.state)];w[i]+=r.norm_sqr();xi[i]+=e.derivatives[l][(i,ch.state)]*r.conj();}}}
+                let sum:f64=w.iter().sum();if !(sum>0.){continue;}
+                for i in 0..ne{if w[i]>0.{xi[i]=Complex::new(0.,-self.decay[(i,i)].re/w[i])*xi[i];}}
+                let mean=(0..ne).fold(Complex::ZERO,|s,i|s+xi[i]*w[i])*(1./sum);
+                spread+=(0..ne).map(|i|w[i]*(xi[i]-mean).norm_sqr()).sum::<f64>();total+=sum;
+            }
+            if total>0.{(spread/total).sqrt()}else{0.}}).fold(0.,f64::max)
     }
     /// The 32 populations of a cluster of ground states' density in the fourth order's coordinates
     /// (`Fourth`): the bare ground ones (M^{−1/2} ρ M^{−1/2})_aa and the excited ones tr(E_i ρ).

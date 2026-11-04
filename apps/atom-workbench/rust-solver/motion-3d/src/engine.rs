@@ -120,18 +120,33 @@
 //! the spread alone it took R E_r ⟨n²⟩. The draw's uniform picks the part, its leftover the explicit part's beam, its
 //! lower bits the sign: no further deviate. The momentum diffusion beyond these kicks is the hook `Diffusion`'s.
 //!
-//! # The transient after a jump into a cluster with explicit states
-//! A jump leaves the atom in a bare ground state, while the folded drives' amplitude of the state it
-//! landed in, X ψ′ (X = Σ e^{−iε̃t} A_c per coherent group of channels, model.rs `Transient`), is
-//! dressed: it builds up from zero, and with probability ‖X ψ′‖² the transient really excites the
-//! folded states and they emit one more photon at once (their decay damps the rest). Where the jump
-//! lands in a cluster with explicit excited states, the map after it is ρ → ρ − ½{Y, ρ} + Σ_s S_s ρ S_s†,
-//! S_s = P_B C_a D_g^{−1/2} X_g per group g of nearly degenerate excited states (which ring apart),
-//! Σ_s S_s†S_s = Y: with probability ψ′†Yψ′ one more photon from the S_s (its class by ‖S_s ψ′‖², its
-//! kicks as a jump's), else ψ′ ← (1 − ½Y)ψ′; its draws come from the jump's stream before the
-//! directions' loops. In a cluster of ground states alone the transient is left out: it is of the
-//! order of the fold's own error, which the fold's charge bounds as validated without it (ground.rs),
-//! and the engine there is the release's, draw for draw (the GPU's kernel, gpu/mod.rs).
+//! # The transient after a jump
+//! A jump leaves the atom in a bare ground state ψ′, while the fold's photons are those of the steady excited amplitude of that state, v = X ψ′ (X = −Σ e^{−iε̃t} R_c per
+//! coherent group of channels, model.rs `Transient`). The amplitude builds up from zero, e(τ) = v − e^{−iKτ} v to first order in the drives, and over the time it rings the atom emits otherwise than the fold's
+//! steady rate has it, by
+//!
+//! ```text
+//! ∫ dτ Σ_a C_a (e e† − v v†) C_a† = Σ_a C_a (Z − a v† − v a†) C_a†        Z = ∫ dτ e^{−iKτ} v v† e^{iK†τ}        a = ∫ dτ e^{−iKτ} v = i R2 ψ′
+//! ```
+//!
+//! -- on K's eigenstates, Δ_i their detunings from a channel, v_i v_i′* (1/(i(Δ_i − Δ_i′) + (Γ_i + Γ_i′)/2) − 1/(iΔ_i + Γ_i/2) − 1/(−iΔ_i′ + Γ_i′/2)), on one state (κ_i/Γ_i) |v_i|², κ_i = 1 − Γ_i²/(Δ_i² + Γ_i²/4).
+//! Small as its weight is, it matters where the atoms' states leave a slow mode rarely: on the tetrahedral MOT's frozen |2,1⟩, which scatters 0.36 /us and leaves at 0.0123 /us, this photon runs at 0.0034 /us, and the
+//! tweezer's tensor shift, 2.3 Γ across F′ = 3, rings its sublevels apart: it lands 66 % back in the mode with F′ = 3 explicit, 96 % if they stay coherent, the whole of the fourth order's error out of the mode. The map's parts:
+//! - Z, of trace ‖v‖², is the excited amplitude a jump leaves to decay: the ringing's own photon, with probability p = Σ ‖v‖² over the coherent groups (their beats average their interference out). Its unraveling is the
+//!   emission itself: a group and an excited manifold by their weights, at a time τ ~ Γ e^{−Γτ}, Γ the manifold's width, the photon's amplitude u_a = C_a e^{−iHτ} v -- each landing state at its frame at t + τ --, its landing cluster by the weights
+//!   there, its kicks a jump's. The mixture over τ is Z exactly, whatever H's off-diagonal part, each pair of its eigenstates at its coherence Γ/(Γ + iδ), the landing states' frames' difference in δ.
+//!   (A manifold's states' widths agree to 1e-4 of Γ, their mean, and D1 and D2 are 1e6 widths apart.) Only a photon takes H's eigenstates (`Model::ringing`, as far as a coupling moves its amplitude beyond the numerical share of the rule's budget): one jump in a hundred on that MOT.
+//! - The interference, −(a v† + v a†), of trace −w, w = Σ (1 − κ_i) |v_i|² ≥ 0, is what the steady amplitude's photons lack while it builds. Where every pair's terms are equal it is w of those photons themselves: a delay of the next jump,
+//!   which at fourth order the slow part's weight holds: A = ‖Πψ′‖² has A + p − 1 = w to the fold's next order, so that after no ringing photon (1 − p) the atom goes on from Πψ′/√A at the threshold θ (1 − p)/A: the slow part's whole weight is kept, and the next jump's first w never comes.
+//!   What the delay leaves, the terms' spread, is ς of the photons' weight, ς the spread of Γ_i/z_i over v, of first order in S (`Model::ringing_spread`: 0.06 on the MOT, where its effect is measured at 2e-5, and of the order of one on a line the light brings to resonance): the fold's charge books S² + ς S (solve.rs `fold_charges`).
+//! - At second order and with explicit states, where the slow part is the state itself, the atom stays in ψ′ after no photon, without the delay: the rates' error is of the fold's own order there (2.7 % on the MOT with or without it), and the populations move less for it (a near-resonant shallow probe's at the focus 0.0017 against 0.0026
+//!   with it); the state's tilt (1 − ½Y)ψ′, Y = Σ X†X, the map's linear form, moves the MOT's |2,1⟩ by 4e-4. So a jump asks for no amplitude unless its draw falls within a bound of p from the columns' norms (`Model::ringing_bound`), about one in ten at p = 1 %; at fourth order p is the metric's form on ψ′, which Π holds.
+//!
+//! Against the rung with F′ = 3 explicit on the MOT, the frozen master equation's largest |Δp| at x times its near beams' intensities (x = 1, ½, ¼): fourth order 0.0150, 0.0077, 0.0040 with a photon coherent over the tensor split, 0.0004, 0.0001, 0.0001 with this one
+//! (S² = 3e-4 at x = 1; H's couplings across F′, of mixing 3 %, are 3e-4 of its first order against H's diagonal alone); second order 0.0134, 0.0070, 0.0036 without a transient, 0.0029, 0.0013, 0.0005 with it.
+//! The photon's draws come from the jump's stream before the directions' loops. A photon's own landing takes its slow part, the third photon's chance -- S² -- in its threshold (`slow_start`), as the bare state a solve starts from does at fourth order.
+//! On the moving atom (1 ms, the second half's means against no such photon): the MOT's F = 1 8 % up, as the frozen atom's, and its T 2.2 % at second order, 1.0 % at fourth (S = 2.1 %, T's charge √2 S), 0.7 % and 0.4 % of it this photon's kicks,
+//! the rest where it lands; the 3D PGC's F = 1 4 % up and its T within 0.3 % (a recorded rung with F′ = 3 explicit: F = 1 3-6 % up, T within 0.4 %). The MOT's photons per atom now hold the core's at fourth order (0.8 % high before), its T the rung's within 0.8 %.
 //!
 //! # What the kicks leave out
 //! The Ehrenfest force averages the dipole force over a superposition of ground states, and a kick
@@ -173,7 +188,7 @@
 //! Every jump draws from its own counter-based stream (rng.rs: the run's seed, the trajectory, the
 //! jump's number), so runs that differ only in the time step make the same choices: the
 //! step-doubling check compares them. A jump draws its class, the next threshold, the polarization,
-//! the absorbed beam (and into a cluster with explicit states the transient's four) first and the
+//! the absorbed beam and the transient's five first and the
 //! directions' rejection loops last, so that
 //! a trajectory's twin on the same streams (control.rs) keeps its thresholds and choices whatever its
 //! loops take.
@@ -712,7 +727,7 @@ impl Segment{
     }
 }
 
-/// The fourth order's start from a bare ground state (after a jump, and at t = 0, into a cluster with
+/// The fourth order's start from a bare ground state at t = 0, or a ringing photon's landing (module documentation, # The transient; into a cluster with
 /// its tables; model.rs `Model::slow_part`): ψ ← Π f/√A, its slow part, and the threshold θ ← θ/A,
 /// A = ‖Π f‖² -- the survival after the dressing's transient is A times the slow part's. A < 1 (far
 /// from resonance): with probability 1 − A the transient emits at once (θ/A ≥ 1, a jump at the step's
@@ -1076,7 +1091,7 @@ impl<'a> Engine<'a>{
         let mut pick=weights.len()-1;
         for(i,&w)in weights.iter().enumerate(){if x<w{pick=i;break;}x-=w;}
         let class=&classes[pick];let nt=m.ground_dimension(class.target);
-        let transient:Option<[f64;4]>=(self.held.is_none()&&m.mixed(class.target)).then(||std::array::from_fn(|_|rng.uniform()));
+        let transient:Option<[f64;5]>=self.held.is_none().then(||std::array::from_fn(|_|rng.uniform()));
         let(direction,e,f,size)=emit(&mut rng,&amplitude[pick],nt,polarization);
         // The recoils of a moving atom: the photon's, the absorbed beam's and the exact conditional
         // mean's correction.
@@ -1087,7 +1102,6 @@ impl<'a> Engine<'a>{
         let mut next=[Complex::ZERO;MOST_MIXED];for i in 0..nt{next[i]=f[i]*(1./size.sqrt());}
         t.cluster=class.target;t.psi=next;t.threshold=threshold;
         if let Some(draws)=transient{self.transient(t,&point,time,draws,&mut rng);}
-        if self.held.is_none(){slow_start(m,t,&point,time);}
     }
 
     /// A moving atom's recoils from a photon (direction n, wave number k, the state it leaves f and
@@ -1106,37 +1120,55 @@ impl<'a> Engine<'a>{
         for a in 0..3{if self.settings.free[a]{t.kappa[a]+=kick[a];}}
     }
 
-    /// The post-jump transient (module documentation) from the normalized ground state the jump
-    /// left: with probability ψ′†Yψ′ one more photon of a piece S_s (by ‖S_s ψ′‖², its kicks a
-    /// jump's), else ψ′ ← (1 − ½Y)ψ′. `draws`: whether, which piece, the polarization, the beam.
-    fn transient(&self,t:&mut Trajectory,point:&Point,time:f64,draws:[f64;4],rng:&mut Rng){
-        let m=self.model;let k=t.cluster;
-        let ops=m.transient(k,point,time);let n0=ops.n0;let psi=t.psi;
-        let mut y=[Complex::ZERO;MOST_STATES];for a in 0..n0{for b in 0..n0{y[a]+=ops.y[a*n0+b]*psi[b];}}
-        let p:f64=(0..n0).map(|a|(psi[a].conj()*y[a]).re).sum();
-        if !(p>0.){return;}
-        if draws[0]>=p{
-            // No photon: ψ′ ← (1 − ½Y)ψ′.
-            let mut next=t.psi;for a in 0..n0{next[a]=psi[a]-y[a]*0.5;}let norm=norm2(&next,n0).sqrt();for z in next[..n0].iter_mut(){*z=*z*(1./norm);}
-            t.psi=next;return;
-        }
-        // One more photon: the piece by its weight.
-        let amplitudes:Vec<[[Complex;MOST_STATES];3]>=ops.pieces.iter().map(|piece|{let nt=m.ground_dimension(piece.target);
-            std::array::from_fn(|a|{let mut u=[Complex::ZERO;MOST_STATES];for i in 0..nt{for b in 0..n0{u[i]+=piece.ops[a][i*n0+b]*psi[b];}}u})}).collect();
-        let weights:Vec<f64>=ops.pieces.iter().zip(&amplitudes).map(|(piece,u)|{let nt=m.ground_dimension(piece.target);(0..3).map(|a|norm2(&u[a],nt)).sum()}).collect();
+    /// The post-jump transient (module documentation) from the normalized ground state ψ′ the jump left: with probability p = ‖Xψ′‖²
+    /// the ringing's photon (`ringing_photon`), and the slow part of the state it leaves; else at fourth order its slow part Πψ′/√A with the threshold θ (1 − p)/A (`slow_start`'s, A = ‖Πψ′‖²).
+    /// `draws`: whether, the photon's time, its landing cluster, its polarization, its beam.
+    fn transient(&self,t:&mut Trajectory,point:&Point,time:f64,draws:[f64;5],rng:&mut Rng){
+        let m=self.model;let k=t.cluster;let psi=t.psi;let n0=m.ground_dimension(k);
+        let p=match m.slow_and_metric(k,point,time){
+            Some((pi,x))=>{
+                let form=(0..n0).map(|a|psi[a].conj()*(0..n0).fold(Complex::ZERO,|s,b|s+x[a*n0+b]*psi[b])).fold(Complex::ZERO,|s,z|s+z).re;
+                if draws[0]>=form{
+                    let mut y=[Complex::ZERO;MOST_MIXED];for a in 0..n0{for b in 0..n0{y[a]+=pi[a*n0+b]*psi[b];}}
+                    let a=norm2(&y,n0);for z in y[..n0].iter_mut(){*z=*z*(1./a.sqrt());}t.psi=y;t.threshold*=(1.-form)/a;return;
+                }
+                form
+            }
+            None=>{if draws[0]>=m.ringing_bound(k,point,&psi){return;}0.}
+        };
+        let v=m.ringing_amplitudes(k,&m.responses(k,point),&psi,time);
+        let total:f64=v.iter().map(|v|v.iter().map(|z|z.norm_sqr()).sum::<f64>()).sum();
+        // At fourth order the draw is within the metric's form, X on the fourth order's carriers; without it within the bound, and the amplitudes' own weight decides.
+        let within=if p>0.{draws[0]*total/p}else{draws[0]};
+        if within<total{self.ringing_photon(t,point,time,&v,within,draws,rng);slow_start(m,t,point,time);}
+    }
+    /// The ringing's photon (module documentation) from ψ′, v its amplitudes per coherent group: the group and the manifold by their weights (`x` within their sum, the
+    /// whether's uniform), the time τ ~ Γ e^{−Γτ} at the manifold's width, the amplitude C_a e^{−iHτ} v, its landing cluster by the weights there, its kicks a jump's.
+    fn ringing_photon(&self,t:&mut Trajectory,point:&Point,time:f64,v:&[Vec<Complex>],x:f64,draws:[f64;5],rng:&mut Rng){
+        let m=self.model;let g=&m.ground;let k=t.cluster;let psi=t.psi;
+        let manifolds=&g.excited_groups;let weight=|c:usize,e:usize|manifolds[e].iter().map(|&i|v[c][i].norm_sqr()).sum::<f64>();
+        let(mut x,mut pick)=(x,(0,0));
+        'pick:for c in 0..v.len(){for e in 0..manifolds.len(){let w=weight(c,e);if w>0.{pick=(c,e);if x<w{break 'pick;}x-=w;}}}
+        let(c,e)=pick;let levels=&manifolds[e];
+        let ring=m.ringing(k,point.r,e);let tau=-(1.-draws[1]).ln()/ring.width;let ops=m.ringing_photon(&ring,tau,time);
+        // Its amplitude on each cluster's ground states; the cluster by the weights.
+        let amplitude=|target:usize|->[[Complex;MOST_STATES];3]{std::array::from_fn(|a|{let mut u=[Complex::ZERO;MOST_STATES];
+            for(row,&to)in g.clusters[target].states.iter().enumerate(){for &i in levels{u[row]+=ops[a][(to,i)]*v[c][i];}}u})};
+        let photons:Vec<[[Complex;MOST_STATES];3]>=(0..g.clusters.len()).map(amplitude).collect();
+        let weights:Vec<f64>=photons.iter().enumerate().map(|(target,u)|(0..3).map(|a|norm2(&u[a],m.ground_dimension(target))).sum()).collect();
         let total:f64=weights.iter().sum();if !(total>0.){return;}
-        let mut x=draws[1]*total;let mut pick=weights.len()-1;for(i,&w)in weights.iter().enumerate(){if x<w{pick=i;break;}x-=w;}
-        let piece=&ops.pieces[pick];let nt=m.ground_dimension(piece.target);
-        let(direction,e,f,size)=emit(rng,&amplitudes[pick],nt,draws[2]);
-        let(_,du,beams)=m.transient_photon(k,point,time,piece,&psi);
-        // The beams' parts and the piece's gradient along the polarization (`kick`), of the photon's own sign:
-        // transient_photon's amplitude is Σ e^{−iε̃t} R ψ′, the photon S ψ′ its negative (X = −Σ e^{−iε̃t} R, model.rs `transient`).
-        let parts=Absorption{beams:beams.iter().map(|(l,v)|{let along=|i:usize|(0..3).fold(Complex::ZERO,|s,a|s+v[a][i]*e[a]);
+        let mut y=draws[2]*total;let mut target=weights.len()-1;for(i,&w)in weights.iter().enumerate(){if y<w{target=i;break;}y-=w;}
+        let nt=m.ground_dimension(target);
+        let(direction,polar,f,size)=emit(rng,&photons[target],nt,draws[3]);
+        let(_,du,beams)=m.transient_photon(k,point,time,c,levels,target,&ops,&psi);
+        // The beams' parts and the photon's gradient along the polarization (`kick`), of the photon's own sign:
+        // transient_photon's amplitude is Σ e^{−iε̃t} R ψ′, the photon its negative (X = −Σ e^{−iε̃t} R, model.rs `transient`).
+        let parts=Absorption{beams:beams.iter().map(|(l,u)|{let along=|i:usize|(0..3).fold(Complex::ZERO,|s,a|s+u[a][i]*polar[a]);
             (*l,(0..nt).map(|i|along(i).norm_sqr()).sum(),-(0..nt).map(|i|(f[i].conj()*along(i)).re).sum::<f64>()/size)}).collect(),explicit:None};
-        let along:[[Complex;3];MOST_STATES]=std::array::from_fn(|i|std::array::from_fn(|x|-(0..3).fold(Complex::ZERO,|s,a|s+du[a][x][i]*e[a])));
-        self.kick(t,point,direction,piece.wave_number,&f,size,&along,&parts,draws[3]);
+        let along:[[Complex;3];MOST_STATES]=std::array::from_fn(|i|std::array::from_fn(|x|-(0..3).fold(Complex::ZERO,|s,a|s+du[a][x][i]*polar[a])));
+        self.kick(t,point,direction,m.carriers[g.clusters[k].coherent[c][0].0.carrier].wave_number,&f,size,&along,&parts,draws[4]);
         let mut next=[Complex::ZERO;MOST_MIXED];for i in 0..nt{next[i]=f[i]*(1./size.sqrt());}
-        t.cluster=piece.target;t.psi=next;
+        t.cluster=target;t.psi=next;
     }
 }
 

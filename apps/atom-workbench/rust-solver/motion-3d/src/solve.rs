@@ -40,7 +40,7 @@
 //! profiles at the atoms with the model's estimates), the time step's bias (its step-doubling share)
 //! and CONFIDENCE standard errors, in quadrature (# Shares): the populations' against the population target (absolute),
 //! T's against the temperature target (relative, the regime's below it, # Regime) -- the fold's charge in either its own
-//! (`fold_charges`: at fourth order the populations' S², T's still √2 S, the force folding at second order). The
+//! (`fold_charges`: at fourth order the populations' S² and what the transient's delay leaves, T's still √2 S, the force folding at second order). The
 //! trajectories are run until the totals meet the targets -- the statistics within what the ledger and the step leave
 //! (# Shares) -- and an output whose total exceeds a target all the same is flagged (`Ledger::flagged`; a checkpoint's
 //! statistics still run, so only its a-priori excess is).
@@ -529,7 +529,7 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
     let explicit:usize=g.clusters.iter().map(|c|c.excited.len()).sum();
     let count=|drive:bool|g.excited_items.iter().filter(|x|matches!(x.kind,ExcitedKind::Drive(_))==drive).fold((0,0),|(k,f),x|if x.folded{(k,f+1)}else{(k+1,f)});
     let(kept,fold)=count(true);
-    let order=if model.fourth{"四阶折叠（误差界为饱和参数之和的平方）"}else{"二阶折叠（误差界为饱和参数之和）"};
+    let order=if model.fourth{"四阶折叠（误差界为饱和参数之和的平方，加跃迁后瞬态光子未尽的一阶余项）"}else{"二阶折叠（误差界为饱和参数之和）"};
     ledger.add(FOLD,fold_charge(model,g.charge),if explicit==0{format!("{fold} 个驱动全部{order}，饱和参数按光场图样平均")}
         else{format!("{fold} 个驱动{order}，{kept} 个显式保留、{explicit} 个激发态精确传播：按预计总耗时选取")});
     let(kept,fold)=count(false);
@@ -575,7 +575,7 @@ fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance
     // bound takes on the paths they go (an atom that gathers where the light is bright, as red-detuned
     // molasses holds it at its lattice's bright sites, meets more than the pattern's mean). The a-priori
     // estimate over the reach decided the fold (`Candidate`).
-    let measured=memory.charges(&estimates.iter().map(|e|fold_charges(model.fourth,2.*e.folded)).collect::<Vec<_>>());
+    let measured=memory.charges(&estimates.iter().map(|e|fold_charges(model,2.*e.folded)).collect::<Vec<_>>());
     let profiles:Vec<f64>=estimates.iter().map(|e|e.profile).collect();let dopplers:Vec<f64>=estimates.iter().map(|e|e.doppler).collect();
     let largest=|v:&[f64]|v.iter().skip(1).copied().fold(0.,f64::max);
     ledger.add("多普勒与反冲频移",largest(&dopplers),format!("一阶（kv/σ）²；单步超过 {:.1e} 时用精确响应",allowance));
@@ -763,7 +763,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // and the motion's step error are the second order's. Beside a pilot's model whose check was put off (beyond the targets at
     // any step), only where those totals come within the targets: what lies beyond them is no fold's.
     let promise=pilot_cost.as_ref().map_or(true,|p|{
-        let apriori:Vec<[f64;2]>=p.apriori.iter().zip(&pilot_candidate.charges).map(|(a,c)|[a[0]-c[0]+fold_charges(true,c[1])[0],a[1]]).collect();
+        let apriori:Vec<[f64;2]>=p.apriori.iter().zip(&pilot_candidate.charges).map(|(a,c)|[a[0]-c[0]+c[1]*c[1],a[1]]).collect();
         let(n,weight)=predicted(&pilot_statistics,&apriori,[0.,p.bias[1]],pilot as f64,pilot_candidate.model.resonance);
         if p.checked.is_none()&&past_targets(&pilot_statistics,&apriori,pilot_candidate.model.resonance){return false;}
         let work=fourth_work(request,&pilot_candidate,&pilot_states,&starts,&running(p.steps,pilot_waiting,doppler_allowance(&pilot_candidate.base,&pilot_candidate.model),pilot_candidate.phase),interval,pilot_waiting);
@@ -1038,10 +1038,10 @@ fn initial_flag(initial:&Initial)->Option<String>{
 /// The cut's share in a ledger (`CUT`), zero without one.
 fn cut(ledger:&Ledger)->f64{ledger.items.iter().find(|i|i.label==CUT).map_or(0.,|i|i.estimate)}
 /// The fold's charge for the saturation S its folded drives meet: its populations' error bound, S at
-/// second order and S² at fourth (ground.rs; against the population core 0.2-1.0 S² where the series
+/// second order and S² + ς S at fourth (ground.rs; against the population core 0.2-1.5 S² where the series
 /// converges, S ≲ 0.5 -- beyond, the charge exceeds the target and the rule keeps the drives).
-fn fold_charge(model:&Model,saturation:f64)->f64{fold_charges(model.fourth,saturation)[0]}
-/// The fold's charges per target, the populations' (`fold_charge`) and T's, for the saturation S its folded drives meet at second or
+fn fold_charge(model:&Model,saturation:f64)->f64{fold_charges(model,saturation)[0]}
+/// The fold's charges per target, the populations' (`fold_charge`: at fourth order S² and the first order the transient's delay leaves, ς S, model.rs `Model::ringing_spread`) and T's, for the saturation S its folded drives meet at second or
 /// fourth order: T's is √2 S at either -- T is the ratio of the momentum diffusion and the friction, each a rate or a force's
 /// gradient of the fold's error S, independent errors in quadrature as the totals' (module documentation, # Shares), and the force
 /// folds at second order. Measured gaps, the explicit states' T against the all-folded T on one kick, second-half means over 1 ms
@@ -1049,7 +1049,7 @@ fn fold_charge(model:&Model,saturation:f64)->f64{fold_charges(model.fourth,satur
 /// and z 2.54 ± 0.49 (S = 2.05 %), a gray molasses's z 0.41 ± 1.44 and x −0.47 ± 0.71 (S = 3.4 %): their root mean square, its noise
 /// taken out, 0.8 S -- what a bound of √2 S with the error uniform within it gives (the 0.82 S of the totals' reading of a bound),
 /// the PGC's z alone 2.3 standard errors beyond it; the populations within 0.5 S.
-fn fold_charges(fourth:bool,saturation:f64)->[f64;2]{[if fourth{saturation*saturation}else{saturation},std::f64::consts::SQRT_2*saturation]}
+fn fold_charges(model:&Model,saturation:f64)->[f64;2]{[if model.fourth{saturation*saturation+model.ringing_spread*saturation}else{saturation},std::f64::consts::SQRT_2*saturation]}
 
 /// A candidate of the fold (module documentation, # The fold's choice): the model at one of the rule's
 /// allowances, its initial state, its ledger, and the fold's charge per output and target (`fold_charges`) -- a
@@ -1062,7 +1062,7 @@ struct Costed{cost:f64,check:f64,work:f64,steps:usize,bias:[f64;2],apriori:Vec<[
 impl Candidate{
     fn new(request:&Request,allowance:f64,fourth:bool)->Result<Candidate,String>{
         let model=Model::with_order(request,allowance,fourth)?;let initial=Initial::deferred(&model,request)?;let base=model_ledger(&model,request);
-        let charges=vec![fold_charges(model.fourth,model.ground.charge);request.times_us.len()];
+        let charges=vec![fold_charges(&model,model.ground.charge);request.times_us.len()];
         Ok(Candidate{model,initial,base,allowance,charges,settled:false,phase:node_phase()})
     }
     /// The initial ensemble's quadrature (ensemble.rs), which none of the fold's choices reads, for the pilot's and
@@ -1102,7 +1102,7 @@ fn next_candidate(request:&Request,ladder:&mut dyn Iterator<Item=f64>,fourth:boo
 /// gathered at a red-detuned lattice's bright sites meets more than its mean). The a-priori charge at every output
 /// where the pilot kept no state after t = 0.
 fn measured_charge(from:&Model,to:&Model,states:&[Trajectory],starts:&[Trajectory],memory:&Memory,interval:f64,outputs:usize)->Vec<[f64;2]>{
-    let charge=|t:&Trajectory|{let x=carried(from,to,t);let p=to.point(x.r,x.kappa);fold_charges(to.fourth,2.*to.readout(x.cluster,&p,&x.psi,x.time).1)};
+    let charge=|t:&Trajectory|{let x=carried(from,to,t);let p=to.point(x.r,x.kappa);fold_charges(to,2.*to.readout(x.cluster,&p,&x.psi,x.time).1)};
     // Per output the states' charges: their sums, their counts, and over the outputs after t = 0 their first two moments and largest.
     let(mut sums,mut counts,mut moments,mut largest)=(vec![[0.;2];outputs],vec![0.;outputs],[[0.;2];2],[0_f64;2]);
     for group in by_output(starts).into_iter().chain(by_output(states)){
@@ -1110,7 +1110,7 @@ fn measured_charge(from:&Model,to:&Model,states:&[Trajectory],starts:&[Trajector
         let charges:Vec<[f64;2]>=group.par_iter().map(|&t|charge(t)).collect();
         for c in &charges{for k in 0..2{sums[i][k]+=c[k];if i>0{moments[0][k]+=c[k];moments[1][k]+=c[k]*c[k];largest[k]=largest[k].max(c[k]);}}}
     }
-    let held:f64=counts[1..].iter().sum();if held==0.{return vec![fold_charges(to.fourth,to.ground.charge);outputs];}
+    let held:f64=counts[1..].iter().sum();if held==0.{return vec![fold_charges(to,to.ground.charge);outputs];}
     let means:[Vec<f64>;2]=std::array::from_fn(|k|{let sum:Vec<f64>=sums.iter().map(|s|s[k]).collect();let mean=moments[0][k]/held;
         steady_means(&sum,&counts,(moments[1][k]/held-mean*mean).max(0.).sqrt(),largest[k])});
     memory.charges(&(0..outputs).map(|i|[means[0][i],means[1][i]]).collect::<Vec<[f64;2]>>())

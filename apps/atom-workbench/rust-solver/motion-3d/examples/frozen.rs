@@ -1,12 +1,12 @@
 //! The atom held still at a point: the engine's jump trajectories against the master equation of
 //! the front end (ground.rs `local_at`: every cluster's H_eff and jumps, with explicit excited states
-//! where the rule keeps them; each jump's transient, model.rs `Transient`), integrated directly (RK4
+//! where the rule keeps them; each jump's transient, engine.rs # The transient), integrated directly (RK4
 //! on the clusters' densities, its step within a fraction of the generators' scale), from the same
 //! initial state: the populations over time. Writes both, with the trajectories' standard errors, to <out>.json for the comparison with
 //! the population core's internal solve of the same scene.
 //! With `fourth` the clusters of ground states take the fourth-order fold (ground.rs `Ground::fourth`):
-//! H̃, L̃ and, after each jump into such a cluster, its slow part Π σ Π† with the transient's photon
-//! Σ S σ S† (the far-detuned form, trace one to O(S²)); 0 trajectories leave the engine out.
+//! H̃, L̃ and, after each jump into such a cluster, its slow part Π σ Π† with the ringing's landing
+//! and its interference (trace one to O(S²)); 0 trajectories leave the engine out.
 //! `cargo run --profile iterate -p atom-motion-3d --example frozen -- <scene> [trajectories] [t_end_us] [interval_us] [out.json] [x y z (um)] [dt_us] [fourth]`
 #[path="scene/mod.rs"] mod scene;
 use atom_motion_3d::engine::Settings;
@@ -40,53 +40,26 @@ fn main(){
     let mut rho:Vec<Dense>=g.clusters.iter().map(|c|{let n=c.dimension();Dense::from_fn(n,n,|i,j|if i==j&&i<c.states.len(){let s=g.ground_states[c.states[i]];request.initial_density[s*STATES+s]}else{Complex::ZERO})}).collect();
     let point=model.point(r,[0.;3]);
     let transients=|t:f64|->Vec<atom_motion_3d::model::Transient>{(0..g.clusters.len()).map(|k|model.transient(k,&point,t)).collect()};
-    // dρ/dt: −i(Hρ − ρH†), and each class's σ = Σ J ρ J† into its target's ground states through the
-    // jump's transient: σ − ½{Y, σ} there, Σ_a S σ S† into each piece's target.
+    let rings:Vec<Vec<atom_motion_3d::model::Ringing>>=(0..g.clusters.len()).map(|k|(0..g.excited_groups.len()).map(|m|model.ringing(k,r,m)).collect()).collect();
     let fixed_slow=slows(0.);
-    let q0=transients(0.);
-    // A transient piece's trace factor at fourth order: its photons per jump, κ = 1 − Γ²/(Δ² + Γ²/4) of
-    // ‖S f‖², Δ the ringing of its excited group against its channels' dressed energy (far detuned an extra
-    // photon, at resonance −3: the dressing's rebuild delays the next; ground.rs `transient_factor`).
-    let kappa=|b:usize,piece:&atom_motion_3d::model::Piece|->f64{if !fourth||!g.clusters[b].excited.is_empty(){return 1.;}
-        let(ch,_)=g.clusters[b].coherent[piece.coherent][0];g.transient_factor(&e,r,&g.excited_groups[piece.excited],ch.carrier,ch.state)};
-    // The slow part's trace balance per cluster: D = 1 − Π†Π − Σ κ S†S (O(S²)), taken as ½{D, σ}.
-    let balance:Vec<Option<Dense>>=(0..g.clusters.len()).map(|b|fixed_slow[b].as_ref().map(|slow|{let nt=slow.rows;
-        let mut d=Dense::from_fn(nt,nt,|i,j|if i==j{Complex::ONE}else{Complex::ZERO});d.add_scaled(-Complex::ONE,&slow.adjoint_product(slow));
-        for piece in &q0[b].pieces{let ns=g.clusters[piece.target].states.len();let w=kappa(b,piece);
-            for a in 0..3{let s=Dense::from_fn(ns,nt,|i,j|piece.ops[a][i*nt+j]);d.add_scaled(Complex::new(-w,0.),&s.adjoint_product(&s));}}
-        d})).collect();
-    let derivative=|rho:&[Dense],l:&[atom_motion_3d::ground::Local],q:&[atom_motion_3d::model::Transient]|->Vec<Dense>{
+    // After a jump into b at time t, on the bare density σ there (model.rs `Model::after_jump`; engine.rs, # The transient).
+    let after=|b:usize,sigma:&Dense,q:&atom_motion_3d::model::Transient,t:f64|model.after_jump(&e,r,b,sigma,q,&rings[b],fixed_slow[b].as_ref(),t);
+    // dρ/dt: −i(Hρ − ρH†), and each class's σ = Σ J ρ J† into its target's ground states through the jump's transient (`after`).
+    let derivative=|rho:&[Dense],l:&[atom_motion_3d::ground::Local],q:&[atom_motion_3d::model::Transient],t:f64|->Vec<Dense>{
         let mut out:Vec<Dense>=rho.iter().zip(l).map(|(p,x)|{let h=&x.effective;let mut d=h.product(p).scaled(Complex::new(0.,-1.));d.add_scaled(Complex::new(0.,1.),&p.product(&h.adjoint()));d}).collect();
         for(k,x)in l.iter().enumerate(){for(class,jumps)in g.clusters[k].classes.iter().zip(&x.jumps){
             let b=class.target;let nt=g.clusters[b].states.len();let mut sigma=Dense::zeros(nt,nt);
             for j in jumps{sigma.add_scaled(Complex::ONE,&j.product(&rho[k]).product(&j.adjoint()));}
-            let y=Dense::from_fn(nt,nt,|i,j|q[b].y[i*nt+j]);let mut kept=sigma.clone();
-            // A cluster of ground states: the second order's jump as it is (the release's), or the fourth
-            // order's slow part and the transient's photon; a mixed cluster: σ − ½{Y, σ} and the photon.
-            let transient=fixed_slow[b].is_some()||!g.clusters[b].excited.is_empty();
-            if let Some(slow)=&fixed_slow[b]{kept=slow.product(&sigma).product(&slow.adjoint());let d=balance[b].as_ref().unwrap();
-                kept.add_scaled(Complex::new(0.5,0.),&d.product(&sigma));kept.add_scaled(Complex::new(0.5,0.),&sigma.product(d));}
-            else if transient{kept.add_scaled(Complex::new(-0.5,0.),&y.product(&sigma));kept.add_scaled(Complex::new(-0.5,0.),&sigma.product(&y));}
-            for i in 0..nt{for j in 0..nt{out[b][(i,j)]+=kept[(i,j)];}}
-            for piece in q[b].pieces.iter().filter(|_|transient){let ns=g.clusters[piece.target].states.len();
-                let w=kappa(b,piece);
-                for a in 0..3{let s=Dense::from_fn(ns,nt,|i,j|piece.ops[a][i*nt+j]);let m=s.product(&sigma).product(&s.adjoint());
-                    for i in 0..ns{for j in 0..ns{out[piece.target][(i,j)]+=m[(i,j)]*w;}}}}
+            for(c,m)in after(b,&sigma,&q[b],t).iter().enumerate(){let ns=g.clusters[c].states.len();for i in 0..ns{for j in 0..ns{out[c][(i,j)]+=m[(i,j)];}}}
         }}
         out
     };
     if fourth{
-        // Every cluster's slow part, then the transients' photons into their targets (an earlier cluster's into a
-        // later one's kept).
+        // The bare initial state's slow part and its ringing's photon, as a jump's.
         let q=transients(0.);let bare=rho.clone();
         for(b,x)in bare.iter().enumerate(){if fixed_slow[b].is_some(){rho[b]=Dense::zeros(x.rows,x.cols);}}
-        for(b,x)in bare.iter().enumerate(){let Some(slow)=&fixed_slow[b]else{continue};let nt=x.rows;
-            let mut part=slow.product(x).product(&slow.adjoint());part.add_scaled(Complex::ONE,&rho[b]);rho[b]=part;let d=balance[b].as_ref().unwrap();
-            rho[b].add_scaled(Complex::new(0.5,0.),&d.product(x));rho[b].add_scaled(Complex::new(0.5,0.),&x.product(d));
-            for piece in &q[b].pieces{let ns=g.clusters[piece.target].states.len();let w=kappa(b,piece);
-                for a in 0..3{let s=Dense::from_fn(ns,nt,|i,j|piece.ops[a][i*nt+j]);let m=s.product(x).product(&s.adjoint());
-                    for i in 0..ns{for j in 0..ns{rho[piece.target][(i,j)]+=m[(i,j)]*w;}}}}
-        }
+        for(b,x)in bare.iter().enumerate(){if fixed_slow[b].is_none(){continue;}
+            for(c,m)in after(b,x,&q[b],0.).iter().enumerate(){let ns=g.clusters[c].states.len();for i in 0..ns{for j in 0..ns{rho[c][(i,j)]+=m[(i,j)];}}}}
     }
     let fourths:Vec<Option<atom_motion_3d::ground::Fourth>>=(0..g.clusters.len()).map(|k|(fourth&&!readout2&&g.clusters[k].excited.is_empty()).then(||g.fourth(&e,k,r,0.).unwrap())).collect();
     let readout=|rho:&[Dense],l:&[atom_motion_3d::ground::Local]|->Vec<f64>{let mut p=vec![0.;STATES];for(k,x)in l.iter().enumerate(){
@@ -114,7 +87,7 @@ fn main(){
         let d:usize=sizes.iter().map(|n|n*n).sum();let mut generator=Dense::zeros(d,d);
         for(k,&n)in sizes.iter().enumerate(){for col in 0..n*n{
             let basis:Vec<Dense>=sizes.iter().enumerate().map(|(j,&m)|Dense::from_fn(m,m,|a,b|if j==k&&a*n+b==col{Complex::ONE}else{Complex::ZERO})).collect();
-            let image=derivative(&basis,&fixed,&fixed_q);
+            let image=derivative(&basis,&fixed,&fixed_q,0.);
             for(j,x)in image.iter().enumerate(){for(e,z)in x.entries.iter().enumerate(){generator[(offsets[j]+e,offsets[k]+col)]=*z;}}
         }}
         // exp(L τ) by scaling and squaring of its Taylor series.
@@ -130,7 +103,7 @@ fn main(){
     for _ in 1..outputs{for _ in 0..steps{
         let(l0,lh,l1)=(at(t),at(t+0.5*dt),at(t+dt));let(q0,qh,q1)=(at_q(t),at_q(t+0.5*dt),at_q(t+dt));
         let add=|a:&[Dense],b:&[Dense],s:f64|->Vec<Dense>{a.iter().zip(b).map(|(x,y)|{let mut z=x.clone();z.add_scaled(Complex::new(s,0.),y);z}).collect()};
-        let k1=derivative(&rho,&l0,&q0);let k2=derivative(&add(&rho,&k1,dt/2.),&lh,&qh);let k3=derivative(&add(&rho,&k2,dt/2.),&lh,&qh);let k4=derivative(&add(&rho,&k3,dt),&l1,&q1);
+        let k1=derivative(&rho,&l0,&q0,t);let k2=derivative(&add(&rho,&k1,dt/2.),&lh,&qh,t+dt/2.);let k3=derivative(&add(&rho,&k2,dt/2.),&lh,&qh,t+dt/2.);let k4=derivative(&add(&rho,&k3,dt),&l1,&q1,t+dt);
         for(i,x)in rho.iter_mut().enumerate(){for(k,w)in [(&k1,1.),(&k2,2.),(&k3,2.),(&k4,1.)]{x.add_scaled(Complex::new(dt*w/6.,0.),&k[i]);}}
         t+=dt;
     }exact.push(readout(&rho,&at(t)));}
