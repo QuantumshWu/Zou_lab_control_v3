@@ -229,7 +229,8 @@
 //! output's trajectories: the need is the largest of many outputs' estimated errors, biased up while few groups stand behind it);
 //! on the GPU a wave takes the last output that wants trajectories, and its width at no further cost. The estimates at an output
 //! rest on the groups that reach it (stats.rs `summarize`), a standard error's rise at the point where they thin out what the
-//! targets allow. No margin is added above the prediction: a batch more costs the device's tail and the statistics, a few
+//! targets allow. The errors the need takes are each output's over its neighbours as far as they agree (`steady`): the largest of many outputs'
+//! noisy estimates stood 20-35 % above their common value in the standard error, 1.3-1.8 times in the need. No margin is added above the prediction: a batch more costs the device's tail and the statistics, a few
 //! trajectories' time, where a margin of the estimate's own noise would cost tens of percent of the trajectories.
 //!
 //! # Control variates
@@ -388,6 +389,38 @@ fn statistics(e:&Estimate,frequencies:[f64;3])->Statistic{
     Statistic{population:CONFIDENCE*e.population_errors.iter().fold(e.loss_error,|m,&x|m.max(x)),
         temperature:CONFIDENCE*(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a]/e.temperature[a]}else{0.}).fold(0.,f64::max),weight:regime(e,frequencies)}
 }
+/// An output's statistics as the stopping rule and the flags take them (module documentation, # Batches): `statistics`, each
+/// error over its neighbours as far as they agree (`steady`).
+fn statistics_of(estimates:&[Estimate],frequencies:[f64;3])->Vec<Statistic>{
+    let mut all:Vec<Statistic>=estimates.iter().map(|e|statistics(e,frequencies)).collect();
+    let(counts,groups):(Vec<f64>,Vec<f64>)=estimates.iter().map(|e|(e.trajectories,e.groups)).unzip();
+    let population=steady(&all.iter().map(|s|s.population).collect::<Vec<f64>>(),&counts,&groups);
+    let temperature=steady(&all.iter().map(|s|s.temperature).collect::<Vec<f64>>(),&counts,&groups);
+    for(i,s)in all.iter_mut().enumerate(){s.population=population[i];s.temperature=temperature[i];}
+    all
+}
+/// Standard errors per output (`values`, at the trajectories and the groups behind each, the first output's left alone) with their
+/// own noise smoothed: a jackknife's variance over g groups has the relative error √(2/(g − 1)), and the need takes their
+/// largest, 20-35 % above their common value over hundreds of outputs (with T's windows overlapping, a little less). Each
+/// output's variance per trajectory takes the mean over its neighbours within the widest window, doubling from one, that agrees
+/// with every narrower one within z √(2/(g − 1)) of the narrower's error, z = √(2 ln n), the largest of n such errors
+/// (Lepski's rule): a plateau is smoothed whole, a transient's real peak beyond that noise stays.
+fn steady(values:&[f64],counts:&[f64],groups:&[f64])->Vec<f64>{
+    let n=values.len();let mut out=values.to_vec();if n<3||values[1..].iter().any(|x|!x.is_finite()){return out;}
+    let v:Vec<f64>=(0..n).map(|i|values[i]*values[i]*counts[i]).collect();
+    let mut sum=vec![0.;n+1];for i in 1..n{sum[i+1]=sum[i]+v[i];}
+    let z=(2.*((n-1) as f64).ln()).sqrt();
+    for i in 1..n{
+        let noise=(2./(groups[i]-1.).max(1.)).sqrt();let mut narrower=vec![(v[i],1.)];let mut half=1;
+        while half<n{
+            let(a,b)=(i.saturating_sub(half).max(1),(i+half).min(n-1));let m=(b+1-a) as f64;let x=(sum[b+1]-sum[a])/m;
+            if narrower.iter().any(|&(y,k):&(f64,f64)|(x-y).abs()>z*noise*y.min(x)/k.sqrt()){break;}
+            narrower.push((x,m));half*=2;
+        }
+        out[i]=(narrower[narrower.len()-1].0/counts[i]).sqrt();
+    }
+    out
+}
 /// The room an error whose work goes as its −α-th power takes beside a floor its work does not move, in quadrature (module
 /// documentation, # Shares): what the floor leaves of the target's square, or where that is less, the weighed cost's least
 /// αF²/(k − α); at most the target itself.
@@ -427,8 +460,9 @@ fn run_room(target:f64,apriori:f64)->f64{room_of(target,apriori,2.+1./ORDER)}
 fn worst_ratio(estimates:&[Estimate],accounts:&Accounts,frequencies:[f64;3])->f64{output_ratios(estimates,accounts,frequencies).into_iter().fold(0.,|m,r|m.max(r[0]).max(r[1]))}
 /// The same per output and kind: the populations' and the loss's, and T's (zero at t = 0).
 fn output_ratios(estimates:&[Estimate],accounts:&Accounts,frequencies:[f64;3])->Vec<[f64;2]>{
-    estimates.iter().enumerate().map(|(i,e)|{if i==0{return [0.;2];}
-        let s=statistics(e,frequencies);let a=accounts.apriori[i];
+    let all=statistics_of(estimates,frequencies);
+    (0..estimates.len()).map(|i|{if i==0{return [0.;2];}
+        let s=all[i];let a=accounts.apriori[i];
         [s.population/room(POPULATION_TARGET,floor(a[0],accounts.bias[0])),s.weight*s.temperature/room(TEMPERATURE_TARGET,floor(a[1],accounts.bias[1]))]
     }).collect()
 }
@@ -531,8 +565,9 @@ fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance
     let apriori:Vec<[f64;2]>=(0..estimates.len()).map(|i|if i==0{[0.;2]}else{measured[i].map(|m|fixed+peak.max(profiles[i])+dopplers[i]+m)}).collect();
     let accounts=Accounts{apriori,excited:measured,bias};
     // The outputs beyond a target: (output, the quantity, its total, the a-priori estimates' and the step's, the statistics).
+    let all=statistics_of(estimates,frequencies);
     let over:Vec<(usize,&str,f64,f64,f64)>=(1..estimates.len()).filter_map(|i|{
-        let s=statistics(&estimates[i],frequencies);let a=accounts.apriori[i];let(p,t)=if last{(s.population,s.temperature)}else{(0.,0.)};let(fp,ft)=(floor(a[0],bias[0]),floor(a[1],bias[1]));
+        let s=all[i];let a=accounts.apriori[i];let(p,t)=if last{(s.population,s.temperature)}else{(0.,0.)};let(fp,ft)=(floor(a[0],bias[0]),floor(a[1],bias[1]));
         let population=(fp.hypot(p)>POPULATION_TARGET).then_some((i,"布居",fp.hypot(p),fp,p));
         let temperature=(s.weight*ft.hypot(t)>TEMPERATURE_TARGET).then_some((i,"温度",ft.hypot(t),ft,t));
         population.or(temperature)}).collect();
@@ -650,7 +685,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let scales=Scales{hbar_over_mass:pilot_candidate.model.hbar_over_mass,frequencies:trap.lab};
         let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:pilot_harmonic.mean[i],twin:None}).collect();
         let mut e=summarize(&pilot_groups,&scales,&means);start(&mut e[0],&pilot_candidate.model,&pilot_candidate.initial);
-        e.iter().map(|x|statistics(x,trap.lab)).collect()
+        statistics_of(&e,trap.lab)
     };
     // How far T binds the step's check (`tolerances`): its target's largest weight over the outputs where the pilot's atoms
     // are (`regime`) -- where T is a reference only its share would refine for a value no target takes.
@@ -1128,7 +1163,7 @@ fn kept(candidates:&[Check],cost:&dyn Fn(&Check)->f64,error:f64)->Option<Check>{
 /// statistic stand.
 fn need_error(groups:&[Group],scales:&Scales,means:&[Means],model:&Model,initial:&Initial,frequencies:[f64;3])->f64{
     let statistic=|groups:&[Group]|->f64{let mut e=summarize(groups,scales,means);start(&mut e[0],model,initial);
-        e.iter().skip(1).map(|x|{let s=statistics(x,frequencies);(s.population/POPULATION_TARGET).max(s.weight*s.temperature/TEMPERATURE_TARGET)}).fold(0.,f64::max)};
+        statistics_of(&e,frequencies).iter().skip(1).map(|s|(s.population/POPULATION_TARGET).max(s.weight*s.temperature/TEMPERATURE_TARGET)).fold(0.,f64::max)};
     let n=groups.len();if n<3{return 0.;}
     let all=statistic(groups);if !(all>0.){return 0.;}
     let left:Vec<f64>=(0..n).into_par_iter().map(|g|statistic(&groups.iter().enumerate().filter(|&(i,_)|i!=g).map(|(_,x)|x.clone()).collect::<Vec<Group>>())).collect();
@@ -1580,6 +1615,20 @@ mod tests{
         let(mut last,mut weight)=need(0.);
         for i in 1..=2000{let(n,w)=need(i as f64*5e-5);assert!((n-last).abs()<=0.05*last.max(TASK as f64)&&(w-weight).abs()<=0.03*weight,"{i}: {n} {w} after {last} {weight}");(last,weight)=(n,w);}
         assert!(weight>1.&&need(0.2).1>need(0.1).1);
+    }
+    /// The standard errors' noise over the outputs (`steady`): a plateau of noisy errors comes to its common value, an output's real
+    /// peak beyond that noise stays, more trajectories at the first outputs keep their smaller errors, and a step in the error is kept.
+    #[test]
+    fn the_errors_noise_is_smoothed_over_the_outputs_that_agree(){
+        let mut rng=crate::rng::Rng::new(5,crate::rng::Purpose::Initial,0,0);let groups=vec![72.;201];let counts=vec![576.;201];
+        let noisy:Vec<f64>=(0..201).map(|_|0.01*(1.+crate::rng::normal_quantile(rng.interior())*(0.5/71_f64).sqrt())).collect();
+        let largest=|v:&[f64]|v[1..].iter().copied().fold(0.,f64::max);
+        let s=steady(&noisy,&counts,&groups);assert!(largest(&noisy)>1.15*0.01&&largest(&s)<1.05*0.01,"{} {}",largest(&noisy),largest(&s));
+        let mut peak=noisy.clone();peak[100]=0.02;let s=steady(&peak,&counts,&groups);assert!(s[100]>0.017,"{}",s[100]);
+        let mut fewer=vec![0.01;201];let mut trajectories=vec![576.;201];for i in 21..201{fewer[i]=0.02;trajectories[i]=144.;}
+        let s=steady(&fewer,&trajectories,&groups);assert!((s[5]-0.01).abs()<1e-3&&(s[100]-0.02).abs()<2e-3,"{} {}",s[5],s[100]);
+        let mut step=vec![0.01;201];for x in &mut step[100..]{*x=0.02;}
+        let s=steady(&step,&counts,&groups);assert!((s[50]-0.01).abs()<1e-3&&(s[150]-0.02).abs()<1e-3,"{} {}",s[50],s[150]);
     }
     /// T's target's weight (module documentation, # Regime): 1 in the regime, falling continuously below it with the method's
     /// own error, the estimate's noise blurring the edge; the tolerance between T's share and the target itself.

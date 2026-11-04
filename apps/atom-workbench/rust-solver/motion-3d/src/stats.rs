@@ -110,8 +110,9 @@ pub struct Estimate{
     pub folded:f64,
     pub profile:f64,
     pub doppler:f64,
-    /// The trajectories behind the estimate.
+    /// The trajectories and the groups behind the estimate.
     pub trajectories:f64,
+    pub groups:f64,
 }
 
 /// What the estimates need of the model: ħ/m (um²/us) and the trap frequencies per axis (rad/us).
@@ -166,7 +167,7 @@ pub fn summarize(groups:&[Group],s:&Scales,means:&[Means])->Vec<Estimate>{
         let present:Vec<&Sums>=groups.iter().map(|g|&g.sums[i]).filter(|x|x.trajectories>0.).collect();let count=present.len();
         let all=present.iter().fold(Sums::zero(),|acc,x|acc.combine(x,1.));
         let correction=means.get(i).map(|m|Correction::new(&all,m));let m=correction.as_ref();
-        let mut e=estimate(&all,s,m);
+        let mut e=estimate(&all,s,m);e.groups=count as f64;
         if count<2{e.population_errors=vec![f64::INFINITY;STATES];e.temperature_error=[f64::INFINITY;3];e.temperature_total_error=f64::INFINITY;e.occupation_error=[f64::INFINITY;3];e.loss_error=f64::INFINITY;return e;}
         let leave:Vec<Estimate>=present.iter().map(|x|estimate(&all.combine(x,-1.),s,m)).collect();
         let factor=(count-1) as f64/count as f64;
