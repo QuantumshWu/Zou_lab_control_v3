@@ -22,11 +22,12 @@ fn main(){
     for part in ["point","generator","exponential","evolve"]{println!("  {part:12} {:8.0} cycles per advance  {:5.1}%",at(part)/advances,share(at(part)));}
     println!("  {:12} {:8.0} cycles per jump     {:5.1}%","jump",at("jump")/jumps.max(1.),share(at("jump")));
     for part in ["exact","photons","absorption"]{println!("    {part:10} {:8.0} cycles per jump     {:5.1}%",at(part)/jumps.max(1.),share(at(part)));}
+    for part in ["items","beams","matrices","weights"]{println!("    {part:10} {:8.0} cycles per jump     {:5.1}%",at(part)/jumps.max(1.),share(at(part)));}
+    let nodes=at("nodes").max(1.);println!("  {:.1} nodes per advance, {:.1} products per node; evolve {:.0} cycles per node, forces {:.0} per node; of the generator per advance: components {:.0}, sizes {:.0}, resolve {:.0}",nodes/advances,at("products")/nodes,at("evolve")/nodes,at("forces")/nodes,at("components")/advances,at("sizes")/advances,at("resolve")/advances);
     println!("    {:.1}% of the jumps with the exact responses",100.*at("exact jumps")/jumps.max(1.));
     println!("  {:12} {:8.0} cycles per advance  {:5.1}%","loss",at("loss")/advances,share(at("loss")));
     println!("  {:12} {:8.0} cycles per advance  {:5.1}%  (all of a step: the parts above and its control)","step",at("step")/advances,share(at("step")));
     println!("  {:12} {:8.0} cycles per output   {:5.1}%","readout",at("readout")/(n*samples as f64),share(at("readout")));
     println!("  {:12} {:8.0} cycles per output   {:5.1}%","windows",at("windows")/(n*samples as f64),share(at("windows")));
-    println!("  {:12} {:8.0} cycles per output   {:5.1}%  (the block's sums at a launch's end and the wait for its slowest warp)","sums",at("sums")/(n*samples as f64),share(at("sums")));
     println!("  {:12} {:8.0} cycles per output   {:5.1}%  (the held twin's steps and records)","twin",at("twin")/(n*samples as f64),share(at("twin")));
 }

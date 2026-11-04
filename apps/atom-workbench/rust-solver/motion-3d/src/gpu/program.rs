@@ -72,13 +72,13 @@ pub struct Params{
     excited:u64,diagonal:u64,couplings:u64,emission:u64,class_rows:u64,fourths:u64,frames:u64,item_first:u64,items:u64,residuals:u64,
     units:u64,unit_beams:u64,unit_weights:u64,
     terms:u64,omegas:u64,group_parts:u64,residual_parts:u64,excited_list:u64,directs:u64,levels:u64,level_first:u64,decay_root:u64,
-    kept:u64,decay:u64,near_units:u64,unit_couplings:u64,vias:u64,via_first:u64,ground_block:u64,term_floor:u64,
+    kept:u64,decay:u64,near_units:u64,unit_couplings:u64,vias:u64,via_first:u64,ground_block:u64,term_floor:u64,powers:u64,
     nbeams:i32,pub(crate) ncarriers:i32,nclusters:i32,focused:i32,nodes:i32,fields:i32,pub(crate) nnear:i32,doppler:i32,loss:i32,weights:i32,nunits:i32,
     exact_at:i32,transient_at:i32,nlevels:i32,rows_at:i32,between_at:i32,
     focused_unit:[i32;MOST_FOCUSED],stride:[i32;MOST_FOCUSED],
     field_carrier:[i32;MOST_CARRIERS*MOST_RANK],field_rank:[i32;MOST_CARRIERS*MOST_RANK],
     ground_states:[i32;GROUND],excited_states:[i32;NE],ground_cluster:[i32;GROUND],ground_position:[i32;GROUND],
-    near_first:[i32;MOST_CARRIERS+1],explicit_of:[u32;GROUND],partners:[u32;NE],
+    near_first:[i32;MOST_CARRIERS+1],explicit_of:[u32;GROUND],partners:[u32;NE],near_focused:u32,
     hm:f32,light2:f32,allowance:f32,truncation:f32,
     axes32:[[f32;3];3],stiffness32:[f32;3],
     hm64:f64,dt:f64,
@@ -86,7 +86,7 @@ pub struct Params{
     half_flow:[[f64;3];3],
     region:f64,
     lattice_axis:[f64;3],lattice_k:f64,lattice_inv_rayleigh:f64,lattice_phase:f64,
-    node_phase:f64,beats:f64,horizon:f64,
+    node_phase:f64,grid_phase:f64,beats:f64,horizon:f64,
 }
 
 /// The kernel's `State`: a trajectory between launches.
@@ -181,7 +181,7 @@ impl Program{
         // room and its norms (the kernel's `exact_segment`), the largest of every cluster's where one takes it.
         let takes=(0..model.clusters()).any(|k|model.mixed(k)||model.beating(k));let mut exact=0;
         // The carriers whose static block on a cluster mixes its responses (ground.rs `Ground::unmixed`, the kernel's
-        // `mixed_responses`), bits; and the near light's shifts ΔE_a^d a cluster's exact responses take (`exact_responses`,
+        // `carrier_responses`), bits; and the near light's shifts ΔE_a^d a cluster's exact responses take (`exact_responses`,
         // ground.rs `Ground::dress_light`), bit d·NG + a: from each of its channels (c, b) the other near carriers' on b and
         // every near carrier's on the intermediates a of its far channels; a mixed block's, the other carriers' on every
         // state of the cluster; none where the model is undressed.
@@ -205,8 +205,8 @@ impl Program{
                 parts:parts as i32,omegas:omegas.len() as i32,terms:terms.len() as i32,nterms:list.len() as i32,emission:emission as i32,excited:excited_list.len() as i32,
                 group_parts:group_parts.len() as i32,residual_parts:residual_parts.len() as i32,states:[0;MAXM],shifts:shifts(k,&cl.states),mixed:mixed(k,&cl.states),pad:0};
             for(x,&b)in cl.states.iter().enumerate(){cluster.states[x]=b as i32;}
-            // Its beats (their period last, 0 without one), its explicit states and its terms (model.rs `exact_terms`).
-            let(beats_k,period)=model.beats(k);omegas.extend(beats_k);omegas.push(period.unwrap_or(0.));excited_list.extend(cl.excited.iter().map(|&e|e as i32));
+            // Its beats, its explicit states and its terms (model.rs `exact_terms`).
+            omegas.extend(model.beats(k).0);excited_list.extend(cl.excited.iter().map(|&e|e as i32));
             terms.extend(list.iter().zip(&u).map(|(t,u)|Term{kind:t[0] as i32,row:t[1] as i32,col:t[2] as i32,carrier:t[3] as i32,part:t[4] as i32,mirror:t[5] as i32,at:t[6] as i32,pad:0,
                 u:u.map(|z|[z.re as f32,z.im as f32])}));
             group_parts.extend(layout.groups.iter().map(|gl|model.part(k,gl.residual) as i32));
@@ -295,7 +295,7 @@ impl Program{
         for c in 0..nc{for b in 0..ng{via_first.push(vias.len() as i32);if g.dressing{vias.extend(g.vias[c][b].iter().map(|v|[v.carrier as i32,v.state as i32]));}}}
         via_first.push(vias.len() as i32);
         let emission:Vec<[f32;2]>=g.emission.iter().flat_map(|c|c.entries.iter().map(|&z|c32(z))).collect();
-        // H's ground block, its base and per focused beam (the block's off-diagonal part, the kernel's `mixed_responses`), and per
+        // H's ground block, its base and per focused beam (the block's off-diagonal part, the kernel's `carrier_responses`), and per
         // channel the weight in an eigen-energy below which a state's term is left out: ground.rs `Mode::skipped`'s rule
         // at single precision's round-off of the generator, ‖V^f[:,b]‖ w/γ ≤ ε l/(3 max_b ‖V^f[:,b]‖).
         let ground_block:Vec<[f32;2]>=blocks.iter().flat_map(|block|g.ground_states.iter().flat_map(move|&a|g.ground_states.iter().map(move|&b|c32(block[(a,b)])))).collect();
@@ -303,6 +303,12 @@ impl Program{
             let strength=|s:usize|g.carriers[c].beams.iter().map(|&l|(0..ne).map(|i|g.folded[l][(i,s)].norm_sqr()).sum::<f64>().sqrt()).sum::<f64>();
             let k=g.cluster[b];let most=g.clusters[k].states.iter().map(|&s|strength(s)).fold(0.,f64::max);let floor=g.floors.get(k).copied().unwrap_or(0.);
             if strength(b)>0.{(f32::EPSILON as f64*g.generator_scale*floor/(3.*most*strength(b))) as f32}else{0.}}).collect();
+        // Per channel (d, a) its near units at their focus intensity summed (the kernel's `self_energy`), lane-major.
+        let powers:Vec<[f32;2]>=(0..nc).flat_map(|d|(0..ng).map(move|a|(d,a))).flat_map(|(d,a)|{let mut m=vec![Complex::ZERO;ne*ne];
+            for &(u,x)in order.iter().filter(|(u,x)|x.carrier==d&&!model.focused.contains(u)){let scale=g.units[u].focus*g.units[u].norm;
+                for j in 0..ne{for i in 0..ne{m[j*ne+i]+=x.coupling[(i,a)]*x.coupling[(j,a)].conj()*scale;}}}
+            m.into_iter().map(c32)}).collect();
+        let near_focused=order.iter().filter(|(u,_)|model.focused.contains(u)).fold(0u32,|m,(_,x)|m|1<<x.carrier);
         // The settings: the trap's principal axes, their flow for dt/2 and stiffness.
         let tau=0.5*settings.dt;
         let half_flow:[[f64;3];3]=std::array::from_fn(|i|{let w=settings.frequencies[i];if w==0.{[1.,hm*tau,0.]}else{let(s,c)=(w*tau).sin_cos();[c,hm/w*s,w/hm*s]}});
@@ -329,7 +335,7 @@ impl Program{
             directs:put!(if directs.is_empty(){vec![Direct::default()]}else{directs}),levels:put!(levels),level_first:put!(level_first),decay_root:put!(decay_root),
             kept:put!(kept),decay:put!(decay),near_units:put!(if near_units.is_empty(){vec![NearUnit::default()]}else{near_units}),
             unit_couplings:put!(if unit_couplings.is_empty(){vec![[0.;2]]}else{unit_couplings}),vias:put!(if vias.is_empty(){vec![[0;2]]}else{vias}),via_first:put!(via_first),
-            ground_block:put!(ground_block),term_floor:put!(term_floor),
+            ground_block:put!(ground_block),term_floor:put!(term_floor),powers:put!(powers),
             nbeams:model.geometry.len() as i32,ncarriers:model.carriers.len() as i32,nclusters:model.layouts.len() as i32,focused:model.focused.len() as i32,
             nodes:nodes as i32,fields:fields as i32,nnear:near,doppler:model.doppler as i32,loss:settings.loss as i32,weights:0,nunits:g.units.len() as i32,
             exact_at:0,transient_at:0,nlevels:g.excited_groups.len() as i32,rows_at:0,between_at:0,
@@ -337,12 +343,12 @@ impl Program{
             field_carrier,field_rank,ground_states:std::array::from_fn(|b|g.ground_states[b] as i32),excited_states:std::array::from_fn(|i|g.excited_states[i] as i32),
             ground_cluster:std::array::from_fn(|b|g.cluster[b] as i32),ground_position:std::array::from_fn(|b|g.clusters[g.cluster[b]].position(b).unwrap() as i32),
             near_first,explicit_of:std::array::from_fn(|b|g.explicit_of.get(b).map_or(0,|p|p.iter().enumerate().fold(0,|m,(e,&x)|m|(x as u32)<<e))),
-            partners:std::array::from_fn(|e|g.dressed.get(e).map_or(0,|f|f.iter().fold(0,|m,&x|m|1u32<<x))),
+            partners:std::array::from_fn(|e|g.dressed.get(e).map_or(0,|f|f.iter().fold(0,|m,&x|m|1u32<<x))),near_focused,
             hm:hm as f32,light2:(2.*g.light) as f32,allowance:settings.doppler as f32,truncation:settings.truncation as f32,
             axes32:settings.axes.map(|a|a.map(|x|x as f32)),stiffness32:settings.frequencies.map(|w|(w*w/hm) as f32),
             hm64:hm,dt:settings.dt,axes:settings.axes,omega:settings.frequencies,stiffness:settings.frequencies.map(|w|w*w/hm),half_flow,region:settings.region,
             lattice_axis:settings.lattice.map_or([0.;3],|l|std::array::from_fn(|i|(0..3).map(|a|settings.axes[i][a]*l.axis[a]).sum())),lattice_k:settings.lattice.map_or(0.,|l|l.wave_number),lattice_inv_rayleigh:settings.lattice.map_or(0.,|l|1./l.rayleigh),lattice_phase:settings.lattice.map_or(0.,|l|l.phase),
-            node_phase:crate::engine::node_phase(),beats:settings.beats,horizon:settings.horizon,
+            node_phase:crate::engine::node_phase(),grid_phase:settings.node_phase,beats:settings.beats,horizon:settings.horizon,
         };
         let photons=g.clusters.iter().map(|c|c.classes.iter().map(|k|k.photons.len()).sum::<usize>()).max().unwrap_or(0);
         // The transient's room: every coherent group's folded amplitude on the excited states (the kernel's `transient`).
