@@ -1931,19 +1931,22 @@ impl Photons<'_>{
                     (0..m.carriers[c].rank).fold(Complex::ZERO,|z,k|z+m.carriers[c].coefficients[j][k]*(sum[k][0]-sum[k][1]*w))*amplitude}),
             };
             (l,rows[..nt].iter().map(|z|z.norm_sqr()).sum(),(0..nt).map(|row|on_f(row,rows[row])).sum())}).collect();
-        // The explicit states' part of the photon: its weight along e, and the beams' weights by their drives'
-        // amplitude into the explicit states, Σ |a_l Σ_k c_lk U_k[e,b] ψ_b|².
+        // The explicit states' part of the photon: its weight along e, and the beams' weights: each explicit state's weight
+        // in the photon shared by the drives into it, Σ |a_l Σ_k c_lk U_k[e,b] ψ_b|² -- a photon of that state.
         let explicit=(!class.direct.is_empty()).then(||{
-            let mut v=[Complex::ZERO;MOST_STATES];
+            let dimension=m.dimension(self.cluster);let mut parts=vec![[Complex::ZERO;MOST_STATES];dimension];
             for &(i,to,w)in &class.direct{let row=target.position(to).unwrap();let phase=Complex::cis(w*self.time)*self.psi[i];
-                for a in 0..3{v[row]+=phase*m.photon(self.cluster,&p.stencil,i-n0,a,to)*e[a];}}
-            let total:f64=v[..nt].iter().map(|z|z.norm_sqr()).sum();
+                for a in 0..3{parts[i][row]+=phase*m.photon(self.cluster,&p.stencil,i-n0,a,to)*e[a];}}
+            let total:f64=(0..nt).map(|row|parts.iter().fold(Complex::ZERO,|s,v|s+v[row]).norm_sqr()).sum();
+            let drive=|dr:&DriveLayout,j:usize,l:usize|{let carrier=&m.carriers[dr.carrier];((0..carrier.rank).fold(Complex::ZERO,|s,k|s+carrier.coefficients[j][k]*dr.u[k])*m.geometry[l].field(p.r).0*self.psi[dr.col]).norm_sqr()};
+            let mut into=vec![0.;dimension];
+            for dr in &m.layouts[self.cluster].drives{for(j,&l)in m.carriers[dr.carrier].beams.iter().enumerate(){into[dr.row]+=drive(dr,j,l);}}
             let mut drives:Vec<(usize,f64)>=vec![];
             for dr in &m.layouts[self.cluster].drives{
-                let carrier=&m.carriers[dr.carrier];
-                for(j,&l)in carrier.beams.iter().enumerate(){
-                    let z=(0..carrier.rank).fold(Complex::ZERO,|s,k|s+carrier.coefficients[j][k]*dr.u[k])*m.geometry[l].field(p.r).0*self.psi[dr.col];
-                    match drives.iter_mut().find(|x|x.0==l){Some(x)=>x.1+=z.norm_sqr(),None=>drives.push((l,z.norm_sqr()))}
+                let weight:f64=parts[dr.row][..nt].iter().map(|z|z.norm_sqr()).sum();
+                for(j,&l)in m.carriers[dr.carrier].beams.iter().enumerate(){
+                    let d=if into[dr.row]>0.{weight*drive(dr,j,l)/into[dr.row]}else{0.};
+                    match drives.iter_mut().find(|x|x.0==l){Some(x)=>x.1+=d,None=>drives.push((l,d))}
                 }
             }
             (total,drives)});

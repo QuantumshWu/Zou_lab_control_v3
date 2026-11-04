@@ -81,7 +81,8 @@
 //! (TW2, x alone) it cools 2–4 % further below it at 4–5 ħω, where the incoherent one is 4–8 % low (# What the kicks leave out).
 //! An explicit state's absorbed light acts through the Ehrenfest force -- the stimulated force of its kept drives,
 //! −∇Re⟨ψ|V|ψ⟩ --, which carries its mean: its part's recoil has mean zero at the jump, the recoil of a beam drawn by
-//! its drives' weights (Σ |a_l Σ_k c_lk U_k ψ_b|²) less their mean a, plus the mean's shot noise ±a with equal chance --
+//! its drives -- each explicit state's weight in the photon shared by the drives into it, Σ |a_l Σ_k c_lk U_k ψ_b|² -- less
+//! their mean a, plus the mean's shot noise ±a with equal chance --
 //! per photon the beams' second moment, without the mean twice. A running wave's beam axis takes R E_r (1 + ⟨n²⟩) so; with
 //! the spread alone it took R E_r ⟨n²⟩. The draw's uniform picks the part, its leftover the explicit part's beam, its
 //! lower bits the sign: no further deviate. The momentum diffusion beyond these kicks is the hook `Diffusion`'s.
@@ -690,7 +691,7 @@ pub fn part_weights(s:&[f64],mu:&[[f64;3]],target:[f64;3])->Vec<f64>{
         for c in 0..n{q[c]+=alpha*d[c];if on[c]>0.&&d[c]<0.&&q[c]<=-4.*f64::EPSILON*alpha*d[c]{q[c]=0.;on[c]=0.;}}
         if !(alpha<1.){break;}
     }
-    let sum:f64=q.iter().sum();for x in q.iter_mut(){*x/=sum;}
+    let sum:f64=q.iter().sum();if sum>0.{for x in q.iter_mut(){*x/=sum;}}
     q
 }
 

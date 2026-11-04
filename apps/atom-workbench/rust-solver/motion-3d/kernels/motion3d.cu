@@ -1192,25 +1192,29 @@ __device__ int absorption(const Program& P,Warp& W,const Cluster& C,const Class&
     }
     __syncwarp();
     // The explicit states' part of the photon (`Photons::absorption`): its weight along e, Σ_rows |Σ e^{iω̃t}
-    // ψ_e Σ_a e_a ĉ_a[to]|², and the beams' weights by their drives into the explicit states,
-    // Σ |a_l Σ_k c_lk U_k ψ_b|² over the kept drives, in the drives' and their carriers' beams' order.
+    // ψ_e Σ_a e_a ĉ_a[to]|², and the beams' weights: each explicit state's weight in the photon shared by the drives into
+    // it, Σ |a_l Σ_k c_lk U_k ψ_b|², in the drives' and their carriers' beams' order.
     float total=0.f;int beams[MOST_BEAMS];float drive[MOST_BEAMS];int nb=0;
     if(K.ndirect>0){
-        float2 v=zero2();
+        float2 v=zero2();float2 part[MAXM];float weight[MAXM],into[MAXM];const int ne=C.n-C.n0;
+        for(int s=0;s<ne;s++){part[s]=zero2();into[s]=0.f;}
         if(lane<nt)for(int i=0;i<K.ndirect;i++){
             const Direct d=P.directs[K.direct+i];if(d.row!=lane)continue;float2 z=zero2();
             for(int a=0;a<3;a++)z+=ea[a]*entry(P,W,tables+C.emission+((d.state-C.n0)*3+a)*NG+d.to,C.size,-1);
-            v+=residual(d.residual,t)*W.psi[d.state]*z;
+            const float2 c=residual(d.residual,t)*W.psi[d.state]*z;v+=c;part[d.state-C.n0]+=c;
         }
         total=warp_sum(lane<nt?norm2(v):0.f);
-        for(int i=0;i<C.nterms;i++){
-            const Term T=P.terms[C.terms+i];if(T.kind!=0)continue;const Carrier Rc=P.carriers[T.carrier];
+        for(int s=0;s<ne;s++)weight[s]=warp_sum(lane<nt?norm2(part[s]):0.f);
+        for(int pass=0;pass<2;pass++)for(int i=0;i<C.nterms;i++){
+            const Term T=P.terms[C.terms+i];if(T.kind!=0)continue;const Carrier Rc=P.carriers[T.carrier];const int s=T.row-C.n0;
             for(int j=0;j<Rc.beams;j++){
                 const int l=P.beam_list[Rc.first+j];const Beam& b=P.beams[l];float2 z=zero2();
                 for(int k=0;k<Rc.rank;k++)z+=make_float2(b.coefficients[k][0],b.coefficients[k][1])*make_float2(T.u[k][0],T.u[k][1]);
-                const float d=norm2(z*pt.a[l]*W.psi[T.col]);int at=0;while(at<nb&&beams[at]!=l)at++;
+                const float d=norm2(z*pt.a[l]*W.psi[T.col]);
+                if(pass==0){into[s]+=d;continue;}
+                int at=0;while(at<nb&&beams[at]!=l)at++;
                 if(at==nb){beams[nb]=l;drive[nb]=0.f;nb++;}
-                drive[at]+=d;
+                if(into[s]>0.f)drive[at]+=weight[s]*d/into[s];
             }
         }
     }
@@ -1316,7 +1320,7 @@ __device__ void part_weights(const double* s,const double (*mu)[3],int n,const d
         for(int c=0;c<n;c++){q[c]+=alpha*d[c];if(on[c]>0.&&d[c]<0.&&q[c]<=-4.*DBL_EPSILON*alpha*d[c]){q[c]=0.;on[c]=0.;}}
         if(!(alpha<1.))break;
     }
-    double sum=0.;for(int c=0;c<n;c++)sum+=q[c];for(int c=0;c<n;c++)q[c]/=sum;
+    double sum=0.;for(int c=0;c<n;c++)sum+=q[c];if(sum>0.)for(int c=0;c<n;c++)q[c]/=sum;
 }
 // The photon's recoils (engine.rs `kick`, `absorbed_recoil`): −k n and the absorbed light's -- the parts' shares (J.shares
 // and J.beams, `count` of them; the explicit states' part J.direct last, its recoil's mean zero) moved to their projections'
