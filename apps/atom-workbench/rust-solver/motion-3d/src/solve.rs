@@ -265,10 +265,11 @@
 //! trajectory so far, held when the jackknife leaves a group out: its errors -- what the stopping rule
 //! takes -- are the corrected values' spread over the groups; where a control follows nothing, β ≈ 0.
 //! The held
-//! twin costs a trajectory of its own: it runs in the first batch, and is kept when the trajectories
+//! twin costs a trajectory of its own, at its share of the work (counted as the step's, `held_work`). It runs in the first batch where the pilot's need says it can pay for itself: the
+//! populations must need more trajectories than T does and than that batch holds, by more than that share (`twin_can_pay`) -- where T
+//! decides the trajectories, or the first batch is all a run takes, its control of the populations saves none. It is kept when the trajectories
 //! that batch says the targets need with it -- the populations' or T's, whichever needs more --,
-//! times its share of the work (counted as the step's, `held_work`), are fewer than without: where T
-//! decides the trajectories its control of the populations saves none. The first batch's groups are
+//! times its share, are fewer than without. The first batch's groups are
 //! Latin hypercubes, so its T need is the run's, not inflated by independent draws' spread at early
 //! times.
 //!
@@ -912,8 +913,24 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // The control variates (control.rs): the harmonic twin's, and the held twin where the trap beam's
     // intensity is the pilot's mean, when the generator is static.
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
+    // A batch is whole groups: on the CPU at least one, on the GPU a group in each of its resident
+    // blocks -- such a batch costs about what one trajectory does --, a whole number of its widths.
+    let width=match &gpu{Some((g,_))=>g.lock().unwrap_or_else(|e|e.into_inner()).width(1),None=>TASK};
+    let unit=if gpu.is_some(){width}else{TASK};
+    // The first batch: FIRST_GROUPS groups, at most the pilot's predicted need (its trajectories each
+    // a group, with the harmonic control), at least the device's width. The need per target: the populations' and T's.
+    let pilot_needs:[f64;2]={
+        let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:pilot_harmonic.mean[i],twin:None}).collect();
+        let mut e=summarize(&pilot_groups,&scales,&means);start(&mut e[0],&model,&initial);
+        let(_,accounts)=ledger(&model,&booked(&base,pilot_beats*horizon),&e,times,allowance,bias,trap.lab,false,&memory);
+        let ratios=output_ratios(&e,&accounts,trap.lab);
+        std::array::from_fn(|k|(pilot as f64*ratios.iter().fold(0_f64,|m,r|m.max(r[k])).powi(2)).min(MOST_TRAJECTORIES as f64))
+    };
+    let count=(FIRST_GROUPS*TASK).min(pilot_needs[0].max(pilot_needs[1]).ceil() as u64).max(width).div_ceil(unit)*unit;
+    // The held twin where it can pay for itself by the pilot's need (`twin_can_pay`): spent in the first batch either way, it held 4-10 % of the CPU's solves and 5-11 % of the kernel's on scenes that never kept it.
+    let twin_share=||held_work(&parts,&settings,interval,waiting)/interval_work(&model,&parts,&settings,interval,waiting);
     let intensity=states.iter().map(|t|model.geometry[model.trap_beam].intensity(t.r)).sum::<f64>()/states.len().max(1) as f64;
-    let mut twin=Twin::new(&model,intensity);
+    let mut twin=if twin_can_pay(count as f64,pilot_needs,0.){Twin::new(&model,intensity).filter(|_|twin_can_pay(count as f64,pilot_needs,twin_share()))}else{None};
     let twin_means=twin.as_ref().map(|t|t.means(&model,&request.initial_density,interval,outputs));
     let means=|held:bool|->Vec<Means>{(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:twin_means.as_ref().filter(|_|held).map(|m|m[i])}).collect()};
     // A batch's trajectories, each group through its output `ends` -- on the GPU all through the farthest: a launch's
@@ -927,20 +944,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
                 for group in &mut out.groups{group.sums.resize(outputs,Sums::zero());}out.samples.resize(listed.len(),vec![]);Ok(out)}
         }
     };
-    // A batch is whole groups: on the CPU at least one, on the GPU a group in each of its resident
-    // blocks -- such a batch costs about what one trajectory does --, a whole number of its widths.
-    let width=match &gpu{Some((g,_))=>g.lock().unwrap_or_else(|e|e.into_inner()).width(1),None=>TASK};
-    let unit=if gpu.is_some(){width}else{TASK};
-    // The first batch: FIRST_GROUPS groups, at most the pilot's predicted need (its trajectories each
-    // a group, with the harmonic control), at least the device's width.
-    let pilot_need={
-        let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:pilot_harmonic.mean[i],twin:None}).collect();
-        let mut e=summarize(&pilot_groups,&scales,&means);start(&mut e[0],&model,&initial);
-        let(_,accounts)=ledger(&model,&booked(&base,pilot_beats*horizon),&e,times,allowance,bias,trap.lab,false,&memory);
-        (pilot as f64*worst_ratio(&e,&accounts,trap.lab).powi(2)).min(MOST_TRAJECTORIES as f64).ceil() as u64
-    };
     let clock=Instant::now();
-    let count=(FIRST_GROUPS*TASK).min(pilot_need).max(width).div_ceil(unit)*unit;
     let first=batch(0,count,&vec![outputs-1;count.div_ceil(TASK) as usize],twin.as_ref())?;
     let wall=clock.elapsed().as_secs_f64();
     // The held twin is kept where its control pays for itself: the trajectories the first batch says
@@ -949,8 +953,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     if twin.is_some(){
         let needed=|means:&[Means]|{let mut e=summarize(&first.groups,&scales,means);start(&mut e[0],&model,&initial);
             let(_,accounts)=ledger(&model,&booked(&base,pilot_beats.max(first.beats)*horizon),&e,times,allowance,bias,trap.lab,false,&memory);worst_ratio(&e,&accounts,trap.lab).powi(2)};
-        let share=held_work(&parts,&settings,interval,waiting)/interval_work(&model,&parts,&settings,interval,waiting);
-        if needed(&means(true))*(1.+share)>=needed(&means(false)){twin=None;}
+        if needed(&means(true))*(1.+twin_share())>=needed(&means(false)){twin=None;}
     }
     let means=means(twin.is_some());
     // Batches until the targets are met, each output's own (module documentation, # Batches). The pace: a batch's seconds per
@@ -983,6 +986,10 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         done+=next;
     }
 }
+
+/// Whether the held twin can pay for itself (module documentation, # Control variates), from the trajectories the pilot predicts the populations and T need: its control lowers the populations'
+/// errors alone, at `share` of the work on every trajectory it runs beside, so that the run comes at best to the larger of the first batch and T's need, against the larger of them and the populations' without it.
+fn twin_can_pay(first:f64,[population,temperature]:[f64;2],share:f64)->bool{(1.+share)*first.max(temperature)<first.max(population).max(temperature)}
 
 /// The bound per unit time of the beats a pilot's exact steps left out (engine.rs `Segment::resolve`), at most the
 /// run's share over its waiting time: the run leaves out beats within that share by construction, and the pilot's
