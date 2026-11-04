@@ -1303,7 +1303,7 @@ fn deposit(model:&Model,t:&Trajectory,psi:&[Complex],doppler:f64)->(f64,f64){
 }
 
 /// The loss's sensitivity to the motion's energy scale: of the pilot's trajectories the share L lost after a state of theirs was
-/// bound (atoms the light heated over the top; an unbound one leaving is no escape), L ln(1/L). An escape over a barrier from a
+/// bound (atoms the light heated over the top; an unbound one leaving is no escape), of those that run to the end, L ln(1/L). An escape over a barrier from a
 /// thermal tail goes as L = e^{−D/k_BT}: a relative error δ of the motion's energy moves L by (D/k_BT) δ of itself, and the D/k_BT
 /// of the tail the atoms were lost from is the one L itself measures, ln(1/L) -- the bound atoms' mean energy need not be that
 /// tail's (a gray molasses at 2 µK with one atom of 32 lost: D/k_BT of over a hundred on that mean, its step 0.385 us against
@@ -1312,7 +1312,8 @@ fn escape(model:&Model,states:&[Trajectory],groups:&[Group])->f64{
     let(hm,outputs)=(model.hbar_over_mass,groups.first().map_or(0,|g|g.sums.len()));if outputs==0{return 0.;}
     let bound:Vec<u64>=states.par_iter().filter_map(|t|{let p=model.point(t.r,t.kappa);let k:f64=t.kappa.iter().map(|k|k*k).sum();
         (0.5*hm*k+model.trap_potential(t.cluster,&p,&t.psi,t.time)<0.).then_some(t.index)}).collect();
-    let share=groups.iter().enumerate().filter(|(k,g)|g.sums[outputs-1].held==0.&&bound.contains(&(*k as u64))).count() as f64/groups.len() as f64;
+    let last=|g:&&Group|g.sums[outputs-1].trajectories>0.;
+    let share=groups.iter().enumerate().filter(|(k,g)|last(g)&&g.sums[outputs-1].held==0.&&bound.contains(&(*k as u64))).count() as f64/groups.iter().filter(last).count().max(1) as f64;
     if share>0.{-share*share.ln()}else{0.}
 }
 
