@@ -1,6 +1,7 @@
 //! The ensemble's observables: sums over groups of trajectories at every output time, and their
 //! estimates with standard errors by the jackknife over the groups.
 use crate::STATES;
+use rayon::prelude::*;
 
 /// kB/ħ in rad/us per μK: a temperature T as the rate kT/ħ.
 pub const KT_PER_UK:f64=1.380649e-23/1.0545718176461565e-34*1e-12;
@@ -161,7 +162,7 @@ pub fn estimate(g:&Sums,s:&Scales,correction:Option<&Correction>)->Estimate{
 /// twins that have jumped) swings from group to group and its spread swamps the error.
 pub fn summarize(groups:&[Group],s:&Scales,means:&[Means])->Vec<Estimate>{
     let outputs=groups[0].sums.len();
-    (0..outputs).map(|i|{
+    (0..outputs).into_par_iter().map(|i|{
         let present:Vec<&Sums>=groups.iter().map(|g|&g.sums[i]).filter(|x|x.trajectories>0.).collect();let count=present.len();
         let all=present.iter().fold(Sums::zero(),|acc,x|acc.combine(x,1.));
         let correction=means.get(i).map(|m|Correction::new(&all,m));let m=correction.as_ref();

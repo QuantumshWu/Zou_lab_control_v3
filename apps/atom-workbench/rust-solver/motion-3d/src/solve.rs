@@ -120,8 +120,9 @@
 //! regime's weight between them (`regime`, `tolerances`): its share would refine for a value no target takes, while a
 //! step that leaves the motion unresolved still moves the loss (the retro-reflected tweezer over 10 us
 //! at the stiff axis' period, 1 us: 0.9 % of its atoms lost, T 160 % high, against 0.016 us).
-//! All scale as dt², so a step that misses is shrunk by the square root of its excess and checked
-//! again, and one that meets them with room is grown the same way, by whatever factor, until a step
+//! All go about as dt², so a step that misses is shrunk by the square root of its excess and checked
+//! again, and one that meets them with room is grown the same way, by whatever factor -- from the second
+//! check on by the power the last two measured (`power`) --, until a step
 //! comes up twice: first by the population criterion's bound, then from the largest step that met
 //! the targets by it with the population error measured -- by the excess of the criteria evaluated
 //! (`next_step`): where the motion or the loss missed, the population was not measured, and its bound,
@@ -608,15 +609,15 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let first=((interval*rate/first_phase()).ceil() as usize).clamp(1,most);
     // The loss's region is the reference trap's (engine.rs `Settings::region`): its initial positions' region.
     let plain=|steps:usize,truncation:f64|{let mut s=Settings::new(interval/steps as f64,&trap,truncation,true);s.region=depth;s};
-    // The pilot's exponentials to double precision; the beats its exact steps leave out within the run's share,
-    // the step's population budget over a waiting time between jumps (engine.rs `Segment::resolve`, `running`):
+    // The pilot's exponentials and the beats its exact steps leave out within the run's share,
+    // the numerical share of the population target over a waiting time between jumps (engine.rs `Segment::resolve`, `running`):
     // before it measures one, the one its atoms start with -- the inverse of its initial states' mean jump rate,
     // the no-jump decay ⟨ψ|i(H − H†)|ψ⟩/⟨ψ|ψ⟩ at their points, at most the run. Where the atoms then go dark the
     // waiting grows and the pilot's share is looser by as much: a beat it leaves out errs by at most that growth
     // times the run's share in an atom's populations, which the pilot's uses take far coarser -- its states
     // sample the step's check (at the run's settings), its fold's charge is the percent of its 2η², its jumps and
     // statistics their counts' --, and the run takes the waiting time the pilot measures.
-    let piloting=|steps:usize,waiting:f64|{let mut s=plain(steps,f64::EPSILON);s.beats=NUMERICAL_SHARE*POPULATION_TARGET*s.dt/waiting;s.horizon=waiting;s};
+    let piloting=|steps:usize,waiting:f64|{let mut s=plain(steps,NUMERICAL_SHARE*POPULATION_TARGET*(interval/steps as f64)/waiting);s.beats=s.truncation;s.horizon=waiting;s};
     let starts:Vec<Trajectory>=(0..pilot).map(|index|pilot_start(&pilot_candidate.model,&plain(first,f64::EPSILON),&pilot_candidate.initial,seed,index)).collect();
     let start_rate=starts.iter().map(|t|{let m=&pilot_candidate.model;let g=m.generator(t.cluster,&m.point(t.r,t.kappa),0.);let n=g.n;
         let(mut form,mut norm)=(Complex::ZERO,0.);for a in 0..n{norm+=t.psi[a].norm_sqr();for b in 0..n{form+=t.psi[a].conj()*g.hamiltonian[a*n+b]*t.psi[b];}}-2.*form.im/norm}).sum::<f64>()/pilot as f64;
@@ -1080,7 +1081,9 @@ fn next_groups(reach:&[u64],counts:&[u64])->Vec<usize>{
 }
 
 /// The step search (module documentation): from `first` each step's check (`check`, or the `known` one where
-/// it was checked) and the next step from it (`next_step`), until a step comes up twice, at most 8 checks;
+/// it was checked) and the next step from it (`next_step`) -- from the second check on by the excess's own power over the last two,
+/// the criteria going as dt^q with q from 2 to 3 where the square root alone crept up on a step in ten checks (`power`) --,
+/// until a step comes up twice, at most 8 checks;
 /// with `measure` (the measured search) the population error measured where the population decides a step.
 fn search(first:usize,most:usize,known:&[Check],check:&dyn Fn(usize)->Check,measure:Option<&dyn Fn(usize)->f64>,checked:&mut Vec<Check>){
     let mut steps=first;
@@ -1088,17 +1091,24 @@ fn search(first:usize,most:usize,known:&[Check],check:&dyn Fn(usize)->Check,meas
         if checked.iter().any(|c|c.steps==steps){break;}
         let mut c=known.iter().find(|c|c.steps==steps).copied().unwrap_or_else(||check(steps));
         if let Some(m)=measure.filter(|_|c.decided_by_population()){c.population=m(steps);}
-        checked.push(c);steps=next_step(&c,measure.is_some(),most);
+        let q=checked.last().map_or(2.,|last:&Check|power(last,&c));
+        checked.push(c);steps=next_step(&c,measure.is_some(),most,q);
     }
 }
 
 /// The search's next step after a check (module documentation): the square root of its excess away (all scale
 /// as dt²) -- in the measured search the excess of the criteria evaluated: where the motion or the loss missed,
 /// the population was not measured, and its bound, which over-counts several times where that search runs, is
-/// left out.
-fn next_step(c:&Check,measured:bool,most:usize)->usize{
+/// left out. The excess goes as dt^q (`power`).
+fn next_step(c:&Check,measured:bool,most:usize,q:f64)->usize{
     let missed=c.motion.max(c.loss);let excess=if measured&&missed>1.{missed}else{c.excess()};
-    ((c.steps as f64*excess.sqrt()).ceil() as usize).clamp(1,most)
+    ((c.steps as f64*excess.powf(1./q)).ceil() as usize).clamp(1,most)
+}
+/// The power q of dt the excess goes as between two checks at other steps, between the integrator's order and twice it:
+/// another criterion's turn at the largest, or the states' noise, must not throw the next step far.
+fn power(a:&Check,b:&Check)->f64{
+    let(ex,st)=((a.excess()/b.excess()).ln(),(b.steps as f64/a.steps as f64).ln());
+    if st==0.||!ex.is_finite(){return ORDER;}(ex/st).clamp(ORDER,2.*ORDER)
 }
 
 /// The step kept among the checked ones that met the targets (module documentation): the largest (where checked twice,
@@ -1591,9 +1601,12 @@ mod tests{
     #[test]
     fn a_missed_step_moves_by_the_criteria_it_evaluated(){
         let most=1<<20;
-        assert_eq!(next_step(&Check{steps:33,population:8.86,loss:0.,motion:1.0104},true,most),34);
-        assert_eq!(next_step(&Check{steps:33,population:8.86,loss:0.,motion:1.0104},false,most),99);
-        assert_eq!(next_step(&Check{steps:99,population:0.016,loss:0.,motion:0.1075},true,most),33);
+        assert_eq!(next_step(&Check{steps:33,population:8.86,loss:0.,motion:1.0104},true,most,2.),34);
+        assert_eq!(next_step(&Check{steps:33,population:8.86,loss:0.,motion:1.0104},false,most,2.),99);
+        assert_eq!(next_step(&Check{steps:99,population:0.016,loss:0.,motion:0.1075},true,most,2.),33);
+        // The excess as dt³: the power over two checks lands on the step at once, where the square root creeps.
+        let check=|s:usize|{let x=(100./s as f64).powi(3);Check{steps:s,population:x,loss:0.,motion:0.}};
+        let(a,b)=(check(70),check(140));assert!((power(&a,&b)-3.).abs()<1e-12);assert_eq!(next_step(&b,false,most,power(&a,&b)),100);
         let power=(1.0104f64/0.1075).ln()/3f64.ln();
         for delta in [-0.02,-1e-3,0.,1e-3,0.02]{
             let check=|s:usize|{let x=s as f64;Check{steps:s,population:8.86*(33./x).powi(2),loss:0.,motion:0.1075*(99./x).powf(power)*(1.+delta)}};
