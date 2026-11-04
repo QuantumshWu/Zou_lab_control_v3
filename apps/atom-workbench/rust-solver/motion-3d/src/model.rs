@@ -92,7 +92,7 @@
 use crate::ground::{self,Ground};
 use crate::ledger::BUDGET;
 use crate::linear::{hermitian_eigenvalues,Dense};
-use crate::solve::{MATRIX_NS,MOST_TRAJECTORIES,POPULATION_TARGET};
+use crate::solve::{MATRIX_NS,POPULATION_TARGET};
 use crate::stats::KT_PER_UK;
 use crate::{Complex,Request,STATES};
 use rayon::prelude::*;
@@ -621,10 +621,11 @@ impl Model{
 
     /// What a unit of booked population error costs the run (ns), the tables' stake (`tabulate`): the run's
     /// trajectories go as the inverse square of the room its estimates leave the statistics, so that an error
-    /// e of the room R costs it 2e/R of itself at first order -- here at the most trajectories a run takes
-    /// (`MOST_TRAJECTORIES`), each the pilot's first steps over the run (the light's pattern, solve.rs `run`)
+    /// e of the room R costs it 2e/R of itself at first order -- here at a run's first batch, the trajectories nearly every
+    /// run takes (solve.rs `FIRST_GROUPS`), each the pilot's first steps over the run (the light's pattern, solve.rs `run`)
     /// at an advance's counted work in the model's dearest cluster (solve.rs `advance_work`), against the
-    /// whole population target. A run that takes fewer pays for at most a doubling beyond its own optimum,
+    /// whole population target. A run that takes more loses only the 2e/R the refinement stopped at (129 nodes on 3D PGC's tables at the most
+    /// a run takes, an error of 5e-7 against its a-priori 2 %: 33 nodes hold 3e-4),
     /// each cutting the error about 2³-fold at 2^D times the work of the last.
     fn stake(&self,request:&Request)->f64{
         let thermal=(KT_PER_UK*request.temperature_uk*self.hbar_over_mass).sqrt();
@@ -632,7 +633,7 @@ impl Model{
         let rate=if pattern>0.{pattern}else{self.reference_state(request).map_or(0.,|s|self.bare_trap(s).frequencies.iter().copied().fold(0.,f64::max))};
         let steps=(self.ground.duration*rate/crate::solve::first_phase()).max(1.);
         let advance=(0..self.layouts.len()).map(|k|crate::solve::advance_work(&self.work(k))).fold(0.,f64::max);
-        2.*MOST_TRAJECTORIES as f64*steps*advance/POPULATION_TARGET
+        2.*(crate::solve::FIRST_GROUPS*crate::TASK) as f64*steps*advance/POPULATION_TARGET
     }
 
     /// The varying units other than the trap beam's (ground.rs `Unit`): each one's profile is judged
