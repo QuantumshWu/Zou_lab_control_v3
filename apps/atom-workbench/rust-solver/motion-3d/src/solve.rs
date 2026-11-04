@@ -242,7 +242,7 @@ use crate::engine::{column_norm,node_phase,series,Engine,Settings,Trajectory};
 use crate::gpu;
 use crate::ground::{ExcitedKind,Ground,Kind};
 use crate::ledger::{Ledger,BUDGET};
-use crate::model::{Exact,Model,Trap,MOST_MIXED,NOT_LINDBLAD};
+use crate::model::{MOST_STATES,Exact,Model,Trap,MOST_MIXED,NOT_LINDBLAD};
 use crate::control::{Harmonic,Twin};
 use crate::stats::{summarize,Estimate,Group,Means,Scales,KT_PER_UK};
 use crate::{pilot_start,sample_states,simulate,Initial,Outcome,Variates,TASK};
@@ -1173,7 +1173,7 @@ fn deposit(model:&Model,t:&Trajectory,psi:&[Complex],doppler:f64)->(f64,f64){
     for(c,(class,u))in model.ground.clusters[t.cluster].classes.iter().zip(&photons.amplitude).enumerate(){
         let nt=model.ground_dimension(class.target);let w:f64=u.iter().map(|v|v[..nt].iter().map(|z|z.norm_sqr()).sum::<f64>()).sum();if !(w>0.){continue;}
         let mut m=[0.;3];
-        for a in 0..3{let mut e=[0.;3];e[a]=1.;let(gradient,_)=photons.absorption(c,e);for x in 0..3{for i in 0..nt{m[x]+=(u[a][i].conj()*gradient[i][x]).im;}}}
+        for a in 0..3{let mut e=[0.;3];e[a]=1.;let(gradient,_)=photons.absorption(c,e,&[Complex::ZERO;MOST_STATES]);for x in 0..3{for i in 0..nt{m[x]+=(u[a][i].conj()*gradient[i][x]).im;}}}
         weight+=w;for x in 0..3{mean[x]+=m[x];}recoil+=w*class.wave_number*class.wave_number+m.iter().map(|v|v*v).sum::<f64>()/w;
     }
     if !(weight>0.){return(0.,0.);}
