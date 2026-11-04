@@ -61,8 +61,12 @@
 //! shifts and H's static couplings between its ground states (the static block's spread: a pair not far
 //! beyond it would beat between the block's eigenstates at their nearness) -- subtracted from its
 //! distance; one that fails is kept (promoted), a drive static in the frames between two states of one
-//! cluster is kept (it costs nothing), and the rule runs again until nothing changes. When every drive folds, the clusters are
-//! the ground states' alone.
+//! cluster is kept (it costs nothing), and the rule runs again until nothing changes. Each pass takes the estimates at its own
+//! dressing and keeps first, per ground state, the most saturated drive of a folded total beyond the allowance: a folded near drive's
+//! light is most of the dressing until it is kept (PGCP_10's probe, a dressing above its distances of 21 to 33 MHz), and what is judged
+//! under it stays kept for nothing -- a cooling drive's saturation read at a quarter of its distance, the pairs of channels within that spread.
+//! The couplings between explicit states and the pairs are judged once the drives stand. The rungs then keep more as the allowance
+//! falls. When every drive folds, the clusters are the ground states' alone.
 //!
 //! # Elimination of the folded drives
 //! Each beam's folded coupling V_l^f is V_l with every kept drive's entry zeroed (`Ground::folded`).
@@ -1314,8 +1318,9 @@ impl Ground{
     /// The drives judged per ground state: kept from the most saturated down (over the light's
     /// pattern) until the total saturation of the rest (their means' sum) fits the allowance, the rest
     /// folded; a drive kept already stays kept. Each one newly kept is passed to `kept` (whose answer
-    /// says whether it counts as a change); whether any did.
-    fn judge_drives(excited:&mut [ExcitedItem],allowance:f64,kept:&mut dyn FnMut(&mut ExcitedItem)->bool)->bool{
+    /// says whether it counts as a change); whether any did. With `one`, at most one per ground state: keeping a drive lowers the
+    /// dressing the others' estimates take (the closure).
+    fn judge_drives(excited:&mut [ExcitedItem],allowance:f64,one:bool,kept:&mut dyn FnMut(&mut ExcitedItem)->bool)->bool{
         let grounds:Vec<usize>={let mut g:Vec<usize>=excited.iter().filter_map(|x|match x.kind{ExcitedKind::Drive(d)=>Some(d.ground),_=>None}).collect();g.sort();g.dedup();g};
         let mut changed=false;
         for b in grounds{
@@ -1325,7 +1330,7 @@ impl Ground{
             for i in drives{
                 if !excited[i].folded{continue;}
                 if total<=allowance{break;}
-                total-=excited[i].mean;excited[i].folded=false;changed|=kept(&mut excited[i]);
+                total-=excited[i].mean;excited[i].folded=false;changed|=kept(&mut excited[i]);if one{break;}
             }
         }
         changed
@@ -1356,20 +1361,21 @@ impl Ground{
         let mut excited=self.excited_couplings();
         for x in excited.iter_mut(){(x.estimate,x.mean)=excited_estimate(x,0.,floor);}
         for x in excited.iter_mut(){if let ExcitedKind::Static{..}=x.kind{x.folded=x.estimate<=BUDGET;}}
-        Ground::judge_drives(&mut excited,allowance,&mut |_|false);
+        Ground::judge_drives(&mut excited,allowance,false,&mut |_|false);
         excited
     }
     /// The allowances at which the rule's explicit excited states change (`Ground::with`), from all
     /// folded (infinite) down to every drive kept, each the largest that gives its set of explicit
     /// states before the closure: the totals of a ground state's folded drives as it keeps them from
-    /// the most saturated down.
+    /// the most saturated down, its total with none kept among them -- its first kept drive lies below that, with
+    /// other ground states' still folded (PGCP_10: the near probe's drives alone, its cooling beams folded).
     pub fn allowances(request:&Request)->Result<Vec<f64>,String>{
         let g=Ground::bare(request)?;let ne=g.excited_states.len();
         let excited=g.judged(f64::INFINITY);
         let mut totals:Vec<f64>=vec![];
         for b in 0..g.ground_states.len(){
             let mut means:Vec<f64>=excited.iter().filter_map(|x|match x.kind{ExcitedKind::Drive(d)if d.ground==b=>Some(x.mean),_=>None}).collect();
-            means.sort_by(|x,y|y.total_cmp(x));let mut rest:f64=means.iter().sum();
+            means.sort_by(|x,y|y.total_cmp(x));let mut rest:f64=means.iter().sum();totals.push(rest);
             for m in means{rest-=m;totals.push(rest.max(0.));}
         }
         totals.sort_by(|x,y|y.total_cmp(x));totals.dedup();
@@ -1412,31 +1418,37 @@ impl Ground{
                     if let(Some(i),Some(j))=(set.iter().position(|&s|s==x),set.iter().position(|&s|s==y)){m[(i,j)]+=Complex::new(item.size,0.);m[(j,i)]+=Complex::new(item.size,0.);}
                 }
                 hermitian_eigenvalues(&m).into_iter().fold(0_f64,|a,v|a.max(v.abs()))}).collect();
-            let mut changed=false;
-            for x in excited.iter_mut().filter(|x|x.folded){
+            // The folded couplings' estimates at this pass's dressing: what the kept couplings leave of it, the last
+            // pass's the estimates the fold's charge books.
+            let mut changed=false;let mut inside=vec![false;excited.len()];
+            for(i,x)in excited.iter_mut().enumerate().filter(|(_,x)|x.folded){
                 let reach=match x.kind{ExcitedKind::Drive(d)=>partition.set[d.ground],
                     ExcitedKind::Static{a,b}=>partition.set[ng+a].or(partition.set[ng+b])};
                 let Some(k)=reach else{continue};
-                let(estimate,mean)=excited_estimate(x,dressing[k],floor);
+                (x.estimate,x.mean)=excited_estimate(x,dressing[k],floor);
                 // A coupling static in the frames between two states of one cluster costs nothing kept.
                 let m=&partition.combinations;
-                let inside=match x.kind{
+                inside[i]=match x.kind{
                     ExcitedKind::Drive(d)=>partition.set[ng+d.excited]==Some(k)&&m[ng+d.excited].iter().zip(&m[d.ground]).enumerate().all(|(c,(e,g))|*e==*g+i32::from(c==d.carrier)),
                     ExcitedKind::Static{a,b}=>partition.set[ng+a]==Some(k)&&partition.set[ng+b]==Some(k)&&m[ng+a]==m[ng+b]};
-                x.estimate=x.estimate.max(estimate);x.mean=x.mean.max(mean);
-                if inside||(matches!(x.kind,ExcitedKind::Static{..})&&estimate>BUDGET){x.folded=false;x.promoted=true;changed=true;}
             }
-            // The drives with the closure's estimates: each ground state's folded total within the allowance.
-            changed|=Ground::judge_drives(&mut excited,allowance,&mut |x|{x.promoted=true;true});
+            // The drives first, the most saturated of each ground state's folded total beyond the allowance: a folded near drive's
+            // light is most of the dressing before it is kept, and estimates taken under it would keep what its keeping lets fold.
+            changed|=Ground::judge_drives(&mut excited,allowance,true,&mut |x|{x.promoted=true;true});
+            if !changed{
+                for(i,x)in excited.iter_mut().enumerate().filter(|(_,x)|x.folded){
+                    if inside[i]||(matches!(x.kind,ExcitedKind::Static{..})&&x.estimate>BUDGET){x.folded=false;x.promoted=true;changed=true;}
+                }
+            }
             // A folded pair of channels between two states of one cluster, judged again with its dressing taken from its
             // separation: the cluster's static block mixes its states by up to that much, and a pair that is not far
             // beyond it would beat between the block's eigenstates at their nearness -- kept.
-            for item in partition.items.iter().filter(|i|i.folded){
+            if !changed{for item in partition.items.iter().filter(|i|i.folded){
                 let Kind::Raman{first,second}=item.kind else{continue};
                 let(Some(k),Some(k2))=(partition.set[first.state],partition.set[second.state])else{continue};
                 if k!=k2||kept.contains(&item.kind){continue;}
                 if !foldable((item.frequency-dressing[k]).max(0.),item.size,self.generator_scale){kept.push(item.kind.clone());changed=true;}
-            }
+            }}
             if !changed&&!moved{self.charge=Ground::charge_of(&excited,ng);return self.assemble(&b,partition,excited);}
         }
     }
