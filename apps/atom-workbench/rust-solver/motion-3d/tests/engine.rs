@@ -5,15 +5,15 @@
 //! off (its T over a trap period as well, with smaller errors), the initial states' bound ensemble and
 //! a group's Latin hypercube of it, and a short solve whose t = 0 is the request's initial state.
 use atom_motion_3d::control::{Harmonic,Twin};
-use atom_motion_3d::engine::{dipole_direction,Engine,Settings};
+use atom_motion_3d::engine::{dipole_direction,Engine,Settings,Trajectory,QUADRATURE};
 use atom_motion_3d::ensemble::kept;
-use atom_motion_3d::ground::Ground;
+use atom_motion_3d::ground::{ExcitedKind,Ground};
 use atom_motion_3d::ledger::BUDGET;
 use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Means,Scales,KT_PER_UK};
 use atom_motion_3d::{initial_trajectory,sample_states,simulate,Initial,Stratum,Variates};
-use atom_motion_3d::solve::{jumps,solve,Device,STEP_SHARE,TEMPERATURE_TARGET};
+use atom_motion_3d::solve::{grid_phase,jumps,solve,Device,POPULATION_TARGET,STEP_SHARE,TEMPERATURE_TARGET};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
 #[path="../examples/scene/mod.rs"] mod scene;
@@ -823,6 +823,46 @@ fn an_explicit_rung_s_frames_are_exact(){
     }}
 }
 
+/// The phase a solve measures for a beating grid (solve.rs `grid_phase`) lies far above the quadrature's bound, and a step
+/// at it meets both shares against a grid far finer than the bound's, by another path than the doubling that chose it: the
+/// whole step from thermal states a few microseconds into the PGC with a resonant probe, its 12-state cluster's beats at 36.4 and 72.8 MHz.
+#[test]
+fn a_beating_grid_s_measured_phase_meets_its_shares(){
+    let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..101).map(|i|i as f64).collect();
+    let model=Model::with(&r,Ground::allowances(&r).unwrap()[1]).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let(dt,waiting)=(0.25,0.6);let share=STEP_SHARE*STEP_SHARE*POPULATION_TARGET*dt/waiting;
+    let mut at=Settings::new(dt,&initial.traps[0],share,true);at.horizon=waiting;let engine=Engine::new(&model,at.clone());
+    let states:Vec<Trajectory>=(0..64).map(|i|{let mut t=initial_trajectory(&model,&at,&initial,7,i,Stratum::single(i));for _ in 0..8{engine.step(&mut t);}t}).collect();
+    let phase=grid_phase(&model,&states,&at);assert!(phase>4.*at.node_phase,"{phase} against the bound's {}",at.node_phase);
+    let(mut coarse,mut fine)=(at.clone(),at.clone());coarse.node_phase=phase;fine.node_phase=at.node_phase/2.;
+    let(coarse,fine)=(Engine::new(&model,coarse),Engine::new(&model,fine));
+    let(mut populations,mut impulse,mut size)=(0.,0.,0.);
+    for t in &states{
+        let n=model.dimension(t.cluster);let(a,b)=(coarse.coast(t,dt,1),fine.coast(t,dt,1));
+        let norm=|x:&Trajectory|x.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>();let(x,y)=(norm(&a),norm(&b));
+        populations+=(0..n).map(|i|(a.psi[i].norm_sqr()/x-b.psi[i].norm_sqr()/y).abs()).fold(0.,f64::max);
+        impulse+=(0..3).map(|k|(a.kappa[k]-b.kappa[k]).powi(2)).sum::<f64>().sqrt();size+=(0..3).map(|k|(b.kappa[k]-t.kappa[k]).powi(2)).sum::<f64>().sqrt();
+    }
+    let m=states.len() as f64;assert!(populations/m<=share,"populations {:e} against the share {share:e}",populations/m);
+    assert!(impulse/size<=QUADRATURE,"the impulse {:e} against {QUADRATURE:e}",impulse/size);
+}
+
+/// The ladder's rungs keep more as the allowance falls, and the closure keeps what it must first: on the PGC with a resonant probe
+/// the first rung holds the probe's five drives and the strongest cooling drive, the cooling beams' others folded. (With the
+/// closure's estimates taken under the folded probe's light, and no rung above each ground state's first kept drive, the first rung
+/// held 7 excited states, its T 5 % above the fully explicit F = 2 cluster's at 100 us, where this rung's is within its 2 % of statistics.)
+#[test]
+fn the_ladder_keeps_more_as_the_allowance_falls_and_the_near_drives_first(){
+    let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..101).map(|i|i as f64).collect();
+    let ladder=Ground::allowances(&r).unwrap();assert!(ladder[0]==f64::INFINITY&&ladder.windows(2).all(|w|w[0]>w[1]),"{ladder:?}");
+    let grounds:Vec<Ground>=ladder.iter().take(12).map(|&a|Ground::with(&r,a).unwrap()).collect();
+    let explicit:Vec<usize>=grounds.iter().map(|g|g.clusters.iter().map(|c|c.excited.len()).sum()).collect();
+    assert!(explicit[0]==0&&explicit.windows(2).all(|w|w[0]<=w[1]),"explicit states along the ladder: {explicit:?}");
+    let g=&grounds[1];let drives:Vec<usize>=g.excited_items.iter().filter(|x|!x.folded&&x.size>1e-6).filter_map(|x|match x.kind{ExcitedKind::Drive(d)=>Some(d.carrier),_=>None}).collect();
+    let probe=drives.iter().filter(|&&c|c==drives[0]).count();
+    assert!(explicit[1]==5&&drives.len()==6&&(probe==5||probe==1),"the first rung: {} explicit states, its drives' carriers {drives:?}",explicit[1]);
+}
+
 /// The atom frozen at the focus: its eliminated master equation there (ground.rs `local_at`, every drive
 /// folded, the beats' phases at each instant), RK4 at 1/250 of the outputs' interval, the populations
 /// at the given times up to `last`.
@@ -872,17 +912,16 @@ fn a_tweezer_s_vector_shift_across_the_field_moves_the_responses_to_the_static_b
     assert!(worst.0<=1e-2+5e-3,"the frozen atom's populations {:.4} off the core's at {} us",worst.0,worst.1);
 }
 
-/// Tables whose function is not smooth on any grid's scale where the atoms go -- b1/109's explicit rung, every
-/// excited state explicit: the interpolation's error 0.4 to 1.4 from 9 to 16385 nodes per axis, with or without
-/// the near light's dressing, 25 s to refine to the work bound -- stop refining at the first doubling that does
-/// not shrink the error, whose next one is predicted to save nothing (model.rs `tabulate`), the last grid kept
-/// and its error booked: 17 nodes per axis (its error 1.1 inside the reach's intensities).
+/// Tables whose function is not smooth on any grid's scale where the atoms go -- b1/109's first explicit rung, 7
+/// excited states explicit in its cluster of the near drives -- stop refining at the first doubling that does not
+/// shrink the error, whose next one is predicted to save nothing (model.rs `tabulate`), the last grid kept and its
+/// error booked: 33 nodes per axis (its error 0.22 inside the reach's intensities).
 #[test]
 fn tables_that_do_not_converge_stop_refining_with_their_error_booked(){
     let v:Value=serde_json::from_str(include_str!("fixtures/explicit_rung_motion.json")).unwrap();let r=sparse_request(&v);
     let allowance=Ground::allowances(&r).unwrap()[1];let model=Model::with(&r,allowance).unwrap();
-    assert!(model.ground.clusters.iter().any(|c|c.excited.len()==24),"the explicit rung");
-    assert!(model.table_stalled&&model.table_limit.is_some_and(|n|n<=17),"refined to {:?} nodes per axis (stalled {})",model.table_limit,model.table_stalled);
+    assert!(model.ground.clusters.iter().any(|c|c.excited.len()==7),"the explicit rung");
+    assert!(model.table_stalled&&model.table_limit.is_some_and(|n|n<=33),"refined to {:?} nodes per axis (stalled {})",model.table_limit,model.table_stalled);
     assert!(model.table_error>0.,"the error booked: {:.2e}",model.table_error);
 }
 

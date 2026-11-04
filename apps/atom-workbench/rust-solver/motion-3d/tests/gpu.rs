@@ -78,8 +78,8 @@ fn model(r:&Request,fourth:bool)->Model{Model::with_order(r,f64::INFINITY,fourth
 /// `Ground::allowances`): its clusters take the exact step (engine.rs # The exact step).
 fn explicit(r:&Request)->Model{Model::with(r,Ground::allowances(r).unwrap()[1]).unwrap()}
 /// The PGC with a resonant probe 10 MHz off the cooling light (the floquet study's PGCP_10), as the app
-/// sends it: its folds' saturation far beyond one, the solve keeps 7 excited states explicit with the 5
-/// ground states of F = 2, a cluster beating at 36.4 and 72.8 MHz that its exact step takes by CF4.
+/// sends it: its folds' saturation far beyond one, its first rung keeps 5 excited states explicit with the 5
+/// ground states of F = 2, a cluster beating at 36.4 MHz that its exact step takes by CF4.
 fn probed()->Request{let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=vec![0.,1.];r}
 /// A batch of the fixture's thermal trajectories and the step's settings (a solve's: the truncation
 /// a share of the step's budget, the loss on), with `threshold` (when given) as every one's.

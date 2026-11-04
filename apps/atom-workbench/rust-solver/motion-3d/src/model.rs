@@ -398,9 +398,9 @@ impl Generator{
 }
 /// A cluster's generator at a point split by its beats (`Model::components`): H(t) = H₀ + Σ_j e^{iΩ_j t} H_j
 /// and the Hermitian part's gradient G(t) = G₀ + Σ_j e^{iΩ_j t} G_j, Hermitian at every t (G_{−Ω} = G_Ω†); H₀
-/// less the static part's scalar; the beats' common period where they are harmonics of one frequency.
+/// less the static part's scalar.
 #[derive(Clone,Debug)]
-pub struct Components{pub statics:Generator,pub beats:Vec<Beat>,pub period:Option<f64>}
+pub struct Components{pub statics:Generator,pub beats:Vec<Beat>}
 /// One beat of a generator: its frequency Ω (rad/us) and its parts of H and of the gradient (n × n).
 #[derive(Clone,Debug)]
 pub struct Beat{pub omega:f64,pub hamiltonian:Vec<Complex>,pub gradient:[Vec<Complex>;3]}
@@ -1427,7 +1427,7 @@ impl Model{
         let mut gradient=gradient.into_iter();let mut h=h.into_iter();
         let statics=Generator{n,hamiltonian:h.next().unwrap(),scalar,gradient:gradient.next().unwrap()};
         let beats_out=beats.omegas.iter().zip(h.zip(gradient)).map(|(&omega,(hamiltonian,gradient))|Beat{omega,hamiltonian,gradient}).collect();
-        Components{statics,beats:beats_out,period:beats.period}
+        Components{statics,beats:beats_out}
     }
 
     /// A cluster's generator at a point and time t (`Local`): a cluster of ground states' (one with
