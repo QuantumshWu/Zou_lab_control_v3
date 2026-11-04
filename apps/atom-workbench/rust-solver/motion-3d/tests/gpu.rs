@@ -77,6 +77,10 @@ fn model(r:&Request,fourth:bool)->Model{Model::with_order(r,f64::INFINITY,fourth
 /// A request's model at its fold ladder's first rung with explicit excited states (ground.rs
 /// `Ground::allowances`): its clusters take the exact step (engine.rs # The exact step).
 fn explicit(r:&Request)->Model{Model::with(r,Ground::allowances(r).unwrap()[1]).unwrap()}
+/// The first rung with explicit states that beat at two frequencies.
+fn beating_twice(r:&Request)->Model{
+    Ground::allowances(r).unwrap().into_iter().map(|a|Model::with(r,a).unwrap()).find(|m|(0..m.clusters()).any(|k|m.mixed(k)&&m.beats(k).0.len()>=4)).expect("a rung beating twice")
+}
 /// The PGC with a resonant probe 10 MHz off the cooling light (the floquet study's PGCP_10), as the app
 /// sends it: its folds' saturation far beyond one, its first rung keeps 5 excited states explicit with the 5
 /// ground states of F = 2, a cluster beating at 36.4 MHz that its exact step takes by CF4.
@@ -148,13 +152,13 @@ fn on_eight_states_a_step_and_a_jump_are_the_cpu_s(){
     let r=request(MOLASSES);compare(&r,None,f64::INFINITY,false,false);compare(&r,Some(0.999),f64::INFINITY,true,false);
 }
 /// The same jump with the exact response: the gray molasses' static ground block mixes its responses (ground.rs,
-/// # The static ground block), the kernel's by its eigenstates (`mixed_responses`).
+/// # The static ground block), the kernel's by its eigenstates (`carrier_responses`).
 #[test]
 fn on_eight_states_a_jump_with_the_exact_response_is_the_cpu_s(){compare(&request(MOLASSES),Some(0.999),0.,true,false);}
 /// With explicit excited states (engine.rs # The exact step), on the tweezer PGC's first explicit rung
 /// (clusters of 3 ground and 4 explicit states and of 2 and 3, their hyperfine beat left out: the static
-/// path, the CPU's eigendecomposition against the GPU's series), the gray molasses' and the probed PGC's (7
-/// explicit states beating at 36.4 and 72.8 MHz: CF4, at its solve's 0.1 us):
+/// path, the CPU's eigendecomposition against the GPU's series), the gray molasses', and the probed PGC's first
+/// beating at two frequencies (5 explicit states at 36.4 and 72.8 MHz: CF4, at its solve's 0.1 us):
 /// - a jump-free step is the CPU's to single precision;
 /// - a jump at each thermal state -- the explicit states' photons and their share of the absorbed light,
 ///   and into a cluster with explicit states its transient --, with the first-order and with the exact
@@ -169,18 +173,19 @@ fn on_eight_states_a_jump_with_the_exact_response_is_the_cpu_s(){compare(&reques
 ///   explicit rung) its time moves by 1e-3 of itself, and the state after it by as much (unbiased).
 #[test]
 fn with_explicit_states_a_step_and_a_jump_are_the_cpu_s(){
-    explicit_rung(&request(PGC),0.2,&[false,true]);
-    explicit_rung(&request(MOLASSES),0.2,&[false]);
-    explicit_rung(&probed(),0.1,&[false,true]);
+    let(pgc,molasses,probe)=(request(PGC),request(MOLASSES),probed());
+    explicit_rung(&pgc,explicit(&pgc),0.2,&[false,true]);
+    explicit_rung(&molasses,explicit(&molasses),0.2,&[false]);
+    explicit_rung(&probe,beating_twice(&probe),0.1,&[false,true]);
 }
-/// The gray molasses' explicit rung's jump with the exact response: its block mixes (the kernel's `mixed_responses`).
+/// The gray molasses' explicit rung's jump with the exact response: its block mixes (the kernel's `carrier_responses`).
 #[test]
-fn with_explicit_states_a_jump_with_a_mixed_block_s_exact_response_is_the_cpu_s(){explicit_rung(&request(MOLASSES),0.2,&[true]);}
-/// A request's first explicit rung (`with_explicit_states_a_step_and_a_jump_are_the_cpu_s`), its jumps with the responses
+fn with_explicit_states_a_jump_with_a_mixed_block_s_exact_response_is_the_cpu_s(){let r=request(MOLASSES);explicit_rung(&r,explicit(&r),0.2,&[true]);}
+/// A request's explicit rung (`with_explicit_states_a_step_and_a_jump_are_the_cpu_s`), its jumps with the responses
 /// `exact` lists: true, the exact one; false, the first order's.
-fn explicit_rung(r:&Request,dt:f64,exact:&[bool]){
+fn explicit_rung(r:&Request,m:Model,dt:f64,exact:&[bool]){
     let Some(gpu)=device()else{return};
-    let m=explicit(r);assert!((0..m.clusters()).any(|k|m.mixed(k)),"explicit states");
+    assert!((0..m.clusters()).any(|k|m.mixed(k)),"explicit states");
     println!("clusters {:?}",(0..m.clusters()).map(|k|(m.dimension(k),m.ground_dimension(k),m.beating(k))).collect::<Vec<_>>());
     compare_model(r,m.clone(),dt,Some(1e-300),f64::INFINITY,false);
     let(model,settings,trajectories)=setup(r,m,dt,None,f64::INFINITY);

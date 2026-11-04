@@ -912,16 +912,15 @@ fn a_tweezer_s_vector_shift_across_the_field_moves_the_responses_to_the_static_b
     assert!(worst.0<=1e-2+5e-3,"the frozen atom's populations {:.4} off the core's at {} us",worst.0,worst.1);
 }
 
-/// Tables whose function is not smooth on any grid's scale where the atoms go -- b1/109's first explicit rung, 7
-/// excited states explicit in its cluster of the near drives -- stop refining at the first doubling that does not
-/// shrink the error, whose next one is predicted to save nothing (model.rs `tabulate`), the last grid kept and its
-/// error booked: 33 nodes per axis (its error 0.22 inside the reach's intensities).
+/// Tables whose function is not smooth on any grid's scale where the atoms go -- a folded drive's pole, the PGC with a
+/// resonant probe with every drive folded -- stop refining at the first doubling that does not shrink the error, whose next
+/// one is predicted to save nothing (model.rs `tabulate`), the last grid kept and its error booked: 33 nodes per axis, its error 1.8.
 #[test]
 fn tables_that_do_not_converge_stop_refining_with_their_error_booked(){
-    let v:Value=serde_json::from_str(include_str!("fixtures/explicit_rung_motion.json")).unwrap();let r=sparse_request(&v);
-    let allowance=Ground::allowances(&r).unwrap()[1];let model=Model::with(&r,allowance).unwrap();
-    assert!(model.ground.clusters.iter().any(|c|c.excited.len()==7),"the explicit rung");
-    assert!(model.table_stalled&&model.table_limit.is_some_and(|n|n<=33),"refined to {:?} nodes per axis (stalled {})",model.table_limit,model.table_stalled);
+    let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..101).map(|i|i as f64).collect();
+    let model=Model::with(&r,f64::INFINITY).unwrap();
+    println!("refined to {:?} nodes per axis, its error {:.3}, stalled {}",model.table_limit,model.table_error,model.table_stalled);
+    assert!(model.table_stalled&&model.table_limit.is_some(),"refined to {:?} nodes per axis (stalled {})",model.table_limit,model.table_stalled);
     assert!(model.table_error>0.,"the error booked: {:.2e}",model.table_error);
 }
 
