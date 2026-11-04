@@ -6,6 +6,7 @@
 pub mod control;
 pub mod eigen;
 pub mod engine;
+pub mod ensemble;
 pub mod gpu;
 pub mod ground;
 pub mod ledger;
@@ -18,20 +19,23 @@ pub mod stats;
 
 pub use request::{Beam,Complex,Matrix,Request,STATES};
 use engine::{Engine,Settings,Trajectory};
+use ensemble::Ensemble;
 use model::{Model,Trap};
 use rayon::prelude::*;
-use rng::{normal_quantile,Purpose,Rng};
+use rng::{Purpose,Rng};
 use control::{Harmonic,Twin};
 use stats::{Atom,Controls,Group,KT_PER_UK};
 use std::sync::Mutex;
 use std::time::Instant;
 
-/// The initial internal states (cluster, position in it, probability), each one's trap (the
-/// harmonic trap its initial positions are drawn in) and depth (`Model::depth`), the temperature,
-/// and the share of the traps' thermal positions beyond their regions (`thermal_position`), booked
-/// as an a-priori estimate: what a region twice as deep would add, the initial states' mean.
+/// The initial internal states (cluster, position in it, probability), each one's trap (the harmonic
+/// trap at its focus, `Model::trap`), depth (`Model::depth`: the loss's region U_h ≤ D) and bound
+/// thermal ensemble (ensemble.rs; none for a state the trap does not hold, which starts at the focus at
+/// rest), the temperature asked for -- the ensembles' parameter T --, and the share of the traps'
+/// thermal distributions over their regions that the ensembles leave out (`Ensemble::cut`, weighted by
+/// the populations).
 #[derive(Clone,Debug)]
-pub struct Initial{pub states:Vec<(usize,usize,f64)>,pub traps:Vec<Trap>,pub depths:Vec<f64>,pub temperature_uk:f64,pub outside:f64}
+pub struct Initial{pub states:Vec<(usize,usize,f64)>,pub traps:Vec<Trap>,pub depths:Vec<f64>,pub ensembles:Vec<Option<Ensemble>>,pub temperature_uk:f64,pub cut:f64}
 impl Initial{
     /// From the request's initial density: its ground populations (the density is diagonal in the
     /// model basis, as the app writes it).
@@ -47,81 +51,40 @@ impl Initial{
         let traps:Vec<Trap>=states.iter().map(|&(k,x,_)|model.trap(k,x)).collect();
         let depths:Vec<f64>=states.iter().map(|&(k,x,_)|model.depth(k,x)).collect();
         let kt=KT_PER_UK*request.temperature_uk;
-        let outside=states.iter().zip(&traps).zip(&depths).enumerate().map(|(i,((&(k,x,p),trap),&depth))|p*outside_share(model,k,x,trap,depth,kt,i as u64)).sum();
-        Ok(Initial{states,traps,depths,temperature_uk:request.temperature_uk,outside})
+        let ensembles=states.iter().zip(&traps).zip(&depths).map(|((&(k,x,_),trap),&depth)|Ensemble::new(model,k,x,trap,depth,kt)).collect::<Result<Vec<_>,_>>()?;
+        let cut=states.iter().zip(&ensembles).map(|(s,e)|s.2*e.as_ref().map_or(0.,|e|e.cut)).sum();
+        Ok(Initial{states,traps,depths,ensembles,temperature_uk:request.temperature_uk,cut})
     }
-}
-
-/// The draws of a region's share (`outside_share`): where the share reaches the a-priori budget,
-/// to about a fifth of it.
-const REGION_DRAWS:u64=4096;
-
-/// A state's harmonic trap at 2T: the scales σ_i √2 of its trapped principal axes (√(2 k_BT ħ/m)/ω_i,
-/// zero along an untrapped one), in which its harmonic potential is U_h = k_BT |z|² (z = q/scale).
-fn doubled_scales(trap:&Trap,kt:f64,hm:f64)->[f64;3]{std::array::from_fn(|i|{let w=trap.frequencies[i];if w>0.{(2.*kt*hm).sqrt()/w}else{0.}})}
-
-/// The trap's thermal positions at T (`thermal_position`) that its region leaves out: the share of
-/// e^{−U/k_BT} over the region twice as deep (U_h ≤ 2D) that lies beyond the trap's (U_h ≤ D), by
-/// importance sampling from the proposal `thermal_position` takes there (on a fixed stream: the
-/// estimate is deterministic). One where the region holds nothing of it; zero for a state the trap
-/// does not hold (its positions are the focus).
-fn outside_share(model:&Model,cluster:usize,state:usize,trap:&Trap,depth:f64,kt:f64,index:u64)->f64{
-    let scales=doubled_scales(trap,kt,model.hbar_over_mass);let trapped=scales.iter().filter(|&&s|s>0.).count();
-    if trapped==0||!(depth>0.){return 0.;}
-    let(inner,outer)=(depth/kt,2.*depth/kt);let normal=outer>=trapped as f64;let edge=outer.sqrt();
-    let mut rng=Rng::new(0x3D_5EED,Purpose::Region,index,0);let(mut all,mut beyond)=(0.,0.);
-    for _ in 0..REGION_DRAWS{
-        let z:[f64;3]=std::array::from_fn(|i|if scales[i]>0.{if normal{normal_quantile(rng.interior())}else{edge*(2.*rng.uniform()-1.)}}else{0.});
-        let z2:f64=z.iter().map(|x|x*x).sum();if z2>outer{continue;}
-        let q:[f64;3]=std::array::from_fn(|i|z[i]*scales[i]);let lab=std::array::from_fn(|a|(0..3).map(|i|q[i]*trap.axes[i][a]).sum());
-        let w=(-model.potential(cluster,state,lab)/kt+if normal{0.5*z2}else{0.}).exp();
-        all+=w;if z2>inner{beyond+=w;}
-    }
-    if all>0.{beyond/all}else{1.}
-}
-
-/// A state's thermal position on its trap's principal axes: the trap's Boltzmann distribution at T,
-/// e^{−U/k_BT} (U the state's potential, `Model::potential`), over the trap's region, where its
-/// harmonic approximation lies below its depth, U_h ≤ D (`Model::depth`; a solve's loss takes the
-/// reference state's, engine.rs `Settings::region`). A finite trap's Boltzmann factor does not fall
-/// off past its depth -- U saturates there --, so no region holds all of it: the region is the trap's,
-/// the share a twice as deep one would add booked (`outside_share`). Drawn
-/// exactly, by rejection, in the coordinates z of the harmonic trap at 2T (U_h = k_BT |z|², the
-/// region |z|² ≤ D/k_BT): from the normal distribution there, accepted with e^{−U/k_BT + |z|²/2} --
-/// at most one where U ≥ U_h/2, as on the region of a Gaussian beam (it lies below its harmonic
-/// potential by at most half, on the axis at U_h = D) and of its standing wave; or, where the region
-/// is shallower than the normal's mean |z|² (the trapped axes' number), uniformly over the cube
-/// about it, accepted with e^{−U/k_BT} on it. The first proposal's deviates are the member's of its
-/// group's Latin hypercube (`next`), the further ones its own stream's. Untrapped axes: zero; a state
-/// the trap does not hold: the focus.
-fn thermal_position(model:&Model,cluster:usize,state:usize,trap:&Trap,depth:f64,kt:f64,rng:&mut Rng,next:&mut dyn FnMut(&mut Rng)->[f64;3])->[f64;3]{
-    let scales=doubled_scales(trap,kt,model.hbar_over_mass);let trapped=scales.iter().filter(|&&s|s>0.).count();
-    // The member's Latin deviates are taken whatever follows, so that its group's stay in step.
-    let first=next(rng);
-    if trapped==0||!(depth>0.){return [0.;3];}
-    let region=depth/kt;let normal=region>=trapped as f64;let edge=region.sqrt();
-    let mut deviates=first;
-    loop{
-        let z:[f64;3]=std::array::from_fn(|i|if scales[i]>0.{if normal{normal_quantile(deviates[i])}else{edge*(2.*deviates[i]-1.)}}else{0.});
-        let z2:f64=z.iter().map(|x|x*x).sum();
-        if z2<=region{
-            let q:[f64;3]=std::array::from_fn(|i|z[i]*scales[i]);let lab=std::array::from_fn(|a|(0..3).map(|i|q[i]*trap.axes[i][a]).sum());
-            let accept=-model.potential(cluster,state,lab)/kt+if normal{0.5*z2}else{0.};
-            if rng.open_uniform().ln()<accept{return q;}
+    /// The initial kinetic temperature per lab axis (uK), exactly: per state its ensemble's relative to
+    /// T (`Ensemble::kinetic`) along each principal axis of its trap with the harmonic oscillator's
+    /// thermal Wigner factor (ħω/2k_BT) coth(ħω/2k_BT) (`initial_trajectory`), weighted by its population
+    /// and the axis' share of the lab axis; a state the trap does not hold at rest.
+    pub fn temperature(&self)->[f64;3]{
+        let kt=KT_PER_UK*self.temperature_uk;let mut t=[0.;3];
+        for((&(_,_,p),trap),e)in self.states.iter().zip(&self.traps).zip(&self.ensembles){
+            let Some(e)=e else{continue};
+            for a in 0..3{for i in 0..3{let half=trap.frequencies[i]/(2.*kt);
+                t[a]+=p*e.kinetic*trap.axes[i][a]*trap.axes[i][a]*if half>0.{self.temperature_uk*half/half.tanh()}else{self.temperature_uk};}}
         }
-        deviates=std::array::from_fn(|_|rng.interior());
+        t
     }
+    /// The ensembles' kinetic temperature relative to T (`Ensemble::kinetic`, classical: without the
+    /// Wigner factor), weighted by the populations.
+    pub fn kinetic(&self)->f64{self.states.iter().zip(&self.ensembles).map(|(s,e)|s.2*e.as_ref().map_or(0.,|e|e.kinetic)).sum()}
 }
 
 /// A trajectory's group: its first trajectory and its size. A group's initial states form a Latin
-/// hypercube: every variable drawn from a uniform deviate -- the internal state's pick, each
-/// coordinate of each Metropolis proposal, each momentum component -- falls for each member in
-/// another of `size` equal-probability strata (the members' order a random permutation of the
-/// strata, new for every variable) at a uniform point inside it. Each member is distributed as an
-/// independent draw would be; the group spreads over every variable's distribution, so its means of
-/// the initial energies, and of what they leave at early times, vary much less than independent
-/// draws'. Groups are independent of each other, so the jackknife over them still measures the
-/// error. A group of one is an independent draw.
+/// hypercube: every variable drawn from a uniform deviate -- the internal state's pick, the position's
+/// first proposal (its radial deviate and direction), the kinetic energy's quantile at the position
+/// and the momentum's direction (ensemble.rs) -- falls for each member in another of `size`
+/// equal-probability strata (the members' order a random permutation of the strata, new for every
+/// variable) at a uniform point inside it. A member whose first proposal is rejected draws its
+/// position from its own stream; its kinetic energy keeps its stratum, the quantile of its distribution
+/// at whatever position it takes. Each member is distributed as an independent draw would be; the
+/// group spreads over every variable's distribution, so its means of the initial energies, and of what
+/// they leave at early times, vary much less than independent draws'. Groups are independent of each
+/// other, so the jackknife over them still measures the error. A group of one is an independent
+/// draw.
 #[derive(Clone,Copy,Debug)]
 pub struct Stratum{pub first:u64,pub size:u64}
 impl Stratum{
@@ -144,12 +107,13 @@ impl Latin{
 }
 
 /// A trajectory's initial state, its group's member (`Stratum`): an internal basis state drawn from
-/// the initial populations; the position from the Boltzmann distribution at T in that state's trap
-/// over the trap's region (`thermal_position`, on the trap's principal axes); the momentum Maxwell,
-/// apart from the position -- an atom the trap cannot hold is lost at the first step --; position
-/// and momentum along each principal axis scaled to the harmonic oscillator's thermal Wigner
-/// function, T* = (ħω/2k)coth(ħω/2kT). Along frozen lab axes (a validation's), nothing. At fourth
-/// order the internal state is the bare state's slow part (engine.rs `slow_start`).
+/// the initial populations; its position and momentum from that state's bound thermal ensemble
+/// (ensemble.rs: the lowered isothermal at T over its trap's bound states, every atom bound by the
+/// loss's own measure too), along each principal axis of its trap scaled to the harmonic oscillator's
+/// thermal Wigner function, T* = (ħω/2k)coth(ħω/2kT) -- a scaled draw the loss's measure would call
+/// unbound (the factors lift its energy by their excess over one) drawn again from its own stream. Along
+/// frozen lab axes (a validation's), nothing; a state the trap does not hold at rest at the focus. At
+/// fourth order the internal state is the bare state's slow part (engine.rs `slow_start`).
 pub fn initial_trajectory(model:&Model,settings:&Settings,initial:&Initial,seed:u64,index:u64,stratum:Stratum)->Trajectory{
     dressed(model,initial_from(model,settings,initial,seed,Purpose::Initial,index,stratum))
 }
@@ -172,19 +136,25 @@ fn initial_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,purpos
     // The axes: the trap's principal ones when every lab axis is free, else the free lab axes.
     let all=settings.free==[true;3];
     let(axes,frequencies)=if all{(trap.axes,trap.frequencies)}else{([[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],std::array::from_fn(|a|if settings.free[a]{trap.lab[a]}else{0.}))};
-    let kt=KT_PER_UK*initial.temperature_uk;let hm=model.hbar_over_mass;
-    let sigma:[f64;3]=std::array::from_fn(|i|if frequencies[i]>0.{(kt*hm).sqrt()/frequencies[i]}else{0.});
-    let lab=|q:[f64;3]|->[f64;3]{std::array::from_fn(|a|(0..3).map(|i|q[i]*axes[i][a]).sum())};
-    // The position: along the trap's principal axes in the trap's region; along the free lab axes of
-    // a validation, that trap with the frozen axes' frequencies zero (none there).
-    let held=Trap{axes,frequencies,lab:trap.lab};
-    let mut q=thermal_position(model,cluster,state,&held,initial.depths[pick],kt,&mut rng,&mut |rng|std::array::from_fn(|_|latin.next(rng)));
+    let kt=KT_PER_UK*initial.temperature_uk;
     let quantum:[f64;3]=std::array::from_fn(|i|{let f=frequencies[i];if f>0.{let half=f/(2.*kt);(half/half.tanh()).sqrt()}else{1.}});
-    for i in 0..3{q[i]*=quantum[i];}
-    let p:[f64;3]=std::array::from_fn(|i|{let z=normal_quantile(latin.next(&mut rng));if sigma[i]>0.{(kt/hm).sqrt()*quantum[i]*z}else{0.}});
+    let scaled=|v:[f64;3]|->[f64;3]{std::array::from_fn(|a|(0..3).map(|i|quantum[i]*(0..3).map(|b|v[b]*axes[i][b]).sum::<f64>()*axes[i][a]).sum())};
     let mut psi=[Complex::ZERO;model::MOST_MIXED];psi[state]=Complex::ONE;
+    let(r,kappa)=match &initial.ensembles[pick]{
+        // The member's Latin deviates are taken whatever its state, so that its group's stay in step.
+        None=>{for _ in 0..Ensemble::deviates(settings.free){latin.next(&mut rng);}([0.;3],[0.;3])}
+        Some(e)=>{
+            let mut draw=e.draw(model,settings.free,&mut rng,&mut |rng|latin.next(rng));
+            loop{
+                let(r,kappa)=(scaled(draw.0),scaled(draw.1));
+                let kinetic=0.5*model.hbar_over_mass*kappa.iter().map(|k|k*k).sum::<f64>();
+                if kinetic+model.trap_potential(cluster,&model.point(r,kappa),&psi,0.)<0.{break(r,kappa);}
+                draw=e.draw(model,settings.free,&mut rng,&mut |rng|rng.interior());
+            }
+        }
+    };
     let threshold=engine::jump_stream(seed,index,0).open_uniform();
-    Trajectory{cluster,psi,r:lab(q),kappa:lab(p),time:0.,threshold,alive:true,jumps:0,doppler:0.,beats:0.,seed,index}
+    Trajectory{cluster,psi,r,kappa,time:0.,threshold,alive:true,jumps:0,doppler:0.,beats:0.,seed,index}
 }
 
 /// The outputs of a run: one group per `group` trajectories, sums at every output time, the held
