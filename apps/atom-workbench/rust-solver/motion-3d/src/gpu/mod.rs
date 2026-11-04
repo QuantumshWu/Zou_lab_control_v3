@@ -147,7 +147,7 @@ impl Gpu{
     /// The kernel's registers and spilled bytes per thread, and its blocks per multiprocessor.
     pub fn resources(&self)->Result<(i32,i32,i32),String>{let(r,l)=self.motion.resources()?;Ok((r,l,self.blocks_per_multiprocessor))}
     /// The widest batch of `groups` groups of whole tasks the GPU runs at once: as many tasks per
-    /// group as its resident blocks hold (one at least).
+    /// group as its resident blocks hold (one at least). More wait for a block to leave.
     pub fn width(&self,groups:u64)->u64{groups*TASK*((self.info.multiprocessors*self.blocks_per_multiprocessor) as u64/groups).max(1)}
     /// The motion kernel's time over every launch so far (s).
     pub fn kernel_seconds(&self)->f64{self.kernel_us.load(Ordering::Relaxed) as f64*1e-6}
