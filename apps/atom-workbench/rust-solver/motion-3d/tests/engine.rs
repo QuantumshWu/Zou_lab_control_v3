@@ -12,7 +12,7 @@ use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Means,Scales,KT_PER_UK};
 use atom_motion_3d::{initial_trajectory,sample_states,simulate,Initial,Stratum,Variates};
-use atom_motion_3d::solve::{jumps,solve,Device,STEP_SHARE,TEMPERATURE_TARGET};
+use atom_motion_3d::solve::{jumps,solve,Device,STEP_SHARE,STEP_VARIANCE,TEMPERATURE_TARGET};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
 #[path="../examples/scene/mod.rs"] mod scene;
@@ -727,7 +727,7 @@ fn the_jumps_heating_on_a_retro_reflected_tweezer_exceeds_its_share_at_the_line_
     let settings=|steps:usize|{let mut s=Settings::new(interval/steps as f64,&initial.traps[reference],f64::EPSILON,true);s.doppler=BUDGET;s.region=initial.depths[reference];s};
     let steps=93;let harmonic=Harmonic::new(&model,&settings(steps),&initial,steps,outputs);
     let(states,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,32,steps,outputs,&harmonic);
-    let share=STEP_SHARE*TEMPERATURE_TARGET;
+    let share=STEP_VARIANCE*TEMPERATURE_TARGET;
     let(line,quarter)=(jumps(&Engine::new(&model,settings(steps)),&states)/share,jumps(&Engine::new(&model,settings(4*steps)),&states)/share);
     println!("the jumps' criterion over T's share: {line:.2} at 0.054 us, {quarter:.2} at 0.0134 us ({} states)",states.len());
     assert!(line>1.&&quarter<1.,"{line:.3} at the line's step, {quarter:.3} at a quarter");

@@ -1,8 +1,8 @@
 //! The approximation ledger of a 3D solve: every a-priori approximation -- one the statistics
 //! cannot see, as they compare the method with itself -- with its estimated error, booked as measured
 //! against the solve's population target (solve.rs, # Shares), the ledger's budget: the estimates are
-//! summed into each output's total with the step's bias and the statistics, and an output whose total
-//! exceeds a target is flagged.
+//! summed, and combined with the step's bias and the statistics in quadrature into each output's total
+//! (solve.rs, # Shares); an output whose total exceeds a target is flagged.
 //!
 //! # The fold rule's threshold
 //! `BUDGET`, the population core's a-priori share of the population target, is still the per-item

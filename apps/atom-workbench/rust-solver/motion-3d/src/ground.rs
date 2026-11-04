@@ -267,9 +267,9 @@ use std::f64::consts::TAU;
 /// estimate of its fold.
 pub const SATURATION:f64=2.;
 /// The numerical share s²ε an unmixed block may change its responses by, relative to themselves (`Ground::unmixed_blocks`):
-/// the numerical tolerances' (solve.rs, # Shares; s = `STEP_SHARE`, ε = `POPULATION_TARGET`), the one switch between a
+/// the numerical tolerances' (solve.rs, # Shares; `NUMERICAL_SHARE` of ε = `POPULATION_TARGET`), the one switch between a
 /// block's eigenstates and its states on their own.
-pub const MIXING_SHARE:f64=crate::solve::STEP_SHARE*crate::solve::STEP_SHARE*crate::solve::POPULATION_TARGET;
+pub const MIXING_SHARE:f64=crate::solve::NUMERICAL_SHARE*crate::solve::POPULATION_TARGET;
 
 /// The co-rotating component of the beams of one frequency (`counter` false: V e^{−iνt},
 /// ν = δ = 2π(ν_beam − ν_frame)) or their counter-rotating one (R e^{−iνt}, ν = −2π(ν_beam + ν_frame)),
