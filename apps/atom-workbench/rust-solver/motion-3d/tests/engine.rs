@@ -1107,12 +1107,14 @@ fn optical_pumping_holds_a_force_of_the_rate_s_order(){
     }
 }
 /// The generator's first order in the kinetic shifts (model.rs # The photons and the Doppler term) is the exact responses' (`Ground::response`): on the tweezer PGC's clusters, every drive folded
-/// and at its first explicit rung, at random points, momenta and times, the part of H_eff odd in κ against the dense generator's at the exact responses, to the third order and the tables' interpolation;
-/// and the decay is the jumps' Σ L†L to first order: i(H − H†) − Σ L†L odd in κ is nothing.
+/// and at its first explicit rung, at random points, momenta and times, the part of H_eff odd in κ against the dense generator's at the exact responses, to the third order and the tables' interpolation,
+/// and the decay is the jumps' Σ L†L to first order -- i(H − H†) − Σ L†L odd in κ is nothing -- where the transfer keeps all it leaves (at a T that makes every entry count, `Model::transfer_tables`).
+/// At the request's T what it leaves stays within its share of T: either's error at the thermal velocity, as the friction it makes against the recoil heating (F·v/(R ħk²/m), R the cluster's largest rate there).
 #[test]
 fn the_generator_s_first_order_is_the_exact_response_s(){
-    for allowance in [f64::INFINITY,BUDGET]{
-    let r=request(&|_|true);let model=Model::with(&r,allowance).unwrap();let g=&model.ground;
+    for allowance in [f64::INFINITY,BUDGET]{for hot in [true,false]{
+    let mut r=request(&|_|true);r.times_us=vec![0.,1000.];if hot{r.temperature_uk=1e9;}let model=Model::with(&r,allowance).unwrap();let g=&model.ground;
+    let(hm,wave)=(model.hbar_over_mass,model.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max));let thermal=KT_PER_UK*r.temperature_uk*hm;let share=NUMERICAL_SHARE*TEMPERATURE_TARGET;
     for(k,at,kappa,t,psi)in samples(&model,3){
         let n=model.dimension(k);let n0=model.ground_dimension(k);let kappa=kappa.map(|x|x*0.1);let opposite=kappa.map(|x|-x);
         // The generator with the scalar it leaves out, at κ.
@@ -1124,14 +1126,22 @@ fn the_generator_s_first_order_is_the_exact_response_s(){
         let odd:Vec<Complex>=h1.iter().zip(&h2).map(|(a,b)|(*a-*b)*0.5).collect();let exact:Vec<Complex>=d1.iter().zip(&d2).map(|(a,b)|(*a-*b)*0.5).collect();
         let size=exact.iter().map(|z|z.abs()).fold(0.,f64::max);
         if size==0.{continue;}
-        for a in 0..n0{for b in 0..n0{assert!((odd[a*n+b]-exact[a*n+b]).abs()<=2e-2*size+1e-12,"cluster {k} at {at:?}, ({a}, {b}): {:?} against {:?} of {size}",odd[a*n+b],exact[a*n+b]);}}
         // The jumps at ±κ: the first order of the decay against the photons' on ψ.
         let hazard=|h:&[Complex]|-2.*expectation(&h[..n*n],&psi,n).im;
-        let photons=|q:[f64;3]|->f64{let p=model.point(at,q);let u=model.photons(k,&p,&psi,t,None);u.amplitude.iter().zip(&g.clusters[k].classes).map(|(u,c)|{let nt=model.ground_dimension(c.target);u.iter().map(|v|v[..nt].iter().map(|z|z.norm_sqr()).sum::<f64>()).sum::<f64>()}).sum()};
+        let rate=|q:[f64;3],state:&[Complex]|->f64{let p=model.point(at,q);let u=model.photons(k,&p,state,t,None);u.amplitude.iter().zip(&g.clusters[k].classes).map(|(u,c)|{let nt=model.ground_dimension(c.target);u.iter().map(|v|v[..nt].iter().map(|z|z.norm_sqr()).sum::<f64>()).sum::<f64>()}).sum()};
+        let photons=|q:[f64;3]|rate(q,&psi);
         let(odd_hazard,odd_photons)=((hazard(&h1)-hazard(&h2))/2.,(photons(kappa)-photons(opposite))/2.);
-        assert!((odd_hazard-odd_photons).abs()<=1e-2*odd_photons.abs().max(1e-3*photons(kappa)),"cluster {k}: the decay's first order {odd_hazard:e} against the photons' {odd_photons:e}");
+        let entries=(0..n0*n0).map(|i|{let j=(i/n0)*n+i%n0;(odd[j]-exact[j]).abs()}).fold(0.,f64::max);
+        if hot{
+            assert!(entries<=2e-2*size+1e-12,"cluster {k} at {at:?}: {entries:e} of {size:e}");
+            assert!((odd_hazard-odd_photons).abs()<=1e-2*odd_photons.abs().max(1e-3*photons(kappa)),"cluster {k}: the decay's first order {odd_hazard:e} against the photons' {odd_photons:e}");
+        }else{
+            let largest=(0..n0).map(|b|{let mut e=[Complex::ZERO;MOST_MIXED];e[b]=Complex::ONE;rate(kappa,&e)}).fold(0.,f64::max);
+            let speed=hm*kappa.iter().map(|x|x*x).sum::<f64>().sqrt();let on_t=|error:f64|error*thermal/speed/(largest*hm*wave);
+            assert!(on_t(entries)<=share&&on_t((odd_hazard-odd_photons).abs())<=share,"cluster {k} at {at:?}: on T {:e} and {:e} of its share {share:e}",on_t(entries),on_t((odd_hazard-odd_photons).abs()));
+        }
     }
-    }
+    }}
 }
 /// The mean force on a multi-level atom's state is the adiabatic expansion's to first order in v (model.rs # The photons and the Doppler term): −2 Re⟨c_e|∇V|ψ⟩, c_e = −Σ_l a_l (R_l − w_l R2_l) ψ, on the
 /// fixture's F = 2 → D2 cooling light and a third beam across it (rank 3), the tweezer weak so that no intensity moves, at random points, velocities and states of its cluster:

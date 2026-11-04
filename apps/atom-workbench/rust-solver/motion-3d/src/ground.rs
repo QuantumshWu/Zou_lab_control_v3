@@ -260,7 +260,7 @@
 //! - the couplings' fold: Σ m² of the folded pairs of channels and static couplings;
 //! - the drives' fold: the largest folded total saturation S_b of a ground state;
 //! - the zeroth-order elimination: η², the folded excited population along the trajectories (lib.rs);
-//! - first order in the Doppler shift: (kv/σ_min)² (engine.rs);
+//! - first order in the Doppler shift: (kv/σ_min)² (engine.rs), what its transfer leaves on T (model.rs `Model::first_error`);
 //! - an emitted photon has its carrier's wave number: ≤ 1e-7 on the D2 line.
 use crate::ledger::BUDGET;
 use crate::linear::{hermitian_eigen,hermitian_eigenvalues,Dense,Lu};

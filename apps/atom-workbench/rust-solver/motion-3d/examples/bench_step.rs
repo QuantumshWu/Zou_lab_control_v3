@@ -30,7 +30,7 @@ fn main(){
     for _ in 0..steps{let mut psi=t.psi;propagate(&l.hamiltonian,n,0.5*dt,&mut psi,truncation);sink+=psi[0].re;}
     let prop=clock.elapsed().as_secs_f64()/steps as f64;
     let clock=Instant::now();
-    for _ in 0..steps{let f=model.force(t.cluster,&l,&t.psi);sink+=f[0];}
+    for _ in 0..steps{let f=model.force(t.cluster,&l,&p,&t.psi);sink+=f[0];}
     let force=clock.elapsed().as_secs_f64()/steps as f64;
     let clock=Instant::now();
     for _ in 0..steps/10{let ph=model.photons(t.cluster,&p,&t.psi,0.,None);sink+=ph.amplitude[0][0][0].re;}

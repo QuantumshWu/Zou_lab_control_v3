@@ -146,8 +146,8 @@
 //! GMW references in the validated regime (solve.rs).
 //!
 //! # First order in the Doppler shift
-//! The folded responses take the kinetic shift of absorption to first order, R − w R2, in the generator as in the jumps'
-//! photons (model.rs, # The photons and the Doppler term: the mean force on a state then the adiabatic expansion's to that
+//! The folded responses take the kinetic shift of absorption to first order, R − w R2, in the generator -- through the second order's decay tables at a transfer of
+//! their own, what that leaves bounded on T -- as in the jumps' photons (model.rs, # The photons and the Doppler term: the mean force on a state then the adiabatic expansion's to that
 //! order), good to (kv/σ)², the largest (w_l/σ_c)² over the near beams, σ_c the nearest excited
 //! pole of beam l's carrier (model.rs `Model::doppler_ratio`). A step whose (kv/σ)² exceeds the
 //! solve's allowance (`Settings::doppler`) takes the exact response at its jumps (model.rs `Exact`), its hazard still the
@@ -897,10 +897,10 @@ impl<'a> Engine<'a>{
     }
 
     /// One step's flow, kick and internal evolution of length dt without jumps: the norms of ψ at
-    /// the start, the middle and the end, the point of the middle, the kick's momentum (the light's
+    /// the start, the middle and the end, the place and momentum of the middle, the kick's momentum (the light's
     /// and the trap's anharmonic part) and ψ at the middle. A cluster of ground states (`exact` takes
     /// the others).
-    fn advance(&self,t:&mut Trajectory,dt:f64)->(f64,f64,f64,crate::model::Point,[f64;3],[Complex;MOST_MIXED]){
+    fn advance(&self,t:&mut Trajectory,dt:f64)->(f64,f64,f64,([f64;3],[f64;3]),[f64;3],[Complex;MOST_MIXED]){
         let(m,s)=(self.model,&self.settings);
         if let Some((h,half))=&self.held{
             // Held: the internal state alone, by the generator there -- a whole step by the half
@@ -909,7 +909,7 @@ impl<'a> Engine<'a>{
             let half_step=|psi:&mut [Complex;MOST_MIXED]|if dt==s.dt{let u=&half[t.cluster];let v=*psi;for i in 0..n{let mut z=Complex::ZERO;for j in 0..n{z+=u[i*n+j]*v[j];}psi[i]=z;}}
                 else{propagate(&local.hamiltonian,n,0.5*dt,psi,s.truncation);};
             half_step(&mut psi);let nh=norm2(&psi,n);let middle=psi;half_step(&mut psi);let n1=norm2(&psi,n);
-            t.psi=psi;t.time+=dt;return(n0,nh,n1,h.point,[0.;3],middle);
+            t.psi=psi;t.time+=dt;return(n0,nh,n1,(h.point.r,h.point.kappa),[0.;3],middle);
         }
         let reference=self.reference(t.r);let(c,w)=reference;
         self.flow(t,0.5*dt,reference);
@@ -917,13 +917,14 @@ impl<'a> Engine<'a>{
         let n=m.dimension(t.cluster);let local=m.local(t.cluster,&point,t.time+0.5*dt);
         let n0=norm2(&t.psi,n);
         let mut psi=t.psi;propagate(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let nh=norm2(&psi,n);let middle=psi;
-        let force=m.force(t.cluster,&local,&psi);let harmonic=self.harmonic(std::array::from_fn(|a|t.r[a]-c[a]));let mut kick=[0.;3];
+        let force=m.force(t.cluster,&local,&point,&psi);let harmonic=self.harmonic(std::array::from_fn(|a|t.r[a]-c[a]));let mut kick=[0.;3];
         for a in 0..3{if s.free[a]{kick[a]=dt*(force[a]-w*harmonic[a]);t.kappa[a]+=kick[a];}}
         propagate(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let n1=norm2(&psi,n);
         t.psi=psi;
+        let place=(point.r,point.kappa);
         self.flow(t,0.5*dt,reference);
         t.time+=dt;
-        (n0,nh,n1,point,kick,middle)
+        (n0,nh,n1,place,kick,middle)
     }
 
     /// The exact step of τ (module documentation): the flow for τ/2; at the held point every
@@ -1023,25 +1024,26 @@ impl<'a> Engine<'a>{
         // The state the loss is judged at: the step's middle where it went without a jump -- the point
         // the flow's first half reached, κ there with half the kick, ψ after the first half step, the
         // middle's time --, else its end.
-        let(point,middle)=if self.takes_exact(t.cluster){self.exact(t,s.dt,exact,true);(m.point(t.r,t.kappa),None)}else{
+        let(place,middle)=if self.takes_exact(t.cluster){self.exact(t,s.dt,exact,true);((t.r,t.kappa),None)}else{
             let mut left=s.dt;
             loop{
                 let start=t.clone();
-                let(n0,nh,n1,point,kick,half)=self.advance(t,left);
-                if n1>t.threshold{let kappa:[f64;3]=std::array::from_fn(|a|point.kappa[a]+0.5*kick[a]);break(point,Some((kappa,half,t.time-0.5*left)));}
+                let(n0,nh,n1,place,kick,half)=self.advance(t,left);
+                if n1>t.threshold{let kappa:[f64;3]=std::array::from_fn(|a|place.1[a]+0.5*kick[a]);break(place,Some((kappa,half,t.time-0.5*left)));}
                 // The crossing on ln‖ψ‖², linear on the half where it lies; the step redone to it.
                 let(ta,tb,la,lb)=if nh<=t.threshold{(0.,0.5*left,n0.ln(),nh.ln())}else{(0.5*left,left,nh.ln(),n1.ln())};
                 let at=if lb<la{(ta+(t.threshold.ln()-la)/(lb-la)*(tb-ta)).clamp(ta,tb)}else{tb};
                 *t=start;if at>0.{self.advance(t,at);}
                 self.jump(t,t.r,t.time,exact);
                 left-=at;
-                if !(left>0.){break(m.point(t.r,t.kappa),None);}
-                if self.takes_exact(t.cluster){self.exact(t,left,exact,true);break(m.point(t.r,t.kappa),None);}
+                if !(left>0.){break((t.r,t.kappa),None);}
+                if self.takes_exact(t.cluster){self.exact(t,left,exact,true);break((t.r,t.kappa),None);}
             }
         };
         // The loss: an atom unbound -- its mechanical energy above the trap's far level -- outside the trap's
         // region (`Settings::region`), of that one state.
-        if s.loss&&self.harmonic_potential(point.r)>s.region{
+        if s.loss&&self.harmonic_potential(place.0)>s.region{
+            let point=m.point(place.0,place.1);
             let(kappa,psi,time)=match &middle{Some((kappa,psi,time))=>(*kappa,psi,*time),None=>(t.kappa,&t.psi,t.time)};
             let kinetic=0.5*m.hbar_over_mass*kappa.iter().map(|k|k*k).sum::<f64>();
             if kinetic+m.trap_bound(t.cluster,&point,psi)>0.&&kinetic+m.trap_potential(t.cluster,&point,psi,time)>0.{t.alive=false;}
