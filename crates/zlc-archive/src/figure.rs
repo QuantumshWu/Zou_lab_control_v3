@@ -15,6 +15,7 @@ use crate::manifest::{exact_keys, manifest_array_keys, materialize, members_of, 
 use crate::npy::{bytes_scalar, read_array, NpyArray, NpySource, MAGIC};
 use crate::tree::stripped;
 use crate::zip::{ZipReader, ZipWriter};
+use zlc_core::acquisition;
 
 pub const FIGURE_SCHEMA: &str = "zlc.figure";
 const INFO_KEY: &str = "info";
@@ -145,8 +146,54 @@ fn unpack_apparatus(info: &mut Json) -> Result<()> {
     restore_apparatus(&table, &mut fields.iter_mut().find(|(name, _)| name == "sections").unwrap().1, true)
 }
 
+/// Each lineage node's event record.
+fn event_records(lineage: &mut Json, mut visit: impl FnMut(&mut Json) -> Result<()>) -> Result<()> {
+    let Json::Object(fields) = lineage else { return Ok(()) };
+    let Some((_, Json::Array(nodes))) = fields.iter_mut().find(|(name, _)| name == "nodes") else { return Ok(()) };
+    for node in nodes {
+        let Json::Object(fields) = node else { continue };
+        if let Some((_, record)) = fields.iter_mut().find(|(name, _)| name == "event_record") { visit(record)?; }
+    }
+    Ok(())
+}
+
+/// An event history kept in the older list form (a figure opened and saved again, or a plugin's)
+/// in columns, when they hold exactly what it says.
+fn compact_events(lineage: &mut Json) -> Result<()> {
+    event_records(lineage, |record| {
+        for (name, encode) in [("acquisition", acquisition::encode_acquisition as fn(&serde_json::Value) -> Option<serde_json::Value>), ("window", acquisition::encode_window)] {
+            let Json::Object(fields) = &mut *record else { break };
+            let Some((_, stored)) = fields.iter_mut().find(|(key, _)| key == name) else { continue };
+            if stored.get("format").is_some() { continue; }
+            let plain = stored.to_serde();
+            if dumps(&Json::from_serde(&plain), Style::Figure).ok() != dumps(stored, Style::Figure).ok() { continue; }
+            if let Some(encoded) = encode(&plain) { *stored = Json::from_serde(&encoded); }
+        }
+        Ok(())
+    })
+}
+
+/// The event histories as readers of the metadata take them, however they are stored.
+fn expand_events(lineage: &mut Json) -> Result<()> {
+    event_records(lineage, |record| {
+        let Json::Object(fields) = record else { return Ok(()) };
+        for (name, stored) in fields.iter_mut() {
+            if stored.get("format").is_none() { continue; }
+            let plain = stored.to_serde();
+            let expanded = match name.as_str() {
+                "acquisition" => acquisition::expand_acquisition(&plain),
+                "window" => acquisition::expand_window(&plain),
+                _ => continue,
+            }.map_err(ArchiveError::value)?;
+            *stored = Json::from_serde(&expanded);
+        }
+        Ok(())
+    })
+}
+
 /// The lineage member's text: its repeated apparatus shared within it.
-fn lineage_document(lineage: Json) -> Result<String> {
+fn lineage_document(mut lineage: Json) -> Result<String> {
+    compact_events(&mut lineage)?;
     let mut sections = Json::object([(LINEAGE_KEY, lineage)]);
     let apparatus = pack_apparatus(&mut sections)?;
     let mut document = Json::object([("schema", Json::str(LINEAGE_SCHEMA)), (LINEAGE_KEY, sections.remove(LINEAGE_KEY).unwrap())]);
@@ -401,6 +448,8 @@ impl NpySource for FileReader {
 pub fn read_archive(path: &Path) -> Result<FigureArchive> {
     let mut archive = read_figure(path, true)?;
     if let Some(lineage) = std::mem::take(&mut archive.lineage).read()? {
+        let mut lineage = lineage;
+        expand_events(&mut lineage)?;
         let Json::Object(fields) = &mut archive.info else { unreachable!() };
         fields.iter_mut().find(|(name, _)| name == "sections").unwrap().1.insert(LINEAGE_KEY, lineage);
     }

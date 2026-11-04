@@ -5,6 +5,7 @@ use std::sync::{Arc, Condvar, Mutex, Weak, atomic::{AtomicBool, Ordering}, mpsc:
 use std::time::{Duration, Instant};
 use serde_json::Value;
 use uuid::Uuid;
+use crate::acquisition::Builder;
 use crate::dataset::DataBlock;
 use crate::OwnedBuffer;
 use crate::schema::{Axis, CodeBase, CodeMapping, Coordinate, Coordinates, DatasetSchema, Domain, DomainRole};
@@ -270,31 +271,33 @@ impl Read {
                 "revision":key.revision,"ordinal":key.ordinal},"run":metadata,"event":event.metadata,
                 "parents":event.parents.iter().map(|parent|record(&parent.key,&parent.run,&parent.event)).collect::<Vec<_>>()})
         }
-        fn acquisition(entries: impl IntoIterator<Item=(PublicationKey, Arc<RunRecord>, Arc<EventRecord>, [usize;2], [usize;2])>) -> Value {
-            fn add_event(key: &PublicationKey, run: &RunRecord, event: &EventRecord,
-                         runs: &mut Vec<Value>, run_indices: &mut HashMap<GenerationId,usize>,
-                         events: &mut Vec<Value>, event_indices: &mut HashMap<PublicationKey,usize>) -> usize {
-                if let Some(index) = event_indices.get(key) { return *index; }
-                let run_index = *run_indices.entry(key.generation).or_insert_with(|| {
-                    let index = runs.len();
-                    runs.push(serde_json::json!({"stream":run.owner.as_ref(), "generation":key.generation.as_uuid().to_string(), "record":run.metadata}));
-                    index
-                });
-                let parents: Vec<_> = event.parents.iter().map(|parent|
-                    add_event(&parent.key,&parent.run,&parent.event,runs,run_indices,events,event_indices)).collect();
-                let index = events.len();
-                events.push(serde_json::json!({"run":run_index, "signal":key.signal.as_ref(), "revision":key.revision,
-                    "ordinal":key.ordinal, "record":event.metadata, "parents":parents}));
-                event_indices.insert(key.clone(),index);
+        /// Each run and each event once, parents before their children.
+        #[derive(Default)]
+        struct Events { table: Builder, runs: HashMap<GenerationId,usize>, known: HashMap<PublicationKey,usize> }
+        impl Events {
+            fn add(&mut self, key: &PublicationKey, run: &RunRecord, event: &EventRecord) -> usize {
+                if let Some(index) = self.known.get(key) { return *index; }
+                let run_index = match self.runs.get(&key.generation) {
+                    Some(index) => *index,
+                    None => {
+                        let index = self.table.run(&run.owner,&key.generation.as_uuid().to_string(),&run.metadata);
+                        self.runs.insert(key.generation,index);
+                        index
+                    }
+                };
+                let parents: Vec<_> = event.parents.iter().map(|parent| self.add(&parent.key,&parent.run,&parent.event)).collect();
+                let index = self.table.event(run_index,&key.signal,key.revision,key.ordinal,&event.metadata,&parents);
+                self.known.insert(key.clone(),index);
                 index
             }
-            let (mut runs, mut events, mut ranges) = (Vec::new(),Vec::new(),Vec::new());
-            let (mut run_indices, mut event_indices) = (HashMap::new(),HashMap::new());
+        }
+        fn acquisition(entries: impl IntoIterator<Item=(PublicationKey, Arc<RunRecord>, Arc<EventRecord>, [usize;2], [usize;2])>) -> Value {
+            let mut events = Events::default();
             for (key,run,event,origin,extent) in entries {
-                let index = add_event(&key,&run,&event,&mut runs,&mut run_indices,&mut events,&mut event_indices);
-                ranges.push(serde_json::json!({"event":index, "origin":origin, "extent":extent}));
+                let index = events.add(&key,&run,&event);
+                events.table.range(index,origin,extent);
             }
-            serde_json::json!({"runs":runs,"events":events,"ranges":ranges})
+            events.table.finish()
         }
         match &self.kind {
             ReadKind::Event(event) => record(&event.key,&event.run,&event.event),
@@ -1630,7 +1633,7 @@ mod tests {
             }
         }
         let before = plane.read_views(&[(scan.clone(),"scan".into(),None)]).pop().unwrap().unwrap().provenance();
-        let acquired = &before["acquisition"];
+        let acquired = crate::acquisition::expand_acquisition(&before["acquisition"]).unwrap();
         assert_eq!(acquired["runs"].as_array().unwrap().len(),2);
         assert_eq!(acquired["events"].as_array().unwrap().len(),5,"the shared parent occurs once");
         for (point,range) in acquired["ranges"].as_array().unwrap().iter().enumerate() {

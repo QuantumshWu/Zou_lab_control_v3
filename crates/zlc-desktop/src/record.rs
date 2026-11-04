@@ -104,7 +104,7 @@ fn equality_key(value: &Value) -> String {
 
 /// Finite acquisitions retain each point's facts without adding nodes to the Flow graph.
 /// Linear in the captures: ranges are grouped by event and records found by their identity.
-fn acquisition_records(nodes: &[Node], acquisitions: &[(String, &Value)]) -> Vec<Node> {
+fn acquisition_records(nodes: &[Node], acquisitions: &[(String, &Value)]) -> Result<Vec<Node>, String> {
     // (signal, stream, generation, sequence) of a record, by `equality_key`.
     fn identity(signal: &str, event: &Value) -> (String, String, String, String) {
         (signal.to_owned(), equality_key(&event["stream"]), equality_key(&event["generation"]), equality_key(&event["sequence"]))
@@ -116,6 +116,7 @@ fn acquisition_records(nodes: &[Node], acquisitions: &[(String, &Value)]) -> Vec
         for signal in &record.signals { found.entry(identity(signal, &record.event)).or_insert(index); }
     }
     for (owner, acquisition) in acquisitions {
+        let acquisition = zlc_core::acquisition::expand_acquisition(acquisition)?;
         let mut ranges: HashMap<u64, Vec<Value>> = HashMap::new();
         for range in acquisition["ranges"].as_array().into_iter().flatten() {
             if let Some(event) = range["event"].as_u64() { ranges.entry(event).or_default().push(json!({"origin": range["origin"], "extent": range["extent"]})); }
@@ -143,7 +144,7 @@ fn acquisition_records(nodes: &[Node], acquisitions: &[(String, &Value)]) -> Vec
     }
     records.sort_by_cached_key(|record| (order.iter().position(|run| run.0 == record.event["stream"] && run.1 == record.event["generation"]).unwrap(), record.event["sequence"].as_u64().unwrap_or(0)));
     for record in &mut records { if let Some(map) = record.event_record.as_object_mut() { map.remove("acquisition"); } }
-    records
+    Ok(records)
 }
 
 /// The operator-facing Logic identity: its name when the run was built, else its id, else the stream's producer.
@@ -628,7 +629,7 @@ pub fn describe(info: &Value) -> Record {
     present(info, lineage_nodes(lineage).and_then(|(root, nodes, acquisitions)| {
         let flow = lineage_graph(root.as_deref(), &nodes, source)?;
         let played = played_pulses(&nodes, source);
-        let records = acquisition_records(&nodes, &acquisitions);
+        let records = acquisition_records(&nodes, &acquisitions)?;
         let devices = device_rows(lineage, &records, source, &played);
         Ok((logic_rows(&records, source), devices, flow, played.into_iter().map(|(pulse, ..)| pulse).collect()))
     }))
@@ -828,6 +829,31 @@ mod tests {
         assert_eq!(field(&epochs[0][1], "state")["epoch_ranges"], json!([[1, 1]]));
         assert_eq!(field(&epochs[1][1], "state")["epoch_ranges"], json!([[2, 2]]));
         assert_eq!(record.flow["nodes"].as_array().unwrap().iter().filter(|node| node["kind"] == "logic").count(), 2);
+    }
+
+    /// The record tabs read an acquisition in its columns as they read it event by event, whatever
+    /// its shots and records.
+    #[test]
+    fn stored_columns_describe_as_the_events_they_hold() {
+        let run = json!({"node": "scan", "named_devices": {"rf": "rf"}});
+        let reading = |shot: usize| json!({"records": {"scan": {"point": shot, "actual_devices": {"rf": {"values": {"frequency": 80.0 + (shot % 3) as f64}, "units": {"frequency": "MHz"}}}}}});
+        let mut events = Vec::new();
+        for shot in 0..12usize {
+            if shot == 7 { continue; }
+            let parents = if events.is_empty() { json!([]) } else { json!([events.len() - 1]) };
+            events.push(json!({"run": 0, "signal": "@logic/scan/scan", "revision": shot + 1, "ordinal": shot, "record": reading(shot), "parents": parents}));
+        }
+        let ranges: Vec<Value> = (0..events.len()).map(|event| json!({"event": event, "origin": [event / 4, event % 4], "extent": [1, 1]})).collect();
+        let list = json!({"runs": [{"stream": "scan", "generation": "scan-gen", "record": run}], "events": events, "ranges": ranges});
+        let columns = zlc_core::acquisition::encode_acquisition(&list).unwrap();
+        assert!(columns.get("format").is_some());
+        let info = |acquisition: &Value| json!({"members": {}, "sections": {"plot": {}, "source": {}, "lineage": {"root": "scan-node", "device_settings": [], "nodes": [
+            {"id": "scan-node", "parents": [], "signals": ["@logic/scan/scan"], "event": {"stream": "scan", "generation": "scan-gen", "sequence": 12}, "record": run,
+             "event_record": {"records": {"scan": {"point": 11}}, "acquisition": acquisition}}]}}});
+        let (from_list, from_columns) = (describe(&info(&list)), describe(&info(&columns)));
+        assert_eq!(from_list.tabs, from_columns.tabs);
+        assert_eq!(from_list.flow, from_columns.flow);
+        assert!(!from_columns.tabs.to_string().contains("cannot read"));
     }
 
     /// A scan's captures are found by identity and grouped by exact state in hashed sets: the result

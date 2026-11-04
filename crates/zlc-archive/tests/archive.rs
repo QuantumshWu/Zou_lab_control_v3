@@ -354,5 +354,8 @@ fn finite_acquisition_provenance_survives_figure_archive_without_extra_logic_nod
     std::fs::write(&path,write_figure_archive(Cursor::new(Vec::new()),"scan",&entries,&sections).unwrap().into_inner()).unwrap();
     let decoded = read_archive(&path).unwrap().info.to_serde();
     assert_eq!(decoded["sections"]["lineage"]["nodes"][0]["event_record"]["acquisition"],acquired);
+    let stored = lineage_document(&path);
+    let columns = &stored["lineage"]["nodes"][0]["event_record"]["acquisition"];
+    assert_eq!(columns["format"],"zlc.acquisition/2","the file holds it in columns, its reader gives it whole");
     std::fs::remove_file(path).unwrap();
 }

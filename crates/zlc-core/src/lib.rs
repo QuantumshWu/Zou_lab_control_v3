@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 pub mod schema;
 pub mod dataset;
+pub mod acquisition;
 pub mod runtime;
 pub mod store;
 pub mod control;
