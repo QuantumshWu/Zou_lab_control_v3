@@ -103,8 +103,9 @@
 //! less the time derivative of the momentum the excited amplitude holds (of mean zero) -- the folded model's mean force
 //! exact at that order whatever the beams. What is left out: the second order in w (the decay's A^D†D A^D, (kv/σ)² of
 //! the rate, booked, engine.rs); the amplitude's lag behind the denominators and the envelopes it moves through,
-//! i G (v·∇_env) R, of the Doppler term's order times ∇_env/k; a drive the dressing brings and two explicit states' shift through
-//! the folded drives, first order on what is small already.
+//! i G (v·∇_env) R, of the Doppler term's order times ∇_env/k (the tweezer's gradient across a shallow trap's near-resonant shell, the control
+//! cycle's: the odd rate +0.003 of 0.62/us at z = 0.4 um, the loss at 300 us +0.001 ± 0.002, T within 0.1 uK); a drive the dressing brings and two
+//! explicit states' shift through the folded drives, first order on what is small already.
 //!
 //! # The trap
 //! The trap beam's focus is the origin. Its trap is each state's potential with the near beams'
