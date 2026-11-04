@@ -316,7 +316,8 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
             (false,false)=>"同频而偏振不同：远失谐光移按各光束光强相加，干涉项（偏振光晶格）略去"};
         ledger.add(&format!("「{}」的干涉",names(&x.beams)),x.estimate(g),action.into());
     }
-    ledger.add("聚焦光的光强插值表",model.table_error,match model.table_limit{Some(n)=>format!("三次插值；网格细化到工作量上限（每维 {n} 个节点）为止"),None=>"三次插值".into()});
+    ledger.add("聚焦光的光强插值表",model.table_error,match(model.table_limit,model.table_stalled){
+        (Some(n),true)=>format!("三次插值；网格加密不再减小误差，止于每维 {n} 个节点"),(Some(n),false)=>format!("三次插值；网格细化到工作量上限（每维 {n} 个节点）为止"),(None,_)=>"三次插值".into()});
     ledger
 }
 
