@@ -52,9 +52,13 @@
 //! with its fold's charge as measured (`measured_charge`: the charge per output the run's ledger books, with
 //! the memory, its mean over the outputs). A candidate's cost is its step check's (below) on those states --
 //! the step it would take -- its counted work per interval there times the trajectories its rooms at that
-//! step's bias need, over the run: continuous in its estimates up to and past the edge of its room, where
-//! the run's own limit of trajectories bounds it. The least cost is taken, and the run goes on from those
-//! states (no pilot runs again); no timing enters, so a request gives the same choice on any machine.
+//! step's bias need, over the run: continuous in its estimates, diverging as a binding room closes -- a model
+//! whose a-priori total and bias leave a target no room meets it with no number of trajectories. Among the
+//! feasible candidates the least cost is taken, one keeping more of the model (its fourth order, a rung) only
+//! for a saving beyond the need's own relative error (`need_error`, as a finer step, `kept`); the ladder's
+//! rungs are costed only where neither the pilot's model nor its fourth order is feasible; with none feasible,
+//! the one of least error, which its ledger flags. The run goes on from those states (no pilot runs again); no
+//! timing enters, so a request gives the same choice on any machine.
 //!
 //! # Time step
 //! The trap's harmonic part is moved exactly (engine.rs); what the step must resolve is the light's
@@ -525,11 +529,11 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // by (`kept`).
     let need={let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:pilot_harmonic.mean[i],twin:None}).collect();
         need_error(&pilot_groups,&Scales{hbar_over_mass:pilot_candidate.model.hbar_over_mass,frequencies:trap.lab},&means,&pilot_candidate.model,&pilot_candidate.initial,trap.lab,binds)};
+    // A candidate's error relative to the targets: its smallest room over the binding ones, relative.
+    let headroom=|rooms:&[f64;2]|(0..2).filter(|&k|binds[k]).map(|k|rooms[k]/TARGETS[k]).fold(f64::INFINITY,f64::min);
     let need_at=|rooms:&[f64;2]|(0..2).filter(|&k|binds[k]&&stats[k]>0.).map(|k|if rooms[k]>0.{(stats[k]/rooms[k]).powi(2)}else{f64::INFINITY}).fold(0.,f64::max);
-    // The trajectories a model's rooms need: the pilot's times `need_at`, at most the run's own limit
-    // (`MOST_TRAJECTORIES`) -- what a run whose rooms close takes --, so that a candidate's cost moves
-    // continuously with its charge up to and past the edge of its room.
-    let trajectories=|rooms:&[f64;2]|(pilot as f64*need_at(rooms)).min(MOST_TRAJECTORIES as f64);
+    // The trajectories a model's rooms need: the pilot's times `need_at`, diverging as a binding room closes.
+    let trajectories=|rooms:&[f64;2]|pilot as f64*need_at(rooms);
     let pilot_waiting=pilot as f64*duration/(pilot_jumps.max(1) as f64);let pilot_horizon=pilot_waiting.min(duration);
     // The trap's slowest axis's period: the span of T's step error (`orbits`).
     let period=std::f64::consts::TAU/trap.frequencies.iter().copied().fold(f64::INFINITY,f64::min);
@@ -554,7 +558,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let checked=step_check(&c.model,states,&settings,steps,most,pilot_waiting,pilot_horizon,pilot as usize,&pilot_groups,depth,period,binds,&work,apriori,need);
         let(r,tolerances)=(checked.chosen.ratios(),tolerances(binds[1]));let rooms:[f64;2]=std::array::from_fn(|k|TARGETS[k]-apriori[k]-r[k]*tolerances[k]);
         let at=work(checked.chosen.steps);
-        (at*trajectories(&rooms)*(outputs-1) as f64,checked_work(&checked,states.len(),pilot as usize,pilot_horizon,interval,period,&work),at,rooms,checked)
+        let open=(0..2).all(|k|!binds[k]||rooms[k]>0.);
+        (if open{at*trajectories(&rooms)*(outputs-1) as f64}else{f64::INFINITY},checked_work(&checked,states.len(),pilot as usize,pilot_horizon,interval,period,&work),at,rooms,checked)
     };
     // The candidates (module documentation, # The fold's choice), each costed where the pilot kept states
     // (atoms all lost before the first output measure none): the pilot's model and its fourth order on the
@@ -574,10 +579,10 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let promise=pilot_cost.as_ref().map_or(true,|p|{let(rooms,r,tolerances)=(p.3,p.4.chosen.ratios(),tolerances(binds[1]));let s=pilot_candidate.charge[1];
         p.2*trajectories(&[rooms[0]+r[0]*tolerances[0]+pilot_candidate.charge[0]-fold_charges(true,s)[0],rooms[1]])*((outputs-1) as f64)+p.1<p.0});
     let fourth_cost=if fourth&&measured&&promise{Candidate::new(request,pilot_candidate.allowance,true).ok().map(|mut c|{c.charged(&charge_of(&pilot_candidate.model,&c.model));
-        let states:Vec<Trajectory>=pilot_states.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect();let(cost,_,_,_,checked)=evaluate(&c,&states);(cost,c,states,checked)})}else{None};
+        let states:Vec<Trajectory>=pilot_states.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect();let(cost,_,_,rooms,checked)=evaluate(&c,&states);(cost,c,states,checked,rooms)})}else{None};
     let mut least=pilot_cost.as_ref().map_or(f64::INFINITY,|p|p.0).min(fourth_cost.as_ref().map_or(f64::INFINITY,|f|f.0));
-    let(mut rung,mut seen,mut shape)=(None,0_f64,vec![]);
-    if measured&&pilot_candidate.fits_unfolded(binds){
+    let(mut rung,mut seen,mut shape,mut fallback)=(None,0_f64,vec![],None);
+    if measured&&!least.is_finite()&&pilot_candidate.fits_unfolded(binds){
         while let Some(mut c)=next_candidate(request,&mut ladder,false,&mut failed){
             // A rung whose closure folds the same drives as the last one's is the same model.
             let folds:Vec<bool>=c.model.ground.excited_items.iter().map(|x|x.folded).collect();if folds==shape{continue;}shape=folds;
@@ -589,19 +594,29 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             // Its check's least: one doubling at the first step (`checked_step`).
             let check=checked_step(states.len(),bound_probes(&c.model,&states).len(),steps,interval,period)*interval_work(&c.model,&parts,&at,interval,pilot_waiting)/steps as f64;
             if floor+check>=least{break;}
-            let(cost,_,work,_,checked)=evaluate(&c,&states);seen=seen.max(work);
-            if cost<least{least=cost;rung=Some((c,states,checked));}
+            let(cost,_,work,rooms,checked)=evaluate(&c,&states);seen=seen.max(work);
+            if cost.is_finite(){if !least.is_finite()||cost*(1.+need)<least{least=cost;rung=Some((c,states,checked));}}
+            else if fallback.as_ref().map_or(true,|f:&(f64,Candidate,Vec<Trajectory>,Steps)|headroom(&rooms)>f.0){fallback=Some((headroom(&rooms),c,states,checked));}
         }
     }
     // The choice: the least predicted cost, ties keeping the earlier; with none costed, the pilot's model. Its
     // run takes the pilot's states carried into its clusters, the pilot's statistics and jumps the prediction's
     // (the models' rates differ by the fold's S, the physical atoms' jumps alike), and the step its check took
     // on them: no pilot runs again.
-    let(chosen,states,known)=match(rung,fourth_cost,pilot_cost){
-        (Some((c,states,checked)),_,_)=>(c,states,Some(checked)),
-        (None,Some((cost,c,states,checked)),p)if p.as_ref().map_or(true,|p|cost<p.0)=>(c,states,Some(checked)),
-        (None,_,p)=>(pilot_candidate,pilot_states,p.map(|p|p.4)),
-    };
+    let pilot_ok=pilot_cost.as_ref().map_or(true,|p|p.0.is_finite());
+    let fourth_wins=fourth_cost.as_ref().is_some_and(|f|f.0.is_finite()&&pilot_cost.as_ref().map_or(true,|p|!p.0.is_finite()||f.0*(1.+need)<p.0));
+    let(chosen,states,known)=if let Some((c,states,checked))=rung{(c,states,Some(checked))}
+        else if fourth_wins{let(_,c,states,checked,_)=fourth_cost.unwrap();(c,states,Some(checked))}
+        else if pilot_ok{(pilot_candidate,pilot_states,pilot_cost.map(|p|p.4))}
+        else{
+            // None feasible: the least error, the largest smallest relative room, among the pilot's model, its fourth order and
+            // the rungs costed (its ledger flags the outputs beyond the targets).
+            let p=pilot_cost.as_ref().map_or(f64::NEG_INFINITY,|p|headroom(&p.3));let f=fourth_cost.as_ref().map_or(f64::NEG_INFINITY,|f|headroom(&f.4));
+            let r=fallback.as_ref().map_or(f64::NEG_INFINITY,|x|x.0);
+            if r>p.max(f){let(_,c,states,checked)=fallback.unwrap();(c,states,Some(checked))}
+            else if f>p{let(_,c,states,checked,_)=fourth_cost.unwrap();(c,states,Some(checked))}
+            else{(pilot_candidate,pilot_states,pilot_cost.map(|p|p.4))}
+        };
     let(jumps,pilot_groups)=(pilot_jumps,pilot_groups);
     let Candidate{model,initial,base,charge,..}=chosen;
     // The generator against its jumps at the pilot's states (`gain`): booked where its decay falls below
@@ -792,9 +807,13 @@ impl Candidate{
     fn charged(&mut self,charge:&[f64;2]){self.charge=*charge;}
     /// Its ledger's estimates but the fold's.
     fn others(&self)->f64{unfolded(&self.base,&self.model)}
-    /// Its estimates but the fold's leave the statistics room on the binding targets: a fold could still make
-    /// it fit.
-    fn fits_unfolded(&self,binds:[bool;2])->bool{TARGETS.iter().zip(binds).all(|(&target,b)|!b||target-self.others()-A_PRIORI_SHARE*target>0.)}
+    /// The estimates no candidate of the fold changes -- the far components' fold and the beams' interference, the
+    /// same in every model of the request -- leave the statistics room on the binding targets: another rung could fit.
+    /// (The others move with the fold: a folded drive's pole leaves the tables no convergence -- RETRO's every drive
+    /// folded, its table stalled at 33 nodes with 1.27 booked --, and a rung keeps it.)
+    fn fits_unfolded(&self,binds:[bool;2])->bool{let g=&self.model.ground;
+        let fixed=g.fold_estimates().0+g.interference.iter().map(|x|x.estimate(g)).sum::<f64>();
+        TARGETS.iter().zip(binds).all(|(&target,b)|!b||target-fixed-A_PRIORI_SHARE*target>0.)}
     /// Its reference state, the largest initial population: its trap (ω per axis) and depth.
     fn reference(&self)->(Trap,f64){let i=&self.initial;let k=(0..i.states.len()).max_by(|&a,&b|i.states[a].2.total_cmp(&i.states[b].2)).unwrap();(i.traps[k],i.depths[k])}
 }
