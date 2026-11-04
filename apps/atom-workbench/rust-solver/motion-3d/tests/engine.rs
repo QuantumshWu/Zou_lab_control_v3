@@ -5,14 +5,14 @@
 //! off (its T over a trap period as well, with smaller errors), a group's Latin hypercube of initial
 //! momenta, and a short solve whose t = 0 is the request's initial state.
 use atom_motion_3d::control::{Harmonic,Twin};
-use atom_motion_3d::engine::{dipole_direction,Engine,Settings};
+use atom_motion_3d::engine::{dipole_direction,Engine,Settings,Trajectory,QUADRATURE};
 use atom_motion_3d::ground::Ground;
 use atom_motion_3d::ledger::BUDGET;
 use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Means,Scales,KT_PER_UK};
 use atom_motion_3d::{initial_trajectory,sample_states,simulate,Initial,Stratum,Variates};
-use atom_motion_3d::solve::{jumps,solve,Device,STEP_SHARE,TEMPERATURE_TARGET};
+use atom_motion_3d::solve::{grid_phase,jumps,solve,Device,POPULATION_TARGET,STEP_SHARE,TEMPERATURE_TARGET};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
 #[path="../examples/scene/mod.rs"] mod scene;
@@ -646,6 +646,30 @@ fn an_explicit_rung_s_frames_are_exact(){
         let(low,_,scale)=model.decay_balance(k,&p,t);let round=64.*f64::EPSILON*model.dimension(k) as f64*scale;
         assert!(low>=-round,"cluster {k} at t = {t}: i(H − H†) − Σ L†L reaches {low:.3e} rad/us (round-off {round:.1e})");
     }}
+}
+
+/// The phase a solve measures for a beating grid (solve.rs `grid_phase`) lies far above the quadrature's bound, and a step
+/// at it meets both shares against a grid far finer than the bound's, by another path than the doubling that chose it: the
+/// whole step from thermal states a few microseconds into the PGC with a resonant probe, its 12-state cluster's beats at 36.4 and 72.8 MHz.
+#[test]
+fn a_beating_grid_s_measured_phase_meets_its_shares(){
+    let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..101).map(|i|i as f64).collect();
+    let model=Model::with(&r,Ground::allowances(&r).unwrap()[1]).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let(dt,waiting)=(0.25,0.6);let share=STEP_SHARE*STEP_SHARE*POPULATION_TARGET*dt/waiting;
+    let mut at=Settings::new(dt,&initial.traps[0],share,true);at.horizon=waiting;let engine=Engine::new(&model,at.clone());
+    let states:Vec<Trajectory>=(0..64).map(|i|{let mut t=initial_trajectory(&model,&at,&initial,7,i,Stratum::single(i));for _ in 0..8{engine.step(&mut t);}t}).collect();
+    let phase=grid_phase(&model,&states,&at);assert!(phase>4.*at.node_phase,"{phase} against the bound's {}",at.node_phase);
+    let(mut coarse,mut fine)=(at.clone(),at.clone());coarse.node_phase=phase;fine.node_phase=at.node_phase/2.;
+    let(coarse,fine)=(Engine::new(&model,coarse),Engine::new(&model,fine));
+    let(mut populations,mut impulse,mut size)=(0.,0.,0.);
+    for t in &states{
+        let n=model.dimension(t.cluster);let(a,b)=(coarse.coast(t,dt,1),fine.coast(t,dt,1));
+        let norm=|x:&Trajectory|x.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>();let(x,y)=(norm(&a),norm(&b));
+        populations+=(0..n).map(|i|(a.psi[i].norm_sqr()/x-b.psi[i].norm_sqr()/y).abs()).fold(0.,f64::max);
+        impulse+=(0..3).map(|k|(a.kappa[k]-b.kappa[k]).powi(2)).sum::<f64>().sqrt();size+=(0..3).map(|k|(b.kappa[k]-t.kappa[k]).powi(2)).sum::<f64>().sqrt();
+    }
+    let m=states.len() as f64;assert!(populations/m<=share,"populations {:e} against the share {share:e}",populations/m);
+    assert!(impulse/size<=QUADRATURE,"the impulse {:e} against {QUADRATURE:e}",impulse/size);
 }
 
 /// The atom frozen at the focus: its eliminated master equation there (ground.rs `local_at`, every drive
