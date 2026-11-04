@@ -704,7 +704,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // The device: the GPU when asked for and able, the model on it; else the CPU, with why.
     let(gpu,note)=match device{
         Device::Cpu=>(None,None),
-        Device::Gpu=>match gpu::gpu_within(gpu::START_WAIT).and_then(|g|{let program=g.lock().unwrap_or_else(|e|e.into_inner()).program(&model,&settings)?;Ok((g,program))}){
+        Device::Gpu=>match gpu::gpu().and_then(|g|{let program=g.lock().unwrap_or_else(|e|e.into_inner()).program(&model,&settings)?;Ok((g,program))}){
             Ok(on)=>(Some(on),None),
             Err(reason)=>(None,Some(format!("{reason}：本次在 CPU 上计算"))),
         },

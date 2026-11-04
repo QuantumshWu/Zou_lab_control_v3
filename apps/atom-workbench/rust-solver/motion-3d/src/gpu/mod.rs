@@ -11,9 +11,9 @@
 //! # Context
 //! The process makes the CUDA context and loads the module once, in the background (`prepare`: the
 //! trajectory lane's worker at its start, a solve at its own), and keeps them for every later solve.
-//! The driver compiles the PTX for the GPU at its first load on a machine, a few seconds once per
-//! version of the kernels, and caches the result (`Startup` records the times). A solve waits for
-//! the GPU at most `START_WAIT` (`gpu_within`): one still starting runs on the CPU, with the reason.
+//! The driver compiles the PTX for the GPU at its first load on a machine, once per version of the
+//! kernels (about a minute on a laptop's GPU), and caches the result (`Startup` records the times). A
+//! solve asked for the GPU waits for it to start (`gpu`): the first compile is waited out.
 //!
 //! # Batches
 //! The initial states are drawn on the CPU (lib.rs `initial_trajectory` and a held twin's start,
@@ -35,17 +35,12 @@ use program::{Program,MAXM,MAXN,MOST_LISTED};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64,Ordering};
 use std::sync::{Condvar,Mutex};
-use std::time::{Duration,Instant};
+use std::time::Instant;
 
 /// The oldest GPUs the PTX targets: compute capability 7.5 (Turing).
 pub const MINIMUM_CAPABILITY:(i32,i32)=(7,5);
 /// A launch's target wall time (ms).
 const LAUNCH_MS:f64=60.;
-/// The longest a solve waits for the GPU to start (the context's few hundred milliseconds, not the
-/// driver's first compile of the kernels).
-pub const START_WAIT:Duration=Duration::from_secs(2);
-/// Why a solve did not wait for a GPU still starting.
-pub const STARTING:&str="GPU 正在首次准备（驱动编译内核，新版本首次使用时一次）";
 /// A block's warps (the kernel's WARPS: lib.rs `TASK`), an output's sums (its RECORD), a trajectory's
 /// record of an output interval (its SLOT_RECORD: the point record and per lab axis two closing
 /// windows' held flag and means) and the most intervals of a launch (its MOST_INTERVALS: the room of
@@ -107,16 +102,13 @@ pub fn prepare(){
         });
     }
 }
-/// The process's GPU, started if it was not, waiting for it at most `wait`; Err: why there is none
-/// (Chinese), `STARTING` when it is not ready by then.
-pub fn gpu_within(wait:Duration)->Result<&'static Mutex<Gpu>,String>{
+/// The process's GPU, started if it was not, waiting for it to start (the driver's first compile of the
+/// kernels included); Err: why there is none (Chinese).
+pub fn gpu()->Result<&'static Mutex<Gpu>,String>{
     prepare();
-    let start=START.lock().unwrap_or_else(|e|e.into_inner());
-    let(start,_)=STARTED.wait_timeout_while(start,wait,|s|matches!(s,Start::Starting)).unwrap_or_else(|e|e.into_inner());
-    match &*start{Start::Done(made)=>made.clone(),_=>Err(STARTING.into())}
+    let start=STARTED.wait_while(START.lock().unwrap_or_else(|e|e.into_inner()),|s|matches!(s,Start::Starting)).unwrap_or_else(|e|e.into_inner());
+    match &*start{Start::Done(made)=>made.clone(),_=>unreachable!("`prepare` has started the GPU")}
 }
-/// The process's GPU, waiting for it to start.
-pub fn gpu()->Result<&'static Mutex<Gpu>,String>{gpu_within(Duration::MAX)}
 /// Makes the process's GPU from PTX compiled with PROFILE (examples/profile.rs), before anything
 /// starts it: its solves then sum the kernel's counters (`Gpu::spans`).
 pub fn install_profiled(ptx:&str)->Result<(),String>{
