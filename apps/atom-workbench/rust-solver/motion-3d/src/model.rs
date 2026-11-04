@@ -1777,6 +1777,79 @@ impl Model{
         let units=|u:usize|{let unit=&self.ground.units[u];unit.beams.iter().zip(&unit.weights).fold(Complex::ZERO,|s,(&l,&w)|s+far(l)*w).norm_sqr()/unit.norm};
         self.level(cluster,x,&units,&|l|far(l).norm_sqr())-self.level(cluster,x,&|u|self.ground.units[u].focus,&|l|self.geometry[l].intensity([0.;3]))
     }
+    /// A cluster state's trap potential at r (rad/us): `level` with every beam at r less the same with
+    /// the trap's beams off (`trap_beams`) -- the trap's own share of the state's shifts there, the
+    /// near beams' interference left out as in `potential`, the other focused beams and the near
+    /// light's own shifts in both: zero where the trap beam's field is, −D_T at the focus (ensemble.rs:
+    /// the initial ensemble's energies). The loss's trap potential (`trap_potential`) with the near
+    /// beams' interference left out; with a trap beam alone, the trap's potential relative to its far
+    /// level (`potential`, `depth`).
+    pub fn trap_level(&self,cluster:usize,x:usize,r:[f64;3])->f64{
+        let off=|u:usize|{let unit=&self.ground.units[u];
+            unit.beams.iter().zip(&unit.weights).filter(|(l,_)|!self.trap_beams.contains(l)).fold(Complex::ZERO,|s,(&l,&w)|s+self.geometry[l].field(r).0*w).norm_sqr()/unit.norm};
+        let beams=|l:usize|self.geometry[l].intensity(r);
+        self.level(cluster,x,&|u|self.unit_intensity(u,r),&beams)-self.level(cluster,x,&off,&|l|if self.trap_beams.contains(&l){0.}else{beams(l)})
+    }
+    /// The trap's largest depth per unit of its intensity (`trap_level`), relative to `depth`, its depth
+    /// at the focus: a bound of c = sup −V_T/(D_T s) over the trap's intensity s in (0, 1] -- its unit's,
+    /// and its near beams' own --, every other focused unit's in [0, 1] and every focused near beam's in
+    /// [0, 1], the plane waves' at theirs. Every point's intensities lie in that set and the trap's own
+    /// lies below its beam's profile A(r) (a standing wave's below its envelope), so −V_T(r) ≤ c D_T A(r)
+    /// everywhere: the initial ensemble's envelope (ensemble.rs).
+    ///
+    /// Proven, not sampled: −V_T is linear in each near beam's intensity, so a sum of each one's part at
+    /// its worse end; and on each cell of the tables' grid in the units' intensities `level` is a
+    /// polynomial -- `cubic`'s Lagrange weights in each unit's intensity, times s where the trap's own
+    /// near beams scale with it: quartic in s, cubic in the others' --, −V_T too, zero at s = 0. A
+    /// polynomial lies below the largest of its Bernstein coefficients on the cell and s is linear, so
+    /// −V_T ≤ R s on the cell wherever each coefficient of −V_T is at most R times s's (its control point's
+    /// s): the cell's R, from −V_T at the cell's equally spaced points (to the evaluations' round-off). A
+    /// trap with no unit of its own (its shift linear in its intensity) takes s = 1 alone. An error where
+    /// the trap's unit holds another beam: its interference with the trap's field falls off as √A, and the
+    /// trap's bound states fill an unbounded phase space.
+    pub fn trap_slope(&self,cluster:usize,x:usize,depth:f64)->Result<f64,String>{
+        let g=&self.ground;let trapped=|l:&usize|self.trap_beams.contains(l);
+        let traps:Vec<usize>=self.focused.iter().copied().filter(|&u|g.units[u].beams.iter().any(trapped)).collect();
+        if traps.iter().any(|&u|!g.units[u].beams.iter().all(trapped)){return Err("光镊与同频率、同偏振的其他光束相干叠加：其干涉项随光镊强度的平方根衰减，束缚的初始热分布无界".into());}
+        let others:Vec<usize>=self.focused.iter().copied().filter(|u|!traps.contains(u)).collect();let others=&others[..];
+        let near:Vec<usize>=self.carriers.iter().flat_map(|c|c.beams.iter().copied()).filter(|l|!trapped(l)&&self.geometry[*l].waist.is_some()).collect();
+        // −V_T D_T at intensities (s, the other units'), the focused near beams at 0 or the one `lit` at 1.
+        let at=|s:f64,o:&[f64],lit:Option<usize>|->f64{
+            let units=|on:bool|move|u:usize|others.iter().position(|&v|v==u).map_or(if on{s}else{0.},|i|o[i]);
+            let beams=|on:bool|move|l:usize|if trapped(&l){if on{s}else{0.}}else if self.geometry[l].waist.is_none(){self.geometry[l].intensity([0.;3])}else if lit==Some(l){1.}else{0.};
+            self.level(cluster,x,&units(false),&beams(false))-self.level(cluster,x,&units(true),&beams(true))};
+        // The dimensions: s (unless the trap has no unit), quartic; the other units', cubic. Each one's
+        // equally spaced points and the inverse of Bernstein's basis there (Gauss–Jordan).
+        let unit=!traps.is_empty();let degrees:Vec<usize>=(0..others.len()+usize::from(unit)).map(|i|if unit&&i==0{4}else{3}).collect();
+        let inverse=|m:usize|->Vec<Vec<f64>>{
+            let binomial=|j:usize|(0..j).fold(1.,|b,i|b*(m-i) as f64/(i+1) as f64);
+            let mut a:Vec<Vec<f64>>=(0..=m).map(|i|{let t=i as f64/m as f64;(0..=m).map(|j|binomial(j)*t.powi(j as i32)*(1.-t).powi((m-j) as i32)).chain((0..=m).map(|k|if k==i{1.}else{0.})).collect()}).collect();
+            for c in 0..=m{let p=(c..=m).max_by(|&x,&y|a[x][c].abs().total_cmp(&a[y][c].abs())).unwrap();a.swap(c,p);let v=a[c][c];for e in a[c].iter_mut(){*e/=v;}
+                for r in 0..=m{if r!=c{let f=a[r][c];let row=a[c].clone();for(e,q)in a[r].iter_mut().zip(row){*e-=f*q;}}}}
+            a.into_iter().map(|row|row[m+1..].to_vec()).collect()};
+        let inverses:Vec<Vec<Vec<f64>>>=degrees.iter().map(|&m|inverse(m)).collect();
+        let n=self.tables.nodes;let h=1./(n-1) as f64;let cells=n-1;let d=degrees.len();
+        let sizes:Vec<usize>=degrees.iter().map(|m|m+1).collect();let size:usize=sizes.iter().product();
+        let bounds:Vec<f64>=(0..cells.pow(d as u32)).into_par_iter().map(|c|{
+            let corner=|i:usize|((c/cells.pow(i as u32))%cells) as f64*h;
+            // The cell's points: index p ↦ per dimension j_i of its degree m_i, at corner + h j_i/m_i.
+            let digit=|p:usize,i:usize|(p/sizes[..i].iter().product::<usize>())%sizes[i];
+            let place=|p:usize,i:usize|corner(i)+h*digit(p,i) as f64/degrees[i] as f64;
+            let coefficients=|lit:Option<usize>|->Vec<f64>{
+                let mut v:Vec<f64>=(0..size).map(|p|{let q:Vec<f64>=(0..d).map(|i|place(p,i)).collect();if unit{at(q[0],&q[1..],lit)}else{at(1.,&q,lit)}}).collect();
+                for i in 0..d{let stride:usize=sizes[..i].iter().product();
+                    for p in 0..size{if digit(p,i)!=0{continue;}
+                        let line:Vec<f64>=(0..sizes[i]).map(|k|v[p+k*stride]).collect();
+                        for k in 0..sizes[i]{v[p+k*stride]=inverses[i][k].iter().zip(&line).map(|(a,b)|a*b).sum();}}}
+                v};
+            // A part's R on the cell: its largest coefficient over its control point's s (none at s = 0, where
+            // −V_T is 0); s = 1 throughout without a unit.
+            let ratio=|v:&[f64]|(0..size).filter_map(|p|{let s=if unit{place(p,0)}else{1.};(s>0.).then(||v[p]/s)}).fold(f64::NEG_INFINITY,f64::max);
+            let base=coefficients(None);
+            ratio(&base)+near.iter().map(|&l|{let lit=coefficients(Some(l));ratio(&lit.iter().zip(&base).map(|(a,b)|a-b).collect::<Vec<f64>>()).max(0.)}).sum::<f64>()
+        }).collect();
+        Ok(bounds.into_iter().fold(f64::NEG_INFINITY,f64::max)/depth)
+    }
     /// The diagonal of h0 and of every near beam's own light shift for a cluster state, the units at
     /// the intensities `units(u)` and the near beams at `beams(l)` (`potential`): the groups' S at the
     /// state's diagonal entry (none where it is not one of a group's).
