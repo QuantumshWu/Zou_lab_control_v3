@@ -61,8 +61,9 @@ pub(crate) const HARMONIC:usize=82;
 /// readouts, the windows, the held twin's steps and records, and the launches; the advances, the jumps and
 /// the jumps with the exact responses; of the jumps the point, the draws, the emission's direction and polarization,
 /// the kicks and the transient with the slow start; of the photons the matrices and the classes' weights, of the absorbed light
-/// its items and its beams.
-pub const SPANS:[&str;26]=["point","generator","exponential","evolve","jump","exact","photons","absorption","loss","step","readout","windows","twin","total","advances","jumps","exact jumps","jump point","draw","emit","kick","transient","items","beams","matrices","weights"];
+/// its items and its beams; an exact evolution's nodes and products by a matrix, and of an exact step the segment's
+/// components, sizes and left-out beats and the panels' forces.
+pub const SPANS:[&str;32]=["point","generator","exponential","evolve","jump","exact","photons","absorption","loss","step","readout","windows","twin","total","advances","jumps","exact jumps","jump point","draw","emit","kick","transient","items","beams","matrices","weights","nodes","products","components","sizes","resolve","forces"];
 
 /// The times the process's GPU took to start (ms): the driver, the context, the module (the driver's
 /// JIT compile of the PTX at its first load on a machine, its cache after).

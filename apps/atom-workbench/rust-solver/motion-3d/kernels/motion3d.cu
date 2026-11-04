@@ -68,7 +68,7 @@ typedef unsigned long long u64;
 // the parts of its work, and the advances and jumps it makes, per trajectory into Run::profile.
 // Without PROFILE the spans are nothing.
 enum Span{SPAN_POINT,SPAN_GENERATOR,SPAN_EXPONENTIAL,SPAN_EVOLVE,SPAN_JUMP,SPAN_EXACT,SPAN_PHOTONS,SPAN_ABSORPTION,SPAN_LOSS,SPAN_STEP,SPAN_READOUT,SPAN_WINDOWS,
-    SPAN_TWIN,SPAN_TOTAL,COUNT_ADVANCES,COUNT_JUMPS,COUNT_EXACT,SPAN_JUMPPOINT,SPAN_DRAW,SPAN_EMIT,SPAN_KICK,SPAN_TRANSIENT,SPAN_ITEMS,SPAN_BEAMS,SPAN_MATRICES,SPAN_WEIGHTS,SPANS};
+    SPAN_TWIN,SPAN_TOTAL,COUNT_ADVANCES,COUNT_JUMPS,COUNT_EXACT,SPAN_JUMPPOINT,SPAN_DRAW,SPAN_EMIT,SPAN_KICK,SPAN_TRANSIENT,SPAN_ITEMS,SPAN_BEAMS,SPAN_MATRICES,SPAN_WEIGHTS,COUNT_NODES,COUNT_PRODUCTS,SPAN_COMPONENTS,SPAN_SIZES,SPAN_RESOLVE,SPAN_FORCES,SPANS};
 #ifdef PROFILE
 #define SPAN_BEGIN(name) const long long name=clock64()
 #define SPAN_END(span,name) do{if(lane==0)W.profile[span]+=clock64()-name;}while(0)
@@ -1962,7 +1962,7 @@ __device__ __forceinline__ void atomic_add(float2* x,float2 v){atomicAdd(&x->x,v
 // groups' −S, at part 0 h0 less the scalar, −(i/2) its groups' Q, its explicit states' terms -- and G_q,
 // then the gradients' Hermitian parts (G₀'s; per pair ±Ω, (G_Ω + G_{−Ω}†)/2 at Ω and its adjoint at −Ω).
 // The lanes take the entries e = lane + 32j; a pair standing for two reads its adjoint at the mirror's place.
-__device__ __noinline__ void exact_components(const Program& P,const Warp& W,const Cluster& C,int lane,float2* X){
+__device__ __noinline__ void exact_components(const Program& P,Warp& W,const Cluster& C,int lane,float2* X){
     const int n=C.n,nn=n*n,Q=C.parts;const float2* tables=P.tables+C.table;const Point& pt=W.pt;
     float2* G=X+Q*nn;float2* Gamma=X+4*Q*nn;
     for(int e=lane;e<5*Q*nn;e+=32)X[e]=zero2();
@@ -2124,15 +2124,15 @@ __device__ unsigned exact_resolve(const Program& P,float2* X,const float* F,cons
 // (‖H₀‖₁ + Σ‖H_j‖₁ + max|Ω|/2)δ is within the grid's (`Program::grid_phase`), each exponential within its part of the larger of
 // the truncation and the beats' share and at least of single precision's round-off, ‖w₁H(t₁) + w₂H(t₂)‖ ≤ ½‖H₀‖₁ + (|w₁| + |w₂|)Σ‖H_j‖₁;
 // else ‖H₀‖₁δ within the node phase, the series to the round-off, and its decay i(H₀ − H₀†) for the roots.
-__device__ __noinline__ Segment exact_segment(const Program& P,const Warp& W,int k,double start,double tau,int lane,float2* X,float& beats){
+__device__ __noinline__ Segment exact_segment(const Program& P,Warp& W,int k,double start,double tau,int lane,float2* X,float& beats){
     const Cluster C=P.clusters[k];Segment S;S.n=C.n;S.parts=C.parts;S.start=start;
     const int n=C.n,nn=n*n,Q=C.parts;const double* omegas=P.omegas+C.omegas;
     float2* base=X+(5*Q+4)*nn;float* F=(float*)(base+Q);float* w=F+5*Q;S.base=base;S.F=F;S.w=w;
-    exact_components(P,W,C,lane,X);
-    for(int m=0;m<4*Q;m++){float column;const float s=msize(X+m*nn,n,lane,column);if(m<Q){F[m]=column;F[Q+m]=s;}else F[2*Q+m-Q]=s;}
+    SPAN_BEGIN(componentsp);exact_components(P,W,C,lane,X);SPAN_END(SPAN_COMPONENTS,componentsp);
+    SPAN_BEGIN(sizesp);for(int m=0;m<4*Q;m++){float column;const float s=msize(X+m*nn,n,lane,column);if(m<Q){F[m]=column;F[Q+m]=s;}else F[2*Q+m-Q]=s;}SPAN_END(SPAN_SIZES,sizesp);
     if(lane<Q){base[lane]=lane==0?make_float2(1.f,0.f):cis(omegas[lane-1]*start);w[lane]=lane==0?0.f:(float)omegas[lane-1];}
     __syncwarp();
-    double dropped;S.kept=exact_resolve(P,X,F,omegas,n,Q,tau,lane,dropped);beats=fmaxf(beats,(float)(dropped/tau));
+    SPAN_BEGIN(resolvep);double dropped;S.kept=exact_resolve(P,X,F,omegas,n,Q,tau,lane,dropped);beats=fmaxf(beats,(float)(dropped/tau));SPAN_END(SPAN_RESOLVE,resolvep);
     S.beating=(S.kept&~1u)!=0u;
     if(!S.beating){
         const int steps=max((int)ceil((double)F[0]*tau/P.node_phase),1);S.spacing=tau/(double)steps;
@@ -2176,7 +2176,7 @@ __device__ float exact_root(const Segment& S,const float2* X,float2 x,float2 mid
 // engine.rs `Segment::evolve`): composite Simpson on panels of two spacings from a node -- a panel to the
 // next node first where it starts between nodes (after a jump), what is left last --, the impulse ∫⟨F⟩dt
 // into `impulse` (lab); the time taken, and `jumped` where it reached it (x then at the root).
-__device__ float exact_evolve(const Segment& S,const float2* X,float2& x,float at,float remaining,float target,int lane,bool& jumped,float impulse[3]){
+__device__ float exact_evolve(const Program& P,Warp& W,const Segment& S,const float2* X,float2& x,float at,float remaining,float target,int lane,bool& jumped,float impulse[3]){
     const float end=at+remaining,delta=S.delta;float t=at;
     int i=max((int)ceilf(at/delta),0);
     float fa[3];float na=seg_force(S,X,t,x,lane,fa);jumped=false;
@@ -2185,7 +2185,8 @@ __device__ float exact_evolve(const Segment& S,const float2* X,float2& x,float a
         if(node>t)b=fminf(node,end);else{const float b2=(float)(i+2)*delta;if(b2<=end){b=b2;whole=true;}else b=end;}
         const float width=b-t,half=0.5f*width;
         float2 middle,last;seg_advances(S,X,t,half,x,lane,middle,last);
-        float fm[3],fb[3],nm,nb;seg_forces(S,X,t+half,b,middle,last,lane,fm,fb,nm,nb);
+        SPAN_BEGIN(forcesp);float fm[3],fb[3],nm,nb;seg_forces(S,X,t+half,b,middle,last,lane,fm,fb,nm,nb);SPAN_END(SPAN_FORCES,forcesp);
+        if(lane==0){W.profile[COUNT_NODES]+=2;W.profile[COUNT_PRODUCTS]+=2*(S.beating?2:1)*S.series.parts*S.series.terms;}
         if(logf(nb)<=target){
             const float s=exact_root(S,X,x,middle,t,na,nm,nb,width,target,lane);
             const float2 h=seg_advance(S,X,t,0.5f*s,x,lane),y=seg_advance(S,X,t+0.5f*s,0.5f*s,h,lane);
@@ -2218,7 +2219,7 @@ __device__ __noinline__ void exact_step(const Program& P,const Run& R,Warp& W,Tr
             SPAN_BEGIN(segment);S=exact_segment(P,W,t.cluster,start,tau,lane,X,t.beats);S.v=W.vec;built=t.cluster;SPAN_END(SPAN_GENERATOR,segment);
         }
         bool jumped;float part[3]={0.f,0.f,0.f};
-        SPAN_BEGIN(evolving);const float taken=exact_evolve(S,X,x,(float)elapsed,(float)(tau-elapsed),(float)(t.log_threshold-t.logn),lane,jumped,part);SPAN_END(SPAN_EVOLVE,evolving);
+        SPAN_BEGIN(evolving);const float taken=exact_evolve(P,W,S,X,x,(float)elapsed,(float)(tau-elapsed),(float)(t.log_threshold-t.logn),lane,jumped,part);SPAN_END(SPAN_EVOLVE,evolving);
         for(int a=0;a<3;a++)impulse[a]+=(double)part[a];
         elapsed=jumped?elapsed+(double)taken:tau;
         if(!jumped)break;

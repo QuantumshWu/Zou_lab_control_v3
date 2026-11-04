@@ -22,6 +22,8 @@ fn main(){
     for part in ["point","generator","exponential","evolve"]{println!("  {part:12} {:8.0} cycles per advance  {:5.1}%",at(part)/advances,share(at(part)));}
     println!("  {:12} {:8.0} cycles per jump     {:5.1}%","jump",at("jump")/jumps.max(1.),share(at("jump")));
     for part in ["exact","photons","absorption"]{println!("    {part:10} {:8.0} cycles per jump     {:5.1}%",at(part)/jumps.max(1.),share(at(part)));}
+    for part in ["items","beams","matrices","weights"]{println!("    {part:10} {:8.0} cycles per jump     {:5.1}%",at(part)/jumps.max(1.),share(at(part)));}
+    let nodes=at("nodes").max(1.);println!("  {:.1} nodes per advance, {:.1} products per node; evolve {:.0} cycles per node, forces {:.0} per node; of the generator per advance: components {:.0}, sizes {:.0}, resolve {:.0}",nodes/advances,at("products")/nodes,at("evolve")/nodes,at("forces")/nodes,at("components")/advances,at("sizes")/advances,at("resolve")/advances);
     println!("    {:.1}% of the jumps with the exact responses",100.*at("exact jumps")/jumps.max(1.));
     println!("  {:12} {:8.0} cycles per advance  {:5.1}%","loss",at("loss")/advances,share(at("loss")));
     println!("  {:12} {:8.0} cycles per advance  {:5.1}%  (all of a step: the parts above and its control)","step",at("step")/advances,share(at("step")));
