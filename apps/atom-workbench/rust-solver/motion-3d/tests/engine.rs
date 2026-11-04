@@ -8,12 +8,11 @@ use atom_motion_3d::control::{Harmonic,Twin};
 use atom_motion_3d::engine::{dipole_direction,Engine,Settings};
 use atom_motion_3d::ground::Ground;
 use atom_motion_3d::ledger::BUDGET;
-use atom_motion_3d::model::{Model,MOST_MIXED,TABLE_SHARE};
+use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Means,Scales,KT_PER_UK};
 use atom_motion_3d::{initial_trajectory,sample_states,simulate,Initial,Stratum,Variates};
-use atom_motion_3d::solve::{jumps,solve,Device,TEMPERATURE_TARGET};
-use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
+use atom_motion_3d::solve::{jumps,solve,Device,STEP_SHARE,TEMPERATURE_TARGET};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
 #[path="../examples/scene/mod.rs"] mod scene;
@@ -468,16 +467,17 @@ fn a_shallow_trap_s_dark_atoms_stay_whatever_the_step(){
 
 /// The same shallow trap's step (solve.rs, # Time step): the line took 2 us, where the impulse's and the
 /// populations' criteria are met and T is 2.1–2.7 % high against 0.25 us (4096 trajectories on shared
-/// streams, its share 1 %); T's own step error, the orbits' over a trap period (`orbits`), keeps the step at
-/// most 1 us (0.6–0.9 % there), and T over the outputs lies within its share (η of the temperature target)
-/// of a quarter of that step, plus three standard errors, on shared streams.
+/// streams, its share 1 %); T's own step error, the orbits' over a trap period (`orbits`), keeps the step below
+/// the line's 2 us (0.6–0.9 % at 1 us, as dt²; the step's share s of T's room beside its a-priori estimates,
+/// solve.rs # Shares, now about 2 % there), and T over the outputs lies within its share (at most s of the
+/// temperature target) of a quarter of that step, plus three standard errors, on shared streams.
 #[test]
 fn a_shallow_trap_s_step_holds_t_within_its_share(){
     let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/shallow_probe_motion.json")).unwrap();
     let mut r=scene::request(&fixture["payload"]);let(duration,outputs,count)=(500.,26,1024u64);
     r.times_us=(0..outputs).map(|i|duration*i as f64/(outputs-1) as f64).collect();
     let dt=solve(&r,Device::Cpu,&mut |_,_|{}).unwrap().time_step_us;
-    assert!(dt<=1.+1e-9,"dt {dt} us");
+    assert!(dt<2.-1e-9,"dt {dt} us");
     let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
     let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();let trap=initial.traps[reference];
     let interval=duration/(outputs-1) as f64;let steps=(interval/dt).round() as usize;
@@ -492,7 +492,7 @@ fn a_shallow_trap_s_step_holds_t_within_its_share(){
     let(coarse,fine)=(temperatures(steps),temperatures(4*steps));
     // Per axis the mean ΔT/T over the outputs and the mean of its standard errors (the outputs' errors are
     // correlated along the trajectories: the mean's is at most theirs).
-    let share=A_PRIORI_SHARE*TEMPERATURE_TARGET;let n=(outputs-1) as f64;
+    let share=STEP_SHARE*TEMPERATURE_TARGET;let n=(outputs-1) as f64;
     for a in 0..3{
         let(d,e)=(1..outputs).fold((0.,0.),|(d,e),i|{let t=fine[i].temperature[a];(d+(coarse[i].temperature[a]-t)/t,e+coarse[i].temperature_error[a].hypot(fine[i].temperature_error[a])/t)});
         println!("axis {a}: dt {dt:.3} us against {:.3} us, mean ΔT/T {:+.2} % ± {:.2} %",dt/4.,100.*d/n,100.*e/n);
@@ -572,9 +572,9 @@ fn sparse_request(v:&Value)->Request{
         field_vector_g:[f[0],f[1],f[2]],mass_kg:v["massKg"].as_f64().unwrap(),initial_density:density,temperature_uk:v["temperatureUK"].as_f64().unwrap(),trap_beam,times_us:vec![]}
 }
 /// The frozen atom's F = 1 population each microsecond, its eliminated master equation's at the focus:
-/// the held twin's exact means there (control.rs), every drive folded.
-fn frozen_f1(r:&Request)->Vec<f64>{
-    let model=Model::new(r).unwrap();let twin=Twin::new(&model,1.).expect("a static generator");assert_eq!(twin.held.point.r,[0.;3]);
+/// the held twin's exact means there (control.rs), every drive folded, at second or fourth order.
+fn frozen_f1(r:&Request,fourth:bool)->Vec<f64>{
+    let model=Model::with_order(r,f64::INFINITY,fourth).unwrap();let twin=Twin::new(&model,1.).expect("a static generator");assert_eq!(twin.held.point.r,[0.;3]);
     twin.means(&model,&r.initial_density,1.,11).iter().map(|row|(0..STATES).filter(|&i|r.states[i].starts_with("ground-1-")).map(|i|row[i]).sum()).collect()
 }
 
@@ -586,7 +586,7 @@ fn frozen_f1(r:&Request)->Vec<f64>{
 #[test]
 fn a_strong_beam_s_raman_rate_through_its_dressing_is_the_core_s(){
     let v:Value=serde_json::from_str(include_str!("fixtures/far_beam_probe_motion.json")).unwrap();let r=sparse_request(&v);
-    for(i,(a,b))in frozen_f1(&r).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
+    for(i,(a,b))in frozen_f1(&r,false).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
 }
 
 /// An 808 nm tweezer, a near carrier, moves a D1 probe's line by its light shift (F1; ground.rs, # The
@@ -596,21 +596,119 @@ fn a_strong_beam_s_raman_rate_through_its_dressing_is_the_core_s(){
 #[test]
 fn a_near_tweezer_s_shift_moves_a_probe_s_line_to_the_core_s(){
     let v:Value=serde_json::from_str(include_str!("fixtures/near_tweezer_probe_motion.json")).unwrap();let r=sparse_request(&v);
-    for(i,(a,b))in frozen_f1(&r).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
+    for(i,(a,b))in frozen_f1(&r,false).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
 }
 
-/// Tables whose function is not smooth on any grid's scale -- b1/109's explicit rung, every excited state
-/// explicit: the interpolation's error 0.4 to 1.4 from 9 to 16385 nodes per axis, with or without the
-/// near light's dressing, 25 s to refine to the work bound -- stop refining once two doublings in a row
-/// leave the error above its smallest so far (model.rs `tabulate`), the last grid kept and its error
-/// booked: 33 nodes per axis.
+/// The fourth order on a dressed probe (ground.rs, # Fourth order): its W3 without what the near light's dressing
+/// already holds -- Σ's first order through the far channels, z's light shifts by the other carriers -- and with the
+/// dressed denominators, the frozen atom's F = 1 population is the population core's at every microsecond to 0.005,
+/// as the second order's: the strong beam 3 GHz off the probe's line (F10, a carrier of the fourth order: 0.0013 at
+/// most) and the 808 nm tweezer (F1, below the budget's square, the probe's dressing alone: 0.0029). The line's fourth
+/// order counted the dressing twice where the dressing's carrier is the fourth order's: F10's 0.0100 off at 2 us.
+#[test]
+fn a_dressed_probe_at_fourth_order_is_the_core_s(){
+    for fixture in [include_str!("fixtures/far_beam_probe_motion.json"),include_str!("fixtures/near_tweezer_probe_motion.json")]{
+        let v:Value=serde_json::from_str(fixture).unwrap();let r=sparse_request(&v);
+        for(i,(a,b))in frozen_f1(&r,true).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
+    }
+}
+
+/// b1/109's fourth order, every drive folded (its F = 2 sublevels −2..0 one cluster, the strong beam's Zeeman pairs
+/// folded): the folded photons a class joins without a kept coupling (ground.rs `FoldedCross`) meet in the jumps' products
+/// at fourth order too -- through the metric's bend and W3 --, and so do the photons of the carriers below the budget's
+/// square sharing their classes. The tables' decay takes them over the landing states the class shares
+/// (model.rs `FourthLayout::landing`), the triples' frequencies from their carriers' integer combinations: at the focus,
+/// a node, the generator is a Lindblad one to round-off at t = 0 and at a generic instant. It lacked 2.4e-3 rad/us of the
+/// jumps' cross terms (of 1.1).
+#[test]
+fn a_fourth_order_decay_holds_its_folded_photons_cross_terms(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/explicit_rung_motion.json")).unwrap();let r=sparse_request(&v);
+    let model=Model::with_order(&r,f64::INFINITY,true).unwrap();let p=model.point([0.;3],[0.;3]);
+    for k in 0..model.clusters(){for t in [0.,0.618]{
+        let(low,_,scale)=model.decay_balance(k,&p,t);let round=64.*f64::EPSILON*model.dimension(k) as f64*scale;
+        assert!(low>=-round,"cluster {k} at t = {t}: i(H − H†) − Σ L̃†L̃ reaches {low:.3e} rad/us (round-off {round:.1e})");
+    }}
+}
+
+/// b1/109's explicit rung: its F = 2 sublevels joined through D1 and D2 explicit states whose frames carry the D1
+/// carrier's detuning, −4.5e7 rad/us in the D2-framed excited manifold. Each frame is its first state's energy plus an
+/// integer combination of the carriers' detunings (ground.rs `Cluster::combinations`): two sublevels' frames along
+/// θ + δ − δ are equal, not 3.2e-9 rad/us apart, and the residuals the photons rotate at are the generator's beats.
+/// At the focus, a node, the generator is a Lindblad one to round-off at a generic instant; the drift was 3.7e-9
+/// rad/us (of 38) at t = 0.618 us, growing with t.
+#[test]
+fn an_explicit_rung_s_frames_are_exact(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/explicit_rung_motion.json")).unwrap();let mut r=sparse_request(&v);
+    // The case's own run, 100 us in 21 samples: its duration sets the rule's resonance floor and the rung.
+    r.times_us=(0..21).map(|i|5.*i as f64).collect();
+    let allowance=Ground::allowances(&r).unwrap()[1];let model=Model::with(&r,allowance).unwrap();let p=model.point([0.;3],[0.;3]);
+    for k in 0..model.clusters(){for t in [0.618,61.8]{
+        let(low,_,scale)=model.decay_balance(k,&p,t);let round=64.*f64::EPSILON*model.dimension(k) as f64*scale;
+        assert!(low>=-round,"cluster {k} at t = {t}: i(H − H†) − Σ L†L reaches {low:.3e} rad/us (round-off {round:.1e})");
+    }}
+}
+
+/// The atom frozen at the focus: its eliminated master equation there (ground.rs `local_at`, every drive
+/// folded, the beats' phases at each instant), RK4 at 1/250 of the outputs' interval, the populations
+/// at the given times up to `last`.
+fn frozen_rows(r:&Request,times:&[f64],last:usize)->Vec<[f64;STATES]>{
+    use atom_motion_3d::linear::Dense;
+    let model=Model::new(r).unwrap();let g=&model.ground;let point=[0.;3];
+    let e=g.eliminate(&model.intensities_at_point(point)).unwrap();
+    let locals=|t:f64|->Vec<_>{(0..g.clusters.len()).map(|k|g.local_at(&e,k,point,t).unwrap()).collect()};
+    let mut rho:Vec<Dense>=g.clusters.iter().map(|c|{let n=c.dimension();Dense::from_fn(n,n,|i,j|if i==j&&i<c.states.len(){let s=g.ground_states[c.states[i]];r.initial_density[s*STATES+s]}else{Complex::ZERO})}).collect();
+    let derivative=|t:f64,rho:&[Dense]|->Vec<Dense>{
+        let x=locals(t);
+        let mut out:Vec<Dense>=rho.iter().zip(&x).map(|(p,l)|{let h=&l.effective;let mut d=h.product(p).scaled(Complex::new(0.,-1.));d.add_scaled(Complex::new(0.,1.),&p.product(&h.adjoint()));d}).collect();
+        for(k,l)in x.iter().enumerate(){for(class,jumps)in g.clusters[k].classes.iter().zip(&l.jumps){for j in jumps{out[class.target].add_scaled(Complex::ONE,&j.product(&rho[k]).product(&j.adjoint()));}}}
+        out
+    };
+    let add=|a:&[Dense],b:&[Dense],s:f64|->Vec<Dense>{a.iter().zip(b).map(|(x,y)|{let mut z=x.clone();z.add_scaled(Complex::new(s,0.),y);z}).collect()};
+    let readout=|t:f64,rho:&[Dense]|{let mut p=[0.;STATES];for(k,l)in locals(t).iter().enumerate(){for(a,b)in p.iter_mut().zip(g.populations(k,l,&rho[k])){*a+=b;}}p};
+    let mut rows=vec![readout(times[0],&rho)];let mut t=times[0];
+    for i in 1..=last{
+        let steps=250;let h=(times[i]-times[i-1])/steps as f64;
+        for _ in 0..steps{
+            let k1=derivative(t,&rho);let k2=derivative(t+h/2.,&add(&rho,&k1,h/2.));let k3=derivative(t+h/2.,&add(&rho,&k2,h/2.));let k4=derivative(t+h,&add(&rho,&k3,h));
+            for(j,x)in rho.iter_mut().enumerate(){for(k,w)in [(&k1,1.),(&k2,2.),(&k3,2.),(&k4,1.)]{x.add_scaled(Complex::new(h*w/6.,0.),&k[j]);}}
+            t+=h;
+        }
+        rows.push(readout(times[i],&rho));
+    }
+    rows
+}
+
+/// A circular tweezer across the field mixes the Zeeman sublevels by its vector light shift, 6.7 rad/us
+/// against their 0.7 rad/us splitting (F6; ground.rs, # The static ground block): the probes' responses
+/// are those of the static block's eigenstates, each at its own energy, and the frozen atom's
+/// populations at the focus are the population core's -- every state's, at every output until the
+/// core's own error exceeds 0.005, to 0.01 beyond it (the release's 0.066 at 35 us).
+#[test]
+fn a_tweezer_s_vector_shift_across_the_field_moves_the_responses_to_the_static_block_s_eigenstates(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/tensor_tweezer_probe_motion.json")).unwrap();let r=sparse_request(&v);
+    let times=floats(&v["core"]["timesUs"]);let errors=floats(&v["core"]["errors"]);
+    let last=errors.iter().position(|&x|x>5e-3).unwrap_or(errors.len())-1;
+    let rows=frozen_rows(&r,&times,last);let mut worst=(0.,0.);
+    for(i,(row,core))in rows.iter().zip(v["core"]["populations"].as_array().unwrap()).enumerate(){
+        if errors[i]>5e-3{continue;}
+        let core=floats(core);let error=(0..STATES).map(|s|(row[s]-core[s]).abs()).fold(0.,f64::max);
+        println!("{} us: {error:.4}",times[i]);if error>worst.0{worst=(error,times[i]);}
+    }
+    assert!(worst.0<=1e-2+5e-3,"the frozen atom's populations {:.4} off the core's at {} us",worst.0,worst.1);
+}
+
+/// Tables whose function is not smooth on any grid's scale where the atoms go -- b1/109's explicit rung, every
+/// excited state explicit: the interpolation's error 0.4 to 1.4 from 9 to 16385 nodes per axis, with or without
+/// the near light's dressing, 25 s to refine to the work bound -- stop refining at the first doubling that does
+/// not shrink the error, whose next one is predicted to save nothing (model.rs `tabulate`), the last grid kept
+/// and its error booked: 17 nodes per axis (its error 1.1 inside the reach's intensities).
 #[test]
 fn tables_that_do_not_converge_stop_refining_with_their_error_booked(){
     let v:Value=serde_json::from_str(include_str!("fixtures/explicit_rung_motion.json")).unwrap();let r=sparse_request(&v);
     let allowance=Ground::allowances(&r).unwrap()[1];let model=Model::with(&r,allowance).unwrap();
     assert!(model.ground.clusters.iter().any(|c|c.excited.len()==24),"the explicit rung");
-    assert!(model.table_stalled&&model.table_limit.is_some_and(|n|n<=33),"refined to {:?} nodes per axis (stalled {})",model.table_limit,model.table_stalled);
-    assert!(model.table_error>TABLE_SHARE,"the error booked: {:.2e}",model.table_error);
+    assert!(model.table_stalled&&model.table_limit.is_some_and(|n|n<=17),"refined to {:?} nodes per axis (stalled {})",model.table_limit,model.table_stalled);
+    assert!(model.table_error>0.,"the error booked: {:.2e}",model.table_error);
 }
 
 /// The retro-reflected tweezer with a resonant probe (tests/fixtures/retro_probe_motion.json, the validation's F3
@@ -629,7 +727,7 @@ fn the_jumps_heating_on_a_retro_reflected_tweezer_exceeds_its_share_at_the_line_
     let settings=|steps:usize|{let mut s=Settings::new(interval/steps as f64,&initial.traps[reference],f64::EPSILON,true);s.doppler=BUDGET;s.region=initial.depths[reference];s};
     let steps=93;let harmonic=Harmonic::new(&model,&settings(steps),&initial,steps,outputs);
     let(states,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,32,steps,outputs,&harmonic);
-    let share=A_PRIORI_SHARE*TEMPERATURE_TARGET;
+    let share=STEP_SHARE*TEMPERATURE_TARGET;
     let(line,quarter)=(jumps(&Engine::new(&model,settings(steps)),&states)/share,jumps(&Engine::new(&model,settings(4*steps)),&states)/share);
     println!("the jumps' criterion over T's share: {line:.2} at 0.054 us, {quarter:.2} at 0.0134 us ({} states)",states.len());
     assert!(line>1.&&quarter<1.,"{line:.3} at the line's step, {quarter:.3} at a quarter");
