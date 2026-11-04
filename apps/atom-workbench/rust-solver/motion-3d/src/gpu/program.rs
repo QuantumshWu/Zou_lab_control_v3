@@ -140,12 +140,12 @@ impl Run{
 
 /// The sizes, offsets and constants the kernel's `layout` reports, for the check that the twins and
 /// the constants they share match.
-pub fn layout()->[u32;26]{
+pub fn layout()->[u32;28]{
     use std::mem::{offset_of,size_of};
     use super::{HARMONIC,MOST_INTERVALS,MOTION,RECORD,SLOT_RECORD,TWIN,WARPS};
     [size_of::<Beam>(),size_of::<Carrier>(),size_of::<Cluster>(),size_of::<Group>(),size_of::<Class>(),size_of::<Photon>(),size_of::<Coherent>(),size_of::<Channel>(),
         size_of::<Params>(),size_of::<State>(),size_of::<Run>(),offset_of!(Params,hm),offset_of!(Params,half_flow),offset_of!(Run,listed),offset_of!(State,psi),offset_of!(State,index),
-        MOST_INTERVALS,SLOT_RECORD,RECORD,WARPS,MAXN,TWIN,MOTION,HARMONIC,size_of::<Fourth>(),size_of::<NearUnit>()].map(|x|x as u32)
+        MOST_INTERVALS,SLOT_RECORD,RECORD,WARPS,MAXN,TWIN,MOTION,HARMONIC,size_of::<Fourth>(),size_of::<NearUnit>(),size_of::<FirstField>(),MOST_FIRST].map(|x|x as u32)
 }
 
 /// The model on the device: the kernel's parameters, the buffers they point into, and the most

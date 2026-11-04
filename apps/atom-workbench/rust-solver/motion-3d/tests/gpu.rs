@@ -54,7 +54,7 @@ fn device()->Option<&'static std::sync::Mutex<gpu::Gpu>>{match gpu::gpu(){Ok(g)=
 fn the_kernel_s_structs_match_their_twins(){
     let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
     let f=gpu.function("layout").unwrap();let out=Buffer::new(128).unwrap();gpu.stream().launch(&f,1,32,&[&out.pointer]).unwrap();
-    let mut words=[0u32;26];gpu.stream().download(&out,&mut words).unwrap();
+    let mut words=[0u32;28];gpu.stream().download(&out,&mut words).unwrap();
     assert_eq!(words,program::layout());
 }
 
