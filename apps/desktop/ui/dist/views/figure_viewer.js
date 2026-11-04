@@ -30,7 +30,9 @@ export class FigureViewerView {
     monitor = element("div", "monitor-page");
     empty = note("", true);
     path = "";
-    flowSignature = "";
+    /** The record's tabs and Flow as last shown; the transport keeps an unchanged part's identity. */
+    shownTabs = null;
+    shownFlow = null;
     // v2: the button beside the chooser acts on what it holds; the one after it does something else.
     editData = command("Edit data", () => { if (this.data.value)
         this.ctx.transport.send({ action: "edit_data", signal: this.data.value }, "Opening the data…"); });
@@ -111,13 +113,16 @@ export class FigureViewerView {
         }
         this.path = doc?.path ?? "";
         this.info.setPath(this.path);
-        const tabs = doc?.info;
-        // The record's tabs as the archive gives them, empty before a file opens.
-        this.info.setTabs(tabs?.length ? tabs : INFO_TABS.map(title => [title, []]));
-        const flow = doc?.flow;
-        const signature = JSON.stringify(flow ?? null);
-        if (signature !== this.flowSignature) {
-            this.flowSignature = signature;
+        // The record comes by itself, when it changes (main.rs viewer_message): nothing here for any other message.
+        const tabs = latest.record?.info;
+        if (tabs !== this.shownTabs) {
+            this.shownTabs = tabs;
+            // The record's tabs as the archive gives them, empty before a file opens.
+            this.info.setTabs(tabs?.length ? tabs : INFO_TABS.map(title => [title, []]));
+        }
+        const flow = latest.record?.flow;
+        if (flow !== this.shownFlow) {
+            this.shownFlow = flow;
             this.info.setGraph("Flow", flow ?? { nodes: [], edges: [] });
         }
         this.readRecord();

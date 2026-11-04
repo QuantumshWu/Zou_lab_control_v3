@@ -47,7 +47,9 @@ export type State = {
   plot_kinds?: PlotKind[];
   acquisition?: { state: "idle" | "starting" | "running" | "stopping" | "stopped" | "error"; produced?: number; error?: string };
   /** The Figure Viewer's own document: the opened archive, its panels and the Data it offers. */
-  viewer?: { document: { path: string; title: string; info?: unknown; flow?: unknown }; panels: Panel[]; signals: Signal[]; plot_kinds?: PlotKind[]; error?: string | null };
+  viewer?: { document: { path: string; title: string }; panels: Panel[]; signals: Signal[]; plot_kinds?: PlotKind[]; error?: string | null };
+  /** Its Figure's record (info pane tabs and Flow); sent only when it changes. */
+  record?: { info?: unknown; flow?: unknown };
   error?: string;
   busy?: boolean;
   message?: string;

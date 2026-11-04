@@ -35,7 +35,9 @@ export class FigureViewerView implements View {
   private monitor = element("div", "monitor-page");
   private empty = note("", true);
   private path = "";
-  private flowSignature = "";
+  /** The record's tabs and Flow as last shown; the transport keeps an unchanged part's identity. */
+  private shownTabs: InfoTab[] | undefined | null = null;
+  private shownFlow: Graph | undefined | null = null;
   // v2: the button beside the chooser acts on what it holds; the one after it does something else.
   private editData = command("Edit data", () => { if (this.data.value) this.ctx.transport.send({ action: "edit_data", signal: this.data.value }, "Opening the data…"); });
   private newData = command("New data", () => this.ctx.transport.send({ action: "new_data" }, "Making new data…"));
@@ -109,12 +111,15 @@ export class FigureViewerView implements View {
     if ((doc?.path ?? "") !== this.path || reopened) { this.report = null; this.opening = Boolean(doc?.path); }
     this.path = doc?.path ?? "";
     this.info.setPath(this.path);
-    const tabs = (doc as { info?: InfoTab[] } | undefined)?.info;
-    // The record's tabs as the archive gives them, empty before a file opens.
-    this.info.setTabs(tabs?.length ? tabs : INFO_TABS.map(title => [title, []] as InfoTab));
-    const flow = (doc as { flow?: Graph } | undefined)?.flow;
-    const signature = JSON.stringify(flow ?? null);
-    if (signature !== this.flowSignature) { this.flowSignature = signature; this.info.setGraph("Flow", flow ?? { nodes: [], edges: [] }); }
+    // The record comes by itself, when it changes (main.rs viewer_message): nothing here for any other message.
+    const tabs = latest.record?.info as InfoTab[] | undefined;
+    if (tabs !== this.shownTabs) {
+      this.shownTabs = tabs;
+      // The record's tabs as the archive gives them, empty before a file opens.
+      this.info.setTabs(tabs?.length ? tabs : INFO_TABS.map(title => [title, []] as InfoTab));
+    }
+    const flow = latest.record?.flow as Graph | undefined;
+    if (flow !== this.shownFlow) { this.shownFlow = flow; this.info.setGraph("Flow", flow ?? { nodes: [], edges: [] }); }
     this.readRecord();
     const signals = latest.viewer?.signals ?? [];
     // v2 set_editable_data_choices: the Figure's datasets and applied data, not what its panels derive.
