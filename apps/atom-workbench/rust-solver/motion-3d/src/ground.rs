@@ -111,6 +111,9 @@
 //! Σ = Σ_(d,a) V_d^f[:,a] V_d^f[:,a]†/(z − Ẽ_a − δ_d)        R_c[:,b] = (K + Σ − z)⁻¹ V_c^f[:,b]
 //! ```
 //!
+//! -- for a ground state alone; within a cluster its static block's eigenstates take the place of the
+//! states (# The static ground block).
+//!
 //! -- a strong beam a few GHz off a probe's line moves it by its light shift, a near tweezer's
 //! shift moves every other light's line. The folded pairs' van Vleck paths of the release,
 //! W̃ D U = V_ĉ†G Σ G V_c, were this response's first order, wrong where Σ is not small against the
@@ -123,6 +126,29 @@
 //! times it; its bound (`Ground::dressing_bounds`, through the dressed resolvent applied to the
 //! intermediates' fields and projected on the response), weighted by the channel's share of the
 //! generator, is the ledger's.
+//!
+//! # The static ground block
+//! A cluster's ground states need not be the eigenstates of what moves them statically: a tweezer's
+//! vector light shift across the field mixes the Zeeman sublevels by more than their splitting (the
+//! validation's F6, 6.7 rad/us against 0.7), as does another near carrier's light shift. A ground
+//! superposition evolving under its static block responds at the block's eigenenergies, not at the
+//! states' diagonal ones: the response solves (K + Σ − δ_c) R − R h_c = V_c^f on the cluster, h_c its
+//! static block as carrier c's responses see it -- H(r)'s ground block on the cluster (its static
+//! couplings: the far light's folds, the field's Zeeman terms) with every other near carrier's light
+//! shift between its states, ΔE^d_{bb′} = −½(v_b†g_b′ + (v_b′†g_b)*) --, by its eigenstates,
+//!
+//! ```text
+//! h_c = Σ_j λ_j u_j u_j†        R_c = Σ_j (K + Σ_j − λ_j − δ_c)⁻¹ V_c^f u_j u_j†
+//! ```
+//!
+//! (`Block`), each eigenstate at its own energy, its self-energy Σ_j of the block's far channels -- the
+//! folded pairs from the cluster's states that none of its states keeps; one another state keeps is the
+//! cluster's own dynamics, its first order in the dressing's bound --, the same for the whole block, so
+//! that R does not depend on the eigenbasis within a degenerate eigenspace. A block of one
+//! state, or one whose states nothing mixes, is the channels' own: the response is continuous in the
+//! mixing. Left out: the couplings that beat (a pair of carriers' Raman terms, the time step's), the
+//! static couplings to other clusters (their fold, the rule's ledger) and the units' interference in
+//! the shifts (in the dressing's bound).
 //!
 //! # Clusters and the mixed generator
 //! The states joined by kept couplings form a cluster (`Cluster`), the trajectory's state space
@@ -192,7 +218,7 @@
 //! - first order in the Doppler shift: (kv/σ_min)² (engine.rs);
 //! - an emitted photon has its carrier's wave number: ≤ 1e-7 on the D2 line.
 use crate::ledger::BUDGET;
-use crate::linear::{hermitian_eigenvalues,Dense,Lu};
+use crate::linear::{hermitian_eigen,hermitian_eigenvalues,Dense,Lu};
 use crate::{Beam,Complex,Request,STATES};
 use atom_population_core::lattice::classification::FOLD_DISTANCE;
 use std::f64::consts::TAU;
@@ -343,15 +369,22 @@ pub struct Elimination{
     /// Per beam, R_l and R2_l, excited ← ground (dimensionless and us).
     pub responses:Vec<Dense>,
     pub derivatives:Vec<Dense>,
-    /// Per carrier and ground state the near light's dressing of its response (`Ground::dress_light`;
-    /// None before the rule's clusters, or where the carrier does not reach the state).
-    pub dressing:Vec<Vec<Option<Dressing>>>,
+    /// Per carrier and cluster the block its responses see (`Ground::dress_light`; None before the rule's
+    /// clusters, or where the carrier reaches none of the cluster's states).
+    pub blocks:Vec<Vec<Option<Block>>>,
 }
-/// A channel's dressing (`Ground::dress_light`): the excited states' self-energy Σ and the energy z;
-/// the bound of z's error (the other carriers' shifts' left-out parts, rad/us) and its shift from
-/// E_b + δ_c; and the intermediates, each far channel with its D_a and D_a² times its energy's error.
+/// A carrier's block on a cluster (module documentation, # The static ground block): the cluster's
+/// static ground block as the carrier's responses see it -- H's, with every other near carrier's light
+/// shift --, its eigenstates (the columns of `vectors`, over the cluster's states) and each one's
+/// dressing.
 #[derive(Clone,Debug)]
-pub struct Dressing{pub sigma:Dense,pub z:f64,pub doubt:f64,pub shift:f64,pub vias:Vec<(Channel,f64,f64)>}
+pub struct Block{pub vectors:Dense,pub modes:Vec<Dressing>}
+/// An eigenstate's dressing (`Ground::dress_light`): the excited states' self-energy Σ and the energy z,
+/// its eigenvalue + δ_c; the bound of z's error (the other carriers' shifts' left-out parts, rad/us); and
+/// the intermediates, each far channel with its D_a, D_a² times its energy's error and whether Σ holds it
+/// (`Ground::vias`).
+#[derive(Clone,Debug)]
+pub struct Dressing{pub sigma:Dense,pub z:f64,pub doubt:f64,pub vias:Vec<(Channel,f64,f64,bool)>}
 /// A near carrier's unit for the dressing (`Ground::dress_light`): its carrier, its folded coupling (the
 /// dominant polarization's W^f = Σ_l u_l V_l^f, a beam alone its own V_l^f) and its beams' remainders
 /// off it, V_l^f − γ_l W^f.
@@ -436,10 +469,12 @@ pub struct Ground{
     pub explicit_of:Vec<Vec<bool>>,
     /// The excited states in groups of nearly one energy at the focus (`transient_groups`).
     pub excited_groups:Vec<Vec<usize>>,
-    /// The near light's dressing (`Ground::dress_light`): per carrier and ground state the far channels of
-    /// its folded pairs, per unit of a near carrier its fields, and whether the eliminations are dressed
-    /// -- after the rule, whose judgements are the bare light's.
-    pub vias:Vec<Vec<Vec<Channel>>>,
+    /// The near light's dressing (`Ground::dress_light`): per carrier and cluster the far channels of its
+    /// block's folded pairs -- and whether its self-energy holds one: not where a state of the cluster keeps
+    /// it, as the cluster's own dynamics then does (its first order the dressing's bound) --, per unit of
+    /// a near carrier its fields, and whether the eliminations are dressed -- after the rule, whose
+    /// judgements are the bare light's.
+    pub vias:Vec<Vec<Vec<(Channel,bool)>>>,
     pub near_units:Vec<Option<NearUnit>>,
     pub dressing:bool,
     /// Per carrier and ground state its dressed response's nearest pole over the trap (rad/us).
@@ -790,6 +825,18 @@ impl Ground{
     fn dressings(&self,excited:&Dense,k:&Dense)->Vec<Vec<(usize,Vec<Complex>)>>{
         self.explicit_of.iter().map(|p|(0..p.len()).filter(|&e|p[e]).map(|e|(e,self.dress(excited,k,e,p))).collect()).collect()
     }
+    /// A block's eigenstate's resolvent at a Doppler shift w: (K + Σ_j − z_j + w)⁻¹, K decoupled from the
+    /// cluster's explicit excited states.
+    fn mode_denominator(&self,k:&Dense,cl:&Cluster,mode:&Dressing,shift:f64)->Result<Lu,String>{
+        let mut dressed=k.clone();dressed.add_scaled(Complex::ONE,&mode.sigma);
+        let dressed=match cl.states.first().and_then(|&b|self.explicit_of.get(b)).filter(|p|p.iter().any(|&x|x)){Some(p)=>self.decoupled(&dressed,p),None=>dressed};
+        denominator(&dressed,shift-mode.z)
+    }
+    /// The source of a block's eigenstate j through beam l: Σ_b u_j[b] times b's (`source`).
+    fn mode_source(&self,l:usize,cl:&Cluster,vectors:&Dense,j:usize,dressings:&[Vec<(usize,Vec<Complex>)>],column:&mut [Complex]){
+        let mut part=vec![Complex::ZERO;column.len()];for x in column.iter_mut(){*x=Complex::ZERO;}
+        for(i,&b)in cl.states.iter().enumerate(){let u=vectors[(i,j)];self.source(l,b,dressings.get(b).map_or(&[][..],|d|d),&mut part);for(x,y)in column.iter_mut().zip(&part){*x+=*y*u;}}
+    }
 
     /// The elimination at the units' intensities (`Ground::hamiltonian_with`): H's ground block and its
     /// energies, its excited block, K, and every near beam's R_l and R2_l of its folded coupling, column
@@ -797,7 +844,7 @@ impl Ground{
     /// and, once the rule has made the clusters, dressed by the other near light (`Ground::dress_light`).
     pub fn eliminate(&self,intensities:&[f64])->Result<Elimination,String>{
         let hamiltonian=self.hamiltonian_with(intensities);
-        let(ng,ne,nc)=(self.ground_states.len(),self.excited_states.len(),self.carriers.len());
+        let(ng,ne)=(self.ground_states.len(),self.excited_states.len());
         let ground=sub(&hamiltonian,&self.ground_states,&self.ground_states);
         let energies:Vec<f64>=(0..ng).map(|b|ground[(b,b)].re).collect();
         let excited=sub(&hamiltonian,&self.excited_states,&self.excited_states);
@@ -807,21 +854,33 @@ impl Ground{
         let mut column=vec![Complex::ZERO;ne];
         let decoupled:Vec<Option<Dense>>=self.explicit_of.iter().map(|p|p.iter().any(|&x|x).then(||self.decoupled(&excited_hamiltonian,p))).collect();
         let dressings=self.dressings(&excited,&excited_hamiltonian);
-        let dressing=if self.dressing{self.dress_light(intensities,&energies,&excited_hamiltonian,&decoupled)?}else{vec![vec![None;ng];nc]};
-        for(c,carrier)in self.carriers.iter().enumerate(){for b in 0..ng{
-            if !self.couples(c,b){continue;}
-            let k=decoupled.get(b).and_then(|x|x.as_ref()).unwrap_or(&excited_hamiltonian);
-            let lu=match &dressing[c][b]{
-                Some(d)=>{let mut dressed=excited_hamiltonian.clone();dressed.add_scaled(Complex::ONE,&d.sigma);
-                    let dressed=match self.explicit_of.get(b).filter(|p|p.iter().any(|&x|x)){Some(p)=>self.decoupled(&dressed,p),None=>dressed};denominator(&dressed,-d.z)?}
-                None=>denominator(k,-energies[b]-carrier.detuning)?,
-            };
-            for &l in &carrier.beams{
-                self.source(l,b,dressings.get(b).map_or(&[][..],|d|d),&mut column);lu.solve(&mut column);for i in 0..ne{responses[l][(i,b)]=column[i];}
-                lu.solve(&mut column);for i in 0..ne{derivatives[l][(i,b)]=column[i];}
+        let blocks=if self.dressing{self.dress_light(intensities,&ground,&energies,&excited_hamiltonian,&decoupled)?}else{vec![]};
+        for(c,carrier)in self.carriers.iter().enumerate(){
+            if self.dressing{
+                // Each eigenstate of the carrier's block at its own energy: R = Σ_j G_j V u_j u_j†.
+                for(k,cl)in self.clusters.iter().enumerate(){let Some(block)=&blocks[c][k] else{continue};
+                    for(j,mode)in block.modes.iter().enumerate(){
+                        let lu=self.mode_denominator(&excited_hamiltonian,cl,mode,0.)?;
+                        for &l in &carrier.beams{
+                            self.mode_source(l,cl,&block.vectors,j,&dressings,&mut column);lu.solve(&mut column);
+                            for(i,&b)in cl.states.iter().enumerate(){let w=block.vectors[(i,j)].conj();for x in 0..ne{responses[l][(x,b)]+=column[x]*w;}}
+                            lu.solve(&mut column);
+                            for(i,&b)in cl.states.iter().enumerate(){let w=block.vectors[(i,j)].conj();for x in 0..ne{derivatives[l][(x,b)]+=column[x]*w;}}
+                        }
+                    }
+                }
+                continue;
             }
-        }}
-        Ok(Elimination{energies,ground,excited,excited_energies,excited_hamiltonian,responses,derivatives,dressing})
+            for b in 0..ng{
+                if !self.couples(c,b){continue;}
+                let lu=denominator(decoupled.get(b).and_then(|x|x.as_ref()).unwrap_or(&excited_hamiltonian),-energies[b]-carrier.detuning)?;
+                for &l in &carrier.beams{
+                    self.source(l,b,dressings.get(b).map_or(&[][..],|d|d),&mut column);lu.solve(&mut column);for i in 0..ne{responses[l][(i,b)]=column[i];}
+                    lu.solve(&mut column);for i in 0..ne{derivatives[l][(i,b)]=column[i];}
+                }
+            }
+        }
+        Ok(Elimination{energies,ground,excited,excited_energies,excited_hamiltonian,responses,derivatives,blocks})
     }
 
     /// The near light's dressing of every channel at the units' intensities (module documentation, # The
@@ -836,85 +895,124 @@ impl Ground{
     /// ΔE_b^d times b's admixture under d and the intermediates' energies' errors (D_a² of them, each
     /// intermediate's energy dressed by every near carrier); both relative to the channel's own pole
     /// (`Dressing`).
-    fn dress_light(&self,intensities:&[f64],energies:&[f64],k:&Dense,decoupled:&[Option<Dense>])->Result<Vec<Vec<Option<Dressing>>>,String>{
+    fn dress_light(&self,intensities:&[f64],ground:&Dense,energies:&[f64],k:&Dense,decoupled:&[Option<Dense>])->Result<Vec<Vec<Option<Block>>>,String>{
         let(ng,ne,nc)=(self.ground_states.len(),self.excited_states.len(),self.carriers.len());
         let column=|m:&Dense,b:usize|->Vec<Complex>{(0..ne).map(|i|m[(i,b)]).collect()};
         let dot=|x:&[Complex],y:&[Complex]|x.iter().zip(y).fold(Complex::ZERO,|s,(a,b)|s+a.conj()**b);
         let norm=|x:&[Complex]|x.iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();
         // Per carrier its units at this node: the amplitude sqrt(s_u N_u), W^f and the remainders.
         let units:Vec<Vec<(f64,&NearUnit)>>=(0..nc).map(|d|self.near_units.iter().enumerate().filter_map(|(u,x)|x.as_ref().filter(|x|x.carrier==d).map(|x|((intensities[u]*self.units[u].norm).max(0.).sqrt(),x))).collect()).collect();
-        // The ground shifts ΔE_b^d, what they leave out (the units' interference, their next order:
-        // b's admixture under d times the shift).
-        let(mut shift,mut left)=(vec![vec![0.;ng];nc],vec![vec![0.;ng];nc]);
+        // Per carrier d and ground state b: its units' fields there, their images under (K − E_b − δ_d)⁻¹ and
+        // b's admixture under d.
+        type Fields=Vec<(f64,Vec<Complex>,Vec<Vec<Complex>>)>;type Images=Vec<(Vec<Complex>,Vec<Vec<Complex>>)>;
+        let mut parts:Vec<Vec<Option<(Fields,Images,f64)>>>=vec![vec![None;ng];nc];
         for d in 0..nc{for b in 0..ng{
             if !self.couples(d,b){continue;}
             let lu=denominator(decoupled.get(b).and_then(|x|x.as_ref()).unwrap_or(k),-energies[b]-self.carriers[d].detuning)?;
             let solved=|v:&[Complex]|{let mut g=v.to_vec();lu.solve(&mut g);g};
-            let fields:Vec<(f64,Vec<Complex>,Vec<Vec<Complex>>)>=units[d].iter().map(|(a,x)|(*a,column(&x.coupling,b),x.remainders.iter().map(|r|column(r,b)).collect())).collect();
-            let images:Vec<(Vec<Complex>,Vec<Vec<Complex>>)>=fields.iter().map(|(_,v,rest)|(solved(v),rest.iter().map(|r|solved(r)).collect())).collect();
-            let mut admixture=0.;
-            for(i,((a,v,rest),(g,grest)))in fields.iter().zip(&images).enumerate(){
-                shift[d][b]-=a*a*dot(v,g).re;admixture+=a*a*norm(g).powi(2);
-                for(j,(_,(g2,_)))in fields.iter().zip(&images).enumerate(){if j!=i{left[d][b]+=a*fields[j].0*dot(v,g2).abs();}}
-                for(r,gr)in rest.iter().zip(grest){left[d][b]+=a*(dot(v,gr).abs()+dot(r,g).abs());for r2 in rest{left[d][b]+=dot(r2,gr).abs();}}
-            }
-            left[d][b]+=admixture*shift[d][b].abs();
+            let fields:Fields=units[d].iter().map(|(a,x)|(*a,column(&x.coupling,b),x.remainders.iter().map(|r|column(r,b)).collect())).collect();
+            let images:Images=fields.iter().map(|(_,v,rest)|(solved(v),rest.iter().map(|r|solved(r)).collect())).collect();
+            let admixture=fields.iter().zip(&images).map(|((a,_,_),(g,_))|a*a*norm(g).powi(2)).sum();
+            parts[d][b]=Some((fields,images,admixture));
         }}
-        // Each ground state's energy dressed by every near carrier, and its error: the intermediates'.
-        let dressed:Vec<f64>=(0..ng).map(|a|energies[a]+(0..nc).map(|d|shift[d][a]).sum::<f64>()).collect();
-        let doubt:Vec<f64>=(0..ng).map(|a|(0..nc).map(|d|left[d][a]).sum()).collect();
-        let mut out=vec![vec![None;ng];nc];
-        for c in 0..nc{for b in 0..ng{
-            if !self.couples(c,b){continue;}
-            let mut z=energies[b]+self.carriers[c].detuning;let mut error=0_f64;
-            for d in (0..nc).filter(|&d|d!=c){z+=shift[d][b];error+=left[d][b];}
-            let mut sigma=Dense::zeros(ne,ne);let mut vias=vec![];
-            for &via in &self.vias[c][b]{
-                let(d,a)=(via.carrier,via.state);let denominator=1./(z-dressed[a]-self.carriers[d].detuning);
-                for(amp,x)in &units[d]{let w=column(&x.coupling,a);let scale=amp*amp*denominator;for p in 0..ne{for q in 0..ne{sigma[(p,q)]+=w[p]*w[q].conj()*scale;}}}
-                vias.push((via,denominator,denominator*denominator*doubt[a]));
+        // d's light shift between ground states b and b2 -- b = b2 its shift of b, ΔE_b^d = −Re(V_d^f†(K − E_b −
+        // δ_d)⁻¹V_d^f)_bb --, −½ Σ_u a_u² (v_ub† g_ub2 + (v_ub2† g_ub)*) of each unit's own field, and the bound
+        // of what it leaves out: the units' interference, a unit's remainders off its polarization, its next
+        // order (the admixtures under d times the shift).
+        let between=|d:usize,b:usize,b2:usize|->(Complex,f64){
+            let(Some((f1,i1,m1)),Some((f2,i2,m2)))=(&parts[d][b],&parts[d][b2])else{return(Complex::ZERO,0.)};
+            let(mut value,mut left)=(Complex::ZERO,0_f64);
+            for(u,((a,v,rest),(g,_)))in f1.iter().zip(i1).enumerate(){
+                let((_,v2,_),(g2,grest2))=(&f2[u],&i2[u]);
+                value-=(dot(v,g2)+dot(v2,g).conj())*(0.5*a*a);
+                for(w,((aw,_,_),(gw,_)))in f2.iter().zip(i2).enumerate(){if w!=u{left+=a*aw*dot(v,gw).abs();}}
+                for(r,gr)in rest.iter().zip(grest2){left+=a*(dot(v,gr).abs()+dot(r,g2).abs());for r2 in rest{left+=dot(r2,gr).abs();}}
             }
-            out[c][b]=Some(Dressing{shift:(z-energies[b]-self.carriers[c].detuning).abs(),sigma,z,doubt:error,vias});
+            left+=0.5*(m1+m2)*value.abs();(value,left)
+        };
+        // Each ground state's energy dressed by every near carrier, and its error: the intermediates'.
+        let dressed:Vec<f64>=(0..ng).map(|a|energies[a]+(0..nc).map(|d|between(d,a,a).0.re).sum::<f64>()).collect();
+        let doubt:Vec<f64>=(0..ng).map(|a|(0..nc).map(|d|between(d,a,a).1).sum()).collect();
+        let mut out=vec![vec![None;self.clusters.len()];nc];
+        for c in 0..nc{for(k,cl)in self.clusters.iter().enumerate(){
+            if !cl.states.iter().any(|&b|self.couples(c,b)){continue;}
+            // The block: H's ground block on the cluster with every other carrier's shifts there, and the bound
+            // of what those leave out (the largest row or column sum of the entries' bounds bounds its norm).
+            let n0=cl.states.len();let mut h=Dense::zeros(n0,n0);let(mut rows,mut columns)=(vec![0.;n0],vec![0.;n0]);
+            for(i,&b)in cl.states.iter().enumerate(){for(j,&b2)in cl.states.iter().enumerate(){
+                h[(i,j)]=ground[(b,b2)];
+                for d in (0..nc).filter(|&d|d!=c){let(x,l)=between(d,b,b2);h[(i,j)]+=x;rows[i]+=l;columns[j]+=l;}
+            }}
+            let mut symmetric=Dense::zeros(n0,n0);for i in 0..n0{for j in 0..n0{symmetric[(i,j)]=(h[(i,j)]+h[(j,i)].conj())*0.5;}}
+            let error=rows.iter().chain(&columns).copied().fold(0.,f64::max);
+            let(values,vectors)=hermitian_eigen(&symmetric);
+            let modes=values.iter().map(|&lambda|{
+                let z=lambda+self.carriers[c].detuning;let mut sigma=Dense::zeros(ne,ne);let mut vias=vec![];
+                for &(via,inside)in &self.vias[c][k]{
+                    let(d,a)=(via.carrier,via.state);let denominator=1./(z-dressed[a]-self.carriers[d].detuning);
+                    if inside{for(amp,x)in &units[d]{let w=column(&x.coupling,a);let scale=amp*amp*denominator;for p in 0..ne{for q in 0..ne{sigma[(p,q)]+=w[p]*w[q].conj()*scale;}}}}
+                    vias.push((via,denominator,denominator*denominator*doubt[a],inside));
+                }
+                Dressing{sigma,z,doubt:error,vias}
+            }).collect();
+            out[c][k]=Some(Block{vectors,modes});
         }}
         Ok(out)
     }
 
     /// The dressing's bounds on the generator at an elimination (module documentation, # The near light's
-    /// dressing): per channel the response's first-order change by what its dressing leaves out
-    /// (`Dressing`) and by the whole dressing, through the dressed resolvent G -- for z's error G R = R2,
-    /// for each intermediate D_a Σ_uv a_u a_v* G w_u (w_v† R), G applied to its units' fields and their
-    /// projections on the response (the units taken apart: their pairs u ≠ v, a unit's remainders off its
-    /// polarization) --, the beams at their peak; the generator's change at most (‖V‖ + ‖D R‖) ≤ 3‖V‖
-    /// times it, relative to the generator's scale: the largest (error, undressed), what the dressing
-    /// leaves out and what an undressed response would err by.
+    /// dressing): per block's eigenstate the response's first-order change by what its dressing leaves out
+    /// (`Dressing`), through the dressed resolvent G -- for z's error G R = R2, for each intermediate
+    /// D_a Σ_uv a_u a_v* G w_u (w_v† R), G applied to its units' fields and their projections on the response
+    /// (the units taken apart: their pairs u ≠ v, a unit's remainders off its polarization) --, the beams at
+    /// their peak; the generator's change at most (‖V‖ + ‖D R‖) ≤ 3‖V‖ times it, relative to the generator's
+    /// scale. With it, what an undressed response errs by (the GPU's exact one, gpu/program.rs): measured,
+    /// the bare response of each ground state at its own energy against the response, weighted alike. The
+    /// largest of each (error, undressed).
     pub fn dressing_bounds(&self,e:&Elimination,intensities:&[f64])->Result<(f64,f64),String>{
-        let(ng,ne)=(self.ground_states.len(),self.excited_states.len());let scale=self.generator_scale.max(f64::MIN_POSITIVE);
+        let ne=self.excited_states.len();let scale=self.generator_scale.max(f64::MIN_POSITIVE);
         let column=|m:&Dense,b:usize|->Vec<Complex>{(0..ne).map(|i|m[(i,b)]).collect()};
         let dot=|x:&[Complex],y:&[Complex]|x.iter().zip(y).fold(Complex::ZERO,|s,(a,b)|s+a.conj()**b).abs();
         let norm=|x:&[Complex]|x.iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();
+        let dressings=self.dressings(&e.excited,&e.excited_hamiltonian);
         let(mut error,mut undressed)=(0_f64,0_f64);
-        for(c,carrier)in self.carriers.iter().enumerate(){for b in 0..ng{
-            let Some(d)=&e.dressing[c][b] else{continue};
-            let mut k=e.excited_hamiltonian.clone();k.add_scaled(Complex::ONE,&d.sigma);
-            if let Some(p)=self.explicit_of.get(b).filter(|p|p.iter().any(|&x|x)){k=self.decoupled(&k,p);}
-            let lu=denominator(&k,-d.z)?;let solved=|v:&[Complex]|{let mut g=v.to_vec();lu.solve(&mut g);norm(&g)};
-            let responses:Vec<Vec<Complex>>=carrier.beams.iter().map(|&l|column(&e.responses[l],b)).collect();
-            let projection=|w:&[Complex]|responses.iter().map(|r|dot(w,r)).sum::<f64>();
-            let second:f64=carrier.beams.iter().map(|&l|norm(&column(&e.derivatives[l],b))).sum();
-            let(mut left,mut change)=(d.doubt*second,d.shift*second);
-            for &(via,denominator,doubt)in &d.vias{
-                let fields:Vec<(f64,Vec<Complex>,Vec<Vec<Complex>>)>=self.near_units.iter().enumerate().filter_map(|(u,x)|x.as_ref().filter(|x|x.carrier==via.carrier)
-                    .map(|x|((intensities[u]*self.units[u].norm).max(0.).sqrt(),column(&x.coupling,via.state),x.remainders.iter().map(|r|column(r,via.state)).collect()))).collect();
-                for(i,(amp,w,rest))in fields.iter().enumerate(){
-                    let(g,p)=(solved(w),projection(w));
-                    change+=denominator.abs()*amp*amp*g*p;left+=doubt*amp*amp*g*p;
-                    for(j,(amp2,w2,_))in fields.iter().enumerate(){if j!=i{left+=denominator.abs()*amp*amp2*g*projection(w2);}}
-                    let rests:f64=rest.iter().map(|r|projection(r)).sum();
-                    for r in rest{let(gr,pr)=(solved(r),projection(r));left+=denominator.abs()*(amp*(g*pr+gr*p)+gr*rests);}
+        for(c,carrier)in self.carriers.iter().enumerate(){for(k,cl)in self.clusters.iter().enumerate(){
+            let Some(block)=&e.blocks[c][k] else{continue};
+            for(j,d)in block.modes.iter().enumerate(){
+                let lu=self.mode_denominator(&e.excited_hamiltonian,cl,d,0.)?;let solved=|v:&[Complex]|{let mut g=v.to_vec();lu.solve(&mut g);g};
+                let sources:Vec<Vec<Complex>>=carrier.beams.iter().map(|&l|{let mut s=vec![Complex::ZERO;ne];self.mode_source(l,cl,&block.vectors,j,&dressings,&mut s);s}).collect();
+                let responses:Vec<Vec<Complex>>=sources.iter().map(|s|solved(s)).collect();
+                let projection=|w:&[Complex]|responses.iter().map(|r|dot(w,r)).sum::<f64>();
+                let second:f64=responses.iter().map(|r|norm(&solved(r))).sum();
+                let mut left=d.doubt*second;
+                for &(via,denominator,doubt,inside)in &d.vias{
+                    let fields:Vec<(f64,Vec<Complex>,Vec<Vec<Complex>>)>=self.near_units.iter().enumerate().filter_map(|(u,x)|x.as_ref().filter(|x|x.carrier==via.carrier)
+                        .map(|x|((intensities[u]*self.units[u].norm).max(0.).sqrt(),column(&x.coupling,via.state),x.remainders.iter().map(|r|column(r,via.state)).collect()))).collect();
+                    for(i,(amp,w,rest))in fields.iter().enumerate(){
+                        let(g,p)=(norm(&solved(w)),projection(w));
+                        // A far channel the cluster keeps for another of its states: its whole first order.
+                        if !inside{left+=denominator.abs()*amp*amp*g*p;continue;}
+                        left+=doubt*amp*amp*g*p;
+                        for(j2,(amp2,w2,_))in fields.iter().enumerate(){if j2!=i{left+=denominator.abs()*amp*amp2*g*projection(w2);}}
+                        let rests:f64=rest.iter().map(|r|projection(r)).sum();
+                        for r in rest{let(gr,pr)=(norm(&solved(r)),projection(r));left+=denominator.abs()*(amp*(g*pr+gr*p)+gr*rests);}
+                    }
                 }
+                error=error.max(3.*sources.iter().map(|s|norm(s)).sum::<f64>()*left/scale);
             }
-            let share=3.*carrier.beams.iter().map(|&l|norm(&column(&self.folded[l],b))).sum::<f64>();
-            error=error.max(share*left/scale);undressed=undressed.max(share*change/scale);
+        }}
+        // What an undressed response errs by, measured: the bare one -- each ground state at its own energy,
+        // undressed -- against the response, column by column, weighted by the channel's share.
+        for(c,carrier)in self.carriers.iter().enumerate(){for b in 0..self.ground_states.len(){
+            if !self.couples(c,b){continue;}
+            let mut k=e.excited_hamiltonian.clone();
+            if let Some(p)=self.explicit_of.get(b).filter(|p|p.iter().any(|&x|x)){k=self.decoupled(&k,p);}
+            let lu=denominator(&k,-e.energies[b]-carrier.detuning)?;let(mut share,mut apart)=(0.,0.);
+            for &l in &carrier.beams{
+                let mut s=vec![Complex::ZERO;ne];self.source(l,b,dressings.get(b).map_or(&[][..],|d|d),&mut s);share+=norm(&s);lu.solve(&mut s);
+                apart+=s.iter().enumerate().map(|(i,x)|(*x-e.responses[l][(i,b)]).norm_sqr()).sum::<f64>().sqrt();
+            }
+            undressed=undressed.max(3.*share*apart/scale);
         }}
         Ok((error,undressed))
     }
@@ -1353,10 +1451,15 @@ impl Ground{
                 width*width>BUDGET*(focus.excited_energies[e]-focus.excited_energies[f]).powi(2)});
             if joined{groups.last_mut().unwrap().push(e);}else{groups.push(vec![e]);}
         }
-        // The near light's dressing from here on (`Ground::dress_light`): every channel's far channels, every
-        // near unit's fields, and the carriers' poles dressed.
-        self.vias=(0..nc).map(|c|(0..ng).map(|b|{let x=Channel{carrier:c,state:b};
-            channels.iter().copied().filter(|&y|self.couples(c,b)&&folded_raman(x,y)==Some(true)).collect()}).collect()).collect();
+        // The near light's dressing from here on (`Ground::dress_light`): every block's far channels -- of the
+        // folded pairs from the cluster's states, those none of its states keeps (a kept pair's other channel
+        // is the cluster's own dynamics) --, every near unit's fields, and the carriers' poles dressed.
+        self.vias=(0..nc).map(|c|clusters.iter().map(|cl|{
+            let mut out:Vec<Channel>=vec![];
+            for &b in cl.states.iter().filter(|&&b|self.couples(c,b)){let x=Channel{carrier:c,state:b};
+                for &y in &channels{if folded_raman(x,y)==Some(true)&&!out.contains(&y){out.push(y);}}}
+            out.into_iter().map(|y|(y,cl.states.iter().all(|&b|folded_raman(Channel{carrier:c,state:b},y)!=Some(false)))).collect()
+        }).collect()).collect();
         self.near_units=self.units.iter().map(|u|{let c=self.carriers.iter().position(|c|c.beams.contains(&u.beams[0]))?;
             let mut coupling=Dense::zeros(ne,ng);for(&l,&x)in u.beams.iter().zip(&u.combination){coupling.add_scaled(x,&self.folded[l]);}
             let remainders=if u.beams.len()>1{u.beams.iter().zip(&u.weights).map(|(&l,&g)|{let mut r=self.folded[l].clone();r.add_scaled(-g,&coupling);r}).collect()}else{vec![]};
@@ -1370,17 +1473,18 @@ impl Ground{
     /// Every beam's amplitude at a point r (um from the focus).
     pub fn amplitudes_at(&self,r:[f64;3])->Vec<Complex>{self.beams.iter().map(|b|b.amplitude_at(r)).collect()}
 
-    /// The nearest excited pole every channel sees over the trap, its dressed response's:
-    /// min σ_min(K + Σ − z) over the eliminations at the varying units' corners and levels.
+    /// The nearest excited pole every channel sees over the trap, its block's dressed responses':
+    /// min σ_min(K + Σ_j − z_j) over the eliminations at the varying units' corners and levels.
     fn dressed_poles(&self)->Result<Vec<Vec<f64>>,String>{
         let(ng,nc)=(self.ground_states.len(),self.carriers.len());let mut poles=vec![vec![f64::INFINITY;ng];nc];
         let mut identity=Dense::zeros(self.excited_states.len(),self.excited_states.len());for i in 0..identity.rows{identity[(i,i)]=Complex::ONE;}
         for intensities in intensity_points(&self.units,&self.beams){
             let e=self.eliminate(&intensities)?;
-            for c in 0..nc{for b in 0..ng{if let Some(d)=&e.dressing[c][b]{
-                let mut k=e.excited_hamiltonian.clone();k.add_scaled(Complex::ONE,&d.sigma);
-                poles[c][b]=poles[c][b].min(1./denominator(&k,-d.z)?.solve_columns(&identity).spectral_norm());
-            }}}
+            for c in 0..nc{for(k,cl)in self.clusters.iter().enumerate(){let Some(block)=&e.blocks[c][k] else{continue};
+                let mut pole=f64::INFINITY;
+                for mode in &block.modes{pole=pole.min(1./self.mode_denominator(&e.excited_hamiltonian,cl,mode,0.)?.solve_columns(&identity).spectral_norm());}
+                for &b in cl.states.iter().filter(|&&b|self.couples(c,b)){poles[c][b]=poles[c][b].min(pole);}
+            }}
         }
         Ok(poles)
     }
@@ -1481,10 +1585,19 @@ impl Ground{
         let c=self.carriers.iter().position(|c|c.beams.contains(&beam)).unwrap();let carrier=&self.carriers[c];let coupling=&self.folded[beam];
         let mut out=Dense::zeros(coupling.rows,coupling.cols);let mut column=vec![Complex::ZERO;coupling.rows];
         let dressings=self.dressings(&elimination.excited,&elimination.excited_hamiltonian);
+        if self.dressing{
+            for(k,cl)in self.clusters.iter().enumerate(){let Some(block)=&elimination.blocks[c][k] else{continue};
+                for(j,mode)in block.modes.iter().enumerate(){
+                    let lu=self.mode_denominator(&elimination.excited_hamiltonian,cl,mode,shift)?;
+                    self.mode_source(beam,cl,&block.vectors,j,&dressings,&mut column);lu.solve(&mut column);
+                    for(i,&b)in cl.states.iter().enumerate(){let w=block.vectors[(i,j)].conj();for x in 0..coupling.rows{out[(x,b)]+=column[x]*w;}}
+                }
+            }
+            return Ok(out);
+        }
         for b in 0..coupling.cols{
             if (0..coupling.rows).all(|i|coupling[(i,b)]==Complex::ZERO){continue;}
-            let(mut k,z)=match &elimination.dressing[c][b]{Some(d)=>{let mut k=elimination.excited_hamiltonian.clone();k.add_scaled(Complex::ONE,&d.sigma);(k,d.z)},
-                None=>(elimination.excited_hamiltonian.clone(),elimination.energies[b]+carrier.detuning)};
+            let mut k=elimination.excited_hamiltonian.clone();let z=elimination.energies[b]+carrier.detuning;
             if let Some(p)=self.explicit_of.get(b).filter(|p|p.iter().any(|&x|x)){k=self.decoupled(&k,p);}
             let lu=denominator(&k,shift-z)?;
             self.source(beam,b,dressings.get(b).map_or(&[][..],|d|d),&mut column);lu.solve(&mut column);for i in 0..coupling.rows{out[(i,b)]=column[i];}
