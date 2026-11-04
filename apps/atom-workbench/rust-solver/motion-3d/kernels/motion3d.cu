@@ -132,6 +132,11 @@ __device__ __forceinline__ float warp_max(float v){
     for(int o=16;o>0;o>>=1)v=fmaxf(v,__shfl_xor_sync(FULL,v,o));
     return v;
 }
+__device__ __forceinline__ double warp_max(double v){
+    #pragma unroll
+    for(int o=16;o>0;o>>=1)v=fmax(v,__shfl_xor_sync(FULL,v,o));
+    return v;
+}
 __device__ __forceinline__ int floordiv(int a,int b){return a>=0?a/b:-((-a+b-1)/b);}
 
 // ---------------------------------------------------------------------------------------------
@@ -287,6 +292,7 @@ struct Program{
     u32 near_focused;                   // the carriers with a focused near unit (bits)
     float hm,light2,allowance,truncation;   // ħ/m (um²/us), twice the light shift's bound, the first order's allowance, the exponentials' truncation
     float ringing;                          // what a coupling within a manifold may move a ringing photon's amplitude by and be left out (model.rs `RINGING_SHARE`)
+    float recoil_spread;                    // the least spread of a photon's parts' recoils along a direction their weights move along, of the largest recoil (engine.rs `RECOIL_SPREAD`)
     float axes32[3][3],stiffness32[3];      // the axes and the stiffness below, in single precision
     double hm64,dt;
     double axes[3][3],omega[3],stiffness[3];// the trap's principal axes (rows), ω_i (rad/us), ω_i²/(ħ/m)
@@ -1597,14 +1603,16 @@ __device__ __forceinline__ void rotate(double& app,double& aqq,double& apq,doubl
     #pragma unroll
     for(int k=0;k<3;k++){const double a=v[k][p],b=v[k][q];v[k][p]=c*a-s*b;v[k][q]=s*a+c*b;}
 }
-// β = C⁺ g on the range of a positive semidefinite C (engine.rs `symmetric`, `part_weights`: eigenvalues above its round-off).
+// β = C⁺ g on the range of a positive semidefinite C (engine.rs `symmetric`, `part_weights`: the directions above its round-off along which the parts on spread by
+// more than `spread`: a lane's `on` and recoil less their mean `off`, the explicit part's `onx`, its recoil's mean zero, so less `centre`; `sum` their weight).
 // Where the adjugate's determinant holds single precision -- its round-off is at most 3 ε tr(C)³, and with it the solution's
-// relative error, which the parts' single-precision shares cannot tell from theirs --, the adjugate's; else Jacobi's rotations
+// relative error, which the parts' single-precision shares cannot tell from theirs -- and every direction spreads that far (each direction's spread is at least the root of its eigenvalue over
+// their weight, and the smallest eigenvalue at least 4 det/tr²), the adjugate's; else Jacobi's rotations
 // to double precision, in the cycle of the places (β does not depend on the order; the CPU's rotates the largest first).
-__device__ __forceinline__ void on_range(double c00,double c01,double c02,double c11,double c12,double c22,const double g[3],double beta[3]){
+__device__ __forceinline__ void on_range(double c00,double c01,double c02,double c11,double c12,double c22,const double g[3],double on,const double off[3],double onx,const double centre[3],double sum,double spread,double beta[3]){
     const double a00=c11*c22-c12*c12,a01=c02*c12-c01*c22,a02=c01*c12-c02*c11,a11=c00*c22-c02*c02,a12=c01*c02-c00*c12,a22=c00*c11-c01*c01;
     const double det=c00*a00+c01*a01+c02*a02,trace=c00+c11+c22;
-    if(det*FLT_EPSILON>3.*DBL_EPSILON*trace*trace*trace){
+    if(det*FLT_EPSILON>3.*DBL_EPSILON*trace*trace*trace&&4.*det>trace*trace*sum*spread*spread){
         const double inverse=1./det;
         beta[0]=inverse*(a00*g[0]+a01*g[1]+a02*g[2]);beta[1]=inverse*(a01*g[0]+a11*g[1]+a12*g[2]);beta[2]=inverse*(a02*g[0]+a12*g[1]+a22*g[2]);
         return;
@@ -1615,22 +1623,25 @@ __device__ __forceinline__ void on_range(double c00,double c01,double c02,double
         if(!(fmax(fmax(fabs(c01),fabs(c02)),fabs(c12))>round))break;
         rotate(c00,c11,c01,c02,c12,v,0,1,round);rotate(c00,c22,c02,c01,c12,v,0,2,round);rotate(c11,c22,c12,c01,c02,v,1,2,round);
     }
-    const double floor_=4.*DBL_EPSILON*(fabs(c00)+fabs(c11)+fabs(c22)),values[3]={c00,c11,c22};
+    const double floor_=64.*DBL_EPSILON*(fabs(c00)+fabs(c11)+fabs(c22)),values[3]={c00,c11,c22};  // engine.rs `SHARE_ROUNDING`
     #pragma unroll
     for(int a=0;a<3;a++)beta[a]=0.;
     #pragma unroll
-    for(int i=0;i<3;i++)if(values[i]>floor_){
+    for(int i=0;i<3;i++){
+        const double along=v[0][i]*off[0]+v[1][i]*off[1]+v[2][i]*off[2],across=v[0][i]*centre[0]+v[1][i]*centre[1]+v[2][i]*centre[2];
+        if(!(values[i]>floor_&&fmax(warp_max(on>0.?fabs(along):0.),onx>0.?fabs(across):0.)>spread))continue;
         const double p=(v[0][i]*g[0]+v[1][i]*g[1]+v[2][i]*g[2])/values[i];
         #pragma unroll
         for(int a=0;a<3;a++)beta[a]+=p*v[a][i];
     }
 }
 // The weights of a photon's parts (engine.rs `part_weights`), a lane per beam: its share s and its recoil's mean mu (zeros on a lane
-// without a beam) and the explicit states' share sx (its recoil's mean zero), n parts in all, moved to the mean `target`: the lane's q and the
-// explicit part's qx; false where no part has a share.
-__device__ __forceinline__ bool part_weights(double s,const double mu[3],double sx,const double target[3],int n,double& q,double& qx){
+// without a beam) and the explicit states' share sx (its recoil's mean zero), n parts in all, moved to the mean `target`, their directions those they spread along by more than `least`
+// of the largest recoil: the lane's q and the explicit part's qx; false where no part has a share.
+__device__ __forceinline__ bool part_weights(double s,const double mu[3],double sx,const double target[3],int n,double least,double& q,double& qx){
     q=qx=0.;const double total=warp_sum(s)+sx;if(!(total>0.))return false;
     const double scale=1./total;q=s*scale;qx=sx*scale;double on=q,onx=qx;
+    const double spread=least*sqrt(warp_max(mu[0]*mu[0]+mu[1]*mu[1]+mu[2]*mu[2]));
     for(int it=0;it<n;it++){
         const double sum=warp_sum(on)+onx;if(!(sum>0.))break;
         const double inverse=1./sum;double centre[3],g[3],off[3];
@@ -1638,7 +1649,7 @@ __device__ __forceinline__ bool part_weights(double s,const double mu[3],double 
         for(int a=0;a<3;a++){centre[a]=inverse*warp_sum(on*mu[a]);g[a]=target[a]-warp_sum(q*mu[a]);off[a]=mu[a]-centre[a];}
         double beta[3];
         on_range(warp_sum(on*off[0]*off[0])+onx*centre[0]*centre[0],warp_sum(on*off[0]*off[1])+onx*centre[0]*centre[1],warp_sum(on*off[0]*off[2])+onx*centre[0]*centre[2],
-            warp_sum(on*off[1]*off[1])+onx*centre[1]*centre[1],warp_sum(on*off[1]*off[2])+onx*centre[1]*centre[2],warp_sum(on*off[2]*off[2])+onx*centre[2]*centre[2],g,beta);
+            warp_sum(on*off[1]*off[1])+onx*centre[1]*centre[1],warp_sum(on*off[1]*off[2])+onx*centre[1]*centre[2],warp_sum(on*off[2]*off[2])+onx*centre[2]*centre[2],g,on,off,onx,centre,sum,spread,beta);
         const double d=on*(beta[0]*off[0]+beta[1]*off[1]+beta[2]*off[2]),dx=-onx*(beta[0]*centre[0]+beta[1]*centre[1]+beta[2]*centre[2]);
         const bool leaving=on>0.&&d<0.,leaving_x=onx>0.&&dx<0.;
         const double alpha=fmin(warp_min(leaving?-q/d:1.),leaving_x?-qx/dx:1.);
@@ -1664,7 +1675,7 @@ __device__ void recoil(const Program& P,const JumpSpace& J,Traj& t,const double 
     }
     #pragma unroll
     for(int a=0;a<3;a++){kick[a]=-wave_number*n[a]+mean[a];target[a]=warp_sum(on*mu[a]);}
-    if(part_weights(s,mu,(double)J.direct,target,count+1,q,qx)){
+    if(part_weights(s,mu,(double)J.direct,target,count+1,(double)P.recoil_spread,q,qx)){
         double x=absorbed;int pick=-1;
         for(int c=0;c<count;c++){const double v=__shfl_sync(FULL,q,c);if(x<v){pick=c;break;}x-=v;}
         if(pick<0&&x<qx)pick=count;

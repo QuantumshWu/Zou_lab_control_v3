@@ -791,22 +791,36 @@ fn symmetric(mut a:[[f64;3];3])->([f64;3],[[f64;3];3]){
     ([a[0][0],a[1][1],a[2][2]],std::array::from_fn(|i|[v[0][i],v[1][i],v[2][i]]))
 }
 
+/// A part's share below the largest by single precision's round-off squared is the GPU's amplitudes' round-off: C's eigenvalues below this of its trace, 2⁻⁴⁶, 64 of double
+/// precision's, are no direction on either device (`part_weights`).
+const SHARE_ROUNDING:f64=f32::EPSILON as f64*f32::EPSILON as f64;
+/// The least spread of a photon's parts' recoils along a direction, of the largest recoil, for which their weights move along it (`part_weights`). Within it the
+/// weights could move the drawn mean by that spread at most and the deterministic kick carries it instead, the mean exact: the photon's second moment moves by twice the spread, of k², at most, within
+/// T's numerical share (`QUADRATURE`). Beams along one axis on carriers apart, 1e-7 of a recoil at 36 MHz, are one direction so -- the kernel's single-precision recoils do not even tell that apart --, and a step
+/// along their difference, which no weight could complete, would only drop one part or another.
+pub(crate) const RECOIL_SPREAD:f64=0.5*QUADRATURE;
+
 /// The weights of a photon's parts (# Absorption): their shares s_c moved the least (χ²) to the mean t of their recoils' means
 /// μ_c, nonnegative: q_c ← q_c + α a_c β·(μ_c − m), a_c the parts still on (first the shares), m their mean, β = C⁺ (t − Σ q μ)
-/// on their covariance C's range (eigenvalues above its round-off), α ≤ 1 up to the first weight that reaches zero -- it
+/// on their covariance C's range, the directions above its round-off (`SHARE_ROUNDING`) along which the parts on spread by
+/// more than `RECOIL_SPREAD`, α ≤ 1 up to the first weight that reaches zero -- it
 /// leaves, and the others move on, at most once per part. A t beyond the recoils' hull leaves them on its face, the rest
 /// to the caller. All zero without a share.
 pub fn part_weights(s:&[f64],mu:&[[f64;3]],target:[f64;3])->Vec<f64>{
     let n=s.len();let total:f64=s.iter().sum();if !(total>0.){return vec![0.;n];}
     let mut q:Vec<f64>=s.iter().map(|x|x/total).collect();let mut on=q.clone();
+    let spread=RECOIL_SPREAD*mu.iter().map(|m|(m[0]*m[0]+m[1]*m[1]+m[2]*m[2]).sqrt()).fold(0.,f64::max);
     for _ in 0..n{
         let sum:f64=on.iter().sum();if !(sum>0.){break;}
         let centre:[f64;3]=std::array::from_fn(|a|(0..n).map(|c|on[c]*mu[c][a]).sum::<f64>()/sum);
         let g:[f64;3]=std::array::from_fn(|a|target[a]-(0..n).map(|c|q[c]*mu[c][a]).sum::<f64>());
         let mut h=[[0.;3];3];for c in 0..n{for i in 0..3{for j in 0..3{h[i][j]+=on[c]*(mu[c][i]-centre[i])*(mu[c][j]-centre[j]);}}}
-        let(values,vectors)=symmetric(h);let floor=4.*f64::EPSILON*values.iter().map(|v|v.abs()).sum::<f64>();
+        let(values,vectors)=symmetric(h);let floor=SHARE_ROUNDING*values.iter().map(|v|v.abs()).sum::<f64>();
         let mut beta=[0.;3];
-        for i in 0..3{if values[i]>floor{let p=(0..3).map(|a|vectors[i][a]*g[a]).sum::<f64>()/values[i];for a in 0..3{beta[a]+=p*vectors[i][a];}}}
+        for i in 0..3{
+            let spreads=(0..n).any(|c|on[c]>0.&&(0..3).map(|a|vectors[i][a]*(mu[c][a]-centre[a])).sum::<f64>().abs()>spread);
+            if values[i]>floor&&spreads{let p=(0..3).map(|a|vectors[i][a]*g[a]).sum::<f64>()/values[i];for a in 0..3{beta[a]+=p*vectors[i][a];}}
+        }
         let d:Vec<f64>=(0..n).map(|c|on[c]*(0..3).map(|a|beta[a]*(mu[c][a]-centre[a])).sum::<f64>()).collect();
         let alpha=(0..n).filter(|&c|on[c]>0.&&d[c]<0.).map(|c|-q[c]/d[c]).fold(1.,f64::min);
         for c in 0..n{q[c]+=alpha*d[c];if on[c]>0.&&d[c]<0.&&q[c]<=-4.*f64::EPSILON*alpha*d[c]{q[c]=0.;on[c]=0.;}}
@@ -1226,6 +1240,24 @@ mod tests{
         // What the exact mean holds beyond the beams' phases is a deterministic kick.
         let extra=[0.3,-0.2,0.1];let(mean,_)=over_the_draw(|u|absorbed_recoil(&b,None,std::array::from_fn(|a|m[a]+extra[a]),u));
         assert!(close(mean,std::array::from_fn(|a|m[a]+extra[a]),2e-3),"{mean:?}");
+    }
+    /// Two beams along one axis on carriers apart, by a dark point (the probed PGC's jump that once parted the devices: shares of 1e-9, the mean beyond the recoils' hull): whatever their split
+    /// below `RECOIL_SPREAD` and however the recoils lie, the weights end on the hull's edge from them to the beam across, at the foot of the mean on it, and neither beam is lost: the direction between the two takes no step.
+    #[test]
+    fn beams_along_one_axis_are_one_direction(){
+        let k=8.05282506255877;let s=[9.173492148945024e-10,9.90160465550982e-10,0.2665137905681378,0.1858455805747167,0.18667338805763312,0.36096723889200283,0.0];
+        let target=[5.1052716918023044,-1.2922150921409203,5.606014164812307];let axis=[1./14_f64.sqrt(),2./14_f64.sqrt(),3./14_f64.sqrt()];
+        for angle in [0_f64,0.3,1.1,2.9]{
+            // Rodrigues' rotation: the frames in which C's zero eigenvalues are its round-off.
+            let turn=|v:[f64;3]|->[f64;3]{let(sin,cos)=angle.sin_cos();let dot=(0..3).map(|a|axis[a]*v[a]).sum::<f64>();
+                let cross=[axis[1]*v[2]-axis[2]*v[1],axis[2]*v[0]-axis[0]*v[2],axis[0]*v[1]-axis[1]*v[0]];std::array::from_fn(|a|v[a]*cos+cross[a]*sin+axis[a]*dot*(1.-cos))};
+            for split in [9.47e-8,3e-7,1e-6,1e-5,1e-4]{
+                let mu=[[k*(1.+split),0.,0.],[k,0.,0.],[-k,0.,0.],[0.,k,0.],[0.,-k,0.],[0.,0.,k],[0.,0.,0.]].map(turn);
+                let q=part_weights(&s,&mu,turn(target));let foot=(target[0]-target[2]+k)/(2.*k);
+                assert!(q[0]>0.&&q[1]>0.,"{angle} {split}: {q:?}");assert!(q[2]==0.&&q[3]==0.&&q[4]==0.&&q[6]==0.,"{angle} {split}: {q:?}");
+                assert!((q[0]+q[1]-foot).abs()<=1e-4&&(q[5]-(1.-foot)).abs()<=1e-4,"{angle} {split}: {q:?} against {foot}");
+            }
+        }
     }
     /// A photon of folded beams and explicit states: the mean is the folded part's whatever the explicit part weighs (its
     /// kicks have mean zero, the Ehrenfest force carrying its mean); the explicit part's second moment is its drives'.

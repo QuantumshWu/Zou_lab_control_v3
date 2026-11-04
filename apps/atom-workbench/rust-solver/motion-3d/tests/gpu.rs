@@ -99,8 +99,9 @@ fn beating_twice(r:&Request)->Model{
 /// sends it: its folds' saturation far beyond one, its first rung keeps 5 excited states explicit with the 5
 /// ground states of F = 2, a cluster beating at 36.4 MHz that its exact step takes by CF4.
 fn probed()->Request{let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=vec![0.,1.];r}
-/// The same with its cooling beam along the probe a line of its own, at twice the cooling light's offset from the probe: three carriers, and rungs that beat at 36.4 and 72.8 MHz.
-fn probed_twice()->Request{let mut r=probed();let beam=r.beams.iter_mut().find(|b|b.id=="cool-plus-x").unwrap();beam.frequency_index[0]*=2;r}
+/// The same with its last cooling beam a line of its own, at twice the cooling light's offset from the probe: three carriers, rungs that beat at 36.4 and 72.8 MHz, and a photon's near
+/// parts whose recoils may leave their covariance an eigenvalue of round-off.
+fn probed_twice()->Request{let mut r=probed();let beam=r.beams.last_mut().unwrap();beam.frequency_index[0]*=2;r}
 /// A batch of the fixture's thermal trajectories and the step's settings (a solve's: the truncation
 /// a share of the step's budget, the loss on), with `threshold` (when given) as every one's.
 fn setup(r:&Request,model:Model,dt:f64,threshold:Option<f64>,allowance:f64)->(Model,Settings,Vec<Trajectory>){
