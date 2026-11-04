@@ -175,8 +175,7 @@
 //! root on a grid of fourth order, so that
 //! their optimum lies at a few per cent of it, its terms' share of the work. The model's approximations take no
 //! fixed share: each is booked as measured against the target, and chosen by its cost (the fold's candidates, the
-//! tables' refinement, model.rs `tabulate`); a model whose estimate the whole target cannot hold is refused (the
-//! GPU's undressed response, gpu/program.rs). The gain's guard (model.rs `Model::lindblad`) is no such estimate: the
+//! tables' refinement, model.rs `tabulate`). The gain's guard (model.rs `Model::lindblad`) is no such estimate: the
 //! generator is of Lindblad form by construction, its round-off the limit of what it may read.
 //!
 //! As the a-priori estimates A near ε that work diverges, as R^−(2+1/p), while past ε no work meets the target: the rule
@@ -745,7 +744,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let Candidate{model,initial,base,charges,phase,..}=chosen;
     // The generator against its jumps at the pilot's states (`gain`): booked where its decay falls below
     // the jumps' rate.
-    let mut base=gained(&base,&model,&states);
+    let base=gained(&base,&model,&states);
     // The beats the exact steps left out (engine.rs `Segment::resolve`), booked as their bound per unit time
     // over the horizon: within the exponentials' share by construction (`booked_beats`).
     let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
@@ -781,8 +780,6 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         },
     };
     let used=if gpu.is_some(){Device::Gpu}else{Device::Cpu};
-    // On the GPU the exact response leaves the near light's dressing out (gpu/program.rs): its bound.
-    if gpu.is_some()&&model.undressed>0.{base.add("GPU 精确响应中的基态静态耦合",model.undressed,"多普勒一阶之外的精确响应按各基态自身能量计算，未计入基态静态块的本征基（GPU）".into());}
     // The control variates (control.rs): the harmonic twin's, and the held twin where the trap beam's
     // intensity is the pilot's mean, when the generator is static.
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);

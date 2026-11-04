@@ -163,7 +163,7 @@ struct Beam{
     u32 coupled;                        // the ground columns its coupling reaches (bit b)
     float coefficients[MOST_RANK][2];   // c_lk on its carrier's basis
 };
-struct Carrier{int rank,beams,first,pad;double detuning,wave;};   // its beams: beam_list[first, first + beams); its photons' wave number
+struct Carrier{int rank,beams,first;u32 couples;double detuning,wave;};   // its beams: beam_list[first, first + beams); the ground states its folded drives reach (bits); its photons' wave number
 // A unit of the light's static shifts (ground.rs `Unit`): its beams unit_beams[first, first + count)
 // with their weights γ_l (unit_weights), N, its intensity at the focus s(0) and its weight when taken
 // at the focus (model.rs `profile_error`; −1 otherwise). Its intensity s = |Σ_l a_l γ_l|²/N.
@@ -179,9 +179,10 @@ struct Unit{int first,count;float norm,focus,profile;int pad;};
 // terms terms[terms, terms + nterms) and dressed photons (the tables at `emission`), its explicit states'
 // excited positions (excited_list[excited]), its groups' parts (group_parts[group_parts + g]) and its
 // sparse groups' beats' (residual_parts[residual_parts + b]). The near light's shifts ΔE_a^d its exact
-// responses' dressing takes (`exact_responses`): bit d·NG + a.
+// responses' dressing takes (`exact_responses`): bit d·NG + a; the carriers whose static block on it mixes its
+// responses (bits; ground.rs `Ground::unmixed`, `mixed_responses`).
 struct Cluster{int n,size,table,h0,groups,ngroups,classes,nclasses,coherent,ncoherent,carriers,fourth,frames,positions,beats,nbeats,
-    n0,exact,parts,omegas,terms,nterms,emission,excited,group_parts,residual_parts;int states[MAXM];u64 shifts;};
+    n0,exact,parts,omegas,terms,nterms,emission,excited,group_parts,residual_parts;int states[MAXM];u64 shifts;u32 mixed;int pad;};
 // A cluster's fourth-order tables (model.rs `FourthLayout`, # Fourth order): their places in its node
 // slice per carrier (−1: none), the carriers that drive it carriers[0, on). H^(4)'s quartic part per
 // pair (c, d), r_c² r_d² matrices n × n of the monomials E^c*_k1 E^c_k2 E^d*_k3 E^d_k4; per carrier
@@ -239,12 +240,13 @@ struct Program{
     // The exact response's dressing (`exact_responses`): every beam's kept drives V_l − V_l^f (NE × NG), D (NE × NE),
     // the near units by carrier (near_units[near_first[d], near_first[d + 1])) and their folded fields W^f
     // (unit_couplings, NG columns of NE each), every channel's far channels (d, a) vias[via_first[c·NG + b],
-    // via_first[c·NG + b + 1]).
-    const float2* kept;const float2* decay;const NearUnit* near_units;const float2* unit_couplings;const int2* vias;const int* via_first;
+    // via_first[c·NG + b + 1]); H's ground block, its base and per focused beam (NG × NG each), and per channel the
+    // weight below which a state's term of a mixed block is left out (`mixed_responses`).
+    const float2* kept;const float2* decay;const NearUnit* near_units;const float2* unit_couplings;const int2* vias;const int* via_first;const float2* ground_block;const float* term_floor;
     int nbeams,ncarriers,nclusters,focused,nodes,fields,nnear,doppler,loss;
     int weights;                        // where a jump's scratch holds the fourth order's weights
     int nunits;
-    int exact_at,transient_at,nlevels,rows_at;  // the exact step's, the transient's and the exact responses' rows' room in a trajectory's scratch
+    int exact_at,transient_at,nlevels,rows_at,between_at;  // the exact step's, the transient's, the exact responses' rows' and the mixed blocks' shifts' room in a trajectory's scratch
     int focused_unit[MOST_FOCUSED],stride[MOST_FOCUSED];   // the focused units (the trap beam's first), the stencil's strides
     int field_carrier[MOST_CARRIERS*MOST_RANK],field_rank[MOST_CARRIERS*MOST_RANK];
     int ground_states[NG],excited_states[NE],ground_cluster[NG],ground_position[NG];
@@ -307,6 +309,9 @@ struct Point{
     Fields fields[MOST_CARRIERS];
     float2 off[MOST_CARRIERS][MOST_RANK];          // E_k with the trap's light off (model.rs `fields_off`)
 };
+// The exact responses' working space (`exact_responses`): the shifts ΔE_a^d; a mixed block's off-diagonal part and
+// eigenvectors, its terms' weights over the columns, its eigenvalues and its states' own energies.
+struct BlockSpace{float shift[MOST_CARRIERS*NG];float2 a[MAXN*MAXN],u[MAXN*MAXN],weights[MAXN];double values[MAXN],own[MAXN];};
 // A jump's working space.
 struct JumpSpace{float2 u[3][MAXN],f[MAXN];float weights[MOST_CLASSES],shares[MOST_BEAMS],projections[MOST_BEAMS],drives[MOST_BEAMS],direct;int beams[MOST_BEAMS],driven[MOST_BEAMS],ndrives;};
 struct Warp{
@@ -315,7 +320,7 @@ struct Warp{
     double2 readout[MAXN];              // the readout's Y ψ
     float2 twin[MAXN];                  // the held twin's ψ
     // vec: the exact step's vectors (`half_of`); dressing: the exact responses' shifts ΔE_a^d (`exact_responses`).
-    union{float2 m[3][MAXN*MAXN];float2 gradient_a[MOST_BEAMS][3];JumpSpace jump;float4 vec[MAXM/2];float dressing[MOST_CARRIERS*NG];};
+    union{float2 m[3][MAXN*MAXN];float2 gradient_a[MOST_BEAMS][3];JumpSpace jump;float4 vec[MAXM/2];BlockSpace block;};
 #ifdef PROFILE
     long long profile[SPANS];
 #endif
@@ -960,13 +965,14 @@ __device__ __forceinline__ void resolvent_row(const Program& P,const Point& pt,u
 __device__ __forceinline__ float unit_weight(const Point& pt,const NearUnit& U){return U.norm*(U.focused>=0?pt.s[U.focused]:U.focus);}
 // The self-energy Σ of channel (c, b) at z, added to the lane's row where the decoupling from p keeps
 // its entries (ground.rs `Ground::dress_light`): over its far channels (d, a) and d's near units,
-// s N W^f[:, a] W^f[:, a]†/(z − Ẽ_a − δ_d), Ẽ_a = E_a + Σ_d ΔE_a^d (the shifts in `shift`).
-__device__ __forceinline__ void self_energy(const Program& P,const Point& pt,const float* shift,int c,int b,double z,u32 p,int lane,float2 (&a)[NE]){
+// s N W^f[:, a] W^f[:, a]†/(z − Ẽ_a − δ_d), Ẽ_a = E_a + Σ_d ΔE_a^d (the shifts in `shift`), an intermediate in the
+// cluster k itself at the state's own energy `own`.
+__device__ __forceinline__ void self_energy(const Program& P,const Point& pt,const float* shift,int c,int b,double z,double own,int k,u32 p,int lane,float2 (&a)[NE]){
     if(lane>=NE)return;
     for(int v=P.via_first[c*NG+b];v<P.via_first[c*NG+b+1];v++){
         const int2 via=P.vias[v];
         double e=diagonal_at(P,pt,via.y)+P.carriers[via.x].detuning;for(int d=0;d<P.ncarriers;d++)e+=(double)shift[d*NG+via.y];
-        const float pole=1.f/(float)(z-e);
+        const float pole=1.f/(float)((P.ground_cluster[via.y]==k?own:z)-e);
         for(int u=P.near_first[via.x];u<P.near_first[via.x+1];u++){
             const float2* w=P.unit_couplings+(u*NG+via.y)*NE;const float2 wi=(pole*unit_weight(pt,P.near_units[u]))*w[lane];
             #pragma unroll
@@ -992,33 +998,153 @@ __device__ __forceinline__ float2 source(const Program& P,const Point& pt,int l,
 }
 
 // The near light's shifts ΔE_a^d of a cluster's channels (`Cluster::shifts`, ground.rs `Ground::dress_light`)
-// at the point into W.dressing (bit d·NG + a; zero where not taken): ΔE_a^d = −Σ_u s N Re(W^f[:, a]†
-// (K − E_a − δ_d)⁻¹ W^f[:, a]) over d's near units, K decoupled from a's cluster's explicit states. False
-// when a resolvent is singular.
-__device__ __noinline__ bool light_shifts(const Program& P,Warp& W,const Cluster& C,int lane){
-    const Point& pt=W.pt;float* shift=W.dressing;
+// at the point into W.block.shift (bit d·NG + a; zero where not taken): ΔE_a^d = −Σ_u s N Re(W^f[:, a]†
+// (K − E_a − δ_d)⁻¹ W^f[:, a]) over d's near units, K decoupled from a's cluster's explicit states. Of a state of
+// the cluster with another carrier's block mixed, M_d[p, q] = Σ_u s N W^f[:, b_p]† (K − E_q − δ_d)⁻¹ W^f[:, b_q]
+// too, the light shift between its places, per carrier in `between` (`mixed_responses`). False when a resolvent
+// is singular.
+__device__ __noinline__ bool light_shifts(const Program& P,Warp& W,const Cluster& C,int lane,float2* between){
+    const Point& pt=W.pt;float* shift=W.block.shift;const int k=P.ground_cluster[C.states[0]];
+    if(C.mixed)for(int e=lane;e<P.ncarriers*MAXN*MAXN;e+=32)between[e]=zero2();
     __syncwarp();shift[lane]=0.f;shift[lane+32]=0.f;__syncwarp();
     for(u64 m=C.shifts;m;m&=m-1){
-        const int bit=__ffsll((long long)m)-1,d=bit/NG,a=bit-d*NG;
+        const int bit=__ffsll((long long)m)-1,d=bit/NG,a=bit-d*NG,q=P.ground_cluster[a]==k?P.ground_position[a]:-1;
+        const bool full=q>=0&&(C.mixed&~(1u<<d))!=0u;
         float2 row[NE];resolvent_row(P,pt,P.explicit_of[a],diagonal_at(P,pt,a)+P.carriers[d].detuning,lane,row);
         int at;if(!factor(row,lane,at))return false;
-        float v=0.f;
+        float2 sum=zero2();
         for(int u=P.near_first[d];u<P.near_first[d+1];u++){
-            const float2* w=P.unit_couplings+(u*NG+a)*NE;float2 dot=zero2();
-            substitute(row,at,lane<NE?w[lane]:zero2(),lane,[&](int k,float2 x){dot+=conj(w[k])*x;});
-            v-=unit_weight(pt,P.near_units[u])*dot.x;
+            const float2* w=P.unit_couplings+(u*NG+a)*NE;
+            const float2* y=full?(lane<C.n0?P.unit_couplings+(u*NG+C.states[lane])*NE:nullptr):(lane==0?w:nullptr);float2 dot=zero2();
+            substitute(row,at,lane<NE?w[lane]:zero2(),lane,[&](int j,float2 x){if(y!=nullptr)dot+=conj(y[j])*x;});
+            sum+=unit_weight(pt,P.near_units[u])*dot;
         }
-        if(lane==0)shift[bit]=v;
+        if(full&&lane<C.n0)between[(d*MAXN+lane)*MAXN+q]=sum;
+        if(lane==(full?q:0))shift[bit]=-sum.x;
     }
     __syncwarp();
     return true;
 }
 // Channel (c, b)'s K + Σ − z at the point (`resolvent_row`, `self_energy`), decoupled from the explicit
-// states p, into `rows` lane-major: entry j of row i at rows[32j + i].
-__device__ __noinline__ void channel_row(const Program& P,const Warp& W,int c,int b,double z,u32 p,int lane,float2* rows){
-    float2 a[NE];resolvent_row(P,W.pt,p,z,lane,a);self_energy(P,W.pt,W.dressing,c,b,z,p,lane,a);
+// states p, into `rows` lane-major: entry j of row i at rows[32j + i]; `plain`: without Σ.
+__device__ __noinline__ void channel_row(const Program& P,const Warp& W,int c,int b,double z,double own,int k,u32 p,bool plain,int lane,float2* rows){
+    float2 a[NE];resolvent_row(P,W.pt,p,z,lane,a);if(!plain)self_energy(P,W.pt,W.block.shift,c,b,z,own,k,p,lane,a);
     #pragma unroll
     for(int j=0;j<NE;j++)rows[j*32+lane]=a[j];
+}
+// A beam's system from a channel's row: K + Σ − z + w_l (lane-major in `rows`) factored into `a`. False when a pivot vanishes.
+__device__ __forceinline__ bool beam_system(const float2* rows,float w,int lane,float2 (&a)[NE],int& at){
+    #pragma unroll
+    for(int j=0;j<NE;j++){a[j]=rows[j*32+lane];if(j==lane)a[j].x+=w;}
+    return factor(a,lane,at);
+}
+
+// The eigenstates of a block's n × n Hermitian h, its off-diagonal part in B.a and its diagonal in B.values, as
+// linear.rs `hermitian_eigen`: cyclic Jacobi rotations -- each lane k < n its row's entries, single precision off the
+// diagonal, which keeps a small mixing's relative accuracy; double precision on it, the hyperfine splitting
+// beside its Zeeman gaps -- until the off-diagonal part is its own round-off (`rounding`, or stops falling):
+// h = U Λ U†, U into B.u (columns), Λ into B.values.
+__device__ void block_eigen(BlockSpace& B,int n,float rounding,int lane){
+    for(int e=lane;e<n*n;e+=32)B.u[e]=e%(n+1)==0?make_float2(1.f,0.f):zero2();
+    float previous=__int_as_float(0x7f800000);
+    for(;;){
+        float off=0.f;for(int e=lane;e<n*n;e+=32)off+=norm2(B.a[e]);
+        __syncwarp();off=warp_sum(off);
+        if(off<=rounding*rounding||!(off<previous))break;
+        previous=off;
+        for(int p=0;p<n;p++)for(int q=p+1;q<n;q++){
+            // An entry within its share of the round-off stays (the off-diagonal part's sum within `rounding`). Its modulus
+            // scaled: a residue's square underflows, and a phase of another modulus would scale U.
+            const float2 apq=B.a[p*n+q];const float big=fmaxf(fabsf(apq.x),fabsf(apq.y));if(big<=rounding/(float)n)continue;
+            // A unitary phase on q makes a_pq real and positive; a real rotation in (p, q) then zeroes it.
+            const float2 unit=make_float2(apq.x/big,apq.y/big);const float m=big*sqrtf(norm2(unit));
+            const float2 ph=make_float2(apq.x/m,apq.y/m);const double dp=B.values[p],dq=B.values[q];
+            const float tau=(float)(dq-dp)/(2.f*m),t=(tau<0.f?-1.f:1.f)/(fabsf(tau)+sqrtf(1.f+tau*tau)),c=1.f/sqrtf(1.f+t*t),r=t*c;
+            if(lane<n){
+                const float2 up=B.u[lane*n+p],uq=B.u[lane*n+q]*conj(ph);B.u[lane*n+p]=c*up-r*uq;B.u[lane*n+q]=r*up+c*uq;
+                if(lane!=p&&lane!=q){
+                    const float2 x=B.a[lane*n+p],y=B.a[lane*n+q]*conj(ph),a1=c*x-r*y,a2=r*x+c*y;
+                    B.a[lane*n+p]=a1;B.a[lane*n+q]=a2;B.a[p*n+lane]=conj(a1);B.a[q*n+lane]=conj(a2);
+                }
+            }
+            if(lane==0){B.a[p*n+q]=zero2();B.a[q*n+p]=zero2();B.values[p]=dp-(double)(t*m);B.values[q]=dq+(double)(t*m);}
+            __syncwarp();
+        }
+    }
+}
+// A term's response into the columns of beam l (`mixed_responses`): X[l][a][to][x] += r w_x, r the lane's C_a R entry.
+__device__ __forceinline__ void spread_term(const Program& P,const BlockSpace& B,float2* X,int near,int n,float2 r,int lane){
+    if(lane<3*NG)for(int x=0;x<n;x++)X[exact_at(near,x,0,0)+lane]+=r*B.weights[x];
+}
+// Carrier c's responses from its mixed static block on the cluster (ground.rs `Ground::dress_light`, `Ground::response`, #
+// The static ground block): h_c = H's ground block on the cluster + Σ_{d≠c} d's light shift between its states,
+// −½(M_d[p, q] + M_d[q, p]*) (`light_shifts`), its eigenstates (`block_eigen`) grouped into eigen-energies z_E = λ_E + δ_c,
+// R_c = Σ_E Σ_b (K + Σ_b(z_E) − z_E + w_l)⁻¹ ŝ_b P_E[b, :]: the states without far channels through one resolvent per
+// eigen-energy, per eigenstate j of Σ_b ŝ_b u_j[b] with u_j[:]*; each with far channels through its own, ŝ_b with its
+// projector's row, its intermediates in the cluster at its own energy h_bb + δ_c. Eigenvalues within twice the
+// rotations' round-off are one energy, n ε‖h's off-diagonal part‖_F in single precision: their pair's response differs
+// by that times the resolvent's square, its own round-off. A term whose bound moves the generator by less than single
+// precision's round-off is left out (`Program::term_floor`, as ground.rs `Mode::skipped` in double). False when a
+// resolvent is singular.
+__device__ __noinline__ bool mixed_responses(const Program& P,Warp& W,const Cluster& C,int c,int lane,float2* X,float2* rows,const float2* between){
+    const Point& pt=W.pt;BlockSpace& B=W.block;const int n=C.n0,k=P.ground_cluster[C.states[0]],nc=P.ncarriers;const Carrier R=P.carriers[c];const u32 p=P.explicit_of[C.states[0]];
+    const float2* y=lane<3*NG?P.emission+lane*NE:nullptr;
+    float size=0.f;
+    for(int e=lane;e<n*n;e+=32){
+        const int i=e/n,j=e-i*n;float2 h=zero2();
+        if(i!=j){
+            const int f=C.states[i]*NG+C.states[j];h=P.ground_block[f];for(int a=0;a<P.focused;a++)h+=pt.s[a]*P.ground_block[(1+a)*NG*NG+f];
+            for(int d=0;d<nc;d++)if(d!=c)h-=0.5f*(between[(d*MAXN+i)*MAXN+j]+conj(between[(d*MAXN+j)*MAXN+i]));
+            size+=norm2(h);
+        }
+        B.a[e]=h;
+    }
+    if(lane<n){double e=diagonal_at(P,pt,C.states[lane]);for(int d=0;d<nc;d++)if(d!=c)e+=(double)B.shift[d*NG+C.states[lane]];B.values[lane]=e;B.own[lane]=e;}
+    size=warp_sum(size);const float rounding=(float)n*1.1920929e-7f*sqrtf(size);
+    __syncwarp();
+    block_eigen(B,n,rounding,lane);
+    int order[MAXN];for(int i=0;i<n;i++){int j=i;const double v=B.values[i];while(j>0&&B.values[order[j-1]]>v){order[j]=order[j-1];j--;}order[j]=i;}
+    for(int b=0;b<R.beams;b++){const int near=P.beams[P.beam_list[R.first+b]].near;if(lane<3*NG)for(int x=0;x<n;x++)X[exact_at(near,x,0,0)+lane]=zero2();}
+    for(int first=0,last;first<n;first=last){
+        last=first+1;while(last<n&&B.values[order[last]]-B.values[order[first]]<=2.*(double)rounding)last++;
+        double z=0.;for(int m=first;m<last;m++)z+=B.values[order[m]];z=z/(double)(last-first)+R.detuning;
+        // Its terms: the states of a weight beyond their floor, those without far channels and those with.
+        u32 plain=0u,dressed=0u;
+        {
+            float w2=0.f;if(lane<n)for(int m=first;m<last;m++)w2+=norm2(B.u[lane*n+order[m]]);
+            const int g=lane<n?C.states[lane]:0;const bool term=lane<n&&((R.couples>>g)&1u)&&w2>0.f&&sqrtf(w2)>P.term_floor[c*NG+g];const bool far=term&&P.via_first[c*NG+g+1]>P.via_first[c*NG+g];
+            plain=__ballot_sync(FULL,term&&!far);dressed=__ballot_sync(FULL,far);
+        }
+        if(plain){
+            channel_row(P,W,c,0,z,z,k,p,true,lane,rows);
+            for(int b=0;b<R.beams;b++){
+                const int l=P.beam_list[R.first+b];const Beam& beam=P.beams[l];
+                float2 a[NE];int at;if(!beam_system(rows,pt.shift[l],lane,a,at))return false;
+                for(int m=first;m<last;m++){
+                    const int j=order[m];float2 s=zero2();
+                    for(u32 places=plain;places;places&=places-1){const int i=__ffs(places)-1;if((beam.coupled>>C.states[i])&1u)s+=source(P,pt,l,C.states[i],p,lane)*B.u[i*n+j];}
+                    float2 response=zero2();substitute(a,at,s,lane,[&](int q,float2 x){if(y!=nullptr)response+=y[q]*x;});
+                    if(lane<n)B.weights[lane]=conj(B.u[lane*n+j]);
+                    __syncwarp();spread_term(P,B,X,beam.near,n,response,lane);__syncwarp();
+                }
+            }
+        }
+        for(u32 places=dressed;places;places&=places-1){
+            const int i=__ffs(places)-1,g=C.states[i];
+            channel_row(P,W,c,g,z,B.own[i]+R.detuning,k,p,false,lane,rows);
+            if(lane<n){float2 w=zero2();for(int m=first;m<last;m++)w+=B.u[i*n+order[m]]*conj(B.u[lane*n+order[m]]);B.weights[lane]=w;}
+            __syncwarp();
+            for(int b=0;b<R.beams;b++){
+                const int l=P.beam_list[R.first+b];const Beam& beam=P.beams[l];if(!((beam.coupled>>g)&1u))continue;
+                float2 a[NE];int at;if(!beam_system(rows,pt.shift[l],lane,a,at))return false;
+                const float2 s=source(P,pt,l,g,p,lane);
+                float2 response=zero2();substitute(a,at,s,lane,[&](int q,float2 x){if(y!=nullptr)response+=y[q]*x;});
+                spread_term(P,B,X,beam.near,n,response,lane);
+            }
+        }
+        __syncwarp();
+    }
+    return true;
 }
 
 // The exact response's photon tables at the point (model.rs `Exact`, ground.rs `Ground::response`):
@@ -1026,13 +1152,15 @@ __device__ __noinline__ void channel_row(const Program& P,const Warp& W,int c,in
 // at the point's intensities, dressed by the near light (ground.rs, # The near light's dressing):
 // R_l[:, b] = (K + Σ − z + w_l)⁻¹ ŝ, channel (c, b)'s energy z = E_b + δ_c + Σ_{d≠c} ΔE_b^d (`light_shifts`)
 // and self-energy Σ (`self_energy`), ŝ its source (`source`), K decoupled from the explicit states of b's
-// cluster. A channel's K + Σ − z once (`channel_row`), each of its carrier's beams from it with w_l. Lane
-// i holds row i of each system (`factor`) and lane 8a + to sums C_a R_l's entry. False when a resolvent is
-// singular, as `Exact::new` fails (the jump keeps the first order).
-__device__ __noinline__ bool exact_responses(const Program& P,Warp& W,const Cluster& C,int lane,float2* X,float2* rows){
-    if(!light_shifts(P,W,C,lane))return false;
-    const Point& pt=W.pt;const float* shift=W.dressing;const float2* y=lane<3*NG?P.emission+lane*NE:nullptr;
+// cluster; a carrier whose static block mixes the responses by its eigenstates (`mixed_responses`). A channel's K + Σ −
+// z once (`channel_row`), each of its carrier's beams from it with w_l. Lane i holds row i of each system (`factor`)
+// and lane 8a + to sums C_a R_l's entry. False when a resolvent is singular, as `Exact::new` fails (the jump keeps
+// the first order).
+__device__ __noinline__ bool exact_responses(const Program& P,Warp& W,const Cluster& C,int lane,float2* X,float2* rows,float2* between){
+    if(!light_shifts(P,W,C,lane,between))return false;
+    const Point& pt=W.pt;const float* shift=W.block.shift;const float2* y=lane<3*NG?P.emission+lane*NE:nullptr;
     for(int c=0;c<P.ncarriers;c++){
+        if((C.mixed>>c)&1u){if(!mixed_responses(P,W,C,c,lane,X,rows,between))return false;continue;}
         const Carrier R=P.carriers[c];
         for(int col=0;col<C.n0;col++){
             const int g=C.states[col];const u32 p=P.explicit_of[g];
@@ -1043,14 +1171,11 @@ __device__ __noinline__ bool exact_responses(const Program& P,Warp& W,const Clus
             }
             if(!coupled)continue;
             double z=diagonal_at(P,pt,g)+R.detuning;for(int d=0;d<P.ncarriers;d++)if(d!=c)z+=(double)shift[d*NG+g];
-            channel_row(P,W,c,g,z,p,lane,rows);
+            channel_row(P,W,c,g,z,z,-1,p,false,lane,rows);
             for(;coupled;coupled&=coupled-1){
                 const int l=P.beam_list[R.first+__ffs(coupled)-1];float2* out=X+exact_at(P.beams[l].near,col,0,0);
-                float2 a[NE];const float w=pt.shift[l];
-                #pragma unroll
-                for(int j=0;j<NE;j++){a[j]=rows[j*32+lane];if(j==lane)a[j].x+=w;}
+                float2 a[NE];int at;if(!beam_system(rows,pt.shift[l],lane,a,at))return false;
                 const float2 s=source(P,pt,l,g,p,lane);
-                int at;if(!factor(a,lane,at))return false;
                 float2 response=zero2();substitute(a,at,s,lane,[&](int k,float2 x){if(y!=nullptr)response+=y[k]*x;});
                 if(lane<3*NG)out[lane]=response;
             }
@@ -1406,7 +1531,7 @@ __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,
     }
     SPAN_BEGIN(responses);
     if(exact)COUNT(COUNT_EXACT);
-    const float2* X=exact&&exact_responses(P,W,C,lane,scratch,scratch+P.rows_at)?scratch:nullptr;
+    const float2* X=exact&&exact_responses(P,W,C,lane,scratch,scratch+P.rows_at,scratch+P.between_at)?scratch:nullptr;
     SPAN_END(SPAN_EXACT,responses);SPAN_BEGIN(photons);
     float2* M=scratch+P.nnear*MAXN*3*NG;photon_matrices(P,W,C,lane,X,M,scratch+P.weights);
     JumpSpace& J=W.jump;
@@ -2532,7 +2657,7 @@ extern "C" __global__ void exact_probe(const Program P,const State* S,float2* X)
     point(P,W,t,lane);exact_components(P,W,P.clusters[t.cluster],lane,X);
 }
 // A check's exact responses (tests/gpu.rs): a trajectory's cluster's photon tables at its point
-// (`exact_responses`) into X, their rows' room after them, one warp; NaN at X[0] where a resolvent is singular.
+// (`exact_responses`) into X, their rows' and the mixed blocks' shifts' room after them, one warp; NaN at X[0] where a resolvent is singular.
 extern "C" __global__ void response_probe(const Program P,const State* S,float2* X){
     __shared__ Warp W;const int lane=threadIdx.x&31;if(threadIdx.x>=32)return;
     Traj t;
@@ -2540,7 +2665,7 @@ extern "C" __global__ void response_probe(const Program P,const State* S,float2*
     for(int i=0;i<3;i++){t.q[i]=S->q[i];t.p[i]=S->p[i];}
     t.time=S->time;t.cluster=S->cluster;
     point(P,W,t,lane);
-    if(!exact_responses(P,W,P.clusters[t.cluster],lane,X,X+P.nnear*MAXN*3*NG)&&lane==0)X[0]=make_float2(__int_as_float(0x7fc00000),0.f);
+    if(!exact_responses(P,W,P.clusters[t.cluster],lane,X,X+P.nnear*MAXN*3*NG,X+P.nnear*MAXN*3*NG+NE*32)&&lane==0)X[0]=make_float2(__int_as_float(0x7fc00000),0.f);
 }
 // A check's jump (tests/gpu.rs): a trajectory's state, a jump at its position and time (the first order
 // in the Doppler shift, or the exact response where `exact`), the state it leaves.
