@@ -23,8 +23,8 @@
 // with its matrices in shared memory, chosen per solve by the largest cluster).
 //
 // # Launches
-// A launch runs every task of a wave over a range of at most MOST_INTERVALS output intervals
-// (src/gpu/mod.rs keeps it short of the display watchdog); the trajectories' states, motion windows
+// A launch runs every warp of a wave for its cycle budget (src/gpu/mod.rs keeps it short of the display watchdog), from
+// where its trajectory stands, within the MOST_INTERVALS output intervals after the first not yet summed; the trajectories' states, motion windows
 // and samples stay in device memory between launches. Each warp runs its trajectory through the
 // launch's intervals on its own, its record of each (the output's, the motion windows closing in it)
 // into its slot's records; after the launch `task_sums` sums the records per interval over each task in the
@@ -284,6 +284,7 @@ struct State{
     float2 twin[MAXN];                  // the held twin's
     float doppler;int cluster,jumps,death;  // death: the step it was lost at, −1 while held
     u32 index;int twin_cluster,twin_jumps;float beats;   // beats: the largest bound per unit time of the beats its exact steps left out
+    int interval,step;                  // where it stands: the output interval it is in, its last step (−1 before the first)
 };
 // The held twin (control.rs `Twin`, engine.rs `Engine::held`), none when `u` is null: per cluster k
 // its half step's propagator `u` and its H_eff `h` (n_k² entries from blocks[k], row-major) and its
@@ -294,12 +295,13 @@ struct Held{const float2* u;const float2* h;const float2* l;const double* readou
 struct Run{
     State* states;double* rings;double* samples;double* sums;float2* scratch;const int* tasks;
     unsigned long long* profile;        // per slot SPANS counters (with PROFILE)
-    double* records;                    // per slot MOST_INTERVALS records of SLOT_RECORD: the launch's intervals
+    double* records;                    // per slot MOST_INTERVALS records of SLOT_RECORD: a ring over the intervals not yet summed
     const double* harmonic;             // per output and lab axis the harmonic control's A and B (control.rs `Harmonic`); none: no control
-    unsigned long long* costs;          // per slot the held twin's cycles and the launches' (lib.rs `Outcome::seconds`)
+    unsigned long long* costs;          // in host memory, per slot this launch's cycles of the held twin and in all (lib.rs `Outcome::seconds`), and the interval it stands in
     Held held;
     u64 seed;
-    int outputs,steps,reach,begin,end;  // the output times, the steps between two, the steps past the last
+    long long budget;                   // the cycles a warp takes in a launch, a step at least (src/gpu/mod.rs)
+    int outputs,steps,reach,begin,end;  // the output times, the steps between two, the steps past the last; the first interval not yet summed, the end of the records' room (`task_sums`: of the intervals every slot has passed)
     int half[3],ring[3],ring_at[3];     // per lab axis: the window's half-width, its ring's length (steps) and place (doubles)
     int ring_stride,scratch_stride,nlisted,pad;
     int listed[MOST_LISTED];
@@ -930,13 +932,16 @@ __device__ __forceinline__ int exact_at(int near,int col,int a,int to){return ((
 // pivoting as linear.rs `Lu` makes it (each column's pivot the remaining row of the largest |a|², the
 // last in the rows' order on ties), the rows staying in their lanes' registers and only their places in
 // that order (`at`) swapped: a row keeps U's entries from its place on, and before it, in each step's
-// column, that step's multiplier. Unrolled, each column its own register. False when a pivot vanishes.
+// column, that step's multiplier. The steps a loop, a column's entry selected (the code stays small for
+// the driver's JIT). False when a pivot vanishes.
 __device__ __forceinline__ bool factor(float2 (&a)[NE],int lane,int& at){
     at=lane;
-    #pragma unroll
     for(int k=0;k<NE;k++){
+        float2 ak=zero2();
+        #pragma unroll
+        for(int j=0;j<NE;j++)if(j==k)ak=a[j];
         // The pivot: the largest |a_ik|² of the rows at k or later, the last of them on ties.
-        float best=lane<NE&&at>=k?norm2(a[k]):-1.f;int place=at,who=lane;
+        float best=lane<NE&&at>=k?norm2(ak):-1.f;int place=at,who=lane;
         #pragma unroll
         for(int o=16;o>0;o>>=1){
             const float ob=__shfl_xor_sync(FULL,best,o);const int op=__shfl_xor_sync(FULL,place,o),ow=__shfl_xor_sync(FULL,who,o);
@@ -945,11 +950,13 @@ __device__ __forceinline__ bool factor(float2 (&a)[NE],int lane,int& at){
         if(!(best>0.f))return false;
         if(at==k)at=place;else if(lane==who)at=k;
         // The rows after it less their multiple of the pivot's row, the multiplier kept in its column.
-        const float2 pivot=make_float2(__shfl_sync(FULL,a[k].x,who),__shfl_sync(FULL,a[k].y,who));
-        const float2 m=at>k?cdiv(a[k],pivot):zero2();
+        const float2 pivot=make_float2(__shfl_sync(FULL,ak.x,who),__shfl_sync(FULL,ak.y,who));
+        const float2 m=at>k?cdiv(ak,pivot):zero2();
         #pragma unroll
-        for(int j=k+1;j<NE;j++){const float2 v=make_float2(__shfl_sync(FULL,a[j].x,who),__shfl_sync(FULL,a[j].y,who));a[j]-=m*v;}
-        if(at>k)a[k]=m;
+        for(int j=0;j<NE;j++){
+            if(j>k){const float2 v=make_float2(__shfl_sync(FULL,a[j].x,who),__shfl_sync(FULL,a[j].y,who));a[j]-=m*v;}
+            else if(j==k&&at>k)a[j]=m;
+        }
     }
     return true;
 }
@@ -958,19 +965,23 @@ __device__ __forceinline__ bool factor(float2 (&a)[NE],int lane,int& at){
 // U_ik x_k); each x_k, uniform over the warp, to `take` as it is found.
 template<class Take>
 __device__ __forceinline__ void substitute(const float2 (&a)[NE],int at,float2 b,int lane,Take take){
-    #pragma unroll
     for(int k=0;k<NE;k++){
+        float2 ak=zero2();
+        #pragma unroll
+        for(int j=0;j<NE;j++)if(j==k)ak=a[j];
         const int who=__ffs(__ballot_sync(FULL,at==k))-1;
         const float2 bk=make_float2(__shfl_sync(FULL,b.x,who),__shfl_sync(FULL,b.y,who));
-        if(at>k)b-=a[k]*bk;
+        if(at>k)b-=ak*bk;
     }
-    #pragma unroll
     for(int k=NE-1;k>=0;k--){
+        float2 ak=zero2();
+        #pragma unroll
+        for(int j=0;j<NE;j++)if(j==k)ak=a[j];
         const int who=__ffs(__ballot_sync(FULL,at==k))-1;
-        const float2 mine=at==k?cdiv(b,a[k]):zero2();
+        const float2 mine=at==k?cdiv(b,ak):zero2();
         const float2 x=make_float2(__shfl_sync(FULL,mine.x,who),__shfl_sync(FULL,mine.y,who));
         take(k,x);
-        if(at<k)b-=a[k]*x;
+        if(at<k)b-=ak*x;
     }
 }
 
@@ -2553,17 +2564,19 @@ __device__ __forceinline__ int window_end(const Run& R,int a,int o){const int at
 __device__ __forceinline__ int ring_at(const Run& R,int a,int k){return R.ring_at[a]+5*(k&(R.ring[a]-1));}
 
 // ---------------------------------------------------------------------------------------------
-// The kernel: every task of the wave (one block each: its first trajectory, its count, its first
-// slot) over the output intervals [begin, end). Interval 0 is the initial state; interval i > 0
-// takes the steps ((i − 1)·steps, i·steps], the last ones past the last output its reach. Each warp
-// runs its trajectory through the launch's intervals on its own, keeping its record of each (the
-// output's point record, the windows closing in it) in its slot's records; at the launch's end the
-// block sums them per interval in the trajectories' order -- the CPU's order within a task -- into
-// the task's sums.
+// The kernel: every slot of the wave with a trajectory (each its warp and block) from where it stands to the output
+// interval `end`, for its cycle budget. Interval 0 is the initial state; interval i > 0 takes the steps
+// ((i − 1)·steps, i·steps], the last ones past the last output its reach. Each warp runs its trajectory on its own,
+// keeping its record of each interval it finishes (the output's point record, the windows closing in it) in its slot's ring
+// of records, and leaves after the step that spends its budget -- a warp of cheap steps does not wait for one of dear ones
+// (an exact step costs ten of a folded one) --, its place in its state and the interval it stands in in `costs`. `task_sums` sums
+// the intervals every slot has passed.
 extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Program P,const Run R){
     __shared__ Warp W;
     const int lane=threadIdx.x,slot=blockIdx.x;if(R.tasks[3*(slot/WARPS)+1]<=slot%WARPS)return;
-    State* S=R.states+slot;double* ring=R.rings+(size_t)slot*R.ring_stride;float2* scratch=R.scratch+(size_t)slot*R.scratch_stride;
+    State* S=R.states+slot;
+    if(S->interval>=R.end){if(lane==0){R.costs[3*slot]=0;R.costs[3*slot+1]=0;R.costs[3*slot+2]=(unsigned long long)S->interval;}return;}
+    double* ring=R.rings+(size_t)slot*R.ring_stride;float2* scratch=R.scratch+(size_t)slot*R.scratch_stride;
     double* records=R.records+(size_t)slot*MOST_INTERVALS*SLOT_RECORD;
     Traj t;Twin h;double prefix=0.,q0[3],p0[3];const bool held=R.held.u!=nullptr;
     long long twin_cycles=0;const long long launched=clock64();
@@ -2582,16 +2595,17 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Program P,con
 #endif
     __syncwarp();SPAN_BEGIN(launch);
     const int last=(R.outputs-1)*R.steps+R.reach;
-    // Per lab axis the first output whose window has not ended before this launch.
-    int start[3];
-    #pragma unroll
-    for(int a=0;a<3;a++){const int before=R.begin==0?-1:(R.begin-1)*R.steps;int o=max(0,floordiv(before-R.half[a],R.steps));while(window_end(R,a,o)<=before)o++;start[a]=o;}
+    int i=S->interval,k=S->step;
     {
-        int next[3]={start[0],start[1],start[2]};
-        for(int i=R.begin;i<R.end;i++){
+        // Per lab axis the first output whose window has not ended before its interval.
+        int next[3];
+        #pragma unroll
+        for(int a=0;a<3;a++){const int before=i==0?-1:(i-1)*R.steps;int o=max(0,floordiv(before-R.half[a],R.steps));while(window_end(R,a,o)<=before)o++;next[a]=o;}
+        for(bool spent=false;i<R.end&&!spent;i++){
             const int lo=i==0?-1:(i-1)*R.steps,hi=i==0?0:min(i*R.steps,last);
-            // The interval's steps, their windows' sums (while held) and rings.
-            for(int k=lo+1;k<=hi;k++){
+            // The interval's steps left, their windows' sums (while held) and rings.
+            while(k<hi&&!spent){
+                k++;
                 if(t.death<0){
                     SPAN_BEGIN(stepping);
                     if(k>0&&step(P,R,W,t,lane,scratch))t.death=k;
@@ -2602,15 +2616,17 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Program P,con
                     }
                 }
                 if(lane<15)ring[ring_at(R,lane/5,k)+lane%5]=prefix;
+                spent=__shfl_sync(FULL,clock64()-launched>=R.budget?1:0,0)!=0;
             }
+            if(k<hi)break;
             // The held twin's steps of the interval, up to the last output.
             if(held&&i>0&&i<R.outputs){
                 const long long begun=clock64();
-                for(int k=lo+1;k<=hi;k++)hold_step(P,R,W,h,t.index,lane);
+                for(int m=lo+1;m<=hi;m++)hold_step(P,R,W,h,t.index,lane);
                 twin_cycles+=clock64()-begun;
             }
             // The record of output i.
-            double* out=records+(size_t)(i-R.begin)*SLOT_RECORD;
+            double* out=records+(size_t)(i%MOST_INTERVALS)*SLOT_RECORD;
             for(int x=lane;x<SLOT_RECORD;x+=32)out[x]=0.;
             __syncwarp();
             SPAN_BEGIN(readout);
@@ -2661,29 +2677,29 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Program P,con
     {
         if(lane==0){
             #pragma unroll
-            for(int i=0;i<3;i++){S->q[i]=t.q[i];S->p[i]=t.p[i];}
+            for(int a=0;a<3;a++){S->q[a]=t.q[a];S->p[a]=t.p[a];}
             S->time=t.time;S->logn=t.logn;S->threshold=t.threshold;S->log_threshold=t.log_threshold;
-            S->doppler=t.doppler;S->cluster=t.cluster;S->jumps=t.jumps;S->death=t.death;S->beats=t.beats;
+            S->doppler=t.doppler;S->cluster=t.cluster;S->jumps=t.jumps;S->death=t.death;S->beats=t.beats;S->interval=i;S->step=k;
         }
         if(lane<15)S->prefix[lane]=prefix;
         if(lane<MAXM)S->psi[lane]=W.psi[lane];
         if(lane<MAXN)S->twin[lane]=W.twin[lane];
         if(lane==0){
             S->twin_logn=h.logn;S->twin_threshold=h.threshold;S->twin_log_threshold=h.log_threshold;S->twin_cluster=h.cluster;S->twin_jumps=h.jumps;
-            R.costs[2*slot]+=(unsigned long long)twin_cycles;R.costs[2*slot+1]+=(unsigned long long)(clock64()-launched);
+            R.costs[3*slot]=(unsigned long long)twin_cycles;R.costs[3*slot+1]=(unsigned long long)(clock64()-launched);R.costs[3*slot+2]=(unsigned long long)i;
         }
     }
 }
 
-// A launch's sums (`motion3d`'s records): per task of the wave one block, its records' sums per interval in the
-// trajectories' order -- the CPU's order within a task.
+// The sums of the intervals [begin, end), which every slot has passed (`motion3d`'s records): per task of the wave one block, its
+// records' sums per interval in the trajectories' order -- the CPU's order within a task.
 extern "C" __global__ void task_sums(const Run R){
     const int count=R.tasks[3*blockIdx.x+1],first=R.tasks[3*blockIdx.x+2];
     const int last=(R.outputs-1)*R.steps+R.reach;
     int start[3];
     #pragma unroll
     for(int a=0;a<3;a++){const int before=R.begin==0?-1:(R.begin-1)*R.steps;int o=max(0,floordiv(before-R.half[a],R.steps));while(window_end(R,a,o)<=before)o++;start[a]=o;}
-    // The block's sums of the launch's intervals in the trajectories' order: each 128 threads every
+    // The block's sums of the intervals in the trajectories' order: each 128 threads every
     // second interval, 69 of them the point record's entries, 24 the closing windows' means and 18
     // their harmonic controls' sums.
     {
@@ -2696,7 +2712,7 @@ extern "C" __global__ void task_sums(const Run R){
             #pragma unroll
             for(int a=0;a<3;a++){closes[a]=0;while(closes[a]<2&&next[a]<R.outputs&&window_end(R,a,next[a])<=hi)outputs[a][closes[a]++]=next[a]++;}
             if(((i-R.begin)&1)!=group)continue;
-            const double* rec=base+(size_t)(i-R.begin)*SLOT_RECORD;
+            const double* rec=base+(size_t)(i%MOST_INTERVALS)*SLOT_RECORD;
             if(x<POINT_RECORD){
                 if(i<R.outputs){double s=0.;for(int w=0;w<count;w++)s+=rec[w*stride+x];R.sums[((size_t)blockIdx.x*R.outputs+i)*RECORD+x]=s;}
             }else if(x<POINT_RECORD+24){

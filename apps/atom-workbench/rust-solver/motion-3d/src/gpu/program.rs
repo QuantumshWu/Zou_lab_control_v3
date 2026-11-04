@@ -96,6 +96,7 @@ pub struct State{
     pub(crate) q0:[f64;3],pub(crate) p0:[f64;3],pub(crate) twin_logn:f64,pub(crate) twin_threshold:f64,pub(crate) twin_log_threshold:f64,
     pub(crate) psi:[[f32;2];MAXM],pub(crate) twin:[[f32;2];MAXN],pub(crate) doppler:f32,pub(crate) cluster:i32,pub(crate) jumps:i32,pub(crate) death:i32,
     pub(crate) index:u32,pub(crate) twin_cluster:i32,pub(crate) twin_jumps:i32,pub(crate) beats:f32,
+    pub(crate) interval:i32,pub(crate) step:i32,
 }
 /// The kernel's `Held`: the held twin's device data (all zero: no twin).
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
@@ -104,7 +105,7 @@ pub struct Held{pub(crate) u:u64,pub(crate) h:u64,pub(crate) l:u64,pub(crate) re
 #[repr(C)]#[derive(Clone,Copy,Debug)]
 pub struct Run{
     pub(crate) states:u64,pub(crate) rings:u64,pub(crate) samples:u64,pub(crate) sums:u64,pub(crate) scratch:u64,pub(crate) tasks:u64,pub(crate) profile:u64,
-    pub(crate) records:u64,pub(crate) harmonic:u64,pub(crate) costs:u64,pub(crate) held:Held,pub(crate) seed:u64,
+    pub(crate) records:u64,pub(crate) harmonic:u64,pub(crate) costs:u64,pub(crate) held:Held,pub(crate) seed:u64,pub(crate) budget:i64,
     pub(crate) outputs:i32,pub(crate) steps:i32,pub(crate) reach:i32,pub(crate) begin:i32,pub(crate) end:i32,
     pub(crate) half:[i32;3],pub(crate) ring:[i32;3],pub(crate) ring_at:[i32;3],
     pub(crate) ring_stride:i32,pub(crate) scratch_stride:i32,pub(crate) nlisted:i32,pub(crate) pad:i32,
@@ -113,7 +114,7 @@ pub struct Run{
 
 impl Run{
     /// A launch of no wave (a check's entry, `Gpu::jump_probe`): every buffer null, the seed zero.
-    pub(crate) fn empty()->Run{Run{states:0,rings:0,samples:0,sums:0,scratch:0,tasks:0,profile:0,records:0,harmonic:0,costs:0,held:Held::default(),seed:0,
+    pub(crate) fn empty()->Run{Run{states:0,rings:0,samples:0,sums:0,scratch:0,tasks:0,profile:0,records:0,harmonic:0,costs:0,held:Held::default(),seed:0,budget:0,
         outputs:0,steps:0,reach:0,begin:0,end:0,half:[0;3],ring:[0;3],ring_at:[0;3],ring_stride:0,scratch_stride:0,nlisted:0,pad:0,listed:[0;MOST_LISTED]}}
 }
 
