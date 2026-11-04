@@ -155,6 +155,10 @@ pub fn initial_trajectory(model:&Model,settings:&Settings,initial:&Initial,seed:
 }
 /// A bare initial state's slow part at fourth order, where it starts (engine.rs `slow_start`).
 pub(crate) fn dressed(model:&Model,mut t:Trajectory)->Trajectory{let point=model.point(t.r,t.kappa);engine::slow_start(model,&mut t,&point,0.);t}
+/// A pilot trajectory's initial state (`sample_states`; solve.rs, the fold's charge at t = 0).
+pub(crate) fn pilot_start(model:&Model,settings:&Settings,initial:&Initial,seed:u64,index:u64)->Trajectory{
+    dressed(model,initial_from(model,settings,initial,seed,Purpose::Pilot,index,Stratum::single(index)))
+}
 /// The bare initial state of a solve's trajectory, which a held twin starts from (`hold`; gpu/mod.rs).
 pub(crate) fn bare_trajectory(model:&Model,settings:&Settings,initial:&Initial,seed:u64,index:u64,stratum:Stratum)->Trajectory{
     initial_from(model,settings,initial,seed,Purpose::Initial,index,stratum)
@@ -373,7 +377,7 @@ pub fn sample_states(model:&Model,settings:&Settings,initial:&Initial,seed:u64,c
     let engine=Engine::new(model,settings.clone());
     let every=((count as usize*outputs)/4096).max(1);
     let runs:Vec<(Vec<Trajectory>,u64,Group)>=(0..count).into_par_iter().map_init(||(Windows::new(settings,steps,outputs),vec![None;outputs]),|(windows,held),index|{
-        let mut t=dressed(model,initial_from(model,settings,initial,seed,Purpose::Pilot,index,Stratum::single(index)));let(r0,k0)=(t.r,t.kappa);
+        let mut t=pilot_start(model,settings,initial,seed,index);let(r0,k0)=(t.r,t.kappa);
         let(atoms,_,kept,jumps)=walk(model,&engine,&mut t,steps,outputs,&[],windows,held,Some(every));
         let mut sums=Group::new(outputs,1);
         for(i,atom)in atoms.iter().enumerate(){sums.add(i,atom.as_ref().map(atom_of).as_ref(),&Controls{harmonic:harmonic.value(i,r0,k0),twin:None});}
