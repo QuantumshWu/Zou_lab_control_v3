@@ -932,13 +932,16 @@ __device__ __forceinline__ int exact_at(int near,int col,int a,int to){return ((
 // pivoting as linear.rs `Lu` makes it (each column's pivot the remaining row of the largest |a|², the
 // last in the rows' order on ties), the rows staying in their lanes' registers and only their places in
 // that order (`at`) swapped: a row keeps U's entries from its place on, and before it, in each step's
-// column, that step's multiplier. Unrolled, each column its own register. False when a pivot vanishes.
+// column, that step's multiplier. The steps a loop, a column's entry selected (the code stays small for
+// the driver's JIT). False when a pivot vanishes.
 __device__ __forceinline__ bool factor(float2 (&a)[NE],int lane,int& at){
     at=lane;
-    #pragma unroll
     for(int k=0;k<NE;k++){
+        float2 ak=zero2();
+        #pragma unroll
+        for(int j=0;j<NE;j++)if(j==k)ak=a[j];
         // The pivot: the largest |a_ik|² of the rows at k or later, the last of them on ties.
-        float best=lane<NE&&at>=k?norm2(a[k]):-1.f;int place=at,who=lane;
+        float best=lane<NE&&at>=k?norm2(ak):-1.f;int place=at,who=lane;
         #pragma unroll
         for(int o=16;o>0;o>>=1){
             const float ob=__shfl_xor_sync(FULL,best,o);const int op=__shfl_xor_sync(FULL,place,o),ow=__shfl_xor_sync(FULL,who,o);
@@ -947,11 +950,13 @@ __device__ __forceinline__ bool factor(float2 (&a)[NE],int lane,int& at){
         if(!(best>0.f))return false;
         if(at==k)at=place;else if(lane==who)at=k;
         // The rows after it less their multiple of the pivot's row, the multiplier kept in its column.
-        const float2 pivot=make_float2(__shfl_sync(FULL,a[k].x,who),__shfl_sync(FULL,a[k].y,who));
-        const float2 m=at>k?cdiv(a[k],pivot):zero2();
+        const float2 pivot=make_float2(__shfl_sync(FULL,ak.x,who),__shfl_sync(FULL,ak.y,who));
+        const float2 m=at>k?cdiv(ak,pivot):zero2();
         #pragma unroll
-        for(int j=k+1;j<NE;j++){const float2 v=make_float2(__shfl_sync(FULL,a[j].x,who),__shfl_sync(FULL,a[j].y,who));a[j]-=m*v;}
-        if(at>k)a[k]=m;
+        for(int j=0;j<NE;j++){
+            if(j>k){const float2 v=make_float2(__shfl_sync(FULL,a[j].x,who),__shfl_sync(FULL,a[j].y,who));a[j]-=m*v;}
+            else if(j==k&&at>k)a[j]=m;
+        }
     }
     return true;
 }
@@ -960,19 +965,23 @@ __device__ __forceinline__ bool factor(float2 (&a)[NE],int lane,int& at){
 // U_ik x_k); each x_k, uniform over the warp, to `take` as it is found.
 template<class Take>
 __device__ __forceinline__ void substitute(const float2 (&a)[NE],int at,float2 b,int lane,Take take){
-    #pragma unroll
     for(int k=0;k<NE;k++){
+        float2 ak=zero2();
+        #pragma unroll
+        for(int j=0;j<NE;j++)if(j==k)ak=a[j];
         const int who=__ffs(__ballot_sync(FULL,at==k))-1;
         const float2 bk=make_float2(__shfl_sync(FULL,b.x,who),__shfl_sync(FULL,b.y,who));
-        if(at>k)b-=a[k]*bk;
+        if(at>k)b-=ak*bk;
     }
-    #pragma unroll
     for(int k=NE-1;k>=0;k--){
+        float2 ak=zero2();
+        #pragma unroll
+        for(int j=0;j<NE;j++)if(j==k)ak=a[j];
         const int who=__ffs(__ballot_sync(FULL,at==k))-1;
-        const float2 mine=at==k?cdiv(b,a[k]):zero2();
+        const float2 mine=at==k?cdiv(b,ak):zero2();
         const float2 x=make_float2(__shfl_sync(FULL,mine.x,who),__shfl_sync(FULL,mine.y,who));
         take(k,x);
-        if(at<k)b-=a[k]*x;
+        if(at<k)b-=ak*x;
     }
 }
 
