@@ -294,6 +294,8 @@ impl Program{
         program.params.exact_at=(program.scratch()-exact-transient) as i32;program.params.transient_at=(program.scratch()-transient) as i32;
         Ok(program)
     }
+    /// The tables' nodes per intensity axis.
+    pub fn nodes(&self)->usize{self.params.nodes as usize}
     /// A jump's working space per trajectory (float2): the exact response's -- every near beam's
     /// photon tables at each cluster column --, the photons' matrices per axis and the fourth order's
     /// weights (the kernel's `Program::weights` is where they start).

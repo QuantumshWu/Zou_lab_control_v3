@@ -301,7 +301,7 @@ struct Warp{
     float2 psi[MAXM],start[MAXM];       // ψ, ψ at a step's start
     double2 readout[MAXN];              // the readout's Y ψ
     float2 twin[MAXN];                  // the held twin's ψ
-    union{float2 m[3][MAXN*MAXN];float2 gradient_a[MOST_BEAMS][3];JumpSpace jump;};
+    union{float2 m[3][MAXN*MAXN];float2 gradient_a[MOST_BEAMS][3];JumpSpace jump;float4 vec[MAXM/2];};   // vec: the exact step's vectors (`half_of`)
 #ifdef PROFILE
     long long profile[SPANS];
 #endif
@@ -1380,10 +1380,13 @@ __device__ float trap(const Program& P,const Warp& W,const Cluster& C,const Entr
 __device__ __forceinline__ float2 shfl2(float2 v,int from){return make_float2(__shfl_sync(FULL,v.x,from),__shfl_sync(FULL,v.y,from));}
 __device__ __forceinline__ float2 halves(float2 v){return v+make_float2(__shfl_xor_sync(FULL,v.x,16),__shfl_xor_sync(FULL,v.y,16));}
 // The lane's half of x: x_b, b ∈ [8h, 8h + 8).
-__device__ __forceinline__ void half_of(float2 x,int lane,float2 (&xb)[8]){
+// Through the warp's shared vector: lanes 0..15 write theirs, each half of the warp reads its own (one
+// address a load, the half's lanes alike).
+__device__ __forceinline__ void half_of(float2 x,int lane,float2 (&xb)[8],float4* v){
+    __syncwarp();if(lane<16)((float2*)v)[lane]=x;__syncwarp();
     const int h=lane>>4;
     #pragma unroll
-    for(int j=0;j<8;j++)xb[j]=shfl2(x,8*h+j);
+    for(int j=0;j<4;j++){const float4 z=v[4*h+j];xb[2*j]=make_float2(z.x,z.y);xb[2*j+1]=make_float2(z.z,z.w);}
 }
 // The lane's row-half of an n × n matrix (row-major), zero past n.
 __device__ __forceinline__ void row_half(const float2* A,int n,int lane,float2 (&a)[8]){
@@ -1410,66 +1413,66 @@ __device__ __forceinline__ float vnorm(float2 x,int lane){return warp_sum(lane<1
 
 // x ← exp(−iBτ)x for B's row-halves (engine.rs `propagate_dyn`): sub-steps of ‖B‖₁τ ≤ ½ (`norm` bounds
 // ‖B‖₁), each through the term whose bound falls below its share of single precision's round-off.
-__device__ float2 taylor(const float2 (&b)[8],float norm,float tau,float2 x,int lane){
+__device__ float2 taylor(const float2 (&b)[8],float norm,float tau,float2 x,int lane,float4* v){
     const float y0=norm*fabsf(tau);const int parts=max((int)ceilf(2.f*y0),1);const float step=tau/(float)parts,y=y0/(float)parts,share=EXACT_ROUND/(float)parts;
     int terms=1;float size=y;while(size>share&&terms<40){terms++;size*=y/(float)terms;}
     for(int p=0;p<parts;p++){
         float2 term=x,sum=x;
-        for(int k=1;k<=terms;k++){float2 xb[8];half_of(term,lane,xb);const float2 v=times(b,xb);const float c=step/(float)k;term=make_float2(v.y*c,-v.x*c);sum+=term;}
+        for(int k=1;k<=terms;k++){float2 xb[8];half_of(term,lane,xb,v);const float2 v=times(b,xb);const float c=step/(float)k;term=make_float2(v.y*c,-v.x*c);sum+=term;}
         x=sum;
     }
     return x;
 }
 
 // A cluster's segment of an exact step (engine.rs `Segment`): its size and parts, the parts it keeps (bit
-// q; bit 0 the static one), its grid's spacing from the step's start, and its path: beating (CF4 over
-// each spacing) or static (the propagator over a whole spacing, the series on the vector off the grid).
-struct Segment{int n,parts;unsigned kept;int beating;double start,spacing;};
+// q; bit 0 the static one), its grid's spacing from the step's start, its path -- beating (CF4 over each
+// spacing) or static (the propagator over a whole spacing, the series on the vector off the grid) --, and
+// in the scratch its parts' phases at the step's start, their norms (`exact_norms`) and their Ω_q. Its
+// times are single precision from the step's start (a step's τ holds them to 1e-7 of itself).
+struct Segment{int n,parts;unsigned kept;int beating;double start,spacing;float delta;const float2* base;const float* F;const float* w;float4* v;};
 
 // A kept beat's phase e^{iΩ_q t}: its phase at the step's start (double precision) times the rest's.
-__device__ __forceinline__ float2 beat_phase(const float2* base,const double* omegas,int q,double t,double start){
-    float s,c;sincosf((float)omegas[q-1]*(float)(t-start),&s,&c);return base[q]*make_float2(c,s);
-}
+__device__ __forceinline__ float2 beat_phase(const Segment& S,int q,float t){float s,c;sincosf(S.w[q]*t,&s,&c);return S.base[q]*make_float2(c,s);}
 
 // x over [t, t + len) by CF4 (engine.rs `cf4`, `Segment::combine`): exp(−i len B₂) exp(−i len B₁) x,
 // B₁ = w₁H(t₁) + w₂H(t₂), B₂ = w₂H(t₁) + w₁H(t₂) at the Gauss nodes t_i = t + c_i len.
-__device__ float2 cf4(const Segment& S,const float2* X,const float* F,const float2* base,const double* omegas,double t,double len,float2 x,int lane){
-    const double r=0.28867513459481287;const int nn=S.n*S.n;
-    const double t1=t+(0.5-r)*len,t2=t+(0.5+r)*len;const float w1=(float)(0.25+r),w2=(float)(0.25-r);
+__device__ float2 cf4(const Segment& S,const float2* X,float t,float len,float2 x,int lane){
+    const float r=0.28867513459481287f,w1=0.25f+r,w2=0.25f-r;const int nn=S.n*S.n;
+    const float t1=t+(0.5f-r)*len,t2=t+(0.5f+r)*len;
     float2 b1[8],b2[8];row_half(X,S.n,lane,b1);
     #pragma unroll
     for(int j=0;j<8;j++){b1[j]=0.5f*b1[j];b2[j]=b1[j];}
-    float n1=0.5f*F[0],n2=n1;
+    float n1=0.5f*S.F[0],n2=n1;
     for(int q=1;q<S.parts;q++){
         if(!((S.kept>>q)&1u))continue;
-        const float2 p1=beat_phase(base,omegas,q,t1,S.start),p2=beat_phase(base,omegas,q,t2,S.start),z1=w1*p1+w2*p2,z2=w2*p1+w1*p2;
+        const float2 p1=beat_phase(S,q,t1),p2=beat_phase(S,q,t2),z1=w1*p1+w2*p2,z2=w2*p1+w1*p2;
         float2 a[8];row_half(X+q*nn,S.n,lane,a);
         #pragma unroll
         for(int j=0;j<8;j++){b1[j]+=z1*a[j];b2[j]+=z2*a[j];}
-        n1+=sqrtf(norm2(z1))*F[q];n2+=sqrtf(norm2(z2))*F[q];
+        n1+=sqrtf(norm2(z1))*S.F[q];n2+=sqrtf(norm2(z2))*S.F[q];
     }
-    x=taylor(b1,n1,(float)len,x,lane);
-    return taylor(b2,n2,(float)len,x,lane);
+    x=taylor(b1,n1,len,x,lane,S.v);
+    return taylor(b2,n2,len,x,lane,S.v);
 }
 
-// x over [t, t + len) by a segment (engine.rs `Segment::advance`): CF4 where it beats; else the
-// propagator over a whole spacing (`node`), the series off the grid.
-__device__ float2 seg_advance(const Segment& S,const float2* X,const float* F,const float2* base,const double* omegas,double t,double len,bool node,float2 x,int lane){
-    if(S.beating)return cf4(S,X,F,base,omegas,t,len,x,lane);
-    float2 a[8];
-    if(node){row_half(X+5*S.parts*S.n*S.n,S.n,lane,a);float2 xb[8];half_of(x,lane,xb);return times(a,xb);}
-    row_half(X,S.n,lane,a);return taylor(a,F[0],(float)len,x,lane);
+// x over [t, t + len) by a segment (engine.rs `Segment::advance`): CF4 where it beats; else the series of
+// exp(−iH₀ len) on the vector -- the CPU's propagator over a whole spacing, as exact: a single-precision
+// propagator applied at every spacing would compound its own rounding over the step (1e-4 of ln‖ψ‖² over 300
+// spacings), the series' rounding is new at each.
+__device__ float2 seg_advance(const Segment& S,const float2* X,float t,float len,bool node,float2 x,int lane){
+    if(S.beating)return cf4(S,X,t,len,x,lane);
+    float2 a[8];row_half(X,S.n,lane,a);return taylor(a,S.F[0],len,x,lane,S.v);
 }
 
 // The conditional force's lab components at the time t (engine.rs `Segment::force`): −Re⟨x|G(t)|x⟩/⟨x|x⟩,
 // G(t) = G₀ + 2 Re Σ e^{iΩt} G_Ω over the kept positive beats; returns ⟨x|x⟩.
-__device__ float seg_force(const Segment& S,const float2* X,const float2* base,const double* omegas,double t,float2 x,int lane,float f[3]){
-    const int Q=S.parts,nn=S.n*S.n,half=(Q-1)/2;float2 xb[8];half_of(x,lane,xb);float s[3];
+__device__ float seg_force(const Segment& S,const float2* X,float t,float2 x,int lane,float f[3]){
+    const int Q=S.parts,nn=S.n*S.n,half=(Q-1)/2;float2 xb[8];half_of(x,lane,xb,S.v);float s[3];
     #pragma unroll
     for(int a=0;a<3;a++){float2 g[8];row_half(X+(Q+a)*nn,S.n,lane,g);s[a]=form_part(g,xb,x).x;}
     for(int q=1+half;q<Q;q++){
         if(!((S.kept>>q)&1u))continue;
-        const float2 p=2.f*beat_phase(base,omegas,q,t,S.start);
+        const float2 p=2.f*beat_phase(S,q,t);
         #pragma unroll
         for(int a=0;a<3;a++){float2 g[8];row_half(X+(Q+3*q+a)*nn,S.n,lane,g);s[a]+=(p*form_part(g,xb,x)).x;}
     }
@@ -1479,12 +1482,54 @@ __device__ float seg_force(const Segment& S,const float2* X,const float2* base,c
     return norm;
 }
 
+// A panel's forces at its middle and its end (`seg_force` of each): one pass over the G parts.
+__device__ void seg_forces(const Segment& S,const float2* X,float t1,float t2,float2 x1,float2 x2,int lane,float f1[3],float f2[3],float& n1,float& n2){
+    const int Q=S.parts,nn=S.n*S.n,half=(Q-1)/2;float2 xb1[8],xb2[8];half_of(x1,lane,xb1,S.v);half_of(x2,lane,xb2,S.v);float s1[3],s2[3];
+    #pragma unroll
+    for(int a=0;a<3;a++){float2 g[8];row_half(X+(Q+a)*nn,S.n,lane,g);s1[a]=form_part(g,xb1,x1).x;s2[a]=form_part(g,xb2,x2).x;}
+    for(int q=1+half;q<Q;q++){
+        if(!((S.kept>>q)&1u))continue;
+        const float2 p1=2.f*beat_phase(S,q,t1),p2=2.f*beat_phase(S,q,t2);
+        #pragma unroll
+        for(int a=0;a<3;a++){float2 g[8];row_half(X+(Q+3*q+a)*nn,S.n,lane,g);s1[a]+=(p1*form_part(g,xb1,x1)).x;s2[a]+=(p2*form_part(g,xb2,x2)).x;}
+    }
+    n1=vnorm(x1,lane);n2=vnorm(x2,lane);
+    #pragma unroll
+    for(int a=0;a<3;a++){f1[a]=-warp_sum(s1[a])/n1;f2[a]=-warp_sum(s2[a])/n2;}
+}
+// A panel's two spacings by CF4 (`cf4` twice) with the parts loaded once: both spacings' B₁ and B₂.
+__device__ void cf4_panel(const Segment& S,const float2* X,float t,float len,float2 x,int lane,float2& middle,float2& last){
+    const float r=0.28867513459481287f,w1=0.25f+r,w2=0.25f-r;const int nn=S.n*S.n;
+    const float ta=t+(0.5f-r)*len,tb=t+(0.5f+r)*len;
+    float2 a1[8],a2[8],b1[8],b2[8];row_half(X,S.n,lane,a1);
+    #pragma unroll
+    for(int j=0;j<8;j++){a1[j]=0.5f*a1[j];a2[j]=a1[j];b1[j]=a1[j];b2[j]=a1[j];}
+    float na1=0.5f*S.F[0],na2=na1,nb1=na1,nb2=na1;
+    for(int q=1;q<S.parts;q++){
+        if(!((S.kept>>q)&1u))continue;
+        const float2 p1=beat_phase(S,q,ta),p2=beat_phase(S,q,tb),p3=beat_phase(S,q,ta+len),p4=beat_phase(S,q,tb+len);
+        const float2 za1=w1*p1+w2*p2,za2=w2*p1+w1*p2,zb1=w1*p3+w2*p4,zb2=w2*p3+w1*p4;
+        float2 h[8];row_half(X+q*nn,S.n,lane,h);
+        #pragma unroll
+        for(int j=0;j<8;j++){a1[j]+=za1*h[j];a2[j]+=za2*h[j];b1[j]+=zb1*h[j];b2[j]+=zb2*h[j];}
+        const float f=S.F[q];na1+=sqrtf(norm2(za1))*f;na2+=sqrtf(norm2(za2))*f;nb1+=sqrtf(norm2(zb1))*f;nb2+=sqrtf(norm2(zb2))*f;
+    }
+    x=taylor(a1,na1,len,x,lane,S.v);middle=taylor(a2,na2,len,x,lane,S.v);
+    x=taylor(b1,nb1,len,middle,lane,S.v);last=taylor(b2,nb2,len,x,lane,S.v);
+}
+// A panel's two halves from x (`seg_advance` twice): a beating segment's by `cf4_panel`, a static one's
+// whole spacings by its propagator loaded once.
+__device__ void seg_advances(const Segment& S,const float2* X,float t,float half,bool whole,float2 x,int lane,float2& middle,float2& last){
+    if(S.beating){cf4_panel(S,X,t,half,x,lane,middle,last);return;}
+    float2 a[8];row_half(X,S.n,lane,a);middle=taylor(a,S.F[0],half,x,lane,S.v);last=taylor(a,S.F[0],half,middle,lane,S.v);
+}
+
 // −d‖x‖²/dt at the time t (engine.rs `Segment::rate`): static ⟨x|D|x⟩, D = i(H₀ − H₀†); beating −2 Im⟨x|H(t)|x⟩.
-__device__ float seg_rate(const Segment& S,const float2* X,const float2* base,const double* omegas,double t,float2 x,int lane){
-    const int Q=S.parts,nn=S.n*S.n;float2 xb[8];half_of(x,lane,xb);float2 a[8];
+__device__ float seg_rate(const Segment& S,const float2* X,float t,float2 x,int lane){
+    const int Q=S.parts,nn=S.n*S.n;float2 xb[8];half_of(x,lane,xb,S.v);float2 a[8];
     if(!S.beating){row_half(X+(5*Q+1)*nn,S.n,lane,a);return warp_sum(form_part(a,xb,x).x);}
     row_half(X,S.n,lane,a);float2 z=form_part(a,xb,x);
-    for(int q=1;q<Q;q++){if(!((S.kept>>q)&1u))continue;row_half(X+q*nn,S.n,lane,a);z+=beat_phase(base,omegas,q,t,S.start)*form_part(a,xb,x);}
+    for(int q=1;q<Q;q++){if(!((S.kept>>q)&1u))continue;row_half(X+q*nn,S.n,lane,a);z+=beat_phase(S,q,t)*form_part(a,xb,x);}
     return -2.f*warp_sum(z.y);
 }
 
@@ -1664,42 +1709,24 @@ __device__ unsigned exact_resolve(const Program& P,float2* X,const float* F,cons
     dropped=moved;return kept;
 }
 
-// U = exp(−iHδ) of an n × n matrix in the scratch (engine.rs `exponential`): its Taylor series through the
-// term whose bound falls below single precision's round-off; T1, T2 working room.
-__device__ void exact_exponential(const float2* H,float2* U,float2* T1,float2* T2,int n,double delta,float norm,int lane){
-    const int nn=n*n;const float d=(float)delta;
-    for(int e=lane;e<nn;e+=32){const float2 h=H[e];const float2 x=make_float2(h.y*d,-h.x*d);T1[e]=x;const int r=e/n;U[e]=x+make_float2(e==r*n+r?1.f:0.f,0.f);}
-    const float size=norm*fabsf(d);float bound=size;
-    for(int k=2;k<40&&bound>EXACT_ROUND;k++){
-        __syncwarp();
-        // T2 = T1 X/k, X = −iδH.
-        for(int e=lane;e<nn;e+=32){const int r=e/n,c=e-r*n;float2 s=zero2();for(int j=0;j<n;j++)s+=T1[r*n+j]*H[j*n+c];T2[e]=(d/(float)k)*make_float2(s.y,-s.x);}
-        __syncwarp();
-        for(int e=lane;e<nn;e+=32){T1[e]=T2[e];U[e]+=T2[e];}
-        bound*=size/(float)k;
-    }
-    __syncwarp();
-}
-
 // A cluster's segment of an exact step of τ from `start` at the point (engine.rs `Segment::new`): its
 // components, their norms and phases at the start, the beats it leaves out (their bound per unit time
 // into `beats`, the trajectory's largest), and its grid: with beats kept, the spacing whose phase
 // (‖H₀‖₁ + Σ‖H_j‖₁ + max|Ω|/2)δ is within the node phase -- with a period, its k-th part where the
-// CPU caches the period's propagators --, else ‖H₀‖₁δ within it and the propagator over a spacing.
+// CPU caches the period's propagators --, else ‖H₀‖₁δ within it and its decay i(H₀ − H₀†) for the roots.
 __device__ __noinline__ Segment exact_segment(const Program& P,const Warp& W,int k,double start,double tau,int lane,float2* X,float& beats){
     const Cluster C=P.clusters[k];Segment S;S.n=C.n;S.parts=C.parts;S.start=start;
     const int n=C.n,nn=n*n,Q=C.parts;const double* omegas=P.omegas+C.omegas;
-    float2* base=X+(5*Q+4)*nn;float* F=(float*)(base+Q);
+    float2* base=X+(5*Q+4)*nn;float* F=(float*)(base+Q);float* w=F+5*Q;S.base=base;S.F=F;S.w=w;
     exact_components(P,W,C,lane,X);
     for(int m=0;m<4*Q;m++){float column;const float s=msize(X+m*nn,n,lane,column);if(m<Q){F[m]=column;F[Q+m]=s;}else F[2*Q+m-Q]=s;}
-    if(lane<Q)base[lane]=lane==0?make_float2(1.f,0.f):cis(omegas[lane-1]*start);
+    if(lane<Q){base[lane]=lane==0?make_float2(1.f,0.f):cis(omegas[lane-1]*start);w[lane]=lane==0?0.f:(float)omegas[lane-1];}
     __syncwarp();
     double dropped;S.kept=exact_resolve(P,X,F,omegas,n,Q,tau,lane,dropped);beats=fmaxf(beats,(float)(dropped/tau));
     S.beating=(S.kept&~1u)!=0u;
     if(!S.beating){
         const int steps=max((int)ceil((double)F[0]*tau/P.node_phase),1);S.spacing=tau/(double)steps;
-        float2* U=X+5*Q*nn;float2* D=U+nn;
-        exact_exponential(X,U,D+nn,D+2*nn,n,S.spacing,F[0],lane);
+        float2* D=X+(5*Q+1)*nn;
         for(int e=lane;e<nn;e+=32){const int r=e/n,c=e-r*n;const float2 z=X[e]-conj(X[c*n+r]);D[e]=make_float2(-z.y,z.x);}
         __syncwarp();
     }else{
@@ -1709,59 +1736,57 @@ __device__ __noinline__ Segment exact_segment(const Program& P,const Warp& W,int
         if(period>0.){const int kk=max((int)ceil(period/widest),1);const double sp=period/(double)kk;if(tau/sp>(double)(kk*n)){S.spacing=sp;cached=true;}}
         if(!cached)S.spacing=tau/(double)max((int)ceil(tau/widest),1);
     }
+    S.delta=(float)S.spacing;
     return S;
 }
 
 // The root s ∈ (0, width] of ln‖x(s)‖² = target from the panel's start x and middle (engine.rs
 // `Segment::root`): Newton on the logarithm with its derivative −rate/‖x‖², from linear interpolation on
 // the half it lies in, kept in the bracket (bisection where it steps out), to single precision.
-__device__ double exact_root(const Segment& S,const float2* X,const float* F,const float2* base,const double* omegas,float2 x,float2 middle,double t,
-        float na,float nm,float nb,double width,double target,int lane){
-    const double half=0.5*width,lna=log((double)na),lnm=log((double)nm),lnb=log((double)nb);
-    double lo,hi,la,lb;if(lnm<=target){lo=0.;hi=half;la=lna;lb=lnm;}else{lo=half;hi=width;la=lnm;lb=lnb;}
-    double s=lb<la?fmin(fmax(lo+(target-la)/(lb-la)*(hi-lo),lo),hi):hi;
+__device__ float exact_root(const Segment& S,const float2* X,float2 x,float2 middle,float t,float na,float nm,float nb,float width,float target,int lane){
+    const float half=0.5f*width,lna=logf(na),lnm=logf(nm),lnb=logf(nb);
+    float lo,hi,la,lb;if(lnm<=target){lo=0.f;hi=half;la=lna;lb=lnm;}else{lo=half;hi=width;la=lnm;lb=lnb;}
+    float s=lb<la?fminf(fmaxf(lo+(target-la)/(lb-la)*(hi-lo),lo),hi):hi;
     for(int it=0;it<64;it++){
-        const bool first=s<=half;const double from=first?0.:half;
-        const float2 y=seg_advance(S,X,F,base,omegas,t+from,s-from,false,first?x:middle,lane);
-        const float norm=vnorm(y,lane);const double g=log((double)norm)-target;
-        if(g>0.)lo=s;else hi=s;
-        const double rate=(double)seg_rate(S,X,base,omegas,t+s,y,lane)/(double)norm;
-        double next=rate>0.?s+g/rate:0.5*(lo+hi);
-        if(!(next>lo&&next<hi))next=0.5*(lo+hi);
-        if(fabs(next-s)<=1e-6*fmax(width,s))return next;
+        const bool first=s<=half;const float from=first?0.f:half;
+        const float2 y=seg_advance(S,X,t+from,s-from,false,first?x:middle,lane);
+        const float norm=vnorm(y,lane),g=logf(norm)-target;
+        if(g>0.f)lo=s;else hi=s;
+        const float rate=seg_rate(S,X,t+s,y,lane)/norm;
+        float next=rate>0.f?s+g/rate:0.5f*(lo+hi);
+        if(!(next>lo&&next<hi))next=0.5f*(lo+hi);
+        if(fabsf(next-s)<=1e-6f*fmaxf(width,s))return next;
         s=next;
     }
     return s;
 }
 
-// From x at `at` (its ‖x‖² relative to e^{logn}), the evolution for at most `remaining` until logn +
-// ln‖x‖² falls to ln θ (engine.rs `Segment::evolve`): composite Simpson on panels of two spacings from a
-// node -- a panel to the next node first where it starts between nodes (after a jump), what is left
-// last --, the impulse ∫⟨F⟩dt into `impulse` (lab); the time taken, and `jumped` where it reached θ
-// (x then at the root).
-__device__ double exact_evolve(const Segment& S,const float2* X,const float* F,const float2* base,const double* omegas,float2& x,double at,double remaining,
-        double logn,double logt,int lane,bool& jumped,double impulse[3]){
-    const double end=at+remaining,origin=S.start,delta=S.spacing;double t=at;
-    long long i=(long long)ceil((at-origin)/delta);if(i<0)i=0;
-    float fa[3];float na=seg_force(S,X,base,omegas,t,x,lane,fa);jumped=false;
+// From x at `at` (single precision from the step's start; its ln‖x‖² relative to the trajectory's), the
+// evolution for at most `remaining` until ln‖x‖² falls to `target` (ln θ less the trajectory's ln‖ψ‖²,
+// engine.rs `Segment::evolve`): composite Simpson on panels of two spacings from a node -- a panel to the
+// next node first where it starts between nodes (after a jump), what is left last --, the impulse ∫⟨F⟩dt
+// into `impulse` (lab); the time taken, and `jumped` where it reached it (x then at the root).
+__device__ float exact_evolve(const Segment& S,const float2* X,float2& x,float at,float remaining,float target,int lane,bool& jumped,float impulse[3]){
+    const float end=at+remaining,delta=S.delta;float t=at;
+    int i=max((int)ceilf(at/delta),0);
+    float fa[3];float na=seg_force(S,X,t,x,lane,fa);jumped=false;
     while(t<end){
-        const double node=origin+(double)i*delta;double b;bool whole=false;
-        if(node>t)b=fmin(node,end);else{const double b2=origin+(double)(i+2)*delta;if(b2<=end){b=b2;whole=true;}else b=end;}
-        const double width=b-t,half=0.5*width;
-        const float2 middle=seg_advance(S,X,F,base,omegas,t,half,whole,x,lane),last=seg_advance(S,X,F,base,omegas,t+half,half,whole,middle,lane);
-        float fm[3],fb[3];const float nm=seg_force(S,X,base,omegas,t+half,middle,lane,fm),nb=seg_force(S,X,base,omegas,b,last,lane,fb);
-        if(logn+log((double)nb)<=logt){
-            const double s=exact_root(S,X,F,base,omegas,x,middle,t,na,nm,nb,width,logt-logn,lane);
-            const float2 h=seg_advance(S,X,F,base,omegas,t,0.5*s,false,x,lane),y=seg_advance(S,X,F,base,omegas,t+0.5*s,0.5*s,false,h,lane);
-            float fh[3],fs[3];seg_force(S,X,base,omegas,t+0.5*s,h,lane,fh);seg_force(S,X,base,omegas,t+s,y,lane,fs);
-            for(int a=0;a<3;a++)impulse[a]+=s/6.*((double)fa[a]+4.*(double)fh[a]+(double)fs[a]);
+        const float node=(float)i*delta;float b;bool whole=false;
+        if(node>t)b=fminf(node,end);else{const float b2=(float)(i+2)*delta;if(b2<=end){b=b2;whole=true;}else b=end;}
+        const float width=b-t,half=0.5f*width;
+        float2 middle,last;seg_advances(S,X,t,half,whole,x,lane,middle,last);
+        float fm[3],fb[3],nm,nb;seg_forces(S,X,t+half,b,middle,last,lane,fm,fb,nm,nb);
+        if(logf(nb)<=target){
+            const float s=exact_root(S,X,x,middle,t,na,nm,nb,width,target,lane);
+            const float2 h=seg_advance(S,X,t,0.5f*s,false,x,lane),y=seg_advance(S,X,t+0.5f*s,0.5f*s,false,h,lane);
+            float fh[3],fs[3];seg_force(S,X,t+0.5f*s,h,lane,fh);seg_force(S,X,t+s,y,lane,fs);
+            #pragma unroll
+            for(int a=0;a<3;a++)impulse[a]+=s/6.f*(fa[a]+4.f*fh[a]+fs[a]);
             x=y;jumped=true;return t+s-at;
         }
-        for(int a=0;a<3;a++)impulse[a]+=width/6.*((double)fa[a]+4.*(double)fm[a]+(double)fb[a]);
-        x=last;
         #pragma unroll
-        for(int a=0;a<3;a++)fa[a]=fb[a];
-        na=nb;t=b;if(whole)i+=2;
+        for(int a=0;a<3;a++){impulse[a]+=width/6.f*(fa[a]+4.f*fm[a]+fb[a]);fa[a]=fb[a];}
+        x=last;na=nb;t=b;if(whole)i+=2;
     }
     return remaining;
 }
@@ -1779,13 +1804,12 @@ __device__ __noinline__ void exact_step(const Program& P,const Run& R,Warp& W,Tr
         if(built!=t.cluster){
             // A later cluster's segment at the step's point (the jump's moved W.pt to its own momentum).
             if(built>=0){Traj h=t;for(int i=0;i<3;i++)h.p[i]=ph[i];point(P,W,h,lane);}
-            S=exact_segment(P,W,t.cluster,start,tau,lane,X,t.beats);built=t.cluster;
+            SPAN_BEGIN(segment);S=exact_segment(P,W,t.cluster,start,tau,lane,X,t.beats);S.v=W.vec;built=t.cluster;SPAN_END(SPAN_GENERATOR,segment);
         }
-        const int Q=S.parts,nn=S.n*S.n;const float2* base=X+(5*Q+4)*nn;const float* F=(const float*)(base+Q);const double* omegas=P.omegas+P.clusters[t.cluster].omegas;
-        bool jumped;double part[3]={0.,0.,0.};
-        const double taken=exact_evolve(S,X,F,base,omegas,x,start+elapsed,tau-elapsed,t.logn,t.log_threshold,lane,jumped,part);
-        for(int a=0;a<3;a++)impulse[a]+=part[a];
-        elapsed+=taken;
+        bool jumped;float part[3]={0.f,0.f,0.f};
+        SPAN_BEGIN(evolving);const float taken=exact_evolve(S,X,x,(float)elapsed,(float)(tau-elapsed),(float)(t.log_threshold-t.logn),lane,jumped,part);SPAN_END(SPAN_EVOLVE,evolving);
+        for(int a=0;a<3;a++)impulse[a]+=(double)part[a];
+        elapsed=jumped?elapsed+(double)taken:tau;
         if(!jumped)break;
         __syncwarp();if(lane<16)W.psi[lane]=x;__syncwarp();
         t.time=start+elapsed;
@@ -2296,6 +2320,16 @@ extern "C" __global__ void merge(const double* sums,const int* runs,int nruns,in
 }
 
 // ---------------------------------------------------------------------------------------------
+// Checks (tests/gpu.rs): a trajectory's cluster's exact-step components at its point (`exact_components`)
+// into X, one warp; a stream's first words and deviates; the structs' sizes.
+extern "C" __global__ void exact_probe(const Program P,const State* S,float2* X){
+    __shared__ Warp W;const int lane=threadIdx.x&31;if(threadIdx.x>=32)return;
+    Traj t;
+    #pragma unroll
+    for(int i=0;i<3;i++){t.q[i]=S->q[i];t.p[i]=S->p[i];}
+    t.time=S->time;t.cluster=S->cluster;
+    point(P,W,t,lane);exact_components(P,W,P.clusters[t.cluster],lane,X);
+}
 // Checks (tests/gpu.rs): a stream's first words and deviates; the structs' sizes.
 #define OFFSET(T,f) ((u32)(u64)&(((T*)0)->f))
 extern "C" __global__ void rng_stream(u64 seed,u32 purpose,u64 trajectory,u32 event,u32* words,double* deviates){

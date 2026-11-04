@@ -221,6 +221,17 @@ impl Gpu{
         Ok(trajectories.iter().zip(&finished).map(|(t,s)|s.trajectory(settings,t.seed)).collect())
     }
 
+    /// A trajectory's cluster's components at its point as the exact step takes them (the kernel's
+    /// `exact_components`, a check's entry): per part H_q, then per part and axis G_q, each n × n row-major.
+    pub fn exact_probe(&self,program:&Program,model:&Model,settings:&Settings,t:&Trajectory)->Result<Vec<Complex>,String>{
+        self.context.make_current()?;
+        let(n,q)=(model.dimension(t.cluster),1+model.beats(t.cluster).0.len());let size=5*q*n*n;
+        let state=Buffer::with(&self.stream,&[program::State::new(t,t,settings)])?;let out=Buffer::new(8*size)?;
+        let f=self.function("exact_probe")?;self.stream.launch(&f,1,32,&[&program.params,&state.pointer,&out.pointer])?;
+        let mut words=vec![[0f32;2];size];self.stream.download(&out,&mut words)?;
+        Ok(words[..4*q*n*n].iter().map(|z|Complex::new(z[0] as f64,z[1] as f64)).collect())
+    }
+
     /// The tasks a wave holds: as many as a quarter of the free memory takes (at most half a gigabyte).
     fn wave(&self,program:&Program,w:&Windows)->Result<usize,String>{
         let slot=std::mem::size_of::<program::State>()+8*w.ring_stride+56*w.listed.len()+8*program.scratch()+8*MOST_INTERVALS*SLOT_RECORD;
