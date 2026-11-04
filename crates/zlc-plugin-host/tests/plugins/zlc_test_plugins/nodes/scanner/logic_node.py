@@ -19,7 +19,7 @@ SURVIVAL = DatasetOutputDeclaration("survival", "zlc.test.survival")
 SCHEMA = AuthoringSchema((AuthoringField("path", "text", "File", ""), AuthoringField("repeats", "int", "Repeats", 200, minimum=1),
                           AuthoringField("points", "int", "Points", 60, minimum=1), AuthoringField("sites", "int", "Sites", 35, minimum=1),
                           AuthoringField("block", "int", "Block", 0, minimum=0), AuthoringField("pause", "float", "Pause", 0.0),
-                          AuthoringField("limit", "int", "Publications", 0, minimum=0)))
+                          AuthoringField("limit", "int", "Publications", 0, minimum=0), AuthoringField("unit", "text", "Axis unit", "µs")))
 
 
 def rabi_frequency(progress):
@@ -28,9 +28,9 @@ def rabi_frequency(progress):
     return 0.026 + 0.009 * progress
 
 
-def synthetic(repeats, points, sites):
+def synthetic(repeats, points, sites, unit):
     repeat = AxisSpec(AxisId("repeat"), "repeat", REPEAT, repeats, coordinates=np.arange(repeats))
-    duration = AxisSpec(AxisId("duration"), "duration", SCAN_POINT, points, coordinates=np.linspace(0.1, 150.0, points), unit="µs")
+    duration = AxisSpec(AxisId("duration"), "duration", SCAN_POINT, points, coordinates=np.linspace(0.1, 150.0, points), unit=unit)
     site = AxisSpec(AxisId("site"), "Site", SITE, sites, coordinates=np.arange(sites))
     schema = DatasetSchema(DomainSpec((repeats,), (repeat,), (range(repeats),)), DomainSpec((points,), (duration,), (range(points),)), DomainSpec((sites,), (site,)),
                            ValueSchema(ValidityContract.components(site.axis_id), np.dtype(bool), "1", name="survival"))
@@ -48,11 +48,11 @@ def saved(path):
 
 
 class Scanner:
-    def __init__(self, path, repeats, points, sites, block, pause, limit):
-        self.path, self.repeats, self.points, self.sites, self.block, self.pause, self.limit = path, repeats, points, sites, block, pause, limit
+    def __init__(self, path, repeats, points, sites, block, pause, limit, unit):
+        self.path, self.repeats, self.points, self.sites, self.block, self.pause, self.limit, self.unit = path, repeats, points, sites, block, pause, limit, unit
 
     def execute(self, context):
-        whole, values, valid = saved(self.path) if self.path else synthetic(self.repeats, self.points, self.sites)
+        whole, values, valid = saved(self.path) if self.path else synthetic(self.repeats, self.points, self.sites, self.unit)
         repeats, points = whole.repeat_domain.size, whole.point_domain.size
         places = [(r, p, self.block) for r in range(repeats) for p in range(0, points, self.block)] if self.block else [(0, 0, points)]
         places = places[:self.limit or len(places)]
@@ -69,4 +69,4 @@ class Scanner:
 
 
 LOGIC_NODE = NodeType("scanner", NodeKind.MEASUREMENT, SCHEMA, description="Publishes a scan, saved or synthetic.", outputs=(SURVIVAL,),
-                      build=lambda path, repeats, points, sites, block, pause, limit: Scanner(path, repeats, points, sites, block, pause, limit), reports_ready=True)
+                      build=lambda path, repeats, points, sites, block, pause, limit, unit: Scanner(path, repeats, points, sites, block, pause, limit, unit), reports_ready=True)

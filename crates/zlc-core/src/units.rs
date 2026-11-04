@@ -424,6 +424,22 @@ impl UnitRegistry {
         is_close(candidate.scale().ok()?, wanted, 1e-12).then_some(candidate)
     }
 
+    /// What the reciprocal of `unit` reads as: the declared reciprocal unit (µs: MHz),
+    /// else its factors' powers negated, a spelling this registry resolves.
+    pub fn inverse_symbol(&self, unit: &Unit) -> String {
+        if let Some(found) = self.inverse_for(unit) { return found.symbol.clone(); }
+        if unit.symbol == "1" { return unit.symbol.clone(); }
+        let negated = |factor: &str| match factor.split_once('^') {
+            None | Some((_, "1")) => format!("{}^-1", factor.split('^').next().unwrap_or(factor)),
+            Some((symbol, "-1")) => symbol.to_owned(),
+            Some((symbol, power)) => match power.strip_prefix('-') {
+                Some(positive) => format!("{symbol}^{positive}"),
+                None => format!("{symbol}^-{power}"),
+            },
+        };
+        unit.symbol.split('*').map(negated).collect::<Vec<_>>().join("*")
+    }
+
     /// One symbol per registered unit, sorted.
     pub fn distinct_symbols(&self) -> Vec<String> {
         let mut symbols: Vec<String> = self.units.values().map(|unit| unit.symbol.clone()).collect();
@@ -687,6 +703,17 @@ mod tests {
 
     fn reading(value: f64, unit: &str, step: Option<f64>) -> String {
         format_reading(Number::Float(value), &DEFAULT_UNITS.resolve(unit).unwrap(), None, step).unwrap()
+    }
+
+    #[test]
+    fn a_reciprocal_reads_as_the_declared_unit_or_negated_powers() {
+        let units = &*DEFAULT_UNITS;
+        for (unit, inverse) in [("µs", "MHz"), ("kHz", "ms"), ("V", "V^-1"), ("mV", "mV^-1"), ("V^-1", "V"), ("V^2", "V^-2"), ("V*µs", "V^-1*µs^-1"), ("1", "1")] {
+            let resolved = units.resolve(unit).unwrap();
+            let read = units.inverse_symbol(&resolved);
+            assert_eq!(read, inverse);
+            assert_eq!(units.resolve(&read).unwrap().symbol, inverse, "it resolves");
+        }
     }
 
     #[test]

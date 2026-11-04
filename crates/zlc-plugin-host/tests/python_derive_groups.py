@@ -29,9 +29,10 @@ zlc_plugin.fit._MODELS = {'line': {'id': 'line', 'label': 'Line', 'parameters': 
     {'name': 'slope', 'unit_relation': 'inverse_axis_0'}, {'name': 'offset', 'unit_relation': 'value'}]}}
 
 
-def fake_fit(model, x, y, sigma=None, warm=None):
+def fake_fit(model, x, y, sigma=None, warm=None, sigma_dof=None):
     """A straight line per row; a row with under three points fails."""
     assert model == 'line' and y.shape[1] == x.size and (sigma is None or sigma.shape == y.shape)
+    assert (sigma_dof is None) == (sigma is None) and (sigma_dof is None or sigma_dof.shape == y.shape)
     cells = y.shape[0]
     values, errors, success = np.full((cells, 2), np.nan), np.full((cells, 2), np.nan), np.zeros(cells, bool)
     for cell in range(cells):
@@ -45,10 +46,11 @@ def fake_fit(model, x, y, sigma=None, warm=None):
 
 
 class Context:
-    def __init__(self): self.warms = []
-    def fit(self, model, x, y, sigma=None, warm=None):
+    def __init__(self): self.warms, self.dofs = [], []
+    def fit(self, model, x, y, sigma=None, warm=None, sigma_dof=None):
         self.warms.append(warm)
-        return fake_fit(model, x, y, sigma, warm)
+        self.dofs.append(sigma_dof)
+        return fake_fit(model, x, y, sigma, warm, sigma_dof)
 
 
 def rows_of(*variables):
@@ -412,6 +414,28 @@ class Fit(unittest.TestCase):
         # Arithmetic has no rule for a sigma.
         self.assertTrue(np.isnan(live.planes['twice']['sigma']).all())
 
+    def test_a_fit_weighs_a_means_sigma_by_its_samples(self):
+        """n - 1 where n samples made the mean, infinite where one did, by either route; arithmetic drops it."""
+        valid = np.ones(self.schema.physical_shape, bool)
+        valid[0, 3, 0], valid[1, 5, 1] = False, False
+        for route in (live_route, sealed_route):
+            context = Context()
+            run(self.rows, route(self.schema, self.values, valid), context)
+            np.testing.assert_array_equal(context.dofs[0][0, :4], [1, 1, 1, np.inf])
+            np.testing.assert_array_equal(context.dofs[0][1, :6], [1, 1, 1, 1, 1, np.inf])
+        over = rows_of({'name': 'a', 'publish': False, 'terms': [{'of': 'counts'}], 'statistic': 'mean', 'over': ['repeat'], 'by': 'repeat', 'every': 2},
+                       {'name': 'b', 'publish': False, 'terms': [{'of': 'a'}, {'op': '*', 'number': 2.0}]},
+                       {'name': 'rabi', 'terms': [{'of': 'b'}], 'statistic': 'fit', 'over': ['duration'], 'model': 'line'})
+        context = Context()
+        run(over, sealed_route(self.schema, self.values, valid), context)
+        self.assertIsNone(context.dofs[0])
+
+    def test_an_inverse_unit_reads_as_the_panels(self):
+        from zlc_data.units import DEFAULT_UNITS
+        for unit, inverse in (('µs', 'MHz'), ('kHz', 'ms'), ('V', 'V^-1'), ('mV', 'mV^-1'), ('V^-1', 'V'), ('V^2', 'V^-2'), ('V*µs', 'V^-1*µs^-1'), ('1', '1')):
+            self.assertEqual(DEFAULT_UNITS.inverse_symbol(unit), inverse)
+            self.assertEqual(DEFAULT_UNITS.resolve(inverse).symbol, inverse)
+
     def test_failed_cell_is_invalid_and_others_stand(self):
         valid = self.valid.copy()
         valid[:2, :, 1] = False
@@ -423,8 +447,8 @@ class Fit(unittest.TestCase):
 
     def test_an_undetermined_parameter_is_invalid_alone(self):
         class Undetermined(Context):
-            def fit(self, model, x, y, sigma=None, warm=None):
-                answer = fake_fit(model, x, y, sigma, warm)
+            def fit(self, model, x, y, sigma=None, warm=None, sigma_dof=None):
+                answer = fake_fit(model, x, y, sigma, warm, sigma_dof)
                 answer.errors[:, 0] = np.nan
                 return answer
         written, _each, _p = run(self.rows, sealed_route(self.schema, self.values, self.valid), Undetermined())

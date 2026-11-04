@@ -738,6 +738,25 @@ class UnitRegistry:
         candidate = _prefixed(base, prefix)
         return candidate if math.isclose(candidate.scale, wanted, rel_tol=1e-12) else None
 
+    def inverse_symbol(self, unit: UnitLike) -> str:
+        """What the reciprocal of ``unit`` reads as: the declared reciprocal unit
+        (µs: MHz), else its factors' powers negated, a spelling this registry resolves."""
+
+        source = self.resolve(unit)
+        found = self.inverse_for(source)
+        if found is not None:
+            return found.symbol
+        if source.symbol == "1":
+            return "1"
+
+        def negated(factor: str) -> str:
+            symbol, separator, power = factor.partition("^")
+            if not separator or power == "1":
+                return f"{symbol}^-1"
+            return symbol if power == "-1" else f"{symbol}^{power[1:] if power.startswith('-') else '-' + power}"
+
+        return "*".join(negated(factor) for factor in source.symbol.split("*"))
+
     def distinct_symbols(self) -> tuple[str, ...]:
         """One symbol per registered unit -- its own, never an alias."""
 
