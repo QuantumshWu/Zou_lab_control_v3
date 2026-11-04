@@ -251,7 +251,8 @@
 //!
 //! # First order in the Doppler and recoil shifts
 //! Absorbing from beam l shifts the excited state by the kinetic energy w_l = (ħ/m)(k_l·κ + k_l²/2);
-//! to first order R_l → R_l − w_l R2_l, and `Ground::response` gives the shifted response to all
+//! to first order R_l → R_l − w_l R2_l, in the generator and the jumps alike (model.rs, # The photons and the
+//! Doppler term), and `Ground::response` gives the shifted response to all
 //! orders. An explicit drive needs neither: the moving atom's phase e^{ik_l·r(t)} is its Doppler shift.
 //!
 //! # Approximations and their estimates (the solve's ledger)
@@ -259,7 +260,7 @@
 //! - the couplings' fold: Σ m² of the folded pairs of channels and static couplings;
 //! - the drives' fold: the largest folded total saturation S_b of a ground state;
 //! - the zeroth-order elimination: η², the folded excited population along the trajectories (lib.rs);
-//! - first order in the Doppler shift: (kv/σ_min)² (engine.rs);
+//! - first order in the Doppler shift: (kv/σ_min)² (engine.rs), what its transfer leaves on T (model.rs `Model::first_error`);
 //! - an emitted photon has its carrier's wave number: ≤ 1e-7 on the D2 line.
 use crate::ledger::BUDGET;
 use crate::linear::{hermitian_eigen,hermitian_eigenvalues,Dense,Lu};
