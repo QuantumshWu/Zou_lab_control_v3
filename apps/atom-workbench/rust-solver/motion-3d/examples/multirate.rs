@@ -100,7 +100,7 @@ fn check(request:&Request,which:&str){
                 let dense=g.local_at(&e,k,r,t).unwrap();let scale=dense.effective.largest();
                 for a in 0..n{for b in 0..n{worst_dense=worst_dense.max((full(&x,a,b)-dense.effective[(a,b)]).abs()/scale);}}
                 if !model.mixed(k){
-                    let local=model.local(k,&p,t);let l=Generator{n,hamiltonian:local.hamiltonian[..n*n].to_vec(),scalar:local.scalar,gradient:model.gradients(k,&local)};let gs=l.gradient.iter().flat_map(|v|v.iter()).map(|z|z.abs()).fold(0.,f64::max);
+                    let local=model.local(k,&p,t);let l=Generator{n,hamiltonian:local.hamiltonian[..n*n].to_vec(),scalar:local.scalar,gradient:model.gradients(k,&local,&p)};let gs=l.gradient.iter().flat_map(|v|v.iter()).map(|z|z.abs()).fold(0.,f64::max);
                     for a in 0..n{for b in 0..n{worst_local=worst_local.max((full(&x,a,b)-full(&l,a,b)).abs()/scale);
                         for q in 0..3{worst_gradient=worst_gradient.max((x.gradient[q][a*n+b]-l.gradient[q][a*n+b]).abs()/gs);}}}
                 }

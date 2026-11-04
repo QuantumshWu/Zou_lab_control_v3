@@ -9,7 +9,7 @@ use atom_motion_3d::engine::{dipole_direction,Engine,Settings,Trajectory,QUADRAT
 use atom_motion_3d::ensemble::kept;
 use atom_motion_3d::ground::{ExcitedKind,Ground};
 use atom_motion_3d::ledger::BUDGET;
-use atom_motion_3d::model::{Model,MOST_MIXED};
+use atom_motion_3d::model::{Model,MOST_MIXED,MOST_STATES};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Means,Scales,KT_PER_UK};
 use atom_motion_3d::{initial_trajectory,sample_states,simulate,simulate_to,Initial,Stratum,Variates};
@@ -113,20 +113,20 @@ fn the_fourth_order_tables_give_the_dense_fourth_order_fold(){
 
 /// The Ehrenfest force is minus the gradient of the energy Re⟨ψ|H_eff|ψ⟩ (central differences),
 /// the trap's and the light's -- with explicit excited states (the drives kept within the budget)
-/// their own potential and the kept drives' stimulated force --, the Doppler term's own gradient
-/// aside (the kinetic shift off).
+/// their own potential and the kept drives' stimulated force --, at rest and with the kinetic shift's first
+/// order at the momentum held (model.rs # The photons and the Doppler term).
 #[test]
 fn the_force_is_the_energy_s_gradient(){
-    for allowance in [f64::INFINITY,BUDGET]{
-    let mut model=Model::with(&request(&|_|true),allowance).unwrap();model.doppler=false;
-    let energy=|cluster:usize,r:[f64;3],t:f64,psi:&[Complex;MOST_MIXED]|->f64{
-        let n=model.dimension(cluster);let local=model.generator(cluster,&model.point(r,[0.;3]),t);local.scalar+expectation(&local.hamiltonian[..n*n],psi,n).re
+    for(allowance,doppler)in [(f64::INFINITY,false),(BUDGET,false),(f64::INFINITY,true),(BUDGET,true)]{
+    let mut model=Model::with(&request(&|_|true),allowance).unwrap();model.doppler=doppler;
+    let energy=|cluster:usize,r:[f64;3],kappa:[f64;3],t:f64,psi:&[Complex;MOST_MIXED]|->f64{
+        let n=model.dimension(cluster);let local=model.generator(cluster,&model.point(r,kappa),t);local.scalar+expectation(&local.hamiltonian[..n*n],psi,n).re
     };
-    for(cluster,r,_,t,psi)in samples(&model,2){
-        let p=model.point(r,[0.;3]);let force=model.generator(cluster,&p,t).force(&psi);let h=1e-5;
+    for(cluster,r,kappa,t,psi)in samples(&model,2){
+        let p=model.point(r,kappa);let force=model.generator(cluster,&p,t).force(&psi);let h=1e-5;
         for a in 0..3{
-            let(mut plus,mut minus)=(r,r);plus[a]+=h;minus[a]-=h;let numeric=-(energy(cluster,plus,t,&psi)-energy(cluster,minus,t,&psi))/(2.*h);
-            assert!((force[a]-numeric).abs()<=1e-5*numeric.abs().max(1.),"cluster {cluster} at {r:?}, axis {a}: {} against {numeric}",force[a]);
+            let(mut plus,mut minus)=(r,r);plus[a]+=h;minus[a]-=h;let numeric=-(energy(cluster,plus,kappa,t,&psi)-energy(cluster,minus,kappa,t,&psi))/(2.*h);
+            assert!((force[a]-numeric).abs()<=1e-5*numeric.abs().max(1.),"cluster {cluster} at {r:?}, doppler {doppler}, axis {a}: {} against {numeric}",force[a]);
         }
     }
     }
@@ -385,8 +385,8 @@ fn the_held_twin_s_master_equation_is_the_front_end_s(){
 
 /// The held engine (engine.rs `Held`: the twin's generator and jumps computed once, control.rs)
 /// follows the plain engine's atom held at the same point: from the same initial state and streams,
-/// the same jumps and the same internal state over 2000 steps -- without the photons' recoil term,
-/// where the engine's decay is its jumps' (the twin's by construction).
+/// the same jumps and the same internal state over 2000 steps, to the tables' interpolation between the plain engine's
+/// decay and its jumps' Σ L†L (the twin's by construction) -- without the photons' recoil term, where the two are one at the nodes.
 #[test]
 fn the_held_engine_is_the_plain_engine_at_rest(){
     let r=request(&|_|true);let mut model=Model::new(&r).unwrap();model.doppler=false;let initial=Initial::new(&model,&r).unwrap();let trap=initial.traps[0];
@@ -398,7 +398,7 @@ fn the_held_engine_is_the_plain_engine_at_rest(){
         for _ in 0..2000{plain.step(&mut a);held.step(&mut b);}
         assert_eq!((a.jumps,a.cluster),(b.jumps,b.cluster),"trajectory {index}");
         let n=model.dimension(a.cluster);let(na,nb):(f64,f64)=(a.psi[..n].iter().map(|z|z.norm_sqr()).sum(),b.psi[..n].iter().map(|z|z.norm_sqr()).sum());
-        for i in 0..n{assert!((a.psi[i].norm_sqr()/na-b.psi[i].norm_sqr()/nb).abs()<1e-6,"trajectory {index} state {i}");}
+        for i in 0..n{assert!((a.psi[i].norm_sqr()/na-b.psi[i].norm_sqr()/nb).abs()<=model.table_error,"trajectory {index} state {i}: {} against the tables' error {}",(a.psi[i].norm_sqr()/na-b.psi[i].norm_sqr()/nb).abs(),model.table_error);}
     }
 }
 
@@ -984,4 +984,225 @@ fn a_group_run_only_through_an_output_sums_what_the_whole_run_sums_there(){
     let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:None}).collect();let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
     let e=summarize(&cut.groups,&scales,&means);
     assert_eq!(e[3].trajectories,24.);assert_eq!(e[4].trajectories,16.);assert_eq!(e[10].trajectories,8.);
+}
+
+/// A synthetic atom on the model's 32 states, its levels' energies in the frame (rad/us; the excited states not named far off), its
+/// emissions (excited state, ground state, dipole, rate), its near beams at the frame's frequency (direction, couplings g:
+/// excited state, ground state, rad/us), a tweezer far off and weak, and a mass a million times the atom's: at any velocity an atom
+/// held to it, its recoil's shift nothing.
+fn synthetic(levels:&[(&str,f64)],emissions:&[(&str,&str,[Complex;3],f64)],beams:&[([f64;3],Vec<(&str,&str,f64)>)],initial:&str)->Request{
+    let mut r=request(&|b|b["waistUm"].is_number());let at=|s:&str|r.states.iter().position(|x|x==s).unwrap();
+    let zero=||Matrix{real:vec![0.;STATES*STATES],imag:vec![0.;STATES*STATES]};
+    let mut h=zero();for s in 0..STATES{if !r.states[s].starts_with("ground"){h.real[s*STATES+s]=5000.+s as f64;}}
+    for &(s,e)in levels{let i=at(s);h.real[i*STATES+i]=e;}
+    let mut emission=[zero(),zero(),zero()];
+    for &(e,g,d,rate)in emissions{let(i,j)=(at(g),at(e));for a in 0..3{let c=d[a]*rate.sqrt();emission[a].real[i*STATES+j]=c.re;emission[a].imag[i*STATES+j]=c.im;}}
+    let frames:Vec<f64>=r.states.iter().map(|s|if s.starts_with("ground"){0.}else{3.8e8}).collect();
+    let mut list:Vec<Beam>=beams.iter().enumerate().map(|(n,(d,couplings))|{let mut x=zero();for &(e,g,v)in couplings{x.real[at(e)*STATES+at(g)]=v;}
+        Beam{id:format!("b{n}"),name:format!("b{n}"),direction:*d,wave_number_per_um:WAVE,waist_um:None,intensity_mw_cm2:1.,frequency_index:vec![0,0],coupling:x,counter_coupling:zero(),outside_shift:zero()}}).collect();
+    let mut x=zero();x.real[at("D1-1-0")*STATES+at(initial)]=1e-3;
+    list.push(Beam{id:"tweezer".into(),name:"tweezer".into(),direction:[1.,0.,0.],wave_number_per_um:7.4,waist_um:Some(1.),intensity_mw_cm2:1.,frequency_index:vec![1,0],coupling:x,counter_coupling:zero(),outside_shift:zero()});
+    let i=at(initial);let mut density=vec![Complex::ZERO;STATES*STATES];density[i*STATES+i]=Complex::ONE;
+    r.trap_beam=list.len()-1;r.mass_kg*=1e6;(r.hamiltonian,r.emission,r.frame_frequencies_mhz,r.frequencies_mhz,r.beams,r.initial_density,r.field_vector_g,r.times_us)=(h,emission,frames,vec![1e7,0.],list,density,[0.;3],vec![0.,100.]);r
+}
+const WAVE:f64=8.05;const LINE:f64=38.1;const SIGMA:f64=40.;
+/// A circular dipole about z.
+fn circular(sign:f64)->[Complex;3]{let r=0.5f64.sqrt();[Complex::new(r,0.),Complex::new(0.,sign*r),Complex::ZERO]}
+/// Γ g²/(σ² + Γ²/4): the scattering rate of a drive g at a detuning σ.
+fn lorentzian(g:f64,sigma:f64)->f64{LINE*g*g/(sigma*sigma+LINE*LINE/4.)}
+/// A ground state's cluster and place.
+fn place(model:&Model,request:&Request,state:&str)->(usize,usize){let s=request.states.iter().position(|x|x==state).unwrap();let b=model.ground.ground_states.iter().position(|&i|i==s).unwrap();let k=model.ground.cluster[b];(k,model.ground.clusters[k].position(b).unwrap())}
+/// The engine's mean force on a ground state at (r, κ), from its parts: the Ehrenfest force, the jumps' mean Σ_a Im⟨u_a|∇u_a⟩/Σ_a ‖u_a‖² (engine.rs
+/// `Engine::kick`, over the photons' directions and polarizations) and the hazard the generator gives them.
+fn parts(model:&Model,cluster:usize,state:usize,r:[f64;3],kappa:[f64;3])->([f64;3],[f64;3],f64){
+    let mut psi=[Complex::ZERO;MOST_MIXED];psi[state]=Complex::ONE;
+    let p=model.point(r,kappa);let g=model.generator(cluster,&p,0.);let n=g.n;
+    let hazard=-2.*expectation(&g.hamiltonian[..n*n],&psi,n).im;let photons=model.photons(cluster,&p,&psi,0.,None);let(mut weight,mut mean)=(0.,[0.;3]);
+    for(c,(class,u))in model.ground.clusters[cluster].classes.iter().zip(&photons.amplitude).enumerate(){let nt=model.ground_dimension(class.target);
+        weight+=u.iter().map(|v|v[..nt].iter().map(|z|z.norm_sqr()).sum::<f64>()).sum::<f64>();
+        for a in 0..3{let mut e=[0.;3];e[a]=1.;let(gradient,_)=photons.absorption(c,e,&[Complex::ZERO;MOST_STATES]);for x in 0..3{for i in 0..nt{mean[x]+=(u[a][i].conj()*gradient[i][x]).im;}}}}
+    (g.force(&psi),mean.map(|x|x/weight),hazard)
+}
+/// Atoms from a ground state, held at velocity v about r0 over `time` after `skip`: per axis the mean of κ's rate and its standard error, the jumps' rate
+/// and the final populations.
+fn held_force(model:&Model,request:&Request,state:&str,r0:[f64;3],v:[f64;3],count:u64,time:f64,dt:f64,skip:f64)->([f64;3],[f64;3],f64,Vec<f64>){
+    use rayon::prelude::*;
+    let(hm,(cluster,at))=(model.hbar_over_mass,place(model,request,state));let k0=v.map(|x|x/hm);let start:[f64;3]=std::array::from_fn(|a|r0[a]-v[a]*time/2.);
+    let trap=atom_motion_3d::model::Trap{lattice:None,axes:[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],frequencies:[0.;3],lab:[0.;3]};
+    let mut s=Settings::new(dt,&trap,f64::EPSILON,false);s.loss=false;let engine=Engine::new(model,s);let(steps,first)=((time/dt).round() as usize,(skip/dt).round() as usize);
+    let out:Vec<([f64;3],u64,[f64;STATES])>=(0..count).into_par_iter().map(|i|{
+        let mut psi=[Complex::ZERO;MOST_MIXED];psi[at]=Complex::ONE;
+        let mut t=atom_motion_3d::engine::Trajectory{cluster,psi,r:start,kappa:k0,time:0.,threshold:atom_motion_3d::engine::jump_stream(7,i,0).open_uniform(),alive:true,jumps:0,doppler:0.,beats:0.,seed:7,index:i};
+        let(mut base,mut jumps)=(k0,0);for n in 0..steps{if n==first{base=t.kappa;jumps=t.jumps;}engine.step(&mut t);}
+        (std::array::from_fn(|a|t.kappa[a]-base[a]),t.jumps-jumps,model.populations(t.cluster,&model.point(t.r,t.kappa),&t.psi,t.time))}).collect();
+    let(n,span)=(count as f64,time-skip);let mean:[f64;3]=std::array::from_fn(|a|out.iter().map(|x|x.0[a]).sum::<f64>()/n);
+    let error=std::array::from_fn(|a|(out.iter().map(|x|(x.0[a]-mean[a]).powi(2)).sum::<f64>()/(n-1.)/n).sqrt()/span);
+    (mean.map(|x|x/span),error,out.iter().map(|x|x.1 as f64).sum::<f64>()/n/span,(0..STATES).map(|s|out.iter().map(|x|x.2[s]).sum::<f64>()/n).collect())
+}
+/// A request's model with every drive folded and with every drive kept.
+fn folded_and_explicit(r:&Request)->[Model;2]{[Model::new(r).unwrap(),Model::with(r,*Ground::allowances(r).unwrap().last().unwrap()).unwrap()]}
+
+/// A running wave's force is ħk R(σ + kv), the rate at the Doppler shifted detuning (model.rs # The photons and the Doppler term): on a closed line, g = 3 rad/us, σ = 40
+/// rad/us, its hazard the first order's and its mean kick ħk whatever the velocity -- with the first order in the rate at rest and the Doppler term's own
+/// gradient left out the slope of F(v) had the wrong sign, a blue probe's Doppler heating its cooling --, folded as with the state explicit, within 4 standard errors.
+#[test]
+fn a_running_wave_s_force_follows_its_doppler_shifted_rate(){
+    let z=[0.,0.,1.];let r=synthetic(&[("D2-3-3",SIGMA)],&[("D2-3-3","ground-2-2",circular(1.),LINE)],&[(z,vec![("D2-3-3","ground-2-2",3.)])],"ground-2-2");
+    let[folded,explicit]=folded_and_explicit(&r);
+    let(cluster,state)=place(&folded,&r,"ground-2-2");let hm=folded.hbar_over_mass;let rate=lorentzian(3.,SIGMA);let slope=2.*SIGMA/(SIGMA*SIGMA+LINE*LINE/4.);
+    for v in [-0.4,-0.2,-0.05,0.05,0.2,0.4]{
+        let w=WAVE*v;let(force,mean,hazard)=parts(&folded,cluster,state,[0.,0.,0.3],[0.,0.,v/hm]);
+        assert!((hazard/(rate*(1.-w*slope))-1.).abs()<=1e-3,"v {v}: hazard {hazard} against {}",rate*(1.-w*slope));
+        assert!((mean[2]-WAVE).abs()<=1e-9&&mean[0].abs()+mean[1].abs()<=1e-9,"v {v}: the mean kick {mean:?}");
+        assert!(force[2].abs()<=1e-6,"v {v}: the Ehrenfest force {force:?}");
+    }
+    for(model,count)in [(&folded,8192),(&explicit,2048)]{for v in [0.1,0.4]{
+        let(a,b)=(held_force(model,&r,"ground-2-2",[0.;3],[0.,0.,v],count,100.,0.1,5.),held_force(model,&r,"ground-2-2",[0.;3],[0.,0.,-v],count,100.,0.1,5.));
+        let exact=WAVE*(lorentzian(3.,SIGMA+WAVE*v)-lorentzian(3.,SIGMA-WAVE*v))/2.;let(odd,error)=((a.0[2]-b.0[2])/2.,0.5*a.1[2].hypot(b.1[2]));
+        println!("v {v}: odd part of F {odd:.4} ± {error:.4} against k(R₊ − R₋)/2 {exact:.4}");
+        assert!((odd-exact).abs()<=4.*error,"v {v}: odd part of F {odd} ± {error} against {exact}");
+    }}
+}
+/// A balanced pair's friction is Doppler's (the J = 0 → J′ = 1 molasses, σ⁺ from +z and σ⁻ from −z on orthogonal dipoles, no interference): F = k(R₊ − R₋), to 4 standard
+/// errors, folded as with the states explicit. Each beam's part in the photon draws its kick; with the term's own gradient left out half of it.
+#[test]
+fn a_balanced_pair_s_friction_is_doppler_s(){
+    let(z,up,down)=([0.,0.,1.],"D2-3-3","D2-3-1");let g="ground-2-2";
+    let r=synthetic(&[(up,SIGMA),(down,SIGMA)],&[(up,g,circular(1.),LINE),(down,g,circular(-1.),LINE)],&[(z,vec![(up,g,3.)]),(z.map(|x|-x),vec![(down,g,3.)])],g);
+    for(model,count)in folded_and_explicit(&r).iter().zip([16384,2048]){for v in [0.1,0.4]{
+        let(force,error,_,_)=held_force(model,&r,g,[0.;3],[0.,0.,v],count,100.,0.1,5.);let exact=WAVE*(lorentzian(3.,SIGMA+WAVE*v)-lorentzian(3.,SIGMA-WAVE*v));
+        println!("v {v}: F {:.4} ± {:.4} against k(R₊ − R₋) {exact:.4}",force[2],error[2]);
+        assert!((force[2]-exact).abs()<=4.*error[2],"v {v}: F {} ± {} against {exact}",force[2],error[2]);
+    }}
+}
+/// The optical Bloch equations of a two-level atom moving at v through a standing wave, from far back along its path to z (RK4): the force −⟨∂_z H⟩ at z.
+fn bloch_force(z:f64,v:f64,g:f64)->f64{
+    let(back,steps)=(4.,8000);let h=back/steps as f64;let field=|z:f64|2.*g*(WAVE*z).cos();
+    let derivative=|t:f64,ee:f64,eg:Complex|->(f64,Complex){let om=Complex::new(field(z+v*t),0.);
+        ((Complex::new(-LINE*ee,0.)+Complex::new(0.,-1.)*(om*eg.conj()-om.conj()*eg)).re,Complex::new(-0.5*LINE,-SIGMA)*eg+Complex::new(0.,-1.)*om*(1.-2.*ee))};
+    let(mut ee,mut eg,mut t)=(0.,Complex::ZERO,-back);
+    for _ in 0..steps{
+        let(a,b)=derivative(t,ee,eg);let(c,d)=derivative(t+h/2.,ee+h/2.*a,eg+b*(h/2.));let(e,f)=derivative(t+h/2.,ee+h/2.*c,eg+d*(h/2.));let(x,y)=derivative(t+h,ee+h*e,eg+f*h);
+        ee+=h/6.*(a+2.*c+2.*e+x);eg+=(b+d*2.+f*2.+y)*(h/6.);t+=h;
+    }
+    -2.*(-2.*g*WAVE*(WAVE*z).sin())*eg.re
+}
+/// A standing wave's friction on a two-level atom goes as sin²(kz) -- the textbook's, 8 k² v g² σ Γ |G|⁴ sin²(kz), and the optical Bloch equations' at every phase --: nothing at the
+/// antinode, twice the running waves' mean at the node. The jumps' mean gives that mean everywhere, the first order's Hermitian part's gradient the rest: an atom a trap holds
+/// within the wavelength (kx ~ 0.7 in the tweezer's radial axes at 30 uK) takes the friction of its place. Where the rate at rest vanishes the first-order rate falls out of the mean, a
+/// second-order share of the path (kv|G|). The first order's fast atom stays a decay (`Model::first_shift`).
+#[test]
+fn a_standing_wave_s_friction_goes_as_the_square_of_its_sine(){
+    let(z,e,g)=([0.,0.,1.],"D2-3-3","ground-2-2");let c=0.5;
+    let r=synthetic(&[(e,SIGMA)],&[(e,g,circular(1.),LINE)],&[(z,vec![(e,g,c)]),(z.map(|x|-x),vec![(e,g,c)])],g);
+    let model=Model::new(&r).unwrap();let(cluster,state)=place(&model,&r,g);let hm=model.hbar_over_mass;let v=0.02;
+    let denominator=SIGMA*SIGMA+LINE*LINE/4.;
+    for i in 0..8{
+        let phase=i as f64*std::f64::consts::PI/8.+0.05;let at=[0.,0.,phase/WAVE];
+        let(a,b)=(parts(&model,cluster,state,at,[0.,0.,v/hm]),parts(&model,cluster,state,at,[0.,0.,-v/hm]));
+        let odd=(a.0[2]-b.0[2]+a.1[2]*a.2-b.1[2]*b.2)/2.;
+        let textbook=-8.*WAVE*WAVE*v*c*c*SIGMA*LINE/(denominator*denominator)*phase.sin().powi(2);
+        let bloch=(bloch_force(at[2],v,c)-bloch_force(at[2],-v,c))/2.;
+        println!("kz {phase:.3}: {odd:.6}, the textbook's {textbook:.6}, the optical Bloch equations' {bloch:.6}");
+        assert!((odd-textbook).abs()<=5e-3*textbook.abs()+1e-7,"kz {phase}: {odd} against {textbook}");
+        assert!((odd-bloch).abs()<=3e-2*bloch.abs()+1e-6,"kz {phase}: {odd} against the optical Bloch equations' {bloch}");
+    }
+    let hot=parts(&model,cluster,state,[0.,0.,0.3/WAVE],[0.,0.,1e3*SIGMA/WAVE/hm]);assert!(hot.2>=0.,"a fast atom's hazard {}",hot.2);
+}
+/// Optical pumping turns a rate's first order into a population's, whose rest force is a force of the same order: two ground states, σ⁺ from +z pumps the first to the second and σ⁻ from −z
+/// the second to the first, equal branching: the rate equations' p₁ = R₋/(R₊ + R₋) balance the scattering from either beam, F = 0 at any velocity. The generator's first order gives their populations
+/// and no force; the rest rate with each jump's mean reweighted by the moving rate (correct on one state: R₀ ρ b̄ = R(v) b̄) leaves p₁ = ½ and the running waves' friction.
+#[test]
+fn optical_pumping_holds_a_force_of_the_rate_s_order(){
+    let(z,up,down,a,b)=([0.,0.,1.],"D2-3-3","D2-3-1","ground-2-2","ground-2-0");let half=0.5*LINE;
+    let r=synthetic(&[(up,SIGMA),(down,SIGMA)],&[(up,a,circular(1.),half),(up,b,circular(1.),half),(down,b,circular(-1.),half),(down,a,circular(-1.),half)],&[(z,vec![(up,a,3.)]),(z.map(|x|-x),vec![(down,b,3.)])],a);
+    let model=Model::new(&r).unwrap();let(first,second)=(r.states.iter().position(|s|s==a).unwrap(),r.states.iter().position(|s|s==b).unwrap());
+    for v in [0.2,0.4]{
+        let(force,error,_,p)=held_force(&model,&r,a,[0.;3],[0.,0.,v],8192,300.,0.1,50.);
+        let(plus,minus)=(lorentzian(3.,SIGMA+WAVE*v),lorentzian(3.,SIGMA-WAVE*v));let share=minus/(plus+minus);
+        println!("v {v}: F {:.4} ± {:.4}, p {:.4} {:.4} against the rate equations' {share:.4} {:.4}",force[2],error[2],p[first],p[second],1.-share);
+        assert!(force[2].abs()<=4.*error[2],"v {v}: F {} ± {}",force[2],error[2]);
+        assert!((p[first]/(p[first]+p[second])-share).abs()<=0.015,"v {v}: p {} {} against {share}",p[first],p[second]);
+    }
+}
+/// The generator's first order in the kinetic shifts (model.rs # The photons and the Doppler term) is the exact responses' (`Ground::response`): on the tweezer PGC's clusters, every drive folded
+/// and at its first explicit rung, at random points, momenta and times, the part of H_eff odd in κ against the dense generator's at the exact responses, to the third order and the tables' interpolation,
+/// and the decay is the jumps' Σ L†L to first order -- i(H − H†) − Σ L†L odd in κ is nothing -- where the transfer keeps all it leaves (at a T that makes every entry count, `Model::transfer_tables`).
+/// At the request's T what it leaves stays within its share of T: either's error at the thermal velocity, as the friction it makes against the recoil heating (F·v/(R ħk²/m), R the cluster's largest rate there).
+#[test]
+fn the_generator_s_first_order_is_the_exact_response_s(){
+    for allowance in [f64::INFINITY,BUDGET]{for hot in [true,false]{
+    let mut r=request(&|_|true);r.times_us=vec![0.,1000.];if hot{r.temperature_uk=1e9;}let model=Model::with(&r,allowance).unwrap();let g=&model.ground;
+    let(hm,wave)=(model.hbar_over_mass,model.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max));let thermal=KT_PER_UK*r.temperature_uk*hm;let share=NUMERICAL_SHARE*TEMPERATURE_TARGET;
+    for(k,at,kappa,t,psi)in samples(&model,3){
+        let n=model.dimension(k);let n0=model.ground_dimension(k);let kappa=kappa.map(|x|x*0.1);let opposite=kappa.map(|x|-x);
+        // The generator with the scalar it leaves out, at κ.
+        let of=|q:[f64;3]|->Vec<Complex>{let x=model.generator(k,&model.point(at,q),t);let mut h=x.hamiltonian;for a in 0..n{h[a*n+a]+=Complex::new(x.scalar,0.);}h};
+        let dense=|q:[f64;3]|->Vec<Complex>{let mut e=g.eliminate(&model.intensities_at_point(at)).unwrap();
+            for c in &g.carriers{for &l in &c.beams{e.responses[l]=g.response(&e,l,model.kinetic_shift(l,q)).unwrap();}}
+            let d=g.local_at(&e,k,at,t).unwrap().effective;(0..n*n).map(|i|d[(i/n,i%n)]).collect()};
+        let(h1,h2,d1,d2)=(of(kappa),of(opposite),dense(kappa),dense(opposite));
+        let odd:Vec<Complex>=h1.iter().zip(&h2).map(|(a,b)|(*a-*b)*0.5).collect();let exact:Vec<Complex>=d1.iter().zip(&d2).map(|(a,b)|(*a-*b)*0.5).collect();
+        let size=exact.iter().map(|z|z.abs()).fold(0.,f64::max);
+        if size==0.{continue;}
+        // The jumps at ±κ: the first order of the decay against the photons' on ψ.
+        let hazard=|h:&[Complex]|-2.*expectation(&h[..n*n],&psi,n).im;
+        let rate=|q:[f64;3],state:&[Complex]|->f64{let p=model.point(at,q);let u=model.photons(k,&p,state,t,None);u.amplitude.iter().zip(&g.clusters[k].classes).map(|(u,c)|{let nt=model.ground_dimension(c.target);u.iter().map(|v|v[..nt].iter().map(|z|z.norm_sqr()).sum::<f64>()).sum::<f64>()}).sum()};
+        let photons=|q:[f64;3]|rate(q,&psi);
+        let(odd_hazard,odd_photons)=((hazard(&h1)-hazard(&h2))/2.,(photons(kappa)-photons(opposite))/2.);
+        let entries=(0..n0*n0).map(|i|{let j=(i/n0)*n+i%n0;(odd[j]-exact[j]).abs()}).fold(0.,f64::max);
+        if hot{
+            assert!(entries<=2e-2*size+1e-12,"cluster {k} at {at:?}: {entries:e} of {size:e}");
+            assert!((odd_hazard-odd_photons).abs()<=1e-2*odd_photons.abs().max(1e-3*photons(kappa)),"cluster {k}: the decay's first order {odd_hazard:e} against the photons' {odd_photons:e}");
+        }else{
+            let largest=(0..n0).map(|b|{let mut e=[Complex::ZERO;MOST_MIXED];e[b]=Complex::ONE;rate(kappa,&e)}).fold(0.,f64::max);
+            let speed=hm*kappa.iter().map(|x|x*x).sum::<f64>().sqrt();let on_t=|error:f64|error*thermal/speed/(largest*hm*wave);
+            assert!(on_t(entries)<=share&&on_t((odd_hazard-odd_photons).abs())<=share,"cluster {k} at {at:?}: on T {:e} and {:e} of its share {share:e}",on_t(entries),on_t((odd_hazard-odd_photons).abs()));
+        }
+    }
+    }}
+}
+/// The mean force on a multi-level atom's state is the adiabatic expansion's to first order in v (model.rs # The photons and the Doppler term): −2 Re⟨c_e|∇V|ψ⟩, c_e = −Σ_l a_l (R_l − w_l R2_l) ψ, on the
+/// fixture's F = 2 → D2 cooling light and a third beam across it (rank 3), the tweezer weak so that no intensity moves, at random points, velocities and states of its cluster:
+/// the part of the engine's force odd in κ -- the Ehrenfest force's and the jumps' mean at the generator's hazard -- less the exact expansion's is the derivative along the path of the momentum the
+/// excited amplitude holds, Σ_l′l (k_l′ + k_l) w_l Im M_l′l, M_l′l = a_l′* a_l ⟨R_l′ψ|R_lψ⟩ -- of mean zero: every beam's first order in its place.
+#[test]
+fn the_mean_force_on_a_state_is_the_adiabatic_expansion_s(){
+    let mut r=request(&|b|b["id"]=="tweezer"||b["id"]=="cool-plus"||b["id"]=="cool-minus");
+    for b in r.beams.iter_mut(){if b.waist_um.is_some(){for v in b.coupling.real.iter_mut().chain(b.coupling.imag.iter_mut()).chain(b.counter_coupling.real.iter_mut()).chain(b.counter_coupling.imag.iter_mut()){*v*=1e-3;}
+        for v in b.outside_shift.real.iter_mut().chain(b.outside_shift.imag.iter_mut()){*v*=1e-6;}}}
+    let mut across=r.beams.iter().find(|b|b.id=="cool-plus").unwrap().clone();across.id="across".into();across.name="across".into();across.direction=[0.6,0.8,0.];r.beams.push(across);
+    let model=Model::new(&r).unwrap();let g=&model.ground;let carrier=&g.carriers[0];assert_eq!(g.carriers.len(),1);
+    let mut next=uniform(11);let(ne,ng)=(g.excited_states.len(),g.ground_states.len());
+    for k in (0..model.clusters()).filter(|&k|model.dimension(k)>=2){for _ in 0..8{
+        let n=model.dimension(k);let at=[next(),next(),next()];let v=[0.2*next(),0.2*next(),0.2*next()];let kappa=v.map(|x|x/model.hbar_over_mass);
+        let mut psi=[Complex::ZERO;MOST_MIXED];for z in psi[..n].iter_mut(){*z=Complex::new(next(),next());}let norm:f64=psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();for z in psi[..n].iter_mut(){*z=*z*(1./norm);}
+        let e=g.eliminate(&model.intensities_at_point(at)).unwrap();let states=&g.clusters[k].states;
+        // Per beam ζ_l = a_l R_l ψ, its first order η_l = a_l w_l R2_l ψ and ∇a_l V_l ψ (per axis).
+        let on=|m:&atom_motion_3d::linear::Dense,i:usize|(0..n).fold(Complex::ZERO,|s,x|s+m[(i,states[x])]*psi[x]);let _=ng;
+        let force=|q:[f64;3]|->([f64;3],[f64;3]){
+            let p=model.point(at,q);let local=model.generator(k,&p,0.);let ehrenfest=local.force(&psi);let hazard=-2.*expectation(&local.hamiltonian[..n*n],&psi,n).im;
+            let photons=model.photons(k,&p,&psi,0.,None);let(mut weight,mut mean)=(0.,[0.;3]);
+            for(c,(class,u))in g.clusters[k].classes.iter().zip(&photons.amplitude).enumerate(){let nt=model.ground_dimension(class.target);
+                weight+=u.iter().map(|x|x[..nt].iter().map(|z|z.norm_sqr()).sum::<f64>()).sum::<f64>();
+                for a in 0..3{let mut ax=[0.;3];ax[a]=1.;let(gradient,_)=photons.absorption(c,ax,&[Complex::ZERO;MOST_STATES]);for x in 0..3{for i in 0..nt{mean[x]+=(u[a][i].conj()*gradient[i][x]).im;}}}}
+            let engine:[f64;3]=std::array::from_fn(|x|ehrenfest[x]+mean[x]*hazard/weight);
+            let mut exact=[0.;3];let mut amplitude=vec![Complex::ZERO;ne];
+            for &l in &carrier.beams{let(a,_)=model.geometry[l].field(at);let w=model.kinetic_shift(l,q);for i in 0..ne{amplitude[i]-=a*(on(&e.responses[l],i)-on(&e.derivatives[l],i)*w);}}
+            for &l in &carrier.beams{let(_,slope)=model.geometry[l].field(at);for x in 0..3{for i in 0..ne{exact[x]-=2.*(amplitude[i].conj()*slope[x]*on(&g.folded[l],i)).re;}}}
+            (engine,exact)};
+        let(a,b)=(force(kappa),force(kappa.map(|x|-x)));
+        // The momentum the excited amplitude holds, its derivative along the path at the state ψ (odd in κ).
+        let mut held=[0.;3];
+        for &l1 in &carrier.beams{for &l in &carrier.beams{
+            let(a1,_)=model.geometry[l1].field(at);let(a2,_)=model.geometry[l].field(at);let(k1,k2)=(model.geometry[l1].wave_vector(),model.geometry[l].wave_vector());
+            let w=(model.kinetic_shift(l,kappa)-model.kinetic_shift(l,kappa.map(|x|-x)))/2.;
+            let m=(0..ne).fold(Complex::ZERO,|s,i|s+(a1*on(&e.responses[l1],i)).conj()*(a2*on(&e.responses[l],i)));
+            for x in 0..3{held[x]+=(k1[x]+k2[x])*w*m.im;}
+        }}
+        let odd:[f64;3]=std::array::from_fn(|x|(a.0[x]-b.0[x])/2.);let exact:[f64;3]=std::array::from_fn(|x|(a.1[x]-b.1[x])/2.);
+        let size=odd.iter().map(|x|x.abs()).fold(0.,f64::max).max(exact.iter().map(|x|x.abs()).fold(0.,f64::max));
+        for x in 0..3{let residual=odd[x]-exact[x];
+            assert!((residual-held[x]).abs()<=1e-2*size+1e-7,"cluster {k} at {at:?}, v {v:?}, axis {x}: engine {} less exact {} is {residual}, against the amplitude's momentum {}",odd[x],exact[x],held[x]);}
+    }}
 }
