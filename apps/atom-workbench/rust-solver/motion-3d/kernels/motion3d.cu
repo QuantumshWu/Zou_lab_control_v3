@@ -177,9 +177,10 @@ struct Unit{int first,count;float norm,focus,profile;int pad;};
 // omegas[omegas, omegas + parts − 1) and their period after them, 0 without one), its explicit states'
 // terms terms[terms, terms + nterms) and dressed photons (the tables at `emission`), its explicit states'
 // excited positions (excited_list[excited]), its groups' parts (group_parts[group_parts + g]) and its
-// sparse groups' beats' (residual_parts[residual_parts + b]).
+// sparse groups' beats' (residual_parts[residual_parts + b]). The near light's shifts ΔE_a^d its exact
+// responses' dressing takes (`exact_responses`): bit d·NG + a.
 struct Cluster{int n,size,table,h0,groups,ngroups,classes,nclasses,coherent,ncoherent,carriers,fourth,frames,positions,beats,nbeats,
-    n0,exact,parts,omegas,terms,nterms,emission,excited,group_parts,residual_parts;int states[MAXM];};
+    n0,exact,parts,omegas,terms,nterms,emission,excited,group_parts,residual_parts;int states[MAXM];u64 shifts;};
 // A cluster's fourth-order tables (model.rs `FourthLayout`, # Fourth order): their places in its node
 // slice per carrier (−1: none), the carriers that drive it carriers[0, on). H^(4)'s quartic part per
 // pair (c, d), r_c² r_d² matrices n × n of the monomials E^c*_k1 E^c_k2 E^d*_k3 E^d_k4; per carrier
@@ -208,6 +209,9 @@ struct Term{int kind,row,col,carrier,part,mirror,at,pad;float u[MOST_RANK][2];};
 // A class's photon from an explicit state (ground.rs `Class::direct`): its place in the cluster, the ground
 // state it lands in and that state's row in the target, its residual.
 struct Direct{int state,to,row,pad;double residual;};
+// A near carrier's unit for the dressing (ground.rs `NearUnit`): its carrier, its place among the focused units
+// (−1: taken at its focus intensity), N and s(0); its field's amplitude² s N at the point.
+struct NearUnit{int carrier,focused;float norm,focus;};
 
 struct Program{
     const Beam* beams;const int* beam_list;const Carrier* carriers;const Cluster* clusters;const Group* groups;const int2* pairs;
@@ -215,8 +219,8 @@ struct Program{
     const float2* tables;
     // The exact response (model.rs `Exact`): K = H_ee − (i/2)D off its diagonal, its base and per
     // focused beam (NE × NE each); the diagonals in double precision, per block [NG ground | NE
-    // excited] (ground ground energies E_b, excited Re K_ii); every beam's coupling V_l (NE × NG);
-    // the emission C_a (3 × NG × NE).
+    // excited] (ground ground energies E_b, excited Re K_ii); every beam's folded coupling V_l^f (NE ×
+    // NG); the emission C_a (3 × NG × NE).
     const float2* excited;const double* diagonal;const float2* couplings;const float2* emission;
     const int* class_rows;
     const Fourth* fourths;const double* frames;
@@ -231,13 +235,20 @@ struct Program{
     // nearly degenerate excited states levels[level_first[g], level_first[g + 1]) and 1/√Γ_ii (the transient).
     const Term* terms;const double* omegas;const int* group_parts;const int* residual_parts;const int* excited_list;const Direct* directs;
     const int* levels;const int* level_first;const float* decay_root;
+    // The exact response's dressing (`exact_responses`): every beam's kept drives V_l − V_l^f (NE × NG), D (NE × NE),
+    // the near units by carrier (near_units[near_first[d], near_first[d + 1])) and their folded fields W^f
+    // (unit_couplings, NG columns of NE each), every channel's far channels (d, a) vias[via_first[c·NG + b],
+    // via_first[c·NG + b + 1]).
+    const float2* kept;const float2* decay;const NearUnit* near_units;const float2* unit_couplings;const int2* vias;const int* via_first;
     int nbeams,ncarriers,nclusters,focused,nodes,fields,nnear,doppler,loss;
     int weights;                        // where a jump's scratch holds the fourth order's weights
     int nunits;
-    int exact_at,transient_at,nlevels;  // the exact step's and the transient's room in a trajectory's scratch
+    int exact_at,transient_at,nlevels,rows_at;  // the exact step's, the transient's and the exact responses' rows' room in a trajectory's scratch
     int focused_unit[MOST_FOCUSED],stride[MOST_FOCUSED];   // the focused units (the trap beam's first), the stencil's strides
     int field_carrier[MOST_CARRIERS*MOST_RANK],field_rank[MOST_CARRIERS*MOST_RANK];
     int ground_states[NG],excited_states[NE],ground_cluster[NG],ground_position[NG];
+    int near_first[MOST_CARRIERS+1];
+    u32 explicit_of[NG],partners[NE];   // per ground state its cluster's explicit states, per excited state its dressing's partners (bits)
     float hm,light2,allowance,truncation;   // ħ/m (um²/us), twice the light shift's bound, the first order's allowance, the exponentials' truncation
     float axes32[3][3],stiffness32[3];      // the axes and the stiffness below, in single precision
     double hm64,dt;
@@ -301,7 +312,8 @@ struct Warp{
     float2 psi[MAXM],start[MAXM];       // ψ, ψ at a step's start
     double2 readout[MAXN];              // the readout's Y ψ
     float2 twin[MAXN];                  // the held twin's ψ
-    union{float2 m[3][MAXN*MAXN];float2 gradient_a[MOST_BEAMS][3];JumpSpace jump;float4 vec[MAXM/2];};   // vec: the exact step's vectors (`half_of`)
+    // vec: the exact step's vectors (`half_of`); dressing: the exact responses' shifts ΔE_a^d (`exact_responses`).
+    union{float2 m[3][MAXN*MAXN];float2 gradient_a[MOST_BEAMS][3];JumpSpace jump;float4 vec[MAXM/2];float dressing[MOST_CARRIERS*NG];};
 #ifdef PROFILE
     long long profile[SPANS];
 #endif
@@ -834,14 +846,14 @@ __device__ void advance(const Program& P,Warp& W,Traj& t,double dt,int lane,doub
 
 __device__ __forceinline__ int exact_at(int near,int col,int a,int to){return ((near*MAXN+col)*3+a)*NG+to;}
 
-// x = A⁻¹ b for the NE × NE system whose row i lane i holds -- a[0, NE) and b in a[NE] -- by
-// Gaussian elimination with partial pivoting as linear.rs `Lu` makes it (each column's pivot the
-// remaining row of the largest |a|², the last in the rows' order on ties), the rows staying in their
-// lanes' registers and only their places in that order (`at`) swapped; then y·x = Σ_m y[m] x_m for
-// the lane's row y of an NE-column matrix (none past its end), summed as the back substitution
-// finds x. False when a pivot vanishes.
-__device__ bool solve(float2 (&a)[NE+1],const float2* y,int lane,float2& out){
-    int at=lane;
+// The LU factors of the NE × NE matrix whose row i lane i holds, by Gaussian elimination with partial
+// pivoting as linear.rs `Lu` makes it (each column's pivot the remaining row of the largest |a|², the
+// last in the rows' order on ties), the rows staying in their lanes' registers and only their places in
+// that order (`at`) swapped: a row keeps U's entries from its place on, and before it, in each step's
+// column, that step's multiplier. The steps a loop, a column's entry selected (the code stays small for
+// the driver's JIT). False when a pivot vanishes.
+__device__ __forceinline__ bool factor(float2 (&a)[NE],int lane,int& at){
+    at=lane;
     for(int k=0;k<NE;k++){
         float2 ak=zero2();
         #pragma unroll
@@ -855,57 +867,161 @@ __device__ bool solve(float2 (&a)[NE+1],const float2* y,int lane,float2& out){
         }
         if(!(best>0.f))return false;
         if(at==k)at=place;else if(lane==who)at=k;
-        // The rows after it less their multiple of the pivot's row.
+        // The rows after it less their multiple of the pivot's row, the multiplier kept in its column.
         const float2 pivot=make_float2(__shfl_sync(FULL,ak.x,who),__shfl_sync(FULL,ak.y,who));
         const float2 m=at>k?cdiv(ak,pivot):zero2();
         #pragma unroll
-        for(int j=1;j<=NE;j++)if(j>k){const float2 v=make_float2(__shfl_sync(FULL,a[j].x,who),__shfl_sync(FULL,a[j].y,who));a[j]-=m*v;}
+        for(int j=0;j<NE;j++){
+            if(j>k){const float2 v=make_float2(__shfl_sync(FULL,a[j].x,who),__shfl_sync(FULL,a[j].y,who));a[j]-=m*v;}
+            else if(j==k&&at>k)a[j]=m;
+        }
     }
-    // Back substitution from the last place: x_k from its row, the rows before it less U_ik x_k.
-    float2 rest=a[NE];out=zero2();
+    return true;
+}
+// x = A⁻¹ b from `factor`'s rows, the lane's row's entry of b in `b`: forward through the steps'
+// multipliers in their order, then back from the last place (x_k from its row, the rows before it less
+// U_ik x_k); each x_k, uniform over the warp, to `take` as it is found.
+template<class Take>
+__device__ __forceinline__ void substitute(const float2 (&a)[NE],int at,float2 b,int lane,Take take){
+    for(int k=0;k<NE;k++){
+        float2 ak=zero2();
+        #pragma unroll
+        for(int j=0;j<NE;j++)if(j==k)ak=a[j];
+        const int who=__ffs(__ballot_sync(FULL,at==k))-1;
+        const float2 bk=make_float2(__shfl_sync(FULL,b.x,who),__shfl_sync(FULL,b.y,who));
+        if(at>k)b-=ak*bk;
+    }
     for(int k=NE-1;k>=0;k--){
         float2 ak=zero2();
         #pragma unroll
         for(int j=0;j<NE;j++)if(j==k)ak=a[j];
         const int who=__ffs(__ballot_sync(FULL,at==k))-1;
-        const float2 mine=at==k?cdiv(rest,ak):zero2();
+        const float2 mine=at==k?cdiv(b,ak):zero2();
         const float2 x=make_float2(__shfl_sync(FULL,mine.x,who),__shfl_sync(FULL,mine.y,who));
-        if(y!=nullptr)out+=y[k]*x;
-        if(at<k)rest-=ak*x;
+        take(k,x);
+        if(at<k)b-=ak*x;
     }
-    return true;
 }
 
-// The exact response's photon tables at the point (model.rs `Exact`, ground.rs `response`):
-// X_l[a][to][col] = (C_a R_l(w_l))[to, b] for every near beam l and cluster column (b its ground
-// state), R_l[:, b] = (K + w_l − E_b − δ_c)⁻¹ V_l[:, b] at the point's intensities: lane i builds
-// row i of the system and lane 8a + to sums C_a R_l's entry. False when a resolvent is singular, as
-// `Exact::new` fails (the jump keeps the first order).
-__device__ __noinline__ bool exact_responses(const Program& P,const Warp& W,const Cluster& C,int lane,float2* X){
-    const Point& pt=W.pt;const float2* y=lane<3*NG?P.emission+lane*NE:nullptr;
-    for(int l=0;l<P.nbeams;l++){
-        const Beam& b=P.beams[l];if(b.near<0)continue;
-        for(int col=0;col<C.n0;col++){
-            const int g=C.states[col];float2* out=X+exact_at(b.near,col,0,0);
-            if(!((b.coupled>>g)&1u)){if(lane<3*NG)out[lane]=zero2();continue;}
-            double shift=(double)pt.shift[l]-P.carriers[b.carrier].detuning-P.diagonal[g];
-            for(int f=0;f<P.focused;f++)shift-=(double)pt.s[f]*P.diagonal[(1+f)*(NG+NE)+g];
-            float2 a[NE+1];
+// The point's H diagonal in double precision (`Program::diagonal`): ground state b at x = b, excited
+// state i at x = NG + i.
+__device__ __forceinline__ double diagonal_at(const Program& P,const Point& pt,int x){
+    double d=P.diagonal[x];for(int f=0;f<P.focused;f++)d+=(double)pt.s[f]*P.diagonal[(1+f)*(NG+NE)+x];return d;
+}
+// K's entry (i, j) at the point in single precision (`Program::excited`).
+__device__ __forceinline__ float2 excited_at(const Program& P,const Point& pt,int i,int j){
+    const int e=i*NE+j;float2 k=P.excited[e];for(int f=0;f<P.focused;f++)k+=pt.s[f]*P.excited[(1+f)*NE*NE+e];return k;
+}
+// Whether K's decoupling from the explicit states p (bits; ground.rs `Ground::decoupled`) keeps entry (i, j).
+__device__ __forceinline__ bool kept_entry(u32 p,int i,int j){return i==j||!(((p>>i)|(p>>j))&1u);}
+// The lane's row of K − z at the point, decoupled from the explicit states p, its diagonal's real part
+// H_ii − z in double precision.
+__device__ __forceinline__ void resolvent_row(const Program& P,const Point& pt,u32 p,double z,int lane,float2 (&a)[NE]){
+    #pragma unroll
+    for(int j=0;j<NE;j++){
+        float2 k=zero2();
+        if(lane<NE&&kept_entry(p,lane,j)){k=excited_at(P,pt,lane,j);if(j==lane)k.x=(float)(diagonal_at(P,pt,NG+lane)-z);}
+        a[j]=k;
+    }
+}
+// A near unit's s N at the point: a focused unit at its intensity there, another at its focus's.
+__device__ __forceinline__ float unit_weight(const Point& pt,const NearUnit& U){return U.norm*(U.focused>=0?pt.s[U.focused]:U.focus);}
+// The self-energy Σ of channel (c, b) at z, added to the lane's row where the decoupling from p keeps
+// its entries (ground.rs `Ground::dress_light`): over its far channels (d, a) and d's near units,
+// s N W^f[:, a] W^f[:, a]†/(z − Ẽ_a − δ_d), Ẽ_a = E_a + Σ_d ΔE_a^d (the shifts in `shift`).
+__device__ __forceinline__ void self_energy(const Program& P,const Point& pt,const float* shift,int c,int b,double z,u32 p,int lane,float2 (&a)[NE]){
+    if(lane>=NE)return;
+    for(int v=P.via_first[c*NG+b];v<P.via_first[c*NG+b+1];v++){
+        const int2 via=P.vias[v];
+        double e=diagonal_at(P,pt,via.y)+P.carriers[via.x].detuning;for(int d=0;d<P.ncarriers;d++)e+=(double)shift[d*NG+via.y];
+        const float pole=1.f/(float)(z-e);
+        for(int u=P.near_first[via.x];u<P.near_first[via.x+1];u++){
+            const float2* w=P.unit_couplings+(u*NG+via.y)*NE;const float2 wi=(pole*unit_weight(pt,P.near_units[u]))*w[lane];
             #pragma unroll
-            for(int j=0;j<=NE;j++)a[j]=zero2();
-            if(lane<NE){
-                #pragma unroll
-                for(int j=0;j<NE;j++){
-                    const int e=lane*NE+j;float2 k=P.excited[e];
-                    for(int f=0;f<P.focused;f++)k+=pt.s[f]*P.excited[(1+f)*NE*NE+e];
-                    if(j==lane){double d=P.diagonal[NG+lane]+shift;for(int f=0;f<P.focused;f++)d+=(double)pt.s[f]*P.diagonal[(1+f)*(NG+NE)+NG+lane];k.x=(float)d;}
-                    a[j]=k;
-                }
-                a[NE]=P.couplings[(l*NE+lane)*NG+g];
+            for(int j=0;j<NE;j++)if(kept_entry(p,lane,j))a[j]+=wi*conj(w[j]);
+        }
+    }
+}
+// The lane's entry of beam l's source from ground state b (ground.rs `Ground::source`): V_l^f[i, b] less,
+// over the explicit states e of p with a kept drive from b, x_e[i] (V_l − V_l^f)[e, b] -- e's dressing
+// x_e[i] = H_ie/(K_ee − K_ii) over its partners outside p (`Ground::dressing`).
+__device__ __forceinline__ float2 source(const Program& P,const Point& pt,int l,int b,u32 p,int lane){
+    if(lane>=NE)return zero2();
+    float2 s=P.couplings[(l*NE+lane)*NG+b];
+    if((p>>lane)&1u)return s;
+    for(u32 m=p;m;m&=m-1){
+        const int e=__ffs(m)-1;const float2 kept=P.kept[(l*NE+e)*NG+b];
+        if(zero(kept)||!((P.partners[e]>>lane)&1u))continue;
+        const float2 d=P.decay[lane*NE+e],h=excited_at(P,pt,lane,e)+make_float2(-0.5f*d.y,0.5f*d.x);
+        const float2 gap=make_float2((float)(diagonal_at(P,pt,NG+e)-diagonal_at(P,pt,NG+lane)),(excited_at(P,pt,e,e)-excited_at(P,pt,lane,lane)).y);
+        s-=cdiv(h,gap)*kept;
+    }
+    return s;
+}
+
+// The near light's shifts ΔE_a^d of a cluster's channels (`Cluster::shifts`, ground.rs `Ground::dress_light`)
+// at the point into W.dressing (bit d·NG + a; zero where not taken): ΔE_a^d = −Σ_u s N Re(W^f[:, a]†
+// (K − E_a − δ_d)⁻¹ W^f[:, a]) over d's near units, K decoupled from a's cluster's explicit states. False
+// when a resolvent is singular.
+__device__ __noinline__ bool light_shifts(const Program& P,Warp& W,const Cluster& C,int lane){
+    const Point& pt=W.pt;float* shift=W.dressing;
+    __syncwarp();shift[lane]=0.f;shift[lane+32]=0.f;__syncwarp();
+    for(u64 m=C.shifts;m;m&=m-1){
+        const int bit=__ffsll((long long)m)-1,d=bit/NG,a=bit-d*NG;
+        float2 row[NE];resolvent_row(P,pt,P.explicit_of[a],diagonal_at(P,pt,a)+P.carriers[d].detuning,lane,row);
+        int at;if(!factor(row,lane,at))return false;
+        float v=0.f;
+        for(int u=P.near_first[d];u<P.near_first[d+1];u++){
+            const float2* w=P.unit_couplings+(u*NG+a)*NE;float2 dot=zero2();
+            substitute(row,at,lane<NE?w[lane]:zero2(),lane,[&](int k,float2 x){dot+=conj(w[k])*x;});
+            v-=unit_weight(pt,P.near_units[u])*dot.x;
+        }
+        if(lane==0)shift[bit]=v;
+    }
+    __syncwarp();
+    return true;
+}
+// Channel (c, b)'s K + Σ − z at the point (`resolvent_row`, `self_energy`), decoupled from the explicit
+// states p, into `rows` lane-major: entry j of row i at rows[32j + i].
+__device__ __noinline__ void channel_row(const Program& P,const Warp& W,int c,int b,double z,u32 p,int lane,float2* rows){
+    float2 a[NE];resolvent_row(P,W.pt,p,z,lane,a);self_energy(P,W.pt,W.dressing,c,b,z,p,lane,a);
+    #pragma unroll
+    for(int j=0;j<NE;j++)rows[j*32+lane]=a[j];
+}
+
+// The exact response's photon tables at the point (model.rs `Exact`, ground.rs `Ground::response`):
+// X_l[a][to][col] = (C_a R_l(w_l))[to, b] for every near beam l and cluster column (b its ground state)
+// at the point's intensities, dressed by the near light (ground.rs, # The near light's dressing):
+// R_l[:, b] = (K + Σ − z + w_l)⁻¹ ŝ, channel (c, b)'s energy z = E_b + δ_c + Σ_{d≠c} ΔE_b^d (`light_shifts`)
+// and self-energy Σ (`self_energy`), ŝ its source (`source`), K decoupled from the explicit states of b's
+// cluster. A channel's K + Σ − z once (`channel_row`), each of its carrier's beams from it with w_l. Lane
+// i holds row i of each system (`factor`) and lane 8a + to sums C_a R_l's entry. False when a resolvent is
+// singular, as `Exact::new` fails (the jump keeps the first order).
+__device__ __noinline__ bool exact_responses(const Program& P,Warp& W,const Cluster& C,int lane,float2* X,float2* rows){
+    if(!light_shifts(P,W,C,lane))return false;
+    const Point& pt=W.pt;const float* shift=W.dressing;const float2* y=lane<3*NG?P.emission+lane*NE:nullptr;
+    for(int c=0;c<P.ncarriers;c++){
+        const Carrier R=P.carriers[c];
+        for(int col=0;col<C.n0;col++){
+            const int g=C.states[col];const u32 p=P.explicit_of[g];
+            u32 coupled=0u;
+            for(int j=0;j<R.beams;j++){
+                const int l=P.beam_list[R.first+j];if((P.beams[l].coupled>>g)&1u)coupled|=1u<<j;
+                else if(lane<3*NG)X[exact_at(P.beams[l].near,col,0,0)+lane]=zero2();
             }
-            float2 response;
-            if(!solve(a,y,lane,response))return false;
-            if(lane<3*NG)out[lane]=response;
+            if(!coupled)continue;
+            double z=diagonal_at(P,pt,g)+R.detuning;for(int d=0;d<P.ncarriers;d++)if(d!=c)z+=(double)shift[d*NG+g];
+            channel_row(P,W,c,g,z,p,lane,rows);
+            for(;coupled;coupled&=coupled-1){
+                const int l=P.beam_list[R.first+__ffs(coupled)-1];float2* out=X+exact_at(P.beams[l].near,col,0,0);
+                float2 a[NE];const float w=pt.shift[l];
+                #pragma unroll
+                for(int j=0;j<NE;j++){a[j]=rows[j*32+lane];if(j==lane)a[j].x+=w;}
+                const float2 s=source(P,pt,l,g,p,lane);
+                int at;if(!factor(a,lane,at))return false;
+                float2 response=zero2();substitute(a,at,s,lane,[&](int k,float2 x){if(y!=nullptr)response+=y[k]*x;});
+                if(lane<3*NG)out[lane]=response;
+            }
         }
     }
     return true;
@@ -1190,7 +1306,7 @@ __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,
     }
     SPAN_BEGIN(responses);
     if(exact)COUNT(COUNT_EXACT);
-    const float2* X=exact&&exact_responses(P,W,C,lane,scratch)?scratch:nullptr;
+    const float2* X=exact&&exact_responses(P,W,C,lane,scratch,scratch+P.rows_at)?scratch:nullptr;
     SPAN_END(SPAN_EXACT,responses);SPAN_BEGIN(photons);
     float2* M=scratch+P.nnear*MAXN*3*NG;photon_matrices(P,W,C,lane,X,M,scratch+P.weights);
     JumpSpace& J=W.jump;
@@ -2338,9 +2454,20 @@ extern "C" __global__ void exact_probe(const Program P,const State* S,float2* X)
     t.time=S->time;t.cluster=S->cluster;
     point(P,W,t,lane);exact_components(P,W,P.clusters[t.cluster],lane,X);
 }
+// A check's exact responses (tests/gpu.rs): a trajectory's cluster's photon tables at its point
+// (`exact_responses`) into X, their rows' room after them, one warp; NaN at X[0] where a resolvent is singular.
+extern "C" __global__ void response_probe(const Program P,const State* S,float2* X){
+    __shared__ Warp W;const int lane=threadIdx.x&31;if(threadIdx.x>=32)return;
+    Traj t;
+    #pragma unroll
+    for(int i=0;i<3;i++){t.q[i]=S->q[i];t.p[i]=S->p[i];}
+    t.time=S->time;t.cluster=S->cluster;
+    point(P,W,t,lane);
+    if(!exact_responses(P,W,P.clusters[t.cluster],lane,X,X+P.nnear*MAXN*3*NG)&&lane==0)X[0]=make_float2(__int_as_float(0x7fc00000),0.f);
+}
 // A check's jump (tests/gpu.rs): a trajectory's state, a jump at its position and time (the first order
-// in the Doppler shift), the state it leaves.
-extern "C" __global__ void jump_probe(const Program P,const Run R,State* S,float2* scratch){
+// in the Doppler shift, or the exact response where `exact`), the state it leaves.
+extern "C" __global__ void jump_probe(const Program P,const Run R,State* S,float2* scratch,int exact){
     __shared__ Warp W;const int lane=threadIdx.x&31;if(threadIdx.x>=32)return;
     Traj t;
     #pragma unroll
@@ -2348,7 +2475,7 @@ extern "C" __global__ void jump_probe(const Program P,const Run R,State* S,float
     t.time=S->time;t.logn=S->logn;t.threshold=S->threshold;t.log_threshold=S->log_threshold;t.doppler=S->doppler;t.cluster=S->cluster;t.jumps=S->jumps;
     t.death=S->death;t.index=S->index;t.beats=S->beats;
     if(lane<MAXM)W.psi[lane]=S->psi[lane];
-    __syncwarp();jump(P,R,W,t,false,lane,scratch);__syncwarp();
+    __syncwarp();jump(P,R,W,t,exact!=0,lane,scratch);__syncwarp();
     if(lane<MAXM)S->psi[lane]=W.psi[lane];
     if(lane==0){for(int i=0;i<3;i++)S->p[i]=t.p[i];S->cluster=t.cluster;S->jumps=t.jumps;S->threshold=t.threshold;S->log_threshold=t.log_threshold;S->logn=t.logn;}
 }
@@ -2365,5 +2492,5 @@ extern "C" __global__ void layout(u32* out){
     out[6]=sizeof(Coherent);out[7]=sizeof(Channel);out[8]=sizeof(Program);out[9]=sizeof(State);out[10]=sizeof(Run);
     out[11]=(u32)OFFSET(Program,hm);out[12]=(u32)OFFSET(Program,half_flow);out[13]=(u32)OFFSET(Run,listed);
     out[14]=(u32)OFFSET(State,psi);out[15]=(u32)OFFSET(State,index);
-    out[16]=MOST_INTERVALS;out[17]=SLOT_RECORD;out[18]=RECORD;out[19]=WARPS;out[20]=MAXN;out[21]=TWIN;out[22]=MOTION;out[23]=HARMONIC;out[24]=sizeof(Fourth);
+    out[16]=MOST_INTERVALS;out[17]=SLOT_RECORD;out[18]=RECORD;out[19]=WARPS;out[20]=MAXN;out[21]=TWIN;out[22]=MOTION;out[23]=HARMONIC;out[24]=sizeof(Fourth);out[25]=sizeof(NearUnit);
 }
