@@ -267,9 +267,9 @@ use std::f64::consts::TAU;
 /// estimate of its fold.
 pub const SATURATION:f64=2.;
 /// The numerical share s²ε an unmixed block may change its responses by, relative to themselves (`Ground::unmixed_blocks`):
-/// the ledger's share of its numerical tolerances -- for now the tables' (model.rs `TABLE_SHARE`), the derived share
-/// when the ledger's shares give one; this is the one place it is set.
-pub const MIXING_SHARE:f64=crate::model::TABLE_SHARE;
+/// the numerical tolerances' (solve.rs, # Shares; s = `STEP_SHARE`, ε = `POPULATION_TARGET`), the one switch between a
+/// block's eigenstates and its states on their own.
+pub const MIXING_SHARE:f64=crate::solve::STEP_SHARE*crate::solve::STEP_SHARE*crate::solve::POPULATION_TARGET;
 
 /// The co-rotating component of the beams of one frequency (`counter` false: V e^{−iνt},
 /// ν = δ = 2π(ν_beam − ν_frame)) or their counter-rotating one (R e^{−iνt}, ν = −2π(ν_beam + ν_frame)),
@@ -1117,10 +1117,10 @@ impl Ground{
     /// terms left out, their bounds (`Mode`) --, the beams at their peak; the generator's change at most
     /// (‖V‖ + ‖D R‖) ≤ 3‖V‖ times it, ‖V‖ the channel's folded coupling, relative to the generator's scale. A
     /// column the carrier does not couple (a state the block mixes in) is not the generator's: all of it,
-    /// through the cluster's widest coupling. With it, what an undressed response errs by (the GPU's exact one,
-    /// gpu/program.rs): measured, the bare response of each ground state at its own energy against the
-    /// response, weighted alike -- none where the block is the states' own energies, unmixed, and nothing
-    /// dresses the channel. The largest of each (error, undressed).
+    /// through the cluster's widest coupling. With it, what an undressed response errs by where the block mixes (the
+    /// GPU's exact one, gpu/program.rs, has the dressing: the static block's eigenbasis is pending): measured, the bare
+    /// response of each ground state at its own energy against the response, weighted alike -- none where the block is
+    /// the states' own energies, unmixed. The largest of each (error, undressed).
     pub fn dressing_bounds(&self,e:&Elimination,intensities:&[f64])->Result<(f64,f64),String>{
         let ne=self.excited_states.len();let scale=self.generator_scale.max(f64::MIN_POSITIVE);
         let column=|m:&Dense,b:usize|->Vec<Complex>{(0..ne).map(|i|m[(i,b)]).collect()};
@@ -1198,7 +1198,7 @@ impl Ground{
             let unmixed=(0..n0).all(|i|(0..n0).all(|j|u[(i,j)]==if i==j{Complex::ONE}else{Complex::ZERO}))&&block.modes.iter().all(|m|m.members.len()==1);
             let kc=self.cluster_hamiltonian(&e.excited_hamiltonian,cl);
             for(i,&b)in cl.states.iter().enumerate(){
-                if !self.couples(c,b)||(unmixed&&block.modes.iter().any(|m|m.members[0]==i&&m.energy==e.energies[b]+carrier.detuning)&&self.vias[c][b].is_empty()){continue;}
+                if !self.couples(c,b)||(unmixed&&block.modes.iter().any(|m|m.members[0]==i&&m.energy==e.energies[b]+carrier.detuning)){continue;}
                 let owned;let lu=match e.bare.get(c).and_then(|x|x[b].as_ref()){Some(lu)=>lu,None=>{owned=denominator(&kc,-e.energies[b]-carrier.detuning)?;&owned}};
                 let apart:f64=carrier.beams.iter().map(|&l|{let mut s=sources[l][b].clone();lu.solve(&mut s);s.iter().enumerate().map(|(x,y)|(*y-e.responses[l][(x,b)]).norm_sqr()).sum::<f64>().sqrt()}).sum();
                 undressed=undressed.max(share[i]*apart/scale);
