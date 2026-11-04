@@ -613,12 +613,25 @@ fn a_crossed_far_beam_is_part_of_the_bound_ensemble(){
         for a in 0..3{assert!((x.temperature[a]-exact[a]).abs()<=4.*x.temperature_error[a],"output {i}, axis {a}: {} ± {} against {}",x.temperature[a],x.temperature_error[a],exact[a]);}}
     // A few k_BT deep.
     let kt=initial.depths[0]/4.;r.temperature_uk=kt/KT_PER_UK;
+    let model=Model::new(&r).unwrap();
     let initial=Initial::new(&model,&r).unwrap();let settings=Settings::new(0.05,&initial.traps[0],f64::EPSILON,false);
     let draws:Vec<(f64,f64)>=(0..16384u64).map(|i|{let t=initial_trajectory(&model,&settings,&initial,9,i,Stratum::single(i));
         let kinetic=0.5*hm*t.kappa.iter().map(|k|k*k).sum::<f64>();(kinetic,model.trap_level(cluster,state,t.r))}).collect();
     assert!(draws.iter().all(|x|x.0+x.1<0.),"an unbound atom");
     let n=draws.len() as f64;let mean=draws.iter().map(|x|x.0).sum::<f64>()/n;let se=(draws.iter().map(|x|(x.0-mean).powi(2)).sum::<f64>()/(n-1.)/n).sqrt();
     let wanted=1.5*kt*initial.kinetic();assert!((mean-wanted).abs()<=4.*se,"kinetic energy {mean} ± {se} against the quadrature's {wanted}");
+}
+
+/// Far beams alone leave a ground state lone in its cluster, its H nothing but the rest of its table entry's rounding (the
+/// imaginary part 3e-20 of 70 rad/us at a node, under the crossed beams' complex fields): at every temperature, the reach's
+/// nodes moving with it, that rounding is no gain and the guard passes the model (model.rs `Model::lindblad`).
+#[test]
+fn a_lone_state_s_round_off_is_no_gain(){
+    let fixture:Value=serde_json::from_str(include_str!("fixtures/crossed_far_beam_motion.json")).unwrap();
+    let mut r=scene::request(&fixture);r.times_us=vec![0.,1.];
+    let model=Model::new(&r).unwrap();let depth=Initial::new(&model,&r).unwrap().depths[0];
+    for f in [40.,20.,10.,8.,6.,5.,4.,3.,2.]{r.temperature_uk=depth/f/KT_PER_UK;
+        Model::new(&r).unwrap_or_else(|e|panic!("k_BT = D/{f}: {e}"));}
 }
 
 /// The near light comes on at t = 0, and its fold's shift is no part of the ensemble's energy: on the tweezer PGC's

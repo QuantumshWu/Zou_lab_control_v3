@@ -1762,12 +1762,15 @@ impl Model{
     /// which the decay leaves out, aside (its own estimate). At fourth order Σ L̃†L̃ to that order, the decay's
     /// (ground.rs, # Fourth order): L̃ = L + δ, δ the fourth order's corrections, less δ†δ, the sixth order
     /// within the fold's charge. D's smallest eigenvalue, Σ L†L's largest and D's round-off scale, the largest of
-    /// i(H − H†)'s and Σ L†L's eigenvalues and of H's entries, whose Hermitian part i(H − H†) cancels (rad/us).
+    /// i(H − H†)'s and Σ L†L's eigenvalues and of H's entries with the scalar the generator leaves out as a phase: the
+    /// tables' entries carry it and their rounding with it, while i(H − H†) cancels it (rad/us). (Without it a lone
+    /// state, its H nothing but the rest of its entry's rounding, 3e-20 of 70 rad/us under F9's crossed far beams, read
+    /// as a gain beyond its own round-off.)
     pub fn decay_balance(&self,cluster:usize,p:&Point,t:f64)->(f64,f64,f64){let b=self.balance(cluster,p,t);(b.low,b.rate,b.scale)}
     /// `decay_balance` with D and the jumps' whole Σ L̃†L̃ (`Balance`).
     fn balance(&self,cluster:usize,p:&Point,t:f64)->Balance{
         let mut p=*p;for f in p.fields.iter_mut(){f.doppler=[Complex::ZERO;MOST_RANK];}let p=&p;
-        let n=self.dimension(cluster);let h=self.generator(cluster,p,t).hamiltonian;let largest=h.iter().map(|z|z.abs()).fold(0.,f64::max);
+        let n=self.dimension(cluster);let generator=self.generator(cluster,p,t);let h=generator.hamiltonian;let largest=h.iter().map(|z|z.abs()).fold(0.,f64::max)+generator.scalar.abs();
         let decay=Dense::from_fn(n,n,|a,b|(h[a*n+b]-h[b*n+a].conj())*Complex::I);
         // Column b: the photons of the basis state b.
         let columns=|fourth:bool|->Vec<Vec<[[Complex;MOST_STATES];3]>>{(0..n).map(|b|{let mut psi=[Complex::ZERO;MOST_MIXED];psi[b]=Complex::ONE;self.photons_to(cluster,p,&psi,t,None,fourth).amplitude}).collect()};
