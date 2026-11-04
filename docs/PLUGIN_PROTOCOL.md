@@ -373,7 +373,8 @@ parent...]`, a range row `[extent0, extent1, event, origin0, origin1]`. `records
 of shapes `{"template": ..., "columns"?: [{"path": [...], "values": [...]}]}`: an event's
 record is the template with each column's `position`-th value at its path. A `window`
 (format `zlc.window/2`) is `{"width", "members": [event index, ...], "acquisition"}`, its
-runs and each member's ancestors held once.
+runs and each member's ancestors held once. The native `read_archive` and `read_file` give
+both in their older structure; Python's `read_archive` gives them as stored.
 
 Plugin -> core events: `release {blocks, leases}`, `run.ready`, `run.progress`,
 `run.finished {run, outcome, result, error}`, `device.log {instance, line}` (one line of

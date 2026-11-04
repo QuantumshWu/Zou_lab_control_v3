@@ -309,6 +309,36 @@ fn opening_leaves_the_lineage_apart_in_both_layouts() {
     std::fs::remove_file(path).unwrap();
 }
 
+/// A figure with an older event history saved again holds it in columns, its window's runs under
+/// the apparatus table too, and its reader gives it back exactly.
+#[test]
+fn saved_again_an_older_history_is_columns_and_reads_the_same() {
+    let path = std::env::temp_dir().join(format!("zlc-history-columns-{}.npz", std::process::id()));
+    let bench = serde_json::json!({"context": "capture", "devices": {"rf": {"values": {"frequency": 80000000.0}}}});
+    let run = serde_json::json!({"node": "camera", "apparatus": bench});
+    let member = |shot: i64| serde_json::json!({"publication": {"stream": "camera", "generation": "g", "signal": "frames", "revision": shot + 1, "ordinal": shot},
+        "run": run, "event": {"records": {"frames": {"index": shot}}}, "parents": []});
+    let events: Vec<_> = (0..40).map(|shot: i64| serde_json::json!({"run": 0, "signal": "frames", "revision": shot + 1, "ordinal": shot, "record": {}, "parents": []})).collect();
+    let ranges: Vec<_> = (0..40).map(|shot: i64| serde_json::json!({"event": shot, "origin": [0, shot], "extent": [1, 1]})).collect();
+    let sections = serde_json::json!({"lineage": {"root": "a", "device_settings": [], "nodes": [
+        {"id": "a", "record": run, "event_record": {"window": {"width": 2, "members": [member(0), member(1)]},
+            "acquisition": {"runs": [{"stream": "camera", "generation": "g", "record": run}], "events": events, "ranges": ranges}}},
+        {"id": "b", "record": run, "event_record": {"acquisition": {"runs": "not a table"}}}]}});
+    let original = Json::from_serde(&sections);
+    let entries = [("data".to_owned(), Entry::Array(zlc_archive::NpyArray::unicode(vec!["sample".into()], vec![1])))];
+    std::fs::write(&path, write_figure_archive(Cursor::new(Vec::new()), "history", &entries, &original).unwrap().into_inner()).unwrap();
+    let stored = lineage_document(&path);
+    let record = &stored["lineage"]["nodes"][0]["event_record"];
+    assert_eq!(record["acquisition"]["format"], "zlc.acquisition/2");
+    assert_eq!(record["acquisition"]["events"].as_array().unwrap().len(), 1);
+    assert_eq!(record["window"]["format"], "zlc.window/2");
+    assert_eq!(record["window"]["acquisition"]["runs"][0]["record"]["apparatus"], serde_json::json!({"$apparatus": 0}));
+    assert_eq!(stored["lineage"]["nodes"][1]["event_record"]["acquisition"], serde_json::json!({"runs": "not a table"}), "what does not fit stays as written");
+    let decoded = read_archive(&path).unwrap();
+    assert_eq!(dumps(decoded.info.get("sections").unwrap(), Style::Figure).unwrap(), dumps(&original, Style::Figure).unwrap());
+    std::fs::remove_file(path).unwrap();
+}
+
 #[test]
 fn shared_apparatus_refuses_malformed_tables_and_references() {
     let path = std::env::temp_dir().join(format!("zlc-shared-apparatus-invalid-{}.npz", std::process::id()));

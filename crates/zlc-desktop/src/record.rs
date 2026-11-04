@@ -5,6 +5,7 @@
 //! saved lineage. Device truth has one owner, the Devices tab; Logic rows
 //! carry the non-device run and event facts. An `apparatus` record adds each
 //! device at its recorded phase, preserving the capture's source and time.
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -53,7 +54,11 @@ fn lineage_nodes(lineage: &Value) -> Result<(Option<String>, Vec<Node>, Vec<(Str
         let event_record = match entry.get("event_record") {
             Some(Value::Object(fields)) => {
                 if let Some(acquisition) = fields.get("acquisition") { acquisitions.push((id.clone(), acquisition)); }
-                Value::Object(fields.iter().filter(|(name, _)| *name != "acquisition").map(|(name, value)| (name.clone(), value.clone())).collect())
+                let mut kept: serde_json::Map<String, Value> = fields.iter().filter(|(name, _)| *name != "acquisition").map(|(name, value)| (name.clone(), value.clone())).collect();
+                if let Some(window) = kept.get_mut("window") {
+                    if let Cow::Owned(members) = zlc_core::acquisition::expand_window(window)? { *window = members; }
+                }
+                Value::Object(kept)
             }
             Some(other) => other.clone(),
             None => json!({}),
@@ -829,6 +834,24 @@ mod tests {
         assert_eq!(field(&epochs[0][1], "state")["epoch_ranges"], json!([[1, 1]]));
         assert_eq!(field(&epochs[1][1], "state")["epoch_ranges"], json!([[2, 2]]));
         assert_eq!(record.flow["nodes"].as_array().unwrap().iter().filter(|node| node["kind"] == "logic").count(), 2);
+    }
+
+    /// A window's event facts read on the Logic tab, each member and its ancestors whole, as the
+    /// file held them before its runs were shared.
+    #[test]
+    fn a_stored_window_reads_as_its_members() {
+        let run = json!({"node": "camera", "device_snapshots": {"camera": {"exposure_seconds": 0.02}}});
+        let member = |shot: i64| json!({"publication": {"stream": "camera", "generation": "camera-gen", "signal": "@logic/camera/frames", "revision": shot + 1, "ordinal": shot},
+            "run": run, "event": {"records": {"frames": {"index": shot}}}, "parents": []});
+        let trees = json!({"width": 4, "members": (0..4).map(member).collect::<Vec<_>>()});
+        let columns = zlc_core::acquisition::encode_window(&trees).unwrap();
+        assert!(columns.to_string().len() < trees.to_string().len());
+        let info = |window: &Value| json!({"members": {}, "sections": {"plot": {}, "source": {}, "lineage": {"root": "n", "device_settings": [], "nodes": [
+            {"id": "n", "parents": [], "signals": ["@logic/camera/frames"], "event": {"stream": "camera", "generation": "camera-gen", "sequence": 4}, "record": run,
+             "event_record": {"window": window}}]}}});
+        let (from_trees, from_columns) = (describe(&info(&trees)), describe(&info(&columns)));
+        assert_eq!(from_trees.tabs, from_columns.tabs);
+        assert!(from_columns.tabs.to_string().contains("\"index\":3"), "{}", from_columns.tabs);
     }
 
     /// The record tabs read an acquisition in its columns as they read it event by event, whatever

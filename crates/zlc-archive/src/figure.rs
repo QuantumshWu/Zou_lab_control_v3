@@ -53,20 +53,25 @@ fn check_metadata(value: &Json) -> Result<()> {
 /// Only run/event records and the saved source own apparatus observations.
 /// User metadata elsewhere, including similarly named keys, stays literal.
 fn apparatus_records(sections: &mut Json, mut visit: impl FnMut(&mut Json) -> Result<()>) -> Result<()> {
-    fn record(value: &mut Json, visit: &mut impl FnMut(&mut Json) -> Result<()>) -> Result<()> {
-        if let Json::Object(pairs) = value {
-            if let Some((_, apparatus)) = pairs.iter_mut().find(|(name, _)| name == "apparatus") { visit(apparatus)?; }
-            if let Some((_, Json::Object(acquisition))) = pairs.iter_mut().find(|(name, _)| name == "acquisition") {
-                if let Some((_, Json::Array(runs))) = acquisition.iter_mut().find(|(name, _)| name == "runs") {
-                    for run in runs {
-                        if let Json::Object(fields) = run {
-                            if let Some((_, Json::Object(record))) = fields.iter_mut().find(|(name, _)| name == "record") {
-                                if let Some((_, apparatus)) = record.iter_mut().find(|(name, _)| name == "apparatus") { visit(apparatus)?; }
-                            }
+    fn run_table(owner: &mut [(String, Json)], visit: &mut impl FnMut(&mut Json) -> Result<()>) -> Result<()> {
+        if let Some((_, Json::Object(acquisition))) = owner.iter_mut().find(|(name, _)| name == "acquisition") {
+            if let Some((_, Json::Array(runs))) = acquisition.iter_mut().find(|(name, _)| name == "runs") {
+                for run in runs {
+                    if let Json::Object(fields) = run {
+                        if let Some((_, Json::Object(record))) = fields.iter_mut().find(|(name, _)| name == "record") {
+                            if let Some((_, apparatus)) = record.iter_mut().find(|(name, _)| name == "apparatus") { visit(apparatus)?; }
                         }
                     }
                 }
             }
+        }
+        Ok(())
+    }
+    fn record(value: &mut Json, visit: &mut impl FnMut(&mut Json) -> Result<()>) -> Result<()> {
+        if let Json::Object(pairs) = value {
+            if let Some((_, apparatus)) = pairs.iter_mut().find(|(name, _)| name == "apparatus") { visit(apparatus)?; }
+            run_table(pairs, visit)?;
+            if let Some((_, Json::Object(window))) = pairs.iter_mut().find(|(name, _)| name == "window") { run_table(window, visit)?; }
         }
         Ok(())
     }

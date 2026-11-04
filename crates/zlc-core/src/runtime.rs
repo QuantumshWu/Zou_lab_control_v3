@@ -262,7 +262,7 @@ impl Read {
         }
     }
     /// The causal facts a saved Figure keeps: each publication with its run and
-    /// event records and parents; a window also lists every member's record.
+    /// event records and parents; a window also holds every member, each run and event once.
     pub fn provenance(&self) -> Value {
         fn record(key:&PublicationKey, run:&RunRecord, event:&EventRecord) -> Value {
             let mut metadata = run.metadata.clone();
@@ -317,8 +317,9 @@ impl Read {
             ReadKind::Window(window) => {
                 let latest = window.entries.last().expect("window has an anchor");
                 let mut value = record(&latest.key,&latest.run,&latest.event);
-                value["window"] = serde_json::json!({"width":window.width,"members":window.entries.iter()
-                    .map(|event|record(&event.key,&event.run,&event.event)).collect::<Vec<_>>()});
+                let mut events = Events::default();
+                let members: Vec<_> = window.entries.iter().map(|event|events.add(&event.key,&event.run,&event.event)).collect();
+                value["window"] = crate::acquisition::window(window.width,&members,events.table);
                 value
             }
         }
@@ -1588,6 +1589,58 @@ mod tests {
         let cell = Domain::dense(vec![2, 3], vec![axis("y", 2), axis("x", 3)]).unwrap();
         DatasetSchema::new(singleton.clone(), singleton, cell,
             ValueSchema::new(DType::U16, Some("count".into()), None, ValidityContract::Value).unwrap()).unwrap()
+    }
+    /// A window's record holds its run once and reads as every member's tree.
+    #[test]
+    fn window_provenance_holds_each_run_once() {
+        let (plane, sample) = (Runtime::new(), schema());
+        let declare = |signal: &str| vec![Declaration {signal:signal.into(),schema:sample.clone(),storage:Storage::Latest}];
+        let camera = plane.begin("camera",declare("frames"),json!({"device_snapshots":{"camera":{"exposure_seconds":0.02}}})).unwrap();
+        let derived = plane.begin("derived",declare("value"),json!({"node":"derived"})).unwrap();
+        let history = plane.retain_history(&derived,"value",3).unwrap();
+        for ordinal in 0..5u64 {
+            let parent = plane.commit(&camera,&bundle(&sample,&["frames"],ordinal)).unwrap().publications[0].clone();
+            let mut output = bundle(&sample,&["value"],ordinal);
+            output.metadata = json!({"records":{"value":{"shot":ordinal}}});
+            output.parents = vec![parent];
+            plane.commit(&derived,&output).unwrap();
+        }
+        let window = plane.read_window(&derived,"value",3).unwrap();
+        let provenance = Read::from_window(window).provenance();
+        let stored = &provenance["window"];
+        assert_eq!(stored["acquisition"]["runs"].as_array().unwrap().len(),2);
+        assert_eq!(stored.to_string().matches("exposure_seconds").count(),1,"once, not per member");
+        let expanded = crate::acquisition::expand_window(stored).unwrap();
+        assert_eq!(expanded["width"],json!(3));
+        let members = expanded["members"].as_array().unwrap();
+        assert_eq!(members.len(),3);
+        for (member,shot) in members.iter().zip(2u64..) {
+            assert_eq!(member["publication"]["ordinal"],json!(shot));
+            assert_eq!(member["publication"]["stream"],"derived");
+            assert_eq!(member["event"]["records"]["value"]["shot"],json!(shot));
+            assert_eq!(member["run"]["node"],"derived");
+            assert_eq!(member["parents"][0]["publication"]["signal"],"frames");
+            assert_eq!(member["parents"][0]["run"]["device_snapshots"]["camera"]["exposure_seconds"],json!(0.02));
+        }
+        drop(history);
+    }
+    /// A run standing for a saved Figure answers its history in a provenance's run record, not in its metadata.
+    #[test]
+    fn an_imported_run_answers_its_saved_history_only_in_a_provenance() {
+        struct Saved(std::sync::atomic::AtomicUsize);
+        impl ImportedRun for Saved {
+            fn saved_history(&self) -> Value { self.0.fetch_add(1,Ordering::Relaxed); json!({"source":{},"lineage":{"root":null,"nodes":[],"device_settings":[]}}) }
+        }
+        let (plane, sample) = (Runtime::new(), schema());
+        let saved = Arc::new(Saved(Default::default()));
+        let figure = plane.begin_imported("figure",vec![Declaration {signal:"data".into(),schema:sample.clone(),storage:Storage::Latest}],json!({"operation":"figure-import"}),saved.clone()).unwrap();
+        let publication = plane.commit(&figure,&bundle(&sample,&["data"],0)).unwrap().publications[0].clone();
+        assert!(publication.run().metadata.get(IMPORTED_LINEAGE).is_none());
+        assert_eq!(saved.0.load(Ordering::Relaxed),0,"nothing asked for it while publishing");
+        let provenance = Read::from_event(publication).unwrap().provenance();
+        assert_eq!(provenance["run"][IMPORTED_LINEAGE]["lineage"]["root"],Value::Null);
+        assert_eq!(provenance["run"]["operation"],"figure-import");
+        assert_eq!(saved.0.load(Ordering::Relaxed),1);
     }
     fn block(schema: &Arc<DatasetSchema>, value: u16) -> Arc<DataBlock> {
         DataBlock::new(schema.clone(), OwnedBuffer::from_vec(vec![value; 6]).into(), Validity::Uniform(true), None).unwrap()
