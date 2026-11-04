@@ -307,7 +307,9 @@ pub struct RecipeParts<'a> {
 /// to the archive writer).
 pub fn encode_plot_recipe(spec: &PlotSpec, parameters: &ValueMap, size: &str, parts: &RecipeParts<'_>) -> Result<ValueMap> {
     let schema = parameter_schema_for(spec, &DEFAULT_STYLE);
-    let complete = schema.initial_values(Some(parameters))?;
+    let mut complete = schema.initial_values(Some(parameters))?;
+    // Absent means square: a figure that never chose a Fit data box saves as it always did.
+    if complete.get("image_box") == Some(&Value::text(super::display::IMAGE_BOX_SQUARE)) { complete.remove("image_box"); }
     let size = DEFAULT_LAYOUT.validate_preset(size).map_err(PlotError::value)?;
     let spec_document = encode_spec(spec)?;
     let default_interaction = Interaction::default();

@@ -104,7 +104,8 @@ pub fn recommended_pulse_preset(channel_count: usize, period_count: usize) -> &'
     let fonts = FontStyle::default();
     let rows = channel_count.max(1) as f64;
     let periods = period_count.max(1) as f64;
-    let mut by_area: Vec<(&'static str, u32, u32)> = PANEL_PRESETS.to_vec();
+    // The image strip presets are not a pulse's: its recommendation stays where it was.
+    let mut by_area: Vec<(&'static str, u32, u32)> = PANEL_PRESETS.iter().copied().filter(|(name, _, _)| !matches!(*name, "1x8" | "2x8")).collect();
     by_area.sort_by_key(|(_, rows, columns)| rows * columns);
     for (name, _, _) in &by_area {
         let Ok(plan) = resolve_surface(Some(name), Kind::PulseTimeline, &SurfaceOptions::default(), &layout, &fonts) else { continue };

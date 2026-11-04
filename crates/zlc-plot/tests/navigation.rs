@@ -122,8 +122,8 @@ fn same_view(a: (NumericRange, NumericRange), b: (NumericRange, NumericRange)) {
 #[test]
 fn small_wheel_steps_are_continuous_below_one_source_pixel() {
     let mut plot = session(frame(45, 61, None), PlotKind::Image);
-    let range = NumericRange::new(29.0, 31.0).unwrap();
-    plot.set_x_limits(range.low, range.high).unwrap();
+    // In to two cells across: a single image's view keeps its cells square.
+    wheel(&mut plot, (2.0f64 / 61.0).ln() / 1.1f64.ln());
     let start = view(&plot);
     for event in 1..=330 {
         let before = view(&plot);

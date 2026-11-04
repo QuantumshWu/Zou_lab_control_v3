@@ -71,7 +71,7 @@ fn render_helpers_match_the_renderer() {
     }
     for c in data["square"].as_array().unwrap() {
         let e = fs(&c[0]);
-        let got = geometry::square_image_limits((e[0], e[1], e[2], e[3]), f(&c[1])).ok().map(|r| bits(&[r.0, r.1, r.2, r.3]));
+        let got = geometry::letterboxed_limits((e[0], e[1], e[2], e[3]), f(&c[1])).ok().map(|r| bits(&[r.0, r.1, r.2, r.3]));
         assert_eq!(got, c[2].as_array().map(|_| want_bits(&c[2])), "square {c}");
     }
     for c in data["histogram"].as_array().unwrap() {

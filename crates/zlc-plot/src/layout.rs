@@ -1,13 +1,13 @@
-//! Fixed preset geometry: the nine panel presets resolved into normalized axes
+//! Fixed preset geometry: the panel presets resolved into normalized axes
 //! boxes, the room past each edge, facet packing and typography. Arithmetic
 //! follows the scientific layout operation for operation, so every box is the
 //! same binary float.
 
 use crate::style::FontStyle;
 
-pub const PANEL_PRESETS: [(&str, u32, u32); 9] = [
+pub const PANEL_PRESETS: [(&str, u32, u32); 11] = [
     ("1x2", 1, 2), ("2x2", 2, 2), ("4x2", 4, 2), ("1x4", 1, 4), ("2x4", 2, 4),
-    ("4x4", 4, 4), ("4x8", 4, 8), ("8x4", 8, 4), ("8x8", 8, 8),
+    ("4x4", 4, 4), ("4x8", 4, 8), ("8x4", 8, 4), ("8x8", 8, 8), ("1x8", 1, 8), ("2x8", 2, 8),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,6 +253,27 @@ fn split_image(data: &NormalizedBox, split: &ImageSplit, region_px: Option<(f64,
             if drawn < span { span = drawn; unit = span / split.image; }
         }
     }
+    place_image_and_rails(data, split, span, unit, region_px, scene, side_distribution)
+}
+
+/// The room the side rails and their gaps take, as a fraction of `unit`.
+fn rails_fraction(split: &ImageSplit) -> f64 {
+    split.image_distribution_gap + split.distribution + split.distribution_colorbar_gap + split.colorbar
+}
+
+/// The whole-pixel box of a Fit data image: as much of `slot` as `shape`
+/// (height/width) allows, on a shape no thinner than `thin` pixels across, so
+/// one tick label can still read that side. Rounding is a fixed point: the
+/// shape of the box it returns gives the same box again.
+fn fit_image_pixels(slot: (f64, f64), shape: f64, thin: f64) -> (f64, f64) {
+    let (slot_w, slot_h) = (slot.0.floor(), slot.1.floor());
+    let shape = shape.max(thin / slot_w).min(slot_h / thin);
+    let width = (slot_h / shape).min(slot_w).round();
+    (width, (width * shape).min(slot_h).round())
+}
+
+fn place_image_and_rails(data: &NormalizedBox, split: &ImageSplit, span: f64, unit: f64, region_px: Option<(f64, f64)>,
+                         scene: bool, side_distribution: bool) -> Result<Vec<AxesPlan>, String> {
     let cursor = data.left;
     let mut image = NormalizedBox::new(cursor, data.top, cursor + span, data.bottom)?;
     let cursor = image.right + unit * split.image_distribution_gap;
@@ -328,6 +349,9 @@ pub struct SurfaceOptions {
     pub export_scale: Option<f64>,
     pub rolling_side_distribution: Option<bool>,
     pub image_height_over_width: Option<f64>,
+    /// The image box takes `image_height_over_width` as its data's shape,
+    /// in whole pixels of the region, beside rails of a fixed physical width.
+    pub image_fit_box: bool,
     pub image_scene: bool,
     pub image_side_distribution: Option<bool>,
 }
@@ -343,6 +367,9 @@ pub fn resolve_surface(preset: Option<&str>, kind: Kind, options: &SurfaceOption
     }
     if options.image_height_over_width.is_some() && kind != Kind::Image {
         return Err("image_height_over_width is accepted only for Image surfaces".into());
+    }
+    if options.image_fit_box && (kind != Kind::Image || options.image_scene || options.image_height_over_width.is_none()) {
+        return Err("image_fit_box is accepted only for a 2-D Image surface with a shape".into());
     }
     if options.image_scene && !matches!(kind, Kind::Image | Kind::FacetGrid) {
         return Err("image_scene is accepted only for Image and FacetGrid surfaces".into());
@@ -377,7 +404,19 @@ pub fn resolve_surface(preset: Option<&str>, kind: Kind, options: &SurfaceOption
     let figure_size_inches = (raster_size.0 as f64 / physical_dpi, raster_size.1 as f64 / physical_dpi);
     let data = data_box(data_width, data_height, margins)?;
     let (mut typography, mut shape, mut show_distribution, mut facet_focus_axes) = (None, None, false, None);
+    let mut image_ratio = options.image_height_over_width;
     let axes = match kind {
+        Kind::Image if options.image_fit_box => {
+            // Rails as wide as the default preset draws them, in every preset.
+            let default_width = layout.preset(layout.default_preset)?.2 * layout.panel_unit.0;
+            let unit = default_width as f64 / figure_design_width as f64;
+            let rails = if side_distribution { unit * rails_fraction(&layout.image_split) } else { 0.0 };
+            let raster = (raster_size.0 as f64, raster_size.1 as f64);
+            let (width, height) = fit_image_pixels(((data.width() - rails) * raster.0, data.height() * raster.1),
+                                                   options.image_height_over_width.unwrap(), fonts.tick_pt * physical_dpi / 72.0);
+            image_ratio = Some(height / width);
+            place_image_and_rails(&data, &layout.image_split, width / raster.0, unit, None, false, side_distribution)?
+        }
         Kind::Image => split_image(&data, &layout.image_split, Some((data_width as f64, data_height as f64)),
                                    options.image_height_over_width, options.image_scene, side_distribution)?,
         Kind::Rolling => {
@@ -420,7 +459,7 @@ pub fn resolve_surface(preset: Option<&str>, kind: Kind, options: &SurfaceOption
         facet_shape: shape, facet_typography: typography, facet_focus_axes,
         rolling_side_distribution: show_distribution,
         image_height_over_width: match options.facet_topology {
-            None => options.image_height_over_width,
+            None => image_ratio,
             Some(topology) => topology.cell_height_over_width,
         },
     })
