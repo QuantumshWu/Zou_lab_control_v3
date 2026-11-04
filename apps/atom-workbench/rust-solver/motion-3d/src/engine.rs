@@ -4,7 +4,7 @@
 //! # One step (flow–kick–flow)
 //! The trap's harmonic part along each of its principal axes, ½ m ω_i² x_i² (`Settings::axes`,
 //! `Settings::frequencies`), is moved exactly: (r, κ) turns in phase space for dt/2 to (r_h, κ_h);
-//! there the cluster's H_eff at the step's middle time gives U = exp(−i H_eff dt/2); ψ_h = U ψ;
+//! there the cluster's H_eff at the step's middle time gives U = exp(−i H_eff dt/2) (`HalfStep`); ψ_h = U ψ;
 //! κ_h += dt (F − F_harmonic) with F the Ehrenfest force −∇Re⟨H_eff⟩ (the trap's full force and
 //! the light's) and F_harmonic its harmonic part; ψ ← U ψ_h; and the harmonic flow for dt/2 again.
 //! Only the anharmonic rest and the light are split, so the step is not bound to the trap period.
@@ -343,6 +343,44 @@ fn propagate_sized<const N:usize>(h:&[Complex;MOST_STATES*MOST_STATES],tau:f64,p
         v=sum;
     }
     psi[..N].copy_from_slice(&v);
+}
+
+/// The fewest n × n products by which scaling and squaring sums exp(−iX), ‖X‖ ≤ x, within `share`: s squarings of the Taylor polynomial of X/2^s, its terms through the first whose
+/// bound y^m/m! is within its 2^−s of the share, the part no lower than the double precision's round-off. None where no such part sums it.
+fn squarings(x:f64,share:f64)->Option<(i32,usize)>{
+    let mut best:Option<(i32,usize)>=None;
+    for s in 0..64{
+        let scale=0.5_f64.powi(s);let(y,part)=(x*scale,share*scale);if part<=f64::EPSILON{break;}
+        let mut terms=1;let mut size=y;while size>part&&terms<40{terms+=1;size*=y/terms as f64;}
+        if size>part{continue;}
+        match best{Some((b,m))if m-1+b as usize<=terms-1+s as usize=>break,_=>best=Some((s,terms))}
+    }
+    best
+}
+/// exp(−iHτ) of an n × n generator (row-major in an 8 × 8 array), by `squarings`'s s and terms.
+fn scaled_exponential<const N:usize>(h:&[Complex;MOST_STATES*MOST_STATES],tau:f64,(s,terms):(i32,usize))->[Complex;MOST_STATES*MOST_STATES]{
+    let times=|a:&[Complex;MOST_STATES*MOST_STATES],b:&[Complex;MOST_STATES*MOST_STATES]|{let mut out=[Complex::ZERO;MOST_STATES*MOST_STATES];
+        for i in 0..N{for k in 0..N{let y=a[i*N+k];for j in 0..N{out[i*N+j]+=y*b[k*N+j];}}}out};
+    let step=tau*0.5_f64.powi(s);let mut x=[Complex::ZERO;MOST_STATES*MOST_STATES];for k in 0..N*N{x[k]=Complex::new(h[k].im*step,-h[k].re*step);}
+    let(mut term,mut sum)=(x,x);for a in 0..N{sum[a*N+a]+=Complex::ONE;}
+    for k in 2..=terms{term=times(&term,&x);let scale=1./k as f64;for i in 0..N*N{term[i]=term[i]*scale;sum[i]+=term[i];}}
+    for _ in 0..s{sum=times(&sum,&sum);}
+    sum
+}
+/// A step's half steps on one generator (`Engine::advance`), exp(−iHτ) twice: its series on the vector (`propagate`), or, where that takes more than one part and more products
+/// (n² each, against n³ of `squarings`, and two by U) -- a generator of ‖H‖τ ≫ 1, a cluster's states' frames apart: THREE's half of its CPU solve, 200 products a half step --, U once.
+enum HalfStep{Series,Matrix(Box<[Complex;MOST_STATES*MOST_STATES]>)}
+impl HalfStep{
+    fn new(h:&[Complex;MOST_STATES*MOST_STATES],n:usize,tau:f64,truncation:f64)->HalfStep{
+        let norm=column_norm(h,n);let(parts,terms)=series(norm,tau,truncation);if parts==1{return HalfStep::Series;}
+        let Some((s,m))=squarings(norm*tau.abs(),truncation)else{return HalfStep::Series};
+        if (m-1+s as usize)*n+2>=2*parts*terms{return HalfStep::Series;}
+        macro_rules! sized{($($n:literal)*)=>{match n{$($n=>Box::new(scaled_exponential::<$n>(h,tau,(s,m))),)*_=>unreachable!("a cluster of ground states has 1 to 8 states")}}}
+        HalfStep::Matrix(sized!(1 2 3 4 5 6 7 8))
+    }
+    fn apply(&self,h:&[Complex;MOST_STATES*MOST_STATES],n:usize,tau:f64,psi:&mut [Complex],truncation:f64){
+        match self{HalfStep::Series=>propagate(h,n,tau,psi,truncation),HalfStep::Matrix(u)=>multiply(&u[..],n,psi)}
+    }
 }
 
 /// ‖H‖∞ bounded above: the largest row sum (with `column_norm` above the spectral norm, √(‖H‖₁‖H‖∞)).
@@ -928,11 +966,11 @@ impl<'a> Engine<'a>{
         self.flow(t,0.5*dt,reference);
         let point=m.point(t.r,t.kappa);
         let n=m.dimension(t.cluster);let local=m.local(t.cluster,&point,t.time+0.5*dt);
-        let n0=norm2(&t.psi,n);
-        let mut psi=t.psi;propagate(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let nh=norm2(&psi,n);let middle=psi;
+        let n0=norm2(&t.psi,n);let half=HalfStep::new(&local.hamiltonian,n,0.5*dt,s.truncation);
+        let mut psi=t.psi;half.apply(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let nh=norm2(&psi,n);let middle=psi;
         let force=m.force(t.cluster,&local,&point,&psi);let harmonic=self.harmonic(std::array::from_fn(|a|t.r[a]-c[a]));let mut kick=[0.;3];
         for a in 0..3{if s.free[a]{kick[a]=dt*(force[a]-w*harmonic[a]);t.kappa[a]+=kick[a];}}
-        propagate(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let n1=norm2(&psi,n);
+        half.apply(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let n1=norm2(&psi,n);
         t.psi=psi;
         let place=(point.r,point.kappa);
         self.flow(t,0.5*dt,reference);
@@ -1312,6 +1350,19 @@ mod tests{
             let size=reference.iter().map(|x|x.abs()).fold(0.,f64::max);
             for k in 0..3{assert!((mine[k]-reference[k]).abs()<=1e-6*size,"offset {offset}, axis {k}: {} against {}",mine[k],reference[k]);}
         }
+    }
+
+    /// A half step by scaling and squaring where its series is long is the series, within the truncation: a stiff generator of frames apart, ‖H‖τ of 100, its products by far the fewer; a mild one stays on the series.
+    #[test]
+    fn a_stiff_half_step_by_squaring_is_its_series(){
+        let n=4;let mut c=random(n,&[],47);for a in 0..n{c.statics.hamiltonian[a*n+a]+=Complex::new(150.*a as f64,0.);}
+        let mut h=[Complex::ZERO;MOST_STATES*MOST_STATES];h[..n*n].copy_from_slice(&c.statics.hamiltonian);
+        let(tau,truncation)=(0.2,1e-7);let psi=state(n,53);
+        let half=HalfStep::new(&h,n,tau,truncation);assert!(matches!(half,HalfStep::Matrix(_)),"a stiff generator takes the matrix");
+        let(mut a,mut b)=(psi,psi);half.apply(&h,n,tau,&mut a,truncation);propagate(&h,n,tau,&mut b,f64::EPSILON);
+        assert!(distance(&a,&b,n)<=truncation,"{:e}",distance(&a,&b,n));
+        for z in h.iter_mut(){*z=*z*1e-3;}assert!(matches!(HalfStep::new(&h,n,tau,truncation),HalfStep::Series),"a mild one its series");
+        assert!(squarings(100.,f64::EPSILON).is_none());
     }
 
     /// The series on the vector takes the fewest products its share allows, within the share; at a share at the
