@@ -16,6 +16,7 @@ mod frame;
 mod process;
 pub mod schema;
 pub mod wire;
+mod workers;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -391,6 +392,8 @@ struct Inner {
     /// nothing uses go, are each one step, so instances opened together (Init opens them
     /// in parallel) share one process, and a closing one never ends a process another is joining.
     gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Where a node's device calls wait, beside the channels they arrived on.
+    device_calls: workers::Workers,
 }
 
 /// The plugin host. Cheap to clone; clones share it.
@@ -425,7 +428,8 @@ impl PluginHost {
                 if let Some(inner) = owner.upgrade() { inner.release_to(pid, names); }
             }));
             Inner { environment: plugin_environment(&config.python), config, session, runtime, safe, registry, job, catalog: Mutex::new(None),
-                    state: Mutex::default(), processes: Mutex::default(), events: Box::new(events), gates: Mutex::default() }
+                    state: Mutex::default(), processes: Mutex::default(), events: Box::new(events), gates: Mutex::default(),
+                    device_calls: workers::Workers::new("zlc-plugin-device-call") }
         });
         let watched = Arc::downgrade(&inner);
         std::thread::Builder::new().name("zlc-plugin-watch".into()).spawn(move || watch(watched)).map_err(|error| error.to_string())?;
@@ -1184,7 +1188,7 @@ impl Inner {
         if op == "device" {
             // Waiting for another plugin must not stop this one's channel.
             let (inner, process) = (self.clone(), process.clone());
-            let _ = std::thread::Builder::new().name("zlc-plugin-device-call".into()).spawn(move || {
+            self.device_calls.run(move || {
                 let answer = inner.route_device(&process, &message, lends);
                 inner.answer(&process, &id, answer);
             });
