@@ -575,6 +575,10 @@ fn cubic(nodes:usize,s:f64)->(usize,[f64;4],[f64;4]){
     (first,weights(h00,h10,h01,h11),weights(d00,d10,d01,d11).map(|x|x/h))
 }
 
+/// What a booked population error e costs a run, in runs: its trajectories go as the inverse square of the room its estimates leave the statistics, 1/(1 − e/ε)² of itself against the
+/// whole target ε (2e/ε at first order); no number of them reaches the target past it.
+fn room_cost(e:f64)->f64{let room=1.-e/POPULATION_TARGET;if room>0.{1./(room*room)}else{f64::INFINITY}}
+
 /// The pairs k′ ≤ k of a Hermitian group of rank r, or every (k′, k) of ranks (r′, r).
 fn field_pairs(hermitian:bool,emitted:usize,absorbed:usize)->Vec<(usize,usize)>{
     if hermitian{(0..absorbed).flat_map(|k1|(k1..absorbed).map(move|k|(k1,k))).collect()}else{(0..emitted).flat_map(|k1|(0..absorbed).map(move|k|(k1,k))).collect()}
@@ -681,13 +685,10 @@ impl Model{
         Ok((model,bases))
     }
 
-    /// What a unit of booked population error costs the run (ns), the tables' stake (`tabulate`): the run's
-    /// trajectories go as the inverse square of the room its estimates leave the statistics, so that an error
-    /// e of the room R costs it 2e/R of itself at first order -- here at a run's first batch, the trajectories nearly every
+    /// What the run costs (ns), the tables' stake (`tabulate`): a run's first batch, the trajectories nearly every
     /// run takes (solve.rs `FIRST_GROUPS`), each the pilot's first steps over the run (the light's pattern, solve.rs `run`)
-    /// at an advance's counted work in the model's dearest cluster (solve.rs `advance_work`), against the
-    /// whole population target. A run that takes more loses only the 2e/R the refinement stopped at (129 nodes on 3D PGC's tables at the most
-    /// a run takes, an error of 5e-7 against its a-priori 2 %: 33 nodes hold 3e-4),
+    /// at an advance's counted work in the model's dearest cluster (solve.rs `advance_work`). A run that takes more loses only the
+    /// 2e/R the refinement stopped at (`room_cost`; 129 nodes on 3D PGC's tables at the most a run takes, an error of 5e-7 against its a-priori 2 %: 33 nodes hold 3e-4),
     /// each cutting the error about 2³-fold at 2^D times the work of the last.
     fn stake(&self,request:&Request)->f64{
         let thermal=(KT_PER_UK*request.temperature_uk*self.hbar_over_mass).sqrt();
@@ -695,7 +696,7 @@ impl Model{
         let rate=if pattern>0.{pattern}else{self.reference_state(request).map_or(0.,|s|self.bare_trap(s).frequencies.iter().copied().fold(0.,f64::max))};
         let steps=(self.ground.duration*rate/crate::solve::first_phase()).max(1.);
         let advance=(0..self.layouts.len()).map(|k|crate::solve::advance_work(&self.work(k))).fold(0.,f64::max);
-        2.*(crate::solve::FIRST_GROUPS*crate::TASK) as f64*steps*advance/POPULATION_TARGET
+        (crate::solve::FIRST_GROUPS*crate::TASK) as f64*steps*advance
     }
 
     /// The varying units other than the trap beam's (ground.rs `Unit`): each one's profile is judged
@@ -1232,7 +1233,8 @@ impl Model{
     /// work per node (linear.rs `counted`) and its error's measure, `MATRIX_NS` a complex multiply-add -- is
     /// below what its smaller error saves the run at `stake` per unit of booked error (`stake`). Its error
     /// is predicted by the last doubling's rate, and by the cubic interpolation's order before one is seen,
-    /// 2⁻³ a doubling (`cubic`): a doubling that did not shrink the error predicts no saving, and stops it
+    /// 2⁻³ a doubling (`cubic`), and what it saves is `room_cost`'s: an error the whole population target leaves no run its room, whatever the run's length (a request of no
+    /// duration, a step's stake: 5 % at 9 nodes on the tweezer PGC). A doubling that did not shrink the error predicts no saving, and stops it
     /// (`table_stalled`: the tabulated function is not smooth on the grids' scale where the atoms go -- a
     /// folded drive's pole, PGCP_10's every-drive-folded model 0.8 to 1.3 from 9 to 32769 nodes there, which
     /// no grid resolves). A grid beyond the work bounds (`MOST_TABLE_BYTES`, `MOST_TABLE_NODES`) is not made
@@ -1254,7 +1256,7 @@ impl Model{
                 let rate:f64=if errors.len()>1{error/errors[errors.len()-2]}else{0.125};
                 if !(rate<1.){self.table_stalled=true;self.table_limit=Some(coarse);break;}
                 let work=MATRIX_NS*((n.pow(d)-coarse.pow(d)) as f64*per_node+(n.pow(d)*measured*4_usize.pow(d)) as f64);
-                if !(work<stake*error*(1.-rate)){break;}
+                if room_cost(error).is_finite()&&!(work<stake*(room_cost(error)-room_cost(rate*error))){break;}
             }
             if !within(n,coarse){self.table_limit=Some(coarse);break;}
             let fine=self.grid_tables(n,mixing,Some(&self.tables))?;let worst=self.interpolation_error(&fine);
@@ -2304,7 +2306,7 @@ mod tests{
     /// The tables stop refining at the work bounds (F9): the tweezer PGC's (its tweezer one intensity
     /// axis) within nine nodes, or within the bytes of the grids of nine and five, keep the grid of
     /// nine, its error measured against the five before it and booked -- where the unbounded tables
-    /// refine on, the next grid paying for itself, to a smaller one --; a bound below the first
+    /// refine on to a smaller one, the next grid paying for itself: nine nodes' error takes the whole population target, even at a run of no duration --; a bound below the first
     /// refinement leaves no measured error, and is refused.
     #[test]
     fn the_tables_stop_at_the_work_bounds_with_their_error_measured(){

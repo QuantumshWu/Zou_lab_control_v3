@@ -385,8 +385,8 @@ fn the_held_twin_s_master_equation_is_the_front_end_s(){
 
 /// The held engine (engine.rs `Held`: the twin's generator and jumps computed once, control.rs)
 /// follows the plain engine's atom held at the same point: from the same initial state and streams,
-/// the same jumps and the same internal state over 2000 steps -- without the photons' recoil term,
-/// where the engine's decay is its jumps' (the twin's by construction).
+/// the same jumps and the same internal state over 2000 steps, to the tables' interpolation between the plain engine's
+/// decay and its jumps' Σ L†L (the twin's by construction) -- without the photons' recoil term, where the two are one at the nodes.
 #[test]
 fn the_held_engine_is_the_plain_engine_at_rest(){
     let r=request(&|_|true);let mut model=Model::new(&r).unwrap();model.doppler=false;let initial=Initial::new(&model,&r).unwrap();let trap=initial.traps[0];
@@ -398,7 +398,7 @@ fn the_held_engine_is_the_plain_engine_at_rest(){
         for _ in 0..2000{plain.step(&mut a);held.step(&mut b);}
         assert_eq!((a.jumps,a.cluster),(b.jumps,b.cluster),"trajectory {index}");
         let n=model.dimension(a.cluster);let(na,nb):(f64,f64)=(a.psi[..n].iter().map(|z|z.norm_sqr()).sum(),b.psi[..n].iter().map(|z|z.norm_sqr()).sum());
-        for i in 0..n{assert!((a.psi[i].norm_sqr()/na-b.psi[i].norm_sqr()/nb).abs()<1e-6,"trajectory {index} state {i}");}
+        for i in 0..n{assert!((a.psi[i].norm_sqr()/na-b.psi[i].norm_sqr()/nb).abs()<=model.table_error,"trajectory {index} state {i}: {} against the tables' error {}",(a.psi[i].norm_sqr()/na-b.psi[i].norm_sqr()/nb).abs(),model.table_error);}
     }
 }
 
