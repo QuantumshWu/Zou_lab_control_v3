@@ -1154,6 +1154,10 @@ pub fn finalize_one(
     // Student-t points: each point's score and its derivative, per unit of
     // its weighted Jacobian row (the sandwich covariance below).
     let (mut scores, mut slopes) = (Vec::new(), Vec::new());
+    // The scatter the arithmetic itself leaves: a fitted value is known to
+    // its rounding, so data the model reproduces exactly (a site that never
+    // changed) measure a scatter of that much, not of none.
+    let mut rounding_rss = 0.0;
     let mut finite = true;
     let mut scaled_jacobian = vec![0.0; selected_count * free_count];
     for point in 0..point_count {
@@ -1175,11 +1179,14 @@ pub fn finalize_one(
             // The Student-t point: its score and slope feed the sandwich.
             let (raw, squared, _cost, _gf, _if, point_finite) = student_terms(fitted[point], observations[point], weight, dof[point]);
             let (score, slope) = student_score(raw, dof[point]);
-            scores.push(score);
+            let rounding = student_score(EPSILON * fitted[point].abs() * weight, dof[point]).0;
+            scores.push(if score.abs() < rounding { rounding } else { score });
             slopes.push(slope);
             (raw, squared, point_finite, 1.0)
         };
         raw_rss += squared;
+        let rounding = EPSILON * fitted[point].abs() * weight;
+        rounding_rss += rounding * rounding;
         let residual_scale = if poisson {
             let expected = pmax(fitted[point], COUNT_FLOOR);
             let absolute = raw.abs();
@@ -1264,7 +1271,8 @@ pub fn finalize_one(
         let triangular = linalg::qr_r(selected, free_count, &scaled_jacobian)?;
         match identify::from_factor(free_count, &triangular, selected.max(free_count))? {
             Some(identified) => {
-                free_covariance = identified.covariance(reduced);
+                let floor = if poisson { 0.0 } else { rounding_rss / (selected as i64 - free_count as i64).max(1) as f64 };
+                free_covariance = identified.covariance(pmax(reduced, floor));
                 defined = identified.defined;
             }
             None => covariance_valid = false,
