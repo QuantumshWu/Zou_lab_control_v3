@@ -204,12 +204,15 @@
 //! integer combinations, evaluated once (`Ground::frequency`): a photon's triple is at its carrier's δ_c exactly.
 //! The second order's R is dressed by the near light (# The near light's dressing), and the fourth order is its
 //! expansion around that dressing:
-//! - at a carrier c's frequency (a photon's triples, and Π's YW below) G_b(ω) is channel (c, b)'s own dressed
-//!   (K + Σ − z)⁻¹ (`fourth_resolvent`): a near tweezer's shift moves the pole W3 sees as it moves R's;
+//! - at a carrier c's frequency (a photon's triples, and Π's YW below) G(ω) is c's block's, as R's (# The static ground
+//!   block): from a source at place b, Σ_E (K + Σ_b(z_E) − z_E)⁻¹ P_E[b, ·] over the block's eigen-energies
+//!   (`fourth_column`; Y's rows by the projectors' transpose): a near tweezer's shift moves the pole W3 sees as it
+//!   moves R's, and a mixed static block's eigenstates respond at their own energies;
 //! - W3 leaves out what R already holds (`Ground::excluded`): the triples (d, d, c) through b′ = a for (d, a) a far
 //!   channel of (c, b) -- Σ's first order: in W3 its Rayleigh–Schrödinger form, the Brillouin–Wigner one less the
-//!   intermediate's admixture, which the dressing takes whole --, and in the triples (c, d, d), d ≠ c, the light
-//!   shift of b by d, Re (V_d†R_d)_bb, z's -- its imaginary part, b's scattering by d, stays. Counted twice, they
+//!   intermediate's admixture, which the dressing takes whole --, and in the triples (c, d, d), d ≠ c, d's light
+//!   shift between the cluster's states, the Hermitian part of (V_d†R_d)[b′, b], c's block's -- its anti-Hermitian
+//!   part, b's scattering by d, stays. Counted twice, they
 //!   tripled the 808 nm tweezer's probe's rates and took F10's populations 0.4 off the core.
 //!
 //! The state is y = M^{1/2} x, M = 1 + X with X = R†R on the
@@ -1865,18 +1868,18 @@ impl Ground{
         // The carriers the fourth order takes (`fourth_carriers`, the tables' alike); an entry's beat Ω is kept where
         // the second order would keep a coupling at it (`fourth_keeps`).
         let(on,size)=self.fourth_carriers(cl);let keep=|i:usize,j:usize,omega:f64|self.fourth_keeps(cl,i,j,omega,size);
-        let resolvent=|b:usize,w:f64|self.fourth_resolvent(e,b,w);
         // W3 per triple on the cluster's columns (ne × n), less what the second order's dressing holds: the
-        // triples (d, d, c) through b′ = a for (d, a) a far channel of (c, b) -- Σ's first order -- and the
-        // light shift Re (V_d†R_d)_bb of b by d in the triples (c, d, d), d ≠ c -- z's (`Ground::excluded`).
+        // triples (d, d, c) through b′ = a for (d, a) a far channel of (c, b) -- Σ's first order -- and the light
+        // shift of the cluster's states by d, the Hermitian part of (V_d†R_d) between them, in the triples (c, d, d),
+        // d ≠ c -- c's block's (`Ground::excluded`); G(ω) at a photon's carrier its block's (`fourth_column`).
         let mut w3:Vec<Dense>=vec![];
         for c1 in 0..nc{for c2 in 0..nc{for c4 in 0..nc{
             let w=self.frequency(&[c1,c4],&[c2]);let inner=v[c2].adjoint_product(&rc[c4]);let mut out=Dense::zeros(ne,n);
             if !(on.contains(&c1)&&on.contains(&c2)&&on.contains(&c4)){w3.push(out);continue;}
             for(j,&b)in st.iter().enumerate(){
-                let mut between:Vec<Complex>=(0..self.ground_states.len()).map(|bp|inner[(bp,b)]).collect();self.excluded(c1,c2,c4,b,&mut between);
-                let mut col:Vec<Complex>=(0..ne).map(|i|between.iter().enumerate().fold(Complex::ZERO,|s,(bp,&x)|s+rc[c1][(i,bp)]*x)).collect();
-                resolvent(b,w)?.solve(&mut col);for i in 0..ne{out[(i,j)]=col[i];}
+                let mut between:Vec<Complex>=(0..self.ground_states.len()).map(|bp|inner[(bp,b)]).collect();self.excluded(c1,c2,c4,b,&mut between,&|bp|inner[(b,bp)]);
+                let col:Vec<Complex>=(0..ne).map(|i|between.iter().enumerate().fold(Complex::ZERO,|s,(bp,&x)|s+rc[c1][(i,bp)]*x)).collect();
+                for(x,o)in self.fourth_column(e,k,j,w,&col,false)?.into_iter().enumerate(){for i in 0..ne{out[(i,x)]+=o[i];}}
             }
             w3.push(out);
         }}}
@@ -1921,13 +1924,16 @@ impl Ground{
         effective.add_scaled(Complex::new(0.,-0.5),&decay);
         // Π = 1 + ½X + YW on the cluster.
         let mut slow=Dense::from_fn(n,n,|i,j|(if i==j{Complex::ONE}else{Complex::ZERO})+xs[(i,j)]*0.5);
-        for &c1 in &on{for(i,&a0)in st.iter().enumerate(){let lu=resolvent(a0,delta(c1))?;
-            for &c2 in &on{for(j,&b)in st.iter().enumerate(){
-                let mut col:Vec<Complex>=(0..ne).map(|q|rc[c2][(q,b)]).collect();lu.solve(&mut col);
-                let z=(0..ne).fold(Complex::ZERO,|s,q|s+v[c1][(q,a0)].conj()*col[q]);
-                slow[(i,j)]-=Complex::cis((theta[i]-theta[j]+delta(c1)-delta(c2))*t)*z;
-            }}
-        }}
+        // (YW)_ax = −Σ_b′ Σ_E P_E[a,b′] V_c1[:,b′]† G_b′(z_E) R_c2[:,x], c1's block's terms (`fourth_column` at each place b′,
+        // its rows a by the projector's transpose).
+        for &c1 in &on{for &c2 in &on{for(j,&b)in st.iter().enumerate(){
+            let col:Vec<Complex>=(0..ne).map(|q|rc[c2][(q,b)]).collect();
+            for(p,&bp)in st.iter().enumerate(){
+                for(i,img)in self.fourth_column(e,k,p,delta(c1),&col,true)?.iter().enumerate(){
+                    let z=(0..ne).fold(Complex::ZERO,|s,q|s+v[c1][(q,bp)].conj()*img[q]);if z==Complex::ZERO{continue;}
+                    slow[(i,j)]-=Complex::cis((theta[i]-theta[j]+delta(c1)-delta(c2))*t)*z;}
+            }
+        }}}
         // The readout: M = 1 + Σ_g W_g†W_g over the coherent groups g (W_g's columns its channels' R_c − W3^c at
         // their beats), M^{−1/2} = 1 − ½Δ + ⅜Δ²; the excited populations from the same amplitudes.
         let amplitudes:Vec<Dense>=cl.coherent.iter().map(|group|{let mut m=Dense::zeros(ne,n);
@@ -1953,15 +1959,25 @@ impl Ground{
         }
         Ok(Fourth{effective,jumps,slow,root,excited,surplus,kappa})
     }
-    /// The fourth order's G_b(ω) (# Fourth order): at a carrier c's frequency -- a photon's triples, and Π's YW --
-    /// channel (c, b)'s dressed (K + Σ − z)⁻¹, the second order's own denominator (`Ground::dress_light`), else
-    /// the bare (K − E_b − ω)⁻¹.
-    pub(crate) fn fourth_resolvent(&self,e:&Elimination,b:usize,w:f64)->Result<Lu,String>{
-        if let Some(d)=(0..self.carriers.len()).find(|&c|same_frame(self.carriers[c].detuning,w)).and_then(|c|e.dressing[c][b].as_ref()){
-            if let Some(lu)=&d.lu{return Ok(lu.clone());}
-            let mut k=e.excited_hamiltonian.clone();k.add_scaled(Complex::ONE,&d.sigma);return denominator(&k,-d.z);
+    /// The carrier whose frequency a fourth-order triple's ω is (a photon's), if any.
+    pub(crate) fn photon_carrier(&self,w:f64)->Option<usize>{(0..self.carriers.len()).find(|&c|same_frame(self.carriers[c].detuning,w))}
+    /// The fourth order's G(ω) on a source s at the cluster's place b (# Fourth order): at a carrier c's frequency -- a
+    /// photon's triples, and Π's YW -- c's block's dressed resolvent, as the second order's response takes it (# The
+    /// static ground block): out[x] = Σ_E G_b(z_E) s P_E[b, x] over the cluster's places x, G_b(z_E) the eigen-energy's
+    /// (K − z_E)⁻¹ or b's own (K + Σ_b(z_E) − z_E)⁻¹ (`Mode`), a place the block leaves out nothing; without a block
+    /// (no carrier at ω, or none on the cluster) the bare (K − E_b − ω)⁻¹ on column b alone. `transpose`: the weights
+    /// P_E[x, b] instead, Y's rows (Π's YW).
+    pub(crate) fn fourth_column(&self,e:&Elimination,k:usize,b:usize,w:f64,s:&[Complex],transpose:bool)->Result<Vec<Vec<Complex>>,String>{
+        let(n,ne)=(self.clusters[k].states.len(),self.excited_states.len());let mut out=vec![vec![Complex::ZERO;ne];n];
+        if let Some(block)=self.photon_carrier(w).and_then(|c|e.blocks.get(c)).and_then(|x|x.get(k)).and_then(|x|x.as_ref()){
+            for(m,mode)in block.modes.iter().enumerate(){
+                let lu=if mode.plain.contains(&b){mode.lu.as_ref()}else{mode.dressed.iter().find(|d|d.place==b).and_then(|d|d.lu.as_ref())};
+                let Some(lu)=lu else{continue};let mut g=s.to_vec();lu.solve(&mut g);
+                for(x,o)in out.iter_mut().enumerate(){let p=if transpose{block.projector(m,x,b)}else{block.projector(m,b,x)};if p==Complex::ZERO{continue;}for(y,&z)in o.iter_mut().zip(&g){*y+=z*p;}}
+            }
+            return Ok(out);
         }
-        denominator(&e.excited_hamiltonian,-e.energies[b]-w)
+        let mut g=s.to_vec();denominator(&e.excited_hamiltonian,-e.energies[self.clusters[k].states[b]]-w)?.solve(&mut g);out[b]=g;Ok(out)
     }
     /// The fourth order's W3 triple (c1, c2, c4) on column b: its middle factor (V_c2†R_c4)[b′, b] over every ground state
     /// b′, less what the second order's dressing already holds (# Fourth order, module documentation # The near light's
@@ -1969,15 +1985,20 @@ impl Ground{
     /// Rayleigh–Schrödinger form, Σ's first order less the intermediate's admixture, which the dressing's
     /// Brillouin–Wigner form takes whole --; and with c2 = c4 ≠ c1 at b′ = b the light shift of b by c2, Re (V_c2†R_c2)_bb,
     /// which z holds (its imaginary part, b's scattering by c2, stays).
-    pub(crate) fn excluded(&self,c1:usize,c2:usize,c4:usize,b:usize,between:&mut [Complex]){
+    pub(crate) fn excluded(&self,c1:usize,c2:usize,c4:usize,b:usize,between:&mut [Complex],column:&dyn Fn(usize)->Complex){
         if c1==c2{for via in &self.vias[c4][b]{if via.carrier==c2{between[via.state]=Complex::ZERO;}}}
-        else if c2==c4{between[b]=Complex::new(0.,between[b].im);}
+        else if c2==c4{for &bp in &self.clusters[self.cluster[b]].states{between[bp]=(between[bp]-column(bp).conj())*0.5;}}
     }
     /// An excited state's post-jump trace factor κ_i = 1 − Γ_i²/(Δ_i² + Γ_i²/4) (# Fourth order) from channel (c, b): Δ_i
-    /// its detuning from the channel's dressed energy, E_i + Re Σ_ii − z (`Dressing`; E_i − E_b − δ_c without one).
+    /// its detuning from the channel's dressed energy, E_i + Re Σ_ii − z_E at the block's eigen-energy E of b's largest
+    /// weight P_E[b,b], Σ b's own self-energy there (`Mode`; E_i − E_b − δ_c without a block).
     pub fn state_factor(&self,e:&Elimination,i:usize,c:usize,b:usize)->f64{
-        let gamma=self.decay[(i,i)].re;
-        let delta=match &e.dressing[c][b]{Some(d)=>e.excited_energies[i]+d.sigma[(i,i)].re-d.z,None=>e.excited_energies[i]-e.energies[b]-self.carriers[c].detuning};
+        let gamma=self.decay[(i,i)].re;let k=self.cluster[b];let x=self.clusters[k].position(b);
+        let delta=match(e.blocks.get(c).and_then(|y|y.get(k)).and_then(|y|y.as_ref()),x){
+            (Some(block),Some(x))if !block.modes.is_empty()=>{
+                let m=(0..block.modes.len()).max_by(|&p,&q|block.projector(p,x,x).re.total_cmp(&block.projector(q,x,x).re)).unwrap();let mode=&block.modes[m];
+                e.excited_energies[i]+mode.dressed.iter().find(|d|d.place==x).map_or(0.,|d|d.sigma[(i,i)].re)-mode.energy}
+            _=>e.excited_energies[i]-e.energies[b]-self.carriers[c].detuning};
         1.-gamma*gamma/(delta*delta+0.25*gamma*gamma)
     }
     /// An excited group's post-jump trace factor from channel (c, b) at r: its states' `state_factor`s weighted by the
