@@ -39,6 +39,7 @@ typedef unsigned long long u64;
 #define NG 8                            // ground states
 #define NE 24                           // excited states
 #define MOST_BEAMS 32
+#define DBL_EPSILON 2.220446049250313e-16
 #define MOST_CARRIERS 8
 #define MOST_RANK 3
 #define MOST_FOCUSED 3
@@ -306,7 +307,7 @@ struct Point{
     float2 off[MOST_CARRIERS][MOST_RANK];          // E_k with the trap's light off (model.rs `fields_off`)
 };
 // A jump's working space.
-struct JumpSpace{float2 u[3][MAXN],f[MAXN];float weights[MOST_CLASSES],shares[MOST_BEAMS];int beams[MOST_BEAMS];};
+struct JumpSpace{float2 u[3][MAXN],f[MAXN];float weights[MOST_CLASSES],shares[MOST_BEAMS],projections[MOST_BEAMS],drives[MOST_BEAMS],direct;int beams[MOST_BEAMS],driven[MOST_BEAMS],ndrives;};
 struct Warp{
     Point pt;
     float2 psi[MAXM],start[MAXM];       // ψ, ψ at a step's start
@@ -1113,7 +1114,9 @@ __device__ float2 amplitude(const Program& P,const Warp& W,const Cluster& C,cons
 // Σ_k ∇E_k A_k + E_k Σ_f ∂_f A_k ∇s_f, whose Im⟨f|·⟩ is the exact conditional mean's correction
 // (`mean`, still to be divided by ‖f‖²). Each beam l of the class's carriers in their order: its
 // share Σ_rows ‖a_l Σ_k c_lk (A_k − w_l B_k)‖² -- beyond the first order the exact responses'
-// ‖a_l Σ e^{iω̃t} ψ[from] Σ_a e_a (C_a R_l)[to, from]‖² -- into J.shares and J.beams; returns how many.
+// ‖a_l Σ e^{iω̃t} ψ[from] Σ_a e_a (C_a R_l)[to, from]‖² -- into J.shares, its projection on the photon J.f, Re⟨f|f_l⟩ (still
+// to be divided by ‖f‖²), into J.projections, and J.beams; returns how many; and the explicit states' part into
+// J.direct, J.drives and J.driven.
 __device__ int absorption(const Program& P,Warp& W,const Cluster& C,const Class& K,int nt,const double e[3],double t,const float2* X,int lane,float mean[3]){
     constexpr int ITEMS=(MAXN*MOST_CARRIERS+31)/32;
     const float2* tables=P.tables+C.table;const Point& pt=W.pt;JumpSpace& J=W.jump;const int D=P.focused;
@@ -1177,7 +1180,7 @@ __device__ int absorption(const Program& P,Warp& W,const Cluster& C,const Class&
         if(!((K.carriers>>c)&1))continue;const Carrier R=P.carriers[c];
         for(int j=0;j<R.beams;j++){
             const int l=P.beam_list[R.first+j];const Beam& b=P.beams[l];const float2 al=pt.a[l];const float wl=pt.shift[l];
-            float v=0.f;
+            float v=0.f,on=0.f;
             #pragma unroll
             for(int m=0;m<ITEMS;m++)if(rows[m]>=0&&carriers[m]==c){
                 float2 g=zero2();
@@ -1190,43 +1193,42 @@ __device__ int absorption(const Program& P,Warp& W,const Cluster& C,const Class&
                     for(int a=0;a<3;a++)z+=ea[a]*X[exact_at(b.near,ph.col,a,ph.to)];
                     g+=residual(ph.residual,t)*W.psi[ph.col]*z;
                 }
-                v+=norm2(al*g);
+                const float2 z=al*g,fr=J.f[rows[m]];v+=norm2(z);on+=fr.x*z.x+fr.y*z.y;
             }
-            const float w=warp_sum(v);if(lane==0){J.shares[count]=w;J.beams[count]=l;}count++;
+            const float w=warp_sum(v),w1=warp_sum(on);if(lane==0){J.shares[count]=w;J.projections[count]=w1;J.beams[count]=l;}count++;
         }
     }
     __syncwarp();
     // The explicit states' part of the photon (`Photons::absorption`): its weight along e, Σ_rows |Σ e^{iω̃t}
-    // ψ_e Σ_a e_a ĉ_a[to]|², shared by the beams in proportion to their drives into the explicit states,
-    // Σ |a_l Σ_k c_lk U_k ψ_b|² over the kept drives -- added to a beam's share, or a share of its own after them.
+    // ψ_e Σ_a e_a ĉ_a[to]|², and the beams' weights: each explicit state's weight in the photon shared by the drives into
+    // it, Σ |a_l Σ_k c_lk U_k ψ_b|², in the drives' and their carriers' beams' order.
+    float total=0.f;int beams[MOST_BEAMS];float drive[MOST_BEAMS];int nb=0;
     if(K.ndirect>0){
-        float2 v=zero2();
+        float2 v=zero2();float2 part[MAXM];float weight[MAXM],into[MAXM];const int ne=C.n-C.n0;
+        for(int s=0;s<ne;s++){part[s]=zero2();into[s]=0.f;}
         if(lane<nt)for(int i=0;i<K.ndirect;i++){
             const Direct d=P.directs[K.direct+i];if(d.row!=lane)continue;float2 z=zero2();
             for(int a=0;a<3;a++)z+=ea[a]*entry(P,W,tables+C.emission+((d.state-C.n0)*3+a)*NG+d.to,C.size,-1);
-            v+=residual(d.residual,t)*W.psi[d.state]*z;
+            const float2 c=residual(d.residual,t)*W.psi[d.state]*z;v+=c;part[d.state-C.n0]+=c;
         }
-        const float total=warp_sum(lane<nt?norm2(v):0.f);
-        // Per beam its drives' Σ |a_l Σ_k c_lk U_k ψ_b|², in the drives' and their carriers' beams' order.
-        int beams[MOST_BEAMS];float drive[MOST_BEAMS];int nb=0;float sum=0.f;
-        for(int i=0;i<C.nterms;i++){
-            const Term T=P.terms[C.terms+i];if(T.kind!=0)continue;const Carrier Rc=P.carriers[T.carrier];
+        total=warp_sum(lane<nt?norm2(v):0.f);
+        for(int s=0;s<ne;s++)weight[s]=warp_sum(lane<nt?norm2(part[s]):0.f);
+        for(int pass=0;pass<2;pass++)for(int i=0;i<C.nterms;i++){
+            const Term T=P.terms[C.terms+i];if(T.kind!=0)continue;const Carrier Rc=P.carriers[T.carrier];const int s=T.row-C.n0;
             for(int j=0;j<Rc.beams;j++){
                 const int l=P.beam_list[Rc.first+j];const Beam& b=P.beams[l];float2 z=zero2();
                 for(int k=0;k<Rc.rank;k++)z+=make_float2(b.coefficients[k][0],b.coefficients[k][1])*make_float2(T.u[k][0],T.u[k][1]);
-                const float d=norm2(z*pt.a[l]*W.psi[T.col]);int at=0;while(at<nb&&beams[at]!=l)at++;
+                const float d=norm2(z*pt.a[l]*W.psi[T.col]);
+                if(pass==0){into[s]+=d;continue;}
+                int at=0;while(at<nb&&beams[at]!=l)at++;
                 if(at==nb){beams[nb]=l;drive[nb]=0.f;nb++;}
-                drive[at]+=d;sum+=d;
-            }
-        }
-        if(sum>0.f){
-            for(int i=0;i<nb;i++){
-                const float share=total*drive[i]/sum;int at=0;while(at<count&&J.beams[at]!=beams[i])at++;
-                __syncwarp();if(lane==0){if(at<count)J.shares[at]+=share;else{J.shares[count]=share;J.beams[count]=beams[i];}}__syncwarp();
-                if(at==count)count++;
+                if(into[s]>0.f)drive[at]+=weight[s]*d/into[s];
             }
         }
     }
+    __syncwarp();
+    if(lane==0){J.direct=total;J.ndrives=nb;for(int i=0;i<nb;i++){J.drives[i]=drive[i];J.driven[i]=beams[i];}}
+    __syncwarp();
     return count;
 }
 
@@ -1294,6 +1296,73 @@ __device__ float emit(Rng& rng,JumpSpace& J,int nt,double polarization,int lane,
     return weights[chosen];
 }
 
+// The eigen-decomposition of a symmetric 3 × 3 matrix (engine.rs `symmetric`): the values and the unit vectors (rows).
+__device__ void symmetric(double a[3][3],double values[3],double vectors[3][3]){
+    double v[3][3]={{1.,0.,0.},{0.,1.,0.},{0.,0.,1.}};
+    for(int it=0;it<64;it++){
+        int p=0,q=1;double big=0.;for(int i=0;i<3;i++)for(int j=i+1;j<3;j++)if(fabs(a[i][j])>big){big=fabs(a[i][j]);p=i;q=j;}
+        if(!(big>DBL_EPSILON*(fabs(a[0][0])+fabs(a[1][1])+fabs(a[2][2]))))break;
+        const double theta=0.5*(a[q][q]-a[p][p])/a[p][q];const double t=(theta<0.?-1.:1.)/(fabs(theta)+sqrt(theta*theta+1.));
+        const double c=1./sqrt(t*t+1.),s=t*c;
+        for(int k=0;k<3;k++){const double x=a[k][p],y=a[k][q];a[k][p]=c*x-s*y;a[k][q]=s*x+c*y;}
+        for(int k=0;k<3;k++){const double x=a[p][k],y=a[q][k];a[p][k]=c*x-s*y;a[q][k]=s*x+c*y;}
+        for(int k=0;k<3;k++){const double x=v[k][p],y=v[k][q];v[k][p]=c*x-s*y;v[k][q]=s*x+c*y;}
+    }
+    for(int i=0;i<3;i++){values[i]=a[i][i];for(int j=0;j<3;j++)vectors[i][j]=v[j][i];}
+}
+// The weights of a photon's parts: their shares s moved the least to the mean t of their recoils' means μ (engine.rs `part_weights`).
+__device__ void part_weights(const double* s,const double (*mu)[3],int n,const double target[3],double* q){
+    double total=0.,on[MOST_BEAMS+1],d[MOST_BEAMS+1];for(int c=0;c<n;c++)total+=s[c];
+    for(int c=0;c<n;c++){q[c]=total>0.?s[c]/total:0.;on[c]=q[c];}
+    if(!(total>0.))return;
+    for(int it=0;it<n;it++){
+        double sum=0.,centre[3],g[3];for(int c=0;c<n;c++)sum+=on[c];if(!(sum>0.))break;
+        for(int a=0;a<3;a++){centre[a]=0.;g[a]=target[a];for(int c=0;c<n;c++){centre[a]+=on[c]*mu[c][a]/sum;g[a]-=q[c]*mu[c][a];}}
+        double h[3][3]={{0.,0.,0.},{0.,0.,0.},{0.,0.,0.}};
+        for(int c=0;c<n;c++)for(int i=0;i<3;i++)for(int j=0;j<3;j++)h[i][j]+=on[c]*(mu[c][i]-centre[i])*(mu[c][j]-centre[j]);
+        double values[3],vectors[3][3];symmetric(h,values,vectors);
+        const double floor_=4.*DBL_EPSILON*(fabs(values[0])+fabs(values[1])+fabs(values[2]));
+        double beta[3]={0.,0.,0.},alpha=1.;
+        for(int i=0;i<3;i++)if(values[i]>floor_){double p=0.;for(int a=0;a<3;a++)p+=vectors[i][a]*g[a];p/=values[i];for(int a=0;a<3;a++)beta[a]+=p*vectors[i][a];}
+        for(int c=0;c<n;c++){double x=0.;for(int a=0;a<3;a++)x+=beta[a]*(mu[c][a]-centre[a]);d[c]=on[c]*x;if(on[c]>0.&&d[c]<0.&&-q[c]/d[c]<alpha)alpha=-q[c]/d[c];}
+        for(int c=0;c<n;c++){q[c]+=alpha*d[c];if(on[c]>0.&&d[c]<0.&&q[c]<=-4.*DBL_EPSILON*alpha*d[c]){q[c]=0.;on[c]=0.;}}
+        if(!(alpha<1.))break;
+    }
+    double sum=0.;for(int c=0;c<n;c++)sum+=q[c];if(sum>0.)for(int c=0;c<n;c++)q[c]/=sum;
+}
+// The photon's recoils (engine.rs `kick`, `absorbed_recoil`): −k n and the absorbed light's -- the parts' shares (J.shares
+// and J.beams, `count` of them; the explicit states' part J.direct last, its recoil's mean zero) moved to their projections'
+// mean on the photon of ‖f‖² `size` (`part_weights`); `absorbed` picks the part, its leftover the explicit part's beam by J.drives,
+// its lower bits the sign of its drives' mean's shot noise, and the rest of the exact conditional mean `mean` is added -- onto
+// the momentum on the trap's principal axes.
+__device__ void recoil(const Program& P,const JumpSpace& J,Traj& t,const double n[3],double wave_number,const double mean[3],int count,double size,double absorbed){
+    double kick[3],s[MOST_BEAMS+1],mu[MOST_BEAMS+1][3],q[MOST_BEAMS+1],target[3]={0.,0.,0.};
+    for(int a=0;a<3;a++)kick[a]=-wave_number*n[a]+mean[a];
+    for(int i=0;i<count;i++){const Beam& b=P.beams[J.beams[i]];s[i]=(double)J.shares[i];for(int a=0;a<3;a++){mu[i][a]=(double)b.direction[a]*(double)b.k;target[a]+=(double)J.projections[i]/size*mu[i][a];}}
+    s[count]=(double)J.direct;for(int a=0;a<3;a++)mu[count][a]=0.;
+    part_weights(s,mu,count+1,target,q);
+    int pick=-1;for(int c=count;c>=0;c--)if(q[c]>0.){pick=c;break;}
+    if(pick>=0){
+        double x=absorbed;for(int c=0;c<=count;c++){if(x<q[c]){pick=c;break;}x-=q[c];}
+        for(int c=0;c<=count;c++)for(int a=0;a<3;a++)kick[a]-=q[c]*mu[c][a];
+        if(pick<count){for(int a=0;a<3;a++)kick[a]+=mu[pick][a];}
+        else{
+            const double left=fmin(fmax(x/q[pick],0.),1.);
+            double total=0.;for(int i=0;i<J.ndrives;i++)total+=(double)J.drives[i];
+            if(total>0.){
+                double average[3]={0.,0.,0.};
+                for(int i=0;i<J.ndrives;i++){const Beam& b=P.beams[J.driven[i]];for(int a=0;a<3;a++)average[a]+=(double)J.drives[i]*((double)b.direction[a]*(double)b.k)/total;}
+                double y=left*total;int l=0;for(int i=J.ndrives-1;i>=0;i--)if(J.drives[i]>0.f){l=i;break;}
+                for(int i=0;i<J.ndrives;i++){const double v=(double)J.drives[i];if(y<v){l=i;break;}y-=v;}
+                const double bits=absorbed*67108864.,sign=bits-floor(bits)<0.5?1.:-1.;const Beam& b=P.beams[J.driven[l]];  // engine.rs `SIGN_BITS`
+                for(int a=0;a<3;a++)kick[a]+=(double)b.direction[a]*(double)b.k-average[a]+sign*average[a];
+            }
+        }
+    }
+    #pragma unroll
+    for(int i=0;i<3;i++)t.p[i]+=P.axes[i][0]*kick[0]+P.axes[i][1]*kick[1]+P.axes[i][2]*kick[2];
+}
+
 __device__ __noinline__ void transient(const Program& P,const Run& R,Warp& W,Traj& t,const double u[4],Rng& rng,int lane,float2* E);
 __device__ float2 response(const Program& P,const Warp& W,const Cluster& C,int c,int i,int col);
 __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,bool exact,int lane,float2* scratch){
@@ -1327,24 +1396,13 @@ __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,
     if(lane<3*nt)J.u[lane%3][lane/3]=amplitude(P,W,C,K,lane%3,lane/3,t.time,M);
     __syncwarp();
     double n[3],e[3];const float size=emit(rng,J,nt,d.polarization,lane,n,e);
-    // The recoils: the photon's, the absorbed beam's and the exact conditional mean's correction.
-    double kick[3];for(int a=0;a<3;a++)kick[a]=-K.wave_number*n[a];
+    // The recoils: the photon's and the absorbed light's about the exact conditional mean.
     SPAN_BEGIN(absorbed);
     float m[3];const int count=absorption(P,W,C,K,nt,e,t.time,X,lane,m);
     SPAN_END(SPAN_ABSORPTION,absorbed);
-    double mean[3],sum=0.;
+    double mean[3];
     for(int x=0;x<3;x++)mean[x]=(double)m[x]/(double)size;
-    for(int i=0;i<count;i++)sum+=(double)J.shares[i];
-    if(sum>0.){
-        double x=d.absorbed*sum;int drawn=J.beams[count-1];
-        for(int i=0;i<count;i++){const double w=(double)J.shares[i];if(x<w){drawn=J.beams[i];break;}x-=w;}
-        double average[3]={0.,0.,0.};
-        for(int i=0;i<count;i++){const Beam& b=P.beams[J.beams[i]];for(int a=0;a<3;a++)average[a]+=(double)J.shares[i]*((double)b.direction[a]*(double)b.k);}
-        const Beam& b=P.beams[drawn];
-        for(int a=0;a<3;a++)kick[a]+=(double)b.direction[a]*(double)b.k+mean[a]-average[a]/sum;
-    }else for(int a=0;a<3;a++)kick[a]+=mean[a];
-    #pragma unroll
-    for(int i=0;i<3;i++)t.p[i]+=P.axes[i][0]*kick[0]+P.axes[i][1]*kick[1]+P.axes[i][2]*kick[2];
+    recoil(P,J,t,n,K.wave_number,mean,count,(double)size,d.absorbed);
     const float scale=1.f/sqrtf(size);
     __syncwarp();if(lane<MAXM)W.psi[lane]=lane<nt?scale*J.f[lane]:zero2();__syncwarp();
     t.cluster=K.target;t.logn=0.;t.threshold=d.threshold;t.log_threshold=log(d.threshold);
@@ -1982,24 +2040,6 @@ __device__ float trap_exact(const Program& P,const Warp& W,const Cluster& C,doub
     return bound?v+P.light2:v;
 }
 
-// The photon's recoils (engine.rs `kick`): −k n, the absorbed beam drawn by its share (`absorbed`, the
-// shares in J.shares and J.beams, `count` of them) less their mean, and the exact conditional mean
-// (`mean`, its Im⟨f|∇f⟩ over ‖f‖²) -- onto the momentum on the trap's principal axes.
-__device__ void recoil(const Program& P,const JumpSpace& J,Traj& t,const double n[3],double wave_number,const double mean[3],int count,double absorbed){
-    double kick[3],sum=0.;for(int a=0;a<3;a++)kick[a]=-wave_number*n[a];
-    for(int i=0;i<count;i++)sum+=(double)J.shares[i];
-    if(sum>0.){
-        double x=absorbed*sum;int drawn=J.beams[count-1];
-        for(int i=0;i<count;i++){const double w=(double)J.shares[i];if(x<w){drawn=J.beams[i];break;}x-=w;}
-        double average[3]={0.,0.,0.};
-        for(int i=0;i<count;i++){const Beam& b=P.beams[J.beams[i]];for(int a=0;a<3;a++)average[a]+=(double)J.shares[i]*((double)b.direction[a]*(double)b.k);}
-        const Beam& b=P.beams[drawn];
-        for(int a=0;a<3;a++)kick[a]+=(double)b.direction[a]*(double)b.k+mean[a]-average[a]/sum;
-    }else for(int a=0;a<3;a++)kick[a]+=mean[a];
-    #pragma unroll
-    for(int i=0;i<3;i++)t.p[i]+=P.axes[i][0]*kick[0]+P.axes[i][1]*kick[1]+P.axes[i][2]*kick[2];
-}
-
 // A table entry of a carrier's response T_k at the stencil (model.rs `responses`' tables: rank × NE × n0).
 __device__ __forceinline__ const float2* t_table(const Program& P,const Cluster& C,int c,int k,int i,int col){
     return P.tables+C.table+P.carrier_tables[C.carriers+3*c+2]+(k*NE+i)*C.n0+col;
@@ -2114,7 +2154,8 @@ __device__ __noinline__ void transient(const Program& P,const Run& R,Warp& W,Tra
             }
         }
     }
-    double m[3];for(int x=0;x<3;x++)m[x]=(double)warp_sum(mean[x])/(double)size;
+    // Of the photon's own sign: this gradient's amplitude is Σ e^{−iε̃t} R ψ′, the photon J.u its negative.
+    double m[3];for(int x=0;x<3;x++)m[x]=-(double)warp_sum(mean[x])/(double)size;
     // The beams' shares: the group's carriers ascending, each one's beams in order.
     int count=0;
     for(int c=0;c<P.ncarriers;c++){
@@ -2134,12 +2175,16 @@ __device__ __noinline__ void transient(const Program& P,const Run& R,Warp& W,Tra
                     }
                 }
             }
-            const float w=warp_sum(norm2(v));if(lane==0){J.shares[count]=w;J.beams[count]=l;}count++;
+            // Its share, and its projection on the photon: this part's amplitude is of the gradient's sign, the photon's negative.
+            const float2 fr=lane<NG&&P.ground_cluster[lane]==target?J.f[P.ground_position[lane]]:zero2();
+            const float w=warp_sum(norm2(v)),w1=-warp_sum(fr.x*v.x+fr.y*v.y);if(lane==0){J.shares[count]=w;J.projections[count]=w1;J.beams[count]=l;}count++;
         }
     }
     __syncwarp();
+    if(lane==0){J.direct=0.f;J.ndrives=0;}
+    __syncwarp();
     // The photon's wave number: its group's first channel's carrier's (model.rs `Piece::wave_number`).
-    recoil(P,J,t,n,P.carriers[P.channels[G.channels].carrier].wave,m,count,u[3]);
+    recoil(P,J,t,n,P.carriers[P.channels[G.channels].carrier].wave,m,count,(double)size,u[3]);
     const float scale=1.f/sqrtf(size);
     __syncwarp();if(lane<MAXM)W.psi[lane]=lane<nt?scale*J.f[lane]:zero2();__syncwarp();
     t.cluster=target;

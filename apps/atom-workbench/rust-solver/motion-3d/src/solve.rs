@@ -242,7 +242,8 @@
 //! its standard errors): heating (TW1, k_B T from 6 to 16 ħω over 10 ms) T within 6 % (mean +2 %) and the
 //! populations within 0.03; cooling (TW2) T within 4.5 % down to k_B T ≈ 5 ħω, 6 % low at 4.6 ħω,
 //! 7-10 % low at 4 ħω and 10-55 % low below 3.5 ħω, the populations within 0.045 but for the first
-//! 50 µs of optical pumping (up to 0.066). Against the 2D quantum trajectories of the same scene
+//! 50 µs of optical pumping (up to 0.066). (With x alone free, the reference's own motion: 3.4–7.7 % low at 5.6–4 ħω, the
+//! engine's absorbed recoils (engine.rs # Absorption) at their incoherent second moment there; the rest is what the kicks leave out.) Against the 2D quantum trajectories of the same scene
 //! (x and y free) within 8 % at 4.6 ħω and 15 % low at 3.1 ħω. Each output time says whether it
 //! is in the regime k_B T ≥ `CLASSICAL` ħω on every axis (with T the engine's own, which lies below
 //! the quantum T where the method cools too far, so the mark comes early rather than late).
@@ -262,7 +263,7 @@ use crate::engine::{column_norm,node_phase,series,Engine,Settings,Trajectory,QUA
 use crate::gpu;
 use crate::ground::{ExcitedKind,Ground,Kind};
 use crate::ledger::Ledger;
-use crate::model::{Exact,Model,Trap,MOST_MIXED,NOT_LINDBLAD};
+use crate::model::{Exact,Model,Trap,MOST_MIXED,MOST_STATES,NOT_LINDBLAD};
 use crate::control::{Harmonic,Twin};
 use crate::stats::{summarize,Estimate,Group,Means,Scales,KT_PER_UK};
 use crate::{pilot_start,sample_states,simulate,Initial,Outcome,Variates,TASK};
@@ -892,10 +893,11 @@ fn cut(ledger:&Ledger)->f64{ledger.items.iter().find(|i|i.label==CUT).map_or(0.,
 /// second order and S² at fourth (ground.rs; against the population core 0.2-1.0 S² where the series
 /// converges, S ≲ 0.5 -- beyond, the charge exceeds the target and the rule keeps the drives).
 fn fold_charge(model:&Model,saturation:f64)->f64{fold_charges(model.fourth,saturation)[0]}
-/// The fold's charges per target, the populations' (`fold_charge`) and T's, for the saturation S its
-/// folded drives meet at second or fourth order: T's is S at either -- the force folds at second order
-/// (against explicit states, the moving 3D PGC's T is 1.1 S off on its axis above 4ħω that differs,
-/// its populations within 0.5 S).
+/// The fold's charges per target, the populations' (`fold_charge`) and T's, for the saturation S its folded drives meet at
+/// second or fourth order: T's is S at either -- the force folds at second order. T is the ratio of the momentum diffusion and the friction, each of the fold's error S, so the moving PGC's z below exceeds it; its charge comes with the rooms' combination of errors (engine.rs # Absorption, both models on one kick:
+/// the explicit states' T against the all-folded T, second-half means over 1 ms on the axes above 4ħω: a tetrahedral MOT's z
+/// +0.03 ± 0.7 % and x +0.6 ± 1.7 % at S = 2.1 %; the moving 3D PGC's x −2.2 ± 0.8 % and z +5.2 ± 1.0 % at S = 2.05 %; a gray
+/// molasses's z +1.4 ± 4.9 % and x −1.6 ± 2.4 % at S = 3.4 %).
 fn fold_charges(fourth:bool,saturation:f64)->[f64;2]{[if fourth{saturation*saturation}else{saturation},saturation]}
 /// The targets in the order of the rooms: the populations' (absolute) and T's (relative).
 const TARGETS:[f64;2]=[POPULATION_TARGET,TEMPERATURE_TARGET];
@@ -1220,7 +1222,7 @@ fn deposit(model:&Model,t:&Trajectory,psi:&[Complex],doppler:f64)->(f64,f64){
     for(c,(class,u))in model.ground.clusters[t.cluster].classes.iter().zip(&photons.amplitude).enumerate(){
         let nt=model.ground_dimension(class.target);let w:f64=u.iter().map(|v|v[..nt].iter().map(|z|z.norm_sqr()).sum::<f64>()).sum();if !(w>0.){continue;}
         let mut m=[0.;3];
-        for a in 0..3{let mut e=[0.;3];e[a]=1.;let(gradient,_)=photons.absorption(c,e);for x in 0..3{for i in 0..nt{m[x]+=(u[a][i].conj()*gradient[i][x]).im;}}}
+        for a in 0..3{let mut e=[0.;3];e[a]=1.;let(gradient,_)=photons.absorption(c,e,&[Complex::ZERO;MOST_STATES]);for x in 0..3{for i in 0..nt{m[x]+=(u[a][i].conj()*gradient[i][x]).im;}}}
         weight+=w;for x in 0..3{mean[x]+=m[x];}recoil+=w*class.wave_number*class.wave_number+m.iter().map(|v|v*v).sum::<f64>()/w;
     }
     if !(weight>0.){return(0.,0.);}
