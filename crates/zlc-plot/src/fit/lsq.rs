@@ -313,8 +313,12 @@ fn covariance_at(objective: &ResidualObjective, solved: &[f64], free: &[usize], 
         return invalid;
     }
     let mut scaled = vec![0.0; points * n];
+    // The scatter the arithmetic itself leaves (finalize_one).
+    let mut rounding_rss = 0.0;
     for i in 0..points {
         let weight = objective.weights.map_or(1.0, |w| w[i]);
+        let rounding = EPSILON * predicted[i].abs() * weight;
+        rounding_rss += rounding * rounding;
         let Ok((raw, _sq, _c, _g, _inf, finite)) = point_terms(predicted[i], objective.values[i], objective.counted, weight, objective.weights.is_some(), objective.loss) else { return invalid };
         if !finite {
             return invalid;
@@ -339,7 +343,8 @@ fn covariance_at(objective: &ResidualObjective, solved: &[f64], free: &[usize], 
     // Rank and identifiability on unit-norm columns (identify.rs): an
     // undetermined parameter's row and column are NaN, the rest stand.
     let Ok(Some(identified)) = super::identify::from_factor(n, &r, points.max(n)) else { return invalid };
-    let covariance = identified.covariance(reduced);
+    let floor = if objective.counted { 0.0 } else { rounding_rss / (points - n) as f64 };
+    let covariance = identified.covariance(pmax(reduced, floor));
     let defined = &identified.defined;
     if (0..n).any(|a| defined[a] && (covariance[a * n + a] < 0.0 || (0..n).any(|b| defined[b] && !covariance[a * n + b].is_finite()))) {
         return invalid;

@@ -138,6 +138,25 @@ fn an_invisible_decay_keeps_every_error_finite() {
     assert!(raw_singular > 0, "no seed is singular in raw units");
 }
 
+/// A series that never changed (a site that survives every shot): nothing
+/// measures the shape's parameters, and no error may claim they are known.
+#[test]
+fn a_series_that_never_changed_claims_no_certainty() {
+    let engine = FitEngine::default();
+    let x: Vec<f64> = (0..50).map(|i| 0.1 + 3.06 * i as f64).collect();
+    for (model, level, shape) in [("damped_sine", 1.0, vec!["baseband_frequency", "decay_time", "phase"]), ("damped_sine", 0.0, vec!["baseband_frequency", "decay_time", "phase"]), ("gaussian_offset", -5.0, vec!["center", "sigma"])] {
+        let spec = engine.registry.get(model).unwrap();
+        let cell = FitCell::points(vec![x.clone()], vec![level; x.len()]);
+        let got = engine.fit(&spec, &cell, &FitRequest { initial: None, bounds: None, options: None, cancelled: None }).unwrap();
+        eprintln!("{model} at {level}: {:?} +- {:?}", got.parameter_values, got.standard_errors);
+        for name in shape {
+            let index = spec.parameter_index(name).unwrap();
+            let (value, error) = (got.parameter_values[index], got.standard_errors[index]);
+            assert!(error.is_nan() || error > 0.1 * value.abs(), "{model} at {level}: {name} {value} +- {error}");
+        }
+    }
+}
+
 #[test]
 fn the_x_unit_changes_no_validity() {
     for seed in 1..=6 {
