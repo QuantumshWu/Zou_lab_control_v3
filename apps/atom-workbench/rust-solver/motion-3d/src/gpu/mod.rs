@@ -18,10 +18,10 @@
 //! # Batches
 //! The initial states are drawn on the CPU (lib.rs `initial_trajectory` and a held twin's start,
 //! exactly); the tasks run as blocks, as many at once as the device memory comfortably holds (a
-//! wave), each launch a range of output intervals of about `LAUNCH_MS` (well inside the display
-//! watchdog), at most `MOST_INTERVALS`: each trajectory through them on its own, its records of the
-//! intervals summed per task at the launch's end. The tasks' sums come back per output and are
-//! merged per group in order, as the CPU's are.
+//! wave), each launch of about `LAUNCH_MS` (well inside the display watchdog) by a cycle budget: every trajectory on
+//! from where it stands, on its own, at most `MOST_INTERVALS` past the first interval not yet summed; a warp of cheap steps
+//! does not wait for one of dear ones. The intervals every slot has passed are summed per task after the launch; the
+//! tasks' sums come back per output and are merged per group in order, as the CPU's are.
 pub mod driver;
 pub mod program;
 pub mod ptx;
@@ -30,9 +30,10 @@ use crate::engine::{propagate,Settings,Trajectory};
 use crate::model::Model;
 use crate::stats::{Group,Sums};
 use crate::{bare_trajectory,dressed,Complex,Initial,Outcome,Stratum,Variates,STATES,TASK};
-use driver::{Buffer,Context,DeviceInfo,Function,Module,Stream};
+use driver::{Buffer,Context,DeviceInfo,Event,Function,HostWords,Module,Stream};
 use program::{Program,MAXM,MAXN,MOST_LISTED};
 use rayon::prelude::*;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64,Ordering};
 use std::sync::{Condvar,Mutex};
 use std::time::Instant;
@@ -62,8 +63,8 @@ pub(crate) const HARMONIC:usize=82;
 /// the jumps with the exact responses; of the jumps the point, the draws, the emission's direction and polarization,
 /// the kicks and the transient with the slow start; of the photons the matrices and the classes' weights, of the absorbed light
 /// its items and its beams; an exact evolution's nodes and products by a matrix, and of an exact step the segment's
-/// components, sizes and left-out beats and the panels' forces.
-pub const SPANS:[&str;32]=["point","generator","exponential","evolve","jump","exact","photons","absorption","loss","step","readout","windows","twin","total","advances","jumps","exact jumps","jump point","draw","emit","kick","transient","items","beams","matrices","weights","nodes","products","components","sizes","resolve","forces"];
+/// components and the panels' forces; a launch's load and store of the warp's state, and the launches.
+pub const SPANS:[&str;32]=["point","generator","exponential","evolve","jump","exact","photons","absorption","loss","step","readout","windows","twin","total","advances","jumps","exact jumps","jump point","draw","emit","kick","transient","items","beams","matrices","weights","nodes","products","components","forces","checkpoint","launches"];
 
 /// The times the process's GPU took to start (ms): the driver, the context, the module (the driver's
 /// JIT compile of the PTX at its first load on a machine, its cache after).
@@ -257,8 +258,10 @@ impl Gpu{
         let(free,_)=self.context.memory()?;
         Ok(((free/4).min(1<<29)/(WARPS*slot+8*w.outputs*RECORD)).max(1))
     }
-    /// One wave: blocks of `WARPS` slots (None: no trajectory), every output interval in launches of
-    /// about LAUNCH_MS -- the first a few steps, the next ones sized by the last's pace. The sums per
+    /// One wave: blocks of `WARPS` slots (None: no trajectory), its trajectories through every output interval in launches
+    /// of about LAUNCH_MS: the first a step per warp (its budget zero), each next one's budget the cycles the slowest warp's clock
+    /// made in the last per millisecond of it on the device, times LAUNCH_MS. Two launches stand in the stream at a time, each
+    /// reporting into its own words of host memory, so that the device does not wait for the host's turn between them. The sums per
     /// output of each run of tasks ([first task, tasks]), the samples kept per slot, the slots' final
     /// states, and the held twins' cycles and all the warps'.
     fn run(&self,program:&Program,w:&Windows,controls:&Controls,seed:u64,slots:&[Option<program::State>],runs:&[[i32;2]])->Result<(Vec<f64>,Vec<f64>,Vec<program::State>,[u64;2]),String>{
@@ -268,23 +271,36 @@ impl Gpu{
         let state_buffer=Buffer::with(&self.stream,&states)?;let task_buffer=Buffer::with(&self.stream,&tasks)?;
         let rings=Buffer::new(8*w.ring_stride*WARPS*n)?;let samples=Buffer::new(56*w.listed.len().max(1)*WARPS*n)?;
         let sums=Buffer::new(8*w.outputs*RECORD*n)?;let scratch=Buffer::new(8*program.scratch()*WARPS*n)?;let records=Buffer::new(8*MOST_INTERVALS*SLOT_RECORD*WARPS*n)?;
-        let profile=Buffer::new(if self.profiled.is_some(){8*SPANS.len()*WARPS*n}else{0})?;let costs=Buffer::new(16*WARPS*n)?;
-        self.stream.zero(&rings)?;self.stream.zero(&samples)?;self.stream.zero(&sums)?;self.stream.zero(&profile)?;self.stream.zero(&costs)?;
+        let profile=Buffer::new(if self.profiled.is_some(){8*SPANS.len()*WARPS*n}else{0})?;
+        // A launch's report per slot: the held twin's cycles, all its cycles, and the interval it stands in (a slot without a
+        // trajectory past them all, and it writes none).
+        let mut cycles:Vec<u64>=slots.iter().flat_map(|s|[0,0,if s.is_some(){0}else{u64::MAX}]).collect();
+        let reports=[HostWords::new(&cycles)?,HostWords::new(&cycles)?];
+        self.stream.zero(&rings)?;self.stream.zero(&samples)?;self.stream.zero(&sums)?;self.stream.zero(&profile)?;
         let mut run=program::Run{states:state_buffer.pointer,rings:rings.pointer,samples:samples.pointer,sums:sums.pointer,scratch:scratch.pointer,tasks:task_buffer.pointer,
             profile:if self.profiled.is_some(){profile.pointer}else{0},records:records.pointer,
-            harmonic:controls.harmonic.as_ref().map_or(0,|b|b.pointer),costs:costs.pointer,held:controls.held,
-            seed,outputs:w.outputs as i32,steps:w.steps as i32,reach:w.reach as i32,begin:0,end:0,half:w.half.map(|h|h as i32),ring:w.ring.map(|l|l as i32),
+            harmonic:controls.harmonic.as_ref().map_or(0,|b|b.pointer),costs:reports[0].address(),held:controls.held,
+            seed,budget:0,outputs:w.outputs as i32,steps:w.steps as i32,reach:w.reach as i32,begin:0,end:0,half:w.half.map(|h|h as i32),ring:w.ring.map(|l|l as i32),
             ring_at:w.ring_at.map(|x|x as i32),ring_stride:w.ring_stride as i32,scratch_stride:program.scratch() as i32,nlisted:w.listed.len() as i32,pad:0,listed:[0;MOST_LISTED]};
         for(k,&l)in w.listed.iter().enumerate(){run.listed[k]=l as i32;}
-        let mut begin=0;let mut chunk=8usize.div_ceil(w.steps).clamp(1,MOST_INTERVALS);
-        while begin<w.intervals{
-            run.begin=begin as i32;run.end=(begin+chunk).min(w.intervals) as i32;
-            let clock=Instant::now();
-            self.stream.launch(&self.motion,(WARPS*n) as u32,32,&[&program.params,&run])?;self.stream.launch(&self.sums,n as u32,(WARPS*32) as u32,&[&run])?;self.stream.synchronize()?;
-            let ms=clock.elapsed().as_secs_f64()*1e3;self.kernel_us.fetch_add((ms*1e3) as u64,Ordering::Relaxed);
-            let done=run.end as usize-begin;begin=run.end as usize;
-            chunk=((done as f64*LAUNCH_MS/ms.max(1e-3)).floor() as usize).clamp(1,(4*done).max(1)).min(MOST_INTERVALS);
+        let mut totals=[0u64;2];let(mut begin,mut launched)=(0,0usize);
+        let mut standing:VecDeque<(Event,Event,usize)>=VecDeque::new();let clock=Instant::now();
+        while begin<w.intervals||!standing.is_empty(){
+            while begin<w.intervals&&standing.len()<reports.len(){
+                run.begin=begin as i32;run.end=(begin+MOST_INTERVALS).min(w.intervals) as i32;run.costs=reports[launched%reports.len()].address();
+                let(start,end)=(Event::new()?,Event::new()?);
+                self.stream.record(&start)?;self.stream.launch(&self.motion,(WARPS*n) as u32,32,&[&program.params,&run])?;self.stream.record(&end)?;
+                standing.push_back((start,end,launched%reports.len()));launched+=1;
+            }
+            let(start,end,report)=standing.pop_front().unwrap();end.synchronize()?;
+            reports[report].read(&mut cycles);
+            let most=cycles.chunks_exact(3).fold(0,|m,c|{totals[0]+=c[0];totals[1]+=c[1];m.max(c[1])});
+            run.budget=(most as f64*LAUNCH_MS/end.since(&start)?.max(1e-3)) as i64;
+            // The intervals every slot has passed.
+            let done=cycles.chunks_exact(3).map(|c|c[2]).min().map_or(w.intervals,|d|(d.min(w.intervals as u64)) as usize);
+            if done>begin{let mut passed=run;passed.begin=begin as i32;passed.end=done as i32;self.stream.launch(&self.sums,n as u32,(WARPS*32) as u32,&[&passed])?;begin=done;}
         }
+        self.stream.synchronize()?;self.kernel_us.fetch_add((clock.elapsed().as_secs_f64()*1e6) as u64,Ordering::Relaxed);
         let mut merged=vec![0f64;w.outputs*RECORD*runs.len()];
         if !runs.is_empty(){
             let(run_buffer,out)=(Buffer::with(&self.stream,runs)?,Buffer::new(8*merged.len())?);let total=merged.len() as u32;
@@ -293,13 +309,11 @@ impl Gpu{
         }
         let mut kept=vec![0f64;7*w.listed.len()*WARPS*n];self.stream.download(&samples,&mut kept)?;
         let mut finished=vec![program::State::default();WARPS*n];self.stream.download(&state_buffer,&mut finished)?;
-        let mut cycles=vec![0u64;2*WARPS*n];self.stream.download(&costs,&mut cycles)?;
-        let costs=cycles.chunks_exact(2).fold([0u64;2],|s,c|[s[0]+c[0],s[1]+c[1]]);
         if let Some(spans)=&self.profiled{
             let mut counters=vec![0u64;SPANS.len()*WARPS*n];self.stream.download(&profile,&mut counters)?;
             let mut spans=spans.lock().unwrap_or_else(|e|e.into_inner());for(i,c)in counters.iter().enumerate(){spans[i%SPANS.len()]+=c;}
         }
-        Ok((merged,kept,finished,costs))
+        Ok((merged,kept,finished,totals))
     }
 }
 
@@ -369,7 +383,7 @@ impl program::State{
         program::State{q:along(t.r),p:along(t.kappa),time:t.time,logn,threshold:t.threshold,log_threshold:t.threshold.ln(),prefix:[0.;15],
             q0:along(settings.about_site(t.r)),p0:along(t.kappa),twin_logn,twin_threshold:twin.threshold,twin_log_threshold:twin.threshold.ln(),
             psi,twin:held,doppler:t.doppler as f32,cluster:t.cluster as i32,jumps:t.jumps as i32,death:if t.alive{-1}else{0},
-            index:t.index as u32,twin_cluster:twin.cluster as i32,twin_jumps:twin.jumps as i32,beats:t.beats as f32}
+            index:t.index as u32,twin_cluster:twin.cluster as i32,twin_jumps:twin.jumps as i32,beats:t.beats as f32,interval:0,step:-1}
     }
     /// The trajectory of a state: on the lab axes, ψ with its norm e^{ln‖ψ‖²/2} as the CPU keeps it.
     fn trajectory(&self,settings:&Settings,seed:u64)->Trajectory{

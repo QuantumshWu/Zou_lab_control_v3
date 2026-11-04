@@ -46,13 +46,21 @@ pub struct Term{kind:i32,row:i32,col:i32,carrier:i32,part:i32,mirror:i32,at:i32,
 /// state's place in the cluster, the ground state it lands in and its row in the target, its residual.
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Direct{state:i32,to:i32,row:i32,pad:i32,residual:f64}
-/// The kernel's `Fourth`: a cluster's fourth-order tables' places per carrier (−1: none).
-#[repr(C)]#[derive(Clone,Copy,Debug)]
-pub struct Fourth{
-    quartic:[[i32;MOST_CARRIERS];MOST_CARRIERS],quadratic:[i32;MOST_CARRIERS],rr:[i32;MOST_CARRIERS],yw:[i32;MOST_CARRIERS],
-    jumps:[[i32;MOST_CARRIERS];MOST_CARRIERS],p:[[i32;MOST_CARRIERS];MOST_CARRIERS],rr_all:[i32;MOST_CARRIERS],photons:[i32;MOST_CARRIERS],
-    on:i32,carriers:[i32;MOST_CARRIERS],pad:[i32;3],
-}
+/// The kernel's `Fourth`: where a cluster's fourth-order slabs lie (model.rs `FourthLayout`), and the carriers that bend its photons' state.
+#[repr(C)]#[derive(Clone,Copy,Default,Debug)]
+pub struct Fourth{quartic:i32,nquartic:i32,slow:i32,nslow:i32,jumps:i32,njumps:i32,factors:i32,nfactors:i32,bends:u32,pad:[i32;3]}
+/// The kernel's `Quartic` (model.rs `QuarticSlab`).
+#[repr(C)]#[derive(Clone,Copy,Default,Debug)]
+pub struct Quartic{fields:[i32;4],at:i32,parts:i32,nu:f64}
+/// The kernel's `Slow` (model.rs `SlowSlab`).
+#[repr(C)]#[derive(Clone,Copy,Default,Debug)]
+pub struct Slow{c1:i32,c2:i32,rr:i32,yw:i32,nu:f64}
+/// The kernel's `JumpTable` (model.rs `JumpSlab`).
+#[repr(C)]#[derive(Clone,Copy,Default,Debug)]
+pub struct JumpTable{photon:i32,inner:i32,at:i32,diagonal:i32,pairs:i32,npairs:i32}
+/// The kernel's `Factor` (model.rs `FourthLayout::p`).
+#[repr(C)]#[derive(Clone,Copy,Default,Debug)]
+pub struct Factor{c2:i32,c4:i32,at:i32,pad:i32}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Group{absorbed:i32,emitted:i32,hermitian:i32,pairs:i32,npairs:i32,s:i32,q:i32,count:i32,residual:f64}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
@@ -69,7 +77,7 @@ pub struct Channel{carrier:i32,col:i32,residual:f64}
 #[repr(C)]#[derive(Clone,Copy,Debug)]
 pub struct Params{
     beams:u64,beam_list:u64,carriers:u64,clusters:u64,groups:u64,pairs:u64,classes:u64,photons:u64,coherent:u64,channels:u64,carrier_tables:u64,tables:u64,
-    excited:u64,diagonal:u64,couplings:u64,emission:u64,class_rows:u64,fourths:u64,frames:u64,item_first:u64,items:u64,residuals:u64,
+    excited:u64,diagonal:u64,couplings:u64,emission:u64,class_rows:u64,fourths:u64,quartics:u64,quartic_parts:u64,slows:u64,jump_tables:u64,jump_pairs:u64,factors:u64,frames:u64,item_first:u64,items:u64,residuals:u64,
     units:u64,unit_beams:u64,unit_weights:u64,
     terms:u64,omegas:u64,group_parts:u64,residual_parts:u64,excited_list:u64,directs:u64,levels:u64,level_first:u64,decay_root:u64,
     kept:u64,decay:u64,near_units:u64,unit_couplings:u64,vias:u64,via_first:u64,ground_block:u64,term_floor:u64,powers:u64,
@@ -96,6 +104,7 @@ pub struct State{
     pub(crate) q0:[f64;3],pub(crate) p0:[f64;3],pub(crate) twin_logn:f64,pub(crate) twin_threshold:f64,pub(crate) twin_log_threshold:f64,
     pub(crate) psi:[[f32;2];MAXM],pub(crate) twin:[[f32;2];MAXN],pub(crate) doppler:f32,pub(crate) cluster:i32,pub(crate) jumps:i32,pub(crate) death:i32,
     pub(crate) index:u32,pub(crate) twin_cluster:i32,pub(crate) twin_jumps:i32,pub(crate) beats:f32,
+    pub(crate) interval:i32,pub(crate) step:i32,
 }
 /// The kernel's `Held`: the held twin's device data (all zero: no twin).
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
@@ -104,7 +113,7 @@ pub struct Held{pub(crate) u:u64,pub(crate) h:u64,pub(crate) l:u64,pub(crate) re
 #[repr(C)]#[derive(Clone,Copy,Debug)]
 pub struct Run{
     pub(crate) states:u64,pub(crate) rings:u64,pub(crate) samples:u64,pub(crate) sums:u64,pub(crate) scratch:u64,pub(crate) tasks:u64,pub(crate) profile:u64,
-    pub(crate) records:u64,pub(crate) harmonic:u64,pub(crate) costs:u64,pub(crate) held:Held,pub(crate) seed:u64,
+    pub(crate) records:u64,pub(crate) harmonic:u64,pub(crate) costs:u64,pub(crate) held:Held,pub(crate) seed:u64,pub(crate) budget:i64,
     pub(crate) outputs:i32,pub(crate) steps:i32,pub(crate) reach:i32,pub(crate) begin:i32,pub(crate) end:i32,
     pub(crate) half:[i32;3],pub(crate) ring:[i32;3],pub(crate) ring_at:[i32;3],
     pub(crate) ring_stride:i32,pub(crate) scratch_stride:i32,pub(crate) nlisted:i32,pub(crate) pad:i32,
@@ -113,7 +122,7 @@ pub struct Run{
 
 impl Run{
     /// A launch of no wave (a check's entry, `Gpu::jump_probe`): every buffer null, the seed zero.
-    pub(crate) fn empty()->Run{Run{states:0,rings:0,samples:0,sums:0,scratch:0,tasks:0,profile:0,records:0,harmonic:0,costs:0,held:Held::default(),seed:0,
+    pub(crate) fn empty()->Run{Run{states:0,rings:0,samples:0,sums:0,scratch:0,tasks:0,profile:0,records:0,harmonic:0,costs:0,held:Held::default(),seed:0,budget:0,
         outputs:0,steps:0,reach:0,begin:0,end:0,half:[0;3],ring:[0;3],ring_at:[0;3],ring_stride:0,scratch_stride:0,nlisted:0,pad:0,listed:[0;MOST_LISTED]}}
 }
 
@@ -145,9 +154,6 @@ impl Program{
         if let Some(k)=(0..model.clusters()).find(|&k|(model.mixed(k)||model.beating(k))&&model.dimension(k)>MAXM){
             return Err(beyond(format!("子空间 {} 个态（{} 个激发态显式）超出精确步的 {MAXM} 个",model.dimension(k),model.dimension(k)-model.ground_dimension(k))));}
         if let Some(k)=(0..model.clusters()).find(|&k|1+model.beats(k).0.len()>MOST_PARTS){return Err(beyond(format!("子空间 {} 的 {} 个残余拍频",k,model.beats(k).0.len()/2)));}
-        // The fourth order's tables are fourth2's slabs now (model.rs `FourthLayout`), which the kernel does
-        // not read yet: a fourth-order model stays on the CPU until it does.
-        if model.fourth{return Err(beyond("四阶折叠".into()));}
         if model.geometry.len()>MOST_BEAMS||model.carriers.len()>MOST_CARRIERS||model.focused.len()>MOST_FOCUSED{return Err(beyond("光束或强度维度太多".into()));}
         if let Some(c)=g.clusters.iter().find(|c|c.states.len()>MAXN||c.classes.len()>MOST_CLASSES){return Err(beyond(format!("子空间 {} 个态、{} 类光子",c.states.len(),c.classes.len())));}
         let hm=model.hbar_over_mass;
@@ -174,7 +180,8 @@ impl Program{
         let nodes=model.tables.nodes;let points=nodes.pow(model.focused.len() as u32);
         let(mut clusters,mut groups,mut pairs,mut classes,mut photons,mut class_rows,mut coherent,mut channels,mut carrier_tables,mut tables)=
             (vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![]);
-        let(fourths,mut frames,weights):(Vec<Fourth>,Vec<f64>,usize)=(vec![],vec![],0);
+        let(mut fourths,mut frames,mut weights):(Vec<Fourth>,Vec<f64>,usize)=(vec![],vec![],0);
+        let(mut quartics,mut quartic_parts,mut slows,mut jump_tables,mut jump_pairs,mut factors):(Vec<Quartic>,Vec<i32>,Vec<Slow>,Vec<JumpTable>,Vec<i32>,Vec<Factor>)=(vec![],vec![],vec![],vec![],vec![],vec![]);
         let(mut item_first,mut items,mut residuals):(Vec<i32>,Vec<[i32;4]>,Vec<f64>)=(vec![],vec![],vec![]);
         let(mut terms,mut omegas,mut group_parts,mut residual_parts,mut excited_list,mut directs):(Vec<Term>,Vec<f64>,Vec<i32>,Vec<i32>,Vec<i32>,Vec<Direct>)=(vec![],vec![],vec![],vec![],vec![],vec![]);
         // The exact step's room in a trajectory's scratch: per cluster its parts' H and G, their working
@@ -210,8 +217,26 @@ impl Program{
             terms.extend(list.iter().zip(&u).map(|(t,u)|Term{kind:t[0] as i32,row:t[1] as i32,col:t[2] as i32,carrier:t[3] as i32,part:t[4] as i32,mirror:t[5] as i32,at:t[6] as i32,pad:0,
                 u:u.map(|z|[z.re as f32,z.im as f32])}));
             group_parts.extend(layout.groups.iter().map(|gl|model.part(k,gl.residual) as i32));
-            // Its frames (its fourth-order tables: none the kernel reads yet, the model refused above).
+            // Its frames and its fourth-order slabs.
             cluster.frames=frames.len() as i32;frames.extend(&cl.frames);
+            if let Some(f)=&layout.fourth{
+                let code=|i:usize|{let(c,k)=f.fields[i];(c*MOST_RANK+k) as i32};
+                cluster.fourth=fourths.len() as i32;
+                fourths.push(Fourth{quartic:quartics.len() as i32,nquartic:f.quartic.len() as i32,slow:slows.len() as i32,nslow:f.slow.len() as i32,jumps:jump_tables.len() as i32,njumps:f.jumps.len() as i32,
+                    factors:factors.len() as i32,nfactors:f.p.len() as i32,bends:f.carriers.iter().fold(0,|m,&c|m|1<<c),pad:[0;3]});
+                for q in &f.quartic{
+                    quartics.push(Quartic{fields:[code(q.conj.0),code(q.conj.1),code(q.plain.0),code(q.plain.1)],at:q.at as i32,parts:quartic_parts.len() as i32,nu:q.nu});
+                    quartic_parts.extend((0..n*n).map(|i|if q.keep[i]{q.part[i] as i32}else{-1}));
+                }
+                slows.extend(f.slow.iter().map(|x|Slow{c1:x.carriers.0 as i32,c2:x.carriers.1 as i32,rr:x.rr as i32,yw:x.yw as i32,nu:x.nu}));
+                factors.extend(f.p.iter().map(|&(c2,c4,_,at)|Factor{c2:c2 as i32,c4:c4 as i32,at:at as i32,pad:0}));
+                for j in &f.jumps{
+                    jump_tables.push(JumpTable{photon:j.photon as i32,inner:j.inner as i32,at:j.at as i32,diagonal:j.diagonal as i32,pairs:jump_pairs.len() as i32,npairs:j.pairs.len() as i32});
+                    jump_pairs.extend(j.pairs.iter().map(|&i|i as i32));
+                }
+                // The jump tables' weights and the middle factors' forms (the kernel's `fourth_weights`).
+                weights=weights.max((f.jumps.len()+f.p.len())*GROUND*n);
+            }
             let data=&model.tables.data[k];assert_eq!(data.len(),2*points*layout.size);
             tables.extend(data.chunks_exact(2).map(|z|[z[0] as f32,z[1] as f32]));
             for gl in &layout.groups{
@@ -327,7 +352,7 @@ impl Program{
             beams:put!(beams),beam_list:put!(beam_list),carriers:put!(carriers),clusters:put!(clusters),groups:put!(groups),pairs:put!(pairs),classes:put!(classes),
             photons:put!(photons),coherent:put!(coherent),channels:put!(channels),carrier_tables:put!(carrier_tables),tables:put!(tables),
             excited:put!(excited),diagonal:put!(diagonal),couplings:put!(couplings),emission:put!(emission),class_rows:put!(class_rows),
-            fourths:if fourths.is_empty(){0}else{put!(fourths)},frames:put!(frames),
+            fourths:if fourths.is_empty(){0}else{put!(fourths)},quartics:put!(quartics),quartic_parts:put!(quartic_parts),slows:put!(slows),jump_tables:put!(jump_tables),jump_pairs:put!(jump_pairs),factors:put!(factors),frames:put!(frames),
             item_first:put!(item_first),items:put!(if items.is_empty(){vec![[0;4]]}else{items}),residuals:put!(if residuals.is_empty(){vec![0.]}else{residuals}),
             units:put!(units),unit_beams:put!(unit_beams),unit_weights:put!(unit_weights),
             terms:put!(if terms.is_empty(){vec![Term::default()]}else{terms}),omegas:put!(omegas),group_parts:put!(if group_parts.is_empty(){vec![0]}else{group_parts}),
