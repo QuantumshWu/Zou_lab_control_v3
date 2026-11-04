@@ -879,12 +879,11 @@ fn cut(ledger:&Ledger)->f64{ledger.items.iter().find(|i|i.label==CUT).map_or(0.,
 /// converges, S ≲ 0.5 -- beyond, the charge exceeds the target and the rule keeps the drives).
 fn fold_charge(model:&Model,saturation:f64)->f64{fold_charges(model.fourth,saturation)[0]}
 /// The fold's charges per target, the populations' (`fold_charge`) and T's, for the saturation S its folded drives meet at
-/// second or fourth order: T's is 2S at either -- T is the ratio of the momentum diffusion and the friction, each a rate or a
-/// force's gradient of the fold's error S, and the force folds at second order (engine.rs # Absorption, both models on one kick:
+/// second or fourth order: T's is S at either -- the force folds at second order. T is the ratio of the momentum diffusion and the friction, each of the fold's error S, so the moving PGC's z below exceeds it; its charge comes with the rooms' combination of errors (engine.rs # Absorption, both models on one kick:
 /// the explicit states' T against the all-folded T, second-half means over 1 ms on the axes above 4ħω: a tetrahedral MOT's z
 /// +0.03 ± 0.7 % and x +0.6 ± 1.7 % at S = 2.1 %; the moving 3D PGC's x −2.2 ± 0.8 % and z +5.2 ± 1.0 % at S = 2.05 %; a gray
 /// molasses's z +1.4 ± 4.9 % and x −1.6 ± 2.4 % at S = 3.4 %).
-fn fold_charges(fourth:bool,saturation:f64)->[f64;2]{[if fourth{saturation*saturation}else{saturation},2.*saturation]}
+fn fold_charges(fourth:bool,saturation:f64)->[f64;2]{[if fourth{saturation*saturation}else{saturation},saturation]}
 /// The targets in the order of the rooms: the populations' (absolute) and T's (relative).
 const TARGETS:[f64;2]=[POPULATION_TARGET,TEMPERATURE_TARGET];
 
