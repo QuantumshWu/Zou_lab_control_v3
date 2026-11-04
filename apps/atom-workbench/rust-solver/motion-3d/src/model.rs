@@ -222,11 +222,11 @@ pub struct Carrier{
 /// beyond its share (`kept`), and while the tables are refined at `w` per pair its W^S and W^Q on the entries.
 #[derive(Clone,Debug)]
 pub(crate) struct GroupLayout{pub(crate) absorbed:usize,pub(crate) emitted:usize,pub(crate) residual:f64,pub(crate) hermitian:bool,pub(crate) pairs:Vec<(usize,usize)>,pub(crate) entries:Vec<(usize,usize)>,pub(crate) s:usize,pub(crate) q:usize,
-    pub(crate) decay:bool,first:Vec<(usize,usize)>,transfer:usize,kept:Vec<Kept>,w:usize}
+    pub(crate) decay:bool,pub(crate) first:Vec<(usize,usize)>,pub(crate) transfer:usize,pub(crate) kept:Vec<Kept>,w:usize}
 /// What the first order's transfer leaves of one field pair (k′, k) beyond its share (`Model::transfer_tables`): the entries (row, column)
 /// and where their W^S − λ^S Q, then their W^Q − λ^Q Q lie.
 #[derive(Clone,Debug)]
-struct Kept{pair:(usize,usize),entries:Vec<(usize,usize)>,at:usize}
+pub(crate) struct Kept{pub(crate) pair:(usize,usize),pub(crate) entries:Vec<(usize,usize)>,pub(crate) at:usize}
 /// Where a carrier's photon tables lie: J and J2 (3 axes × rank × ng × n0) and T (rank × ne × n0),
 /// on the cluster's n0 ground states.
 #[derive(Clone,Copy,Debug)]
@@ -1525,6 +1525,8 @@ impl Model{
     /// A cluster's beats (rad/us), ascending and closed under negation, and their common period (us)
     /// where they are harmonics of one frequency.
     pub fn beats(&self,cluster:usize)->(&[f64],Option<f64>){let b=&self.layouts[cluster].beats;(&b.omegas,b.period)}
+    /// The entries of a cluster's groups the first order's transfer leaves (`transfer_tables`).
+    pub fn kept_entries(&self,cluster:usize)->usize{self.layouts[cluster].groups.iter().map(|g|g.kept.iter().map(|k|k.entries.len()).sum::<usize>()).sum()}
     /// A cluster's number of ground states (the first of its basis).
     pub fn ground_dimension(&self,cluster:usize)->usize{self.layouts[cluster].n0}
     /// The part of a cluster's components a residual goes into (`components`): 0 the static one, 1 + j beat j's.
@@ -1532,13 +1534,13 @@ impl Model{
     /// A cluster's terms of its explicit states for the GPU's components (gpu/program.rs `Term`), in
     /// `components`' order: per kept drive (kind 0), decay cross term (1), decay (2) and dressing's drive
     /// (3) its row, column, carrier, part, its mirror's part (the residual's negative), its tables' place
-    /// and a drive's U_k; and where the explicit states' dressed photons lie (`photon`).
-    pub(crate) fn exact_terms(&self,cluster:usize)->(Vec<[usize;7]>,Vec<[Complex;MOST_RANK]>,usize){
+    /// (a cross term's X_k, then its X2_k's) and a drive's U_k; and where the explicit states' dressed photons lie (`photon`).
+    pub(crate) fn exact_terms(&self,cluster:usize)->(Vec<[usize;8]>,Vec<[Complex;MOST_RANK]>,usize){
         let l=&self.layouts[cluster];let part=|w:f64|self.part(cluster,w);let(mut terms,mut u)=(vec![],vec![]);
-        for d in &l.drives{terms.push([0,d.row,d.col,d.carrier,part(d.residual),part(-d.residual),0]);u.push(d.u);}
-        for c in &l.crosses{terms.push([1,c.row,c.col,c.carrier,part(c.residual),part(-c.residual),c.at]);u.push([Complex::ZERO;MOST_RANK]);}
-        for d in &l.decays{terms.push([2,d.row,d.col,0,part(d.residual),part(-d.residual),d.at]);u.push([Complex::ZERO;MOST_RANK]);}
-        for e in &l.effective{terms.push([3,e.row,e.col,e.carrier,part(e.residual),part(-e.residual),e.at]);u.push([Complex::ZERO;MOST_RANK]);}
+        for d in &l.drives{terms.push([0,d.row,d.col,d.carrier,part(d.residual),part(-d.residual),0,0]);u.push(d.u);}
+        for c in &l.crosses{terms.push([1,c.row,c.col,c.carrier,part(c.residual),part(-c.residual),c.at,c.at2]);u.push([Complex::ZERO;MOST_RANK]);}
+        for d in &l.decays{terms.push([2,d.row,d.col,0,part(d.residual),part(-d.residual),d.at,0]);u.push([Complex::ZERO;MOST_RANK]);}
+        for e in &l.effective{terms.push([3,e.row,e.col,e.carrier,part(e.residual),part(-e.residual),e.at,0]);u.push([Complex::ZERO;MOST_RANK]);}
         (terms,u,l.emission)
     }
 

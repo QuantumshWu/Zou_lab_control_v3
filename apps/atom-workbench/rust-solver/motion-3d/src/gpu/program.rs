@@ -18,10 +18,19 @@ pub const MOST_PARTS:usize=32;
 pub const NE:usize=24;
 pub const MOST_CLASSES:usize=32;
 pub const MOST_LISTED:usize=32;
+/// A cluster's most field pairs with a first order in the kinetic shifts in the generator of a static one (the kernel's `Warp::first`; the exact step's table lies in its room)
+/// and what a table holds per pair, in float2.
+pub const MOST_FIRST:usize=25;
+const FIRST_PAIR:usize=5;
+/// A mirror item's role and where the rest of an item's fourth word starts (the kernel's ITEM_*).
+const ITEM_ADJOINT:i32=1;
+const ITEM_FIRST:i32=2;
+const ITEM_KEPT:i32=3;
+const ITEM_PAIR:i32=2;
 
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Beam{
-    direction:[f32;3],k:f32,wave:[f32;3],inv_w2:f32,inv_rayleigh:f32,recoil:f32,inv_pole:f32,trap:i32,
+    direction:[f32;3],k:f32,wave:[f32;3],inv_w2:f32,inv_rayleigh:f32,recoil:f32,inv_pole:f32,half_pole:f32,trap:i32,
     carrier:i32,near:i32,coupled:u32,coefficients:[[f32;2];MOST_RANK],
 }
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
@@ -31,7 +40,7 @@ pub struct Carrier{rank:i32,beams:i32,first:i32,couples:u32,detuning:f64,wave:f6
 pub struct Unit{first:i32,count:i32,norm:f32,focus:f32,profile:f32,pad:i32}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Cluster{n:i32,size:i32,table:i32,h0:i32,groups:i32,ngroups:i32,classes:i32,nclasses:i32,coherent:i32,ncoherent:i32,carriers:i32,fourth:i32,frames:i32,
-    positions:i32,beats:i32,nbeats:i32,n0:i32,exact:i32,parts:i32,omegas:i32,terms:i32,nterms:i32,emission:i32,excited:i32,group_parts:i32,residual_parts:i32,states:[i32;MAXM],
+    positions:i32,beats:i32,nbeats:i32,n0:i32,exact:i32,parts:i32,omegas:i32,terms:i32,nterms:i32,emission:i32,excited:i32,group_parts:i32,residual_parts:i32,first_fields:i32,nfirst:i32,states:[i32;MAXM],
     shifts:u64,mixed:u32,pad:i32}
 /// The kernel's `NearUnit` (ground.rs `NearUnit`): its carrier, its place among the focused units (−1: at its
 /// focus intensity), N and s(0).
@@ -39,9 +48,9 @@ pub struct Cluster{n:i32,size:i32,table:i32,h0:i32,groups:i32,ngroups:i32,classe
 pub struct NearUnit{carrier:i32,focused:i32,norm:f32,focus:f32}
 /// The kernel's `Term`: a term of a cluster's explicit states (model.rs `exact_terms`): a kept drive (0), a
 /// decay cross term (1), a decay (2) or a dressing's drive (3), its row, column, carrier, part, its
-/// mirror's part, its tables' place, a drive's U_k.
+/// mirror's part, its tables' place (a cross term's X_k, and at `at2` its X2_k), a drive's U_k.
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
-pub struct Term{kind:i32,row:i32,col:i32,carrier:i32,part:i32,mirror:i32,at:i32,pad:i32,u:[[f32;2];MOST_RANK]}
+pub struct Term{kind:i32,row:i32,col:i32,carrier:i32,part:i32,mirror:i32,at:i32,at2:i32,u:[[f32;2];MOST_RANK]}
 /// The kernel's `Direct`: a class's photon from an explicit state (ground.rs `Class::direct`): its
 /// state's place in the cluster, the ground state it lands in and its row in the target, its residual.
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
@@ -62,7 +71,10 @@ pub struct JumpTable{photon:i32,inner:i32,at:i32,diagonal:i32,pairs:i32,npairs:i
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Factor{c2:i32,c4:i32,at:i32,pad:i32}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
-pub struct Group{absorbed:i32,emitted:i32,hermitian:i32,pairs:i32,npairs:i32,s:i32,q:i32,count:i32,residual:f64}
+pub struct Group{absorbed:i32,emitted:i32,hermitian:i32,pairs:i32,npairs:i32,s:i32,q:i32,count:i32,first:i32,pad:i32,residual:f64}
+/// The kernel's `FirstField`: a field pair of a group with a first order: its transfer's place, its fields and carriers, its beat.
+#[repr(C)]#[derive(Clone,Copy,Default,Debug)]
+pub struct FirstField{transfer:i32,kind:i32,residual:f64}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Class{target:i32,photons:i32,nphotons:i32,carriers:i32,rows:i32,direct:i32,ndirect:i32,pad:i32,wave_number:f64}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
@@ -80,7 +92,7 @@ pub struct Params{
     excited:u64,diagonal:u64,couplings:u64,emission:u64,class_rows:u64,fourths:u64,quartics:u64,quartic_parts:u64,slows:u64,jump_tables:u64,jump_pairs:u64,factors:u64,frames:u64,item_first:u64,items:u64,residuals:u64,
     units:u64,unit_beams:u64,unit_weights:u64,
     terms:u64,omegas:u64,group_parts:u64,residual_parts:u64,excited_list:u64,directs:u64,levels:u64,level_first:u64,decay_root:u64,
-    kept:u64,decay:u64,near_units:u64,unit_couplings:u64,vias:u64,via_first:u64,ground_block:u64,term_floor:u64,powers:u64,
+    kept:u64,decay:u64,near_units:u64,unit_couplings:u64,vias:u64,via_first:u64,ground_block:u64,term_floor:u64,powers:u64,first_fields:u64,
     nbeams:i32,pub(crate) ncarriers:i32,nclusters:i32,focused:i32,nodes:i32,fields:i32,pub(crate) nnear:i32,doppler:i32,loss:i32,weights:i32,nunits:i32,
     exact_at:i32,transient_at:i32,nlevels:i32,rows_at:i32,between_at:i32,
     focused_unit:[i32;MOST_FOCUSED],stride:[i32;MOST_FOCUSED],
@@ -138,7 +150,7 @@ pub fn layout()->[u32;26]{
 
 /// The model on the device: the kernel's parameters, the buffers they point into, and the most
 /// photons of a cluster's jumps.
-pub struct Program{pub params:Params,photons:usize,weights:usize,exact:usize,transient:usize,rows:usize,between:usize,_buffers:Vec<Buffer>}
+pub struct Program{pub params:Params,photons:usize,weights:usize,pub(crate) exact:usize,transient:usize,rows:usize,between:usize,_buffers:Vec<Buffer>}
 
 fn c32(z:Complex)->[f32;2]{[z.re as f32,z.im as f32]}
 
@@ -164,9 +176,9 @@ impl Program{
         let beams:Vec<Beam>=model.geometry.iter().enumerate().map(|(l,geometry)|{
             let k=geometry.wave_number;let(inv_w2,inv_rayleigh)=match geometry.waist{Some(w)=>(1./(w*w),2./(k*w*w)),None=>(0.,0.)};
             let mut beam=Beam{direction:geometry.direction.map(|x|x as f32),k:k as f32,wave:geometry.wave_vector().map(|x|x as f32),inv_w2:inv_w2 as f32,
-                inv_rayleigh:inv_rayleigh as f32,recoil:(0.5*hm*k*k) as f32,inv_pole:0.,trap:model.trap_beams.contains(&l) as i32,carrier:-1,near:-1,coupled:0,coefficients:[[0.;2];MOST_RANK]};
+                inv_rayleigh:inv_rayleigh as f32,recoil:(0.5*hm*k*k) as f32,inv_pole:0.,half_pole:0.,trap:model.trap_beams.contains(&l) as i32,carrier:-1,near:-1,coupled:0,coefficients:[[0.;2];MOST_RANK]};
             if let Some((c,j))=owner[l]{
-                let pole=g.poles[c];beam.inv_pole=if pole>0.&&pole.is_finite(){(1./pole) as f32}else{0.};
+                let pole=g.poles[c];beam.inv_pole=if pole>0.&&pole.is_finite(){(1./pole) as f32}else{0.};beam.half_pole=(0.5*pole) as f32;
                 beam.carrier=c as i32;beam.near=near;near+=1;
                 for b in (0..ng).filter(|&b|g.couples(c,b)){if (0..ne).any(|i|g.couplings[l][(i,b)]!=Complex::ZERO){beam.coupled|=1<<b;}}
                 for k in 0..model.carriers[c].rank{beam.coefficients[k]=c32(model.carriers[c].coefficients[j][k]);}
@@ -184,8 +196,9 @@ impl Program{
         let(mut quartics,mut quartic_parts,mut slows,mut jump_tables,mut jump_pairs,mut factors):(Vec<Quartic>,Vec<i32>,Vec<Slow>,Vec<JumpTable>,Vec<i32>,Vec<Factor>)=(vec![],vec![],vec![],vec![],vec![],vec![]);
         let(mut item_first,mut items,mut residuals):(Vec<i32>,Vec<[i32;4]>,Vec<f64>)=(vec![],vec![],vec![]);
         let(mut terms,mut omegas,mut group_parts,mut residual_parts,mut excited_list,mut directs):(Vec<Term>,Vec<f64>,Vec<i32>,Vec<i32>,Vec<i32>,Vec<Direct>)=(vec![],vec![],vec![],vec![],vec![],vec![]);
+        let mut first_fields:Vec<FirstField>=vec![];
         // The exact step's room in a trajectory's scratch: per cluster its parts' H and G, their working
-        // room and its norms (the kernel's `exact_segment`), the largest of every cluster's where one takes it.
+        // room and its norms (the kernel's `exact_segment`) and its first orders' table, the largest of every cluster's where one takes it.
         let takes=(0..model.clusters()).any(|k|model.mixed(k)||model.beating(k));let mut exact=0;
         // The carriers whose static block on a cluster mixes its responses (ground.rs `Ground::unmixed`, the kernel's
         // `carrier_responses`), bits; and the near light's shifts ΔE_a^d a cluster's exact responses take (`exact_responses`,
@@ -204,17 +217,16 @@ impl Program{
             bits};
         for(k,(layout,cl))in model.layouts.iter().zip(&g.clusters).enumerate(){
             let parts=1+model.beats(k).0.len();let(n,n0)=(layout.n,layout.n0);
-            if takes{exact=exact.max((5*parts+4)*n*n+4*parts);}
             let(list,u,emission)=model.exact_terms(k);
             let mut cluster=Cluster{n:n as i32,size:layout.size as i32,table:(tables.len()) as i32,h0:layout.h0 as i32,groups:groups.len() as i32,ngroups:layout.groups.len() as i32,
                 classes:classes.len() as i32,nclasses:cl.classes.len() as i32,coherent:coherent.len() as i32,ncoherent:cl.coherent.len() as i32,carriers:carrier_tables.len() as i32,
                 fourth:-1,frames:0,positions:item_first.len() as i32,beats:residuals.len() as i32,nbeats:0,n0:n0 as i32,exact:(model.mixed(k)||model.beating(k)) as i32,
                 parts:parts as i32,omegas:omegas.len() as i32,terms:terms.len() as i32,nterms:list.len() as i32,emission:emission as i32,excited:excited_list.len() as i32,
-                group_parts:group_parts.len() as i32,residual_parts:residual_parts.len() as i32,states:[0;MAXM],shifts:shifts(k,&cl.states),mixed:mixed(k,&cl.states),pad:0};
+                group_parts:group_parts.len() as i32,residual_parts:residual_parts.len() as i32,first_fields:first_fields.len() as i32,nfirst:0,states:[0;MAXM],shifts:shifts(k,&cl.states),mixed:mixed(k,&cl.states),pad:0};
             for(x,&b)in cl.states.iter().enumerate(){cluster.states[x]=b as i32;}
             // Its beats, its explicit states and its terms (model.rs `exact_terms`).
             omegas.extend(model.beats(k).0);excited_list.extend(cl.excited.iter().map(|&e|e as i32));
-            terms.extend(list.iter().zip(&u).map(|(t,u)|Term{kind:t[0] as i32,row:t[1] as i32,col:t[2] as i32,carrier:t[3] as i32,part:t[4] as i32,mirror:t[5] as i32,at:t[6] as i32,pad:0,
+            terms.extend(list.iter().zip(&u).map(|(t,u)|Term{kind:t[0] as i32,row:t[1] as i32,col:t[2] as i32,carrier:t[3] as i32,part:t[4] as i32,mirror:t[5] as i32,at:t[6] as i32,at2:t[7] as i32,
                 u:u.map(|z|[z.re as f32,z.im as f32])}));
             group_parts.extend(layout.groups.iter().map(|gl|model.part(k,gl.residual) as i32));
             // Its frames and its fourth-order slabs.
@@ -239,29 +251,46 @@ impl Program{
             }
             let data=&model.tables.data[k];assert_eq!(data.len(),2*points*layout.size);
             tables.extend(data.chunks_exact(2).map(|z|[z[0] as f32,z[1] as f32]));
-            for gl in &layout.groups{
+            // Per group 1 + its first pair's place among the cluster's field pairs with a first order (the kernel's `first_table`), its other pairs after it; 0 without one.
+            let first_of:Vec<usize>=layout.groups.iter().map(|gl|{
+                if gl.first.is_empty(){return 0;}
+                let place=1+first_fields.len()-cluster.first_fields as usize;
+                first_fields.extend(gl.pairs.iter().map(|&(k1,k)|FirstField{transfer:gl.transfer as i32,kind:(k1|k<<2|gl.absorbed<<4|gl.emitted<<7|(gl.hermitian as usize)<<10) as i32,residual:gl.residual}));place}).collect();
+            cluster.nfirst=first_fields.len() as i32-cluster.first_fields;
+            if cluster.exact==0&&cluster.nfirst as usize>MOST_FIRST{return Err(beyond(format!("子空间的 {} 个光场对带一阶多普勒项",cluster.nfirst)));}
+            if takes{exact=exact.max((5*parts+4)*n*n+4*parts+FIRST_PAIR*cluster.nfirst as usize);}
+            for(gl,&first)in layout.groups.iter().zip(&first_of){
                 groups.push(Group{absorbed:gl.absorbed as i32,emitted:gl.emitted as i32,hermitian:gl.hermitian as i32,pairs:pairs.len() as i32,npairs:gl.pairs.len() as i32,
-                    s:gl.s as i32,q:gl.q as i32,count:gl.entries.len() as i32,residual:gl.residual});
+                    s:gl.s as i32,q:gl.q as i32,count:gl.entries.len() as i32,first:first as i32,pad:0,residual:gl.residual});
                 pairs.extend(gl.pairs.iter().map(|&(k1,k)|[k1 as i32,k as i32]));
             }
-            // The sparse groups' entries by the place they land at (model.rs `scatter`): per place, in the
-            // groups' and pairs' order, (S's place, Q's place, kind, 0) -- the kernel's `items` -- and from
-            // a pair standing for two its adjoint at the mirror place; their beats.
-            let n=layout.n;let mut places:Vec<Vec<[i32;4]>>=vec![vec![];n*n];let mut beats:Vec<f64>=vec![];
-            for gl in layout.groups.iter().filter(|g|g.entries.len()<n*n){
+            // The kernel's `items`, per place three lists in the groups' and pairs' order, each item (S's place, Q's place, kind, role and the pair's place):
+            // 0 the sparse groups' entries that land there (model.rs `scatter`); 1 what the first order's transfer leaves of any group there, its ΔW^S and ΔW^Q in the two places;
+            // 2 at their mirrors: of a pair standing for two its adjoint, of a pair between two carriers with a first order that first order's adjoint, of 1 its adjoint. Their beats.
+            let n=layout.n;let mut places:Vec<[Vec<[i32;4]>;3]>=vec![[vec![],vec![],vec![]];n*n];let mut beats:Vec<f64>=vec![];
+            for(gl,&first)in layout.groups.iter().zip(&first_of).filter(|(g,_)|g.entries.len()<n*n||!g.kept.is_empty()){
                 let beat=match beats.iter().position(|&w|w==gl.residual){Some(b)=>b,None=>{beats.push(gl.residual);beats.len()-1}};
-                for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
-                    let twice=gl.hermitian&&k1<k;let kind=(k1|k<<2|gl.absorbed<<4|gl.emitted<<7|(twice as usize)<<10|beat<<12) as i32;
+                let kind=|k1:usize,k:usize,twice:bool|(k1|k<<2|gl.absorbed<<4|gl.emitted<<7|(twice as usize)<<10|beat<<12) as i32;
+                if gl.entries.len()<n*n{for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
+                    let twice=gl.hermitian&&k1<k;let kind=kind(k1,k,twice);let pair=if first>0{((first+pi) as i32)<<ITEM_PAIR}else{0};
                     for(j,&(a,b))in gl.entries.iter().enumerate(){
-                        let at=(pi*gl.entries.len()+j) as i32;let item=[gl.s as i32+at,gl.q as i32+at,kind,0];
-                        places[a*n+b].push(item);if twice{places[b*n+a].push([item[0],item[1],kind|1<<11,0]);}
+                        let at=(pi*gl.entries.len()+j) as i32;let(s,q)=(gl.s as i32+at,gl.q as i32+at);
+                        places[a*n+b][0].push([s,q,kind,pair]);
+                        if twice{places[b*n+a][2].push([s,q,kind,ITEM_ADJOINT|pair]);}else if first>0&&!gl.hermitian{places[b*n+a][2].push([s,q,kind,ITEM_FIRST|pair]);}
+                    }
+                }}
+                for kept in &gl.kept{
+                    let kind=kind(kept.pair.0,kept.pair.1,false);let count=kept.entries.len();
+                    for(j,&(x,y))in kept.entries.iter().enumerate(){
+                        let(s,q)=((kept.at+j) as i32,(kept.at+count+j) as i32);
+                        places[x*n+y][1].push([s,q,kind,0]);places[y*n+x][2].push([s,q,kind,ITEM_KEPT]);
                     }
                 }
             }
             if beats.len()>64{return Err(beyond(format!("子空间的稀疏组有 {} 个剩余拍频",beats.len())));}
             residual_parts.extend(beats.iter().map(|&w|model.part(k,w) as i32));
             cluster.nbeats=beats.len() as i32;residuals.extend(beats);
-            for place in places{item_first.push(items.len() as i32);items.extend(place);}
+            for list in places.into_iter().flatten(){item_first.push(items.len() as i32);items.extend(list);}
             item_first.push(items.len() as i32);
             // A class's photons by the row they land in and their carrier (each row's photons one run,
             // each carrier's a run within it), and where each row's run starts.
@@ -360,7 +389,7 @@ impl Program{
             directs:put!(if directs.is_empty(){vec![Direct::default()]}else{directs}),levels:put!(levels),level_first:put!(level_first),decay_root:put!(decay_root),
             kept:put!(kept),decay:put!(decay),near_units:put!(if near_units.is_empty(){vec![NearUnit::default()]}else{near_units}),
             unit_couplings:put!(if unit_couplings.is_empty(){vec![[0.;2]]}else{unit_couplings}),vias:put!(if vias.is_empty(){vec![[0;2]]}else{vias}),via_first:put!(via_first),
-            ground_block:put!(ground_block),term_floor:put!(term_floor),powers:put!(powers),
+            ground_block:put!(ground_block),term_floor:put!(term_floor),powers:put!(powers),first_fields:put!(if first_fields.is_empty(){vec![FirstField::default()]}else{first_fields}),
             nbeams:model.geometry.len() as i32,ncarriers:model.carriers.len() as i32,nclusters:model.layouts.len() as i32,focused:model.focused.len() as i32,
             nodes:nodes as i32,fields:fields as i32,nnear:near,doppler:model.doppler as i32,loss:settings.loss as i32,weights:0,nunits:g.units.len() as i32,
             exact_at:0,transient_at:0,nlevels:g.excited_groups.len() as i32,rows_at:0,between_at:0,
