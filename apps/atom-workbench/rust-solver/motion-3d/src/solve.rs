@@ -526,6 +526,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // gpu/program.rs).
     let fourth=device==Device::Cpu;
     let Some(mut pilot_candidate)=next_candidate(request,&mut ladder,false,&mut failed)else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
+    pilot_candidate.settle();
     // A generator that gains on the ladder's first rung, every drive folded, is the fold's construction failing
     // (model.rs `Model::lindblad`), not a regime to escalate into explicit states: the solve stops with why.
     if let Some(e)=failed.as_ref().filter(|e|e.starts_with(NOT_LINDBLAD)){return Err(Stop::Error(e.clone()));}
@@ -671,6 +672,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         else if fourth_wins{let(f,c,states)=fourth_cost.unwrap();(c,states,Some(f.checked))}
         else{(pilot_candidate,pilot_states,pilot_cost.map(|p|p.checked))};
     let(jumps,pilot_groups)=(pilot_jumps,pilot_groups);
+    let mut chosen=chosen;chosen.settle();
     let Candidate{model,initial,base,charges,..}=chosen;
     // The generator against its jumps at the pilot's states (`gain`): booked where its decay falls below
     // the jumps' rate.
@@ -862,19 +864,23 @@ const TARGETS:[f64;2]=[POPULATION_TARGET,TEMPERATURE_TARGET];
 /// A candidate of the fold (module documentation, # The fold's choice): the model at one of the rule's
 /// allowances, its initial state, its ledger, and the fold's charge per output and target (`fold_charges`) -- a
 /// priori at every output, or as measured (`Candidate::charged`).
-struct Candidate{model:Model,initial:Initial,base:Ledger,allowance:f64,charges:Vec<[f64;2]>}
+struct Candidate{model:Model,initial:Initial,base:Ledger,allowance:f64,charges:Vec<[f64;2]>,settled:bool}
 /// A candidate's weighed cost (`evaluate` in `run`): at the step its check keeps, its work over the run times the weight of
 /// its totals (`predicted`), its check's own work, its work per interval, the step's bias and its a-priori totals per output.
 struct Costed{cost:f64,check:f64,work:f64,bias:[f64;2],apriori:Vec<[f64;2]>,checked:Steps}
 impl Candidate{
     fn new(request:&Request,allowance:f64,fourth:bool)->Result<Candidate,String>{
-        let model=Model::with_order(request,allowance,fourth)?;let initial=Initial::new(&model,request)?;let mut base=model_ledger(&model,request);
-        // The initial ensemble (ensemble.rs): the share of the traps' thermal distributions it leaves out, and
-        // its flag (`initial_flag`) on the base ledger, every output's.
+        let model=Model::with_order(request,allowance,fourth)?;let initial=Initial::deferred(&model,request)?;let base=model_ledger(&model,request);
+        let charges=vec![fold_charges(model.fourth,model.ground.charge);request.times_us.len()];
+        Ok(Candidate{model,initial,base,allowance,charges,settled:false})
+    }
+    /// The initial ensemble's quadrature (ensemble.rs), which none of the fold's choices reads, for the pilot's and
+    /// the chosen model alone: the share of the traps' thermal distributions it leaves out, and its flag
+    /// (`initial_flag`) on the base ledger, every output's.
+    fn settle(&mut self){
+        if self.settled{return;}self.settled=true;self.initial.integrate(&self.model);let(initial,base)=(&self.initial,&mut self.base);
         if initial.cut>0.{base.add(CUT,initial.cut,"取势阱中束缚原子的降低等温分布 f ∝ e^(−E/k_BT) − 1（E 为相对阱外的机械能，E < 0）：相对势阱区（谐振近似低于阱深处）内的热分布，未束缚与阱顶附近的原子不计入；丢失与布居依赖这一截断".into());}
         base.flagged=initial_flag(&initial);
-        let charges=vec![fold_charges(model.fourth,model.ground.charge);request.times_us.len()];
-        Ok(Candidate{model,initial,base,allowance,charges})
     }
     /// Its fold's charges as measured (`measured_charge`) in place of the a-priori estimate.
     fn charged(&mut self,charges:Vec<[f64;2]>){self.charges=charges;}

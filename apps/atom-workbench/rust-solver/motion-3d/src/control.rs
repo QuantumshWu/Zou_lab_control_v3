@@ -3,7 +3,7 @@
 //! control's excess over the known mean (stats.rs) -- keeps its expectation with a smaller spread.
 //!
 //! # T: the harmonic twin
-//! The trajectory's initial r₀ and κ₀ carried by the trap's harmonic part alone (the engine's flow,
+//! The trajectory's initial r₀ (about its own site in a standing wave, engine.rs `Settings::about_site`) and κ₀ carried by the trap's harmonic part alone (the engine's flow,
 //! along the trap's principal axes): over each output's window (lib.rs `Windows`) its κ² along a lab
 //! axis, less the same with κ₀ = 0, is κ₀ᵀ A κ₀ + 2 κ₀ᵀ B r₀ -- A and B the window's means of products
 //! of the axes' cosines and sines. κ₀ is centred and symmetric at each r₀ (the bound ensemble's

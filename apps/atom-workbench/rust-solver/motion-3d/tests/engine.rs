@@ -596,6 +596,75 @@ fn a_shallow_trap_s_bound_ensemble_stays_with_the_light_off(){
     }
 }
 
+/// A second far beam crossing the tweezer (the validation's F9, its far beams alone) is part of the trap the bound
+/// ensemble is at equilibrium in (ensemble.rs): its depth the two beams', T stationary from t = 0 -- at the trap beam's
+/// own equilibrium the cloud, far too long along the tweezer's axis for the crossed trap, breathed from 19 up to 360 uK
+/// within 4 us. A few k_BT deep the draws from the two beams' mixture have the quadrature's kinetic temperature, and
+/// every atom is bound.
+#[test]
+fn a_crossed_far_beam_is_part_of_the_bound_ensemble(){
+    let fixture:Value=serde_json::from_str(include_str!("fixtures/crossed_far_beam_motion.json")).unwrap();
+    let mut r=scene::request(&fixture);r.times_us=vec![0.,1.];
+    let model=Model::new(&r).unwrap();assert_eq!(model.trap_modes().len(),2);
+    let initial=Initial::new(&model,&r).unwrap();let trap=initial.traps[0];let(cluster,state,_)=initial.states[0];let hm=model.hbar_over_mass;
+    let e=initial.ensembles[0].as_ref().unwrap();assert!((e.depth/initial.depths[0]-1.).abs()<=1e-6,"{} {}",e.depth,initial.depths[0]);
+    let exact=initial.temperature();
+    let mut settings=Settings::new(0.05,&trap,f64::EPSILON,false);settings.region=initial.depths[0];
+    let outcome=simulate(&model,&settings,&initial,5,0,1024,8,20,11,&[],None);assert_eq!(outcome.jumps,0);
+    let estimates=summarize(&outcome.groups,&Scales{hbar_over_mass:hm,frequencies:trap.lab},&[]);
+    for(i,x)in estimates.iter().enumerate(){assert_eq!(x.loss,0.);
+        for a in 0..3{assert!((x.temperature[a]-exact[a]).abs()<=4.*x.temperature_error[a],"output {i}, axis {a}: {} ± {} against {}",x.temperature[a],x.temperature_error[a],exact[a]);}}
+    // A few k_BT deep.
+    let kt=initial.depths[0]/4.;r.temperature_uk=kt/KT_PER_UK;
+    let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();let settings=Settings::new(0.05,&initial.traps[0],f64::EPSILON,false);
+    let draws:Vec<(f64,f64)>=(0..16384u64).map(|i|{let t=initial_trajectory(&model,&settings,&initial,9,i,Stratum::single(i));
+        let kinetic=0.5*hm*t.kappa.iter().map(|k|k*k).sum::<f64>();(kinetic,model.trap_level(cluster,state,t.r))}).collect();
+    assert!(draws.iter().all(|x|x.0+x.1<0.),"an unbound atom");
+    let n=draws.len() as f64;let mean=draws.iter().map(|x|x.0).sum::<f64>()/n;let se=(draws.iter().map(|x|(x.0-mean).powi(2)).sum::<f64>()/(n-1.)/n).sqrt();
+    let wanted=1.5*kt*initial.kinetic();assert!((mean-wanted).abs()<=4.*se,"kinetic energy {mean} ± {se} against the quadrature's {wanted}");
+}
+
+/// The near light comes on at t = 0, and its fold's shift is no part of the ensemble's energy: on the tweezer PGC's
+/// all-folded model the 10 MHz probe's denominator closes on a shell about the focus, where with it the envelope's top
+/// stood at 137 k_BT against the focus's 34 and no proposal in e^100 was kept (the solve never reached its first
+/// result). The envelope sits at the focus's depth, and the draws take no time.
+#[test]
+fn a_near_probe_s_fold_stays_out_of_the_ensemble_s_energy(){
+    let fixture:Value=serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap();
+    let mut r=scene::request(&fixture);r.times_us=vec![0.,1.];
+    let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let e=initial.ensembles[0].as_ref().unwrap();let ratio=e.top/(e.depth/(KT_PER_UK*r.temperature_uk));
+    assert!(ratio<=1.01,"the envelope's top {ratio} times the depth");
+    let settings=Settings::new(0.05,&initial.traps[0],f64::EPSILON,false);
+    for i in 0..256u64{let t=initial_trajectory(&model,&settings,&initial,9,i,Stratum::single(i));assert!(t.r.iter().all(|x|x.is_finite()));}
+}
+
+/// A standing wave's neighbouring sites: their atoms start about their own sites' bottoms (lib.rs `initial_trajectory`:
+/// scaled about the focus site 1's stood 67 times as high up its well as the centre's), and the harmonic part about each
+/// atom's own site (engine.rs, # A standing wave's sites) keeps T, no atom lost, at a step of ω dt = 1.5: the kick
+/// no longer takes the site's stiffness (about the focus T_x rose to 3.6 times at a step of that order).
+#[test]
+fn a_standing_wave_s_sites_hold_their_atoms_as_the_centre_does(){
+    let(_,mut r)=retro(0.);r.times_us=vec![0.,1.];let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let trap=initial.traps[0];let(cluster,state,_)=initial.states[0];let hm=model.hbar_over_mass;
+    let lattice=trap.lattice.expect("the tweezer and its reflection are a standing wave");
+    let settings=Settings::new(0.01,&trap,f64::EPSILON,false);
+    let mut levels=[(0.,0_u32);2];
+    for i in 0..8192u64{let t=initial_trajectory(&model,&settings,&initial,9,i,Stratum::single(i));
+        let z=(0..3).map(|a|t.r[a]*lattice.axis[a]).sum::<f64>();let n=lattice.nearest(z).0;let m=n.abs() as usize;if m>1{continue;}
+        let bottom:[f64;3]=std::array::from_fn(|a|t.r[a]+(lattice.site(n)-z)*lattice.axis[a]);
+        levels[m].0+=model.trap_level(cluster,state,t.r)-model.trap_level(cluster,state,bottom);levels[m].1+=1;}
+    let(centre,neighbours)=(levels[0].0/levels[0].1 as f64,levels[1].0/levels[1].1 as f64);
+    assert!(levels[1].1>64&&(neighbours/centre-1.).abs()<0.3,"{} atoms' level above their bottoms at sites ±1 {neighbours}, at the centre {centre}",levels[1].1);
+    let exact=initial.temperature();let dt=1.5/trap.frequencies.iter().copied().fold(0.,f64::max);
+    let mut s=Settings::new(dt,&trap,f64::EPSILON,false);s.region=initial.depths[0];
+    let steps=(1./dt).ceil() as usize;s.dt=1./steps as f64;
+    let outcome=simulate(&model,&s,&initial,5,0,1024,8,steps,11,&[],None);assert_eq!(outcome.jumps,0);
+    let estimates=summarize(&outcome.groups,&Scales{hbar_over_mass:hm,frequencies:trap.lab},&[]);
+    for(i,x)in estimates.iter().enumerate(){assert_eq!(x.loss,0.);
+        for a in 0..3{assert!((x.temperature[a]-exact[a]).abs()<=5.*x.temperature_error[a],"output {i}, axis {a}: {} ± {} against {}",x.temperature[a],x.temperature_error[a],exact[a]);}}
+}
+
 /// The fixture's tweezer alone and with a reflection along its axis, in phase at the focus (F5): the
 /// reflection's field the tweezer's with `turn` of the cooling beam's polarization added (relative to
 /// the tweezer's coupling's size, its outside shift the tweezer's).

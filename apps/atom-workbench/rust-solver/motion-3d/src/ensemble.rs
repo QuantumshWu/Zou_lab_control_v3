@@ -1,9 +1,11 @@
 //! The initial ensemble's motion: one initial internal state's bound thermal ensemble in the trap, the
 //! lowered isothermal (Michie 1963; King 1966)
 //!   f(r, κ) ∝ e^{−E/k_BT} − 1 for E < 0, zero above,
-//! E = ħ²κ²/2m + V(r) the mechanical energy with the state's trap potential relative to its far level
-//! (model.rs `Model::trap_level`: the trap's own share of the state's shifts, the near beams'
-//! interference left out), T the temperature asked for; every atom is also bound by the loss's own
+//! E = ħ²κ²/2m + V(r) the mechanical energy with the state's potential in the trap's light relative to its far
+//! level (model.rs `Model::trap_level`: the shifts of the trap's beams and of every far focused beam -- what the
+//! atom's motion conserves before the near light comes on at t = 0; a cloud at the trap beam's own equilibrium
+//! breathes up to 19 times as hot in a trap crossed by a second far beam --, the near light off), T the
+//! temperature asked for; every atom is also bound by the loss's own
 //! measure, the trap potential with the near light's interference (model.rs `Model::trap_potential`,
 //! engine.rs # Loss): its momenta stop where either energy reaches the far level.
 //!
@@ -28,13 +30,14 @@
 //!
 //! # The envelope
 //! At r the momenta's weight is w(y) = e^y P(d/2, y) − y^{d/2}/Γ(d/2 + 1) in d dimensions (`kept`), y =
-//! −V/k_BT, increasing in y. The trap's depth at r is at most c D A(r) (model.rs `Model::trap_slope`),
-//! A the trap beam's intensity profile, and A ≤ 1/(1 + u) with u = 2ρ²/w₀² + ζ²/z_R² its harmonic
-//! coordinate (e^{−t} ≤ 1/(1 + t) on the Gaussian factor): so y ≤ a/(1 + u), a = c D/k_BT, and the
-//! positions' density is dominated by w(a/(1 + u)) -- a function of u alone, isotropic in the
-//! coordinates ξ that whiten u. Its radial law, y = a/(1 + u) with density ∝ (a/y − 1)^{d/2−1}
+//! −V/k_BT, increasing in y. The trap's depth at r is at most c D max_m A_m(r) (model.rs `Model::trap_slope`),
+//! A_m the intensity profile of each mode of its light (`Mode`; a beam and its reflection are one), and
+//! A_m ≤ 1/(1 + u_m) with u_m = 2ρ²/w₀² + ζ²/z_R² its harmonic coordinate (e^{−t} ≤ 1/(1 + t) on the Gaussian
+//! factor): so y ≤ a max_m 1/(1 + u_m), a = c D/k_BT, and the positions' density is dominated by the mixture
+//! Σ_m w(a/(1 + u_m)) -- each part a function of its u_m alone, isotropic in the coordinates ξ that whiten it, its
+//! mass in proportion to that whitening's volume. A part's radial law, y = a/(1 + u) with density ∝ (a/y − 1)^{d/2−1}
 //! w(y)/y², is drawn exactly from pieces ∝ e^y, each bounded by its factors at their worst ends
-//! (`Radial`); the direction is uniform. A drawn point is kept with w(y(r))/w(a/(1 + u)) ≤ 1, the
+//! (`Radial`); the direction is uniform. A drawn point is kept with w(y(r))/Σ_m w(a/(1 + u_m)) ≤ 1, the
 //! loss's measure taken only where the trap's own lets it pass.
 //!
 //! # The momenta
@@ -44,12 +47,13 @@
 //!
 //! # The quadrature
 //! Its kinetic temperature and its share of the trap's thermal distribution are integrals over the
-//! positions of closed forms in y (`kept` at d/2 and d/2 + 1, and e^y): in the whitened coordinates,
+//! positions of closed forms in y (`kept` at d/2 and d/2 + 1, and e^y): over the mixture's parts, each with its
+//! share of the mixture at the point (one for a beam alone), in its whitened coordinates,
 //! Gauss–Legendre in the radial y on panels doubling away from the top (the first in √(a − y)), in
 //! cos θ from the beam's axis, and the trapezoidal rule in the azimuth; the region the share is taken
 //! against (U_h ≤ D, as the loss's) is an ellipsoid about the focus, so along each direction it ends
 //! at a panel's edge.
-use crate::model::{Model,Trap,MOST_MIXED};
+use crate::model::{Geometry,Model,Trap,MOST_MIXED};
 use crate::rng::{normal_quantile,Rng};
 use crate::Complex;
 use rayon::prelude::*;
@@ -153,31 +157,60 @@ impl Radial{
     }
 }
 
-/// One initial internal state's bound thermal ensemble (module documentation): its cluster and place
-/// in it; its trap's own depth at the focus D_T (rad/us) and the envelope's top a = c D_T/k_BT
-/// (model.rs `Model::trap_slope`); the classical ensemble's kinetic temperature relative to T, per axis
-/// (`kinetic`); and its share of the trap's thermal distribution over its region (U_h ≤ D, Maxwell's
-/// momenta) that it leaves out -- the unbound atoms and the lowering (`cut`). The radial laws per number
-/// of free axes are made when first drawn from.
+/// A mode of the trap's light in the envelope's mixture (module documentation, # The envelope): its frame (two
+/// axes across the beam, its axis), waist and Rayleigh range.
 #[derive(Clone,Debug)]
-pub struct Ensemble{pub cluster:usize,pub state:usize,pub depth:f64,pub top:f64,pub kinetic:f64,pub cut:f64,kt:f64,frame:[[f64;3];3],waist:f64,rayleigh:f64,radial:[OnceLock<Radial>;3]}
-impl Ensemble{
-    /// The ensemble of state `state` of `cluster` at k_BT `kt` (rad/us), its trap `trap` and its loss's
-    /// depth `region` (`Model::depth`, the region U_h ≤ D its share is taken against); none for a state
-    /// the trap does not hold (no bound state: D_T ≤ 0).
-    pub fn new(model:&Model,cluster:usize,state:usize,trap:&Trap,region:f64,kt:f64)->Result<Option<Ensemble>,String>{
-        let depth=-model.trap_level(cluster,state,[0.;3]);
-        if !(depth>0.){return Ok(None);}
-        let c=model.trap_slope(cluster,state,depth)?;let top=c*depth/kt;
-        let g=&model.geometry[model.trap_beam];let(waist,n)=(g.waist.ok_or("The trap beam has no waist")?,g.direction);
+struct Mode{frame:[[f64;3];3],waist:f64,rayleigh:f64}
+impl Mode{
+    fn new(g:&Geometry)->Result<Mode,String>{
+        let(waist,n)=(g.waist.ok_or("The trap beam has no waist")?,g.direction);
         let rayleigh=g.wave_number*waist*waist/2.;
         let pick=if n[0].abs()<0.9{[1.,0.,0.]}else{[0.,1.,0.]};let along:f64=(0..3).map(|i|pick[i]*n[i]).sum();
         let e1:[f64;3]={let v:[f64;3]=std::array::from_fn(|i|pick[i]-along*n[i]);let l=(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]).sqrt();v.map(|x|x/l)};
         let e2=[n[1]*e1[2]-n[2]*e1[1],n[2]*e1[0]-n[0]*e1[2],n[0]*e1[1]-n[1]*e1[0]];
-        let mut e=Ensemble{cluster,state,depth,top,kinetic:1.,cut:0.,kt,frame:[e1,e2,n],waist,rayleigh,radial:Default::default()};
-        let(kinetic,cut)=e.integrals(model,trap,region);(e.kinetic,e.cut)=(kinetic,cut);
-        Ok(Some(e))
+        Ok(Mode{frame:[e1,e2,n],waist,rayleigh})
     }
+    /// Its harmonic coordinate u at r.
+    fn coordinate(&self,r:[f64;3])->f64{
+        let p=|i:usize|(0..3).map(|c|r[c]*self.frame[i][c]).sum::<f64>();let(x,y,z)=(p(0),p(1),p(2));
+        2.*(x*x+y*y)/(self.waist*self.waist)+z*z/(self.rayleigh*self.rayleigh)
+    }
+    /// The whitened point at u = 1 along (cos θ from the beam's axis, azimuth φ).
+    fn along(&self,mu:f64,phi:f64)->[f64;3]{
+        let(s,(sp,cp))=((1.-mu*mu).max(0.).sqrt(),phi.sin_cos());let w=self.waist/2f64.sqrt();
+        std::array::from_fn(|i|w*s*(cp*self.frame[0][i]+sp*self.frame[1][i])+self.rayleigh*mu*self.frame[2][i])
+    }
+    /// ξ ↦ r on the free lab axes, the inverse square root of the harmonic coordinate's form u = rᵀBr,
+    /// B = (2/w₀²)(1 − nnᵀ) + nnᵀ/z_R², on them (the frozen axes' zero), and its volume.
+    fn whitening(&self,free:[bool;3])->([[f64;3];3],f64){
+        let n=self.frame[2];let(across,axial)=(2./(self.waist*self.waist),1./(self.rayleigh*self.rayleigh));
+        let form:[[f64;3];3]=std::array::from_fn(|i|std::array::from_fn(|j|if free[i]&&free[j]{across*(if i==j{1.}else{0.})+(axial-across)*n[i]*n[j]}else if i==j{1.}else{0.}));
+        let(values,vectors)=crate::model::symmetric_eigen(form);
+        (std::array::from_fn(|i|std::array::from_fn(|j|if free[i]&&free[j]{(0..3).map(|k|vectors[k][i]*vectors[k][j]/values[k].sqrt()).sum()}else{0.})),values.iter().map(|v|v.sqrt().recip()).product())
+    }
+}
+
+/// One initial internal state's bound thermal ensemble (module documentation): its cluster and place
+/// in it; its depth at the focus in the trap's light D_T (rad/us) and the envelope's top a = c D_T/k_BT
+/// (model.rs `Model::trap_slope`); the classical ensemble's kinetic temperature relative to T, per axis
+/// (`kinetic`); and its share of the trap's thermal distribution over its region (U_h ≤ D, Maxwell's
+/// momenta) that it leaves out -- the unbound atoms and the lowering (`cut`), these two by quadrature
+/// (`integrate`). The envelope's modes; the radial laws per number of free axes are made when first drawn from.
+#[derive(Clone,Debug)]
+pub struct Ensemble{pub cluster:usize,pub state:usize,pub depth:f64,pub top:f64,pub kinetic:f64,pub cut:f64,kt:f64,modes:Vec<Mode>,radial:[OnceLock<Radial>;3]}
+impl Ensemble{
+    /// The ensemble of state `state` of `cluster` at k_BT `kt` (rad/us), its `kinetic` and `cut` still to come
+    /// (`integrate`); none for a state the trap does not hold (no bound state: D_T ≤ 0).
+    pub fn new(model:&Model,cluster:usize,state:usize,kt:f64)->Result<Option<Ensemble>,String>{
+        let depth=-model.trap_level(cluster,state,[0.;3]);
+        if !(depth>0.){return Ok(None);}
+        let c=model.trap_slope(cluster,state,depth)?;let top=c*depth/kt;
+        let modes=model.trap_modes().into_iter().map(|l|Mode::new(&model.geometry[l])).collect::<Result<Vec<_>,_>>()?;
+        Ok(Some(Ensemble{cluster,state,depth,top,kinetic:1.,cut:0.,kt,modes,radial:Default::default()}))
+    }
+    /// Its kinetic temperature and cut, its trap `trap` and its loss's depth `region` (`Model::depth`, the region
+    /// U_h ≤ D its share is taken against).
+    pub fn integrate(&mut self,model:&Model,trap:&Trap,region:f64){(self.kinetic,self.cut)=self.integrals(model,trap,region);}
     /// The trap's own depth and the loss's at r, in k_BT (module documentation): y_T, and the momenta's
     /// reach k_max = min(y_T, y_A), zero where either is unbound.
     fn depths(&self,model:&Model,r:[f64;3],psi:&[Complex;MOST_MIXED])->(f64,f64){
@@ -185,19 +218,23 @@ impl Ensemble{
         let loss=-model.trap_potential(self.cluster,&model.point(r,[0.;3]),psi,0.)/self.kt;
         (own,own.min(loss).max(0.))
     }
-    /// The whitened point at harmonic coordinate u = 1 along (cos θ from the beam's axis, azimuth φ).
-    fn along(&self,mu:f64,phi:f64)->[f64;3]{
-        let(s,(sp,cp))=((1.-mu*mu).max(0.).sqrt(),phi.sin_cos());let w=self.waist/2f64.sqrt();
-        std::array::from_fn(|i|w*s*(cp*self.frame[0][i]+sp*self.frame[1][i])+self.rayleigh*mu*self.frame[2][i])
+    /// The mixture's envelope at r in `s` half dimensions, the part `m` proposed at y there: the sum of the parts, and that part's share of it.
+    fn envelope(&self,s:f64,m:usize,y:f64,r:[f64;3])->(f64,f64){
+        let a=self.top;let own=kept(s,y,y,a);
+        if self.modes.len()==1{return(own,1.);}
+        let rest:f64=self.modes.iter().enumerate().filter(|x|x.0!=m).map(|(_,o)|{let v=a/(1.+o.coordinate(r));kept(s,v,v,a)}).sum();
+        (own+rest,own/(own+rest))
     }
     /// The classical ensemble's kinetic temperature relative to T and its cut of the trap's thermal
     /// distribution over the region U_h ≤ `region` (module documentation, # The quadrature), in three
     /// dimensions: 32 Gauss nodes in cos θ, 8 azimuths, 16 Gauss nodes per radial panel.
     fn integrals(&self,model:&Model,trap:&Trap,region:f64)->(f64,f64){
         let(a,hm)=(self.top,model.hbar_over_mass);let mut psi=[Complex::ZERO;MOST_MIXED];psi[self.state]=Complex::ONE;
-        let(polar,radial)=(legendre(32),legendre(16));let azimuths=8;
-        let sums=(0..polar.len()*azimuths).into_par_iter().map(|p|{
-            let((mu,wm),phi)=(polar[p/azimuths],TAU*((p%azimuths) as f64+0.5)/azimuths as f64);let unit=self.along(mu,phi);
+        let(polar,radial)=(legendre(32),legendre(16));let azimuths=8;let every=[true;3];let first=self.modes[0].whitening(every).1;
+        // The mixture's parts, each with its volume (relative to the first's) and its share of the mixture at the point.
+        let sums=self.modes.iter().enumerate().map(|(m,mode)|{let volume=mode.whitening(every).1/first;
+          (0..polar.len()*azimuths).into_par_iter().map(|p|{
+            let((mu,wm),phi)=(polar[p/azimuths],TAU*((p%azimuths) as f64+0.5)/azimuths as f64);let unit=mode.along(mu,phi);
             // The region along this direction: U_h = u U_h(unit) ≤ D, at t_R = a u_R/(1 + u_R).
             let harmonic:f64=(0..3).map(|i|{let x:f64=(0..3).map(|c|unit[c]*trap.axes[i][c]).sum();trap.frequencies[i]*trap.frequencies[i]*x*x}).sum::<f64>()/(2.*hm);
             let inside=if harmonic>0.{let u=region/harmonic;a*u/(1.+u)}else{a};
@@ -210,14 +247,15 @@ impl Ensemble{
                     // The first panel in τ = √t (its t^{1/2} at the top), the rest in t.
                     let(t,dt)=if k==0{let(r0,r1)=(lo.sqrt(),hi.sqrt());let tau=0.5*(r0+r1)+0.5*(r1-r0)*x;(tau*tau,w*0.5*(r1-r0)*2.*tau)}else{(0.5*(lo+hi)+0.5*(hi-lo)*x,w*0.5*(hi-lo))};
                     // u = t/(a − t); the measure ½ u^{1/2} du = ½ (t/(a − t))^{1/2} a/(a − t)² dt.
-                    let u=t/(a-t);let measure=0.5*u.sqrt()*a/((a-t)*(a-t))*dt*wm;
-                    let r=unit.map(|x|x*u.sqrt());let(own,reach)=self.depths(model,r,&psi);
+                    let u=t/(a-t);let r=unit.map(|x|x*u.sqrt());let measure=0.5*u.sqrt()*a/((a-t)*(a-t))*dt*wm*volume*self.envelope(1.5,m,a-t,r).1;
+                    let(own,reach)=self.depths(model,r,&psi);
                     let(number,energy)=(kept(1.5,own,reach,a),kept(2.5,own,reach,a));
                     s[0]+=measure*number;s[1]+=measure*energy;
                     if t<inside{s[2]+=measure*number;s[3]+=measure*(own-a).exp();}
                 }
             }
-            s}).reduce(||[0.;4],|x,y|std::array::from_fn(|i|x[i]+y[i]));
+            s}).reduce(||[0.;4],|x,y|std::array::from_fn(|i|x[i]+y[i]))
+        }).fold([0.;4],|x:[f64;4],y|std::array::from_fn(|i|x[i]+y[i]));
         (sums[1]/sums[0],(1.-sums[2]/sums[3]).max(0.))
     }
     /// The radial law in d dimensions.
@@ -233,16 +271,21 @@ impl Ensemble{
         let directions=if d==3{2}else{1};
         let first:Vec<f64>=(0..1+directions).map(|_|next(rng)).collect();let momenta:Vec<f64>=(0..1+directions).map(|_|next(rng)).collect();
         let mut psi=[Complex::ZERO;MOST_MIXED];psi[self.state]=Complex::ONE;
-        let(a,s)=(self.top,d as f64/2.);let radial=self.radial(d);let whiten=self.whitening(free);
+        let(a,s)=(self.top,d as f64/2.);let radial=self.radial(d);
+        // The mixture's parts' whitenings and masses, their radial law the same.
+        let parts:Vec<([[f64;3];3],f64)>=self.modes.iter().map(|m|m.whitening(free)).collect();let mass:f64=parts.iter().map(|p|p.1).sum();
         let mut deviates=first;
         let(r,own,reach)=loop{
-            let y=radial.sample(deviates[0],rng);let u=a/y-1.;
+            // The part from the first deviate, the radial law from what is left of it (a beam alone: the deviate itself).
+            let(mut x,mut m)=(deviates[0],0);
+            for(i,p)in parts.iter().enumerate(){let share=p.1/mass;if x<share||i+1==parts.len(){m=i;x=(x/share).min(1.);break;}x-=share;}
+            let y=radial.sample(x,rng);let u=a/y-1.;
             let xi=sphere(free,&deviates[1..]).map(|x|x*u.sqrt());
-            let r:[f64;3]=std::array::from_fn(|i|(0..3).map(|j|whiten[i][j]*xi[j]).sum());
-            let envelope=kept(s,y,y,a);let draw=rng.open_uniform()*envelope;
+            let r:[f64;3]=std::array::from_fn(|i|(0..3).map(|j|parts[m].0[i][j]*xi[j]).sum());
+            let draw=rng.open_uniform()*self.envelope(s,m,y,r).0;
             let own=-model.trap_level(self.cluster,self.state,r)/self.kt;
             if own>0.{
-                debug_assert!(own<=y*(1.+1e-12),"the envelope at {r:?}: y {own} above its bound {y}");
+                debug_assert!(own<=self.modes.iter().map(|o|a/(1.+o.coordinate(r))).fold(y,f64::max)*(1.+1e-12),"the envelope at {r:?}: y {own} above its bound");
                 // The trap's own depth first, the loss's only where that lets the point pass.
                 if draw<=kept(s,own,own,a){
                     let loss=-model.trap_potential(self.cluster,&model.point(r,[0.;3]),&psi,0.)/self.kt;let reach=own.min(loss).max(0.);
@@ -255,14 +298,6 @@ impl Ensemble{
         let k=invert(s,own,reach,momenta[0]);
         let size=(2.*k*self.kt/model.hbar_over_mass).sqrt();
         (r,sphere(free,&momenta[1..]).map(|x|x*size))
-    }
-    /// ξ ↦ r on the free lab axes: the inverse square root of the beam's harmonic coordinate's form
-    /// u = rᵀBr, B = (2/w₀²)(1 − nnᵀ) + nnᵀ/z_R², on them (the frozen axes' zero).
-    fn whitening(&self,free:[bool;3])->[[f64;3];3]{
-        let n=self.frame[2];let(across,axial)=(2./(self.waist*self.waist),1./(self.rayleigh*self.rayleigh));
-        let form:[[f64;3];3]=std::array::from_fn(|i|std::array::from_fn(|j|if free[i]&&free[j]{across*(if i==j{1.}else{0.})+(axial-across)*n[i]*n[j]}else if i==j{1.}else{0.}));
-        let(values,vectors)=crate::model::symmetric_eigen(form);
-        std::array::from_fn(|i|std::array::from_fn(|j|if free[i]&&free[j]{(0..3).map(|k|vectors[k][i]*vectors[k][j]/values[k].sqrt()).sum()}else{0.}))
     }
 }
 

@@ -39,7 +39,10 @@ pub struct Initial{pub states:Vec<(usize,usize,f64)>,pub traps:Vec<Trap>,pub dep
 impl Initial{
     /// From the request's initial density: its ground populations (the density is diagonal in the
     /// model basis, as the app writes it).
-    pub fn new(model:&Model,request:&Request)->Result<Initial,String>{
+    pub fn new(model:&Model,request:&Request)->Result<Initial,String>{let mut i=Initial::deferred(model,request)?;i.integrate(model);Ok(i)}
+    /// `new` with its ensembles' kinetic temperatures and cut still to come (`integrate`): what a fold's candidate
+    /// needs until it is the pilot's or the chosen, the quadrature touching none of the fold's choices.
+    pub fn deferred(model:&Model,request:&Request)->Result<Initial,String>{
         let g=&model.ground;let rho=&request.initial_density;let mut states=vec![];
         for i in 0..STATES{for j in 0..STATES{if i!=j&&rho[i*STATES+j].abs()>0.{return Err("The initial density must be diagonal in the model basis".into());}}}
         for(k,cluster)in g.clusters.iter().enumerate(){for(x,&b)in cluster.states.iter().enumerate(){
@@ -51,9 +54,13 @@ impl Initial{
         let traps:Vec<Trap>=states.iter().map(|&(k,x,_)|model.trap(k,x)).collect();
         let depths:Vec<f64>=states.iter().map(|&(k,x,_)|model.depth(k,x)).collect();
         let kt=KT_PER_UK*request.temperature_uk;
-        let ensembles=states.iter().zip(&traps).zip(&depths).map(|((&(k,x,_),trap),&depth)|Ensemble::new(model,k,x,trap,depth,kt)).collect::<Result<Vec<_>,_>>()?;
-        let cut=states.iter().zip(&ensembles).map(|(s,e)|s.2*e.as_ref().map_or(0.,|e|e.cut)).sum();
-        Ok(Initial{states,traps,depths,ensembles,temperature_uk:request.temperature_uk,cut})
+        let ensembles=states.iter().map(|&(k,x,_)|Ensemble::new(model,k,x,kt)).collect::<Result<Vec<_>,_>>()?;
+        Ok(Initial{states,traps,depths,ensembles,temperature_uk:request.temperature_uk,cut:0.})
+    }
+    /// The ensembles' kinetic temperatures and share left out, by quadrature (ensemble.rs).
+    pub fn integrate(&mut self,model:&Model){
+        for((e,trap),&depth)in self.ensembles.iter_mut().zip(&self.traps).zip(&self.depths){if let Some(e)=e{e.integrate(model,trap,depth);}}
+        self.cut=self.states.iter().zip(&self.ensembles).map(|(s,e)|s.2*e.as_ref().map_or(0.,|e|e.cut)).sum();
     }
     /// The initial kinetic temperature per lab axis (uK), exactly: per state its ensemble's relative to
     /// T (`Ensemble::kinetic`) along each principal axis of its trap with the harmonic oscillator's
@@ -110,8 +117,13 @@ impl Latin{
 /// the initial populations; its position and momentum from that state's bound thermal ensemble
 /// (ensemble.rs: the lowered isothermal at T over its trap's bound states, every atom bound by the
 /// loss's own measure too), along each principal axis of its trap scaled to the harmonic oscillator's
-/// thermal Wigner function, T* = (ħω/2k)coth(ħω/2kT) -- a scaled draw the loss's measure would call
-/// unbound (the factors lift its energy by their excess over one) drawn again from its own stream. Along
+/// thermal Wigner function, T* = (ħω/2k)coth(ħω/2kT): the momentum by √(T*/T), and the position's displacement from
+/// the bottom of the atom's own well likewise, that displacement x = K⁻¹∇V at the atom (V the ensemble's potential,
+/// K the trap's stiffness at the focus): r itself in a harmonic trap; about its own site in a standing wave, whose
+/// sites are as stiff, ∝ sin(2kz) -- continuous, no site to pick, zero at the nodes where no oscillator holds it.
+/// (Scaled about the focus a neighbouring site's atom left its site's bottom by (√(T*/T) − 1)λ/2: 975 uK of potential
+/// energy at the retro tweezer's site 1, against 14 uK in the centre.) A scaled draw the loss's measure would call
+/// unbound (the factors lift its energy by their excess over one) is drawn again from its own stream. Along
 /// frozen lab axes (a validation's), nothing; a state the trap does not hold at rest at the focus. At
 /// fourth order the internal state is the bare state's slow part (engine.rs `slow_start`).
 pub fn initial_trajectory(model:&Model,settings:&Settings,initial:&Initial,seed:u64,index:u64,stratum:Stratum)->Trajectory{
@@ -139,6 +151,14 @@ fn initial_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,purpos
     let kt=KT_PER_UK*initial.temperature_uk;
     let quantum:[f64;3]=std::array::from_fn(|i|{let f=frequencies[i];if f>0.{let half=f/(2.*kt);(half/half.tanh()).sqrt()}else{1.}});
     let scaled=|v:[f64;3]|->[f64;3]{std::array::from_fn(|a|(0..3).map(|i|quantum[i]*(0..3).map(|b|v[b]*axes[i][b]).sum::<f64>()*axes[i][a]).sum())};
+    // The position's displacement from its own well's bottom scaled likewise, the slope by central differences as `Model::trap`'s.
+    let displaced=|r:[f64;3]|->[f64;3]{
+        let h=1e-3*model.geometry[model.trap_beam].waist.unwrap_or(1.);let mut out=r;
+        for i in 0..3{let f=frequencies[i];if !(f>0.){continue;}
+            let at=|s:f64|->[f64;3]{std::array::from_fn(|a|r[a]+s*axes[i][a])};
+            let slope=(model.trap_level(cluster,state,at(h))-model.trap_level(cluster,state,at(-h)))/(2.*h);
+            let shift=(quantum[i]-1.)*slope*model.hbar_over_mass/(f*f);for a in 0..3{out[a]+=shift*axes[i][a];}}
+        out};
     let mut psi=[Complex::ZERO;model::MOST_MIXED];psi[state]=Complex::ONE;
     let(r,kappa)=match &initial.ensembles[pick]{
         // The member's Latin deviates are taken whatever its state, so that its group's stay in step.
@@ -146,7 +166,7 @@ fn initial_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,purpos
         Some(e)=>{
             let mut draw=e.draw(model,settings.free,&mut rng,&mut |rng|latin.next(rng));
             loop{
-                let(r,kappa)=(scaled(draw.0),scaled(draw.1));
+                let(r,kappa)=(displaced(draw.0),scaled(draw.1));
                 let kinetic=0.5*model.hbar_over_mass*kappa.iter().map(|k|k*k).sum::<f64>();
                 if kinetic+model.trap_potential(cluster,&model.point(r,kappa),&psi,0.)<0.{break(r,kappa);}
                 draw=e.draw(model,settings.free,&mut rng,&mut |rng|rng.interior());
@@ -207,7 +227,7 @@ fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count
         let index=first+n as u64;let k=tasks.partition_point(|t|t.1<=index)-1;let(g,from,to)=tasks[k];let(start,end)=bounds(g);
         let mut bare=initial_from(model,settings,initial,seed,Purpose::Initial,index,Stratum{first:start,size:end-start});
         if let Some(r)=origin{bare.r=r;bare.kappa=[0.;3];}
-        let(r0,k0)=(bare.r,bare.kappa);
+        let(r0,k0)=(settings.about_site(bare.r),bare.kappa);
         let clock=Instant::now();
         let twin=twins.as_ref().map(|(e,twin)|hold(e,twin,&bare,steps,outputs));
         let held_seconds=clock.elapsed().as_secs_f64();let clock=Instant::now();
@@ -347,7 +367,7 @@ pub fn sample_states(model:&Model,settings:&Settings,initial:&Initial,seed:u64,c
     let engine=Engine::new(model,settings.clone());
     let every=((count as usize*outputs)/4096).max(1);
     let runs:Vec<(Vec<Trajectory>,u64,Group)>=(0..count).into_par_iter().map_init(||(Windows::new(settings,steps,outputs),vec![None;outputs]),|(windows,held),index|{
-        let mut t=pilot_start(model,settings,initial,seed,index);let(r0,k0)=(t.r,t.kappa);
+        let mut t=pilot_start(model,settings,initial,seed,index);let(r0,k0)=(settings.about_site(t.r),t.kappa);
         let(atoms,_,kept,jumps)=walk(model,&engine,&mut t,steps,outputs,&[],windows,held,Some(every));
         let mut sums=Group::new(outputs,1);
         for(i,atom)in atoms.iter().enumerate(){sums.add(i,atom.as_ref().map(atom_of).as_ref(),&Controls{harmonic:harmonic.value(i,r0,k0),twin:None});}
