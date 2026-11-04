@@ -855,3 +855,7 @@ pub fn stop_camera(workbench: &mut Workbench, builtin: &Builtin, origin: &Origin
     run(workbench, builtin, "stop_node", &json!({"node": node}), origin, 0, host);
     workbench.take_replies().into_iter().map(|(_, result)| result).last().unwrap_or(Ok(Value::Null)).map(|_| ())
 }
+
+#[cfg(test)]
+#[path = "workbench_host_fit_path.rs"]
+mod fit_path;

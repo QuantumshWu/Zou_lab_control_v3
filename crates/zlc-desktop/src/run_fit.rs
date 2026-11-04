@@ -237,6 +237,15 @@ mod tests {
         let stopped = || true;
         let result = fit_answer(&engine, "damped_sine", &array(x, &[60]), &array(y, &[2, 60]), None, None, Some(&stopped));
         assert!(matches!(result, Err(FitError::Cancelled)));
+
+        // A Stop that comes once the batch's one bucket is solving: its cells not begun never start.
+        let (cells, points) = (256, 60);
+        let (x, y) = batch(&truths(cells), points, 0.02);
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let begun = || asked.fetch_add(1, Ordering::Relaxed) > cells + cells / 2;
+        let result = fit_answer(&engine, "damped_sine", &array(x, &[points]), &array(y, &[cells, points]), None, None, Some(&begun));
+        assert!(matches!(result, Err(FitError::Cancelled)));
+        assert!(asked.load(Ordering::Relaxed) < 2 * cells, "{asked:?}");
     }
 
     #[test]
