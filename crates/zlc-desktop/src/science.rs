@@ -127,7 +127,7 @@ impl Science {
         let path = path.to_str().ok_or("The figure path is not valid Unicode")?;
         let opened = read_document(path, self.services.fit.clone(), self.services.defaults.clone(), self.services.registry.clone())
             .map_err(|error| error_text(&error))?;
-        Ok(DecodedArchive { path: opened.path, info: opened.info, items: opened.items.into_iter().map(|item| ArchiveItem {
+        Ok(DecodedArchive { path: opened.path, info: opened.info, lineage: opened.lineage, items: opened.items.into_iter().map(|item| ArchiveItem {
             key: item.key, plane: item.plane, target: item.target, overlay: item.overlay, overlay_plane: item.overlay_plane }).collect() })
     }
 

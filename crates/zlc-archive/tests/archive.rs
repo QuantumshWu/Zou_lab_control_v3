@@ -98,7 +98,19 @@ fn check_valid(path: &Path, case: &serde_json::Value) -> Vec<String> {
         }
     }
     let rewritten = match rewrite(path, &archive) {
-        Ok(bytes) => serde_json::json!(digest(&bytes)),
+        Ok(bytes) => {
+            // A lineage now leaves the metadata for its own member, so Python's recorded bytes
+            // no longer apply: the re-saved file must read back as this one, member for member.
+            if archive.info.get("sections").unwrap().get("lineage").is_some() {
+                let copy = std::env::temp_dir().join(format!("zlc-resaved-{}-{}", std::process::id(), file.replace(['/', '\\'], "-")));
+                std::fs::write(&copy, &bytes).unwrap();
+                let again = read_archive(&copy).unwrap();
+                std::fs::remove_file(&copy).unwrap();
+                if dumps(&again.info, Style::Figure).unwrap() != dumps(&archive.info, Style::Figure).unwrap() { fail("re-saved info differs".into()); }
+                if !again.arrays.iter().zip(archive.arrays.iter()).all(|(left, right)| left.0 == right.0 && left.1.little_endian_bytes() == right.1.little_endian_bytes()) { fail("re-saved members differ".into()); }
+                case["resave"].clone()
+            } else { serde_json::json!(digest(&bytes)) }
+        }
         Err(error) => serde_json::json!([error.kind.python_name(), error.message]),
     };
     if rewritten != case["resave"] { fail(format!("rewrite {rewritten} vs Python's resave {}", case["resave"])); }
@@ -115,7 +127,7 @@ fn rewrite(path: &Path, archive: &FigureArchive) -> zlc_archive::Result<Vec<u8>>
     let mut entries = Vec::new();
     for member in &order {
         let key = member.strip_suffix(".npy").unwrap_or(member);
-        if key == "info" { continue; }
+        if key == "info" || key == "lineage.json" { continue; }
         if let Some((name, dataset)) = archive.datasets.iter().find(|(name, _)| name == key) {
             entries.push((name.clone(), Entry::Dataset(ArchiveDataset { reference: dataset.reference.clone(), source: dataset.source() })));
         } else if !owned.iter().any(|name| name == key) {
@@ -191,6 +203,10 @@ fn regression_archives_end_like_python() {
 #[test]
 fn malformed_archives_are_refused_like_python() { check_all("invalid", 150); }
 
+fn lineage_document(path: &Path) -> serde_json::Value {
+    serde_json::from_slice(&ZipReader::open(path).unwrap().read("lineage.json").unwrap()).unwrap()
+}
+
 fn apparatus_document(path: &Path) -> serde_json::Value {
     let mut zip = ZipReader::open(path).unwrap();
     let array = zlc_archive::npy::read_array(&mut zip.open_member("info.npy").unwrap()).unwrap();
@@ -224,13 +240,17 @@ fn shared_apparatus_is_stored_once_and_public_reader_restores_every_record() {
     let entries = [("data".to_owned(), Entry::Array(zlc_archive::NpyArray::unicode(vec!["sample".into()], vec![1])))];
     let bytes = write_figure_archive(Cursor::new(Vec::new()), "shared", &entries, &original).unwrap().into_inner();
     std::fs::write(&path, &bytes).unwrap();
-    let stored = apparatus_document(&path);
+    let stored = lineage_document(&path);
+    assert_eq!(stored["schema"], "zlc.figure.lineage/1");
     assert_eq!(stored["apparatus_table"]["schema"], "zlc.figure.apparatus-table/1");
     assert_eq!(stored["apparatus_table"]["records"].as_array().unwrap().len(), 3);
-    assert_eq!(stored["sections"]["lineage"]["nodes"][0]["record"]["apparatus"], serde_json::json!({"$apparatus": 0}));
-    assert_eq!(stored["sections"]["lineage"]["nodes"][1]["record"]["apparatus"], serde_json::json!({"$apparatus": 1}));
-    assert_eq!(stored["sections"]["source"]["run_record"]["apparatus"], serde_json::json!({"$apparatus": 0}));
-    assert_eq!(stored["sections"]["lineage"]["nodes"][0]["event_record"]["acquisition"]["runs"][0]["record"]["apparatus"], serde_json::json!({"$apparatus":0}));
+    assert_eq!(stored["lineage"]["nodes"][0]["record"]["apparatus"], serde_json::json!({"$apparatus": 0}));
+    assert_eq!(stored["lineage"]["nodes"][1]["record"]["apparatus"], serde_json::json!({"$apparatus": 1}));
+    assert_eq!(stored["lineage"]["nodes"][0]["event_record"]["acquisition"]["runs"][0]["record"]["apparatus"], serde_json::json!({"$apparatus":0}));
+    let stored = apparatus_document(&path);
+    assert!(stored["sections"].get("lineage").is_none(), "the lineage is not in the metadata");
+    assert!(stored.get("apparatus_table").is_none(), "the source's one record has nothing to share with");
+    assert_eq!(stored["sections"]["source"]["run_record"]["apparatus"], sections["source"]["run_record"]["apparatus"]);
     assert_eq!(stored["sections"]["custom"], sections["custom"], "unrelated metadata is literal");
     let decoded = read_archive(&path).unwrap();
     assert!(decoded.info.get("apparatus_table").is_none());
@@ -239,6 +259,53 @@ fn shared_apparatus_is_stored_once_and_public_reader_restores_every_record() {
     // An uncompressed historical file remains literal, including reference-shaped user values.
     write_apparatus_document(&path, &decoded.info.to_serde());
     assert_eq!(read_archive(&path).unwrap().info, decoded.info);
+    std::fs::remove_file(path).unwrap();
+}
+
+/// `open_archive` leaves the lineage unparsed, from the member and from an older file's
+/// metadata alike, and it reads as `read_archive` reads it.
+#[test]
+fn opening_leaves_the_lineage_apart_in_both_layouts() {
+    let path = std::env::temp_dir().join(format!("zlc-lineage-apart-{}.npz", std::process::id()));
+    let shared = serde_json::json!({"context": "capture", "devices": {"rf": {"values": {"frequency": 80000000.0}}}});
+    let sections = serde_json::json!({"plot": {"data": {"size": "2x2", "text with \"lineage\":[{": "}]"}},
+        "lineage": {"root": "a", "device_settings": [], "nodes": [{"id": "a", "record": {"apparatus": shared}, "event_record": {"note": "a \"quoted\" {[ value"}},
+                                                                   {"id": "b", "record": {"apparatus": shared}}]},
+        "source": {"run_record": {"apparatus": shared}, "title": "a run"}});
+    let entries = [("data".to_owned(), Entry::Array(zlc_archive::NpyArray::unicode(vec!["sample".into()], vec![1])))];
+    let bytes = write_figure_archive(Cursor::new(Vec::new()), "apart", &entries, &Json::from_serde(&sections)).unwrap().into_inner();
+    std::fs::write(&path, &bytes).unwrap();
+    let whole = read_archive(&path).unwrap();
+    assert_eq!(whole.info.get("sections").unwrap().to_serde()["lineage"], sections["lineage"]);
+    assert!(!whole.lineage.is_present());
+    let check = |path: &Path| {
+        let opened = zlc_archive::open_archive(path).unwrap();
+        assert!(opened.info.get("sections").unwrap().get("lineage").is_none());
+        assert_eq!(opened.info.get("sections").unwrap().to_serde()["plot"], sections["plot"]);
+        assert_eq!(opened.info.get("sections").unwrap().to_serde()["source"], sections["source"]);
+        assert_eq!(opened.lineage.read().unwrap().unwrap().to_serde(), sections["lineage"]);
+    };
+    check(&path);
+    // The same document as an older file wrote it, the shared apparatus in one table for both.
+    let mut document = apparatus_document(&path);
+    document["sections"]["lineage"] = sections["lineage"].clone();
+    document["sections"]["lineage"]["nodes"][0]["record"]["apparatus"] = serde_json::json!({"$apparatus": 0});
+    document["sections"]["lineage"]["nodes"][1]["record"]["apparatus"] = serde_json::json!({"$apparatus": 0});
+    document["sections"]["source"]["run_record"]["apparatus"] = serde_json::json!({"$apparatus": 0});
+    document["apparatus_table"] = serde_json::json!({"schema": "zlc.figure.apparatus-table/1", "records": [shared]});
+    write_apparatus_document(&path, &document);
+    assert!(!ZipReader::open(&path).unwrap().names().contains(&"lineage.json"));
+    assert_eq!(read_archive(&path).unwrap().info.get("sections").unwrap().to_serde()["lineage"], sections["lineage"]);
+    check(&path);
+    // Stored both ways at once, or in a foreign shape, it is refused.
+    let mut zip = zlc_archive::zip::ZipWriter::new(Cursor::new(Vec::new())).unwrap();
+    let info = zlc_archive::NpyArray::unicode(vec![document.to_string()], Vec::new());
+    zip.write_member("info.npy", true, &[&info.header(), &info.data_bytes()]).unwrap();
+    zip.write_member("lineage.json", true, &[br#"{"schema":"zlc.figure.lineage/1","lineage":{}}"#]).unwrap();
+    let data = zlc_archive::NpyArray::unicode(vec!["sample".into()], vec![1]);
+    zip.write_member("data.npy", true, &[&data.header(), &data.data_bytes()]).unwrap();
+    std::fs::write(&path, zip.finish().unwrap().into_inner()).unwrap();
+    assert_eq!(read_archive(&path).err().unwrap().message, "figure lineage is stored twice");
     std::fs::remove_file(path).unwrap();
 }
 

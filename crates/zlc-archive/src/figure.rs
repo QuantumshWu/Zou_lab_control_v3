@@ -1,6 +1,8 @@
 //! `zlc_data.figure_archive`: a figure's arrays and typed datasets as NPZ
 //! members beside one strict JSON metadata tree, written and read exactly as
-//! the scientific code does (member order, Deflate choice, refusals).
+//! the scientific code does (member order, Deflate choice, refusals), and its
+//! lineage (the whole causal history, never needed to draw it) as a UTF-8 JSON
+//! member of its own. A file from before that member keeps it in the metadata.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, Write};
@@ -8,7 +10,7 @@ use std::path::Path;
 
 use crate::deflate::zlib_compressed_len;
 use crate::error::{ArchiveError, ErrorKind, Result};
-use crate::json::{dumps, parse_metadata, py_repr_names, py_repr_str, Json, Style};
+use crate::json::{dumps, object_path_span, parse_metadata, py_repr_names, py_repr_str, Json, Style};
 use crate::manifest::{exact_keys, manifest_array_keys, materialize, members_of, snapshot_from_manifest, snapshot_manifest, ArchiveDataset, ReadDataset};
 use crate::npy::{bytes_scalar, read_array, NpyArray, NpySource, MAGIC};
 use crate::tree::stripped;
@@ -16,6 +18,9 @@ use crate::zip::{ZipReader, ZipWriter};
 
 pub const FIGURE_SCHEMA: &str = "zlc.figure";
 const INFO_KEY: &str = "info";
+const LINEAGE_KEY: &str = "lineage";
+const LINEAGE_MEMBER: &str = "lineage.json";
+const LINEAGE_SCHEMA: &str = "zlc.figure.lineage/1";
 const PROBE_BYTES: usize = 1 << 20;
 const MIN_SAVINGS: f64 = 0.20;
 const WRITE_BUFFER: usize = 16 * 1024 * 1024;
@@ -109,17 +114,16 @@ fn pack_apparatus(sections: &mut Json) -> Result<Option<Json>> {
     Ok(Some(Json::object([("schema", Json::str(APPARATUS_SCHEMA)), ("records", Json::Array(records))])))
 }
 
-fn unpack_apparatus(info: &mut Json) -> Result<()> {
-    let Some(table) = info.remove(APPARATUS_TABLE) else { return Ok(()) };
+/// Put back the table's records into `sections`' references. `whole`: `sections` are all the
+/// table was written for, so it can have no record they do not use.
+fn restore_apparatus(table: &Json, sections: &mut Json, whole: bool) -> Result<()> {
     if table.as_object().is_none() { return Err(ArchiveError::value("figure apparatus table must be an object")); }
-    exact_keys(&table, &["schema", "records"], "figure apparatus table")?;
+    exact_keys(table, &["schema", "records"], "figure apparatus table")?;
     if table.get("schema").and_then(Json::as_str) != Some(APPARATUS_SCHEMA) {
         return Err(ArchiveError::value("unsupported figure apparatus table schema"));
     }
     let records = table.get("records").and_then(Json::as_array).filter(|records| !records.is_empty())
         .ok_or_else(|| ArchiveError::value("figure apparatus table records must be a non-empty array"))?;
-    let Json::Object(fields) = info else { unreachable!() };
-    let sections = &mut fields.iter_mut().find(|(name, _)| name == "sections").unwrap().1;
     let mut used = HashSet::new();
     apparatus_records(sections, |value| {
         if value.as_object().is_none_or(|fields| fields.len() != 1 || fields[0].0 != APPARATUS_REF) {
@@ -131,8 +135,68 @@ fn unpack_apparatus(info: &mut Json) -> Result<()> {
         *value = records[index].clone();
         Ok(())
     })?;
-    if used.len() != records.len() { return Err(ArchiveError::value("figure apparatus table contains unused records")); }
+    if whole && used.len() != records.len() { return Err(ArchiveError::value("figure apparatus table contains unused records")); }
     Ok(())
+}
+
+fn unpack_apparatus(info: &mut Json) -> Result<()> {
+    let Some(table) = info.remove(APPARATUS_TABLE) else { return Ok(()) };
+    let Json::Object(fields) = info else { unreachable!() };
+    restore_apparatus(&table, &mut fields.iter_mut().find(|(name, _)| name == "sections").unwrap().1, true)
+}
+
+/// The lineage member's text: its repeated apparatus shared within it.
+fn lineage_document(lineage: Json) -> Result<String> {
+    let mut sections = Json::object([(LINEAGE_KEY, lineage)]);
+    let apparatus = pack_apparatus(&mut sections)?;
+    let mut document = Json::object([("schema", Json::str(LINEAGE_SCHEMA)), (LINEAGE_KEY, sections.remove(LINEAGE_KEY).unwrap())]);
+    if let Some(table) = apparatus { document.insert(APPARATUS_TABLE, table); }
+    dumps(&document, Style::Figure)
+}
+
+/// The lineage as a file stores it, not yet parsed: what drawing a figure leaves alone. Held
+/// in memory, so that a figure saved over its own file still has it.
+#[derive(Default)]
+pub struct SavedLineage(StoredLineage);
+
+#[derive(Default)]
+enum StoredLineage {
+    /// A figure with no lineage, or (from `read_archive`) one already in its metadata.
+    #[default]
+    Absent,
+    /// The text of the lineage member.
+    Member(Vec<u8>),
+    /// The lineage's text inside an older file's metadata, and that file's apparatus table.
+    Inline { lineage: String, table: Option<Json> },
+}
+
+impl SavedLineage {
+    pub fn is_present(&self) -> bool { !matches!(self.0, StoredLineage::Absent) }
+
+    /// The lineage, its shared apparatus restored; `None` when the figure has none.
+    pub fn read(&self) -> Result<Option<Json>> {
+        match &self.0 {
+            StoredLineage::Absent => Ok(None),
+            StoredLineage::Member(bytes) => {
+                let text = std::str::from_utf8(bytes).map_err(|_| ArchiveError::value("figure lineage is not UTF-8"))?;
+                let mut document = parse_metadata(text)?;
+                if document.as_object().is_none() { return Err(ArchiveError::value("figure lineage document must be an object")); }
+                let keys: &[&str] = if document.get(APPARATUS_TABLE).is_some() { &["schema", LINEAGE_KEY, APPARATUS_TABLE] } else { &["schema", LINEAGE_KEY] };
+                exact_keys(&document, keys, "figure lineage document")?;
+                let schema = document.get("schema").unwrap();
+                if schema.as_str() != Some(LINEAGE_SCHEMA) { return Err(ArchiveError::value(format!("unsupported figure lineage format {}", crate::json::py_repr(schema)))); }
+                let table = document.remove(APPARATUS_TABLE);
+                let mut sections = Json::object([(LINEAGE_KEY, document.remove(LINEAGE_KEY).unwrap())]);
+                if let Some(table) = &table { restore_apparatus(table, &mut sections, true)?; }
+                Ok(sections.remove(LINEAGE_KEY))
+            }
+            StoredLineage::Inline { lineage, table } => {
+                let mut sections = Json::object([(LINEAGE_KEY, parse_metadata(lineage)?)]);
+                if let Some(table) = table { restore_apparatus(table, &mut sections, false)?; }
+                Ok(sections.remove(LINEAGE_KEY))
+            }
+        }
+    }
 }
 
 /// `_compression_sample(array)` of the member's stored bytes.
@@ -199,6 +263,7 @@ pub fn write_figure_archive<W: Write + Seek>(stream: W, name: &str, arrays: &[(S
         ("dtype", Json::Str(array.dtype.str())),
         ("shape", Json::Array(array.shape.iter().map(|size| Json::Int(*size as i128)).collect())),
     ]))).collect());
+    let lineage = sections.remove(LINEAGE_KEY).map(lineage_document).transpose()?;
     let apparatus = pack_apparatus(&mut sections)?;
     let mut info = Json::object([("schema", Json::str(FIGURE_SCHEMA)), ("name", Json::str(name)), ("members", members), ("sections", sections)]);
     if let Some(table) = apparatus { info.insert(APPARATUS_TABLE, table); }
@@ -206,6 +271,7 @@ pub fn write_figure_archive<W: Write + Seek>(stream: W, name: &str, arrays: &[(S
     let io = |error: std::io::Error| ArchiveError::os(&error, None);
     let mut zip = ZipWriter::new(stream).map_err(io)?;
     write_member(&mut zip, INFO_KEY, &NpyArray::unicode(vec![info], Vec::new())).map_err(io)?;
+    if let Some(lineage) = &lineage { zip.write_member(LINEAGE_MEMBER, deflates(lineage.as_bytes()), &[lineage.as_bytes()]).map_err(io)?; }
     for (key, array) in &stored { write_member(&mut zip, key, array).map_err(io)?; }
     zip.finish().map_err(io)
 }
@@ -235,8 +301,9 @@ impl Members {
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
 }
 
-/// What `read_archive` returns: the metadata, every member, and the typed datasets.
-pub struct FigureArchive { pub info: Json, pub arrays: Members, pub datasets: Vec<(String, ReadDataset)> }
+/// What `read_archive` returns: the metadata, every member, and the typed datasets; what
+/// `open_archive` returns: the same with the lineage not in the metadata but apart.
+pub struct FigureArchive { pub info: Json, pub arrays: Members, pub datasets: Vec<(String, ReadDataset)>, pub lineage: SavedLineage }
 
 impl FigureArchive {
     pub fn array(&self, name: &str) -> Option<&NpyArray> { self.arrays.get(name) }
@@ -251,16 +318,44 @@ fn load_member(zip: &mut ZipReader, physical: &str) -> Result<NpyArray> {
     read_array(&mut member)
 }
 
-/// `_parse_info(array)` then `_validate_current_info(info)`.
-fn parse_info(array: &NpyArray) -> Result<Json> {
+fn scalar_info(array: &NpyArray) -> Result<()> {
     if !array.shape.is_empty() || array.dtype.kind != crate::npdtype::Kind::Unicode {
         return Err(ArchiveError::value("figure info must be one scalar Unicode JSON document"));
     }
+    Ok(())
+}
+
+/// `_parse_info(array)` then `_validate_current_info(info)`.
+fn parse_info(array: &NpyArray) -> Result<Json> {
+    scalar_info(array)?;
     let mut info = parse_metadata(&array.text(0)?)?;
+    validate_info(&info)?;
+    unpack_apparatus(&mut info)?;
+    Ok(info)
+}
+
+/// An older file's metadata without parsing the lineage inside it: its text is cut out of
+/// the document and kept. What no plain scan finds is parsed whole, and the parser judges it.
+fn parse_info_apart(array: &NpyArray) -> Result<(Json, SavedLineage)> {
+    scalar_info(array)?;
+    let text = array.text(0)?;
+    let Some(span) = object_path_span(&text, &["sections", LINEAGE_KEY]) else { return Ok((parse_info(array)?, SavedLineage::default())) };
+    let mut info = parse_metadata(&[&text[..span.start], "null", &text[span.end..]].concat())?;
+    validate_info(&info)?;
+    let table = info.remove(APPARATUS_TABLE);
+    let Json::Object(fields) = &mut info else { unreachable!() };
+    let sections = &mut fields.iter_mut().find(|(name, _)| name == "sections").unwrap().1;
+    sections.remove(LINEAGE_KEY);
+    if let Some(table) = &table { restore_apparatus(table, sections, false)?; }
+    Ok((info, SavedLineage(StoredLineage::Inline { lineage: text[span].to_owned(), table })))
+}
+
+/// `_validate_current_info(info)` but for its apparatus.
+fn validate_info(info: &Json) -> Result<()> {
     if info.as_object().is_none() { return Err(ArchiveError::value("figure metadata root must be an object")); }
     let keys: &[&str] = if info.get(APPARATUS_TABLE).is_some() { &["schema", "name", "members", "sections", APPARATUS_TABLE] }
         else { &["schema", "name", "members", "sections"] };
-    exact_keys(&info, keys, "figure metadata")?;
+    exact_keys(info, keys, "figure metadata")?;
     let schema = info.get("schema").unwrap();
     if schema.as_str() != Some(FIGURE_SCHEMA) { return Err(ArchiveError::value(format!("unsupported figure format {}", crate::json::py_repr(schema)))); }
     match info.get("name").unwrap() { Json::Str(name) if !name.is_empty() && !stripped(name) => {} _ => return Err(ArchiveError::value("figure metadata name must be non-empty text")) }
@@ -282,8 +377,7 @@ fn parse_info(array: &NpyArray) -> Result<Json> {
             if sizes.iter().all(|size| matches!(size, Json::Int(value) if *value >= 0) || matches!(size, Json::BigInt(text) if !text.starts_with('-'))));
         if !valid_shape { return Err(ArchiveError::value(format!("figure member {} shape must be nonnegative integers", py_repr_str(key)))); }
     }
-    unpack_apparatus(&mut info)?;
-    Ok(info)
+    Ok(())
 }
 
 /// A shape tuple's `repr` from its Python ints.
@@ -305,6 +399,18 @@ impl NpySource for FileReader {
 
 /// `read_archive(path)`: read once, returning metadata, members and the typed datasets.
 pub fn read_archive(path: &Path) -> Result<FigureArchive> {
+    let mut archive = read_figure(path, true)?;
+    if let Some(lineage) = std::mem::take(&mut archive.lineage).read()? {
+        let Json::Object(fields) = &mut archive.info else { unreachable!() };
+        fields.iter_mut().find(|(name, _)| name == "sections").unwrap().1.insert(LINEAGE_KEY, lineage);
+    }
+    Ok(archive)
+}
+
+/// What a figure's drawing reads: all of it but the lineage, which stays unparsed in `lineage`.
+pub fn open_archive(path: &Path) -> Result<FigureArchive> { read_figure(path, false) }
+
+fn read_figure(path: &Path, whole: bool) -> Result<FigureArchive> {
     let display = path.to_string_lossy().into_owned();
     let mut file = std::fs::File::open(path).map_err(|error| ArchiveError::io(&error, &display))?;
     let mut magic = Vec::with_capacity(6);
@@ -319,7 +425,10 @@ pub fn read_archive(path: &Path) -> Result<FigureArchive> {
         return Err(ArchiveError::value("This file contains pickled (object) data. If you trust the file you can load it unsafely using the `allow_pickle=` keyword argument or `pickle.load()`."));
     }
     let mut zip = ZipReader::from_file(file)?;
-    let zip_names: Vec<String> = zip.names().into_iter().map(str::to_owned).collect();
+    let mut zip_names: Vec<String> = zip.names().into_iter().map(str::to_owned).collect();
+    let lineage_members = zip_names.iter().filter(|name| *name == LINEAGE_MEMBER).count();
+    if lineage_members > 1 { return Err(ArchiveError::value(format!("figure contains duplicate NPZ members {}", py_repr_names(&[LINEAGE_MEMBER])))); }
+    zip_names.retain(|name| name != LINEAGE_MEMBER);
     if zip_names.iter().any(|name| !name.ends_with(".npy")) { return Err(ArchiveError::value("figure NPZ may contain only NPY members")); }
     let names: Vec<&str> = zip_names.iter().map(|name| &name[..name.len() - 4]).collect();
     let mut counts: HashMap<&str, usize> = HashMap::with_capacity(names.len());
@@ -327,7 +436,13 @@ pub fn read_archive(path: &Path) -> Result<FigureArchive> {
     let duplicates: Vec<&str> = counts.iter().filter(|(_, count)| **count > 1).map(|(name, _)| *name).collect();
     if !duplicates.is_empty() { return Err(ArchiveError::value(format!("figure contains duplicate NPZ members {}", py_repr_names(&duplicates)))); }
     if !counts.contains_key(INFO_KEY) { return Err(ArchiveError::value(format!("figure carries no {INFO_KEY} document"))); }
-    let info = parse_info(&load_member(&mut zip, &format!("{INFO_KEY}.npy"))?)?;
+    let info_member = load_member(&mut zip, &format!("{INFO_KEY}.npy"))?;
+    let (info, lineage) = if lineage_members == 1 {
+        let info = parse_info(&info_member)?;
+        if info.get("sections").unwrap().get(LINEAGE_KEY).is_some() { return Err(ArchiveError::value("figure lineage is stored twice")); }
+        (info, SavedLineage(StoredLineage::Member(zip.read(LINEAGE_MEMBER)?)))
+    } else if whole { (parse_info(&info_member)?, SavedLineage::default()) } else { parse_info_apart(&info_member)? };
+    drop(info_member);
     let members = info.get("members").unwrap().as_object().unwrap();
     let declared: HashSet<&str> = members.iter().map(|(key, _)| key.as_str()).collect();
     let missing: Vec<&str> = declared.iter().copied().filter(|key| !counts.contains_key(key)).collect();
@@ -357,7 +472,7 @@ pub fn read_archive(path: &Path) -> Result<FigureArchive> {
             if let Some(position) = arrays.index.get(&member) { arrays.entries[*position].1.fortran = false; }
         }
     }
-    Ok(FigureArchive { info, arrays, datasets })
+    Ok(FigureArchive { info, arrays, datasets, lineage })
 }
 
 /// `_read_datasets(info, arrays)`.

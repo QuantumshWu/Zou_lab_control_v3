@@ -32,7 +32,7 @@ pub mod tree;
 pub mod zip;
 
 pub use error::{ArchiveError, ErrorKind, Result};
-pub use figure::{read_archive, write_figure_archive, write_figure_file, Entry, FigureArchive, Members};
+pub use figure::{open_archive, read_archive, write_figure_archive, write_figure_file, Entry, FigureArchive, Members, SavedLineage};
 pub use json::Json;
 pub use manifest::{ArchiveDataset, DatasetRef, ReadDataset};
 pub use npy::{NpyArray, NpyData, NpyType};

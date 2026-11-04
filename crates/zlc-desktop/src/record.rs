@@ -624,17 +624,23 @@ pub fn label(source: &Value) -> String {
 /// the file's arrays and plot configuration are still shown.
 pub fn describe(info: &Value) -> Record {
     let sections = &info["sections"];
-    let (plot, lineage, source) = (&sections["plot"], &sections["lineage"], &sections["source"]);
-    let described = lineage_nodes(lineage).and_then(|(root, nodes, acquisitions)| {
+    let (lineage, source) = (&sections["lineage"], &sections["source"]);
+    present(info, lineage_nodes(lineage).and_then(|(root, nodes, acquisitions)| {
         let flow = lineage_graph(root.as_deref(), &nodes, source)?;
         let played = played_pulses(&nodes, source);
         let records = acquisition_records(&nodes, &acquisitions);
         let devices = device_rows(lineage, &records, source, &played);
         Ok((logic_rows(&records, source), devices, flow, played.into_iter().map(|(pulse, ..)| pulse).collect()))
-    });
+    }))
+}
+
+/// The record of a figure whose lineage cannot be read at all.
+pub fn unreadable(info: &Value, error: &str) -> Record { present(info, Err(error.to_owned())) }
+
+fn present(info: &Value, described: Result<(Rows, Rows, Value, Vec<PlayedPulse>), String>) -> Record {
     let (logic, devices, flow, pulses) = described.unwrap_or_else(|error| (vec![("record".to_owned(), json!(format!("cannot read this figure's lineage: {error}")))],
         Vec::new(), json!({"nodes": [], "edges": []}), Vec::new()));
-    let tabs = json!([["Plot", rows_json(plot_rows(info, plot))], ["Logic", rows_json(logic)], ["Devices", rows_json(devices)],
+    let tabs = json!([["Plot", rows_json(plot_rows(info, &info["sections"]["plot"]))], ["Logic", rows_json(logic)], ["Devices", rows_json(devices)],
                       ["Flow", []]]);
     Record { tabs, flow, pulses }
 }

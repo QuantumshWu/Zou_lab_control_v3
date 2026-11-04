@@ -36,17 +36,30 @@ fn dataset_segment(key: &str, index: usize) -> String {
 /// An opened Figure's saved metadata: one, whatever the number of its datasets. Drawing and
 /// working with its panels never touch it. What the viewer's record tabs show of it is built
 /// when they are first looked at, a descendant's saved history when one is saved.
-pub struct SavedRecord { info: Value, read: OnceLock<Record>, asked: AtomicBool }
+pub struct SavedRecord { info: Value, lineage: zlc_archive::SavedLineage, read: OnceLock<Record>, asked: AtomicBool }
 
 impl SavedRecord {
-    fn read(&self) -> &Record { self.read.get_or_init(|| crate::record::describe(&self.info)) }
+    fn read(&self) -> &Record {
+        self.read.get_or_init(|| match self.lineage.read() {
+            Ok(Some(lineage)) => {
+                let mut info = self.info.clone();
+                info["sections"]["lineage"] = lineage.to_serde();
+                crate::record::describe(&info)
+            }
+            Ok(None) => crate::record::describe(&self.info),
+            Err(error) => crate::record::unreadable(&self.info, &error.message),
+        })
+    }
 }
 
 impl ImportedRun for SavedRecord {
     fn saved_history(&self) -> Value {
-        let sections = &self.info["sections"];
-        json!({"source": sections.get("source").cloned().unwrap_or_else(|| json!({})),
-               "lineage": sections.get("lineage").cloned().unwrap_or_else(|| json!({"root":null,"nodes":[],"device_settings":[]}))})
+        // A lineage that cannot be read fails the capture: this is no history (the save is refused).
+        match self.lineage.read() {
+            Ok(lineage) => json!({"source": self.info["sections"].get("source").cloned().unwrap_or_else(|| json!({})),
+                                  "lineage": lineage.map_or_else(|| json!({"root":null,"nodes":[],"device_settings":[]}), |lineage| lineage.to_serde())}),
+            Err(error) => json!(error.message),
+        }
     }
 }
 
@@ -63,6 +76,7 @@ pub struct ArchiveItem {
 pub struct DecodedArchive {
     pub path: String,
     pub info: Value,
+    pub lineage: zlc_archive::SavedLineage,
     pub items: Vec<ArchiveItem>,
 }
 
@@ -125,11 +139,9 @@ impl MountedArchive {
         let serial = NEXT_ARCHIVE.try_update(Ordering::Relaxed, Ordering::Relaxed, |next| next.checked_add(1))
             .map_err(|_| "Archive import identity counter exhausted")?;
         let sections = &decoded.info["sections"];
-        if !sections.get("source").is_none_or(Value::is_object) || !sections.get("lineage").is_none_or(Value::is_object) {
-            return Err("Imported Figure source and lineage must be objects".into());
-        }
+        if !sections.get("source").is_none_or(Value::is_object) { return Err("Imported Figure source must be an object".into()); }
         let label = crate::record::label(&sections["source"]);
-        let saved = Arc::new(SavedRecord { info: decoded.info, read: OnceLock::new(), asked: AtomicBool::new(false) });
+        let saved = Arc::new(SavedRecord { info: decoded.info, lineage: decoded.lineage, read: OnceLock::new(), asked: AtomicBool::new(false) });
         let mut mounted = Self { runtime, path: decoded.path, items: Vec::new(), saved, label };
         for (index, ((item, kind, window), panel)) in prepared.into_iter().zip(panel_ids).enumerate() {
             // Each dataset is its own sealed producer, as in v2. Independent

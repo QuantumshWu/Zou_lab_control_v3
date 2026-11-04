@@ -340,19 +340,40 @@ are retained in `snapshot_fields`; remote endpoints live in `device_transports`
 and never overwrite device-owned provenance. Remote snapshots forward the owner's
 same complete payload. An old publisher without the capability is unavailable.
 
+A figure archive keeps its lineage out of `info.npy`, in its own zip member
+`lineage.json`: UTF-8 JSON `{"schema": "zlc.figure.lineage/1", "lineage": ...,
+"apparatus_table"?: ...}`. Drawing a figure and working with its panels never read it;
+it is read for the Figure Viewer's record tabs, for saving the figure again and by
+`read_file`. A file written before this member existed keeps `sections.lineage` inside
+`info.npy` and reads the same.
+
 Figure archives store identical shared apparatus records once when they occur in
-multiple lineage/source records. The optional root `apparatus_table` has schema
-`zlc.figure.apparatus-table/1` and a `records` array; only designated record.apparatus
-positions use exact `{"$apparatus": index}` references. Rust and Python readers
-expand these references and remove the table before exposing the document. The
-public metadata structure is unchanged; records with different context, timestamps
-or payloads are never conflated. Files without a table retain their existing format.
+multiple records of one document (`info.npy` or `lineage.json`). The optional root
+`apparatus_table` has schema `zlc.figure.apparatus-table/1` and a `records` array; only
+designated record.apparatus positions use exact `{"$apparatus": index}` references.
+Rust and Python readers expand these references and remove the table before exposing
+the document. The public metadata structure is unchanged; records with different
+context, timestamps or payloads are never conflated. Files without a table retain their
+existing format.
 Finite dataset provenance includes all acquired ranges, not only the last event.
-Its `acquisition` projection contains deduplicated `runs`, `events` and placed
-`ranges`; event parents retain the source's settings epochs. Publication prefixes
-hold immutable backward metadata chains, so later commits cannot change a saved
-prefix or make an old read retain future facts. Viewer groups these records under
-their actual Logic runs and device states rather than adding a Flow node per point.
+Its `acquisition` projection holds `runs`, every event once and the placed `ranges`;
+event parents retain the source's settings epochs. Publication prefixes hold immutable
+backward metadata chains, so later commits cannot change a saved prefix or make an old
+read retain future facts. Viewer groups these records under their actual Logic runs and
+device states rather than adding a Flow node per point.
+
+`acquisition` is stored in columns (`zlc_core::acquisition`, lossless; format
+`zlc.acquisition/2`; without a `format` it is the older list of event objects, read the
+same): `signals` and `records` tables and `events`/`ranges` rows under rules. A rule is
+`{"rows": [...], "repeat": [n, ...], "step": [level, ...]}`: its rows repeated over the
+nested counts, the last fastest, each row at indices `i` being `rows[r] + sum(i[d] *
+step[d][r])`; a chunk without `repeat` is literal rows, so a dropped or retried shot
+just ends one rule. An event row is `[run, signal, shape, position, revision, ordinal,
+parent...]`, a range row `[extent0, extent1, event, origin0, origin1]`. `records` is a list
+of shapes `{"template": ..., "columns"?: [{"path": [...], "values": [...]}]}`: an event's
+record is the template with each column's `position`-th value at its path. A `window`
+(format `zlc.window/2`) is `{"width", "members": [event index, ...], "acquisition"}`, its
+runs and each member's ancestors held once.
 
 Plugin -> core events: `release {blocks, leases}`, `run.ready`, `run.progress`,
 `run.finished {run, outcome, result, error}`, `device.log {instance, line}` (one line of
