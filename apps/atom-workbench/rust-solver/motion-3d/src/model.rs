@@ -440,16 +440,15 @@ fn quadratic<const N:usize>(x:&[f64;MOST_W],psi:&[Complex])->Complex{
 }
 
 /// One node of the tables: every cluster's tables there, and its bounds: the dressing's (what it leaves
-/// out, `Model::dressing`), the elimination's (`Model::resonance`) and the undressed response's
-/// (`Model::undressed`).
-type Node=(Vec<Vec<Complex>>,[f64;3]);
+/// out, `Model::dressing`) and the elimination's (`Model::resonance`).
+type Node=(Vec<Vec<Complex>>,[f64;2]);
 
 /// The tables on one grid of n nodes per focused unit: per cluster, node-major, its layout's size per
 /// node (re/im interleaved); per node its bounds (`Node`); and each bound's largest over the nodes
-/// inside the reach (`Model::dressing`, `Model::resonance`, `Model::undressed`); the work its computed
+/// inside the reach (`Model::dressing`, `Model::resonance`); the work its computed
 /// nodes took, counted (linear.rs `counted`: complex multiply-adds).
 #[derive(Clone,Debug)]
-pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,bounds:Vec<[f64;3]>,reach:[f64;3],work:f64}
+pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,bounds:Vec<[f64;2]>,reach:[f64;2],work:f64}
 
 /// The trap of the trap beam: its principal axes (unit rows on the lab axes) and frequencies
 /// (rad/us) at the focus for a reference state, and the frequencies per lab axis.
@@ -483,11 +482,8 @@ pub struct Model{
     pub table_stalled:bool,
     /// The near light's dressing (ground.rs `Ground::dressing_bounds`), relative to the generator's
     /// scale, its largest over the tables' nodes inside the reach's intensities (as `resonance`): the bound
-    /// of what it leaves out, and what a bare
-    /// response -- each ground state at its own energy, undressed -- errs by where a block mixes, measured (the
-    /// GPU's exact response, gpu/program.rs: the static block's eigenbasis is pending).
+    /// of what it leaves out.
     pub dressing:f64,
-    pub undressed:f64,
     /// The fourth order's H^(4) entries left out at beats the second order folds: their mixings' squares
     /// (`FourthLayout`).
     pub fourth_dropped:f64,
@@ -610,7 +606,7 @@ impl Model{
         if ground.ground_states.len()!=GROUND{return Err(format!("The ground manifold has {} states, not {GROUND}",ground.ground_states.len()));}
         if ground.clusters.iter().any(|c|c.excited.is_empty()&&c.states.len()>MOST_STATES){return Err("A cluster of ground states has more than eight states".into());}
         let mut model=Model{ground,geometry,trap_beam,trap_beams,focused:vec![trap_unit],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
-            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3],work:0.},table_error:0.,table_limit:None,table_stalled:false,dressing:0.,undressed:0.,fourth_dropped:0.,resonance:0.,reach:vec![[0.;3]],
+            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;2],work:0.},table_error:0.,table_limit:None,table_stalled:false,dressing:0.,fourth_dropped:0.,resonance:0.,reach:vec![[0.;3]],
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
         model.choose_profiles(request)?;
         model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();
@@ -877,8 +873,8 @@ impl Model{
         }
         // The elimination's excited weight per ground state, every near beam at its peak (`resonance`).
         let resonance=(0..ng).map(|b|self.carriers.iter().flat_map(|c|c.beams.iter()).map(|&l|(0..ne).map(|i|e.responses[l][(i,b)].norm_sqr()).sum::<f64>()).sum::<f64>()).fold(0.,f64::max);
-        let(dressing,undressed)=g.dressing_bounds(&e,&intensities)?;
-        Ok((out,[dressing,resonance,undressed]))
+        let dressing=g.dressing_bounds(&e,&intensities)?;
+        Ok((out,[dressing,resonance]))
     }
 
     /// A cluster of ground states' fourth-order layout (`FourthLayout`), its tables from `size` on: H^(4)'s
@@ -1147,7 +1143,7 @@ impl Model{
         let entries:usize=self.layouts.iter().map(|l|l.size).sum();
         let within=|n:usize,coarse:usize|n.pow(d)<=most_nodes&&16*entries*(n.pow(d)+coarse.pow(d))<=most_bytes;
         if !within(2*FIRST_NODES-1,FIRST_NODES){return Err(format!("The elimination's tables take {entries} complex entries per node: beyond the work bounds"));}
-        self.tables=self.grid_tables(FIRST_NODES,mixing,None)?;(self.dressing,self.undressed)=(self.tables.reach[0],self.tables.reach[2]);
+        self.tables=self.grid_tables(FIRST_NODES,mixing,None)?;self.dressing=self.tables.reach[0];
         // The counted work per computed node, and the errors measured so far.
         let(mut per_node,mut errors)=(self.tables.work/FIRST_NODES.pow(d) as f64,vec![]);
         loop{
@@ -1161,7 +1157,7 @@ impl Model{
             if !within(n,coarse){self.table_limit=Some(coarse);break;}
             let fine=self.grid_tables(n,mixing,Some(&self.tables))?;let worst=self.interpolation_error(&fine);
             per_node=fine.work/(n.pow(d)-coarse.pow(d)) as f64;
-            (self.dressing,self.undressed)=(self.dressing.max(fine.reach[0]),self.undressed.max(fine.reach[2]));
+            self.dressing=self.dressing.max(fine.reach[0]);
             self.tables=fine;self.table_error=worst;errors.push(worst);
             if worst==0.{break;}
         }
