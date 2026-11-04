@@ -158,9 +158,16 @@
 //! again as a virtual state. What the block leaves out -- each entry's left-out part, the units'
 //! interference in the shifts and their next order -- moves its eigenvalues and eigenvectors, and the
 //! response at first order by Σ_ij M_i[z_i, z_j] (u_i†E u_j) u_j† (M_i(z) eigenstate i's response at energy z,
-//! its divided differences); its bound is the dressing's (`Ground::dressing_bounds`). Left out: the couplings
-//! that beat (a pair of carriers' Raman terms, the time step's) and the static couplings to other clusters
-//! (their fold, the rule's ledger).
+//! its divided differences); its bound is the dressing's (`Ground::dressing_bounds`). A block whose responses change
+//! by less than the numerical share (`MIXING_SHARE`) relative to themselves when its off-diagonal part is left out,
+//! measured against its eigenstates' at the eliminations that judge the trap, is taken unmixed (`Ground::unmixed`):
+//! each state its own eigenstate at its own energy h_bb + δ_c, one factorization per state as for a lone state, the
+//! largest change booked (`Ground::unmixed_error`). Its eigenstates would cost a factorization per eigen-energy and
+//! state for that change alone: a molasses' F = 2, whose sublevels the other carrier's shifts mix by 6e-4 to 0.2
+//! rad/us (its eigenstates turned 45°, the responses 1e-5 apart), a Zeeman ladder coupled at 6e-7 rad/us. A Λ
+//! scheme, a tweezer's vector shift across the field or a far beam's tensor shift mix the responses by 2e-3 to 6e-2:
+//! those blocks keep their eigenstates. Left out: the couplings that beat (a pair of carriers' Raman terms, the time
+//! step's) and the static couplings to other clusters (their fold, the rule's ledger).
 //!
 //! # Clusters and the mixed generator
 //! The states joined by kept couplings form a cluster (`Cluster`), the trajectory's state space
@@ -211,8 +218,9 @@
 //! - W3 leaves out what R already holds (`Ground::excluded`): the triples (d, d, c) through b′ = a for (d, a) a far
 //!   channel of (c, b) -- Σ's first order: in W3 its Rayleigh–Schrödinger form, the Brillouin–Wigner one less the
 //!   intermediate's admixture, which the dressing takes whole --, and in the triples (c, d, d), d ≠ c, d's light
-//!   shift between the cluster's states, the Hermitian part of (V_d†R_d)[b′, b], c's block's -- its anti-Hermitian
-//!   part, b's scattering by d, stays. Counted twice, they
+//!   shift between the cluster's states, the Hermitian part of (V_d†R_d)[b′, b], c's block's (an unmixed block's at
+//!   b′ = b alone: the off-diagonal part it leaves out W3 takes) -- its anti-Hermitian part, b's scattering by d,
+//!   stays. Counted twice, they
 //!   tripled the 808 nm tweezer's probe's rates and took F10's populations 0.4 off the core.
 //!
 //! The state is y = M^{1/2} x, M = 1 + X with X = R†R on the
@@ -258,6 +266,10 @@ use std::f64::consts::TAU;
 /// A drive's saturation parameter is 2(g/|ΔE|)²: the relative error of its linear response, the
 /// estimate of its fold.
 pub const SATURATION:f64=2.;
+/// The numerical share s²ε an unmixed block may change its responses by, relative to themselves (`Ground::unmixed_blocks`):
+/// the ledger's share of its numerical tolerances -- for now the tables' (model.rs `TABLE_SHARE`), the derived share
+/// when the ledger's shares give one; this is the one place it is set.
+pub const MIXING_SHARE:f64=crate::model::TABLE_SHARE;
 
 /// The co-rotating component of the beams of one frequency (`counter` false: V e^{−iνt},
 /// ν = δ = 2π(ν_beam − ν_frame)) or their counter-rotating one (R e^{−iνt}, ν = −2π(ν_beam + ν_frame)),
@@ -415,8 +427,9 @@ pub struct Elimination{
 }
 /// A carrier's block on a cluster (module documentation, # The static ground block): the cluster's
 /// static ground block as the carrier's responses see it -- H's, with every other near carrier's light
-/// shift --, its eigenstates (the columns of `vectors`, over the cluster's states), the bound of each
-/// entry's left-out part (row-major over the cluster's states, rad/us), and its eigen-energies' terms.
+/// shift --, its eigenstates (the columns of `vectors`, over the cluster's states; an unmixed block's the
+/// states themselves, `Ground::unmixed`), the bound of each entry's left-out part (row-major over the
+/// cluster's states, rad/us), and its eigen-energies' terms.
 #[derive(Clone,Debug)]
 pub struct Block{pub vectors:Dense,pub error:Vec<f64>,pub modes:Vec<Mode>}
 /// An eigen-energy's terms of the response R = Σ_E Σ_b G_b(z_E) V^f[:,b] P_E[b,:] (`Ground::dress_light`): its
@@ -531,6 +544,11 @@ pub struct Ground{
     /// eigenvalue of the decay D decoupled from its explicit states (K's anti-Hermitian part is −(i/2) D there, Σ
     /// is Hermitian), |x†(K + Σ − z)x| ≥ ½ x†D x.
     pub floors:Vec<f64>,
+    /// Per carrier and cluster whether its block is taken unmixed: each state at its own energy h_bb + δ_c, the block's
+    /// off-diagonal part left out (`Ground::unmixed_blocks`, # The static ground block); and the largest relative change
+    /// of their responses it makes, booked.
+    pub unmixed:Vec<Vec<bool>>,
+    pub unmixed_error:f64,
     /// Per carrier and ground state its dressed response's nearest pole over the trap (rad/us).
     pub channel_poles:Vec<Vec<f64>>,
     /// Per excited state, the excited states H's folded couplings join it to with a separation the
@@ -847,7 +865,7 @@ impl Ground{
         let duration=request.times_us.last().copied().unwrap_or(0.).max(0.);
         let mut ground=Ground{ground_states,excited_states,levels,decay,emission,beams:request.beams.clone(),folded:couplings.clone(),couplings,hamiltonian,units,outside:unit_outside,folds:unit_folds,interference,
             components,l0,carriers,duration,reach:vec![],excited_items:vec![],charge:0.,items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![],
-            explicit_of:vec![],excited_groups:vec![],dressed:vec![],vias:vec![],near_units:vec![],dressing:false,floors:vec![],channel_poles:vec![]};
+            explicit_of:vec![],excited_groups:vec![],dressed:vec![],vias:vec![],near_units:vec![],dressing:false,floors:vec![],unmixed:vec![],unmixed_error:0.,channel_poles:vec![]};
         ground.reach=ground.reach(request);
         Ok(ground)
     }
@@ -928,7 +946,8 @@ impl Ground{
     /// energies, its excited block, K, and every near beam's R_l and R2_l of its folded coupling -- each
     /// column through K decoupled from its cluster's explicit states (`decoupled`); before the rule's
     /// clusters at its state's own energy, from then on by each cluster's static block's eigenstates at their
-    /// energies, dressed by the other near light (`Ground::dress_light`, `Block`).
+    /// energies (an unmixed block's states at their own, `Ground::unmixed`), dressed by the other near light
+    /// (`Ground::dress_light`, `Block`).
     pub fn eliminate(&self,intensities:&[f64])->Result<Elimination,String>{
         let hamiltonian=self.hamiltonian_with(intensities);
         let(ng,ne)=(self.ground_states.len(),self.excited_states.len());
@@ -979,7 +998,8 @@ impl Ground{
     /// beams' amplitudes bounded by their units' intensities) -- with each entry's left-out part bounded (the
     /// units' interference: their pairs' products exactly, a unit's remainders off its polarization by their
     /// norms; the dressing's next order, the shift times the states' admixture under d); its eigenstates u_j
-    /// at z_j = λ_j + δ_c; and per eigenstate the cluster's states it takes, each with far channels with its
+    /// at z_j = λ_j + δ_c (an unmixed block's: the states themselves at h_bb + δ_c, `Ground::unmixed`); and per
+    /// eigenstate the cluster's states it takes, each with far channels with its
     /// self-energy Σ_b(z_j) = Σ_{(d,a)∈vias(c,b)} V_d^f[:,a] V_d^f[:,a]†/(z_j − Ẽ_a − δ_d) (an intermediate in the cluster
     /// itself at the state's own energy z_b = h_bb + δ_c, the difference in its error) -- each intermediate's
     /// energy dressed by every near carrier, Ẽ_a = E_a + Σ_d ΔE_a^d, its error the shifts' left-out parts and
@@ -1038,14 +1058,22 @@ impl Ground{
             }}
             let symmetric=Dense::from_fn(n0,n0,|i,j|(h[(i,j)]+h[(j,i)].conj())*0.5);
             let error:Vec<f64>=(0..n0*n0).map(|x|0.5*(left[x]+left[(x%n0)*n0+x/n0])).collect();
-            let(values,vectors)=hermitian_eigen(&symmetric);
-            // Eigenvalues equal to their round-off are one energy, its eigenstates' basis a choice: the decomposition's
-            // residual ‖h − U Λ U†‖_F bounds how far each lies from one of h's (Weyl), and two within twice it of the
-            // energy's first are not told apart -- one factorization, the response through its projector.
-            let residual={let mut r=symmetric.clone();for i in 0..n0{for j in 0..n0{for x in 0..n0{r[(i,j)]-=vectors[(i,x)]*vectors[(j,x)].conj()*values[x];}}}frobenius(&r)};
-            let mut order:Vec<usize>=(0..n0).collect();order.sort_by(|&a,&b|values[a].total_cmp(&values[b]));
-            let mut groups:Vec<Vec<usize>>=vec![];
-            for &j in &order{match groups.last_mut(){Some(g)if values[j]-values[g[0]]<=2.*residual=>g.push(j),_=>groups.push(vec![j])}}
+            // An unmixed block (`Ground::unmixed`): each state its own eigenstate at its own energy h_bb, the off-diagonal part
+            // left out.
+            let(values,vectors,groups)=if self.unmixed.get(c).is_some_and(|x|x[k]){
+                let mut vectors=Dense::zeros(n0,n0);for i in 0..n0{vectors[(i,i)]=Complex::ONE;}
+                ((0..n0).map(|i|symmetric[(i,i)].re).collect::<Vec<f64>>(),vectors,(0..n0).map(|i|vec![i]).collect::<Vec<Vec<usize>>>())
+            }else{
+                let(values,vectors)=hermitian_eigen(&symmetric);
+                // Eigenvalues equal to their round-off are one energy, its eigenstates' basis a choice: the decomposition's
+                // residual ‖h − U Λ U†‖_F bounds how far each lies from one of h's (Weyl), and two within twice it of the
+                // energy's first are not told apart -- one factorization, the response through its projector.
+                let residual={let mut r=symmetric.clone();for i in 0..n0{for j in 0..n0{for x in 0..n0{r[(i,j)]-=vectors[(i,x)]*vectors[(j,x)].conj()*values[x];}}}frobenius(&r)};
+                let mut order:Vec<usize>=(0..n0).collect();order.sort_by(|&a,&b|values[a].total_cmp(&values[b]));
+                let mut groups:Vec<Vec<usize>>=vec![];
+                for &j in &order{match groups.last_mut(){Some(g)if values[j]-values[g[0]]<=2.*residual=>g.push(j),_=>groups.push(vec![j])}}
+                (values,vectors,groups)
+            };
             // A term's bound, (2/γ) ‖V^f[:,b]‖ |P_E[b,:]| (‖(K + Σ − z)⁻¹‖ ≤ 2/γ, `Ground::floors`; |P_E[b,x]| ≤ sqrt(P_E[b,b])), moves
             // the generator by at most 3 ‖V^f‖ times it: left out where that is below double precision's round-off of its scale.
             let strength:Vec<f64>=cl.states.iter().map(|&b|self.carriers[c].beams.iter().map(|&l|norm(&column(&self.folded[l],b))).sum()).collect();
@@ -1664,7 +1692,7 @@ impl Ground{
             Some(NearUnit{carrier:c,coupling,remainders})}).collect();
         self.items=items;self.cut=cut;self.clusters=clusters;self.cluster=cluster;self.excited_items=excited;self.excited_groups=groups;self.dressed=dressed;
         self.floors=self.clusters.iter().map(|cl|0.5*hermitian_eigenvalues(&self.cluster_hamiltonian(&self.decay,cl)).into_iter().fold(f64::INFINITY,f64::min).max(0.)).collect();
-        self.dressing=true;self.channel_poles=self.dressed_poles()?;
+        self.dressing=true;self.unmixed_blocks()?;self.channel_poles=self.dressed_poles()?;
         self.poles=self.channel_poles.iter().map(|p|p.iter().copied().fold(f64::INFINITY,f64::min)).collect();self.pole=self.poles.iter().copied().fold(f64::INFINITY,f64::min);
         Ok(())
     }
@@ -1686,6 +1714,35 @@ impl Ground{
             }}
         }
         Ok(poles)
+    }
+
+    /// Which blocks are taken unmixed (`Ground::unmixed`, # The static ground block): those whose responses change by less
+    /// than the numerical share relative to themselves (`MIXING_SHARE`), measured against the block's
+    /// eigenstates' at every elimination `dressed_poles` judges the trap by, the varying units' corners and levels: per column,
+    /// every beam's ‖ΔR‖ + σ ‖ΔR2‖ over its ‖R‖ (a column the carrier does not couple, that only mixing gives one, over the
+    /// cluster's largest), R2 entering times a Doppler shift below the nearest pole σ the cluster's responses see, ‖R‖/‖R2‖ at
+    /// least (the first order's range; beyond its allowance the exact response, engine.rs); the largest change they keep,
+    /// booked (`Ground::unmixed_error`).
+    fn unmixed_blocks(&mut self)->Result<(),String>{
+        let(nc,nk,ne)=(self.carriers.len(),self.clusters.len(),self.excited_states.len());let mut change=vec![vec![0_f64;nk];nc];
+        let norm=|m:&Dense,n:Option<&Dense>,b:usize|(0..ne).map(|i|(m[(i,b)]-n.map_or(Complex::ZERO,|n|n[(i,b)])).norm_sqr()).sum::<f64>().sqrt();
+        for intensities in intensity_points(&self.units,&self.beams){
+            self.unmixed=vec![];let mixed=self.eliminate(&intensities)?;
+            self.unmixed=vec![vec![true;nk];nc];let unmixed=self.eliminate(&intensities)?;
+            for(c,carrier)in self.carriers.iter().enumerate(){for(k,cl)in self.clusters.iter().enumerate(){
+                let size=|m:&[Dense],n:Option<&[Dense]>,b:usize|carrier.beams.iter().map(|&l|norm(&m[l],n.map(|n|&n[l]),b)).sum::<f64>();
+                let coupled:Vec<usize>=cl.states.iter().copied().filter(|&b|self.couples(c,b)).collect();if coupled.is_empty(){continue;}
+                let largest=coupled.iter().map(|&b|size(&mixed.responses,None,b)).fold(0.,f64::max);
+                let pole=coupled.iter().map(|&b|size(&mixed.responses,None,b)/size(&mixed.derivatives,None,b)).fold(f64::INFINITY,f64::min);
+                for &b in &cl.states{
+                    let apart=size(&mixed.responses,Some(&unmixed.responses[..]),b)+pole*size(&mixed.derivatives,Some(&unmixed.derivatives[..]),b);if apart==0.{continue;}
+                    change[c][k]=change[c][k].max(apart/if self.couples(c,b){size(&mixed.responses,None,b)}else{largest});
+                }
+            }}
+        }
+        self.unmixed=change.iter().map(|x|x.iter().map(|&y|y<=MIXING_SHARE).collect()).collect();
+        self.unmixed_error=change.iter().flatten().copied().filter(|&y|y<=MIXING_SHARE).fold(0.,f64::max);
+        Ok(())
     }
 
     /// A cluster's generator at a point r and a time t (the dense reference of model.rs, with the
@@ -1983,11 +2040,15 @@ impl Ground{
     /// b′, less what the second order's dressing already holds (# Fourth order, module documentation # The near light's
     /// dressing): through a far channel (c2, b′) of (c4, b) with c1 = c2, the path R′'s Σ resums -- in W3 its
     /// Rayleigh–Schrödinger form, Σ's first order less the intermediate's admixture, which the dressing's
-    /// Brillouin–Wigner form takes whole --; and with c2 = c4 ≠ c1 at b′ = b the light shift of b by c2, Re (V_c2†R_c2)_bb,
-    /// which z holds (its imaginary part, b's scattering by c2, stays).
+    /// Brillouin–Wigner form takes whole --; and with c2 = c4 ≠ c1 the light shift by c2 between the cluster's states b′
+    /// and b, the Hermitian part of (V_c2†R_c2)[b′, b] (`column(b′)` its entry (b, b′)), which c1's block holds -- an
+    /// unmixed block (`Ground::unmixed`) at b′ = b alone, b's energy, its off-diagonal part W3's --; the anti-Hermitian
+    /// part, b's scattering by c2, stays.
     pub(crate) fn excluded(&self,c1:usize,c2:usize,c4:usize,b:usize,between:&mut [Complex],column:&dyn Fn(usize)->Complex){
+        let k=self.cluster[b];
         if c1==c2{for via in &self.vias[c4][b]{if via.carrier==c2{between[via.state]=Complex::ZERO;}}}
-        else if c2==c4{for &bp in &self.clusters[self.cluster[b]].states{between[bp]=(between[bp]-column(bp).conj())*0.5;}}
+        else if c2==c4{let unmixed=self.unmixed.get(c1).is_some_and(|x|x[k]);
+            for &bp in self.clusters[k].states.iter().filter(|&&bp|!unmixed||bp==b){between[bp]=(between[bp]-column(bp).conj())*0.5;}}
     }
     /// An excited state's post-jump trace factor κ_i = 1 − Γ_i²/(Δ_i² + Γ_i²/4) (# Fourth order) from channel (c, b): Δ_i
     /// its detuning from the channel's dressed energy, E_i + Re Σ_ii − z_E at the block's eigen-energy E of b's largest
