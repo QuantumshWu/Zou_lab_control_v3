@@ -26,7 +26,7 @@ from zlc_data.snapshot_projection import _subset_mapped_domain
 from .expression import (
     Operand, _answering, _apply_reduction_plans, _axis, _axis_labels, _domains, _primary, _reduce_plan, _schema, _structure,
     _unit, centred, evaluate, fit_cells, fit_operands, fit_schemas, fit_target, formula, group_domain, reads_for_fit,
-    stated_square, standard_error, statistic_of, typed_variables,
+    sigma_dof, stated_square, standard_error, statistic_of, typed_variables,
 )
 
 
@@ -104,23 +104,23 @@ def _merge(tally, index, part, operation) -> None:
     tally["n"][index] = total
 
 
-def _result(tally, operation) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    """(values, valid, sigma) of one tally, as the statistic reads over whole data."""
+def _result(tally, operation) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
+    """(values, valid, sigma, its degrees of freedom) of one tally, as the statistic reads over whole data."""
 
     count = tally["n"]
     valid = count > 0
     if operation == "count":
-        return count, valid, None
+        return count, valid, None, None
     if operation == "sum":
-        return tally["total"], valid, None
+        return tally["total"], valid, None, None
     if operation in ("min", "max"):
-        return tally["extreme"], valid, None
+        return tally["extreme"], valid, None, None
     if operation in ("any", "all"):
-        return tally["flag"], valid, None
+        return tally["flag"], valid, None, None
     if operation == "std":
-        return np.sqrt(np.divide(tally["m2"], count, out=np.full(count.shape, np.nan), where=valid)), valid, None
+        return np.sqrt(np.divide(tally["m2"], count, out=np.full(count.shape, np.nan), where=valid)), valid, None, None
     return (np.where(valid, tally["mean"], np.nan), valid,
-            standard_error(tally["m2"], count, tally.get("stated")))
+            standard_error(tally["m2"], count, tally.get("stated")), sigma_dof(count))
 
 
 # -- one variable's groups ---------------------------------------------------
@@ -266,15 +266,12 @@ class Accumulator:
             size = (len(rows), _domains(self.schema)[1].size if self.domain == 0 else len(columns))
             origin, ordinal = (rows[0], columns[0]), None
             schema = restricted(self.schema, origin, size)
-        planes = [np.concatenate([np.concatenate([results[(row, column)][k] for column in columns], axis=1)
-                                  for row in rows], axis=0)
-                  for k in (0, 1)]
-        sigma = results[(rows[0], columns[0])][2]
-        if sigma is not None:
-            sigma = np.concatenate([np.concatenate([results[(row, column)][2] for column in columns], axis=1)
-                                    for row in rows], axis=0)
+        values, valid, sigma, dof = (
+            None if results[(rows[0], columns[0])][k] is None else
+            np.concatenate([np.concatenate([results[(row, column)][k] for column in columns], axis=1) for row in rows], axis=0)
+            for k in range(4))
         dtype = schema.value_schema.dtype
-        return Chunk(Operand(schema, planes[0].astype(dtype, copy=False), planes[1], sigma), origin, ordinal)
+        return Chunk(Operand(schema, values.astype(dtype, copy=False), valid, sigma, dof), origin, ordinal)
 
 
 def _repeat_lines(schema: DatasetSchema, by: str) -> tuple[np.ndarray, np.ndarray]:
@@ -470,7 +467,7 @@ class Accumulation:
 def _take_rows(value: Operand, d: int, k: int, origin, extent) -> Operand:
     cut = (slice(None),) * d + (slice(k, k + 1),)
     return Operand(restricted(value.schema, origin, extent), value.values[cut], value.valid[cut],
-                   None if value.sigma is None else value.sigma[cut])
+                   None if value.sigma is None else value.sigma[cut], None if value.dof is None else value.dof[cut])
 
 
 def _origin(result: Operand, whole: DatasetSchema, where) -> tuple[int, int]:

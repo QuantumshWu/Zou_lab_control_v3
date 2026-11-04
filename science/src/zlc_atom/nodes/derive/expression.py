@@ -185,12 +185,10 @@ def variable_outputs(row: Mapping[str, object]) -> tuple[str, ...]:
 
 def _parameter_unit(relation: str, x_unit: str, y_unit: str) -> str:
     """A parameter's unit by the catalogue's relation to the x and y units: an
-    inverse axis reads as a panel's fit names it, the registry's reciprocal unit
-    (µs: MHz) when it declares one."""
+    inverse axis reads as a panel's fit names it (``inverse_symbol``)."""
 
     if relation == "inverse_axis_0":
-        inverse = DEFAULT_UNITS.inverse_for(x_unit)
-        return _unit_power(x_unit, -1) if inverse is None else inverse.symbol
+        return DEFAULT_UNITS.inverse_symbol(x_unit)
     return {"dimensionless": "1", "value": y_unit, "value_times_axis_0": _unit_power(f"{y_unit}*{x_unit}", 1),
             "axis_0": x_unit, "radian": "rad"}[relation]
 
@@ -632,7 +630,7 @@ def _masked(value, mask, negate, texts):
         return schema
     keep = _aligned(mask.values, steps, value.shape)
     keep = (~keep if negate else keep) & _aligned(mask.valid, steps, value.shape)
-    return Operand(schema, value.values, value.valid & keep, value.sigma)
+    return Operand(schema, value.values, value.valid & keep, value.sigma, value.dof)
 
 
 def changing_axes(schema: DatasetSchema, event: DatasetSchema | None) -> dict:
@@ -708,7 +706,8 @@ def _pick(item, term, evaluating, changing):
     if not isinstance(item, Operand):
         return picked
     return Operand(picked, _take(item.values, take), _take(item.valid, take),
-                   None if item.sigma is None else _take(item.sigma, take))
+                   None if item.sigma is None else _take(item.sigma, take),
+                   None if item.dof is None else _take(item.dof, take))
 
 
 def _grouped_axes(domain, axis, every):
@@ -848,6 +847,14 @@ def standard_error(spread, count, stated=None):
     return np.sqrt(np.divide(variance, count, out=np.full(count.shape, np.nan), where=count >= 1))
 
 
+def sigma_dof(count):
+    """The degrees of freedom of each :func:`standard_error`, the plot's rule (zlc-plot
+    projection ``sem_dof``): n samples estimate their own variance with n - 1; a lone
+    one stands on what it states, known otherwise."""
+    count = np.asarray(count, dtype=np.float64)
+    return np.where(count > 1, count - 1.0, np.inf)
+
+
 def _statistic(item, operation, names, by="", every=0, errors=False):
     """``item`` reduced by one statistic over named axes, in any domain, ``by``
     in groups of ``every``.  A group is valid when it has at least one valid
@@ -877,10 +884,11 @@ def _statistic(item, operation, names, by="", every=0, errors=False):
         values = _apply_reduction_plans(total, plans, "sum" if operation == "mean" else operation)
         if operation == "mean":
             values = np.divide(values, count, out=np.full(values.shape, np.nan), where=valid)
-    sigma = None
+    sigma = dof = None
     if errors and operation == "mean":
         sigma = standard_error(centred(item, plans, count, valid)[1], count, stated_square(item, plans))
-    return Operand(schema, np.asarray(values).astype(schema.value_schema.dtype, copy=False), valid, sigma)
+        dof = sigma_dof(count)
+    return Operand(schema, np.asarray(values).astype(schema.value_schema.dtype, copy=False), valid, sigma, dof)
 
 
 # -- fit: a statistic that eats one axis and yields parameters ---------------
@@ -935,9 +943,10 @@ def fit_cells(item, target, model, fit, warm=None):
     and errors with the parameters last.  ``warm`` is one row per cell."""
     y = _fit_tensor(np.where(item.valid, item.values, np.nan), target)
     sigma = None if item.sigma is None else _fit_tensor(np.where(item.valid, item.sigma, np.nan), target)
+    dof = None if item.dof is None else _fit_tensor(np.where(item.valid, item.dof, np.inf), target)
     lead, count = y.shape[:-1], target.x.size
-    answer = fit(model, target.x, y.reshape(-1, count),
-                 sigma=None if sigma is None else sigma.reshape(-1, count), warm=warm)
+    answer = fit(model, target.x, y.reshape(-1, count), sigma=None if sigma is None else sigma.reshape(-1, count),
+                 warm=warm, sigma_dof=None if dof is None else dof.reshape(-1, count))
 
     def stored(plane, tail=()):
         plane = np.asarray(plane).reshape(*lead, *tail)
@@ -985,12 +994,14 @@ class Operand:
     """One Dataset value while evaluating: its complete schema, read-only
     values and validity.  A non-finite float is invalid.  ``sigma``, when it
     has one, is the uncertainty of these samples: a pick and a where keep it,
-    an operator has no rule for it and drops it."""
+    an operator has no rule for it and drops it.  ``dof`` stands beside a sigma
+    that was estimated here: its degrees of freedom, which a fit weighs it by."""
 
     schema: DatasetSchema
     values: np.ndarray
     valid: np.ndarray | None = None
     sigma: np.ndarray | None = None
+    dof: np.ndarray | None = None
 
     def __post_init__(self):
         values = np.asarray(self.values)
@@ -1008,6 +1019,10 @@ class Operand:
             sigma = np.asarray(self.sigma, dtype=np.float64).view()
             sigma.setflags(write=False)
             object.__setattr__(self, "sigma", sigma)
+        if self.dof is not None:
+            dof = np.asarray(self.dof, dtype=np.float64).view()
+            dof.setflags(write=False)
+            object.__setattr__(self, "dof", dof)
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "valid", valid)
         object.__setattr__(self, "schema", _schema(

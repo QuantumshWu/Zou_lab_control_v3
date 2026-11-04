@@ -268,3 +268,80 @@ fn a_sealed_scan_takes() {
     }
     stage.host.shutdown();
 }
+
+/// Survival pooled over a group's repeats and its sites, point by point, as a panel's curve holds
+/// it: (x, y, sem, sem_dof) of the valid points, by `sem_from_moments` and `CurveSeries::sem_dof`.
+fn panel_series(runtime: &Runtime, group: std::ops::Range<usize>, sites: usize) -> [Vec<f64>; 4] {
+    let source = runtime.signals().into_iter().rev().find(|item| &*item.signal == SIGNAL && item.published).unwrap();
+    let latest = runtime.read_latest(&source.generation, SIGNAL).unwrap();
+    let dataset = latest.canonical().unwrap();
+    let placement = dataset.segments().next().unwrap();
+    let zlc_core::AnyBuffer::Bool(values) = placement.data().values() else { panic!("dtype") };
+    let zlc_core::dataset::Validity::Mask(mask) = placement.data().validity() else { panic!("a mask") };
+    let schema = dataset.schema();
+    let axis = schema.domain(zlc_core::schema::DomainRole::Point).axes()[0].clone();
+    let zlc_core::schema::Coordinates::Numeric(zlc_core::AnyBuffer::F64(x)) = axis.coordinates() else { panic!("coordinates") };
+    let points = x.as_slice().len();
+    let mut series: [Vec<f64>; 4] = Default::default();
+    for point in 0..points {
+        let samples: Vec<f64> = group.clone().flat_map(|row| (0..sites).map(move |site| (row * points + point) * sites + site))
+            .filter(|&at| mask.as_slice()[at]).map(|at| f64::from(u8::from(values.as_slice()[at]))).collect();
+        if samples.is_empty() { continue; }
+        let n = samples.len() as f64;
+        let (mean, square) = (samples.iter().sum::<f64>() / n, samples.iter().map(|sample| sample * sample).sum::<f64>() / n);
+        let sem = zlc_plot::projection::reduce::sem_from_moments(&[mean], &[square], &[samples.len() as i64], None)[0];
+        series[0].push(x.as_slice()[point]);
+        series[1].push(mean);
+        series[2].push(sem);
+        series[3].push(if samples.len() > 1 { n - 1.0 } else { f64::INFINITY });
+    }
+    series
+}
+
+#[test]
+fn a_small_group_fits_as_a_panel_fit_does() {
+    use zlc_plot::fit::param_units::{FitParameterUnits, FitQuantityUnits};
+    use zlc_plot::fit::{CellData, FitCell, FitEngine, FitRequest};
+    let Some(stage) = stage() else { return };
+    let (repeats, every, points, sites) = (12, 2, 60, 8);
+    let source = stage.scan(json!({"repeats": repeats, "points": points, "sites": sites, "unit": "mV"}));
+    let scanned = stage.finish(&[&source], Duration::from_secs(60));
+    assert_eq!(scanned[&source].0, "completed", "{:?}", scanned[&source].1);
+    let run = stage.derive("small", &group_variables(every, "duration"), &PARAMETERS);
+    let ended = stage.finish(&[&run], Duration::from_secs(60));
+    assert_eq!(ended[&run].0, "completed", "{:?}", ended[&run].1);
+
+    // The engine as a panel's fit calls it, each group warm from the one before as Derive's is.
+    let engine = FitEngine::default();
+    let model = engine.registry.get("damped_sine").unwrap();
+    let columns: Vec<_> = PARAMETERS.iter().map(|name| parameter(&stage.runtime, &format!("@logic/small/{name}"))).collect();
+    let (mut warm, mut widened): (Option<Vec<f64>>, f64) = (None, 0.0);
+    for group in 0..repeats / every {
+        let [x, y, sem, dof] = panel_series(&stage.runtime, group * every..(group + 1) * every, sites);
+        let cell = |dof: Option<Arc<[f64]>>| FitCell { data: CellData::Points { coordinates: vec![x.clone().into()], observations: Some(y.clone().into()) },
+            sigma: Some(sem.clone().into()), sigma_dof: dof, selected_indices: None, data_revision: 0, warm_start: warm.clone() };
+        let panel = engine.fit(&model, &cell(Some(dof.clone().into())), &FitRequest::default()).unwrap();
+        let gaussian = engine.fit(&model, &cell(None), &FitRequest::default()).unwrap();
+        assert!(panel.success, "group {group}: {}", panel.message);
+        for (k, column) in columns.iter().enumerate() {
+            let (value, error) = (panel.parameter_values[k], panel.standard_errors[k]);
+            assert!((column.1[group] - value).abs() <= 1e-3 * error, "group {group} {}: {} against the panel's {value} ± {error}", PARAMETERS[k], column.1[group]);
+            // A decay far beyond the scan is a flat direction: its error, larger than itself, is rounding's to move.
+            let determined = error < value.abs();
+            assert!(!determined || (column.2[group] - error).abs() <= 1e-3 * error, "group {group} {}: error {} against the panel's {error}", PARAMETERS[k], column.2[group]);
+            if determined { widened = widened.max((gaussian.standard_errors[k] / error - 1.0).abs()); }
+        }
+        warm = Some(panel.parameter_values.clone());
+    }
+    assert!(widened > 1e-2, "without its degrees of freedom the fit would read otherwise: {widened}");
+
+    // The unit: what a panel's fit names over the same axis.
+    let axis = zlc_core::units::DEFAULT_UNITS.resolve("mV").unwrap();
+    let units = FitParameterUnits { registry: None, histogram: false, rolling_primary: false,
+        quantities: Box::new(|_| Some(FitQuantityUnits { canonical_unit: axis.clone(), display_unit: axis.clone() })) };
+    let frequency = model.parameters.iter().find(|spec| spec.name == "baseband_frequency").unwrap();
+    let named = units.parameter_conversion(frequency, false, None).unwrap().symbol;
+    assert_eq!(named, "mV^-1");
+    assert_eq!(parameter(&stage.runtime, "@logic/small/rabi_baseband_frequency").0, named);
+    stage.host.shutdown();
+}

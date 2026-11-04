@@ -390,16 +390,17 @@ class RunContext:
                                                  "frame_ms": int(frame_ms)})
         return pathlib.Path(answer["path"])
 
-    def fit(self, model_id: str, x: Any, y: Any, sigma: Any = None, warm: Any = None) -> Any:
+    def fit(self, model_id: str, x: Any, y: Any, sigma: Any = None, warm: Any = None, sigma_dof: Any = None) -> Any:
         """One independent fit per row of ``y`` ``(cells, n)`` over ``x`` ``(n)`` by the core's
         fit engine; ``sigma`` as ``y``, ``warm`` ``(cells, parameters)`` beside the engine's
-        own seeds (a row with a NaN is none). Answers a ``zlc_plugin.fit.FitAnswer``: a
+        own seeds (a row with a NaN is none), ``sigma_dof`` each sigma's degrees of freedom
+        as a panel's fit has them (infinite: known otherwise). Answers a ``zlc_plugin.fit.FitAnswer``: a
         cell that cannot be fitted is that cell's ``success`` False. The run's Stop ends
         the batch and raises here."""
 
         from .fit import fit_answer, fit_request
 
-        request = fit_request(model_id, x, y, sigma, warm)
+        request = fit_request(model_id, x, y, sigma, warm, sigma_dof)
         if self._run.cancel.is_set():
             raise PluginError("cancelled", "the run was stopped")
         return fit_answer(self._request("run.fit", request))

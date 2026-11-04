@@ -57,10 +57,11 @@ fn rows(array: &Array, name: &str, cells: usize, columns: usize) -> Result<Vec<f
     reals(array, name)
 }
 
-/// The batch `y` `(cells, n)` over `x` `(n)`, with `sigma` `(cells, n)` and warm starts
-/// `warm` `(cells, parameters)`, a row with a non-finite value being none for its cell.
+/// The batch `y` `(cells, n)` over `x` `(n)`, with `sigma` `(cells, n)`, its degrees of
+/// freedom `sigma_dof` as a panel's fit has them, and warm starts `warm`
+/// `(cells, parameters)`, a row with a non-finite value being none for its cell.
 /// One cell's failure is that cell's: only a bad request or `Cancelled` fails the call.
-pub fn fit_answer(engine: &FitEngine, model_id: &str, x: &Array, y: &Array, sigma: Option<&Array>, warm: Option<&Array>,
+pub fn fit_answer(engine: &FitEngine, model_id: &str, x: &Array, y: &Array, sigma: Option<&Array>, sigma_dof: Option<&Array>, warm: Option<&Array>,
                   cancelled: Option<&(dyn Fn() -> bool + Sync)>) -> Result<FitAnswer, FitError> {
     let model = engine.registry.get(model_id).map_err(|error| FitError::value(error.0))?;
     if !fits_a_series(&model) { return Err(FitError::value(format!("run.fit: {model_id} does not fit a series"))); }
@@ -70,12 +71,13 @@ pub fn fit_answer(engine: &FitEngine, model_id: &str, x: &Array, y: &Array, sigm
     let coordinates: Arc<[f64]> = reals(x, "x")?.into();
     let observations = rows(y, "y", cells, points)?;
     let sigma = sigma.map(|sigma| rows(sigma, "sigma", cells, points)).transpose()?;
+    let sigma_dof = sigma_dof.map(|dof| rows(dof, "sigma_dof", cells, points)).transpose()?;
     let warm = warm.map(|warm| rows(warm, "warm", cells, count)).transpose()?;
     let row = |values: &[f64], width: usize, cell: usize| values[cell * width..(cell + 1) * width].to_vec();
     let batch: Vec<FitCell> = (0..cells).map(|cell| FitCell {
         data: CellData::Points { coordinates: vec![coordinates.clone()], observations: Some(row(&observations, points, cell).into()) },
         sigma: sigma.as_ref().map(|sigma| row(sigma, points, cell).into()),
-        sigma_dof: None, selected_indices: None, data_revision: 0,
+        sigma_dof: sigma_dof.as_ref().map(|dof| row(dof, points, cell).into()), selected_indices: None, data_revision: 0,
         warm_start: warm.as_ref().map(|warm| row(warm, count, cell)).filter(|start| start.iter().all(|value| value.is_finite())),
     }).collect();
     let outcomes = if batch.is_empty() { Vec::new() } else {
@@ -110,14 +112,14 @@ pub fn fit_answer(engine: &FitEngine, model_id: &str, x: &Array, y: &Array, sigm
     Ok(answer)
 }
 
-/// One `run.fit` request `{model, x, y, sigma, warm}`; a run that stops ends its batch.
+/// One `run.fit` request `{model, x, y, sigma, sigma_dof, warm}`; a run that stops ends its batch.
 pub fn answer(params: &Value, lent: &Lent, stop: &AtomicBool) -> Result<Value, CallError> {
     let refused = |message: String| CallError::new(ErrorKind::Refused, message);
     let optional = |field: &str| (!params[field].is_null()).then(|| lent.array(&params[field])).transpose().map_err(refused);
     let (x, y) = (lent.array(&params["x"]).map_err(refused)?, lent.array(&params["y"]).map_err(refused)?);
-    let (sigma, warm) = (optional("sigma")?, optional("warm")?);
+    let (sigma, sigma_dof, warm) = (optional("sigma")?, optional("sigma_dof")?, optional("warm")?);
     let cancelled = || stop.load(Ordering::Relaxed);
-    match fit_answer(&ENGINE, params["model"].as_str().unwrap_or(""), &x, &y, sigma.as_ref(), warm.as_ref(), Some(&cancelled)) {
+    match fit_answer(&ENGINE, params["model"].as_str().unwrap_or(""), &x, &y, sigma.as_ref(), sigma_dof.as_ref(), warm.as_ref(), Some(&cancelled)) {
         Ok(answer) => Ok(answer.to_json()),
         Err(FitError::Cancelled) => Err(CallError::new(ErrorKind::Cancelled, "the run was stopped")),
         Err(error) => Err(refused(error.failure_text())),
@@ -166,7 +168,7 @@ mod tests {
         y[points..2 * points].fill(f64::NAN);
         y[3 * points + 5..4 * points].fill(f64::NAN);
         for hole in [3, 17, 40] { y[4 * points + hole] = f64::NAN; }
-        let answer = fit_answer(&engine, "damped_sine", &array(x.clone(), &[points]), &array(y.clone(), &[cells, points]), None, None, None).unwrap();
+        let answer = fit_answer(&engine, "damped_sine", &array(x.clone(), &[points]), &array(y.clone(), &[cells, points]), None, None, None, None).unwrap();
         assert_eq!(answer.parameters, ["amplitude", "offset", "baseband_frequency", "decay_time", "phase"]);
         assert_eq!(answer.success, [true, false, true, false, true, true], "{:?}", answer.messages);
         for cell in [1, 3] {
@@ -216,17 +218,17 @@ mod tests {
         let mut starts: Vec<f64> = truth.iter().flatten().copied().collect();
         starts[5] = f64::NAN;
         let warm = array(starts, &[cells, 5]);
-        let answer = fit_answer(&engine, "damped_sine", &x, &y, Some(&sigma), Some(&warm), None).unwrap();
+        let answer = fit_answer(&engine, "damped_sine", &x, &y, Some(&sigma), None, Some(&warm), None).unwrap();
         assert_eq!(answer.success, [true, true, true], "{:?}", answer.messages);
         // With the noise's own sigma the reduced chi-square is near one.
         assert!(answer.reduced_chi_square.iter().all(|chi| (0.4..1.8).contains(chi)), "{:?}", answer.reduced_chi_square);
 
         let short = array(vec![0.0; 3], &[3]);
-        for result in [fit_answer(&engine, "damped_sine", &short, &y, None, None, None), fit_answer(&engine, "damped_sine", &x, &y, Some(&short), None, None),
-                       fit_answer(&engine, "damped_sine", &x, &y, None, Some(&sigma), None), fit_answer(&engine, "no_such_model", &x, &y, None, None, None)] {
+        for result in [fit_answer(&engine, "damped_sine", &short, &y, None, None, None, None), fit_answer(&engine, "damped_sine", &x, &y, Some(&short), None, None, None),
+                       fit_answer(&engine, "damped_sine", &x, &y, None, None, Some(&sigma), None), fit_answer(&engine, "no_such_model", &x, &y, None, None, None, None)] {
             assert!(result.is_err());
         }
-        let empty = fit_answer(&engine, "damped_sine", &x, &array(Vec::new(), &[0, points]), None, None, None).unwrap();
+        let empty = fit_answer(&engine, "damped_sine", &x, &array(Vec::new(), &[0, points]), None, None, None, None).unwrap();
         assert!(empty.values.is_empty() && empty.parameters.len() == 5);
     }
 
@@ -235,7 +237,7 @@ mod tests {
         let engine = FitEngine::default();
         let (x, y) = batch(&truths(2), 60, 0.02);
         let stopped = || true;
-        let result = fit_answer(&engine, "damped_sine", &array(x, &[60]), &array(y, &[2, 60]), None, None, Some(&stopped));
+        let result = fit_answer(&engine, "damped_sine", &array(x, &[60]), &array(y, &[2, 60]), None, None, None, Some(&stopped));
         assert!(matches!(result, Err(FitError::Cancelled)));
 
         // A Stop that comes once the batch's one bucket is solving: its cells not begun never start.
@@ -243,7 +245,7 @@ mod tests {
         let (x, y) = batch(&truths(cells), points, 0.02);
         let asked = std::sync::atomic::AtomicUsize::new(0);
         let begun = || asked.fetch_add(1, Ordering::Relaxed) > cells + cells / 2;
-        let result = fit_answer(&engine, "damped_sine", &array(x, &[points]), &array(y, &[cells, points]), None, None, Some(&begun));
+        let result = fit_answer(&engine, "damped_sine", &array(x, &[points]), &array(y, &[cells, points]), None, None, None, Some(&begun));
         assert!(matches!(result, Err(FitError::Cancelled)));
         assert!(asked.load(Ordering::Relaxed) < 2 * cells, "{asked:?}");
     }
@@ -272,7 +274,7 @@ mod tests {
         let (x, y) = (array(x, &[points]), array(y, &[cells, points]));
         for round in 0..3 {
             let started = Instant::now();
-            let answer = fit_answer(&engine, "damped_sine", &x, &y, None, None, None).unwrap();
+            let answer = fit_answer(&engine, "damped_sine", &x, &y, None, None, None, None).unwrap();
             let good = answer.success.iter().filter(|success| **success).count();
             println!("round {round}: {cells} cells of {points} points, damped_sine: {:.1} ms, {good} succeeded", started.elapsed().as_secs_f64() * 1e3);
         }
