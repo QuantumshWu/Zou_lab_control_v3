@@ -232,6 +232,17 @@ impl Gpu{
         Ok(words[..4*q*n*n].iter().map(|z|Complex::new(z[0] as f64,z[1] as f64)).collect())
     }
 
+    /// A trajectory after a jump at its position and time on the GPU (engine.rs `Engine::jump`, the first
+    /// order in the Doppler shift; a check's entry): the kernel's `jump_probe`.
+    pub fn jump_probe(&self,program:&Program,settings:&Settings,t:&Trajectory)->Result<Trajectory,String>{
+        self.context.make_current()?;
+        let state=Buffer::with(&self.stream,&[program::State::new(t,t,settings)])?;let scratch=Buffer::new(8*program.scratch())?;
+        let mut run=program::Run::empty();run.seed=t.seed;
+        let f=self.function("jump_probe")?;self.stream.launch(&f,1,32,&[&program.params,&run,&state.pointer,&scratch.pointer])?;
+        let mut out=[program::State::default()];self.stream.download(&state,&mut out)?;
+        Ok(out[0].trajectory(settings,t.seed))
+    }
+
     /// The tasks a wave holds: as many as a quarter of the free memory takes (at most half a gigabyte).
     fn wave(&self,program:&Program,w:&Windows)->Result<usize,String>{
         let slot=std::mem::size_of::<program::State>()+8*w.ring_stride+56*w.listed.len()+8*program.scratch()+8*MOST_INTERVALS*SLOT_RECORD;

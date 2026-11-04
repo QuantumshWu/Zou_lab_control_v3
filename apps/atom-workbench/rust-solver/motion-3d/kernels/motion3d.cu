@@ -2330,6 +2330,20 @@ extern "C" __global__ void exact_probe(const Program P,const State* S,float2* X)
     t.time=S->time;t.cluster=S->cluster;
     point(P,W,t,lane);exact_components(P,W,P.clusters[t.cluster],lane,X);
 }
+// A check's jump (tests/gpu.rs): a trajectory's state, a jump at its position and time (the first order
+// in the Doppler shift), the state it leaves.
+extern "C" __global__ void jump_probe(const Program P,const Run R,State* S,float2* scratch){
+    __shared__ Warp W;const int lane=threadIdx.x&31;if(threadIdx.x>=32)return;
+    Traj t;
+    #pragma unroll
+    for(int i=0;i<3;i++){t.q[i]=S->q[i];t.p[i]=S->p[i];}
+    t.time=S->time;t.logn=S->logn;t.threshold=S->threshold;t.log_threshold=S->log_threshold;t.doppler=S->doppler;t.cluster=S->cluster;t.jumps=S->jumps;
+    t.death=S->death;t.index=S->index;t.beats=S->beats;
+    if(lane<MAXM)W.psi[lane]=S->psi[lane];
+    __syncwarp();jump(P,R,W,t,false,lane,scratch);__syncwarp();
+    if(lane<MAXM)S->psi[lane]=W.psi[lane];
+    if(lane==0){for(int i=0;i<3;i++)S->p[i]=t.p[i];S->cluster=t.cluster;S->jumps=t.jumps;S->threshold=t.threshold;S->log_threshold=t.log_threshold;S->logn=t.logn;}
+}
 // Checks (tests/gpu.rs): a stream's first words and deviates; the structs' sizes.
 #define OFFSET(T,f) ((u32)(u64)&(((T*)0)->f))
 extern "C" __global__ void rng_stream(u64 seed,u32 purpose,u64 trajectory,u32 event,u32* words,double* deviates){

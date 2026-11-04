@@ -104,6 +104,12 @@ pub struct Run{
     pub(crate) listed:[i32;MOST_LISTED],
 }
 
+impl Run{
+    /// A launch of no wave (a check's entry, `Gpu::jump_probe`): every buffer null, the seed zero.
+    pub(crate) fn empty()->Run{Run{states:0,rings:0,samples:0,sums:0,scratch:0,tasks:0,profile:0,records:0,harmonic:0,costs:0,held:Held::default(),seed:0,
+        outputs:0,steps:0,reach:0,begin:0,end:0,half:[0;3],ring:[0;3],ring_at:[0;3],ring_stride:0,scratch_stride:0,nlisted:0,pad:0,listed:[0;MOST_LISTED]}}
+}
+
 /// The sizes, offsets and constants the kernel's `layout` reports, for the check that the twins and
 /// the constants they share match.
 pub fn layout()->[u32;25]{
