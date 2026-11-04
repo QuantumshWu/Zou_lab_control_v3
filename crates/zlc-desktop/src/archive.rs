@@ -5,7 +5,7 @@ use std::{collections::HashSet, sync::{Arc, atomic::{AtomicU64, Ordering}}};
 use zlc_plot::session::ImagePointOverlay;
 use serde_json::{Map, Value, json};
 use zlc_core::{store::Snapshot,
-    runtime::{Bundle, Declaration, Generation, Input, Read, Runtime, Storage}};
+    runtime::{Bundle, Declaration, Generation, ImportedRun, Input, Read, Runtime, Storage}};
 
 use crate::panels::PanelInput;
 
@@ -31,7 +31,14 @@ fn dataset_segment(key: &str, index: usize) -> String {
     let safe = safe.trim_matches(|character| character == '.' || character == '_');
     if safe.is_empty() { format!("dataset-{}", index + 1) } else { safe.to_owned() }
 }
-const IMPORTED_LINEAGE: &str = "zlc.figure.imported-lineage";
+
+/// The saved source and lineage what an archive's runs publish descends from: one, whatever
+/// the number of its datasets, and asked for only when a descendant is saved.
+struct SavedHistory { source: Value, lineage: Value }
+
+impl ImportedRun for SavedHistory {
+    fn saved_history(&self) -> Value { json!({"source": self.source, "lineage": self.lineage}) }
+}
 
 pub struct ArchiveItem {
     pub key: String,
@@ -68,7 +75,6 @@ pub struct MountedItem {
 pub struct MountedArchive {
     runtime: Runtime,
     path: String,
-    info: Value,
     items: Vec<MountedItem>,
     /// What the Figure Viewer's info pane shows of it (read once, at mount).
     pub record: crate::record::Record,
@@ -108,13 +114,14 @@ impl MountedArchive {
         let serial = NEXT_ARCHIVE.try_update(Ordering::Relaxed, Ordering::Relaxed, |next| next.checked_add(1))
             .map_err(|_| "Archive import identity counter exhausted")?;
         let record = crate::record::describe(&decoded.info);
-        let mut mounted = Self { runtime, path: decoded.path, info: decoded.info, items: Vec::new(), record };
-        let source = mounted.info["sections"].get("source").cloned().unwrap_or_else(|| json!({}));
-        let lineage = mounted.info["sections"].get("lineage").cloned()
-            .unwrap_or_else(|| json!({"root":null,"nodes":[],"device_settings":[]}));
+        let mut mounted = Self { runtime, path: decoded.path, items: Vec::new(), record };
+        let mut info = decoded.info;
+        let source = info["sections"].get_mut("source").map_or_else(|| json!({}), Value::take);
+        let lineage = info["sections"].get_mut("lineage").map_or_else(|| json!({"root":null,"nodes":[],"device_settings":[]}), Value::take);
         if !source.is_object() || !lineage.is_object() {
             return Err("Imported Figure source and lineage must be objects".into());
         }
+        let history: Arc<dyn ImportedRun> = Arc::new(SavedHistory { source, lineage });
         for (index, ((item, kind, window), panel)) in prepared.into_iter().zip(panel_ids).enumerate() {
             // Each dataset is its own sealed producer, as in v2. Independent
             // archived datasets must not become one artificial atomic event.
@@ -124,8 +131,7 @@ impl MountedArchive {
             if mounted.items.iter().any(|mounted| mounted.signal == signal) { signal = format!("{FIGURE_SIGNALS}{serial}/dataset-{}", index + 1).into(); }
             let overlay_signal: Option<Arc<str>> = item.overlay_plane.as_ref()
                 .map(|_| format!("{signal}/overlay").into());
-            let metadata = json!({"operation":"figure-import", "archive":mounted.path, "dataset":item.key,
-                (IMPORTED_LINEAGE):{"source":source,"lineage":lineage}});
+            let metadata = json!({"operation":"figure-import", "archive":mounted.path, "dataset":item.key});
             let mut declarations = vec![Declaration { signal:signal.clone(),
                 schema:item.plane.schema().clone(), storage:Storage::Snapshot }];
             let plane = item.plane.clone();
@@ -136,8 +142,8 @@ impl MountedArchive {
                     schema:status.schema().clone(), storage:Storage::Snapshot });
                 inputs.push(Input::Dataset { signal:status_signal, ordinal:None, snapshot:status });
             }
-            let generation = mounted.runtime.begin(owner, declarations,
-                metadata).map_err(|error| error.to_string())?;
+            let generation = mounted.runtime.begin_imported(owner, declarations,
+                metadata, history.clone()).map_err(|error| error.to_string())?;
             // Register ownership before either fallible write. On any error
             // Drop retires only these candidate generations, never the old UI.
             mounted.items.push(MountedItem { panel, key:item.key, signal:signal.clone(), generation:generation.clone(), plane, publication:None,

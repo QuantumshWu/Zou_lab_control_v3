@@ -41,15 +41,26 @@ fn split_signal(signal: &str) -> Option<(&str, &str)> {
 
 fn signal_name(signal: &str) -> String { split_signal(signal).map_or(signal, |(_, output)| output).to_owned() }
 
-fn lineage_nodes(lineage: &Value) -> Result<(Option<String>, Vec<Node>), String> {
+/// The root, the nodes (their event records without their acquisitions) and each node's
+/// acquisition where it is: a scan's records every shot, and no node carries a copy of that.
+fn lineage_nodes(lineage: &Value) -> Result<(Option<String>, Vec<Node>, Vec<(String, &Value)>), String> {
     let root = lineage.get("root").and_then(Value::as_str).map(str::to_owned);
     let mut nodes = Vec::new();
+    let mut acquisitions = Vec::new();
     for entry in lineage.get("nodes").and_then(Value::as_array).ok_or("figure lineage nodes must be an array")? {
         let id = entry.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).ok_or("figure lineage node IDs must be text")?.to_owned();
         if nodes.iter().any(|node: &Node| node.id == id) { return Err("figure lineage node IDs must be unique".into()); }
         let strings = |key: &str| -> Vec<String> { entry.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect() };
+        let event_record = match entry.get("event_record") {
+            Some(Value::Object(fields)) => {
+                if let Some(acquisition) = fields.get("acquisition") { acquisitions.push((id.clone(), acquisition)); }
+                Value::Object(fields.iter().filter(|(name, _)| *name != "acquisition").map(|(name, value)| (name.clone(), value.clone())).collect())
+            }
+            Some(other) => other.clone(),
+            None => json!({}),
+        };
         nodes.push(Node { id, event: entry.get("event").cloned().unwrap_or(Value::Null), parents: strings("parents"), signals: strings("signals"),
-                          record: Arc::new(entry.get("record").cloned().unwrap_or_else(|| json!({}))), event_record: entry.get("event_record").cloned().unwrap_or_else(|| json!({})) });
+                          record: Arc::new(entry.get("record").cloned().unwrap_or_else(|| json!({}))), event_record });
     }
     if root.is_none() && !nodes.is_empty() { return Err("empty figure lineage cannot contain nodes".into()); }
     if let Some(root) = &root {
@@ -57,7 +68,7 @@ fn lineage_nodes(lineage: &Value) -> Result<(Option<String>, Vec<Node>), String>
             return Err("figure lineage refers to an unknown node".into());
         }
     }
-    Ok((root, nodes))
+    Ok((root, nodes, acquisitions))
 }
 
 /// A value's text such that two values are `==` exactly when their texts are equal: object
@@ -94,7 +105,7 @@ fn equality_key(value: &Value) -> String {
 
 /// Finite acquisitions retain each point's facts without adding nodes to the Flow graph.
 /// Linear in the captures: ranges are grouped by event and records found by their identity.
-fn acquisition_records(nodes: &[Node]) -> Vec<Node> {
+fn acquisition_records(nodes: &[Node], acquisitions: &[(String, &Value)]) -> Vec<Node> {
     // (signal, stream, generation, sequence) of a record, by `equality_key`.
     fn identity(signal: &str, event: &Value) -> (String, String, String, String) {
         (signal.to_owned(), equality_key(&event["stream"]), equality_key(&event["generation"]), equality_key(&event["sequence"]))
@@ -105,8 +116,7 @@ fn acquisition_records(nodes: &[Node]) -> Vec<Node> {
     for (index, record) in records.iter().enumerate() {
         for signal in &record.signals { found.entry(identity(signal, &record.event)).or_insert(index); }
     }
-    for owner in nodes {
-        let acquisition = &owner.event_record["acquisition"];
+    for (owner, acquisition) in acquisitions {
         let mut ranges: HashMap<u64, Vec<Value>> = HashMap::new();
         for range in acquisition["ranges"].as_array().into_iter().flatten() {
             if let Some(event) = range["event"].as_u64() { ranges.entry(event).or_default().push(json!({"origin": range["origin"], "extent": range["extent"]})); }
@@ -124,7 +134,7 @@ fn acquisition_records(nodes: &[Node]) -> Vec<Node> {
                 continue;
             }
             found.insert(key, records.len());
-            records.push(Node { id: owner.id.clone(), event, parents: Vec::new(), signals: vec![signal.to_owned()], record: runs[run_index].clone(), event_record: capture["record"].clone() });
+            records.push(Node { id: owner.clone(), event, parents: Vec::new(), signals: vec![signal.to_owned()], record: runs[run_index].clone(), event_record: capture["record"].clone() });
         }
     }
     let mut order: Vec<(Value, Value)> = Vec::new();
@@ -604,10 +614,10 @@ fn rows_json(rows: Rows) -> Value { Value::Array(rows.into_iter().map(|(label, v
 pub fn describe(info: &Value) -> Record {
     let sections = &info["sections"];
     let (plot, lineage, source) = (&sections["plot"], &sections["lineage"], &sections["source"]);
-    let described = lineage_nodes(lineage).and_then(|(root, nodes)| {
+    let described = lineage_nodes(lineage).and_then(|(root, nodes, acquisitions)| {
         let flow = lineage_graph(root.as_deref(), &nodes, source)?;
         let played = played_pulses(&nodes, source);
-        let records = acquisition_records(&nodes);
+        let records = acquisition_records(&nodes, &acquisitions);
         let devices = device_rows(lineage, &records, source, &played);
         Ok((logic_rows(&records, source), devices, flow, played.into_iter().map(|(pulse, ..)| pulse).collect()))
     });

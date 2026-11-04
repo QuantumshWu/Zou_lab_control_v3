@@ -42,7 +42,15 @@ impl Generation {
     pub fn owner(&self) -> &str { &self.owner }
 }
 
-pub struct RunRecord { pub generation: GenerationId, pub owner: Arc<str>, pub metadata: Value }
+pub struct RunRecord { pub generation: GenerationId, pub owner: Arc<str>, pub metadata: Value,
+    /// Set on a run that stands for a saved Figure (`begin_imported`).
+    pub imported: Option<Arc<dyn ImportedRun>> }
+/// The field of a provenance's run record that holds an imported run's saved history.
+pub const IMPORTED_LINEAGE: &str = "zlc.figure.imported-lineage";
+/// A saved Figure's history, kept behind one handle its datasets' runs share: readers of
+/// run metadata (a selection's context, a plugin's read) never carry it. Only capturing a
+/// provenance asks for it, as `{source, lineage}`.
+pub trait ImportedRun: Send + Sync { fn saved_history(&self) -> Value; }
 pub struct ParentRecord {
     pub key: PublicationKey,
     pub run: Arc<RunRecord>,
@@ -256,8 +264,10 @@ impl Read {
     /// event records and parents; a window also lists every member's record.
     pub fn provenance(&self) -> Value {
         fn record(key:&PublicationKey, run:&RunRecord, event:&EventRecord) -> Value {
+            let mut metadata = run.metadata.clone();
+            if let Some(imported) = &run.imported { metadata[IMPORTED_LINEAGE] = imported.saved_history(); }
             serde_json::json!({"publication":{"stream":run.owner.as_ref(),"generation":key.generation.as_uuid().to_string(),"signal":key.signal.as_ref(),
-                "revision":key.revision,"ordinal":key.ordinal},"run":run.metadata,"event":event.metadata,
+                "revision":key.revision,"ordinal":key.ordinal},"run":metadata,"event":event.metadata,
                 "parents":event.parents.iter().map(|parent|record(&parent.key,&parent.run,&parent.event)).collect::<Vec<_>>()})
         }
         fn acquisition(entries: impl IntoIterator<Item=(PublicationKey, Arc<RunRecord>, Arc<EventRecord>, [usize;2], [usize;2])>) -> Value {
@@ -929,7 +939,12 @@ impl Runtime {
     }
 
     pub fn begin(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value) -> Result<Generation> {
-        self.begin_run(owner.into(),outputs,metadata,None)
+        self.begin_run(owner.into(),outputs,metadata,None,None)
+    }
+
+    /// A run that stands for a saved Figure: what it publishes descends from `imported`.
+    pub fn begin_imported(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value, imported: Arc<dyn ImportedRun>) -> Result<Generation> {
+        self.begin_run(owner.into(),outputs,metadata,None,Some(imported))
     }
 
     /// Declare an actual causal route, not a naming convention. Presentation
@@ -937,7 +952,7 @@ impl Runtime {
     pub fn begin_derived(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value,
                          source:&PublicationKey, coherent:bool) -> Result<Generation> {
         self.begin_run(owner.into(),outputs,metadata,Some(DerivedSource {signal:source.signal.clone(),
-            generation:Some(source.generation),coherent,guarded:true,declared:true}))
+            generation:Some(source.generation),coherent,guarded:true,declared:true}),None)
     }
 
     /// A plugin run that consumes `source` and commits each result with the
@@ -950,11 +965,11 @@ impl Runtime {
     /// member while it runs. It keeps committing a replaced run's remaining queue.
     pub fn begin_consuming(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value,
                            source: Arc<str>, generation: Option<GenerationId>) -> Result<Generation> {
-        self.begin_run(owner.into(),outputs,metadata,Some(DerivedSource {signal:source,generation,coherent:true,guarded:false,declared:true}))
+        self.begin_run(owner.into(),outputs,metadata,Some(DerivedSource {signal:source,generation,coherent:true,guarded:false,declared:true}),None)
     }
 
     fn begin_run(&self, owner:Arc<str>, outputs:Vec<Declaration>, metadata:Value,
-                 source:Option<DerivedSource>) -> Result<Generation> {
+                 source:Option<DerivedSource>, imported:Option<Arc<dyn ImportedRun>>) -> Result<Generation> {
         if owner.is_empty() || owner.trim() != owner.as_ref() || outputs.is_empty() {
             return Err(RuntimeError::InvalidDeclaration("An owner and at least one output are required".into()));
         }
@@ -1000,7 +1015,7 @@ impl Runtime {
             }).collect();
             state.owners.insert(owner.clone(), token.id);
             let mut run = Run { token: token.clone(), sealed: false, revision: 0, signals,
-                record: Arc::new(RunRecord { generation: token.id, owner:owner.clone(), metadata }), outcome: None, subscribers: Arc::from([]),source };
+                record: Arc::new(RunRecord { generation: token.id, owner:owner.clone(), metadata, imported }), outcome: None, subscribers: Arc::from([]),source };
             // Explicit followers and their retention are installed before the
             // producer can commit its first event, without a notification race.
             for (&ticket,subscriber) in state.subscribers.iter_mut().filter(|(_,subscriber)|
