@@ -8,7 +8,7 @@ use atom_motion_3d::control::{Harmonic,Twin};
 use atom_motion_3d::engine::{dipole_direction,Engine,Settings};
 use atom_motion_3d::ground::Ground;
 use atom_motion_3d::ledger::BUDGET;
-use atom_motion_3d::model::{Model,MOST_MIXED};
+use atom_motion_3d::model::{Model,MOST_MIXED,TABLE_SHARE};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Means,Scales,KT_PER_UK};
 use atom_motion_3d::{initial_trajectory,simulate,Initial,Stratum,Variates};
@@ -632,4 +632,18 @@ fn a_tweezer_s_vector_shift_across_the_field_moves_the_responses_to_the_static_b
         println!("{} us: {error:.4}",times[i]);if error>worst.0{worst=(error,times[i]);}
     }
     assert!(worst.0<=1e-2+5e-3,"the frozen atom's populations {:.4} off the core's at {} us",worst.0,worst.1);
+}
+
+/// Tables whose function is not smooth on any grid's scale -- b1/109's explicit rung, every excited state
+/// explicit: the interpolation's error 0.4 to 1.4 from 9 to 16385 nodes per axis, with or without the
+/// near light's dressing, 25 s to refine to the work bound -- stop refining once two doublings in a row
+/// leave the error above its smallest so far (model.rs `tabulate`), the last grid kept and its error
+/// booked: 33 nodes per axis.
+#[test]
+fn tables_that_do_not_converge_stop_refining_with_their_error_booked(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/explicit_rung_motion.json")).unwrap();let r=sparse_request(&v);
+    let allowance=Ground::allowances(&r).unwrap()[1];let model=Model::with(&r,allowance).unwrap();
+    assert!(model.ground.clusters.iter().any(|c|c.excited.len()==24),"the explicit rung");
+    assert!(model.table_stalled&&model.table_limit.is_some_and(|n|n<=33),"refined to {:?} nodes per axis (stalled {})",model.table_limit,model.table_stalled);
+    assert!(model.table_error>TABLE_SHARE,"the error booked: {:.2e}",model.table_error);
 }

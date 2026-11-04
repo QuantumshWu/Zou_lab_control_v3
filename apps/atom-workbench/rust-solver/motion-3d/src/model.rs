@@ -458,10 +458,12 @@ pub struct Model{
     pub mass_kg:f64,
     pub(crate) layouts:Vec<Layout>,
     pub(crate) tables:Tables,
-    /// The interpolation's measured largest relative error, and where the work bounds stopped the
-    /// grid's refinement short of `TABLE_SHARE` the nodes per axis it kept.
+    /// The interpolation's measured largest relative error, and where the work bounds -- or doublings
+    /// that did not shrink the error (`table_stalled`) -- stopped the grid's refinement short of
+    /// `TABLE_SHARE` the nodes per axis it kept.
     pub table_error:f64,
     pub table_limit:Option<usize>,
+    pub table_stalled:bool,
     /// The near light's dressing (ground.rs `Ground::dressing_bounds`), relative to the generator's
     /// scale, its largest over the tables' nodes inside the reach's intensities (as `resonance`): the bound
     /// of what it leaves out, and what a bare
@@ -582,7 +584,7 @@ impl Model{
         if ground.ground_states.len()!=GROUND{return Err(format!("The ground manifold has {} states, not {GROUND}",ground.ground_states.len()));}
         if ground.clusters.iter().any(|c|c.excited.is_empty()&&c.states.len()>MOST_STATES){return Err("A cluster of ground states has more than eight states".into());}
         let mut model=Model{ground,geometry,trap_beam,trap_beams,focused:vec![trap_unit],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
-            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3]},table_error:0.,table_limit:None,dressing:0.,undressed:0.,fourth_dropped:0.,resonance:0.,reach:vec![[0.;3]],
+            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3]},table_error:0.,table_limit:None,table_stalled:false,dressing:0.,undressed:0.,fourth_dropped:0.,resonance:0.,reach:vec![[0.;3]],
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
         model.choose_profiles(request)?;
         model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();
@@ -1047,13 +1049,18 @@ impl Model{
     /// cubic interpolation from the coarser grid meets TABLE_SHARE at the finer grid's nodes, the
     /// finer grid kept; or until the next grid would pass the work bounds (`MOST_TABLE_BYTES`,
     /// `MOST_TABLE_NODES`), the last grid kept with its measured error (the coarser grid's against it,
-    /// an upper estimate of its own) -- once refined at least, so that the error is measured.
+    /// an upper estimate of its own) -- once refined at least, so that the error is measured; or until two
+    /// doublings in a row leave that error above its smallest so far -- the tabulated function is not
+    /// smooth on the grids' scale (a crossing, a pole: b1/109's explicit rung, 0.4 to 1.4 from 9 to 16385
+    /// nodes), where finer grids do not approach the share; a feature the first grids miss shrinks the
+    /// error again within one --, the last grid kept with its error.
     fn tabulate(&mut self,mixing:&[Vec<Vec<Complex>>],most_bytes:usize,most_nodes:usize)->Result<(),String>{
         let d=self.focused.len() as u32;
         let entries:usize=self.layouts.iter().map(|l|l.size).sum();
         let within=|n:usize,coarse:usize|n.pow(d)<=most_nodes&&16*entries*(n.pow(d)+coarse.pow(d))<=most_bytes;
         if !within(2*FIRST_NODES-1,FIRST_NODES){return Err(format!("The elimination's tables take {entries} complex entries per node: beyond the work bounds"));}
         self.tables=self.grid_tables(FIRST_NODES,mixing,None)?;(self.dressing,self.undressed)=(self.tables.reach[0],self.tables.reach[2]);
+        let(mut best,mut stalls)=(f64::INFINITY,0);
         loop{
             let n=2*self.tables.nodes-1;
             if !within(n,self.tables.nodes){self.table_limit=Some(self.tables.nodes);break;}
@@ -1061,6 +1068,8 @@ impl Model{
             (self.dressing,self.undressed)=(self.dressing.max(fine.reach[0]),self.undressed.max(fine.reach[2]));
             self.tables=fine;self.table_error=worst;
             if worst<=TABLE_SHARE{break;}
+            if worst<best{(best,stalls)=(worst,0);}else{stalls+=1;}
+            if stalls==2{self.table_limit=Some(self.tables.nodes);self.table_stalled=true;break;}
         }
         self.resonance=self.tables.reach[1];
         Ok(())
