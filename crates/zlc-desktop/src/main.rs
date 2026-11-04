@@ -27,6 +27,7 @@ mod bench;
 mod share;
 mod slm_host;
 mod readers;
+mod run_fit;
 mod cadence;
 mod pointer_queue;
 mod installer;
@@ -1630,6 +1631,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             answer(Ok(zlc_bus::mcp::ToolOutput { json: state, png: None }));
                         }
                         "list_signals" => answer(Ok(zlc_bus::mcp::ToolOutput { json: json!({"signals": remote::signals(&runtime)}), png: None })),
+                        "fit_models" => answer(Ok(zlc_bus::mcp::ToolOutput { json: run_fit::fit_models(), png: None })),
                         "save_image" | "get_window_image" => {
                             // The same picture the window's Save image… writes; the reply carries it too
                             // (get_window_image: only the reply, v2 lab_screenshot).

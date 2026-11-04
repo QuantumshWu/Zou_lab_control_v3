@@ -16,12 +16,12 @@ mod frame;
 mod process;
 pub mod schema;
 pub mod wire;
-mod workers;
+pub mod workers;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -184,7 +184,7 @@ pub enum HostEvent {
     /// `generation`: the Runtime generation the run published under, if it began.
     RunFinished { instance: String, run: String, outcome: String, result: Value, error: Option<Value>, generation: Option<String> },
     /// A run asks the application: `run.operator_input`, `run.artifact`, `run.figure`, `run.animation`,
-    /// `run.acquire` or `core` (a catalogue command, under the run's origin). Answer with
+    /// `run.fit`, `run.acquire` or `core` (a catalogue command, under the run's origin). Answer with
     /// `respond(ticket, ..)`; `lent` holds the blocks the request's arrays are on.
     Request { instance: String, run: String, ticket: u64, op: String, params: Value, origin: Origin, lent: Lent },
     /// Plugin commands appeared or disappeared (MCP `tools/list_changed`).
@@ -310,6 +310,14 @@ struct RunState {
     outputs: HashMap<String, OutputState>,
     histories: Vec<HistoryLease>,
     apparatus: Option<Value>,
+    stop: RunStop,
+}
+
+/// What work done for a run watches: set when the run is asked to stop, and when it is gone.
+struct RunStop(Arc<AtomicBool>);
+
+impl Drop for RunStop {
+    fn drop(&mut self) { self.0.store(true, Ordering::Relaxed); }
 }
 
 struct Instance {
@@ -812,7 +820,7 @@ impl PluginHost {
             }
             state.instances.get_mut(instance).unwrap().run = Some(RunState { id: run.clone(), origin: request.origin.clone(),
                 devices: request.devices.clone(), signals: request.outputs.clone(), generation: None, route, outputs: HashMap::new(),
-                histories: Vec::new(), apparatus: None });
+                histories: Vec::new(), apparatus: None, stop: RunStop(Arc::default()) });
             let following = following.map(|(follower, received)| { state.followers.push(follower); received });
             (process, devices, source, following)
         };
@@ -856,12 +864,22 @@ impl PluginHost {
         let process = {
             let state = self.inner.state.lock().unwrap();
             let entry = state.instances.get(instance).ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not open")))?;
-            if entry.run.as_ref().is_none_or(|current| current.id != run) {
+            let Some(current) = entry.run.as_ref().filter(|current| current.id == run) else {
                 return Err(CallError::new(ErrorKind::StaleRun, format!("{run} is not {instance}'s current run")));
-            }
-            entry.serving.process().cloned().ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not a node of this core")))?
+            };
+            let process = entry.serving.process().cloned().ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not a node of this core")))?;
+            current.stop.0.store(true, Ordering::Relaxed);
+            process
         };
         process.event("run.stop", json!({"instance": instance, "run": run}))
+    }
+
+    /// What work done for this run watches: set once it is asked to stop or is gone
+    /// (already set when it is not the instance's current run).
+    pub fn run_stop(&self, instance: &str, run: &str) -> Arc<AtomicBool> {
+        let state = self.inner.state.lock().unwrap();
+        let current = state.instances.get(instance).and_then(|entry| entry.run.as_ref()).filter(|current| current.id == run);
+        current.map_or_else(|| Arc::new(AtomicBool::new(true)), |current| current.stop.0.clone())
     }
 
     /// Open instances: (id, type, pid; 0 for one another core serves).
@@ -1199,7 +1217,7 @@ impl Inner {
             "run.commit" => self.run_commit(&message["p"], &lends).map(|value| (value, Vec::new())),
             "run.commit_events" => self.run_commit_events(&message["p"], &lends).map(|value| (value, Vec::new())),
             "runtime.read" => self.runtime_read(process, &message["p"]),
-            "run.operator_input" | "run.artifact" | "run.figure" | "run.animation" | "run.acquire" | "run.snapshot" | "core" => {
+            "run.operator_input" | "run.artifact" | "run.figure" | "run.animation" | "run.fit" | "run.acquire" | "run.snapshot" | "core" => {
                 // The application answers these (respond); the run's thread waits.
                 let params = &message["p"];
                 let (instance, run) = (params["instance"].as_str().unwrap_or("").to_owned(), params["run"].as_str().unwrap_or("").to_owned());

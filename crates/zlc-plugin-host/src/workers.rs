@@ -21,13 +21,13 @@ struct Queue { jobs: VecDeque<Job>, idle: usize }
 #[derive(Default)]
 struct Shared { queue: Mutex<Queue>, ready: Condvar }
 
-pub(crate) struct Workers { name: &'static str, shared: Arc<Shared> }
+pub struct Workers { name: &'static str, shared: Arc<Shared> }
 
 impl Workers {
-    pub(crate) fn new(name: &'static str) -> Self { Self { name, shared: Arc::default() } }
+    pub fn new(name: &'static str) -> Self { Self { name, shared: Arc::default() } }
 
     /// Runs `job` now on a thread of its own: never behind a job that is waiting.
-    pub(crate) fn run(&self, job: impl FnOnce() + Send + 'static) {
+    pub fn run(&self, job: impl FnOnce() + Send + 'static) {
         let start = {
             let mut queue = self.shared.queue.lock().unwrap();
             queue.jobs.push_back(Box::new(job));

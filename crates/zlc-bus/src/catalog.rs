@@ -1060,6 +1060,8 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Installed device and logic-node types: what each is for, its settings/fields with choices and units, inputs, outputs, device needs; and plugins that failed to load."),
     command!("plot_catalog", PlotCatalog, read, true,
         "What panels can do before one exists: plot kinds, facet cell kinds, axis roles, reductions and fit models (formulas and parameters with details)."),
+    command!("fit_models", Empty, read, true,
+        "The models a series can be fitted with (run.fit): each one's id, label, and parameters with their names and unit relations."),
     command!("get_device_log", DeviceLog, read, true, "The newest log lines of a device instance's plugin."),
     command!("add_device", AddDevice, control, false, "Add a device to the apparatus draft; it opens at apply_devices."),
     command!("remove_device", DeviceRef, control, false, "Remove a device from the apparatus draft; the open instance closes at apply_devices."),

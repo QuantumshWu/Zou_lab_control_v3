@@ -155,6 +155,8 @@ pub struct Stand {
     scanning: Arc<Mutex<std::collections::BTreeSet<String>>>,
     /// Each instance's opens and closes, in the order asked: the next turn to hand out, and the gate.
     lifecycles: BTreeMap<String, (u64, Arc<Gate>)>,
+    /// Where `run.fit` batches are solved: off the window's turn and the channel's thread.
+    fits: zlc_plugin_host::workers::Workers,
 }
 
 /// Workbench runs and plugin-host runs. A run's host id is known only when its start
@@ -294,7 +296,8 @@ impl Builtin {
                core: Arc<dyn Fn(crate::remote::RemoteCall) -> Result<(), String> + Send + Sync>) -> Self {
         Self(Rc::new(RefCell::new(Stand { runtime, host, missing: None, catalog_ready: false, reply, instances: BTreeMap::new(), runs: Arc::default(),
             unmapped: Vec::new(), directories: BTreeMap::new(), requests: BTreeMap::new(), core, events: Vec::new(), camera: None,
-            acquisition: json!({"state": "idle", "produced": 0}), native: None, native_instances: BTreeMap::new(), bench: None, scanning: Arc::default(), lifecycles: BTreeMap::new() })))
+            acquisition: json!({"state": "idle", "produced": 0}), native: None, native_instances: BTreeMap::new(), bench: None, scanning: Arc::default(), lifecycles: BTreeMap::new(),
+            fits: zlc_plugin_host::workers::Workers::new("zlc-plugin-fit") })))
     }
     /// Native device types (their descriptors) and the handler their instances' requests go to.
     pub fn set_native(&self, types: Vec<Value>, handler: Rc<dyn Fn(NativeRequest)>) { self.0.borrow_mut().native = Some((types, handler)); }
@@ -451,6 +454,13 @@ impl Builtin {
                     host.respond(ticket, written.map_err(refused));
                 });
                 if let Err(error) = spawned { self.respond(ticket, Err(error.to_string())); }
+                Vec::new()
+            }
+            "run.fit" => {
+                let stand = self.0.borrow();
+                let Some(host) = stand.host.clone() else { return Vec::new() };
+                let stop = host.run_stop(params["instance"].as_str().unwrap_or(""), params["run"].as_str().unwrap_or(""));
+                stand.fits.run(move || host.respond(ticket, crate::run_fit::answer(&params, &lent, &stop)));
                 Vec::new()
             }
             "run.operator_input" => {

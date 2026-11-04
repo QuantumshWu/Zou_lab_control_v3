@@ -18,11 +18,12 @@ its device arguments are proxies implementing the capability's Protocol.
 from .context import LiveDatasetOutput, LiveEvents, Read, RunContext
 from .declare import (Command, DatasetInput, DatasetOutputDeclaration, DeviceRequirement, DeviceType, FileParam,
                       NodeKind, NodeType, Opened, PhysicalOutput)
+from .fit import FitAnswer, fit_models
 from .host import allocate, core, notifier, share, simulation_parameters
 from .wire import PluginError, Refused
 
 __all__ = [
-    "Command", "DatasetInput", "DatasetOutputDeclaration", "DeviceRequirement", "DeviceType", "FileParam", "LiveDatasetOutput", "LiveEvents",
+    "Command", "DatasetInput", "DatasetOutputDeclaration", "DeviceRequirement", "DeviceType", "FileParam", "FitAnswer", "LiveDatasetOutput", "LiveEvents",
     "NodeKind", "NodeType", "Opened", "PhysicalOutput", "PluginError", "Read", "Refused", "RunContext", "allocate", "core",
-    "notifier", "share", "simulation_parameters",
+    "fit_models", "notifier", "share", "simulation_parameters",
 ]
