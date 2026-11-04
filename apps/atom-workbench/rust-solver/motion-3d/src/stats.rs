@@ -1,6 +1,7 @@
 //! The ensemble's observables: sums over groups of trajectories at every output time, and their
 //! estimates with standard errors by the jackknife over the groups.
 use crate::STATES;
+use rayon::prelude::*;
 
 /// kB/ħ in rad/us per μK: a temperature T as the rate kT/ħ.
 pub const KT_PER_UK:f64=1.380649e-23/1.0545718176461565e-34*1e-12;
@@ -57,6 +58,10 @@ impl Group{
     pub fn new(outputs:usize,trajectories:usize)->Group{
         let mut s=Sums::zero();s.trajectories=trajectories as f64;Group{sums:vec![s;outputs]}
     }
+    /// A group whose trajectories run through its first `reach` outputs alone: none are counted beyond.
+    pub fn reaching(outputs:usize,reach:usize,trajectories:usize)->Group{
+        let mut g=Group::new(outputs,trajectories);for s in g.sums.iter_mut().skip(reach){s.trajectories=0.;}g
+    }
     /// Another group's sums added in: the two as one group.
     pub fn merge(&mut self,o:&Group){for(s,x)in self.sums.iter_mut().zip(&o.sums){*s=s.combine(x,1.);}}
     /// One trajectory at output i: the atom when it is held there, and its control variates.
@@ -105,8 +110,9 @@ pub struct Estimate{
     pub folded:f64,
     pub profile:f64,
     pub doppler:f64,
-    /// The trajectories behind the estimate.
+    /// The trajectories and the groups behind the estimate.
     pub trajectories:f64,
+    pub groups:f64,
 }
 
 /// What the estimates need of the model: ħ/m (um²/us) and the trap frequencies per axis (rad/us).
@@ -150,18 +156,20 @@ pub fn estimate(g:&Sums,s:&Scales,correction:Option<&Correction>)->Estimate{
     e
 }
 
-/// The pooled estimates at every output time, with jackknife standard errors over the groups, the
+/// The pooled estimates at every output time, with jackknife standard errors over the groups that reach it (a batch's
+/// trajectories run only as far as the outputs need them, solve.rs # Batches), the
 /// control variates' means per output where given: their β from every trajectory, held when a group
 /// is left out -- recomputed with it, a β that rests on a few trajectories at an early output (a few
 /// twins that have jumped) swings from group to group and its spread swamps the error.
 pub fn summarize(groups:&[Group],s:&Scales,means:&[Means])->Vec<Estimate>{
-    let outputs=groups[0].sums.len();let count=groups.len();
-    (0..outputs).map(|i|{
-        let all=groups.iter().skip(1).fold(groups[0].sums[i].clone(),|acc,g|acc.combine(&g.sums[i],1.));
+    let outputs=groups[0].sums.len();
+    (0..outputs).into_par_iter().map(|i|{
+        let present:Vec<&Sums>=groups.iter().map(|g|&g.sums[i]).filter(|x|x.trajectories>0.).collect();let count=present.len();
+        let all=present.iter().fold(Sums::zero(),|acc,x|acc.combine(x,1.));
         let correction=means.get(i).map(|m|Correction::new(&all,m));let m=correction.as_ref();
-        let mut e=estimate(&all,s,m);
+        let mut e=estimate(&all,s,m);e.groups=count as f64;
         if count<2{e.population_errors=vec![f64::INFINITY;STATES];e.temperature_error=[f64::INFINITY;3];e.temperature_total_error=f64::INFINITY;e.occupation_error=[f64::INFINITY;3];e.loss_error=f64::INFINITY;return e;}
-        let leave:Vec<Estimate>=groups.iter().map(|g|estimate(&all.combine(&g.sums[i],-1.),s,m)).collect();
+        let leave:Vec<Estimate>=present.iter().map(|x|estimate(&all.combine(x,-1.),s,m)).collect();
         let factor=(count-1) as f64/count as f64;
         let spread=|f:&dyn Fn(&Estimate)->f64|->f64{let m=leave.iter().map(|x|f(x)).sum::<f64>()/count as f64;(factor*leave.iter().map(|x|(f(x)-m).powi(2)).sum::<f64>()).sqrt()};
         for a in 0..3{e.temperature_error[a]=spread(&|x|x.temperature[a]);e.occupation_error[a]=spread(&|x|x.occupation[a]);}
