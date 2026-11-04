@@ -36,7 +36,7 @@ fn main(){
         // The drives' saturation at the focus: 2|Σ_l V_l[e,b]|²/|E_e − E_b − δ_c − iΓ/2|² (every beam's
         // amplitude 1 there, the energies the focus's), against the rule's (every beam at its peak in phase,
         // the smallest distance over the trap).
-        {let e=g.eliminate(&g.hamiltonian_with(&vec![1.;g.beams.len()])).unwrap();let mut worst=(0.,0.,String::new());
+        {let e=g.eliminate(&g.focus_intensities()).unwrap();let mut worst=(0.,0.,String::new());
         for x in &g.excited_items{if let ExcitedKind::Drive(d)=x.kind{
             let v=g.carriers[d.carrier].beams.iter().fold(atom_motion_3d::Complex::ZERO,|s,&l|s+g.couplings[l][(d.excited,d.ground)]);
             let de=atom_motion_3d::Complex::new(e.excited_energies[d.excited]-e.energies[d.ground]-g.carriers[d.carrier].detuning,-0.5*g.decay[(d.excited,d.excited)].re);
@@ -67,6 +67,6 @@ fn main(){
         // Each ground state's total saturation with every drive folded (the rule's estimates over the reach).
         {let mut t=vec![0.;g.ground_states.len()];for x in &g.excited_items{if let ExcitedKind::Drive(d)=x.kind{t[d.ground]+=2.*(x.size/x.distance.max(1./g.duration)).powi(2);}}
         let(b,v)=t.iter().copied().enumerate().max_by(|a,b|a.1.total_cmp(&b.1)).unwrap();println!("  every drive folded: largest total saturation {v:.3e} ({}); reach intensities {:?}",label(g.ground_states[b]),g.reach.iter().map(|x|format!("{x:.3}")).collect::<Vec<_>>());}
-        let(far,near,drives)=g.fold_estimates();println!("  folds: far {far:.2e}, ground couplings {near:.2e}, drives {drives:.2e}; quartic {:.2e}",model.quartic);
+        let(far,near,drives)=g.fold_estimates();println!("  folds: far {far:.2e}, ground couplings {near:.2e}, drives {drives:.2e}; dressing {:.2e}",model.dressing);
     }
 }

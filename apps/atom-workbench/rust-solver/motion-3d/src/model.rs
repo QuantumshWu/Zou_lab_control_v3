@@ -60,15 +60,13 @@
 //! lets the exact step cache one period's propagators (engine.rs). A cluster with beats or explicit
 //! excited states takes the exact step; `local` is the release's static clusters of ground states'.
 //!
-//! # The folded pairs' van Vleck shift
-//! A folded pair's path (c, b) → (d, a) → (f, b̂) shifts H_eff by W̃ D U, U = −[V_d† G V_c]_ab and
-//! W̃ = −[V_f† G V_d]_b̂a at the cluster's path energy (ground.rs). Through a carrier d of one beam l,
-//! E^d E^d† = |a_l|² c_l c_l† is its intensity (1, or s_l on its axis): the shift is quadratic in
-//! E^f* E^c, Σ_qk E^f_q* E^c_k |a_l|² D W̄_q Ū_k with Ū_k = −V_l[:,a]† G U^c_k[:,b] and
-//! W̄_q = −U^f_q[:,b̂]† G V_l[:,a], and the tables of the pair (c, f) take it -- the Hermitian
-//! group's split into its Hermitian and anti-Hermitian halves. Through a carrier of several beams it
-//! is quartic in their interfering fields; it is left out with its bound in the ledger
-//! (`Model::quartic`), as a fold at first order.
+//! # The near light's dressing
+//! Every near carrier's response is dressed by the other near light (ground.rs, # The near light's
+//! dressing): the elimination at each node takes it, each near carrier's field at its units'
+//! intensities there, and the tables hold the dressed responses -- the folded pairs' far channels in
+//! their denominators, where the release added their first order as van Vleck paths. What the
+//! dressing leaves out (a carrier's beams' interference, its next order) is bounded at each node
+//! against the pole, its largest over the tables in the ledger (`Model::dressing`).
 //!
 //! # The photons and the Doppler term
 //! The photon of axis x scattered from carrier c leaves the atom in C_x A_c ψ = −C_x R_c ψ, from the
@@ -92,7 +90,7 @@
 //! waist and frequency (its reflections, `Model::trap_beams`).
 use crate::ground::{self,Ground};
 use crate::ledger::BUDGET;
-use crate::linear::{hermitian_eigenvalues,Dense,Lu};
+use crate::linear::{hermitian_eigenvalues,Dense};
 use crate::stats::KT_PER_UK;
 use crate::{Complex,Request,STATES};
 use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
@@ -174,10 +172,9 @@ pub struct Carrier{
 
 /// A table group's place in a node's slice: a kept group of `ground::Group` with one residual beat,
 /// its field pairs (k′ ≤ k for a Hermitian one), its entries -- the (row, column) places of the
-/// cluster's generator its couplings at this beat reach, and those its van Vleck paths add (both
-/// ways in a Hermitian group); S and Q vanish elsewhere -- and where its S and Q lie (the entries'
-/// values per pair). A `decay` group holds the decay alone, its S zero: the cross terms of folded
-/// photons a class joins without a kept coupling (`ground::FoldedCross`).
+/// cluster's generator its couplings at this beat reach; S and Q vanish elsewhere -- and where its S
+/// and Q lie (the entries' values per pair). A `decay` group holds the decay alone, its S zero: the
+/// cross terms of folded photons a class joins without a kept coupling (`ground::FoldedCross`).
 #[derive(Clone,Debug)]
 pub(crate) struct GroupLayout{pub(crate) absorbed:usize,pub(crate) emitted:usize,pub(crate) residual:f64,pub(crate) hermitian:bool,pub(crate) pairs:Vec<(usize,usize)>,pub(crate) entries:Vec<(usize,usize)>,pub(crate) s:usize,pub(crate) q:usize,
     pub(crate) decay:bool}
@@ -426,15 +423,16 @@ fn quadratic<const N:usize>(x:&[f64;MOST_W],psi:&[Complex])->Complex{
     s
 }
 
-/// One node of the tables: every cluster's tables there, the quartic shifts' bound and the
-/// elimination's (`Model::resonance`).
-type Node=(Vec<Vec<Complex>>,f64,f64);
+/// One node of the tables: every cluster's tables there, and its bounds: the dressing's (what it leaves
+/// out, `Model::dressing`), the elimination's (`Model::resonance`) and the undressed response's
+/// (`Model::undressed`).
+type Node=(Vec<Vec<Complex>>,[f64;3]);
 
 /// The tables on one grid of n nodes per focused unit: per cluster, node-major, its layout's size per
-/// node (re/im interleaved); per node the quartic shifts' bound and the elimination's; and the
-/// elimination's bound over the nodes inside the reach (`Model::resonance`).
+/// node (re/im interleaved); per node its bounds (`Node`); and each bound's largest over the nodes
+/// inside the reach (`Model::dressing`, `Model::resonance`, `Model::undressed`).
 #[derive(Clone,Debug)]
-pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,bounds:Vec<(f64,f64)>,resonance:f64}
+pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,bounds:Vec<[f64;3]>,reach:[f64;3]}
 
 /// The trap of the trap beam: its principal axes (unit rows on the lab axes) and frequencies
 /// (rad/us) at the focus for a reference state, and the frequencies per lab axis.
@@ -464,8 +462,11 @@ pub struct Model{
     /// grid's refinement short of `TABLE_SHARE` the nodes per axis it kept.
     pub table_error:f64,
     pub table_limit:Option<usize>,
-    /// The quartic van Vleck shifts left out: their bound relative to the eliminated generator's scale.
-    pub quartic:f64,
+    /// The near light's dressing (ground.rs `Ground::dressing_bounds`), relative to the generator's
+    /// scale, its largest over the tables' nodes inside the reach's intensities (as `resonance`): what it
+    /// leaves out, and what an undressed response would err by (the GPU's exact response, gpu/program.rs).
+    pub dressing:f64,
+    pub undressed:f64,
     /// The fourth order's H^(4) entries left out at beats the second order folds: their mixings' squares
     /// (`FourthLayout`).
     pub fourth_dropped:f64,
@@ -579,7 +580,7 @@ impl Model{
         if ground.ground_states.len()!=GROUND{return Err(format!("The ground manifold has {} states, not {GROUND}",ground.ground_states.len()));}
         if ground.clusters.iter().any(|c|c.excited.is_empty()&&c.states.len()>MOST_STATES){return Err("A cluster of ground states has more than eight states".into());}
         let mut model=Model{ground,geometry,trap_beam,trap_beams,focused:vec![trap_unit],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
-            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],resonance:0.},table_error:0.,table_limit:None,quartic:0.,fourth_dropped:0.,resonance:0.,reach:vec![[0.;3]],
+            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3]},table_error:0.,table_limit:None,dressing:0.,undressed:0.,fourth_dropped:0.,resonance:0.,reach:vec![[0.;3]],
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
         model.choose_profiles(request)?;
         model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();
@@ -673,9 +674,6 @@ impl Model{
                     let hermitian=gr.absorbed==gr.emitted&&residual==0.;
                     let pairs=field_pairs(hermitian,self.carriers[gr.emitted].rank,self.carriers[gr.absorbed].rank);
                     let mut entries:Vec<(usize,usize)>=gr.entries.iter().filter(|x|x.2==residual).map(|x|(x.0,x.1)).collect();
-                    for p in cl.paths.iter().filter(|p|p.from.carrier==gr.absorbed&&p.back.carrier==gr.emitted&&p.residual==residual&&self.carriers[p.via.carrier].beams.len()==1){
-                        let(x,y)=(cl.position(p.back.state).unwrap(),cl.position(p.from.state).unwrap());entries.push((x,y));if hermitian{entries.push((y,x));}
-                    }
                     entries.sort();entries.dedup();
                     let square=pairs.len()*entries.len();groups.push(GroupLayout{absorbed:gr.absorbed,emitted:gr.emitted,residual,hermitian,pairs,entries,s:size,q:size+square,decay:false});size+=2*square;
                 }
@@ -737,15 +735,16 @@ impl Model{
         }).collect()
     }
 
-    /// H at the focused units' intensities s, the others at the focus.
-    pub fn hamiltonian_at(&self,s:&[f64])->Dense{
-        let mut intensities=self.ground.focus_intensities();for(i,&u)in self.focused.iter().enumerate(){intensities[u]=s[i];}
-        self.ground.hamiltonian_with(&intensities)
+    /// Every unit's intensity with the focused ones at s, the others at the focus.
+    pub fn unit_intensities(&self,s:&[f64])->Vec<f64>{
+        let mut intensities=self.ground.focus_intensities();for(i,&u)in self.focused.iter().enumerate(){intensities[u]=s[i];}intensities
     }
+    /// H at the focused units' intensities s, the others at the focus.
+    pub fn hamiltonian_at(&self,s:&[f64])->Dense{self.ground.hamiltonian_with(&self.unit_intensities(s))}
 
-    /// Every cluster's tables at the intensities s, and the quartic shifts' bound there.
+    /// Every cluster's tables at the intensities s, and its bounds there (`Node`).
     fn node(&self,s:&[f64],mixing:&[Vec<Vec<Complex>>])->Result<Node,String>{
-        let g=&self.ground;let e=g.eliminate(&self.hamiltonian_at(s))?;let(ne,ng)=(g.excited_states.len(),g.ground_states.len());
+        let g=&self.ground;let intensities=self.unit_intensities(s);let e=g.eliminate(&intensities)?;let(ne,ng)=(g.excited_states.len(),g.ground_states.len());
         // Per carrier: U^f_k (the folded basis), T_k, T2_k (ne × ng).
         let combine=|c:usize,matrices:&[Dense]|->Vec<Dense>{mixing[c].iter().map(|g_k|{let mut m=Dense::zeros(ne,ng);
             for(j,&l)in self.carriers[c].beams.iter().enumerate(){m.add_scaled(g_k[j],&matrices[l]);}m}).collect()};
@@ -754,9 +753,8 @@ impl Model{
         let t2:Vec<Vec<Dense>>=(0..self.carriers.len()).map(|c|combine(c,&e.derivatives)).collect();
         let jump=|m:&Dense|->[Dense;3]{std::array::from_fn(|a|g.emission[a].product(m))};
         let(j,j2):(Vec<Vec<[Dense;3]>>,Vec<Vec<[Dense;3]>>)=(t.iter().map(|ts|ts.iter().map(jump).collect()).collect(),t2.iter().map(|ts|ts.iter().map(jump).collect()).collect());
-        let mut quartic=0_f64;
         let mut out=vec![];
-        for(k,(cl,layout))in g.clusters.iter().zip(&self.layouts).enumerate(){
+        for(cl,layout)in g.clusters.iter().zip(&self.layouts){
             let(n,n0,states)=(layout.n,layout.n0,&cl.states);let mut node=vec![Complex::ZERO;layout.size];
             // h0: the energies less the frames, the kept static couplings (their residual zero) and
             // the folded static couplings' van Vleck shift, of the ground and the explicit states.
@@ -800,51 +798,6 @@ impl Model{
                     }
                 }
             }
-            // The folded pairs' van Vleck shift: through a carrier of one beam into the tables of the
-            // pair's group; through several, its bound.
-            if !cl.paths.is_empty(){
-                let mut resolvents:Vec<Option<(Lu,f64)>>=vec![None;self.carriers.len()];let mut omitted=vec![0_f64;n*n];
-                for p in &cl.paths{
-                    let(c,d,f)=(p.from.carrier,p.via.carrier,p.back.carrier);
-                    if resolvents[c].is_none(){let z=g.path_energy(&e,k,c);resolvents[c]=Some((ground::denominator(&e.excited_hamiltonian,-z)?,z));}
-                    let(lu,z)=resolvents[c].as_ref().unwrap();let z=*z;
-                    let denominator=1./(z-e.energies[p.via.state]-g.carriers[d].detuning);
-                    let(x,y)=(cl.position(p.back.state).unwrap(),cl.position(p.from.state).unwrap());
-                    let solve=|m:&Dense,col:usize|->Vec<Complex>{let mut v:Vec<Complex>=(0..ne).map(|i|m[(i,col)]).collect();lu.solve(&mut v);v};
-                    let dot=|m:&Dense,col:usize,v:&[Complex]|->Complex{(0..ne).fold(Complex::ZERO,|s,i|s+m[(i,col)].conj()*v[i])};
-                    if self.carriers[d].beams.len()==1&&g.units[g.unit_of(self.carriers[d].beams[0])].beams.len()==1{
-                        let l=self.carriers[d].beams[0];
-                        let intensity=self.focused.iter().position(|&x|x==g.unit_of(l)).map_or(1.,|i|s[i]);
-                        let gv=solve(&g.folded[l],p.via.state);
-                        let ubar:Vec<Complex>=(0..self.carriers[c].rank).map(|k0|-dot(&g.folded[l],p.via.state,&solve(&u[c][k0],p.from.state))).collect();
-                        let wbar:Vec<Complex>=(0..self.carriers[f].rank).map(|q|-dot(&u[f][q],p.back.state,&gv)).collect();
-                        // M_qk = |a_l|² D W̄_q Ū_k, into the group (c → f) at the path's residual.
-                        let gl=layout.groups.iter().find(|x|!x.decay&&x.absorbed==c&&x.emitted==f&&x.residual==p.residual).ok_or("A van Vleck path without its group")?;
-                        let m=|q:usize,k0:usize|wbar[q]*ubar[k0]*(intensity*denominator);
-                        let place=|x:usize,y:usize|gl.entries.binary_search(&(x,y)).unwrap();
-                        for(pi,&(k1,k0))in gl.pairs.iter().enumerate(){
-                            let at=pi*gl.entries.len()+place(x,y);let mirror=||pi*gl.entries.len()+place(y,x);
-                            if gl.hermitian{
-                                // Its Hermitian and anti-Hermitian halves (H_eff = h0 − ΦS − (i/2)ΦQ), the pair
-                                // (k1, k0) standing for (k0, k1) too: of A = Φ_qk M_qk |x⟩⟨y|, ½(A_qk + A_kq†) in S
-                                // and i(A_qk − A_kq†) in Q.
-                                let(a,b)=(m(k1,k0),m(k0,k1).conj());
-                                let mirror=mirror();
-                                node[gl.s+at]-=a*0.5;node[gl.s+mirror]-=b*0.5;
-                                node[gl.q+at]+=a*Complex::new(0.,1.);node[gl.q+mirror]-=b*Complex::new(0.,1.);
-                            }else{node[gl.s+at]-=m(k1,k0);}
-                        }
-                    }else{
-                        // The bound of |W̃ D U| over the trap, every beam at most its peak.
-                        let(uc,ud)=(&self.carriers[c].beams,&self.carriers[d].beams);let ub:f64=uc.iter().map(|&l|{let gv=solve(&g.folded[l],p.from.state);
-                            ud.iter().map(|&k1|dot(&g.folded[k1],p.via.state,&gv).abs()).sum::<f64>()}).sum();
-                        let wb:f64=ud.iter().map(|&k1|{let gv=solve(&g.folded[k1],p.via.state);
-                            self.carriers[f].beams.iter().map(|&l|dot(&g.folded[l],p.back.state,&gv).abs()).sum::<f64>()}).sum();
-                        omitted[x*n+y]+=ub*wb*denominator.abs();
-                    }
-                }
-                quartic=quartic.max(omitted.iter().copied().fold(0.,f64::max));
-            }
             for(c,cl2)in layout.carriers.iter().enumerate(){
                 for kk in 0..self.carriers[c].rank{for ax in 0..3{for row in 0..ng{for y in 0..n0{
                     let at=((kk*3+ax)*ng+row)*n0+y;node[cl2.j+at]=j[c][kk][ax][(row,states[y])];node[cl2.j2+at]=j2[c][kk][ax][(row,states[y])];
@@ -877,7 +830,8 @@ impl Model{
         }
         // The elimination's excited weight per ground state, every near beam at its peak (`resonance`).
         let resonance=(0..ng).map(|b|self.carriers.iter().flat_map(|c|c.beams.iter()).map(|&l|(0..ne).map(|i|e.responses[l][(i,b)].norm_sqr()).sum::<f64>()).sum::<f64>()).fold(0.,f64::max);
-        Ok((out,quartic,resonance))
+        let(dressing,undressed)=g.dressing_bounds(&e,&intensities)?;
+        Ok((out,[dressing,resonance,undressed]))
     }
 
     /// A cluster of ground states' fourth-order layout (`FourthLayout`), its tables from `size` on: H^(4)'s
@@ -1039,12 +993,13 @@ impl Model{
             }).collect::<Result<_,_>>()?;
             for made in batch{match made{
                 Made::Shared(j)=>{let c=coarse.unwrap();for(k,l)in self.layouts.iter().enumerate(){data[k].extend_from_slice(&c.data[k][2*j*l.size..2*(j+1)*l.size]);}bounds.push(c.bounds[j]);}
-                Made::Computed(node)=>{for(k,t)in node.0.iter().enumerate(){data[k].extend(t.iter().flat_map(|z|[z.re,z.im]));}bounds.push((node.1,node.2));}
+                Made::Computed(node)=>{for(k,t)in node.0.iter().enumerate(){data[k].extend(t.iter().flat_map(|z|[z.re,z.im]));}bounds.push(node.1);}
             }}
         }
         let low:Vec<f64>=self.focused.iter().map(|&u|self.reach.iter().map(|&r|self.unit_intensity(u,r).min(1.)).fold(1.,f64::min)-1./(n-1).max(1) as f64).collect();
-        let resonance=(0..count).filter(|&i|self.grid_point(n,i).iter().zip(&low).all(|(x,l)|x>=l)).map(|i|bounds[i].1).fold(0.,f64::max);
-        Ok(Tables{nodes:n,data,bounds,resonance})
+        let inside:Vec<usize>=(0..count).filter(|&i|self.grid_point(n,i).iter().zip(&low).all(|(x,l)|x>=l)).collect();
+        let reach=std::array::from_fn(|k|inside.iter().map(|&i|bounds[i][k]).fold(0.,f64::max));
+        Ok(Tables{nodes:n,data,bounds,reach})
     }
     /// The coarse grid's (`self.tables`) largest interpolation error at a finer grid's nodes, relative
     /// to the scale of each cluster's table kind.
@@ -1092,19 +1047,20 @@ impl Model{
     /// `MOST_TABLE_NODES`), the last grid kept with its measured error (the coarser grid's against it,
     /// an upper estimate of its own) -- once refined at least, so that the error is measured.
     fn tabulate(&mut self,mixing:&[Vec<Vec<Complex>>],most_bytes:usize,most_nodes:usize)->Result<(),String>{
-        let(d,scale)=(self.focused.len() as u32,self.ground.generator_scale.max(f64::MIN_POSITIVE));
+        let d=self.focused.len() as u32;
         let entries:usize=self.layouts.iter().map(|l|l.size).sum();
         let within=|n:usize,coarse:usize|n.pow(d)<=most_nodes&&16*entries*(n.pow(d)+coarse.pow(d))<=most_bytes;
         if !within(2*FIRST_NODES-1,FIRST_NODES){return Err(format!("The elimination's tables take {entries} complex entries per node: beyond the work bounds"));}
-        self.tables=self.grid_tables(FIRST_NODES,mixing,None)?;self.quartic=self.tables.bounds.iter().map(|b|b.0).fold(0.,f64::max)/scale;
+        self.tables=self.grid_tables(FIRST_NODES,mixing,None)?;(self.dressing,self.undressed)=(self.tables.reach[0],self.tables.reach[2]);
         loop{
             let n=2*self.tables.nodes-1;
             if !within(n,self.tables.nodes){self.table_limit=Some(self.tables.nodes);break;}
-            let fine=self.grid_tables(n,mixing,Some(&self.tables))?;let worst=self.interpolation_error(&fine);let quartic=fine.bounds.iter().map(|b|b.0).fold(0.,f64::max);
-            self.tables=fine;self.table_error=worst;self.quartic=self.quartic.max(quartic/scale);
+            let fine=self.grid_tables(n,mixing,Some(&self.tables))?;let worst=self.interpolation_error(&fine);
+            (self.dressing,self.undressed)=(self.dressing.max(fine.reach[0]),self.undressed.max(fine.reach[2]));
+            self.tables=fine;self.table_error=worst;
             if worst<=TABLE_SHARE{break;}
         }
-        self.resonance=self.tables.resonance;
+        self.resonance=self.tables.reach[1];
         Ok(())
     }
 
@@ -1689,7 +1645,8 @@ impl Model{
     /// the beats' phases), the tables at their node nearest each point with the point's fields: there they are
     /// the elimination's own, while between nodes D carries their interpolation's error too, the tables' booked
     /// one. A generator gains where its no-jump decay falls below its jumps' rate, D = i(H − H†) − Σ L̃†L̃ < 0: a
-    /// decay no jump carries (a van Vleck path's dissipative part, the validation's F10). Its error is the
+    /// decay no jump carries (the validation's F10 before the near light's dressing: the folded pairs' van Vleck
+    /// paths outside the responses, ground.rs). Its error is the
     /// largest ε with −D ≤ ε (Σ L̃†L̃ + 1/T) beyond D's round-off, T the solve's duration (`excess`): in a state
     /// the jumps leave bright, the relative error of its no-jump decay against its jump rate; in a dark one
     /// (rate below 1/T), the norm the gain adds over the run -- a decay below zero grows it and stops the
@@ -1863,17 +1820,20 @@ pub struct Exact{pub responses:Vec<Dense>}
 impl Exact{
     /// The exact responses at a point and momentum.
     pub fn new(model:&Model,r:[f64;3],kappa:[f64;3])->Result<Exact,String>{
-        let g=&model.ground;let e=g.eliminate(&model.hamiltonian_at_point(r))?;
+        let g=&model.ground;let e=g.eliminate(&model.intensities_at_point(r))?;
         let mut responses=vec![Dense::zeros(g.excited_states.len(),g.ground_states.len());g.beams.len()];
         for c in &g.carriers{for &l in &c.beams{responses[l]=g.response(&e,l,model.kinetic_shift(l,kappa))?;}}
         Ok(Exact{responses})
     }
 }
 impl Model{
-    /// H at a point: the focused units at their intensities there, the others at the focus.
-    pub fn hamiltonian_at_point(&self,r:[f64;3])->Dense{
-        let s:Vec<f64>=self.focused.iter().map(|&u|self.unit_intensity(u,r).min(1.)).collect();self.hamiltonian_at(&s)
+    /// Every unit's intensity at a point as the tables take it: the focused ones there, the others at
+    /// the focus.
+    pub fn intensities_at_point(&self,r:[f64;3])->Vec<f64>{
+        let s:Vec<f64>=self.focused.iter().map(|&u|self.unit_intensity(u,r).min(1.)).collect();self.unit_intensities(&s)
     }
+    /// H at a point: the focused units at their intensities there, the others at the focus.
+    pub fn hamiltonian_at_point(&self,r:[f64;3])->Dense{self.ground.hamiltonian_with(&self.intensities_at_point(r))}
 }
 
 /// A cluster's post-jump transient operators (`Model::transient`): Y (n0 × n0) and the pieces.

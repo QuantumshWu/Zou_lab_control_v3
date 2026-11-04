@@ -5,6 +5,7 @@
 use super::driver::{Buffer,Stream};
 use crate::engine::Settings;
 use crate::linear::Dense;
+use crate::ledger::BUDGET;
 use crate::model::{Model,GROUND,MOST_BEAMS,MOST_CARRIERS,MOST_FOCUSED,MOST_RANK,MOST_STATES};
 use crate::Complex;
 
@@ -134,6 +135,10 @@ impl Program{
         // The fourth order's tables are fourth2's slabs now (model.rs `FourthLayout`), which the kernel does
         // not read yet: a fourth-order model stays on the CPU until it does.
         if model.fourth{return Err(beyond("四阶折叠".into()));}
+        // The kernel's exact response (beyond the Doppler first order's allowance) is the undressed one
+        // (ground.rs, # The near light's dressing): within the budget its bound is booked (solve.rs), beyond
+        // it the device would compute another model.
+        if model.undressed>BUDGET{return Err(beyond(format!("近共振光彼此的光移使响应改变 {:.1}%，GPU 的精确响应尚未计入",100.*model.undressed)));}
         if model.geometry.len()>MOST_BEAMS||model.carriers.len()>MOST_CARRIERS||model.focused.len()>MOST_FOCUSED{return Err(beyond("光束或强度维度太多".into()));}
         if let Some(c)=g.clusters.iter().find(|c|c.states.len()>MAXN||c.classes.len()>MOST_CLASSES){return Err(beyond(format!("子空间 {} 个态、{} 类光子",c.states.len(),c.classes.len())));}
         let hm=model.hbar_over_mass;

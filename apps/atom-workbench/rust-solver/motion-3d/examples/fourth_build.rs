@@ -11,7 +11,7 @@ fn main(){
         for fourth in [false,true]{
             let clock=Instant::now();
             match Model::with_order(&request,f64::INFINITY,fourth){
-                Ok(m)=>println!("{name} fourth {fourth}: {:.2} s, table error {:.1e}, quartic {:.1e}, clusters {:?}",clock.elapsed().as_secs_f64(),m.table_error,m.quartic,
+                Ok(m)=>println!("{name} fourth {fourth}: {:.2} s, table error {:.1e}, dressing {:.1e}, clusters {:?}",clock.elapsed().as_secs_f64(),m.table_error,m.dressing,
                     (0..m.clusters()).map(|k|m.dimension(k)).collect::<Vec<_>>()),
                 Err(e)=>println!("{name} fourth {fourth}: {:.2} s, error {e}",clock.elapsed().as_secs_f64()),
             }

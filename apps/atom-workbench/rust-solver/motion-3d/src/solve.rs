@@ -285,7 +285,7 @@ fn histograms(samples:&[Vec<([f64;3],[f64;3])>],listed:&[usize],value:&dyn Fn(&(
 fn when(us:f64)->String{if us<1e3{format!("{us:.0} μs")}else{format!("{:.2} ms",us/1e3)}}
 
 /// The model's approximations (fixed before the run): the far components' fold, the couplings'
-/// fold, the quartic van Vleck shifts left out, the Gaussian beams' profiles and the tables.
+/// fold, the near light's dressing left out, the Gaussian beams' profiles and the tables.
 fn model_ledger(model:&Model,request:&Request)->Ledger{
     let g=&model.ground;let mut ledger=Ledger::new();let(far,near,statics)=g.fold_estimates();
     let folded=g.components.iter().filter(|c|c.folded&&c.size>0.).count();
@@ -302,14 +302,18 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
     let(kept,fold)=g.items.iter().filter(|i|matches!(i.kind,Kind::Static{..}|Kind::Raman{..})).fold((0,0),|(k,f),i|if i.folded{(k,f+1)}else{(k+1,f)});
     let sizes:Vec<String>=g.clusters.iter().map(|c|c.dimension().to_string()).collect();
     ledger.add("基态之间的耦合（塞曼子能级、拉曼项、两组光的拍频）",near,format!("{fold} 对二阶折叠，{kept} 对显式保留；子空间 {}",sizes.join("+")));
-    if model.quartic>0.{ledger.add("经多束光的四阶能移",model.quartic,"略去（一阶折叠）".into());}
+    if model.dressing>0.{ledger.add("近共振光的相互缀饰（彼此的光移）",model.dressing,"各近共振光的光移全阶计入彼此的分母；同频多束光的干涉与缀饰的下一阶略去".into());}
     if model.fourth_dropped>0.{ledger.add("四阶折叠的快拍频项",model.fourth_dropped,"略去（与二阶相同的截断频率）".into());}
     let names=|beams:&[usize]|beams.iter().map(|&l|request.beams[l].name.as_str()).collect::<Vec<_>>().join(" + ");
     for &(u,error,_)in &model.profiles{ledger.add(&format!("「{}」的光强分布",names(&g.units[u].beams)),error,"取焦点处的光强".into());}
     for &u in &model.focused[1..]{ledger.add(&format!("「{}」的光强分布",names(&g.units[u].beams)),0.,"按位置插值（强度维度）".into());}
     // The interference the units of beams of one frequency leave out (ground.rs `coherence`).
     for x in &g.interference{
-        let action=if x.coherent{"同频光束按主偏振合成一个光场（驻波精确）；偏离主偏振的剩余分量略去"}else{"同频而偏振不同：光移按各光束的光强相加，干涉项（偏振光晶格）略去"};
+        let action=match(x.near,x.coherent){
+            (true,true)=>"近共振光场按相干叠加精确计入；远失谐部分（反旋项、32 态以外能级的光移）按主偏振合成，偏离主偏振的剩余分量略去",
+            (true,false)=>"近共振光场按相干叠加精确计入；远失谐部分（反旋项、32 态以外能级的光移）按各光束光强相加，其偏振干涉略去",
+            (false,true)=>"同频光束按主偏振合成一个光场（驻波精确）；偏离主偏振的剩余分量略去",
+            (false,false)=>"同频而偏振不同：远失谐光移按各光束光强相加，干涉项（偏振光晶格）略去"};
         ledger.add(&format!("「{}」的干涉",names(&x.beams)),x.estimate(g),action.into());
     }
     ledger.add("聚焦光的光强插值表",model.table_error,match model.table_limit{Some(n)=>format!("三次插值；网格细化到工作量上限（每维 {n} 个节点）为止"),None=>"三次插值".into()});
@@ -584,6 +588,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         },
     };
     let used=if gpu.is_some(){Device::Gpu}else{Device::Cpu};
+    // On the GPU the exact response leaves the near light's dressing out (gpu/program.rs): its bound.
+    if gpu.is_some()&&model.undressed>0.{base.add("GPU 精确响应中的近共振光彼此光移",model.undressed,"多普勒一阶之外的精确响应未含彼此的光移（GPU）；其界".into());}
     // The control variates (control.rs): the harmonic twin's, and the held twin where the trap beam's
     // intensity is the pilot's mean, when the generator is static.
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
@@ -669,9 +675,9 @@ fn resonance(model:&Model)->Option<String>{
 const GAIN:&str="生成元的增益";
 /// A model's gain at sampled states (model.rs `Model::decay_balance`, at most FIRST_GROUPS × 8 of them): the
 /// largest −λ of D = i(H − H†) − Σ L†L beyond its eigenvalues' round-off, relative to the largest jump rate
-/// met -- the relative error of the jump rate where the no-jump decay misses it (a van Vleck path's
-/// dissipative part that no jump carries, the validation's F10); 0 for a Lindblad generator, unbounded
-/// for a gain without jumps.
+/// met -- the relative error of the jump rate where the no-jump decay misses it (a decay no jump carries,
+/// the validation's F10 before the near light's dressing); 0 for a Lindblad generator, unbounded for a
+/// gain without jumps.
 fn gain(model:&Model,states:&[Trajectory])->f64{
     let every=(states.len()/(FIRST_GROUPS as usize*8)).max(1);
     let(gain,rate)=states.par_iter().step_by(every).map(|t|{let(low,rate,scale)=model.decay_balance(t.cluster,&model.point(t.r,t.kappa),t.time);

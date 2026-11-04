@@ -6,7 +6,7 @@
 //! momenta, and a short solve whose t = 0 is the request's initial state.
 use atom_motion_3d::control::{Harmonic,Twin};
 use atom_motion_3d::engine::{dipole_direction,Engine,Settings};
-use atom_motion_3d::ground::{Ground,Path};
+use atom_motion_3d::ground::Ground;
 use atom_motion_3d::ledger::BUDGET;
 use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
@@ -55,19 +55,18 @@ fn samples(model:&Model,seed:u64)->Vec<(usize,[f64;3],[f64;3],f64,[Complex;MOST_
 fn expectation(m:&[Complex],psi:&[Complex],n:usize)->Complex{let mut s=Complex::ZERO;for a in 0..n{for b in 0..n{s+=psi[a].conj()*m[a*n+b]*psi[b];}}s}
 
 /// The model's tables against the front end's dense generator at random points and times (the
-/// kinetic shift off, the van Vleck paths the tables hold), for the clusters of ground states and
-/// those with explicit excited states alike: H_eff and every class's photons, to the tables'
-/// interpolation; and the photons carry the whole decay but the paths' (their second order).
+/// kinetic shift off), for the clusters of ground states and those with explicit excited states
+/// alike: H_eff and every class's photons, to the tables' interpolation; and the photons carry the
+/// whole decay (the dressed responses', ground.rs # The near light's dressing).
 #[test]
 fn the_tables_give_the_front_end_s_generator_and_the_photons_carry_the_decay(){
     // Every drive folded, and the drives kept until each ground state's folded rest is within the budget.
     for allowance in [f64::INFINITY,BUDGET]{
     let mut model=Model::with(&request(&|_|true),allowance).unwrap();model.doppler=false;let g=&model.ground;
-    let tabulated=|p:&Path|model.carriers[p.via.carrier].beams.len()==1;
     assert_eq!((0..model.clusters()).any(|k|model.mixed(k)),allowance<f64::INFINITY,"explicit excited states at the allowance {allowance}");
     for(k,r,_,t,psi)in samples(&model,1){
         let n=model.dimension(k);let p=model.point(r,[0.;3]);let local=model.generator(k,&p,t);
-        let e=g.eliminate(&model.hamiltonian_at_point(r)).unwrap();let dense=g.local_with(&e,k,r,t,&tabulated).unwrap();
+        let e=g.eliminate(&model.intensities_at_point(r)).unwrap();let dense=g.local_at(&e,k,r,t).unwrap();
         let scale=dense.effective.largest();
         for a in 0..n{for b in 0..n{let x=local.hamiltonian[a*n+b]+if a==b{Complex::new(local.scalar,0.)}else{Complex::ZERO};
             assert!((x-dense.effective[(a,b)]).abs()<=1e-3*scale,"cluster {k} at {r:?}, ({a}, {b}): {x:?} against {:?}",dense.effective[(a,b)]);}}
@@ -76,8 +75,7 @@ fn the_tables_give_the_front_end_s_generator_and_the_photons_carry_the_decay(){
         let exact:f64=dense.jumps.iter().map(|j|j.iter().map(|m|{let v:Vec<Complex>=(0..m.rows).map(|i|(0..n).fold(Complex::ZERO,|s,b|s+m[(i,b)]*psi[b])).collect();v.iter().map(|z|z.norm_sqr()).sum::<f64>()}).sum::<f64>()).sum();
         assert!((fast-exact).abs()<=1e-3*exact.max(1e-12),"cluster {k}: photons {fast:e} against {exact:e}");
         let decay=-2.*expectation(&local.hamiltonian[..n*n],&psi,n).im;
-        let shift=-2.*expectation(&dense.shift.entries,&psi,n).im;
-        assert!((decay-shift-fast).abs()<=1e-3*fast.max(1e-12),"cluster {k} at {r:?}: decay {decay:e} less the paths' {shift:e} against {fast:e}");
+        assert!((decay-fast).abs()<=1e-3*fast.max(1e-12),"cluster {k} at {r:?}: decay {decay:e} against {fast:e}");
     }
     }
 }
@@ -92,7 +90,7 @@ fn the_fourth_order_tables_give_the_dense_fourth_order_fold(){
     let herm=|m:&dyn Fn(usize,usize)->Complex,a:usize,b:usize|(m(a,b)+m(b,a).conj())*0.5;
     for(k,r,_,t,psi)in samples(&model,5){
         let n=model.dimension(k);let p=model.point(r,[0.;3]);let local=model.local(k,&p,t);
-        let e=g.eliminate(&model.hamiltonian_at_point(r)).unwrap();let dense=g.fourth(&e,k,r,t).unwrap();
+        let e=g.eliminate(&model.intensities_at_point(r)).unwrap();let dense=g.fourth(&e,k,r,t).unwrap();
         let scale=dense.effective.largest();
         // The local generator and the beats' components (`Model::generator`, a beating cluster's path).
         let generator=model.generator(k,&p,t);
@@ -319,7 +317,7 @@ fn the_held_twin_s_master_equation_is_the_front_end_s(){
     let r=request(&|_|true);let model=Model::new(&r).unwrap();let g=&model.ground;
     let twin=Twin::new(&model,0.9).expect("a static generator");let point=twin.held.point.r;
     let(interval,outputs)=(1.,21);let means=twin.means(&model,&r.initial_density,interval,outputs);
-    let e=g.eliminate(&model.hamiltonian_at_point(point)).unwrap();
+    let e=g.eliminate(&model.intensities_at_point(point)).unwrap();
     let locals:Vec<_>=(0..g.clusters.len()).map(|k|g.local_at(&e,k,point,0.).unwrap()).collect();
     let mut rho:Vec<atom_motion_3d::linear::Dense>=g.clusters.iter().map(|c|{let n=c.states.len();atom_motion_3d::linear::Dense::from_fn(n,n,|i,j|if i==j{let s=g.ground_states[c.states[i]];r.initial_density[s*STATES+s]}else{Complex::ZERO})}).collect();
     let derivative=|rho:&[atom_motion_3d::linear::Dense]|->Vec<atom_motion_3d::linear::Dense>{
@@ -542,4 +540,47 @@ fn a_reflection_a_little_off_the_tweezer_s_polarization_is_its_standing_wave_wit
         let mut d=h.clone();d.add_scaled(-Complex::ONE,&reference);
         assert!(d.largest()<=1e-5*light.largest(),"r {r:?}: {:.2e} of {:.2e}",d.largest(),light.largest());
     }
+}
+
+/// A fixture's motion request, its matrices sparse ([row, column, re, im]), its initial state diagonal
+/// (tests/fixtures/*_probe_motion.json: validate/probe_scan payloads with the population core's rows
+/// recorded at the focus).
+fn sparse_request(v:&Value)->Request{
+    let beams=v["beams"].as_array().unwrap().iter().map(|b|{let d=floats(&b["direction"]);Beam{id:b["id"].as_str().unwrap().into(),name:b["name"].as_str().unwrap().into(),
+        direction:[d[0],d[1],d[2]],wave_number_per_um:b["waveNumberPerUm"].as_f64().unwrap(),waist_um:b["waistUm"].as_f64(),intensity_mw_cm2:b["intensityMWcm2"].as_f64().unwrap(),
+        frequency_index:b["frequencyIndex"].as_array().unwrap().iter().map(|n|n.as_i64().unwrap() as i32).collect(),coupling:matrix(&b["coupling"]),
+        counter_coupling:matrix(&b["counterCoupling"]),outside_shift:matrix(&b["outsideShift"])}}).collect::<Vec<Beam>>();
+    let trap_beam=beams.iter().position(|b|b.id==v["trapBeamId"].as_str().unwrap()).unwrap();
+    let initial=floats(&v["initial"]);let mut density=vec![Complex::ZERO;STATES*STATES];for i in 0..STATES{density[i*STATES+i]=Complex::new(initial[i],0.);}
+    let(e,f)=(v["emission"].as_array().unwrap(),floats(&v["fieldVectorG"]));
+    Request{states:v["states"].as_array().unwrap().iter().map(|s|s.as_str().unwrap().into()).collect(),hamiltonian:matrix(&v["hamiltonian"]),
+        frame_frequencies_mhz:floats(&v["frameFrequenciesMHz"]),frequencies_mhz:floats(&v["frequenciesMHz"]),beams,emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],
+        field_vector_g:[f[0],f[1],f[2]],mass_kg:v["massKg"].as_f64().unwrap(),initial_density:density,temperature_uk:v["temperatureUK"].as_f64().unwrap(),trap_beam,times_us:vec![]}
+}
+/// The frozen atom's F = 1 population each microsecond, its eliminated master equation's at the focus:
+/// the held twin's exact means there (control.rs), every drive folded.
+fn frozen_f1(r:&Request)->Vec<f64>{
+    let model=Model::new(r).unwrap();let twin=Twin::new(&model,1.).expect("a static generator");assert_eq!(twin.held.point.r,[0.;3]);
+    twin.means(&model,&r.initial_density,1.,11).iter().map(|row|(0..STATES).filter(|&i|r.states[i].starts_with("ground-1-")).map(|i|row[i]).sum()).collect()
+}
+
+/// A strong beam 3 GHz off a probe's line dresses the probe (F10; ground.rs, # The near light's
+/// dressing): with the folded pairs' far channels in the responses' denominators -- where the release
+/// added their first order outside the jumps, 3.2 rad/us of gain (tests/lindblad.rs) -- the frozen
+/// atom's F = 1 population, the strong beam's Raman scattering, is the population core's at every
+/// microsecond to 0.005 (0.2008 at 10 us; the release's 0.000).
+#[test]
+fn a_strong_beam_s_raman_rate_through_its_dressing_is_the_core_s(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/far_beam_probe_motion.json")).unwrap();let r=sparse_request(&v);
+    for(i,(a,b))in frozen_f1(&r).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
+}
+
+/// An 808 nm tweezer, a near carrier, moves a D1 probe's line by its light shift (F1; ground.rs, # The
+/// near light's dressing): the probe 32 MHz above the bare line is on the shifted one, and the frozen
+/// atom's F = 1 population is the population core's at every microsecond to 0.005 (0.549 at 10 us;
+/// the release's line sat at +8 MHz, 0.98 here).
+#[test]
+fn a_near_tweezer_s_shift_moves_a_probe_s_line_to_the_core_s(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/near_tweezer_probe_motion.json")).unwrap();let r=sparse_request(&v);
+    for(i,(a,b))in frozen_f1(&r).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
 }

@@ -24,7 +24,7 @@
 #[path="scene/mod.rs"] mod scene;
 use atom_motion_3d::control::Harmonic;
 use atom_motion_3d::engine::{Engine,Settings,Trajectory};
-use atom_motion_3d::ground::{Ground,Path};
+use atom_motion_3d::ground::Ground;
 use atom_motion_3d::ledger::BUDGET;
 use atom_motion_3d::model::{Generator,Model};
 use atom_motion_3d::solve::{CONFIDENCE,POPULATION_TARGET,TEMPERATURE_TARGET};
@@ -88,17 +88,16 @@ fn check(request:&Request,which:&str){
                 entries.iter().take(6).map(|&(v,a,bb)|format!("{} <- {}: {:.2e}",label(a),label(bb),v)).collect::<Vec<_>>());
         }
     }
-    let tabulated=|p:&Path|model.carriers[p.via.carrier].beams.len()==1;
     let mut seed=0x5EED_u64;let mut next=||{seed^=seed<<13;seed^=seed>>7;seed^=seed<<17;(seed>>11) as f64/(1u64<<53) as f64-0.5};
     let(mut worst_local,mut worst_dense,mut worst_gradient)=(0_f64,0_f64,0_f64);
     for _ in 0..8{
-        let r=[0.4*next(),0.4*next(),1.2*next()];let p=model.point(r,[0.;3]);let e=g.eliminate(&model.hamiltonian_at_point(r)).unwrap();
+        let r=[0.4*next(),0.4*next(),1.2*next()];let p=model.point(r,[0.;3]);let e=g.eliminate(&model.intensities_at_point(r)).unwrap();
         for k in 0..model.clusters(){
             let n=model.dimension(k);let c=model.components(k,&p);
             for _ in 0..4{
                 let t=20.*(next()+0.5);let x=c.at(t);
                 let full=|h:&Generator,a:usize,b:usize|h.hamiltonian[a*n+b]+if a==b{Complex::new(h.scalar,0.)}else{Complex::ZERO};
-                let dense=g.local_with(&e,k,r,t,&tabulated).unwrap();let scale=dense.effective.largest();
+                let dense=g.local_at(&e,k,r,t).unwrap();let scale=dense.effective.largest();
                 for a in 0..n{for b in 0..n{worst_dense=worst_dense.max((full(&x,a,b)-dense.effective[(a,b)]).abs()/scale);}}
                 if !model.mixed(k){
                     let local=model.local(k,&p,t);let l=Generator{n,hamiltonian:local.hamiltonian[..n*n].to_vec(),scalar:local.scalar,gradient:model.gradients(k,&local)};let gs=l.gradient.iter().flat_map(|v|v.iter()).map(|z|z.abs()).fold(0.,f64::max);
