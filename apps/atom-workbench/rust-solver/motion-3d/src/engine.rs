@@ -1151,8 +1151,8 @@ mod tests{
     }
     /// A random generator of n states (an H_eff's shape: Hermitian, its energies spread, less (i/2) a
     /// decay on the diagonal) with Hermitian beats at ±Ω for each of `omegas` (H_{−Ω} = H_Ω†, so the norm
-    /// decays monotonically), and its gradients, the beats' paired (G_{−Ω} = G_Ω†); with `period`.
-    fn random(n:usize,omegas:&[f64],period:Option<f64>,seed:u64)->Components{
+    /// decays monotonically), and its gradients, the beats' paired (G_{−Ω} = G_Ω†).
+    fn random(n:usize,omegas:&[f64],seed:u64)->Components{
         let mut next=uniform(seed);
         let mut h=hermitian(&mut next,n,60.);for i in 0..n{h[i*n+i]+=Complex::new(80.*next(),-12.*(next()+0.5));}
         let gradient=std::array::from_fn(|_|hermitian(&mut next,n,30.));
@@ -1161,7 +1161,7 @@ mod tests{
         let adjoint=|x:&[Complex]|->Vec<Complex>{(0..n*n).map(|k|x[(k%n)*n+k/n].conj()).collect()};
         let mut beats:Vec<Beat>=raw.iter().zip(omegas).rev().map(|((b,g),&w)|Beat{omega:-w,hamiltonian:adjoint(b),gradient:std::array::from_fn(|a|adjoint(&g[a]))}).collect();
         beats.extend(raw.into_iter().zip(omegas).map(|((b,g),&w)|Beat{omega:w,hamiltonian:b,gradient:g}));
-        Components{statics:Generator{n,hamiltonian:h,scalar:0.,gradient},beats,period}
+        Components{statics:Generator{n,hamiltonian:h,scalar:0.,gradient},beats}
     }
     fn state(n:usize,seed:u64)->[Complex;MOST_MIXED]{
         let mut next=uniform(seed);let mut psi=[Complex::ZERO;MOST_MIXED];for z in psi[..n].iter_mut(){*z=Complex::new(next(),next());}
@@ -1191,11 +1191,11 @@ mod tests{
     #[test]
     fn cf4_is_exact_for_a_static_generator_and_of_fourth_order_with_beats(){
         let n=5;let tau=0.1;let psi=state(n,3);
-        let still=random(n,&[],None,7);
+        let still=random(n,&[],7);
         let exact=Segment::new(still.clone(),0.,tau,0.,0.,tau,node_phase());let mut a=psi;exact.evolve(&mut a,0.,tau,0.);
         let cf4=beating(still,0.,tau/8.);let mut b=psi;cf4.evolve(&mut b,0.,tau,0.);
         assert!(distance(&b,&a,n)<=1e-12,"static: {:e}",distance(&b,&a,n));
-        let c=random(n,&[150.,300.],None,11);let(target,_)=reference(&c,&psi,0.,tau,20000);
+        let c=random(n,&[150.,300.],11);let(target,_)=reference(&c,&psi,0.,tau,20000);
         let error=|steps:usize|{let s=beating(c.clone(),0.,tau/steps as f64);let mut x=psi;s.evolve(&mut x,0.,tau,0.);distance(&x,&target,n)};
         let e:Vec<f64>=[32,64,128].iter().map(|&s|error(s)).collect();
         assert!(e[1]/e[2]>12.&&e[1]/e[2]<20.,"errors {e:?}: ratio {}",e[1]/e[2]);
@@ -1207,7 +1207,7 @@ mod tests{
     /// step's start and from a time between nodes (after a jump), its series' share within the state's error there.
     #[test]
     fn a_beating_grid_on_its_entries_gives_the_dense_evolution(){
-        let n=5;let(start,tau)=(0.37,0.1);let mut c=random(n,&[170.,410.],None,43);
+        let n=5;let(start,tau)=(0.37,0.1);let mut c=random(n,&[170.,410.],43);
         // A cluster's pattern: most entries zero, and some of the round-off's size.
         for b in c.beats.iter_mut(){for k in 0..n*n{if (k/n+k%n)%2==0{b.hamiltonian[k]=Complex::ZERO;for g in b.gradient.iter_mut(){g[k]=Complex::ZERO;}}}}
         for a in 0..n{for b in 0..n{if a!=b&&(a+2*b)%3==0{let z=Complex::new(1e-30,1e-31);c.statics.hamiltonian[a*n+b]=z;c.statics.hamiltonian[b*n+a]=z.conj();}}}
@@ -1239,7 +1239,7 @@ mod tests{
     /// root of the norm and state there, and impulses within the quadrature's bound of a fine grid's.
     #[test]
     fn the_spectral_and_the_taylor_segments_agree(){
-        let n=6;let tau=0.1;let c=random(n,&[],None,13);let psi=state(n,17);
+        let n=6;let tau=0.1;let c=random(n,&[],13);let psi=state(n,17);
         let spectral=Segment::new(c.clone(),0.,tau,1e-9,1e-9,tau,node_phase());let taylor=Segment::new(c.clone(),0.,tau,0.,0.,tau,node_phase());
         assert!(matches!(spectral.how,How::Spectral{..})&&matches!(taylor.how,How::Taylor{..}));
         // The norm at the end, and a threshold between it and 1.
@@ -1264,7 +1264,7 @@ mod tests{
     /// share too small for it keeps it.
     #[test]
     fn a_beat_within_the_share_is_left_out(){
-        let n=4;let tau=0.05;let w=4e4;let mut c=random(n,&[w],None,29);
+        let n=4;let tau=0.05;let w=4e4;let mut c=random(n,&[w],29);
         for b in c.beats.iter_mut(){for z in b.hamiltonian.iter_mut(){*z=*z*1e-5;}for g in b.gradient.iter_mut(){for z in g.iter_mut(){*z=*z*1e-5;}}}
         let size=|h:&[Complex]|column_norm(h,n).max(row_norm(h,n));
         let bound=2.*c.beats.iter().map(|b|size(&b.hamiltonian)).sum::<f64>()*(1.+(size(&c.statics.hamiltonian)+c.beats.iter().map(|b|size(&b.hamiltonian)).sum::<f64>())*tau)/w;
@@ -1280,7 +1280,7 @@ mod tests{
     /// share of a fine grid's.
     #[test]
     fn a_spectral_grid_follows_the_state_s_amplitudes(){
-        let n=6;let tau=0.2;let mut c=random(n,&[],None,37);
+        let n=6;let tau=0.2;let mut c=random(n,&[],37);
         // Two blocks: three slow states near zero, three at −400 rad/us, coupled weakly; the state in the first.
         for a in 0..n{for b in 0..n{let scale=if a<3&&b<3{0.1}else if (a<3)!=(b<3){0.05}else{1.};c.statics.hamiltonian[a*n+b]=c.statics.hamiltonian[a*n+b]*scale;}}
         for a in 3..n{c.statics.hamiltonian[a*n+a]+=Complex::new(-400.,0.);}
@@ -1300,7 +1300,7 @@ mod tests{
     /// against an eight-fold finer one.
     #[test]
     fn a_beating_segment_finds_the_norm_s_root(){
-        let n=5;let tau=0.12;let c=random(n,&[170.,410.],None,19);let psi=state(n,23);
+        let n=5;let tau=0.12;let c=random(n,&[170.,410.],19);let psi=state(n,23);
         let rule=Segment::new(c.clone(),0.,tau,0.,0.,tau,node_phase());let fine=beating(c,0.,rule.spacing/8.);
         let mut end=psi;rule.evolve(&mut end,0.,tau,0.);let threshold=0.5*(1.+norm2(&end,n));
         let(mut a,mut b)=(psi,psi);let(sa,ja,ia)=rule.evolve(&mut a,0.,tau,threshold);let(sb,jb,ib)=fine.evolve(&mut b,0.,tau,threshold);
