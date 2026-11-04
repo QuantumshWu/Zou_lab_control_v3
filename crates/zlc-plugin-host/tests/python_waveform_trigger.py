@@ -28,7 +28,7 @@ from zlc_atom.nodes.waveform_measurement.measurement import (
     WAVEFORM_MEASUREMENT_SCHEMA, FiniteCapture, MonitorCapture, WaveformMeasurementNode, WaveformMeasurementRequest,
     waveform_preview)
 from zlc_atom.nodes.waveform_measurement.trigger import (
-    HYSTERESIS_SHARE, TriggerDetector, TriggerSettings, WaveformTrigger)
+    TriggerDetector, TriggerSettings, WaveformTrigger)
 
 RATE_HZ = 1000.0
 DT = 1.0 / RATE_HZ
@@ -67,6 +67,45 @@ def wrong_edges(shots, frequency, slope='rising'):
     return int(np.sum(derivative < 0 if slope == 'rising' else derivative > 0))
 
 
+def true_edges(frequency, phase, level, slope, end):
+    """When the clean signal crosses the level in the chosen direction."""
+
+    angle = np.arcsin(level) if slope == 'rising' else np.pi - np.arcsin(level)
+    first = np.floor((-phase - angle) / (2 * np.pi))
+    times = (angle + phase * -1 + 2 * np.pi * np.arange(first, first + end * frequency + 3)) / (2 * np.pi * frequency)
+    return times[(times > 0.0) & (times < end)]
+
+
+def counted(frequency, noise, rate, samples, slope, level, seed, block=1):
+    """(true edges, records fired for them): every edge from the second period on,
+    in a stream read twenty of the source's records at a time."""
+
+    rng = np.random.default_rng(seed)
+    phase = rng.uniform(0.0, 2 * np.pi)
+    seconds = max(6.0, 8.0 / frequency)
+    count = int(seconds * rate)
+    times = np.arange(count) / rate
+    values = (np.sin(2 * np.pi * frequency * times + phase) + noise * rng.standard_normal(count)).astype(np.float32)[:, None]
+    records = [WaveformRecord(values[at:at + block], at // block, times[at], 1)
+               for at in range(0, count - block + 1, block)]
+    detector = TriggerDetector(WaveformTrigger(0, level, slope, samples, samples // 5), 1.0 / rate)
+    shots = [shot for at in range(0, len(records), 20) for shot in detector.feed(records[at:at + 20])]
+    fired = np.array([shot.time_seconds for shot in shots])
+    period = 1.0 / frequency
+    edges = true_edges(frequency, phase, level, slope, times[-1])
+    # Past the run's start (its cost is measured on its own) and the first pre-trigger share,
+    # and whole by the end of the stream.
+    edges = edges[(edges > max(period, samples / rate)) & (edges < times[-1] - samples / rate - 2 * block / rate)]
+    return edges, fired[(fired > edges[0] - period / 2) & (fired < edges[-1] + period / 2)]
+
+
+def lengths_around_the_period(frequency, rate):
+    """Below, at and just above a period and a multiple of it."""
+
+    period = rate / frequency
+    return tuple(max(4, length) for length in (int(0.6 * period), int(period), int(2 * period), int(2 * period) + 1))
+
+
 def settings(channel='voltage/CH1', level=0.0, slope='rising', samples=30, position=20.0):
     return TriggerSettings(channel, level, slope, samples, position)
 
@@ -84,44 +123,54 @@ def armed(source, repeat=0, trigger=None):
 
 
 class Detection(unittest.TestCase):
-    def test_no_wrong_edge_over_slow_and_fast_signals_noise_lengths_and_both_slopes(self):
-        for frequency in (1.3, 4.7, 11.0, 24.0, 47.0):
-            for noise in (0.01, 0.05):
-                for samples in (20, 30, 90):
+    def assert_every_edge_fires_once(self, edges, fired, frequency):
+        self.assertEqual(fired.size, edges.size, 'as many records as true edges')
+        self.assertLess(np.max(np.abs(fired - edges)), 0.2 / frequency, 'each at its own edge')
+
+    def test_every_edge_fires_once_at_a_centred_level_whatever_the_record_length(self):
+        for rate in (400.0, 1000.0):
+            for frequency in (1.0, 4.7, 11.0, 24.0, 50.0):
+                for noise in (0.01, 0.05):
+                    for samples in lengths_around_the_period(frequency, rate):
+                        for slope in ('rising', 'falling'):
+                            with self.subTest(rate=rate, frequency=frequency, noise=noise, samples=samples, slope=slope):
+                                self.assert_every_edge_fires_once(
+                                    *counted(frequency, noise, rate, samples, slope, 0.0, int(rate + samples)), frequency)
+
+    def test_every_edge_fires_once_in_the_outer_parts_of_the_range_at_low_noise(self):
+        for rate in (400.0, 1000.0):
+            for frequency in (1.0, 4.7, 11.0, 24.0, 50.0):
+                for level in (-0.8, 0.8):
                     for slope in ('rising', 'falling'):
-                        with self.subTest(frequency=frequency, noise=noise, samples=samples, slope=slope):
-                            _, shots = detect(sine(frequency, noise), 12.0, samples=samples, slope=slope)
-                            self.assertGreater(len(shots), 5)
-                            self.assertEqual(wrong_edges(shots, frequency, slope), 0)
+                        with self.subTest(rate=rate, frequency=frequency, level=level, slope=slope):
+                            samples = lengths_around_the_period(frequency, rate)[1]
+                            self.assert_every_edge_fires_once(
+                                *counted(frequency, 0.01, rate, samples, slope, level, 7), frequency)
 
-    def test_the_hysteresis_is_what_keeps_the_slow_wrong_edges_out(self):
-        original = HYSTERESIS_SHARE
-        import zlc_atom.nodes.waveform_measurement.trigger as module
-        module.HYSTERESIS_SHARE = 0.0
-        try:
-            # No hysteresis and no clamp distance either: any sample below the level arms it.
-            _, shots = detect(sine(4.7, 0.05), 12.0)
-        finally:
-            module.HYSTERESIS_SHARE = original
-        self.assertGreater(wrong_edges(shots, 4.7) / len(shots), 0.05, 'a wrong-edge rate the hysteresis has to remove')
+    @unittest.expectedFailure
+    def test_the_measured_limit_of_the_arming_rule_5_percent_noise_at_a_level_80_percent_out(self):
+        # The level is then about four noise widths from the extreme: slow signals
+        # fire extra records and 24-50 Hz ones miss edges.  Stated, not hidden.
+        for rate, frequency, level, slope in ((400.0, 1.0, -0.8, 'rising'), (400.0, 50.0, -0.8, 'rising')):
+            self.assert_every_edge_fires_once(*counted(frequency, 0.05, rate, 40, slope, level, 3), frequency)
 
-    def test_a_record_shorter_than_a_period_catches_every_edge_and_one_period_about_every_second(self):
-        _, every = detect(sine(10.0, 0.01), 10.0, samples=50, pre=10)
-        rising_edges = 10.0 * 10.0
-        self.assertGreater(len(every), 0.95 * rising_edges)
-        self.assertTrue(np.allclose(np.diff([shot.time_seconds for shot in every]), 0.1, atol=2e-3))
-        _, second = detect(sine(10.0, 0.01), 10.0, samples=100, pre=0)
-        gaps = np.diff([shot.time_seconds for shot in second])
-        self.assertLess(len(second), 0.75 * rising_edges)
-        self.assertGreater(np.median(gaps), 0.19)
+    def test_edges_inside_the_record_before_them_fire_and_each_record_holds_its_own_raw_samples(self):
+        records = stream(sine(50.0, 0.02), 6.0, 10)
+        raw = np.concatenate([record.samples for record in records])
+        shots = TriggerDetector(WaveformTrigger(0, 0.0, 'rising', 50, 10), DT).feed(records)
+        gaps = np.diff([shot.time_seconds for shot in shots])
+        self.assertTrue(np.allclose(gaps, 0.02, atol=2e-3), 'an edge every period: 2.5 records overlap')
+        self.assertGreater(len(shots), 295)
+        for shot in shots:
+            at = int(round((shot.time_seconds - shot.crossing_offset_seconds) * RATE_HZ))
+            np.testing.assert_array_equal(shot.samples, raw[at - 10:at + 40])
+        self.assertFalse(np.shares_memory(shots[0].samples, shots[1].samples))
 
-    def test_a_level_in_the_outer_quarter_of_the_signal_still_fires(self):
-        for level, slope in ((-0.9, 'rising'), (0.9, 'falling')):
-            with self.subTest(level=level, slope=slope):
-                _, shots = detect(sine(5.0, 0.01), 8.0, level=level, slope=slope)
-                self.assertGreaterEqual(len(shots), 25, "after the look-back fills, one per period")
-                # All at that crossing, one per period.
-                self.assertTrue(np.allclose(np.diff([shot.time_seconds for shot in shots]), 0.2, atol=5e-3))
+    def test_the_run_s_first_samples_are_compared_with_what_has_been_seen_so_far(self):
+        # A level near the signal's edge fires at once: no fill, no wait.
+        _, shots = detect(sine(5.0, 0.01, phase=-np.pi / 2), 2.0, level=-0.8, pre=0)
+        self.assertEqual(len(shots), 10)
+        self.assertLess(shots[0].time_seconds, 0.2)
 
     def test_the_crossing_time_is_sub_sample_and_the_samples_are_the_raw_ones(self):
         records = stream(sine(5.0), 4.0, 10)
@@ -142,13 +191,11 @@ class Detection(unittest.TestCase):
     def test_pre_trigger_and_records_span_blocks_of_any_cut(self):
         records = stream(sine(7.0, 0.02), 6.0, 1)
         whole = TriggerDetector(WaveformTrigger(0, 0.0, 'rising', 40, 25), DT).feed(records)
-        self.assertGreater(len(whole), 20)
+        self.assertGreater(len(whole), 35)
         for block in (1, 3, 10, 64):
             detector = TriggerDetector(WaveformTrigger(0, 0.0, 'rising', 40, 25), DT)
             cut = [shot for at in range(0, len(records), block) for shot in detector.feed(records[at:at + block])]
-            # A read's threshold differs by a hair; the crossings found do not.
-            self.assertEqual([round(shot.time_seconds, 6) for shot in cut],
-                             [round(shot.time_seconds, 6) for shot in whole][:len(cut)])
+            self.assertEqual([shot.time_seconds for shot in cut], [shot.time_seconds for shot in whole])
             for shot, reference in zip(cut, whole):
                 np.testing.assert_array_equal(shot.samples, reference.samples)
 
@@ -173,11 +220,12 @@ class Detection(unittest.TestCase):
             for index in range(at - 10, at + 50):
                 self.assertIn(index, raw, 'a record holds only samples that follow one another')
 
-    def test_memory_stays_about_one_record(self):
-        detector = TriggerDetector(WaveformTrigger(0, 5.0, 'rising', 30, 6), DT)  # never fires
-        for at, record in enumerate(stream(sine(5.0), 5.0, 10)):
-            self.assertEqual(detector.feed([record]), [])
-            self.assertLessEqual(detector._samples.shape[0], 30)
+    def test_memory_stays_about_one_record_however_many_are_being_filled(self):
+        for level in (5.0, 0.0):  # never fires; fires with several records being filled
+            detector = TriggerDetector(WaveformTrigger(0, level, 'rising', 300, 60), DT)
+            for record in stream(sine(50.0), 3.0, 10):
+                detector.feed([record])
+                self.assertLessEqual(detector._samples.shape[0], 300)
 
     def test_missing_samples_fire_nothing_and_do_not_break_the_stream(self):
         def holes(times):
@@ -288,6 +336,18 @@ class Scope:
 
 
 class Captures(unittest.TestCase):
+    def test_a_finite_capture_of_overlapping_records_stops_at_exactly_n(self):
+        source = virtual(sine(50.0, 0.02))
+        node = armed(source, 12, settings(samples=70, position=20.0))
+        committed = []
+        capture = FiniteCapture(node, should_stop=None)
+        try:
+            self.assertEqual(capture.collect(commit_shot=lambda record, index: committed.append(record)), 12)
+        finally:
+            source.close()
+        self.assertEqual([record.source_ordinal for record in committed], list(range(12)))
+        self.assertTrue(np.allclose(np.diff([record.time_seconds for record in committed]), 0.02, atol=2e-3))
+
     def test_a_finite_capture_gets_n_records_in_order_with_the_trigger_at_time_zero(self):
         source = virtual(sine(20.0, 0.02))
         node = armed(source, 12, settings(samples=30, position=20.0))
@@ -483,30 +543,24 @@ def field_trigger(slope='rising', samples=40, pre=8, level=30.0):
 class SeveralQuantities(unittest.TestCase):
     """Several outputs of different units in every record, at 400 Hz, in records of any length."""
 
-    def test_no_wrong_edge_over_1_to_50_hz_from_records_of_one_sample_or_a_block(self):
-        for frequency in (1.0, 4.7, 11.0, 24.0, 50.0):
-            for noise in (0.01, 0.05):
+    def test_every_edge_fires_once_from_records_of_one_sample_or_a_block(self):
+        for block in (1, 16):
+            for frequency in (1.0, 11.0, 50.0):
                 for samples in (20, 40, 80):
-                    for slope, block in (('rising', 1), ('falling', 1), ('rising', 16)):
-                        with self.subTest(frequency=frequency, noise=noise, samples=samples, slope=slope, block=block):
-                            detector = TriggerDetector(field_trigger(slope, samples, samples // 5), SLOW_DT)
-                            records = quantities_records(quantities_signal(frequency, noise), 12.0, block)
-                            # Read as the capture reads: a slice's worth of records at a time.
-                            step = max(1, 20 // block)
-                            shots = [shot for at in range(0, len(records), step) for shot in detector.feed(records[at:at + step])]
-                            self.assertGreater(len(shots), 5)
-                            self.assertEqual(wrong_edges(shots, frequency, slope), 0)
-                            self.assertTrue(all(shot.samples.shape == (samples, 10) for shot in shots))
+                    for slope in ('rising', 'falling'):
+                        with self.subTest(block=block, frequency=frequency, samples=samples, slope=slope):
+                            edges, fired = counted(frequency, 0.05, SLOW_RATE_HZ, samples, slope, 0.0, 11, block=block)
+                            self.assertEqual(fired.size, edges.size)
 
     def test_at_50_hz_the_crossing_time_beats_the_sample_period(self):
-        # 8 samples a period, 40-point records: re-armed on a crossing, so the next
-        # one often has to wait for the edge after it: every 5 or 6 periods.
+        # 8 samples a period, 40-point records, five periods long: every edge still fires.
         frequency = 50.0
         results = {}
         for noise in (0.01, 0.05):
             detector = TriggerDetector(field_trigger(), SLOW_DT)
             shots = detector.feed(quantities_records(quantities_signal(frequency, noise), 20.0))
-            self.assertTrue(8.0 <= len(shots) / 20.0 <= 10.0, len(shots))
+            # 1000 rising edges, less the one before the 8 pre-trigger samples and the 4 in the last 32.
+            self.assertAlmostEqual(len(shots), 995, delta=1)
             self.assertEqual(wrong_edges(shots, frequency), 0)
             crossing = np.array([shot.time_seconds for shot in shots])
             sample = crossing - np.array([shot.crossing_offset_seconds for shot in shots])
@@ -626,16 +680,16 @@ class Performance(unittest.TestCase):
     def test_it_keeps_up(self):
         for name, source, trigger, wanted in (
             ('400 Hz, 1 sample/record, 4 outputs, 40-point records, 50 Hz signal',
-             quantities_source(quantities_signal(50.0, 0.02)), settings(channel=FIELD_Z, level=30.0, samples=40), 8.0),
-            ('1 kHz, 10 samples/record, 1 output, 15-point records, 50 Hz signal',
-             virtual(sine(50.0, 0.02), block=10), settings(samples=15), 50.0),
-            ('1 kHz, 100 samples/record, 1 output, 15-point records, 50 Hz signal',
-             virtual(sine(50.0, 0.02), block=100), settings(samples=15), 50.0),
+             quantities_source(quantities_signal(50.0, 0.02)), settings(channel=FIELD_Z, level=30.0, samples=40), 50.0),
+            ('1 kHz, 10 samples/record, 1 output, 40-point records, 50 Hz signal',
+             virtual(sine(50.0, 0.02), block=10), settings(samples=40), 50.0),
+            ('1 kHz, 100 samples/record, 1 output, 40-point records, 50 Hz signal',
+             virtual(sine(50.0, 0.02), block=100), settings(samples=40), 50.0),
         ):
             rate, cpu, waiting, reads = self.measure(source, trigger)
             print(f'\n{name}: {rate:5.1f} records/s, {reads:4.1f} reads/s, process CPU {100 * cpu:4.1f}% of one core, '
                   f'at most {waiting} source records waiting')
-            self.assertGreater(rate, 0.9 * wanted)
+            self.assertGreater(rate, 0.95 * wanted)
 
 
 if __name__ == '__main__':

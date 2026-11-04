@@ -6,10 +6,9 @@ stream goes in as the source's records, cut however the source cuts them, and
 what comes out is one record per trigger: the same raw samples, never
 resampled, with the sub-sample time of the level crossing beside them.
 
-Re-arming is the only holdoff: a trigger may fire once the record before it is
-complete and the pre-trigger share has refilled, so two records never share a
-sample.  A record shorter than the signal period catches every edge; a record
-of one period about every second edge.
+There is no dead time: a scope's is a limit of its hardware.  Every edge fires,
+an edge inside the record before it included, so records overlap and the same
+sample can sit in several, each record its own copy.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from math import ceil, floor
+from math import ceil, floor, inf
 
 import numpy as np
 
@@ -25,23 +24,19 @@ from zlc_atom.devices.waveform.contract import WaveformOutput, WaveformRecord
 
 SLOPES = ("rising", "falling")
 
-#: To fire rising, the signal must first have been this share of its running
-#: peak-to-peak below the level since re-arm (mirrored for falling), which is
-#: what makes a noisy crossing of the WRONG slope unable to fire.  At 1 kHz with
-#: 30-sample records and no such condition, wrong-edge records reach 7.7% at
-#: 11 Hz with 5% noise, 32% at 4.7 Hz and 50% at 1.3 Hz; with this share they
-#: are 0% in all three.  It scales with the signal, so it needs no knob.
-HYSTERESIS_SHARE = 0.25
-
-#: The running peak-to-peak looks back this far (or two records, if longer): it
-#: must span a period of the slowest signal this trigger serves (1 Hz), and an
-#: amplitude that drops is forgotten after this long.
-PEAK_WINDOW_SECONDS = 2.0
-
-#: No trigger before the peak-to-peak has seen this much of the stream: with
-#: only the first samples in hand it is the noise, and hysteresis scaled to the
-#: noise would let the first record fire on a wrong edge.
-SETTLE_SECONDS = 0.25
+#: The running extremes look back this far.  To fire rising, the signal must
+#: have passed halfway from the level to its running minimum since the previous
+#: firing (falling: to its running maximum).  At a centred level that is 25% of
+#: the peak-to-peak; it scales with the signal, so it needs no knob, and a level
+#: near an extreme asks for nothing the signal does not reach.  The look-back is
+#: bounded so a large transient cannot disable arming for good.  What that limits:
+#: a signal that stays on one side of the level for this whole time has no extreme
+#: left on the other side, so with noise on it, a slope slower than a period of
+#: about twice this long can fire on the wrong edge.
+EXTREMES_WINDOW_SECONDS = 2.0
+#: The look-back is kept as this many minima of fixed runs of samples, so what a
+#: sample is compared with does not depend on how the stream was cut into reads.
+_EXTREMES_RUNS = 16
 
 #: The time axis travels as JSON coordinates in each output's schema, about
 #: 25 bytes a point, inside one 16 MiB channel frame.
@@ -128,35 +123,37 @@ class TriggerSettings:
 class TriggerDetector:
     """The stream in, triggered records out; holds at most about one record of it.
 
-    One ordinal gap in the stream ends what lies before it: a record being
-    filled is lost (``broken_records``), never stitched across the gap, and the
-    pre-trigger share refills before the next trigger may fire.
+    Whether the signal is armed runs over every sample, whatever records are
+    being filled.  An edge within the first pre-trigger share of the stream has
+    no record to go in, and it arms and fires like any other otherwise.
+
+    One ordinal gap in the stream ends what lies before it: the records being
+    filled are lost (``broken_records``), never stitched across the gap, and the
+    pre-trigger share refills before the next record.
     """
 
     def __init__(self, trigger: WaveformTrigger, sample_interval_seconds: float) -> None:
         self._trigger = trigger
         self._interval = float(sample_interval_seconds)
-        # Falling is rising on the negated signal, the level and extremes with it.
+        # Falling is rising on the negated signal, the level and the extreme with it.
         self._sign = 1.0 if trigger.slope == "rising" else -1.0
         self._level = self._sign * trigger.level
-        self._peak_window = ceil(max(PEAK_WINDOW_SECONDS / self._interval, 2 * trigger.record_samples))
-        self._peaks: deque[tuple[int, float, float]] = deque()
-        self._peak_samples = 0
+        self._run_samples = max(1, ceil(EXTREMES_WINDOW_SECONDS / self._interval / _EXTREMES_RUNS))
+        self._run_minima: deque[float] = deque(maxlen=_EXTREMES_RUNS)
+        self._run_minimum = inf
+        self._run_filled = 0
+        self._armed = False
         self._expected_ordinal: int | None = None
         self._produced = 0
         #: Records a gap in the stream cut short: the one way a trigger is lost.
         self.broken_records = 0
         self._clear_stream()
-        # Indices are into the kept tail followed by the block being read.
-        self._rearm = max(trigger.pre_samples, ceil(SETTLE_SECONDS / self._interval))
 
     def _clear_stream(self) -> None:
         self._samples: np.ndarray | None = None
         self._times: np.ndarray | None = None
-        self._rearm = self._trigger.pre_samples
-        self._seen_beyond = False
-        #: (index of the trigger sample, crossing time, offset) of the record being filled.
-        self._pending: tuple[int, float, float] | None = None
+        #: (index of the trigger sample, crossing time, offset) of each record being filled.
+        self._pending: deque[tuple[int, float, float]] = deque()
 
     def feed(self, records: Sequence[WaveformRecord]) -> list[TriggeredRecord]:
         """The records these complete, in order; the stream continues in the next call."""
@@ -167,36 +164,29 @@ class TriggerDetector:
             if self._expected_ordinal is not None and record.source_ordinal != self._expected_ordinal:
                 self._scan(run, fired)
                 run = []
-                self.broken_records += self._pending is not None
+                self.broken_records += len(self._pending)
                 self._clear_stream()
             self._expected_ordinal = record.source_ordinal + 1
             run.append(record)
         self._scan(run, fired)
         return fired
 
-    def _beyond(self, fresh: np.ndarray) -> float:
-        """The value the signal must have passed since re-arm: the hysteresis.
+    def _running_minimum(self, fresh: np.ndarray) -> np.ndarray:
+        """The signal's minimum over the look-back, up to and including each sample."""
 
-        ``HYSTERESIS_SHARE`` of the running peak-to-peak from the level.  Once the
-        look-back is full, its far extreme is known and the value goes no further
-        than halfway to it: a level within a quarter of the signal's edge would
-        otherwise ask for a value the signal never reaches, and wait forever on a
-        perfectly good signal.  Before that, an extreme not yet seen would pull the
-        value up against the level, where noise can pass it.
-        """
-
-        low, high = float(np.fmin.reduce(fresh)), float(np.fmax.reduce(fresh))
-        if low == low:  # not all missing samples
-            self._peaks.append((fresh.size, low, high))
-            self._peak_samples += fresh.size
-            while self._peak_samples - self._peaks[0][0] >= self._peak_window:
-                self._peak_samples -= self._peaks.popleft()[0]
-        if not self._peaks:
-            return float("-inf")
-        low = min(item[1] for item in self._peaks)
-        high = max(item[2] for item in self._peaks)
-        beyond = self._level - HYSTERESIS_SHARE * (high - low)
-        return max(beyond, 0.5 * (self._level + low)) if self._peak_samples >= self._peak_window else beyond
+        minima = np.empty(fresh.size)
+        at = 0
+        while at < fresh.size:
+            part = fresh[at:at + self._run_samples - self._run_filled]
+            before = min(self._run_minimum, min(self._run_minima, default=inf))
+            minima[at:at + part.size] = np.fmin(before, np.fmin.accumulate(part))
+            self._run_minimum = float(np.fmin(self._run_minimum, np.fmin.reduce(part)))
+            self._run_filled += part.size
+            if self._run_filled == self._run_samples:
+                self._run_minima.append(self._run_minimum)
+                self._run_minimum, self._run_filled = inf, 0
+            at += part.size
+        return minima
 
     def _scan(self, run: list[WaveformRecord], fired: list[TriggeredRecord]) -> None:
         if not run:
@@ -209,53 +199,50 @@ class TriggerDetector:
         self._times = np.concatenate([*held_times, *(
             record.time_seconds + self._interval * np.arange(record.samples.shape[0]) for record in run)])
         signal = self._sign * self._samples[:, trigger.column].astype(np.float64)
-        beyond = self._beyond(signal[scanned:])
         level = self._level
+        fresh = signal[scanned:]
+        arming = np.flatnonzero((fresh < 0.5 * (level + self._running_minimum(fresh))) & (fresh < level)) + scanned
         first = max(scanned, 1)
         edges = np.flatnonzero((signal[first - 1:-1] < level) & (signal[first:] >= level)) + first
-        passed = np.flatnonzero(signal[scanned:] < beyond) + scanned
-        length = signal.size
-        position = max(scanned, self._rearm)
+        position = scanned
         # Jumps from one condition to the next, so the cost is per trigger
         # however many times noise crosses the level.
         while True:
-            if self._pending is not None:
-                (index, crossing, offset) = self._pending
-                start = index - trigger.pre_samples
-                if start + trigger.record_samples > length:
+            if not self._armed:
+                found = int(np.searchsorted(arming, position))
+                if found == arming.size:
                     break
-                fired.append(TriggeredRecord(
-                    self._samples[start:start + trigger.record_samples], self._produced, crossing,
-                    run[-1].host_received_at_ns, crossing_offset_seconds=offset,
-                ))
-                self._produced += 1
-                self._pending = None
-            if not self._seen_beyond:
-                found = int(np.searchsorted(passed, position))
-                if found == passed.size:
-                    break
-                position = int(passed[found]) + 1
-                self._seen_beyond = True
-            found = int(np.searchsorted(edges, max(position, self._rearm)))
+                position = int(arming[found]) + 1
+                self._armed = True
+            found = int(np.searchsorted(edges, position))
             if found == edges.size:
                 break
             index = int(edges[found])
-            share = (level - signal[index - 1]) / (signal[index] - signal[index - 1])
-            before, at = self._times[index - 1], self._times[index]
-            crossing = float(before + share * (at - before))
-            self._pending = (index, crossing, crossing - float(at))
-            self._rearm = position = index + trigger.record_samples
-            self._seen_beyond = False
-        # Keep what the record being filled, the next pre-trigger share and the
+            self._armed = False
+            position = index + 1
+            if index >= trigger.pre_samples:
+                share = (level - signal[index - 1]) / (signal[index] - signal[index - 1])
+                before, at = self._times[index - 1], self._times[index]
+                crossing = float(before + share * (at - before))
+                self._pending.append((index, crossing, crossing - float(at)))
+        length = signal.size
+        while self._pending and self._pending[0][0] - trigger.pre_samples + trigger.record_samples <= length:
+            (index, crossing, offset) = self._pending.popleft()
+            start = index - trigger.pre_samples
+            fired.append(TriggeredRecord(
+                self._samples[start:start + trigger.record_samples], self._produced, crossing,
+                run[-1].host_received_at_ns, crossing_offset_seconds=offset,
+            ))
+            self._produced += 1
+        # Keep what the records being filled, the next pre-trigger share and the
         # next crossing's previous sample can still need.
         keep = max(0, length - max(trigger.pre_samples, 1))
-        if self._pending is not None:
-            keep = min(keep, self._pending[0] - trigger.pre_samples)
-            self._pending = (self._pending[0] - keep, *self._pending[1:])
-        self._rearm -= keep
+        if self._pending:
+            keep = min(keep, self._pending[0][0] - trigger.pre_samples)
+            self._pending = deque((index - keep, crossing, offset) for index, crossing, offset in self._pending)
         self._samples = self._samples[keep:].copy()
         self._times = self._times[keep:].copy()
 
 
-__all__ = ["HYSTERESIS_SHARE", "SLOPES", "TriggerDetector", "TriggerSettings", "TriggeredRecord",
+__all__ = ["EXTREMES_WINDOW_SECONDS", "SLOPES", "TriggerDetector", "TriggerSettings", "TriggeredRecord",
            "WaveformTrigger", "channel_choices", "channel_value"]
