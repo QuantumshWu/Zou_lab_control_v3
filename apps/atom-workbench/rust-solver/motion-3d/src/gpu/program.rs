@@ -114,7 +114,7 @@ pub struct Params{
 pub struct State{
     pub(crate) q:[f64;3],pub(crate) p:[f64;3],pub(crate) time:f64,pub(crate) logn:f64,pub(crate) threshold:f64,pub(crate) log_threshold:f64,pub(crate) prefix:[f64;15],
     pub(crate) q0:[f64;3],pub(crate) p0:[f64;3],pub(crate) twin_logn:f64,pub(crate) twin_threshold:f64,pub(crate) twin_log_threshold:f64,
-    pub(crate) psi:[[f32;2];MAXM],pub(crate) twin:[[f32;2];MAXN],pub(crate) doppler:f32,pub(crate) cluster:i32,pub(crate) jumps:i32,pub(crate) death:i32,
+    pub(crate) psi:[[f32;2];MAXM],pub(crate) twin:[[f32;2];MAXN],pub(crate) cluster:i32,pub(crate) jumps:i32,pub(crate) death:i32,
     pub(crate) index:u32,pub(crate) twin_cluster:i32,pub(crate) twin_jumps:i32,pub(crate) beats:f32,
     pub(crate) interval:i32,pub(crate) step:i32,
 }

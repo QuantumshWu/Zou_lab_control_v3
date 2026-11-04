@@ -486,6 +486,13 @@ pub fn hermitian_form(x:&[Complex],psi:&[Complex],n:usize)->f64{
     s
 }
 
+/// out = the weighted sum of four nodes' interleaved complex slices (`Model::interpolate`).
+#[inline(always)]
+fn four_nodes(w:[f64;4],[a,b,c,e]:[&[f64];4],out:&mut [Complex]){
+    for(j,o)in out.iter_mut().enumerate(){let(x,y)=(2*j,2*j+1);o.re=w[0]*a[x]+w[1]*b[x]+w[2]*c[x]+w[3]*e[x];o.im=w[0]*a[y]+w[1]*b[y]+w[2]*c[y]+w[3]*e[y];}
+}
+#[target_feature(enable="avx2,fma")]
+unsafe fn four_nodes_wide(w:[f64;4],nodes:[&[f64];4],out:&mut [Complex]){four_nodes(w,nodes,out)}
 /// acc += c x for interleaved complex vectors of W/2 entries.
 #[inline(always)]
 fn caxpy<const W:usize>(c:Complex,x:&[f64;W],acc:&mut [f64;W]){
@@ -1406,7 +1413,13 @@ impl Model{
     /// out = the table slice [start, start + out.len()) of a cluster, interpolated (with the weights'
     /// derivative in s_f when `derivative` names one).
     pub fn interpolate(&self,cluster:usize,stencil:&Stencil,derivative:Option<usize>,start:usize,out:&mut [Complex]){
-        let size=2*self.layouts[cluster].size;let data=&self.tables.data[cluster];let len=out.len();out.fill(Complex::ZERO);
+        let size=2*self.layouts[cluster].size;let data=&self.tables.data[cluster];let len=out.len();
+        if stencil.dimensions==1&&derivative.is_none(){
+            let at=stencil.first[0]*size+2*start;let nodes:[&[f64];4]=std::array::from_fn(|m|&data[at+m*size..at+m*size+2*len]);
+            if self.wide{unsafe{four_nodes_wide(stencil.weights[0],nodes,out);}}else{four_nodes(stencil.weights[0],nodes,out);}
+            return;
+        }
+        out.fill(Complex::ZERO);
         for i in 0..stencil.count(){
             let(node,w,dw)=stencil.node(i);let w=match derivative{None=>w,Some(f)=>dw[f]};let base=node*size+2*start;
             for(o,x)in out.iter_mut().zip(data[base..base+2*len].chunks_exact(2)){o.re+=w*x[0];o.im+=w*x[1];}
@@ -1446,7 +1459,11 @@ impl Model{
     /// Everything at (r, κ) but the internal state: per focused unit its intensity s = |F|²/N
     /// (F = Σ_l a_l γ_l, ground.rs `Unit`), its gradient 2 Re(F* ∇F)/N and its intensity with the
     /// trap's light off (`trap_beams`).
-    pub fn point(&self,r:[f64;3],kappa:[f64;3])->Point{
+    pub fn point(&self,r:[f64;3],kappa:[f64;3])->Point{if self.wide{unsafe{self.point_wide(r,kappa)}}else{self.point_body(r,kappa)}}
+    #[target_feature(enable="avx2,fma")]
+    unsafe fn point_wide(&self,r:[f64;3],kappa:[f64;3])->Point{self.point_body(r,kappa)}
+    #[inline(always)]
+    fn point_body(&self,r:[f64;3],kappa:[f64;3])->Point{
         let(mut s,mut off)=([0.;MOST_FOCUSED],[0.;MOST_FOCUSED]);let mut gradient=[[0.;3];MOST_FOCUSED];
         for(i,&u)in self.focused.iter().enumerate(){
             let unit=&self.ground.units[u];let(mut field,mut slope,mut rest)=(Complex::ZERO,[Complex::ZERO;3],Complex::ZERO);
@@ -1858,9 +1875,12 @@ impl Model{
     /// form, Σ_pairs Re(−∇Φ ⟨ψ|S|ψ⟩ − Φ Σ_f ∇s_f ⟨ψ|∂_f S|ψ⟩) + Σ_f ∇s_f ⟨ψ|∂_f h0|ψ⟩, from the forms of
     /// each pair's tables on its entries (`Local`).
     pub fn force(&self,cluster:usize,local:&Local,p:&Point,psi:&[Complex])->[f64;3]{
-        macro_rules! sized{($($n:literal)*)=>{match self.dimension(cluster){$($n=>self.force_sized::<$n>(cluster,local,p,psi),)*_=>unreachable!("a cluster has 1 to 8 states")}}}
+        macro_rules! sized{($($n:literal)*)=>{match self.dimension(cluster){$($n=>if self.wide{unsafe{self.force_wide::<$n>(cluster,local,p,psi)}}else{self.force_sized::<$n>(cluster,local,p,psi)},)*_=>unreachable!("a cluster has 1 to 8 states")}}}
         sized!(1 2 3 4 5 6 7 8)
     }
+    #[target_feature(enable="avx2,fma")]
+    unsafe fn force_wide<const N:usize>(&self,cluster:usize,local:&Local,p:&Point,psi:&[Complex])->[f64;3]{self.force_sized::<N>(cluster,local,p,psi)}
+    #[inline(always)]
     fn force_sized<const N:usize>(&self,cluster:usize,local:&Local,p:&Point,psi:&[Complex])->[f64;3]{
         let layout=&self.layouts[cluster];let d=self.focused.len();let norm:f64=psi[..N].iter().map(|z|z.norm_sqr()).sum();
         // Per group the products ψ_a* ψ_b on its entries (row-major for a group of every entry); a
@@ -2015,11 +2035,18 @@ impl Model{
     pub fn photons<'a>(&'a self,cluster:usize,p:&Point,psi:&[Complex],t:f64,exact:Option<Exact>)->Photons<'a>{self.photons_to(cluster,p,psi,t,exact,true)}
     /// `photons`, with the fourth order's corrections where `fourth` (else the second order's alone).
     fn photons_to<'a>(&'a self,cluster:usize,p:&Point,psi:&[Complex],t:f64,exact:Option<Exact>,fourth:bool)->Photons<'a>{
+        if self.wide{unsafe{self.photons_wide(cluster,p,psi,t,exact,fourth)}}else{self.photons_body(cluster,p,psi,t,exact,fourth)}
+    }
+    #[target_feature(enable="avx2,fma")]
+    unsafe fn photons_wide<'a>(&'a self,cluster:usize,p:&Point,psi:&[Complex],t:f64,exact:Option<Exact>,fourth:bool)->Photons<'a>{self.photons_body(cluster,p,psi,t,exact,fourth)}
+    #[inline(always)]
+    fn photons_body<'a>(&'a self,cluster:usize,p:&Point,psi:&[Complex],t:f64,exact:Option<Exact>,fourth:bool)->Photons<'a>{
         let g=&self.ground;let cl=&g.clusters[cluster];let layout=&self.layouts[cluster];let(n,n0)=(layout.n,layout.n0);let ng=g.ground_states.len();let size=ng*n0;
         // Per carrier, rank and axis the jump tables J_k and J2_k at the point (ng × n0), and per carrier
         // and axis M = Σ_k E_k J_k − E^D_k J2_k, or the exact responses' C_a Σ_l a_l R_l(w_l).
         let ranks:usize=self.carriers.iter().map(|c|c.rank).sum();
-        let(mut jumps,mut doppler)=(vec![Complex::ZERO;3*ranks*size],vec![Complex::ZERO;3*ranks*size]);let mut matrices=vec![Complex::ZERO;3*self.carriers.len()*size];
+        let[mut jumps,mut doppler,mut matrices]=PHOTON_BUFFERS.with(|b|b.take());
+        for v in [&mut jumps,&mut doppler]{if v.len()<3*ranks*size{v.resize(3*ranks*size,Complex::ZERO);}}matrices.clear();matrices.resize(3*self.carriers.len()*size,Complex::ZERO);
         let mut at=0;
         for(c,cl2)in layout.carriers.iter().enumerate(){
             let fl=&p.fields[c];
@@ -2056,7 +2083,7 @@ impl Model{
             }
             u}).collect();
         let mut state=[Complex::ZERO;MOST_MIXED];state[..n].copy_from_slice(&psi[..n]);
-        Photons{model:self,cluster,point:*p,psi:state,time:t,jumps,doppler,exact,amplitude}
+        Photons{model:self,cluster,point:*p,psi:state,time:t,jumps,doppler,matrices,exact,amplitude}
     }
 
     /// A cluster's generator against its jumps at a point and time: D = i(H − H†) − Σ L†L over its classes'
@@ -2076,7 +2103,7 @@ impl Model{
         let n=self.dimension(cluster);let generator=self.generator(cluster,p,t);let h=generator.hamiltonian;let largest=h.iter().map(|z|z.abs()).fold(0.,f64::max)+generator.scalar.abs();
         let decay=Dense::from_fn(n,n,|a,b|(h[a*n+b]-h[b*n+a].conj())*Complex::I);
         // Column b: the photons of the basis state b.
-        let columns=|fourth:bool|->Vec<Vec<[[Complex;MOST_STATES];3]>>{(0..n).map(|b|{let mut psi=[Complex::ZERO;MOST_MIXED];psi[b]=Complex::ONE;self.photons_to(cluster,p,&psi,t,None,fourth).amplitude}).collect()};
+        let columns=|fourth:bool|->Vec<Vec<[[Complex;MOST_STATES];3]>>{(0..n).map(|b|{let mut psi=[Complex::ZERO;MOST_MIXED];psi[b]=Complex::ONE;std::mem::take(&mut self.photons_to(cluster,p,&psi,t,None,fourth).amplitude)}).collect()};
         let(full,second)=(columns(true),self.layouts[cluster].fourth.as_ref().map(|_|columns(false)));
         let(mut jumps,mut whole)=(Dense::zeros(n,n),Dense::zeros(n,n));
         // A photon lands in its target's ground states.
@@ -2457,10 +2484,17 @@ pub struct Absorption{pub beams:Vec<(usize,f64,f64)>,pub explicit:Option<(f64,Ve
 /// (`Photons::absorption`) from the jump tables at the point, kept.
 pub struct Photons<'a>{
     model:&'a Model,cluster:usize,point:Point,psi:[Complex;MOST_MIXED],time:f64,
-    /// Per carrier, rank and axis (carrier-major): J_k and J2_k at the point, ng × n0.
-    jumps:Vec<Complex>,doppler:Vec<Complex>,
+    /// Per carrier, rank and axis (carrier-major): J_k and J2_k at the point, ng × n0; the third buffer of `PHOTON_BUFFERS`, per carrier and axis their sum on the fields.
+    jumps:Vec<Complex>,doppler:Vec<Complex>,matrices:Vec<Complex>,
     exact:Option<Exact>,
     pub amplitude:Vec<[[Complex;MOST_STATES];3]>,
+}
+impl Drop for Photons<'_>{
+    fn drop(&mut self){let buffers=[std::mem::take(&mut self.jumps),std::mem::take(&mut self.doppler),std::mem::take(&mut self.matrices)];let _=PHOTON_BUFFERS.try_with(|b|b.set(buffers));}
+}
+thread_local!{
+    /// A jump's working rows (`Photons`), kept per thread: a heap's lock and a zeroing per jump.
+    static PHOTON_BUFFERS:std::cell::Cell<[Vec<Complex>;3]>=const{std::cell::Cell::new([Vec::new(),Vec::new(),Vec::new()])};
 }
 impl Photons<'_>{
     /// Where carrier c's rank k and axis a's tables start in `jumps`.
@@ -2477,6 +2511,12 @@ impl Photons<'_>{
     /// (`Absorption`) of the photon f along e: per beam l of the class's carriers its share ‖f_l‖² and projection
     /// Re⟨f|f_l⟩/⟨f|f⟩, f_l = a_l z_l per row, and the explicit states' part.
     pub fn absorption(&self,class:usize,e:[f64;3],f:&[Complex;MOST_STATES])->([[Complex;3];MOST_STATES],Absorption){
+        if self.model.wide{unsafe{self.absorption_wide(class,e,f)}}else{self.absorption_body(class,e,f)}
+    }
+    #[target_feature(enable="avx2,fma")]
+    unsafe fn absorption_wide(&self,class:usize,e:[f64;3],f:&[Complex;MOST_STATES])->([[Complex;3];MOST_STATES],Absorption){self.absorption_body(class,e,f)}
+    #[inline(always)]
+    fn absorption_body(&self,class:usize,e:[f64;3],f:&[Complex;MOST_STATES])->([[Complex;3];MOST_STATES],Absorption){
         let m=self.model;let g=&m.ground;let cl=&g.clusters[self.cluster];let class=&cl.classes[class];let target=&g.clusters[class.target];
         let(n0,nt,p,d)=(m.ground_dimension(self.cluster),target.states.len(),&self.point,m.focused.len());
         let(layout,size)=(&m.layouts[self.cluster],g.ground_states.len()*n0);let(data,slice)=(&m.tables.data[self.cluster],2*layout.size);
@@ -2486,18 +2526,20 @@ impl Photons<'_>{
         for &(ph,w)in &class.photons{
             let(row,col)=(target.position(ph.to).unwrap(),cl.position(ph.from).unwrap());let phase=rotation.at(w)*self.psi[col];
             let sum=&mut sums[carriers.binary_search(&ph.carrier).unwrap()*MOST_STATES+row];
+            let first=self.offset(ph.carrier,0,0)+ph.to*n0+col;
             for k in 0..m.carriers[ph.carrier].rank{
                 let(mut a,mut b)=(Complex::ZERO,Complex::ZERO);let mut slope=[Complex::ZERO;MOST_FOCUSED];
-                for x in 0..3{let at=self.offset(ph.carrier,k,x)+ph.to*n0+col;a+=self.jumps[at]*e[x];b+=self.doppler[at]*e[x];}
+                for x in 0..3{let at=first+(k*3+x)*size;a+=self.jumps[at]*e[x];b+=self.doppler[at]*e[x];}
                 if d>0{
                     let place=(k*3,ph.to*n0+col);let cl2=&layout.carriers[ph.carrier];
                     let starts:[usize;3]=std::array::from_fn(|x|2*(cl2.j+(place.0+x)*size+place.1));
-                    for i in 0..p.stencil.count(){
-                        let(node,_,dw)=p.stencil.node(i);let base=node*slice;
-                        let along=|at:&[usize;3]|(0..3).fold(Complex::ZERO,|v,x|v+Complex::new(data[base+at[x]],data[base+at[x]+1])*e[x]);
-                        let v=along(&starts);
+                    let along=|base:usize|(0..3).fold(Complex::ZERO,|v,x|v+Complex::new(data[base+starts[x]],data[base+starts[x]+1])*e[x]);
+                    if d==1{let(node,dw)=(p.stencil.first[0],p.stencil.derivatives[0]);for i in 0..4{slope[0]+=along((node+i)*slice)*dw[i];}}
+                    else{for i in 0..p.stencil.count(){
+                        let(node,_,dw)=p.stencil.node(i);
+                        let v=along(node*slice);
                         for f in 0..d{slope[f]+=v*dw[f];}
-                    }
+                    }}
                 }
                 sum[k][0]+=phase*a;sum[k][1]+=phase*b;for f in 0..d{sum[k][2+f]+=phase*slope[f];}
             }

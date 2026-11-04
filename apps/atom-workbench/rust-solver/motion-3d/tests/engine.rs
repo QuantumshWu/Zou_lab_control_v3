@@ -453,7 +453,7 @@ fn the_held_twin_at_fourth_order_averages_to_its_master_equation(){
     let runs:Vec<Vec<[f64;STATES]>>=(0..count).map(|index|{
         let mut psi=[Complex::ZERO;MOST_MIXED];psi[state]=Complex::ONE;
         let mut t=atom_motion_3d::engine::Trajectory{cluster,psi,r:twin.held.point.r,kappa:[0.;3],time:0.,threshold:atom_motion_3d::engine::jump_stream(17,index,0).open_uniform(),
-            alive:true,jumps:0,doppler:0.,beats:0.,seed:17,index};
+            alive:true,jumps:0,beats:0.,seed:17,index};
         twin.start(&mut t);
         let mut out=vec![twin.populations(t.cluster,&t.psi)];
         for _ in 1..outputs{for _ in 0..steps{held.step(&mut t);}out.push(twin.populations(t.cluster,&t.psi));}
@@ -1109,7 +1109,7 @@ fn held_force(model:&Model,request:&Request,state:&str,r0:[f64;3],v:[f64;3],coun
     let mut s=Settings::new(dt,&trap,f64::EPSILON,false);s.loss=false;let engine=Engine::new(model,s);let(steps,first)=((time/dt).round() as usize,(skip/dt).round() as usize);
     let out:Vec<([f64;3],u64,[f64;STATES])>=(0..count).into_par_iter().map(|i|{
         let mut psi=[Complex::ZERO;MOST_MIXED];psi[at]=Complex::ONE;
-        let mut t=atom_motion_3d::engine::Trajectory{cluster,psi,r:start,kappa:k0,time:0.,threshold:atom_motion_3d::engine::jump_stream(7,i,0).open_uniform(),alive:true,jumps:0,doppler:0.,beats:0.,seed:7,index:i};
+        let mut t=atom_motion_3d::engine::Trajectory{cluster,psi,r:start,kappa:k0,time:0.,threshold:atom_motion_3d::engine::jump_stream(7,i,0).open_uniform(),alive:true,jumps:0,beats:0.,seed:7,index:i};
         let(mut base,mut jumps)=(k0,0);for n in 0..steps{if n==first{base=t.kappa;jumps=t.jumps;}engine.step(&mut t);}
         (std::array::from_fn(|a|t.kappa[a]-base[a]),t.jumps-jumps,model.populations(t.cluster,&model.point(t.r,t.kappa),&t.psi,t.time))}).collect();
     let(n,span)=(count as f64,time-skip);let mean:[f64;3]=std::array::from_fn(|a|out.iter().map(|x|x.0[a]).sum::<f64>()/n);

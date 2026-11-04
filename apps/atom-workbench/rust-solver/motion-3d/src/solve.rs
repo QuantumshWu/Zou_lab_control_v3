@@ -243,16 +243,17 @@
 //!
 //! The first standard errors stand on `FIRST_GROUPS` groups on any machine: the pilot's trajectories,
 //! each a group of one (with the harmonic control, at the pilot's step), predict the need, and the
-//! first batch is that many groups of `TASK`, at most the need the pilot predicts, at least the
-//! device's width -- a machine of more threads runs it in fewer rounds, not with more trajectories.
+//! first batch on the CPU is that many groups of `TASK`, at most the need the pilot predicts -- a machine of more threads runs it in fewer rounds, not with more trajectories --, each as far as the reach it predicts wants it, half of them through the run (`WHOLE_GROUPS`): a whole first batch held the 3D PGC's and the D1 gray molasses's late outputs at 256 trajectories where they need 170 and 50-70.
+//! An output the pilot under-predicts gets its trajectories in the next batch, which pass every earlier output too.
+//! On the GPU a wave's time grows with its trajectories (a laptop's RTX 5070 at the 3D PGC's step: 2.1 s for 8, 2.7 for 256, 3.96 for 576 -- its clock falls with the load, its cycles per step about stay), and a wave costs at least a trajectory's time as far as it goes, so that its first
+//! wave runs what the pilot predicts is needed and the need's own error (`first_ends`), each group as far as the reach wants it: a group that stops early leaves the others its clock. (Over 12 seeds: the need alone ran a second wave on 4 of DEFAULT's and 7 of THREE's, against 1 and 2 with its error; twice its error took the kernel's mean up 4-17 % on GMD1C, TET and PGC3D.)
 //! An output's need is its trajectories so far times its worst ratio squared (the statistics over their rooms); a trajectory
 //! that reaches an output passes every earlier one, so that the trajectories an output must be passed by -- its reach -- are the
 //! largest need from it on, and a batch's trajectories run only as far as the outputs that still want them, half a period past
 //! the last (lib.rs `simulate_to`): the outputs where T binds or the fold's memory leaves the populations little room are often
 //! the first few (the D1 gray molasses' first 0.4 ms of 10 ms; the 3D PGC's T at its first output alone), and those alone
-//! paid for the whole run. On the CPU each group of a batch runs as far as its place in the reach (at most doubling each
-//! output's trajectories: the need is the largest of many outputs' estimated errors, biased up while few groups stand behind it);
-//! on the GPU a wave takes the last output that wants trajectories, and its width at no further cost. The estimates at an output
+//! paid for the whole run. Each group of a batch runs as far as its place in the reach (at most doubling each
+//! output's trajectories: the need is the largest of many outputs' estimated errors, biased up while few groups stand behind it). The estimates at an output
 //! rest on the groups that reach it (stats.rs `summarize`), a standard error's rise at the point where they thin out what the
 //! targets allow. The errors the need takes are each output's over its neighbours as far as they agree (`steady`): the largest of many outputs'
 //! noisy estimates stood 20-35 % above their common value in the standard error, 1.3-1.8 times in the need. No margin is added above the prediction: a batch more costs the device's tail and the statistics, a few
@@ -265,10 +266,11 @@
 //! trajectory so far, held when the jackknife leaves a group out: its errors -- what the stopping rule
 //! takes -- are the corrected values' spread over the groups; where a control follows nothing, β ≈ 0.
 //! The held
-//! twin costs a trajectory of its own: it runs in the first batch, and is kept when the trajectories
+//! twin costs a trajectory of its own, at its share of the work (counted as the step's, `held_work`). It runs in the first batch where the pilot's need says it can pay for itself: the
+//! populations must need more trajectories than T does and than that batch holds, by more than that share (`twin_can_pay`) -- where T
+//! decides the trajectories, or the first batch is all a run takes, its control of the populations saves none. It is kept when the trajectories
 //! that batch says the targets need with it -- the populations' or T's, whichever needs more --,
-//! times its share of the work (counted as the step's, `held_work`), are fewer than without: where T
-//! decides the trajectories its control of the populations saves none. The first batch's groups are
+//! times its share, are fewer than without. The first batch's groups are
 //! Latin hypercubes, so its T need is the run's, not inflated by independent draws' spread at early
 //! times.
 //!
@@ -305,9 +307,8 @@
 //! streams and sums. The two devices make a solve's choices alike: the model, the ledger, the pilot
 //! and the time step on the CPU in double precision either way, the statistics and their stopping
 //! rule. A batch is whole groups: on the CPU at least one (its threads take the trajectories one at
-//! a time, so a batch costs its trajectories and one tail whatever its size), and on the GPU whole
-//! waves -- a group in each of its resident blocks --, a wave costing about what one trajectory does,
-//! so that there the first batch is usually the last. A GPU that cannot run (none, an older driver, a
+//! a time, so a batch costs its trajectories and one tail whatever its size), and on the GPU a wave of them,
+//! which costs at least a trajectory's time as far as it goes. A GPU that cannot run (none, an older driver, a
 //! model beyond its kernel) leaves the solve on the CPU with the reason
 //! (`Solution::device_note`); one that fails during the batches has the solve redone on the CPU.
 use crate::engine::{column_norm,node_phase,series,Engine,Settings,Trajectory,QUADRATURE};
@@ -359,6 +360,9 @@ pub const MOST_STEPS:usize=1<<24;
 /// pilot's trajectories, each a group of one, and at most the first batch's groups of `TASK` -- the
 /// twin's decision and the first prediction stand on them (formerly two per thread of 16 threads).
 pub const FIRST_GROUPS:u64=32;
+/// The groups of a CPU's first batch that run through the whole run whatever the pilot's need says (`first_ends`), half `FIRST_GROUPS`: a jackknife's variance over g groups errs by √(2/(g − 1)), 36 % here against 25 % on those, and
+/// its coverage at CONFIDENCE standard errors is that of t with g − 1 degrees of freedom, 93.6 % here against 94.6 %.
+const WHOLE_GROUPS:u64=FIRST_GROUPS/2;
 
 pub const NOT_CONFINED:&str="光镊不约束原子：3D 运动计算光镊中的单个原子，需要在焦点处形成势阱的光镊";
 
@@ -912,36 +916,42 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // The control variates (control.rs): the harmonic twin's, and the held twin where the trap beam's
     // intensity is the pilot's mean, when the generator is static.
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
+    // The need the pilot predicts per output and target, the populations' and T's (its trajectories each a group, with the harmonic control).
+    let pilot_needs:Vec<[f64;2]>={
+        let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:pilot_harmonic.mean[i],twin:None}).collect();
+        let mut e=summarize(&pilot_groups,&scales,&means);start(&mut e[0],&model,&initial);
+        let(_,accounts)=ledger(&model,&booked(&base,pilot_beats*horizon),&e,times,allowance,bias,trap.lab,false,&memory);
+        output_ratios(&e,&accounts,trap.lab).iter().map(|r|r.map(|x|(pilot as f64*x*x).min(MOST_TRAJECTORIES as f64))).collect()
+    };
+    let largest_need:[f64;2]=std::array::from_fn(|k|pilot_needs.iter().fold(0_f64,|m,n|m.max(n[k])));
+    // The first batch, each group as far as the reach wants it (module documentation, # Batches): on the CPU FIRST_GROUPS groups, at most the pilot's need -- another batch costs a tail --;
+    // on the GPU the pilot's need and its error -- another wave costs a whole trajectory's time, as far as it goes --, at least FIRST_GROUPS groups through the run, at most what its resident blocks hold.
+    let pilot_reach=reaches(&pilot_needs.iter().map(|n|n[0].max(n[1])).collect::<Vec<f64>>());
+    let ends:Vec<usize>=match &gpu{
+        Some((g,_))=>{let width=g.lock().unwrap_or_else(|e|e.into_inner()).width(1).max(FIRST_GROUPS*TASK);let margin=1.+need;
+            let wanted:Vec<f64>=pilot_reach.iter().map(|x|x*margin).collect();
+            first_ends(&wanted,(wanted[1].ceil() as u64).clamp(FIRST_GROUPS*TASK,width).div_ceil(TASK),FIRST_GROUPS)}
+        None=>first_ends(&pilot_reach,(FIRST_GROUPS*TASK).min(pilot_reach[1].ceil() as u64).div_ceil(TASK).max(1),WHOLE_GROUPS),
+    };
+    let count=ends.len() as u64*TASK;
+    // The held twin where it can pay for itself by the pilot's need (`twin_can_pay`): spent in the first batch either way, it held 4-10 % of the CPU's solves and 5-11 % of the kernel's on scenes that never kept it.
+    let twin_share=||held_work(&parts,&settings,interval,waiting)/interval_work(&model,&parts,&settings,interval,waiting);
     let intensity=states.iter().map(|t|model.geometry[model.trap_beam].intensity(t.r)).sum::<f64>()/states.len().max(1) as f64;
-    let mut twin=Twin::new(&model,intensity);
+    let mut twin=if twin_can_pay(count as f64,largest_need,0.){Twin::new(&model,intensity).filter(|_|twin_can_pay(count as f64,largest_need,twin_share()))}else{None};
     let twin_means=twin.as_ref().map(|t|t.means(&model,&request.initial_density,interval,outputs));
     let means=|held:bool|->Vec<Means>{(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:twin_means.as_ref().filter(|_|held).map(|m|m[i])}).collect()};
-    // A batch's trajectories, each group through its output `ends` -- on the GPU all through the farthest: a launch's
-    // intervals are the wave's.
+    // A batch's trajectories, each group through its output `ends`.
     let batch=|first:u64,count:u64,ends:&[usize],twin:Option<&Twin>|->Result<Outcome,Stop>{
         let variates=Variates{harmonic:&harmonic,twin};
         match &gpu{
             None=>Ok(simulate_to(&model,&settings,&initial,seed,first,count,TASK,steps,outputs,&listed,Some(&variates),ends)),
             Some((g,program))=>{let last=ends.iter().copied().max().unwrap_or(outputs-1);let short:Vec<usize>=listed.iter().copied().filter(|&l|l<=last).collect();
-                let mut out=g.lock().unwrap_or_else(|e|e.into_inner()).simulate(program,&model,&settings,&initial,seed,first,count,TASK,steps,last+1,&short,Some(&variates)).map_err(Stop::Gpu)?;
+                let mut out=g.lock().unwrap_or_else(|e|e.into_inner()).simulate(program,&model,&settings,&initial,seed,first,count,TASK,steps,last+1,&short,Some(&variates),Some(ends)).map_err(Stop::Gpu)?;
                 for group in &mut out.groups{group.sums.resize(outputs,Sums::zero());}out.samples.resize(listed.len(),vec![]);Ok(out)}
         }
     };
-    // A batch is whole groups: on the CPU at least one, on the GPU a group in each of its resident
-    // blocks -- such a batch costs about what one trajectory does --, a whole number of its widths.
-    let width=match &gpu{Some((g,_))=>g.lock().unwrap_or_else(|e|e.into_inner()).width(1),None=>TASK};
-    let unit=if gpu.is_some(){width}else{TASK};
-    // The first batch: FIRST_GROUPS groups, at most the pilot's predicted need (its trajectories each
-    // a group, with the harmonic control), at least the device's width.
-    let pilot_need={
-        let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:pilot_harmonic.mean[i],twin:None}).collect();
-        let mut e=summarize(&pilot_groups,&scales,&means);start(&mut e[0],&model,&initial);
-        let(_,accounts)=ledger(&model,&booked(&base,pilot_beats*horizon),&e,times,allowance,bias,trap.lab,false,&memory);
-        (pilot as f64*worst_ratio(&e,&accounts,trap.lab).powi(2)).min(MOST_TRAJECTORIES as f64).ceil() as u64
-    };
     let clock=Instant::now();
-    let count=(FIRST_GROUPS*TASK).min(pilot_need).max(width).div_ceil(unit)*unit;
-    let first=batch(0,count,&vec![outputs-1;count.div_ceil(TASK) as usize],twin.as_ref())?;
+    let first=batch(0,count,&ends,twin.as_ref())?;
     let wall=clock.elapsed().as_secs_f64();
     // The held twin is kept where its control pays for itself: the trajectories the first batch says
     // the targets need with it, times its share of the work (counted as the step's, `held_work`),
@@ -949,13 +959,12 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     if twin.is_some(){
         let needed=|means:&[Means]|{let mut e=summarize(&first.groups,&scales,means);start(&mut e[0],&model,&initial);
             let(_,accounts)=ledger(&model,&booked(&base,pilot_beats.max(first.beats)*horizon),&e,times,allowance,bias,trap.lab,false,&memory);worst_ratio(&e,&accounts,trap.lab).powi(2)};
-        let share=held_work(&parts,&settings,interval,waiting)/interval_work(&model,&parts,&settings,interval,waiting);
-        if needed(&means(true))*(1.+share)>=needed(&means(false)){twin=None;}
+        if needed(&means(true))*(1.+twin_share())>=needed(&means(false)){twin=None;}
     }
     let means=means(twin.is_some());
     // Batches until the targets are met, each output's own (module documentation, # Batches). The pace: a batch's seconds per
     // trajectory and output interval it ran.
-    let mut outcome=first;let mut done=count;let mut pace=wall/(count*(outputs-1) as u64) as f64;
+    let mut outcome=first;let mut done=count;let mut pace=wall/ends.iter().map(|&e|TASK*e as u64).sum::<u64>().max(1) as f64;
     loop{
         let mut estimates=summarize(&outcome.groups,&scales,&means);start(&mut estimates[0],&model,&initial);
         let(_,accounts)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,false,&memory);
@@ -968,21 +977,25 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         if let(Some(note),Some(flag))=(&bounded,&ledger.flagged){ledger.flagged=Some(format!("{note}；{flag}"));}
         let mut solution=assemble(&model,&estimates,&outcome,&listed,times,trap.lab,done,counts[outputs-1],dt,&request.initial_density,ledger,twin.is_some());
         solution.device=used;solution.device_note=note.clone();solution.needed=wanted;
-        let Some(last)=last else{
+        if last.is_none(){
             if ratio>1.{solution.reason=Some(format!("统计误差为目标的 {ratio:.1} 倍：轨迹数已达上限 {MOST_TRAJECTORIES}"));}
             return Ok(solution);
-        };
+        }
         let remaining:u64=(1..outputs).map(|i|reach[i].saturating_sub(counts[i])).sum();
         checkpoint(&solution,Some(pace*remaining as f64*1e3));
-        let ends=if gpu.is_some(){vec![last;(next_batch(reach[last],counts[last],width,unit)/TASK) as usize]}else{next_groups(&reach,&counts)};
+        let ends=next_groups(&reach,&counts);
         let next=ends.len() as u64*TASK;
         let clock=Instant::now();
         let more=batch(done,next,&ends,twin.as_ref())?;
         pace=clock.elapsed().as_secs_f64()/ends.iter().map(|&e|TASK*e as u64).sum::<u64>().max(1) as f64;
-        outcome.groups.extend(more.groups);for(a,b)in outcome.samples.iter_mut().zip(more.samples){a.extend(b);}outcome.jumps+=more.jumps;outcome.doppler=outcome.doppler.max(more.doppler);outcome.beats=outcome.beats.max(more.beats);
+        outcome.groups.extend(more.groups);for(a,b)in outcome.samples.iter_mut().zip(more.samples){a.extend(b);}outcome.jumps+=more.jumps;outcome.beats=outcome.beats.max(more.beats);
         done+=next;
     }
 }
+
+/// Whether the held twin can pay for itself (module documentation, # Control variates), from the trajectories the pilot predicts the populations and T need: its control lowers the populations'
+/// errors alone, at `share` of the work on every trajectory it runs beside, so that the run comes at best to the larger of the first batch and T's need, against the larger of them and the populations' without it.
+fn twin_can_pay(first:f64,[population,temperature]:[f64;2],share:f64)->bool{(1.+share)*first.max(temperature)<first.max(population).max(temperature)}
 
 /// The bound per unit time of the beats a pilot's exact steps left out (engine.rs `Segment::resolve`), at most the
 /// run's share over its waiting time: the run leaves out beats within that share by construction, and the pilot's
@@ -1235,11 +1248,13 @@ fn relaxed(model:&Model,settings:&Settings,states:Vec<Trajectory>)->Vec<Trajecto
         let norm=x.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();for z in x.psi[..n].iter_mut(){*z=*z*(1./norm);}x}).collect()
 }
 
-/// The batch after `done` trajectories at an output (module documentation, # Batches): the predicted remaining
-/// need, at least the device's `width` and at most `done` -- the need followed at most to twice the
-/// trajectories it rests on --, in whole `unit`s (waves on the GPU).
-fn next_batch(needed:u64,done:u64,width:u64,unit:u64)->u64{needed.saturating_sub(done).clamp(width,done.max(width)).div_ceil(unit)*unit}
-/// A batch's groups on the CPU (module documentation, # Batches), each its last output: the g-th, after its `TASK` g trajectories
+/// The first batch's groups (module documentation, # Batches), each its last output: of `count` groups the g-th, after `TASK` g trajectories, as far as an output wants it (`reach`, the trajectories each output wants passed by); the first `whole` through the run, on which the
+/// first standard errors at its late outputs stand.
+fn first_ends(reach:&[f64],count:u64,whole:u64)->Vec<usize>{
+    let last=reach.len()-1;
+    (0..count).map(|g|if g<whole{last}else{(1..=last).rev().find(|&i|((g*TASK) as f64)<reach[i]).unwrap_or(1)}).collect()
+}
+/// A batch's groups (module documentation, # Batches), each its last output: the g-th, after its `TASK` g trajectories
 /// before it, as far as an output still wants it -- its reach beyond its trajectories so far, at most doubled.
 fn next_groups(reach:&[u64],counts:&[u64])->Vec<usize>{
     let mut ends=vec![];
@@ -1893,7 +1908,7 @@ mod tests{
     #[test]
     fn the_fold_s_charge_stays_with_dark_atoms_and_relaxes_with_the_photons(){
         let atom=|index:u64,jumps:&[u64]|->Vec<Trajectory>{jumps.iter().enumerate().map(|(i,&n)|Trajectory{cluster:0,psi:[Complex::ZERO;crate::model::MOST_MIXED],r:[0.;3],kappa:[0.;3],
-            time:(i+1) as f64*5.,threshold:1.,alive:true,jumps:n,doppler:0.,beats:0.,seed:0,index}).collect()};
+            time:(i+1) as f64*5.,threshold:1.,alive:true,jumps:n,beats:0.,seed:0,index}).collect()};
         let charges=|s:&[f64]|s.iter().map(|&x|[x,x]).collect::<Vec<[f64;2]>>();let first=|c:Vec<[f64;2]>|c.iter().map(|x|x[0]).collect::<Vec<f64>>();
         // Pumped dark within the first interval: two photons, then none.
         let dark=Memory::of(&[atom(0,&[2,2,2,2]),atom(1,&[3,3,3,3])].concat(),5.,5);
@@ -2009,16 +2024,11 @@ mod tests{
         assert!((t[1]-BIAS_SHARE*run).abs()<1e-15&&(room(TEMPERATURE_TARGET,floor(0.0905,t[1]))-(1.-BIAS_VARIANCE).sqrt()*run).abs()<1e-12,"{t:?} {run}");
         assert_eq!(tolerances(&[0.;2],&[[0.;2],[0.,0.0905]])[1],TEMPERATURE_TARGET);
     }
-    /// The batches: the remaining need in whole groups, at least the width, at most doubling; on the
-    /// GPU whole waves.
+    /// The first batch: its first groups through the run, each one beyond them as far as the reach wants it; the batches after it, each output's own need.
     #[test]
-    fn a_batch_is_the_remaining_need_within_its_bounds(){
-        assert_eq!(next_batch(300,256,32,TASK),48);
-        assert_eq!(next_batch(260,256,32,TASK),32);
-        assert_eq!(next_batch(845,256,32,TASK),256);
-        assert_eq!(next_batch(700,640,640,640),640);
-        assert_eq!(next_batch(4000,1280,640,640),1280);
-        assert_eq!(next_batch(1700,1280,640,640),640);
+    fn a_batch_is_the_need_within_its_bounds(){
+        let wave=first_ends(&[0.,800.,800.,100.,100.],72,32);assert_eq!(wave.len(),72);assert!(wave[..32].iter().all(|&e|e==4)&&wave[32..].iter().all(|&e|e==2),"{wave:?}");
+        let batch=first_ends(&[0.,500.,200.,100.,100.],32,8);assert!(batch[..13].iter().all(|&e|e==4)&&batch[13..].iter().all(|&e|e<=2),"{batch:?}");assert_eq!((batch[20],batch[31]),(2,1));
         // Each output's own need: the reach is the largest need from an output on; the groups go as far as an output wants them.
         assert_eq!(reaches(&[0.,500.,100.,300.,50.]),vec![500.,500.,300.,300.,50.]);
         assert_eq!(next_groups(&[0,276,276,264,256],&[0,256,256,256,256]),vec![3,2,2]);
