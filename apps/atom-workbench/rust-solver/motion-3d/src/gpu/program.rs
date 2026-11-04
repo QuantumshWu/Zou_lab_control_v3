@@ -76,7 +76,7 @@ pub struct Group{absorbed:i32,emitted:i32,hermitian:i32,pairs:i32,npairs:i32,s:i
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct FirstField{transfer:i32,kind:i32,residual:f64}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
-pub struct Class{target:i32,photons:i32,nphotons:i32,carriers:i32,rows:i32,direct:i32,ndirect:i32,pad:i32,wave_number:f64}
+pub struct Class{target:i32,photons:i32,nphotons:i32,carriers:i32,rows:i32,direct:i32,ndirect:i32,beating:i32,wave_number:f64}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Photon{carrier:i32,col:i32,to:i32,row:i32,residual:f64}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
@@ -301,7 +301,7 @@ impl Program{
                     row:target.position(ph.to).unwrap() as i32,residual:w}).collect();
                 list.sort_by_key(|p|(p.row,p.carrier));
                 classes.push(Class{target:class.target as i32,photons:photons.len() as i32,nphotons:list.len() as i32,carriers,rows:class_rows.len() as i32,
-                    direct:directs.len() as i32,ndirect:class.direct.len() as i32,pad:0,wave_number:class.wave_number});
+                    direct:directs.len() as i32,ndirect:class.direct.len() as i32,beating:list.iter().any(|p|p.residual!=0.) as i32,wave_number:class.wave_number});
                 directs.extend(class.direct.iter().map(|&(i,to,w)|Direct{state:i as i32,to:to as i32,row:target.position(to).unwrap() as i32,pad:0,residual:w}));
                 for row in 0..=target.states.len() as i32{class_rows.push(photons.len() as i32+list.iter().take_while(|p|p.row<row).count() as i32);}
                 photons.extend(list);

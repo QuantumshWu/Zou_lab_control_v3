@@ -228,8 +228,8 @@ struct FirstField{int transfer,kind;double residual;};
 // A jump class (ground.rs `Class`): its photons photons[photons, photons + nphotons) by the row they
 // land in and their carrier, the carriers they come from (bits), and where each row's photons start
 // (class_rows[rows + r], r up to the target's size).
-// Its photons from explicit states directs[direct, direct + ndirect).
-struct Class{int target,photons,nphotons,carriers,rows,direct,ndirect,pad;double wave_number;};
+// Its photons from explicit states directs[direct, direct + ndirect). `beating`: one of its photons has a residual.
+struct Class{int target,photons,nphotons,carriers,rows,direct,ndirect,beating;double wave_number;};
 // A photon: its carrier, its source column and ground row in the jump tables, its row in the target cluster, ω̃ − ω̃₀.
 struct Photon{int carrier,col,to,row;double residual;};
 struct Coherent{int channels,count;};
@@ -1358,7 +1358,7 @@ __device__ void photon_matrices(const Program& P,const Warp& W,const Cluster& C,
 // explicit states' photons there e^{iω̃t} ψ_e ĉ_a[to] (their dressed photons at the stencil).
 __device__ float2 amplitude(const Program& P,const Warp& W,const Cluster& C,const Class& K,int a,int row,double t,const float2* M){
     const int first=P.classes[C.classes].photons,end=P.class_rows[K.rows+row+1];float2 u=zero2();
-    for(int i=P.class_rows[K.rows+row];i<end;i++)u+=residual(P.photons[i].residual,t)*M[3*(i-first)+a];
+    for(int i=P.class_rows[K.rows+row];i<end;i++){const float2 m=M[3*(i-first)+a];u+=K.beating?residual(P.photons[i].residual,t)*m:m;}
     for(int i=0;i<K.ndirect;i++){
         const Direct d=P.directs[K.direct+i];if(d.row!=row)continue;
         u-=residual(d.residual,t)*W.psi[d.state]*entry(P,W,P.tables+C.table+C.emission+((d.state-C.n0)*3+a)*NG+d.to,C.size,-1);
@@ -1367,105 +1367,98 @@ __device__ float2 amplitude(const Program& P,const Warp& W,const Cluster& C,cons
 }
 
 // The picked class's absorbed light along the photon's polarization e (model.rs `Photons::gradient`
-// and `Photons::shares`, contracted with e), from one pass over its photons' jump tables. A lane's
-// items are (row, carrier) pairs of the target's rows and the class's carriers; of an item, over its
+// and `Photons::shares`, contracted with e), from one pass over its photons' jump tables. In passes of the class's carriers
+// (ascending, as many as the warp's lanes hold, one in nearly every scene) a lane per (carrier, target row, k), a row's k adjacent; of a lane, over its
 // photons, A_k = Σ e^{iω̃t} ψ[from] Σ_a e_a J_k[a][to, from], B_k the same of J2_k, and the gradient's part
-// through the intensities Σ_k E_k Σ_f ∂_f A_k ∇s_f, whose Im⟨f|·⟩ is the exact conditional mean's correction
-// (`mean`, still to be divided by ‖f‖²). Each beam l of the class's carriers in their order, z_l = Σ_k c_lk (A_k − w_l B_k) --
+// through the intensities E_k Σ_f ∂_f A_k ∇s_f, whose Im⟨f|·⟩ is the exact conditional mean's correction
+// (`mean`, still to be divided by ‖f‖²). Each beam l of its carriers in their order, on a row's first lane z_l = Σ_k c_lk (A_k − w_l B_k) --
 // beyond the first order the exact responses' Σ e^{iω̃t} ψ[from] Σ_a e_a (C_a R_l)[to, from] --: the gradient's part
 // through the field ∇a_l z_l, its share Σ_rows ‖a_l z_l‖² into J.shares, its projection on the photon J.f, Re⟨f|a_l z_l⟩ (still
 // to be divided by ‖f‖²), into J.projections, and J.beams -- of a plane wave ∇a_l = i k_l a_l, its part of `mean` k_l times its projection --; returns how many; and the
 // explicit states' part into J.direct, J.drives and J.driven.
 __device__ int absorption(const Program& P,Warp& W,const Cluster& C,const Class& K,int nt,const double e[3],double t,const float2* X,int lane,float mean[3]){
-    constexpr int ITEMS=(MAXN*MOST_CARRIERS+31)/32;
     const float2* tables=P.tables+C.table;const Point& pt=W.pt;JumpSpace& J=W.jump;const int D=P.focused;
     const float ea[3]={(float)e[0],(float)e[1],(float)e[2]};
-    float2 A[ITEMS][MOST_RANK],B[ITEMS][MOST_RANK];int rows[ITEMS],carriers[ITEMS],runs[ITEMS][2];
     #pragma unroll
     for(int x=0;x<3;x++)mean[x]=0.f;
-    SPAN_BEGIN(items);
-    #pragma unroll
-    for(int m=0;m<ITEMS;m++){
-        const int it=lane+32*m,row=it/P.ncarriers,c=it-row*P.ncarriers;
-        const bool mine=row<nt&&((K.carriers>>c)&1);rows[m]=mine?row:-1;carriers[m]=c;
-        float2 d[MOST_RANK][MOST_FOCUSED];
-        #pragma unroll
-        for(int k=0;k<MOST_RANK;k++){
-            A[m][k]=B[m][k]=zero2();
-            #pragma unroll
-            for(int f=0;f<MOST_FOCUSED;f++)d[k][f]=zero2();
+    int count=0;
+    for(int from=0,to;from<P.ncarriers;from=to){
+        SPAN_BEGIN(items);
+        // The pass's carriers and the lane's place among them.
+        int c=-1,row=0,k=0,lanes=0;
+        for(to=from;to<P.ncarriers;to++){
+            if(!((K.carriers>>to)&1))continue;
+            const int rank=P.carriers[to].rank,size=nt*rank;if(lanes+size>32)break;
+            if(c<0&&lane<lanes+size){c=to;row=(lane-lanes)/rank;k=lane-lanes-row*rank;}
+            lanes+=size;
         }
-        // The item's photons: the carrier's run within the row's.
+        // The lane's photons: the carrier's run within the row's.
+        float2 A=zero2(),B=zero2(),d[MOST_FOCUSED];
+        #pragma unroll
+        for(int f=0;f<MOST_FOCUSED;f++)d[f]=zero2();
         int lo=0,hi=0;
-        if(mine){
+        if(c>=0){
             lo=P.class_rows[K.rows+row];const int end=P.class_rows[K.rows+row+1];
             while(lo<end&&P.photons[lo].carrier<c)lo++;
             hi=lo;while(hi<end&&P.photons[hi].carrier==c)hi++;
-        }
-        runs[m][0]=lo;runs[m][1]=hi;
-        if(!mine)continue;
-        const int j1=P.carrier_tables[C.carriers+3*c],j2=P.carrier_tables[C.carriers+3*c+1],rank=P.carriers[c].rank;
-        for(int i=lo;i<hi;i++){
-            const Photon ph=P.photons[i];
-            const float2 phase=residual(ph.residual,t)*W.psi[ph.col];
-            #pragma unroll
-            for(int k=0;k<MOST_RANK;k++)if(k<rank){
+            const int j1=P.carrier_tables[C.carriers+3*c],j2=P.carrier_tables[C.carriers+3*c+1];
+            for(int i=lo;i<hi;i++){
+                const Photon ph=P.photons[i];
+                const float2 phase=residual(ph.residual,t)*W.psi[ph.col];
                 const int at=(k*3*NG+ph.to)*C.n0+ph.col;float2 v1,v2,slope[MOST_FOCUSED];
                 contracted(P,pt,tables+j1+at,tables+j2+at,NG*C.n0,C.size,ea,v1,v2,slope);
-                A[m][k]+=phase*v1;B[m][k]+=phase*v2;
+                A+=phase*v1;B+=phase*v2;
                 #pragma unroll
-                for(int f=0;f<MOST_FOCUSED;f++)if(f<D)d[k][f]+=phase*slope[f];
+                for(int f=0;f<MOST_FOCUSED;f++)if(f<D)d[f]+=phase*slope[f];
+            }
+            const float2 ek=pt.fields[c].e[k],fr=J.f[row];
+            #pragma unroll
+            for(int x=0;x<3;x++){
+                float2 g=zero2();
+                #pragma unroll
+                for(int f=0;f<MOST_FOCUSED;f++)if(f<D)g+=pt.grad_s[f][x]*(ek*d[f]);
+                mean[x]+=fr.x*g.y-fr.y*g.x;
             }
         }
-        const Fields& fl=pt.fields[c];const float2 fr=J.f[row];
-        #pragma unroll
-        for(int x=0;x<3;x++){
-            float2 g=zero2();
-            #pragma unroll
-            for(int k=0;k<MOST_RANK;k++)if(k<rank){
-                #pragma unroll
-                for(int f=0;f<MOST_FOCUSED;f++)if(f<D)g+=pt.grad_s[f][x]*(fl.e[k]*d[k][f]);
-            }
-            mean[x]+=fr.x*g.y-fr.y*g.x;
-        }
-    }
-    SPAN_END(SPAN_ITEMS,items);SPAN_BEGIN(beamsp);
-    int count=0;
-    for(int c=0;c<P.ncarriers;c++){
-        if(!((K.carriers>>c)&1))continue;const Carrier R=P.carriers[c];
-        for(int j=0;j<R.beams;j++){
-            const int l=P.beam_list[R.first+j];const Beam& b=P.beams[l];const float wl=X==nullptr?first_shift(pt,b,l):0.f;const bool focused=b.inv_w2!=0.f;float2 al=pt.a[l],slope[3];
-            if(focused)field(b,pt.r,al,slope);
-            float v=0.f,on=0.f;
-            #pragma unroll
-            for(int m=0;m<ITEMS;m++)if(rows[m]>=0&&carriers[m]==c){
+        SPAN_END(SPAN_ITEMS,items);SPAN_BEGIN(beamsp);
+        for(int q=from;q<to;q++){
+            if(!((K.carriers>>q)&1))continue;const Carrier R=P.carriers[q];const bool mine=c==q,first=mine&&k==0;
+            for(int j=0;j<R.beams;j++){
+                const int l=P.beam_list[R.first+j];const Beam& b=P.beams[l];const bool focused=b.inv_w2!=0.f;float2 al=pt.a[l],slope[3];
+                if(focused)field(b,pt.r,al,slope);
+                // z_l on a row's first lane.
                 float2 g=zero2();
                 if(X==nullptr){
-                    #pragma unroll
-                    for(int k=0;k<MOST_RANK;k++)if(k<R.rank)g+=make_float2(b.coefficients[k][0],b.coefficients[k][1])*(A[m][k]-wl*B[m][k]);
-                }else for(int i=runs[m][0];i<runs[m][1];i++){
+                    const float wl=first_shift(pt,b,l);
+                    if(mine)g=make_float2(b.coefficients[k][0],b.coefficients[k][1])*(A-wl*B);
+                    const float2 y=g;
+                    for(int r=1;r<R.rank;r++)g+=make_float2(__shfl_down_sync(FULL,y.x,r),__shfl_down_sync(FULL,y.y,r));
+                }else if(first)for(int i=lo;i<hi;i++){
                     const Photon ph=P.photons[i];float2 z=zero2();
                     #pragma unroll
                     for(int a=0;a<3;a++)z+=ea[a]*X[exact_at(b.near,ph.col,a,ph.to)];
                     g+=residual(ph.residual,t)*W.psi[ph.col]*z;
                 }
-                const float2 z=al*g,fr=J.f[rows[m]];v+=norm2(z);on+=fr.x*z.x+fr.y*z.y;
-                if(focused){
-                    #pragma unroll
-                    for(int x=0;x<3;x++){const float2 dz=slope[x]*g;mean[x]+=fr.x*dz.y-fr.y*dz.x;}
+                float v=0.f,on=0.f;
+                if(first){
+                    const float2 z=al*g,fr=J.f[row];v=norm2(z);on=fr.x*z.x+fr.y*z.y;
+                    if(focused){
+                        #pragma unroll
+                        for(int x=0;x<3;x++){const float2 dz=slope[x]*g;mean[x]+=fr.x*dz.y-fr.y*dz.x;}
+                    }
                 }
+                if(!focused){
+                    #pragma unroll
+                    for(int x=0;x<3;x++)mean[x]+=b.wave[x]*on;
+                }
+                const float w=warp_sum(v),w1=warp_sum(on);if(lane==0){J.shares[count]=w;J.projections[count]=w1;J.beams[count]=l;}count++;
             }
-            if(!focused){
-                #pragma unroll
-                for(int x=0;x<3;x++)mean[x]+=b.wave[x]*on;
-            }
-            const float w=warp_sum(v),w1=warp_sum(on);if(lane==0){J.shares[count]=w;J.projections[count]=w1;J.beams[count]=l;}count++;
         }
+        SPAN_END(SPAN_BEAMS,beamsp);
     }
     #pragma unroll
     for(int x=0;x<3;x++)mean[x]=warp_sum(mean[x]);
     __syncwarp();
-    SPAN_END(SPAN_BEAMS,beamsp);
     // The explicit states' part of the photon (`Photons::absorption`): its weight along e, Σ_rows |Σ e^{iω̃t}
     // ψ_e Σ_a e_a ĉ_a[to]|², and the beams' weights: each explicit state's weight in the photon shared by the drives into
     // it, Σ |a_l Σ_k c_lk U_k ψ_b|², in the drives' and their carriers' beams' order.
