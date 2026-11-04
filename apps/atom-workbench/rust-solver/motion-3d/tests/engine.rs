@@ -12,8 +12,8 @@ use atom_motion_3d::ledger::BUDGET;
 use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Means,Scales,KT_PER_UK};
-use atom_motion_3d::{initial_trajectory,sample_states,simulate,Initial,Stratum,Variates};
-use atom_motion_3d::solve::{grid_phase,jumps,solve,Device,POPULATION_TARGET,STEP_SHARE,TEMPERATURE_TARGET};
+use atom_motion_3d::{initial_trajectory,sample_states,simulate,simulate_to,Initial,Stratum,Variates};
+use atom_motion_3d::solve::{grid_phase,jumps,solve,Device,BIAS_SHARE,NUMERICAL_SHARE,POPULATION_TARGET,TEMPERATURE_TARGET};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
 #[path="../examples/scene/mod.rs"] mod scene;
@@ -530,7 +530,7 @@ fn a_shallow_trap_s_step_holds_t_within_its_share(){
     let(coarse,fine)=(temperatures(steps),temperatures(4*steps));
     // Per axis the mean ΔT/T over the outputs and the mean of its standard errors (the outputs' errors are
     // correlated along the trajectories: the mean's is at most theirs).
-    let share=STEP_SHARE*TEMPERATURE_TARGET;let n=(outputs-1) as f64;
+    let share=BIAS_SHARE*TEMPERATURE_TARGET;let n=(outputs-1) as f64;
     for a in 0..3{
         let(d,e)=(1..outputs).fold((0.,0.),|(d,e),i|{let t=fine[i].temperature[a];(d+(coarse[i].temperature[a]-t)/t,e+coarse[i].temperature_error[a].hypot(fine[i].temperature_error[a])/t)});
         println!("axis {a}: dt {dt:.3} us against {:.3} us, mean ΔT/T {:+.2} % ± {:.2} %",dt/4.,100.*d/n,100.*e/n);
@@ -830,7 +830,7 @@ fn an_explicit_rung_s_frames_are_exact(){
 fn a_beating_grid_s_measured_phase_meets_its_shares(){
     let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..101).map(|i|i as f64).collect();
     let model=Model::with(&r,Ground::allowances(&r).unwrap()[1]).unwrap();let initial=Initial::new(&model,&r).unwrap();
-    let(dt,waiting)=(0.25,0.6);let share=STEP_SHARE*STEP_SHARE*POPULATION_TARGET*dt/waiting;
+    let(dt,waiting)=(0.25,0.6);let share=NUMERICAL_SHARE*POPULATION_TARGET*dt/waiting;
     let mut at=Settings::new(dt,&initial.traps[0],share,true);at.horizon=waiting;let engine=Engine::new(&model,at.clone());
     let states:Vec<Trajectory>=(0..64).map(|i|{let mut t=initial_trajectory(&model,&at,&initial,7,i,Stratum::single(i));for _ in 0..8{engine.step(&mut t);}t}).collect();
     let phase=grid_phase(&model,&states,&at);assert!(phase>4.*at.node_phase,"{phase} against the bound's {}",at.node_phase);
@@ -933,7 +933,7 @@ fn tables_that_do_not_converge_stop_refining_with_their_error_booked(){
 /// along 32 trajectories at that step the jumps' criterion lies beyond T's share there, and within it at a quarter
 /// of it (it goes as dt²).
 #[test]
-fn the_jumps_heating_on_a_retro_reflected_tweezer_exceeds_its_share_at_the_line_s_step(){
+fn the_jumps_criterion_on_a_retro_reflected_tweezer_reads_the_step_as_its_square(){
     let fixture:Value=serde_json::from_str(include_str!("fixtures/retro_probe_motion.json")).unwrap();
     let(outputs,interval)=(21,5.);let mut r=scene::request(&fixture);r.times_us=(0..outputs).map(|i|interval*i as f64).collect();
     let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
@@ -941,8 +941,29 @@ fn the_jumps_heating_on_a_retro_reflected_tweezer_exceeds_its_share_at_the_line_
     let settings=|steps:usize|{let mut s=Settings::new(interval/steps as f64,&initial.traps[reference],f64::EPSILON,true);s.doppler=BUDGET;s.region=initial.depths[reference];s};
     let steps=93;let harmonic=Harmonic::new(&model,&settings(steps),&initial,steps,outputs);
     let(states,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,32,steps,outputs,&harmonic);
-    let share=STEP_SHARE*TEMPERATURE_TARGET;
-    let(line,quarter)=(jumps(&Engine::new(&model,settings(steps)),&states)/share,jumps(&Engine::new(&model,settings(4*steps)),&states)/share);
-    println!("the jumps' criterion over T's share: {line:.2} at 0.054 us, {quarter:.2} at 0.0134 us ({} states)",states.len());
-    assert!(line>1.&&quarter<1.,"{line:.3} at the line's step, {quarter:.3} at a quarter");
+    // A fixed bar: a fifth of the T target, near the criterion at the step the line once took there; a quarter of that step reads a sixteenth of it.
+    let bar=0.2*TEMPERATURE_TARGET;
+    let(line,quarter)=(jumps(&Engine::new(&model,settings(steps)),&states)/bar,jumps(&Engine::new(&model,settings(4*steps)),&states)/bar);
+    println!("the jumps' criterion over the bar: {line:.2} at 0.054 us, {quarter:.2} at 0.0134 us ({} states)",states.len());
+    assert!(line>0.5&&line/quarter>8.&&line/quarter<32.,"{line:.3} at the line's step, {quarter:.3} at a quarter");
+}
+
+/// A group run only through an output (solve.rs # Batches) sums what the whole run sums there -- T's windows half a period past it
+/// included --, and counts no trajectories beyond; the estimates at an output rest on the groups that reach it.
+#[test]
+fn a_group_run_only_through_an_output_sums_what_the_whole_run_sums_there(){
+    let fixture:Value=serde_json::from_str(include_str!("fixtures/retro_probe_motion.json")).unwrap();
+    let(outputs,interval,steps)=(11,5.,20);let mut r=scene::request(&fixture);r.times_us=(0..outputs).map(|i|interval*i as f64).collect();
+    let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();let trap=initial.traps[reference];
+    let mut s=Settings::new(interval/steps as f64,&trap,f64::EPSILON,true);s.doppler=BUDGET;s.region=initial.depths[reference];
+    let harmonic=Harmonic::new(&model,&s,&initial,steps,outputs);let v=Variates{harmonic:&harmonic,twin:None};
+    let whole=simulate(&model,&s,&initial,0x3D_5EED,0,24,8,steps,outputs,&[],Some(&v));
+    let ends=[10,7,3];let cut=simulate_to(&model,&s,&initial,0x3D_5EED,0,24,8,steps,outputs,&[],Some(&v),&ends);
+    for(g,&end)in ends.iter().enumerate(){for i in 0..outputs{let(a,b)=(&whole.groups[g].sums[i],&cut.groups[g].sums[i]);
+        if i<=end{assert!(a.held==b.held&&a.kappa2==b.kappa2&&a.populations==b.populations&&a.harmonic==b.harmonic&&a.trajectories==b.trajectories,"group {g} output {i}");}
+        else{assert!(b.trajectories==0.&&b.held==0.,"group {g} output {i}");}}}
+    let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:None}).collect();let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
+    let e=summarize(&cut.groups,&scales,&means);
+    assert_eq!(e[3].trajectories,24.);assert_eq!(e[4].trajectories,16.);assert_eq!(e[10].trajectories,8.);
 }

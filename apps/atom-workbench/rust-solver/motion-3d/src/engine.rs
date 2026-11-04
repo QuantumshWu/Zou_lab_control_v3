@@ -188,7 +188,7 @@ use crate::Complex;
 
 /// The impulse's quadrature share in the exact step: its grid has ν δ ≤ 2 `node_phase`, ν the force's
 /// largest frequency, so that composite Simpson's error, (ν·2δ)⁴/2880 of the impulse at most, is within it.
-pub const QUADRATURE:f64=crate::solve::STEP_SHARE*crate::solve::STEP_SHARE*crate::solve::TEMPERATURE_TARGET;
+pub const QUADRATURE:f64=crate::solve::NUMERICAL_SHARE*crate::solve::TEMPERATURE_TARGET;
 pub(crate) fn node_phase()->f64{(2880.*QUADRATURE).powf(0.25)/4.}
 
 /// A trajectory's state.
@@ -292,7 +292,7 @@ fn dot(a:[f64;3],b:[f64;3])->f64{a[0]*b[0]+a[1]*b[1]+a[2]*b[2]}
 fn norm2(psi:&[Complex],n:usize)->f64{psi[..n].iter().map(|z|z.norm_sqr()).sum()}
 
 /// ψ ← exp(−i H τ) ψ for an n × n matrix H (row-major in an 8 × 8 array): Taylor series on the vector
-/// in sub-steps of ‖H‖τ ≤ ½ (‖H‖ the largest column sum of |re| + |im|, above the 1-norm), each
+/// in sub-steps of ‖H‖τ ≤ `SUB_STEP` (‖H‖ the largest column sum of |re| + |im|, above the 1-norm), each
 /// summed through the term whose bound (‖H‖τ)^m/m! falls below its share of `truncation` (relative
 /// to ‖ψ‖; the remainder past it is at most half that bound).
 pub fn propagate(h:&[Complex;MOST_STATES*MOST_STATES],n:usize,tau:f64,psi:&mut [Complex],truncation:f64){
@@ -305,11 +305,14 @@ pub fn column_norm(h:&[Complex],n:usize)->f64{
     let mut norm=0_f64;for b in 0..n{let mut column=0.;for a in 0..n{column+=h[a*n+b].re.abs()+h[a*n+b].im.abs();}norm=norm.max(column);}
     norm
 }
-/// The series of exp(−iHτ) for a generator of that norm (`propagate`): its sub-steps of ‖H‖τ ≤ ½ and
+/// A sub-step's ‖H‖τ (`propagate`): a series' terms per unit of ‖H‖τ fall with it (at a truncation of 1e-5, 13 at ½, 6.5 at 2,
+/// 4 at 6), the largest that still sums to double precision within its 40 terms, its largest term's round-off 65 ε.
+const SUB_STEP:f64=6.;
+/// The series of exp(−iHτ) for a generator of that norm (`propagate`): its sub-steps of ‖H‖τ ≤ `SUB_STEP` and
 /// each one's terms, through the first whose bound y^m/m! is within the sub-step's share of the
 /// truncation bound.
 pub fn series(norm:f64,tau:f64,truncation:f64)->(usize,usize){
-    let x=norm*tau.abs();let parts=((x/0.5).ceil() as usize).max(1);
+    let x=norm*tau.abs();let parts=((x/SUB_STEP).ceil() as usize).max(1);
     let y=x/parts as f64;let share=truncation/parts as f64;let mut terms=1;let mut size=y;while size>share&&terms<40{terms+=1;size*=y/terms as f64;}
     (parts,terms)
 }
@@ -332,7 +335,7 @@ fn propagate_sized<const N:usize>(h:&[Complex;MOST_STATES*MOST_STATES],tau:f64,p
 fn row_norm(h:&[Complex],n:usize)->f64{(0..n).map(|a|(0..n).map(|b|h[a*n+b].re.abs()+h[a*n+b].im.abs()).sum::<f64>()).fold(0.,f64::max)}
 /// ψ ← exp(−i H τ) ψ on any number of states, to double precision: `propagate`'s series.
 pub fn propagate_dyn(h:&[Complex],n:usize,tau:f64,psi:&mut [Complex]){
-    let x=column_norm(h,n)*tau.abs();let parts=((x/0.5).ceil() as usize).max(1);let step=tau/parts as f64;
+    let x=column_norm(h,n)*tau.abs();let parts=((x/SUB_STEP).ceil() as usize).max(1);let step=tau/parts as f64;
     let y=x/parts as f64;let share=f64::EPSILON/parts as f64;let mut terms=1;let mut size=y;while size>share&&terms<40{terms+=1;size*=y/terms as f64;}
     let(mut term,mut next)=([Complex::ZERO;MOST_MIXED],[Complex::ZERO;MOST_MIXED]);
     for _ in 0..parts{
