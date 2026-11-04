@@ -8,7 +8,7 @@ use atom_motion_3d::control::{Harmonic,Twin};
 use atom_motion_3d::engine::{dipole_direction,Engine,Settings};
 use atom_motion_3d::ground::Ground;
 use atom_motion_3d::ledger::BUDGET;
-use atom_motion_3d::model::{Model,MOST_MIXED};
+use atom_motion_3d::model::{Model,MOST_MIXED,TABLE_SHARE};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Means,Scales,KT_PER_UK};
 use atom_motion_3d::{initial_trajectory,sample_states,simulate,Initial,Stratum,Variates};
@@ -277,6 +277,20 @@ fn a_solve_starts_from_the_request_s_initial_state(){
     for i in 0..STATES{assert_eq!(s.populations[0][i],r.initial_density[i*STATES+i].re);}
     for e in &s.temperature_errors_uk[1..]{for a in 0..3{assert!(e[a]>0.);}}
     for(t,e)in s.temperature_total_uk.iter().zip(&s.temperature_total_errors_uk).skip(1){assert!(*t>0.&&*e>0.);}
+}
+
+/// The fold's choice on the shallow trap's cycling control (solve.rs, # The fold's choice): every drive stays
+/// folded, the cheapest by the candidates' counted costs. The line took the first explicit rung uncosted (6
+/// excited states exact, dt 0.094 us, 2.6 times the folded model's CPU time): the pilot's fold charge was the
+/// extreme of its states grouped by their times' last bits (6.3 % against their mean 2.9 %), and left the
+/// folded model no room.
+#[test]
+fn the_shallow_cycle_keeps_its_drives_folded(){
+    let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/shallow_cycle_motion.json")).unwrap();
+    let mut r=scene::request(&fixture["payload"]);r.times_us=(0..31).map(|i|10.*i as f64).collect();
+    let s=solve(&r,Device::Cpu,&mut |_,_|{}).unwrap();
+    println!("{} trajectories, dt {:.4} us; {}",s.trajectories,s.time_step_us,s.method);
+    assert!(s.method.contains("消去激发态后的基态内态"),"{}",s.method);
 }
 
 /// The harmonic control's mean (control.rs) against the initial states' own: its value from 4096
@@ -583,6 +597,20 @@ fn a_strong_beam_s_raman_rate_through_its_dressing_is_the_core_s(){
 fn a_near_tweezer_s_shift_moves_a_probe_s_line_to_the_core_s(){
     let v:Value=serde_json::from_str(include_str!("fixtures/near_tweezer_probe_motion.json")).unwrap();let r=sparse_request(&v);
     for(i,(a,b))in frozen_f1(&r).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
+}
+
+/// Tables whose function is not smooth on any grid's scale -- b1/109's explicit rung, every excited state
+/// explicit: the interpolation's error 0.4 to 1.4 from 9 to 16385 nodes per axis, with or without the
+/// near light's dressing, 25 s to refine to the work bound -- stop refining once two doublings in a row
+/// leave the error above its smallest so far (model.rs `tabulate`), the last grid kept and its error
+/// booked: 33 nodes per axis.
+#[test]
+fn tables_that_do_not_converge_stop_refining_with_their_error_booked(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/explicit_rung_motion.json")).unwrap();let r=sparse_request(&v);
+    let allowance=Ground::allowances(&r).unwrap()[1];let model=Model::with(&r,allowance).unwrap();
+    assert!(model.ground.clusters.iter().any(|c|c.excited.len()==24),"the explicit rung");
+    assert!(model.table_stalled&&model.table_limit.is_some_and(|n|n<=33),"refined to {:?} nodes per axis (stalled {})",model.table_limit,model.table_stalled);
+    assert!(model.table_error>TABLE_SHARE,"the error booked: {:.2e}",model.table_error);
 }
 
 /// The retro-reflected tweezer with a resonant probe (tests/fixtures/retro_probe_motion.json, the validation's F3
