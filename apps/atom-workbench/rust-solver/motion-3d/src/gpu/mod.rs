@@ -222,7 +222,7 @@ impl Gpu{
     pub fn exact_probe(&self,program:&Program,model:&Model,settings:&Settings,t:&Trajectory)->Result<Vec<Complex>,String>{
         self.context.make_current()?;
         let(n,q)=(model.dimension(t.cluster),1+model.beats(t.cluster).0.len());let size=5*q*n*n;
-        let state=Buffer::with(&self.stream,&[program::State::new(t,t,settings)])?;let out=Buffer::new(8*size)?;
+        let state=Buffer::with(&self.stream,&[program::State::new(t,t,settings)])?;let out=Buffer::new(8*size.max(program.exact))?;
         let f=self.function("exact_probe")?;self.stream.launch(&f,1,32,&[&program.params,&state.pointer,&out.pointer])?;
         let mut words=vec![[0f32;2];size];self.stream.download(&out,&mut words)?;
         Ok(words[..4*q*n*n].iter().map(|z|Complex::new(z[0] as f64,z[1] as f64)).collect())

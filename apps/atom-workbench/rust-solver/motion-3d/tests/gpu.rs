@@ -7,7 +7,7 @@ use atom_motion_3d::engine::{Engine,Settings,Trajectory,QUADRATURE};
 use atom_motion_3d::gpu::{self,driver::Buffer,program};
 use atom_motion_3d::ground::Ground;
 use atom_motion_3d::linear::Dense;
-use atom_motion_3d::model::{Exact,Model,GROUND};
+use atom_motion_3d::model::{Exact,Model,GROUND,MOST_MIXED};
 use atom_motion_3d::rng::{Purpose,Rng};
 #[path="../examples/scene/mod.rs"] mod scene;
 use atom_motion_3d::control::{Harmonic,Twin};
@@ -54,7 +54,7 @@ fn device()->Option<&'static std::sync::Mutex<gpu::Gpu>>{match gpu::gpu(){Ok(g)=
 fn the_kernel_s_structs_match_their_twins(){
     let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
     let f=gpu.function("layout").unwrap();let out=Buffer::new(128).unwrap();gpu.stream().launch(&f,1,32,&[&out.pointer]).unwrap();
-    let mut words=[0u32;26];gpu.stream().download(&out,&mut words).unwrap();
+    let mut words=[0u32;28];gpu.stream().download(&out,&mut words).unwrap();
     assert_eq!(words,program::layout());
 }
 
@@ -106,11 +106,15 @@ fn compare(r:&Request,threshold:Option<f64>,allowance:f64,jumps:bool,fourth:bool
 /// propagator as many times, in single precision -- its ψ, norm and momentum to 5e-4, 5e-4 and 5e-5.
 fn compare_model(r:&Request,model:Model,dt:f64,threshold:Option<f64>,allowance:f64,jumps:bool){
     let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
-    let fourth=model.fourth;let exact=(0..model.clusters()).any(|k|model.mixed(k)||model.beating(k));let(tp,tn,tk)=if exact{(5e-4,5e-4,5e-5)}else{(2e-5,2e-5,2e-5)};
     let(model,settings,trajectories)=setup(r,model,dt,threshold,allowance);
-    let program=gpu.program(&model,&settings).unwrap();
-    let got=gpu.advance(&program,&settings,&trajectories,1).unwrap();
-    let engine=Engine::new(&model,settings.clone());
+    compare_from(&gpu,&model,&settings,&trajectories,jumps);
+}
+/// `compare_model` from given states.
+fn compare_from(gpu:&gpu::Gpu,model:&Model,settings:&Settings,trajectories:&[Trajectory],jumps:bool){
+    let dt=settings.dt;let fourth=model.fourth;let exact=(0..model.clusters()).any(|k|model.mixed(k)||model.beating(k));let(tp,tn,tk)=if exact{(5e-4,5e-4,5e-5)}else{(2e-5,2e-5,2e-5)};
+    let program=gpu.program(model,settings).unwrap();
+    let got=gpu.advance(&program,settings,trajectories,1).unwrap();
+    let engine=Engine::new(model,settings.clone());
     let mut jumped=0;
     for(start,g)in trajectories.iter().zip(&got){
         let mut c=start.clone();engine.step(&mut c);
@@ -243,6 +247,64 @@ fn exact_responses(r:&Request,m:Model){
     println!("{} states: the GPU's {worst:.1e} off, the dressing {dressing:.1e}",trajectories.len());
     assert!(worst<=1e-5,"the exact responses {worst:.2e} off the CPU's");assert!(dressing>=10.*1e-5,"the dressing ({dressing:.1e}) within the check's reach");
 }
+/// A model's every cluster from the thermal (r, κ) (model.rs, # The photons and the Doppler term: each cluster's groups take their own transfers and leave their own
+/// entries), a superposition of its states in place of the initial one: a jump-free step, and a jump at the state, its photon's
+/// recoil and the state it leaves relative to the photon's own size.
+fn every_cluster(r:&Request,m:Model,dt:f64){
+    let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
+    let(model,settings,thermal)=setup(r,m,dt,Some(1e-300),f64::INFINITY);
+    let states:Vec<Trajectory>=thermal.iter().enumerate().map(|(i,t)|{
+        let k=i%model.clusters();let n=model.dimension(k);let mut x=t.clone();x.cluster=k;x.psi=[Complex::ZERO;MOST_MIXED];
+        for b in 0..n{x.psi[b]=Complex::cis(1.7*((b+1)*(i+1)) as f64)*(1./(n as f64).sqrt());}x}).collect();
+    compare_from(&gpu,&model,&settings,&states,false);
+    let program=gpu.program(&model,&settings).unwrap();let engine=Engine::new(&model,settings.clone());
+    for t in &states{
+        let mut c=t.clone();let(r0,t0)=(c.r,c.time);engine.jump(&mut c,r0,t0,false);let g=gpu.jump_probe(&program,&settings,t,false).unwrap();
+        let at=format!("the jump of trajectory {} (cluster {} → {})",t.index,t.cluster,c.cluster);
+        assert_eq!((g.cluster,g.jumps),(c.cluster,c.jumps),"{at}");assert_eq!(g.threshold,c.threshold,"{at}");
+        let scale=c.kappa.iter().map(|x|x.abs()).fold(1.,f64::max);
+        for a in 0..3{assert!((g.kappa[a]-c.kappa[a]).abs()<=5e-5*scale,"{at}: κ {:?} against {:?}",g.kappa,c.kappa);}
+        let n=model.dimension(c.cluster);let(gn,cn)=(g.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt(),c.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt());
+        for x in 0..n{let(a,b)=(g.psi[x]*(1./gn),c.psi[x]*(1./cn));assert!((a-b).abs()<=1e-4,"{at}: ψ[{x}] {a:?} against {b:?}");}
+    }
+}
+/// What the first order's transfer leaves (model.rs `Model::transfer_tables`), at its entries and their mirrors in the generator: the default scene's static clusters,
+/// its explicit rung's and the probed PGC's beating ones, where a group between two carriers keeps entries at either beat.
+#[test]
+fn with_what_the_transfer_leaves_a_step_and_a_jump_are_the_cpu_s(){
+    let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/default_scene_motion.json")).unwrap();
+    let(default,probe)=(scene::request(&fixture["payload"]),probed());
+    for(r,m,dt)in [(&default,model(&default,false),0.2),(&default,explicit(&default),0.2),(&probe,model(&probe,false),0.1)]{
+        assert!((0..m.clusters()).any(|k|m.kept_entries(k)>0),"entries the transfer leaves");every_cluster(r,m,dt);
+    }
+}
+/// A cluster's exact-step components at thermal points (the kernel's `exact_components`, model.rs `Model::components`), every part's H_q and G_q entry by entry -- with the
+/// first order's coefficients on Q at the part and its mirror, what the transfer leaves and the cross terms' X2_k --: H_q within 1e-5 of the part's largest or of the generator's
+/// single-precision round-off, H₀'s also within 1e-6 of the scalar it left out (h0's single-precision round-off in a state whose light has all but gone), G_q within 1e-4 of its largest (the tables' single-precision
+/// slopes) or 1e-5 of that scalar (close to the focus the intensity's gradient is what is left of the wave's k a a*, 2e-5 rad/us/um of 0.13 there).
+#[test]
+fn the_exact_components_are_the_cpu_s(){
+    let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
+    let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/default_scene_motion.json")).unwrap();
+    let(default,pgc,molasses,probe)=(scene::request(&fixture["payload"]),request(PGC),request(MOLASSES),probed());
+    for(r,m)in [(&default,explicit(&default)),(&pgc,explicit(&pgc)),(&molasses,explicit(&molasses)),(&probe,model(&probe,false)),(&probe,explicit(&probe)),(&probe,beating_twice(&probe))]{
+        let(model,settings,thermal)=setup(r,m,0.1,None,f64::INFINITY);let program=gpu.program(&model,&settings).unwrap();let mut worst=[0_f64;2];
+        for(i,t)in thermal.iter().enumerate(){
+            let k=i%model.clusters();let mut x=t.clone();x.cluster=k;
+            let c=model.components(k,&model.point(x.r,x.kappa));let n=c.n();let nn=n*n;let parts=1+c.beats.len();
+            let got=gpu.exact_probe(&program,&model,&settings,&x).unwrap();
+            let round=f32::EPSILON as f64*c.beats.iter().flat_map(|b|&b.hamiltonian).chain(&c.statics.hamiltonian).map(|z|z.abs()).fold(1e30*f32::MIN_POSITIVE as f64,f64::max);
+            for q in 0..parts{
+                let(h,g)=if q==0{(&c.statics.hamiltonian,&c.statics.gradient)}else{(&c.beats[q-1].hamiltonian,&c.beats[q-1].gradient)};
+                let check=|cpu:&[Complex],gpu:&[Complex],floor:f64,within:f64,what:String,worst:&mut [f64;2],side:usize|{let largest=cpu.iter().map(|z|z.abs()).fold(floor,f64::max);
+                    for(e,(a,b))in cpu.iter().zip(gpu).enumerate(){let off=(*a-*b).abs()/largest;worst[side]=worst[side].max(off);assert!(off<=within,"cluster {k}, {what}, entry {e}: {b:?} against {a:?} of {largest}");}};
+                check(h,&got[q*nn..(q+1)*nn],if q==0{0.1*c.statics.scalar.abs()}else{round},1e-5,format!("H_{q}"),&mut worst,0);
+                for a in 0..3{check(&g[a],&got[(parts+3*q+a)*nn..(parts+3*q+a+1)*nn],(0.1*c.statics.scalar.abs()).max(round),1e-4,format!("G_{q}[{a}]"),&mut worst,1);}
+            }
+        }
+        println!("clusters {:?}: the GPU's H {:.1e} and G {:.1e} off",(0..model.clusters()).map(|k|(model.dimension(k),model.ground_dimension(k),model.beats(k).0.len())).collect::<Vec<_>>(),worst[0],worst[1]);
+    }
+}
 /// With a retro-reflected tweezer (`retro`): a step, and a jump with the first-order and the exact
 /// response (its base and the standing wave's block per unit, gpu/program.rs).
 #[test]
@@ -290,9 +352,11 @@ fn at_fourth_order_a_beating_step_and_jump_are_the_cpu_s(){
 /// molasses' trajectory 44 from F7's initial positions on: 4.6e-6 after 26 steps, 1.2e-5 after its
 /// first jump, beyond the CPU's margin of 8.8e-4 two jumps later, in step 28 where the CPU's fell in
 /// 29). So now and then a crossing near a step's end falls in the next step on one of them, at any
-/// step -- a smaller step does not help, the drift does not shrink with it --: it is that and nothing
-/// else, the counts never differ by more than one.
-fn straddles(gpu:&gpu::Gpu,program:&program::Program,model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,after:&[usize])->Vec<(u64,usize)>{
+/// step -- a smaller step does not help, the drift does not shrink with it --: within `within` steps it is that and nothing
+/// else, the counts differ by one at most. Further on a jump itself can part them, on either device: the mean recoil of a state
+/// the light nearly leaves dark is as sensitive as its photon is small (the gray molasses' trajectory 45 from the 40th at 0.1 us, on the CPU alone,
+/// r and κ moved by 1e-7 of themselves: Δκ 3e-4 after 180 steps, 0.06 at 200, three jumps on, 13/um and two jumps apart at 280, as on the GPU).
+fn straddles(gpu:&gpu::Gpu,program:&program::Program,model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,after:&[usize],within:usize)->Vec<(u64,usize)>{
     let engine=Engine::new(model,settings.clone());
     let start:Vec<Trajectory>=(first..first+count).map(|i|{let s=first+(i-first)/group*group;
         initial_trajectory(model,settings,initial,seed,i,Stratum{first:s,size:(s+group).min(first+count)-s})}).collect();
@@ -301,7 +365,7 @@ fn straddles(gpu:&gpu::Gpu,program:&program::Program,model:&Model,settings:&Sett
         for _ in done..k{for t in cpu.iter_mut(){if t.alive{engine.step(t);}}}done=k;
         for(c,g)in cpu.iter().zip(gpu.advance(program,settings,&start,k).unwrap()){
             if(c.jumps,c.alive)!=(g.jumps,g.alive){
-                assert!(c.jumps.abs_diff(g.jumps)<=1,"trajectory {} after {k} steps: {} jumps against the CPU's {}",c.index,g.jumps,c.jumps);
+                assert!(k>within||c.jumps.abs_diff(g.jumps)<=1,"trajectory {} after {k} steps: {} jumps against the CPU's {}",c.index,g.jumps,c.jumps);
                 out.push((c.index,k));
             }
         }
@@ -336,7 +400,7 @@ fn batch(r:&Request,fourth:bool,dt:f64)->bool{
     let(windows,run)=(last+reach.min(last),last+reach);
     let after:Vec<usize>=(1..=windows).chain((run>windows).then_some(run)).collect();
     let first=(40u64..).step_by(20).take(8).find(|&first|{
-        let s=straddles(&gpu,&program,&model,&settings,&initial,seed,first,count,group,&after);
+        let s=straddles(&gpu,&program,&model,&settings,&initial,seed,first,count,group,&after,windows);
         if !s.is_empty(){println!("trajectories {first} to {}: jumps a step apart (trajectory, step) {s:?}",first+count-1);}
         s.is_empty()
     }).expect("a batch whose jumps fall in the same steps on both devices");

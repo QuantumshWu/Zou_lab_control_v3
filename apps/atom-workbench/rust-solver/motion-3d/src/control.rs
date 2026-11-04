@@ -132,9 +132,8 @@ impl Twin{
                 std::array::from_fn(|x|{let l:Vec<Complex>=(0..nt*n).map(|e|columns[e%n][c][x][e/n]).collect();
                     match &slow[class.target]{None=>l,Some(pi)=>(0..nt*n).map(|e|{let(i,j)=(e/n,e%n);(0..nt).fold(Complex::ZERO,|z,m|z+pi[i*nt+m]*l[m*n+j])}).collect()}})}).collect()}).collect();
         // Each cluster's generator: the Hermitian part of the engine's H_eff there, its decay its own
-        // jumps' Σ L†L. The engine's decay comes from the tables of the responses and its jumps from
-        // the photons, which take the recoil's (and the Doppler's) first order: the two differ by ~1e-4
-        // of the scattering rate, and a generator of the one with the jumps of the other leaks trace.
+        // jumps' Σ L†L. The engine's decay holds the photons' first order in the recoil, not its square, and the tables'
+        // interpolation lies between them: a generator of the one with the jumps of the other leaks trace.
         // With its jumps' decay the twin's unraveling is exactly the Lindblad equation of its H and L
         // (`means`): its mean exact, its trace one, every correction's trace zero.
         let locals=(0..model.clusters()).map(|k|{
