@@ -159,7 +159,13 @@ LOGIC_NODE = NodeType(
         "* /, comparison == != > < >= <=, logic and, or, \"and not\", mask where, \"where not\". "
         "Precedence: * / then + - then one comparison then and/\"and not\" then or then where; left to "
         "right within a level; no parentheses (put a group in an internal variable). statistic sum mean "
-        "count min max std any all reduces the over axis names (a list, any domains). Booleans: sum is "
+        "count min max std any all reduces the over axis names (a list, any domains), and with by (one of "
+        "them) + every N that axis in consecutive groups of N instead of whole: it stays, one coordinate per "
+        "group, the mean of its members'. Groups over a Repeat or Point axis span publications: what reads "
+        "them evaluates on what just closed, once; a finite source gives a finite output. statistic fit "
+        "+ model reads one numeric over axis as x and publishes <name>_<parameter>, with sigma, per remaining "
+        "cell: a = mean of counts over repeat, Site by repeat every 50; rabi = fit of a over duration. "
+        "Booleans: sum is "
         "the number true, mean the fraction true, count the valid samples; booleans never mix with "
         "numbers, and two booleans take every comparison, false < true (occupied at frame 0 > occupied "
         "at frame 2: loaded at 0 and empty at 2). An operand whose axes are a subset of the other's "
@@ -168,7 +174,7 @@ LOGIC_NODE = NodeType(
         "[{\"name\":\"same\",\"publish\":false,\"terms\":[{\"of\":\"occupied\",\"at\":\"frame\","
         "\"labels\":[\"0\"]},{\"op\":\"==\",\"of\":\"occupied\",\"at\":\"frame\",\"labels\":[\"2\"]}]},"
         "{\"name\":\"kept\",\"terms\":[{\"of\":\"counts\"},{\"op\":\"where\",\"of\":\"same\"}]}]. "
-        "Shot averages with error bars, per-site probabilities and fits belong in a plot panel."
+        "Shot averages with error bars and per-site probabilities belong in a plot panel."
     ),
     input_specs=(DatasetInput("bundle", None, "exact", select_bundle=True),),
     declare_outputs=_draft_outputs,

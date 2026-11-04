@@ -23,7 +23,8 @@ from zlc_atom.nodes._framework.frames import FIRST, LAST
 
 from .expression import (
     CATEGORIES, DOMAINS, NO_PUBLISHED, OPERATORS, STATISTICS, STATISTICS_FOR, TERM_DEFAULTS, VARIABLE_COLUMNS,
-    axis_groups, changing_axes, describe_schema, frames_kept, pick_values, term_text, typed_variables, where_notes,
+    _answering, axis_groups, changing_axes, describe_schema, fit_models, fit_target, frames_kept, pick_values,
+    term_text, typed_variables, variable_outputs, where_notes,
 )
 
 #: The field the cards write; the Edit page's plain form leaves it out.
@@ -281,7 +282,13 @@ def _preview(row, answer, typed: bool) -> str:
     schema = answer["schema"]
     if schema is None or not typed:
         return "→ checked when the source publishes"
+    if answer["fit"]:
+        shown = ", ".join(f"{name.removeprefix(row['name'] + '_')} ({item.value_schema.value_unit})"
+                          for name, item in answer["fit"].items())
+        return f"→ publishes {shown}"
     notes = [describe_schema(schema)]
+    if row["every"]:
+        notes.append(f"each group of {row['every']} {row['by']}")
     if answer["grouping"]:
         notes.append(answer["grouping"])
     reducible = answer["reducible"]
@@ -337,6 +344,20 @@ def _added(row, answer, context) -> dict:
     return added
 
 
+def _fit_axes(reducible) -> list[str]:
+    """The axes a fit of this value may read as x: numeric coordinates, one x per stored row."""
+
+    names = []
+    for _word, _domain, axes in axis_groups(reducible):
+        for axis in axes:
+            try:
+                fit_target(reducible, (axis.name,))
+            except (TypeError, ValueError):
+                continue
+            names.append(axis.name)
+    return names
+
+
 def _card(row, answer, context) -> dict:
     """One variable's card: its lines, its statistic, its result or problem."""
 
@@ -359,6 +380,14 @@ def _card(row, answer, context) -> dict:
         "choices": [[name, reducible is None or name in STATISTICS_FOR[_boolean(reducible)]
                      or name == row["statistic"]] for name in STATISTICS],
         "over": list(row["over"]), "over_choices": over, "default_over": cells,
+        # Groups: blank every is the whole axis; by is one of over_choices.
+        "by": row["by"], "every": row["every"],
+        # A fit: the model's list once fit is chosen, the one x axis it may take, what it publishes.
+        "model": row["model"],
+        "models": [] if row["statistic"] != "fit" else [[model["id"], model["label"]] for model in fit_models().values()],
+        "fit_axes": [] if row["statistic"] != "fit" or reducible is None else _fit_axes(reducible),
+        "publishes": [[name.removeprefix(row["name"] + "_"), item.value_schema.value_unit or "1"]
+                      for name, item in (answer.get("fit") or {}).items()],
         "error": "", "muted": False,
     }
     error = answer["error"]
@@ -411,9 +440,11 @@ def derive_editor_facts(rows: Sequence[Mapping[str, object]], problem: str, bund
     answers = typed_variables(rows, inputs, changing)
     results: dict[str, object] = {}
     reads: dict[str, set[str]] = {}
+    owner = {name: rows[position]["name"] for name, position in _answering(rows).items()}
     for row, answer in zip(rows, answers):
         results.setdefault(row["name"], answer["schema"])
-        reads.setdefault(row["name"], set()).update(term["of"] for term in row["terms"] if term["of"])
+        results.update(answer["fit"] or {})
+        reads.setdefault(row["name"], set()).update(owner.get(term["of"], term["of"]) for term in row["terms"] if term["of"])
 
     def schema_of(name):
         return inputs.get(name) if name in members else results.get(name)
@@ -441,8 +472,9 @@ def derive_editor_facts(rows: Sequence[Mapping[str, object]], problem: str, bund
     for row, answer in zip(rows, answers):
         closed = readers(row["name"]) | {row["name"]}
         variables = tuple(dict.fromkeys(
-            other["name"] for other in rows
-            if other["name"] and other["name"] not in closed and other["name"] not in members))
+            name for other in rows
+            if other["name"] and other["name"] not in closed and other["name"] not in members
+            for name in variable_outputs(other)))
         cards.append(_card(row, answer, {"members": members, "variables": variables, "schema_of": schema_of,
                                          "frames_of": frames_of, "frame_axis": frame_axis, "typed": typed,
                                          "changing": changing, "label_sets": label_sets}))
