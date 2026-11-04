@@ -114,7 +114,7 @@
 //!   us, 8192 trajectories); the jumps' criterion takes it to 0.033 us, T −0.1 ± 1.5 % there. A doubling
 //!   of the deposit itself cancels by the motion's time reversal (the cross term is odd in v) and misses it;
 //! - the loss, within the populations' tolerance: an escape over the trap's top moves with the motion's energy -- the pilot's
-//!   escaped share times D/k_BT per relative error of it (`escape`) --, by the larger of the orbits'
+//!   escaped share L by L ln(1/L) per relative error of it (`escape`) --, by the larger of the orbits'
 //!   and the jumps' errors.
 //! T's criteria take the step's share of T's room where T binds and the target itself where it is a reference only, the
 //! regime's weight between them (`regime`, `tolerances`): its share would refine for a value no target takes, while a
@@ -675,7 +675,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let apriori:Vec<[f64;2]>=c.charges.iter().map(|x|x.map(|x|others+x+pilot_beats*pilot_horizon)).collect();
         let tolerances=tolerances(binding,&apriori);let bias=|k:&Check|{let r=k.ratios();[r[0]*tolerances[0],r[1]*tolerances[1]]};
         let cost=|k:&Check|{let(n,weight)=predicted(&pilot_statistics,&apriori,bias(k),pilot as f64,c.model.resonance);work(k.steps)*n*weight*(outputs-1) as f64};
-        let checked=step_check(&c.model,states,&settings,steps,most,pilot_waiting,pilot_horizon,pilot as usize,&pilot_groups,depth,period,tolerances,&cost,need);
+        let checked=step_check(&c.model,states,&settings,steps,most,pilot_waiting,pilot_horizon,pilot as usize,&pilot_groups,period,tolerances,&cost,need);
         let chosen=checked.chosen;
         Costed{cost:cost(&chosen),check:checked_work(&checked,states.len(),pilot as usize,pilot_horizon,interval,period,&work),work:work(chosen.steps),bias:bias(&chosen),apriori,checked}
     };
@@ -729,7 +729,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             // states' exact steps resolve what the folded model's step left to the fold (CONTROL_CYCLE's first rung: 118 steps
             // per interval against the folded 34, its evaluation ten CPU-s for a cost twice the least's).
             let tolerances=tolerances(binding,&apriori);
-            let r=step_excess(&Engine::new(&c.model,at.clone()),&states,pilot_waiting,&probes,period,escape(&c.model,&states,&pilot_groups,depth),tolerances);
+            let r=step_excess(&Engine::new(&c.model,at.clone()),&states,pilot_waiting,&probes,period,escape(&c.model,&states,&pilot_groups),tolerances);
             let fewest_steps=((steps as f64*r[1].max(r[2]).sqrt()).ceil() as usize).clamp(1,most);
             // There the motion's and the loss's biases, as dt², and the trajectories they leave the statistics: the rung's
             // cost at the largest step its check can keep -- a near tie (RETRO's ladder, ten rungs within its error of the
@@ -771,7 +771,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let checked=match known{Some(checked)=>checked,None=>{let tolerances=tolerances(binding,&apriori);
         let cost=|k:&Check|{let r=k.ratios();let(n,weight)=predicted(&pilot_statistics,&apriori,[r[0]*tolerances[0],r[1]*tolerances[1]],pilot as f64,model.resonance);
             interval_work(&model,&parts,&settings(k.steps),interval,waiting)*n*weight};
-        step_check(&model,&states,&settings,steps,most,waiting,horizon,pilot as usize,&pilot_groups,depth,period,tolerances,&cost,need)}};
+        step_check(&model,&states,&settings,steps,most,waiting,horizon,pilot as usize,&pilot_groups,period,tolerances,&cost,need)}};
     let tolerances=checked.tolerances;
     let chosen=checked.chosen;
     let(steps,ratios)=(chosen.steps,chosen.ratios());
@@ -1150,10 +1150,10 @@ impl Check{
 /// the statistics their balance by construction. Every check after the searches is the measured list's (for
 /// `checked_work`); the tolerances the checks took, for the step's bias.
 struct Steps{bound:Vec<Check>,measured:Vec<Check>,chosen:Check,probes:usize,tolerances:[f64;2]}
-fn step_check(model:&Model,states:&[Trajectory],settings:&dyn Fn(usize)->Settings,first:usize,most:usize,waiting:f64,horizon:f64,subsample:usize,groups:&[Group],depth:f64,period:f64,
+fn step_check(model:&Model,states:&[Trajectory],settings:&dyn Fn(usize)->Settings,first:usize,most:usize,waiting:f64,horizon:f64,subsample:usize,groups:&[Group],period:f64,
     tolerances:[f64;2],cost:&dyn Fn(&Check)->f64,need:f64)->Steps{
     // The orbits' probes and the loss's sensitivity (`bound_probes`, `escape`), at the pilot's groups.
-    let(probes,escape)=(bound_probes(model,states),escape(model,states,groups,depth));
+    let(probes,escape)=(bound_probes(model,states),escape(model,states,groups));
     let doubled=|steps:usize|{let r=step_excess(&Engine::new(model,settings(steps)),states,waiting,&probes,period,escape,tolerances);Check{steps,population:r[0],loss:r[1],motion:r[2]}};
     let measure=|steps:usize|accumulated_excess(&Engine::new(model,settings(steps)),states,horizon,subsample,tolerances[0]);
     let checked=|steps:usize|{let mut c=doubled(steps);if c.decided_by_population(){c.population=measure(steps);}c};
@@ -1257,20 +1257,18 @@ fn deposit(model:&Model,t:&Trajectory,psi:&[Complex],doppler:f64)->(f64,f64){
     let hm=model.hbar_over_mass;(hm*(0..3).map(|a|t.kappa[a]*mean[a]).sum::<f64>()/weight,0.5*hm*recoil/weight)
 }
 
-/// The loss's sensitivity to the motion's energy scale: the pilot's escape over the trap's top -- the
-/// share of its trajectories lost after a state of theirs was bound (atoms the light heated over the
-/// top; an unbound one leaving is no escape) -- times the trap's depth over the bound states' mean
-/// kinetic energy per axis, D/k_BT. An escape over a barrier from a thermal tail goes as e^{−D/k_BT}:
-/// a relative error δ of the motion's energy (its orbits', `orbits`) moves the trap's top by δD for the
-/// orbits that reach it, and the escaped share by D/k_BT δ of itself. Zero where none escaped.
-fn escape(model:&Model,states:&[Trajectory],groups:&[Group],depth:f64)->f64{
+/// The loss's sensitivity to the motion's energy scale: of the pilot's trajectories the share L lost after a state of theirs was
+/// bound (atoms the light heated over the top; an unbound one leaving is no escape), L ln(1/L). An escape over a barrier from a
+/// thermal tail goes as L = e^{−D/k_BT}: a relative error δ of the motion's energy moves L by (D/k_BT) δ of itself, and the D/k_BT
+/// of the tail the atoms were lost from is the one L itself measures, ln(1/L) -- the bound atoms' mean energy need not be that
+/// tail's (a gray molasses at 2 µK with one atom of 32 lost: D/k_BT of over a hundred on that mean, its step 0.385 us against
+/// 0.625 us with none lost, the loss at either within 0.01 % at 8192 trajectories). Zero where none escaped.
+fn escape(model:&Model,states:&[Trajectory],groups:&[Group])->f64{
     let(hm,outputs)=(model.hbar_over_mass,groups.first().map_or(0,|g|g.sums.len()));if outputs==0{return 0.;}
-    let bound:Vec<(u64,f64)>=states.par_iter().filter_map(|t|{let p=model.point(t.r,t.kappa);let k:f64=t.kappa.iter().map(|k|k*k).sum();
-        (0.5*hm*k+model.trap_potential(t.cluster,&p,&t.psi,t.time)<0.).then_some((t.index,hm*k/3.))}).collect();
-    if bound.is_empty(){return 0.;}
-    let kt=bound.iter().map(|b|b.1).sum::<f64>()/bound.len() as f64;
-    let escaped=groups.iter().enumerate().filter(|(k,g)|g.sums[outputs-1].held==0.&&bound.iter().any(|b|b.0==*k as u64)).count() as f64;
-    escaped/groups.len() as f64*depth/kt
+    let bound:Vec<u64>=states.par_iter().filter_map(|t|{let p=model.point(t.r,t.kappa);let k:f64=t.kappa.iter().map(|k|k*k).sum();
+        (0.5*hm*k+model.trap_potential(t.cluster,&p,&t.psi,t.time)<0.).then_some(t.index)}).collect();
+    let share=groups.iter().enumerate().filter(|(k,g)|g.sums[outputs-1].held==0.&&bound.contains(&(*k as u64))).count() as f64/groups.len() as f64;
+    if share>0.{-share*share.ln()}else{0.}
 }
 
 /// The orbits' probes: per pilot trajectory its states bound to the trap -- their mechanical energy below the trap's far
