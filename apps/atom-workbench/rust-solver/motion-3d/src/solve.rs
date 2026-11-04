@@ -61,7 +61,9 @@
 //! `Candidate::fixed`), by more than that error and a rung's least check: below, no rung -- more of the model explicit,
 //! more work per step, at least one doubling -- can win or pay for its check. A rung's own check, as the pilot's model's at
 //! the rung's work, is spent only where what the rung's floor leaves of the least cost exceeds it: on a short run
-//! the check, a trap period of the probes' orbits, is the whole run's work at equal steps. The run goes on from those states (no
+//! the check, a trap period of the probes' orbits, is the whole run's work at equal steps. A folded model beyond its targets at any
+//! step (a pole its tables do not resolve, a charge past the rooms) is costed at the pilot's step with no bias, its check put off
+//! until it is the choice: what the step moves of that cost is little beside the weight. The run goes on from those states (no
 //! pilot runs again); no timing enters, so a request gives the same choice on any machine.
 //!
 //! # Time step
@@ -664,10 +666,11 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // at least those of its least charges -- per output the pilot's T charge squared for the populations
     // (`fold_charges`; a mean of squares is at least the square of the mean) with no step bias, and T's the second
     // order's with the pilot's model's T bias: the fourth order folds the force at the second, so that T's charge
-    // and the motion's step error are the second order's.
+    // and the motion's step error are the second order's. Beside a pilot's model whose check was put off (beyond the targets at
+    // any step), only where those totals come within the targets: what lies beyond them is no fold's.
     let promise=pilot_cost.as_ref().map_or(true,|p|{
         let apriori:Vec<[f64;2]>=p.apriori.iter().zip(&pilot_candidate.charges).map(|(a,c)|[a[0]-c[0]+fold_charges(true,c[1])[0],a[1]]).collect();
-        let(n,weight)=predicted(&pilot_statistics,&apriori,[0.,p.bias[1]],binds,pilot as f64,pilot_candidate.model.resonance);p.work*n*weight*((outputs-1) as f64)+p.check<p.cost});
+        let(n,weight)=predicted(&pilot_statistics,&apriori,[0.,p.bias[1]],binds,pilot as f64,pilot_candidate.model.resonance);p.work*n*weight*((outputs-1) as f64)+p.check<p.cost&&(p.checked.is_some()||weight<=1.)});
     let fourth_cost=if fourth&&measured&&promise{Candidate::new(request,pilot_candidate.allowance,true).ok().map(|mut c|{c.charged(charge_of(&pilot_candidate.model,&c.model));
         let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect()};
         let(states,begun)=(into(&pilot_states),into(&starts));c.phase=grid_phase(&c.model,&states,&running(steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase));
