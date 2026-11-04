@@ -61,8 +61,12 @@
 //! shifts and H's static couplings between its ground states (the static block's spread: a pair not far
 //! beyond it would beat between the block's eigenstates at their nearness) -- subtracted from its
 //! distance; one that fails is kept (promoted), a drive static in the frames between two states of one
-//! cluster is kept (it costs nothing), and the rule runs again until nothing changes. When every drive folds, the clusters are
-//! the ground states' alone.
+//! cluster is kept (it costs nothing), and the rule runs again until nothing changes. Each pass takes the estimates at its own
+//! dressing and keeps first, per ground state, the most saturated drive of a folded total beyond the allowance: a folded near drive's
+//! light is most of the dressing until it is kept (PGCP_10's probe, a dressing above its distances of 21 to 33 MHz), and what is judged
+//! under it stays kept for nothing -- a cooling drive's saturation read at a quarter of its distance, the pairs of channels within that spread.
+//! The couplings between explicit states and the pairs are judged once the drives stand. The rungs then keep more as the allowance
+//! falls. When every drive folds, the clusters are the ground states' alone.
 //!
 //! # Elimination of the folded drives
 //! Each beam's folded coupling V_l^f is V_l with every kept drive's entry zeroed (`Ground::folded`).
@@ -266,7 +270,7 @@ use std::f64::consts::TAU;
 /// A drive's saturation parameter is 2(g/|ΔE|)²: the relative error of its linear response, the
 /// estimate of its fold.
 pub const SATURATION:f64=2.;
-/// The numerical share s²ε an unmixed block may change its responses by, relative to themselves (`Ground::unmixed_blocks`):
+/// The numerical share an unmixed block may change its responses by, relative to themselves (`Ground::unmixed_blocks`):
 /// the numerical tolerances' (solve.rs, # Shares; `NUMERICAL_SHARE` of ε = `POPULATION_TARGET`), the one switch between a
 /// block's eigenstates and its states on their own.
 pub const MIXING_SHARE:f64=crate::solve::NUMERICAL_SHARE*crate::solve::POPULATION_TARGET;
@@ -419,11 +423,8 @@ pub struct Elimination{
     pub responses:Vec<Dense>,
     pub derivatives:Vec<Dense>,
     /// Per carrier and cluster the block its responses see (`Ground::dress_light`; empty before the rule's
-    /// clusters, None where the carrier reaches none of the cluster's states), and per carrier and ground
-    /// state the bare channel's factorization where the dressing made one (a shift's denominator,
-    /// K − E_b − δ_c: the undressed response's, `Ground::dressing_bounds`).
+    /// clusters, None where the carrier reaches none of the cluster's states).
     pub blocks:Vec<Vec<Option<Block>>>,
-    pub bare:Vec<Vec<Option<Lu>>>,
 }
 /// A carrier's block on a cluster (module documentation, # The static ground block): the cluster's
 /// static ground block as the carrier's responses see it -- H's, with every other near carrier's light
@@ -968,9 +969,9 @@ impl Ground{
                     lu.solve(&mut column);for i in 0..ne{derivatives[l][(i,b)]=column[i];}
                 }
             }}
-            return Ok(Elimination{energies,ground,excited,excited_energies,excited_hamiltonian,responses,derivatives,blocks:vec![],bare:vec![]});
+            return Ok(Elimination{energies,ground,excited,excited_energies,excited_hamiltonian,responses,derivatives,blocks:vec![]});
         }
-        let(mut blocks,bare)=self.dress_light(intensities,&ground,&energies,&excited_hamiltonian,&decoupled)?;
+        let mut blocks=self.dress_light(intensities,&ground,&energies,&excited_hamiltonian,&decoupled)?;
         for(c,carrier)in self.carriers.iter().enumerate(){for(k,cl)in self.clusters.iter().enumerate(){
             let Some(block)=blocks[c][k].as_mut() else{continue};
             let kc=self.cluster_hamiltonian(&excited_hamiltonian,cl);
@@ -987,7 +988,7 @@ impl Ground{
                 let mode=&mut block.modes[m];mode.lu=plain;for(d,lu)in mode.dressed.iter_mut().zip(dressed){d.lu=Some(lu);}
             }
         }}
-        Ok(Elimination{energies,ground,excited,excited_energies,excited_hamiltonian,responses,derivatives,blocks,bare})
+        Ok(Elimination{energies,ground,excited,excited_energies,excited_hamiltonian,responses,derivatives,blocks})
     }
 
     /// The near light's dressing at the units' intensities (module documentation, # The near light's
@@ -1006,8 +1007,8 @@ impl Ground{
     /// the spread of a's cluster's static block about it (its row's other entries, Gershgorin's radius). A
     /// state whose term's bound is below double precision's round-off of the generator is left out (`Mode`).
     /// The shifts are computed where they enter a block (another carrier reaches the state's cluster) or an
-    /// intermediate's energy or spread (its cluster holds one); their factorizations are the bare channels'.
-    fn dress_light(&self,intensities:&[f64],ground:&Dense,energies:&[f64],k:&Dense,decoupled:&[Option<Dense>])->Result<(Vec<Vec<Option<Block>>>,Vec<Vec<Option<Lu>>>),String>{
+    /// intermediate's energy or spread (its cluster holds one).
+    fn dress_light(&self,intensities:&[f64],ground:&Dense,energies:&[f64],k:&Dense,decoupled:&[Option<Dense>])->Result<Vec<Vec<Option<Block>>>,String>{
         let(ng,ne,nc)=(self.ground_states.len(),self.excited_states.len(),self.carriers.len());
         let column=|m:&Dense,b:usize|->Vec<Complex>{(0..ne).map(|i|m[(i,b)]).collect()};
         let dot=|x:&[Complex],y:&[Complex]|x.iter().zip(y).fold(Complex::ZERO,|s,(a,b)|s+a.conj()**b);
@@ -1017,7 +1018,7 @@ impl Ground{
         // Per carrier d and ground state b: its units' fields there, their images under (K − E_b − δ_d)⁻¹ and
         // b's admixture under d.
         type Fields=Vec<(f64,Vec<Complex>,Vec<Vec<Complex>>)>;type Images=Vec<(Vec<Complex>,Vec<Vec<Complex>>)>;
-        let mut parts:Vec<Vec<Option<(Fields,Images,f64)>>>=vec![vec![None;ng];nc];let mut bare=vec![vec![None;ng];nc];
+        let mut parts:Vec<Vec<Option<(Fields,Images,f64)>>>=vec![vec![None;ng];nc];
         let holds:Vec<bool>=(0..self.clusters.len()).map(|k|self.vias.iter().flatten().flatten().any(|v|self.cluster[v.state]==k)).collect();
         for d in 0..nc{for b in (0..ng).filter(|&b|self.couples(d,b)){
             let cl=&self.clusters[self.cluster[b]];
@@ -1027,7 +1028,7 @@ impl Ground{
             let fields:Fields=units[d].iter().map(|(a,x)|(*a,column(&x.coupling,b),x.remainders.iter().map(|r|column(r,b)).collect())).collect();
             let images:Images=fields.iter().map(|(_,v,rest)|(solved(v),rest.iter().map(|r|solved(r)).collect())).collect();
             let admixture=fields.iter().zip(&images).map(|((a,_,_),(g,_))|a*a*norm(g).powi(2)).sum();
-            parts[d][b]=Some((fields,images,admixture));bare[d][b]=Some(lu);
+            parts[d][b]=Some((fields,images,admixture));
         }}
         // d's light shift between ground states b and b2 (b = b2: its shift of b, ΔE_b^d = −Re(V_d^f†(K − E_b − δ_d)⁻¹V_d^f)_bb)
         // and the bound of what it leaves out.
@@ -1103,7 +1104,7 @@ impl Ground{
             }).collect();
             out[c][k]=Some(Block{vectors,error,modes});
         }}
-        Ok((out,bare))
+        Ok(out)
     }
 
     /// The dressing's bounds on the generator at an elimination (module documentation, # The near light's
@@ -1117,20 +1118,17 @@ impl Ground{
     /// terms left out, their bounds (`Mode`) --, the beams at their peak; the generator's change at most
     /// (‖V‖ + ‖D R‖) ≤ 3‖V‖ times it, ‖V‖ the channel's folded coupling, relative to the generator's scale. A
     /// column the carrier does not couple (a state the block mixes in) is not the generator's: all of it,
-    /// through the cluster's widest coupling. With it, what an undressed response errs by where the block mixes (the
-    /// GPU's exact one, gpu/program.rs, has the dressing: the static block's eigenbasis is pending): measured, the bare
-    /// response of each ground state at its own energy against the response, weighted alike -- none where the block is
-    /// the states' own energies, unmixed. The largest of each (error, undressed).
-    pub fn dressing_bounds(&self,e:&Elimination,intensities:&[f64])->Result<(f64,f64),String>{
+    /// through the cluster's widest coupling. The largest.
+    pub fn dressing_bounds(&self,e:&Elimination,intensities:&[f64])->Result<f64,String>{
         let ne=self.excited_states.len();let scale=self.generator_scale.max(f64::MIN_POSITIVE);
         let column=|m:&Dense,b:usize|->Vec<Complex>{(0..ne).map(|i|m[(i,b)]).collect()};
         let dot=|x:&[Complex],y:&[Complex]|x.iter().zip(y).fold(Complex::ZERO,|s,(a,b)|s+a.conj()**b).abs();
         let norm=|x:&[Complex]|x.iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();
         let sources=self.sources(&e.excited,&e.excited_hamiltonian);
-        let(mut error,mut undressed)=(0_f64,0_f64);
+        let mut error=0_f64;
         for(c,carrier)in self.carriers.iter().enumerate(){for(k,cl)in self.clusters.iter().enumerate(){
             let Some(block)=e.blocks.get(c).and_then(|x|x[k].as_ref()) else{continue};
-            let(n0,u,nm)=(cl.states.len(),&block.vectors,block.modes.len());
+            let(n0,nm)=(cl.states.len(),block.modes.len());
             let share:Vec<f64>=cl.states.iter().map(|&b|3.*carrier.beams.iter().map(|&l|norm(&column(&self.folded[l],b))).sum::<f64>()).collect();
             let projector:Vec<Vec<f64>>=(0..nm).map(|m|(0..n0*n0).map(|x|block.projector(m,x/n0,x%n0).abs()).collect()).collect();
             // Per place the bound of its column's change; per eigen-energy its response's slope; per eigen-energy and source
@@ -1194,17 +1192,8 @@ impl Ground{
                 if self.couples(c,b){error=error.max(share[i]*change[i]/scale);continue;}
                 error=error.max(widest*carrier.beams.iter().map(|&l|norm(&column(&e.responses[l],b))).sum::<f64>()/scale);
             }
-            // What an undressed response errs by, measured.
-            let unmixed=(0..n0).all(|i|(0..n0).all(|j|u[(i,j)]==if i==j{Complex::ONE}else{Complex::ZERO}))&&block.modes.iter().all(|m|m.members.len()==1);
-            let kc=self.cluster_hamiltonian(&e.excited_hamiltonian,cl);
-            for(i,&b)in cl.states.iter().enumerate(){
-                if !self.couples(c,b)||(unmixed&&block.modes.iter().any(|m|m.members[0]==i&&m.energy==e.energies[b]+carrier.detuning)){continue;}
-                let owned;let lu=match e.bare.get(c).and_then(|x|x[b].as_ref()){Some(lu)=>lu,None=>{owned=denominator(&kc,-e.energies[b]-carrier.detuning)?;&owned}};
-                let apart:f64=carrier.beams.iter().map(|&l|{let mut s=sources[l][b].clone();lu.solve(&mut s);s.iter().enumerate().map(|(x,y)|(*y-e.responses[l][(x,b)]).norm_sqr()).sum::<f64>().sqrt()}).sum();
-                undressed=undressed.max(share[i]*apart/scale);
-            }
         }}
-        Ok((error,undressed))
+        Ok(error)
     }
 
     /// A frame or a beat from its integer combination m of the carriers' detunings (`Cluster::combinations`):
@@ -1329,8 +1318,9 @@ impl Ground{
     /// The drives judged per ground state: kept from the most saturated down (over the light's
     /// pattern) until the total saturation of the rest (their means' sum) fits the allowance, the rest
     /// folded; a drive kept already stays kept. Each one newly kept is passed to `kept` (whose answer
-    /// says whether it counts as a change); whether any did.
-    fn judge_drives(excited:&mut [ExcitedItem],allowance:f64,kept:&mut dyn FnMut(&mut ExcitedItem)->bool)->bool{
+    /// says whether it counts as a change); whether any did. With `one`, at most one per ground state: keeping a drive lowers the
+    /// dressing the others' estimates take (the closure).
+    fn judge_drives(excited:&mut [ExcitedItem],allowance:f64,one:bool,kept:&mut dyn FnMut(&mut ExcitedItem)->bool)->bool{
         let grounds:Vec<usize>={let mut g:Vec<usize>=excited.iter().filter_map(|x|match x.kind{ExcitedKind::Drive(d)=>Some(d.ground),_=>None}).collect();g.sort();g.dedup();g};
         let mut changed=false;
         for b in grounds{
@@ -1340,7 +1330,7 @@ impl Ground{
             for i in drives{
                 if !excited[i].folded{continue;}
                 if total<=allowance{break;}
-                total-=excited[i].mean;excited[i].folded=false;changed|=kept(&mut excited[i]);
+                total-=excited[i].mean;excited[i].folded=false;changed|=kept(&mut excited[i]);if one{break;}
             }
         }
         changed
@@ -1371,20 +1361,21 @@ impl Ground{
         let mut excited=self.excited_couplings();
         for x in excited.iter_mut(){(x.estimate,x.mean)=excited_estimate(x,0.,floor);}
         for x in excited.iter_mut(){if let ExcitedKind::Static{..}=x.kind{x.folded=x.estimate<=BUDGET;}}
-        Ground::judge_drives(&mut excited,allowance,&mut |_|false);
+        Ground::judge_drives(&mut excited,allowance,false,&mut |_|false);
         excited
     }
     /// The allowances at which the rule's explicit excited states change (`Ground::with`), from all
     /// folded (infinite) down to every drive kept, each the largest that gives its set of explicit
     /// states before the closure: the totals of a ground state's folded drives as it keeps them from
-    /// the most saturated down.
+    /// the most saturated down, its total with none kept among them -- its first kept drive lies below that, with
+    /// other ground states' still folded (PGCP_10: the near probe's drives alone, its cooling beams folded).
     pub fn allowances(request:&Request)->Result<Vec<f64>,String>{
         let g=Ground::bare(request)?;let ne=g.excited_states.len();
         let excited=g.judged(f64::INFINITY);
         let mut totals:Vec<f64>=vec![];
         for b in 0..g.ground_states.len(){
             let mut means:Vec<f64>=excited.iter().filter_map(|x|match x.kind{ExcitedKind::Drive(d)if d.ground==b=>Some(x.mean),_=>None}).collect();
-            means.sort_by(|x,y|y.total_cmp(x));let mut rest:f64=means.iter().sum();
+            means.sort_by(|x,y|y.total_cmp(x));let mut rest:f64=means.iter().sum();totals.push(rest);
             for m in means{rest-=m;totals.push(rest.max(0.));}
         }
         totals.sort_by(|x,y|y.total_cmp(x));totals.dedup();
@@ -1427,31 +1418,37 @@ impl Ground{
                     if let(Some(i),Some(j))=(set.iter().position(|&s|s==x),set.iter().position(|&s|s==y)){m[(i,j)]+=Complex::new(item.size,0.);m[(j,i)]+=Complex::new(item.size,0.);}
                 }
                 hermitian_eigenvalues(&m).into_iter().fold(0_f64,|a,v|a.max(v.abs()))}).collect();
-            let mut changed=false;
-            for x in excited.iter_mut().filter(|x|x.folded){
+            // The folded couplings' estimates at this pass's dressing: what the kept couplings leave of it, the last
+            // pass's the estimates the fold's charge books.
+            let mut changed=false;let mut inside=vec![false;excited.len()];
+            for(i,x)in excited.iter_mut().enumerate().filter(|(_,x)|x.folded){
                 let reach=match x.kind{ExcitedKind::Drive(d)=>partition.set[d.ground],
                     ExcitedKind::Static{a,b}=>partition.set[ng+a].or(partition.set[ng+b])};
                 let Some(k)=reach else{continue};
-                let(estimate,mean)=excited_estimate(x,dressing[k],floor);
+                (x.estimate,x.mean)=excited_estimate(x,dressing[k],floor);
                 // A coupling static in the frames between two states of one cluster costs nothing kept.
                 let m=&partition.combinations;
-                let inside=match x.kind{
+                inside[i]=match x.kind{
                     ExcitedKind::Drive(d)=>partition.set[ng+d.excited]==Some(k)&&m[ng+d.excited].iter().zip(&m[d.ground]).enumerate().all(|(c,(e,g))|*e==*g+i32::from(c==d.carrier)),
                     ExcitedKind::Static{a,b}=>partition.set[ng+a]==Some(k)&&partition.set[ng+b]==Some(k)&&m[ng+a]==m[ng+b]};
-                x.estimate=x.estimate.max(estimate);x.mean=x.mean.max(mean);
-                if inside||(matches!(x.kind,ExcitedKind::Static{..})&&estimate>BUDGET){x.folded=false;x.promoted=true;changed=true;}
             }
-            // The drives with the closure's estimates: each ground state's folded total within the allowance.
-            changed|=Ground::judge_drives(&mut excited,allowance,&mut |x|{x.promoted=true;true});
+            // The drives first, the most saturated of each ground state's folded total beyond the allowance: a folded near drive's
+            // light is most of the dressing before it is kept, and estimates taken under it would keep what its keeping lets fold.
+            changed|=Ground::judge_drives(&mut excited,allowance,true,&mut |x|{x.promoted=true;true});
+            if !changed{
+                for(i,x)in excited.iter_mut().enumerate().filter(|(_,x)|x.folded){
+                    if inside[i]||(matches!(x.kind,ExcitedKind::Static{..})&&x.estimate>BUDGET){x.folded=false;x.promoted=true;changed=true;}
+                }
+            }
             // A folded pair of channels between two states of one cluster, judged again with its dressing taken from its
             // separation: the cluster's static block mixes its states by up to that much, and a pair that is not far
             // beyond it would beat between the block's eigenstates at their nearness -- kept.
-            for item in partition.items.iter().filter(|i|i.folded){
+            if !changed{for item in partition.items.iter().filter(|i|i.folded){
                 let Kind::Raman{first,second}=item.kind else{continue};
                 let(Some(k),Some(k2))=(partition.set[first.state],partition.set[second.state])else{continue};
                 if k!=k2||kept.contains(&item.kind){continue;}
                 if !foldable((item.frequency-dressing[k]).max(0.),item.size,self.generator_scale){kept.push(item.kind.clone());changed=true;}
-            }
+            }}
             if !changed&&!moved{self.charge=Ground::charge_of(&excited,ng);return self.assemble(&b,partition,excited);}
         }
     }

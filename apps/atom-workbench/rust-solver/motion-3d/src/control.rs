@@ -3,11 +3,12 @@
 //! control's excess over the known mean (stats.rs) -- keeps its expectation with a smaller spread.
 //!
 //! # T: the harmonic twin
-//! The trajectory's initial r₀ and κ₀ carried by the trap's harmonic part alone (the engine's flow,
+//! The trajectory's initial r₀ (about its own site in a standing wave, engine.rs `Settings::about_site`) and κ₀ carried by the trap's harmonic part alone (the engine's flow,
 //! along the trap's principal axes): over each output's window (lib.rs `Windows`) its κ² along a lab
 //! axis, less the same with κ₀ = 0, is κ₀ᵀ A κ₀ + 2 κ₀ᵀ B r₀ -- A and B the window's means of products
-//! of the axes' cosines and sines. κ₀ is centred and drawn apart from r₀, so the mean is tr(A Σ),
-//! Σ = E[κ₀κ₀ᵀ] of the initial states (each state's Maxwell momenta, its trap's axes and Wigner
+//! of the axes' cosines and sines. κ₀ is centred and symmetric at each r₀ (the bound ensemble's
+//! momenta are isotropic wherever the atom starts, ensemble.rs), so the mean is tr(A Σ), Σ = E[κ₀κ₀ᵀ]
+//! of the initial states (each state's ensemble's kinetic temperature, its trap's axes and Wigner
 //! factor), exactly, whatever r₀'s distribution. While the atom still moves in the harmonic trap the
 //! control follows its window's κ² closely; the light and the trap's anharmonic part decorrelate it.
 //!
@@ -88,14 +89,17 @@ fn window(theta:f64,lo:usize,hi:usize)->(f64,f64){
     (sign*kernel*c,sign*kernel*s)
 }
 
-/// E[κ₀κ₀ᵀ] on the settings' principal axes: each initial state's Maxwell momenta along its own trap's
-/// axes with the harmonic oscillator's Wigner factor (lib.rs `initial_trajectory`), weighted by its
-/// population.
+/// E[κ₀κ₀ᵀ] on the settings' principal axes: each initial state's bound ensemble's momenta, isotropic
+/// at its kinetic temperature (ensemble.rs `Ensemble::kinetic`), along its own trap's axes with the
+/// harmonic oscillator's Wigner factor (lib.rs `initial_trajectory`), weighted by its population; a
+/// state the trap does not hold at rest. (A draw the Wigner factors leave unbound by the loss's measure,
+/// drawn again, moves it by the square of their excess over one, below 10⁻⁶ of it.)
 fn initial_momenta(model:&Model,settings:&Settings,initial:&Initial)->[[f64;3];3]{
     let(kt,hm)=(KT_PER_UK*initial.temperature_uk,model.hbar_over_mass);let mut lab=[[0.;3];3];
-    for(&(_,_,p),trap)in initial.states.iter().zip(&initial.traps){
+    for((&(_,_,p),trap),e)in initial.states.iter().zip(&initial.traps).zip(&initial.ensembles){
+        let Some(e)=e else{continue};
         for i in 0..3{let half=trap.frequencies[i]/(2.*kt);let quantum=if half>0.{half/half.tanh()}else{1.};
-            for x in 0..3{for y in 0..3{lab[x][y]+=p*kt/hm*quantum*trap.axes[i][x]*trap.axes[i][y];}}}
+            for x in 0..3{for y in 0..3{lab[x][y]+=p*e.kinetic*kt/hm*quantum*trap.axes[i][x]*trap.axes[i][y];}}}
     }
     std::array::from_fn(|p|std::array::from_fn(|q|(0..3).map(|x|(0..3).map(|y|settings.axes[p][x]*lab[x][y]*settings.axes[q][y]).sum::<f64>()).sum()))
 }

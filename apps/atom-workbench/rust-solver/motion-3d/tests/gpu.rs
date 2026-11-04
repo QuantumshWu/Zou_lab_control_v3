@@ -78,8 +78,8 @@ fn model(r:&Request,fourth:bool)->Model{Model::with_order(r,f64::INFINITY,fourth
 /// `Ground::allowances`): its clusters take the exact step (engine.rs # The exact step).
 fn explicit(r:&Request)->Model{Model::with(r,Ground::allowances(r).unwrap()[1]).unwrap()}
 /// The PGC with a resonant probe 10 MHz off the cooling light (the floquet study's PGCP_10), as the app
-/// sends it: its folds' saturation far beyond one, the solve keeps 7 excited states explicit with the 5
-/// ground states of F = 2, a cluster beating at 36.4 and 72.8 MHz that its exact step takes by CF4.
+/// sends it: its folds' saturation far beyond one, its first rung keeps 5 excited states explicit with the 5
+/// ground states of F = 2, a cluster beating at 36.4 MHz that its exact step takes by CF4.
 fn probed()->Request{let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=vec![0.,1.];r}
 /// A batch of the fixture's thermal trajectories and the step's settings (a solve's: the truncation
 /// a share of the step's budget, the loss on), with `threshold` (when given) as every one's.
@@ -148,10 +148,8 @@ fn on_eight_states_a_step_and_a_jump_are_the_cpu_s(){
     let r=request(MOLASSES);compare(&r,None,f64::INFINITY,false,false);compare(&r,Some(0.999),f64::INFINITY,true,false);
 }
 /// The same jump with the exact response: the gray molasses' static ground block mixes its responses (ground.rs,
-/// # The static ground block), which the kernel's exact response, dressed with each ground state at its own energy,
-/// leaves out: the static block's eigenbasis is pending, its error booked (solve.rs); the CPU's ψ 6e-5 off after the jump.
+/// # The static ground block), the kernel's by its eigenstates (`mixed_responses`).
 #[test]
-#[ignore="pending the GPU's F6 static-block port"]
 fn on_eight_states_a_jump_with_the_exact_response_is_the_cpu_s(){compare(&request(MOLASSES),Some(0.999),0.,true,false);}
 /// With explicit excited states (engine.rs # The exact step), on the tweezer PGC's first explicit rung
 /// (clusters of 3 ground and 4 explicit states and of 2 and 3, their hyperfine beat left out: the static
@@ -175,10 +173,8 @@ fn with_explicit_states_a_step_and_a_jump_are_the_cpu_s(){
     explicit_rung(&request(MOLASSES),0.2,&[false]);
     explicit_rung(&probed(),0.1,&[false,true]);
 }
-/// The gray molasses' explicit rung's jump with the exact response: its block mixes, which the kernel's response leaves out
-/// (the static block's eigenbasis is pending; ψ 1.2e-5 off).
+/// The gray molasses' explicit rung's jump with the exact response: its block mixes (the kernel's `mixed_responses`).
 #[test]
-#[ignore="pending the GPU's F6 static-block port"]
 fn with_explicit_states_a_jump_with_a_mixed_block_s_exact_response_is_the_cpu_s(){explicit_rung(&request(MOLASSES),0.2,&[true]);}
 /// A request's first explicit rung (`with_explicit_states_a_step_and_a_jump_are_the_cpu_s`), its jumps with the responses
 /// `exact` lists: true, the exact one; false, the first order's.
@@ -211,10 +207,9 @@ fn explicit_rung(r:&Request,dt:f64,exact:&[bool]){
 /// states, their dressing in the source), where the dressing moves them by 6.9e-4.
 #[test]
 fn the_exact_responses_are_the_cpu_s(){let r=probed();let m=explicit(&r);exact_responses(&r,m);}
-/// On the gray molasses (one cluster of all 8 ground states), whose static block mixes its responses: the kernel's are
-/// 1.3e-2 off the CPU's (the static block's eigenbasis is pending).
+/// On the gray molasses (one cluster of all 8 ground states), whose static block mixes its responses (the kernel's
+/// `mixed_responses`).
 #[test]
-#[ignore="pending the GPU's F6 static-block port"]
 fn on_a_mixed_block_the_exact_responses_are_the_cpu_s(){let r=request(MOLASSES);let m=model(&r,false);exact_responses(&r,m);}
 /// A model's exact responses on both devices (`the_exact_responses_are_the_cpu_s`).
 fn exact_responses(r:&Request,m:Model){
@@ -226,10 +221,13 @@ fn exact_responses(r:&Request,m:Model){
     for t in &trajectories{
         let got=gpu.response_probe(&program,&settings,t).unwrap();
         let(cpu,undressed)=(Exact::new(&model,t.r,t.kappa).unwrap(),Exact::new(&bare,t.r,t.kappa).unwrap());
+        // A column at single precision's round-off of the state's largest entry (a coupling at the round-off of the
+        // data) has no relative accuracy to check.
+        let largest=near.iter().flat_map(|&l|(0..3).map(move|a|(l,a))).map(|(l,a)|g.emission[a].product(&cpu.responses[l]).entries.iter().map(|z|z.abs()).fold(0.,f64::max)).fold(0.,f64::max);
         for(j,&l)in near.iter().enumerate(){
             let(c,u):(Vec<Dense>,Vec<Dense>)=(0..3).map(|a|(g.emission[a].product(&cpu.responses[l]),g.emission[a].product(&undressed.responses[l]))).unzip();
             for(col,&b)in g.clusters[t.cluster].states.iter().enumerate(){
-                let scale=(0..3).flat_map(|a|(0..GROUND).map(move|to|(a,to))).map(|(a,to)|c[a][(to,b)].abs()).fold(0.,f64::max);if scale==0.{continue;}
+                let scale=(0..3).flat_map(|a|(0..GROUND).map(move|to|(a,to))).map(|(a,to)|c[a][(to,b)].abs()).fold(f32::EPSILON as f64*largest,f64::max);if scale==0.{continue;}
                 for a in 0..3{for to in 0..GROUND{
                     let x=got[((j*program::MAXN+col)*3+a)*GROUND+to];
                     worst=worst.max((x-c[a][(to,b)]).abs()/scale);dressing=dressing.max((u[a][(to,b)]-c[a][(to,b)]).abs()/scale);
@@ -297,11 +295,13 @@ fn straddles(gpu:&gpu::Gpu,program:&program::Program,model:&Model,settings:&Sett
 /// sums can tell: after every step within the windows, and at the run's end, where the jumps are
 /// counted. A jump a step apart moves its recoil by a step in a window (1.6e-3 of the gray molasses'
 /// Σκ_x² at its last output, trajectory 44 from the 40th). The held twin's jumps are not checked so
-/// (no entry steps it alone on the GPU): each fixture's fall in the same steps.
-fn batch(r:&Request,fourth:bool)->bool{
+/// (no entry steps it alone on the GPU): each fixture's fall in the same steps. The trap's region is
+/// the solve's (its depth: the loss's, and the harmonic part's weight beyond it, engine.rs), the step
+/// `dt` one the batch's trajectories converge at: the devices' precisions part where they do not.
+fn batch(r:&Request,fourth:bool,dt:f64)->bool{
     let Some(gpu)=device()else{return false};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
     let model=model(r,fourth);let initial=Initial::new(&model,r).unwrap();
-    let settings=Settings::new(0.2,&initial.traps[0],1e-6,true);
+    let mut settings=Settings::new(dt,&initial.traps[0],1e-6,true);settings.region=initial.depths[0];
     let(seed,count,group,steps,outputs,listed)=(0x3D_5EED,20,10,3,6,[2,5]);
     let program=gpu.program(&model,&settings).unwrap();
     // The run: the outputs, then the windows' reach past the last, half the slowest trap period
@@ -345,17 +345,21 @@ fn batch(r:&Request,fourth:bool)->bool{
     twin.is_some()
 }
 /// The batches of the tweezer PGC, the gray molasses and the retro-reflected tweezer; one of them has
-/// a held twin.
+/// a held twin. The retro-reflected tweezer's at 0.05 us: its initial atoms fill the standing wave's
+/// neighbouring sites too (ensemble.rs, 40 % of them), whose own wells are as stiff as the central
+/// site's while the harmonic part about the focus there is ten times the depth (weighted down,
+/// engine.rs) -- their κ after 3 us moves by up to 14 % between 0.2 and 0.05 us, by 1 % between 0.1
+/// and 0.05 us, the central site's by 10⁻⁴.
 #[test]
 fn a_batch_s_sums_are_the_cpu_s(){
-    let twins=[batch(&request(PGC),false),batch(&request(MOLASSES),false),batch(&retro(),false)];
+    let twins=[batch(&request(PGC),false,0.1),batch(&request(MOLASSES),false,0.1),batch(&retro(),false,0.05)];
     if device().is_some(){assert!(twins.iter().any(|&t|t),"a fixture with a held twin");}
 }
 /// The same at fourth order, on the tweezer PGC, with the held twin's start and post-jump map (control.rs
 /// # The twin at fourth order).
 #[test]
 #[ignore="fourth2's FourthLayout (slabs, slow pairs, jump slabs): the kernel's port is pending"]
-fn at_fourth_order_a_batch_s_sums_are_the_cpu_s(){batch(&request(PGC),true);}
+fn at_fourth_order_a_batch_s_sums_are_the_cpu_s(){batch(&request(PGC),true,0.2);}
 
 /// The default scene's motion as the app sends it (rust-solver/tests/fixtures/default_scene_motion.json)
 /// with the held twin kept: a GPU batch's estimates, the twin's control correcting the populations,
