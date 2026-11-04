@@ -628,9 +628,6 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // is what its folded drives meet at the pilot's states (`measured_charge`), and of those whose charge
     // leaves the statistics room the one of least predicted cost is taken.
     let mut ladder=Ground::allowances(request)?.into_iter();let mut failed=None;
-    // The fourth order is a candidate on the CPU (the GPU's kernel does not read its tables' slabs yet,
-    // gpu/program.rs).
-    let fourth=device==Device::Cpu;
     let Some(mut pilot_candidate)=next_candidate(request,&mut ladder,false,&mut failed)else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
     pilot_candidate.settle();
     // A generator that gains on the ladder's first rung, every drive folded, is the fold's construction failing
@@ -748,10 +745,20 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let promise=pilot_cost.as_ref().map_or(true,|p|{
         let apriori:Vec<[f64;2]>=p.apriori.iter().zip(&pilot_candidate.charges).map(|(a,c)|[a[0]-c[0]+fold_charges(true,c[1])[0],a[1]]).collect();
         let(n,weight)=predicted(&pilot_statistics,&apriori,[0.,p.bias[1]],pilot as f64,pilot_candidate.model.resonance);p.work*n*weight*((outputs-1) as f64)+p.check<p.cost&&(p.checked.is_some()||weight<=1.)});
-    let fourth_cost=if fourth&&measured&&promise{Candidate::new(request,pilot_candidate.allowance,true).ok().map(|mut c|{c.charged(charge_of(&pilot_candidate.model,&c.model));
+    // On the GPU a wave takes its width at no further cost and the fourth order pays by the kernel's work, about twice the second's: it is
+    // built only where the pilot's model takes more than a wave or lies beyond the targets at any step, and taken only for fewer
+    // of the kernel's cycles in whole waves (`kernel_interval`).
+    let waves=|x:&Costed,width:f64|(x.cost/(x.work*(outputs-1) as f64)/width).ceil().max(1.);
+    let width=||gpu::gpu().map_or(TASK,|g|g.lock().unwrap_or_else(|e|e.into_inner()).width(1)) as f64;
+    let promise=promise&&(device==Device::Cpu||pilot_cost.as_ref().map_or(true,|p|p.checked.is_none()||waves(p,width())>1.));
+    let fourth_cost=if measured&&promise{Candidate::new(request,pilot_candidate.allowance,true).ok().map(|mut c|{c.charged(charge_of(&pilot_candidate.model,&c.model));
         let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect()};
         let(states,begun)=(into(&pilot_states),into(&starts));c.phase=grid_phase(&c.model,&states,&running(steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase));
         let costed=evaluate(&c,&states,&begun,None);(costed,c,states,begun)})}else{None};
+    let kernel=|c:&Candidate,states:&[Trajectory],begun:&[Trajectory],x:&Costed|{
+        let allowance=doppler_allowance(&gained(&c.base,&c.model,states),&c.model);
+        kernel_interval(&c.model,&state_work(&c.model,states,begun),&running(x.steps,pilot_waiting,allowance,c.phase),interval,pilot_waiting)*waves(x,width())};
+    let fourth_cost=fourth_cost.filter(|f|device==Device::Cpu||pilot_cost.as_ref().map_or(true,|p|kernel(&f.1,&f.2,&f.3,&f.0)*(1.+need)<kernel(&pilot_candidate,&pilot_states,&starts,p)));
     let mut least=pilot_cost.as_ref().map_or(f64::INFINITY,|p|p.cost).min(fourth_cost.as_ref().map_or(f64::INFINITY,|f|f.0.cost));
     // The ladder's rungs where the folded models' cost could fall, without the estimates a rung can change (at the pilot's
     // model's step, its totals with those no candidate changes alone, `Candidate::fixed`, and the beats), by more than the prediction's
@@ -1466,7 +1473,7 @@ pub(crate) fn first_phase()->f64{(BIAS_VARIANCE*TEMPERATURE_TARGET).sqrt()}
 /// propagation and its jump (ns), its generator's norm and its dimension; in a cluster that takes the exact
 /// step (explicit excited states, beats), the state itself -- its step's segment is probed at each step
 /// (`exact_step`); and its weight in the run's time.
-struct StateWork{advance:f64,jump:f64,norm:f64,n:usize,exact:Option<Trajectory>,weight:f64}
+struct StateWork{advance:f64,jump:f64,norm:f64,n:usize,exact:Option<Trajectory>,weight:f64,kernel:[f64;2]}
 /// The work model's states (`StateWork`) over the run's time, each in the model's own clusters: the pilot's states at the
 /// outputs, and its initial ones (`begun`) at half their weight -- the trapezoid rule over the outputs, whose first
 /// interval the atoms start in their initial clusters (the shallow probe's every atom dark at the outputs, in its
@@ -1477,7 +1484,7 @@ fn state_work(model:&Model,states:&[Trajectory],begun:&[Trajectory])->Vec<StateW
         let w=model.work(t.cluster);let n=model.dimension(t.cluster);let exact=model.mixed(t.cluster)||model.beating(t.cluster);
         let norm=if exact{0.}else{column_norm(&model.local(t.cluster,&model.point(t.r,t.kappa),t.time).hamiltonian,n)};
         StateWork{advance:advance_work(&w),
-            jump:JUMP_NS+PHOTON_MULTIPLY_ADD_NS*w.photons+ABSORPTION_MULTIPLY_ADD_NS*w.absorption,norm,n,exact:exact.then(||t.clone()),weight}
+            jump:JUMP_NS+PHOTON_MULTIPLY_ADD_NS*w.photons+ABSORPTION_MULTIPLY_ADD_NS*w.absorption,norm,n,exact:exact.then(||t.clone()),weight,kernel:model.kernel_work(t.cluster)}
     }).collect()
 }
 /// The exact step's work (`exact_step`, ns): per complex multiply-add of n × n matrices, per n³ of the spectral
@@ -1563,6 +1570,17 @@ fn interval_work(model:&Model,states:&[StateWork],s:&Settings,interval:f64,waiti
     for(x,p)in states.iter().zip(&parts){let a=p[0]+p[1];advance+=x.weight*a;jump+=x.weight*(x.jump+if x.exact.is_some(){p[0]}else{2.*a});}
     let count=weights(states);
     (interval/s.dt*advance+interval/waiting*jump)/count
+}
+/// A step's work per interval in the GPU's kernel (a warp's cycles, model.rs `Model::kernel_work`), as `interval_work`: the exact step's
+/// at `EXACT_CYCLES` per ns of its count, PGCP_10's 1.6M cycles a step in the 12-state cluster against its 130 us.
+fn kernel_interval(model:&Model,states:&[StateWork],s:&Settings,interval:f64,waiting:f64)->f64{
+    const EXACT_CYCLES:f64=12.;
+    let parts=steps_parts(model,states,s);let(mut advance,mut jump)=(0.,0.);
+    for(x,p)in states.iter().zip(&parts){
+        let a=if x.exact.is_some(){EXACT_CYCLES*(p[0]+p[1])}else{x.kernel[0]};
+        advance+=x.weight*a;jump+=x.weight*(x.kernel[1]+if x.exact.is_some(){EXACT_CYCLES*p[0]}else{2.*a});
+    }
+    (interval/s.dt*advance+interval/waiting*jump)/weights(states)
 }
 /// The states' total weight in the run's time (`state_work`), at least one's.
 fn weights(states:&[StateWork])->f64{states.iter().map(|x|x.weight).sum::<f64>().max(1.)}

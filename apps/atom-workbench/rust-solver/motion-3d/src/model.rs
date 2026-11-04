@@ -1304,6 +1304,16 @@ impl Model{
         let absorption=classes.iter().map(|c|c.photons.iter().map(|(ph,_)|self.carriers[ph.carrier].rank as f64*(6.+nodes*(3.+d))).sum::<f64>()).sum::<f64>()/classes.len().max(1) as f64;
         Work{generator,force,photons,absorption,pairs:layout.groups.iter().map(|g|g.pairs.len()).sum()}
     }
+    /// A cluster's work in the GPU's kernel, a warp's cycles (solve.rs `kernel_interval`): a step, its table pairs' gathers and the
+    /// fourth order's slabs beside its fixed parts, and a jump, every class's photons at the second order and the fourth's W3 and forms
+    /// at their own rates. A static cluster's: against a wave of 576 at both orders on PGC3D, TET, THREE, GMD1C and DEFAULT, on a laptop's RTX 5070, the
+    /// counts' totals within 15 % of the cycles and their ratios between the orders within 10 %; another device's clock scales them alike.
+    pub fn kernel_work(&self,cluster:usize)->[f64;2]{
+        let layout=&self.layouts[cluster];let w=self.work(cluster);let nodes=(1usize<<(2*self.focused.len())) as f64;
+        let second:f64=self.carriers.iter().map(|c|c.rank as f64*3.*self.ground.ground_states.len() as f64*layout.n as f64*(2.*nodes+1.)).sum();
+        let slabs=layout.fourth.as_ref().map_or(0,|f|f.quartic.len()) as f64;
+        [85e3+5e3*w.pairs as f64+2.5e3*slabs,160e3+35.*second.min(w.photons)+19.*(w.photons-second).max(0.)]
+    }
     /// The number of clusters.
     pub fn clusters(&self)->usize{self.layouts.len()}
     /// Whether a cluster has explicit excited states.
