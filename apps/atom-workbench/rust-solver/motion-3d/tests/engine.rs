@@ -11,8 +11,8 @@ use atom_motion_3d::ledger::BUDGET;
 use atom_motion_3d::model::{Model,MOST_MIXED};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Means,Scales,KT_PER_UK};
-use atom_motion_3d::{initial_trajectory,simulate,Initial,Stratum,Variates};
-use atom_motion_3d::solve::{solve,Device,TEMPERATURE_TARGET};
+use atom_motion_3d::{initial_trajectory,sample_states,simulate,Initial,Stratum,Variates};
+use atom_motion_3d::solve::{jumps,solve,Device,TEMPERATURE_TARGET};
 use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
@@ -583,4 +583,26 @@ fn a_strong_beam_s_raman_rate_through_its_dressing_is_the_core_s(){
 fn a_near_tweezer_s_shift_moves_a_probe_s_line_to_the_core_s(){
     let v:Value=serde_json::from_str(include_str!("fixtures/near_tweezer_probe_motion.json")).unwrap();let r=sparse_request(&v);
     for(i,(a,b))in frozen_f1(&r).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
+}
+
+/// The retro-reflected tweezer with a resonant probe (tests/fixtures/retro_probe_motion.json, the validation's F3
+/// repro; its 951 kHz lattice axis turns the velocity by 0.3 rad per step): the step holds a step's jump hazard at
+/// its middle, and the heating the jumps carry errs at second order (solve.rs `jumps`) -- at the step the line took,
+/// 0.054 us, T −3.1 ± 1.9 % at its binding outputs against 0.0132 us (4096 trajectories on shared streams), the
+/// jumps' net −0.064 µK per jump of their 2.15 against the hazard taken along the step, −0.071 predicted. On states
+/// along 32 trajectories at that step the jumps' criterion lies beyond T's share there, and within it at a quarter
+/// of it (it goes as dt²).
+#[test]
+fn the_jumps_heating_on_a_retro_reflected_tweezer_exceeds_its_share_at_the_line_s_step(){
+    let fixture:Value=serde_json::from_str(include_str!("fixtures/retro_probe_motion.json")).unwrap();
+    let(outputs,interval)=(21,5.);let mut r=scene::request(&fixture);r.times_us=(0..outputs).map(|i|interval*i as f64).collect();
+    let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();
+    let settings=|steps:usize|{let mut s=Settings::new(interval/steps as f64,&initial.traps[reference],f64::EPSILON,true);s.doppler=BUDGET;s.region=initial.depths[reference];s};
+    let steps=93;let harmonic=Harmonic::new(&model,&settings(steps),&initial,steps,outputs);
+    let(states,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,32,steps,outputs,&harmonic);
+    let share=A_PRIORI_SHARE*TEMPERATURE_TARGET;
+    let(line,quarter)=(jumps(&Engine::new(&model,settings(steps)),&states)/share,jumps(&Engine::new(&model,settings(4*steps)),&states)/share);
+    println!("the jumps' criterion over T's share: {line:.2} at 0.054 us, {quarter:.2} at 0.0134 us ({} states)",states.len());
+    assert!(line>1.&&quarter<1.,"{line:.3} at the line's step, {quarter:.3} at a quarter");
 }
