@@ -1146,34 +1146,38 @@ fn steady_means(sums:&[f64],counts:&[f64],deviation:f64,largest:f64)->Vec<f64>{
 /// The fold's memory (module documentation, # Ledger), from a pilot's atoms: per atom its jumps up to each
 /// output (at its last state kept there or before) and from each output on (at its first state kept there or
 /// after: where the pilot keeps every few outputs' states, the jumps in between are at most their difference),
-/// and the last output it was kept at -- held there.
-struct Memory{upto:Vec<Vec<u64>>,from:Vec<Vec<u64>>,last:Vec<usize>}
+/// and the last output it was kept at -- held there. Per output its atoms' in one row; e^{−n} per whole n, down to where it vanishes.
+struct Memory{atoms:usize,upto:Vec<u64>,from:Vec<u64>,last:Vec<usize>,decay:Vec<f64>}
 impl Memory{
     fn of(states:&[Trajectory],interval:f64,outputs:usize)->Memory{
         let mut atoms:Vec<(u64,Vec<(usize,u64)>)>=vec![];
         for t in states{let at=(((t.time/interval).round() as usize).min(outputs-1),t.jumps);
             match atoms.iter_mut().find(|a|a.0==t.index){Some(a)=>a.1.push(at),None=>atoms.push((t.index,vec![(0,0),at]))}}
-        let(mut upto,mut from,mut last)=(vec![],vec![],vec![]);
-        for(_,mut kept)in atoms{
-            kept.sort();let u:Vec<u64>=(0..outputs).map(|i|kept.iter().rev().find(|x|x.0<=i).map_or(0,|x|x.1)).collect();
-            from.push((0..outputs).map(|j|kept.iter().find(|x|x.0>=j).map_or(u[j],|x|x.1)).collect());upto.push(u);last.push(kept[kept.len()-1].0);
+        let count=atoms.len();let(mut upto,mut from,mut last)=(vec![0;outputs*count],vec![0;outputs*count],vec![0;count]);
+        for(a,(_,mut kept))in atoms.into_iter().enumerate(){
+            kept.sort();last[a]=kept[kept.len()-1].0;
+            // The last state kept at or before each output, and the first at or after it.
+            let(mut before,mut after)=(0,0);
+            for i in 0..outputs{
+                while before+1<kept.len()&&kept[before+1].0<=i{before+=1;}
+                while after<kept.len()&&kept[after].0<i{after+=1;}
+                upto[i*count+a]=kept[before].1;from[i*count+a]=if after<kept.len(){kept[after].1}else{kept[before].1};
+            }
         }
-        Memory{upto,from,last}
-    }
-    /// The share of an error made by output j that the atoms held at output i ≥ j still carry: per atom e^{−n}, n
-    /// its jumps in between, their mean; all of it where none is held at i.
-    fn kept(&self,i:usize,j:usize)->f64{
-        let(mut sum,mut count)=(0.,0.);
-        for a in (0..self.last.len()).filter(|&a|self.last[a]>=i){sum+=(-(self.upto[a][i].saturating_sub(self.from[a][j]) as f64)).exp();count+=1.;}
-        if count>0.{sum/count}else{1.}
+        Memory{atoms:count,upto,from,last,decay:(0..).map(|n:u32|(-f64::from(n)).exp()).take_while(|&x|x>0.).collect()}
     }
     /// The fold's charges per output and target with the memory: at each output the largest of its own and each
     /// earlier output's times the share kept since the end of the interval after it, over which that one's
-    /// error is made.
+    /// error is made -- of an error made by output j, per atom held at output i ≥ j e^{−n}, n its jumps in between, their mean; all of it where none is held at i.
     fn charges(&self,values:&[[f64;2]])->Vec<[f64;2]>{
         let top:[f64;2]=std::array::from_fn(|k|values.iter().map(|v|v[k]).fold(0.,f64::max));
-        (0..values.len()).map(|i|{let mut most=values[i];
-            for j in (0..i).rev(){let kept=self.kept(i,j+1);if (0..2).all(|k|top[k]*kept<=most[k]){break;}for k in 0..2{most[k]=most[k].max(values[j][k]*kept);}}
+        (0..values.len()).into_par_iter().map(|i|{let mut most=values[i];
+            let held:Vec<(usize,u64)>=(0..self.atoms).filter(|&a|self.last[a]>=i).map(|a|(a,self.upto[i*self.atoms+a])).collect();
+            for j in (0..i).rev(){
+                let from=&self.from[(j+1)*self.atoms..(j+2)*self.atoms];
+                let kept=if held.is_empty(){1.}else{held.iter().map(|&(a,upto)|self.decay.get(upto.saturating_sub(from[a]) as usize).copied().unwrap_or(0.)).sum::<f64>()/held.len() as f64};
+                if (0..2).all(|k|top[k]*kept<=most[k]){break;}for k in 0..2{most[k]=most[k].max(values[j][k]*kept);}
+            }
             most}).collect()
     }
 }
