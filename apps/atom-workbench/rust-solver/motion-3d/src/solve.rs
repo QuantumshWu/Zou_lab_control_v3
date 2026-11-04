@@ -648,8 +648,10 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // all folded down, their order the a-priori estimates'; the pilot runs the first, each candidate's charge
     // is what its folded drives meet at the pilot's states (`measured_charge`), and of those whose charge
     // leaves the statistics room the one of least predicted cost is taken.
-    let mut ladder=Ground::allowances(request)?.into_iter();let mut failed=None;
-    let Some(mut pilot_candidate)=next_candidate(request,&mut ladder,false,&mut failed)else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
+    // The generator before the rule, every candidate's start (`next_candidate`); the rule's allowances from it, past the first -- every drive folded -- only where a rung is wanted.
+    let bare=Ground::bare(request)?;let mut rungs=None;
+    let mut ladder=std::iter::once(f64::INFINITY).chain(std::iter::from_fn(||rungs.get_or_insert_with(||bare.rungs().into_iter().skip(1)).next()));let mut failed=None;
+    let Some(mut pilot_candidate)=next_candidate(request,&bare,&mut ladder,&mut failed)else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
     pilot_candidate.settle();
     // A generator that gains on the ladder's first rung, every drive folded, is the fold's construction failing
     // (model.rs `Model::lindblad`), not a regime to escalate into explicit states: the solve stops with why.
@@ -775,7 +777,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let waves=|x:&Costed,width:f64|(x.cost/(x.work*(outputs-1) as f64)/width).ceil().max(1.);
     let width=||gpu::gpu().map_or(TASK,|g|g.lock().unwrap_or_else(|e|e.into_inner()).width(1)) as f64;
     let promise=promise&&(device==Device::Cpu||pilot_cost.as_ref().map_or(true,|p|p.checked.is_none()||waves(p,width())>1.));
-    let fourth_cost=if measured&&promise{Candidate::new(request,pilot_candidate.allowance,true).ok().map(|mut c|{c.charged(charge_of(&pilot_candidate.model,&c.model));
+    let fourth_cost=if measured&&promise{Candidate::new(request,pilot_candidate.model.ground.clone(),pilot_candidate.allowance,true).ok().map(|mut c|{c.charged(charge_of(&pilot_candidate.model,&c.model));
         let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect()};
         let(states,begun)=(into(&pilot_states),into(&starts));c.phase=grid_phase(&c.model,&states,&running(steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase));
         let costed=evaluate(&c,&states,&begun,None);(costed,c,states,begun)})}else{None};
@@ -798,7 +800,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // size between them, its biases the same at the rung's tolerances.
     let(mut rung,mut shapes,mut doubled)=(None,vec![],Vec::<(Vec<(Vec<usize>,Vec<usize>)>,[f64;3],[f64;2])>::new());
     if open{
-        while let Some(mut c)=next_candidate(request,&mut ladder,false,&mut failed){
+        while let Some(mut c)=next_candidate(request,&bare,&mut ladder,&mut failed){
             // A rung whose closure folds the same drives as an earlier one's is the same model.
             let folds:Vec<bool>=c.model.ground.excited_items.iter().map(|x|x.folded).collect();if shapes.contains(&folds){continue;}shapes.push(folds);
             c.charged(charge_of(&pilot_candidate.model,&c.model));
@@ -1065,8 +1067,8 @@ struct Candidate{model:Model,initial:Initial,base:Ledger,allowance:f64,charges:V
 /// The check itself (`Steps`); none yet where it was put off, beyond the targets whatever its step (`evaluate`).
 struct Costed{cost:f64,check:f64,work:f64,steps:usize,bias:[f64;2],apriori:Vec<[f64;2]>,checked:Option<Steps>}
 impl Candidate{
-    fn new(request:&Request,allowance:f64,fourth:bool)->Result<Candidate,String>{
-        let model=Model::with_order(request,allowance,fourth)?;let initial=Initial::deferred(&model,request)?;let base=model_ledger(&model,request);
+    fn new(request:&Request,ground:Ground,allowance:f64,fourth:bool)->Result<Candidate,String>{
+        let model=Model::of_ground(request,ground,fourth)?;let initial=Initial::deferred(&model,request)?;let base=model_ledger(&model,request);
         let charges=vec![fold_charges(model.fourth,model.ground.charge);request.times_us.len()];
         Ok(Candidate{model,initial,base,allowance,charges,settled:false,phase:node_phase()})
     }
@@ -1093,8 +1095,8 @@ impl Candidate{
 }
 /// The next candidate along the rule's allowances that builds (a model that fails, its tables not
 /// converging, is passed over with its error kept).
-fn next_candidate(request:&Request,ladder:&mut dyn Iterator<Item=f64>,fourth:bool,failed:&mut Option<String>)->Option<Candidate>{
-    for a in ladder{match Candidate::new(request,a,fourth){Ok(c)=>return Some(c),Err(e)=>{failed.get_or_insert(e);}}}
+fn next_candidate(request:&Request,bare:&Ground,ladder:&mut dyn Iterator<Item=f64>,failed:&mut Option<String>)->Option<Candidate>{
+    for a in ladder{match bare.clustered(a).and_then(|ground|Candidate::new(request,ground,a,false)){Ok(c)=>return Some(c),Err(e)=>{failed.get_or_insert(e);}}}
     None
 }
 /// The fold's charges a candidate's folded drives would take per output and target (`fold_charges`), at the pilot's
@@ -1601,7 +1603,7 @@ fn jump_work(w:&crate::model::Work)->f64{JUMP_NS+PHOTON_MULTIPLY_ADD_NS*w.photon
 /// the fourth order's layout (`Model::layout_work`), the rest the candidate's own. The candidate's own work where the layout fails.
 fn fourth_work(request:&Request,c:&Candidate,states:&[Trajectory],begun:&[Trajectory],s:&Settings,interval:f64,waiting:f64)->f64{
     let mut parts=state_work(&c.model,states,begun);
-    if let Ok(works)=Model::layout_work(request,c.allowance,true){for x in parts.iter_mut().filter(|x|x.exact.is_none()){let w=&works[x.cluster];x.advance=advance_work(w);x.jump=jump_work(w);}}
+    if let Ok(works)=Model::layout_work(request,c.model.ground.clone(),true){for x in parts.iter_mut().filter(|x|x.exact.is_none()){let w=&works[x.cluster];x.advance=advance_work(w);x.jump=jump_work(w);}}
     interval_work(&c.model,&parts,s,interval,waiting)
 }
 /// The work model's states (`StateWork`) over the run's time, each in the model's own clusters: the pilot's states at the
