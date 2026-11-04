@@ -80,9 +80,9 @@
 //! - the internal state's populations after one waiting time between jumps (the pilot's mean),
 //!   within its tolerance. Bounded by one step's difference times the steps of
 //!   that time; where the motion's criteria below are met, measured as well: from each of a
-//!   subsample of the states (one per pilot trajectory) the jump-free flow over that time (at most
+//!   subsample of the states (one per pilot trajectory, more until the verdict stands, `accumulated_excess`) the jump-free flow over that time (at most
 //!   the run) in steps of dt against steps of dt/2, the largest difference of the cluster's
-//!   populations, their mean over the subsample plus CONFIDENCE standard errors -- in a gray
+//!   populations, their mean over them plus CONFIDENCE standard errors -- in a gray
 //!   molasses the atoms wait 50-140 us in dark states, and the bound over-counts the step's error
 //!   there several times;
 //! - the step's light impulse, relative, within T's tolerance;
@@ -1344,7 +1344,7 @@ fn step_check(model:&Model,states:&[Trajectory],settings:&dyn Fn(usize)->Setting
 /// A step check's own work (ns, `step_check`) at `work`'s work per step (per interval over the steps): per
 /// checked step a step and two halves on every state and the orbits' jump-free flow over the trap's `period` in
 /// steps of dt and of dt/2 from every probe (`checked_step`), and where the population error was measured the
-/// jump-free flow over the horizon in steps of dt and of dt/2 from the subsample.
+/// jump-free flow over the horizon in steps of dt and of dt/2 from the subsample (the first layer of `accumulated_excess`).
 fn checked_work(checked:&Steps,states:usize,subsample:usize,horizon:f64,interval:f64,period:f64,work:&dyn Fn(usize)->f64)->f64{
     let doubled=|c:&Check|checked_step(states,checked.probes,c.steps,interval,period)*work(c.steps)/c.steps as f64;
     checked.bound.iter().map(doubled).sum::<f64>()+checked.measured.iter().map(|c|if checked.bound.iter().any(|b|b.steps==c.steps){0.}else{doubled(c)}
@@ -1572,20 +1572,27 @@ pub fn drift(model:&Model,settings:&dyn Fn(usize)->Settings,steps:usize,probes:&
 }
 
 /// The population error a step accumulates over `horizon` (module documentation), over its tolerance:
-/// from each of `subsample` states spread over the sampled ones the jump-free flow in steps of dt
+/// from states spread over the sampled ones the jump-free flow in steps of dt
 /// against steps of dt/2, the largest difference of the cluster's populations; their mean plus
-/// CONFIDENCE standard errors.
+/// CONFIDENCE standard errors. Heavy-tailed in a gray molasses, its atoms dark but for a few bright ones, so in layers as the orbits' (`orbits`): `subsample` states, then
+/// doubling, evenly between those taken, at most `TASK` times as many, until the errors are within the step's share of the tolerance or the magnitude less the errors lies beyond it. (The D1 molasses's
+/// step over 76 seeds at 10 us outputs: 0.24-0.77 us on 32 states alone, one seed's few bright states holding it at 0.24 us where the populations' true error stays within half the tolerance to 0.71 us
+/// against 0.167 us; 0.56-0.77 us so, 90 % within 0.56-0.63 us either way.)
 fn accumulated_excess(engine:&Engine,states:&[Trajectory],horizon:f64,subsample:usize,tolerance:f64)->f64{
     let dt=engine.settings.dt;let richardson=4./3.;let count=((horizon/dt).ceil() as usize).max(1);
-    let every=(states.len()/subsample.max(1)).max(1);let picked:Vec<&Trajectory>=states.iter().step_by(every).collect();
-    let errors:Vec<f64>=picked.par_iter().map(|t|{
+    let flow=|t:&&Trajectory|->f64{
         let n=engine.model.dimension(t.cluster);let(one,two)=(engine.coast(t,dt,count),engine.coast(t,0.5*dt,2*count));
         let(a,b)=(one.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>(),two.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>());
         richardson*(0..n).map(|i|(one.psi[i].norm_sqr()/a-two.psi[i].norm_sqr()/b).abs()).fold(0.,f64::max)
-    }).collect();
-    let m=errors.len().max(1) as f64;let mean=errors.iter().sum::<f64>()/m;
-    let spread=(errors.iter().map(|e|(e-mean).powi(2)).sum::<f64>()/(m*(m-1.).max(1.))).sqrt();
-    (mean+CONFIDENCE*spread)/tolerance
+    };
+    let mut stride=(states.len()/subsample.max(1)).max(1);let most=TASK as usize*(states.len()/stride).max(1);
+    let mut errors:Vec<f64>=states.iter().step_by(stride).collect::<Vec<&Trajectory>>().par_iter().map(flow).collect();
+    loop{
+        let m=errors.len().max(1) as f64;let mean=errors.iter().sum::<f64>()/m;
+        let spread=CONFIDENCE*(errors.iter().map(|e|(e-mean).powi(2)).sum::<f64>()/(m*(m-1.).max(1.))).sqrt();
+        if spread<=BIAS_SHARE*tolerance||mean-spread>tolerance||stride==1||errors.len()>=most{return (mean+spread)/tolerance;}
+        errors.extend(states.iter().skip(stride/2).step_by(stride).collect::<Vec<&Trajectory>>().par_iter().map(flow).collect::<Vec<f64>>());stride/=2;
+    }
 }
 
 /// What a unit of each of the step's parts costs (ns), for the work model (`interval_work`): measured
