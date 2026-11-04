@@ -29,7 +29,8 @@
 //! populations until they relax, and an atom's populations relax through the photons it scatters. An atom
 //! pumped into a dark state keeps its transient's error (an optical pumping's, the validation's M1: 0.028
 //! at 5 µs), one that scatters forgets it within a few photons. So the charge at output i is the largest
-//! over j ≤ i of output j's 2η² -- its error over the interval after j, where the larger of the interval's
+//! over j ≤ i of output j's 2η² (the mean of its states over its neighbours as far as they agree, `steady_means`)
+//! -- its error over the interval after j, where the larger of the interval's
 //! two ends bounds it -- times the mean over the atoms held at i of e^{−n}, n an atom's jumps since the
 //! end of that interval (`Memory`, the pilot's atoms): at least its own 2η², and at most the largest since
 //! t = 0. (QuTiP's solvers control a step's local error and leave the global error, as an elimination's
@@ -455,6 +456,12 @@ fn predicted(statistics:&[Statistic],apriori:&[[f64;2]],bias:[f64;2],pilot:f64,r
     let weight=(1..statistics.len()).flat_map(|i|terms(i).map(|(target,s,floor)|beyond(target,floor.hypot(s*(pilot/run(i)).sqrt())))).fold(beyond(POPULATION_TARGET,resonance),f64::max);
     ((1..statistics.len()).map(run).sum::<f64>()/n,weight)
 }
+/// Whether the a-priori totals alone lie past a target at some output after t = 0, or the resonance past the populations': no room for the
+/// statistics or a step. The weight (`predicted`) cannot tell: the trajectories a run needs bring its binding total to the target itself, its
+/// weight 1 within round-off.
+fn past_targets(statistics:&[Statistic],apriori:&[[f64;2]],resonance:f64)->bool{
+    resonance>POPULATION_TARGET||(1..statistics.len()).any(|i|apriori[i][0]>POPULATION_TARGET||apriori[i][1]>TEMPERATURE_TARGET/statistics[i].weight)
+}
 /// The trajectories each output must be passed by (module documentation, # Batches): the largest of its need and every later
 /// output's.
 fn reaches(needs:&[f64])->Vec<f64>{let mut most=0_f64;let mut out:Vec<f64>=needs.iter().rev().map(|&x|{most=most.max(x);most}).collect();out.reverse();out}
@@ -722,8 +729,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let cost=|k:&Check|{let(n,weight)=predicted(&pilot_statistics,&apriori,bias(k),pilot as f64,c.model.resonance);work(k.steps)*n*weight*(outputs-1) as f64};
         // Beyond the targets with no step bias at all (a pole its tables do not resolve, a charge past the rooms): what the step can move of its
         // cost is little beside that weight, and its check is put off until it is the choice -- its cost at the first step with no bias.
-        let(n,weight)=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64,c.model.resonance);
-        if weight>1.&&first.is_none(){let at=work(steps);return Costed{cost:at*n*weight*(outputs-1) as f64,check:checked_step(states.len(),bound_probes(&c.model,states).first,steps,interval,period)*at/steps as f64,work:at,steps,bias:[0.;2],apriori,checked:None};}
+        if past_targets(&pilot_statistics,&apriori,c.model.resonance)&&first.is_none(){let(n,weight)=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64,c.model.resonance);let at=work(steps);return Costed{cost:at*n*weight*(outputs-1) as f64,check:checked_step(states.len(),bound_probes(&c.model,states).first,steps,interval,period)*at/steps as f64,work:at,steps,bias:[0.;2],apriori,checked:None};}
         let known:Vec<Check>=first.iter().map(|&(k,t)|Check{steps:k.steps,population:k.population*t[0]/tolerances[0],loss:k.loss*t[0]/tolerances[0],motion:k.motion*t[1]/tolerances[1]}).collect();
         let checked=step_check(&c.model,states,&settings,steps,most,pilot_waiting,pilot_horizon,pilot as usize,&pilot_groups,period,tolerances,&cost,need,&known);
         let chosen=checked.chosen;
@@ -749,7 +755,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let promise=fourth&&pilot_cost.as_ref().map_or(true,|p|{
         let apriori:Vec<[f64;2]>=p.apriori.iter().zip(&pilot_candidate.charges).map(|(a,c)|[a[0]-c[0]+fold_charges(true,c[1])[0],a[1]]).collect();
         let(n,weight)=predicted(&pilot_statistics,&apriori,[0.,p.bias[1]],pilot as f64,pilot_candidate.model.resonance);
-        if p.checked.is_none()&&weight>1.{return false;}
+        if p.checked.is_none()&&past_targets(&pilot_statistics,&apriori,pilot_candidate.model.resonance){return false;}
         let work=fourth_work(request,&pilot_candidate,&pilot_states,&starts,&running(p.steps,pilot_waiting,doppler_allowance(&pilot_candidate.base,&pilot_candidate.model),pilot_candidate.phase),interval,pilot_waiting);
         work*n*weight*((outputs-1) as f64)+p.check*work/p.work<p.cost});
     let fourth_cost=if measured&&promise{Candidate::new(request,pilot_candidate.allowance,true).ok().map(|mut c|{c.charged(charge_of(&pilot_candidate.model,&c.model));
@@ -1062,23 +1068,47 @@ fn next_candidate(request:&Request,ladder:&mut dyn Iterator<Item=f64>,fourth:boo
 /// The fold's charges a candidate's folded drives would take per output and target (`fold_charges`), at the pilot's
 /// states carried into its clusters (`carried`) and at its initial ones: per output their mean 2η² (twice the folded
 /// excited population; each output holds few of the pilot's states, and their largest is their extreme, not the
-/// run's), an output the pilot kept no states at holding the last one's, with the memory (`Memory::charges`) -- what
+/// run's) over its neighbours as far as they agree (`steady_means`: an atom's bright moment among dark ones held GMD1C's
+/// charge at 6.1 % where its states' mean is 0.08 %), with the memory (`Memory::charges`) -- what
 /// the run's ledger books there. What the atoms meet rather than the light's pattern extrapolated (an atom held in the
 /// dark states of a gray molasses meets little of its bright state's saturation once there, all of it before; one
 /// gathered at a red-detuned lattice's bright sites meets more than its mean). The a-priori charge at every output
 /// where the pilot kept no state after t = 0.
 fn measured_charge(from:&Model,to:&Model,states:&[Trajectory],starts:&[Trajectory],memory:&Memory,interval:f64,outputs:usize)->Vec<[f64;2]>{
     let charge=|t:&Trajectory|{let x=carried(from,to,t);let p=to.point(x.r,x.kappa);fold_charges(to.fourth,2.*to.readout(x.cluster,&p,&x.psi,x.time).1)};
-    // Per output the states' mean charges.
-    let(mut profile,mut held)=(vec![[0.;2];outputs],vec![false;outputs]);
+    // Per output the states' charges: their sums, their counts, and over the outputs after t = 0 their first two moments and largest.
+    let(mut sums,mut counts,mut moments,mut largest)=(vec![[0.;2];outputs],vec![0.;outputs],[[0.;2];2],[0_f64;2]);
     for group in by_output(starts).into_iter().chain(by_output(states)){
-        let i=((group[0].time/interval).round() as usize).min(outputs-1);let n=group.len() as f64;held[i]=true;
+        let i=((group[0].time/interval).round() as usize).min(outputs-1);counts[i]+=group.len() as f64;
         let charges:Vec<[f64;2]>=group.par_iter().map(|&t|charge(t)).collect();
-        for c in &charges{for k in 0..2{profile[i][k]+=c[k]/n;}}
+        for c in &charges{for k in 0..2{sums[i][k]+=c[k];if i>0{moments[0][k]+=c[k];moments[1][k]+=c[k]*c[k];largest[k]=largest[k].max(c[k]);}}}
     }
-    if !held.iter().skip(1).any(|&h|h){return vec![fold_charges(to.fourth,to.ground.charge);outputs];}
-    for i in 1..outputs{if !held[i]{profile[i]=profile[i-1];}}
-    memory.charges(&profile)
+    let held:f64=counts[1..].iter().sum();if held==0.{return vec![fold_charges(to.fourth,to.ground.charge);outputs];}
+    let means:[Vec<f64>;2]=std::array::from_fn(|k|{let sum:Vec<f64>=sums.iter().map(|s|s[k]).collect();let mean=moments[0][k]/held;
+        steady_means(&sum,&counts,(moments[1][k]/held-mean*mean).max(0.).sqrt(),largest[k])});
+    memory.charges(&(0..outputs).map(|i|[means[0][i],means[1][i]]).collect::<Vec<[f64;2]>>())
+}
+/// Means per output (`sums` over `counts` states, the first output's left alone) over their neighbours as far as they agree: the mean
+/// within the widest window, doubling from the output's own, that agrees with every narrower one within Bernstein's bound on that one's
+/// noise, z σ/√m + z² b/(6 m) -- σ the states' standard deviation, b their largest, m the narrower's states, z = √(2 ln n), over n such
+/// means (Lepski's rule, as `steady`'s for the errors): the charge of atoms mostly dark has a tail far beyond a normal law's, and one bright
+/// state alone at an output is no peak. Noise over a plateau is averaged whole, a transient's real peak beyond it stays. An output
+/// without states takes its nearest's.
+fn steady_means(sums:&[f64],counts:&[f64],deviation:f64,largest:f64)->Vec<f64>{
+    let n=sums.len();let mut out=vec![if counts[0]>0.{sums[0]/counts[0]}else{0.};n];
+    let(mut total,mut held)=(vec![0.;n+1],vec![0.;n+1]);for i in 1..n{total[i+1]=total[i]+sums[i];held[i+1]=held[i]+counts[i];}
+    let z=(2.*((n-1).max(1) as f64).ln()).sqrt();
+    for i in 1..n{
+        let(mut narrower,mut half)=(Vec::<(f64,f64)>::new(),0);
+        loop{
+            let(a,b)=(i.saturating_sub(half).max(1),(i+half).min(n-1));let m=held[b+1]-held[a];
+            if m>0.{let x=(total[b+1]-total[a])/m;if narrower.iter().any(|&(y,k)|(x-y).abs()>z*deviation/k.sqrt()+z*z*largest/(6.*k)){break;}narrower.push((x,m));}
+            if a==1&&b==n-1{break;}
+            half=(2*half).max(1);
+        }
+        out[i]=narrower.last().map_or(0.,|x|x.0);
+    }
+    out
 }
 
 /// The fold's memory (module documentation, # Ledger), from a pilot's atoms: per atom its jumps up to each
@@ -1653,6 +1683,36 @@ mod tests{
     const TARGETS:[f64;2]=[POPULATION_TARGET,TEMPERATURE_TARGET];
     /// The fold's charge with the memory: a bright transient's charge stays with atoms that go dark (b1/128's
     /// optical pumping, the validation's M1), and atoms that scatter forget it within their next photons.
+    #[test]
+    fn past_the_targets_reads_the_estimates_not_the_weight_s_round_off(){
+        // A run's need brings its binding total to the target itself: its weight is 1 within round-off, on either side.
+        let statistics:Vec<Statistic>=(0..5).map(|i|Statistic{population:0.2+0.01*i as f64,temperature:0.05,weight:1.}).collect();
+        let within=vec![[0.02,0.03];5];
+        let(_,weight)=predicted(&statistics,&within,[0.;2],32.,0.);
+        assert!((weight-1.).abs()<1e-12&&!past_targets(&statistics,&within,0.),"{}",weight-1.);
+        let mut past=within.clone();past[3][0]=1.2*POPULATION_TARGET;assert!(past_targets(&statistics,&past,0.));
+        let mut past=within.clone();past[2][1]=1.2*TEMPERATURE_TARGET;assert!(past_targets(&statistics,&past,0.));
+        assert!(past_targets(&statistics,&within,1.2*POPULATION_TARGET));
+        // T's target is its regime's, and t = 0's estimates are the request's own.
+        let mut wide=statistics.clone();wide[2].weight=0.5;let mut past=within.clone();past[2][1]=1.2*TEMPERATURE_TARGET;assert!(!past_targets(&wide,&past,0.));
+        let mut past=within.clone();past[0]=[1.;2];assert!(!past_targets(&statistics,&past,0.));
+    }
+    #[test]
+    fn a_charge_s_steady_mean_averages_its_tail_and_keeps_a_real_step(){
+        // A plateau of one state per output, dark but for one bright state: 20 standard errors of a normal law, no peak.
+        let n=1001;let(mut sums,counts)=(vec![0.001;n],vec![1.;n]);sums[485]=0.06;
+        let mean=sums[1..].iter().sum::<f64>()/1000.;let deviation=(sums[1..].iter().map(|x|x*x).sum::<f64>()/1000.-mean*mean).sqrt();
+        let out=steady_means(&sums,&counts,deviation,0.06);
+        assert!(out[1..].iter().all(|&x|x<0.01),"{} at the bright state, {:?}",out[485],&out[1..4]);
+        // Ten times the charge over the first quarter stands on its states.
+        let n=257;let mut sums=vec![1.;n];for s in &mut sums[..=64]{*s=10.;}let counts=vec![1.;n];
+        let m=(64.*10.+192.)/256.;let deviation=((64.*100.+192.)/256.-m*m as f64).sqrt();
+        let out=steady_means(&sums,&counts,deviation,10.);
+        assert!((out[8]-10.).abs()<1.5&&(out[200]-1.).abs()<0.1,"{} {}",out[8],out[200]);
+        // An output without states takes its nearest's.
+        let mut counts=vec![1.;9];let mut sums=vec![1.;9];counts[4]=0.;sums[4]=0.;
+        assert!((steady_means(&sums,&counts,0.,1.)[4]-1.).abs()<1e-12);
+    }
     #[test]
     fn the_fold_s_charge_stays_with_dark_atoms_and_relaxes_with_the_photons(){
         let atom=|index:u64,jumps:&[u64]|->Vec<Trajectory>{jumps.iter().enumerate().map(|(i,&n)|Trajectory{cluster:0,psi:[Complex::ZERO;crate::model::MOST_MIXED],r:[0.;3],kappa:[0.;3],
