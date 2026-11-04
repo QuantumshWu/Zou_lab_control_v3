@@ -33,7 +33,7 @@ mod pointer_queue;
 mod installer;
 
 use std::{collections::{BTreeMap,BTreeSet,VecDeque}, path::PathBuf, sync::{Arc,mpsc,atomic::Ordering}};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tao::{event::{Event, WindowEvent}, event_loop::{ControlFlow, EventLoopBuilder}, platform::windows::WindowExtWindows};
 use wry::WebContext;
 use zlc_core::runtime::Runtime;
@@ -42,6 +42,8 @@ use zlc_core::runtime::Runtime;
 enum AppEvent { Command { window: Option<windows::Kind>, command: Value }, Completed(science::Completion), Plugin(zlc_plugin_host::HostEvent),
     Workbench(zlc_workbench::Event), CatalogReady, RuntimeChanged, RebaseNeeded, WorkerError(String), InvalidMessage(String), DerivationError(String),
     Remote(remote::RemoteCall), WaitExpired(u64), Title { window: windows::Kind, title: String },
+    /// A Figure's record has been read on its own thread: its tabs can be shown.
+    RecordRead { document: u32, saved: Arc<archive::SavedRecord> },
     /// The page-drawn title bar's buttons: hover, press, maximized (frame.rs).
     Caption { window: windows::Kind, message: Value }, Pulse(pulse_host::PulseEvent), Native(workbench_host::NativeRequest), PulsePoll,
     /// A held panel's update interval has passed (cadence::Waker).
@@ -236,14 +238,41 @@ fn shows_panel(accepted: &Value, viewers: &BTreeMap<u32, Viewer>, panel: &Value)
 /// message and back, never copied: it carries the opened Figure's whole record.
 /// A save's answer is the message's own `saved` section, as on the Task Console's
 /// state, so a page (an Edit's Save figure, Save as…) reads it in one place.
+/// The record stays in the document for whoever reads it there (get_state); the
+/// page is sent it as a `record` section of its own, only when it changed since
+/// the page was last sent it (`RECORD_UNSENT`). Delta.rs compares only the
+/// sections a message has, so a gesture's message does not walk the record.
 fn viewer_message<T>(viewer: &mut Value, deliver: impl FnOnce(&Value) -> T) -> T {
-    let saved = viewer.as_object_mut().and_then(|document| document.remove("saved")).unwrap_or(Value::Null);
+    let (saved, unsent) = viewer.as_object_mut().map_or((Value::Null, false), |document| (document.remove("saved").unwrap_or(Value::Null), document.remove(RECORD_UNSENT).is_some()));
     let mut message = json!({"type":"state", "request":viewer["request"], "error":viewer["error"], "result":viewer["result"], "saved": saved});
+    let mut record = Map::new();
+    if let Some(document) = viewer.get_mut("document").and_then(Value::as_object_mut) {
+        // The last keys first: each leaves the others' order as it was, and goes back as it was.
+        for part in ["flow", "info"] { if let Some(value) = document.remove(part) { record.insert(part.to_owned(), value); } }
+    }
     message["viewer"] = std::mem::take(viewer);
+    if unsent { message["record"] = Value::Object(std::mem::take(&mut record)); }
     let delivered = deliver(&message);
     *viewer = message["viewer"].take();
     viewer["saved"] = message["saved"].take();
+    if unsent { if let Value::Object(sent) = message["record"].take() { record = sent; } }
+    if let Some(document) = viewer.get_mut("document").and_then(Value::as_object_mut) {
+        for part in ["info", "flow"] { if let Some(value) = record.remove(part) { document.insert(part.to_owned(), value); } }
+    }
     delivered
+}
+
+/// A viewer document's mark that its page does not hold its record as it is now: the next
+/// message (viewer_message, which takes the mark off) sends it. A new page holds nothing.
+const RECORD_UNSENT: &str = "record_unsent";
+
+/// What a viewer's document shows of its Figure's record, as far as it is read.
+fn show_record(viewer: &mut Value, archive: &archive::MountedArchive) {
+    let (info, flow, record) = archive.record_view();
+    viewer["document"]["record"] = json!(record);
+    viewer["document"]["info"] = info;
+    viewer["document"]["flow"] = flow;
+    viewer[RECORD_UNSENT] = json!(true);
 }
 
 /// Whether `kind` is a window the operator has: a Figure Viewer until it closes.
@@ -866,11 +895,24 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             let _ = saved.send_event(AppEvent::ImageSaved { request, result });
                         });
                     }
+                    if action == "read_record" {
+                        // A record tab was looked at: its Figure goes on working while it is read.
+                        let Some(&windows::Kind::FigureViewer(document)) = from.as_ref() else { return Err("A Figure's record is read in its Figure Viewer".into()) };
+                        let viewer = viewers.get_mut(&document).ok_or_else(|| format!("FigureViewer {document} is not open"))?;
+                        if let Some(archive) = viewer.archive.clone().filter(|archive| viewer.state["document"]["path"] == archive.path()) {
+                            let read = self_proxy.clone();
+                            archive.read_record(move |saved| { let _ = read.send_event(AppEvent::RecordRead { document, saved }); });
+                            show_record(&mut viewer.state, &archive);
+                        }
+                        viewer.state["request"] = command["id"].clone();
+                        return viewer_message(&mut viewer.state, |message| windows.send_to(&windows::Kind::FigureViewer(document), message));
+                    }
                     if action == "open_recorded_pulse" {
                         let key = command["key"].as_str().unwrap_or("");
                         let asking = match &from { Some(windows::Kind::FigureViewer(number)) => viewers.get(number), _ => None };
                         let played = asking.into_iter().chain(viewers.values()).filter_map(|viewer| viewer.archive.as_ref())
-                            .find_map(|archive| archive.record.pulses.iter().find(|pulse| pulse.key == key))
+                            .filter_map(|archive| archive.record_if_read()).find_map(|record| record.pulses.iter().find(|pulse| pulse.key == key))
+                            .or_else(|| asking.and_then(|viewer| viewer.archive.as_ref()).and_then(|archive| archive.record().pulses.iter().find(|pulse| pulse.key == key)))
                             .ok_or_else(|| format!("This Figure played no pulse {key:?}"))?;
                         let answer = pulse.editor.open_recorded(&played.tree.to_string(), command["discard_changes"] == true);
                         pulse.dispatch();
@@ -1268,7 +1310,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             windows.send_to(&kind, &slm.message(device))?;
                             for (panel, sequence, front) in slm.fronts(device) { windows.submit(panel, sequence, front)?; }
                         }
-                        if let windows::Kind::FigureViewer(number) = &kind { if let Some(viewer) = viewers.get_mut(number) { viewer_message(&mut viewer.state, |message| windows.send_to(&kind, message))?; } }
+                        if let windows::Kind::FigureViewer(number) = &kind { if let Some(viewer) = viewers.get_mut(number) { viewer.state[RECORD_UNSENT] = json!(true); viewer_message(&mut viewer.state, |message| windows.send_to(&kind, message))?; } }
                         if kind == windows::Kind::PulseEditor {
                             let mut state = json!({"type": "state"});
                             state["pulse"] = pulse.state();
@@ -1527,14 +1569,15 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             // The opened Figure's record: the info pane's tabs and its Flow.
                             if let Some(archive) = archive.as_ref().filter(|archive| state["document"]["path"] == archive.path()) {
                                 // The record the viewer already holds moves on, not copied again (it is the Figure's whole provenance).
-                                let held = (completion.action != "present_archive" && accepted["document"]["path"] == archive.path() && !accepted["document"]["info"].is_null())
-                                    .then(|| (accepted["document"]["info"].take(), accepted["document"]["flow"].take()));
-                                let (info, flow) = held.unwrap_or_else(|| (archive.record.tabs.clone(), archive.record.flow.clone()));
-                                state["document"]["info"] = info;
-                                state["document"]["flow"] = flow;
+                                if completion.action != "present_archive" && accepted["document"]["path"] == archive.path() && !accepted["document"]["info"].is_null() {
+                                    for part in ["record", "info", "flow"] { state["document"][part] = accepted["document"][part].take(); }
+                                } else { show_record(&mut state, archive); }
                                 for signal in state["signals"].as_array_mut().into_iter().flatten() {
                                     if let Some(label) = signal["id"].as_str().and_then(|id| archive.label(id)) { signal["label"] = json!(label); }
                                 }
+                            } else if !accepted["document"]["info"].is_null() {
+                                // The Figure has gone: its page lets its record go too.
+                                state[RECORD_UNSENT] = json!(true);
                             }
                             if let Some((drafts, targets, board)) = viewer_data.as_mut() {
                                 for signal in state["signals"].as_array_mut().into_iter().flatten() {
@@ -1709,6 +1752,16 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 Event::UserEvent(AppEvent::WaitExpired(id)) => remote::check_waiters(&accepted, &mut waiters, Some(id)),
+                Event::UserEvent(AppEvent::RecordRead { document, saved }) => {
+                    // Unless another Figure has replaced it meanwhile.
+                    if let Some(viewer) = viewers.get_mut(&document) {
+                        if let Some(archive) = viewer.archive.clone().filter(|archive| archive.holds(&saved) && viewer.state["document"]["path"] == archive.path()) {
+                            show_record(&mut viewer.state, &archive);
+                            viewer.state["request"] = json!(0);
+                            viewer_message(&mut viewer.state, |message| windows.send_to(&windows::Kind::FigureViewer(document), message))?;
+                        }
+                    }
+                }
                 Event::UserEvent(AppEvent::ImageSaved { request, result }) => {
                     let mut state = accepted.clone();
                     state["request"] = json!(request);
@@ -2072,5 +2125,64 @@ mod tests {
         let text = delta::Sent::default().encode(sent.as_object().unwrap(), |_| true, |_| true).unwrap();
         let page: Value = serde_json::from_str(&text).unwrap();
         assert!(page["changes"].as_array().unwrap().iter().any(|change| change[0] == json!(["saved"]) && change[1] == refused), "{text}");
+    }
+
+    /// The record goes to a page when it changed, or when the page is new; every other
+    /// message leaves it out and the host's document (get_state's answer) keeps it.
+    #[test]
+    fn a_viewer_page_is_sent_a_figures_record_once() {
+        let opened = |viewer: &mut Value, path: &str, tab: &str| {
+            viewer["document"] = json!({"path": path, "title": "Figure Viewer", "record": "read", "info": [[tab, [["events", "many"]]]], "flow": {"nodes": [tab], "edges": []}});
+            viewer[RECORD_UNSENT] = json!(true);
+        };
+        let mut sent = delta::Sent::default();
+        let mut message = |viewer: &mut Value, request: u64| -> (Value, String) {
+            viewer["request"] = json!(request);
+            let text = viewer_message(viewer, |message| {
+                assert!(message["viewer"]["document"].get("info").is_none() && message["viewer"]["document"].get("flow").is_none(), "{message}");
+                sent.encode(message.as_object().unwrap(), |_| true, |_| true)
+            }).unwrap();
+            (serde_json::from_str(&text).unwrap(), text)
+        };
+        let told = |page: &Value, path: Value| page["changes"].as_array().unwrap().iter().find(|change| change[0] == path).map(|change| change[1].clone());
+        let mut viewer = json!({"request": 0, "error": null, "result": null, "panels": [], "signals": []});
+
+        opened(&mut viewer, "a.npz", "Logic");
+        let (first, _) = message(&mut viewer, 1);
+        let record = told(&first, json!(["record"])).expect("the first message has it");
+        assert_eq!((record["info"][0][0].clone(), record["flow"]["nodes"][0].clone()), (json!("Logic"), json!("Logic")));
+        assert_eq!(told(&first, json!(["viewer"])).unwrap()["document"]["record"], "read", "how far it is read stays the document's");
+
+        let held = viewer["document"].clone();
+        let (second, text) = message(&mut viewer, 2);
+        assert_eq!(second["changes"], json!([[["viewer", "request"], 2]]), "{text}");
+        assert!(!text.contains("Logic"), "{text}");
+        assert_eq!(viewer["document"], held, "the host's document keeps it whole");
+        assert_eq!(viewer["document"].as_object().unwrap().keys().collect::<Vec<_>>(), ["path", "title", "record", "info", "flow"], "and in its order");
+        assert!(viewer.get(RECORD_UNSENT).is_none(), "{viewer}");
+
+        // Another file (or the same one refreshed, which reads again) replaces what the page holds.
+        opened(&mut viewer, "b.npz", "Other");
+        let (third, text) = message(&mut viewer, 3);
+        assert_eq!(told(&third, json!(["record", "info", 0, 0])), Some(json!("Other")), "{text}");
+
+        // The Figure gone: the page's record goes.
+        viewer["document"] = json!({"path": "", "title": "Figure Viewer"});
+        viewer[RECORD_UNSENT] = json!(true);
+        let (fourth, text) = message(&mut viewer, 4);
+        assert!(fourth["changes"].as_array().unwrap().iter().any(|change| change[0] == json!(["record", "info"]) && change.as_array().unwrap().len() == 1), "{text}");
+        assert!(viewer["document"].get("info").is_none(), "no part appears in a document without it: {viewer}");
+    }
+
+    /// A page made again (a reload) holds nothing: its first state has the record whole.
+    #[test]
+    fn a_reloaded_viewer_page_is_sent_the_record_again() {
+        let mut viewer = json!({"request": 0, "error": null, "result": null, "document": {"path": "a.npz", "record": "read", "info": [["Logic", []]], "flow": {"nodes": [], "edges": []}}, RECORD_UNSENT: true});
+        let mut sent = delta::Sent::default();
+        assert!(viewer_message(&mut viewer, |message| sent.encode(message.as_object().unwrap(), |_| true, |_| true)).unwrap().contains("Logic"));
+        assert!(viewer_message(&mut viewer, |message| sent.encode(message.as_object().unwrap(), |_| true, |_| true)).is_none_or(|text| !text.contains("Logic")));
+        sent.reset();
+        viewer[RECORD_UNSENT] = json!(true);
+        assert!(viewer_message(&mut viewer, |message| sent.encode(message.as_object().unwrap(), |_| true, |_| true)).unwrap().contains("Logic"));
     }
 }

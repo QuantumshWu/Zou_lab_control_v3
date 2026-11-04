@@ -41,6 +41,16 @@ fn golden() -> Json {
 
 fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 
+/// Whether a written archive is the recorded one: the recorded file, from before a lineage
+/// had its own member, differs in bytes only by that, so metadata and members are compared.
+fn same_archive(written: &Path, recorded: &Path) -> bool {
+    let (written, recorded) = (read_archive(written).unwrap(), read_archive(recorded).unwrap());
+    dumps(&written.info, Style::Figure).unwrap() == dumps(&recorded.info, Style::Figure).unwrap()
+        && written.arrays.len() == recorded.arrays.len()
+        && written.arrays.iter().zip(recorded.arrays.iter()).all(|(left, right)| left.0 == right.0 && left.1.dtype.str() == right.1.dtype.str()
+            && left.1.shape == right.1.shape && left.1.little_endian_bytes() == right.1.little_endian_bytes())
+}
+
 /// A path under `root`, as the golden writes it.
 fn relative(path: &str, root: &Path) -> String {
     Path::new(path).strip_prefix(root).unwrap_or(Path::new(path)).to_string_lossy().replace('\\', "/")
@@ -132,8 +142,8 @@ fn figures_save_like_python() {
                     let expected: Vec<String> = expected.as_array().unwrap().iter().map(|path| path.as_str().unwrap().replacen("save/", &format!("{route}/"), 1)).collect();
                     if paths != expected { failures.push(format!("{label}: wrote {paths:?}, expected {expected:?}")); continue; }
                     if std::fs::read(root.join(&expected[0])).unwrap() != image { failures.push(format!("{label}: image bytes differ")); }
-                    if digest(&std::fs::read(root.join(&expected[1])).unwrap()) != case["archive_sha256"].as_str().unwrap() {
-                        failures.push(format!("{label}: archive bytes differ"));
+                    if !same_archive(&root.join(&expected[1]), &data().join(case["ok"][1].as_str().unwrap())) {
+                        failures.push(format!("{label}: archive differs"));
                     }
                 }
                 (Err(error), None) if refusal(error.python_name(), &error.message) == case["error"] => {}
@@ -169,7 +179,7 @@ fn run_figures_save_their_recipe() {
                                  recipe, source: sections["source"].clone(), lineage: sections["lineage"].clone(), image: true };
         match save_run_figure(figure, &services) {
             Ok((image, archive)) => {
-                if digest(&std::fs::read(&archive).unwrap()) != case["archive_sha256"].as_str().unwrap() { failures.push(format!("{name}: archive bytes differ")); }
+                if !same_archive(&archive, &data().join(case["ok"][1].as_str().unwrap())) { failures.push(format!("{name}: archive differs")); }
                 // Each format's own file (the SVG and PDF writers' pictures are checked against v2's by eye).
                 let bytes = image.as_ref().and_then(|image| std::fs::read(image).ok()).unwrap_or_default();
                 let suffix = image.as_ref().and_then(|image| image.extension()).map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
@@ -233,7 +243,9 @@ fn figures_read_like_python() {
         };
         let (opened, expected) = opened;
         if relative(&opened.path, &root) != expected["path"].as_str().unwrap() { failures.push(format!("{label}: path {}", opened.path)); }
-        if opened.info != serde_json::from_str::<Json>(expected["info"].as_str().unwrap()).unwrap() { failures.push(format!("{label}: info differs")); }
+        let mut info = opened.info.clone();
+        if let Some(lineage) = opened.lineage.read().unwrap() { info["sections"]["lineage"] = lineage.to_serde(); }
+        if info != serde_json::from_str::<Json>(expected["info"].as_str().unwrap()).unwrap() { failures.push(format!("{label}: info differs")); }
         let items = expected["items"].as_array().unwrap();
         if opened.items.len() != items.len() { failures.push(format!("{label}: {} items", opened.items.len())); continue; }
         for (item, want) in opened.items.iter().zip(items) {

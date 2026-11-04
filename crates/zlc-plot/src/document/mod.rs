@@ -143,7 +143,7 @@ struct Transaction<R> {
     roi_keys: OrderedMap<String, RoiKey>,
     panel_status: OrderedMap<String, PanelStatus>,
     fit_outputs: BTreeSet<String>,
-    document: (String, Json),
+    document: String,
     action: String,
 }
 
@@ -151,7 +151,6 @@ struct Transaction<R> {
 pub struct FigureDocument<R: DocumentRead> {
     pub(crate) services: SessionServices,
     pub path: String,
-    pub info: Json,
     pub(crate) sessions: OrderedMap<String, SessionHandle>,
     pub(crate) inputs: OrderedMap<String, R>,
     pub(crate) panel_status: OrderedMap<String, PanelStatus>,
@@ -251,7 +250,7 @@ fn file_name(path: &str) -> String { path.rsplit(['/', '\\']).find(|part| !part.
 impl<R: DocumentRead> FigureDocument<R> {
     pub fn new(services: SessionServices, saver: Option<Arc<dyn FigureSaver<R>>>) -> Self {
         FigureDocument {
-            services, path: String::new(), info: json!({}), sessions: OrderedMap::new(), inputs: OrderedMap::new(), panel_status: OrderedMap::new(),
+            services, path: String::new(), sessions: OrderedMap::new(), inputs: OrderedMap::new(), panel_status: OrderedMap::new(),
             panel_sources: OrderedMap::new(), dpr: 1.0, roi_keys: OrderedMap::new(), fit_outputs: BTreeSet::new(), staged: OrderedMap::new(),
             manual_fits: Vec::new(), offered_fronts: BTreeSet::new(), initial_overlays: OrderedMap::new(), configurations: OrderedMap::new(),
             removed_outputs: BTreeSet::new(), presentation: None, saver,
@@ -264,7 +263,7 @@ impl<R: DocumentRead> FigureDocument<R> {
         self.presentation = Some(Transaction {
             sessions: self.sessions.clone(), inputs: self.inputs.clone(), panel_sources: self.panel_sources.clone(),
             configurations: self.configurations.clone(), roi_keys: self.roi_keys.clone(), panel_status: self.panel_status.clone(),
-            fit_outputs: self.fit_outputs.clone(), document: (self.path.clone(), self.info.clone()), action: action.to_owned(),
+            fit_outputs: self.fit_outputs.clone(), document: self.path.clone(), action: action.to_owned(),
         });
         for handle in self.sessions.values() { lock(handle).begin_presentation()?; }
         Ok(())
@@ -305,7 +304,7 @@ impl<R: DocumentRead> FigureDocument<R> {
             restore(&mut self.panel_sources, &saved.panel_sources, key);
         }
         if (saved.action == "replace_document" || saved.action == "close") && !keys.iter().all(|key| accepted_targets.contains(key)) {
-            (self.path, self.info) = saved.document;
+            self.path = saved.document;
         }
         self.staged = OrderedMap::new();
         self.manual_fits.clear();
@@ -324,7 +323,6 @@ impl<R: DocumentRead> FigureDocument<R> {
         self.panel_status = OrderedMap::new();
         self.panel_sources = OrderedMap::new();
         self.path.clear();
-        self.info = json!({});
         self.roi_keys = OrderedMap::new();
         self.fit_outputs.clear();
         self.configurations = OrderedMap::new();

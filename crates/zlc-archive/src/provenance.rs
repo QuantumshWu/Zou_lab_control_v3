@@ -5,11 +5,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+use zlc_core::runtime::IMPORTED_LINEAGE;
+
 use crate::error::{ArchiveError, Result};
 use crate::json::Json;
-
-/// Where a mounted figure's saved lineage and source travel in its run record.
-pub const IMPORTED_LINEAGE: &str = "zlc.figure.imported-lineage";
 
 /// The deepest causal chain `visit` (two interpreter frames a level) walks
 /// from a script's top level before Python raises `RecursionError`.

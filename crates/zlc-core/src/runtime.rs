@@ -5,6 +5,7 @@ use std::sync::{Arc, Condvar, Mutex, Weak, atomic::{AtomicBool, Ordering}, mpsc:
 use std::time::{Duration, Instant};
 use serde_json::Value;
 use uuid::Uuid;
+use crate::acquisition::Builder;
 use crate::dataset::DataBlock;
 use crate::OwnedBuffer;
 use crate::schema::{Axis, CodeBase, CodeMapping, Coordinate, Coordinates, DatasetSchema, Domain, DomainRole};
@@ -42,7 +43,15 @@ impl Generation {
     pub fn owner(&self) -> &str { &self.owner }
 }
 
-pub struct RunRecord { pub generation: GenerationId, pub owner: Arc<str>, pub metadata: Value }
+pub struct RunRecord { pub generation: GenerationId, pub owner: Arc<str>, pub metadata: Value,
+    /// Set on a run that stands for a saved Figure (`begin_imported`).
+    pub imported: Option<Arc<dyn ImportedRun>> }
+/// The field of a provenance's run record that holds an imported run's saved history.
+pub const IMPORTED_LINEAGE: &str = "zlc.figure.imported-lineage";
+/// A saved Figure's history, kept behind one handle its datasets' runs share: readers of
+/// run metadata (a selection's context, a plugin's read) never carry it. Only capturing a
+/// provenance asks for it, as `{source, lineage}`.
+pub trait ImportedRun: Send + Sync { fn saved_history(&self) -> Value; }
 pub struct ParentRecord {
     pub key: PublicationKey,
     pub run: Arc<RunRecord>,
@@ -253,38 +262,42 @@ impl Read {
         }
     }
     /// The causal facts a saved Figure keeps: each publication with its run and
-    /// event records and parents; a window also lists every member's record.
+    /// event records and parents; a window also holds every member, each run and event once.
     pub fn provenance(&self) -> Value {
         fn record(key:&PublicationKey, run:&RunRecord, event:&EventRecord) -> Value {
+            let mut metadata = run.metadata.clone();
+            if let Some(imported) = &run.imported { metadata[IMPORTED_LINEAGE] = imported.saved_history(); }
             serde_json::json!({"publication":{"stream":run.owner.as_ref(),"generation":key.generation.as_uuid().to_string(),"signal":key.signal.as_ref(),
-                "revision":key.revision,"ordinal":key.ordinal},"run":run.metadata,"event":event.metadata,
+                "revision":key.revision,"ordinal":key.ordinal},"run":metadata,"event":event.metadata,
                 "parents":event.parents.iter().map(|parent|record(&parent.key,&parent.run,&parent.event)).collect::<Vec<_>>()})
         }
-        fn acquisition(entries: impl IntoIterator<Item=(PublicationKey, Arc<RunRecord>, Arc<EventRecord>, [usize;2], [usize;2])>) -> Value {
-            fn add_event(key: &PublicationKey, run: &RunRecord, event: &EventRecord,
-                         runs: &mut Vec<Value>, run_indices: &mut HashMap<GenerationId,usize>,
-                         events: &mut Vec<Value>, event_indices: &mut HashMap<PublicationKey,usize>) -> usize {
-                if let Some(index) = event_indices.get(key) { return *index; }
-                let run_index = *run_indices.entry(key.generation).or_insert_with(|| {
-                    let index = runs.len();
-                    runs.push(serde_json::json!({"stream":run.owner.as_ref(), "generation":key.generation.as_uuid().to_string(), "record":run.metadata}));
-                    index
-                });
-                let parents: Vec<_> = event.parents.iter().map(|parent|
-                    add_event(&parent.key,&parent.run,&parent.event,runs,run_indices,events,event_indices)).collect();
-                let index = events.len();
-                events.push(serde_json::json!({"run":run_index, "signal":key.signal.as_ref(), "revision":key.revision,
-                    "ordinal":key.ordinal, "record":event.metadata, "parents":parents}));
-                event_indices.insert(key.clone(),index);
+        /// Each run and each event once, parents before their children.
+        #[derive(Default)]
+        struct Events { table: Builder, runs: HashMap<GenerationId,usize>, known: HashMap<PublicationKey,usize> }
+        impl Events {
+            fn add(&mut self, key: &PublicationKey, run: &RunRecord, event: &EventRecord) -> usize {
+                if let Some(index) = self.known.get(key) { return *index; }
+                let run_index = match self.runs.get(&key.generation) {
+                    Some(index) => *index,
+                    None => {
+                        let index = self.table.run(&run.owner,&key.generation.as_uuid().to_string(),&run.metadata);
+                        self.runs.insert(key.generation,index);
+                        index
+                    }
+                };
+                let parents: Vec<_> = event.parents.iter().map(|parent| self.add(&parent.key,&parent.run,&parent.event)).collect();
+                let index = self.table.event(run_index,&key.signal,key.revision,key.ordinal,&event.metadata,&parents);
+                self.known.insert(key.clone(),index);
                 index
             }
-            let (mut runs, mut events, mut ranges) = (Vec::new(),Vec::new(),Vec::new());
-            let (mut run_indices, mut event_indices) = (HashMap::new(),HashMap::new());
+        }
+        fn acquisition(entries: impl IntoIterator<Item=(PublicationKey, Arc<RunRecord>, Arc<EventRecord>, [usize;2], [usize;2])>) -> Value {
+            let mut events = Events::default();
             for (key,run,event,origin,extent) in entries {
-                let index = add_event(&key,&run,&event,&mut runs,&mut run_indices,&mut events,&mut event_indices);
-                ranges.push(serde_json::json!({"event":index, "origin":origin, "extent":extent}));
+                let index = events.add(&key,&run,&event);
+                events.table.range(index,origin,extent);
             }
-            serde_json::json!({"runs":runs,"events":events,"ranges":ranges})
+            events.table.finish()
         }
         match &self.kind {
             ReadKind::Event(event) => record(&event.key,&event.run,&event.event),
@@ -304,8 +317,9 @@ impl Read {
             ReadKind::Window(window) => {
                 let latest = window.entries.last().expect("window has an anchor");
                 let mut value = record(&latest.key,&latest.run,&latest.event);
-                value["window"] = serde_json::json!({"width":window.width,"members":window.entries.iter()
-                    .map(|event|record(&event.key,&event.run,&event.event)).collect::<Vec<_>>()});
+                let mut events = Events::default();
+                let members: Vec<_> = window.entries.iter().map(|event|events.add(&event.key,&event.run,&event.event)).collect();
+                value["window"] = crate::acquisition::window(window.width,&members,events.table);
                 value
             }
         }
@@ -1128,7 +1142,12 @@ impl Runtime {
     }
 
     pub fn begin(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value) -> Result<Generation> {
-        self.begin_run(owner.into(),outputs,metadata,None)
+        self.begin_run(owner.into(),outputs,metadata,None,None)
+    }
+
+    /// A run that stands for a saved Figure: what it publishes descends from `imported`.
+    pub fn begin_imported(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value, imported: Arc<dyn ImportedRun>) -> Result<Generation> {
+        self.begin_run(owner.into(),outputs,metadata,None,Some(imported))
     }
 
     /// Declare an actual causal route, not a naming convention. Presentation
@@ -1136,7 +1155,7 @@ impl Runtime {
     pub fn begin_derived(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value,
                          source:&PublicationKey, coherent:bool) -> Result<Generation> {
         self.begin_run(owner.into(),outputs,metadata,Some(DerivedSource {signal:source.signal.clone(),
-            generation:Some(source.generation),coherent,guarded:true,declared:true}))
+            generation:Some(source.generation),coherent,guarded:true,declared:true}),None)
     }
 
     /// A plugin run that consumes `source` and commits each result with the
@@ -1149,11 +1168,11 @@ impl Runtime {
     /// member while it runs. It keeps committing a replaced run's remaining queue.
     pub fn begin_consuming(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value,
                            source: Arc<str>, generation: Option<GenerationId>) -> Result<Generation> {
-        self.begin_run(owner.into(),outputs,metadata,Some(DerivedSource {signal:source,generation,coherent:true,guarded:false,declared:true}))
+        self.begin_run(owner.into(),outputs,metadata,Some(DerivedSource {signal:source,generation,coherent:true,guarded:false,declared:true}),None)
     }
 
     fn begin_run(&self, owner:Arc<str>, outputs:Vec<Declaration>, metadata:Value,
-                 source:Option<DerivedSource>) -> Result<Generation> {
+                 source:Option<DerivedSource>, imported:Option<Arc<dyn ImportedRun>>) -> Result<Generation> {
         if owner.is_empty() || owner.trim() != owner.as_ref() || outputs.is_empty() {
             return Err(RuntimeError::InvalidDeclaration("An owner and at least one output are required".into()));
         }
@@ -1199,7 +1218,7 @@ impl Runtime {
             }).collect();
             state.owners.insert(owner.clone(), token.id);
             let mut run = Run { token: token.clone(), sealed: false, revision: 0, signals,
-                record: Arc::new(RunRecord { generation: token.id, owner:owner.clone(), metadata }), outcome: None, subscribers: Arc::from([]),source };
+                record: Arc::new(RunRecord { generation: token.id, owner:owner.clone(), metadata, imported }), outcome: None, subscribers: Arc::from([]),source };
             // Explicit followers and their retention are installed before the
             // producer can commit its first event, without a notification race.
             for (&ticket,subscriber) in state.subscribers.iter_mut().filter(|(_,subscriber)|
@@ -1654,6 +1673,58 @@ mod tests {
         DatasetSchema::new(singleton.clone(), singleton, cell,
             ValueSchema::new(DType::U16, Some("count".into()), None, ValidityContract::Value).unwrap()).unwrap()
     }
+    /// A window's record holds its run once and reads as every member's tree.
+    #[test]
+    fn window_provenance_holds_each_run_once() {
+        let (plane, sample) = (Runtime::new(), schema());
+        let declare = |signal: &str| vec![Declaration {signal:signal.into(),schema:sample.clone(),storage:Storage::Latest}];
+        let camera = plane.begin("camera",declare("frames"),json!({"device_snapshots":{"camera":{"exposure_seconds":0.02}}})).unwrap();
+        let derived = plane.begin("derived",declare("value"),json!({"node":"derived"})).unwrap();
+        let history = plane.retain_history(&derived,"value",3).unwrap();
+        for ordinal in 0..5u64 {
+            let parent = plane.commit(&camera,&bundle(&sample,&["frames"],ordinal)).unwrap().publications[0].clone();
+            let mut output = bundle(&sample,&["value"],ordinal);
+            output.metadata = json!({"records":{"value":{"shot":ordinal}}});
+            output.parents = vec![parent];
+            plane.commit(&derived,&output).unwrap();
+        }
+        let window = plane.read_window(&derived,"value",3).unwrap();
+        let provenance = Read::from_window(window).provenance();
+        let stored = &provenance["window"];
+        assert_eq!(stored["acquisition"]["runs"].as_array().unwrap().len(),2);
+        assert_eq!(stored.to_string().matches("exposure_seconds").count(),1,"once, not per member");
+        let expanded = crate::acquisition::expand_window(stored).unwrap();
+        assert_eq!(expanded["width"],json!(3));
+        let members = expanded["members"].as_array().unwrap();
+        assert_eq!(members.len(),3);
+        for (member,shot) in members.iter().zip(2u64..) {
+            assert_eq!(member["publication"]["ordinal"],json!(shot));
+            assert_eq!(member["publication"]["stream"],"derived");
+            assert_eq!(member["event"]["records"]["value"]["shot"],json!(shot));
+            assert_eq!(member["run"]["node"],"derived");
+            assert_eq!(member["parents"][0]["publication"]["signal"],"frames");
+            assert_eq!(member["parents"][0]["run"]["device_snapshots"]["camera"]["exposure_seconds"],json!(0.02));
+        }
+        drop(history);
+    }
+    /// A run standing for a saved Figure answers its history in a provenance's run record, not in its metadata.
+    #[test]
+    fn an_imported_run_answers_its_saved_history_only_in_a_provenance() {
+        struct Saved(std::sync::atomic::AtomicUsize);
+        impl ImportedRun for Saved {
+            fn saved_history(&self) -> Value { self.0.fetch_add(1,Ordering::Relaxed); json!({"source":{},"lineage":{"root":null,"nodes":[],"device_settings":[]}}) }
+        }
+        let (plane, sample) = (Runtime::new(), schema());
+        let saved = Arc::new(Saved(Default::default()));
+        let figure = plane.begin_imported("figure",vec![Declaration {signal:"data".into(),schema:sample.clone(),storage:Storage::Latest}],json!({"operation":"figure-import"}),saved.clone()).unwrap();
+        let publication = plane.commit(&figure,&bundle(&sample,&["data"],0)).unwrap().publications[0].clone();
+        assert!(publication.run().metadata.get(IMPORTED_LINEAGE).is_none());
+        assert_eq!(saved.0.load(Ordering::Relaxed),0,"nothing asked for it while publishing");
+        let provenance = Read::from_event(publication).unwrap().provenance();
+        assert_eq!(provenance["run"][IMPORTED_LINEAGE]["lineage"]["root"],Value::Null);
+        assert_eq!(provenance["run"]["operation"],"figure-import");
+        assert_eq!(saved.0.load(Ordering::Relaxed),1);
+    }
     fn block(schema: &Arc<DatasetSchema>, value: u16) -> Arc<DataBlock> {
         DataBlock::new(schema.clone(), OwnedBuffer::from_vec(vec![value; 6]).into(), Validity::Uniform(true), None).unwrap()
     }
@@ -1698,7 +1769,7 @@ mod tests {
             }
         }
         let before = plane.read_views(&[(scan.clone(),"scan".into(),None)]).pop().unwrap().unwrap().provenance();
-        let acquired = &before["acquisition"];
+        let acquired = crate::acquisition::expand_acquisition(&before["acquisition"]).unwrap();
         assert_eq!(acquired["runs"].as_array().unwrap().len(),2);
         assert_eq!(acquired["events"].as_array().unwrap().len(),5,"the shared parent occurs once");
         for (point,range) in acquired["ranges"].as_array().unwrap().iter().enumerate() {
