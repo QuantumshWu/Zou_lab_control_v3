@@ -148,10 +148,8 @@ fn on_eight_states_a_step_and_a_jump_are_the_cpu_s(){
     let r=request(MOLASSES);compare(&r,None,f64::INFINITY,false,false);compare(&r,Some(0.999),f64::INFINITY,true,false);
 }
 /// The same jump with the exact response: the gray molasses' static ground block mixes its responses (ground.rs,
-/// # The static ground block), which the kernel's exact response, dressed with each ground state at its own energy,
-/// leaves out: the static block's eigenbasis is pending, its error booked (solve.rs); the CPU's ψ 6e-5 off after the jump.
+/// # The static ground block), the kernel's by its eigenstates (`mixed_responses`).
 #[test]
-#[ignore="pending the GPU's F6 static-block port"]
 fn on_eight_states_a_jump_with_the_exact_response_is_the_cpu_s(){compare(&request(MOLASSES),Some(0.999),0.,true,false);}
 /// With explicit excited states (engine.rs # The exact step), on the tweezer PGC's first explicit rung
 /// (clusters of 3 ground and 4 explicit states and of 2 and 3, their hyperfine beat left out: the static
@@ -175,10 +173,8 @@ fn with_explicit_states_a_step_and_a_jump_are_the_cpu_s(){
     explicit_rung(&request(MOLASSES),0.2,&[false]);
     explicit_rung(&probed(),0.1,&[false,true]);
 }
-/// The gray molasses' explicit rung's jump with the exact response: its block mixes, which the kernel's response leaves out
-/// (the static block's eigenbasis is pending; ψ 1.2e-5 off).
+/// The gray molasses' explicit rung's jump with the exact response: its block mixes (the kernel's `mixed_responses`).
 #[test]
-#[ignore="pending the GPU's F6 static-block port"]
 fn with_explicit_states_a_jump_with_a_mixed_block_s_exact_response_is_the_cpu_s(){explicit_rung(&request(MOLASSES),0.2,&[true]);}
 /// A request's first explicit rung (`with_explicit_states_a_step_and_a_jump_are_the_cpu_s`), its jumps with the responses
 /// `exact` lists: true, the exact one; false, the first order's.
@@ -211,10 +207,9 @@ fn explicit_rung(r:&Request,dt:f64,exact:&[bool]){
 /// states, their dressing in the source), where the dressing moves them by 6.9e-4.
 #[test]
 fn the_exact_responses_are_the_cpu_s(){let r=probed();let m=explicit(&r);exact_responses(&r,m);}
-/// On the gray molasses (one cluster of all 8 ground states), whose static block mixes its responses: the kernel's are
-/// 1.3e-2 off the CPU's (the static block's eigenbasis is pending).
+/// On the gray molasses (one cluster of all 8 ground states), whose static block mixes its responses (the kernel's
+/// `mixed_responses`).
 #[test]
-#[ignore="pending the GPU's F6 static-block port"]
 fn on_a_mixed_block_the_exact_responses_are_the_cpu_s(){let r=request(MOLASSES);let m=model(&r,false);exact_responses(&r,m);}
 /// A model's exact responses on both devices (`the_exact_responses_are_the_cpu_s`).
 fn exact_responses(r:&Request,m:Model){
@@ -226,10 +221,13 @@ fn exact_responses(r:&Request,m:Model){
     for t in &trajectories{
         let got=gpu.response_probe(&program,&settings,t).unwrap();
         let(cpu,undressed)=(Exact::new(&model,t.r,t.kappa).unwrap(),Exact::new(&bare,t.r,t.kappa).unwrap());
+        // A column at single precision's round-off of the state's largest entry (a coupling at the round-off of the
+        // data) has no relative accuracy to check.
+        let largest=near.iter().flat_map(|&l|(0..3).map(move|a|(l,a))).map(|(l,a)|g.emission[a].product(&cpu.responses[l]).entries.iter().map(|z|z.abs()).fold(0.,f64::max)).fold(0.,f64::max);
         for(j,&l)in near.iter().enumerate(){
             let(c,u):(Vec<Dense>,Vec<Dense>)=(0..3).map(|a|(g.emission[a].product(&cpu.responses[l]),g.emission[a].product(&undressed.responses[l]))).unzip();
             for(col,&b)in g.clusters[t.cluster].states.iter().enumerate(){
-                let scale=(0..3).flat_map(|a|(0..GROUND).map(move|to|(a,to))).map(|(a,to)|c[a][(to,b)].abs()).fold(0.,f64::max);if scale==0.{continue;}
+                let scale=(0..3).flat_map(|a|(0..GROUND).map(move|to|(a,to))).map(|(a,to)|c[a][(to,b)].abs()).fold(f32::EPSILON as f64*largest,f64::max);if scale==0.{continue;}
                 for a in 0..3{for to in 0..GROUND{
                     let x=got[((j*program::MAXN+col)*3+a)*GROUND+to];
                     worst=worst.max((x-c[a][(to,b)]).abs()/scale);dressing=dressing.max((u[a][(to,b)]-c[a][(to,b)]).abs()/scale);
