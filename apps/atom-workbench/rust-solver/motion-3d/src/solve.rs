@@ -1681,17 +1681,21 @@ pub(crate) fn advance_work(w:&crate::model::Work)->f64{ADVANCE_NS+MULTIPLY_ADD_N
 /// target), its T error about the phase squared.
 pub(crate) fn first_phase()->f64{(BIAS_VARIANCE*TEMPERATURE_TARGET).sqrt()}
 /// A sampled state's parts of the work model (`interval_work`): its cluster, its advance without the
-/// propagation and its jump (ns), its generator's norm and its dimension; in a cluster that takes the exact
-/// step (explicit excited states, beats), the state itself -- its step's segment is probed at each step
-/// (`exact_step`); and its weight in the run's time.
+/// propagation and its jump (ns), its generator's norm and its dimension; in a cluster with explicit excited states or beats,
+/// the state itself -- the exact step's segment is probed at each step (`exact_step`), where the settings have its cluster take it (`takes_exact`) --;
+/// and its weight in the run's time.
 struct StateWork{cluster:usize,advance:f64,jump:f64,norm:f64,n:usize,exact:Option<Trajectory>,weight:f64,kernel:[f64;2]}
+impl StateWork{
+    /// Whether its step is the exact one under an engine's settings: a cluster's beats all left out at the model's reach leave it the plain step (engine.rs `quiet_clusters`).
+    fn takes_exact(&self,engine:&Engine)->bool{self.exact.is_some()&&engine.takes_exact(self.cluster)}
+}
 /// A cluster's jump in the work model (`StateWork`).
 fn jump_work(w:&crate::model::Work)->f64{JUMP_NS+PHOTON_MULTIPLY_ADD_NS*w.photons+ABSORPTION_MULTIPLY_ADD_NS*w.absorption}
 /// The work per interval (`interval_work`) of a candidate's fourth order, its tables unbuilt: its states' advances and jumps from
 /// the fourth order's layout (`Model::layout_work`), the rest the candidate's own. The candidate's own work where the layout fails.
 fn fourth_work(request:&Request,c:&Candidate,states:&[Trajectory],begun:&[Trajectory],s:&Settings,interval:f64,waiting:f64)->f64{
-    let mut parts=state_work(&c.model,states,begun);
-    if let Ok(works)=Model::layout_work(request,c.model.ground.clone(),true){for x in parts.iter_mut().filter(|x|x.exact.is_none()){let w=&works[x.cluster];x.advance=advance_work(w);x.jump=jump_work(w);}}
+    let mut parts=state_work(&c.model,states,begun);let engine=Engine::new(&c.model,s.clone());
+    if let Ok(works)=Model::layout_work(request,c.model.ground.clone(),true){for x in parts.iter_mut().filter(|x|!x.takes_exact(&engine)){let w=&works[x.cluster];x.advance=advance_work(w);x.jump=jump_work(w);}}
     interval_work(&c.model,&parts,s,interval,waiting)
 }
 /// The work model's states (`StateWork`) over the run's time, each in the model's own clusters: the pilot's states at the
@@ -1702,7 +1706,7 @@ fn fourth_work(request:&Request,c:&Candidate,states:&[Trajectory],begun:&[Trajec
 fn state_work(model:&Model,states:&[Trajectory],begun:&[Trajectory])->Vec<StateWork>{
     states.par_iter().map(|t|(t,1.)).chain(begun.par_iter().map(|t|(t,0.5))).map(|(t,weight)|{
         let w=model.work(t.cluster);let n=model.dimension(t.cluster);let exact=model.mixed(t.cluster)||model.beating(t.cluster);
-        let norm=if exact{0.}else{column_norm(&model.local(t.cluster,&model.point(t.r,t.kappa),t.time).hamiltonian,n)};
+        let norm=if model.mixed(t.cluster){0.}else{column_norm(&model.local(t.cluster,&model.point(t.r,t.kappa),t.time).hamiltonian,n)};
         StateWork{cluster:t.cluster,advance:advance_work(&w),jump:jump_work(&w),norm,n,exact:exact.then(||t.clone()),weight,kernel:model.kernel_work(t.cluster)}
     }).collect()
 }
@@ -1723,8 +1727,8 @@ pub(crate) const MATRIX_NS:f64=0.469;const SPECTRAL_N3:f64=60.;const CIS_NS:f64=
 /// the grid's: per node (amplitude-weighted on the spectral path) its propagation (a phase per state, a
 /// propagator's product, or CF4's two combinations of the beats and their series, `Entries::node_work`) and the force's and the
 /// norm's forms, n² each.
-fn exact_step(model:&Model,s:&Settings,t:&Trajectory,x:&StateWork)->[f64;2]{
-    let p=Engine::new(model,s.clone()).probe(t.cluster,&model.point(t.r,t.kappa),t.time,s.dt,&t.psi);
+fn exact_step(engine:&Engine,t:&Trajectory,x:&StateWork)->[f64;2]{
+    let(model,s)=(engine.model,&engine.settings);let p=engine.probe(t.cluster,&model.point(t.r,t.kappa),t.time,s.dt,&t.psi);
     let n=x.n as f64;let(n2,n3)=(n*n,n*n*n);let pairs=p.beats.len() as f64;
     let terms=series(1.,node_phase(),f64::EPSILON).1 as f64;let nodes=p.weighted.unwrap_or(p.nodes) as f64;
     // Per path: the build's multiply-adds, a node's multiply-adds and phases.
@@ -1823,16 +1827,19 @@ fn response(rates:&[f64],m:usize,span:f64)->Vec<f64>{
     for _ in 0..doublings{let next=product(&e,&s);for(a,b)in s.iter_mut().zip(&next){*a+=*b;}e=product(&e,&e);}
     s
 }
-/// A step's parts at every state (ns): what every step pays -- the advance with, in a cluster of ground states,
+/// A step's parts at every state (ns): what every step pays -- the advance with, taking the plain step,
 /// its two half steps' series, or the exact step's per step (`exact_step`) -- and what the multirate grid takes
-/// over the step, whose nodes per unit time no step changes. The exact states' from at most `PROBED` of them,
+/// over the step, whose nodes per unit time no step changes; and whether it takes the exact step. The exact states' from at most `PROBED` of them,
 /// evenly spread, their mean for the rest.
-fn steps_parts(model:&Model,states:&[StateWork],s:&Settings)->Vec<[f64;2]>{
-    let exact:Vec<usize>=(0..states.len()).filter(|&i|states[i].exact.is_some()).collect();
-    let probed:Vec<[f64;2]>=exact.par_iter().step_by((exact.len()/PROBED).max(1)).map(|&i|exact_step(model,s,states[i].exact.as_ref().unwrap(),&states[i])).collect();
+fn steps_parts(model:&Model,states:&[StateWork],s:&Settings)->Vec<([f64;2],bool)>{
+    let engine=Engine::new(model,s.clone());
+    let exact:Vec<usize>=(0..states.len()).filter(|&i|states[i].takes_exact(&engine)).collect();
+    let probed:Vec<[f64;2]>=exact.par_iter().step_by((exact.len()/PROBED).max(1)).map(|&i|exact_step(&engine,states[i].exact.as_ref().unwrap(),&states[i])).collect();
     let mean:[f64;2]=std::array::from_fn(|k|probed.iter().map(|p|p[k]).sum::<f64>()/probed.len().max(1) as f64);
-    states.iter().map(|x|if x.exact.is_some(){mean}else{[x.advance+2.*half_step(x,s),0.]}).collect()
+    states.iter().map(|x|if x.takes_exact(&engine){(mean,true)}else{([x.advance+2.*half_step(x,s),0.],false)}).collect()
 }
+/// What a jump adds to an exact step (`exact_step`'s parts, ns): the step redone to its crossing and its rest build their segments, and the grid up to the crossing goes over again, half a step's on average.
+fn exact_redo(p:&[f64;2])->f64{2.*p[0]+0.5*p[1]}
 /// A half step's propagation at a state (ns): its series' sub-steps × terms at its generator's norm,
 /// the step's dt and truncation.
 fn half_step(x:&StateWork,s:&Settings)->f64{let(sub,terms)=series(x.norm,0.5*s.dt,s.truncation);(sub*terms) as f64*(TERM_NS+TERM_MULTIPLY_ADD_NS*(x.n*x.n) as f64)}
@@ -1840,12 +1847,11 @@ fn half_step(x:&StateWork,s:&Settings)->f64{let(sub,terms)=series(x.norm,0.5*s.d
 /// same whatever the machine and its load: its steps (`steps_parts`), each the generator's and the force's
 /// multiply-adds and pairs of the state's cluster and two half steps' series, or the exact step's; and per
 /// jump, one every waiting time, the jump itself -- every class's photons, the picked class's absorbed light
-/// and the rest -- and two more advances, the step redone to the jump and its rest (an exact step goes on
-/// from the jump: its segment in the cluster it lands in). A readout per output is the same at every step and
+/// and the rest -- and two more advances, the step redone to the jump and its rest (of an exact step, `exact_redo`). A readout per output is the same at every step and
 /// left out.
 fn interval_work(model:&Model,states:&[StateWork],s:&Settings,interval:f64,waiting:f64)->f64{
     let parts=steps_parts(model,states,s);let(mut advance,mut jump)=(0.,0.);
-    for(x,p)in states.iter().zip(&parts){let a=p[0]+p[1];advance+=x.weight*a;jump+=x.weight*(x.jump+if x.exact.is_some(){p[0]}else{2.*a});}
+    for(x,(p,exact))in states.iter().zip(&parts){let a=p[0]+p[1];advance+=x.weight*a;jump+=x.weight*(x.jump+if *exact{exact_redo(p)}else{2.*a});}
     let count=weights(states);
     (interval/s.dt*advance+interval/waiting*jump)/count
 }
@@ -1854,9 +1860,9 @@ fn interval_work(model:&Model,states:&[StateWork],s:&Settings,interval:f64,waiti
 fn kernel_interval(model:&Model,states:&[StateWork],s:&Settings,interval:f64,waiting:f64)->f64{
     const EXACT_CYCLES:f64=12.;
     let parts=steps_parts(model,states,s);let(mut advance,mut jump)=(0.,0.);
-    for(x,p)in states.iter().zip(&parts){
-        let a=if x.exact.is_some(){EXACT_CYCLES*(p[0]+p[1])}else{x.kernel[0]};
-        advance+=x.weight*a;jump+=x.weight*(x.kernel[1]+if x.exact.is_some(){EXACT_CYCLES*p[0]}else{2.*a});
+    for(x,(p,exact))in states.iter().zip(&parts){
+        let a=if *exact{EXACT_CYCLES*(p[0]+p[1])}else{x.kernel[0]};
+        advance+=x.weight*a;jump+=x.weight*(x.kernel[1]+if *exact{EXACT_CYCLES*exact_redo(p)}else{2.*a});
     }
     (interval/s.dt*advance+interval/waiting*jump)/weights(states)
 }
@@ -1866,7 +1872,7 @@ fn weights(states:&[StateWork])->f64{states.iter().map(|x|x.weight).sum::<f64>()
 /// per unit time is the generator's and not the step's, and the jumps.
 fn least_work(model:&Model,states:&[StateWork],s:&Settings,interval:f64,waiting:f64)->f64{
     let parts=steps_parts(model,states,s);let(mut grid,mut jump)=(0.,0.);
-    for(x,p)in states.iter().zip(&parts){grid+=x.weight*p[1];jump+=x.weight*x.jump;}
+    for(x,(p,_))in states.iter().zip(&parts){grid+=x.weight*p[1];jump+=x.weight*x.jump;}
     let count=weights(states);
     (interval/s.dt*grid+interval/waiting*jump)/count
 }

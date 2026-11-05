@@ -160,10 +160,11 @@ impl Program{
         let beyond=|what:String|->String{format!("模型超出 GPU 内核的范围（{what}）")};
         if ng!=GROUND||ne!=NE{return Err(beyond(format!("{ng} 个基态、{ne} 个激发态")));}
         if settings.free!=[true;3]{return Err(beyond("运动只沿部分坐标轴".into()));}
-        // The exact step's clusters (explicit excited states, beats) in its bucket and its parts.
-        if let Some(k)=(0..model.clusters()).find(|&k|(model.mixed(k)||model.beating(k))&&model.dimension(k)>MAXM){
+        // The exact step's clusters (explicit excited states, beats not all left out: engine.rs `quiet_clusters`) in its bucket; where one takes it, any cluster a jump lands it in in its parts.
+        let quiet=crate::engine::quiet_clusters(model,settings);let exact_of=|k:usize|model.mixed(k)||(model.beating(k)&&quiet[k].is_none());let takes=(0..model.clusters()).any(exact_of);
+        if let Some(k)=(0..model.clusters()).find(|&k|exact_of(k)&&model.dimension(k)>MAXM){
             return Err(beyond(format!("子空间 {} 个态（{} 个激发态显式）超出精确步的 {MAXM} 个",model.dimension(k),model.dimension(k)-model.ground_dimension(k))));}
-        if let Some(k)=(0..model.clusters()).find(|&k|1+model.beats(k).0.len()>MOST_PARTS){return Err(beyond(format!("子空间 {} 的 {} 个残余拍频",k,model.beats(k).0.len()/2)));}
+        if let Some(k)=(0..model.clusters()).find(|&k|takes&&1+model.beats(k).0.len()>MOST_PARTS){return Err(beyond(format!("子空间 {} 的 {} 个残余拍频",k,model.beats(k).0.len()/2)));}
         if model.geometry.len()>MOST_BEAMS||model.carriers.len()>MOST_CARRIERS||model.focused.len()>MOST_FOCUSED{return Err(beyond("光束或强度维度太多".into()));}
         if let Some(c)=g.clusters.iter().find(|c|c.states.len()>MAXN){return Err(beyond(format!("子空间 {} 个态",c.states.len())));}
         let hm=model.hbar_over_mass;
@@ -197,8 +198,7 @@ impl Program{
         let mut first_fields:Vec<FirstField>=vec![];
         // The exact step's room in a trajectory's scratch: per cluster its parts' H and G, their working
         // room and its norms (the kernel's `exact_segment`) and its first orders' table, the largest of every cluster's where one takes it.
-        let quiet=crate::engine::quiet_clusters(model,settings);let exact_of=|k:usize|model.mixed(k)||(model.beating(k)&&quiet[k].is_none());
-        let takes=(0..model.clusters()).any(exact_of);let mut exact=0;
+        let mut exact=0;
         // The carriers whose static block on a cluster mixes its responses (ground.rs `Ground::unmixed`, the kernel's
         // `carrier_responses`), bits; and the near light's shifts ΔE_a^d a cluster's exact responses take (`exact_responses`,
         // ground.rs `Ground::dress_light`), bit d·NG + a: from each of its channels (c, b) the other near carriers' on b and
