@@ -124,10 +124,10 @@ fn compare(r:&Request,threshold:Option<f64>,allowance:f64,jumps:bool,fourth:bool
 fn compare_model(r:&Request,model:Model,dt:f64,threshold:Option<f64>,allowance:f64,jumps:bool){
     let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
     let(model,settings,trajectories)=setup(r,model,dt,threshold,allowance);
-    compare_from(&gpu,&model,&settings,&trajectories,jumps);
+    compare_from(&gpu,&model,&settings,&trajectories,jumps,0.);
 }
-/// `compare_model` from given states.
-fn compare_from(gpu:&gpu::Gpu,model:&Model,settings:&Settings,trajectories:&[Trajectory],jumps:bool){
+/// `compare_model` from given states. `crossing`: how far off ln‖ψ‖² the GPU's crossing may lie (`a_step_with_its_jump`), per jump of the step, its tolerances then with what that moves on the CPU itself, a step at each of its thresholds moved so.
+fn compare_from(gpu:&gpu::Gpu,model:&Model,settings:&Settings,trajectories:&[Trajectory],jumps:bool,crossing:f64){
     let dt=settings.dt;let fourth=model.fourth;let exact=(0..model.clusters()).any(|k|model.mixed(k)||model.beating(k));let(tp,tn,tk)=if exact{(5e-4,5e-4,5e-5)}else{(2e-5,2e-5,2e-5)};
     let program=gpu.program(model,settings).unwrap();
     let got=gpu.advance(&program,settings,trajectories,1).unwrap();
@@ -137,20 +137,29 @@ fn compare_from(gpu:&gpu::Gpu,model:&Model,settings:&Settings,trajectories:&[Tra
         let mut c=start.clone();engine.step(&mut c);
         let at=format!("trajectory {} (cluster {} → {}, jumps {})",start.index,start.cluster,c.cluster,c.jumps);
         assert_eq!((g.cluster,g.jumps,g.alive),(c.cluster,c.jumps,c.alive),"{at}");jumped+=(c.jumps>0) as usize;
-        assert!((g.threshold-c.threshold).abs()<=if fourth{1e-5*c.threshold}else{0.},"{at}: the new threshold {} against {}",g.threshold,c.threshold);
         let scale=c.kappa.iter().map(|x|x.abs()).fold(1.,f64::max);
+        let n=model.dimension(c.cluster);let(gn,cn)=(g.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>(),c.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>());
+        // What the crossing's own error moves on the CPU: r, κ, ln‖ψ‖² and ψ.
+        let(mut dr,mut dk,mut dn,mut dp)=([0_f64;3],[0_f64;3],0_f64,[0_f64;MOST_MIXED]);
+        if crossing>0.{for sign in [-1.,1.]{
+            let mut d=start.clone();d.threshold*=(sign*crossing*c.jumps as f64).exp();engine.step(&mut d);
+            if d.cluster!=c.cluster{continue;}
+            let dd=d.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>();dn=dn.max((dd.ln()-cn.ln()).abs());
+            for a in 0..3{dr[a]=dr[a].max((d.r[a]-c.r[a]).abs());dk[a]=dk[a].max((d.kappa[a]-c.kappa[a]).abs());}
+            for x in 0..n{dp[x]=dp[x].max((d.psi[x]*(1./dd.sqrt())-c.psi[x]*(1./cn.sqrt())).abs());}
+        }}
+        assert!((g.threshold-c.threshold).abs()<=if fourth{1e-5*c.threshold}else{0.},"{at}: the new threshold {} against {}",g.threshold,c.threshold);
         for a in 0..3{
             // The exact step's impulse on its node grid within its quadrature share (engine.rs `QUADRATURE`), where the CPU's
             // static cluster may take the spectral path exactly; a momentum's difference moves the position over the step's
             // flow by (ħ/m) dt Δκ.
             let k=tk*scale+if exact{QUADRATURE*(c.kappa[a]-start.kappa[a]).abs()}else{0.};
-            assert!((g.r[a]-c.r[a]).abs()<=2e-6*c.r.iter().map(|x|x.abs()).fold(1e-3,f64::max)+if exact{model.hbar_over_mass*dt*k}else{0.},"{at}: r {:?} against {:?}, κ {:?} against {:?}",g.r,c.r,g.kappa,c.kappa);
-            assert!((g.kappa[a]-c.kappa[a]).abs()<=k,"{at}: κ {:?} against {:?}",g.kappa,c.kappa);
+            assert!((g.r[a]-c.r[a]).abs()<=2e-6*c.r.iter().map(|x|x.abs()).fold(1e-3,f64::max)+if exact{model.hbar_over_mass*dt*k}else{0.}+dr[a],"{at}: r {:?} against {:?}, κ {:?} against {:?}, the crossing's own {dr:?}",g.r,c.r,g.kappa,c.kappa);
+            assert!((g.kappa[a]-c.kappa[a]).abs()<=k+dk[a],"{at}: κ {:?} against {:?}, the crossing's own {dk:?}",g.kappa,c.kappa);
         }
-        let n=model.dimension(c.cluster);let(gn,cn)=(g.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>(),c.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>());
         // Each jump redoes part of the step from a crossing found in single precision: the norm and the state alike.
-        assert!((gn.ln()-cn.ln()).abs()<=tn*(1+c.jumps) as f64,"{at}: ln‖ψ‖² {} against {}",gn.ln(),cn.ln());
-        for x in 0..n{let(a,b)=(g.psi[x]*(1./gn.sqrt()),c.psi[x]*(1./cn.sqrt()));assert!((a-b).abs()<=tp*(1+c.jumps) as f64,"{at}: ψ[{x}] {a:?} against {b:?}");}
+        assert!((gn.ln()-cn.ln()).abs()<=tn*(1+c.jumps) as f64+dn,"{at}: ln‖ψ‖² {} against {}",gn.ln(),cn.ln());
+        for x in 0..n{let(a,b)=(g.psi[x]*(1./gn.sqrt()),c.psi[x]*(1./cn.sqrt()));assert!((a-b).abs()<=tp*(1+c.jumps) as f64+dp[x],"{at}: ψ[{x}] {a:?} against {b:?}");}
     }
     if jumps{assert_eq!(jumped,trajectories.len(),"every trajectory jumps in the step");}
     println!("{} trajectories, {jumped} jumped",trajectories.len());
@@ -166,8 +175,8 @@ fn a_jump_is_the_cpu_s(){compare(&request(PGC),Some(0.999),f64::INFINITY,true,fa
 /// The same with the exact response (an allowance of zero: every step beyond the first order).
 #[test]
 fn a_jump_with_the_exact_response_is_the_cpu_s(){compare(&request(PGC),Some(0.999),0.,true,false);}
-/// On a cluster of all 8 ground states (two entries of each matrix per lane): a jump-free step, a jump at each thermal state with the first-order response, and a step with its jumps where
-/// their thresholds fall, which makes the same jumps, landings and losses (`steps_and_jumps`). Past a step's own crossing the continuous quantities cannot agree to single precision here: the crossing lies on the
+/// On a cluster of all 8 ground states (two entries of each matrix per lane): a jump-free step, a jump at each thermal state with the first-order response, and a step with a jump
+/// inside it (`steps_and_jumps`). Past a step's own crossing the continuous quantities agree only as far as the crossing does (`a_step_with_its_jump`): it lies on the
 /// single-precision norm and a ringing photon lands at its cluster's frames at the crossing's time, F = 1 and F = 2 4.3e4 rad/us apart. A threshold moved by that round-off (6e-8) on the CPU alone moves 10 of trajectories
 /// 0 to 63 (at a threshold of 0.999) by 4e-5 to 3e-4 in the state and up to 1.5e-3 in the momentum, the others by 1.4e-7 and 8e-7; the phase is as good as the photon's own draw, its mixture over τ the coherence Γ/(Γ + iδ) of 8e-4.
 #[test]
@@ -189,9 +198,9 @@ fn on_eight_states_a_jump_with_the_exact_response_is_the_cpu_s(){let r=request(M
 ///   on the PGC's explicit rung, whose beams all lie along one axis (κ 5e-6 off at most); with the first order, the
 ///   tables' single-precision slopes times that cancellation (its nearest state's κ_z scatters by 7e-7 of κ, up to
 ///   2e-6, unbiased, as the position moves by 2e-5 um);
-/// - a step with its jumps where their thresholds fall makes the same jumps, landings and losses. Its
-///   crossing is found on the single-precision norm: in a slowly decaying state (0.02/us on the PGC's
-///   explicit rung) its time moves by 1e-3 of itself, and the state after it by as much (unbiased).
+/// - a step with a jump inside it, at every place of the step, makes the same jump, landing and loss, and leaves the same r, κ and ψ
+///   (`a_step_with_its_jump`): the step redone to the jump's crossing, in the same order. The crossing is found on the single-precision norm (1.7e-6 to 5.4e-6 of
+///   ln‖ψ‖² off here): in a slowly decaying state (0.02/us on the PGC's explicit rung) its time moves by 1e-3 of itself, and the state after it by as much (unbiased).
 #[test]
 fn with_explicit_states_a_step_and_a_jump_are_the_cpu_s(){
     let(pgc,molasses,probe)=(request(PGC),request(MOLASSES),probed_twice());
@@ -222,18 +231,30 @@ fn same_jump(gpu:&gpu::Gpu,program:&program::Program,engine:&Engine,model:&Model
     for x in 0..n{let(a,b)=(g.psi[x]*(1./gn),c.psi[x]*(1./cn));off[1]=off[1].max((a-b).abs());assert!((a-b).abs()<=psi,"{at}: ψ[{x}] {a:?} against {b:?}");}
     off
 }
-/// A model's jump-free step, its jump at each thermal state with the responses `exact` lists, and a step with its jumps where their thresholds fall.
+/// A model's jump-free step, its jump at each thermal state with the responses `exact` lists, and a step with a jump inside it.
 fn steps_and_jumps(r:&Request,m:Model,dt:f64,exact:&[bool]){
     let Some(gpu)=device()else{return};
     compare_model(r,m.clone(),dt,Some(1e-300),f64::INFINITY,false);
     let(model,settings,trajectories)=setup(r,m,dt,None,f64::INFINITY);
     let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());let program=gpu.program(&model,&settings).unwrap();let engine=Engine::new(&model,settings.clone());
     for(t,&exact)in trajectories.iter().flat_map(|t|exact.iter().map(move|e|(t,e))){same_jump(&gpu,&program,&engine,&model,&settings,t,exact,if exact{2e-5}else{5e-6},1e-5);}
-    // A step with its jumps where their thresholds fall: the same jumps, landings and losses.
-    let got=gpu.advance(&program,&settings,&trajectories,1).unwrap();let mut jumped=0;
-    for(t,g)in trajectories.iter().zip(&got){let mut c=t.clone();engine.step(&mut c);jumped+=c.jumps as usize;
-        assert_eq!((g.cluster,g.jumps,g.alive),(c.cluster,c.jumps,c.alive),"trajectory {}",t.index);}
-    println!("{} jumps in a step, the same on both devices",jumped);
+    a_step_with_its_jump(&gpu,&model,&settings,&trajectories);
+}
+/// A step with a jump inside it, on both devices the same jump, landing and loss, and r, κ and ψ after it: each state's threshold at its own share of the state's fall over a jump-free step, the shares evenly over
+/// the step, so the crossings lie everywhere in it. The position says where in the step the jump was made: held at the step's middle through its jump, as the exact step once was, the recoil moves r by (ħ/m) κ_jump (τ/2 − t*). The crossing lies on the
+/// single-precision norm: within the GPU's largest ln‖ψ‖² off the CPU's in that jump-free step, and what that moves on the CPU itself goes into the tolerances (`compare_from`); a state that falls by less than that has no crossing to place.
+fn a_step_with_its_jump(gpu:&gpu::Gpu,model:&Model,settings:&Settings,thermal:&[Trajectory]){
+    let engine=Engine::new(model,settings.clone());let program=gpu.program(model,settings).unwrap();
+    let norm=|t:&Trajectory|t.psi[..model.dimension(t.cluster)].iter().map(|z|z.norm_sqr()).sum::<f64>().ln();
+    let free:Vec<Trajectory>=thermal.iter().map(|t|{let mut x=t.clone();x.threshold=1e-300;x}).collect();
+    let ends:Vec<f64>=free.iter().map(|t|{let mut c=t.clone();engine.step(&mut c);norm(&c)}).collect();
+    let round=gpu.advance(&program,settings,&free,1).unwrap().iter().zip(&ends).map(|(g,e)|(norm(g)-e).abs()).fold(0.,f64::max);
+    let last=thermal.len() as f64;
+    let placed:Vec<Trajectory>=thermal.iter().zip(&ends).enumerate().filter_map(|(i,(t,e))|{let share=(i as f64+1.)/(last+1.);let fall=norm(t)-e;
+        (fall*(1.-share)>2.*round).then(||{let mut x=t.clone();x.threshold=(norm(t)-share*fall).exp();x})}).collect();
+    assert!(2*placed.len()>=thermal.len(),"{} of {} states fall by more than the norm's {round:.1e} in a step",placed.len(),thermal.len());
+    compare_from(gpu,model,settings,&placed,true,round);
+    println!("{} of {} states' jumps within a step, the crossing within {round:.1e}",placed.len(),thermal.len());
 }
 /// The exact responses at thermal states (the kernel's `exact_responses`, model.rs `Exact`): every near
 /// beam's C_a R_l at each cluster column, dressed by the near light (ground.rs, # The near light's
@@ -282,7 +303,7 @@ fn every_cluster(r:&Request,m:Model,dt:f64){
     let states:Vec<Trajectory>=thermal.iter().enumerate().map(|(i,t)|{
         let k=i%model.clusters();let n=model.dimension(k);let mut x=t.clone();x.cluster=k;x.psi=[Complex::ZERO;MOST_MIXED];
         for b in 0..n{x.psi[b]=Complex::cis(1.7*((b+1)*(i+1)) as f64)*(1./(n as f64).sqrt());}x}).collect();
-    compare_from(&gpu,&model,&settings,&states,false);
+    compare_from(&gpu,&model,&settings,&states,false,0.);
     let program=gpu.program(&model,&settings).unwrap();let engine=Engine::new(&model,settings.clone());
     for t in &states{
         let mut c=t.clone();let(r0,t0)=(c.r,c.time);engine.jump(&mut c,r0,t0,false);let g=gpu.jump_probe(&program,&settings,t,false).unwrap();
@@ -350,7 +371,7 @@ fn at_fourth_order_a_step_and_a_jump_are_the_cpu_s(){
 }
 
 /// The same on the gray molasses, whose H^(4) beats at the hyperfine splitting: its slabs in the parts of the exact step. A jump-free
-/// step, and a jump at each thermal state (the step's own crossing moves with the single-precision norm, the state by as much).
+/// step, and a jump at each thermal state: past a step's own crossing the slow part's and the photon's phases at its time, 4.3e4 rad/us between F = 1 and F = 2, are as good as a draw (a crossing moved by 1e-4 us moves (1 − p)/A by 0.5 % and κ by 0.6/um).
 #[test]
 fn at_fourth_order_a_beating_step_and_jump_are_the_cpu_s(){
     let Some(gpu)=device()else{return};
