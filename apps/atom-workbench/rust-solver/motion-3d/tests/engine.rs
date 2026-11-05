@@ -522,7 +522,9 @@ fn a_shallow_trap_s_step_holds_t_within_its_share(){
     let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/shallow_probe_motion.json")).unwrap();
     let mut r=scene::request(&fixture["payload"]);let(duration,outputs,count)=(500.,26,1024u64);
     r.times_us=(0..outputs).map(|i|duration*i as f64/(outputs-1) as f64).collect();
-    let dt=solve(&r,Device::Cpu,&mut |_,_|{}).unwrap().time_step_us;
+    let solved=solve(&r,Device::Cpu,&mut |_,_|{}).unwrap();let dt=solved.time_step_us;
+    // What the setup's bound ensemble leaves out (a third of this shallow trap's atoms) is a note beside the ledger, no flag.
+    let(note,flag)=(solved.approximations.note.as_deref().unwrap_or(""),solved.approximations.flagged.as_deref().unwrap_or(""));assert!(note.contains("不计入")&&!flag.contains("不计入"),"{note} | {flag}");
     let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
     let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();let trap=initial.traps[reference];
     let interval=duration/(outputs-1) as f64;let steps=(interval/dt).round() as usize;
