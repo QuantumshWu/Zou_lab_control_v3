@@ -927,7 +927,7 @@ pub struct Held{pub point:Point,pub locals:Vec<Local>,pub jumps:Vec<Vec<[Vec<Com
 /// cluster's propagator exp(−i H dt/2) over half the settings' step; the momentum diffusion's hook.
 /// Per cluster of ground states with beats the largest bound of those beats (`Segment::resolve`, its step's) where the exact step leaves them all out at the model's reach -- wherever the atom goes:
 /// a generator static within the exponentials' share, the plain step's, at a tenth of the work (# The exact step). None for the others.
-fn quiet_clusters(model:&Model,s:&Settings)->Vec<Option<f64>>{
+pub(crate) fn quiet_clusters(model:&Model,s:&Settings)->Vec<Option<f64>>{
     (0..model.clusters()).map(|k|{
         if model.mixed(k)||!model.beating(k){return None;}
         let mut most=0_f64;

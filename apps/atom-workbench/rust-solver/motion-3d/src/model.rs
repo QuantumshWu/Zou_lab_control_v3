@@ -59,7 +59,8 @@
 //! its adjoint), and the gradient's Hermitian part pairs them, G_{−Ω} = G_Ω†. Where the beats are
 //! integer multiples of one frequency ω₀ (Euclid's algorithm within the round-off) their period 2π/ω₀
 //! lets the exact step cache one period's propagators (engine.rs). A cluster with beats or explicit
-//! excited states takes the exact step; `local` is the release's static clusters of ground states'.
+//! excited states takes the exact step, unless its beats are all within the exponentials' share wherever the atom goes
+//! (engine.rs `quiet_clusters`); `local` is the plain step's, its beats at the step's middle.
 //!
 //! # The near light's dressing
 //! Every near carrier's response is dressed by the other near light (ground.rs, # The near light's
