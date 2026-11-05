@@ -992,6 +992,18 @@ fn a_beating_grid_s_measured_phase_meets_its_shares(){
     assert!(impulse/size<=QUADRATURE,"the impulse {:e} against {QUADRATURE:e}",impulse/size);
 }
 
+/// A far drive the dressing brings takes the rule of every coupling (model.rs `layouts`): a near tweezer's on the explicit states of a probe's rung is left out, its mixing booked within the budget.
+#[test]
+fn a_far_drive_of_the_dressing_folds(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/near_tweezer_probe_motion.json")).unwrap();let mut r=sparse_request(&v);r.times_us=(0..21).map(|i|5.*i as f64).collect();
+    let ladder=Ground::allowances(&r).unwrap();let mut seen=false;
+    for &a in ladder.iter().skip(1).take(3){let model=Model::with(&r,a).unwrap();
+        if model.effective_dropped>0.{seen=true;assert!(model.effective_dropped<=BUDGET,"{}",model.effective_dropped);}
+        for k in 0..model.clusters(){println!("rung {a:.3e}, cluster {k} of {} states: beats {:?}, scale {:.3e}, dropped {:.3e}",model.dimension(k),model.beats(k).0.iter().filter(|w|**w>0.).map(|w|format!("{w:.3e}")).collect::<Vec<_>>(),model.ground.generator_scale,model.effective_dropped);}
+    }
+    assert!(seen,"no far drive of the dressing on this ladder");
+}
+
 /// What a beating grid lands between the groups of ground states over the run (solve.rs `grid_phase`, `landed_excess`), on the same PGC: at the rung a solve takes there it leaves the phase its shares measure; at the rung with
 /// three states of F' = 2 explicit, which those shares let the grid kick through the beat, it takes the phase down by a third. A step within a spacing starts the search at its one panel (it ran to 1e28 once).
 #[test]
