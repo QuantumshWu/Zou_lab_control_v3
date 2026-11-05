@@ -257,7 +257,7 @@
 //! An output the pilot under-predicts gets its trajectories in the next batch, which pass every earlier output too.
 //! On the GPU a wave's time grows with its trajectories (a laptop's RTX 5070 at the 3D PGC's step: 2.1 s for 8, 2.7 for 256, 3.96 for 576 -- its clock falls with the load, its cycles per step about stay), and a wave costs at least a trajectory's time as far as it goes, so that its first
 //! wave runs what the pilot predicts is needed and the need's own error (`first_ends`), each group as far as the reach wants it: a group that stops early leaves the others its clock. (Over 12 seeds: the need alone ran a second wave on 4 of DEFAULT's and 7 of THREE's, against 1 and 2 with its error; twice its error took the kernel's mean up 4-17 % on GMD1C, TET and PGC3D.)
-//! T rests on the atoms still held, and its statistic stands at the share of atoms it reads, its relative error times the held share, as a population's below: read among the held atoms alone a share f would ask 1/f the trajectories, for the T of atoms the light has mostly blown out (a probe at 100 mW/cm², 97 % lost by 25 us: 16384 trajectories, the cap, against 7300-8100). Its need goes as that share, 8 f/R² with x = f N atoms' relative error √(2/x) and R its room, from nothing with no atom held: at the root of the share every count from two asked 8/R² and none or one nothing, so that on a probe at 1 W/cm², 96-98 % lost at its first output of 50 us, a first batch's 2 or 3 held atoms went on to 800-2000 trajectories for T's of a few atoms and one holding fewer stopped at 80; at the share all stop at 80. The reported errors stay T's own: where few atoms remain the output says so.
+//! T rests on the atoms still held, and its statistic stands at the share of atoms it reads, its relative error times the held share, as a population's below: read among the held atoms alone a share f would ask 1/f the trajectories, for the T of atoms the light has mostly blown out (a probe at 100 mW/cm², 97 % lost by 25 us: 16384 trajectories, the cap, against 7300-8100). Its need goes as that share, 8 f/R² with x = f N atoms' relative error √(2/x) and R its room, from nothing with no atom held: at the root of the share every count from two asked 8/R² and none or one nothing, so that on a probe at 1 W/cm², 96-98 % lost at its first output of 50 us, a first batch's 2 or 3 held atoms went on to 800-2000 trajectories for T's of a few atoms and one holding fewer stopped at 80; at the share all stop at 80. The reported errors stay T's own, of one estimate (`Record::temperature_errors`): where few atoms remain the output says so.
 //! The populations' target is the app's, whose rows are the probabilities p (1 − L) that the atom is in a state and still held, beside the loss L, adding up to one: a population's statistic, and its reported error, are its error among the held atoms times the held share (`shown_error`), the loss's as it is. Read among the held atoms alone they asked those 7300-8100 of that probe, about 1000 now, and of a probe at 10 W/cm², 99.5 % lost by 600 us, 130 000-420 000 for numbers shown at 0.5 % of their size.
 //! Trajectories alike read no error: N atoms all lost, or none of them in a state, stand at a jackknife of zero, which says nothing of what none of them met; Wilson's interval at `CONFIDENCE` leaves it up to z²/(N + z²) away (`unseen`). So an output's populations and loss take at least the trajectories that bring that within their room, z²(1/R − 1), 76 at the target (`population_ratio`), and the reported error is at least that far end. (A probe at 1 W/cm², 2.5 % held at its first output of 10 us: its pilot of 32 kept none, its run of 16 read all lost.) It is what a count of none says, and below what any output with counts to read asks but for a run of very few trajectories, whose N it sets.
 //! An output's need is its trajectories so far times its worst ratio squared (the statistics over their rooms); a trajectory
@@ -631,7 +631,12 @@ impl Account{
 /// errors against the targets -- the populations' with the loss's, one vector of probabilities adding up to one, and T's, the largest axis's at the share of
 /// atoms it reads -- with what its a-priori totals took there as measured. Computed once a batch (`records`): the stop
 /// (`output_ratios`), the flag and the ledger's lines (`ledger`) and the reported errors (`assemble`) only read it.
-struct Record<'a>{estimate:&'a Estimate,population:Account,temperature:Account,measured:Measured}
+struct Record<'a>{estimate:&'a Estimate,population:Account,temperature:Account,measured:Measured,reads:bool}
+impl Record<'_>{
+    /// T's standard errors, per axis and of its total, as the app shows them: its own (the estimate's, stats.rs), whose largest relative one at the share of atoms it reads the
+    /// statistic stands on (`statistics`); none, infinite here and null in the contract, where fewer than two atoms read a T (`reads_temperature`).
+    fn temperature_errors(&self)->([f64;3],f64){if self.reads{(self.estimate.temperature_error,self.estimate.temperature_total_error)}else{([f64::INFINITY;3],f64::INFINITY)}}
+}
 
 /// The records of a solve's estimates so far.
 fn records<'a>(model:&Model,base:&Ledger,estimates:&'a [Estimate],bias:[f64;2],frequencies:[f64;3],memory:&Memory)->Vec<Record<'a>>{
@@ -646,9 +651,9 @@ fn records<'a>(model:&Model,base:&Ledger,estimates:&'a [Estimate],bias:[f64;2],f
         let(population,temperature)=(POPULATION_TARGET,TEMPERATURE_TARGET/s.weight);
         // What the first order's transfer leaves out (model.rs `Model::first_error`), on T alone: its friction against the recoil heating at the T the atoms have.
         let measured=Measured{charge,profile:e.profile,doppler:e.doppler,transfer:model.first_error*e.temperature_total};
-        if i==0{return Record{estimate:e,population:Account::initial(population),temperature:Account::initial(temperature),measured};}
+        if i==0{return Record{estimate:e,population:Account::initial(population),temperature:Account::initial(temperature),measured,reads:true};}
         let[p,t]=apriori.at(measured);
-        Record{estimate:e,measured,
+        Record{estimate:e,measured,reads:reads_temperature(e),
             population:Account{statistic:s.population,open:unseen(e.trajectories),bias:bias[0],model:p,target:population},
             temperature:Account{statistic:s.temperature,open:0.,bias:bias[1],model:t,target:temperature}}
     }).collect()
@@ -1957,7 +1962,7 @@ fn assemble(model:&Model,records:&[Record],outcome:&Outcome,listed:&[usize],time
     let explicit:usize=model.ground.clusters.iter().map(|c|c.excited.len()).sum();
     let internal=if explicit>0{format!("内态（子空间 {}，其中 {explicit} 个激发态显式、精确传播，其余激发态二阶消去）",sizes.join("+"))}else{format!("消去激发态后的基态内态（子空间 {}）",sizes.join("+"))};
     // Each output's source: itself where an atom is held (t = 0 always), else the last that held one.
-    let held=|i:usize|i==0||estimates[i].loss<1.;let read=|i:usize|i==0||reads_temperature(estimates[i]);
+    let held=|i:usize|i==0||estimates[i].loss<1.;let read=|i:usize|records[i].reads;
     let(source,measured)=(last_holding(estimates.len(),&held),last_holding(estimates.len(),&read));
     let mut flag=|note:String|ledger.flagged=Some(match ledger.flagged.take(){Some(r)=>format!("{note}；{r}"),None=>note});
     if let Some(gone)=(0..estimates.len()).find(|&i|!held(i)){flag(format!("{} 起已无原子被俘获（丢失概率 1）：此后的布居、温度与分布沿用 {} 的值，仅供参考",when(times[gone]),when(times[source[gone]])));}
@@ -1968,9 +1973,9 @@ fn assemble(model:&Model,records:&[Record],outcome:&Outcome,listed:&[usize],time
         sample_errors:records.iter().map(|r|r.population.read()/CONFIDENCE).collect(),
         estimated_errors:records.iter().map(|r|r.population.total()).collect(),
         temperature_uk:carried(&|e|e.temperature),
-        temperature_errors_uk:estimates.iter().enumerate().map(|(i,e)|if read(i){e.temperature_error}else{[f64::INFINITY;3]}).collect(),
+        temperature_errors_uk:records.iter().map(|r|r.temperature_errors().0).collect(),
         temperature_total_uk:measured.iter().map(|&j|estimates[j].temperature_total).collect(),
-        temperature_total_errors_uk:estimates.iter().enumerate().map(|(i,e)|if read(i){e.temperature_total_error}else{f64::INFINITY}).collect(),
+        temperature_total_errors_uk:records.iter().map(|r|r.temperature_errors().1).collect(),
         mean_velocity_mps:carried(&|e|e.mean_velocity),
         trap_frequency_khz:frequencies.map(|w|w/std::f64::consts::TAU*1e3),
         mean_occupation:carried(&|e|e.occupation),
