@@ -644,7 +644,8 @@ fn a_lone_state_s_round_off_is_no_gain(){
 /// The near light comes on at t = 0, and its fold's shift is no part of the ensemble's energy: on the tweezer PGC's
 /// all-folded model the 10 MHz probe's denominator closes on a shell about the focus, where with it the envelope's top
 /// stood at 137 k_BT against the focus's 34 and no proposal in e^100 was kept (the solve never reached its first
-/// result). The envelope sits at the focus's depth, and the draws take no time.
+/// result). The envelope sits at the focus's depth, and the draws take no time. Brighter, the fold lifts the whole focus above the
+/// far level, where the near light leaves no state bound: the draws are the trap's still, and what the light does to them is the run's.
 #[test]
 fn a_near_probe_s_fold_stays_out_of_the_ensemble_s_energy(){
     let fixture:Value=serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap();
@@ -654,6 +655,14 @@ fn a_near_probe_s_fold_stays_out_of_the_ensemble_s_energy(){
     assert!(ratio<=1.01,"the envelope's top {ratio} times the depth");
     let settings=Settings::new(0.05,&initial.traps[0],f64::EPSILON,false);
     for i in 0..256u64{let t=initial_trajectory(&model,&settings,&initial,9,i,Stratum::single(i));assert!(t.r.iter().all(|x|x.is_finite()));}
+    for beam in r.beams.iter_mut().filter(|b|b.waist_um.is_none()){for x in beam.coupling.real.iter_mut().chain(beam.coupling.imag.iter_mut()){*x*=4.;}}
+    let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();let(cluster,state,_)=initial.states[0];
+    let mut psi=[Complex::ZERO;MOST_MIXED];psi[state]=Complex::ONE;
+    let(level,potential)=(model.trap_level(cluster,state,[0.;3]),model.trap_potential(cluster,&model.point([0.;3],[0.;3]),&psi,0.));
+    assert!(level<0.&&potential>0.,"the trap's own level {level}, with the near light {potential}");
+    let settings=Settings::new(0.05,&initial.traps[0],f64::EPSILON,false);
+    for i in 0..256u64{let t=initial_trajectory(&model,&settings,&initial,9,i,Stratum::single(i));
+        let kinetic=0.5*model.hbar_over_mass*t.kappa.iter().map(|k|k*k).sum::<f64>();assert!(kinetic+model.trap_level(cluster,state,t.r)<0.,"an atom the trap does not bind");}
 }
 
 /// A standing wave's neighbouring sites: their atoms start about their own sites' bottoms (lib.rs `initial_trajectory`:

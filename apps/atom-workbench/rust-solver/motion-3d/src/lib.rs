@@ -115,15 +115,14 @@ impl Latin{
 
 /// A trajectory's initial state, its group's member (`Stratum`): an internal basis state drawn from
 /// the initial populations; its position and momentum from that state's bound thermal ensemble
-/// (ensemble.rs: the lowered isothermal at T over its trap's bound states, every atom bound by the
-/// loss's own measure too), along each principal axis of its trap scaled to the harmonic oscillator's
+/// (ensemble.rs: the lowered isothermal at T over its trap's bound states), along each principal axis of its trap scaled to the harmonic oscillator's
 /// thermal Wigner function, T* = (ħω/2k)coth(ħω/2kT): the momentum by √(T*/T), and the position's displacement from
 /// the bottom of the atom's own well likewise, that displacement x = K⁻¹∇V at the atom (V the ensemble's potential,
 /// K the trap's stiffness at the focus): r itself in a harmonic trap; about its own site in a standing wave, whose
 /// sites are as stiff, ∝ sin(2kz) -- continuous, no site to pick, zero at the nodes where no oscillator holds it.
 /// (Scaled about the focus a neighbouring site's atom left its site's bottom by (√(T*/T) − 1)λ/2: 975 uK of potential
-/// energy at the retro tweezer's site 1, against 14 uK in the centre.) A scaled draw the loss's measure would call
-/// unbound (the factors lift its energy by their excess over one) is drawn again from its own stream. Along
+/// energy at the retro tweezer's site 1, against 14 uK in the centre.) A scaled draw the trap would not bind
+/// (the factors lift its energy by their excess over one) is drawn again from its own stream. Along
 /// frozen lab axes (a validation's), nothing; a state the trap does not hold at rest at the focus. At
 /// fourth order the internal state is the bare state's slow part (engine.rs `slow_start`).
 pub fn initial_trajectory(model:&Model,settings:&Settings,initial:&Initial,seed:u64,index:u64,stratum:Stratum)->Trajectory{
@@ -168,7 +167,7 @@ fn initial_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,purpos
             loop{
                 let(r,kappa)=(displaced(draw.0),scaled(draw.1));
                 let kinetic=0.5*model.hbar_over_mass*kappa.iter().map(|k|k*k).sum::<f64>();
-                if kinetic+model.trap_potential(cluster,&model.point(r,kappa),&psi,0.)<0.{break(r,kappa);}
+                if kinetic+model.trap_level(cluster,state,r)<0.{break(r,kappa);}
                 draw=e.draw(model,settings.free,&mut rng,&mut |rng|rng.interior());
             }
         }
