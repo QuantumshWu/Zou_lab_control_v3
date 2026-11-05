@@ -134,11 +134,12 @@
 //! All go about as dt², so a step that misses is shrunk by the square root of its excess and checked
 //! again, and one that meets them with room is grown the same way, by whatever factor -- from the second
 //! check on by the power the last two measured (`power`) --, until a step
-//! comes up twice: first by the population criterion's bound, then from the largest step that met
-//! the targets by it with the population error measured -- by the excess of the criteria evaluated
+//! comes up twice: first by the population criterion's bound, as far as the first step it alone misses, then from the largest step that met
+//! the targets by it, or that one, with the population error measured -- by the excess of the criteria evaluated
 //! (`next_step`): where the motion or the loss missed, the population was not measured, and its bound,
 //! which over-counts several times where the measured search runs, is left out (a step that missed by
-//! 1 % on the motion went back by the bound's ninefold excess to a third of its size). Every checked
+//! 1 % on the motion went back by the bound's ninefold excess to a third of its size). A bound that a measured error then takes back paid every finer check for nothing: the orbits go as the step's
+//! count, and on a PGC with its resonant probe at 100 mW/cm² they took 99.6 % of its checks, two thirds of that at 0.005 us, where the bound met, for a step of 0.05 us (its bound 7 there, its measured error 0.4). Every checked
 //! step that met the targets is a candidate, and the largest is kept (`kept`) -- the field's rule, the
 //! largest step that meets the tolerances --, a finer one only where it is predicted to cost less by
 //! more than the prediction's own uncertainty: the relative standard error of the trajectories the
@@ -726,7 +727,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let binding=vec![1.;starts.len()];let probes=bound_probes(&c.model,&starts,&binding);
         let deposits=Deposits::default();
         let doubled=|k:usize|{let r=step_excess(&Engine::new(&c.model,running(k,start_waiting,allowance,c.phase)),&starts,&binding,start_waiting,&probes,period,0.,tolerances,&deposits);Check{steps:k,population:r[0],loss:r[1],motion:r[2]}};
-        let mut bound=vec![];search(first,most,&[],&doubled,None,&mut bound);
+        let mut bound=vec![];search(first,most,&[],&doubled,None,false,&mut bound);
         bound.iter().filter(|c|c.met()).map(|c|c.steps).min().unwrap_or(bound[bound.len()-1].steps)};
     let pilot_harmonic=Harmonic::new(&pilot_candidate.model,&piloting(steps,start_waiting,pilot_candidate.phase),&pilot_candidate.initial,steps,outputs);
     let(pilot_states,pilot_jumps,pilot_groups)=sample_states(&pilot_candidate.model,&piloting(steps,start_waiting,pilot_candidate.phase),&pilot_candidate.initial,seed,pilot,steps,outputs,&pilot_harmonic);
@@ -1280,15 +1281,16 @@ fn next_groups(reach:&[u64],counts:&[u64])->Vec<usize>{
 /// it was checked) and the next step from it (`next_step`) -- from the second check on by the excess's own power over the last two,
 /// the criteria going as dt^q with q from 2 to 3 where the square root alone crept up on a step in ten checks (`power`) --,
 /// until a step comes up twice, at most 8 checks;
-/// with `measure` (the measured search) the population error measured where the population decides a step.
-fn search(first:usize,most:usize,known:&[Check],check:&dyn Fn(usize)->Check,measure:Option<&dyn Fn(usize)->f64>,checked:&mut Vec<Check>){
+/// with `measure` (the measured search) the population error measured where the population decides a step; with `hand_over`, a bound's search that a measured one takes up, until the first step its bound alone misses.
+fn search(first:usize,most:usize,known:&[Check],check:&dyn Fn(usize)->Check,measure:Option<&dyn Fn(usize)->f64>,hand_over:bool,checked:&mut Vec<Check>){
     let mut steps=first;
     for _ in 0..8{
         if checked.iter().any(|c|c.steps==steps){break;}
         let mut c=known.iter().find(|c|c.steps==steps).copied().unwrap_or_else(||check(steps));
         if let Some(m)=measure.filter(|_|c.decided_by_population()){c.population=m(steps);}
         let q=checked.last().map_or(2.,|last:&Check|power(last,&c));
-        checked.push(c);steps=next_step(&c,measure.is_some(),most,q);
+        checked.push(c);if hand_over&&c.decided_by_population()&&c.population>1.{break;}
+        steps=next_step(&c,measure.is_some(),most,q);
     }
 }
 
@@ -1348,7 +1350,7 @@ impl Check{
 }
 
 /// A model's step check on sampled states (module documentation, # Time step): the bound rule's search from
-/// `first` (`search`, the next step from the criteria evaluated, `next_step`), then, where the population criterion
+/// `first` (`search`, the next step from the criteria evaluated, `next_step`) up to the first step its bound alone misses, then, where the population criterion
 /// decides that rule's step, the search from it with the population error measured where it decides. Kept: the
 /// largest met step, a finer one only for a predicted saving beyond the need's relative error `need` (`kept`; the
 /// weighed cost `cost`), and the rule taken once more over every step from the largest to the finest candidate; or the
@@ -1363,9 +1365,9 @@ fn step_check(model:&Model,states:&[Trajectory],binding:&[f64],settings:&dyn Fn(
     let doubled=|steps:usize|{let r=step_excess(&Engine::new(model,settings(steps)),states,binding,waiting,&probes,period,escape,tolerances,deposits);Check{steps,population:r[0],loss:r[1],motion:r[2]}};
     let measure=|steps:usize|accumulated_excess(&Engine::new(model,settings(steps)),states,horizon,subsample,tolerances[0]);
     let checked=|steps:usize|{let mut c=doubled(steps);if c.decided_by_population(){c.population=measure(steps);}c};
-    let mut bound=vec![];search(first,most,known,&doubled,None,&mut bound);
+    let mut bound=vec![];search(first,most,known,&doubled,None,true,&mut bound);
     let grown=*bound.iter().filter(|c|c.met()).min_by_key(|c|c.steps).unwrap_or(&bound[bound.len()-1]);
-    let mut measured=vec![];if grown.decided_by_population(){search(grown.steps,most,&bound,&doubled,Some(&measure as &dyn Fn(usize)->f64),&mut measured);}
+    let mut measured=vec![];if grown.decided_by_population(){search(grown.steps,most,&bound,&doubled,Some(&measure as &dyn Fn(usize)->f64),false,&mut measured);}
     let mut candidates:Vec<Check>=bound.iter().chain(&measured).filter(|c|c.met()).copied().collect();
     let chosen=if candidates.len()>1{
         let mut choice=kept(&candidates,cost,need).unwrap_or(grown);
@@ -2039,9 +2041,13 @@ mod tests{
         for delta in [-0.02,-1e-3,0.,1e-3,0.02]{
             let check=|s:usize|{let x=s as f64;Check{steps:s,population:8.86*(33./x).powi(2),loss:0.,motion:0.1075*(99./x).powf(power)*(1.+delta)}};
             let measure=|s:usize|0.016*(99./s as f64).powi(2);
-            let mut bound=vec![];search(43,most,&[],&check,None,&mut bound);
+            let mut bound=vec![];search(43,most,&[],&check,None,false,&mut bound);
             let grown=*bound.iter().filter(|c|c.met()).min_by_key(|c|c.steps).unwrap();
-            let mut measured=vec![];search(grown.steps,most,&bound,&check,Some(&measure as &dyn Fn(usize)->f64),&mut measured);
+            let mut measured=vec![];search(grown.steps,most,&bound,&check,Some(&measure as &dyn Fn(usize)->f64),false,&mut measured);
+            // Handed over at the first step the bound alone misses, the same step, for one finer check less.
+            let mut handed=vec![];search(43,most,&[],&check,None,true,&mut handed);assert!(handed.last().unwrap().decided_by_population()&&handed.last().unwrap().population>1.&&handed.len()<bound.len(),"{handed:?}");
+            let mut over=vec![];search(handed.last().unwrap().steps,most,&handed,&check,Some(&measure as &dyn Fn(usize)->f64),false,&mut over);
+            let taken=over.iter().filter(|c|c.met()).map(|c|c.steps).min().unwrap();assert!(taken==33||taken==34,"{over:?}");
             let kept=measured.iter().filter(|c|c.met()).map(|c|c.steps).min().unwrap();
             assert!(grown.steps==99&&(kept==33||kept==34),"δ {delta}: grown {}, kept {kept} steps ({measured:?})",grown.steps);
         }
