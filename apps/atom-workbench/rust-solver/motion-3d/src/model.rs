@@ -2675,6 +2675,13 @@ mod tests{
         for node in 0..model.tables.data[k].len()/(2*size){for i in q..q+square{for c in 0..2{model.tables.data[k][2*(node*size+i)+c]*=1.-1e-6;}}}
         let e=model.lindblad().expect_err("a gain of a millionth of a rate");assert!(e.starts_with(NOT_LINDBLAD),"{e}");
     }
+    /// The ladder a solve climbs holds every rung of the rule's but those whose new explicit states no drive reads at any position: the tweezer PGC's D2 light on the D1 states.
+    #[test]
+    fn a_rung_no_drive_reads_is_no_rung(){
+        let f:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/tweezer_pgc.json")).unwrap();
+        let g=crate::ground::Ground::bare(&crate::ground::tests::request(&f["request"])).unwrap();let(all,ladder)=(g.rungs(),g.ladder());
+        assert!(ladder[0]==f64::INFINITY&&ladder.len()>1&&ladder.len()<all.len()&&ladder.iter().all(|a|all.contains(a)),"{all:?} {ladder:?}");
+    }
     /// Residuals within the round-off of zero are static and of each other one beat; the beats come in
     /// pairs ±Ω; harmonics of one frequency have its period, incommensurate ones none.
     #[test]

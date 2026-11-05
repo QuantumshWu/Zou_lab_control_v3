@@ -1417,7 +1417,13 @@ impl Ground{
     /// other ground states' still folded (PGCP_10: the near probe's drives alone, its cooling beams folded).
     pub fn allowances(request:&Request)->Result<Vec<f64>,String>{Ok(Ground::bare(request)?.rungs())}
     /// The allowances of a generator before the rule (`allowances`, `bare`).
-    pub(crate) fn rungs(&self)->Vec<f64>{
+    pub(crate) fn rungs(&self)->Vec<f64>{self.rungs_where(false)}
+    /// The rungs a solve climbs (solve.rs, # The fold's choice): `rungs` less those that add explicit states no drive takes past the rule's per-item threshold at any position (`BUDGET`, the drive's
+    /// `estimate`, a bound over the trap). Such a rung keeps what no run's statistics could read, and it can cost without limit: a tensor scene's D1 light on the D2 states, 7 THz away at 1e-12 of saturation, merges
+    /// the hyperfine levels into one cluster of 23 states on a grid of that beat, and its first read of the grid outlasted five minutes where the rungs before it took a second in all. (A drive that nears
+    /// resonance anywhere in the trap reads there, however low its mean: the retro-reflected tweezer's chosen rung stands at a mean of 2e-3.)
+    pub(crate) fn ladder(&self)->Vec<f64>{self.rungs_where(true)}
+    fn rungs_where(&self,worth:bool)->Vec<f64>{
         let g=self;let ne=g.excited_states.len();
         let excited=g.judged(f64::INFINITY);
         let mut totals:Vec<f64>=vec![];
@@ -1430,7 +1436,11 @@ impl Ground{
         let mut out=vec![f64::INFINITY];let mut last=Ground::explicit_states(&excited,ne);
         for t in totals{
             let explicit=Ground::explicit_states(&g.judged(t),ne);
-            if explicit!=last{out.push(t);last=explicit;}
+            if explicit!=last{
+                let reads=excited.iter().any(|x|matches!(x.kind,ExcitedKind::Drive(d)if explicit[d.excited]&&!last[d.excited])&&x.estimate>BUDGET);
+                if !worth||reads{out.push(t);}
+                last=explicit;
+            }
         }
         out
     }
