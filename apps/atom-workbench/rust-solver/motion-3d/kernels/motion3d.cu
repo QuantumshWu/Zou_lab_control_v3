@@ -50,14 +50,14 @@ typedef unsigned long long u64;
 #define WARPS 8                         // trajectories per block: lib.rs `TASK`
 // An output's sums (stats.rs `Sums`; src/gpu/mod.rs `sums_of`): held, profile, doppler, the 32
 // populations; the held twin's 32 populations, Σ_k c_k² and Σ_k c_k p_k; the folded excited population
-// (η²); per lab axis the motion's Σκ, Σκ², Σr, Σr²; per lab axis the harmonic control's Σc, Σc², Σc κ².
+// (η²); per lab axis the motion's Σκ, Σκ²; per lab axis the harmonic control's Σc, Σc², Σc κ².
 #define TWIN 35                         // where the held twin's sums start
 #define FOLDED 69                       // where the folded excited population's sum is
 #define POINT_RECORD 70                 // the part taken at the output time
 #define MOTION 70                       // where the motion windows' means start
-#define HARMONIC 82                     // where the harmonic control's sums start
-#define RECORD 91
-#define CLOSE 8                         // a closing window's record: held, ⟨κ⟩, ⟨κ²⟩, ⟨r⟩, ⟨r²⟩, the harmonic control's c, c², c ⟨κ²⟩
+#define HARMONIC 76                     // where the harmonic control's sums start
+#define RECORD 85
+#define CLOSE 6                         // a closing window's record: held, ⟨κ⟩, ⟨κ²⟩, the harmonic control's c, c², c ⟨κ²⟩
 #define SLOT_RECORD (POINT_RECORD+3*2*CLOSE)   // a trajectory's record of an interval: the point's, per lab axis two closing windows' 
 #define MOST_INTERVALS 64               // the most output intervals of a launch (the records' room)
 #define FULL 0xffffffffu
@@ -316,7 +316,7 @@ __constant__ Program P;
 struct State{
     double q[3],p[3];                   // position (um) and momentum over ħ (1/um) on the trap's principal axes
     double time,logn,threshold,log_threshold;
-    double prefix[15];                  // per lab axis: steps, Σκ, Σκ², Σr, Σr² through the last step (lib.rs `Windows`)
+    double prefix[9];                   // per lab axis: steps, Σκ, Σκ² through the last step (lib.rs `Windows`)
     double q0[3],p0[3];                 // the initial ones: the harmonic control's
     double twin_logn,twin_threshold,twin_log_threshold;   // the held twin's (control.rs)
     float2 psi[MAXM];                   // ψ/‖ψ‖ on its cluster
@@ -2788,11 +2788,11 @@ __device__ void record(Warp& W,const Traj& t,int lane,double* out){
 // The motion windows (lib.rs `Windows`): output o's window along an axis is the steps within
 // min(h, o·steps) of o·steps, h the axis's half-width, so it ends at c(o) = o·steps + min(h, o·steps),
 // which grows with o: in an interval at most one whole window and one early one end. A warp keeps the
-// prefix sums of its steps' (1, κ, κ², r, r²) per lab axis -- lane 5a + v holds axis a's v -- and a
+// prefix sums of its steps' (1, κ, κ²) per lab axis -- lane 3a + v holds axis a's v -- and a
 // ring of them per axis (a power of two of at least 2h + steps + 1 steps), long enough to hold a
 // window's start until the interval its end falls in.
 __device__ __forceinline__ int window_end(const Run& R,int a,int o){const int at=o*R.steps;return at+min(R.half[a],at);}
-__device__ __forceinline__ int ring_at(const Run& R,int a,int k){return R.ring_at[a]+5*(k&(R.ring[a]-1));}
+__device__ __forceinline__ int ring_at(const Run& R,int a,int k){return R.ring_at[a]+3*(k&(R.ring[a]-1));}
 
 // ---------------------------------------------------------------------------------------------
 // The kernel: every slot of the wave with a trajectory (each its warp and block) from where it stands to the output
@@ -2818,7 +2818,7 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Run R){
         t.time=S->time;t.logn=S->logn;t.threshold=S->threshold;t.log_threshold=S->log_threshold;
         t.cluster=S->cluster;t.jumps=S->jumps;t.death=S->death;t.index=S->index;t.beats=S->beats;
         h.logn=S->twin_logn;h.threshold=S->twin_threshold;h.log_threshold=S->twin_log_threshold;h.cluster=S->twin_cluster;h.jumps=S->twin_jumps;
-        if(lane<15)prefix=S->prefix[lane];
+        if(lane<9)prefix=S->prefix[lane];
         if(lane<MAXM)W.psi[lane]=S->psi[lane];
         if(lane<MAXN)W.twin[lane]=S->twin[lane];
     }
@@ -2845,12 +2845,12 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Run R){
                     SPAN_BEGIN(stepping);
                     if(k>0&&step(R.seed,W,t,lane,scratch))t.death=k;
                     SPAN_END(SPAN_STEP,stepping);
-                    if(t.death<0&&lane<15){
-                        const int a=lane/5,v=lane-5*a;float r[3],kappa[3];lab32(t.q,r);lab32(t.p,kappa);
-                        const double x=(double)(v<3?kappa[a]:r[a]);prefix+=v==0?1.:v==1||v==3?x:x*x;
+                    if(t.death<0&&lane<9){
+                        const int a=lane/3,v=lane-3*a;float kappa[3];lab32(t.p,kappa);
+                        const double x=(double)kappa[a];prefix+=v==0?1.:v==1?x:x*x;
                     }
                 }
-                if(lane<15)ring[ring_at(R,lane/5,k)+lane%5]=prefix;
+                if(lane<9)ring[ring_at(R,lane/3,k)+lane%3]=prefix;
                 spent=__shfl_sync(FULL,clock64()-launched>=R.budget?1:0,0)!=0;
             }
             if(k<hi)break;
@@ -2882,23 +2882,23 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Run R){
                 if(o>through||window_end(R,a,o)>hi)break;
                 next[a]++;
                 double v=0.;
-                if(lane<15&&lane/5==a){
+                if(lane<9&&lane/3==a){
                     const int at=o*R.steps,h=min(R.half[a],at),end=at+h,before=at-h-1;
                     if(t.death<0||t.death>at){
-                        const int x=lane-5*a;
+                        const int x=lane-3*a;
                         const double now=end==hi?prefix:ring[ring_at(R,a,end)+x];
                         v=now-(before<0?0.:ring[ring_at(R,a,before)+x]);
                     }
                 }
-                // v: lane 5a + x holds the window's sum of x; the means divide by its steps (x = 0).
-                const double steps=__shfl_sync(FULL,v,5*a);double* close=out+POINT_RECORD+(2*a+c)*CLOSE;
-                if(lane<15&&lane/5==a){const int x=lane-5*a;close[x]=x==0?(steps>0.?1.:0.):(steps>0.?v/steps:0.);}
+                // v: lane 3a + x holds the window's sum of x; the means divide by its steps (x = 0).
+                const double steps=__shfl_sync(FULL,v,3*a);double* close=out+POINT_RECORD+(2*a+c)*CLOSE;
+                if(lane<9&&lane/3==a){const int x=lane-3*a;close[x]=x==0?(steps>0.?1.:0.):(steps>0.?v/steps:0.);}
                 // The harmonic control of output o along the axis (control.rs `Harmonic::value`): every
                 // trajectory's, held or lost, with its κ²'s mean when held.
-                if(R.harmonic!=nullptr&&lane==5*a+2){
+                if(R.harmonic!=nullptr&&lane==3*a+2){
                     const double* m=R.harmonic+((size_t)o*3+a)*18;double value=0.;
                     for(int p=0;p<3;p++){double s=0.;for(int q=0;q<3;q++)s+=m[3*p+q]*p0[q]+2.*m[9+3*p+q]*q0[q];value+=p0[p]*s;}
-                    close[5]=value;close[6]=value*value;close[7]=value*close[2];
+                    close[3]=value;close[4]=value*value;close[5]=value*close[2];
                 }
             }
             SPAN_END(SPAN_WINDOWS,windows);
@@ -2916,7 +2916,7 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Run R){
             S->time=t.time;S->logn=t.logn;S->threshold=t.threshold;S->log_threshold=t.log_threshold;
             S->cluster=t.cluster;S->jumps=t.jumps;S->death=t.death;S->beats=t.beats;S->interval=i;S->step=k;
         }
-        if(lane<15)S->prefix[lane]=prefix;
+        if(lane<9)S->prefix[lane]=prefix;
         if(lane<MAXM)S->psi[lane]=W.psi[lane];
         if(lane<MAXN)S->twin[lane]=W.twin[lane];
         if(lane==0){
@@ -2939,7 +2939,7 @@ extern "C" __global__ void task_sums(const Run R){
     #pragma unroll
     for(int a=0;a<3;a++){const int before=R.begin==0?-1:(R.begin-1)*R.steps;int o=max(0,floordiv(before-R.half[a],R.steps));while(window_end(R,a,o)<=before)o++;start[a]=o;}
     // The block's sums of the intervals in the trajectories' order: each 128 threads every
-    // second interval, 69 of them the point record's entries, 24 the closing windows' means and 18
+    // second interval, 70 of them the point record's entries, 12 the closing windows' means and 18
     // their harmonic controls' sums.
     {
         const int group=threadIdx.x>>7,x=threadIdx.x&127;const size_t stride=(size_t)MOST_INTERVALS*SLOT_RECORD;
@@ -2954,16 +2954,16 @@ extern "C" __global__ void task_sums(const Run R){
             const double* rec=base+(size_t)(i%MOST_INTERVALS)*SLOT_RECORD;
             if(x<POINT_RECORD){
                 if(i<=through){double s=0.;for(int w=0;w<count;w++)s+=rec[w*stride+x];R.sums[((size_t)blockIdx.x*R.outputs+i)*RECORD+x]=s;}
-            }else if(x<POINT_RECORD+24){
-                const int j=x-POINT_RECORD,a=j/8,c=(j/4)%2,m=j%4;
+            }else if(x<POINT_RECORD+12){
+                const int j=x-POINT_RECORD,a=j/4,c=(j/2)%2,m=j%2;
                 if(c<closes[a]){
                     double s=0.;for(int w=0;w<count;w++){const double* close=rec+w*stride+POINT_RECORD+(2*a+c)*CLOSE;if(close[0]>0.)s+=close[1+m];}
-                    R.sums[((size_t)blockIdx.x*R.outputs+outputs[a][c])*RECORD+MOTION+4*a+m]=s;
+                    R.sums[((size_t)blockIdx.x*R.outputs+outputs[a][c])*RECORD+MOTION+2*a+m]=s;
                 }
-            }else if(x<POINT_RECORD+42){
-                const int j=x-POINT_RECORD-24,a=j/6,c=(j/3)%2,m=j%3;
+            }else if(x<POINT_RECORD+30){
+                const int j=x-POINT_RECORD-12,a=j/6,c=(j/3)%2,m=j%3;
                 if(c<closes[a]){
-                    double s=0.;for(int w=0;w<count;w++)s+=rec[w*stride+POINT_RECORD+(2*a+c)*CLOSE+5+m];
+                    double s=0.;for(int w=0;w<count;w++)s+=rec[w*stride+POINT_RECORD+(2*a+c)*CLOSE+3+m];
                     R.sums[((size_t)blockIdx.x*R.outputs+outputs[a][c])*RECORD+HARMONIC+3*a+m]=s;
                 }
             }

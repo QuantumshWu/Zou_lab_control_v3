@@ -198,7 +198,7 @@ pub(crate) const TASK:u64=8;
 /// trajectories in their order, a trajectory that finishes early waiting for those before it, so
 /// the sums do not depend on the threads.
 ///
-/// With `Settings::average` an atom's κ, κ², r and r² along each lab axis are its means over the
+/// With `Settings::average` an atom's κ and κ² along each lab axis are its means over the
 /// steps within half a trap period of each output time (a window cut at t = 0 to stay centred, and
 /// the trajectory run half a period past the last output): an atom's kinetic energy along a trap
 /// axis sloshes into potential energy and back twice a period, and over a period its mean is half
@@ -264,7 +264,7 @@ fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count
 
 /// A held atom at an output: its motion's window means, populations, folded excited population (η²),
 /// profile error and (kv/σ)².
-type Moment=([[f64;4];3],[f64;STATES],f64,f64,f64);
+type Moment=([[f64;2];3],[f64;STATES],f64,f64,f64);
 fn atom_of(m:&Moment)->Atom<'_>{Atom{motion:m.0,populations:&m.1,folded:m.2,profile:m.3,doppler:m.4}}
 
 /// A trajectory's walk through the outputs (`run`, `sample_states`): `steps` steps between outputs and
@@ -319,7 +319,7 @@ pub(crate) fn half_windows(settings:&Settings)->[usize;3]{
 }
 
 /// One trajectory's motion sums about every output time: per output and lab axis the steps counted
-/// and Σκ, Σκ², Σr, Σr² over its window -- the steps within `half` of the output's (at most as many
+/// and Σκ, Σκ² over its window -- the steps within `half` of the output's (at most as many
 /// as the output's own, so a window stays centred), one step without averaging.
 ///
 /// Each step is added once, to the output interval it lies in (interval j holds steps
@@ -328,7 +328,7 @@ pub(crate) fn half_windows(settings:&Settings)->[usize;3]{
 /// `half mod steps + 1` -- a window's edges fall at those places of every interval. A window is the
 /// whole intervals it covers, the difference of two running totals, and the two partial intervals
 /// at its ends: O(1) per step and per output, O(outputs) memory.
-struct Windows{half:[usize;3],steps:usize,reach:usize,total:Vec<[[f64;5];3]>,head:Vec<[[f64;5];3]>,tail:Vec<[[f64;5];3]>}
+struct Windows{half:[usize;3],steps:usize,reach:usize,total:Vec<[[f64;3];3]>,head:Vec<[[f64;3];3]>,tail:Vec<[[f64;3];3]>}
 impl Windows{
     fn new(settings:&Settings,steps:usize,outputs:usize)->Windows{
         Windows::with(half_windows(settings),steps,outputs)
@@ -336,32 +336,32 @@ impl Windows{
     /// Windows of `half` steps per axis around outputs `steps` apart.
     fn with(half:[usize;3],steps:usize,outputs:usize)->Windows{
         let reach=half.into_iter().max().unwrap();let intervals=outputs+reach.div_ceil(steps);
-        Windows{half,steps,reach,total:Vec::with_capacity(intervals),head:vec![[[0.;5];3];intervals],tail:vec![[[0.;5];3];intervals]}
+        Windows{half,steps,reach,total:Vec::with_capacity(intervals),head:vec![[[0.;3];3];intervals],tail:vec![[[0.;3];3];intervals]}
     }
-    fn clear(&mut self){self.total.clear();self.head.fill([[0.;5];3]);self.tail.fill([[0.;5];3]);}
+    fn clear(&mut self){self.total.clear();self.head.fill([[0.;3];3]);self.tail.fill([[0.;3];3]);}
     /// The trajectory at step k (from t = 0): into its interval's sums.
     fn add(&mut self,k:usize,t:&Trajectory){
         let(j,m)=if k==0{(0,self.steps)}else{let j=k.div_ceil(self.steps);(j,k-(j-1)*self.steps)};
-        let last=self.total.last().copied().unwrap_or([[0.;5];3]);while self.total.len()<=j{self.total.push(last);}
+        let last=self.total.last().copied().unwrap_or([[0.;3];3]);while self.total.len()<=j{self.total.push(last);}
         for a in 0..3{
-            let(x,q)=(t.r[a],t.kappa[a]);let v=[1.,q,q*q,x,x*x];let r=self.half[a]%self.steps;
+            let q=t.kappa[a];let v=[1.,q,q*q];let r=self.half[a]%self.steps;
             for(s,y)in self.total[j][a].iter_mut().zip(v){*s+=y;}
             if m<=r{for(s,y)in self.head[j][a].iter_mut().zip(v){*s+=y;}}
             if m+r>=self.steps{for(s,y)in self.tail[j][a].iter_mut().zip(v){*s+=y;}}
         }
     }
-    /// Output i's means: κ, κ², r, r² per axis.
-    fn means(&self,i:usize)->[[f64;4];3]{
+    /// Output i's means: κ, κ² per axis.
+    fn means(&self,i:usize)->[[f64;2];3]{
         let at=i*self.steps;let total=|j:usize,a:usize|self.total[j.min(self.total.len()-1)][a];
         std::array::from_fn(|a|{
             let h=self.half[a];
             // Within half a window of t = 0 the window is cut there: the whole intervals 0 ..= 2i.
-            let s:[f64;5]=if at<h{total(2*i,a)}else{
+            let s:[f64;3]=if at<h{total(2*i,a)}else{
                 let(lo,hi)=(i-h/self.steps,i+h/self.steps);let(whole,first)=((total(hi,a),total(lo,a)),self.tail[lo][a]);
-                let end=self.head.get(hi+1).map_or([0.;5],|x|x[a]);
+                let end=self.head.get(hi+1).map_or([0.;3],|x|x[a]);
                 std::array::from_fn(|v|whole.0[v]-whole.1[v]+first[v]+end[v])
             };
-            [s[1]/s[0],s[2]/s[0],s[3]/s[0],s[4]/s[0]]
+            [s[1]/s[0],s[2]/s[0]]
         })
     }
 }
@@ -394,15 +394,15 @@ mod tests{
         let mut rng=Rng::new(9,Purpose::Initial,0,0);
         for(steps,half,outputs)in [(1,[0,3,419],50),(5,[7,10,0],20),(44,[5,110,113],6),(3,[2,2,2],10),(4,[8,1,4],9)]{
             let mut w=Windows::with(half,steps,outputs);let last=(outputs-1)*steps+w.reach;let lost=last-last/5;
-            let values:Vec<([f64;3],[f64;3])>=(0..=last).map(|_|(std::array::from_fn(|_|rng.uniform()-0.5),std::array::from_fn(|_|rng.uniform()-0.5))).collect();
+            let values:Vec<[f64;3]>=(0..=last).map(|_|std::array::from_fn(|_|rng.uniform()-0.5)).collect();
             let mut t=Trajectory{cluster:0,psi:[Complex::ZERO;model::MOST_MIXED],r:[0.;3],kappa:[0.;3],time:0.,threshold:1.,alive:true,jumps:0,beats:0.,seed:0,index:0};
-            for k in 0..=lost{(t.r,t.kappa)=values[k];w.add(k,&t);}
+            for k in 0..=lost{t.kappa=values[k];w.add(k,&t);}
             for i in 0..outputs{
                 let at=i*steps;if at>lost{continue;}let m=w.means(i);
                 for a in 0..3{
-                    let h=half[a].min(at);let(mut n,mut s)=(0.,[0.;4]);
-                    for k in at-h..=(at+h).min(lost){let(r,q)=values[k];n+=1.;s[0]+=q[a];s[1]+=q[a]*q[a];s[2]+=r[a];s[3]+=r[a]*r[a];}
-                    for v in 0..4{assert!((m[a][v]-s[v]/n).abs()<=1e-12,"steps {steps} half {half:?} output {i} axis {a}: {} against {}",m[a][v],s[v]/n);}
+                    let h=half[a].min(at);let(mut n,mut s)=(0.,[0.;2]);
+                    for k in at-h..=(at+h).min(lost){let q=values[k];n+=1.;s[0]+=q[a];s[1]+=q[a]*q[a];}
+                    for v in 0..2{assert!((m[a][v]-s[v]/n).abs()<=1e-12,"steps {steps} half {half:?} output {i} axis {a}: {} against {}",m[a][v],s[v]/n);}
                 }
             }
         }

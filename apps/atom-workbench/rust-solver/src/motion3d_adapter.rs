@@ -27,7 +27,7 @@
 //! - per lab axis ("x", "y", "z"): `temperatureUK` and `temperatureErrorUK` (μK, one per sample:
 //!   T = m Var(v)/k_B over one trap period of the axis around the sample, and its standard error),
 //!   `meanVelocityMps`, `meanOccupation` (both over the same period; n̄ relative to
-//!   that axis's `trapFrequencyKHz`, ω/2π at the focus), `momentum` (`velocitiesMps`, `samples`,
+//!   that axis's `trapFrequencyKHz`, ω/2π at the trap's bottom), `momentum` (`velocitiesMps`, `samples`,
 //!   `probabilities`) and `position` (`positionsUm`, ...), distributions at listed samples;
 //! - `temperatureTotalUK` and `temperatureTotalErrorUK`, one per sample: T_total = (T_x + T_y +
 //!   T_z)/3, the temperature of the 3D velocity variance, and its standard error;

@@ -257,7 +257,7 @@ pub struct Settings{
     /// The bound on each exponential's truncated Taylor remainder relative to ‖ψ‖ (`propagate`):
     /// a share of the step's own error budget in a solve, f64::EPSILON for double precision.
     pub truncation:f64,
-    /// The motion's sums (T, ⟨v⟩, n̄, ⟨r²⟩) averaged over one trap period of each axis centred on
+    /// The motion's sums (T, ⟨v⟩, n̄) averaged over one trap period of each axis centred on
     /// each output time (lib.rs `simulate`, a solve's), or taken at the output time.
     pub average:bool,
     /// The loss by the mechanical energy (a solve's); off where a validation holds the atom.

@@ -247,7 +247,7 @@
 //! gives every trajectory the same share of the variance, so the need that a batch's errors predict
 //! holds for the trajectories still to come; groups of 8 keep most of the hypercube's gain (the
 //! trajectories T needs at early times fall by 10-40% from groups of 1 to groups of 8, little more
-//! beyond) while the jackknife's groups grow with the trajectories. T, ⟨v⟩, n̄ and ⟨r²⟩ are each
+//! beyond) while the jackknife's groups grow with the trajectories. T, ⟨v⟩ and n̄ are each
 //! atom's means over one trap period of the axis around each output (lib.rs `simulate`): its kinetic
 //! energy sloshes into potential energy and back twice a period, so over a period the spread of T
 //! between atoms is their energies' alone.
@@ -402,7 +402,7 @@ pub struct Solution{
     pub temperature_total_uk:Vec<f64>,
     pub temperature_total_errors_uk:Vec<f64>,
     pub mean_velocity_mps:Vec<[f64;3]>,
-    /// ω_a/2π (kHz) at the focus of the reference state's trap per lab axis, and n̄ per axis relative to it.
+    /// ω_a/2π (kHz) at the bottom of the reference state's trap per lab axis, and n̄ per axis relative to it (stats.rs `Estimate::occupation`).
     pub trap_frequency_khz:[f64;3],
     pub mean_occupation:Vec<[f64;3]>,
     pub loss_probability:Vec<f64>,

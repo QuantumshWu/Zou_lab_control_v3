@@ -6,7 +6,7 @@ use rayon::prelude::*;
 /// kB/ħ in rad/us per μK: a temperature T as the rate kT/ħ.
 pub const KT_PER_UK:f64=1.380649e-23/1.0545718176461565e-34*1e-12;
 
-/// Sums over the atoms still held at one output time: their number, Σκ, Σκ², Σr, Σr² per axis,
+/// Sums over the atoms still held at one output time: their number, Σκ, Σκ² per axis,
 /// Σ populations, Σ of the folded excited population (the elimination's η²), Σ of the Gaussian
 /// beams' profile error at the atoms (model.rs
 /// `Model::profile_error`) and Σ (kv/σ)² (`Model::doppler_ratio`), with the number of trajectories
@@ -19,8 +19,6 @@ pub struct Sums{
     pub held:f64,
     pub kappa:[f64;3],
     pub kappa2:[f64;3],
-    pub position:[f64;3],
-    pub position2:[f64;3],
     pub populations:[f64;STATES],
     pub folded:f64,
     pub profile:f64,
@@ -30,12 +28,12 @@ pub struct Sums{
     pub twin2:[f64;2],
 }
 impl Sums{
-    pub fn zero()->Sums{Sums{trajectories:0.,held:0.,kappa:[0.;3],kappa2:[0.;3],position:[0.;3],position2:[0.;3],populations:[0.;STATES],folded:0.,profile:0.,doppler:0.,
+    pub fn zero()->Sums{Sums{trajectories:0.,held:0.,kappa:[0.;3],kappa2:[0.;3],populations:[0.;STATES],folded:0.,profile:0.,doppler:0.,
         harmonic:[[0.;3];3],twin:[0.;STATES],twin2:[0.;2]}}
     fn combine(&self,o:&Sums,sign:f64)->Sums{let mut out=self.clone();out.add(o,sign);out}
     fn add(&mut self,o:&Sums,sign:f64){
         self.trajectories+=sign*o.trajectories;self.held+=sign*o.held;
-        for a in 0..3{self.kappa[a]+=sign*o.kappa[a];self.kappa2[a]+=sign*o.kappa2[a];self.position[a]+=sign*o.position[a];self.position2[a]+=sign*o.position2[a];
+        for a in 0..3{self.kappa[a]+=sign*o.kappa[a];self.kappa2[a]+=sign*o.kappa2[a];
             for j in 0..3{self.harmonic[a][j]+=sign*o.harmonic[a][j];}}
         for(x,y)in self.populations.iter_mut().zip(&o.populations){*x+=sign*y;}
         for(x,y)in self.twin.iter_mut().zip(&o.twin){*x+=sign*y;}
@@ -43,10 +41,10 @@ impl Sums{
     }
 }
 
-/// An atom held at an output: its motion's means about it -- κ, κ², r and r² per axis, at the
+/// An atom held at an output: its motion's means about it -- κ and κ² per axis, at the
 /// output time or over a window around it --, its populations and folded excited population, its
 /// profile error and (kv/σ)².
-pub struct Atom<'a>{pub motion:[[f64;4];3],pub populations:&'a [f64;STATES],pub folded:f64,pub profile:f64,pub doppler:f64}
+pub struct Atom<'a>{pub motion:[[f64;2];3],pub populations:&'a [f64;STATES],pub folded:f64,pub profile:f64,pub doppler:f64}
 /// A trajectory's control variates at an output (control.rs): the harmonic control per lab axis and,
 /// with a held twin, the twin's populations.
 pub struct Controls<'a>{pub harmonic:[f64;3],pub twin:Option<&'a [f64;STATES]>}
@@ -69,7 +67,7 @@ impl Group{
         let s=&mut self.sums[i];
         if let Some(x)=atom{
             s.held+=1.;s.folded+=x.folded;s.profile+=x.profile;s.doppler+=x.doppler;
-            for a in 0..3{s.kappa[a]+=x.motion[a][0];s.kappa2[a]+=x.motion[a][1];s.position[a]+=x.motion[a][2];s.position2[a]+=x.motion[a][3];}
+            for a in 0..3{s.kappa[a]+=x.motion[a][0];s.kappa2[a]+=x.motion[a][1];}
             for(y,p)in s.populations.iter_mut().zip(x.populations){*y+=p;}
         }
         for a in 0..3{let(c,y)=(controls.harmonic[a],atom.map_or(0.,|x|x.motion[a][1]));s.harmonic[a][0]+=c;s.harmonic[a][1]+=c*c;s.harmonic[a][2]+=c*y;}
@@ -104,8 +102,6 @@ pub struct Estimate{
     /// The probability that the atom has been lost, and its standard error.
     pub loss:f64,
     pub loss_error:f64,
-    /// ⟨r²⟩ per axis (um²).
-    pub position2:[f64;3],
     /// The held atoms' mean folded excited population (the elimination's η²), mean profile error
     /// and mean (kv/σ)² of the first order in the Doppler shift.
     pub folded:f64,
@@ -141,7 +137,7 @@ impl Correction<'_>{
 pub fn estimate(g:&Sums,s:&Scales,correction:Option<&Correction>)->Estimate{
     let n=g.held;let m=moments(g,s,correction);
     Estimate{temperature:m.temperature,temperature_total:m.temperature_total,occupation:m.occupation,populations:m.populations.to_vec(),loss:m.loss,trajectories:g.trajectories,
-        mean_velocity:if n>0.{std::array::from_fn(|a|g.kappa[a]/n*s.hbar_over_mass)}else{[0.;3]},position2:if n>0.{std::array::from_fn(|a|g.position2[a]/n)}else{[0.;3]},
+        mean_velocity:if n>0.{std::array::from_fn(|a|g.kappa[a]/n*s.hbar_over_mass)}else{[0.;3]},
         folded:if n>0.{g.folded/n}else{0.},profile:if n>0.{g.profile/n}else{0.},doppler:if n>0.{g.doppler/n}else{0.},..Default::default()}
 }
 /// What the jackknife spreads (`summarize`), of `estimate`: no allocation per group left out.
@@ -206,7 +202,7 @@ mod tests{
                 for _ in 0..64{
                     let x=normal();let(p,c)=(0.5+0.1*x+0.01*normal(),if correlated{0.5+0.1*x}else{0.5+0.1*normal()});
                     let mut populations=[0.;STATES];populations[0]=p;populations[1]=1.-p;let mut twin=[0.;STATES];twin[0]=c;twin[1]=1.-c;
-                    let atom=Atom{motion:[[0.,1.,0.,0.];3],populations:&populations,folded:0.,profile:0.,doppler:0.};
+                    let atom=Atom{motion:[[0.,1.];3],populations:&populations,folded:0.,profile:0.,doppler:0.};
                     g.add(0,Some(&atom),&Controls{harmonic:[0.;3],twin:Some(&twin)});
                 }g}).collect();
             let mut mean=[0.;STATES];mean[0]=0.5;mean[1]=0.5;
