@@ -446,6 +446,10 @@ fn statistics(e:&Estimate,frequencies:[f64;3])->Statistic{
     Statistic{population:CONFIDENCE*shown_error(e),
         temperature:CONFIDENCE*(1.-e.loss).max(0.).sqrt()*(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a]/e.temperature[a]}else{0.}).fold(0.,f64::max),weight:regime(e,frequencies)}
 }
+/// Whether an output holds the two atoms a temperature takes (`assemble`).
+fn reads_temperature(e:&Estimate)->bool{(e.trajectories*(1.-e.loss)).round()>=2.}
+/// Per output the last at or before it that `holds` (the first must).
+fn last_holding(outputs:usize,holds:&dyn Fn(usize)->bool)->Vec<usize>{(0..outputs).scan(0,|last,i|{if holds(i){*last=i;}Some(*last)}).collect()}
 /// An output's statistics as the stopping rule and the flags take them (module documentation, # Batches): `statistics`, each
 /// error over its neighbours as far as they agree (`steady`).
 fn statistics_of(estimates:&[Estimate],frequencies:[f64;3])->Vec<Statistic>{
@@ -1949,7 +1953,8 @@ fn start(e:&mut Estimate,model:&Model,initial:&Initial){
 /// after), and so are T and the mean velocity (`start`). An output where no atom is held (the loss
 /// one) has no held atom to describe: its populations, T, ⟨v⟩, n̄ and distributions are the last
 /// output's that had one -- each row still a probability vector, the app's p (1 − L) zero there --,
-/// outside the validated regime, and the flag says from when.
+/// outside the validated regime, and the flag says from when. T takes two atoms, a variance: one atom reads a variance of zero and an error of zero, which is no T. An output holding fewer has none of its
+/// own: its T, ⟨v⟩ and n̄ are the last output's that read one, its T's error none (infinite here, as a single group's; null in the contract, and the app says unknown), outside the validated regime, and the flag says from when.
 fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],times:&[f64],frequencies:[f64;3],trajectories:u64,through:u64,dt:f64,initial:&[Complex],mut ledger:Ledger,twin:bool)->Solution{
     let hm=model.hbar_over_mass;
     let velocity=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.1[a]*hm));
@@ -1959,26 +1964,25 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
     let explicit:usize=model.ground.clusters.iter().map(|c|c.excited.len()).sum();
     let internal=if explicit>0{format!("内态（子空间 {}，其中 {explicit} 个激发态显式、精确传播，其余激发态二阶消去）",sizes.join("+"))}else{format!("消去激发态后的基态内态（子空间 {}）",sizes.join("+"))};
     // Each output's source: itself where an atom is held (t = 0 always), else the last that held one.
-    let held=|i:usize|i==0||estimates[i].loss<1.;
-    let source:Vec<usize>=(0..estimates.len()).scan(0,|last,i|{if held(i){*last=i;}Some(*last)}).collect();
-    if let Some(gone)=(0..estimates.len()).find(|&i|!held(i)){
-        let note=format!("{} 起已无原子被俘获（丢失概率 1）：此后的布居、温度与分布沿用 {} 的值，仅供参考",when(times[gone]),when(times[source[gone]]));
-        ledger.flagged=Some(match ledger.flagged.take(){Some(r)=>format!("{note}；{r}"),None=>note});
-    }
-    let carried=|f:&dyn Fn(&Estimate)->[f64;3]|->Vec<[f64;3]>{source.iter().map(|&j|f(&estimates[j])).collect()};
+    let held=|i:usize|i==0||estimates[i].loss<1.;let read=|i:usize|i==0||reads_temperature(&estimates[i]);
+    let(source,measured)=(last_holding(estimates.len(),&held),last_holding(estimates.len(),&read));
+    let mut flag=|note:String|ledger.flagged=Some(match ledger.flagged.take(){Some(r)=>format!("{note}；{r}"),None=>note});
+    if let Some(gone)=(0..estimates.len()).find(|&i|!held(i)){flag(format!("{} 起已无原子被俘获（丢失概率 1）：此后的布居、温度与分布沿用 {} 的值，仅供参考",when(times[gone]),when(times[source[gone]])));}
+    if let Some(few)=(0..estimates.len()).find(|&i|held(i)&&!read(i)){flag(format!("{} 起有时刻被俘获的原子不足两个：这些时刻的温度沿用此前的值，误差未知",when(times[few])));}
+    let carried=|f:&dyn Fn(&Estimate)->[f64;3]|->Vec<[f64;3]>{measured.iter().map(|&j|f(&estimates[j])).collect()};
     Solution{
         populations:source.iter().map(|&j|if j==0{first.clone()}else{estimates[j].populations.clone()}).collect(),
         sample_errors:estimates.iter().enumerate().map(|(i,e)|if i==0{0.}else{reported_error(e)}).collect(),
         temperature_uk:carried(&|e|e.temperature),
-        temperature_errors_uk:carried(&|e|e.temperature_error),
-        temperature_total_uk:source.iter().map(|&j|estimates[j].temperature_total).collect(),
-        temperature_total_errors_uk:source.iter().map(|&j|estimates[j].temperature_total_error).collect(),
+        temperature_errors_uk:estimates.iter().enumerate().map(|(i,e)|if read(i){e.temperature_error}else{[f64::INFINITY;3]}).collect(),
+        temperature_total_uk:measured.iter().map(|&j|estimates[j].temperature_total).collect(),
+        temperature_total_errors_uk:estimates.iter().enumerate().map(|(i,e)|if read(i){e.temperature_total_error}else{f64::INFINITY}).collect(),
         mean_velocity_mps:carried(&|e|e.mean_velocity),
         trap_frequency_khz:frequencies.map(|w|w/std::f64::consts::TAU*1e3),
         mean_occupation:carried(&|e|e.occupation),
         loss_probability:{let mut worst=0.;estimates.iter().map(|e|{worst=e.loss.max(worst);worst}).collect()},
         velocity,position,
-        classical:estimates.iter().enumerate().map(|(i,e)|held(i)&&classical(e,frequencies)).collect(),
+        classical:estimates.iter().enumerate().map(|(i,e)|read(i)&&classical(e,frequencies)).collect(),
         trajectories,needed:trajectories,time_step_us:dt,
         method:format!("半经典 3D：经典质点（位置、动量）携带{internal}，量子跳跃（自发辐射按偶极辐射方向图反冲，吸收按光束反冲并保持精确的平均力），机械能高于势阱深度且已离开势阱区即算损失，{trajectories} 条轨迹{}，步长 {dt:.3} μs；控制变量：谐振孪生（T）{}",if through<trajectories{format!("（走完全程的 {through} 条）")}else{String::new()},if twin{"与静止孪生（布居）"}else{""}),
         reason:None,
@@ -2068,6 +2072,13 @@ mod tests{
         let mut e=Estimate::default();e.trajectories=76.;e.loss=1.;e.population_errors=vec![0.;2];
         assert!((CONFIDENCE*reported_error(&e)-POPULATION_TARGET).abs()<1e-15);
         e.loss_error=0.1;assert_eq!(reported_error(&e),0.1);
+    }
+    /// T takes two atoms (`assemble`): one reads a variance of zero with an error of zero, a count of none or one reads no T at any N; an output takes the last that reads one, t = 0 always.
+    #[test]
+    fn a_temperature_takes_two_atoms(){
+        let at=|n:f64,held:f64|{let mut e=Estimate::default();e.trajectories=n;e.loss=1.-held/n;reads_temperature(&e)};
+        for n in [3.,80.,1456.,16384.]{assert!(!at(n,0.)&&!at(n,1.)&&at(n,2.),"{n}");}
+        assert_eq!(last_holding(5,&|i|i==0||i==2),vec![0,0,2,2,2]);
     }
     /// T's probes fall as its weights do (`bound_probes`): evenly over a trajectory's states where they weigh alike, each state in time, and over their number where none weighs.
     #[test]

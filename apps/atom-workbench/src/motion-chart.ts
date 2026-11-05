@@ -46,8 +46,8 @@ function ticksWithin(low:number,high:number,intervals:number):number[]{
 const digits=(n:number)=>formatNumber(n,{digits:4});
 
 /** A line of a panel: its name, its values (base units), its ink and width; with its standard error
- * per sample (`error`, base units), read in the cursor's readout as value ± error. */
-export interface Line {name:string;values:readonly number[];ink:string;width?:number;error?:readonly number[]}
+ * per sample (`error`, base units; null where it has none), read in the cursor's readout as value ± error. */
+export interface Line {name:string;values:readonly number[];ink:string;width?:number;error?:readonly (number|null)[]}
 /** One panel: its name, its axis title, its lines and display unit; its axis runs from 0 to the top
  * of its ticks. */
 export interface Series {id:string;name:string;title:string;lines:Line[];unit:Unit}
@@ -153,10 +153,11 @@ function bindCursor(host:HTMLElement,svg:SVGSVGElement,count:number,at:(i:number
 const mark=(name:string,attrs:Record<string,string>)=>{const node=document.createElementNS(SVG,name);for(const [key,value] of Object.entries(attrs))node.setAttribute(key,value);return node;};
 
 /** A readout row's value: the line's value at the sample, with its standard error when it has one
- * (T ± 误差), in the panel's unit. */
+ * (T ± 误差), in the panel's unit; a line of errors with none at the sample says so (a T carried over a
+ * sample with fewer than two atoms held). */
 export function lineReading(l:Line,i:number,unit:Unit):string{
-  const value=formatNumber(l.values[i]!*unit.factor,{digits:4}),error=l.error?` ± ${formatNumber(l.error[i]!*unit.factor,{digits:2})}`:'';
-  return `${value}${error}${unit.name?` ${unit.name}`:''}`;
+  const value=formatNumber(l.values[i]!*unit.factor,{digits:4}),error=l.error?.[i],name=unit.name?` ${unit.name}`:'';
+  return error==null?`${value}${name}${l.error?'（误差未知）':''}`:`${value} ± ${formatNumber(error*unit.factor,{digits:2})}${name}`;
 }
 /** The time cursor of a series chart: every line of both panels at the sample, one outside the
  * validated regime marked. */

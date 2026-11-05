@@ -239,6 +239,8 @@ test('a motion result is read strictly: the 3D block with the total temperature,
   assert.deepEqual([m.temperatureTotalUK,m.temperatureTotalErrorUK,m.trapFrequencyKHz,m.classical],[[31,31,31],[.9,.9,.9],[100.5,100.5,19.3],[true,true,false]]);
   assert.deepEqual([m.device,m.deviceNote,m.approximations],[MOTION_DIAGNOSTICS.device,MOTION_DIAGNOSTICS.deviceNote,MOTION_DIAGNOSTICS.approximations]);
   assert.equal(result.populationAccuracy.requestedTolerance,.05);assert.equal(result.mean.status,'not-requested');
+  const few=readMotion(d=>{d.motion.temperatureErrorUK.x[1]=null;d.motion.temperatureTotalErrorUK[1]=null;}).motion;
+  assert.deepEqual([few.temperatureErrorUK[0],few.temperatureTotalErrorUK],[[1.5,null,1.5],[.9,null,.9]],'a sample with fewer than two atoms held has no T of its own and no error');
   const flagged=readMotion(d=>{d.diagnostics.approximations.flagged='t ≥ 8 ms 的输出超出近似误差预算';delete d.diagnostics.deviceNote;}).motion;
   assert.equal(flagged.approximations.flagged,'t ≥ 8 ms 的输出超出近似误差预算');assert.equal(Object.hasOwn(flagged,'deviceNote'),false);
   for(const [label,change] of [
@@ -282,6 +284,8 @@ test('温度与 n̄: a line per axis and the total temperature apart from them; 
   assert.doesNotMatch(chart,/<polygon/,'no band');assert.doesNotMatch(chart,/⟨v⟩|平均速度/,'no velocity');
   assert.equal(lineReading(temperature.lines[3],1,temperature.unit),'31 ± 0.9 μK');assert.equal(lineReading(temperature.lines[0],1,temperature.unit),'30 ± 1.5 μK');
   assert.equal(lineReading(occupation.lines[2],1,occupation.unit),'4.5');
+  const few=motionSeries(readMotion(d=>{d.motion.temperatureErrorUK.x[1]=null;}).motion)[0];
+  assert.equal(lineReading(few.lines[0],1,few.unit),'30 μK（误差未知）');assert.equal(lineReading(few.lines[0],0,few.unit),'30 ± 1.5 μK');
   // A sample outside the validated regime lies on the grey band of both panels, from half-way to its neighbour.
   const bands=svg=>[...svg.matchAll(/<rect class="reference-band" x="([\d.]+)" y="(\d+)" width="([\d.]+)" height="(\d+)"/g)].map(m=>m.slice(1).map(Number));
   const reference=result.motion.classical.map(inside=>!inside);
