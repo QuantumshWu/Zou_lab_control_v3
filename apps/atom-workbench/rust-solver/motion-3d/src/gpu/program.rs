@@ -41,7 +41,7 @@ pub struct Unit{first:i32,count:i32,norm:f32,focus:f32,profile:f32,pad:i32}
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Cluster{n:i32,size:i32,table:i32,h0:i32,groups:i32,ngroups:i32,classes:i32,nclasses:i32,coherent:i32,ncoherent:i32,carriers:i32,fourth:i32,frames:i32,
     positions:i32,beats:i32,nbeats:i32,n0:i32,exact:i32,parts:i32,omegas:i32,terms:i32,nterms:i32,emission:i32,excited:i32,group_parts:i32,residual_parts:i32,first_fields:i32,nfirst:i32,states:[i32;MAXM],
-    shifts:u64,mixed:u32,pad:i32}
+    shifts:u64,mixed:u32,driven:i32,ndriven:i32,pad:i32}
 /// The kernel's `NearUnit` (ground.rs `NearUnit`): its carrier, its place among the focused units (−1: at its
 /// focus intensity), N and s(0).
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
@@ -92,7 +92,7 @@ pub struct Params{
     excited:u64,diagonal:u64,couplings:u64,emission:u64,class_rows:u64,fourths:u64,quartics:u64,quartic_parts:u64,slows:u64,jump_tables:u64,jump_pairs:u64,factors:u64,frames:u64,item_first:u64,items:u64,residuals:u64,
     units:u64,unit_beams:u64,unit_weights:u64,
     terms:u64,omegas:u64,group_parts:u64,residual_parts:u64,excited_list:u64,directs:u64,levels:u64,level_first:u64,level_width:u64,
-    kept:u64,decay:u64,near_units:u64,unit_couplings:u64,vias:u64,via_first:u64,ground_block:u64,term_floor:u64,powers:u64,first_fields:u64,
+    kept:u64,decay:u64,near_units:u64,unit_couplings:u64,vias:u64,via_first:u64,ground_block:u64,term_floor:u64,powers:u64,first_fields:u64,driven_beams:u64,
     nbeams:i32,pub(crate) ncarriers:i32,nclusters:i32,focused:i32,nodes:i32,fields:i32,pub(crate) nnear:i32,doppler:i32,loss:i32,weights:i32,nunits:i32,
     exact_at:i32,transient_at:i32,nlevels:i32,rows_at:i32,between_at:i32,
     focused_unit:[i32;MOST_FOCUSED],stride:[i32;MOST_FOCUSED],
@@ -103,7 +103,7 @@ pub struct Params{
     axes32:[[f32;3];3],stiffness32:[f32;3],
     hm64:f64,dt:f64,
     axes:[[f64;3];3],omega:[f64;3],stiffness:[f64;3],
-    half_flow:[[f64;3];3],
+    half_flow:[[f64;3];3],flow_ratio:[[f64;2];3],region32:f32,lattice:i32,
     region:f64,
     lattice_axis:[f64;3],lattice_k:f64,lattice_inv_rayleigh:f64,lattice_phase:f64,
     node_phase:f64,grid_phase:f64,beats:f64,horizon:f64,
@@ -196,7 +196,7 @@ impl Program{
         let(mut quartics,mut quartic_parts,mut slows,mut jump_tables,mut jump_pairs,mut factors):(Vec<Quartic>,Vec<i32>,Vec<Slow>,Vec<JumpTable>,Vec<i32>,Vec<Factor>)=(vec![],vec![],vec![],vec![],vec![],vec![]);
         let(mut item_first,mut items,mut residuals):(Vec<i32>,Vec<[i32;4]>,Vec<f64>)=(vec![],vec![],vec![]);
         let(mut terms,mut omegas,mut group_parts,mut residual_parts,mut excited_list,mut directs):(Vec<Term>,Vec<f64>,Vec<i32>,Vec<i32>,Vec<i32>,Vec<Direct>)=(vec![],vec![],vec![],vec![],vec![],vec![]);
-        let mut first_fields:Vec<FirstField>=vec![];
+        let mut first_fields:Vec<FirstField>=vec![];let mut driven_beams:Vec<i32>=vec![];
         // The exact step's room in a trajectory's scratch: per cluster its parts' H and G, their working
         // room and its norms (the kernel's `exact_segment`) and its first orders' table, the largest of every cluster's where one takes it.
         let takes=(0..model.clusters()).any(|k|model.mixed(k)||model.beating(k));let mut exact=0;
@@ -218,11 +218,13 @@ impl Program{
         for(k,(layout,cl))in model.layouts.iter().zip(&g.clusters).enumerate(){
             let parts=1+model.beats(k).0.len();let(n,n0)=(layout.n,layout.n0);
             let(list,u,emission)=model.exact_terms(k);
+            // The beams of its kept drives, in the order of their first drive (the kernel's `absorption`).
+            let driven=driven_beams.len();for t in list.iter().filter(|t|t[0]==0){for &l in &model.carriers[t[3]].beams{if !driven_beams[driven..].contains(&(l as i32)){driven_beams.push(l as i32);}}}
             let mut cluster=Cluster{n:n as i32,size:layout.size as i32,table:(tables.len()) as i32,h0:layout.h0 as i32,groups:groups.len() as i32,ngroups:layout.groups.len() as i32,
                 classes:classes.len() as i32,nclasses:cl.classes.len() as i32,coherent:coherent.len() as i32,ncoherent:cl.coherent.len() as i32,carriers:carrier_tables.len() as i32,
                 fourth:-1,frames:0,positions:item_first.len() as i32,beats:residuals.len() as i32,nbeats:0,n0:n0 as i32,exact:(model.mixed(k)||model.beating(k)) as i32,
                 parts:parts as i32,omegas:omegas.len() as i32,terms:terms.len() as i32,nterms:list.len() as i32,emission:emission as i32,excited:excited_list.len() as i32,
-                group_parts:group_parts.len() as i32,residual_parts:residual_parts.len() as i32,first_fields:first_fields.len() as i32,nfirst:0,states:[0;MAXM],shifts:shifts(k,&cl.states),mixed:mixed(k,&cl.states),pad:0};
+                group_parts:group_parts.len() as i32,residual_parts:residual_parts.len() as i32,first_fields:first_fields.len() as i32,nfirst:0,states:[0;MAXM],shifts:shifts(k,&cl.states),mixed:mixed(k,&cl.states),driven:driven as i32,ndriven:(driven_beams.len()-driven) as i32,pad:0};
             for(x,&b)in cl.states.iter().enumerate(){cluster.states[x]=b as i32;}
             // Its beats, its explicit states and its terms (model.rs `exact_terms`).
             omegas.extend(model.beats(k).0);excited_list.extend(cl.excited.iter().map(|&e|e as i32));
@@ -387,7 +389,7 @@ impl Program{
             directs:put!(if directs.is_empty(){vec![Direct::default()]}else{directs}),levels:put!(levels),level_first:put!(level_first),level_width:put!(level_width),
             kept:put!(kept),decay:put!(decay),near_units:put!(if near_units.is_empty(){vec![NearUnit::default()]}else{near_units}),
             unit_couplings:put!(if unit_couplings.is_empty(){vec![[0.;2]]}else{unit_couplings}),vias:put!(if vias.is_empty(){vec![[0;2]]}else{vias}),via_first:put!(via_first),
-            ground_block:put!(ground_block),term_floor:put!(term_floor),powers:put!(powers),first_fields:put!(if first_fields.is_empty(){vec![FirstField::default()]}else{first_fields}),
+            ground_block:put!(ground_block),term_floor:put!(term_floor),powers:put!(powers),first_fields:put!(if first_fields.is_empty(){vec![FirstField::default()]}else{first_fields}),driven_beams:put!(if driven_beams.is_empty(){vec![0]}else{driven_beams}),
             nbeams:model.geometry.len() as i32,ncarriers:model.carriers.len() as i32,nclusters:model.layouts.len() as i32,focused:model.focused.len() as i32,
             nodes:nodes as i32,fields:fields as i32,nnear:near,doppler:model.doppler as i32,loss:settings.loss as i32,weights:0,nunits:g.units.len() as i32,
             exact_at:0,transient_at:0,nlevels:g.excited_groups.len() as i32,rows_at:0,between_at:0,
@@ -398,7 +400,7 @@ impl Program{
             partners:std::array::from_fn(|e|g.dressed.get(e).map_or(0,|f|f.iter().fold(0,|m,&x|m|1u32<<x))),near_focused,
             hm:hm as f32,light2:(2.*g.light) as f32,allowance:settings.doppler as f32,truncation:settings.truncation as f32,ringing:RINGING_SHARE as f32,recoil_spread:crate::engine::RECOIL_SPREAD as f32,
             axes32:settings.axes.map(|a|a.map(|x|x as f32)),stiffness32:settings.frequencies.map(|w|(w*w/hm) as f32),
-            hm64:hm,dt:settings.dt,axes:settings.axes,omega:settings.frequencies,stiffness:settings.frequencies.map(|w|w*w/hm),half_flow,region:settings.region,
+            hm64:hm,dt:settings.dt,axes:settings.axes,omega:settings.frequencies,stiffness:settings.frequencies.map(|w|w*w/hm),half_flow,flow_ratio:settings.frequencies.map(|w|if w==0.{[0.;2]}else{[hm/w,w/hm]}),region32:(2.*settings.region) as f32,lattice:settings.lattice.is_some() as i32,region:settings.region,
             lattice_axis:settings.lattice.map_or([0.;3],|l|std::array::from_fn(|i|(0..3).map(|a|settings.axes[i][a]*l.axis[a]).sum())),lattice_k:settings.lattice.map_or(0.,|l|l.wave_number),lattice_inv_rayleigh:settings.lattice.map_or(0.,|l|1./l.rayleigh),lattice_phase:settings.lattice.map_or(0.,|l|l.phase),
             node_phase:crate::engine::node_phase(),grid_phase:settings.node_phase,beats:settings.beats,horizon:settings.horizon,
         };
