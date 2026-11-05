@@ -136,7 +136,7 @@
 use crate::ground::{self,Ground};
 use crate::ledger::BUDGET;
 use crate::linear::{hermitian_eigen_within,hermitian_eigenvalues,Dense};
-use crate::solve::{MATRIX_NS,POPULATION_TARGET};
+use crate::solve::{MATRIX_NS,NUMERICAL_SHARE,POPULATION_TARGET};
 use crate::stats::KT_PER_UK;
 use crate::{Complex,Request,STATES};
 use rayon::prelude::*;
@@ -2155,7 +2155,9 @@ impl Model{
     /// (`NOT_LINDBLAD`), with its relative error, the largest ε with −D ≤ ε (Σ L̃†L̃ + 1/T) beyond D's round-off
     /// (`excess`), and the fold's ladder (solve.rs) passes over it -- the solve stops where it is the ladder's first
     /// rung, every drive folded. Between nodes the interpolation's D the solve meets along its pilot's states is
-    /// booked (solve.rs `gain`).
+    /// booked (solve.rs `gain`). So is a gain within what the norm it grows over the run can show, the exponentials' share of the population target: a beat's own rounding (a frame's sum of detunings, ε times hundreds of
+    /// THz) parts the decay's phases from the jumps' as t goes on -- 1e-12 to 1e-9 of the jump rate at the generic instant, none at t = 0, smooth in the beams' amplitudes -- and that alone refused a D1 scene of three
+    /// colours at 12.7 G at twice the round-off here, and a neighbour of it at 575 times, with a norm of 1e-7 over its 100 us.
     fn lindblad(&self)->Result<(),String>{
         let last=(self.tables.nodes-1).max(1) as f64;
         for &r in &self.reach{
@@ -2165,7 +2167,9 @@ impl Model{
             p.stencil=self.stencil(&s);
             for t in [0.,GENERIC]{for k in 0..self.clusters(){
                 let b=self.balance(k,&p,t);let round=64.*f64::EPSILON*self.dimension(k) as f64*b.scale;
-                if -b.low<=round{continue;}
+                // Its round-off, or what the norm it grows over the run cannot show.
+                let limit=if self.ground.duration>0.{round.max(NUMERICAL_SHARE*POPULATION_TARGET/self.ground.duration)}else{round};
+                if -b.low<=limit{continue;}
                 let floor=if self.ground.duration>0.{1./self.ground.duration}else{b.rate.max(round)};
                 let error=excess(&b.d,&b.jumps,round,floor);
                 return Err(format!("{NOT_LINDBLAD}：子空间 {k} 在 r = ({:.2}, {:.2}, {:.2}) μm、t = {t:.3} μs 处，无跳跃的衰减低于跳跃率（i(H − H†) − ΣL†L 的最小本征值 {:.2e} rad/μs，超出舍入误差 {round:.1e} rad/μs；最大跳跃率 {:.2e} rad/μs，相对误差 {:.2e}）——这部分衰减没有跳跃承载，轨迹的范数会增长",
@@ -2674,6 +2678,9 @@ mod tests{
         let size=model.layouts[k].size;
         for node in 0..model.tables.data[k].len()/(2*size){for i in q..q+square{for c in 0..2{model.tables.data[k][2*(node*size+i)+c]*=1.-1e-6;}}}
         let e=model.lindblad().expect_err("a gain of a millionth of a rate");assert!(e.starts_with(NOT_LINDBLAD),"{e}");
+        // Over a run the same gain is refused only where the norm it grows can show: not over a nanosecond, over ten seconds.
+        model.ground.duration=1e-3;assert!(model.lindblad().is_ok());
+        model.ground.duration=1e7;assert!(model.lindblad().is_err());
     }
     /// The ladder a solve climbs holds every rung of the rule's but those whose new explicit states no drive reads at any position: the tweezer PGC's D2 light on the D1 states.
     #[test]

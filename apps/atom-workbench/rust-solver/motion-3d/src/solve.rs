@@ -216,7 +216,7 @@
 //! booked as measured against the target, and chosen by its cost (the fold's candidates, the tables' refinement, model.rs
 //! `tabulate`); a model whose estimate the whole target cannot hold is refused (the GPU's undressed response, gpu/program.rs).
 //! The gain's guard (model.rs `Model::lindblad`) is no such estimate: the generator is of Lindblad form by construction, its
-//! round-off the limit of what it may read.
+//! round-off the limit of what it may read, and of what it refuses the norm the gain can show over the run.
 //!
 //! As the a-priori estimates A near ε that work diverges, as R^−(2+1/p), while past ε no work meets the target: the rule
 //! that held the statistics to the sliver below the target and gave them the whole target above it was a cliff (the
