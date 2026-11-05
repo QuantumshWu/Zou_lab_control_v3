@@ -44,9 +44,8 @@ fn candidate(request:&Request,which:&str)->(f64,Model){
     let a=ladder[which.parse::<usize>().unwrap()];(a,Model::with(request,a).unwrap())
 }
 fn describe(m:&Model)->String{
-    (0..m.clusters()).map(|k|{let(beats,period)=m.beats(k);let half=beats.len()/2;
-        format!("{}({}){}",m.dimension(k),m.dimension(k)-m.ground_dimension(k),if half>0{format!(" beats {:?} MHz period {}",beats[half..].iter().map(|w|(w/TAU*1e4).round()/1e4).collect::<Vec<_>>(),
-            period.map_or("none".into(),|t|format!("{t:.5} us")))}else{String::new()})}).collect::<Vec<_>>().join(", ")
+    (0..m.clusters()).map(|k|{let beats=m.beats(k);let half=beats.len()/2;
+        format!("{}({}){}",m.dimension(k),m.dimension(k)-m.ground_dimension(k),if half>0{format!(" beats {:?} MHz",beats[half..].iter().map(|w|(w/TAU*1e4).round()/1e4).collect::<Vec<_>>())}else{String::new()})}).collect::<Vec<_>>().join(", ")
 }
 
 fn main(){

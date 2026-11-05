@@ -168,7 +168,7 @@ impl Program{
         let quiet=crate::engine::quiet_clusters(model,settings);let exact_of=|k:usize|model.mixed(k)||(model.beating(k)&&quiet[k].is_none());let takes=(0..model.clusters()).any(exact_of);
         if let Some(k)=(0..model.clusters()).find(|&k|exact_of(k)&&model.dimension(k)>MAXM){
             return Err(beyond(format!("子空间 {} 个态（{} 个激发态显式）超出精确步的 {MAXM} 个",model.dimension(k),model.dimension(k)-model.ground_dimension(k))));}
-        if let Some(k)=(0..model.clusters()).find(|&k|takes&&1+model.beats(k).0.len()>MOST_PARTS){return Err(beyond(format!("子空间 {} 的 {} 个残余拍频",k,model.beats(k).0.len()/2)));}
+        if let Some(k)=(0..model.clusters()).find(|&k|takes&&1+model.beats(k).len()>MOST_PARTS){return Err(beyond(format!("子空间 {} 的 {} 个残余拍频",k,model.beats(k).len()/2)));}
         if model.geometry.len()>MOST_BEAMS||model.carriers.len()>MOST_CARRIERS||model.focused.len()>MOST_FOCUSED{return Err(beyond("光束或强度维度太多".into()));}
         if let Some(c)=g.clusters.iter().find(|c|c.states.len()>MAXN){return Err(beyond(format!("子空间 {} 个态",c.states.len())));}
         let hm=model.hbar_over_mass;
@@ -220,7 +220,7 @@ impl Program{
             for c in (0..nc).filter(|&c|(mixed(k,states)>>c)&1==1){for d in (0..nc).filter(|&d|d!=c){for &b in states{if g.couples(d,b){bits|=1<<(d*GROUND+b);}}}}
             bits};
         for(k,(layout,cl))in model.layouts.iter().zip(&g.clusters).enumerate(){
-            let parts=1+model.beats(k).0.len();let(n,n0)=(layout.n,layout.n0);
+            let parts=1+model.beats(k).len();let(n,n0)=(layout.n,layout.n0);
             let(list,u,tone_list,emission)=model.exact_terms(k);let(beat_waves,state_waves)=model.beat_waves(k);
             // The beams of its kept drives, in the order of their first drive (the kernel's `absorption`).
             let driven=driven_beams.len();for t in list.iter().filter(|t|t[0]==0){for &l in &model.carriers[t[3]].beams{if !driven_beams[driven..].contains(&(l as i32)){driven_beams.push(l as i32);}}}
@@ -231,7 +231,7 @@ impl Program{
                 group_parts:group_parts.len() as i32,residual_parts:residual_parts.len() as i32,first_fields:first_fields.len() as i32,nfirst:0,states:[0;MAXM],shifts:shifts(k,&cl.states),mixed:mixed(k,&cl.states),driven:driven as i32,ndriven:(driven_beams.len()-driven) as i32,labels:state_waves.map_or(-1,|_|labels.len() as i32),moves:model.moves(k) as i32,pad:0};
             for(x,&b)in cl.states.iter().enumerate(){cluster.states[x]=b as i32;}
             // Its beats, its explicit states and its terms (model.rs `exact_terms`).
-            omegas.extend(model.beats(k).0);waves.extend(beat_waves.iter().flatten().copied());labels.extend(state_waves.iter().flat_map(|x|x.iter().flatten()).map(|&x|x as f32));excited_list.extend(cl.excited.iter().map(|&e|e as i32));
+            omegas.extend(model.beats(k));waves.extend(beat_waves.iter().flatten().copied());labels.extend(state_waves.iter().flat_map(|x|x.iter().flatten()).map(|&x|x as f32));excited_list.extend(cl.excited.iter().map(|&e|e as i32));
             for((t,u),per)in list.iter().zip(&u).zip(&tone_list){
                 terms.push(Term{kind:t[0] as i32,row:t[1] as i32,col:t[2] as i32,carrier:t[3] as i32,part:t[4] as i32,at:t[5] as i32,at2:t[6] as i32,tones:tones.len() as i32,ntones:per.len() as i32,u:u.map(|z|[z.re as f32,z.im as f32])});
                 tones.extend(per.iter().map(|x|Tone{beam:x[0] as i32,part:x[1] as i32,mirror:x[2] as i32}));

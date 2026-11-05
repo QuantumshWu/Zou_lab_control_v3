@@ -4,7 +4,7 @@ use crate::STATES;
 use rayon::prelude::*;
 
 /// kB/ħ in rad/us per μK: a temperature T as the rate kT/ħ.
-pub const KT_PER_UK:f64=1.380649e-23/1.0545718176461565e-34*1e-12;
+pub const KT_PER_UK:f64=crate::model::BOLTZMANN/crate::model::HBAR*1e-12;
 
 /// Sums over the atoms still held at one output time: their number, Σκ, Σκ² per axis,
 /// Σ populations, Σ of the folded excited population (the elimination's η²), Σ of the Gaussian

@@ -56,9 +56,7 @@
 //! H₀ the static part less its scalar (a phase), H_j the terms at Ω_j, the gradients alike. Residuals
 //! within `same_frame`'s tolerance at the cluster's largest frame and detuning (the frames' round-off)
 //! are static, and are one beat where within it of each other; the beats come in pairs ±Ω (a term and
-//! its adjoint), and the gradient's Hermitian part pairs them, G_{−Ω} = G_Ω†. Where the beats are
-//! integer multiples of one frequency ω₀ (Euclid's algorithm within the round-off) their period 2π/ω₀
-//! lets the exact step cache one period's propagators (engine.rs). A cluster with beats or explicit
+//! its adjoint), and the gradient's Hermitian part pairs them, G_{−Ω} = G_Ω†. A cluster with beats or explicit
 //! excited states takes the exact step, unless its beats are all within the exponentials' share wherever the atom goes
 //! (engine.rs `quiet_clusters`); `local` is the plain step's, its beats at the step's middle.
 //!
@@ -294,10 +292,9 @@ struct EffectiveLayout{row:usize,col:usize,carrier:usize,residual:f64,at:usize,t
 pub(crate) struct Layout{pub(crate) n:usize,pub(crate) n0:usize,pub(crate) size:usize,base:usize,pub(crate) h0:usize,pub(crate) groups:Vec<GroupLayout>,pub(crate) carriers:Vec<CarrierLayout>,crosses:Vec<CrossLayout>,pub(crate) drives:Vec<DriveLayout>,
     decays:Vec<DecayLayout>,effective:Vec<EffectiveLayout>,effective_dropped:f64,emission:usize,pub(crate) fourth:Option<FourthLayout>,pub(crate) beats:Beats,pub(crate) labels:Vec<[f64;3]>,pub(crate) gauged:bool}
 /// A cluster's beats (module documentation, # The generator's beats): the distinct residuals and wave vectors of its terms, by the residuals ascending and closed under negation -- (−Ω_max, −q) … (−Ω_min, −q′),
-/// (Ω_min, q′) … (Ω_max, q), a wave vector's sign its residual's, of a residual zero its first component's --; the round-offs within which a residual or a wave vector is static or one of them; their common period where they are
-/// harmonics of one frequency and none moves with the atom.
+/// (Ω_min, q′) … (Ω_max, q), a wave vector's sign its residual's, of a residual zero its first component's --; the round-offs within which a residual or a wave vector is static or one of them.
 #[derive(Clone,Debug,Default)]
-pub(crate) struct Beats{pub(crate) omegas:Vec<f64>,pub(crate) waves:Vec<[f64;3]>,round_off:f64,wave_round_off:f64,pub(crate) period:Option<f64>}
+pub(crate) struct Beats{pub(crate) omegas:Vec<f64>,pub(crate) waves:Vec<[f64;3]>,round_off:f64,wave_round_off:f64}
 impl Beats{
     /// The beats of terms (residual, wave vector): those beyond the round-offs, one where within them of each other.
     fn new(terms:impl Iterator<Item=(f64,[f64;3])>,round_off:f64,wave_round_off:f64)->Beats{
@@ -307,9 +304,7 @@ impl Beats{
         for x in positive{if !merged.iter().rev().take_while(|m|x.0-m.0<=round_off).any(|m|(0..3).all(|i|(x.1[i]-m.1[i]).abs()<=wave_round_off)){merged.push(x);}}
         let omegas:Vec<f64>=merged.iter().rev().map(|m|-m.0).chain(merged.iter().map(|m|m.0)).collect();
         let waves:Vec<[f64;3]>=merged.iter().rev().map(|m|m.1.map(|x|0.-x)).chain(merged.iter().map(|m|m.1)).collect();
-        let still=merged.iter().all(|m|m.1==[0.;3]);let frequencies:Vec<f64>=merged.iter().map(|m|m.0).collect();
-        let period=if still{Beats::period_of(&frequencies,round_off)}else{None};
-        Beats{omegas,waves,round_off,wave_round_off,period}
+        Beats{omegas,waves,round_off,wave_round_off}
     }
     /// A term's beat with the sign of the pair's positive one: whether it is the negative of that, the residual and the wave vector, none where both lie within the round-offs of zero.
     fn positive(w:f64,q:[f64;3],round_off:f64,wave_round_off:f64)->Option<(bool,f64,[f64;3])>{
@@ -317,26 +312,6 @@ impl Beats{
         if w==0.&&q==[0.;3]{return None;}
         let negative=w<0.||(w==0.&&q.iter().find(|x|**x!=0.).is_some_and(|x|*x<0.));
         Some(if negative{(true,-w,q.map(|x|0.-x))}else{(false,w,q)})
-    }
-    /// The period 2π/ω₀ of beats that are integer multiples of one frequency ω₀: Euclid's algorithm with
-    /// nearest-integer quotients on the positive beats, each remainder's bound of its round-off carried
-    /// along (|a − q b| errs by at most e_a + |q| e_b); a remainder within its bound ends it, one whose
-    /// divisor is within its own bound has no common frequency. Every beat is then checked to be its
-    /// multiple within the bounds. Within the round-off incommensurate beats are harmonics too, of a
-    /// fundamental far below them: a period too long for a step's cache, which declines it (engine.rs).
-    fn period_of(positive:&[f64],round_off:f64)->Option<f64>{
-        let(&first,rest)=positive.split_first()?;let(mut g,mut error)=(first,round_off);
-        for &w in rest{
-            let(mut a,mut ea,mut b,mut eb)=(w,round_off,g,error);
-            loop{
-                if b<=eb{return None;}
-                let q=(a/b).round();let(r,er)=((a-q*b).abs(),ea+q.abs()*eb);
-                if r<=er{break;}
-                (a,ea,b,eb)=(b,eb,r,er);
-            }
-            (g,error)=(b,eb);
-        }
-        positive.iter().all(|&w|{let q=(w/g).round();(w-q*g).abs()<=round_off+q*error}).then(||std::f64::consts::TAU/g)
     }
     /// The beat of a term: None where it is static, else its index in `omegas`.
     fn of(&self,residual:f64,wave:[f64;3])->Option<usize>{
@@ -1726,9 +1701,8 @@ impl Model{
     pub fn beating(&self,cluster:usize)->bool{!self.layouts[cluster].beats.omegas.is_empty()}
     /// The points the profiles and the bound are judged over (`reach`): the focus and ±reach_a along the trap's principal axes.
     pub(crate) fn reach_points(&self)->&[[f64;3]]{&self.reach}
-    /// A cluster's beats (rad/us), ascending and closed under negation, and their common period (us)
-    /// where they are harmonics of one frequency.
-    pub fn beats(&self,cluster:usize)->(&[f64],Option<f64>){let b=&self.layouts[cluster].beats;(&b.omegas,b.period)}
+    /// A cluster's beats (rad/us), ascending and closed under negation.
+    pub fn beats(&self,cluster:usize)->&[f64]{&self.layouts[cluster].beats.omegas}
     /// The entries of a cluster's groups the first order's transfer leaves (`transfer_tables`).
     pub fn kept_entries(&self,cluster:usize)->usize{self.layouts[cluster].groups.iter().map(|g|g.kept.iter().map(|k|k.entries.len()).sum::<usize>()).sum()}
     /// A cluster's number of ground states (the first of its basis).
@@ -2682,8 +2656,6 @@ impl Model{
     pub fn intensities_at_point(&self,r:[f64;3])->Vec<f64>{
         let s:Vec<f64>=self.focused.iter().map(|&u|self.unit_intensity(u,r).min(1.)).collect();self.unit_intensities(&s)
     }
-    /// H at a point: the focused units at their intensities there, the others at the focus.
-    pub fn hamiltonian_at_point(&self,r:[f64;3])->Dense{self.ground.hamiltonian_with(&self.intensities_at_point(r))}
 }
 
 /// A cluster's post-jump transient amplitudes (`Model::transient`): per coherent group of channels X (ne × n0, row-major).
@@ -2825,7 +2797,6 @@ impl Photons<'_>{
 #[cfg(test)]
 mod tests{
     use super::{cubic,Beats,Model,MOST_TABLE_BYTES,MOST_TABLE_NODES,NOT_LINDBLAD};
-    use std::f64::consts::TAU;
 
     /// The interpolant (`cubic`) is C¹ -- its derivative, the force the tables give, the same from either side of every
     /// node, the grid's ends included --, reproduces a quadratic exactly, and converges at third order: a smooth
@@ -2887,24 +2858,19 @@ mod tests{
         assert!(ladder[0]==f64::INFINITY&&ladder.len()>1&&ladder.len()<all.len()&&ladder.iter().all(|a|all.contains(a)),"{all:?} {ladder:?}");
     }
     /// Residuals within the round-off of zero are static and of each other one beat; the beats come in
-    /// pairs ±Ω; harmonics of one frequency have its period, incommensurate ones none.
+    /// pairs ±Ω.
     #[test]
-    fn the_beats_merge_the_round_off_and_find_the_period(){
+    fn the_beats_merge_the_round_off(){
         let w=228.702;let round_off=1e-10;
         let still=|x:Vec<f64>,r:f64|Beats::new(x.into_iter().map(|w|(w,[0.;3])),r,1e-12);
         let b=still(vec![0.,-5.7e-14,w,w*(1.+1e-15),-w,2.*w,-2.*w+3e-13,5.*w,0.],round_off);
         assert_eq!(b.omegas.len(),6);
         for(x,y)in b.omegas.iter().zip([-5.*w,-2.*w,-w,w,2.*w,5.*w]){assert!((x-y).abs()<=round_off,"{:?}",b.omegas);}
-        assert!((b.period.unwrap()-TAU/w).abs()<=1e-12*TAU/w,"{:?}",b.period);
         assert_eq!(b.of(1e-13,[0.;3]),None);assert_eq!(b.of(-2.*w,[0.;3]),Some(1));assert_eq!(b.of(5.*w*(1.-1e-16),[0.;3]),Some(5));
-        // Incommensurate beats are harmonics only of a fundamental below their ratio's resolution in the
-        // round-off: a period far too long for a step's cache (engine.rs).
-        assert!(still(vec![1.,2f64.sqrt()],1e-12).period.map_or(true,|t|TAU/t<1e-4));
-        assert!((still(vec![3.,4.5,-7.5],1e-12).period.unwrap()-TAU/1.5).abs()<=1e-12);
         assert!(still(vec![0.,1e-11],1e-10).omegas.is_empty());
-        // A beam's wave vector and its negative at a residual and its negative are one pair; a term with a wave vector alone is a beat; none moves with a period.
+        // A beam's wave vector and its negative at a residual and its negative are one pair; a term with a wave vector alone is a beat.
         let k=[0.,0.,8.];let m=[0.,0.,-8.];let b=Beats::new([(0.,k),(0.,m),(w,k),(-w,m),(w,m),(0.,[1e-13,0.,0.])].into_iter(),1e-10,1e-12);
-        assert_eq!(b.omegas.len(),6);assert_eq!(b.period,None);
+        assert_eq!(b.omegas.len(),6);
         assert_eq!(b.of(0.,k),Some(3));assert_eq!(b.of(0.,m),Some(2));assert_eq!(b.of(-w,k),Some(1));assert_eq!(b.of(w,m),Some(4));assert_eq!(b.of(w,k),Some(5));assert_eq!(b.of(0.,[0.;3]),None);
     }
 }

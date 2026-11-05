@@ -130,7 +130,7 @@
 //! their mean a, plus the mean's shot noise ±a with equal chance --
 //! per photon the beams' second moment, without the mean twice. A running wave's beam axis takes R E_r (1 + ⟨n²⟩) so; with
 //! the spread alone it took R E_r ⟨n²⟩. The draw's uniform picks the part, its leftover the explicit part's beam, its
-//! lower bits the sign: no further deviate. The momentum diffusion beyond these kicks is the hook `Diffusion`'s.
+//! lower bits the sign: no further deviate.
 //!
 //! # The transient after a jump
 //! A jump leaves the atom in a bare ground state ψ′, while the fold's photons are those of the steady excited amplitude of that state, v = X ψ′ (X = −Σ e^{−iε̃t} R_c per
@@ -314,15 +314,6 @@ impl Settings{
             _=>{let c=self.about();std::array::from_fn(|a|r[a]-c[a])}
         }
     }
-}
-
-/// A momentum diffusion scheme beyond the per-beam kicks: the hook for one (none by default). It
-/// may change κ at the end of each exact step's internal evolution, given the step's point and
-/// length, and at each photon, given its amplitude f (the target cluster's ground states) and the
-/// kick the engine has drawn.
-pub trait Diffusion:Sync{
-    fn step(&self,_model:&Model,_t:&mut Trajectory,_point:&Point,_tau:f64){}
-    fn photon(&self,_model:&Model,_t:&Trajectory,_point:&Point,_f:&[Complex],_kick:&mut [f64;3]){}
 }
 
 /// The harmonic flow along one axis for τ: (x, κ) turned by ωτ in phase space (x in um, κ in 1/um,
@@ -997,7 +988,7 @@ pub fn jump_stream(seed:u64,index:u64,jump:u64)->Rng{Rng::new(seed,Purpose::Jump
 pub struct Held{pub point:Point,pub locals:Vec<Local>,pub jumps:Vec<Vec<[Vec<Complex>;3]>>}
 
 /// The engine: a model and its settings; for a held atom its generator and jumps there, and each
-/// cluster's propagator exp(−i H dt/2) over half the settings' step; the momentum diffusion's hook.
+/// cluster's propagator exp(−i H dt/2) over half the settings' step.
 /// Per cluster of ground states with beats the largest bound of those beats (`Segment::resolve`, its step's) where the exact step leaves them all out at the model's reach -- wherever the atom goes:
 /// a generator static within the exponentials' share, the plain step's, at a tenth of the work (# The exact step). None for the others.
 pub(crate) fn quiet_clusters(model:&Model,s:&Settings)->Vec<Option<f64>>{
@@ -1012,10 +1003,10 @@ pub(crate) fn quiet_clusters(model:&Model,s:&Settings)->Vec<Option<f64>>{
     }).collect()
 }
 
-pub struct Engine<'a>{pub model:&'a Model,pub settings:Settings,held:Option<(&'a Held,Vec<[Complex;MOST_STATES*MOST_STATES]>)>,pub diffusion:Option<&'a dyn Diffusion>,quiet:Vec<Option<f64>>}
+pub struct Engine<'a>{pub model:&'a Model,pub settings:Settings,held:Option<(&'a Held,Vec<[Complex;MOST_STATES*MOST_STATES]>)>,quiet:Vec<Option<f64>>}
 
 impl<'a> Engine<'a>{
-    pub fn new(model:&'a Model,settings:Settings)->Engine<'a>{let quiet=quiet_clusters(model,&settings);Engine{model,settings,held:None,diffusion:None,quiet}}
+    pub fn new(model:&'a Model,settings:Settings)->Engine<'a>{let quiet=quiet_clusters(model,&settings);Engine{model,settings,held:None,quiet}}
     /// The engine of an atom held at a point: no axis free, no loss, the held generator and jumps;
     /// the half step's propagators by the exponentials' own series on the basis states. Its clusters
     /// are of ground states (a twin exists for those alone, control.rs).
@@ -1023,7 +1014,7 @@ impl<'a> Engine<'a>{
         let mut s=settings.clone();s.free=[false;3];s.loss=false;
         let half=held.locals.iter().enumerate().map(|(k,local)|{let n=model.dimension(k);let mut u=[Complex::ZERO;MOST_STATES*MOST_STATES];
             for j in 0..n{let mut e=[Complex::ZERO;MOST_STATES];e[j]=Complex::ONE;propagate(&local.hamiltonian,n,0.5*s.dt,&mut e,s.truncation);for i in 0..n{u[i*n+j]=e[i];}}u}).collect();
-        Engine{model,settings:s,held:Some((held,half)),diffusion:None,quiet:vec![]}
+        Engine{model,settings:s,held:Some((held,half)),quiet:vec![]}
     }
     /// The trap's harmonic flow for τ about c, its part weighted by w (`reference`): along its principal axes
     /// when every lab axis is free, else along the free lab axes, at the frequencies ω √w.
@@ -1132,7 +1123,6 @@ impl<'a> Engine<'a>{
         }
         let harmonic=self.harmonic(std::array::from_fn(|a|t.r[a]-c[a]));let mut kick=[0.;3];
         for a in 0..3{if s.free[a]{kick[a]=impulse[a]-tau*w*harmonic[a];t.kappa[a]+=kick[a];}}
-        if let Some(d)=self.diffusion{d.step(m,t,&point,tau);}
         self.flow(t,0.5*tau,reference);
         t.time=start+tau;
         kick
@@ -1303,7 +1293,7 @@ impl<'a> Engine<'a>{
         // mean's correction.
         if let Some(photons)=&photons{
             let(gradient,parts)=photons.absorption(pick,e,&f);
-            self.kick(t,&point,direction,class.wave_number,&f,size,&gradient,&parts,absorbed);
+            self.kick(t,direction,class.wave_number,&f,size,&gradient,&parts,absorbed);
         }
         let mut next=[Complex::ZERO;MOST_MIXED];for i in 0..nt{next[i]=f[i]*(1./size.sqrt());}
         t.cluster=class.target;t.psi=next;t.threshold=threshold;
@@ -1314,7 +1304,7 @@ impl<'a> Engine<'a>{
     /// ‖f‖², the gradient of its amplitudes along the polarization ε per row and axis, and its absorbed
     /// light's parts): −k n, and the absorbed light's with the exact conditional mean Im⟨f|∇f⟩/‖f‖²
     /// (`absorbed_recoil`, by the uniform `absorbed`).
-    fn kick(&self,t:&mut Trajectory,point:&Point,direction:[f64;3],k:f64,f:&[Complex;MOST_STATES],size:f64,du:&[[Complex;3];MOST_STATES],parts:&Absorption,absorbed:f64){
+    fn kick(&self,t:&mut Trajectory,direction:[f64;3],k:f64,f:&[Complex;MOST_STATES],size:f64,du:&[[Complex;3];MOST_STATES],parts:&Absorption,absorbed:f64){
         let m=self.model;let mut kick=direction.map(|x|-k*x);
         let mean:[f64;3]=std::array::from_fn(|x|{let mut s=0.;for i in 0..MOST_STATES{s+=(f[i].conj()*du[i][x]).im;}s/size});
         let beams:Vec<([f64;3],f64,f64)>=parts.beams.iter().map(|&(l,s,w)|(m.geometry[l].wave_vector(),s,w)).collect();
@@ -1322,7 +1312,6 @@ impl<'a> Engine<'a>{
         let explicit=parts.explicit.as_ref().zip(drives.as_deref()).map(|((w,_),d)|(*w,d));
         let recoil=absorbed_recoil(&beams,explicit,mean,absorbed);
         for a in 0..3{kick[a]+=recoil[a];}
-        if let Some(d)=self.diffusion{d.photon(m,t,point,f,&mut kick);}
         for a in 0..3{if self.settings.free[a]{t.kappa[a]+=kick[a];}}
     }
 
@@ -1372,7 +1361,7 @@ impl<'a> Engine<'a>{
         let parts=Absorption{beams:beams.iter().map(|(l,u)|{let along=|i:usize|(0..3).fold(Complex::ZERO,|s,a|s+u[a][i]*polar[a]);
             (*l,(0..nt).map(|i|along(i).norm_sqr()).sum(),-(0..nt).map(|i|(f[i].conj()*along(i)).re).sum::<f64>()/size)}).collect(),explicit:None};
         let along:[[Complex;3];MOST_STATES]=std::array::from_fn(|i|std::array::from_fn(|x|-(0..3).fold(Complex::ZERO,|s,a|s+du[a][x][i]*polar[a])));
-        self.kick(t,point,direction,m.carriers[g.clusters[k].coherent[c][0].0.carrier].wave_number,&f,size,&along,&parts,draws[4]);
+        self.kick(t,direction,m.carriers[g.clusters[k].coherent[c][0].0.carrier].wave_number,&f,size,&along,&parts,draws[4]);
         let mut next=[Complex::ZERO;MOST_MIXED];for i in 0..nt{next[i]=f[i]*(1./size.sqrt());}
         t.cluster=target;t.psi=next;
     }

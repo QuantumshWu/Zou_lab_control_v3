@@ -745,7 +745,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // first step, at the a-priori estimates of its model -- the largest step met there, else the search's last. With explicit states their exact steps take the populations, whose bound over-counts many
     // times there, and bare states ring (`relaxed`; a resonant probe of 100 mW/cm²: 502 steps per us for the choice's 5): that first step, the light's pattern's.
     let steps=if pilot_candidate.model.ground.clusters.iter().any(|x|!x.excited.is_empty()){first}else{let c=&pilot_candidate;let allowance=doppler_allowance(&c.base,&c.model);
-        let weights={let mut e=Estimate::default();start(&mut e,&c.model,&c.initial);vec![regime(&e,trap.lab);outputs]};let tolerances=tolerances(&weights,&c.charges.iter().map(|x|x.map(|x|c.others()+x)).collect::<Vec<_>>());
+        let weights={let mut e=Estimate::default();start(&mut e,&c.initial);vec![regime(&e,trap.lab);outputs]};let tolerances=tolerances(&weights,&c.charges.iter().map(|x|x.map(|x|c.others()+x)).collect::<Vec<_>>());
         let binding=vec![1.;starts.len()];let probes=bound_probes(&c.model,&starts,&binding);
         let deposits=Deposits::default();
         let doubled=|k:usize|{let r=step_excess(&Engine::new(&c.model,running(c.reference(),k,start_waiting,allowance,c.phase)),&starts,&binding,start_waiting,&probes,period,0.,tolerances,&deposits,(FIRST_GROUPS*TASK) as f64*duration);Check{steps:k,population:r[0],loss:r[1],motion:r[2]}};
@@ -771,7 +771,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let(pilot_statistics,ceilings):(Vec<Statistic>,Vec<f64>)={
         let scales=Scales{hbar_over_mass:pilot_candidate.model.hbar_over_mass,frequencies:trap.lab};
         let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:pilot_harmonic.mean[i],twin:None}).collect();
-        let mut e=summarize(&pilot_groups,&scales,&means);start(&mut e[0],&pilot_candidate.model,&pilot_candidate.initial);
+        let mut e=summarize(&pilot_groups,&scales,&means);start(&mut e[0],&pilot_candidate.initial);
         (statistics_of(&e,trap.lab),e.iter().map(|x|ceiling(x,trap.lab)).collect())
     };
     // T's target's weight per output where the pilot's atoms are: over the states, where T's criteria read (`regime`, `binding_at`), and at its upper bound against the step's tolerance (`ceiling`, `tolerances`).
@@ -779,7 +779,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // The relative standard error of the need the pilot predicts (`need_error`): the margin a finer step must save
     // by (`kept`).
     let need={let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:pilot_harmonic.mean[i],twin:None}).collect();
-        need_error(&pilot_groups,&Scales{hbar_over_mass:pilot_candidate.model.hbar_over_mass,frequencies:trap.lab},&means,&pilot_candidate.model,&pilot_candidate.initial,trap.lab)};
+        need_error(&pilot_groups,&Scales{hbar_over_mass:pilot_candidate.model.hbar_over_mass,frequencies:trap.lab},&means,&pilot_candidate.initial,trap.lab)};
     let pilot_waiting=pilot as f64*duration/(pilot_jumps.max(1) as f64);let pilot_horizon=pilot_waiting.min(duration);
     // The beats the pilot's exact steps left out (engine.rs `Segment::resolve`): their bound per unit time, at
     // most the run's share over its waiting time (`booked_beats`).
@@ -973,7 +973,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // The need the pilot predicts per output and target, the populations' and T's (its trajectories each a group, with the harmonic control).
     let pilot_needs:Vec<[f64;2]>={
         let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:pilot_harmonic.mean[i],twin:None}).collect();
-        let mut e=summarize(&pilot_groups,&scales,&means);start(&mut e[0],&model,&initial);
+        let mut e=summarize(&pilot_groups,&scales,&means);start(&mut e[0],&initial);
         let(_,accounts)=ledger(&model,&booked(&base,pilot_beats*horizon),&e,times,allowance,bias,trap.lab,false,&memory);
         output_ratios(&e,&accounts,trap.lab).iter().map(|r|r.map(|x|(pilot as f64*x*x).min(MOST_TRAJECTORIES as f64))).collect()
     };
@@ -1011,7 +1011,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // the targets need with it, times its share of the work (counted as the step's, `held_work`),
     // against those they need without.
     if twin.is_some(){
-        let needed=|means:&[Means]|{let mut e=summarize(&first.groups,&scales,means);start(&mut e[0],&model,&initial);
+        let needed=|means:&[Means]|{let mut e=summarize(&first.groups,&scales,means);start(&mut e[0],&initial);
             let(_,accounts)=ledger(&model,&booked(&base,pilot_beats.max(first.beats)*horizon),&e,times,allowance,bias,trap.lab,false,&memory);worst_ratio(&e,&accounts,trap.lab).powi(2)};
         if needed(&means(true))*(1.+twin_share())>=needed(&means(false)){twin=None;}
     }
@@ -1020,7 +1020,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // trajectory and output interval it ran.
     let mut outcome=first;let mut done=count;let mut pace=wall/ends.iter().map(|&e|TASK*e as u64).sum::<u64>().max(1) as f64;
     loop{
-        let mut estimates=summarize(&outcome.groups,&scales,&means);start(&mut estimates[0],&model,&initial);
+        let mut estimates=summarize(&outcome.groups,&scales,&means);start(&mut estimates[0],&initial);
         let(_,accounts)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,false,&memory);
         let counts:Vec<u64>=estimates.iter().map(|e|e.trajectories as u64).collect();
         let worst=output_ratios(&estimates,&accounts,trap.lab);let ratio=worst.iter().fold(0_f64,|m,r|m.max(r[0]).max(r[1]));
@@ -1367,8 +1367,8 @@ fn kept(candidates:&[Check],cost:&dyn Fn(&Check)->f64,error:f64)->Option<Check>{
 /// statistic over its target squared (`statistics`, CONFIDENCE standard errors from the pilot's groups, T's target its
 /// regime's), so twice that statistic's relative error, its jackknife over the groups. Zero where fewer than three groups or no
 /// statistic stand.
-fn need_error(groups:&[Group],scales:&Scales,means:&[Means],model:&Model,initial:&Initial,frequencies:[f64;3])->f64{
-    let statistic=|groups:&[&Group]|->f64{let mut e=summarize(groups,scales,means);start(&mut e[0],model,initial);
+fn need_error(groups:&[Group],scales:&Scales,means:&[Means],initial:&Initial,frequencies:[f64;3])->f64{
+    let statistic=|groups:&[&Group]|->f64{let mut e=summarize(groups,scales,means);start(&mut e[0],initial);
         statistics_of(&e,frequencies).iter().skip(1).map(|s|(s.population/POPULATION_TARGET).max(s.weight*s.temperature/TEMPERATURE_TARGET)).fold(0.,f64::max)};
     let n=groups.len();if n<3{return 0.;}
     let all=statistic(&groups.iter().collect::<Vec<&Group>>());if !(all>0.){return 0.;}
@@ -1955,8 +1955,8 @@ fn held_work(states:&[StateWork],s:&Settings,interval:f64,waiting:f64)->f64{
 /// t = 0 is the request's initial state, exactly: per lab axis T is its bound ensembles' kinetic
 /// temperature with each trap's thermal Wigner factor (lib.rs `Initial::temperature`), the mean
 /// velocity zero -- the trajectories' estimates there carry only the sampling's error.
-fn start(e:&mut Estimate,model:&Model,initial:&Initial){
-    let t=initial.temperature();let _=model;
+fn start(e:&mut Estimate,initial:&Initial){
+    let t=initial.temperature();
     e.temperature=t;e.temperature_error=[0.;3];e.mean_velocity=[0.;3];
     e.temperature_total=t.iter().sum::<f64>()/3.;e.temperature_total_error=0.;
 }

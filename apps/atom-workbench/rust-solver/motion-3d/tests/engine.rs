@@ -861,7 +861,7 @@ fn a_near_tweezer_s_shift_moves_a_probe_s_line_to_the_core_s(){
 fn a_near_tweezer_s_far_cross_terms_leave_the_splitting_folded(){
     let v:Value=serde_json::from_str(include_str!("fixtures/near_tweezer_gray_molasses_motion.json")).unwrap();let r=sparse_request(&v);
     let model=Model::new(&r).unwrap();
-    assert_eq!(model.clusters(),1);assert_eq!(model.dimension(0),8);assert!(!model.beating(0),"{:?}",model.beats(0).0);
+    assert_eq!(model.clusters(),1);assert_eq!(model.dimension(0),8);assert!(!model.beating(0),"{:?}",model.beats(0));
 }
 
 /// The fourth order on a dressed probe (ground.rs, # Fourth order): its W3 without what the near light's dressing
@@ -1003,7 +1003,7 @@ fn a_far_drive_of_the_dressing_folds(){
     let ladder=Ground::allowances(&r).unwrap();let mut seen=false;
     for &a in ladder.iter().skip(1).take(3){let model=Model::with(&r,a).unwrap();
         if model.effective_dropped>0.{seen=true;assert!(model.effective_dropped<=BUDGET,"{}",model.effective_dropped);}
-        for k in 0..model.clusters(){println!("rung {a:.3e}, cluster {k} of {} states: beats {:?}, scale {:.3e}, dropped {:.3e}",model.dimension(k),model.beats(k).0.iter().filter(|w|**w>0.).map(|w|format!("{w:.3e}")).collect::<Vec<_>>(),model.ground.generator_scale,model.effective_dropped);}
+        for k in 0..model.clusters(){println!("rung {a:.3e}, cluster {k} of {} states: beats {:?}, scale {:.3e}, dropped {:.3e}",model.dimension(k),model.beats(k).iter().filter(|w|**w>0.).map(|w|format!("{w:.3e}")).collect::<Vec<_>>(),model.ground.generator_scale,model.effective_dropped);}
     }
     assert!(seen,"no far drive of the dressing on this ladder");
 }

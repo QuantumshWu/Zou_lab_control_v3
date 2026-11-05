@@ -66,7 +66,6 @@ impl Dense{
         assert_eq!((self.rows,self.cols),(b.rows,b.cols));for(x,&y)in self.entries.iter_mut().zip(&b.entries){*x+=z*y;}
     }
     pub fn scaled(&self,z:Complex)->Dense{Dense{rows:self.rows,cols:self.cols,entries:self.entries.iter().map(|&x|z*x).collect()}}
-    pub fn is_zero(&self)->bool{self.entries.iter().all(|&x|x==Complex::ZERO)}
     /// The largest entry's modulus.
     pub fn largest(&self)->f64{self.entries.iter().fold(0.,|a,x|a.max(x.abs()))}
     /// ‖self‖₂, the largest singular value.

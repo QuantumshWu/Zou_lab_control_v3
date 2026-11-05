@@ -30,7 +30,5 @@ impl Ledger{
     pub fn add(&mut self,label:&str,estimate:f64,action:String){self.items.push(Item{label:label.into(),estimate,action});}
     /// The estimates' sum.
     pub fn used(&self)->f64{self.items.iter().map(|i|i.estimate).sum()}
-    /// What is left of the budget.
-    pub fn left(&self)->f64{(self.budget-self.used()).max(0.)}
 }
 impl Default for Ledger{fn default()->Ledger{Ledger::new()}}

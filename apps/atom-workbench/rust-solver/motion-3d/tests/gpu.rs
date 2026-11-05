@@ -93,7 +93,7 @@ fn model(r:&Request,fourth:bool)->Model{Model::with_order(r,f64::INFINITY,fourth
 fn explicit(r:&Request)->Model{Model::with(r,Ground::allowances(r).unwrap()[1]).unwrap()}
 /// The first rung with explicit states that beat at two frequencies.
 fn beating_twice(r:&Request)->Model{
-    Ground::allowances(r).unwrap().into_iter().map(|a|Model::with(r,a).unwrap()).find(|m|(0..m.clusters()).any(|k|m.mixed(k)&&m.beats(k).0.len()>=4)).expect("a rung beating twice")
+    Ground::allowances(r).unwrap().into_iter().map(|a|Model::with(r,a).unwrap()).find(|m|(0..m.clusters()).any(|k|m.mixed(k)&&m.beats(k).len()>=4)).expect("a rung beating twice")
 }
 /// The PGC with a resonant probe 10 MHz off the cooling light (the floquet study's PGCP_10), as the app
 /// sends it: its folds' saturation far beyond one, its first rung keeps 5 excited states explicit with the 5
@@ -350,7 +350,7 @@ fn the_exact_components_are_the_cpu_s(){
                 for a in 0..3{check(g[a],&got[(parts+3*q+a)*nn..(parts+3*q+a+1)*nn],(0.1*c.scalar.abs()).max(round),1e-4,format!("G_{q}[{a}]"),&mut worst,1);}
             }
         }
-        println!("clusters {:?}: the GPU's H {:.1e} and G {:.1e} off",(0..model.clusters()).map(|k|(model.dimension(k),model.ground_dimension(k),model.beats(k).0.len())).collect::<Vec<_>>(),worst[0],worst[1]);
+        println!("clusters {:?}: the GPU's H {:.1e} and G {:.1e} off",(0..model.clusters()).map(|k|(model.dimension(k),model.ground_dimension(k),model.beats(k).len())).collect::<Vec<_>>(),worst[0],worst[1]);
     }
 }
 /// With a retro-reflected tweezer (`retro`): a step, and a jump with the first-order and the exact

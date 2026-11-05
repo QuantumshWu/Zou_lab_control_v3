@@ -226,7 +226,7 @@ impl Gpu{
     /// `exact_components`, a check's entry): per part H_q, then per part and axis G_q, each n × n row-major.
     pub fn exact_probe(&self,program:&Program,model:&Model,settings:&Settings,t:&Trajectory)->Result<Vec<Complex>,String>{
         self.set(program)?;
-        let(n,q)=(model.dimension(t.cluster),1+model.beats(t.cluster).0.len());let size=5*q*n*n;
+        let(n,q)=(model.dimension(t.cluster),1+model.beats(t.cluster).len());let size=5*q*n*n;
         let state=Buffer::with(&self.stream,&[program::State::new(t,t,settings)])?;let out=Buffer::new(8*size.max(program.exact))?;
         let f=self.function("exact_probe")?;self.stream.launch(&f,1,32,&[&state.pointer,&out.pointer])?;
         let mut words=vec![[0f32;2];size];self.stream.download(&out,&mut words)?;
