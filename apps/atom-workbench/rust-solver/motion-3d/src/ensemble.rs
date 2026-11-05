@@ -5,9 +5,10 @@
 //! level (model.rs `Model::trap_level`: the shifts of the trap's beams and of every far focused beam -- what the
 //! atom's motion conserves before the near light comes on at t = 0; a cloud at the trap beam's own equilibrium
 //! breathes up to 19 times as hot in a trap crossed by a second far beam --, the near light off), T the
-//! temperature asked for; every atom is also bound by the loss's own
-//! measure, the trap potential with the near light's interference (model.rs `Model::trap_potential`,
-//! engine.rs # Loss): its momenta stop where either energy reaches the far level.
+//! temperature asked for. What the near light then does to an atom is the run's: one its light leaves unbound is lost once it has left
+//! the trap's region (engine.rs # Loss). Its fold's shift is no part of what holds the atoms before it: a strong near drive's fold
+//! lifts the whole focus above the far level (a D1 drive of 600 mW/cm² at 10 MHz: 12 k_BT above it, where the trap holds 16 k_BT below), and a
+//! draw bound by that as well had no atom to take.
 //!
 //! # Why lowered
 //! The bound states of a Gaussian beam fill an unbounded phase space: at r the bound momenta fill a
@@ -37,13 +38,11 @@
 //! Σ_m w(a/(1 + u_m)) -- each part a function of its u_m alone, isotropic in the coordinates ξ that whiten it, its
 //! mass in proportion to that whitening's volume. A part's radial law, y = a/(1 + u) with density ∝ (a/y − 1)^{d/2−1}
 //! w(y)/y², is drawn exactly from pieces ∝ e^y, each bounded by its factors at their worst ends
-//! (`Radial`); the direction is uniform. A drawn point is kept with w(y(r))/Σ_m w(a/(1 + u_m)) ≤ 1, the
-//! loss's measure taken only where the trap's own lets it pass.
+//! (`Radial`); the direction is uniform. A drawn point is kept with w(y(r))/Σ_m w(a/(1 + u_m)) ≤ 1.
 //!
 //! # The momenta
-//! At r, kinetic energy k (in k_BT) up to k_max -- y, or the loss's depth there if lower -- with
-//! density ∝ (e^{y−k} − 1) k^{d/2−1}: by inverting its distribution `kept(d/2, y, k)/kept(d/2, y, k_max)`
-//! (Newton's steps kept within a bracket), the direction uniform.
+//! At r, kinetic energy k (in k_BT) up to y with density ∝ (e^{y−k} − 1) k^{d/2−1}: by inverting its distribution
+//! `kept(d/2, y, k)/kept(d/2, y, y)` (Newton's steps kept within a bracket), the direction uniform.
 //!
 //! # The quadrature
 //! Its kinetic temperature and its share of the trap's thermal distribution are integrals over the
@@ -53,9 +52,8 @@
 //! cos θ from the beam's axis, and the trapezoidal rule in the azimuth; the region the share is taken
 //! against (U_h ≤ D, as the loss's) is an ellipsoid about the trap's centre, so along each direction its ends
 //! fall at panels' edges.
-use crate::model::{Geometry,Model,Trap,MOST_MIXED};
+use crate::model::{Geometry,Model,Trap};
 use crate::rng::{normal_quantile,Rng};
-use crate::Complex;
 use rayon::prelude::*;
 use std::f64::consts::{PI,TAU};
 use std::sync::OnceLock;
@@ -211,13 +209,6 @@ impl Ensemble{
     /// Its kinetic temperature and cut, its trap `trap` and its loss's depth `region` (`Model::depth`, the region
     /// U_h ≤ D its share is taken against).
     pub fn integrate(&mut self,model:&Model,trap:&Trap,region:f64){(self.kinetic,self.cut)=self.integrals(model,trap,region);}
-    /// The trap's own depth and the loss's at r, in k_BT (module documentation): y_T, and the momenta's
-    /// reach k_max = min(y_T, y_A), zero where either is unbound.
-    fn depths(&self,model:&Model,r:[f64;3],psi:&[Complex;MOST_MIXED])->(f64,f64){
-        let own=-model.trap_level(self.cluster,self.state,r)/self.kt;if !(own>0.){return(own,0.);}
-        let loss=-model.trap_potential(self.cluster,&model.point(r,[0.;3]),psi,0.)/self.kt;
-        (own,own.min(loss).max(0.))
-    }
     /// The mixture's envelope at r in `s` half dimensions, the part `m` proposed at y there: the sum of the parts, and that part's share of it.
     fn envelope(&self,s:f64,m:usize,y:f64,r:[f64;3])->(f64,f64){
         let a=self.top;let own=kept(s,y,y,a);
@@ -229,7 +220,7 @@ impl Ensemble{
     /// distribution over the region U_h ≤ `region` (module documentation, # The quadrature), in three
     /// dimensions: 32 Gauss nodes in cos θ, 8 azimuths, 16 Gauss nodes per radial panel.
     fn integrals(&self,model:&Model,trap:&Trap,region:f64)->(f64,f64){
-        let(a,hm)=(self.top,model.hbar_over_mass);let mut psi=[Complex::ZERO;MOST_MIXED];psi[self.state]=Complex::ONE;
+        let(a,hm)=(self.top,model.hbar_over_mass);
         let(polar,radial)=(legendre(32),legendre(16));let azimuths=8;let every=[true;3];let first=self.modes[0].whitening(every).1;
         // The mixture's parts, each with its volume (relative to the first's) and its share of the mixture at the point.
         let sums=self.modes.iter().enumerate().map(|(m,mode)|{let volume=mode.whitening(every).1/first;
@@ -256,8 +247,8 @@ impl Ensemble{
                     let(t,dt)=if k==0{let(r0,r1)=(lo.sqrt(),hi.sqrt());let tau=0.5*(r0+r1)+0.5*(r1-r0)*x;(tau*tau,w*0.5*(r1-r0)*2.*tau)}else{(0.5*(lo+hi)+0.5*(hi-lo)*x,w*0.5*(hi-lo))};
                     // u = t/(a − t); the measure ½ u^{1/2} du = ½ (t/(a − t))^{1/2} a/(a − t)² dt.
                     let u=t/(a-t);let r=unit.map(|x|x*u.sqrt());let measure=0.5*u.sqrt()*a/((a-t)*(a-t))*dt*wm*volume*self.envelope(1.5,m,a-t,r).1;
-                    let(own,reach)=self.depths(model,r,&psi);
-                    let(number,energy)=(kept(1.5,own,reach,a),kept(2.5,own,reach,a));
+                    let own=-model.trap_level(self.cluster,self.state,r)/self.kt;
+                    let(number,energy)=(kept(1.5,own,own,a),kept(2.5,own,own,a));
                     s[0]+=measure*number;s[1]+=measure*energy;
                     if t>entered&&t<left{s[2]+=measure*number;s[3]+=measure*(own-a).exp();}
                 }
@@ -278,12 +269,11 @@ impl Ensemble{
         let d=free.iter().filter(|&&f|f).count();if d==0{return([0.;3],[0.;3]);}
         let directions=if d==3{2}else{1};
         let first:Vec<f64>=(0..1+directions).map(|_|next(rng)).collect();let momenta:Vec<f64>=(0..1+directions).map(|_|next(rng)).collect();
-        let mut psi=[Complex::ZERO;MOST_MIXED];psi[self.state]=Complex::ONE;
         let(a,s)=(self.top,d as f64/2.);let radial=self.radial(d);
         // The mixture's parts' whitenings and masses, their radial law the same.
         let parts:Vec<([[f64;3];3],f64)>=self.modes.iter().map(|m|m.whitening(free)).collect();let mass:f64=parts.iter().map(|p|p.1).sum();
         let mut deviates=first;
-        let(r,own,reach)=loop{
+        let(r,own)=loop{
             // The part from the first deviate, the radial law from what is left of it (a beam alone: the deviate itself).
             let(mut x,mut m)=(deviates[0],0);
             for(i,p)in parts.iter().enumerate(){let share=p.1/mass;if x<share||i+1==parts.len(){m=i;x=(x/share).min(1.);break;}x-=share;}
@@ -294,16 +284,12 @@ impl Ensemble{
             let own=-model.trap_level(self.cluster,self.state,r)/self.kt;
             if own>0.{
                 debug_assert!(own<=self.modes.iter().map(|o|a/(1.+o.coordinate(r))).fold(y,f64::max)*(1.+1e-12),"the envelope at {r:?}: y {own} above its bound");
-                // The trap's own depth first, the loss's only where that lets the point pass.
-                if draw<=kept(s,own,own,a){
-                    let loss=-model.trap_potential(self.cluster,&model.point(r,[0.;3]),&psi,0.)/self.kt;let reach=own.min(loss).max(0.);
-                    if draw<=kept(s,own,reach,a){break(r,own,reach);}
-                }
+                if draw<=kept(s,own,own,a){break(r,own);}
             }
             deviates=(0..1+directions).map(|_|rng.interior()).collect();
         };
         // The kinetic energy k by its distribution, then the direction.
-        let k=invert(s,own,reach,momenta[0]);
+        let k=invert(s,own,momenta[0]);
         let size=(2.*k*self.kt/model.hbar_over_mass).sqrt();
         (r,sphere(free,&momenta[1..]).map(|x|x*size))
     }
@@ -321,12 +307,11 @@ fn sphere(free:[bool;3],deviates:&[f64])->[f64;3]{
     v
 }
 
-/// The kinetic energy (in k_BT) whose distribution at depth y, up to k_max, is u: kept(s, y, k)/kept(s, y,
-/// k_max) = u, its density ∝ (e^{y−k} − 1) k^{s−1} -- Newton's steps on k^s (smooth at 0) kept within a
-/// bracket, bisection where one leaves it.
-fn invert(s:f64,y:f64,reach:f64,u:f64)->f64{
-    if !(reach>0.){return 0.;}
-    let target=u*kept(s,y,reach,y);let(mut lo,mut hi)=(0_f64,reach.powf(s));let mut v=u*hi;
+/// The kinetic energy (in k_BT) whose distribution at depth y is u: kept(s, y, k)/kept(s, y, y) = u, its density
+/// ∝ (e^{y−k} − 1) k^{s−1} -- Newton's steps on k^s (smooth at 0) kept within a bracket, bisection where one leaves it.
+fn invert(s:f64,y:f64,u:f64)->f64{
+    if !(y>0.){return 0.;}
+    let target=u*kept(s,y,y,y);let(mut lo,mut hi)=(0_f64,y.powf(s));let mut v=u*hi;
     for _ in 0..200{
         let k=v.powf(1./s);let f=kept(s,y,k,y)-target;
         if f==0.{break;}
@@ -385,9 +370,9 @@ mod tests{
     /// The momenta's inverse distribution (`invert`) against `kept`, to round-off, across the deviates.
     #[test]
     fn the_kinetic_energy_inverts_its_distribution(){
-        for s in [0.5,1.,1.5]{for y in [1e-3,0.7,4.3,30.]{for reach in [y,0.4*y]{for u in [1e-9,0.01,0.3,0.5,0.97,1.-1e-12]{
-            let k=invert(s,y,reach,u);let back=kept(s,y,k,y)/kept(s,y,reach,y);
-            assert!(k>=0.&&k<=reach*(1.+1e-12)&&(back-u).abs()<=1e-11,"s {s} y {y} reach {reach} u {u}: k {k}, distribution {back}");
-        }}}}
+        for s in [0.5,1.,1.5]{for y in [1e-3,0.7,4.3,30.]{for u in [1e-9,0.01,0.3,0.5,0.97,1.-1e-12]{
+            let k=invert(s,y,u);let back=kept(s,y,k,y)/kept(s,y,y,y);
+            assert!(k>=0.&&k<=y*(1.+1e-12)&&(back-u).abs()<=1e-11,"s {s} y {y} u {u}: k {k}, distribution {back}");
+        }}}
     }
 }

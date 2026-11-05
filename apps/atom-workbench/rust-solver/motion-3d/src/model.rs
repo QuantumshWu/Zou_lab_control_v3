@@ -466,21 +466,47 @@ impl Generator{
 }
 /// A cluster's generator at a point split by its beats (`Model::components`): H(t) = H₀ + Σ_j e^{iΩ_j t} H_j
 /// and the Hermitian part's gradient G(t) = G₀ + Σ_j e^{iΩ_j t} G_j, Hermitian at every t (G_{−Ω} = G_Ω†); H₀
-/// less the static part's scalar.
+/// less the static part's scalar. Flat, as the kernel's scratch, n × n each: `matrices` H_q at q n² and, past the `parts`, G_q per axis at (parts + 3q + axis) n², q = 0 the static part;
+/// `omegas` the frequencies of the beats still kept (the exact step leaves some out) and `places` their q.
 #[derive(Clone,Debug)]
-pub struct Components{pub statics:Generator,pub beats:Vec<Beat>}
+pub struct Components{pub n:usize,pub scalar:f64,pub(crate) parts:usize,pub(crate) omegas:Vec<f64>,pub(crate) places:Vec<usize>,pub(crate) matrices:Vec<Complex>}
 /// One beat of a generator: its frequency Ω (rad/us) and its parts of H and of the gradient (n × n).
-#[derive(Clone,Debug)]
-pub struct Beat{pub omega:f64,pub hamiltonian:Vec<Complex>,pub gradient:[Vec<Complex>;3]}
+#[derive(Clone,Copy,Debug)]
+pub struct Beat<'a>{pub omega:f64,pub hamiltonian:&'a [Complex],pub gradient:[&'a [Complex];3]}
+thread_local!{
+    /// A thread's last `Components`' buffers, for its next (as `LOCAL_BUFFERS`): the exact step's generator per step allocates nothing, where a beating cluster's parts took six allocations each.
+    static COMPONENT_BUFFERS:std::cell::Cell<(Vec<Complex>,Vec<f64>,Vec<usize>)>=const{std::cell::Cell::new((Vec::new(),Vec::new(),Vec::new()))};
+}
+impl Drop for Components{
+    fn drop(&mut self){let buffers=(std::mem::take(&mut self.matrices),std::mem::take(&mut self.omegas),std::mem::take(&mut self.places));let _=COMPONENT_BUFFERS.try_with(|b|b.set(buffers));}
+}
 impl Components{
-    pub fn n(&self)->usize{self.statics.n}
+    pub fn n(&self)->usize{self.n}
+    /// H₀.
+    pub fn hamiltonian(&self)->&[Complex]{let nn=self.n*self.n;&self.matrices[..nn]}
+    /// G₀ along an axis.
+    pub fn gradient(&self,axis:usize)->&[Complex]{let nn=self.n*self.n;let at=(self.parts+axis)*nn;&self.matrices[at..at+nn]}
+    /// The frequencies of the beats kept, ascending and closed under negation.
+    pub fn omegas(&self)->&[f64]{&self.omegas}
+    /// The kept beat j.
+    pub fn beat(&self,j:usize)->Beat<'_>{
+        let(q,nn)=(self.places[j],self.n*self.n);
+        Beat{omega:self.omegas[j],hamiltonian:&self.matrices[q*nn..(q+1)*nn],gradient:std::array::from_fn(|a|{let at=(self.parts+3*q+a)*nn;&self.matrices[at..at+nn]})}
+    }
+    /// The beats kept.
+    pub fn beats(&self)->impl Iterator<Item=Beat<'_>>{(0..self.omegas.len()).map(|j|self.beat(j))}
+    /// Only the beats `keep` says, by their index among the kept.
+    pub(crate) fn retain(&mut self,keep:impl Fn(usize)->bool){
+        let mut left=0;for j in 0..self.omegas.len(){if keep(j){self.omegas[left]=self.omegas[j];self.places[left]=self.places[j];left+=1;}}
+        self.omegas.truncate(left);self.places.truncate(left);
+    }
     /// The generator at time t.
     pub fn at(&self,t:f64)->Generator{
-        let mut g=self.statics.clone();
-        for b in &self.beats{
+        let mut g=Generator{n:self.n,hamiltonian:self.hamiltonian().to_vec(),scalar:self.scalar,gradient:std::array::from_fn(|a|self.gradient(a).to_vec())};
+        for b in self.beats(){
             let phase=Complex::cis(b.omega*t);
-            for(o,x)in g.hamiltonian.iter_mut().zip(&b.hamiltonian){*o+=phase**x;}
-            for a in 0..3{for(o,x)in g.gradient[a].iter_mut().zip(&b.gradient[a]){*o+=phase**x;}}
+            for(o,x)in g.hamiltonian.iter_mut().zip(b.hamiltonian){*o+=phase**x;}
+            for a in 0..3{for(o,x)in g.gradient[a].iter_mut().zip(b.gradient[a]){*o+=phase**x;}}
         }
         g
     }
@@ -1608,14 +1634,14 @@ impl Model{
     }
 
     /// The table slice [start, start + value.len()) of a cluster at a stencil, and with `slopes` its
-    /// derivatives in every s_f, in one pass over the stencil's nodes.
-    fn gather_dyn(&self,cluster:usize,stencil:&Stencil,start:usize,value:&mut [Complex],mut slopes:Option<&mut [Vec<Complex>]>){
+    /// derivatives in every s_f (each at f times the given stride), in one pass over the stencil's nodes.
+    fn gather_dyn(&self,cluster:usize,stencil:&Stencil,start:usize,value:&mut [Complex],mut slopes:Option<(&mut [Complex],usize)>){
         let size=2*self.layouts[cluster].size;let data=&self.tables.data[cluster];let len=value.len();let d=stencil.dimensions;
-        value.fill(Complex::ZERO);if let Some(s)=slopes.as_deref_mut(){for g in 0..d{s[g][..len].fill(Complex::ZERO);}}
+        value.fill(Complex::ZERO);if let Some((s,stride))=&mut slopes{for g in 0..d{s[g* *stride..g* *stride+len].fill(Complex::ZERO);}}
         for i in 0..stencil.count(){
             let(node,w,dw)=stencil.node(i);let base=node*size+2*start;let x=&data[base..base+2*len];
             for(o,z)in value.iter_mut().zip(x.chunks_exact(2)){o.re+=w*z[0];o.im+=w*z[1];}
-            if let Some(s)=slopes.as_deref_mut(){for g in 0..d{for(o,z)in s[g].iter_mut().zip(x.chunks_exact(2)){o.re+=dw[g]*z[0];o.im+=dw[g]*z[1];}}}
+            if let Some((s,stride))=&mut slopes{for g in 0..d{for(o,z)in s[g* *stride..g* *stride+len].iter_mut().zip(x.chunks_exact(2)){o.re+=dw[g]*z[0];o.im+=dw[g]*z[1];}}}
         }
     }
     /// A cluster's generator at a point and time t on its n states (`Generator`): a static cluster of
@@ -1634,10 +1660,10 @@ impl Model{
         let layout=&self.layouts[cluster];let(n,d)=(layout.n,self.focused.len());let nn=n*n;let beats=&layout.beats;let parts=1+beats.omegas.len();
         // The part of a residual: 0 the static one, 1 + j beat j's.
         let part=|w:f64|beats.of(w).map_or(0,|j|j+1);
-        let zeros=||vec![Complex::ZERO;nn];
-        let mut gradient:Vec<[Vec<Complex>;3]>=(0..parts).map(|_|std::array::from_fn(|_|zeros())).collect();
-        let(mut m,mut gamma):(Vec<Vec<Complex>>,Vec<Vec<Complex>>)=((0..parts).map(|_|zeros()).collect(),(0..parts).map(|_|zeros()).collect());
-        let mut buf=zeros();let mut slope=vec![zeros();d];
+        // Flat: M_q, then H_q in its place at the end, G_q per axis (`Components`), Γ_q, a table's entries, their slopes.
+        let(mut matrices,mut omegas,mut places)=COMPONENT_BUFFERS.take();crate::linear::zeroed(&mut matrices,(5*parts+1+d)*nn);
+        let(m,rest)=matrices.split_at_mut(parts*nn);let(gradient,rest)=rest.split_at_mut(3*parts*nn);let(gamma,rest)=rest.split_at_mut(parts*nn);let(buf,slope)=rest.split_at_mut(nn);
+        let of=|q:usize|q*nn..(q+1)*nn;let along=|q:usize,a:usize|of(3*q+a);
         // acc += c X, and with `adjoint` c X + (c X)† (a Hermitian group's pair k1 < k standing for both);
         // a group's tables hold its entries alone (`scatter`).
         let add=|c:Complex,x:&[Complex],acc:&mut [Complex],adjoint:bool|{for a in 0..n{for b in 0..n{acc[a*n+b]+=c*x[a*n+b];if adjoint{acc[a*n+b]+=(c*x[b*n+a]).conj();}}}};
@@ -1650,14 +1676,14 @@ impl Model{
             let lambda_s=transfer[0];let(mu,nu)=first_coefficients(transfer[0],transfer[1]);
             for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
                 let at=pi*count;let ee=e.e[k1].conj()*f.e[k];let both=gl.hermitian&&k1<k;
-                self.gather_dyn(cluster,&p.stencil,gl.s+at,&mut buf[..count],Some(&mut slope));
-                scatter(ee,&buf[..count],&gl.entries,&mut m[q],both);
+                self.gather_dyn(cluster,&p.stencil,gl.s+at,&mut buf[..count],Some((&mut *slope,nn)));
+                scatter(ee,&buf[..count],&gl.entries,&mut m[of(q)],both);
                 // ∇H_herm ∋ −∇(Φ) S − Φ Σ_f ∂_f S ∇s_f.
                 for a in 0..3{
-                    let c=e.grad[k1][a].conj()*f.e[k]+e.e[k1].conj()*f.grad[k][a];scatter(-c,&buf[..count],&gl.entries,&mut gradient[q][a],both);
-                    for g in 0..d{scatter(-ee*p.intensity_gradient[g][a],&slope[g][..count],&gl.entries,&mut gradient[q][a],both);}
+                    let c=e.grad[k1][a].conj()*f.e[k]+e.e[k1].conj()*f.grad[k][a];scatter(-c,&buf[..count],&gl.entries,&mut gradient[along(q,a)],both);
+                    for g in 0..d{scatter(-ee*p.intensity_gradient[g][a],&slope[g*nn..g*nn+count],&gl.entries,&mut gradient[along(q,a)],both);}
                 }
-                self.gather_dyn(cluster,&p.stencil,gl.q+at,&mut buf[..count],None);scatter(ee,&buf[..count],&gl.entries,&mut gamma[q],both);
+                self.gather_dyn(cluster,&p.stencil,gl.q+at,&mut buf[..count],None);scatter(ee,&buf[..count],&gl.entries,&mut gamma[of(q)],both);
                 // The first order on Q (module documentation): in Γ, H ∋ −(i/2) Γ, its coefficients μ ξ_k′k + ν ξ_kk′* and, on Q†, μ ξ_kk′ + ν ξ_k′k* or, between two
                 // carriers, ν ξ* at the mirror's beat; its force's gradient once, the pairing below halves it onto the two beats.
                 if gl.first.is_empty(){continue;}
@@ -1665,39 +1691,39 @@ impl Model{
                 let slope_of=|k1:usize,k:usize,a:usize|e.grad[k1][a].conj()*f.doppler[k]+e.e[k1].conj()*f.doppler_grad[k][a];
                 if gl.hermitian{
                     let other=e.e[k].conj()*f.doppler[k1];
-                    scatter((mu*xi+nu*other.conj())*into,&buf[..count],&gl.entries,&mut gamma[q],false);
-                    if k1<k{adjoint_at((mu*other+nu*xi.conj())*into,&mut gamma[q]);}
-                    for a in 0..3{let mut c=lambda_s*slope_of(k1,k,a);if k1<k{c+=(lambda_s*slope_of(k,k1,a)).conj();}scatter(c,&buf[..count],&gl.entries,&mut gradient[q][a],false);}
+                    scatter((mu*xi+nu*other.conj())*into,&buf[..count],&gl.entries,&mut gamma[of(q)],false);
+                    if k1<k{adjoint_at((mu*other+nu*xi.conj())*into,&mut gamma[of(q)]);}
+                    for a in 0..3{let mut c=lambda_s*slope_of(k1,k,a);if k1<k{c+=(lambda_s*slope_of(k,k1,a)).conj();}scatter(c,&buf[..count],&gl.entries,&mut gradient[along(q,a)],false);}
                 }else{
-                    scatter(mu*xi*into,&buf[..count],&gl.entries,&mut gamma[q],false);adjoint_at(nu*xi.conj()*into,&mut gamma[mirror]);
-                    for a in 0..3{scatter(lambda_s*slope_of(k1,k,a),&buf[..count],&gl.entries,&mut gradient[q][a],false);}
+                    scatter(mu*xi*into,&buf[..count],&gl.entries,&mut gamma[of(q)],false);adjoint_at(nu*xi.conj()*into,&mut gamma[of(mirror)]);
+                    for a in 0..3{scatter(lambda_s*slope_of(k1,k,a),&buf[..count],&gl.entries,&mut gradient[along(q,a)],false);}
                 }
             }
             // What the transfer leaves: ½ ξ ΔW^S + (i/2) ξ ΔW^Q and their mirrors' adjoints, in Γ; ΔW^S's gradient.
             for kept in &gl.kept{
                 let(k1,k)=kept.pair;let count=kept.entries.len();let xi=e.e[k1].conj()*f.doppler[k];
                 self.gather_dyn(cluster,&p.stencil,kept.at,&mut buf[..count],None);
-                for(j,&(x,y))in kept.entries.iter().enumerate(){let z=xi*buf[j]*0.5;gamma[q][x*n+y]+=z*into;gamma[mirror][y*n+x]+=z.conj()*into;
-                    for a in 0..3{gradient[q][a][x*n+y]+=(e.grad[k1][a].conj()*f.doppler[k]+e.e[k1].conj()*f.doppler_grad[k][a])*buf[j];}}
+                for(j,&(x,y))in kept.entries.iter().enumerate(){let z=xi*buf[j]*0.5;gamma[q*nn+x*n+y]+=z*into;gamma[mirror*nn+y*n+x]+=z.conj()*into;
+                    for a in 0..3{gradient[along(q,a).start+x*n+y]+=(e.grad[k1][a].conj()*f.doppler[k]+e.e[k1].conj()*f.doppler_grad[k][a])*buf[j];}}
                 self.gather_dyn(cluster,&p.stencil,kept.at+count,&mut buf[..count],None);
-                for(j,&(x,y))in kept.entries.iter().enumerate(){let z=xi*buf[j]*Complex::new(0.,0.5);gamma[q][x*n+y]+=z*into;gamma[mirror][y*n+x]+=(xi*buf[j]).conj()*Complex::new(0.,0.5)*into;}
+                for(j,&(x,y))in kept.entries.iter().enumerate(){let z=xi*buf[j]*Complex::new(0.,0.5);gamma[q*nn+x*n+y]+=z*into;gamma[mirror*nn+y*n+x]+=(xi*buf[j]).conj()*Complex::new(0.,0.5)*into;}
             }
         }
-        self.gather_dyn(cluster,&p.stencil,layout.h0,&mut buf,Some(&mut slope));
-        for a in 0..3{for g in 0..d{let c=Complex::new(p.intensity_gradient[g][a],0.);add(c,&slope[g],&mut gradient[0][a],false);}}
+        self.gather_dyn(cluster,&p.stencil,layout.h0,&mut *buf,Some((&mut *slope,nn)));
+        for a in 0..3{for g in 0..d{let c=Complex::new(p.intensity_gradient[g][a],0.);add(c,&slope[of(g)],&mut gradient[along(0,a)],false);}}
         // The static part less its scalar (its Hermitian part's mean diagonal, a phase); a beat's diagonal,
         // a phase that beats, stays in its part.
-        let scalar=(0..n).map(|a|buf[a*n+a].re-m[0][a*n+a].re).sum::<f64>()/n as f64;
-        let mut h:Vec<Vec<Complex>>=(0..parts).map(|q|(0..nn).map(|i|(if q==0{buf[i]}else{Complex::ZERO})-m[q][i]-gamma[q][i]*Complex::new(0.,0.5)).collect()).collect();
-        for a in 0..n{h[0][a*n+a]-=Complex::new(scalar,0.);}
+        let scalar=(0..n).map(|a|buf[a*n+a].re-m[a*n+a].re).sum::<f64>()/n as f64;
+        let h=m;for q in 0..parts{for i in 0..nn{h[q*nn+i]=(if q==0{buf[i]}else{Complex::ZERO})-h[q*nn+i]-gamma[q*nn+i]*Complex::new(0.,0.5);}}
+        for a in 0..n{h[a*n+a]-=Complex::new(scalar,0.);}
         // The fourth order (a cluster of ground states): each slab's kept entries in their beats' parts
         // (`fourth_parts`; the force keeps the second order's).
-        self.fourth_parts(cluster,p,&mut h);
+        self.fourth_parts(cluster,p,h);
         // The kept drives, Σ_k E_k U_k e^{iΩ̃t} and its adjoint; their gradients the stimulated force.
         for dr in &layout.drives{
             let fl=&p.fields[dr.carrier];let(q,mirror)=(part(dr.residual),part(-dr.residual));let rank=self.carriers[dr.carrier].rank;
-            let v=(0..rank).fold(Complex::ZERO,|s,k|s+fl.e[k]*dr.u[k]);h[q][dr.row*n+dr.col]+=v;h[mirror][dr.col*n+dr.row]+=v.conj();
-            for a in 0..3{let g=(0..rank).fold(Complex::ZERO,|s,k|s+fl.grad[k][a]*dr.u[k]);gradient[q][a][dr.row*n+dr.col]+=g;gradient[mirror][a][dr.col*n+dr.row]+=g.conj();}
+            let v=(0..rank).fold(Complex::ZERO,|s,k|s+fl.e[k]*dr.u[k]);h[q*nn+dr.row*n+dr.col]+=v;h[mirror*nn+dr.col*n+dr.row]+=v.conj();
+            for a in 0..3{let g=(0..rank).fold(Complex::ZERO,|s,k|s+fl.grad[k][a]*dr.u[k]);gradient[along(q,a).start+dr.row*n+dr.col]+=g;gradient[along(mirror,a).start+dr.col*n+dr.row]+=g.conj();}
         }
         // The decay cross terms, (i/2) e^{iΩ̃t} Σ_k E_k X_k and its mirror; the explicit states' decay.
         let mut x=[Complex::ZERO;MOST_RANK];
@@ -1705,35 +1731,33 @@ impl Model{
             let rank=self.carriers[cr.carrier].rank;self.gather_dyn(cluster,&p.stencil,cr.at,&mut x[..rank],None);
             let mut z=(0..rank).fold(Complex::ZERO,|s,k|s+p.fields[cr.carrier].e[k]*x[k]);
             self.gather_dyn(cluster,&p.stencil,cr.at2,&mut x[..rank],None);z-=(0..rank).fold(Complex::ZERO,|s,k|s+p.fields[cr.carrier].doppler[k]*x[k]);
-            h[part(cr.residual)][cr.row*n+cr.col]+=z*Complex::new(0.,0.5);h[part(-cr.residual)][cr.col*n+cr.row]+=z.conj()*Complex::new(0.,0.5);
+            h[part(cr.residual)*nn+cr.row*n+cr.col]+=z*Complex::new(0.,0.5);h[part(-cr.residual)*nn+cr.col*n+cr.row]+=z.conj()*Complex::new(0.,0.5);
         }
         let mut z1=[Complex::ZERO];
-        for x in &layout.decays{self.gather_dyn(cluster,&p.stencil,x.at,&mut z1,None);h[part(x.residual)][x.row*n+x.col]+=z1[0];}
+        for x in &layout.decays{self.gather_dyn(cluster,&p.stencil,x.at,&mut z1,None);h[part(x.residual)*nn+x.row*n+x.col]+=z1[0];}
         // The drives the dressing brings: Σ_k E_k Y_k e^{iΩ̃t} and its adjoint, and their gradients.
-        let(mut y,mut dy)=([Complex::ZERO;MOST_RANK],vec![vec![Complex::ZERO;MOST_RANK];d]);
+        let(mut y,mut dy)=([Complex::ZERO;MOST_RANK],[Complex::ZERO;MOST_FOCUSED*MOST_RANK]);
         for x in &layout.effective{
             let rank=self.carriers[x.carrier].rank;let fl=&p.fields[x.carrier];let(q,mirror)=(part(x.residual),part(-x.residual));
-            self.gather_dyn(cluster,&p.stencil,x.at,&mut y[..rank],Some(&mut dy));
-            let v=(0..rank).fold(Complex::ZERO,|s,k|s+fl.e[k]*y[k]);h[q][x.row*n+x.col]+=v;h[mirror][x.col*n+x.row]+=v.conj();
+            self.gather_dyn(cluster,&p.stencil,x.at,&mut y[..rank],Some((&mut dy,MOST_RANK)));
+            let v=(0..rank).fold(Complex::ZERO,|s,k|s+fl.e[k]*y[k]);h[q*nn+x.row*n+x.col]+=v;h[mirror*nn+x.col*n+x.row]+=v.conj();
             for a in 0..3{
                 let mut g=(0..rank).fold(Complex::ZERO,|s,k|s+fl.grad[k][a]*y[k]);
-                for f in 0..d{g+=(0..rank).fold(Complex::ZERO,|s,k|s+fl.e[k]*dy[f][k])*p.intensity_gradient[f][a];}
-                gradient[q][a][x.row*n+x.col]+=g;gradient[mirror][a][x.col*n+x.row]+=g.conj();
+                for f in 0..d{g+=(0..rank).fold(Complex::ZERO,|s,k|s+fl.e[k]*dy[f*MOST_RANK+k])*p.intensity_gradient[f][a];}
+                gradient[along(q,a).start+x.row*n+x.col]+=g;gradient[along(mirror,a).start+x.col*n+x.row]+=g.conj();
             }
         }
         // The gradients' Hermitian parts (the force reads Re⟨ψ|·|ψ⟩ alone): the static one's, and per pair of
         // beats ±Ω, (G_Ω + G_{−Ω}†)/2 at Ω and its adjoint at −Ω, so that G(t) is Hermitian at every t.
-        for g in gradient[0].iter_mut(){for a in 0..n{for b in a..n{let z=(g[a*n+b]+g[b*n+a].conj())*0.5;g[a*n+b]=z;g[b*n+a]=z.conj();}}}
+        for x in 0..3{let g=&mut gradient[along(0,x)];for a in 0..n{for b in a..n{let z=(g[a*n+b]+g[b*n+a].conj())*0.5;g[a*n+b]=z;g[b*n+a]=z.conj();}}}
         let half=beats.omegas.len()/2;
         for i in 0..half{
-            let(up,down)=(1+half+i,half-i);let(low,high)=gradient.split_at_mut(up);
-            for x in 0..3{let(u,v)=(&mut high[0][x],&mut low[down][x]);
+            let(up,down)=(1+half+i,half-i);let(low,high)=gradient.split_at_mut(3*up*nn);
+            for x in 0..3{let(u,v)=(&mut high[of(x)],&mut low[along(down,x)]);
                 for a in 0..n{for b in 0..n{let z=(u[a*n+b]+v[b*n+a].conj())*0.5;u[a*n+b]=z;v[b*n+a]=z.conj();}}}
         }
-        let mut gradient=gradient.into_iter();let mut h=h.into_iter();
-        let statics=Generator{n,hamiltonian:h.next().unwrap(),scalar,gradient:gradient.next().unwrap()};
-        let beats_out=beats.omegas.iter().zip(h.zip(gradient)).map(|(&omega,(hamiltonian,gradient))|Beat{omega,hamiltonian,gradient}).collect();
-        Components{statics,beats:beats_out}
+        omegas.clear();omegas.extend_from_slice(&beats.omegas);places.clear();places.extend(1..parts);
+        Components{n,scalar,parts,omegas,places,matrices}
     }
 
     /// A cluster's generator at a point and time t (`Local`): a cluster of ground states' (one with
@@ -1767,13 +1791,13 @@ impl Model{
     }
     /// A cluster's H^(4) at a point added into its beats' parts (`components`): each slab's monomial times its
     /// kept entries, each into its part (`QuarticSlab::part`).
-    fn fourth_parts(&self,cluster:usize,p:&Point,h:&mut [Vec<Complex>]){
+    fn fourth_parts(&self,cluster:usize,p:&Point,h:&mut [Complex]){
         let Some(f)=self.layouts[cluster].fourth.as_ref()else{return};let nn=self.dimension(cluster).pow(2);
-        let e=|i:usize|{let(c,k)=f.fields[i];p.fields[c].e[k]};let mut slab=vec![Complex::ZERO;nn];
+        let e=|i:usize|{let(c,k)=f.fields[i];p.fields[c].e[k]};let mut slab=[Complex::ZERO;MOST_STATES*MOST_STATES];let slab=&mut slab[..nn];
         for q in &f.quartic{
             let m=e(q.conj.0).conj()*e(q.conj.1).conj()*e(q.plain.0)*e(q.plain.1);if m==Complex::ZERO{continue;}
-            self.interpolate(cluster,&p.stencil,None,q.at,&mut slab);
-            for i in 0..nn{if q.keep[i]{h[q.part[i]][i]+=m*slab[i];}}
+            self.interpolate(cluster,&p.stencil,None,q.at,slab);
+            for i in 0..nn{if q.keep[i]{h[q.part[i]*nn+i]+=m*slab[i];}}
         }
     }
     /// out += a carrier pair's slab at `at` at a point and time (n × n): Σ E^c1*_k1 E^c2_k2 M_k1k2 in its
