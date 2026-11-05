@@ -751,7 +751,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let weights={let mut e=Estimate::default();start(&mut e,&c.model,&c.initial);vec![regime(&e,trap.lab);outputs]};let tolerances=tolerances(&weights,&c.charges.iter().map(|x|x.map(|x|c.others()+x)).collect::<Vec<_>>());
         let binding=vec![1.;starts.len()];let probes=bound_probes(&c.model,&starts,&binding);
         let deposits=Deposits::default();
-        let doubled=|k:usize|{let r=step_excess(&Engine::new(&c.model,running(c.reference(),k,start_waiting,allowance,c.phase)),&starts,&binding,start_waiting,&probes,period,0.,tolerances,&deposits);Check{steps:k,population:r[0],loss:r[1],motion:r[2]}};
+        let doubled=|k:usize|{let r=step_excess(&Engine::new(&c.model,running(c.reference(),k,start_waiting,allowance,c.phase)),&starts,&binding,start_waiting,&probes,period,0.,tolerances,&deposits,(FIRST_GROUPS*TASK) as f64*duration);Check{steps:k,population:r[0],loss:r[1],motion:r[2]}};
         let mut bound=vec![];search(first,most,&[],&doubled,None,false,&mut bound);
         bound.iter().filter(|c|c.met()).map(|c|c.steps).min().unwrap_or(bound[bound.len()-1].steps)};
     // The pilot's atoms. A pilot that keeps none to the first output measures nothing the choice can read: a model whose own estimates lie past the targets (`Candidate::past_their_targets`)
@@ -807,7 +807,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         // cost is little beside that weight, and its check is put off until it is the choice -- its cost at the first step with no bias.
         if past_targets(&pilot_statistics,&apriori,c.model.resonance)&&first.is_none(){let(n,weight)=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64,c.model.resonance);let at=work(steps);return Costed{cost:at*n*weight*(outputs-1) as f64,check:checked_step(states.len(),bound_probes(&c.model,states,&binding).first,steps,interval,period)*at/steps as f64,work:at,steps,bias:[0.;2],apriori,checked:None};}
         let known:Vec<Check>=first.iter().map(|&(k,t)|Check{steps:k.steps,population:k.population*t[0]/tolerances[0],loss:k.loss*t[0]/tolerances[0],motion:k.motion*t[1]/tolerances[1]}).collect();
-        let checked=step_check(&c.model,states,&binding,&settings,steps,most,pilot_waiting,pilot_horizon,pilot as usize,&pilot_groups,period,tolerances,&cost,need,&known,deposits);
+        let reach=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64,c.model.resonance).0*duration;
+        let checked=step_check(&c.model,states,&binding,&settings,first.map_or(steps,|x|x.0.steps),most,pilot_waiting,pilot_horizon,pilot as usize,&pilot_groups,period,tolerances,&cost,need,&known,deposits,reach);
         let chosen=checked.chosen;
         Costed{cost:cost(&chosen),check:checked_work(&checked,states.len(),pilot as usize,pilot_horizon,interval,period,&work),work:work(chosen.steps),steps:chosen.steps,bias:bias(&chosen),apriori,checked:Some(checked)}
     };
@@ -861,7 +862,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let per_work=pilot_cost.as_ref().map_or(0.,|p|p.check/p.work);
     // Each rung's first doubling by its clusters (`Candidate::clusters`): the same states' dynamics whatever the drives of round-off's
     // size between them, its biases the same at the rung's tolerances.
-    let(mut rung,mut doubled)=(None,Vec::<(Vec<(Vec<usize>,Vec<usize>)>,[f64;3],[f64;2])>::new());
+    let(mut rung,mut doubled)=(None,Vec::<(Vec<(Vec<usize>,Vec<usize>)>,usize,[f64;3],[f64;2])>::new());
     if open{
         while let Some(mut c)=next_candidate(request,&bare,&mut ladder,&mut failed,&mut shapes){
             c.charged(charge_of(&pilot_candidate.model,&c.model));
@@ -875,26 +876,30 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             let(fewest,weight)=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64,c.model.resonance);
             // Its check as the pilot's model's at its own work: spent whether it is taken or not. A rung is taken only for a saving
             // beyond the need's error: one whose floor cannot make it, its check paid, is passed over with its check unspent.
-            let check=per_work*interval_work(&c.model,&parts,&at,interval,pilot_waiting);
-            if least_work(&c.model,&parts,&at,interval,pilot_waiting)*fewest*weight*(outputs-1) as f64*(1.+need)+check>=least{break;}
+            let(at_work,at_least)=(interval_work(&c.model,&parts,&at,interval,pilot_waiting),least_work(&c.model,&parts,&at,interval,pilot_waiting));
+            let check=per_work*at_work;
+            if at_least*fewest*weight*(outputs-1) as f64*(1.+need)+check>=least{break;}
             let states=relaxed(&c.model,&at,bare);let binding=binding_at(&states,&weights,interval);let probes=bound_probes(&c.model,&states,&binding);
-            // That doubling, made: the motion's and the loss's criteria, as dt², bound the steps the check can keep from below
+            // That doubling, made, from the coarse side as the grid's (`grid_phase`): at the fewest steps whose work per interval still is at least the work no step changes (W(s) = a s + least_work), at most the pilot's -- a read of the
+            // orbits costs as its steps until there, and the pilot's step is no measure of a rung's: on a Λ scheme's rung of 5 explicit states 0.04 us against the 0.62 us it keeps, each check at 0.04-0.05 us 125-155 CPU-s of a search of 830 for a run of 11.
+            // The motion's and the loss's criteria, as dt², bound the steps the check can keep from below
             // (the population's bound may yet be measured smaller), and the work there any step's it keeps -- the explicit
             // states' exact steps resolve what the folded model's step left to the fold (CONTROL_CYCLE's first rung: 118 steps
             // per interval against the folded 34, its evaluation ten CPU-s for a cost twice the least's).
             let tolerances=tolerances(&ceilings,&apriori);let clusters=c.clusters();let deposits=Deposits::default();
-            let r=match doubled.iter().find(|x|x.0==clusters){
-                Some(x)=>[x.1[0]*x.2[0]/tolerances[0],x.1[1]*x.2[0]/tolerances[0],x.1[2]*x.2[1]/tolerances[1]],
-                None=>{let r=step_excess(&Engine::new(&c.model,at.clone()),&states,&binding,pilot_waiting,&probes,period,escape(&c.model,&states,&pilot_groups),tolerances,&deposits);doubled.push((clusters,r,tolerances));r}
+            let coarse=((at_least*steps as f64/(at_work-at_least)).ceil() as usize).clamp(1,steps);
+            let(coarse,r)=match doubled.iter().find(|x|x.0==clusters){
+                Some(x)=>(x.1,[x.2[0]*x.3[0]/tolerances[0],x.2[1]*x.3[0]/tolerances[0],x.2[2]*x.3[1]/tolerances[1]]),
+                None=>{let read=running(c.reference(),coarse,pilot_waiting,at.doppler,at.node_phase);let r=step_excess(&Engine::new(&c.model,read),&states,&binding,pilot_waiting,&probes,period,escape(&c.model,&states,&pilot_groups),tolerances,&deposits,fewest*duration);doubled.push((clusters,coarse,r,tolerances));(coarse,r)}
             };
-            let fewest_steps=((steps as f64*r[1].max(r[2]).sqrt()).ceil() as usize).clamp(1,most);
+            let fewest_steps=((coarse as f64*r[1].max(r[2]).sqrt()).ceil() as usize).clamp(1,most);
             // There the motion's and the loss's biases, as dt², and the trajectories they leave the statistics: the rung's
             // cost at the largest step its check can keep -- a near tie (RETRO's ladder, ten rungs within its error of the
             // first) is passed over unchecked; one that saves beyond the error is costed.
-            let x=(steps as f64/fewest_steps as f64).powi(2);
+            let x=(coarse as f64/fewest_steps as f64).powi(2);
             let(n,weight)=predicted(&pilot_statistics,&apriori,[r[1]*x*tolerances[0],r[2]*x*tolerances[1]],pilot as f64,c.model.resonance);
             if interval_work(&c.model,&parts,&running(c.reference(),fewest_steps,pilot_waiting,at.doppler,at.node_phase),interval,pilot_waiting)*n*weight*(outputs-1) as f64*(1.+need)+check>=least{break;}
-            let costed=evaluate(&c,&states,&begun,Some((Check{steps,population:r[0],loss:r[1],motion:r[2]},tolerances)),&deposits);
+            let costed=evaluate(&c,&states,&begun,Some((Check{steps:coarse,population:r[0],loss:r[1],motion:r[2]},tolerances)),&deposits);
             // A rung keeps more of the model explicit: taken only for a saving beyond the prediction's own uncertainty.
             if costed.cost*(1.+need)<least{least=costed.cost;rung=Some((c,states,begun,costed.checked));}
         }
@@ -931,7 +936,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let checked=match known{Some(checked)=>checked,None=>{let tolerances=tolerances(&ceilings,&apriori);
         let cost=|k:&Check|{let r=k.ratios();let(n,weight)=predicted(&pilot_statistics,&apriori,[r[0]*tolerances[0],r[1]*tolerances[1]],pilot as f64,model.resonance);
             interval_work(&model,&parts,&settings(k.steps),interval,waiting)*n*weight};
-        step_check(&model,&states,&binding_at(&states,&weights,interval),&settings,steps,most,waiting,horizon,pilot as usize,&pilot_groups,period,tolerances,&cost,need,&[],&Deposits::default())}};
+        let reach=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64,model.resonance).0*duration;
+        step_check(&model,&states,&binding_at(&states,&weights,interval),&settings,steps,most,waiting,horizon,pilot as usize,&pilot_groups,period,tolerances,&cost,need,&[],&Deposits::default(),reach)}};
     let tolerances=checked.tolerances;
     // The kept step against T's error over the run (`drift`), each output against T's tolerance there and the loss's: read where its error per period could add up past that;
     // where more stands than that, as dt² the step where it would come to it and its bias, checked again at least as far as that span.
@@ -1389,13 +1395,13 @@ impl Check{
 /// weighed cost `cost`), and the rule taken once more over every step from the largest to the finest candidate; or the
 /// last checked when none met. A met step's bias is at most the step's share of the run's room (`tolerances`): it leaves
 /// the statistics their balance by construction. Every check after the searches is the measured list's (for
-/// `checked_work`); the tolerances the checks took, for the step's bias. `known`: checks already made, at those tolerances. `binding`: T's weight at each state (`binding_at`).
+/// `checked_work`); the tolerances the checks took, for the step's bias. `known`: checks already made, at those tolerances. `binding`: T's weight at each state (`binding_at`). `reach`: the time (us) the trajectories the run predicts take together (`orbits`).
 struct Steps{bound:Vec<Check>,measured:Vec<Check>,chosen:Check,probes:usize,tolerances:[f64;2]}
 fn step_check(model:&Model,states:&[Trajectory],binding:&[f64],settings:&dyn Fn(usize)->Settings,first:usize,most:usize,waiting:f64,horizon:f64,subsample:usize,groups:&[Group],period:f64,
-    tolerances:[f64;2],cost:&dyn Fn(&Check)->f64,need:f64,known:&[Check],deposits:&Deposits)->Steps{
+    tolerances:[f64;2],cost:&dyn Fn(&Check)->f64,need:f64,known:&[Check],deposits:&Deposits,reach:f64)->Steps{
     // The orbits' probes and the loss's sensitivity (`bound_probes`, `escape`), at the pilot's groups.
     let(probes,escape)=(bound_probes(model,states,binding),escape(model,states,groups));
-    let doubled=|steps:usize|{let r=step_excess(&Engine::new(model,settings(steps)),states,binding,waiting,&probes,period,escape,tolerances,deposits);Check{steps,population:r[0],loss:r[1],motion:r[2]}};
+    let doubled=|steps:usize|{let r=step_excess(&Engine::new(model,settings(steps)),states,binding,waiting,&probes,period,escape,tolerances,deposits,reach);Check{steps,population:r[0],loss:r[1],motion:r[2]}};
     let measure=|steps:usize|accumulated_excess(&Engine::new(model,settings(steps)),states,horizon,subsample,tolerances[0]);
     let checked=|steps:usize|{let mut c=doubled(steps);if c.decided_by_population(){c.population=measure(steps);}c};
     let mut bound=vec![];search(first,most,known,&doubled,None,true,&mut bound);
@@ -1445,8 +1451,8 @@ fn temperature_tolerance(weight:f64,apriori:f64)->f64{(BIAS_SHARE*run_room(TEMPE
 /// against two halves, the populations' difference times the steps of a waiting time --; the loss's, the
 /// escape's sensitivity times the motion's energy error, the orbits' or the jumps' (`escape`); and the
 /// motion's, the largest of the light impulse's relative error over one step (the same doublings, over the states as T's target weighs them, `binding`), the
-/// orbits' error over a trap period (`orbits`) and the jumps' (`jumps`).
-fn step_excess(engine:&Engine,states:&[Trajectory],binding:&[f64],waiting:f64,probes:&Probes,period:f64,escape:f64,tolerances:[f64;2],deposits:&Deposits)->[f64;3]{
+/// orbits' error over a trap period (`orbits`, `reach` the time the run's trajectories take together) and the jumps' (`jumps`).
+fn step_excess(engine:&Engine,states:&[Trajectory],binding:&[f64],waiting:f64,probes:&Probes,period:f64,escape:f64,tolerances:[f64;2],deposits:&Deposits,reach:f64)->[f64;3]{
     let dt=engine.settings.dt;let richardson=4./3.;let count=states.len().max(1) as f64;
     // The states' doublings on the threads, summed in their order (the sums do not depend on the threads).
     let doubled:Vec<([f64;2],[f64;3],([f64;3],[f64;3]))>=states.par_iter().map(|t|engine.doubling(t,dt)).collect();
@@ -1458,7 +1464,7 @@ fn step_excess(engine:&Engine,states:&[Trajectory],binding:&[f64],waiting:f64,pr
     // The motion's error is the largest of its criteria: below the others' -- the loss's reads the energy's alone -- the orbits' moves nothing.
     let heat=heating(engine,states,&deposits.of(engine.model,states,engine.settings.doppler),&doubled.iter().map(|d|d.2).collect::<Vec<_>>());
     let floor=if escape>0.{heat}else{heat.max(relative).max(anywhere*tolerances[1]/TEMPERATURE_TARGET)};
-    let energy=orbits(engine,probes,period,tolerances[1].min(if escape>0.{tolerances[0]/escape}else{f64::INFINITY}),floor).max(heat);
+    let energy=orbits(engine,probes,period,tolerances[1].min(if escape>0.{tolerances[0]/escape}else{f64::INFINITY}),floor,reach/dt).max(heat);
     [bound/tolerances[0],escape*energy/tolerances[0],(relative.max(energy)/tolerances[1]).max(anywhere/TEMPERATURE_TARGET)]
 }
 
@@ -1575,7 +1581,9 @@ fn layer_place(j:u32,weights:&[f64])->usize{
 /// pilot's draws: the probes' layers (`bound_probes`) are added, doubling their number, until the errors are within the
 /// step's share of `tolerance` or the magnitude less the errors lies beyond it, or none are left (the same steps within 6 %). Where its magnitude and errors lie within `floor`, what the step's other
 /// criteria hold the motion's error to, it reads no further, from a group's trajectories' probes up: the flows are the dearest of a check on an exact step (of PGCP_10's search all of its 36 000 exact steps), and most stand below the others.
-fn orbits(engine:&Engine,probes:&Probes,period:f64,tolerance:f64,floor:f64)->f64{
+/// And a layer is read only while its flows take fewer steps than what the read's errors could still move of the `run` (its steps at this step, `read_pays`, as `drift`'s layers): between the sizes the errors leave, as far as they lie above `floor`. Where a period is several runs
+/// a layer of 8 probes is a tenth of the run, and a read of every layer ten of them at every check (a Λ scheme's rung over 100 us at a slowest period of 440 us: 90 CPU-s a check at its step, against a run of 11).
+fn orbits(engine:&Engine,probes:&Probes,period:f64,tolerance:f64,floor:f64,run:f64)->f64{
     if probes.states.is_empty(){return 0.;}
     // The flow takes no jump over the period: its exponentials are held within the step's share over the period as a
     // run's are over a waiting time (`running`) -- summed past the waiting they were set for, their truncation would be read
@@ -1598,7 +1606,10 @@ fn orbits(engine:&Engine,probes:&Probes,period:f64,tolerance:f64,floor:f64)->f64
         let bound=axes.iter().map(|&x|orbit_bound(x,tolerance)).fold(0.,f64::max);
         if axes.iter().map(|x|x[0]+x[1]).fold(0.,f64::max)<=floor{return bound;}
         if count>=first&&(axes.iter().map(|x|x[1]).fold(0.,f64::max)<=BIAS_SHARE*tolerance||axes.iter().any(|x|x[0]-x[1]>tolerance)||count==probes.states.len()){return bound;}
-        count=if count<first{(2*count).min(first)}else{(2*count).min(probes.states.len())};
+        let next=if count<first{(2*count).min(first)}else{(2*count).min(probes.states.len())};
+        let(high,low)=(axes.iter().map(|x|x[0]+x[1]).fold(0.,f64::max)/tolerance,axes.iter().map(|x|x[0]-x[1]).fold(floor,f64::max)/tolerance);
+        if !read_pays(((next-count)*steps) as f64,run,high,low){return bound;}
+        count=next;
     }
 }
 
