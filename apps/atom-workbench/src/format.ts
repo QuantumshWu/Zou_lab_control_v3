@@ -68,6 +68,9 @@ export function formatElapsed(ms:number):string{
   return ms<1000?withUnit(ms,'ms',{digits:4}):withUnit(ms/1000,'s',{digits:4});
 }
 
+/** A time counted up in place, in whole seconds: 1:05. */
+export function clockTime(ms:number):string{const seconds=Math.floor(ms/1000);return `${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`;}
+
 /** A running solve's remaining time in the status line (ui-design.md §6.16), counted down from the
  * checkpoint that estimated it: `estimateMs` the solver's estimate then, `sinceMs` the time since.
  * "预计剩余约 7 s": whole seconds below 10 s (never 0 s), 5 s steps below a minute, whole minutes

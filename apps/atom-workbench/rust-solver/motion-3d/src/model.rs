@@ -59,7 +59,8 @@
 //! its adjoint), and the gradient's Hermitian part pairs them, G_{−Ω} = G_Ω†. Where the beats are
 //! integer multiples of one frequency ω₀ (Euclid's algorithm within the round-off) their period 2π/ω₀
 //! lets the exact step cache one period's propagators (engine.rs). A cluster with beats or explicit
-//! excited states takes the exact step; `local` is the release's static clusters of ground states'.
+//! excited states takes the exact step, unless its beats are all within the exponentials' share wherever the atom goes
+//! (engine.rs `quiet_clusters`); `local` is the plain step's, its beats at the step's middle.
 //!
 //! # The near light's dressing
 //! Every near carrier's response is dressed by the other near light (ground.rs, # The near light's
@@ -1553,6 +1554,8 @@ impl Model{
     pub fn mixed(&self,cluster:usize)->bool{self.layouts[cluster].n>self.layouts[cluster].n0}
     /// Whether a cluster's generator beats: a term keeps a residual frequency in its frame.
     pub fn beating(&self,cluster:usize)->bool{!self.layouts[cluster].beats.omegas.is_empty()}
+    /// The points the profiles and the bound are judged over (`reach`): the focus and ±reach_a along the trap's principal axes.
+    pub(crate) fn reach_points(&self)->&[[f64;3]]{&self.reach}
     /// A cluster's beats (rad/us), ascending and closed under negation, and their common period (us)
     /// where they are harmonics of one frequency.
     pub fn beats(&self,cluster:usize)->(&[f64],Option<f64>){let b=&self.layouts[cluster].beats;(&b.omegas,b.period)}
