@@ -157,7 +157,7 @@
 use crate::ground::{self,Ground};
 use crate::ledger::BUDGET;
 use crate::linear::{hermitian_eigen_within,hermitian_eigenvalues,round_off,single_round_off,symmetric_eigen,unit_round_off,Dense};
-use crate::cost::{advance_work,pays,COMPLEX_MULTIPLY_ADD_NS,KERNEL_FOURTH_PHOTON,KERNEL_JUMP,KERNEL_PAIR,KERNEL_PHOTON,KERNEL_SLAB,KERNEL_STEP};
+use crate::cost::{advance_work,pays,COMPLEX_MULTIPLY_ADD_NS};
 use crate::solve::{NUMERICAL_SHARE,POPULATION_TARGET};
 use crate::stats::KT_PER_UK;
 use crate::{Complex,Request,STATES};
@@ -1666,15 +1666,6 @@ impl Model{
         let classes=&self.ground.clusters[cluster].classes;
         let absorption=classes.iter().map(|c|c.photons.iter().map(|(ph,_)|self.carriers[ph.carrier].rank as f64*(6.+2.*nodes*(3.+d))).sum::<f64>()).sum::<f64>()/classes.len().max(1) as f64;
         Work{generator,force,photons,absorption,pairs:layout.groups.iter().map(|g|g.pairs.len()).sum()}
-    }
-    /// A cluster's work in the GPU's kernel, a warp's cycles (solve.rs `kernel_interval`, cost.rs): a step, its table pairs' gathers and the
-    /// fourth order's slabs beside its fixed parts, and a jump, every class's photons at the second order and the fourth's W3 and forms
-    /// at their own rates.
-    pub fn kernel_work(&self,cluster:usize)->[f64;2]{
-        let layout=&self.layouts[cluster];let w=self.work(cluster);let nodes=(1usize<<(2*self.focused.len())) as f64;
-        let second:f64=self.carriers.iter().map(|c|c.rank as f64*3.*self.ground.ground_states.len() as f64*layout.n as f64*(2.*nodes+1.)).sum();
-        let slabs=layout.fourth.as_ref().map_or(0,|f|f.quartic.len()) as f64;
-        [KERNEL_STEP+KERNEL_PAIR*w.pairs as f64+KERNEL_SLAB*slabs,KERNEL_JUMP+KERNEL_PHOTON*second.min(w.photons)+KERNEL_FOURTH_PHOTON*(w.photons-second).max(0.)]
     }
     /// The number of clusters.
     pub fn clusters(&self)->usize{self.layouts.len()}

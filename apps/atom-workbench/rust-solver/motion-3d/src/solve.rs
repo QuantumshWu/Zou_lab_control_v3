@@ -47,7 +47,7 @@
 //!
 //! # The fold's choice
 //! The rule's candidates (ground.rs `Ground::ladder`) from all folded down, and the
-//! first's fourth order (on the GPU past its gate alone: # Device), are costed on the pilot's states carried into their clusters (`carried`): each
+//! first's fourth order, are costed on the pilot's states carried into their clusters (`carried`): each
 //! with its fold's charge as measured (`measured_charge`: per output the charge the run's ledger books, with
 //! the memory). A candidate's cost is its step check's (below) on those states -- the step it would take --:
 //! its counted work per interval there times the trajectories its rooms at that step's bias need and the weight
@@ -62,7 +62,7 @@
 //! the rung's work, is spent only where what the rung's floor leaves of the least cost exceeds it: on a short run
 //! the check, a trap period of the probes' orbits, is the whole run's work at equal steps. A folded model beyond its targets at any
 //! step (a pole its tables do not resolve, a charge past the rooms) is costed at the pilot's step with no bias, its check put off
-//! until it is the choice: what the step moves of that cost is little beside the weight. The run goes on from those states; no timing enters, so a request gives the same choice on any machine, but for the GPU's fourth order (# Device).
+//! until it is the choice: what the step moves of that cost is little beside the weight. The run goes on from those states; no timing enters, so a request gives the same choice on any machine and either device (# Device).
 //! A pilot runs again only where it keeps no atom to the first output, its model's own estimates past the targets: no state of it measures a charge or a step, and an atom blown out at once by a folded drive's
 //! unsaturated rate says the fold does not hold (a resonant probe of 100 mW/cm² with cooling of 30, every drive folded: all atoms lost within 1 us, its 3+12 rung none by 2 us and 63 % by 100 us). The next rung
 //! takes the pilot's place, and the choice goes on from it; a model within its targets has lost its atoms by its physics (`Candidate::past_their_targets`).
@@ -320,13 +320,13 @@
 //! which runs a batch's trajectories as the CPU does -- the same groups, initial states, random
 //! streams and sums. The two devices make a solve's choices alike -- the model, the ledger, the pilot
 //! and the time step on the CPU in double precision either way, the statistics and their stopping
-//! rule -- but for the fourth order: on the GPU it is built and taken by the kernel's cycles in whole waves of the device's width (`kernel_interval`, `Gpu::width`), so that a GPU's model can differ from the CPU's, and from another GPU's.
+//! rule. A wave takes its width at no further cost, which no choice reads: one model for a request on any machine and either device, at a cost of its own where a saving in trajectories falls within a wave (cost.rs # The unit).
 //! A batch is whole groups: on the CPU at least one (its threads take the trajectories one at
 //! a time, so a batch costs its trajectories and one tail whatever its size), and on the GPU a wave of them,
 //! which costs at least a trajectory's time as far as it goes. A GPU that cannot run (none, an older driver, a
 //! model beyond its kernel) leaves the solve on the CPU with the reason
 //! (`Solution::device_note`); one that fails during the batches has the solve redone on the CPU.
-use crate::cost::{advance_work,jump_work,pays,CIS_NS,COMPLEX_MULTIPLY_ADD_NS,KERNEL_EXACT_PER_NS,SPECTRAL_N3,TERM_NS};
+use crate::cost::{advance_work,jump_work,pays,CIS_NS,COMPLEX_MULTIPLY_ADD_NS,SPECTRAL_N3,TERM_NS};
 use crate::engine::{column_norm,node_phase,series,Engine,Landings,Settings,Trajectory,QUADRATURE};
 use crate::gpu;
 use crate::ground::{ExcitedKind,Ground,Kind};
@@ -860,27 +860,17 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // order's with the pilot's model's T bias: the fourth order folds the force at the second, so that T's charge
     // and the motion's step error are the second order's. Beside a pilot's model whose check was put off (beyond the targets at
     // any step), only where those totals come within the targets: what lies beyond them is no fold's.
-    let promise=pilot_cost.as_ref().map_or(true,|p|{
+    let promise=pilot_candidate.allowance==f64::INFINITY&&pilot_cost.as_ref().map_or(true,|p|{
         let open=open_saturation(pilot_candidate.model.resonance,memory.atoms as f64);
         let apriori:Vec<[f64;2]>=pilot_candidate.charges.iter().map(|c|p.total.at(Measured::charge([open+c[1]*c[1],c[1]]))).collect();
         let(n,weight)=predicted(&pilot_statistics,&apriori,[0.,p.bias[1]],pilot as f64);
         if p.checked.is_none()&&past_targets(&pilot_statistics,&apriori){return false;}
         let work=fourth_work(request,&pilot_candidate,&pilot_states,&starts,&running(pilot_candidate.reference(),p.steps,pilot_waiting,doppler_allowance(&pilot_candidate.base,&pilot_candidate.model),pilot_candidate.phase),interval,pilot_waiting);
         saves(work*n*weight*((outputs-1) as f64),p.check*work/p.work,p.cost)});
-    // On the GPU a wave takes its width at no further cost and the fourth order pays by the kernel's work, about twice the second's: it is
-    // built only where the pilot's model takes more than a wave or lies beyond the targets at any step, and taken only for fewer
-    // of the kernel's cycles in whole waves (`kernel_interval`).
-    let waves=|x:&Costed,width:f64|(x.cost/(x.work*(outputs-1) as f64)/width).ceil().max(1.);
-    let width=||gpu::gpu().map_or(TASK,|g|g.lock().unwrap_or_else(|e|e.into_inner()).width(1)) as f64;
-    let promise=promise&&pilot_candidate.allowance==f64::INFINITY&&(device==Device::Cpu||pilot_cost.as_ref().map_or(true,|p|p.checked.is_none()||waves(p,width())>1.));
     let fourth_cost=if measured&&promise{Candidate::new(request,pilot_candidate.model.ground.clone(),pilot_candidate.allowance,true).ok().map(|mut c|{c.charged(charge_of(&pilot_candidate.model,&c.model));
         let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect()};
         let(states,begun)=(into(&pilot_states),into(&starts));c.phase=grid_phase(&c.model,&states,&running(c.reference(),steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase),Some((&groups,duration)));
         let costed=evaluate(&c,&states,&begun,None,&Deposits::default());(costed,c,states,begun)})}else{None};
-    let kernel=|c:&Candidate,states:&[Trajectory],begun:&[Trajectory],x:&Costed|{
-        let allowance=doppler_allowance(&gained(&c.base,&c.model,states),&c.model);
-        kernel_interval(&c.model,&state_work(&c.model,states,begun),&running(c.reference(),x.steps,pilot_waiting,allowance,c.phase),interval,pilot_waiting)*waves(x,width())};
-    let fourth_cost=fourth_cost.filter(|f|device==Device::Cpu||pilot_cost.as_ref().map_or(true,|p|saves(kernel(&f.1,&f.2,&f.3,&f.0),0.,kernel(&pilot_candidate,&pilot_states,&starts,p))));
     // What the choice stands at so far: the pilot's model, or its fourth order where that pays.
     let fourth_wins=fourth_cost.as_ref().is_some_and(|f|pilot_cost.as_ref().map_or(true,|p|saves(f.0.cost,0.,p.cost)));
     let mut least=match(&fourth_cost,&pilot_cost){(Some(f),_)if fourth_wins=>f.0.cost,(_,Some(p))=>p.cost,_=>f64::INFINITY};
@@ -1732,7 +1722,7 @@ pub(crate) fn first_phase()->f64{(BIAS_VARIANCE*TEMPERATURE_TARGET).sqrt()}
 /// propagation and its jump (ns), its generator's norm and its dimension; in a cluster with explicit excited states or beats,
 /// the state itself -- the exact step's segment is probed at each step (`exact_step`), where the settings have its cluster take it (`Engine::takes_exact`: a cluster's beats all left out at the model's reach leave it the plain step) --;
 /// and its weight in the run's time.
-struct StateWork{cluster:usize,advance:f64,jump:f64,norm:f64,n:usize,exact:Option<Trajectory>,weight:f64,kernel:[f64;2]}
+struct StateWork{cluster:usize,advance:f64,jump:f64,norm:f64,n:usize,exact:Option<Trajectory>,weight:f64}
 /// The work per interval (`interval_work`) of a candidate's fourth order, its tables unbuilt: its states' advances and jumps from
 /// the fourth order's layout (`Model::layout_work`), the rest the candidate's own. The candidate's own work where the layout fails.
 fn fourth_work(request:&Request,c:&Candidate,states:&[Trajectory],begun:&[Trajectory],s:&Settings,interval:f64,waiting:f64)->f64{
@@ -1749,7 +1739,7 @@ fn state_work(model:&Model,states:&[Trajectory],begun:&[Trajectory])->Vec<StateW
     states.par_iter().map(|t|(t,1.)).chain(begun.par_iter().map(|t|(t,0.5))).map(|(t,weight)|{
         let w=model.work(t.cluster);let n=model.dimension(t.cluster);
         let norm=if model.mixed(t.cluster){0.}else{column_norm(&model.local(t.cluster,&model.point(t.r,t.kappa),t.time).hamiltonian,n)};
-        StateWork{cluster:t.cluster,advance:advance_work(&w),jump:jump_work(&w),norm,n,exact:(!model.is_static(t.cluster)).then(||t.clone()),weight,kernel:model.kernel_work(t.cluster)}
+        StateWork{cluster:t.cluster,advance:advance_work(&w),jump:jump_work(&w),norm,n,exact:(!model.is_static(t.cluster)).then(||t.clone()),weight}
     }).collect()
 }
 /// The exact step's work at a state (ns, engine.rs `Engine::exact`), from the segment the step builds there
@@ -1892,16 +1882,6 @@ fn interval_work(model:&Model,states:&[StateWork],s:&Settings,interval:f64,waiti
     for(x,(p,exact))in states.iter().zip(&parts){let a=p[0]+p[1];advance+=x.weight*a;jump+=x.weight*(x.jump+if *exact{exact_redo(p)}else{2.*a});}
     let count=weights(states);
     (interval/s.dt*advance+interval/waiting*jump)/count
-}
-/// A step's work per interval in the GPU's kernel (a warp's cycles, model.rs `Model::kernel_work`), as `interval_work`: the exact step's
-/// at `KERNEL_EXACT_PER_NS` of its count.
-fn kernel_interval(model:&Model,states:&[StateWork],s:&Settings,interval:f64,waiting:f64)->f64{
-    let parts=steps_parts(model,states,s);let(mut advance,mut jump)=(0.,0.);
-    for(x,(p,exact))in states.iter().zip(&parts){
-        let a=if *exact{KERNEL_EXACT_PER_NS*(p[0]+p[1])}else{x.kernel[0]};
-        advance+=x.weight*a;jump+=x.weight*(x.kernel[1]+if *exact{KERNEL_EXACT_PER_NS*exact_redo(p)}else{2.*a});
-    }
-    (interval/s.dt*advance+interval/waiting*jump)/weights(states)
 }
 /// The states' total weight in the run's time (`state_work`), at least one's.
 fn weights(states:&[StateWork])->f64{states.iter().map(|x|x.weight).sum::<f64>().max(1.)}
