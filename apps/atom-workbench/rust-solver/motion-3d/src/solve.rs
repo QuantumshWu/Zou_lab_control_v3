@@ -881,7 +881,9 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let allowance=doppler_allowance(&gained(&c.base,&c.model,states),&c.model);
         kernel_interval(&c.model,&state_work(&c.model,states,begun),&running(c.reference(),x.steps,pilot_waiting,allowance,c.phase),interval,pilot_waiting)*waves(x,width())};
     let fourth_cost=fourth_cost.filter(|f|device==Device::Cpu||pilot_cost.as_ref().map_or(true,|p|saves(kernel(&f.1,&f.2,&f.3,&f.0),0.,kernel(&pilot_candidate,&pilot_states,&starts,p))));
-    let mut least=pilot_cost.as_ref().map_or(f64::INFINITY,|p|p.cost).min(fourth_cost.as_ref().map_or(f64::INFINITY,|f|f.0.cost));
+    // What the choice stands at so far: the pilot's model, or its fourth order where that pays.
+    let fourth_wins=fourth_cost.as_ref().is_some_and(|f|pilot_cost.as_ref().map_or(true,|p|saves(f.0.cost,0.,p.cost)));
+    let mut least=match(&fourth_cost,&pilot_cost){(Some(f),_)if fourth_wins=>f.0.cost,(_,Some(p))=>p.cost,_=>f64::INFINITY};
     // The ladder's rungs where the folded models' cost could fall, without the estimates a rung can change (at the pilot's
     // model's step, its totals with those no candidate changes alone, `Candidate::fixed`, and the beats), by more than the prediction's
     // uncertainty and a rung's least check: more of the model explicit, more work per step, one doubling at least. Below
@@ -940,7 +942,6 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // none costed, the pilot's model. Its run takes the pilot's states carried into its clusters, the pilot's statistics
     // and jumps the prediction's (the models' rates differ by the fold's S, the physical atoms' jumps alike), and the step
     // its check took on them: no pilot runs again.
-    let fourth_wins=fourth_cost.as_ref().is_some_and(|f|pilot_cost.as_ref().map_or(true,|p|saves(f.0.cost,0.,p.cost)));
     let(chosen,states,begun,known)=if let Some((c,states,begun,checked))=rung{(c,states,begun,checked)}
         else if fourth_wins{let(f,c,states,begun)=fourth_cost.unwrap();(c,states,begun,f.checked)}
         else{(pilot_candidate,pilot_states,starts,pilot_cost.and_then(|p|p.checked))};
