@@ -269,7 +269,7 @@
 //! output's trajectories: the need is the largest of many outputs' estimated errors, biased up while few groups stand behind it). The estimates at an output
 //! rest on the groups that reach it (stats.rs `summarize`), a standard error's rise at the point where they thin out what the
 //! targets allow. The errors the need takes are each output's over its neighbours as far as they agree (`steady`): the largest of many outputs'
-//! noisy estimates stood 20-35 % above their common value in the standard error, 1.3-1.8 times in the need. An output's reported error, which the app's marks read against the target, is the same number (`Account::read`): the stop and the marks read one record (`Record`). (The default scene's probe over 100 us at 448 trajectories: 2 SE at single outputs read up to 5.3 % over 14-19 us, a mark on 6 of 32 seeds, where the rows' 2 SD over the seeds is 3.8-4.4 % and the most trajectories in [0, 1] can spread, 2 √(p (1 − p)/N), 4.6 %; over its neighbours it reads 4.7-4.9 %, no mark on any seed.) No margin is added above the prediction: a batch more costs the device's tail and the statistics, a few
+//! noisy estimates stood 20-35 % above their common value in the standard error, 1.3-1.8 times in the need. The app's marks and its status line read each output's total estimated error against the target (`Account::total`, # Ledger and the total error), its statistics this same number: the stop, the flag and the marks read one record (`Record`). (The default scene's probe over 100 us at 448 trajectories: 2 SE at single outputs read up to 5.3 % over 14-19 us, a mark on 6 of 32 seeds, where the rows' 2 SD over the seeds is 3.8-4.4 % and the most trajectories in [0, 1] can spread, 2 √(p (1 − p)/N), 4.6 %; over its neighbours it reads 4.7-4.9 %, no mark on any seed.) No margin is added above the prediction: a batch more costs the device's tail and the statistics, a few
 //! trajectories' time, where a margin of the estimate's own noise would cost tens of percent of the trajectories.
 //!
 //! # Control variates
@@ -391,6 +391,8 @@ pub struct Solution{
     pub populations:Vec<Vec<f64>>,
     /// Per time, the largest standard error of the populations as shown, p (1 − L), and the loss, as the stopping rule reads it, at least what its trajectories leave open (`Account::read`).
     pub sample_errors:Vec<f64>,
+    /// Per time, the total estimated error of the populations as shown and the loss (module documentation, # Ledger and the total error; `Account::total`): what the app's marks and status line read, as the flag does.
+    pub estimated_errors:Vec<f64>,
     pub temperature_uk:Vec<[f64;3]>,
     pub temperature_errors_uk:Vec<[f64;3]>,
     /// T_total = (T_x + T_y + T_z)/3 and its standard error (stats.rs `Estimate`).
@@ -622,6 +624,8 @@ impl Account{
     /// The floor beside the statistics (`floor`), and their room beside it (`room`).
     fn floor(&self)->f64{floor(self.model,self.bias)}
     fn room(&self)->f64{room(self.target,self.floor())}
+    /// Its total estimated error (# Shares): the floor and what the statistics read, in quadrature.
+    fn total(&self)->f64{self.floor().hypot(self.read())}
 }
 /// An output's record: its estimate (each quantity's value and its own standard error, as the app shows them, stats.rs) and its
 /// errors against the targets -- the populations' with the loss's, one vector of probabilities adding up to one, and T's, the largest axis's at the share of
@@ -670,7 +674,7 @@ fn ledger(model:&Model,base:&Ledger,records:&[Record],times:&[f64],allowance:f64
     ledger.totals=[total(&|r|r.population,POPULATION_TARGET),total(&|r|r.temperature,TEMPERATURE_TARGET)];
     // The outputs beyond a target: (output, the quantity, its total, the a-priori estimates' and the step's, the statistics, the target, the fold's charge).
     let over:Vec<(usize,&str,f64,f64,f64,f64,f64)>=records.iter().enumerate().skip(1).filter_map(|(i,r)|{
-        let at=|a:&Account,name:&'static str,charge:f64|{let(floor,s)=(a.floor(),if last{a.statistic}else{0.});let total=floor.hypot(s);(total>a.target).then_some((i,name,total,floor,s,a.target,charge))};
+        let at=|a:&Account,name:&'static str,charge:f64|{let(s,total)=if last{(a.read(),a.total())}else{(0.,a.floor())};(total>a.target).then_some((i,name,total,a.floor(),s,a.target,charge))};
         at(&r.population,"布居",r.measured.charge[0]).or_else(||at(&r.temperature,"温度",r.measured.charge[1]))}).collect();
     if !over.is_empty(){
         let(first,last_over)=(over[0].0,over[over.len()-1].0);
@@ -1962,6 +1966,7 @@ fn assemble(model:&Model,records:&[Record],outcome:&Outcome,listed:&[usize],time
     Solution{
         populations:source.iter().map(|&j|if j==0{first.clone()}else{estimates[j].populations.clone()}).collect(),
         sample_errors:records.iter().map(|r|r.population.read()/CONFIDENCE).collect(),
+        estimated_errors:records.iter().map(|r|r.population.total()).collect(),
         temperature_uk:carried(&|e|e.temperature),
         temperature_errors_uk:estimates.iter().enumerate().map(|(i,e)|if read(i){e.temperature_error}else{[f64::INFINITY;3]}).collect(),
         temperature_total_uk:measured.iter().map(|&j|estimates[j].temperature_total).collect(),
@@ -2070,6 +2075,15 @@ mod tests{
         let at=|statistic:f64|Account{statistic,open:unseen(76.),bias:0.,model:0.,target:POPULATION_TARGET}.read();
         assert!((at(0.)-POPULATION_TARGET).abs()<1e-15);
         assert_eq!(at(CONFIDENCE*0.1),CONFIDENCE*0.1);
+    }
+    /// The marks' number is the flag's (`Account::total`): the floor and what the statistics read in quadrature, at the target where the statistics stand at their room; t = 0 has none.
+    #[test]
+    fn a_total_is_the_floor_and_what_the_statistics_read(){
+        let a=Account{statistic:0.03,open:0.,bias:0.02,model:0.01,target:POPULATION_TARGET};
+        assert!((a.total()-(14e-4_f64).sqrt()).abs()<1e-15,"{}",a.total());
+        assert!((Account{statistic:a.room(),..a}.total()-POPULATION_TARGET).abs()<1e-15);
+        assert!((Account{statistic:0.,open:0.03,..a}.total()-a.total()).abs()<1e-15);
+        assert_eq!(Account::initial(POPULATION_TARGET).total(),0.);
     }
     /// A read pays for what it could move of the run (`read_pays`): the resonant probe's PGC at 1.09 limits does not, the retro-reflected tweezer at 14.7 does, nothing within the limit does, and a stand already beyond asks for more.
     #[test]

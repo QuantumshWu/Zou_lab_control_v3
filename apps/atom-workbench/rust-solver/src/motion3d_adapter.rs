@@ -15,7 +15,7 @@
 //! # Result contract
 //! `states`, `timesUs`, `populations` (the held atom's, averaged over the trajectories, projected
 //! onto the probability simplex as the population core's rows are), `populationAccuracy` against the
-//! method's own target (`POPULATION_TARGET`, two standard errors per sample, each grown by its
+//! method's own target (`POPULATION_TARGET`, each sample's total estimated error, the engine's `Solution::estimated_errors`, grown by its
 //! row's projection), `diagnostics` (`engine`, `traceError` and `initialStateError` of the rows
 //! before the projection, `elapsedMs`, `method`,
 //! `device` -- the device used -- with `deviceNote` when it is not the one asked for, and
@@ -42,7 +42,7 @@
 //! (`diagnostics.estimatedRemainingMs`).
 use crate::{Device,Model,Operator,Options,lattice_core_adapter};
 use atom_motion_3d::ledger::{Ledger,Total};
-use atom_motion_3d::solve::{self as engine,Distributions,Solution,CONFIDENCE,POPULATION_TARGET};
+use atom_motion_3d::solve::{self as engine,Distributions,Solution,POPULATION_TARGET};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use atom_population_core::Lapack;
 use atom_population_core::lattice::accuracy;
@@ -141,7 +141,7 @@ fn result(model:&Model,times:&[f64],initial:&[f64],solution:&Solution,groups:&[l
     // Published: each row projected onto the probability simplex, the projection's change (over the
     // states and the groups) added to that sample's error, as the population core's rows are.
     let indices:Vec<Vec<usize>>=groups.iter().map(|g|g.indices.clone()).collect();
-    let mut errors:Vec<f64>=solution.sample_errors.iter().map(|e|CONFIDENCE*e).collect();
+    let mut errors=solution.estimated_errors.clone();
     let populations:Vec<Vec<f64>>=solution.populations.iter().zip(&mut errors).map(|(row,error)|{
         let projected=pipeline::simplex(row);*error+=accuracy::metric(row,&projected,&indices);projected}).collect();
     let estimated=errors.iter().fold(0_f64,|a,&b|a.max(b));let converged=estimated<=POPULATION_TARGET;
@@ -160,7 +160,7 @@ fn result(model:&Model,times:&[f64],initial:&[f64],solution:&Solution,groups:&[l
     // A request for the GPU that ran on the CPU says why.
     if let Some(note)=&solution.device_note{result["diagnostics"]["deviceNote"]=json!(note);}
     if !converged{result["populationAccuracy"]["reason"]=json!(solution.reason.clone()
-        .unwrap_or_else(||format!("The statistical error is {estimated:.2e} against the target {POPULATION_TARGET:e}")));}
+        .unwrap_or_else(||format!("The estimated error is {estimated:.2e} against the target {POPULATION_TARGET:e}")));}
     if let Some(remaining)=remaining{
         result["progress"]=json!(true);
         if let Some(ms)=remaining.filter(|ms|ms.is_finite()){result["diagnostics"]["estimatedRemainingMs"]=json!(ms.max(0.));}

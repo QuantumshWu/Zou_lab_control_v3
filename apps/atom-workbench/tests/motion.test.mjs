@@ -334,7 +334,7 @@ test('the motion engine\'s sentences are shown in Chinese',()=>{
   assert.deepEqual(notes,['GPU 计算出错（{error}）：本次在 CPU 上计算','{reason}：本次在 CPU 上计算']);
   const gpu=readFileSync(new URL('../rust-solver/motion-3d/src/gpu/mod.rs',import.meta.url),'utf8');
   for(const reason of ['NVIDIA 驱动太旧','没有 NVIDIA 显卡','驱动无法编译 GPU 内核'])assert.ok(gpu.includes(reason),reason);
-  // A result short of its statistical target says why in Chinese.
-  const partial=[...adapter.matchAll(/format!\("(The statistical error is[^"]*)"\)/g)].map(m=>m[1].replace(/\{[A-Za-z_]*(?::[^}]*)?\}/g,'1'));
-  assert.equal(partial.length,1);assert.equal(solverText(partial[0]),'统计误差为 1，目标 1。');
+  // A result short of its target says why in Chinese.
+  const partial=[...adapter.matchAll(/format!\("(The estimated error is[^"]*)"\)/g)].map(m=>m[1].replace(/\{[A-Za-z_]*(?::[^}]*)?\}/g,'1'));
+  assert.equal(partial.length,1);assert.equal(solverText(partial[0]),'估计误差为 1，目标 1。');
 });

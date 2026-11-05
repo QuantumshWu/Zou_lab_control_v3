@@ -2,8 +2,8 @@ import type {Level,MotionDevice} from './types.js';
 import {POPULATION_TOLERANCE} from './types.js';
 import {POPULATION_GROUPS} from './population-selection.js';
 import {MOTION_AXES} from './motion.js';
-/** The semiclassical 3D motion's population accuracy target (absolute): its statistics are run
- * until two standard errors of every population lie within it (rust-solver/motion-3d solve.rs). */
+/** The semiclassical 3D motion's population accuracy target (absolute): its trajectories are run
+ * until each sample's total estimated error lies within it (rust-solver/motion-3d solve.rs). */
 export const SEMICLASSICAL_POPULATION_TARGET=0.05;
 /** The semiclassical 3D motion's validated regime: k_B T ≥ SEMICLASSICAL_REGIME ħω on every axis
  * (rust-solver/motion-3d solve.rs CLASSICAL); its result marks each sample (`classical`). */
@@ -21,7 +21,7 @@ export interface PopulationAccuracy {
 }
 /** Explicit population-output qualification; never a density/PSD claim. `tolerance` is the
  * target the solve was run to: POPULATION_TOLERANCE, or the semiclassical 3D motion's own
- * (SEMICLASSICAL_POPULATION_TARGET), against which it reports two standard errors per sample. */
+ * (SEMICLASSICAL_POPULATION_TARGET), against which it reports its total estimated error per sample. */
 export function readPopulationAccuracy(value:unknown,samples:number,tolerance=POPULATION_TOLERANCE):PopulationAccuracy {
   const invalid=():never=>{throw new Error('Invalid complete populationAccuracy contract');};
   if(!value||typeof value!=='object'||Array.isArray(value))invalid();

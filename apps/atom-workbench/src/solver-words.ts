@@ -46,7 +46,7 @@ const PATTERNS:readonly [RegExp,(...groups:string[])=>string][]=[
     (modes,need,budget)=>`未求解（不收敛）：此请求的晶格有 ${modes} 个模式，约需 ${need} GB 内存，超过 ${budget} GB 的内存预算。`],
   [/^The trajectory duration is limited to 10 s \(requested (\S+) s\)$/,seconds=>`轨迹时长最长 10 s（请求为 ${num(seconds)} s），未计算。`],
   [/^A trajectory has 2 to (\d+) samples \(requested (\d+)\)$/,(most,samples)=>`轨迹的采样点数应为 2 至 ${most}（请求为 ${samples}），未计算。`],
-  [/^The statistical error is (\S+) against the target (\S+)$/,(error,target)=>`统计误差为 ${num(error)}，目标 ${num(target)}。`],
+  [/^The estimated error is (\S+) against the target (\S+)$/,(error,target)=>`估计误差为 ${num(error)}，目标 ${num(target)}。`],
   [/^An output time is at most (\S+) us \(10 s; requested (\S+) us\)$/,(most,requested)=>`输出时刻最长 10 s（${num(most)} µs；请求为 ${num(requested)} µs），未计算。`],
 ];
 /** A solver sentence in Chinese; one this table does not know is shown as written. */
