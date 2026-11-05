@@ -819,7 +819,7 @@ impl Model{
     fn stake(&self,request:&Request)->f64{
         let thermal=(KT_PER_UK*request.temperature_uk*self.hbar_over_mass).sqrt();
         let pattern=self.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max)*thermal;
-        let rate=if pattern>0.{pattern}else{self.reference_state(request).map_or(0.,|s|self.bare_trap(s).frequencies.iter().copied().fold(0.,f64::max))};
+        let rate=if pattern>0.{pattern}else{self.ground.reference_state(request).map_or(0.,|s|self.bare_trap(s).frequencies.iter().copied().fold(0.,f64::max))};
         let steps=(self.ground.duration*rate/crate::solve::first_phase()).max(1.);
         let advance=(0..self.layouts.len()).map(|k|crate::solve::advance_work(&self.work(k))).fold(0.,f64::max);
         (crate::solve::FIRST_GROUPS*crate::TASK) as f64*steps*advance
@@ -835,10 +835,9 @@ impl Model{
     /// fields (near beams) and its shifts at the focus; beyond, an intensity axis (at most
     /// `MOST_FOCUSED` in all, the largest errors first).
     fn choose_profiles(&mut self,request:&Request)->Result<(),String>{
-        let g=&self.ground;let reference=self.reference_state(request)?;
+        let g=&self.ground;let reference=g.reference_state(request)?;
         let trap=self.bare_trap(reference);
-        let reach:[f64;3]=std::array::from_fn(|a|{let w=trap.frequencies[a];
-            if w>0.{(2.*BUDGET.recip().ln()*KT_PER_UK*request.temperature_uk*self.hbar_over_mass).sqrt()/w}else{0.}});
+        let reach:[f64;3]=std::array::from_fn(|a|ground::thermal_reach(trap.frequencies[a],request.temperature_uk,self.hbar_over_mass).unwrap_or(0.));
         self.reach.extend(ground::reach_points(trap.centre,&trap.axes,reach,g.units.iter().any(|u|u.beams.len()>1)));
         let mut errors:Vec<(usize,f64,f64)>=vec![];
         for(u,unit)in g.units.iter().enumerate(){
@@ -862,15 +861,9 @@ impl Model{
     }
     /// A unit's intensity at r (ground.rs `Unit`), from the beams' geometry.
     pub fn unit_intensity(&self,u:usize,r:[f64;3])->f64{
-        let unit=&self.ground.units[u];unit.beams.iter().zip(&unit.weights).fold(Complex::ZERO,|s,(&l,&w)|s+self.geometry[l].field(r).0*w).norm_sqr()/unit.norm
+        self.ground.units[u].intensity(|l|self.geometry[l].field(r).0)
     }
 
-    /// The reference state: the request's largest initial population, a ground state (its position
-    /// in `Ground::ground_states`).
-    pub fn reference_state(&self,request:&Request)->Result<usize,String>{
-        let rho=&request.initial_density;
-        self.ground.ground_states.iter().enumerate().max_by(|a,b|rho[a.1*STATES+a.1].re.total_cmp(&rho[b.1*STATES+b.1].re)).map(|x|x.0).ok_or("No ground state".into())
-    }
     /// The trap a ground state sees in H(r) alone (its energy, the folds and outside shifts at r), at its well there (`Ground::centre`, the same state's).
     fn bare_trap(&self,state:usize)->Trap{
         let g=&self.ground;let i=g.ground_states[state];
@@ -999,7 +992,7 @@ impl Model{
             // The beats of every term's residual and wave vector, a residual static within `same_frame`'s tolerance at the
             // cluster's largest frame and detuning (the round-off of the frames' differences), a wave vector within the same share of the largest; the fourth order's
             // kept entries beat at θ_a − θ_b + ν (`FourthLayout::residuals`). The states' wave vectors where they leave fewer beats than none.
-            let largest=cl.frames.iter().chain(&cl.excited_frames).map(|x|x.abs()).fold(0.,f64::max)+g.carriers.iter().map(|c|c.detuning.abs()).fold(0.,f64::max);
+            let round_off=g.residual_round_off(cl);
             let wave_round_off=64.*f64::EPSILON*2.*self.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max);
             let quartic:Vec<f64>=fourth.as_ref().map_or(vec![],|f|f.residuals(&cl.frames));
             let beats_of=|k:&[[f64;3]]|{
@@ -1009,7 +1002,7 @@ impl Model{
                     .chain(crosses.iter().flat_map(|x|x.tones.iter().map(move|t|(x.residual,across(x.row,x.col,x.carrier,t)))))
                     .chain(effective.iter().flat_map(|x|x.tones.iter().map(move|t|(x.residual,across(x.row,x.col,x.carrier,t)))))
                     .chain(decays.iter().map(|x|(x.residual,std::array::from_fn::<f64,3,_>(|a|k[x.col][a]-k[x.row][a])))).chain(quartic.iter().map(|&w|(w,[0.;3]))).collect();
-                Beats::new(terms.into_iter(),64.*f64::EPSILON*2.*largest,wave_round_off)};
+                Beats::new(terms.into_iter(),round_off,wave_round_off)};
             let(plain,along)=(beats_of(&none),beats_of(&labels));let gauged=along.omegas.len()<plain.omegas.len();
             let(beats,labels)=if gauged{(along,labels)}else{(plain,none)};
             let part=|w:f64,q:[f64;3]|beats.of(w,q).map_or(0,|j|j+1);
@@ -1155,7 +1148,7 @@ impl Model{
         let(on,b)=g.fourth_carriers(cl);let l0=g.generator_scale;
         let fields:Vec<(usize,usize)>=on.iter().flat_map(|&c|(0..r(c)).map(move|k|(c,k))).collect();
         let pairs:Vec<(usize,usize)>=(0..fields.len()).flat_map(|i|(i..fields.len()).map(move|j|(i,j))).collect();
-        let round_off=64.*f64::EPSILON*2.*(cl.frames.iter().map(|x|x.abs()).fold(0.,f64::max)+g.carriers.iter().map(|c|c.detuning.abs()).fold(0.,f64::max));
+        let round_off=g.residual_round_off(cl);
         let mut left:Vec<(usize,usize,f64)>=vec![];
         let mut keep=|nu:f64|->Vec<bool>{(0..n*n).map(|i|{
             let(x,y)=(i/n,i%n);let omega=cl.frames[x]-cl.frames[y]+nu;

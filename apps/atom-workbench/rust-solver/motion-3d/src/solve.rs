@@ -1107,7 +1107,7 @@ fn initial_note(initial:&Initial)->Option<String>{
     let cut=(initial.cut>BIAS_VARIANCE*POPULATION_TARGET).then(||format!("初始热分布中能量高于阱顶（未束缚）及阱顶附近的 {:.0}% 原子不计入（取束缚原子的降低等温分布 f ∝ e^(−E/k_BT) − 1，E 为相对阱外的机械能）；丢失与布居依赖这一截断",100.*initial.cut));
     let ratio=initial.kinetic();let set=initial.temperature_uk;
     let shallow=((ratio-1.).abs()>BIAS_VARIANCE*TEMPERATURE_TARGET).then(||{
-        let k=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();
+        let k=initial.reference();
         let depth=initial.ensembles[k].as_ref().map_or(initial.depths[k],|e|e.depth)/(KT_PER_UK*set);let t=initial.temperature();
         // One decimal from one up (none for the setting's whole numbers), two significant digits below.
         let digits=|x:f64|if (x-x.round()).abs()<=1e-9*x.abs(){format!("{x:.0}")}else if x>=0.95{format!("{x:.1}")}else{let d=(-x.log10()).ceil().max(0.) as usize+1;format!("{x:.d$}")};
@@ -1169,7 +1169,7 @@ impl Candidate{
     /// has no regime without atoms; its charges are a priori until `charged`).
     fn past_their_targets(&self)->bool{self.model.resonance>POPULATION_TARGET||self.charges.iter().any(|x|self.others()+x[0]>POPULATION_TARGET)}
     /// Its reference state, the largest initial population: its trap (ω per axis) and depth.
-    fn reference(&self)->(Trap,f64){let i=&self.initial;let k=(0..i.states.len()).max_by(|&a,&b|i.states[a].2.total_cmp(&i.states[b].2)).unwrap();(i.traps[k],i.depths[k])}
+    fn reference(&self)->(Trap,f64){let i=&self.initial;let k=i.reference();(i.traps[k],i.depths[k])}
 }
 /// The next candidate along the rule's allowances that builds (a model that fails, its tables not
 /// converging, is passed over with its error kept), past the rungs whose closure folds the same drives as one in `shapes`, the same model, before their tables.

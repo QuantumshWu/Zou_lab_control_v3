@@ -312,10 +312,10 @@ pub struct Component{pub beams:Vec<usize>,pub counter:bool,pub nu:f64,pub size:f
 #[derive(Clone,Debug)]
 pub struct Unit{pub beams:Vec<usize>,pub weights:Vec<Complex>,pub norm:f64,pub focus:f64,pub combination:Vec<Complex>}
 impl Unit{
-    /// Its intensity s = |Σ_l a_l γ_l|²/N at the beams' amplitudes a (indexed by beam), in [0, 1].
-    pub fn intensity(&self,a:&[Complex])->f64{self.field(a).norm_sqr()/self.norm}
-    /// Σ_l a_l γ_l at the beams' amplitudes a (indexed by beam).
-    pub fn field(&self,a:&[Complex])->Complex{self.beams.iter().zip(&self.weights).fold(Complex::ZERO,|s,(&l,&w)|s+a[l]*w)}
+    /// Its intensity s = |Σ_l a_l γ_l|²/N at the beams' amplitudes a, in [0, 1].
+    pub fn intensity(&self,a:impl Fn(usize)->Complex)->f64{self.field(a).norm_sqr()/self.norm}
+    /// Σ_l a_l γ_l at the beams' amplitudes a.
+    pub fn field(&self,a:impl Fn(usize)->Complex)->Complex{self.beams.iter().zip(&self.weights).fold(Complex::ZERO,|s,(&l,&w)|s+a(l)*w)}
     /// Whether its intensity varies over the trap: a Gaussian beam's, or interfering beams'.
     pub fn varies(&self,beams:&[Beam])->bool{self.beams.len()>1||beams[self.beams[0]].waist_um.is_some()}
 }
@@ -859,6 +859,11 @@ fn spread(cl:&Cluster,r:&[Complex],weights:&[Complex],out:&mut Dense){
     for(&b,&w)in cl.states.iter().zip(weights){if w==Complex::ZERO{continue;}for(x,&y)in r.iter().enumerate(){out[(x,b)]+=y*w;}}
 }
 
+/// The atoms' reach along an axis of a harmonic trap at ω (rad/us): the end of the thermal ellipsoid, the region within ln(1/`BUDGET`) k_B T of its bottom, which holds all but the budget of a Boltzmann ensemble (T in μK, hm = ħ/m). None where the axis does not confine.
+pub(crate) fn thermal_reach(w:f64,temperature_uk:f64,hm:f64)->Option<f64>{
+    (w>0.).then(||(2.*BUDGET.recip().ln()*crate::stats::KT_PER_UK*temperature_uk*hm).sqrt()/w)
+}
+
 /// Two frames are one: equal to the rounding of the sums of detunings they are made of.
 pub(crate) fn same_frame(a:f64,b:f64)->bool{(a-b).abs()<=64.*f64::EPSILON*(a.abs()+b.abs())}
 
@@ -949,7 +954,7 @@ impl Ground{
     }
 
     /// Every unit's intensity at a point r (um from the focus).
-    pub fn intensities_at(&self,r:[f64;3])->Vec<f64>{let a=self.amplitudes_at(r);self.units.iter().map(|u|u.intensity(&a)).collect()}
+    pub fn intensities_at(&self,r:[f64;3])->Vec<f64>{let a=self.amplitudes_at(r);self.units.iter().map(|u|u.intensity(|l|a[l])).collect()}
     /// H at a point r (um from the focus): H0 with each unit's outside shift and fold at its
     /// intensity there.
     pub fn hamiltonian_at(&self,r:[f64;3])->Dense{self.hamiltonian_with(&self.intensities_at(r))}
@@ -1347,19 +1352,23 @@ impl Ground{
     /// interfering beams (`reach_points`). 1 for a plane wave, 0 for every varying unit when the trap
     /// does not confine. Beyond the reach, what an atom meets is measured along its trajectory (the
     /// folded excited population, the ledger's η²). And that well's place.
+    /// The reference state: the request's largest initial population, a ground state (its position in `ground_states`).
+    pub fn reference_state(&self,request:&Request)->Result<usize,String>{
+        let rho=&request.initial_density;
+        self.ground_states.iter().enumerate().max_by(|a,b|rho[a.1*STATES+a.1].re.total_cmp(&rho[b.1*STATES+b.1].re)).map(|x|x.0).ok_or("No ground state".into())
+    }
     fn reach(&self,request:&Request)->(Vec<f64>,[f64;3]){
         let unconfined=|centre:[f64;3]|(self.units.iter().map(|u|if u.varies(&self.beams){0.}else{1.}).collect(),centre);
         let Some(waist)=request.beams.get(request.trap_beam).and_then(|b|b.waist_um)else{return unconfined([0.;3])};
-        let rho=&request.initial_density;
-        let reference=*self.ground_states.iter().max_by(|&&a,&&b|rho[a*STATES+a].re.total_cmp(&rho[b*STATES+b].re)).unwrap();
+        let reference=self.ground_states[self.reference_state(request).unwrap()];
         // The reference state's well and its Hessian there.
         let u=|r:[f64;3]|self.hamiltonian_at(r)[(reference,reference)].re;
         let centre=self.well(request.trap_beam,&u);let(values,axes)=crate::linear::symmetric_eigen(slopes(&u,centre,difference(waist)).2);
-        let hm=crate::model::HBAR/request.mass_kg*1e6;let kt=crate::stats::KT_PER_UK*request.temperature_uk;
-        let reach:[f64;3]=std::array::from_fn(|a|{let w=(values[a]*hm).max(0.).sqrt();if w>0.{(2.*BUDGET.recip().ln()*kt*hm).sqrt()/w}else{f64::INFINITY}});
+        let hm=crate::model::HBAR/request.mass_kg*1e6;
+        let reach:[f64;3]=std::array::from_fn(|a|thermal_reach((values[a]*hm).max(0.).sqrt(),request.temperature_uk,hm).unwrap_or(f64::INFINITY));
         if reach.iter().any(|x|!x.is_finite()){return unconfined(centre);}
         (self.units.iter().map(|u|if !u.varies(&self.beams){1.}else{
-            reach_points(centre,&axes,reach,u.beams.len()>1).into_iter().map(|r|u.intensity(&self.amplitudes_at(r))).fold(1_f64,f64::min)}).collect(),centre)
+            reach_points(centre,&axes,reach,u.beams.len()>1).into_iter().map(|r|{let a=self.amplitudes_at(r);u.intensity(|l|a[l])}).fold(1_f64,f64::min)}).collect(),centre)
     }
     /// Where a potential u of the trap beam's light has its trap: the bottom of the well its descent from the focus reaches (`descent`, module documentation, # Where the trap is), the focus where that
     /// leaves the beam's focal volume, its harmonic coordinate 2ρ²/w² + ζ²/z_R² past one, or finds no well.
@@ -2002,6 +2011,10 @@ impl Ground{
     pub fn carrier_saturation(&self,c:usize,cl:&Cluster)->f64{
         cl.states.iter().map(|&b|self.excited_items.iter().filter(|x|x.folded).filter_map(|x|match x.kind{ExcitedKind::Drive(d)if d.carrier==c&&d.ground==b=>Some(x.mean),_=>None}).sum::<f64>()).fold(0.,f64::max)
     }
+    /// Within what a residual of a cluster is static and two are one: `same_frame`'s tolerance at its largest frame and detuning, the round-off of the frames' differences.
+    pub(crate) fn residual_round_off(&self,cl:&Cluster)->f64{
+        64.*f64::EPSILON*2.*(cl.frames.iter().chain(&cl.excited_frames).map(|f|f.abs()).fold(0.,f64::max)+self.carriers.iter().map(|c|c.detuning.abs()).fold(0.,f64::max))
+    }
     /// The carriers the fourth order takes on a cluster, those beyond the budget's square (a carrier within it
     /// adds at most that relatively to the others' rates, its bound in the ledger's quartic item, model.rs
     /// `Model::quartic`), and the size of its H^(4), b = S l0 (S their saturations' sum, l0 the eliminated
@@ -2023,8 +2036,7 @@ impl Ground{
     /// residual on the entry, or one the rule does not let fold (|Ω| < FOLD_DISTANCE l0, or its mixing
     /// b/(|Ω| − l0) beyond the budget, b the size of H^(4)).
     pub fn fourth_keeps(&self,cl:&Cluster,x:usize,y:usize,omega:f64,b:f64)->bool{
-        let w=omega.abs();let l0=self.generator_scale;
-        let round_off=64.*f64::EPSILON*2.*(cl.frames.iter().chain(&cl.excited_frames).map(|f|f.abs()).fold(0.,f64::max)+self.carriers.iter().map(|c|c.detuning.abs()).fold(0.,f64::max));
+        let w=omega.abs();let l0=self.generator_scale;let round_off=self.residual_round_off(cl);
         w<=round_off||w<self.cut||!(w>=FOLD_DISTANCE*l0&&mixing(omega,b,l0).powi(2)<=BUDGET)
             ||cl.groups.iter().any(|gr|gr.entries.iter().any(|&(a,c,r)|a==x&&c==y&&(r-omega).abs()<=round_off))
     }

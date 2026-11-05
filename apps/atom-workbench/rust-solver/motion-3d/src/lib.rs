@@ -57,6 +57,8 @@ impl Initial{
         let ensembles=states.iter().zip(&traps).map(|(&(k,x,_),trap)|Ensemble::new(model,k,x,kt,trap.centre)).collect::<Result<Vec<_>,_>>()?;
         Ok(Initial{states,traps,depths,ensembles,temperature_uk:request.temperature_uk,cut:0.})
     }
+    /// The reference state, the largest initial population: its place in `states`.
+    pub fn reference(&self)->usize{(0..self.states.len()).max_by(|&a,&b|self.states[a].2.total_cmp(&self.states[b].2)).unwrap()}
     /// The ensembles' kinetic temperatures and share left out, by quadrature (ensemble.rs).
     pub fn integrate(&mut self,model:&Model){
         for((e,trap),&depth)in self.ensembles.iter_mut().zip(&self.traps).zip(&self.depths){if let Some(e)=e{e.integrate(model,trap,depth);}}
