@@ -113,6 +113,32 @@ pub(crate) fn lu_solve(a:&[Complex],pivots:&[usize],n:usize,b:&mut [Complex]){
     for i in 0..n{let mut x=b[i];for j in 0..i{x-=a[i*n+j]*b[j];}b[i]=x;}
     for i in (0..n).rev(){let mut x=b[i];for j in i+1..n{x-=a[i*n+j]*b[j];}b[i]=x/a[i*n+i];}
 }
+/// One Jacobi rotation of a real symmetric 3 × 3 matrix in the plane (p, q), a[p][q] ≠ 0, its eigenvectors the rows of v.
+fn rotate_symmetric(a:&mut [[f64;3];3],v:&mut [[f64;3];3],p:usize,q:usize){
+    let theta=(a[q][q]-a[p][p])/(2.*a[p][q]);let t=theta.signum()/(theta.abs()+(theta*theta+1.).sqrt());let c=1./(t*t+1.).sqrt();let s=t*c;
+    for k in 0..3{let(x,y)=(a[k][p],a[k][q]);a[k][p]=c*x-s*y;a[k][q]=s*x+c*y;}
+    for k in 0..3{let(x,y)=(a[p][k],a[q][k]);a[p][k]=c*x-s*y;a[q][k]=s*x+c*y;}
+    for k in 0..3{let(x,y)=(v[p][k],v[q][k]);v[p][k]=c*x-s*y;v[q][k]=s*x+c*y;}
+}
+/// The eigen-decomposition of a real symmetric 3 × 3 matrix: its eigenvalues and orthonormal eigenvectors (rows), by cyclic Jacobi rotations.
+pub(crate) fn symmetric_eigen(m:[[f64;3];3])->([f64;3],[[f64;3];3]){
+    let mut a=m;let mut v=[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]];
+    for _ in 0..64{
+        let off=a[0][1].abs()+a[0][2].abs()+a[1][2].abs();if off<=1e-15*(a[0][0].abs()+a[1][1].abs()+a[2][2].abs()){break;}
+        for(p,q)in [(0,1),(0,2),(1,2)]{if a[p][q]!=0.{rotate_symmetric(&mut a,&mut v,p,q);}}
+    }
+    ([a[0][0],a[1][1],a[2][2]],v)
+}
+/// The same with the largest off-diagonal entry rotated first, to one ε: the order the CPU's `part_weights` (engine.rs) takes. Either order on the other's matrices moves every chaotic trajectory's digits, none of their statistics.
+pub(crate) fn symmetric_eigen_pivoted(m:[[f64;3];3])->([f64;3],[[f64;3];3]){
+    let mut a=m;let mut v=[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]];
+    for _ in 0..64{
+        let(mut p,mut q,mut big)=(0,1,0.);for i in 0..3{for j in i+1..3{if a[i][j].abs()>big{big=a[i][j].abs();p=i;q=j;}}}
+        if !(big>f64::EPSILON*(a[0][0].abs()+a[1][1].abs()+a[2][2].abs())){break;}
+        rotate_symmetric(&mut a,&mut v,p,q);
+    }
+    ([a[0][0],a[1][1],a[2][2]],v)
+}
 /// `x` emptied and filled with `len` zeros: a buffer kept for its capacity.
 pub(crate) fn zeroed<T:Clone+Default>(x:&mut Vec<T>,len:usize){x.clear();x.resize(len,T::default());}
 

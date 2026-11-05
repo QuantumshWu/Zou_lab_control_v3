@@ -156,7 +156,7 @@
 //! waist and frequency (its reflections, `Model::trap_beams`).
 use crate::ground::{self,Ground};
 use crate::ledger::BUDGET;
-use crate::linear::{hermitian_eigen_within,hermitian_eigenvalues,Dense};
+use crate::linear::{hermitian_eigen_within,hermitian_eigenvalues,symmetric_eigen,Dense};
 use crate::solve::{MATRIX_NS,NUMERICAL_SHARE,POPULATION_TARGET};
 use crate::stats::KT_PER_UK;
 use crate::{Complex,Request,STATES};
@@ -210,6 +210,11 @@ pub struct Geometry{pub direction:[f64;3],pub wave_number:f64,pub waist:Option<f
 impl Geometry{
     /// The wave vector (rad/um).
     pub fn wave_vector(&self)->[f64;3]{self.direction.map(|n|n*self.wave_number)}
+    /// A unit vector across the beam: a lab axis less its part along the beam.
+    pub(crate) fn across(&self)->[f64;3]{
+        let n=self.direction;let pick=if n[0].abs()<0.9{[1.,0.,0.]}else{[0.,1.,0.]};let along=pick[0]*n[0]+pick[1]*n[1]+pick[2]*n[2];
+        let v:[f64;3]=std::array::from_fn(|i|pick[i]-along*n[i]);let l=(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]).sqrt();v.map(|x|x/l)
+    }
     /// a(r) and ∇a(r) (1/um): the plane wave e^{ikζ}, or the paraxial Gaussian beam focused at the
     /// origin e^{ikζ} exp(−ρ²/(w² q))/q, q = 1 + iζ/z_R, z_R = k w²/2 (request.rs `Beam::amplitude_at`),
     /// whose ∇ln a = ik n − 2(r − ζn)/(w² q) + i(ρ²/(w² q²) − 1/q) n / z_R.
@@ -730,23 +735,6 @@ fn trap_beams(ground:&Ground,geometry:&[Geometry],trap_beam:usize)->Vec<usize>{
 fn trap_light(ground:&Ground,geometry:&[Geometry],trap_beams:&[usize])->Vec<usize>{
     (0..geometry.len()).filter(|l|trap_beams.contains(l)||(geometry[*l].waist.is_some()&&!ground.carriers.iter().any(|c|c.beams.contains(l))
         &&ground.units.iter().filter(|u|u.beams.contains(l)).all(|u|u.beams.iter().all(|&b|geometry[b].waist.is_some())))).collect()
-}
-
-/// The largest eigenvalue's eigenvector of a real symmetric 3 × 3 matrix's eigen-decomposition:
-/// its eigenvalues and orthonormal eigenvectors (rows), by Jacobi rotations.
-pub(crate) fn symmetric_eigen(m:[[f64;3];3])->([f64;3],[[f64;3];3]){
-    let mut a=m;let mut v=[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]];
-    for _ in 0..64{
-        let off=a[0][1].abs()+a[0][2].abs()+a[1][2].abs();if off<=1e-15*(a[0][0].abs()+a[1][1].abs()+a[2][2].abs()){break;}
-        for(p,q)in [(0,1),(0,2),(1,2)]{
-            if a[p][q]==0.{continue;}
-            let theta=(a[q][q]-a[p][p])/(2.*a[p][q]);let t=theta.signum()/(theta.abs()+(theta*theta+1.).sqrt());let c=1./(t*t+1.).sqrt();let s=t*c;
-            for k in 0..3{let(x,y)=(a[k][p],a[k][q]);a[k][p]=c*x-s*y;a[k][q]=s*x+c*y;}
-            for k in 0..3{let(x,y)=(a[p][k],a[q][k]);a[p][k]=c*x-s*y;a[q][k]=s*x+c*y;}
-            for k in 0..3{let(x,y)=(v[p][k],v[q][k]);v[p][k]=c*x-s*y;v[q][k]=s*x+c*y;}
-        }
-    }
-    ([a[0][0],a[1][1],a[2][2]],v)
 }
 
 impl Model{

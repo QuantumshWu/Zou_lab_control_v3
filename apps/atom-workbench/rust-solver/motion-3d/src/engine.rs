@@ -348,8 +348,12 @@ const SUB_STEP:f64=6.;
 /// truncation bound.
 pub fn series(norm:f64,tau:f64,truncation:f64)->(usize,usize){
     let x=norm*tau.abs();let parts=((x/SUB_STEP).ceil() as usize).max(1);
-    let y=x/parts as f64;let share=truncation/parts as f64;let mut terms=1;let mut size=y;while size>share&&terms<40{terms+=1;size*=y/terms as f64;}
-    (parts,terms)
+    (parts,terms_within(x/parts as f64,truncation/parts as f64,40).0)
+}
+/// The terms that sum exp(y)'s series within `share`, through the first whose bound y^m/m! is within it, at most `most`, and that bound.
+fn terms_within(y:f64,share:f64,most:usize)->(usize,f64){
+    let mut terms=1;let mut size=y;while size>share&&terms<most{terms+=1;size*=y/terms as f64;}
+    (terms,size)
 }
 fn propagate_sized<const N:usize>(h:&[Complex;MOST_STATES*MOST_STATES],tau:f64,psi:&mut [Complex],truncation:f64){
     let(parts,terms)=series(column_norm(h,N),tau,truncation);let step=tau/parts as f64;
@@ -372,7 +376,7 @@ fn squarings(x:f64,share:f64)->Option<(i32,usize)>{
     let mut best:Option<(i32,usize)>=None;
     for s in 0..64{
         let scale=0.5_f64.powi(s);let(y,part)=(x*scale,share*scale);if part<=f64::EPSILON{break;}
-        let mut terms=1;let mut size=y;while size>part&&terms<40{terms+=1;size*=y/terms as f64;}
+        let(terms,size)=terms_within(y,part,40);
         if size>part{continue;}
         match best{Some((b,m))if m-1+b as usize<=terms-1+s as usize=>break,_=>best=Some((s,terms))}
     }
@@ -408,8 +412,7 @@ impl HalfStep{
 fn row_norm(h:&[Complex],n:usize)->f64{(0..n).map(|a|(0..n).map(|b|h[a*n+b].re.abs()+h[a*n+b].im.abs()).sum::<f64>()).fold(0.,f64::max)}
 /// ψ ← exp(−i H τ) ψ on any number of states, to double precision: `propagate`'s series.
 pub fn propagate_dyn(h:&[Complex],n:usize,tau:f64,psi:&mut [Complex]){
-    let x=column_norm(h,n)*tau.abs();let parts=((x/SUB_STEP).ceil() as usize).max(1);let step=tau/parts as f64;
-    let y=x/parts as f64;let share=f64::EPSILON/parts as f64;let mut terms=1;let mut size=y;while size>share&&terms<40{terms+=1;size*=y/terms as f64;}
+    let(parts,terms)=series(column_norm(h,n),tau,f64::EPSILON);let step=tau/parts as f64;
     let(mut term,mut next)=([Complex::ZERO;MOST_MIXED],[Complex::ZERO;MOST_MIXED]);
     for _ in 0..parts{
         term[..n].copy_from_slice(&psi[..n]);
@@ -592,7 +595,7 @@ impl Entries{
 fn series_within(x:f64,share:f64)->(usize,usize){
     let widest=(share/f64::EPSILON).ln().max(1.);let mut parts=((x/widest).ceil() as usize).max(1);let mut best=(parts,usize::MAX);
     loop{
-        let(y,part)=(x/parts as f64,share/parts as f64);let mut terms=1;let mut size=y;while size>part&&terms<64{terms+=1;size*=y/terms as f64;}
+        let part=share/parts as f64;let(terms,size)=terms_within(x/parts as f64,part,64);
         if size>part{parts+=1;continue;}
         if parts*terms>=best.0.saturating_mul(best.1){return best;}
         best=(parts,terms);parts+=1;
@@ -892,22 +895,6 @@ fn emit(rng:&mut Rng,u:&[[Complex;MOST_STATES];3],nt:usize,polarization:f64)->([
     (direction,pair[chosen],amplitudes[chosen],weights[chosen])
 }
 
-/// The eigen-decomposition of a symmetric 3 × 3 matrix (Jacobi's rotations to double precision): the values and
-/// the unit vectors (rows).
-fn symmetric(mut a:[[f64;3];3])->([f64;3],[[f64;3];3]){
-    let mut v=[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]];
-    for _ in 0..64{
-        let(mut p,mut q,mut big)=(0,1,0.);for i in 0..3{for j in i+1..3{if a[i][j].abs()>big{big=a[i][j].abs();p=i;q=j;}}}
-        if !(big>f64::EPSILON*(a[0][0].abs()+a[1][1].abs()+a[2][2].abs())){break;}
-        let theta=0.5*(a[q][q]-a[p][p])/a[p][q];let t=theta.signum()/(theta.abs()+(theta*theta+1.).sqrt());
-        let c=1./(t*t+1.).sqrt();let s=t*c;
-        for k in 0..3{let(x,y)=(a[k][p],a[k][q]);a[k][p]=c*x-s*y;a[k][q]=s*x+c*y;}
-        for k in 0..3{let(x,y)=(a[p][k],a[q][k]);a[p][k]=c*x-s*y;a[q][k]=s*x+c*y;}
-        for k in 0..3{let(x,y)=(v[k][p],v[k][q]);v[k][p]=c*x-s*y;v[k][q]=s*x+c*y;}
-    }
-    ([a[0][0],a[1][1],a[2][2]],std::array::from_fn(|i|[v[0][i],v[1][i],v[2][i]]))
-}
-
 /// A part's share below the largest by single precision's round-off squared is the GPU's amplitudes' round-off: C's eigenvalues below this of its trace, 2⁻⁴⁶, 64 of double
 /// precision's, are no direction on either device (`part_weights`).
 const SHARE_ROUNDING:f64=f32::EPSILON as f64*f32::EPSILON as f64;
@@ -932,7 +919,7 @@ pub fn part_weights(s:&[f64],mu:&[[f64;3]],target:[f64;3])->Vec<f64>{
         let centre:[f64;3]=std::array::from_fn(|a|(0..n).map(|c|on[c]*mu[c][a]).sum::<f64>()/sum);
         let g:[f64;3]=std::array::from_fn(|a|target[a]-(0..n).map(|c|q[c]*mu[c][a]).sum::<f64>());
         let mut h=[[0.;3];3];for c in 0..n{for i in 0..3{for j in 0..3{h[i][j]+=on[c]*(mu[c][i]-centre[i])*(mu[c][j]-centre[j]);}}}
-        let(values,vectors)=symmetric(h);let floor=SHARE_ROUNDING*values.iter().map(|v|v.abs()).sum::<f64>();
+        let(values,vectors)=crate::linear::symmetric_eigen_pivoted(h);let floor=SHARE_ROUNDING*values.iter().map(|v|v.abs()).sum::<f64>();
         let mut beta=[0.;3];
         for i in 0..3{
             let spreads=(0..n).any(|c|on[c]>0.&&(0..3).map(|a|vectors[i][a]*(mu[c][a]-centre[a])).sum::<f64>().abs()>spread);

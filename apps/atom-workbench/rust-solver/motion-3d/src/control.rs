@@ -114,10 +114,8 @@ impl Twin{
     /// the beam; none when the generator has residual beats.
     pub fn new(model:&Model,intensity:f64)->Option<Twin>{
         if !static_generator(model)||(0..model.clusters()).any(|k|model.mixed(k)){return None;}
-        let g=&model.geometry[model.trap_beam];let n=g.direction;
-        let pick=if n[0].abs()<0.9{[1.,0.,0.]}else{[0.,1.,0.]};let along=pick[0]*n[0]+pick[1]*n[1]+pick[2]*n[2];
-        let across:[f64;3]=std::array::from_fn(|i|pick[i]-along*n[i]);let l=(across[0]*across[0]+across[1]*across[1]+across[2]*across[2]).sqrt();
-        let centre=model.centre();let at=|d:f64|->[f64;3]{std::array::from_fn(|i|centre[i]+across[i]/l*d)};
+        let g=&model.geometry[model.trap_beam];let across=g.across();
+        let centre=model.centre();let at=|d:f64|->[f64;3]{std::array::from_fn(|i|centre[i]+across[i]*d)};
         let(mut lo,mut hi)=(0.,g.waist?);while g.intensity(at(hi))>intensity{hi*=2.;}
         for _ in 0..60{let mid=0.5*(lo+hi);if g.intensity(at(mid))>intensity{lo=mid;}else{hi=mid;}}
         let point=model.point(at(lo),[0.;3]);

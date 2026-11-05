@@ -824,7 +824,7 @@ pub(crate) fn slopes(u:&dyn Fn([f64;3])->f64,r:[f64;3],h:f64)->(f64,[f64;3],[[f6
 pub(crate) fn descent(u:&dyn Fn([f64;3])->f64,start:[f64;3],h:f64,inside:&dyn Fn([f64;3])->bool)->[f64;3]{
     let(mut r,mut radius)=(start,h);let(mut u0,mut g,mut c)=slopes(u,r,h);
     loop{
-        let(values,vectors)=crate::model::symmetric_eigen(c);let round=64.*f64::EPSILON*u0.abs();
+        let(values,vectors)=crate::linear::symmetric_eigen(c);let round=64.*f64::EPSILON*u0.abs();
         let along=vectors.map(|v|v[0]*g[0]+v[1]*g[1]+v[2]*g[2]);
         let bowl=values.iter().all(|&l|l*h*h>round);
         let steps:[f64;3]=std::array::from_fn(|i|if values[i]*h*h>round{-along[i]/values[i]}else if along[i].abs()*h>round{-along[i].signum()*radius}else if values[i]*h*h< -round{radius}else{0.});
@@ -1354,7 +1354,7 @@ impl Ground{
         let reference=*self.ground_states.iter().max_by(|&&a,&&b|rho[a*STATES+a].re.total_cmp(&rho[b*STATES+b].re)).unwrap();
         // The reference state's well and its Hessian there.
         let u=|r:[f64;3]|self.hamiltonian_at(r)[(reference,reference)].re;
-        let centre=self.well(request.trap_beam,&u);let(values,axes)=crate::model::symmetric_eigen(slopes(&u,centre,difference(waist)).2);
+        let centre=self.well(request.trap_beam,&u);let(values,axes)=crate::linear::symmetric_eigen(slopes(&u,centre,difference(waist)).2);
         let hm=crate::model::HBAR/request.mass_kg*1e6;let kt=crate::stats::KT_PER_UK*request.temperature_uk;
         let reach:[f64;3]=std::array::from_fn(|a|{let w=(values[a]*hm).max(0.).sqrt();if w>0.{(2.*BUDGET.recip().ln()*kt*hm).sqrt()/w}else{f64::INFINITY}});
         if reach.iter().any(|x|!x.is_finite()){return unconfined(centre);}
