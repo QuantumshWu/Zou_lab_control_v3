@@ -326,6 +326,7 @@
 //! which costs at least a trajectory's time as far as it goes. A GPU that cannot run (none, an older driver, a
 //! model beyond its kernel) leaves the solve on the CPU with the reason
 //! (`Solution::device_note`); one that fails during the batches has the solve redone on the CPU.
+use crate::cost::{advance_work,jump_work,pays,CIS_NS,COMPLEX_MULTIPLY_ADD_NS,KERNEL_EXACT_PER_NS,SPECTRAL_N3,TERM_NS};
 use crate::engine::{column_norm,node_phase,series,Engine,Landings,Settings,Trajectory,QUADRATURE};
 use crate::gpu;
 use crate::ground::{ExcitedKind,Ground,Kind};
@@ -811,6 +812,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // The relative standard error of the need the pilot predicts (`need_error`): the margin a finer step must save
     // by (`kept`).
     let need=need_error(&pilot_groups,&Scales{hbar_over_mass:pilot_candidate.model.hbar_over_mass,frequencies:trap.lab},&pilot_harmonic.mean,&pilot_candidate.initial,trap.lab);
+    // The rule (cost.rs `pays`) as a model's cost reads it: what is still to be spent on the model beside its predicted cost, that cost's uncertainty the need's error, against the cost it would replace.
+    let saves=|cost:f64,spend:f64,against:f64|pays(spend,against-cost,need*cost);
     let pilot_waiting=pilot as f64*duration/(pilot_jumps.max(1) as f64);let pilot_horizon=pilot_waiting.min(duration);
     // The beats the pilot's exact steps left out (engine.rs `Segment::resolve`): their bound per unit time, at
     // most the run's share over its waiting time (`booked_beats`).
@@ -877,7 +880,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let kernel=|c:&Candidate,states:&[Trajectory],begun:&[Trajectory],x:&Costed|{
         let allowance=doppler_allowance(&gained(&c.base,&c.model,states),&c.model);
         kernel_interval(&c.model,&state_work(&c.model,states,begun),&running(c.reference(),x.steps,pilot_waiting,allowance,c.phase),interval,pilot_waiting)*waves(x,width())};
-    let fourth_cost=fourth_cost.filter(|f|device==Device::Cpu||pilot_cost.as_ref().map_or(true,|p|kernel(&f.1,&f.2,&f.3,&f.0)*(1.+need)<kernel(&pilot_candidate,&pilot_states,&starts,p)));
+    let fourth_cost=fourth_cost.filter(|f|device==Device::Cpu||pilot_cost.as_ref().map_or(true,|p|saves(kernel(&f.1,&f.2,&f.3,&f.0),0.,kernel(&pilot_candidate,&pilot_states,&starts,p))));
     let mut least=pilot_cost.as_ref().map_or(f64::INFINITY,|p|p.cost).min(fourth_cost.as_ref().map_or(f64::INFINITY,|f|f.0.cost));
     // The ladder's rungs where the folded models' cost could fall, without the estimates a rung can change (at the pilot's
     // model's step, its totals with those no candidate changes alone, `Candidate::fixed`, and the beats), by more than the prediction's
@@ -886,7 +889,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // startup's checks; F10's a run of 1 CPU-s, a rung's check ten, its opening with the pilot's draws).
     let open=pilot_cost.as_ref().is_some_and(|p|{let fixed=vec![[pilot_candidate.fixed()+pilot_beats*pilot_horizon;2];outputs];
         let(n,weight)=predicted(&pilot_statistics,&fixed,p.bias,pilot as f64);
-        least>p.work*n*weight*(outputs-1) as f64*(1.+need)+checked_step(pilot_states.len(),bound_probes(&pilot_candidate.model,&pilot_states,&binding_at(&pilot_states,&weights,interval)).first,p.steps,interval,period)*p.work/p.steps as f64});
+        saves(p.work*n*weight*(outputs-1) as f64,checked_step(pilot_states.len(),bound_probes(&pilot_candidate.model,&pilot_states,&binding_at(&pilot_states,&weights,interval)).first,p.steps,interval,period)*p.work/p.steps as f64,least)});
     // A check's work per unit of the work per interval: the same steps' doublings at another model's work (the pilot's model's).
     let per_work=pilot_cost.as_ref().map_or(0.,|p|p.check/p.work);
     // Each rung's first doubling by its clusters (`Candidate::clusters`): the same states' dynamics whatever the drives of round-off's
@@ -907,7 +910,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             // beyond the need's error: one whose floor cannot make it, its check paid, is passed over with its check unspent.
             let(at_work,at_least)=(interval_work(&c.model,&parts,&at,interval,pilot_waiting),least_work(&c.model,&parts,&at,interval,pilot_waiting));
             let check=per_work*at_work;
-            if at_least*fewest*weight*(outputs-1) as f64*(1.+need)+check>=least{break;}
+            if !saves(at_least*fewest*weight*(outputs-1) as f64,check,least){break;}
             let states=relaxed(&c.model,&at,bare);let binding=binding_at(&states,&weights,interval);let probes=bound_probes(&c.model,&states,&binding);
             // That doubling, made, from the coarse side as the grid's (`grid_phase`): at the fewest steps whose work per interval still is at least the work no step changes (W(s) = a s + least_work), at most the pilot's -- a read of the
             // orbits costs as its steps until there, and the pilot's step is no measure of a rung's: on a Λ scheme's rung of 5 explicit states 0.04 us against the 0.62 us it keeps, each check at 0.04-0.05 us 125-155 CPU-s of a search of 830 for a run of 11.
@@ -927,17 +930,17 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             // first) is passed over unchecked; one that saves beyond the error is costed.
             let x=(coarse as f64/fewest_steps as f64).powi(2);
             let(n,weight)=predicted(&pilot_statistics,&apriori,[r[1]*x*tolerances[0],r[2]*x*tolerances[1]],pilot as f64);
-            if interval_work(&c.model,&parts,&running(c.reference(),fewest_steps,pilot_waiting,at.doppler,at.node_phase),interval,pilot_waiting)*n*weight*(outputs-1) as f64*(1.+need)+check>=least{break;}
+            if !saves(interval_work(&c.model,&parts,&running(c.reference(),fewest_steps,pilot_waiting,at.doppler,at.node_phase),interval,pilot_waiting)*n*weight*(outputs-1) as f64,check,least){break;}
             let costed=evaluate(&c,&states,&begun,Some((Check{steps:coarse,population:r[0],loss:r[1],motion:r[2]},tolerances)),&deposits);
             // A rung keeps more of the model explicit: taken only for a saving beyond the prediction's own uncertainty.
-            if costed.cost*(1.+need)<least{least=costed.cost;rung=Some((c,states,begun,costed.checked));}
+            if saves(costed.cost,0.,least){least=costed.cost;rung=Some((c,states,begun,costed.checked));}
         }
     }
     // The choice: the least weighed cost, one keeping more of the model only for a saving beyond the need's error; with
     // none costed, the pilot's model. Its run takes the pilot's states carried into its clusters, the pilot's statistics
     // and jumps the prediction's (the models' rates differ by the fold's S, the physical atoms' jumps alike), and the step
     // its check took on them: no pilot runs again.
-    let fourth_wins=fourth_cost.as_ref().is_some_and(|f|pilot_cost.as_ref().map_or(true,|p|f.0.cost*(1.+need)<p.cost));
+    let fourth_wins=fourth_cost.as_ref().is_some_and(|f|pilot_cost.as_ref().map_or(true,|p|saves(f.0.cost,0.,p.cost)));
     let(chosen,states,begun,known)=if let Some((c,states,begun,checked))=rung{(c,states,begun,checked)}
         else if fourth_wins{let(f,c,states,begun)=fourth_cost.unwrap();(c,states,begun,f.checked)}
         else{(pilot_candidate,pilot_states,starts,pilot_cost.and_then(|p|p.checked))};
@@ -1356,14 +1359,14 @@ fn power(a:&Check,b:&Check)->f64{
 }
 
 /// The step kept among the checked ones that met the targets (module documentation): the largest (where checked twice,
-/// its later check, the population measured), or the largest of those whose weighed cost (`cost`) lies within the
-/// prediction's own uncertainty (`error`, relative) of the least: a finer step only for a saving beyond it. None without
+/// its later check, the population measured), or the largest that no other step's saving pays against (cost.rs `pays`, the checks made: its weighed cost `cost` lies within the
+/// prediction's own uncertainty, `error` relative, of the least): a finer step only for a saving beyond it. None without
 /// one.
 fn kept(candidates:&[Check],cost:&dyn Fn(&Check)->f64,error:f64)->Option<Check>{
     let largest=*candidates.iter().rev().min_by_key(|c|c.steps)?;
     let costs:Vec<(Check,f64)>=candidates.iter().filter(|c|c.steps>=largest.steps).map(|c|(*c,cost(c))).collect();
     let least=costs.iter().map(|x|x.1).fold(f64::INFINITY,f64::min);
-    costs.iter().rev().filter(|x|x.1<=least*(1.+error)).min_by_key(|x|x.0.steps).map(|x|x.0).or(Some(largest))
+    costs.iter().rev().filter(|x|!pays(0.,x.1-least,error*least)).min_by_key(|x|x.0.steps).map(|x|x.0).or(Some(largest))
 }
 
 /// The relative standard error of the trajectories the pilot predicts (module documentation): the need goes as the largest
@@ -1721,24 +1724,6 @@ fn accumulated_excess(engine:&Engine,states:&[Trajectory],horizon:f64,subsample:
     }
 }
 
-/// What a unit of each of the step's parts costs (ns), for the work model (`interval_work`): measured
-/// once on one performance core of the Core Ultra 7 265H (examples/bench_cost.rs) and fitted over
-/// DEFAULT, THREE, PGC3D, TET, GMD1C and PGCP_10, each part within 10–20 % of its measured time; only
-/// their ratios enter the choice. An advance without its propagation: per call (the point's fields,
-/// the flow, the kick), per multiply-add of the generator and the force (`Model::work`) and per table
-/// pair.
-const ADVANCE_NS:f64=374.;const MULTIPLY_ADD_NS:f64=0.247;const PAIR_NS:f64=29.9;
-/// A half step's propagation: per term of its series and per multiply-add (n² a term).
-const TERM_NS:f64=4.4;const TERM_MULTIPLY_ADD_NS:f64=0.469;
-/// A whole jump (`Engine::jump`): per call (its point, the class's and the polarization's draws, the
-/// dipole pattern, the kicks), per multiply-add of every class's photons and per multiply-add of the
-/// picked class's absorbed light (`Model::work`). Timed against the advance in the same interleaved
-/// rounds on the loaded machine (each the least of 30 rounds × 3 passes), taken at the advance's cost
-/// above: within 10 % but DEFAULT's (+21 %); a jump costs 1.5–2.1 times its photons alone.
-const JUMP_NS:f64=970.;const PHOTON_MULTIPLY_ADD_NS:f64=0.594;const ABSORPTION_MULTIPLY_ADD_NS:f64=1.48;
-
-/// An advance's counted work in a cluster (ns, `ADVANCE_NS` and the rest; model.rs `Model::work`), its propagation aside.
-pub(crate) fn advance_work(w:&crate::model::Work)->f64{ADVANCE_NS+MULTIPLY_ADD_NS*(w.generator+w.force)+PAIR_NS*w.pairs as f64}
 /// The phase the light's pattern advances per first step (module documentation, # Time step): sqrt(s × the temperature
 /// target), its T error about the phase squared.
 pub(crate) fn first_phase()->f64{(BIAS_VARIANCE*TEMPERATURE_TARGET).sqrt()}
@@ -1747,8 +1732,6 @@ pub(crate) fn first_phase()->f64{(BIAS_VARIANCE*TEMPERATURE_TARGET).sqrt()}
 /// the state itself -- the exact step's segment is probed at each step (`exact_step`), where the settings have its cluster take it (`Engine::takes_exact`: a cluster's beats all left out at the model's reach leave it the plain step) --;
 /// and its weight in the run's time.
 struct StateWork{cluster:usize,advance:f64,jump:f64,norm:f64,n:usize,exact:Option<Trajectory>,weight:f64,kernel:[f64;2]}
-/// A cluster's jump in the work model (`StateWork`).
-fn jump_work(w:&crate::model::Work)->f64{JUMP_NS+PHOTON_MULTIPLY_ADD_NS*w.photons+ABSORPTION_MULTIPLY_ADD_NS*w.absorption}
 /// The work per interval (`interval_work`) of a candidate's fourth order, its tables unbuilt: its states' advances and jumps from
 /// the fourth order's layout (`Model::layout_work`), the rest the candidate's own. The candidate's own work where the layout fails.
 fn fourth_work(request:&Request,c:&Candidate,states:&[Trajectory],begun:&[Trajectory],s:&Settings,interval:f64,waiting:f64)->f64{
@@ -1768,14 +1751,6 @@ fn state_work(model:&Model,states:&[Trajectory],begun:&[Trajectory])->Vec<StateW
         StateWork{cluster:t.cluster,advance:advance_work(&w),jump:jump_work(&w),norm,n,exact:(!model.is_static(t.cluster)).then(||t.clone()),weight,kernel:model.kernel_work(t.cluster)}
     }).collect()
 }
-/// The exact step's work (`exact_step`, ns): per complex multiply-add of n × n matrices, per n³ of the spectral
-/// path's eigendecomposition with its forms, and per complex exponential of a beat's phase (at the large
-/// arguments a run's times give). Against the step's CPU time on one core of the Core Ultra 7 265H (the jump-free
-/// step at each of a candidate's states along its trajectories, as examples/multirate.rs `profile` times it):
-/// PGC3D's 10-state cluster (spectral at the run's beats share), PGCP_10's 12-state
-/// and 5-state beating clusters and PGC3D's folded one take 1.2-3.3 times their counts on the loaded machine --
-/// the counts' ratios, which alone choose, within about ±30 %.
-pub(crate) const MATRIX_NS:f64=0.469;const SPECTRAL_N3:f64=60.;const CIS_NS:f64=25.;
 /// The exact step's work at a state (ns, engine.rs `Engine::exact`), from the segment the step builds there
 /// (`Engine::probe`): per step, every step's -- its advance (the components' gather, the flows and the kick),
 /// the beats' bounds (`Segment::resolve`: per pair two commutators, n³ each, of either beat, where its boundary term
@@ -1795,7 +1770,7 @@ fn exact_step(engine:&Engine,t:&Trajectory,x:&StateWork)->[f64;2]{
         "taylor"=>(terms*n3,5.*n2,0.),
         _=>(0.,p.node[0],p.node[1]),
     };
-    [x.advance+MATRIX_NS*(8.*pairs*n3+build),nodes*(TERM_MULTIPLY_ADD_NS*node+CIS_NS*turns)]
+    [x.advance+COMPLEX_MULTIPLY_ADD_NS*(8.*pairs*n3+build),nodes*(COMPLEX_MULTIPLY_ADD_NS*node+CIS_NS*turns)]
 }
 /// The exact states a work count probes at most (`steps_parts`): each probe builds its segment.
 const PROBED:usize=256;
@@ -1889,7 +1864,7 @@ fn response(rates:&[f64],m:usize,span:f64)->Vec<f64>{
     for _ in 0..doublings{let next=product(&e,&s);for(a,b)in s.iter_mut().zip(&next){*a+=*b;}e=product(&e,&e);}
     s
 }
-/// A step's parts at every state (ns): what every step pays -- the advance with, taking the plain step,
+/// A step's parts at every state (cost.rs): what every step pays -- the advance with, taking the plain step,
 /// its two half steps' series, or the exact step's per step (`exact_step`) -- and what the multirate grid takes
 /// over the step, whose nodes per unit time no step changes; and whether it takes the exact step. The exact states' from at most `PROBED` of them,
 /// evenly spread, their mean for the rest.
@@ -1904,8 +1879,8 @@ fn steps_parts(model:&Model,states:&[StateWork],s:&Settings)->Vec<([f64;2],bool)
 fn exact_redo(p:&[f64;2])->f64{2.*p[0]+0.5*p[1]}
 /// A half step's propagation at a state (ns): its series' sub-steps × terms at its generator's norm,
 /// the step's dt and truncation.
-fn half_step(x:&StateWork,s:&Settings)->f64{let(sub,terms)=series(x.norm,0.5*s.dt,s.truncation);(sub*terms) as f64*(TERM_NS+TERM_MULTIPLY_ADD_NS*(x.n*x.n) as f64)}
-/// A step's work per interval (ns, `ADVANCE_NS` and the rest), counted on the sampled states -- the
+fn half_step(x:&StateWork,s:&Settings)->f64{let(sub,terms)=series(x.norm,0.5*s.dt,s.truncation);(sub*terms) as f64*(TERM_NS+COMPLEX_MULTIPLY_ADD_NS*(x.n*x.n) as f64)}
+/// A step's work per interval (cost.rs), counted on the sampled states -- the
 /// same whatever the machine and its load: its steps (`steps_parts`), each the generator's and the force's
 /// multiply-adds and pairs of the state's cluster and two half steps' series, or the exact step's; and per
 /// jump, one every waiting time, the jump itself -- every class's photons, the picked class's absorbed light
@@ -1918,13 +1893,12 @@ fn interval_work(model:&Model,states:&[StateWork],s:&Settings,interval:f64,waiti
     (interval/s.dt*advance+interval/waiting*jump)/count
 }
 /// A step's work per interval in the GPU's kernel (a warp's cycles, model.rs `Model::kernel_work`), as `interval_work`: the exact step's
-/// at `EXACT_CYCLES` per ns of its count, PGCP_10's 1.6M cycles a step in the 12-state cluster against its 130 us.
+/// at `KERNEL_EXACT_PER_NS` of its count.
 fn kernel_interval(model:&Model,states:&[StateWork],s:&Settings,interval:f64,waiting:f64)->f64{
-    const EXACT_CYCLES:f64=12.;
     let parts=steps_parts(model,states,s);let(mut advance,mut jump)=(0.,0.);
     for(x,(p,exact))in states.iter().zip(&parts){
-        let a=if *exact{EXACT_CYCLES*(p[0]+p[1])}else{x.kernel[0]};
-        advance+=x.weight*a;jump+=x.weight*(x.kernel[1]+if *exact{EXACT_CYCLES*exact_redo(p)}else{2.*a});
+        let a=if *exact{KERNEL_EXACT_PER_NS*(p[0]+p[1])}else{x.kernel[0]};
+        advance+=x.weight*a;jump+=x.weight*(x.kernel[1]+if *exact{KERNEL_EXACT_PER_NS*exact_redo(p)}else{2.*a});
     }
     (interval/s.dt*advance+interval/waiting*jump)/weights(states)
 }

@@ -157,7 +157,8 @@
 use crate::ground::{self,Ground};
 use crate::ledger::BUDGET;
 use crate::linear::{hermitian_eigen_within,hermitian_eigenvalues,round_off,single_round_off,symmetric_eigen,unit_round_off,Dense};
-use crate::solve::{MATRIX_NS,NUMERICAL_SHARE,POPULATION_TARGET};
+use crate::cost::{advance_work,COMPLEX_MULTIPLY_ADD_NS,KERNEL_FOURTH_PHOTON,KERNEL_JUMP,KERNEL_PAIR,KERNEL_PHOTON,KERNEL_SLAB,KERNEL_STEP};
+use crate::solve::{NUMERICAL_SHARE,POPULATION_TARGET};
 use crate::stats::KT_PER_UK;
 use crate::{Complex,Request,STATES};
 use rayon::prelude::*;
@@ -817,7 +818,7 @@ impl Model{
 
     /// What the run costs (ns), the tables' stake (`tabulate`): a run's first batch, the trajectories nearly every
     /// run takes (solve.rs `FIRST_GROUPS`), each the pilot's first steps over the run (the light's pattern, solve.rs `run`)
-    /// at an advance's counted work in the model's dearest cluster (solve.rs `advance_work`). A run that takes more loses only the
+    /// at an advance's counted work in the model's dearest cluster (cost.rs `advance_work`). A run that takes more loses only the
     /// 2e/R the refinement stopped at (`room_cost`; 129 nodes on 3D PGC's tables at the most a run takes, an error of 5e-7 against its a-priori 2 %: 33 nodes hold 3e-4),
     /// each cutting the error about 2³-fold at 2^D times the work of the last.
     fn stake(&self,request:&Request)->f64{
@@ -825,7 +826,7 @@ impl Model{
         let pattern=self.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max)*thermal;
         let rate=if pattern>0.{pattern}else{self.ground.reference_state(request).map_or(0.,|s|self.bare_trap(s).frequencies.iter().copied().fold(0.,f64::max))};
         let steps=(self.ground.duration*rate/crate::solve::first_phase()).max(1.);
-        let advance=(0..self.layouts.len()).map(|k|crate::solve::advance_work(&self.work(k))).fold(0.,f64::max);
+        let advance=(0..self.layouts.len()).map(|k|advance_work(&self.work(k))).fold(0.,f64::max);
         (crate::solve::FIRST_GROUPS*crate::TASK) as f64*steps*advance
     }
 
@@ -1418,7 +1419,7 @@ impl Model{
     /// kept with the coarser one's measured error against it (`interpolation_error`, an upper estimate of
     /// its own) -- once refined at least, so that the error is measured --, and doubled again while that
     /// pays: while the next grid's counted work -- its new nodes' eliminations at the last grid's counted
-    /// work per node (linear.rs `counted`) and its error's measure, `MATRIX_NS` a complex multiply-add -- is
+    /// work per node (linear.rs `counted`) and its error's measure, `COMPLEX_MULTIPLY_ADD_NS` each -- is
     /// below what its smaller error saves the run (`stake`'s run at its `room_cost`). Its error
     /// is predicted by the last doubling's rate, and by the cubic interpolation's order before one is seen,
     /// 2⁻³ a doubling (`cubic`), and what it saves is `room_cost`'s: an error the whole population target leaves no run its room, whatever the run's length (a request of no
@@ -1443,7 +1444,7 @@ impl Model{
                 let smallest=errors.iter().copied().fold(f64::INFINITY,f64::min);
                 if errors.iter().rev().take_while(|&&e|e>smallest).count()>=STALLED_DOUBLINGS{self.table_stalled=true;self.table_limit=Some(coarse);break;}
                 let rate:f64=if errors.len()>1&&error<errors[errors.len()-2]{error/errors[errors.len()-2]}else{0.125};
-                let work=MATRIX_NS*((n.pow(d)-coarse.pow(d)) as f64*per_node+(n.pow(d)*measured*4_usize.pow(d)) as f64);
+                let work=COMPLEX_MULTIPLY_ADD_NS*((n.pow(d)-coarse.pow(d)) as f64*per_node+(n.pow(d)*measured*4_usize.pow(d)) as f64);
                 if room_cost(error).is_finite()&&!(work<stake*(room_cost(error)-room_cost(rate*error))){break;}
             }
             if !within(n,coarse){self.table_limit=Some(coarse);break;}
@@ -1666,17 +1667,14 @@ impl Model{
         let absorption=classes.iter().map(|c|c.photons.iter().map(|(ph,_)|self.carriers[ph.carrier].rank as f64*(6.+2.*nodes*(3.+d))).sum::<f64>()).sum::<f64>()/classes.len().max(1) as f64;
         Work{generator,force,photons,absorption,pairs:layout.groups.iter().map(|g|g.pairs.len()).sum()}
     }
-    /// A cluster's work in the GPU's kernel, a warp's cycles (solve.rs `kernel_interval`): a step, its table pairs' gathers and the
+    /// A cluster's work in the GPU's kernel, a warp's cycles (solve.rs `kernel_interval`, cost.rs): a step, its table pairs' gathers and the
     /// fourth order's slabs beside its fixed parts, and a jump, every class's photons at the second order and the fourth's W3 and forms
-    /// at their own rates. A static cluster's: against a wave of 576 at both orders on PGC3D, TET, THREE, GMD1C and DEFAULT, on a laptop's RTX 5070, the
-    /// ratios between the orders, what a choice between them reads, within about 20 % (PGC3D 1.81 against 1.71, TET 1.83 against 1.83, GMD1C 2.53 against
-    /// 2.84, THREE 1.69 against 2.03), the totals 1.1 to 1.6 times the cycles (fitted to a kernel some 30 % slower per step, the ratios unmoved beyond this).
-    /// Fixed numbers, one GPU's: another's own ratios change no choice here, only how well it fits that GPU.
+    /// at their own rates.
     pub fn kernel_work(&self,cluster:usize)->[f64;2]{
         let layout=&self.layouts[cluster];let w=self.work(cluster);let nodes=(1usize<<(2*self.focused.len())) as f64;
         let second:f64=self.carriers.iter().map(|c|c.rank as f64*3.*self.ground.ground_states.len() as f64*layout.n as f64*(2.*nodes+1.)).sum();
         let slabs=layout.fourth.as_ref().map_or(0,|f|f.quartic.len()) as f64;
-        [85e3+5e3*w.pairs as f64+2.5e3*slabs,160e3+35.*second.min(w.photons)+19.*(w.photons-second).max(0.)]
+        [KERNEL_STEP+KERNEL_PAIR*w.pairs as f64+KERNEL_SLAB*slabs,KERNEL_JUMP+KERNEL_PHOTON*second.min(w.photons)+KERNEL_FOURTH_PHOTON*(w.photons-second).max(0.)]
     }
     /// The number of clusters.
     pub fn clusters(&self)->usize{self.layouts.len()}

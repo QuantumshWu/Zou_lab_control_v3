@@ -4,6 +4,7 @@
 //! its front end, the generator with the excited states eliminated, on the small dense linear
 //! algebra of `linear`.
 pub mod control;
+pub(crate) mod cost;
 pub mod eigen;
 pub mod engine;
 pub mod ensemble;
