@@ -104,10 +104,9 @@
 //!   error asks 0.03–0.05 us --;
 //!   with the orbits, the impulse and the populations' criterion, the 3D PGC and the tetrahedral MOT
 //!   hold T within 0.4 % and 1.0 % of a quarter of their steps at the outputs where it binds (4096
-//!   trajectories on shared streams). Its errors count against the tolerance only as far as the step's share of it, where the probes' layers stop as resolved; beyond that, what stands above them (`orbit_bound`): on orbits that part
-//!   ways within the period a pair is two samples of the motion, its errors fall far more slowly than the step's own (as dt^0.5 below), and a bound on them meets no tolerance until the step holds the pairs together over the whole period, whatever T's error is. The PGC with a resonant
-//!   probe and its cooling beams at 30 mW/cm²: 0.0115 ± 0.156, 0.0696 ± 0.109 and 0.0515 ± 0.093 at 0.0625 us on 32 probes, the bound's search down to 0.0034 us past five minutes of its checks; read so, 0.2 us on the pilot's states and 0.167 us for the run,
-//!   where T is +0.1, −0.5, +1.4 ± 2.0 % against 0.031 us and +1.6, +2.1, −1.0 ± 2.0 % against 0.0078 us (4096 trajectories on shared streams);
+//!   trajectories on shared streams). A probe's difference counts at the share of atoms that keep that orbit over the period, the flow's no-jump survival ‖ψ‖² at its end, as a statistic stands at the share of atoms it reads (# Batches): a flow no atom follows is no atom's error, and a smaller step cannot pay for it. A flow ends where that share lies within the numerical share of the tolerance.
+//!   (A probe at 1 W/cm²: its atoms wait 1.3 us for a jump and the period is 52 us. The flow ran on past them, its survival at the end at most 1e-127, 72 % of its probes past their loss at a median 3.8 us, κ² up a hundred times, and its pairs parted until the step resolved the light's pattern for atoms that fast, k v dt about 0.3:
+//!   1.3, 3.0, 0.68, 0.92 and 1.04 tolerances from 0.25 to 0.022 us, 72 of the run's 88 s. Read at the share, under 0.01 of the tolerance at every step, and the step is the impulse's, 0.037 us. Where the atoms keep the orbit -- a trap alone, atoms dark through a period -- the share is 1 and the read the step's own: the shallow probe's T +3.9 % on its worst axis at 2.86 us, and +8.0 % at the 4 us the impulse would take, against 1 us, 4096 trajectories on shared streams);
 //! - the heating the jumps carry, their counterpart of the orbits (`jumps`), within T's tolerance: the step holds a (sub-)step's jump hazard R at its middle, so the jumps fall evenly over a
 //!   step instead of by the hazard along it, and a jump's expected deposit -- its cross term
 //!   c = (ħ²/m) κ·E[Δκ], E[Δκ] the mean kick of its photons -- takes a first-order profile over its place
@@ -1569,7 +1568,7 @@ fn layer_place(j:u32,weights:&[f64])->usize{
 /// shorter: a window short of a period weighs the orbit's phase, not the step) in steps of dt and of dt/2, ψ kept
 /// normalized, the mean κ² per axis over it compared -- 4/3 their difference, the probe's orbit's own
 /// error, which the window means of T keep. Per axis the probes' mean difference relative to their mean
-/// κ² and its CONFIDENCE standard errors, read against the tolerance (`orbit_bound`); the largest axis. Zero without probes. A few probes' orbits are
+/// κ² and its CONFIDENCE standard errors, each probe's difference at the share of atoms that keep its orbit (the flow's no-jump survival at its end, module documentation): their sum, the largest axis. Zero without probes. A few probes' orbits are
 /// chaotic -- dt and dt/2 part ways, their κ² windows 20-40 % apart at the step the mean differs by 1 % --, so that with one
 /// probe per pilot trajectory the standard error rested on those few and the 3D PGC's step moved by 1.8 times between its
 /// pilot's draws: the probes' layers (`bound_probes`) are added, doubling their number, until the errors are within the
@@ -1585,26 +1584,28 @@ fn orbits(engine:&Engine,probes:&Probes,period:f64,tolerance:f64,floor:f64)->f64
     let mut held=engine.settings.clone();held.truncation=held.truncation.min(NUMERICAL_SHARE*POPULATION_TARGET*held.dt/period);
     let engine=&Engine::new(engine.model,held);
     let(dt,model)=(engine.settings.dt,engine.model);let steps=((period/dt).ceil() as usize).max(1);
-    let flow=|t:&Trajectory|->[[f64;3];2]{
-        let mean=|h:f64,n:usize|->[f64;3]{let mut x=t.clone();let mut sum=[0.;3];let size=model.dimension(x.cluster);
-            for _ in 0..n{x=engine.coast(&x,h,1);let norm=x.psi[..size].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();for z in x.psi[..size].iter_mut(){*z=*z*(1./norm);}
-                for a in 0..3{sum[a]+=x.kappa[a]*x.kappa[a];}}
-            sum.map(|v|v/n as f64)};
-        [mean(dt,steps),mean(0.5*dt,2*steps)]};
+    // A flow's mean κ² per axis, its no-jump survival and its steps: at most `n`, ending where the survival lies within `least`.
+    let flow=|t:&Trajectory,h:f64,n:usize,least:f64|->([f64;3],f64,usize){
+        let mut x=t.clone();let size=model.dimension(x.cluster);let square=|x:&Trajectory|x.psi[..size].iter().map(|z|z.norm_sqr()).sum::<f64>();
+        let(mut sum,mut kept,mut last)=([0.;3],1_f64,square(&x));let mut taken=0;
+        while taken<n&&kept>least{
+            x=engine.coast(&x,h,1);let now=square(&x);kept*=now/last;let root=now.sqrt();for z in x.psi[..size].iter_mut(){*z=*z*(1./root);}last=1.;
+            for a in 0..3{sum[a]+=x.kappa[a]*x.kappa[a];}taken+=1;}
+        (sum.map(|v|v/taken as f64),kept,taken)};
+    let pair=|t:&Trajectory|{let(a,kept,taken)=flow(t,dt,steps,NUMERICAL_SHARE*tolerance);let(b,also,_)=flow(t,0.5*dt,2*taken,0.);at_share(a,b,kept.min(also))};
     let first=probes.first.min(probes.states.len());let mut windows:Vec<[[f64;3];2]>=vec![];let mut count=first.min(TASK as usize);
     loop{
-        windows.extend(probes.states[windows.len()..count].par_iter().map(|t|flow(t)).collect::<Vec<_>>());
+        windows.extend(probes.states[windows.len()..count].par_iter().map(|t|pair(t)).collect::<Vec<_>>());
         let axes=paired_error(&windows);
-        let bound=axes.iter().map(|&x|orbit_bound(x,tolerance)).fold(0.,f64::max);
-        if axes.iter().map(|x|x[0]+x[1]).fold(0.,f64::max)<=floor{return bound;}
+        let bound=axes.iter().map(|x|x[0]+x[1]).fold(0.,f64::max);
+        if bound<=floor{return bound;}
         if count>=first&&(axes.iter().map(|x|x[1]).fold(0.,f64::max)<=BIAS_SHARE*tolerance||axes.iter().any(|x|x[0]-x[1]>tolerance)||count==probes.states.len()){return bound;}
         count=if count<first{(2*count).min(first)}else{(2*count).min(probes.states.len())};
     }
 }
 
-/// What an axis's read of the orbits holds against T's tolerance (module documentation, # Time step): its size and errors while those lie within the step's share of the tolerance, where `orbits`' layers stop as resolved; beyond it what
-/// stands above them and that width, falling as they grow: a read twice as noisy says half as much. Errors alone never miss the tolerance; continuous, and in a size above its errors increasing.
-fn orbit_bound([size,errors]:[f64;2],tolerance:f64)->f64{let share=BIAS_SHARE*tolerance;(size+errors).min((size-errors).max(0.)+2.*share*share/errors.max(share))}
+/// A pair's windows, at dt and at dt/2, with their difference at a share of the atoms (`orbits`): what `paired_error` reads of it.
+fn at_share(coarse:[f64;3],fine:[f64;3],share:f64)->[[f64;3];2]{[std::array::from_fn(|a|fine[a]+share*(coarse[a]-fine[a])),fine]}
 
 /// Per axis the magnitude of the paired windows' error, 4/3 the difference of the mean κ² at dt (a window's first) and at dt/2
 /// relative to the latter's mean, and its CONFIDENCE standard errors. Zeros on an axis without κ².
@@ -2022,15 +2023,13 @@ mod tests{
         let stands=|z:f64,rng:&mut crate::rng::Rng|(0..runs).filter(|_|(0..looks).map(|_|crate::rng::normal_quantile(rng.interior()).abs()).fold(0.,f64::max)>limit+z).count() as f64/runs as f64;
         let(wide,narrow)=(stands(looks_confidence(27.),&mut rng),stands(CONFIDENCE,&mut rng));assert!(wide<0.06&&narrow>0.15&&narrow<0.3,"{wide} {narrow}");
     }
-    /// An orbits' read against the tolerance (`orbit_bound`): a resolved read its size and errors; errors alone, however large, hold no step; a size past the tolerance by its errors misses it; continuous.
+    /// An orbit's read counts at the share of atoms that keep it (`at_share`): all of it at one, in proportion below, and nothing of a flow no atom follows, however its pair parted.
     #[test]
-    fn an_orbits_read_s_noise_alone_holds_no_step(){
-        let t=0.05;let share=BIAS_SHARE*t;
-        assert_eq!(orbit_bound([0.02,0.01],t),0.03);assert_eq!(orbit_bound([0.,share],t),share);assert!((orbit_bound([t,share],t)-(t+share)).abs()<1e-15);
-        for e in [1.5*share,0.1,1.]{for m in [0.,0.5*e,e]{assert!(orbit_bound([m,e],t)<t,"{m} {e}");}}
-        assert!(orbit_bound([0.3,0.1],t)>2.*t&&orbit_bound([0.102,0.1],t)<t);
-        let mut last=orbit_bound([0.,0.1],t);for i in 1..=4000{let x=orbit_bound([i as f64*1e-4,0.1],t);assert!(x>=last&&x-last<=2e-4,"{i}: {x} after {last}");last=x;}
-        for m in [0.,0.01,0.05,0.2]{let mut last=orbit_bound([m,0.],t);for i in 1..=4000{let x=orbit_bound([m,i as f64*1e-4],t);assert!((x-last).abs()<=4e-4,"{m} {i}: {x} after {last}");last=x;}}
+    fn an_orbit_s_read_counts_at_the_share_of_atoms_that_keep_it(){
+        let pairs=|share:f64|{let w:Vec<[[f64;3];2]>=(0..8).map(|i|at_share([2.;3],[1.+0.1*i as f64;3],share)).collect();paired_error(&w)[0]};
+        let whole=pairs(1.);let half=pairs(0.5);assert!((half[0]-0.5*whole[0]).abs()<1e-12&&(half[1]-0.5*whole[1]).abs()<1e-12);
+        assert_eq!(pairs(0.),[0.;2]);assert!(whole[0]>0.5,"{whole:?}");
+        assert_eq!(at_share([3.,4.,5.],[1.,2.,3.],1.)[0],[3.,4.,5.]);assert_eq!(at_share([3.,4.,5.],[1.,2.,3.],0.)[0],[1.,2.,3.]);
     }
     /// T's statistic stands at the atoms the run holds: its relative error at no loss, half of it with a quarter of the atoms held, nothing where none is.
     #[test]
