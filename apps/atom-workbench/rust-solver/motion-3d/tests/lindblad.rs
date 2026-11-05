@@ -62,7 +62,7 @@ fn a_strong_beam_s_folded_pairs_make_a_lindblad_generator_where_every_drive_fold
     }
 }
 
-/// The default scene's first rungs, either order, are Lindblad generators within the budget: none is refused.
+/// The default scene's first rungs, either order, are Lindblad generators: none is refused.
 #[test]
 fn the_default_scene_s_rungs_are_not_refused(){
     let r=request(include_str!("../../tests/fixtures/default_scene_motion.json"));

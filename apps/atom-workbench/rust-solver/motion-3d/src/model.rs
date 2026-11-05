@@ -179,7 +179,7 @@ const FIRST_NODES:usize=5;
 /// An instant at which the generator's beats take generic phases (us, the golden ratio's inverse: no
 /// rational multiple of a period), where `Model::lindblad` checks it besides t = 0.
 const GENERIC:f64=0.618_033_988_749_894_8;
-/// The head of a model's refusal for a generator that gains beyond the budget (`Model::lindblad`): solve.rs stops
+/// The head of a model's refusal for a generator that gains (`Model::lindblad`): solve.rs stops
 /// with it where the ladder's first rung, every drive folded, meets it.
 pub const NOT_LINDBLAD:&str="消去激发态后的生成元不是 Lindblad 形式";
 /// The most a model's tables may take while a grid is refined, the coarse grid's and the fine one's

@@ -21,7 +21,7 @@
 //! before the projection, `elapsedMs`, `method`,
 //! `device` -- the device used -- with `deviceNote` when it is not the one asked for, and
 //! `approximations`: the ledger of the a-priori approximations, `budget`, `used`, `items` of
-//! `label`, `estimate` and `action`, `flagged` when some output times lie beyond the budget, and `note` with what the
+//! `label`, `estimate` and `action`, `flagged` when some output times lie beyond a target, and `note` with what the
 //! initial ensemble leaves out, no warning),
 //! and `motion`, read by `readMotionResult` in src/solver-types.ts:
 //! - `axis`: "3d";

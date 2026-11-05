@@ -13,10 +13,9 @@
 //!
 //! # Ledger and the total error
 //! Every a-priori approximation's estimate enters the solve's ledger (ledger.rs), reported against
-//! its budget, the a-priori share of the population target. The decisions take that share: the
-//! couplings' and the far components' folds (ground.rs), a Gaussian beam's intensity axis (model.rs)
-//! and, per step, the first order in the Doppler shift -- what the budget leaves after the model's
-//! estimates and the pilot's elimination, or the budget on its own where the elimination alone exceeds it (the exact
+//! the population target. The fold rule's per-item threshold is the a-priori share of it (`BUDGET`, ledger.rs): the
+//! couplings' and the far components' folds (ground.rs), a Gaussian beam's intensity axis (model.rs).
+//! The first order in the Doppler shift takes, per step, the step's share of the run's room beside the other estimates (`doppler_allowance`; the exact
 //! response beyond, engine.rs). The elimination's η² -- each output's mean
 //! excited population, the local expansion parameter ⟨Y⟩ of each atom's state -- is measured along
 //! the trajectories and is no decision yet: it enters the total (validated on resonant probes against
@@ -47,8 +46,8 @@
 //! statistics still run, so only its a-priori excess is).
 //!
 //! # The fold's choice
-//! The rule's candidates (ground.rs `Ground::ladder`) from all folded down, and on the CPU the
-//! first's fourth order, are costed on the pilot's states carried into their clusters (`carried`): each
+//! The rule's candidates (ground.rs `Ground::ladder`) from all folded down, and the
+//! first's fourth order (on the GPU past its gate alone: # Device), are costed on the pilot's states carried into their clusters (`carried`): each
 //! with its fold's charge as measured (`measured_charge`: per output the charge the run's ledger books, with
 //! the memory). A candidate's cost is its step check's (below) on those states -- the step it would take --:
 //! its counted work per interval there times the trajectories its rooms at that step's bias need and the weight
@@ -63,7 +62,7 @@
 //! the rung's work, is spent only where what the rung's floor leaves of the least cost exceeds it: on a short run
 //! the check, a trap period of the probes' orbits, is the whole run's work at equal steps. A folded model beyond its targets at any
 //! step (a pole its tables do not resolve, a charge past the rooms) is costed at the pilot's step with no bias, its check put off
-//! until it is the choice: what the step moves of that cost is little beside the weight. The run goes on from those states; no timing enters, so a request gives the same choice on any machine.
+//! until it is the choice: what the step moves of that cost is little beside the weight. The run goes on from those states; no timing enters, so a request gives the same choice on any machine, but for the GPU's fourth order (# Device).
 //! A pilot runs again only where it keeps no atom to the first output, its model's own estimates past the targets: no state of it measures a charge or a step, and an atom blown out at once by a folded drive's
 //! unsaturated rate says the fold does not hold (a resonant probe of 100 mW/cm² with cooling of 30, every drive folded: all atoms lost within 1 us, its 3+12 rung none by 2 us and 63 % by 100 us). The next rung
 //! takes the pilot's place, and the choice goes on from it; a model within its targets has lost its atoms by its physics (`Candidate::past_their_targets`).
@@ -216,7 +215,7 @@
 //! `NUMERICAL_SHARE` of their target, ε/(1 + 2p)²: their work grows with the logarithm of their tolerance, or as its fourth root on a grid of fourth order, so that their
 //! optimum lies at a few per cent of it, its terms' share of the work. The model's approximations take no fixed share: each is
 //! booked as measured against the target, and chosen by its cost (the fold's candidates, the tables' refinement, model.rs
-//! `tabulate`); a model whose estimate the whole target cannot hold is refused (the GPU's undressed response, gpu/program.rs).
+//! `tabulate`).
 //! The gain's guard (model.rs `Model::lindblad`) is no such estimate: the generator is of Lindblad form by construction, its
 //! round-off the limit of what it may read, and of what it refuses the norm the gain can show over the run.
 //!
@@ -236,8 +235,8 @@
 //! statistics carry the result shows. The first order in the Doppler shift takes the step's share of the run's room beside the
 //! other estimates (`doppler_allowance`), a truncation per step as the step's own error. The candidates' weighed costs (# The
 //! fold's choice, # Time step) are the same work times weight: a model whose total misses its target is taken only for a
-//! saving its weight outweighs -- 2 % beyond for 28 %, a quarter beyond for 16 times --, and every decision moves continuously
-//! with its estimates.
+//! saving its weight outweighs -- 2 % beyond for 28 %, a quarter beyond for 16 times --, the weight moving continuously
+//! with its estimates. The picks among discrete models and a few gates are not continuous: `past_targets`, `past_their_targets`, the fold rule's `BUDGET` (ledger.rs).
 //!
 //! # Batches
 //! Every batch is cut into groups of `TASK` trajectories (lib.rs `Stratum`), a task on the CPU and a
@@ -323,9 +322,10 @@
 //! # Device
 //! The batches run on the device asked for (`Device`): the CPU's threads, or the GPU (gpu/mod.rs),
 //! which runs a batch's trajectories as the CPU does -- the same groups, initial states, random
-//! streams and sums. The two devices make a solve's choices alike: the model, the ledger, the pilot
+//! streams and sums. The two devices make a solve's choices alike -- the model, the ledger, the pilot
 //! and the time step on the CPU in double precision either way, the statistics and their stopping
-//! rule. A batch is whole groups: on the CPU at least one (its threads take the trajectories one at
+//! rule -- but for the fourth order: on the GPU it is built and taken by the kernel's cycles in whole waves of the device's width (`kernel_interval`, `Gpu::width`), so that a GPU's model can differ from the CPU's, and from another GPU's.
+//! A batch is whole groups: on the CPU at least one (its threads take the trajectories one at
 //! a time, so a batch costs its trajectories and one tail whatever its size), and on the GPU a wave of them,
 //! which costs at least a trajectory's time as far as it goes. A GPU that cannot run (none, an older driver, a
 //! model beyond its kernel) leaves the solve on the CPU with the reason
@@ -413,7 +413,7 @@ pub struct Solution{
     pub classical:Vec<bool>,
     pub trajectories:u64,
     /// The trajectories the statistics need by the latest batch's estimate: `trajectories` is the
-    /// first whole batch at or beyond it (a batch at most triples the trajectories run).
+    /// first whole batch at or beyond it (a batch at most doubles the trajectories run).
     pub needed:u64,
     pub time_step_us:f64,
     pub method:String,
@@ -1101,7 +1101,7 @@ fn gain(model:&Model,states:&[Trajectory])->f64{
 const FOLD:&str="消去激发态";
 /// What the request's setup leaves of its thermal distributions, on every output (the base ledger's `note`, `Candidate::settle`): no choice of the solve changes it and
 /// it is no error of the solve's, so that it stays out of the ledger's items, the totals and the flag. The share of the traps' thermal distributions over their regions (U_h ≤ D, Maxwell's
-/// momenta) that the bound ensembles leave out (ensemble.rs) -- the unbound atoms and the lowering near the trap's top --, beyond the budget, and the ensemble's kinetic temperature where it
+/// momenta) that the bound ensembles leave out (ensemble.rs) -- the unbound atoms and the lowering near the trap's top --, beyond `BIAS_VARIANCE` of the population target, and the ensemble's kinetic temperature where it
 /// departs from T by more than T's share: a trap a few k_BT deep holds no bound ensemble as hot as T (none of a Gaussian beam's is hotter than 0.166 D/k_B, ensemble.rs), the reference state's depth in k_BT.
 fn initial_note(initial:&Initial)->Option<String>{
     let cut=(initial.cut>BIAS_VARIANCE*POPULATION_TARGET).then(||format!("初始热分布中能量高于阱顶（未束缚）及阱顶附近的 {:.0}% 原子不计入（取束缚原子的降低等温分布 f ∝ e^(−E/k_BT) − 1，E 为相对阱外的机械能）；丢失与布居依赖这一截断",100.*initial.cut));
