@@ -113,6 +113,12 @@ pub(crate) fn lu_solve(a:&[Complex],pivots:&[usize],n:usize,b:&mut [Complex]){
     for i in 0..n{let mut x=b[i];for j in 0..i{x-=a[i*n+j]*b[j];}b[i]=x;}
     for i in (0..n).rev(){let mut x=b[i];for j in i+1..n{x-=a[i*n+j]*b[j];}b[i]=x/a[i*n+i];}
 }
+/// A term of a sum of size `scale` at or within this is that sum's rounding, no term: 64 ε of the scale.
+pub(crate) fn round_off(scale:f64)->f64{64.*f64::EPSILON*scale}
+/// The same at one ε of `scale`: the sites that read a term against a single number's precision.
+pub(crate) fn unit_round_off(scale:f64)->f64{f64::EPSILON*scale}
+/// The same at the kernel's single precision, one ε of `f32`: what the GPU's generator cannot hold.
+pub(crate) fn single_round_off(scale:f64)->f64{f32::EPSILON as f64*scale}
 /// One Jacobi rotation of a real symmetric 3 × 3 matrix in the plane (p, q), a[p][q] ≠ 0, its eigenvectors the rows of v.
 fn rotate_symmetric(a:&mut [[f64;3];3],v:&mut [[f64;3];3],p:usize,q:usize){
     let theta=(a[q][q]-a[p][p])/(2.*a[p][q]);let t=theta.signum()/(theta.abs()+(theta*theta+1.).sqrt());let c=1./(t*t+1.).sqrt();let s=t*c;

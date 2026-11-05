@@ -4,7 +4,7 @@
 //! and ground.rs and kept on the device while its batches run.
 use super::driver::{Buffer,Stream};
 use crate::engine::Settings;
-use crate::linear::Dense;
+use crate::linear::{single_round_off,Dense};
 use crate::model::{Model,GROUND,MOST_BEAMS,MOST_CARRIERS,MOST_FOCUSED,MOST_RANK,MOST_STATES,RINGING_SHARE};
 use crate::Complex;
 
@@ -364,7 +364,7 @@ impl Program{
         let term_floor:Vec<f32>=(0..nc).flat_map(|c|(0..ng).map(move|b|(c,b))).map(|(c,b)|{
             let strength=|s:usize|g.carriers[c].beams.iter().map(|&l|(0..ne).map(|i|g.folded[l][(i,s)].norm_sqr()).sum::<f64>().sqrt()).sum::<f64>();
             let k=g.cluster[b];let most=g.clusters[k].states.iter().map(|&s|strength(s)).fold(0.,f64::max);let floor=g.floors.get(k).copied().unwrap_or(0.);
-            if strength(b)>0.{(f32::EPSILON as f64*g.generator_scale*floor/(3.*most*strength(b))) as f32}else{0.}}).collect();
+            if strength(b)>0.{(single_round_off(g.generator_scale*floor)/(3.*most*strength(b))) as f32}else{0.}}).collect();
         // Per channel (d, a) its near units at their focus intensity summed (the kernel's `self_energy`), lane-major.
         let powers:Vec<[f32;2]>=(0..nc).flat_map(|d|(0..ng).map(move|a|(d,a))).flat_map(|(d,a)|{let mut m=vec![Complex::ZERO;ne*ne];
             for &(u,x)in order.iter().filter(|(u,x)|x.carrier==d&&!model.focused.contains(u)){let scale=g.units[u].focus*g.units[u].norm;

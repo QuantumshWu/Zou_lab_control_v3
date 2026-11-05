@@ -212,7 +212,7 @@
 //! takes every cluster's generator and jump operators at its point once, steps by the
 //! half step's propagators, and draws a jump's direction and polarization without the kicks.
 use crate::eigen::{decompose,Eigen};
-use crate::linear::zeroed;
+use crate::linear::{unit_round_off,zeroed};
 use crate::model::{Absorption,Components,Exact,Local,Model,Point,MOST_MIXED,MOST_STATES};
 use crate::rng::{Purpose,Rng};
 use crate::Complex;
@@ -536,13 +536,13 @@ impl Entries{
         let Entries{entries,parts,sizes,forms,beats,fixed,working,..}=&mut e;
         sizes.clear();sizes.push(column_norm(c.hamiltonian(),n));sizes.extend(c.beats().map(|b|column_norm(b.hamiltonian,n)));
         // Entries within the generator's round-off are none (a cluster keeps drives of 1e-30, static in its frames).
-        let floor=(f64::EPSILON*sizes.iter().sum::<f64>()).powi(2);
+        let floor=unit_round_off(sizes.iter().sum::<f64>()).powi(2);
         entries.clear();parts.clear();parts.push(0);
         for h in std::iter::once(c.hamiltonian()).chain(c.beats().map(|b|b.hamiltonian)){entries.extend(h.iter().enumerate().filter(|(_,z)|z.norm_sqr()>floor).map(|(k,&z)|(k/n,k%n,z)));parts.push(entries.len());}
         let scale={let(_,w)=cf4();w[0]+w[1]};for x in fixed.iter_mut(){zeroed(x,n*n);}for &(a,b,z)in &entries[..parts[1]]{let k=b*n+a;fixed[0][k]=z.re*scale;fixed[1][k]=z.im*scale;}
         let statics=[c.gradient(0),c.gradient(1),c.gradient(2)];
         let gradients=std::iter::once(statics).chain((half..c.omegas().len()).map(|j|c.beat(j).gradient));
-        let top=gradients.clone().flat_map(|g|g.into_iter().flatten()).fold(0_f64,|m,z|m.max(z.norm_sqr()))*f64::EPSILON*f64::EPSILON;
+        let top=unit_round_off(unit_round_off(gradients.clone().flat_map(|g|g.into_iter().flatten()).fold(0_f64,|m,z|m.max(z.norm_sqr()))));
         let form=|g:&[&[Complex];3],a:usize,b:usize,scale:f64|->Option<(usize,usize,[Complex;3])>{let k=a*n+b;g.iter().any(|x|x[k].norm_sqr()>top).then(||(a,b,[g[0][k]*scale,g[1][k]*scale,g[2][k]*scale]))};
         forms.clear();beats.clear();
         forms.extend((0..n).flat_map(|a|(a..n).map(move|b|(a,b))).filter_map(|(a,b)|form(&statics,a,b,if a==b{1.}else{2.})));beats.push(forms.len());

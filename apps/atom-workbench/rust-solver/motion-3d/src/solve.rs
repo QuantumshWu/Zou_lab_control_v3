@@ -1093,7 +1093,7 @@ fn doppler_allowance(base:&Ledger,model:&Model)->f64{BIAS_SHARE*run_room(POPULAT
 fn gain(model:&Model,states:&[Trajectory])->f64{
     let every=(states.len()/(FIRST_GROUPS as usize*8)).max(1);
     let(gain,rate)=states.par_iter().step_by(every).map(|t|{let(low,rate,scale)=model.decay_balance(t.cluster,&model.point(t.r,t.kappa),t.time);
-        let n=model.dimension(t.cluster) as f64;((-low-64.*f64::EPSILON*n*scale).max(0.),rate)}).reduce(||(0.,0.),|a,b|(a.0.max(b.0),a.1.max(b.1)));
+        let n=model.dimension(t.cluster) as f64;((-low-crate::linear::round_off(n*scale)).max(0.),rate)}).reduce(||(0.,0.),|a,b|(a.0.max(b.0),a.1.max(b.1)));
     if gain==0.{0.}else if rate>0.{gain/rate}else{f64::INFINITY}
 }
 

@@ -156,7 +156,7 @@
 //! waist and frequency (its reflections, `Model::trap_beams`).
 use crate::ground::{self,Ground};
 use crate::ledger::BUDGET;
-use crate::linear::{hermitian_eigen_within,hermitian_eigenvalues,symmetric_eigen,Dense};
+use crate::linear::{hermitian_eigen_within,hermitian_eigenvalues,round_off,single_round_off,symmetric_eigen,unit_round_off,Dense};
 use crate::solve::{MATRIX_NS,NUMERICAL_SHARE,POPULATION_TARGET};
 use crate::stats::KT_PER_UK;
 use crate::{Complex,Request,STATES};
@@ -179,6 +179,10 @@ const FIRST_NODES:usize=5;
 /// An instant at which the generator's beats take generic phases (us, the golden ratio's inverse: no
 /// rational multiple of a period), where `Model::lindblad` checks it besides t = 0.
 const GENERIC:f64=0.618_033_988_749_894_8;
+/// What a carrier's coupling leaves off its basis, of its norm, and is on it: no new matrix of the span (`Model::laid_out`, Gram-Schmidt). Literal, no derivation; far above `round_off`.
+const OFF_THE_BASIS:f64=1e-10;
+/// What a beam's coupling may leave off its carrier's span, of its norm, before the model is refused. Literal, no derivation.
+const OFF_THE_SPAN:f64=1e-9;
 /// The head of a model's refusal for a generator that gains (`Model::lindblad`): solve.rs stops
 /// with it where the ladder's first rung, every drive folded, meets it.
 pub const NOT_LINDBLAD:&str="消去激发态后的生成元不是 Lindblad 形式";
@@ -783,7 +787,7 @@ impl Model{
                     let x=frobenius_inner(b,&u);u.add_scaled(-x,b);for(gi,mi)in g.iter_mut().zip(&mixing[k]){*gi-=x**mi;}
                 }}
                 let norm=frobenius_inner(&u,&u).re.sqrt();let scale=frobenius_inner(v,v).re.sqrt();
-                if norm<=1e-10*scale{continue;}
+                if norm<=OFF_THE_BASIS*scale{continue;}
                 basis.push(u.scaled(Complex::new(1./norm,0.)));mixing.push(g.into_iter().map(|x|x*(1./norm)).collect());
             }
             if basis.len()>MOST_RANK{return Err(format!("A carrier's couplings span {} matrices; the dipole operator has three components",basis.len()));}
@@ -792,7 +796,7 @@ impl Model{
             for(v,c)in couplings.iter().zip(&coefficients){
                 let mut d=(*v).clone();for(k,b)in basis.iter().enumerate(){d.add_scaled(-c[k],b);}
                 let(e,s)=(frobenius_inner(&d,&d).re.sqrt(),frobenius_inner(v,v).re.sqrt());
-                if e>1e-9*s{return Err(format!("A beam's coupling is off its carrier's span by {:.1e} of its norm",e/s));}
+                if e>OFF_THE_SPAN*s{return Err(format!("A beam's coupling is off its carrier's span by {:.1e} of its norm",e/s));}
             }
             carriers.push(Carrier{beams:c.beams.clone(),rank:basis.len(),coefficients,wave_number:c.wave_number,interfering:vec![]});bases.push(mixing);
         }
@@ -975,7 +979,7 @@ impl Model{
             let coupling=|d:&DriveLayout,j:usize|{let carrier=&self.carriers[d.carrier];(0..carrier.rank).fold(Complex::ZERO,|s,k|s+carrier.coefficients[j][k]*d.u[k])};
             let largest_coupling=drives.iter().flat_map(|d|(0..self.carriers[d.carrier].beams.len()).map(move|j|(d,j))).map(|(d,j)|coupling(d,j).abs())
                 .chain(crosses.iter().map(|x|(x.carrier,x.col)).chain(effective.iter().map(|x|(x.carrier,x.col))).flat_map(|(c,b)|self.carriers[c].beams.iter().map(move|&l|(l,b))).map(|(l,b)|column(l,b))).fold(0.,f64::max);
-            let floor=f32::EPSILON as f64*largest_coupling;
+            let floor=single_round_off(largest_coupling);
             let new_tones=|list:Vec<(usize,f64,Complex)>|->Vec<Tone>{
                 let strongest=list.iter().filter(|x|x.1>floor).max_by(|a,b|a.1.total_cmp(&b.1)).map(|x|x.0);
                 list.into_iter().map(|(beam,size,u)|Tone{beam,lead:if size>floor{Some(beam)}else{strongest},part:0,mirror:0,u}).collect()};
@@ -993,7 +997,7 @@ impl Model{
             // cluster's largest frame and detuning (the round-off of the frames' differences), a wave vector within the same share of the largest; the fourth order's
             // kept entries beat at θ_a − θ_b + ν (`FourthLayout::residuals`). The states' wave vectors where they leave fewer beats than none.
             let round_off=g.residual_round_off(cl);
-            let wave_round_off=64.*f64::EPSILON*2.*self.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max);
+            let wave_round_off=crate::linear::round_off(2.*self.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max));
             let quartic:Vec<f64>=fourth.as_ref().map_or(vec![],|f|f.residuals(&cl.frames));
             let beats_of=|k:&[[f64;3]]|{
                 let across=|row:usize,col:usize,c:usize,t:&Tone|if t.lead.is_none(){[0.;3]}else{let(q,a,b)=(wave(c,t),k[row],k[col]);std::array::from_fn::<f64,3,_>(|x|q[x]+b[x]-a[x])};
@@ -1399,7 +1403,7 @@ impl Model{
             let modulus=|node:usize,x:usize|{let i=2*(node*layout.size+x);first.data[k][i].hypot(first.data[k][i+1])};
             let rates:Vec<Vec<f64>>=layout.groups.iter().map(|gl|{let count=gl.entries.len();(0..count).map(|j|gl.pairs.iter().enumerate().map(|(p,&(k1,k0))|{
                 let largest=(0..nodes).map(|node|modulus(node,gl.s+p*count+j).max(modulus(node,gl.q+p*count+j))).fold(0.,f64::max);largest*peak[gl.emitted][k1]*peak[gl.absorbed][k0]}).fold(0.,f64::max)).collect()}).collect();
-            let floor=f64::EPSILON*rates.iter().flatten().copied().fold(0.,f64::max);
+            let floor=unit_round_off(rates.iter().flatten().copied().fold(0.,f64::max));
             let cl=&mut self.ground.clusters[k];
             for(gl,rate)in layout.groups.iter().zip(&rates){for(&(x,y),_)in gl.entries.iter().zip(rate).filter(|(_,&r)|r<=floor){
                 if gl.decay{cl.folded_crosses.retain(|c|!(c.row==x&&c.col==y&&c.absorbed==gl.absorbed&&c.emitted==gl.emitted&&c.residual==gl.residual));}
@@ -2305,7 +2309,7 @@ impl Model{
                 let k=(0..4).max_by(|&a,&b|w[a].abs().total_cmp(&w[b].abs())).unwrap();(p.stencil.first[f]+k) as f64/last}).collect();
             p.stencil=self.stencil(&s);
             for t in [0.,GENERIC]{for k in 0..self.clusters(){
-                let b=self.balance(k,&p,t);let round=64.*f64::EPSILON*self.dimension(k) as f64*b.scale;
+                let b=self.balance(k,&p,t);let round=round_off(self.dimension(k) as f64*b.scale);
                 // Its round-off, or what the norm it grows over the run cannot show.
                 let limit=if self.ground.duration>0.{round.max(NUMERICAL_SHARE*POPULATION_TARGET/self.ground.duration)}else{round};
                 if -b.low<=limit{continue;}

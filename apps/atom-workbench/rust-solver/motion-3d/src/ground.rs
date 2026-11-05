@@ -284,7 +284,7 @@
 //! - first order in the Doppler shift: (kv/σ_min)² (engine.rs), what its transfer leaves on T (model.rs `Model::first_error`);
 //! - an emitted photon has its carrier's wave number: ≤ 1e-7 on the D2 line.
 use crate::ledger::BUDGET;
-use crate::linear::{hermitian_eigen,hermitian_eigenvalues,Dense,Lu};
+use crate::linear::{hermitian_eigen,hermitian_eigenvalues,round_off,unit_round_off,Dense,Lu};
 use crate::{Beam,Complex,Request,STATES};
 use atom_population_core::lattice::classification::FOLD_DISTANCE;
 use rayon::prelude::*;
@@ -370,6 +370,10 @@ pub enum ExcitedKind{Drive(Drive),Static{a:usize,b:usize}}
 /// closure kept it.
 #[derive(Clone,Debug)]
 pub struct ExcitedItem{pub kind:ExcitedKind,pub size:f64,pub power:f64,pub distance:f64,pub estimate:f64,pub mean:f64,pub folded:bool,pub promoted:bool}
+impl ExcitedItem{
+    /// Whether it mixes at all: an admixture beyond double precision's.
+    fn mixes(&self)->bool{self.size/self.distance>unit_round_off(1.)}
+}
 
 /// The kept couplings of a cluster from one carrier to another: absorbing `absorbed`, emitting
 /// into `emitted`, each entry (row a, column b, in the cluster's order) with its residual beat
@@ -640,7 +644,7 @@ impl Interference{
 /// A matrix of the request with its entries at the round-off of its largest set to zero: what a selection rule forbids and the polarizations' rotation leaves at 1e-16 of the allowed is no coupling,
 /// whatever its frequency (`Ground::couples`, the rule's items).
 fn rounded(mut m:Dense)->Dense{
-    let floor=64.*f64::EPSILON*m.entries.iter().map(|z|z.abs()).fold(0.,f64::max);
+    let floor=round_off(m.entries.iter().map(|z|z.abs()).fold(0.,f64::max));
     for z in m.entries.iter_mut(){if z.abs()<=floor{*z=Complex::ZERO;}}
     m
 }
@@ -824,7 +828,7 @@ pub(crate) fn slopes(u:&dyn Fn([f64;3])->f64,r:[f64;3],h:f64)->(f64,[f64;3],[[f6
 pub(crate) fn descent(u:&dyn Fn([f64;3])->f64,start:[f64;3],h:f64,inside:&dyn Fn([f64;3])->bool)->[f64;3]{
     let(mut r,mut radius)=(start,h);let(mut u0,mut g,mut c)=slopes(u,r,h);
     loop{
-        let(values,vectors)=crate::linear::symmetric_eigen(c);let round=64.*f64::EPSILON*u0.abs();
+        let(values,vectors)=crate::linear::symmetric_eigen(c);let round=round_off(u0.abs());
         let along=vectors.map(|v|v[0]*g[0]+v[1]*g[1]+v[2]*g[2]);
         let bowl=values.iter().all(|&l|l*h*h>round);
         let steps:[f64;3]=std::array::from_fn(|i|if values[i]*h*h>round{-along[i]/values[i]}else if along[i].abs()*h>round{-along[i].signum()*radius}else if values[i]*h*h< -round{radius}else{0.});
@@ -865,7 +869,7 @@ pub(crate) fn thermal_reach(w:f64,temperature_uk:f64,hm:f64)->Option<f64>{
 }
 
 /// Two frames are one: equal to the rounding of the sums of detunings they are made of.
-pub(crate) fn same_frame(a:f64,b:f64)->bool{(a-b).abs()<=64.*f64::EPSILON*(a.abs()+b.abs())}
+pub(crate) fn same_frame(a:f64,b:f64)->bool{(a-b).abs()<=round_off(a.abs()+b.abs())}
 
 /// The partition the rule leaves for one set of verdicts on the excited couplings: the ground
 /// couplings classified, the cut, the clusters (sets of nodes: the ground states, then the excited
@@ -1160,7 +1164,7 @@ impl Ground{
             // A term's bound, (2/γ) ‖V^f[:,b]‖ |P_E[b,:]| (‖(K + Σ − z)⁻¹‖ ≤ 2/γ, `Ground::floors`; |P_E[b,x]| ≤ sqrt(P_E[b,b])), moves
             // the generator by at most 3 ‖V^f‖ times it: left out where that is below double precision's round-off of its scale.
             let strength:Vec<f64>=cl.states.iter().map(|&b|self.carriers[c].beams.iter().map(|&l|norm(&column(&self.folded[l],b))).sum()).collect();
-            let ceiling=f64::EPSILON*self.generator_scale/(3.*strength.iter().copied().fold(0.,f64::max)).max(f64::MIN_POSITIVE);
+            let ceiling=unit_round_off(self.generator_scale)/(3.*strength.iter().copied().fold(0.,f64::max)).max(f64::MIN_POSITIVE);
             let modes=groups.into_iter().map(|members|{
                 let z=members.iter().map(|&j|values[j]).sum::<f64>()/members.len() as f64+self.carriers[c].detuning;
                 let mut mode=Mode{members,energy:z,plain:vec![],lu:None,dressed:vec![],skipped:vec![]};
@@ -1573,10 +1577,9 @@ impl Ground{
     /// one cluster with its dressing taken from their separation: kept where one may not fold. Whether any was.
     fn keep_partners(&self,excited:&mut [ExcitedItem],explicit:&[bool],b:&Bounds,set:&[Option<usize>],dressing:&[f64])->bool{
         let(ng,l0)=(self.ground_states.len(),self.generator_scale);
-        let mixes=|x:&ExcitedItem|x.size/x.distance>f64::EPSILON;
-        let kept:Vec<(Drive,f64,f64)>=excited.iter().filter(|x|!x.folded&&mixes(x)).filter_map(|x|match x.kind{ExcitedKind::Drive(d)=>Some((d,x.size,x.distance)),_=>None}).collect();
+        let kept:Vec<(Drive,f64,f64)>=excited.iter().filter(|x|!x.folded&&x.mixes()).filter_map(|x|match x.kind{ExcitedKind::Drive(d)=>Some((d,x.size,x.distance)),_=>None}).collect();
         let mut changed=false;
-        for x in excited.iter_mut().filter(|x|x.folded&&mixes(x)){
+        for x in excited.iter_mut().filter(|x|x.folded&&x.mixes()){
             let ExcitedKind::Drive(d)=x.kind else{continue};if !explicit[d.excited]{continue;}
             let gamma=self.decay[(d.excited,d.excited)].re;
             let within=if set[d.ground]==set[ng+d.excited]{set[d.ground].map_or(0.,|k|dressing[k])}else{0.};
@@ -1598,7 +1601,7 @@ impl Ground{
         let l0=2.*b.light+2.*b.scattering;self.generator_scale=l0;self.light=b.light;
         let separation=|a:usize,c:usize,beat:f64|b.separation(a,c,beat);
         // A coupling at the generator's round-off is no term, whatever its frequency: neither kept, for a beat within the generator's scale, nor a far channel of the responses' dressing (`Model::prune` for the tables).
-        let term=|size:f64|size>f64::EPSILON*l0;
+        let term=|size:f64|size>unit_round_off(l0);
         let mut items:Vec<Item>=vec![];
         for a in 0..ng{for c in a+1..ng{if term(2.*b.statics[a][c].max(b.statics[c][a])){
             items.push(Item{kind:Kind::Static{a,b:c},frequency:separation(a,c,0.),size:2.*b.statics[a][c].max(b.statics[c][a]),folded:false});}}}
@@ -1757,7 +1760,7 @@ impl Ground{
         enum Source{Folded(Photon),Direct(usize,usize)}
         // The frequencies an explicit state's amplitude holds: its frame's and each kept drive's reaching it, through H's kept couplings too.
         let mut holds:Vec<Vec<Vec<i32>>>=(0..ne).map(|e|vec![combination(&[(ng+e,1)],&[])]).collect();
-        for x in excited.iter().filter(|x|!x.folded&&x.size/x.distance>f64::EPSILON){if let ExcitedKind::Drive(d)=x.kind{
+        for x in excited.iter().filter(|x|!x.folded&&x.mixes()){if let ExcitedKind::Drive(d)=x.kind{
             let f=combination(&[(d.ground,1)],&[(d.carrier,1)]);if !holds[d.excited].contains(&f){holds[d.excited].push(f);}
         }}
         loop{
@@ -2013,7 +2016,7 @@ impl Ground{
     }
     /// Within what a residual of a cluster is static and two are one: `same_frame`'s tolerance at its largest frame and detuning, the round-off of the frames' differences.
     pub(crate) fn residual_round_off(&self,cl:&Cluster)->f64{
-        64.*f64::EPSILON*2.*(cl.frames.iter().chain(&cl.excited_frames).map(|f|f.abs()).fold(0.,f64::max)+self.carriers.iter().map(|c|c.detuning.abs()).fold(0.,f64::max))
+        round_off(2.*(cl.frames.iter().chain(&cl.excited_frames).map(|f|f.abs()).fold(0.,f64::max)+self.carriers.iter().map(|c|c.detuning.abs()).fold(0.,f64::max)))
     }
     /// The carriers the fourth order takes on a cluster, those beyond the budget's square (a carrier within it
     /// adds at most that relatively to the others' rates, its bound in the ledger's quartic item, model.rs
