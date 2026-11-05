@@ -14,7 +14,7 @@ export class IpcNativeLane {
    * loop is inside the request until then, the driver's first compile of the kernels included: nothing
    * is written to it, it is not retired as idle, and no deadline runs. */
   startGpu(){return new Promise((resolve,reject)=>{clearTimeout(this.idleTimer);this.idleTimer=null;this.gpuWaiting.push({resolve,reject});this.schedule();});}
-  enqueue(job){clearTimeout(this.idleTimer);job.queuedAt=performance.now();this.queue.push(job);this.schedule();}
+  enqueue(job){clearTimeout(this.idleTimer);this.idleTimer=null;job.queuedAt=performance.now();this.queue.push(job);this.schedule();}
   schedule(){if(this.closed||this.pumpTimer)return;this.pumpTimer=true;queueMicrotask(()=>{this.pumpTimer=null;void this.pump();});}
   async start(){
     if(this.closed||this.worker)return;
