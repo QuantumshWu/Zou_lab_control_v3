@@ -136,7 +136,7 @@ impl Check{fn excess(&self)->f64{self.population.max(self.motion)}fn met(&self)-
 /// solve.rs `step_excess`.
 fn step_excess(engine:&Engine,states:&[Trajectory],waiting:f64)->[f64;2]{
     let dt=engine.settings.dt;let richardson=4./3.;
-    let doubled:Vec<([f64;2],[f64;3])>=states.par_iter().map(|t|engine.doubling(t,dt)).collect();
+    let doubled:Vec<([f64;2],[f64;3])>=states.par_iter().map(|t|{let(a,b,_)=engine.doubling(t,dt);(a,b)}).collect();
     let(mut population,mut difference,mut impulse)=(0.,0.,0.);
     for(motion,internal)in &doubled{difference+=motion[0];impulse+=motion[1];population+=internal[0];}
     let bound=richardson*population/states.len().max(1) as f64*(waiting/dt).max(1.);
