@@ -2828,13 +2828,6 @@ mod tests{
         model.ground.duration=1e-3;assert!(model.lindblad().is_ok());
         model.ground.duration=1e7;assert!(model.lindblad().is_err());
     }
-    /// The ladder a solve climbs holds every rung of the rule's but those whose new explicit states no drive reads at any position: the tweezer PGC's D2 light on the D1 states.
-    #[test]
-    fn a_rung_no_drive_reads_is_no_rung(){
-        let f:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/tweezer_pgc.json")).unwrap();
-        let g=crate::ground::Ground::bare(&crate::ground::tests::request(&f["request"])).unwrap();let(all,ladder)=(g.rungs(),g.ladder());
-        assert!(ladder[0]==f64::INFINITY&&ladder.len()>1&&ladder.len()<all.len()&&ladder.iter().all(|a|all.contains(a)),"{all:?} {ladder:?}");
-    }
     /// Residuals within the round-off of zero are static and of each other one beat; the beats come in
     /// pairs ±Ω.
     #[test]

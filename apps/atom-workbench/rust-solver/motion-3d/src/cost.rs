@@ -4,8 +4,7 @@
 //! Every decision that spends work for a saving is `pays`: the spend, what it could save, and the uncertainty of that saving, all in the table's unit.
 //! The uncertainty is the prediction's own where it has one, the need's relative error (solve.rs `need_error`) times the predicted cost. What each gate reads differs for a reason, stated at the gate:
 //! a check already made is no longer a spend; a count of products has no error of its own (the half step); a decision made before any pilot has no need's error to read yet (the tables' refinement); and a read that guards an accuracy takes no margin against itself (`read_pays`).
-//! Beside the rule stand what is no trade of work: the shares (a block taken unmixed, ground.rs `MIXING_SHARE`, an error the ledger books, decided before a model's layouts exist to cost it), the ladder's rungs that keep what no drive takes past the fold rule's own threshold (ground.rs `Ground::ladder`, read before
-//! a rung's tables tell what it would spend) and the first batch's size (solve.rs # Batches).
+//! Beside the rule stand what is no trade of work: the shares (a block taken unmixed, ground.rs `MIXING_SHARE`, an error the ledger books, decided before a model's layouts and its tables' nodes exist to cost it) and the first batch's size (solve.rs # Batches).
 //!
 //! # The unit
 //! The nanosecond of one performance core of the Core Ultra 7 265H, the machine the table was measured on. No timing enters a solve: every cost is a count of work at the table's rates, so that a request gives

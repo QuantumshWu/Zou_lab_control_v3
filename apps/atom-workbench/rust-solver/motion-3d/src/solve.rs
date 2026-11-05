@@ -46,7 +46,7 @@
 //! statistics still run, so only its a-priori excess is).
 //!
 //! # The fold's choice
-//! The rule's candidates (ground.rs `Ground::ladder`) from all folded down, and the
+//! The rule's candidates (ground.rs `Ground::rungs`) from all folded down, and the
 //! first's fourth order, are costed on the pilot's states carried into their clusters (`carried`): each
 //! with its fold's charge as measured (`measured_charge`: per output the charge the run's ledger books, with
 //! the memory). A candidate's cost is its step check's (below) on those states -- the step it would take --:
@@ -727,7 +727,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // leaves the statistics room the one of least predicted cost is taken.
     // The generator before the rule, every candidate's start (`next_candidate`); the rule's allowances from it, past the first -- every drive folded -- only where a rung is wanted.
     let bare=Ground::bare(request)?;let mut rungs=None;
-    let mut ladder=std::iter::once(f64::INFINITY).chain(std::iter::from_fn(||rungs.get_or_insert_with(||bare.ladder().into_iter().skip(1)).next()));let mut failed=None;
+    let mut ladder=std::iter::once(f64::INFINITY).chain(std::iter::from_fn(||rungs.get_or_insert_with(||bare.rungs().into_iter().skip(1)).next()));let mut failed=None;
     let Some(mut pilot_candidate)=next_candidate(request,&bare,&mut ladder,&mut failed,&mut vec![])else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
     pilot_candidate.settle();
     // A generator that gains on the ladder's first rung, every drive folded, is the fold's construction failing
@@ -847,8 +847,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // (atoms all lost before the first output measure none): the pilot's model and its fourth order on the
     // pilot's own states, then the ladder's on them carried into its clusters (`relaxed`). A rung is costed while
     // its step check's least work and the least work any step leaves it -- the multirate grid's nodes and the
-    // jumps (`least_work`), or a costed earlier rung's work at its step where larger: a later rung keeps more
-    // states explicit, and costs more per step and per node -- times the fewest trajectories it can need and their
+    // jumps (`least_work`) -- times the fewest trajectories it can need and their
     // weight (its totals with no step bias) could still cost less: its check is spent whether it is taken or not.
     let measured=!pilot_states.is_empty();
     let pilot_cost=measured.then(||evaluate(&pilot_candidate,&pilot_states,&starts,None,&Deposits::default()));
@@ -894,15 +893,20 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             let period=slowest_period(&c.reference().0);let mut at=running(c.reference(),steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase);
             let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect()};
             let(bare,begun)=(into(&pilot_states),into(&starts));
-            c.phase=grid_phase(&c.model,&bare,&at,Some((&groups,duration)));at.node_phase=c.phase;
             let parts=state_work(&c.model,&bare,&begun);
             let total=Apriori::of(&booked(&c.base,pilot_beats*pilot_horizon),&c.model);let apriori:Vec<[f64;2]>=c.charges.iter().map(|&x|total.at(Measured::charge(x))).collect();
             let(fewest,weight)=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64);
             // Its check as the pilot's model's at its own work: spent whether it is taken or not. A rung is taken only for a saving
-            // beyond the need's error: one whose floor cannot make it, its check paid, is passed over with its check unspent.
-            let(at_work,at_least)=(interval_work(&c.model,&parts,&at,interval,pilot_waiting),least_work(&c.model,&parts,&at,interval,pilot_waiting));
+            // beyond the need's error: one whose floor cannot make it, its check paid, is passed over with its check unspent -- at
+            // whatever grid its search has come to, so that a rung no drive of which a run could read stops by its cost: the validation's tensor scenes' D1 light on the D2 states, 7 THz away at 1e-12 of
+            // saturation, merges the hyperfine levels into one cluster of 23 to 32 states on a grid of that beat, whose read on its 256 probes ran past five minutes where the rungs before it took a second.
+            let work_at=|s:&Settings|(interval_work(&c.model,&parts,s,interval,pilot_waiting),least_work(&c.model,&parts,s,interval,pilot_waiting));
+            let floor_pays=|(work,floor):(f64,f64)|saves(floor*fewest*weight*(outputs-1) as f64,per_work*work,least);
+            let Some(phase)=grid_within(&c.model,&bare,&at,Some((&groups,duration)),&|phase|{let mut s=at.clone();s.node_phase=phase;floor_pays(work_at(&s))})else{break};
+            c.phase=phase;at.node_phase=phase;
+            let(at_work,at_least)=work_at(&at);
+            if !floor_pays((at_work,at_least)){break;}
             let check=per_work*at_work;
-            if !saves(at_least*fewest*weight*(outputs-1) as f64,check,least){break;}
             let states=relaxed(&c.model,&at,bare);let binding=binding_at(&states,&weights,interval);let probes=bound_probes(&c.model,&states,&binding);
             // That doubling, made, from the coarse side as the grid's (`grid_phase`): at the fewest steps whose work per interval still is at least the work no step changes (W(s) = a s + least_work), at most the pilot's -- a read of the
             // orbits costs as its steps until there, and the pilot's step is no measure of a rung's: on a Λ scheme's rung of 5 explicit states 0.04 us against the 0.62 us it keeps, each check at 0.04-0.05 us 125-155 CPU-s of a search of 830 for a run of 11.
@@ -1774,10 +1778,13 @@ const PROBED:usize=256;
 /// nearly all of its work (of a 16-state rung that lost by 147 times, 583 of its 606 CPU-s, against the run's 40): beyond the fourth order's range the grid aliases the force's beats.
 /// And, on what it finds, what the grid lands over the run between the groups of ground states `landing` names with the run's span (`landed_excess`; a pilot's first read of its starts takes none), the same
 /// search below that phase where it misses. The bound's own where no state of `at` takes a beating grid.
-pub fn grid_phase(model:&Model,states:&[Trajectory],at:&Settings,landing:Option<(&[usize],f64)>)->f64{
-    if !(0..model.clusters()).any(|k|model.beating(k)){return node_phase();}
+pub fn grid_phase(model:&Model,states:&[Trajectory],at:&Settings,landing:Option<(&[usize],f64)>)->f64{grid_within(model,states,at,landing,&|_|true).unwrap_or(node_phase())}
+/// `grid_phase`'s search while `within` holds at a phase it would read, a spend's rule (the ladder's floor at that grid): none where it stops.
+fn grid_within(model:&Model,states:&[Trajectory],at:&Settings,landing:Option<(&[usize],f64)>,within:&dyn Fn(f64)->bool)->Option<f64>{
+    if !(0..model.clusters()).any(|k|model.beating(k)){return Some(node_phase());}
     let engine=Engine::new(model,at.clone());let picked:Vec<&Trajectory>=states.iter().step_by((states.len()/PROBED).max(1)).collect();
-    let coarsest=picked.par_iter().filter_map(|t|engine.coarsest_phase(t)).reduce(||0.,f64::max);if !(coarsest>0.){return node_phase();}
+    let coarsest=picked.par_iter().filter_map(|t|engine.coarsest_phase(t)).reduce(||0.,f64::max);if !(coarsest>0.){return Some(node_phase());}
+    if !within(coarsest){return None;}
     let landed:Vec<Trajectory>=picked.par_iter().map(|t|engine.landed(t)).collect();
     let recoil=model.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max).powi(2);
     let excess=|phase:f64|->f64{
@@ -1788,25 +1795,26 @@ pub fn grid_phase(model:&Model,states:&[Trajectory],at:&Settings,landing:Option<
         let heat=kicks.iter().sum::<f64>()/(kicks.len().max(1) as f64*recoil.max(f64::MIN_POSITIVE));
         (16./15.*((mean+CONFIDENCE*spread)/at.beats).max(sum(1)/sum(2).max(f64::MIN_POSITIVE)/QUADRATURE)).max(heat/QUADRATURE)
     };
-    let phase=largest_met(coarsest,excess(coarsest),&excess);
+    let phase=largest_met(coarsest,excess(coarsest),&excess,within)?;
     // What it lands between the groups over the run.
-    let Some((groups,span))=landing else{return phase};let count=groups.iter().max().map_or(0,|g|g+1);if count<2{return phase;}
+    let Some((groups,span))=landing else{return Some(phase)};let count=groups.iter().max().map_or(0,|g|g+1);if count<2{return Some(phase);}
     let moved=|phase:f64|landed_excess(&engine,&picked,phase,groups,count,span);
-    let r=moved(phase);if r<=1.{return phase;}
-    largest_met(phase,r,&moved)
+    let r=moved(phase);if r<=1.{return Some(phase);}
+    largest_met(phase,r,&moved,within)
 }
 /// The largest phase a read's excess meets, from one read at the coarsest phase in question: a miss goes down by the fourth root of its excess, at least to half its spacing -- its errors saturate on a grid that aliases --, and then between the
 /// largest phase met and the smallest missed on the logarithms' line, until one's excess lies within a factor two of its share (`grid_phase`). Past the quadrature's bound, where its share may be out of the grid's reach, or past the first phase met, at most 8 reads.
-fn largest_met(mut phase:f64,mut r:f64,read:&dyn Fn(f64)->f64)->f64{
+fn largest_met(mut phase:f64,mut r:f64,read:&dyn Fn(f64)->f64,within:&dyn Fn(f64)->bool)->Option<f64>{
     // The largest phase met and the smallest missed, each with its excess.
     let(mut met,mut missed)=((0_f64,0_f64),(f64::INFINITY,f64::INFINITY));let mut reads=0;
     loop{
         if r<=1.{met=(phase,r);if r>=0.5||!missed.0.is_finite(){break;}}else{missed=(phase,r);}
         if met.0>0.||phase<=2.*node_phase(){reads+=1;if reads>8{break;}}
         phase=if met.0>0.{met.0*(missed.0/met.0).powf(((0.75/met.1).ln()/(missed.1/met.1).ln()).clamp(0.1,0.9))}else{phase*r.recip().powf(0.25).min(0.5)};
+        if !(met.0>0.)&&!within(phase){return None;}
         r=read(phase);
     }
-    if met.0>0.{met.0}else{phase}
+    Some(if met.0>0.{met.0}else{phase})
 }
 /// The reads of a step's landings per probe (`Engine::grid_landings`): their errors stop falling at about this many, where the probes' own spread is what is left (F = 1 over the PGC with a resonant probe's
 /// run, on its rung with F' = 2 and F' = 1 explicit at the phase its shares take: 0.0072, 0.0055, 0.0049, 0.0046, 0.0046 at 2, 4, 8, 16, 32 reads).
@@ -2050,6 +2058,14 @@ mod tests{
         assert!((Account{statistic:a.room(),..a}.total()-POPULATION_TARGET).abs()<1e-15);
         assert!((Account{statistic:0.,open:0.03,..a}.total()-a.total()).abs()<1e-15);
         assert_eq!(Account::initial(POPULATION_TARGET).total(),0.);
+    }
+    /// A grid's search goes no finer than a spend allows (`grid_within`): given up where the phase it would read next cannot pay, and past a phase met it reads what it found.
+    #[test]
+    fn a_grid_search_stops_where_it_cannot_pay(){
+        let read=|phase:f64|(phase/0.1).powi(4);
+        let met=largest_met(10.,read(10.),&read,&|_|true).unwrap();assert!(read(met)<=1.&&read(met)>=0.5,"{met}");
+        assert!(largest_met(10.,read(10.),&read,&|phase|phase>=1.).is_none());
+        assert!((largest_met(10.,read(10.),&read,&|phase|phase>=0.5*met).unwrap()-met).abs()<1e-12,"the bound below what it finds moves nothing");
     }
     /// A read pays for what it could move of the run (`read_pays`): the resonant probe's PGC at 1.09 limits does not, the retro-reflected tweezer at 14.7 does, nothing within the limit does, and a stand already beyond asks for more.
     #[test]
