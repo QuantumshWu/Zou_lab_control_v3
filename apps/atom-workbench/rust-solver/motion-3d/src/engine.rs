@@ -1029,14 +1029,15 @@ impl<'a> Engine<'a>{
     /// jump, the step-doubling check's), the impulse along it; the kick; the flow for τ/2. The kick's
     /// momentum (the light's and the trap's anharmonic part). Where ‖ψ‖² reaches the threshold in it, the
     /// step is redone to that crossing, the jump made at the place it reaches and the rest of the step
-    /// taken from there (the kick then none of the caller's: only the check, without jumps, reads it).
+    /// taken from there (the kick then none of the caller's: only the check, without jumps, reads it). A part of a step
+    /// leaves out beats within its part of the share (a short part took the step's whole share, and what it left out booked 12 % on the 1 G molasses).
     fn exact(&self,t:&mut Trajectory,tau:f64,exact:bool,jumps:bool)->[f64;3]{
         let(m,s)=(self.model,&self.settings);
         let before=jumps.then(||t.clone());
         let reference=self.reference(t.r);let(c,w)=reference;
         self.flow(t,0.5*tau,reference);
         let point=m.point(t.r,t.kappa);let start=t.time;
-        let segment=Segment::new(m.components(t.cluster,&point),start,tau,s.truncation,s.beats,s.horizon,s.node_phase);t.beats=t.beats.max(segment.dropped/tau);
+        let segment=Segment::new(m.components(t.cluster,&point),start,tau,s.truncation,s.beats*(tau/s.dt).min(1.),s.horizon,s.node_phase);t.beats=t.beats.max(segment.dropped/tau);
         let(taken,jumped,impulse)=segment.evolve(&mut t.psi,start,tau,if jumps{t.threshold}else{0.});
         if let(true,Some(from))=(jumped,before){
             let beats=t.beats;*t=from;t.beats=beats;
