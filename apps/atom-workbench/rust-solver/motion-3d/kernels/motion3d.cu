@@ -1938,10 +1938,10 @@ __device__ __forceinline__ float vnorm(float2 x,int lane){return warp_sum(lane<1
 
 // The fewest products of B that sum exp(−iX) on a vector, ‖X‖ ≤ x, within `share` of ‖ψ‖ (engine.rs `series_within`): Taylor's
 // series in equal parts, each through the first term whose bound y^m/m! is within its part's share. A part's round-off, about
-// e^y of the single precision, stays within the share: y ≤ ln(share/ε).
+// e^y of the single precision, stays within the share: y ≤ ln(share/ε), or y = 1, whose parts round the least, where that is below it.
 struct Series{int parts,terms;};
 __device__ Series series_within(float x,float share){
-    const float widest=fmaxf(logf(share/(float)FLT_EPSILON),0.5f);Series best;int fewest=0x7fffffff;
+    const float widest=fmaxf(logf(share/(float)FLT_EPSILON),1.f);Series best;int fewest=0x7fffffff;
     for(int parts=max((int)ceilf(x/widest),1);;parts++){
         const float y=x/(float)parts,part=share/(float)parts;int terms=1;float size=y;while(size>part&&terms<64){terms++;size*=y/(float)terms;}
         if(size>part)continue;

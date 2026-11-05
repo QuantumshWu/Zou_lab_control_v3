@@ -539,9 +539,10 @@ impl Entries{
 }
 /// The fewest products of H that sum exp(−iX) on a vector, ‖X‖ ≤ x, within `share` of ‖ψ‖: Taylor's series in equal parts, each
 /// through the first term whose bound y^m/m! is within its part's share. The products per unit of x fall with y, from 16 at y = ½
-/// to 5 at y = 4 (at a share of 1e-6), while the series' round-off, about e^y of the double precision, stays within the share.
+/// to 5 at y = 4 (at a share of 1e-6), while the series' round-off, about e^y of the double precision, stays within the share. A share too near the round-off for any part leaves y = 1, whose
+/// parts round the least, (x/y) e^y of the double precision least there.
 fn series_within(x:f64,share:f64)->(usize,usize){
-    let widest=(share/f64::EPSILON).ln().max(0.5);let mut parts=((x/widest).ceil() as usize).max(1);let mut best=(parts,usize::MAX);
+    let widest=(share/f64::EPSILON).ln().max(1.);let mut parts=((x/widest).ceil() as usize).max(1);let mut best=(parts,usize::MAX);
     loop{
         let(y,part)=(x/parts as f64,share/parts as f64);let mut terms=1;let mut size=y;while size>part&&terms<64{terms+=1;size*=y/terms as f64;}
         if size>part{parts+=1;continue;}
@@ -1460,14 +1461,14 @@ mod tests{
     }
 
     /// The series on the vector takes the fewest products its share allows, within the share; at a share at the
-    /// series' round-off it keeps its parts small.
+    /// series' round-off its parts are those that round the least (x = 1: 1 × 18 products; parts of ½ took 2 × 15, and rounded by more).
     #[test]
     fn the_series_takes_the_fewest_products_within_its_share(){
         for(x,share)in [(0.3,1e-6),(1.3,8e-6),(4.,1e-6),(30.,1e-4),(1.,f64::EPSILON),(200.,1e-5)]{
             let(parts,terms)=series_within(x,share);let y=x/parts as f64;
             let bound=(1..=terms).fold(1.,|s,k|s*y/k as f64);
             assert!(bound*parts as f64<=share,"x {x} share {share}: {parts} × {terms}, bound {bound:e}");
-            assert!(y<=(share/f64::EPSILON).ln().max(0.5)+1e-12,"x {x} share {share}: y {y}");
+            assert!(y<=(share/f64::EPSILON).ln().max(1.)+1e-12,"x {x} share {share}: y {y}");
             let(sub,each)=series(x,1.,share);assert!(parts*terms<=sub*each,"x {x} share {share}: {parts} × {terms} against {sub} × {each}");
         }
     }
