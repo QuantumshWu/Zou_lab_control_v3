@@ -852,7 +852,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // weight (its totals with no step bias) could still cost less: its check is spent whether it is taken or not.
     let measured=!pilot_states.is_empty();
     let pilot_cost=measured.then(||evaluate(&pilot_candidate,&pilot_states,&starts,None,&Deposits::default()));
-    // The fourth order is built where it can pay its check and run: its work per interval at least the pilot's
+    // The fourth order is built where it can pay its check and run beyond the need's error, the rule of every model here: its work per interval at least the pilot's
     // model's at its step with its own layout's generators and jumps (`fourth_work`; GMD1C's 2.7 times, its tables eight times the
     // model's to build), its check's at least that model's at that work, its totals
     // at least those of its least charges -- per output what the atoms leave open (`with_open`, the same at either order) and the pilot's T charge squared for the populations
@@ -866,7 +866,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let(n,weight)=predicted(&pilot_statistics,&apriori,[0.,p.bias[1]],pilot as f64);
         if p.checked.is_none()&&past_targets(&pilot_statistics,&apriori){return false;}
         let work=fourth_work(request,&pilot_candidate,&pilot_states,&starts,&running(pilot_candidate.reference(),p.steps,pilot_waiting,doppler_allowance(&pilot_candidate.base,&pilot_candidate.model),pilot_candidate.phase),interval,pilot_waiting);
-        work*n*weight*((outputs-1) as f64)+p.check*work/p.work<p.cost});
+        saves(work*n*weight*((outputs-1) as f64),p.check*work/p.work,p.cost)});
     // On the GPU a wave takes its width at no further cost and the fourth order pays by the kernel's work, about twice the second's: it is
     // built only where the pilot's model takes more than a wave or lies beyond the targets at any step, and taken only for fewer
     // of the kernel's cycles in whole waves (`kernel_interval`).
