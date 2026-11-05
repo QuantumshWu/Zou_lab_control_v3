@@ -137,6 +137,10 @@ fn moments(g:&Sums,s:&Scales,correction:Option<&Correction>)->Moments{
     for k in 0..STATES{e.populations[k]=g.populations[k]/n;}
     e
 }
+/// Whether so many independent samples read a spread: a variance has one degree of freedom fewer than its samples, so it takes two. What is too few to read
+/// is this wherever the read is a spread -- a temperature over its atoms (solve.rs `reads_temperature`), a jackknife over its groups (`summarize`), that jackknife's own over the
+/// groups left out (solve.rs `need_error`), a read's error over its windows (solve.rs `drift`); where it is a count, what none met, it is what the samples leave open (solve.rs `unseen`).
+pub(crate) fn reads_spread(samples:f64)->bool{samples>=2.}
 /// The jackknife's standard error of a value over the groups left out.
 fn spread(leave:&[Moments],factor:f64,f:impl Fn(&Moments)->f64)->f64{let m=leave.iter().map(&f).sum::<f64>()/leave.len() as f64;(factor*leave.iter().map(|x|(f(x)-m).powi(2)).sum::<f64>()).sqrt()}
 
@@ -152,7 +156,7 @@ pub fn summarize<G:std::borrow::Borrow<Group>+Sync>(groups:&[G],s:&Scales,means:
         let mut all=Sums::zero();for x in &present{all.add(x,1.);}
         let correction=means.get(i).map(|&m|Correction::new(&all,m));let m=correction.as_ref();
         let mut e=estimate(&all,s,m);e.groups=count as f64;
-        if count<2{e.population_errors=vec![f64::INFINITY;STATES];e.temperature_error=[f64::INFINITY;3];e.temperature_total_error=f64::INFINITY;e.occupation_error=[f64::INFINITY;3];e.loss_error=f64::INFINITY;return e;}
+        if !reads_spread(count as f64){e.population_errors=vec![f64::INFINITY;STATES];e.temperature_error=[f64::INFINITY;3];e.temperature_total_error=f64::INFINITY;e.occupation_error=[f64::INFINITY;3];e.loss_error=f64::INFINITY;return e;}
         let leave:Vec<Moments>=present.iter().map(|x|moments(&all.combine(x,-1.),s,m)).collect();
         let factor=(count-1) as f64/count as f64;
         for a in 0..3{e.temperature_error[a]=spread(&leave,factor,|x|x.temperature[a]);e.occupation_error[a]=spread(&leave,factor,|x|x.occupation[a]);}
