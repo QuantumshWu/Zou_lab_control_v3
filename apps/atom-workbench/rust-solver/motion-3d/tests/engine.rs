@@ -993,7 +993,7 @@ fn a_beating_grid_s_measured_phase_meets_its_shares(){
 }
 
 /// What a beating grid lands between the groups of ground states over the run (solve.rs `grid_phase`, `landed_excess`), on the same PGC: at the rung a solve takes there it leaves the phase its shares measure; at the rung with
-/// three states of F' = 2 explicit, which those shares let the grid kick through the beat, it takes the phase down by a third. A step within a spacing has nothing to read beyond the grids' coinciding: the phase stops there (it ran to 1e28).
+/// three states of F' = 2 explicit, which those shares let the grid kick through the beat, it takes the phase down by a third. A step within a spacing starts the search at its one panel (it ran to 1e28 once).
 #[test]
 fn a_beating_grid_s_phase_holds_what_it_lands_over_the_run(){
     let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..101).map(|i|i as f64).collect();
