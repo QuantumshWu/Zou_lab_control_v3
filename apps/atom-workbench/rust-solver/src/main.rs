@@ -136,9 +136,6 @@ struct Request {
     options: Options,
     #[serde(default)]
     progress: bool,
-    /// The lane a worker serves, told with its `warmup`: the trajectory lane's starts the GPU.
-    #[serde(default)]
-    lane: Option<String>,
 }
 
 fn write_line(message: &Value) -> bool {
@@ -146,19 +143,22 @@ fn write_line(message: &Value) -> bool {
     serde_json::to_writer(&mut out, message).is_ok() && writeln!(out).is_ok() && out.flush().is_ok()
 }
 
-/// One protocol response. `capabilities` and `warmup` (the worker start-up
-/// LAPACK self-check; the trajectory lane's worker also starts the motion's
-/// GPU in the background) are operations; anything else is an rb87-full/2 solve,
-/// which with `progress` first streams every checkpoint's result as
-/// `checkpoint` progress (the same contract, marked `progress`).
+/// One protocol response. `capabilities`, `warmup` (the worker start-up LAPACK
+/// self-check) and `gpu` (starts the motion's GPU, answered when it has, the
+/// driver's first compile of the kernels included, or with why it cannot) are
+/// operations; anything else is an rb87-full/2 solve, which with `progress` first
+/// streams every checkpoint's result as `checkpoint` progress (the same contract,
+/// marked `progress`).
 fn respond(request: Request) -> Value {
     let id = request.id;
+    let ready = |outcome: Result<(), String>| match outcome {
+        Ok(()) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"ready":true}),
+        Err(error) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"error":error}),
+    };
     match request.op.as_deref() {
         Some("capabilities") => return json!({"id":id,"protocol":NATIVE_PROTOCOL,"capabilities":[FULL_MODEL_SCHEMA]}),
-        Some("warmup") => return match lattice_core_adapter::warmup().inspect(|_| if request.lane.as_deref() == Some("trajectory") { motion3d_adapter::prepare() }) {
-            Ok(()) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"ready":true}),
-            Err(error) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"error":error}),
-        },
+        Some("warmup") => return ready(lattice_core_adapter::warmup()),
+        Some("gpu") => return ready(motion3d_adapter::start_gpu()),
         Some(_) => return json!({"id":id,"protocol":NATIVE_PROTOCOL,"error":"Unknown native operation"}),
         None => {}
     }
@@ -226,6 +226,16 @@ mod tests {
         assert_eq!(warm["ready"], true, "{warm}");
         assert!(request(json!({"id":1,"op":"unknown"}))["error"].is_string());
     }
+    /// The `gpu` operation answers once the GPU has started -- ready -- or with why it cannot, never
+    /// before: a second start finds the same outcome at once (`ATOM_HIDE_NVCUDA` simulates no driver).
+    #[test]
+    fn the_gpu_operation_answers_when_the_gpu_has_started() {
+        let first = request(json!({"id":-2,"op":"gpu"}));
+        assert_eq!(first["id"], -2, "{first}");
+        assert_eq!(first["protocol"], NATIVE_PROTOCOL, "{first}");
+        assert!(first["ready"] == true || !first["error"].as_str().unwrap_or("").is_empty(), "{first}");
+        assert_eq!(request(json!({"id":-2,"op":"gpu"})), first);
+    }
     #[test]
     fn solves_require_the_full_model_schema() {
         let model = json!({"dimension":1,"states":["a"],"hReal":[0],"hImag":[0],"collapse":[]});
@@ -284,6 +294,67 @@ mod tests {
         assert!(worst <= 1e-7, "a published row's sum is off by {worst:.2e}");
         let outside = rows.iter().flatten().filter(|&&p| !(0. ..=1.).contains(&p)).count();
         assert_eq!(outside, 0, "every published population lies in [0, 1]");
+    }
+    /// The default scene with a weak D1 probe (tests/fixtures/weak_d1_probe_motion.json): the light's
+    /// friction is weak, and a step's change of the mechanical energy is the integrator's own error,
+    /// which the friction criterion took for the friction -- the released step search ran away, and
+    /// the harmonic control's sums per step asked for terabytes. The step is the one the light's
+    /// pattern needs (k v_T ≈ 0.35 rad/us at 20 uK: a few tenths of a microsecond), the result
+    /// within its targets.
+    #[test]
+    fn a_weak_light_s_motion_keeps_the_step_its_pattern_needs() {
+        let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/weak_d1_probe_motion.json")).unwrap();
+        let mut line = fixture["payload"].clone();
+        line["id"] = json!(9);
+        let out = request(line);
+        assert!(out["error"].is_null(), "{}", out["error"]);
+        let result = &out["result"];
+        let dt = result["motion"]["timeStepUs"].as_f64().unwrap();
+        assert!(dt >= 0.1, "the step is {dt:e} us");
+        let flagged = &result["diagnostics"]["approximations"]["flagged"];
+        assert!(flagged.is_null(), "{flagged}");
+    }
+    /// Every atom lost (tests/fixtures/total_loss_motion.json: the three-beam scene's tweezer at a
+    /// millionth of its power, a trap 1 nK deep, its probe and repump, the atom at 30 uK, 100 us): the
+    /// initial atoms are the trap's bound ones (motion-3d ensemble.rs), and the light, scattering on,
+    /// unbinds every one and pushes it out of the trap's region (motion-3d engine.rs # Loss) within the
+    /// run. The result says so -- the loss one from the sample every atom has left by, the rows there (no
+    /// held atom to describe) the last held ones, each a probability vector, outside the validated regime,
+    /// and the flag from when -- where the released engine's empty rows failed the adapter's trace gate.
+    #[test]
+    fn a_motion_whose_every_atom_is_lost_reports_the_loss() {
+        let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/total_loss_motion.json")).unwrap();
+        let mut line = fixture["payload"].clone();
+        line["id"] = json!(10);
+        let out = request(line);
+        assert!(out["error"].is_null(), "{}", out["error"]);
+        let result = &out["result"];
+        let loss: Vec<f64> = result["motion"]["lossProbability"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+        assert_eq!(loss[0], 0.);
+        assert!(loss.windows(2).all(|w| w[1] >= w[0]), "{loss:?}");
+        let gone = loss.iter().position(|&l| l == 1.).unwrap_or_else(|| panic!("every atom leaves within the run: {loss:?}"));
+        assert!(loss[gone..].iter().all(|&l| l == 1.), "{loss:?}");
+        let rows: Vec<Vec<f64>> = result["populations"].as_array().unwrap().iter().map(|row| row.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect()).collect();
+        assert!(rows[gone..].iter().all(|row| row == &rows[gone - 1]), "the rows after the loss carry the last held one's");
+        let classical = result["motion"]["classical"].as_array().unwrap();
+        assert!(classical[gone..].iter().all(|c| c == false), "{classical:?}");
+        let flagged = result["diagnostics"]["approximations"]["flagged"].as_str().unwrap_or("");
+        assert!(flagged.contains("无原子被俘获"), "{flagged}");
+    }
+    /// The default scene's tweezer alone (tests/fixtures/tweezer_alone_motion.json: 30 uK in its
+    /// 830 uK deep trap, 1 ms): with no other light the light's frame rotates at the tweezer, a near
+    /// carrier whose shift lies in its field, and the loss criterion's trap less the trap beam off
+    /// kept that field -- a trap 36 uK deep, 84 % of the atoms lost at once. The depth is the
+    /// tweezer's whole shift: the atoms stay.
+    #[test]
+    fn the_tweezer_alone_holds_its_thermal_atom() {
+        let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/tweezer_alone_motion.json")).unwrap();
+        let mut line = fixture["payload"].clone();
+        line["id"] = json!(11);
+        let out = request(line);
+        assert!(out["error"].is_null(), "{}", out["error"]);
+        let loss: Vec<f64> = out["result"]["motion"]["lossProbability"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+        assert!(loss.iter().all(|&l| l < 0.01), "{loss:?}");
     }
     /// A motion request is a trajectory alone of 3D motion, its trap one of its beams; a tweezer
     /// without light shift confines nothing. The device is the GPU (by default) or the CPU.

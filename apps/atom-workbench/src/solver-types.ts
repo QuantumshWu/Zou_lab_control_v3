@@ -87,7 +87,7 @@ export interface ApproximationLedger {budget:number;used:number;items:{label:str
  * trajectories and time step; the device it ran on, why that is not the one asked for (a
  * fallback's `deviceNote`), and its approximation ledger. */
 export interface MotionResult {
-  temperatureUK:number[][];temperatureErrorUK:number[][];temperatureTotalUK:number[];temperatureTotalErrorUK:number[];
+  temperatureUK:number[][];temperatureErrorUK:(number|null)[][];temperatureTotalUK:number[];temperatureTotalErrorUK:(number|null)[];
   meanOccupation:number[][];trapFrequencyKHz:number[];lossProbability:number[];classical:boolean[];
   momentum:Distributions[];position:Distributions[];trajectories:number;timeStepUs:number;
   device:MotionDevice;deviceNote?:string;approximations:ApproximationLedger;
@@ -100,6 +100,8 @@ export function readMotionResult(value:unknown,diagnostics:Record<string,unknown
   const object=(v:unknown,keys:readonly string[],optional:readonly string[]=[]):Record<string,unknown>=>{
     if(!v||typeof v!=='object'||Array.isArray(v)||!keys.every(key=>Object.hasOwn(v,key))||!Object.keys(v).every(key=>keys.includes(key)||optional.includes(key)))invalid();return v as Record<string,unknown>;};
   const series=(v:unknown,length:number,admits:(x:number)=>boolean):number[]=>{if(!Array.isArray(v)||v.length!==length||!v.every(x=>typeof x==='number'&&Number.isFinite(x)&&admits(x)))invalid();return [...(v as number[])];};
+  // A temperature's standard errors: null where it has none, a sample with fewer than two atoms held (the engine's `assemble`).
+  const errors=(v:unknown):(number|null)[]=>{if(!Array.isArray(v)||v.length!==samples||!v.every(x=>x===null||(typeof x==='number'&&Number.isFinite(x)&&x>=0)))invalid();return [...(v as (number|null)[])];};
   const text=(v:unknown,empty=false):string=>typeof v==='string'&&(empty||v.trim()!=='')?v:invalid();
   const size=(v:unknown):number=>typeof v==='number'&&Number.isFinite(v)&&v>=0?v:invalid();
   // Distributions: on a strictly increasing grid, at increasing samples ending with the last, each a
@@ -127,8 +129,8 @@ export function readMotionResult(value:unknown,diagnostics:Record<string,unknown
   const note=diagnostics.deviceNote===undefined?undefined:text(diagnostics.deviceNote);
   const ledger=object(diagnostics.approximations,['budget','used','items'],['flagged']);
   const items=Array.isArray(ledger.items)?ledger.items.map(item=>{const i=object(item,['label','estimate','action']);return {label:text(i.label),estimate:size(i.estimate),action:text(i.action,true)};}):invalid();
-  return {temperatureUK:perAxis(m.temperatureUK,v=>series(v,samples,x=>x>=0)),temperatureErrorUK:perAxis(m.temperatureErrorUK,v=>series(v,samples,x=>x>=0)),
-    temperatureTotalUK:series(m.temperatureTotalUK,samples,x=>x>=0),temperatureTotalErrorUK:series(m.temperatureTotalErrorUK,samples,x=>x>=0),
+  return {temperatureUK:perAxis(m.temperatureUK,v=>series(v,samples,x=>x>=0)),temperatureErrorUK:perAxis(m.temperatureErrorUK,errors),
+    temperatureTotalUK:series(m.temperatureTotalUK,samples,x=>x>=0),temperatureTotalErrorUK:errors(m.temperatureTotalErrorUK),
     meanOccupation:perAxis(m.meanOccupation,v=>series(v,samples,()=>true)),trapFrequencyKHz:perAxis(m.trapFrequencyKHz,v=>typeof v==='number'&&Number.isFinite(v)&&v>0?v:invalid()),
     lossProbability:loss,classical:[...(m.classical as boolean[])],
     momentum:perAxis(m.momentum,v=>distributions(v,'velocitiesMps')),position:perAxis(m.position,v=>distributions(v,'positionsUm')),

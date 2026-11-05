@@ -1,7 +1,15 @@
 //! Dense complex linear algebra for the elimination's small matrices (a few dozen rows): complex
-//! arithmetic, products, an LU factorization with partial pivoting and the spectral norm.
+//! arithmetic, products, an LU factorization with partial pivoting and the spectral norm. Each thread
+//! counts the complex multiply-adds its products, factorizations, solves and eigenvalue sweeps take
+//! (their nominal counts, `counted`): a table node's work (model.rs `tabulate`), the same on any machine.
 use crate::{Complex,Matrix,STATES};
+use std::cell::Cell;
 use std::ops::{Add,AddAssign,Div,Index,IndexMut,Mul,Neg,Sub,SubAssign};
+
+thread_local!{static WORK:Cell<f64>=const{Cell::new(0.)};}
+/// The complex multiply-adds this thread's dense algebra has taken so far (nominal counts).
+pub fn counted()->f64{WORK.with(|w|w.get())}
+fn count(work:usize){WORK.with(|w|w.set(w.get()+work as f64));}
 
 impl Complex{
     pub const ZERO:Complex=Complex{re:0.,im:0.};
@@ -41,14 +49,14 @@ impl Dense{
     pub fn adjoint(&self)->Dense{Dense::from_fn(self.cols,self.rows,|i,j|self[(j,i)].conj())}
     /// self · b.
     pub fn product(&self,b:&Dense)->Dense{
-        assert_eq!(self.cols,b.rows);let mut out=Dense::zeros(self.rows,b.cols);
+        assert_eq!(self.cols,b.rows);let mut out=Dense::zeros(self.rows,b.cols);count(self.rows*self.cols*b.cols);
         for i in 0..self.rows{for k in 0..self.cols{let x=self[(i,k)];if x==Complex::ZERO{continue;}
             for j in 0..b.cols{out[(i,j)]+=x*b[(k,j)];}}}
         out
     }
     /// self† · b.
     pub fn adjoint_product(&self,b:&Dense)->Dense{
-        assert_eq!(self.rows,b.rows);let mut out=Dense::zeros(self.cols,b.cols);
+        assert_eq!(self.rows,b.rows);let mut out=Dense::zeros(self.cols,b.cols);count(self.rows*self.cols*b.cols);
         for k in 0..self.rows{for i in 0..self.cols{let x=self[(k,i)].conj();if x==Complex::ZERO{continue;}
             for j in 0..b.cols{out[(i,j)]+=x*b[(k,j)];}}}
         out
@@ -74,7 +82,7 @@ pub struct Lu{factors:Dense,pivots:Vec<usize>}
 impl Lu{
     /// None when a pivot vanishes: the matrix is singular.
     pub fn new(matrix:&Dense)->Option<Lu>{
-        let n=matrix.rows;assert_eq!(n,matrix.cols);let mut a=matrix.clone();let mut pivots=vec![0;n];
+        let n=matrix.rows;assert_eq!(n,matrix.cols);let mut a=matrix.clone();let mut pivots=vec![0;n];count(n*n*n/3);
         for k in 0..n{
             let p=(k..n).max_by(|&i,&j|a[(i,k)].norm_sqr().total_cmp(&a[(j,k)].norm_sqr())).unwrap();
             if a[(p,k)]==Complex::ZERO{return None;}
@@ -86,7 +94,7 @@ impl Lu{
     }
     /// b ← A⁻¹ b.
     pub fn solve(&self,b:&mut [Complex]){
-        let a=&self.factors;let n=a.rows;
+        let a=&self.factors;let n=a.rows;count(n*n);
         for(k,&p)in self.pivots.iter().enumerate(){b.swap(k,p);}
         for i in 0..n{let mut x=b[i];for j in 0..i{x-=a[(i,j)]*b[j];}b[i]=x;}
         for i in (0..n).rev(){let mut x=b[i];for j in i+1..n{x-=a[(i,j)]*b[j];}b[i]=x/a[(i,i)];}
@@ -101,26 +109,43 @@ impl Lu{
 
 /// The eigenvalues of a Hermitian matrix: cyclic Jacobi rotations until the off-diagonal part is
 /// below the double precision of the matrix or stops shrinking.
-pub fn hermitian_eigenvalues(matrix:&Dense)->Vec<f64>{
+pub fn hermitian_eigenvalues(matrix:&Dense)->Vec<f64>{jacobi(matrix,None,&|_,_|true)}
+/// The eigendecomposition of a Hermitian matrix, H = U diag(λ) U†: the same rotations, U their product --
+/// its columns orthonormal to round-off, in a degenerate eigenspace too.
+pub fn hermitian_eigen(matrix:&Dense)->(Vec<f64>,Dense){
+    let mut u=Dense::zeros(matrix.rows,matrix.rows);for i in 0..matrix.rows{u[(i,i)]=Complex::ONE;}
+    let values=jacobi(matrix,Some(&mut u),&|_,_|true);(values,u)
+}
+/// The same as far as a coupling matters over a width w: the rotations of a pair only while |H_pq|² exceeds share² (w² + (H_pp − H_qq)²), its mixing's
+/// size whether its separation or the width bounds it, until a sweep rotates none.
+pub fn hermitian_eigen_within(matrix:&Dense,width:f64,share:f64)->(Vec<f64>,Dense){
+    let mut u=Dense::zeros(matrix.rows,matrix.rows);for i in 0..matrix.rows{u[(i,i)]=Complex::ONE;}
+    let values=jacobi(matrix,Some(&mut u),&|coupling,apart|coupling>share*share*(width*width+apart));(values,u)
+}
+/// Cyclic Jacobi rotations of the pairs `matters` keeps by |H_pq|² and (H_pp − H_qq)².
+fn jacobi(matrix:&Dense,mut vectors:Option<&mut Dense>,matters:&dyn Fn(f64,f64)->bool)->Vec<f64>{
     let n=matrix.rows;let mut a=matrix.clone();
     let total:f64=a.entries.iter().map(|x|x.norm_sqr()).sum();
     let mut previous=f64::INFINITY;
     loop{
         let off:f64=(0..n).map(|i|(0..n).filter(|&j|j!=i).map(|j|a[(i,j)].norm_sqr()).sum::<f64>()).sum();
         if off<=f64::EPSILON*f64::EPSILON*total||!(off<previous){break;}
-        previous=off;
+        previous=off;count(2*n*n*n);let mut rotated=false;
         for p in 0..n{for q in p+1..n{
-            let modulus=a[(p,q)].abs();if modulus==0.{continue;}
+            let modulus=a[(p,q)].abs();if modulus==0.||!matters(modulus*modulus,(a[(p,p)].re-a[(q,q)].re).powi(2)){continue;}rotated=true;
             // A unitary phase on q makes a_pq real and positive; a real rotation in (p, q) then zeroes it.
             // The phase divides by the modulus, whose reciprocal overflows when it is subnormal.
             let phase=Complex::new(a[(p,q)].re/modulus,a[(p,q)].im/modulus);
             for k in 0..n{a[(k,q)]=a[(k,q)]*phase.conj();a[(q,k)]=a[(q,k)]*phase;}
+            if let Some(u)=vectors.as_deref_mut(){for k in 0..n{u[(k,q)]=u[(k,q)]*phase.conj();}}
             let tau=(a[(q,q)].re-a[(p,p)].re)/(2.*modulus);
             let t=tau.signum()/(tau.abs()+(1.+tau*tau).sqrt());let c=1./(1.+t*t).sqrt();let s=t*c;
             for k in 0..n{let(x,y)=(a[(k,p)],a[(k,q)]);a[(k,p)]=x*c-y*s;a[(k,q)]=x*s+y*c;}
             for k in 0..n{let(x,y)=(a[(p,k)],a[(q,k)]);a[(p,k)]=x*c-y*s;a[(q,k)]=x*s+y*c;}
+            if let Some(u)=vectors.as_deref_mut(){for k in 0..n{let(x,y)=(u[(k,p)],u[(k,q)]);u[(k,p)]=x*c-y*s;u[(k,q)]=x*s+y*c;}}
             a[(p,q)]=Complex::ZERO;a[(q,p)]=Complex::ZERO;
         }}
+        if !rotated{break;}
     }
     (0..n).map(|i|a[(i,i)].re).collect()
 }
@@ -154,5 +179,18 @@ mod tests{
         // A subnormal off-diagonal element, whose reciprocal overflows: rotated away, no NaN.
         let tiny=Dense::from_fn(2,2,|i,j|if i==j{Complex::new(1.+i as f64,0.)}else{Complex::new(5e-320,if i<j{3e-320}else{-3e-320})});
         assert_eq!(hermitian_eigenvalues(&tiny),vec![1.,2.]);
+    }
+    /// As far as a coupling matters: a pair within the share over the width is left, one beyond it rotated away; the matrix is U diag(λ) U† but for what is left.
+    #[test]
+    fn the_eigenstates_within_a_share_leave_the_couplings_that_do_not_matter(){
+        let n=4;let mut h=Dense::zeros(n,n);for(i,e)in [0.,3.,50.,50.2].iter().enumerate(){h[(i,i)]=Complex::new(*e,0.);}
+        let mut couple=|a:usize,b:usize,z:Complex|{h[(a,b)]=z;h[(b,a)]=z.conj();};
+        couple(0,1,Complex::new(0.,2.));couple(2,3,Complex::new(0.3,0.1));couple(0,2,Complex::new(1e-4,0.));
+        let(share,width)=(1e-3,1.);let(values,u)=hermitian_eigen_within(&h,width,share);
+        let diagonal=Dense::from_fn(n,n,|i,j|if i==j{Complex::new(values[i],0.)}else{Complex::ZERO});
+        let mut rest=u.product(&diagonal).product(&u.adjoint());rest.add_scaled(-Complex::ONE,&h);
+        assert!(rest.largest()<=2e-4,"{}",rest.largest());
+        let exact=hermitian_eigenvalues(&h);let mut a=values.clone();let mut b=exact.clone();a.sort_by(f64::total_cmp);b.sort_by(f64::total_cmp);
+        for(x,y)in a.iter().zip(&b){assert!((x-y).abs()<=1e-6,"{a:?} {b:?}");}
     }
 }

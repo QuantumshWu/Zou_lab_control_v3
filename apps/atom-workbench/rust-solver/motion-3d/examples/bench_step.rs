@@ -14,7 +14,7 @@ fn main(){
     let dt:f64=args.get(3).map_or(0.2,|s|s.parse().unwrap());let truncation:f64=args.get(4).map_or(f64::EPSILON,|s|s.parse().unwrap());
     let request=scene::scene(&name);
     let model=Model::new(&request).unwrap();
-    let trap=atom_motion_3d::model::Trap{axes:[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],frequencies:[0.;3],lab:[0.;3]};let mut settings=Settings::new(dt,&trap,truncation,false);settings.loss=false;
+    let trap=atom_motion_3d::model::Trap{lattice:None,axes:[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],frequencies:[0.;3],lab:[0.;3]};let mut settings=Settings::new(dt,&trap,truncation,false);settings.loss=false;
     let initial=Initial::new(&model,&request).unwrap();
     let mut t=initial_trajectory(&model,&settings,&initial,1,0,Stratum::single(0));
     let n=model.dimension(t.cluster);
@@ -30,7 +30,7 @@ fn main(){
     for _ in 0..steps{let mut psi=t.psi;propagate(&l.hamiltonian,n,0.5*dt,&mut psi,truncation);sink+=psi[0].re;}
     let prop=clock.elapsed().as_secs_f64()/steps as f64;
     let clock=Instant::now();
-    for _ in 0..steps{let f=model.force(t.cluster,&l,&t.psi);sink+=f[0];}
+    for _ in 0..steps{let f=model.force(t.cluster,&l,&p,&t.psi);sink+=f[0];}
     let force=clock.elapsed().as_secs_f64()/steps as f64;
     let clock=Instant::now();
     for _ in 0..steps/10{let ph=model.photons(t.cluster,&p,&t.psi,0.,None);sink+=ph.amplitude[0][0][0].re;}

@@ -51,11 +51,14 @@ api!{
     cuModuleLoadDataEx:fn(*mut Handle,*const c_void,u32,*mut i32,*mut *mut c_void);
     cuModuleUnload:fn(Handle);
     cuModuleGetFunction:fn(*mut Handle,Handle,*const c_char);
+    cuModuleGetGlobal_v2:fn(*mut DevicePtr,*mut usize,Handle,*const c_char);
     cuFuncSetAttribute:fn(Handle,i32,i32);
     cuFuncGetAttribute:fn(*mut i32,i32,Handle);
     cuOccupancyMaxActiveBlocksPerMultiprocessor:fn(*mut i32,Handle,i32,usize);
     cuMemAlloc_v2:fn(*mut DevicePtr,usize);
     cuMemFree_v2:fn(DevicePtr);
+    cuMemAllocHost_v2:fn(*mut *mut c_void,usize);
+    cuMemFreeHost:fn(*mut c_void);
     cuMemcpyHtoDAsync_v2:fn(DevicePtr,*const c_void,usize,Handle);
     cuMemcpyDtoHAsync_v2:fn(*mut c_void,DevicePtr,usize,Handle);
     cuMemsetD8Async:fn(DevicePtr,u8,usize,Handle);
@@ -176,6 +179,11 @@ impl Module{
         check(&format!("cuModuleGetFunction({name})"),unsafe{(driver()?.api.cuModuleGetFunction)(&mut f,self.module,c.as_ptr() as *const c_char)})?;
         Ok(Function{function:f,name:name.to_string()})
     }
+    /// A module variable's device address.
+    pub fn global(&self,name:&str)->Result<DevicePtr,String>{
+        let c=format!("{name}\0");let(mut pointer,mut bytes)=(0,0);
+        check(&format!("cuModuleGetGlobal({name})"),unsafe{(driver()?.api.cuModuleGetGlobal_v2)(&mut pointer,&mut bytes,self.module,c.as_ptr() as *const c_char)})?;Ok(pointer)
+    }
 }
 impl Drop for Module{fn drop(&mut self){if let Ok(d)=driver(){unsafe{(d.api.cuModuleUnload)(self.module);}}}}
 
@@ -201,7 +209,7 @@ impl Function{
 /// A kernel argument: a value whose address the launch passes.
 pub trait Arg{fn pointer(&self)->*mut c_void;}
 macro_rules! arg{($($t:ty),*)=>{$(impl Arg for $t{fn pointer(&self)->*mut c_void{self as *const $t as *mut c_void}})*};}
-arg!(u32,i32,u64,f32,f64,super::program::Params,super::program::Run);
+arg!(u32,i32,u64,f32,f64,super::program::Run);
 
 /// A stream: launches, copies and events in order.
 pub struct Stream{stream:Handle}
@@ -212,6 +220,11 @@ impl Stream{
     pub fn launch(&self,f:&Function,blocks:u32,threads:u32,args:&[&dyn Arg])->Result<(),String>{
         let mut pointers:Vec<*mut c_void>=args.iter().map(|a|a.pointer()).collect();
         check(&format!("launch {}",f.name),unsafe{(driver()?.api.cuLaunchKernel)(f.function,blocks,1,1,threads,1,1,0,self.stream,pointers.as_mut_ptr(),std::ptr::null_mut())})
+    }
+    /// Copies a value to a device address (from pageable memory: done on return).
+    pub fn put<T:Copy>(&self,to:DevicePtr,data:&T)->Result<(),String>{
+        call!("cuMemcpyHtoDAsync",cuMemcpyHtoDAsync_v2(to,data as *const T as *const c_void,std::mem::size_of::<T>(),self.stream))?;
+        self.synchronize()
     }
     /// Copies `data` into the buffer at byte offset `at` (from pageable memory: done on return).
     pub fn upload_at<T:Copy>(&self,to:&Buffer,at:usize,data:&[T])->Result<(),String>{
@@ -254,3 +267,17 @@ impl Buffer{
     pub fn with<T:Copy>(stream:&Stream,data:&[T])->Result<Buffer,String>{let b=Buffer::new(std::mem::size_of_val(data))?;stream.upload(&b,data)?;Ok(b)}
 }
 impl Drop for Buffer{fn drop(&mut self){if let Ok(d)=driver(){unsafe{(d.api.cuMemFree_v2)(self.pointer);}}}}
+
+/// Words in host memory the device writes (a launch's report, read without a copy once an event says it is done).
+pub struct HostWords{pointer:*mut u64,len:usize}
+impl HostWords{
+    pub fn new(data:&[u64])->Result<HostWords,String>{
+        let mut pointer=std::ptr::null_mut();check(&format!("cuMemAllocHost({} words)",data.len()),unsafe{(driver()?.api.cuMemAllocHost_v2)(&mut pointer,8*data.len().max(1))})?;
+        let out=HostWords{pointer:pointer as *mut u64,len:data.len()};unsafe{std::ptr::copy_nonoverlapping(data.as_ptr(),out.pointer,data.len());}Ok(out)
+    }
+    /// The device's address of the words.
+    pub fn address(&self)->u64{self.pointer as u64}
+    /// The words: to be read only when no launch that writes them is running.
+    pub fn read(&self,out:&mut [u64]){unsafe{std::ptr::copy_nonoverlapping(self.pointer as *const u64,out.as_mut_ptr(),self.len.min(out.len()));}}
+}
+impl Drop for HostWords{fn drop(&mut self){if let Ok(d)=driver(){unsafe{(d.api.cuMemFreeHost)(self.pointer as *mut c_void);}}}}

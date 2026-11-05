@@ -33,7 +33,7 @@ fn main(){
     let z=|d:f64,a:f64,b:f64|d.abs()/(a*a+b*b).sqrt().max(1e-300);
     let(mut pz,mut pcount,mut pover,mut pmax)=(0f64,0usize,0usize,0f64);
     for i in 1..samples{for k in 0..c.populations[i].len(){
-        let d=g.populations[i][k]-c.populations[i][k];let x=z(d,c.sample_errors[i],g.sample_errors[i]);pz=pz.max(x);pcount+=1;pover+=(x>2.) as usize;pmax=pmax.max(d.abs());
+        let d=(1.-g.loss_probability[i])*g.populations[i][k]-(1.-c.loss_probability[i])*c.populations[i][k];let x=z(d,c.sample_errors[i],g.sample_errors[i]);pz=pz.max(x);pcount+=1;pover+=(x>2.) as usize;pmax=pmax.max(d.abs());
     }}
     let(mut lz,mut lmax)=(0f64,0f64);for i in 1..samples{let d=g.loss_probability[i]-c.loss_probability[i];lz=lz.max(z(d,c.sample_errors[i],g.sample_errors[i]));lmax=lmax.max(d.abs());}
     println!("populations: largest |Δp| {pmax:.4}, largest z {pz:.2}, z > 2 in {pover} of {pcount}; loss: largest |Δ| {lmax:.2e}, z {lz:.2}");

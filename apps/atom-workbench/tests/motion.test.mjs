@@ -239,6 +239,8 @@ test('a motion result is read strictly: the 3D block with the total temperature,
   assert.deepEqual([m.temperatureTotalUK,m.temperatureTotalErrorUK,m.trapFrequencyKHz,m.classical],[[31,31,31],[.9,.9,.9],[100.5,100.5,19.3],[true,true,false]]);
   assert.deepEqual([m.device,m.deviceNote,m.approximations],[MOTION_DIAGNOSTICS.device,MOTION_DIAGNOSTICS.deviceNote,MOTION_DIAGNOSTICS.approximations]);
   assert.equal(result.populationAccuracy.requestedTolerance,.05);assert.equal(result.mean.status,'not-requested');
+  const few=readMotion(d=>{d.motion.temperatureErrorUK.x[1]=null;d.motion.temperatureTotalErrorUK[1]=null;}).motion;
+  assert.deepEqual([few.temperatureErrorUK[0],few.temperatureTotalErrorUK],[[1.5,null,1.5],[.9,null,.9]],'a sample with fewer than two atoms held has no T of its own and no error');
   const flagged=readMotion(d=>{d.diagnostics.approximations.flagged='t ≥ 8 ms 的输出超出近似误差预算';delete d.diagnostics.deviceNote;}).motion;
   assert.equal(flagged.approximations.flagged,'t ≥ 8 ms 的输出超出近似误差预算');assert.equal(Object.hasOwn(flagged,'deviceNote'),false);
   for(const [label,change] of [
@@ -282,6 +284,8 @@ test('温度与 n̄: a line per axis and the total temperature apart from them; 
   assert.doesNotMatch(chart,/<polygon/,'no band');assert.doesNotMatch(chart,/⟨v⟩|平均速度/,'no velocity');
   assert.equal(lineReading(temperature.lines[3],1,temperature.unit),'31 ± 0.9 μK');assert.equal(lineReading(temperature.lines[0],1,temperature.unit),'30 ± 1.5 μK');
   assert.equal(lineReading(occupation.lines[2],1,occupation.unit),'4.5');
+  const few=motionSeries(readMotion(d=>{d.motion.temperatureErrorUK.x[1]=null;}).motion)[0];
+  assert.equal(lineReading(few.lines[0],1,few.unit),'30 μK（误差未知）');assert.equal(lineReading(few.lines[0],0,few.unit),'30 ± 1.5 μK');
   // A sample outside the validated regime lies on the grey band of both panels, from half-way to its neighbour.
   const bands=svg=>[...svg.matchAll(/<rect class="reference-band" x="([\d.]+)" y="(\d+)" width="([\d.]+)" height="(\d+)"/g)].map(m=>m.slice(1).map(Number));
   const reference=result.motion.classical.map(inside=>!inside);
@@ -319,11 +323,15 @@ test('the examples: 3D PGC and 光镊 + 探测光 + 回泵光 run motion in thei
 test('the motion engine\'s sentences are shown in Chinese',()=>{
   assert.equal(solverText('A motion request is a trajectory alone: meanOnly and includeMean are false'),'运动只计算时间演化，不计算长期布居。');
   // The 3D engine's refusals and its device note are written in Chinese: motion along an axis or in
-  // a plane, a request for the GPU, and a scene whose light does not confine the atom.
+  // a plane, a scene whose light does not confine the atom, and a request for the GPU that ran on the CPU.
   const adapter=readFileSync(new URL('../rust-solver/src/motion3d_adapter.rs',import.meta.url),'utf8');
-  for(const name of ['ONLY_3D','GPU_PENDING'])assert.match(new RegExp(`pub const ${name}:&str="([^"]+)";`).exec(adapter)?.[1]??'',/^[一-鿿]/,name);
+  assert.match(/pub const ONLY_3D:&str="([^"]+)";/.exec(adapter)?.[1]??'',/^[一-鿿]/);
   const solve=readFileSync(new URL('../rust-solver/motion-3d/src/solve.rs',import.meta.url),'utf8');
   assert.match(/pub const NOT_CONFINED:&str="([^"]+)";/.exec(solve)?.[1]??'',/^[一-鿿]/);
+  const notes=[...solve.matchAll(/format!\("((?:\{reason\}|GPU 计算出错)[^"]*)"\)/g)].map(m=>m[1]);
+  assert.deepEqual(notes,['GPU 计算出错（{error}）：本次在 CPU 上计算','{reason}：本次在 CPU 上计算']);
+  const gpu=readFileSync(new URL('../rust-solver/motion-3d/src/gpu/mod.rs',import.meta.url),'utf8');
+  for(const reason of ['NVIDIA 驱动太旧','没有 NVIDIA 显卡','驱动无法编译 GPU 内核'])assert.ok(gpu.includes(reason),reason);
   // A result short of its statistical target says why in Chinese.
   const partial=[...adapter.matchAll(/format!\("(The statistical error is[^"]*)"\)/g)].map(m=>m[1].replace(/\{[A-Za-z_]*(?::[^}]*)?\}/g,'1'));
   assert.equal(partial.length,1);assert.equal(solverText(partial[0]),'统计误差为 1，目标 1。');

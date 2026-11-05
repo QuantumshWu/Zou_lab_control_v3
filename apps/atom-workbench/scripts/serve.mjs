@@ -80,9 +80,8 @@ class NativeLane {
         if(!w.capabilities){
           try{w.capabilities=nativeCapabilities(message);}catch(error){this.failWorker(w,failure(error.message,503,'incompatible-native-protocol'));return;}
           // Capability negotiation comes first. The warmup operation then
-          // checks the numerical runtime (a LAPACK self-check); told its lane,
-          // the trajectory lane's worker also starts the motion's GPU.
-          w.child.stdin.write(JSON.stringify({id:-1,op:'warmup',lane:this.name})+'\n');
+          // checks the numerical runtime (a LAPACK self-check).
+          w.child.stdin.write(JSON.stringify({id:-1,op:'warmup'})+'\n');
           continue;
         }
         if(message.id!==-1||message.error||message.protocol!==NATIVE_PROTOCOL||message.ready!==true){

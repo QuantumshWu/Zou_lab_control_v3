@@ -7,10 +7,19 @@ export function createModelWorker(post){
   let service,closed=false,unavailable;const active=new Map(),pending=[];
   const sendNative=command=>post({kind:'native',command});
   const finish=(channel,status,data)=>post({kind:'response',channel,status,data});
-  async function solve(channel,input){
+  /** A request runs once the bridge is configured; refused when it never will be. */
+  function whenServed(channel,run){
     if(closed){finish(channel,503,{error:'Native bridge is closed.',code:'solver-unavailable'});return;}
     if(unavailable){finish(channel,503,{error:unavailable,code:'solver-unavailable'});return;}
-    if(!service){if(pending.length>=8)finish(channel,503,{error:'Native bridge is not ready.',code:'solver-unavailable'});else pending.push({channel,input});return;}
+    if(!service){if(pending.length>=8)finish(channel,503,{error:'Native bridge is not ready.',code:'solver-unavailable'});else pending.push({channel,run});return;}
+    void run();
+  }
+  /** The GPU's start (IpcNativeLane.startGpu): why it cannot run, if so, or the failure that ended its worker. */
+  async function startGpu(channel){
+    try{finish(channel,200,{reason:await service.lanes.trajectory.startGpu()});}
+    catch(error){finish(channel,error.status??503,{error:error.message,code:error.code??'solver-unavailable'});}
+  }
+  async function solve(channel,input){
     let task,streaming=false,token;
     const event=(type,data,status)=>{streaming=true;post({kind:'stream',channel,event:{type,data,...(status===undefined?{}:{status})},done:type==='result'||type==='error'});};
     try{
@@ -43,11 +52,12 @@ export function createModelWorker(post){
         // Match createAtomServer: initialize both native lanes independently
         // of the first user solve, without blocking UI/static spectroscopy.
         for(const lane of Object.values(service.lanes))void lane.start();
-        for(const item of pending.splice(0))void solve(item.channel,item.input);return;
+        for(const item of pending.splice(0))void item.run();return;
       }
       service?.lanes[event.lane]?.receive(event);return;
     }
-    if(message.kind==='solve'){void solve(message.channel,message.request);return;}
+    if(message.kind==='solve'){whenServed(message.channel,()=>solve(message.channel,message.request));return;}
+    if(message.kind==='gpu'){whenServed(message.channel,()=>startGpu(message.channel));return;}
     if(message.kind==='cancel'){
       for(let i=pending.length-1;i>=0;i--)if(pending[i].channel===message.channel)pending.splice(i,1);
       const task=active.get(message.channel);active.delete(message.channel);task?.cancel();return;
