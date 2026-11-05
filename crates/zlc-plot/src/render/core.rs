@@ -18,7 +18,7 @@ use super::height_bars::HeightBars;
 use super::image::ImageTables;
 use super::geometry;
 use super::labels::state_label;
-use super::limits::{autoscaled_limits, relim_retains, scalar_close, select_display_limits};
+use super::limits::{autoscaled_limits, scalar_close, select_display_limits, tight_limits};
 use super::mpl::axes::{AxesModel, Child, ChildId, TitleText};
 use super::mpl::figure::FigureModel;
 use super::mpl::rc::Rc;
@@ -692,8 +692,13 @@ impl Renderer {
             None
         } else if let Some(range) = data_range {
             let policy = &self.style.render;
-            Some(autoscaled_limits(range, current, policy.image_color_padding_fraction, policy.image_color_deadband_fraction,
-                                   mode == RelimMode::Normal, relim_retains(mode, rules_geometry) && mode_asked == Some(asked)))
+            // An axis that rules geometry keeps its hysteresis even when tight: a scene must not jump every frame.
+            Some(if mode == RelimMode::Tight && !rules_geometry {
+                tight_limits(range, policy.image_color_padding_fraction)
+            } else {
+                autoscaled_limits(range, current, policy.image_color_padding_fraction, policy.image_color_deadband_fraction,
+                                  mode == RelimMode::Normal, mode_asked == Some(asked))
+            })
         } else {
             Some(current.unwrap_or((0.0, 1.0)))
         };

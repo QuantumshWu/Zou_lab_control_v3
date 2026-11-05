@@ -321,7 +321,7 @@ fn the_drawn_checker_has_square_cells() {
     }
 }
 
-/// The default box of a simple image and its picture, as main c16ed8c2 drew them.
+/// The default box of a simple image, as main c16ed8c2 drew it, and its picture in tight colour limits.
 #[test]
 fn square_home_is_unchanged() {
     let panel = Panel::open(scan(2, 3, Lattice::Uniform), target(false, "2x2", None));
@@ -331,7 +331,7 @@ fn square_home_is_unchanged() {
     assert_eq!((axes.x_limits, axes.y_limits), ((-0.5, 2.5), (2.0, -1.0)));
     let front = panel.front.as_ref().unwrap();
     let hash = front.pixels.as_slice().iter().fold(0xcbf29ce484222325u64, |hash, byte| (hash ^ *byte as u64).wrapping_mul(0x100000001b3));
-    assert_eq!(hash, 0x4881a2e7cb40803);
+    assert_eq!(hash, 0x61ad43117cf9734e);
 }
 
 /// The option's life: a control, a recipe, a restored figure and an export.
