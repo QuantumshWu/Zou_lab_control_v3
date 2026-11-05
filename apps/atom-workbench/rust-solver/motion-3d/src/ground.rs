@@ -629,6 +629,13 @@ impl Interference{
     pub fn estimate(&self,g:&Ground)->f64{self.bound*(1./g.pole.max(f64::MIN_POSITIVE)).max(1./g.generator_scale.max(self.shift).max(f64::MIN_POSITIVE))}
 }
 
+/// A matrix of the request with its entries at the round-off of its largest set to zero: what a selection rule forbids and the polarizations' rotation leaves at 1e-16 of the allowed is no coupling,
+/// whatever its frequency (`Ground::couples`, the rule's items).
+fn rounded(mut m:Dense)->Dense{
+    let floor=64.*f64::EPSILON*m.entries.iter().map(|z|z.abs()).fold(0.,f64::max);
+    for z in m.entries.iter_mut(){if z.abs()<=floor{*z=Complex::ZERO;}}
+    m
+}
 /// The units of the beams of one frequency (module documentation, # Far components) and the
 /// interference they leave out, bounded over the trap (every beam at most its peak), whichever of two
 /// leaves out less:
@@ -839,8 +846,8 @@ impl Ground{
         }}
         let all:Vec<usize>=(0..STATES).collect();
         let mut decay=Dense::zeros(ne,ne);
-        for c in &request.emission{let c=Dense::block(c,&all,&excited_states);decay.add_scaled(Complex::ONE,&c.adjoint_product(&c));}
-        let emission:[Dense;3]=std::array::from_fn(|a|Dense::block(&request.emission[a],&ground_states,&excited_states));
+        for c in &request.emission{let c=rounded(Dense::block(c,&all,&excited_states));decay.add_scaled(Complex::ONE,&c.adjoint_product(&c));}
+        let emission:[Dense;3]=std::array::from_fn(|a|rounded(Dense::block(&request.emission[a],&ground_states,&excited_states)));
         let hamiltonian=Dense::block(&request.hamiltonian,&all,&all);
         if (0..STATES).any(|i|(0..STATES).any(|j|i!=j&&hamiltonian[(i,j)]!=Complex::ZERO)){return Err("H0 must be diagonal in the model basis".into());}
         let energies:Vec<f64>=(0..STATES).map(|i|hamiltonian[(i,i)].re).collect();
@@ -849,9 +856,9 @@ impl Ground{
         let frame=request.frame_frequencies_mhz[excited_states[0]];
         let spread=energies.iter().copied().fold(f64::NEG_INFINITY,f64::max)-energies.iter().copied().fold(f64::INFINITY,f64::min);
         let l0=spread+frobenius(&decay)+emission.iter().map(|c|frobenius(c).powi(2)).sum::<f64>();
-        let couplings:Vec<Dense>=request.beams.iter().map(|b|Dense::block(&b.coupling,&excited_states,&ground_states)).collect();
-        let counters:Vec<Dense>=request.beams.iter().map(|b|Dense::block(&b.counter_coupling,&excited_states,&ground_states)).collect();
-        let outside:Vec<Dense>=request.beams.iter().map(|b|Dense::block(&b.outside_shift,&all,&all)).collect();
+        let couplings:Vec<Dense>=request.beams.iter().map(|b|rounded(Dense::block(&b.coupling,&excited_states,&ground_states))).collect();
+        let counters:Vec<Dense>=request.beams.iter().map(|b|rounded(Dense::block(&b.counter_coupling,&excited_states,&ground_states))).collect();
+        let outside:Vec<Dense>=request.beams.iter().map(|b|rounded(Dense::block(&b.outside_shift,&all,&all))).collect();
         let detuning=|beam:&Beam|beam.frequency_index.iter().zip(&request.frequencies_mhz).map(|(&n,&f)|n as f64*f).sum::<f64>();
         // The beams of each frequency, in the order of their first.
         let mut frequencies:Vec<Vec<usize>>=vec![];
@@ -1527,15 +1534,17 @@ impl Ground{
         // sides, its decay and its jumps.
         let l0=2.*b.light+2.*b.scattering;self.generator_scale=l0;self.light=b.light;
         let separation=|a:usize,c:usize,beat:f64|b.separation(a,c,beat);
+        // A coupling at the generator's round-off is no term, whatever its frequency: neither kept, for a beat within the generator's scale, nor a far channel of the responses' dressing (`Model::prune` for the tables).
+        let term=|size:f64|size>f64::EPSILON*l0;
         let mut items:Vec<Item>=vec![];
-        for a in 0..ng{for c in a+1..ng{if b.statics[a][c]>0.{
+        for a in 0..ng{for c in a+1..ng{if term(2.*b.statics[a][c].max(b.statics[c][a])){
             items.push(Item{kind:Kind::Static{a,b:c},frequency:separation(a,c,0.),size:2.*b.statics[a][c].max(b.statics[c][a]),folded:false});}}}
         let channels:Vec<Channel>=(0..nc).flat_map(|c|(0..ng).map(move|s|Channel{carrier:c,state:s})).filter(|ch|self.couples(ch.carrier,ch.state)).collect();
         for(i,&x)in channels.iter().enumerate(){for &y in &channels[i+1..]{
             // Absorbing x, emitting into y's carrier and landing in y's state: Ω = (E_y + δ_y) − (E_x + δ_x).
             let beat=self.carriers[y.carrier].detuning-self.carriers[x.carrier].detuning;
             let size=2.*b.raman[x.carrier][y.carrier][y.state][x.state].max(b.raman[y.carrier][x.carrier][x.state][y.state]);
-            if size>0.{items.push(Item{kind:Kind::Raman{first:x,second:y},frequency:separation(y.state,x.state,beat),size,folded:false});}
+            if term(size){items.push(Item{kind:Kind::Raman{first:x,second:y},frequency:separation(y.state,x.state,beat),size,folded:false});}
         }}
         for from in 0..ng{
             let photons:Vec<Photon>=(0..nc).flat_map(|c|(0..ng).map(move|to|Photon{carrier:c,from,to})).filter(|p|b.photons[p.carrier][from][p.to].iter().any(|&n|n>0.)).collect();
@@ -1544,14 +1553,14 @@ impl Ground{
                 // Their frequencies (δ_p + E_from − E_p.to) − (δ_q + E_from − E_q.to).
                 let beat=self.carriers[p.carrier].detuning-self.carriers[q.carrier].detuning;
                 let size:f64=(0..3).map(|x|b.photons[p.carrier][from][p.to][x]*b.photons[q.carrier][from][q.to][x]).sum();
-                if size>0.{items.push(Item{kind:Kind::Photons{first:p,second:q},frequency:separation(q.to,p.to,beat),size,folded:false});}
+                if term(size){items.push(Item{kind:Kind::Photons{first:p,second:q},frequency:separation(q.to,p.to,beat),size,folded:false});}
             }}
         }
         // An explicit state's two photons landing in two ground states: the coherence its jumps make
         // between them, |Σ_a C_a C_a*|, at their separation.
         for e in (0..ne).filter(|&e|explicit[e]){for first in 0..ng{for second in first+1..ng{
             let z=(0..3).fold(Complex::ZERO,|s,a|s+self.emission[a][(first,e)]*self.emission[a][(second,e)].conj());
-            if z.abs()>0.{items.push(Item{kind:Kind::Direct{excited:e,first,second},frequency:separation(first,second,0.),size:z.abs(),folded:false});}
+            if term(z.abs()){items.push(Item{kind:Kind::Direct{excited:e,first,second},frequency:separation(first,second,0.),size:z.abs(),folded:false});}
         }}}
         let(verdicts,cut)=classify(&items.iter().map(|i|(i.frequency,i.size)).collect::<Vec<_>>(),l0);
         for(item,v)in items.iter_mut().zip(verdicts){item.folded=v&&!kept.contains(&item.kind);}

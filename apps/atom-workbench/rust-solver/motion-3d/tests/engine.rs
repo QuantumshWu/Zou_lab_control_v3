@@ -843,6 +843,31 @@ fn a_line_narrower_than_the_grids_stops_the_refinement_with_its_error_booked(){
     assert!(model.table_stalled&&model.table_limit.is_some()&&model.table_error>0.5,"refined to {:?} nodes per axis, its error {:.2e}, stalled {}",model.table_limit,model.table_error,model.table_stalled);
 }
 
+/// The PGC with a resonant probe at other intensities (mW/cm²), its first microseconds: its couplings scaled by the root of the intensity, the outside shifts by the intensity.
+fn probed_at(probe:f64,cooling:f64,duration:usize)->Request{
+    let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..=duration).map(|i|i as f64).collect();
+    for b in r.beams.iter_mut(){
+        let to=if b.id=="probe"{probe}else if b.id.starts_with("cool"){cooling}else{continue};let f=(to/b.intensity_mw_cm2).sqrt();b.intensity_mw_cm2=to;
+        for m in [&mut b.coupling,&mut b.counter_coupling]{for x in m.real.iter_mut().chain(m.imag.iter_mut()){*x*=f;}}
+        for x in b.outside_shift.real.iter_mut().chain(b.outside_shift.imag.iter_mut()){*x*=f*f;}
+    }
+    r
+}
+/// A pilot whose atoms are all lost before the first output, its model's own estimates far past the targets (the resonant probe of 100 mW/cm² with cooling of 30, every drive folded: a charge of 5e8, a
+/// resonance of 53 %), hands over to the next rung: the solve took that model, every atom lost by 1 us, where its 3+12 rung loses none by 2 us (its more explicit rungs agree, 63 % by 100 us). Its run
+/// reads the rung's trap and region: 100 kHz and 136 rad/us, against the all-folded 78 kHz and a region of −53.
+#[test]
+fn a_pilot_that_keeps_no_atom_hands_over_to_the_next_rung(){
+    let s=solve(&probed_at(100.,30.,3),Device::Cpu,&mut |_,_|{}).unwrap();
+    assert!(s.method.contains("显式"),"{}",s.method);assert!(s.loss_probability[2]<0.1,"the loss at 2 us: {:?}",s.loss_probability);
+    assert!(s.trap_frequency_khz[0]>99.,"the trap: {:?} kHz",s.trap_frequency_khz);
+}
+/// A near beam whose fold anti-traps the reference state (the resonant probe of 300 mW/cm² with cooling of 30, every drive folded: 146 % of resonance) is no reason to refuse while a rung keeps that drive.
+#[test]
+fn a_model_with_no_trap_hands_over_to_the_next_rung(){
+    let s=solve(&probed_at(300.,30.,3),Device::Cpu,&mut |_,_|{}).unwrap();
+    assert!(s.method.contains("显式"),"{}",s.method);assert!(s.trap_frequency_khz[0]>99.,"the trap: {:?} kHz",s.trap_frequency_khz);
+}
 /// b1/109's explicit rung: its F = 2 sublevels joined through D1 and D2 explicit states whose frames carry the D1
 /// carrier's detuning, −4.5e7 rad/us in the D2-framed excited manifold. Each frame is its first state's energy plus an
 /// integer combination of the carriers' detunings (ground.rs `Cluster::combinations`): two sublevels' frames along
@@ -1036,16 +1061,17 @@ fn a_tweezer_s_vector_shift_across_the_field_moves_the_responses_to_the_static_b
     assert!(worst.0<=1e-2+5e-3,"the frozen atom's populations {:.4} off the core's at {} us",worst.0,worst.1);
 }
 
-/// A table's relative interpolation error is no error where the table itself is round-off (model.rs `interpolation_error`):
-/// the PGC with a resonant probe with every drive folded holds Raman groups of 1e-53, products of two round-offs a selection
-/// rule leaves, whose "error" of 1.8 read as a pole no grid resolves and stopped its refinement at 33 nodes. What holds anything
-/// interpolates within 1e-3 there, and the refinement goes on or ends by what it saves.
+/// A table that holds only round-off is no term (model.rs `Model::prune`, ground.rs `rounded`, `partition`): the PGC with a resonant probe with every drive folded held Raman groups of 1e-53, products of two round-offs a
+/// selection rule leaves, whose relative "error" of 1.8 read as a pole no grid resolves and stopped its refinement at 33 nodes; the rung of 3+10 at 100 mW/cm² 24 of its 36 groups, 147 %. What holds anything interpolates within 1e-3 there.
 #[test]
 fn a_table_of_round_off_is_no_error(){
     let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..101).map(|i|i as f64).collect();
     let model=Model::with(&r,f64::INFINITY).unwrap();
     println!("limit {:?}, its error {:.3e}, stalled {}",model.table_limit,model.table_error,model.table_stalled);
     assert!(!model.table_stalled&&model.table_error<1e-3&&model.table_error>0.,"its error {:.2e}, stalled {}",model.table_error,model.table_stalled);
+    let v=probed_at(100.,3.,100);let rung=Model::with(&v,Ground::allowances(&v).unwrap()[1]).unwrap();
+    assert!(!rung.table_stalled&&rung.table_error<1e-3,"the rung's error {:.2e}, stalled {}",rung.table_error,rung.table_stalled);
+    assert!(rung.work(1).pairs<=64,"the rung's pairs of fields: {} (141 with those of round-off)",rung.work(1).pairs);
 }
 
 /// A σ⁺σ⁻ molasses on an F = 1 → F′ = 2 line along z, a detuning σ below its centre: the ground states' energies m Ω, the excited states' m′ Ω′, the σ⁺ beam along +z at +δ/2, the σ⁻

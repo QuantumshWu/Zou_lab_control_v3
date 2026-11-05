@@ -684,6 +684,7 @@ impl Model{
     pub(crate) fn of_ground(request:&Request,ground:Ground,fourth:bool)->Result<Model,String>{Model::built(request,ground,fourth,MOST_TABLE_BYTES,MOST_TABLE_NODES)}
     fn built(request:&Request,ground:Ground,fourth:bool,most_bytes:usize,most_nodes:usize)->Result<Model,String>{
         let(mut model,bases)=Model::laid_out(request,ground,fourth)?;
+        model.prune(&bases)?;
         let stake=model.stake(request);model.tabulate(&bases,most_bytes,most_nodes,stake)?;
         model.transfer_tables(request.temperature_uk);
         model.lindblad()?;
@@ -1266,17 +1267,12 @@ impl Model{
                 for js in &f.jumps{kinds.push((js.at,js.at+r(js.inner)*3*ng*ng*n*js.sources(n)));}
                 for &(c2,c4,_,at)in &f.p{kinds.push((at,at+r(c2)*r(c4)*ng*n));}
             }
-            // Per kind its scale and the largest error, the fine grid's nodes on the threads. A kind within the
-            // round-off of the cluster's largest table (H0 apart: the trap's energies, no response) is none: what it
-            // holds is that round-off, or its square, whose relative error no grid shrinks (a Q of 1e-37 between
-            // two carriers' photons a selection rule forbids, 2 % at every grid, the whole 1 G bias PGC's table item).
-            let exact=|i:usize,start:usize,end:usize|&fine.data[b][2*(i*layout.size+start)..2*(i*layout.size+end)];
-            let modulus=|x:&[f64]|x.chunks_exact(2).map(|z|z[0].hypot(z[1])).fold(0_f64,f64::max);
-            let scales:Vec<f64>=kinds.iter().map(|&(start,end)|inside.par_iter().map(|&i|modulus(exact(i,start,end))).reduce(||0.,f64::max)).collect();
-            let floor=64.*f64::EPSILON*scales[1..].iter().fold(0_f64,|m,&x|m.max(x));
-            for(k,(&(start,end),&scale))in kinds.iter().zip(&scales).enumerate(){
-                if scale==0.||(k>0&&scale<=floor){continue;}
-                let exact=|i:usize|exact(i,start,end);
+            // Per kind its scale and the largest error, the fine grid's nodes on the threads.
+            for(start,end)in kinds{
+                let exact=|i:usize|&fine.data[b][2*(i*layout.size+start)..2*(i*layout.size+end)];
+                let modulus=|x:&[f64]|x.chunks_exact(2).map(|z|z[0].hypot(z[1])).fold(0_f64,f64::max);
+                let scale=inside.par_iter().map(|&i|modulus(exact(i))).reduce(||0.,f64::max);
+                if scale==0.{continue;}
                 let e=inside.par_iter().map_init(||vec![Complex::ZERO;end-start],|out,&i|{
                     self.interpolate(b,&self.stencil(&self.grid_point(fine.nodes,i)[..d]),None,start,out);
                     out.iter().zip(exact(i).chunks_exact(2)).fold(0_f64,|m,(x,y)|m.max((x.re-y[0]).hypot(x.im-y[1])))
@@ -1285,6 +1281,27 @@ impl Model{
             }
         }
         worst
+    }
+    /// The groups' entries that hold nothing out of the clusters and the layouts: those whose term, its fields at their peak times its S or Q over the first grid, stays within the round-off of the
+    /// cluster's largest. What the dressed responses leave between channels a selection rule keeps apart is no term, whatever its beat: 1e-23 rad/us on a resonant probe's rung of 3+10 against its 8, 24 of its
+    /// 36 groups, all computed in every generator call, as is the decay's between folded photons a class joins (`Ground`'s rule keeps a pair by its undressed size; `Model::lindblad` holds a cluster's decay to its jumps at this round-off).
+    fn prune(&mut self,mixing:&[Vec<Vec<Complex>>])->Result<(),String>{
+        let first=self.grid_tables(FIRST_NODES,mixing,None)?;let nodes=first.nodes.pow(self.focused.len() as u32);
+        let peak:Vec<[f64;MOST_RANK]>=self.carriers.iter().map(|c|std::array::from_fn(|k|c.coefficients.iter().map(|x|x[k].abs()).sum())).collect();
+        for(k,layout)in self.layouts.iter().enumerate(){
+            let modulus=|node:usize,x:usize|{let i=2*(node*layout.size+x);first.data[k][i].hypot(first.data[k][i+1])};
+            let rates:Vec<Vec<f64>>=layout.groups.iter().map(|gl|{let count=gl.entries.len();(0..count).map(|j|gl.pairs.iter().enumerate().map(|(p,&(k1,k0))|{
+                let largest=(0..nodes).map(|node|modulus(node,gl.s+p*count+j).max(modulus(node,gl.q+p*count+j))).fold(0.,f64::max);largest*peak[gl.emitted][k1]*peak[gl.absorbed][k0]}).fold(0.,f64::max)).collect()}).collect();
+            let floor=f64::EPSILON*rates.iter().flatten().copied().fold(0.,f64::max);
+            let cl=&mut self.ground.clusters[k];
+            for(gl,rate)in layout.groups.iter().zip(&rates){for(&(x,y),_)in gl.entries.iter().zip(rate).filter(|(_,&r)|r<=floor){
+                if gl.decay{cl.folded_crosses.retain(|c|!(c.row==x&&c.col==y&&c.absorbed==gl.absorbed&&c.emitted==gl.emitted&&c.residual==gl.residual));}
+                else if let Some(g)=cl.groups.iter_mut().find(|g|g.absorbed==gl.absorbed&&g.emitted==gl.emitted){g.entries.retain(|e|!(e.0==x&&e.1==y&&e.2==gl.residual));}
+            }}
+            cl.groups.retain(|g|!g.entries.is_empty());
+        }
+        self.layouts=self.layouts(mixing);self.fourth_dropped=self.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();
+        Ok(())
     }
     /// The tables on grids of FIRST_NODES, then doubled (each grid's nodes computed once), the finer grid
     /// kept with the coarser one's measured error against it (`interpolation_error`, an upper estimate of
