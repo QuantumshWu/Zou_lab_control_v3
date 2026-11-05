@@ -165,7 +165,7 @@ fn close(got: &[f64], want: &[f64]) {
 /// Then the same variables over what it sealed, as `<node>_sealed`.
 fn both_routes(host: &PluginHost, events: &mpsc::Receiver<HostEvent>, runtime: &Runtime, values: Value, node: &str, variables: &Value, outputs: &[&str]) {
     // Its own name: a node run again leaves its last generation standing until it publishes.
-    let source = &format!("@logic/repeater/{node}_counts");
+    let source = &format!("@logic/repeater_{node}/counts");
     let source = source.as_str();
     let named = |node: &str| outputs.iter().map(|name| ((*name).to_owned(), format!("@logic/{node}/{name}"))).collect::<Vec<_>>();
     let start = |node: &str| {
