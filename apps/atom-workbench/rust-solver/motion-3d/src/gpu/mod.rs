@@ -77,6 +77,8 @@ pub struct Gpu{
     pub startup:Startup,
     pub driver_version:i32,
     motion:Function,
+    /// Where the module keeps the program its kernels read (the kernel's `P`).
+    program:driver::DevicePtr,
     stream:Stream,
     blocks_per_multiprocessor:i32,
     merge:Function,
@@ -135,10 +137,10 @@ impl Gpu{
         let clock=Instant::now();let context=Context::new(device)?;let context_ms=clock.elapsed().as_secs_f64()*1e3;
         let clock=Instant::now();
         let module=context.load(ptx).map_err(|e|format!("驱动无法编译 GPU 内核（{e}）"))?;
-        let motion=module.function("motion3d")?;motion.prefer_shared()?;let merge=module.function("merge")?;let sums=module.function("task_sums")?;
+        let motion=module.function("motion3d")?;motion.prefer_shared()?;let merge=module.function("merge")?;let sums=module.function("task_sums")?;let program=module.global("P")?;
         let module_ms=clock.elapsed().as_secs_f64()*1e3;
         let blocks_per_multiprocessor=(motion.occupancy(32)?/WARPS as i32).max(1);
-        Ok(Gpu{info:device.clone(),startup:Startup{driver_ms,context_ms,module_ms},driver_version:version,motion,stream:Stream::new()?,blocks_per_multiprocessor,merge,sums,
+        Ok(Gpu{info:device.clone(),startup:Startup{driver_ms,context_ms,module_ms},driver_version:version,motion,program,stream:Stream::new()?,blocks_per_multiprocessor,merge,sums,
             profiled:profiled.then(||Mutex::new(vec![0;SPANS.len()])),kernel_us:AtomicU64::new(0),module,context})
     }
     /// A kernel of the module by name (the checks' kernels).
@@ -153,6 +155,8 @@ impl Gpu{
     pub fn kernel_seconds(&self)->f64{self.kernel_us.load(Ordering::Relaxed) as f64*1e-6}
     /// The profiled kernel's counters summed over every trajectory it ran (`SPANS`); None unprofiled.
     pub fn spans(&self)->Option<Vec<u64>>{self.profiled.as_ref().map(|s|s.lock().unwrap_or_else(|e|e.into_inner()).clone())}
+    /// The program the kernels read until the next call, on the calling thread's context (one solve holds the process's GPU at a time).
+    fn set(&self,program:&Program)->Result<(),String>{self.context.make_current()?;self.stream.put(self.program,&program.params)}
     /// A model and its step's settings on the device.
     pub fn program(&self,model:&Model,settings:&Settings)->Result<Program,String>{self.context.make_current()?;Program::new(&self.stream,model,settings)}
 
@@ -162,7 +166,7 @@ impl Gpu{
     /// trajectories only through the output `ends[g]` (lib.rs `simulate_to`), half a period past it, its sums counting none beyond.
     pub fn simulate(&self,program:&Program,model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],
         variates:Option<&Variates>,ends:Option<&[usize]>)->Result<Outcome,String>{
-        self.context.make_current()?;let clock=Instant::now();
+        self.set(program)?;let clock=Instant::now();
         let controls=Controls::new(&self.stream,model,settings,variates)?;let mut cycles=[0u64;2];
         // The tasks in order: (their group, their first trajectory, the one after their last), as lib.rs `run`.
         let bounds=|g:u64|(first+g*group,(first+(g+1)*group).min(first+count));
@@ -208,7 +212,7 @@ impl Gpu{
     /// The trajectories after `steps` steps of the settings' dt on the GPU (engine.rs `Engine::step`
     /// each): the checks' entry, one launch without the motion windows.
     pub fn advance(&self,program:&Program,settings:&Settings,trajectories:&[Trajectory],steps:usize)->Result<Vec<Trajectory>,String>{
-        self.context.make_current()?;
+        self.set(program)?;
         let seed=trajectories.first().map_or(0,|t|t.seed);
         if trajectories.iter().any(|t|t.seed!=seed){return Err("the trajectories of a launch share their run's seed".into());}
         let mut plain=settings.clone();plain.average=false;
@@ -221,10 +225,10 @@ impl Gpu{
     /// A trajectory's cluster's components at its point as the exact step takes them (the kernel's
     /// `exact_components`, a check's entry): per part H_q, then per part and axis G_q, each n × n row-major.
     pub fn exact_probe(&self,program:&Program,model:&Model,settings:&Settings,t:&Trajectory)->Result<Vec<Complex>,String>{
-        self.context.make_current()?;
+        self.set(program)?;
         let(n,q)=(model.dimension(t.cluster),1+model.beats(t.cluster).0.len());let size=5*q*n*n;
         let state=Buffer::with(&self.stream,&[program::State::new(t,t,settings)])?;let out=Buffer::new(8*size.max(program.exact))?;
-        let f=self.function("exact_probe")?;self.stream.launch(&f,1,32,&[&program.params,&state.pointer,&out.pointer])?;
+        let f=self.function("exact_probe")?;self.stream.launch(&f,1,32,&[&state.pointer,&out.pointer])?;
         let mut words=vec![[0f32;2];size];self.stream.download(&out,&mut words)?;
         Ok(words[..4*q*n*n].iter().map(|z|Complex::new(z[0] as f64,z[1] as f64)).collect())
     }
@@ -233,10 +237,10 @@ impl Gpu{
     /// entry): per near beam (in the beams' order), cluster column, axis a and ground state `to`, (C_a R_l)[to, b];
     /// Err where a resolvent is singular.
     pub fn response_probe(&self,program:&Program,settings:&Settings,t:&Trajectory)->Result<Vec<Complex>,String>{
-        self.context.make_current()?;
+        self.set(program)?;
         let size=program.params.nnear as usize*program::MAXN*3*crate::model::GROUND;
         let state=Buffer::with(&self.stream,&[program::State::new(t,t,settings)])?;let out=Buffer::new(8*(size+program::NE*32+program.params.ncarriers as usize*program::MAXN*program::MAXN))?;
-        let f=self.function("response_probe")?;self.stream.launch(&f,1,32,&[&program.params,&state.pointer,&out.pointer])?;
+        let f=self.function("response_probe")?;self.stream.launch(&f,1,32,&[&state.pointer,&out.pointer])?;
         let mut words=vec![[0f32;2];size];self.stream.download(&out,&mut words)?;
         if words[0][0].is_nan(){return Err("The excited states' resolvent is singular".into());}
         Ok(words.iter().map(|z|Complex::new(z[0] as f64,z[1] as f64)).collect())
@@ -245,10 +249,10 @@ impl Gpu{
     /// A trajectory after a jump at its position and time on the GPU (engine.rs `Engine::jump`, the first
     /// order in the Doppler shift or, where `exact`, the exact response; a check's entry): the kernel's `jump_probe`.
     pub fn jump_probe(&self,program:&Program,settings:&Settings,t:&Trajectory,exact:bool)->Result<Trajectory,String>{
-        self.context.make_current()?;
+        self.set(program)?;
         let state=Buffer::with(&self.stream,&[program::State::new(t,t,settings)])?;let scratch=Buffer::new(8*program.scratch())?;
         let mut run=program::Run::empty();run.seed=t.seed;
-        let f=self.function("jump_probe")?;self.stream.launch(&f,1,32,&[&program.params,&run,&state.pointer,&scratch.pointer,&(exact as i32)])?;
+        let f=self.function("jump_probe")?;self.stream.launch(&f,1,32,&[&run,&state.pointer,&scratch.pointer,&(exact as i32)])?;
         let mut out=[program::State::default()];self.stream.download(&state,&mut out)?;
         Ok(out[0].trajectory(settings,t.seed))
     }
@@ -290,7 +294,7 @@ impl Gpu{
             while begin<w.intervals&&standing.len()<reports.len(){
                 run.begin=begin as i32;run.end=(begin+MOST_INTERVALS).min(w.intervals) as i32;run.costs=reports[launched%reports.len()].address();
                 let(start,end)=(Event::new()?,Event::new()?);
-                self.stream.record(&start)?;self.stream.launch(&self.motion,(WARPS*n) as u32,32,&[&program.params,&run])?;self.stream.record(&end)?;
+                self.stream.record(&start)?;self.stream.launch(&self.motion,(WARPS*n) as u32,32,&[&run])?;self.stream.record(&end)?;
                 standing.push_back((start,end,launched%reports.len()));launched+=1;
             }
             let(start,end,report)=standing.pop_front().unwrap();end.synchronize()?;

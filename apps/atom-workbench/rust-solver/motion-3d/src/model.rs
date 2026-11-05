@@ -1557,8 +1557,9 @@ impl Model{
     /// A cluster's work in the GPU's kernel, a warp's cycles (solve.rs `kernel_interval`): a step, its table pairs' gathers and the
     /// fourth order's slabs beside its fixed parts, and a jump, every class's photons at the second order and the fourth's W3 and forms
     /// at their own rates. A static cluster's: against a wave of 576 at both orders on PGC3D, TET, THREE, GMD1C and DEFAULT, on a laptop's RTX 5070, the
-    /// counts' totals within 15 % of the cycles and their ratios between the orders within about 20 % (PGC3D 1.81 against 1.87, GMD1C 2.55 against
-    /// 2.85, THREE 1.73 against 2.17). Fixed numbers, one GPU's: another's own ratios change no choice here, only how well it fits that GPU.
+    /// ratios between the orders, what a choice between them reads, within about 20 % (PGC3D 1.81 against 1.71, TET 1.83 against 1.83, GMD1C 2.53 against
+    /// 2.84, THREE 1.69 against 2.03), the totals 1.1 to 1.6 times the cycles (fitted to a kernel some 30 % slower per step, the ratios unmoved beyond this).
+    /// Fixed numbers, one GPU's: another's own ratios change no choice here, only how well it fits that GPU.
     pub fn kernel_work(&self,cluster:usize)->[f64;2]{
         let layout=&self.layouts[cluster];let w=self.work(cluster);let nodes=(1usize<<(2*self.focused.len())) as f64;
         let second:f64=self.carriers.iter().map(|c|c.rank as f64*3.*self.ground.ground_states.len() as f64*layout.n as f64*(2.*nodes+1.)).sum();

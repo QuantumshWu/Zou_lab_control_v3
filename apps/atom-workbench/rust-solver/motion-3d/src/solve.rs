@@ -683,7 +683,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // The generator before the rule, every candidate's start (`next_candidate`); the rule's allowances from it, past the first -- every drive folded -- only where a rung is wanted.
     let bare=Ground::bare(request)?;let mut rungs=None;
     let mut ladder=std::iter::once(f64::INFINITY).chain(std::iter::from_fn(||rungs.get_or_insert_with(||bare.rungs().into_iter().skip(1)).next()));let mut failed=None;
-    let Some(mut pilot_candidate)=next_candidate(request,&bare,&mut ladder,&mut failed)else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
+    let Some(mut pilot_candidate)=next_candidate(request,&bare,&mut ladder,&mut failed,&mut vec![])else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
     pilot_candidate.settle();
     // A generator that gains on the ladder's first rung, every drive folded, is the fold's construction failing
     // (model.rs `Model::lindblad`), not a regime to escalate into explicit states: the solve stops with why.
@@ -693,7 +693,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // estimates lie past the targets hands over to the next rung, which keeps that drive (a resonant probe of 300 mW/cm², cooling of 30: 146 % of resonance with every drive folded); the last refuses.
     let mut shapes=vec![pilot_candidate.folds()];
     while pilot_candidate.reference().0.frequencies.iter().any(|&w|!(w>0.)){
-        let next=if pilot_candidate.past_their_targets(){next_shape(request,&bare,&mut ladder,&mut failed,&mut shapes)}else{None};
+        let next=if pilot_candidate.past_their_targets(){next_candidate(request,&bare,&mut ladder,&mut failed,&mut shapes)}else{None};
         let Some(next)=next else{return Err(Stop::Error(match resonance(&pilot_candidate.model){Some(r)=>format!("{r}：光镊的势阱无从判断"),None=>NOT_CONFINED.into()}))};
         pilot_candidate=next;pilot_candidate.settle();
     }
@@ -745,7 +745,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let(pilot_harmonic,pilot_states,pilot_jumps,pilot_groups)=loop{
         let harmonic=Harmonic::new(&pilot_candidate.model,&piloting(pilot_candidate.reference(),steps,start_waiting,pilot_candidate.phase),&pilot_candidate.initial,steps,outputs);
         let(states,jumps,groups)=sample_states(&pilot_candidate.model,&piloting(pilot_candidate.reference(),steps,start_waiting,pilot_candidate.phase),&pilot_candidate.initial,seed,pilot,steps,outputs,&harmonic);
-        if states.is_empty()&&pilot_candidate.past_their_targets(){if let Some(next)=next_shape(request,&bare,&mut ladder,&mut failed,&mut shapes){pilot_candidate=next;(starts,start_waiting)=begin(&mut pilot_candidate);continue;}}
+        if states.is_empty()&&pilot_candidate.past_their_targets(){if let Some(next)=next_candidate(request,&bare,&mut ladder,&mut failed,&mut shapes){pilot_candidate=next;(starts,start_waiting)=begin(&mut pilot_candidate);continue;}}
         break(harmonic,states,jumps,groups);
     };
     let(trap,period)={let t=pilot_candidate.reference().0;(t,slowest_period(&t))};
@@ -849,7 +849,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // size between them, its biases the same at the rung's tolerances.
     let(mut rung,mut doubled)=(None,Vec::<(Vec<(Vec<usize>,Vec<usize>)>,[f64;3],[f64;2])>::new());
     if open{
-        while let Some(mut c)=next_shape(request,&bare,&mut ladder,&mut failed,&mut shapes){
+        while let Some(mut c)=next_candidate(request,&bare,&mut ladder,&mut failed,&mut shapes){
             c.charged(charge_of(&pilot_candidate.model,&c.model));
             // Its grid on the pilot's states carried into it, bare as a jump leaves them (`grid_phase`).
             let period=slowest_period(&c.reference().0);let mut at=running(c.reference(),steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase);
@@ -1160,14 +1160,13 @@ impl Candidate{
     fn reference(&self)->(Trap,f64){let i=&self.initial;let k=(0..i.states.len()).max_by(|&a,&b|i.states[a].2.total_cmp(&i.states[b].2)).unwrap();(i.traps[k],i.depths[k])}
 }
 /// The next candidate along the rule's allowances that builds (a model that fails, its tables not
-/// converging, is passed over with its error kept).
-fn next_candidate(request:&Request,bare:&Ground,ladder:&mut dyn Iterator<Item=f64>,failed:&mut Option<String>)->Option<Candidate>{
-    for a in ladder{match bare.clustered(a).and_then(|ground|Candidate::new(request,ground,a,false)){Ok(c)=>return Some(c),Err(e)=>{failed.get_or_insert(e);}}}
-    None
-}
-/// The next candidate along the rule's allowances that is a model of its own (`next_candidate`): a rung whose closure folds the same drives as an earlier one's is the same model.
-fn next_shape(request:&Request,bare:&Ground,ladder:&mut dyn Iterator<Item=f64>,failed:&mut Option<String>,shapes:&mut Vec<Vec<bool>>)->Option<Candidate>{
-    while let Some(c)=next_candidate(request,bare,ladder,failed){let folds=c.folds();if !shapes.contains(&folds){shapes.push(folds);return Some(c);}}
+/// converging, is passed over with its error kept), past the rungs whose closure folds the same drives as one in `shapes`, the same model, before their tables.
+fn next_candidate(request:&Request,bare:&Ground,ladder:&mut dyn Iterator<Item=f64>,failed:&mut Option<String>,shapes:&mut Vec<Vec<bool>>)->Option<Candidate>{
+    for a in ladder{
+        let ground=match bare.clustered(a){Ok(ground)=>ground,Err(e)=>{failed.get_or_insert(e);continue;}};
+        let folds:Vec<bool>=ground.excited_items.iter().map(|x|x.folded).collect();if shapes.contains(&folds){continue;}
+        match Candidate::new(request,ground,a,false){Ok(c)=>{shapes.push(folds);return Some(c);},Err(e)=>{failed.get_or_insert(e);}}
+    }
     None
 }
 /// A trap's slowest axis's period: the span of T's step error (`orbits`).
@@ -1448,13 +1447,16 @@ fn temperature_tolerance(weight:f64,apriori:f64)->f64{(BIAS_SHARE*run_room(TEMPE
 fn step_excess(engine:&Engine,states:&[Trajectory],binding:&[f64],waiting:f64,probes:&Probes,period:f64,escape:f64,tolerances:[f64;2],deposits:&Deposits)->[f64;3]{
     let dt=engine.settings.dt;let richardson=4./3.;let count=states.len().max(1) as f64;
     // The states' doublings on the threads, summed in their order (the sums do not depend on the threads).
-    let doubled:Vec<([f64;2],[f64;3])>=states.par_iter().map(|t|engine.doubling(t,dt)).collect();
+    let doubled:Vec<([f64;2],[f64;3],([f64;3],[f64;3]))>=states.par_iter().map(|t|engine.doubling(t,dt)).collect();
     // The impulse's relative error: over the states as T's target weighs them against its tolerance where it binds, and over all against the T target itself.
     let(mut population,mut difference,mut impulse,mut whole)=(0.,0.,0.,[0.;2]);
-    for((motion,internal),&w)in doubled.iter().zip(binding){difference+=w*motion[0];impulse+=w*motion[1];whole[0]+=motion[0];whole[1]+=motion[1];population+=internal[0];}
+    for((motion,internal,_),&w)in doubled.iter().zip(binding){difference+=w*motion[0];impulse+=w*motion[1];whole[0]+=motion[0];whole[1]+=motion[1];population+=internal[0];}
     let bound=richardson*population/count*(waiting/dt).max(1.);
     let relative=if impulse>0.{richardson*difference/impulse}else{0.};let anywhere=if whole[1]>0.{richardson*whole[0]/whole[1]}else{0.};
-    let energy=orbits(engine,probes,period,tolerances[1].min(if escape>0.{tolerances[0]/escape}else{f64::INFINITY})).max(heating(engine,states,&deposits.of(engine.model,states,engine.settings.doppler)));
+    // The motion's error is the largest of its criteria: below the others' -- the loss's reads the energy's alone -- the orbits' moves nothing.
+    let heat=heating(engine,states,&deposits.of(engine.model,states,engine.settings.doppler),&doubled.iter().map(|d|d.2).collect::<Vec<_>>());
+    let floor=if escape>0.{heat}else{heat.max(relative).max(anywhere*tolerances[1]/TEMPERATURE_TARGET)};
+    let energy=orbits(engine,probes,period,tolerances[1].min(if escape>0.{tolerances[0]/escape}else{f64::INFINITY}),floor).max(heat);
     [bound/tolerances[0],escape*energy/tolerances[0],(relative.max(energy)/tolerances[1]).max(anywhere/TEMPERATURE_TARGET)]
 }
 
@@ -1466,7 +1468,10 @@ fn step_excess(engine:&Engine,states:&[Trajectory],binding:&[f64],waiting:f64,pr
 /// within its step, by the chance R(1 − u) dt after one at u, keeps the first one's place: per jump the net
 /// −(R_j dt/12) S, R_j = E[R²]/E[R] the hazard at the jumps -- over the recoil per jump E[R r]/E[R], with
 /// E[c ΔR] its magnitude plus CONFIDENCE standard errors. Zero without jumps.
-pub fn jumps(engine:&Engine,states:&[Trajectory])->f64{heating(engine,states,&deposits(engine.model,states,engine.settings.doppler))}
+pub fn jumps(engine:&Engine,states:&[Trajectory])->f64{
+    let ends:Vec<([f64;3],[f64;3])>=states.par_iter().map(|t|{let end=engine.coast(t,engine.settings.dt,1);(end.r,end.kappa)}).collect();
+    heating(engine,states,&deposits(engine.model,states,engine.settings.doppler),&ends)
+}
 /// A sampled state's ψ normalized, and its hazard ⟨ψ|i(H − H†)|ψ⟩ with the generator at a point, at the state's time.
 fn normalized(model:&Model,t:&Trajectory)->[Complex;MOST_MIXED]{
     let n=model.dimension(t.cluster);let size=t.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();
@@ -1489,12 +1494,12 @@ impl Deposits{
         std::cell::Ref::map(self.0.borrow(),|x|&x.as_ref().unwrap().1)
     }
 }
-/// `jumps` from its `deposits`: per state the hazard's change over the jump-free step.
-fn heating(engine:&Engine,states:&[Trajectory],deposits:&[[f64;3]])->f64{
+/// `jumps` from its `deposits` and each state's (r, κ) at the end of its jump-free step: per state the hazard's change over that step.
+fn heating(engine:&Engine,states:&[Trajectory],deposits:&[[f64;3]],ends:&[([f64;3],[f64;3])])->f64{
     let(model,dt)=(engine.model,engine.settings.dt);
-    let parts:Vec<[f64;4]>=states.par_iter().zip(deposits).map(|(t,&[rate,cross,recoil])|{
-        let psi=normalized(model,t);let end=engine.coast(t,dt,1);
-        [rate,rate*rate,cross*(hazard(model,t,&psi,end.r,end.kappa)-rate),rate*recoil]}).collect();
+    let parts:Vec<[f64;4]>=states.par_iter().zip(deposits).zip(ends).map(|((t,&[rate,cross,recoil]),&(r,kappa))|{
+        let psi=normalized(model,t);
+        [rate,rate*rate,cross*(hazard(model,t,&psi,r,kappa)-rate),rate*recoil]}).collect();
     let n=parts.len() as f64;let sum=|k:usize|parts.iter().map(|x|x[k]).sum::<f64>();
     let(rate,square,heating)=(sum(0),sum(1),sum(3));if !(n>1.&&rate>0.&&heating>0.){return 0.;}
     let mean=sum(2)/n;let error=(parts.iter().map(|x|(x[2]-mean).powi(2)).sum::<f64>()/(n*(n-1.))).sqrt();
@@ -1566,8 +1571,9 @@ fn layer_place(j:u32,weights:&[f64])->usize{
 /// chaotic -- dt and dt/2 part ways, their κ² windows 20-40 % apart at the step the mean differs by 1 % --, so that with one
 /// probe per pilot trajectory the standard error rested on those few and the 3D PGC's step moved by 1.8 times between its
 /// pilot's draws: the probes' layers (`bound_probes`) are added, doubling their number, until the errors are within the
-/// step's share of `tolerance` or the magnitude less the errors lies beyond it, or none are left (the same steps within 6 %).
-fn orbits(engine:&Engine,probes:&Probes,period:f64,tolerance:f64)->f64{
+/// step's share of `tolerance` or the magnitude less the errors lies beyond it, or none are left (the same steps within 6 %). Where its magnitude and errors lie within `floor`, what the step's other
+/// criteria hold the motion's error to, it reads no further, from a group's trajectories' probes up: the flows are the dearest of a check on an exact step (of PGCP_10's search all of its 36 000 exact steps), and most stand below the others.
+fn orbits(engine:&Engine,probes:&Probes,period:f64,tolerance:f64,floor:f64)->f64{
     if probes.states.is_empty(){return 0.;}
     // The flow takes no jump over the period: its exponentials and beats are held within the step's share over the
     // period as a run's are over a waiting time (`running`) -- summed past the waiting they were set for, their
@@ -1581,13 +1587,14 @@ fn orbits(engine:&Engine,probes:&Probes,period:f64,tolerance:f64)->f64{
                 for a in 0..3{sum[a]+=x.kappa[a]*x.kappa[a];}}
             sum.map(|v|v/n as f64)};
         [mean(dt,steps),mean(0.5*dt,2*steps)]};
-    let mut windows:Vec<[[f64;3];2]>=vec![];let mut count=probes.first.min(probes.states.len());
+    let first=probes.first.min(probes.states.len());let mut windows:Vec<[[f64;3];2]>=vec![];let mut count=first.min(TASK as usize);
     loop{
         windows.extend(probes.states[windows.len()..count].par_iter().map(|t|flow(t)).collect::<Vec<_>>());
         let axes=paired_error(&windows);
         let bound=axes.iter().map(|&x|orbit_bound(x,tolerance)).fold(0.,f64::max);
-        if axes.iter().map(|x|x[1]).fold(0.,f64::max)<=BIAS_SHARE*tolerance||axes.iter().any(|x|x[0]-x[1]>tolerance)||count==probes.states.len(){return bound;}
-        count=(2*count).min(probes.states.len());
+        if axes.iter().map(|x|x[0]+x[1]).fold(0.,f64::max)<=floor{return bound;}
+        if count>=first&&(axes.iter().map(|x|x[1]).fold(0.,f64::max)<=BIAS_SHARE*tolerance||axes.iter().any(|x|x[0]-x[1]>tolerance)||count==probes.states.len()){return bound;}
+        count=if count<first{(2*count).min(first)}else{(2*count).min(probes.states.len())};
     }
 }
 
