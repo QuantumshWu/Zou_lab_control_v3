@@ -624,6 +624,11 @@ impl Segment{
         let how=How::Beating(Entries::new(&components,truncation/(2*steps) as f64));
         Segment{components,start,spacing:tau/steps as f64,how,dropped:0.}
     }
+    /// A beating segment at half the spacing, of the same components (`Engine::grid_error`), over its step of τ.
+    fn refined(&self,tau:f64,truncation:f64)->Segment{
+        let steps=2*(tau/self.spacing).round() as usize;
+        Segment{components:self.components.clone(),start:self.start,spacing:tau/steps as f64,how:How::Beating(Entries::new(&self.components,truncation/(2*steps) as f64)),dropped:self.dropped}
+    }
     /// The beats a step resolves: the pairs ±Ω whose cost on the step (`bounds`) is within the share are
     /// left out, the cheapest first while their costs' sum stays within it -- on ‖ψ‖ and on the static
     /// force's integral ‖G₀‖τ. Their cost.
@@ -1113,15 +1118,21 @@ impl<'a> Engine<'a>{
         let weighted=s.weighted(&s.enter(psi),tau,0.).map(|d|(tau/d).round() as usize);
         Probe{path,spacing:s.spacing,nodes:(tau/s.spacing).round() as usize,beats:work.pairs.iter().map(|&(i,x,_)|(omegas[i],x,!kept.contains(&omegas[i]))).collect(),share:self.settings.beats,seconds:[built,segment],weighted,node}
     }
+    /// The largest phase whose grid differs from the next coarser's at a trajectory's state: its step in one panel of two spacings. None where its cluster takes no beating segment (solve.rs `grid_phase`).
+    pub fn coarsest_phase(&self,t:&Trajectory)->Option<f64>{
+        if !self.takes_exact(t.cluster){return None;}
+        let(m,s)=(self.model,&self.settings);
+        let segment=Segment::new(m.components(t.cluster,&m.point(t.r,t.kappa)),t.time,s.dt,s.truncation,s.beats,s.horizon,s.node_phase);
+        matches!(segment.how,How::Beating(_)).then(||s.node_phase*s.dt/(2.*segment.spacing))
+    }
     /// A beating segment's grid at `phase` against one of half that spacing, one jump-free step from a trajectory's state at its
     /// point: the largest difference of its populations, of the impulse, and the impulse's size; None where its cluster
-    /// takes no beating segment, or where a step within a spacing leaves the two one grid and nothing to read (solve.rs `grid_phase`).
+    /// takes no beating segment (solve.rs `grid_phase`).
     pub fn grid_error(&self,t:&Trajectory,phase:f64)->Option<[f64;3]>{
         if !self.takes_exact(t.cluster){return None;}
         let(m,s)=(self.model,&self.settings);let n=m.dimension(t.cluster);let c=m.components(t.cluster,&m.point(t.r,t.kappa));
-        let at=|c:Components,phase:f64|Segment::new(c,t.time,s.dt,s.truncation,s.beats,s.horizon,phase);
-        let coarse=at(c.clone(),phase);if !matches!(coarse.how,How::Beating(_)){return None;}
-        let fine=at(c,0.5*phase);if fine.spacing==coarse.spacing{return None;}let(mut a,mut b)=(t.psi,t.psi);
+        let coarse=Segment::new(c,t.time,s.dt,s.truncation,s.beats,s.horizon,phase);if !matches!(coarse.how,How::Beating(_)){return None;}
+        let fine=coarse.refined(s.dt,s.truncation);let(mut a,mut b)=(t.psi,t.psi);
         let(_,_,one)=coarse.evolve(&mut a,t.time,s.dt,0.);let(_,_,two)=fine.evolve(&mut b,t.time,s.dt,0.);
         let(x,y)=(norm2(&a,n),norm2(&b,n));
         Some([(0..n).map(|i|(a[i].norm_sqr()/x-b[i].norm_sqr()/y).abs()).fold(0.,f64::max),(0..3).map(|k|(one[k]-two[k]).powi(2)).sum::<f64>().sqrt(),two.iter().map(|v|v*v).sum::<f64>().sqrt()])
@@ -1132,7 +1143,8 @@ impl<'a> Engine<'a>{
         let(m,s)=(self.model,&self.settings);let point=m.point(t.r,t.kappa);let c=m.components(t.cluster,&point);
         let at=|c:Components,phase:f64|Segment::new(c,t.time,s.dt,s.truncation,s.beats,s.horizon,phase);
         let coarse=m.beating(t.cluster).then(||at(c.clone(),phase)).filter(|x|matches!(x.how,How::Beating(_)));
-        (self.landings(t,&point,&at(c,0.5*phase),groups,count,draws),coarse.map(|x|self.landings(t,&point,&x,groups,count,draws)))
+        let fine=match &coarse{Some(x)=>x.refined(s.dt,s.truncation),None=>at(c,0.5*phase)};
+        (self.landings(t,&point,&fine,groups,count,draws),coarse.map(|x|self.landings(t,&point,&x,groups,count,draws)))
     }
     /// A step's landings through a segment: at each read the photons of the state the evolution holds there, which a jump would take -- off a copy from the last whole panel before it, as a jump's
     /// (`Segment::evolve`), the grid's own path going on untouched: reads that broke its panels refined the grid they read (F = 1 on a PGC's explicit rung at phase 9.9, 0.06 at 4 reads, 0.0003 at 32).

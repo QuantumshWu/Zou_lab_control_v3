@@ -1790,39 +1790,38 @@ const PROBED:usize=256;
 /// states -- at most `PROBED` of them, evenly spread, each one jump-free step against a grid of half the spacing, 16/15
 /// their difference, CF4's and Simpson's order. The populations' largest difference, its mean plus CONFIDENCE standard
 /// errors, within the numerical share of the population target (`Settings::beats`: over the waiting time, `NUMERICAL_SHARE` ε), and the impulse's within `QUADRATURE`
-/// of its size. By the fourth root of its excess, from twice the quadrature's bound, and between the largest phase met and the smallest
-/// missed on the logarithms' line, until one's excess lies within a factor two of its share: beyond the fourth order's range the grid aliases the force's beats.
+/// of its size. From the coarsest grid down (`largest_met`): a read costs as its nodes, so that a search pays about what its last read costs. From the quadrature's bound upward its first read, far finer than the phase it came to, was
+/// nearly all of its work (of a 16-state rung that lost by 147 times, 583 of its 606 CPU-s, against the run's 40): beyond the fourth order's range the grid aliases the force's beats.
 /// And, on what it finds, what the grid lands over the run between the groups of ground states `landing` names with the run's span (`landed_excess`; a pilot's first read of its starts takes none), the same
 /// search below that phase where it misses. The bound's own where no state of `at` takes a beating grid.
 pub fn grid_phase(model:&Model,states:&[Trajectory],at:&Settings,landing:Option<(&[usize],f64)>)->f64{
     if !(0..model.clusters()).any(|k|model.beating(k)){return node_phase();}
     let engine=Engine::new(model,at.clone());let picked:Vec<&Trajectory>=states.iter().step_by((states.len()/PROBED).max(1)).collect();
-    let excess=|phase:f64|->Option<f64>{
-        let errors:Vec<[f64;3]>=picked.par_iter().filter_map(|t|engine.grid_error(t,phase)).collect();if errors.is_empty(){return None;}
+    let coarsest=picked.par_iter().filter_map(|t|engine.coarsest_phase(t)).reduce(||0.,f64::max);if !(coarsest>0.){return node_phase();}
+    let excess=|phase:f64|->f64{
+        let errors:Vec<[f64;3]>=picked.par_iter().filter_map(|t|engine.grid_error(t,phase)).collect();
         let m=errors.len() as f64;let sum=|k:usize|errors.iter().map(|e|e[k]).sum::<f64>();let mean=sum(0)/m;
         let spread=(errors.iter().map(|e|(e[0]-mean).powi(2)).sum::<f64>()/(m*(m-1.).max(1.))).sqrt();
-        Some(16./15.*((mean+CONFIDENCE*spread)/at.beats).max(sum(1)/sum(2).max(f64::MIN_POSITIVE)/QUADRATURE))
+        16./15.*((mean+CONFIDENCE*spread)/at.beats).max(sum(1)/sum(2).max(f64::MIN_POSITIVE)/QUADRATURE)
     };
-    let first=2.*node_phase();let Some(r)=excess(first)else{return node_phase()};
-    let phase=largest_met(first,r,&excess);
+    let phase=largest_met(coarsest,excess(coarsest),&excess);
     // What it lands between the groups over the run.
     let Some((groups,span))=landing else{return phase};let count=groups.iter().max().map_or(0,|g|g+1);if count<2{return phase;}
     let moved=|phase:f64|landed_excess(&engine,&picked,phase,groups,count,span);
     let r=moved(phase);if r<=1.{return phase;}
-    largest_met(phase,r,&|phase|Some(moved(phase)))
+    largest_met(phase,r,&moved)
 }
-/// The largest phase a read's excess meets, from one read: by the fourth root of its excess, and between the largest phase met and the smallest missed on the logarithms' line, until one's excess lies
-/// within a factor two of its share (`grid_phase`).
-fn largest_met(mut phase:f64,mut r:f64,read:&dyn Fn(f64)->Option<f64>)->f64{
+/// The largest phase a read's excess meets, from one read at the coarsest phase in question: a miss goes down by the fourth root of its excess, at least to half its spacing -- its errors saturate on a grid that aliases --, and then between the
+/// largest phase met and the smallest missed on the logarithms' line, until one's excess lies within a factor two of its share (`grid_phase`). Past the quadrature's bound, where its share may be out of the grid's reach, or past the first phase met, at most 8 reads.
+fn largest_met(mut phase:f64,mut r:f64,read:&dyn Fn(f64)->f64)->f64{
     // The largest phase met and the smallest missed, each with its excess.
-    let(mut met,mut missed)=((0_f64,0_f64),(f64::INFINITY,f64::INFINITY));
-    for _ in 0..8{
-        if r<=1.{met=(phase,r);if r>=0.5{break;}}else{missed=(phase,r);}
-        phase=if met.0>0.&&missed.0.is_finite(){met.0*(missed.0/met.0).powf(((0.75/met.1).ln()/(missed.1/met.1).ln()).clamp(0.1,0.9))}else{phase*r.max(f64::EPSILON).recip().powf(0.25)};
-        // Past the grids' coinciding a read has nothing to read: as missed, whatever the phase beyond would hold.
-        r=read(phase).unwrap_or(f64::INFINITY);
+    let(mut met,mut missed)=((0_f64,0_f64),(f64::INFINITY,f64::INFINITY));let mut reads=0;
+    loop{
+        if r<=1.{met=(phase,r);if r>=0.5||!missed.0.is_finite(){break;}}else{missed=(phase,r);}
+        if met.0>0.||phase<=2.*node_phase(){reads+=1;if reads>8{break;}}
+        phase=if met.0>0.{met.0*(missed.0/met.0).powf(((0.75/met.1).ln()/(missed.1/met.1).ln()).clamp(0.1,0.9))}else{phase*r.recip().powf(0.25).min(0.5)};
+        r=read(phase);
     }
-    if r<=1.&&phase>met.0{met.0=phase;}
     if met.0>0.{met.0}else{phase}
 }
 /// The reads of a step's landings per probe (`Engine::grid_landings`): their errors stop falling at about this many, where the probes' own spread is what is left (F = 1 over the PGC with a resonant probe's
