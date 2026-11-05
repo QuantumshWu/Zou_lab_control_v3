@@ -81,10 +81,10 @@ fn check(request:&Request,which:&str){
         let c=model.components(k,&p);let n=c.n();let cl=&g.clusters[k];
         let label=|i:usize|if i<cl.states.len(){request.states[g.ground_states[cl.states[i]]].clone()}else{request.states[g.excited_states[cl.excited[i-cl.states.len()]]].clone()};
         let norm=|h:&[Complex]|(0..n).map(|b|(0..n).map(|a|h[a*n+b].abs()).sum::<f64>()).fold(0.,f64::max);
-        println!("cluster {k}: static ‖H₀‖₁ {:.3e} rad/us",norm(&c.statics.hamiltonian));
-        for b in c.beats.iter().filter(|b|b.omega>0.){
+        println!("cluster {k}: static ‖H₀‖₁ {:.3e} rad/us",norm(c.hamiltonian()));
+        for b in c.beats().filter(|b|b.omega>0.){
             let mut entries:Vec<(f64,usize,usize)>=(0..n*n).map(|i|(b.hamiltonian[i].abs(),i/n,i%n)).filter(|x|x.0>0.).collect();entries.sort_by(|x,y|y.0.total_cmp(&x.0));
-            println!("  beat {:.4} MHz: ‖H_j‖₁ {:.3e} rad/us, mixing {:.2e}; largest {:?}",b.omega/TAU,norm(&b.hamiltonian),norm(&b.hamiltonian)/b.omega,
+            println!("  beat {:.4} MHz: ‖H_j‖₁ {:.3e} rad/us, mixing {:.2e}; largest {:?}",b.omega/TAU,norm(b.hamiltonian),norm(b.hamiltonian)/b.omega,
                 entries.iter().take(6).map(|&(v,a,bb)|format!("{} <- {}: {:.2e}",label(a),label(bb),v)).collect::<Vec<_>>());
         }
     }

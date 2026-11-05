@@ -959,9 +959,9 @@ fn second_order_gaps(model:&Model,k:usize,point:[f64;3])->(f64,f64){
     let a=g.amplitudes_at(point);let e=g.eliminate(&model.intensities_at_point(point)).unwrap();
     let c=model.components(k,&model.point(point,[0.;3]));
     let entry=|x:usize,y:usize,nu:f64|->Complex{let apart=cl.frame(x)-cl.frame(y);let mut s=Complex::ZERO;
-        if (apart+nu).abs()<1e-6{s+=c.statics.hamiltonian[x*n+y];}
-        for b in &c.beats{if (b.omega-apart-nu).abs()<1e-6{s+=b.hamiltonian[x*n+y];}}s};
-    let diagonal=|x:usize|c.statics.scalar+cl.frame(x);
+        if (apart+nu).abs()<1e-6{s+=c.hamiltonian()[x*n+y];}
+        for b in c.beats(){if (b.omega-apart-nu).abs()<1e-6{s+=b.hamiltonian[x*n+y];}}s};
+    let diagonal=|x:usize|c.scalar+cl.frame(x);
     let shifted=|m:&Dense,z:f64|Lu::new(&Dense::from_fn(m.rows,m.cols,|i,j|if i==j{m[(i,j)]-Complex::new(z,0.)}else{m[(i,j)]})).unwrap();
     let block=Dense::from_fn(n-n0,n-n0,|i,j|entry(n0+i,n0+j,0.)+Complex::new(if i==j{diagonal(n0+i)}else{0.},0.));
     let(mut exact,mut held)=(Dense::zeros(n0,n0),Dense::zeros(n0,n0));let mut worst=0_f64;

@@ -4,20 +4,24 @@
 //! eigenvectors of T by back substitution and R = Q Y, its columns of unit norm, and R⁻¹ by LU.
 //! Its condition, ‖R‖₁‖R⁻¹‖₁, bounds the rounding of what is computed through it: near an exceptional
 //! point it grows without bound, and the exact step (engine.rs) then takes its grid instead.
-use crate::linear::{Dense,Lu};
+use crate::linear::{lu_factor,lu_solve,zeroed};
 use crate::Complex;
 
-/// H = R diag(λ) R⁻¹ with the condition of R.
-pub struct Eigen{pub n:usize,pub values:Vec<Complex>,pub vectors:Vec<Complex>,pub inverse:Vec<Complex>,pub condition:f64}
+/// H = R diag(λ) R⁻¹ with the condition of R, and the buffers its computation works in: one kept for its next generator takes no memory (the exact step's, a decomposition per step).
+#[derive(Default)]
+pub struct Eigen{pub n:usize,pub values:Vec<Complex>,pub vectors:Vec<Complex>,pub inverse:Vec<Complex>,pub condition:f64,a:Vec<Complex>,q:Vec<Complex>,v:Vec<Complex>,y:Vec<Complex>,factors:Vec<Complex>,pivots:Vec<usize>}
 
 fn abs1(z:Complex)->f64{z.re.abs()+z.im.abs()}
 
 /// The eigendecomposition of an n × n matrix, or None when the QR iteration does not converge or R is
 /// singular.
-pub fn eigen(h:&[Complex],n:usize)->Option<Eigen>{
-    let mut a:Vec<Complex>=h[..n*n].to_vec();let mut q=vec![Complex::ZERO;n*n];for i in 0..n{q[i*n+i]=Complex::ONE;}
+pub fn eigen(h:&[Complex],n:usize)->Option<Eigen>{let mut e=Eigen::default();decompose(&mut e,h,n).then_some(e)}
+/// `eigen` into a kept `Eigen`; false when the QR iteration does not converge or R is singular.
+pub fn decompose(e:&mut Eigen,h:&[Complex],n:usize)->bool{
+    e.n=n;let Eigen{values,vectors:r,inverse,condition,a,q,v,y,factors,pivots,..}=e;
+    a.clear();a.extend_from_slice(&h[..n*n]);zeroed(q,n*n);for i in 0..n{q[i*n+i]=Complex::ONE;}
     // Householder reduction to upper Hessenberg form, A ← P A P, Q ← Q P.
-    let mut v=vec![Complex::ZERO;n];
+    zeroed(v,n);
     for k in 0..n.saturating_sub(2){
         let alpha:f64=(k+1..n).map(|i|a[i*n+k].norm_sqr()).sum::<f64>().sqrt();if alpha==0.{continue;}
         let x0=a[(k+1)*n+k];let phase=if x0.abs()>0.{x0*(1./x0.abs())}else{Complex::ONE};
@@ -37,7 +41,7 @@ pub fn eigen(h:&[Complex],n:usize)->Option<Eigen>{
         let mut lo=hi-1;
         while lo>0{let s=abs1(a[(lo-1)*n+lo-1])+abs1(a[lo*n+lo]);if abs1(a[lo*n+lo-1])<=f64::EPSILON*if s>0.{s}else{scale}{a[lo*n+lo-1]=Complex::ZERO;break;}lo-=1;}
         if lo==hi-1{hi-=1;iterations=0;continue;}
-        iterations+=1;if iterations>60*n{return None;}
+        iterations+=1;if iterations>60*n{return false;}
         // The Wilkinson shift: the eigenvalue of the trailing 2 × 2 block nearer its corner (an
         // exceptional shift every tenth iteration).
         let(p,qq,r,s)=(a[(hi-2)*n+hi-2],a[(hi-2)*n+hi-1],a[(hi-1)*n+hi-2],a[(hi-1)*n+hi-1]);
@@ -46,10 +50,9 @@ pub fn eigen(h:&[Complex],n:usize)->Option<Eigen>{
             let(e1,e2)=(m1-s,m2-s);if abs1(e1)<=abs1(e2){m1}else{m2}};
         if !(mu.re.is_finite()&&mu.im.is_finite()){mu=s;}
         // One QR sweep of (A − μ) on [lo, hi) by Givens rotations, then RQ + μ.
-        let mut rot:Vec<(f64,Complex)>=Vec::with_capacity(hi-lo);
         for k in lo..hi-1{
             let x=if k==lo{a[k*n+k]-mu}else{a[k*n+k-1]};let y=if k==lo{a[(k+1)*n+k]}else{a[(k+1)*n+k-1]};
-            let(c,sn)=givens(x,y);rot.push((c,sn));
+            let(c,sn)=givens(x,y);
             // Rows k, k+1 from column (k−1 or lo) on.
             let start=if k==lo{lo}else{k-1};
             for j in start..n{let(u,w)=(a[k*n+j],a[(k+1)*n+j]);a[k*n+j]=u*c+w*sn;a[(k+1)*n+j]=w*c-u*sn.conj();}
@@ -61,9 +64,9 @@ pub fn eigen(h:&[Complex],n:usize)->Option<Eigen>{
         }
     }
     // The eigenvectors of T by back substitution, near-equal eigenvalues kept apart by ε‖T‖.
-    let values:Vec<Complex>=(0..n).map(|i|a[i*n+i]).collect();
+    values.clear();values.extend((0..n).map(|i|a[i*n+i]));
     let floor=f64::EPSILON*scale;
-    let mut y=vec![Complex::ZERO;n*n];
+    zeroed(y,n*n);
     for k in 0..n{
         y[k*n+k]=Complex::ONE;
         for j in (0..k).rev(){
@@ -73,16 +76,16 @@ pub fn eigen(h:&[Complex],n:usize)->Option<Eigen>{
         }
     }
     // R = Q Y, columns of unit norm.
-    let mut r=vec![Complex::ZERO;n*n];
+    zeroed(r,n*n);
     for i in 0..n{for k in 0..n{r[i*n+k]=(0..=k).fold(Complex::ZERO,|s,m|s+q[i*n+m]*y[m*n+k]);}}
-    for k in 0..n{let norm=(0..n).map(|i|r[i*n+k].norm_sqr()).sum::<f64>().sqrt();if !(norm>0.){return None;}for i in 0..n{r[i*n+k]=r[i*n+k]*(1./norm);}}
-    let dense=Dense::from_fn(n,n,|i,j|r[i*n+j]);let lu=Lu::new(&dense)?;
-    let identity=Dense::from_fn(n,n,|i,j|if i==j{Complex::ONE}else{Complex::ZERO});let inv=lu.solve_columns(&identity);
-    let inverse:Vec<Complex>=inv.entries.clone();
+    for k in 0..n{let norm=(0..n).map(|i|r[i*n+k].norm_sqr()).sum::<f64>().sqrt();if !(norm>0.){return false;}for i in 0..n{r[i*n+k]=r[i*n+k]*(1./norm);}}
+    // R⁻¹, column by column; v the column.
+    factors.clear();factors.extend_from_slice(r);zeroed(pivots,n);if !lu_factor(factors,n,pivots){return false;}
+    zeroed(inverse,n*n);
+    for j in 0..n{for i in 0..n{v[i]=if i==j{Complex::ONE}else{Complex::ZERO};}lu_solve(factors,pivots,n,&mut v[..n]);for i in 0..n{inverse[i*n+j]=v[i];}}
     let norm1=|m:&[Complex]|(0..n).map(|j|(0..n).map(|i|m[i*n+j].abs()).sum::<f64>()).fold(0.,f64::max);
-    let condition=norm1(&r)*norm1(&inverse);
-    if !condition.is_finite(){return None;}
-    Some(Eigen{n,values,vectors:r,inverse,condition})
+    *condition=norm1(r)*norm1(inverse);
+    condition.is_finite()
 }
 
 /// √z on the principal branch.
