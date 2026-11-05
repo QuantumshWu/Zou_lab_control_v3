@@ -15,7 +15,7 @@
 //! (Wisdom–Holman's mixed-variable splittings); where the system leaves the reference's domain the
 //! field's practice is a smooth changeover of what the reference takes (Chambers' hybrid integrator,
 //! its changeover function; r-RESPA's switching functions), not a hard switch. The harmonic part about
-//! the focus is no model of the trap past its region (U_h > D, `Settings::region`): there it grows as
+//! the trap's centre is no model of the trap past its region (U_h > D, `Settings::region`): there it grows as
 //! ζ² while the trap's potential saturates at its depth, and the kick cancels its rotation -- an atom
 //! barely bound far out on a shallow trap's axis took an energy error (ω dt)² U_h, many times its
 //! binding (SHALLOW_PROBE's tweezer alone, light off: 4 of 1024 such atoms lost over 2 ms at 0.25 us,
@@ -33,7 +33,7 @@
 //! their stiffness to the kick: the step resolves ω dt there, while the harmonic part's rotation is exact at the
 //! centre. So where the trap is a standing wave (model.rs `Lattice`) the harmonic part is the atom's own site's at the
 //! step's start (`reference`): about the nearest antinode z_n on the axis, its stiffness the site's, A(z_n) = 1/(1 +
-//! z_n²/z_R²) of the centre's, u = U_h⊥/(A D) + tan²Φ -- Φ the distance from the site in the standing wave's phase,
+//! z_n²/z_R²) over the trap's centre's (`Lattice::share`), u = U_h⊥/(A D) + tan²Φ -- Φ the distance from the site in the standing wave's phase,
 //! tan²Φ the atom's level above its site's bottom over its depth below the far level, (kx)² near the bottom, the
 //! across part as before --, so that w falls to zero at the node between two sites: the reference is continuous
 //! through it, with no switch, though its centre changes there. An atom within its site's region takes the same
@@ -257,7 +257,7 @@ pub struct Settings{
     /// The bound on each exponential's truncated Taylor remainder relative to ‖ψ‖ (`propagate`):
     /// a share of the step's own error budget in a solve, f64::EPSILON for double precision.
     pub truncation:f64,
-    /// The motion's sums (T, ⟨v⟩, n̄, ⟨r²⟩) averaged over one trap period of each axis centred on
+    /// The motion's sums (T, ⟨v⟩, n̄) averaged over one trap period of each axis centred on
     /// each output time (lib.rs `simulate`, a solve's), or taken at the output time.
     pub average:bool,
     /// The loss by the mechanical energy (a solve's); off where a validation holds the atom.
@@ -283,19 +283,23 @@ pub struct Settings{
     pub node_phase:f64,
     /// The trap's standing wave (model.rs `Lattice`): the harmonic part is the atom's own site's (`Engine::reference`).
     pub lattice:Option<crate::model::Lattice>,
+    /// The trap's centre (model.rs `Trap`): where the harmonic part and its region stand when every lab axis is free (`about`).
+    pub centre:[f64;3],
 }
 impl Settings{
     /// The settings of a trap (model.rs `Trap`), every axis free, the loss on, the first order in
     /// the Doppler shift everywhere.
     pub fn new(dt:f64,trap:&crate::model::Trap,truncation:f64,average:bool)->Settings{
-        Settings{dt,free:[true;3],axes:trap.axes,frequencies:trap.frequencies,lab:trap.lab,truncation,average,loss:true,doppler:f64::INFINITY,beats:truncation,horizon:dt,region:0.,node_phase:node_phase(),lattice:trap.lattice}
+        Settings{dt,free:[true;3],axes:trap.axes,frequencies:trap.frequencies,lab:trap.lab,truncation,average,loss:true,doppler:f64::INFINITY,beats:truncation,horizon:dt,region:0.,node_phase:node_phase(),lattice:trap.lattice,centre:trap.centre}
     }
-    /// r less its own site's place where the harmonic part is the atom's own site's (`Engine::reference`): the start of
+    /// Where the harmonic part stands: the trap's centre when every lab axis is free, else the focus, the free axes' origin.
+    pub fn about(&self)->[f64;3]{if self.free==[true;3]{self.centre}else{[0.;3]}}
+    /// r less its own site's place where the harmonic part is the atom's own site's (`Engine::reference`), else less the trap's centre: the start of
     /// the harmonic control's twin (control.rs), which turns about that site as the atom does.
     pub fn about_site(&self,r:[f64;3])->[f64;3]{
         match self.lattice{
             Some(l)if self.free==[true;3]&&self.region>0.=>{let z=l.site(l.nearest(dot(l.axis,r)).0);std::array::from_fn(|a|r[a]-z*l.axis[a])}
-            _=>r,
+            _=>{let c=self.about();std::array::from_fn(|a|r[a]-c[a])}
         }
     }
 }
@@ -1014,14 +1018,14 @@ impl<'a> Engine<'a>{
     /// The harmonic part's centre and weight at a step's start r (module documentation, # Beyond the trap's region,
     /// # A standing wave's sites): one within the region, U_h ≤ D (`Settings::region`), and (2u − 1)/u² beyond it, u =
     /// U_h/D -- continuous with its slope at the region's edge, the weighted part's potential below 2D
-    /// everywhere --, about the focus or the atom's own site; one without a region.
+    /// everywhere --, about the trap's centre or the atom's own site; one without a region.
     fn reference(&self,r:[f64;3])->([f64;3],f64){
-        let s=&self.settings;let depth=s.region;if !(depth>0.){return([0.;3],1.);}
+        let s=&self.settings;let(depth,about)=(s.region,s.about());if !(depth>0.){return(about,1.);}
         let changeover=|u:f64|if u<=1.{1.}else{(2.*u-1.)/(u*u)};
         match s.lattice.filter(|_|s.free==[true;3]){
-            None=>([0.;3],changeover(self.harmonic_potential(r)/depth)),
+            None=>(about,changeover(self.harmonic_potential(std::array::from_fn(|a|r[a]-about[a]))/depth)),
             Some(l)=>{
-                let(n,phase)=l.nearest(dot(l.axis,r));let z=l.site(n);let c=l.axis.map(|x|x*z);let share=1./(1.+(z/l.rayleigh).powi(2));
+                let(n,phase)=l.nearest(dot(l.axis,r));let z=l.site(n);let c=l.axis.map(|x|x*z);let share=l.share(z);
                 let along=dot(l.axis,r)-z;let across:[f64;3]=std::array::from_fn(|a|r[a]-c[a]-along*l.axis[a]);
                 let tangent=phase.tan();(c,share*changeover(self.harmonic_potential(across)/(depth*share)+tangent*tangent))
             }
@@ -1217,7 +1221,7 @@ impl<'a> Engine<'a>{
         };
         // The loss: an atom unbound -- its mechanical energy above the trap's far level -- outside the trap's
         // region (`Settings::region`), of that one state.
-        if s.loss&&self.harmonic_potential(place.0)>s.region{
+        if s.loss&&self.harmonic_potential({let c=s.about();std::array::from_fn(|a|place.0[a]-c[a])})>s.region{
             let point=m.point(place.0,place.1);
             let(kappa,psi,time)=match &middle{Some((kappa,psi,time))=>(*kappa,psi,*time),None=>(t.kappa,&t.psi,t.time)};
             let kinetic=0.5*m.hbar_over_mass*kappa.iter().map(|k|k*k).sum::<f64>();

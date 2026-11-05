@@ -30,6 +30,12 @@
 //! one, or the interference of polarizations that differ -- a polarization lattice, which the beams'
 //! intensities alone do not fix --, its bound in the ledger (`Ground::interference`, solve.rs).
 //!
+//! # Where the trap is
+//! A beam focused at the origin need not hold its atoms there: a reflection's standing wave has its antinodes a mirror phase φ's φ/2k along the axis from the focus, whatever the beam's
+//! frequency, and φ past 90° makes the focus a slope's top. The trap of a potential is the nearest bottom of a well to the focus, whatever the field: its descent from the focus
+//! (`descent`, `Ground::well`), and everything about the trap reads that place -- its frequencies, depth and region, the atoms' reach. Where two wells are as near (a top: φ = 180°), the descent's
+//! first step falls into one, the same one every time, and they are mirror images. At a focus that is a well's bottom the descent stands still, the focus's very bits.
+//!
 //! # One rule over the ground and the excited states
 //! The near components of one frequency (equal `Beam::frequency_index`) form a carrier c at δ_c;
 //! carrier c drives V_c(r) = Σ_{l∈c} a_l(r) V_l e^{−iδ_c t} + h.c., each beam with its own coupling
@@ -534,6 +540,8 @@ pub struct Ground{
     pub duration:f64,
     /// Per unit, its least intensity within the atom's reach (`Ground::reach`): 1 for a plane wave.
     pub reach:Vec<f64>,
+    /// The bottom of the reference state's well in H(r) alone (`Ground::well`): the atoms' reach is about it.
+    pub centre:[f64;3],
     /// The couplings of the excited states, classified, with the closure's verdicts.
     pub excited_items:Vec<ExcitedItem>,
     /// The fold's charge: the largest total saturation over the light's pattern of a ground state's
@@ -786,16 +794,51 @@ fn intensity_points(units:&[Unit],beams:&[Beam])->Vec<Vec<f64>>{
         for(f,&u)in varying.iter().enumerate(){intensities[u]=levels[(point/levels.len().pow(f as u32))%levels.len()];}intensities}).collect()
 }
 
-/// The points an atom's reach is judged at: the thermal ellipsoid's ends along its principal axes
+/// The points an atom's reach is judged at: the thermal ellipsoid about the trap's centre (`Ground::well`), its ends along its principal axes
 /// (`axes`' rows, half-widths `reach`), and with `inside` a grid of nine per axis within it too, for
 /// a pattern on the wavelength's scale (interfering beams).
-pub(crate) fn reach_points(axes:&[[f64;3];3],reach:[f64;3],inside:bool)->Vec<[f64;3]>{
-    let at=|q:[f64;3]|->[f64;3]{std::array::from_fn(|i|(0..3).map(|a|q[a]*axes[a][i]).sum())};
+pub(crate) fn reach_points(centre:[f64;3],axes:&[[f64;3];3],reach:[f64;3],inside:bool)->Vec<[f64;3]>{
+    let at=|q:[f64;3]|->[f64;3]{std::array::from_fn(|i|centre[i]+(0..3).map(|a|q[a]*axes[a][i]).sum::<f64>())};
     let mut out:Vec<[f64;3]>=(0..3).flat_map(|a|[-1.,1.].map(move|s|(a,s))).map(|(a,s)|{let mut q=[0.;3];q[a]=s*reach[a];at(q)}).collect();
     if inside{for i in -4_i32..=4{for j in -4_i32..=4{for k in -4_i32..=4{
         if i*i+j*j+k*k<=16{out.push(at([i as f64*reach[0]/4.,j as f64*reach[1]/4.,k as f64*reach[2]/4.]));}
     }}}}
     out
+}
+
+/// The central differences a trap's derivatives are taken over: a thousandth of its beam's waist.
+pub(crate) fn difference(waist:f64)->f64{1e-3*waist}
+/// A potential u at r, its gradient and its Hessian, by central differences over h.
+pub(crate) fn slopes(u:&dyn Fn([f64;3])->f64,r:[f64;3],h:f64)->(f64,[f64;3],[[f64;3];3]){
+    let e=|a:usize|{let mut v=[0.;3];v[a]=h;v};let add=|x:[f64;3],y:[f64;3]|->[f64;3]{std::array::from_fn(|i|x[i]+y[i])};let neg=|x:[f64;3]|x.map(|v|-v);let at=|x:[f64;3]|u(add(r,x));
+    let u0=u(r);
+    let gradient=std::array::from_fn(|a|(at(e(a))-at(neg(e(a))))/(2.*h));
+    let hessian=std::array::from_fn(|a|std::array::from_fn(|b|if a==b{(at(e(a))+at(neg(e(a)))-2.*u0)/(h*h)}
+        else{(at(add(e(a),e(b)))-at(add(e(a),neg(e(b))))-at(add(neg(e(a)),e(b)))+at(add(neg(e(a)),neg(e(b)))))/(4.*h*h)}));
+    (u0,gradient,hessian)
+}
+/// The bottom of the well a potential u's descent from `start` reaches (module documentation, # Where the trap is), or `start` where it
+/// reaches none: a step of Newton's along each eigenvector of the Hessian curved upward, downhill along the others -- at a top, where a tie has no slope to follow, along the eigenvector as
+/// it is --, within a radius from h up, doubled after a step it cut short and halved where u did not fall. It ends where a step's predicted gain is within u's rounding, its point a bowl's bottom or none; or where it
+/// leaves `inside`. A bowl at the start is the answer as it stands: the start's very bits.
+pub(crate) fn descent(u:&dyn Fn([f64;3])->f64,start:[f64;3],h:f64,inside:&dyn Fn([f64;3])->bool)->[f64;3]{
+    let(mut r,mut radius)=(start,h);let(mut u0,mut g,mut c)=slopes(u,r,h);
+    loop{
+        let(values,vectors)=crate::model::symmetric_eigen(c);let round=64.*f64::EPSILON*u0.abs();
+        let along=vectors.map(|v|v[0]*g[0]+v[1]*g[1]+v[2]*g[2]);
+        let bowl=values.iter().all(|&l|l*h*h>round);
+        let steps:[f64;3]=std::array::from_fn(|i|if values[i]*h*h>round{-along[i]/values[i]}else if along[i].abs()*h>round{-along[i].signum()*radius}else if values[i]*h*h< -round{radius}else{0.});
+        let length=steps.iter().map(|x|x*x).sum::<f64>().sqrt();
+        loop{
+            let scale=if length>radius{radius/length}else{1.};
+            let gain=-(0..3).map(|i|{let x=steps[i]*scale;along[i]*x+0.5*values[i]*x*x}).sum::<f64>();
+            if !(gain>round){return if bowl{r}else{start};}
+            let next:[f64;3]=std::array::from_fn(|a|r[a]+(0..3).map(|i|steps[i]*scale*vectors[i][a]).sum::<f64>());
+            if !inside(next){return start;}
+            if u(next)<u0{r=next;(u0,g,c)=slopes(u,r,h);if scale<1.{radius*=2.;}break;}
+            radius=radius.min(length)*0.5;
+        }
+    }
 }
 
 /// A block's eigen-energy m's terms for one beam (`Mode`), each its response, with `second` its second, and its
@@ -900,8 +943,8 @@ impl Ground{
         let duration=request.times_us.last().copied().unwrap_or(0.).max(0.);
         let mut ground=Ground{ground_states,excited_states,levels,decay,emission,beams:request.beams.clone(),folded:couplings.clone(),couplings,hamiltonian,units,outside:unit_outside,folds:unit_folds,interference,
             components,l0,carriers,duration,reach:vec![],excited_items:vec![],charge:0.,items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![],
-            explicit_of:vec![],excited_groups,dressed:vec![],vias:vec![],near_units:vec![],dressing:false,floors:vec![],unmixed:vec![],unmixed_error:0.,channel_poles:vec![]};
-        ground.reach=ground.reach(request);
+            explicit_of:vec![],excited_groups,dressed:vec![],vias:vec![],near_units:vec![],dressing:false,floors:vec![],unmixed:vec![],unmixed_error:0.,channel_poles:vec![],centre:[0.;3]};
+        (ground.reach,ground.centre)=ground.reach(request);
         Ok(ground)
     }
 
@@ -1299,29 +1342,30 @@ impl Ground{
     /// Each unit's least intensity within the atom's reach: the region of the trap within
     /// ln(1/budget) k_B T of its bottom, the harmonic trap's thermal ellipsoid holding all but the
     /// budget of a Boltzmann ensemble at the request's temperature (model.rs `choose_profiles` judges
-    /// the units' profiles over it too), the trap the most populated initial ground state's at the
-    /// focus of the trap beam; at the ellipsoid's ends along its principal axes, and inside it for
+    /// the units' profiles over it too), the trap the most populated initial ground state's in
+    /// its well in H(r) alone (`Ground::well`); at the ellipsoid's ends along its principal axes, and inside it for
     /// interfering beams (`reach_points`). 1 for a plane wave, 0 for every varying unit when the trap
     /// does not confine. Beyond the reach, what an atom meets is measured along its trajectory (the
-    /// folded excited population, the ledger's η²).
-    fn reach(&self,request:&Request)->Vec<f64>{
-        let unconfined=||self.units.iter().map(|u|if u.varies(&self.beams){0.}else{1.}).collect();
-        let Some(waist)=request.beams.get(request.trap_beam).and_then(|b|b.waist_um)else{return unconfined()};
+    /// folded excited population, the ledger's η²). And that well's place.
+    fn reach(&self,request:&Request)->(Vec<f64>,[f64;3]){
+        let unconfined=|centre:[f64;3]|(self.units.iter().map(|u|if u.varies(&self.beams){0.}else{1.}).collect(),centre);
+        let Some(waist)=request.beams.get(request.trap_beam).and_then(|b|b.waist_um)else{return unconfined([0.;3])};
         let rho=&request.initial_density;
         let reference=*self.ground_states.iter().max_by(|&&a,&&b|rho[a*STATES+a].re.total_cmp(&rho[b*STATES+b].re)).unwrap();
-        // The reference state's potential's Hessian at the focus by central differences over a
-        // thousandth of the trap beam's waist (as model.rs `Model::trap`).
-        let h=1e-3*waist;let u=|r:[f64;3]|self.hamiltonian_at(r)[(reference,reference)].re;
-        let e=|a:usize|{let mut v=[0.;3];v[a]=h;v};let add=|x:[f64;3],y:[f64;3]|->[f64;3]{std::array::from_fn(|i|x[i]+y[i])};let neg=|x:[f64;3]|x.map(|v|-v);
-        let u0=u([0.;3]);
-        let hessian:[[f64;3];3]=std::array::from_fn(|a|std::array::from_fn(|b|if a==b{(u(e(a))+u(neg(e(a)))-2.*u0)/(h*h)}
-            else{(u(add(e(a),e(b)))-u(add(e(a),neg(e(b))))-u(add(neg(e(a)),e(b)))+u(add(neg(e(a)),neg(e(b)))))/(4.*h*h)}));
-        let(values,axes)=crate::model::symmetric_eigen(hessian);
+        // The reference state's well and its Hessian there.
+        let u=|r:[f64;3]|self.hamiltonian_at(r)[(reference,reference)].re;
+        let centre=self.well(request.trap_beam,&u);let(values,axes)=crate::model::symmetric_eigen(slopes(&u,centre,difference(waist)).2);
         let hm=crate::model::HBAR/request.mass_kg*1e6;let kt=crate::stats::KT_PER_UK*request.temperature_uk;
         let reach:[f64;3]=std::array::from_fn(|a|{let w=(values[a]*hm).max(0.).sqrt();if w>0.{(2.*BUDGET.recip().ln()*kt*hm).sqrt()/w}else{f64::INFINITY}});
-        if reach.iter().any(|x|!x.is_finite()){return unconfined();}
-        self.units.iter().map(|u|if !u.varies(&self.beams){1.}else{
-            reach_points(&axes,reach,u.beams.len()>1).into_iter().map(|r|u.intensity(&self.amplitudes_at(r))).fold(1_f64,f64::min)}).collect()
+        if reach.iter().any(|x|!x.is_finite()){return unconfined(centre);}
+        (self.units.iter().map(|u|if !u.varies(&self.beams){1.}else{
+            reach_points(centre,&axes,reach,u.beams.len()>1).into_iter().map(|r|u.intensity(&self.amplitudes_at(r))).fold(1_f64,f64::min)}).collect(),centre)
+    }
+    /// Where a potential u of the trap beam's light has its trap: the bottom of the well its descent from the focus reaches (`descent`, module documentation, # Where the trap is), the focus where that
+    /// leaves the beam's focal volume, its harmonic coordinate 2ρ²/w² + ζ²/z_R² past one, or finds no well.
+    pub(crate) fn well(&self,trap_beam:usize,u:&dyn Fn([f64;3])->f64)->[f64;3]{
+        let beam=&self.beams[trap_beam];let Some(w)=beam.waist_um else{return [0.;3]};let(n,rayleigh)=(beam.direction,beam.wave_number_per_um*w*w/2.);
+        descent(u,[0.;3],difference(w),&|r|{let zeta=r[0]*n[0]+r[1]*n[1]+r[2]*n[2];2.*(r[0]*r[0]+r[1]*r[1]+r[2]*r[2]-zeta*zeta)/(w*w)+zeta*zeta/(rayleigh*rayleigh)<=1.})
     }
 
     /// The couplings of the excited states, unjudged: every drive with its size and distance over the
@@ -2175,6 +2219,24 @@ pub(crate) mod tests{
     use crate::linear::uniform;
     use crate::Matrix;
     use serde_json::Value;
+
+    /// The descent (module documentation, # Where the trap is): on a standing wave across a Gaussian profile from every side of its sites, at a tie either way, the well nearest the start; a bowl at the start its very bits, one off it
+    /// its bottom; on a potential without a well, the start.
+    #[test]
+    fn a_descent_reaches_the_nearest_well_or_none(){
+        let(k,h)=(8.,difference(1.));let everywhere=|_:[f64;3]|true;
+        let wave=|phase:f64|move|r:[f64;3]|{let x=(k*r[2]+0.5*phase).cos();-x*x*(-2.*(r[0]*r[0]+r[1]*r[1])).exp()/(1.+r[2]*r[2]/25.)};
+        assert_eq!(descent(&wave(0.),[0.;3],h,&everywhere),[0.;3]);
+        for degrees in [30.,-60.,89.,91.,-120.,150.,-179.]{
+            let phase=f64::to_radians(degrees);let r=descent(&wave(phase),[0.;3],h,&everywhere);let site=-0.5*phase/k;
+            assert!((r[2]-site).abs()<=2e-3&&r[0].abs()<=1e-6&&r[1].abs()<=1e-6,"{degrees}: {r:?} against the site at {site}");
+        }
+        let r=descent(&wave(std::f64::consts::PI),[0.;3],h,&everywhere);assert!((r[2].abs()-0.5*std::f64::consts::PI/k).abs()<=2e-3,"the tie: {r:?}");
+        let bowl=|r:[f64;3]|(r[0]-0.3).powi(2)+2.*(r[1]+0.1).powi(2)+3.*(r[2]-r[0]).powi(2);let r=descent(&bowl,[0.;3],h,&everywhere);
+        assert!((r[0]-0.3).abs()<=1e-6&&(r[1]+0.1).abs()<=1e-6&&(r[2]-0.3).abs()<=1e-6,"{r:?}");
+        let hill=|r:[f64;3]|(-2.*(r[0]*r[0]+r[1]*r[1])).exp()/(1.+r[2]*r[2]/25.);
+        assert_eq!(descent(&hill,[0.;3],h,&everywhere),[0.;3]);assert_eq!(descent(&hill,[0.;3],h,&|r|r[0]*r[0]+r[1]*r[1]+r[2]*r[2]<=1.),[0.;3]);
+    }
 
     /// The free-space 1D PGC (the PGC example before the tweezer example) as the app sent it, and
     /// gme.py's numbers for it (tests/fixtures/ground_gme.json).
