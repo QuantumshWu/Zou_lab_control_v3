@@ -78,7 +78,9 @@ fn groups_reach_runtime_as_write_once_placements_beside_a_per_event_latest() {
         {"name": "a", "terms": [{"of": "counts"}], "statistic": "mean", "over": ["repeat", "Site"], "by": "repeat", "every": 2},
         {"name": "b", "terms": [{"of": "counts"}], "statistic": "mean", "over": ["Site"]},
     ]);
-    let source = "@logic/repeater/counts";
+    // Its own name: a node run again leaves its last generation standing until it publishes.
+    let source = &format!("@logic/repeater/{node}_counts");
+    let source = source.as_str();
     host.open("repeater", "repeater", json!({}), json!({})).unwrap();
     let repeater = host.start_run("repeater", request(json!({"repeats": 5, "points": 2, "pause": 0.1}), None, &[("counts", source)])).unwrap();
     published(&runtime, source);
@@ -164,7 +166,9 @@ fn close(got: &[f64], want: &[f64]) {
 /// The repeater's source, sealed; each `(node, variables, outputs)` running while it publishes.
 /// Then the same variables over what it sealed, as `<node>_sealed`.
 fn both_routes(host: &PluginHost, events: &mpsc::Receiver<HostEvent>, runtime: &Runtime, values: Value, node: &str, variables: &Value, outputs: &[&str]) {
-    let source = "@logic/repeater/counts";
+    // Its own name: a node run again leaves its last generation standing until it publishes.
+    let source = &format!("@logic/repeater/{node}_counts");
+    let source = source.as_str();
     let named = |node: &str| outputs.iter().map(|name| ((*name).to_owned(), format!("@logic/{node}/{name}"))).collect::<Vec<_>>();
     let start = |node: &str| {
         let names = named(node);
@@ -258,7 +262,9 @@ fn a_repeat_group_beside_a_kept_repeat_axis_closes_by_its_own_axis() {
 #[test]
 fn a_monitor_gives_one_latest_event_per_group_and_its_seal_the_partial_one() {
     let Some((host, runtime, events)) = host() else { return };
-    let source = "@logic/repeater/counts";
+    // Its own name: a node run again leaves its last generation standing until it publishes.
+    let source = &format!("@logic/repeater/{node}_counts");
+    let source = source.as_str();
     host.open("repeater", "repeater", json!({}), json!({})).unwrap();
     let repeater = host.start_run("repeater", request(json!({"repeats": 7, "monitor": true, "pause": 0.1}), None, &[("counts", source)])).unwrap();
     published(&runtime, source);
