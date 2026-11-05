@@ -131,7 +131,9 @@ fn compare_from(gpu:&gpu::Gpu,model:&Model,settings:&Settings,trajectories:&[Tra
     let dt=settings.dt;let fourth=model.fourth;let exact=(0..model.clusters()).any(|k|model.mixed(k)||model.beating(k));let(tp,tn,tk)=if exact{(5e-4,5e-4,5e-5)}else{(2e-5,2e-5,2e-5)};
     let program=gpu.program(model,settings).unwrap();
     let got=gpu.advance(&program,settings,trajectories,1).unwrap();
-    let engine=Engine::new(model,settings.clone());
+    // The CPU on the kernel's own grid and so with Simpson's same error: with no truncation a static generator takes its Taylor path, of the kernel's whole panels (engine.rs `static_panels`), not the spectral path's weighted ones.
+    let mut same_grid=settings.clone();if exact{same_grid.truncation=0.;}
+    let engine=Engine::new(model,same_grid);
     let mut jumped=0;
     for(start,g)in trajectories.iter().zip(&got){
         let mut c=start.clone();engine.step(&mut c);
@@ -150,8 +152,7 @@ fn compare_from(gpu:&gpu::Gpu,model:&Model,settings:&Settings,trajectories:&[Tra
         }}
         assert!((g.threshold-c.threshold).abs()<=if fourth{1e-5*c.threshold}else{0.},"{at}: the new threshold {} against {}",g.threshold,c.threshold);
         for a in 0..3{
-            // The exact step's impulse on its node grid within its quadrature share (engine.rs `QUADRATURE`), where the CPU's
-            // static cluster may take the spectral path exactly; a momentum's difference moves the position over the step's
+            // The exact step's impulse within its quadrature share (engine.rs `QUADRATURE`); a momentum's difference moves the position over the step's
             // flow by (ħ/m) dt Δκ.
             let k=tk*scale+if exact{QUADRATURE*(c.kappa[a]-start.kappa[a]).abs()}else{0.};
             assert!((g.r[a]-c.r[a]).abs()<=2e-6*c.r.iter().map(|x|x.abs()).fold(1e-3,f64::max)+if exact{model.hbar_over_mass*dt*k}else{0.}+dr[a],"{at}: r {:?} against {:?}, κ {:?} against {:?}, the crossing's own {dr:?}",g.r,c.r,g.kappa,c.kappa);
@@ -338,15 +339,15 @@ fn the_exact_components_are_the_cpu_s(){
         let(model,settings,thermal)=setup(r,m,0.1,None,f64::INFINITY);let program=gpu.program(&model,&settings).unwrap();let mut worst=[0_f64;2];
         for(i,t)in thermal.iter().enumerate(){
             let k=i%model.clusters();let mut x=t.clone();x.cluster=k;
-            let c=model.components(k,&model.point(x.r,x.kappa));let n=c.n();let nn=n*n;let parts=1+c.beats.len();
+            let c=model.components(k,&model.point(x.r,x.kappa));let n=c.n();let nn=n*n;let parts=1+c.omegas().len();
             let got=gpu.exact_probe(&program,&model,&settings,&x).unwrap();
-            let round=f32::EPSILON as f64*c.beats.iter().flat_map(|b|&b.hamiltonian).chain(&c.statics.hamiltonian).map(|z|z.abs()).fold(1e30*f32::MIN_POSITIVE as f64,f64::max);
+            let round=f32::EPSILON as f64*c.beats().flat_map(|b|b.hamiltonian).chain(c.hamiltonian()).map(|z|z.abs()).fold(1e30*f32::MIN_POSITIVE as f64,f64::max);
             for q in 0..parts{
-                let(h,g)=if q==0{(&c.statics.hamiltonian,&c.statics.gradient)}else{(&c.beats[q-1].hamiltonian,&c.beats[q-1].gradient)};
+                let(h,g)=if q==0{(c.hamiltonian(),[c.gradient(0),c.gradient(1),c.gradient(2)])}else{let b=c.beat(q-1);(b.hamiltonian,b.gradient)};
                 let check=|cpu:&[Complex],gpu:&[Complex],floor:f64,within:f64,what:String,worst:&mut [f64;2],side:usize|{let largest=cpu.iter().map(|z|z.abs()).fold(floor,f64::max);
                     for(e,(a,b))in cpu.iter().zip(gpu).enumerate(){let off=(*a-*b).abs()/largest;worst[side]=worst[side].max(off);assert!(off<=within,"cluster {k}, {what}, entry {e}: {b:?} against {a:?} of {largest}");}};
-                check(h,&got[q*nn..(q+1)*nn],if q==0{0.1*c.statics.scalar.abs()}else{round},1e-5,format!("H_{q}"),&mut worst,0);
-                for a in 0..3{check(&g[a],&got[(parts+3*q+a)*nn..(parts+3*q+a+1)*nn],(0.1*c.statics.scalar.abs()).max(round),1e-4,format!("G_{q}[{a}]"),&mut worst,1);}
+                check(h,&got[q*nn..(q+1)*nn],if q==0{0.1*c.scalar.abs()}else{round},1e-5,format!("H_{q}"),&mut worst,0);
+                for a in 0..3{check(g[a],&got[(parts+3*q+a)*nn..(parts+3*q+a+1)*nn],(0.1*c.scalar.abs()).max(round),1e-4,format!("G_{q}[{a}]"),&mut worst,1);}
             }
         }
         println!("clusters {:?}: the GPU's H {:.1e} and G {:.1e} off",(0..model.clusters()).map(|k|(model.dimension(k),model.ground_dimension(k),model.beats(k).0.len())).collect::<Vec<_>>(),worst[0],worst[1]);
@@ -495,7 +496,6 @@ fn batch(r:&Request,fourth:bool,dt:f64)->bool{
         assert_eq!((x.trajectories,x.held),(y.trajectories,y.held),"{at}: trajectories and held");
         for a in 0..3{
             close(x.kappa[a],y.kappa[a],(y.kappa2[a]*y.held).sqrt(),&format!("{at}: Σκ[{a}]"));close(x.kappa2[a],y.kappa2[a],0.,&format!("{at}: Σκ²[{a}]"));
-            close(x.position[a],y.position[a],(y.position2[a]*y.held).sqrt(),&format!("{at}: Σr[{a}]"));close(x.position2[a],y.position2[a],0.,&format!("{at}: Σr²[{a}]"));
             for j in 0..3{close(x.harmonic[a][j],y.harmonic[a][j],1e-9*y.harmonic[a][1].sqrt(),&format!("{at}: harmonic[{a}][{j}]"));}
         }
         for s in 0..STATES{close(x.populations[s],y.populations[s],y.held,&format!("{at}: Σp[{s}]"));close(x.twin[s],y.twin[s],y.trajectories,&format!("{at}: twin Σc[{s}]"));}
@@ -539,7 +539,7 @@ fn a_group_stops_at_its_last_output_as_on_the_cpu(){
     let close=|a:f64,b:f64,what:&str|assert!((a-b).abs()<=1e-3*b.abs().max(1.),"{what}: {a} against {b}");
     for(k,(gg,cg))in g.groups.iter().zip(&c.groups).enumerate(){for(i,(x,y))in gg.sums.iter().zip(&cg.sums).enumerate(){
         let at=format!("group {k}, output {i}");assert_eq!((x.trajectories,x.held),(y.trajectories,y.held),"{at}");
-        for a in 0..3{close(x.kappa2[a],y.kappa2[a],&format!("{at}: Σκ²[{a}]"));close(x.position2[a],y.position2[a],&format!("{at}: Σr²[{a}]"));for j in 0..3{close(x.harmonic[a][j],y.harmonic[a][j],&format!("{at}: harmonic[{a}][{j}]"));}}
+        for a in 0..3{close(x.kappa2[a],y.kappa2[a],&format!("{at}: Σκ²[{a}]"));for j in 0..3{close(x.harmonic[a][j],y.harmonic[a][j],&format!("{at}: harmonic[{a}][{j}]"));}}
         for s in 0..STATES{close(x.populations[s],y.populations[s],&format!("{at}: Σp[{s}]"));}
         if i>ends[k]{assert_eq!(x.held,0.,"{at}: none beyond its last output");}
     }}

@@ -522,7 +522,9 @@ fn a_shallow_trap_s_step_holds_t_within_its_share(){
     let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/shallow_probe_motion.json")).unwrap();
     let mut r=scene::request(&fixture["payload"]);let(duration,outputs,count)=(500.,26,1024u64);
     r.times_us=(0..outputs).map(|i|duration*i as f64/(outputs-1) as f64).collect();
-    let dt=solve(&r,Device::Cpu,&mut |_,_|{}).unwrap().time_step_us;
+    let solved=solve(&r,Device::Cpu,&mut |_,_|{}).unwrap();let dt=solved.time_step_us;
+    // What the setup's bound ensemble leaves out (a third of this shallow trap's atoms) is a note beside the ledger, no flag.
+    let(note,flag)=(solved.approximations.note.as_deref().unwrap_or(""),solved.approximations.flagged.as_deref().unwrap_or(""));assert!(note.contains("不计入")&&!flag.contains("不计入"),"{note} | {flag}");
     let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
     let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();let trap=initial.traps[reference];
     let interval=duration/(outputs-1) as f64;let steps=(interval/dt).round() as usize;
@@ -644,7 +646,8 @@ fn a_lone_state_s_round_off_is_no_gain(){
 /// The near light comes on at t = 0, and its fold's shift is no part of the ensemble's energy: on the tweezer PGC's
 /// all-folded model the 10 MHz probe's denominator closes on a shell about the focus, where with it the envelope's top
 /// stood at 137 k_BT against the focus's 34 and no proposal in e^100 was kept (the solve never reached its first
-/// result). The envelope sits at the focus's depth, and the draws take no time.
+/// result). The envelope sits at the focus's depth, and the draws take no time. Brighter, the fold lifts the whole focus above the
+/// far level, where the near light leaves no state bound: the draws are the trap's still, and what the light does to them is the run's.
 #[test]
 fn a_near_probe_s_fold_stays_out_of_the_ensemble_s_energy(){
     let fixture:Value=serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap();
@@ -654,6 +657,14 @@ fn a_near_probe_s_fold_stays_out_of_the_ensemble_s_energy(){
     assert!(ratio<=1.01,"the envelope's top {ratio} times the depth");
     let settings=Settings::new(0.05,&initial.traps[0],f64::EPSILON,false);
     for i in 0..256u64{let t=initial_trajectory(&model,&settings,&initial,9,i,Stratum::single(i));assert!(t.r.iter().all(|x|x.is_finite()));}
+    for beam in r.beams.iter_mut().filter(|b|b.waist_um.is_none()){for x in beam.coupling.real.iter_mut().chain(beam.coupling.imag.iter_mut()){*x*=4.;}}
+    let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();let(cluster,state,_)=initial.states[0];
+    let mut psi=[Complex::ZERO;MOST_MIXED];psi[state]=Complex::ONE;
+    let(level,potential)=(model.trap_level(cluster,state,[0.;3]),model.trap_potential(cluster,&model.point([0.;3],[0.;3]),&psi,0.));
+    assert!(level<0.&&potential>0.,"the trap's own level {level}, with the near light {potential}");
+    let settings=Settings::new(0.05,&initial.traps[0],f64::EPSILON,false);
+    for i in 0..256u64{let t=initial_trajectory(&model,&settings,&initial,9,i,Stratum::single(i));
+        let kinetic=0.5*model.hbar_over_mass*t.kappa.iter().map(|k|k*k).sum::<f64>();assert!(kinetic+model.trap_level(cluster,state,t.r)<0.,"an atom the trap does not bind");}
 }
 
 /// A standing wave's neighbouring sites: their atoms start about their own sites' bottoms (lib.rs `initial_trajectory`:
@@ -680,6 +691,69 @@ fn a_standing_wave_s_sites_hold_their_atoms_as_the_centre_does(){
     let estimates=summarize(&outcome.groups,&Scales{hbar_over_mass:hm,frequencies:trap.lab},&[]);
     for(i,x)in estimates.iter().enumerate(){assert_eq!(x.loss,0.);
         for a in 0..3{assert!((x.temperature[a]-exact[a]).abs()<=5.*x.temperature_error[a],"output {i}, axis {a}: {} ± {} against {}",x.temperature[a],x.temperature_error[a],exact[a]);}}
+}
+
+/// A retro-reflected tweezer's last beam, its reflection in phase at the focus, at reflectivity R and mirror phase φ (degrees): its coupling by √R e^{iφ}, its counter-rotating one by √R e^{−iφ}, its outside
+/// shift by R. H0's shifts at the focus stay the phase's first: a scalar on the ground states, whose traps these are.
+fn mirrored(r:&Request,reflectivity:f64,phase:f64)->Request{
+    let(mut r,(s,c),a)=(r.clone(),phase.to_radians().sin_cos(),reflectivity.sqrt());
+    let turn=|m:&mut Matrix,sign:f64|for(x,y)in m.real.iter_mut().zip(m.imag.iter_mut()){(*x,*y)=(a*(*x*c-sign*s**y),a*(sign*s**x+c**y));};
+    let b=r.beams.last_mut().unwrap();turn(&mut b.coupling,1.);turn(&mut b.counter_coupling,-1.);
+    for x in b.outside_shift.real.iter_mut().chain(b.outside_shift.imag.iter_mut()){*x*=reflectivity;}
+    r
+}
+/// A mirror phase moves a far tweezer's standing wave along its axis by φ/2k, and nothing else moves but the beam's envelope there, A = 1/(1 + z²/z_R²): the trap stands at the well its descent from the focus
+/// reaches (ground.rs # Where the trap is) at every phase, the tie at 180° in one of its two wells, its depth A of the focus's and its frequencies with it, at any reflectivity. (At the focus, the Hessian there read
+/// 269 kHz at 85°, 17 kHz at −90° against 911 kHz at 0° and nothing past 90°.) At 0° the focus's very bits.
+#[test]
+fn a_mirror_phase_moves_the_trap_with_its_sites(){
+    let(_,base)=retro(0.);
+    for reflectivity in [1.,0.1]{
+        let read=|phase:f64|{let mut r=mirrored(&base,reflectivity,phase);r.times_us=vec![0.,1.];let model=Model::new(&r).unwrap();let i=Initial::new(&model,&r).unwrap();
+            let mut sorted=i.traps[0].frequencies;sorted.sort_by(f64::total_cmp);(i.traps[0],sorted,i.depths[0],i.ensembles[0].as_ref().unwrap().kinetic)};
+        let(trap,frequencies,depth,kinetic)=read(0.);assert_eq!(trap.centre,[0.;3]);
+        for phase in [45.,-45.,90.,-90.,135.,-135.,180.]{
+            let(at,moved,deep,cooler)=read(phase);let l=at.lattice.expect("a standing wave");
+            let z=(0..3).map(|a|at.centre[a]*l.axis[a]).sum::<f64>();let expected=phase.to_radians()/(2.*l.wave_number);
+            assert!((if phase==180.{z.abs()}else{z}-expected).abs()<=1.5/(l.rayleigh*l.wave_number)*expected.abs(),"R {reflectivity} φ {phase}: the trap at {z} against φ/2k = {expected}");
+            let envelope=1./(1.+(z/l.rayleigh).powi(2));
+            assert!((deep/depth-envelope).abs()<=1e-3,"R {reflectivity} φ {phase}: depth {} of the focus's against the envelope's {envelope}",deep/depth);
+            for a in 0..3{assert!((moved[a]/frequencies[a]-1.).abs()<=1.5*(1.-envelope)+1e-3,"R {reflectivity} φ {phase}: {:?} kHz against {:?}",moved.map(|w|w/std::f64::consts::TAU*1e3),frequencies.map(|w|w/std::f64::consts::TAU*1e3));}
+            assert!((cooler-kinetic).abs()<=1e-3,"R {reflectivity} φ {phase}: the ensemble's kinetic temperature {cooler} against {kinetic}");
+        }
+    }
+}
+/// Thermal atoms in a request's tweezer stay thermal and held at a step of ω dt = 1.5, the light off but the tweezer's.
+fn thermal_atoms_stay(r:&Request){
+    let model=Model::new(r).unwrap();let initial=Initial::new(&model,r).unwrap();let trap=initial.traps[0];let hm=model.hbar_over_mass;
+    let exact=initial.temperature();let dt=1.5/trap.frequencies.iter().copied().fold(0.,f64::max);
+    let mut s=Settings::new(dt,&trap,f64::EPSILON,false);s.region=initial.depths[0];let steps=(1./dt).ceil() as usize;s.dt=1./steps as f64;
+    let outcome=simulate(&model,&s,&initial,5,0,1024,8,steps,11,&[],None);
+    let estimates=summarize(&outcome.groups,&Scales{hbar_over_mass:hm,frequencies:trap.lab},&[]);
+    for(i,x)in estimates.iter().enumerate(){assert_eq!(x.loss,0.,"output {i}");
+        for a in 0..3{assert!((x.temperature[a]-exact[a]).abs()<=5.*x.temperature_error[a],"output {i}, axis {a}: {} ± {} against {}",x.temperature[a],x.temperature_error[a],exact[a]);
+            // n̄ takes no place: on a standing wave's axis a neighbouring site's atom is at its own well's energy (read from the focus: 377 where k_BT/ħω − ½ was 0.2).
+            let oscillator=KT_PER_UK*x.temperature[a]/trap.lab[a]-0.5;assert!((x.occupation[a]-oscillator).abs()<=5.*x.occupation_error[a]+1e-9,"output {i}, axis {a}: n̄ {} against k_BT/ħω − ½ {oscillator}",x.occupation[a]);}}
+}
+/// A far tweezer's atoms past 90° and at the tie, every initial energy taken in the wells they stand in.
+#[test]
+fn a_mirror_phase_s_sites_hold_their_atoms(){
+    let(_,base)=retro(0.);
+    for(reflectivity,phase)in [(1.,135.),(1.,180.),(0.1,-135.)]{let mut r=mirrored(&base,reflectivity,phase);r.times_us=vec![0.,1.];thermal_atoms_stay(&r);}
+}
+/// An 808 nm tweezer that is a near carrier, reflected at 102°, as a folded one: its standing wave in the trap's potential through its beams' summed field (model.rs `Model::level`), the trap in its site and its
+/// thermal atoms drawn from it. (Each beam's own shift alone left the ensemble the beams' sum, and the atoms rose from 15 uK to 338 uK within 20 us without a photon: the validation's s5063.)
+#[test]
+fn a_near_carrier_s_standing_wave_holds_its_atoms(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/near_tweezer_probe_motion.json")).unwrap();let mut r=sparse_request(&v);r.times_us=vec![0.,1.];
+    let tweezer=r.beams.iter().position(|b|b.id==r.beams[r.trap_beam].id).unwrap();
+    let mut reflection=r.beams[tweezer].clone();(reflection.id,reflection.name)=("reflection".into(),"反射光".into());reflection.direction=reflection.direction.map(|x|-x);r.beams.push(reflection);
+    let r=mirrored(&r,0.91,102.);let alone=Initial::new(&Model::new(&sparse_request(&v)).unwrap(),&sparse_request(&v)).unwrap().traps[0];
+    let model=Model::new(&r).unwrap();assert!(model.carriers.iter().any(|c|c.beams.contains(&tweezer)&&c.beams.contains(&(r.beams.len()-1))),"the tweezer and its reflection are a near carrier");
+    let trap=Initial::new(&model,&r).unwrap().traps[0];let l=trap.lattice.expect("a standing wave");
+    let z=(0..3).map(|a|trap.centre[a]*l.axis[a]).sum::<f64>();let expected=102_f64.to_radians()/(2.*l.wave_number);assert!((z-expected).abs()<=0.1*expected,"the trap at {z} against φ/2k = {expected}");
+    let largest=|t:&atom_motion_3d::model::Trap|t.frequencies.iter().copied().fold(0.,f64::max);assert!(largest(&trap)>5.*largest(&alone),"{:?} against the tweezer alone's {:?}",trap.frequencies,alone.frequencies);
+    thermal_atoms_stay(&r);
 }
 
 /// The fixture's tweezer alone and with a reflection along its axis, in phase at the focus (F5): the
@@ -915,11 +989,27 @@ fn a_beating_grid_s_measured_phase_meets_its_shares(){
         impulse+=(0..3).map(|k|(a.kappa[k]-b.kappa[k]).powi(2)).sum::<f64>().sqrt();size+=(0..3).map(|k|(b.kappa[k]-t.kappa[k]).powi(2)).sum::<f64>().sqrt();
     }
     let m=states.len() as f64;assert!(populations/m<=share,"populations {:e} against the share {share:e}",populations/m);
+    // From the states a jump leaves, which ring at the drives' detunings: the kick the grid adds, as heat against the photon's recoil.
+    let recoil=model.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max).powi(2);
+    let heat=states.iter().map(|t|{let l=engine.landed(t);let(a,b)=(coarse.coast(&l,dt,1),fine.coast(&l,dt,1));(0..3).map(|k|(a.kappa[k]-b.kappa[k]).powi(2)).sum::<f64>()}).sum::<f64>()/m/recoil;
+    assert!(heat<=2.*QUADRATURE,"the kick's heat {heat:e} of the recoil's against its share {QUADRATURE:e}");
     assert!(impulse/size<=QUADRATURE,"the impulse {:e} against {QUADRATURE:e}",impulse/size);
 }
 
+/// A far drive the dressing brings takes the rule of every coupling (model.rs `layouts`): a near tweezer's on the explicit states of a probe's rung is left out, its mixing booked within the budget.
+#[test]
+fn a_far_drive_of_the_dressing_folds(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/near_tweezer_probe_motion.json")).unwrap();let mut r=sparse_request(&v);r.times_us=(0..21).map(|i|5.*i as f64).collect();
+    let ladder=Ground::allowances(&r).unwrap();let mut seen=false;
+    for &a in ladder.iter().skip(1).take(3){let model=Model::with(&r,a).unwrap();
+        if model.effective_dropped>0.{seen=true;assert!(model.effective_dropped<=BUDGET,"{}",model.effective_dropped);}
+        for k in 0..model.clusters(){println!("rung {a:.3e}, cluster {k} of {} states: beats {:?}, scale {:.3e}, dropped {:.3e}",model.dimension(k),model.beats(k).0.iter().filter(|w|**w>0.).map(|w|format!("{w:.3e}")).collect::<Vec<_>>(),model.ground.generator_scale,model.effective_dropped);}
+    }
+    assert!(seen,"no far drive of the dressing on this ladder");
+}
+
 /// What a beating grid lands between the groups of ground states over the run (solve.rs `grid_phase`, `landed_excess`), on the same PGC: at the rung a solve takes there it leaves the phase its shares measure; at the rung with
-/// three states of F' = 2 explicit, which those shares let the grid kick through the beat, it takes the phase down by a third. A step within a spacing has nothing to read beyond the grids' coinciding: the phase stops there (it ran to 1e28).
+/// three states of F' = 2 explicit, which those shares let the grid kick through the beat, it takes the phase down by a third. A step within a spacing starts the search at its one panel (it ran to 1e28 once).
 #[test]
 fn a_beating_grid_s_phase_holds_what_it_lands_over_the_run(){
     let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..101).map(|i|i as f64).collect();
@@ -959,9 +1049,9 @@ fn second_order_gaps(model:&Model,k:usize,point:[f64;3])->(f64,f64){
     let a=g.amplitudes_at(point);let e=g.eliminate(&model.intensities_at_point(point)).unwrap();
     let c=model.components(k,&model.point(point,[0.;3]));
     let entry=|x:usize,y:usize,nu:f64|->Complex{let apart=cl.frame(x)-cl.frame(y);let mut s=Complex::ZERO;
-        if (apart+nu).abs()<1e-6{s+=c.statics.hamiltonian[x*n+y];}
-        for b in &c.beats{if (b.omega-apart-nu).abs()<1e-6{s+=b.hamiltonian[x*n+y];}}s};
-    let diagonal=|x:usize|c.statics.scalar+cl.frame(x);
+        if (apart+nu).abs()<1e-6{s+=c.hamiltonian()[x*n+y];}
+        for b in c.beats(){if (b.omega-apart-nu).abs()<1e-6{s+=b.hamiltonian[x*n+y];}}s};
+    let diagonal=|x:usize|c.scalar+cl.frame(x);
     let shifted=|m:&Dense,z:f64|Lu::new(&Dense::from_fn(m.rows,m.cols,|i,j|if i==j{m[(i,j)]-Complex::new(z,0.)}else{m[(i,j)]})).unwrap();
     let block=Dense::from_fn(n-n0,n-n0,|i,j|entry(n0+i,n0+j,0.)+Complex::new(if i==j{diagonal(n0+i)}else{0.},0.));
     let(mut exact,mut held)=(Dense::zeros(n0,n0),Dense::zeros(n0,n0));let mut worst=0_f64;
@@ -1244,7 +1334,7 @@ fn parts(model:&Model,cluster:usize,state:usize,r:[f64;3],kappa:[f64;3])->([f64;
 fn held_force(model:&Model,request:&Request,state:&str,r0:[f64;3],v:[f64;3],count:u64,time:f64,dt:f64,skip:f64)->([f64;3],[f64;3],f64,Vec<f64>){
     use rayon::prelude::*;
     let(hm,(cluster,at))=(model.hbar_over_mass,place(model,request,state));let k0=v.map(|x|x/hm);let start:[f64;3]=std::array::from_fn(|a|r0[a]-v[a]*time/2.);
-    let trap=atom_motion_3d::model::Trap{lattice:None,axes:[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],frequencies:[0.;3],lab:[0.;3]};
+    let trap=atom_motion_3d::model::Trap{centre:[0.;3],lattice:None,axes:[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],frequencies:[0.;3],lab:[0.;3]};
     let mut s=Settings::new(dt,&trap,f64::EPSILON,false);s.loss=false;let engine=Engine::new(model,s);let(steps,first)=((time/dt).round() as usize,(skip/dt).round() as usize);
     let out:Vec<([f64;3],u64,[f64;STATES])>=(0..count).into_par_iter().map(|i|{
         let mut psi=[Complex::ZERO;MOST_MIXED];psi[at]=Complex::ONE;
@@ -1539,4 +1629,68 @@ fn the_slow_part_s_weight_and_the_ringing_s_sum_to_the_delay(){
             assert!(excess>=0.&&(excess-w).abs()<=0.05*p*p.max(0.1),"cluster {k} state {b}: A {a} + p {p} − 1 = {excess} against Σ (1 − κ)|v|² {w}");
         }
     }
+}
+
+/// Galilean covariance of the exact step (engine.rs, # The exact step, the atom's path): an atom moving uniformly through a running wave at a detuning δ is an atom at rest at δ − k·v. Its kept drives' phases along its path are
+/// that shift, at any step. From a bare ground state, what a jump leaves, the no-jump evolution -- its excited population and its norm, the waiting time's law and so the photon rate -- on the retro-reflected tweezer's probe far out of the
+/// tweezer, the atom's momentum held (the kick's change of v within a step is the splitting's): the two agree at every step's end whatever its size. Held in the step, as the line had it, the moving atom's drive moved only between steps. What is left is the fold's second order in the shift,
+/// (kv/σ)² of the far excited states' shifts, for σ the hyperfine splitting. The atom at rest at δ differs by far more: the check has teeth.
+#[test]
+fn a_moving_atom_s_kept_drive_is_an_atom_at_rest_at_the_shifted_detuning(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/retro_probe_motion.json")).unwrap();
+    let shifted=|mhz:f64|{let mut r=scene::request(&v);r.times_us=vec![0.,10.];r.frequencies_mhz.push(mhz);for b in r.beams.iter_mut(){b.frequency_index.push(b.waist_um.is_none() as i32);}r};
+    // A shift of about a sixth of the line's width, and the first rung with explicit states that keeps the same ones at both detunings.
+    let doppler=6.;let(base,other)=(shifted(0.),shifted(-doppler/std::f64::consts::TAU));
+    let places=|r:&Request,a:f64|{let g=Ground::with(r,a).unwrap();g.clusters.iter().map(|c|(c.states.clone(),c.excited.clone())).collect::<Vec<_>>()};
+    let allowance=Ground::allowances(&base).unwrap().into_iter().find(|&a|{let x=places(&base,a);x.iter().any(|c|!c.1.is_empty())&&x==places(&other,a)}).unwrap();
+    let probe=base.beams.iter().position(|b|b.waist_um.is_none()).unwrap();let k=base.beams[probe].wave_number_per_um;let d=base.beams[probe].direction;
+    let moving=Model::with(&base,allowance).unwrap();let rest=Model::with(&other,allowance).unwrap();
+    // κ along the probe, k·v = (ħ/m) k κ.
+    let along=doppler/(moving.hbar_over_mass*k);let kappa=d.map(|x|x*along);
+    let far=[0.,30.,0.];let mut checked=0;let within=(doppler/(std::f64::consts::TAU*157.)).powi(2);let mut worst=0_f64;
+    for c in (0..moving.clusters()).filter(|&c|moving.mixed(c)){for b in 0..moving.ground_dimension(c){
+        let n=moving.dimension(c);let run=|m:&Model,kappa:[f64;3],dt:f64,steps:usize|->Vec<[f64;2]>{
+            let mut s=Settings::new(dt,&m.trap(c,b),1e-10,false);s.frequencies=[0.;3];s.lab=[0.;3];s.loss=false;s.beats=1e-10;let engine=Engine::new(m,s);
+            let mut psi=[Complex::ZERO;MOST_MIXED];psi[b]=Complex::ONE;
+            let mut t=Trajectory{cluster:c,psi,r:far,kappa,time:0.,threshold:1.,alive:true,jumps:0,beats:0.,seed:1,index:0};
+            (0..steps).map(|_|{t=engine.coast(&t,dt,1);t.kappa=kappa;let norm:f64=t.psi[..n].iter().map(|z|z.norm_sqr()).sum();
+                [t.psi[moving.ground_dimension(c)..n].iter().map(|z|z.norm_sqr()).sum::<f64>()/norm,norm.ln()]}).collect()};
+        for(dt,steps)in [(3.,4),(1.,12),(0.3,40),(0.05,240)]{
+            let(a,b0,c0)=(run(&moving,kappa,dt,steps),run(&rest,[0.;3],dt,steps),run(&moving,[0.;3],dt,steps));
+            for((x,y),z)in a.iter().zip(&b0).zip(&c0){
+                let off=((x[0]-y[0]).abs()/y[0].max(f64::MIN_POSITIVE)).max((x[1]-y[1]).abs()/y[1].abs().max(f64::MIN_POSITIVE));worst=worst.max(off);
+                assert!(off<=within,"cluster {c}, state {b}, dt {dt}: excited {:.8e} and ln‖ψ‖² {:.8e} moving against {:.8e} and {:.8e} at rest, {off:.2e} off, (kv/σ)² {within:.2e}",x[0],x[1],y[0],y[1]);
+                let _=z;
+            }
+            let(x,z)=(a.last().unwrap(),c0.last().unwrap());if x[1].abs()>1e-3{assert!((x[1]-z[1]).abs()>=0.01*x[1].abs(),"cluster {c}, state {b}, dt {dt}: the shift moves the rate ({:.6e} against {:.6e})",x[1],z[1]);checked+=1;}
+        }
+    }}
+    println!("{checked} runs, largest difference {worst:.2e}, (kv/σ)² {within:.2e}");assert!(checked>0);
+}
+
+/// The path's momentum is the step's middle's (model.rs, # The atom's path): reversible, the step keeps the energy; at the momentum before the kick phase space grows where the force is a potential's. A kept standing wave far off its line,
+/// an atom out of the tweezer, no jump, its beats real (±k on one state): the mechanical energy over 240 steps within 1 % of the sum of ½(ħ/m)I², where a path at κ_h moved it by 5.7 % at 1 us and 1.5 % at 0.5 us (the phases held in the step 0.07 and 0.55 %).
+#[test]
+fn a_kept_standing_wave_keeps_its_energy_along_the_atom_s_path(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/retro_probe_motion.json")).unwrap();
+    let mut r=scene::request(&v);r.times_us=vec![0.,10.];r.frequencies_mhz.push(200.);for b in r.beams.iter_mut(){b.frequency_index.push(b.waist_um.is_none() as i32);}
+    let probe=r.beams.iter().position(|b|b.waist_um.is_none()).unwrap();
+    // Five times the field, against a detuning of 200 MHz: a lattice of a fraction of a rad/us, an excited population of about 1e-3.
+    {let c=&mut r.beams[probe].coupling;for x in c.real.iter_mut().chain(c.imag.iter_mut()){*x*=5.;}}
+    let mut back=r.beams[probe].clone();back.id="back".into();back.direction=back.direction.map(|x|-x);r.beams.push(back);
+    let m=Ground::allowances(&r).unwrap().into_iter().find_map(|a|{let m=Model::with(&r,a).ok()?;(0..m.clusters()).any(|c|m.mixed(c)&&m.beating(c)).then_some(m)}).expect("a kept standing wave beats");
+    let c=(0..m.clusters()).find(|&c|m.mixed(c)&&m.beating(c)).unwrap();
+    let k=r.beams[probe].wave_number_per_um;let along=r.beams[probe].direction;let n=m.dimension(c);let mut checked=0;
+    for dt in [1.,0.5]{for b in 0..m.ground_dimension(c){
+        let mut s=Settings::new(dt,&m.trap(c,b),1e-6,false);s.frequencies=[0.;3];s.lab=[0.;3];s.loss=false;s.beats=1e-4;s.node_phase=1.;let engine=Engine::new(&m,s);
+        let mut psi=[Complex::ZERO;MOST_MIXED];psi[b]=Complex::ONE;let kappa=along.map(|x|x*0.4/(m.hbar_over_mass*k));
+        let mut t=Trajectory{cluster:c,psi,r:[0.,30.,0.1],kappa,time:0.,threshold:1.,alive:true,jumps:0,beats:0.,seed:1,index:0};
+        // From a step in, the bare state's own transient behind it.
+        t=engine.coast(&t,dt,1);let start=engine.energy(&t);let mut heat=0.;
+        for _ in 0..240{let next=engine.coast(&t,dt,1);heat+=0.5*m.hbar_over_mass*(0..3).map(|a|(next.kappa[a]-t.kappa[a]).powi(2)).sum::<f64>();t=next;}
+        let moved=engine.energy(&t)-start;let excited:f64=t.psi[m.ground_dimension(c)..n].iter().map(|z|z.norm_sqr()).sum::<f64>()/t.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>();
+        println!("dt {dt}, state {b}: the energy moved {moved:.4} rad/us against ½(ħ/m)ΣI² {heat:.4}, excited {excited:.2e}");
+        if heat>1e-2{assert!(moved.abs()<=0.01*heat,"dt {dt}, state {b}: the energy moved {moved:.4} rad/us against {heat:.4}");checked+=1;}
+    }}
+    assert!(checked>0);
 }

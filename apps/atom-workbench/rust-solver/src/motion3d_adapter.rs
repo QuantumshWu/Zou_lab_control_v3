@@ -21,13 +21,14 @@
 //! before the projection, `elapsedMs`, `method`,
 //! `device` -- the device used -- with `deviceNote` when it is not the one asked for, and
 //! `approximations`: the ledger of the a-priori approximations, `budget`, `used`, `items` of
-//! `label`, `estimate` and `action`, and `flagged` when some output times lie beyond the budget),
+//! `label`, `estimate` and `action`, `flagged` when some output times lie beyond the budget, and `note` with what the
+//! initial ensemble leaves out, no warning),
 //! and `motion`, read by `readMotionResult` in src/solver-types.ts:
 //! - `axis`: "3d";
 //! - per lab axis ("x", "y", "z"): `temperatureUK` and `temperatureErrorUK` (μK, one per sample:
 //!   T = m Var(v)/k_B over one trap period of the axis around the sample, and its standard error),
 //!   `meanVelocityMps`, `meanOccupation` (both over the same period; n̄ relative to
-//!   that axis's `trapFrequencyKHz`, ω/2π at the focus), `momentum` (`velocitiesMps`, `samples`,
+//!   that axis's `trapFrequencyKHz`, ω/2π at the trap's bottom), `momentum` (`velocitiesMps`, `samples`,
 //!   `probabilities`) and `position` (`positionsUm`, ...), distributions at listed samples;
 //! - `temperatureTotalUK` and `temperatureTotalErrorUK`, one per sample: T_total = (T_x + T_y +
 //!   T_z)/3, the temperature of the 3D velocity variance, and its standard error;
@@ -126,6 +127,7 @@ fn approximations(ledger:&Ledger)->Value{
     let mut out=json!({"budget":ledger.budget,"used":ledger.used(),
         "items":ledger.items.iter().map(|i|json!({"label":i.label,"estimate":i.estimate,"action":i.action})).collect::<Vec<_>>()});
     if let Some(reason)=&ledger.flagged{out["flagged"]=json!(reason);}
+    if let Some(note)=&ledger.note{out["note"]=json!(note);}
     out
 }
 

@@ -126,6 +126,7 @@ input[aria-invalid=true], input.invalid { border-color: var(--red-dark); }
 .initial-controls .field-control.capped > .spin { flex: 1 1 auto; }
 .initial-controls .field-control.capped::after { content: none; }
 .solver-readouts > .horizon-note { grid-column: 1 / -1; margin: 0; color: var(--orange-dark); }
+.solver-readouts > .ledger-note { grid-column: 1 / -1; margin: 0; }
 .initial-summary { color: var(--muted-ink); overflow-wrap: anywhere; }
 .initial-note { margin: 0; }
 .initial-controls > button { align-self: flex-start; }

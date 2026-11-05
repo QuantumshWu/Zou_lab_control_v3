@@ -45,14 +45,14 @@
 //! them (`decays`) and linear in the fields between one and a ground state (`crosses`: the folded
 //! amplitude A_c = −R_c of the class's photons, X_k = w·T_k[:,b] with w = Σ_{to,a} C_a[to,e]* C_a[to,·]
 //! over the photons the two share). Only the Hermitian part acts on the motion: the Ehrenfest force
-//! is −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩, with the kept drives' gradients Σ_k ∇E_k U_k the stimulated force. The
+//! is −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩, with the kept drives' gradients Σ_k ∇E_k U_k the stimulated force, beam by beam on the atom's path (below). The
 //! decay is the jumps' product by construction: where a class joins two folded photons of channels
 //! without a kept coupling (through an explicit state's photon of their frequency), their cross term
 //! Q = Σ_{to,a} (C_a T^d)[to,a]†(C_a T^c)[to,b] over the landing states they share enters alone, in a
 //! group of its own without S (ground.rs `FoldedCross`).
 //!
 //! # The generator's beats
-//! Every term's residual Ω̃ is a beat of the generator: H_eff(t) = H₀ + Σ_j e^{iΩ_j t} H_j (`Components`),
+//! Every term's residual Ω̃ is a beat of the generator: H_eff(t) = H₀ + Σ_j e^{iΩ_j t} H_j (`Components`), at the frequency Ω̃ + q·v on the atom's path (below),
 //! H₀ the static part less its scalar (a phase), H_j the terms at Ω_j, the gradients alike. Residuals
 //! within `same_frame`'s tolerance at the cluster's largest frame and detuning (the frames' round-off)
 //! are static, and are one beat where within it of each other; the beats come in pairs ±Ω (a term and
@@ -61,6 +61,29 @@
 //! lets the exact step cache one period's propagators (engine.rs). A cluster with beats or explicit
 //! excited states takes the exact step, unless its beats are all within the exponentials' share wherever the atom goes
 //! (engine.rs `quiet_clusters`); `local` is the plain step's, its beats at the step's middle.
+//!
+//! # The atom's path
+//! Over an exact step (engine.rs) the atom moves on a straight line through the step's middle point r_h at the time t_m, r_h + v(t − t_m), so that every beam's plane wave advances as e^{ik_l·v(t − t_m)}: the
+//! state sees each beam at its Doppler-shifted frequency, within the step, whatever the step's size. (Held at r_h, a kept drive had no Doppler shift within a step, only phase steps between steps, which a
+//! jump's bare state forgets: the anti-friction or friction of its line lost where the step did not resolve the internal state's memory: engine.rs, # First order in the Doppler shift.)
+//! A linear term of the explicit states -- a kept drive, a decay cross term, a dressing's drive -- is a sum over its carrier's beams, so each beam's share (`Tone`) goes into the beat of the term's
+//! residual and of the beam's wave vector, of frequency Ω̃ + k_l·v at that atom's velocity (`on_path`): the beats are the cluster's, their matrices the point's, their frequencies a step's; a beam and
+//! its reverse are one pair ±Ω, each the other's mirror. The states take wave vectors K_s as they take frames: ψ_s = e^{iK_s·v(t − t_m)} x_s, x_s under the diagonal shift K_s·v, a term's beat then at
+//! q = k_l + K_b − K_e. Along a spanning tree of the kept drives, the strongest first (`state_waves`), the tree's beams stand at q = 0, so that where the drives are a tree -- one k per state among them -- no beat is left
+//! and the step is static, at no cost; where a state is driven by beams of different k their (k_l − k_l′)·v are real beats, on the grid and under the rule that leaves out small ones like any other's (engine.rs `Segment::resolve`).
+//! The states take wave vectors where that leaves fewer beats than none: on a 3D molasses' explicit rung the six beams' 4 pairs of beats (±k along each axis and the probe's) stand at 73 along a tree.
+//! A beam within the single precision of the cluster's largest coupling has no phase of its own (`Tone`): what the kernel's generator cannot hold, a term's share it goes along with.
+//!
+//! On the path the terms are the field's at the point times their phases, the rest held; left out, each of second order about the middle:
+//! - a beam's envelope along the path, (v·∇ln|a_l|) τ of its amplitude, as the tables' intensities and the first order's denominators: a tweezer's within v τ/w of a waist w;
+//! - the velocity's change within the step, a phase k·(F/m) τ²/2, the flow–kick–flow splitting's own order, which the step-doubling check measures;
+//! - the groups' couplings Φ_k′k = E^d_k′* E^c_k, held at r_h, whose beam pairs' (k_c − k_d)·v have no in-step phase, as in a cluster of ground states. They stand between states of one wave vector by construction (`state_waves`: what they couple has one), so that they stay static in any gauge.
+//! The path's velocity is the step's middle's, of κ_h and half the kick I the step takes, known from the state at the step's start (engine.rs `Engine::on_path`). That keeps the step reversible: reversed, it takes the same line back only at the mean of the momenta before and
+//! after its kick. At κ_h the impulse along the path depends on the momentum it changes, and phase space grows where the force is a potential's: for a force of wave vector q the kick's factor from the path falls with κ as (q (ħ/m) κ τ)²/24 and is read half a kick off the middle, an area
+//! of 1 + (q (ħ/m) I τ)²/24 per step over an orbit. PGC1D's rung of 3+3 and 2+2 explicit states, a lattice of its kept drives (4 ms, 2048 atoms): T_x 13.4 ± 0.6 uK at 1.25 us and 7.2 ± 0.3 at 0.31 us at κ_h, at the middle's momentum 7.2 ± 0.5 and 7.4 ± 0.3, where the phases held in the step
+//! read 5.1 ± 0.4, 5.5 ± 0.3 and at 0.078 us 7.1 ± 0.5. A kept standing wave's energy over 240 steps of 1 us, against a sum of ½(ħ/m)I² of 5.3 rad/us: moved by 0.30 at κ_h, by −0.007 at the middle's momentum (tests/engine.rs).
+//! Nothing counts twice with the fold's first order: R − wR₂ (below, # The photons and the Doppler term) shifts the denominators of the amplitudes the fold eliminates, in the groups and in a cross term's X2; the path takes the phases of a term's own
+//! field, the numerators. The kinetic shift's recoil part ħk²/2m stays the first order's: a kept drive's frequency takes k_l·v of the classical velocity, whose momentum the stimulated force moves as the state goes up.
 //!
 //! # The near light's dressing
 //! Every near carrier's response is dressed by the other near light (ground.rs, # The near light's
@@ -126,8 +149,8 @@
 //!
 //! # The trap
 //! The trap beam's focus is the origin. Its trap is each state's potential with the near beams'
-//! interference left out (`Model::potential`; a unit's standing wave is in it); its Hessian at the
-//! focus gives the trap's principal axes and frequencies (`Trap`). An atom is held while its
+//! interference left out but within a unit of the trap's light (`Model::potential`; its standing wave is in it, the fields of a near carrier's beams as of a folded one's); its
+//! Hessian at the well of that light (ground.rs # Where the trap is, `Trap::centre`) gives the trap's principal axes and frequencies (`Trap`). An atom is held while its
 //! mechanical energy, ħ²κ²/2m plus its potential relative to far from the trap, is negative -- or,
 //! unbound, until it leaves the trap's region (engine.rs # Loss): the potential the engine's force
 //! derives from, Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ of its current internal state, less the same with the trap's light
@@ -218,6 +241,8 @@ pub struct Carrier{
     /// c_lk per beam of the carrier (in `beams` order).
     pub coefficients:Vec<[Complex;MOST_RANK]>,
     pub wave_number:f64,
+    /// Its beams' places (j, m), j ≠ m, whose fields add in the trap's potential (`Model::level`): both of one unit of the trap's light.
+    pub interfering:Vec<(usize,usize)>,
 }
 
 /// A table group's place in a node's slice: a kept group of `ground::Group` with one residual beat,
@@ -239,44 +264,59 @@ pub(crate) struct Kept{pub(crate) pair:(usize,usize),pub(crate) entries:Vec<(usi
 /// ‖T_k[:,b]‖ (rank × n0, `Model::ringing_bound`), on the cluster's n0 ground states.
 #[derive(Clone,Copy,Debug)]
 pub(crate) struct CarrierLayout{pub(crate) j:usize,pub(crate) j2:usize,pub(crate) t:usize,pub(crate) norm:usize}
-/// A kept drive: row (explicit state), column (ground state), carrier, residual beat and U_k[e,b]
-/// per rank at the focus.
+/// A beam's share of a term of the explicit states (module documentation, # The atom's path): the beam's place among its carrier's beams; the beam whose wave vector it takes, its own or, within the single precision of
+/// the cluster's largest coupling, its term's strongest, none where that too lies within it; the part of the term's residual at that wave vector (`Beats::of`), the part of their negatives, and of a kept drive the beam's coupling Σ_k c_lk U_k[e,b].
 #[derive(Clone,Copy,Debug)]
-pub struct DriveLayout{pub row:usize,pub col:usize,pub carrier:usize,pub residual:f64,pub u:[Complex;MOST_RANK]}
+pub(crate) struct Tone{pub(crate) beam:usize,lead:Option<usize>,pub(crate) part:usize,pub(crate) mirror:usize,pub(crate) u:Complex}
+/// A kept drive: row (explicit state), column (ground state), carrier, residual beat, U_k[e,b]
+/// per rank at the focus and its beams' tones.
+#[derive(Clone,Debug)]
+pub(crate) struct DriveLayout{pub(crate) row:usize,pub(crate) col:usize,pub(crate) carrier:usize,pub(crate) residual:f64,pub(crate) u:[Complex;MOST_RANK],pub(crate) tones:Vec<Tone>}
 /// A decay cross term between an explicit state (row) and a ground state (column) whose folded
 /// photons share a class with its: carrier, residual beat, the landing states the two share, and
 /// where its X_k = w·T_k[:,b] and X2_k = w·T2_k[:,b] lie (rank values each), w = Σ_{to,a} ĉ_a[to]* C_a[to,·]
-/// with the explicit state's dressed photon ĉ (`Layout::emission`).
+/// with the explicit state's dressed photon ĉ (`Layout::emission`), and its beams' tones.
 #[derive(Clone,Debug)]
-struct CrossLayout{row:usize,col:usize,carrier:usize,residual:f64,tos:Vec<usize>,at:usize,at2:usize}
+struct CrossLayout{row:usize,col:usize,carrier:usize,residual:f64,tos:Vec<usize>,at:usize,at2:usize,tones:Vec<Tone>}
 /// The decay between two explicit states of a class, −(i/2) Σ_{to,a} ĉ_a[to]* ĉ′_a[to] over the
-/// landing states they share: row, column, residual beat, those states, where its value lies.
+/// landing states they share: row, column, residual beat, those states, where its value lies, its part among the beats.
 #[derive(Clone,Debug)]
-struct DecayLayout{row:usize,col:usize,residual:f64,tos:Vec<usize>,at:usize}
+struct DecayLayout{row:usize,col:usize,residual:f64,tos:Vec<usize>,at:usize,part:usize}
 /// A drive the dressing brings, from ground state b (column) to explicit state e (row) through the
 /// folded excited states F: ½(H_eF A_c[F,b] + x_e†V^f_c[F,b]) = Σ_k E_k Y_k, carrier, residual beat,
-/// where Y_k lie (rank values).
+/// where Y_k lie (rank values), its beams' tones.
 #[derive(Clone,Debug)]
-struct EffectiveLayout{row:usize,col:usize,carrier:usize,residual:f64,at:usize}
+struct EffectiveLayout{row:usize,col:usize,carrier:usize,residual:f64,at:usize,tones:Vec<Tone>}
 /// Where one cluster's tables lie in a node's slice, and its explicit states' terms: the kept drives
 /// (without a table), the decays, the cross terms, the dressing's drives and the explicit states'
-/// dressed photons ĉ_a[to] (explicit × 3 axes × ng, at `emission`).
+/// dressed photons ĉ_a[to] (explicit × 3 axes × ng, at `emission`); its states' wave vectors K_s on the atom's path where they leave fewer beats (module documentation, # The atom's path; `gauged`, else none).
 #[derive(Clone,Debug)]
-pub(crate) struct Layout{pub(crate) n:usize,pub(crate) n0:usize,pub(crate) size:usize,base:usize,pub(crate) h0:usize,pub(crate) groups:Vec<GroupLayout>,pub(crate) carriers:Vec<CarrierLayout>,crosses:Vec<CrossLayout>,drives:Vec<DriveLayout>,
-    decays:Vec<DecayLayout>,effective:Vec<EffectiveLayout>,emission:usize,pub(crate) fourth:Option<FourthLayout>,beats:Beats}
-/// A cluster's beats (module documentation, # The generator's beats): the distinct frequencies of its terms'
-/// residuals, ascending and closed under negation (−Ω_max … −Ω_min, Ω_min … Ω_max); the round-off within
-/// which a residual is static or one of them; their common period where they are harmonics of one frequency.
+pub(crate) struct Layout{pub(crate) n:usize,pub(crate) n0:usize,pub(crate) size:usize,base:usize,pub(crate) h0:usize,pub(crate) groups:Vec<GroupLayout>,pub(crate) carriers:Vec<CarrierLayout>,crosses:Vec<CrossLayout>,pub(crate) drives:Vec<DriveLayout>,
+    decays:Vec<DecayLayout>,effective:Vec<EffectiveLayout>,effective_dropped:f64,emission:usize,pub(crate) fourth:Option<FourthLayout>,pub(crate) beats:Beats,pub(crate) labels:Vec<[f64;3]>,pub(crate) gauged:bool}
+/// A cluster's beats (module documentation, # The generator's beats): the distinct residuals and wave vectors of its terms, by the residuals ascending and closed under negation -- (−Ω_max, −q) … (−Ω_min, −q′),
+/// (Ω_min, q′) … (Ω_max, q), a wave vector's sign its residual's, of a residual zero its first component's --; the round-offs within which a residual or a wave vector is static or one of them; their common period where they are
+/// harmonics of one frequency and none moves with the atom.
 #[derive(Clone,Debug,Default)]
-pub(crate) struct Beats{pub(crate) omegas:Vec<f64>,round_off:f64,pub(crate) period:Option<f64>}
+pub(crate) struct Beats{pub(crate) omegas:Vec<f64>,pub(crate) waves:Vec<[f64;3]>,round_off:f64,wave_round_off:f64,pub(crate) period:Option<f64>}
 impl Beats{
-    /// The beats of the residuals: those beyond the round-off, merged where within it of each other.
-    fn new(residuals:impl Iterator<Item=f64>,round_off:f64)->Beats{
-        let mut positive:Vec<f64>=residuals.map(f64::abs).filter(|&w|w>round_off).collect();positive.sort_by(f64::total_cmp);
-        let mut merged:Vec<f64>=vec![];for w in positive{if merged.last().map_or(true,|&m|w-m>round_off){merged.push(w);}}
-        let omegas:Vec<f64>=merged.iter().rev().map(|&w|-w).chain(merged.iter().copied()).collect();
-        let period=Beats::period_of(&merged,round_off);
-        Beats{omegas,round_off,period}
+    /// The beats of terms (residual, wave vector): those beyond the round-offs, one where within them of each other.
+    fn new(terms:impl Iterator<Item=(f64,[f64;3])>,round_off:f64,wave_round_off:f64)->Beats{
+        let mut positive:Vec<(f64,[f64;3])>=terms.filter_map(|(w,q)|Beats::positive(w,q,round_off,wave_round_off).map(|x|(x.1,x.2))).collect();
+        positive.sort_by(|a,b|a.0.total_cmp(&b.0).then_with(||(0..3).map(|i|a.1[i].total_cmp(&b.1[i])).find(|o|o.is_ne()).unwrap_or(std::cmp::Ordering::Equal)));
+        let mut merged:Vec<(f64,[f64;3])>=vec![];
+        for x in positive{if !merged.iter().rev().take_while(|m|x.0-m.0<=round_off).any(|m|(0..3).all(|i|(x.1[i]-m.1[i]).abs()<=wave_round_off)){merged.push(x);}}
+        let omegas:Vec<f64>=merged.iter().rev().map(|m|-m.0).chain(merged.iter().map(|m|m.0)).collect();
+        let waves:Vec<[f64;3]>=merged.iter().rev().map(|m|m.1.map(|x|0.-x)).chain(merged.iter().map(|m|m.1)).collect();
+        let still=merged.iter().all(|m|m.1==[0.;3]);let frequencies:Vec<f64>=merged.iter().map(|m|m.0).collect();
+        let period=if still{Beats::period_of(&frequencies,round_off)}else{None};
+        Beats{omegas,waves,round_off,wave_round_off,period}
+    }
+    /// A term's beat with the sign of the pair's positive one: whether it is the negative of that, the residual and the wave vector, none where both lie within the round-offs of zero.
+    fn positive(w:f64,q:[f64;3],round_off:f64,wave_round_off:f64)->Option<(bool,f64,[f64;3])>{
+        let w=if w.abs()<=round_off{0.}else{w};let q=q.map(|x|if x.abs()<=wave_round_off{0.}else{x});
+        if w==0.&&q==[0.;3]{return None;}
+        let negative=w<0.||(w==0.&&q.iter().find(|x|**x!=0.).is_some_and(|x|*x<0.));
+        Some(if negative{(true,-w,q.map(|x|0.-x))}else{(false,w,q)})
     }
     /// The period 2π/ω₀ of beats that are integer multiples of one frequency ω₀: Euclid's algorithm with
     /// nearest-integer quotients on the positive beats, each remainder's bound of its round-off carried
@@ -298,11 +338,11 @@ impl Beats{
         }
         positive.iter().all(|&w|{let q=(w/g).round();(w-q*g).abs()<=round_off+q*error}).then(||std::f64::consts::TAU/g)
     }
-    /// The beat of a residual: None where it is static, else its index in `omegas`.
-    fn of(&self,residual:f64)->Option<usize>{
-        if residual.abs()<=self.round_off{return None;}
-        let half=self.omegas.len()/2;let i=self.omegas[half..].iter().position(|&w|(residual.abs()-w).abs()<=self.round_off).expect("every residual has its beat");
-        Some(if residual>0.{half+i}else{half-1-i})
+    /// The beat of a term: None where it is static, else its index in `omegas`.
+    fn of(&self,residual:f64,wave:[f64;3])->Option<usize>{
+        let(negative,w,q)=Beats::positive(residual,wave,self.round_off,self.wave_round_off)?;let half=self.omegas.len()/2;
+        let i=(half..self.omegas.len()).position(|j|(w-self.omegas[j]).abs()<=self.round_off&&(0..3).all(|a|(q[a]-self.waves[j][a]).abs()<=self.wave_round_off)).expect("every term has its beat");
+        Some(if negative{half-1-i}else{half+i})
     }
 }
 /// The fourth order's tables of a cluster of ground states (ground.rs, # Fourth order), on
@@ -349,7 +389,7 @@ impl FourthLayout{
     /// Each slab's kept entries' parts among the cluster's beats.
     fn place(&mut self,frames:&[f64],beats:&Beats){
         let n=frames.len();
-        for q in &mut self.quartic{q.part=(0..n*n).map(|i|if q.keep[i]{beats.of(frames[i/n]-frames[i%n]+q.nu).map_or(0,|j|j+1)}else{0}).collect();}
+        for q in &mut self.quartic{q.part=(0..n*n).map(|i|if q.keep[i]{beats.of(frames[i/n]-frames[i%n]+q.nu,[0.;3]).map_or(0,|j|j+1)}else{0}).collect();}
     }
 }
 /// One carrier pair's slabs: R_c1†R_c2 on the coherent entries (`coherent`) at `rr`, YW_c1c2 at `yw`; their
@@ -433,6 +473,8 @@ pub struct Point{
     /// ∇s_f (1/um).
     pub intensity_gradient:[[f64;3];MOST_FOCUSED],
     pub fields:[CarrierField;MOST_CARRIERS],
+    /// The fields' E^D stand: the first order's shifts act on its terms (`Model::balance` takes them off).
+    pub shifted:bool,
 }
 
 /// A cluster's generator at a point and a time: H_eff less `scalar`, the scalar part of its
@@ -464,21 +506,54 @@ impl Generator{
 }
 /// A cluster's generator at a point split by its beats (`Model::components`): H(t) = H₀ + Σ_j e^{iΩ_j t} H_j
 /// and the Hermitian part's gradient G(t) = G₀ + Σ_j e^{iΩ_j t} G_j, Hermitian at every t (G_{−Ω} = G_Ω†); H₀
-/// less the static part's scalar.
+/// less the static part's scalar. Flat, as the kernel's scratch, n × n each: `matrices` H_q at q n² and, past the `parts`, G_q per axis at (parts + 3q + axis) n², q = 0 the static part;
+/// `omegas` the frequencies of the beats still kept (the exact step leaves some out) and `places` their q. Along the atom's path (`Model::on_path`, # The atom's path) the frequencies take the beats' q·v, and where the
+/// cluster's states have wave vectors K_s ψ_s = e^{iK_s·v(t − `middle`)} x_s: `gauge`, K_s·v per state, which x_s evolves under (`gauged`; none at rest).
 #[derive(Clone,Debug)]
-pub struct Components{pub statics:Generator,pub beats:Vec<Beat>}
+pub struct Components{pub n:usize,pub scalar:f64,pub(crate) parts:usize,pub(crate) omegas:Vec<f64>,pub(crate) places:Vec<usize>,pub(crate) matrices:Vec<Complex>,pub(crate) gauge:[f64;MOST_MIXED],pub(crate) middle:f64,pub(crate) gauged:bool}
 /// One beat of a generator: its frequency Ω (rad/us) and its parts of H and of the gradient (n × n).
-#[derive(Clone,Debug)]
-pub struct Beat{pub omega:f64,pub hamiltonian:Vec<Complex>,pub gradient:[Vec<Complex>;3]}
+#[derive(Clone,Copy,Debug)]
+pub struct Beat<'a>{pub omega:f64,pub hamiltonian:&'a [Complex],pub gradient:[&'a [Complex];3]}
+thread_local!{
+    /// A thread's last `Components`' buffers, for its next (as `LOCAL_BUFFERS`): the exact step's generator per step allocates nothing, where a beating cluster's parts took six allocations each.
+    static COMPONENT_BUFFERS:std::cell::Cell<(Vec<Complex>,Vec<f64>,Vec<usize>)>=const{std::cell::Cell::new((Vec::new(),Vec::new(),Vec::new()))};
+}
+impl Drop for Components{
+    fn drop(&mut self){let buffers=(std::mem::take(&mut self.matrices),std::mem::take(&mut self.omegas),std::mem::take(&mut self.places));let _=COMPONENT_BUFFERS.try_with(|b|b.set(buffers));}
+}
 impl Components{
-    pub fn n(&self)->usize{self.statics.n}
+    pub fn n(&self)->usize{self.n}
+    /// H₀.
+    pub fn hamiltonian(&self)->&[Complex]{let nn=self.n*self.n;&self.matrices[..nn]}
+    /// G₀ along an axis.
+    pub fn gradient(&self,axis:usize)->&[Complex]{let nn=self.n*self.n;let at=(self.parts+axis)*nn;&self.matrices[at..at+nn]}
+    /// The frequencies of the beats kept, ascending and closed under negation.
+    pub fn omegas(&self)->&[f64]{&self.omegas}
+    /// The kept beat j.
+    pub fn beat(&self,j:usize)->Beat<'_>{
+        let(q,nn)=(self.places[j],self.n*self.n);
+        Beat{omega:self.omegas[j],hamiltonian:&self.matrices[q*nn..(q+1)*nn],gradient:std::array::from_fn(|a|{let at=(self.parts+3*q+a)*nn;&self.matrices[at..at+nn]})}
+    }
+    /// The beats kept.
+    pub fn beats(&self)->impl Iterator<Item=Beat<'_>>{(0..self.omegas.len()).map(|j|self.beat(j))}
+    /// Only the beats `keep` says, by their index among the kept.
+    pub(crate) fn retain(&mut self,keep:impl Fn(usize)->bool){
+        let mut left=0;for j in 0..self.omegas.len(){if keep(j){self.omegas[left]=self.omegas[j];self.places[left]=self.places[j];left+=1;}}
+        self.omegas.truncate(left);self.places.truncate(left);
+    }
+    /// The Ehrenfest force on ħκ on a state at the time t: −Re⟨ψ|G(t)|ψ⟩/⟨ψ|ψ⟩, G(t) = G₀ + 2 Re Σ_{Ω>0} e^{iΩt} G_Ω.
+    pub fn force_at(&self,t:f64,psi:&[Complex])->[f64;3]{
+        let n=self.n;let norm:f64=psi[..n].iter().map(|z|z.norm_sqr()).sum();let half=self.omegas.len()/2;
+        let form=|g:&[Complex]|{let mut s=Complex::ZERO;for a in 0..n{let mut r=Complex::ZERO;for b in 0..n{r+=g[a*n+b]*psi[b];}s+=psi[a].conj()*r;}s};
+        std::array::from_fn(|a|{let mut f=form(self.gradient(a)).re;for j in half..self.omegas.len(){let b=self.beat(j);f+=2.*(Complex::cis(b.omega*t)*form(b.gradient[a])).re;}-f/norm})
+    }
     /// The generator at time t.
     pub fn at(&self,t:f64)->Generator{
-        let mut g=self.statics.clone();
-        for b in &self.beats{
+        let mut g=Generator{n:self.n,hamiltonian:self.hamiltonian().to_vec(),scalar:self.scalar,gradient:std::array::from_fn(|a|self.gradient(a).to_vec())};
+        for b in self.beats(){
             let phase=Complex::cis(b.omega*t);
-            for(o,x)in g.hamiltonian.iter_mut().zip(&b.hamiltonian){*o+=phase**x;}
-            for a in 0..3{for(o,x)in g.gradient[a].iter_mut().zip(&b.gradient[a]){*o+=phase**x;}}
+            for(o,x)in g.hamiltonian.iter_mut().zip(b.hamiltonian){*o+=phase**x;}
+            for a in 0..3{for(o,x)in g.gradient[a].iter_mut().zip(b.gradient[a]){*o+=phase**x;}}
         }
         g
     }
@@ -523,17 +598,19 @@ type Node=(Vec<Vec<Complex>>,[f64;3]);
 #[derive(Clone,Debug)]
 pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,bounds:Vec<[f64;3]>,reach:[f64;3],work:f64}
 
-/// The trap of the trap beam: its principal axes (unit rows on the lab axes) and frequencies
-/// (rad/us) at the focus for a reference state, and the frequencies per lab axis.
+/// The trap of the trap beam for a reference state: its place, the well's bottom (ground.rs # Where the trap is), its principal axes (unit rows on the lab axes) and frequencies
+/// (rad/us) there, and the frequencies per lab axis.
 #[derive(Clone,Copy,Debug)]
-pub struct Trap{pub axes:[[f64;3];3],pub frequencies:[f64;3],pub lab:[f64;3],pub lattice:Option<Lattice>}
+pub struct Trap{pub centre:[f64;3],pub axes:[[f64;3];3],pub frequencies:[f64;3],pub lab:[f64;3],pub lattice:Option<Lattice>}
 
 /// The trap's standing wave, its beam and reflection one unit (ground.rs `Unit`): on the beam's axis the field is
 /// γ₀ a + γ₁ ā, a = e^{ikz}/(1 + iz/z_R), its antinodes -- the sites -- where Φ(z) = kz − atan(z/z_R) + ½ arg(γ₀ γ̄₁)
-/// is a multiple of π, its nodes half way between. Its axis (a unit vector), k, z_R and that phase.
+/// is a multiple of π, its nodes half way between. Its axis (a unit vector), k, z_R and that phase; the envelope's inverse 1 + z²/z_R² at the trap's centre, where the trap's frequencies are read.
 #[derive(Clone,Copy,Debug)]
-pub struct Lattice{pub axis:[f64;3],pub wave_number:f64,pub rayleigh:f64,pub phase:f64}
+pub struct Lattice{pub axis:[f64;3],pub wave_number:f64,pub rayleigh:f64,pub phase:f64,pub central:f64}
 impl Lattice{
+    /// The stiffness at a site at z on the axis relative to the trap's: the envelope's there over its own at the trap's centre.
+    pub fn share(&self,z:f64)->f64{self.central/(1.+(z/self.rayleigh).powi(2))}
     /// The nearest site's number at z on the axis, and Φ's distance from it there, within ±π/2.
     pub fn nearest(&self,z:f64)->(f64,f64){let phase=self.wave_number*z-(z/self.rayleigh).atan()+self.phase;let n=(phase/std::f64::consts::PI).round();(n,phase-n*std::f64::consts::PI)}
     /// Site n's place on the axis: Φ's root by Newton's steps, from a start that depends on n alone.
@@ -576,6 +653,8 @@ pub struct Model{
     /// The fourth order's H^(4) entries left out at beats the second order folds: their mixings' squares
     /// (`FourthLayout`).
     pub fourth_dropped:f64,
+    /// The dressing's drives left out at beats the rule folds (`layouts`): their mixings' squares.
+    pub effective_dropped:f64,
     /// The largest error on T, relative and per µK of T, of what the first order's transfer leaves out (`transfer_tables`): at the request's T within `FIRST_SHARE`.
     pub first_error:f64,
     /// The elimination's a-priori bound over the atoms' reach: the largest excited weight a ground
@@ -583,13 +662,13 @@ pub struct Model{
     /// (Ω_l/2σ)², the beams' interference averaged out), over the tables' nodes inside the reach's
     /// intensities (`reach`). Where it exceeds the population target the eliminated model is outside
     /// its validity somewhere the atoms go -- light near resonance, which the excited population
-    /// measured along the trajectories can miss when the atoms sit in dark states (solve.rs flags it).
+    /// measured along the trajectories can miss when the atoms sit in dark states (solve.rs `with_open` books it for what the atoms read leave open).
     pub resonance:f64,
     /// What the transient's delay leaves of its interference (engine.rs, # The transient), relative to the photons' weight: the spread of
     /// Γ_i/z_i over the excited amplitudes a cluster's channels drive, every near beam at its peak, its largest over the tables' nodes inside
     /// the reach's intensities (as `resonance`).
     pub ringing_spread:f64,
-    /// The reach the profiles and the bound are judged over: the focus and the points ±reach_a along
+    /// The reach the profiles and the bound are judged over: the trap's centre (ground.rs `Ground::well`) and the points ±reach_a along
     /// each principal axis of the trap (`choose_profiles`).
     reach:Vec<[f64;3]>,
     /// The processor has AVX2 and FMA: the generator is built with them.
@@ -634,6 +713,29 @@ fn first_coefficients(lambda_s:Complex,lambda_q:Complex)->(Complex,Complex){
 fn room_cost(e:f64)->f64{let room=1.-e/POPULATION_TARGET;if room>0.{1./(room*room)}else{f64::INFINITY}}
 
 /// The pairs k′ ≤ k of a Hermitian group of rank r, or every (k′, k) of ranks (r′, r).
+/// Each state's wave vector on the atom's path (module documentation, # The atom's path): zero at the first state of each tree, one along what `held` couples, and across each of the `edges` (size, row, column, beam's wave vector), the strongest
+/// first, K_row = K_col + k. A spanning tree of the kept couplings, as the frames' (ground.rs `Ground::partition`).
+fn state_waves(n:usize,held:&[(usize,usize)],edges:&[(f64,usize,usize,[f64;3])])->Vec<[f64;3]>{
+    let mut labels:Vec<Option<[f64;3]>>=vec![None;n];
+    let spread=|labels:&mut Vec<Option<[f64;3]>>|loop{
+        let mut grew=false;
+        for &(a,b)in held{match(labels[a],labels[b]){(Some(x),None)=>{labels[b]=Some(x);grew=true;}(None,Some(x))=>{labels[a]=Some(x);grew=true;}_=>{}}}
+        if !grew{break;}
+    };
+    for s in 0..n{
+        if labels[s].is_some(){continue;}
+        labels[s]=Some([0.;3]);spread(&mut labels);
+        while let Some(&(_,row,col,k))=edges.iter().find(|x|labels[x.1].is_some()!=labels[x.2].is_some()){
+            match(labels[row],labels[col]){
+                (None,Some(b))=>labels[row]=Some(std::array::from_fn(|a|b[a]+k[a])),
+                (Some(e),None)=>labels[col]=Some(std::array::from_fn(|a|e[a]-k[a])),
+                _=>{}
+            }
+            spread(&mut labels);
+        }
+    }
+    labels.into_iter().map(|x|x.unwrap()).collect()
+}
 fn field_pairs(hermitian:bool,emitted:usize,absorbed:usize)->Vec<(usize,usize)>{
     if hermitian{(0..absorbed).flat_map(|k1|(k1..absorbed).map(move|k|(k1,k))).collect()}else{(0..emitted).flat_map(|k1|(0..absorbed).map(move|k|(k1,k))).collect()}
 }
@@ -729,17 +831,20 @@ impl Model{
                 let(e,s)=(frobenius_inner(&d,&d).re.sqrt(),frobenius_inner(v,v).re.sqrt());
                 if e>1e-9*s{return Err(format!("A beam's coupling is off its carrier's span by {:.1e} of its norm",e/s));}
             }
-            carriers.push(Carrier{beams:c.beams.clone(),rank:basis.len(),coefficients,wave_number:c.wave_number});bases.push(mixing);
+            carriers.push(Carrier{beams:c.beams.clone(),rank:basis.len(),coefficients,wave_number:c.wave_number,interfering:vec![]});bases.push(mixing);
         }
         if carriers.len()>MOST_CARRIERS||geometry.len()>MOST_BEAMS{return Err(format!("3D 运动最多支持 {MOST_CARRIERS} 个近共振频率、{MOST_BEAMS} 束光"));}
         if ground.ground_states.len()!=GROUND{return Err(format!("The ground manifold has {} states, not {GROUND}",ground.ground_states.len()));}
         if ground.clusters.iter().any(|c|c.excited.is_empty()&&c.states.len()>MOST_STATES){return Err("A cluster of ground states has more than eight states".into());}
         let trap_light=trap_light(&ground,&geometry,&trap_beams);
+        for c in &mut carriers{let n=c.beams.len();let of=|j:usize|ground.units.iter().position(|u|u.beams.contains(&c.beams[j]));
+            c.interfering=(0..n*n).map(|x|(x/n,x%n)).filter(|&(j,m)|j!=m&&of(j)==of(m)&&trap_light.contains(&c.beams[j])&&trap_light.contains(&c.beams[m])).collect();}
+        let centre=ground.centre;
         let mut model=Model{ground,geometry,trap_beam,trap_beams,trap_light,focused:vec![trap_unit],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
-            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3],work:0.},table_error:0.,table_limit:None,table_stalled:false,dressing:0.,fourth_dropped:0.,first_error:0.,resonance:0.,ringing_spread:0.,reach:vec![[0.;3]],
+            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3],work:0.},table_error:0.,table_limit:None,table_stalled:false,dressing:0.,fourth_dropped:0.,effective_dropped:0.,first_error:0.,resonance:0.,ringing_spread:0.,reach:vec![centre],
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
         model.choose_profiles(request)?;
-        model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();
+        model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();model.effective_dropped=model.layouts.iter().map(|l|l.effective_dropped).sum();
         Ok((model,bases))
     }
 
@@ -771,7 +876,7 @@ impl Model{
         let trap=self.bare_trap(reference);
         let reach:[f64;3]=std::array::from_fn(|a|{let w=trap.frequencies[a];
             if w>0.{(2.*BUDGET.recip().ln()*KT_PER_UK*request.temperature_uk*self.hbar_over_mass).sqrt()/w}else{0.}});
-        self.reach.extend(ground::reach_points(&trap.axes,reach,g.units.iter().any(|u|u.beams.len()>1)));
+        self.reach.extend(ground::reach_points(trap.centre,&trap.axes,reach,g.units.iter().any(|u|u.beams.len()>1)));
         let mut errors:Vec<(usize,f64,f64)>=vec![];
         for(u,unit)in g.units.iter().enumerate(){
             if u==self.focused[0]||!unit.varies(&g.beams){continue;}
@@ -803,35 +908,34 @@ impl Model{
         let rho=&request.initial_density;
         self.ground.ground_states.iter().enumerate().max_by(|a,b|rho[a.1*STATES+a.1].re.total_cmp(&rho[b.1*STATES+b.1].re)).map(|x|x.0).ok_or("No ground state".into())
     }
-    /// The trap a ground state sees in H(r) alone (its energy, the folds and outside shifts at r):
-    /// its Hessian at the focus by central differences over a thousandth of the trap's waist.
+    /// The trap a ground state sees in H(r) alone (its energy, the folds and outside shifts at r), at its well there (`Ground::centre`, the same state's).
     fn bare_trap(&self,state:usize)->Trap{
-        let g=&self.ground;let i=g.ground_states[state];let h=1e-3*self.geometry[self.trap_beam].waist.unwrap();
+        let g=&self.ground;let i=g.ground_states[state];
         let u=|r:[f64;3]|g.hamiltonian_at(r)[(i,i)].re;
-        self.trap_of(&u,h)
+        self.trap_of(&u,g.centre)
     }
-    /// The trap of a potential u(r) (rad/us): its Hessian at the focus, eigen-decomposed.
-    fn trap_of(&self,u:&dyn Fn([f64;3])->f64,h:f64)->Trap{
-        let e=|a:usize|{let mut v=[0.;3];v[a]=h;v};let add=|x:[f64;3],y:[f64;3]|std::array::from_fn(|i|x[i]+y[i]);let neg=|x:[f64;3]|x.map(|v|-v);
-        let u0=u([0.;3]);
-        let hessian:[[f64;3];3]=std::array::from_fn(|a|std::array::from_fn(|b|if a==b{(u(e(a))+u(neg(e(a)))-2.*u0)/(h*h)}
-            else{(u(add(e(a),e(b)))-u(add(e(a),neg(e(b))))-u(add(neg(e(a)),e(b)))+u(add(neg(e(a)),neg(e(b)))))/(4.*h*h)}));
+    /// The trap of a potential u(r) (rad/us) at a place: its Hessian there, eigen-decomposed.
+    fn trap_of(&self,u:&dyn Fn([f64;3])->f64,centre:[f64;3])->Trap{
+        let(_,_,hessian)=ground::slopes(u,centre,ground::difference(self.geometry[self.trap_beam].waist.unwrap()));
         let(values,axes)=symmetric_eigen(hessian);
         let w=|x:f64|(x*self.hbar_over_mass).max(0.).sqrt();
-        Trap{axes,frequencies:values.map(w),lab:std::array::from_fn(|a|w(hessian[a][a])),lattice:self.lattice()}
+        Trap{centre,axes,frequencies:values.map(w),lab:std::array::from_fn(|a|w(hessian[a][a])),lattice:self.lattice(centre)}
     }
-    /// The trap's standing wave, where the trap beam's unit is it and its reflection.
-    fn lattice(&self)->Option<Lattice>{
+    /// The bottom of the reference state's well in H(r) alone (`Ground::centre`): where what no state's own trap decides is taken, a held twin's line and the explicit states' decay.
+    pub fn centre(&self)->[f64;3]{self.ground.centre}
+    /// The trap's standing wave, where the trap beam's unit is it and its reflection, its envelope at the trap's centre.
+    fn lattice(&self,centre:[f64;3])->Option<Lattice>{
         let unit=&self.ground.units[self.focused[0]];if unit.beams.len()!=2||!unit.beams.iter().all(|l|self.trap_beams.contains(l)){return None;}
         let(a,b)=(&self.geometry[unit.beams[0]],&self.geometry[unit.beams[1]]);let waist=a.waist?;
         if (0..3).map(|i|a.direction[i]*b.direction[i]).sum::<f64>()>0.{return None;}
         let z=unit.weights[0]*unit.weights[1].conj();
-        Some(Lattice{axis:a.direction,wave_number:a.wave_number,rayleigh:a.wave_number*waist*waist/2.,phase:0.5*z.im.atan2(z.re)})
+        let(rayleigh,along)=(a.wave_number*waist*waist/2.,(0..3).map(|i|a.direction[i]*centre[i]).sum::<f64>());
+        Some(Lattice{axis:a.direction,wave_number:a.wave_number,rayleigh,phase:0.5*z.im.atan2(z.re),central:1.+(along/rayleigh).powi(2)})
     }
-    /// The trap of the model's tables for a cluster's state (its potential with the interference left
-    /// out, `potential`).
+    /// The trap of the model's tables for a cluster's state: at the well of what holds it before the near light comes on (`trap_level`, ground.rs `Ground::well`), its Hessian in its potential
+    /// (`potential`), the near light's own shifts in it.
     pub fn trap(&self,cluster:usize,x:usize)->Trap{
-        let h=1e-3*self.geometry[self.trap_beam].waist.unwrap();self.trap_of(&|r|self.potential(cluster,x,r),h)
+        let centre=self.ground.well(self.trap_beam,&|r|self.trap_level(cluster,x,r));self.trap_of(&|r|self.potential(cluster,x,r,centre),centre)
     }
 
     /// Each cluster's table layout: h0, its groups split by residual beat, its carriers' photon
@@ -872,20 +976,25 @@ impl Model{
             let(mut decays,mut crosses):(Vec<DecayLayout>,Vec<CrossLayout>)=(vec![],vec![]);
             for class in &cl.classes{for &(i,to,wi)in &class.direct{
                 for &(j,to2,wj)in &class.direct{if to2!=to{continue;}let residual=wj-wi;
-                    match decays.iter_mut().find(|x|x.row==i&&x.col==j&&x.residual==residual){Some(x)=>x.tos.push(to),None=>decays.push(DecayLayout{row:i,col:j,residual,tos:vec![to],at:0})}
+                    match decays.iter_mut().find(|x|x.row==i&&x.col==j&&x.residual==residual){Some(x)=>x.tos.push(to),None=>decays.push(DecayLayout{row:i,col:j,residual,tos:vec![to],at:0,part:0})}
                 }
                 for &(p,wp)in &class.photons{if p.to!=to{continue;}
                     let(col,residual)=(cl.position(p.from).unwrap(),wp-wi);
                     match crosses.iter_mut().find(|x|x.row==i&&x.col==col&&x.carrier==p.carrier&&x.residual==residual){
-                        Some(x)=>x.tos.push(to),None=>crosses.push(CrossLayout{row:i,col,carrier:p.carrier,residual,tos:vec![to],at:0,at2:0})}
+                        Some(x)=>x.tos.push(to),None=>crosses.push(CrossLayout{row:i,col,carrier:p.carrier,residual,tos:vec![to],at:0,at2:0,tones:vec![]})}
                 }
             }}
             for x in crosses.iter_mut(){x.at=size;x.at2=size+self.carriers[x.carrier].rank;size+=2*self.carriers[x.carrier].rank;}
             for x in decays.iter_mut(){x.at=size;size+=1;}
             // The dressing's drives: from a ground state of the cluster through a folded excited state
-            // H couples to an explicit one, per carrier that drives it there.
+            // H couples to an explicit one, per carrier that drives it there. They take the rule of every coupling (ground.rs): one above the cut whose mixing fits folds (`foldable`), left out with what it leaves booked,
+            // as the fourth order's fast entries (`fourth_keeps`) -- its size H's coupling times the folded state's admixture. Left out, not folded, its second order goes too: its rate over the run and its shift against the state's width, each within the numerical share of the
+            // population target (a closer one holds a rate between sublevels of a PGC's probe's rung, 0.011 /us off of 0.30 with it, 0.017 without). Kept, a beat of 13 THz, an 808 nm tweezer's distance from the D2 line, at 550 rad/us of a retro-reflected tweezer's tensor mixing, took
+            // the grid to 64 million nodes for a step of 0.7 us, at a mixing² of 4e-11.
             let folded_static=|a:usize,b:usize|g.dressed[a].contains(&b);
-            let mut effective=vec![];
+            let coupling=|a:usize,b:usize|g.excited_items.iter().find(|x|matches!(x.kind,ground::ExcitedKind::Static{a:p,b:q}if (p==a&&q==b)||(p==b&&q==a))).map_or(0.,|x|x.size);
+            let admixture=|c:usize,b:usize,e:usize|g.excited_items.iter().find(|x|matches!(x.kind,ground::ExcitedKind::Drive(d)if d==ground::Drive{carrier:c,excited:e,ground:b})).map_or(0.,|x|x.size/x.distance.max(f64::MIN_POSITIVE));
+            let mut effective=vec![];let mut effective_dropped=0.;
             for(p,&e)in cl.excited.iter().enumerate(){
                 let reached:Vec<usize>=(0..ne).filter(|&f|!cl.excited.contains(&f)&&folded_static(e,f)).collect();
                 if reached.is_empty(){continue;}
@@ -893,26 +1002,64 @@ impl Model{
                     if !reached.iter().any(|&f|carrier.beams.iter().any(|&l|g.folded[l][(f,b)]!=Complex::ZERO)){continue;}
                     let(m,mx)=(&cl.combinations[n0+p],&cl.combinations[x]);
                     let residual=g.beat(0.,&(0..m.len()).map(|i|m[i]-mx[i]-i32::from(i==c)).collect::<Vec<i32>>());
-                    effective.push(EffectiveLayout{row:n0+p,col:x,carrier:c,residual,at:size});size+=carrier.rank;
+                    let strength:f64=reached.iter().map(|&f|coupling(e,f)*admixture(c,b,f)).sum();
+                    let width=g.decay[(e,e)].re.max(f64::MIN_POSITIVE);let left=ground::mixing(residual,strength,g.generator_scale).powi(2)*(1.+width*g.duration)+strength*strength/residual.abs().max(f64::MIN_POSITIVE)/width;
+                    if residual.abs()>=g.cut&&ground::foldable(residual,strength,g.generator_scale)&&left<=crate::solve::NUMERICAL_SHARE*crate::solve::POPULATION_TARGET{effective_dropped+=left;continue;}
+                    effective.push(EffectiveLayout{row:n0+p,col:x,carrier:c,residual,at:size,tones:vec![]});size+=carrier.rank;
                 }}
             }
             let emission=size;size+=3*ng*cl.excited.len();
-            let drives:Vec<DriveLayout>=cl.drives.iter().map(|&(row,col,c,residual)|DriveLayout{row,col,carrier:c,residual,
-                u:std::array::from_fn(|k|if k<self.carriers[c].rank{basis[c][k][(cl.excited[row-n0],cl.states[col])]}else{Complex::ZERO})}).collect();
+            let mut drives:Vec<DriveLayout>=cl.drives.iter().map(|&(row,col,c,residual)|DriveLayout{row,col,carrier:c,residual,
+                u:std::array::from_fn(|k|if k<self.carriers[c].rank{basis[c][k][(cl.excited[row-n0],cl.states[col])]}else{Complex::ZERO}),tones:vec![]}).collect();
             // The fourth order: a cluster of ground states, on the carriers whose folded drives reach it.
             let mut fourth=(self.fourth&&cl.excited.is_empty()).then(||self.fourth_layout(k,&mut size));
-            // The beats of every term's residual, a residual static within `same_frame`'s tolerance at the
-            // cluster's largest frame and detuning (the round-off of the frames' differences); the fourth order's
-            // kept entries beat at θ_a − θ_b + ν (`FourthLayout::residuals`).
+            // The beams that act through each linear term (module documentation, # The atom's path): a kept drive's coupling and a cross term's or a dressing's drive's folded column, by size; a beam within the
+            // single precision of the cluster's largest has no phase of its own, what the kernel's generator cannot hold (`Tone`).
+            let column=|l:usize,b:usize|(0..ne).map(|f|g.folded[l][(f,cl.states[b])].abs()).fold(0.,f64::max);
+            let coupling=|d:&DriveLayout,j:usize|{let carrier=&self.carriers[d.carrier];(0..carrier.rank).fold(Complex::ZERO,|s,k|s+carrier.coefficients[j][k]*d.u[k])};
+            let largest_coupling=drives.iter().flat_map(|d|(0..self.carriers[d.carrier].beams.len()).map(move|j|(d,j))).map(|(d,j)|coupling(d,j).abs())
+                .chain(crosses.iter().map(|x|(x.carrier,x.col)).chain(effective.iter().map(|x|(x.carrier,x.col))).flat_map(|(c,b)|self.carriers[c].beams.iter().map(move|&l|(l,b))).map(|(l,b)|column(l,b))).fold(0.,f64::max);
+            let floor=f32::EPSILON as f64*largest_coupling;
+            let new_tones=|list:Vec<(usize,f64,Complex)>|->Vec<Tone>{
+                let strongest=list.iter().filter(|x|x.1>floor).max_by(|a,b|a.1.total_cmp(&b.1)).map(|x|x.0);
+                list.into_iter().map(|(beam,size,u)|Tone{beam,lead:if size>floor{Some(beam)}else{strongest},part:0,mirror:0,u}).collect()};
+            let columns=|c:usize,b:usize|self.carriers[c].beams.iter().enumerate().map(|(j,&l)|(j,column(l,b),Complex::ZERO)).collect::<Vec<_>>();
+            for d in drives.iter_mut(){let list=(0..self.carriers[d.carrier].beams.len()).map(|j|{let u=coupling(d,j);(j,u.abs(),u)}).filter(|x|x.1>0.).collect();d.tones=new_tones(list);}
+            for x in crosses.iter_mut(){x.tones=new_tones(columns(x.carrier,x.col));}
+            for x in effective.iter_mut(){x.tones=new_tones(columns(x.carrier,x.col));}
+            // The states' wave vectors along a spanning tree of the kept drives' beams, the strongest first; what H and the held groups' couplings hold together has one (`state_waves`).
+            let held:Vec<(usize,usize)>=groups.iter().flat_map(|gl|gl.entries.iter().copied()).chain(cl.statics.iter().copied()).chain(cl.static_paths.iter().map(|x|(x.0,x.1)))
+                .chain(cl.excited_statics.iter().copied()).chain(cl.excited_paths.iter().map(|x|(x.0,x.1))).filter(|x|x.0!=x.1).collect();
+            let wave=|c:usize,t:&Tone|t.lead.map_or([0.;3],|j|self.geometry[self.carriers[c].beams[j]].wave_vector());
+            let mut edges:Vec<(f64,usize,usize,[f64;3])>=drives.iter().flat_map(|d|d.tones.iter().filter(|t|t.lead==Some(t.beam)).map(move|t|(t.u.abs(),d.row,d.col,wave(d.carrier,t)))).collect();edges.sort_by(|a,b|b.0.total_cmp(&a.0));
+            let labels=state_waves(n,&held,&edges);let none=vec![[0.;3];n];
+            // The beats of every term's residual and wave vector, a residual static within `same_frame`'s tolerance at the
+            // cluster's largest frame and detuning (the round-off of the frames' differences), a wave vector within the same share of the largest; the fourth order's
+            // kept entries beat at θ_a − θ_b + ν (`FourthLayout::residuals`). The states' wave vectors where they leave fewer beats than none.
             let largest=cl.frames.iter().chain(&cl.excited_frames).map(|x|x.abs()).fold(0.,f64::max)+g.carriers.iter().map(|c|c.detuning.abs()).fold(0.,f64::max);
+            let wave_round_off=64.*f64::EPSILON*2.*self.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max);
             let quartic:Vec<f64>=fourth.as_ref().map_or(vec![],|f|f.residuals(&cl.frames));
-            let residuals=groups.iter().map(|x|x.residual).chain(drives.iter().map(|x|x.residual)).chain(crosses.iter().map(|x|x.residual))
-                .chain(decays.iter().map(|x|x.residual)).chain(effective.iter().map(|x|x.residual)).chain(quartic);
-            let beats=Beats::new(residuals,64.*f64::EPSILON*2.*largest);
+            let beats_of=|k:&[[f64;3]]|{
+                let across=|row:usize,col:usize,c:usize,t:&Tone|if t.lead.is_none(){[0.;3]}else{let(q,a,b)=(wave(c,t),k[row],k[col]);std::array::from_fn::<f64,3,_>(|x|q[x]+b[x]-a[x])};
+                let terms:Vec<(f64,[f64;3])>=groups.iter().map(|x|(x.residual,[0.;3]))
+                    .chain(drives.iter().flat_map(|x|x.tones.iter().map(move|t|(x.residual,across(x.row,x.col,x.carrier,t)))))
+                    .chain(crosses.iter().flat_map(|x|x.tones.iter().map(move|t|(x.residual,across(x.row,x.col,x.carrier,t)))))
+                    .chain(effective.iter().flat_map(|x|x.tones.iter().map(move|t|(x.residual,across(x.row,x.col,x.carrier,t)))))
+                    .chain(decays.iter().map(|x|(x.residual,std::array::from_fn::<f64,3,_>(|a|k[x.col][a]-k[x.row][a])))).chain(quartic.iter().map(|&w|(w,[0.;3]))).collect();
+                Beats::new(terms.into_iter(),64.*f64::EPSILON*2.*largest,wave_round_off)};
+            let(plain,along)=(beats_of(&none),beats_of(&labels));let gauged=along.omegas.len()<plain.omegas.len();
+            let(beats,labels)=if gauged{(along,labels)}else{(plain,none)};
+            let part=|w:f64,q:[f64;3]|beats.of(w,q).map_or(0,|j|j+1);
+            let across=|row:usize,col:usize,c:usize,t:&Tone|if t.lead.is_none(){[0.;3]}else{let(q,a,b)=(wave(c,t),labels[row],labels[col]);std::array::from_fn::<f64,3,_>(|x|q[x]+b[x]-a[x])};
+            let place=|t:&mut Tone,row:usize,col:usize,c:usize,w:f64|{let q=across(row,col,c,t);t.part=part(w,q);t.mirror=part(-w,q.map(|x|-x));};
+            for x in drives.iter_mut(){let(row,col,c,w)=(x.row,x.col,x.carrier,x.residual);for t in x.tones.iter_mut(){place(t,row,col,c,w);}}
+            for x in crosses.iter_mut(){let(row,col,c,w)=(x.row,x.col,x.carrier,x.residual);for t in x.tones.iter_mut(){place(t,row,col,c,w);}}
+            for x in effective.iter_mut(){let(row,col,c,w)=(x.row,x.col,x.carrier,x.residual);for t in x.tones.iter_mut(){place(t,row,col,c,w);}}
+            for x in decays.iter_mut(){x.part=part(x.residual,std::array::from_fn(|a|labels[x.col][a]-labels[x.row][a]));}
             if let Some(f)=fourth.as_mut(){f.place(&cl.frames,&beats);}
             // The first order's W^S and W^Q, last in the slice: `transfer_tables` takes them out once the grid is settled.
             let base=size;for gl in groups.iter_mut(){gl.w=size;size+=2*gl.first.len()*gl.entries.len();}
-            Layout{n,n0,size,base,h0,groups,carriers,crosses,drives,decays,effective,emission,fourth,beats}
+            Layout{n,n0,size,base,h0,groups,carriers,crosses,drives,decays,effective,effective_dropped,emission,fourth,beats,labels,gauged}
         }).collect()
     }
 
@@ -1304,7 +1451,7 @@ impl Model{
             }}
             cl.groups.retain(|g|!g.entries.is_empty());
         }
-        self.layouts=self.layouts(mixing);self.fourth_dropped=self.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();
+        self.layouts=self.layouts(mixing);self.fourth_dropped=self.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();self.effective_dropped=self.layouts.iter().map(|l|l.effective_dropped).sum();
         Ok(())
     }
     /// The tables on grids of FIRST_NODES, then doubled (each grid's nodes computed once), the finer grid
@@ -1505,7 +1652,7 @@ impl Model{
             }
         }
         let d=self.focused.len();let stencil=self.stencil(&s[..d]);
-        Point{r,kappa,stencil,far:self.stencil(&off[..d]),intensity_gradient:gradient,fields}
+        Point{r,kappa,stencil,far:self.stencil(&off[..d]),intensity_gradient:gradient,fields,shifted:true}
     }
 
     /// w_l = (ħ/m) k_l·κ + ħ|k_l|²/2m (rad/us): the kinetic energy absorbing from beam l gives.
@@ -1587,29 +1734,32 @@ impl Model{
     /// A cluster's number of ground states (the first of its basis).
     pub fn ground_dimension(&self,cluster:usize)->usize{self.layouts[cluster].n0}
     /// The part of a cluster's components a residual goes into (`components`): 0 the static one, 1 + j beat j's.
-    pub(crate) fn part(&self,cluster:usize,residual:f64)->usize{self.layouts[cluster].beats.of(residual).map_or(0,|j|j+1)}
+    pub(crate) fn part(&self,cluster:usize,residual:f64)->usize{self.layouts[cluster].beats.of(residual,[0.;3]).map_or(0,|j|j+1)}
     /// A cluster's terms of its explicit states for the GPU's components (gpu/program.rs `Term`), in
     /// `components`' order: per kept drive (kind 0), decay cross term (1), decay (2) and dressing's drive
-    /// (3) its row, column, carrier, part, its mirror's part (the residual's negative), its tables' place
-    /// (a cross term's X_k, then its X2_k's) and a drive's U_k; and where the explicit states' dressed photons lie (`photon`).
-    pub(crate) fn exact_terms(&self,cluster:usize)->(Vec<[usize;8]>,Vec<[Complex;MOST_RANK]>,usize){
-        let l=&self.layouts[cluster];let part=|w:f64|self.part(cluster,w);let(mut terms,mut u)=(vec![],vec![]);
-        for d in &l.drives{terms.push([0,d.row,d.col,d.carrier,part(d.residual),part(-d.residual),0,0]);u.push(d.u);}
-        for c in &l.crosses{terms.push([1,c.row,c.col,c.carrier,part(c.residual),part(-c.residual),c.at,c.at2]);u.push([Complex::ZERO;MOST_RANK]);}
-        for d in &l.decays{terms.push([2,d.row,d.col,0,part(d.residual),part(-d.residual),d.at,0]);u.push([Complex::ZERO;MOST_RANK]);}
-        for e in &l.effective{terms.push([3,e.row,e.col,e.carrier,part(e.residual),part(-e.residual),e.at,0]);u.push([Complex::ZERO;MOST_RANK]);}
-        (terms,u,l.emission)
+    /// (3) its row, column, carrier, a decay's part, its tables' place
+    /// (a cross term's X_k, then its X2_k's), a drive's U_k and its beams' tones (their parts and the beams); and where the explicit states' dressed photons lie (`photon`).
+    pub(crate) fn exact_terms(&self,cluster:usize)->(Vec<[usize;7]>,Vec<[Complex;MOST_RANK]>,Vec<Vec<[usize;3]>>,usize){
+        let l=&self.layouts[cluster];let(mut terms,mut u,mut tones)=(vec![],vec![],vec![]);
+        let beams=|c:usize,list:&[Tone]|->Vec<[usize;3]>{list.iter().map(|t|[self.carriers[c].beams[t.beam],t.part,t.mirror]).collect()};
+        for d in &l.drives{terms.push([0,d.row,d.col,d.carrier,0,0,0]);u.push(d.u);tones.push(beams(d.carrier,&d.tones));}
+        for c in &l.crosses{terms.push([1,c.row,c.col,c.carrier,0,c.at,c.at2]);u.push([Complex::ZERO;MOST_RANK]);tones.push(beams(c.carrier,&c.tones));}
+        for d in &l.decays{terms.push([2,d.row,d.col,0,d.part,d.at,0]);u.push([Complex::ZERO;MOST_RANK]);tones.push(vec![]);}
+        for e in &l.effective{terms.push([3,e.row,e.col,e.carrier,0,e.at,0]);u.push([Complex::ZERO;MOST_RANK]);tones.push(beams(e.carrier,&e.tones));}
+        (terms,u,tones,l.emission)
     }
+    /// A cluster's beats' wave vectors and its states' (`Beats`, `Layout::labels`), none where it has no gauge: gpu/program.rs's.
+    pub(crate) fn beat_waves(&self,cluster:usize)->(&[[f64;3]],Option<&[[f64;3]]>){let l=&self.layouts[cluster];(&l.beats.waves,l.gauged.then_some(&l.labels[..]))}
 
     /// The table slice [start, start + value.len()) of a cluster at a stencil, and with `slopes` its
-    /// derivatives in every s_f, in one pass over the stencil's nodes.
-    fn gather_dyn(&self,cluster:usize,stencil:&Stencil,start:usize,value:&mut [Complex],mut slopes:Option<&mut [Vec<Complex>]>){
+    /// derivatives in every s_f (each at f times the given stride), in one pass over the stencil's nodes.
+    fn gather_dyn(&self,cluster:usize,stencil:&Stencil,start:usize,value:&mut [Complex],mut slopes:Option<(&mut [Complex],usize)>){
         let size=2*self.layouts[cluster].size;let data=&self.tables.data[cluster];let len=value.len();let d=stencil.dimensions;
-        value.fill(Complex::ZERO);if let Some(s)=slopes.as_deref_mut(){for g in 0..d{s[g][..len].fill(Complex::ZERO);}}
+        value.fill(Complex::ZERO);if let Some((s,stride))=&mut slopes{for g in 0..d{s[g* *stride..g* *stride+len].fill(Complex::ZERO);}}
         for i in 0..stencil.count(){
             let(node,w,dw)=stencil.node(i);let base=node*size+2*start;let x=&data[base..base+2*len];
             for(o,z)in value.iter_mut().zip(x.chunks_exact(2)){o.re+=w*z[0];o.im+=w*z[1];}
-            if let Some(s)=slopes.as_deref_mut(){for g in 0..d{for(o,z)in s[g].iter_mut().zip(x.chunks_exact(2)){o.re+=dw[g]*z[0];o.im+=dw[g]*z[1];}}}
+            if let Some((s,stride))=&mut slopes{for g in 0..d{for(o,z)in s[g* *stride..g* *stride+len].iter_mut().zip(x.chunks_exact(2)){o.re+=dw[g]*z[0];o.im+=dw[g]*z[1];}}}
         }
     }
     /// A cluster's generator at a point and time t on its n states (`Generator`): a static cluster of
@@ -1623,15 +1773,18 @@ impl Model{
     }
     /// A cluster's generator at a point split by its beats (`Components`): its tables' terms, the kept
     /// drives, the decay cross terms and the explicit states' decay (module documentation), and a cluster
-    /// of ground states' fourth order, each into the part of its residual -- the static one, or its beat's.
+    /// of ground states' fourth order, each into the part of its residual and wave vector -- the static one, or its beat's: the atom at the point, at its beats' residuals (`on_path` moves it).
     pub fn components(&self,cluster:usize,p:&Point)->Components{
         let layout=&self.layouts[cluster];let(n,d)=(layout.n,self.focused.len());let nn=n*n;let beats=&layout.beats;let parts=1+beats.omegas.len();
         // The part of a residual: 0 the static one, 1 + j beat j's.
-        let part=|w:f64|beats.of(w).map_or(0,|j|j+1);
-        let zeros=||vec![Complex::ZERO;nn];
-        let mut gradient:Vec<[Vec<Complex>;3]>=(0..parts).map(|_|std::array::from_fn(|_|zeros())).collect();
-        let(mut m,mut gamma):(Vec<Vec<Complex>>,Vec<Vec<Complex>>)=((0..parts).map(|_|zeros()).collect(),(0..parts).map(|_|zeros()).collect());
-        let mut buf=zeros();let mut slope=vec![zeros();d];
+        let part=|w:f64|beats.of(w,[0.;3]).map_or(0,|j|j+1);
+        // Flat: M_q, then H_q in its place at the end, G_q per axis (`Components`), Γ_q, a table's entries, their slopes.
+        let(mut matrices,mut omegas,mut places)=COMPONENT_BUFFERS.take();crate::linear::zeroed(&mut matrices,(5*parts+1+d)*nn);
+        let(m,rest)=matrices.split_at_mut(parts*nn);let(gradient,rest)=rest.split_at_mut(3*parts*nn);let(gamma,rest)=rest.split_at_mut(parts*nn);let(buf,slope)=rest.split_at_mut(nn);
+        // Every near beam's amplitude and gradient at the point: a cluster with explicit states' terms take them beam by beam.
+        let mut fields=[(Complex::ZERO,[Complex::ZERO;3]);MOST_BEAMS];
+        if layout.n>layout.n0{for c in &self.carriers{for &l in &c.beams{fields[l]=self.geometry[l].field(p.r);}}}
+        let of=|q:usize|q*nn..(q+1)*nn;let along=|q:usize,a:usize|of(3*q+a);
         // acc += c X, and with `adjoint` c X + (c X)† (a Hermitian group's pair k1 < k standing for both);
         // a group's tables hold its entries alone (`scatter`).
         let add=|c:Complex,x:&[Complex],acc:&mut [Complex],adjoint:bool|{for a in 0..n{for b in 0..n{acc[a*n+b]+=c*x[a*n+b];if adjoint{acc[a*n+b]+=(c*x[b*n+a]).conj();}}}};
@@ -1644,14 +1797,14 @@ impl Model{
             let lambda_s=transfer[0];let(mu,nu)=first_coefficients(transfer[0],transfer[1]);
             for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
                 let at=pi*count;let ee=e.e[k1].conj()*f.e[k];let both=gl.hermitian&&k1<k;
-                self.gather_dyn(cluster,&p.stencil,gl.s+at,&mut buf[..count],Some(&mut slope));
-                scatter(ee,&buf[..count],&gl.entries,&mut m[q],both);
+                self.gather_dyn(cluster,&p.stencil,gl.s+at,&mut buf[..count],Some((&mut *slope,nn)));
+                scatter(ee,&buf[..count],&gl.entries,&mut m[of(q)],both);
                 // ∇H_herm ∋ −∇(Φ) S − Φ Σ_f ∂_f S ∇s_f.
                 for a in 0..3{
-                    let c=e.grad[k1][a].conj()*f.e[k]+e.e[k1].conj()*f.grad[k][a];scatter(-c,&buf[..count],&gl.entries,&mut gradient[q][a],both);
-                    for g in 0..d{scatter(-ee*p.intensity_gradient[g][a],&slope[g][..count],&gl.entries,&mut gradient[q][a],both);}
+                    let c=e.grad[k1][a].conj()*f.e[k]+e.e[k1].conj()*f.grad[k][a];scatter(-c,&buf[..count],&gl.entries,&mut gradient[along(q,a)],both);
+                    for g in 0..d{scatter(-ee*p.intensity_gradient[g][a],&slope[g*nn..g*nn+count],&gl.entries,&mut gradient[along(q,a)],both);}
                 }
-                self.gather_dyn(cluster,&p.stencil,gl.q+at,&mut buf[..count],None);scatter(ee,&buf[..count],&gl.entries,&mut gamma[q],both);
+                self.gather_dyn(cluster,&p.stencil,gl.q+at,&mut buf[..count],None);scatter(ee,&buf[..count],&gl.entries,&mut gamma[of(q)],both);
                 // The first order on Q (module documentation): in Γ, H ∋ −(i/2) Γ, its coefficients μ ξ_k′k + ν ξ_kk′* and, on Q†, μ ξ_kk′ + ν ξ_k′k* or, between two
                 // carriers, ν ξ* at the mirror's beat; its force's gradient once, the pairing below halves it onto the two beats.
                 if gl.first.is_empty(){continue;}
@@ -1659,75 +1812,101 @@ impl Model{
                 let slope_of=|k1:usize,k:usize,a:usize|e.grad[k1][a].conj()*f.doppler[k]+e.e[k1].conj()*f.doppler_grad[k][a];
                 if gl.hermitian{
                     let other=e.e[k].conj()*f.doppler[k1];
-                    scatter((mu*xi+nu*other.conj())*into,&buf[..count],&gl.entries,&mut gamma[q],false);
-                    if k1<k{adjoint_at((mu*other+nu*xi.conj())*into,&mut gamma[q]);}
-                    for a in 0..3{let mut c=lambda_s*slope_of(k1,k,a);if k1<k{c+=(lambda_s*slope_of(k,k1,a)).conj();}scatter(c,&buf[..count],&gl.entries,&mut gradient[q][a],false);}
+                    scatter((mu*xi+nu*other.conj())*into,&buf[..count],&gl.entries,&mut gamma[of(q)],false);
+                    if k1<k{adjoint_at((mu*other+nu*xi.conj())*into,&mut gamma[of(q)]);}
+                    for a in 0..3{let mut c=lambda_s*slope_of(k1,k,a);if k1<k{c+=(lambda_s*slope_of(k,k1,a)).conj();}scatter(c,&buf[..count],&gl.entries,&mut gradient[along(q,a)],false);}
                 }else{
-                    scatter(mu*xi*into,&buf[..count],&gl.entries,&mut gamma[q],false);adjoint_at(nu*xi.conj()*into,&mut gamma[mirror]);
-                    for a in 0..3{scatter(lambda_s*slope_of(k1,k,a),&buf[..count],&gl.entries,&mut gradient[q][a],false);}
+                    scatter(mu*xi*into,&buf[..count],&gl.entries,&mut gamma[of(q)],false);adjoint_at(nu*xi.conj()*into,&mut gamma[of(mirror)]);
+                    for a in 0..3{scatter(lambda_s*slope_of(k1,k,a),&buf[..count],&gl.entries,&mut gradient[along(q,a)],false);}
                 }
             }
             // What the transfer leaves: ½ ξ ΔW^S + (i/2) ξ ΔW^Q and their mirrors' adjoints, in Γ; ΔW^S's gradient.
             for kept in &gl.kept{
                 let(k1,k)=kept.pair;let count=kept.entries.len();let xi=e.e[k1].conj()*f.doppler[k];
                 self.gather_dyn(cluster,&p.stencil,kept.at,&mut buf[..count],None);
-                for(j,&(x,y))in kept.entries.iter().enumerate(){let z=xi*buf[j]*0.5;gamma[q][x*n+y]+=z*into;gamma[mirror][y*n+x]+=z.conj()*into;
-                    for a in 0..3{gradient[q][a][x*n+y]+=(e.grad[k1][a].conj()*f.doppler[k]+e.e[k1].conj()*f.doppler_grad[k][a])*buf[j];}}
+                for(j,&(x,y))in kept.entries.iter().enumerate(){let z=xi*buf[j]*0.5;gamma[q*nn+x*n+y]+=z*into;gamma[mirror*nn+y*n+x]+=z.conj()*into;
+                    for a in 0..3{gradient[along(q,a).start+x*n+y]+=(e.grad[k1][a].conj()*f.doppler[k]+e.e[k1].conj()*f.doppler_grad[k][a])*buf[j];}}
                 self.gather_dyn(cluster,&p.stencil,kept.at+count,&mut buf[..count],None);
-                for(j,&(x,y))in kept.entries.iter().enumerate(){let z=xi*buf[j]*Complex::new(0.,0.5);gamma[q][x*n+y]+=z*into;gamma[mirror][y*n+x]+=(xi*buf[j]).conj()*Complex::new(0.,0.5)*into;}
+                for(j,&(x,y))in kept.entries.iter().enumerate(){let z=xi*buf[j]*Complex::new(0.,0.5);gamma[q*nn+x*n+y]+=z*into;gamma[mirror*nn+y*n+x]+=(xi*buf[j]).conj()*Complex::new(0.,0.5)*into;}
             }
         }
-        self.gather_dyn(cluster,&p.stencil,layout.h0,&mut buf,Some(&mut slope));
-        for a in 0..3{for g in 0..d{let c=Complex::new(p.intensity_gradient[g][a],0.);add(c,&slope[g],&mut gradient[0][a],false);}}
+        self.gather_dyn(cluster,&p.stencil,layout.h0,&mut *buf,Some((&mut *slope,nn)));
+        for a in 0..3{for g in 0..d{let c=Complex::new(p.intensity_gradient[g][a],0.);add(c,&slope[of(g)],&mut gradient[along(0,a)],false);}}
         // The static part less its scalar (its Hermitian part's mean diagonal, a phase); a beat's diagonal,
         // a phase that beats, stays in its part.
-        let scalar=(0..n).map(|a|buf[a*n+a].re-m[0][a*n+a].re).sum::<f64>()/n as f64;
-        let mut h:Vec<Vec<Complex>>=(0..parts).map(|q|(0..nn).map(|i|(if q==0{buf[i]}else{Complex::ZERO})-m[q][i]-gamma[q][i]*Complex::new(0.,0.5)).collect()).collect();
-        for a in 0..n{h[0][a*n+a]-=Complex::new(scalar,0.);}
+        let scalar=(0..n).map(|a|buf[a*n+a].re-m[a*n+a].re).sum::<f64>()/n as f64;
+        let h=m;for q in 0..parts{for i in 0..nn{h[q*nn+i]=(if q==0{buf[i]}else{Complex::ZERO})-h[q*nn+i]-gamma[q*nn+i]*Complex::new(0.,0.5);}}
+        for a in 0..n{h[a*n+a]-=Complex::new(scalar,0.);}
         // The fourth order (a cluster of ground states): each slab's kept entries in their beats' parts
         // (`fourth_parts`; the force keeps the second order's).
-        self.fourth_parts(cluster,p,&mut h);
-        // The kept drives, Σ_k E_k U_k e^{iΩ̃t} and its adjoint; their gradients the stimulated force.
+        self.fourth_parts(cluster,p,h);
+        // The kept drives beam by beam, a_l Σ_k c_lk U_k e^{iΩ̃t} and its adjoint, each into its part (`Tone`); their gradients the stimulated force.
         for dr in &layout.drives{
-            let fl=&p.fields[dr.carrier];let(q,mirror)=(part(dr.residual),part(-dr.residual));let rank=self.carriers[dr.carrier].rank;
-            let v=(0..rank).fold(Complex::ZERO,|s,k|s+fl.e[k]*dr.u[k]);h[q][dr.row*n+dr.col]+=v;h[mirror][dr.col*n+dr.row]+=v.conj();
-            for a in 0..3{let g=(0..rank).fold(Complex::ZERO,|s,k|s+fl.grad[k][a]*dr.u[k]);gradient[q][a][dr.row*n+dr.col]+=g;gradient[mirror][a][dr.col*n+dr.row]+=g.conj();}
-        }
-        // The decay cross terms, (i/2) e^{iΩ̃t} Σ_k E_k X_k and its mirror; the explicit states' decay.
-        let mut x=[Complex::ZERO;MOST_RANK];
-        for cr in &layout.crosses{
-            let rank=self.carriers[cr.carrier].rank;self.gather_dyn(cluster,&p.stencil,cr.at,&mut x[..rank],None);
-            let mut z=(0..rank).fold(Complex::ZERO,|s,k|s+p.fields[cr.carrier].e[k]*x[k]);
-            self.gather_dyn(cluster,&p.stencil,cr.at2,&mut x[..rank],None);z-=(0..rank).fold(Complex::ZERO,|s,k|s+p.fields[cr.carrier].doppler[k]*x[k]);
-            h[part(cr.residual)][cr.row*n+cr.col]+=z*Complex::new(0.,0.5);h[part(-cr.residual)][cr.col*n+cr.row]+=z.conj()*Complex::new(0.,0.5);
-        }
-        let mut z1=[Complex::ZERO];
-        for x in &layout.decays{self.gather_dyn(cluster,&p.stencil,x.at,&mut z1,None);h[part(x.residual)][x.row*n+x.col]+=z1[0];}
-        // The drives the dressing brings: Σ_k E_k Y_k e^{iΩ̃t} and its adjoint, and their gradients.
-        let(mut y,mut dy)=([Complex::ZERO;MOST_RANK],vec![vec![Complex::ZERO;MOST_RANK];d]);
-        for x in &layout.effective{
-            let rank=self.carriers[x.carrier].rank;let fl=&p.fields[x.carrier];let(q,mirror)=(part(x.residual),part(-x.residual));
-            self.gather_dyn(cluster,&p.stencil,x.at,&mut y[..rank],Some(&mut dy));
-            let v=(0..rank).fold(Complex::ZERO,|s,k|s+fl.e[k]*y[k]);h[q][x.row*n+x.col]+=v;h[mirror][x.col*n+x.row]+=v.conj();
-            for a in 0..3{
-                let mut g=(0..rank).fold(Complex::ZERO,|s,k|s+fl.grad[k][a]*y[k]);
-                for f in 0..d{g+=(0..rank).fold(Complex::ZERO,|s,k|s+fl.e[k]*dy[f][k])*p.intensity_gradient[f][a];}
-                gradient[q][a][x.row*n+x.col]+=g;gradient[mirror][a][x.col*n+x.row]+=g.conj();
+            let carrier=&self.carriers[dr.carrier];
+            for t in &dr.tones{
+                let(a,g)=&fields[carrier.beams[t.beam]];
+                let v=*a*t.u;h[t.part*nn+dr.row*n+dr.col]+=v;h[t.mirror*nn+dr.col*n+dr.row]+=v.conj();
+                for x in 0..3{let z=g[x]*t.u;gradient[along(t.part,x).start+dr.row*n+dr.col]+=z;gradient[along(t.mirror,x).start+dr.col*n+dr.row]+=z.conj();}
             }
         }
+        // The decay cross terms beam by beam, (i/2) e^{iΩ̃t} a_l Σ_k c_lk (X_k − w_l X2_k) and its mirror; the explicit states' decay.
+        let(mut x,mut x2)=([Complex::ZERO;MOST_RANK],[Complex::ZERO;MOST_RANK]);
+        for cr in &layout.crosses{
+            let carrier=&self.carriers[cr.carrier];let rank=carrier.rank;self.gather_dyn(cluster,&p.stencil,cr.at,&mut x[..rank],None);self.gather_dyn(cluster,&p.stencil,cr.at2,&mut x2[..rank],None);
+            for t in &cr.tones{
+                let l=carrier.beams[t.beam];let c=&carrier.coefficients[t.beam];let w=if p.shifted{self.first_shift(cr.carrier,l,p.kappa)}else{0.};
+                let z=(0..rank).fold(Complex::ZERO,|s,k|s+c[k]*(x[k]-x2[k]*w))*fields[l].0;
+                h[t.part*nn+cr.row*n+cr.col]+=z*Complex::new(0.,0.5);h[t.mirror*nn+cr.col*n+cr.row]+=z.conj()*Complex::new(0.,0.5);
+            }
+        }
+        let mut z1=[Complex::ZERO];
+        for x in &layout.decays{self.gather_dyn(cluster,&p.stencil,x.at,&mut z1,None);h[x.part*nn+x.row*n+x.col]+=z1[0];}
+        // The drives the dressing brings beam by beam: a_l Σ_k c_lk Y_k e^{iΩ̃t} and its adjoint, and their gradients.
+        let(mut y,mut dy)=([Complex::ZERO;MOST_RANK],[Complex::ZERO;MOST_FOCUSED*MOST_RANK]);
+        for x in &layout.effective{
+            let carrier=&self.carriers[x.carrier];let rank=carrier.rank;
+            self.gather_dyn(cluster,&p.stencil,x.at,&mut y[..rank],Some((&mut dy,MOST_RANK)));
+            for t in &x.tones{
+                let(a,g)=&fields[carrier.beams[t.beam]];let c=&carrier.coefficients[t.beam];
+                let sum=(0..rank).fold(Complex::ZERO,|s,k|s+c[k]*y[k]);
+                let v=*a*sum;h[t.part*nn+x.row*n+x.col]+=v;h[t.mirror*nn+x.col*n+x.row]+=v.conj();
+                for axis in 0..3{
+                    let mut z=g[axis]*sum;
+                    for f in 0..d{z+=*a*(0..rank).fold(Complex::ZERO,|s,k|s+c[k]*dy[f*MOST_RANK+k])*p.intensity_gradient[f][axis];}
+                    gradient[along(t.part,axis).start+x.row*n+x.col]+=z;gradient[along(t.mirror,axis).start+x.col*n+x.row]+=z.conj();
+                }
+            }
+        }
+
         // The gradients' Hermitian parts (the force reads Re⟨ψ|·|ψ⟩ alone): the static one's, and per pair of
         // beats ±Ω, (G_Ω + G_{−Ω}†)/2 at Ω and its adjoint at −Ω, so that G(t) is Hermitian at every t.
-        for g in gradient[0].iter_mut(){for a in 0..n{for b in a..n{let z=(g[a*n+b]+g[b*n+a].conj())*0.5;g[a*n+b]=z;g[b*n+a]=z.conj();}}}
+        for x in 0..3{let g=&mut gradient[along(0,x)];for a in 0..n{for b in a..n{let z=(g[a*n+b]+g[b*n+a].conj())*0.5;g[a*n+b]=z;g[b*n+a]=z.conj();}}}
         let half=beats.omegas.len()/2;
         for i in 0..half{
-            let(up,down)=(1+half+i,half-i);let(low,high)=gradient.split_at_mut(up);
-            for x in 0..3{let(u,v)=(&mut high[0][x],&mut low[down][x]);
+            let(up,down)=(1+half+i,half-i);let(low,high)=gradient.split_at_mut(3*up*nn);
+            for x in 0..3{let(u,v)=(&mut high[of(x)],&mut low[along(down,x)]);
                 for a in 0..n{for b in 0..n{let z=(u[a*n+b]+v[b*n+a].conj())*0.5;u[a*n+b]=z;v[b*n+a]=z.conj();}}}
         }
-        let mut gradient=gradient.into_iter();let mut h=h.into_iter();
-        let statics=Generator{n,hamiltonian:h.next().unwrap(),scalar,gradient:gradient.next().unwrap()};
-        let beats_out=beats.omegas.iter().zip(h.zip(gradient)).map(|(&omega,(hamiltonian,gradient))|Beat{omega,hamiltonian,gradient}).collect();
-        Components{statics,beats:beats_out}
+        omegas.clear();omegas.extend_from_slice(&beats.omegas);places.clear();places.extend(1..parts);
+        Components{n,scalar,parts,omegas,places,matrices,gauge:[0.;MOST_MIXED],middle:0.,gauged:false}
+    }
+    /// Whether a cluster's step has a path to take (`on_path`): a beat with a wave vector, or states with theirs.
+    pub fn moves(&self,cluster:usize)->bool{let l=&self.layouts[cluster];self.doppler&&(l.gauged||l.beats.waves.iter().any(|w|*w!=[0.;3]))}
+    /// A cluster's components at rest (`components`) along the atom's straight path through their point at the time `middle`, at the momentum κ (module documentation, # The atom's path): every beat's frequency takes its q·v and
+    /// its matrices e^{−iq·v t_m}, so that e^{i(Ω̃ + q·v)t} at t_m is e^{iΩ̃t_m}, the fields' phases at the point; the states with wave vectors take their diagonal shifts K_s·v.
+    pub fn on_path(&self,cluster:usize,c:&mut Components,kappa:[f64;3],middle:f64){
+        if !self.doppler{return;}
+        let layout=&self.layouts[cluster];let v=kappa.map(|x|x*self.hbar_over_mass);let(n,parts)=(layout.n,c.parts);let nn=n*n;let dot=|k:&[f64;3]|k[0]*v[0]+k[1]*v[1]+k[2]*v[2];
+        for j in 0..parts-1{
+            let rate=dot(&layout.beats.waves[j]);if rate==0.{continue;}
+            c.omegas[j]+=rate;let phase=Complex::cis(-rate*middle);let q=j+1;
+            for z in &mut c.matrices[q*nn..(q+1)*nn]{*z=*z*phase;}
+            let at=(parts+3*q)*nn;for z in &mut c.matrices[at..at+3*nn]{*z=*z*phase;}
+        }
+        if layout.gauged{
+            for a in 0..n{c.gauge[a]=dot(&layout.labels[a]);c.matrices[a*n+a]+=Complex::new(c.gauge[a],0.);}
+            c.middle=middle;c.gauged=true;
+        }
     }
 
     /// A cluster's generator at a point and time t (`Local`): a cluster of ground states' (one with
@@ -1761,13 +1940,13 @@ impl Model{
     }
     /// A cluster's H^(4) at a point added into its beats' parts (`components`): each slab's monomial times its
     /// kept entries, each into its part (`QuarticSlab::part`).
-    fn fourth_parts(&self,cluster:usize,p:&Point,h:&mut [Vec<Complex>]){
+    fn fourth_parts(&self,cluster:usize,p:&Point,h:&mut [Complex]){
         let Some(f)=self.layouts[cluster].fourth.as_ref()else{return};let nn=self.dimension(cluster).pow(2);
-        let e=|i:usize|{let(c,k)=f.fields[i];p.fields[c].e[k]};let mut slab=vec![Complex::ZERO;nn];
+        let e=|i:usize|{let(c,k)=f.fields[i];p.fields[c].e[k]};let mut slab=[Complex::ZERO;MOST_STATES*MOST_STATES];let slab=&mut slab[..nn];
         for q in &f.quartic{
             let m=e(q.conj.0).conj()*e(q.conj.1).conj()*e(q.plain.0)*e(q.plain.1);if m==Complex::ZERO{continue;}
-            self.interpolate(cluster,&p.stencil,None,q.at,&mut slab);
-            for i in 0..nn{if q.keep[i]{h[q.part[i]][i]+=m*slab[i];}}
+            self.interpolate(cluster,&p.stencil,None,q.at,slab);
+            for i in 0..nn{if q.keep[i]{h[q.part[i]*nn+i]+=m*slab[i];}}
         }
     }
     /// out += a carrier pair's slab at `at` at a point and time (n × n): Σ E^c1*_k1 E^c2_k2 M_k1k2 in its
@@ -2129,7 +2308,7 @@ impl Model{
     pub fn decay_balance(&self,cluster:usize,p:&Point,t:f64)->(f64,f64,f64){let b=self.balance(cluster,p,t);(b.low,b.rate,b.scale)}
     /// `decay_balance` with D and the jumps' whole Σ L̃†L̃ (`Balance`).
     fn balance(&self,cluster:usize,p:&Point,t:f64)->Balance{
-        let mut p=*p;for f in p.fields.iter_mut(){f.doppler=[Complex::ZERO;MOST_RANK];f.doppler_grad=[[Complex::ZERO;3];MOST_RANK];}let p=&p;
+        let mut p=*p;for f in p.fields.iter_mut(){f.doppler=[Complex::ZERO;MOST_RANK];f.doppler_grad=[[Complex::ZERO;3];MOST_RANK];}p.shifted=false;let p=&p;
         let n=self.dimension(cluster);let generator=self.generator(cluster,p,t);let h=generator.hamiltonian;let largest=h.iter().map(|z|z.abs()).fold(0.,f64::max)+generator.scalar.abs();
         let decay=Dense::from_fn(n,n,|a,b|(h[a*n+b]-h[b*n+a].conj())*Complex::I);
         // Column b: the photons of the basis state b.
@@ -2352,25 +2531,27 @@ impl Model{
         (u,du,beams)
     }
 
-    /// A cluster state's potential at r relative to the focus (rad/us): the diagonal of h0 (the units'
+    /// The near beams' field products ā_l a_m at r (`level`): a beam's own intensity, the interference of two.
+    fn products(&self,r:[f64;3])->impl Fn(usize,usize)->Complex+'_{
+        move|l,m|if l==m{Complex::new(self.geometry[l].intensity(r),0.)}else{self.geometry[l].field(r).0.conj()*self.geometry[m].field(r).0}
+    }
+    /// A cluster state's potential at r relative to the trap's centre `centre` (rad/us): the diagonal of h0 (the units'
     /// intensities there, a standing wave's in it) and of every near beam's own light shift,
-    /// |a_l(r)|² Σ c_lk′* c_lk S_k′k -- the near beams' interference (their lattice) left out. A tweezer
-    /// folded at second order is in h0; one that is a near carrier (the only light): the trap is the
-    /// same.
-    pub fn potential(&self,cluster:usize,x:usize,r:[f64;3])->f64{
-        self.level(cluster,x,&|u|self.unit_intensity(u,r),&|l|self.geometry[l].intensity(r))-self.level(cluster,x,&|u|self.ground.units[u].focus,&|l|self.geometry[l].intensity([0.;3]))
+    /// |a_l(r)|² Σ c_lk′* c_lk S_k′k -- the near beams' interference (their lattice) left out, but for a unit of the trap's light's (`level`), its standing wave whether it folds or is a near carrier.
+    pub fn potential(&self,cluster:usize,x:usize,r:[f64;3],centre:[f64;3])->f64{
+        self.level(cluster,x,&|u|self.unit_intensity(u,r),&self.products(r))-self.level(cluster,x,&|u|self.unit_intensity(u,centre),&self.products(centre))
     }
     /// A cluster state's trap depth (rad/us): the level its potential tends to far from every
     /// focused beam -- the Gaussian beams' amplitudes zero, the plane waves' as at the focus --,
-    /// relative to the focus; positive for a state the trap holds.
-    pub fn depth(&self,cluster:usize,x:usize)->f64{
+    /// relative to the trap's centre; positive for a state the trap holds.
+    pub fn depth(&self,cluster:usize,x:usize,centre:[f64;3])->f64{
         let far=|l:usize|if self.geometry[l].waist.is_some(){Complex::ZERO}else{self.geometry[l].field([0.;3]).0};
         let units=|u:usize|{let unit=&self.ground.units[u];unit.beams.iter().zip(&unit.weights).fold(Complex::ZERO,|s,(&l,&w)|s+far(l)*w).norm_sqr()/unit.norm};
-        self.level(cluster,x,&units,&|l|far(l).norm_sqr())-self.level(cluster,x,&|u|self.ground.units[u].focus,&|l|self.geometry[l].intensity([0.;3]))
+        self.level(cluster,x,&units,&|l,m|if l==m{Complex::new(far(l).norm_sqr(),0.)}else{far(l).conj()*far(m)})-self.level(cluster,x,&|u|self.unit_intensity(u,centre),&self.products(centre))
     }
     /// A cluster state's potential in the trap's light at r (rad/us): `level` with every beam at r less the same with
     /// the trap's light off (`trap_light`), the near light off in both -- the shifts of the trap's beams and of every
-    /// far focused beam there, zero where those beams' fields are, −D_T at the focus (ensemble.rs: the initial
+    /// far focused beam there, zero where those beams' fields are, −D_T at the trap's centre (ensemble.rs: the initial
     /// ensemble's energies). The near light comes on at t = 0: its fold's shift, whose denominator a focused trap's
     /// shift can close on a shell about the focus (PGCP_10's probe in its all-folded model: 137 k_BT there against the
     /// focus's 34), is no part of what holds the atoms before it. Far from a resonance, with a trap beam alone, the
@@ -2379,8 +2560,8 @@ impl Model{
     pub fn trap_level(&self,cluster:usize,x:usize,r:[f64;3])->f64{
         let off=|u:usize|{let unit=&self.ground.units[u];
             unit.beams.iter().zip(&unit.weights).filter(|(l,_)|!self.trap_light.contains(l)).fold(Complex::ZERO,|s,(&l,&w)|s+self.geometry[l].field(r).0*w).norm_sqr()/unit.norm};
-        let beams=|l:usize|if self.trap_light.contains(&l){self.geometry[l].intensity(r)}else{0.};
-        self.level(cluster,x,&|u|self.unit_intensity(u,r),&beams)-self.level(cluster,x,&off,&|_|0.)
+        let near=self.products(r);let beams=|l:usize,m:usize|if self.trap_light.contains(&l){near(l,m)}else{Complex::ZERO};
+        self.level(cluster,x,&|u|self.unit_intensity(u,r),&beams)-self.level(cluster,x,&off,&|_,_|Complex::ZERO)
     }
     /// The envelope's modes (ensemble.rs): one beam of each mode -- waist, wave number and axis either way, the same
     /// intensity profile -- of the trap's light in the focused units, the trap beam's first.
@@ -2392,8 +2573,8 @@ impl Model{
         modes
     }
     /// The trap's largest depth per unit of its light's intensity (`trap_level`), relative to `depth`, its depth at
-    /// the focus: a bound of c = sup −V_T/(D_T L) over the intensities of the units of the trap's light in (0, 1], L
-    /// their mean weighted by each one's share of the depth at the focus, every other focused unit's in [0, 1]. Every
+    /// its centre: a bound of c = sup −V_T/(D_T L) over the intensities of the units of the trap's light in (0, 1], L
+    /// their mean weighted by each one's share of the depth at the centre, every other focused unit's in [0, 1]. Every
     /// point's intensities lie in that set and a
     /// unit's intensity lies below the largest of its beams' profiles A_l(r), so −V_T(r) ≤ c D_T L ≤ c D_T max_l A_l(r)
     /// everywhere: the initial ensemble's envelope (ensemble.rs).
@@ -2406,7 +2587,7 @@ impl Model{
     /// round-off). A trap with no unit of its own (its shift linear in its intensity) takes L = 1. An error where a
     /// unit of the trap's light holds a beam not of it: its interference with the trap's field falls off as √A, and
     /// the trap's bound states fill an unbounded phase space.
-    pub fn trap_slope(&self,cluster:usize,x:usize,depth:f64)->Result<f64,String>{
+    pub fn trap_slope(&self,cluster:usize,x:usize,depth:f64,centre:[f64;3])->Result<f64,String>{
         let g=&self.ground;let trapped=|l:&usize|self.trap_light.contains(l);
         let traps:Vec<usize>=self.focused.iter().copied().filter(|&u|g.units[u].beams.iter().any(trapped)).collect();let traps=&traps[..];
         if traps.iter().any(|&u|!g.units[u].beams.iter().all(trapped)){return Err("光镊与同频率、同偏振的其他光束相干叠加：其干涉项随光镊强度的平方根衰减，束缚的初始热分布无界".into());}
@@ -2415,11 +2596,15 @@ impl Model{
         // −V_T D_T at intensities q (the trap's units', then the other units').
         let at=|q:&[f64]|->f64{
             let units=|on:bool|move|u:usize|match traps.iter().position(|&v|v==u){Some(i)=>if on{q[i]}else{0.},None=>others.iter().position(|&v|v==u).map_or(0.,|i|q[t+i])};
-            let beams=|on:bool|move|l:usize|if on&&trapped(&l){traps.iter().position(|&u|g.units[u].beams.contains(&l)).map_or(1.,|i|q[i])}else{0.};
+            // A near beam's intensity with its unit's, and two of a unit's interference there: their fields in phase, every beam's amplitude its unit's, whose summed field's intensity it is.
+            let beams=|on:bool|move|l:usize,m:usize|->Complex{if !(on&&trapped(&l)){return Complex::ZERO;}
+                let s=traps.iter().position(|&u|g.units[u].beams.contains(&l)).map_or(1.,|i|q[i]);if l==m{return Complex::new(s,0.);}
+                let unit=&g.units[g.unit_of(l)];let weight=|b:usize|unit.weights[unit.beams.iter().position(|&y|y==b).unwrap()];let(a,b)=(weight(l),weight(m));
+                a*b.conj()*(s/(a.abs()*b.abs()))};
             self.level(cluster,x,&units(false),&beams(false))-self.level(cluster,x,&units(true),&beams(true))};
-        // L's weights: each unit's share of the depth at the focus (none for a repulsive one).
-        let focus:Vec<f64>=traps.iter().chain(others).map(|&u|self.unit_intensity(u,[0.;3]).min(1.)).collect();
-        let shares:Vec<f64>=(0..t).map(|i|{let mut q=focus.clone();q[i]=0.;(at(&focus)-at(&q)).max(0.)}).collect();let whole:f64=shares.iter().sum();
+        // L's weights: each unit's share of the depth at the centre (none for a repulsive one).
+        let there:Vec<f64>=traps.iter().chain(others).map(|&u|self.unit_intensity(u,centre).min(1.)).collect();
+        let shares:Vec<f64>=(0..t).map(|i|{let mut q=there.clone();q[i]=0.;(at(&there)-at(&q)).max(0.)}).collect();let whole:f64=shares.iter().sum();
         let weights:Vec<f64>=shares.iter().map(|s|if whole>0.{s/whole}else{1./t as f64}).collect();
         // The dimensions: the trap's units' (quartic), the other units' (cubic). Each one's equally spaced points and
         // the inverse of Bernstein's basis there (Gauss–Jordan).
@@ -2449,10 +2634,10 @@ impl Model{
         }).collect();
         Ok(bounds.into_iter().fold(f64::NEG_INFINITY,f64::max)/depth)
     }
-    /// The diagonal of h0 and of every near beam's own light shift for a cluster state, the units at
-    /// the intensities `units(u)` and the near beams at `beams(l)` (`potential`): the groups' S at the
-    /// state's diagonal entry (none where it is not one of a group's).
-    fn level(&self,cluster:usize,x:usize,units:&dyn Fn(usize)->f64,beams:&dyn Fn(usize)->f64)->f64{
+    /// The diagonal of h0 and of the near light's shift for a cluster state, the units at
+    /// the intensities `units(u)` and the near beams' fields' products ā_l a_m at `beams(l, m)` (`potential`): the groups' S at the
+    /// state's diagonal entry (none where it is not one of a group's), E_k′* E_k with E_k = Σ_l a_l c_lk: each beam's own shift, and the interference of a unit of the trap's light (`Carrier::interfering`).
+    fn level(&self,cluster:usize,x:usize,units:&dyn Fn(usize)->f64,beams:&dyn Fn(usize,usize)->Complex)->f64{
         let layout=&self.layouts[cluster];let n=layout.n;
         let s:Vec<f64>=self.focused.iter().map(|&u|units(u).min(1.)).collect();let stencil=self.stencil(&s);
         let mut entry=[Complex::ZERO];self.interpolate(cluster,&stencil,None,layout.h0+x*n+x,&mut entry);let mut u=entry[0].re;
@@ -2460,10 +2645,17 @@ impl Model{
             let Ok(diagonal)=gl.entries.binary_search(&(x,x)) else{continue};
             let carrier=&self.carriers[gl.absorbed];let mut value=[Complex::ZERO];
             for(j,&l)in carrier.beams.iter().enumerate(){
-                let at=beams(l);if at==0.{continue;}let coefficient=&carrier.coefficients[j];
+                let at=beams(l,l).re;if at==0.{continue;}let coefficient=&carrier.coefficients[j];
                 for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
                     self.interpolate(cluster,&stencil,None,gl.s+pi*gl.entries.len()+diagonal,&mut value);
                     u-=at*(coefficient[k1].conj()*coefficient[k]*value[0]).re*if k1<k{2.}else{1.};
+                }
+            }
+            for &(j,m)in &carrier.interfering{
+                let product=beams(carrier.beams[j],carrier.beams[m]);if product==Complex::ZERO{continue;}let(a,b)=(&carrier.coefficients[j],&carrier.coefficients[m]);
+                for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
+                    self.interpolate(cluster,&stencil,None,gl.s+pi*gl.entries.len()+diagonal,&mut value);
+                    u-=(product*a[k1].conj()*b[k]*value[0]).re*if k1<k{2.}else{1.};
                 }
             }
         }
@@ -2699,15 +2891,20 @@ mod tests{
     #[test]
     fn the_beats_merge_the_round_off_and_find_the_period(){
         let w=228.702;let round_off=1e-10;
-        let b=Beats::new([0.,-5.7e-14,w,w*(1.+1e-15),-w,2.*w,-2.*w+3e-13,5.*w,0.].into_iter(),round_off);
+        let still=|x:Vec<f64>,r:f64|Beats::new(x.into_iter().map(|w|(w,[0.;3])),r,1e-12);
+        let b=still(vec![0.,-5.7e-14,w,w*(1.+1e-15),-w,2.*w,-2.*w+3e-13,5.*w,0.],round_off);
         assert_eq!(b.omegas.len(),6);
         for(x,y)in b.omegas.iter().zip([-5.*w,-2.*w,-w,w,2.*w,5.*w]){assert!((x-y).abs()<=round_off,"{:?}",b.omegas);}
         assert!((b.period.unwrap()-TAU/w).abs()<=1e-12*TAU/w,"{:?}",b.period);
-        assert_eq!(b.of(1e-13),None);assert_eq!(b.of(-2.*w),Some(1));assert_eq!(b.of(5.*w*(1.-1e-16)),Some(5));
+        assert_eq!(b.of(1e-13,[0.;3]),None);assert_eq!(b.of(-2.*w,[0.;3]),Some(1));assert_eq!(b.of(5.*w*(1.-1e-16),[0.;3]),Some(5));
         // Incommensurate beats are harmonics only of a fundamental below their ratio's resolution in the
         // round-off: a period far too long for a step's cache (engine.rs).
-        assert!(Beats::new([1.,2f64.sqrt()].into_iter(),1e-12).period.map_or(true,|t|TAU/t<1e-4));
-        assert!((Beats::new([3.,4.5,-7.5].into_iter(),1e-12).period.unwrap()-TAU/1.5).abs()<=1e-12);
-        assert!(Beats::new([0.,1e-11].into_iter(),1e-10).omegas.is_empty());
+        assert!(still(vec![1.,2f64.sqrt()],1e-12).period.map_or(true,|t|TAU/t<1e-4));
+        assert!((still(vec![3.,4.5,-7.5],1e-12).period.unwrap()-TAU/1.5).abs()<=1e-12);
+        assert!(still(vec![0.,1e-11],1e-10).omegas.is_empty());
+        // A beam's wave vector and its negative at a residual and its negative are one pair; a term with a wave vector alone is a beat; none moves with a period.
+        let k=[0.,0.,8.];let m=[0.,0.,-8.];let b=Beats::new([(0.,k),(0.,m),(w,k),(-w,m),(w,m),(0.,[1e-13,0.,0.])].into_iter(),1e-10,1e-12);
+        assert_eq!(b.omegas.len(),6);assert_eq!(b.period,None);
+        assert_eq!(b.of(0.,k),Some(3));assert_eq!(b.of(0.,m),Some(2));assert_eq!(b.of(-w,k),Some(1));assert_eq!(b.of(w,m),Some(4));assert_eq!(b.of(w,k),Some(5));assert_eq!(b.of(0.,[0.;3]),None);
     }
 }

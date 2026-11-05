@@ -110,14 +110,14 @@ fn initial_momenta(model:&Model,settings:&Settings,initial:&Initial)->[[f64;3];3
 /// cluster's post-jump map Π there (n × n, row-major; none without the fourth order's tables).
 pub struct Twin{pub held:Held,pub(crate) readout:Vec<Vec<[f64;STATES]>>,pub slow:Vec<Option<Vec<Complex>>>}
 impl Twin{
-    /// The twin where the trap beam's intensity is `intensity`, on the line through its focus across
-    /// it; none when the generator has residual beats.
+    /// The twin where the trap beam's intensity is `intensity`, on the line through the trap's centre (`Model::centre`) across
+    /// the beam; none when the generator has residual beats.
     pub fn new(model:&Model,intensity:f64)->Option<Twin>{
         if !static_generator(model)||(0..model.clusters()).any(|k|model.mixed(k)){return None;}
         let g=&model.geometry[model.trap_beam];let n=g.direction;
         let pick=if n[0].abs()<0.9{[1.,0.,0.]}else{[0.,1.,0.]};let along=pick[0]*n[0]+pick[1]*n[1]+pick[2]*n[2];
         let across:[f64;3]=std::array::from_fn(|i|pick[i]-along*n[i]);let l=(across[0]*across[0]+across[1]*across[1]+across[2]*across[2]).sqrt();
-        let at=|d:f64|->[f64;3]{across.map(|x|x/l*d)};
+        let centre=model.centre();let at=|d:f64|->[f64;3]{std::array::from_fn(|i|centre[i]+across[i]/l*d)};
         let(mut lo,mut hi)=(0.,g.waist?);while g.intensity(at(hi))>intensity{hi*=2.;}
         for _ in 0..60{let mid=0.5*(lo+hi);if g.intensity(at(mid))>intensity{lo=mid;}else{hi=mid;}}
         let point=model.point(at(lo),[0.;3]);

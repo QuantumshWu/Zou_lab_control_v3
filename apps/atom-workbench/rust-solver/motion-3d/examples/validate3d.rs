@@ -60,7 +60,7 @@ fn main(){
             // the emitted photon, ⟨n²⟩ = 1 summed over the axes).
             let(block22,state22)={let k=model.ground.cluster[b22];(k,model.ground.clusters[k].position(b22).unwrap())};
             let energy:Vec<f64>=outcome.samples.iter().map(|atoms|atoms.iter().map(|(r,kappa)|
-                (0..3).map(|a|model.hbar_over_mass*kappa[a]*kappa[a]/2.).sum::<f64>()+model.potential(block22,state22,*r)).sum::<f64>()/atoms.len() as f64/KT_PER_UK).collect();
+                (0..3).map(|a|model.hbar_over_mass*kappa[a]*kappa[a]/2.).sum::<f64>()+model.potential(block22,state22,*r,trap.centre)).sum::<f64>()/atoms.len() as f64/KT_PER_UK).collect();
             let at:Vec<f64>=listed.iter().map(|&i|times[i]).collect();
             println!("mechanical energy: dE/dt {:.5} uK/us, 2 E_r R {:.5} uK/us ({:+.1}%)",slope(&at,&energy),2.*c*rate,100.*(slope(&at,&energy)/(2.*c*rate)-1.));
             for(a,extra)in[(0,0.3),(1,0.3),(2,1.4)]{let t:Vec<f64>=e.iter().map(|x|x.temperature[a]).collect();let measured=slope(&times,&t);let expected=c*rate*extra;
