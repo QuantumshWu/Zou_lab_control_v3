@@ -61,7 +61,14 @@ archive's datasets (`@figure/<k>/<dataset name>`) and its panels' outputs. `open
 opens the Figure in a new window; `open {path, window}` replaces that window's Figure
 (as its File field does); the live board, its camera and its runs go on. A command
 naming a `figure-<n>-<k>` panel, or `add_panel` of a viewer's signal, acts on that
-viewer; a panel cannot be bound to another document's signal. The host sends each
+viewer; a panel cannot be bound to another document's signal. A viewer also runs
+processors on its data: `add_node {type_id, source_signal}`, `edit_node`, `start_node`,
+`stop_node`, `remove_node` from its window (or naming a node `figure-<n>-<type>`) act on
+that viewer's own workbench, whose rows are its `logic` and whose offered types, the
+processors whose declaration needs no device, file or workspace resource, are its
+`processor_types`. Their outputs (`@logic/figure-<n>-<type>/<output>`) are that viewer's
+`signals`; closing the window, or opening another Figure in it, removes the nodes and
+their signals. The host sends each
 viewer to its window as a `state` message `{request, error, result, saved, viewer}`: a
 save's answer is the message's own `saved`, as on the Task Console's state.
 

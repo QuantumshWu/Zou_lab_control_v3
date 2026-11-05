@@ -6,6 +6,7 @@
 <pre id="result">pending</pre>
 <script type="module">
 import { FigureViewerView } from '../dist/views/figure_viewer.js';
+import { applyChanges } from '../dist/transport.js';
 const assert=(value,message)=>{if(!value)throw Error(message)};
 const equal=(actual,expected,message)=>assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)}`);
 const checks=[],sent=[];
@@ -25,6 +26,50 @@ try {
  accept('',0);
  check('the information pane has no duplicate Raw metadata page',()=>{
   equal([...viewer.info.tabs.strip.querySelectorAll('.tab-label')].map(label=>label.textContent),['Plot','Logic','Devices','Flow'],'info tabs');
+ });
+ check('a Figure\'s record is asked for when a tab that shows it is looked at, not before',()=>{
+  const shown=record=>{ctx.latest.viewer.document={path:ARCHIVE,record};viewer.update({type:'state',request:0,error:null})};
+  const before=sent.length;
+  shown('unread');equal(sent.length,before,'opening on the Plot tab reads nothing');
+  viewer.info.tabs.setCurrent('Logic');equal(sent.at(-1),{action:'read_record'},'looking at Logic');
+  shown('reading');viewer.info.tabs.setCurrent('Devices');equal(sent.length,before+1,'asked once');
+  shown('read');viewer.info.tabs.setCurrent('Flow');equal(sent.length,before+1,'nothing more to read');
+  shown('unread');equal(sent.at(-1),{action:'read_record'},'a Figure opened while a record tab shows');equal(sent.length,before+2,'asked at once');
+  viewer.info.tabs.setCurrent('Plot');accept('',0);
+ });
+ check('a record arrives once: other messages cost nothing and the pane keeps it; a new one replaces it; none clears it',()=>{
+  // As the page gets them: delta changes on the sections it holds (transport.ts), merged into latest (shell.ts).
+  let sections={};
+  const message=changes=>{const [next,touched]=applyChanges(sections,changes);sections=next;for(const key of touched)ctx.latest[key]=sections[key];viewer.update({type:'state',request:0,error:null})};
+  const rows=()=>viewer.info.root.textContent;
+  let stringified=0,setTabs=0,setGraph=0;
+  const stringify=JSON.stringify,tabsOf=viewer.info.setTabs.bind(viewer.info),graphOf=viewer.info.setGraph.bind(viewer.info);
+  viewer.info.setTabs=tabs=>{setTabs++;tabsOf(tabs)};viewer.info.setGraph=(title,graph)=>{setGraph++;graphOf(title,graph)};
+  const tab=(title,row)=>[title,[[row,'value']]];
+  const first=[tab('Plot','plot row'),tab('Logic','logic row'),tab('Devices','device row'),['Flow',[]]];
+  ctx.latest.viewer.document={path:ARCHIVE,record:'read'};
+  message([[['record'],{info:first,flow:{nodes:[],edges:[]}}]]);
+  equal([setTabs,setGraph],[1,1],'first message shown');
+  assert(rows().includes('logic row'),'the panel shows the tabs');
+  JSON.stringify=value=>{const text=stringify(value);if(text?.includes('logic row'))stringified++;return text};
+  try {
+   // What a pointer gesture's message does: the panels change, no record section.
+   for(let n=0;n<3;n++)message([[['viewer'],{}]]);
+  } finally {JSON.stringify=stringify}
+  equal([setTabs,setGraph,stringified],[1,1,0],'no setTabs, no setGraph, no stringify');
+  assert(rows().includes('logic row'),'the panel still shows the tabs');
+  // A record whose tabs changed and whose Flow did not (the record read): only the tabs.
+  message([[['record','info',1,1,0,0],'read row']]);
+  equal([setTabs,setGraph],[2,1],'one part changed');
+  assert(rows().includes('read row')&&!rows().includes('logic row'),'the read row shown');
+  // Another file: replaced. A refresh is the same message.
+  message([[['record','info'],[tab('Plot','plot row'),tab('Logic','other file'),tab('Devices','device row'),['Flow',[]]]]]);
+  assert(rows().includes('other file')&&!rows().includes('read row'),'another file replaces them');
+  // The Figure gone (keys deleted): the pane stands empty.
+  message([[['record','info']],[['record','flow']]]);
+  assert(!rows().includes('other file'),'cleared');
+  equal([...viewer.info.tabs.strip.querySelectorAll('.tab-label')].map(label=>label.textContent),['Plot','Logic','Devices','Flow'],'its tabs stand');
+  viewer.info.setTabs=tabsOf;viewer.info.setGraph=graphOf;delete ctx.latest.record;ctx.latest.viewer={document:{path:''},panels:[],signals:[],plot_kinds:[]};accept('',0);
  });
  check('Browse requests the native visual picker without guessing a path',()=>{
   assert(browse.title.includes('thumbnails')&&browse.title.includes('same-named'),'visual matching guidance missing');

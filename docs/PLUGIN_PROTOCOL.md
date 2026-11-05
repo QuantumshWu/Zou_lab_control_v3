@@ -142,9 +142,14 @@ requirements; the core claims those fields for the run (Device Control cannot
 move them meanwhile) and passes each device as `argument` (a tunable proxy). Such a
 claim shares the device (v2's runtime claim, `RunRequest.shared`): it conflicts with
 no other run's claim, while two exclusive claims never hold one device.
-`resolve_field_choices(values, resources)` answers `{field: [[value, label], ...]}`
+`resolve_field_units(values, devices)` answers `{field: unit}`, the unit a field is typed
+in when the draft decides it (a trigger level, its channel's). `declare_previews(values,
+devices, node)` is told the node's id, the producer its axes are named after, so a preview's
+`semantic` can hold one coordinate of one (`{"fate:cell_data:<axis>": ["scope-value", position]}`).
+`resolve_field_choices(values, resources, devices)` answers `{field: [[value, label], ...]}`
 for fields whose options come from the draft (an SLM rearrangement's imaging
-periods are the chosen pulse's periods); the form shows that field as a choice,
+periods are the chosen pulse's periods, a waveform trigger's channels the bound
+source's); the form shows that field as a choice,
 and a value it holds that is not among them as unavailable, never replaced.
 
 A node's page draws the newest answers it has, never an empty draft: a node just
@@ -340,19 +345,41 @@ are retained in `snapshot_fields`; remote endpoints live in `device_transports`
 and never overwrite device-owned provenance. Remote snapshots forward the owner's
 same complete payload. An old publisher without the capability is unavailable.
 
+A figure archive keeps its lineage out of `info.npy`, in its own zip member
+`lineage.json`: UTF-8 JSON `{"schema": "zlc.figure.lineage/1", "lineage": ...,
+"apparatus_table"?: ...}`. Drawing a figure and working with its panels never read it;
+it is read for the Figure Viewer's record tabs, for saving the figure again and by
+`read_file`. A file written before this member existed keeps `sections.lineage` inside
+`info.npy` and reads the same.
+
 Figure archives store identical shared apparatus records once when they occur in
-multiple lineage/source records. The optional root `apparatus_table` has schema
-`zlc.figure.apparatus-table/1` and a `records` array; only designated record.apparatus
-positions use exact `{"$apparatus": index}` references. Rust and Python readers
-expand these references and remove the table before exposing the document. The
-public metadata structure is unchanged; records with different context, timestamps
-or payloads are never conflated. Files without a table retain their existing format.
+multiple records of one document (`info.npy` or `lineage.json`). The optional root
+`apparatus_table` has schema `zlc.figure.apparatus-table/1` and a `records` array; only
+designated record.apparatus positions use exact `{"$apparatus": index}` references.
+Rust and Python readers expand these references and remove the table before exposing
+the document. The public metadata structure is unchanged; records with different
+context, timestamps or payloads are never conflated. Files without a table retain their
+existing format.
 Finite dataset provenance includes all acquired ranges, not only the last event.
-Its `acquisition` projection contains deduplicated `runs`, `events` and placed
-`ranges`; event parents retain the source's settings epochs. Publication prefixes
-hold immutable backward metadata chains, so later commits cannot change a saved
-prefix or make an old read retain future facts. Viewer groups these records under
-their actual Logic runs and device states rather than adding a Flow node per point.
+Its `acquisition` projection holds `runs`, every event once and the placed `ranges`;
+event parents retain the source's settings epochs. Publication prefixes hold immutable
+backward metadata chains, so later commits cannot change a saved prefix or make an old
+read retain future facts. Viewer groups these records under their actual Logic runs and
+device states rather than adding a Flow node per point.
+
+`acquisition` is stored in columns (`zlc_core::acquisition`, lossless; format
+`zlc.acquisition/2`; without a `format` it is the older list of event objects, read the
+same): `signals` and `records` tables and `events`/`ranges` rows under rules. A rule is
+`{"rows": [...], "repeat": [n, ...], "step": [level, ...]}`: its rows repeated over the
+nested counts, the last fastest, each row at indices `i` being `rows[r] + sum(i[d] *
+step[d][r])`; a chunk without `repeat` is literal rows, so a dropped or retried shot
+just ends one rule. An event row is `[run, signal, shape, position, revision, ordinal,
+parent...]`, a range row `[extent0, extent1, event, origin0, origin1]`. `records` is a list
+of shapes `{"template": ..., "columns"?: [{"path": [...], "values": [...]}]}`: an event's
+record is the template with each column's `position`-th value at its path. A `window`
+(format `zlc.window/2`) is `{"width", "members": [event index, ...], "acquisition"}`, its
+runs and each member's ancestors held once. The native `read_archive` and `read_file` give
+both in their older structure; Python's `read_archive` gives them as stored.
 
 Plugin -> core events: `release {blocks, leases}`, `run.ready`, `run.progress`,
 `run.finished {run, outcome, result, error}`, `device.log {instance, line}` (one line of
@@ -372,17 +399,19 @@ Plugin -> core (only during a run, bound to its run id):
 |---|---|
 | `run.begin {outputs: [{name, schema, storage, index_by_source}], record}` | Declare the run's outputs and run record. `Runtime::begin` under owner `<instance>` with the record (plus the host's `node`, `node_name` and acquisition `apparatus`, section 3) as the run's metadata (who started it goes in the seal); a run consuming a source (a processor, or a run following its source signal) begins with `Runtime::begin_consuming`, a same-shot route of that signal, so a result is shown with the source event its `parents` name (v2 `source_name`); signals are the names the run's start gave (`RunRequest.outputs`, e.g. `@logic/<node>/<output>`), else `<instance>/<output>`. Storage `latest | finite`. |
 | `run.commit {inputs: [{output, ordinal, origin, data, schema?}], metadata, parents}` | One atomic bundle (`Runtime::commit`): siblings commit together or not at all. `origin` is the finite `(repeat, point)` placement; a finite event carries its chunk `schema` when it differs from the last one sent. `parents` are read leases the node consumed. Metadata is `{records: {output: event_record}, shot_time_seconds: {output: t}}`; `t` stamps that output's shot (every shot of a signal or none, later shots later), and a history window over it carries the shot time as an alternative coordinate of its source index. Returns each output's publication key. |
+| `run.commit_events {count, ordinals, inputs: [{output, data, schema?}], shot_times?, origins?, shown?, records?}` | `count` consecutive event bundles in one round trip (`Runtime::commit_events`), each the event `run.commit` would make of it: `ordinals` (u64), `shot_times` (f64), `origins` (`(count, 2)` u64) and `shown` (bool) have one row per event, and each output's `data` planes hold the events one after another, first axis the event, each event borrowing its part. `records` is one JSON record per event, kept under every output of the bundle. Every Exact and Follow subscriber takes each event; a Latest subscriber and the change watch only the last. `shown` says where a board's front may stand: a board reads a signal at its newest shown event (a window ends there, whatever has been published since), and every other reader (subscribers, `runtime.read`, `read_latest`, saving, readouts) takes every event as ever. Absent: every event is shown. A run that ended with no shown event is shown as it stands. Retention stays the demand: the ring holds `window` events from the newest, and the part of the shown window it has passed is kept beside it until the next mark, however long that takes. Answers nothing. |
 | `run.operator_input {kind, title, message, payload}` | Blocks the run thread until the operator answers or the run stops. |
 | `run.artifact {name, path, role, contract_id}` | Register a completed run-contained artifact. |
 | `run.figure {path, data, overlay, recipe, source, lineage, image}` | Save one figure (`RunContext.save_figure`, `zlc_plugin.figures`): the core writes the `zlc.figure` archive `<path stem>.npz` and, when `image`, renders `path` (`.png`/`.pdf`/`.svg`; no suffix = `.png`). `data` is one complete dataset `{schema, data: {values, validity, sigma}, block_id, revision, generation}` (`validity` true/false or its storage mask). `recipe` is `{spec, parameters, size}` plus any of `viewport, classifier_thresholds, facet_focus, fit, selectors, interaction, presentation`: `spec` is the archive recipe's spec tree; the core completes `parameters` with the kind's defaults, validates `size` and normalizes `classifier_thresholds` as a plot session keeps them (v2 `encode_plot_recipe`). `overlay` is null or `{revision, coordinates (N,2), point_ids, labels, static_statuses, status (a dataset), paths_xy (N,K,2)}`. `source`/`lineage` go into the archive's sections as v2's `save_figure_artifact` put them. Answers `{archive, image}` (`image` null when not drawn). Registering them as artifacts stays the plugin's. |
 | `run.animation {path, images, frame_ms}` | A looping GIF of the run's images (its figure previews, inside the run directory), `frame_ms` each, each frame on its own palette (v2's Pillow save of the recording previews); answers `{path}`. `RunContext.save_animation`. |
+| `run.fit {model, x, y, sigma, sigma_dof, warm}` | One independent fit per row of `y` `(cells, n)` over `x` `(n)` by the core's fit engine with its default options (`RunContext.fit`, `zlc_plugin.fit`); `sigma` as `y` or null, `sigma_dof` (each sigma's degrees of freedom, as a panel's fit weighs them) as `y` or null, `warm` `(cells, parameters)` or null, a row with a non-finite value being none. `model` is an id of the read-only catalogue command `fit_models` (`{models: [{id, label, parameters: [{name, unit_relation}]}]}`, series models only; `zlc_plugin.fit_models`, also from a draft query). Answers `{parameters, values, errors, success, reduced_chi_square, messages}`, a row per cell, null for NaN. A cell that cannot be fitted (too few finite points, a solver failure) is `success: false` with its reason, not a failed call; non-finite points are dropped by the engine. Solved on a standing worker, off the window's turn and the channel's thread; the run's Stop ends the batch with `cancelled`. |
 | `run.acquire {node, completion}` | Start the acquisition node this run drives (v2's `restart_logic`); answered at `ready` or `terminal`. |
 | `run.snapshot {wait}` | Record configured acquisition state (`wait: false`) or join an existing observation before publication (`wait: true`). A ready parent/child context shares one observation; without an explicit capture, publication adds no empty or retrospective record. |
 | `core {command, params}` | Run one catalogue command (e.g. a Pulse operation) under the run's origin; the run's claims apply (a `pulse_*` command needs the sequencer claimed). From a draft query (`zlc_plugin.core`, `run: null`) only a `read` command is answered: an estimate's `pulse_estimate`. |
 | `device {argument, method, args, kwargs}` | Call a claimed device's SPI (section 7 checks apply). `tunable_fields` answers the same rows as the `fields` op, as data. |
 | `runtime.read {signal, mode, width}` | Read a Runtime signal: `event | dataset | window` (the event of a dataset publication, e.g. a Fit over a finite run, is its dataset). Returns `{lease, key, schema, window, segments: [{origin, extent, data}], metadata, run_record, placement, lineage}`, `lineage` its ancestry nearest first, each publication once: `[{key, run_record, event_record}]`; the lease is released (event `release {leases}`) when the SDK's `Read` is garbage. |
 
-The six requests above `device` are answered by the application, not the host:
+The seven requests above `device` are answered by the application, not the host:
 the host passes them on (`HostEvent::Request {ticket, op, params, origin, lent}`, `lent`
 holding the blocks its arrays are on) and the
 run thread waits for `PluginHost::respond(ticket, result)`.
@@ -413,7 +442,8 @@ delivery `describe_run(inputs)` as the run record, commits the returned outputs
 with the anchor as parent and its ordinal, and only then answers, so the next
 delivery waits (v2's follow processor). `kind: "sealed"` completes the run (it
 fails if nothing was delivered), `"retired"` stops it (the source moved on),
-`"failed"` fails it with the core's reason. A finite source that has sealed is
+`"failed"` fails it with the core's reason. A finite source that has sealed, or a
+sealed Snapshot (a saved Figure's dataset in a Figure Viewer), is
 delivered whole, once, then `sealed` (v2's frozen processor): each member is its
 run's complete dataset (`segments` as placed), its own `canonical_schema` with
 `cell_origin` (0, 0); a sealed live source delivers its current event.
@@ -446,6 +476,7 @@ only while it runs.
 `ctx` (the SDK's `RunContext`) keeps v2's `NodeExecutionContext` surface:
 `instance_id`, `generation`, `cancel_requested()`, `report_ready()`,
 `report_progress()`, `set_run_record()`, `commit_live(outputs, source_publication=)`,
+`commit_events(outputs, ordinals=, shot_times=, origins=, shown=, records=)` (new, with `LiveEvents`),
 `request_operator_input()`, `run_directory`, `register_artifact()`,
 `seal_terminal(accept_stop=, partial=)` and `register_partial_exit_writer(writer)`,
 both answered inside the plugin: a sealed run ignores a later `run.stop`; an

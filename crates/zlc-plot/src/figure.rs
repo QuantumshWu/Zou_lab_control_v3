@@ -17,7 +17,7 @@ use zlc_archive::manifest::{dataset_manifest, snapshot_from_manifest, ArchiveDat
 use zlc_archive::npdtype::Kind;
 use zlc_archive::npy::{NpyArray, NpyData};
 use zlc_archive::provenance::capture_figure_provenance;
-use zlc_archive::{read_archive, write_figure_file, ArchiveError, Entry, FigureArchive};
+use zlc_archive::{open_archive, write_figure_file, ArchiveError, Entry, FigureArchive, SavedLineage};
 use zlc_core::store::Snapshot;
 use zlc_core::AnyBuffer;
 
@@ -279,14 +279,14 @@ pub struct OpenedItem {
     pub target: serde_json::Value,
 }
 
-/// `read_document(path)`: an archive's resolved path, metadata and datasets.
-pub struct OpenedFigure { pub path: String, pub info: serde_json::Value, pub items: Vec<OpenedItem> }
+/// `read_document(path)`: an archive's resolved path, metadata, its lineage not yet parsed, and datasets.
+pub struct OpenedFigure { pub path: String, pub info: serde_json::Value, pub lineage: SavedLineage, pub items: Vec<OpenedItem> }
 
 /// `zlc_science.figure.read_document`: typed data and the existing recipe,
-/// without fitting or drawing.
+/// without fitting or drawing, or the lineage neither needs.
 pub fn read_document(path: &str, fit: Arc<dyn FitLayer>, defaults: Arc<Defaults>, registry: Option<Arc<UnitRegistry>>) -> Result<OpenedFigure> {
     let resolved = resolve(Path::new(path))?;
-    let archive = read_archive(&resolved)?;
+    let mut archive = open_archive(&resolved)?;
     let mut items = Vec::with_capacity(archive.datasets.len());
     for (key, _) in &archive.datasets {
         let FigurePlot { data, overlay, status, recipe } = read_figure_plot(&archive, key)?;
@@ -309,7 +309,7 @@ pub fn read_document(path: &str, fit: Arc<dyn FitLayer>, defaults: Arc<Defaults>
         items.push(OpenedItem { key: key.clone(), plane: data.snapshot, overlay_plane: status.map(|status| status.snapshot), overlay, target });
     }
     if items.is_empty() { return Err(PlotError::value("Figure archive contains no datasets")); }
-    Ok(OpenedFigure { path: resolved.display().to_string(), info: finite_json(&archive.info)?, items })
+    Ok(OpenedFigure { path: resolved.display().to_string(), info: finite_json(&archive.info)?, lineage: std::mem::take(&mut archive.lineage), items })
 }
 
 // ------------------------------------------------------------- saving

@@ -3,8 +3,8 @@
 The sampler a run holds is a device reached through the core: every
 attribute read and every call is a round trip.  These tests put the virtual
 IMU behind a proxy that charges each such access, and check that a capture
-reaches the source once per batch (never once per record) and catches up
-after a stall instead of overflowing the source's 2 s receive buffer.
+reaches the source and the core once per batch (never once per record) and catches
+up after a stall instead of overflowing the source's 2 s receive buffer.
 """
 import pathlib
 import sys
@@ -61,16 +61,18 @@ def node_for(remote, repeat=0):
 
 
 class Committed:
-    """commit_live that costs ``seconds`` per event and keeps the ordinals, once stalled."""
+    """commit_events that costs ``seconds`` per commit and keeps the ordinals, once stalled."""
 
     def __init__(self, seconds, stall_at=None, stall_seconds=0.0):
         self.seconds, self.stall_at, self.stall_seconds = seconds, stall_at, stall_seconds
         self.ordinals = []
+        self.commits = 0
 
-    def __call__(self, outputs):
-        (first, *_rest) = outputs.values()
-        self.ordinals.append(int(next(iter(first.event_record['record_timing']['wf']))))
-        if self.stall_at is not None and len(self.ordinals) == self.stall_at:
+    def __call__(self, outputs, *, ordinals, **_):
+        self.commits += 1
+        before = len(self.ordinals)
+        self.ordinals += [int(ordinal) for ordinal in ordinals]
+        if self.stall_at is not None and before < self.stall_at <= len(self.ordinals):
             time.sleep(self.stall_seconds)
         deadline = time.perf_counter() + self.seconds
         while time.perf_counter() < deadline:
@@ -102,7 +104,7 @@ class MonitorThroughput(unittest.TestCase):
     def run_monitor(self, rate_hz, seconds, committed):
         remote = Remote(imu(rate_hz))
         node = node_for(remote)
-        capture = MonitorCapture(node, commit_live=committed)
+        capture = MonitorCapture(node, commit_events=committed)
         polls = 0
         stop = time.monotonic() + seconds
         try:
@@ -115,7 +117,7 @@ class MonitorThroughput(unittest.TestCase):
         return remote, capture, terminal, polls
 
     def test_a_backlog_is_one_read_and_the_capture_catches_up_after_a_stall(self):
-        # 2 kHz, 0.25 ms of publishing per record, and one 1.5 s stall: the
+        # 2 kHz, 0.25 ms of publishing per commit, and one 1.5 s stall: the
         # backlog (3000 records, inside the 4000-record buffer) is taken in a
         # few reads and published, and the capture is current again.
         committed = Committed(0.00025, stall_at=200, stall_seconds=1.5)
@@ -142,43 +144,36 @@ class FiniteThroughput(unittest.TestCase):
     def test_a_finite_capture_takes_batches_and_keeps_every_index(self):
         remote = Remote(imu(2000.0))
         node = node_for(remote, repeat=3000)
-        committed = []
-        stalled = []
-
-        def commit_shot(record, index):
-            if index == 100 and not stalled:
-                stalled.append(True)
-                time.sleep(0.8)
-            committed.append((index, record.source_ordinal))
-
+        committed = Committed(0.0, stall_at=100, stall_seconds=0.8)
         capture = FiniteCapture(node, should_stop=None)
         try:
-            self.assertEqual(capture.collect(commit_shot=commit_shot), 3000)
+            self.assertEqual(capture.collect(commit=committed), 3000)
         finally:
             remote._source.close()
-        self.assertEqual(committed, [(index, index) for index in range(3000)])
+        self.assertEqual(committed.ordinals, list(range(3000)))
         self.assertTrue(capture.terminal.no_more_records)
         self.assertLess(remote.accesses.get('read_records', 0), 1500)
+        self.assertLess(committed.commits, 100, 'one commit a read')
 
     def test_a_stopped_finite_capture_publishes_what_it_had_taken_and_what_the_source_held(self):
         remote = Remote(imu(2000.0))
         node = node_for(remote, repeat=100000)
         stop = threading.Event()
-        committed = []
+        committed = Committed(0.0)
 
-        def commit_shot(record, index):
-            committed.append((index, record.source_ordinal))
-            if index == 500:
+        def commit(outputs, **kwargs):
+            committed(outputs, **kwargs)
+            if len(committed.ordinals) > 500 and not stop.is_set():
                 stop.set()
-                time.sleep(0.3)  # records pile up, some taken, some still in the source
+                time.sleep(0.3)  # records pile up in the source
 
         capture = FiniteCapture(node, should_stop=stop.is_set)
         try:
-            kept = capture.collect(commit_shot=commit_shot)
+            kept = capture.collect(commit=commit)
         finally:
             remote._source.close()
         self.assertEqual(kept, capture.terminal.produced_count)
-        self.assertEqual(committed, [(index, index) for index in range(kept)])
+        self.assertEqual(committed.ordinals, list(range(kept)))
         self.assertTrue(capture.terminal.no_more_records)
 
 

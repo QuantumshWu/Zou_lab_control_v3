@@ -27,7 +27,7 @@ import numpy as np
 
 from . import capabilities, tunable
 from .blocks import Arena, Attachments
-from .declare import ADMIT, QUERY_PARAMETERS, DeviceType, NodeKind, NodeType, Opened, field_json
+from .declare import ADMIT, NODE_INSTANCE, QUERY_PARAMETERS, DeviceType, NodeKind, NodeType, Opened, field_json
 from .describe import describe, find
 from .wire import (PROTOCOL, Channel, Decoder, Encoder, PluginError, error_payload, plain, raise_remote)
 
@@ -766,6 +766,7 @@ def _query(instance: Instance, params: dict[str, Any]) -> Any:
             # The core names the facts; the v2 callable takes them positionally.
             facts = dict(params)
             facts["devices"] = Run.proxies(instance, dict(params.get("devices") or {}), run=None)
+            facts["node"] = instance.name.removeprefix(NODE_INSTANCE)
             _QUERYING.instance = instance
             try:
                 return function(*(facts.get(parameter) for parameter in QUERY_PARAMETERS[name]))
@@ -1017,6 +1018,13 @@ class Run:
         process = self.instance.process
         bundle = any(getattr(item, "select_bundle", False) for item in self.declared.input_specs)
         evaluated = 0
+        # A node that keeps state across deliveries: told its run, asked for what
+        # is left at the source's seal (never at a Stop), committed with the last
+        # delivery as parent.
+        if callable(getattr(node, "bind_run", None)):
+            node.bind_run(self.context)
+        finish = getattr(node, "finish_inputs", None)
+        last = None
         while not self.cancel.is_set():
             try:
                 identity, params = self.deliveries.get(timeout=0.2)
@@ -1028,6 +1036,9 @@ class Run:
                 if kind == "sealed":
                     if evaluated == 0:
                         raise PluginError("failed", "the source ended before it published")
+                    if callable(finish):
+                        for outputs in finish():
+                            self.context.commit_live(outputs, source_publication=last)
                     return {"evaluated": evaluated}
                 if kind == "retired":
                     # A source that moved on is the source's lifecycle, not a fault (v2: cancelled).
@@ -1039,11 +1050,20 @@ class Run:
             try:
                 self.refs.adopt(params)
                 outputs = node.evaluate_inputs(inputs) if bundle else node.evaluate(inputs[params["anchor"]])
-                if not isinstance(outputs, Mapping) or not outputs:
-                    raise TypeError("processor evaluate() must return a non-empty mapping")
-                if evaluated == 0 and callable(getattr(node, "describe_run", None)):
-                    self.context.set_run_record(node.describe_run(inputs))
-                self.context.commit_live(outputs, source_publication=inputs.publication(params["anchor"]))
+                # A mapping is this delivery's one commit; a tuple of them its several, or none.
+                if not isinstance(outputs, tuple) and (not isinstance(outputs, Mapping) or not outputs):
+                    raise TypeError("processor evaluate() must return a non-empty mapping or a tuple of commits")
+                if evaluated == 0:
+                    if callable(getattr(node, "describe_run", None)):
+                        self.context.set_run_record(node.describe_run(inputs))
+                    # An output a first commit may leave out is declared before it.
+                    if callable(getattr(node, "run_outputs", None)):
+                        for name, (schema, storage, index) in node.run_outputs().items():
+                            self.context.declare_output(name, schema, storage=storage, index_by_source=index)
+                if callable(finish):
+                    last = inputs[params["anchor"]]
+                for commit in (outputs,) if isinstance(outputs, Mapping) else outputs:
+                    self.context.commit_live(commit, source_publication=inputs.publication(params["anchor"]))
             except BaseException as error:
                 process.reply(identity, error=error)
                 raise
@@ -1089,7 +1109,12 @@ class Run:
                 arguments.update(self.params.get("resources", {}))
                 if self.params.get("source_signal") is not None:
                     arguments["source_signal"] = self.params["source_signal"]
-                node = self.declared if self.declared.build is None else self.declared.build(**arguments)
+                # A build asks the core what a draft query may.
+                _QUERYING.instance = self.instance
+                try:
+                    node = self.declared if self.declared.build is None else self.declared.build(**arguments)
+                finally:
+                    _QUERYING.instance = None
             result = self._process(node) if self.declared.kind is NodeKind.PROCESSOR else node.execute(self.context)
             if self.stop_accepted or self.cancel.is_set():
                 outcome = "stopped"

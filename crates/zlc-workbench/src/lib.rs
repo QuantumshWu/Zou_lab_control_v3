@@ -211,6 +211,8 @@ pub struct Workbench {
     pub(crate) routed_selections: BTreeMap<String, Value>,
     /// Devices driven from outside the workbench, by whom (the Pulse Editor playing on the session's sequencer).
     pub(crate) device_users: DeviceUsers,
+    /// A processor follows its source across its runs (the apparatus's); a Figure Viewer's data has no next run.
+    pub(crate) follows_sources: bool,
 }
 
 /// v2 DeviceUseCoordinator's other owners: each device driven from outside the workbench, by
@@ -236,17 +238,9 @@ pub(crate) fn text<'a>(params: &'a Value, name: &str) -> Result<&'a str, String>
 }
 
 impl Workbench {
-    pub fn new(root: &Path, mut plugins: Box<dyn Plugins>) -> Result<Self, String> {
-        let workspace = Workspace::new(root)?;
-        let catalog = plugins.catalog();
-        let mut workbench = Self { plugins, catalog, apparatus: apparatus::Apparatus::empty(workspace.apparatus()), workspace,
-            devices: BTreeMap::new(), nodes: Vec::new(), runs: Vec::new(), run_sequences: BTreeMap::new(), board: layout::Board::default(), notes: Vec::new(),
-            report: (String::new(), "idle"), settling: None, settling_since: None,
-            // v2 set_deriving(False) when the console is built.
-            console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None,
-            tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), applied_simulation: None, scan: None,
-            resolution: None, found: Vec::new(), bundles: BTreeMap::new(),
-            selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new(), device_users: DeviceUsers::default() };
+    pub fn new(root: &Path, plugins: Box<dyn Plugins>) -> Result<Self, String> {
+        let mut workbench = Self::document(root, plugins)?;
+        workbench.follows_sources = true;
         let path = workbench.workspace.apparatus();
         if path.is_file() {
             if let Err(error) = workbench.load_apparatus(&path) { workbench.notes.push(error); }
@@ -256,6 +250,20 @@ impl Workbench {
         }
         workbench.say_new_notes();
         Ok(workbench)
+    }
+
+    /// A workbench of logic nodes alone, no apparatus read: a Figure Viewer's, over the data it holds.
+    pub fn document(root: &Path, mut plugins: Box<dyn Plugins>) -> Result<Self, String> {
+        let workspace = Workspace::new(root)?;
+        let catalog = plugins.catalog();
+        Ok(Self { plugins, catalog, apparatus: apparatus::Apparatus::empty(workspace.apparatus()), workspace,
+            devices: BTreeMap::new(), nodes: Vec::new(), runs: Vec::new(), run_sequences: BTreeMap::new(), board: layout::Board::default(), notes: Vec::new(),
+            report: (String::new(), "idle"), settling: None, settling_since: None,
+            // v2 set_deriving(False) when the console is built.
+            console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None,
+            tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), applied_simulation: None, scan: None,
+            resolution: None, found: Vec::new(), bundles: BTreeMap::new(),
+            selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new(), device_users: DeviceUsers::default(), follows_sources: false })
     }
 
     pub fn handles(name: &str) -> bool { COMMANDS.contains(&name) }
@@ -276,6 +284,7 @@ impl Workbench {
         self.say_new_notes();
     }
     pub fn workspace(&self) -> &Workspace { &self.workspace }
+    pub fn catalog(&self) -> &TypeCatalog { &self.catalog }
     /// The file dialog a window command without a path asks (v2 ask_open_path / ask_save_path):
     /// its caption, its v2 filter, whether it saves, where it starts -- a folder, or the file a
     /// save proposes -- and its kind's own folder ([`workspace::dialog_start`]). Devices@ starts at
@@ -523,6 +532,28 @@ impl Workbench {
         sections.insert("board".into(), self.board_state(&host.panels(), &signals));
         sections.insert("runs".into(), Value::Array(self.runs.iter().rev().take(50).map(logic::Run::row).collect()));
         sections
+    }
+
+    /// The logic nodes' rows alone (what a Figure Viewer's page draws of them).
+    pub fn logic_rows(&self, host: &dyn Host) -> Value {
+        let signals = host.signals();
+        Value::Array(self.nodes.iter().map(|node| self.node_row(node, &signals)).collect())
+    }
+
+    /// The node types that can run on saved data, for a Figure Viewer's chooser.
+    pub fn pure_processors(&self) -> Value {
+        Value::Array(self.catalog.nodes().filter(|item| item.pure_processor() && item.addable.unwrap_or(true))
+            .map(|item| json!({"type_id": item.type_id, "label": item.label(), "description": item.description})).collect())
+    }
+
+    /// Whether a node of this id stands on this board.
+    pub fn has_node(&self, id: &str) -> bool { self.node(id).is_some() }
+
+    /// Everything goes at once: each node's run is told to stop, its plugin instance closes, its signals are withdrawn.
+    pub fn close_nodes(&mut self, host: &mut dyn Host) {
+        self.stop_all(host);
+        for node in std::mem::take(&mut self.nodes) { self.plugins.close(&zlc_core::control::node_instance(&node.id)); }
+        self.tickets.clear();
     }
 
     /// Put the sections into a state message, ordering `panels` as the board does.

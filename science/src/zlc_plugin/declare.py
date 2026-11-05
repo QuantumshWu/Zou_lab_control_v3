@@ -317,9 +317,10 @@ class DeviceRequirement:
 #: v2 callable takes them.
 QUERY_PARAMETERS: dict[str, tuple[str, ...]] = {
     "declare_outputs": ("values", "devices"),
-    "declare_previews": ("values", "devices"),
+    "declare_previews": ("values", "devices", "node"),
     "resolve_field_availability": ("devices",),
-    "resolve_field_choices": ("values", "resources"),
+    "resolve_field_choices": ("values", "resources", "devices"),
+    "resolve_field_units": ("values", "devices"),
     "resolve_device_claims": ("values",),
     "editor_facts": ("values", "resources", "devices", "source", "bundle", "artifacts"),
     "resolve_defaults": ("values", "resources"),
@@ -337,7 +338,7 @@ NODE_INSTANCE = "node/"
 #: (``node.answers``): a node just added is drawn from them at once, its own process's
 #: answers replacing them when they land.
 FIRST_ANSWERS = ("declare_outputs", "declare_previews", "resolve_field_availability", "resolve_field_choices",
-                 "resolve_defaults", "resolve_device_claims", "editor_facts")
+                 "resolve_field_units", "resolve_defaults", "resolve_device_claims", "editor_facts")
 
 
 @dataclass(frozen=True)
@@ -367,8 +368,11 @@ class NodeType:
     selection_mappings: tuple[object, ...] = ()
     workspace_resources: tuple[object, ...] = ()
     resolve_field_availability: Callable[..., Any] | None = None
-    #: ``(values, resources) -> {field: [(value, label), ...]}``: the choices of
-    #: a field whose options come from the draft (a chosen pulse's periods).
+    #: ``(values, devices) -> {field: unit}``: the unit a field is typed in, when the draft decides it.
+    resolve_field_units: Callable[..., Any] | None = None
+    #: ``(values, resources, devices) -> {field: [(value, label), ...]}``: the choices
+    #: of a field whose options come from the draft (a chosen pulse's periods, a
+    #: bound source's channels).
     resolve_field_choices: Callable[..., Any] | None = None
     #: ``(values) -> {argument: {"instance": key, "fields": [...]}}``: devices a
     #: draft names (a scan's device axes) beside the declared requirements;
@@ -428,7 +432,7 @@ class NodeType:
         source or bundle. A query that cannot answer it is left to the node's own process."""
 
         facts = {"values": {item["name"]: item["default"] for item in parameters}, "devices": {}, "resources": {},
-                 "source": None, "bundle": [], "artifacts": {"inputs": {}, "resolved": {}}}
+                 "source": None, "bundle": [], "artifacts": {"inputs": {}, "resolved": {}}, "node": None}
         answers: dict[str, Any] = {}
         for name in FIRST_ANSWERS:
             function = getattr(self, name)

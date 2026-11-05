@@ -52,6 +52,22 @@ class LiveDatasetOutput:
 
 
 @dataclass(frozen=True)
+class LiveEvents:
+    """One output's consecutive events of a ``commit_events``, as one contiguous array.
+
+    ``schema`` is each event's. ``values`` has one row per event, each row the
+    event's physical shape; ``validity`` is a bool mask of those rows, or one bool
+    for them all. A finite output also states the complete run schema.
+    """
+
+    declaration: DatasetOutputDeclaration
+    schema: Any
+    values: np.ndarray
+    validity: bool | np.ndarray = True
+    canonical_schema: Any = None
+
+
+@dataclass(frozen=True)
 class Read:
     """One leased Runtime read: its publication key and a zlc_data snapshot.
 
@@ -374,6 +390,28 @@ class RunContext:
                                                  "frame_ms": int(frame_ms)})
         return pathlib.Path(answer["path"])
 
+    def fit(self, model_id: str, x: Any, y: Any, sigma: Any = None, warm: Any = None, sigma_dof: Any = None) -> Any:
+        """One independent fit per row of ``y`` ``(cells, n)`` over ``x`` ``(n)`` by the core's
+        fit engine; ``sigma`` as ``y``, ``warm`` ``(cells, parameters)`` beside the engine's
+        own seeds (a row with a NaN is none), ``sigma_dof`` each sigma's degrees of freedom
+        as a panel's fit has them (infinite: known otherwise). Answers a ``zlc_plugin.fit.FitAnswer``: a
+        cell that cannot be fitted is that cell's ``success`` False. The run's Stop ends
+        the batch and raises here."""
+
+        from .fit import fit_answer, fit_request
+
+        request = fit_request(model_id, x, y, sigma, warm, sigma_dof)
+        if self._run.cancel.is_set():
+            raise PluginError("cancelled", "the run was stopped")
+        return fit_answer(self._request("run.fit", request))
+
+    def fit_models(self) -> Mapping[str, Mapping[str, Any]]:
+        """The fit models ``fit`` takes, by id (``zlc_plugin.fit.fit_models``)."""
+
+        from .fit import fit_models
+
+        return fit_models(self.core)
+
     def seal_terminal(self, *, accept_stop: bool = False, partial: bool = False) -> None:
         """Enter the run's non-cancellable terminal commit (v2's NodeExecutionContext rule).
 
@@ -462,31 +500,19 @@ class RunContext:
                 raise ValueError(f"output {name!r} carries the declaration of {output.declaration.name!r}")
             schema, values, mask, sigma = _planes(output.snapshot)
             finite = output.canonical_schema is not None
-            if not self._begun and name not in self._declared:
-                self._declared[name] = (output.canonical_schema if finite else schema,
-                                        "finite" if finite else "latest", output.declaration.index_by_source)
+            self._declare_first(name, output, schema, finite)
             ordinal = (int(output.ordinal) if output.ordinal is not None else int(source_ordinal)
                        if source_ordinal is not None else self._ordinals.get(name, 0))
             entry: dict[str, Any] = {"output": name, "ordinal": ordinal,
                                      "origin": list(output.cell_origin) if finite else None,
                                      "data": {"values": values, "validity": mask, "sigma": sigma}}
-            fingerprint = schema.fingerprint
-            if self._sent_schema.get(name) != fingerprint:
-                declared = self._declared.get(name)
-                if finite or declared is None or declared[0].fingerprint != fingerprint:
-                    entry["schema"] = _tree(schema)
-                self._sent_schema[name] = fingerprint
+            self._state_schema(entry, name, schema, finite)
             entries.append(entry)
             if output.event_record is not None:
                 records[name] = dict(output.event_record)
             if output.shot_time_seconds is not None:
                 times[name] = float(output.shot_time_seconds)
-        if not self._begun:
-            self.record_devices(wait=True)
-            self._request("run.begin", {"record": self._record, "outputs": [
-                {"name": name, "schema": _tree(schema), "storage": storage, "index_by_source": index}
-                for name, (schema, storage, index) in self._declared.items()]})
-            self._begun = True
+        self._begin()
         metadata: dict[str, Any] = {}
         if records:
             metadata["records"] = records
@@ -497,6 +523,70 @@ class RunContext:
         for entry in entries:
             self._ordinals[entry["output"]] = entry["ordinal"] + 1
         return keys
+
+    def commit_events(self, outputs: Mapping[str, LiveEvents], *, ordinals: np.ndarray,
+                      shot_times: np.ndarray | None = None, origins: np.ndarray | None = None,
+                      shown: np.ndarray | None = None, records: list[Mapping[str, Any]] | None = None) -> None:
+        """Commit consecutive event bundles in one round trip, whatever their number.
+
+        Each is the event ``commit_live`` would make of it (every output at that
+        ``ordinal``, its ``shot_times``, its ``origins`` row of a finite run, and its
+        ``records`` row kept under every output), and every reader takes it as one.
+        ``shown`` is one bool per event: whether a board may show its data up to
+        that event; every other reader takes them all. None: every event may.
+        """
+
+        if not outputs:
+            raise ValueError("a commit needs at least one output")
+        count = len(ordinals)
+        if count == 0:
+            raise ValueError("a commit needs at least one event")
+        entries = []
+        for name, output in outputs.items():
+            if not isinstance(output, LiveEvents):
+                raise TypeError("commit_events takes LiveEvents values")
+            if output.declaration.name != name:
+                raise ValueError(f"output {name!r} carries the declaration of {output.declaration.name!r}")
+            finite = output.canonical_schema is not None
+            self._declare_first(name, output, output.schema, finite)
+            entry: dict[str, Any] = {"output": name, "data": {"values": output.values, "validity": output.validity}}
+            self._state_schema(entry, name, output.schema, finite)
+            entries.append(entry)
+        self._begin()
+        self._request("run.commit_events", {
+            "count": count, "inputs": entries, "ordinals": np.asarray(ordinals, dtype="<u8"),
+            "shot_times": None if shot_times is None else np.asarray(shot_times, dtype="<f8"),
+            "origins": None if origins is None else np.asarray(origins, dtype="<u8"),
+            "shown": None if shown is None else np.asarray(shown, dtype=bool),
+            "records": records})
+        following = int(ordinals[-1]) + 1
+        for name in outputs:
+            self._ordinals[name] = following
+
+    def _declare_first(self, name: str, output: Any, schema: Any, finite: bool) -> None:
+        """What the first commit states of an output not declared before it."""
+
+        if not self._begun and name not in self._declared:
+            self._declared[name] = (output.canonical_schema if finite else schema,
+                                    "finite" if finite else "latest", output.declaration.index_by_source)
+
+    def _state_schema(self, entry: dict[str, Any], name: str, schema: Any, finite: bool) -> None:
+        """An event's schema travels when it is not what the core already holds."""
+
+        fingerprint = schema.fingerprint
+        if self._sent_schema.get(name) != fingerprint:
+            declared = self._declared.get(name)
+            if finite or declared is None or declared[0].fingerprint != fingerprint:
+                entry["schema"] = _tree(schema)
+            self._sent_schema[name] = fingerprint
+
+    def _begin(self) -> None:
+        if not self._begun:
+            self.record_devices(wait=True)
+            self._request("run.begin", {"record": self._record, "outputs": [
+                {"name": name, "schema": _tree(schema), "storage": storage, "index_by_source": index}
+                for name, (schema, storage, index) in self._declared.items()]})
+            self._begun = True
 
     # ---------------------------------------------------------- reading
 
@@ -517,5 +607,5 @@ class RunContext:
         return self.read(f"{self.instance_id}/{output_name}", mode="dataset").snapshot
 
 
-__all__ = ["DeliveredInputs", "LiveDatasetOutput", "Read", "RunContext", "RunRefs", "SignalValue", "signal_value",
+__all__ = ["DeliveredInputs", "LiveDatasetOutput", "LiveEvents", "Read", "RunContext", "RunRefs", "SignalValue", "signal_value",
            "snapshot_from_wire"]

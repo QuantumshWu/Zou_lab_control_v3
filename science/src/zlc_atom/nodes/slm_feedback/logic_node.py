@@ -198,7 +198,7 @@ _PREVIEWS = (
 )
 
 
-def _previews(values, devices=None):
+def _previews(values, devices=None, node=None):
     """Frequency mode shoots no camera frames of its own."""
 
     del devices

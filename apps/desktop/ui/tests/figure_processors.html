@@ -1,0 +1,74 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Figure Viewer processors regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. The Viewer's chooser, its tabs and their commands; a row is written here as the host sends it.
+import { FigureViewerView } from '../dist/views/figure_viewer.js';
+const assert=(value,message)=>{if(!value)throw Error(message)};
+const equal=(actual,expected,message)=>assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)}`);
+const results=[],sent=[];
+const settle=()=>new Promise(resolve=>setTimeout(resolve,30));
+const transport={pending:new Map(),lastError:'',notice:null,busyText(){return ''},send(command){sent.push(command);return sent.length},choosePath(){return Promise.resolve(null)}};
+const DATA='@figure/1/data',NODE='figure-1-derive';
+const ctx={transport,latest:{type:'state',viewer:{document:{path:'C:\\d\\a.npz'},panels:[],signals:[{id:DATA,label:'data'}],plot_kinds:[]}},show(){}};
+const viewer=new FigureViewerView(ctx,{root:document.createElement('div'),size:0,presenting:false});document.body.append(viewer.root);
+const tell=(section,request=0,error=null)=>{Object.assign(ctx.latest.viewer,section);viewer.update({type:'state',request,error})};
+const row=(fields={})=>({node_id:NODE,name:'Derive',type_id:'derive',node_kind:'processor',draft_revision:1,values:{},controls:[],source_signal:DATA,source_label:'Signal bundle',
+  source_choices:[[DATA,DATA]],device_keys:{},device_choices:{},device_labels:{},artifact_inputs:{},auto_preview:false,outputs:[],issues:[],can_start:true,can_stop:false,
+  preview_offered:true,edited:false,state:'idle',status:'not started',phase:'idle',run:null,...fields});
+const button=(words,within=viewer.root)=>[...within.querySelectorAll('button')].find(node=>node.textContent.trim()===words);
+const labels=()=>[...viewer.tabs.strip.querySelectorAll('.tab-label')].map(label=>label.textContent);
+const check=async(name,test)=>{await test();results.push(name)};
+try {
+ await check('nothing to add until the catalogue says what can run on saved data',()=>{
+  tell({processor_types:[],logic:[]});
+  assert(button('Add processor').disabled,'disabled without types');
+ });
+ await check('Add processor asks for the chosen type on the chosen data',()=>{
+  tell({processor_types:[{type_id:'derive',label:'Derive',description:'Algebra'}]});
+  assert(!button('Add processor').disabled,'enabled');
+  button('Add processor').click();
+  equal(sent.at(-1),{action:'add_node',type_id:'derive',source_signal:DATA},'the command');
+ });
+ await check('its Edit tab opens forward, the Logic page\'s editor, with no Plot switch',()=>{
+  tell({logic:[row()]},sent.length);
+  equal(labels(),['Monitor','Edit · Derive'],'tabs');
+  equal(viewer.tabs.currentKey,`node:${NODE}`,'in front');
+  const page=viewer.root.querySelector('.logic-editor');
+  assert(page,'the editor');
+  assert(page.querySelector('.row-switch').hidden,'no Plot switch');
+ });
+ await check('its buttons are the node\'s commands',()=>{
+  [...viewer.root.querySelectorAll('.logic-editor-actions button')].find(node=>node.textContent.startsWith('Start')).click();
+  equal(sent.at(-1),{action:'start_node',node:NODE,expected_draft_revision:1},'Start');
+ });
+ await check('a failure stands on its tab, Monitor stays',()=>{
+  tell({logic:[row({state:'error',status:'the process was lost'})]});
+  assert(viewer.root.querySelector('.logic-editor').textContent.includes('the process was lost'),'said');
+  equal(labels(),['Monitor','Edit · Derive'],'tabs');
+ });
+ await check('a running node asks before its tab closes it; a stopped one goes at once',async()=>{
+  tell({logic:[row({phase:'running',state:'running',status:'running',can_stop:true})]});
+  const count=sent.length;
+  viewer.tabs.strip.querySelector('.tab-close').click();
+  await settle();
+  const dialog=document.querySelector('dialog.dialog');
+  assert(dialog,'asked');
+  button('Keep it',dialog).click();
+  await settle();
+  equal(sent.length,count,'kept');
+  tell({logic:[row()]});
+  viewer.tabs.strip.querySelector('.tab-close').click();
+  await settle();
+  equal(sent.at(-1),{action:'remove_node',node:NODE},'removed');
+ });
+ await check('the row gone, its tab is gone',()=>{
+  tell({logic:[]});
+  equal(labels(),['Monitor'],'tabs');
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,results});
+} catch(error){document.getElementById('result').textContent=JSON.stringify({passed:false,count:results.length,results,error:String(error.stack??error)})}
+</script>

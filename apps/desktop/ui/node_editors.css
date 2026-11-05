@@ -100,8 +100,32 @@
 .derive-error.muted { color: var(--muted-ink); }
 .derive-reduce { grid-column: 2 / 7; display: flex; flex-wrap: wrap; align-items: center; gap: var(--row-gap); min-width: 0; }
 .derive-over { width: auto; min-width: var(--derive-operand-w); }
+.derive-reduce > .segmented { flex-wrap: wrap; max-width: 100%; }
+/* A word and what it names wrap as one. */
+.derive-pair { display: flex; align-items: center; gap: var(--row-gap); min-width: 0; }
+.derive-pair > select { width: auto; min-width: var(--range-count-w); }
+.derive-pair > .spin { flex: none; width: var(--range-count-w); }
+/* The statistic's word and its remove stand on the strip's line, however its controls wrap. */
+.derive-stat-lead, .derive-reduce + .derive-remove { align-self: start; }
+.derive-stat-lead { min-height: var(--control); }
 .derive-adds { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: var(--row-gap); }
 .derive-preview { grid-column: 2 / -1; padding-left: var(--field-text-inset); margin-top: calc(-1 * var(--row-gap) / 2); }
+/* A pane too narrow for the column set: a card's lines stand one under another
+ * (a head line's Publish and remove beside its name), nothing overflows. */
+.derive-variables { container-type: inline-size; }
+@container (max-width: 660px) {
+  .derive-inputs-form { grid-template-columns: minmax(0, 1fr); }
+  .derive-inputs { grid-template-columns: max-content minmax(0, 1fr); }
+  .derive-inputs > .derive-input-axes { grid-column: 1 / -1; white-space: normal; }
+  .derive-lines { grid-template-columns: 1fr auto auto; grid-auto-flow: dense; }
+  .derive-lead, .derive-stat-lead { justify-content: flex-start; }
+  .derive-lines > .derive-operand, .derive-at, .derive-labels-cell, .derive-reduce, .derive-error, .derive-adds, .derive-preview { grid-column: 1 / -1; width: 0; min-width: 100%; }
+  .derive-labels-cell:not(:has(> :not([hidden]))), .derive-tail { display: none; }
+  .derive-lines > .derive-publish { grid-column: 2; }
+  .derive-lines > .derive-remove { grid-column: 3; }
+  .derive-pair { max-width: 100%; }
+  .derive-pair > select, .derive-pair > .derive-over { min-width: 0; }
+}
 
 /* ---------- FrameClaimsEditor / PostSelectionEditor -------------------- */
 .frame-claims > .selection-grid { align-self: flex-start; }

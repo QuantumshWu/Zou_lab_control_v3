@@ -424,3 +424,63 @@ fn scans_and_resolves_are_handed_the_bound_resources() {
     assert_eq!(host.resolve("test.echo", json!({}), &[], wait).unwrap_err().kind, ErrorKind::UnknownOp);
     host.shutdown();
 }
+
+#[test]
+fn a_run_asks_for_fits_on_lent_arrays_and_its_stop_ends_them() {
+    let Some((host, _runtime, _safe, events)) = host() else { return };
+    host.open("fitter", "fitter", json!({}), json!({})).unwrap();
+    let start = || host.start_run("fitter", RunRequest { prepared: None, device_labels: Default::default(), values: json!({}), devices: Default::default(), shared: Default::default(),
+        origin: Origin::Operator, resources: json!({}), source_signal: None, run_directory: None, outputs: Default::default(), record_devices: false }).unwrap();
+    let cells = |count: usize| json!({"parameters": ["a", "b"], "values": vec![json!([1.0, 2.0]); count], "errors": vec![json!([0.5, null]); count],
+        "success": vec![true; count], "reduced_chi_square": vec![1.0; count], "messages": vec![""; count]});
+
+    let run = start();
+    let mut asked = 0;
+    let (outcome, result, error) = loop {
+        match events.recv_timeout(Duration::from_secs(60)).expect("run events") {
+            HostEvent::Request { run: id, ticket, op, params, lent, .. } if id == run => {
+                assert_eq!((op.as_str(), &params["model"]), ("run.fit", &json!("damped_sine")));
+                asked += 1;
+                let x = lent.array(&params["x"]).unwrap();
+                assert!(matches!(x.values, AnyBuffer::F64(_)));
+                if asked == 1 {
+                    assert!(params["y"].get("$array").is_some(), "the large arrays go by block");
+                    assert_eq!(x.shape, [60]);
+                    assert_eq!(lent.array(&params["y"]).unwrap().shape, [300, 60]);
+                    assert_eq!(lent.array(&params["sigma"]).unwrap().shape, [300, 60]);
+                    assert_eq!(lent.array(&params["warm"]).unwrap().shape, [300, 2]);
+                    host.respond(ticket, Ok(cells(300)));
+                } else {
+                    assert_eq!((lent.array(&params["y"]).unwrap().shape, &params["sigma"], &params["warm"]), (vec![2, 3], &json!(null), &json!(null)));
+                    host.respond(ticket, Ok(cells(2)));
+                }
+            }
+            HostEvent::RunFinished { run: id, outcome, result, error, .. } if id == run => break (outcome, result, error),
+            HostEvent::Failed { reason, .. } => panic!("plugin failed: {reason}"),
+            _ => {}
+        }
+    };
+    assert_eq!(outcome, "completed", "{error:?}");
+    assert_eq!(result, json!({"values": [300, 2], "errors": [300, 2], "nan_error": true, "success": [true, true], "chi": [300], "messages": ["", ""],
+                              "parameters": ["a", "b"], "short": [2, 2]}));
+    assert!(host.run_stop("fitter", &run).load(std::sync::atomic::Ordering::Relaxed), "a run that is gone is stopped");
+
+    // The run's Stop: the flag its batch watches is set, and the cancelled answer ends the run stopped.
+    let run = start();
+    let outcome = loop {
+        match events.recv_timeout(Duration::from_secs(60)).expect("run events") {
+            HostEvent::Request { run: id, ticket, .. } if id == run => {
+                let stop = host.run_stop("fitter", &run);
+                assert!(!stop.load(std::sync::atomic::Ordering::Relaxed));
+                host.stop_run("fitter", &run).unwrap();
+                assert!(stop.load(std::sync::atomic::Ordering::Relaxed));
+                host.respond(ticket, Err(zlc_plugin_host::CallError::new(ErrorKind::Cancelled, "the run was stopped")));
+            }
+            HostEvent::RunFinished { run: id, outcome, .. } if id == run => break outcome,
+            HostEvent::Failed { reason, .. } => panic!("plugin failed: {reason}"),
+            _ => {}
+        }
+    };
+    assert_eq!(outcome, "stopped");
+    host.shutdown();
+}

@@ -202,7 +202,7 @@ pub fn signal_key(producer: &str, output: &str) -> String { format!("@logic/{pro
 
 /// The draft queries asked whenever a draft changes (PLUGIN_PROTOCOL §2);
 /// admission that needs data or files runs in the plugin at Start.
-const DRAFT_QUERIES: [&str; 9] = ["declare_outputs", "declare_previews", "resolve_field_availability", "resolve_field_choices", "resolve_defaults",
+const DRAFT_QUERIES: [&str; 10] = ["declare_outputs", "declare_previews", "resolve_field_availability", "resolve_field_choices", "resolve_field_units", "resolve_defaults",
                                   "resolve_device_claims", "editor_facts", ADMIT_SOURCE, ADMIT];
 /// What the draft cannot compute from what its source published (v2 admit_source): asked
 /// once every member of the source bundle has a schema; its answers are draft issues.
@@ -407,13 +407,14 @@ impl Workbench {
     /// The signals a node's source bundle holds, by member name: every output of the source's
     /// producer when its input takes the whole bundle (v2 `select_bundle`), else the selected one.
     fn bundle_signals(&self, node: &Node) -> Vec<(String, String)> {
-        let Some((producer, _)) = split_signal(&node.draft.source_signal) else { return Vec::new() };
+        if node.draft.source_signal.is_empty() { return Vec::new(); }
         let whole = self.catalog.get(&node.type_id).and_then(|item| item.node().inputs.first()).is_some_and(|input| input.select_bundle);
-        let signals: Vec<String> = match self.node(producer).filter(|_| whole) {
+        let signals: Vec<String> = match split_signal(&node.draft.source_signal).and_then(|(producer, _)| self.node(producer)).filter(|_| whole) {
             Some(producer) => self.node_outputs(producer).into_iter().map(|(signal, _)| signal).collect(),
             None => vec![node.draft.source_signal.clone()],
         };
-        signals.into_iter().filter_map(|signal| split_signal(&signal).map(|(_, name)| name.to_owned()).map(|name| (name, signal))).collect()
+        // A member is called what a delivery calls it: the signal's last segment, whoever makes it (a saved dataset's too).
+        signals.into_iter().map(|signal| (signal.rsplit('/').next().unwrap_or(&signal).to_owned(), signal)).collect()
     }
 
     /// The source bundles the nodes' queries read (an editor, an admission check), each member
@@ -1025,7 +1026,7 @@ impl Workbench {
             if let Some((parent, reply, _)) = acquisition { self.plugins.acquired(&parent, reply, Err(error)); } return;
         }
         self.cancel_start(id, "superseded by another Start");
-        let processor = self.catalog.get(&self.node(id).unwrap().type_id).is_some_and(|descriptor| descriptor.node().node_kind == "processor");
+        let processor = self.follows_sources && self.catalog.get(&self.node(id).unwrap().type_id).is_some_and(|descriptor| descriptor.node().node_kind == "processor");
         if processor { self.plugins.follow(&node_instance(id), Some(&frozen.draft.source_signal)); }
         let node = self.node_mut(id).unwrap();
         node.error = None; node.running = Some(frozen.draft.clone()); node.frozen = Some(frozen);
@@ -1482,12 +1483,14 @@ impl Workbench {
         self.stop_acquisitions(id, "its parent run ended");
         for panel in preview_panels { host.close_panel(&panel); self.board.remove(&panel); }
         let message = error.as_ref().map(|error| error["message"].as_str().map(str::to_owned).unwrap_or_else(|| error.to_string()));
+        // On saved data what completed stands as the configuration it came from: an edit reads "edited" until it runs again.
+        let stands = !self.follows_sources && outcome == "completed";
         if let Ok(node) = self.node_mut(&node_id) {
             if outcome == "failed" {
                 let message = message.unwrap_or_else(|| "the run failed".into());
                 node.error = Some(if node.follow { format!("failed; restarts with the source's next run: {message}") } else { message });
             }
-            if !node.follow && node.pending.is_none() { node.running = None; node.frozen = None; }
+            if !node.follow && node.pending.is_none() && !stands { node.running = None; node.frozen = None; }
             if node.removing { self.retire_node(&node_id); }
         }
         self.close_released();
@@ -1670,6 +1673,11 @@ impl Workbench {
                 let reason = unavailable.and_then(|reasons| reasons.get(&field.name)).and_then(Value::as_str).filter(|reason| !reason.trim().is_empty())
                     .map(str::to_owned).or_else(|| field.derived.then(|| field.description.clone().unwrap_or_default()));
                 if let Some(reason) = reason { control["unavailable_reason"] = json!(reason); }
+            }
+            // A unit the draft decides (a trigger level is typed in its channel's).
+            let units = node.answers.get("resolve_field_units").and_then(|(_, answer)| answer.as_ref().ok()).and_then(Value::as_object);
+            for (name, unit) in units.into_iter().flatten() {
+                if let Some(control) = controls.iter_mut().find(|control| control["name"] == name.as_str()) { control["unit"] = unit.clone(); }
             }
             // Options the draft decides (an SLM rearrangement's imaging periods are its pulse's
             // periods): the field is a choice of them; a held value not among them stays, unavailable.

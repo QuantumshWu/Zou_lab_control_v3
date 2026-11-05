@@ -1,7 +1,9 @@
 """Ordered native waveform records, independent of read and display cadence.
 
 Adapters own bounded receive queues. Runtime alone retains run data/history.
-Each native record is published in order, preserving its samples and timestamp.
+Each native record is published in order, preserving its samples and timestamp;
+what one read takes goes out as one commit. A software trigger holds nothing: it
+publishes every sample as its own event and marks the edges (``trigger.py``).
 """
 
 from __future__ import annotations
@@ -11,14 +13,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from math import ceil
-from time import monotonic, time_ns
+from time import monotonic, sleep, time_ns
 
 import numpy as np
 
-from zlc_data import COMPONENT, READOUT_EVENT, SAMPLE_TIME, AxisSpec, DatasetSchema, DomainSpec, OwnedSnapshot
-from zlc_plugin import DatasetOutputDeclaration, LiveDatasetOutput
+from zlc_data import COMPONENT, READOUT_EVENT, SAMPLE_TIME, AxisSpec, DomainSpec, OwnedSnapshot
+from zlc_plugin import DatasetOutputDeclaration, LiveEvents
+from zlc_plugin.figures import AxisRef
 
-from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.data import cell_axis_id, snapshot_from_array
 from zlc_atom.devices.waveform.contract import (
     WaveformAcquisitionMode,
@@ -31,16 +34,38 @@ from zlc_atom.devices.waveform.contract import (
 )
 from zlc_atom.nodes._framework.descriptor import NodePreviewSpec
 
+from .trigger import SLOPES, TriggerDetector, TriggerSettings, WaveformTrigger, channel_output
 
-#: How often a capture comes back to see whether it has been asked to stop;
-#: the read length is the cancel latency, and it belongs to the loop.
+
+#: How often a capture comes back to see whether it has been asked to stop; the
+#: read length is the cancel latency, and it belongs to the loop. A free-running
+#: source is also read at most this often, so reads and commits follow this cadence
+#: and not the sample rate: an event is published at most this late.
 _CANCEL_RESPONSE_SECONDS = 0.05
 _RECEIVE_BUFFER_SECONDS = 2.0
 #: Sample bytes one read of a backlog may carry (a channel frame holds 16 MiB of JSON).
 _BATCH_BYTES = 2 << 20
+#: How long without a shot before a capture says it is waiting, and how often it
+#: says what it saw meanwhile: a trigger that fires now and then does not flicker
+#: the status between two words.
+_WAITING_AFTER_SECONDS = 1.0
+
+TRIGGER_OFF = "off"
+_TRIGGER_ON = ("trigger_slope", SLOPES)
 
 WAVEFORM_MEASUREMENT_SCHEMA = AuthoringSchema((
-    AuthoringField("repeat", "int", "Records (0 = continuous)", 0, minimum=0),
+    AuthoringField("repeat", "int", "Records (0 = continuous)", 0, minimum=0,
+                   description="how many records to keep; with a trigger, that many samples in a row from the first trigger"),
+    AuthoringField(
+        "trigger_slope", "choice", "Slope", TRIGGER_OFF,
+        choices=(AuthoringChoice(TRIGGER_OFF, "Off"), AuthoringChoice("rising", "Rising"),
+                 AuthoringChoice("falling", "Falling")),
+        segmented=True, group="Trigger",
+        description="lock the view on a level crossing, for a slow free-running source: every sample is still "
+                    "published, and a plot's newest data ends on the latest crossing",
+    ),
+    AuthoringField("trigger_channel", "text", "Channel", "", required=True, enabled_when=_TRIGGER_ON, group="Trigger"),
+    AuthoringField("trigger_level", "float", "Level", 0.0, enabled_when=_TRIGGER_ON, group="Trigger"),
 ))
 
 
@@ -57,11 +82,23 @@ def waveform_outputs(
     )
 
 
-def waveform_preview(source: WaveformSource) -> NodePreviewSpec:
-    """The first quantity, as a rolling trace of shots or as the trace one shot is."""
+def waveform_preview(source: WaveformSource, *, trigger_channel: str | None = None, node: str | None = None) -> NodePreviewSpec:
+    """The first quantity, as a rolling trace of shots or as the trace one shot is.
 
-    (first, *_rest) = waveform_outputs(source.outputs)
-    return NodePreviewSpec(first, "rolling" if int(source.record_samples) == 1 else "curve")
+    Triggered, every sample is a shot and the one to watch is the channel the
+    trigger locks: ``trigger_channel`` names it (empty: not chosen yet), and
+    ``node``, the producer its channel axis is named after, lets the view hold it.
+    """
+
+    outputs = waveform_outputs(source.outputs)
+    if trigger_channel is None:
+        return NodePreviewSpec(outputs[0], "rolling" if int(source.record_samples) == 1 else "curve")
+    chosen = channel_output(trigger_channel, source.outputs)
+    if chosen is None or node is None:
+        return NodePreviewSpec(outputs[0] if chosen is None else next(o for o in outputs if o.name == chosen.name), "rolling")
+    held = AxisRef.cell_data(cell_axis_id(node, chosen.name, 0, COMPONENT).value).fate_field
+    position = chosen.channel_labels.index(str(trigger_channel).partition("/")[2])
+    return NodePreviewSpec(next(o for o in outputs if o.name == chosen.name), "rolling", semantic={held: ["scope-value", position]})
 
 
 @lru_cache(maxsize=64)
@@ -179,6 +216,7 @@ class WaveformMeasurementRequest:
 
     sampler_key: str
     repeat: int
+    trigger: TriggerSettings | None = None
 
     def __post_init__(self) -> None:
         key = str(self.sampler_key).strip()
@@ -202,64 +240,44 @@ class FiniteCapture:
         self.node = node
         self.should_stop = should_stop
         self.closed = False
-        self.completed_shots = 0
         self.terminal: WaveformCaptureTerminalRecord | None = None
-        #: Records already taken from the source, not yet handed out.
-        self._taken: deque[WaveformRecord] = deque()
 
-    def collect(
-        self,
-        *,
-        commit_shot: Callable[[WaveformRecord, int], None],
-    ) -> int:
+    def collect(self, *, commit: Callable[..., object], progress: Callable[[int], object] = lambda shots: None) -> int:
         """Read every shot and publish it; answers how many shots were kept."""
 
         if self.closed:
             raise RuntimeError("finite capture is closed")
+        node = self.node
+
+        def publish(records: list[WaveformRecord]) -> None:
+            if node.publish_finite(records, commit):
+                progress(node.published)
+
         try:
-            for index in range(self.node.repeat):
-                record = self.next_shot()
-                if record is None:
-                    break
-                commit_shot(record, index)
+            while node.published < node.repeat and (self.should_stop is None or not self.should_stop()):
+                records = node.take_records(node.repeat - node.published)
+                publish(records)
+                if not records:
+                    node.check_quiet(current=node.published, total=node.repeat)
             terminal = self.close()
             # Stop freezes the receive count before draining. No subsequent
             # read can pull a sample acquired after this capture stopped:
-            # what is left is what was taken and what the source still holds.
-            left = min(self.node.repeat, terminal.produced_count) - self.completed_shots
-            self._taken.extend(self.node.drain_records(left - len(self._taken)))
-            for index in range(self.completed_shots, self.completed_shots + left):
-                commit_shot(self._taken.popleft(), index)
-                self.completed_shots += 1
-            self.terminal = replace(terminal, no_more_records=self.completed_shots == terminal.produced_count)
+            # what is left is what the source still holds. A triggered source ran
+            # on past the run's shots, and only a capture cut short wants its tail.
+            if node.published < node.repeat:
+                publish(node.drain_records(terminal.produced_count - node.records_read))
+            self.terminal = replace(terminal, no_more_records=node.triggered or node.records_read == terminal.produced_count)
         except BaseException as error:
             # The source is stopped whatever happened, and a source that
             # failed raises again from its terminal.
             try:
                 if not self.closed:
                     self.closed = True
-                    self.node.sampler.finish_record_capture()
+                    node.sampler.finish_record_capture()
             except BaseException as cleanup_error:
                 error.add_note(f"waveform cleanup also failed: {cleanup_error}")
             raise
-        return self.completed_shots
-
-    def next_shot(self) -> WaveformRecord | None:
-        """Wait for the next native record; never substitute a newer one."""
-        if self.closed:
-            raise RuntimeError("finite capture is closed")
-        node = self.node
-        deadline = monotonic() + node.silence_seconds
-        while self.should_stop is None or not self.should_stop():
-            if not self._taken:
-                # Everything the source holds, up to this capture's rest, in one read.
-                self._taken.extend(node.take_records(node.repeat - self.completed_shots))
-            if self._taken:
-                self.completed_shots += 1
-                return self._taken.popleft()
-            if monotonic() >= deadline:
-                raise TimeoutError("waveform source stopped delivering records")
-        return None
+        return node.published
 
     def close(self) -> WaveformCaptureTerminalRecord:
         if self.terminal is not None:
@@ -279,50 +297,27 @@ class MonitorCapture:
         self,
         node: "WaveformMeasurementNode",
         *,
-        commit_live: Callable[..., object],
+        commit_events: Callable[..., object],
     ) -> None:
-        if not callable(commit_live):
-            raise TypeError("a monitor requires commit_live")
+        if not callable(commit_events):
+            raise TypeError("a monitor requires commit_events")
         self.node = node
         self.closed = False
         self.terminal: WaveformCaptureTerminalRecord | None = None
-        self._revision = 0
-        self._deadline = monotonic() + node.silence_seconds
-        #: Silence is a fault only for a source that samples on its own
-        #: clock; a triggered one waits for its trigger, however long the
-        #: pulse that fires it is stopped or being edited.
-        self._free_running = (
-            node.working_point.acquisition_mode
-            == WaveformAcquisitionMode.FREE_RUNNING.value
-        )
-        self._commit_live = commit_live
-
-    @property
-    def revision(self) -> int:
-        return self._revision
+        self._commit = commit_events
 
     def poll(self) -> int:
-        """Publish every record the source holds, each its own event, in order.
+        """Publish every record the source holds, each its own event, in order, in one commit.
 
-        One read takes them all: the cost of reaching the source is paid
-        once per poll, not once per record, so a backlog shrinks instead of
-        growing whenever publishing a record is cheaper than the record period.
+        One read takes them all and one commit publishes them: reaching the
+        core is paid once per poll, not once per record.
         """
         if self.closed:
             raise RuntimeError("monitor capture is closed")
         records = self.node.take_records()
-        if not records:
-            if self._free_running and monotonic() >= self._deadline:
-                raise TimeoutError("waveform source stopped delivering records")
-            return 0
-        for record in records:
-            self._publish(record)
-        self._deadline = monotonic() + self.node.silence_seconds
-        return len(records)
-
-    def _publish(self, record: WaveformRecord) -> None:
-        self._revision += 1
-        self._commit_live(self.node._shot_outputs(record, revision=self._revision))
+        published = self.node.publish_monitor(records, self._commit)
+        self.node.check_quiet()
+        return published
 
     def close(self, *, drain: bool = True) -> WaveformCaptureTerminalRecord:
         if self.terminal is not None:
@@ -330,8 +325,7 @@ class MonitorCapture:
         self.closed = True
         terminal = _stopped_terminal(self.node.sampler.finish_record_capture())
         if drain:
-            for record in self.node.drain_records(terminal.produced_count - self._revision):
-                self._publish(record)
+            self.node.publish_monitor(self.node.drain_records(terminal.produced_count - self.node.records_read), self._commit)
             terminal = replace(terminal, no_more_records=True)
         self.terminal = terminal
         return terminal
@@ -364,16 +358,33 @@ class WaveformMeasurementNode:
         self._time_origin: float | None = None
         self._last_time: float | None = None
         self._next_ordinal = 0
-        #: Per output: the event schema a finite run's canonical schema was
-        #: built from, and that canonical schema.  The event schema is one
-        #: cached object for the whole run, so the canonical one is built once
-        #: rather than from an O(repeat) code vector on every record.
-        self._canonical: dict[str, tuple[DatasetSchema, DatasetSchema]] = {}
+        #: Events published so far: each event's ordinal and its place in a finite run.
+        self.published = 0
+        #: Records taken from the source so far; what a stopped source still holds is the rest.
+        self.records_read = 0
         #: The source's facts, read once per run: the sampler is a device
         #: reached through the core, and every attribute read is a round trip.
         self._record_samples = 0
         self._source_timeout = 0.0
         self._batch_records = 1
+        #: The run's software trigger, when the request has one.
+        self._trigger: WaveformTrigger | None = None
+        self._detector: TriggerDetector | None = None
+        #: Per output: one event's schema, and a finite run's complete schema.
+        self._schemas: dict[str, tuple[object, object]] = {}
+        self._next_read = 0.0
+        #: A finite triggered capture publishes from its first trigger on.
+        self._started = True
+        self._last_status = 0.0
+        #: Silence is a fault only for a source that samples on its own clock:
+        #: one with its own trigger waits for it, however long the pulse that
+        #: fires it is stopped or being edited.  "No software trigger yet" is
+        #: never silence, because the source's records still arrive.
+        self._free_running = False
+        self._last_delivery = 0.0
+        self._last_shot = 0.0
+        self._waiting = False
+        self._report_status: Callable[..., object] | None = None
 
     @property
     def request(self) -> WaveformMeasurementRequest:
@@ -382,6 +393,10 @@ class WaveformMeasurementNode:
     @property
     def repeat(self) -> int:
         return self._request.repeat
+
+    @property
+    def triggered(self) -> bool:
+        return self._trigger is not None
 
     @property
     def sampler_key(self) -> str:
@@ -420,11 +435,24 @@ class WaveformMeasurementNode:
         self._time_origin = None
         self._last_time = None
         self._next_ordinal = 0
-        self._canonical = {}
+        self.published = self.records_read = 0
+        self._schemas = {}
+        self._free_running = point.acquisition_mode == WaveformAcquisitionMode.FREE_RUNNING.value
+        self._trigger = self._detector = None
+        self._started = self._request.trigger is None or self.repeat == 0
+        parameters: dict[str, object] = {"repeat": self.repeat}
+        settings = self._request.trigger
+        if settings is not None:
+            if not self._free_running:
+                raise ValueError(
+                    "this source has its own hardware trigger; the software trigger is for free-running sources")
+            self._trigger = settings.resolve(self._quantities.values())
+            parameters["trigger"] = {
+                "channel": settings.channel, "level": settings.level, "slope": settings.slope,
+                "column": self._trigger.column,
+            }
         self._run_record = {
-            "parameters": {
-                "repeat": self.repeat,
-            },
+            "parameters": parameters,
             "named_devices": {"sampler": self.sampler_key},
             "device_snapshots": {"sampler": _working_point_snapshot(self.sampler, point)},
             # Host call time, not a device-clock to UTC calibration.
@@ -432,72 +460,116 @@ class WaveformMeasurementNode:
         }
         return point
 
-    def _shot_time(self, record: WaveformRecord) -> float:
-        if record.source_ordinal != self._next_ordinal:
-            raise RuntimeError(f"waveform record gap: expected {self._next_ordinal}, got {record.source_ordinal}")
-        if record.samples.shape[0] != self._record_samples:
-            raise ValueError("waveform record sample count changed during capture")
-        if self._last_time is not None and record.time_seconds <= self._last_time:
+    def _check_stream(self, records: list[WaveformRecord]) -> None:
+        """The source's records follow one another, with this run's sample count and a clock that advances."""
+
+        for record in records:
+            if record.source_ordinal != self._next_ordinal:
+                raise RuntimeError(f"waveform record gap: expected {self._next_ordinal}, got {record.source_ordinal}")
+            if record.samples.shape[0] != self._record_samples:
+                raise ValueError("waveform record sample count changed during capture")
+            self._next_ordinal += 1
+
+    def _event_schemas(self, samples: int, columns: int) -> dict[str, tuple[object, object]]:
+        """One event's schema per output, the same object for the whole run, and for a
+        finite run its complete schema, built once rather than from an O(repeat) code
+        vector on every record."""
+
+        if not self._schemas:
+            blank = WaveformRecord(np.zeros((samples, columns), dtype=np.float32), 0, 0.0, 1)
+            for declaration in self._outputs:
+                schema = shot_snapshot(
+                    blank, output=self._quantities[declaration.name], producer=self.instance_id, generation=self.generation,
+                    revision=0, sample_interval_seconds=self.working_point.sample_interval_seconds,
+                    continuous=self._free_running,
+                ).block.schema
+                complete = None
+                if self.repeat:
+                    (repeat_axis,) = schema.repeat_domain.axes
+                    complete = replace(schema, repeat_domain=DomainSpec(
+                        (self.repeat,), (replace(repeat_axis, size=self.repeat),), (tuple(range(self.repeat)),)))
+                self._schemas[declaration.name] = (schema, complete)
+        return self._schemas
+
+    def _as_events(self, records: list[WaveformRecord]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(samples ``(events, samples, columns)``, source times, host receipts) of these records.
+
+        Triggered, each sample is its own event: a plot's window counts events, and a
+        view can only end on the edge when the edge is the end of an event.
+        """
+
+        times = np.fromiter((record.time_seconds for record in records), np.float64, len(records))
+        received = np.fromiter((record.host_received_at_ns for record in records), np.int64, len(records))
+        samples = np.stack([record.samples for record in records])
+        if self._trigger is None:
+            return samples, times, received
+        count = self._record_samples
+        offsets = self.working_point.sample_interval_seconds * np.arange(count)
+        return samples.reshape(-1, 1, samples.shape[2]), (times[:, None] + offsets).ravel(), np.repeat(received, count)
+
+    def _commit(self, samples: np.ndarray, times: np.ndarray, received: np.ndarray, commit: Callable[..., object],
+                *, shown: np.ndarray | None = None, finite: bool = False) -> int:
+        """Publish these events as one commit, the same events however they are cut."""
+
+        count = samples.shape[0]
+        if not count:
+            return 0
+        if self._last_time is not None and times[0] <= self._last_time or np.any(np.diff(times) <= 0.0):
             raise RuntimeError("waveform record clock did not advance")
         if self._time_origin is None:
-            self._time_origin = record.time_seconds
-        self._last_time = record.time_seconds
-        self._next_ordinal += 1
-        return record.time_seconds - self._time_origin
-
-    def _shot_outputs(
-        self,
-        record: WaveformRecord,
-        *,
-        revision: int,
-        index: int | None = None,
-    ) -> dict[str, LiveDatasetOutput]:
-        point = self.working_point
-        outputs: dict[str, LiveDatasetOutput] = {}
-        shot_time = self._shot_time(record)
-        evidence = {"record_timing": {self.instance_id: {str(record.source_ordinal): {
-            "record_time_seconds": shot_time, "source_time_seconds": record.time_seconds,
-            "time_basis": point.time_basis, "host_received_at_ns": record.host_received_at_ns,
-        }}}}
+            self._time_origin = float(times[0])
+        self._last_time = float(times[-1])
+        shot_times = times - self._time_origin
+        ordinals = np.arange(self.published, self.published + count, dtype=np.uint64)
+        schemas = self._event_schemas(samples.shape[1], samples.shape[2])
+        outputs: dict[str, LiveEvents] = {}
         for declaration in self._outputs:
-            snapshot = shot_snapshot(
-                record,
-                output=self._quantities[declaration.name],
-                producer=self.instance_id,
-                generation=self.generation,
-                revision=revision,
-                sample_interval_seconds=point.sample_interval_seconds,
-                continuous=point.acquisition_mode == WaveformAcquisitionMode.FREE_RUNNING.value,
-            )
-            if index is None:
-                outputs[declaration.name] = LiveDatasetOutput(
-                    declaration,
-                    snapshot,
-                    shot_time_seconds=shot_time,
-                    event_record=evidence,
-                )
-                continue
-            schema = snapshot.block.schema
-            built = self._canonical.get(declaration.name)
-            if built is None or built[0] is not schema:
-                (repeat_axis,) = schema.repeat_domain.axes
-                built = (schema, replace(
-                    schema,
-                    repeat_domain=DomainSpec(
-                        (self.repeat,),
-                        (replace(repeat_axis, size=self.repeat),),
-                        (tuple(range(self.repeat)),),
-                    ),
-                ))
-                self._canonical[declaration.name] = built
-            outputs[declaration.name] = LiveDatasetOutput(
-                declaration,
-                snapshot,
-                canonical_schema=built[1],
-                cell_origin=(index, 0),
-                event_record=evidence,
-            )
-        return outputs
+            picked = samples[:, :, list(self._quantities[declaration.name].columns)]
+            # Each row in its event's physical shape (see shot_snapshot).
+            values = picked[:, None] if self._free_running or samples.shape[1] == 1 else picked.transpose(0, 2, 1)[:, None, None]
+            valid = np.isfinite(values)
+            (schema, complete) = schemas[declaration.name]
+            outputs[declaration.name] = LiveEvents(declaration, schema, values, True if valid.all() else valid, complete if finite else None)
+        basis, instance = self.working_point.time_basis, self.instance_id
+        records = [{"record_timing": {instance: {str(ordinal): {
+            "record_time_seconds": shot, "source_time_seconds": source, "time_basis": basis, "host_received_at_ns": host}}}}
+            for ordinal, shot, source, host in zip(ordinals.tolist(), shot_times.tolist(), times.tolist(), received.tolist())]
+        commit(outputs, ordinals=ordinals, shot_times=None if finite else shot_times,
+               origins=np.stack((ordinals, np.zeros(count, dtype=np.uint64)), axis=1) if finite else None,
+               shown=shown, records=records)
+        self.published += count
+        return count
+
+    def _marks(self, samples: np.ndarray) -> np.ndarray:
+        marks = self._detector.scan(samples[:, 0, self._trigger.column])
+        if marks.any():
+            self._triggered()
+        return marks
+
+    def publish_monitor(self, records: list[WaveformRecord], commit: Callable[..., object]) -> int:
+        """Everything goes out at once; a trigger only marks where a view may stand."""
+
+        if not records:
+            return 0
+        self._check_stream(records)
+        samples, times, received = self._as_events(records)
+        return self._commit(samples, times, received, commit, shown=None if self._trigger is None else self._marks(samples))
+
+    def publish_finite(self, records: list[WaveformRecord], commit: Callable[..., object]) -> int:
+        """Up to the run's rest of ``repeat`` events; triggered, only from its first trigger on."""
+
+        if not records:
+            return 0
+        self._check_stream(records)
+        samples, times, received = self._as_events(records)
+        first = 0
+        if not self._started:
+            marks = self._marks(samples)
+            if not marks.any():
+                return 0
+            self._started, first = True, int(np.argmax(marks))
+        last = first + self.repeat - self.published
+        return self._commit(samples[first:last], times[first:last], received[first:last], commit, finite=True)
 
     @property
     def silence_seconds(self) -> float:
@@ -511,11 +583,55 @@ class WaveformMeasurementNode:
         One read per batch, not per record: a capture that falls behind
         catches up at the cost of publishing alone, because reaching the
         source (a round trip through the core) is paid once for the backlog.
+        A free-running source is read once a slice, so that it costs reads by
+        the slice and not by the sample.
         """
 
-        count = self._batch_records if limit is None else max(1, min(int(limit), self._batch_records))
-        return list(self.sampler.read_records(count, timeout=_CANCEL_RESPONSE_SECONDS, exact=False))
+        if self._free_running:
+            wait = self._next_read - monotonic()
+            if wait > 0.0:
+                sleep(wait)
+            self._next_read = monotonic() + _CANCEL_RESPONSE_SECONDS
+        count = self._batch_records if limit is None or self._trigger is not None else max(1, min(int(limit), self._batch_records))
+        records = list(self.sampler.read_records(count, timeout=_CANCEL_RESPONSE_SECONDS, exact=False))
+        if records:
+            self.records_read += len(records)
+            self._last_delivery = monotonic()
+            if self._trigger is None:
+                self._triggered()
+        return records
 
+    def _triggered(self) -> None:
+        """A shot came: whatever was being waited for has happened."""
+
+        self._last_shot = monotonic()
+        if self._waiting:
+            self._waiting = False
+            if self._report_status is not None:
+                self._report_status("Triggered")
+
+    def _waiting_status(self) -> str:
+        trigger = self._trigger
+        seen = None if trigger is None else self._detector.take_range()
+        if seen is None:
+            return "Waiting for trigger"
+        return (f"Waiting for trigger: {trigger.name} ranged {seen[0]:.4g} to {seen[1]:.4g} {trigger.unit}, "
+                f"level {trigger.level:.6g}")
+
+    def check_quiet(self, *, current: int | None = None, total: int | None = None) -> None:
+        """A dead source is a fault; a quiet trigger is a status, saying what it sees."""
+
+        now = monotonic()
+        if self._free_running and now - self._last_delivery >= self.silence_seconds:
+            raise TimeoutError("waveform source stopped delivering records")
+        # A finite triggered capture stops looking once its first trigger has come.
+        waits = not self._free_running or (self._trigger is not None and (self.repeat == 0 or not self._started))
+        if waits and now - self._last_shot >= _WAITING_AFTER_SECONDS and (
+                not self._waiting or now - self._last_status >= _WAITING_AFTER_SECONDS):
+            self._last_status = now
+            self._waiting = True
+            if self._report_status is not None:
+                self._report_status(self._waiting_status(), current=current, total=total)
     def drain_records(self, count: int) -> list[WaveformRecord]:
         """Exactly the ``count`` records a stopped source still holds, a batch per read."""
 
@@ -523,6 +639,7 @@ class WaveformMeasurementNode:
         while len(records) < count:
             records.extend(self.sampler.read_records(
                 min(count - len(records), self._batch_records), timeout=0.0, exact=True))
+        self.records_read += len(records)
         return records
 
     def _arm(self) -> None:
@@ -533,7 +650,9 @@ class WaveformMeasurementNode:
         # inside one channel frame however long the records are.
         columns = 1 + max(column for output in self._quantities.values() for column in output.columns)
         self._batch_records = max(1, min(capacity, _BATCH_BYTES // (4 * columns * self._record_samples)))
-        self.sampler.arm(self.repeat or None, buffer_record_count=capacity)
+        # Triggered, the source streams until the run has its shots: how many of
+        # its records that takes is the signal's business.
+        self.sampler.arm(None if self._trigger is not None else self.repeat or None, buffer_record_count=capacity)
         self._run_record["acquisition"] = {"buffer_record_count": capacity}
         # Hardware may quantize the requested rate at arm (notably DAQ).
         # Freeze its accepted clock before publishing even the first record.
@@ -541,6 +660,11 @@ class WaveformMeasurementNode:
         self._run_record["device_snapshots"]["sampler"] = _working_point_snapshot(
             self.sampler, self._working_point
         )
+        if self._trigger is not None:
+            self._detector = TriggerDetector(self._trigger, self._working_point.sample_interval_seconds)
+        self._last_delivery = self._last_shot = monotonic()
+        self._next_read = 0.0
+        self._waiting = False
 
     # ------------------------------------------------------------- capture
     def _armed(self, *, after_arm: Callable[[], object] | None = None) -> None:
@@ -564,9 +688,10 @@ class WaveformMeasurementNode:
         # The run's instance names the signals and the evidence, not this node's type.
         self.instance_id = context.instance_id
         self._generation = context.generation
+        self._report_status = context.report_progress
         if self.repeat == 0:
             self._armed(after_arm=context.record_devices)
-            capture = MonitorCapture(self, commit_live=context.commit_live)
+            capture = MonitorCapture(self, commit_events=context.commit_events)
             try:
                 context.set_run_record(self.run_record)
                 context.report_ready()
@@ -579,7 +704,7 @@ class WaveformMeasurementNode:
                     error.add_note(f"waveform cleanup also failed: {cleanup_error}")
                 raise
             capture.close()
-            return {"shots": capture.revision}
+            return {"shots": self.published}
         self._armed(after_arm=context.record_devices)
         capture = FiniteCapture(self, should_stop=context.cancel_requested)
         try:
@@ -589,14 +714,14 @@ class WaveformMeasurementNode:
             capture.close()
             raise
 
-        def commit_shot(record: WaveformRecord, index: int) -> None:
-            context.commit_live(self._shot_outputs(record, revision=index + 1, index=index))
-            context.report_progress("Capturing", current=index + 1, total=int(self.repeat))
+        def progress(shots: int) -> None:
+            context.report_progress("Capturing", current=shots, total=int(self.repeat))
 
-        return {"shots": capture.collect(commit_shot=commit_shot)}
+        return {"shots": capture.collect(commit=context.commit_events, progress=progress)}
 
 
 __all__ = [
+    "TRIGGER_OFF",
     "WAVEFORM_MEASUREMENT_SCHEMA",
     "FiniteCapture",
     "MonitorCapture",

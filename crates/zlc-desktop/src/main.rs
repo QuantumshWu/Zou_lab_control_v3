@@ -27,20 +27,27 @@ mod bench;
 mod share;
 mod slm_host;
 mod readers;
+mod run_fit;
+mod viewer_logic;
 mod cadence;
 mod pointer_queue;
 mod installer;
 
 use std::{collections::{BTreeMap,BTreeSet,VecDeque}, path::PathBuf, sync::{Arc,mpsc,atomic::Ordering}};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tao::{event::{Event, WindowEvent}, event_loop::{ControlFlow, EventLoopBuilder}, platform::windows::WindowExtWindows};
 use wry::WebContext;
 use zlc_core::runtime::Runtime;
 
 /// `window`: the page a command came from (None: a remote client or the host itself).
 enum AppEvent { Command { window: Option<windows::Kind>, command: Value }, Completed(science::Completion), Plugin(zlc_plugin_host::HostEvent),
-    Workbench(zlc_workbench::Event), CatalogReady, RuntimeChanged, RebaseNeeded, WorkerError(String), InvalidMessage(String), DerivationError(String),
+    Workbench(zlc_workbench::Event),
+    /// A Figure Viewer's node's plugin call answered (viewer_logic.rs).
+    ViewerWorkbench { viewer: u32, event: zlc_workbench::Event },
+    CatalogReady, RuntimeChanged, RebaseNeeded, WorkerError(String), InvalidMessage(String), DerivationError(String),
     Remote(remote::RemoteCall), WaitExpired(u64), Title { window: windows::Kind, title: String },
+    /// A Figure's record has been read on its own thread: its tabs can be shown.
+    RecordRead { document: u32, saved: Arc<archive::SavedRecord> },
     /// The page-drawn title bar's buttons: hover, press, maximized (frame.rs).
     Caption { window: windows::Kind, message: Value }, Pulse(pulse_host::PulseEvent), Native(workbench_host::NativeRequest), PulsePoll,
     /// A held panel's update interval has passed (cadence::Waker).
@@ -103,11 +110,19 @@ struct Viewer {
     /// Its board (v2 FigureViewer's ConsoleBoardView, panel_only): the panels in the order shown, each one's
     /// name, update interval and Overlay -- what Setting's Panel rows edit and a carried title reorders.
     board: Vec<ViewerPanel>,
+    /// Its processors on the opened data, once it has one (viewer_logic.rs).
+    logic: Option<viewer_logic::Logic>,
 }
 
 /// One panel of a viewer's board: its title (v2 PanelState.title: a dataset's label, a blank panel's
 /// kind, the operator's name), its update interval and its Overlay ("": off).
 struct ViewerPanel { panel: String, title: Option<String>, interval_ms: u64, overlay: String }
+
+/// What a Viewer's Data offers: its Figure's datasets, what its panels and nodes publish, and the working copies it applied.
+fn viewer_offers(number: u32, archive: Option<&archive::MountedArchive>, manual: &[(String, String)], signal: &str) -> bool {
+    signal.starts_with(&format!("@logic/{}-", panels::viewer_prefix(number))) || archive.is_some_and(|archive| archive.offers(signal, number))
+        || manual.iter().any(|(applied, _)| applied == signal)
+}
 
 /// Where a Figure Viewer's file dialogs start without a Figure: today's folder, made as v2's viewer makes it.
 fn viewer_folder(workspace: &zlc_workbench::Workspace) -> PathBuf { workspace.day_folder().unwrap_or_else(|_| workspace.data()) }
@@ -152,11 +167,49 @@ fn settle_board(board: &mut Vec<ViewerPanel>, state: &mut Value) {
 impl Viewer {
     fn new(number: u32) -> Self {
         Self { bindings: panels::Panels::with_prefix(panels::viewer_prefix(number)), error: None, pending: false, archive: None, closing: false,
-            drafts: manual::Drafts::default(), waiting: None, targets: BTreeMap::new(), generations: BTreeMap::new(), derived: Vec::new(), board: Vec::new(),
+            drafts: manual::Drafts::default(), waiting: None, targets: BTreeMap::new(), generations: BTreeMap::new(), derived: Vec::new(), board: Vec::new(), logic: None,
             state: json!({"type":"state", "request":0, "document":{"path":"", "title":"Figure Viewer"}, "panels":[], "signals":[], "error":null}) }
     }
 
     fn settle_board(&mut self) { settle_board(&mut self.board, &mut self.state); }
+
+    /// Its logic with the signals this Viewer offers in reach: `work`, then whatever it makes known goes to the page.
+    fn logic_turn(&mut self, number: u32, runtime: &Runtime, windows: &mut windows::Windows, remote_pending: &mut BTreeMap<u64, remote::Pending>,
+                  work: impl FnOnce(&mut viewer_logic::Logic, &mut viewer_logic::Scope)) -> Result<(), String> {
+        let Some(mut logic) = self.logic.take() else { return Ok(()) };
+        let (archive, manual) = (self.archive.clone(), self.drafts.offered());
+        let offers = move |signal: &str| viewer_offers(number, archive.as_deref(), &manual, signal);
+        let mut scope = viewer_logic::Scope { runtime, offers: &offers };
+        work(&mut logic, &mut scope);
+        let (replies, rows) = (logic.take_replies(), logic.rows(&scope));
+        self.logic = Some(logic);
+        let changed = self.state["logic"] != rows;
+        self.state["logic"] = rows;
+        let window = windows::Kind::FigureViewer(number);
+        if replies.is_empty() {
+            if !changed { return Ok(()); }
+            self.state["request"] = json!(0);
+            return viewer_message(&mut self.state, |message| windows.send_to(&window, message));
+        }
+        for (request, result) in replies {
+            self.state["request"] = json!(request);
+            match result {
+                Ok(value) => { self.state["result"] = value; self.state["error"] = Value::Null; }
+                Err(error) => { self.state["result"] = Value::Null; self.state["error"] = json!(error); }
+            }
+            viewer_message(&mut self.state, |message| { remote::settle(message, remote_pending); windows.send_to(&window, message) })?;
+        }
+        Ok(())
+    }
+
+    /// Its nodes go: with its window, or with the Figure they read.
+    fn close_logic(&mut self, number: u32, runtime: &Runtime) {
+        let Some(logic) = self.logic.take() else { return };
+        let (archive, manual) = (self.archive.clone(), self.drafts.offered());
+        let offers = move |signal: &str| viewer_offers(number, archive.as_deref(), &manual, signal);
+        logic.close(&mut viewer_logic::Scope { runtime, offers: &offers });
+        self.state["logic"] = json!([]);
+    }
 
     /// Setting's Panel rows and a carried title, on this viewer's board (v2 panel_only ConsolePresenter).
     fn board_command(&mut self, action: &str, command: &Value) -> Result<Value, String> {
@@ -235,14 +288,41 @@ fn shows_panel(accepted: &Value, viewers: &BTreeMap<u32, Viewer>, panel: &Value)
 /// message and back, never copied: it carries the opened Figure's whole record.
 /// A save's answer is the message's own `saved` section, as on the Task Console's
 /// state, so a page (an Edit's Save figure, Save as…) reads it in one place.
+/// The record stays in the document for whoever reads it there (get_state); the
+/// page is sent it as a `record` section of its own, only when it changed since
+/// the page was last sent it (`RECORD_UNSENT`). Delta.rs compares only the
+/// sections a message has, so a gesture's message does not walk the record.
 fn viewer_message<T>(viewer: &mut Value, deliver: impl FnOnce(&Value) -> T) -> T {
-    let saved = viewer.as_object_mut().and_then(|document| document.remove("saved")).unwrap_or(Value::Null);
+    let (saved, unsent) = viewer.as_object_mut().map_or((Value::Null, false), |document| (document.remove("saved").unwrap_or(Value::Null), document.remove(RECORD_UNSENT).is_some()));
     let mut message = json!({"type":"state", "request":viewer["request"], "error":viewer["error"], "result":viewer["result"], "saved": saved});
+    let mut record = Map::new();
+    if let Some(document) = viewer.get_mut("document").and_then(Value::as_object_mut) {
+        // The last keys first: each leaves the others' order as it was, and goes back as it was.
+        for part in ["flow", "info"] { if let Some(value) = document.remove(part) { record.insert(part.to_owned(), value); } }
+    }
     message["viewer"] = std::mem::take(viewer);
+    if unsent { message["record"] = Value::Object(std::mem::take(&mut record)); }
     let delivered = deliver(&message);
     *viewer = message["viewer"].take();
     viewer["saved"] = message["saved"].take();
+    if unsent { if let Value::Object(sent) = message["record"].take() { record = sent; } }
+    if let Some(document) = viewer.get_mut("document").and_then(Value::as_object_mut) {
+        for part in ["info", "flow"] { if let Some(value) = record.remove(part) { document.insert(part.to_owned(), value); } }
+    }
     delivered
+}
+
+/// A viewer document's mark that its page does not hold its record as it is now: the next
+/// message (viewer_message, which takes the mark off) sends it. A new page holds nothing.
+const RECORD_UNSENT: &str = "record_unsent";
+
+/// What a viewer's document shows of its Figure's record, as far as it is read.
+fn show_record(viewer: &mut Value, archive: &archive::MountedArchive) {
+    let (info, flow, record) = archive.record_view();
+    viewer["document"]["record"] = json!(record);
+    viewer["document"]["info"] = info;
+    viewer["document"]["flow"] = flow;
+    viewer[RECORD_UNSENT] = json!(true);
 }
 
 /// Whether `kind` is a window the operator has: a Figure Viewer until it closes.
@@ -521,8 +601,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     // Their Python is the checkout's science environment (ZLC_PLUGIN_PYTHON overrides),
     // its environment set by the host: started from Explorer, nothing else is needed.
     // Devices@ lists the plugin types: discovery runs beside its window (from the
-    // catalogue kept for these sources and this environment, else Python). Nothing
-    // else is started ahead: a plugin process starts when its device opens.
+    // catalogue kept for these sources and this environment, else Python). A Figure Viewer
+    // offers the pure processors from it. Nothing else is started ahead: a plugin process
+    // starts when its device or node opens.
     let science_src = zlc_core::checkout::path("science/src");
     let plugin_proxy = std::sync::Mutex::new(event_loop.create_proxy());
     let plugins = zlc_plugin_host::HostConfig::from_env(science_src).map(|mut config| {
@@ -536,7 +617,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
             if let Ok(proxy) = plugin_proxy.lock() { let _ = proxy.send_event(AppEvent::Plugin(event)); }
         }));
     match &plugins {
-        Ok(host) if !standalone => {
+        Ok(host) if !matches!(mode, Mode::PulseEditor(_)) => {
             let (warming, ready) = (host.clone(), std::sync::Mutex::new(event_loop.create_proxy()));
             std::thread::Builder::new().name("zlc-plugin-warm".into()).spawn(move || {
                 let discovery = trace::span("startup.discovery", || json!({}));
@@ -551,10 +632,11 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     // The application composition (devices, logic, runs, board), driving the
     // plugin host through workbench_host::Builtin.
     let (reply_proxy, core_proxy) = (std::sync::Mutex::new(event_loop.create_proxy()), std::sync::Mutex::new(event_loop.create_proxy()));
+    let core_calls: Arc<dyn Fn(remote::RemoteCall) -> Result<(), String> + Send + Sync> = Arc::new(move |call| core_proxy.lock().map_err(|_| "instrument closing".to_owned())?
+        .send_event(AppEvent::Remote(call)).map_err(|_| "the instrument window has closed".to_owned()));
     let builtin = workbench_host::Builtin::new(runtime.clone(), plugins.as_ref().ok().cloned(), Arc::new(move |event| {
         if let Ok(proxy) = reply_proxy.lock() { let _ = proxy.send_event(AppEvent::Workbench(event)); }
-    }), Arc::new(move |call| core_proxy.lock().map_err(|_| "instrument closing".to_owned())?
-        .send_event(AppEvent::Remote(call)).map_err(|_| "the instrument window has closed".to_owned())));
+    }), core_calls.clone());
     // No science environment: the Device Manager says so for every plugin family.
     if let Err(error) = &plugins { builtin.host_missing(error.clone()); }
     // Each open SLM Editor's pictures, drawn off the window's turn.
@@ -635,6 +717,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             let windows::Kind::FigureViewer(number) = kind else { unreachable!() };
                             if let Some(viewer) = viewers.get_mut(&number) {
                                 viewer.closing = true;
+                                viewer.close_logic(number, &runtime);
                                 for panel in panel_ids(&viewer.state) { queue.push_back(json!({"id":0,"action":"close_panel","panel":panel,"document":number})); }
                                 queue.push_back(json!({"id":0,"action":"drop_document","document":number}));
                             }
@@ -865,11 +948,24 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             let _ = saved.send_event(AppEvent::ImageSaved { request, result });
                         });
                     }
+                    if action == "read_record" {
+                        // A record tab was looked at: its Figure goes on working while it is read.
+                        let Some(&windows::Kind::FigureViewer(document)) = from.as_ref() else { return Err("A Figure's record is read in its Figure Viewer".into()) };
+                        let viewer = viewers.get_mut(&document).ok_or_else(|| format!("FigureViewer {document} is not open"))?;
+                        if let Some(archive) = viewer.archive.clone().filter(|archive| viewer.state["document"]["path"] == archive.path()) {
+                            let read = self_proxy.clone();
+                            archive.read_record(move |saved| { let _ = read.send_event(AppEvent::RecordRead { document, saved }); });
+                            show_record(&mut viewer.state, &archive);
+                        }
+                        viewer.state["request"] = command["id"].clone();
+                        return viewer_message(&mut viewer.state, |message| windows.send_to(&windows::Kind::FigureViewer(document), message));
+                    }
                     if action == "open_recorded_pulse" {
                         let key = command["key"].as_str().unwrap_or("");
                         let asking = match &from { Some(windows::Kind::FigureViewer(number)) => viewers.get(number), _ => None };
                         let played = asking.into_iter().chain(viewers.values()).filter_map(|viewer| viewer.archive.as_ref())
-                            .find_map(|archive| archive.record.pulses.iter().find(|pulse| pulse.key == key))
+                            .filter_map(|archive| archive.record_if_read()).find_map(|record| record.pulses.iter().find(|pulse| pulse.key == key))
+                            .or_else(|| asking.and_then(|viewer| viewer.archive.as_ref()).and_then(|archive| archive.record().pulses.iter().find(|pulse| pulse.key == key)))
                             .ok_or_else(|| format!("This Figure played no pulse {key:?}"))?;
                         let answer = pulse.editor.open_recorded(&played.tree.to_string(), command["discard_changes"] == true);
                         pulse.dispatch();
@@ -918,6 +1014,26 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 remote::settle(message, &mut remote_pending);
                                 windows.send_to(&windows::Kind::FigureViewer(number), message)
                             });
+                        }
+                    }
+                    // A node of a Figure Viewer is its Viewer's: from its window, or named (MCP).
+                    if viewer_logic::COMMANDS.contains(&action.as_str()) {
+                        let viewer_number = match &from {
+                            Some(windows::Kind::FigureViewer(number)) => Some(*number),
+                            _ => command["node"].as_str().and_then(panels::viewer_of),
+                        };
+                        if let Some(number) = viewer_number {
+                            let viewer = viewers.get_mut(&number).filter(|viewer| !viewer.closing).ok_or_else(|| format!("FigureViewer {number} is not open"))?;
+                            if viewer.logic.is_none() {
+                                if zlc_workbench::Plugins::discovering(&builtin) { return Err("The plugin types are still being discovered".into()); }
+                                let proxy = std::sync::Mutex::new(self_proxy.clone());
+                                viewer.logic = Some(viewer_logic::Logic::new(runtime.clone(), plugins.as_ref().map_err(Clone::clone)?.clone(), &root, Arc::new(move |event| {
+                                    if let Ok(proxy) = proxy.lock() { let _ = proxy.send_event(AppEvent::ViewerWorkbench { viewer: number, event }); }
+                                }), core_calls.clone())?);
+                            }
+                            let (params, request) = (remote::parameters(&command), command["id"].as_u64().unwrap_or(0));
+                            return viewer.logic_turn(number, &runtime, &mut windows, &mut remote_pending,
+                                |logic, scope| logic.command(number, &action, &params, &origin, request, scope));
                         }
                     }
                     if matches!(action.as_str(), "start_camera" | "stop_camera") || zlc_workbench::Workbench::handles(&action)
@@ -1267,7 +1383,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             windows.send_to(&kind, &slm.message(device))?;
                             for (panel, sequence, front) in slm.fronts(device) { windows.submit(panel, sequence, front)?; }
                         }
-                        if let windows::Kind::FigureViewer(number) = &kind { if let Some(viewer) = viewers.get_mut(number) { viewer_message(&mut viewer.state, |message| windows.send_to(&kind, message))?; } }
+                        if let windows::Kind::FigureViewer(number) = &kind { if let Some(viewer) = viewers.get_mut(number) { viewer.state["processor_types"] = workbench.pure_processors(); viewer.state[RECORD_UNSENT] = json!(true); viewer_message(&mut viewer.state, |message| windows.send_to(&kind, message))?; } }
                         if kind == windows::Kind::PulseEditor {
                             let mut state = json!({"type": "state"});
                             state["pulse"] = pulse.state();
@@ -1362,6 +1478,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         else {
                             // The opened Figure replaces its viewer's panels only; the live board runs on.
                             if let Some(viewer) = viewers.get_mut(&document) {
+                                // Its processors read the Figure it replaces, and go with it.
+                                viewer.close_logic(document, &runtime);
                                 let mut next=candidate.bindings;next.continue_ids_from(&viewer.bindings);
                                 viewer.bindings=next;
                                 drop(viewer.archive.replace(candidate.data));
@@ -1437,8 +1555,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             // Each document offers its own data: the opened Figure's, or the apparatus's.
-                            bindings.decorate(&mut state,&runtime,|signal| if in_viewer { archive.as_ref().is_some_and(|archive| archive.offers(signal, document))
-                                    || manual_data.iter().any(|(applied, _)| applied == signal) }
+                            bindings.decorate(&mut state,&runtime,|signal| if in_viewer { viewer_offers(document, archive.as_deref(), &manual_data, signal) }
                                 else { !archive::viewer_owned(signal) });
                             let previous = accepted["panels"].as_array().ok_or("Accepted state has no panels")?;
                             let rows = state["panels"].as_array_mut().ok_or("Scientific response has no panels")?;
@@ -1526,14 +1643,15 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             // The opened Figure's record: the info pane's tabs and its Flow.
                             if let Some(archive) = archive.as_ref().filter(|archive| state["document"]["path"] == archive.path()) {
                                 // The record the viewer already holds moves on, not copied again (it is the Figure's whole provenance).
-                                let held = (completion.action != "present_archive" && accepted["document"]["path"] == archive.path() && !accepted["document"]["info"].is_null())
-                                    .then(|| (accepted["document"]["info"].take(), accepted["document"]["flow"].take()));
-                                let (info, flow) = held.unwrap_or_else(|| (archive.record.tabs.clone(), archive.record.flow.clone()));
-                                state["document"]["info"] = info;
-                                state["document"]["flow"] = flow;
+                                if completion.action != "present_archive" && accepted["document"]["path"] == archive.path() && !accepted["document"]["info"].is_null() {
+                                    for part in ["record", "info", "flow"] { state["document"][part] = accepted["document"][part].take(); }
+                                } else { show_record(&mut state, archive); }
                                 for signal in state["signals"].as_array_mut().into_iter().flatten() {
                                     if let Some(label) = signal["id"].as_str().and_then(|id| archive.label(id)) { signal["label"] = json!(label); }
                                 }
+                            } else if !accepted["document"]["info"].is_null() {
+                                // The Figure has gone: its page lets its record go too.
+                                state[RECORD_UNSENT] = json!(true);
                             }
                             if let Some((drafts, targets, board)) = viewer_data.as_mut() {
                                 for signal in state["signals"].as_array_mut().into_iter().flatten() {
@@ -1541,6 +1659,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 // A preview's document now holds the recipe it started from.
                                 targets.retain(|panel, _| !ids.contains(panel));
+                                // Its processors' rows stay as their last turn made them; what can be added, as the catalogue says.
+                                state["logic"] = accepted["logic"].take();
+                                state["processor_types"] = workbench.pure_processors();
                                 if let Some((_, editor, applies, path)) = drafts.saving.take_if(|(request, ..)| *request == completion.request) {
                                     if state["saved"]["exists"].is_array() {
                                         // Nothing written: the window names those files and asks, and Overwrite saves this archive again, told to.
@@ -1630,6 +1751,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             answer(Ok(zlc_bus::mcp::ToolOutput { json: state, png: None }));
                         }
                         "list_signals" => answer(Ok(zlc_bus::mcp::ToolOutput { json: json!({"signals": remote::signals(&runtime)}), png: None })),
+                        "fit_models" => answer(Ok(zlc_bus::mcp::ToolOutput { json: run_fit::fit_models(), png: None })),
                         "save_image" | "get_window_image" => {
                             // The same picture the window's Save image… writes; the reply carries it too
                             // (get_window_image: only the reply, v2 lab_screenshot).
@@ -1707,6 +1829,16 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 Event::UserEvent(AppEvent::WaitExpired(id)) => remote::check_waiters(&accepted, &mut waiters, Some(id)),
+                Event::UserEvent(AppEvent::RecordRead { document, saved }) => {
+                    // Unless another Figure has replaced it meanwhile.
+                    if let Some(viewer) = viewers.get_mut(&document) {
+                        if let Some(archive) = viewer.archive.clone().filter(|archive| archive.holds(&saved) && viewer.state["document"]["path"] == archive.path()) {
+                            show_record(&mut viewer.state, &archive);
+                            viewer.state["request"] = json!(0);
+                            viewer_message(&mut viewer.state, |message| windows.send_to(&windows::Kind::FigureViewer(document), message))?;
+                        }
+                    }
+                }
                 Event::UserEvent(AppEvent::ImageSaved { request, result }) => {
                     let mut state = accepted.clone();
                     state["request"] = json!(request);
@@ -1735,6 +1867,11 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             if owned != viewer.derived { viewer.derived = owned; viewer.pending = true; }
                         }
                     }
+                    if !closing {
+                        for (number, viewer) in viewers.iter_mut().filter(|(_, viewer)| viewer.logic.is_some()) {
+                            viewer.logic_turn(*number, &runtime, &mut windows, &mut remote_pending, |logic, scope| logic.runtime_changed(scope))?;
+                        }
+                    }
                     // Following processors and previews start on new publications.
                     let mut host = workbench_host::DesktopHost { runtime: &runtime, bindings: &mut bindings, accepted: &accepted,
                         queue: &mut queue, targets: &mut pending_targets };
@@ -1761,6 +1898,23 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                // A process lost under the board's nodes and a Viewer's: each hears of its own.
+                Event::UserEvent(AppEvent::Plugin(event)) if viewer_logic::split_failed(&event).is_some() => {
+                    for event in viewer_logic::split_failed(&event).unwrap_or_default() { let _ = self_proxy.send_event(AppEvent::Plugin(event)); }
+                }
+                // A Viewer's node's facts are its Viewer's; a Viewer already gone hears nothing, and its run asks in vain.
+                Event::UserEvent(AppEvent::Plugin(event)) if viewer_logic::viewer_of_event(&event).is_some() => {
+                    let number = viewer_logic::viewer_of_event(&event).expect("the guard");
+                    match viewers.get_mut(&number).filter(|viewer| viewer.logic.is_some() && !closing) {
+                        Some(viewer) => viewer.logic_turn(number, &runtime, &mut windows, &mut remote_pending, |logic, scope| logic.host_event(event, scope))?,
+                        None => if let zlc_plugin_host::HostEvent::Request { ticket, .. } = event { builtin.respond(ticket, Err("its Figure Viewer has closed".into())); },
+                    }
+                }
+                Event::UserEvent(AppEvent::ViewerWorkbench { viewer: number, event }) => {
+                    if let Some(viewer) = viewers.get_mut(&number).filter(|_| !closing) {
+                        viewer.logic_turn(number, &runtime, &mut windows, &mut remote_pending, |logic, scope| logic.answered(event, scope))?;
+                    }
+                }
                 // Plugin facts (host events, answers of calls made off this turn) reach the workbench here.
                 Event::UserEvent(event @ (AppEvent::Plugin(_) | AppEvent::Workbench(_) | AppEvent::CatalogReady)) => {
                     let events = match event {
@@ -1770,7 +1924,18 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             if let zlc_workbench::Event::Failed { instance, .. } = &event { pulse.lose_device(instance); }
                             std::iter::once(event).chain(builtin.replay()).collect()
                         }
-                        _ => { trace::point("startup.catalog", || json!({})); builtin.catalog_ready(); workbench.refresh_catalog(); Vec::new() }
+                        _ => {
+                            trace::point("startup.catalog", || json!({}));
+                            builtin.catalog_ready();
+                            workbench.refresh_catalog();
+                            // What the open Viewers can add is known now.
+                            for (number, viewer) in viewers.iter_mut().filter(|(_, viewer)| !viewer.closing) {
+                                viewer.state["processor_types"] = workbench.pure_processors();
+                                viewer.state["request"] = json!(0);
+                                if !closing { viewer_message(&mut viewer.state, |message| windows.send_to(&windows::Kind::FigureViewer(*number), message))?; }
+                            }
+                            Vec::new()
+                        }
                     };
                     let mut host = workbench_host::DesktopHost { runtime: &runtime, bindings: &mut bindings, accepted: &accepted,
                         queue: &mut queue, targets: &mut pending_targets };
@@ -2070,5 +2235,64 @@ mod tests {
         let text = delta::Sent::default().encode(sent.as_object().unwrap(), |_| true, |_| true).unwrap();
         let page: Value = serde_json::from_str(&text).unwrap();
         assert!(page["changes"].as_array().unwrap().iter().any(|change| change[0] == json!(["saved"]) && change[1] == refused), "{text}");
+    }
+
+    /// The record goes to a page when it changed, or when the page is new; every other
+    /// message leaves it out and the host's document (get_state's answer) keeps it.
+    #[test]
+    fn a_viewer_page_is_sent_a_figures_record_once() {
+        let opened = |viewer: &mut Value, path: &str, tab: &str| {
+            viewer["document"] = json!({"path": path, "title": "Figure Viewer", "record": "read", "info": [[tab, [["events", "many"]]]], "flow": {"nodes": [tab], "edges": []}});
+            viewer[RECORD_UNSENT] = json!(true);
+        };
+        let mut sent = delta::Sent::default();
+        let mut message = |viewer: &mut Value, request: u64| -> (Value, String) {
+            viewer["request"] = json!(request);
+            let text = viewer_message(viewer, |message| {
+                assert!(message["viewer"]["document"].get("info").is_none() && message["viewer"]["document"].get("flow").is_none(), "{message}");
+                sent.encode(message.as_object().unwrap(), |_| true, |_| true)
+            }).unwrap();
+            (serde_json::from_str(&text).unwrap(), text)
+        };
+        let told = |page: &Value, path: Value| page["changes"].as_array().unwrap().iter().find(|change| change[0] == path).map(|change| change[1].clone());
+        let mut viewer = json!({"request": 0, "error": null, "result": null, "panels": [], "signals": []});
+
+        opened(&mut viewer, "a.npz", "Logic");
+        let (first, _) = message(&mut viewer, 1);
+        let record = told(&first, json!(["record"])).expect("the first message has it");
+        assert_eq!((record["info"][0][0].clone(), record["flow"]["nodes"][0].clone()), (json!("Logic"), json!("Logic")));
+        assert_eq!(told(&first, json!(["viewer"])).unwrap()["document"]["record"], "read", "how far it is read stays the document's");
+
+        let held = viewer["document"].clone();
+        let (second, text) = message(&mut viewer, 2);
+        assert_eq!(second["changes"], json!([[["viewer", "request"], 2]]), "{text}");
+        assert!(!text.contains("Logic"), "{text}");
+        assert_eq!(viewer["document"], held, "the host's document keeps it whole");
+        assert_eq!(viewer["document"].as_object().unwrap().keys().collect::<Vec<_>>(), ["path", "title", "record", "info", "flow"], "and in its order");
+        assert!(viewer.get(RECORD_UNSENT).is_none(), "{viewer}");
+
+        // Another file (or the same one refreshed, which reads again) replaces what the page holds.
+        opened(&mut viewer, "b.npz", "Other");
+        let (third, text) = message(&mut viewer, 3);
+        assert_eq!(told(&third, json!(["record", "info", 0, 0])), Some(json!("Other")), "{text}");
+
+        // The Figure gone: the page's record goes.
+        viewer["document"] = json!({"path": "", "title": "Figure Viewer"});
+        viewer[RECORD_UNSENT] = json!(true);
+        let (fourth, text) = message(&mut viewer, 4);
+        assert!(fourth["changes"].as_array().unwrap().iter().any(|change| change[0] == json!(["record", "info"]) && change.as_array().unwrap().len() == 1), "{text}");
+        assert!(viewer["document"].get("info").is_none(), "no part appears in a document without it: {viewer}");
+    }
+
+    /// A page made again (a reload) holds nothing: its first state has the record whole.
+    #[test]
+    fn a_reloaded_viewer_page_is_sent_the_record_again() {
+        let mut viewer = json!({"request": 0, "error": null, "result": null, "document": {"path": "a.npz", "record": "read", "info": [["Logic", []]], "flow": {"nodes": [], "edges": []}}, RECORD_UNSENT: true});
+        let mut sent = delta::Sent::default();
+        assert!(viewer_message(&mut viewer, |message| sent.encode(message.as_object().unwrap(), |_| true, |_| true)).unwrap().contains("Logic"));
+        assert!(viewer_message(&mut viewer, |message| sent.encode(message.as_object().unwrap(), |_| true, |_| true)).is_none_or(|text| !text.contains("Logic")));
+        sent.reset();
+        viewer[RECORD_UNSENT] = json!(true);
+        assert!(viewer_message(&mut viewer, |message| sent.encode(message.as_object().unwrap(), |_| true, |_| true)).unwrap().contains("Logic"));
     }
 }
