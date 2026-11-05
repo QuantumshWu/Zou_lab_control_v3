@@ -1807,7 +1807,8 @@ const PROBED:usize=256;
 /// states -- at most `PROBED` of them, evenly spread, each one jump-free step against a grid of half the spacing, 16/15
 /// their difference, CF4's and Simpson's order. The populations' largest difference, its mean plus CONFIDENCE standard
 /// errors, within the numerical share of the population target (`Settings::beats`: over the waiting time, `NUMERICAL_SHARE` ε), and the impulse's within `QUADRATURE`
-/// of its size. From the coarsest grid down (`largest_met`): a read costs as its nodes, so that a search pays about what its last read costs. From the quadrature's bound upward its first read, far finer than the phase it came to, was
+/// of its size. And the same step from the states their jumps leave (`Engine::landed`): a bare state rings at the drives' detunings where the probes' own states have relaxed, so that the grid's force on it errs by far more, a kick of its own per jump, of
+/// random sign: a heat of (ΔI/k)² of the photon's recoil, within `QUADRATURE`. (Off these alone a strongly driven rung of 11 explicit states read 0.08 of its share at phase 30.8, and its T_x stood 25 % high at any step: 16.7 of it, ΔI = 0.65 k, on the states a jump leaves; T within its error from phase 10.) From the coarsest grid down (`largest_met`): a read costs as its nodes, so that a search pays about what its last read costs. From the quadrature's bound upward its first read, far finer than the phase it came to, was
 /// nearly all of its work (of a 16-state rung that lost by 147 times, 583 of its 606 CPU-s, against the run's 40): beyond the fourth order's range the grid aliases the force's beats.
 /// And, on what it finds, what the grid lands over the run between the groups of ground states `landing` names with the run's span (`landed_excess`; a pilot's first read of its starts takes none), the same
 /// search below that phase where it misses. The bound's own where no state of `at` takes a beating grid.
@@ -1815,11 +1816,15 @@ pub fn grid_phase(model:&Model,states:&[Trajectory],at:&Settings,landing:Option<
     if !(0..model.clusters()).any(|k|model.beating(k)){return node_phase();}
     let engine=Engine::new(model,at.clone());let picked:Vec<&Trajectory>=states.iter().step_by((states.len()/PROBED).max(1)).collect();
     let coarsest=picked.par_iter().filter_map(|t|engine.coarsest_phase(t)).reduce(||0.,f64::max);if !(coarsest>0.){return node_phase();}
+    let landed:Vec<Trajectory>=picked.par_iter().map(|t|engine.landed(t)).collect();
+    let recoil=model.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max).powi(2);
     let excess=|phase:f64|->f64{
         let errors:Vec<[f64;3]>=picked.par_iter().filter_map(|t|engine.grid_error(t,phase)).collect();
         let m=errors.len() as f64;let sum=|k:usize|errors.iter().map(|e|e[k]).sum::<f64>();let mean=sum(0)/m;
         let spread=(errors.iter().map(|e|(e[0]-mean).powi(2)).sum::<f64>()/(m*(m-1.).max(1.))).sqrt();
-        16./15.*((mean+CONFIDENCE*spread)/at.beats).max(sum(1)/sum(2).max(f64::MIN_POSITIVE)/QUADRATURE)
+        let kicks:Vec<f64>=landed.par_iter().filter_map(|t|engine.grid_error(t,phase)).map(|e|(16./15.*e[1]).powi(2)).collect();
+        let heat=kicks.iter().sum::<f64>()/(kicks.len().max(1) as f64*recoil.max(f64::MIN_POSITIVE));
+        (16./15.*((mean+CONFIDENCE*spread)/at.beats).max(sum(1)/sum(2).max(f64::MIN_POSITIVE)/QUADRATURE)).max(heat/QUADRATURE)
     };
     let phase=largest_met(coarsest,excess(coarsest),&excess);
     // What it lands between the groups over the run.

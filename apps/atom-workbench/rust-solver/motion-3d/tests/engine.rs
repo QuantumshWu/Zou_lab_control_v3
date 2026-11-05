@@ -989,6 +989,10 @@ fn a_beating_grid_s_measured_phase_meets_its_shares(){
         impulse+=(0..3).map(|k|(a.kappa[k]-b.kappa[k]).powi(2)).sum::<f64>().sqrt();size+=(0..3).map(|k|(b.kappa[k]-t.kappa[k]).powi(2)).sum::<f64>().sqrt();
     }
     let m=states.len() as f64;assert!(populations/m<=share,"populations {:e} against the share {share:e}",populations/m);
+    // From the states a jump leaves, which ring at the drives' detunings: the kick the grid adds, as heat against the photon's recoil.
+    let recoil=model.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max).powi(2);
+    let heat=states.iter().map(|t|{let l=engine.landed(t);let(a,b)=(coarse.coast(&l,dt,1),fine.coast(&l,dt,1));(0..3).map(|k|(a.kappa[k]-b.kappa[k]).powi(2)).sum::<f64>()}).sum::<f64>()/m/recoil;
+    assert!(heat<=2.*QUADRATURE,"the kick's heat {heat:e} of the recoil's against its share {QUADRATURE:e}");
     assert!(impulse/size<=QUADRATURE,"the impulse {:e} against {QUADRATURE:e}",impulse/size);
 }
 
@@ -1662,4 +1666,31 @@ fn a_moving_atom_s_kept_drive_is_an_atom_at_rest_at_the_shifted_detuning(){
         }
     }}
     println!("{checked} runs, largest difference {worst:.2e}, (kv/σ)² {within:.2e}");assert!(checked>0);
+}
+
+/// The path's momentum is the step's middle's (model.rs, # The atom's path): reversible, the step keeps the energy; at the momentum before the kick phase space grows where the force is a potential's. A kept standing wave far off its line,
+/// an atom out of the tweezer, no jump, its beats real (±k on one state): the mechanical energy over 240 steps within 1 % of the sum of ½(ħ/m)I², where a path at κ_h moved it by 5.7 % at 1 us and 1.5 % at 0.5 us (the phases held in the step 0.07 and 0.55 %).
+#[test]
+fn a_kept_standing_wave_keeps_its_energy_along_the_atom_s_path(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/retro_probe_motion.json")).unwrap();
+    let mut r=scene::request(&v);r.times_us=vec![0.,10.];r.frequencies_mhz.push(200.);for b in r.beams.iter_mut(){b.frequency_index.push(b.waist_um.is_none() as i32);}
+    let probe=r.beams.iter().position(|b|b.waist_um.is_none()).unwrap();
+    // Five times the field, against a detuning of 200 MHz: a lattice of a fraction of a rad/us, an excited population of about 1e-3.
+    {let c=&mut r.beams[probe].coupling;for x in c.real.iter_mut().chain(c.imag.iter_mut()){*x*=5.;}}
+    let mut back=r.beams[probe].clone();back.id="back".into();back.direction=back.direction.map(|x|-x);r.beams.push(back);
+    let m=Ground::allowances(&r).unwrap().into_iter().find_map(|a|{let m=Model::with(&r,a).ok()?;(0..m.clusters()).any(|c|m.mixed(c)&&m.beating(c)).then_some(m)}).expect("a kept standing wave beats");
+    let c=(0..m.clusters()).find(|&c|m.mixed(c)&&m.beating(c)).unwrap();
+    let k=r.beams[probe].wave_number_per_um;let along=r.beams[probe].direction;let n=m.dimension(c);let mut checked=0;
+    for dt in [1.,0.5]{for b in 0..m.ground_dimension(c){
+        let mut s=Settings::new(dt,&m.trap(c,b),1e-6,false);s.frequencies=[0.;3];s.lab=[0.;3];s.loss=false;s.beats=1e-4;s.node_phase=1.;let engine=Engine::new(&m,s);
+        let mut psi=[Complex::ZERO;MOST_MIXED];psi[b]=Complex::ONE;let kappa=along.map(|x|x*0.4/(m.hbar_over_mass*k));
+        let mut t=Trajectory{cluster:c,psi,r:[0.,30.,0.1],kappa,time:0.,threshold:1.,alive:true,jumps:0,beats:0.,seed:1,index:0};
+        // From a step in, the bare state's own transient behind it.
+        t=engine.coast(&t,dt,1);let start=engine.energy(&t);let mut heat=0.;
+        for _ in 0..240{let next=engine.coast(&t,dt,1);heat+=0.5*m.hbar_over_mass*(0..3).map(|a|(next.kappa[a]-t.kappa[a]).powi(2)).sum::<f64>();t=next;}
+        let moved=engine.energy(&t)-start;let excited:f64=t.psi[m.ground_dimension(c)..n].iter().map(|z|z.norm_sqr()).sum::<f64>()/t.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>();
+        println!("dt {dt}, state {b}: the energy moved {moved:.4} rad/us against ½(ħ/m)ΣI² {heat:.4}, excited {excited:.2e}");
+        if heat>1e-2{assert!(moved.abs()<=0.01*heat,"dt {dt}, state {b}: the energy moved {moved:.4} rad/us against {heat:.4}");checked+=1;}
+    }}
+    assert!(checked>0);
 }

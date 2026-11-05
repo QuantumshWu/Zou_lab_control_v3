@@ -465,7 +465,7 @@ fn product_right(a:&[Complex],b:&[Complex],n:usize,out:&mut Vec<Complex>){
 type State=[Complex;MOST_MIXED];
 
 /// One cluster's internal evolution in an exact step (module documentation): its generator's components
-/// at the held point, the step's start (the beats' phases are absolute), the grid's spacing δ -- its nodes
+/// on the atom's path, the step's start (the beats' phases are absolute), the grid's spacing δ -- its nodes
 /// at start + iδ --, how it propagates, and the bound of the beats it left out.
 struct Segment{components:Components,start:f64,spacing:f64,how:How,dropped:f64}
 /// How a segment propagates over its grid.
@@ -1108,7 +1108,7 @@ impl<'a> Engine<'a>{
         }
         components
     }
-    /// The exact step of τ (module documentation): the flow for τ/2; at the held point the cluster's
+    /// The exact step of τ (module documentation): the flow for τ/2; at the point there the cluster's
     /// generator at the middle time once, the internal state propagated exactly (`jumps` false: with no
     /// jump, the step-doubling check's), the impulse along it; the kick; the flow for τ/2. The kick's
     /// momentum (the light's and the trap's anharmonic part). Where ‖ψ‖² reaches the threshold in it, the
@@ -1167,6 +1167,8 @@ impl<'a> Engine<'a>{
         let(x,y)=(norm2(&a,n),norm2(&b,n));
         Some([(0..n).map(|i|(a[i].norm_sqr()/x-b[i].norm_sqr()/y).abs()).fold(0.,f64::max),(0..3).map(|k|(one[k]-two[k]).powi(2)).sum::<f64>().sqrt(),two.iter().map(|v|v*v).sum::<f64>().sqrt()])
     }
+    /// The state a jump leaves a trajectory in, on a copy (`jump`, its own stream): a bare state, whose amplitudes ring at the drives' detunings where the trajectory's own have relaxed (solve.rs `grid_phase`).
+    pub fn landed(&self,t:&Trajectory)->Trajectory{let mut x=t.clone();let(r,time)=(x.r,x.time);self.jump(&mut x,r,time,false);x}
     /// One step's landings from a trajectory's state (`Landings`) on a grid of half the spacing at `phase` and on the grid at it, none where its cluster takes no beating grid (the first is then its own
     /// propagation); `draws` the reads' places, each in its equal share of the step, in [0, 1), the same on both (solve.rs `landed_excess`).
     pub fn grid_landings(&self,t:&Trajectory,phase:f64,groups:&[usize],count:usize,draws:&[f64])->(Landings,Option<Landings>){
