@@ -256,7 +256,8 @@
 //! An output the pilot under-predicts gets its trajectories in the next batch, which pass every earlier output too.
 //! On the GPU a wave's time grows with its trajectories (a laptop's RTX 5070 at the 3D PGC's step: 2.1 s for 8, 2.7 for 256, 3.96 for 576 -- its clock falls with the load, its cycles per step about stay), and a wave costs at least a trajectory's time as far as it goes, so that its first
 //! wave runs what the pilot predicts is needed and the need's own error (`first_ends`), each group as far as the reach wants it: a group that stops early leaves the others its clock. (Over 12 seeds: the need alone ran a second wave on 4 of DEFAULT's and 7 of THREE's, against 1 and 2 with its error; twice its error took the kernel's mean up 4-17 % on GMD1C, TET and PGC3D.)
-//! T rests on the atoms still held, and its statistic stands at the atoms the run holds, its relative error times the root of the held share: the same error on a share f of the atoms would ask 1/f the trajectories, for the T of atoms the light has mostly blown out (a probe at 100 mW/cm², 97 % lost by 25 us: 16384 trajectories, the cap, against 7300-8100, where what's left of T's heavy tail on 230 atoms, 2.8 times its Gaussian error, still binds). The reported errors stay T's own: where few atoms remain the output says so.
+//! T rests on the atoms still held, and its statistic stands at the atoms the run holds, its relative error times the root of the held share: the same error on a share f of the atoms would ask 1/f the trajectories, for the T of atoms the light has mostly blown out (a probe at 100 mW/cm², 97 % lost by 25 us: 16384 trajectories, the cap, against 7300-8100). The reported errors stay T's own: where few atoms remain the output says so.
+//! The populations' target is the app's, whose rows are the probabilities p (1 − L) that the atom is in a state and still held, beside the loss L, adding up to one: a population's statistic, and its reported error, are its error among the held atoms times the held share (`shown_error`), the loss's as it is. Read among the held atoms alone they asked those 7300-8100 of that probe, about 1000 now, and of a probe at 10 W/cm², 99.5 % lost by 600 us, 130 000-420 000 for numbers shown at 0.5 % of their size.
 //! An output's need is its trajectories so far times its worst ratio squared (the statistics over their rooms); a trajectory
 //! that reaches an output passes every earlier one, so that the trajectories an output must be passed by -- its reach -- are the
 //! largest need from it on, and a batch's trajectories run only as far as the outputs that still want them, half a period past
@@ -390,7 +391,7 @@ pub struct Distributions{pub grid:Vec<f64>,pub samples:Vec<usize>,pub probabilit
 #[derive(Clone,Debug)]
 pub struct Solution{
     pub populations:Vec<Vec<f64>>,
-    /// Per time, the largest standard error of the populations and the loss.
+    /// Per time, the largest standard error of the populations as shown, p (1 − L), and the loss (`shown_error`).
     pub sample_errors:Vec<f64>,
     pub temperature_uk:Vec<[f64;3]>,
     pub temperature_errors_uk:Vec<[f64;3]>,
@@ -432,12 +433,14 @@ fn ceiling(e:&Estimate,frequencies:[f64;3])->f64{weight_at(std::array::from_fn(|
 fn weight_at(temperature:[f64;3],frequencies:[f64;3])->f64{
     (0..3).filter(|&a|frequencies[a]>0.).map(|a|(KT_PER_UK*temperature[a]/(CLASSICAL*frequencies[a])).max(0.)).fold(1_f64,f64::min).powi(2)
 }
-/// An output's statistical errors at CONFIDENCE: the populations' and the loss's largest (absolute) and T's largest
+/// An output's largest standard error of what is shown of the atom (# Batches): a population as the probability p (1 − L) that it is in that state and held, its error among the held atoms times the held share, and the loss's.
+fn shown_error(e:&Estimate)->f64{let held=(1.-e.loss).max(0.);e.population_errors.iter().map(|&x|held*x).fold(e.loss_error,f64::max)}
+/// An output's statistical errors at CONFIDENCE: the populations' as shown and the loss's largest (`shown_error`, absolute) and T's largest
 /// relative one over the axes, at the atoms the run holds (# Batches), with its target's weight there (`regime`).
 #[derive(Clone,Copy,Debug)]
 struct Statistic{population:f64,temperature:f64,weight:f64}
 fn statistics(e:&Estimate,frequencies:[f64;3])->Statistic{
-    Statistic{population:CONFIDENCE*e.population_errors.iter().fold(e.loss_error,|m,&x|m.max(x)),
+    Statistic{population:CONFIDENCE*shown_error(e),
         temperature:CONFIDENCE*(1.-e.loss).max(0.).sqrt()*(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a]/e.temperature[a]}else{0.}).fold(0.,f64::max),weight:regime(e,frequencies)}
 }
 /// An output's statistics as the stopping rule and the flags take them (module documentation, # Batches): `statistics`, each
@@ -1956,7 +1959,7 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
     let carried=|f:&dyn Fn(&Estimate)->[f64;3]|->Vec<[f64;3]>{source.iter().map(|&j|f(&estimates[j])).collect()};
     Solution{
         populations:source.iter().map(|&j|if j==0{first.clone()}else{estimates[j].populations.clone()}).collect(),
-        sample_errors:estimates.iter().enumerate().map(|(i,e)|if i==0{0.}else{e.population_errors.iter().fold(e.loss_error,|m,&x|m.max(x))}).collect(),
+        sample_errors:estimates.iter().enumerate().map(|(i,e)|if i==0{0.}else{shown_error(e)}).collect(),
         temperature_uk:carried(&|e|e.temperature),
         temperature_errors_uk:carried(&|e|e.temperature_error),
         temperature_total_uk:source.iter().map(|&j|estimates[j].temperature_total).collect(),
@@ -2030,6 +2033,16 @@ mod tests{
         let mut e=Estimate::default();e.temperature=[10.;3];e.temperature_error=[1.;3];let at=|e:&Estimate|statistics(e,[1.;3]).temperature;
         let whole=at(&e);assert!((whole-CONFIDENCE*0.1).abs()<1e-15,"{whole}");
         e.loss=0.75;assert!((at(&e)-0.5*whole).abs()<1e-15);e.loss=1.;assert_eq!(at(&e),0.);
+    }
+    /// A population's statistic is its error as the app shows it: among the held atoms at no loss, a quarter of that with a quarter of the atoms held, the loss's own where that is the larger; a single group's infinite errors stay so, lost or not.
+    #[test]
+    fn a_population_s_statistic_is_its_error_as_shown(){
+        let mut e=Estimate::default();e.population_errors=vec![0.2,0.1];e.loss_error=0.01;let at=|e:&Estimate|statistics(e,[1.;3]).population;
+        assert!((at(&e)-CONFIDENCE*0.2).abs()<1e-15);
+        e.loss=0.75;assert!((at(&e)-CONFIDENCE*0.05).abs()<1e-15);
+        e.loss=0.99;assert!((at(&e)-CONFIDENCE*0.01).abs()<1e-15);
+        e.loss=1.;assert_eq!(at(&e),CONFIDENCE*0.01);
+        e.population_errors=vec![f64::INFINITY;2];e.loss_error=f64::INFINITY;assert_eq!(at(&e),f64::INFINITY);e.loss=0.5;assert_eq!(at(&e),f64::INFINITY);
     }
     /// T's probes fall as its weights do (`bound_probes`): evenly over a trajectory's states where they weigh alike, each state in time, and over their number where none weighs.
     #[test]
