@@ -17,7 +17,8 @@
 // block of warps would wait for its slowest). A task of the CPU's (lib.rs `TASK`: up to eight consecutive
 // trajectories of one group) is eight slots. The warp's lanes share its work: a lane per beam for the fields, a
 // lane per matrix entry (e = lane + 32 j, j < SLOTS) for the tables' gathers and the generator, a
-// lane per row for the propagator's products and the readout's excited states. The trajectory's
+// lane per row for the propagator's products and the readout's excited states. A step's hot functions are templates of
+// their slots and focused units, S and F (`advance_in`): nearly every step takes one of each. The trajectory's
 // scalars are uniform over the warp; ψ and the matrices are in its shared memory. A cluster holds
 // at most MAXN states: the kernel's bucket (excited states joining clusters would add a larger one,
 // with its matrices in shared memory, chosen per solve by the largest cluster).
@@ -384,12 +385,12 @@ struct Traj{double q[3],p[3],time,logn,threshold,log_threshold;int cluster,jumps
 struct Twin{double logn,threshold,log_threshold;int cluster,jumps;};
 
 // A lane's entries of an n × n matrix: e = lane + 32 j, its row and column.
-struct Entries{
-    int n,nn,row[SLOTS],col[SLOTS];
+template<int S=SLOTS> struct Entries{
+    int n,nn,row[S],col[S];
     __device__ Entries(int size,int lane){
         n=size;nn=n*n;
         #pragma unroll
-        for(int j=0;j<SLOTS;j++){const int e=lane+32*j;row[j]=e/n;col[j]=e-row[j]*n;}
+        for(int j=0;j<S;j++){const int e=lane+32*j;row[j]=e/n;col[j]=e-row[j]*n;}
     }
     __device__ bool has(int j,int lane)const{return lane+32*j<nn;}
 };
@@ -511,37 +512,38 @@ __device__ float doppler_ratio(const Traj& t,int lane){
 // per node of the others': a row's four loads are issued together, the rows in the node order of
 // model.rs `Stencil::node` (the first axis fastest). Of a row: its first node and the other axes'
 // weights, with their derivatives' (`dw`, per axis, the row's factor of the first axis's own).
-struct Row{int index;float w,dw[MOST_FOCUSED];};
-__device__ __forceinline__ Row stencil_row(const Point& pt,bool far,int o){
-    Row r;r.index=far?pt.far_first[0]:pt.first[0];r.w=1.f;
+template<int F> struct Row{int index;float w,dw[F];};
+template<int F>
+__device__ __forceinline__ Row<F> stencil_row(const Point& pt,bool far,int o){
+    Row<F> r;r.index=far?pt.far_first[0]:pt.first[0];r.w=1.f;
     #pragma unroll
-    for(int g=0;g<MOST_FOCUSED;g++)r.dw[g]=1.f;
+    for(int g=0;g<F;g++)r.dw[g]=1.f;
     #pragma unroll
-    for(int f=1;f<MOST_FOCUSED;f++)if(f<P.focused){
+    for(int f=1;f<F;f++)if(f<P.focused){
         const int m=(o>>(2*(f-1)))&3;const float wf=far?pt.far_weight[f][m]:pt.weight[f][m];
         r.index+=((far?pt.far_first[f]:pt.first[f])+m)*P.stride[f];r.w*=wf;
         #pragma unroll
-        for(int g=1;g<MOST_FOCUSED;g++)r.dw[g]*=g==f?pt.slope[f][m]:wf;
+        for(int g=1;g<F;g++)r.dw[g]*=g==f?pt.slope[f][m]:wf;
     }
     return r;
 }
 
 // A slice of `count` entries of a cluster's tables at the stencil (model.rs `gather`), with the trap
 // beam off when `far`: the lane's entries; with SLOPES their derivatives in every s_f too.
-template<bool SLOPES>
-__device__ void gather(const Warp& W,bool far,const float2* base,int size,int count,int lane,float2 (&value)[SLOTS],float2 (&slope)[MOST_FOCUSED][SLOTS]){
+template<bool SLOPES,int S,int F>
+__device__ void gather(const Warp& W,bool far,const float2* base,int size,int count,int lane,float2 (&value)[S],float2 (&slope)[F][S]){
     const Point& pt=W.pt;const int D=P.focused;
     #pragma unroll
-    for(int j=0;j<SLOTS;j++){
+    for(int j=0;j<S;j++){
         value[j]=zero2();
         #pragma unroll
-        for(int g=0;g<MOST_FOCUSED;g++)slope[g][j]=zero2();
+        for(int g=0;g<F;g++)slope[g][j]=zero2();
     }
     const float* w0=far?pt.far_weight[0]:pt.weight[0];const float* s0=pt.slope[0];
-    for(int o=0;o<(1<<(2*(D-1)));o++){
-        const Row r=stencil_row(pt,far,o);const float2* x=base+(size_t)r.index*size;
+    for(int o=0;o<(F==1?1:1<<(2*(D-1)));o++){
+        const Row<F> r=stencil_row<F>(pt,far,o);const float2* x=base+(size_t)r.index*size;
         #pragma unroll
-        for(int j=0;j<SLOTS;j++){
+        for(int j=0;j<S;j++){
             const int e=lane+32*j;
             if(e<count){
                 float2 v[4];
@@ -553,7 +555,7 @@ __device__ void gather(const Warp& W,bool far,const float2* base,int size,int co
                     if(SLOPES){
                         slope[0][j]+=(r.w*s0[m])*v[m];
                         #pragma unroll
-                        for(int g=1;g<MOST_FOCUSED;g++)if(g<D)slope[g][j]+=(r.dw[g]*w0[m])*v[m];
+                        for(int g=1;g<F;g++)if(g<D)slope[g][j]+=(r.dw[g]*w0[m])*v[m];
                     }
                 }
             }
@@ -561,24 +563,26 @@ __device__ void gather(const Warp& W,bool far,const float2* base,int size,int co
     }
 }
 
-// One entry of a cluster's tables at the stencil, or its derivative in s_f (model.rs `interpolate`).
-__device__ float2 entry(const Warp& W,const float2* x,int size,int derivative){
-    const Point& pt=W.pt;float2 v=zero2();const float* w0=derivative==0?pt.slope[0]:pt.weight[0];
-    for(int o=0;o<(1<<(2*(P.focused-1)));o++){
-        const Row r=stencil_row(pt,false,o);const float factor=derivative>0?r.dw[derivative]:r.w;const float2* at=x+(size_t)r.index*size;
+// One entry of a cluster's tables at the stencil (model.rs `interpolate`).
+template<int F=MOST_FOCUSED>
+__device__ float2 entry(const Warp& W,const float2* x,int size){
+    const Point& pt=W.pt;float2 v=zero2();const float* w0=pt.weight[0];
+    for(int o=0;o<(F==1?1:1<<(2*(P.focused-1)));o++){
+        const Row<F> r=stencil_row<F>(pt,false,o);const float2* at=x+(size_t)r.index*size;
         float2 u[4];
         #pragma unroll
         for(int m=0;m<4;m++)u[m]=__ldg(at+(size_t)m*size);
         #pragma unroll
-        for(int m=0;m<4;m++)v+=(factor*w0[m])*u[m];
+        for(int m=0;m<4;m++)v+=(r.w*w0[m])*u[m];
     }
     return v;
 }
 // One entry of a cluster's tables at the stencil with the trap beam off (`gather`'s `far`).
+template<int F=MOST_FOCUSED>
 __device__ float2 far_entry(const Warp& W,const float2* x,int size){
     const Point& pt=W.pt;float2 v=zero2();const float* w0=pt.far_weight[0];
-    for(int o=0;o<(1<<(2*(P.focused-1)));o++){
-        const Row r=stencil_row(pt,true,o);const float2* at=x+(size_t)r.index*size;
+    for(int o=0;o<(F==1?1:1<<(2*(P.focused-1)));o++){
+        const Row<F> r=stencil_row<F>(pt,true,o);const float2* at=x+(size_t)r.index*size;
         float2 u[4];
         #pragma unroll
         for(int m=0;m<4;m++)u[m]=__ldg(at+(size_t)m*size);
@@ -588,12 +592,13 @@ __device__ float2 far_entry(const Warp& W,const float2* x,int size){
     return v;
 }
 // One entry of a cluster's tables at the stencil with its derivatives in every s_f (`gather`'s of one entry).
-__device__ float2 entry_slopes(const Warp& W,const float2* x,int size,float2 (&slope)[MOST_FOCUSED]){
+template<int F>
+__device__ float2 entry_slopes(const Warp& W,const float2* x,int size,float2 (&slope)[F]){
     const Point& pt=W.pt;float2 v=zero2();const float* w0=pt.weight[0];const float* s0=pt.slope[0];
     #pragma unroll
-    for(int g=0;g<MOST_FOCUSED;g++)slope[g]=zero2();
-    for(int o=0;o<(1<<(2*(P.focused-1)));o++){
-        const Row r=stencil_row(pt,false,o);const float2* at=x+(size_t)r.index*size;
+    for(int g=0;g<F;g++)slope[g]=zero2();
+    for(int o=0;o<(F==1?1:1<<(2*(P.focused-1)));o++){
+        const Row<F> r=stencil_row<F>(pt,false,o);const float2* at=x+(size_t)r.index*size;
         float2 u[4];
         #pragma unroll
         for(int m=0;m<4;m++)u[m]=__ldg(at+(size_t)m*size);
@@ -601,17 +606,18 @@ __device__ float2 entry_slopes(const Warp& W,const float2* x,int size,float2 (&s
         for(int m=0;m<4;m++){
             v+=(r.w*w0[m])*u[m];slope[0]+=(r.w*s0[m])*u[m];
             #pragma unroll
-            for(int g=1;g<MOST_FOCUSED;g++)if(g<P.focused)slope[g]+=(r.dw[g]*w0[m])*u[m];
+            for(int g=1;g<F;g++)if(g<P.focused)slope[g]+=(r.dw[g]*w0[m])*u[m];
         }
     }
     return v;
 }
 
 // A place of two tables at the stencil (a photon's J and J2), each place's nodes one batch of loads.
+template<int F=MOST_FOCUSED>
 __device__ __forceinline__ void entry_pair(const Point& pt,const float2* x,const float2* y,int size,float2& vx,float2& vy){
     const float* w0=pt.weight[0];vx=vy=zero2();
-    for(int o=0;o<(1<<(2*(P.focused-1)));o++){
-        const Row r=stencil_row(pt,false,o);const size_t at=(size_t)r.index*size;float2 u[4],v[4];
+    for(int o=0;o<(F==1?1:1<<(2*(P.focused-1)));o++){
+        const Row<F> r=stencil_row<F>(pt,false,o);const size_t at=(size_t)r.index*size;float2 u[4],v[4];
         #pragma unroll
         for(int m=0;m<4;m++){const size_t node=at+(size_t)m*size;u[m]=__ldg(x+node);v[m]=__ldg(y+node);}
         #pragma unroll
@@ -619,12 +625,13 @@ __device__ __forceinline__ void entry_pair(const Point& pt,const float2* x,const
     }
 }
 // The same along a polarization, Σ_a e_a x[a·stride], and the first table's derivatives in every s_f (`absorption`).
+template<int F=MOST_FOCUSED>
 __device__ __forceinline__ void contracted(const Point& pt,const float2* x,const float2* y,int stride,int size,const float e[3],float2& vx,float2& vy,float2 (&slope)[MOST_FOCUSED]){
     const float* w0=pt.weight[0];const float* s0=pt.slope[0];vx=vy=zero2();
     #pragma unroll
     for(int g=0;g<MOST_FOCUSED;g++)slope[g]=zero2();
-    for(int o=0;o<(1<<(2*(P.focused-1)));o++){
-        const Row r=stencil_row(pt,false,o);const size_t at=(size_t)r.index*size;float2 u[4][3],v[4][3];
+    for(int o=0;o<(F==1?1:1<<(2*(P.focused-1)));o++){
+        const Row<F> r=stencil_row<F>(pt,false,o);const size_t at=(size_t)r.index*size;float2 u[4][3],v[4][3];
         #pragma unroll
         for(int m=0;m<4;m++){
             const size_t node=at+(size_t)m*size;
@@ -653,7 +660,7 @@ __device__ __forceinline__ float2 monomial(const Point& pt,const Quartic& Q){
 }
 // The lane's entries of `out` plus a carrier pair's slab at `at` at the point and t (model.rs `fourth_pair`, before the
 // cluster's frames): Σ_k1k2 E^c1*_k1 E^c2_k2 M_k1k2 e^{iνt}.
-__device__ void fourth_pair(const Warp& W,const Cluster& C,const Entries& E,const Slow& S,int at,double t,int lane,float2 (&out)[SLOTS]){
+__device__ void fourth_pair(const Warp& W,const Cluster& C,const Entries<>& E,const Slow& S,int at,double t,int lane,float2 (&out)[SLOTS]){
     const int r1=P.carriers[S.c1].rank,r2=P.carriers[S.c2].rank;const Fields& f1=W.pt.fields[S.c1];const Fields& f2=W.pt.fields[S.c2];
     const float2 beat=residual(S.nu,t);float2 buf[SLOTS],unused[MOST_FOCUSED][SLOTS];
     for(int k1=0;k1<r1;k1++)for(int k2=0;k2<r2;k2++){
@@ -664,12 +671,13 @@ __device__ void fourth_pair(const Warp& W,const Cluster& C,const Entries& E,cons
     }
 }
 // The lane's entries of an n × n matrix in the cluster's frames at t: entry (a, b) times e^{i(θ_a − θ_b)t}.
-__device__ void in_frames(const Cluster& C,const Entries& E,double t,int lane,float2 (&x)[SLOTS]){
+template<int S>
+__device__ void in_frames(const Cluster& C,const Entries<S>& E,double t,int lane,float2 (&x)[S]){
     #pragma unroll
-    for(int j=0;j<SLOTS;j++)if(E.has(j,lane)&&E.row[j]!=E.col[j])x[j]=x[j]*cis((P.frames[C.frames+E.row[j]]-P.frames[C.frames+E.col[j]])*t);
+    for(int j=0;j<S;j++)if(E.has(j,lane)&&E.row[j]!=E.col[j])x[j]=x[j]*cis((P.frames[C.frames+E.row[j]]-P.frames[C.frames+E.col[j]])*t);
 }
 // The metric's coherent part X = Σ R_c1†R_c2 at the lane's entries at the point and t, in the cluster's frames (model.rs `coherent_metric`).
-__device__ void coherent_metric(const Warp& W,const Cluster& C,const Entries& E,double t,int lane,float2 (&x)[SLOTS]){
+__device__ void coherent_metric(const Warp& W,const Cluster& C,const Entries<>& E,double t,int lane,float2 (&x)[SLOTS]){
     const Fourth F=P.fourths[C.fourth];
     #pragma unroll
     for(int j=0;j<SLOTS;j++)x[j]=zero2();
@@ -678,7 +686,8 @@ __device__ void coherent_metric(const Warp& W,const Cluster& C,const Entries& E,
 }
 // A cluster's fourth-order part of H_eff at the point and t at the lane's entries (model.rs `fourth_hamiltonian`): over its slabs the
 // monomial in its beat's phase times the slab, in the cluster's frames; zero for a cluster folded at second order.
-__device__ void fourth_hamiltonian(const Warp& W,const Cluster& C,const Entries& E,double t,int lane,float2 (&h)[SLOTS]){
+template<int S,int U>
+__device__ void fourth_hamiltonian(const Warp& W,const Cluster& C,const Entries<S>& E,double t,int lane,float2 (&h)[S]){
     #pragma unroll
     for(int j=0;j<SLOTS;j++)h[j]=zero2();
     if(C.fourth<0)return;
@@ -705,13 +714,14 @@ __device__ __forceinline__ float2 xi_slope(const Fields& fe,const Fields& fa,int
 // `Model::gradients`), a lane per pair and every pair at once: on Q at the pair's entries, in a Hermitian group μ ξ_k′k + ν ξ_kk′*, between two carriers μ ξ; on Q† at their mirrors,
 // in a Hermitian group's pair standing for two μ ξ_kk′ + ν ξ_k′k*, between two carriers ν ξ* at the mirror's beat; none in a pair on the diagonal of k. The gradient's coefficient on Q:
 // λ^S ∇_a ξ_k′k, with its adjoint's in a pair standing for two.
+template<int U=MOST_FOCUSED>
 __device__ __forceinline__ void first_table(const Warp& W,const Cluster& C,double t,bool phased,int lane,FirstPair* table){
     if(C.nfirst==0)return;
     const float2* tables=P.tables+C.table;const Point& pt=W.pt;
     __syncwarp();
     for(int f=lane;f<C.nfirst;f+=32){
         const FirstField D=P.first_fields[C.first_fields+f];const int k1=D.kind&3,k=(D.kind>>2)&3;const Fields& fa=pt.fields[(D.kind>>4)&7];const Fields& fe=pt.fields[(D.kind>>7)&7];const bool hermitian=(D.kind>>10)&1;
-        float2 ls,lq,mu,nu;entry_pair(pt,tables+D.transfer,tables+D.transfer+1,C.size,ls,lq);first_coefficients(ls,lq,mu,nu);
+        float2 ls,lq,mu,nu;entry_pair<U>(pt,tables+D.transfer,tables+D.transfer+1,C.size,ls,lq);first_coefficients(ls,lq,mu,nu);
         const float2 phase=phased?residual(D.residual,t):make_float2(1.f,0.f),xi=phase*(conj(fe.e[k1])*fa.doppler[k]),lambda=phase*ls,other=hermitian?conj(fe.e[k])*fa.doppler[k1]:zero2();
         FirstPair& F=table[f];F.on=mu*xi+nu*conj(other);F.off=hermitian&&k1==k?zero2():conj(mu*other+nu*conj(xi));
         #pragma unroll
@@ -723,18 +733,19 @@ __device__ __forceinline__ void first_table(const Warp& W,const Cluster& C,doubl
 // A cluster's generator at the point and time t: H_eff less its scalar part into W.m[0] (row-major,
 // model.rs `Local::hamiltonian`), and in the lane's entries h0 and the gradient of the Hermitian
 // part per axis (`Local::gradient`).
-struct Local{float2 h0[SLOTS],grad[3][SLOTS];};
-__device__ void local(Warp& W,const Cluster& C,const Entries& E,double t,int lane,Local& L){
+template<int S> struct Local{float2 h0[S],grad[3][S];};
+template<int S,int F>
+__device__ void local(Warp& W,const Cluster& C,const Entries<S>& E,double t,int lane,Local<S>& L){
     // `wide`: a second slot of a lane's entries, beyond five states.
-    const int nn=E.nn;const float2* tables=P.tables+C.table;const Point& pt=W.pt;const int D=P.focused;const bool wide=nn>32;
-    float2 m[SLOTS],ma[SLOTS],g[SLOTS],ga[SLOTS],buf[SLOTS],slope[MOST_FOCUSED][SLOTS];
+    const int nn=E.nn;const float2* tables=P.tables+C.table;const Point& pt=W.pt;const int D=P.focused;const bool wide=S>1&&nn>32;
+    float2 m[S],ma[S],g[S],ga[S],buf[S],slope[F][S];
     #pragma unroll
-    for(int j=0;j<SLOTS;j++){
+    for(int j=0;j<S;j++){
         m[j]=ma[j]=g[j]=ga[j]=zero2();
         #pragma unroll
         for(int a=0;a<3;a++)L.grad[a][j]=zero2();
     }
-    first_table(W,C,t,true,lane,W.first);
+    first_table<F>(W,C,t,true,lane,W.first);
     for(int gi=0;gi<C.ngroups;gi++){
         const Group G=P.groups[C.groups+gi];if(G.count!=nn)continue;
         const Fields& fa=pt.fields[G.absorbed];const Fields& fe=pt.fields[G.emitted];
@@ -747,31 +758,31 @@ __device__ void local(Warp& W,const Cluster& C,const Entries& E,double t,int lan
             const float2 ee=phase*conj(fe.e[k1])*fa.e[k];
             gather<true>(W,false,tables+G.s+pi*nn,C.size,nn,lane,buf,slope);
             #pragma unroll
-            for(int j=0;j<SLOTS;j++)if(j==0||wide){m[j]+=ee*buf[j];if(twice)ma[j]+=ee*buf[j];}
+            for(int j=0;j<S;j++)if(j==0||wide){m[j]+=ee*buf[j];if(twice)ma[j]+=ee*buf[j];}
             #pragma unroll
             for(int a=0;a<3;a++){
                 const float2 c=(-both)*(phase*(conj(fe.grad[k1][a])*fa.e[k]+conj(fe.e[k1])*fa.grad[k][a]));
                 #pragma unroll
-                for(int j=0;j<SLOTS;j++)if(j==0||wide)L.grad[a][j]+=c*buf[j];
+                for(int j=0;j<S;j++)if(j==0||wide)L.grad[a][j]+=c*buf[j];
                 #pragma unroll
-                for(int f=0;f<MOST_FOCUSED;f++)if(f<D){
+                for(int f=0;f<F;f++)if(F==1||f<D){
                     const float2 cf=(-both*pt.grad_s[f][a])*ee;
                     #pragma unroll
-                    for(int j=0;j<SLOTS;j++)if(j==0||wide)L.grad[a][j]+=cf*slope[f][j];
+                    for(int j=0;j<S;j++)if(j==0||wide)L.grad[a][j]+=cf*slope[f][j];
                 }
             }
             gather<false>(W,false,tables+G.q+pi*nn,C.size,nn,lane,buf,slope);
             if(G.first>0){
-                const FirstPair& F=W.first[G.first-1+pi];const float2 on=ee+F.on,off=twice?ee+F.off:F.off;
+                const FirstPair& first=W.first[G.first-1+pi];const float2 on=ee+first.on,off=twice?ee+first.off:first.off;
                 #pragma unroll
-                for(int j=0;j<SLOTS;j++)if(j==0||wide){
+                for(int j=0;j<S;j++)if(j==0||wide){
                     g[j]+=on*buf[j];ga[j]+=off*buf[j];
                     #pragma unroll
-                    for(int a=0;a<3;a++)L.grad[a][j]+=F.grad[a]*buf[j];
+                    for(int a=0;a<3;a++)L.grad[a][j]+=first.grad[a]*buf[j];
                 }
             }else{
                 #pragma unroll
-                for(int j=0;j<SLOTS;j++)if(j==0||wide){g[j]+=ee*buf[j];if(twice)ga[j]+=ee*buf[j];}
+                for(int j=0;j<S;j++)if(j==0||wide){g[j]+=ee*buf[j];if(twice)ga[j]+=ee*buf[j];}
             }
         }
     }
@@ -784,12 +795,12 @@ __device__ void local(Warp& W,const Cluster& C,const Entries& E,double t,int lan
         for(int b=lane;b<C.nbeats;b+=32)phases[b]=residual(P.residuals[C.beats+b],t);
         __syncwarp();
         #pragma unroll
-        for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){
+        for(int j=0;j<S;j++)if(E.has(j,lane)){
             const int e=lane+32*j,at=C.positions+3*e,kept=P.item_first[at+1],end=P.item_first[at+2];
             #pragma unroll 2
             for(int i=P.item_first[at];i<kept;i++){
                 const int4 it=__ldg(P.items+i);
-                float2 ds[MOST_FOCUSED];const float2 s=entry_slopes(W,tables+it.x,C.size,ds);const float2 q=entry(W,tables+it.y,C.size,-1);
+                float2 ds[F];const float2 s=entry_slopes<F>(W,tables+it.x,C.size,ds);const float2 q=entry<F>(W,tables+it.y,C.size);
                 const int k1=it.z&3,k=(it.z>>2)&3;const Fields& fa=pt.fields[(it.z>>4)&7];const Fields& fe=pt.fields[(it.z>>7)&7];
                 const float2 phase=phases[it.z>>12];const float2 ee=phase*conj(fe.e[k1])*fa.e[k];const bool twice=(it.z>>10)&1;const int first=it.w>>ITEM_PAIR;
                 m[j]+=ee*s;g[j]+=ee*q;if(twice){ma[j]+=ee*s;ga[j]+=ee*q;}
@@ -800,12 +811,12 @@ __device__ void local(Warp& W,const Cluster& C,const Entries& E,double t,int lan
                     L.grad[a][j]+=((-both)*(phase*(conj(fe.grad[k1][a])*fa.e[k]+conj(fe.e[k1])*fa.grad[k][a])))*s;
                     if(first>0)L.grad[a][j]+=W.first[first-1].grad[a]*q;
                     #pragma unroll
-                    for(int f=0;f<MOST_FOCUSED;f++)if(f<D)L.grad[a][j]+=((-both*pt.grad_s[f][a])*ee)*ds[f];
+                    for(int f=0;f<F;f++)if(F==1||f<D)L.grad[a][j]+=((-both*pt.grad_s[f][a])*ee)*ds[f];
                 }
             }
             for(int i=kept;i<end;i++){
                 const int4 it=__ldg(P.items+i);const int k1=it.z&3,k=(it.z>>2)&3;const Fields& fa=pt.fields[(it.z>>4)&7];const Fields& fe=pt.fields[(it.z>>7)&7];
-                const float2 phase=phases[it.z>>12];float2 ws,wq,mu,nu;entry_pair(pt,tables+it.x,tables+it.y,C.size,ws,wq);first_coefficients(ws,wq,mu,nu);
+                const float2 phase=phases[it.z>>12];float2 ws,wq,mu,nu;entry_pair<F>(pt,tables+it.x,tables+it.y,C.size,ws,wq);first_coefficients(ws,wq,mu,nu);
                 const float2 xi=phase*(conj(fe.e[k1])*fa.doppler[k]);g[j]+=mu*xi;ga[j]+=conj(nu)*xi;ws=phase*ws;
                 #pragma unroll
                 for(int a=0;a<3;a++)L.grad[a][j]+=ws*xi_slope(fe,fa,k1,k,a);
@@ -816,31 +827,31 @@ __device__ void local(Warp& W,const Cluster& C,const Entries& E,double t,int lan
     #pragma unroll
     for(int a=0;a<3;a++){
         #pragma unroll
-        for(int f=0;f<MOST_FOCUSED;f++)if(f<D){
+        for(int f=0;f<F;f++)if(F==1||f<D){
             const float c=pt.grad_s[f][a];
             #pragma unroll
-            for(int j=0;j<SLOTS;j++)if(j==0||wide)L.grad[a][j]+=c*slope[f][j];
+            for(int j=0;j<S;j++)if(j==0||wide)L.grad[a][j]+=c*slope[f][j];
         }
     }
     // The adjoint halves through shared memory; the scalar part; H_eff = h0 − M − (i/2)Γ less it.
     __syncwarp();
     #pragma unroll
-    for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){const int e=lane+32*j;W.m[1][e]=ma[j];W.m[2][e]=ga[j];}
+    for(int j=0;j<S;j++)if(E.has(j,lane)){const int e=lane+32*j;W.m[1][e]=ma[j];W.m[2][e]=ga[j];}
     __syncwarp();
     float diagonal=0.f;
     #pragma unroll
-    for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){
+    for(int j=0;j<S;j++)if(E.has(j,lane)){
         const int mirror=E.col[j]*E.n+E.row[j];m[j]+=conj(W.m[1][mirror]);g[j]+=conj(W.m[2][mirror]);
         if(E.row[j]==E.col[j])diagonal+=L.h0[j].x-m[j].x;
     }
     const float scalar=warp_sum(diagonal)/(float)E.n;
     // The fourth order's part (model.rs `fourth_hamiltonian`), in the cluster's frames; the force keeps
     // the second order's.
-    float2 h4[SLOTS];
-    fourth_hamiltonian(W,C,E,t,lane,h4);
+    float2 h4[S];
+    fourth_hamiltonian<S,F>(W,C,E,t,lane,h4);
     __syncwarp();
     #pragma unroll
-    for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){
+    for(int j=0;j<S;j++)if(E.has(j,lane)){
         float2 h=make_float2(L.h0[j].x-m[j].x+0.5f*g[j].y,L.h0[j].y-m[j].y-0.5f*g[j].x);
         if(E.row[j]==E.col[j])h.x-=scalar;
         W.m[0][lane+32*j]=h+h4[j];
@@ -849,9 +860,10 @@ __device__ void local(Warp& W,const Cluster& C,const Entries& E,double t,int lan
 }
 
 // out = A B for n × n matrices in shared memory: the lane's entries.
-__device__ __forceinline__ void product(const float2* A,const float2* B,const Entries& E,int lane,float2 (&out)[SLOTS]){
+template<int S>
+__device__ __forceinline__ void product(const float2* A,const float2* B,const Entries<S>& E,int lane,float2 (&out)[S]){
     #pragma unroll
-    for(int j=0;j<SLOTS;j++){
+    for(int j=0;j<S;j++){
         float2 s=zero2();
         if(E.has(j,lane)){
             const float2* x=A+E.row[j]*E.n;const float2* y=B+E.col[j];
@@ -868,33 +880,34 @@ __device__ __forceinline__ void product(const float2* A,const float2* B,const En
 // the largest whose round-off stays the single precision's (its largest term 2, the kernel's series' own choice: at ‖H‖τ = 18,
 // 14 products against 43 in sequential parts of ½, U's error 1.6e-6 against 2.8e-6), the first square from ‖H‖τ = 1, where
 // it saves two products at no cost to speak of. U into W.m[2].
-__device__ void exponential(Warp& W,const Entries& E,double tau,int lane){
+template<int S>
+__device__ void exponential(Warp& W,const Entries<S>& E,double tau,int lane){
     float column=0.f;
     if(lane<E.n)for(int a=0;a<E.n;a++){const float2 h=W.m[0][a*E.n+lane];column+=fabsf(h.x)+fabsf(h.y);}
     const float x=warp_max(column)*fabsf((float)tau);int squares=x>1.f?1:0;float scale=x>1.f?0.5f:1.f;
     while(x*scale>2.f){squares++;scale*=0.5f;}
     const float step=(float)tau*scale,y=x*scale,share=P.truncation*scale;int terms=1;float size=y;while(size>share&&terms<40){terms++;size*=y/(float)terms;}
     // X = −i step H into m[0]; the term (m[1]) X and the sum (m[2]) I + X.
-    float2 v[SLOTS];
+    float2 v[S];
     #pragma unroll
-    for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){const float2 h=W.m[0][lane+32*j];v[j]=make_float2(h.y*step,-h.x*step);}
+    for(int j=0;j<S;j++)if(E.has(j,lane)){const float2 h=W.m[0][lane+32*j];v[j]=make_float2(h.y*step,-h.x*step);}
     __syncwarp();
     #pragma unroll
-    for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){const int e=lane+32*j;W.m[0][e]=v[j];W.m[1][e]=v[j];W.m[2][e]=v[j]+make_float2(E.row[j]==E.col[j]?1.f:0.f,0.f);}
+    for(int j=0;j<S;j++)if(E.has(j,lane)){const int e=lane+32*j;W.m[0][e]=v[j];W.m[1][e]=v[j];W.m[2][e]=v[j]+make_float2(E.row[j]==E.col[j]?1.f:0.f,0.f);}
     __syncwarp();
     for(int k=2;k<=terms;k++){
         product(W.m[1],W.m[0],E,lane,v);
         const float inverse=1.f/(float)k;
         __syncwarp();
         #pragma unroll
-        for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){const int e=lane+32*j;v[j]=inverse*v[j];W.m[1][e]=v[j];W.m[2][e]+=v[j];}
+        for(int j=0;j<S;j++)if(E.has(j,lane)){const int e=lane+32*j;v[j]=inverse*v[j];W.m[1][e]=v[j];W.m[2][e]+=v[j];}
         __syncwarp();
     }
     for(int p=0;p<squares;p++){
         product(W.m[2],W.m[2],E,lane,v);
         __syncwarp();
         #pragma unroll
-        for(int j=0;j<SLOTS;j++)if(E.has(j,lane))W.m[2][lane+32*j]=v[j];
+        for(int j=0;j<S;j++)if(E.has(j,lane))W.m[2][lane+32*j]=v[j];
         __syncwarp();
     }
 }
@@ -913,7 +926,7 @@ __device__ float apply(const float2* U,float2* psi,int n,int lane){
 }
 
 // Re⟨ψ|X|ψ⟩/⟨ψ|ψ⟩ of the lane's entries of X.
-__device__ float quadratic(const Warp& W,const Entries& E,const float2 (&x)[SLOTS],int lane){
+__device__ float quadratic(const Warp& W,const Entries<>& E,const float2 (&x)[SLOTS],int lane){
     float s=0.f;
     #pragma unroll
     for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){const float2 pa=W.psi[E.row[j]],z=x[j]*W.psi[E.col[j]];s+=pa.x*z.x+pa.y*z.y;}
@@ -971,17 +984,18 @@ __device__ void flow(Traj& t,double tau,const Reference& R){
 // kick -- on the trap's principal axes, and the lane's entry of ψ after the first half step.
 struct Middle{double q[3],p[3];float2 psi;};
 
-// One step's flow, kick and internal evolution of length dt without jumps (engine.rs `advance`):
-// ln‖ψ‖² at the middle (`lh`) and the end (t.logn), the midpoint's point in W.pt and h0 there in L, the
-// middle state in M.
-__device__ void advance(Warp& W,Traj& t,double dt,int lane,double& lh,Local& L,Middle& M){
+// One step's flow, kick and internal evolution of length dt without jumps (engine.rs `advance`) on S slots and F focused units:
+// ln‖ψ‖² at the middle (`lh`) and the end (t.logn), the midpoint's point in W.pt and h0 there in `h0`, the
+// middle state in M. Each instance is a function of its own, as the step is: the driver's register allocator serves them far better than the step's inlined together (PGC3D's and TET's kernels −20 % with the narrow instance, PGCP_10's +9 % with the step inlined), and the module is smaller for it.
+template<int S,int F>
+__device__ __noinline__ void advance_in(Warp& W,Traj& t,double dt,int lane,double& lh,float2 (&h0)[SLOTS],Middle& M){
     COUNT(COUNT_ADVANCES);SPAN_BEGIN(start);
     const Reference R=reference(t.q);
     flow(t,0.5*dt,R);
     point<true>(W,t,lane);
     SPAN_END(SPAN_POINT,start);SPAN_BEGIN(generator);
-    const Cluster C=P.clusters[t.cluster];const Entries E(C.n,lane);
-    local(W,C,E,t.time+0.5*dt,lane,L);
+    const Cluster C=P.clusters[t.cluster];const Entries<S> E(C.n,lane);Local<S> L;
+    local<S,F>(W,C,E,t.time+0.5*dt,lane,L);
     SPAN_END(SPAN_GENERATOR,generator);SPAN_BEGIN(propagator);
     exponential(W,E,0.5*dt,lane);
     SPAN_END(SPAN_EXPONENTIAL,propagator);SPAN_BEGIN(evolve);
@@ -990,7 +1004,7 @@ __device__ void advance(Warp& W,Traj& t,double dt,int lane,double& lh,Local& L,M
     // The Ehrenfest force −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ at the middle, less the weighted harmonic part the flow takes.
     float s[3]={0.f,0.f,0.f};
     #pragma unroll
-    for(int j=0;j<SLOTS;j++)if(E.has(j,lane)){
+    for(int j=0;j<S;j++)if(E.has(j,lane)){
         const float2 pa=W.psi[E.row[j]],pb=W.psi[E.col[j]];
         #pragma unroll
         for(int a=0;a<3;a++){const float2 z=L.grad[a][j]*pb;s[a]+=pa.x*z.x+pa.y*z.y;}
@@ -1009,6 +1023,13 @@ __device__ void advance(Warp& W,Traj& t,double dt,int lane,double& lh,Local& L,M
     flow(t,0.5*dt,R);
     t.time+=dt;
     SPAN_END(SPAN_EVOLVE,evolve);
+    #pragma unroll
+    for(int j=0;j<S;j++)h0[j]=L.h0[j];
+}
+// The instance a step takes in the trajectory's cluster: nearly always one slot, its n² entries a lane each, and one focused unit, its table one row of four.
+__device__ __forceinline__ void advance(Warp& W,Traj& t,double dt,int lane,double& lh,float2 (&h0)[SLOTS],Middle& M){
+    const int n=P.clusters[t.cluster].n;
+    if(P.focused==1&&n*n<=32)advance_in<1,1>(W,t,dt,lane,lh,h0,M);else advance_in<SLOTS,MOST_FOCUSED>(W,t,dt,lane,lh,h0,M);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1314,7 +1335,7 @@ __device__ void fourth_weights(const Warp& W,const Cluster& C,int lane,float2* w
         const int which=i/size,at=i-which*size;const Factor M=P.factors[F.factors+which];const int r2=P.carriers[M.c2].rank,r4=P.carriers[M.c4].rank;float2 w=zero2();
         for(int k3=0;k3<r2;k3++)for(int k4=0;k4<r4;k4++){
             const float2 c=conj(pt.fields[M.c2].e[k3])*pt.fields[M.c4].e[k4];if(zero(c))continue;
-            w+=c*entry(W,tables+M.at+(k3*r4+k4)*size+at,C.size,-1);
+            w+=c*entry(W,tables+M.at+(k3*r4+k4)*size+at,C.size);
         }
         forms[i]=w;
     }
@@ -1337,8 +1358,8 @@ __device__ float2 fourth_photon(const Warp& W,const Cluster& C,const Photon& ph,
             const float2 e=fi.e[k];if(zero(e))continue;float2 v=zero2();
             for(int bp=0;bp<NG;bp++){
                 const float2* x=tables+J.at+k*block+(((a*NG+ph.to)*NG+bp)*n+ph.col)*s;
-                if(J.diagonal)v+=entry(W,x,C.size,-1)*weight[bp*n+ph.col];
-                else for(int b=0;b<n;b++)v+=entry(W,x+b,C.size,-1)*weight[bp*n+b];
+                if(J.diagonal)v+=entry(W,x,C.size)*weight[bp*n+ph.col];
+                else for(int b=0;b<n;b++)v+=entry(W,x+b,C.size)*weight[bp*n+b];
             }
             z-=e*v;
         }
@@ -1383,7 +1404,7 @@ __device__ float2 amplitude(const Warp& W,const Cluster& C,const Class& K,int a,
     for(int i=P.class_rows[K.rows+row];i<end;i++){const float2 m=M[3*(i-first)+a];u+=K.beating?residual(P.photons[i].residual,t)*m:m;}
     for(int i=0;i<K.ndirect;i++){
         const Direct d=P.directs[K.direct+i];if(d.row!=row)continue;
-        u-=residual(d.residual,t)*W.psi[d.state]*entry(W,P.tables+C.table+C.emission+((d.state-C.n0)*3+a)*NG+d.to,C.size,-1);
+        u-=residual(d.residual,t)*W.psi[d.state]*entry(W,P.tables+C.table+C.emission+((d.state-C.n0)*3+a)*NG+d.to,C.size);
     }
     return u;
 }
@@ -1490,7 +1511,7 @@ __device__ int absorption(Warp& W,const Cluster& C,const Class& K,int nt,const d
         for(int s=0;s<ne;s++){part[s]=zero2();into[s]=0.f;}
         if(lane<nt)for(int i=0;i<K.ndirect;i++){
             const Direct d=P.directs[K.direct+i];if(d.row!=lane)continue;float2 z=zero2();
-            for(int a=0;a<3;a++)z+=ea[a]*entry(W,tables+C.emission+((d.state-C.n0)*3+a)*NG+d.to,C.size,-1);
+            for(int a=0;a<3;a++)z+=ea[a]*entry(W,tables+C.emission+((d.state-C.n0)*3+a)*NG+d.to,C.size);
             const float2 c=residual(d.residual,t)*W.psi[d.state]*z;v+=c;part[d.state-C.n0]+=c;
         }
         total=warp_sum(lane<nt?norm2(v):0.f);
@@ -1516,7 +1537,7 @@ __device__ int absorption(Warp& W,const Cluster& C,const Class& K,int nt,const d
 
 // The bare state's slow part Π = 1 + ½X + YW at the lane's entries at the point and t in the cluster's frames, with the metric's
 // coherent part X it holds (model.rs `slow_and_metric`).
-__device__ void slow_and_metric(const Warp& W,const Cluster& C,const Entries& E,double t,int lane,float2 (&x)[SLOTS],float2 (&pi)[SLOTS]){
+__device__ void slow_and_metric(const Warp& W,const Cluster& C,const Entries<>& E,double t,int lane,float2 (&x)[SLOTS],float2 (&pi)[SLOTS]){
     const Fourth F=P.fourths[C.fourth];
     coherent_metric(W,C,E,t,lane,x);
     #pragma unroll
@@ -1527,7 +1548,7 @@ __device__ void slow_and_metric(const Warp& W,const Cluster& C,const Entries& E,
     for(int j=0;j<SLOTS;j++)pi[j]=pi[j]+0.5f*x[j]+make_float2(E.has(j,lane)&&E.row[j]==E.col[j]?1.f:0.f,0.f);
 }
 // ψ ← Π ψ/√A (W.psi, normalized before): A = ‖Π ψ‖².
-__device__ float slow_part(Warp& W,const Entries& E,const float2 (&pi)[SLOTS],int lane){
+__device__ float slow_part(Warp& W,const Entries<>& E,const float2 (&pi)[SLOTS],int lane){
     __syncwarp();
     #pragma unroll
     for(int j=0;j<SLOTS;j++)if(E.has(j,lane))W.m[0][lane+32*j]=pi[j];
@@ -1854,7 +1875,7 @@ __device__ void hold_record(const Run& R,Warp& W,const Twin& h,int lane,double* 
 // −Φ_off S with the trap beam off -- Φ_off of the fields with the trap beam's own part a c_k taken
 // out of its carrier's, so that a tweezer that is a near carrier is in the depth as a folded one
 // is; the bound takes twice the light shift's bound for the latter.
-__device__ float trap(const Warp& W,const Cluster& C,const Entries& E,const float2 (&h0)[SLOTS],double t,bool bound,int lane){
+__device__ __noinline__ float trap(const Warp& W,const Cluster& C,const Entries<>& E,const float2 (&h0)[SLOTS],double t,bool bound,int lane){
     const float2* tables=P.tables+C.table;const Point& pt=W.pt;
     float2 difference[SLOTS],far[SLOTS],slope[MOST_FOCUSED][SLOTS];
     gather<false>(W,true,tables+C.h0,C.size,E.nn,lane,far,slope);
@@ -1874,7 +1895,7 @@ __device__ float trap(const Warp& W,const Cluster& C,const Entries& E,const floa
             const float2 fa=pt.fields[ca].e[k],fe=pt.fields[ce].e[k1],oa=pt.off[ca][k],oe=pt.off[ce][k1];
             const float2 phase=residual(P.residuals[C.beats+(it.z>>12)],t),c=zero2()-both*(conj(fe)*fa)*phase,c0=both*(conj(oe)*oa)*phase;
             const float2* x=tables+it.x;
-            difference[j]+=c*entry(W,x,C.size,-1)+c0*far_entry(W,x,C.size);
+            difference[j]+=c*entry(W,x,C.size)+c0*far_entry(W,x,C.size);
         }
     }
     for(int gi=0;gi<C.ngroups;gi++){
@@ -2074,7 +2095,7 @@ __device__ float seg_rate(const Segment& S,const float2* X,float t,float2 x,int 
 // −(c S + ee Σ_f ∇s_f ∂_f S) into G_p per axis and, of a direct term of a pair with a first order (its `Group::first` in `firsts`), its gradient's coefficients on Q.
 __device__ __forceinline__ void group_term(const Warp& W,const Cluster& C,const float2* s,const float2* q,float2 ee,float2 on,const float2 (&c)[3],int first,const FirstPair* firsts,
         int p,bool adjoint,int e,float2* X,float2* G,float2* Gamma,int nn){
-    const Point& pt=W.pt;float2 ds[MOST_FOCUSED];const float2 sv=entry_slopes(W,s,C.size,ds),qv=entry(W,q,C.size,-1);
+    const Point& pt=W.pt;float2 ds[MOST_FOCUSED];const float2 sv=entry_slopes(W,s,C.size,ds),qv=entry(W,q,C.size);
     float2 h=ee*sv,g=on*qv;if(adjoint){h=conj(h);g=conj(g);}
     X[p*nn+e]+=h;Gamma[p*nn+e]+=g;
     #pragma unroll
@@ -2113,7 +2134,7 @@ __device__ __noinline__ void exact_components(Warp& W,const Cluster& C,int lane,
                 const int r=e/n,m=(e-r*n)*n+r;
                 group_term(W,C,s+e,q+e,ee,ee+on,c,first,firsts,p,false,e,X,G,Gamma,nn);
                 if(twice)group_term(W,C,s+m,q+m,ee,ee+off,c,0,firsts,p,true,e,X,G,Gamma,nn);
-                else if(mirrored)Gamma[beat*nn+e]+=conj(off*entry(W,q+m,C.size,-1));
+                else if(mirrored)Gamma[beat*nn+e]+=conj(off*entry(W,q+m,C.size));
             }
         }
     }
@@ -2142,7 +2163,7 @@ __device__ __noinline__ void exact_components(Warp& W,const Cluster& C,int lane,
                 #pragma unroll
                 for(int a=0;a<3;a++)c[a]=conj(fe.grad[k1][a])*fa.e[k]+conj(fe.e[k1])*fa.grad[k][a];
                 group_term(W,C,tables+it.x,tables+it.y,ee,first>0?ee+firsts[first-1].off:ee,c,0,firsts,p,true,e,X,G,Gamma,nn);
-            }else if(role==ITEM_FIRST)Gamma[beat*nn+e]+=conj(firsts[first-1].off*entry(W,tables+it.y,C.size,-1));
+            }else if(role==ITEM_FIRST)Gamma[beat*nn+e]+=conj(firsts[first-1].off*entry(W,tables+it.y,C.size));
             else{float2 ws,wq,mu,nu;entry_pair(pt,tables+it.x,tables+it.y,C.size,ws,wq);first_coefficients(ws,wq,mu,nu);Gamma[beat*nn+e]+=nu*conj(conj(fe.e[k1])*fa.doppler[k]);}
         }
     }
@@ -2170,7 +2191,7 @@ __device__ __noinline__ void exact_components(Warp& W,const Cluster& C,int lane,
         __syncwarp();const Fourth F=P.fourths[C.fourth];
         for(int q=0;q<F.nquartic;q++){
             const Quartic Q=P.quartics[F.quartic+q];const float2 m=monomial(pt,Q);if(zero(m))continue;
-            for(int e=lane;e<nn;e+=32){const int part=P.quartic_parts[Q.parts+e];if(part>=0)X[part*nn+e]+=m*entry(W,tables+Q.at+e,C.size,-1);}
+            for(int e=lane;e<nn;e+=32){const int part=P.quartic_parts[Q.parts+e];if(part>=0)X[part*nn+e]+=m*entry(W,tables+Q.at+e,C.size);}
         }
     }
     // The explicit states' terms (model.rs `exact_terms`), a lane each: a kept drive's Σ_k E_k U_k, a decay
@@ -2187,7 +2208,7 @@ __device__ __noinline__ void exact_components(Warp& W,const Cluster& C,int lane,
         }else if(T.kind==1){
             float2 z=zero2();for(int k=0;k<rank;k++){float2 x,x2;entry_pair(pt,tables+T.at+k,tables+T.at2+k,C.size,x,x2);z+=fl.e[k]*x-fl.doppler[k]*x2;}
             v=make_float2(-0.5f*z.y,0.5f*z.x);w=make_float2(0.5f*z.y,0.5f*z.x);
-        }else if(T.kind==2)v=entry(W,tables+T.at,C.size,-1);
+        }else if(T.kind==2)v=entry(W,tables+T.at,C.size);
         else for(int k=0;k<rank;k++){
             float2 ds[MOST_FOCUSED];const float2 y=entry_slopes(W,tables+T.at+k,C.size,ds);v+=fl.e[k]*y;
             #pragma unroll
@@ -2402,7 +2423,7 @@ __device__ __noinline__ void exact_step(u64 seed,Warp& W,Traj& t,double tau,bool
 __device__ float trap_exact(const Warp& W,const Cluster& C,double t,bool bound,int lane){
     const int n=C.n,nn=n*n;const float2* tables=P.tables+C.table;const Point& pt=W.pt;float s=0.f;
     for(int e=lane;e<nn;e+=32){
-        const int r=e/n,c=e-r*n;float2 d=entry(W,tables+C.h0+e,C.size,-1)-far_entry(W,tables+C.h0+e,C.size);
+        const int r=e/n,c=e-r*n;float2 d=entry(W,tables+C.h0+e,C.size)-far_entry(W,tables+C.h0+e,C.size);
         if(!bound){
             for(int gi=0;gi<C.ngroups;gi++){
                 const Group G=P.groups[C.groups+gi];if(G.count!=nn)continue;
@@ -2410,7 +2431,7 @@ __device__ float trap_exact(const Warp& W,const Cluster& C,double t,bool bound,i
                 for(int pi=0;pi<G.npairs;pi++){
                     const int2 pair=P.pairs[G.pairs+pi];const int k1=pair.x,k=pair.y;const float both=G.hermitian&&k1<k?2.f:1.f;
                     const float2 cc=zero2()-both*(conj(fe.e[k1])*fa.e[k])*phase,c0=both*(conj(pt.off[G.emitted][k1])*pt.off[G.absorbed][k])*phase;
-                    const float2* x=tables+G.s+pi*nn+e;d+=cc*entry(W,x,C.size,-1)+c0*far_entry(W,x,C.size);
+                    const float2* x=tables+G.s+pi*nn+e;d+=cc*entry(W,x,C.size)+c0*far_entry(W,x,C.size);
                 }
             }
             if(C.nbeats>0){
@@ -2420,7 +2441,7 @@ __device__ float trap_exact(const Warp& W,const Cluster& C,double t,bool bound,i
                     const int k1=it.z&3,k=(it.z>>2)&3,ca=(it.z>>4)&7,ce=(it.z>>7)&7;const float both=(it.z>>10)&1?2.f:1.f;
                     const float2 phase=residual(P.residuals[C.beats+(it.z>>12)],t);
                     const float2 cc=zero2()-both*(conj(pt.fields[ce].e[k1])*pt.fields[ca].e[k])*phase,c0=both*(conj(pt.off[ce][k1])*pt.off[ca][k])*phase;
-                    const float2* x=tables+it.x;d+=cc*entry(W,x,C.size,-1)+c0*far_entry(W,x,C.size);
+                    const float2* x=tables+it.x;d+=cc*entry(W,x,C.size)+c0*far_entry(W,x,C.size);
                 }
             }
         }
@@ -2445,7 +2466,7 @@ __device__ float ringing_bound(const Warp& W,const Cluster& C,int lane){
         for(int h=lane;h<G.count;h+=32){
             const Channel ch=P.channels[G.channels+h];const int rank=P.carriers[ch.carrier].rank;const float a=sqrtf(norm2(W.psi[ch.col]));
             const float2* x=P.tables+C.table+P.carrier_tables[C.carriers+3*ch.carrier+2]+rank*NE*C.n0+ch.col;
-            for(int r=0;r<rank;r++)s+=a*sqrtf(norm2(W.pt.fields[ch.carrier].e[r]))*entry(W,x+r*C.n0,C.size,-1).x;
+            for(int r=0;r<rank;r++)s+=a*sqrtf(norm2(W.pt.fields[ch.carrier].e[r]))*entry(W,x+r*C.n0,C.size).x;
         }
         s=warp_sum(s);bound+=s*s;
     }
@@ -2597,14 +2618,14 @@ __device__ __noinline__ void transient(Warp& W,Traj& t,const double u[5],Rng& rn
 // True when the atom is lost in it: unbound -- its mechanical energy above the trap's far level --
 // outside the trap's region, judged at the step's middle where it went without a jump, else at its
 // end.
-__device__ bool step(u64 seed,Warp& W,Traj& t,int lane,float2* scratch){
+__device__ __noinline__ bool step(u64 seed,Warp& W,Traj& t,int lane,float2* scratch){
     // The first order in the Doppler shift where it holds, by the step's start; the exact response beyond: read at its jumps and by an exact step alone.
-    double left=P.dt;Local L;Middle M;bool fresh=false,exact=false,asked=false;
+    double left=P.dt;float2 h0[SLOTS];Middle M;bool fresh=false,exact=false,asked=false;
     if(P.clusters[t.cluster].exact){exact=doppler_ratio(t,lane)>P.allowance;exact_step(seed,W,t,left,exact,lane,scratch);point<false>(W,t,lane);fresh=true;}
     else for(;;){
         const Traj start=t;
         if(lane<MAXN)W.start[lane]=W.psi[lane];
-        double lh;advance(W,t,left,lane,lh,L,M);
+        double lh;advance(W,t,left,lane,lh,h0,M);
         if(t.logn>t.log_threshold)break;
         // The crossing on ln‖ψ‖², linear on the half where it lies; the step redone to it.
         if(!asked){exact=doppler_ratio(start,lane)>P.allowance;asked=true;}
@@ -2612,7 +2633,7 @@ __device__ bool step(u64 seed,Warp& W,Traj& t,int lane,float2* scratch){
         if(lh<=t.log_threshold){ta=0.;tb=0.5*left;la=start.logn;lb=lh;}else{ta=0.5*left;tb=left;la=lh;lb=t.logn;}
         const double at=lb<la?fmin(fmax(ta+(t.log_threshold-la)/(lb-la)*(tb-ta),ta),tb):tb;
         t=start;__syncwarp();if(lane<MAXN)W.psi[lane]=W.start[lane];__syncwarp();
-        if(at>0.){double unused;advance(W,t,at,lane,unused,L,M);}
+        if(at>0.){double unused;advance(W,t,at,lane,unused,h0,M);}
         {COUNT(COUNT_JUMPS);SPAN_BEGIN(jumping);jump(seed,W,t,exact,lane,scratch);SPAN_END(SPAN_JUMP,jumping);}
         left-=at;
         if(!(left>0.)){point<false>(W,t,lane);fresh=true;break;}
@@ -2636,11 +2657,11 @@ __device__ bool step(u64 seed,Warp& W,Traj& t,int lane,float2* scratch){
             SPAN_END(SPAN_LOSS,loss);return lost;
         }
         const Entries E(C.n,lane);
-        if(fresh){float2 slope[MOST_FOCUSED][SLOTS];gather<false>(W,false,P.tables+C.table+C.h0,C.size,E.nn,lane,L.h0,slope);}
+        if(fresh){float2 slope[MOST_FOCUSED][SLOTS];gather<false>(W,false,P.tables+C.table+C.h0,C.size,E.nn,lane,h0,slope);}
         // ψ at the middle in W.psi while judged, the end's kept.
         float2 end=zero2();
         if(!fresh){__syncwarp();if(lane<MAXN){end=W.psi[lane];W.psi[lane]=M.psi;}__syncwarp();}
-        lost=kinetic+(double)trap(W,C,E,L.h0,time,true,lane)>0.&&kinetic+(double)trap(W,C,E,L.h0,time,false,lane)>0.;
+        lost=kinetic+(double)trap(W,C,E,h0,time,true,lane)>0.&&kinetic+(double)trap(W,C,E,h0,time,false,lane)>0.;
         if(!fresh){__syncwarp();if(lane<MAXN)W.psi[lane]=end;__syncwarp();}
     }
     SPAN_END(SPAN_LOSS,loss);
@@ -2653,7 +2674,7 @@ __device__ bool step(u64 seed,Warp& W,Traj& t,int lane,float2* scratch){
 // R_c[i][col] = Σ_k E_k T_k[i][col] at the stencil (model.rs `populations`' responses).
 __device__ float2 response(const Warp& W,const Cluster& C,int c,int i,int col){
     const float2* x=P.tables+C.table+P.carrier_tables[C.carriers+3*c+2]+i*C.n0+col;const Fields& f=W.pt.fields[c];float2 r=zero2();
-    for(int k=0;k<P.carriers[c].rank;k++)r+=f.e[k]*entry(W,x+k*NE*C.n0,C.size,-1);
+    for(int k=0;k<P.carriers[c].rank;k++)r+=f.e[k]*entry(W,x+k*NE*C.n0,C.size);
     return r;
 }
 
