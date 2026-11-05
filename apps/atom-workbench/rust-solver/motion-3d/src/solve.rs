@@ -46,7 +46,7 @@
 //! statistics still run, so only its a-priori excess is).
 //!
 //! # The fold's choice
-//! The rule's candidates (ground.rs `Ground::allowances`) from all folded down, and on the CPU the
+//! The rule's candidates (ground.rs `Ground::ladder`) from all folded down, and on the CPU the
 //! first's fourth order, are costed on the pilot's states carried into their clusters (`carried`): each
 //! with its fold's charge as measured (`measured_charge`: per output the charge the run's ledger books, with
 //! the memory). A candidate's cost is its step check's (below) on those states -- the step it would take --:
@@ -218,7 +218,7 @@
 //! booked as measured against the target, and chosen by its cost (the fold's candidates, the tables' refinement, model.rs
 //! `tabulate`); a model whose estimate the whole target cannot hold is refused (the GPU's undressed response, gpu/program.rs).
 //! The gain's guard (model.rs `Model::lindblad`) is no such estimate: the generator is of Lindblad form by construction, its
-//! round-off the limit of what it may read.
+//! round-off the limit of what it may read, and of what it refuses the norm the gain can show over the run.
 //!
 //! As the a-priori estimates A near ε that work diverges, as R^−(2+1/p), while past ε no work meets the target: the rule
 //! that held the statistics to the sliver below the target and gave them the whole target above it was a cliff (the
@@ -700,7 +700,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // leaves the statistics room the one of least predicted cost is taken.
     // The generator before the rule, every candidate's start (`next_candidate`); the rule's allowances from it, past the first -- every drive folded -- only where a rung is wanted.
     let bare=Ground::bare(request)?;let mut rungs=None;
-    let mut ladder=std::iter::once(f64::INFINITY).chain(std::iter::from_fn(||rungs.get_or_insert_with(||bare.rungs().into_iter().skip(1)).next()));let mut failed=None;
+    let mut ladder=std::iter::once(f64::INFINITY).chain(std::iter::from_fn(||rungs.get_or_insert_with(||bare.ladder().into_iter().skip(1)).next()));let mut failed=None;
     let Some(mut pilot_candidate)=next_candidate(request,&bare,&mut ladder,&mut failed,&mut vec![])else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
     pilot_candidate.settle();
     // A generator that gains on the ladder's first rung, every drive folded, is the fold's construction failing

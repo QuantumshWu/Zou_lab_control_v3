@@ -136,7 +136,7 @@
 use crate::ground::{self,Ground};
 use crate::ledger::BUDGET;
 use crate::linear::{hermitian_eigen_within,hermitian_eigenvalues,Dense};
-use crate::solve::{MATRIX_NS,POPULATION_TARGET};
+use crate::solve::{MATRIX_NS,NUMERICAL_SHARE,POPULATION_TARGET};
 use crate::stats::KT_PER_UK;
 use crate::{Complex,Request,STATES};
 use rayon::prelude::*;
@@ -170,6 +170,11 @@ pub const NOT_LINDBLAD:&str="消去激发态后的生成元不是 Lindblad 形�
 /// interpolation error booked (`Model::table_error`, the ledger's), the same on any machine.
 pub const MOST_TABLE_BYTES:usize=1<<32;
 pub const MOST_TABLE_NODES:usize=1<<20;
+/// The doublings above their smallest error that stop the tables' refinement (`Model::tabulate`): a grid eight times finer that has not come below it. A line the grids do not yet resolve moves the error about one
+/// on its way: the retro-reflected tweezer with a resonant probe at a mirror phase of 30°, its rung keeping the probe, 0.60, 1.10, 0.75 and 0.012 from 9 to 65 nodes, and every drive folded 0.84, 1.10, 1.44, 0.29,
+/// then 0.069, 0.011 and 0.0014 at 513; on a line of half the width 0.87, 1.0, 0.82, 0.35, 0.059 and 0.0064 from 33 to 1025. Stopped at the first rise, it booked 110 % on every mirror phase but 0, with its T and
+/// populations what the finer grids give.
+const STALLED_DOUBLINGS:usize=3;
 /// The nodes of a grid computed at once, written into its tables before the next: a grid's nodes
 /// are held once, in its tables.
 const NODE_BATCH:usize=4096;
@@ -560,8 +565,7 @@ pub struct Model{
     pub(crate) layouts:Vec<Layout>,
     pub(crate) tables:Tables,
     /// The interpolation's measured largest relative error where the atoms go (`tabulate`), and where the
-    /// work bounds -- or a doubling that did not shrink the error (`table_stalled`), whose next one is
-    /// predicted to save nothing -- stopped the grid's refinement the nodes per axis it kept.
+    /// work bounds -- or `STALLED_DOUBLINGS` above its smallest error (`table_stalled`) -- stopped the grid's refinement the nodes per axis it kept.
     pub table_error:f64,
     pub table_limit:Option<usize>,
     pub table_stalled:bool,
@@ -1311,8 +1315,8 @@ impl Model{
     /// below what its smaller error saves the run (`stake`'s run at its `room_cost`). Its error
     /// is predicted by the last doubling's rate, and by the cubic interpolation's order before one is seen,
     /// 2⁻³ a doubling (`cubic`), and what it saves is `room_cost`'s: an error the whole population target leaves no run its room, whatever the run's length (a request of no
-    /// duration, a step's stake: 5 % at 9 nodes on the tweezer PGC). A doubling that did not shrink the error predicts no saving, and stops it
-    /// (`table_stalled`: the tabulated function is not smooth on the grids' scale where the atoms go).
+    /// duration, a step's stake: 5 % at 9 nodes on the tweezer PGC). A doubling that did not shrink the error says nothing of the next: a grid short of a line across the intensity axis reads about one
+    /// until it resolves it, the cubic's order the prediction there. `STALLED_DOUBLINGS` above its smallest stop it (`table_stalled`: the tabulated function is not smooth on the grids' scale where the atoms go).
     /// A grid beyond the work bounds (`MOST_TABLE_BYTES`, `MOST_TABLE_NODES`) is not made
     /// whatever it saves (`table_limit`). Its error is booked (the ledger's), the room it takes from the
     /// statistics like any estimate's (solve.rs).
@@ -1329,8 +1333,9 @@ impl Model{
         loop{
             let(coarse,n)=(self.tables.nodes,2*self.tables.nodes-1);
             if let Some(&error)=errors.last(){
-                let rate:f64=if errors.len()>1{error/errors[errors.len()-2]}else{0.125};
-                if !(rate<1.){self.table_stalled=true;self.table_limit=Some(coarse);break;}
+                let smallest=errors.iter().copied().fold(f64::INFINITY,f64::min);
+                if errors.iter().rev().take_while(|&&e|e>smallest).count()>=STALLED_DOUBLINGS{self.table_stalled=true;self.table_limit=Some(coarse);break;}
+                let rate:f64=if errors.len()>1&&error<errors[errors.len()-2]{error/errors[errors.len()-2]}else{0.125};
                 let work=MATRIX_NS*((n.pow(d)-coarse.pow(d)) as f64*per_node+(n.pow(d)*measured*4_usize.pow(d)) as f64);
                 if room_cost(error).is_finite()&&!(work<stake*(room_cost(error)-room_cost(rate*error))){break;}
             }
@@ -2155,7 +2160,9 @@ impl Model{
     /// (`NOT_LINDBLAD`), with its relative error, the largest ε with −D ≤ ε (Σ L̃†L̃ + 1/T) beyond D's round-off
     /// (`excess`), and the fold's ladder (solve.rs) passes over it -- the solve stops where it is the ladder's first
     /// rung, every drive folded. Between nodes the interpolation's D the solve meets along its pilot's states is
-    /// booked (solve.rs `gain`).
+    /// booked (solve.rs `gain`). So is a gain within what the norm it grows over the run can show, the exponentials' share of the population target: a beat's own rounding (a frame's sum of detunings, ε times hundreds of
+    /// THz) parts the decay's phases from the jumps' as t goes on -- 1e-12 to 1e-9 of the jump rate at the generic instant, none at t = 0, smooth in the beams' amplitudes -- and that alone refused a D1 scene of three
+    /// colours at 12.7 G at twice the round-off here, and a neighbour of it at 575 times, with a norm of 1e-7 over its 100 us.
     fn lindblad(&self)->Result<(),String>{
         let last=(self.tables.nodes-1).max(1) as f64;
         for &r in &self.reach{
@@ -2165,7 +2172,9 @@ impl Model{
             p.stencil=self.stencil(&s);
             for t in [0.,GENERIC]{for k in 0..self.clusters(){
                 let b=self.balance(k,&p,t);let round=64.*f64::EPSILON*self.dimension(k) as f64*b.scale;
-                if -b.low<=round{continue;}
+                // Its round-off, or what the norm it grows over the run cannot show.
+                let limit=if self.ground.duration>0.{round.max(NUMERICAL_SHARE*POPULATION_TARGET/self.ground.duration)}else{round};
+                if -b.low<=limit{continue;}
                 let floor=if self.ground.duration>0.{1./self.ground.duration}else{b.rate.max(round)};
                 let error=excess(&b.d,&b.jumps,round,floor);
                 return Err(format!("{NOT_LINDBLAD}：子空间 {k} 在 r = ({:.2}, {:.2}, {:.2}) μm、t = {t:.3} μs 处，无跳跃的衰减低于跳跃率（i(H − H†) − ΣL†L 的最小本征值 {:.2e} rad/μs，超出舍入误差 {round:.1e} rad/μs；最大跳跃率 {:.2e} rad/μs，相对误差 {:.2e}）——这部分衰减没有跳跃承载，轨迹的范数会增长",
@@ -2674,6 +2683,16 @@ mod tests{
         let size=model.layouts[k].size;
         for node in 0..model.tables.data[k].len()/(2*size){for i in q..q+square{for c in 0..2{model.tables.data[k][2*(node*size+i)+c]*=1.-1e-6;}}}
         let e=model.lindblad().expect_err("a gain of a millionth of a rate");assert!(e.starts_with(NOT_LINDBLAD),"{e}");
+        // Over a run the same gain is refused only where the norm it grows can show: not over a nanosecond, over ten seconds.
+        model.ground.duration=1e-3;assert!(model.lindblad().is_ok());
+        model.ground.duration=1e7;assert!(model.lindblad().is_err());
+    }
+    /// The ladder a solve climbs holds every rung of the rule's but those whose new explicit states no drive reads at any position: the tweezer PGC's D2 light on the D1 states.
+    #[test]
+    fn a_rung_no_drive_reads_is_no_rung(){
+        let f:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/tweezer_pgc.json")).unwrap();
+        let g=crate::ground::Ground::bare(&crate::ground::tests::request(&f["request"])).unwrap();let(all,ladder)=(g.rungs(),g.ladder());
+        assert!(ladder[0]==f64::INFINITY&&ladder.len()>1&&ladder.len()<all.len()&&ladder.iter().all(|a|all.contains(a)),"{all:?} {ladder:?}");
     }
     /// Residuals within the round-off of zero are static and of each other one beat; the beats come in
     /// pairs ±Ω; harmonics of one frequency have its period, incommensurate ones none.
