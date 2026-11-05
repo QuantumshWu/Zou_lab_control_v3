@@ -50,8 +50,8 @@
 //! share of the mixture at the point (one for a beam alone), in its whitened coordinates,
 //! Gauss–Legendre in the radial y on panels doubling away from the top (the first in √(a − y)), in
 //! cos θ from the beam's axis, and the trapezoidal rule in the azimuth; the region the share is taken
-//! against (U_h ≤ D, as the loss's) is an ellipsoid about the focus, so along each direction it ends
-//! at a panel's edge.
+//! against (U_h ≤ D, as the loss's) is an ellipsoid about the trap's centre, so along each direction its ends
+//! fall at panels' edges.
 use crate::model::{Geometry,Model,Trap};
 use crate::rng::{normal_quantile,Rng};
 use rayon::prelude::*;
@@ -189,7 +189,7 @@ impl Mode{
 }
 
 /// One initial internal state's bound thermal ensemble (module documentation): its cluster and place
-/// in it; its depth at the focus in the trap's light D_T (rad/us) and the envelope's top a = c D_T/k_BT
+/// in it; its depth at the trap's centre in the trap's light D_T (rad/us) and the envelope's top a = c D_T/k_BT
 /// (model.rs `Model::trap_slope`); the classical ensemble's kinetic temperature relative to T, per axis
 /// (`kinetic`); and its share of the trap's thermal distribution over its region (U_h ≤ D, Maxwell's
 /// momenta) that it leaves out -- the unbound atoms and the lowering (`cut`), these two by quadrature
@@ -197,12 +197,12 @@ impl Mode{
 #[derive(Clone,Debug)]
 pub struct Ensemble{pub cluster:usize,pub state:usize,pub depth:f64,pub top:f64,pub kinetic:f64,pub cut:f64,kt:f64,modes:Vec<Mode>,radial:[OnceLock<Radial>;3]}
 impl Ensemble{
-    /// The ensemble of state `state` of `cluster` at k_BT `kt` (rad/us), its `kinetic` and `cut` still to come
+    /// The ensemble of state `state` of `cluster` at k_BT `kt` (rad/us) in its trap at `centre`, its `kinetic` and `cut` still to come
     /// (`integrate`); none for a state the trap does not hold (no bound state: D_T ≤ 0).
-    pub fn new(model:&Model,cluster:usize,state:usize,kt:f64)->Result<Option<Ensemble>,String>{
-        let depth=-model.trap_level(cluster,state,[0.;3]);
+    pub fn new(model:&Model,cluster:usize,state:usize,kt:f64,centre:[f64;3])->Result<Option<Ensemble>,String>{
+        let depth=-model.trap_level(cluster,state,centre);
         if !(depth>0.){return Ok(None);}
-        let c=model.trap_slope(cluster,state,depth)?;let top=c*depth/kt;
+        let c=model.trap_slope(cluster,state,depth,centre)?;let top=c*depth/kt;
         let modes=model.trap_modes().into_iter().map(|l|Mode::new(&model.geometry[l])).collect::<Result<Vec<_>,_>>()?;
         Ok(Some(Ensemble{cluster,state,depth,top,kinetic:1.,cut:0.,kt,modes,radial:Default::default()}))
     }
@@ -226,11 +226,19 @@ impl Ensemble{
         let sums=self.modes.iter().enumerate().map(|(m,mode)|{let volume=mode.whitening(every).1/first;
           (0..polar.len()*azimuths).into_par_iter().map(|p|{
             let((mu,wm),phi)=(polar[p/azimuths],TAU*((p%azimuths) as f64+0.5)/azimuths as f64);let unit=mode.along(mu,phi);
-            // The region along this direction: U_h = u U_h(unit) ≤ D, at t_R = a u_R/(1 + u_R).
-            let harmonic:f64=(0..3).map(|i|{let x:f64=(0..3).map(|c|unit[c]*trap.axes[i][c]).sum();trap.frequencies[i]*trap.frequencies[i]*x*x}).sum::<f64>()/(2.*hm);
-            let inside=if harmonic>0.{let u=region/harmonic;a*u/(1.+u)}else{a};
+            // The region along this direction: U_h(√u unit − c) = u H − 2√u B + C ≤ D about the trap's centre c, from u₋ to u₊ at t = a u/(1 + u): its roots √u = (B ± √(B² + H(D − C)))/H,
+            // u₊ written so that it is D/H itself at c = 0.
+            let form=|x:[f64;3],y:[f64;3]|(0..3).map(|i|{let(p,q):(f64,f64)=((0..3).map(|c|x[c]*trap.axes[i][c]).sum(),(0..3).map(|c|y[c]*trap.axes[i][c]).sum());trap.frequencies[i]*trap.frequencies[i]*p*q}).sum::<f64>()/(2.*hm);
+            let(harmonic,slope,start)=(form(unit,unit),form(unit,trap.centre),form(trap.centre,trap.centre));
+            let(entered,left)=if harmonic>0.{
+                let discriminant=slope*slope+harmonic*(region-start);let root=discriminant.max(0.).sqrt();let at=|u:f64|a*u/(1.+u);
+                if discriminant<0.||slope+root<=0.{(0.,0.)}else{
+                    let near=(slope-root)/harmonic;
+                    (if near>0.{at(near*near)}else{0.},at((region-start)/harmonic+2.*slope*(slope+root)/(harmonic*harmonic)))
+                }
+            }else{(0.,a)};
             let mut edges=vec![0.];let mut t=1_f64;while t<a{edges.push(t);t*=2.;}edges.push(a);
-            if inside<a{let k=edges.partition_point(|&e|e<inside);if edges[k]!=inside{edges.insert(k,inside);}}
+            for end in [entered,left]{if end>0.&&end<a{let k=edges.partition_point(|&e|e<end);if edges[k]!=end{edges.insert(k,end);}}}
             let mut s=[0.;4];
             for k in 0..edges.len()-1{
                 let(lo,hi)=(edges[k],edges[k+1]);
@@ -242,7 +250,7 @@ impl Ensemble{
                     let own=-model.trap_level(self.cluster,self.state,r)/self.kt;
                     let(number,energy)=(kept(1.5,own,own,a),kept(2.5,own,own,a));
                     s[0]+=measure*number;s[1]+=measure*energy;
-                    if t<inside{s[2]+=measure*number;s[3]+=measure*(own-a).exp();}
+                    if t>entered&&t<left{s[2]+=measure*number;s[3]+=measure*(own-a).exp();}
                 }
             }
             s}).reduce(||[0.;4],|x,y|std::array::from_fn(|i|x[i]+y[i]))

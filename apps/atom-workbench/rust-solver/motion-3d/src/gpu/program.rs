@@ -103,14 +103,15 @@ pub struct Params{
     axes:[[f64;3];3],omega:[f64;3],stiffness:[f64;3],
     half_flow:[[f64;3];3],flow_ratio:[[f64;2];3],region32:f32,lattice:i32,
     region:f64,
-    lattice_axis:[f64;3],lattice_k:f64,lattice_inv_rayleigh:f64,lattice_phase:f64,
-    node_phase:f64,grid_phase:f64,beats:f64,horizon:f64,
+    centre:[f64;3],offset:i32,offset_pad:i32,
+    lattice_axis:[f64;3],lattice_k:f64,lattice_inv_rayleigh:f64,lattice_phase:f64,lattice_central:f64,
+    quadrature:f64,grid_phase:f64,beats:f64,horizon:f64,
 }
 
 /// The kernel's `State`: a trajectory between launches.
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct State{
-    pub(crate) q:[f64;3],pub(crate) p:[f64;3],pub(crate) time:f64,pub(crate) logn:f64,pub(crate) threshold:f64,pub(crate) log_threshold:f64,pub(crate) prefix:[f64;15],
+    pub(crate) q:[f64;3],pub(crate) p:[f64;3],pub(crate) time:f64,pub(crate) logn:f64,pub(crate) threshold:f64,pub(crate) log_threshold:f64,pub(crate) prefix:[f64;9],
     pub(crate) q0:[f64;3],pub(crate) p0:[f64;3],pub(crate) twin_logn:f64,pub(crate) twin_threshold:f64,pub(crate) twin_log_threshold:f64,
     pub(crate) psi:[[f32;2];MAXM],pub(crate) twin:[[f32;2];MAXN],pub(crate) cluster:i32,pub(crate) jumps:i32,pub(crate) death:i32,
     pub(crate) index:u32,pub(crate) twin_cluster:i32,pub(crate) twin_jumps:i32,pub(crate) beats:f32,
@@ -400,8 +401,9 @@ impl Program{
             hm:hm as f32,light2:(2.*g.light) as f32,allowance:settings.doppler as f32,truncation:settings.truncation as f32,ringing:RINGING_SHARE as f32,recoil_spread:crate::engine::RECOIL_SPREAD as f32,
             axes32:settings.axes.map(|a|a.map(|x|x as f32)),stiffness32:settings.frequencies.map(|w|(w*w/hm) as f32),
             hm64:hm,dt:settings.dt,axes:settings.axes,omega:settings.frequencies,stiffness:settings.frequencies.map(|w|w*w/hm),half_flow,flow_ratio:settings.frequencies.map(|w|if w==0.{[0.;2]}else{[hm/w,w/hm]}),region32:(2.*settings.region) as f32,lattice:settings.lattice.is_some() as i32,region:settings.region,
-            lattice_axis:settings.lattice.map_or([0.;3],|l|std::array::from_fn(|i|(0..3).map(|a|settings.axes[i][a]*l.axis[a]).sum())),lattice_k:settings.lattice.map_or(0.,|l|l.wave_number),lattice_inv_rayleigh:settings.lattice.map_or(0.,|l|1./l.rayleigh),lattice_phase:settings.lattice.map_or(0.,|l|l.phase),
-            node_phase:crate::engine::node_phase(),grid_phase:settings.node_phase,beats:settings.beats,horizon:settings.horizon,
+            centre:{let c=settings.about();std::array::from_fn(|i|(0..3).map(|a|settings.axes[i][a]*c[a]).sum())},offset:(settings.lattice.is_some()||settings.about()!=[0.;3]) as i32,offset_pad:0,
+            lattice_axis:settings.lattice.map_or([0.;3],|l|std::array::from_fn(|i|(0..3).map(|a|settings.axes[i][a]*l.axis[a]).sum())),lattice_k:settings.lattice.map_or(0.,|l|l.wave_number),lattice_inv_rayleigh:settings.lattice.map_or(0.,|l|1./l.rayleigh),lattice_phase:settings.lattice.map_or(0.,|l|l.phase),lattice_central:settings.lattice.map_or(1.,|l|l.central),
+            quadrature:crate::engine::QUADRATURE,grid_phase:settings.node_phase,beats:settings.beats,horizon:settings.horizon,
         };
         let photons=g.clusters.iter().map(|c|c.classes.iter().map(|k|k.photons.len()).sum::<usize>()).max().unwrap_or(0);
         // A jump's classes' weights, a float each (the kernel's `jump`): as many as the model's largest number of them, which a field splits as far as the photons' frequencies part.

@@ -131,7 +131,9 @@ fn compare_from(gpu:&gpu::Gpu,model:&Model,settings:&Settings,trajectories:&[Tra
     let dt=settings.dt;let fourth=model.fourth;let exact=(0..model.clusters()).any(|k|model.mixed(k)||model.beating(k));let(tp,tn,tk)=if exact{(5e-4,5e-4,5e-5)}else{(2e-5,2e-5,2e-5)};
     let program=gpu.program(model,settings).unwrap();
     let got=gpu.advance(&program,settings,trajectories,1).unwrap();
-    let engine=Engine::new(model,settings.clone());
+    // The CPU on the kernel's own grid and so with Simpson's same error: with no truncation a static generator takes its Taylor path, of the kernel's whole panels (engine.rs `static_panels`), not the spectral path's weighted ones.
+    let mut same_grid=settings.clone();if exact{same_grid.truncation=0.;}
+    let engine=Engine::new(model,same_grid);
     let mut jumped=0;
     for(start,g)in trajectories.iter().zip(&got){
         let mut c=start.clone();engine.step(&mut c);
@@ -150,8 +152,7 @@ fn compare_from(gpu:&gpu::Gpu,model:&Model,settings:&Settings,trajectories:&[Tra
         }}
         assert!((g.threshold-c.threshold).abs()<=if fourth{1e-5*c.threshold}else{0.},"{at}: the new threshold {} against {}",g.threshold,c.threshold);
         for a in 0..3{
-            // The exact step's impulse on its node grid within its quadrature share (engine.rs `QUADRATURE`), where the CPU's
-            // static cluster may take the spectral path exactly; a momentum's difference moves the position over the step's
+            // The exact step's impulse within its quadrature share (engine.rs `QUADRATURE`); a momentum's difference moves the position over the step's
             // flow by (ħ/m) dt Δκ.
             let k=tk*scale+if exact{QUADRATURE*(c.kappa[a]-start.kappa[a]).abs()}else{0.};
             assert!((g.r[a]-c.r[a]).abs()<=2e-6*c.r.iter().map(|x|x.abs()).fold(1e-3,f64::max)+if exact{model.hbar_over_mass*dt*k}else{0.}+dr[a],"{at}: r {:?} against {:?}, κ {:?} against {:?}, the crossing's own {dr:?}",g.r,c.r,g.kappa,c.kappa);
@@ -495,7 +496,6 @@ fn batch(r:&Request,fourth:bool,dt:f64)->bool{
         assert_eq!((x.trajectories,x.held),(y.trajectories,y.held),"{at}: trajectories and held");
         for a in 0..3{
             close(x.kappa[a],y.kappa[a],(y.kappa2[a]*y.held).sqrt(),&format!("{at}: Σκ[{a}]"));close(x.kappa2[a],y.kappa2[a],0.,&format!("{at}: Σκ²[{a}]"));
-            close(x.position[a],y.position[a],(y.position2[a]*y.held).sqrt(),&format!("{at}: Σr[{a}]"));close(x.position2[a],y.position2[a],0.,&format!("{at}: Σr²[{a}]"));
             for j in 0..3{close(x.harmonic[a][j],y.harmonic[a][j],1e-9*y.harmonic[a][1].sqrt(),&format!("{at}: harmonic[{a}][{j}]"));}
         }
         for s in 0..STATES{close(x.populations[s],y.populations[s],y.held,&format!("{at}: Σp[{s}]"));close(x.twin[s],y.twin[s],y.trajectories,&format!("{at}: twin Σc[{s}]"));}
@@ -539,7 +539,7 @@ fn a_group_stops_at_its_last_output_as_on_the_cpu(){
     let close=|a:f64,b:f64,what:&str|assert!((a-b).abs()<=1e-3*b.abs().max(1.),"{what}: {a} against {b}");
     for(k,(gg,cg))in g.groups.iter().zip(&c.groups).enumerate(){for(i,(x,y))in gg.sums.iter().zip(&cg.sums).enumerate(){
         let at=format!("group {k}, output {i}");assert_eq!((x.trajectories,x.held),(y.trajectories,y.held),"{at}");
-        for a in 0..3{close(x.kappa2[a],y.kappa2[a],&format!("{at}: Σκ²[{a}]"));close(x.position2[a],y.position2[a],&format!("{at}: Σr²[{a}]"));for j in 0..3{close(x.harmonic[a][j],y.harmonic[a][j],&format!("{at}: harmonic[{a}][{j}]"));}}
+        for a in 0..3{close(x.kappa2[a],y.kappa2[a],&format!("{at}: Σκ²[{a}]"));for j in 0..3{close(x.harmonic[a][j],y.harmonic[a][j],&format!("{at}: harmonic[{a}][{j}]"));}}
         for s in 0..STATES{close(x.populations[s],y.populations[s],&format!("{at}: Σp[{s}]"));}
         if i>ends[k]{assert_eq!(x.held,0.,"{at}: none beyond its last output");}
     }}

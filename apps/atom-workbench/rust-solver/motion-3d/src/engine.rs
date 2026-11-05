@@ -15,7 +15,7 @@
 //! (Wisdom–Holman's mixed-variable splittings); where the system leaves the reference's domain the
 //! field's practice is a smooth changeover of what the reference takes (Chambers' hybrid integrator,
 //! its changeover function; r-RESPA's switching functions), not a hard switch. The harmonic part about
-//! the focus is no model of the trap past its region (U_h > D, `Settings::region`): there it grows as
+//! the trap's centre is no model of the trap past its region (U_h > D, `Settings::region`): there it grows as
 //! ζ² while the trap's potential saturates at its depth, and the kick cancels its rotation -- an atom
 //! barely bound far out on a shallow trap's axis took an energy error (ω dt)² U_h, many times its
 //! binding (SHALLOW_PROBE's tweezer alone, light off: 4 of 1024 such atoms lost over 2 ms at 0.25 us,
@@ -33,7 +33,7 @@
 //! their stiffness to the kick: the step resolves ω dt there, while the harmonic part's rotation is exact at the
 //! centre. So where the trap is a standing wave (model.rs `Lattice`) the harmonic part is the atom's own site's at the
 //! step's start (`reference`): about the nearest antinode z_n on the axis, its stiffness the site's, A(z_n) = 1/(1 +
-//! z_n²/z_R²) of the centre's, u = U_h⊥/(A D) + tan²Φ -- Φ the distance from the site in the standing wave's phase,
+//! z_n²/z_R²) over the trap's centre's (`Lattice::share`), u = U_h⊥/(A D) + tan²Φ -- Φ the distance from the site in the standing wave's phase,
 //! tan²Φ the atom's level above its site's bottom over its depth below the far level, (kx)² near the bottom, the
 //! across part as before --, so that w falls to zero at the node between two sites: the reference is continuous
 //! through it, with no switch, though its centre changes there. An atom within its site's region takes the same
@@ -71,15 +71,14 @@
 //!   with beats that are all left out at the model's reach (`quiet_clusters`: a bias field's Zeeman beats of 10⁻⁵ to 10⁻³⁰ of its
 //!   Raman couplings, near the generator's scale and so kept by the rule, the couplings static in its frames) is static within that share and takes the plain step:
 //!   6 us per step against 26 on the 1 G molasses, whose T is the same.
-//! The impulse is the conditional force's time integral along that evolution, ∫ ⟨ψ|F|ψ⟩/⟨ψ|ψ⟩ dt
-//! (composite Simpson on the grid, its error within `QUADRATURE` of the impulse: (ν·2δ)⁴/2880 bounds
-//! it, ν the integrand's largest frequency -- 2‖H‖₁, and with beats 2(‖H₀‖₁ + Σ_j ‖H_j‖₁) + max|Ω_j|;
-//! through the eigendecomposition each frequency λ_a* − λ_b weighted by its amplitude in the state,
-//! `Segment::weighted`), applied with the
-//! jumps' kicks and less dt F_harmonic(r_h) before the flow for dt/2 again. On a beating grid that bound is far
-//! above what either error takes: a fast component of the force errs on Simpson's grid by its own integral's
-//! (θ⁴/2880 of 2/ω, not of τ: it does not accumulate, θ = ω·2δ, until the grid aliases it at θ = 2π), and the
-//! state's fast part is small beside the slow one. So a solve measures the phase of the grid that meets both shares,
+//! The impulse is the conditional force's time integral along that evolution, ∫ ⟨ψ|F|ψ⟩/⟨ψ|ψ⟩ dt, by composite Simpson on the grid, applied with the
+//! jumps' kicks and less dt F_harmonic(r_h) before the flow for dt/2 again. Over whole panels of h = 2δ Simpson's sum of a component A e^{iωt} of the force is exactly S times its integral,
+//! S = (u/3)(2 + cos u)/sin u = 1 + u⁴/180 + …, u = ωh/2 (`simpson_excess`): it errs by S − 1 of an integral of at most min(τ, 2/|ω|) |A| -- a fast component's does not accumulate --, until the grid
+//! aliases it at u = π. A static generator's propagation is exact on any grid, so that is the whole of its grid's error, and a grid that reads only its frequencies' bound ν = 2‖H‖₁ takes the
+//! fewest whole panels that keep (S − 1) min(1, 2/(ντ)) within `QUADRATURE`, the worst a state can make of it (`static_panels`). Over successive steps those errors cancel as the integrals do, at one S. So a grid through the eigendecomposition, which follows the state
+//! from step to step and S with it, takes no such credit: each frequency λ_a* − λ_b weighted by its amplitude in the state, (S − 1) of τ to the first order within the share (`Segment::weighted`). With min(τ, 2/|ω|) there, which lets S − 1 run up to tens near its pole, the 10 G scene's T_x
+//! stood 3.6 ± 1.2 µK higher at 3-6 ms and T_y 3.7 ± 1.5 at 6-10 ms (a pair of runs), where the kernel's grid, S − 1 ≤ 0.16, moved nothing beyond its statistics. On a beating grid the same bound, at ν = 2(‖H₀‖₁ + Σ_j ‖H_j‖₁) + max|Ω_j|, is far
+//! above what either error takes, the state's fast part being small beside the slow one. So a solve measures the phase of the grid that meets both shares,
 //! the populations' over the waiting time and the impulse's `QUADRATURE`, by doubling the grid on its states
 //! (`Engine::grid_error`, solve.rs `grid_phase`; `Settings::node_phase`, the bound's by default), CF4's own error
 //! of fourth order in the beats' derivatives (validated against a
@@ -216,10 +215,21 @@ use crate::model::{Absorption,Components,Exact,Local,Model,Point,MOST_MIXED,MOST
 use crate::rng::{Purpose,Rng};
 use crate::Complex;
 
-/// The impulse's quadrature share in the exact step: its grid has ν δ ≤ 2 `node_phase`, ν the force's
-/// largest frequency, so that composite Simpson's error, (ν·2δ)⁴/2880 of the impulse at most, is within it.
+/// The impulse's quadrature share in the exact step (module documentation, # The exact step): composite Simpson's error within it of the integrand's size times the step.
 pub const QUADRATURE:f64=crate::solve::NUMERICAL_SHARE*crate::solve::TEMPERATURE_TARGET;
+/// A beating grid's phase by default, its spacing times half its force's frequencies' bound (`Settings::node_phase`): (ν·2δ)⁴/2880, `simpson_excess` to its first order, at `QUADRATURE`.
 pub(crate) fn node_phase()->f64{(2880.*QUADRATURE).powf(0.25)/4.}
+/// S − 1, S the ratio of composite Simpson's sum of a component e^{iωt} over whole panels of h to its integral, u = ωh/2: u⁴/180 = (ωh)⁴/2880 to the first order, all its orders' coefficients positive (so that at a
+/// complex ω, a decaying component, |ω| bounds it), its pole at u = π the grid aliasing the component. At u = 0 it reads as no excess: NaN exceeds nothing.
+fn simpson_excess(u:f64)->f64{u*(2.+u.cos())/(3.*u.sin())-1.}
+/// The fewest whole panels over τ of a static generator's grid, x = ντ/2, ν its frequencies' bound (module documentation, # The exact step): (S − 1) min(1, 2/(ντ)) within `QUADRATURE` at u = νh/2 = x/panels. And no spacing wider than
+/// one part of the exponentials' series, x/(2 panels) = ‖H‖₁δ ≤ 1 at ν = 2‖H‖₁ (`series_within`'s widest at a share at the round-off, the kernel's): the series takes its fewest products per unit of time there, and past it, in parts, more
+/// than the forces it saves repay (the 10 G scene's kernel per trajectory, against (ν·2δ)⁴/2880 of τ: −49 % at 1.7 times that phase, −55 % here, 2.17 times it, −33 % at 2.7), which keeps u ≤ 2, clear of the pole.
+pub(crate) fn static_panels(x:f64)->usize{
+    let room=QUADRATURE*x.max(1.);let mut panels=((0.5*x).ceil() as usize).max(1);
+    while simpson_excess(x/panels as f64)>room{panels+=1;}
+    panels
+}
 
 /// A trajectory's state.
 #[derive(Clone,Debug)]
@@ -257,7 +267,7 @@ pub struct Settings{
     /// The bound on each exponential's truncated Taylor remainder relative to ‖ψ‖ (`propagate`):
     /// a share of the step's own error budget in a solve, f64::EPSILON for double precision.
     pub truncation:f64,
-    /// The motion's sums (T, ⟨v⟩, n̄, ⟨r²⟩) averaged over one trap period of each axis centred on
+    /// The motion's sums (T, ⟨v⟩, n̄) averaged over one trap period of each axis centred on
     /// each output time (lib.rs `simulate`, a solve's), or taken at the output time.
     pub average:bool,
     /// The loss by the mechanical energy (a solve's); off where a validation holds the atom.
@@ -283,19 +293,23 @@ pub struct Settings{
     pub node_phase:f64,
     /// The trap's standing wave (model.rs `Lattice`): the harmonic part is the atom's own site's (`Engine::reference`).
     pub lattice:Option<crate::model::Lattice>,
+    /// The trap's centre (model.rs `Trap`): where the harmonic part and its region stand when every lab axis is free (`about`).
+    pub centre:[f64;3],
 }
 impl Settings{
     /// The settings of a trap (model.rs `Trap`), every axis free, the loss on, the first order in
     /// the Doppler shift everywhere.
     pub fn new(dt:f64,trap:&crate::model::Trap,truncation:f64,average:bool)->Settings{
-        Settings{dt,free:[true;3],axes:trap.axes,frequencies:trap.frequencies,lab:trap.lab,truncation,average,loss:true,doppler:f64::INFINITY,beats:truncation,horizon:dt,region:0.,node_phase:node_phase(),lattice:trap.lattice}
+        Settings{dt,free:[true;3],axes:trap.axes,frequencies:trap.frequencies,lab:trap.lab,truncation,average,loss:true,doppler:f64::INFINITY,beats:truncation,horizon:dt,region:0.,node_phase:node_phase(),lattice:trap.lattice,centre:trap.centre}
     }
-    /// r less its own site's place where the harmonic part is the atom's own site's (`Engine::reference`): the start of
+    /// Where the harmonic part stands: the trap's centre when every lab axis is free, else the focus, the free axes' origin.
+    pub fn about(&self)->[f64;3]{if self.free==[true;3]{self.centre}else{[0.;3]}}
+    /// r less its own site's place where the harmonic part is the atom's own site's (`Engine::reference`), else less the trap's centre: the start of
     /// the harmonic control's twin (control.rs), which turns about that site as the atom does.
     pub fn about_site(&self,r:[f64;3])->[f64;3]{
         match self.lattice{
             Some(l)if self.free==[true;3]&&self.region>0.=>{let z=l.site(l.nearest(dot(l.axis,r)).0);std::array::from_fn(|a|r[a]-z*l.axis[a])}
-            _=>r,
+            _=>{let c=self.about();std::array::from_fn(|a|r[a]-c[a])}
         }
     }
 }
@@ -612,7 +626,7 @@ impl Segment{
             SPECTRAL.set(spectral);
             let h=components.hamiltonian();
             let decay:Vec<Complex>=(0..n*n).map(|k|{let(a,b)=(k/n,k%n);(h[a*n+b]-h[b*n+a].conj())*Complex::I}).collect();
-            let steps=((column_norm(h,n)*tau/node_phase()).ceil() as usize).max(1);let spacing=tau/steps as f64;
+            let spacing=tau/(2*static_panels(column_norm(h,n)*tau)) as f64;
             let propagator=exponential(h,n,spacing);
             return Segment{components,start,spacing,how:How::Taylor{propagator,decay},dropped:0.};
         }
@@ -699,7 +713,7 @@ impl Segment{
     /// |A_c| τ (|ω_c|·2δ)⁴/2880: the spacing whose fourth moment Σ_c |A_c||ω_c|⁴ (2δ)⁴/2880 keeps every form
     /// within `QUADRATURE` of its total |A|, the integrand's scale at the start, the norm's fall to its
     /// least over the evolution taken in (‖ψ‖² ≥ max(threshold, its end)); the spacings over `remaining`
-    /// whole.
+    /// whole. No credit for a fast component's integral, as this grid moves with the state (module documentation, # The exact step).
     fn weighted(&self,x:&State,remaining:f64,threshold:f64)->Option<f64>{
         let How::Spectral(spectral)=&self.how else{return None};let n=self.n();
         let start=self.norm(x);let mut end=*x;self.advance(&mut end,0.,remaining,None);let least=self.norm(&end).max(threshold).min(start);
@@ -1019,14 +1033,14 @@ impl<'a> Engine<'a>{
     /// The harmonic part's centre and weight at a step's start r (module documentation, # Beyond the trap's region,
     /// # A standing wave's sites): one within the region, U_h ≤ D (`Settings::region`), and (2u − 1)/u² beyond it, u =
     /// U_h/D -- continuous with its slope at the region's edge, the weighted part's potential below 2D
-    /// everywhere --, about the focus or the atom's own site; one without a region.
+    /// everywhere --, about the trap's centre or the atom's own site; one without a region.
     fn reference(&self,r:[f64;3])->([f64;3],f64){
-        let s=&self.settings;let depth=s.region;if !(depth>0.){return([0.;3],1.);}
+        let s=&self.settings;let(depth,about)=(s.region,s.about());if !(depth>0.){return(about,1.);}
         let changeover=|u:f64|if u<=1.{1.}else{(2.*u-1.)/(u*u)};
         match s.lattice.filter(|_|s.free==[true;3]){
-            None=>([0.;3],changeover(self.harmonic_potential(r)/depth)),
+            None=>(about,changeover(self.harmonic_potential(std::array::from_fn(|a|r[a]-about[a]))/depth)),
             Some(l)=>{
-                let(n,phase)=l.nearest(dot(l.axis,r));let z=l.site(n);let c=l.axis.map(|x|x*z);let share=1./(1.+(z/l.rayleigh).powi(2));
+                let(n,phase)=l.nearest(dot(l.axis,r));let z=l.site(n);let c=l.axis.map(|x|x*z);let share=l.share(z);
                 let along=dot(l.axis,r)-z;let across:[f64;3]=std::array::from_fn(|a|r[a]-c[a]-along*l.axis[a]);
                 let tangent=phase.tan();(c,share*changeover(self.harmonic_potential(across)/(depth*share)+tangent*tangent))
             }
@@ -1229,7 +1243,7 @@ impl<'a> Engine<'a>{
         };
         // The loss: an atom unbound -- its mechanical energy above the trap's far level -- outside the trap's
         // region (`Settings::region`), of that one state.
-        if s.loss&&self.harmonic_potential(place.0)>s.region{
+        if s.loss&&self.harmonic_potential({let c=s.about();std::array::from_fn(|a|place.0[a]-c[a])})>s.region{
             let point=m.point(place.0,place.1);
             let(kappa,psi,time)=match &middle{Some((kappa,psi,time))=>(*kappa,psi,*time),None=>(t.kappa,&t.psi,t.time)};
             let kinetic=0.5*m.hbar_over_mass*kappa.iter().map(|k|k*k).sum::<f64>();
@@ -1559,8 +1573,9 @@ mod tests{
         let mut x=psi;let(_,_,reference)=finer.evolve(&mut x,0.,tau,0.);let mut y=psi;let(_,_,mine)=spectral.evolve(&mut y,0.,tau,0.);
         let size=reference.iter().map(|v|v.abs()).fold(0.,f64::max);
         for k in 0..3{assert!((mine[k]-reference[k]).abs()<=QUADRATURE*size&&(whole[k]-reference[k]).abs()<=QUADRATURE*size,"axis {k}: {} and {} against {}",mine[k],whole[k],reference[k]);}
-        let size=ib.iter().map(|v|v.abs()).fold(0.,f64::max);
-        for k in 0..3{assert!((ia[k]-ib[k]).abs()<=QUADRATURE*size,"to the root, axis {k}: {} against {}",ia[k],ib[k]);}
+        // To the root, whose impulse the redone step does not read: within the share of the force's size times the step, the net impulse there being small beside it.
+        let size=(0..3).map(|k|column_norm(c.gradient(k),n)).fold(0.,f64::max)*tau;
+        for k in 0..3{assert!((ia[k]-ib[k]).abs()<=QUADRATURE*size,"to the root, axis {k}: {} against {} of {size}",ia[k],ib[k]);}
     }
 
     /// A fast weak beat within the exponentials' share is left out (the step then static, through its
@@ -1577,6 +1592,43 @@ mod tests{
         let resolved=beating(c,0.,TAU/w/16.);
         let psi=state(n,31);let(mut a,mut b)=(psi,psi);left.evolve(&mut a,0.,tau,0.);resolved.evolve(&mut b,0.,tau,0.);
         assert!(distance(&a,&b,n)<=bound,"{:e} against the bound {bound:e}",distance(&a,&b,n));
+    }
+
+    /// Composite Simpson's sum of a component over whole panels is S times its integral, at any frequency and decay short of the aliasing; S's first order is (ωh)⁴/2880, and the
+    /// fewest panels meet their bound where one less would not.
+    #[test]
+    fn simpson_s_sum_of_a_component_is_s_times_its_integral(){
+        for(omega,decay,tau,panels)in [(100.,0.,0.1,7),(400.,0.,0.2,50),(1000.,0.,0.3,60),(3000.,0.,0.07,40),(300.,19.,0.2,13)]{
+            let w:Complex=Complex::new(omega,decay);let h=tau/panels as f64;let at=|t:f64|(Complex::I*w*t).exp();
+            let mut sum=Complex::ZERO;for p in 0..panels{let t=p as f64*h;sum+=(at(t)+at(t+0.5*h)*4.+at(t+h))*(h/6.);}
+            let integral=(at(tau)-Complex::ONE)/(Complex::I*w);
+            // S at the complex phase: (u/3)(2 + cos u)/sin u, cos and sin of u = ωh/2 by e^{iu}.
+            let u=w*(0.5*h);let(e,back)=((Complex::I*u).exp(),(Complex::I*u*(-1.)).exp());let(c,s)=((e+back)*0.5,(e-back)*Complex::new(0.,-0.5));
+            let ratio=u*(c+Complex::new(2.,0.))*(1./3.)/s;
+            assert!((sum-ratio*integral).abs()<=1e-12*integral.abs().max(tau*1e-3),"ω {omega}: {sum:?} against {:?}",ratio*integral);
+            if decay==0.{assert!((ratio.re-1.-simpson_excess(u.re)).abs()<=1e-12&&ratio.im.abs()<=1e-12,"{ratio:?}");}
+            assert!((ratio-Complex::ONE).abs()<=simpson_excess(u.abs())+1e-12,"a complex phase's excess within its modulus': {ratio:?}");
+        }
+        for u in [1e-2,0.1,0.5,1.]{let leading=u*u*u*u/180.;assert!((simpson_excess(u)-leading).abs()<=0.2*u*u*leading+1e-14,"u {u}: {} against {leading}",simpson_excess(u));}
+        for x in [0_f64,0.3,1.,2.5,7.,20.,39.,41.,300.,1e4]{
+            let panels=static_panels(x);let room=QUADRATURE*x.max(1.);let cap=((0.5*x).ceil() as usize).max(1);
+            assert!(x==0.||simpson_excess(x/panels as f64)<=room,"x {x}: {panels} panels");
+            assert!(panels==cap||simpson_excess(x/(panels-1) as f64)>room,"x {x}: {panels} panels, one less meets it");
+        }
+    }
+
+    /// The rule's grid on a state holding every frequency, from a phase over the step below one to hundreds: the impulse within the quadrature's share of the force's size times the step.
+    #[test]
+    fn a_static_grid_holds_the_impulse_within_its_share(){
+        let n=4;
+        for(shift,tau)in [(0.,0.01),(0.,0.05),(400.,0.1),(2000.,0.1),(2000.,0.4)]{
+            let mut c=random(n,&[],53);for a in 2..n{h_of(&mut c,0)[a*n+a]+=Complex::new(shift,0.);}
+            let rule=Segment::new(c.clone(),0.,tau,0.,0.,tau,node_phase());assert!(matches!(rule.how,How::Taylor{..}));
+            let fine=Segment{components:c.clone(),start:0.,spacing:rule.spacing/16.,how:How::Taylor{propagator:exponential(c.hamiltonian(),n,rule.spacing/16.),decay:vec![]},dropped:0.};
+            let psi=state(n,59);let(mut a,mut b)=(psi,psi);let(_,_,mine)=rule.evolve(&mut a,0.,tau,0.);let(_,_,reference)=fine.evolve(&mut b,0.,tau,0.);
+            let size=(0..3).map(|k|column_norm(c.gradient(k),n)).fold(0.,f64::max)*tau;
+            for k in 0..3{assert!((mine[k]-reference[k]).abs()<=QUADRATURE*size,"shift {shift}, τ {tau}, axis {k}: {} against {} of {size}",mine[k],reference[k]);}
+        }
     }
 
     /// A static generator whose fast part the state hardly holds: its spectral grid weighted by the

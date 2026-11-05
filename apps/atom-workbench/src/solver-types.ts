@@ -78,7 +78,7 @@ export interface ApproximationLedger {budget:number;used:number;items:{label:str
 /** The motion of a motion result (ui-design.md §6.20): a single atom in the tweezer moving in 3D,
  * solved semiclassically, its series per lab axis x, y, z (motion.ts MOTION_AXES). At every sample
  * per axis the temperature T = m·Var(v)/k_B (μK) with its standard error and n̄ relative to that
- * axis's trap frequency at the focus (`trapFrequencyKHz`, ω/2π, the one the engine used); the total
+ * axis's trap frequency at the trap's bottom (`trapFrequencyKHz`, ω/2π, the one the engine used), m⟨v²⟩/ħω − ½; the total
  * temperature (T_x + T_y + T_z)/3 with its own standard error, both the engine's; the probability
  * that the atom has left the trap by then; whether the sample lies in the method's validated regime
  * (`classical`: k_B T ≥ SEMICLASSICAL_REGIME ħω on every axis; outside it the result is a reference

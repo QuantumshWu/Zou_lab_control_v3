@@ -247,7 +247,7 @@
 //! gives every trajectory the same share of the variance, so the need that a batch's errors predict
 //! holds for the trajectories still to come; groups of 8 keep most of the hypercube's gain (the
 //! trajectories T needs at early times fall by 10-40% from groups of 1 to groups of 8, little more
-//! beyond) while the jackknife's groups grow with the trajectories. T, ⟨v⟩, n̄ and ⟨r²⟩ are each
+//! beyond) while the jackknife's groups grow with the trajectories. T, ⟨v⟩ and n̄ are each
 //! atom's means over one trap period of the axis around each output (lib.rs `simulate`): its kinetic
 //! energy sloshes into potential energy and back twice a period, so over a period the spread of T
 //! between atoms is their energies' alone.
@@ -270,7 +270,7 @@
 //! output's trajectories: the need is the largest of many outputs' estimated errors, biased up while few groups stand behind it). The estimates at an output
 //! rest on the groups that reach it (stats.rs `summarize`), a standard error's rise at the point where they thin out what the
 //! targets allow. The errors the need takes are each output's over its neighbours as far as they agree (`steady`): the largest of many outputs'
-//! noisy estimates stood 20-35 % above their common value in the standard error, 1.3-1.8 times in the need. No margin is added above the prediction: a batch more costs the device's tail and the statistics, a few
+//! noisy estimates stood 20-35 % above their common value in the standard error, 1.3-1.8 times in the need. An output's reported error, which the app's marks read against the target, is the same number (`reported_error`): the stop and the marks read one. (The default scene's probe over 100 us at 448 trajectories: 2 SE at single outputs read up to 5.3 % over 14-19 us, a mark on 6 of 32 seeds, where the rows' 2 SD over the seeds is 3.8-4.4 % and the most trajectories in [0, 1] can spread, 2 √(p (1 − p)/N), 4.6 %; over its neighbours it reads 4.7-4.9 %, no mark on any seed.) No margin is added above the prediction: a batch more costs the device's tail and the statistics, a few
 //! trajectories' time, where a margin of the estimate's own noise would cost tens of percent of the trajectories.
 //!
 //! # Control variates
@@ -383,7 +383,7 @@ pub const FIRST_GROUPS:u64=32;
 /// its coverage at CONFIDENCE standard errors is that of t with g − 1 degrees of freedom, 93.6 % here against 94.6 %.
 const WHOLE_GROUPS:u64=FIRST_GROUPS/2;
 
-pub const NOT_CONFINED:&str="光镊不约束原子：3D 运动计算光镊中的单个原子，需要在焦点处形成势阱的光镊";
+pub const NOT_CONFINED:&str="光镊不约束原子：3D 运动计算光镊中的单个原子，需要在焦点附近形成势阱的光镊";
 
 /// Distributions along one axis on one grid, at some of the times.
 #[derive(Clone,Debug,PartialEq)]
@@ -394,7 +394,7 @@ pub struct Distributions{pub grid:Vec<f64>,pub samples:Vec<usize>,pub probabilit
 #[derive(Clone,Debug)]
 pub struct Solution{
     pub populations:Vec<Vec<f64>>,
-    /// Per time, the largest standard error of the populations as shown, p (1 − L), and the loss, at least what its trajectories leave open (`reported_error`).
+    /// Per time, the largest standard error of the populations as shown, p (1 − L), and the loss, as the stopping rule reads it, at least what its trajectories leave open (`reported_error`).
     pub sample_errors:Vec<f64>,
     pub temperature_uk:Vec<[f64;3]>,
     pub temperature_errors_uk:Vec<[f64;3]>,
@@ -402,7 +402,7 @@ pub struct Solution{
     pub temperature_total_uk:Vec<f64>,
     pub temperature_total_errors_uk:Vec<f64>,
     pub mean_velocity_mps:Vec<[f64;3]>,
-    /// ω_a/2π (kHz) at the focus of the reference state's trap per lab axis, and n̄ per axis relative to it.
+    /// ω_a/2π (kHz) at the bottom of the reference state's trap per lab axis, and n̄ per axis relative to it (stats.rs `Estimate::occupation`).
     pub trap_frequency_khz:[f64;3],
     pub mean_occupation:Vec<[f64;3]>,
     pub loss_probability:Vec<f64>,
@@ -438,8 +438,8 @@ fn weight_at(temperature:[f64;3],frequencies:[f64;3])->f64{
 }
 /// An output's largest standard error of what is shown of the atom (# Batches): a population as the probability p (1 − L) that it is in that state and held, its error among the held atoms times the held share, and the loss's.
 fn shown_error(e:&Estimate)->f64{let held=(1.-e.loss).max(0.);e.population_errors.iter().map(|&x|held*x).fold(e.loss_error,f64::max)}
-/// An output's reported standard error: `shown_error`, at least what its trajectories leave open, in standard errors (`unseen`): a reading of all lost says no more than that.
-fn reported_error(e:&Estimate)->f64{shown_error(e).max(unseen(e.trajectories)/CONFIDENCE)}
+/// An output's reported standard error (# Batches): the statistic the stopping rule and the flags read (`statistics_of`), at least what its trajectories leave open (`unseen`: a reading of all lost says no more than that), in standard errors. The app's marks read it against the target: one number for the stop and the marks.
+fn reported_error(statistic:f64,trajectories:f64)->f64{statistic.max(unseen(trajectories))/CONFIDENCE}
 /// An output's statistical errors at CONFIDENCE: the populations' as shown and the loss's largest (`shown_error`, absolute) and T's largest
 /// relative one over the axes, at the atoms the run holds (# Batches), with its target's weight there (`regime`).
 #[derive(Clone,Copy,Debug)]
@@ -1297,7 +1297,7 @@ fn carried(from:&Model,to:&Model,t:&Trajectory)->Trajectory{
 /// explicit states (the generator's −2 Im of their diagonal), its norm restored.
 fn relaxed(model:&Model,settings:&Settings,states:Vec<Trajectory>)->Vec<Trajectory>{
     let slowest:Vec<f64>=(0..model.clusters()).map(|k|{if !model.mixed(k){return 0.;}let(n,n0)=(model.dimension(k),model.ground_dimension(k));
-        let g=model.generator(k,&model.point([0.;3],[0.;3]),0.);(n0..n).map(|e|-2.*g.hamiltonian[e*n+e].im).fold(f64::INFINITY,f64::min)}).collect();
+        let g=model.generator(k,&model.point(model.centre(),[0.;3]),0.);(n0..n).map(|e|-2.*g.hamiltonian[e*n+e].im).fold(f64::INFINITY,f64::min)}).collect();
     let engine=Engine::new(model,settings.clone());
     states.into_par_iter().map(|t|{let decay=slowest[t.cluster];if !(decay>0.&&decay.is_finite()){return t;}
         let mut x=engine.coast(&t,2.*(1./BIAS_VARIANCE).ln()/decay,1);let n=model.dimension(x.cluster);
@@ -1790,7 +1790,7 @@ pub(crate) const MATRIX_NS:f64=0.469;const SPECTRAL_N3:f64=60.;const CIS_NS:f64=
 fn exact_step(engine:&Engine,t:&Trajectory,x:&StateWork)->[f64;2]{
     let(model,s)=(engine.model,&engine.settings);let p=engine.probe(t.cluster,&model.point(t.r,t.kappa),t.time,s.dt,&t.psi);
     let n=x.n as f64;let(n2,n3)=(n*n,n*n*n);let pairs=p.beats.len() as f64;
-    let terms=series(1.,node_phase(),f64::EPSILON).1 as f64;let nodes=p.weighted.unwrap_or(p.nodes) as f64;
+    let terms=series(1.,1.,f64::EPSILON).1 as f64;let nodes=p.weighted.unwrap_or(p.nodes) as f64;
     // Per path: the build's multiply-adds, a node's multiply-adds and phases.
     let(build,node,turns)=match p.path{
         "spectral"=>(SPECTRAL_N3*n3,4.*n2+n,0.),
@@ -1972,13 +1972,14 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
     // Each output's source: itself where an atom is held (t = 0 always), else the last that held one.
     let held=|i:usize|i==0||estimates[i].loss<1.;let read=|i:usize|i==0||reads_temperature(&estimates[i]);
     let(source,measured)=(last_holding(estimates.len(),&held),last_holding(estimates.len(),&read));
+    let statistic=statistics_of(estimates,frequencies);
     let mut flag=|note:String|ledger.flagged=Some(match ledger.flagged.take(){Some(r)=>format!("{note}；{r}"),None=>note});
     if let Some(gone)=(0..estimates.len()).find(|&i|!held(i)){flag(format!("{} 起已无原子被俘获（丢失概率 1）：此后的布居、温度与分布沿用 {} 的值，仅供参考",when(times[gone]),when(times[source[gone]])));}
     if let Some(few)=(0..estimates.len()).find(|&i|held(i)&&!read(i)){flag(format!("{} 起有时刻被俘获的原子不足两个：这些时刻的温度沿用此前的值，误差未知",when(times[few])));}
     let carried=|f:&dyn Fn(&Estimate)->[f64;3]|->Vec<[f64;3]>{measured.iter().map(|&j|f(&estimates[j])).collect()};
     Solution{
         populations:source.iter().map(|&j|if j==0{first.clone()}else{estimates[j].populations.clone()}).collect(),
-        sample_errors:estimates.iter().enumerate().map(|(i,e)|if i==0{0.}else{reported_error(e)}).collect(),
+        sample_errors:estimates.iter().zip(&statistic).enumerate().map(|(i,(e,s))|if i==0{0.}else{reported_error(s.population,e.trajectories)}).collect(),
         temperature_uk:carried(&|e|e.temperature),
         temperature_errors_uk:estimates.iter().enumerate().map(|(i,e)|if read(i){e.temperature_error}else{[f64::INFINITY;3]}).collect(),
         temperature_total_uk:measured.iter().map(|&j|estimates[j].temperature_total).collect(),
@@ -2082,9 +2083,8 @@ mod tests{
         let(need,weight)=predicted(&none,&[[0.;2];3],[0.;2],32.);assert!((need-n).abs()<1e-9&&weight==1.,"{need} {weight}");
         let read=[Statistic{population:0.,temperature:0.,weight:1.},Statistic{population:0.1,temperature:0.,weight:1.},Statistic{population:0.,temperature:0.,weight:1.}];
         let(reach,_)=predicted(&read,&[[0.;2];3],[0.;2],32.);assert!((reach-128.).abs()<1e-9,"{reach}");
-        let mut e=Estimate::default();e.trajectories=76.;e.loss=1.;e.population_errors=vec![0.;2];
-        assert!((CONFIDENCE*reported_error(&e)-POPULATION_TARGET).abs()<1e-15);
-        e.loss_error=0.1;assert_eq!(reported_error(&e),0.1);
+        assert!((CONFIDENCE*reported_error(0.,76.)-POPULATION_TARGET).abs()<1e-15);
+        assert_eq!(reported_error(CONFIDENCE*0.1,76.),0.1);
     }
     /// A read pays for what it could move of the run (`read_pays`): the resonant probe's PGC at 1.09 limits does not, the retro-reflected tweezer at 14.7 does, nothing within the limit does, and a stand already beyond asks for more.
     #[test]

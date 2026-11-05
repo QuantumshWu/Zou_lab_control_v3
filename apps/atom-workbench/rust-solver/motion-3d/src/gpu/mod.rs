@@ -47,15 +47,15 @@ const LAUNCH_MS:f64=60.;
 /// windows' held flag and means) and the most intervals of a launch (its MOST_INTERVALS: the room of
 /// each trajectory's records, which the block sums at the launch's end).
 pub(crate) const WARPS:usize=TASK as usize;
-pub(crate) const RECORD:usize=91;
-pub(crate) const SLOT_RECORD:usize=70+3*2*8;
+pub(crate) const RECORD:usize=85;
+pub(crate) const SLOT_RECORD:usize=70+3*2*6;
 pub(crate) const MOST_INTERVALS:usize=64;
 /// Where an output's sums (the kernel's record) keep the held twin's, the folded excited population's,
 /// the motion's and the harmonic control's (`sums_of`).
 pub(crate) const TWIN:usize=35;
 pub(crate) const FOLDED:usize=69;
 pub(crate) const MOTION:usize=70;
-pub(crate) const HARMONIC:usize=82;
+pub(crate) const HARMONIC:usize=76;
 /// The profiled kernel's counters per trajectory (its SPANS): the cycles of the point, the generator,
 /// the exponential, the evolution with the kick, the jumps -- of them the exact responses, the
 /// photons' matrices with the classes' weights and the absorbed light --, the loss, the steps, the
@@ -323,7 +323,7 @@ impl Gpu{
 }
 
 /// A batch's motion windows (lib.rs `Windows`): half a trap period per lab axis, the reach past the
-/// last output, the kernel's rings (per axis a power of two of at least 2h + steps + 1 steps of five
+/// last output, the kernel's rings (per axis a power of two of at least 2h + steps + 1 steps of three
 /// sums) and its intervals.
 struct Windows{outputs:usize,steps:usize,listed:Vec<usize>,half:[usize;3],reach:usize,ring:[usize;3],ring_at:[usize;3],ring_stride:usize,intervals:usize}
 impl Windows{
@@ -331,7 +331,7 @@ impl Windows{
         if listed.len()>MOST_LISTED{return Err("too many listed outputs".into());}
         let half:[usize;3]=std::array::from_fn(|a|{let w=settings.lab[a];if settings.average&&w>0.{(std::f64::consts::PI/w/settings.dt).round() as usize}else{0}});
         let reach=half.into_iter().max().unwrap();let ring=half.map(|h|(2*h+steps+1).next_power_of_two());
-        Ok(Windows{outputs,steps,listed:listed.to_vec(),half,reach,ring,ring_at:[0,5*ring[0],5*(ring[0]+ring[1])],ring_stride:5*(ring[0]+ring[1]+ring[2]),intervals:outputs+reach.div_ceil(steps)})
+        Ok(Windows{outputs,steps,listed:listed.to_vec(),half,reach,ring,ring_at:[0,3*ring[0],3*(ring[0]+ring[1])],ring_stride:3*(ring[0]+ring[1]+ring[2]),intervals:outputs+reach.div_ceil(steps)})
     }
 }
 
@@ -341,7 +341,7 @@ fn sums_of(x:&[f64],trajectories:f64)->Sums{
     let mut s=Sums::zero();s.trajectories=trajectories;s.held=x[0];s.profile=x[1];s.doppler=x[2];s.folded=x[FOLDED];
     s.populations.copy_from_slice(&x[3..3+STATES]);s.twin.copy_from_slice(&x[TWIN..TWIN+STATES]);s.twin2=[x[TWIN+STATES],x[TWIN+STATES+1]];
     for a in 0..3{
-        let m=&x[MOTION+4*a..][..4];s.kappa[a]=m[0];s.kappa2[a]=m[1];s.position[a]=m[2];s.position2[a]=m[3];
+        let m=&x[MOTION+2*a..][..2];s.kappa[a]=m[0];s.kappa2[a]=m[1];
         let h=&x[HARMONIC+3*a..][..3];s.harmonic[a]=[h[0],h[1],h[2]];
     }
     s
@@ -385,7 +385,7 @@ impl program::State{
         fn unit<const N:usize>(t:&crate::engine::Trajectory)->(f64,[[f32;2];N]){let norm:f64=t.psi.iter().map(|z|z.norm_sqr()).sum();let scale=1./norm.sqrt();
             (norm.ln(),std::array::from_fn(|x|[(t.psi[x].re*scale) as f32,(t.psi[x].im*scale) as f32]))}
         let((logn,psi),(twin_logn,held))=(unit::<MAXM>(t),unit::<MAXN>(twin));
-        program::State{q:along(t.r),p:along(t.kappa),time:t.time,logn,threshold:t.threshold,log_threshold:t.threshold.ln(),prefix:[0.;15],
+        program::State{q:along(t.r),p:along(t.kappa),time:t.time,logn,threshold:t.threshold,log_threshold:t.threshold.ln(),prefix:[0.;9],
             q0:along(settings.about_site(t.r)),p0:along(t.kappa),twin_logn,twin_threshold:twin.threshold,twin_log_threshold:twin.threshold.ln(),
             psi,twin:held,cluster:t.cluster as i32,jumps:t.jumps as i32,death:if t.alive{-1}else{0},
             index:t.index as u32,twin_cluster:twin.cluster as i32,twin_jumps:twin.jumps as i32,beats:t.beats as f32,interval:0,step:-1}
