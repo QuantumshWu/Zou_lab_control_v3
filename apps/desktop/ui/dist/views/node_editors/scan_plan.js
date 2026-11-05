@@ -404,6 +404,7 @@ export class ScanPlanEditor {
     add = button("Add axis", () => this.addRow(false));
     addManual = button("Add manual axis", () => this.addRow(true));
     axes = element("div", "scan-axes");
+    unread = element("p", "field-error");
     problem = element("p", "field-error");
     summary = element("p", "note wrap");
     apiTitle = sectionTitle("API values");
@@ -435,7 +436,7 @@ export class ScanPlanEditor {
         // keeps for it (labelFloor), never setting it: the column, and every field
         // after it, stays put when a pulse that binds some is chosen.
         this.apiForm.dataset.labelRoom = "";
-        this.root.append(sectionTitle("Scan plan", this.add, this.addManual), this.axes, this.problem, this.summary, this.apiTitle, this.apiForm, this.parked, this.apiNote);
+        this.root.append(sectionTitle("Scan plan", this.add, this.addManual), this.axes, this.unread, this.problem, this.summary, this.apiTitle, this.apiForm, this.parked, this.apiNote);
         if (readOnly)
             for (const node of [this.add, this.addManual, this.apiTitle, this.apiForm, this.parked, this.apiNote])
                 node.hidden = true;
@@ -502,6 +503,8 @@ export class ScanPlanEditor {
         this.addManual.disabled = Boolean(locked);
         for (const view of this.rows)
             view.locked = Boolean(locked);
+        setText(this.unread, facts.unread || "");
+        this.unread.hidden = !facts.unread;
         setText(this.problem, facts.problem);
         this.problem.hidden = !facts.problem;
         setText(this.summary, facts.problem ? "" : facts.summary);

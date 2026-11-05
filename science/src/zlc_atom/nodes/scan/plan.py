@@ -294,8 +294,14 @@ def label_device_scan_ports(
 def scan_ports_for_devices(
     tunables: Mapping | None, *, units: Mapping[str, str] | None = None,
     device_labels: Mapping[str, str] | None = None,
+    unread: dict[str, str] | None = None,
 ) -> tuple[ScanPort, ...]:
     """Every port the bench's tunable devices offer, from their own words.
+
+    A device that cannot answer raises, unless ``unread`` is given: then it
+    offers nothing and that dict says why, by device key.  An editor gives it,
+    since one instrument failing a read says nothing about the other knobs; a
+    run does not, since it cannot move a knob it cannot read.
 
     ``tunables`` is already the tunable set -- ``tunable_devices`` chose it
     by ``is_tunable`` -- so each device is asked for its
@@ -314,7 +320,14 @@ def scan_ports_for_devices(
     ports: list[ScanPort] = []
     for key in sorted(dict(tunables or {})):
         device = tunables[key]
-        for tunable in device.tunable_fields():
+        try:
+            fields = device.tunable_fields()
+        except Exception as error:  # noqa: BLE001 -- the instrument's or its link's, of any type
+            if unread is None:
+                raise
+            unread[key] = str(error)
+            continue
+        for tunable in fields:
             if not isinstance(tunable, TunableField):
                 raise TypeError("device tunable_fields must contain TunableField values")
             field = tunable.metadata
