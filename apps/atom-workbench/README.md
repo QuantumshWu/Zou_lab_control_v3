@@ -116,7 +116,10 @@ compiled by a pinned NVRTC 12.0 (`motion-3d/scripts/ptx.ps1`; a test checks it
 against the source), and loads `nvcuda.dll` at run time, the driver API alone.
 Without such a GPU, with an older driver or with a model beyond the kernel the
 solve runs on the CPU and `diagnostics.deviceNote` says why; `diagnostics.device`
-is the device used. The worker keeps its CUDA context for every later solve.
+is the device used. The worker keeps its CUDA context for every later solve. The
+driver compiles the PTX at its first load, and after a driver update (a minute or
+two): the worker's `gpu` operation answers when it has, and the window waits
+frozen meanwhile, a moving bar and the elapsed time on it (docs/ui-design.md §6.24).
 
 Every request asks for the same absolute population error,
 `populationTolerance: 0.01` on the probability scale (1%); it is not a user

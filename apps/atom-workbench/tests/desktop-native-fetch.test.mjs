@@ -15,6 +15,20 @@ const solve=(adapter,body=input(),signal)=>adapter.fetch('http://127.0.0.1:4180/
 async function posted(worker){await tick();return worker.messages.filter(message=>message.kind==='solve').at(-1);}
 const line=chunk=>JSON.parse(new TextDecoder().decode(chunk).trim());
 
+test('a GPU start has no deadline, keeps its answer, and ends with the adapter',async()=>{
+ const f=fixture({timeoutMs:5});try{
+  const pending=f.adapter.fetch('http://127.0.0.1:4180/api/gpu',{method:'POST'});await tick();
+  const message=f.worker.messages.at(-1);assert.equal(message.kind,'gpu');
+  // Far past the solves' transport deadline it stands.
+  await new Promise(resolve=>setTimeout(resolve,40));let settled=false;void pending.finally(()=>{settled=true;});await tick();assert.equal(settled,false);
+  f.worker.emit({kind:'response',channel:message.channel,status:200,data:{reason:'没有 NVIDIA 显卡'}});
+  const response=await pending;assert.equal(response.status,200);assert.equal((await response.json()).reason,'没有 NVIDIA 显卡');
+  // A model Worker that dies takes the start with it: nothing waits for ever.
+  const lost=f.adapter.fetch('http://127.0.0.1:4180/api/gpu',{method:'POST'});await tick();f.worker.crash('Worker crashed');
+  await assert.rejects(lost,/Worker crashed/);
+ }finally{await f.adapter.dispose();}
+});
+
 test('native JSON response preserves identity and other URL paths use the original fetch',async()=>{
  const f=fixture();try{
   assert.equal(await(await f.adapter.fetch('/data.json')).text(),'fallback');assert.equal(f.fallback.length,1);

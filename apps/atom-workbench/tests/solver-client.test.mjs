@@ -30,6 +30,16 @@ function meanFixture(scene,request){return {...fixture(scene,scene.dynamics,[0])
 function checkpoint(scene,request,sampleErrors){const settings=scene.dynamics,timesUs=[0,settings.durationUs/2,settings.durationUs],states=buildFullMasterModel(scene,settings).states;
  return {...nativeResult({states,initialIndex:states.findIndex(s=>s.id===settings.initialStateId),timesUs,sampleErrors}),assumptions:['test assumption'],
    service:{protocol:HTTP_PROTOCOL,nativeProtocol:NATIVE_PROTOCOL,capabilities:[FULL_MODEL_SCHEMA]},progress:true,request};}
+test('a GPU start says why the GPU cannot run; a service that does not serve it says nothing; a worker that ended rejects it',async()=>{
+ const reply=(status,body)=>new Response(JSON.stringify(body),{status});
+ const answers=[reply(200,{}),reply(200,{reason:'没有 NVIDIA 显卡'}),reply(405,{error:'Method not allowed'}),reply(503,{error:'Rust 后端退出。',code:'solver-unavailable'})];
+ const calls=[],client=new DynamicsClient({baseUrl:'http://solver',clientId:'gpu-start',fetch:(url,init)=>{calls.push([url,init.method]);return Promise.resolve(answers.shift());}});
+ assert.equal(await client.startGpu(),undefined);
+ assert.equal(await client.startGpu(),'没有 NVIDIA 显卡');
+ assert.equal(await client.startGpu(),undefined);
+ await assert.rejects(client.startGpu(),/Rust 后端退出/);
+ assert.deepEqual(calls[0],['http://solver/api/gpu','POST']);
+});
 test('a checkpoint arrives before the final result and stays available when evolution fails',async t=>{
  const mock=transport(),progress=[],client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'partial-mean'});t.after(()=>client.dispose());
  const scene=scenario();let finished=false;const pending=client.solve(scene,scene.dynamics,{onProgress:value=>progress.push(value)});const rejected=assert.rejects(pending,/unstable evolution/).then(()=>finished=true);
