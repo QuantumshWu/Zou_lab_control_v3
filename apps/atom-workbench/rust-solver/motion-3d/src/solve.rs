@@ -55,7 +55,7 @@
 //! statistic they bind on -- a mean charge over the outputs under-predicted the D1 gray molasses' need twice over,
 //! its early transient), over the run: continuous in its estimates (# Shares). The least is taken,
 //! one keeping more of the model (its fourth order, a rung) only for a saving beyond the need's own relative
-//! error (`need_error`, as a finer step, `kept`); the ladder's rungs are costed only where the folded models'
+//! error (`need_error`; the rule of every spend here, cost.rs `pays`, as a finer step's, `kept`); the ladder's rungs are costed only where the folded models'
 //! cost would fall, without the estimates a rung can change (their totals at the pilot's step with only
 //! `Candidate::fixed`), by more than that error and a rung's least check: below, no rung -- more of the model explicit,
 //! more work per step, at least one doubling -- can win or pay for its check. A rung's own check, as the pilot's model's at
@@ -1679,8 +1679,8 @@ pub fn drift(model:&Model,settings:&dyn Fn(usize)->Settings,steps:usize,probes:&
             let at=count as f64/probes.states[..count].iter().map(|t|1./limit(t.time+reach as f64*dt)).sum::<f64>();
             let largest=axes.into_iter().max_by(|a,b|standing(*a,at).total_cmp(&standing(*b,at))).unwrap();
             let(layers,top)=((count as f64/total as f64).sqrt(),most.excess.max(1.));let could=axes.iter().map(|x|x[0]-x[1]*layers).fold(0.,f64::max)/at;
-            let pays=read_pays((((2*count).min(total)-count)*reach) as f64,run,could,top);
-            if could<=top||!pays||count==total||(largest[0]-largest[1]>at&&largest[1]<=BIAS_SHARE*largest[0]&&count>first){break(largest,at);}
+            let further=read_pays((((2*count).min(total)-count)*reach) as f64,run,could,top);
+            if could<=top||!further||count==total||(largest[0]-largest[1]>at&&largest[1]<=BIAS_SHARE*largest[0]&&count>first){break(largest,at);}
             count=(2*count).min(total);
         };
         let stands=standing(largest,at);

@@ -3,7 +3,9 @@
 //! # The rule
 //! Every decision that spends work for a saving is `pays`: the spend, what it could save, and the uncertainty of that saving, all in the table's unit.
 //! The uncertainty is the prediction's own where it has one, the need's relative error (solve.rs `need_error`) times the predicted cost. What each gate reads differs for a reason, stated at the gate:
-//! a check already made is no longer a spend, a count of products or steps has no error of its own, and a decision made before any pilot (the tables' refinement) has no need to read yet.
+//! a check already made is no longer a spend; a count of products has no error of its own (the half step); a decision made before any pilot has no need's error to read yet (the tables' refinement); and a read that guards an accuracy takes no margin against itself (`read_pays`).
+//! Beside the rule stand what is no trade of work: the shares (a block taken unmixed, ground.rs `MIXING_SHARE`, an error the ledger books, decided before a model's layouts exist to cost it), the ladder's rungs that keep what no drive takes past the fold rule's own threshold (ground.rs `Ground::ladder`, read before
+//! a rung's tables tell what it would spend) and the first batch's size (solve.rs # Batches).
 //!
 //! # The unit
 //! The nanosecond of one performance core of the Core Ultra 7 265H, the machine the table was measured on. No timing enters a solve: every cost is a count of work at the table's rates, so that a request gives
@@ -37,3 +39,15 @@ pub(crate) fn pays(spend:f64,could_save:f64,uncertainty:f64)->bool{spend+uncerta
 pub(crate) fn advance_work(w:&Work)->f64{ADVANCE_NS+MULTIPLY_ADD_NS*(w.generator+w.force)+PAIR_NS*w.pairs as f64}
 /// A cluster's jump.
 pub(crate) fn jump_work(w:&Work)->f64{JUMP_NS+PHOTON_MULTIPLY_ADD_NS*w.photons+ABSORPTION_MULTIPLY_ADD_NS*w.absorption}
+
+#[cfg(test)]
+mod tests{
+    use super::pays;
+    /// A spend pays only for a saving beyond it and the saving's uncertainty; a spend made is none, and no saving is none.
+    #[test]
+    fn a_spend_pays_only_beyond_itself_and_the_uncertainty(){
+        assert!(pays(1.,2.,0.)&&!pays(2.,2.,0.)&&!pays(1.,2.,1.)&&pays(1.,2.,0.5));
+        assert!(pays(0.,1.,0.)&&!pays(0.,0.,0.)&&!pays(0.,-1.,0.));
+        assert!(!pays(1.,f64::NAN,0.),"a saving that cannot be read pays nothing");
+    }
+}
