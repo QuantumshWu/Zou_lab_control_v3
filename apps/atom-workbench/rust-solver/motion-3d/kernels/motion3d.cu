@@ -2009,7 +2009,8 @@ __device__ __forceinline__ float2 form_part(const float2 (&a)[8],const float2 (&
     float2 s=zero2();
     #pragma unroll
     for(int j=0;j<8;j++)s+=a[j]*xb[j];
-    return conj(xr)*s;
+    // conj(xr)*s with its fused products named: of a sum of two NVRTC fuses either, and unrelated edits flipped its choice here, the digits of the step's first force with it (PGCP_10's T[1] by 2.5e-11, its paths apart later).
+    return make_float2(__fmaf_rn(xr.x,s.x,xr.y*s.y),__fmaf_rn(xr.x,s.y,-(xr.y*s.x)));
 }
 // ‖x‖² of a lane-replicated vector.
 __device__ __forceinline__ float vnorm(float2 x,int lane){return warp_sum(lane<16?norm2(x):0.f);}
