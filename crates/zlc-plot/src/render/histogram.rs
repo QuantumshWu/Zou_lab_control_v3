@@ -11,7 +11,7 @@ use std::sync::Arc;
 use super::core::{real_value, relim_mode, text_value, truthy, Kind, Renderer};
 use super::curve::{apply_smart_ticks, series_identity, series_slot};
 use super::labels::{quantity_label, state_label};
-use super::limits::{relim_retains, select_display_limits};
+use super::limits::select_display_limits;
 use super::mpl::axes::{BarArtist, Child, ChildId};
 use crate::configuration::{DisplayState, PlotSpec, Value};
 use crate::kinds::RelimMode;
@@ -217,12 +217,14 @@ impl Renderer {
             let max = |values: &[f64]| values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             let py_max = |a: f64, b: f64| if b > a { b } else { a };
             let peak = if finite.is_empty() { 0.0 } else { max(&finite) };
+            let tight = mode == RelimMode::Tight;
             let target = if logarithmic {
-                if positive.is_empty() { (0.8, 1.2) } else { (py_max(min(&positive) * 0.8, f64::MIN_POSITIVE), py_max(max(&positive) * 1.2, 1.0)) }
+                // The floor stays below the smallest count even when tight: a bar standing on it would have no height.
+                if positive.is_empty() { (0.8, 1.2) } else { (py_max(min(&positive) * 0.8, f64::MIN_POSITIVE), py_max(max(&positive) * if tight { 1.0 } else { 1.2 }, 1.0)) }
             } else {
-                (0.0, if peak > 0.0 { peak * 1.08 } else { 1.0 })
+                (0.0, if peak > 0.0 { peak * if tight { 1.0 } else { 1.08 } } else { 1.0 })
             };
-            let force = previous.is_none_or(|(_, held)| held != semantics) || !relim_retains(mode, false);
+            let force = previous.is_none_or(|(_, held)| held != semantics) || tight;
             Some(if force { target } else {
                 let ((prior_low, prior_high), _) = previous.unwrap();
                 let (expand, expanded) = if logarithmic {
