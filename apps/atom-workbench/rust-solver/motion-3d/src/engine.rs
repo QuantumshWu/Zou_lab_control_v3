@@ -45,11 +45,17 @@
 //! a term whose residual its frame keeps: model.rs `Components`) changes within the step. Holding
 //! either at the step's middle ties the motion's step to the internal state's pace, so the step takes
 //! the internal state exactly instead -- multirate: the motion's step keeps its own size. The flow for
-//! dt/2 to (r_h, κ_h); there, the position held, every cluster the trajectory visits in the step takes
-//! its generator's components once (`Segment`), H(t) = H₀ + Σ_j e^{iΩ_j t} H_j, and ψ is propagated
-//! through the whole step on a grid of spacing δ from the step's start, every jump at the root of
-//! ‖ψ(t)‖² = θ (safeguarded Newton on ln‖ψ‖², whose derivative is −⟨ψ|i(H − H†)|ψ⟩/‖ψ‖²), the
-//! trajectory going on from the state the jump left in the cluster it landed in:
+//! dt/2 to (r_h, κ_h); there, the position held, the cluster takes its generator's components once
+//! (`Segment`), H(t) = H₀ + Σ_j e^{iΩ_j t} H_j, and ψ is propagated through the step on a grid of spacing δ
+//! from its start, to the root of ‖ψ(t)‖² = θ (safeguarded Newton on ln‖ψ‖², whose derivative is
+//! −⟨ψ|i(H − H†)|ψ⟩/‖ψ‖²) where it has one. A jump's step is then redone to that root, as a cluster of ground
+//! states' is (`Engine::step`): flow, evolution and kick of that length, the jump at the place they reach, the rest of
+//! the step a step of its own from the state the jump left, in the cluster it landed in. Held through the jump, the two
+//! states' forces act at the one r_h, against r_h + v (t* − τ)/2 and r_h + v t*/2: an error of the work, per jump
+//! (C₁ − C₂) v² t*(τ − t*)/2 with C the states' curvatures of ⟨ψ|H(r)|ψ⟩ at their fixed ψ -- a dressed ground state's a
+//! light shift's (2k)², the bare state a jump leaves none -- that heats as v², a friction of its own against the light's. The
+//! 1D σ⁺σ⁻ molasses at 3 mW/cm², −6 Γ (5 ms, 2048 atoms) stood at T_x 16.8 ± 0.9 µK at a step of 1.35 us and 32 ± 2 at 2 us against 10.6 ± 0.3 at small steps, where a
+//! cluster of ground states' step takes 9.2 ± 0.5 and 11.1 ± 0.8; redone, 10.0 ± 0.5 and 10.8 ± 0.6. No check of the jump-free flow sees it. On a grid:
 //! - a static generator through its eigendecomposition H = R Λ R⁻¹ (eigen.rs), exact at any time,
 //!   where its rounding -- R's condition times the double precision, grown by the phases over the
 //!   step -- is within the exponentials' share (`Settings::truncation`); near an exceptional point by
@@ -1001,24 +1007,26 @@ impl<'a> Engine<'a>{
         (n0,nh,n1,place,kick,middle)
     }
 
-    /// The exact step of τ (module documentation): the flow for τ/2; at the held point every
-    /// cluster's generator at the middle time once, the internal state propagated exactly through
-    /// the jumps (`jumps` false: none, the step-doubling check's), the impulse along it; the kick; the
-    /// flow for τ/2. The kick's momentum (the light's and the trap's anharmonic part).
+    /// The exact step of τ (module documentation): the flow for τ/2; at the held point the cluster's
+    /// generator at the middle time once, the internal state propagated exactly (`jumps` false: with no
+    /// jump, the step-doubling check's), the impulse along it; the kick; the flow for τ/2. The kick's
+    /// momentum (the light's and the trap's anharmonic part). Where ‖ψ‖² reaches the threshold in it, the
+    /// step is redone to that crossing, the jump made at the place it reaches and the rest of the step
+    /// taken from there (the kick then none of the caller's: only the check, without jumps, reads it).
     fn exact(&self,t:&mut Trajectory,tau:f64,exact:bool,jumps:bool)->[f64;3]{
         let(m,s)=(self.model,&self.settings);
+        let before=jumps.then(||t.clone());
         let reference=self.reference(t.r);let(c,w)=reference;
         self.flow(t,0.5*tau,reference);
         let point=m.point(t.r,t.kappa);let start=t.time;
-        let mut segments:Vec<(usize,Segment)>=vec![];let mut impulse=[0.;3];let mut elapsed=0.;
-        while elapsed<tau{
-            let k=t.cluster;
-            if !segments.iter().any(|x|x.0==k){let segment=Segment::new(m.components(k,&point),start,tau,s.truncation,s.beats,s.horizon,s.node_phase);t.beats=t.beats.max(segment.dropped/tau);segments.push((k,segment));}
-            let segment=&segments.iter().find(|x|x.0==k).unwrap().1;
-            let(taken,jumped,part)=segment.evolve(&mut t.psi,start+elapsed,tau-elapsed,if jumps{t.threshold}else{0.});
-            for a in 0..3{impulse[a]+=part[a];}elapsed+=taken;
-            if !jumped{break;}
-            t.time=start+elapsed;self.jump(t,point.r,t.time,exact);
+        let segment=Segment::new(m.components(t.cluster,&point),start,tau,s.truncation,s.beats,s.horizon,s.node_phase);t.beats=t.beats.max(segment.dropped/tau);
+        let(taken,jumped,impulse)=segment.evolve(&mut t.psi,start,tau,if jumps{t.threshold}else{0.});
+        if let(true,Some(from))=(jumped,before){
+            let beats=t.beats;*t=from;t.beats=beats;
+            self.exact(t,taken,exact,false);self.jump(t,t.r,t.time,exact);
+            if taken<tau{self.exact(t,tau-taken,exact,true);}
+            t.time=start+tau;
+            return [0.;3];
         }
         let harmonic=self.harmonic(std::array::from_fn(|a|t.r[a]-c[a]));let mut kick=[0.;3];
         for a in 0..3{if s.free[a]{kick[a]=impulse[a]-tau*w*harmonic[a];t.kappa[a]+=kick[a];}}

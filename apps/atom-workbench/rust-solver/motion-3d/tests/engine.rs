@@ -1014,16 +1014,16 @@ fn a_tweezer_s_vector_shift_across_the_field_moves_the_responses_to_the_static_b
     assert!(worst.0<=1e-2+5e-3,"the frozen atom's populations {:.4} off the core's at {} us",worst.0,worst.1);
 }
 
-/// Tables whose function is not smooth on any grid's scale where the atoms go -- a folded drive's pole, the PGC with a
-/// resonant probe with every drive folded -- stop refining at the first doubling that does not shrink the error, whose next
-/// one is predicted to save nothing (model.rs `tabulate`), the last grid kept and its error booked: 33 nodes per axis, its error 1.8.
+/// A table's relative interpolation error is no error where the table itself is round-off (model.rs `interpolation_error`):
+/// the PGC with a resonant probe with every drive folded holds Raman groups of 1e-53, products of two round-offs a selection
+/// rule leaves, whose "error" of 1.8 read as a pole no grid resolves and stopped its refinement at 33 nodes. What holds anything
+/// interpolates within 1e-3 there, and the refinement goes on or ends by what it saves.
 #[test]
-fn tables_that_do_not_converge_stop_refining_with_their_error_booked(){
+fn a_table_of_round_off_is_no_error(){
     let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..101).map(|i|i as f64).collect();
     let model=Model::with(&r,f64::INFINITY).unwrap();
-    println!("refined to {:?} nodes per axis, its error {:.3}, stalled {}",model.table_limit,model.table_error,model.table_stalled);
-    assert!(model.table_stalled&&model.table_limit.is_some(),"refined to {:?} nodes per axis (stalled {})",model.table_limit,model.table_stalled);
-    assert!(model.table_error>0.,"the error booked: {:.2e}",model.table_error);
+    println!("limit {:?}, its error {:.3e}, stalled {}",model.table_limit,model.table_error,model.table_stalled);
+    assert!(!model.table_stalled&&model.table_error<1e-3&&model.table_error>0.,"its error {:.2e}, stalled {}",model.table_error,model.table_stalled);
 }
 
 /// The retro-reflected tweezer with a resonant probe (tests/fixtures/retro_probe_motion.json, the validation's F3
