@@ -1167,10 +1167,8 @@ function solverDetails():string{
     // p̄(T) at a T shorter than this is still relaxing.
     ...(result.mean?.slowestRelaxationUs!=null?[readout('最慢弛豫时间',(()=>{const unit=timeDisplayUnit(result.mean.slowestRelaxationUs!);return withUnit(result.mean.slowestRelaxationUs!*unit.factor,unit.name,{digits:3});})())]:[]),
     // Its approximation ledger: the approximations' total against the population target, and whether
-    // an output's total error exceeds a target (`flagged`); then the budget its a-priori choices are
-    // made against, which does not bound the total (the η² of the excited states' elimination is in it).
+    // an output's total error exceeds a target (`flagged`).
     ...(motion?[readout('近似误差',approximationTotal(motion.approximations,accuracy?.requestedTolerance)),
-      readout('取舍预算',`${errorPercent(motion.approximations.budget)}（折叠或保留、平面波或强度维度、一阶或精确多普勒）`),
       ...(motion.approximations.flagged?[`<p class="horizon-note">${esc(motion.approximations.flagged)}</p>`]:[]),
       // What the setup's initial ensemble leaves out: true of the setup, no error of the solve's, so no warning; beside the ledger.
       ...(motion.approximations.note?[`<p class="ledger-note">${esc(motion.approximations.note)}</p>`]:[])]:[]),
