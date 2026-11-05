@@ -254,6 +254,7 @@
 //! An output the pilot under-predicts gets its trajectories in the next batch, which pass every earlier output too.
 //! On the GPU a wave's time grows with its trajectories (a laptop's RTX 5070 at the 3D PGC's step: 2.1 s for 8, 2.7 for 256, 3.96 for 576 -- its clock falls with the load, its cycles per step about stay), and a wave costs at least a trajectory's time as far as it goes, so that its first
 //! wave runs what the pilot predicts is needed and the need's own error (`first_ends`), each group as far as the reach wants it: a group that stops early leaves the others its clock. (Over 12 seeds: the need alone ran a second wave on 4 of DEFAULT's and 7 of THREE's, against 1 and 2 with its error; twice its error took the kernel's mean up 4-17 % on GMD1C, TET and PGC3D.)
+//! T rests on the atoms still held, and its statistic stands at the atoms the run holds, its relative error times the root of the held share: the same error on a share f of the atoms would ask 1/f the trajectories, for the T of atoms the light has mostly blown out (a probe at 100 mW/cm², 97 % lost by 25 us: 16384 trajectories, the cap, 98 s against a few hundred). The reported errors stay T's own: where few atoms remain the output says so.
 //! An output's need is its trajectories so far times its worst ratio squared (the statistics over their rooms); a trajectory
 //! that reaches an output passes every earlier one, so that the trajectories an output must be passed by -- its reach -- are the
 //! largest need from it on, and a batch's trajectories run only as far as the outputs that still want them, half a period past
@@ -430,12 +431,12 @@ fn weight_at(temperature:[f64;3],frequencies:[f64;3])->f64{
     (0..3).filter(|&a|frequencies[a]>0.).map(|a|(KT_PER_UK*temperature[a]/(CLASSICAL*frequencies[a])).max(0.)).fold(1_f64,f64::min).powi(2)
 }
 /// An output's statistical errors at CONFIDENCE: the populations' and the loss's largest (absolute) and T's largest
-/// relative one over the axes, with its target's weight there (`regime`).
+/// relative one over the axes, at the atoms the run holds (# Batches), with its target's weight there (`regime`).
 #[derive(Clone,Copy,Debug)]
 struct Statistic{population:f64,temperature:f64,weight:f64}
 fn statistics(e:&Estimate,frequencies:[f64;3])->Statistic{
     Statistic{population:CONFIDENCE*e.population_errors.iter().fold(e.loss_error,|m,&x|m.max(x)),
-        temperature:CONFIDENCE*(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a]/e.temperature[a]}else{0.}).fold(0.,f64::max),weight:regime(e,frequencies)}
+        temperature:CONFIDENCE*(1.-e.loss).max(0.).sqrt()*(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a]/e.temperature[a]}else{0.}).fold(0.,f64::max),weight:regime(e,frequencies)}
 }
 /// An output's statistics as the stopping rule and the flags take them (module documentation, # Batches): `statistics`, each
 /// error over its neighbours as far as they agree (`steady`).
@@ -1979,6 +1980,13 @@ mod tests{
         assert!(orbit_bound([0.3,0.1],t)>2.*t&&orbit_bound([0.102,0.1],t)<t);
         let mut last=orbit_bound([0.,0.1],t);for i in 1..=4000{let x=orbit_bound([i as f64*1e-4,0.1],t);assert!(x>=last&&x-last<=2e-4,"{i}: {x} after {last}");last=x;}
         for m in [0.,0.01,0.05,0.2]{let mut last=orbit_bound([m,0.],t);for i in 1..=4000{let x=orbit_bound([m,i as f64*1e-4],t);assert!((x-last).abs()<=4e-4,"{m} {i}: {x} after {last}");last=x;}}
+    }
+    /// T's statistic stands at the atoms the run holds: its relative error at no loss, half of it with a quarter of the atoms held, nothing where none is.
+    #[test]
+    fn t_s_statistic_stands_at_the_atoms_the_run_holds(){
+        let mut e=Estimate::default();e.temperature=[10.;3];e.temperature_error=[1.;3];let at=|e:&Estimate|statistics(e,[1.;3]).temperature;
+        let whole=at(&e);assert!((whole-CONFIDENCE*0.1).abs()<1e-15,"{whole}");
+        e.loss=0.75;assert!((at(&e)-0.5*whole).abs()<1e-15);e.loss=1.;assert_eq!(at(&e),0.);
     }
     /// T's probes fall as its weights do (`bound_probes`): evenly over a trajectory's states where they weigh alike, each state in time, and over their number where none weighs.
     #[test]
