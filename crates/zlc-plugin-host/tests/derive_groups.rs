@@ -167,17 +167,20 @@ fn both_routes(host: &PluginHost, events: &mpsc::Receiver<HostEvent>, runtime: &
     let source = "@logic/repeater/counts";
     let named = |node: &str| outputs.iter().map(|name| ((*name).to_owned(), format!("@logic/{node}/{name}"))).collect::<Vec<_>>();
     let start = |node: &str| {
-        host.open(node, "derive", json!({}), json!({})).unwrap();
         let names = named(node);
         let names: Vec<(&str, &str)> = names.iter().map(|(name, signal)| (name.as_str(), signal.as_str())).collect();
         host.start_run(node, request(json!({"variables": variables}), Some(source), &names)).unwrap()
     };
+    // Open before the source runs: a source sealed before its reader starts is one delivery, not the live route.
+    let sealed_node = format!("{node}_sealed");
+    host.open(node, "derive", json!({}), json!({})).unwrap();
+    host.open(&sealed_node, "derive", json!({}), json!({})).unwrap();
     if host.instances().iter().all(|(name, _, _)| name != "repeater") { host.open("repeater", "repeater", json!({}), json!({})).unwrap(); }
     let repeater = host.start_run("repeater", request(values, None, &[("counts", source)])).unwrap();
     published(runtime, source);
     let live = start(node);
     await_end(events, &[&repeater, &live]);
-    let sealed = start(&format!("{node}_sealed"));
+    let sealed = start(&sealed_node);
     await_end(events, &[&sealed]);
 }
 
@@ -205,7 +208,7 @@ fn one_delivery_that_closes_two_rectangles_makes_two_commits() {
     let variables = json!([{"name": "a", "terms": [{"of": "counts"}], "statistic": "sum", "over": ["duration"], "by": "duration", "every": 2}]);
     // The fourth publication closes (0, 0), (0, 1) and (1, 0): rows of different lengths; the last one (1, 1).
     let places = "[[0,0,1,1],[0,3,1,1],[1,0,1,1],[0,1,2,2],[1,3,1,1]]";
-    both_routes(&host, &events, &runtime, json!({"repeats": 2, "points": 4, "pause": 0.01, "places": places}), "many", &variables, &["a"]);
+    both_routes(&host, &events, &runtime, json!({"repeats": 2, "points": 4, "pause": 0.1, "places": places}), "many", &variables, &["a"]);
     let (values, _sigmas, segments, rows) = plane(&runtime, "@logic/many/a");
     assert_eq!((segments, rows), (3, 2), "the rectangles, then the last group");
     let want: Vec<f64> = [0.0, 10.0].iter().flat_map(|r| [2.0 * r + 1.0, 2.0 * r + 5.0]).flat_map(|v| [0.0, 0.2, 0.4].map(|c| v + c)).collect();
