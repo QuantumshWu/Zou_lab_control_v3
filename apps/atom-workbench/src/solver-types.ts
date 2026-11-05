@@ -70,11 +70,13 @@ export interface MeanResult {
  * the sample times -- `samples`, increasing indices into timesUs, the last sample among them --
  * each the probability at every grid point, summing to one. */
 export interface Distributions {grid:number[];samples:number[];probabilities:number[][]}
-/** A motion solve's approximation ledger (`diagnostics.approximations`): the error budget its
- * approximations may use, the part they use, and each approximation -- what it is, its estimated
- * error and what the engine did about it; `flagged`, when present, says where the ledger is not
- * kept, shown as the validated regime is (a reference only). */
-export interface ApproximationLedger {budget:number;used:number;items:{label:string;estimate:number;action:string}[];flagged?:string;note?:string}
+/** A target's a-priori total in a motion solve's ledger, at the output where it takes most of the target, and the target there. */
+export interface LedgerTotal {error:number;target:number}
+/** A motion solve's approximation ledger (`diagnostics.approximations`): the a-priori totals of the
+ * populations and of T, and each approximation -- what it is, its estimated error (its largest over the outputs) and
+ * what the engine did about it; `flagged`, when present, says where an output's total error exceeds a target,
+ * shown as the validated regime is (a reference only). */
+export interface ApproximationLedger {totals:{population:LedgerTotal;temperature:LedgerTotal};items:{label:string;estimate:number;action:string}[];flagged?:string;note?:string}
 /** The motion of a motion result (ui-design.md §6.20): a single atom in the tweezer moving in 3D,
  * solved semiclassically, its series per lab axis x, y, z (motion.ts MOTION_AXES). At every sample
  * per axis the temperature T = m·Var(v)/k_B (μK) with its standard error and n̄ relative to that
@@ -127,7 +129,9 @@ export function readMotionResult(value:unknown,diagnostics:Record<string,unknown
   // The device it ran on, a fallback's note, and the approximation ledger.
   const device:MotionDevice=diagnostics.device==='gpu'||diagnostics.device==='cpu'?diagnostics.device:invalid();
   const note=diagnostics.deviceNote===undefined?undefined:text(diagnostics.deviceNote);
-  const ledger=object(diagnostics.approximations,['budget','used','items'],['flagged','note']);
+  const ledger=object(diagnostics.approximations,['totals','items'],['flagged','note']);
+  const totals=object(ledger.totals,['population','temperature']);
+  const total=(v:unknown):LedgerTotal=>{const t=object(v,['error','target']);return {error:size(t.error),target:size(t.target)};};
   const items=Array.isArray(ledger.items)?ledger.items.map(item=>{const i=object(item,['label','estimate','action']);return {label:text(i.label),estimate:size(i.estimate),action:text(i.action,true)};}):invalid();
   return {temperatureUK:perAxis(m.temperatureUK,v=>series(v,samples,x=>x>=0)),temperatureErrorUK:perAxis(m.temperatureErrorUK,errors),
     temperatureTotalUK:series(m.temperatureTotalUK,samples,x=>x>=0),temperatureTotalErrorUK:errors(m.temperatureTotalErrorUK),
@@ -135,7 +139,7 @@ export function readMotionResult(value:unknown,diagnostics:Record<string,unknown
     lossProbability:loss,classical:[...(m.classical as boolean[])],
     momentum:perAxis(m.momentum,v=>distributions(v,'velocitiesMps')),position:perAxis(m.position,v=>distributions(v,'positionsUm')),
     trajectories:m.trajectories as number,timeStepUs:m.timeStepUs as number,device,...(note===undefined?{}:{deviceNote:note}),
-    approximations:{budget:size(ledger.budget),used:size(ledger.used),items,...(ledger.flagged===undefined?{}:{flagged:text(ledger.flagged)}),...(ledger.note===undefined?{}:{note:text(ledger.note)})}};
+    approximations:{totals:{population:total(totals.population),temperature:total(totals.temperature)},items,...(ledger.flagged===undefined?{}:{flagged:text(ledger.flagged)}),...(ledger.note===undefined?{}:{note:text(ledger.note)})}};
 }
 export interface DynamicsResult {
   states:Level[];timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];

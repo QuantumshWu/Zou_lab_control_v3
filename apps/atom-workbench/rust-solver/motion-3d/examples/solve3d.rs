@@ -19,7 +19,7 @@ fn main(){
     let wall=started.elapsed().as_secs_f64();
     println!("{name}: {:.1} s wall on {:?}{}, {} trajectories (needed {}), dt {:.4} us, trap {:?} kHz; {}",wall,s.device,s.device_note.as_ref().map_or(String::new(),|n|format!(" ({n})")),
         s.trajectories,s.needed,s.time_step_us,s.trap_frequency_khz,s.reason.clone().unwrap_or_default());
-    let a=&s.approximations;println!("ledger: budget {:.3e}, used {:.3e}{}",a.budget,a.used(),a.flagged.as_ref().map_or(String::new(),|f|format!(", flagged: {f}")));
+    let a=&s.approximations;println!("ledger: populations {:.3e} of {:.3e}, T {:.3e} of {:.3e}{}",a.totals[0].error,a.totals[0].target,a.totals[1].error,a.totals[1].target,a.flagged.as_ref().map_or(String::new(),|f|format!(", flagged: {f}")));
     for item in &a.items{println!("  {} {:.3}%: {}",item.label,100.*item.estimate,item.action);}
     println!("method: {}",s.method);
     let pick=|label:&str|request.states.iter().position(|x|x==label).unwrap();

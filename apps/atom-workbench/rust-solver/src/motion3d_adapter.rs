@@ -19,7 +19,8 @@
 //! row's projection), `diagnostics` (`engine`, `traceError` and `initialStateError` of the rows
 //! before the projection, `elapsedMs`, `method`,
 //! `device` -- the device used -- with `deviceNote` when it is not the one asked for, and
-//! `approximations`: the ledger of the a-priori approximations, `budget`, `used`, `items` of
+//! `approximations`: the ledger of the a-priori approximations, `totals` (`population` and `temperature`, each
+//! the `error` of the a-priori total at the output where it takes most of its `target`), `items` of
 //! `label`, `estimate` and `action`, `flagged` when some output times lie beyond a target, and `note` with what the
 //! initial ensemble leaves out, no warning),
 //! and `motion`, read by `readMotionResult` in src/solver-types.ts:
@@ -40,7 +41,7 @@
 //! streamed first (`progress`: true) with the engine's estimate of the remaining wall time
 //! (`diagnostics.estimatedRemainingMs`).
 use crate::{Device,Model,Operator,Options,lattice_core_adapter};
-use atom_motion_3d::ledger::Ledger;
+use atom_motion_3d::ledger::{Ledger,Total};
 use atom_motion_3d::solve::{self as engine,Distributions,Solution,CONFIDENCE,POPULATION_TARGET};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use atom_population_core::Lapack;
@@ -123,7 +124,8 @@ fn distributions(d:&[Distributions;3],grid:&str)->Value{
 }
 /// The ledger in the contract's shape.
 fn approximations(ledger:&Ledger)->Value{
-    let mut out=json!({"budget":ledger.budget,"used":ledger.used(),
+    let total=|t:&Total|json!({"error":t.error,"target":t.target});
+    let mut out=json!({"totals":{"population":total(&ledger.totals[0]),"temperature":total(&ledger.totals[1])},
         "items":ledger.items.iter().map(|i|json!({"label":i.label,"estimate":i.estimate,"action":i.action})).collect::<Vec<_>>()});
     if let Some(reason)=&ledger.flagged{out["flagged"]=json!(reason);}
     if let Some(note)=&ledger.note{out["note"]=json!(note);}

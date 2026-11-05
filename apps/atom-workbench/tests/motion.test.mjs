@@ -251,7 +251,7 @@ test('a motion result is read strictly: the 3D block with the total temperature,
     ['one axis missing',d=>{delete d.motion.temperatureUK.z;}],['no regime',d=>{delete d.motion.classical;}],['no trajectories',d=>{d.motion.trajectories=0;}],
     ['a loss that decreases',d=>{d.motion.lossProbability[2]=0;}],['an unknown key',d=>{d.motion.axes=['x','y','z'];}],
     ['no device',d=>{delete d.diagnostics.device;}],['another device',d=>{d.diagnostics.device='tpu';}],['an empty note',d=>{d.diagnostics.deviceNote=' ';}],
-    ['no ledger',d=>{delete d.diagnostics.approximations;}],['a ledger key',d=>{d.diagnostics.approximations.total=1;}],['a negative estimate',d=>{d.diagnostics.approximations.items[0].estimate=-1;}],
+    ['no ledger',d=>{delete d.diagnostics.approximations;}],['a ledger key',d=>{d.diagnostics.approximations.total=1;}],['no totals',d=>{delete d.diagnostics.approximations.totals;}],['a negative total',d=>{d.diagnostics.approximations.totals.temperature.error=-1;}],['a negative estimate',d=>{d.diagnostics.approximations.items[0].estimate=-1;}],
     ['an item without its action',d=>{delete d.diagnostics.approximations.items[1].action;}],['an empty flag',d=>{d.diagnostics.approximations.flagged='';}],['an empty ledger note',d=>{d.diagnostics.approximations.note='';}],
   ])assert.throws(()=>readMotion(change),/运动结果/,label);
   assert.throws(()=>readMotion(d=>{d.populationAccuracy.requestedTolerance=.01;}),/布居精度/);
