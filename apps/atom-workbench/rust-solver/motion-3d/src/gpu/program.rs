@@ -148,7 +148,7 @@ pub fn layout()->[u32;28]{
         MOST_INTERVALS,SLOT_RECORD,RECORD,WARPS,MAXN,TWIN,MOTION,HARMONIC,size_of::<Fourth>(),size_of::<NearUnit>(),size_of::<FirstField>(),MOST_FIRST].map(|x|x as u32)
 }
 
-/// The model on the device: the kernel's parameters, the buffers they point into, and the most
+/// The model on the device: the program the kernels read (`Gpu::set`), the buffers it points into, and the most
 /// photons of a cluster's jumps.
 pub struct Program{pub params:Params,photons:usize,weights:usize,pub(crate) exact:usize,transient:usize,rows:usize,between:usize,_buffers:Vec<Buffer>}
 
