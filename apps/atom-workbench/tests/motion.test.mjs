@@ -243,6 +243,8 @@ test('a motion result is read strictly: the 3D block with the total temperature,
   assert.deepEqual([few.temperatureErrorUK[0],few.temperatureTotalErrorUK],[[1.5,null,1.5],[.9,null,.9]],'a sample with fewer than two atoms held has no T of its own and no error');
   const flagged=readMotion(d=>{d.diagnostics.approximations.flagged='t ≥ 8 ms 的输出超出近似误差预算';delete d.diagnostics.deviceNote;}).motion;
   assert.equal(flagged.approximations.flagged,'t ≥ 8 ms 的输出超出近似误差预算');assert.equal(Object.hasOwn(flagged,'deviceNote'),false);
+  const noted=readMotion(d=>{d.diagnostics.approximations.note='初始热分布中 84% 原子不计入';}).motion;
+  assert.equal(noted.approximations.note,'初始热分布中 84% 原子不计入');assert.equal(Object.hasOwn(noted.approximations,'flagged'),false,'the setup\'s note is no flag');
   for(const [label,change] of [
     ['no block',d=>{delete d.motion;}],['an axis',d=>{d.motion.axis='x';}],['no total temperature',d=>{delete d.motion.temperatureTotalUK;}],
     ['a total short of a sample',d=>{d.motion.temperatureTotalUK.pop();}],['a negative total error',d=>{d.motion.temperatureTotalErrorUK[1]=-.1;}],
@@ -250,7 +252,7 @@ test('a motion result is read strictly: the 3D block with the total temperature,
     ['a loss that decreases',d=>{d.motion.lossProbability[2]=0;}],['an unknown key',d=>{d.motion.axes=['x','y','z'];}],
     ['no device',d=>{delete d.diagnostics.device;}],['another device',d=>{d.diagnostics.device='tpu';}],['an empty note',d=>{d.diagnostics.deviceNote=' ';}],
     ['no ledger',d=>{delete d.diagnostics.approximations;}],['a ledger key',d=>{d.diagnostics.approximations.total=1;}],['a negative estimate',d=>{d.diagnostics.approximations.items[0].estimate=-1;}],
-    ['an item without its action',d=>{delete d.diagnostics.approximations.items[1].action;}],['an empty flag',d=>{d.diagnostics.approximations.flagged='';}],
+    ['an item without its action',d=>{delete d.diagnostics.approximations.items[1].action;}],['an empty flag',d=>{d.diagnostics.approximations.flagged='';}],['an empty ledger note',d=>{d.diagnostics.approximations.note='';}],
   ])assert.throws(()=>readMotion(change),/运动结果/,label);
   assert.throws(()=>readMotion(d=>{d.populationAccuracy.requestedTolerance=.01;}),/布居精度/);
   // A block nobody asked for is refused.

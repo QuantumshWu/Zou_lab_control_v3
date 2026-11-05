@@ -74,7 +74,7 @@ export interface Distributions {grid:number[];samples:number[];probabilities:num
  * approximations may use, the part they use, and each approximation -- what it is, its estimated
  * error and what the engine did about it; `flagged`, when present, says where the ledger is not
  * kept, shown as the validated regime is (a reference only). */
-export interface ApproximationLedger {budget:number;used:number;items:{label:string;estimate:number;action:string}[];flagged?:string}
+export interface ApproximationLedger {budget:number;used:number;items:{label:string;estimate:number;action:string}[];flagged?:string;note?:string}
 /** The motion of a motion result (ui-design.md §6.20): a single atom in the tweezer moving in 3D,
  * solved semiclassically, its series per lab axis x, y, z (motion.ts MOTION_AXES). At every sample
  * per axis the temperature T = m·Var(v)/k_B (μK) with its standard error and n̄ relative to that
@@ -127,7 +127,7 @@ export function readMotionResult(value:unknown,diagnostics:Record<string,unknown
   // The device it ran on, a fallback's note, and the approximation ledger.
   const device:MotionDevice=diagnostics.device==='gpu'||diagnostics.device==='cpu'?diagnostics.device:invalid();
   const note=diagnostics.deviceNote===undefined?undefined:text(diagnostics.deviceNote);
-  const ledger=object(diagnostics.approximations,['budget','used','items'],['flagged']);
+  const ledger=object(diagnostics.approximations,['budget','used','items'],['flagged','note']);
   const items=Array.isArray(ledger.items)?ledger.items.map(item=>{const i=object(item,['label','estimate','action']);return {label:text(i.label),estimate:size(i.estimate),action:text(i.action,true)};}):invalid();
   return {temperatureUK:perAxis(m.temperatureUK,v=>series(v,samples,x=>x>=0)),temperatureErrorUK:perAxis(m.temperatureErrorUK,errors),
     temperatureTotalUK:series(m.temperatureTotalUK,samples,x=>x>=0),temperatureTotalErrorUK:errors(m.temperatureTotalErrorUK),
@@ -135,7 +135,7 @@ export function readMotionResult(value:unknown,diagnostics:Record<string,unknown
     lossProbability:loss,classical:[...(m.classical as boolean[])],
     momentum:perAxis(m.momentum,v=>distributions(v,'velocitiesMps')),position:perAxis(m.position,v=>distributions(v,'positionsUm')),
     trajectories:m.trajectories as number,timeStepUs:m.timeStepUs as number,device,...(note===undefined?{}:{deviceNote:note}),
-    approximations:{budget:size(ledger.budget),used:size(ledger.used),items,...(ledger.flagged===undefined?{}:{flagged:text(ledger.flagged)})}};
+    approximations:{budget:size(ledger.budget),used:size(ledger.used),items,...(ledger.flagged===undefined?{}:{flagged:text(ledger.flagged)}),...(ledger.note===undefined?{}:{note:text(ledger.note)})}};
 }
 export interface DynamicsResult {
   states:Level[];timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];

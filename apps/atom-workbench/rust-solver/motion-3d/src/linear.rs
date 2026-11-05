@@ -82,23 +82,11 @@ pub struct Lu{factors:Dense,pivots:Vec<usize>}
 impl Lu{
     /// None when a pivot vanishes: the matrix is singular.
     pub fn new(matrix:&Dense)->Option<Lu>{
-        let n=matrix.rows;assert_eq!(n,matrix.cols);let mut a=matrix.clone();let mut pivots=vec![0;n];count(n*n*n/3);
-        for k in 0..n{
-            let p=(k..n).max_by(|&i,&j|a[(i,k)].norm_sqr().total_cmp(&a[(j,k)].norm_sqr())).unwrap();
-            if a[(p,k)]==Complex::ZERO{return None;}
-            pivots[k]=p;for j in 0..n{a.entries.swap(k*n+j,p*n+j);}
-            let pivot=a[(k,k)];
-            for i in k+1..n{let factor=a[(i,k)]/pivot;a[(i,k)]=factor;for j in k+1..n{let u=a[(k,j)];a[(i,j)]-=factor*u;}}
-        }
-        Some(Lu{factors:a,pivots})
+        let n=matrix.rows;assert_eq!(n,matrix.cols);let mut a=matrix.clone();let mut pivots=vec![0;n];
+        lu_factor(&mut a.entries,n,&mut pivots).then_some(Lu{factors:a,pivots})
     }
     /// b ← A⁻¹ b.
-    pub fn solve(&self,b:&mut [Complex]){
-        let a=&self.factors;let n=a.rows;count(n*n);
-        for(k,&p)in self.pivots.iter().enumerate(){b.swap(k,p);}
-        for i in 0..n{let mut x=b[i];for j in 0..i{x-=a[(i,j)]*b[j];}b[i]=x;}
-        for i in (0..n).rev(){let mut x=b[i];for j in i+1..n{x-=a[(i,j)]*b[j];}b[i]=x/a[(i,i)];}
-    }
+    pub fn solve(&self,b:&mut [Complex]){lu_solve(&self.factors.entries,&self.pivots,self.factors.rows,b)}
     /// A⁻¹ b for every column of b.
     pub fn solve_columns(&self,b:&Dense)->Dense{
         let mut out=b.clone();let mut column=vec![Complex::ZERO;b.rows];
@@ -106,6 +94,28 @@ impl Lu{
         out
     }
 }
+
+/// The LU factorization with partial pivoting of the n × n matrix in `a`, in place (row-major), its pivots; false when a pivot vanishes.
+pub(crate) fn lu_factor(a:&mut [Complex],n:usize,pivots:&mut [usize])->bool{
+    count(n*n*n/3);
+    for k in 0..n{
+        let p=(k..n).max_by(|&i,&j|a[i*n+k].norm_sqr().total_cmp(&a[j*n+k].norm_sqr())).unwrap();
+        if a[p*n+k]==Complex::ZERO{return false;}
+        pivots[k]=p;for j in 0..n{a.swap(k*n+j,p*n+j);}
+        let pivot=a[k*n+k];
+        for i in k+1..n{let factor=a[i*n+k]/pivot;a[i*n+k]=factor;for j in k+1..n{let u=a[k*n+j];a[i*n+j]-=factor*u;}}
+    }
+    true
+}
+/// b ← A⁻¹ b from `lu_factor`'s factors and pivots.
+pub(crate) fn lu_solve(a:&[Complex],pivots:&[usize],n:usize,b:&mut [Complex]){
+    count(n*n);
+    for(k,&p)in pivots.iter().enumerate(){b.swap(k,p);}
+    for i in 0..n{let mut x=b[i];for j in 0..i{x-=a[i*n+j]*b[j];}b[i]=x;}
+    for i in (0..n).rev(){let mut x=b[i];for j in i+1..n{x-=a[i*n+j]*b[j];}b[i]=x/a[i*n+i];}
+}
+/// `x` emptied and filled with `len` zeros: a buffer kept for its capacity.
+pub(crate) fn zeroed<T:Clone+Default>(x:&mut Vec<T>,len:usize){x.clear();x.resize(len,T::default());}
 
 /// The eigenvalues of a Hermitian matrix: cyclic Jacobi rotations until the off-diagonal part is
 /// below the double precision of the matrix or stops shrinking.

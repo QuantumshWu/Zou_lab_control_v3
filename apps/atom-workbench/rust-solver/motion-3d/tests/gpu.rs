@@ -338,15 +338,15 @@ fn the_exact_components_are_the_cpu_s(){
         let(model,settings,thermal)=setup(r,m,0.1,None,f64::INFINITY);let program=gpu.program(&model,&settings).unwrap();let mut worst=[0_f64;2];
         for(i,t)in thermal.iter().enumerate(){
             let k=i%model.clusters();let mut x=t.clone();x.cluster=k;
-            let c=model.components(k,&model.point(x.r,x.kappa));let n=c.n();let nn=n*n;let parts=1+c.beats.len();
+            let c=model.components(k,&model.point(x.r,x.kappa));let n=c.n();let nn=n*n;let parts=1+c.omegas().len();
             let got=gpu.exact_probe(&program,&model,&settings,&x).unwrap();
-            let round=f32::EPSILON as f64*c.beats.iter().flat_map(|b|&b.hamiltonian).chain(&c.statics.hamiltonian).map(|z|z.abs()).fold(1e30*f32::MIN_POSITIVE as f64,f64::max);
+            let round=f32::EPSILON as f64*c.beats().flat_map(|b|b.hamiltonian).chain(c.hamiltonian()).map(|z|z.abs()).fold(1e30*f32::MIN_POSITIVE as f64,f64::max);
             for q in 0..parts{
-                let(h,g)=if q==0{(&c.statics.hamiltonian,&c.statics.gradient)}else{(&c.beats[q-1].hamiltonian,&c.beats[q-1].gradient)};
+                let(h,g)=if q==0{(c.hamiltonian(),[c.gradient(0),c.gradient(1),c.gradient(2)])}else{let b=c.beat(q-1);(b.hamiltonian,b.gradient)};
                 let check=|cpu:&[Complex],gpu:&[Complex],floor:f64,within:f64,what:String,worst:&mut [f64;2],side:usize|{let largest=cpu.iter().map(|z|z.abs()).fold(floor,f64::max);
                     for(e,(a,b))in cpu.iter().zip(gpu).enumerate(){let off=(*a-*b).abs()/largest;worst[side]=worst[side].max(off);assert!(off<=within,"cluster {k}, {what}, entry {e}: {b:?} against {a:?} of {largest}");}};
-                check(h,&got[q*nn..(q+1)*nn],if q==0{0.1*c.statics.scalar.abs()}else{round},1e-5,format!("H_{q}"),&mut worst,0);
-                for a in 0..3{check(&g[a],&got[(parts+3*q+a)*nn..(parts+3*q+a+1)*nn],(0.1*c.statics.scalar.abs()).max(round),1e-4,format!("G_{q}[{a}]"),&mut worst,1);}
+                check(h,&got[q*nn..(q+1)*nn],if q==0{0.1*c.scalar.abs()}else{round},1e-5,format!("H_{q}"),&mut worst,0);
+                for a in 0..3{check(g[a],&got[(parts+3*q+a)*nn..(parts+3*q+a+1)*nn],(0.1*c.scalar.abs()).max(round),1e-4,format!("G_{q}[{a}]"),&mut worst,1);}
             }
         }
         println!("clusters {:?}: the GPU's H {:.1e} and G {:.1e} off",(0..model.clusters()).map(|k|(model.dimension(k),model.ground_dimension(k),model.beats(k).0.len())).collect::<Vec<_>>(),worst[0],worst[1]);
