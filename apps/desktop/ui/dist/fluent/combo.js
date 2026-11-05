@@ -12,8 +12,9 @@ const REFERENCE_PX = 100;
 /** FluentComboBox.sizeHint: the box is at least as wide as the widest thing it
  * may say (its placeholder or a pickable row, without a grouped row's indent)
  * and as `minimum` "M"s (setMinimumContentsLength), with its chrome. Kept in em
- * of the box's own font (fluent.css reads --combo-min), so it holds at any scale;
- * a fixed or ignored size is the owner's CSS min-width. */
+ * of the box's own font (fluent.css reads --combo-words and --combo-min), so it
+ * holds at any scale, and it is the one width a box takes from its content: the
+ * picked row's words never size it. A fixed size is the owner's CSS width. */
 export function hintWidest(select, labels, minimum = 0) {
     if (measure === undefined) {
         measure = document.createElement("canvas").getContext("2d");
@@ -26,9 +27,11 @@ export function hintWidest(select, labels, minimum = 0) {
     let widest = minimum > 0 ? measure.measureText("M".repeat(minimum)).width : 0;
     for (const label of labels)
         widest = Math.max(widest, measure.measureText(label.trimStart()).width);
-    const value = `calc(${Math.ceil(widest * 100 / REFERENCE_PX) / 100}em + var(--combo-chrome))`;
-    if (select.style.getPropertyValue("--combo-min") !== value)
-        select.style.setProperty("--combo-min", value);
+    const words = `${Math.ceil(widest * 100 / REFERENCE_PX) / 100}em`;
+    if (select.style.getPropertyValue("--combo-words") === words)
+        return;
+    select.style.setProperty("--combo-words", words);
+    select.style.setProperty("--combo-min", `calc(${words} + var(--combo-chrome))`);
 }
 /** Where a combo box's list opens (QComboBox::showPopup): below the box when
  * the whole list fits there; otherwise on the side with more room -- above when

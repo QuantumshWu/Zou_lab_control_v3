@@ -356,12 +356,6 @@ const GROUP_BYTES: usize = 64 << 20;
 
 struct Signal {
     schema: Arc<DatasetSchema>, latest: Option<Arc<Publication>>,
-    /// The newest event its source marked shown (`commit_events`): where a board's
-    /// front stands. Every event of a commit that marks nothing is marked.
-    shown: Option<Arc<Publication>>,
-    /// The members of the window ending at `shown` that the ring has passed: as many
-    /// as that window needs, so a board can read it however long the next mark takes.
-    passed: VecDeque<Arc<Publication>>,
     last_ordinal: Option<u64>,
     head: Option<Arc<PayloadLineage>>,
     history: VecDeque<Arc<Publication>>, demands: BTreeMap<u64, usize>,
@@ -379,16 +373,6 @@ struct Signal {
 }
 impl Signal {
     fn capacity(&self) -> usize { self.demands.values().copied().max().unwrap_or(0) }
-    /// The event a board's front stands at: the newest shown; a run that ended
-    /// without marking one is shown as it stands, so it is not left blank.
-    fn front(&self, sealed: bool) -> Option<&Arc<Publication>> {
-        self.shown.as_ref().or(self.latest.as_ref().filter(|_| sealed))
-    }
-    /// What this signal retains of its events, oldest first: the rest of the shown
-    /// window the ring has passed, then the ring.
-    fn retained(&self) -> impl DoubleEndedIterator<Item = &Arc<Publication>> {
-        self.passed.iter().chain(self.history.iter())
-    }
     /// The finite run's committed events from its store, each with its own block and
     /// record (v2 replayed its commit chunks); the canonical layout is the run's now.
     fn replay(&self, generation: GenerationId, name: &Arc<str>, run: &Arc<RunRecord>) -> Vec<Arc<Publication>> {
@@ -412,17 +396,9 @@ impl Signal {
         let capacity = self.capacity();
         let Some(latest) = &self.latest else { return false; };
         let count = self.history.len();
-        let behind = |ordinal: u64| ordinal.saturating_sub(capacity.saturating_sub(1) as u64);
-        let start = latest.key.ordinal.map(behind);
-        let shown = self.shown.as_ref().and_then(|shown| shown.key.ordinal).filter(|_| capacity > 0);
-        let in_shown_window = |event: &Publication| shown.is_some_and(|shown| event.key.ordinal.is_some_and(|ordinal| (behind(shown)..=shown).contains(&ordinal)));
+        let start = latest.key.ordinal.map(|ordinal| ordinal.saturating_sub(capacity.saturating_sub(1) as u64));
         while self.history.front().is_some_and(|p| capacity == 0 || p.key.ordinal < start) {
-            let event = self.history.pop_front().unwrap();
-            if in_shown_window(&event) { self.passed.push_back(event); } else { garbage.push(event); }
-        }
-        // A smaller demand, or none: the window it needs is shorter.
-        while self.passed.front().is_some_and(|event| !in_shown_window(event)) {
-            garbage.push(self.passed.pop_front().unwrap());
+            garbage.push(self.history.pop_front().unwrap());
         }
         let trimmed = count != self.history.len();
         if trimmed { self.views.clear(); }
@@ -573,9 +549,9 @@ fn window_read_at(signal:&mut Signal,width:usize,anchor:&Arc<Publication>) -> Re
     let start=Some(anchor.key.ordinal.ok_or(RuntimeError::NoData)?.saturating_sub(width as u64-1));
     // The historical anchor itself must still be materializable. A retained
     // display picture is not permission to silently substitute a newer shot.
-    if width>1 && !signal.retained().any(|event|event.key==anchor.key) {return Err(RuntimeError::PublicationExpired);}
+    if width>1 && !signal.history.iter().any(|event|event.key==anchor.key) {return Err(RuntimeError::PublicationExpired);}
     let entries:Vec<_>=if width==1 {vec![anchor.clone()]} else {
-        signal.retained().filter(|event|event.key.ordinal>=start && event.key.ordinal<=anchor.key.ordinal).cloned().collect()
+        signal.history.iter().filter(|event|event.key.ordinal>=start && event.key.ordinal<=anchor.key.ordinal).cloned().collect()
     };
     let schema=window_schema_of(signal,width,anchor.key.ordinal.ok_or(RuntimeError::NoData)?,&entries)?;
     Ok(Arc::new(WindowRead {latest:anchor.key.clone(),width,view_epoch:signal.view_epoch,schema,entries:entries.into()}))
@@ -615,8 +591,6 @@ fn ancestry(publication:&Arc<Publication>) -> Option<HashMap<Arc<str>,Read>> {
 /// One surface's last complete same-shot selection (v2 `previous_front`): what
 /// it keeps showing while a component's new shot is still being derived. Each
 /// board owns its own, so what another surface reads never changes this one.
-/// A signal's front stands at its newest shown event (`commit_events`), which
-/// only this selection reads; every other reader takes every event.
 #[derive(Default)]
 pub struct Front {
     selected: HashMap<Arc<str>,Read>,
@@ -660,10 +634,10 @@ fn coherent_front(state:&State,requests:&[(Generation,Arc<str>,Option<usize>)],p
         // the signal across runs is one only while it runs (v2: only a processor stays a
         // route once ended).
         let route=run.source.as_ref().filter(|source|source.coherent && source.declared
-            && (source.generation.is_some() || !run.sealed));
+            && (source.generation.is_some() || !run.sealed) && owes_its_group(state,source));
         for (name,signal) in &run.signals {
             retained.insert(name.clone(),signal);
-            if let Some(event)=signal.front(run.sealed) {
+            if let Some(event)=&signal.latest {
                 latest.insert(name.clone(),dataset_read(event.clone()));
                 bundles.entry(event_identity(&event.key)).or_default().insert(name.clone());
             }
@@ -708,7 +682,7 @@ fn coherent_front(state:&State,requests:&[(Generation,Arc<str>,Option<usize>)],p
         let at_shot=|name:&Arc<str>,shot:&HashSet<EventIdentity>| latest.get(name).filter(|read:&&Read|read.shot_roots()==*shot).cloned().or_else(|| {
             let signal:&Signal=retained.get(name)?;
             let same_shot=|event:&&Arc<Publication>|causal_events(&event.key,&event.event,true)==*shot;
-            let kept=if windowed.contains(name) {signal.retained().rev().find(same_shot)} else {signal.recent.as_ref()?.iter().rev().find(same_shot)};
+            let kept=if windowed.contains(name) {signal.history.iter().rev().find(same_shot)} else {signal.recent.as_ref()?.iter().rev().find(same_shot)};
             kept.map(|event|dataset_read(event.clone()))
         });
         let mut joined=HashMap::new();let mut coherent=shot.is_some();
@@ -737,17 +711,13 @@ fn coherent_front(state:&State,requests:&[(Generation,Arc<str>,Option<usize>)],p
             coherent &= !previous.selected.iter().filter(|(name,_)|component.contains(*name)).any(|(_,read)|
                 read.shot_roots().iter().any(|shown|shot.iter().any(|root|root.0==shown.0 && root.1<shown.1)));
         }
-        // No newer complete shot: the group keeps the one it showed (v2 previous_front), of
-        // whichever runs. A member that never had a result has none to keep; one whose
-        // signal left the Runtime has left the group.
+        // No newer complete shot: each member keeps what it showed (v2 previous_front), of
+        // whichever runs and shots: they stood apart until a consumer came to owe this group.
+        // A member that never had a result has none to keep; one whose signal left the
+        // Runtime has left the group.
         if !coherent {
             joined=previous.selected.iter().filter(|(name,_)|component.contains(*name) && state.signals.contains_key(*name))
                 .map(|(name,read)|(name.clone(),read.clone())).collect();
-            let roots:HashSet<_>=required.iter().filter_map(|name|joined.get(name)).map(|read| {
-                let mut roots:Vec<_>=causal_events(&read.anchor().key,&read.anchor().event,true).into_iter().collect();
-                roots.sort_unstable_by_key(|(generation,revision)|(generation.as_uuid(),*revision));roots
-            }).collect();
-            if roots.len()!=1 {joined.clear();}
         }
         for name in component {selected.remove(&name);if let Some(read)=joined.remove(&name) {selected.insert(name,read);}}
     }
@@ -766,7 +736,25 @@ struct Run {
 /// (`generation`), or the signal across its runs. A guarded route is a derived
 /// owner's: it ends when that source run is replaced. A declared route is a member
 /// of its source's same-shot group until its owner releases it (`release_route`).
-struct DerivedSource { signal: Arc<str>, generation: Option<GenerationId>, coherent: bool, guarded: bool, declared: bool }
+struct DerivedSource {
+    signal: Arc<str>, generation: Option<GenerationId>, coherent: bool, guarded: bool, declared: bool,
+    /// The subscription that feeds it, when it is told (`bind_consumer`): what says it owes the newest shot.
+    consumer: Option<u64>,
+}
+
+/// Whether a consumer's group waits for it. A consumer with work for the newest source
+/// event alone is about to answer it: its group waits, and they are shown together.
+/// With nothing to do it owes no shot (it answered the last with nothing, as a group of
+/// repeats does until it closes); with more it is catching up. Then its source goes on
+/// showing its newest, and the consumer what it has answered. A consumer that takes only
+/// the newest is never behind. One whose feed is not known, or has gone, keeps its group
+/// as a declared member does.
+fn owes_its_group(state:&State,source:&DerivedSource) -> bool {
+    let Some(subscriber)=source.consumer.and_then(|ticket|state.subscribers.get(&ticket)) else {return true};
+    let queued=subscriber.queue.iter().filter(|delivery|matches!(delivery.kind,DeliveryKind::Data)).take(2).count();
+    let owed=usize::from(subscriber.in_hand)+subscriber.replay.len().saturating_add(queued);
+    if matches!(subscriber.policy,DeliveryPolicy::Latest) {owed>0} else {owed==1}
+}
 struct Subscriber {
     generation: Option<GenerationId>, follow_owner: Option<Arc<str>>,
     requests: Vec<ReadRequest>, policy: DeliveryPolicy,
@@ -777,6 +765,8 @@ struct Subscriber {
     /// A finite run's committed events, delivered before the queue; its store holds them.
     replay: VecDeque<Arc<Delivery>>,
     changed: Arc<Condvar>, interrupted: bool,
+    /// A data delivery taken by `next` and not finished: the next `next` says it is.
+    in_hand: bool,
 }
 impl Subscriber {
     /// The blocks an event pins itself: its own, or a Snapshot replacement's
@@ -880,10 +870,7 @@ impl Subscriber {
             if matches!(start,Start::Replay) && request.mode == ReadMode::Event && signal.store.is_some() {
                 for event in signal.replay(run.token.id,&request.signal,&run.record) { replayed.entry(event.key.revision).or_default().push(event); }
             } else if !matches!(start,Start::Next) {
-                // A Latest subscriber takes what a board shows: not an event past the mark.
-                let shown = signal.front(run.sealed).map(|event| event.key.clone());
-                current.extend(signal.latest.iter().filter(|event|(!matches!(request.mode,ReadMode::Event) || event.data.is_some())
-                    && (!matches!(self.policy,DeliveryPolicy::Latest) || shown.as_ref() == Some(&event.key))).cloned());
+                current.extend(signal.latest.iter().filter(|event|!matches!(request.mode,ReadMode::Event) || event.data.is_some()).cloned());
             }
         }
         let result = (|| {
@@ -948,9 +935,9 @@ fn release_demands(run: &mut Run, requests: &[ReadRequest], ticket: u64, garbage
 #[derive(Default)]
 struct Garbage { publications: Vec<Arc<Publication>>, deliveries: Vec<Arc<Delivery>>, heads: Vec<Arc<PayloadLineage>> }
 
-/// One event, under the lock. `shown`: a board's front may stand at it. `newest_marked`:
-/// the newest such of what is committed together, the one a Latest subscriber takes.
-fn commit_locked(state: &mut State, generation: &Generation, bundle: &Bundle, shown: bool, newest_marked: bool, garbage: &mut Garbage) -> Result<Arc<Delivery>> {
+/// One event, under the lock. `newest`: the newest of what is committed together,
+/// the one a Latest subscriber takes.
+fn commit_locked(state: &mut State, generation: &Generation, bundle: &Bundle, newest: bool, garbage: &mut Garbage) -> Result<Arc<Delivery>> {
     if bundle.inputs.is_empty() { return Err(RuntimeError::EmptyBundle); }
     if !bundle.metadata.is_object() { return Err(RuntimeError::InvalidMetadata); }
     if state.closed { return Err(RuntimeError::Closed); }
@@ -1069,11 +1056,6 @@ fn commit_locked(state: &mut State, generation: &Generation, bundle: &Bundle, sh
         if let Some(ordinal)=publication.key.ordinal {signal.last_ordinal=Some(ordinal);}
         if let Some(previous)=signal.head.replace(head.clone()) {garbage.heads.push(previous);}
         if let Some(previous) = signal.latest.replace(publication.clone()) { garbage.publications.push(previous); }
-        // A mark is on the newest event, so the ring holds its whole window.
-        if shown {
-            if let Some(previous) = signal.shown.replace(publication.clone()) { garbage.publications.push(previous); }
-            garbage.publications.extend(signal.passed.drain(..));
-        }
         signal.keep_recent(publication,&mut garbage.publications);
         if signal.capacity() > 0 {
             // Recomputing the same source ordinal revises that sample;
@@ -1096,7 +1078,7 @@ fn commit_locked(state: &mut State, generation: &Generation, bundle: &Bundle, sh
     let run = runs.get_mut(&generation.id).unwrap();
     for ticket in subscriber_ids.iter() {
         let Some(subscriber) = subscribers.get_mut(ticket).filter(|s| s.terminal.is_none()) else { continue; };
-        if !newest_marked && matches!(subscriber.policy, DeliveryPolicy::Latest) { continue; }
+        if !newest && matches!(subscriber.policy, DeliveryPolicy::Latest) { continue; }
         let publications: Arc<[_]> = committed.publications.iter().filter(|p|
             subscriber.requests.iter().any(|request| request.signal == p.key.signal
                 && (!matches!(request.mode,ReadMode::Event) || p.data.is_some()))).cloned().collect();
@@ -1155,7 +1137,7 @@ impl Runtime {
     pub fn begin_derived(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value,
                          source:&PublicationKey, coherent:bool) -> Result<Generation> {
         self.begin_run(owner.into(),outputs,metadata,Some(DerivedSource {signal:source.signal.clone(),
-            generation:Some(source.generation),coherent,guarded:true,declared:true}),None)
+            generation:Some(source.generation),coherent,guarded:true,declared:true,consumer:None}),None)
     }
 
     /// A plugin run that consumes `source` and commits each result with the
@@ -1168,7 +1150,17 @@ impl Runtime {
     /// member while it runs. It keeps committing a replaced run's remaining queue.
     pub fn begin_consuming(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value,
                            source: Arc<str>, generation: Option<GenerationId>) -> Result<Generation> {
-        self.begin_run(owner.into(),outputs,metadata,Some(DerivedSource {signal:source,generation,coherent:true,guarded:false,declared:true}),None)
+        self.begin_run(owner.into(),outputs,metadata,Some(DerivedSource {signal:source,generation,coherent:true,guarded:false,declared:true,consumer:None}),None)
+    }
+
+    /// The subscription that feeds this consuming run, one delivery at a time: from now
+    /// on its group waits for it only for the shot it owes (`owes_its_group`).
+    pub fn bind_consumer(&self, generation: &Generation, consumer: SubscriptionTicket) -> Result<()> {
+        let mut state = self.inner.state.lock().unwrap();
+        let run = state.runs.get_mut(&generation.id).ok_or(RuntimeError::UnknownGeneration)?;
+        if let Some(source) = run.source.as_mut() { source.consumer = Some(consumer.0); }
+        notify_changes(&state);
+        Ok(())
     }
 
     fn begin_run(&self, owner:Arc<str>, outputs:Vec<Declaration>, metadata:Value,
@@ -1211,7 +1203,7 @@ impl Runtime {
                 let time_axis: Arc<str> = format!("{history_axis}.time").into();
                 state.signals.insert(output.signal.clone(), token.id);
                 let store = matches!(output.storage,Storage::Finite).then(|| DatasetStore::new(output.schema.clone()));
-                (output.signal, Signal { schema: output.schema, latest: None, shown: None, passed: VecDeque::new(), last_ordinal:None, head:None, history: VecDeque::new(),
+                (output.signal, Signal { schema: output.schema, latest: None, last_ordinal:None, head:None, history: VecDeque::new(),
                     demands: BTreeMap::new(), recent: source.as_ref().filter(|source|source.coherent).map(|_|VecDeque::new()), views: HashMap::new(), view_epoch: 0,
                     window_schemas: HashMap::new(), history_axis, time_axis, stamped: None, store,
                     history_capable: matches!(output.storage,Storage::Latest), events: Vec::new() })
@@ -1239,7 +1231,7 @@ impl Runtime {
         let mut garbage = Garbage::default();
         let result = {
             let mut state = self.inner.state.lock().unwrap();
-            let committed = commit_locked(&mut state, generation, bundle, true, true, &mut garbage);
+            let committed = commit_locked(&mut state, generation, bundle, true, &mut garbage);
             if committed.is_ok() { notify_changes(&state); }
             committed
         };
@@ -1249,21 +1241,16 @@ impl Runtime {
 
     /// Commit consecutive event bundles under one lock, each its own event in order
     /// as `commit` would make it: every Exact and Follow subscriber takes each, a
-    /// Latest subscriber the newest marked, which is what a board shows, and the
-    /// change watch one wake. `shown` says of each whether a board's front may stand
-    /// at it (`Front`); None marks them all. Answers the last delivery.
-    pub fn commit_events(&self, generation: &Generation, bundles: &[Bundle], shown: Option<&[bool]>) -> Result<Arc<Delivery>> {
+    /// Latest subscriber the newest, and the change watch one wake. Answers the last delivery.
+    pub fn commit_events(&self, generation: &Generation, bundles: &[Bundle]) -> Result<Arc<Delivery>> {
         let count = bundles.len();
         if count == 0 { return Err(RuntimeError::EmptyBundle); }
-        if shown.is_some_and(|shown| shown.len() != count) { return Err(RuntimeError::InvalidLayout("One mark per event".into())); }
         let mut garbage = Garbage::default();
-        let newest_marked = shown.map_or(Some(count - 1), |shown| shown.iter().rposition(|marked| *marked));
         let (mut last, mut failed) = (None, None);
         {
             let mut state = self.inner.state.lock().unwrap();
             for (index, bundle) in bundles.iter().enumerate() {
-                let marked = shown.is_none_or(|shown| shown[index]);
-                match commit_locked(&mut state, generation, bundle, marked, newest_marked == Some(index), &mut garbage) {
+                match commit_locked(&mut state, generation, bundle, index + 1 == count, &mut garbage) {
                     Ok(delivery) => last = Some(delivery),
                     Err(error) => { failed = Some(error); break; }
                 }
@@ -1383,9 +1370,6 @@ impl Runtime {
         signal_state.demands.insert(ticket, width);
         if signal_state.history.is_empty() {
             if let Some(latest) = &signal_state.latest { signal_state.history.push_back(latest.clone()); }
-            // A board reads the event it stands at, even when newer ones have come since.
-            let shown = signal_state.shown.clone().filter(|shown| signal_state.latest.as_ref().is_some_and(|latest| latest.key != shown.key));
-            signal_state.passed.extend(shown);
         }
         notify_changes(&state);
         Ok(HistoryLease { inner: Arc::downgrade(&self.inner), generation: generation.id,
@@ -1443,7 +1427,7 @@ impl Runtime {
             let generation = follow_owner.as_ref().and_then(|owner|state.owners.get(owner).copied()).or(generation);
             let mut subscriber = Subscriber { generation:None, follow_owner, requests: unique, policy,
                 queue: VecDeque::new(), bytes: 0, terminal:None, blocks:HashMap::new(),first:None,replay:VecDeque::new(),
-                changed: Arc::new(Condvar::new()), interrupted: false };
+                changed: Arc::new(Condvar::new()), interrupted: false, in_hand: false };
             if let Some(generation)=generation {
                 let run=state.runs.get_mut(&generation).ok_or(RuntimeError::UnknownGeneration)?;
                 subscriber.attach(run,ticket,start,&mut deliveries,&mut garbage)?;
@@ -1623,7 +1607,12 @@ impl Drop for HistoryLease {
 }
 
 pub struct Subscription { inner: Weak<Inner>, ticket: u64 }
+/// Which subscription feeds a consuming run (`Runtime::bind_consumer`).
+#[derive(Clone, Copy, Debug)]
+pub struct SubscriptionTicket(u64);
 impl Subscription {
+    pub fn ticket(&self) -> SubscriptionTicket { SubscriptionTicket(self.ticket) }
+
     /// Interrupt one wait for control work without consuming an exact delivery.
     pub fn wake(&self) -> Result<()> {
         let inner = self.inner.upgrade().ok_or(RuntimeError::Closed)?;
@@ -1640,13 +1629,21 @@ impl Subscription {
         let deadline = Instant::now().checked_add(timeout)
             .ok_or_else(|| RuntimeError::InvalidDeclaration("Timeout exceeds the monotonic clock range".into()))?;
         let mut state = inner.state.lock().unwrap();
-        let changed = state.subscribers.get(&self.ticket).ok_or(RuntimeError::Closed)?.changed.clone();
+        let subscriber = state.subscribers.get_mut(&self.ticket).ok_or(RuntimeError::Closed)?;
+        let changed = subscriber.changed.clone();
+        // Asking for the next says the last is finished; with nothing committed for it, a
+        // board learns here that the source need not wait.
+        if std::mem::take(&mut subscriber.in_hand) { notify_changes(&state); }
         loop {
             let subscriber = state.subscribers.get_mut(&self.ticket).ok_or(RuntimeError::Closed)?;
             if std::mem::take(&mut subscriber.interrupted) { return Ok(None); }
-            if let Some(delivery) = subscriber.replay.pop_front() { return Ok(Some(delivery)); }
-            if let Some(delivery) = subscriber.queue.pop_front() {
+            let taken = subscriber.replay.pop_front().or_else(|| {
+                let delivery = subscriber.queue.pop_front()?;
                 subscriber.account(&delivery, false);
+                Some(delivery)
+            });
+            if let Some(delivery) = taken {
+                subscriber.in_hand = matches!(delivery.kind, DeliveryKind::Data);
                 return Ok(Some(delivery));
             }
             if let Some(error) = &subscriber.terminal { return Err(error.clone()); }
@@ -2487,64 +2484,6 @@ mod tests {
     /// v2's stamped history: the shot time is an alternative coordinate of the
     /// source index, holes get unique ordered times, and a waveform's sample
     /// time continues across the window from each shot's own time.
-    #[test]
-    fn a_board_stands_at_the_newest_shown_event_and_followers_take_every_event() {
-        let (plane, schema) = (Runtime::new(), schema());
-        let generation = plane.begin("source", vec![Declaration {signal:"value".into(),schema:schema.clone(),storage:Storage::Latest}],json!({})).unwrap();
-        let _history = plane.retain_history(&generation,"value",4).unwrap();
-        let follower = plane.subscribe(&generation,vec!["value".into()],DeliveryPolicy::Follow,Start::Next).unwrap();
-        let latest = plane.subscribe(&generation,vec!["value".into()],DeliveryPolicy::Latest,Start::Next).unwrap();
-        let mut front = Front::default();
-        let request = [(generation.clone(),Arc::<str>::from("value"),Some(4))];
-        let ordinals = |read: &Read| match read.kind() {
-            ReadKind::Window(window) => window.entries().iter().map(|entry| entry.key().ordinal.unwrap()).collect::<Vec<_>>(),
-            _ => panic!("a window"),
-        };
-        let events = |from: u64, count: u64| (from..from + count).map(|ordinal| bundle(&schema,&["value"],ordinal)).collect::<Vec<_>>();
-
-        // Nothing marked: a board has nothing to show; every other reader has the newest.
-        plane.commit_events(&generation,&events(0,3),Some(&[false,false,false])).unwrap();
-        assert!(matches!(plane.read_coherent_views(&request,&mut front).remove(0),Err(RuntimeError::NoData)));
-        assert_eq!(plane.read_latest(&generation,"value").unwrap().key().ordinal,Some(2));
-        // One batch: the mark inside it is where the window ends, with newer events after it.
-        plane.commit_events(&generation,&events(3,4),Some(&[false,false,true,false])).unwrap();
-        let shown = plane.read_coherent_views(&request,&mut front).remove(0).unwrap();
-        assert_eq!(ordinals(&shown),[2,3,4,5]);
-        assert_eq!(plane.read_latest(&generation,"value").unwrap().key().ordinal,Some(6));
-        // Far longer than the ring without a mark: the ring keeps its capacity, the rest of the
-        // shown window is kept beside it, and the board is given the same window.
-        plane.commit_events(&generation,&events(7,20),Some(&[false; 20])).unwrap();
-        let again = plane.read_coherent_views(&request,&mut front).remove(0).unwrap();
-        assert!(again.same_read(&shown),"nothing new to draw");
-        assert_eq!(ordinals(&plane.read_coherent_views(&request,&mut Front::default()).remove(0).unwrap()),[2,3,4,5],"a new board reads it too");
-        assert_eq!(plane.signals()[0].retained_events,4,"the ring is the demand");
-        // The next mark moves the window, and lets the old one go.
-        plane.commit_events(&generation,&events(27,2),Some(&[true,false])).unwrap();
-        assert_eq!(ordinals(&plane.read_coherent_views(&request,&mut front).remove(0).unwrap()),[24,25,26,27]);
-        // Every event reached the follower in order; a Latest subscriber was given the newest
-        // mark, so what derives from it is of the shot a board shows.
-        let mut followed = Vec::new();
-        while let Some(delivery) = follower.next(Duration::ZERO).unwrap() { followed.push(delivery.publications[0].key().ordinal.unwrap()); }
-        assert_eq!(followed,(0..29).collect::<Vec<_>>());
-        assert_eq!(latest.next(Duration::ZERO).unwrap().unwrap().publications[0].key().ordinal,Some(27));
-        // Attached past the mark, it waits for the next one.
-        let late = plane.subscribe(&generation,vec!["value".into()],DeliveryPolicy::Latest,Start::Current).unwrap();
-        assert!(late.next(Duration::ZERO).unwrap().is_none());
-        // Commits that mark nothing mark everything: a board reads the newest, as ever.
-        plane.commit_events(&generation,&events(29,2),None).unwrap();
-        assert_eq!(late.next(Duration::ZERO).unwrap().unwrap().publications[0].key().ordinal,Some(30));
-        assert_eq!(ordinals(&plane.read_coherent_views(&request,&mut front).remove(0).unwrap()),[27,28,29,30]);
-        plane.commit(&generation,&bundle(&schema,&["value"],31)).unwrap();
-        assert_eq!(ordinals(&plane.read_coherent_views(&request,&mut front).remove(0).unwrap()),[28,29,30,31]);
-        // A run that ended with no mark at all is shown as it stands.
-        let unmarked = plane.begin("other", vec![Declaration {signal:"other".into(),schema:schema.clone(),storage:Storage::Latest}],json!({})).unwrap();
-        plane.commit_events(&unmarked,&[bundle(&schema,&["other"],0)],Some(&[false])).unwrap();
-        let other = [(unmarked.clone(),Arc::<str>::from("other"),None)];
-        assert!(matches!(plane.read_coherent_views(&other,&mut Front::default()).remove(0),Err(RuntimeError::NoData)));
-        plane.seal(&unmarked,json!({})).unwrap();
-        assert!(plane.read_coherent_views(&other,&mut Front::default()).remove(0).is_ok());
-    }
-
     #[test]
     fn stamped_window_carries_shot_time_and_sample_time_origins() {
         let stamped = |schema: &Arc<DatasetSchema>, ordinal: u64, time: Option<f64>| Bundle { inputs: vec![Input::Event {

@@ -74,7 +74,7 @@ def _build(
             sampler_key=sampler_key,
             repeat=int(authored["repeat"]),
             trigger=None if authored["trigger_slope"] == TRIGGER_OFF else TriggerSettings(
-                str(authored["trigger_channel"]), float(authored["trigger_level"]), str(authored["trigger_slope"]),
+                str(authored["trigger_channel"]), float(authored["trigger_level"]), str(authored["trigger_slope"]), int(authored["trigger_samples"]),
             ),
         ),
         producer="waveform_measurement",
@@ -91,7 +91,8 @@ LOGIC_NODE = NodeType(
         "are dynamic: one signal per quantity declared by the selected source "
         "(for example scope voltage or IMU acceleration), not a fixed output list. A slow "
         "free-running source can be locked by a software trigger on a channel, level and "
-        "slope: every sample is its own event, and a plot's newest data ends on the latest crossing."
+        "slope: each crossing gives one record of the asked samples, with the crossing in its middle "
+        "on a time axis that is zero there."
     ),
     reports_ready=True,
     # What it publishes is what its instrument carries: four quantities off

@@ -526,14 +526,12 @@ class RunContext:
 
     def commit_events(self, outputs: Mapping[str, LiveEvents], *, ordinals: np.ndarray,
                       shot_times: np.ndarray | None = None, origins: np.ndarray | None = None,
-                      shown: np.ndarray | None = None, records: list[Mapping[str, Any]] | None = None) -> None:
+                      records: list[Mapping[str, Any]] | None = None) -> None:
         """Commit consecutive event bundles in one round trip, whatever their number.
 
         Each is the event ``commit_live`` would make of it (every output at that
         ``ordinal``, its ``shot_times``, its ``origins`` row of a finite run, and its
         ``records`` row kept under every output), and every reader takes it as one.
-        ``shown`` is one bool per event: whether a board may show its data up to
-        that event; every other reader takes them all. None: every event may.
         """
 
         if not outputs:
@@ -557,7 +555,6 @@ class RunContext:
             "count": count, "inputs": entries, "ordinals": np.asarray(ordinals, dtype="<u8"),
             "shot_times": None if shot_times is None else np.asarray(shot_times, dtype="<f8"),
             "origins": None if origins is None else np.asarray(origins, dtype="<u8"),
-            "shown": None if shown is None else np.asarray(shown, dtype=bool),
             "records": records})
         following = int(ordinals[-1]) + 1
         for name in outputs:
@@ -579,6 +576,13 @@ class RunContext:
             if finite or declared is None or declared[0].fingerprint != fingerprint:
                 entry["schema"] = _tree(schema)
             self._sent_schema[name] = fingerprint
+
+    def declare_now(self) -> None:
+        """Publish what has been declared before anything is committed: a run whose outputs
+        answer on a clock of their own is known to its readers from its first delivery."""
+
+        if self._declared:
+            self._begin()
 
     def _begin(self) -> None:
         if not self._begun:

@@ -2,8 +2,9 @@
 
 Adapters own bounded receive queues. Runtime alone retains run data/history.
 Each native record is published in order, preserving its samples and timestamp;
-what one read takes goes out as one commit. A software trigger holds nothing: it
-publishes every sample as its own event and marks the edges (``trigger.py``).
+what one read takes goes out as one commit. With a software trigger an event is one
+trace around an edge, with the shape of a record of a source triggered in hardware
+(``trigger.py``), so a continuous and a finite run read alike.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from zlc_atom.devices.waveform.contract import (
 )
 from zlc_atom.nodes._framework.descriptor import NodePreviewSpec
 
-from .trigger import SLOPES, TriggerDetector, TriggerSettings, WaveformTrigger, channel_output
+from .trigger import MINIMUM_SAMPLES, SLOPES, TraceAssembler, TriggerSettings, WaveformTrigger, channel_output
 
 
 #: How often a capture comes back to see whether it has been asked to stop; the
@@ -55,17 +56,19 @@ _TRIGGER_ON = ("trigger_slope", SLOPES)
 
 WAVEFORM_MEASUREMENT_SCHEMA = AuthoringSchema((
     AuthoringField("repeat", "int", "Records (0 = continuous)", 0, minimum=0,
-                   description="how many records to keep; with a trigger, that many samples in a row from the first trigger"),
+                   description="how many records to keep; with a trigger, one record for each of that many triggers"),
     AuthoringField(
         "trigger_slope", "choice", "Slope", TRIGGER_OFF,
         choices=(AuthoringChoice(TRIGGER_OFF, "Off"), AuthoringChoice("rising", "Rising"),
                  AuthoringChoice("falling", "Falling")),
         segmented=True, group="Trigger",
-        description="lock the view on a level crossing, for a slow free-running source: every sample is still "
-                    "published, and a plot's newest data ends on the latest crossing",
+        description="lock on a level crossing, for a slow free-running source: each crossing gives one record "
+                    "with the crossing in its middle, on a time axis that is zero there",
     ),
     AuthoringField("trigger_channel", "text", "Channel", "", required=True, enabled_when=_TRIGGER_ON, group="Trigger"),
     AuthoringField("trigger_level", "float", "Level", 0.0, enabled_when=_TRIGGER_ON, group="Trigger"),
+    AuthoringField("trigger_samples", "int", "Samples", 400, minimum=MINIMUM_SAMPLES, enabled_when=_TRIGGER_ON, group="Trigger",
+                   description="samples of each record, half of them before the crossing"),
 ))
 
 
@@ -85,9 +88,9 @@ def waveform_outputs(
 def waveform_preview(source: WaveformSource, *, trigger_channel: str | None = None, node: str | None = None) -> NodePreviewSpec:
     """The first quantity, as a rolling trace of shots or as the trace one shot is.
 
-    Triggered, every sample is a shot and the one to watch is the channel the
-    trigger locks: ``trigger_channel`` names it (empty: not chosen yet), and
-    ``node``, the producer its channel axis is named after, lets the view hold it.
+    Triggered, every shot is a trace, drawn one on the other. ``trigger_channel`` names
+    the channel to watch (empty: not chosen yet), and ``node``, the producer its axes are
+    named after, lets the view hold it.
     """
 
     outputs = waveform_outputs(source.outputs)
@@ -95,10 +98,12 @@ def waveform_preview(source: WaveformSource, *, trigger_channel: str | None = No
         return NodePreviewSpec(outputs[0], "rolling" if int(source.record_samples) == 1 else "curve")
     chosen = channel_output(trigger_channel, source.outputs)
     if chosen is None or node is None:
-        return NodePreviewSpec(outputs[0] if chosen is None else next(o for o in outputs if o.name == chosen.name), "rolling")
+        return NodePreviewSpec(outputs[0] if chosen is None else next(o for o in outputs if o.name == chosen.name), "curve")
     held = AxisRef.cell_data(cell_axis_id(node, chosen.name, 0, COMPONENT).value).fate_field
+    records = AxisRef.repeat(f"{node}.{chosen.name}.repeat").fate_field
     position = chosen.channel_labels.index(str(trigger_channel).partition("/")[2])
-    return NodePreviewSpec(next(o for o in outputs if o.name == chosen.name), "rolling", semantic={held: ["scope-value", position]})
+    return NodePreviewSpec(next(o for o in outputs if o.name == chosen.name), "curve",
+                           semantic={held: ["scope-value", position], records: "group"})
 
 
 @lru_cache(maxsize=64)
@@ -113,11 +118,11 @@ def _channel_axis(producer: str, signal: str, labels: tuple[str, ...]) -> AxisSp
 
 
 @lru_cache(maxsize=64)
-def _sample_axis(producer: str, signal: str, interval: float, samples: int, continuous: bool) -> AxisSpec:
+def _sample_axis(producer: str, signal: str, interval: float, samples: int, continuous: bool, first: int) -> AxisSpec:
     role = SAMPLE_TIME if continuous else READOUT_EVENT
     return AxisSpec(cell_axis_id(producer, signal, 1, role),
         "sample time" if continuous else "record time", role, int(samples),
-        coordinates=tuple(index * interval for index in range(int(samples))), unit="s")
+        coordinates=tuple((first + index) * interval for index in range(int(samples))), unit="s")
 
 
 def shot_snapshot(
@@ -129,8 +134,12 @@ def shot_snapshot(
     revision: int,
     sample_interval_seconds: float,
     continuous: bool = False,
+    first_sample: int = 0,
 ) -> OwnedSnapshot:
     """Continuous samples are Point rows; triggered samples stay in the cell.
+
+    ``first_sample`` is where the record's time axis starts, in samples: a software
+    trigger's trace has its zero at the crossing.
 
     A non-finite sample is one the source could not obtain (a polled sensor
     that did not answer writes NaN): it is published INVALID through the
@@ -155,12 +164,12 @@ def shot_snapshot(
     elif continuous:
         values = picked[None]
         cell_axes = (_channel_axis(producer, output.name, labels),)
-        point_axes = (_sample_axis(producer, output.name, sample_interval_seconds, picked.shape[0], True),)
+        point_axes = (_sample_axis(producer, output.name, sample_interval_seconds, picked.shape[0], True, first_sample),)
     else:
         values = picked.T[None]
         cell_axes = (
             _channel_axis(producer, output.name, labels),
-            _sample_axis(producer, output.name, sample_interval_seconds, picked.shape[0], continuous),
+            _sample_axis(producer, output.name, sample_interval_seconds, picked.shape[0], continuous, first_sample),
         )
     return snapshot_from_array(
         values,
@@ -369,12 +378,10 @@ class WaveformMeasurementNode:
         self._batch_records = 1
         #: The run's software trigger, when the request has one.
         self._trigger: WaveformTrigger | None = None
-        self._detector: TriggerDetector | None = None
+        self._traces: TraceAssembler | None = None
         #: Per output: one event's schema, and a finite run's complete schema.
         self._schemas: dict[str, tuple[object, object]] = {}
         self._next_read = 0.0
-        #: A finite triggered capture publishes from its first trigger on.
-        self._started = True
         self._last_status = 0.0
         #: Silence is a fault only for a source that samples on its own clock:
         #: one with its own trigger waits for it, however long the pulse that
@@ -438,8 +445,7 @@ class WaveformMeasurementNode:
         self.published = self.records_read = 0
         self._schemas = {}
         self._free_running = point.acquisition_mode == WaveformAcquisitionMode.FREE_RUNNING.value
-        self._trigger = self._detector = None
-        self._started = self._request.trigger is None or self.repeat == 0
+        self._trigger = self._traces = None
         parameters: dict[str, object] = {"repeat": self.repeat}
         settings = self._request.trigger
         if settings is not None:
@@ -449,7 +455,7 @@ class WaveformMeasurementNode:
             self._trigger = settings.resolve(self._quantities.values())
             parameters["trigger"] = {
                 "channel": settings.channel, "level": settings.level, "slope": settings.slope,
-                "column": self._trigger.column,
+                "samples": self._trigger.samples, "column": self._trigger.column,
             }
         self._run_record = {
             "parameters": parameters,
@@ -481,7 +487,7 @@ class WaveformMeasurementNode:
                 schema = shot_snapshot(
                     blank, output=self._quantities[declaration.name], producer=self.instance_id, generation=self.generation,
                     revision=0, sample_interval_seconds=self.working_point.sample_interval_seconds,
-                    continuous=self._free_running,
+                    continuous=self._continuous, first_sample=0 if self._traces is None else -self._traces.before,
                 ).block.schema
                 complete = None
                 if self.repeat:
@@ -491,11 +497,16 @@ class WaveformMeasurementNode:
                 self._schemas[declaration.name] = (schema, complete)
         return self._schemas
 
+    @property
+    def _continuous(self) -> bool:
+        """A record's samples are rows of the source's own stream, not a trace of its own."""
+
+        return self._free_running and self._trigger is None
+
     def _as_events(self, records: list[WaveformRecord]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """(samples ``(events, samples, columns)``, source times, host receipts) of these records.
 
-        Triggered, each sample is its own event: a plot's window counts events, and a
-        view can only end on the edge when the edge is the end of an event.
+        Triggered, an event is a trace, and these records may complete any number of them.
         """
 
         times = np.fromiter((record.time_seconds for record in records), np.float64, len(records))
@@ -505,10 +516,13 @@ class WaveformMeasurementNode:
             return samples, times, received
         count = self._record_samples
         offsets = self.working_point.sample_interval_seconds * np.arange(count)
-        return samples.reshape(-1, 1, samples.shape[2]), (times[:, None] + offsets).ravel(), np.repeat(received, count)
+        traces = self._traces.push(samples.reshape(-1, samples.shape[2]), (times[:, None] + offsets).ravel(), np.repeat(received, count))
+        if traces.edges:
+            self._triggered()
+        return traces.samples, traces.times, traces.received
 
     def _commit(self, samples: np.ndarray, times: np.ndarray, received: np.ndarray, commit: Callable[..., object],
-                *, shown: np.ndarray | None = None, finite: bool = False) -> int:
+                *, finite: bool = False) -> int:
         """Publish these events as one commit, the same events however they are cut."""
 
         count = samples.shape[0]
@@ -526,7 +540,7 @@ class WaveformMeasurementNode:
         for declaration in self._outputs:
             picked = samples[:, :, list(self._quantities[declaration.name].columns)]
             # Each row in its event's physical shape (see shot_snapshot).
-            values = picked[:, None] if self._free_running or samples.shape[1] == 1 else picked.transpose(0, 2, 1)[:, None, None]
+            values = picked[:, None] if self._continuous or samples.shape[1] == 1 else picked.transpose(0, 2, 1)[:, None, None]
             valid = np.isfinite(values)
             (schema, complete) = schemas[declaration.name]
             outputs[declaration.name] = LiveEvents(declaration, schema, values, True if valid.all() else valid, complete if finite else None)
@@ -536,40 +550,28 @@ class WaveformMeasurementNode:
             for ordinal, shot, source, host in zip(ordinals.tolist(), shot_times.tolist(), times.tolist(), received.tolist())]
         commit(outputs, ordinals=ordinals, shot_times=None if finite else shot_times,
                origins=np.stack((ordinals, np.zeros(count, dtype=np.uint64)), axis=1) if finite else None,
-               shown=shown, records=records)
+               records=records)
         self.published += count
         return count
 
-    def _marks(self, samples: np.ndarray) -> np.ndarray:
-        marks = self._detector.scan(samples[:, 0, self._trigger.column])
-        if marks.any():
-            self._triggered()
-        return marks
-
     def publish_monitor(self, records: list[WaveformRecord], commit: Callable[..., object]) -> int:
-        """Everything goes out at once; a trigger only marks where a view may stand."""
+        """Everything these records complete goes out at once."""
 
         if not records:
             return 0
         self._check_stream(records)
         samples, times, received = self._as_events(records)
-        return self._commit(samples, times, received, commit, shown=None if self._trigger is None else self._marks(samples))
+        return self._commit(samples, times, received, commit)
 
     def publish_finite(self, records: list[WaveformRecord], commit: Callable[..., object]) -> int:
-        """Up to the run's rest of ``repeat`` events; triggered, only from its first trigger on."""
+        """Up to the run's rest of ``repeat`` events."""
 
         if not records:
             return 0
         self._check_stream(records)
         samples, times, received = self._as_events(records)
-        first = 0
-        if not self._started:
-            marks = self._marks(samples)
-            if not marks.any():
-                return 0
-            self._started, first = True, int(np.argmax(marks))
-        last = first + self.repeat - self.published
-        return self._commit(samples[first:last], times[first:last], received[first:last], commit, finite=True)
+        last = self.repeat - self.published
+        return self._commit(samples[:last], times[:last], received[:last], commit, finite=True)
 
     @property
     def silence_seconds(self) -> float:
@@ -612,7 +614,7 @@ class WaveformMeasurementNode:
 
     def _waiting_status(self) -> str:
         trigger = self._trigger
-        seen = None if trigger is None else self._detector.take_range()
+        seen = None if trigger is None else self._traces.take_range()
         if seen is None:
             return "Waiting for trigger"
         return (f"Waiting for trigger: {trigger.name} ranged {seen[0]:.4g} to {seen[1]:.4g} {trigger.unit}, "
@@ -624,8 +626,7 @@ class WaveformMeasurementNode:
         now = monotonic()
         if self._free_running and now - self._last_delivery >= self.silence_seconds:
             raise TimeoutError("waveform source stopped delivering records")
-        # A finite triggered capture stops looking once its first trigger has come.
-        waits = not self._free_running or (self._trigger is not None and (self.repeat == 0 or not self._started))
+        waits = not self._free_running or self._trigger is not None
         if waits and now - self._last_shot >= _WAITING_AFTER_SECONDS and (
                 not self._waiting or now - self._last_status >= _WAITING_AFTER_SECONDS):
             self._last_status = now
@@ -650,8 +651,8 @@ class WaveformMeasurementNode:
         # inside one channel frame however long the records are.
         columns = 1 + max(column for output in self._quantities.values() for column in output.columns)
         self._batch_records = max(1, min(capacity, _BATCH_BYTES // (4 * columns * self._record_samples)))
-        # Triggered, the source streams until the run has its shots: how many of
-        # its records that takes is the signal's business.
+        # Triggered, the source streams until the run has its traces: how many of
+        # its records that takes depends on the signal.
         self.sampler.arm(None if self._trigger is not None else self.repeat or None, buffer_record_count=capacity)
         self._run_record["acquisition"] = {"buffer_record_count": capacity}
         # Hardware may quantize the requested rate at arm (notably DAQ).
@@ -661,7 +662,7 @@ class WaveformMeasurementNode:
             self.sampler, self._working_point
         )
         if self._trigger is not None:
-            self._detector = TriggerDetector(self._trigger, self._working_point.sample_interval_seconds)
+            self._traces = TraceAssembler(self._trigger, self._working_point.sample_interval_seconds)
         self._last_delivery = self._last_shot = monotonic()
         self._next_read = 0.0
         self._waiting = False

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use zlc_core::AnyBuffer;
 use zlc_core::control::{Origin, SafeActions};
-use zlc_core::runtime::{Publication, Runtime, SignalDescription};
+use zlc_core::runtime::{Front, Publication, Runtime, SignalDescription};
 use zlc_core::schema::DomainRole;
 use zlc_plugin_host::{HostConfig, HostEvent, PluginHost, RunRequest};
 
@@ -254,6 +254,44 @@ fn a_repeat_group_beside_a_kept_repeat_axis_closes_by_its_own_axis() {
         close(&values, &want);
         close(&plane(&runtime, &format!("@logic/{node}_sealed/a")).0, &want);
     }
+    host.shutdown();
+}
+
+/// A slow clock on a running source: the signal is known from the first delivery, the source
+/// stays live on a board beside it, and each closed group shows.
+#[test]
+fn a_group_on_a_running_source_holds_no_board_back() {
+    let Some((host, runtime, events)) = host() else { return };
+    let source = "@logic/repeater/counts";
+    host.open("repeater", "repeater", json!({}), json!({})).unwrap();
+    let repeater = host.start_run("repeater", request(json!({"repeats": 8, "points": 2, "pause": 0.1}), None, &[("counts", source)])).unwrap();
+    let scan = published(&runtime, source);
+    let variables = json!([{"name": "a", "terms": [{"of": "counts"}], "statistic": "mean", "over": ["repeat", "Site"], "by": "repeat", "every": 3}]);
+    host.open("groups", "derive", json!({}), json!({})).unwrap();
+    let groups = host.start_run("groups", request(json!({"variables": variables}), Some(source), &[("a", "@logic/groups/a")])).unwrap();
+    // Declared before its first group closes, six events on.
+    let until = Instant::now() + Duration::from_secs(5);
+    let signal = loop {
+        if let Some(found) = runtime.signals().into_iter().find(|item| &*item.signal == "@logic/groups/a") { break found; }
+        assert!(Instant::now() < until, "not declared");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let requests = [(scan.generation.clone(), std::sync::Arc::<str>::from(source), None), (signal.generation.clone(), std::sync::Arc::<str>::from("@logic/groups/a"), None)];
+    let mut front = Front::default();
+    let (mut behind, mut reads, mut groups_seen) = (0, 0, std::collections::BTreeSet::new());
+    while runtime.signals().into_iter().rev().find(|item| &*item.signal == source).is_some_and(|item| !item.sealed) {
+        let answer = runtime.read_coherent_views(&requests, &mut front);
+        let newest = runtime.read_latest(&scan.generation, source).unwrap().key().ordinal.unwrap();
+        let shown = answer[0].as_ref().map(|read| read.key().ordinal.unwrap()).unwrap_or(0);
+        if newest > shown + 1 { behind += 1; }
+        reads += 1;
+        if let Ok(read) = &answer[1] { groups_seen.insert(read.key().ordinal.unwrap()); }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    await_end(&events, &[&repeater, &groups]);
+    assert!(reads > 50);
+    assert!(behind * 20 < reads, "the source is live: behind by more than an event in {behind} of {reads} reads");
+    assert!(groups_seen.len() >= 2, "each closed group shows: {groups_seen:?}");
     host.shutdown();
 }
 

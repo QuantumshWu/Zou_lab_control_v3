@@ -74,9 +74,9 @@ Calibration and Seamless Scan run their own acquisition and Pulse: start them on
 Processors (Occupancy, Frame Survival, Derive, ...) can start before their source publishes: they follow
 it (`phase: following`) and run on each new acquisition. `waveform_measurement` does the same for
 waveform devices; read the source's actual axes in `list_signals`. Its `trigger_slope` (`rising`/`falling`,
-default `off`) with `trigger_channel` and `trigger_level` locks a slow free-running source in software: every
-sample is published as its own event, and a panel's window ends on the latest crossing. With `repeat` N it keeps
-N consecutive samples from the first crossing.
+default `off`) with `trigger_channel`, `trigger_level` and `trigger_samples` locks a slow free-running source in
+software: each crossing gives one record of that many samples with the crossing in its middle, on a record time
+axis that is zero there. With `repeat` N it keeps the records of N crossings; with 0 each record is the latest.
 
 ## pulse
 

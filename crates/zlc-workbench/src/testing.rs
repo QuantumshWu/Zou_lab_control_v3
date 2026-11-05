@@ -1492,6 +1492,21 @@ mod tests {
         assert_eq!(wb.node_row(wb.node("seamless_scan").unwrap(),&[])["editor_facts"]["marker"],"fresh");
     }
     #[test]
+    fn a_row_says_while_its_editor_model_is_of_an_older_draft() {
+        let mut catalog=catalog();catalog["types"][4]["node"]["queries"]=json!(["editor_facts"]);
+        let (_root,mut wb,calls,mut host)=rig("editor-facts-pending",catalog);
+        add_open_node(&mut wb,&mut host,json!({"type_id":"seamless_scan"}));
+        let first=asked(&calls,"editor_facts");
+        event(&mut wb,Event::Answered{ticket:first,result:Ok(json!({"marker":"first"}))},&mut host);
+        let row=|wb:&Workbench|wb.node_row(wb.node("seamless_scan").unwrap(),&[]);
+        assert_eq!(row(&wb)["editor_facts_pending"],false);
+        apply(&mut wb,&mut host,"edit_node",json!({"node":"seamless_scan","values":{"acquisition_logic":"camera_measurement"}})).unwrap();
+        assert_eq!((&row(&wb)["editor_facts_pending"],&row(&wb)["editor_facts"]["marker"]),(&json!(true),&json!("first")));
+        let second=asked(&calls,"editor_facts");
+        event(&mut wb,Event::Answered{ticket:second,result:Ok(json!({"marker":"second"}))},&mut host);
+        assert_eq!((&row(&wb)["editor_facts_pending"],&row(&wb)["editor_facts"]["marker"]),(&json!(false),&json!("second")));
+    }
+    #[test]
     fn old_reply_cannot_touch_recreated_node() {
         let mut catalog=catalog();catalog["types"][4]["node"]["queries"]=json!(["editor_facts"]);
         let (_root,mut wb,calls,mut host)=rig("audit-recreate-reply",catalog);

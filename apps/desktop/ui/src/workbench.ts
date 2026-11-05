@@ -145,6 +145,8 @@ export type LogicRow = {
    * place of the fields it manages.  `editor_facts_error`: why it could not. */
   editor_facts?: EditorFacts | null;
   editor_facts_error?: string | null;
+  /** `editor_facts` answers an older draft; the current one's answer is on its way. */
+  editor_facts_pending?: boolean;
 };
 
 export type ArtifactValue = string | null | { path: string; frames?: string[] }[];
