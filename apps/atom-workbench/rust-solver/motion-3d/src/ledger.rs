@@ -21,12 +21,12 @@ pub const BUDGET:f64=A_PRIORI_SHARE*POPULATION_TARGET;
 #[derive(Clone,Debug,PartialEq)]
 pub struct Item{pub label:String,pub estimate:f64,pub action:String}
 
-/// The ledger of a solve: its items against the population target (`budget`) and, when some output times lie beyond a
-/// target, why.
+/// The ledger of a solve: its items against the population target (`budget`); when some output times lie beyond a
+/// target, why; and what is true of the request's setup whatever the solve does (`note`: the initial ensemble's, no error of the solve's and no warning).
 #[derive(Clone,Debug,PartialEq)]
-pub struct Ledger{pub budget:f64,pub items:Vec<Item>,pub flagged:Option<String>}
+pub struct Ledger{pub budget:f64,pub items:Vec<Item>,pub flagged:Option<String>,pub note:Option<String>}
 impl Ledger{
-    pub fn new()->Ledger{Ledger{budget:crate::solve::POPULATION_TARGET,items:vec![],flagged:None}}
+    pub fn new()->Ledger{Ledger{budget:crate::solve::POPULATION_TARGET,items:vec![],flagged:None,note:None}}
     pub fn add(&mut self,label:&str,estimate:f64,action:String){self.items.push(Item{label:label.into(),estimate,action});}
     /// The estimates' sum.
     pub fn used(&self)->f64{self.items.iter().map(|i|i.estimate).sum()}
