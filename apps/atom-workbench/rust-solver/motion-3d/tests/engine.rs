@@ -832,15 +832,23 @@ fn a_folded_drive_across_an_explicit_state_s_line_leaves_its_tables_smooth(){
     assert!(!model.table_stalled&&model.table_error<1e-3,"its error {:.2e}, stalled {}",model.table_error,model.table_stalled);
 }
 
-/// A folded drive's line narrower than the grids where the atoms go: the retro-reflected tweezer with a resonant probe, every drive folded, on a line of a quarter of its
-/// width, a real error of about 1 from 33 nodes on. The refinement stops at the first doubling that does not shrink it, whose next one is predicted to save nothing
-/// (model.rs `tabulate`), the last grid kept and its error booked: the estimate that takes the rung that keeps the drive.
+/// A folded drive's line narrower than the first grids where the atoms go: the retro-reflected tweezer with a resonant probe, every drive folded, on a line of half its amplitude's width: an error of about 1 from 33 to
+/// 129 nodes, rising on the way, and then the cubic's order: the refinement goes on through it (model.rs `tabulate`, `STALLED_DOUBLINGS`).
 #[test]
-fn a_line_narrower_than_the_grids_stops_the_refinement_with_its_error_booked(){
+fn a_line_the_first_grids_do_not_resolve_does_not_stop_the_refinement(){
     let f:Value=serde_json::from_str(include_str!("fixtures/retro_probe_motion.json")).unwrap();let mut r=scene::request(&f);r.times_us=(0..21).map(|i|5.*i as f64).collect();
     for m in r.emission.iter_mut(){for x in m.real.iter_mut().chain(m.imag.iter_mut()){*x*=0.5;}}
     let model=Model::with(&r,f64::INFINITY).unwrap();
-    assert!(model.table_stalled&&model.table_limit.is_some()&&model.table_error>0.5,"refined to {:?} nodes per axis, its error {:.2e}, stalled {}",model.table_limit,model.table_error,model.table_stalled);
+    assert!(!model.table_stalled&&model.table_error<0.05,"refined to {:?} nodes per axis, its error {:.2e}, stalled {}",model.table_limit,model.table_error,model.table_stalled);
+}
+/// The same tweezer at a mirror phase of 30°: the standing wave's antinode a fraction of a wavelength off the focus, nothing else moved. Its rung that keeps the probe holds its tables' error within the targets, without a flag.
+#[test]
+fn a_mirror_phase_leaves_the_tables_converging(){
+    let f:Value=serde_json::from_str(include_str!("fixtures/retro_probe_motion.json")).unwrap();let mut r=scene::request(&f);r.times_us=(0..21).map(|i|5.*i as f64).collect();
+    let phase=30_f64.to_radians();let turn=|m:&mut Matrix,sign:f64|{let(s,c)=(sign*phase).sin_cos();for(x,y)in m.real.iter_mut().zip(m.imag.iter_mut()){(*x,*y)=(*x*c-*y*s,*x*s+*y*c);}};
+    let reflection=r.beams.iter_mut().find(|b|b.id.contains("reflection")).unwrap();turn(&mut reflection.coupling,1.);turn(&mut reflection.counter_coupling,-1.);
+    let model=Model::with(&r,Ground::allowances(&r).unwrap()[1]).unwrap();
+    assert!(!model.table_stalled&&model.table_error<0.05,"refined to {:?} nodes per axis, its error {:.2e}, stalled {}",model.table_limit,model.table_error,model.table_stalled);
 }
 
 /// The PGC with a resonant probe at other intensities (mW/cm²), its first microseconds: its couplings scaled by the root of the intensity, the outside shifts by the intensity.

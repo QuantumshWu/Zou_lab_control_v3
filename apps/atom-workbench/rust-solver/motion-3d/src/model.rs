@@ -170,6 +170,11 @@ pub const NOT_LINDBLAD:&str="消去激发态后的生成元不是 Lindblad 形�
 /// interpolation error booked (`Model::table_error`, the ledger's), the same on any machine.
 pub const MOST_TABLE_BYTES:usize=1<<32;
 pub const MOST_TABLE_NODES:usize=1<<20;
+/// The doublings above their smallest error that stop the tables' refinement (`Model::tabulate`): a grid eight times finer that has not come below it. A line the grids do not yet resolve moves the error about one
+/// on its way: the retro-reflected tweezer with a resonant probe at a mirror phase of 30°, its rung keeping the probe, 0.60, 1.10, 0.75 and 0.012 from 9 to 65 nodes, and every drive folded 0.84, 1.10, 1.44, 0.29,
+/// then 0.069, 0.011 and 0.0014 at 513; on a line of half the width 0.87, 1.0, 0.82, 0.35, 0.059 and 0.0064 from 33 to 1025. Stopped at the first rise, it booked 110 % on every mirror phase but 0, with its T and
+/// populations what the finer grids give.
+const STALLED_DOUBLINGS:usize=3;
 /// The nodes of a grid computed at once, written into its tables before the next: a grid's nodes
 /// are held once, in its tables.
 const NODE_BATCH:usize=4096;
@@ -560,8 +565,7 @@ pub struct Model{
     pub(crate) layouts:Vec<Layout>,
     pub(crate) tables:Tables,
     /// The interpolation's measured largest relative error where the atoms go (`tabulate`), and where the
-    /// work bounds -- or a doubling that did not shrink the error (`table_stalled`), whose next one is
-    /// predicted to save nothing -- stopped the grid's refinement the nodes per axis it kept.
+    /// work bounds -- or `STALLED_DOUBLINGS` above its smallest error (`table_stalled`) -- stopped the grid's refinement the nodes per axis it kept.
     pub table_error:f64,
     pub table_limit:Option<usize>,
     pub table_stalled:bool,
@@ -1311,8 +1315,8 @@ impl Model{
     /// below what its smaller error saves the run (`stake`'s run at its `room_cost`). Its error
     /// is predicted by the last doubling's rate, and by the cubic interpolation's order before one is seen,
     /// 2⁻³ a doubling (`cubic`), and what it saves is `room_cost`'s: an error the whole population target leaves no run its room, whatever the run's length (a request of no
-    /// duration, a step's stake: 5 % at 9 nodes on the tweezer PGC). A doubling that did not shrink the error predicts no saving, and stops it
-    /// (`table_stalled`: the tabulated function is not smooth on the grids' scale where the atoms go).
+    /// duration, a step's stake: 5 % at 9 nodes on the tweezer PGC). A doubling that did not shrink the error says nothing of the next: a grid short of a line across the intensity axis reads about one
+    /// until it resolves it, the cubic's order the prediction there. `STALLED_DOUBLINGS` above its smallest stop it (`table_stalled`: the tabulated function is not smooth on the grids' scale where the atoms go).
     /// A grid beyond the work bounds (`MOST_TABLE_BYTES`, `MOST_TABLE_NODES`) is not made
     /// whatever it saves (`table_limit`). Its error is booked (the ledger's), the room it takes from the
     /// statistics like any estimate's (solve.rs).
@@ -1329,8 +1333,9 @@ impl Model{
         loop{
             let(coarse,n)=(self.tables.nodes,2*self.tables.nodes-1);
             if let Some(&error)=errors.last(){
-                let rate:f64=if errors.len()>1{error/errors[errors.len()-2]}else{0.125};
-                if !(rate<1.){self.table_stalled=true;self.table_limit=Some(coarse);break;}
+                let smallest=errors.iter().copied().fold(f64::INFINITY,f64::min);
+                if errors.iter().rev().take_while(|&&e|e>smallest).count()>=STALLED_DOUBLINGS{self.table_stalled=true;self.table_limit=Some(coarse);break;}
+                let rate:f64=if errors.len()>1&&error<errors[errors.len()-2]{error/errors[errors.len()-2]}else{0.125};
                 let work=MATRIX_NS*((n.pow(d)-coarse.pow(d)) as f64*per_node+(n.pow(d)*measured*4_usize.pow(d)) as f64);
                 if room_cost(error).is_finite()&&!(work<stake*(room_cost(error)-room_cost(rate*error))){break;}
             }
