@@ -496,7 +496,6 @@ fn batch(r:&Request,fourth:bool,dt:f64)->bool{
         assert_eq!((x.trajectories,x.held),(y.trajectories,y.held),"{at}: trajectories and held");
         for a in 0..3{
             close(x.kappa[a],y.kappa[a],(y.kappa2[a]*y.held).sqrt(),&format!("{at}: Σκ[{a}]"));close(x.kappa2[a],y.kappa2[a],0.,&format!("{at}: Σκ²[{a}]"));
-            close(x.position[a],y.position[a],(y.position2[a]*y.held).sqrt(),&format!("{at}: Σr[{a}]"));close(x.position2[a],y.position2[a],0.,&format!("{at}: Σr²[{a}]"));
             for j in 0..3{close(x.harmonic[a][j],y.harmonic[a][j],1e-9*y.harmonic[a][1].sqrt(),&format!("{at}: harmonic[{a}][{j}]"));}
         }
         for s in 0..STATES{close(x.populations[s],y.populations[s],y.held,&format!("{at}: Σp[{s}]"));close(x.twin[s],y.twin[s],y.trajectories,&format!("{at}: twin Σc[{s}]"));}
@@ -540,7 +539,7 @@ fn a_group_stops_at_its_last_output_as_on_the_cpu(){
     let close=|a:f64,b:f64,what:&str|assert!((a-b).abs()<=1e-3*b.abs().max(1.),"{what}: {a} against {b}");
     for(k,(gg,cg))in g.groups.iter().zip(&c.groups).enumerate(){for(i,(x,y))in gg.sums.iter().zip(&cg.sums).enumerate(){
         let at=format!("group {k}, output {i}");assert_eq!((x.trajectories,x.held),(y.trajectories,y.held),"{at}");
-        for a in 0..3{close(x.kappa2[a],y.kappa2[a],&format!("{at}: Σκ²[{a}]"));close(x.position2[a],y.position2[a],&format!("{at}: Σr²[{a}]"));for j in 0..3{close(x.harmonic[a][j],y.harmonic[a][j],&format!("{at}: harmonic[{a}][{j}]"));}}
+        for a in 0..3{close(x.kappa2[a],y.kappa2[a],&format!("{at}: Σκ²[{a}]"));for j in 0..3{close(x.harmonic[a][j],y.harmonic[a][j],&format!("{at}: harmonic[{a}][{j}]"));}}
         for s in 0..STATES{close(x.populations[s],y.populations[s],&format!("{at}: Σp[{s}]"));}
         if i>ends[k]{assert_eq!(x.held,0.,"{at}: none beyond its last output");}
     }}

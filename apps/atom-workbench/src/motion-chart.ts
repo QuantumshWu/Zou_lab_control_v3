@@ -58,7 +58,7 @@ export function motionSeries(motion:MotionResult):[Series,Series]{
   const temperature:Line[]=[...MOTION_AXES.map((axis,k)=>({name:`T${along(axis)}`,values:motion.temperatureUK[k]!,ink:AXIS_INKS[axis],error:motion.temperatureErrorUK[k]!})),
     {name:'总温度',values:motion.temperatureTotalUK,ink:TOTAL_INK,width:TOTAL_WIDTH,error:motion.temperatureTotalErrorUK}];
   return [{id:'temperature',name:'温度 T',title:'温度 T / μK（各轴一个阱周期内的平均）',lines:temperature,unit:{name:'μK',factor:1}},
-    {id:'occupation',name:'n̄',title:`平均振动量子数 n̄（相对各轴焦点处的阱频 ω/2π：${MOTION_AXES.map((axis,k)=>`${axis} ${digits(motion.trapFrequencyKHz[k]!)}`).join('、')} kHz）`,
+    {id:'occupation',name:'n̄',title:`平均振动量子数 n̄ = m⟨v²⟩/ħω − ½（各轴阱底处的阱频 ω/2π：${MOTION_AXES.map((axis,k)=>`${axis} ${digits(motion.trapFrequencyKHz[k]!)}`).join('、')} kHz）`,
       lines:MOTION_AXES.map((axis,k)=>({name:`n̄${along(axis)}`,values:motion.meanOccupation[k]!,ink:AXIS_INKS[axis]})),unit:{name:'',factor:1}}];
 }
 /** A panel: its series, its vertical span and ticks (display units), and where a value goes. */
