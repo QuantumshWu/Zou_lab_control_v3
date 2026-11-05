@@ -74,7 +74,11 @@
 //! the populations' over the waiting time and the impulse's `QUADRATURE`, by doubling the grid on its states
 //! (`Engine::grid_error`, solve.rs `grid_phase`; `Settings::node_phase`, the bound's by default), CF4's own error
 //! of fourth order in the beats' derivatives (validated against a
-//! fine CF4, the master equation and the population core: examples/multirate.rs). What is left is the
+//! fine CF4, the master equation and the population core: examples/multirate.rs). Neither share sees a small part of the state that is a whole channel between ground states: a far-detuned explicit state
+//! driven through a beat is kicked as the beat's phase steps from one spacing to the next, the kicks adding as the spacing nears 2π over its detuning and the beat, and staying well past it. Its population lies far below the
+//! populations' largest difference and the impulse barely feels it, while its photons pump the atom out of its cluster, and what they move adds up over the run until the populations relax. (The PGC with a
+//! resonant probe with F' = 2 and F' = 1 explicit, 100 us: F = 1 stands 0.023 ± 0.008 above a grid of 0.6 times the spacing, at the phase those two shares read 0.26 and 0.69 of themselves; the numerical share is 0.002.)
+//! So a solve also reads what a step lands between the groups of ground states, over the run (`Engine::grid_landings`, solve.rs `landed_excess`). What is left is the
 //! motion's own splitting, which the step-doubling check measures. A trajectory whose jump lands it in
 //! such a cluster takes the rest of its step so.
 //!
@@ -781,6 +785,10 @@ pub fn slow_start(model:&Model,t:&mut Trajectory,point:&Point,time:f64){
 /// the seconds its components and its segment take to build, and on a beating grid a node's work (`Entries::node_work`).
 pub struct Probe{pub path:&'static str,pub spacing:f64,pub nodes:usize,pub beats:Vec<(f64,f64,bool)>,pub share:f64,pub seconds:[f64;2],pub weighted:Option<usize>,pub node:[f64;2]}
 
+/// What one step from a trajectory's state, normalized, lands between groups of ground states (`Engine::grid_landings`, solve.rs `landed_excess`): the group it starts in, its largest; per group the master
+/// equation's source Σ_x ‖P_g J_x ψ(s)‖² summed over the step's reads, ψ the no-jump state unnormalized; the ground states' population at the step's end, and the norm there.
+pub struct Landings{pub from:usize,pub sources:Vec<f64>,pub stay:Vec<f64>,pub left:f64}
+
 /// A real orthonormal pair across the unit vector n.
 fn across(n:[f64;3])->[[f64;3];2]{
     let a=if n[0].abs()<=n[1].abs()&&n[0].abs()<=n[2].abs(){[1.,0.,0.]}else if n[1].abs()<=n[2].abs(){[0.,1.,0.]}else{[0.,0.,1.]};
@@ -1032,16 +1040,42 @@ impl<'a> Engine<'a>{
     }
     /// A beating segment's grid at `phase` against one of half that spacing, one jump-free step from a trajectory's state at its
     /// point: the largest difference of its populations, of the impulse, and the impulse's size; None where its cluster
-    /// takes no beating segment (solve.rs `grid_phase`).
+    /// takes no beating segment, or where a step within a spacing leaves the two one grid and nothing to read (solve.rs `grid_phase`).
     pub fn grid_error(&self,t:&Trajectory,phase:f64)->Option<[f64;3]>{
         if !self.takes_exact(t.cluster){return None;}
         let(m,s)=(self.model,&self.settings);let n=m.dimension(t.cluster);let c=m.components(t.cluster,&m.point(t.r,t.kappa));
         let at=|c:Components,phase:f64|Segment::new(c,t.time,s.dt,s.truncation,s.beats,s.horizon,phase);
         let coarse=at(c.clone(),phase);if !matches!(coarse.how,How::Beating(_)){return None;}
-        let fine=at(c,0.5*phase);let(mut a,mut b)=(t.psi,t.psi);
+        let fine=at(c,0.5*phase);if fine.spacing==coarse.spacing{return None;}let(mut a,mut b)=(t.psi,t.psi);
         let(_,_,one)=coarse.evolve(&mut a,t.time,s.dt,0.);let(_,_,two)=fine.evolve(&mut b,t.time,s.dt,0.);
         let(x,y)=(norm2(&a,n),norm2(&b,n));
         Some([(0..n).map(|i|(a[i].norm_sqr()/x-b[i].norm_sqr()/y).abs()).fold(0.,f64::max),(0..3).map(|k|(one[k]-two[k]).powi(2)).sum::<f64>().sqrt(),two.iter().map(|v|v*v).sum::<f64>().sqrt()])
+    }
+    /// One step's landings from a trajectory's state (`Landings`) on a grid of half the spacing at `phase` and on the grid at it, none where its cluster takes no beating grid (the first is then its own
+    /// propagation); `draws` the reads' places, each in its equal share of the step, in [0, 1), the same on both (solve.rs `landed_excess`).
+    pub fn grid_landings(&self,t:&Trajectory,phase:f64,groups:&[usize],count:usize,draws:&[f64])->(Landings,Option<Landings>){
+        let(m,s)=(self.model,&self.settings);let point=m.point(t.r,t.kappa);let c=m.components(t.cluster,&point);
+        let at=|c:Components,phase:f64|Segment::new(c,t.time,s.dt,s.truncation,s.beats,s.horizon,phase);
+        let coarse=m.beating(t.cluster).then(||at(c.clone(),phase)).filter(|x|matches!(x.how,How::Beating(_)));
+        (self.landings(t,&point,&at(c,0.5*phase),groups,count,draws),coarse.map(|x|self.landings(t,&point,&x,groups,count,draws)))
+    }
+    /// A step's landings through a segment: at each read the photons of the state the evolution holds there, which a jump would take -- off a copy from the last whole panel before it, as a jump's
+    /// (`Segment::evolve`), the grid's own path going on untouched: reads that broke its panels refined the grid they read (F = 1 on a PGC's explicit rung at phase 9.9, 0.06 at 4 reads, 0.0003 at 32).
+    fn landings(&self,t:&Trajectory,point:&Point,segment:&Segment,groups:&[usize],count:usize,draws:&[f64])->Landings{
+        let(m,s)=(self.model,&self.settings);let n=m.dimension(t.cluster);let g=&m.ground;let cl=&g.clusters[t.cluster];
+        let size=norm2(&t.psi,n).sqrt();let mut x=t.psi;for z in x[..n].iter_mut(){*z=*z*(1./size);}
+        let of=|x:&[Complex]|{let mut p=vec![0.;count];for(a,&state)in cl.states.iter().enumerate(){p[groups[state]]+=x[a].norm_sqr();}p};
+        let start=of(&x);let from=(0..count).max_by(|&a,&b|start[a].total_cmp(&start[b])).unwrap();
+        let(mut at,panel,mut sources)=(t.time,2.*segment.spacing,vec![0.;count]);
+        for(k,place)in draws.iter().enumerate(){
+            let to=t.time+s.dt*(k as f64+place)/draws.len() as f64;let node=t.time+((to-t.time)/panel).floor()*panel;
+            if node>at{segment.evolve(&mut x,at,node-at,0.);at=node;}
+            let mut y=x;if to>at{segment.evolve(&mut y,at,to-at,0.);}
+            let photons=m.photons(t.cluster,point,&y,to,None);
+            for(class,u)in cl.classes.iter().zip(&photons.amplitude){for(row,&state)in g.clusters[class.target].states.iter().enumerate(){sources[groups[state]]+=(0..3).map(|a|u[a][row].norm_sqr()).sum::<f64>();}}
+        }
+        segment.evolve(&mut x,at,t.time+s.dt-at,0.);
+        Landings{from,sources,stay:of(&x),left:norm2(&x,n)}
     }
     /// Whether a cluster takes the exact step: one with explicit excited states or a beating generator
     /// (a held atom's clusters are of ground states and static, control.rs).
