@@ -327,7 +327,7 @@
 //! model beyond its kernel) leaves the solve on the CPU with the reason
 //! (`Solution::device_note`); one that fails during the batches has the solve redone on the CPU.
 use crate::cost::{advance_work,jump_work,pays,CIS_NS,COMPLEX_MULTIPLY_ADD_NS,SPECTRAL_N3,TERM_NS};
-use crate::engine::{column_norm,node_phase,series,Engine,Landings,Settings,Trajectory,QUADRATURE};
+use crate::engine::{column_norm,halves,node_phase,series,Engine,Halves,Landings,Settings,Trajectory,QUADRATURE};
 use crate::gpu;
 use crate::ground::{ExcitedKind,Ground,Kind};
 use crate::ledger::{Ledger,Total};
@@ -1864,13 +1864,18 @@ fn steps_parts(model:&Model,states:&[StateWork],s:&Settings)->Vec<([f64;2],bool)
     let exact:Vec<usize>=(0..states.len()).filter(|&i|engine.takes_exact(states[i].cluster)).collect();
     let probed:Vec<[f64;2]>=exact.par_iter().step_by((exact.len()/PROBED).max(1)).map(|&i|exact_step(&engine,states[i].exact.as_ref().unwrap(),&states[i])).collect();
     let mean:[f64;2]=std::array::from_fn(|k|probed.iter().map(|p|p[k]).sum::<f64>()/probed.len().max(1) as f64);
-    states.iter().map(|x|if engine.takes_exact(x.cluster){(mean,true)}else{([x.advance+2.*half_step(x,s),0.],false)}).collect()
+    states.iter().map(|x|if engine.takes_exact(x.cluster){(mean,true)}else{([x.advance+half_steps(x,s),0.],false)}).collect()
 }
 /// What a jump adds to an exact step (`exact_step`'s parts, ns): the step redone to its crossing and its rest build their segments, and the grid up to the crossing goes over again, half a step's on average.
 fn exact_redo(p:&[f64;2])->f64{2.*p[0]+0.5*p[1]}
-/// A half step's propagation at a state (ns): its series' sub-steps × terms at its generator's norm,
-/// the step's dt and truncation.
-fn half_step(x:&StateWork,s:&Settings)->f64{let(sub,terms)=series(x.norm,0.5*s.dt,s.truncation);(sub*terms) as f64*(TERM_NS+COMPLEX_MULTIPLY_ADD_NS*(x.n*x.n) as f64)}
+/// A step's two half steps' propagation at a state (cost.rs), as the step takes them at its generator's norm, the step's dt and truncation (engine.rs `halves`): two times the series' parts × terms, or U's products once.
+fn half_steps(x:&StateWork,s:&Settings)->f64{
+    let size=(x.n*x.n) as f64;
+    match halves(x.norm,0.5*s.dt,s.truncation,x.n){
+        Halves::Series(parts,terms)=>2.*(parts*terms) as f64*(TERM_NS+COMPLEX_MULTIPLY_ADD_NS*size),
+        Halves::Matrix(squarings,terms)=>COMPLEX_MULTIPLY_ADD_NS*size*((terms-1+squarings as usize)*x.n+2) as f64,
+    }
+}
 /// A step's work per interval (cost.rs), counted on the sampled states -- the
 /// same whatever the machine and its load: its steps (`steps_parts`), each the generator's and the force's
 /// multiply-adds and pairs of the state's cluster and two half steps' series, or the exact step's; and per

@@ -204,6 +204,7 @@
 //! step-doubling check compares them. A jump draws its class, the next threshold, the polarization,
 //! the absorbed beam and the transient's five first and the
 //! directions' rejection loops last.
+use crate::cost::pays;
 use crate::eigen::{decompose,Eigen};
 use crate::linear::{unit_round_off,zeroed};
 use crate::model::{Absorption,Components,Exact,Model,Point,MOST_MIXED,MOST_STATES};
@@ -385,14 +386,19 @@ fn scaled_exponential<const N:usize>(h:&[Complex;MOST_STATES*MOST_STATES],tau:f6
     for _ in 0..s{sum=times(&sum,&sum);}
     sum
 }
-/// A step's half steps on one generator (`Engine::advance`), exp(−iHτ) twice: its series on the vector (`propagate`), or, where that takes more than one part and more products
-/// (n² each, against n³ of `squarings`, and two by U) -- a generator of ‖H‖τ ≫ 1, a cluster's states' frames apart: THREE's half of its CPU solve, 200 products a half step --, U once.
+/// How a step's two half steps go on a generator of norm `norm` (exp(−iHτ) twice, `HalfStep`, and the step's cost, solve.rs): its series on the vector (`propagate`), parts × terms, or, where that takes more than one part and U pays (cost.rs `pays`) -- a generator of ‖H‖τ ≫ 1, a cluster's states' frames apart:
+/// THREE's half of its CPU solve, 200 products a half step --, `squarings`'s s and terms once. In n² products each way, n³ a product of `squarings` and two by U: the unit divides out, a count has no error of its own, and each way's own overhead, a term's or an array's, stands aside.
+pub(crate) enum Halves{Series(usize,usize),Matrix(i32,usize)}
+pub(crate) fn halves(norm:f64,tau:f64,truncation:f64,n:usize)->Halves{
+    let(parts,terms)=series(norm,tau,truncation);
+    if parts>1{if let Some((s,m))=squarings(norm*tau.abs(),truncation){if pays(((m-1+s as usize)*n+2) as f64,(2*parts*terms) as f64,0.){return Halves::Matrix(s,m);}}}
+    Halves::Series(parts,terms)
+}
+/// A step's half steps on one generator (`Engine::advance`), as `halves` has them.
 enum HalfStep{Series,Matrix(Box<[Complex;MOST_STATES*MOST_STATES]>)}
 impl HalfStep{
     fn new(h:&[Complex;MOST_STATES*MOST_STATES],n:usize,tau:f64,truncation:f64)->HalfStep{
-        let norm=column_norm(h,n);let(parts,terms)=series(norm,tau,truncation);if parts==1{return HalfStep::Series;}
-        let Some((s,m))=squarings(norm*tau.abs(),truncation)else{return HalfStep::Series};
-        if (m-1+s as usize)*n+2>=2*parts*terms{return HalfStep::Series;}
+        let Halves::Matrix(s,m)=halves(column_norm(h,n),tau,truncation,n)else{return HalfStep::Series};
         macro_rules! sized{($($n:literal)*)=>{match n{$($n=>Box::new(scaled_exponential::<$n>(h,tau,(s,m))),)*_=>unreachable!("a cluster of ground states has 1 to 8 states")}}}
         HalfStep::Matrix(sized!(1 2 3 4 5 6 7 8))
     }
