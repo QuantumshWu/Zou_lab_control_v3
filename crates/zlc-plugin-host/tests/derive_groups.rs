@@ -78,9 +78,7 @@ fn groups_reach_runtime_as_write_once_placements_beside_a_per_event_latest() {
         {"name": "a", "terms": [{"of": "counts"}], "statistic": "mean", "over": ["repeat", "Site"], "by": "repeat", "every": 2},
         {"name": "b", "terms": [{"of": "counts"}], "statistic": "mean", "over": ["Site"]},
     ]);
-    // Its own name: a node run again leaves its last generation standing until it publishes.
-    let source = &format!("@logic/repeater/{node}_counts");
-    let source = source.as_str();
+    let source = "@logic/repeater/counts";
     host.open("repeater", "repeater", json!({}), json!({})).unwrap();
     let repeater = host.start_run("repeater", request(json!({"repeats": 5, "points": 2, "pause": 0.1}), None, &[("counts", source)])).unwrap();
     published(&runtime, source);
@@ -262,9 +260,7 @@ fn a_repeat_group_beside_a_kept_repeat_axis_closes_by_its_own_axis() {
 #[test]
 fn a_monitor_gives_one_latest_event_per_group_and_its_seal_the_partial_one() {
     let Some((host, runtime, events)) = host() else { return };
-    // Its own name: a node run again leaves its last generation standing until it publishes.
-    let source = &format!("@logic/repeater/{node}_counts");
-    let source = source.as_str();
+    let source = "@logic/repeater/counts";
     host.open("repeater", "repeater", json!({}), json!({})).unwrap();
     let repeater = host.start_run("repeater", request(json!({"repeats": 7, "monitor": true, "pause": 0.1}), None, &[("counts", source)])).unwrap();
     published(&runtime, source);
