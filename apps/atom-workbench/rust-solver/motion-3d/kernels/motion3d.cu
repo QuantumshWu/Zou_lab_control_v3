@@ -302,7 +302,9 @@ struct Program{
     float region32;                         // twice the region in single precision (`well_inside`)
     int lattice;                            // the trap has a standing wave
     double region;                          // the trap's region the loss takes (engine.rs `Settings::region`), rad/us
-    double lattice_axis[3],lattice_k,lattice_inv_rayleigh,lattice_phase; // the trap's standing wave (model.rs `Lattice`): its axis on the principal axes, k (0: none), 1/z_R, its phase
+    double centre[3];                       // the trap's centre (model.rs `Trap`) on the principal axes
+    int offset,offset_pad;                  // the harmonic part stands off the focus: the trap's centre, or a standing wave's site
+    double lattice_axis[3],lattice_k,lattice_inv_rayleigh,lattice_phase,lattice_central; // the trap's standing wave (model.rs `Lattice`): its axis on the principal axes, k (0: none), 1/z_R, its phase, the envelope's inverse at the trap's centre
     double node_phase,grid_phase,beats,horizon;   // the exact step's node phase, a beating grid's (engine.rs `Settings::node_phase`), its beats' share and their horizon
 };
 
@@ -952,7 +954,7 @@ __device__ float quadratic(const Warp& W,const Entries<>& E,const float2 (&x)[SL
 
 // The harmonic part's centre (on the principal axes) and weight at a step's start (engine.rs
 // `Engine::reference`): one within the trap's region, U_h ≤ D, (2u − 1)/u² beyond it, u = U_h/D, about the
-// focus or, in a standing wave, the atom's own site; one without a region.
+// trap's centre or, in a standing wave, the atom's own site; one without a region.
 // Whether an atom stands inside the trap's region, U_h ≤ D, by more than the rounding of the double precision's test, and so of this one in single precision: the usual case, without the
 // double precision's instructions, a warp's dearest by far (40 fused multiply-adds per advance: +1.4 to +2.8 % of PGC3D's kernel in double precision, on every lane or on one, none to measure in single).
 __device__ __forceinline__ bool well_inside(const double* q){
@@ -965,8 +967,8 @@ struct Reference{double c[3],w;};
 __device__ Reference reference(const double* q){
     Reference R;R.w=1.;
     #pragma unroll
-    for(int i=0;i<3;i++)R.c[i]=0.;
-    if(!(P.region32>0.f)||(!P.lattice&&well_inside(q)))return R;
+    for(int i=0;i<3;i++)R.c[i]=P.centre[i];
+    if(!(P.region32>0.f)||(!P.offset&&well_inside(q)))return R;
     double harmonic=0.,share=1.,tangent=0.,along=0.;
     if(P.lattice){
         double z=0.;
@@ -976,7 +978,7 @@ __device__ Reference reference(const double* q){
         // Site n's place (model.rs `Lattice::site`).
         double site=target/P.lattice_k;
         for(;;){const double x=site*P.lattice_inv_rayleigh,dz=(P.lattice_k*site-atan(x)-target)/(P.lattice_k-P.lattice_inv_rayleigh/(1.+x*x));site-=dz;if(fabs(dz)<=8.881784197001252e-16*(fabs(site)+1./P.lattice_k))break;}
-        tangent=tan(phase-n*0.5*TAU);share=1./(1.+site*site*P.lattice_inv_rayleigh*P.lattice_inv_rayleigh);along=z-site;
+        tangent=tan(phase-n*0.5*TAU);share=P.lattice_central/(1.+site*site*P.lattice_inv_rayleigh*P.lattice_inv_rayleigh);along=z-site;
         #pragma unroll
         for(int i=0;i<3;i++)R.c[i]=site*P.lattice_axis[i];
     }
@@ -1001,12 +1003,12 @@ __device__ __forceinline__ Turn turn(double tau,const Reference& R){
     }
     return u;
 }
-// By `half` a whole step's half flow, else u; the centre only of a standing wave's (it is zero otherwise).
+// By `half` a whole step's half flow, else u; the centre only off the focus (it is zero otherwise).
 __device__ __forceinline__ void flow(Traj& t,bool half,const Turn& u,const Reference& R){
     #pragma unroll
     for(int i=0;i<3;i++){
         const double c=half?P.half_flow[i][0]:u.c[i],sh=half?P.half_flow[i][1]:u.sh[i],sw=half?P.half_flow[i][2]:u.sw[i];
-        const double x=P.lattice?t.q[i]-R.c[i]:t.q[i],k=t.p[i],y=x*c+k*sh;t.q[i]=P.lattice?y+R.c[i]:y;t.p[i]=k*c-x*sw;
+        const double x=P.offset?t.q[i]-R.c[i]:t.q[i],k=t.p[i],y=x*c+k*sh;t.q[i]=P.offset?y+R.c[i]:y;t.p[i]=k*c-x*sw;
     }
 }
 
@@ -1058,7 +1060,7 @@ __device__ __noinline__ void advance_in(Warp& W,Traj& out,double dt,int lane,dou
     const float tau=(float)dt;
     #pragma unroll
     for(int i=0;i<3;i++){
-        const double kick=(double)(tau*(P.axes32[i][0]*force[0]+P.axes32[i][1]*force[1]+P.axes32[i][2]*force[2]+(float)R.w*P.stiffness32[i]*(float)(P.lattice?t.q[i]-R.c[i]:t.q[i])));
+        const double kick=(double)(tau*(P.axes32[i][0]*force[0]+P.axes32[i][1]*force[1]+P.axes32[i][2]*force[2]+(float)R.w*P.stiffness32[i]*(float)(P.offset?t.q[i]-R.c[i]:t.q[i])));
         M.q[i]=t.q[i];M.p[i]=t.p[i];M.kick[i]=kick;t.p[i]+=kick;
     }
     const float n1=apply(W.m[2],W.psi,C.n,lane);t.logn=lh+(double)logf(n1);
@@ -2686,10 +2688,10 @@ __device__ __noinline__ bool step(u64 seed,Warp& W,Traj& t,int lane,float2* scra
     const double* q=fresh?t.q:M.q;
     bool lost=false;
     const auto outside=[&](){
-        if(well_inside(q))return false;
+        if(!P.offset&&well_inside(q))return false;
         double harmonic=0.;
         #pragma unroll
-        for(int i=0;i<3;i++)harmonic+=P.omega[i]*P.omega[i]*q[i]*q[i];
+        for(int i=0;i<3;i++){const double x=q[i]-P.centre[i];harmonic+=P.omega[i]*P.omega[i]*x*x;}
         return 0.5*harmonic/P.hm64>P.region;
     };
     if(outside()){

@@ -383,7 +383,7 @@ pub const FIRST_GROUPS:u64=32;
 /// its coverage at CONFIDENCE standard errors is that of t with g − 1 degrees of freedom, 93.6 % here against 94.6 %.
 const WHOLE_GROUPS:u64=FIRST_GROUPS/2;
 
-pub const NOT_CONFINED:&str="光镊不约束原子：3D 运动计算光镊中的单个原子，需要在焦点处形成势阱的光镊";
+pub const NOT_CONFINED:&str="光镊不约束原子：3D 运动计算光镊中的单个原子，需要在焦点附近形成势阱的光镊";
 
 /// Distributions along one axis on one grid, at some of the times.
 #[derive(Clone,Debug,PartialEq)]
@@ -1306,7 +1306,7 @@ fn carried(from:&Model,to:&Model,t:&Trajectory)->Trajectory{
 /// explicit states (the generator's −2 Im of their diagonal), its norm restored.
 fn relaxed(model:&Model,settings:&Settings,states:Vec<Trajectory>)->Vec<Trajectory>{
     let slowest:Vec<f64>=(0..model.clusters()).map(|k|{if !model.mixed(k){return 0.;}let(n,n0)=(model.dimension(k),model.ground_dimension(k));
-        let g=model.generator(k,&model.point([0.;3],[0.;3]),0.);(n0..n).map(|e|-2.*g.hamiltonian[e*n+e].im).fold(f64::INFINITY,f64::min)}).collect();
+        let g=model.generator(k,&model.point(model.centre(),[0.;3]),0.);(n0..n).map(|e|-2.*g.hamiltonian[e*n+e].im).fold(f64::INFINITY,f64::min)}).collect();
     let engine=Engine::new(model,settings.clone());
     states.into_par_iter().map(|t|{let decay=slowest[t.cluster];if !(decay>0.&&decay.is_finite()){return t;}
         let mut x=engine.coast(&t,2.*(1./BIAS_VARIANCE).ln()/decay,1);let n=model.dimension(x.cluster);

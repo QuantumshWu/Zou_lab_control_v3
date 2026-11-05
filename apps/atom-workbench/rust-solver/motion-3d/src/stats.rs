@@ -95,7 +95,8 @@ pub struct Estimate{
     pub temperature_total:f64,
     pub temperature_total_error:f64,
     pub mean_velocity:[f64;3],
-    /// n̄ per axis relative to its trap frequency, and its standard error.
+    /// n̄ per axis relative to its trap frequency, ħ⟨κ²⟩/mω − ½ -- the energy on the axis over ħω, twice its kinetic part in a harmonic well (the virial theorem), which takes no
+    /// place: the same in whichever well of a standing wave the atom sits --, and its standard error.
     pub occupation:[f64;3],
     pub occupation_error:[f64;3],
     pub populations:Vec<f64>,
@@ -156,8 +157,7 @@ fn moments(g:&Sums,s:&Scales,correction:Option<&Correction>)->Moments{
     for a in 0..3{
         let(mean,second)=(g.kappa[a]/n,kappa2[a]/n);let variance=(second-mean*mean).max(0.);
         e.temperature[a]=variance*s.hbar_over_mass/KT_PER_UK;
-        let x2=g.position2[a]/n;let w=s.frequencies[a];
-        e.occupation[a]=if w>0.{(second*s.hbar_over_mass/2.+w*w/s.hbar_over_mass*x2/2.)/w-0.5}else{0.};
+        let w=s.frequencies[a];e.occupation[a]=if w>0.{second*s.hbar_over_mass/w-0.5}else{0.};
     }
     e.temperature_total=e.temperature.iter().sum::<f64>()/3.;
     for k in 0..STATES{e.populations[k]=populations[k]/n;}

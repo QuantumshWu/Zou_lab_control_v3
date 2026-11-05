@@ -126,8 +126,8 @@
 //!
 //! # The trap
 //! The trap beam's focus is the origin. Its trap is each state's potential with the near beams'
-//! interference left out (`Model::potential`; a unit's standing wave is in it); its Hessian at the
-//! focus gives the trap's principal axes and frequencies (`Trap`). An atom is held while its
+//! interference left out but within a unit of the trap's light (`Model::potential`; its standing wave is in it, the fields of a near carrier's beams as of a folded one's); its
+//! Hessian at the well of that light (ground.rs # Where the trap is, `Trap::centre`) gives the trap's principal axes and frequencies (`Trap`). An atom is held while its
 //! mechanical energy, ħ²κ²/2m plus its potential relative to far from the trap, is negative -- or,
 //! unbound, until it leaves the trap's region (engine.rs # Loss): the potential the engine's force
 //! derives from, Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ of its current internal state, less the same with the trap's light
@@ -218,6 +218,8 @@ pub struct Carrier{
     /// c_lk per beam of the carrier (in `beams` order).
     pub coefficients:Vec<[Complex;MOST_RANK]>,
     pub wave_number:f64,
+    /// Its beams' places (j, m), j ≠ m, whose fields add in the trap's potential (`Model::level`): both of one unit of the trap's light.
+    pub interfering:Vec<(usize,usize)>,
 }
 
 /// A table group's place in a node's slice: a kept group of `ground::Group` with one residual beat,
@@ -523,17 +525,19 @@ type Node=(Vec<Vec<Complex>>,[f64;3]);
 #[derive(Clone,Debug)]
 pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,bounds:Vec<[f64;3]>,reach:[f64;3],work:f64}
 
-/// The trap of the trap beam: its principal axes (unit rows on the lab axes) and frequencies
-/// (rad/us) at the focus for a reference state, and the frequencies per lab axis.
+/// The trap of the trap beam for a reference state: its place, the well's bottom (ground.rs # Where the trap is), its principal axes (unit rows on the lab axes) and frequencies
+/// (rad/us) there, and the frequencies per lab axis.
 #[derive(Clone,Copy,Debug)]
-pub struct Trap{pub axes:[[f64;3];3],pub frequencies:[f64;3],pub lab:[f64;3],pub lattice:Option<Lattice>}
+pub struct Trap{pub centre:[f64;3],pub axes:[[f64;3];3],pub frequencies:[f64;3],pub lab:[f64;3],pub lattice:Option<Lattice>}
 
 /// The trap's standing wave, its beam and reflection one unit (ground.rs `Unit`): on the beam's axis the field is
 /// γ₀ a + γ₁ ā, a = e^{ikz}/(1 + iz/z_R), its antinodes -- the sites -- where Φ(z) = kz − atan(z/z_R) + ½ arg(γ₀ γ̄₁)
-/// is a multiple of π, its nodes half way between. Its axis (a unit vector), k, z_R and that phase.
+/// is a multiple of π, its nodes half way between. Its axis (a unit vector), k, z_R and that phase; the envelope's inverse 1 + z²/z_R² at the trap's centre, where the trap's frequencies are read.
 #[derive(Clone,Copy,Debug)]
-pub struct Lattice{pub axis:[f64;3],pub wave_number:f64,pub rayleigh:f64,pub phase:f64}
+pub struct Lattice{pub axis:[f64;3],pub wave_number:f64,pub rayleigh:f64,pub phase:f64,pub central:f64}
 impl Lattice{
+    /// The stiffness at a site at z on the axis relative to the trap's: the envelope's there over its own at the trap's centre.
+    pub fn share(&self,z:f64)->f64{self.central/(1.+(z/self.rayleigh).powi(2))}
     /// The nearest site's number at z on the axis, and Φ's distance from it there, within ±π/2.
     pub fn nearest(&self,z:f64)->(f64,f64){let phase=self.wave_number*z-(z/self.rayleigh).atan()+self.phase;let n=(phase/std::f64::consts::PI).round();(n,phase-n*std::f64::consts::PI)}
     /// Site n's place on the axis: Φ's root by Newton's steps, from a start that depends on n alone.
@@ -589,7 +593,7 @@ pub struct Model{
     /// Γ_i/z_i over the excited amplitudes a cluster's channels drive, every near beam at its peak, its largest over the tables' nodes inside
     /// the reach's intensities (as `resonance`).
     pub ringing_spread:f64,
-    /// The reach the profiles and the bound are judged over: the focus and the points ±reach_a along
+    /// The reach the profiles and the bound are judged over: the trap's centre (ground.rs `Ground::well`) and the points ±reach_a along
     /// each principal axis of the trap (`choose_profiles`).
     reach:Vec<[f64;3]>,
     /// The processor has AVX2 and FMA: the generator is built with them.
@@ -729,14 +733,17 @@ impl Model{
                 let(e,s)=(frobenius_inner(&d,&d).re.sqrt(),frobenius_inner(v,v).re.sqrt());
                 if e>1e-9*s{return Err(format!("A beam's coupling is off its carrier's span by {:.1e} of its norm",e/s));}
             }
-            carriers.push(Carrier{beams:c.beams.clone(),rank:basis.len(),coefficients,wave_number:c.wave_number});bases.push(mixing);
+            carriers.push(Carrier{beams:c.beams.clone(),rank:basis.len(),coefficients,wave_number:c.wave_number,interfering:vec![]});bases.push(mixing);
         }
         if carriers.len()>MOST_CARRIERS||geometry.len()>MOST_BEAMS{return Err(format!("3D 运动最多支持 {MOST_CARRIERS} 个近共振频率、{MOST_BEAMS} 束光"));}
         if ground.ground_states.len()!=GROUND{return Err(format!("The ground manifold has {} states, not {GROUND}",ground.ground_states.len()));}
         if ground.clusters.iter().any(|c|c.excited.is_empty()&&c.states.len()>MOST_STATES){return Err("A cluster of ground states has more than eight states".into());}
         let trap_light=trap_light(&ground,&geometry,&trap_beams);
+        for c in &mut carriers{let n=c.beams.len();let of=|j:usize|ground.units.iter().position(|u|u.beams.contains(&c.beams[j]));
+            c.interfering=(0..n*n).map(|x|(x/n,x%n)).filter(|&(j,m)|j!=m&&of(j)==of(m)&&trap_light.contains(&c.beams[j])&&trap_light.contains(&c.beams[m])).collect();}
+        let centre=ground.centre;
         let mut model=Model{ground,geometry,trap_beam,trap_beams,trap_light,focused:vec![trap_unit],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
-            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3],work:0.},table_error:0.,table_limit:None,table_stalled:false,dressing:0.,fourth_dropped:0.,first_error:0.,resonance:0.,ringing_spread:0.,reach:vec![[0.;3]],
+            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3],work:0.},table_error:0.,table_limit:None,table_stalled:false,dressing:0.,fourth_dropped:0.,first_error:0.,resonance:0.,ringing_spread:0.,reach:vec![centre],
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
         model.choose_profiles(request)?;
         model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();
@@ -771,7 +778,7 @@ impl Model{
         let trap=self.bare_trap(reference);
         let reach:[f64;3]=std::array::from_fn(|a|{let w=trap.frequencies[a];
             if w>0.{(2.*BUDGET.recip().ln()*KT_PER_UK*request.temperature_uk*self.hbar_over_mass).sqrt()/w}else{0.}});
-        self.reach.extend(ground::reach_points(&trap.axes,reach,g.units.iter().any(|u|u.beams.len()>1)));
+        self.reach.extend(ground::reach_points(trap.centre,&trap.axes,reach,g.units.iter().any(|u|u.beams.len()>1)));
         let mut errors:Vec<(usize,f64,f64)>=vec![];
         for(u,unit)in g.units.iter().enumerate(){
             if u==self.focused[0]||!unit.varies(&g.beams){continue;}
@@ -803,35 +810,34 @@ impl Model{
         let rho=&request.initial_density;
         self.ground.ground_states.iter().enumerate().max_by(|a,b|rho[a.1*STATES+a.1].re.total_cmp(&rho[b.1*STATES+b.1].re)).map(|x|x.0).ok_or("No ground state".into())
     }
-    /// The trap a ground state sees in H(r) alone (its energy, the folds and outside shifts at r):
-    /// its Hessian at the focus by central differences over a thousandth of the trap's waist.
+    /// The trap a ground state sees in H(r) alone (its energy, the folds and outside shifts at r), at its well there (`Ground::centre`, the same state's).
     fn bare_trap(&self,state:usize)->Trap{
-        let g=&self.ground;let i=g.ground_states[state];let h=1e-3*self.geometry[self.trap_beam].waist.unwrap();
+        let g=&self.ground;let i=g.ground_states[state];
         let u=|r:[f64;3]|g.hamiltonian_at(r)[(i,i)].re;
-        self.trap_of(&u,h)
+        self.trap_of(&u,g.centre)
     }
-    /// The trap of a potential u(r) (rad/us): its Hessian at the focus, eigen-decomposed.
-    fn trap_of(&self,u:&dyn Fn([f64;3])->f64,h:f64)->Trap{
-        let e=|a:usize|{let mut v=[0.;3];v[a]=h;v};let add=|x:[f64;3],y:[f64;3]|std::array::from_fn(|i|x[i]+y[i]);let neg=|x:[f64;3]|x.map(|v|-v);
-        let u0=u([0.;3]);
-        let hessian:[[f64;3];3]=std::array::from_fn(|a|std::array::from_fn(|b|if a==b{(u(e(a))+u(neg(e(a)))-2.*u0)/(h*h)}
-            else{(u(add(e(a),e(b)))-u(add(e(a),neg(e(b))))-u(add(neg(e(a)),e(b)))+u(add(neg(e(a)),neg(e(b)))))/(4.*h*h)}));
+    /// The trap of a potential u(r) (rad/us) at a place: its Hessian there, eigen-decomposed.
+    fn trap_of(&self,u:&dyn Fn([f64;3])->f64,centre:[f64;3])->Trap{
+        let(_,_,hessian)=ground::slopes(u,centre,ground::difference(self.geometry[self.trap_beam].waist.unwrap()));
         let(values,axes)=symmetric_eigen(hessian);
         let w=|x:f64|(x*self.hbar_over_mass).max(0.).sqrt();
-        Trap{axes,frequencies:values.map(w),lab:std::array::from_fn(|a|w(hessian[a][a])),lattice:self.lattice()}
+        Trap{centre,axes,frequencies:values.map(w),lab:std::array::from_fn(|a|w(hessian[a][a])),lattice:self.lattice(centre)}
     }
-    /// The trap's standing wave, where the trap beam's unit is it and its reflection.
-    fn lattice(&self)->Option<Lattice>{
+    /// The bottom of the reference state's well in H(r) alone (`Ground::centre`): where what no state's own trap decides is taken, a held twin's line and the explicit states' decay.
+    pub fn centre(&self)->[f64;3]{self.ground.centre}
+    /// The trap's standing wave, where the trap beam's unit is it and its reflection, its envelope at the trap's centre.
+    fn lattice(&self,centre:[f64;3])->Option<Lattice>{
         let unit=&self.ground.units[self.focused[0]];if unit.beams.len()!=2||!unit.beams.iter().all(|l|self.trap_beams.contains(l)){return None;}
         let(a,b)=(&self.geometry[unit.beams[0]],&self.geometry[unit.beams[1]]);let waist=a.waist?;
         if (0..3).map(|i|a.direction[i]*b.direction[i]).sum::<f64>()>0.{return None;}
         let z=unit.weights[0]*unit.weights[1].conj();
-        Some(Lattice{axis:a.direction,wave_number:a.wave_number,rayleigh:a.wave_number*waist*waist/2.,phase:0.5*z.im.atan2(z.re)})
+        let(rayleigh,along)=(a.wave_number*waist*waist/2.,(0..3).map(|i|a.direction[i]*centre[i]).sum::<f64>());
+        Some(Lattice{axis:a.direction,wave_number:a.wave_number,rayleigh,phase:0.5*z.im.atan2(z.re),central:1.+(along/rayleigh).powi(2)})
     }
-    /// The trap of the model's tables for a cluster's state (its potential with the interference left
-    /// out, `potential`).
+    /// The trap of the model's tables for a cluster's state: at the well of what holds it before the near light comes on (`trap_level`, ground.rs `Ground::well`), its Hessian in its potential
+    /// (`potential`), the near light's own shifts in it.
     pub fn trap(&self,cluster:usize,x:usize)->Trap{
-        let h=1e-3*self.geometry[self.trap_beam].waist.unwrap();self.trap_of(&|r|self.potential(cluster,x,r),h)
+        let centre=self.ground.well(self.trap_beam,&|r|self.trap_level(cluster,x,r));self.trap_of(&|r|self.potential(cluster,x,r,centre),centre)
     }
 
     /// Each cluster's table layout: h0, its groups split by residual beat, its carriers' photon
@@ -2352,25 +2358,27 @@ impl Model{
         (u,du,beams)
     }
 
-    /// A cluster state's potential at r relative to the focus (rad/us): the diagonal of h0 (the units'
+    /// The near beams' field products ā_l a_m at r (`level`): a beam's own intensity, the interference of two.
+    fn products(&self,r:[f64;3])->impl Fn(usize,usize)->Complex+'_{
+        move|l,m|if l==m{Complex::new(self.geometry[l].intensity(r),0.)}else{self.geometry[l].field(r).0.conj()*self.geometry[m].field(r).0}
+    }
+    /// A cluster state's potential at r relative to the trap's centre `centre` (rad/us): the diagonal of h0 (the units'
     /// intensities there, a standing wave's in it) and of every near beam's own light shift,
-    /// |a_l(r)|² Σ c_lk′* c_lk S_k′k -- the near beams' interference (their lattice) left out. A tweezer
-    /// folded at second order is in h0; one that is a near carrier (the only light): the trap is the
-    /// same.
-    pub fn potential(&self,cluster:usize,x:usize,r:[f64;3])->f64{
-        self.level(cluster,x,&|u|self.unit_intensity(u,r),&|l|self.geometry[l].intensity(r))-self.level(cluster,x,&|u|self.ground.units[u].focus,&|l|self.geometry[l].intensity([0.;3]))
+    /// |a_l(r)|² Σ c_lk′* c_lk S_k′k -- the near beams' interference (their lattice) left out, but for a unit of the trap's light's (`level`), its standing wave whether it folds or is a near carrier.
+    pub fn potential(&self,cluster:usize,x:usize,r:[f64;3],centre:[f64;3])->f64{
+        self.level(cluster,x,&|u|self.unit_intensity(u,r),&self.products(r))-self.level(cluster,x,&|u|self.unit_intensity(u,centre),&self.products(centre))
     }
     /// A cluster state's trap depth (rad/us): the level its potential tends to far from every
     /// focused beam -- the Gaussian beams' amplitudes zero, the plane waves' as at the focus --,
-    /// relative to the focus; positive for a state the trap holds.
-    pub fn depth(&self,cluster:usize,x:usize)->f64{
+    /// relative to the trap's centre; positive for a state the trap holds.
+    pub fn depth(&self,cluster:usize,x:usize,centre:[f64;3])->f64{
         let far=|l:usize|if self.geometry[l].waist.is_some(){Complex::ZERO}else{self.geometry[l].field([0.;3]).0};
         let units=|u:usize|{let unit=&self.ground.units[u];unit.beams.iter().zip(&unit.weights).fold(Complex::ZERO,|s,(&l,&w)|s+far(l)*w).norm_sqr()/unit.norm};
-        self.level(cluster,x,&units,&|l|far(l).norm_sqr())-self.level(cluster,x,&|u|self.ground.units[u].focus,&|l|self.geometry[l].intensity([0.;3]))
+        self.level(cluster,x,&units,&|l,m|if l==m{Complex::new(far(l).norm_sqr(),0.)}else{far(l).conj()*far(m)})-self.level(cluster,x,&|u|self.unit_intensity(u,centre),&self.products(centre))
     }
     /// A cluster state's potential in the trap's light at r (rad/us): `level` with every beam at r less the same with
     /// the trap's light off (`trap_light`), the near light off in both -- the shifts of the trap's beams and of every
-    /// far focused beam there, zero where those beams' fields are, −D_T at the focus (ensemble.rs: the initial
+    /// far focused beam there, zero where those beams' fields are, −D_T at the trap's centre (ensemble.rs: the initial
     /// ensemble's energies). The near light comes on at t = 0: its fold's shift, whose denominator a focused trap's
     /// shift can close on a shell about the focus (PGCP_10's probe in its all-folded model: 137 k_BT there against the
     /// focus's 34), is no part of what holds the atoms before it. Far from a resonance, with a trap beam alone, the
@@ -2379,8 +2387,8 @@ impl Model{
     pub fn trap_level(&self,cluster:usize,x:usize,r:[f64;3])->f64{
         let off=|u:usize|{let unit=&self.ground.units[u];
             unit.beams.iter().zip(&unit.weights).filter(|(l,_)|!self.trap_light.contains(l)).fold(Complex::ZERO,|s,(&l,&w)|s+self.geometry[l].field(r).0*w).norm_sqr()/unit.norm};
-        let beams=|l:usize|if self.trap_light.contains(&l){self.geometry[l].intensity(r)}else{0.};
-        self.level(cluster,x,&|u|self.unit_intensity(u,r),&beams)-self.level(cluster,x,&off,&|_|0.)
+        let near=self.products(r);let beams=|l:usize,m:usize|if self.trap_light.contains(&l){near(l,m)}else{Complex::ZERO};
+        self.level(cluster,x,&|u|self.unit_intensity(u,r),&beams)-self.level(cluster,x,&off,&|_,_|Complex::ZERO)
     }
     /// The envelope's modes (ensemble.rs): one beam of each mode -- waist, wave number and axis either way, the same
     /// intensity profile -- of the trap's light in the focused units, the trap beam's first.
@@ -2392,8 +2400,8 @@ impl Model{
         modes
     }
     /// The trap's largest depth per unit of its light's intensity (`trap_level`), relative to `depth`, its depth at
-    /// the focus: a bound of c = sup −V_T/(D_T L) over the intensities of the units of the trap's light in (0, 1], L
-    /// their mean weighted by each one's share of the depth at the focus, every other focused unit's in [0, 1]. Every
+    /// its centre: a bound of c = sup −V_T/(D_T L) over the intensities of the units of the trap's light in (0, 1], L
+    /// their mean weighted by each one's share of the depth at the centre, every other focused unit's in [0, 1]. Every
     /// point's intensities lie in that set and a
     /// unit's intensity lies below the largest of its beams' profiles A_l(r), so −V_T(r) ≤ c D_T L ≤ c D_T max_l A_l(r)
     /// everywhere: the initial ensemble's envelope (ensemble.rs).
@@ -2406,7 +2414,7 @@ impl Model{
     /// round-off). A trap with no unit of its own (its shift linear in its intensity) takes L = 1. An error where a
     /// unit of the trap's light holds a beam not of it: its interference with the trap's field falls off as √A, and
     /// the trap's bound states fill an unbounded phase space.
-    pub fn trap_slope(&self,cluster:usize,x:usize,depth:f64)->Result<f64,String>{
+    pub fn trap_slope(&self,cluster:usize,x:usize,depth:f64,centre:[f64;3])->Result<f64,String>{
         let g=&self.ground;let trapped=|l:&usize|self.trap_light.contains(l);
         let traps:Vec<usize>=self.focused.iter().copied().filter(|&u|g.units[u].beams.iter().any(trapped)).collect();let traps=&traps[..];
         if traps.iter().any(|&u|!g.units[u].beams.iter().all(trapped)){return Err("光镊与同频率、同偏振的其他光束相干叠加：其干涉项随光镊强度的平方根衰减，束缚的初始热分布无界".into());}
@@ -2415,11 +2423,15 @@ impl Model{
         // −V_T D_T at intensities q (the trap's units', then the other units').
         let at=|q:&[f64]|->f64{
             let units=|on:bool|move|u:usize|match traps.iter().position(|&v|v==u){Some(i)=>if on{q[i]}else{0.},None=>others.iter().position(|&v|v==u).map_or(0.,|i|q[t+i])};
-            let beams=|on:bool|move|l:usize|if on&&trapped(&l){traps.iter().position(|&u|g.units[u].beams.contains(&l)).map_or(1.,|i|q[i])}else{0.};
+            // A near beam's intensity with its unit's, and two of a unit's interference there: their fields in phase, every beam's amplitude its unit's, whose summed field's intensity it is.
+            let beams=|on:bool|move|l:usize,m:usize|->Complex{if !(on&&trapped(&l)){return Complex::ZERO;}
+                let s=traps.iter().position(|&u|g.units[u].beams.contains(&l)).map_or(1.,|i|q[i]);if l==m{return Complex::new(s,0.);}
+                let unit=&g.units[g.unit_of(l)];let weight=|b:usize|unit.weights[unit.beams.iter().position(|&y|y==b).unwrap()];let(a,b)=(weight(l),weight(m));
+                a*b.conj()*(s/(a.abs()*b.abs()))};
             self.level(cluster,x,&units(false),&beams(false))-self.level(cluster,x,&units(true),&beams(true))};
-        // L's weights: each unit's share of the depth at the focus (none for a repulsive one).
-        let focus:Vec<f64>=traps.iter().chain(others).map(|&u|self.unit_intensity(u,[0.;3]).min(1.)).collect();
-        let shares:Vec<f64>=(0..t).map(|i|{let mut q=focus.clone();q[i]=0.;(at(&focus)-at(&q)).max(0.)}).collect();let whole:f64=shares.iter().sum();
+        // L's weights: each unit's share of the depth at the centre (none for a repulsive one).
+        let there:Vec<f64>=traps.iter().chain(others).map(|&u|self.unit_intensity(u,centre).min(1.)).collect();
+        let shares:Vec<f64>=(0..t).map(|i|{let mut q=there.clone();q[i]=0.;(at(&there)-at(&q)).max(0.)}).collect();let whole:f64=shares.iter().sum();
         let weights:Vec<f64>=shares.iter().map(|s|if whole>0.{s/whole}else{1./t as f64}).collect();
         // The dimensions: the trap's units' (quartic), the other units' (cubic). Each one's equally spaced points and
         // the inverse of Bernstein's basis there (Gauss–Jordan).
@@ -2449,10 +2461,10 @@ impl Model{
         }).collect();
         Ok(bounds.into_iter().fold(f64::NEG_INFINITY,f64::max)/depth)
     }
-    /// The diagonal of h0 and of every near beam's own light shift for a cluster state, the units at
-    /// the intensities `units(u)` and the near beams at `beams(l)` (`potential`): the groups' S at the
-    /// state's diagonal entry (none where it is not one of a group's).
-    fn level(&self,cluster:usize,x:usize,units:&dyn Fn(usize)->f64,beams:&dyn Fn(usize)->f64)->f64{
+    /// The diagonal of h0 and of the near light's shift for a cluster state, the units at
+    /// the intensities `units(u)` and the near beams' fields' products ā_l a_m at `beams(l, m)` (`potential`): the groups' S at the
+    /// state's diagonal entry (none where it is not one of a group's), E_k′* E_k with E_k = Σ_l a_l c_lk: each beam's own shift, and the interference of a unit of the trap's light (`Carrier::interfering`).
+    fn level(&self,cluster:usize,x:usize,units:&dyn Fn(usize)->f64,beams:&dyn Fn(usize,usize)->Complex)->f64{
         let layout=&self.layouts[cluster];let n=layout.n;
         let s:Vec<f64>=self.focused.iter().map(|&u|units(u).min(1.)).collect();let stencil=self.stencil(&s);
         let mut entry=[Complex::ZERO];self.interpolate(cluster,&stencil,None,layout.h0+x*n+x,&mut entry);let mut u=entry[0].re;
@@ -2460,10 +2472,17 @@ impl Model{
             let Ok(diagonal)=gl.entries.binary_search(&(x,x)) else{continue};
             let carrier=&self.carriers[gl.absorbed];let mut value=[Complex::ZERO];
             for(j,&l)in carrier.beams.iter().enumerate(){
-                let at=beams(l);if at==0.{continue;}let coefficient=&carrier.coefficients[j];
+                let at=beams(l,l).re;if at==0.{continue;}let coefficient=&carrier.coefficients[j];
                 for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
                     self.interpolate(cluster,&stencil,None,gl.s+pi*gl.entries.len()+diagonal,&mut value);
                     u-=at*(coefficient[k1].conj()*coefficient[k]*value[0]).re*if k1<k{2.}else{1.};
+                }
+            }
+            for &(j,m)in &carrier.interfering{
+                let product=beams(carrier.beams[j],carrier.beams[m]);if product==Complex::ZERO{continue;}let(a,b)=(&carrier.coefficients[j],&carrier.coefficients[m]);
+                for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
+                    self.interpolate(cluster,&stencil,None,gl.s+pi*gl.entries.len()+diagonal,&mut value);
+                    u-=(product*a[k1].conj()*b[k]*value[0]).re*if k1<k{2.}else{1.};
                 }
             }
         }

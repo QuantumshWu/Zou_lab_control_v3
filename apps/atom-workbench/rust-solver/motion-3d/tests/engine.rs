@@ -682,6 +682,69 @@ fn a_standing_wave_s_sites_hold_their_atoms_as_the_centre_does(){
         for a in 0..3{assert!((x.temperature[a]-exact[a]).abs()<=5.*x.temperature_error[a],"output {i}, axis {a}: {} ± {} against {}",x.temperature[a],x.temperature_error[a],exact[a]);}}
 }
 
+/// A retro-reflected tweezer's last beam, its reflection in phase at the focus, at reflectivity R and mirror phase φ (degrees): its coupling by √R e^{iφ}, its counter-rotating one by √R e^{−iφ}, its outside
+/// shift by R. H0's shifts at the focus stay the phase's first: a scalar on the ground states, whose traps these are.
+fn mirrored(r:&Request,reflectivity:f64,phase:f64)->Request{
+    let(mut r,(s,c),a)=(r.clone(),phase.to_radians().sin_cos(),reflectivity.sqrt());
+    let turn=|m:&mut Matrix,sign:f64|for(x,y)in m.real.iter_mut().zip(m.imag.iter_mut()){(*x,*y)=(a*(*x*c-sign*s**y),a*(sign*s**x+c**y));};
+    let b=r.beams.last_mut().unwrap();turn(&mut b.coupling,1.);turn(&mut b.counter_coupling,-1.);
+    for x in b.outside_shift.real.iter_mut().chain(b.outside_shift.imag.iter_mut()){*x*=reflectivity;}
+    r
+}
+/// A mirror phase moves a far tweezer's standing wave along its axis by φ/2k, and nothing else moves but the beam's envelope there, A = 1/(1 + z²/z_R²): the trap stands at the well its descent from the focus
+/// reaches (ground.rs # Where the trap is) at every phase, the tie at 180° in one of its two wells, its depth A of the focus's and its frequencies with it, at any reflectivity. (At the focus, the Hessian there read
+/// 269 kHz at 85°, 17 kHz at −90° against 911 kHz at 0° and nothing past 90°.) At 0° the focus's very bits.
+#[test]
+fn a_mirror_phase_moves_the_trap_with_its_sites(){
+    let(_,base)=retro(0.);
+    for reflectivity in [1.,0.1]{
+        let read=|phase:f64|{let mut r=mirrored(&base,reflectivity,phase);r.times_us=vec![0.,1.];let model=Model::new(&r).unwrap();let i=Initial::new(&model,&r).unwrap();
+            let mut sorted=i.traps[0].frequencies;sorted.sort_by(f64::total_cmp);(i.traps[0],sorted,i.depths[0],i.ensembles[0].as_ref().unwrap().kinetic)};
+        let(trap,frequencies,depth,kinetic)=read(0.);assert_eq!(trap.centre,[0.;3]);
+        for phase in [45.,-45.,90.,-90.,135.,-135.,180.]{
+            let(at,moved,deep,cooler)=read(phase);let l=at.lattice.expect("a standing wave");
+            let z=(0..3).map(|a|at.centre[a]*l.axis[a]).sum::<f64>();let expected=phase.to_radians()/(2.*l.wave_number);
+            assert!((if phase==180.{z.abs()}else{z}-expected).abs()<=1.5/(l.rayleigh*l.wave_number)*expected.abs(),"R {reflectivity} φ {phase}: the trap at {z} against φ/2k = {expected}");
+            let envelope=1./(1.+(z/l.rayleigh).powi(2));
+            assert!((deep/depth-envelope).abs()<=1e-3,"R {reflectivity} φ {phase}: depth {} of the focus's against the envelope's {envelope}",deep/depth);
+            for a in 0..3{assert!((moved[a]/frequencies[a]-1.).abs()<=1.5*(1.-envelope)+1e-3,"R {reflectivity} φ {phase}: {:?} kHz against {:?}",moved.map(|w|w/std::f64::consts::TAU*1e3),frequencies.map(|w|w/std::f64::consts::TAU*1e3));}
+            assert!((cooler-kinetic).abs()<=1e-3,"R {reflectivity} φ {phase}: the ensemble's kinetic temperature {cooler} against {kinetic}");
+        }
+    }
+}
+/// Thermal atoms in a request's tweezer stay thermal and held at a step of ω dt = 1.5, the light off but the tweezer's.
+fn thermal_atoms_stay(r:&Request){
+    let model=Model::new(r).unwrap();let initial=Initial::new(&model,r).unwrap();let trap=initial.traps[0];let hm=model.hbar_over_mass;
+    let exact=initial.temperature();let dt=1.5/trap.frequencies.iter().copied().fold(0.,f64::max);
+    let mut s=Settings::new(dt,&trap,f64::EPSILON,false);s.region=initial.depths[0];let steps=(1./dt).ceil() as usize;s.dt=1./steps as f64;
+    let outcome=simulate(&model,&s,&initial,5,0,1024,8,steps,11,&[],None);
+    let estimates=summarize(&outcome.groups,&Scales{hbar_over_mass:hm,frequencies:trap.lab},&[]);
+    for(i,x)in estimates.iter().enumerate(){assert_eq!(x.loss,0.,"output {i}");
+        for a in 0..3{assert!((x.temperature[a]-exact[a]).abs()<=5.*x.temperature_error[a],"output {i}, axis {a}: {} ± {} against {}",x.temperature[a],x.temperature_error[a],exact[a]);
+            // n̄ takes no place: on a standing wave's axis a neighbouring site's atom is at its own well's energy (read from the focus: 377 where k_BT/ħω − ½ was 0.2).
+            let oscillator=KT_PER_UK*x.temperature[a]/trap.lab[a]-0.5;assert!((x.occupation[a]-oscillator).abs()<=5.*x.occupation_error[a]+1e-9,"output {i}, axis {a}: n̄ {} against k_BT/ħω − ½ {oscillator}",x.occupation[a]);}}
+}
+/// A far tweezer's atoms past 90° and at the tie, every initial energy taken in the wells they stand in.
+#[test]
+fn a_mirror_phase_s_sites_hold_their_atoms(){
+    let(_,base)=retro(0.);
+    for(reflectivity,phase)in [(1.,135.),(1.,180.),(0.1,-135.)]{let mut r=mirrored(&base,reflectivity,phase);r.times_us=vec![0.,1.];thermal_atoms_stay(&r);}
+}
+/// An 808 nm tweezer that is a near carrier, reflected at 102°, as a folded one: its standing wave in the trap's potential through its beams' summed field (model.rs `Model::level`), the trap in its site and its
+/// thermal atoms drawn from it. (Each beam's own shift alone left the ensemble the beams' sum, and the atoms rose from 15 uK to 338 uK within 20 us without a photon: the validation's s5063.)
+#[test]
+fn a_near_carrier_s_standing_wave_holds_its_atoms(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/near_tweezer_probe_motion.json")).unwrap();let mut r=sparse_request(&v);r.times_us=vec![0.,1.];
+    let tweezer=r.beams.iter().position(|b|b.id==r.beams[r.trap_beam].id).unwrap();
+    let mut reflection=r.beams[tweezer].clone();(reflection.id,reflection.name)=("reflection".into(),"反射光".into());reflection.direction=reflection.direction.map(|x|-x);r.beams.push(reflection);
+    let r=mirrored(&r,0.91,102.);let alone=Initial::new(&Model::new(&sparse_request(&v)).unwrap(),&sparse_request(&v)).unwrap().traps[0];
+    let model=Model::new(&r).unwrap();assert!(model.carriers.iter().any(|c|c.beams.contains(&tweezer)&&c.beams.contains(&(r.beams.len()-1))),"the tweezer and its reflection are a near carrier");
+    let trap=Initial::new(&model,&r).unwrap().traps[0];let l=trap.lattice.expect("a standing wave");
+    let z=(0..3).map(|a|trap.centre[a]*l.axis[a]).sum::<f64>();let expected=102_f64.to_radians()/(2.*l.wave_number);assert!((z-expected).abs()<=0.1*expected,"the trap at {z} against φ/2k = {expected}");
+    let largest=|t:&atom_motion_3d::model::Trap|t.frequencies.iter().copied().fold(0.,f64::max);assert!(largest(&trap)>5.*largest(&alone),"{:?} against the tweezer alone's {:?}",trap.frequencies,alone.frequencies);
+    thermal_atoms_stay(&r);
+}
+
 /// The fixture's tweezer alone and with a reflection along its axis, in phase at the focus (F5): the
 /// reflection's field the tweezer's with `turn` of the cooling beam's polarization added (relative to
 /// the tweezer's coupling's size, its outside shift the tweezer's).
@@ -1244,7 +1307,7 @@ fn parts(model:&Model,cluster:usize,state:usize,r:[f64;3],kappa:[f64;3])->([f64;
 fn held_force(model:&Model,request:&Request,state:&str,r0:[f64;3],v:[f64;3],count:u64,time:f64,dt:f64,skip:f64)->([f64;3],[f64;3],f64,Vec<f64>){
     use rayon::prelude::*;
     let(hm,(cluster,at))=(model.hbar_over_mass,place(model,request,state));let k0=v.map(|x|x/hm);let start:[f64;3]=std::array::from_fn(|a|r0[a]-v[a]*time/2.);
-    let trap=atom_motion_3d::model::Trap{lattice:None,axes:[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],frequencies:[0.;3],lab:[0.;3]};
+    let trap=atom_motion_3d::model::Trap{centre:[0.;3],lattice:None,axes:[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],frequencies:[0.;3],lab:[0.;3]};
     let mut s=Settings::new(dt,&trap,f64::EPSILON,false);s.loss=false;let engine=Engine::new(model,s);let(steps,first)=((time/dt).round() as usize,(skip/dt).round() as usize);
     let out:Vec<([f64;3],u64,[f64;STATES])>=(0..count).into_par_iter().map(|i|{
         let mut psi=[Complex::ZERO;MOST_MIXED];psi[at]=Complex::ONE;

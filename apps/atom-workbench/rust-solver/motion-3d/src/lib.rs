@@ -29,8 +29,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 /// The initial internal states (cluster, position in it, probability), each one's trap (the harmonic
-/// trap at its focus, `Model::trap`), depth (`Model::depth`: the loss's region U_h ≤ D) and bound
-/// thermal ensemble (ensemble.rs; none for a state the trap does not hold, which starts at the focus at
+/// trap at its centre, `Model::trap`), depth (`Model::depth`: the loss's region U_h ≤ D) and bound
+/// thermal ensemble (ensemble.rs; none for a state the trap does not hold, which starts there at
 /// rest), the temperature asked for -- the ensembles' parameter T --, and the share of the traps'
 /// thermal distributions over their regions that the ensembles leave out (`Ensemble::cut`, weighted by
 /// the populations).
@@ -52,9 +52,9 @@ impl Initial{
         if !(total>0.){return Err("The initial density has no ground population".into());}
         for s in &mut states{s.2/=total;}
         let traps:Vec<Trap>=states.iter().map(|&(k,x,_)|model.trap(k,x)).collect();
-        let depths:Vec<f64>=states.iter().map(|&(k,x,_)|model.depth(k,x)).collect();
+        let depths:Vec<f64>=states.iter().zip(&traps).map(|(&(k,x,_),trap)|model.depth(k,x,trap.centre)).collect();
         let kt=KT_PER_UK*request.temperature_uk;
-        let ensembles=states.iter().map(|&(k,x,_)|Ensemble::new(model,k,x,kt)).collect::<Result<Vec<_>,_>>()?;
+        let ensembles=states.iter().zip(&traps).map(|(&(k,x,_),trap)|Ensemble::new(model,k,x,kt,trap.centre)).collect::<Result<Vec<_>,_>>()?;
         Ok(Initial{states,traps,depths,ensembles,temperature_uk:request.temperature_uk,cut:0.})
     }
     /// The ensembles' kinetic temperatures and share left out, by quadrature (ensemble.rs).
@@ -119,12 +119,12 @@ impl Latin{
 /// loss's own measure too), along each principal axis of its trap scaled to the harmonic oscillator's
 /// thermal Wigner function, T* = (ħω/2k)coth(ħω/2kT): the momentum by √(T*/T), and the position's displacement from
 /// the bottom of the atom's own well likewise, that displacement x = K⁻¹∇V at the atom (V the ensemble's potential,
-/// K the trap's stiffness at the focus): r itself in a harmonic trap; about its own site in a standing wave, whose
+/// K the trap's stiffness at its centre): r itself in a harmonic trap; about its own site in a standing wave, whose
 /// sites are as stiff, ∝ sin(2kz) -- continuous, no site to pick, zero at the nodes where no oscillator holds it.
 /// (Scaled about the focus a neighbouring site's atom left its site's bottom by (√(T*/T) − 1)λ/2: 975 uK of potential
 /// energy at the retro tweezer's site 1, against 14 uK in the centre.) A scaled draw the loss's measure would call
 /// unbound (the factors lift its energy by their excess over one) is drawn again from its own stream. Along
-/// frozen lab axes (a validation's), nothing; a state the trap does not hold at rest at the focus. At
+/// frozen lab axes (a validation's), nothing; a state the trap does not hold at rest at the trap's centre. At
 /// fourth order the internal state is the bare state's slow part (engine.rs `slow_start`).
 pub fn initial_trajectory(model:&Model,settings:&Settings,initial:&Initial,seed:u64,index:u64,stratum:Stratum)->Trajectory{
     dressed(model,initial_from(model,settings,initial,seed,Purpose::Initial,index,stratum))
@@ -162,7 +162,7 @@ fn initial_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,purpos
     let mut psi=[Complex::ZERO;model::MOST_MIXED];psi[state]=Complex::ONE;
     let(r,kappa)=match &initial.ensembles[pick]{
         // The member's Latin deviates are taken whatever its state, so that its group's stay in step.
-        None=>{for _ in 0..Ensemble::deviates(settings.free){latin.next(&mut rng);}([0.;3],[0.;3])}
+        None=>{for _ in 0..Ensemble::deviates(settings.free){latin.next(&mut rng);}(trap.centre,[0.;3])}
         Some(e)=>{
             let mut draw=e.draw(model,settings.free,&mut rng,&mut |rng|latin.next(rng));
             loop{
