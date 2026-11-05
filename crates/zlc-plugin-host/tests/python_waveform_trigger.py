@@ -1,9 +1,9 @@
 """The software trigger of Waveform Measurement, at the rates it serves.
 
-The trigger holds nothing: every sample is published as it comes, and an edge is a
-mark on the event it fell on. A virtual source samples at 400 Hz to 1 kHz, with one
-sample or a block in each of its records and one or several quantities, and streams
-signals of 1-50 Hz with 1-5% noise. The same through the real host and Runtime is
+Each edge gives one trace with the crossing in its middle, on a time axis that is zero
+there. A virtual source samples at 400 Hz to 1 kHz, with one sample or a block in each
+of its records and one or several quantities, and streams signals of 1-50 Hz with 1-5%
+noise. The same through the real host and Runtime is
 tests/waveform_commit.rs. Run directly with Python.
 """
 import pathlib
@@ -22,7 +22,7 @@ from zlc_atom.nodes.waveform_measurement import logic_node
 from zlc_atom.nodes.waveform_measurement.measurement import (
     WAVEFORM_MEASUREMENT_SCHEMA, FiniteCapture, MonitorCapture, WaveformMeasurementNode, WaveformMeasurementRequest,
     waveform_preview)
-from zlc_atom.nodes.waveform_measurement.trigger import TriggerDetector, TriggerSettings, WaveformTrigger, channel_choices, unit_text
+from zlc_atom.nodes.waveform_measurement.trigger import TraceAssembler, TriggerDetector, TriggerSettings, WaveformTrigger, channel_choices, unit_text
 from zlc_plugin import capabilities
 from zlc_plugin.declare import QUERY_PARAMETERS, field_json
 
@@ -54,33 +54,34 @@ def node_of(source, *, repeat=0, trigger=None, producer='wf'):
 
 
 def detector(level=0.0, slope='rising', rate=RATE_HZ):
-    return TriggerDetector(WaveformTrigger(0, level, slope, 'x', 'V'), 1.0 / rate)
+    return TriggerDetector(WaveformTrigger(0, level, slope, 'x', 'V', 2), 1.0 / rate)
 
 
 class Commits:
     """What the context's commit_events was given, as the events it says."""
 
     def __init__(self):
-        self.ordinals, self.shot_times, self.shown, self.records, self.values = [], [], [], [], {}
+        self.ordinals, self.shot_times, self.records, self.values = [], [], [], {}
         self.commits = 0
         self.origins = []
 
-    def __call__(self, outputs, *, ordinals, shot_times=None, origins=None, shown=None, records=None):
+    def __call__(self, outputs, *, ordinals, shot_times=None, origins=None, records=None):
         self.commits += 1
         count = len(ordinals)
         assert all(output.values.shape[0] == count for output in outputs.values())
         assert len(records) == count
         self.ordinals += [int(item) for item in ordinals]
         self.shot_times += [] if shot_times is None else [float(item) for item in shot_times]
-        self.shown += [True] * count if shown is None else [bool(item) for item in shown]
         self.records += records
         self.origins += [] if origins is None else [tuple(int(cell) for cell in row) for row in origins]
         for name, output in outputs.items():
             self.values.setdefault(name, []).append(output.values)
             self.canonical = output.canonical_schema
 
-    def column(self, name, channel=0):
-        return np.concatenate(self.values[name]).reshape(len(self.ordinals), -1, self.values[name][0].shape[-1])[:, 0, channel]
+    def traces(self, name, channel=0):
+        """``(traces, samples)`` of one channel."""
+
+        return np.concatenate(self.values[name])[:, 0, 0, channel, :]
 
 
 def monitored(signal, seconds, *, trigger=None, **source):
@@ -151,10 +152,91 @@ class Detection(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(values[marks])))
 
 
-class Publication(unittest.TestCase):
-    """Only the marks differ from trigger off: the same events, published as they arrive."""
+def square(times):
+    """A square-like wave of unit swing with a 10 ms edge, not locked to the sampling."""
 
-    def test_every_sample_is_published_as_it_comes_and_edges_are_marked(self):
+    phase = np.mod(times, 0.5137)
+    return np.stack((np.clip(0.5 + (phase - 0.1) / 0.010, 0.0, 1.0) - np.clip(0.5 + (phase - 0.35) / 0.010, 0.0, 1.0),) * 2, axis=1).astype(np.float32)
+
+
+def pushed(signal, *, rate=RATE_HZ, samples=100, level=0.0, slope='rising', seconds=4.0, cut=50):
+    """A stream through an assembler, cut as reads cut it."""
+
+    assembler = TraceAssembler(WaveformTrigger(0, level, slope, 'x', 'V', samples), 1.0 / rate)
+    times = np.arange(int(seconds * rate)) / rate
+    values = signal(times)
+    received = np.arange(times.size, dtype=np.int64)
+    parts = [assembler.push(values[at:at + cut], times[at:at + cut], received[at:at + cut]) for at in range(0, times.size, cut)]
+    return assembler, np.concatenate([part.samples for part in parts]), np.concatenate([part.times for part in parts]), sum(part.edges for part in parts)
+
+
+class Traces(unittest.TestCase):
+    def test_a_trace_is_centred_on_its_crossing_and_passes_the_level_there(self):
+        for level, slope in ((0.0, 'rising'), (0.3, 'rising'), (-0.2, 'falling')):
+            assembler, traces, times, _ = pushed(sine(23.7, 0.02), samples=100, level=level, slope=slope)
+            self.assertEqual(assembler.before, 50)
+            self.assertEqual(traces.shape[1:], (100, 2))
+            self.assertGreater(traces.shape[0], 80)
+            np.testing.assert_allclose(traces[:, 50, 0], level, atol=1e-5)
+            # Before the crossing it is on one side, after it on the other.
+            sign = 1.0 if slope == 'rising' else -1.0
+            self.assertLess(np.median(sign * traces[:, 45, 0]), sign * level)
+            self.assertGreater(np.median(sign * traces[:, 55, 0]), sign * level)
+            periods = np.diff(times) * 23.7
+            self.assertLess(np.abs(periods[np.abs(periods - 1.0) < 0.5] - 1.0).max(), 0.05)
+
+    def test_the_sample_phase_does_not_move_a_trace(self):
+        # 400 Hz over a 10 ms edge: four samples on it.
+        _, traces, times, _ = pushed(square, rate=400.0, samples=40, level=0.5, seconds=30.0, cut=7)
+        self.assertGreater(traces.shape[0], 50)
+        # Every point of the edge, in every trace, sits where the exact edge is.
+        for index, expected in ((19, 0.5 - 2.5 / 10), (20, 0.5), (21, 0.5 + 2.5 / 10)):
+            np.testing.assert_allclose(traces[:, index, 0], expected, atol=1e-5)
+        # What aligning on the first sample past the level would have left: a quarter of the swing.
+        first_past = np.ceil(times * 400.0 - 1e-9) / 400.0 - times
+        self.assertGreater(np.ptp(first_past) * 400.0, 0.9)
+
+    def test_how_reads_cut_the_stream_changes_nothing(self):
+        whole = pushed(sine(23.7, 0.03), samples=64, cut=4000)
+        for cut in (1, 7, 50, 333):
+            part = pushed(sine(23.7, 0.03), samples=64, cut=cut)
+            np.testing.assert_array_equal(part[1], whole[1])
+            np.testing.assert_array_equal(part[2], whole[2])
+
+    def test_every_edge_gives_a_trace_and_traces_overlap(self):
+        _, traces, times, edges = pushed(sine(23.7), samples=500, seconds=4.0)
+        # A period is about 42 samples; a trace is about twelve periods long.
+        self.assertGreater(traces.shape[0], 80)
+        self.assertLessEqual(edges - traces.shape[0], 13, 'only the ends lack samples')
+        self.assertTrue(np.all(np.diff(times) < 0.06))
+
+    def test_an_edge_without_enough_samples_ahead_gives_no_trace(self):
+        def late(times):
+            out = np.full((times.size, 2), -1.0, dtype=np.float32)
+            out[times >= 0.03, 0] = 1.0
+            return out
+        _, traces, _, edges = pushed(late, samples=100, seconds=1.0)
+        self.assertEqual((edges, traces.shape[0]), (1, 0), 'its crossing is 30 samples in, a trace asks for 50 ahead')
+
+    def test_it_holds_a_bounded_number_of_samples(self):
+        assembler, *_ = pushed(lambda times: np.ones((times.size, 2), dtype=np.float32), samples=64, seconds=10.0, level=5.0)
+        self.assertLessEqual(assembler._held.shape[0], 65)
+
+    def test_a_sample_that_could_not_be_read_stays_invalid_in_its_trace(self):
+        def holes(times, inner=sine(5.0)):
+            out = inner(times)
+            out[::37] = np.nan
+            return out
+        _, traces, _, _ = pushed(holes, samples=60, seconds=4.0)
+        self.assertGreater(traces.shape[0], 5)
+        self.assertTrue(np.isnan(traces).any())
+        self.assertTrue(np.isfinite(traces[:, 30, 0]).all(), 'a crossing lies between two good samples')
+
+
+class Publication(unittest.TestCase):
+    """Each trace is one event, the shape of a record of a source triggered in hardware."""
+
+    def test_each_edge_is_one_event_from_any_source_layout(self):
         for samples, outputs in ((1, (VOLTAGE,)), (25, (VOLTAGE,)), (1, N100_OUTPUTS), (25, N100_OUTPUTS)):
             with self.subTest(samples=samples, outputs=len(outputs)):
                 columns = 1 + max(column for output in outputs for column in output.columns)
@@ -163,29 +245,36 @@ class Publication(unittest.TestCase):
                     return np.tile(inner(times)[:, :1], (1, columns)).astype(np.float32)
 
                 channel = f'{outputs[0].name}/{outputs[0].channel_labels[0]}'
-                node, commits, terminal = monitored(signal, 1.5, trigger=TriggerSettings(channel, 0.0, 'rising'),
-                                                    samples=samples, outputs=outputs)
-                self.assertEqual(commits.ordinals, list(range(terminal.produced_count * samples)), 'Stop leaves nothing unpublished')
-                expected = np.arange(len(commits.ordinals)) / RATE_HZ
-                np.testing.assert_allclose(commits.shot_times, expected, atol=1e-9)
+                node, commits, _ = monitored(signal, 1.5, trigger=TriggerSettings(channel, 0.0, 'rising', 40),
+                                             samples=samples, outputs=outputs)
+                self.assertEqual(commits.ordinals, list(range(len(commits.ordinals))))
+                self.assertGreater(len(commits.ordinals), 20)
+                np.testing.assert_allclose(commits.traces(outputs[0].name)[:, 20], 0.0, atol=1e-5)
                 self.assertTrue(np.all(np.diff(commits.shot_times) > 0))
-                values = commits.column(outputs[0].name)
-                marks = np.flatnonzero(commits.shown)
-                self.assertGreater(marks.size, 20)
-                self.assertTrue(np.all(values[marks] >= 0.0) and np.all(values[marks - 1] < 0.0))
-                # Single-sample events, the shape of a single-sample source off.
-                self.assertEqual(commits.values[outputs[0].name][0].shape[1:3], (1, 1))
-                # Reads follow the slice, not the sample.
                 self.assertLess(commits.commits, 40, 'one commit a read')
-                timing = commits.records[10]['record_timing']['wf']['10']
-                self.assertAlmostEqual(timing['record_time_seconds'], commits.shot_times[10])
-                self.assertEqual(timing['time_basis'], 'sample_clock')
+                timing = commits.records[3]['record_timing']['wf']['3']
+                self.assertAlmostEqual(timing['record_time_seconds'], commits.shot_times[3])
 
-    def test_trigger_off_marks_every_event_and_keeps_the_records_whole(self):
+    def test_the_time_axis_is_zero_at_the_crossing_in_a_continuous_and_a_finite_run(self):
+        for repeat in (0, 5):
+            device = source_of(sine(23.7), samples=1)
+            node = node_of(device, repeat=repeat, trigger=TriggerSettings('voltage/CH1', 0.0, 'rising', 40))
+            (event, complete) = node._event_schemas(40, 2)['voltage']
+            device.close()
+            (channel, record) = event.cell_domain.axes
+            self.assertEqual((channel.name, record.name, record.size, record.unit), ('channel', 'record time', 40, 's'))
+            np.testing.assert_allclose(record.coordinates[:21:20], (-0.02, 0.0))
+            self.assertEqual(event.point_domain.axes, ())
+            if repeat:
+                self.assertEqual(complete.repeat_domain.size, 5)
+                self.assertEqual(complete.cell_domain, event.cell_domain)
+            else:
+                self.assertIsNone(complete)
+
+    def test_trigger_off_keeps_the_records_whole(self):
         for samples in (1, 25):
             node, commits, terminal = monitored(sine(23.7, 0.03), 0.8, samples=samples)
             self.assertEqual(commits.ordinals, list(range(terminal.produced_count)))
-            self.assertTrue(all(commits.shown))
             self.assertEqual(commits.values['voltage'][0].shape[1:], (1, samples, 2))
             np.testing.assert_allclose(commits.shot_times, np.arange(terminal.produced_count) * samples / RATE_HZ, atol=1e-9)
             self.assertLess(commits.commits, 30)
@@ -224,31 +313,38 @@ class FiniteRuns(unittest.TestCase):
             device.close()
         return kept, commits, capture
 
-    def test_repeat_is_n_consecutive_samples_from_the_first_edge(self):
+    def test_repeat_is_one_trace_for_each_of_that_many_edges(self):
         for samples in (1, 25):
-            trigger = TriggerSettings('voltage/CH1', 0.0, 'rising')
-            # Starts high and falling, so its first samples are well before the first edge.
-            kept, commits, capture = self.collect(sine(5.0, 0.0, phase=np.pi / 2), 300, trigger=trigger, samples=samples)
-            self.assertEqual(kept, 300)
-            self.assertEqual(commits.ordinals, list(range(300)))
-            self.assertEqual(commits.origins, [(index, 0) for index in range(300)])
-            values = commits.column('voltage')
-            self.assertGreaterEqual(values[0], 0.0)
-            self.assertLess(values[0], 0.1)
-            self.assertTrue(np.all(np.diff(values[:10]) > 0))
-            self.assertEqual(commits.canonical.repeat_domain.size, 300)
+            trigger = TriggerSettings('voltage/CH1', 0.0, 'rising', 200)
+            kept, commits, capture = self.collect(sine(5.0, 0.0, phase=np.pi / 2), 5, trigger=trigger, samples=samples)
+            self.assertEqual(kept, 5)
+            self.assertEqual(commits.ordinals, list(range(5)))
+            self.assertEqual(commits.origins, [(index, 0) for index in range(5)])
+            self.assertEqual(commits.canonical.repeat_domain.size, 5)
+            traces = commits.traces('voltage')
+            self.assertEqual(traces.shape, (5, 200))
+            np.testing.assert_allclose(traces[:, 100], 0.0, atol=1e-5)
+            # The same wave at the same phase: one trace lies on the next.
+            self.assertLess(np.abs(traces - traces[0]).max(), 1e-3)
             self.assertTrue(capture.terminal.source_stopped)
-            first = commits.records[0]['record_timing']['wf']['0']
-            self.assertEqual(first['record_time_seconds'], 0.0)
-            self.assertGreater(first['source_time_seconds'], 0.05, 'nothing before the first trigger was kept')
+            crossings = [commits.records[index]['record_timing']['wf'][str(index)]['source_time_seconds'] for index in range(5)]
+            np.testing.assert_allclose(np.diff(crossings), 0.2, atol=1e-3)
 
     def test_stopped_before_any_edge_keeps_nothing(self):
         stop = threading.Event()
         threading.Timer(0.3, stop.set).start()
         kept, commits, capture = self.collect(lambda times: np.ones((times.size, 2), dtype=np.float32), 100,
-                                              trigger=TriggerSettings('voltage/CH1', 5.0, 'rising'), stop=stop.is_set)
+                                              trigger=TriggerSettings('voltage/CH1', 5.0, 'rising', 20), stop=stop.is_set)
         self.assertEqual((kept, commits.commits), (0, 0))
         self.assertTrue(capture.terminal.no_more_records)
+
+    def test_stopped_part_way_keeps_the_traces_it_has(self):
+        stop = threading.Event()
+        threading.Timer(0.8, stop.set).start()
+        kept, commits, _ = self.collect(sine(5.0), 100, trigger=TriggerSettings('voltage/CH1', 0.0, 'rising', 40), stop=stop.is_set)
+        self.assertGreater(kept, 0)
+        self.assertLess(kept, 100)
+        self.assertEqual(commits.ordinals, list(range(kept)))
 
     def test_repeat_without_a_trigger_is_as_it_was(self):
         kept, commits, capture = self.collect(sine(5.0), 60)
@@ -282,7 +378,7 @@ class Quiet(unittest.TestCase):
         def centred(times):
             return (30.0 + np.sin(times)[:, None] * np.ones((1, 2))).astype(np.float32)
         device = source_of(centred, outputs=(WaveformOutput('field', 'uT', ('z', 'y'), (0, 1)),), rate=400.0)
-        node = node_of(device, trigger=TriggerSettings('field/z', 0.0, 'rising'))
+        node = node_of(device, trigger=TriggerSettings('field/z', 0.0, 'rising', 20))
         said = []
         node._report_status = lambda message, **_: said.append(message)
         commits = Commits()
@@ -296,8 +392,7 @@ class Quiet(unittest.TestCase):
             device.close()
         self.assertGreaterEqual(len(said), 2, 'it keeps saying what it sees')
         self.assertRegex(said[0], r'^Waiting for trigger: field z ranged 3\d(\.\d+)? to 3\d(\.\d+)? µT, level 0$')
-        self.assertFalse(any(commits.shown), 'no view may stand anywhere')
-        self.assertEqual(commits.ordinals, list(range(len(commits.ordinals))), 'and every sample is published')
+        self.assertEqual(commits.commits, 0, 'no edge, no trace')
 
     def test_the_first_edge_ends_the_wait(self):
         def signal(times):
@@ -305,7 +400,7 @@ class Quiet(unittest.TestCase):
             out[times > 1.4, 0] = 1.0
             return out
         device = source_of(signal)
-        node = node_of(device, trigger=TriggerSettings('voltage/CH1', 0.0, 'rising'))
+        node = node_of(device, trigger=TriggerSettings('voltage/CH1', 0.0, 'rising', 20))
         said = []
         node._report_status = lambda message, **_: said.append(message)
         capture = MonitorCapture(node, commit_events=Commits())
@@ -329,7 +424,7 @@ class Quiet(unittest.TestCase):
             def timeout(self):
                 return 0.2
 
-        for trigger in (None, TriggerSettings('voltage/CH1', 0.0, 'rising')):
+        for trigger in (None, TriggerSettings('voltage/CH1', 0.0, 'rising', 20)):
             device = Dead(VirtualWaveformConfig(RATE_HZ, 1, (VOLTAGE,)), sample_source=sine(5.0))
             node = node_of(device, trigger=trigger)
             capture = MonitorCapture(node, commit_events=Commits())
@@ -356,7 +451,7 @@ class Quiet(unittest.TestCase):
 
     def test_a_software_trigger_on_a_source_with_its_own_is_refused(self):
         device = Triggered(VirtualWaveformConfig(RATE_HZ, 5, (VOLTAGE,)), sample_source=sine(5.0))
-        node = WaveformMeasurementNode(sampler=device, request=WaveformMeasurementRequest('s', 0, TriggerSettings('voltage/CH1', 0.0, 'rising')), producer='wf')
+        node = WaveformMeasurementNode(sampler=device, request=WaveformMeasurementRequest('s', 0, TriggerSettings('voltage/CH1', 0.0, 'rising', 20)), producer='wf')
         with self.assertRaisesRegex(ValueError, 'hardware trigger'):
             node._configure()
         device.close()
@@ -366,12 +461,13 @@ class Form(unittest.TestCase):
     def source(self):
         return source_of(sine(5.0), outputs=N100_OUTPUTS)
 
-    def test_the_trigger_has_three_parameters_on_the_form(self):
+    def test_the_trigger_has_four_parameters_on_the_form(self):
         rows = {row['name']: row for row in map(field_json, WAVEFORM_MEASUREMENT_SCHEMA.fields)}
-        self.assertEqual(list(rows), ['repeat', 'trigger_slope', 'trigger_channel', 'trigger_level'])
+        self.assertEqual(list(rows), ['repeat', 'trigger_slope', 'trigger_channel', 'trigger_level', 'trigger_samples'])
         self.assertEqual(rows['trigger_slope']['label'], 'Slope')
         self.assertEqual(rows['trigger_slope']['default'], 'off')
         self.assertEqual(rows['trigger_channel']['group'], 'Trigger')
+        self.assertEqual(rows['trigger_samples']['group'], 'Trigger')
 
     def test_channels_and_the_level_read_in_display_units(self):
         self.assertEqual([unit_text(unit) for unit in ('uT', 'rad*s^-1', 'm*s^-2', 'K', 'V')], ['µT', 'rad/s', 'm/s²', 'K', 'V'])
@@ -384,18 +480,18 @@ class Form(unittest.TestCase):
         self.assertEqual(answer({'trigger_channel': ''}, {'sampler': self.source()}), {})
         self.assertEqual(answer({}, {}), {})
 
-    def test_the_preview_is_a_rolling_view_of_the_trigger_channel(self):
+    def test_the_preview_draws_the_traces_of_the_trigger_channel_one_on_the_other(self):
         source = self.source()
         free = waveform_preview(source)
         self.assertEqual((free.output.name, free.plot_kind, dict(free.semantic)), ('magnetic_field', 'rolling', {}))
         triggered = waveform_preview(source, trigger_channel='angular_rate/z', node='n1')
-        self.assertEqual((triggered.output.name, triggered.plot_kind), ('angular_rate', 'rolling'))
-        self.assertEqual(dict(triggered.semantic), {'fate:cell_data:n1.angular_rate.0.component': ['scope-value', 2]})
+        self.assertEqual((triggered.output.name, triggered.plot_kind), ('angular_rate', 'curve'))
+        self.assertEqual(dict(triggered.semantic), {'fate:cell_data:n1.angular_rate.0.component': ['scope-value', 2],
+                                                    'fate:repeat:n1.angular_rate.repeat': 'group'})
         self.assertEqual(waveform_preview(source, trigger_channel='', node='n1').output.name, 'magnetic_field')
-        # Block records are single samples when triggered, and their own trace when not.
         block = source_of(sine(5.0), samples=50)
         self.assertEqual(waveform_preview(block).plot_kind, 'curve')
-        self.assertEqual(waveform_preview(block, trigger_channel='voltage/CH2', node='n').plot_kind, 'rolling')
+        self.assertEqual(waveform_preview(block, trigger_channel='voltage/CH2', node='n').plot_kind, 'curve')
 
     def test_a_source_with_its_own_trigger_says_so_on_the_slope_row(self):
         device = Triggered(VirtualWaveformConfig(RATE_HZ, 5, (VOLTAGE,)), sample_source=sine(5.0))

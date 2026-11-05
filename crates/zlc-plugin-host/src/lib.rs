@@ -28,7 +28,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use zlc_core::AnyBuffer;
 use zlc_core::control::{Origin, SafeActions, public_instance};
-use zlc_core::runtime::{Bundle, Declaration, DeliveryKind, DeliveryPolicy, Generation, GenerationId, HistoryLease, Input, Read, ReadKind,
+use zlc_core::runtime::{Bundle, Declaration, DeliveryKind, DeliveryPolicy, Generation, GenerationId, HistoryLease, Input, Read, ReadKind, SubscriptionTicket,
     ReadMode, ReadRequest, RunRecord, Runtime, RuntimeError, Start, Storage, Subscription};
 use zlc_core::schema::{DatasetSchema, DomainRole};
 
@@ -307,6 +307,8 @@ struct RunState {
     /// The signal its commits derive from: one run of it (a processor's subscription),
     /// or the signal across its runs (a run following it), declared at run.begin.
     route: Option<(Arc<str>, Option<GenerationId>)>,
+    /// The subscription a processor's deliveries come by.
+    consumer: Option<SubscriptionTicket>,
     outputs: HashMap<String, OutputState>,
     histories: Vec<HistoryLease>,
     apparatus: Option<Value>,
@@ -805,6 +807,7 @@ impl PluginHost {
             };
             let route = request.source_signal.as_deref().filter(|_| source.is_some() || following.is_some())
                 .map(|signal| (Arc::from(signal), source.as_ref().map(|source| source.generation)));
+            let consumer = source.as_ref().and_then(|source: &Source| match &source.feed { Feed::Live(subscription) => Some(subscription.ticket()), Feed::Sealed(_) => None });
             let mut devices = serde_json::Map::new();
             for (argument, device) in &request.devices {
                 let target = state.instances.get(device).filter(|target| target.descriptor.is_device())
@@ -821,7 +824,7 @@ impl PluginHost {
                 state.instances.get_mut(device).unwrap().claims.push((run.clone(), !request.shared.contains(argument)));
             }
             state.instances.get_mut(instance).unwrap().run = Some(RunState { id: run.clone(), origin: request.origin.clone(),
-                devices: request.devices.clone(), signals: request.outputs.clone(), generation: None, route, outputs: HashMap::new(),
+                devices: request.devices.clone(), signals: request.outputs.clone(), generation: None, route, consumer, outputs: HashMap::new(),
                 histories: Vec::new(), apparatus: None, stop: RunStop(Arc::default()) });
             let following = following.map(|(follower, received)| { state.followers.push(follower); received });
             (process, devices, source, following)
@@ -1297,6 +1300,7 @@ impl Inner {
             Some((source, of)) => self.runtime.begin_consuming(public_instance(&instance), declarations, record, source, of),
             None => self.runtime.begin(public_instance(&instance), declarations, record),
         }.map_err(|error| CallError::from(error.to_string()))?;
+        if let Some(consumer) = run.consumer { self.runtime.bind_consumer(&generation, consumer).map_err(|error| CallError::from(error.to_string()))?; }
         let id = generation.id().as_uuid().to_string();
         run.generation = Some(generation);
         let declared: Vec<String> = outputs.values().map(|output| output.signal.to_string()).collect();
@@ -1364,7 +1368,7 @@ impl Inner {
     }
 
     /// Consecutive events of a run in one message (PLUGIN_PROTOCOL.md §5): each the
-    /// event `run_commit` would make of it, and any of them possibly not shown.
+    /// event `run_commit` would make of it.
     fn run_commit_events(&self, params: &Value, lends: &[Arc<Lend>]) -> Result<Value, CallError> {
         let invalid = |message: String| CallError::new(ErrorKind::Invalid, message);
         let column = |field: &str, expected: usize| -> Result<Option<AnyBuffer>, CallError> {
@@ -1382,10 +1386,6 @@ impl Inner {
         let origins = match column("origins", count)? {
             None => None, Some(AnyBuffer::U64(origins)) if origins.len() == 2 * count => Some(origins),
             Some(_) => return Err(invalid("origins are (count, 2) u64".into())),
-        };
-        let shown = match column("shown", count)? {
-            None => None, Some(AnyBuffer::Bool(shown)) => Some(shown),
-            Some(_) => return Err(invalid("shown is one bool per event".into())),
         };
         let records = match &params["records"] {
             Value::Null => None,
@@ -1429,7 +1429,7 @@ impl Inner {
             }).collect();
             Bundle { inputs, metadata: Value::Object(metadata), parents: Vec::new() }
         }).collect();
-        self.runtime.commit_events(&generation, &bundles, shown.as_ref().map(|shown| shown.as_slice()))
+        self.runtime.commit_events(&generation, &bundles)
             .map_err(|error| CallError::from(error.to_string()))?;
         Ok(Value::Null)
     }

@@ -59,7 +59,9 @@ impl Renderer {
         let window = int_value(state, "window");
         let primary_index = matches!(&**payload, Payload::Curve(curve) if curve.x_role.as_deref() == Some("primary-index"));
         let frame = if primary_index {
-            curve_x_limits(&[1.0 - window as f64, 0.0])
+            // A finite run has fewer records than the window may be wide: the frame is what there is.
+            let records = sliced.iter().map(|item| item.x.len()).max().unwrap_or(0).max(1) as f64;
+            curve_x_limits(&[1.0 - records.min(window as f64), 0.0])
         } else {
             let extents: Vec<f64> = sliced.iter().flat_map(|item| [item.summary.xlow, item.summary.xhigh]).collect();
             curve_x_limits(&extents)

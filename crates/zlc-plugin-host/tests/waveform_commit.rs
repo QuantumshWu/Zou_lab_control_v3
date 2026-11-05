@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use zlc_core::AnyBuffer;
 use zlc_core::control::{Origin, SafeActions};
-use zlc_core::runtime::{DeliveryPolicy, Front, Read, ReadKind, Runtime, RuntimeError, Start, Subscription};
+use zlc_core::runtime::{DeliveryPolicy, Front, Runtime, Start, Subscription};
 use zlc_plugin_host::{HostConfig, HostEvent, PluginHost, RunRequest};
 
 type Host = (PluginHost, Runtime, mpsc::Receiver<HostEvent>);
@@ -88,7 +88,7 @@ fn waveform(rate: f64, samples: u64, outputs: u64, channels: u64) -> Value {
 }
 
 fn triggered(repeat: u64) -> Value {
-    json!({"repeat": repeat, "trigger_slope": "rising", "trigger_channel": "q0/c0", "trigger_level": 0.0})
+    json!({"repeat": repeat, "trigger_slope": "rising", "trigger_channel": "q0/c0", "trigger_level": 0.0, "trigger_samples": 60})
 }
 
 fn start(host: &PluginHost, device: Value, values: Value) -> (String, Vec<String>) {
@@ -98,74 +98,39 @@ fn start(host: &PluginHost, device: Value, values: Value) -> (String, Vec<String
     (host.start_run("wave", request(values, &outputs)).unwrap(), outputs)
 }
 
-/// A value of the shown window's last event and the one before, per output `q0`.
-fn tail(read: &Read) -> (u64, f32, f32) {
-    let ReadKind::Window(window) = read.kind() else { panic!("a window") };
-    let entries = window.entries();
-    let value = |entry: &std::sync::Arc<zlc_core::runtime::Publication>| {
-        let AnyBuffer::F32(values) = entry.data().unwrap().values() else { panic!("dtype") };
-        values.as_slice()[0]
-    };
-    (entries[entries.len() - 1].key().ordinal.unwrap(), value(&entries[entries.len() - 2]), value(&entries[entries.len() - 1]))
-}
-
-/// Single-sample and multi-sample records, several outputs: every sample one event,
-/// in order, followed whole; a board's window always ends on a rising edge, and the
-/// phase at its right edge stays put from one refresh to the next.
+/// Single-sample and multi-sample records, several outputs: each edge one event holding
+/// its trace, in order, followed whole, with the level at the middle of every trace.
 #[test]
-fn a_triggered_run_publishes_every_sample_and_a_board_locks_on_its_edges() {
+fn a_triggered_run_publishes_one_centred_trace_for_each_edge() {
     for (samples, outputs, channels) in [(1, 4, 10), (20, 2, 4)] {
         let Some((host, runtime, events)) = host() else { return };
         let (run, names) = start(&host, waveform(1000.0, samples, outputs, channels), triggered(0));
         let description = published(&runtime, "@logic/wave/q0");
-        let lease = runtime.retain_history(&description.generation, "@logic/wave/q0", 300).unwrap();
         let follower = runtime.subscribe(&description.generation, vec!["@logic/wave/q0".into()], DeliveryPolicy::Follow, Start::Next).unwrap();
-        let request = [(description.generation.clone(), std::sync::Arc::<str>::from("@logic/wave/q0"), Some(300))];
-        let mut front = Front::default();
         let mut taken = Vec::new();
-        let mut phases = Vec::new();
-        let mut edges = std::collections::BTreeSet::new();
-        let until = Instant::now() + Duration::from_secs(3);
-        let mut behind = 0usize;
-        while Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(30));
-            drain(&follower, &mut taken);
-            let Ok(shown) = runtime.read_coherent_views(&request, &mut front).remove(0) else { continue };
-            // The lease may have come after the first edges.
-            let ReadKind::Window(window) = shown.kind() else { panic!("a window") };
-            if window.entries().len() < 2 { continue; }
-            let (ordinal, before, at) = tail(&shown);
-            assert!(before < 0.0 && at >= 0.0, "the view ends on an edge: {before} then {at}");
-            edges.insert(ordinal);
-            phases.push(at);
-            let newest = runtime.read_latest(&description.generation, "@logic/wave/q0").unwrap().key().ordinal.unwrap();
-            if newest > ordinal { behind += 1; }
-        }
-        assert!(edges.len() > 20, "{} distinct edges", edges.len());
-        assert!(behind > 0, "other readers run ahead of a board");
-        let spread = phases.iter().fold(f32::MIN, |a, b| a.max(*b)) - phases.iter().fold(f32::MAX, |a, b| a.min(*b));
-        let per_sample = 2.0 * std::f32::consts::PI * 23.7 / 1000.0;
-        assert!(spread < 2.0 * per_sample + 6.0 * 0.03, "the phase at the right edge moved {spread}");
+        for _ in 0..60 { std::thread::sleep(Duration::from_millis(50)); drain(&follower, &mut taken); }
         host.stop_run("wave", &run).unwrap();
         let (outcome, result, error) = await_end(&events, &run);
         assert_eq!(outcome, "stopped", "{error:?}");
         drain(&follower, &mut taken);
-        drop(lease);
+        assert!(taken.len() > 40, "{} traces in 3 s of 23.7 Hz", taken.len());
         let last = runtime.read_latest(&description.generation, "@logic/wave/q0").unwrap().key().ordinal.unwrap();
-        assert_eq!(result["shots"].as_u64(), Some(last + 1), "Stop leaves nothing unpublished");
-        assert_eq!(taken.last().unwrap().0, last);
+        assert_eq!(result["shots"].as_u64(), Some(last + 1));
         for pair in taken.windows(2) {
             assert_eq!(pair[1].0, pair[0].0 + 1, "every event in order");
-            assert!(pair[1].2 > pair[0].2, "shot times strictly increase");
+            assert!(pair[1].2 > pair[0].2, "crossing times strictly increase");
         }
         let origin = taken[0].3 - taken[0].2;
-        for (ordinal, _, shot, source) in &taken {
-            assert!((source - shot - origin).abs() < 1e-9);
-            assert!((shot - *ordinal as f64 * 1e-3).abs() < 1e-6, "a sample's own time, every sample its own event: {ordinal} at {shot}");
-        }
+        for (_, _, shot, source) in &taken { assert!((source - shot - origin).abs() < 1e-9); }
+        let latest = runtime.read_latest(&description.generation, "@logic/wave/q0").unwrap();
+        let schema = latest.data().unwrap().schema().clone();
+        assert_eq!(schema.domain(zlc_core::schema::DomainRole::Cell).axes()[1].name(), "record time");
+        assert_eq!(schema.domain(zlc_core::schema::DomainRole::Cell).axes()[1].len(), 60);
+        assert_eq!(schema.domain(zlc_core::schema::DomainRole::Point).size(), 1);
+        let AnyBuffer::F32(values) = latest.data().unwrap().values() else { panic!("dtype") };
+        assert!(values.as_slice()[30].abs() < 1e-4, "the level at the middle of the trace: {}", values.as_slice()[30]);
         for name in &names {
             let signal = runtime.signals().into_iter().rev().find(|item| *item.signal == *format!("@logic/wave/{name}")).unwrap();
-            assert_eq!(signal.schema.domain(zlc_core::schema::DomainRole::Point).size(), 1, "one sample an event");
             assert_eq!(runtime.read_latest(&signal.generation, &signal.signal).unwrap().key().ordinal, Some(last), "one bundle");
         }
         host.shutdown();
@@ -200,26 +165,22 @@ fn a_free_running_run_commits_its_events_in_batches_unchanged() {
     }
 }
 
-/// `repeat` with a trigger: N consecutive samples from the first edge, nothing before it;
+/// `repeat` with a trigger: one trace for each of N edges, a complete dataset;
 /// without one, a finite run of records as it always was.
 #[test]
-fn a_finite_triggered_run_keeps_n_samples_from_the_first_edge() {
+fn a_finite_triggered_run_keeps_one_trace_for_each_edge() {
     let Some((host, runtime, events)) = host() else { return };
-    let (run, _) = start(&host, waveform(1000.0, 10, 2, 4), triggered(250));
+    let (run, _) = start(&host, waveform(1000.0, 10, 2, 4), triggered(5));
     let (outcome, result, error) = await_end(&events, &run);
-    assert_eq!((outcome.as_str(), &result), ("completed", &json!({"shots": 250})), "{error:?}");
+    assert_eq!((outcome.as_str(), &result), ("completed", &json!({"shots": 5})), "{error:?}");
     let signal = runtime.signals().into_iter().rev().find(|item| &*item.signal == "@logic/wave/q0").unwrap();
     assert!(signal.finite && signal.sealed);
+    assert_eq!(signal.schema.domain(zlc_core::schema::DomainRole::Repeat).size(), 5);
+    assert_eq!(signal.schema.domain(zlc_core::schema::DomainRole::Cell).axes()[1].len(), 60);
     let latest = runtime.read_latest(&signal.generation, "@logic/wave/q0").unwrap();
     let dataset = latest.canonical().expect("finite dataset");
-    assert_eq!((dataset.written_cells(), dataset.total_cells()), (250, 250));
-    let values: Vec<f32> = dataset.segments().map(|segment| {
-        let AnyBuffer::F32(values) = segment.data().values() else { panic!("dtype") };
-        values.as_slice()[0]
-    }).collect();
-    assert!(values[0] >= 0.0 && values[0] < 0.6, "starts on the edge: {}", values[0]);
-    assert!(values[1] > values[0] - 0.2, "rising");
-    assert_eq!(latest.key().ordinal, Some(249));
+    assert_eq!((dataset.written_cells(), dataset.total_cells()), (5, 5));
+    assert_eq!(latest.key().ordinal, Some(4));
     host.close("wave").unwrap();
     host.close("source").unwrap();
 
@@ -229,16 +190,13 @@ fn a_finite_triggered_run_keeps_n_samples_from_the_first_edge() {
     host.shutdown();
 }
 
-/// No edge: the run waits and says what it sees, the data goes on arriving at every
-/// reader but a board's, and Stop leaves a run a board shows as it stands. A source
-/// that stops delivering is a fault whatever the trigger is doing.
+/// No edge: the run waits and says what it sees, and Stop ends it. A source that
+/// stops delivering is a fault whatever the trigger is doing.
 #[test]
-fn a_quiet_trigger_is_a_status_and_a_dead_source_a_fault() {
-    let Some((host, runtime, events)) = host() else { return };
-    let quiet = json!({"repeat": 0, "trigger_slope": "rising", "trigger_channel": "q0/c0", "trigger_level": 5.0});
+fn a_quiet_trigger_is_a_status() {
+    let Some((host, _runtime, events)) = host() else { return };
+    let quiet = json!({"repeat": 0, "trigger_slope": "rising", "trigger_channel": "q0/c0", "trigger_level": 5.0, "trigger_samples": 20});
     let (run, _) = start(&host, waveform(400.0, 1, 1, 3), quiet);
-    let description = published(&runtime, "@logic/wave/q0");
-    let request = [(description.generation.clone(), std::sync::Arc::<str>::from("@logic/wave/q0"), None)];
     let until = Instant::now() + Duration::from_secs(10);
     let status = loop {
         assert!(Instant::now() < until, "no waiting status");
@@ -247,11 +205,8 @@ fn a_quiet_trigger_is_a_status_and_a_dead_source_a_fault() {
         }
     };
     assert!(status.contains("q0 c0 ranged") && status.contains(" V, level 5"), "{status}");
-    assert!(matches!(runtime.read_coherent_views(&request, &mut Front::default()).remove(0), Err(RuntimeError::NoData)));
-    assert!(runtime.read_latest(&description.generation, "@logic/wave/q0").unwrap().key().ordinal.unwrap() > 100);
     host.stop_run("wave", &run).unwrap();
     assert_eq!(await_end(&events, &run).0, "stopped");
-    assert!(runtime.read_coherent_views(&request, &mut Front::default()).remove(0).is_ok());
     host.shutdown();
 }
 

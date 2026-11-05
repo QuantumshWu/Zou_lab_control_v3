@@ -1060,6 +1060,8 @@ class Run:
                     if callable(getattr(node, "run_outputs", None)):
                         for name, (schema, storage, index) in node.run_outputs().items():
                             self.context.declare_output(name, schema, storage=storage, index_by_source=index)
+                    if not outputs:
+                        self.context.declare_now()
                 if callable(finish):
                     last = inputs[params["anchor"]]
                 for commit in (outputs,) if isinstance(outputs, Mapping) else outputs:
