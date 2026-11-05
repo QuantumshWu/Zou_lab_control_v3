@@ -124,7 +124,7 @@
 //! - the loss, within the populations' tolerance: an escape over the trap's top moves with the motion's energy -- the pilot's
 //!   escaped share L by L ln(1/L) per relative error of it (`escape`) --, by the larger of the orbits'
 //!   and the jumps' errors.
-//! T's criteria take the step's share of T's room at T's target there (`regime`), at most the T target itself
+//! T's criteria take the step's share of T's room at T's target there (`ceiling`, # Regime), at most the T target itself
 //! (`tolerances`): the share of a target the method's own error sets would refine for a value no one can read, while a
 //! step that leaves the motion unresolved still moves the loss (the retro-reflected tweezer over 10 us
 //! at the stiff axis' period, 1 us: 0.9 % of its atoms lost, T 160 % high, against 0.016 us).
@@ -304,6 +304,11 @@
 //! run's step and need (the 3D PGC's dt from 0.294 to 0.164 us as its pilot's T_y at the first output crossed 4 ħω, RETRO's need
 //! from 9 to over 700 as its T_y did at the last).
 //!
+//! The step's tolerance reads that weight at T's upper confidence bound, T + CONFIDENCE standard errors per axis (`ceiling`), as every criterion of the step reads its own errors: it is a limit, and no later batch corrects a step. On T itself a pilot's few atoms under-read it where it lies near
+//! CLASSICAL: RETRO's T_y of 23.0 ± 4.8 µK at 85 µs where it is 30.5, w 0.59 for 1, T's tolerance 7.6 % for 4.5 %, its step 0.066 us and T_x −11 % on one seed of 32, where the bound keeps 0.043-0.058 us on 96 seeds, T_x at most −9 %; the 3D PGC's T_y at its first output over 10 ms, T's tolerance up to 7.3 % on 17 seeds of 48, its step up to 0.76 us,
+//! T_x and T_y +16 %, where the bound keeps 0.46-0.63 us on all 48, +12 % at most. A T that lies below the limit by its errors keeps its target: GMD1C, TET, DEFAULT, THREE and the 1 ms runs keep their steps on 24 seeds each. T's weights over the states (`binding_at`) and the need (`predicted`, the batches' `output_ratios`) keep T itself: a weighing and a prediction want their estimate's
+//! middle, and the batches' T, within a few per cent, sets the run's own target.
+//!
 //! # Device
 //! The batches run on the device asked for (`Device`): the CPU's threads, or the GPU (gpu/mod.rs),
 //! which runs a batch's trajectories as the CPU does -- the same groups, initial states, random
@@ -414,8 +419,11 @@ fn classical(e:&Estimate,frequencies:[f64;3])->bool{(0..3).all(|a|KT_PER_UK*e.te
 
 /// The weight w of T's target at an output (module documentation, # Regime): its target is ε_T/w, w = min(1, m²), m the lowest
 /// axis's margin k_B T/(CLASSICAL ħω).
-fn regime(e:&Estimate,frequencies:[f64;3])->f64{
-    (0..3).filter(|&a|frequencies[a]>0.).map(|a|(KT_PER_UK*e.temperature[a]/(CLASSICAL*frequencies[a])).max(0.)).fold(1_f64,f64::min).powi(2)
+fn regime(e:&Estimate,frequencies:[f64;3])->f64{weight_at(e.temperature,frequencies)}
+/// T's weight at its upper confidence bound, CONFIDENCE standard errors per axis above T, for the step's tolerance (module documentation, # Regime).
+fn ceiling(e:&Estimate,frequencies:[f64;3])->f64{weight_at(std::array::from_fn(|a|e.temperature[a]+CONFIDENCE*e.temperature_error[a]),frequencies)}
+fn weight_at(temperature:[f64;3],frequencies:[f64;3])->f64{
+    (0..3).filter(|&a|frequencies[a]>0.).map(|a|(KT_PER_UK*temperature[a]/(CLASSICAL*frequencies[a])).max(0.)).fold(1_f64,f64::min).powi(2)
 }
 /// An output's statistical errors at CONFIDENCE: the populations' and the loss's largest (absolute) and T's largest
 /// relative one over the axes, with its target's weight there (`regime`).
@@ -727,13 +735,13 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         // The pilot's statistics per output (its trajectories each a group of one, with the harmonic control): CONFIDENCE
     // standard errors, the populations' and the loss's largest and T's with its regime's weight (`statistics`). The
     // trajectories a model needs are (statistic/room)² times the pilot's at the output and target that bind (`predicted`).
-    let pilot_statistics:Vec<Statistic>={
+    let(pilot_statistics,ceilings):(Vec<Statistic>,Vec<f64>)={
         let scales=Scales{hbar_over_mass:pilot_candidate.model.hbar_over_mass,frequencies:trap.lab};
         let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:pilot_harmonic.mean[i],twin:None}).collect();
         let mut e=summarize(&pilot_groups,&scales,&means);start(&mut e[0],&pilot_candidate.model,&pilot_candidate.initial);
-        statistics_of(&e,trap.lab)
+        (statistics_of(&e,trap.lab),e.iter().map(|x|ceiling(x,trap.lab)).collect())
     };
-    // T's target per output where the pilot's atoms are, for the step's check (`regime`, `tolerances`).
+    // T's target's weight per output where the pilot's atoms are: over the states, where T's criteria read (`regime`, `binding_at`), and at its upper bound against the step's tolerance (`ceiling`, `tolerances`).
     let weights:Vec<f64>=pilot_statistics.iter().map(|s|s.weight).collect();
     // The relative standard error of the need the pilot predicts (`need_error`): the margin a finer step must save
     // by (`kept`).
@@ -756,7 +764,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let work=|s:usize|->f64{if let Some(&(_,w))=counted.borrow().iter().find(|x|x.0==s){return w;}
             let w=interval_work(&c.model,&parts,&settings(s),interval,pilot_waiting);counted.borrow_mut().push((s,w));w};
         let apriori:Vec<[f64;2]>=c.charges.iter().map(|x|x.map(|x|others+x+pilot_beats*pilot_horizon)).collect();
-        let tolerances=tolerances(&weights,&apriori);let bias=|k:&Check|{let r=k.ratios();[r[0]*tolerances[0],r[1]*tolerances[1]]};
+        let tolerances=tolerances(&ceilings,&apriori);let bias=|k:&Check|{let r=k.ratios();[r[0]*tolerances[0],r[1]*tolerances[1]]};
         let cost=|k:&Check|{let(n,weight)=predicted(&pilot_statistics,&apriori,bias(k),pilot as f64,c.model.resonance);work(k.steps)*n*weight*(outputs-1) as f64};
         // Beyond the targets with no step bias at all (a pole its tables do not resolve, a charge past the rooms): what the step can move of its
         // cost is little beside that weight, and its check is put off until it is the choice -- its cost at the first step with no bias.
@@ -839,7 +847,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             // (the population's bound may yet be measured smaller), and the work there any step's it keeps -- the explicit
             // states' exact steps resolve what the folded model's step left to the fold (CONTROL_CYCLE's first rung: 118 steps
             // per interval against the folded 34, its evaluation ten CPU-s for a cost twice the least's).
-            let tolerances=tolerances(&weights,&apriori);let clusters=c.clusters();let deposits=Deposits::default();
+            let tolerances=tolerances(&ceilings,&apriori);let clusters=c.clusters();let deposits=Deposits::default();
             let r=match doubled.iter().find(|x|x.0==clusters){
                 Some(x)=>[x.1[0]*x.2[0]/tolerances[0],x.1[1]*x.2[0]/tolerances[0],x.1[2]*x.2[1]/tolerances[1]],
                 None=>{let r=step_excess(&Engine::new(&c.model,at.clone()),&states,&binding,pilot_waiting,&probes,period,escape(&c.model,&states,&pilot_groups),tolerances,&deposits);doubled.push((clusters,r,tolerances));r}
@@ -880,9 +888,9 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // The step (`step_check`; on the pilot's states as the choice checked it): the a-priori total the steps'
     // costs take -- the ledger's estimates with the fold's charge as the pilot measured it. The motion's criteria
     // hold T's step error within the step's share of T's room at its target there, at most the T target itself
-    // (`weights`, `tolerances`): a step that leaves the motion unresolved still moves the loss.
+    // (`ceilings`, `tolerances`): a step that leaves the motion unresolved still moves the loss.
     let apriori:Vec<[f64;2]>=charges.iter().map(|x|x.map(|c|unfolded(&base,&model)+c+pilot_beats*horizon)).collect();let parts=state_work(&model,&states,&begun);
-    let checked=match known{Some(checked)=>checked,None=>{let tolerances=tolerances(&weights,&apriori);
+    let checked=match known{Some(checked)=>checked,None=>{let tolerances=tolerances(&ceilings,&apriori);
         let cost=|k:&Check|{let r=k.ratios();let(n,weight)=predicted(&pilot_statistics,&apriori,[r[0]*tolerances[0],r[1]*tolerances[1]],pilot as f64,model.resonance);
             interval_work(&model,&parts,&settings(k.steps),interval,waiting)*n*weight};
         step_check(&model,&states,&binding_at(&states,&weights,interval),&settings,steps,most,waiting,horizon,pilot as usize,&pilot_groups,period,tolerances,&cost,need,&[],&Deposits::default())}};
@@ -890,7 +898,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // The kept step against T's error over the run (`drift`), each output against T's tolerance there and the loss's: read where its error per period could add up past that;
     // where more stands than that, as dt² the step where it would come to it and its bias, checked again at least as far as that span.
     let chosen={let(probes,sensitivity)=(bound_probes(&model,&states,&binding_at(&states,&weights,interval)),escape(&model,&states,&pilot_groups));
-        let limits:Vec<f64>=apriori.iter().zip(&weights).map(|(a,&w)|temperature_tolerance(w,a[1]).min(if sensitivity>0.{tolerances[0]/sensitivity}else{f64::INFINITY})).collect();
+        let limits:Vec<f64>=apriori.iter().zip(&ceilings).map(|(a,&w)|temperature_tolerance(w,a[1]).min(if sensitivity>0.{tolerances[0]/sensitivity}else{f64::INFINITY})).collect();
         let limit=|t:f64|limits[((t/interval).round() as usize).clamp(1,outputs-1)];
         let run_steps=|k:&Check|{let r=k.ratios();predicted(&pilot_statistics,&apriori,[r[0]*tolerances[0],r[1]*tolerances[1]],pilot as f64,model.resonance).0*(k.steps*(outputs-1)) as f64};
         let mut through=0.;let mut kept=checked.chosen;
@@ -1386,7 +1394,7 @@ fn checked_step(states:usize,probes:usize,steps:usize,interval:f64,period:f64)->
 
 /// The tolerances of a step's criteria (module documentation, # Shares): per target the step's share s of the run's room
 /// beside the a-priori totals `apriori` per output (`run_room`), its least over the outputs after t = 0 -- T's at its target ε_T/w
-/// there (`weights`, `regime`), at most ε_T: a step that leaves the motion unresolved still moves the loss.
+/// there (`weights`, `ceiling`), at most ε_T: a step that leaves the motion unresolved still moves the loss.
 fn tolerances(weights:&[f64],apriori:&[[f64;2]])->[f64;2]{
     let population=BIAS_SHARE*apriori.iter().skip(1).map(|a|run_room(POPULATION_TARGET,a[0])).fold(POPULATION_TARGET,f64::min);
     let temperature=apriori.iter().zip(weights).skip(1).map(|(a,&w)|temperature_tolerance(w,a[1])).fold(TEMPERATURE_TARGET,f64::min);
@@ -1989,6 +1997,11 @@ mod tests{
         let a=[[0.;2],[0.02,0.02]];let t=|w:f64|tolerances(&[w,w],&a)[1];
         assert!((t(1.)-BIAS_SHARE*run_room(TEMPERATURE_TARGET,0.02)).abs()<1e-15&&t(0.)==TEMPERATURE_TARGET&&t(0.25)==TEMPERATURE_TARGET);
         assert!(t(0.6)>t(1.)&&t(0.6)<TEMPERATURE_TARGET);assert!((tolerances(&[0.,1.],&a)[1]-t(1.)).abs()<1e-15||tolerances(&[0.,1.],&a)[1]==t(1.));
+        // Its upper bound, for the step's tolerance: T within the limit by its errors reads the limit; no errors read T itself; a group alone, its errors unknown, reads the limit.
+        let mut e=Estimate::default();e.temperature=[1e9,0.77*limit,3.*limit];assert!((regime(&e,[w;3])-0.5929).abs()<1e-12);assert!((ceiling(&e,[w;3])-0.5929).abs()<1e-12);
+        e.temperature_error=[0.,0.1*limit,0.];assert!((ceiling(&e,[w;3])-0.9409).abs()<1e-12);assert!((regime(&e,[w;3])-0.5929).abs()<1e-12);
+        e.temperature_error=[0.,0.2*limit,0.];assert_eq!(ceiling(&e,[w;3]),1.);
+        e.temperature_error=[f64::INFINITY;3];assert_eq!(ceiling(&e,[w;3]),1.);
     }
     /// After a miss the search moves by the criteria it evaluated (`next_step`): the D1 gray molasses at 10 us
     /// outputs, with the near light's dressing, missed at 33 steps by 1 % on the motion, its population not
