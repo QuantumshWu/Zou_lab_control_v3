@@ -57,14 +57,16 @@
 //! An excited state is explicit when a drive into it is kept, or a kept coupling joins it to an
 //! explicit one. Closure: every folded drive from a cluster's ground state, every folded coupling
 //! of an explicit state, and every folded pair of channels between two of its ground states, is judged
-//! again with the cluster's dressing -- the spectral norm of the bounds of its kept couplings, its light
-//! shifts and H's static couplings between its ground states (the static block's spread: a pair not far
-//! beyond it would beat between the block's eigenstates at their nearness) -- subtracted from its
+//! again with the cluster's dressing -- the spectral norm of the bounds of what stays in its static block, its states' light
+//! shifts and its kept couplings (the block's spread: a pair not far beyond it would beat between the block's eigenstates at their nearness) -- subtracted from its
 //! distance; one that fails is kept (promoted), a drive static in the frames between two states of one
 //! cluster is kept (it costs nothing), and the rule runs again until nothing changes. Each pass takes the estimates at its own
 //! dressing and keeps first, per ground state, the most saturated drive of a folded total beyond the allowance: a folded near drive's
 //! light is most of the dressing until it is kept (PGCP_10's probe, a dressing above its distances of 21 to 33 MHz), and what is judged
 //! under it stays kept for nothing -- a cooling drive's saturation read at a quarter of its distance, the pairs of channels within that spread.
+//! What folds stays out of it: it beats away at its own frequency, and its bound says nothing of the block. A near tweezer's cross terms with the cooling beams, bounds of 2.9 GHz at a beat of 6 THz (m² 2e-7), gave a
+//! D1 gray molasses at 808 nm a dressing of 7.6 GHz past its 6.8 GHz hyperfine splitting, against 47 MHz from what stays: pairs of m² ≤ 1e-9 kept at that beat, a grid of 30 000 nodes per us, 256 trajectories of 100 us in
+//! 2930 CPU-s against 0.8, T the same within 0.5 of its standard errors at every output on shared streams.
 //! The couplings between explicit states and the pairs are judged once the drives stand. The rungs then keep more as the allowance
 //! falls. When every drive folds, the clusters are the ground states' alone.
 //!
@@ -1426,12 +1428,14 @@ impl Ground{
             // Each ground state's cluster's explicit states, for the eliminations from here on.
             let explicit_of:Vec<Vec<bool>>=(0..ng).map(|x|{let k=partition.set[x];(0..ne).map(|e|explicit[e]&&partition.set[ng+e]==k).collect()}).collect();
             let moved=explicit_of!=self.explicit_of;self.explicit_of=explicit_of;
-            // The closure: each cluster's dressing, the spectral norm of its couplings' bounds.
+            // The closure: each cluster's dressing, the spectral norm of the bounds of its static block: its states' light shifts, its kept pairs of channels, static couplings and excited couplings.
             let dressing:Vec<f64>=partition.sets.iter().map(|set|{
                 let n=set.len();let mut m=Dense::zeros(n,n);
-                for(i,&x)in set.iter().enumerate(){for(j,&y)in set.iter().enumerate(){if x<ng&&y<ng{
-                    let s:f64=b.raman.iter().flat_map(|r|r.iter()).map(|r|r[x][y].max(r[y][x])).sum();
-                    let statics=if x==y{0.}else{b.statics[x][y].max(b.statics[y][x])};m[(i,j)]=Complex::new(s+statics,0.);}}}
+                for(i,&x)in set.iter().enumerate(){if x<ng{m[(i,i)]=Complex::new((0..b.raman.len()).map(|c|b.raman[c][c][x][x]).sum(),0.);}}
+                for item in partition.items.iter().filter(|i|!i.folded){
+                    let(x,y)=match item.kind{Kind::Raman{first,second}=>(first.state,second.state),Kind::Static{a,b}=>(a,b),_=>continue};
+                    if let(Some(i),Some(j))=(set.iter().position(|&s|s==x),set.iter().position(|&s|s==y)){m[(i,j)]+=Complex::new(0.5*item.size,0.);if i!=j{m[(j,i)]+=Complex::new(0.5*item.size,0.);}}
+                }
                 for item in excited.iter().filter(|x|!x.folded){
                     let(x,y)=match item.kind{ExcitedKind::Drive(d)=>(ng+d.excited,d.ground),ExcitedKind::Static{a,b}=>(ng+a,ng+b)};
                     if let(Some(i),Some(j))=(set.iter().position(|&s|s==x),set.iter().position(|&s|s==y)){m[(i,j)]+=Complex::new(item.size,0.);m[(j,i)]+=Complex::new(item.size,0.);}

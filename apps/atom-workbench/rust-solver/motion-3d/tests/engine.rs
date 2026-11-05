@@ -781,6 +781,15 @@ fn a_near_tweezer_s_shift_moves_a_probe_s_line_to_the_core_s(){
     for(i,(a,b))in frozen_f1(&r,false).iter().zip(floats(&v["core"]["f1"])).enumerate(){assert!((a-b).abs()<=5e-3,"{i} us: {a} against the core's {b}");}
 }
 
+/// A near tweezer's far cross terms stay out of a cluster's dressing (ground.rs, # One rule over the ground and the excited states): a D1 gray molasses in an 808 nm tweezer keeps the Raman resonance of its cooling and repump
+/// beams in one cluster and folds the pairs at the 6.8 GHz splitting, whose mixing is 1e-9: bounds of 2.9 GHz at a beat of 6 THz gave it a dressing past that splitting, a beat on a grid of 30 000 nodes per us.
+#[test]
+fn a_near_tweezer_s_far_cross_terms_leave_the_splitting_folded(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/near_tweezer_gray_molasses_motion.json")).unwrap();let r=sparse_request(&v);
+    let model=Model::new(&r).unwrap();
+    assert_eq!(model.clusters(),1);assert_eq!(model.dimension(0),8);assert!(!model.beating(0),"{:?}",model.beats(0).0);
+}
+
 /// The fourth order on a dressed probe (ground.rs, # Fourth order): its W3 without what the near light's dressing
 /// already holds -- Σ's first order through the far channels, z's light shifts by the other carriers -- and with the
 /// dressed denominators, the frozen atom's F = 1 population is the population core's at every microsecond to 0.005,
