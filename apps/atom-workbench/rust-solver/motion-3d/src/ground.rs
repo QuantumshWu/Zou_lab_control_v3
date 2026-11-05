@@ -279,6 +279,7 @@ use crate::ledger::BUDGET;
 use crate::linear::{hermitian_eigen,hermitian_eigenvalues,Dense,Lu};
 use crate::{Beam,Complex,Request,STATES};
 use atom_population_core::lattice::classification::FOLD_DISTANCE;
+use rayon::prelude::*;
 use std::f64::consts::TAU;
 
 /// A drive's saturation parameter is 2(g/|ΔE|)²: the relative error of its linear response, the
@@ -1232,8 +1233,25 @@ impl Ground{
         let mut out=Bounds{raman:vec![vec![vec![vec![0.;ng];ng];nc];nc],photons:vec![vec![vec![[0.;3];ng];ng];nc],statics:vec![vec![0.;ng];ng],
             high:vec![vec![f64::NEG_INFINITY;ng];ng],light:0.,scattering:0.,poles:vec![f64::INFINITY;nc]};
         let mut identity=Dense::zeros(self.excited_states.len(),self.excited_states.len());for i in 0..identity.rows{identity[(i,i)]=Complex::ONE;}
-        for intensities in intensity_points(&self.units,&self.beams){
-            let e=self.eliminate(&intensities)?;
+        // A rung's closure takes this several times over: per intensity point, beam pair and carrier on the threads, each sum in its order.
+        let points:Vec<Result<(Elimination,Vec<[Dense;3]>,Vec<Result<(Vec<[Dense;3]>,f64),String>>),String>>=intensity_points(&self.units,&self.beams).par_iter().map(|intensities|{
+            let e=self.eliminate(intensities)?;
+            let pairs:Vec<[Dense;3]>=self.carriers.iter().flat_map(|carrier|self.carriers.iter().flat_map(move|emitted|carrier.beams.iter().flat_map(move|&l|emitted.beams.iter().map(move|&k|(l,k))))).collect::<Vec<_>>()
+                .into_par_iter().map(|(l,k)|[self.folded[k].adjoint_product(&e.responses[l]),e.responses[k].adjoint_product(&self.folded[l]),e.responses[k].adjoint_product(&self.decay.product(&e.responses[l]))]).collect();
+            let carriers=self.carriers.par_iter().enumerate().map(|(c,carrier)|{
+                let jumps:Vec<[Dense;3]>=carrier.beams.iter().map(|&l|std::array::from_fn(|x|self.emission[x].product(&e.responses[l]))).collect();
+                let mut pole=f64::INFINITY;
+                for b in 0..ng{
+                    if !self.couples(c,b){continue;}
+                    let lu=denominator(&e.excited_hamiltonian,-e.energies[b]-carrier.detuning)?;
+                    pole=pole.min(1./lu.solve_columns(&identity).spectral_norm());
+                }
+                Ok((jumps,pole))
+            }).collect();
+            Ok((e,pairs,carriers))
+        }).collect();
+        for point in points{
+            let(e,pairs,carriers)=point?;let mut pairs=pairs.iter();
             for a in 0..ng{for b in 0..ng{
                 out.high[a][b]=out.high[a][b].max(e.energies[a]-e.energies[b]);
                 if a!=b{out.statics[a][b]=out.statics[a][b].max(e.ground[(a,b)].abs());}
@@ -1241,9 +1259,8 @@ impl Ground{
             // Per pair of beams the three products; per carrier pair their sums of moduli.
             let mut raman=vec![vec![vec![vec![0.;ng];ng];nc];nc];let(mut light,mut scattering)=(vec![0.;ng],vec![0.;ng]);
             for(c,carrier)in self.carriers.iter().enumerate(){for(d,emitted)in self.carriers.iter().enumerate(){
-                for &l in &carrier.beams{for &k in &emitted.beams{
-                    let(v,w)=(self.folded[k].adjoint_product(&e.responses[l]),e.responses[k].adjoint_product(&self.folded[l]));
-                    let q=e.responses[k].adjoint_product(&self.decay.product(&e.responses[l]));
+                for _ in &carrier.beams{for _ in &emitted.beams{
+                    let [v,w,q]=pairs.next().unwrap();
                     for a in 0..ng{for b in 0..ng{
                         raman[c][d][a][b]+=0.5*(v[(a,b)].abs()+w[(a,b)].abs()+q[(a,b)].abs());
                         if c==d{light[a]+=((v[(a,b)]+w[(a,b)])*0.5).abs();scattering[a]+=q[(a,b)].abs();}
@@ -1252,16 +1269,12 @@ impl Ground{
             }}
             for c in 0..nc{for d in 0..nc{for a in 0..ng{for b in 0..ng{out.raman[c][d][a][b]=out.raman[c][d][a][b].max(raman[c][d][a][b]);}}}}
             out.light=out.light.max(light.iter().copied().fold(0.,f64::max));out.scattering=out.scattering.max(scattering.iter().copied().fold(0.,f64::max));
-            for(c,carrier)in self.carriers.iter().enumerate(){
-                let jumps:Vec<[Dense;3]>=carrier.beams.iter().map(|&l|std::array::from_fn(|x|self.emission[x].product(&e.responses[l]))).collect();
+            for(c,carrier)in carriers.into_iter().enumerate(){
+                let(jumps,pole)=carrier?;
                 for b in 0..ng{for a in 0..ng{for x in 0..3{
                     let n:f64=jumps.iter().map(|j|j[x][(a,b)].abs()).sum();out.photons[c][b][a][x]=out.photons[c][b][a][x].max(n);
                 }}}
-                for b in 0..ng{
-                    if !self.couples(c,b){continue;}
-                    let lu=denominator(&e.excited_hamiltonian,-e.energies[b]-carrier.detuning)?;
-                    out.poles[c]=out.poles[c].min(1./lu.solve_columns(&identity).spectral_norm());
-                }
+                out.poles[c]=out.poles[c].min(pole);
             }
         }
         Ok(out)
@@ -1743,11 +1756,11 @@ impl Ground{
         let mut identity=Dense::zeros(self.excited_states.len(),self.excited_states.len());for i in 0..identity.rows{identity[(i,i)]=Complex::ONE;}
         for intensities in intensity_points(&self.units,&self.beams){
             let e=self.eliminate(&intensities)?;
-            for c in 0..nc{for(k,cl)in self.clusters.iter().enumerate(){let Some(block)=&e.blocks[c][k] else{continue};
-                let mut pole=f64::INFINITY;
-                for mode in &block.modes{for lu in mode.lu.iter().chain(mode.dressed.iter().filter_map(|d|d.lu.as_ref())){pole=pole.min(1./lu.solve_columns(&identity).spectral_norm());}}
-                for &b in cl.states.iter().filter(|&&b|self.couples(c,b)){poles[c][b]=poles[c][b].min(pole);}
-            }}
+            let blocks:Vec<(usize,usize)>=(0..nc).flat_map(|c|(0..self.clusters.len()).map(move|k|(c,k))).filter(|&(c,k)|e.blocks[c][k].is_some()).collect();
+            let found:Vec<f64>=blocks.par_iter().map(|&(c,k)|{let mut pole=f64::INFINITY;
+                for mode in &e.blocks[c][k].as_ref().unwrap().modes{for lu in mode.lu.iter().chain(mode.dressed.iter().filter_map(|d|d.lu.as_ref())){pole=pole.min(1./lu.solve_columns(&identity).spectral_norm());}}
+                pole}).collect();
+            for(&(c,k),&pole)in blocks.iter().zip(&found){for &b in self.clusters[k].states.iter().filter(|&&b|self.couples(c,b)){poles[c][b]=poles[c][b].min(pole);}}
         }
         Ok(poles)
     }
