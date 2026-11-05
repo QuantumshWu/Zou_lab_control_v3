@@ -45,7 +45,6 @@ typedef unsigned long long u64;
 #define MOST_CARRIERS 8
 #define MOST_RANK 3
 #define MOST_FOCUSED 3
-#define MOST_CLASSES 32
 #define MOST_LISTED 32
 #define WARPS 8                         // trajectories per block: lib.rs `TASK`
 // An output's sums (stats.rs `Sums`; src/gpu/mod.rs `sums_of`): held, profile, doppler, the 32
@@ -284,7 +283,7 @@ struct Program{
     int nbeams,ncarriers,nclusters,focused,nodes,fields,nnear,doppler,loss;
     int weights;                        // where a jump's scratch holds the fourth order's weights
     int nunits;
-    int exact_at,transient_at,nlevels,rows_at,between_at;  // the exact step's, the transient's, the exact responses' rows' and the mixed blocks' shifts' room in a trajectory's scratch
+    int exact_at,transient_at,nlevels,rows_at,between_at,classes_at;  // the exact step's, the transient's, the exact responses' rows', the mixed blocks' shifts' and a jump's classes' weights' room in a trajectory's scratch
     int focused_unit[MOST_FOCUSED],stride[MOST_FOCUSED];   // the focused units (the trap beam's first), the stencil's strides
     int field_carrier[MOST_CARRIERS*MOST_RANK],field_rank[MOST_CARRIERS*MOST_RANK];
     int ground_states[NG],excited_states[NE],ground_cluster[NG],ground_position[NG];
@@ -359,7 +358,7 @@ struct Point{
 // eigenvectors, its terms' weights over the columns, its eigenvalues and its states' own energies.
 struct BlockSpace{float shift[MOST_CARRIERS*NG];float2 a[MAXN*MAXN],u[MAXN*MAXN],weights[MAXN];double values[MAXN],own[MAXN];};
 // A jump's working space.
-struct JumpSpace{float2 u[3][MAXN],f[MAXN];float weights[MOST_CLASSES],shares[MOST_BEAMS],projections[MOST_BEAMS],drives[MOST_BEAMS],direct;int beams[MOST_BEAMS],driven[MOST_BEAMS],ndrives;};
+struct JumpSpace{float2 u[3][MAXN],f[MAXN];float landing[NG],shares[MOST_BEAMS],projections[MOST_BEAMS],drives[MOST_BEAMS],direct;int beams[MOST_BEAMS],driven[MOST_BEAMS],ndrives;};
 struct Warp{
     Point pt;
     float2 psi[MAXM],start[MAXM];       // ψ, ψ at a step's start
@@ -1550,18 +1549,18 @@ __device__ __forceinline__ void across(const double n[3],double pair[2][3]){
 // A quantum jump at the trajectory's position and time (engine.rs `Engine::jump`), with the exact
 // response when `exact`: the class and the cluster it lands in, the photon's direction from the
 // dipole pattern, its polarization, the recoils, and the state the photon leaves.
-// The place x falls in among the weights J.weights[0, n): the last where it is past them by round-off.
-__device__ __forceinline__ int picked(const JumpSpace& J,int n,double x){
-    for(int c=0;c<n;c++){const double w=(double)J.weights[c];if(x<w)return c;x-=w;}
+// The place x falls in among the weights[0, n): the last where it is past them by round-off.
+__device__ __forceinline__ int picked(const float* weights,int n,double x){
+    for(int c=0;c<n;c++){const double w=(double)weights[c];if(x<w)return c;x-=w;}
     return n-1;
 }
-// A jump's first draws (engine.rs `jump`), each class's weight in J.weights and their total positive:
+// A jump's first draws (engine.rs `jump`), each class's weight in `weights` and their total positive:
 // the class, the next threshold, the polarization's and the absorbed beam's uniforms -- before the
 // direction's rejection loop, so that a twin on the same stream keeps its thresholds and choices.
 struct Draws{int pick;double threshold,polarization,absorbed;};
-__device__ Draws draw(Rng& rng,const JumpSpace& J,int nclasses,double total){
+__device__ Draws draw(Rng& rng,const float* weights,int nclasses,double total){
     Draws d;const double x=rng.uniform()*total;d.threshold=rng.open_uniform();d.polarization=rng.uniform();d.absorbed=rng.uniform();
-    d.pick=picked(J,nclasses,x);
+    d.pick=picked(weights,nclasses,x);
     return d;
 }
 // The photon of the picked class's amplitudes J.u (nt rows): its direction n from the dipole pattern
@@ -1722,18 +1721,18 @@ __device__ __noinline__ void jump(const Program& P,const Run& R,Warp& W,Traj& t,
     SPAN_END(SPAN_EXACT,responses);SPAN_BEGIN(photons);
     if(C.fourth>=0)bent_state(P,W,C,t.time,lane);
     SPAN_BEGIN(matrices);float2* M=scratch+P.nnear*MAXN*3*NG;photon_matrices(P,W,C,lane,X,M,scratch+P.weights);SPAN_END(SPAN_MATRICES,matrices);SPAN_BEGIN(weightsp);
-    JumpSpace& J=W.jump;
+    JumpSpace& J=W.jump;float* weights=(float*)(scratch+P.classes_at);
     // The class, and the cluster it lands the atom in: by Σ_a ‖u_a‖².
     double total=0.;
     for(int c=0;c<C.nclasses;c++){
         const Class K=P.classes[C.classes+c];const int nt=P.clusters[K.target].n0;
         float v=0.f;if(lane<3*nt)v=norm2(amplitude(P,W,C,K,lane%3,lane/3,t.time,M));
-        const float w=warp_sum(v);if(lane==0)J.weights[c]=w;total+=(double)w;
+        const float w=warp_sum(v);if(lane==0)weights[c]=w;total+=(double)w;
     }
     __syncwarp();
     SPAN_END(SPAN_WEIGHTS,weightsp);SPAN_END(SPAN_PHOTONS,photons);
     if(!(total>0.)){t.threshold=rng.open_uniform();t.log_threshold=log(t.threshold);return;}
-    SPAN_BEGIN(drawing);const Draws d=draw(rng,J,C.nclasses,total);SPAN_END(SPAN_DRAW,drawing);
+    SPAN_BEGIN(drawing);const Draws d=draw(rng,weights,C.nclasses,total);SPAN_END(SPAN_DRAW,drawing);
     const Class K=P.classes[C.classes+d.pick];const Cluster T=P.clusters[K.target];const int nt=T.n0;
     // The transient's five draws, before the directions' loops.
     double tu[5];for(int i=0;i<5;i++)tu[i]=rng.uniform();
@@ -1777,9 +1776,9 @@ __device__ void hold_advance(const Program& P,const Run& R,Warp& W,Twin& h,doubl
 // The twin's jump (engine.rs `Engine::jump` of a held atom): the trajectory's stream of the twin's
 // jump number, the classes' amplitudes from the jump operators at its point, the same draws as a
 // moving atom's, no kicks.
-__device__ void hold_jump(const Program& P,const Run& R,Warp& W,Twin& h,u32 index,int lane){
+__device__ void hold_jump(const Program& P,const Run& R,Warp& W,Twin& h,u32 index,int lane,float2* scratch){
     h.jumps++;Rng rng(R.seed,PURPOSE_JUMP,index,(u32)h.jumps);
-    const Cluster C=P.clusters[h.cluster];JumpSpace& J=W.jump;
+    const Cluster C=P.clusters[h.cluster];JumpSpace& J=W.jump;float* weights=(float*)(scratch+P.classes_at);
     // u_x = L_x ψ of a class at the lane's (x, row).
     auto amplitude=[&](int c,int nt)->float2{
         float2 u=zero2();if(lane>=3*nt)return u;
@@ -1790,11 +1789,11 @@ __device__ void hold_jump(const Program& P,const Run& R,Warp& W,Twin& h,u32 inde
     double total=0.;
     for(int c=0;c<C.nclasses;c++){
         const int nt=P.clusters[P.classes[C.classes+c].target].n;
-        const float w=warp_sum(norm2(amplitude(c,nt)));if(lane==0)J.weights[c]=w;total+=(double)w;
+        const float w=warp_sum(norm2(amplitude(c,nt)));if(lane==0)weights[c]=w;total+=(double)w;
     }
     __syncwarp();
     if(!(total>0.)){h.threshold=rng.open_uniform();h.log_threshold=log(h.threshold);return;}
-    const Draws d=draw(rng,J,C.nclasses,total);
+    const Draws d=draw(rng,weights,C.nclasses,total);
     const Class K=P.classes[C.classes+d.pick];const int nt=P.clusters[K.target].n;
     const float2 u=amplitude(d.pick,nt);if(lane<3*nt)J.u[lane%3][lane/3]=u;
     __syncwarp();
@@ -1806,7 +1805,7 @@ __device__ void hold_jump(const Program& P,const Run& R,Warp& W,Twin& h,u32 inde
 
 // One step of the twin (engine.rs `Engine::step` of a held atom): where ‖ψ‖² crosses the threshold
 // the step is redone to the crossing, the jump made there and the rest taken from the state it left.
-__device__ void hold_step(const Program& P,const Run& R,Warp& W,Twin& h,u32 index,int lane){
+__device__ void hold_step(const Program& P,const Run& R,Warp& W,Twin& h,u32 index,int lane,float2* scratch){
     double left=P.dt;
     for(;;){
         const Twin start=h;
@@ -1818,7 +1817,7 @@ __device__ void hold_step(const Program& P,const Run& R,Warp& W,Twin& h,u32 inde
         const double at=lb<la?fmin(fmax(ta+(h.log_threshold-la)/(lb-la)*(tb-ta),ta),tb):tb;
         h=start;__syncwarp();if(lane<MAXN)W.twin[lane]=W.start[lane];__syncwarp();
         if(at>0.){double unused;hold_advance(P,R,W,h,at,lane,unused);}
-        hold_jump(P,R,W,h,index,lane);
+        hold_jump(P,R,W,h,index,lane,scratch);
         left-=at;
         if(!(left>0.))break;
     }
@@ -2488,10 +2487,10 @@ __device__ __noinline__ void ringing_photon(const Program& P,Warp& W,Traj& t,dou
     }
     // Its landing cluster by the weights there.
     double total=0.;
-    for(int c=0;c<P.nclusters;c++){const float w=warp_sum(lane<3*NG&&P.ground_cluster[to]==c?norm2(v):0.f);if(lane==0)J.weights[c]=w;total+=(double)w;}
+    for(int c=0;c<P.nclusters;c++){const float w=warp_sum(lane<3*NG&&P.ground_cluster[to]==c?norm2(v):0.f);if(lane==0)J.landing[c]=w;total+=(double)w;}
     __syncwarp();
     if(!(total>0.))return;
-    const int target=picked(J,P.nclusters,u[2]*total),nt=P.clusters[target].n0;const bool row=lane<NG&&P.ground_cluster[lane]==target;
+    const int target=picked(J.landing,P.nclusters,u[2]*total),nt=P.clusters[target].n0;const bool row=lane<NG&&P.ground_cluster[lane]==target;
     if(lane<3*MAXN)J.u[lane%3][lane/3]=zero2();
     __syncwarp();
     if(lane<3*NG&&P.ground_cluster[to]==target)J.u[ax][P.ground_position[to]]=v;
@@ -2772,7 +2771,7 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Program P,con
             // The held twin's steps of the interval, up to the last output.
             if(held&&i>0&&i<=through){
                 const long long begun=clock64();
-                for(int m=lo+1;m<=hi;m++)hold_step(P,R,W,h,t.index,lane);
+                for(int m=lo+1;m<=hi;m++)hold_step(P,R,W,h,t.index,lane,scratch);
                 twin_cycles+=clock64()-begun;
             }
             // The record of output i.

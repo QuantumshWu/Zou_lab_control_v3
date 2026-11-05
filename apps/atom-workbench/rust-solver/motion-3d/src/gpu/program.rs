@@ -10,13 +10,11 @@ use crate::Complex;
 
 /// The most states of a cluster of ground states the kernel holds (its bucket), of a cluster its exact
 /// step takes (explicit excited states, beats: engine.rs # The exact step) and the most parts of its
-/// components, the excited states, the most classes of a cluster's jumps and the most listed outputs
-/// (lib.rs `simulate`'s distributions).
+/// components, the excited states and the most listed outputs (lib.rs `simulate`'s distributions).
 pub const MAXN:usize=MOST_STATES;
 pub const MAXM:usize=16;
 pub const MOST_PARTS:usize=32;
 pub const NE:usize=24;
-pub const MOST_CLASSES:usize=32;
 pub const MOST_LISTED:usize=32;
 /// A cluster's most field pairs with a first order in the kinetic shifts in the generator of a static one (the kernel's `Warp::first`; the exact step's table lies in its room)
 /// and what a table holds per pair, in float2.
@@ -94,7 +92,7 @@ pub struct Params{
     terms:u64,omegas:u64,group_parts:u64,residual_parts:u64,excited_list:u64,directs:u64,levels:u64,level_first:u64,level_width:u64,
     kept:u64,decay:u64,near_units:u64,unit_couplings:u64,vias:u64,via_first:u64,ground_block:u64,term_floor:u64,powers:u64,first_fields:u64,
     nbeams:i32,pub(crate) ncarriers:i32,nclusters:i32,focused:i32,nodes:i32,fields:i32,pub(crate) nnear:i32,doppler:i32,loss:i32,weights:i32,nunits:i32,
-    exact_at:i32,transient_at:i32,nlevels:i32,rows_at:i32,between_at:i32,
+    exact_at:i32,transient_at:i32,nlevels:i32,rows_at:i32,between_at:i32,classes_at:i32,
     focused_unit:[i32;MOST_FOCUSED],stride:[i32;MOST_FOCUSED],
     field_carrier:[i32;MOST_CARRIERS*MOST_RANK],field_rank:[i32;MOST_CARRIERS*MOST_RANK],
     ground_states:[i32;GROUND],excited_states:[i32;NE],ground_cluster:[i32;GROUND],ground_position:[i32;GROUND],
@@ -148,9 +146,9 @@ pub fn layout()->[u32;28]{
         MOST_INTERVALS,SLOT_RECORD,RECORD,WARPS,MAXN,TWIN,MOTION,HARMONIC,size_of::<Fourth>(),size_of::<NearUnit>(),size_of::<FirstField>(),MOST_FIRST].map(|x|x as u32)
 }
 
-/// The model on the device: the kernel's parameters, the buffers they point into, and the most
-/// photons of a cluster's jumps.
-pub struct Program{pub params:Params,photons:usize,weights:usize,pub(crate) exact:usize,transient:usize,rows:usize,between:usize,_buffers:Vec<Buffer>}
+/// The model on the device: the kernel's parameters, the buffers they point into, the most
+/// photons of a cluster's jumps and the rest of a trajectory's scratch (`scratch`).
+pub struct Program{pub params:Params,photons:usize,classes:usize,weights:usize,pub(crate) exact:usize,transient:usize,rows:usize,between:usize,_buffers:Vec<Buffer>}
 
 fn c32(z:Complex)->[f32;2]{[z.re as f32,z.im as f32]}
 
@@ -167,7 +165,7 @@ impl Program{
             return Err(beyond(format!("子空间 {} 个态（{} 个激发态显式）超出精确步的 {MAXM} 个",model.dimension(k),model.dimension(k)-model.ground_dimension(k))));}
         if let Some(k)=(0..model.clusters()).find(|&k|1+model.beats(k).0.len()>MOST_PARTS){return Err(beyond(format!("子空间 {} 的 {} 个残余拍频",k,model.beats(k).0.len()/2)));}
         if model.geometry.len()>MOST_BEAMS||model.carriers.len()>MOST_CARRIERS||model.focused.len()>MOST_FOCUSED{return Err(beyond("光束或强度维度太多".into()));}
-        if let Some(c)=g.clusters.iter().find(|c|c.states.len()>MAXN||c.classes.len()>MOST_CLASSES){return Err(beyond(format!("子空间 {} 个态、{} 类光子",c.states.len(),c.classes.len())));}
+        if let Some(c)=g.clusters.iter().find(|c|c.states.len()>MAXN){return Err(beyond(format!("子空间 {} 个态",c.states.len())));}
         let hm=model.hbar_over_mass;
         // The beams: each one's carrier and place among them, and the near beams' order.
         let mut owner=vec![None;model.geometry.len()];
@@ -391,7 +389,7 @@ impl Program{
             ground_block:put!(ground_block),term_floor:put!(term_floor),powers:put!(powers),first_fields:put!(if first_fields.is_empty(){vec![FirstField::default()]}else{first_fields}),
             nbeams:model.geometry.len() as i32,ncarriers:model.carriers.len() as i32,nclusters:model.layouts.len() as i32,focused:model.focused.len() as i32,
             nodes:nodes as i32,fields:fields as i32,nnear:near,doppler:model.doppler as i32,loss:settings.loss as i32,weights:0,nunits:g.units.len() as i32,
-            exact_at:0,transient_at:0,nlevels:g.excited_groups.len() as i32,rows_at:0,between_at:0,
+            exact_at:0,transient_at:0,nlevels:g.excited_groups.len() as i32,rows_at:0,between_at:0,classes_at:0,
             focused_unit:std::array::from_fn(|f|model.focused.get(f).map_or(0,|&u|u as i32)),stride:std::array::from_fn(|f|nodes.pow(f as u32) as i32),
             field_carrier,field_rank,ground_states:std::array::from_fn(|b|g.ground_states[b] as i32),excited_states:std::array::from_fn(|i|g.excited_states[i] as i32),
             ground_cluster:std::array::from_fn(|b|g.cluster[b] as i32),ground_position:std::array::from_fn(|b|g.clusters[g.cluster[b]].position(b).unwrap() as i32),
@@ -404,6 +402,8 @@ impl Program{
             node_phase:crate::engine::node_phase(),grid_phase:settings.node_phase,beats:settings.beats,horizon:settings.horizon,
         };
         let photons=g.clusters.iter().map(|c|c.classes.iter().map(|k|k.photons.len()).sum::<usize>()).max().unwrap_or(0);
+        // A jump's classes' weights, a float each (the kernel's `jump`): as many as the model's largest number of them, which a field splits as far as the photons' frequencies part.
+        let classes=g.clusters.iter().map(|c|c.classes.len()).max().unwrap_or(0).div_ceil(2);
         // The transient's room (the kernel's `transient`, `ringing_photon`): every coherent group's folded amplitude on the excited states, and for a photon on the largest manifold's
         // m states its operators (3 axes × ng × m), per carrier and rank its channels' amplitudes (m), H's off-diagonal part or propagator and its eigenvectors (m × m), its diagonal and its phases (m).
         let most=g.excited_groups.iter().map(|x|x.len()).max().unwrap_or(0);
@@ -412,7 +412,8 @@ impl Program{
         let rows=if near>0{NE*32}else{0};
         // The mixed blocks' light shifts between a cluster's places, per carrier (the kernel's `light_shifts`).
         let between=nc*MAXN*MAXN;
-        let mut program=Program{params,photons,weights,exact,transient,rows,between,_buffers:buffers};let total=program.scratch();program.params.weights=(total-weights-exact-transient-rows-between) as i32;
+        let mut program=Program{params,photons,classes,weights,exact,transient,rows,between,_buffers:buffers};let total=program.scratch();program.params.weights=(total-weights-exact-transient-rows-between) as i32;
+        program.params.classes_at=program.params.weights-classes as i32;
         program.params.exact_at=(total-exact-transient-rows-between) as i32;program.params.transient_at=(total-transient-rows-between) as i32;
         program.params.rows_at=(total-rows-between) as i32;program.params.between_at=(total-between) as i32;
         Ok(program)
@@ -420,8 +421,8 @@ impl Program{
     /// The tables' nodes per intensity axis.
     pub fn nodes(&self)->usize{self.params.nodes as usize}
     /// A jump's working space per trajectory (float2): the exact response's -- every near beam's
-    /// photon tables at each cluster column --, the photons' matrices per axis and the fourth order's
-    /// weights (the kernel's `Program::weights` is where they start), the exact step's and the transient's
+    /// photon tables at each cluster column --, the photons' matrices per axis, the classes' weights and the fourth order's
+    /// (the kernel's `Program::classes_at` and `Program::weights` are where they start), the exact step's and the transient's
     /// room, and the exact responses' channel rows and mixed blocks' shifts (`Program::rows_at`, `Program::between_at`).
-    pub fn scratch(&self)->usize{self.params.nnear as usize*MAXN*3*GROUND+3*self.photons+self.weights+self.exact+self.transient+self.rows+self.between}
+    pub fn scratch(&self)->usize{self.params.nnear as usize*MAXN*3*GROUND+3*self.photons+self.classes+self.weights+self.exact+self.transient+self.rows+self.between}
 }
