@@ -2243,22 +2243,18 @@ __device__ unsigned exact_resolve(const Program& P,float2* X,const float* F,cons
     double scale=0.;for(int a=0;a<3;a++)scale=fmax(scale,(double)F[2*Q+a]);scale*=tau;
     double cost[16],push[16];int order[16];
     for(int i=0;i<half;i++){
-        const int down=half-i,up=1+half+i;const double w=omegas[up-1],others=pace-w*((double)F[Q+down]+(double)F[Q+up]);double x=0.;
+        // One division a pair, and the force's bound linear in the gradients' sizes, one coefficient for both of a pair's sides per axis: a double's division costs 2000 cycles a warp, and 30 a pair took a quarter of the kernel on PGC1D_BIAS_TILT.
+        const int down=half-i,up=1+half+i;const double w=omegas[up-1],iw=1./w,iw2=iw*iw,others=pace-w*((double)F[Q+down]+(double)F[Q+up]);double x=0.;
         for(int side=0;side<2;side++){
-            const int q=side?up:down;const double m=(double)F[Q+q];float unused;
-            if(2.*m/w*once>share){x+=2.*m/w*once;continue;}
+            const int q=side?up:down;const double m=(double)F[Q+q],edge=2.*m*iw*once;float unused;
+            if(edge>share){x+=edge;continue;}
             commutator(X,X+q*nn,W1,n,lane);const double x1=(double)msize(W1,n,lane,unused);
             commutator(X,W1,W2,n,lane);const double x2=(double)msize(W2,n,lane,unused);
             const double xx=x1+3.*m*all,y=x2+3.*x1*all+6.*bound*m*all+3.*m*all*all+2.*m*others+w*m*all;
-            x+=fmin(2.*m/w*once+2.*bound*m*tau/w,(2.*m/w+2.*xx/(w*w))*once+tau*y/(w*w));
+            x+=fmin(edge+2.*bound*m*tau*iw,edge+(2.*xx*iw2*once+tau*y*iw2));
         }
-        double f=0.;
-        for(int a=0;a<3;a++){
-            double v=0.;
-            for(int side=0;side<2;side++){const double g=(double)F[2*Q+3*(side?up:down)+a];
-                v+=fmin(2.*g/w*once+4.*bound*g*tau/w,(2.*g/w+8.*bound*g/(w*w))*once+tau*(24.*bound*bound+4.*pace)*g/(w*w));}
-            f=fmax(f,v);
-        }
+        const double per=fmin(2.*iw*once+4.*bound*tau*iw,(2.*iw+8.*bound*iw2)*once+tau*(24.*bound*bound+4.*pace)*iw2);double f=0.;
+        for(int a=0;a<3;a++)f=fmax(f,per*((double)F[2*Q+3*down+a]+(double)F[2*Q+3*up+a]));
         cost[i]=x;push[i]=f;order[i]=i;
     }
     // The cheapest first (a stable sort), while within the share.
