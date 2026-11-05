@@ -258,6 +258,7 @@
 //! wave runs what the pilot predicts is needed and the need's own error (`first_ends`), each group as far as the reach wants it: a group that stops early leaves the others its clock. (Over 12 seeds: the need alone ran a second wave on 4 of DEFAULT's and 7 of THREE's, against 1 and 2 with its error; twice its error took the kernel's mean up 4-17 % on GMD1C, TET and PGC3D.)
 //! T rests on the atoms still held, and its statistic stands at the atoms the run holds, its relative error times the root of the held share: the same error on a share f of the atoms would ask 1/f the trajectories, for the T of atoms the light has mostly blown out (a probe at 100 mW/cm², 97 % lost by 25 us: 16384 trajectories, the cap, against 7300-8100). The reported errors stay T's own: where few atoms remain the output says so.
 //! The populations' target is the app's, whose rows are the probabilities p (1 − L) that the atom is in a state and still held, beside the loss L, adding up to one: a population's statistic, and its reported error, are its error among the held atoms times the held share (`shown_error`), the loss's as it is. Read among the held atoms alone they asked those 7300-8100 of that probe, about 1000 now, and of a probe at 10 W/cm², 99.5 % lost by 600 us, 130 000-420 000 for numbers shown at 0.5 % of their size.
+//! Trajectories alike read no error: N atoms all lost, or none of them in a state, stand at a jackknife of zero, which says nothing of what none of them met; Wilson's interval at `CONFIDENCE` leaves it up to z²/(N + z²) away (`unseen`). So an output's populations and loss take at least the trajectories that bring that within their room, z²(1/R − 1), 76 at the target (`population_ratio`), and the reported error is at least that far end. (A probe at 1 W/cm², 2.5 % held at its first output of 10 us: its pilot of 32 kept none, its run of 16 read all lost.) It is what a count of none says, and below what any output with counts to read asks but for a run of very few trajectories, whose N it sets.
 //! An output's need is its trajectories so far times its worst ratio squared (the statistics over their rooms); a trajectory
 //! that reaches an output passes every earlier one, so that the trajectories an output must be passed by -- its reach -- are the
 //! largest need from it on, and a batch's trajectories run only as far as the outputs that still want them, half a period past
@@ -391,7 +392,7 @@ pub struct Distributions{pub grid:Vec<f64>,pub samples:Vec<usize>,pub probabilit
 #[derive(Clone,Debug)]
 pub struct Solution{
     pub populations:Vec<Vec<f64>>,
-    /// Per time, the largest standard error of the populations as shown, p (1 − L), and the loss (`shown_error`).
+    /// Per time, the largest standard error of the populations as shown, p (1 − L), and the loss, at least what its trajectories leave open (`reported_error`).
     pub sample_errors:Vec<f64>,
     pub temperature_uk:Vec<[f64;3]>,
     pub temperature_errors_uk:Vec<[f64;3]>,
@@ -435,6 +436,8 @@ fn weight_at(temperature:[f64;3],frequencies:[f64;3])->f64{
 }
 /// An output's largest standard error of what is shown of the atom (# Batches): a population as the probability p (1 − L) that it is in that state and held, its error among the held atoms times the held share, and the loss's.
 fn shown_error(e:&Estimate)->f64{let held=(1.-e.loss).max(0.);e.population_errors.iter().map(|&x|held*x).fold(e.loss_error,f64::max)}
+/// An output's reported standard error: `shown_error`, at least what its trajectories leave open, in standard errors (`unseen`): a reading of all lost says no more than that.
+fn reported_error(e:&Estimate)->f64{shown_error(e).max(unseen(e.trajectories)/CONFIDENCE)}
 /// An output's statistical errors at CONFIDENCE: the populations' as shown and the loss's largest (`shown_error`, absolute) and T's largest
 /// relative one over the axes, at the atoms the run holds (# Batches), with its target's weight there (`regime`).
 #[derive(Clone,Copy,Debug)]
@@ -484,6 +487,12 @@ fn room_of(target:f64,floor:f64,exponent:f64)->f64{let(t,f)=(target*target,floor
 fn room(target:f64,floor:f64)->f64{room_of(target,floor,2.)}
 /// An output's floor beside the statistics: its a-priori estimates (`Accounts::apriori`) and the step's bias, in quadrature.
 fn floor(apriori:f64,bias:f64)->f64{apriori.hypot(bias)}
+/// What N trajectories alike leave open of what none of them met (module documentation, # Batches): the far end of Wilson's interval at `CONFIDENCE` at a count of none or all, z²/(N + z²), where a jackknife reads zero.
+fn unseen(trajectories:f64)->f64{let z=CONFIDENCE*CONFIDENCE;z/(trajectories+z)}
+/// The trajectories that bring it within `room` (`unseen`): z²(1/room − 1).
+fn unseen_need(room:f64)->f64{CONFIDENCE*CONFIDENCE*(1./room-1.).max(0.)}
+/// The populations' and the loss's ratio to their room at N trajectories, its square times N the need: their statistic's, at least what brings `unseen` within the room.
+fn population_ratio(statistic:f64,room:f64,trajectories:f64)->f64{(statistic/room).max((unseen_need(room)/trajectories).sqrt())}
 /// The weight of a total at its target (module documentation, # Shares): 1 within it, (E/ε)^k beyond.
 fn beyond(target:f64,total:f64)->f64{(total/target).max(1.).powf(BEYOND)}
 /// What a run predicts at a candidate step (module documentation, # Shares, # Batches): the trajectories its rooms need --
@@ -496,7 +505,7 @@ fn beyond(target:f64,total:f64)->f64{(total/target).max(1.).powf(BEYOND)}
 /// resonance -- F5's retro-reflected tweezer folded whole at a 9 % bound, its charge 3 %, against its explicit rung).
 fn predicted(statistics:&[Statistic],apriori:&[[f64;2]],bias:[f64;2],pilot:f64,resonance:f64)->(f64,f64){
     let terms=|i:usize|{let s=statistics[i];let a=apriori[i];[(POPULATION_TARGET,s.population,floor(a[0],bias[0])),(TEMPERATURE_TARGET/s.weight,s.temperature,floor(a[1],bias[1]))]};
-    let needs:Vec<f64>=(0..statistics.len()).map(|i|if i==0{0.}else{pilot*terms(i).iter().map(|&(target,s,floor)|(s/room(target,floor)).powi(2)).fold(0.,f64::max)}).collect();
+    let needs:Vec<f64>=(0..statistics.len()).map(|i|if i==0{0.}else{let[p,t]=terms(i);pilot*population_ratio(p.1,room(p.0,p.2),pilot).max(t.1/room(t.0,t.2)).powi(2)}).collect();
     let reach=reaches(&needs);let largest=reach.get(1).copied().unwrap_or(0.).clamp(TASK as f64,MOST_TRAJECTORIES as f64);let first=((FIRST_GROUPS*TASK) as f64).min(largest);
     let run=|i:usize|reach[i].clamp(first,MOST_TRAJECTORIES as f64);let n=(statistics.len()-1).max(1) as f64;
     let weight=(1..statistics.len()).flat_map(|i|terms(i).map(|(target,s,floor)|beyond(target,floor.hypot(s*(pilot/run(i)).sqrt())))).fold(beyond(POPULATION_TARGET,resonance),f64::max);
@@ -518,12 +527,12 @@ fn run_room(target:f64,apriori:f64)->f64{room_of(target,apriori,2.+1./ORDER)}
 /// The largest ratio of the statistical errors to their room over every output after t = 0 (the
 /// request's initial state, `start`): 1 meets the targets.
 fn worst_ratio(estimates:&[Estimate],accounts:&Accounts,frequencies:[f64;3])->f64{output_ratios(estimates,accounts,frequencies).into_iter().fold(0.,|m,r|m.max(r[0]).max(r[1]))}
-/// The same per output and kind: the populations' and the loss's, and T's (zero at t = 0).
+/// The same per output and kind: the populations' and the loss's (`population_ratio`), and T's (zero at t = 0).
 fn output_ratios(estimates:&[Estimate],accounts:&Accounts,frequencies:[f64;3])->Vec<[f64;2]>{
     let all=statistics_of(estimates,frequencies);
     (0..estimates.len()).map(|i|{if i==0{return [0.;2];}
         let s=all[i];let a=accounts.apriori[i];
-        [s.population/room(POPULATION_TARGET,floor(a[0],accounts.bias[0])),s.temperature/room(TEMPERATURE_TARGET/s.weight,floor(a[1],accounts.bias[1]))]
+        [population_ratio(s.population,room(POPULATION_TARGET,floor(a[0],accounts.bias[0])),estimates[i].trajectories),s.temperature/room(TEMPERATURE_TARGET/s.weight,floor(a[1],accounts.bias[1]))]
     }).collect()
 }
 
@@ -1959,7 +1968,7 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
     let carried=|f:&dyn Fn(&Estimate)->[f64;3]|->Vec<[f64;3]>{source.iter().map(|&j|f(&estimates[j])).collect()};
     Solution{
         populations:source.iter().map(|&j|if j==0{first.clone()}else{estimates[j].populations.clone()}).collect(),
-        sample_errors:estimates.iter().enumerate().map(|(i,e)|if i==0{0.}else{shown_error(e)}).collect(),
+        sample_errors:estimates.iter().enumerate().map(|(i,e)|if i==0{0.}else{reported_error(e)}).collect(),
         temperature_uk:carried(&|e|e.temperature),
         temperature_errors_uk:carried(&|e|e.temperature_error),
         temperature_total_uk:source.iter().map(|&j|estimates[j].temperature_total).collect(),
@@ -2044,6 +2053,22 @@ mod tests{
         e.loss=1.;assert_eq!(at(&e),CONFIDENCE*0.01);
         e.population_errors=vec![f64::INFINITY;2];e.loss_error=f64::INFINITY;assert_eq!(at(&e),f64::INFINITY);e.loss=0.5;assert_eq!(at(&e),f64::INFINITY);
     }
+    /// What trajectories alike leave open (`unseen`): 16 atoms all lost leave 20 % possible, a jackknife's zero says nothing of it. An output's populations and loss take at least the trajectories that bring it within their room, 76 at the target, in the pilot's prediction and in a run's
+    /// ratio alike; beyond them it asks nothing, and a statistic above it stands. The reported error is at least its far end.
+    #[test]
+    fn trajectories_alike_leave_open_what_none_met(){
+        assert!((unseen(16.)-0.2).abs()<1e-15);
+        let n=unseen_need(POPULATION_TARGET);assert!((n-76.).abs()<1e-9&&(unseen(n)-POPULATION_TARGET).abs()<1e-15);
+        assert!((population_ratio(0.,POPULATION_TARGET,n)-1.).abs()<1e-15&&population_ratio(0.,POPULATION_TARGET,2.*n)<1.);
+        assert_eq!(population_ratio(0.1,POPULATION_TARGET,100.),2.);
+        let none=[Statistic{population:0.,temperature:0.,weight:1.};3];
+        let(need,weight)=predicted(&none,&[[0.;2];3],[0.;2],32.,0.);assert!((need-n).abs()<1e-9&&weight==1.,"{need} {weight}");
+        let read=[Statistic{population:0.,temperature:0.,weight:1.},Statistic{population:0.1,temperature:0.,weight:1.},Statistic{population:0.,temperature:0.,weight:1.}];
+        let(reach,_)=predicted(&read,&[[0.;2];3],[0.;2],32.,0.);assert!((reach-128.).abs()<1e-9,"{reach}");
+        let mut e=Estimate::default();e.trajectories=76.;e.loss=1.;e.population_errors=vec![0.;2];
+        assert!((CONFIDENCE*reported_error(&e)-POPULATION_TARGET).abs()<1e-15);
+        e.loss_error=0.1;assert_eq!(reported_error(&e),0.1);
+    }
     /// T's probes fall as its weights do (`bound_probes`): evenly over a trajectory's states where they weigh alike, each state in time, and over their number where none weighs.
     #[test]
     fn t_s_probes_fall_where_its_weights_are(){
@@ -2111,7 +2136,7 @@ mod tests{
         let(run,t)=(run_room(0.1,0.0899),BIAS_SHARE*run_room(0.1,0.0899));assert!((run-0.04495).abs()<1e-12&&(room(0.1,floor(0.0899,t))-0.0402).abs()<1e-4,"{run} {t}");
         // One output after t = 0: the need and the weight across the turn and the target.
         let need=|f:f64|predicted(&[Statistic{population:0.,temperature:0.,weight:0.},Statistic{population:0.01,temperature:0.,weight:0.}],&[[0.;2],[f,0.]],[0.;2],32.,0.);
-        let(n,w)=need(0.01);assert!(n==TASK as f64&&w==1.,"{n} {w}");
+        let(n,w)=need(0.01);assert!((n-unseen_need(room(POPULATION_TARGET,0.01))).abs()<1e-9&&w==1.,"{n} {w}");
         let(mut last,mut weight)=need(0.);
         for i in 1..=2000{let(n,w)=need(i as f64*5e-5);assert!((n-last).abs()<=0.05*last.max(TASK as f64)&&(w-weight).abs()<=0.03*weight,"{i}: {n} {w} after {last} {weight}");(last,weight)=(n,w);}
         assert!(weight>1.&&need(0.2).1>need(0.1).1);
