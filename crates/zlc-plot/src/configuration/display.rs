@@ -140,6 +140,17 @@ fn image_parameters(style: &PlotStyle) -> Vec<ParameterSpec> {
     ]
 }
 
+/// The value of `image_box` a figure that never chose has.
+pub(crate) const IMAGE_BOX_SQUARE: &str = "square";
+
+/// Whether a single image's axes box stays square or hugs its data; a cell is
+/// square on screen either way. A grid's cells have no such choice.
+fn image_box_parameter() -> ParameterSpec {
+    ParameterSpec::declare("image_box", ValueType::Text, E::LAYOUT | E::AXIS_TRANSFORM, Value::text(IMAGE_BOX_SQUARE))
+        .normalized(Normalizer::NonEmptyText).labelled("Image box")
+        .with_choices(vec![(Value::text(IMAGE_BOX_SQUARE), "Square".to_owned()), (Value::text("fit"), "Fit data".to_owned())]).segmented().finished()
+}
+
 fn side_distribution_parameter() -> ParameterSpec { flag("side_distribution", E::LAYOUT, true, "Side distribution") }
 
 /// The one schema builder for bound sessions and unbound authoring.
@@ -177,6 +188,7 @@ fn build_parameter_schema(kind: PlotKind, semantic_kind: PlotKind, has_facet: bo
     if semantic_kind == PlotKind::Image {
         entries.extend(image_parameters(style));
         entries.push(side_distribution_parameter());
+        if kind == PlotKind::Image { entries.push(image_box_parameter()); }
     }
     if kind == PlotKind::Rolling {
         entries.push(bin_count_parameter(ROLLING_DISTRIBUTION_BIN_EFFECTS));

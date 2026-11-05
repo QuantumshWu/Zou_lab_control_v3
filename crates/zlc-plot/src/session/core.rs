@@ -829,6 +829,14 @@ pub(crate) fn facet_cell_count(spec: &PlotSpec, payload: &Payload) -> Option<usi
 
 fn structure_equal(a: &Arc<DatasetSchema>, b: &Arc<DatasetSchema>) -> bool { Arc::ptr_eq(a, b) || a.structure_key() == b.structure_key() }
 
+/// The shape a Fit data box takes: the committed view's, else the whole image's.
+fn image_view_shape(scene: &Scene) -> Option<f64> {
+    let Payload::Image(image) = &**scene.projection.payload() else { return None };
+    let range = |range: Option<crate::configuration::selectors::NumericRange>| range.map(|range| (range.low, range.high));
+    let (x, y) = scene.viewport.unwrap_or((None, None));
+    crate::render::geometry::image_view_shape(&image.x.display.to_f64(), &image.y.display.to_f64(), (range(x), range(y)))
+}
+
 /// `_surface_plan_for(spec, payload, state)`.
 pub(crate) fn surface_plan_for(scene: &Scene, services: &SessionServices, device_pixel_ratio: f64) -> Result<SurfacePlan> {
     let spec = &scene.spec;
@@ -839,11 +847,14 @@ pub(crate) fn surface_plan_for(scene: &Scene, services: &SessionServices, device
         cell_height_over_width: semantic_image.then_some(1.0),
     });
     let flag = |name: &str| matches!(state.get(name), Some(Value::Bool(true)));
+    let image_scene = semantic_image && state.get("presentation").is_some_and(|value| value.py_str() == "height_bars");
+    let fit_shape = if spec.kind() == PlotKind::Image && !image_scene && state.get("image_box") == Some(&Value::text("fit")) { image_view_shape(scene) } else { None };
     let options = SurfaceOptions {
         facet_topology: topology, device_pixel_ratio: Some(device_pixel_ratio), export_scale: None,
         rolling_side_distribution: (spec.kind() == PlotKind::Rolling).then(|| flag("side_distribution")),
-        image_height_over_width: (spec.kind() == PlotKind::Image).then_some(1.0),
-        image_scene: semantic_image && state.get("presentation").is_some_and(|value| value.py_str() == "height_bars"),
+        image_height_over_width: (spec.kind() == PlotKind::Image).then_some(fit_shape.unwrap_or(1.0)),
+        image_fit_box: fit_shape.is_some(),
+        image_scene,
         image_side_distribution: Some(!semantic_image || flag("side_distribution")),
     };
     resolve_surface(Some(scene.size), layout_kind(spec.kind()), &options, &services.defaults.layout, &services.defaults.style.fonts)

@@ -427,8 +427,14 @@ impl Renderer {
         let home = self.home_limits.get(&axes).copied().unwrap_or((self.fig.axes[axes].xlim, self.fig.axes[axes].ylim));
         match requested {
             None => home,
-            Some((x, y)) => (x.unwrap_or(home.0), y.unwrap_or(home.1)),
+            Some((x, y)) => self.image_view_on_box(axes, (x.unwrap_or(home.0), y.unwrap_or(home.1))),
         }
+    }
+
+    /// A single image's cells are square on screen whatever view is asked of it.
+    fn image_view_on_box(&self, axes: usize, view: ((f64, f64), (f64, f64))) -> ((f64, f64), (f64, f64)) {
+        let (PlotSpec::Image(_), Some(aspect), Some(ratio)) = (&self.spec, self.fig.axes[axes].aspect, self.plan.image_height_over_width) else { return view };
+        geometry::image_view_on_box(view, (&self.axis_scale(axes, true), &self.axis_scale(axes, false)), aspect, ratio)
     }
 
     /// `axis_scale(axis, name)`: how the axis maps a value to its position.

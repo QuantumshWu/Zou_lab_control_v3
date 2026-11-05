@@ -197,10 +197,12 @@ pub fn image_destination_rect(bbox: [f64; 4], extent: (f64, f64, f64, f64), x_li
     (w >= 1 && h >= 1).then_some((round_int(x_start), round_int(y_start), w, h))
 }
 
-/// Letterbox one image footprint inside a fixed square viewport.
-pub fn square_image_limits(extent: (f64, f64, f64, f64), coordinate_aspect: f64) -> Result<(f64, f64, f64, f64), String> {
+/// Letterbox one image footprint inside a viewport on which one x unit and
+/// `screen_scale` y units are equally long on screen: a square box's scale is
+/// the coordinate aspect, any other box's that aspect over its height/width.
+pub fn letterboxed_limits(extent: (f64, f64, f64, f64), screen_scale: f64) -> Result<(f64, f64, f64, f64), String> {
     let (mut left, mut right, mut upper, mut lower) = extent;
-    let scale = coordinate_aspect;
+    let scale = screen_scale;
     let x_span = (right - left).abs();
     let y_span = (lower - upper).abs() * scale;
     if x_span <= 0.0 || y_span <= 0.0 || !scale.is_finite() || scale <= 0.0 { return Err("image extent spans must be positive".into()); }
@@ -216,6 +218,32 @@ pub fn square_image_limits(extent: (f64, f64, f64, f64), coordinate_aspect: f64)
         right += direction * padding;
     }
     Ok((left, right, upper, lower))
+}
+
+/// A view of an image (x and y limits in axis values) taken to the box it is
+/// drawn in: the smallest view containing it, about its centre, on which a cell
+/// is square at `box_ratio` (height/width). A view already there within its
+/// coordinates' floating-point resolution stays as it is.
+pub fn image_view_on_box(view: ((f64, f64), (f64, f64)), scales: (&AxisScale, &AxisScale), coordinate_aspect: f64, box_ratio: f64)
+                         -> ((f64, f64), (f64, f64)) {
+    let drawn = (scales.0.space(view.0.0), scales.0.space(view.0.1), scales.1.space(view.1.0), scales.1.space(view.1.1));
+    let screen_scale = coordinate_aspect / box_ratio;
+    let (x_span, y_span) = ((drawn.1 - drawn.0).abs(), (drawn.3 - drawn.2).abs() * screen_scale);
+    let largest = drawn.0.abs().max(drawn.1.abs()).max(drawn.2.abs().max(drawn.3.abs()) * screen_scale);
+    if (x_span - y_span).abs() <= 64.0 * f64::EPSILON * largest { return view; }
+    let Ok((left, right, upper, lower)) = letterboxed_limits(drawn, screen_scale) else { return view };
+    ((scales.0.value(left), scales.0.value(right)), (scales.1.value(upper), scales.1.value(lower)))
+}
+
+/// The height/width on which an image's cells are square when it shows
+/// `view` (x and y ranges in axis values; a missing one is the whole footprint).
+pub fn image_view_shape(x: &[f64], y: &[f64], view: (Option<(f64, f64)>, Option<(f64, f64)>)) -> Option<f64> {
+    let scales = (image_coordinate_scale(x).ok()?, image_coordinate_scale(y).ok()?);
+    let aspect = image_cell_aspect(x, y, (&scales.0, &scales.1))?;
+    let (x0, x1, y0, y1) = centers_extent(x, y, (&scales.0, &scales.1));
+    let span = |range: Option<(f64, f64)>, scale: &AxisScale, whole: f64| range.map_or(whole, |(low, high)| scale.space(high) - scale.space(low)).abs();
+    let shape = aspect * span(view.1, &scales.1, y1 - y0) / span(view.0, &scales.0, x1 - x0);
+    (shape.is_finite() && shape > 0.0).then_some(shape)
 }
 
 /// How wide one image axis is extent-wise: N samples cover N pitches.

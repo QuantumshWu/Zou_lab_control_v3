@@ -29,6 +29,7 @@ fn resolve_surface_matches_the_scientific_layout() {
             export_scale: optional(&o["export"]),
             rolling_side_distribution: o["rolling"].as_bool(),
             image_height_over_width: optional(&o["aspect"]),
+            image_fit_box: false,
             image_scene: o["scene"].as_bool().unwrap(),
             image_side_distribution: o["side"].as_bool(),
         };
