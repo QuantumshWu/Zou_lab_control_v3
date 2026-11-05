@@ -269,7 +269,7 @@
 //! output's trajectories: the need is the largest of many outputs' estimated errors, biased up while few groups stand behind it). The estimates at an output
 //! rest on the groups that reach it (stats.rs `summarize`), a standard error's rise at the point where they thin out what the
 //! targets allow. The errors the need takes are each output's over its neighbours as far as they agree (`steady`): the largest of many outputs'
-//! noisy estimates stood 20-35 % above their common value in the standard error, 1.3-1.8 times in the need. No margin is added above the prediction: a batch more costs the device's tail and the statistics, a few
+//! noisy estimates stood 20-35 % above their common value in the standard error, 1.3-1.8 times in the need. An output's reported error, which the app's marks read against the target, is the same number (`reported_error`): the stop and the marks read one. (The default scene's probe over 100 us at 448 trajectories: 2 SE at single outputs read up to 5.3 % over 14-19 us, a mark on 6 of 32 seeds, where the rows' 2 SD over the seeds is 3.8-4.4 % and the most trajectories in [0, 1] can spread, 2 √(p (1 − p)/N), 4.6 %; over its neighbours it reads 4.7-4.9 %, no mark on any seed.) No margin is added above the prediction: a batch more costs the device's tail and the statistics, a few
 //! trajectories' time, where a margin of the estimate's own noise would cost tens of percent of the trajectories.
 //!
 //! # Control variates
@@ -393,7 +393,7 @@ pub struct Distributions{pub grid:Vec<f64>,pub samples:Vec<usize>,pub probabilit
 #[derive(Clone,Debug)]
 pub struct Solution{
     pub populations:Vec<Vec<f64>>,
-    /// Per time, the largest standard error of the populations as shown, p (1 − L), and the loss, at least what its trajectories leave open (`reported_error`).
+    /// Per time, the largest standard error of the populations as shown, p (1 − L), and the loss, as the stopping rule reads it, at least what its trajectories leave open (`reported_error`).
     pub sample_errors:Vec<f64>,
     pub temperature_uk:Vec<[f64;3]>,
     pub temperature_errors_uk:Vec<[f64;3]>,
@@ -437,8 +437,8 @@ fn weight_at(temperature:[f64;3],frequencies:[f64;3])->f64{
 }
 /// An output's largest standard error of what is shown of the atom (# Batches): a population as the probability p (1 − L) that it is in that state and held, its error among the held atoms times the held share, and the loss's.
 fn shown_error(e:&Estimate)->f64{let held=(1.-e.loss).max(0.);e.population_errors.iter().map(|&x|held*x).fold(e.loss_error,f64::max)}
-/// An output's reported standard error: `shown_error`, at least what its trajectories leave open, in standard errors (`unseen`): a reading of all lost says no more than that.
-fn reported_error(e:&Estimate)->f64{shown_error(e).max(unseen(e.trajectories)/CONFIDENCE)}
+/// An output's reported standard error (# Batches): the statistic the stopping rule and the flags read (`statistics_of`), at least what its trajectories leave open (`unseen`: a reading of all lost says no more than that), in standard errors. The app's marks read it against the target: one number for the stop and the marks.
+fn reported_error(statistic:f64,trajectories:f64)->f64{statistic.max(unseen(trajectories))/CONFIDENCE}
 /// An output's statistical errors at CONFIDENCE: the populations' as shown and the loss's largest (`shown_error`, absolute) and T's largest
 /// relative one over the axes, at the atoms the run holds (# Batches), with its target's weight there (`regime`).
 #[derive(Clone,Copy,Debug)]
@@ -1959,13 +1959,14 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
     // Each output's source: itself where an atom is held (t = 0 always), else the last that held one.
     let held=|i:usize|i==0||estimates[i].loss<1.;let read=|i:usize|i==0||reads_temperature(&estimates[i]);
     let(source,measured)=(last_holding(estimates.len(),&held),last_holding(estimates.len(),&read));
+    let statistic=statistics_of(estimates,frequencies);
     let mut flag=|note:String|ledger.flagged=Some(match ledger.flagged.take(){Some(r)=>format!("{note}；{r}"),None=>note});
     if let Some(gone)=(0..estimates.len()).find(|&i|!held(i)){flag(format!("{} 起已无原子被俘获（丢失概率 1）：此后的布居、温度与分布沿用 {} 的值，仅供参考",when(times[gone]),when(times[source[gone]])));}
     if let Some(few)=(0..estimates.len()).find(|&i|held(i)&&!read(i)){flag(format!("{} 起有时刻被俘获的原子不足两个：这些时刻的温度沿用此前的值，误差未知",when(times[few])));}
     let carried=|f:&dyn Fn(&Estimate)->[f64;3]|->Vec<[f64;3]>{measured.iter().map(|&j|f(&estimates[j])).collect()};
     Solution{
         populations:source.iter().map(|&j|if j==0{first.clone()}else{estimates[j].populations.clone()}).collect(),
-        sample_errors:estimates.iter().enumerate().map(|(i,e)|if i==0{0.}else{reported_error(e)}).collect(),
+        sample_errors:estimates.iter().zip(&statistic).enumerate().map(|(i,(e,s))|if i==0{0.}else{reported_error(s.population,e.trajectories)}).collect(),
         temperature_uk:carried(&|e|e.temperature),
         temperature_errors_uk:estimates.iter().enumerate().map(|(i,e)|if read(i){e.temperature_error}else{[f64::INFINITY;3]}).collect(),
         temperature_total_uk:measured.iter().map(|&j|estimates[j].temperature_total).collect(),
@@ -2060,9 +2061,8 @@ mod tests{
         let(need,weight)=predicted(&none,&[[0.;2];3],[0.;2],32.,0.);assert!((need-n).abs()<1e-9&&weight==1.,"{need} {weight}");
         let read=[Statistic{population:0.,temperature:0.,weight:1.},Statistic{population:0.1,temperature:0.,weight:1.},Statistic{population:0.,temperature:0.,weight:1.}];
         let(reach,_)=predicted(&read,&[[0.;2];3],[0.;2],32.,0.);assert!((reach-128.).abs()<1e-9,"{reach}");
-        let mut e=Estimate::default();e.trajectories=76.;e.loss=1.;e.population_errors=vec![0.;2];
-        assert!((CONFIDENCE*reported_error(&e)-POPULATION_TARGET).abs()<1e-15);
-        e.loss_error=0.1;assert_eq!(reported_error(&e),0.1);
+        assert!((CONFIDENCE*reported_error(0.,76.)-POPULATION_TARGET).abs()<1e-15);
+        assert_eq!(reported_error(CONFIDENCE*0.1,76.),0.1);
     }
     /// A read pays for what it could move of the run (`read_pays`): the resonant probe's PGC at 1.09 limits does not, the retro-reflected tweezer at 14.7 does, nothing within the limit does, and a stand already beyond asks for more.
     #[test]
