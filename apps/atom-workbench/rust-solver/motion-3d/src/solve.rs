@@ -1590,9 +1590,9 @@ fn layer_place(j:u32,weights:&[f64])->usize{
 /// chaotic -- dt and dt/2 part ways, their κ² windows 20-40 % apart at the step the mean differs by 1 % --, so that with one
 /// probe per pilot trajectory the standard error rested on those few and the 3D PGC's step moved by 1.8 times between its
 /// pilot's draws: the probes' layers (`bound_probes`) are added, doubling their number, until the errors are within the
-/// step's share of `tolerance` or the magnitude less the errors lies beyond it, or none are left (the same steps within 6 %). Where its magnitude and errors lie within `floor`, what the step's other
-/// criteria hold the motion's error to, it reads no further, from a group's trajectories' probes up: the flows are the dearest of a check on an exact step (of PGCP_10's search all of its 36 000 exact steps), and most stand below the others.
-/// And a layer is read only while its flows take fewer steps than what the read's errors could still move of the `run` (its steps at this step, `read_pays`, as `drift`'s layers): between the sizes the errors leave, as far as they lie above `floor`. Where a period is several runs
+/// step's share of `tolerance` or the magnitude less the errors lies beyond it, or none are left (the same steps within 6 %).
+/// And a layer is read only while its flows take fewer steps than what the read's errors could still move of the `run` (its steps at this step, `read_pays`, as `drift`'s layers), from a group's trajectories' probes up: between the sizes the errors leave, as far as they lie above `floor`, what the step's other
+/// criteria hold the motion's error to -- a magnitude and errors within it can move nothing. The flows are the dearest of a check on an exact step (of PGCP_10's search all of its 36 000 exact steps), and most stand below the others. Where a period is several runs
 /// a layer of 8 probes is a tenth of the run, and a read of every layer ten of them at every check (a Λ scheme's rung over 100 us at a slowest period of 440 us: 90 CPU-s a check at its step, against a run of 11).
 fn orbits(engine:&Engine,probes:&Probes,period:f64,tolerance:f64,floor:f64,run:f64)->f64{
     if probes.states.is_empty(){return 0.;}
@@ -1618,7 +1618,6 @@ fn orbits(engine:&Engine,probes:&Probes,period:f64,tolerance:f64,floor:f64,run:f
         windows.extend(probes.states[windows.len()..count].par_iter().map(|t|pair(t)).collect::<Vec<_>>());
         let axes=paired_error(&windows);
         let bound=axes.iter().map(|x|x[0]+x[1]).fold(0.,f64::max);
-        if bound<=floor{return bound;}
         if count>=first&&(axes.iter().map(|x|x[1]).fold(0.,f64::max)<=BIAS_SHARE*tolerance||axes.iter().any(|x|x[0]-x[1]>tolerance)||count==probes.states.len()){return bound;}
         let next=if count<first{(2*count).min(first)}else{(2*count).min(probes.states.len())};
         let(high,low)=(axes.iter().map(|x|x[0]+x[1]).fold(0.,f64::max)/tolerance,axes.iter().map(|x|x[0]-x[1]).fold(floor,f64::max)/tolerance);
@@ -1655,7 +1654,8 @@ fn looks_confidence(looks:f64)->f64{largest_look(looks).max(CONFIDENCE)}
 /// The steps of `drift`'s spans' unit: the trap's slowest period, at most the run.
 fn drift_window(period:f64,duration:f64,dt:f64)->usize{((period.min(duration)/dt).ceil() as usize).max(1)}
 /// Whether `drift`'s further reads of so many steps pay (each in steps of dt and of dt/2, three times that): a stand ρ times the limit takes the run ρ^(1/p) − 1 of its `run` steps more, what could stand against what already does.
-fn read_pays(steps:f64,run:f64,could:f64,top:f64)->bool{3.*steps<=run*(could.powf(1./ORDER)-top.powf(1./ORDER))}
+/// The rule (cost.rs `pays`), both sides in this step's steps, whose work divides out. No uncertainty beside `could`, itself the upper side of what the errors leave: these reads guard T's accuracy, and a margin on the saving would drop one for a saving within the noise.
+fn read_pays(steps:f64,run:f64,could:f64,top:f64)->bool{pays(3.*steps,run*(could.powf(1./ORDER)-top.powf(1./ORDER)),0.)}
 /// What of T's step error over the run stands (`drift`): at the span where it comes closest to or furthest past its limit there, its share of that limit, its size and the span.
 #[derive(Clone,Copy,Debug,Default)]
 pub struct Drift{pub excess:f64,pub stands:f64,pub span:f64}

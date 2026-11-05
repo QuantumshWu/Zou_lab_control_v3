@@ -157,7 +157,7 @@
 use crate::ground::{self,Ground};
 use crate::ledger::BUDGET;
 use crate::linear::{hermitian_eigen_within,hermitian_eigenvalues,round_off,single_round_off,symmetric_eigen,unit_round_off,Dense};
-use crate::cost::{advance_work,COMPLEX_MULTIPLY_ADD_NS,KERNEL_FOURTH_PHOTON,KERNEL_JUMP,KERNEL_PAIR,KERNEL_PHOTON,KERNEL_SLAB,KERNEL_STEP};
+use crate::cost::{advance_work,pays,COMPLEX_MULTIPLY_ADD_NS,KERNEL_FOURTH_PHOTON,KERNEL_JUMP,KERNEL_PAIR,KERNEL_PHOTON,KERNEL_SLAB,KERNEL_STEP};
 use crate::solve::{NUMERICAL_SHARE,POPULATION_TARGET};
 use crate::stats::KT_PER_UK;
 use crate::{Complex,Request,STATES};
@@ -1418,9 +1418,9 @@ impl Model{
     /// The tables on grids of FIRST_NODES, then doubled (each grid's nodes computed once), the finer grid
     /// kept with the coarser one's measured error against it (`interpolation_error`, an upper estimate of
     /// its own) -- once refined at least, so that the error is measured --, and doubled again while that
-    /// pays: while the next grid's counted work -- its new nodes' eliminations at the last grid's counted
+    /// pays (cost.rs `pays`): while the next grid's counted work -- its new nodes' eliminations at the last grid's counted
     /// work per node (linear.rs `counted`) and its error's measure, `COMPLEX_MULTIPLY_ADD_NS` each -- is
-    /// below what its smaller error saves the run (`stake`'s run at its `room_cost`). Its error
+    /// below what its smaller error saves the run (`stake`'s run at its `room_cost`), with no uncertainty: no pilot has run, no need's error stands yet. Its error
     /// is predicted by the last doubling's rate, and by the cubic interpolation's order before one is seen,
     /// 2⁻³ a doubling (`cubic`), and what it saves is `room_cost`'s: an error the whole population target leaves no run its room, whatever the run's length (a request of no
     /// duration, a step's stake: 5 % at 9 nodes on the tweezer PGC). A doubling that did not shrink the error says nothing of the next: a grid short of a line across the intensity axis reads about one
@@ -1445,7 +1445,7 @@ impl Model{
                 if errors.iter().rev().take_while(|&&e|e>smallest).count()>=STALLED_DOUBLINGS{self.table_stalled=true;self.table_limit=Some(coarse);break;}
                 let rate:f64=if errors.len()>1&&error<errors[errors.len()-2]{error/errors[errors.len()-2]}else{0.125};
                 let work=COMPLEX_MULTIPLY_ADD_NS*((n.pow(d)-coarse.pow(d)) as f64*per_node+(n.pow(d)*measured*4_usize.pow(d)) as f64);
-                if room_cost(error).is_finite()&&!(work<stake*(room_cost(error)-room_cost(rate*error))){break;}
+                if room_cost(error).is_finite()&&!pays(work,stake*(room_cost(error)-room_cost(rate*error)),0.){break;}
             }
             if !within(n,coarse){self.table_limit=Some(coarse);break;}
             let fine=self.grid_tables(n,mixing,Some(&self.tables))?;let worst=self.interpolation_error(&fine);
