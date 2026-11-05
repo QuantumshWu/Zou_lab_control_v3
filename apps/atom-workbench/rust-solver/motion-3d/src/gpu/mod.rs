@@ -10,7 +10,7 @@
 //!
 //! # Context
 //! The process makes the CUDA context and loads the module once, in the background (`prepare`: the
-//! trajectory lane's worker at its start, a solve at its own), and keeps them for every later solve.
+//! worker's `gpu` operation, which waits for it, or a solve at its start), and keeps them for every later solve.
 //! The driver compiles the PTX for the GPU at its first load on a machine, once per version of the
 //! kernels (about a minute on a laptop's GPU), and caches the result (`Startup` records the times). A
 //! solve asked for the GPU waits for it to start (`gpu`): the first compile is waited out.

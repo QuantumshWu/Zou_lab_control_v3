@@ -136,9 +136,6 @@ struct Request {
     options: Options,
     #[serde(default)]
     progress: bool,
-    /// The lane a worker serves, told with its `warmup`: the trajectory lane's starts the GPU.
-    #[serde(default)]
-    lane: Option<String>,
 }
 
 fn write_line(message: &Value) -> bool {
@@ -146,19 +143,22 @@ fn write_line(message: &Value) -> bool {
     serde_json::to_writer(&mut out, message).is_ok() && writeln!(out).is_ok() && out.flush().is_ok()
 }
 
-/// One protocol response. `capabilities` and `warmup` (the worker start-up
-/// LAPACK self-check; the trajectory lane's worker also starts the motion's
-/// GPU in the background) are operations; anything else is an rb87-full/2 solve,
-/// which with `progress` first streams every checkpoint's result as
-/// `checkpoint` progress (the same contract, marked `progress`).
+/// One protocol response. `capabilities`, `warmup` (the worker start-up LAPACK
+/// self-check) and `gpu` (starts the motion's GPU, answered when it has, the
+/// driver's first compile of the kernels included, or with why it cannot) are
+/// operations; anything else is an rb87-full/2 solve, which with `progress` first
+/// streams every checkpoint's result as `checkpoint` progress (the same contract,
+/// marked `progress`).
 fn respond(request: Request) -> Value {
     let id = request.id;
+    let ready = |outcome: Result<(), String>| match outcome {
+        Ok(()) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"ready":true}),
+        Err(error) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"error":error}),
+    };
     match request.op.as_deref() {
         Some("capabilities") => return json!({"id":id,"protocol":NATIVE_PROTOCOL,"capabilities":[FULL_MODEL_SCHEMA]}),
-        Some("warmup") => return match lattice_core_adapter::warmup().inspect(|_| if request.lane.as_deref() == Some("trajectory") { motion3d_adapter::prepare() }) {
-            Ok(()) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"ready":true}),
-            Err(error) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"error":error}),
-        },
+        Some("warmup") => return ready(lattice_core_adapter::warmup()),
+        Some("gpu") => return ready(motion3d_adapter::start_gpu()),
         Some(_) => return json!({"id":id,"protocol":NATIVE_PROTOCOL,"error":"Unknown native operation"}),
         None => {}
     }
@@ -225,6 +225,16 @@ mod tests {
         let warm = request(json!({"id":-1,"op":"warmup"}));
         assert_eq!(warm["ready"], true, "{warm}");
         assert!(request(json!({"id":1,"op":"unknown"}))["error"].is_string());
+    }
+    /// The `gpu` operation answers once the GPU has started -- ready -- or with why it cannot, never
+    /// before: a second start finds the same outcome at once (`ATOM_HIDE_NVCUDA` simulates no driver).
+    #[test]
+    fn the_gpu_operation_answers_when_the_gpu_has_started() {
+        let first = request(json!({"id":-2,"op":"gpu"}));
+        assert_eq!(first["id"], -2, "{first}");
+        assert_eq!(first["protocol"], NATIVE_PROTOCOL, "{first}");
+        assert!(first["ready"] == true || !first["error"].as_str().unwrap_or("").is_empty(), "{first}");
+        assert_eq!(request(json!({"id":-2,"op":"gpu"})), first);
     }
     #[test]
     fn solves_require_the_full_model_schema() {

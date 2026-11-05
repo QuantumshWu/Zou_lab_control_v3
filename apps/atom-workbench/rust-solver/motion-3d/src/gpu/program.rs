@@ -199,7 +199,8 @@ impl Program{
         let mut first_fields:Vec<FirstField>=vec![];let mut driven_beams:Vec<i32>=vec![];
         // The exact step's room in a trajectory's scratch: per cluster its parts' H and G, their working
         // room and its norms (the kernel's `exact_segment`) and its first orders' table, the largest of every cluster's where one takes it.
-        let takes=(0..model.clusters()).any(|k|model.mixed(k)||model.beating(k));let mut exact=0;
+        let quiet=crate::engine::quiet_clusters(model,settings);let exact_of=|k:usize|model.mixed(k)||(model.beating(k)&&quiet[k].is_none());
+        let takes=(0..model.clusters()).any(exact_of);let mut exact=0;
         // The carriers whose static block on a cluster mixes its responses (ground.rs `Ground::unmixed`, the kernel's
         // `carrier_responses`), bits; and the near light's shifts ΔE_a^d a cluster's exact responses take (`exact_responses`,
         // ground.rs `Ground::dress_light`), bit d·NG + a: from each of its channels (c, b) the other near carriers' on b and
@@ -222,7 +223,7 @@ impl Program{
             let driven=driven_beams.len();for t in list.iter().filter(|t|t[0]==0){for &l in &model.carriers[t[3]].beams{if !driven_beams[driven..].contains(&(l as i32)){driven_beams.push(l as i32);}}}
             let mut cluster=Cluster{n:n as i32,size:layout.size as i32,table:(tables.len()) as i32,h0:layout.h0 as i32,groups:groups.len() as i32,ngroups:layout.groups.len() as i32,
                 classes:classes.len() as i32,nclasses:cl.classes.len() as i32,coherent:coherent.len() as i32,ncoherent:cl.coherent.len() as i32,carriers:carrier_tables.len() as i32,
-                fourth:-1,frames:0,positions:item_first.len() as i32,beats:residuals.len() as i32,nbeats:0,n0:n0 as i32,exact:(model.mixed(k)||model.beating(k)) as i32,
+                fourth:-1,frames:0,positions:item_first.len() as i32,beats:residuals.len() as i32,nbeats:0,n0:n0 as i32,exact:exact_of(k) as i32,
                 parts:parts as i32,omegas:omegas.len() as i32,terms:terms.len() as i32,nterms:list.len() as i32,emission:emission as i32,excited:excited_list.len() as i32,
                 group_parts:group_parts.len() as i32,residual_parts:residual_parts.len() as i32,first_fields:first_fields.len() as i32,nfirst:0,states:[0;MAXM],shifts:shifts(k,&cl.states),mixed:mixed(k,&cl.states),driven:driven as i32,ndriven:(driven_beams.len()-driven) as i32,pad:0};
             for(x,&b)in cl.states.iter().enumerate(){cluster.states[x]=b as i32;}

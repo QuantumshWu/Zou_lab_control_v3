@@ -319,11 +319,15 @@ test('the examples: 3D PGC and 光镊 + 探测光 + 回泵光 run motion in thei
 test('the motion engine\'s sentences are shown in Chinese',()=>{
   assert.equal(solverText('A motion request is a trajectory alone: meanOnly and includeMean are false'),'运动只计算时间演化，不计算长期布居。');
   // The 3D engine's refusals and its device note are written in Chinese: motion along an axis or in
-  // a plane, a request for the GPU, and a scene whose light does not confine the atom.
+  // a plane, a scene whose light does not confine the atom, and a request for the GPU that ran on the CPU.
   const adapter=readFileSync(new URL('../rust-solver/src/motion3d_adapter.rs',import.meta.url),'utf8');
-  for(const name of ['ONLY_3D','GPU_PENDING'])assert.match(new RegExp(`pub const ${name}:&str="([^"]+)";`).exec(adapter)?.[1]??'',/^[一-鿿]/,name);
+  assert.match(/pub const ONLY_3D:&str="([^"]+)";/.exec(adapter)?.[1]??'',/^[一-鿿]/);
   const solve=readFileSync(new URL('../rust-solver/motion-3d/src/solve.rs',import.meta.url),'utf8');
   assert.match(/pub const NOT_CONFINED:&str="([^"]+)";/.exec(solve)?.[1]??'',/^[一-鿿]/);
+  const notes=[...solve.matchAll(/format!\("((?:\{reason\}|GPU 计算出错)[^"]*)"\)/g)].map(m=>m[1]);
+  assert.deepEqual(notes,['GPU 计算出错（{error}）：本次在 CPU 上计算','{reason}：本次在 CPU 上计算']);
+  const gpu=readFileSync(new URL('../rust-solver/motion-3d/src/gpu/mod.rs',import.meta.url),'utf8');
+  for(const reason of ['NVIDIA 驱动太旧','没有 NVIDIA 显卡','驱动无法编译 GPU 内核'])assert.ok(gpu.includes(reason),reason);
   // A result short of its statistical target says why in Chinese.
   const partial=[...adapter.matchAll(/format!\("(The statistical error is[^"]*)"\)/g)].map(m=>m[1].replace(/\{[A-Za-z_]*(?::[^}]*)?\}/g,'1'));
   assert.equal(partial.length,1);assert.equal(solverText(partial[0]),'统计误差为 1，目标 1。');
