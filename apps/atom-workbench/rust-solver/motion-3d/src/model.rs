@@ -613,7 +613,7 @@ pub struct Model{
     /// (Ω_l/2σ)², the beams' interference averaged out), over the tables' nodes inside the reach's
     /// intensities (`reach`). Where it exceeds the population target the eliminated model is outside
     /// its validity somewhere the atoms go -- light near resonance, which the excited population
-    /// measured along the trajectories can miss when the atoms sit in dark states (solve.rs flags it).
+    /// measured along the trajectories can miss when the atoms sit in dark states (solve.rs `with_open` books it for what the atoms read leave open).
     pub resonance:f64,
     /// What the transient's delay leaves of its interference (engine.rs, # The transient), relative to the photons' weight: the spread of
     /// Γ_i/z_i over the excited amplitudes a cluster's channels drive, every near beam at its peak, its largest over the tables' nodes inside
