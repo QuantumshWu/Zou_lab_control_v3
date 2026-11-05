@@ -1,0 +1,103 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Combo stability regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. A state or a pick never moves a control: no style of a state changes a
+// box's size, a box sized by its content takes the widest row whatever it says, and an editor is not
+// redrawn from a model of an older draft.
+import {ComboBox, hintWidest} from '../dist/fluent/combo.js';
+import {NodeEditors} from '../dist/views/node_editors/index.js';
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const results = [];
+const check = async (name, test) => { await test(); results.push(name); };
+const LAYOUT = ['borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+  'marginTop', 'marginRight', 'marginBottom', 'marginLeft', 'fontSize', 'fontWeight', 'width', 'height', 'minWidth', 'minHeight', 'lineHeight', 'gap', 'display', 'position'];
+/** Every style rule of the page, in @layer, @media and @container too. */
+function* rules(list) {
+  for (const rule of list) {
+    if (rule.styleSheet) yield* rules(rule.styleSheet.cssRules);
+    else if (rule.selectorText !== undefined) yield rule;
+    else if (rule.cssRules) yield* rules(rule.cssRules);
+  }
+}
+const pick = (combo, label) => {
+  const option = [...combo.root.options].find(item => item.text === label);
+  option.selected = true;
+  combo.root.dispatchEvent(new Event('change', {bubbles: true}));
+};
+const stand = (className, combo) => {
+  const pair = document.createElement('div');
+  pair.className = className;
+  pair.style.cssText = 'position:fixed;left:40px;top:40px;width:800px';
+  pair.append(combo.root);
+  document.body.append(pair);
+  return pair;
+};
+try {
+  await check('no pointer state changes the size of a box', () => {
+    const wrong = [];
+    for (const sheet of document.styleSheets) for (const rule of rules(sheet.cssRules)) {
+      // A state on the box itself; `.x:hover .y` may show or hide a part that holds no room.
+      const stated = rule.selectorText.split(',').filter(part => /:(hover|active)\s*$/.test(part.trim()));
+      if (!stated.length) continue;
+      const moved = LAYOUT.filter(name => rule.style[name]);
+      if (moved.length) wrong.push(`${rule.selectorText} { ${moved.join(', ')} }`);
+    }
+    assert(!wrong.length, wrong.join(' ; '));
+  });
+  await check('a box sized by its content is as wide as its widest row, whichever it says', async () => {
+    for (const [className, css] of [['derive-pair', ''], ['', 'display:flex']]) {
+      const combo = new ComboBox(() => {}, 'choose');
+      combo.setChoices([['a', 'a'], ['long', 'a much longer name of a model'], ['mid', 'middling']]);
+      const pair = stand(className, combo);
+      pair.style.cssText += `;${css}`;
+      combo.root.style.width = 'auto';
+      await new Promise(resolve => setTimeout(resolve));
+      const widths = new Set();
+      for (const label of ['a', 'a much longer name of a model', 'middling', 'a']) {
+        pick(combo, label);
+        widths.add(combo.root.getBoundingClientRect().width);
+        await new Promise(resolve => setTimeout(resolve));
+        widths.add(combo.root.getBoundingClientRect().width);
+      }
+      assert(widths.size === 1, `${className}: ${[...widths]}`);
+      const words = combo.root.querySelector('selectedcontent');
+      assert(words.scrollWidth <= words.clientWidth + 1, 'its widest row is not cut');
+      pair.remove();
+    }
+  });
+  await check('a choice list that changes moves the box only by its own widest row', async () => {
+    const select = document.createElement('select');
+    hintWidest(select, ['short']);
+    const first = select.style.getPropertyValue('--combo-words');
+    hintWidest(select, ['short']);
+    assert(select.style.getPropertyValue('--combo-words') === first, 'the same list, the same width');
+    hintWidest(select, ['a much longer row']);
+    assert(parseFloat(select.style.getPropertyValue('--combo-words')) > parseFloat(first), 'a wider list, a wider box');
+    assert(select.style.getPropertyValue('--combo-min').includes(select.style.getPropertyValue('--combo-words')), 'one width, with its chrome');
+  });
+  await check('an editor stands while its model is of an older draft', () => {
+    const editors = new NodeEditors({edit: () => 0, editArtifacts: () => 0, choose: async () => null});
+    const model = {editor: 'pair_matrix', manages: ['x']};
+    editors.reconcile([model]);
+    const drawn = [];
+    editors.drawn[0].view = {root: document.createElement('div'), update: (row, facts) => drawn.push(facts.answer)};
+    const row = (x, pending) => ({values: {x}, controls: [], node_id: 'n', type_id: 't', name: 'n', editor_facts_pending: pending});
+    editors.reconcile([{...model, answer: 'first'}]);
+    assert(editors.update(row(1, true), '') && drawn.length === 1, 'nothing drawn yet: the newest answer draws');
+    editors.reconcile([{...model, answer: 'first'}]);
+    assert(!editors.update(row(2, true), '') && drawn.length === 1, 'the draft moved on, its answer has not come');
+    editors.reconcile([{...model, answer: 'second'}]);
+    assert(editors.update(row(2, false), '') && drawn.join() === 'first,second', 'its answer draws');
+    editors.reset();
+    editors.reconcile([{...model, answer: 'second'}]);
+    assert(editors.update(row(2, true), ''), 'a replaced draft draws at once');
+  });
+  document.getElementById('result').textContent = JSON.stringify({passed: true, count: results.length, results});
+} catch (error) {
+  document.getElementById('result').textContent = JSON.stringify({passed: false, error: String(error && error.stack || error), results});
+}
+</script>

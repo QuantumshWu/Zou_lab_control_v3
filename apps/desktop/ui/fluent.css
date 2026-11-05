@@ -169,7 +169,9 @@ select.cycle-active { background: var(--selected); }
 /* FluentCycleComboBox: the list's row says "Scope", the closed box "Scope: <coordinate>". */
 .select-row > .cycle-at { display: none; }
 selectedcontent > .cycle-at { display: inline; }
-select > button.combo-face { all: unset; display: block; flex: 1; min-width: 0; overflow: hidden; }
+/* The face is as wide as the widest row (combo.ts hintWidest), whatever row it says: a box sized by
+ * its content takes that one width, so a pick never moves it or what stands beside it. */
+select > button.combo-face { all: unset; display: block; flex: 1 1 auto; width: var(--combo-words, auto); min-width: 0; overflow: hidden; }
 selectedcontent { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The one chevron, drawn in the drop column inside the edge -- the stepper
  * column a spin box below would use (scale.ts --chevron-drop). */
@@ -283,7 +285,8 @@ select.unit-picker { flex: none; width: auto; field-sizing: content; }
   height: var(--control); min-width: var(--switch-w); padding: 0 0 var(--cap-lift);
   border: 0; background: transparent; color: var(--text); cursor: pointer;
 }
-.switch:hover, .switch:active, .switch:disabled, .switch:disabled:hover { background: transparent; border: 0; }
+/* A state changes colours, never the box: a row with its own edge (a list's) keeps its height. */
+.switch:hover, .switch:active, .switch:disabled, .switch:disabled:hover { background: transparent; border-color: transparent; }
 .switch .track {
   position: relative; flex: none; width: var(--switch-w); height: var(--switch-h);
   border-radius: calc(var(--switch-h) / 2); background: var(--placeholder);
@@ -321,7 +324,7 @@ select.unit-picker { flex: none; width: auto; field-sizing: content; }
   flex: 0 1 auto; min-width: 0; max-width: 100%;
 }
 .check .words { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.check:hover, .check:active, .check:disabled, .check:disabled:hover { background: transparent; border: 0; }
+.check:hover, .check:active, .check:disabled, .check:disabled:hover { background: transparent; border-color: transparent; }
 .check .box {
   position: relative; flex: none; width: var(--check-size); height: var(--check-size);
   border-radius: var(--radius); background: var(--neutral-fill);

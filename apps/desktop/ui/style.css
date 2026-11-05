@@ -531,7 +531,7 @@ body.carrying, body.carrying * { cursor: grabbing !important; }
   width: var(--pulse-badge); height: auto; min-height: 0; min-width: 0; padding: 0; border: none; border-radius: 0;
   display: block; background: transparent; cursor: pointer;
 }
-.pulse-badge:hover, .pulse-badge:active, .pulse-badge:disabled, .pulse-badge:disabled:hover { background: transparent; border: none; }
+.pulse-badge:hover, .pulse-badge:active, .pulse-badge:disabled, .pulse-badge:disabled:hover { background: transparent; border-color: transparent; }
 .pulse-badge:disabled { cursor: default; }
 .pulse-badge > svg { display: block; }
 .pulse-badge circle { --badge-fill: var(--placeholder); fill: var(--badge-fill); }

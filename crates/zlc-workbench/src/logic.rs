@@ -1748,6 +1748,8 @@ impl Workbench {
             "device_keys": node.draft.device_keys,
             "device_choices": device_choices,
             "editor_facts_error": editor_facts.and_then(|answer| answer.as_ref().err()),
+            // The newest answer is of an older draft, and its process has been asked for this one's.
+            "editor_facts_pending": node.instance == Instance::Open && node.answers.get(EDITOR_FACTS).is_some_and(|(revision, _)| *revision != node.revision),
             "artifact_inputs": node.draft.artifact_inputs,
             "artifact_specs": descriptor.map(|item| item.node().artifact_inputs.iter().map(|spec| json!({"name": spec.name, "label": spec.label,
                 "file_filter": spec.file_filter, "required": spec.required.unwrap_or(true), "frame_claims": spec.frame_claims})).collect::<Vec<_>>()).unwrap_or_default(),
