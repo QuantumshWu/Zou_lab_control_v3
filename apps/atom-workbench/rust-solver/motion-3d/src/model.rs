@@ -1553,6 +1553,8 @@ impl Model{
     pub fn mixed(&self,cluster:usize)->bool{self.layouts[cluster].n>self.layouts[cluster].n0}
     /// Whether a cluster's generator beats: a term keeps a residual frequency in its frame.
     pub fn beating(&self,cluster:usize)->bool{!self.layouts[cluster].beats.omegas.is_empty()}
+    /// The points the profiles and the bound are judged over (`reach`): the focus and ±reach_a along the trap's principal axes.
+    pub(crate) fn reach_points(&self)->&[[f64;3]]{&self.reach}
     /// A cluster's beats (rad/us), ascending and closed under negation, and their common period (us)
     /// where they are harmonics of one frequency.
     pub fn beats(&self,cluster:usize)->(&[f64],Option<f64>){let b=&self.layouts[cluster].beats;(&b.omegas,b.period)}
