@@ -1017,6 +1017,64 @@ fn a_table_of_round_off_is_no_error(){
     assert!(!model.table_stalled&&model.table_error<1e-3&&model.table_error>0.,"its error {:.2e}, stalled {}",model.table_error,model.table_stalled);
 }
 
+/// A σ⁺σ⁻ molasses on an F = 1 → F′ = 2 line along z, a detuning σ below its centre: the ground states' energies m Ω, the excited states' m′ Ω′, the σ⁺ beam along +z at +δ/2, the σ⁻
+/// beam along −z at −δ/2 (ground-2-* and D2-3-* stand for the two levels).
+fn larmor(omega:f64,excited:f64,delta:f64)->Request{
+    let(g,ground,upper)=(3.,|m:i32|format!("ground-2-{m}"),|m:i32|format!("D2-3-{m}"));
+    let strength=|m:i32,q:i32|->f64{match q{0=>if m==0{2./3.}else{0.5},_=>match m*q{1=>1.,0=>0.5,_=>1./6.}}};
+    let names:Vec<(String,String,i32,i32)>=(-1..=1).flat_map(|m|[-1,0,1].map(|q|(m,q))).map(|(m,q)|(upper(m+q),ground(m),m,q)).collect();
+    let levels:Vec<(String,f64)>=(-1..=1).map(|m|(ground(m),m as f64*omega)).chain((-2..=2).map(|m|(upper(m),SIGMA+m as f64*excited))).collect();
+    let levels:Vec<(&str,f64)>=levels.iter().map(|(s,e)|(s.as_str(),*e)).collect();
+    let z=Complex::new(1.,0.);
+    let emissions:Vec<(&str,&str,[Complex;3],f64)>=names.iter().map(|(e,b,m,q)|(e.as_str(),b.as_str(),match q{0=>[Complex::ZERO,Complex::ZERO,z],q=>circular(*q as f64)},LINE*strength(*m,*q))).collect();
+    let beam=|q:i32|names.iter().filter(|x|x.3==q).map(|(e,b,m,_)|(e.as_str(),b.as_str(),g*strength(*m,q).sqrt())).collect::<Vec<_>>();
+    let mut r=synthetic(&levels,&emissions,&[([0.,0.,1.],beam(1)),([0.,0.,-1.],beam(-1))],"ground-2-0");
+    r.frequencies_mhz[1]=0.5*delta.abs()/std::f64::consts::TAU;
+    if delta!=0.{let sign=delta.signum() as i32;r.beams[0].frequency_index=vec![0,sign];r.beams[1].frequency_index=vec![0,-sign];}
+    r
+}
+/// The steady populations of the molasses' three ground states, frozen at the focus: the null vector of its folded generator and jumps on the clusters that hold them.
+fn larmor_steady(r:&Request)->[f64;3]{
+    use atom_motion_3d::linear::{Dense,Lu};
+    let model=Model::new(r).unwrap();let g=&model.ground;let at=|m:i32|{let s=r.states.iter().position(|x|*x==format!("ground-2-{m}")).unwrap();g.ground_states.iter().position(|&i|i==s).unwrap()};
+    let held=[at(-1),at(0),at(1)];let focus=[0.;3];let e=g.eliminate(&model.intensities_at_point(focus)).unwrap();
+    let clusters:Vec<usize>=(0..g.clusters.len()).filter(|&k|g.clusters[k].states.iter().any(|b|held.contains(b))).collect();
+    let sizes:Vec<usize>=clusters.iter().map(|&k|g.clusters[k].states.len()).collect();let offsets:Vec<usize>=sizes.iter().scan(0,|o,&n|{let x=*o;*o+=n*n;Some(x)}).collect();let d:usize=sizes.iter().map(|n|n*n).sum();
+    let mut generator=Dense::zeros(d,d);
+    for(i,&k)in clusters.iter().enumerate(){let n=sizes[i];let local=g.local_at(&e,k,focus,0.).unwrap();for column in 0..n*n{
+        let rho=Dense::from_fn(n,n,|a,b|if a*n+b==column{Complex::ONE}else{Complex::ZERO});
+        let mut image:Vec<Dense>=sizes.iter().map(|&m|Dense::zeros(m,m)).collect();
+        image[i].add_scaled(Complex::new(0.,-1.),&local.effective.product(&rho));image[i].add_scaled(Complex::I,&rho.product(&local.effective.adjoint()));
+        for(class,jumps)in g.clusters[k].classes.iter().zip(&local.jumps){if let Some(b)=clusters.iter().position(|&x|x==class.target){for j in jumps{image[b].add_scaled(Complex::ONE,&j.product(&rho).product(&j.adjoint()));}}}
+        for(j,x)in image.iter().enumerate(){for(q,z)in x.entries.iter().enumerate(){generator[(offsets[j]+q,offsets[i]+column)]=*z;}}
+    }}
+    // The trace's row in the place of the first.
+    for j in 0..d{generator[(0,j)]=Complex::ZERO;}for(i,&n)in sizes.iter().enumerate(){for a in 0..n{generator[(0,offsets[i]+a*n+a)]=Complex::ONE;}}
+    let mut x=vec![Complex::ZERO;d];x[0]=Complex::ONE;Lu::new(&generator).unwrap().solve(&mut x);
+    held.map(|b|{let k=g.cluster[b];let i=clusters.iter().position(|&c|c==k).unwrap();let a=g.clusters[k].position(b).unwrap();x[offsets[i]+a*sizes[i]+a].re})
+}
+/// Larmor's theorem: with the excited states' g factor the ground states', a field along the beams and the beams' difference 2Ω is the field-free molasses in the frame turning at Ω,
+/// exactly, by another route: two carriers, their photons in classes of their frequencies, its Raman couplings static in the frames alone. So its frozen atom's populations do not depend on
+/// the field, to double precision, and stand within the fold's own order of the one carrier's (the saturation 2(g/|σ − iΓ/2|)² = 0.9 % here; 8e-4: the two carriers' light dresses each
+/// other's response, one carrier's does not), while the field without the difference leaves them; and the excited states' g factor apart, the populations lean to the low m in proportion.
+#[test]
+fn a_bias_field_compensated_by_the_beams_is_larmor_s_frame(){
+    let free=larmor_steady(&larmor(0.,0.,0.));
+    println!("field-free {free:?}");assert!((free[0]-free[2]).abs()<=1e-12,"{free:?}");
+    let saturation=2.*9./(SIGMA*SIGMA+LINE*LINE/4.);let first=larmor_steady(&larmor(0.3,0.3,0.6));
+    for omega in [0.3,1.,3.,8.,30.]{
+        let p=larmor_steady(&larmor(omega,omega,2.*omega));
+        let worst=(0..3).map(|i|(p[i]-free[i]).abs()).fold(0.,f64::max);println!("Ω {omega}: {p:?}, |Δp| {worst:.2e}");
+        assert!(worst<=0.2*saturation,"Ω {omega}: {p:?} against {free:?}");
+        assert!((0..3).all(|i|(p[i]-first[i]).abs()<=1e-12),"Ω {omega}: {p:?} against {first:?}");
+        // Without the difference the Raman coupling is off by 2Ω.
+        if omega>=1.{let off=larmor_steady(&larmor(omega,omega,0.));let moved=(0..3).map(|i|(off[i]-free[i]).abs()).fold(0.,f64::max);println!("  without the difference {off:?}");assert!(moved>=5.*worst.max(1e-4),"Ω {omega}: {off:?}");}
+    }
+    let lean=|xi:f64|{let p=larmor_steady(&larmor(1.,1.+xi,2.));p[0]-p[2]};
+    let(one,two)=(lean(0.1),lean(0.2));println!("the excited g factor apart: p(-1) - p(+1) {one:.5} at 0.1 rad/us, {two:.5} at 0.2");
+    assert!(one>0.&&(two/one-2.).abs()<=0.1,"{one} {two}");
+}
+
 /// The retro-reflected tweezer with a resonant probe (tests/fixtures/retro_probe_motion.json, the validation's F3
 /// repro; its 951 kHz lattice axis turns the velocity by 0.3 rad per step): the step holds a step's jump hazard at
 /// its middle, and the heating the jumps carry errs at second order (solve.rs `jumps`) -- at the step the line took,
