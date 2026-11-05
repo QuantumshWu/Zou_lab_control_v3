@@ -59,7 +59,8 @@
 //! its adjoint), and the gradient's Hermitian part pairs them, G_{−Ω} = G_Ω†. Where the beats are
 //! integer multiples of one frequency ω₀ (Euclid's algorithm within the round-off) their period 2π/ω₀
 //! lets the exact step cache one period's propagators (engine.rs). A cluster with beats or explicit
-//! excited states takes the exact step; `local` is the release's static clusters of ground states'.
+//! excited states takes the exact step, unless its beats are all within the exponentials' share wherever the atom goes
+//! (engine.rs `quiet_clusters`); `local` is the plain step's, its beats at the step's middle.
 //!
 //! # The near light's dressing
 //! Every near carrier's response is dressed by the other near light (ground.rs, # The near light's
@@ -1265,12 +1266,17 @@ impl Model{
                 for js in &f.jumps{kinds.push((js.at,js.at+r(js.inner)*3*ng*ng*n*js.sources(n)));}
                 for &(c2,c4,_,at)in &f.p{kinds.push((at,at+r(c2)*r(c4)*ng*n));}
             }
-            // Per kind its scale and the largest error, the fine grid's nodes on the threads.
-            for(start,end)in kinds{
-                let exact=|i:usize|&fine.data[b][2*(i*layout.size+start)..2*(i*layout.size+end)];
-                let modulus=|x:&[f64]|x.chunks_exact(2).map(|z|z[0].hypot(z[1])).fold(0_f64,f64::max);
-                let scale=inside.par_iter().map(|&i|modulus(exact(i))).reduce(||0.,f64::max);
-                if scale==0.{continue;}
+            // Per kind its scale and the largest error, the fine grid's nodes on the threads. A kind within the
+            // round-off of the cluster's largest table (H0 apart: the trap's energies, no response) is none: what it
+            // holds is that round-off, or its square, whose relative error no grid shrinks (a Q of 1e-37 between
+            // two carriers' photons a selection rule forbids, 2 % at every grid, the whole 1 G bias PGC's table item).
+            let exact=|i:usize,start:usize,end:usize|&fine.data[b][2*(i*layout.size+start)..2*(i*layout.size+end)];
+            let modulus=|x:&[f64]|x.chunks_exact(2).map(|z|z[0].hypot(z[1])).fold(0_f64,f64::max);
+            let scales:Vec<f64>=kinds.iter().map(|&(start,end)|inside.par_iter().map(|&i|modulus(exact(i,start,end))).reduce(||0.,f64::max)).collect();
+            let floor=64.*f64::EPSILON*scales[1..].iter().fold(0_f64,|m,&x|m.max(x));
+            for(k,(&(start,end),&scale))in kinds.iter().zip(&scales).enumerate(){
+                if scale==0.||(k>0&&scale<=floor){continue;}
+                let exact=|i:usize|exact(i,start,end);
                 let e=inside.par_iter().map_init(||vec![Complex::ZERO;end-start],|out,&i|{
                     self.interpolate(b,&self.stencil(&self.grid_point(fine.nodes,i)[..d]),None,start,out);
                     out.iter().zip(exact(i).chunks_exact(2)).fold(0_f64,|m,(x,y)|m.max((x.re-y[0]).hypot(x.im-y[1])))
@@ -1289,9 +1295,8 @@ impl Model{
     /// is predicted by the last doubling's rate, and by the cubic interpolation's order before one is seen,
     /// 2⁻³ a doubling (`cubic`), and what it saves is `room_cost`'s: an error the whole population target leaves no run its room, whatever the run's length (a request of no
     /// duration, a step's stake: 5 % at 9 nodes on the tweezer PGC). A doubling that did not shrink the error predicts no saving, and stops it
-    /// (`table_stalled`: the tabulated function is not smooth on the grids' scale where the atoms go -- a
-    /// folded drive's pole, PGCP_10's every-drive-folded model 0.8 to 1.3 from 9 to 32769 nodes there, which
-    /// no grid resolves). A grid beyond the work bounds (`MOST_TABLE_BYTES`, `MOST_TABLE_NODES`) is not made
+    /// (`table_stalled`: the tabulated function is not smooth on the grids' scale where the atoms go).
+    /// A grid beyond the work bounds (`MOST_TABLE_BYTES`, `MOST_TABLE_NODES`) is not made
     /// whatever it saves (`table_limit`). Its error is booked (the ledger's), the room it takes from the
     /// statistics like any estimate's (solve.rs).
     fn tabulate(&mut self,mixing:&[Vec<Vec<Complex>>],most_bytes:usize,most_nodes:usize,stake:f64)->Result<(),String>{
@@ -1549,6 +1554,8 @@ impl Model{
     pub fn mixed(&self,cluster:usize)->bool{self.layouts[cluster].n>self.layouts[cluster].n0}
     /// Whether a cluster's generator beats: a term keeps a residual frequency in its frame.
     pub fn beating(&self,cluster:usize)->bool{!self.layouts[cluster].beats.omegas.is_empty()}
+    /// The points the profiles and the bound are judged over (`reach`): the focus and ±reach_a along the trap's principal axes.
+    pub(crate) fn reach_points(&self)->&[[f64;3]]{&self.reach}
     /// A cluster's beats (rad/us), ascending and closed under negation, and their common period (us)
     /// where they are harmonics of one frequency.
     pub fn beats(&self,cluster:usize)->(&[f64],Option<f64>){let b=&self.layouts[cluster].beats;(&b.omegas,b.period)}
