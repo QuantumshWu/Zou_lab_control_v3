@@ -1181,7 +1181,7 @@ function solverDetails():string{
 function approximationTotal(ledger:ApproximationLedger):string{
   const [largest]=[...ledger.items].sort((a,b)=>b.estimate-a.estimate);
   const total=(name:string,t:LedgerTotal)=>`${name} ${errorPercent(t.error)}（目标 ${errorPercent(t.target)}）`;
-  return `${total('布居',ledger.totals.population)}，${total('温度',ledger.totals.temperature)}${largest?`；最大一项${largest.label} ${errorPercent(largest.estimate)}`:''}；${ledger.flagged?'超出目标（见下）':'未超出'}`;
+  return `${total('布居',ledger.totals.population)}，${total('温度',ledger.totals.temperature)}${largest?`；最大一项：${largest.label} ${errorPercent(largest.estimate)}`:''}；${ledger.flagged?'超出目标（见下）':'未超出'}`;
 }
 /** A motion result's approximation ledger (solver-types.ts ApproximationLedger): each approximation,
  * its estimated error and what the engine did about it. */
