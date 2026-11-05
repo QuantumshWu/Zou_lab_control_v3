@@ -119,6 +119,22 @@ try {
    equal(input.value,'2','override digits');
    equal(t.edits.filter(edit=>'api_values' in edit).at(-1),{api_values:'delay = 2'},'override in the pulse\'s unit');
  });
+ await check('a device that cannot be read says so; its axis and the plan stand until it can',async()=>{
+   const axis={port:'device:rigol:frequency',unit:'Hz',values:[1,2]};
+   const t=setup([axis]);
+   const text=JSON.stringify({axes:[axis]});
+   const facts={editor:'scan_plan',manages:['plan','api_values'],families:{pulse:'pulse:param:',api:'api:',device:'device:',manual:'manual:'},
+     host_advanced:['api:','device:','manual:'],ports:[port],withheld:{},summary:'',problem:'',api:null};
+   const row={node_id:'scan',values:{plan:text,api_values:''}};
+   const error=()=>[...t.editor.root.querySelectorAll('.field-error')].filter(node=>!node.hidden).map(node=>node.textContent);
+   t.editor.update(row,{...facts,unoffered:{[axis.port]:{group:'rigol',leaf:'frequency'}},unread:'rigol could not be read: VI_ERROR_SYSTEM_ERROR'},'');
+   equal(error(),['rigol could not be read: VI_ERROR_SYSTEM_ERROR'],'the reason');
+   assert(t.editor.root.querySelector('.axis-port')?.textContent.includes('frequency'),'the axis still says its knob');
+   assert(!t.editor.root.querySelector('button:disabled')||[...t.editor.root.querySelectorAll('button')].find(item=>item.textContent==='Add axis').disabled===false,'another knob can be added');
+   t.editor.update(row,{...facts,unoffered:{},unread:''},'');
+   equal(error(),[],'it reads again');
+   equal(t.edits.filter(edit=>'plan' in edit),[],'the plan was not written');
+ });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
 } catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
 </script>

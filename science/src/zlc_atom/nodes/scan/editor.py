@@ -293,12 +293,14 @@ def _api(pulse: Mapping[str, object], rows: Sequence[Mapping], text: object) -> 
 
 
 def scan_editor_facts(values: Mapping[str, object], pulse: Mapping[str, object] | None,
-                      device_ports: Sequence[ScanPort], tunables: Mapping[str, object] | None = None) -> dict:
+                      device_ports: Sequence[ScanPort], tunables: Mapping[str, object] | None = None,
+                      unread: Mapping[str, str] | None = None) -> dict:
     """The scan plan editor's model for one draft: the knobs (the pulse's
     slots and API parameters, then the devices' scannable fields), the API
     parameters the pulse withholds and why, what the plan amounts to, and the
     API values section (None until a pulse is chosen).  ``tunables`` are the lent
-    devices: a knob's limits in its other spellings are converted through them."""
+    devices: a knob's limits in its other spellings are converted through them.
+    ``unread``: why a lent device offered nothing, by device key."""
 
     spellings = _Spellings(tunables)
     ports = [*hardware_scan_ports_for(pulse), *api_scan_ports_for(pulse)] if pulse is not None else []
@@ -331,6 +333,8 @@ def scan_editor_facts(values: Mapping[str, object], pulse: Mapping[str, object] 
         "ports": [_port(port, spellings) for port in ports],
         "withheld": {} if pulse is None else unscannable_api_ports(pulse),
         "unoffered": unoffered,
+        "unread": "; ".join(f"{getattr((tunables or {}).get(key), 'role', '') or key} could not be read: {reason}"
+                            for key, reason in sorted((unread or {}).items())),
         "summary": summary,
         "problem": problem,
         "api": None if pulse is None else _api(pulse, _rows(values.get("plan")), values.get("api_values")),

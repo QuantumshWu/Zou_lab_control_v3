@@ -40,6 +40,8 @@ type Facts = EditorFacts & {
   withheld: Record<string, string>;
   /** The plan's ports nobody offers now, with their owner and name. */
   unoffered: Record<string, { group: string; leaf: string }>;
+  /** Which lent devices could not be read, and why; their knobs are not offered. */
+  unread?: string;
   summary: string;
   problem: string;
   api: { fields: ApiField[]; overrides: [string, number][]; parked: { name: string; text: string; problem: boolean }[]; note: string;
@@ -388,6 +390,7 @@ export class ScanPlanEditor implements NodeEditor {
   private add = button("Add axis", () => this.addRow(false));
   private addManual = button("Add manual axis", () => this.addRow(true));
   private axes = element("div", "scan-axes");
+  private unread = element("p", "field-error");
   private problem = element("p", "field-error");
   private summary = element("p", "note wrap");
   private apiTitle = sectionTitle("API values");
@@ -418,7 +421,7 @@ export class ScanPlanEditor implements NodeEditor {
     // keeps for it (labelFloor), never setting it: the column, and every field
     // after it, stays put when a pulse that binds some is chosen.
     this.apiForm.dataset.labelRoom = "";
-    this.root.append(sectionTitle("Scan plan", this.add, this.addManual), this.axes, this.problem, this.summary,
+    this.root.append(sectionTitle("Scan plan", this.add, this.addManual), this.axes, this.unread, this.problem, this.summary,
       this.apiTitle, this.apiForm, this.parked, this.apiNote);
     if (readOnly) for (const node of [this.add, this.addManual, this.apiTitle, this.apiForm, this.parked, this.apiNote]) node.hidden = true;
   }
@@ -482,6 +485,8 @@ export class ScanPlanEditor implements NodeEditor {
     this.add.disabled = !facts.ports.length || Boolean(locked);
     this.addManual.disabled = Boolean(locked);
     for (const view of this.rows) view.locked = Boolean(locked);
+    setText(this.unread, facts.unread || "");
+    this.unread.hidden = !facts.unread;
     setText(this.problem, facts.problem);
     this.problem.hidden = !facts.problem;
     setText(this.summary, facts.problem ? "" : facts.summary);
