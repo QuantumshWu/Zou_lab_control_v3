@@ -269,7 +269,7 @@
 //! output's trajectories: the need is the largest of many outputs' estimated errors, biased up while few groups stand behind it). The estimates at an output
 //! rest on the groups that reach it (stats.rs `summarize`), a standard error's rise at the point where they thin out what the
 //! targets allow. The errors the need takes are each output's over its neighbours as far as they agree (`steady`): the largest of many outputs'
-//! noisy estimates stood 20-35 % above their common value in the standard error, 1.3-1.8 times in the need. An output's reported error, which the app's marks read against the target, is the same number (`reported_error`): the stop and the marks read one. (The default scene's probe over 100 us at 448 trajectories: 2 SE at single outputs read up to 5.3 % over 14-19 us, a mark on 6 of 32 seeds, where the rows' 2 SD over the seeds is 3.8-4.4 % and the most trajectories in [0, 1] can spread, 2 √(p (1 − p)/N), 4.6 %; over its neighbours it reads 4.7-4.9 %, no mark on any seed.) No margin is added above the prediction: a batch more costs the device's tail and the statistics, a few
+//! noisy estimates stood 20-35 % above their common value in the standard error, 1.3-1.8 times in the need. An output's reported error, which the app's marks read against the target, is the same number (`Account::read`): the stop and the marks read one record (`Record`). (The default scene's probe over 100 us at 448 trajectories: 2 SE at single outputs read up to 5.3 % over 14-19 us, a mark on 6 of 32 seeds, where the rows' 2 SD over the seeds is 3.8-4.4 % and the most trajectories in [0, 1] can spread, 2 √(p (1 − p)/N), 4.6 %; over its neighbours it reads 4.7-4.9 %, no mark on any seed.) No margin is added above the prediction: a batch more costs the device's tail and the statistics, a few
 //! trajectories' time, where a margin of the estimate's own noise would cost tens of percent of the trajectories.
 //!
 //! # Control variates
@@ -389,7 +389,7 @@ pub struct Distributions{pub grid:Vec<f64>,pub samples:Vec<usize>,pub probabilit
 #[derive(Clone,Debug)]
 pub struct Solution{
     pub populations:Vec<Vec<f64>>,
-    /// Per time, the largest standard error of the populations as shown, p (1 − L), and the loss, as the stopping rule reads it, at least what its trajectories leave open (`reported_error`).
+    /// Per time, the largest standard error of the populations as shown, p (1 − L), and the loss, as the stopping rule reads it, at least what its trajectories leave open (`Account::read`).
     pub sample_errors:Vec<f64>,
     pub temperature_uk:Vec<[f64;3]>,
     pub temperature_errors_uk:Vec<[f64;3]>,
@@ -433,8 +433,6 @@ fn weight_at(temperature:[f64;3],frequencies:[f64;3])->f64{
 }
 /// An output's largest standard error of what is shown of the atom (# Batches): a population as the probability p (1 − L) that it is in that state and held, its error among the held atoms times the held share, and the loss's.
 fn shown_error(e:&Estimate)->f64{let held=(1.-e.loss).max(0.);e.population_errors.iter().map(|&x|held*x).fold(e.loss_error,f64::max)}
-/// An output's reported standard error (# Batches): the statistic the stopping rule and the flags read (`statistics_of`), at least what its trajectories leave open (`unseen`: a reading of all lost says no more than that), in standard errors. The app's marks read it against the target: one number for the stop and the marks.
-fn reported_error(statistic:f64,trajectories:f64)->f64{statistic.max(unseen(trajectories))/CONFIDENCE}
 /// An output's statistical errors at CONFIDENCE: the populations' as shown and the loss's largest (`shown_error`, absolute) and T's largest
 /// relative one over the axes, at the share of atoms it reads (# Batches), with its target's weight there (`regime`).
 #[derive(Clone,Copy,Debug)]
@@ -486,7 +484,7 @@ fn room_of(target:f64,floor:f64,exponent:f64)->f64{let(t,f)=(target*target,floor
 /// The statistics' room (their trajectories go as S^−2) beside an output's floor (`floor`): what it leaves of the target, or
 /// its balance beyond 1 − 2/k of the target's square (the output is then flagged).
 fn room(target:f64,floor:f64)->f64{room_of(target,floor,2.)}
-/// An output's floor beside the statistics: its a-priori estimates (`Accounts::apriori`) and the step's bias, in quadrature.
+/// An output's floor beside the statistics: its a-priori estimates (`Account::model`) and the step's bias, in quadrature.
 fn floor(apriori:f64,bias:f64)->f64{apriori.hypot(bias)}
 /// What N trajectories alike leave open of what none of them met (module documentation, # Batches): the far end of Wilson's interval at `CONFIDENCE` at a count of none or all, z²/(N + z²), where a jackknife reads zero.
 fn unseen(trajectories:f64)->f64{let z=CONFIDENCE*CONFIDENCE;z/(trajectories+z)}
@@ -523,14 +521,10 @@ fn reaches(needs:&[f64])->Vec<f64>{let mut most=0_f64;let mut out:Vec<f64>=needs
 /// R^−(2+1/p) at their cost-optimal split, in quadrature (module documentation, # Shares): what the estimates leave of the
 /// target's square, or beyond (1 − s²) of it their balance αA²/(k − α), α = 2 + 1/p; at most the target. The step takes its share s (`tolerances`).
 fn run_room(target:f64,apriori:f64)->f64{room_of(target,apriori,2.+1./ORDER)}
-/// The ratio of the statistical errors to their room over every output after t = 0 (the
+/// The stop's read of the records (`Record`): the ratio of the statistical errors to their room over every output after t = 0 (the
 /// request's initial state, `start`), 1 meeting the targets, per kind: the populations' and the loss's (`population_ratio`), and T's (zero at t = 0).
-fn output_ratios(estimates:&[Estimate],accounts:&Accounts,frequencies:[f64;3])->Vec<[f64;2]>{
-    let all=statistics_of(estimates,frequencies);
-    (0..estimates.len()).map(|i|{if i==0{return [0.;2];}
-        let s=all[i];let a=accounts.apriori[i];
-        [population_ratio(s.population,room(POPULATION_TARGET,floor(a[0],accounts.bias[0])),estimates[i].trajectories),s.temperature/room(TEMPERATURE_TARGET/s.weight,floor(a[1],accounts.bias[1]))]
-    }).collect()
+fn output_ratios(records:&[Record])->Vec<[f64;2]>{
+    records.iter().enumerate().map(|(i,r)|if i==0{[0.;2]}else{[population_ratio(r.population.statistic,r.population.room(),r.estimate.trajectories),r.temperature.statistic/r.temperature.room()]}).collect()
 }
 
 /// The distribution sample indices: evenly spread over the outputs, the first and last among them.
@@ -601,58 +595,79 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
     ledger
 }
 
-/// A solve's error accounts so far: per output and target (the populations, T) the a-priori estimates'
-/// total (the model's, and there the fold's charge as measured, the mean (kv/σ)² and the profiles at
-/// the atoms) and the fold's charge in it (`fold_charges`), and the time step's bias on the populations
-/// and on T.
-struct Accounts{apriori:Vec<[f64;2]>,excited:Vec<[f64;2]>,bias:[f64;2]}
+/// One target's errors at an output (module documentation, # Shares): the statistics at CONFIDENCE (`statistics_of`), what the
+/// trajectories leave open of what none of them met (`unseen`, the populations' alone, # Batches), the time step's bias, the a-priori
+/// total (the model's estimates, and there the fold's charge as measured, the mean (kv/σ)² and the profiles at the atoms), the fold's
+/// charge in it (`fold_charges`), and the target there (T's its regime's, `regime`).
+#[derive(Clone,Copy,Debug)]
+struct Account{statistic:f64,open:f64,bias:f64,model:f64,charge:f64,target:f64}
+impl Account{
+    /// t = 0 is the request's initial state (`start`): none of it.
+    fn initial(target:f64)->Account{Account{statistic:0.,open:0.,bias:0.,model:0.,charge:0.,target}}
+    /// What the statistics read: at least what stays open (a reading of all lost says no more than that).
+    fn read(&self)->f64{self.statistic.max(self.open)}
+    /// The floor beside the statistics (`floor`), and their room beside it (`room`).
+    fn floor(&self)->f64{floor(self.model,self.bias)}
+    fn room(&self)->f64{room(self.target,self.floor())}
+}
+/// An output's record: its estimate (each quantity's value and its own standard error, as the app shows them, stats.rs) and its
+/// errors against the targets -- the populations' with the loss's, one vector of probabilities adding up to one, and T's, the largest axis's at the share of
+/// atoms it reads -- with what the model's estimates take there as measured along the trajectories. Computed once a batch (`records`): the stop
+/// (`output_ratios`), the flag and the ledger's lines (`ledger`) and the reported errors (`assemble`) only read it.
+struct Record<'a>{estimate:&'a Estimate,population:Account,temperature:Account,profile:f64,doppler:f64,transfer:f64}
 
-/// The ledger of a solve's estimates so far, and its accounts: the model's items, the elimination's
-/// largest η², the largest mean (kv/σ)² and the profiles at the atoms. With `last`, the outputs whose
-/// total estimated error -- the a-priori total, the step's bias and the statistics -- exceeds a
-/// target are flagged; before it, those whose a-priori total and bias alone do.
-fn ledger(model:&Model,base:&Ledger,estimates:&[Estimate],times:&[f64],allowance:f64,bias:[f64;2],frequencies:[f64;3],last:bool,memory:&Memory)->(Ledger,Accounts){
-    let mut ledger=base.clone();let charge=fold_charge(model,model.ground.charge);
+/// The records of a solve's estimates so far.
+fn records<'a>(model:&Model,base:&Ledger,estimates:&'a [Estimate],bias:[f64;2],frequencies:[f64;3],memory:&Memory)->Vec<Record<'a>>{
     // The fold's error, charged as measured along the trajectories: the folded excited population's 2η² at
     // each output with the populations' memory of the earlier ones (`Memory::charges`) -- what the fold's
     // bound takes on the paths they go (an atom that gathers where the light is bright, as red-detuned
     // molasses holds it at its lattice's bright sites, meets more than the pattern's mean). The a-priori
     // estimate over the reach decided the fold (`Candidate`).
     let measured=memory.charges(&estimates.iter().map(|e|with_open(fold_charges(model,2.*e.folded),model,e.trajectories)).collect::<Vec<_>>());
-    let profiles:Vec<f64>=estimates.iter().map(|e|e.profile).collect();let dopplers:Vec<f64>=estimates.iter().map(|e|e.doppler).collect();
-    let largest=|v:&[f64]|v.iter().skip(1).copied().fold(0.,f64::max);
-    ledger.add("多普勒与反冲频移",largest(&dopplers),format!("一阶（kv/σ）²；单步超过 {:.1e} 时用精确响应",allowance));
-    // What the first order's transfer leaves out (model.rs `Model::first_error`), on T alone: its friction against the recoil heating at the T the atoms have.
-    let transfer:Vec<f64>=estimates.iter().map(|e|model.first_error*e.temperature_total).collect();
-    ledger.add("一阶多普勒项的转移（温度）",largest(&transfer),"一阶项按各组衰减表的比例给出，超出份额的表项单独保留；其余按其摩擦对反冲加热的比值计入温度".into());
-    if !model.profiles.is_empty(){ledger.add("聚焦光在原子处的强度（沿轨迹）",largest(&profiles),"按峰值强度的平面波".into());}
-    let met=largest(&measured.iter().map(|m|m[0]).collect::<Vec<f64>>());
+    let peak:f64=model.profiles.iter().map(|p|p.1).sum();let fixed=base.used()-peak-fold_charge(model,model.ground.charge);
+    let statistics=statistics_of(estimates,frequencies);
+    estimates.iter().zip(&statistics).zip(&measured).enumerate().map(|(i,((e,s),m))|{
+        let(population,temperature)=(POPULATION_TARGET,TEMPERATURE_TARGET/s.weight);
+        // What the first order's transfer leaves out (model.rs `Model::first_error`), on T alone: its friction against the recoil heating at the T the atoms have.
+        let transfer=model.first_error*e.temperature_total;
+        if i==0{return Record{estimate:e,population:Account::initial(population),temperature:Account::initial(temperature),profile:e.profile,doppler:e.doppler,transfer};}
+        let[p,t]=m.map(|m|fixed+peak.max(e.profile)+e.doppler+m);
+        Record{estimate:e,profile:e.profile,doppler:e.doppler,transfer,
+            population:Account{statistic:s.population,open:unseen(e.trajectories),bias:bias[0],model:p,charge:m[0],target:population},
+            temperature:Account{statistic:s.temperature,open:0.,bias:bias[1],model:t+transfer,charge:m[1],target:temperature}}
+    }).collect()
+}
+
+/// The ledger of a solve's records so far: the model's items, the elimination's
+/// largest η², the largest mean (kv/σ)² and the profiles at the atoms. With `last`, the outputs whose
+/// total estimated error -- the a-priori total, the step's bias and the statistics -- exceeds a
+/// target are flagged; before it, those whose a-priori total and bias alone do.
+fn ledger(model:&Model,base:&Ledger,records:&[Record],times:&[f64],allowance:f64,last:bool)->Ledger{
+    let mut ledger=base.clone();let charge=fold_charge(model,model.ground.charge);
+    let largest=|part:&dyn Fn(&Record)->f64|records.iter().skip(1).map(part).fold(0.,f64::max);
+    ledger.add("多普勒与反冲频移",largest(&|r|r.doppler),format!("一阶（kv/σ）²；单步超过 {:.1e} 时用精确响应",allowance));
+    ledger.add("一阶多普勒项的转移（温度）",largest(&|r|r.transfer),"一阶项按各组衰减表的比例给出，超出份额的表项单独保留；其余按其摩擦对反冲加热的比值计入温度".into());
+    if !model.profiles.is_empty(){ledger.add("聚焦光在原子处的强度（沿轨迹）",largest(&|r|r.profile),"按峰值强度的平面波".into());}
+    let met=largest(&|r|r.population.charge);
     if let Some(item)=ledger.items.iter_mut().find(|i|i.label==FOLD){
         item.action=format!("{}；计入沿轨迹实测的饱和参数 2η²{}（先验估计 {:.2}%{}）与轨迹未及之处的近共振上界{}",item.action,if model.fourth{" 的平方"}else{""},100.*charge,if met>charge{"，实测高于先验估计"}else{""},
             if model.fourth{"；温度仍计 2η²（力按二阶折叠）"}else{""});item.estimate=met;
     }
-    let peak:f64=model.profiles.iter().map(|p|p.1).sum();let fixed=base.used()-peak-charge;
-    let apriori:Vec<[f64;2]>=(0..estimates.len()).map(|i|if i==0{[0.;2]}else{let[p,t]=measured[i].map(|m|fixed+peak.max(profiles[i])+dopplers[i]+m);[p,t+transfer[i]]}).collect();
-    let accounts=Accounts{apriori,excited:measured,bias};
-    // The outputs beyond a target: (output, the quantity, its total, the a-priori estimates' and the step's, the statistics, the target).
-    let all=statistics_of(estimates,frequencies);
-    let over:Vec<(usize,&str,f64,f64,f64,f64)>=(1..estimates.len()).filter_map(|i|{
-        let s=all[i];let a=accounts.apriori[i];let(p,t)=if last{(s.population,s.temperature)}else{(0.,0.)};let(fp,ft)=(floor(a[0],bias[0]),floor(a[1],bias[1]));
-        let population=(fp.hypot(p)>POPULATION_TARGET).then_some((i,"布居",fp.hypot(p),fp,p,POPULATION_TARGET));
-        let temperature=(ft.hypot(t)>TEMPERATURE_TARGET/s.weight).then_some((i,"温度",ft.hypot(t),ft,t,TEMPERATURE_TARGET/s.weight));
-        population.or(temperature)}).collect();
+    // The outputs beyond a target: (output, the quantity, its total, the a-priori estimates' and the step's, the statistics, the target, the fold's charge).
+    let over:Vec<(usize,&str,f64,f64,f64,f64,f64)>=records.iter().enumerate().skip(1).filter_map(|(i,r)|{
+        let at=|a:&Account,name:&'static str|{let(floor,s)=(a.floor(),if last{a.statistic}else{0.});let total=floor.hypot(s);(total>a.target).then_some((i,name,total,floor,s,a.target,a.charge))};
+        at(&r.population,"布居").or_else(||at(&r.temperature,"温度"))}).collect();
     if !over.is_empty(){
         let(first,last_over)=(over[0].0,over[over.len()-1].0);
-        let span=if over.len()==last_over-first+1&&last_over==estimates.len()-1{format!("{} 起",when(times[first]))}
+        let span=if over.len()==last_over-first+1&&last_over==records.len()-1{format!("{} 起",when(times[first]))}
             else{format!("{} 至 {} 之间 {} 个时刻",when(times[first]),when(times[last_over]),over.len())};
         let worst=over.iter().max_by(|a,b|(a.2/a.5).total_cmp(&(b.2/b.5))).unwrap();let target=worst.5;
         let over=format!("{span}估计误差超出目标：{}误差最大 {:.1}%（目标 {:.0}%；三项平方和开方：近似与步长 {:.1}%，其中消去激发态 {:.1}%；统计 {:.1}%）",
-            worst.1,100.*worst.2,100.*target,100.*worst.3,100.*accounts.excited[worst.0][if worst.1=="布居"{0}else{1}],100.*worst.4);
+            worst.1,100.*worst.2,100.*target,100.*worst.3,100.*worst.6,100.*worst.4);
         ledger.flagged=Some(match ledger.flagged.take(){Some(r)=>format!("{r}；{over}"),None=>over});
     }
-    (ledger,accounts)
+    ledger
 }
-
 /// Solves a request on the device asked for (module documentation, # Device). `checkpoint` receives
 /// every batch's complete result and the estimated wall time (ms) the rest will take.
 pub fn solve(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))->Result<Solution,String>{
@@ -963,8 +978,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // The need the pilot predicts per output and target, the populations' and T's (its trajectories each a group, with the harmonic control).
     let pilot_needs:Vec<[f64;2]>={
         let mut e=summarize(&pilot_groups,&scales,&pilot_harmonic.mean);start(&mut e[0],&initial);
-        let(_,accounts)=ledger(&model,&booked(&base,pilot_beats*horizon),&e,times,allowance,bias,trap.lab,false,&memory);
-        output_ratios(&e,&accounts,trap.lab).iter().map(|r|r.map(|x|(pilot as f64*x*x).min(MOST_TRAJECTORIES as f64))).collect()
+        output_ratios(&records(&model,&booked(&base,pilot_beats*horizon),&e,bias,trap.lab,&memory)).iter().map(|r|r.map(|x|(pilot as f64*x*x).min(MOST_TRAJECTORIES as f64))).collect()
     };
     // The first batch, each group as far as the reach wants it (module documentation, # Batches): on the CPU FIRST_GROUPS groups, at most the pilot's need -- another batch costs a tail --;
     // on the GPU the pilot's need and its error -- another wave costs a whole trajectory's time, as far as it goes --, at least FIRST_GROUPS groups through the run, at most what its resident blocks hold.
@@ -993,15 +1007,15 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let mut outcome=first;let mut done=count;let mut pace=wall/ends.iter().map(|&e|TASK*e as u64).sum::<u64>().max(1) as f64;
     loop{
         let mut estimates=summarize(&outcome.groups,&scales,&harmonic.mean);start(&mut estimates[0],&initial);
-        let(_,accounts)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,false,&memory);
+        let booked=booked(&base,pilot_beats.max(outcome.beats)*horizon);let records=records(&model,&booked,&estimates,bias,trap.lab,&memory);
         let counts:Vec<u64>=estimates.iter().map(|e|e.trajectories as u64).collect();
-        let worst=output_ratios(&estimates,&accounts,trap.lab);let ratio=worst.iter().fold(0_f64,|m,r|m.max(r[0]).max(r[1]));
+        let worst=output_ratios(&records);let ratio=worst.iter().fold(0_f64,|m,r|m.max(r[0]).max(r[1]));
         let reach=reaches(&worst.iter().zip(&counts).map(|(r,&n)|n as f64*r[0].max(r[1]).powi(2)).collect::<Vec<f64>>());
         let wanted=reach[1].ceil() as u64;let reach:Vec<u64>=reach.iter().map(|x|(x.ceil() as u64).min(MOST_TRAJECTORIES)).collect();
         let last=(1..outputs).rev().find(|&i|reach[i]>counts[i]);
-        let(mut ledger,_)=ledger(&model,&booked(&base,pilot_beats.max(outcome.beats)*horizon),&estimates,times,allowance,bias,trap.lab,last.is_none(),&memory);
+        let mut ledger=ledger(&model,&booked,&records,times,allowance,last.is_none());
         if let(Some(note),Some(flag))=(&bounded,&ledger.flagged){ledger.flagged=Some(format!("{note}；{flag}"));}
-        let mut solution=assemble(&model,&estimates,&outcome,&listed,times,trap.lab,done,counts[outputs-1],dt,&request.initial_density,ledger);
+        let mut solution=assemble(&model,&records,&outcome,&listed,times,trap.lab,done,counts[outputs-1],dt,&request.initial_density,ledger);
         solution.device=used;solution.device_note=note.clone();solution.needed=wanted;
         if last.is_none(){
             if ratio>1.{solution.reason=Some(format!("统计误差为目标的 {ratio:.1} 倍：轨迹数已达上限 {MOST_TRAJECTORIES}"));}
@@ -1047,7 +1061,7 @@ fn gained(base:&Ledger,model:&Model,states:&[Trajectory])->Ledger{
     if gain>0.{ledger.add(GAIN,gain,"沿试探轨迹测得：无跳跃的衰减低于跳跃率（i(H − H†) − ΣL†L 的负本征值对最大跳跃率之比）".into());}
     ledger
 }
-/// A model's ledger's estimates but the fold's charge: what the fold's charge and the step's bias add to (`Accounts::apriori`).
+/// A model's ledger's estimates but the fold's charge: what the fold's charge and the step's bias add to (`Account::model`).
 fn unfolded(base:&Ledger,model:&Model)->f64{base.used()-fold_charge(model,model.ground.charge)}
 /// The first order in the Doppler shift's allowance: the step's share of the run's room beside the model's other
 /// estimates on the population target (`run_room`; the fold's charge takes its own) -- a truncation per step, as the
@@ -1919,8 +1933,8 @@ fn start(e:&mut Estimate,initial:&Initial){
 /// output's that had one -- each row still a probability vector, the app's p (1 − L) zero there --,
 /// outside the validated regime, and the flag says from when. T takes two atoms, a variance: one atom reads a variance of zero and an error of zero, which is no T. An output holding fewer has none of its
 /// own: its T, ⟨v⟩ and n̄ are the last output's that read one, its T's error none (infinite here, as a single group's; null in the contract, and the app says unknown), outside the validated regime, and the flag says from when.
-fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],times:&[f64],frequencies:[f64;3],trajectories:u64,through:u64,dt:f64,initial:&[Complex],mut ledger:Ledger)->Solution{
-    let hm=model.hbar_over_mass;
+fn assemble(model:&Model,records:&[Record],outcome:&Outcome,listed:&[usize],times:&[f64],frequencies:[f64;3],trajectories:u64,through:u64,dt:f64,initial:&[Complex],mut ledger:Ledger)->Solution{
+    let hm=model.hbar_over_mass;let estimates:Vec<&Estimate>=records.iter().map(|r|r.estimate).collect();
     let velocity=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.1[a]*hm));
     let position=std::array::from_fn(|a|histograms(&outcome.samples,listed,&|s|s.0[a]));
     let first:Vec<f64>=(0..STATES).map(|i|initial[i*STATES+i].re).collect();
@@ -1928,16 +1942,15 @@ fn assemble(model:&Model,estimates:&[Estimate],outcome:&Outcome,listed:&[usize],
     let explicit:usize=model.ground.clusters.iter().map(|c|c.excited.len()).sum();
     let internal=if explicit>0{format!("内态（子空间 {}，其中 {explicit} 个激发态显式、精确传播，其余激发态二阶消去）",sizes.join("+"))}else{format!("消去激发态后的基态内态（子空间 {}）",sizes.join("+"))};
     // Each output's source: itself where an atom is held (t = 0 always), else the last that held one.
-    let held=|i:usize|i==0||estimates[i].loss<1.;let read=|i:usize|i==0||reads_temperature(&estimates[i]);
+    let held=|i:usize|i==0||estimates[i].loss<1.;let read=|i:usize|i==0||reads_temperature(estimates[i]);
     let(source,measured)=(last_holding(estimates.len(),&held),last_holding(estimates.len(),&read));
-    let statistic=statistics_of(estimates,frequencies);
     let mut flag=|note:String|ledger.flagged=Some(match ledger.flagged.take(){Some(r)=>format!("{note}；{r}"),None=>note});
     if let Some(gone)=(0..estimates.len()).find(|&i|!held(i)){flag(format!("{} 起已无原子被俘获（丢失概率 1）：此后的布居、温度与分布沿用 {} 的值，仅供参考",when(times[gone]),when(times[source[gone]])));}
     if let Some(few)=(0..estimates.len()).find(|&i|held(i)&&!read(i)){flag(format!("{} 起有时刻被俘获的原子不足两个：这些时刻的温度沿用此前的值，误差未知",when(times[few])));}
-    let carried=|f:&dyn Fn(&Estimate)->[f64;3]|->Vec<[f64;3]>{measured.iter().map(|&j|f(&estimates[j])).collect()};
+    let carried=|f:&dyn Fn(&Estimate)->[f64;3]|->Vec<[f64;3]>{measured.iter().map(|&j|f(estimates[j])).collect()};
     Solution{
         populations:source.iter().map(|&j|if j==0{first.clone()}else{estimates[j].populations.clone()}).collect(),
-        sample_errors:estimates.iter().zip(&statistic).enumerate().map(|(i,(e,s))|if i==0{0.}else{reported_error(s.population,e.trajectories)}).collect(),
+        sample_errors:records.iter().map(|r|r.population.read()/CONFIDENCE).collect(),
         temperature_uk:carried(&|e|e.temperature),
         temperature_errors_uk:estimates.iter().enumerate().map(|(i,e)|if read(i){e.temperature_error}else{[f64::INFINITY;3]}).collect(),
         temperature_total_uk:measured.iter().map(|&j|estimates[j].temperature_total).collect(),
@@ -2043,8 +2056,9 @@ mod tests{
         let(need,weight)=predicted(&none,&[[0.;2];3],[0.;2],32.);assert!((need-n).abs()<1e-9&&weight==1.,"{need} {weight}");
         let read=[Statistic{population:0.,temperature:0.,weight:1.},Statistic{population:0.1,temperature:0.,weight:1.},Statistic{population:0.,temperature:0.,weight:1.}];
         let(reach,_)=predicted(&read,&[[0.;2];3],[0.;2],32.);assert!((reach-128.).abs()<1e-9,"{reach}");
-        assert!((CONFIDENCE*reported_error(0.,76.)-POPULATION_TARGET).abs()<1e-15);
-        assert_eq!(reported_error(CONFIDENCE*0.1,76.),0.1);
+        let at=|statistic:f64|Account{statistic,open:unseen(76.),bias:0.,model:0.,charge:0.,target:POPULATION_TARGET}.read();
+        assert!((at(0.)-POPULATION_TARGET).abs()<1e-15);
+        assert_eq!(at(CONFIDENCE*0.1),CONFIDENCE*0.1);
     }
     /// A read pays for what it could move of the run (`read_pays`): the resonant probe's PGC at 1.09 limits does not, the retro-reflected tweezer at 14.7 does, nothing within the limit does, and a stand already beyond asks for more.
     #[test]
