@@ -39,7 +39,7 @@
 //! (the trap's anti-trapping of the excited states among them). A group of one carrier with itself
 //! and no beat is Hermitian in (k′, k), S_kk′ = S_k′k†, Q_kk′ = Q_k′k†: its tables hold k′ ≤ k, the
 //! pairs k′ < k standing for both. Between two explicit states its S is their folded drives' van
-//! Vleck shift, −½ Σ_b U^f_k[e,b] U^f_k′[e′,b]* (1/(E_e − δ − E_b) + 1/(E_e′ − δ − E_b)), and Q zero.
+//! Vleck shift, −½ Σ_b U^f_k[e,b] U^f_k′[e′,b]* (Re 1/(K_ee − δ − E_b) + Re 1/(K_e′e′ − δ − E_b)) (ground.rs `Elimination::shift_denominator`), and Q zero.
 //! The kept drives are linear in the fields and need no table: U_k at the focus is exact. The decay
 //! of the explicit states, −(i/2) Σ_φ J_φ†J_φ on their rows and columns, is constant between two of
 //! them (`decays`) and linear in the fields between one and a ground state (`crosses`: the folded
@@ -963,7 +963,7 @@ impl Model{
                         if x>=n0{
                             // Two explicit states: their folded drives' van Vleck shift (c = d, no Q).
                             let(ea,eb,delta)=(cl.excited[x-n0],cl.excited[y-n0],g.carriers[c].detuning);let mut sv=Complex::ZERO;
-                            for b in 0..ng{sv-=u[c][k0][(ea,b)]*u[c][k1][(eb,b)].conj()*(0.5*(1./(e.excited_energies[ea]-delta-e.energies[b])+1./(e.excited_energies[eb]-delta-e.energies[b])));}
+                            for b in 0..ng{sv-=u[c][k0][(ea,b)]*u[c][k1][(eb,b)].conj()*(0.5*(e.shift_denominator(ea,b,delta)+e.shift_denominator(eb,b,delta)));}
                             node[gl.s+base+gl.entries.binary_search(&(x,y)).unwrap()]=sv;continue;
                         }
                         let(a,b)=(states[x],states[y]);let(mut sv,mut qv)=(Complex::ZERO,Complex::ZERO);
@@ -1540,8 +1540,9 @@ impl Model{
     /// A cluster's work in the GPU's kernel, a warp's cycles (solve.rs `kernel_interval`): a step, its table pairs' gathers and the
     /// fourth order's slabs beside its fixed parts, and a jump, every class's photons at the second order and the fourth's W3 and forms
     /// at their own rates. A static cluster's: against a wave of 576 at both orders on PGC3D, TET, THREE, GMD1C and DEFAULT, on a laptop's RTX 5070, the
-    /// counts' totals within 15 % of the cycles and their ratios between the orders within about 20 % (PGC3D 1.81 against 1.87, GMD1C 2.55 against
-    /// 2.85, THREE 1.73 against 2.17). Fixed numbers, one GPU's: another's own ratios change no choice here, only how well it fits that GPU.
+    /// ratios between the orders, what a choice between them reads, within about 20 % (PGC3D 1.81 against 1.71, TET 1.83 against 1.83, GMD1C 2.53 against
+    /// 2.84, THREE 1.69 against 2.03), the totals 1.1 to 1.6 times the cycles (fitted to a kernel some 30 % slower per step, the ratios unmoved beyond this).
+    /// Fixed numbers, one GPU's: another's own ratios change no choice here, only how well it fits that GPU.
     pub fn kernel_work(&self,cluster:usize)->[f64;2]{
         let layout=&self.layouts[cluster];let w=self.work(cluster);let nodes=(1usize<<(2*self.focused.len())) as f64;
         let second:f64=self.carriers.iter().map(|c|c.rank as f64*3.*self.ground.ground_states.len() as f64*layout.n as f64*(2.*nodes+1.)).sum();

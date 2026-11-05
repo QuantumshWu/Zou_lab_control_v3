@@ -467,8 +467,8 @@ enum How{
 /// A beating generator by its matrices' entries (`Entries::new`). Per part -- 0 the static one, 1 + j the kept beat j -- its
 /// entries (row, column, value; round-off left out) and its size, above ‖·‖₁. The force's forms: the static gradients' upper
 /// triangle (row, column, per axis the entry, doubled off the diagonal: Re⟨x|G|x⟩ of a Hermitian G) and each positive beat's entries.
-/// The share of ‖ψ‖ each exponential's series is summed to; whether the processor has AVX2 and FMA; the working matrix (`Working`).
-struct Entries{n:usize,parts:Vec<Vec<(usize,usize,Complex)>>,sizes:Vec<f64>,statics:Vec<(usize,usize,[Complex;3])>,beats:Vec<Vec<(usize,usize,[Complex;3])>>,share:f64,wide:bool,working:std::cell::RefCell<Working>}
+/// The share of ‖ψ‖ each exponential's series is summed to; whether the processor has AVX2 and FMA; the static part of an exponential's matrix, (w₁ + w₂) H₀ as `Working` holds it; the working matrix (`Working`).
+struct Entries{n:usize,parts:Vec<Vec<(usize,usize,Complex)>>,sizes:Vec<f64>,statics:Vec<(usize,usize,[Complex;3])>,beats:Vec<Vec<(usize,usize,[Complex;3])>>,share:f64,wide:bool,fixed:[Vec<f64>;2],working:std::cell::RefCell<Working>}
 /// An exponential's matrix w₁H(t₁) + w₂H(t₂), column-major, its real and imaginary parts apart (the product by a vector goes
 /// column by column, in the processor's vectors), and each pair of beats' phases at t₁ and t₂.
 struct Working{re:Vec<f64>,im:Vec<f64>,phases:Vec<[Complex;2]>}
@@ -497,13 +497,14 @@ impl Entries{
         let sizes:Vec<f64>=matrices.iter().map(|h|column_norm(h,n)).collect();
         // Entries within the generator's round-off are none (a cluster keeps drives of 1e-30, static in its frames).
         let floor=(f64::EPSILON*sizes.iter().sum::<f64>()).powi(2);
-        let parts=matrices.iter().map(|h|h.iter().enumerate().filter(|(_,z)|z.norm_sqr()>floor).map(|(k,&z)|(k/n,k%n,z)).collect()).collect();
+        let parts:Vec<Vec<(usize,usize,Complex)>>=matrices.iter().map(|h|h.iter().enumerate().filter(|(_,z)|z.norm_sqr()>floor).map(|(k,&z)|(k/n,k%n,z)).collect()).collect();
+        let scale={let(_,w)=cf4();w[0]+w[1]};let mut fixed=[vec![0.;n*n],vec![0.;n*n]];for &(a,b,z)in &parts[0]{let k=b*n+a;fixed[0][k]=z.re*scale;fixed[1][k]=z.im*scale;}
         let gradients=std::iter::once(&c.statics.gradient).chain(c.beats[half..].iter().map(|b|&b.gradient));
         let top=gradients.flat_map(|g|g.iter().flat_map(|x|x.iter())).fold(0_f64,|m,z|m.max(z.norm_sqr()))*f64::EPSILON*f64::EPSILON;
         let forms=|g:&[Vec<Complex>;3],a:usize,b:usize,scale:f64|->Option<(usize,usize,[Complex;3])>{let k=a*n+b;g.iter().any(|x|x[k].norm_sqr()>top).then(||(a,b,[g[0][k]*scale,g[1][k]*scale,g[2][k]*scale]))};
         let statics=(0..n).flat_map(|a|(a..n).map(move|b|(a,b))).filter_map(|(a,b)|forms(&c.statics.gradient,a,b,if a==b{1.}else{2.})).collect();
         let beats=c.beats[half..].iter().map(|x|(0..n*n).filter_map(|k|forms(&x.gradient,k/n,k%n,1.)).collect()).collect();
-        Entries{n,parts,sizes,statics,beats,share:share.max(f64::EPSILON),wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),
+        Entries{n,parts,sizes,statics,beats,share:share.max(f64::EPSILON),wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),fixed,
             working:std::cell::RefCell::new(Working{re:vec![0.;n*n],im:vec![0.;n*n],phases:vec![[Complex::ZERO;2];half]})}
     }
     /// x ← exp(−iτ(w₂H₁ + w₁H₂)) exp(−iτ(w₁H₁ + w₂H₂)) x, H_i = H(t_i) (`cf4`): `beats` the positive beats, each one's adjoint beat
@@ -513,8 +514,7 @@ impl Entries{
         for(p,beat)in phases.iter_mut().zip(beats){*p=[Complex::cis(beat.omega*times[0]),Complex::cis(beat.omega*times[1])];}
         let(mut xr,mut xi)=([0.;MOST_MIXED],[0.;MOST_MIXED]);for a in 0..n{xr[a]=x[a].re;xi[a]=x[a].im;}
         for weights in [w,[w[1],w[0]]]{
-            let scale=weights[0]+weights[1];re.fill(0.);im.fill(0.);
-            for &(a,b,z)in &self.parts[0]{let k=b*n+a;re[k]=z.re*scale;im[k]=z.im*scale;}let mut size=scale*self.sizes[0];
+            re.copy_from_slice(&self.fixed[0]);im.copy_from_slice(&self.fixed[1]);let mut size=(weights[0]+weights[1])*self.sizes[0];
             for(i,p)in phases.iter().enumerate(){
                 let z=p[0]*weights[0]+p[1]*weights[1];let(down,up)=(half-i,half+1+i);
                 for &(a,b,y)in &self.parts[down]{let k=b*n+a;re[k]+=z.re*y.re+z.im*y.im;im[k]+=z.re*y.im-z.im*y.re;}
@@ -1127,15 +1127,15 @@ impl<'a> Engine<'a>{
     /// The step-doubling error of one step of dt from a trajectory's state, without jumps: one step
     /// against two of dt/2, as (|Δκ|, |kick|) -- the momentum's difference and the step's
     /// non-harmonic impulse (1/um) -- and (max |Δp|, |Δ ln‖ψ‖²|, |ln‖ψ‖²|) -- the largest difference of
-    /// the cluster's state populations, of the norm's decay and the decay itself.
-    pub fn doubling(&self,t:&Trajectory,dt:f64)->([f64;2],[f64;3]){
+    /// the cluster's state populations, of the norm's decay and the decay itself; and the one step's end (r, κ).
+    pub fn doubling(&self,t:&Trajectory,dt:f64)->([f64;2],[f64;3],([f64;3],[f64;3])){
         let n=self.model.dimension(t.cluster);
         let mut one=t.clone();let(n0,n1,kick)=self.free_step(&mut one,dt);
         let mut two=t.clone();self.free_step(&mut two,0.5*dt);let(_,n2,_)=self.free_step(&mut two,0.5*dt);
         let dk=(0..3).map(|a|(one.kappa[a]-two.kappa[a]).powi(2)).sum::<f64>().sqrt();let impulse=kick.iter().map(|x|x*x).sum::<f64>().sqrt();
         let(a,b)=(norm2(&one.psi,n),norm2(&two.psi,n));
         let dp=(0..n).map(|i|(one.psi[i].norm_sqr()/a-two.psi[i].norm_sqr()/b).abs()).fold(0.,f64::max);
-        ([dk,impulse],[dp,((n1/n0).ln()-(n2/n0).ln()).abs(),(n1/n0).ln().abs()])
+        ([dk,impulse],[dp,((n1/n0).ln()-(n2/n0).ln()).abs(),(n1/n0).ln().abs()],(one.r,one.kappa))
     }
 
     /// One step of dt: flow, kick and flow (`advance`), or the exact step in a cluster with explicit

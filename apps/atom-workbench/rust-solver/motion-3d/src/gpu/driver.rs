@@ -51,6 +51,7 @@ api!{
     cuModuleLoadDataEx:fn(*mut Handle,*const c_void,u32,*mut i32,*mut *mut c_void);
     cuModuleUnload:fn(Handle);
     cuModuleGetFunction:fn(*mut Handle,Handle,*const c_char);
+    cuModuleGetGlobal_v2:fn(*mut DevicePtr,*mut usize,Handle,*const c_char);
     cuFuncSetAttribute:fn(Handle,i32,i32);
     cuFuncGetAttribute:fn(*mut i32,i32,Handle);
     cuOccupancyMaxActiveBlocksPerMultiprocessor:fn(*mut i32,Handle,i32,usize);
@@ -178,6 +179,11 @@ impl Module{
         check(&format!("cuModuleGetFunction({name})"),unsafe{(driver()?.api.cuModuleGetFunction)(&mut f,self.module,c.as_ptr() as *const c_char)})?;
         Ok(Function{function:f,name:name.to_string()})
     }
+    /// A module variable's device address.
+    pub fn global(&self,name:&str)->Result<DevicePtr,String>{
+        let c=format!("{name}\0");let(mut pointer,mut bytes)=(0,0);
+        check(&format!("cuModuleGetGlobal({name})"),unsafe{(driver()?.api.cuModuleGetGlobal_v2)(&mut pointer,&mut bytes,self.module,c.as_ptr() as *const c_char)})?;Ok(pointer)
+    }
 }
 impl Drop for Module{fn drop(&mut self){if let Ok(d)=driver(){unsafe{(d.api.cuModuleUnload)(self.module);}}}}
 
@@ -203,7 +209,7 @@ impl Function{
 /// A kernel argument: a value whose address the launch passes.
 pub trait Arg{fn pointer(&self)->*mut c_void;}
 macro_rules! arg{($($t:ty),*)=>{$(impl Arg for $t{fn pointer(&self)->*mut c_void{self as *const $t as *mut c_void}})*};}
-arg!(u32,i32,u64,f32,f64,super::program::Params,super::program::Run);
+arg!(u32,i32,u64,f32,f64,super::program::Run);
 
 /// A stream: launches, copies and events in order.
 pub struct Stream{stream:Handle}
@@ -214,6 +220,11 @@ impl Stream{
     pub fn launch(&self,f:&Function,blocks:u32,threads:u32,args:&[&dyn Arg])->Result<(),String>{
         let mut pointers:Vec<*mut c_void>=args.iter().map(|a|a.pointer()).collect();
         check(&format!("launch {}",f.name),unsafe{(driver()?.api.cuLaunchKernel)(f.function,blocks,1,1,threads,1,1,0,self.stream,pointers.as_mut_ptr(),std::ptr::null_mut())})
+    }
+    /// Copies a value to a device address (from pageable memory: done on return).
+    pub fn put<T:Copy>(&self,to:DevicePtr,data:&T)->Result<(),String>{
+        call!("cuMemcpyHtoDAsync",cuMemcpyHtoDAsync_v2(to,data as *const T as *const c_void,std::mem::size_of::<T>(),self.stream))?;
+        self.synchronize()
     }
     /// Copies `data` into the buffer at byte offset `at` (from pageable memory: done on return).
     pub fn upload_at<T:Copy>(&self,to:&Buffer,at:usize,data:&[T])->Result<(),String>{

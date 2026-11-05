@@ -21,7 +21,7 @@ fn main(){
     println!("{name}: {} sampled states",states.len());
     for dt in [0.05,0.1,0.2,0.3,0.5,1.0]{
         let(mut dk,mut kick,mut dp,mut dl,mut l)=(0.,0.,0_f64,0.,0.);
-        for t in &states{let(a,b)=engine.doubling(t,dt);dk+=a[0];kick+=a[1];dp=dp.max(b[0]);dl+=b[1];l+=b[2];}
+        for t in &states{let(a,b,_)=engine.doubling(t,dt);dk+=a[0];kick+=a[1];dp=dp.max(b[0]);dl+=b[1];l+=b[2];}
         let mean_dp:f64=states.iter().map(|t|engine.doubling(t,dt).1[0]).sum::<f64>()/states.len() as f64;
         println!("dt {dt:4}: impulse {:.2e} (rel), population per step mean {:.2e} max {:.2e}, decay {:.2e} (rel)",dk/kick,mean_dp,dp,dl/l);
     }
