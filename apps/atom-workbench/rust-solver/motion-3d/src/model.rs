@@ -265,7 +265,7 @@ struct EffectiveLayout{row:usize,col:usize,carrier:usize,residual:f64,at:usize}
 /// dressed photons ĉ_a[to] (explicit × 3 axes × ng, at `emission`).
 #[derive(Clone,Debug)]
 pub(crate) struct Layout{pub(crate) n:usize,pub(crate) n0:usize,pub(crate) size:usize,base:usize,pub(crate) h0:usize,pub(crate) groups:Vec<GroupLayout>,pub(crate) carriers:Vec<CarrierLayout>,crosses:Vec<CrossLayout>,drives:Vec<DriveLayout>,
-    decays:Vec<DecayLayout>,effective:Vec<EffectiveLayout>,emission:usize,pub(crate) fourth:Option<FourthLayout>,beats:Beats}
+    decays:Vec<DecayLayout>,effective:Vec<EffectiveLayout>,effective_dropped:f64,emission:usize,pub(crate) fourth:Option<FourthLayout>,beats:Beats}
 /// A cluster's beats (module documentation, # The generator's beats): the distinct frequencies of its terms'
 /// residuals, ascending and closed under negation (−Ω_max … −Ω_min, Ω_min … Ω_max); the round-off within
 /// which a residual is static or one of them; their common period where they are harmonics of one frequency.
@@ -606,6 +606,8 @@ pub struct Model{
     /// The fourth order's H^(4) entries left out at beats the second order folds: their mixings' squares
     /// (`FourthLayout`).
     pub fourth_dropped:f64,
+    /// The dressing's drives left out at beats the rule folds (`layouts`): their mixings' squares.
+    pub effective_dropped:f64,
     /// The largest error on T, relative and per µK of T, of what the first order's transfer leaves out (`transfer_tables`): at the request's T within `FIRST_SHARE`.
     pub first_error:f64,
     /// The elimination's a-priori bound over the atoms' reach: the largest excited weight a ground
@@ -769,10 +771,10 @@ impl Model{
             c.interfering=(0..n*n).map(|x|(x/n,x%n)).filter(|&(j,m)|j!=m&&of(j)==of(m)&&trap_light.contains(&c.beams[j])&&trap_light.contains(&c.beams[m])).collect();}
         let centre=ground.centre;
         let mut model=Model{ground,geometry,trap_beam,trap_beams,trap_light,focused:vec![trap_unit],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
-            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3],work:0.},table_error:0.,table_limit:None,table_stalled:false,dressing:0.,fourth_dropped:0.,first_error:0.,resonance:0.,ringing_spread:0.,reach:vec![centre],
+            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3],work:0.},table_error:0.,table_limit:None,table_stalled:false,dressing:0.,fourth_dropped:0.,effective_dropped:0.,first_error:0.,resonance:0.,ringing_spread:0.,reach:vec![centre],
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
         model.choose_profiles(request)?;
-        model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();
+        model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();model.effective_dropped=model.layouts.iter().map(|l|l.effective_dropped).sum();
         Ok((model,bases))
     }
 
@@ -915,9 +917,14 @@ impl Model{
             for x in crosses.iter_mut(){x.at=size;x.at2=size+self.carriers[x.carrier].rank;size+=2*self.carriers[x.carrier].rank;}
             for x in decays.iter_mut(){x.at=size;size+=1;}
             // The dressing's drives: from a ground state of the cluster through a folded excited state
-            // H couples to an explicit one, per carrier that drives it there.
+            // H couples to an explicit one, per carrier that drives it there. They take the rule of every coupling (ground.rs): one above the cut whose mixing fits folds (`foldable`), left out with what it leaves booked,
+            // as the fourth order's fast entries (`fourth_keeps`) -- its size H's coupling times the folded state's admixture. Left out, not folded, its second order goes too: its rate over the run and its shift against the state's width, each within the numerical share of the
+            // population target (a closer one holds a rate between sublevels of a PGC's probe's rung, 0.011 /us off of 0.30 with it, 0.017 without). Kept, a beat of 13 THz, an 808 nm tweezer's distance from the D2 line, at 550 rad/us of a retro-reflected tweezer's tensor mixing, took
+            // the grid to 64 million nodes for a step of 0.7 us, at a mixing² of 4e-11.
             let folded_static=|a:usize,b:usize|g.dressed[a].contains(&b);
-            let mut effective=vec![];
+            let coupling=|a:usize,b:usize|g.excited_items.iter().find(|x|matches!(x.kind,ground::ExcitedKind::Static{a:p,b:q}if (p==a&&q==b)||(p==b&&q==a))).map_or(0.,|x|x.size);
+            let admixture=|c:usize,b:usize,e:usize|g.excited_items.iter().find(|x|matches!(x.kind,ground::ExcitedKind::Drive(d)if d==ground::Drive{carrier:c,excited:e,ground:b})).map_or(0.,|x|x.size/x.distance.max(f64::MIN_POSITIVE));
+            let mut effective=vec![];let mut effective_dropped=0.;
             for(p,&e)in cl.excited.iter().enumerate(){
                 let reached:Vec<usize>=(0..ne).filter(|&f|!cl.excited.contains(&f)&&folded_static(e,f)).collect();
                 if reached.is_empty(){continue;}
@@ -925,6 +932,9 @@ impl Model{
                     if !reached.iter().any(|&f|carrier.beams.iter().any(|&l|g.folded[l][(f,b)]!=Complex::ZERO)){continue;}
                     let(m,mx)=(&cl.combinations[n0+p],&cl.combinations[x]);
                     let residual=g.beat(0.,&(0..m.len()).map(|i|m[i]-mx[i]-i32::from(i==c)).collect::<Vec<i32>>());
+                    let strength:f64=reached.iter().map(|&f|coupling(e,f)*admixture(c,b,f)).sum();
+                    let width=g.decay[(e,e)].re.max(f64::MIN_POSITIVE);let left=ground::mixing(residual,strength,g.generator_scale).powi(2)*(1.+width*g.duration)+strength*strength/residual.abs().max(f64::MIN_POSITIVE)/width;
+                    if residual.abs()>=g.cut&&ground::foldable(residual,strength,g.generator_scale)&&left<=crate::solve::NUMERICAL_SHARE*crate::solve::POPULATION_TARGET{effective_dropped+=left;continue;}
                     effective.push(EffectiveLayout{row:n0+p,col:x,carrier:c,residual,at:size});size+=carrier.rank;
                 }}
             }
@@ -944,7 +954,7 @@ impl Model{
             if let Some(f)=fourth.as_mut(){f.place(&cl.frames,&beats);}
             // The first order's W^S and W^Q, last in the slice: `transfer_tables` takes them out once the grid is settled.
             let base=size;for gl in groups.iter_mut(){gl.w=size;size+=2*gl.first.len()*gl.entries.len();}
-            Layout{n,n0,size,base,h0,groups,carriers,crosses,drives,decays,effective,emission,fourth,beats}
+            Layout{n,n0,size,base,h0,groups,carriers,crosses,drives,decays,effective,effective_dropped,emission,fourth,beats}
         }).collect()
     }
 
@@ -1336,7 +1346,7 @@ impl Model{
             }}
             cl.groups.retain(|g|!g.entries.is_empty());
         }
-        self.layouts=self.layouts(mixing);self.fourth_dropped=self.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();
+        self.layouts=self.layouts(mixing);self.fourth_dropped=self.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();self.effective_dropped=self.layouts.iter().map(|l|l.effective_dropped).sum();
         Ok(())
     }
     /// The tables on grids of FIRST_NODES, then doubled (each grid's nodes computed once), the finer grid
