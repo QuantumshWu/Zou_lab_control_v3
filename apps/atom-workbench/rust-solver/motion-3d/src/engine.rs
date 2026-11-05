@@ -45,11 +45,11 @@
 //! a term whose residual its frame keeps: model.rs `Components`) changes within the step. Holding
 //! either at the step's middle ties the motion's step to the internal state's pace, so the step takes
 //! the internal state exactly instead -- multirate: the motion's step keeps its own size. The flow for
-//! dt/2 to (r_h, κ_h); there, the position held, the cluster takes its generator's components once
-//! (`Segment`), H(t) = H₀ + Σ_j e^{iΩ_j t} H_j, and ψ is propagated through the step on a grid of spacing δ
+//! dt/2 to (r_h, κ_h); there the cluster takes its generator's components once
+//! (`Segment`), H(t) = H₀ + Σ_j e^{iΩ_j t} H_j -- the tables and the envelopes held at r_h, the beams' phases advancing along the straight path r_h + v(t − t_m), each beat's frequency taking its q·v (model.rs, # The atom's path) --, and ψ is propagated through the step on a grid of spacing δ
 //! from its start, to the root of ‖ψ(t)‖² = θ (safeguarded Newton on ln‖ψ‖², whose derivative is
 //! −⟨ψ|i(H − H†)|ψ⟩/‖ψ‖²) where it has one. A jump's step is then redone to that root, as a cluster of ground
-//! states' is (`Engine::step`): flow, evolution and kick of that length, the jump at the place they reach, the rest of
+//! states' is (`Engine::step`): flow, evolution and kick of that length, each on its own path, so that the state and the photons' folded amplitudes hold the beams' phases of the place they reach; the jump at that place, the rest of
 //! the step a step of its own from the state the jump left, in the cluster it landed in. Held through the jump, the two
 //! states' forces act at the one r_h, against r_h + v (t* − τ)/2 and r_h + v t*/2: an error of the work, per jump
 //! (C₁ − C₂) v² t*(τ − t*)/2 with C the states' curvatures of ⟨ψ|H(r)|ψ⟩ at their fixed ψ -- a dressed ground state's a
@@ -179,8 +179,10 @@
 //! pole of beam l's carrier (model.rs `Model::doppler_ratio`). A step whose (kv/σ)² exceeds the
 //! solve's allowance (`Settings::doppler`) takes the exact response at its jumps (model.rs `Exact`), its hazard still the
 //! generator's first order, its error of that (kv/σ)² on the few atoms that hot;
-//! the atoms' mean (kv/σ)² is the ledger's. An explicit drive needs neither: the atom's motion through e^{ik_l·r} is
-//! its Doppler shift.
+//! the atoms' mean (kv/σ)² is the ledger's. An explicit drive needs neither: its beams' phases advance along the atom's path within the step (model.rs, # The atom's path), so that the state sees them at their Doppler-shifted
+//! frequencies at any step: an atom moving through a running wave is an atom at rest at the detuning less k·v (tests/engine.rs). No step check sees what their absence does: the phases' steps between steps stand for the Doppler shift only where the step
+//! resolves the internal state's memory, and a jump erases that memory. A weak probe's T_z at 100 us (a tweezer and 0.3 mW/cm² on z, 4096 atoms): 78.4, 82.9, 91.3, 94.1, 94.3 uK at 1.67, 0.71, 0.18, 0.045, 0.011 us held, where the step's doubling read 2.8 %, and 93.2, 93.1,
+//! 93.9, 94.3 on the path; detuned by +6 MHz, the lost friction over-heating, 42.3, 38.9, 38.2 against 38.3, 38.2, 38.1.
 //!
 //! # Loss
 //! An atom is lost when it is no longer bound to the trap beam and has left the trap's region: its
@@ -644,8 +646,8 @@ impl Segment{
         Segment{components:self.components.clone(),start:self.start,spacing:tau/steps as f64,how:How::Beating(Entries::new(&self.components,truncation/(2*steps) as f64)),dropped:self.dropped}
     }
     /// The beats a step resolves: the pairs ±Ω whose cost on the step (`bounds`) is within the share are
-    /// left out, the cheapest first while their costs' sum stays within it -- on ‖ψ‖ and on the static
-    /// force's integral ‖G₀‖τ. Their cost.
+    /// left out, the cheapest first while their costs' sum stays within it -- on ‖ψ‖ and on the
+    /// force's integral (‖G₀‖ + Σ_j ‖G_j‖)τ: a stimulated force stands in the beats its beams' phases move it to. Their cost.
     fn resolve(c:&mut Components,tau:f64,truncation:f64,horizon:f64)->f64{
         let half=c.omegas().len()/2;let mut work=BOUNDS.take();let scale=Segment::bounds(c,tau,truncation,horizon,&mut work);let Bounds{pairs,dropped,..}=&mut work;
         // The cheapest first, in their order where they cost the same.
@@ -657,13 +659,13 @@ impl Segment{
         moved
     }
     /// Per pair of beats ±Ω (`resolve`), into `work`: its index and what leaving it out costs a step, on the state and
-    /// on the force's integral; and the static force's integral ‖G₀‖τ, returned. Dropping B e^{iΩt} from H moves the
+    /// on the force's integral; and the force's integral (‖G₀‖ + Σ_j ‖G_j‖)τ, returned. Dropping B e^{iΩt} from H moves the
     /// propagator by ‖∫ U_rest(τ,s) B U(s) e^{iΩs} ds‖ (Duhamel's formula); integrated by parts it splits
     /// into boundary terms, which successive steps' cancel -- a trajectory pays them once over its horizon H,
     /// until a jump --, and an integral that accumulates: the cost is boundary·τ/H + integral, the smaller
     /// of two bounds. Once: boundary 2b/|Ω|, integral 2hbτ/|Ω|; twice: boundary 2b/|Ω| + 2x/Ω² and integral
-    /// τy/Ω², x = ‖[H₀,B]‖ + 3b b′, y = ‖[H₀,[H₀,B]]‖ + 3‖[H₀,B]‖ b′ + 6h b b′ + 3b b′² + 2b h″ + |Ω| b b′ --
-    /// b = ‖B‖, h the generator's bound, b′ all the beats' sizes, h″ the other beats' Σ|Ω_k|‖H_k‖ (norms
+    /// τy/Ω², x = ‖[H₀,B]‖ + 3b b′, y = ‖[H₀,[H₀,B]]‖ + 3‖[H₀,B]‖ b′ + 6h b b′ + 3b b′² + 2b h″ + |Ω| b b_± --
+    /// b = ‖B‖, h the generator's bound, b′ all the beats' sizes, h″ the other beats' Σ|Ω_k|‖H_k‖, b_± the pair's own: only a beat with its own negative stands still, every other's product is the slower beat's in h″ (norms
     /// above the spectral one). The force's integral alike, its integrand's derivatives ⟨ψ|G|ψ⟩/⟨ψ|ψ⟩
     /// within 4hg and (24h² + 4h″)g (h″ every beat's). Either bound holds the first boundary term: where that alone exceeds
     /// `share`, no pair of it is left out, and it stands for the bound without the commutators.
@@ -671,19 +673,20 @@ impl Segment{
         let n=c.n();let size=|h:&[Complex]|column_norm(h,n).max(row_norm(h,n));let half=c.omegas().len()/2;let h0=c.hamiltonian();
         let all=c.beats().map(|b|size(b.hamiltonian)).sum::<f64>();let bound=size(h0)+all;
         let pace=c.beats().map(|b|b.omega.abs()*size(b.hamiltonian)).sum::<f64>();
-        let scale=(0..3).map(|a|size(c.gradient(a))).fold(0.,f64::max)*tau;let once=(tau/horizon).min(1.);
+        let scale=(0..3).map(|a|size(c.gradient(a))+c.beats().map(|b|size(b.gradient[a])).sum::<f64>()).fold(0.,f64::max)*tau;let once=(tau/horizon).min(1.);
         let Bounds{pairs,left,right,first,second,..}=work;
-        let mut state=|b:&[Complex],w:f64,others:f64|->f64{
+        let mut state=|b:&[Complex],w:f64,others:f64,own:f64|->f64{
             let m=size(b);if 2.*m/w*once>share{return 2.*m/w*once;}
             commutator(h0,b,n,left,right,first);commutator(h0,first,n,left,right,second);let(x1,x2)=(size(first),size(second));
-            let x=x1+3.*m*all;let y=x2+3.*x1*all+6.*bound*m*all+3.*m*all*all+2.*m*others+w*m*all;
+            let x=x1+3.*m*all;let y=x2+3.*x1*all+6.*bound*m*all+3.*m*all*all+2.*m*others+w*m*own;
             (2.*m/w*once+2.*bound*m*tau/w).min((2.*m/w+2.*x/(w*w))*once+tau*y/(w*w))};
         let force=|g:f64,w:f64|(2.*g/w*once+4.*bound*g*tau/w).min((2.*g/w+8.*bound*g/(w*w))*once+tau*(24.*bound*bound+4.*pace)*g/(w*w));
         pairs.clear();
         for i in 0..half{
-            let(down,up)=(c.beat(half-1-i),c.beat(half+i));let w=up.omega;
-            let others=pace-w*(size(down.hamiltonian)+size(up.hamiltonian));
-            let moved=state(down.hamiltonian,w,others)+state(up.hamiltonian,w,others);
+            let(down,up)=(c.beat(half-1-i),c.beat(half+i));let w=up.omega.abs();
+            if w==0.{pairs.push((i,f64::INFINITY,f64::INFINITY));continue;}
+            let own=size(down.hamiltonian)+size(up.hamiltonian);let others=pace-w*own;
+            let moved=state(down.hamiltonian,w,others,own)+state(up.hamiltonian,w,others,own);
             pairs.push((i,moved,(0..3).map(|a|force(size(down.gradient[a]),w)+force(size(up.gradient[a]),w)).fold(0.,f64::max)));
         }
         scale
@@ -726,16 +729,18 @@ impl Segment{
         let widest=0.5*(2880.*allowed/ratio).powf(0.25);let steps=(remaining/widest).ceil().max(1.);
         Some(remaining/steps)
     }
-    /// The state of ψ.
-    fn enter(&self,psi:&[Complex])->State{
-        let n=self.n();let mut x=[Complex::ZERO;MOST_MIXED];
-        match &self.how{How::Spectral(s)=>{let inverse=&s.eigen.inverse;for a in 0..n{x[a]=(0..n).fold(Complex::ZERO,|s,b|s+inverse[a*n+b]*psi[b]);}},_=>x[..n].copy_from_slice(&psi[..n])}
-        x
+    /// The gauge's phases over a time from the path's middle: ψ_s = e^{iK_s·v(t − t_m)} x_s (model.rs `Components`).
+    fn gauged(&self,x:&mut [Complex],elapsed:f64){let c=&self.components;if c.gauged{for a in 0..self.n(){x[a]=x[a]*Complex::cis(c.gauge[a]*elapsed);}}}
+    /// The state of ψ at the time `at`.
+    fn enter(&self,psi:&[Complex],at:f64)->State{
+        let n=self.n();let mut y=[Complex::ZERO;MOST_MIXED];y[..n].copy_from_slice(&psi[..n]);self.gauged(&mut y,self.components.middle-at);
+        match &self.how{How::Spectral(s)=>{let inverse=&s.eigen.inverse;let mut x=[Complex::ZERO;MOST_MIXED];for a in 0..n{x[a]=(0..n).fold(Complex::ZERO,|s,b|s+inverse[a*n+b]*y[b]);}x},_=>y}
     }
-    /// ψ of a state.
-    fn leave(&self,x:&State,psi:&mut [Complex]){
+    /// ψ of a state at the time `t`.
+    fn leave(&self,x:&State,psi:&mut [Complex],t:f64){
         let n=self.n();
         match &self.how{How::Spectral(s)=>{let vectors=&s.eigen.vectors;for a in 0..n{psi[a]=(0..n).fold(Complex::ZERO,|s,b|s+vectors[a*n+b]*x[b]);}},_=>psi[..n].copy_from_slice(&x[..n])}
+        self.gauged(psi,t-self.components.middle);
     }
     /// A state propagated over `len` from the time t; `node`: the grid's node i where it is the whole
     /// spacing from it.
@@ -790,7 +795,7 @@ impl Segment{
     /// from `at`, weighted by the state's amplitudes.
     fn evolve(&self,psi:&mut [Complex],at:f64,remaining:f64,threshold:f64)->(f64,bool,[f64;3]){
         let(n,end)=(self.n(),at+remaining);let mut impulse=[0.;3];
-        let mut x=self.enter(psi);let mut t=at;
+        let mut x=self.enter(psi,at);let mut t=at;
         // The grid: a spectral segment's from `at`, its spacing weighted by the state's amplitudes (`weighted`)
         // and its phases over it; the others' from the segment's start.
         let weighted=self.weighted(&x,remaining,threshold);
@@ -814,12 +819,12 @@ impl Segment{
                 let mut h=x;self.advance(&mut h,t,0.5*s,None);let mut y=h;self.advance(&mut y,t+0.5*s,0.5*s,None);
                 let(fh,_)=self.force(&h,t+0.5*s,None);let(fs,_)=self.force(&y,t+s,None);
                 for a in 0..3{impulse[a]+=s/6.*(fa[a]+4.*fh[a]+fs[a]);}
-                self.leave(&y,psi);return(t+s-at,true,impulse);
+                self.leave(&y,psi,t+s);return(t+s-at,true,impulse);
             }
             for a in 0..3{impulse[a]+=width/6.*(fa[a]+4.*fm[a]+fb[a]);}
             x=last;fa=fb;na=nb;t=b;if whole{i+=2;}
         }
-        self.leave(&x,psi);
+        self.leave(&x,psi,end);
         (remaining,false,impulse)
     }
     /// The time s in (0, width] at which ‖ψ(s)‖² = threshold from the panel's start x (its middle at half
@@ -1092,6 +1097,17 @@ impl<'a> Engine<'a>{
         (n0,nh,n1,place,kick,middle)
     }
 
+    /// A cluster's components over a step of τ from `start` through a point on the atom's path (model.rs `Model::on_path`, # The atom's path), its momentum the step's middle's: the point's and half the kick the step takes, of its reference (c, w)
+    /// less its harmonic part, from the force at the point on the state at the step's start.
+    fn on_path(&self,cluster:usize,point:&Point,psi:&[Complex],start:f64,tau:f64,(c,w):([f64;3],f64))->Components{
+        let(m,s)=(self.model,&self.settings);let mut components=m.components(cluster,point);
+        if m.moves(cluster){
+            let middle=start+0.5*tau;let force=components.force_at(middle,psi);let harmonic=self.harmonic(std::array::from_fn(|a|point.r[a]-c[a]));
+            let kappa=std::array::from_fn(|a|point.kappa[a]+if s.free[a]{0.5*tau*(force[a]-w*harmonic[a])}else{0.});
+            m.on_path(cluster,&mut components,kappa,middle);
+        }
+        components
+    }
     /// The exact step of τ (module documentation): the flow for τ/2; at the held point the cluster's
     /// generator at the middle time once, the internal state propagated exactly (`jumps` false: with no
     /// jump, the step-doubling check's), the impulse along it; the kick; the flow for τ/2. The kick's
@@ -1105,7 +1121,7 @@ impl<'a> Engine<'a>{
         let reference=self.reference(t.r);let(c,w)=reference;
         self.flow(t,0.5*tau,reference);
         let point=m.point(t.r,t.kappa);let start=t.time;
-        let segment=Segment::new(m.components(t.cluster,&point),start,tau,s.truncation,s.beats*(tau/s.dt).min(1.),s.horizon,s.node_phase);t.beats=t.beats.max(segment.dropped/tau);
+        let segment=Segment::new(self.on_path(t.cluster,&point,&t.psi,start,tau,reference),start,tau,s.truncation,s.beats*(tau/s.dt).min(1.),s.horizon,s.node_phase);t.beats=t.beats.max(segment.dropped/tau);
         let(taken,jumped,impulse)=segment.evolve(&mut t.psi,start,tau,if jumps{t.threshold}else{0.});drop(segment);
         if let(true,Some(from))=(jumped,before){
             let beats=t.beats;*t=from;t.beats=beats;
@@ -1124,19 +1140,19 @@ impl<'a> Engine<'a>{
 
     /// The exact step's segment of a cluster at a point over τ from `start` (`Probe`).
     pub fn probe(&self,cluster:usize,point:&Point,start:f64,tau:f64,psi:&[Complex])->Probe{
-        let clock=std::time::Instant::now();let c=self.model.components(cluster,point);let built=clock.elapsed().as_secs_f64();
+        let clock=std::time::Instant::now();let c=self.on_path(cluster,point,psi,start,tau,self.reference(point.r));let built=clock.elapsed().as_secs_f64();
         let mut work=Bounds::default();Segment::bounds(&c,tau,self.settings.beats,self.settings.horizon,&mut work);let half=c.omegas().len()/2;let omegas=c.omegas()[half..].to_vec();
         let clock=std::time::Instant::now();let s=Segment::new(c,start,tau,self.settings.truncation,self.settings.beats,self.settings.horizon,self.settings.node_phase);let segment=clock.elapsed().as_secs_f64();
         let kept=s.components.omegas();
         let(path,node)=match &s.how{How::Spectral(_)=>("spectral",[0.;2]),How::Taylor{..}=>("taylor",[0.;2]),How::Beating(e)=>("beating",e.node_work(s.spacing))};
-        let weighted=s.weighted(&s.enter(psi),tau,0.).map(|d|(tau/d).round() as usize);
+        let weighted=s.weighted(&s.enter(psi,start),tau,0.).map(|d|(tau/d).round() as usize);
         Probe{path,spacing:s.spacing,nodes:(tau/s.spacing).round() as usize,beats:work.pairs.iter().map(|&(i,x,_)|(omegas[i],x,!kept.contains(&omegas[i]))).collect(),share:self.settings.beats,seconds:[built,segment],weighted,node}
     }
     /// The largest phase whose grid differs from the next coarser's at a trajectory's state: its step in one panel of two spacings. None where its cluster takes no beating segment (solve.rs `grid_phase`).
     pub fn coarsest_phase(&self,t:&Trajectory)->Option<f64>{
         if !self.takes_exact(t.cluster){return None;}
         let(m,s)=(self.model,&self.settings);
-        let segment=Segment::new(m.components(t.cluster,&m.point(t.r,t.kappa)),t.time,s.dt,s.truncation,s.beats,s.horizon,s.node_phase);
+        let segment=Segment::new(self.on_path(t.cluster,&m.point(t.r,t.kappa),&t.psi,t.time,s.dt,self.reference(t.r)),t.time,s.dt,s.truncation,s.beats,s.horizon,s.node_phase);
         matches!(segment.how,How::Beating(_)).then(||s.node_phase*s.dt/(2.*segment.spacing))
     }
     /// A beating segment's grid at `phase` against one of half that spacing, one jump-free step from a trajectory's state at its
@@ -1144,7 +1160,7 @@ impl<'a> Engine<'a>{
     /// takes no beating segment (solve.rs `grid_phase`).
     pub fn grid_error(&self,t:&Trajectory,phase:f64)->Option<[f64;3]>{
         if !self.takes_exact(t.cluster){return None;}
-        let(m,s)=(self.model,&self.settings);let n=m.dimension(t.cluster);let c=m.components(t.cluster,&m.point(t.r,t.kappa));
+        let(m,s)=(self.model,&self.settings);let n=m.dimension(t.cluster);let c=self.on_path(t.cluster,&m.point(t.r,t.kappa),&t.psi,t.time,s.dt,self.reference(t.r));
         let coarse=Segment::new(c,t.time,s.dt,s.truncation,s.beats,s.horizon,phase);if !matches!(coarse.how,How::Beating(_)){return None;}
         let fine=coarse.refined(s.dt,s.truncation);let(mut a,mut b)=(t.psi,t.psi);
         let(_,_,one)=coarse.evolve(&mut a,t.time,s.dt,0.);let(_,_,two)=fine.evolve(&mut b,t.time,s.dt,0.);
@@ -1154,7 +1170,7 @@ impl<'a> Engine<'a>{
     /// One step's landings from a trajectory's state (`Landings`) on a grid of half the spacing at `phase` and on the grid at it, none where its cluster takes no beating grid (the first is then its own
     /// propagation); `draws` the reads' places, each in its equal share of the step, in [0, 1), the same on both (solve.rs `landed_excess`).
     pub fn grid_landings(&self,t:&Trajectory,phase:f64,groups:&[usize],count:usize,draws:&[f64])->(Landings,Option<Landings>){
-        let(m,s)=(self.model,&self.settings);let point=m.point(t.r,t.kappa);let c=m.components(t.cluster,&point);
+        let(m,s)=(self.model,&self.settings);let point=m.point(t.r,t.kappa);let c=self.on_path(t.cluster,&point,&t.psi,t.time,s.dt,self.reference(t.r));
         let at=|c:Components,phase:f64|Segment::new(c,t.time,s.dt,s.truncation,s.beats,s.horizon,phase);
         let coarse=m.beating(t.cluster).then(||at(c.clone(),phase)).filter(|x|matches!(x.how,How::Beating(_)));
         let fine=match &coarse{Some(x)=>x.refined(s.dt,s.truncation),None=>at(c,0.5*phase)};
@@ -1172,7 +1188,9 @@ impl<'a> Engine<'a>{
             let to=t.time+s.dt*(k as f64+place)/draws.len() as f64;let node=t.time+((to-t.time)/panel).floor()*panel;
             if node>at{segment.evolve(&mut x,at,node-at,0.);at=node;}
             let mut y=x;if to>at{segment.evolve(&mut y,at,to-at,0.);}
-            let photons=m.photons(t.cluster,point,&y,to,None);
+            // The photons at the place the path reaches at the read: the amplitude y holds the beams' phases there.
+            let there=m.point(std::array::from_fn(|a|point.r[a]+m.hbar_over_mass*point.kappa[a]*(to-t.time-0.5*s.dt)),point.kappa);
+            let photons=m.photons(t.cluster,&there,&y,to,None);
             for(class,u)in cl.classes.iter().zip(&photons.amplitude){for(row,&state)in g.clusters[class.target].states.iter().enumerate(){sources[groups[state]]+=(0..3).map(|a|u[a][row].norm_sqr()).sum::<f64>();}}
         }
         segment.evolve(&mut x,at,t.time+s.dt-at,0.);
@@ -1462,7 +1480,7 @@ mod tests{
         for(b,g)in raw{hs.push(b);gs.push(g);}
         let matrices:Vec<Complex>=hs.into_iter().flatten().chain(gs.into_iter().flat_map(|g|g.into_iter().flatten())).collect();
         let beats:Vec<f64>=omegas.iter().rev().map(|&w|-w).chain(omegas.iter().copied()).collect();
-        Components{n,scalar:0.,parts:1+beats.len(),places:(1..=beats.len()).collect(),omegas:beats,matrices}
+        Components{n,scalar:0.,parts:1+beats.len(),places:(1..=beats.len()).collect(),omegas:beats,matrices,gauge:[0.;MOST_MIXED],middle:0.,gauged:false}
     }
     /// H_q of a test's components, before any beat is left out.
     fn h_of(c:&mut Components,q:usize)->&mut [Complex]{let nn=c.n*c.n;&mut c.matrices[q*nn..(q+1)*nn]}
@@ -1642,7 +1660,7 @@ mod tests{
         for a in 3..n{h_of(&mut c,0)[a*n+a]+=Complex::new(-400.,0.);}
         let mut psi=state(n,41);for z in psi[3..n].iter_mut(){*z=*z*0.01;}let norm=norm2(&psi,n).sqrt();for z in psi[..n].iter_mut(){*z=*z*(1./norm);}
         let s=Segment::new(c.clone(),0.,tau,1e-9,1e-9,tau,node_phase());assert!(matches!(s.how,How::Spectral{..}));
-        let weighted=s.weighted(&s.enter(&psi),tau,0.).unwrap();
+        let weighted=s.weighted(&s.enter(&psi,0.),tau,0.).unwrap();
         // The cross components' weight is about the fast part's amplitude, 1%: (ω·2δ)⁴ may grow about a hundredfold.
         assert!(weighted>=2.*s.spacing,"weighted {weighted:e} against the rule's {:e}",s.spacing);
         let fine=Segment{components:c,start:0.,spacing:s.spacing/16.,how:How::Taylor{propagator:exponential(s.components.hamiltonian(),n,s.spacing/16.),decay:vec![]},dropped:0.};

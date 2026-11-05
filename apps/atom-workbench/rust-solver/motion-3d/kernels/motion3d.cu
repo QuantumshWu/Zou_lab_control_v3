@@ -198,7 +198,7 @@ struct Unit{int first,count;float norm,focus,profile;int pad;};
 // entries start (item_first[positions + 3e + list] for the place e = row·n + col, `Program::items`), its sparse groups' residual
 // beats (residuals[beats, beats + nbeats)) and its states' ground positions. For its exact step (`exact`:
 // explicit excited states or beats): its ground states n0, its components' parts (1 + its beats, the beats
-// omegas[omegas, omegas + parts − 1) and their period after them, 0 without one), its explicit states'
+// omegas[omegas, omegas + parts − 1), their wave vectors at the same place (`waves`, three each)), its states' wave vectors on the atom's path (labels[labels, ..), three each; −1: none, model.rs `Layout`) and whether it has a path to take (`moves`, `Model::moves`), its explicit states'
 // terms terms[terms, terms + nterms) and dressed photons (the tables at `emission`), its explicit states'
 // excited positions (excited_list[excited]), its groups' parts (group_parts[group_parts + g]) and its
 // sparse groups' beats' (residual_parts[residual_parts + b]). The near light's shifts ΔE_a^d its exact
@@ -206,7 +206,7 @@ struct Unit{int first,count;float norm,focus,profile;int pad;};
 // responses (bits; ground.rs `Ground::unmixed`, `carrier_responses`). The field pairs of its groups with a first order:
 // first_fields[first_fields, first_fields + nfirst) (`first_table`). The beams of its kept drives, by their first drive: driven_beams[driven, driven + ndriven).
 struct Cluster{int n,size,table,h0,groups,ngroups,classes,nclasses,coherent,ncoherent,carriers,fourth,frames,positions,beats,nbeats,
-    n0,exact,parts,omegas,terms,nterms,emission,excited,group_parts,residual_parts,first_fields,nfirst;int states[MAXM];u64 shifts;u32 mixed;int driven,ndriven,pad;};
+    n0,exact,parts,omegas,terms,nterms,emission,excited,group_parts,residual_parts,first_fields,nfirst;int states[MAXM];u64 shifts;u32 mixed;int driven,ndriven,labels,moves,pad;};
 // A cluster's fourth-order tables (model.rs `FourthLayout`, # Fourth order): their places in its node
 // slice per carrier (−1: none), the carriers that drive it carriers[0, on). H^(4)'s quartic part per
 // pair (c, d), r_c² r_d² matrices n × n of the monomials E^c*_k1 E^c_k2 E^d*_k3 E^d_k4; per carrier
@@ -241,9 +241,11 @@ struct Photon{int carrier,col,to,row;double residual;};
 struct Coherent{int channels,count;};
 struct Channel{int carrier,col;double residual;};
 // A term of a cluster's explicit states (model.rs `exact_terms`): a kept drive (kind 0), a decay cross term
-// (1), a decay (2) or a dressing's drive (3); its entry, carrier, part and its mirror's part (the negative
-// residual's), its tables' place (a cross term's X_k, and at `at2` its X2_k), a drive's U_k.
-struct Term{int kind,row,col,carrier,part,mirror,at,at2;float u[MOST_RANK][2];};
+// (1), a decay (2) or a dressing's drive (3); its entry, carrier, a decay's part, its tables' place (a cross term's X_k, and at `at2` its X2_k),
+// its beams' tones tones[tones, tones + ntones), a drive's U_k.
+struct Term{int kind,row,col,carrier,part,at,at2,tones,ntones;float u[MOST_RANK][2];};
+// A beam's share of a term (model.rs `Tone`): the beam, the part of its beat and of its negative.
+struct Tone{int beam,part,mirror;};
 // A class's photon from an explicit state (ground.rs `Class::direct`): its place in the cluster, the ground
 // state it lands in and that state's row in the target, its residual.
 struct Direct{int state,to,row,pad;double residual;};
@@ -281,6 +283,7 @@ struct Program{
     // their focus intensity summed, Σ_u s(0) N W^f[:, a] W^f[:, a]† (lane-major, entry j of row i at [j·NE + i]).
     const float2* kept;const float2* decay;const NearUnit* near_units;const float2* unit_couplings;const int2* vias;const int* via_first;const float2* ground_block;const float* term_floor;const float2* powers;
     const FirstField* first_fields;const int* driven_beams;
+    const Tone* tones;const double* waves;const float* labels;
     int nbeams,ncarriers,nclusters,focused,nodes,fields,nnear,doppler,loss;
     int weights;                        // where a jump's scratch holds the fourth order's weights
     int nunits;
@@ -2046,7 +2049,7 @@ __device__ float2 taylor(const float2 (&b)[8],const Series& S,float tau,float2 x
 // spacing) or static (the series on the vector) -- and its exponentials' series, and
 // in the scratch its parts' phases at the step's start, their norms (`exact_norms`) and their Ω_q. Its
 // times are single precision from the step's start (a step's τ holds them to 1e-7 of itself).
-struct Segment{int n,parts;unsigned kept;int beating,steps;float delta;Series series;const float2* base;const float* F;const float* w;float4* v;};
+struct Segment{int n,parts;unsigned kept;int beating,steps;float delta,gauge;Series series;const float2* base;const float* F;const float* w;float4* v;};
 
 // A kept beat's phase e^{iΩ_q t}: its phase at the step's start (double precision) times the rest's.
 __device__ __forceinline__ float2 beat_phase(const Segment& S,int q,float t){float s,c;sincosf(S.w[q]*t,&s,&c);return S.base[q]*make_float2(c,s);}
@@ -2246,35 +2249,35 @@ __device__ __noinline__ void exact_components(Warp& W,const Cluster& C,int lane,
             for(int e=lane;e<nn;e+=32){const int part=P.quartic_parts[Q.parts+e];if(part>=0)X[part*nn+e]+=m*entry(W,tables+Q.at+e,C.size);}
         }
     }
-    // The explicit states' terms (model.rs `exact_terms`), a lane each: a kept drive's Σ_k E_k U_k, a decay
-    // cross term's (i/2) Σ_k (E_k X_k − E^D_k X2_k), a decay's value, a dressing's drive's Σ_k E_k Y_k, and their mirrors at the
-    // negative residual's part; the drives' gradients.
+    // The explicit states' terms (model.rs `exact_terms`), a lane each, beam by beam (`Tone`): a kept drive's a_l Σ_k c_lk U_k, a decay
+    // cross term's (i/2) a_l Σ_k c_lk (X_k − w_l X2_k), a dressing's drive's a_l Σ_k c_lk Y_k, and their mirrors at the
+    // negative beat's part; the drives' gradients; a decay's value.
     for(int i=lane;i<C.nterms;i+=32){
-        const Term T=P.terms[C.terms+i];const int at=T.row*n+T.col,mirror=T.col*n+T.row;const Fields& fl=pt.fields[T.carrier];const int rank=P.carriers[T.carrier].rank;
-        float2 v=zero2(),w=zero2(),g[3]={zero2(),zero2(),zero2()};
-        if(T.kind==0){
-            for(int k=0;k<rank;k++){const float2 u=make_float2(T.u[k][0],T.u[k][1]);v+=fl.e[k]*u;
-                #pragma unroll
-                for(int a=0;a<3;a++)g[a]+=fl.grad[k][a]*u;}
-            w=conj(v);
-        }else if(T.kind==1){
-            float2 z=zero2();for(int k=0;k<rank;k++){float2 x,x2;entry_pair(pt,tables+T.at+k,tables+T.at2+k,C.size,x,x2);z+=fl.e[k]*x-fl.doppler[k]*x2;}
-            v=make_float2(-0.5f*z.y,0.5f*z.x);w=make_float2(0.5f*z.y,0.5f*z.x);
-        }else if(T.kind==2)v=entry(W,tables+T.at,C.size);
-        else for(int k=0;k<rank;k++){
-            float2 ds[MOST_FOCUSED];const float2 y=entry_slopes(W,tables+T.at+k,C.size,ds);v+=fl.e[k]*y;
+        const Term T=P.terms[C.terms+i];const int at=T.row*n+T.col,mirror=T.col*n+T.row;
+        if(T.kind==2){atomic_add(X+T.part*nn+at,entry(W,tables+T.at,C.size));continue;}
+        const int rank=P.carriers[T.carrier].rank;float2 x[MOST_RANK],x2[MOST_RANK],dy[MOST_RANK][MOST_FOCUSED];
+        for(int k=0;k<rank;k++){
+            if(T.kind==0)x[k]=make_float2(T.u[k][0],T.u[k][1]);
+            else if(T.kind==1)entry_pair(pt,tables+T.at+k,tables+T.at2+k,C.size,x[k],x2[k]);
+            else x[k]=entry_slopes(W,tables+T.at+k,C.size,dy[k]);
+        }
+        for(int j=0;j<T.ntones;j++){
+            const Tone O=P.tones[T.tones+j];const int l=O.beam;const Beam& b=P.beams[l];const float2 al=pt.a[l];
+            const float shift=T.kind==1?first_shift(pt,b,l):0.f;float2 sum=zero2();
+            for(int k=0;k<rank;k++){const float2 c=make_float2(b.coefficients[k][0],b.coefficients[k][1]);sum+=c*(T.kind==1?x[k]-shift*x2[k]:x[k]);}
+            const float2 z=al*sum;
+            if(T.kind==1){atomic_add(X+O.part*nn+at,make_float2(-0.5f*z.y,0.5f*z.x));atomic_add(X+O.mirror*nn+mirror,make_float2(0.5f*z.y,0.5f*z.x));continue;}
+            atomic_add(X+O.part*nn+at,z);atomic_add(X+O.mirror*nn+mirror,conj(z));
             #pragma unroll
             for(int a=0;a<3;a++){
-                g[a]+=fl.grad[k][a]*y;
-                #pragma unroll
-                for(int f=0;f<MOST_FOCUSED;f++)if(f<P.focused)g[a]+=pt.grad_s[f][a]*(fl.e[k]*ds[f]);
+                float2 g=W.gradient_a[l][a]*sum;
+                if(T.kind==3)for(int k=0;k<rank;k++){
+                    const float2 c=make_float2(b.coefficients[k][0],b.coefficients[k][1]);
+                    #pragma unroll
+                    for(int f=0;f<MOST_FOCUSED;f++)if(f<P.focused)g+=pt.grad_s[f][a]*(al*(c*dy[k][f]));
+                }
+                atomic_add(G+(3*O.part+a)*nn+at,g);atomic_add(G+(3*O.mirror+a)*nn+mirror,conj(g));
             }
-        }
-        if(T.kind==3)w=conj(v);
-        atomic_add(X+T.part*nn+at,v);if(T.kind!=2)atomic_add(X+T.mirror*nn+mirror,w);
-        if(T.kind==0||T.kind==3){
-            #pragma unroll
-            for(int a=0;a<3;a++){atomic_add(G+(3*T.part+a)*nn+at,g[a]);atomic_add(G+(3*T.mirror+a)*nn+mirror,conj(g[a]));}
         }
     }
     __syncwarp();
@@ -2315,23 +2318,24 @@ __device__ void commutator(const float2* A,const float2* B,float2* out,int n,int
 // and on the force's integral -- Duhamel's formula integrated by parts, its boundary terms once over the
 // horizon --, the cheapest first while their sums stay within `share`; a side whose first boundary
 // term alone exceeds the share takes no commutators, that term its cost. The parts
-// kept (bits); their cost into `dropped`. F: per part ‖H_q‖₁, then the sizes of H_q, then of G_q per axis.
-__device__ unsigned exact_resolve(float2* X,const float* F,const double* omegas,int n,int Q,double tau,double share,int lane,double& dropped){
+// kept (bits); their cost into `dropped`. F: per part ‖H_q‖₁, then the sizes of H_q, then of G_q per axis; om: per part its frequency on the atom's path.
+__device__ unsigned exact_resolve(float2* X,const float* F,const float* om,int n,int Q,double tau,double share,int lane,double& dropped){
     unsigned kept=Q>=32?0xffffffffu:(1u<<Q)-1u;dropped=0.;const int half=(Q-1)/2;if(half==0)return kept;
     const int nn=n*n;float2* W1=X+(5*Q+2)*nn;float2* W2=W1+nn;
-    double all=0.,pace=0.;for(int q=1;q<Q;q++){all+=(double)F[Q+q];pace+=fabs(omegas[q-1])*(double)F[Q+q];}
+    double all=0.,pace=0.;for(int q=1;q<Q;q++){all+=(double)F[Q+q];pace+=fabs((double)om[q])*(double)F[Q+q];}
     const double bound=(double)F[Q]+all,once=fmin(tau/P.horizon,1.);
-    double scale=0.;for(int a=0;a<3;a++)scale=fmax(scale,(double)F[2*Q+a]);scale*=tau;
+    double scale=0.;for(int a=0;a<3;a++){double along=0.;for(int q=0;q<Q;q++)along+=(double)F[2*Q+3*q+a];scale=fmax(scale,along);}scale*=tau;
     double cost[16],push[16];int order[16];
     for(int i=0;i<half;i++){
         // One division a pair, and the force's bound linear in the gradients' sizes, one coefficient for both of a pair's sides per axis: a double's division costs 2000 cycles a warp, and 30 a pair took a quarter of the kernel on PGC1D_BIAS_TILT.
-        const int down=half-i,up=1+half+i;const double w=omegas[up-1],iw=1./w,iw2=iw*iw,others=pace-w*((double)F[Q+down]+(double)F[Q+up]);double x=0.;
+        const int down=half-i,up=1+half+i;const double w=fabs((double)om[up]),iw=1./w,iw2=iw*iw,others=pace-w*((double)F[Q+down]+(double)F[Q+up]);double x=0.;
+        if(w==0.){cost[i]=__longlong_as_double(0x7ff0000000000000ll);push[i]=cost[i];order[i]=i;continue;}
         for(int side=0;side<2;side++){
             const int q=side?up:down;const double m=(double)F[Q+q],edge=2.*m*iw*once;float unused;
             if(edge>share){x+=edge;continue;}
             commutator(X,X+q*nn,W1,n,lane);const double x1=(double)msize(W1,n,lane,unused);
             commutator(X,W1,W2,n,lane);const double x2=(double)msize(W2,n,lane,unused);
-            const double xx=x1+3.*m*all,y=x2+3.*x1*all+6.*bound*m*all+3.*m*all*all+2.*m*others+w*m*all;
+            const double xx=x1+3.*m*all,y=x2+3.*x1*all+6.*bound*m*all+3.*m*all*all+2.*m*others+w*m*((double)F[Q+down]+(double)F[Q+up]);
             x+=fmin(edge+2.*bound*m*tau*iw,edge+(2.*xx*iw2*once+tau*y*iw2));
         }
         const double per=fmin(2.*iw*once+4.*bound*tau*iw,(2.*iw+8.*bound*iw2)*once+tau*(24.*bound*bound+4.*pace)*iw2);double f=0.;
@@ -2361,15 +2365,37 @@ __device__ int static_panels(float x){
 // (‖H₀‖₁ + Σ‖H_j‖₁ + max|Ω|/2)δ is within the grid's (`Program::grid_phase`), each exponential within its part of the larger of
 // the truncation and that share and at least of single precision's round-off, ‖w₁H(t₁) + w₂H(t₂)‖ ≤ ½‖H₀‖₁ + (|w₁| + |w₂|)Σ‖H_j‖₁;
 // else `static_panels`, the series to the round-off, and its decay i(H₀ − H₀†) for the roots.
-__device__ __noinline__ Segment exact_segment(Warp& W,int k,double start,double tau,int lane,float2* X,float& beats){
-    const Cluster C=P.clusters[k];Segment S;S.n=C.n;S.parts=C.parts;
-    const int n=C.n,nn=n*n,Q=C.parts;const double* omegas=P.omegas+C.omegas;
+__device__ __noinline__ Segment exact_segment(Warp& W,Traj& t,const Reference& H,double tau,int lane,float2* X){
+    const int k=t.cluster;const double start=t.time;float& beats=t.beats;
+    const Cluster C=P.clusters[k];Segment S;S.n=C.n;S.parts=C.parts;S.gauge=0.f;S.v=W.vec;
+    const int n=C.n,nn=n*n,Q=C.parts;const double* omegas=P.omegas+C.omegas;const double* waves=P.waves+3*C.omegas;
     float2* base=X+(5*Q+4)*nn;float* F=(float*)(base+Q);float* w=F+5*Q;S.base=base;S.F=F;S.w=w;
     SPAN_BEGIN(componentsp);exact_components(W,C,lane,X);SPAN_END(SPAN_COMPONENTS,componentsp);
+    // The atom's velocity on its path (engine.rs `Engine::on_path`), the step's middle's: the point's momentum and half the kick the step takes, from the force at the point on the state at the step's start (`exact_part`'s kick); the states' diagonal shifts K_s·v, and every beat's q·v below.
+    double v[3]={0.,0.,0.};
+    if(C.moves){
+        if(lane<Q){base[lane]=lane==0?make_float2(1.f,0.f):cis(omegas[lane-1]*(start+0.5*tau));w[lane]=0.f;}
+        __syncwarp();S.kept=FULL;
+        const float2 x=W.psi[lane&15];float f[3];seg_force(S,X,0.f,x,vnorm(x,lane),lane,f);double p[3];
+        #pragma unroll
+        for(int i=0;i<3;i++)p[i]=t.p[i]+0.5*tau*(P.axes[i][0]*(double)f[0]+P.axes[i][1]*(double)f[1]+P.axes[i][2]*(double)f[2]+H.w*P.stiffness[i]*(t.q[i]-H.c[i]));
+        lab(p,v);
+        #pragma unroll
+        for(int a=0;a<3;a++)v[a]*=P.hm64;
+    }
+    if(C.labels>=0){
+        const int s=lane&15;
+        if(s<n){const float* K=P.labels+C.labels+3*s;S.gauge=(float)(v[0]*(double)K[0]+v[1]*(double)K[1]+v[2]*(double)K[2]);if(lane<n)X[lane*n+lane].x+=S.gauge;}
+        __syncwarp();
+    }
     for(int m=0;m<4*Q;m++){float column;const float s=msize(X+m*nn,n,lane,column);if(m<Q){F[m]=column;F[Q+m]=s;}else F[2*Q+m-Q]=s;}
-    if(lane<Q){base[lane]=lane==0?make_float2(1.f,0.f):cis(omegas[lane-1]*start);w[lane]=lane==0?0.f:(float)omegas[lane-1];}
+    if(lane<Q){
+        // A beat's phase at the step's start, e^{iΩ̃t₀} e^{−iq·vτ/2}: the fields' phases are the point's at the step's middle.
+        const double rate=lane==0?0.:v[0]*waves[3*(lane-1)]+v[1]*waves[3*(lane-1)+1]+v[2]*waves[3*(lane-1)+2];
+        base[lane]=lane==0?make_float2(1.f,0.f):cis(omegas[lane-1]*start-0.5*tau*rate);w[lane]=lane==0?0.f:(float)(omegas[lane-1]+rate);
+    }
     __syncwarp();
-    const double share=P.beats*fmin(tau/P.dt,1.);double dropped;S.kept=exact_resolve(X,F,omegas,n,Q,tau,share,lane,dropped);beats=fmaxf(beats,(float)(dropped/tau));
+    const double share=P.beats*fmin(tau/P.dt,1.);double dropped;S.kept=exact_resolve(X,F,w,n,Q,tau,share,lane,dropped);beats=fmaxf(beats,(float)(dropped/tau));
     S.beating=(S.kept&~1u)!=0u;double spacing;
     if(!S.beating){
         S.steps=2*static_panels(F[0]*(float)tau);spacing=tau/(double)S.steps;
@@ -2379,7 +2405,7 @@ __device__ __noinline__ Segment exact_segment(Warp& W,int k,double start,double 
         __syncwarp();
     }else{
         double beat=0.,most=0.;
-        for(int q=1;q<Q;q++)if((S.kept>>q)&1u){beat+=(double)F[q];most=fmax(most,fabs(omegas[q-1]));}
+        for(int q=1;q<Q;q++)if((S.kept>>q)&1u){beat+=(double)F[q];most=fmax(most,fabs((double)w[q]));}
         const double widest=P.grid_phase/((double)F[0]+beat+0.5*most);S.steps=2*max((int)ceil(0.5*tau/widest),1);spacing=tau/(double)S.steps;
         S.series=series_within((float)((0.5*(double)F[0]+0.57735026918962576*beat)*spacing),fmaxf((float)(fmax((double)P.truncation,share)/(double)(2*S.steps)),EXACT_ROUND));
     }
@@ -2437,10 +2463,14 @@ __device__ __noinline__ double exact_part(Warp& W,Traj& t,double tau,bool jumps,
     const Reference H=reference(t.q);
     const bool half=tau==P.dt&&H.w==1.;Turn u;if(!half)u=turn(0.5*tau,H);
     flow(t,half,u,H);point<true>(W,t,lane);
-    SPAN_BEGIN(segment);Segment S=exact_segment(W,t.cluster,t.time,tau,lane,X,t.beats);S.v=W.vec;SPAN_END(SPAN_GENERATOR,segment);
+    SPAN_BEGIN(segment);Segment S=exact_segment(W,t,H,tau,lane,X);SPAN_END(SPAN_GENERATOR,segment);
     __syncwarp();float2 x=W.psi[lane&15];float impulse[3]={0.f,0.f,0.f};
+    // The gauge's phase over half the step (engine.rs `Segment::gauged`): ψ_s = e^{iK_s·v(t − t_m)} x_s at the step's ends.
+    float2 turn=make_float2(1.f,0.f);
+    if(S.gauge!=0.f){float sn,cs;sincosf(0.5f*(float)tau*S.gauge,&sn,&cs);turn=make_float2(cs,sn);x=x*turn;}
     SPAN_BEGIN(evolving);const float root=exact_evolve(W,S,X,x,(float)tau,jumps,(float)(t.log_threshold-t.logn),lane,impulse);SPAN_END(SPAN_EVOLVE,evolving);
     if(root>=0.f)return fmin((double)root,tau);
+    x=x*turn;
     const float norm=vnorm(x,lane);t.logn+=log((double)norm);
     __syncwarp();if(lane<16)W.psi[lane]=(1.f/sqrtf(norm))*x;__syncwarp();
     #pragma unroll

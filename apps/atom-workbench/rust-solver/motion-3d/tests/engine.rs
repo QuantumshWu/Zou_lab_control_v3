@@ -1614,3 +1614,40 @@ fn the_slow_part_s_weight_and_the_ringing_s_sum_to_the_delay(){
         }
     }
 }
+
+/// Galilean covariance of the exact step (engine.rs, # The exact step, the atom's path): an atom moving uniformly through a running wave at a detuning δ is an atom at rest at δ − k·v. Its kept drives' phases along its path are
+/// that shift, at any step. From a bare ground state, what a jump leaves, the no-jump evolution -- its excited population and its norm, the waiting time's law and so the photon rate -- on the retro-reflected tweezer's probe far out of the
+/// tweezer, the atom's momentum held (the kick's change of v within a step is the splitting's): the two agree at every step's end whatever its size. Held in the step, as the line had it, the moving atom's drive moved only between steps. What is left is the fold's second order in the shift,
+/// (kv/σ)² of the far excited states' shifts, for σ the hyperfine splitting. The atom at rest at δ differs by far more: the check has teeth.
+#[test]
+fn a_moving_atom_s_kept_drive_is_an_atom_at_rest_at_the_shifted_detuning(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/retro_probe_motion.json")).unwrap();
+    let shifted=|mhz:f64|{let mut r=scene::request(&v);r.times_us=vec![0.,10.];r.frequencies_mhz.push(mhz);for b in r.beams.iter_mut(){b.frequency_index.push(b.waist_um.is_none() as i32);}r};
+    // A shift of about a sixth of the line's width, and the first rung with explicit states that keeps the same ones at both detunings.
+    let doppler=6.;let(base,other)=(shifted(0.),shifted(-doppler/std::f64::consts::TAU));
+    let places=|r:&Request,a:f64|{let g=Ground::with(r,a).unwrap();g.clusters.iter().map(|c|(c.states.clone(),c.excited.clone())).collect::<Vec<_>>()};
+    let allowance=Ground::allowances(&base).unwrap().into_iter().find(|&a|{let x=places(&base,a);x.iter().any(|c|!c.1.is_empty())&&x==places(&other,a)}).unwrap();
+    let probe=base.beams.iter().position(|b|b.waist_um.is_none()).unwrap();let k=base.beams[probe].wave_number_per_um;let d=base.beams[probe].direction;
+    let moving=Model::with(&base,allowance).unwrap();let rest=Model::with(&other,allowance).unwrap();
+    // κ along the probe, k·v = (ħ/m) k κ.
+    let along=doppler/(moving.hbar_over_mass*k);let kappa=d.map(|x|x*along);
+    let far=[0.,30.,0.];let mut checked=0;let within=(doppler/(std::f64::consts::TAU*157.)).powi(2);let mut worst=0_f64;
+    for c in (0..moving.clusters()).filter(|&c|moving.mixed(c)){for b in 0..moving.ground_dimension(c){
+        let n=moving.dimension(c);let run=|m:&Model,kappa:[f64;3],dt:f64,steps:usize|->Vec<[f64;2]>{
+            let mut s=Settings::new(dt,&m.trap(c,b),1e-10,false);s.frequencies=[0.;3];s.lab=[0.;3];s.loss=false;s.beats=1e-10;let engine=Engine::new(m,s);
+            let mut psi=[Complex::ZERO;MOST_MIXED];psi[b]=Complex::ONE;
+            let mut t=Trajectory{cluster:c,psi,r:far,kappa,time:0.,threshold:1.,alive:true,jumps:0,beats:0.,seed:1,index:0};
+            (0..steps).map(|_|{t=engine.coast(&t,dt,1);t.kappa=kappa;let norm:f64=t.psi[..n].iter().map(|z|z.norm_sqr()).sum();
+                [t.psi[moving.ground_dimension(c)..n].iter().map(|z|z.norm_sqr()).sum::<f64>()/norm,norm.ln()]}).collect()};
+        for(dt,steps)in [(3.,4),(1.,12),(0.3,40),(0.05,240)]{
+            let(a,b0,c0)=(run(&moving,kappa,dt,steps),run(&rest,[0.;3],dt,steps),run(&moving,[0.;3],dt,steps));
+            for((x,y),z)in a.iter().zip(&b0).zip(&c0){
+                let off=((x[0]-y[0]).abs()/y[0].max(f64::MIN_POSITIVE)).max((x[1]-y[1]).abs()/y[1].abs().max(f64::MIN_POSITIVE));worst=worst.max(off);
+                assert!(off<=within,"cluster {c}, state {b}, dt {dt}: excited {:.8e} and ln‖ψ‖² {:.8e} moving against {:.8e} and {:.8e} at rest, {off:.2e} off, (kv/σ)² {within:.2e}",x[0],x[1],y[0],y[1]);
+                let _=z;
+            }
+            let(x,z)=(a.last().unwrap(),c0.last().unwrap());if x[1].abs()>1e-3{assert!((x[1]-z[1]).abs()>=0.01*x[1].abs(),"cluster {c}, state {b}, dt {dt}: the shift moves the rate ({:.6e} against {:.6e})",x[1],z[1]);checked+=1;}
+        }
+    }}
+    println!("{checked} runs, largest difference {worst:.2e}, (kv/σ)² {within:.2e}");assert!(checked>0);
+}
