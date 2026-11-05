@@ -737,9 +737,9 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let piloting=|at:(Trap,f64),steps:usize,waiting:f64,phase:f64|{let mut s=plain(at,steps,NUMERICAL_SHARE*POPULATION_TARGET*(interval/steps as f64)/waiting);s.beats=s.truncation;s.horizon=waiting;s.node_phase=phase;s};
     let period=slowest_period(&trap);
     // A run's settings at `steps` per interval: its exponentials summed to the numerical share of the population
-    // target over a waiting time, `NUMERICAL_SHARE` ε dt/waiting, and the beats left out within it; the first order in the
+    // target over a waiting time, at most the run -- what a step leaves out adds up until a jump or the run's end --, `NUMERICAL_SHARE` ε dt/waiting, and the beats left out within it; the first order in the
     // Doppler shift within `allowance` (`doppler_allowance`); a beating grid at `phase` (`grid_phase`).
-    let running=|at:(Trap,f64),steps:usize,waiting:f64,allowance:f64,phase:f64|{let dt=interval/steps as f64;let mut s=plain(at,steps,NUMERICAL_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=allowance;s.horizon=waiting;s.node_phase=phase;s};
+    let running=|at:(Trap,f64),steps:usize,waiting:f64,allowance:f64,phase:f64|{let dt=interval/steps as f64;let horizon=waiting.min(duration);let mut s=plain(at,steps,NUMERICAL_SHARE*POPULATION_TARGET*dt/horizon);s.doppler=allowance;s.horizon=horizon;s.node_phase=phase;s};
     // A pilot's model's initial states, the waiting time they start with and its beating grid's phase on them.
     let begin=|c:&mut Candidate|->(Vec<Trajectory>,f64){c.settle();
         let starts:Vec<Trajectory>=(0..pilot).map(|index|pilot_start(&c.model,&plain(c.reference(),first,f64::EPSILON),&c.initial,seed,index)).collect();
@@ -790,7 +790,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let pilot_waiting=pilot as f64*duration/(pilot_jumps.max(1) as f64);let pilot_horizon=pilot_waiting.min(duration);
     // The beats the pilot's exact steps left out (engine.rs `Segment::resolve`): their bound per unit time, at
     // most the run's share over its waiting time (`booked_beats`).
-    let pilot_beats=booked_beats(&pilot_states,pilot_waiting);
+    let pilot_beats=booked_beats(&pilot_states,pilot_horizon);
     // Its grid on its states, as a rung's on its own (`grid_phase`).
     let groups=pilot_candidate.model.ground.cluster.clone();
     pilot_candidate.phase=grid_phase(&pilot_candidate.model,&pilot_states,&running(pilot_candidate.reference(),steps,pilot_waiting,doppler_allowance(&pilot_candidate.base,&pilot_candidate.model),pilot_candidate.phase),Some((&groups,duration)));
@@ -924,7 +924,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // over the horizon: within the exponentials' share by construction (`booked_beats`).
     let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
     let waiting=pilot as f64*duration/(jumps.max(1) as f64);let horizon=waiting.min(duration);
-    let pilot_beats=booked_beats(&states,waiting);
+    let pilot_beats=booked_beats(&states,horizon);
     let allowance=doppler_allowance(&base,&model);
     let settings=|steps:usize|running(reference,steps,waiting,allowance,phase);
     // The step (`step_check`; on the pilot's states as the choice checked it): the a-priori total the steps'
@@ -1052,9 +1052,9 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
 fn twin_can_pay(first:f64,[population,temperature]:[f64;2],share:f64)->bool{(1.+share)*first.max(temperature)<first.max(population).max(temperature)}
 
 /// The bound per unit time of the beats a pilot's exact steps left out (engine.rs `Segment::resolve`), at most the
-/// run's share over its waiting time: the run leaves out beats within that share by construction, and the pilot's
+/// run's share over its horizon (`running`): the run leaves out beats within that share by construction, and the pilot's
 /// share is looser where its horizon was shorter than the waiting time it measured (`piloting`).
-fn booked_beats(states:&[Trajectory],waiting:f64)->f64{states.iter().map(|t|t.beats).fold(0.,f64::max).min(NUMERICAL_SHARE*POPULATION_TARGET/waiting)}
+fn booked_beats(states:&[Trajectory],horizon:f64)->f64{states.iter().map(|t|t.beats).fold(0.,f64::max).min(NUMERICAL_SHARE*POPULATION_TARGET/horizon)}
 
 /// The model's ledger with the beats the exact steps left out, `bound` their largest over the horizon.
 fn booked(base:&Ledger,bound:f64)->Ledger{
@@ -1594,10 +1594,12 @@ fn layer_place(j:u32,weights:&[f64])->usize{
 /// criteria hold the motion's error to, it reads no further, from a group's trajectories' probes up: the flows are the dearest of a check on an exact step (of PGCP_10's search all of its 36 000 exact steps), and most stand below the others.
 fn orbits(engine:&Engine,probes:&Probes,period:f64,tolerance:f64,floor:f64)->f64{
     if probes.states.is_empty(){return 0.;}
-    // The flow takes no jump over the period: its exponentials and beats are held within the step's share over the
-    // period as a run's are over a waiting time (`running`) -- summed past the waiting they were set for, their
-    // truncation would be read as the step's T error (the 3D PGC's 2-3 times at the step's share s²).
-    let mut held=engine.settings.clone();held.truncation=held.truncation.min(NUMERICAL_SHARE*POPULATION_TARGET*held.dt/period);held.beats=held.beats.min(held.truncation);
+    // The flow takes no jump over the period: its exponentials are held within the step's share over the period as a
+    // run's are over a waiting time (`running`) -- summed past the waiting they were set for, their truncation would be read
+    // as the step's T error (the 3D PGC's 2-3 times at the step's share s²). The beats stay the run's: the flows at dt and
+    // at dt/2 leave out the same ones, their bounds going as the share with the step, so what they leave out reads no step error, and held tighter
+    // the read was of another integrator than the run's, at many times its work (a saturated probe's rung, 2 ms a step on a grid of 3000 nodes where the run takes its plain path).
+    let mut held=engine.settings.clone();held.truncation=held.truncation.min(NUMERICAL_SHARE*POPULATION_TARGET*held.dt/period);
     let engine=&Engine::new(engine.model,held);
     let(dt,model)=(engine.settings.dt,engine.model);let steps=((period/dt).ceil() as usize).max(1);
     let flow=|t:&Trajectory|->[[f64;3];2]{

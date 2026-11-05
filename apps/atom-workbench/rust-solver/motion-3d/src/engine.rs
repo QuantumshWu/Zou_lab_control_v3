@@ -556,9 +556,9 @@ impl Segment{
     /// `truncation`, the beats it leaves out within `beats` over `horizon`, a beating grid at `phase` (`Settings`).
     fn new(mut components:Components,start:f64,tau:f64,truncation:f64,beats:f64,horizon:f64,phase:f64)->Segment{
         let dropped=Segment::resolve(&mut components,tau,beats,horizon);
-        let mut segment=Segment::build(components,start,tau,truncation,beats,phase);segment.dropped=dropped;segment
+        let mut segment=Segment::build(components,start,tau,truncation,phase);segment.dropped=dropped;segment
     }
-    fn build(components:Components,start:f64,tau:f64,truncation:f64,beats:f64,phase:f64)->Segment{
+    fn build(components:Components,start:f64,tau:f64,truncation:f64,phase:f64)->Segment{
         let n=components.n();
         if components.beats.is_empty(){
             let h=&components.statics.hamiltonian;
@@ -574,12 +574,11 @@ impl Segment{
             return Segment{components,start,spacing,how:How::Taylor{propagator,decay},dropped:0.};
         }
         // The force's frequencies are within 2‖H(t)‖ + max|Ω|, ‖H(t)‖ ≤ ‖H₀‖ + Σ‖H_j‖; whole panels of two spacings,
-        // each spacing's two exponentials within their part of what the beats left out may take (a pilot's truncation
-        // is double precision for its static exponentials, whose rounding it weighs; its grid errs by far more).
+        // each spacing's two exponentials within their part of the exponentials' share.
         let norm=column_norm(&components.statics.hamiltonian,n)+components.beats.iter().map(|b|column_norm(&b.hamiltonian,n)).sum::<f64>()
             +0.5*components.beats.iter().map(|b|b.omega.abs()).fold(0.,f64::max);
         let steps=2*((0.5*tau*norm/phase).ceil() as usize).max(1);
-        let how=How::Beating(Entries::new(&components,truncation.max(beats)/(2*steps) as f64));
+        let how=How::Beating(Entries::new(&components,truncation/(2*steps) as f64));
         Segment{components,start,spacing:tau/steps as f64,how,dropped:0.}
     }
     /// The beats a step resolves: the pairs ±Ω whose cost on the step (`bounds`) is within the share are
