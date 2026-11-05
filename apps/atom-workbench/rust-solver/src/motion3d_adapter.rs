@@ -55,9 +55,9 @@ const AXES:[&str;3]=["x","y","z"];
 /// Why a motion block along an axis or in a plane is refused: only 3D motion is served.
 pub const ONLY_3D:&str="运动只计算 3D（半经典）：运动轴需为 3d";
 
-/// Starts the GPU in the background (the trajectory lane's worker at its start), so its first
-/// motion solve finds the context made and the kernels loaded.
-pub fn prepare(){atom_motion_3d::gpu::prepare();}
+/// Starts the GPU and waits for it: the context made and the kernels loaded, the driver's first
+/// compile of them included. Err: why there is none (Chinese).
+pub fn start_gpu()->Result<(),String>{atom_motion_3d::gpu::gpu().map(|_|())}
 
 /// The motion block of the model, as the TypeScript model writes it.
 #[derive(Clone,Deserialize)]

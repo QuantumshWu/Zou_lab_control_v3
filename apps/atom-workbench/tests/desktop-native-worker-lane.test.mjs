@@ -28,6 +28,147 @@ test('IPC lane preserves handshake, cancellation and stale-generation isolation'
   lane.receive({kind:'closed',generation:2});await lane.close();
 });
 
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+/** A turn of the event loop that does not depend on setTimeout (a test may mock it). */
+const turn=()=>new Promise(resolve=>setImmediate(resolve));
+const started=(workerIdleMs=1)=>{const commands=[],finished=[],owner={binarySha256:'binary',build:{sha256:'build'},startupTimeoutMs:1000,workerIdleMs,sendNative:c=>commands.push(c),finish:(job,error,value)=>{job.settled=true;finished.push({job,error,value});}};
+  return {commands,finished,lane:new IpcNativeLane(owner,'trajectory')};};
+const handshake=async(lane,generation=1)=>{lane.receive({kind:'opened',generation,binarySha256:'binary',pid:123});lane.receive({kind:'message',generation,message:capabilities});lane.receive({kind:'message',generation,message:warm});await turn();};
+
+/** A job: `device` as a motion solve's options say it; none with motion off. */
+const solveJob=(nativeId,device)=>({nativeId,payload:device?{options:{device}}:{},settled:false});
+
+test('A worker holding the GPU retires after its idle time, a job in time keeps it, and the next job starts a fresh one',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const IDLE=60000,{commands,lane}=started(IDLE),job=nativeId=>solveJob(nativeId,'gpu');
+  const closed=()=>commands.some(c=>c.op==='close');
+  lane.enqueue(job(10));await turn();await handshake(lane);assert.equal(commands.at(-1).message.id,10);
+  lane.receive({kind:'message',generation:1,message:{id:10,error:'answered'}});await turn();
+  // A job just in time keeps the worker, and no idle time counts while it runs.
+  t.mock.timers.tick(IDLE-1);assert.equal(closed(),false);
+  lane.enqueue(job(11));await turn();assert.equal(commands.at(-1).message.id,11);assert.equal(commands.filter(c=>c.op==='open').length,1);
+  t.mock.timers.tick(10*IDLE);assert.equal(closed(),false);
+  // Its time starts again when the job has answered: enqueue used to leave the cancelled timer's id,
+  // so a worker that had run a job was never retired, and its CUDA context kept the GPU awake.
+  lane.receive({kind:'message',generation:1,message:{id:11,error:'answered'}});await turn();
+  t.mock.timers.tick(IDLE-1);assert.equal(closed(),false);
+  t.mock.timers.tick(1);assert.deepEqual(commands.at(-1),{op:'close',lane:'trajectory',generation:1});
+  // A job in the meantime waits for the worker to go, and starts a fresh one; nothing starts one by itself.
+  lane.enqueue(job(12));await turn();assert.equal(commands.at(-1).op,'close');
+  lane.receive({kind:'closed',generation:1});await turn();assert.deepEqual(commands.at(-1),{op:'open',lane:'trajectory',generation:2});
+  await handshake(lane,2);assert.equal(commands.at(-1).message.id,12);
+  // The solve on the fresh worker starts the GPU itself if it asks for it: the lane asks nothing first.
+  assert.equal(commands.some(c=>c.message?.id===-2),false);
+  lane.receive({kind:'message',generation:2,message:{id:12,error:'answered'}});await turn();
+  t.mock.timers.tick(IDLE);assert.deepEqual(commands.at(-1),{op:'close',lane:'trajectory',generation:2});
+  lane.receive({kind:'closed',generation:2});await turn();assert.equal(commands.at(-1).op,'close');
+  await lane.close();
+});
+
+test('A worker without the GPU stays with its prepared model: motion off, or on the CPU; a solve on the GPU makes it one that retires',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const IDLE=60000,{commands,lane}=started(IDLE),closed=()=>commands.some(c=>c.op==='close');
+  const answer=id=>lane.receive({kind:'message',generation:1,message:{id,error:'answered'}});
+  lane.enqueue(solveJob(20));await turn();await handshake(lane);assert.equal(commands.at(-1).message.id,20);
+  answer(20);await turn();t.mock.timers.tick(10*IDLE);assert.equal(closed(),false);
+  lane.enqueue(solveJob(21,'cpu'));await turn();assert.equal(commands.at(-1).message.id,21);
+  answer(21);await turn();t.mock.timers.tick(10*IDLE);assert.equal(closed(),false);
+  assert.equal(commands.filter(c=>c.op==='open').length,1,'the same worker throughout');
+  lane.enqueue(solveJob(22,'gpu'));await turn();assert.equal(commands.at(-1).message.id,22);
+  answer(22);await turn();t.mock.timers.tick(IDLE-1);assert.equal(closed(),false);
+  t.mock.timers.tick(1);assert.deepEqual(commands.at(-1),{op:'close',lane:'trajectory',generation:1});
+  lane.receive({kind:'closed',generation:1});await lane.close();
+});
+
+test('A worker whose GPU start failed holds no context: it stays and keeps its answer, and the next solve there has the reason at once',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const IDLE=60000,REASON='驱动无法编译 GPU 内核（test）',{commands,lane}=started(IDLE),closed=()=>commands.some(c=>c.op==='close');
+  const failed={kind:'message',generation:1,message:{id:-2,protocol:NATIVE_PROTOCOL,error:REASON}};
+  const first=lane.startGpu();await turn();await handshake(lane);
+  lane.receive(failed);assert.equal(await first,REASON);await turn();
+  t.mock.timers.tick(10*IDLE);assert.equal(closed(),false);
+  // Past the idle time the same worker is asked: its process answers from what it knows, no new one compiles.
+  const next=lane.startGpu();await turn();
+  assert.deepEqual(commands.at(-1),{op:'write',lane:'trajectory',generation:1,message:{id:-2,op:'gpu'}});assert.equal(commands.filter(c=>c.op==='open').length,1);
+  lane.receive(failed);assert.equal(await next,REASON);await turn();
+  // The solve that asked for the GPU runs on its CPU with the note: the worker still holds none.
+  lane.enqueue(solveJob(30,'gpu'));await turn();assert.equal(commands.at(-1).message.id,30);
+  lane.receive({kind:'message',generation:1,message:{id:30,error:'answered'}});await turn();
+  t.mock.timers.tick(10*IDLE);assert.equal(closed(),false);
+  const closing=lane.close();lane.receive({kind:'closed',generation:1});await closing;
+});
+
+test('A GPU start after a retirement has a fresh worker, and that worker too retires when idle',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const IDLE=60000,{commands,lane}=started(IDLE);
+  const first=lane.startGpu();await turn();await handshake(lane);assert.equal(commands.at(-1).message.id,-2);
+  // No idle time counts while the kernels compile.
+  t.mock.timers.tick(10*IDLE);assert.equal(commands.some(c=>c.op==='close'),false);
+  lane.receive({kind:'message',generation:1,message:{id:-2,protocol:NATIVE_PROTOCOL,ready:true}});await first;await turn();
+  t.mock.timers.tick(IDLE);assert.deepEqual(commands.at(-1),{op:'close',lane:'trajectory',generation:1});
+  lane.receive({kind:'closed',generation:1});await turn();
+  const next=lane.startGpu();await turn();assert.deepEqual(commands.at(-1),{op:'open',lane:'trajectory',generation:2});
+  await handshake(lane,2);assert.deepEqual(commands.at(-1).message,{id:-2,op:'gpu'});
+  lane.receive({kind:'message',generation:2,message:{id:-2,protocol:NATIVE_PROTOCOL,ready:true}});assert.equal(await next,undefined);await turn();
+  t.mock.timers.tick(IDLE);assert.deepEqual(commands.at(-1),{op:'close',lane:'trajectory',generation:2});
+  lane.receive({kind:'closed',generation:2});await lane.close();
+});
+
+test('A compile holds the trajectory lane: nothing is written to its worker, the worker is not retired as idle, then the queue goes on',async()=>{
+  const {commands,lane}=started();
+  let answer='none';const start=lane.startGpu().then(why=>{answer=why;});await tick();
+  assert.deepEqual(commands[0],{op:'open',lane:'trajectory',generation:1});
+  await handshake(lane);
+  assert.deepEqual(commands.at(-1).message,{id:-2,op:'gpu'},'the worker told its lane no more than its warmup');
+  assert.deepEqual(commands.find(c=>c.message?.id===-1).message,{id:-1,op:'warmup'});
+  const job={nativeId:7,payload:{},settled:false};lane.enqueue(job);
+  // The idle retirement is 1 ms here: far past it the worker stands, and nothing went to it.
+  await sleep(30);
+  assert.equal(commands.at(-1).message.id,-2);assert.equal(commands.some(c=>c.op==='close'),false);assert.equal(answer,'none');
+  lane.receive({kind:'message',generation:1,message:{id:-2,protocol:NATIVE_PROTOCOL,ready:true}});
+  await start;assert.equal(answer,undefined,'started: no reason');
+  await tick();assert.equal(commands.at(-1).message.id,7,'then the job');
+  lane.receive({kind:'message',generation:1,message:{id:7,error:'end'}});
+  lane.receive({kind:'closed',generation:1});await lane.close();
+});
+
+test('A GPU that cannot run answers why and takes the lane no further; a second start asks its worker again',async()=>{
+  const {commands,lane}=started();
+  const first=lane.startGpu();await tick();await handshake(lane);
+  lane.receive({kind:'message',generation:1,message:{id:-2,protocol:NATIVE_PROTOCOL,error:'没有 NVIDIA 显卡'}});
+  assert.equal(await first,'没有 NVIDIA 显卡');
+  const second=lane.startGpu();await tick();assert.equal(commands.filter(c=>c.message?.id===-2).length,2);
+  lane.receive({kind:'message',generation:1,message:{id:-2,protocol:NATIVE_PROTOCOL,error:'没有 NVIDIA 显卡'}});
+  assert.equal(await second,'没有 NVIDIA 显卡');
+  lane.receive({kind:'closed',generation:1});await lane.close();
+});
+
+test('A worker that ends during the compile rejects the start, with the queue, and the next start has a worker of its own',async()=>{
+  const {commands,finished,lane}=started();
+  const crash=lane.startGpu();await tick();await handshake(lane);
+  const job={nativeId:8,payload:{},settled:false};lane.enqueue(job);await tick();
+  lane.receive({kind:'closed',generation:1,error:'exit code 1'});
+  await assert.rejects(crash,/Rust 后端退出。exit code 1/);assert.match(finished[0].error.message,/exit code 1/);
+  const next=lane.startGpu();await tick();assert.deepEqual(commands.at(-1),{op:'open',lane:'trajectory',generation:2});
+  await handshake(lane,2);assert.equal(commands.at(-1).message.id,-2);
+  // A worker that cannot start at all ends the start: it does not spawn another for ever.
+  lane.receive({kind:'error',generation:2,error:'write failed'});
+  await assert.rejects(next,/write failed/);assert.equal(commands.at(-1).op,'close');
+  lane.receive({kind:'closed',generation:2});await tick();assert.equal(commands.filter(c=>c.op==='open').length,2);
+  await lane.close();
+});
+
+test('A start is the lane\'s last job: a cancelled solve\'s worker going does not lose it, and the service\'s close ends it',async()=>{
+  const {commands,lane}=started();
+  const job={nativeId:9,payload:{},settled:false};lane.enqueue(job);await tick();await handshake(lane);assert.equal(commands.at(-1).message.id,9);
+  // The solve that runs is cancelled for the one that asks for the GPU: its worker goes, the next has the start.
+  const start=lane.startGpu();lane.cancel(job,Error('cancelled'));await tick();assert.equal(commands.at(-1).op,'close');
+  lane.receive({kind:'closed',generation:1});await tick();assert.deepEqual(commands.at(-1),{op:'open',lane:'trajectory',generation:2});
+  await handshake(lane,2);assert.equal(commands.at(-1).message.id,-2);
+  const closing=lane.close();await assert.rejects(start,/shutting down/);
+  lane.receive({kind:'closed',generation:2});await closing;
+});
+
 test('IPC lane fails the worker on any progress but a checkpoint: the deleted 2D engine\'s running report is no message',async()=>{
   const commands=[],finished=[];const owner={binarySha256:'binary',build:{sha256:'build'},startupTimeoutMs:1000,workerIdleMs:1000,sendNative:c=>commands.push(c),finish:(job,error,value)=>{job.settled=true;finished.push({job,error,value});}};
   const lane=new IpcNativeLane(owner,'trajectory');
@@ -92,6 +233,31 @@ test('Worker sends the identical complete model, finite jobs to the trajectory l
   const mean=normalizeDynamicsResult(events.find(e=>e.channel==='mean'&&e.kind==='response').data,old);
   assert.equal(mean.timesUs.length,1);assert.equal(mean.mean.converged,true);
   await worker.receive({kind:'shutdown'});assert.equal(events.at(-1).kind,'shutdown-complete');
+});
+
+test('Worker answers a GPU start asked before its configuration: with why it cannot run, with the failure that ended its worker',async()=>{
+  const events=[];let worker;const answers=[{id:-2,protocol:NATIVE_PROTOCOL,error:'没有 NVIDIA 显卡'}];
+  const host=command=>{
+    const event=message=>queueMicrotask(()=>void worker.receive({kind:'native',event:{lane:command.lane,generation:command.generation,...message}}));
+    if(command.op==='open')event({kind:'opened',pid:100,binarySha256:'binary'});
+    if(command.op==='close')event({kind:'closed'});
+    if(command.op==='write'){
+      const request=command.message;
+      if(request.id===0)event({kind:'message',message:capabilities});
+      else if(request.id===-1)event({kind:'message',message:warm});
+      else if(request.id===-2){assert.equal(command.lane,'trajectory');const answer=answers.shift();event(answer?{kind:'message',message:answer}:{kind:'closed',error:'exit code 1'});}
+    }
+  };
+  worker=createModelWorker(message=>{events.push(message);if(message.kind==='native')host(message.command);});
+  const answered=async channel=>{for(let i=0;i<100&&!events.some(e=>e.channel===channel);i++)await tick();return events.find(e=>e.channel===channel);};
+  await worker.receive({kind:'gpu',channel:'early'});
+  assert.equal(events.some(e=>e.channel==='early'),false,'it waits for the configuration');
+  await worker.receive({kind:'native',event:{kind:'configuration',binarySha256:'binary',buildSha256:'build',defaults:{}}});
+  const cannot=await answered('early');assert.equal(cannot.status,200);assert.equal(cannot.data.reason,'没有 NVIDIA 显卡');
+  await worker.receive({kind:'gpu',channel:'crash'});
+  const crashed=await answered('crash');assert.equal(crashed.status,503);assert.match(crashed.data.error,/exit code 1/);
+  await worker.receive({kind:'shutdown'});
+  await worker.receive({kind:'gpu',channel:'closed'});assert.equal(events.at(-1).status,503);
 });
 
 test('Worker reports native startup failure and cancels requests queued before configuration',async()=>{
