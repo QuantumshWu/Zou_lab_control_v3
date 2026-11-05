@@ -10,9 +10,8 @@ pub const KT_PER_UK:f64=crate::model::BOLTZMANN/crate::model::HBAR*1e-12;
 /// Σ populations, Σ of the folded excited population (the elimination's η²), Σ of the Gaussian
 /// beams' profile error at the atoms (model.rs
 /// `Model::profile_error`) and Σ (kv/σ)² (`Model::doppler_ratio`), with the number of trajectories
-/// they come from; and over every trajectory, held or lost, the control variates' (control.rs): per
-/// lab axis the harmonic control's Σc, Σc² and Σ c κ² (κ² the held atom's, none when lost), and the
-/// held twin's Σc per state with, over the states, Σ c² and Σ c p (p the held atom's population).
+/// they come from; and over every trajectory, held or lost, the harmonic control's (control.rs): per
+/// lab axis its Σc, Σc² and Σ c κ² (κ² the held atom's, none when lost).
 #[derive(Clone,Debug)]
 pub struct Sums{
     pub trajectories:f64,
@@ -24,20 +23,17 @@ pub struct Sums{
     pub profile:f64,
     pub doppler:f64,
     pub harmonic:[[f64;3];3],
-    pub twin:[f64;STATES],
-    pub twin2:[f64;2],
 }
 impl Sums{
     pub fn zero()->Sums{Sums{trajectories:0.,held:0.,kappa:[0.;3],kappa2:[0.;3],populations:[0.;STATES],folded:0.,profile:0.,doppler:0.,
-        harmonic:[[0.;3];3],twin:[0.;STATES],twin2:[0.;2]}}
+        harmonic:[[0.;3];3]}}
     fn combine(&self,o:&Sums,sign:f64)->Sums{let mut out=self.clone();out.add(o,sign);out}
     fn add(&mut self,o:&Sums,sign:f64){
         self.trajectories+=sign*o.trajectories;self.held+=sign*o.held;
         for a in 0..3{self.kappa[a]+=sign*o.kappa[a];self.kappa2[a]+=sign*o.kappa2[a];
             for j in 0..3{self.harmonic[a][j]+=sign*o.harmonic[a][j];}}
         for(x,y)in self.populations.iter_mut().zip(&o.populations){*x+=sign*y;}
-        for(x,y)in self.twin.iter_mut().zip(&o.twin){*x+=sign*y;}
-        self.folded+=sign*o.folded;self.profile+=sign*o.profile;self.doppler+=sign*o.doppler;self.twin2[0]+=sign*o.twin2[0];self.twin2[1]+=sign*o.twin2[1];
+        self.folded+=sign*o.folded;self.profile+=sign*o.profile;self.doppler+=sign*o.doppler;
     }
 }
 
@@ -45,10 +41,6 @@ impl Sums{
 /// output time or over a window around it --, its populations and folded excited population, its
 /// profile error and (kv/σ)².
 pub struct Atom<'a>{pub motion:[[f64;2];3],pub populations:&'a [f64;STATES],pub folded:f64,pub profile:f64,pub doppler:f64}
-/// A trajectory's control variates at an output (control.rs): the harmonic control per lab axis and,
-/// with a held twin, the twin's populations.
-pub struct Controls<'a>{pub harmonic:[f64;3],pub twin:Option<&'a [f64;STATES]>}
-
 /// One group of trajectories: its sums at every output time.
 #[derive(Clone,Debug)]
 pub struct Group{pub sums:Vec<Sums>}
@@ -62,25 +54,17 @@ impl Group{
     }
     /// Another group's sums added in: the two as one group.
     pub fn merge(&mut self,o:&Group){for(s,x)in self.sums.iter_mut().zip(&o.sums){*s=s.combine(x,1.);}}
-    /// One trajectory at output i: the atom when it is held there, and its control variates.
-    pub fn add(&mut self,i:usize,atom:Option<&Atom>,controls:&Controls){
+    /// One trajectory at output i: the atom when it is held there, and its harmonic control per lab axis.
+    pub fn add(&mut self,i:usize,atom:Option<&Atom>,harmonic:[f64;3]){
         let s=&mut self.sums[i];
         if let Some(x)=atom{
             s.held+=1.;s.folded+=x.folded;s.profile+=x.profile;s.doppler+=x.doppler;
             for a in 0..3{s.kappa[a]+=x.motion[a][0];s.kappa2[a]+=x.motion[a][1];}
             for(y,p)in s.populations.iter_mut().zip(x.populations){*y+=p;}
         }
-        for a in 0..3{let(c,y)=(controls.harmonic[a],atom.map_or(0.,|x|x.motion[a][1]));s.harmonic[a][0]+=c;s.harmonic[a][1]+=c*c;s.harmonic[a][2]+=c*y;}
-        if let Some(twin)=controls.twin{
-            for k in 0..STATES{let(c,y)=(twin[k],atom.map_or(0.,|x|x.populations[k]));s.twin[k]+=c;s.twin2[0]+=c*c;s.twin2[1]+=c*y;}
-        }
+        for a in 0..3{let(c,y)=(harmonic[a],atom.map_or(0.,|x|x.motion[a][1]));s.harmonic[a][0]+=c;s.harmonic[a][1]+=c*c;s.harmonic[a][2]+=c*y;}
     }
 }
-
-/// The control variates' exact means at one output (control.rs): the harmonic control's per lab axis
-/// and, with a held twin, its populations'.
-#[derive(Clone,Debug)]
-pub struct Means{pub harmonic:[f64;3],pub twin:Option<[f64;STATES]>}
 
 /// The estimates at one output time.
 #[derive(Clone,Debug,Default)]
@@ -116,24 +100,21 @@ pub struct Estimate{
 #[derive(Clone,Copy,Debug)]
 pub struct Scales{pub hbar_over_mass:f64,pub frequencies:[f64;3]}
 
-/// A control variate's correction at one output: its means (`Means`) and β, the regression of the
-/// held atoms' κ² per lab axis and of their populations on the controls over every trajectory so far
-/// -- one β for all the populations, so they keep their sum.
-pub struct Correction<'a>{pub means:&'a Means,pub harmonic:[f64;3],pub twin:f64}
-impl Correction<'_>{
-    /// The regression of sums on their controls (none where a control does not vary).
-    pub fn new<'a>(g:&Sums,means:&'a Means)->Correction<'a>{
+/// The harmonic control's correction at one output: its exact means per lab axis (control.rs) and β, the regression of the
+/// held atoms' κ² per lab axis on the control over every trajectory so far.
+pub struct Correction{pub means:[f64;3],pub harmonic:[f64;3]}
+impl Correction{
+    /// The regression of sums on their control (none where it does not vary).
+    pub fn new(g:&Sums,means:[f64;3])->Correction{
         let all=g.trajectories;
         let harmonic=std::array::from_fn(|a|{let[c,cc,cy]=g.harmonic[a];let variance=cc-c*c/all;if variance>0.{(cy-c*g.kappa2[a]/all)/variance}else{0.}});
-        let variance=g.twin2[0]-g.twin.iter().map(|c|c*c).sum::<f64>()/all;
-        let covariance=g.twin2[1]-g.twin.iter().zip(&g.populations).map(|(c,y)|c*y).sum::<f64>()/all;
-        Correction{means,harmonic,twin:if means.twin.is_some()&&variance>0.{covariance/variance}else{0.}}
+        Correction{means,harmonic}
     }
 }
 
-/// The estimates of sums, with a correction by the control variates: the held atoms' κ² and
-/// populations less β times their controls' excess over their means -- the same expectation, the
-/// variance less the part the controls account for.
+/// The estimates of sums, with a correction by the harmonic control: the held atoms' κ²
+/// less β times its excess over its means -- the same expectation, the
+/// variance less the part the control accounts for.
 pub fn estimate(g:&Sums,s:&Scales,correction:Option<&Correction>)->Estimate{
     let n=g.held;let m=moments(g,s,correction);
     Estimate{temperature:m.temperature,temperature_total:m.temperature_total,occupation:m.occupation,populations:m.populations.to_vec(),loss:m.loss,trajectories:g.trajectories,
@@ -145,18 +126,15 @@ struct Moments{temperature:[f64;3],temperature_total:f64,occupation:[f64;3],popu
 fn moments(g:&Sums,s:&Scales,correction:Option<&Correction>)->Moments{
     let n=g.held;let all=g.trajectories;let mut e=Moments{temperature:[0.;3],temperature_total:0.,occupation:[0.;3],populations:[0.;STATES],loss:1.-n/all};
     if n<=0.{return e;}
-    let(mut kappa2,mut populations)=(g.kappa2,g.populations);
-    if let Some(c)=correction{
-        for a in 0..3{kappa2[a]-=c.harmonic[a]*(g.harmonic[a][0]-all*c.means.harmonic[a]);}
-        if let Some(mean)=&c.means.twin{for k in 0..STATES{populations[k]-=c.twin*(g.twin[k]-all*mean[k]);}}
-    }
+    let mut kappa2=g.kappa2;
+    if let Some(c)=correction{for a in 0..3{kappa2[a]-=c.harmonic[a]*(g.harmonic[a][0]-all*c.means[a]);}}
     for a in 0..3{
         let(mean,second)=(g.kappa[a]/n,kappa2[a]/n);let variance=(second-mean*mean).max(0.);
         e.temperature[a]=variance*s.hbar_over_mass/KT_PER_UK;
         let w=s.frequencies[a];e.occupation[a]=if w>0.{second*s.hbar_over_mass/w-0.5}else{0.};
     }
     e.temperature_total=e.temperature.iter().sum::<f64>()/3.;
-    for k in 0..STATES{e.populations[k]=populations[k]/n;}
+    for k in 0..STATES{e.populations[k]=g.populations[k]/n;}
     e
 }
 /// The jackknife's standard error of a value over the groups left out.
@@ -164,15 +142,15 @@ fn spread(leave:&[Moments],factor:f64,f:impl Fn(&Moments)->f64)->f64{let m=leave
 
 /// The pooled estimates at every output time, with jackknife standard errors over the groups that reach it (a batch's
 /// trajectories run only as far as the outputs need them, solve.rs # Batches), the
-/// control variates' means per output where given: their β from every trajectory, held when a group
-/// is left out -- recomputed with it, a β that rests on a few trajectories at an early output (a few
-/// twins that have jumped) swings from group to group and its spread swamps the error.
-pub fn summarize<G:std::borrow::Borrow<Group>+Sync>(groups:&[G],s:&Scales,means:&[Means])->Vec<Estimate>{
+/// harmonic control's means per output and lab axis where given: its β from every trajectory, held when a group
+/// is left out -- recomputed with it, a β that rests on a few trajectories at an early output
+/// swings from group to group and its spread swamps the error.
+pub fn summarize<G:std::borrow::Borrow<Group>+Sync>(groups:&[G],s:&Scales,means:&[[f64;3]])->Vec<Estimate>{
     let outputs=groups[0].borrow().sums.len();
     (0..outputs).into_par_iter().map(|i|{
         let present:Vec<&Sums>=groups.iter().map(|g|&g.borrow().sums[i]).filter(|x|x.trajectories>0.).collect();let count=present.len();
         let mut all=Sums::zero();for x in &present{all.add(x,1.);}
-        let correction=means.get(i).map(|m|Correction::new(&all,m));let m=correction.as_ref();
+        let correction=means.get(i).map(|&m|Correction::new(&all,m));let m=correction.as_ref();
         let mut e=estimate(&all,s,m);e.groups=count as f64;
         if count<2{e.population_errors=vec![f64::INFINITY;STATES];e.temperature_error=[f64::INFINITY;3];e.temperature_total_error=f64::INFINITY;e.occupation_error=[f64::INFINITY;3];e.loss_error=f64::INFINITY;return e;}
         let leave:Vec<Moments>=present.iter().map(|x|moments(&all.combine(x,-1.),s,m)).collect();
@@ -189,9 +167,9 @@ pub fn summarize<G:std::borrow::Borrow<Group>+Sync>(groups:&[G],s:&Scales,means:
 mod tests{
     use super::*;
     use crate::rng::{normal_quantile,Purpose,Rng};
-    /// The control variates' estimate on drawn sums: a population 0.5 + 0.1 x + noise and its
-    /// control 0.5 + 0.1 x with the known mean 0.5; and an uncorrelated control. The estimate keeps
-    /// the expectation and the populations' sum, its error shrinks by the correlation's, and an
+    /// The harmonic control's estimate on drawn sums: an atom's κ² on one axis 1 + 0.1 x + noise and its
+    /// control 1 + 0.1 x with the known mean 1; and an uncorrelated control. The estimate keeps
+    /// the expectation, its error shrinks by the correlation's, and an
     /// uncorrelated control leaves it to within its error.
     #[test]
     fn the_control_variates_keep_the_mean_and_shrink_the_error(){
@@ -200,17 +178,15 @@ mod tests{
         for correlated in [true,false]{
             let groups:Vec<Group>=(0..32).map(|_|{let mut g=Group::new(1,64);
                 for _ in 0..64{
-                    let x=normal();let(p,c)=(0.5+0.1*x+0.01*normal(),if correlated{0.5+0.1*x}else{0.5+0.1*normal()});
-                    let mut populations=[0.;STATES];populations[0]=p;populations[1]=1.-p;let mut twin=[0.;STATES];twin[0]=c;twin[1]=1.-c;
-                    let atom=Atom{motion:[[0.,1.];3],populations:&populations,folded:0.,profile:0.,doppler:0.};
-                    g.add(0,Some(&atom),&Controls{harmonic:[0.;3],twin:Some(&twin)});
+                    let x=normal();let(y,c)=(1.+0.1*x+0.01*normal(),if correlated{1.+0.1*x}else{1.+0.1*normal()});
+                    let atom=Atom{motion:[[0.,y];3],populations:&[0.;STATES],folded:0.,profile:0.,doppler:0.};
+                    g.add(0,Some(&atom),[c;3]);
                 }g}).collect();
-            let mut mean=[0.;STATES];mean[0]=0.5;mean[1]=0.5;
-            let(with,plain)=(&summarize(&groups,&scales,&[Means{harmonic:[0.;3],twin:Some(mean)}])[0],&summarize(&groups,&scales,&[])[0]);
-            assert!((with.populations.iter().sum::<f64>()-1.).abs()<1e-12,"the populations keep their sum");
-            assert!((with.populations[0]-0.5).abs()<=4.*with.population_errors[0],"{} ± {}",with.populations[0],with.population_errors[0]);
-            if correlated{assert!(with.population_errors[0]<0.2*plain.population_errors[0],"{} against {}",with.population_errors[0],plain.population_errors[0]);}
-            else{assert!((with.populations[0]-plain.populations[0]).abs()<=plain.population_errors[0]&&with.population_errors[0]<=1.1*plain.population_errors[0]);}
+            let(with,plain)=(&summarize(&groups,&scales,&[[1.;3]])[0],&summarize(&groups,&scales,&[])[0]);
+            let(t,e)=(with.temperature[0]*KT_PER_UK,with.temperature_error[0]*KT_PER_UK);let(p,o)=(plain.temperature[0]*KT_PER_UK,plain.temperature_error[0]*KT_PER_UK);
+            assert!((t-1.).abs()<=4.*e,"{t} ± {e}");
+            if correlated{assert!(e<0.2*o,"{e} against {o}");}
+            else{assert!((t-p).abs()<=o&&e<=1.1*o);}
         }
     }
 }

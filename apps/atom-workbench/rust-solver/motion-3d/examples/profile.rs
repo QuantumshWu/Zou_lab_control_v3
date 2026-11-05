@@ -30,5 +30,4 @@ fn main(){
     println!("  {:12} {:8.0} cycles per advance  {:5.1}%  (all of a step: the parts above and its control)","step",at("step")/advances,share(at("step")));
     println!("  {:12} {:8.0} cycles per output   {:5.1}%","readout",at("readout")/(n*samples as f64),share(at("readout")));
     println!("  {:12} {:8.0} cycles per output   {:5.1}%","windows",at("windows")/(n*samples as f64),share(at("windows")));
-    println!("  {:12} {:8.0} cycles per output   {:5.1}%  (the held twin's steps and records)","twin",at("twin")/(n*samples as f64),share(at("twin")));
 }

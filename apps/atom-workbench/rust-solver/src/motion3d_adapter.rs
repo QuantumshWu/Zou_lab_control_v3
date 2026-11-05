@@ -14,8 +14,7 @@
 //!
 //! # Result contract
 //! `states`, `timesUs`, `populations` (the held atom's, averaged over the trajectories, projected
-//! onto the probability simplex as the population core's rows are: the control variates' estimate
-//! is unbiased, so a population near zero can dip below it), `populationAccuracy` against the
+//! onto the probability simplex as the population core's rows are), `populationAccuracy` against the
 //! method's own target (`POPULATION_TARGET`, two standard errors per sample, each grown by its
 //! row's projection), `diagnostics` (`engine`, `traceError` and `initialStateError` of the rows
 //! before the projection, `elapsedMs`, `method`,

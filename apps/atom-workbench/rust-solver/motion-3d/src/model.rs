@@ -881,7 +881,7 @@ impl Model{
         let w=|x:f64|(x*self.hbar_over_mass).max(0.).sqrt();
         Trap{centre,axes,frequencies:values.map(w),lab:std::array::from_fn(|a|w(hessian[a][a])),lattice:self.lattice(centre)}
     }
-    /// The bottom of the reference state's well in H(r) alone (`Ground::centre`): where what no state's own trap decides is taken, a held twin's line and the explicit states' decay.
+    /// The bottom of the reference state's well in H(r) alone (`Ground::centre`): where what no state's own trap decides is taken: the explicit states' decay.
     pub fn centre(&self)->[f64;3]{self.ground.centre}
     /// The trap's standing wave, where the trap beam's unit is it and its reflection, its envelope at the trap's centre.
     fn lattice(&self,centre:[f64;3])->Option<Lattice>{

@@ -115,19 +115,16 @@ pub struct Params{
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct State{
     pub(crate) q:[f64;3],pub(crate) p:[f64;3],pub(crate) time:f64,pub(crate) logn:f64,pub(crate) threshold:f64,pub(crate) log_threshold:f64,pub(crate) prefix:[f64;9],
-    pub(crate) q0:[f64;3],pub(crate) p0:[f64;3],pub(crate) twin_logn:f64,pub(crate) twin_threshold:f64,pub(crate) twin_log_threshold:f64,
-    pub(crate) psi:[[f32;2];MAXM],pub(crate) twin:[[f32;2];MAXN],pub(crate) cluster:i32,pub(crate) jumps:i32,pub(crate) death:i32,
-    pub(crate) index:u32,pub(crate) twin_cluster:i32,pub(crate) twin_jumps:i32,pub(crate) beats:f32,
+    pub(crate) q0:[f64;3],pub(crate) p0:[f64;3],
+    pub(crate) psi:[[f32;2];MAXM],pub(crate) cluster:i32,pub(crate) jumps:i32,pub(crate) death:i32,
+    pub(crate) index:u32,pub(crate) beats:f32,
     pub(crate) interval:i32,pub(crate) step:i32,
 }
-/// The kernel's `Held`: the held twin's device data (all zero: no twin).
-#[repr(C)]#[derive(Clone,Copy,Default,Debug)]
-pub struct Held{pub(crate) u:u64,pub(crate) h:u64,pub(crate) l:u64,pub(crate) readout:u64,pub(crate) blocks:u64,pub(crate) jumps:u64}
 /// The kernel's `Run`: a launch's wave and output intervals.
 #[repr(C)]#[derive(Clone,Copy,Debug)]
 pub struct Run{
     pub(crate) states:u64,pub(crate) rings:u64,pub(crate) samples:u64,pub(crate) sums:u64,pub(crate) scratch:u64,pub(crate) tasks:u64,pub(crate) profile:u64,
-    pub(crate) records:u64,pub(crate) harmonic:u64,pub(crate) costs:u64,pub(crate) held:Held,pub(crate) seed:u64,pub(crate) budget:i64,
+    pub(crate) records:u64,pub(crate) harmonic:u64,pub(crate) costs:u64,pub(crate) seed:u64,pub(crate) budget:i64,
     pub(crate) outputs:i32,pub(crate) steps:i32,pub(crate) reach:i32,pub(crate) begin:i32,pub(crate) end:i32,
     pub(crate) half:[i32;3],pub(crate) ring:[i32;3],pub(crate) ring_at:[i32;3],
     pub(crate) ring_stride:i32,pub(crate) scratch_stride:i32,pub(crate) nlisted:i32,pub(crate) pad:i32,
@@ -136,18 +133,18 @@ pub struct Run{
 
 impl Run{
     /// A launch of no wave (a check's entry, `Gpu::jump_probe`): every buffer null, the seed zero.
-    pub(crate) fn empty()->Run{Run{states:0,rings:0,samples:0,sums:0,scratch:0,tasks:0,profile:0,records:0,harmonic:0,costs:0,held:Held::default(),seed:0,budget:0,
+    pub(crate) fn empty()->Run{Run{states:0,rings:0,samples:0,sums:0,scratch:0,tasks:0,profile:0,records:0,harmonic:0,costs:0,seed:0,budget:0,
         outputs:0,steps:0,reach:0,begin:0,end:0,half:[0;3],ring:[0;3],ring_at:[0;3],ring_stride:0,scratch_stride:0,nlisted:0,pad:0,listed:[0;MOST_LISTED]}}
 }
 
 /// The sizes, offsets and constants the kernel's `layout` reports, for the check that the twins and
 /// the constants they share match.
-pub fn layout()->[u32;28]{
+pub fn layout()->[u32;27]{
     use std::mem::{offset_of,size_of};
-    use super::{HARMONIC,MOST_INTERVALS,MOTION,RECORD,SLOT_RECORD,TWIN,WARPS};
+    use super::{HARMONIC,MOST_INTERVALS,MOTION,RECORD,SLOT_RECORD,WARPS};
     [size_of::<Beam>(),size_of::<Carrier>(),size_of::<Cluster>(),size_of::<Group>(),size_of::<Class>(),size_of::<Photon>(),size_of::<Coherent>(),size_of::<Channel>(),
         size_of::<Params>(),size_of::<State>(),size_of::<Run>(),offset_of!(Params,hm),offset_of!(Params,half_flow),offset_of!(Run,listed),offset_of!(State,psi),offset_of!(State,index),
-        MOST_INTERVALS,SLOT_RECORD,RECORD,WARPS,MAXN,TWIN,MOTION,HARMONIC,size_of::<Fourth>(),size_of::<NearUnit>(),size_of::<FirstField>(),MOST_FIRST].map(|x|x as u32)
+        MOST_INTERVALS,SLOT_RECORD,RECORD,WARPS,MAXN,MOTION,HARMONIC,size_of::<Fourth>(),size_of::<NearUnit>(),size_of::<FirstField>(),MOST_FIRST].map(|x|x as u32)
 }
 
 /// The model on the device: the program the kernels read (`Gpu::set`), the buffers it points into, the most

@@ -10,9 +10,9 @@ use atom_motion_3d::linear::Dense;
 use atom_motion_3d::model::{Exact,Model,GROUND,MOST_MIXED};
 use atom_motion_3d::rng::{Purpose,Rng};
 #[path="../examples/scene/mod.rs"] mod scene;
-use atom_motion_3d::control::{Harmonic,Twin};
-use atom_motion_3d::stats::{summarize,Means,Scales};
-use atom_motion_3d::{initial_trajectory,Beam,Complex,Initial,Matrix,Request,Stratum,Variates,STATES};
+use atom_motion_3d::control::Harmonic;
+use atom_motion_3d::stats::{summarize,Scales};
+use atom_motion_3d::{initial_trajectory,Beam,Complex,Initial,Matrix,Request,Stratum,STATES};
 use serde_json::Value;
 
 fn matrix(v:&Value)->Matrix{
@@ -68,7 +68,7 @@ fn device()->Option<&'static std::sync::Mutex<gpu::Gpu>>{match gpu::gpu(){Ok(g)=
 fn the_kernel_s_structs_match_their_twins(){
     let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
     let f=gpu.function("layout").unwrap();let out=Buffer::new(128).unwrap();gpu.stream().launch(&f,1,32,&[&out.pointer]).unwrap();
-    let mut words=[0u32;28];gpu.stream().download(&out,&mut words).unwrap();
+    let mut words=[0u32;27];gpu.stream().download(&out,&mut words).unwrap();
     assert_eq!(words,program::layout());
 }
 
@@ -453,21 +453,19 @@ fn straddles(gpu:&gpu::Gpu,program:&program::Program,model:&Model,settings:&Sett
 }
 
 /// A batch on the GPU sums what the same batch sums on the CPU (lib.rs `simulate`), to single
-/// precision, with the control variates (control.rs): 20 trajectories in two groups -- tasks of 8, 2,
+/// precision, with the harmonic control (control.rs): 20 trajectories in two groups -- tasks of 8, 2,
 /// 8 and 2 (blocks with idle warps) --, 3 steps between 6 outputs, the motion's means over each
 /// output's window of half a trap period (the windows closing up to the reach past the last output,
-/// over several launches), the samples kept at two outputs, every trajectory's harmonic control and,
-/// where the generator is static, its held twin. The batch is the first 20 trajectories from the
+/// over several launches), the samples kept at two outputs and every trajectory's harmonic control. The batch is the first 20 trajectories from the
 /// 40th on, by 20, whose jumps fall in the same steps on both devices (`straddles`) wherever the
 /// sums can tell: after every step within the windows, and at the run's end, where the jumps are
 /// counted -- but where a cluster's states' frames lie apart (`frames_apart`): there a ringing photon's landing takes their phase at its crossing's time, in single precision (`on_eight_states_a_step_and_a_jump_are_the_cpu_s`),
 /// and over the half trap period past the windows 1 to 3 of every 20 trajectories part by a jump (the gray molasses' batches from the 40th to the 180th), so that its total is left out. A jump a step apart moves its recoil by a step in a window (1.6e-3 of the gray molasses'
-/// Σκ_x² at its last output, trajectory 44 from the 40th). The held twin's jumps are not checked so
-/// (no entry steps it alone on the GPU): each fixture's fall in the same steps. The trap's region is
+/// Σκ_x² at its last output, trajectory 44 from the 40th). The trap's region is
 /// the solve's (its depth: the loss's, and the harmonic part's weight beyond it, engine.rs), the step
 /// `dt` one the batch's trajectories converge at: the devices' precisions part where they do not.
-fn batch(r:&Request,fourth:bool,dt:f64)->bool{
-    let Some(gpu)=device()else{return false};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
+fn batch(r:&Request,fourth:bool,dt:f64){
+    let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
     let model=model(r,fourth);let initial=Initial::new(&model,r).unwrap();
     let mut settings=Settings::new(dt,&initial.traps[0],1e-6,true);settings.region=initial.depths[0];
     let(seed,count,group,steps,outputs,listed)=(0x3D_5EED,20,10,3,6,[2,5]);
@@ -485,10 +483,8 @@ fn batch(r:&Request,fourth:bool,dt:f64)->bool{
         s.is_empty()
     }).expect("a batch whose jumps fall in the same steps on both devices");
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
-    let twin=Twin::new(&model,0.5*model.geometry[model.trap_beam].intensity([0.;3]));
-    let variates=Variates{harmonic:&harmonic,twin:twin.as_ref()};
-    let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&variates),None).unwrap();
-    let c=atom_motion_3d::simulate(&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&variates));
+    let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&harmonic),None).unwrap();
+    let c=atom_motion_3d::simulate(&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&harmonic));
     assert_eq!(g.groups.len(),c.groups.len());
     let close=|a:f64,b:f64,scale:f64,what:&str|assert!((a-b).abs()<=1e-3*b.abs().max(scale),"{what}: {a} against {b}");
     for(k,(gg,cg))in g.groups.iter().zip(&c.groups).enumerate(){for(i,(x,y))in gg.sums.iter().zip(&cg.sums).enumerate(){
@@ -498,8 +494,7 @@ fn batch(r:&Request,fourth:bool,dt:f64)->bool{
             close(x.kappa[a],y.kappa[a],(y.kappa2[a]*y.held).sqrt(),&format!("{at}: Σκ[{a}]"));close(x.kappa2[a],y.kappa2[a],0.,&format!("{at}: Σκ²[{a}]"));
             for j in 0..3{close(x.harmonic[a][j],y.harmonic[a][j],1e-9*y.harmonic[a][1].sqrt(),&format!("{at}: harmonic[{a}][{j}]"));}
         }
-        for s in 0..STATES{close(x.populations[s],y.populations[s],y.held,&format!("{at}: Σp[{s}]"));close(x.twin[s],y.twin[s],y.trajectories,&format!("{at}: twin Σc[{s}]"));}
-        for j in 0..2{close(x.twin2[j],y.twin2[j],y.trajectories,&format!("{at}: twin2[{j}]"));}
+        for s in 0..STATES{close(x.populations[s],y.populations[s],y.held,&format!("{at}: Σp[{s}]"));}
         close(x.profile,y.profile,1e-6*y.held,&format!("{at}: profile"));close(x.doppler,y.doppler,1e-9*y.held,&format!("{at}: (kv/σ)²"));
         close(x.folded,y.folded,1e-9*y.held,&format!("{at}: folded η²"));
     }}
@@ -508,21 +503,18 @@ fn batch(r:&Request,fourth:bool,dt:f64)->bool{
         assert_eq!(gs.len(),cs.len());
         for(x,y)in gs.iter().zip(cs){for a in 0..3{close(x.0[a],y.0[a],1e-3,"a sample's r");close(x.1[a],y.1[a],1.,"a sample's κ");}}
     }
-    println!("trajectories {first} to {}: {} groups of {} outputs, {} jumps, held twin {}",first+count-1,g.groups.len(),outputs,g.jumps,twin.is_some());
-    twin.is_some()
+    println!("trajectories {first} to {}: {} groups of {} outputs, {} jumps",first+count-1,g.groups.len(),outputs,g.jumps);
 }
 /// Whether a cluster's ground states' frames lie apart.
 fn frames_apart(model:&Model)->bool{model.ground.clusters.iter().any(|c|c.frames[..c.states.len()].iter().any(|&w|w!=c.frames[0]))}
-/// The batches of the tweezer PGC, the gray molasses and the retro-reflected tweezer; one of them has
-/// a held twin. The retro-reflected tweezer's at 0.05 us: its initial atoms fill the standing wave's
+/// The batches of the tweezer PGC, the gray molasses and the retro-reflected tweezer. The retro-reflected tweezer's at 0.05 us: its initial atoms fill the standing wave's
 /// neighbouring sites too (ensemble.rs, 40 % of them), whose own wells are as stiff as the central
 /// site's while the harmonic part about the focus there is ten times the depth (weighted down,
 /// engine.rs) -- their κ after 3 us moves by up to 14 % between 0.2 and 0.05 us, by 1 % between 0.1
 /// and 0.05 us, the central site's by 10⁻⁴.
 #[test]
 fn a_batch_s_sums_are_the_cpu_s(){
-    let twins=[batch(&request(PGC),false,0.1),batch(&request(MOLASSES),false,0.1),batch(&retro(),false,0.05)];
-    if device().is_some(){assert!(twins.iter().any(|&t|t),"a fixture with a held twin");}
+    batch(&request(PGC),false,0.1);batch(&request(MOLASSES),false,0.1);batch(&retro(),false,0.05);
 }
 /// A batch's groups each through its own last output (lib.rs `simulate_to`, solve.rs # Batches) on the GPU are the CPU's: the same sums at the outputs a group reaches -- with its windows' far halves
 /// past its last --, none counted beyond, and the samples of those that reach a listed output.
@@ -533,9 +525,9 @@ fn a_group_stops_at_its_last_output_as_on_the_cpu(){
     let mut settings=Settings::new(0.1,&initial.traps[0],1e-6,true);settings.region=initial.depths[0];
     let(seed,first,count,group,steps,outputs,listed,ends)=(0x3D_5EED,40,32,8,3,6,[2,5],[5,3,1,5]);
     let program=gpu.program(&model,&settings).unwrap();
-    let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);let variates=Variates{harmonic:&harmonic,twin:None};
-    let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&variates),Some(&ends)).unwrap();
-    let c=atom_motion_3d::simulate_to(&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&variates),&ends);
+    let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
+    let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&harmonic),Some(&ends)).unwrap();
+    let c=atom_motion_3d::simulate_to(&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&harmonic),&ends);
     let close=|a:f64,b:f64,what:&str|assert!((a-b).abs()<=1e-3*b.abs().max(1.),"{what}: {a} against {b}");
     for(k,(gg,cg))in g.groups.iter().zip(&c.groups).enumerate(){for(i,(x,y))in gg.sums.iter().zip(&cg.sums).enumerate(){
         let at=format!("group {k}, output {i}");assert_eq!((x.trajectories,x.held),(y.trajectories,y.held),"{at}");
@@ -545,17 +537,15 @@ fn a_group_stops_at_its_last_output_as_on_the_cpu(){
     }}
     for(gs,cs)in g.samples.iter().zip(&c.samples){assert_eq!(gs.len(),cs.len());}
 }
-/// The same at fourth order, on the tweezer PGC, with the held twin's start and post-jump map (control.rs
-/// # The twin at fourth order).
+/// The same at fourth order, on the tweezer PGC.
 #[test]
 fn at_fourth_order_a_batch_s_sums_are_the_cpu_s(){batch(&request(PGC),true,0.2);}
 
-/// The default scene's motion as the app sends it (rust-solver/tests/fixtures/default_scene_motion.json)
-/// with the held twin kept: a GPU batch's estimates, the twin's control correcting the populations,
-/// have rows that sum to one within 1e-9 -- the atom's and the twin's readouts in double precision
+/// The default scene's motion as the app sends it (rust-solver/tests/fixtures/default_scene_motion.json):
+/// a GPU batch's estimates have rows that sum to one within 1e-9 -- the atom's readout in double precision
 /// (the adapter checks 1e-7).
 #[test]
-fn the_default_scene_s_rows_sum_to_one_with_the_held_twin(){
+fn the_default_scene_s_rows_sum_to_one(){
     let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
     let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/default_scene_motion.json")).unwrap();
     let r=scene::request(&fixture["payload"]);let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
@@ -563,11 +553,9 @@ fn the_default_scene_s_rows_sum_to_one_with_the_held_twin(){
     let(outputs,steps,interval)=(101,10,1.);
     let settings=Settings::new(interval/steps as f64,&trap,1e-7,true);
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
-    let twin=Twin::new(&model,0.5*model.geometry[model.trap_beam].intensity([0.;3])).expect("the default scene's generator is static");
-    let means:Vec<Means>=twin.means(&model,&r.initial_density,interval,outputs).into_iter().enumerate().map(|(i,m)|Means{harmonic:harmonic.mean[i],twin:Some(m)}).collect();
     let program=gpu.program(&model,&settings).unwrap();
-    let out=gpu.simulate(&program,&model,&settings,&initial,0x3D_5EED,0,256,32,steps,outputs,&[],Some(&Variates{harmonic:&harmonic,twin:Some(&twin)}),None).unwrap();
-    let estimates=summarize(&out.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab},&means);
+    let out=gpu.simulate(&program,&model,&settings,&initial,0x3D_5EED,0,256,32,steps,outputs,&[],Some(&harmonic),None).unwrap();
+    let estimates=summarize(&out.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab},&harmonic.mean);
     let worst=estimates.iter().filter(|e|e.loss<1.).map(|e|(e.populations.iter().sum::<f64>()-1.).abs()).fold(0.,f64::max);
     println!("the rows' largest |sum - 1|: {worst:.2e}");
     assert!(worst<=1e-9,"a row's sum is off by {worst:.2e}");

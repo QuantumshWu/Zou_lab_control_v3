@@ -4,15 +4,15 @@
 //! dipole pattern's moments, the trap, a thermal state that stays thermal and held with the light
 //! off (its T over a trap period as well, with smaller errors), the initial states' bound ensemble and
 //! a group's Latin hypercube of it, and a short solve whose t = 0 is the request's initial state.
-use atom_motion_3d::control::{Harmonic,Twin};
+use atom_motion_3d::control::Harmonic;
 use atom_motion_3d::engine::{dipole_direction,Engine,Settings,Trajectory,QUADRATURE};
 use atom_motion_3d::ensemble::kept;
 use atom_motion_3d::ground::{ExcitedKind,Ground};
 use atom_motion_3d::ledger::BUDGET;
 use atom_motion_3d::model::{Model,MOST_MIXED,MOST_STATES};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
-use atom_motion_3d::stats::{summarize,Means,Scales,KT_PER_UK};
-use atom_motion_3d::{initial_trajectory,sample_states,simulate,simulate_to,Initial,Stratum,Variates};
+use atom_motion_3d::stats::{summarize,Scales,KT_PER_UK};
+use atom_motion_3d::{initial_trajectory,sample_states,simulate,simulate_to,Initial,Stratum};
 use atom_motion_3d::solve::{bound_probes,drift,grid_phase,jumps,solve,Device,BIAS_SHARE,NUMERICAL_SHARE,POPULATION_TARGET,TEMPERATURE_TARGET};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
@@ -354,123 +354,6 @@ fn the_harmonic_control_keeps_no_sums_per_step(){
     }}
 }
 
-/// The held twin's exact means (control.rs: the engine's generator and jumps at its point, by the
-/// superoperator's exponential) against the dense front end's master equation at the same point
-/// (ground.rs `local_at`, RK4), from the initial state over 20 us: within the tables' accuracy.
-#[test]
-fn the_held_twin_s_master_equation_is_the_front_end_s(){
-    let r=request(&|_|true);let model=Model::new(&r).unwrap();let g=&model.ground;
-    let twin=Twin::new(&model,0.9).expect("a static generator");let point=twin.held.point.r;
-    let(interval,outputs)=(1.,21);let means=twin.means(&model,&r.initial_density,interval,outputs);
-    let e=g.eliminate(&model.intensities_at_point(point)).unwrap();
-    let locals:Vec<_>=(0..g.clusters.len()).map(|k|g.local_at(&e,k,point,0.).unwrap()).collect();
-    let mut rho:Vec<atom_motion_3d::linear::Dense>=g.clusters.iter().map(|c|{let n=c.states.len();atom_motion_3d::linear::Dense::from_fn(n,n,|i,j|if i==j{let s=g.ground_states[c.states[i]];r.initial_density[s*STATES+s]}else{Complex::ZERO})}).collect();
-    let derivative=|rho:&[atom_motion_3d::linear::Dense]|->Vec<atom_motion_3d::linear::Dense>{
-        let mut out:Vec<_>=rho.iter().zip(&locals).map(|(p,x)|{let h=&x.effective;let mut d=h.product(p).scaled(Complex::new(0.,-1.));d.add_scaled(Complex::new(0.,1.),&p.product(&h.adjoint()));d}).collect();
-        for(k,x)in locals.iter().enumerate(){for(class,jumps)in g.clusters[k].classes.iter().zip(&x.jumps){for j in jumps{out[class.target].add_scaled(Complex::ONE,&j.product(&rho[k]).product(&j.adjoint()));}}}
-        out
-    };
-    let h=0.002;let mut worst=0_f64;
-    for i in 1..outputs{
-        for _ in 0..(interval/h).round() as usize{
-            let add=|a:&[atom_motion_3d::linear::Dense],b:&[atom_motion_3d::linear::Dense],s:f64|->Vec<atom_motion_3d::linear::Dense>{a.iter().zip(b).map(|(x,y)|{let mut z=x.clone();z.add_scaled(Complex::new(s,0.),y);z}).collect()};
-            let k1=derivative(&rho);let k2=derivative(&add(&rho,&k1,h/2.));let k3=derivative(&add(&rho,&k2,h/2.));let k4=derivative(&add(&rho,&k3,h));
-            for(j,x)in rho.iter_mut().enumerate(){for(k,w)in [(&k1,1.),(&k2,2.),(&k3,2.),(&k4,1.)]{x.add_scaled(Complex::new(h*w/6.,0.),&k[j]);}}
-        }
-        let mut p=[0.;STATES];for(k,x)in locals.iter().enumerate(){for(a,b)in p.iter_mut().zip(g.populations(k,x,&rho[k])){*a+=b;}}
-        worst=worst.max((0..STATES).map(|s|(p[s]-means[i][s]).abs()).fold(0.,f64::max));
-    }
-    assert!(worst<=2e-3,"largest |Δp| {worst:.2e}");
-}
-
-/// The held engine (engine.rs `Held`: the twin's generator and jumps computed once, control.rs) is the plain engine's atom held at the
-/// same point, but for the jump's transient, which the twin leaves out: along the atom's states over 2000 steps the same internal state after a step without a jump and the same
-/// photon of every class, to the tables' interpolation between the plain engine's decay and its jumps' Σ L†L (the twin's by construction) --
-/// without the photons' recoil term, where the two are one at the nodes.
-#[test]
-fn the_held_engine_is_the_plain_engine_at_rest(){
-    let r=request(&|_|true);let mut model=Model::new(&r).unwrap();model.doppler=false;let initial=Initial::new(&model,&r).unwrap();let trap=initial.traps[0];
-    let twin=Twin::new(&model,0.9).expect("a static generator");
-    let mut settings=Settings::new(0.2,&trap,f64::EPSILON,false);settings.free=[false;3];settings.loss=false;
-    let(plain,held)=(Engine::new(&model,settings.clone()),Engine::held(&model,&settings,&twin.held));
-    for index in 0..8{
-        let mut a=initial_trajectory(&model,&settings,&initial,13,index,Stratum::single(index));a.r=twin.held.point.r;a.kappa=[0.;3];
-        for step in 0..2000{
-            plain.step(&mut a);if step%100!=0{continue;}
-            let(k,n)=(a.cluster,model.dimension(a.cluster));let norm:f64=a.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();let mut from=a.clone();for z in from.psi[..n].iter_mut(){*z=*z*(1./norm);}from.threshold=0.;
-            let(mut x,mut y)=(from.clone(),from.clone());plain.step(&mut x);held.step(&mut y);
-            let(nx,ny):(f64,f64)=(x.psi[..n].iter().map(|z|z.norm_sqr()).sum(),y.psi[..n].iter().map(|z|z.norm_sqr()).sum());
-            for i in 0..n{assert!((x.psi[i].norm_sqr()/nx-y.psi[i].norm_sqr()/ny).abs()<=model.table_error,"trajectory {index} state {i}: {} against the tables' error {}",(x.psi[i].norm_sqr()/nx-y.psi[i].norm_sqr()/ny).abs(),model.table_error);}
-            let photons=model.photons(k,&twin.held.point,&from.psi,from.time,None);let rate:f64=photons.amplitude.iter().zip(&model.ground.clusters[k].classes).map(|(u,c)|u.iter().map(|v|v[..model.ground_dimension(c.target)].iter().map(|z|z.norm_sqr()).sum::<f64>()).sum::<f64>()).sum();
-            for(c,(u,class))in photons.amplitude.iter().zip(&model.ground.clusters[k].classes).enumerate(){let nt=model.ground_dimension(class.target);
-                for axis in 0..3{for i in 0..nt{let z=(0..n).fold(Complex::ZERO,|s,b|s+twin.held.jumps[k][c][axis][i*n+b]*from.psi[b]);
-                    assert!((z-u[axis][i]).abs()<=model.table_error*rate.sqrt(),"trajectory {index} class {c} axis {axis} row {i}: {z:?} against {:?}",u[axis][i]);}}}
-        }
-    }
-}
-
-/// The held twin is the unraveling of a Lindblad equation: its generator's decay is its jumps' own
-/// Σ L†L (the photons' first order in the recoil kept; at fourth order K = Π L̃, the post-jump map
-/// in its jumps, control.rs), so its master equation (`Twin::means`) keeps the trace one -- and every
-/// correction of the populations (stats.rs) keeps their sum -- over 100 us of a probe on the
-/// tweezer, at second and at fourth order.
-#[test]
-fn the_held_twin_is_a_lindblad_unraveling_and_keeps_the_trace(){
-    let r=request(&|b|b["id"]=="tweezer"||b["id"]=="cool-plus");
-    for fourth in [false,true]{
-    let model=Model::with_order(&r,f64::INFINITY,fourth).unwrap();
-    let twin=Twin::new(&model,0.93).expect("a static generator");
-    assert_eq!(twin.slow.iter().any(|s|s.is_some()),fourth,"the post-jump map at fourth order only");
-    for k in 0..model.clusters(){
-        let n=model.dimension(k);let h=&twin.held.locals[k].hamiltonian;let(mut worst,mut scale)=(0_f64,0_f64);
-        for p in 0..n{for q in 0..n{
-            let decay=(h[p*n+q]-h[q*n+p].conj())*Complex::new(0.,1.);let mut jumps=Complex::ZERO;
-            for(class,l)in model.ground.clusters[k].classes.iter().zip(&twin.held.jumps[k]){let nt=model.dimension(class.target);for x in 0..3{for i in 0..nt{jumps+=l[x][i*n+p].conj()*l[x][i*n+q];}}}
-            worst=worst.max((decay-jumps).abs());scale=scale.max(jumps.abs());
-        }}
-        assert!(worst<=1e-12*scale.max(f64::MIN_POSITIVE),"cluster {k}: |Γ − ΣL†L| {worst:.2e} of {scale:.2e}");
-    }
-    let means=twin.means(&model,&r.initial_density,1.,101);
-    let worst=means.iter().map(|p|(p.iter().sum::<f64>()-1.).abs()).fold(0.,f64::max);
-    assert!(worst<=1e-10,"the trace off by {worst:.2e}");
-    }
-}
-
-/// The held twin's populations average to its master equation's at fourth order: 4096 twins of a
-/// probe on the tweezer (their bare initial state's slow part at the twin's point, their streams the
-/// trajectories'), held 30 us in steps of 0.2 us, against `Twin::means` at every output within four
-/// standard errors -- the post-jump map in the jumps, K = Π L̃, and the plain threshold make the
-/// unraveling exactly that Lindblad equation's (control.rs, # The twin at fourth order).
-#[test]
-fn the_held_twin_at_fourth_order_averages_to_its_master_equation(){
-    let r=request(&|b|b["id"]=="tweezer"||b["id"]=="cool-plus");let model=Model::with_order(&r,f64::INFINITY,true).unwrap();
-    let initial=Initial::new(&model,&r).unwrap();let twin=Twin::new(&model,0.93).expect("a static generator");
-    assert!(twin.slow.iter().any(|s|s.is_some()),"fourth-order tables");
-    let mut settings=Settings::new(0.2,&initial.traps[0],f64::EPSILON,false);settings.free=[false;3];settings.loss=false;
-    let held=Engine::held(&model,&settings,&twin.held);
-    let(steps,outputs,count)=(5,31,4096u64);let means=twin.means(&model,&r.initial_density,1.,outputs);
-    let(cluster,state,_)=initial.states[0];
-    let runs:Vec<Vec<[f64;STATES]>>=(0..count).map(|index|{
-        let mut psi=[Complex::ZERO;MOST_MIXED];psi[state]=Complex::ONE;
-        let mut t=atom_motion_3d::engine::Trajectory{cluster,psi,r:twin.held.point.r,kappa:[0.;3],time:0.,threshold:atom_motion_3d::engine::jump_stream(17,index,0).open_uniform(),
-            alive:true,jumps:0,beats:0.,seed:17,index};
-        twin.start(&mut t);
-        let mut out=vec![twin.populations(t.cluster,&t.psi)];
-        for _ in 1..outputs{for _ in 0..steps{held.step(&mut t);}out.push(twin.populations(t.cluster,&t.psi));}
-        out}).collect();
-    let mut worst=(0_f64,0usize,0usize);
-    for i in 0..outputs{for s in 0..STATES{
-        let v:Vec<f64>=runs.iter().map(|x|x[i][s]).collect();let n=v.len() as f64;let m=v.iter().sum::<f64>()/n;
-        // The spread at least a rare event's (the exact mean's share of the twins once each), where
-        // few twins or none have jumped yet.
-        let se=(v.iter().map(|x|(x-m).powi(2)).sum::<f64>()/(n-1.)/n).sqrt().max((means[i][s].abs()/n).sqrt());
-        if se>0.{let z=(m-means[i][s]).abs()/se;if z>worst.0{worst=(z,i,s);}}
-    }}
-    println!("largest |z| {:.2} (output {}, state {})",worst.0,worst.1,worst.2);
-    assert!(worst.0<=4.,"output {} state {}: |z| {:.2}",worst.1,worst.2,worst.0);
-}
-
-/// A shallow trap's loss against the step (rust-solver/tests/fixtures/shallow_probe_motion.json: the
 /// default scene's tweezer at 0.6 mW, 128 uK deep, its probe on F = 2 → F' = 2 at 1 mW/cm², the atom
 /// at 30 uK, 500 us): the probe pumps every atom into F = 1 within the first sample, dark from then on
 /// and its energy kept, so that past it an atom is lost only by the step. 1024 trajectories on shared
@@ -533,9 +416,8 @@ fn a_shallow_trap_s_step_holds_t_within_its_share(){
     let temperatures=|steps:usize|{
         let mut s=Settings::new(interval/steps as f64,&trap,f64::EPSILON,true);s.region=initial.depths[reference];
         let harmonic=Harmonic::new(&model,&s,&initial,steps,outputs);
-        let outcome=simulate(&model,&s,&initial,0x3D_5EED,0,count,8,steps,outputs,&[],Some(&Variates{harmonic:&harmonic,twin:None}));
-        let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:None}).collect();
-        summarize(&outcome.groups,&scales,&means)};
+        let outcome=simulate(&model,&s,&initial,0x3D_5EED,0,count,8,steps,outputs,&[],Some(&harmonic));
+        summarize(&outcome.groups,&scales,&harmonic.mean)};
     let(coarse,fine)=(temperatures(steps),temperatures(4*steps));
     // Per axis the mean ΔT/T over the outputs and the mean of its standard errors (the outputs' errors are
     // correlated along the trajectories: the mean's is at most theirs).
@@ -827,11 +709,60 @@ fn sparse_request(v:&Value)->Request{
         frame_frequencies_mhz:floats(&v["frameFrequenciesMHz"]),frequencies_mhz:floats(&v["frequenciesMHz"]),beams,emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],
         field_vector_g:[f[0],f[1],f[2]],mass_kg:v["massKg"].as_f64().unwrap(),initial_density:density,temperature_uk:v["temperatureUK"].as_f64().unwrap(),trap_beam,times_us:vec![]}
 }
-/// The frozen atom's F = 1 population each microsecond, its eliminated master equation's at the focus:
-/// the held twin's exact means there (control.rs), every drive folded, at second or fourth order.
+/// The frozen atom's F = 1 population each microsecond, its eliminated master equation's at the focus, every drive folded, at second or fourth order:
+/// the engine's H_eff and jumps there, its decay its jumps' own Σ L†L (so that its trace stays one), at fourth order each jump's post-jump map K = Π L̃ and each
+/// initial basis state's slow part Π e/√A, by the exponential of its superoperator over a microsecond.
 fn frozen_f1(r:&Request,fourth:bool)->Vec<f64>{
-    let model=Model::with_order(r,f64::INFINITY,fourth).unwrap();let twin=Twin::new(&model,1.).expect("a static generator");assert_eq!(twin.held.point.r,[0.;3]);
-    twin.means(&model,&r.initial_density,1.,11).iter().map(|row|(0..STATES).filter(|&i|r.states[i].starts_with("ground-1-")).map(|i|row[i]).sum()).collect()
+    use atom_motion_3d::linear::Dense;
+    let model=Model::with_order(r,f64::INFINITY,fourth).unwrap();let g=&model.ground;let point=model.point([0.;3],[0.;3]);let clusters=model.clusters();
+    let sizes:Vec<usize>=(0..clusters).map(|k|model.dimension(k)).collect();
+    let offsets:Vec<usize>=sizes.iter().scan(0,|o,&n|{let x=*o;*o+=n*n;Some(x)}).collect();let d:usize=sizes.iter().map(|n|n*n).sum();
+    let slow:Vec<Option<Vec<Complex>>>=(0..clusters).map(|k|model.slow_part(k,&point,0.)).collect();
+    let jumps:Vec<Vec<[Vec<Complex>;3]>>=(0..clusters).map(|k|{let n=sizes[k];
+        let columns:Vec<Vec<[[Complex;MOST_STATES];3]>>=(0..n).map(|j|{let mut psi=[Complex::ZERO;MOST_STATES];psi[j]=Complex::ONE;std::mem::take(&mut model.photons(k,&point,&psi,0.,None).amplitude)}).collect();
+        g.clusters[k].classes.iter().enumerate().map(|(c,class)|{let nt=sizes[class.target];
+            std::array::from_fn(|x|{let l:Vec<Complex>=(0..nt*n).map(|e|columns[e%n][c][x][e/n]).collect();
+                match &slow[class.target]{None=>l,Some(pi)=>(0..nt*n).map(|e|{let(i,j)=(e/n,e%n);(0..nt).fold(Complex::ZERO,|z,m|z+pi[i*nt+m]*l[m*n+j])}).collect()}})}).collect()}).collect();
+    let mut generator=Dense::zeros(d,d);
+    for(k,&n)in sizes.iter().enumerate(){
+        let o=offsets[k];let h=model.local(k,&point,0.).hamiltonian;
+        let mut effective=vec![Complex::ZERO;n*n];
+        for p in 0..n{for q in 0..n{
+            let mut decay=Complex::ZERO;
+            for(class,l)in g.clusters[k].classes.iter().zip(&jumps[k]){for x in 0..3{for i in 0..sizes[class.target]{decay+=l[x][i*n+p].conj()*l[x][i*n+q];}}}
+            effective[p*n+q]=(h[p*n+q]+h[q*n+p].conj())*0.5-decay*Complex::new(0.,0.5);
+        }}
+        for i in 0..n{for j in 0..n{for m in 0..n{
+            generator[(o+i*n+j,o+m*n+j)]+=Complex::new(0.,-1.)*effective[i*n+m];
+            generator[(o+i*n+j,o+i*n+m)]+=Complex::new(0.,1.)*effective[j*n+m].conj();
+        }}}
+        for(class,c)in g.clusters[k].classes.iter().enumerate(){let(nt,ot)=(sizes[c.target],offsets[c.target]);
+            for a in 0..3{let l=&jumps[k][class][a];for i in 0..nt{for j in 0..nt{for p in 0..n{for q in 0..n{generator[(ot+i*nt+j,o+p*n+q)]+=l[i*n+p]*l[j*n+q].conj();}}}}}}
+    }
+    // exp(M τ), τ a microsecond, by scaling and squaring of its Taylor series.
+    let norm=(0..d).map(|j|(0..d).map(|i|generator[(i,j)].abs()).sum::<f64>()).fold(0.,f64::max);let squarings=if norm>0.5{(norm/0.5).log2().ceil() as u32}else{0};
+    let a=generator.scaled(Complex::new(1./2f64.powi(squarings as i32),0.));let mut propagator=Dense::from_fn(d,d,|i,j|if i==j{Complex::ONE}else{Complex::ZERO});let mut term=propagator.clone();
+    for k in 1..=30{term=term.product(&a).scaled(Complex::new(1./k as f64,0.));propagator.add_scaled(Complex::ONE,&term);if term.largest()<=f64::EPSILON*propagator.largest(){break;}}
+    for _ in 0..squarings{propagator=propagator.product(&propagator);}
+    let mut rho=vec![Complex::ZERO;d];
+    for(k,c)in g.clusters.iter().enumerate(){let n=sizes[k];for(x,&b)in c.states.iter().enumerate(){let s=g.ground_states[b];let p=r.initial_density[s*STATES+s];
+        match &slow[k]{
+            None=>rho[offsets[k]+x*n+x]=p,
+            Some(pi)=>{let w:f64=(0..n).map(|i|pi[i*n+x].norm_sqr()).sum();for i in 0..n{for j in 0..n{rho[offsets[k]+i*n+j]+=p*pi[i*n+x]*pi[j*n+x].conj()*(1./w);}}}
+        }}}
+    // The populations of a density: each pure state's readout, the off-diagonal entries by the images of e_i + e_j and e_i + i e_j.
+    let f1=|rho:&[Complex]|->f64{let mut p=[0.;STATES];
+        for(k,&n)in sizes.iter().enumerate(){let o=offsets[k];
+            let pure=|psi:&[Complex;MOST_STATES]|->[f64;STATES]{let norm:f64=psi[..n].iter().map(|z|z.norm_sqr()).sum();model.populations(k,&point,psi,0.).map(|x|x*norm)};
+            let unit=|i:usize|{let mut v=[Complex::ZERO;MOST_STATES];v[i]=Complex::ONE;v};
+            let diagonal:Vec<[f64;STATES]>=(0..n).map(|i|pure(&unit(i))).collect();
+            for i in 0..n{for s in 0..STATES{p[s]+=rho[o+i*n+i].re*diagonal[i][s];}
+                for j in i+1..n{let(mut x,mut y)=(unit(i),unit(i));x[j]=Complex::ONE;y[j]=Complex::I;let(px,py)=(pure(&x),pure(&y));let z=rho[o+i*n+j];
+                    for s in 0..STATES{p[s]+=z.re*(px[s]-diagonal[i][s]-diagonal[j][s])+z.im*(diagonal[i][s]+diagonal[j][s]-py[s]);}}}}
+        (0..STATES).filter(|&i|r.states[i].starts_with("ground-1-")).map(|i|p[i]).sum()};
+    let mut out=vec![f1(&rho)];
+    for _ in 1..11{rho=(0..d).map(|i|(0..d).fold(Complex::ZERO,|z,j|z+propagator[(i,j)]*rho[j])).collect();out.push(f1(&rho));}
+    out
 }
 
 /// A strong beam 3 GHz off a probe's line dresses the probe (F10; ground.rs, # The near light's
@@ -1281,14 +1212,14 @@ fn a_group_run_only_through_an_output_sums_what_the_whole_run_sums_there(){
     let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
     let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();let trap=initial.traps[reference];
     let mut s=Settings::new(interval/steps as f64,&trap,f64::EPSILON,true);s.doppler=BUDGET;s.region=initial.depths[reference];
-    let harmonic=Harmonic::new(&model,&s,&initial,steps,outputs);let v=Variates{harmonic:&harmonic,twin:None};
-    let whole=simulate(&model,&s,&initial,0x3D_5EED,0,24,8,steps,outputs,&[],Some(&v));
-    let ends=[10,7,3];let cut=simulate_to(&model,&s,&initial,0x3D_5EED,0,24,8,steps,outputs,&[],Some(&v),&ends);
+    let harmonic=Harmonic::new(&model,&s,&initial,steps,outputs);
+    let whole=simulate(&model,&s,&initial,0x3D_5EED,0,24,8,steps,outputs,&[],Some(&harmonic));
+    let ends=[10,7,3];let cut=simulate_to(&model,&s,&initial,0x3D_5EED,0,24,8,steps,outputs,&[],Some(&harmonic),&ends);
     for(g,&end)in ends.iter().enumerate(){for i in 0..outputs{let(a,b)=(&whole.groups[g].sums[i],&cut.groups[g].sums[i]);
         if i<=end{assert!(a.held==b.held&&a.kappa2==b.kappa2&&a.populations==b.populations&&a.harmonic==b.harmonic&&a.trajectories==b.trajectories,"group {g} output {i}");}
         else{assert!(b.trajectories==0.&&b.held==0.,"group {g} output {i}");}}}
-    let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:None}).collect();let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
-    let e=summarize(&cut.groups,&scales,&means);
+    let scales=Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab};
+    let e=summarize(&cut.groups,&scales,&harmonic.mean);
     assert_eq!(e[3].trajectories,24.);assert_eq!(e[4].trajectories,16.);assert_eq!(e[10].trajectories,8.);
 }
 

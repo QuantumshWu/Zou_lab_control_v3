@@ -273,20 +273,19 @@ mod tests {
             "beams":[],"emission":model["collapse"].clone()});
         model
     }
-    /// The default scene's motion as the app sends it (tests/fixtures/default_scene_motion.json), with
-    /// the held twin kept (motion-3d control.rs): the result passes the adapter's checks -- the
+    /// The default scene's motion as the app sends it (tests/fixtures/default_scene_motion.json):
+    /// the result passes the adapter's checks -- the
     /// engine's rows, before the projection, sum to one (`lattice_core_adapter::row_errors`, the
-    /// trace it reports) -- with the twin's control variate correcting them, and every published
+    /// trace it reports) --, and every published
     /// population lies in [0, 1] (the rows projected onto the probability simplex).
     #[test]
-    fn the_default_scene_s_motion_keeps_every_row_s_sum_with_the_held_twin() {
+    fn the_default_scene_s_motion_keeps_every_row_s_sum() {
         let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/default_scene_motion.json")).unwrap();
         let mut line = fixture["payload"].clone();
         line["id"] = json!(8);
         let out = request(line);
         assert!(out["error"].is_null(), "{}", out["error"]);
         let result = &out["result"];
-        assert!(result["diagnostics"]["method"].as_str().unwrap().contains("静止孪生"), "the held twin is kept: {}", result["diagnostics"]["method"]);
         let trace = result["diagnostics"]["traceError"].as_f64().unwrap();
         assert!(trace <= 1e-7, "a row's sum before the projection is off by {trace:.2e}");
         let rows: Vec<Vec<f64>> = result["populations"].as_array().unwrap().iter().map(|row| row.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect()).collect();
