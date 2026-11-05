@@ -141,6 +141,10 @@ fn moments(g:&Sums,s:&Scales,correction:Option<&Correction>)->Moments{
 /// is this wherever the read is a spread -- a temperature over its atoms (solve.rs `reads_temperature`), a jackknife over its groups (`summarize`), that jackknife's own over the
 /// groups left out (solve.rs `need_error`), a read's error over its windows (solve.rs `drift`); where it is a count, what none met, it is what the samples leave open (solve.rs `unseen`).
 pub(crate) fn reads_spread(samples:f64)->bool{samples>=2.}
+/// The relative error of a jackknife's variance over g groups (χ² with g − 1 degrees of freedom): √(2/(g − 1)), of its standard error half that, √(1/(2(g − 1))): 8 % on 72 groups.
+pub(crate) fn variance_noise(groups:f64)->f64{(2./(groups-1.).max(1.)).sqrt()}
+/// The largest of n noisy looks at one quantity, in standard errors: z = √(2 ln n), what a read that takes their largest must allow for.
+pub(crate) fn largest_look(looks:f64)->f64{(2.*looks.ln()).sqrt()}
 /// The jackknife's standard error of a value over the groups left out.
 fn spread(leave:&[Moments],factor:f64,f:impl Fn(&Moments)->f64)->f64{let m=leave.iter().map(&f).sum::<f64>()/leave.len() as f64;(factor*leave.iter().map(|x|(f(x)-m).powi(2)).sum::<f64>()).sqrt()}
 

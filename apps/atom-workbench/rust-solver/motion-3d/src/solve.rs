@@ -332,7 +332,7 @@ use crate::ground::{ExcitedKind,Ground,Kind};
 use crate::ledger::{Ledger,Total};
 use crate::model::{Exact,Model,Trap,MOST_MIXED,MOST_STATES,NOT_LINDBLAD};
 use crate::control::Harmonic;
-use crate::stats::{reads_spread,summarize,Estimate,Group,Scales,Sums,KT_PER_UK};
+use crate::stats::{largest_look,reads_spread,summarize,variance_noise,Estimate,Group,Scales,Sums,KT_PER_UK};
 use crate::{pilot_start,sample_states,simulate_to,Initial,Outcome,TASK};
 use crate::{Complex,Request,STATES};
 use rayon::prelude::*;
@@ -459,18 +459,18 @@ fn statistics_of(estimates:&[Estimate],frequencies:[f64;3])->Vec<Statistic>{
     all
 }
 /// Standard errors per output (`values`, at the trajectories and the groups behind each, the first output's left alone) with their
-/// own noise smoothed: a jackknife's variance over g groups has the relative error √(2/(g − 1)), and the need takes their
+/// own noise smoothed: a jackknife's variance over g groups has the relative error `variance_noise`, and the need takes their
 /// largest, 20-35 % above their common value over hundreds of outputs (with T's windows overlapping, a little less). Each
 /// output's variance per trajectory takes the mean over its neighbours within the widest window, doubling from one, that agrees
-/// with every narrower one within z √(2/(g − 1)) of the narrower's error, z = √(2 ln n), the largest of n such errors
-/// (Lepski's rule): a plateau is smoothed whole, a transient's real peak beyond that noise stays.
+/// with every narrower one within z of its own noise, z the largest of n such errors (`largest_look`;
+/// Lepski's rule): a plateau is smoothed whole, a transient's real peak beyond that noise stays.
 fn steady(values:&[f64],counts:&[f64],groups:&[f64])->Vec<f64>{
     let n=values.len();let mut out=values.to_vec();if n<3||values[1..].iter().any(|x|!x.is_finite()){return out;}
     let v:Vec<f64>=(0..n).map(|i|values[i]*values[i]*counts[i]).collect();
     let mut sum=vec![0.;n+1];for i in 1..n{sum[i+1]=sum[i]+v[i];}
-    let z=(2.*((n-1) as f64).ln()).sqrt();
+    let z=largest_look((n-1) as f64);
     for i in 1..n{
-        let noise=(2./(groups[i]-1.).max(1.)).sqrt();let mut narrower=vec![(v[i],1.)];let mut half=1;
+        let noise=variance_noise(groups[i]);let mut narrower=vec![(v[i],1.)];let mut half=1;
         while half<n{
             let(a,b)=(i.saturating_sub(half).max(1),(i+half).min(n-1));let m=(b+1-a) as f64;let x=(sum[b+1]-sum[a])/m;
             if narrower.iter().any(|&(y,k):&(f64,f64)|(x-y).abs()>z*noise*y.min(x)/k.sqrt()){break;}
@@ -1218,7 +1218,7 @@ fn measured_charge(from:&Model,to:&Model,states:&[Trajectory],starts:&[Trajector
 fn steady_means(sums:&[f64],counts:&[f64],deviation:f64,largest:f64)->Vec<f64>{
     let n=sums.len();let mut out=vec![if counts[0]>0.{sums[0]/counts[0]}else{0.};n];
     let(mut total,mut held)=(vec![0.;n+1],vec![0.;n+1]);for i in 1..n{total[i+1]=total[i]+sums[i];held[i+1]=held[i]+counts[i];}
-    let z=(2.*((n-1).max(1) as f64).ln()).sqrt();
+    let z=largest_look((n-1).max(1) as f64);
     for i in 1..n{
         let(mut narrower,mut half)=(Vec::<(f64,f64)>::new(),0);
         loop{
@@ -1646,8 +1646,8 @@ fn standing(error:[f64;2],limit:f64)->f64{let beyond=error[0]-limit;if beyond>er
 /// a second span lowers it by 1.27, a third by 1.15, so two is the last that pays about as much. (The retro-reflected tweezer's error on the first layer of probes stands 1.2-2.6 times its errors at
 /// 0.05-0.10 us; with the step forced to 0.104, 0.078, 0.069 and 0.062 us the read moves it on 11, 12, 7 and 4 of 12 seeds at z = 2.33, on the same seeds 11, 12, 9 and 4 at 2.)
 const QUIET_SPANS:usize=2;
-/// The errors of a read that takes the largest of `looks` noisy sizes, in standard errors: z = √(2 ln n), the largest of n such errors (as `steady`), at least `CONFIDENCE`.
-fn looks_confidence(looks:f64)->f64{(2.*looks.ln()).sqrt().max(CONFIDENCE)}
+/// The errors of a read that takes the largest of `looks` noisy sizes, in standard errors: the largest of so many errors (`largest_look`, as `steady`), at least `CONFIDENCE`.
+fn looks_confidence(looks:f64)->f64{largest_look(looks).max(CONFIDENCE)}
 /// The steps of `drift`'s spans' unit: the trap's slowest period, at most the run.
 fn drift_window(period:f64,duration:f64,dt:f64)->usize{((period.min(duration)/dt).ceil() as usize).max(1)}
 /// Whether `drift`'s further reads of so many steps pay (each in steps of dt and of dt/2, three times that): a stand ρ times the limit takes the run ρ^(1/p) − 1 of its `run` steps more, what could stand against what already does.
