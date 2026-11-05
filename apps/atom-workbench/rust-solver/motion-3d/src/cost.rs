@@ -12,7 +12,7 @@
 //! the same decisions on any machine and at any load, and only the table's ratios decide -- on either device: a device's own speed divides out of any choice between models on it.
 //! What the kernel's work reads against these counts, a choice between the orders: their ratio here (PGC3D 1.88, TET 1.94, GMD1C 2.75, THREE 1.82, DEFAULT 1.00) against the kernel's as profiled on a laptop's RTX 5070, a wave of 576 (1.71, 1.83, 2.84, 2.03, 1.07), within 10 %; no device needs a table of its own.
 //! A wave takes its width at no further cost, and that no choice reads, for a choice that read it would change with the device's width: where the fourth order saves trajectories beyond its work and the pilot's model fits a wave, a GPU pays up to that ratio for the saving a CPU makes.
-//! Of the gate's 43 scenes and spans none reads differently at a width of 576: CONTROL_CYCLE's fourth order (1.21 here) takes 385 trajectories against 639, B1_128's its pilot's model past the targets.
+//! No run of the gate reads differently at a width of 576: those the fourth order's promise passes take more than a wave at the second order (R5004, R5051) or lie past the targets (B1_128, the one that takes it).
 //!
 //! # The table
 //! The advance's, the half step's: measured on that core (examples/bench_cost.rs) and fitted over DEFAULT, THREE, PGC3D, TET, GMD1C and PGCP_10, each part within 10–20 % of its measured time.
