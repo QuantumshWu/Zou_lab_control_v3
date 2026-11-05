@@ -1171,7 +1171,9 @@ function solverDetails():string{
     // made against, which does not bound the total (the η² of the excited states' elimination is in it).
     ...(motion?[readout('近似误差',approximationTotal(motion.approximations,accuracy?.requestedTolerance)),
       readout('取舍预算',`${errorPercent(motion.approximations.budget)}（折叠或保留、平面波或强度维度、一阶或精确多普勒）`),
-      ...(motion.approximations.flagged?[`<p class="horizon-note">${esc(motion.approximations.flagged)}</p>`]:[])]:[]),
+      ...(motion.approximations.flagged?[`<p class="horizon-note">${esc(motion.approximations.flagged)}</p>`]:[]),
+      // What the setup's initial ensemble leaves out: true of the setup, no error of the solve's, so no warning; beside the ledger.
+      ...(motion.approximations.note?[`<p class="ledger-note">${esc(motion.approximations.note)}</p>`]:[])]:[]),
   ].join(''):'';
   const notes=result?[...(result.method?[`时间演化：${solverText(result.method)}`]:[]),...(result.mean.method?[`长期布居：${solverText(result.mean.method)}`]:[]),...(result.mean.reason?[solverText(result.mean.reason)]:[]),...result.assumptions.map(labelStateIds)]:[];
   return `<section class="solver-details"><h4>计算详情</h4>${error?`<p class="solver-error">${esc(solverText(error))}</p>`:''}${result?`<div class="form solver-readouts">${rows}</div>${motion?approximationLedger(motion.approximations):''}${notes.map(text=>`<p>${esc(text)}</p>`).join('')}`:'<p>没有当前参数的求解结果。</p>'}${failureRecords.length?'<button data-export-solver-failures>导出失败记录</button>':''}</section>`;

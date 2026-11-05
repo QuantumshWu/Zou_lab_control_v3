@@ -21,7 +21,8 @@
 //! before the projection, `elapsedMs`, `method`,
 //! `device` -- the device used -- with `deviceNote` when it is not the one asked for, and
 //! `approximations`: the ledger of the a-priori approximations, `budget`, `used`, `items` of
-//! `label`, `estimate` and `action`, and `flagged` when some output times lie beyond the budget),
+//! `label`, `estimate` and `action`, `flagged` when some output times lie beyond the budget, and `note` with what the
+//! initial ensemble leaves out, no warning),
 //! and `motion`, read by `readMotionResult` in src/solver-types.ts:
 //! - `axis`: "3d";
 //! - per lab axis ("x", "y", "z"): `temperatureUK` and `temperatureErrorUK` (μK, one per sample:
@@ -126,6 +127,7 @@ fn approximations(ledger:&Ledger)->Value{
     let mut out=json!({"budget":ledger.budget,"used":ledger.used(),
         "items":ledger.items.iter().map(|i|json!({"label":i.label,"estimate":i.estimate,"action":i.action})).collect::<Vec<_>>()});
     if let Some(reason)=&ledger.flagged{out["flagged"]=json!(reason);}
+    if let Some(note)=&ledger.note{out["note"]=json!(note);}
     out
 }
 
