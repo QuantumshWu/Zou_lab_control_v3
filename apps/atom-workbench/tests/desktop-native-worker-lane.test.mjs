@@ -35,9 +35,12 @@ const started=(workerIdleMs=1)=>{const commands=[],finished=[],owner={binarySha2
   return {commands,finished,lane:new IpcNativeLane(owner,'trajectory')};};
 const handshake=async(lane,generation=1)=>{lane.receive({kind:'opened',generation,binarySha256:'binary',pid:123});lane.receive({kind:'message',generation,message:capabilities});lane.receive({kind:'message',generation,message:warm});await turn();};
 
-test('A worker that has run a job retires after its idle time, a job in time keeps it, and the next job starts a fresh one',async t=>{
+/** A job: `device` as a motion solve's options say it; none with motion off. */
+const solveJob=(nativeId,device)=>({nativeId,payload:device?{options:{device}}:{},settled:false});
+
+test('A worker holding the GPU retires after its idle time, a job in time keeps it, and the next job starts a fresh one',async t=>{
   t.mock.timers.enable({apis:['setTimeout']});
-  const IDLE=60000,{commands,lane}=started(IDLE),job=nativeId=>({nativeId,payload:{},settled:false});
+  const IDLE=60000,{commands,lane}=started(IDLE),job=nativeId=>solveJob(nativeId,'gpu');
   const closed=()=>commands.some(c=>c.op==='close');
   lane.enqueue(job(10));await turn();await handshake(lane);assert.equal(commands.at(-1).message.id,10);
   lane.receive({kind:'message',generation:1,message:{id:10,error:'answered'}});await turn();
@@ -60,6 +63,39 @@ test('A worker that has run a job retires after its idle time, a job in time kee
   t.mock.timers.tick(IDLE);assert.deepEqual(commands.at(-1),{op:'close',lane:'trajectory',generation:2});
   lane.receive({kind:'closed',generation:2});await turn();assert.equal(commands.at(-1).op,'close');
   await lane.close();
+});
+
+test('A worker without the GPU stays with its prepared model: motion off, or on the CPU; a solve on the GPU makes it one that retires',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const IDLE=60000,{commands,lane}=started(IDLE),closed=()=>commands.some(c=>c.op==='close');
+  const answer=id=>lane.receive({kind:'message',generation:1,message:{id,error:'answered'}});
+  lane.enqueue(solveJob(20));await turn();await handshake(lane);assert.equal(commands.at(-1).message.id,20);
+  answer(20);await turn();t.mock.timers.tick(10*IDLE);assert.equal(closed(),false);
+  lane.enqueue(solveJob(21,'cpu'));await turn();assert.equal(commands.at(-1).message.id,21);
+  answer(21);await turn();t.mock.timers.tick(10*IDLE);assert.equal(closed(),false);
+  assert.equal(commands.filter(c=>c.op==='open').length,1,'the same worker throughout');
+  lane.enqueue(solveJob(22,'gpu'));await turn();assert.equal(commands.at(-1).message.id,22);
+  answer(22);await turn();t.mock.timers.tick(IDLE-1);assert.equal(closed(),false);
+  t.mock.timers.tick(1);assert.deepEqual(commands.at(-1),{op:'close',lane:'trajectory',generation:1});
+  lane.receive({kind:'closed',generation:1});await lane.close();
+});
+
+test('A worker whose GPU start failed holds no context: it stays and keeps its answer, and the next solve there has the reason at once',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const IDLE=60000,REASON='驱动无法编译 GPU 内核（test）',{commands,lane}=started(IDLE),closed=()=>commands.some(c=>c.op==='close');
+  const failed={kind:'message',generation:1,message:{id:-2,protocol:NATIVE_PROTOCOL,error:REASON}};
+  const first=lane.startGpu();await turn();await handshake(lane);
+  lane.receive(failed);assert.equal(await first,REASON);await turn();
+  t.mock.timers.tick(10*IDLE);assert.equal(closed(),false);
+  // Past the idle time the same worker is asked: its process answers from what it knows, no new one compiles.
+  const next=lane.startGpu();await turn();
+  assert.deepEqual(commands.at(-1),{op:'write',lane:'trajectory',generation:1,message:{id:-2,op:'gpu'}});assert.equal(commands.filter(c=>c.op==='open').length,1);
+  lane.receive(failed);assert.equal(await next,REASON);await turn();
+  // The solve that asked for the GPU runs on its CPU with the note: the worker still holds none.
+  lane.enqueue(solveJob(30,'gpu'));await turn();assert.equal(commands.at(-1).message.id,30);
+  lane.receive({kind:'message',generation:1,message:{id:30,error:'answered'}});await turn();
+  t.mock.timers.tick(10*IDLE);assert.equal(closed(),false);
+  const closing=lane.close();lane.receive({kind:'closed',generation:1});await closing;
 });
 
 test('A GPU start after a retirement has a fresh worker, and that worker too retires when idle',async t=>{

@@ -18,7 +18,9 @@ export class IpcNativeLane {
   schedule(){if(this.closed||this.pumpTimer)return;this.pumpTimer=true;queueMicrotask(()=>{this.pumpTimer=null;void this.pump();});}
   async start(){
     if(this.closed||this.worker)return;
-    const w={generation:++this.generation,ready:false,retiring:false,gpuStarting:false,pid:null,capabilities:null,startTimer:null,openSentAt:performance.now(),startup:{}};
+    // `gpu`: null nothing yet; 'starting' inside its `gpu` request; 'failed' answered why the GPU cannot run;
+    // 'held' its CUDA context made, or a solve on the GPU sent to it.
+    const w={generation:++this.generation,ready:false,retiring:false,gpu:null,pid:null,capabilities:null,startTimer:null,openSentAt:performance.now(),startup:{}};
     w.exit=new Promise(resolve=>w.exited=resolve);this.worker=w;
     w.startTimer=setTimeout(()=>this.failWorker(w,failure('Native solver startup timed out.')),this.owner.startupTimeoutMs);
     this.owner.sendNative({op:'open',lane:this.name,generation:w.generation});
@@ -54,7 +56,7 @@ export class IpcNativeLane {
       clearTimeout(w.startTimer);w.ready=true;this.error='';this.owner.verified=true;this.schedule();return;
     }
     if(message.id===GPU_ID){
-      w.gpuStarting=false;const why=message.ready===true?undefined:String(message.error??'GPU 启动失败');
+      const why=message.ready===true?undefined:String(message.error??'GPU 启动失败');w.gpu=why===undefined?'held':'failed';
       for(const waiting of this.gpuWaiting.splice(0))waiting.resolve(why);
       this.schedule();return;
     }
@@ -76,19 +78,24 @@ export class IpcNativeLane {
     this.schedule();
   }
   async pump(){
-    if(this.closed||this.active||this.worker?.retiring||this.worker?.gpuStarting)return;
+    if(this.closed||this.active||this.worker?.retiring||this.worker?.gpu==='starting')return;
     if(this.gpuWaiting.length){
       if(!this.worker){await this.start();return;}
-      if(this.worker.ready){this.worker.gpuStarting=true;this.write(this.worker,{id:GPU_ID,op:'gpu'});}
+      if(this.worker.ready){this.worker.gpu='starting';this.write(this.worker,{id:GPU_ID,op:'gpu'});}
       return;
     }
     this.queue=this.queue.filter(job=>!job.settled);
     if(!this.queue.length){
-      if(this.name==='trajectory'&&this.worker?.ready&&!this.idleTimer)this.idleTimer=setTimeout(()=>{this.idleTimer=null;if(!this.active&&!this.queue.length)this.retire();},this.owner.workerIdleMs);
+      // Only a worker holding a CUDA context retires when idle: a live context keeps a laptop's discrete GPU
+      // awake. Any other costs nothing to keep and is worth keeping: with motion off its prepared model spares
+      // the next request on that model up to a second, and a failed GPU start's answer spares compiling again
+      // behind a hold only to fail again.
+      if(this.worker?.gpu==='held'&&!this.idleTimer)this.idleTimer=setTimeout(()=>{this.idleTimer=null;if(!this.active&&!this.queue.length)this.retire();},this.owner.workerIdleMs);
       return;
     }
     if(!this.worker){await this.start();return;}if(!this.worker.ready)return;
     const job=this.queue.shift();if(job.settled){this.schedule();return;}this.active=job;job.startedAt=performance.now();
+    if(job.payload.options?.device==='gpu')this.worker.gpu??='held';
     this.write(this.worker,{id:job.nativeId,...job.payload,progress:!!job.onProgress});
   }
   cancel(job,error){this.queue=this.queue.filter(item=>item!==job);if(this.active===job){this.active=null;this.retire();}this.owner.finish(job,error);this.schedule();}
