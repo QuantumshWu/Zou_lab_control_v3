@@ -311,7 +311,7 @@
 //! which costs at least a trajectory's time as far as it goes. A GPU that cannot run (none, an older driver, a
 //! model beyond its kernel) leaves the solve on the CPU with the reason
 //! (`Solution::device_note`); one that fails during the batches has the solve redone on the CPU.
-use crate::engine::{column_norm,node_phase,series,Engine,Settings,Trajectory,QUADRATURE};
+use crate::engine::{column_norm,node_phase,series,Engine,Landings,Settings,Trajectory,QUADRATURE};
 use crate::gpu;
 use crate::ground::{ExcitedKind,Ground,Kind};
 use crate::ledger::Ledger;
@@ -706,7 +706,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let running=|steps:usize,waiting:f64,allowance:f64,phase:f64|{let dt=interval/steps as f64;let mut s=plain(steps,NUMERICAL_SHARE*POPULATION_TARGET*dt/waiting);s.doppler=allowance;s.horizon=waiting;s.node_phase=phase;s};
     // The pilot's step (module documentation, # Time step): the bound rule's search on its own initial states from the
     // first step, at the a-priori estimates of its model -- the largest step met there, else the search's last.
-    pilot_candidate.phase=grid_phase(&pilot_candidate.model,&starts,&running(first,start_waiting,doppler_allowance(&pilot_candidate.base,&pilot_candidate.model),pilot_candidate.phase));
+    pilot_candidate.phase=grid_phase(&pilot_candidate.model,&starts,&running(first,start_waiting,doppler_allowance(&pilot_candidate.base,&pilot_candidate.model),pilot_candidate.phase),None);
     let steps={let c=&pilot_candidate;let allowance=doppler_allowance(&c.base,&c.model);
         let weights={let mut e=Estimate::default();start(&mut e,&c.model,&c.initial);vec![regime(&e,trap.lab);outputs]};let tolerances=tolerances(&weights,&c.charges.iter().map(|x|x.map(|x|c.others()+x)).collect::<Vec<_>>());
         let binding=vec![1.;starts.len()];let probes=bound_probes(&c.model,&starts,&binding);
@@ -741,7 +741,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // most the run's share over its waiting time (`booked_beats`).
     let pilot_beats=booked_beats(&pilot_states,pilot_waiting);
     // Its grid on its states, as a rung's on its own (`grid_phase`).
-    pilot_candidate.phase=grid_phase(&pilot_candidate.model,&pilot_states,&running(steps,pilot_waiting,doppler_allowance(&pilot_candidate.base,&pilot_candidate.model),pilot_candidate.phase));
+    let groups=pilot_candidate.model.ground.cluster.clone();
+    pilot_candidate.phase=grid_phase(&pilot_candidate.model,&pilot_states,&running(steps,pilot_waiting,doppler_allowance(&pilot_candidate.base,&pilot_candidate.model),pilot_candidate.phase),Some((&groups,duration)));
     // A candidate's weighed cost on the pilot's states carried into its clusters (module documentation, # The fold's
     // choice): its step check there (`step_check`), every step weighed by its counted work per interval times the
     // trajectories its rooms at its bias need and the weight of the totals they leave (`predicted`) over the run; at the
@@ -794,7 +795,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     let promise=promise&&(device==Device::Cpu||pilot_cost.as_ref().map_or(true,|p|p.checked.is_none()||waves(p,width())>1.));
     let fourth_cost=if measured&&promise{Candidate::new(request,pilot_candidate.model.ground.clone(),pilot_candidate.allowance,true).ok().map(|mut c|{c.charged(charge_of(&pilot_candidate.model,&c.model));
         let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect()};
-        let(states,begun)=(into(&pilot_states),into(&starts));c.phase=grid_phase(&c.model,&states,&running(steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase));
+        let(states,begun)=(into(&pilot_states),into(&starts));c.phase=grid_phase(&c.model,&states,&running(steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase),Some((&groups,duration)));
         let costed=evaluate(&c,&states,&begun,None,&Deposits::default());(costed,c,states,begun)})}else{None};
     let kernel=|c:&Candidate,states:&[Trajectory],begun:&[Trajectory],x:&Costed|{
         let allowance=doppler_allowance(&gained(&c.base,&c.model,states),&c.model);
@@ -823,7 +824,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             let mut at=running(steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase);
             let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect()};
             let(bare,begun)=(into(&pilot_states),into(&starts));
-            c.phase=grid_phase(&c.model,&bare,&at);at.node_phase=c.phase;
+            c.phase=grid_phase(&c.model,&bare,&at,Some((&groups,duration)));at.node_phase=c.phase;
             let parts=state_work(&c.model,&bare,&begun);
             let apriori:Vec<[f64;2]>=c.charges.iter().map(|x|x.map(|x|c.others()+x+pilot_beats*pilot_horizon)).collect();
             let(fewest,weight)=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64,c.model.resonance);
@@ -1719,8 +1720,9 @@ const PROBED:usize=256;
 /// errors, within the numerical share of the population target (`Settings::beats`: over the waiting time, `NUMERICAL_SHARE` ε), and the impulse's within `QUADRATURE`
 /// of its size. By the fourth root of its excess, from twice the quadrature's bound, and between the largest phase met and the smallest
 /// missed on the logarithms' line, until one's excess lies within a factor two of its share: beyond the fourth order's range the grid aliases the force's beats.
-/// The bound's own where no state of `at` takes a beating grid.
-pub fn grid_phase(model:&Model,states:&[Trajectory],at:&Settings)->f64{
+/// And, on what it finds, what the grid lands over the run between the groups of ground states `landing` names with the run's span (`landed_excess`; a pilot's first read of its starts takes none), the same
+/// search below that phase where it misses. The bound's own where no state of `at` takes a beating grid.
+pub fn grid_phase(model:&Model,states:&[Trajectory],at:&Settings,landing:Option<(&[usize],f64)>)->f64{
     if !(0..model.clusters()).any(|k|model.beating(k)){return node_phase();}
     let engine=Engine::new(model,at.clone());let picked:Vec<&Trajectory>=states.iter().step_by((states.len()/PROBED).max(1)).collect();
     let excess=|phase:f64|->Option<f64>{
@@ -1729,16 +1731,74 @@ pub fn grid_phase(model:&Model,states:&[Trajectory],at:&Settings)->f64{
         let spread=(errors.iter().map(|e|(e[0]-mean).powi(2)).sum::<f64>()/(m*(m-1.).max(1.))).sqrt();
         Some(16./15.*((mean+CONFIDENCE*spread)/at.beats).max(sum(1)/sum(2).max(f64::MIN_POSITIVE)/QUADRATURE))
     };
-    let mut phase=2.*node_phase();let Some(mut r)=excess(phase)else{return node_phase()};
+    let first=2.*node_phase();let Some(r)=excess(first)else{return node_phase()};
+    let phase=largest_met(first,r,&excess);
+    // What it lands between the groups over the run.
+    let Some((groups,span))=landing else{return phase};let count=groups.iter().max().map_or(0,|g|g+1);if count<2{return phase;}
+    let moved=|phase:f64|landed_excess(&engine,&picked,phase,groups,count,span);
+    let r=moved(phase);if r<=1.{return phase;}
+    largest_met(phase,r,&|phase|Some(moved(phase)))
+}
+/// The largest phase a read's excess meets, from one read: by the fourth root of its excess, and between the largest phase met and the smallest missed on the logarithms' line, until one's excess lies
+/// within a factor two of its share (`grid_phase`).
+fn largest_met(mut phase:f64,mut r:f64,read:&dyn Fn(f64)->Option<f64>)->f64{
     // The largest phase met and the smallest missed, each with its excess.
     let(mut met,mut missed)=((0_f64,0_f64),(f64::INFINITY,f64::INFINITY));
     for _ in 0..8{
         if r<=1.{met=(phase,r);if r>=0.5{break;}}else{missed=(phase,r);}
         phase=if met.0>0.&&missed.0.is_finite(){met.0*(missed.0/met.0).powf(((0.75/met.1).ln()/(missed.1/met.1).ln()).clamp(0.1,0.9))}else{phase*r.max(f64::EPSILON).recip().powf(0.25)};
-        let Some(x)=excess(phase)else{break};r=x;
+        // Past the grids' coinciding a read has nothing to read: as missed, whatever the phase beyond would hold.
+        r=read(phase).unwrap_or(f64::INFINITY);
     }
     if r<=1.&&phase>met.0{met.0=phase;}
     if met.0>0.{met.0}else{phase}
+}
+/// The reads of a step's landings per probe (`Engine::grid_landings`): their errors stop falling at about this many, where the probes' own spread is what is left (F = 1 over the PGC with a resonant probe's
+/// run, on its rung with F' = 2 and F' = 1 explicit at the phase its shares take: 0.0072, 0.0055, 0.0049, 0.0046, 0.0046 at 2, 4, 8, 16, 32 reads).
+const LANDING_READS:usize=8;
+/// What a beating grid at `phase` moves between the groups of ground states over `span`, over the populations' numerical share. A jump-free step's populations cannot read it: within a cluster the state's
+/// fall gives back in its jumps what it moves in the populations (the same PGC's chosen rung, 1.7e-4 of a population per step of a third of a microsecond at its phase, 5 % if it added up, its run's populations
+/// within 0.005), and the states a far-detuned explicit state pumps into lie in another cluster. So the one-step master equation on each probe, on this grid against one of half its spacing:
+/// per group the jumps' landings, the no-jump norm's fall −ln‖ψ‖² shared out as its reads' sources (`Landings`) per cluster -- a jump's own share is a ratio of the photons' weights at its time, and the mean of that
+/// ratio over a state's beats stands above the ratio of their means --, per unit time, the group it starts in taking the rest, through the groups' response ∫ e^{Rs} ds (`response`, R the rates between them on the finer grid: it adds up until
+/// they relax, at most over the run). Per group the mean over the probes -- their beats average out, as a run's do -- plus CONFIDENCE standard errors, 16/15 their difference. (Against pairs of runs on one seed, 100 us:
+/// the rung with F' = 2 and F' = 1 explicit at phases 12.2, 9.9, 6.1: F = 1 read 0.048, 0.041, 0.001, run 0.027 ± 0.005, 0.023 ± 0.008, within 0.012; its rung with three states of F' = 2 explicit at 9.7, 6.3: 0.008, 0.0004, run
+/// 0.005 ± 0.006, 0.001 ± 0.003; the chosen rung at its 2.9: 0.0002, run -0.002 ± 0.006.) Within a group the populations relax in about ten such steps (p(2,2) on a rung beside the chosen one, -0.04 at -4e-3 per step), and there the
+/// share over the waiting time (`grid_phase`) holds them to a few of the numerical share.
+fn landed_excess(engine:&Engine,picked:&[&Trajectory],phase:f64,groups:&[usize],count:usize,span:f64)->f64{
+    let dt=engine.settings.dt;let clusters=engine.model.clusters();
+    let reads:Vec<(Landings,Option<Landings>)>=picked.par_iter().enumerate().map(|(j,t)|{
+        let draws:[f64;LANDING_READS]=std::array::from_fn(|k|((j*LANDING_READS+k+1) as f64*0.618033988749895).fract());
+        engine.grid_landings(t,phase,groups,count,&draws)}).collect();
+    // Per cluster and grid the norm's fall per unit of its photons, the finer grid's first.
+    let(mut fall,mut photons)=([vec![0.;clusters],vec![0.;clusters]],[vec![0.;clusters],vec![0.;clusters]]);
+    for(t,(x,y))in picked.iter().zip(&reads){for(k,z)in [x,y.as_ref().unwrap_or(x)].into_iter().enumerate(){fall[k][t.cluster]-=z.left.max(f64::MIN_POSITIVE).ln();photons[k][t.cluster]+=z.sources.iter().sum::<f64>();}}
+    let scale=|k:usize,c:usize|if photons[k][c]>0.{fall[k][c]/photons[k][c]}else{0.};
+    // The rates between the groups, on the finer grid: of the probes in each.
+    let(mut rates,mut probes)=(vec![0.;count*count],vec![0_f64;count]);
+    for(t,r)in picked.iter().zip(&reads){let x=&r.0;probes[x.from]+=1.;
+        for h in (0..count).filter(|&h|h!=x.from){let w=scale(0,t.cluster)*x.sources[h]/dt;rates[h*count+x.from]+=w;rates[x.from*count+x.from]-=w;}}
+    for g in 0..count{if probes[g]>0.{for h in 0..count{rates[h*count+g]/=probes[g];}}}
+    let response=response(&rates,count,span);
+    // Per probe the groups' change's error per unit time, through the response.
+    let moved:Vec<Vec<f64>>=picked.iter().zip(&reads).map(|(t,(x,y))|{let mut d=vec![0.;count];
+        if let Some(y)=y{let own=x.from;for h in (0..count).filter(|&h|h!=own){d[h]=(scale(1,t.cluster)*y.sources[h]-scale(0,t.cluster)*x.sources[h]+y.stay[h]-x.stay[h])/dt;d[own]-=d[h];}}
+        (0..count).map(|h|(0..count).map(|g|response[h*count+g]*d[g]).sum()).collect()}).collect();
+    let m=picked.len() as f64;
+    16./15.*(0..count).map(|h|{let mean=moved.iter().map(|d|d[h]).sum::<f64>()/m;
+        mean.abs()+CONFIDENCE*(moved.iter().map(|d|(d[h]-mean).powi(2)).sum::<f64>()/(m*(m-1.).max(1.))).sqrt()}).fold(0.,f64::max)/(NUMERICAL_SHARE*POPULATION_TARGET)
+}
+/// ∫₀^span e^{Rs} ds of rates R (m × m, row-major): the series over a span whose ‖R s‖ lies within one, then doubling it, S(2s) = S(s) + e^{Rs} S(s), e^{2Rs} = (e^{Rs})², e^{Rs} = 1 + R S(s).
+fn response(rates:&[f64],m:usize,span:f64)->Vec<f64>{
+    let product=|a:&[f64],b:&[f64]|->Vec<f64>{let mut out=vec![0.;m*m];for i in 0..m{for k in 0..m{for j in 0..m{out[i*m+j]+=a[i*m+k]*b[k*m+j];}}}out};
+    let size=(0..m).map(|g|(0..m).map(|h|rates[h*m+g].abs()).sum::<f64>()).fold(0.,f64::max)*span;
+    let doublings=if size>1.{size.log2().ceil() as i32}else{0};let h=span/2_f64.powi(doublings);
+    let unit:Vec<f64>=(0..m*m).map(|k|if k/m==k%m{1.}else{0.}).collect();
+    let mut term:Vec<f64>=unit.iter().map(|x|x*h).collect();let mut s=term.clone();
+    for k in 2..24{term=product(rates,&term).iter().map(|x|x*h/k as f64).collect();for(a,b)in s.iter_mut().zip(&term){*a+=*b;}}
+    let mut e:Vec<f64>=product(rates,&s).iter().zip(&unit).map(|(a,b)|a+b).collect();
+    for _ in 0..doublings{let next=product(&e,&s);for(a,b)in s.iter_mut().zip(&next){*a+=*b;}e=product(&e,&e);}
+    s
 }
 /// A step's parts at every state (ns): what every step pays -- the advance with, in a cluster of ground states,
 /// its two half steps' series, or the exact step's per step (`exact_step`) -- and what the multirate grid takes

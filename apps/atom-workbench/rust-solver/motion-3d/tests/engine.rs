@@ -840,7 +840,7 @@ fn a_beating_grid_s_measured_phase_meets_its_shares(){
     let(dt,waiting)=(0.25,0.6);let share=NUMERICAL_SHARE*POPULATION_TARGET*dt/waiting;
     let mut at=Settings::new(dt,&initial.traps[0],share,true);at.horizon=waiting;let engine=Engine::new(&model,at.clone());
     let states:Vec<Trajectory>=(0..64).map(|i|{let mut t=initial_trajectory(&model,&at,&initial,7,i,Stratum::single(i));for _ in 0..8{engine.step(&mut t);}t}).collect();
-    let phase=grid_phase(&model,&states,&at);assert!(phase>4.*at.node_phase,"{phase} against the bound's {}",at.node_phase);
+    let phase=grid_phase(&model,&states,&at,None);assert!(phase>4.*at.node_phase,"{phase} against the bound's {}",at.node_phase);
     let(mut coarse,mut fine)=(at.clone(),at.clone());coarse.node_phase=phase;fine.node_phase=at.node_phase/2.;
     let(coarse,fine)=(Engine::new(&model,coarse),Engine::new(&model,fine));
     let(mut populations,mut impulse,mut size)=(0.,0.,0.);
@@ -852,6 +852,22 @@ fn a_beating_grid_s_measured_phase_meets_its_shares(){
     }
     let m=states.len() as f64;assert!(populations/m<=share,"populations {:e} against the share {share:e}",populations/m);
     assert!(impulse/size<=QUADRATURE,"the impulse {:e} against {QUADRATURE:e}",impulse/size);
+}
+
+/// What a beating grid lands between the groups of ground states over the run (solve.rs `grid_phase`, `landed_excess`), on the same PGC: at the rung a solve takes there it leaves the phase its shares measure; at the rung with
+/// three states of F' = 2 explicit, which those shares let the grid kick through the beat, it takes the phase down by a third. A step within a spacing has nothing to read beyond the grids' coinciding: the phase stops there (it ran to 1e28).
+#[test]
+fn a_beating_grid_s_phase_holds_what_it_lands_over_the_run(){
+    let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..101).map(|i|i as f64).collect();
+    let ladder=Ground::allowances(&r).unwrap();let groups=Model::with(&r,f64::INFINITY).unwrap().ground.cluster.clone();
+    let phases=|rung:usize,dt:f64|{
+        let model=Model::with(&r,ladder[rung]).unwrap();let initial=Initial::new(&model,&r).unwrap();let waiting=0.7;
+        let mut at=Settings::new(dt,&initial.traps[0],NUMERICAL_SHARE*POPULATION_TARGET*dt/waiting,true);at.horizon=waiting;let engine=Engine::new(&model,at.clone());
+        let states:Vec<Trajectory>=(0..64).map(|i|{let mut t=initial_trajectory(&model,&at,&initial,7,i,Stratum::single(i));for _ in 0..((2.5/dt) as usize).min(8){engine.step(&mut t);}t}).collect();
+        (grid_phase(&model,&states,&at,None),grid_phase(&model,&states,&at,Some((&groups,100.))))};
+    let(shares,landed)=phases(1,1./3.);assert_eq!(landed,shares,"the chosen rung's phase");
+    let(shares,landed)=phases(8,1./3.);assert!(landed<0.8*shares,"{landed} against the shares' {shares}");
+    let(shares,_)=phases(1,0.002);assert!(shares<4.,"a step within a spacing: {shares}");
 }
 
 /// The ladder's rungs keep more as the allowance falls, and the closure keeps what it must first: on the PGC with a resonant probe
