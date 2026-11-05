@@ -1128,8 +1128,8 @@ impl Candidate{
     /// Its ledger's estimates but the fold's.
     fn others(&self)->f64{unfolded(&self.base,&self.model)}
     /// The estimates no candidate of the fold changes: the far components' fold and the beams' interference, the same in
-    /// every model of the request. (The others move with the fold: a folded drive's pole leaves the tables no convergence
-    /// -- RETRO's every drive folded, its table stalled at 33 nodes with 1.27 booked --, and a rung keeps it.)
+    /// every model of the request. (The others move with the fold: a folded drive's line, narrow across the intensities, takes the tables more nodes
+    /// -- RETRO's every drive folded holds 0.55 at 33 nodes and 1.4e-3 at 513, the rung that keeps its drive 1.4e-3 at 65.)
     fn fixed(&self)->f64{let g=&self.model.ground;g.fold_estimates().0+g.interference.iter().map(|x|x.estimate(g)).sum::<f64>()}
     /// Its clusters: each one's ground states and explicit excited states.
     fn clusters(&self)->Vec<(Vec<usize>,Vec<usize>)>{self.model.ground.clusters.iter().map(|c|(c.states.clone(),c.excited.clone())).collect()}

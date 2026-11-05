@@ -200,7 +200,7 @@
 //! ```text
 //! H_eff = Σ_s (E_s − θ_s)|s⟩⟨s| + Σ_kept e^{iΩ̃t} X_ab |a⟩⟨b|
 //!       + Σ_kept drives e^{iΩ̃t} V_c[e,b] |e⟩⟨b| + h.c. + Σ_{e,e′∈P} (H_ee′ kept, or its van Vleck shift)
-//!       + Σ_{e,e′∈P} ½ Σ_b V_c^f[e,b] V_c^f[e′,b]* (1/(E_e − δ_c − E_b) + 1/(E_e′ − δ_c − E_b)) |e⟩⟨e′|
+//!       + Σ_{e,e′∈P} ½ Σ_b V_c^f[e,b] V_c^f[e′,b]* (Re 1/(K_ee − δ_c − E_b) + Re 1/(K_e′e′ − δ_c − E_b)) |e⟩⟨e′|
 //!       − (i/2) Σ_φ J_φ†J_φ  (on the explicit states; the folded part is X's)
 //! J_{a,φ} = Σ_{(c,b→b′)∈φ} e^{iω̃t} [C_a R_c]_{b′b} |b′⟩⟨b| − Σ_{(e→b′)∈φ} e^{iω̃t} [C_a]_{b′e} |b′⟩⟨e|
 //! ```
@@ -441,6 +441,13 @@ pub struct Elimination{
     /// Per carrier and cluster the block its responses see (`Ground::dress_light`; empty before the rule's
     /// clusters, None where the carrier reaches none of the cluster's states).
     pub blocks:Vec<Vec<Option<Block>>>,
+}
+impl Elimination{
+    /// What a folded drive at δ from ground state b shifts an explicit state e by, per |V[e,b]|²: Re 1/(K_ee − E_b − δ), the state's amplitude
+    /// living at its complex energy; 1/Γ_e at most. The rule folds a drive by its complex mismatch, so that it may cross the state's
+    /// line within the trap: its bare 1/(E_e − E_b − δ) has a pole there of no width (the validation's F2, case 109: 1 rad/us at a table's node
+    /// 1e-3 of the intensities from it, against 1e-3 rad/us here), which read 22 % at any grid and kept the rung that holds the near drive from the choice.
+    pub fn shift_denominator(&self,e:usize,b:usize,delta:f64)->f64{(Complex::ONE/(self.excited_hamiltonian[(e,e)]-Complex::new(self.energies[b]+delta,0.))).re}
 }
 /// A carrier's block on a cluster (module documentation, # The static ground block): the cluster's
 /// static ground block as the carrier's responses see it -- H's, with every other near carrier's light
@@ -1805,10 +1812,10 @@ impl Ground{
             x.add_scaled(Complex::new(0.,-0.5),&rc[d].adjoint_product(&self.decay.product(&rc[c])));
             for &(i,j,w)in &g.entries{
                 if i<n0{h[(i,j)]+=Complex::cis(w*t)*x[(cl.states[i],cl.states[j])];continue;}
-                // Two explicit states: ½ Σ_b V_c^f[e,b] V_c^f[f,b]* (1/(E_e − δ_c − E_b) + 1/(E_f − δ_c − E_b)).
+                // Two explicit states: ½ Σ_b V_c^f[e,b] V_c^f[f,b]* (Re 1/(K_ee − δ_c − E_b) + Re 1/(K_ff − δ_c − E_b)).
                 let(ex,fx)=(cl.excited[i-n0],cl.excited[j-n0]);let delta=self.carriers[c].detuning;
                 for b in 0..self.ground_states.len(){
-                    h[(i,j)]+=Complex::cis(w*t)*v[c][(ex,b)]*v[c][(fx,b)].conj()*(0.5*(1./(e.excited_energies[ex]-delta-e.energies[b])+1./(e.excited_energies[fx]-delta-e.energies[b])));
+                    h[(i,j)]+=Complex::cis(w*t)*v[c][(ex,b)]*v[c][(fx,b)].conj()*(0.5*(e.shift_denominator(ex,b,delta)+e.shift_denominator(fx,b,delta)));
                 }
             }
         }

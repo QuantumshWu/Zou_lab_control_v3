@@ -821,6 +821,28 @@ fn a_fourth_order_decay_holds_its_folded_photons_cross_terms(){
     }}
 }
 
+/// A weak folded drive across an explicit state's line within the trap (the validation's F2, case 109, its first rungs): the state's shift
+/// by it is bounded by its width (ground.rs `Elimination::shift_denominator`), and the tables hold it like any other: the bare denominator's pole, of no width, read
+/// 22 % at any grid from 33 nodes on, the refinement stalled there.
+#[test]
+fn a_folded_drive_across_an_explicit_state_s_line_leaves_its_tables_smooth(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/folded_drive_across_explicit_line_motion.json")).unwrap();let mut r=sparse_request(&v);r.times_us=(0..21).map(|i|5.*i as f64).collect();
+    let model=Model::with(&r,Ground::allowances(&r).unwrap()[1]).unwrap();
+    assert!(model.ground.clusters.iter().any(|c|!c.excited.is_empty()),"the rung holds no explicit state");
+    assert!(!model.table_stalled&&model.table_error<1e-3,"its error {:.2e}, stalled {}",model.table_error,model.table_stalled);
+}
+
+/// A folded drive's line narrower than the grids where the atoms go: the retro-reflected tweezer with a resonant probe, every drive folded, on a line of a quarter of its
+/// width, a real error of about 1 from 33 nodes on. The refinement stops at the first doubling that does not shrink it, whose next one is predicted to save nothing
+/// (model.rs `tabulate`), the last grid kept and its error booked: the estimate that takes the rung that keeps the drive.
+#[test]
+fn a_line_narrower_than_the_grids_stops_the_refinement_with_its_error_booked(){
+    let f:Value=serde_json::from_str(include_str!("fixtures/retro_probe_motion.json")).unwrap();let mut r=scene::request(&f);r.times_us=(0..21).map(|i|5.*i as f64).collect();
+    for m in r.emission.iter_mut(){for x in m.real.iter_mut().chain(m.imag.iter_mut()){*x*=0.5;}}
+    let model=Model::with(&r,f64::INFINITY).unwrap();
+    assert!(model.table_stalled&&model.table_limit.is_some()&&model.table_error>0.5,"refined to {:?} nodes per axis, its error {:.2e}, stalled {}",model.table_limit,model.table_error,model.table_stalled);
+}
+
 /// b1/109's explicit rung: its F = 2 sublevels joined through D1 and D2 explicit states whose frames carry the D1
 /// carrier's detuning, −4.5e7 rad/us in the D2-framed excited manifold. Each frame is its first state's energy plus an
 /// integer combination of the carriers' detunings (ground.rs `Cluster::combinations`): two sublevels' frames along
