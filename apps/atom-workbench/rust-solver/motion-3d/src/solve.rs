@@ -1744,20 +1744,16 @@ pub(crate) fn advance_work(w:&crate::model::Work)->f64{ADVANCE_NS+MULTIPLY_ADD_N
 pub(crate) fn first_phase()->f64{(BIAS_VARIANCE*TEMPERATURE_TARGET).sqrt()}
 /// A sampled state's parts of the work model (`interval_work`): its cluster, its advance without the
 /// propagation and its jump (ns), its generator's norm and its dimension; in a cluster with explicit excited states or beats,
-/// the state itself -- the exact step's segment is probed at each step (`exact_step`), where the settings have its cluster take it (`takes_exact`) --;
+/// the state itself -- the exact step's segment is probed at each step (`exact_step`), where the settings have its cluster take it (`Engine::takes_exact`: a cluster's beats all left out at the model's reach leave it the plain step) --;
 /// and its weight in the run's time.
 struct StateWork{cluster:usize,advance:f64,jump:f64,norm:f64,n:usize,exact:Option<Trajectory>,weight:f64,kernel:[f64;2]}
-impl StateWork{
-    /// Whether its step is the exact one under an engine's settings: a cluster's beats all left out at the model's reach leave it the plain step (engine.rs `quiet_clusters`).
-    fn takes_exact(&self,engine:&Engine)->bool{self.exact.is_some()&&engine.takes_exact(self.cluster)}
-}
 /// A cluster's jump in the work model (`StateWork`).
 fn jump_work(w:&crate::model::Work)->f64{JUMP_NS+PHOTON_MULTIPLY_ADD_NS*w.photons+ABSORPTION_MULTIPLY_ADD_NS*w.absorption}
 /// The work per interval (`interval_work`) of a candidate's fourth order, its tables unbuilt: its states' advances and jumps from
 /// the fourth order's layout (`Model::layout_work`), the rest the candidate's own. The candidate's own work where the layout fails.
 fn fourth_work(request:&Request,c:&Candidate,states:&[Trajectory],begun:&[Trajectory],s:&Settings,interval:f64,waiting:f64)->f64{
     let mut parts=state_work(&c.model,states,begun);let engine=Engine::new(&c.model,s.clone());
-    if let Ok(works)=Model::layout_work(request,c.model.ground.clone(),true){for x in parts.iter_mut().filter(|x|!x.takes_exact(&engine)){let w=&works[x.cluster];x.advance=advance_work(w);x.jump=jump_work(w);}}
+    if let Ok(works)=Model::layout_work(request,c.model.ground.clone(),true){for x in parts.iter_mut().filter(|x|!engine.takes_exact(x.cluster)){let w=&works[x.cluster];x.advance=advance_work(w);x.jump=jump_work(w);}}
     interval_work(&c.model,&parts,s,interval,waiting)
 }
 /// The work model's states (`StateWork`) over the run's time, each in the model's own clusters: the pilot's states at the
@@ -1767,9 +1763,9 @@ fn fourth_work(request:&Request,c:&Candidate,states:&[Trajectory],begun:&[Trajec
 /// runs 3.4 times it).
 fn state_work(model:&Model,states:&[Trajectory],begun:&[Trajectory])->Vec<StateWork>{
     states.par_iter().map(|t|(t,1.)).chain(begun.par_iter().map(|t|(t,0.5))).map(|(t,weight)|{
-        let w=model.work(t.cluster);let n=model.dimension(t.cluster);let exact=model.mixed(t.cluster)||model.beating(t.cluster);
+        let w=model.work(t.cluster);let n=model.dimension(t.cluster);
         let norm=if model.mixed(t.cluster){0.}else{column_norm(&model.local(t.cluster,&model.point(t.r,t.kappa),t.time).hamiltonian,n)};
-        StateWork{cluster:t.cluster,advance:advance_work(&w),jump:jump_work(&w),norm,n,exact:exact.then(||t.clone()),weight,kernel:model.kernel_work(t.cluster)}
+        StateWork{cluster:t.cluster,advance:advance_work(&w),jump:jump_work(&w),norm,n,exact:(!model.is_static(t.cluster)).then(||t.clone()),weight,kernel:model.kernel_work(t.cluster)}
     }).collect()
 }
 /// The exact step's work (`exact_step`, ns): per complex multiply-add of n × n matrices, per n³ of the spectral
@@ -1899,10 +1895,10 @@ fn response(rates:&[f64],m:usize,span:f64)->Vec<f64>{
 /// evenly spread, their mean for the rest.
 fn steps_parts(model:&Model,states:&[StateWork],s:&Settings)->Vec<([f64;2],bool)>{
     let engine=Engine::new(model,s.clone());
-    let exact:Vec<usize>=(0..states.len()).filter(|&i|states[i].takes_exact(&engine)).collect();
+    let exact:Vec<usize>=(0..states.len()).filter(|&i|engine.takes_exact(states[i].cluster)).collect();
     let probed:Vec<[f64;2]>=exact.par_iter().step_by((exact.len()/PROBED).max(1)).map(|&i|exact_step(&engine,states[i].exact.as_ref().unwrap(),&states[i])).collect();
     let mean:[f64;2]=std::array::from_fn(|k|probed.iter().map(|p|p[k]).sum::<f64>()/probed.len().max(1) as f64);
-    states.iter().map(|x|if x.takes_exact(&engine){(mean,true)}else{([x.advance+2.*half_step(x,s),0.],false)}).collect()
+    states.iter().map(|x|if engine.takes_exact(x.cluster){(mean,true)}else{([x.advance+2.*half_step(x,s),0.],false)}).collect()
 }
 /// What a jump adds to an exact step (`exact_step`'s parts, ns): the step redone to its crossing and its rest build their segments, and the grid up to the crossing goes over again, half a step's on average.
 fn exact_redo(p:&[f64;2])->f64{2.*p[0]+0.5*p[1]}

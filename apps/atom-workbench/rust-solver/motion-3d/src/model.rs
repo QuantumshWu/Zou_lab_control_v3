@@ -1681,9 +1681,13 @@ impl Model{
     /// The number of clusters.
     pub fn clusters(&self)->usize{self.layouts.len()}
     /// Whether a cluster has explicit excited states.
-    pub fn mixed(&self,cluster:usize)->bool{self.layouts[cluster].n>self.layouts[cluster].n0}
+    pub fn mixed(&self,cluster:usize)->bool{self.ground.mixed(cluster)}
     /// Whether a cluster's generator beats: a term keeps a residual frequency in its frame.
     pub fn beating(&self,cluster:usize)->bool{!self.layouts[cluster].beats.omegas.is_empty()}
+    /// Whether a cluster's generator is static: ground states alone, none beating.
+    pub fn is_static(&self,cluster:usize)->bool{!self.mixed(cluster)&&!self.beating(cluster)}
+    /// Whether a cluster takes the exact step (engine.rs): explicit excited states, or beats it does not leave out wherever the atom goes (`quiet`, engine.rs `quiet_clusters`).
+    pub(crate) fn takes_exact(&self,cluster:usize,quiet:&[Option<f64>])->bool{self.mixed(cluster)||(self.beating(cluster)&&quiet[cluster].is_none())}
     /// The points the profiles and the bound are judged over (`reach`): the focus and ±reach_a along the trap's principal axes.
     pub(crate) fn reach_points(&self)->&[[f64;3]]{&self.reach}
     /// A cluster's beats (rad/us), ascending and closed under negation.
@@ -1724,7 +1728,7 @@ impl Model{
     /// A cluster's generator at a point and time t on its n states (`Generator`): a static cluster of
     /// ground states' through `local`, every other one's through its beats' components (`components`).
     pub fn generator(&self,cluster:usize,p:&Point,t:f64)->Generator{
-        if !self.mixed(cluster)&&!self.beating(cluster){
+        if self.is_static(cluster){
             let local=self.local(cluster,p,t);let n=self.dimension(cluster);
             return Generator{n,hamiltonian:local.hamiltonian[..n*n].to_vec(),scalar:local.scalar,gradient:self.gradients(cluster,&local,p)};
         }

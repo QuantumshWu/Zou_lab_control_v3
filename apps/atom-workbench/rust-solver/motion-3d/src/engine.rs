@@ -1177,7 +1177,7 @@ impl<'a> Engine<'a>{
     }
     /// Whether a cluster takes the exact step: one with explicit excited states or a beating generator
     /// (a held atom's clusters are of ground states and static, control.rs).
-    pub(crate) fn takes_exact(&self,cluster:usize)->bool{self.held.is_none()&&(self.model.mixed(cluster)||(self.model.beating(cluster)&&self.quiet[cluster].is_none()))}
+    pub(crate) fn takes_exact(&self,cluster:usize)->bool{self.held.is_none()&&self.model.takes_exact(cluster,&self.quiet)}
     /// The mechanical energy of a trajectory's state (rad/us): ħ²κ²/2m and its potential, the
     /// Hermitian part of its generator's expectation (the trap's and the light's, the force's).
     pub fn energy(&self,t:&Trajectory)->f64{

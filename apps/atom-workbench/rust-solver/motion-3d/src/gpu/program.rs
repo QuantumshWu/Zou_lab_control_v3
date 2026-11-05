@@ -165,7 +165,7 @@ impl Program{
         if ng!=GROUND||ne!=NE{return Err(beyond(format!("{ng} 个基态、{ne} 个激发态")));}
         if settings.free!=[true;3]{return Err(beyond("运动只沿部分坐标轴".into()));}
         // The exact step's clusters (explicit excited states, beats not all left out: engine.rs `quiet_clusters`) in its bucket; where one takes it, any cluster a jump lands it in in its parts.
-        let quiet=crate::engine::quiet_clusters(model,settings);let exact_of=|k:usize|model.mixed(k)||(model.beating(k)&&quiet[k].is_none());let takes=(0..model.clusters()).any(exact_of);
+        let quiet=crate::engine::quiet_clusters(model,settings);let exact_of=|k:usize|model.takes_exact(k,&quiet);let takes=(0..model.clusters()).any(exact_of);
         if let Some(k)=(0..model.clusters()).find(|&k|exact_of(k)&&model.dimension(k)>MAXM){
             return Err(beyond(format!("子空间 {} 个态（{} 个激发态显式）超出精确步的 {MAXM} 个",model.dimension(k),model.dimension(k)-model.ground_dimension(k))));}
         if let Some(k)=(0..model.clusters()).find(|&k|takes&&1+model.beats(k).len()>MOST_PARTS){return Err(beyond(format!("子空间 {} 的 {} 个残余拍频",k,model.beats(k).len()/2)));}
