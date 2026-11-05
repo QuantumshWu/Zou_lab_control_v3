@@ -187,7 +187,9 @@
 //! took one of 48 pilots from 0.625 to 0.329 us, and sizes just past their errors at 4 of its 9 spans held the read through the whole run, then again at the finer step: 73 CPU-s against the others' 0.0-2.5, a wait three times theirs. T's step error there is about that limit all along (x and y from 1.5 ms on: +14.2 ± 1.6 % at
 //! 0.70 us, +7.9 ± 1.6 % at 0.50 us, against 0.07 us, 8192 trajectories on shared streams; T's target there 0.77): no count of probes reads it, and a stand of five times it was the noise. At 2.57 standard errors none of the 48 moves or reads for more than 0.9 CPU-s, and the retro-reflected tweezer's error still moves every one of its 32 pilots at their first read (0.044-0.066 us against 0.043-0.066 us).
 //! The read is needed only where the error could add up: with the kept step's
-//! motion's error per period, summed over the periods up to each output, within that output's limit (a run of few periods, PGCP_10's two at 2 %), no read can change the step. More than the limit
+//! motion's error per period, summed over the periods up to each output, within that output's limit, no read can change the step; and only where its first layer over its first span pays for what that sum beyond the limit could move of the run, the test the next layers take (`read_pays`).
+//! (The resonant probe's PGC, two periods, its jumps parting the pairs within them: ±0.32 on 64 probes against a limit of 0.045, 5 of 12 pilots read at 1.05-1.25 limits, 54 thousand exact steps on one of them for at most 7 thousand of the run's; its T at 0.5 us is 0.4 ± 2 % of 0.125 us's, and the one that stood, 6 limits at 0.5 us, took the step to 0.167 us for nothing.
+//! The retro-reflected tweezer's error sums to 12-15 limits: its first read of 6 thousand steps against a million.) More than the limit
 //! standing, the step where it would come to it, as dt², its bias as much, is checked again, at least as far as that span: 0.046-0.053 us over the pilot's seeds, T −3.8 ± 1.9 % at
 //! 0.045 us and −6.0 ± 1.9 % at 0.052 us where it binds, against 0.013 us (8192 trajectories on shared streams); at 0.104 us, T −23 %, it stands 2-6 limits on 28 pilots of 28. On the other scenes the noise stops the spans within their first few and no step moves.
 //!
@@ -942,7 +944,8 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let limit=|t:f64|limits[((t/interval).round() as usize).clamp(1,outputs-1)];
         let run_steps=|k:&Check|{let r=k.ratios();predicted(&pilot_statistics,&apriori,[r[0]*tolerances[0],r[1]*tolerances[1]],pilot as f64,model.resonance).0*(k.steps*(outputs-1)) as f64};
         let mut through=0.;let mut kept=checked.chosen;
-        if !(1..outputs).any(|i|kept.motion*tolerances[1]*(times[i]/period).max(1.)>limits[i]){kept}else{loop{
+        let could=(1..outputs).map(|i|kept.motion*tolerances[1]*(times[i]/period).max(1.)/limits[i]).fold(0.,f64::max);
+        if !read_pays((probes.first*drift_window(period,duration,interval/kept.steps as f64)) as f64,run_steps(&kept),could,1.){kept}else{loop{
             let d=drift(&model,&settings,kept.steps,&probes,period,duration,&limit,through,run_steps(&kept));
             let read=Check{motion:kept.motion.max(d.excess),loss:kept.loss.max(sensitivity*d.stands/tolerances[0]),..kept};
             if d.excess<=1.||kept.steps==most{break read;}
@@ -1640,6 +1643,10 @@ fn standing(error:[f64;2],limit:f64)->f64{let beyond=error[0]-limit;if beyond>er
 const QUIET_SPANS:usize=2;
 /// The errors of a read that takes the largest of `looks` noisy sizes, in standard errors: z = √(2 ln n), the largest of n such errors (as `steady`), at least `CONFIDENCE`.
 fn looks_confidence(looks:f64)->f64{(2.*looks.ln()).sqrt().max(CONFIDENCE)}
+/// The steps of `drift`'s spans' unit: the trap's slowest period, at most the run.
+fn drift_window(period:f64,duration:f64,dt:f64)->usize{((period.min(duration)/dt).ceil() as usize).max(1)}
+/// Whether `drift`'s further reads of so many steps pay (each in steps of dt and of dt/2, three times that): a stand ρ times the limit takes the run ρ^(1/p) − 1 of its `run` steps more, what could stand against what already does.
+fn read_pays(steps:f64,run:f64,could:f64,top:f64)->bool{3.*steps<=run*(could.powf(1./ORDER)-top.powf(1./ORDER))}
 /// What of T's step error over the run stands (`drift`): at the span where it comes closest to or furthest past its limit there, its share of that limit, its size and the span.
 #[derive(Clone,Copy,Debug,Default)]
 pub struct Drift{pub excess:f64,pub stands:f64,pub span:f64}
@@ -1654,7 +1661,7 @@ pub struct Drift{pub excess:f64,pub stands:f64,pub span:f64}
 pub fn drift(model:&Model,settings:&dyn Fn(usize)->Settings,steps:usize,probes:&Probes,period:f64,duration:f64,limit:&dyn Fn(f64)->f64,through:f64,run:f64)->Drift{
     if probes.states.is_empty(){return Drift::default();}
     let(coarse,fine)=(Engine::new(model,settings(steps)),Engine::new(model,settings(2*steps)));let dt=coarse.settings.dt;
-    let window=((period.min(duration)/dt).ceil() as usize).max(1);let end=((duration/dt).ceil() as usize).max(window);
+    let window=drift_window(period,duration,dt);let end=((duration/dt).ceil() as usize).max(window);
     let wider=looks_confidence(3.*(1.+(end as f64/window as f64).log2().ceil()))/CONFIDENCE;
     struct Pair{coarse:Trajectory,fine:Trajectory,done:usize,window:Option<[[f64;3];2]>}
     // A flow's next `count` steps, the κ² of the last `tail`; none once its atom is lost.
@@ -1673,7 +1680,7 @@ pub fn drift(model:&Model,settings:&dyn Fn(usize)->Settings,steps:usize,probes:&
             let at=count as f64/probes.states[..count].iter().map(|t|1./limit(t.time+reach as f64*dt)).sum::<f64>();
             let largest=axes.into_iter().max_by(|a,b|standing(*a,at).total_cmp(&standing(*b,at))).unwrap();
             let(layers,top)=((count as f64/total as f64).sqrt(),most.excess.max(1.));let could=axes.iter().map(|x|x[0]-x[1]*layers).fold(0.,f64::max)/at;
-            let pays=3.*(((2*count).min(total)-count)*reach) as f64<=run*(could.powf(1./ORDER)-top.powf(1./ORDER));
+            let pays=read_pays((((2*count).min(total)-count)*reach) as f64,run,could,top);
             if could<=top||!pays||count==total||(largest[0]-largest[1]>at&&largest[1]<=BIAS_SHARE*largest[0]&&count>first){break(largest,at);}
             count=(2*count).min(total);
         };
@@ -2072,6 +2079,13 @@ mod tests{
         let mut e=Estimate::default();e.trajectories=76.;e.loss=1.;e.population_errors=vec![0.;2];
         assert!((CONFIDENCE*reported_error(&e)-POPULATION_TARGET).abs()<1e-15);
         e.loss_error=0.1;assert_eq!(reported_error(&e),0.1);
+    }
+    /// A read pays for what it could move of the run (`read_pays`): the resonant probe's PGC at 1.09 limits does not, the retro-reflected tweezer at 14.7 does, nothing within the limit does, and a stand already beyond asks for more.
+    #[test]
+    fn a_read_pays_for_what_it_could_move(){
+        assert!(!read_pays(9984.,97663.,1.093,1.));assert!(read_pays(5856.,433350.,14.67,1.));
+        assert!(!read_pays(1.,1e9,1.,1.)&&!read_pays(1.,1e9,0.5,1.));
+        assert!(read_pays(9984.,97663.,1.8,1.)&&!read_pays(9984.,97663.,1.8,1.7));
     }
     /// T takes two atoms (`assemble`): one reads a variance of zero with an error of zero, a count of none or one reads no T at any N; an output takes the last that reads one, t = 0 always.
     #[test]
