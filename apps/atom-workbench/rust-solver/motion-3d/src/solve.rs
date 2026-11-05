@@ -177,6 +177,9 @@
 //! its limit, T's tolerance at the probes' times by then (`tolerances`) or the loss's: a stand there moves the whole run's step, and only while the next layer takes fewer steps than what its verdict could move of the run (the tweezer's
 //! read at its moved step: 200 thousand against 50 thousand). A size moves the step only where it lies beyond the limit by its errors (`standing`): on a chaotic span they far exceed the limit, and at two standard errors alone a size is no error of the
 //! step's -- the gray molasses's 0.204 ± 0.150 at 420 us on all 256 probes, against a limit of 0.083, at 0.556 us, is 0.201 ± 0.159 at 0.417 us; its squares' difference with the errors, taken alone, took one of 64 pilots there finer, and one of 16 of the 3D PGC's from 0.63 to 0.43 us.
+//! And the read takes the largest of its sizes over the axes and the spans, so its errors stand at the confidence of those looks (`looks_confidence`, as `steady`'s): at two standard errors, of its 27 looks over the 3D PGC's 10 ms, x's 0.526 ± 0.337 at 6.7 ms on 128 probes, against a limit of 0.1,
+//! took one of 48 pilots from 0.625 to 0.329 us, and sizes just past their errors at 4 of its 9 spans held the read through the whole run, then again at the finer step: 73 CPU-s against the others' 0.0-2.5, a wait three times theirs. T's step error there is about that limit all along (x and y from 1.5 ms on: +14.2 ± 1.6 % at
+//! 0.70 us, +7.9 ± 1.6 % at 0.50 us, against 0.07 us, 8192 trajectories on shared streams; T's target there 0.77): no count of probes reads it, and a stand of five times it was the noise. At 2.57 standard errors none of the 48 moves or reads for more than 0.9 CPU-s, and the retro-reflected tweezer's error still moves every one of its 32 pilots at their first read (0.044-0.066 us against 0.043-0.066 us).
 //! The read is needed only where the error could add up: with the kept step's
 //! motion's error per period, summed over the periods up to each output, within that output's limit (a run of few periods, PGCP_10's two at 2 %), no read can change the step. More than the limit
 //! standing, the step where it would come to it, as dt², its bias as much, is checked again, at least as far as that span: 0.046-0.053 us over the pilot's seeds, T −3.8 ± 1.9 % at
@@ -1557,19 +1560,20 @@ fn paired_error(windows:&[[[f64;3];2]])->[[f64;2];3]{
 /// What of an error stands against a limit: its magnitude less its errors up to the limit, and from there on the limit and what lies beyond it, the squares' difference with the errors, as the budget's quadrature: zero at the noise, at the limit where the magnitude lies beyond it by its errors, the magnitude far above them.
 fn standing(error:[f64;2],limit:f64)->f64{let beyond=error[0]-limit;if beyond>error[1]{limit+(beyond*beyond-error[1]*error[1]).sqrt()}else{(error[0]-error[1]).max(0.)}}
 
-/// The spans in succession on which nothing stands that stop T's step error over the run (`drift`). A real error x, its errors at a span e (`CONFIDENCE` standard errors), reads quiet with the
-/// chance Φ(z (1 − x/e)), z = `CONFIDENCE`; a span's errors are two or three times its last's, so that the spans are nearly independent and n of them leave that chance to the n-th power. It comes to
-/// Φ(−z), the 2.3 % every other statistic here leaves on one side, at x/e = 2, 1.52, 1.29, 1.14 for n = 1, 2, 3, 4. Each span doubles the read, and doubling the probes instead would lower that x by √2 = 1.41:
-/// a second span lowers it by 1.32, a third by 1.18, so two is the last that pays about as much. (The retro-reflected tweezer's error on the first layer of probes stands 1.2-2.6 times its errors at
-/// 0.05-0.10 us; with the step forced to 0.104, 0.078, 0.069 and 0.062 us the read moves it on 12, 11, 11 and 8 of 12 seeds with one quiet span, 12, 12, 11 and 8 with two, 12, 12, 12 and 8 with three;
-/// with two, a size's move held to what lies beyond the limit by its errors and the layers to the run's stake, 12, 11, 7 and 7.)
+/// The spans in succession on which nothing stands that stop T's step error over the run (`drift`). A real error x, its errors at a span e (z standard errors, z the read's `looks_confidence`), reads quiet with the
+/// chance Φ(z (1 − x/e)); a span's errors are two or three times its last's, so that the spans are nearly independent and n of them leave that chance to the n-th power. It comes to
+/// Φ(−`CONFIDENCE`), the 2.3 % every other statistic here leaves on one side, at x/e = 1.78, 1.40, 1.22, 1.11 for n = 1, 2, 3, 4 at z = 2.57. Each span doubles the read, and doubling the probes instead would lower that x by √2 = 1.41:
+/// a second span lowers it by 1.27, a third by 1.15, so two is the last that pays about as much. (The retro-reflected tweezer's error on the first layer of probes stands 1.2-2.6 times its errors at
+/// 0.05-0.10 us; with the step forced to 0.104, 0.078, 0.069 and 0.062 us the read moves it on 11, 12, 7 and 4 of 12 seeds at z = 2.33, on the same seeds 11, 12, 9 and 4 at 2.)
 const QUIET_SPANS:usize=2;
+/// The errors of a read that takes the largest of `looks` noisy sizes, in standard errors: z = √(2 ln n), the largest of n such errors (as `steady`), at least `CONFIDENCE`.
+fn looks_confidence(looks:f64)->f64{(2.*looks.ln()).sqrt().max(CONFIDENCE)}
 /// What of T's step error over the run stands (`drift`): at the span where it comes closest to or furthest past its limit there, its share of that limit, its size and the span.
 #[derive(Clone,Copy,Debug,Default)]
 pub struct Drift{pub excess:f64,pub stands:f64,pub span:f64}
 /// T's step error over the run (module documentation): from each probe a run's own flow, its jumps in on the same streams, in
 /// steps of dt and of dt/2, over 1, 2, 4... periods of the trap's slowest axis up to the run, each pair carried on from where it
-/// stopped, the mean κ² per axis over its last period compared (`paired_error`), against `limit` at the probes' times by then (their
+/// stopped, the mean κ² per axis over its last period compared (`paired_error`, its errors at the confidence of the read's looks, the axes times the spans, `looks_confidence`), against `limit` at the probes' times by then (their
 /// tolerances' harmonic mean: the pooled error is the mean of theirs). A span reads the probes' first layer, more only for what could raise the largest stand beyond the limit, which sets the new step --
 /// a stand beyond it, or a size that the errors of all the layers would leave beyond it --: until, on more probes than the first layer's, the largest stand's errors lie within the step's share of
 /// its size and it lies beyond the limit by them (the pairs' differences are heavy-tailed: 39 ± 26 % on 64 probes of the retro-reflected tweezer's quiet axis, ±7 % on all), or nothing is left that could,
@@ -1579,6 +1583,7 @@ pub fn drift(model:&Model,settings:&dyn Fn(usize)->Settings,steps:usize,probes:&
     if probes.states.is_empty(){return Drift::default();}
     let(coarse,fine)=(Engine::new(model,settings(steps)),Engine::new(model,settings(2*steps)));let dt=coarse.settings.dt;
     let window=((period.min(duration)/dt).ceil() as usize).max(1);let end=((duration/dt).ceil() as usize).max(window);
+    let wider=looks_confidence(3.*(1.+(end as f64/window as f64).log2().ceil()))/CONFIDENCE;
     struct Pair{coarse:Trajectory,fine:Trajectory,done:usize,window:Option<[[f64;3];2]>}
     // A flow's next `count` steps, the κ² of the last `tail`; none once its atom is lost.
     let flow=|e:&Engine,x:&mut Trajectory,count:usize,tail:usize|->Option<[f64;3]>{let mut sum=[0.;3];
@@ -1592,7 +1597,7 @@ pub fn drift(model:&Model,settings:&dyn Fn(usize)->Settings,steps:usize,probes:&
             if pairs.len()<count{pairs.extend(probes.states[pairs.len()..count].iter().map(|t|Pair{coarse:t.clone(),fine:t.clone(),done:0,window:None}));}
             pairs[..count].par_iter_mut().for_each(|p|{let left=reach-p.done;let tail=window.min(left);
                 if left>0{let(a,b)=(flow(&coarse,&mut p.coarse,left,tail),flow(&fine,&mut p.fine,2*left,2*tail));p.done=reach;p.window=a.zip(b).map(|(a,b)|[a,b]);}});
-            let windows:Vec<[[f64;3];2]>=pairs[..count].iter().filter_map(|p|p.window).collect();let axes=if windows.len()<2{[[0.;2];3]}else{paired_error(&windows)};
+            let windows:Vec<[[f64;3];2]>=pairs[..count].iter().filter_map(|p|p.window).collect();let axes=if windows.len()<2{[[0.;2];3]}else{paired_error(&windows).map(|[size,errors]|[size,wider*errors])};
             let at=count as f64/probes.states[..count].iter().map(|t|1./limit(t.time+reach as f64*dt)).sum::<f64>();
             let largest=axes.into_iter().max_by(|a,b|standing(*a,at).total_cmp(&standing(*b,at))).unwrap();
             let(layers,top)=((count as f64/total as f64).sqrt(),most.excess.max(1.));let could=axes.iter().map(|x|x[0]-x[1]*layers).fold(0.,f64::max)/at;
@@ -1877,6 +1882,16 @@ mod tests{
         assert_eq!(standing([0.1,0.2],limit),0.);assert!((standing([0.2958,0.2032],limit)-0.0926).abs()<1e-12);
         let far=standing([0.25,0.04],limit);assert!(far>0.24&&far<0.25,"{far}");
         let mut last=0.;for i in 0..4000{let m=(i as f64+0.5)*1e-4;let s=standing([m,0.1],limit);assert!(s>=last&&s-last<0.006&&(s<=limit)==(m<=0.2),"{m}: {s} after {last}");last=s;}
+    }
+    /// A read's errors at the confidence of its looks (`looks_confidence`): the single statistics' at few looks, continuous, and on a chaotic span -- the limit 0.6 of the standard error, as the 3D PGC's over 10 ms at 128 probes, 27 looks -- a size past the
+    /// limit by them on about one run in 25, where at two standard errors it is about one in 5.
+    #[test]
+    fn a_read_s_errors_stand_at_the_confidence_of_its_looks(){
+        assert_eq!(looks_confidence(3.),CONFIDENCE);assert_eq!(looks_confidence(6.),CONFIDENCE);assert!((looks_confidence(15.)-2.327).abs()<1e-3&&(looks_confidence(27.)-2.567).abs()<1e-3);
+        let mut last=looks_confidence(1.);for i in 1..=4000{let x=looks_confidence(1.+0.01*i as f64);assert!(x>=last&&x-last<0.01);last=x;}
+        let mut rng=crate::rng::Rng::new(9,crate::rng::Purpose::Initial,0,0);let(runs,looks,limit)=(4000,27,0.6);
+        let stands=|z:f64,rng:&mut crate::rng::Rng|(0..runs).filter(|_|(0..looks).map(|_|crate::rng::normal_quantile(rng.interior()).abs()).fold(0.,f64::max)>limit+z).count() as f64/runs as f64;
+        let(wide,narrow)=(stands(looks_confidence(27.),&mut rng),stands(CONFIDENCE,&mut rng));assert!(wide<0.06&&narrow>0.15&&narrow<0.3,"{wide} {narrow}");
     }
     /// T's probes fall as its weights do (`bound_probes`): evenly over a trajectory's states where they weigh alike, each state in time, and over their number where none weighs.
     #[test]
