@@ -1790,7 +1790,7 @@ pub(crate) const MATRIX_NS:f64=0.469;const SPECTRAL_N3:f64=60.;const CIS_NS:f64=
 fn exact_step(engine:&Engine,t:&Trajectory,x:&StateWork)->[f64;2]{
     let(model,s)=(engine.model,&engine.settings);let p=engine.probe(t.cluster,&model.point(t.r,t.kappa),t.time,s.dt,&t.psi);
     let n=x.n as f64;let(n2,n3)=(n*n,n*n*n);let pairs=p.beats.len() as f64;
-    let terms=series(1.,node_phase(),f64::EPSILON).1 as f64;let nodes=p.weighted.unwrap_or(p.nodes) as f64;
+    let terms=series(1.,1.,f64::EPSILON).1 as f64;let nodes=p.weighted.unwrap_or(p.nodes) as f64;
     // Per path: the build's multiply-adds, a node's multiply-adds and phases.
     let(build,node,turns)=match p.path{
         "spectral"=>(SPECTRAL_N3*n3,4.*n2+n,0.),

@@ -303,7 +303,7 @@ struct Program{
     int lattice;                            // the trap has a standing wave
     double region;                          // the trap's region the loss takes (engine.rs `Settings::region`), rad/us
     double lattice_axis[3],lattice_k,lattice_inv_rayleigh,lattice_phase; // the trap's standing wave (model.rs `Lattice`): its axis on the principal axes, k (0: none), 1/z_R, its phase
-    double node_phase,grid_phase,beats,horizon;   // the exact step's node phase, a beating grid's (engine.rs `Settings::node_phase`), its beats' share and their horizon
+    double quadrature,grid_phase,beats,horizon;   // the exact step's quadrature share (engine.rs `QUADRATURE`), a beating grid's phase (`Settings::node_phase`), its beats' share and their horizon
 };
 
 // The solve's program, in the module's constant memory (src/gpu/mod.rs `Gpu::set`, before its launches): every read of it is a constant bank's. As a kernel's parameter handed
@@ -2346,12 +2346,19 @@ __device__ unsigned exact_resolve(float2* X,const float* F,const double* omegas,
     dropped=moved;return kept;
 }
 
+// The fewest whole panels of a static segment's grid over τ, x = ‖H₀‖₁τ (engine.rs `static_panels`): Simpson's error on the force's fastest component, (S − 1) min(1, 2/(ντ)) at ν = 2‖H₀‖₁, within the quadrature's share,
+// S = (u/3)(2 + cos u)/sin u at u = x/panels, and no spacing wider than one part of the series. At x = 0, u/sin u reads as met.
+__device__ int static_panels(float x){
+    const float room=(float)P.quadrature*fmaxf(x,1.f);
+    for(int panels=max((int)ceilf(0.5f*x),1);;panels++){const float u=x/(float)panels;if(!(u*(2.f+cosf(u))/(3.f*sinf(u))-1.f>room))return panels;}
+}
+
 // A cluster's segment of an exact step of τ from `start` at the point (engine.rs `Segment::new`): its
 // components, their norms and phases at the start, the beats it leaves out -- a part of a step within its part of the beats' share, `Engine::exact` -- (their bound per unit time
 // into `beats`, the trajectory's largest), and its grid and series: with beats kept, whole panels of two spacings whose phase
 // (‖H₀‖₁ + Σ‖H_j‖₁ + max|Ω|/2)δ is within the grid's (`Program::grid_phase`), each exponential within its part of the larger of
 // the truncation and that share and at least of single precision's round-off, ‖w₁H(t₁) + w₂H(t₂)‖ ≤ ½‖H₀‖₁ + (|w₁| + |w₂|)Σ‖H_j‖₁;
-// else ‖H₀‖₁δ within the node phase, the series to the round-off, and its decay i(H₀ − H₀†) for the roots.
+// else `static_panels`, the series to the round-off, and its decay i(H₀ − H₀†) for the roots.
 __device__ __noinline__ Segment exact_segment(Warp& W,int k,double start,double tau,int lane,float2* X,float& beats){
     const Cluster C=P.clusters[k];Segment S;S.n=C.n;S.parts=C.parts;
     const int n=C.n,nn=n*n,Q=C.parts;const double* omegas=P.omegas+C.omegas;
@@ -2363,7 +2370,7 @@ __device__ __noinline__ Segment exact_segment(Warp& W,int k,double start,double 
     const double share=P.beats*fmin(tau/P.dt,1.);double dropped;S.kept=exact_resolve(X,F,omegas,n,Q,tau,share,lane,dropped);beats=fmaxf(beats,(float)(dropped/tau));
     S.beating=(S.kept&~1u)!=0u;double spacing;
     if(!S.beating){
-        S.steps=max((int)ceil((double)F[0]*tau/P.node_phase),1);spacing=tau/(double)S.steps;
+        S.steps=2*static_panels(F[0]*(float)tau);spacing=tau/(double)S.steps;
         S.series=series_within(F[0]*(float)spacing,EXACT_ROUND);
         float2* D=X+(5*Q+1)*nn;
         for(int e=lane;e<nn;e+=32){const int r=e/n,c=e-r*n;const float2 z=X[e]-conj(X[c*n+r]);D[e]=make_float2(-z.y,z.x);}

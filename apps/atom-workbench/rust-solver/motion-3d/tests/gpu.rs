@@ -131,7 +131,9 @@ fn compare_from(gpu:&gpu::Gpu,model:&Model,settings:&Settings,trajectories:&[Tra
     let dt=settings.dt;let fourth=model.fourth;let exact=(0..model.clusters()).any(|k|model.mixed(k)||model.beating(k));let(tp,tn,tk)=if exact{(5e-4,5e-4,5e-5)}else{(2e-5,2e-5,2e-5)};
     let program=gpu.program(model,settings).unwrap();
     let got=gpu.advance(&program,settings,trajectories,1).unwrap();
-    let engine=Engine::new(model,settings.clone());
+    // The CPU on the kernel's own grid and so with Simpson's same error: with no truncation a static generator takes its Taylor path, of the kernel's whole panels (engine.rs `static_panels`), not the spectral path's weighted ones.
+    let mut same_grid=settings.clone();if exact{same_grid.truncation=0.;}
+    let engine=Engine::new(model,same_grid);
     let mut jumped=0;
     for(start,g)in trajectories.iter().zip(&got){
         let mut c=start.clone();engine.step(&mut c);
@@ -150,8 +152,7 @@ fn compare_from(gpu:&gpu::Gpu,model:&Model,settings:&Settings,trajectories:&[Tra
         }}
         assert!((g.threshold-c.threshold).abs()<=if fourth{1e-5*c.threshold}else{0.},"{at}: the new threshold {} against {}",g.threshold,c.threshold);
         for a in 0..3{
-            // The exact step's impulse on its node grid within its quadrature share (engine.rs `QUADRATURE`), where the CPU's
-            // static cluster may take the spectral path exactly; a momentum's difference moves the position over the step's
+            // The exact step's impulse within its quadrature share (engine.rs `QUADRATURE`); a momentum's difference moves the position over the step's
             // flow by (ħ/m) dt Δκ.
             let k=tk*scale+if exact{QUADRATURE*(c.kappa[a]-start.kappa[a]).abs()}else{0.};
             assert!((g.r[a]-c.r[a]).abs()<=2e-6*c.r.iter().map(|x|x.abs()).fold(1e-3,f64::max)+if exact{model.hbar_over_mass*dt*k}else{0.}+dr[a],"{at}: r {:?} against {:?}, κ {:?} against {:?}, the crossing's own {dr:?}",g.r,c.r,g.kappa,c.kappa);
