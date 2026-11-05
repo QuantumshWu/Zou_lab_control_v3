@@ -843,6 +843,31 @@ fn a_line_narrower_than_the_grids_stops_the_refinement_with_its_error_booked(){
     assert!(model.table_stalled&&model.table_limit.is_some()&&model.table_error>0.5,"refined to {:?} nodes per axis, its error {:.2e}, stalled {}",model.table_limit,model.table_error,model.table_stalled);
 }
 
+/// The PGC with a resonant probe at other intensities (mW/cm²), its first microseconds: its couplings scaled by the root of the intensity, the outside shifts by the intensity.
+fn probed_at(probe:f64,cooling:f64,duration:usize)->Request{
+    let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..=duration).map(|i|i as f64).collect();
+    for b in r.beams.iter_mut(){
+        let to=if b.id=="probe"{probe}else if b.id.starts_with("cool"){cooling}else{continue};let f=(to/b.intensity_mw_cm2).sqrt();b.intensity_mw_cm2=to;
+        for m in [&mut b.coupling,&mut b.counter_coupling]{for x in m.real.iter_mut().chain(m.imag.iter_mut()){*x*=f;}}
+        for x in b.outside_shift.real.iter_mut().chain(b.outside_shift.imag.iter_mut()){*x*=f*f;}
+    }
+    r
+}
+/// A pilot whose atoms are all lost before the first output, its model's own estimates far past the targets (the resonant probe of 100 mW/cm² with cooling of 30, every drive folded: a charge of 5e8, a
+/// resonance of 53 %), hands over to the next rung: the solve took that model, every atom lost by 1 us, where its 3+12 rung loses none by 2 us (its more explicit rungs agree, 63 % by 100 us). Its run
+/// reads the rung's trap and region: 100 kHz and 136 rad/us, against the all-folded 78 kHz and a region of −53.
+#[test]
+fn a_pilot_that_keeps_no_atom_hands_over_to_the_next_rung(){
+    let s=solve(&probed_at(100.,30.,3),Device::Cpu,&mut |_,_|{}).unwrap();
+    assert!(s.method.contains("显式"),"{}",s.method);assert!(s.loss_probability[2]<0.1,"the loss at 2 us: {:?}",s.loss_probability);
+    assert!(s.trap_frequency_khz[0]>99.,"the trap: {:?} kHz",s.trap_frequency_khz);
+}
+/// A near beam whose fold anti-traps the reference state (the resonant probe of 300 mW/cm² with cooling of 30, every drive folded: 146 % of resonance) is no reason to refuse while a rung keeps that drive.
+#[test]
+fn a_model_with_no_trap_hands_over_to_the_next_rung(){
+    let s=solve(&probed_at(300.,30.,3),Device::Cpu,&mut |_,_|{}).unwrap();
+    assert!(s.method.contains("显式"),"{}",s.method);assert!(s.trap_frequency_khz[0]>99.,"the trap: {:?} kHz",s.trap_frequency_khz);
+}
 /// b1/109's explicit rung: its F = 2 sublevels joined through D1 and D2 explicit states whose frames carry the D1
 /// carrier's detuning, −4.5e7 rad/us in the D2-framed excited manifold. Each frame is its first state's energy plus an
 /// integer combination of the carriers' detunings (ground.rs `Cluster::combinations`): two sublevels' frames along
