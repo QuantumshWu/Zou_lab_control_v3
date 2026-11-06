@@ -32,7 +32,9 @@ clear, the error of the move it interrupts).
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import threading
+import time
 
 BAUD = 57600
 TERMINATOR = b"\r\n"
@@ -42,6 +44,14 @@ ADDRESSES = range(1, 32)
 #: times that leaves the USB adapter's own latency room without letting a
 #: missing controller stall the lane for long.
 REPLY_TIMEOUT_SECONDS = 0.2
+
+# Reopening a USB/serial link need not behave like an established session.
+# Only the read-only identity handshake uses this allowance and retries.
+STARTUP_REPLY_TIMEOUT_SECONDS = 1.0
+STARTUP_ATTEMPTS = 3
+STARTUP_RETRY_SECONDS = 0.1
+
+_LOG = logging.getLogger(__name__)
 
 #: Controller states (TS, the last two digits): code -> (kind, the manual's words).
 #: The kind is what decides what may be asked of the controller.
@@ -124,6 +134,10 @@ class Smc100NoReply(Smc100Error):
     """No (complete) answer within the reply time-out."""
 
 
+class Smc100ConnectionError(Smc100Error):
+    """The read-only startup handshake failed; includes its exchange history."""
+
+
 class Smc100CommandError(Smc100Error):
     """The controller refused a command; ``code`` is its TE letter."""
 
@@ -200,6 +214,122 @@ class Smc100Link:
 
     def _line(self, command: str, argument: str) -> bytes:
         return f"{self.address}{command}{argument}".encode("ascii") + TERMINATOR
+
+    def identify(self, *, reply_timeout: float | None = None) -> str:
+        """Establish communication using TE / VE / TE on the same open port.
+
+        The first TE consumes a previous session's command error, separately
+        from the version query. Only these read-only exchanges are retried.
+        In particular, a failed handshake never resets or homes the stage.
+        Discovery can use a shorter per-reply budget for absent addresses.
+        """
+
+        timeout = STARTUP_REPLY_TIMEOUT_SECONDS if reply_timeout is None else reply_timeout
+        history: list[str] = []
+        with self._lock:
+            previous_timeout = self.port.timeout
+            try:
+                for attempt in range(1, STARTUP_ATTEMPTS + 1):
+                    exchanges: list[str] = []
+                    try:
+                        try:
+                            before = self._startup_query("TE", timeout, exchanges)
+                        except Smc100NoReply:
+                            # VE can still identify a controller whose TE is unavailable
+                            # (e.g. JOGGING). Keep that evidence in the failure report.
+                            before = None
+                        if before is not None and (len(before) != 1 or before not in COMMAND_ERRORS):
+                            raise Smc100Error(f"invalid initial TE value {before!r}")
+                        if before not in (None, "@"):
+                            _LOG.info(
+                                "SMC100 CONNECT address %d: prior TE %s (%s)",
+                                self.address, before, COMMAND_ERRORS[before],
+                            )
+                        version_error = None
+                        try:
+                            version = self._startup_query("VE", timeout, exchanges)
+                        except Smc100Error as error:
+                            version_error = error
+                        try:
+                            after = self._startup_query("TE", timeout, exchanges)
+                        except Smc100NoReply as error:
+                            if version_error is None and version:
+                                raise Smc100Error(
+                                    f"VE answered {version!r}, but error-register synchronization failed: {error}; "
+                                    "TE is unavailable in JOGGING (leave jogging on the SMC-RC and Init again)"
+                                ) from None
+                            raise
+                        if version_error is not None:
+                            raise Smc100Error(
+                                f"{version_error}; TE after VE returned {after!r} "
+                                f"({COMMAND_ERRORS.get(after, 'invalid command error reply')})"
+                            )
+                        if not version:
+                            raise Smc100Error("VE returned an empty version")
+                        if after != "@":
+                            raise Smc100Error(
+                                f"TE after VE returned {after!r} "
+                                f"({COMMAND_ERRORS.get(after, 'invalid command error reply')})"
+                            )
+                    except Smc100Error as error:
+                        detail = f"attempt {attempt}: {error}; " + "; ".join(exchanges)
+                        history.append(detail)
+                        _LOG.info("SMC100 CONNECT address %d: %s", self.address, detail)
+                        if attempt < STARTUP_ATTEMPTS:
+                            time.sleep(STARTUP_RETRY_SECONDS)
+                    else:
+                        _LOG.info(
+                            "SMC100 CONNECT address %d succeeded on attempt %d: %s",
+                            self.address, attempt, "; ".join(exchanges),
+                        )
+                        return version
+            finally:
+                self.port.timeout = previous_timeout
+        raise Smc100ConnectionError(
+            f"SMC100 startup handshake failed at address {self.address} "
+            f"after {STARTUP_ATTEMPTS} attempts ({timeout:g} s per reply). "
+            + " | ".join(history)
+        )
+
+    def _startup_query(self, command: str, timeout: float, exchanges: list[str]) -> str:
+        """Read one startup response, retaining partial and unrelated RX in diagnostics.
+
+        This tolerance is limited to connection setup. Normal exchanges still
+        fail on an unexpected reply, and set commands are never replayed.
+        """
+
+        started = time.monotonic()
+        received = bytearray()
+        pending = bytearray()
+        try:
+            self.port.reset_input_buffer()
+            self.port.write(self._line(command, ""))
+            # write_timeout bounds writes; the reply waits for transmission.
+            # pySerial's Windows flush() can wait indefinitely on flow control.
+            deadline = time.monotonic() + timeout
+            prefix = f"{self.address}{command}".encode("ascii")
+            while (remaining := deadline - time.monotonic()) > 0:
+                self.port.timeout = min(REPLY_TIMEOUT_SECONDS, remaining)
+                chunk = self.port.read_until(TERMINATOR, size=256)
+                # Bound diagnostics and garbage accumulation on a wrong port.
+                received.extend(chunk[:max(0, 256 - len(received))])
+                pending.extend(chunk)
+                while TERMINATOR in pending:
+                    raw, _, tail = pending.partition(TERMINATOR)
+                    pending = bytearray(tail)
+                    if raw[:len(prefix)].upper() == prefix:
+                        try:
+                            return raw[len(prefix):].decode("ascii").strip()
+                        except UnicodeDecodeError:
+                            pass
+                if len(pending) >= 256:
+                    raise Smc100Error(f"{prefix.decode()} received an overlong unterminated reply")
+            raise Smc100NoReply(f"{prefix.decode()} had no matching complete reply within {timeout:g} s")
+        finally:
+            exchanges.append(
+                f"TX {self._line(command, '')!r}, RX {bytes(received)!r}, "
+                f"{time.monotonic() - started:.3f} s"
+            )
 
     def _send(self, command: str, argument: str) -> None:
         # A reply that arrived after its exchange gave up belongs to nobody.
@@ -283,6 +413,7 @@ __all__ = [
     "REPLY_TIMEOUT_SECONDS",
     "STATES",
     "Smc100CommandError",
+    "Smc100ConnectionError",
     "Smc100Error",
     "Smc100Link",
     "Smc100NoReply",

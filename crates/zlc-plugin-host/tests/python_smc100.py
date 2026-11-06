@@ -4,11 +4,13 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / 'science' / 'src'))
 from zlc_atom.authoring import TuneRefused
 from zlc_atom.devices.motion.newport_smc100 import Smc100Axis, Smc100Config, Smc100CommandError, Smc100Link
 from zlc_atom.devices.motion.newport_smc100 import axis as axis_module
+from zlc_atom.devices.motion.newport_smc100 import protocol as protocol_module
 from zlc_atom.devices.motion.newport_smc100.axis import probe_port
 from zlc_atom.devices.motion.newport_smc100.device_types import DEVICE_TYPES, NEWPORT_SMC100_SCHEMA
 from zlc_atom.devices.motion.newport_smc100.protocol import parse_status
@@ -34,6 +36,50 @@ def fields(axis):
     return {field.metadata.name: field for field in axis.tunable_fields()}
 
 
+class StartupPort(SimulatedSerialPort):
+    """Real protocol exchanges with faults confined to selected version replies."""
+
+    def __init__(self, sim, faults=(), **kwargs):
+        super().__init__(sim, **kwargs)
+        self.faults = list(faults)
+        self.sent = []
+        self.read_timeouts = []
+
+    def _line(self, text):
+        self.sent.append(text)
+        before = len(self._replies)
+        super()._line(text)
+        if not text.endswith('VE') or not self.faults:
+            return
+        fault = self.faults.pop(0)
+        if fault in ('refuse', 'drop', 'empty', 'reply-and-error'):
+            if fault in ('refuse', 'drop'):
+                del self._replies[before:]
+            elif fault == 'empty':
+                self._replies[before:] = [(self._clock() + 0.01, b'1VE\r\n')]
+            if fault in ('refuse', 'reply-and-error'):
+                self.controllers[1].error = 'A'
+        elif fault == 'delayed':
+            due, raw = self._replies[before]
+            self._replies[before] = (due + 0.25, raw)
+        elif fault == 'fragmented':
+            due, raw = self._replies[before]
+            self._replies[before:] = [(due, raw[:8]), (due + 0.01, raw[8:])]
+        elif fault == 'unexpected':
+            due, _raw = self._replies[before]
+            self._replies.insert(before, (due, b'2VE another controller\r\n'))
+        else:
+            raise AssertionError(f'unknown startup fault {fault}')
+
+    def read_until(self, *args, **kwargs):
+        self.read_timeouts.append(self.timeout)
+        return super().read_until(*args, **kwargs)
+
+
+def quick_startup():
+    return mock.patch.multiple(protocol_module, STARTUP_REPLY_TIMEOUT_SECONDS=0.08, STARTUP_RETRY_SECONDS=0.0)
+
+
 class Protocol(unittest.TestCase):
     def test_set_commands_answer_nothing_and_refusals_come_from_te(self):
         sim = controller(); port = SimulatedSerialPort(sim); link = Smc100Link(port, 1)
@@ -55,10 +101,139 @@ class Protocol(unittest.TestCase):
 
     def test_another_address_on_the_chain_is_not_answered(self):
         port = SimulatedSerialPort(controller())
-        with self.assertRaises(RuntimeError) as missing:
+        with quick_startup(), self.assertRaises(RuntimeError) as missing:
             Smc100Axis(Smc100Config('COM9', 2), serial_port=port)
-        self.assertIn('no SMC100 answered at address 2', str(missing.exception))
+        self.assertIn('COM9 at address 2', str(missing.exception))
         self.assertFalse(port.is_open, 'a failed open releases the port')
+        self.assertEqual(port.timeout, 0.2)
+
+
+class Startup(unittest.TestCase):
+    def test_old_te_is_reported_separately_and_cannot_poison_the_first_move(self):
+        sim = controller(); sim.error = 'A'
+        port = StartupPort(sim)
+        with self.assertLogs(protocol_module.__name__, level='INFO') as logged:
+            axis = Smc100Axis(Smc100Config('COM9'), serial_port=port)
+        self.addCleanup(axis.close)
+        self.assertTrue(any('TE A' in line for line in logged.output), logged.output)
+        self.assertEqual(sim.commands[:3], ['TE', 'VE', 'TE'])
+        self.assertEqual(axis.version, sim.version)
+        self.assertEqual(port.timeout, 0.2)
+        self.assertIn('homed: READY', axis.home())
+        self.assertAlmostEqual(axis.tune('position', 3.0), 3.0)
+
+    def test_transient_version_failures_recover_on_the_same_open_port(self):
+        for fault in ('refuse', 'drop', 'empty', 'reply-and-error'):
+            with self.subTest(fault=fault):
+                sim = controller(); port = StartupPort(sim, (fault,))
+                with quick_startup():
+                    axis = Smc100Axis(Smc100Config('COM9'), serial_port=port)
+                try:
+                    self.assertEqual(axis.version, sim.version)
+                    self.assertEqual(sim.commands.count('VE'), 2)
+                    self.assertTrue(port.is_open)
+                    self.assertEqual(port.timeout, 0.2)
+                    self.assertFalse(any(c[:2] in ('PA', 'PR', 'OR', 'MM', 'RS', 'ST') for c in sim.commands))
+                finally:
+                    axis.close()
+
+    def test_startup_waits_for_a_version_reply_slower_than_normal_queries(self):
+        sim = controller(); port = StartupPort(sim, ('delayed',))
+        started = time.monotonic()
+        axis = Smc100Axis(Smc100Config('COM9'), serial_port=port)
+        self.addCleanup(axis.close)
+        self.assertEqual(axis.version, sim.version)
+        self.assertEqual(sim.commands.count('VE'), 1)
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+        self.assertEqual(port.timeout, 0.2)
+
+    def test_startup_recovers_from_fragmented_or_unrelated_frames(self):
+        for fault in ('fragmented', 'unexpected'):
+            with self.subTest(fault=fault):
+                sim = controller(); port = StartupPort(sim, (fault,))
+                with quick_startup():
+                    version = Smc100Link(port, 1).identify()
+                self.assertEqual(version, sim.version)
+                self.assertLessEqual(sim.commands.count('VE'), protocol_module.STARTUP_ATTEMPTS)
+                self.assertEqual(port.timeout, 0.2)
+                self.assertTrue(set(sim.commands) <= {'TE', 'VE'})
+                port.close()
+
+    def test_unfinished_remote_command_recovers_without_driving_the_stage(self):
+        sim = controller(); port = StartupPort(sim)
+        # Bytes already at the controller, beyond a host-side input-buffer reset.
+        port._pending = b'1XX'
+        with quick_startup():
+            axis = Smc100Axis(Smc100Config('COM9'), serial_port=port)
+        self.addCleanup(axis.close)
+        self.assertEqual(sim.commands[0], 'XX1TE')
+        self.assertEqual(axis.version, sim.version)
+        self.assertEqual(sim.commands.count('VE'), 2)
+        self.assertEqual(axis.tunable_values()['state'], 'NOT REFERENCED from reset')
+        self.assertFalse(any(c[:2] in ('PA', 'PR', 'OR', 'MM', 'RS', 'ST') for c in sim.commands))
+        self.assertEqual(port.timeout, 0.2)
+
+    def test_version_without_te_reports_synchronization_failure_and_closes(self):
+        class NoTePort(StartupPort):
+            def _line(self, text):
+                before = len(self._replies)
+                super()._line(text)
+                if text.endswith('TE'):
+                    del self._replies[before:]
+
+        sim = controller(); port = NoTePort(sim)
+        started = time.monotonic()
+        with quick_startup(), self.assertRaises(RuntimeError) as failed:
+            Smc100Axis(Smc100Config('COM9'), serial_port=port)
+        diagnostic = str(failed.exception)
+        self.assertIn('VE answered', diagnostic)
+        self.assertIn(sim.version, diagnostic)
+        self.assertIn('error-register synchronization failed', diagnostic)
+        self.assertNotIn('no SMC100', diagnostic)
+        self.assertEqual(sim.commands.count('VE'), protocol_module.STARTUP_ATTEMPTS)
+        self.assertTrue(set(sim.commands) <= {'TE', 'VE'})
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertEqual(port.timeout, 0.2)
+        self.assertFalse(port.is_open)
+
+    def test_persistent_version_refusal_is_bounded_and_closes_the_port(self):
+        sim = controller()
+        port = StartupPort(sim, ('refuse',) * protocol_module.STARTUP_ATTEMPTS)
+        started = time.monotonic()
+        with quick_startup(), self.assertRaises(RuntimeError) as failed:
+            Smc100Axis(Smc100Config('COM9'), serial_port=port)
+        self.assertIn('COM9 at address 1', str(failed.exception))
+        self.assertIn("TE after VE returned 'A'", str(failed.exception))
+        self.assertEqual(sim.commands.count('VE'), protocol_module.STARTUP_ATTEMPTS)
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertEqual(port.timeout, 0.2)
+        self.assertFalse(port.is_open)
+        self.assertTrue(set(sim.commands) <= {'TE', 'VE'})
+
+    def test_silent_startup_is_bounded_and_closes_the_port(self):
+        sim = controller(); port = StartupPort(sim); port.silent = True
+        started = time.monotonic()
+        with quick_startup(), self.assertRaises(RuntimeError) as failed:
+            Smc100Axis(Smc100Config('COM9'), serial_port=port)
+        self.assertIn('COM9 at address 1', str(failed.exception))
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertLessEqual(len(sim.commands), 3 * protocol_module.STARTUP_ATTEMPTS)
+        self.assertEqual(port.timeout, 0.2)
+        self.assertFalse(port.is_open)
+        self.assertTrue(set(sim.commands) <= {'TE', 'VE'})
+
+    def test_normal_operations_keep_refusals_and_frame_errors_strict(self):
+        sim = controller(); port = StartupPort(sim, ('refuse',))
+        link = Smc100Link(port, 1)
+        with self.assertRaises(Smc100CommandError):
+            link.query('VE', '')
+        self.assertEqual(sim.commands.count('VE'), 1)
+        port.faults = ['unexpected']
+        with self.assertRaises(protocol_module.Smc100Error):
+            link.query('VE', '')
+        self.assertEqual(sim.commands.count('VE'), 2)
+        self.assertEqual(port.timeout, 0.2)
+        port.close()
 
 
 class Axis(unittest.TestCase):
@@ -202,10 +377,22 @@ class Finding(unittest.TestCase):
         def opener(device):
             sim = sims[device]
             return SimulatedSerialPort(*(() if sim is None else (sim,)))
-        self.assertEqual(probe_port('COM5', (1,), opener=opener), [])
-        found = probe_port('COM4', (1, 2), opener=opener)
+        with quick_startup(), mock.patch.object(axis_module, 'REPLY_TIMEOUT_SECONDS', 0.08):
+            self.assertEqual(probe_port('COM5', (1,), opener=opener), [])
+            found = probe_port('COM4', (1, 2), opener=opener)
         self.assertEqual([(a, s) for a, _v, s in found], [(1, 'VIRTUAL25CC')])
-        self.assertEqual(sims['COM4'].commands, ['VE', 'ID?'])
+        self.assertEqual(sims['COM4'].commands, ['TE', 'VE', 'TE', 'ID?'])
+
+    def test_probe_shares_startup_recovery_and_closes_its_port(self):
+        sim = controller(); sim.error = 'A'
+        port = StartupPort(sim, ('refuse',))
+        with quick_startup(), mock.patch.object(axis_module, 'REPLY_TIMEOUT_SECONDS', 0.08):
+            found = probe_port('COM9', (1,), opener=lambda _device: port)
+        self.assertEqual(found, [(1, sim.version, sim.stage)])
+        self.assertEqual(sim.commands.count('VE'), 2)
+        self.assertTrue(set(sim.commands) <= {'TE', 'VE', 'ID?'})
+        self.assertEqual(port.timeout, 0.2)
+        self.assertFalse(port.is_open)
 
     def test_declaration(self):
         declared = DEVICE_TYPES[0]

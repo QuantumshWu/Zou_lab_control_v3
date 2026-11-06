@@ -56,8 +56,10 @@ from .protocol import (
     MOVING,
     NOT_REFERENCED,
     READY,
+    REPLY_TIMEOUT_SECONDS,
     ControllerStatus,
     Smc100CommandError,
+    Smc100ConnectionError,
     Smc100Error,
     Smc100Link,
     Smc100NoReply,
@@ -139,12 +141,11 @@ class Smc100Axis:
         self._unread: dict[str, str] = {}
         try:
             try:
-                self.version = self._link.query("VE", "")
-            except Smc100NoReply:
+                self.version = self._link.identify()
+            except Smc100ConnectionError as error:
                 raise RuntimeError(
-                    f"no SMC100 answered at address {config.address} on {config.port} "
-                    f"({BAUD} baud, 8N1, Xon/Xoff): {config.address}VE got no reply; check the port, "
-                    "the address (the controller's own, set with Newport's utility) and its power"
+                    f"could not initialize SMC100 on {config.port} at address {config.address} "
+                    f"({BAUD} baud, 8N1, Xon/Xoff): {error}"
                 ) from None
             self.stage = self._optional(lambda: self._link.query("ID"), "stage") or ""
             self._read_settings()
@@ -561,7 +562,7 @@ class Smc100Axis:
 def probe_port(device: str, addresses: tuple[int, ...], *, opener=open_serial) -> list[tuple[int, str, str]]:
     """``(address, version, stage)`` of each controller that answers VE on ``device``.
 
-    VE and ID? only read; nothing is set.  A port another program holds
+    TE, VE and ID? only read; nothing is set. A port another program holds
     cannot be opened and is passed over.
     """
 
@@ -574,7 +575,9 @@ def probe_port(device: str, addresses: tuple[int, ...], *, opener=open_serial) -
         for address in addresses:
             link = Smc100Link(port, address)
             try:
-                version = link.query("VE", "")
+                # The same handshake, with a shorter budget for absent addresses.
+                # Explicit Init gets the full startup allowance on its chosen port.
+                version = link.identify(reply_timeout=REPLY_TIMEOUT_SECONDS)
             except Smc100Error:
                 continue
             try:
