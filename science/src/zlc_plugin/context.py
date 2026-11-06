@@ -405,6 +405,12 @@ class RunContext:
             raise PluginError("cancelled", "the run was stopped")
         return fit_answer(self._request("run.fit", request))
 
+    def scan(self, spec: Mapping[str, Any]):
+        """Prepare a factored scan whose source reads and publications stay in the core."""
+        from .scan import NativeScan
+
+        return NativeScan(self, spec)
+
     def fit_models(self) -> Mapping[str, Mapping[str, Any]]:
         """The fit models ``fit`` takes, by id (``zlc_plugin.fit.fit_models``)."""
 

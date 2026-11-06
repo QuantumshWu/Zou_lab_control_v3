@@ -255,7 +255,7 @@ LOGIC_NODE = NodeType(
         "acquisition logic, waits for ready and owns Pulse Fire throughout the scan."
     ),
     acquisition_input="acquisition_logic",
-    input_specs=(DatasetInput("signal", None, "exact"),),
+    input_specs=(DatasetInput("signal", None, "exact", consumer="core"),),
     outputs=(SCAN_OUTPUT,),
     # A scan is one measurement per point, so its plot is one cell per
     # point.  A plan that leaves nothing to face -- one axis over one

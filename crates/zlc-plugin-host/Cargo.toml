@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 zlc-core = { path = "../zlc-core" }
+zlc-scan = { path = "../zlc-scan" }
 zlc-archive = { path = "../zlc-archive" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"

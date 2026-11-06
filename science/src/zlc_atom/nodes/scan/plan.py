@@ -556,6 +556,16 @@ def formula_values(source: str, values: Sequence[float]) -> tuple[float, ...]:
         raise ValueError(f"cannot evaluate formula: {error}") from error
 
 
+def scan_row_count(axes: Sequence[ScanAxis]) -> int:
+    """Count the factored groups without expanding their Cartesian product."""
+    lengths: dict[str, int] = {}
+    for axis in axes:
+        group = axis.coordinate_of or axis.port
+        if lengths.setdefault(group, len(axis.values)) != len(axis.values):
+            raise ValueError("linked parameters must have equal lengths")
+    return math.prod(lengths.values())
+
+
 def scan_rows(axes: Sequence[ScanAxis]) -> tuple[tuple[float, ...], ...]:
     """Independent groups form a product; parameters of one group advance together."""
     groups = tuple(dict.fromkeys(axis.coordinate_of or axis.port for axis in axes))

@@ -1,0 +1,1 @@
+"""Native scan integration fixture."""

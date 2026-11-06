@@ -13,7 +13,9 @@ mod cache;
 pub mod descriptor;
 mod files;
 mod frame;
+mod native_input;
 mod process;
+mod scan;
 pub mod schema;
 pub mod wire;
 pub mod workers;
@@ -313,6 +315,9 @@ struct RunState {
     histories: Vec<HistoryLease>,
     apparatus: Option<Value>,
     stop: RunStop,
+    /// An exact input consumed by a core service, never encoded for Python.
+    core_input: Option<Arc<Mutex<native_input::CoreInput>>>,
+    scan: Option<Arc<Mutex<scan::Session>>>,
 }
 
 /// What work done for a run watches: set when the run is asked to stop, and when it is gone.
@@ -404,6 +409,7 @@ struct Inner {
     gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Where a node's device calls wait, beside the channels they arrived on.
     device_calls: workers::Workers,
+    scan_calls: workers::Workers,
 }
 
 /// The plugin host. Cheap to clone; clones share it.
@@ -439,7 +445,8 @@ impl PluginHost {
             }));
             Inner { environment: plugin_environment(&config.python), config, session, runtime, safe, registry, job, catalog: Mutex::new(None),
                     state: Mutex::default(), processes: Mutex::default(), events: Box::new(events), gates: Mutex::default(),
-                    device_calls: workers::Workers::new("zlc-plugin-device-call") }
+                    device_calls: workers::Workers::new("zlc-plugin-device-call"),
+                    scan_calls: workers::Workers::new("zlc-plugin-scan") }
         });
         let watched = Arc::downgrade(&inner);
         std::thread::Builder::new().name("zlc-plugin-watch".into()).spawn(move || watch(watched)).map_err(|error| error.to_string())?;
@@ -787,6 +794,11 @@ impl PluginHost {
                 .and_then(|(_, parked)| parked.take());
             let entry = state.instances.get(instance).expect("checked");
             let input = entry.descriptor.active_input(&request.values);
+            let core_input = input.is_some_and(|input| input["consumer"] == "core");
+            if core_input && (input.is_some_and(|input| input["delivery"] != "exact" || input["select_bundle"] == true)
+                || entry.descriptor.node.as_ref().is_some_and(|node| node["node_kind"] == "processor")) {
+                return Err(CallError::new(ErrorKind::Invalid, "a core input requires one exact non-processor input"));
+            }
             let source = match &entry.descriptor.node {
                 Some(node) if node["node_kind"] == "processor" => Some(match parked {
                     Some(source) => source,
@@ -823,10 +835,17 @@ impl PluginHost {
             for (argument, device) in &request.devices {
                 state.instances.get_mut(device).unwrap().claims.push((run.clone(), !request.shared.contains(argument)));
             }
+            let mut native_input = None;
+            let following = following.and_then(|(follower, received)| {
+                state.followers.push(follower);
+                if core_input {
+                    native_input = Some(Arc::new(Mutex::new(native_input::CoreInput::new(received))));
+                    None
+                } else { Some(received) }
+            });
             state.instances.get_mut(instance).unwrap().run = Some(RunState { id: run.clone(), origin: request.origin.clone(),
                 devices: request.devices.clone(), signals: request.outputs.clone(), generation: None, route, consumer, outputs: HashMap::new(),
-                histories: Vec::new(), apparatus: None, stop: RunStop(Arc::default()) });
-            let following = following.map(|(follower, received)| { state.followers.push(follower); received });
+                histories: Vec::new(), apparatus: None, stop: RunStop(Arc::default()), core_input: native_input, scan: None });
             (process, devices, source, following)
         };
         let started = process.request("run.start", json!({"instance": instance, "run": run, "values": request.values,
@@ -1208,6 +1227,16 @@ impl Inner {
     fn plugin_request(self: &Arc<Self>, process: &Arc<PluginProcess>, message: Value, lends: Vec<Arc<Lend>>) {
         let id = message["id"].clone();
         let op = message["op"].as_str().unwrap_or("").to_owned();
+        if op.starts_with("run.scan.") {
+            // Input waits must never hold the plugin reader (the source can be
+            // another node in that same process). Services reuse warm workers.
+            let (inner, process) = (self.clone(), process.clone());
+            self.scan_calls.run(move || {
+                let answer = inner.scan_request(process.pid(), &op, &message["p"]);
+                inner.answer(&process, &id, answer.map(|value| (value, Vec::new())));
+            });
+            return;
+        }
         if op == "device" {
             // Waiting for another plugin must not stop this one's channel.
             let (inner, process) = (self.clone(), process.clone());
@@ -1264,9 +1293,7 @@ impl Inner {
     }
 
     fn run_begin(&self, params: &Value) -> Result<Value, CallError> {
-        let instance = params["instance"].as_str().unwrap_or("").to_owned();
         let mut declarations = Vec::new();
-        let mut outputs = HashMap::new();
         for output in params["outputs"].as_array().ok_or_else(|| CallError::new(ErrorKind::Invalid, "run.begin needs outputs"))? {
             let name = output["name"].as_str().ok_or_else(|| CallError::new(ErrorKind::Invalid, "an output needs a name"))?;
             let schema = wire::schema_from_tree(&output["schema"]).map_err(|error| CallError::new(ErrorKind::Invalid, format!("{name}: {error}")))?;
@@ -1276,6 +1303,14 @@ impl Inner {
             };
             declarations.push((name.to_owned(), schema, finite));
         }
+        self.begin_outputs(params, declarations)
+    }
+
+    /// One declaration path for plugin-created and core-created schemas. Native
+    /// services do not serialize a schema merely to decode it back in this process.
+    fn begin_outputs(&self, params: &Value, declarations: Vec<(String, Arc<DatasetSchema>, bool)>) -> Result<Value, CallError> {
+        let instance = params["instance"].as_str().unwrap_or("").to_owned();
+        let mut outputs = HashMap::new();
         let mut state = self.state.lock().unwrap();
         let display_name = state.instances.get(&instance).map(|entry| entry.display_name.clone()).unwrap_or_else(|| public_instance(&instance).to_owned());
         let run = Self::run_of(&mut state, params)?;

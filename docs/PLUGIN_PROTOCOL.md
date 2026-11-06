@@ -487,6 +487,70 @@ failure is that run's reported error. A v2 `execute(context)` therefore ports un
 be declared with `ctx.declare_output(name, schema, storage)` before it, because
 Runtime declares every output of a generation at once).
 
+### 5.1 Core-consumed scan input
+
+An exact, single-signal input of a non-processor node may declare
+`consumer: "core"` (`DatasetInput(..., consumer="core")`). The default is
+`"plugin"`. Core consumption keeps the existing bounded Runtime subscription
+in the host; it sends no `run.deliver` messages or arrays to Python. A run may
+prepare one scan service over that input. Other input and processor semantics
+are unchanged.
+
+`ctx.scan(spec)` creates a run-scoped `NativeScan`. The version-2 protocol
+adds these operations; every request carries the current instance/run, and
+every operation after prepare carries the returned opaque handle:
+
+| Operation | Parameters / result |
+|---|---|
+| `run.scan.prepare` | `spec: {axes, scan_repeats, run_repeats}`; returns handle, ordered ports, outer/inner/point/shot counts, outer/inner widths and maximum row-page values |
+| `run.scan.rows` | `scope: outer/inner/all`, `start`, `count`; returns a bounded page `{rows}` |
+| `run.scan.arm` | `row_offset`, `scan_repeat_base`, `sweeps`, `actual_devices`, `quiet_seconds`, optional `new_source`; checks segment order and drains pre-segment input |
+| `run.scan.configure` | `output`, `record`, optional `effective_inner` receipt in plan units/order; freezes effective geometry and run record once, returning effective axes |
+| `run.scan.collect` | `timeout_seconds` (0..1), `max_events` (1..4096); returns collected count, segment written/total, run written/total and `complete` |
+
+Each axis states `{port, identity, label, unit, values, coordinate_of,
+host_advanced}`. `identity` is the stable owner-supplied name from which Dataset
+axis IDs derive; `label` is display text. `coordinate_of` names an independent
+parent port, or is null. A group with a host-advanced member is wholly outside
+the board-advanced groups. Values must be finite and nonempty, linked lengths
+must match, and counts must fit the native layout. Port owners supply their
+units and device facts; device-specific conversions remain with the adapter.
+
+Prepare and configure keep axis vectors, not expanded host × board rows. An
+inner table is materialized only when the existing Pulse table API requires
+it. Effective coordinates must map one authored value consistently; they do
+not change group lengths or the scan's traversal. The source's singleton
+Repeat carrier is consumed, its Point/Cell axes preserved, and `scan.repeat`
+and `pulse.run` describe the scan's two repeat counts. Implicit integer repeat
+coordinates are semantically equivalent to the older explicit vectors.
+
+The first collect declares outputs from the first source event's schema via
+the same native declaration path as `run.begin`. The host stamps node identity
+and apparatus facts, and replaces `record.plan`/`scan_shape` with the effective
+factored plan. Each commit reuses the source DataBlock and real parent. It
+preserves the source ordinal and source event record, merging the segment's
+device readbacks into `actual_devices`. The output keeps the prior scan's
+unstamped-shot-time contract; the parent's timing remains in its provenance.
+
+Within a segment, source ordinals must be consecutive. Source generation or
+schema changes, source termination, queue overflow and malformed placement
+fail collection; collection failures remain latched. Cancellation is checked
+between events and during sliced native waits. Ending the run drops its input
+and plan, and old run IDs or handles cannot be reused. Completion/Stop retains
+committed finite data under the existing Runtime seal rules.
+
+The caller arms before firing and configures before collecting. Python still
+owns board DONE/fault checks and missing-source grace. It may use zero quiet
+time at a later arm only after both the previous expected records and board
+DONE; the first segment uses the legacy quiet drain, now bounded to two
+seconds and cancellable. A publication boundary alone does not prove that a
+physical device has drained all delayed triggers.
+When the first segment will explicitly start an acquisition, `new_source=true`
+forgets the old subscription before that start. The follower remains registered
+and adopts the new generation before its first publication, so the old source's
+Stop cannot fail the new collection. A source cannot be replaced this way after
+the scan has published data.
+
 ## 6. Data plane
 
 **Blocks.** Bulk values live in shared-memory blocks: named, paging-file-backed

@@ -11,6 +11,7 @@ from zlc_atom.authoring import AuthoringField, TunableField
 from zlc_atom.devices.rf.contract import FREQUENCY_FIELD, POWER_FIELD
 from zlc_atom.devices.rf.rigol_dg4000.source import RigolDg4000RfSource
 from zlc_plugin.tunable import convert_tunable_field, read_tunable_in_unit, tune_in_unit
+from scan_reference import attach_scan_oracle
 
 
 def field(unit='Hz', current=1001000.0, step=1000.0):
@@ -125,6 +126,7 @@ class NumericUnits(unittest.TestCase):
                     record_devices=lambda: ordering.append(('snapshot', knob.entry.current)),
                     set_run_record=lambda record: run_record.update(record),
                     commit_live=lambda records, **kwargs: outputs.append(records['scan']))
+                scan_services = attach_scan_oracle(context, lambda: source, outputs.append, run_record.update)
                 scan = SeamlessScanMeasurement(pulse={'path': 'test.zpulse', 'api_fields': []},
                     plan=ScanPlan((ScanAxis('device:rf:frequency', (1.0004, 2.0006), 'MHz'),)),
                     ports=(ScanPort('device:rf:frequency', 'RF frequency', 'Hz', 1e3, 2e8),),
@@ -134,6 +136,8 @@ class NumericUnits(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, 'second fire failed'): scan.execute(context)
                 else:
                     self.assertEqual(scan.execute(context), {'points': 2, 'shots': 2})
+                arms = [params for op, params in scan_services[0].calls if op == "run.scan.arm"]
+                self.assertEqual([arm["new_source"] for arm in arms], [True, False])
                 baseline = run_record['device_snapshots']['tunable:rf']
                 self.assertEqual(baseline, {'values': {'frequency': 1000000.0}, 'units': {'frequency': 'Hz'},
                     'provenance': {'device_session_id': 'rf-test', 'settings_epoch': 1}})
@@ -204,6 +208,7 @@ class LinkedScan(unittest.TestCase):
             return {'done':True,'status':'done'}
         context=types.SimpleNamespace(core=core,cancel_requested=lambda:False,discard_inputs=lambda:None,next_input=lambda t:source,
             report_progress=lambda *a,**k:None,record_devices=lambda:None,set_run_record=records.append,commit_live=lambda data,**k:outputs.append(data['scan']))
+        attach_scan_oracle(context, lambda: source, outputs.append, records.append)
         scan=SeamlessScanMeasurement(pulse={'path':'test.json','api_fields':[]},plan=plan,
             ports=tuple(ScanPort(a.port,a.port,a.unit,0,1000) for a in plan.axes),source_signal='source',repeats=1,shots_per_point=1)
         self.assertEqual(scan.execute(context),{'points':6,'shots':6})
@@ -236,6 +241,7 @@ class LinkedScan(unittest.TestCase):
             return receipt['done']
         context=types.SimpleNamespace(core=core,cancel_requested=lambda:False,discard_inputs=lambda:None,next_input=lambda t:source,
             report_progress=lambda *a,**k:None,record_devices=lambda:None,set_run_record=records.append,commit_live=lambda data,**k:outputs.append(data['scan']))
+        attach_scan_oracle(context, lambda: source, outputs.append, records.append)
         scan=SeamlessScanMeasurement(pulse={'path':'test.json','api_fields':[]},plan=plan,
             ports=tuple(ScanPort(a.port,a.port,'s',0,1) for a in plan.axes),source_signal='source',repeats=1,shots_per_point=1)
         self.assertEqual(scan.execute(context),{'points':2,'shots':2})

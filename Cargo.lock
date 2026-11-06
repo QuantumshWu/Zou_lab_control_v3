@@ -3075,6 +3075,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "zlc-archive",
  "zlc-core",
+ "zlc-scan",
 ]
 
 [[package]]
@@ -3109,6 +3110,14 @@ dependencies = [
 [[package]]
 name = "zlc-resources"
 version = "0.1.0"
+
+[[package]]
+name = "zlc-scan"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "zlc-core",
+]
 
 [[package]]
 name = "zlc-text"

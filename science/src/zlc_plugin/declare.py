@@ -295,8 +295,13 @@ class DatasetInput:
     delivery: str
     select_bundle: bool = False
     enabled_when: tuple[str, tuple[Any, ...]] | None = None
+    consumer: str = "plugin"
 
     def __post_init__(self) -> None:
+        if self.consumer not in ("plugin", "core"):
+            raise ValueError("dataset input consumer must be 'plugin' or 'core'")
+        if self.consumer == "core" and (self.delivery != "exact" or self.select_bundle):
+            raise ValueError("core dataset inputs require exact delivery without a bundle")
         if self.delivery not in ("exact", "latest"):
             raise ValueError("dataset input delivery must be 'exact' or 'latest'")
 
@@ -452,7 +457,7 @@ class NodeType:
         for item in self.input_specs:
             if isinstance(item, DatasetInput) or hasattr(item, "delivery"):
                 inputs.append({"name": item.name, "contract": item.contract_id,
-                               "delivery": item.delivery, "select_bundle": bool(getattr(item, "select_bundle", False)),
+                               "delivery": item.delivery, "consumer": getattr(item, "consumer", "plugin"), "select_bundle": bool(getattr(item, "select_bundle", False)),
                                "enabled_when": plain(getattr(item, "enabled_when", None))})
             else:
                 codec = getattr(item, "codec", None)

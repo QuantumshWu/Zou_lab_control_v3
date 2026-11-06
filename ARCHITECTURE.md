@@ -42,6 +42,35 @@ configuration owns values, resources, output names, previews and device claims;
 all cancellation paths discard pending candidates and answer acquisition callers.
 Async editor and device replies apply only to the request that is still current.
 
+## Scan execution
+
+`crates/zlc-scan` owns immutable execution geometry: independent and linked
+axes, host/board grouping, bounded row pages, effective board coordinates and
+the scan's Dataset mappings. It stores axis vectors and mixed-radix strides,
+not a Cartesian table. Repeat coordinates and code mappings stay factored.
+It has no device calls, scheduler, plotting or Python dependency.
+
+The plugin host's run-scoped scan service consumes an exact Runtime input
+directly. It places each original immutable DataBlock into the native finite
+store with its real parent publication, source ordinal and event metadata.
+No source pixels, per-shot schema or placement messages travel through the
+Python scan. Runtime still owns storage, overlap checks, subscriptions,
+lineage and sealing; the scan service does not create a second data store.
+
+Python retains authored value banks/formulas, device-specific facts and
+conversions, manual prompts, device writes/readbacks/restoration and Pulse
+completion policy. It prepares one native plan, applies settings at segment
+boundaries and collects bounded batches of progress. The first segment keeps
+a bounded quiet drain for sources without an arm/drain acknowledgement. Later
+segments omit that silence timer only after the prior expected records and
+board DONE have both been observed. This is not a hardware trigger-ID protocol:
+native collection rejects source ordinal gaps and generation/schema changes,
+but cannot identify a missed hardware trigger whose driver supplied no evidence.
+
+TypeScript owns interaction and display. Canonical execution geometry is
+validated by Rust; the current authoring editor and Python adapter still
+project authored ranges and linked formulas into that geometry.
+
 
 ## Commands
 
