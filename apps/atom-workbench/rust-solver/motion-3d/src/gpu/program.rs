@@ -48,7 +48,7 @@ pub struct NearUnit{carrier:i32,focused:i32,norm:f32,focus:f32}
 /// decay cross term (1), a decay (2) or a dressing's drive (3), its row, column, carrier, a decay's part, its tables' place
 /// (a cross term's X_k, and at `at2` its X2_k), its beams' tones, a drive's U_k.
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
-pub struct Term{kind:i32,row:i32,col:i32,carrier:i32,part:i32,at:i32,at2:i32,tones:i32,ntones:i32,u:[[f32;2];MOST_RANK]}
+pub struct Term{kind:i32,row:i32,col:i32,carrier:i32,part:i32,at:i32,at2:i32,tones:i32,ntones:i32,u:[[f32;2];MOST_RANK],residual:f64}
 /// The kernel's `Tone` (model.rs `Tone`): a beam's share of a term: the beam, the part of its beat and of its negative.
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Tone{beam:i32,part:i32,mirror:i32}
@@ -229,8 +229,8 @@ impl Program{
             for(x,&b)in cl.states.iter().enumerate(){cluster.states[x]=b as i32;}
             // Its beats, its explicit states and its terms (model.rs `exact_terms`).
             omegas.extend(model.beats(k));waves.extend(beat_waves.iter().flatten().copied());labels.extend(state_waves.iter().flat_map(|x|x.iter().flatten()).map(|&x|x as f32));excited_list.extend(cl.excited.iter().map(|&e|e as i32));
-            for((t,u),per)in list.iter().zip(&u).zip(&tone_list){
-                terms.push(Term{kind:t[0] as i32,row:t[1] as i32,col:t[2] as i32,carrier:t[3] as i32,part:t[4] as i32,at:t[5] as i32,at2:t[6] as i32,tones:tones.len() as i32,ntones:per.len() as i32,u:u.map(|z|[z.re as f32,z.im as f32])});
+            for(i,((t,u),per))in list.iter().zip(&u).zip(&tone_list).enumerate(){
+                terms.push(Term{kind:t[0] as i32,row:t[1] as i32,col:t[2] as i32,carrier:t[3] as i32,part:t[4] as i32,at:t[5] as i32,at2:t[6] as i32,tones:tones.len() as i32,ntones:per.len() as i32,u:u.map(|z|[z.re as f32,z.im as f32]),residual:if t[0]==0{layout.drives[i].residual}else{0.}});
                 tones.extend(per.iter().map(|x|Tone{beam:x[0] as i32,part:x[1] as i32,mirror:x[2] as i32}));
             }
             group_parts.extend(layout.groups.iter().map(|gl|model.part(k,gl.residual) as i32));

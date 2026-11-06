@@ -242,7 +242,7 @@ struct Channel{int carrier,col;double residual;};
 // A term of a cluster's explicit states (model.rs `exact_terms`): a kept drive (kind 0), a decay cross term
 // (1), a decay (2) or a dressing's drive (3); its entry, carrier, a decay's part, its tables' place (a cross term's X_k, and at `at2` its X2_k),
 // its beams' tones tones[tones, tones + ntones), a drive's U_k.
-struct Term{int kind,row,col,carrier,part,at,at2,tones,ntones;float u[MOST_RANK][2];};
+struct Term{int kind,row,col,carrier,part,at,at2,tones,ntones;float u[MOST_RANK][2];double residual;};
 // A beam's share of a term (model.rs `Tone`): the beam, the part of its beat and of its negative.
 struct Tone{int beam,part,mirror;};
 // A class's photon from an explicit state (ground.rs `Class::direct`): its place in the cluster, the ground
@@ -362,7 +362,8 @@ struct Point{
 // eigenvectors, its terms' weights over the columns, its eigenvalues and its states' own energies.
 struct BlockSpace{float shift[MOST_CARRIERS*NG];float2 a[MAXN*MAXN],u[MAXN*MAXN],weights[MAXN];double values[MAXN],own[MAXN];};
 // A jump's working space.
-struct JumpSpace{float2 u[3][MAXN],f[MAXN];float landing[NG],shares[MOST_BEAMS],projections[MOST_BEAMS],drives[MOST_BEAMS],into[MAXM],direct;int beams[MOST_BEAMS],driven[MOST_BEAMS],ndrives;};
+struct JumpSpace{float2 u[3][MAXN],f[MAXN];float landing[NG],shares[MOST_BEAMS],projections[MOST_BEAMS],drives[MOST_BEAMS],into[MAXM],direct;
+    float state_weight[MAXM],energy[MAXM],slope[MAXM][3];int beams[MOST_BEAMS],driven[MOST_BEAMS],ndrives;};
 struct Warp{
     Point pt;
     float2 psi[MAXM],start[MAXM];       // ψ, ψ at a step's start
@@ -406,13 +407,14 @@ __device__ __forceinline__ void lab32(const double v[3],float out[3]){
 
 // a(r) and ∇a(r) (model.rs `Geometry::field`): the plane wave e^{ikζ}, or the paraxial Gaussian
 // beam focused at the origin e^{ikζ} exp(−ρ²/(w² q))/q, q = 1 + iζ/z_R.
+template<bool Log=false>
 __device__ void field(const Beam& b,const float r[3],float2& a,float2 g[3]){
     const float zeta=r[0]*b.direction[0]+r[1]*b.direction[1]+r[2]*b.direction[2];
     float sn,cs;sincosf(b.k*zeta,&sn,&cs);const float2 wave=make_float2(cs,sn);
     if(b.inv_w2==0.f){
         a=wave;const float2 ika=make_float2(-b.k*sn,b.k*cs);
         #pragma unroll
-        for(int i=0;i<3;i++)g[i]=b.direction[i]*ika;
+        for(int i=0;i<3;i++)g[i]=b.direction[i]*(Log?make_float2(0.f,b.k):ika);
         return;
     }
     const float2 inv=cdiv(make_float2(1.f,0.f),make_float2(1.f,zeta*b.inv_rayleigh));
@@ -421,7 +423,7 @@ __device__ void field(const Beam& b,const float r[3],float2& a,float2 g[3]){
     const float2 along=make_float2(0.f,b.k)+b.inv_rayleigh*(make_float2(0.f,rho2*b.inv_w2)*inv*inv-make_float2(-inv.y,inv.x));
     const float2 across=(-2.f*b.inv_w2)*inv;
     #pragma unroll
-    for(int i=0;i<3;i++)g[i]=a*(b.direction[i]*along+(r[i]-zeta*b.direction[i])*across);
+    for(int i=0;i<3;i++){const float2 v=b.direction[i]*along+(r[i]-zeta*b.direction[i])*across;g[i]=Log?v:a*v;}
 }
 
 // The C1 cubic Hermite weights with Catmull-Rom's central slopes (one-sided at the grid's ends) on four consecutive
@@ -1552,6 +1554,11 @@ __device__ int absorption(Warp& W,const Cluster& C,const Class& K,int nt,const d
         }
         total=warp_sum(lane<nt?norm2(v):0.f);
         for(int s=0;s<ne;s++)weight[s]=warp_sum(lane<nt?norm2(part[s]):0.f);
+        if(lane<C.n){
+            float2 ds[MOST_FOCUSED];J.energy[lane]=entry_slopes(W,tables+C.h0+lane*C.n+lane,C.size,ds).x;
+            for(int a=0;a<3;a++){float v=0.f;for(int f=0;f<P.focused;f++)v+=ds[f].x*pt.grad_s[f][a];J.slope[lane][a]=v;}
+        }
+        if(lane<ne)J.state_weight[lane]=weight[lane];
         const auto driving=[&](const Term& T,int rank,int l){const Beam& b=P.beams[l];float2 z=zero2();
             for(int k=0;k<rank;k++)z+=make_float2(b.coefficients[k][0],b.coefficients[k][1])*make_float2(T.u[k][0],T.u[k][1]);
             return norm2(z*pt.a[l]*W.psi[T.col]);};
@@ -1738,7 +1745,8 @@ __device__ __forceinline__ bool part_weights(double s,const double mu[3],double 
 // mean on the photon of ‖f‖² `size` (`part_weights`); `absorbed` picks the part, its leftover the explicit part's beam by J.drives,
 // its lower bits the sign of its drives' mean's shot noise, and the rest of the exact conditional mean `mean` is added -- onto
 // the momentum on the trap's principal axes.
-__device__ void recoil(const JumpSpace& J,Traj& t,const double n[3],double wave_number,const double mean[3],int count,double size,double absorbed,int lane){
+__device__ void recoil(const Warp& W,const Cluster& C,Traj& t,const double n[3],double wave_number,const double mean[3],int count,double size,double absorbed,int lane){
+    const JumpSpace& J=W.jump;const Point& pt=W.pt;
     double kick[3],mu[3]={0.,0.,0.},target[3],s=0.,on=0.,q,qx;
     if(lane<count){
         const Beam& b=P.beams[J.beams[lane]];const double k=(double)b.k;s=(double)J.shares[lane];on=(double)J.projections[lane]/size;
@@ -1762,13 +1770,28 @@ __device__ void recoil(const JumpSpace& J,Traj& t,const double n[3],double wave_
             const double left=fmin(fmax(x/qx,0.),1.);
             double total=0.;for(int i=0;i<J.ndrives;i++)total+=(double)J.drives[i];
             if(total>0.){
-                double average[3]={0.,0.,0.};
-                for(int i=0;i<J.ndrives;i++){const Beam& b=P.beams[J.driven[i]];const double w=(double)J.drives[i]*(double)b.k/total;for(int a=0;a<3;a++)average[a]+=w*(double)b.direction[a];}
                 double y=left*total;int l=0;for(int i=J.ndrives-1;i>=0;i--)if(J.drives[i]>0.f){l=i;break;}
                 for(int i=0;i<J.ndrives;i++){const double v=(double)J.drives[i];if(y<v){l=i;break;}y-=v;}
-                const double bits=absorbed*67108864.,sign=bits-floor(bits)<0.5?1.:-1.;const Beam& b=P.beams[J.driven[l]];  // engine.rs `SIGN_BITS`
-                #pragma unroll
-                for(int a=0;a<3;a++)kick[a]+=(double)b.direction[a]*(double)b.k-average[a]+sign*average[a];
+                const int beam=J.driven[l];const Beam& b=P.beams[beam];const Carrier Rc=P.carriers[b.carrier];int chosen=-1;
+                for(int i=0;i<C.nterms;i++){
+                    const Term T=P.terms[C.terms+i];if(T.kind!=0)break;if(T.carrier!=b.carrier)continue;const int s=T.row-C.n0;
+                    float2 v=zero2();for(int k=0;k<Rc.rank;k++)v+=make_float2(b.coefficients[k][0],b.coefficients[k][1])*make_float2(T.u[k][0],T.u[k][1]);
+                    const float weight=J.into[s]>0.f?J.state_weight[s]*norm2(v*pt.a[beam]*W.psi[T.col])/J.into[s]:0.f;
+                    if(weight<=0.f)continue;chosen=i;if(y<(double)weight)break;y-=(double)weight;
+                }
+                if(chosen>=0){
+                    const Term T=P.terms[C.terms+chosen];const int e=P.excited_list[C.excited+T.row-C.n0];
+                    const double delta=(double)J.energy[T.row]-(double)J.energy[T.col]+T.residual+(double)pt.shift[beam],gamma=0.5*(double)P.decay[e*NE+e].x;
+                    const double inv=1./(delta*delta+gamma*gamma),bits=absorbed*67108864.;
+                    const double sign=bits-floor(bits)<0.5?1.:-1.,quadrature=2.*bits-floor(2.*bits)<0.5?1.:-1.;
+                    float2 field_value,ds[3];field<true>(b,pt.r,field_value,ds);
+                    for(int a=0;a<3;a++){
+                        const double gradient=(double)J.slope[T.row][a]-(double)J.slope[T.col][a];
+                        const double phase=(double)ds[a].y-gamma*inv*gradient;
+                        const double amplitude=(double)ds[a].x-delta*inv*gradient;
+                        kick[a]+=sign*phase+quadrature*amplitude;
+                    }
+                }
             }
         }
     }
@@ -1816,7 +1839,7 @@ __device__ __noinline__ void jump(u64 seed,Warp& W,Traj& t,bool exact,int lane,f
     SPAN_END(SPAN_ABSORPTION,absorbed);
     SPAN_BEGIN(kicking);double mean[3];
     for(int x=0;x<3;x++)mean[x]=(double)m[x]/(double)size;
-    recoil(J,t,n,K.wave_number,mean,count,(double)size,d.absorbed,lane);
+    recoil(W,C,t,n,K.wave_number,mean,count,(double)size,d.absorbed,lane);
     const float scale=1.f/sqrtf(size);
     __syncwarp();if(lane<MAXM)W.psi[lane]=lane<nt?scale*J.f[lane]:zero2();__syncwarp();
     t.cluster=K.target;t.logn=0.;t.threshold=d.threshold;t.log_threshold=log(d.threshold);
@@ -2556,7 +2579,7 @@ __device__ __noinline__ void ringing_photon(Warp& W,Traj& t,double x,const doubl
     if(lane==0){J.direct=0.f;J.ndrives=0;}
     __syncwarp();
     // The photon's wave number: its group's first channel's carrier's.
-    recoil(J,t,n,P.carriers[P.channels[G.channels].carrier].wave,exact_mean,count,(double)size,u[4],lane);
+    recoil(W,C,t,n,P.carriers[P.channels[G.channels].carrier].wave,exact_mean,count,(double)size,u[4],lane);
     const float scale=1.f/sqrtf(size);
     __syncwarp();if(lane<MAXM)W.psi[lane]=lane<nt?scale*J.f[lane]:zero2();__syncwarp();
     t.cluster=target;

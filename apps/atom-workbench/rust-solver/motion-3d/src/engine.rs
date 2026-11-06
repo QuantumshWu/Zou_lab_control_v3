@@ -125,12 +125,14 @@
 //! ‖∇f‖²/⟨f|f⟩ (the second-order Wigner value at a point), is not taken: against the tweezer PGC's 1D quantum reference
 //! (TW2, x alone) it cools 2–4 % further below it at 4–5 ħω, where the incoherent one is 4–8 % low (# What the kicks leave out).
 //! An explicit state's absorbed light acts through the Ehrenfest force -- the stimulated force of its kept drives,
-//! −∇Re⟨ψ|V|ψ⟩ --, which carries its mean: its part's recoil has mean zero at the jump, the recoil of a beam drawn by
-//! its drives -- each explicit state's weight in the photon shared by the drives into it, Σ |a_l Σ_k c_lk U_k ψ_b|² -- less
-//! their mean a, plus the mean's shot noise ±a with equal chance --
-//! per photon the beams' second moment, without the mean twice. A running wave's beam axis takes R E_r (1 + ⟨n²⟩) so; with
-//! the spread alone it took R E_r ⟨n²⟩. The draw's uniform picks the part, its leftover the explicit part's beam, its
-//! lower bits the sign: no further deviate.
+//! −∇Re⟨ψ|V|ψ⟩ --, which carries its mean. Its jump therefore draws independent signs on the real and imaginary parts
+//! of ∇ln σ, σ = a_l/(δ − iΓ/2), from its driven transition. Its mean is zero and its covariance is Re[∇σ*⊗∇σ]/|σ|²:
+//! the low-saturation force diffusion Γħ² Re[∇σ*⊗∇σ] (Murr et al., https://arxiv.org/abs/quant-ph/0512001, Eq. 1),
+//! including spatial Stark shifts. The phase gradient contains both the wave vector and the detuning gradient;
+//! independent extra kicks miss their cross terms. A uniform running wave recovers ±ħk. The transition's weight is
+//! the explicit state's photon weight shared by the drives into it, as before; this incoherent attribution is an
+//! approximation for coupled multilevel states, not a general saturation correction. The draw's lower two bits supply
+//! the signs, independently of its upper bits selecting the part and drive.
 //!
 //! # The transient after a jump
 //! A jump leaves the atom in a bare ground state ψ′, while the fold's photons are those of the steady excited amplitude of that state, v = X ψ′ (X = −Σ e^{−iε̃t} R_c per
@@ -207,7 +209,7 @@
 use crate::cost::pays;
 use crate::eigen::{decompose,Eigen};
 use crate::linear::{unit_round_off,zeroed};
-use crate::model::{Absorption,Components,Exact,Model,Point,MOST_MIXED,MOST_STATES};
+use crate::model::{Absorption,Components,Exact,Model,Point,Recoil,MOST_MIXED,MOST_STATES};
 use crate::rng::{Purpose,Rng};
 use crate::Complex;
 
@@ -940,9 +942,9 @@ pub const SIGN_BITS:f64=(1u64<<26) as f64;
 /// A photon's absorbed recoil (# Absorption) from the uniform u: its parts -- per near beam its wave vector, share and
 /// projection on the photon; the explicit states' share and their beams' wave vectors and drive weights --, and its exact
 /// conditional mean. u picks the part by its weight (`part_weights`, the explicit part's recoil mean zero), its leftover the
-/// explicit part's beam, and its lower bits (`SIGN_BITS`) the sign of its mean's shot noise; the kick is the picked beam's
-/// recoil (the explicit part's less its drives' mean, ± that mean) and the rest of the exact mean.
-pub fn absorbed_recoil(beams:&[([f64;3],f64,f64)],explicit:Option<(f64,&[([f64;3],f64)])>,mean:[f64;3],u:f64)->[f64;3]{
+/// explicit transition, and its lower bits (`SIGN_BITS`) the independent signs of that response's two quadratures.
+/// The explicit part has zero mean; the folded part retains its exact conditional mean.
+pub fn absorbed_recoil(beams:&[([f64;3],f64,f64)],explicit:Option<(f64,&[Recoil])>,mean:[f64;3],u:f64)->[f64;3]{
     let mut s:Vec<f64>=beams.iter().map(|x|x.1).collect();let mut mu:Vec<[f64;3]>=beams.iter().map(|x|x.0).collect();
     if let Some((v,_))=explicit{s.push(v);mu.push([0.;3]);}
     let target:[f64;3]=std::array::from_fn(|a|beams.iter().map(|x|x.2*x.0[a]).sum());
@@ -952,13 +954,13 @@ pub fn absorbed_recoil(beams:&[([f64;3],f64,f64)],explicit:Option<(f64,&[([f64;3
     for(c,&v)in q.iter().enumerate(){if x<v{pick=c;break;}x-=v;}
     let left=(x/q[pick]).clamp(0.,1.);
     let mut kick=if pick<beams.len(){beams[pick].0}else{
-        let drives=explicit.map_or(&[][..],|x|x.1);let total:f64=drives.iter().map(|d|d.1).sum();
+        let drives=explicit.map_or(&[][..],|x|x.1);let total:f64=drives.iter().map(|d|d.weight).sum();
         if !(total>0.){[0.;3]}else{
-            let average:[f64;3]=std::array::from_fn(|a|drives.iter().map(|d|d.1*d.0[a]).sum::<f64>()/total);
-            let mut y=left*total;let mut l=(0..drives.len()).rev().find(|&i|drives[i].1>0.).unwrap();
-            for(i,d)in drives.iter().enumerate(){if y<d.1{l=i;break;}y-=d.1;}
+            let mut y=left*total;let mut l=(0..drives.len()).rev().find(|&i|drives[i].weight>0.).unwrap();
+            for(i,d)in drives.iter().enumerate(){if y<d.weight{l=i;break;}y-=d.weight;}
             let sign=if (u*SIGN_BITS).fract()<0.5{1.}else{-1.};
-            std::array::from_fn(|a|drives[l].0[a]-average[a]+sign*average[a])
+            let quadrature=if (u*(2.*SIGN_BITS)).fract()<0.5{1.}else{-1.};
+            std::array::from_fn(|a|sign*drives[l].phase[a]+quadrature*drives[l].amplitude[a])
         }
     };
     for a in 0..3{kick[a]+=mean[a]-(0..q.len()).map(|c|q[c]*mu[c][a]).sum::<f64>();}
@@ -1262,8 +1264,7 @@ impl<'a> Engine<'a>{
         let m=self.model;let mut kick=direction.map(|x|-k*x);
         let mean:[f64;3]=std::array::from_fn(|x|{let mut s=0.;for i in 0..MOST_STATES{s+=(f[i].conj()*du[i][x]).im;}s/size});
         let beams:Vec<([f64;3],f64,f64)>=parts.beams.iter().map(|&(l,s,w)|(m.geometry[l].wave_vector(),s,w)).collect();
-        let drives=parts.explicit.as_ref().map(|(_,d)|d.iter().map(|&(l,w)|(m.geometry[l].wave_vector(),w)).collect::<Vec<_>>());
-        let explicit=parts.explicit.as_ref().zip(drives.as_deref()).map(|((w,_),d)|(*w,d));
+        let explicit=parts.explicit.as_ref().map(|(w,d)|(*w,d.as_slice()));
         let recoil=absorbed_recoil(&beams,explicit,mean,absorbed);
         for a in 0..3{kick[a]+=recoil[a];}
         for a in 0..3{if self.settings.free[a]{t.kappa[a]+=kick[a];}}
@@ -1344,7 +1345,7 @@ mod tests{
     fn a_running_wave_s_photon_takes_its_recoil_in_either_model(){
         let k=[3.,0.,7.];
         for u in [0.01,0.4,0.99]{assert!(close(absorbed_recoil(&[(k,0.3,1.)],None,k,u),k,1e-12));}
-        let(mean,second)=over_the_draw(|u|absorbed_recoil(&[],Some((1.,&[(k,0.7)])),[0.;3],u));
+        let(mean,second)=over_the_draw(|u|absorbed_recoil(&[],Some((1.,&[Recoil{phase:k,amplitude:[0.;3],weight:0.7}])),[0.;3],u));
         assert!(close(mean,[0.;3],1e-3),"{mean:?}");assert!(close(second,[9.,0.,49.],1e-9),"{second:?}");
     }
     /// The draw over a photon's beams: without interference (the projections the shares) the shares, the second moment
@@ -1397,12 +1398,34 @@ mod tests{
     /// kicks have mean zero, the Ehrenfest force carrying its mean); the explicit part's second moment is its drives'.
     #[test]
     fn the_explicit_part_s_kicks_add_no_mean(){
-        let k=pairs();let drives:Vec<([f64;3],f64)>=k.iter().copied().zip([0.4,0.1,0.2,0.1,0.15,0.05]).collect();
+        let k=pairs();let drives:Vec<Recoil>=k.iter().copied().zip([0.4,0.1,0.2,0.1,0.15,0.05]).map(|(phase,weight)|Recoil{phase,amplitude:[0.;3],weight}).collect();
         let beams=[(k[0],0.02,0.02),(k[1],0.01,-0.01)];let mean:[f64;3]=std::array::from_fn(|a|0.02*k[0][a]-0.01*k[1][a]);
         let(got,_)=over_the_draw(|u|absorbed_recoil(&beams,Some((0.97,&drives)),mean,u));assert!(close(got,mean,3e-3),"{got:?}");
         let(got,second)=over_the_draw(|u|absorbed_recoil(&[],Some((1.,&drives)),[0.;3],u));assert!(close(got,[0.;3],3e-3),"{got:?}");
-        let total:f64=drives.iter().map(|d|d.1).sum();
-        for a in 0..3{let incoherent=drives.iter().map(|d|d.1*d.0[a]*d.0[a]).sum::<f64>()/total;assert!((second[a]-incoherent).abs()<=2e-2,"{second:?}");}
+        let total:f64=drives.iter().map(|d|d.weight).sum();
+        for a in 0..3{let incoherent=drives.iter().map(|d|d.weight*d.phase[a]*d.phase[a]).sum::<f64>()/total;assert!((second[a]-incoherent).abs()<=2e-2,"{second:?}");}
+    }
+    #[test]
+    fn the_explicit_response_kicks_keep_the_full_covariance(){
+        let k=[3.,-2.,7.];let gradient=[31.,17.,-11.];let gamma=19.;
+        for delta in [0.,12.,-25.,400.]{
+            let slope=k.map(|x|Complex::new(0.,x));
+            let r=Recoil::response(slope,delta,gamma,gradient,1.);
+            // Differentiate the complex response itself, independently of its logarithmic formula.
+            let h=1e-5;let response=|a:usize,x:f64|Complex::cis(k[a]*x)/Complex::new(delta+gradient[a]*x,-gamma);
+            let sigma=response(0,0.);let derivative:[Complex;3]=std::array::from_fn(|a|(response(a,h)-response(a,-h))*(0.5/h));
+            let(mut mean,mut covariance)=([0.;3],[[0.;3];3]);
+            for bit in 0..4{
+                let u=(12345.+(bit as f64+0.5)/4.)/SIGN_BITS;
+                let v=absorbed_recoil(&[],Some((1.,std::slice::from_ref(&r))),[0.;3],u);
+                for a in 0..3{mean[a]+=v[a]/4.;for b in 0..3{covariance[a][b]+=v[a]*v[b]/4.;}}
+            }
+            assert!(close(mean,[0.;3],1e-12),"{mean:?}");
+            for a in 0..3{for b in 0..3{
+                let expected=(derivative[a].conj()*derivative[b]).re/sigma.norm_sqr();
+                assert!((covariance[a][b]-expected).abs()<1e-6,"δ={delta}, {a},{b}: {} vs {expected}",covariance[a][b]);
+            }}
+        }
     }
     /// A random Hermitian n × n matrix of entries up to `size`.
     fn hermitian(next:&mut impl FnMut()->f64,n:usize,size:f64)->Vec<Complex>{

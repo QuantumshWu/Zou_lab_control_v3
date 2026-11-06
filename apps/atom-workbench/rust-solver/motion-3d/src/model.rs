@@ -224,16 +224,20 @@ impl Geometry{
     /// origin e^{ikζ} exp(−ρ²/(w² q))/q, q = 1 + iζ/z_R, z_R = k w²/2 (request.rs `Beam::amplitude_at`),
     /// whose ∇ln a = ik n − 2(r − ζn)/(w² q) + i(ρ²/(w² q²) − 1/q) n / z_R.
     pub fn field(&self,r:[f64;3])->(Complex,[Complex;3]){
+        let(a,log)=self.field_log(r);(a,log.map(|x|a*x))
+    }
+    /// The analytic logarithmic slope stays finite when the Gaussian amplitude underflows.
+    fn field_log(&self,r:[f64;3])->(Complex,[Complex;3]){
         let(k,n)=(self.wave_number,self.direction);let zeta=r[0]*n[0]+r[1]*n[1]+r[2]*n[2];let wave=Complex::cis(k*zeta);
         match self.waist{
-            None=>{let g=Complex::new(0.,k)*wave;(wave,n.map(|x|g*x))}
+            None=>(wave,n.map(|x|Complex::new(0.,k*x))),
             Some(w)=>{
                 let rayleigh=k*w*w/2.;let q=Complex::new(1.,zeta/rayleigh);let inverse=Complex::ONE/q;
                 let rho2=(r[0]*r[0]+r[1]*r[1]+r[2]*r[2]-zeta*zeta).max(0.);
                 let a=wave*(Complex::new(-rho2/(w*w),0.)*inverse).exp()*inverse;
                 let along=Complex::new(0.,k)+(Complex::new(0.,rho2/(w*w))*inverse*inverse-Complex::new(0.,1.)*inverse)*(1./rayleigh);
                 let across=inverse*(-2./(w*w));
-                (a,std::array::from_fn(|i|a*(along*n[i]+across*(r[i]-zeta*n[i]))))
+                (a,std::array::from_fn(|i|along*n[i]+across*(r[i]-zeta*n[i])))
             }
         }
     }
@@ -2654,7 +2658,20 @@ pub struct Ringing{pub levels:Vec<usize>,pub energies:Vec<f64>,pub vectors:Dense
 /// carriers its folded share and its amplitude's projection on the photon, and its explicit states' part -- its share and
 /// the beams' weights by their drives into the explicit states.
 #[derive(Clone,Debug,Default)]
-pub struct Absorption{pub beams:Vec<(usize,f64,f64)>,pub explicit:Option<(f64,Vec<(usize,f64)>)>}
+pub struct Absorption{pub beams:Vec<(usize,f64,f64)>,pub explicit:Option<(f64,Vec<Recoil>)>}
+/// One driven transition's logarithmic response gradient. Independent signs on its two quadratures
+/// give zero mean and covariance Re[∇ln σ* ⊗ ∇ln σ], σ = a/(δ − iΓ/2), at low saturation.
+/// This extends the existing incoherent attribution of an explicit photon; it does not eliminate
+/// coherences between ground states or assert a diffusion theorem at arbitrary saturation.
+#[derive(Clone,Debug)]
+pub struct Recoil{pub phase:[f64;3],pub amplitude:[f64;3],pub weight:f64}
+impl Recoil{
+    pub fn response(log_field:[Complex;3],delta:f64,half_width:f64,gradient:[f64;3],weight:f64)->Self{
+        let inverse=Complex::ONE/Complex::new(delta,-half_width);
+        let log:[Complex;3]=std::array::from_fn(|a|log_field[a]-inverse*gradient[a]);
+        Self{phase:log.map(|z|z.im),amplitude:log.map(|z|z.re),weight}
+    }
+}
 /// The photon amplitudes of every class of a cluster's jumps at a point: per class and axis the
 /// target cluster's amplitude u_a; for a class drawn, its gradient and its absorbed light's parts
 /// (`Photons::absorption`) from the jump tables at the point, kept.
@@ -2759,14 +2776,26 @@ impl Photons<'_>{
             let drive=|dr:&DriveLayout,j:usize,l:usize|{let carrier=&m.carriers[dr.carrier];((0..carrier.rank).fold(Complex::ZERO,|s,k|s+carrier.coefficients[j][k]*dr.u[k])*m.geometry[l].field(p.r).0*self.psi[dr.col]).norm_sqr()};
             let mut into=vec![0.;dimension];
             for dr in &m.layouts[self.cluster].drives{for(j,&l)in m.carriers[dr.carrier].beams.iter().enumerate(){into[dr.row]+=drive(dr,j,l);}}
-            let mut drives:Vec<(usize,f64)>=vec![];
-            for dr in &m.layouts[self.cluster].drives{
-                let weight:f64=parts[dr.row][..nt].iter().map(|z|z.norm_sqr()).sum();
-                for(j,&l)in m.carriers[dr.carrier].beams.iter().enumerate(){
-                    let d=if into[dr.row]>0.{weight*drive(dr,j,l)/into[dr.row]}else{0.};
-                    match drives.iter_mut().find(|x|x.0==l){Some(x)=>x.1+=d,None=>drives.push((l,d))}
-                }
+            let mut diagonal=vec![(0.,[0.;3]);dimension];
+            for(i,out)in diagonal.iter_mut().enumerate(){
+                let(mut value,mut slope)=([Complex::ZERO],[Complex::ZERO;MOST_FOCUSED]);
+                m.gather_dyn(self.cluster,&p.stencil,layout.h0+i*dimension+i,&mut value,Some((&mut slope,1)));
+                *out=(value[0].re,std::array::from_fn(|a|(0..d).map(|f|slope[f].re*p.intensity_gradient[f][a]).sum()));
             }
+            let mut driven=vec![];
+            for dr in &layout.drives{for &l in &m.carriers[dr.carrier].beams{if !driven.contains(&l){driven.push(l);}}}
+            let mut drives=vec![];
+            for l in driven{for dr in &layout.drives{
+                let Some(j)=m.carriers[dr.carrier].beams.iter().position(|&x|x==l)else{continue};
+                let weight:f64=parts[dr.row][..nt].iter().map(|z|z.norm_sqr()).sum();
+                let weight=if into[dr.row]>0.{weight*drive(dr,j,l)/into[dr.row]}else{0.};
+                if weight<=0.{continue;}
+                let(e,b)=(diagonal[dr.row],diagonal[dr.col]);
+                let delta=e.0-b.0+dr.residual+m.kinetic_shift(l,p.kappa);
+                let half_width=0.5*g.decay[(cl.excited[dr.row-n0],cl.excited[dr.row-n0])].re;
+                let(_,log_field)=m.geometry[l].field_log(p.r);
+                drives.push(Recoil::response(log_field,delta,half_width,std::array::from_fn(|a|e.1[a]-b.1[a]),weight));
+            }}
             (total,drives)});
         (gradient,Absorption{beams,explicit})
     }
@@ -2775,6 +2804,15 @@ impl Photons<'_>{
 #[cfg(test)]
 mod tests{
     use super::{cubic,Beats,Model,MOST_TABLE_BYTES,MOST_TABLE_NODES,NOT_LINDBLAD};
+
+    #[test]
+    fn a_vanishing_drive_has_a_finite_logarithmic_response(){
+        let geometry=super::Geometry{direction:[0.,0.,1.],wave_number:8.,waist:Some(1.)};
+        let(field,log)=geometry.field_log([1000.,0.,0.]);assert_eq!(field,crate::Complex::ZERO);
+        let response=super::Recoil::response(log,0.,19.,[31.,-7.,11.],0.);
+        assert!(response.phase.iter().chain(&response.amplitude).all(|x|x.is_finite()));
+        assert_eq!(response.amplitude[0],-2000.);
+    }
 
     /// The interpolant (`cubic`) is C¹ -- its derivative, the force the tables give, the same from either side of every
     /// node, the grid's ends included --, reproduces a quadratic exactly, and converges at third order: a smooth
