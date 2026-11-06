@@ -272,16 +272,21 @@ fn production_seamless_scan_runs_through_real_rpc_and_native_collection() {
                     "pulse_run" => {
                         let stage = args["stage"].as_str().unwrap();
                         stages.push(stage.to_owned());
+                        let handle = args["scan_plan"]["handle"].as_str().expect("native scan handle");
+                        assert!(args.get("scan").is_none(),"production scan materialized its table in Python");
+                        let plan = h.host.scan_plan(&run,handle).unwrap();
+                        assert_eq!(plan.inner_count(),3);
                         if stage == "load" {
-                            assert_eq!(args["scan"]["fields"], json!(["dwell"]));
-                            assert_eq!(args["scan"]["rows"], json!([[1.0], [2.0], [3.0]]));
+                            assert_eq!(plan.axes()[0].values,[1.0,2.0,3.0]);
                         } else {
                             assert_eq!(stage, "fire");
                             assert_eq!(args["run_repeats"], 2);
                             assert_eq!(args["scan_repeats"], 2);
                         }
+                        h.host.accept_scan_pulse(&run,handle,Some(vec![vec![1.25],vec![2.25],vec![3.25]]),
+                            json!({"config":{},"program":{"rows":[[100],[200],[300]],"native_snapshot":true}})).unwrap();
                         h.host.respond(ticket, Ok(json!({"command_id": 77, "applied": {"config": {}},
-                            "scan": {"fields": ["dwell"], "rows": [[1.25], [2.25], [3.25]]}})));
+                            "scan": {"handle":handle,"fields": ["dwell"], "row_count":3}})));
                         if stage == "fire" {
                             for ordinal in 0..12 { publish(&h.runtime, &source, schema.clone(), ordinal, None); }
                         }
@@ -308,6 +313,7 @@ fn production_seamless_scan_runs_through_real_rpc_and_native_collection() {
     let latest = h.runtime.read_latest(&signal.generation, OUTPUT).unwrap();
     assert_eq!(latest.canonical().unwrap().written_cells(), 24);
     assert_eq!(latest.run().metadata["plan"]["axes"][0]["values"], json!([1.25, 2.25, 3.25]));
+    assert_eq!(latest.run().metadata["device_snapshots"]["sequencer"]["program"]["native_snapshot"],true);
 }
 
 #[test]

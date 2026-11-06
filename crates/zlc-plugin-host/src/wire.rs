@@ -1,5 +1,4 @@
 //! Arrays and datasets on the wire (PLUGIN_PROTOCOL.md §6), core side.
-use std::any::Any;
 use std::sync::Arc;
 
 use base64::Engine;
@@ -13,30 +12,7 @@ use crate::blocks::{Lend, Registry};
 /// Arrays smaller than this are sent inline (as the SDK does).
 pub const INLINE_BYTES: usize = 16 << 10;
 
-pub fn dtype(text: &str) -> Result<DType, String> {
-    Ok(match text {
-        "|b1" => DType::Bool, "|u1" => DType::U8, "|i1" => DType::I8, "<u2" => DType::U16, "<i2" => DType::I16,
-        "<u4" => DType::U32, "<i4" => DType::I32, "<u8" => DType::U64, "<i8" => DType::I64, "<f2" => DType::F16,
-        "<f4" => DType::F32, "<f8" => DType::F64, "<c8" => DType::C64, "<c16" => DType::C128,
-        other => return Err(format!("Unsupported array dtype {other:?}")),
-    })
-}
-
-pub fn dtype_name(dtype: DType) -> &'static str {
-    match dtype {
-        DType::Bool => "|b1", DType::U8 => "|u1", DType::I8 => "|i1", DType::U16 => "<u2", DType::I16 => "<i2",
-        DType::U32 => "<u4", DType::I32 => "<i4", DType::U64 => "<u8", DType::I64 => "<i8", DType::F16 => "<f2",
-        DType::F32 => "<f4", DType::F64 => "<f8", DType::C64 => "<c8", DType::C128 => "<c16",
-    }
-}
-
-/// Inline bytes kept 16-byte aligned, so any dtype can borrow them.
-struct Inline(Vec<u128>, usize);
-
-unsafe impl ForeignBytes for Inline {
-    fn bytes(&self) -> &[u8] { unsafe { std::slice::from_raw_parts(self.0.as_ptr().cast(), self.1) } }
-    fn as_any(&self) -> &dyn Any { self }
-}
+pub use zlc_native::arrays::{dtype, dtype_name};
 
 /// One decoded array: its values (borrowed from a block when lent) and shape.
 pub struct Array { pub values: AnyBuffer, pub shape: Vec<usize> }
@@ -54,21 +30,14 @@ pub fn array(reference: &Value, lends: &[Arc<Lend>]) -> Result<Array, String> {
             .ok_or_else(|| format!("Block {name} was not lent by this message"))?;
         let kind = dtype(spec["dtype"].as_str().ok_or("Array has no dtype")?)?;
         let shape = shape_of(spec)?;
-        let count = shape.iter().product::<usize>();
+        let count = shape.iter().try_fold(1usize, |count, dim| count.checked_mul(*dim).ok_or("Array shape overflows usize"))?;
         let offset = spec["offset"].as_u64().ok_or("Array has no offset")? as usize;
         let owner: Arc<dyn ForeignBytes> = lend.clone();
         return Ok(Array { values: AnyBuffer::from_foreign(kind, owner, offset, count)?, shape });
     }
-    if let Some(spec) = reference.get("$inline") {
-        let bytes = base64::engine::general_purpose::STANDARD.decode(spec["b64"].as_str().ok_or("Inline array has no data")?)
-            .map_err(|error| format!("Inline array: {error}"))?;
-        let kind = dtype(spec["dtype"].as_str().ok_or("Array has no dtype")?)?;
-        let shape = shape_of(spec)?;
-        let count = shape.iter().product::<usize>();
-        let mut words = vec![0u128; bytes.len().div_ceil(16)];
-        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), words.as_mut_ptr().cast::<u8>(), bytes.len()) };
-        let owner: Arc<dyn ForeignBytes> = Arc::new(Inline(words, bytes.len()));
-        return Ok(Array { values: AnyBuffer::from_foreign(kind, owner, 0, count)?, shape });
+    if reference.get("$inline").is_some() {
+        let tensor = zlc_native::arrays::decode(reference)?;
+        return Ok(Array { values: tensor.values, shape: tensor.shape });
     }
     Err(format!("Expected an array, got {reference}"))
 }

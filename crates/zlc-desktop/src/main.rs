@@ -27,6 +27,7 @@ mod bench;
 mod share;
 mod slm_host;
 mod readers;
+mod run_artifacts;
 mod run_fit;
 mod viewer_logic;
 mod cadence;

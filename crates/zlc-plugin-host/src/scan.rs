@@ -9,7 +9,7 @@ use zlc_core::runtime::{Bundle, Generation, GenerationId, Input, ReadKind};
 use zlc_core::schema::{DatasetSchema, DomainRole};
 use zlc_scan::{Plan, PlanSpec, Scope};
 
-use crate::{CallError, ErrorKind, Inner, native_input::{CoreInput, check_stop}};
+use crate::{CallError, ErrorKind, Inner, PluginHost, native_input::{CoreInput, check_stop}};
 
 fn invalid(message: impl Into<String>) -> CallError { CallError::new(ErrorKind::Invalid, message) }
 fn integer(params: &Value, name: &str) -> Result<usize, CallError> {
@@ -34,13 +34,56 @@ struct Segment {
 
 pub(crate) struct Session {
     handle: String,
-    plan: Plan,
+    plan: Arc<Plan>,
     input: Arc<Mutex<CoreInput>>,
     configuration: Option<Configuration>,
     publication: Option<Publication>,
     segment: Option<Segment>,
     written: usize,
     failure: Option<CallError>,
+    pulse_applied: Option<Value>,
+}
+
+impl PluginHost {
+    fn scan_session(&self, run_id: &str, handle: &str) -> Result<Arc<Mutex<Session>>, CallError> {
+        let session = {
+            let state = self.inner.state.lock().unwrap();
+            let run = state.instances.values().filter_map(|entry| entry.run.as_ref()).find(|run| run.id == run_id)
+                .ok_or_else(|| CallError::new(ErrorKind::StaleRun, "the scan run has ended"))?;
+            check_stop(&run.stop.0)?;
+            run.scan.clone().ok_or_else(|| invalid("the run has no native scan"))?
+        };
+        if session.lock().unwrap().handle != handle { return Err(CallError::new(ErrorKind::StaleRun, "the scan handle belongs to another run")); }
+        Ok(session)
+    }
+
+    /// Native Pulse receives the immutable plan by reference, not a JSON table.
+    pub fn scan_plan(&self, run: &str, handle: &str) -> Result<Arc<Plan>, CallError> {
+        let session = self.scan_session(run, handle)?;
+        let held = session.lock().unwrap();
+        if let Some(error) = &held.failure { return Err(error.clone()); }
+        Ok(held.plan.clone())
+    }
+
+    /// The board's full receipt stays native. LOAD and its first FIRE refine
+    /// the acquisition snapshot; a configured run keeps that snapshot frozen.
+    pub fn accept_scan_pulse(&self, run: &str, handle: &str, effective_inner: Option<Vec<Vec<f64>>>, applied: Value) -> Result<(), CallError> {
+        let session = self.scan_session(run, handle)?;
+        let mut held = session.lock().unwrap();
+        if let Some(error) = &held.failure { return Err(error.clone()); }
+        if let Some(rows) = effective_inner {
+            let plan = held.plan.with_effective_inner(&rows).map_err(invalid)?;
+            if held.configuration.is_some() && plan.axes() != held.plan.axes() {
+                return Err(invalid("the board changed effective scan coordinates during the run"));
+            }
+            held.plan = Arc::new(plan);
+        }
+        if held.configuration.is_none() { held.pulse_applied = Some(applied); }
+        else if held.pulse_applied.as_ref().is_some_and(|first| first["config"] != applied["config"]) {
+            return Err(invalid("the Config file changed during the scan"));
+        }
+        Ok(())
+    }
 }
 
 impl Inner {
@@ -71,8 +114,8 @@ impl Inner {
                     "outer_width": plan.outer_axis_count(), "inner_width": plan.axes().len() - plan.outer_axis_count(),
                     "max_row_values": zlc_scan::MAX_ROW_VALUES,
                     "ports": plan.axes().iter().map(|axis| axis.port.as_str()).collect::<Vec<_>>()});
-                run.scan = Some(Arc::new(Mutex::new(Session { handle, plan, input, configuration: None,
-                    publication: None, segment: None, written: 0, failure: None })));
+                run.scan = Some(Arc::new(Mutex::new(Session { handle, plan: Arc::new(plan), input, configuration: None,
+                    publication: None, segment: None, written: 0, failure: None, pulse_applied: None })));
                 return Ok(answer);
             }
             (run.scan.clone().ok_or_else(|| invalid("prepare a scan before using its plan"))?, run.stop.0.clone())
@@ -98,6 +141,11 @@ impl Inner {
                 } else { Plan::new(session.plan.spec().clone()).map_err(invalid)? };
                 let output = params["output"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| invalid("the scan needs an output name"))?.to_owned();
                 let mut record = params["record"].as_object().cloned().ok_or_else(|| invalid("the scan needs a run record"))?;
+                if let Some(applied) = &session.pulse_applied {
+                    let snapshots = record.entry("device_snapshots").or_insert_with(|| json!({}));
+                    if !snapshots.is_object() { return Err(invalid("device_snapshots must be an object")); }
+                    snapshots["sequencer"] = applied.clone();
+                }
                 let axes: Vec<Value> = plan.axes().iter().map(|axis| {
                     let mut value = json!({"port": axis.port, "values": axis.values, "unit": axis.unit});
                     if let Some(parent) = &axis.coordinate_of { value["coordinate_of"] = json!(parent); }
@@ -108,7 +156,7 @@ impl Inner {
                     .map(|axis| axis.values.len()).collect::<Vec<_>>()));
                 let answer = json!({"axes": plan.axes()});
                 session.configuration = Some(Configuration { output, record: Value::Object(record) });
-                session.plan = plan;
+                session.plan = Arc::new(plan);
                 Ok(answer)
             }
             "run.scan.arm" => {

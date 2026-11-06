@@ -141,17 +141,6 @@ fn unit_choices(unit: &str) -> Vec<Value> {
         .collect()
 }
 
-/// v2's simulation world schema, used when no simulated type declares its own.
-fn simulation_fields() -> Vec<fields::Field> {
-    serde_json::from_value(json!([
-        // The virtual qCMOS sensor: the whole trap plane the full SLM addresses (zlc_atom simulation world).
-        {"name": "image_shape_yx", "type": "pair", "label": "Image shape (y, x)", "default": [372, 460]},
-        {"name": "grid_shape_yx", "type": "pair", "label": "Trap grid (y, x)", "default": [5, 7]},
-        {"name": "seed", "type": "int", "label": "Seed", "default": 0},
-        {"name": "world_profile", "type": "str", "label": "World profile", "default": ""},
-    ])).expect("simulation schema")
-}
-
 /// A template over a row's settings (`visa:{resource}`), each `{name}` its value as text.
 fn expand(template: &str, parameters: &Map<String, Value>) -> String {
     let mut text = template.to_owned();
@@ -311,7 +300,9 @@ impl Workbench {
         let patch = values.as_object().ok_or("values must be an object")?;
         let mut merged = self.apparatus.simulation.clone();
         merged.extend(patch.clone());
-        let (projected, _) = fields::project_values(&simulation_fields(), &merged, false)?;
+        let fields = self.catalog.configuration_schemas.get("simulation")
+            .ok_or("no installed plugin declares the simulation configuration")?;
+        let (projected, _) = fields::project_values(fields, &merged, false)?;
         self.apparatus.simulation = projected;
         Ok(json!({"simulation": self.apparatus.simulation}))
     }
@@ -506,7 +497,15 @@ impl Workbench {
             Some(Value::Object(saved)) => saved.clone(),
             Some(_) => { notes.push("simulation must be an object; the simulation settings are at their defaults".into()); lost += 1; Map::new() }
         };
-        let (simulation, refusals) = fields::restore(&simulation_fields(), &saved)?;
+        let (simulation, refusals) = match self.catalog.configuration_schemas.get("simulation") {
+            Some(fields) => fields::restore(fields, &saved)?,
+            None => {
+                if !saved.is_empty() && !self.plugins.discovering() {
+                    notes.push("simulation configuration was kept; its declaring plugin is unavailable".into());
+                }
+                (saved, Vec::new())
+            }
+        };
         lost += refusals.len();
         notes.extend(refusals.into_iter().map(|refusal| format!("simulation: {refusal}; it is at its default")));
         Ok((draft, simulation, skipped, notes, lost))

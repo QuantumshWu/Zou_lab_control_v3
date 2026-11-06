@@ -10,6 +10,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 rayon = "1.12"
 zlc-core = { path = "../zlc-core" }
+zlc-scientific = { path = "../zlc-scientific" }
 zlc-figure = { path = "../zlc-figure" }
 zlc-mathtext = { path = "../zlc-mathtext" }
 zlc-text = { path = "../zlc-text" }

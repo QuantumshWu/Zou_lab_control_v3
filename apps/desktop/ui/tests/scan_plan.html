@@ -5,6 +5,7 @@
 <script type="module">
 // Run with tools/test_ui.ps1. No model runs: the editor's facts are written here and every draft edit is recorded.
 import {ScanPlanEditor} from '../dist/views/node_editors/scan_plan.js';
+import {scanFacts,range as rangeOf} from './scan_facts.js';
 const wait = (ms=100) => new Promise(resolve=>setTimeout(resolve,ms));
 const assert = (condition, message) => { if (!condition) throw Error(message); };
 const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
@@ -50,11 +51,11 @@ function setup(axes,api=null,offered=[port]) {
   document.body.append(editor.root);
   const facts={editor:'scan_plan',manages:['plan','api_values'],families:{pulse:'pulse:param:',api:'api:',device:'device:',manual:'manual:'},
     host_advanced:['api:','device:','manual:'],ports:offered,withheld:{},unoffered:{},summary:'',problem:'',api};
-  editor.update({node_id:'scan',values:{plan:JSON.stringify({axes}),api_values:''}},facts,'');
+  editor.update({node_id:'scan',values:{plan:JSON.stringify({axes}),api_values:''}},scanFacts(facts,axes),'');
   const plan=()=>JSON.parse(edits.filter(edit=>'plan' in edit).at(-1).plan).axes;
   const add=()=>[...editor.root.querySelectorAll('button')].find(item=>item.textContent==='Add axis').click();
   // The model answers again, its knobs read anew (`ports`), with the plan the editor wrote.
-  const again=ports=>editor.update({node_id:'scan',values:{plan:edits.filter(edit=>'plan' in edit).at(-1).plan,api_values:''}},{...facts,ports},'');
+  const again=ports=>editor.update({node_id:'scan',values:{plan:edits.filter(edit=>'plan' in edit).at(-1).plan,api_values:''}},scanFacts({...facts,ports},JSON.parse(edits.filter(edit=>'plan' in edit).at(-1).plan).axes),'');
   return {editor,edits,plan,add,again};
 }
 try {
@@ -76,8 +77,8 @@ try {
    const t=setup([],null,order.map(name=>ports[name]));
    for(const _ of order) t.add();
    const axes=Object.fromEntries(t.plan().map(axis=>[axis.port.split(':').at(-1),axis]));
-   const sweep=(name,unit,from,to)=>{const axis=axes[name];equal(axis.unit,unit,`${name} unit`);near(axis.values,Array.from({length:5},(_,k)=>from+(to-from)*k/4),`${name} sweep`);
-     equal([axis.values[0],axis.values[4]],[from,to],`${name} ends, exact`)};
+   const sweep=(name,unit,from,to)=>{const axis=axes[name];equal(axis.unit,unit,`${name} unit`);equal(rangeOf(axis),{start:from,stop:to,count:5},`${name} endpoints and count, exact`);
+     equal(axis.values,[],`${name} range is not expanded in the UI`)};
    sweep('carrier','GHz',6.734,6.934);
    sweep('drive','MHz',79.9,80.1);
    sweep('power','dBm',-10.1,-9.9);
@@ -89,20 +90,20 @@ try {
    const t=setup([],null,[ports.repeats,ports.once,ports.edge,ports.unknown]);
    for(let k=0;k<4;k++) t.add();
    const axes=Object.fromEntries(t.plan().map(axis=>[axis.port.split(':').at(-1),axis]));
-   equal([axes.b1.unit,axes.b1.values],['count',[2,3,4]],'repeats 3: 2, 3, 4');
-   equal([axes.b2.unit,axes.b2.values],['count',[1,2]],'repeats 1: never below its limit');
-   equal(axes.edge.unit,'MHz','at its lower limit');near(axes.edge.values,[500,500.025,500.05,500.075,500.1],'clipped to its limit');
-   equal([axes.unknown.unit,axes.unknown.values],['GHz',[0.5]],'one point, in the unit its range reads in');
+   equal([axes.b1.unit,rangeOf(axes.b1)],['count',{start:2,stop:4,count:3}],'repeats 3: 2, 3, 4');
+   equal([axes.b2.unit,rangeOf(axes.b2)],['count',{start:1,stop:2,count:2}],'repeats 1: never below its limit');
+   equal(axes.edge.unit,'MHz','at its lower limit');equal(rangeOf(axes.edge),{start:500,stop:500.1,count:5},'clipped to its limit');
+   equal([axes.unknown.unit,rangeOf(axes.unknown)],['GHz',{start:0.5,stop:0.5,count:1}],'one point, in the unit its range reads in');
  });
  await check('a unit the operator picks stays until the knob is changed; a new knob starts again',async()=>{
    const t=setup([],null,[ports.drive,ports.carrier]);
    t.add();equal(t.plan()[0].unit,'MHz','default');
    choose(t.editor.root.querySelector('.axis-unit .unit-picker'),'kHz');
-   equal(t.plan().map(axis=>[axis.unit,axis.values[0]]),[['kHz',79.9]],'picked: digits kept');
+   equal(t.plan().map(axis=>[axis.unit,rangeOf(axis).start]),[['kHz',79.9]],'picked: digits kept');
    t.again([{...ports.drive,current:2e7},ports.carrier]);
    equal(t.editor.root.querySelector('.axis-unit .unit-picker').value,'kHz','a new reading re-chose the unit');
    choose(t.editor.root.querySelector('.axis-port'),'carrier');
-   equal(t.plan().map(axis=>[axis.port,axis.unit,axis.values[0],axis.values.length]),[['device:rf:carrier','GHz',6.734,5]],'new knob');
+   equal(t.plan().map(axis=>[axis.port,axis.unit,rangeOf(axis).start,rangeOf(axis).count]),[['device:rf:carrier','GHz',6.734,5]],'new knob');
  });
  await check('an API value first shown reads in its default unit; a box at the pulse\'s own number is re-read in the picked spelling',async()=>{
    const t=setup([],delay(0.001));
@@ -127,11 +128,11 @@ try {
      host_advanced:['api:','device:','manual:'],ports:[port],withheld:{},summary:'',problem:'',api:null};
    const row={node_id:'scan',values:{plan:text,api_values:''}};
    const error=()=>[...t.editor.root.querySelectorAll('.field-error')].filter(node=>!node.hidden).map(node=>node.textContent);
-   t.editor.update(row,{...facts,unoffered:{[axis.port]:{group:'rigol',leaf:'frequency'}},unread:'rigol could not be read: VI_ERROR_SYSTEM_ERROR'},'');
+   t.editor.update(row,scanFacts({...facts,unoffered:{[axis.port]:{group:'rigol',leaf:'frequency'}},unread:'rigol could not be read: VI_ERROR_SYSTEM_ERROR'},[axis]),'');
    equal(error(),['rigol could not be read: VI_ERROR_SYSTEM_ERROR'],'the reason');
    assert(t.editor.root.querySelector('.axis-port')?.textContent.includes('frequency'),'the axis still says its knob');
    assert(!t.editor.root.querySelector('button:disabled')||[...t.editor.root.querySelectorAll('button')].find(item=>item.textContent==='Add axis').disabled===false,'another knob can be added');
-   t.editor.update(row,{...facts,unoffered:{},unread:''},'');
+   t.editor.update(row,scanFacts({...facts,unoffered:{},unread:''},[axis]),'');
    equal(error(),[],'it reads again');
    equal(t.edits.filter(edit=>'plan' in edit),[],'the plan was not written');
  });

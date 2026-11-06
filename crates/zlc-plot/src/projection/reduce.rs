@@ -15,22 +15,7 @@ use crate::numeric::{add_reduce, extreme_reduce, int_add_reduce, leading_sum};
 use crate::with_dtype;
 
 // ------------------------------------------------------------------- SEM
-/// `_sem_from_moments`.
-pub fn sem_from_moments(mean: &[f64], mean_of_squares: &[f64], counts: &[i64], mean_sigma_square: Option<&[f64]>) -> Vec<f64> {
-    let eps = f64::EPSILON;
-    (0..mean.len()).map(|i| {
-        let n = counts[i] as f64;
-        let squared_mean = mean[i] * mean[i];
-        let mut spread = mean_of_squares[i] - squared_mean;
-        let roundoff = ((mean_of_squares[i].abs() + squared_mean) * eps) * (n.max(1.0) + 3.0);
-        if spread <= roundoff { spread = 0.0; }
-        if !spread.is_nan() && spread < 0.0 { spread = 0.0; }
-        let mut variance = if n > 1.0 { spread * n / (n - 1.0) } else { f64::NAN };
-        if let Some(stated) = mean_sigma_square { if variance.is_nan() { variance = stated[i]; } }
-        let sem = (variance / n).sqrt();
-        if n < 1.0 { f64::NAN } else { sem }
-    }).collect()
-}
+pub use zlc_scientific::statistics::sem_from_moments;
 
 /// `_sem_of_mean`: per bucket, centred on the bucket's own mean.
 pub fn sem_of_mean(means: &[f64], counts: &[i64], samples: &Array, sigma: Option<&Array>,

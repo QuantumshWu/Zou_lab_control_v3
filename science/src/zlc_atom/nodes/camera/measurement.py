@@ -8,6 +8,8 @@ from functools import lru_cache
 from time import monotonic
 
 import numpy as np
+from zlc_plugin.capture import CaptureLedger, validate_group, terminal_evidence
+
 from zlc_data import (
     AxisId,
     AxisRoleId,
@@ -298,13 +300,7 @@ def _strict_cycle_ordinals(
     frames_per_cycle: int,
 ) -> tuple[CameraFrameRecord, ...]:
     cycle = tuple(records)
-    expected = tuple(range(expected_start, expected_start + frames_per_cycle))
-    observed = tuple(int(record.source_ordinal) for record in cycle)
-    if len(cycle) != frames_per_cycle or observed != expected:
-        raise RuntimeError(
-            "camera cycle source ordinals are not contiguous: "
-            f"expected {expected}, received {observed}"
-        )
+    validate_group((record.source_ordinal for record in cycle), start=expected_start, size=frames_per_cycle)
     return cycle
 
 
@@ -325,18 +321,7 @@ def _strict_terminal(
     may still remain for the caller's ordinary-Stop drain.
     """
 
-    if not (terminal.source_stopped and terminal.joined):
-        raise RuntimeError(
-            "camera terminal evidence is incomplete: the capture did not stop, "
-            "drain and join"
-        )
-    produced = terminal.produced_count
-    if produced < expected_frames or (produced != expected_frames and not stopped):
-        raise RuntimeError(
-            "camera terminal count differs from completed cycles: "
-            f"completed cycles account for {expected_frames} frame(s), camera "
-            f"produced {produced} (a partial cycle may be present)"
-        )
+    terminal_evidence(terminal, expected=expected_frames, stopped=stopped)
     return terminal
 
 
@@ -478,7 +463,7 @@ class FiniteCapture:
                     break
                 on_cycle(cycle, index)
             terminal = self.close()
-            complete = min(self.repeat, terminal.produced_count // self.frames_per_cycle)
+            complete = min(self.repeat, terminal_evidence(terminal, group_size=self.frames_per_cycle)["complete_groups"])
             while self.completed_cycles < complete:
                 pending = self._pending_records
                 pending.extend(self.node.read_records(
@@ -496,6 +481,7 @@ class FiniteCapture:
             if remaining:
                 self.node.read_records(remaining, timeout=0.0, exact=True)
             self._pending_records.clear()
+            self.node._capture_ledger.call("reset_group")
             terminal = replace(terminal, no_more_frames=True)
             self.terminal = terminal
         except BaseException as error:
@@ -632,7 +618,7 @@ class MonitorCapture:
         # on, so consecutive records ARE the aligned cycle.
         pending = self._pending_records
         pending.append(record)
-        if len(pending) == self.node.frames_per_cycle:
+        if self.node._capture_ledger.call("append_group", size=self.node.frames_per_cycle)["complete"]:
             cycle = tuple(pending)
             pending.clear()
             self._revision += 1
@@ -667,6 +653,7 @@ class MonitorCapture:
                 self._accept_record(record)
             # A partial cycle is counted but is not a scientific publication.
             self._pending_records.clear()
+            self.node._capture_ledger.call("reset_group")
             terminal = replace(terminal, no_more_frames=True)
         self.terminal = terminal
         return terminal
@@ -758,6 +745,7 @@ class CameraMeasurementNode:
         self._actual_working_point = None
         self._run_record = None
         self._next_record_ordinal = 0
+        self._capture_ledger = CaptureLedger("camera")
         self._canonical = None
         # This measurement owns both: it exists to point the camera.  The
         # geometry first, because it is the expensive one to get wrong.  A
@@ -861,13 +849,9 @@ class CameraMeasurementNode:
         records = tuple(
             self.camera.read_frame_records(read_count, timeout=timeout, exact=exact)
         )
+        accepted = self._capture_ledger.call("sequence", ordinals=[record.source_ordinal for record in records])
+        self._next_record_ordinal = int(accepted["next"])
         for record in records:
-            if record.source_ordinal != self._next_record_ordinal:
-                raise RuntimeError(
-                    f"camera frame sequence gap: expected {self._next_record_ordinal}, "
-                    f"received {record.source_ordinal}"
-                )
-            self._next_record_ordinal += 1
             if self._record_received is not None:
                 self._record_received(record)
         if not self.reads_photoelectrons:

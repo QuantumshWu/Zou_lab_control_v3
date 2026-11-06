@@ -730,6 +730,8 @@ pub struct PulseRun {
     pub scan_repeats: Option<u64>,
     /// A table the board plays: these scan slots (no other slot streams), each row run_repeats times.
     pub scan: Option<PulseScanTable>,
+    /// A run-scoped native scan plan; mutually exclusive with an explicit scan table.
+    pub scan_plan: Option<PulseScanPlan>,
     /// A run's two-step play: `load` puts the document on the board without firing (no command_id);
     /// `fire` then fires what that load left there (repeats only). Default: both at once.
     pub stage: Option<String>,
@@ -743,6 +745,15 @@ pub struct PulseScanTable {
     pub fields: Vec<String>,
     /// One row per point, one value per field.
     pub rows: Vec<Vec<f64>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PulseScanPlan {
+    /// Opaque handle returned by this run's native scan prepare operation.
+    pub handle: String,
+    /// The host point whose linked pulse coordinates accompany this inner table.
+    pub outer_index: usize,
 }
 
 /// The Pulse ticks a scan plan schedules, compiled for the attached board.

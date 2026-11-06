@@ -13,7 +13,10 @@ mod cache;
 pub mod descriptor;
 mod files;
 mod frame;
+mod lifecycle;
+mod native;
 mod native_input;
+mod outgoing;
 mod process;
 mod scan;
 pub mod schema;
@@ -38,7 +41,7 @@ pub use blocks::{Lend, Registry};
 pub use descriptor::{Catalog, CommandDescriptor, FileParam, TypeDescriptor};
 use process::{Incoming, Job, PluginProcess};
 
-pub const PROTOCOL: [u32; 2] = [2, 0];
+pub const PROTOCOL: [u32; 2] = [3, 0];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind { Refused, Invalid, Failed, Timeout, Lost, Cancelled, StaleRun, UnknownOp, NotClaimed }
@@ -240,7 +243,9 @@ impl Serving {
                 let blocks: Vec<String> = lends.iter().map(|lend| lend.name().to_owned()).collect();
                 for name in &blocks { registry.hold_for(process.pid(), name)?; }
                 drop(lends);
-                let incoming = process.request_with(op, params, blocks, deadline)?;
+                let unread = blocks.clone();
+                let incoming = process.request_with_cleanup(op, params, blocks, deadline,
+                    || registry.released_by(process.pid(), &unread))?;
                 Ok(Reply { value: incoming.message["ok"].clone(), lends: incoming.lends })
             }
             Serving::Remote(endpoint) => endpoint.request(op, params, lends, deadline),
@@ -315,9 +320,11 @@ struct RunState {
     histories: Vec<HistoryLease>,
     apparatus: Option<Value>,
     stop: RunStop,
+    lifecycle: lifecycle::RunLifecycle,
     /// An exact input consumed by a core service, never encoded for Python.
     core_input: Option<Arc<Mutex<native_input::CoreInput>>>,
     scan: Option<Arc<Mutex<scan::Session>>>,
+    native: Arc<Mutex<zlc_native::Service>>,
 }
 
 /// What work done for a run watches: set when the run is asked to stop, and when it is gone.
@@ -410,6 +417,8 @@ struct Inner {
     /// Where a node's device calls wait, beside the channels they arrived on.
     device_calls: workers::Workers,
     scan_calls: workers::Workers,
+    native_calls: workers::Workers,
+    native_services: Mutex<HashMap<u32, Arc<Mutex<zlc_native::Service>>>>,
 }
 
 /// The plugin host. Cheap to clone; clones share it.
@@ -446,7 +455,8 @@ impl PluginHost {
             Inner { environment: plugin_environment(&config.python), config, session, runtime, safe, registry, job, catalog: Mutex::new(None),
                     state: Mutex::default(), processes: Mutex::default(), events: Box::new(events), gates: Mutex::default(),
                     device_calls: workers::Workers::new("zlc-plugin-device-call"),
-                    scan_calls: workers::Workers::new("zlc-plugin-scan") }
+                    scan_calls: workers::Workers::new("zlc-plugin-scan"),
+                    native_calls: workers::Workers::new("zlc-plugin-native"), native_services: Mutex::default() }
         });
         let watched = Arc::downgrade(&inner);
         std::thread::Builder::new().name("zlc-plugin-watch".into()).spawn(move || watch(watched)).map_err(|error| error.to_string())?;
@@ -845,7 +855,8 @@ impl PluginHost {
             });
             state.instances.get_mut(instance).unwrap().run = Some(RunState { id: run.clone(), origin: request.origin.clone(),
                 devices: request.devices.clone(), signals: request.outputs.clone(), generation: None, route, consumer, outputs: HashMap::new(),
-                histories: Vec::new(), apparatus: None, stop: RunStop(Arc::default()), core_input: native_input, scan: None });
+                histories: Vec::new(), apparatus: None, stop: RunStop(Arc::default()), lifecycle: lifecycle::RunLifecycle::default(), core_input: native_input, scan: None,
+                native: Arc::new(Mutex::new(zlc_native::Service::default())) });
             (process, devices, source, following)
         };
         let started = process.request("run.start", json!({"instance": instance, "run": run, "values": request.values,
@@ -886,12 +897,13 @@ impl PluginHost {
     /// Ask a run to stop; it ends with `RunFinished`.
     pub fn stop_run(&self, instance: &str, run: &str) -> Result<(), CallError> {
         let process = {
-            let state = self.inner.state.lock().unwrap();
-            let entry = state.instances.get(instance).ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not open")))?;
-            let Some(current) = entry.run.as_ref().filter(|current| current.id == run) else {
+            let mut state = self.inner.state.lock().unwrap();
+            let entry = state.instances.get_mut(instance).ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not open")))?;
+            let Some(current) = entry.run.as_mut().filter(|current| current.id == run) else {
                 return Err(CallError::new(ErrorKind::StaleRun, format!("{run} is not {instance}'s current run")));
             };
             let process = entry.serving.process().cloned().ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not a node of this core")))?;
+            if !current.lifecycle.request_stop() { return Ok(()); }
             current.stop.0.store(true, Ordering::Relaxed);
             process
         };
@@ -1138,6 +1150,7 @@ impl Inner {
     }
 
     fn process_exited(&self, process: &Arc<PluginProcess>, reason: String) {
+        self.native_services.lock().unwrap().remove(&process.pid());
         process.ended();
         self.registry.holder_gone(process.pid());
         let retiring = process.retiring.load(Ordering::Acquire);
@@ -1205,10 +1218,18 @@ impl Inner {
                     current: params["current"].as_u64(), total: params["total"].as_u64() });
             },
             "run.finished" => {
-                let (instance, run, outcome) = (text("instance"), text("run"), text("outcome"));
-                let generation = self.end_run(&instance, &run, &outcome, &json!({"result": params["result"], "error": params["error"]}));
-                (self.events)(HostEvent::RunFinished { instance, run, outcome, result: params["result"].clone(),
-                    error: params.get("error").filter(|error| !error.is_null()).cloned(), generation });
+                // Older/custom protocol implementations cannot choose their own
+                // terminal result. Fail explicitly rather than leave a live run
+                // waiting forever or bypass the Stop/terminal arbitration.
+                let (instance, run) = (text("instance"), text("run"));
+                let owned = self.state.lock().unwrap().instances.get(&instance)
+                    .is_some_and(|entry| entry.serving.pid() == process.pid() && entry.run.as_ref().is_some_and(|current| current.id == run));
+                if owned {
+                    let error = json!({"kind":"invalid", "message":"run.finished is no longer authoritative; use run.begin_terminal and run.finish"});
+                    let generation = self.end_run(&instance, &run, "failed", &json!({"error": error}));
+                    (self.events)(HostEvent::RunFinished { instance, run, outcome:"failed".into(), result:Value::Null,
+                        error:Some(error), generation });
+                }
             }
             // Its log stays this core's too (the publishing machine's row narrates it).
             "device.log" => if process.instances.lock().unwrap().contains(&text("instance")) {
@@ -1227,6 +1248,14 @@ impl Inner {
     fn plugin_request(self: &Arc<Self>, process: &Arc<PluginProcess>, message: Value, lends: Vec<Arc<Lend>>) {
         let id = message["id"].clone();
         let op = message["op"].as_str().unwrap_or("").to_owned();
+        if op == "native" {
+            let (inner, process) = (self.clone(), process.clone());
+            self.native_calls.run(move || {
+                let answer = inner.native_request(&process, &message["p"], &lends);
+                inner.answer(&process, &id, answer);
+            });
+            return;
+        }
         if op.starts_with("run.scan.") {
             // Input waits must never hold the plugin reader (the source can be
             // another node in that same process). Services reuse warm workers.
@@ -1247,11 +1276,12 @@ impl Inner {
             return;
         }
         let answer = match op.as_str() {
+            "run.begin_terminal" | "run.finish" => self.lifecycle_request(process.pid(), &op, &message["p"]).map(|value| (value, Vec::new())),
             "run.begin" => self.run_begin(&message["p"]).map(|value| (value, Vec::new())),
             "run.commit" => self.run_commit(&message["p"], &lends).map(|value| (value, Vec::new())),
             "run.commit_events" => self.run_commit_events(&message["p"], &lends).map(|value| (value, Vec::new())),
             "runtime.read" => self.runtime_read(process, &message["p"]),
-            "run.operator_input" | "run.artifact" | "run.figure" | "run.animation" | "run.fit" | "run.acquire" | "run.snapshot" | "core" => {
+            "run.operator_input" | "run.artifact" | "run.artifacts" | "run.figure" | "run.animation" | "run.fit" | "run.acquire" | "run.snapshot" | "core" => {
                 // The application answers these (respond); the run's thread waits.
                 let params = &message["p"];
                 let (instance, run) = (params["instance"].as_str().unwrap_or("").to_owned(), params["run"].as_str().unwrap_or("").to_owned());

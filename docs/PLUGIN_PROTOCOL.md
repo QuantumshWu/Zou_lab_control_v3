@@ -1,10 +1,15 @@
-# Plugin protocol (v2)
+# Plugin protocol (v3)
 
 Python plugins (device drivers, logic nodes, the WGS/SLM glue they contain) run
 outside the Rust core. The core has no interpreter and no GIL; a plugin crash or
 hang loses plugins, never the application or its data. This document is the
 contract between `crates/zlc-plugin-host` (Rust) and `science/src/zlc_plugin`
 (the Python SDK). Changes after announcement are small commits titled `API: ...`.
+
+Version 3 requires core-issued terminal tokens and the matching native service
+runtime. Older SDK processes are rejected during the version handshake, before
+devices or runs are admitted; they cannot silently fall back to plugin-decided
+terminal outcomes. The scientific artifact formats are unchanged.
 
 Terms: a **plugin type** is one discovered declaration (`camera.virtual_mot`, the
 `camera_measurement` node). A **plugin instance** is one configured use of a type:
@@ -52,7 +57,7 @@ Plugin folders follow v2's layout rule, one folder = one device:
 exporting `LOGIC_NODE` (a `zlc_plugin.NodeType`). Family folders hold only shared
 contracts. The descriptor is written once, in Python, beside the code it
 describes. The core learns it by asking the plugin process `describe {packages}`,
-which imports each leaf module and answers one JSON document `{"protocol": [2, 0],
+which imports each leaf module and answers one JSON document `{"protocol": [3, 0],
 "types": [...], "errors": [...]}` (kept in `.local\plugins\catalog.cache` until a
 source or the environment changes).
 A module that fails to import is reported in `errors` with its traceback; the
@@ -175,6 +180,13 @@ without an instance: `discover` (its hardware scan; an SDK `discover` that takes
 resolved before it opens, one row at a time in the operator's order while the other
 rows open, and what it finds is pinned into the apparatus (WORKBENCH_COMMANDS §4.2).
 
+Packages may export `configuration.APPARATUS_SCHEMAS`: a mapping from apparatus
+namespace to an authoring schema. Discovery serializes these under
+`configuration_schemas`; conflicting declarations are catalogue errors. The
+workbench projects settings using these declarations, and preserves saved values
+when their owner is unavailable. The simulation schema is declared by `zlc_atom`,
+including its defaults and bounds, rather than copied into the native workbench.
+
 Capabilities name a device SPI by token (`camera.adapter`, `motion.axis`, `rf.source`,
 `slm.phase`, `waveform.source`; the pulse board is native and no plugin claims it:
 a node plays a pulse through the core's `pulse_*` commands). `zlc_plugin.capabilities`
@@ -195,7 +207,7 @@ spawned -> ready -> open -> (idle <-> running) -> closing -> closed
 | configure | `configure {instance, parameters}` | device: `adapter.reconfigure(values)` or refuses | `{state}` |
 | prepare (node) | `query {instance, name: "prepare_run", values, devices, resources, source_signal}` | projects and builds a candidate with read-only device proxies; the active run is untouched | `{prepared: token}` |
 | discard (node) | `run.discard {instance, prepared}` | releases an unstarted candidate; idempotent | `{}` |
-| start (node) | `run.start {instance, run, prepared?, values, devices, resources, source_signal, run_directory, origin}` | consumes the prepared candidate and binds its proxies to the acquired run; without a token, builds on the run thread for direct SDK clients | `{run}` immediately; terminal via `run.finished` event |
+| start (node) | `run.start {instance, run, prepared?, values, devices, resources, source_signal, run_directory, origin}` | consumes the prepared candidate and binds its proxies to the acquired run; without a token, builds on the run thread for direct SDK clients | `{run}` immediately; terminal via tokenized `run.begin_terminal` / `run.finish` requests |
 | stop (node) | event `run.stop {instance, run}` | sets the run's cancel flag | none |
 | health | `ping` | answered by the reader thread (proves the interpreter and GIL are alive) | `{}` |
 | catalogue (process) | `describe {packages}` | imports every leaf module on a thread of its own | the descriptor document (section 2) |
@@ -234,9 +246,18 @@ the current operator name, overriding plugin-supplied identity. Later renames
 do not change this historical record. It also writes the core's configured
 acquisition `apparatus` (section 5); a plugin's own key of that name is dropped.
 
-A run ends with event `run.finished {run, outcome: completed|stopped|failed,
-result, error}`. The core seals the run's Runtime generation with that outcome
-(`Runtime::seal`), never the plugin. Stop is not deletion: a stopped run's
+The core owns the Stop/terminal race. `run.begin_terminal {accept_stop, partial}`
+atomically enters protected terminal work and returns an opaque token. A Stop
+accepted first refuses this transition unless `accept_stop`; a later Stop is
+ignored. At executor exit the SDK calls `run.begin_terminal` with
+`finalizing: true`, `intent: success|error|invalid` and `accept_stop: true`.
+The core returns the frozen `outcome` and whether to invoke the partial-exit writer.
+After cleanup, `run.finish {token, result, error}` validates that token, seals the
+Runtime generation and emits the application `RunFinished` event. The plugin
+retires its local runner and unread deliveries **before** this last request, so
+an immediate restart after completion reaches a reusable lane. An old
+plugin-authored `run.finished` event is a protocol failure, not an authoritative
+successful outcome. Stop is not deletion: a stopped run's
 committed data stays readable. A restart is a new `run` id and a new generation;
 commits carrying an old run id are refused (`stale_run`).
 
@@ -255,7 +276,7 @@ Framing: `u32` little-endian byte length, then that many bytes of UTF-8 JSON
 {"t": "req", "id": 7, "op": "spi", "p": {...}, "deadline_ms": 2000, "blocks": [...]}
 {"t": "res", "id": 7, "ok": {...}, "blocks": [...]}
 {"t": "res", "id": 7, "error": {"kind": "refused", "type": "TuneRefused", "message": "...", "traceback": "..."}}
-{"t": "evt", "op": "run.finished", "p": {...}, "blocks": [...]}
+{"t": "evt", "op": "run.progress", "p": {...}, "blocks": [...]}
 ```
 
 Both sides issue requests; each side numbers its own (independent id spaces).
@@ -382,7 +403,7 @@ runs and each member's ancestors held once. The native `read_archive` and `read_
 both in their older structure; Python's `read_archive` gives them as stored.
 
 Plugin -> core events: `release {blocks, leases}`, `run.ready`, `run.progress`,
-`run.finished {run, outcome, result, error}`, `device.log {instance, line}` (one line of
+`device.log {instance, line}` (one line of
 an open device's own log, v2's: each INFO record of the loggers under `zlc_pulse.remote`,
 `zlc_atom.devices` and the type's `log_channels`, as `[HH:MM:SS] message`, for the devices
 it is about -- a logger under the type's `log_channels`, or a line ending in
@@ -401,7 +422,10 @@ Plugin -> core (only during a run, bound to its run id):
 | `run.commit {inputs: [{output, ordinal, origin, data, schema?}], metadata, parents}` | One atomic bundle (`Runtime::commit`): siblings commit together or not at all. `origin` is the finite `(repeat, point)` placement; a finite event carries its chunk `schema` when it differs from the last one sent. `parents` are read leases the node consumed. Metadata is `{records: {output: event_record}, shot_time_seconds: {output: t}}`; `t` stamps that output's shot (every shot of a signal or none, later shots later), and a history window over it carries the shot time as an alternative coordinate of its source index. Returns each output's publication key. |
 | `run.commit_events {count, ordinals, inputs: [{output, data, schema?}], shot_times?, origins?, records?}` | `count` consecutive event bundles in one round trip (`Runtime::commit_events`), each the event `run.commit` would make of it: `ordinals` (u64), `shot_times` (f64) and `origins` (`(count, 2)` u64) have one row per event, and each output's `data` planes hold the events one after another, first axis the event, each event borrowing its part. `records` is one JSON record per event, kept under every output of the bundle. Every Exact and Follow subscriber takes each event; a Latest subscriber and the change watch only the last. Answers nothing. |
 | `run.operator_input {kind, title, message, payload}` | Blocks the run thread until the operator answers or the run stops. |
-| `run.artifact {name, path, role, contract_id}` | Register a completed run-contained artifact. |
+| `run.begin_terminal {accept_stop, partial, finalizing?, intent?}` | Core-owned Stop/terminal arbitration; returns `{token, stop_accepted, partial, outcome, run_exit_writer}`. `outcome` is fixed when finalizing. |
+| `run.finish {token, result, error}` | Completes an already-finalizing run after plugin cleanup, using the core's frozen outcome. |
+| `run.artifacts {action, ...}` | Run-contained native publication and registration; see section 5.3. |
+| `run.artifact {name, path, role, contract_id}` | Legacy registration spelling, routed through the same confined artifact store. |
 | `run.figure {path, data, overlay, recipe, source, lineage, image}` | Save one figure (`RunContext.save_figure`, `zlc_plugin.figures`): the core writes the `zlc.figure` archive `<path stem>.npz` and, when `image`, renders `path` (`.png`/`.pdf`/`.svg`; no suffix = `.png`). `data` is one complete dataset `{schema, data: {values, validity, sigma}, block_id, revision, generation}` (`validity` true/false or its storage mask). `recipe` is `{spec, parameters, size}` plus any of `viewport, classifier_thresholds, facet_focus, fit, selectors, interaction, presentation`: `spec` is the archive recipe's spec tree; the core completes `parameters` with the kind's defaults, validates `size` and normalizes `classifier_thresholds` as a plot session keeps them (v2 `encode_plot_recipe`). `overlay` is null or `{revision, coordinates (N,2), point_ids, labels, static_statuses, status (a dataset), paths_xy (N,K,2)}`. `source`/`lineage` go into the archive's sections as v2's `save_figure_artifact` put them. Answers `{archive, image}` (`image` null when not drawn). Registering them as artifacts stays the plugin's. |
 | `run.animation {path, images, frame_ms}` | A looping GIF of the run's images (its figure previews, inside the run directory), `frame_ms` each, each frame on its own palette (v2's Pillow save of the recording previews); answers `{path}`. `RunContext.save_animation`. |
 | `run.fit {model, x, y, sigma, sigma_dof, warm}` | One independent fit per row of `y` `(cells, n)` over `x` `(n)` by the core's fit engine with its default options (`RunContext.fit`, `zlc_plugin.fit`); `sigma` as `y` or null, `sigma_dof` (each sigma's degrees of freedom, as a panel's fit weighs them) as `y` or null, `warm` `(cells, parameters)` or null, a row with a non-finite value being none. `model` is an id of the read-only catalogue command `fit_models` (`{models: [{id, label, parameters: [{name, unit_relation}]}]}`, series models only; `zlc_plugin.fit_models`, also from a draft query). Answers `{parameters, values, errors, success, reduced_chi_square, messages}`, a row per cell, null for NaN. A cell that cannot be fitted (too few finite points, a solver failure) is `success: false` with its reason, not a failed call; non-finite points are dropped by the engine. Solved on a standing worker, off the window's turn and the channel's thread; the run's Stop ends the batch with `cancelled`. |
@@ -411,8 +435,8 @@ Plugin -> core (only during a run, bound to its run id):
 | `device {argument, method, args, kwargs}` | Call a claimed device's SPI (section 7 checks apply). `tunable_fields` answers the same rows as the `fields` op, as data. |
 | `runtime.read {signal, mode, width}` | Read a Runtime signal: `event | dataset | window` (the event of a dataset publication, e.g. a Fit over a finite run, is its dataset). Returns `{lease, key, schema, window, segments: [{origin, extent, data}], metadata, run_record, placement, lineage}`, `lineage` its ancestry nearest first, each publication once: `[{key, run_record, event_record}]`; the lease is released (event `release {leases}`) when the SDK's `Read` is garbage. |
 
-The seven requests above `device` are answered by the application, not the host:
-the host passes them on (`HostEvent::Request {ticket, op, params, origin, lent}`, `lent`
+Operator input, artifacts, figure/animation saves, fits, acquisition, snapshots and
+`core` requests are answered by the application. The host passes those on (`HostEvent::Request {ticket, op, params, origin, lent}`, `lent`
 holding the blocks its arrays are on) and the
 run thread waits for `PluginHost::respond(ticket, result)`.
 
@@ -449,8 +473,8 @@ run's complete dataset (`segments` as placed), its own `canonical_schema` with
 `cell_origin` (0, 0); a sealed live source delivers its current event.
 
 A node of another kind started with a source signal over an exact dataset input
-(the seamless scan: it fires the pulse that drives its own source) is subscribed the
-same way, from the source's current event, and gets the same `run.deliver` requests;
+with `consumer: "plugin"` is subscribed the same way, from the source's current
+event, and gets the same `run.deliver` requests;
 its `execute` takes them in order with `ctx.next_input(timeout)` (acknowledged as
 taken, so the next is sent) and drops what came before a sampling boundary with
 `ctx.discard_inputs()`. A `sealed`/`retired`/`failed` delivery ends the wait with an
@@ -478,11 +502,12 @@ only while it runs.
 `report_progress()`, `set_run_record()`, `commit_live(outputs, source_publication=)`,
 `declare_now()` (what was declared stands before a first commit), `commit_events(outputs, ordinals=, shot_times=, origins=, records=)` (new, with `LiveEvents`),
 `request_operator_input()`, `run_directory`, `register_artifact()`,
-`seal_terminal(accept_stop=, partial=)` and `register_partial_exit_writer(writer)`,
-both answered inside the plugin: a sealed run ignores a later `run.stop`; an
-error out of a stopped (unsealed) run ends it `stopped`, as v2's NodeHost did; the
-writer runs once with `"stopped"`/`"failed"` before `run.finished`, and its own
-failure is that run's reported error. A v2 `execute(context)` therefore ports unchanged. `set_run_record` plus the first
+`seal_terminal(accept_stop=, partial=)` and `register_partial_exit_writer(writer)`.
+Sealing is decided by the core; the SDK only caches its acknowledgement. The
+partial writer remains plugin code, runs once with the core-decided
+`"stopped"`/`"failed"` status before `run.finish`, and its failure is retained in
+the final error. Protected terminal/partial cleanup may use pure native services
+and artifact publication after Stop; it grants no additional device claims. A v2 `execute(context)` therefore ports unchanged. `set_run_record` plus the first
 `commit_live` produce `run.begin` (outputs not present in the first commit must
 be declared with `ctx.declare_output(name, schema, storage)` before it, because
 Runtime declares every output of a generation at once).
@@ -496,8 +521,8 @@ in the host; it sends no `run.deliver` messages or arrays to Python. A run may
 prepare one scan service over that input. Other input and processor semantics
 are unchanged.
 
-`ctx.scan(spec)` creates a run-scoped `NativeScan`. The version-2 protocol
-adds these operations; every request carries the current instance/run, and
+`ctx.scan(spec)` creates a run-scoped `NativeScan`. The version-3 protocol
+provides these operations; every request carries the current instance/run, and
 every operation after prepare carries the returned opaque handle:
 
 | Operation | Parameters / result |
@@ -516,13 +541,18 @@ the board-advanced groups. Values must be finite and nonempty, linked lengths
 must match, and counts must fit the native layout. Port owners supply their
 units and device facts; device-specific conversions remain with the adapter.
 
-Prepare and configure keep axis vectors, not expanded host × board rows. An
-inner table is materialized only when the existing Pulse table API requires
-it. Effective coordinates must map one authored value consistently; they do
+Prepare and configure keep axis vectors, not expanded host × board rows. Pulse
+resolves the run's plan handle natively and admits slots, counter limits and a
+64 MiB conservative materialization budget before constructing its inner table.
+Full tables and applied snapshots stay in Rust; only compact receipts cross to
+Python. Effective inner coordinates must map one authored value consistently; they do
 not change group lengths or the scan's traversal. The source's singleton
 Repeat carrier is consumed, its Point/Cell axes preserved, and `scan.repeat`
 and `pulse.run` describe the scan's two repeat counts. Implicit integer repeat
 coordinates are semantically equivalent to the older explicit vectors.
+Outer coordinates retain their nominal setpoint semantics, including a pulse
+column linked to a host axis; actual carried values remain in the applied Pulse
+snapshot. Device readbacks are recorded separately from those setpoints.
 
 The first collect declares outputs from the first source event's schema via
 the same native declaration path as `run.begin`. The host stamps node identity
@@ -550,6 +580,100 @@ forgets the old subscription before that start. The follower remains registered
 and adopts the new generation before its first publication, so the old source's
 Stop cannot fail the new collection. A source cannot be replaced this way after
 the scan has published data.
+
+### 5.2 Process-local capture ledger
+
+`zlc-capture` supplies the shared acquisition state machine through a small C ABI
+(`zlc_capture.dll`, located by `ZLC_CAPTURE_LIBRARY` or the packaged engine folder).
+`zlc_plugin.capture.CaptureLedger` owns its opaque handle. These calls stay inside
+the plugin process; recording each frame adds no core IPC round trip.
+
+Python retains already-owned record objects in its FIFO, SDK worker/thread
+identity, buffer copying and wakeups. Rust decides arming/readiness, consecutive
+ordinals, finite completion, queue capacity, failure precedence, exact/loose read
+admission, and stopped/joined terminal evidence. A failed join retains the capture
+and worker for cleanup retry. Overflow preserves the accepted queue and fails
+before returning scientific data. Camera and waveform nodes use the same native
+sequence and terminal rules; camera cycle boundaries and partial-cycle evidence
+are checked natively. Borrowed vendor buffers and hardware stop calls remain in
+the adapter. An unavailable native capture library is an installation error;
+there is no second Python policy implementation.
+
+### 5.3 Run artifact publication
+
+`RunContext.artifacts` provides `write_json`, `write_text`, `write_bytes`,
+`write_file`, `stage`, and `register`. Python retains scientific JSON/NPZ formats;
+the core owns publication. `write_file(path, writer)` stages a same-directory
+file, lets the scientific callback fill its stream, then asks the core to sync,
+atomically publish and acknowledge the parent directory. An exception in the
+writer aborts only the temporary. Stages are also retired with their owning run.
+
+`run.artifacts` actions are `stage`, `finalize`, `abort`, `write_text`,
+`write_bytes`, `write_json`, `register`, `flush`, `mkdir`, `makedirs` and
+`claim_directory`. A stage returns `{token, path, target}`. Finalize/abort requires
+that run's token. Write/stage options include `name`, `role`, `contract_id`,
+`lineage` and `unique`; a supplied name registers the result in the same native
+operation. Unique publication never overwrites an occupied name. A name may be
+updated at its original path but cannot silently change to another artifact.
+
+The store resolves paths before checking containment, including existing links;
+`start.json` and `run.json` remain reserved. Registration checks a complete regular
+file and records size, run identity, role, contract and supplied lineage.
+Figure and animation paths use the same confinement rule. Unfinalized stages
+are bounded to 128 per run, and operations on a retired run are refused.
+
+Replies use `{ok: ...}` or `{error: {type, message, published}}` inside the normal
+RPC result. If replacement succeeded but directory acknowledgement failed,
+`published` names the complete visible file. The SDK raises
+`DirectoryDurabilityError(published=...)` and leaves that file in place. A named
+visible result is registered with `durable: false` and its publication error;
+it is never silently presented as durable or removed as a failed temporary.
+
+Offline `zlc_durable` calls use the same `zlc-archive::durable::StagedWrite`
+implementation through the native helper. During a hosted run they route through
+the run-confined artifact facade. Directory fsync, unique-name collision handling
+and atomic replacement have one implementation; payload encoding remains Python.
+
+### 5.4 Shared native rules and offline tools
+
+The SDK's `native.call(operation, **params)` / `ctx.native(...)` use a `native`
+request `{operation, params, instance?, run?}`. The neutral `zlc_native` Python
+package owns the client/codec; the SDK installs its live transport. Outside a
+host it uses the engine's persistent framed `zlc-native` helper. Both routes
+dispatch the same Rust implementation. Large hosted arrays retain the existing
+shared-memory ownership rules; there are no per-element RPCs.
+
+`scan.compile` normalizes, compiles or previews the authored document. Compact
+Range descriptors `{start,stop,count}`, explicit Values, linked formulas and
+inactive banks are preserved as authored data. `scan.order` and `scan.bind`
+provide execution order and unit/range/port admission for draft and runtime
+callers, including binding views that select only some axes of a linked group.
+TypeScript sends authored patches and accepts canonical preview rows only when
+their echoed source matches the current draft. It does not expand numeric grids
+or interpret formulas. The run-scoped `scan_plan {handle,outer_index}` Pulse
+parameter resolves directly to its native plan; receipts crossing to Python
+contain identity/count/configuration evidence, not full tables. The host retains
+full applied snapshots for the native run record and LOAD/FIRE checks.
+
+`fields.project` and `fields.value` share `zlc-authoring` with the native
+workbench, preserving typed projection failures and inactive draft values.
+`units.*` uses the core registry, array conversion and quantity parsing/formatting
+rules. Custom unit definitions remain explicit data, including device-specific
+loads; Python caches immutable results with bounded capacity and invalidates
+them when its registry changes.
+
+`scientific.*` provides canonical axis/selection/reduction plans, bulk typed
+operations and grouped accumulators. Plot and Derive share numerical kernels
+and SEM rules. Group handles are opaque and unique, belong to a run's native
+service and are released on finish/drop or when the run ends. Invalid or stale
+handles never select a newly created group's state. Protected terminal work may
+still use these services for its final analysis; an ended run cannot.
+
+The offline helper accepts `durable.*` for local file ownership. Hosted run
+writes use `ctx.artifacts` and its run-directory authority; global native requests
+cannot bypass that containment. Non-run plugin caches use a local helper, without
+acquiring authority over the application's run artifacts. Native products and
+the Python SDK are shipped together in an engine release.
 
 ## 6. Data plane
 
@@ -625,8 +749,27 @@ receives the original type when it is a builtin (`TimeoutError`, `ValueError`,
 `RuntimeError`, `TypeError`, ...) or `zlc_plugin.PluginError(kind, ...)` otherwise,
 with the remote traceback attached as a note.
 
-Deadlines: the caller states `deadline_ms`; on expiry the caller gets `timeout`.
-The callee is not interrupted (a running operation stops cooperatively, through
+Deadlines cover writer admission, pipe contention and reply waiting as one
+monotonic budget. The single native wire writer has separate bounded normal and
+control queues (64 frames each); it discards an expired unsent frame and sends
+the remaining budget to the SDK. It also stamps `deadline_monotonic_ns` in the
+shared Windows QPC clock (and `deadline_unix_ns` as a fallback); the SDK takes
+the earlier of that absolute deadline and its receipt-relative budget. Thus a
+frame delayed inside a blocked write cannot acquire a fresh execution budget
+when it finally arrives. A frame already being written must finish
+without interleaving. Pending requests remain owned until the actual response or
+process exit, including a caller that has stopped waiting. Normal pending-call
+admission is capped at 256, with 64 additional control slots.
+
+The Python SDK admits at most 64 ordinary requests per instance lane, with a
+reserved control wake slot. It checks a queued request's expiry before executing
+its handler. Declared concurrent calls have eight ordinary slots and two
+independent `stop`/`make_safe` slots. Stop can interrupt admitted calls during
+shutdown, but cannot race the final SDK Close after the last call relinquishes
+the handle. Catalogue/discovery/resolve together admit four calls per process.
+Overload is an explicit `refused` reply, never an unbounded thread or queue.
+
+On expiry the caller gets `timeout`. A callee already executing is not interrupted (a running operation stops cooperatively, through
 its bounded timeouts or the run's `run.stop`). An instance that leaves a request
 unanswered for deadline + 5 s is **unresponsive**: the core marks it failed, seals
 its running generation as failed with that reason and tells the process `abandon`;

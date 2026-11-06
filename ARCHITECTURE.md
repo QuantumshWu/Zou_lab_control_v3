@@ -57,19 +57,65 @@ No source pixels, per-shot schema or placement messages travel through the
 Python scan. Runtime still owns storage, overlap checks, subscriptions,
 lineage and sealing; the scan service does not create a second data store.
 
-Python retains authored value banks/formulas, device-specific facts and
-conversions, manual prompts, device writes/readbacks/restoration and Pulse
-completion policy. It prepares one native plan, applies settings at segment
-boundaries and collects bounded batches of progress. The first segment keeps
+Rust also compiles the authored Range/Values/formula banks and supplies the
+editor's preview, validation, binding and ordering. Authored documents retain
+their inactive banks; execution plans contain only selected values. TypeScript
+edits those documents and only applies a preview matching its current draft.
+Python supplies device-specific facts and conversions, manual prompts, device
+writes/readbacks/restoration and Pulse completion policy. It prepares one native
+plan, applies settings at segment boundaries and collects bounded batches of
+progress. A run-bound plan handle reaches Pulse directly: slot/count/memory
+admission, table construction and quantization happen natively. Full applied
+tables remain native for the run record and staged LOAD/FIRE verification;
+Python receives a compact receipt. The first segment keeps
 a bounded quiet drain for sources without an arm/drain acknowledgement. Later
 segments omit that silence timer only after the prior expected records and
 board DONE have both been observed. This is not a hardware trigger-ID protocol:
 native collection rejects source ordinal gaps and generation/schema changes,
 but cannot identify a missed hardware trigger whose driver supplied no evidence.
 
-TypeScript owns interaction and display. Canonical execution geometry is
-validated by Rust; the current authoring editor and Python adapter still
-project authored ranges and linked formulas into that geometry.
+TypeScript owns interaction and display, including focus, mounted controls,
+wheel gestures and authored-bank memory. It contains no second scan compiler.
+
+## Shared rules and plugin services
+
+`zlc-authoring` projects generic field values for both the workbench and Python
+adapters. Scientific cross-field validators and device-dependent conversions
+remain plugin code. Package `configuration.APPARATUS_SCHEMAS` declarations own
+scientific apparatus settings, including the simulation world; the workbench
+does not hardcode those fields or defaults and preserves saved settings when
+their declaring package is unavailable.
+
+`zlc-core::units` is the common registry, conversion, quantity formatting and
+parsing implementation. Python exposes immutable unit values and bounded
+caches. `zlc-scientific` owns named-axis geometry, typed array operations,
+statistical reductions and grouped accumulators, shared by Derive and Plot.
+Python retains expression authoring/dependencies and research-specific policy;
+bulk arrays use the existing shared-memory channel. Mutable native kernel
+handles belong to one run and cannot alias a later run's state.
+
+The small Python `zlc_native` client and codec have no dependency on the plugin
+SDK. Hosted calls use the existing Rust host; offline tools call the same rules
+through a persistent `zlc-native` helper. There is no second Python numerical or
+schema fallback. `zlc-capture` runs inside the plugin process as a small native
+library: it owns queue admission, source ordinals, capture/group counts and
+terminal evidence; Python keeps SDK threads, record objects, waits and vendor
+buffer lifetimes. Capture policy calls do not cross the process channel.
+
+The core arbitrates Stop against protected terminal work. The SDK performs
+cleanup before the core accepts its finish token, so immediate restart cannot
+see a still-registered old Python run. Device lanes, concurrent work and wire
+admission are bounded, emergency actions have a separate reserve, and unsent
+or queued expired requests cannot later act. A started call's timeout does not
+release its device or argument-buffer ownership prematurely.
+
+Run artifacts use a core-owned staging/publication service over `zlc-archive`
+durability primitives. Python formats scientific content; the native owner
+reserves names, checks containment, syncs, publishes and registers results.
+Offline durability uses those same primitives. A complete visible file whose
+directory acknowledgement fails remains named as published-but-not-durable.
+The engine bundle includes `zlc-native.exe` and `zlc_capture.dll` alongside the
+application; changing native rules requires rebuilding these products.
 
 
 ## Commands

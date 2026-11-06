@@ -34,7 +34,7 @@ class ScanServiceOracle:
             self.segment_total = len(self.inner) * params["sweeps"] * self.spec["run_repeats"]
             return {}
         if op == "run.scan.configure":
-            inner = params.get("effective_inner", self.inner)
+            inner = params.get("effective_inner", getattr(self, "effective_inner", self.inner))
             rows = tuple(tuple(a) + tuple(b) for a in self.outer for b in inner)
             names = [a["identity"] for a in self.spec["axes"]]
             ports = [a.port for a in self.plan.axes]
@@ -43,6 +43,8 @@ class ScanServiceOracle:
                 axis_names=[a["label"] for a in self.spec["axes"]],
                 coordinate_of=[ports.index(a.coordinate_of) if a.coordinate_of else None for a in self.plan.axes])
             record = deepcopy(params["record"])
+            if hasattr(self, "applied"):
+                record.setdefault("device_snapshots", {})["sequencer"] = deepcopy(self.applied)
             for index, axis in enumerate(record["plan"]["axes"]):
                 mapping = {wanted[index]: actual[index] for wanted, actual in zip(self.plan.rows(), rows, strict=True)}
                 axis["values"] = [mapping[value] for value in axis["values"]]
@@ -76,5 +78,27 @@ def attach_scan_oracle(context, source, publish, record):
         service = ScanServiceOracle(source, publish, record)
         services.append(service)
         return NativeScan(SimpleNamespace(_request=service.request), spec)
+    core = context.core
+    def pulse(command, **params):
+        reference = params.pop("scan_plan", None)
+        if command != "pulse_run" or reference is None:
+            return core(command, **params)
+        service = services[-1]
+        outer, inner = split_outer_axes(service.plan)
+        carried = [(axis, value) for axis, value in zip(outer, service.outer[reference["outer_index"]])
+                   if axis.port.startswith("pulse:param:")]
+        fields = [axis.port[len("pulse:param:"):] for axis in inner] + [axis.port[len("pulse:param:"):] for axis, _ in carried]
+        if fields:
+            params["scan"] = {"fields": fields, "rows": [list(row) + [value for _, value in carried] for row in service.inner]}
+        receipt = core(command, **params)
+        service.applied = receipt["applied"]
+        if inner:
+            table = receipt.get("scan")
+            if not table:
+                raise RuntimeError("FIRE receipt is missing its loaded scan table")
+            service.effective_inner = tuple(tuple(row[table["fields"].index(axis.port[len("pulse:param:"):])] for axis in inner)
+                                            for row in table["rows"])
+        return {**receipt, "scan": {"handle": reference["handle"], "row_count": len(service.inner), "fields": fields}}
     context.scan = prepare
+    context.core = pulse
     return services

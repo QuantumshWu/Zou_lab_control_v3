@@ -16,13 +16,13 @@ from dataclasses import asdict, replace
 
 from zlc_data.units import DEFAULT_UNITS, UnitError, format_quantity
 from zlc_plugin.tunable import convert_tunable_value
+from zlc_plugin.native import call as native
 
 from .plan import (
     API_PARAM_FAMILY,
     DEVICE_PARAM_FAMILY,
     MANUAL_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
-    ScanPlan,
     ScanPort,
     ambiguous_api_value,
     api_overrides_from_authored,
@@ -31,7 +31,6 @@ from .plan import (
     device_port_parts,
     hardware_scan_ports_for,
     host_advanced_port,
-    plan_input_rows,
     port_group,
     port_leaf,
     unscannable_api_ports,
@@ -159,40 +158,36 @@ def _port(port: ScanPort, spellings: _Spellings) -> dict:
             "currents": spellings.currents(port)}
 
 
-def _rows(plan: object) -> tuple[dict, ...]:
-    try:
-        return plan_input_rows(plan)
-    except (TypeError, ValueError):
-        return ()
-
-
-def _summary(plan: object) -> tuple[str, str]:
+def _summary(plan: object, preview: Mapping | None = None) -> tuple[str, str]:
     """What the plan is, or why it cannot be read (v2 ``_refresh_summary``)."""
 
     try:
-        rows = plan_input_rows(plan) if str(plan or "").strip() else ()
-        parsed = ScanPlan.from_tree(plan) if rows else None
+        preview = preview if preview is not None else native("scan.compile", document=plan, mode="preview")
+        rows = preview["rows"]
+        if rows and preview.get("problem"):
+            return "", str(preview["problem"])
+        parsed = preview.get("axes") if rows else None
     except (TypeError, ValueError) as error:
         return "", str(error)
     if parsed is None:
         return ("No axes yet. Each row is one axis, outermost first; every point plays the pulse and "
                 "captures one measurement."), ""
-    manual = [axis for axis in parsed.axes if axis.port.startswith(MANUAL_PARAM_FAMILY)]
-    device = [axis for axis in parsed.axes if axis.port.startswith(DEVICE_PARAM_FAMILY)]
+    manual = [axis for axis in parsed if axis["port"].startswith(MANUAL_PARAM_FAMILY)]
+    device = [axis for axis in parsed if axis["port"].startswith(DEVICE_PARAM_FAMILY)]
     # The run stops once per setting of the hand's axes, not once per point.
     stops = 1
     for axis in manual:
-        stops *= len(axis.values)
+        stops *= len(axis["values"])
     by_hand = "" if not manual else (
         f" The run stops {'once' if stops == 1 else _counted(stops, 'time')} for you to set "
-        f"{_spoken_list([axis.port[len(MANUAL_PARAM_FAMILY):] for axis in manual])} by hand.")
+        f"{_spoken_list([axis['port'][len(MANUAL_PARAM_FAMILY):] for axis in manual])} by hand.")
     calls = 1
     for axis in device:
-        calls *= len(axis.values)
+        calls *= len(axis["values"])
     by_device = "" if not device else (
         f" {_counted(calls, 'device setting')} {'is' if calls == 1 else 'are'} applied and read back between fires.")
-    shape = " × ".join(str(count) for count in parsed.shape)
-    return (f"{_counted(len(parsed.shape), 'axis', 'axes')}, {shape} = {_counted(parsed.point_count, 'point')}, "
+    shape = " × ".join(str(count) for count in preview["shape"])
+    return (f"{_counted(len(preview['shape']), 'axis', 'axes')}, {shape} = {_counted(preview['point_count'], 'point')}, "
             "outermost first; each point resolves the template, plays it, and captures one measurement."
             f"{by_hand}{by_device}"), ""
 
@@ -311,12 +306,18 @@ def scan_editor_facts(values: Mapping[str, object], pulse: Mapping[str, object] 
                  if port.port.startswith(API_PARAM_FAMILY) and port.port[len(API_PARAM_FAMILY):] in overrides else port
                  for port in ports]
     ports.extend(device_ports)
-    summary, problem = _summary(values.get("plan"))
+    document = values.get("plan")
+    try:
+        preview = native("scan.compile", document=document if str(document or "").strip() else {"axes": []}, mode="preview")
+        summary, problem = _summary(document, preview)
+    except (TypeError, ValueError) as error:
+        preview = {"rows": [], "axis_facts": []}
+        summary, problem = "", str(error)
     # An axis on a knob nobody offers now (a slot renamed, a binding taken off,
     # a device closed) keeps saying what was authored, under its owner.
     offered = {port.port for port in ports}
     unoffered = {}
-    for row in (item for axis in _rows(values.get("plan")) for item in (axis, *axis.get("links", ()))):
+    for row in (item for axis in preview["rows"] for item in (axis, *axis.get("links", ()))):
         name = row["port"]
         if name in offered or name.startswith(MANUAL_PARAM_FAMILY):
             continue
@@ -337,7 +338,10 @@ def scan_editor_facts(values: Mapping[str, object], pulse: Mapping[str, object] 
                             for key, reason in sorted((unread or {}).items())),
         "summary": summary,
         "problem": problem,
-        "api": None if pulse is None else _api(pulse, _rows(values.get("plan")), values.get("api_values")),
+        "rows": preview["rows"],
+        "axis_facts": preview.get("axis_facts", []),
+        "plan_source": str(document or ""),
+        "api": None if pulse is None else _api(pulse, preview["rows"], values.get("api_values")),
     }
 
 

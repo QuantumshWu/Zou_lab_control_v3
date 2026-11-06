@@ -10,6 +10,9 @@ use std::fmt;
 use std::sync::{Arc, LazyLock};
 
 use crate::decimal::Decimal;
+#[path = "unit_arrays.rs"]
+mod arrays;
+pub use arrays::ArrayConversion;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnitError(pub String);
@@ -270,6 +273,10 @@ impl UnitRegistry {
     }
 
     pub fn revision(&self) -> u64 { self.revision }
+
+    /// Registered definitions, once per symbol, for language adapters. Derived
+    /// prefixes and products remain the registry's resolution rules.
+    pub fn definitions(&self) -> Vec<Arc<Unit>> { self.distinct_units() }
 
     pub fn register(&mut self, unit: Unit, replace: bool) -> Result<Arc<Unit>, UnitError> {
         let unit = Arc::new(unit);
@@ -562,9 +569,15 @@ impl Number {
 
 /// The one prefix that suits every value here.
 pub fn prefix_for(values: &[Number], unit: &Unit) -> &'static Prefix {
+    prefix_for_decimals(&values.iter().filter_map(|value|value.decimal()).collect::<Vec<_>>(),unit)
+}
+
+/// Exact decimal frontend used by language adapters, including integers wider
+/// than the array dtype contract and Decimal-valued editor fields.
+pub fn prefix_for_decimals(values:&[Decimal],unit:&Unit)->&'static Prefix {
     let ladder: Vec<&'static Prefix> = unit.ladder().collect();
     if ladder.len() == 1 { return NO_PREFIX; }
-    let Some(largest) = values.iter().filter_map(|value| value.decimal()).filter(|d| !d.is_zero()).map(|d| d.adjusted()).max()
+    let Some(largest) = values.iter().filter(|d| !d.is_zero()).map(|d| d.adjusted()).max()
         else { return NO_PREFIX };
     let exponent = PREFIX_STEP * largest.div_euclid(PREFIX_STEP);
     ladder.iter().copied().find(|rung| rung.exponent as i64 <= exponent).unwrap_or(ladder[ladder.len() - 1])
@@ -588,7 +601,11 @@ pub fn figure_padded(value: &str, widest: &str) -> String {
 /// One number and its unit, as a person should read them.
 pub fn format_quantity(value: Number, unit: &Unit, prefix: Option<&'static Prefix>) -> Result<String, UnitError> {
     let Some(decimal) = value.decimal() else { return Ok(format!("{} {}", value.text(), unit.symbol).trim().to_owned()) };
-    let step = prefix.unwrap_or_else(|| prefix_for(&[value], unit));
+    format_decimal_quantity(&decimal,unit,prefix)
+}
+
+pub fn format_decimal_quantity(decimal:&Decimal,unit:&Unit,prefix:Option<&'static Prefix>)->Result<String,UnitError>{
+    let step = prefix.unwrap_or_else(|| prefix_for_decimals(std::slice::from_ref(decimal), unit));
     if !unit.in_ladder(step) { return error(format!("{} cannot take the prefix {}", quoted(&unit.symbol), quoted(step.symbol))); }
     let shifted = decimal.scaleb(-step.exponent as i64);
     let symbol = if unit.symbol != "1" { format!("{}{}", step.symbol, unit.symbol) } else { step.symbol.to_owned() };

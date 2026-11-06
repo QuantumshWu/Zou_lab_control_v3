@@ -1,0 +1,21 @@
+[package]
+name = "zlc-native"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+zlc-core = { path = "../zlc-core" }
+zlc-authoring = { path = "../zlc-authoring" }
+zlc-archive = { path = "../zlc-archive" }
+zlc-scan = { path = "../zlc-scan" }
+zlc-scientific = { path = "../zlc-scientific" }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+base64 = "0.22"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "zlc-native"
+path = "src/main.rs"

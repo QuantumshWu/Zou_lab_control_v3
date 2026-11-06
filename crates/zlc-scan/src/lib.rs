@@ -5,6 +5,7 @@
 //! by mixed-radix index, and dataset mappings retain the same factorization.
 
 mod dataset;
+pub mod authoring;
 
 use std::collections::{HashMap, HashSet};
 

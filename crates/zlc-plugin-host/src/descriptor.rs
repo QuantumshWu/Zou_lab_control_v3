@@ -109,6 +109,8 @@ pub struct Catalog {
     /// Apparatus templates the packages offer: name -> [{instance_id, type_id}].
     #[serde(default)]
     pub templates: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    pub configuration_schemas: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Catalog {

@@ -11,6 +11,7 @@ run on threads of their own.
 
 from __future__ import annotations
 
+from collections import Counter
 import inspect
 import itertools
 import logging
@@ -34,6 +35,34 @@ from .wire import (PROTOCOL, Channel, Decoder, Encoder, PluginError, error_paylo
 
 #: Where the bench's device code narrates (v2 _ServerLogBuffer.SOURCES).
 _LOG_SOURCES = ("zlc_pulse.remote", "zlc_atom.devices")
+_LANE_REQUESTS = 64
+_CONCURRENT_CALLS = 8
+_EMERGENCY_CALLS = 2
+
+
+def _discard_frame(process, message):
+    """Release only frame lends that no decoded array has taken ownership of."""
+    for name in message.pop("blocks", ()):
+        process._releases.put(("blocks", str(name)))
+
+
+def _decode_frame(process, message, key="p"):
+    if not hasattr(process, "attachments"):
+        try:
+            return process.decode(message.get(key) or {})
+        finally:
+            _discard_frame(process, message)
+    unread = Counter(str(name) for name in message.get("blocks", ()))
+    def acquired(name):
+        # Attachments installed the ndarray finalizer before this callback.
+        if unread[name]:
+            unread[name] -= 1
+    try:
+        return Decoder(lambda reference: process.attachments.attach(reference, acquired=acquired))(
+            (message.get(key) or {}) if key == "p" else message.get(key))
+    finally:
+        message["blocks"] = list(unread.elements())
+        _discard_frame(process, message)
 
 
 class _DeviceLog(logging.Handler):
@@ -86,6 +115,7 @@ class Process:
         self.session = "unset"
         self.arena: Arena | None = None
         self._releases: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
+        self._auxiliary = threading.BoundedSemaphore(4)
         self.attachments = Attachments(lambda name: self._releases.put(("blocks", name)))
         self.instances: dict[str, Instance] = {}
         self.shared: dict[str, Any] = {}
@@ -144,8 +174,9 @@ class Process:
         answer = pending.message
         assert answer is not None
         if "error" in answer:
+            _discard_frame(self, answer)
             raise_remote(answer["error"])
-        return self.decode(answer.get("ok"))
+        return _decode_frame(self, answer, "ok")
 
     def release_lease(self, lease: int) -> None:
         """Called by a read's finalizer: only enqueues."""
@@ -204,6 +235,8 @@ class Process:
                 if pending is not None:
                     pending.message = message
                     pending.event.set()
+                else:
+                    _discard_frame(self, message)
             elif kind == "evt":
                 self._event(message)
             elif kind == "req":
@@ -260,8 +293,32 @@ class Process:
     def _request(self, message: dict[str, Any]) -> str | None:
         identity = int(message["id"])
         op = str(message.get("op"))
+        if "deadline_ms" in message:
+            budget = message["deadline_ms"]
+            if isinstance(budget, bool) or not isinstance(budget, (int, float)) or not 0 <= budget < float("inf"):
+                _discard_frame(self, message)
+                self.reply(identity, error=PluginError("invalid", "deadline_ms must be finite and nonnegative"))
+                return None
+            received = time.monotonic()
+            remaining = budget / 1000.0
+            absolute = message.get("deadline_monotonic_ns")
+            if absolute is not None and os.name == "nt" and "QueryPerformanceCounter" in time.get_clock_info("monotonic").implementation:
+                if isinstance(absolute, bool) or not isinstance(absolute, int) or absolute < 0:
+                    _discard_frame(self, message)
+                    self.reply(identity, error=PluginError("invalid", "deadline_monotonic_ns must be nonnegative integer nanoseconds"))
+                    return None
+                remaining = min(remaining, (absolute - time.monotonic_ns()) / 1_000_000_000)
+            elif "deadline_unix_ns" in message:
+                absolute = message["deadline_unix_ns"]
+                if isinstance(absolute, bool) or not isinstance(absolute, int) or absolute < 0:
+                    _discard_frame(self, message)
+                    self.reply(identity, error=PluginError("invalid", "deadline_unix_ns must be nonnegative integer nanoseconds"))
+                    return None
+                remaining = min(remaining, (absolute - time.time_ns()) / 1_000_000_000)
+            message["_expires_at"] = received + remaining
         params = message.get("p") or {}
         if op == "hello":
+            _discard_frame(self, message)
             major = int(params["protocol"][0])
             if major != PROTOCOL[0]:
                 self.reply(identity, error=PluginError("invalid", f"protocol {major} is not {PROTOCOL[0]}"))
@@ -272,9 +329,11 @@ class Process:
                                   "python": sys.version.split()[0], "sdk": "zlc_plugin 1"})
             return None
         if op == "ping":
+            _discard_frame(self, message)
             self.reply(identity, {})
             return None
         if op == "exit":
+            _discard_frame(self, message)
             self.reply(identity, {})
             return "exit"
         if op in ("discover", "resolve", "describe"):
@@ -283,20 +342,43 @@ class Process:
             # or a slow import holds up neither this process's instances nor its channel; the
             # core stops waiting at its deadline and a late answer is dropped.
             target = {"discover": self._discover, "resolve": self._resolve, "describe": self._describe}[op]
-            threading.Thread(target=target, args=(identity, params), name=f"zlc-{op}", daemon=True).start()
+            if not self._auxiliary.acquire(blocking=False):
+                _discard_frame(self, message)
+                self.reply(identity, error=PluginError("refused", "four catalogue/discovery calls are already active"))
+                return None
+            def auxiliary():
+                try:
+                    if time.monotonic() >= message.get("_expires_at", float("inf")):
+                        self.reply(identity, error=PluginError("timeout", f"{op} expired before execution"))
+                    else:
+                        target(identity, _decode_frame(self, message))
+                except BaseException as error:
+                    self.reply(identity, error=error)
+                finally:
+                    _discard_frame(self, message)
+                    self._auxiliary.release()
+            try:
+                threading.Thread(target=auxiliary, name=f"zlc-{op}", daemon=True).start()
+            except BaseException:
+                _discard_frame(self, message)
+                self._auxiliary.release()
+                raise
             return None
         name = str(params.get("instance", ""))
         instance = self.instances.get(name)
         if instance is None:
             if op == "close":
+                _discard_frame(self, message)
                 self.reply(identity, {"state": "closed"})
                 return None
             if op != "open":
+                _discard_frame(self, message)
                 self.reply(identity, error=PluginError("invalid", f"no open instance {name!r}"))
                 return None
             instance = Instance(self, name)
             self.instances[name] = instance
         if instance.abandoned:
+            _discard_frame(self, message)
             self.reply(identity, error=PluginError("refused", f"{name} is still releasing its previous operation; retry after cleanup completes"))
             return None
         if instance.concurrent(op, params):
@@ -305,7 +387,11 @@ class Process:
             # on a thread of its own.
             instance.dispatch_concurrent(message)
             return None
-        instance.lane.put(message)
+        if instance.lane.qsize() >= _LANE_REQUESTS:
+            _discard_frame(self, message)
+            self.reply(identity, error=PluginError("refused", f"{name} already has {_LANE_REQUESTS} queued calls"))
+            return None
+        instance.lane.put_nowait(message)
         return None
 
 
@@ -335,10 +421,11 @@ class Instance:
         self.log_token: str | None = None
         self.runs: dict[str, Run] = {}
         self.prepared: dict[str, tuple[object, dict[str, Any]]] = {}
-        self.lane: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self.lane: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=_LANE_REQUESTS + 1)
         self._shutdown_requested = threading.Event()
         self._calls = threading.Condition()
         self._active_calls = 0
+        self._active_control_calls = 0
         self._closing_device = False
         self._thread = threading.Thread(target=self._serve, name=f"zlc-lane-{name}", daemon=True)
         self._thread.start()
@@ -347,6 +434,20 @@ class Instance:
         try:
             self._serve_lane()
         finally:
+            # Frames left behind a Close/Shutdown were never decoded. Their
+            # borrowed blocks still need explicit release, once per lend.
+            while True:
+                try:
+                    pending = self.lane.get_nowait()
+                except queue.Empty:
+                    break
+                if pending is not None:
+                    _discard_frame(self.process, pending)
+                    if not getattr(self.process, "_closed", False):
+                        try:
+                            self.process.reply(int(pending["id"]), error=PluginError("cancelled", "the device lane closed before execution"))
+                        except (OSError, RuntimeError):
+                            pass
             # A lane owns its device from construction through destruction.
             # Channel shutdown must not close concurrently with an unfinished
             # Open/SDK call, nor miss a handle that Open has not returned yet.
@@ -366,9 +467,12 @@ class Instance:
         while True:
             message = self.lane.get()
             if self._shutdown_requested.is_set():
+                if message is not None:
+                    _discard_frame(self.process, message)
                 return
             if message is not None:
                 if self.abandoned:
+                    _discard_frame(self.process, message)
                     self.process.reply(int(message["id"]), error=PluginError("cancelled", "the instance is releasing an overdue operation"))
                     continue
                 if self._handle(message):
@@ -389,7 +493,10 @@ class Instance:
         self.abandoned = True
         for run in list(self.runs.values()):
             run.cancel.set()
-        self.lane.put(None)
+        try:
+            self.lane.put_nowait(None)  # one reserved control slot; never block the reader
+        except queue.Full:
+            pass  # a previous control wake already fills the reserved slot
 
     def _handle(self, message: dict[str, Any]) -> bool:
         """Answer one request; False when the instance is gone.
@@ -401,7 +508,13 @@ class Instance:
         identity = int(message["id"])
         op = str(message.get("op"))
         try:
-            params = self.process.decode(message.get("p") or {})
+            params = _decode_frame(self.process, message)
+            if time.monotonic() >= message.get("_expires_at", float("inf")):
+                if op == "run.deliver":
+                    for read in (params.get("inputs") or {}).values():
+                        self.process.release_lease(int(read["lease"]))
+                self.process.reply(identity, error=PluginError("timeout", f"{op} expired in the device queue before execution"))
+                return True
             if op == "run.deliver":
                 # Answered by the run thread once taken, or refused once the run has ended.
                 run = self.runs.get(str(params.get("run")))
@@ -452,24 +565,42 @@ class Instance:
         return call is not None and str(call) in declared.concurrent
 
     def dispatch_concurrent(self, message: dict[str, Any]) -> None:
+        params = message.get("p") or {}
+        call_name = {"spi": params.get("method"), "command": params.get("name"), "make_safe": "make_safe"}.get(message.get("op"))
+        emergency = call_name in ("stop", "make_safe")
         with self._calls:
-            if self._closing_device or self._shutdown_requested.is_set():
+            # Stop can interrupt admitted work during shutdown, but never races
+            # the final SDK close after the last active call has relinquished it.
+            closing = self._closing_device and (not emergency or self._active_calls == 0)
+            if closing or (self._shutdown_requested.is_set() and not emergency):
+                _discard_frame(self.process, message)
                 self.process.reply(int(message["id"]), error=PluginError("cancelled", "the device is closing"))
                 return
+            count = self._active_control_calls if emergency else self._active_calls - self._active_control_calls
+            limit = _EMERGENCY_CALLS if emergency else _CONCURRENT_CALLS
+            if count >= limit:
+                _discard_frame(self.process, message)
+                self.process.reply(int(message["id"]), error=PluginError("refused", f"{self.name} already has {limit} concurrent {'control ' if emergency else ''}calls"))
+                return
             self._active_calls += 1
+            if emergency:
+                self._active_control_calls += 1
+        def release():
+            with self._calls:
+                self._active_calls -= 1
+                if emergency:
+                    self._active_control_calls -= 1
+                self._calls.notify_all()
         def call():
             try:
                 self._handle(message)
             finally:
-                with self._calls:
-                    self._active_calls -= 1
-                    self._calls.notify_all()
+                release()
         try:
             threading.Thread(target=call, name=f"zlc-call-{self.name}", daemon=True).start()
         except BaseException:
-            with self._calls:
-                self._active_calls -= 1
-                self._calls.notify_all()
+            _discard_frame(self.process, message)
+            release()
             raise
 
     def close_device(self) -> None:
@@ -490,7 +621,10 @@ class Instance:
         self._shutdown_requested.set()
         for run in list(self.runs.values()):
             run.cancel.set()
-        self.lane.put(None)
+        try:
+            self.lane.put_nowait(None)  # one reserved control slot; never block the reader
+        except queue.Full:
+            pass  # a previous control wake already fills the reserved slot
         if wait:
             self._thread.join()
 
@@ -979,9 +1113,10 @@ class Run:
         self.prepared_node = None
         self.params = params
         self.cancel = threading.Event()
-        #: seal_terminal's facts: sealed runs ignore a later Stop.
+        #: Cached core terminal acknowledgement; the core owns the Stop race.
         self.lock = threading.Lock()
         self.sealed = self.stop_accepted = self.partial = False
+        self.terminal_token: str | None = None
         #: Set when the run has ended: a delivery is then refused, not queued.
         self.ended = False
         self.partial_exit_writer: Callable[[str, BaseException], None] | None = None
@@ -1085,7 +1220,9 @@ class Run:
         if writer is None:
             return
         try:
-            writer(status, error)
+            from . import native
+            with native.scope(self.context):
+                writer(status, error)
         except BaseException as failure:  # noqa: BLE001 -- reported with the run's end
             self.exit_failure = failure
 
@@ -1099,7 +1236,7 @@ class Run:
 
     def _main(self) -> None:
         process = self.instance.process
-        outcome, result, error = "completed", None, None
+        intent, result, failure = "success", None, None
         try:
             node = self.prepared_node
             if node is None:
@@ -1117,26 +1254,36 @@ class Run:
                     node = self.declared if self.declared.build is None else self.declared.build(**arguments)
                 finally:
                     _QUERYING.instance = None
-            result = self._process(node) if self.declared.kind is NodeKind.PROCESSOR else node.execute(self.context)
-            if self.stop_accepted or self.cancel.is_set():
-                outcome = "stopped"
-                if not self.stop_accepted:
-                    self._exit_writer("stopped", PluginError("cancelled", "the run was stopped"))
+            from . import native
+            with native.scope(self.context):
+                result = self._process(node) if self.declared.kind is NodeKind.PROCESSOR else node.execute(self.context)
         except _Invalid as invalid:
-            outcome, error = "failed", error_payload(invalid.cause, kind="invalid")
-        except BaseException as failure:  # noqa: BLE001 -- the terminal reports it
-            # An error out of a run the operator stopped is the stop itself
-            # (v2's NodeHost): it was interrupted mid-step, which is what Stop does.
-            stopped = self.cancel.is_set() and not self.stop_accepted
-            outcome = "stopped" if stopped else "failed"
-            error = None if stopped else error_payload(failure)
-            self._exit_writer(outcome, failure)
-        if self.exit_failure is not None:
-            error = error_payload(self.exit_failure)
+            intent, failure = "invalid", invalid.cause
+        except BaseException as error:  # noqa: BLE001 -- cleanup runs before the terminal
+            intent, failure = "error", error
         try:
-            encoded, blocks = process.encode({"instance": self.instance.name, "run": self.run_id,
-                                              "outcome": outcome, "result": plain_result(result), "error": error})
-            process.send({"t": "evt", "op": "run.finished", "p": encoded, "blocks": blocks})
+            decision = self.context._request("run.begin_terminal", {
+                "accept_stop": True, "partial": self.partial, "finalizing": True, "intent": intent,
+            })
+            outcome = str(decision["outcome"])
+            if decision["run_exit_writer"]:
+                self._exit_writer(outcome, failure or PluginError("cancelled", "the run was stopped"))
+            error = None
+            if failure is not None and outcome != "stopped":
+                error = error_payload(failure, kind="invalid") if intent == "invalid" else error_payload(failure)
+            if self.exit_failure is not None:
+                error = error_payload(self.exit_failure)
+            # Finish is the core's restart barrier. Retire the local runner and
+            # settle unread deliveries before the core can announce completion.
+            self.instance.runs.pop(self.run_id, None)
+            self._end_deliveries()
+            self.context._request("run.finish", {"token": decision["token"], "result": plain_result(result), "error": error})
+        except BaseException as ending_error:
+            # Losing the core cannot strand plugin-owned cleanup. There is no
+            # local outcome fallback: the disconnected host owns run retirement.
+            if intent != "invalid":
+                self._exit_writer("failed", failure or ending_error)
+            print(f"{self.instance.name}: terminal handshake failed: {ending_error}", file=sys.stderr)
         finally:
             self.instance.runs.pop(self.run_id, None)
             self._end_deliveries()
@@ -1220,4 +1367,6 @@ def main() -> int:
     null = os.open(os.devnull, os.O_RDONLY)
     os.dup2(null, 0)
     _PROCESS = Process(Channel(source, sink))
+    from .native import install_host_transport
+    install_host_transport(_PROCESS)
     return _PROCESS.serve()

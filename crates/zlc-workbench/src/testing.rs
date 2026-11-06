@@ -89,7 +89,12 @@ impl Host for FakeHost {
 /// A camera, a sequencer with a coil output, a camera measurement, an
 /// occupancy processor and a scan task that acquires through the measurement.
 pub fn catalog() -> Value {
-    json!({"protocol": [2, 0], "errors": [{"module": "zlc_atom.devices.camera.pylon.device_types", "error": "No module named pypylon"}], "types": [
+    json!({"protocol": [2, 0], "configuration_schemas": {"simulation": [
+        {"name":"image_shape_yx","type":"pair","label":"Image shape","default":[372,460]},
+        {"name":"grid_shape_yx","type":"pair","label":"Trap grid","default":[5,7]},
+        {"name":"seed","type":"int","label":"Seed","default":0,"minimum":0},
+        {"name":"world_profile","type":"str","label":"Profile","default":""}
+    ]}, "errors": [{"module": "zlc_atom.devices.camera.pylon.device_types", "error": "No module named pypylon"}], "types": [
         {"type_id": "camera.virtual_mot", "kind": "device", "family": "camera", "label": "Virtual MOT camera", "simulation": true,
          "capabilities": ["camera.adapter"], "parameters": [{"name": "exposure_seconds", "type": "float", "label": "Exposure", "default": 0.1, "minimum": 0.0}],
          "commands": [{"name": "editor_send", "summary": "Send the draft", "drives": true, "params": [], "input_schema": {"type": "object"}},
@@ -912,6 +917,30 @@ mod tests {
         assert_eq!(workbench.apparatus_state()["action"], "shut_down");
         apply(&mut workbench, &mut host, "edit_simulation", json!({"values": {"seed": 5}})).unwrap();
         assert_eq!(workbench.apparatus_state()["action"], "apply");
+    }
+
+    #[test]
+    fn simulation_rules_come_from_the_plugin_and_missing_declarations_preserve_saved_values() {
+        let (_root, mut workbench, _calls, mut host) = rig("simulation-schema-owner", catalog());
+        let refusal=apply(&mut workbench,&mut host,"edit_simulation",json!({"values":{"seed":-1}})).unwrap_err();
+        assert!(refusal.contains("at least 0"),"{refusal}");
+        let mut declared=catalog();
+        declared["configuration_schemas"]["simulation"]=json!([
+            {"name":"plugin_setting","type":"int","label":"Plugin setting","default":12,"minimum":10}
+        ]);
+        let (_root, mut workbench, _calls, mut host)=rig("simulation-other-owner",declared);
+        apply(&mut workbench,&mut host,"edit_simulation",json!({"values":{"plugin_setting":15}})).unwrap();
+        assert_eq!(workbench.apparatus.simulation["plugin_setting"],15);
+        assert!(apply(&mut workbench,&mut host,"edit_simulation",json!({"values":{"seed":2}})).is_err());
+
+        let mut missing=catalog(); missing.as_object_mut().unwrap().remove("configuration_schemas");
+        let root=scratch("simulation-unavailable-owner");
+        std::fs::write(root.join("apparatus.json"),RIG.replace("\"simulation\": {}","\"simulation\": {\"seed\":7,\"unknown_owner_value\":\"keep\"}")).unwrap();
+        let mut workbench=Workbench::new(&root,Box::new(FakePlugins{calls:Rc::default(),catalog:missing})).unwrap();
+        let mut host=FakeHost::default();
+        assert_eq!(workbench.apparatus.simulation["seed"],7,"saved configuration survives unavailable plugin declarations");
+        assert_eq!(workbench.apparatus.simulation["unknown_owner_value"],"keep");
+        assert!(apply(&mut workbench,&mut host,"edit_simulation",json!({"values":{"seed":2}})).unwrap_err().contains("declares"));
     }
 
     /// v2 _path_unread: a file not read in full is never replaced by Save unless asked; the draft is not that file.

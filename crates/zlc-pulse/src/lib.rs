@@ -16,6 +16,7 @@ pub mod wire;
 pub mod codec;
 pub mod binding;
 pub mod scan;
+pub mod scan_plan;
 pub mod schedule;
 pub mod manifest;
 pub mod transport;

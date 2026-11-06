@@ -354,9 +354,13 @@ class RunContext:
 
         return pathlib.Path(directory)
 
+    @property
+    def artifacts(self):
+        from .artifacts import Artifacts
+        return Artifacts(self)
+
     def register_artifact(self, name: str, path: Any, *, role: str, contract_id: str = "") -> Any:
-        return self._request("run.artifact", {"name": name, "path": str(path), "role": role,
-                                              "contract_id": contract_id})
+        return self.artifacts.register(name, path, role=role, contract_id=contract_id)
 
     def save_figure(self, path: Any, *, plot_input: Any, spec: Any, parameters: Mapping[str, Any] | None = None,
                     size: str = "4x4", source: Mapping[str, Any] | None = None,
@@ -405,6 +409,12 @@ class RunContext:
             raise PluginError("cancelled", "the run was stopped")
         return fit_answer(self._request("run.fit", request))
 
+    def native(self, operation: str, **params: Any) -> Any:
+        """Call a native scientific service under this run's lifetime."""
+        from .native import call, scope
+        with scope(self):
+            return call(operation, params)
+
     def scan(self, spec: Mapping[str, Any]):
         """Prepare a factored scan whose source reads and publications stay in the core."""
         from .scan import NativeScan
@@ -427,12 +437,14 @@ class RunContext:
         ``partial`` says the committed data is a cut-short prefix.
         """
 
+        decision = self._request("run.begin_terminal", {"accept_stop": bool(accept_stop), "partial": bool(partial)})
         run = self._run
         with run.lock:
-            stopped = run.cancel.is_set()
-            if stopped and not accept_stop:
-                raise PluginError("cancelled", "the run was stopped before its terminal commit")
-            run.sealed, run.stop_accepted, run.partial = True, stopped and bool(accept_stop), bool(partial)
+            # Cached acknowledgement only: the core arbitrates Stop vs terminal.
+            run.terminal_token = str(decision["token"])
+            run.sealed = True
+            run.stop_accepted = bool(decision["stop_accepted"])
+            run.partial = bool(decision["partial"])
 
     def register_partial_exit_writer(self, writer: Any) -> None:
         """The Task's one writer of what a stopped or failed run leaves: called

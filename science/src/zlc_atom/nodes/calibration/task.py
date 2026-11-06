@@ -626,23 +626,13 @@ def _save_report(
     """
 
     run_root = result.artifact_path.parents[1]
-    summary_path = write_readable_json(
-        run_root / "summary.json", _plain_json_value(result.summary, "summary")
+    summary_path = artifact_context.artifacts.write_json(
+        run_root / "summary.json", _plain_json_value(result.summary, "summary"),
+        name="calibration_summary", role="summary", contract_id="calibration.summary"
     )
-    artifact_context.register_artifact(
-        "calibration_summary",
-        summary_path,
-        role="summary",
-        contract_id="calibration.summary",
-    )
-    summary_preview = atomic_write_text(
-        run_root / "summary.txt",
-        "\n".join(summary_lines(result.summary)) + "\n", encoding="utf-8"
-    )
-    artifact_context.register_artifact(
-        "calibration_summary_text",
-        summary_preview,
-        role="summary",
+    summary_preview = artifact_context.artifacts.write_text(
+        run_root / "summary.txt", "\n".join(summary_lines(result.summary)) + "\n",
+        name="calibration_summary_text", role="summary"
     )
     figure_root = run_root / "figures"
     _save_report_images(
@@ -1731,13 +1721,8 @@ class CalibrationTask:
             context.seal_terminal()
             context.report_progress("Saving calibration")
         durable_makedirs(final_root)
-        calibration.save(artifact_path)
-        artifact_context.register_artifact(
-            "artifact_path",
-            artifact_path,
-            role="final",
-            contract_id=TrapCalibration.CONTRACT_ID,
-        )
+        artifact_context.artifacts.write_json(artifact_path, calibration.to_dict(),
+            name="artifact_path", role="final", contract_id=TrapCalibration.CONTRACT_ID)
         summary = readout_summary(analysis, run_chain=(run_record,))
         if self._site_review_record is not None:
             summary = {
@@ -1802,7 +1787,7 @@ class CalibrationTask:
         if self._partial_cycles_completed < 1:
             return
         snapshot = context.current_dataset(CAPTURE_PREVIEW_DECLARATION.name)
-        summary_path = write_readable_json(
+        summary_path = context.artifacts.write_json(
             run_folder / "partial-summary.json",
             {
                 "format": "zlc.calibration.partial-summary",
@@ -1810,10 +1795,7 @@ class CalibrationTask:
                 "cycles_completed": self._partial_cycles_completed,
                 "cycles_requested": self._cycles_requested,
                 "error": f"{type(error).__name__}: {error}",
-            },
-        )
-        context.register_artifact(
-            "calibration_partial_summary", summary_path, role="summary"
+            }, name="calibration_partial_summary", role="summary",
         )
         from zlc_plugin.figures import (
             AxisRef,

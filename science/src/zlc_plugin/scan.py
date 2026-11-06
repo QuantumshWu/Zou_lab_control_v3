@@ -50,6 +50,12 @@ class NativeScan:
             params["effective_inner"] = [[float(value) for value in row] for row in effective_inner]
         return self._request("configure", **params)
 
+    def pulse_segment(self, outer_index: int = 0) -> dict[str, Any]:
+        """A native plan reference, never an expanded board table."""
+        if not 0 <= outer_index < self.outer_count:
+            raise ValueError("the scan outer point is outside its plan")
+        return {"handle": self.handle, "outer_index": int(outer_index)}
+
     def arm(self, *, row_offset: int, scan_repeat_base: int, sweeps: int,
             quiet_seconds: float, actual_devices: Mapping[str, Any], new_source: bool = False) -> Any:
         return self._request("arm", row_offset=row_offset, scan_repeat_base=scan_repeat_base,

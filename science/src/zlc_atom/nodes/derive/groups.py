@@ -22,11 +22,12 @@ from dataclasses import dataclass
 import numpy as np
 from zlc_data import DatasetSchema, DomainSpec
 from zlc_data.snapshot_projection import _subset_mapped_domain
+from . import native_ops
 
 from .expression import (
-    Operand, _answering, _apply_reduction_plans, _axis, _axis_labels, _domains, _primary, _reduce_plan, _schema, _structure,
-    _unit, centred, evaluate, fit_cells, fit_operands, fit_schemas, fit_target, formula, group_domain, reads_for_fit,
-    sigma_dof, stated_square, standard_error, statistic_of, typed_variables,
+    Operand, _answering, _axis, _axis_labels, _domains, _primary, _reduce_plan, _schema, _structure,
+    _unit, evaluate, fit_cells, fit_operands, fit_schemas, fit_target, formula, group_domain, reads_for_fit,
+    statistic_of, typed_variables,
 )
 
 
@@ -53,76 +54,6 @@ class Chunk:
     ordinal: int | None = None
 
 
-# -- moments -----------------------------------------------------------------
-
-def _measure(item: Operand, plans, operation: str) -> dict[str, np.ndarray]:
-    """One increment's moments per output bucket, as :func:`_merge` adds them."""
-
-    count = _apply_reduction_plans(item.valid, plans, "count")
-    valid = count > 0
-    part = {"n": count}
-    if operation in ("mean", "std"):
-        part["mean"], part["m2"] = centred(item, plans, count, valid)
-        if operation == "mean" and item.sigma is not None:
-            part["stated"] = stated_square(item, plans)
-    elif operation == "sum" and item.values.dtype.kind == "b":
-        part["total"] = _apply_reduction_plans(item.valid & item.values, plans, "count")
-    elif operation == "sum":
-        part["total"] = _apply_reduction_plans(np.where(item.valid, item.values, 0.0).astype(np.float64), plans, "sum")
-    elif operation in ("min", "max"):
-        fill = np.inf if operation == "min" else -np.inf
-        part["extreme"] = _apply_reduction_plans(np.where(item.valid, item.values, fill).astype(np.float64), plans, operation)
-    elif operation in ("any", "all"):
-        part["flag"] = _apply_reduction_plans(np.where(item.valid, item.values, operation == "all"), plans, operation)
-    return part
-
-
-def _empty(shape, part, operation) -> dict[str, np.ndarray]:
-    start = {"extreme": np.inf if operation == "min" else -np.inf, "flag": operation == "all"}
-    return {key: np.full((*shape, *plane.shape), start.get(key, 0), dtype=plane.dtype)
-            for key, plane in part.items()}
-
-
-def _merge(tally, index, part, operation) -> None:
-    """``part`` into ``tally[index]``: Welford's merge of means and squares."""
-
-    n1, n2 = tally["n"][index], part["n"]
-    total = n1 + n2
-    if "mean" in part:
-        delta = part["mean"] - tally["mean"][index]
-        shift = np.divide(delta * n2, total, out=np.zeros(total.shape), where=total > 0)
-        tally["m2"][index] += part["m2"] + delta * delta * np.divide(n1 * n2, total, out=np.zeros(total.shape), where=total > 0)
-        tally["mean"][index] += shift
-    if "stated" in part:
-        tally["stated"][index] += part["stated"]
-    if "total" in part:
-        tally["total"][index] += part["total"]
-    if "extreme" in part:
-        tally["extreme"][index] = (np.minimum if operation == "min" else np.maximum)(tally["extreme"][index], part["extreme"])
-    if "flag" in part:
-        tally["flag"][index] = (np.logical_and if operation == "all" else np.logical_or)(tally["flag"][index], part["flag"])
-    tally["n"][index] = total
-
-
-def _result(tally, operation) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
-    """(values, valid, sigma, its degrees of freedom) of one tally, as the statistic reads over whole data."""
-
-    count = tally["n"]
-    valid = count > 0
-    if operation == "count":
-        return count, valid, None, None
-    if operation == "sum":
-        return tally["total"], valid, None, None
-    if operation in ("min", "max"):
-        return tally["extreme"], valid, None, None
-    if operation in ("any", "all"):
-        return tally["flag"], valid, None, None
-    if operation == "std":
-        return np.sqrt(np.divide(tally["m2"], count, out=np.full(count.shape, np.nan), where=valid)), valid, None, None
-    return (np.where(valid, tally["mean"], np.nan), valid,
-            standard_error(tally["m2"], count, tally.get("stated")), sigma_dof(count))
-
-
 # -- one variable's groups ---------------------------------------------------
 
 class Accumulator:
@@ -135,7 +66,7 @@ class Accumulator:
     (Repeat, Point) cell.
     """
 
-    def __init__(self, row: Mapping[str, object], reducible: DatasetSchema, *, spanning: bool):
+    def __init__(self, row: Mapping[str, object], reducible: DatasetSchema, *, spanning: bool, transient: bool = False):
         self.row, self.reducible = row, reducible
         self.operation, self.spanning = str(row["statistic"]), spanning
         self.domain = group_domain(row, reducible)
@@ -145,16 +76,15 @@ class Accumulator:
         domains = _domains(reducible)
         self._inverse = tuple(mapped.get(d, np.arange(domains[d].size)) for d in (0, 1))
         self._counts = tuple(np.bincount(inverse) for inverse in self._inverse)
-        self._tallies: dict[tuple[int, int], dict] = {}
-        self._arrived: dict[tuple[int, int], int] = {}
-        self._closed: set[tuple[int, int]] = set()
-        #: Each kept Repeat row's (line, place along the axis in groups): a line is
-        #: one set of coordinates of the other kept Repeat axes, in order on its own.
-        self._line, self._step = _repeat_lines(self.schema, row["by"]) if self.domain == 0 and not spanning else (None, None)
-        self._latest: dict[int, int] = {}
-        #: Each kept row's identity, by its axes' codes (filled when a pick needs it).
+        lines, steps = _repeat_lines(self.schema, row["by"]) if self.domain == 0 and not spanning else (None, None)
         self._rows: list[dict | None] = [None, None]
         self._same: list[bool | None] = [None, None]
+        self._transient, self._finished = transient, False
+        self._handle = native_ops.call(
+            "scientific.group.create", statistic=self.operation, domain=self.domain,
+            spanning=self.spanning, every=int(row["every"]), counts_r=self._counts[0].astype("<i8"),
+            counts_p=self._counts[1].astype("<i8"), source_points=domains[1].size,
+            output_points=_domains(self.schema)[1].size, lines=lines, steps=steps)["handle"]
 
     def _canonical(self, d: int, view: DomainSpec, source: tuple[int, DomainSpec] | None) -> np.ndarray:
         """The row of the whole reducible each row of this increment is."""
@@ -177,101 +107,43 @@ class Accumulator:
             columns.append(np.array([positions[label] for label in labels])[view.codes(axis.axis_id)].tolist())
         return np.array([self._rows[d][key] for key in zip(*columns)], dtype=np.int64)
 
-    def _expected(self, unit) -> int:
-        if self.spanning:
-            return int(self.row["every"]) * int(self._counts[0][0]) * _domains(self.reducible)[1].size
-        if self.domain == 0:
-            return int(self._counts[0][unit[0]]) * _domains(self.reducible)[1].size
-        return int(self._counts[0][unit[0]]) * int(self._counts[1][unit[1]])
-
-    def feed(self, item: Operand, sources: tuple[tuple[int, DomainSpec], tuple[int, DomainSpec]] | None,
-             ordinal: int | None = None) -> tuple[Chunk, ...]:
-        """One increment: its moments into its groups; what that closes."""
-
+    def feed(self, item: Operand, sources, ordinal=None) -> tuple[Chunk, ...]:
         view = _domains(item.schema)
         out = [self._inverse[d][self._canonical(d, view[d], None if sources is None else sources[d])] for d in (0, 1)]
-        unique_r, local_r = np.unique(out[0], return_inverse=True)
-        unique_p, local_p = np.unique(out[1], return_inverse=True)
-        plans = (("mapped", 0, local_r.reshape(-1), unique_r.size), ("mapped", 1, local_p.reshape(-1), unique_p.size),
-                 *self._cell_plans)
-        part = _measure(item, plans, self.operation)
-        hit_r, hit_p = np.bincount(local_r.reshape(-1)), np.bincount(local_p.reshape(-1))
-        touched = []
-        for i, row in enumerate(unique_r.tolist()):
-            row = ordinal // int(self.row["every"]) if self.spanning else row
-            if self.domain == 0:
-                units = (((row, 0), i, slice(None), int(hit_r[i]) * view[1].size),)
-            else:
-                units = tuple(((row, group), i, j, int(hit_r[i]) * int(hit_p[j])) for j, group in enumerate(unique_p.tolist()))
-            touched.extend(self._add(*unit, part, unique_p) for unit in units)
-        if self.domain == 0:
-            for unit in touched:
-                line, step = self._place(unit)
-                self._latest[line] = max(self._latest.get(line, step), step)
-        return self._close(self._due(touched))
-
-    def _place(self, unit) -> tuple[int, int]:
-        """A monitor's rows are its groups, in one line."""
-
-        return (0, unit[0]) if self._line is None else (int(self._line[unit[0]]), int(self._step[unit[0]]))
-
-    def _followed(self, unit) -> bool:
-        """Whether a later group stands in this unit's line: nothing more comes to it."""
-
-        line, step = self._place(unit)
-        return step < self._latest.get(line, step)
-
-    def _add(self, unit, i, j, arrivals, part, unique_p):
-        if unit in self._closed or (self.domain == 0 and self._followed(unit) and unit not in self._tallies):
-            raise ValueError(f"{self.row['name']}: a {self.row['by']} sample arrived after its group closed; "
-                             "repeats run in order")
-        slices = {key: plane[i, j] for key, plane in part.items()}
-        tally = self._tallies.get(unit)
-        if tally is None:
-            shape = (1, _domains(self.schema)[1].size) if self.domain == 0 else (1, 1)
-            bare = {key: plane[0, 0] for key, plane in part.items()}
-            tally = self._tallies[unit] = _empty(shape, bare, self.operation)
-        _merge(tally, (0, unique_p) if self.domain == 0 else (0, 0), slices, self.operation)
-        self._arrived[unit] = self._arrived.get(unit, 0) + arrivals
-        return unit
-
-    def _due(self, touched) -> list:
-        due = [unit for unit in dict.fromkeys(touched) if self._arrived[unit] >= self._expected(unit)]
-        if self.domain == 0:
-            due.extend(unit for unit in self._tallies if self._followed(unit) and unit not in due)
-        return due
+        try:
+            answer = native_ops.call("scientific.group.feed", handle=self._handle,
+                                     values=item.values, valid=item.valid, sigma=item.sigma,
+                                     rows=out[0].astype("<i8"), points=out[1].astype("<i8"),
+                                     plans=native_ops.plans(self._cell_plans), ordinal=0 if ordinal is None else int(ordinal))
+            return self._chunks(answer)
+        finally:
+            if self._transient:
+                native_ops.call("scientific.group.drop", handle=self._handle)
+                self._finished = True
 
     def close_all(self) -> tuple[Chunk, ...]:
-        """The source sealed: every open group as it stands, its n smaller."""
-
-        return self._close(list(self._tallies))
-
-    def _close(self, units) -> tuple[Chunk, ...]:
-        if not units:
+        if self._finished:
             return ()
-        results = {}
-        for unit in units:
-            results[unit] = _result(self._tallies.pop(unit), self.operation)
-            del self._arrived[unit]
-        self._closed.update(units)
-        if self.domain == 0:
-            self._closed = {unit for unit in self._closed if not self._followed(unit)}
-        return tuple(self._chunk(block, results) for block in _rectangles(units, spanning=self.spanning))
+        self._finished = True
+        return self._chunks(native_ops.call("scientific.group.finish", handle=self._handle))
 
-    def _chunk(self, block, results) -> Chunk:
-        rows, columns = block
-        if self.spanning:
-            schema, origin, ordinal = self.schema, (0, 0), rows[0]
-        else:
-            size = (len(rows), _domains(self.schema)[1].size if self.domain == 0 else len(columns))
-            origin, ordinal = (rows[0], columns[0]), None
-            schema = restricted(self.schema, origin, size)
-        values, valid, sigma, dof = (
-            None if results[(rows[0], columns[0])][k] is None else
-            np.concatenate([np.concatenate([results[(row, column)][k] for column in columns], axis=1) for row in rows], axis=0)
-            for k in range(4))
-        dtype = schema.value_schema.dtype
-        return Chunk(Operand(schema, values.astype(dtype, copy=False), valid, sigma, dof), origin, ordinal)
+    @property
+    def held_bytes(self) -> int:
+        """Numerical accumulator storage, owned by the native service."""
+        return 0 if self._finished else int(native_ops.call("scientific.group.state", handle=self._handle)["held_bytes"])
+
+    def _chunks(self, answer) -> tuple[Chunk, ...]:
+        chunks = []
+        for part in answer["chunks"]:
+            rows, columns = part["rows"], part["columns"]
+            if self.spanning:
+                schema, origin, ordinal = self.schema, (0, 0), rows[0]
+            else:
+                size = (len(rows), _domains(self.schema)[1].size if self.domain == 0 else len(columns))
+                origin, ordinal = (rows[0], columns[0]), None
+                schema = restricted(self.schema, origin, size)
+            chunks.append(Chunk(Operand(schema, part["values"], part["valid"], part.get("sigma"), part.get("dof")), origin, ordinal))
+        return tuple(chunks)
 
 
 def _repeat_lines(schema: DatasetSchema, by: str) -> tuple[np.ndarray, np.ndarray]:
@@ -282,34 +154,6 @@ def _repeat_lines(schema: DatasetSchema, by: str) -> tuple[np.ndarray, np.ndarra
     others = [domain.codes(axis.axis_id) for axis in axes if axis.name != by]
     line = np.unique(np.column_stack(others), axis=0, return_inverse=True)[1].reshape(-1) if others else np.zeros(domain.size, np.int64)
     return line, np.asarray(domain.codes(next(axis for axis in axes if axis.name == by).axis_id))
-
-
-def _rectangles(units, *, spanning) -> list[tuple[tuple[int, ...], tuple[int, ...]]]:
-    """Closed units as (rows, columns) rectangles of consecutive ones, in order:
-    one commit holds each.  A monitor gives one event per group."""
-
-    runs: dict[int, list[list[int]]] = {}
-    for row, column in sorted(units):
-        columns = runs.setdefault(row, [])
-        if columns and columns[-1][-1] + 1 == column:
-            columns[-1].append(column)
-        else:
-            columns.append([column])
-    blocks: list[tuple[list[int], list[int]]] = []
-    open_blocks: dict[tuple[int, ...], list[int]] = {}
-    for row in sorted(runs):
-        following = {}
-        for columns in runs[row]:
-            key = tuple(columns)
-            rows = open_blocks.get(key)
-            if not spanning and rows is not None and rows[-1] + 1 == row:
-                rows.append(row)
-            else:
-                rows = [row]
-                blocks.append((rows, list(columns)))
-            following[key] = rows
-        open_blocks = following
-    return [(tuple(rows), tuple(columns)) for rows, columns in blocks]
 
 
 # -- a draft's run -----------------------------------------------------------
@@ -380,7 +224,7 @@ class Accumulation:
             if found is None:
                 found = self.accumulators[step.position] = Accumulator(step.row, reducible, spanning=spanning)
             return found
-        return Accumulator(step.row, reducible, spanning=False)
+        return Accumulator(step.row, reducible, spanning=False, transient=True)
 
     def step(self, members: Mapping[str, Operand] | None, sources, ordinal: int | None, fit) -> dict[str, list[Chunk]]:
         """One delivery's chunks by output name; ``members`` None: the source sealed."""

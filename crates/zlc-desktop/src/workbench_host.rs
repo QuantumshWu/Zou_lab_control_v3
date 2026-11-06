@@ -165,6 +165,7 @@ pub struct Stand {
     lifecycles: BTreeMap<String, (u64, Arc<Gate>)>,
     /// Where `run.fit` batches are solved: off the window's turn and the channel's thread.
     fits: zlc_plugin_host::workers::Workers,
+    artifacts: Arc<crate::run_artifacts::Store>,
 }
 
 /// Workbench runs and plugin-host runs. A run's host id is known only when its start
@@ -244,13 +245,9 @@ fn refused(message: String) -> zlc_plugin_host::CallError { zlc_plugin_host::Cal
 /// when asked, written inside its run directory; `{archive, image}`.
 /// A path a run names, inside its run directory (relative ones are taken from it).
 fn run_path(directory: Option<&std::path::PathBuf>, path: &Value) -> Result<std::path::PathBuf, String> {
-    let directory = directory.ok_or("This run has no run directory")?;
-    let path = std::path::Path::new(path.as_str().ok_or("A path must be text")?);
-    let path = if path.is_absolute() { path.to_path_buf() } else { directory.join(path) };
-    if !path.starts_with(directory) || path.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
-        return Err(format!("{} is outside the run directory", path.display()));
-    }
-    Ok(path)
+    let directory=directory.ok_or("This run has no run directory")?;
+    let path=std::path::Path::new(path.as_str().ok_or("An artifact needs a path")?);
+    crate::run_artifacts::confined(directory,path)
 }
 
 /// `run.animation`: the GIF of the run's frame images, written inside its run directory; `{path}`.
@@ -305,7 +302,7 @@ impl Builtin {
         Self(Rc::new(RefCell::new(Stand { runtime, host, missing: None, catalog_ready: false, reply, instances: BTreeMap::new(), runs: Arc::default(),
             unmapped: Vec::new(), directories: BTreeMap::new(), requests: BTreeMap::new(), core, events: Vec::new(), camera: None,
             acquisition: json!({"state": "idle", "produced": 0}), native: None, native_instances: BTreeMap::new(), bench: None, scanning: Arc::default(), lifecycles: BTreeMap::new(),
-            fits: zlc_plugin_host::workers::Workers::new("zlc-plugin-fit") })))
+            fits: zlc_plugin_host::workers::Workers::new("zlc-plugin-fit"), artifacts: Arc::default() })))
     }
     /// Native device types (their descriptors) and the handler their instances' requests go to.
     pub fn set_native(&self, types: Vec<Value>, handler: Rc<dyn Fn(NativeRequest)>) { self.0.borrow_mut().native = Some((types, handler)); }
@@ -404,6 +401,7 @@ impl Builtin {
                 self.camera_fact(&ours, if outcome == "failed" { "error" } else { "stopped" }, error.as_ref());
                 let mut stand = self.0.borrow_mut();
                 stand.runs.lock().unwrap().mapped.remove(&run);
+                stand.artifacts.retire(&ours);
                 stand.directories.remove(&ours);
                 stand.requests.retain(|request, _| !request.starts_with(&format!("{ours}:")));
                 vec![Event::RunFinished { run: ours, outcome, error, generation }]
@@ -477,21 +475,22 @@ impl Builtin {
                 vec![Event::RunRequest { run, request: json!({"request": request, "kind": params["kind"], "title": params["title"],
                     "message": params["message"], "payload": params["payload"]}) }]
             }
-            "run.artifact" => {
-                // Registered only once it exists, complete, inside the run's directory.
-                let directory = self.0.borrow().directories.get(&run).cloned();
-                let registered = (|| -> Result<Value, String> {
-                    let directory = directory.ok_or("This run has no run directory")?;
-                    let path = std::path::Path::new(params["path"].as_str().ok_or("An artifact needs a path")?);
-                    let path = if path.is_absolute() { path.to_path_buf() } else { directory.join(path) };
-                    let relative = path.strip_prefix(&directory).map_err(|_| format!("{} is outside the run directory", path.display()))?;
-                    if matches!(relative.to_str(), Some("start.json" | "run.json")) { return Err("start.json and run.json are the run's own records".into()); }
-                    let size = std::fs::metadata(&path).map_err(|error| format!("{}: {error}", path.display()))?.len();
-                    Ok(json!({"name": params["name"], "path": relative.to_string_lossy().replace('\\', "/"), "role": params["role"],
-                              "contract_id": params["contract_id"], "size_bytes": size}))
-                })();
-                self.respond(ticket, registered.clone());
-                registered.map(|artifact| vec![Event::RunArtifact { run, artifact }]).unwrap_or_default()
+            "run.artifacts" | "run.artifact" => {
+                let stand=self.0.borrow();
+                let Some(host)=stand.host.clone() else{return Vec::new()};
+                let directory=stand.directories.get(&run).cloned();
+                let store=stand.artifacts.clone();let reply=stand.reply.clone();
+                let legacy=op=="run.artifact";
+                let mut params=params;
+                if legacy{params["action"]=json!("register");}
+                stand.fits.run(move||{
+                    let (answer,artifacts)=store.answer(&run,directory.as_deref(),&params,&lent);
+                    for artifact in artifacts{reply(Event::RunArtifact{run:run.clone(),artifact});}
+                    if legacy{
+                        host.respond(ticket,if answer.get("error").is_some(){Err(refused(answer["error"]["message"].as_str().unwrap_or("artifact registration failed").to_owned()))}else{Ok(answer["ok"].clone())});
+                    }else{host.respond(ticket,Ok(answer));}
+                });
+                Vec::new()
             }
             "run.acquire" => vec![Event::RunAcquire { run, ticket, node: params["node"].as_str().unwrap_or("").to_owned(),
                 completion: params["completion"].as_str().unwrap_or("ready").to_owned() }],
@@ -574,7 +573,7 @@ fn plugin_families() -> Vec<String> {
 impl Plugins for Builtin {
     fn catalog(&mut self) -> TypeCatalog {
         let stand = self.0.borrow();
-        let (mut types, mut errors, mut templates) = (Vec::new(), Vec::new(), serde_json::Map::new());
+        let (mut types, mut errors, mut templates, mut configuration_schemas) = (Vec::new(), Vec::new(), serde_json::Map::new(), serde_json::Map::new());
         if let Some((native, _)) = &stand.native { types.extend(native.iter().cloned()); }
         if stand.bench.is_some() { types.push(zlc_fabric::remote_type()); }
         if let Some(host) = stand.host.as_ref().filter(|_| stand.catalog_ready) {
@@ -583,6 +582,7 @@ impl Plugins for Builtin {
                     types.extend(catalog.types.iter().map(descriptor));
                     errors.extend(catalog.errors.iter().map(|error| json!({"module": error.module, "error": error.error})));
                     templates = catalog.templates.clone();
+                    configuration_schemas = catalog.configuration_schemas.clone();
                 }
                 Err(error) => errors.push(json!({"module": "zlc_plugin describe", "error": error})),
             }
@@ -593,7 +593,8 @@ impl Plugins for Builtin {
             if families.is_empty() { errors.push(json!({"module": "zlc_atom", "error": reason})); }
             errors.extend(families.into_iter().map(|family| json!({"module": format!("zlc_atom.devices.{family}"), "error": reason})));
         }
-        TypeCatalog::from_describe(&json!({"protocol": [2, 0], "types": types, "errors": errors, "templates": templates})).unwrap_or_else(|error| {
+        TypeCatalog::from_describe(&json!({"protocol": zlc_plugin_host::PROTOCOL, "types": types, "errors": errors, "templates": templates,
+            "configuration_schemas": configuration_schemas})).unwrap_or_else(|error| {
             eprintln!("{}", json!({"type": "plugin-error", "error": error}));
             TypeCatalog::default()
         })

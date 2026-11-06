@@ -1,9 +1,9 @@
-"""Derive's statistics in groups and fit, without a core: moments against raw arrays.
+"""Derive's native statistics and grouping, with NumPy arrays as the oracle.
 
 A live route (events one by one) and a sealed route (one whole dataset) are the
 same increments, so their groups agree to rounding. ``ZLC_DERIVE_FILE`` names a
 real dataset to do that on (``data.npz`` with ``info``, ``data``, ``data.validity``).
-Runs directly with Python; ``ctx.fit`` is a small numpy fit with the same signature.
+Runs with the offline native helper; ``ctx.fit`` is a small NumPy fit with the same signature.
 """
 import json
 import os
@@ -544,7 +544,7 @@ def run_member(rows, deliveries):
         for commit in commits:
             written.take(commit)
         for accumulator in processor._accumulation.accumulators.values():
-            held = sum(plane.nbytes for tally in accumulator._tallies.values() for plane in tally.values())
+            held = accumulator.held_bytes
             processor.peak_open = max(processor.peak_open, held)
     for commit in processor.finish_inputs():
         written.take(commit)

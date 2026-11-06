@@ -33,10 +33,19 @@ class NativeScanFixture:
             from zlc_atom.nodes.scan.plan import ScanAxis, ScanPlan, ScanPort
             from zlc_atom.nodes.scan.seamless import SeamlessScanMeasurement
 
+            request = context._request
+            def guarded(operation, params, **options):
+                if operation == "run.scan.rows" and params.get("scope") == "inner":
+                    raise AssertionError("production scan requested expanded inner rows")
+                if operation == "run.scan.configure" and "effective_inner" in params:
+                    raise AssertionError("production scan returned expanded coordinates to the core")
+                return request(operation, params, **options)
+            context._request = guarded
+
             plan = ScanPlan(tuple(ScanAxis(axis["port"], tuple(axis["values"]), axis["unit"], axis.get("coordinate_of"))
                                   for axis in self.spec["axes"]))
             measurement = SeamlessScanMeasurement(
-                pulse={"path": "fixture.json", "api_fields": []}, plan=plan,
+                pulse={"path": self.spec.get("pulse_path", "fixture.json"), "api_fields": []}, plan=plan,
                 ports=tuple(ScanPort(axis.port, axis.port, axis.unit, 0, 1e12) for axis in plan.axes),
                 source_signal=self.source_signal, repeats=self.spec["scan_repeats"], shots_per_point=self.spec["run_repeats"],
             )

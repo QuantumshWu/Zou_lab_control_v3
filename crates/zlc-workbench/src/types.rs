@@ -163,6 +163,8 @@ pub struct TypeCatalog {
     pub errors: Vec<(String, String)>,
     /// Apparatus starting points (Device Manager New…): name -> (instance id, type id) rows.
     pub templates: Vec<(String, Vec<(String, String)>)>,
+    /// Package-owned apparatus domains (for example a simulation world).
+    pub configuration_schemas: std::collections::BTreeMap<String, Vec<Field>>,
 }
 
 impl TypeCatalog {
@@ -182,7 +184,11 @@ impl TypeCatalog {
         let templates = document["templates"].as_object().into_iter().flatten().map(|(name, rows)| (name.clone(),
             rows.as_array().into_iter().flatten().map(|row| (row["instance_id"].as_str().unwrap_or("").to_owned(), row["type_id"].as_str().unwrap_or("").to_owned())).collect()))
             .collect();
-        Ok(Self { types, errors, templates })
+        let configuration_schemas = match document.get("configuration_schemas") {
+            None => Default::default(),
+            Some(schemas) => serde_json::from_value(schemas.clone()).map_err(|e| format!("configuration schemas: {e}"))?,
+        };
+        Ok(Self { types, errors, templates, configuration_schemas })
     }
     pub fn get(&self, type_id: &str) -> Option<&TypeDescriptor> { self.types.iter().find(|item| item.type_id == type_id) }
     pub fn devices(&self) -> impl Iterator<Item = &TypeDescriptor> { self.types.iter().filter(|item| item.is_device()) }

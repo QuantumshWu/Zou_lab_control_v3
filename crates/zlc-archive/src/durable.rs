@@ -196,29 +196,127 @@ pub fn durable_makedirs(directory: &Path) -> Result<PathBuf> {
     Ok(target)
 }
 
-/// `atomic_write_file(target, writer)`: `write` fills a same-directory
-/// temporary, which is synced, renamed over `target` and acknowledged.
-pub fn atomic_write_file(target: &Path, write: impl FnOnce(File) -> Result<File>) -> Result<PathBuf> {
-    let destination = resolve(target)?;
-    let parent = destination.parent().map_or_else(|| destination.clone(), Path::to_path_buf);
-    if !parent.is_dir() {
-        return Err(ArchiveError::new(ErrorKind::FileNotFound, format!("target parent directory does not exist: {}", parent.display())));
-    }
-    let name = destination.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let (temporary, file) = mkstemp(&parent, &format!(".{name}."), ".tmp")?;
-    let display = temporary.to_string_lossy().into_owned();
-    let result = write(file).and_then(|file| {
-        file.sync_all().map_err(|error| ArchiveError::os(&error, None))?;
+/// A same-directory staged artifact. Only unfinished temporary names are
+/// removed on drop; a visible publication survives a directory-flush failure.
+#[derive(Debug)]
+pub struct StagedWrite { temporary: PathBuf, destination: PathBuf, published: Option<PathBuf> }
+
+impl StagedWrite {
+    pub fn new(target: &Path) -> Result<Self> { Self::with_temporary(target, None, None) }
+    pub fn with_temporary(target: &Path, prefix: Option<&str>, suffix: Option<&str>) -> Result<Self> {
+        let destination = resolve(target)?;
+        let parent = destination.parent().ok_or_else(|| ArchiveError::value("a file needs a parent directory"))?;
+        if !parent.is_dir() { return Err(ArchiveError::new(ErrorKind::FileNotFound, format!("target parent directory does not exist: {}", parent.display()))); }
+        let name = destination.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
+        let default_prefix=format!(".{name}.");
+        let prefix=prefix.unwrap_or(&default_prefix);let suffix=suffix.unwrap_or(".tmp");
+        if [prefix,suffix].iter().any(|value|value.contains(['/','\\',':','\0'])) {return Err(ArchiveError::value("temporary name components may not contain separators"));}
+        let (temporary, file) = mkstemp(parent, prefix, suffix)?;
         drop(file);
-        replace(&temporary, &destination).map_err(|error| win32(&error, &[&display, &destination.to_string_lossy()]))?;
-        flush_published(&parent, &destination)
-    });
-    if let Err(original) = result {
-        // `temporary.unlink()` in the handler: a missing file is fine, any other failure replaces the error.
-        return Err(match std::fs::remove_file(&temporary) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => win32(&error, &[&display]),
-            _ => original,
-        });
+        Ok(Self { temporary, destination, published: None })
     }
-    Ok(destination)
+    pub fn temporary(&self) -> &Path { &self.temporary }
+    pub fn destination(&self) -> &Path { &self.destination }
+    pub fn published(&self) -> Option<&Path> { self.published.as_deref() }
+    /// Publish one caller-selected unique candidate without consuming the
+    /// staged bytes on collision. Candidate spelling can remain a UI policy.
+    pub fn finish_exclusive(&mut self, candidate:&Path)->Result<PathBuf>{
+        let path=resolve(candidate)?;
+        if path.parent()!=self.destination.parent(){return Err(ArchiveError::value("unique candidates must share the staged directory"));}
+        if self.published.is_some(){return Err(ArchiveError::value("the artifact was already published"));}
+        self.sync_stage()?;
+        self.publish_exclusive(&path)?;
+        flush_published(self.destination.parent().unwrap(),&self.destination)?;
+        Ok(self.destination.clone())
+    }
+
+    fn sync_stage(&self)->Result<()>{
+        if !std::fs::symlink_metadata(&self.temporary).map_err(|error|ArchiveError::os(&error,None))?.is_file() {return Err(ArchiveError::value("the staged artifact must remain a regular file"));}
+        let file=std::fs::OpenOptions::new().read(true).write(true).open(&self.temporary).map_err(|e|ArchiveError::io(&e,&self.temporary.to_string_lossy()))?;
+        file.sync_all().map_err(|e|ArchiveError::os(&e,None))
+    }
+
+    fn publish_exclusive(&mut self,path:&Path)->Result<()>{
+        match std::fs::hard_link(&self.temporary,path){
+            Ok(())=>{self.published=Some(path.to_path_buf());std::fs::remove_file(&self.temporary).map_err(|e|ArchiveError::io(&e,&self.temporary.to_string_lossy()))?;}
+            Err(error) if error.kind()==std::io::ErrorKind::AlreadyExists=>return Err(ArchiveError::io(&error,&path.to_string_lossy())),
+            Err(_)=>{
+                let claim=std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e|ArchiveError::io(&e,&path.to_string_lossy()))?;drop(claim);
+                if let Err(error)=replace(&self.temporary,path){let _=std::fs::remove_file(path);return Err(win32(&error,&[&self.temporary.to_string_lossy(),&path.to_string_lossy()]));}
+                self.published=Some(path.to_path_buf());
+            }
+        }
+        self.destination=path.to_path_buf();Ok(())
+    }
+
+    pub fn finish(&mut self, unique: bool) -> Result<PathBuf> { self.finish_ack(unique, flush_published) }
+    fn finish_ack(&mut self, unique: bool, acknowledge: impl Fn(&Path,&Path)->Result<()>) -> Result<PathBuf> {
+        if let Some(path) = &self.published { acknowledge(path.parent().unwrap(), path)?; return Ok(path.clone()); }
+        self.sync_stage()?;
+        if unique {
+            let original=self.destination.clone();
+            let parent=original.parent().unwrap();
+            let stem=original.file_stem().unwrap_or_default().to_string_lossy();
+            let extension=original.extension().map(|part|format!(".{}",part.to_string_lossy())).unwrap_or_default();
+            for ordinal in 0..10_000 {
+                let path=if ordinal==0{original.clone()}else{parent.join(format!("{stem}_{ordinal}{extension}"))};
+                match self.publish_exclusive(&path){Ok(())=>break,Err(error) if error.kind==ErrorKind::FileExists=>continue,Err(error)=>return Err(error)}
+            }
+            if self.published.is_none(){return Err(ArchiveError::new(ErrorKind::FileExists,"no unoccupied artifact name remains"));}
+        } else {
+            replace(&self.temporary,&self.destination).map_err(|error|win32(&error,&[&self.temporary.to_string_lossy(),&self.destination.to_string_lossy()]))?;
+            self.published=Some(self.destination.clone());
+        }
+        acknowledge(self.destination.parent().unwrap(),&self.destination)?;
+        Ok(self.destination.clone())
+    }
+
+}
+
+impl Drop for StagedWrite {
+    fn drop(&mut self) { let _=std::fs::remove_file(&self.temporary); }
+}
+
+/// `atomic_write_file(target, writer)`: the same staged publication authority
+/// used by hosted Python writers and the standalone native helper.
+pub fn atomic_write_file(target: &Path, write: impl FnOnce(File) -> Result<File>) -> Result<PathBuf> {
+    let mut staged=StagedWrite::new(target)?;
+    let file=std::fs::OpenOptions::new().write(true).truncate(true).open(staged.temporary())
+        .map_err(|error|ArchiveError::io(&error,&staged.temporary().to_string_lossy()))?;
+    drop(write(file)?);
+    staged.finish(false)
+}
+
+/// Claim a new directory (collision is an error), then acknowledge both entries.
+pub fn claim_directory(directory:&Path)->Result<PathBuf>{
+    let target=resolve(directory)?;
+    std::fs::create_dir(&target).map_err(|e|ArchiveError::io(&e,&target.to_string_lossy()))?;
+    flush_published(&target,&target)?;
+    if let Some(parent)=target.parent(){flush_published(parent,&target)?;}
+    Ok(target)
+}
+
+#[cfg(test)]
+mod staged_tests {
+    use super::*;
+    fn folder(label:&str)->PathBuf{
+        let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!("zlc-stage-{label}-{}-{stamp}",std::process::id()));std::fs::create_dir(&path).unwrap();path
+    }
+    #[test]fn dropped_writer_keeps_original_and_removes_only_temporary(){
+        let root=folder("abort");let target=root.join("data.bin");std::fs::write(&target,b"old").unwrap();
+        let staged=StagedWrite::new(&target).unwrap();let temporary=staged.temporary().to_path_buf();std::fs::write(&temporary,b"partial").unwrap();drop(staged);
+        assert_eq!(std::fs::read(&target).unwrap(),b"old");assert!(!temporary.exists());std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]fn unique_publication_never_replaces_an_existing_name(){
+        let root=folder("unique");let target=root.join("data.bin");std::fs::write(&target,b"old").unwrap();
+        let mut staged=StagedWrite::new(&target).unwrap();std::fs::write(staged.temporary(),b"new").unwrap();let saved=staged.finish(true).unwrap();
+        assert_ne!(saved,target);assert_eq!(std::fs::read(target).unwrap(),b"old");assert_eq!(std::fs::read(saved).unwrap(),b"new");drop(staged);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]fn failed_directory_acknowledgement_preserves_visible_publication(){
+        let root=folder("ack");let target=root.join("data.bin");let mut staged=StagedWrite::new(&target).unwrap();std::fs::write(staged.temporary(),b"complete").unwrap();
+        let error=staged.finish_ack(false,|_,_|Err(ArchiveError::new(ErrorKind::DirectoryDurability,"injected directory flush failure"))).unwrap_err();
+        assert_eq!(error.kind,ErrorKind::DirectoryDurability);assert_eq!(staged.published(),Some(target.as_path()));drop(staged);
+        assert_eq!(std::fs::read(target).unwrap(),b"complete");std::fs::remove_dir_all(root).unwrap();
+    }
 }

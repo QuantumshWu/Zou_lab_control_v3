@@ -155,7 +155,7 @@ class Attachments:
         self._mappings: dict[str, tuple[mmap.mmap, int, int]] = {}
         self._views: dict[int, str] = {}
 
-    def attach(self, reference: dict[str, Any]) -> np.ndarray:
+    def attach(self, reference: dict[str, Any], *, acquired: Callable[[str], None] | None = None) -> np.ndarray:
         """A read-only array over one lend; dropping its last view releases the lend."""
 
         name = str(reference["block"])
@@ -169,6 +169,8 @@ class Attachments:
         view = ImmutableBuffer(entry[0])
         self._views[id(view)] = name
         weakref.finalize(view, self._dropped, id(view), name)
+        if acquired is not None:
+            acquired(name)
         dtype = np.dtype(reference["dtype"])
         shape = tuple(int(item) for item in reference["shape"])
         count = int(np.prod(shape, dtype=np.int64))

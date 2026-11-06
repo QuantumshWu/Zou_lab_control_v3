@@ -50,5 +50,5 @@ include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["zlc_data*", "zlc_durable*", "zlc_atom*", "zlc_plugin*"]
+include = ["zlc_data*", "zlc_durable*", "zlc_atom*", "zlc_plugin*", "zlc_native*"]
 namespaces = false

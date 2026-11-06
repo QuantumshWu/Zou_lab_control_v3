@@ -120,7 +120,11 @@ class NativeScanTests(unittest.TestCase):
         calls = []
         def core(command, **params):
             calls.append((command, params))
-            if command == "pulse_run": return {"command_id": 1, "applied": {"config": {}}}
+            if command == "pulse_run":
+                self.assertNotIn("scan", params, "the production caller must not expand an inner table")
+                reference = params["scan_plan"]
+                return {"command_id": 1, "applied": {"config": {}},
+                        "scan": {**reference, "fields": [], "row_count": 1}}
             return {"done": True, "status": "done", "elapsed_seconds": 0.0}
         context = types.SimpleNamespace(_request=service.request, core=core, cancel_requested=lambda: False,
             report_progress=lambda *a, **k: None, request_operator_input=lambda *a, **k: None,

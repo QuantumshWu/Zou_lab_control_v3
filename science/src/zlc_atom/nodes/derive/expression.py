@@ -15,7 +15,7 @@ Every rule an operation applies to a Dataset's axes, dtype, unit and
 validity is a plan that reads schemas only.  Evaluation applies each plan
 to arrays (:class:`Operand`) and :func:`typed_variables` applies the same
 plans to the source's schemas alone, so the editor's preview and Start's
-admission are the evaluation's own answer before any data exists.  NumPy
+admission are the evaluation's own answer before any data exists.  The native scientific engine
 does the math; nothing here runs operator-written code.
 
 A statistic can reduce one of its axes in consecutive groups (``by`` +
@@ -40,6 +40,8 @@ from zlc_data.axis import SCALAR, AxisId, AxisSpec
 from zlc_data.selection import EmptySelection, take_indices
 from zlc_data.snapshot_projection import _subset_axis, _subset_mapped_domain
 from zlc_data.units import DEFAULT_UNITS, UnitError
+
+from . import native_ops
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField
 from zlc_atom.nodes._framework.frames import FIRST, LAST
@@ -284,22 +286,9 @@ def pick_values(schema: DatasetSchema, at: str) -> tuple[str, ...] | None:
 
 
 def _pick_target(schema, at, what):
-    """(domain index, the axes a pick ``at`` takes): one primary axis named
-    ``at``, or the primary axes of the domain ``at`` when it has two or
-    more -- a one-axis domain is picked by its axis' name, never two ways."""
-    if at not in DOMAINS:
-        d, axis = _axis(schema, at, what, "pick")
-        return d, (axis,)
-    if any(axis.name == at for domain in _domains(schema) for axis in domain.axes):
-        raise ValueError(f"{at} names both a domain and an axis of {what}; it cannot be picked by name")
-    d = DOMAINS.index(at)
-    axes = _primary(_domains(schema)[d])
-    if len(axes) == 1:
-        raise ValueError(f"{at} has one axis, {axes[0].name}; pick {axes[0].name}")
-    if not axes:
-        names = ", ".join(axis.name for _d, axis in _named_axes(schema)) or "none"
-        raise ValueError(f"{what} has no {at} axes; its axes: {names}")
-    return d, axes
+    answer = native_ops.pick_target(schema, at, what)
+    domain = _domains(schema)[answer["domain"]]
+    return answer["domain"], tuple(domain.axis(AxisId(identity)) for identity in answer["axes"])
 
 
 def axes_text(schema: DatasetSchema) -> str:
@@ -320,175 +309,21 @@ def _listed(labels, limit: int = 12) -> str:
 
 
 def _axis(schema, name, what, verb):
-    """(domain index, primary axis) named ``name`` in ``what``'s schema, any
-    domain and any role.  ``verb`` is what is done to it: pick or reduce."""
-    found = [(d, axis) for d, axis in _named_axes(schema) if axis.name == name]
-    if len(found) == 1:
-        return found[0]
-    if found:
-        done = {"pick": "picked", "reduce": "reduced"}[verb]
-        raise ValueError(f"two axes of {what} are named {name}; it cannot be {done} by name")
-    for domain in _domains(schema):
-        for axis in domain.axes:
-            if axis.coordinate_of is not None and axis.name == name:
-                primary = domain.coordinate_axis(axis.axis_id).name
-                raise ValueError(f"{name} is another coordinate of {primary}; {verb} {primary}")
-    names = ", ".join(axis.name for _d, axis in _named_axes(schema)) or "none"
-    raise ValueError(f"{what} has no axis {name!r}; its axes: {names}")
+    answer = native_ops.axis(schema, name, what, verb)
+    return answer["domain"], _domains(schema)[answer["domain"]].axis(AxisId(answer["axis"]))
 
-
-# -- plans: what each operation does to a schema --------------------------
 
 def _isel_plan(schema, d, axis, indexes, scalar):
-    """(schema keeping ``indexes`` of one primary axis, how to take its storage).
-
-    ``indexes`` ascend: several keep the axis, restricted to them in axis
-    order; one (``scalar``) removes the axis and its whole coordinate
-    group, never its domain.  A Repeat/Point pick keeps the rows carrying
-    those codes; a Cell pick takes that dense dimension.
-    """
-    domains = list(_domains(schema))
-    domain = domains[d]
-    if d < 2:
-        family = {a.axis_id: a for a in domain.coordinate_axes(axis.axis_id)}
-        codes = domain.codes(axis.axis_id)
-        rank = np.full(axis.size, -1, dtype=np.int64)
-        rank[list(indexes)] = np.arange(len(indexes))
-        rows = np.flatnonzero(rank[codes] >= 0)
-        if not rows.size:
-            raise EmptySelection("no stored rows")
-        rows = rows[np.argsort(rank[codes[rows]], kind="stable")]
-        # Selection retains the existing row mapping; no dense logical grid.
-        rows = (range(int(rows[0]), int(rows[-1]) + 1)
-                if np.all(np.diff(rows) == 1) else tuple(int(row) for row in rows))
-        domain = _subset_mapped_domain(domain, rows)
-        if scalar:
-            kept = tuple(a for a in domain.axes if a.axis_id not in family)
-            domain = DomainSpec(domain.shape, kept, tuple(tuple(domain.codes(a.axis_id)) for a in kept))
-        else:
-            kept = tuple(_subset_axis(family[a.axis_id], indexes) if a.axis_id in family else a
-                         for a in domain.axes)
-            domain = DomainSpec(domain.shape, kept, tuple(
-                tuple(rank[codes[list(rows)]]) if a.axis_id in family
-                else tuple(domain.codes(a.axis_id)) for a in kept))
-        domains[d] = domain
-        take = (((d, rows, False),), False)
-    else:
-        position = domain.axes.index(axis)
-        axes = tuple(a for a in domain.axes if a.axis_id != axis.axis_id) if scalar else tuple(
-            _subset_axis(a, indexes) if a.axis_id == axis.axis_id else a for a in domain.axes)
-        domains[d] = DomainSpec(tuple(a.size for a in axes), axes) if axes else SCALAR_DOMAIN
-        take = (((position + 2, indexes, scalar),), not axes)
-    return _schema(domains, schema.value_schema.dtype, _unit(schema), schema.value_schema.name), take
+    return native_ops.pick_plan(schema, d, (axis,), indexes, scalar, False)
 
 
 def _domain_plan(schema, d, axes, rows, scalar):
-    """(schema keeping ``rows`` of domain ``d`` -- positions among its rows,
-    ascending -- how to take its storage).
-
-    One row removes the domain's axes and their coordinate groups; several
-    keep them, restricted to the coordinates those rows use.  A Repeat/Point
-    domain keeps exactly the rows; a dense Cell domain keeps a grid, so its
-    rows must be every combination of the coordinates they use.
-    """
-    domains = list(_domains(schema))
-    domain = domains[d]
-    family = {member.axis_id for axis in axes for member in domain.coordinate_axes(axis.axis_id)}
-    if d < 2:
-        rows = (range(rows[0], rows[-1] + 1) if rows[-1] - rows[0] + 1 == len(rows) else tuple(rows))
-        domain = _subset_mapped_domain(domain, rows)
-        if scalar:
-            kept = tuple(a for a in domain.axes if a.axis_id not in family)
-            domain = DomainSpec(domain.shape, kept, tuple(tuple(domain.codes(a.axis_id)) for a in kept))
-        domains[d] = domain
-        take = (((d, rows, False),), False)
-    else:
-        positions = [domain.axes.index(axis) for axis in axes]
-        indexes = np.array(np.unravel_index(np.asarray(rows, dtype=np.int64), [axis.size for axis in axes])).T
-        if scalar:
-            rest = tuple(a for a in domain.axes if a.axis_id not in family)
-            domains[d] = DomainSpec(tuple(a.size for a in rest), rest) if rest else SCALAR_DOMAIN
-            take = (tuple((position + 2, (int(index),), True)
-                          for position, index in zip(positions, indexes[0])), not rest)
-        else:
-            used = [tuple(sorted({int(index) for index in indexes[:, k]})) for k in range(len(axes))]
-            if len(rows) != int(np.prod([len(kept) for kept in used])):
-                raise ValueError(f"these {DOMAINS[d]} values do not fill a grid of "
-                                 f"{' × '.join(axis.name for axis in axes)}; pick one, or pick each axis in a "
-                                 "variable of its own")
-            subsets = dict(zip((axis.axis_id for axis in axes), used))
-            kept = tuple(_subset_axis(a, subsets[a.axis_id]) if a.axis_id in subsets else a for a in domain.axes)
-            domains[d] = DomainSpec(tuple(a.size for a in kept), kept)
-            take = (tuple((position + 2, subset, False) for position, subset in zip(positions, used)), False)
-    return _schema(domains, schema.value_schema.dtype, _unit(schema), schema.value_schema.name), take
-
-
-def _take(array, take):
-    """Storage indexed as a plan said: one step per physical axis, the
-    highest axis first so a dropped axis moves none still to come."""
-    steps, expand = take
-    for axis, indexes, drop in sorted(steps, key=lambda step: -step[0]):
-        array = take_indices(array, indexes, axis=axis, drop=drop)
-    return array[..., None] if expand else array
+    return native_ops.pick_plan(schema, d, axes, rows, scalar, True)
 
 
 def _alignment(target, other):
-    """How ``other``'s storage spreads over ``target``'s geometry.
-
-    None when both carry the same axes.  Otherwise every axis of ``other``
-    must be an axis of ``target`` -- the same AxisId, name, coordinates and
-    labels -- and ``other`` repeats along the axes it lacks: a per-shot
-    level beside every site, a frame-pinned verdict beside every frame.  No
-    axis is matched by size, position or name alone, and no Cartesian
-    product is formed; anything else raises ValueError.
-    """
-    wanted_domains, given_domains = _domains(target), _domains(other)
-    if wanted_domains == given_domains:
-        return None
-    steps = []
-    for d, (wanted, given) in enumerate(zip(wanted_domains, given_domains)):
-        if wanted == given:
-            steps.append(None)
-            continue
-        # The one-value cell domain carries a placeholder axis, not a named one.
-        given_axes = () if given == SCALAR_DOMAIN else given.axes
-        if any(a not in wanted.axes for a in given_axes):
-            raise ValueError("an axis of one side is not on the other")
-        if d == 2:
-            positions = [wanted.axes.index(a) for a in given_axes]
-            if positions != sorted(positions):
-                raise ValueError("the cell axes are in another order")
-            steps.append(tuple(a.size if a in given_axes else 1 for a in wanted.axes))
-            continue
-        if not given.axes:
-            if given.size != 1:
-                raise ValueError("unnamed rows cannot be matched")
-            steps.append(np.zeros(wanted.size, np.int64))
-            continue
-
-        def keys(domain):
-            return np.column_stack([np.asarray(domain.codes(a.axis_id), dtype=np.int64)
-                                    for a in given.axes]).tolist()
-
-        rows = {tuple(code): row for row, code in enumerate(keys(given))}
-        try:
-            steps.append(np.array([rows[tuple(code)] for code in keys(wanted)], dtype=np.int64))
-        except KeyError:
-            raise ValueError("one side has no value for some coordinates of the other") from None
-    return tuple(steps)
-
-
-def _aligned(array, steps, shape):
-    if steps is None:
-        return array
-    repeat_rows, point_rows, cells = steps
-    if repeat_rows is not None:
-        array = np.take(array, repeat_rows, axis=0)
-    if point_rows is not None:
-        array = np.take(array, point_rows, axis=1)
-    if cells is not None:
-        array = array.reshape(array.shape[:2] + cells)
-    return np.broadcast_to(array, shape)
+    """The native coordinate owner validates and plans schema alignment."""
+    return native_ops.alignment(target, other)
 
 
 def _differ(left, right):
@@ -594,15 +429,16 @@ def _operator(op, left, right, texts):
     arrays, valid = [], np.ones(shape, bool)
     for item, step in zip((left, right), steps):
         if isinstance(item, Operand):
-            arrays.append(_aligned(item.values, step, shape))
-            valid &= _aligned(item.valid, step, shape)
+            aligned_values, aligned_valid = native_ops.aligned((item.values, item.valid), step, shape)
+            arrays.append(aligned_values)
+            valid &= aligned_valid
         else:
             arrays.append(item)
     if conversion is not None:
         arrays[1] = DEFAULT_UNITS.convert(arrays[1], *conversion)
-    with np.errstate(all="ignore"):
-        values = np.asarray(_apply(op, *arrays))
-    return Operand(schema, values, valid)
+    compute_dtype = np.result_type(*probes) if kind == "comparison" else dtype
+    answer = native_ops.binary(op, arrays[0], arrays[1], valid, shape, dtype, compute_dtype)
+    return Operand(schema, answer["values"], answer["valid"])
 
 
 def _masked(value, mask, negate, texts):
@@ -628,9 +464,9 @@ def _masked(value, mask, negate, texts):
     schema = _schema(_domains(left), left.value_schema.dtype, _unit(left), left.value_schema.name)
     if not isinstance(value, Operand):
         return schema
-    keep = _aligned(mask.values, steps, value.shape)
-    keep = (~keep if negate else keep) & _aligned(mask.valid, steps, value.shape)
-    return Operand(schema, value.values, value.valid & keep, value.sigma, value.dof)
+    keep, judged = native_ops.aligned((mask.values, mask.valid), steps, value.shape)
+    kept = native_ops.call("scientific.where", valid=value.valid, mask=keep, judged=judged, negate=negate)
+    return Operand(schema, value.values, kept["valid"], value.sigma, value.dof)
 
 
 def changing_axes(schema: DatasetSchema, event: DatasetSchema | None) -> dict:
@@ -705,190 +541,21 @@ def _pick(item, term, evaluating, changing):
         raise ValueError(f"{where} no row at {at} {labels[0]!r}") from None
     if not isinstance(item, Operand):
         return picked
-    return Operand(picked, _take(item.values, take), _take(item.valid, take),
-                   None if item.sigma is None else _take(item.sigma, take),
-                   None if item.dof is None else _take(item.dof, take))
-
-
-def _grouped_axes(domain, axis, every):
-    """``axis`` and its alternate coordinates in consecutive groups of ``every``:
-    each coordinate the mean of its members' numeric ones (their index when
-    they have none), under an AxisId of its own, by old id."""
-
-    starts = np.arange(0, axis.size, every)
-    grouped_id = AxisId(f"{axis.axis_id.value}/every-{every}")
-    grouped = {}
-    for member in domain.coordinate_axes(axis.axis_id):
-        values = np.asarray(member)
-        if values.dtype.kind not in "iuf":
-            values = np.arange(member.size)
-        means = np.add.reduceat(values.astype(np.float64), starts) / np.diff(np.append(starts, axis.size))
-        identity = grouped_id if member is axis else AxisId(f"{member.axis_id.value}/every-{every}")
-        try:
-            grouped[member.axis_id] = AxisSpec(
-                identity, member.name, member.role, starts.size, coordinates=means, unit=member.unit,
-                coordinate_frame=member.coordinate_frame, coordinate_of=None if member is axis else grouped_id)
-        except ValueError:
-            raise ValueError(f"two groups of {every} {member.name} read the same mean coordinate; "
-                             "choose another size") from None
-    return grouped
+    planes = native_ops.selected((item.values, item.valid, item.sigma, item.dof), take)
+    return Operand(picked, *planes)
 
 
 def _reduce_plan(schema, operation, names, by="", every=0):
-    """(schema after one statistic over named primary axes, the reduction plans).
-
-    ``every`` keeps the axis ``by`` -- one of them -- in groups of that many
-    coordinates (:func:`_grouped_axes`) instead of removing it."""
-    found = []
-    for name in names:
-        d, axis = _axis(schema, name, "the value", "reduce")
-        if any(axis.axis_id == other.axis_id for _d, other in found):
-            raise ValueError(f"{axis.name} is chosen twice")
-        found.append((d, axis))
-    boolean = _is_boolean(schema)
-    if operation not in STATISTICS_FOR[boolean]:
-        raise TypeError(f"{operation} needs numbers; for booleans use sum, mean, count, any or all" if boolean
-                        else f"{operation} needs booleans")
-    source = _domains(schema)
-    grouped = {}
-    if every:
-        d, axis = next(((d, axis) for d, axis in found if axis.name == by), (None, None))
-        if axis is None:
-            raise ValueError(f"{by} is not among the axes it reduces")
-        grouped = _grouped_axes(source[d], axis, every)
-    # Alternate coordinates reduce with their primary.
-    ids = {member.axis_id for d, axis in found for member in source[d].coordinate_axes(axis.axis_id)} - set(grouped)
-    domains = list(source)
-    # Sums/counts pass through all domains before division: averaging group
-    # averages would weight partially valid groups incorrectly.
-    plans = []
-    for d, domain in enumerate(source):
-        if not any(a.axis_id in ids or a.axis_id in grouped for a in domain.axes):
-            continue
-        staying = tuple(a for a in domain.axes if a.axis_id not in ids)
-        kept = tuple(grouped.get(a.axis_id, a) for a in staying)
-        if d < 2:
-            if kept:
-                codes = np.column_stack([domain.codes(a.axis_id) // (every if a.axis_id in grouped else 1)
-                                         for a in staying])
-                groups, first, inverse = np.unique(codes, axis=0, return_index=True, return_inverse=True)
-                order = np.argsort(first)
-                remap = np.empty(order.size, np.int64)
-                remap[order] = np.arange(order.size)
-                inverse, groups = remap[inverse.reshape(-1)], groups[order]
-                domains[d] = DomainSpec((len(groups),), kept, tuple(tuple(int(v) for v in c) for c in groups.T))
-            else:
-                inverse = np.zeros(domain.size, np.int64)
-                domains[d] = DomainSpec((1,), (), ())
-            plans.append(("mapped", d, inverse, domains[d].size))
-        else:
-            positions = tuple(2 + i for i, a in enumerate(domain.axes) if a.axis_id in ids)
-            kept_positions = tuple(i for i, a in enumerate(domain.axes) if a.axis_id not in ids)
-            shape = domain.shape
-            for i, a in enumerate(domain.axes):
-                if a.axis_id in grouped:
-                    # A group of a dense dimension: its samples are all in this evaluation.
-                    plans.append(("mapped", 2 + i, np.arange(a.size) // every, grouped[a.axis_id].size))
-                    shape = shape[:i] + (grouped[a.axis_id].size,) + shape[i + 1:]
-            if positions:
-                plans.append(("dense", positions, shape, kept_positions))
-            domains[d] = DomainSpec(tuple(a.size for a in kept), kept) if kept else SCALAR_DOMAIN
-    if operation == "count" or (boolean and operation == "sum"):
-        dtype = np.int64
-    elif operation in ("all", "any"):
-        dtype = bool
-    else:
-        dtype = np.float64
-    unit = "1" if boolean or operation == "count" else _unit(schema)
-    return _schema(domains, dtype, unit), tuple(plans)
-
-
-def centred(item, plans, count, valid):
-    """(each bucket's mean, sum of squares about it), over ``plans``.
-
-    Anchor every output bucket to one of its own stored samples.  Both passes
-    then operate on small local deltas, so constant data stays exactly
-    constant and real sub-baseline spread survives."""
-    flat_indexes = np.arange(item.values.size, dtype=np.int64).reshape(item.shape)
-    flat_indexes = np.where(item.valid, flat_indexes, item.values.size)
-    first = _apply_reduction_plans(flat_indexes, plans, "min")
-    anchors = np.zeros(count.shape, dtype=np.float64)
-    anchors[valid] = item.values.reshape(-1)[first[valid]]
-    centered = np.zeros(item.shape, dtype=np.float64)
-    np.subtract(item.values, _expand_reduction_plans(anchors, plans), out=centered,
-                where=item.valid, dtype=np.float64)
-    local_mean = np.divide(_apply_reduction_plans(centered, plans, "sum"), count,
-                           out=np.zeros(count.shape, dtype=np.float64), where=valid)
-    centered -= _expand_reduction_plans(local_mean, plans)
-    np.copyto(centered, 0.0, where=~item.valid)
-    return anchors + local_mean, _apply_reduction_plans(np.square(centered), plans, "sum")
-
-
-def stated_square(item, plans):
-    """Each bucket's sum of the squared sigmas its valid samples state, or None without a sigma plane."""
-    if item.sigma is None:
-        return None
-    return _apply_reduction_plans(np.where(item.valid, np.square(item.sigma), 0.0), plans, "sum")
-
-
-def standard_error(spread, count, stated=None):
-    """The standard error of a mean, the plot's one rule (zlc-plot projection
-    ``sem_from_moments``), from each bucket's sum of squares about its mean,
-    its count and the sum of its samples' squared sigmas: a spread within
-    roundoff is none; one sample has no spread of its own, so it stands on
-    what it states, or has no error."""
-    count = np.asarray(count, dtype=np.float64)
-    second = np.divide(spread, count, out=np.zeros(count.shape), where=count > 0)
-    second = np.where(second <= np.abs(second) * np.finfo(np.float64).eps * (np.maximum(count, 1.0) + 3.0), 0.0, second)
-    variance = np.divide(second * count, count - 1.0, out=np.full(count.shape, np.nan), where=count > 1)
-    if stated is not None:
-        variance = np.where(np.isnan(variance),
-                            np.divide(stated, count, out=np.full(count.shape, np.nan), where=count > 0), variance)
-    return np.sqrt(np.divide(variance, count, out=np.full(count.shape, np.nan), where=count >= 1))
-
-
-def sigma_dof(count):
-    """The degrees of freedom of each :func:`standard_error`, the plot's rule (zlc-plot
-    projection ``sem_dof``): n samples estimate their own variance with n - 1; a lone
-    one stands on what it states, known otherwise."""
-    count = np.asarray(count, dtype=np.float64)
-    return np.where(count > 1, count - 1.0, np.inf)
+    return native_ops.reduction_plan(schema, operation, tuple(names), by, int(every))
 
 
 def _statistic(item, operation, names, by="", every=0, errors=False):
-    """``item`` reduced by one statistic over named axes, in any domain, ``by``
-    in groups of ``every``.  A group is valid when it has at least one valid
-    sample.  ``errors``: a mean also states its standard error."""
+    """Compile the named-axis request, then evaluate its complete native reduction."""
     schema, plans = _reduce_plan(_schema_of(item), operation, names, by, every)
     if not isinstance(item, Operand):
         return schema
-    count = _apply_reduction_plans(item.valid, plans, "count")
-    valid = count > 0
-    if operation == "count":
-        values = count
-    elif operation in ("all", "any"):
-        values = _apply_reduction_plans(np.where(item.valid, item.values, operation == "all"), plans, operation)
-    elif operation == "std":
-        _mean, spread = centred(item, plans, count, valid)
-        values = np.sqrt(np.divide(spread, count, out=np.full(count.shape, np.nan, dtype=np.float64),
-                                   where=valid))
-    elif item.values.dtype.kind == "b":
-        # The number true, or the fraction true of the valid samples.
-        true = _apply_reduction_plans(item.valid & item.values, plans, "count")
-        values = true if operation == "sum" else np.divide(
-            true, count, out=np.full(count.shape, np.nan), where=valid)
-    else:
-        fill = {"min": np.inf, "max": -np.inf}.get(operation, 0.0)
-        total = np.full(item.shape, fill, dtype=np.float64)
-        np.copyto(total, item.values, where=item.valid)
-        values = _apply_reduction_plans(total, plans, "sum" if operation == "mean" else operation)
-        if operation == "mean":
-            values = np.divide(values, count, out=np.full(values.shape, np.nan), where=valid)
-    sigma = dof = None
-    if errors and operation == "mean":
-        sigma = standard_error(centred(item, plans, count, valid)[1], count, stated_square(item, plans))
-        dof = sigma_dof(count)
-    return Operand(schema, np.asarray(values).astype(schema.value_schema.dtype, copy=False), valid, sigma, dof)
+    answer = native_ops.statistic(item, plans, operation, errors)
+    return Operand(schema, answer["values"], answer["valid"], answer.get("sigma"), answer.get("dof"))
 
 
 # -- fit: a statistic that eats one axis and yields parameters ---------------
@@ -1032,65 +699,6 @@ class Operand:
     @property
     def shape(self):
         return self.values.shape
-
-
-def _group_reduce(values, codes, count, axis, operation):
-    source = np.moveaxis(values, axis, 0)
-    if operation == "min":
-        reducer = np.minimum
-        fill = np.iinfo(source.dtype).max if source.dtype.kind in "iu" else np.inf
-    elif operation == "max":
-        reducer = np.maximum
-        fill = np.iinfo(source.dtype).min if source.dtype.kind in "iu" else -np.inf
-    else:
-        reducer, fill = {
-            "all": (np.logical_and, True), "any": (np.logical_or, False),
-        }.get(operation, (np.add, 0))
-    out = np.full((count, *source.shape[1:]), fill,
-                  dtype=np.int64 if operation == "count" else source.dtype)
-    reducer.at(out, codes, source)
-    return np.moveaxis(out, 0, axis)
-
-
-def _apply_reduction_plans(values, plans, operation):
-    """Apply an already-resolved axis reduction without rebuilding its geometry."""
-    result = values
-    for plan in plans:
-        if plan[0] == "mapped":
-            _, axis, inverse, size = plan
-            result = _group_reduce(result, inverse, size, axis, operation)
-            continue
-        _, positions, _original_shape, kept_positions = plan
-        reducer = {"min": np.min, "max": np.max, "all": np.all, "any": np.any}.get(operation, np.sum)
-        result = reducer(result, axis=positions)
-        if not kept_positions:
-            result = result[..., None]
-    return result
-
-
-def _expand_reduction_plans(values, plans):
-    """Broadcast one value per resolved output bucket back to source geometry."""
-    result = values
-    for plan in reversed(plans):
-        if plan[0] == "mapped":
-            _, axis, inverse, _size = plan
-            result = np.take(result, inverse, axis=axis)
-            continue
-        _, _positions, original_shape, kept_positions = plan
-        shape = list(result.shape[:2])
-        cursor = 2
-        kept = set(kept_positions)
-        for position in range(len(original_shape)):
-            if position in kept:
-                shape.append(result.shape[cursor])
-                cursor += 1
-            else:
-                shape.append(1)
-        result = np.broadcast_to(
-            result.reshape(tuple(shape)),
-            (*result.shape[:2], *original_shape),
-        )
-    return result
 
 
 # -- one variable: terms -> precedence tree -> fold -> statistic -------------

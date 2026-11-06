@@ -8,6 +8,16 @@ see `docs/PLUGIN_PROTOCOL.md`); the desktop itself embeds no interpreter.
 - `zlc_atom`: the devices (`devices/`, one folder per device) and logic nodes
   (`nodes/`).
 - `zlc_data`, `zlc_durable`: the data and file formats the plugins share.
+- `zlc_native`: the independent native-service client and common wire codec.
+  Hosted calls use the existing plugin channel; offline scripts reuse a persistent
+  `zlc-native.exe` helper. `ZLC_NATIVE_EXECUTABLE` selects an explicit helper.
+
+The engine supplies `zlc-native.exe` and `zlc_capture.dll`; the latter holds the
+process-local capture ledger without moving SDK buffers or workers out of Python.
+`ZLC_CAPTURE_LIBRARY` selects an explicit library. Development adapters also find
+the matching products under this checkout's `target/x86_64-pc-windows-msvc/release`.
+There is no fallback copy of native rules in Python. Build the native products
+when their interfaces change; plain Python-only edits still need no compilation.
 
 Changing a plugin needs no build: it takes effect the next time the plugin process
 starts (once every device is shut down and every node removed, or when the app starts

@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 zlc-core = { path = "../zlc-core" }
+zlc-scan = { path = "../zlc-scan" }
 crc32fast = "1.5"
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Devices_Communication", "Win32_System_IO", "Win32_System_Threading", "Win32_Security", "Win32_System_Registry", "Win32_System_Console", "Win32_System_JobObjects"] }
 

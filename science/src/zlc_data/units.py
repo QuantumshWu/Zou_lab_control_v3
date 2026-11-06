@@ -1,6 +1,8 @@
 """What a number means, and the one way it is shown to a person.
 
-Units live HERE, in the bottom layer, because a unit is a fact about data --
+Unit definitions and registry rules live in the native core; Python exposes values and caches.
+
+Historically units lived here, in the bottom layer, because a unit is a fact about data --
 what the number in this column is -- and not about drawing it.  They used to
 live in ``zlc_plot``, which meant the layer that compiles a pulse could not
 see them and kept a second, smaller table of its own; the two disagreed about
@@ -28,11 +30,10 @@ what is displayed is what is held, digit for digit.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
-import math
-import re
 from threading import RLock
 
 import numpy as np
@@ -82,24 +83,12 @@ PREFIXES: tuple[Prefix, ...] = (
     Prefix("n", -9),
 )
 
-_PREFIX_BY_SPELLING = {
-    spelling: prefix
-    for prefix in PREFIXES
-    for spelling in prefix.spellings
-    if spelling
-}
 _PREFIX_BY_EXPONENT = {prefix.exponent: prefix for prefix in PREFIXES}
 #: The identity step, for a caller that wants a number in EXACTLY the unit it
 #: names -- a reading converted into the hertz the operator chose for a row
 #: stays in hertz however large it is, because that row is the one place the
 #: operator said which scale they read.
 NO_PREFIX = _PREFIX_BY_EXPONENT[0]
-_PREFIX_BY_SYMBOL = {prefix.symbol: prefix for prefix in PREFIXES if prefix.symbol}
-#: The step between neighbouring prefixes.  Read off the table rather than
-#: written down, because it is the table that decides it.
-_PREFIX_STEP = 3
-
-
 # ----------------------------------------------------------------- conversion
 
 
@@ -110,16 +99,14 @@ class Scaled:
     factor: float
 
     def __post_init__(self) -> None:
-        factor = float(self.factor)
-        if not np.isfinite(factor) or factor == 0.0:
-            raise UnitError("unit factor must be finite and non-zero")
-        object.__setattr__(self, "factor", factor)
+        object.__setattr__(self, "factor", float(self.factor))
+        _conversion_facts(self)
 
     def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
-        return np.asarray(values) * self.factor
+        return _apply_conversion(self, values, inverse=False)
 
     def from_base(self, values: ArrayLike) -> NDArray[np.generic]:
-        return np.asarray(values) / self.factor
+        return _apply_conversion(self, values, inverse=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,16 +122,14 @@ class Offset:
     offset: float
 
     def __post_init__(self) -> None:
-        offset = float(self.offset)
-        if not np.isfinite(offset):
-            raise UnitError("unit offset must be finite")
-        object.__setattr__(self, "offset", offset)
+        object.__setattr__(self, "offset", float(self.offset))
+        _conversion_facts(self)
 
     def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
-        return np.asarray(values, dtype=float) + self.offset
+        return _apply_conversion(self, values, inverse=False)
 
     def from_base(self, values: ArrayLike) -> NDArray[np.generic]:
-        return np.asarray(values, dtype=float) - self.offset
+        return _apply_conversion(self, values, inverse=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,21 +151,15 @@ class Decibel:
     factor: float = 10.0
 
     def __post_init__(self) -> None:
-        reference, factor = float(self.reference), float(self.factor)
-        if not np.isfinite(reference) or reference <= 0.0:
-            raise UnitError("decibel reference must be finite and positive")
-        if not np.isfinite(factor) or factor == 0.0:
-            raise UnitError("decibel factor must be finite and non-zero")
-        object.__setattr__(self, "reference", reference)
-        object.__setattr__(self, "factor", factor)
+        object.__setattr__(self, "reference", float(self.reference))
+        object.__setattr__(self, "factor", float(self.factor))
+        _conversion_facts(self)
 
     def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
-        return self.reference * np.power(10.0, np.asarray(values) / self.factor)
+        return _apply_conversion(self, values, inverse=False)
 
     def from_base(self, values: ArrayLike) -> NDArray[np.generic]:
-        ratio = np.asarray(values, dtype=float) / self.reference
-        with np.errstate(divide="ignore", invalid="ignore"):
-            return self.factor * np.log10(ratio)
+        return _apply_conversion(self, values, inverse=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,29 +176,15 @@ class VoltageIntoLoad:
     mean_square_divisor: float = 8.0
 
     def __post_init__(self) -> None:
-        load = float(self.load_ohms)
-        if not np.isfinite(load) or load <= 0.0:
-            raise UnitError("a load must be finite and positive")
-        object.__setattr__(self, "load_ohms", load)
-        divisor = float(self.mean_square_divisor)
-        if not np.isfinite(divisor) or divisor <= 0.0:
-            raise UnitError("a mean-square divisor must be finite and positive")
-        object.__setattr__(self, "mean_square_divisor", divisor)
+        object.__setattr__(self, "load_ohms", float(self.load_ohms))
+        object.__setattr__(self, "mean_square_divisor", float(self.mean_square_divisor))
+        _conversion_facts(self)
 
     def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
-        # An amplitude below zero has no power: NaN, as a level has none for
-        # a power below zero.  Squared, -0.04 Vpp was the power of +0.04 Vpp,
-        # and a plot's view, limit or drawn wall below 0 Vpp landed mirrored
-        # on the other side of zero where no "no value" check could see it.
-        volts = np.asarray(values, dtype=float)
-        return np.where(volts < 0.0, np.nan, volts * volts) / (
-            self.mean_square_divisor * self.load_ohms
-        )
+        return _apply_conversion(self, values, inverse=False)
 
     def from_base(self, values: ArrayLike) -> NDArray[np.generic]:
-        watts = np.asarray(values, dtype=float)
-        with np.errstate(invalid="ignore"):
-            return np.sqrt(self.mean_square_divisor * self.load_ohms * watts)
+        return _apply_conversion(self, values, inverse=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,40 +202,20 @@ class Prefixed:
     factor: float
 
     def __post_init__(self) -> None:
-        factor = float(self.factor)
-        if not np.isfinite(factor) or factor <= 0.0:
-            raise UnitError("a prefix factor must be finite and positive")
-        object.__setattr__(self, "factor", factor)
+        object.__setattr__(self, "factor", float(self.factor))
+        _conversion_facts(self)
 
     def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
-        return self.inner.to_base(np.asarray(values, dtype=float) * self.factor)
+        return _apply_conversion(self, values, inverse=False)
 
     def from_base(self, values: ArrayLike) -> NDArray[np.generic]:
-        return np.asarray(self.inner.from_base(values), dtype=float) / self.factor
+        return _apply_conversion(self, values, inverse=True)
 
 
 Conversion = Scaled | Offset | Decibel | VoltageIntoLoad | Prefixed
 
 
 # ------------------------------------------------------------------- the unit
-
-
-def _exact_decade(conversion: "Conversion") -> int | None:
-    """The whole power of ten this conversion is, when it is exactly one.
-
-    Exactly: the candidate is rebuilt and compared, so a factor that merely
-    rounds to a power of ten does not get to claim one.  A level and a
-    degree have no decade at all, and saying so is what keeps the exact
-    arithmetic honest about where it can be used.
-    """
-
-    if not isinstance(conversion, Scaled):
-        return None
-    factor = conversion.factor
-    if factor <= 0.0:
-        return None
-    candidate = round(math.log10(factor))
-    return candidate if 10.0**candidate == factor else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,7 +233,7 @@ class Unit:
 
     symbol: str
     dimension: str
-    conversion: Conversion = Scaled(1.0)
+    conversion: Conversion = field(default_factory=lambda: Scaled(1.0))
     #: The prefixes this unit is read in, besides its bare symbol: ``("m",
     #: "µ", "n")`` for the second, nothing for a unit that takes none.  What
     #: an instrument here is read in is a fact about the quantity, and only
@@ -312,64 +257,12 @@ class Unit:
     decade: int | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
-        for text, field in ((self.symbol, "symbol"), (self.dimension, "dimension")):
-            if not isinstance(text, str) or not text or text.strip() != text:
-                raise UnitError(f"unit {field} must be a non-empty, trimmed string")
-        if not isinstance(
-            self.conversion, (Scaled, Offset, Decibel, VoltageIntoLoad, Prefixed)
-        ):
-            raise UnitError(
-                "unit conversion must be Scaled, Offset, Decibel, VoltageIntoLoad or Prefixed"
-            )
-        if isinstance(self.prefixes, str):
-            raise UnitError("unit prefixes must be an iterable of prefix symbols, not a string")
-        prefixes = tuple(self.prefixes)
-        unknown = [prefix for prefix in prefixes if prefix not in _PREFIX_BY_SYMBOL]
-        if unknown:
-            raise UnitError(f"unit {self.symbol!r} names prefixes the table lacks: {unknown!r}")
-        if len(set(prefixes)) != len(prefixes):
-            raise UnitError(f"unit {self.symbol!r} names a prefix twice")
-        object.__setattr__(self, "prefixes", prefixes)
-        if isinstance(self.aliases, str):
-            raise UnitError("unit aliases must be an iterable of strings, not a string")
-        aliases = tuple(self.aliases)
-        if any(
-            not isinstance(alias, str) or not alias or alias.strip() != alias
-            for alias in aliases
-        ):
-            raise UnitError("unit aliases must be non-empty, trimmed strings")
-        names = (self.symbol, *aliases)
-        if len(set(names)) != len(names):
-            raise UnitError(f"unit {self.symbol!r} contains duplicate names")
-        object.__setattr__(self, "aliases", aliases)
-        object.__setattr__(self, "decade", _exact_decade(self.conversion))
-        if self.prefixes and (
-            isinstance(self.conversion, (Offset, Decibel, Prefixed))
-            or (
-                self.decade is not None
-                and self.decade != 0
-                and self.decade % _PREFIX_STEP == 0
-            )
-        ):
-            # A prefix multiplies the number written in the unit, so it
-            # belongs on the reference of a spelling family and nowhere else:
-            # never on a spelling that IS a prefix step of its base --
-            # allowing it on "ms" is how "ms" and "millis" both become
-            # resolvable and stop meaning exactly one thing -- never on a
-            # level (there is no milli-dBm), and never on a spelling that
-            # already carries one.  A family of its own may be linear and
-            # not the base: the gauss is a ten-thousandth of a tesla, no
-            # prefix step, and is read in gauss and milligauss; an amplitude
-            # such as Vpp is its own family although its dimension's base
-            # is the watt.
-            raise UnitError(f"this unit cannot take a prefix: {self.symbol!r}")
-        inverse = self.inverse_dimension
-        if inverse is not None and (
-            not isinstance(inverse, str) or not inverse or inverse.strip() != inverse
-        ):
-            raise UnitError(
-                "unit inverse_dimension must be a non-empty, trimmed string or None"
-            )
+        if isinstance(self.prefixes, str) or isinstance(self.aliases, str):
+            raise UnitError("unit prefixes and aliases must be sequences, not strings")
+        answer = _unit_native("units.validate", unit=_unit_tree(self))
+        object.__setattr__(self, "prefixes", tuple(answer["prefixes"]))
+        object.__setattr__(self, "aliases", tuple(answer["aliases"]))
+        object.__setattr__(self, "decade", answer["decade"])
 
     @property
     def ladder(self) -> tuple[Prefix, ...]:
@@ -381,41 +274,17 @@ class Unit:
         unit are spelled and ordered the same way.
         """
 
-        return tuple(
-            prefix
-            for prefix in PREFIXES
-            if prefix.exponent == 0 or prefix.symbol in self.prefixes
-        )
+        offered = _unit_facts(self)["ladder"]
+        return tuple(prefix for symbol in offered for prefix in PREFIXES if prefix.symbol == symbol)
 
     @property
     def is_linear(self) -> bool:
-        return isinstance(self.conversion, Scaled)
+        return bool(_unit_facts(self)["linear"])
 
     @property
     def coordinate_scale(self) -> tuple[str, float] | None:
-        """Group and signed-number scale, distinct from conversion to base.
-
-        Voltage coordinates have a constant ratio to other voltage coordinates,
-        but not to power. This scale also applies to spans and coefficients
-        multiplying an authored coordinate, including negative coefficients.
-        """
-        conversion = self.conversion
-        factor = 1.0
-        while isinstance(conversion, Prefixed):
-            factor *= conversion.factor
-            conversion = conversion.inner
-        if isinstance(conversion, Scaled):
-            return self.dimension, factor * conversion.factor
-        if isinstance(conversion, Offset):
-            # A span in Celsius is the same span in kelvin: the shifted zero
-            # cancels in every difference, so coordinates scale one to one.
-            return self.dimension, factor
-        if isinstance(conversion, VoltageIntoLoad):
-            return (
-                f"coordinate:{self.dimension}:voltage",
-                factor / math.sqrt(conversion.mean_square_divisor * conversion.load_ohms),
-            )
-        return None
+        result = _unit_facts(self)["coordinate_scale"]
+        return None if result is None else tuple(result)
 
     @property
     def scale(self) -> float:
@@ -443,7 +312,7 @@ class Unit:
         microsecond axis.
         """
 
-        return isinstance(self.conversion, Scaled) and self.conversion.factor == 1.0
+        return bool(_unit_facts(self)["base"])
 
     def compatible_with(self, other: "Unit") -> bool:
         return self.dimension == other.dimension
@@ -461,345 +330,223 @@ class Unit:
     def convert_value_to(self, values: ArrayLike, target: "Unit") -> NDArray[np.generic]:
         """Values in this unit, in ``target`` -- the one conversion callers use."""
 
-        if not self.compatible_with(target):
-            raise UnitError(
-                f"incompatible units: {self.symbol!r} ({self.dimension}) and "
-                f"{target.symbol!r} ({target.dimension})"
-            )
         if self == target:
             return np.asarray(values)
-        return target.from_base(self.to_base(values))
+        facts = _conversion_facts(self.conversion)
+        array = np.asarray(values, dtype=float if facts["initial_real_to"] else None)
+        return _conversion_answer(_unit_native("units.convert", values=array,
+                            source=_unit_tree(self), target=_unit_tree(target)))
+
 
 
 UnitLike = str | Unit
 
 
+def _conversion_tree(conversion):
+    if isinstance(conversion, Scaled):
+        return {"kind": "scaled", "factor": conversion.factor}
+    if isinstance(conversion, Offset):
+        return {"kind": "offset", "offset": conversion.offset}
+    if isinstance(conversion, Decibel):
+        return {"kind": "decibel", "reference": conversion.reference, "factor": conversion.factor}
+    if isinstance(conversion, VoltageIntoLoad):
+        return {"kind": "voltage", "load_ohms": conversion.load_ohms, "divisor": conversion.mean_square_divisor}
+    if isinstance(conversion, Prefixed):
+        return {"kind": "prefixed", "inner": _conversion_tree(conversion.inner), "factor": conversion.factor}
+    raise UnitError("unknown unit conversion")
+
+
+def _conversion_from_tree(value):
+    # The native answer is already validated; adopting it is a value operation,
+    # not a second native request during catalogue construction.
+    kind = value["kind"]
+    classes = {"scaled": Scaled, "offset": Offset, "decibel": Decibel, "voltage": VoltageIntoLoad, "prefixed": Prefixed}
+    if kind not in classes:
+        raise UnitError("unknown native unit conversion")
+    result = object.__new__(classes[kind])
+    for name, item in value.items():
+        if name == "kind":
+            continue
+        if name == "inner":
+            item = _conversion_from_tree(item)
+        object.__setattr__(result, "mean_square_divisor" if name == "divisor" else name, item)
+    return result
+
+
+@lru_cache(maxsize=512)
+def _conversion_facts(conversion):
+    return _unit_native("units.conversion_facts", conversion=_conversion_tree(conversion))
+
+
+def _conversion_answer(answer):
+    if answer["discarded_imaginary"]:
+        import warnings
+        warnings.warn("Casting complex values to real discards the imaginary part", np.exceptions.ComplexWarning, stacklevel=3)
+    values = answer["values"]
+    return values[()] if values.ndim == 0 else values
+
+
+def _apply_conversion(conversion, values, *, inverse):
+    facts = _conversion_facts(conversion)
+    array = np.asarray(values, dtype=float if facts["initial_real_from" if inverse else "initial_real_to"] else None)
+    return _conversion_answer(_unit_native("units.apply", conversion=_conversion_tree(conversion), values=array, inverse=inverse))
+
+
+def _unit_tree(unit):
+    return {"symbol": unit.symbol, "dimension": unit.dimension,
+            "conversion": _conversion_tree(unit.conversion), "prefixes": list(unit.prefixes),
+            "aliases": list(unit.aliases), "inverse_dimension": unit.inverse_dimension}
+
+
+def _unit_from_tree(value):
+    # Native definitions are already validated. Reconstructing a Python value
+    # must not recursively ask the backend to validate the backend's own answer.
+    unit = object.__new__(Unit)
+    for name in ("symbol", "dimension", "inverse_dimension", "decade"):
+        object.__setattr__(unit, name, value[name])
+    for name in ("prefixes", "aliases"):
+        object.__setattr__(unit, name, tuple(value[name]))
+    object.__setattr__(unit, "conversion", _conversion_from_tree(value["conversion"]))
+    return unit
+
+
+def _unit_native(operation, **params):
+    from zlc_native import call
+    try:
+        return call(operation, **params)
+    except ValueError as error:
+        raise UnitError(str(error)) from None
+
+
+@lru_cache(maxsize=512)
+def _unit_facts(unit):
+    return _unit_native("units.facts", unit=_unit_tree(unit))
+
+
 @lru_cache(maxsize=512)
 def _prefixed(base: Unit, prefix: Prefix) -> Unit:
-    """The unit that is ``prefix`` applied to ``base``."""
-
     if prefix.exponent == 0:
         return base
-    factor = 10.0**prefix.exponent
-    # A rung of a decade family is an exact decade itself: 1e-4 * 1e-3 is
-    # not 1e-7 in binary, and a milligauss that missed its decade would
-    # lose the exact decimal shift its family is read with.
-    if base.is_linear:
-        conversion: Conversion = Scaled(
-            10.0 ** (base.decade + prefix.exponent)
-            if base.decade is not None
-            else base.scale * factor
-        )
-    else:
-        conversion = Prefixed(base.conversion, factor)
-    return Unit(
-        symbol=f"{prefix.symbol}{base.symbol}",
-        dimension=base.dimension,
-        conversion=conversion,
-        aliases=tuple(
-            f"{spelling}{name}"
-            for spelling in prefix.spellings
-            for name in (base.symbol, *base.aliases)
-            if spelling != prefix.symbol or name != base.symbol
-        ),
-        inverse_dimension=base.inverse_dimension,
-    )
-
-
-# ---------------------------------------------------------------- the registry
+    return _unit_from_tree(_unit_native("units.resolve", units=[_unit_tree(base)], unit=prefix.symbol + base.symbol))
 
 
 class UnitRegistry:
-    """The registered base units, and every prefixed spelling they imply.
+    """Python values/cache over the core's canonical registry rules."""
 
-    A registry is mutable so an application can add a dimension its instruments
-    need.  A dataset carries unit symbols, not :class:`Unit` objects, so it is
-    understood only where a registry resolves the same spellings: an
-    application that registers its own dimension registers it again wherever
-    its datasets are read.
-    """
-
-    def __init__(self, units: Iterable[Unit] = ()) -> None:
-        self._units: dict[str, Unit] = {}
-        self._base_units: dict[str, Unit] = {}
+    def __init__(self, units: Iterable[Unit] = (), *, _defaults: bool = False) -> None:
         self._lock = RLock()
         self._revision = 0
+        self._definitions = []
+        self._registered = {}
+        self._cache = OrderedDict()
+        self._metadata_cache = OrderedDict()
+        self._defaults = _defaults
         for unit in units:
             self.register(unit)
 
+    def _ensure(self):
+        if self._defaults:
+            self._adopt(_unit_native("units.builtins")["units"])
+            self._revision = len(self._definitions)
+            self._defaults = False
+
+    def _adopt(self, definitions):
+        self._definitions = definitions
+        self._registered = {}
+        self._cache.clear()
+        self._metadata_cache.clear()
+        for definition in definitions:
+            unit = _unit_from_tree(definition)
+            for name in (unit.symbol, *unit.aliases):
+                self._registered[name] = unit
+
+    def _call(self, operation, **params):
+        self._ensure()
+        return _unit_native(operation, units=self._definitions, **params)
+
+    def _metadata(self, operation, unit):
+        """Bounded metadata cache; a registry replacement invalidates every answer."""
+        key = (operation, unit)
+        if key in self._metadata_cache:
+            self._metadata_cache.move_to_end(key)
+            return self._metadata_cache[key]
+        answer = self._call(operation, unit=_unit_tree(unit) if isinstance(unit, Unit) else unit)
+        self._metadata_cache[key] = answer
+        if len(self._metadata_cache) > 512:
+            self._metadata_cache.popitem(last=False)
+        return answer
+
     @property
     def revision(self) -> int:
-        """Monotonic identity of the registry's current conversion truth."""
-
         with self._lock:
+            self._ensure()
             return self._revision
 
     def register(self, unit: Unit, *, replace: bool = False) -> Unit:
         if not isinstance(unit, Unit):
             raise TypeError("unit must be a Unit")
-        names = (unit.symbol, *unit.aliases)
         with self._lock:
-            collisions = [name for name in names if name in self._units]
-            if collisions and not replace:
-                raise UnitError(f"unit name already registered: {collisions[0]!r}")
-            existing_base = self._base_units.get(unit.dimension)
-            if unit.is_base and existing_base not in (None, unit):
-                if not replace:
-                    raise UnitError(
-                        f"dimension {unit.dimension!r} already has base unit "
-                        f"{existing_base.symbol!r}"
-                    )
-                collisions.extend(
-                    name
-                    for name, registered in self._units.items()
-                    if registered == existing_base
-                )
-            if replace and collisions:
-                displaced = {
-                    self._units[name] for name in collisions if name in self._units
-                }
-                for name, registered in tuple(self._units.items()):
-                    if registered in displaced:
-                        del self._units[name]
-                for dimension, base in tuple(self._base_units.items()):
-                    if base in displaced:
-                        del self._base_units[dimension]
-            for name in names:
-                self._units[name] = unit
-            if unit.is_base:
-                self._base_units[unit.dimension] = unit
+            answer = self._call("units.register", unit=_unit_tree(unit), replace=bool(replace))
+            self._adopt(answer["units"])
             self._revision += 1
-        return unit
+            return self._registered[unit.symbol]
 
     def resolve(self, unit: UnitLike) -> Unit:
-        """One unit, by object or by any spelling this registry accepts.
-
-        Registered spellings win outright, so a registered name can never be
-        re-read as a prefix plus something else.
-        """
-
         if isinstance(unit, Unit):
             return unit
         if not isinstance(unit, str):
             raise TypeError("unit must be a Unit or registered symbol")
         with self._lock:
-            registered = self._units.get(unit)
-            if registered is not None:
-                return registered
-            base, prefix = self._split_prefix(unit)
-        if base is None:
-            if "*" in unit or "^" in unit:
-                dimensions: dict[str, Decimal] = {}
-                symbols, scales = [], []
-                for part in unit.split("*"):
-                    spelling, separator, raw_exponent = part.partition("^")
-                    try:
-                        exponent = Decimal(raw_exponent) if separator else Decimal(1)
-                    except InvalidOperation as error:
-                        raise UnitError(f"invalid unit exponent {raw_exponent!r}") from error
-                    if not exponent.is_finite() or not math.isfinite(float(exponent)):
-                        raise UnitError("unit exponent must be finite")
-                    factor = self.resolve(spelling)
-                    coordinate_scale = factor.coordinate_scale
-                    if coordinate_scale is not None:
-                        dimension, scale = coordinate_scale
-                    else:
-                        # Products multiply the authored numbers, not the
-                        # physical conversion of each number. In particular
-                        # count*mVpp must never square a negative coefficient.
-                        # Nonhomogeneous coordinates retain their own family;
-                        # crossing to W/dBm is not a product scale.
-                        family, prefix = self.family_and_prefix(factor)
-                        dimension = f"coordinate:{family.symbol}"
-                        scale = 10.0 ** prefix.exponent
-                    if dimension != "dimensionless":
-                        dimensions[dimension] = dimensions.get(dimension, Decimal(0)) + exponent
-                    try:
-                        scales.append(math.pow(scale, float(exponent)))
-                    except (OverflowError, ValueError) as error:
-                        raise UnitError("unit exponent produces an invalid scale") from error
-                    symbols.append(factor.symbol if exponent == 1 else
-                                   f"{factor.symbol}^{exponent.normalize()}")
-                return Unit(
-                    "*".join(symbols),
-                    "*".join(dimension if power == 1 else f"{dimension}^{power.normalize()}"
-                             for dimension, power in sorted(dimensions.items()) if power)
-                    or "dimensionless",
-                    Scaled(math.prod(scales)),
-                )
-            raise UnitError(f"unknown unit {unit!r}")
-        return _prefixed(base, prefix)
-
-    def _split_prefix(self, text: str) -> tuple[Unit | None, Prefix]:
-        for spelling, prefix in _PREFIX_BY_SPELLING.items():
-            if not text.startswith(spelling):
-                continue
-            base = self._units.get(text[len(spelling):])
-            if base is not None and prefix in base.ladder:
-                return base, prefix
-        return None, _PREFIX_BY_EXPONENT[0]
+            self._ensure()
+            if unit in self._registered:
+                return self._registered[unit]
+            if unit not in self._cache:
+                self._cache[unit] = _unit_from_tree(self._call("units.resolve", unit=unit))
+                if len(self._cache) > 512:
+                    self._cache.popitem(last=False)
+            self._cache.move_to_end(unit)
+            return self._cache[unit]
 
     def base_for(self, unit_or_dimension: UnitLike) -> Unit:
-        """The base unit of a unit's or a dimension's dimension."""
-
-        if isinstance(unit_or_dimension, Unit):
-            if unit_or_dimension.is_base:
-                return unit_or_dimension
-            dimension = unit_or_dimension.dimension
-        else:
-            with self._lock:
-                known = unit_or_dimension in self._base_units
-            dimension = (
-                unit_or_dimension if known else self.resolve(unit_or_dimension).dimension
-            )
         with self._lock:
-            try:
-                return self._base_units[dimension]
-            except KeyError as exc:
-                raise UnitError(f"dimension {dimension!r} has no base unit") from exc
+            return _unit_from_tree(self._metadata("units.base", unit_or_dimension))
 
     def family_of(self, unit: UnitLike) -> Unit:
-        """The registered unit this spelling is a prefixed form of, or itself.
-
-        ``mW`` belongs to ``W``; ``dBm`` and ``Vpp`` each belong to
-        themselves, although all three share one dimension and one base.  A
-        choice list groups by THIS and not by ``base_for``: the base of a
-        dimension is a fact about arithmetic, and which symbols a person
-        reads as one family is a fact about the symbols.
-        """
-
         return self.family_and_prefix(unit)[0]
 
     def family_and_prefix(self, unit: UnitLike) -> tuple[Unit, Prefix]:
-        """The family this spelling belongs to and the prefix it carries.
-
-        ``(s, milli)`` for ``ms``, ``(Vpp, identity)`` for ``Vpp``.  A
-        registered spelling is its own family and carries no prefix even when
-        it begins with a prefix letter: ``m`` is the metre.  Two spellings of
-        one family differ by nothing but a decimal shift of the number written
-        in them, which is what lets a value be shown in one and read back from
-        the other without a float multiplication in between.
-        """
-
-        resolved = self.resolve(unit)
         with self._lock:
-            registered = self._units.get(resolved.symbol)
-            if registered is not None:
-                return registered, NO_PREFIX
-            base, prefix = self._split_prefix(resolved.symbol)
-        return (resolved, NO_PREFIX) if base is None else (base, prefix)
+            answer = self._metadata("units.family", self.resolve(unit))
+            return _unit_from_tree(answer["unit"]), _PREFIX_BY_EXPONENT[int(answer["prefix"])]
 
-    def convert(
-        self, values: ArrayLike, source: UnitLike, target: UnitLike
-    ) -> NDArray[np.generic]:
+    def convert(self, values: ArrayLike, source: UnitLike, target: UnitLike) -> NDArray[np.generic]:
         return self.resolve(source).convert_value_to(values, self.resolve(target))
 
     def convert_decimal(self, value: object, source: UnitLike, target: UnitLike) -> Decimal:
-        """Convert one authored number without a binary round trip for prefixes."""
         number = value if isinstance(value, Decimal) else decimal_of(value)
         if number is None or not number.is_finite():
             raise UnitError("unit conversion requires a finite scalar")
-        origin, destination = self.resolve(source), self.resolve(target)
-        if not origin.compatible_with(destination):
-            raise UnitError(f"incompatible units: {origin.symbol!r} and {destination.symbol!r}")
-        own_family, own_prefix = self.family_and_prefix(origin)
-        shown_family, shown_prefix = self.family_and_prefix(destination)
-        if own_family == shown_family:
-            return number.scaleb(own_prefix.exponent - shown_prefix.exponent)
-        if origin.decade is not None and destination.decade is not None:
-            return number.scaleb(origin.decade - destination.decade)
-        converted = decimal_of(origin.convert_value_to(float(number), destination))
-        if converted is None:
-            raise UnitError("unit conversion produced a non-finite value")
-        return converted
+        with self._lock:
+            return Decimal(self._call("units.decimal", value=str(number),
+                source=_unit_tree(self.resolve(source)), target=_unit_tree(self.resolve(target))))
 
     def inverse_for(self, unit: UnitLike) -> Unit | None:
-        """The declared inverse-dimension unit with reciprocal scale, or None.
-
-        None when no rung of the inverse dimension's ladder IS the reciprocal:
-        a 500 MHz clock has a period of 2 ns, and ``ns`` is not that.  The
-        match is judged by ratio alone -- an absolute tolerance in base units
-        is a fixed number of seconds, which beside 1e-9 accepts anything.
-        """
-
-        source = self.resolve(unit)
-        dimension = source.inverse_dimension
-        if dimension is None or not source.is_linear:
-            return None
-        try:
-            base = self.base_for(dimension)
-        except UnitError:
-            return None
-        wanted = 1.0 / source.scale
-        exponent = round(np.log10(wanted / base.scale))
-        prefix = _PREFIX_BY_EXPONENT.get(int(exponent))
-        if prefix is None or prefix not in base.ladder:
-            return None
-        candidate = _prefixed(base, prefix)
-        return candidate if math.isclose(candidate.scale, wanted, rel_tol=1e-12) else None
+        with self._lock:
+            answer = self._metadata("units.inverse", self.resolve(unit))
+            return None if answer is None else _unit_from_tree(answer)
 
     def inverse_symbol(self, unit: UnitLike) -> str:
-        """What the reciprocal of ``unit`` reads as: the declared reciprocal unit
-        (µs: MHz), else its factors' powers negated, a spelling this registry resolves."""
-
-        source = self.resolve(unit)
-        found = self.inverse_for(source)
-        if found is not None:
-            return found.symbol
-        if source.symbol == "1":
-            return "1"
-
-        def negated(factor: str) -> str:
-            symbol, separator, power = factor.partition("^")
-            if not separator or power == "1":
-                return f"{symbol}^-1"
-            return symbol if power == "-1" else f"{symbol}^{power[1:] if power.startswith('-') else '-' + power}"
-
-        return "*".join(negated(factor) for factor in source.symbol.split("*"))
+        with self._lock:
+            return self._metadata("units.inverse_symbol", self.resolve(unit))
 
     def distinct_symbols(self) -> tuple[str, ...]:
-        """One symbol per registered unit -- its own, never an alias."""
-
         with self._lock:
-            return tuple(sorted({unit.symbol for unit in self._units.values()}))
+            self._ensure()
+            return tuple(sorted(definition["symbol"] for definition in self._definitions))
 
     def display_choices(self, unit: UnitLike) -> tuple[str, ...]:
-        """Every unit this one may be SHOWN in, largest first.
-
-        A display-unit list belongs to one axis, so it holds that axis's
-        dimension and nothing else: offering ``pixel`` as the display unit of a
-        time axis is not a choice, it is a way to make the plot raise.  Each
-        unit of the dimension contributes its own ladder -- the rungs it
-        declares it is read in, not every prefix the table can spell -- so a
-        temperature offers kelvin down to nanokelvin and Celsius beside it,
-        never terakelvin.
-        """
-
-        resolved = self.resolve(unit)
         with self._lock:
-            registered = tuple(
-                candidate
-                for candidate in {value.symbol: value for value in self._units.values()}.values()
-                if candidate.dimension == resolved.dimension
-            )
-        choices: list[str] = []
-        for candidate in registered:
-            choices.extend(
-                _prefixed(candidate, prefix).symbol for prefix in candidate.ladder
-            )
-        if not choices:
-            choices.append(resolved.symbol)
-        ordered = sorted(
-            dict.fromkeys(choices),
-            key=lambda symbol: -_display_order(self.resolve(symbol)),
-        )
-        return tuple(ordered)
-
-
-def _display_order(unit: Unit) -> float:
-    """How big one of this unit is, for ordering a choice list."""
-
-    return float(np.log10(unit.scale)) if unit.is_linear else float("-inf")
+            return tuple(self._metadata("units.choices", self.resolve(unit)))
 
 
 #: The load an RF amplitude is read into, in ohms.  The convention every
@@ -808,49 +555,11 @@ RF_LOAD_OHMS = 50.0
 
 
 def _builtin_units() -> tuple[Unit, ...]:
-    """One base per dimension, plus the units that are their own thing.
-
-    Everything a prefix can reach is absent on purpose: ``ms``, ``MHz``,
-    ``nm`` and the rest are derived, so this table cannot develop the holes a
-    hand-written one always does.  Each base names the rungs it is read in
-    on this bench: the pulse board's clock is tens of nanoseconds and a
-    period is never kiloseconds, an atom cloud is nanokelvin and nothing
-    here is megakelvin, a coil's field is microtesla.  A symbol is written
-    the way it is read -- the degree sign, not the letters that spell it --
-    and the letters are aliases for whoever must type it.
-    """
-
-    return (
-        Unit("1", "dimensionless", aliases=("arb",)),
-        Unit("s", "time", prefixes=("m", "µ", "n"), inverse_dimension="frequency"),
-        Unit("m", "length", prefixes=("k", "m", "µ", "n")),
-        Unit("Hz", "frequency", prefixes=("k", "M", "G"), inverse_dimension="time"),
-        Unit("V", "voltage", prefixes=("m", "µ")),
-        Unit("A", "current", prefixes=("m", "µ")),
-        Unit("W", "power", prefixes=("m", "µ", "n")),
-        Unit("K", "temperature", prefixes=("m", "µ", "n")),
-        Unit("°C", "temperature", Offset(273.15), aliases=("degC",)),
-        Unit("T", "magnetic_flux_density", prefixes=("m", "µ", "n")),
-        Unit("G", "magnetic_flux_density", Scaled(1e-4), prefixes=("m",)),
-        Unit("rad", "angle", prefixes=("m",)),
-        Unit("°", "angle", Scaled(np.pi / 180.0), aliases=("deg",)),
-        Unit("dBm", "power", Decibel(1.0e-3)),
-        Unit("dB", "log_gain"),
-        Unit("Vpp", "power", VoltageIntoLoad(RF_LOAD_OHMS), prefixes=("m", "µ")),
-        Unit("Vrms", "power", VoltageIntoLoad(RF_LOAD_OHMS, 1.0), prefixes=("m", "µ")),
-        Unit("count", "count"),
-        Unit("point", "point"),
-        # A DAC code is a signed integer the board takes, where 0 is 0 V.
-        # It had no unit at all: carrying the editor's label "DAC code
-        # (0 = 0 V)" as one is what killed the first plot ever drawn over a
-        # scan, and the fix was to send an empty string instead -- which
-        # says the axis is dimensionless, and it is not.
-        Unit("code", "code"),
-        Unit("pixel", "pixel"),
-    )
+    return tuple(_unit_from_tree(value) for value in _unit_native("units.builtins")["units"])
 
 
-DEFAULT_UNITS = UnitRegistry(_builtin_units())
+# Lazy: importing data types never spawns a process or requires an active host.
+DEFAULT_UNITS = UnitRegistry(_defaults=True)
 
 
 def resolve_unit(value: UnitLike, registry: UnitRegistry | None = None) -> Unit:
@@ -891,54 +600,13 @@ def decimal_of(value: object) -> Decimal | None:
 
 
 def prefix_for(values: ArrayLike, unit: UnitLike, registry: UnitRegistry | None = None) -> Prefix:
-    """The one prefix that suits every value here.
-
-    One prefix for the whole group, because a column or an axis whose rows
-    each chose their own is a column that cannot be read down: 1 M above 900 k
-    hides that the second is smaller.  The group is sized by its largest
-    member, so nothing in it is shown with a leading zero it did not need.
-
-    The step is a rung of the unit's own ladder, the largest that does not
-    show a leading zero, and the top or bottom rung when the number is past
-    them: ``ms`` already carries one, ``°`` and ``count`` have no ladder, and
-    for all of them the answer is the identity step.  Asking the dimension
-    instead -- "seconds take prefixes, so this time unit does" -- is how
-    ``2 kms`` was written for two seconds, a spelling no resolver accepts
-    and so a number nobody could type back.
-    """
-
-    resolved = resolve_unit(unit, registry)
-    ladder = resolved.ladder
-    if len(ladder) == 1:
-        return NO_PREFIX
-    magnitudes = [
-        decimal.adjusted()
-        for decimal in (decimal_of(value) for value in np.atleast_1d(np.asarray(values, dtype=object)).ravel())
-        if decimal is not None and decimal != 0
-    ]
-    if not magnitudes:
-        return NO_PREFIX
-    exponent = _PREFIX_STEP * (max(magnitudes) // _PREFIX_STEP)
-    for rung in ladder:
-        if rung.exponent <= exponent:
-            return rung
-    return ladder[-1]
-
-
-def _plain_digits(value: Decimal) -> str:
-    """The number, with nothing after the point that says nothing.
-
-    Moving the decimal point leaves the zeros the shift walked past, so a
-    hertz field read in gigahertz printed ``6.8347000000``.  Those zeros are
-    not digits of the value -- dropping them changes nothing that can be
-    read back -- and the number they were padding is the one a person is
-    trying to read.
-    """
-
-    text = format(value, "f")
-    if "." not in text:
-        return text
-    return text.rstrip("0").rstrip(".") or "0"
+    units = registry or DEFAULT_UNITS
+    resolved = units.resolve(unit)
+    numbers = [str(decimal) for decimal in (decimal_of(value) for value in np.atleast_1d(np.asarray(values, dtype=object)).ravel())
+               if decimal is not None]
+    with units._lock:
+        exponent = units._call("units.prefix", values=numbers, unit=_unit_tree(resolved))
+    return _PREFIX_BY_EXPONENT[int(exponent)]
 
 
 def figure_padded(value: object, widest: object) -> str:
@@ -952,124 +620,25 @@ def figure_padded(value: object, widest: object) -> str:
     return str(value).rjust(len(str(widest)), "\u2007")
 
 
-def format_quantity(
-    value: object,
-    unit: UnitLike = "1",
-    *,
-    prefix: Prefix | None = None,
-    registry: UnitRegistry | None = None,
-) -> str:
-    """One number and its unit, as a person should read them.
-
-    The digits are the value's own -- the decimal point moves, nothing is
-    rounded away -- so ``120000000.0 Hz`` reads ``120.0000000 MHz`` and can be
-    typed straight back in.  Rounding here would make the box show a number
-    the device is not holding, which is the failure this whole path exists to
-    avoid; a caller that wants fewer digits should round the VALUE, where the
-    decision is visible.
-
-    ``prefix`` fixes the step taken from ``unit`` instead of choosing one:
-    ``NO_PREFIX`` shows the number in exactly the unit named.  A step is only
-    ever taken from a spelling that may carry a prefix; ``2000 ms`` stays
-    ``2000 ms``, because ``kms`` is not a unit.
-    """
-
-    resolved = resolve_unit(unit, registry)
-    decimal = decimal_of(value)
-    if decimal is None:
+def format_quantity(value: object, unit: UnitLike = "1", *, prefix: Prefix | None = None,
+                    registry: UnitRegistry | None = None) -> str:
+    units = registry or DEFAULT_UNITS
+    resolved = units.resolve(unit)
+    number = decimal_of(value)
+    if number is None:
         return f"{value} {resolved.symbol}".strip()
-    step = prefix if prefix is not None else prefix_for([decimal], resolved, registry)
-    if step not in resolved.ladder:
-        raise UnitError(f"{resolved.symbol!r} cannot take the prefix {step.symbol!r}")
-    shifted = decimal.scaleb(-step.exponent)
-    symbol = f"{step.symbol}{resolved.symbol}" if resolved.symbol != "1" else step.symbol
-    return f"{_plain_digits(shifted)} {symbol}".strip()
+    step = None if prefix is None else {"symbol": prefix.symbol, "exponent": prefix.exponent, "accepts": list(prefix.accepts)}
+    with units._lock:
+        return units._call("units.format", value=str(number), unit=_unit_tree(resolved), prefix=step)
 
 
-# ------------------------------------------------------------ reading it back
-
-
-_QUANTITY = re.compile(
-    r"""\A\s*
-    (?P<number>[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)
-    \s*
-    (?P<unit>[^\s]*)
-    \s*\Z""",
-    re.VERBOSE,
-)
-
-
-def parse_quantity(
-    text: str,
-    unit: UnitLike = "1",
-    *,
-    registry: UnitRegistry | None = None,
-) -> float:
-    """Read a typed quantity back, in ``unit``.
-
-    Everything the formatter can produce is accepted, and so is everything a
-    person reasonably types instead: a bare number in the field's own unit,
-    a prefix alone (``1.05M`` in a hertz field, a rung of the field's own
-    family), a whole compatible unit (``1.05 MHz``, ``1050 kHz``), and ``u``
-    wherever ``µ`` is shown.  The result is in ``unit``, never in the base,
-    because the field's stored value is in its own unit and a parse that
-    silently changed that would be the base-for-canonical mistake again.
-
-    What the formatter showed is read back as the number it showed, bit for
-    bit: between two spellings of one family the point is shifted back the
-    way it was shifted out, in decimal, and only a foreign unit (degrees
-    into radians, a level into watts) goes through float arithmetic.
-    ``0.1 ns`` multiplied out as ``0.1 * 1e-9`` is 1.0000000000000002e-10,
-    one ulp from the 1e-10 the box was showing.
-    """
-
-    resolved = resolve_unit(unit, registry)
+def parse_quantity(text: str, unit: UnitLike = "1", *, registry: UnitRegistry | None = None) -> float:
+    units = registry or DEFAULT_UNITS
+    resolved = units.resolve(unit)
     if not isinstance(text, str):
         raise UnitError("a typed quantity must be text")
-    match = _QUANTITY.match(text)
-    if match is None:
-        raise UnitError(f"not a number with an optional unit: {text.strip()!r}")
-    number = match.group("number")
-    written = match.group("unit")
-    if not written:
-        return float(number)
-    units = registry or DEFAULT_UNITS
-    family, carried = units.family_and_prefix(resolved)
-    # What is written is read in the field's OWN family first: its own
-    # symbol or one of its rungs (``m`` in a metre box is the metre, ``mm``
-    # a millimetre), then a bare prefix as a rung of that family (``5m`` in
-    # a seconds box is five milliseconds although ``m`` is also the metre,
-    # ``2G`` in a hertz box two gigahertz although ``G`` is also the gauss),
-    # and only then a whole unit of another family, converted.
-    known = _is_known(written, registry)
-    prefix = _PREFIX_BY_SPELLING.get(written)
-    if known and units.family_of(written) == family:
-        spelled = resolve_unit(written, registry)
-    elif prefix is not None and prefix in family.ladder:
-        spelled = _prefixed(family, prefix)
-    elif known:
-        spelled = resolve_unit(written, registry)
-    elif prefix is None:
-        raise UnitError(f"unknown unit or prefix {written!r}")
-    else:
-        raise UnitError(f"{resolved.symbol!r} cannot take the prefix {written!r}")
-    if not spelled.compatible_with(resolved):
-        raise UnitError(
-            f"{written!r} is {spelled.dimension}, and this value is "
-            f"{resolved.dimension}"
-        )
-    spelled_family, spelled_prefix = units.family_and_prefix(spelled)
-    if spelled_family == family:
-        return float(Decimal(number).scaleb(spelled_prefix.exponent - carried.exponent))
-    return float(np.asarray(spelled.convert_value_to(float(number), resolved)))
-
-
-def _is_known(text: str, registry: UnitRegistry | None) -> bool:
-    try:
-        resolve_unit(text, registry)
-    except UnitError:
-        return False
-    return True
+    with units._lock:
+        return float(units._call("units.parse", text=text, unit=_unit_tree(resolved)))
 
 
 __all__ = [

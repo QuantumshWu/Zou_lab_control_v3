@@ -379,42 +379,37 @@ class AuthoringSchema:
         *,
         require_complete: bool,
     ) -> dict[str, Any]:
-        supplied = dict(values or {})
-        unknown = set(supplied) - set(self.field_names)
-        if unknown:
-            raise ValueError(f"unknown authoring fields: {sorted(unknown)}")
-        result: dict[str, Any] = {}
-        complete = True
-        effective = {field.name: supplied.get(field.name, field.default) for field in self.fields}
-        for field in self.fields:
-            if not condition_enabled(field.enabled_when, effective):
-                result[field.name] = effective[field.name]
-                continue
-            value = project_field(
-                field,
-                supplied.get(field.name, field.default),
-                require_complete=require_complete,
-            )
-            vacant = value is None or (
-                field.required
-                and (
-                    (isinstance(value, str) and not value.strip())
-                    or (isinstance(value, tuple) and not value)
-                )
-            )
-            if vacant and field.required:
-                if require_complete:
-                    raise ValueError(
-                        f"{field.label} must have at least one row"
-                        if str(field.value_type) == "rows"
-                        else f"{field.label} must be filled in"
-                    )
-                complete = False
-            result[field.name] = value
-            effective[field.name] = value
-        if self.validator is not None and complete:
+        from zlc_plugin.declare import field_json
+        from zlc_plugin.native import call
+
+        answer = call("fields.project", fields=[field_json(field) for field in self.fields],
+                      values=dict(values or {}), complete=require_complete)
+        _native_projection_error(answer)
+        result = {field.name: (_projection_shape(field, answer["values"][field.name])
+                              if answer["enabled"][field.name] else answer["values"][field.name]) for field in self.fields}
+        if self.validator is not None and answer["complete"]:
             self.validator(result)
         return result
+
+
+def _native_projection_error(answer):
+    error = answer.get("error")
+    if error is not None:
+        kind = TypeError if error["type"] == "TypeError" else ValueError
+        raise kind(error["message"])
+
+
+def _projection_shape(field, value):
+    # Python collection conventions are an adapter detail; rules live in Rust.
+    if value is None:
+        return None
+    if field.value_type in ("numeric_tuple", "text_tuple"):
+        return tuple(value)
+    if field.value_type == "rows":
+        return tuple({column.name: (_projection_shape(column, row[column.name])
+                                    if condition_enabled(column.enabled_when, row) else row[column.name]) for column in field.columns}
+                     for row in value)
+    return value
 
 
 def project_field(
@@ -429,141 +424,12 @@ def project_field(
     rows field.
     """
 
-    value = _project_value(field, value, require_complete=require_complete)
-    if value is None and str(field.value_type) in ("str", "text", "folder"):
-        # One vacancy spelling per type family: an absent text is the
-        # empty string everywhere (form widgets hold "" natively).
-        value = ""
-    if value is None and str(field.value_type) in ("rows", "text_tuple"):
-        value = ()
-    if field.choices and value is not None and not any(
-        _typed_equal(value, choice.value) for choice in field.choices
-    ):
-        offered = tuple(choice.value for choice in field.choices)
-        raise ValueError(f"{field.label} must be one of {offered!r}")
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        unit = f" {field.unit}" if field.unit else ""
-        if field.minimum is not None and value < field.minimum:
-            raise ValueError(f"{field.label} must be at least {field.minimum}{unit}")
-        if field.maximum is not None and value > field.maximum:
-            raise ValueError(f"{field.label} must be at most {field.maximum}{unit}")
-    return value
+    from zlc_plugin.declare import field_json
+    from zlc_plugin.native import call
 
-
-def _project_value(
-    field: AuthoringField, value: object, *, require_complete: bool
-) -> object:
-    if value is None:
-        return None
-    declared = str(field.value_type)
-    if declared == "rows":
-        if isinstance(value, (str, bytes, Mapping)) or not isinstance(
-            value, (list, tuple)
-        ):
-            raise TypeError(f"{field.label} must be a list of rows")
-        columns = AuthoringSchema(field.columns)
-        rows = []
-        for index, row in enumerate(value, 1):
-            if not isinstance(row, Mapping):
-                raise TypeError(
-                    f"{field.label} row {index} must be a mapping of its columns"
-                )
-            try:
-                rows.append(columns._project(row, require_complete=require_complete))
-            except (TypeError, ValueError) as error:
-                raise type(error)(f"{field.label} row {index}: {error}") from None
-        return tuple(rows)
-    if declared == "text_tuple":
-        # A list of names or labels, each one text: never a string split by
-        # a guessed separator, because a label may hold any character.
-        if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)) or any(
-            not isinstance(item, str) for item in value
-        ):
-            raise TypeError(f"{field.label} must be a list of texts")
-        items = tuple(item.strip() for item in value)
-        if not all(items):
-            raise ValueError(f"{field.label} items must be non-empty text")
-        return items
-    if declared == "numeric_tuple":
-        try:
-            parts = tuple(
-                piece for piece in value.replace(",", " ").split() if piece
-            ) if isinstance(value, str) else tuple(value)
-        except TypeError as error:
-            raise TypeError(f"{field.label} must be a numeric list") from error
-        if not parts:
-            raise ValueError(f"{field.label} needs at least one number")
-        try:
-            if any(isinstance(part, bool) for part in parts):
-                raise TypeError
-            projected = tuple(float(part) for part in parts)
-        except (TypeError, ValueError) as error:
-            raise TypeError(f"{field.label} items must be finite numbers") from error
-        if not all(math.isfinite(item) for item in projected):
-            raise ValueError(f"{field.label} items must be finite")
-        return projected
-    if declared == "pair":
-        if isinstance(value, (tuple, list)):
-            parts = tuple(value)
-        else:
-            parts = tuple(
-                piece
-                for piece in str(value).replace(",", " ").split()
-                if piece
-            )
-        if len(parts) != 2:
-            raise ValueError(f"{field.label} needs two numbers, as y, x")
-        return [
-            _project_integer(part, label=f"{field.label} item")
-            for part in parts
-        ]
-    if declared == "int":
-        return _project_integer(value, label=field.label)
-    if declared == "float":
-        try:
-            if isinstance(value, bool):
-                raise TypeError
-            result = float(value)
-        except (TypeError, ValueError):
-            raise TypeError(f"{field.label} must be a finite number") from None
-        if not math.isfinite(result):
-            raise ValueError(f"{field.label} must be finite")
-        return result
-    if declared == "bool":
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"true", "1", "yes", "on"}:
-                return True
-            if normalized in {"false", "0", "no", "off"}:
-                return False
-        raise TypeError(f"{field.label} must be true or false")
-    if declared in {"str", "text", "choice", "resource", "folder"}:
-        if not isinstance(value, str):
-            if declared not in {"choice"}:
-                raise TypeError(f"{field.label} must be text")
-            return value
-        return value
-    raise ValueError(
-        f"field {field.name!r} is declared as {field.value_type!r}, "
-        "which has no domain value projector"
-    )
-
-
-_DECIMAL_INTEGER = re.compile(r"[+-]?[0-9]+")
-
-
-def _project_integer(value: object, *, label: str) -> int:
-    """Project an authored integer without Python's lossy ``int`` coercions."""
-
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip()
-        if _DECIMAL_INTEGER.fullmatch(normalized):
-            return int(normalized, 10)
-    raise TypeError(f"{label} must be an integer or decimal integer text")
+    answer = call("fields.value", field=field_json(field), value=value, complete=require_complete)
+    _native_projection_error(answer)
+    return _projection_shape(field, answer["value"])
 
 
 __all__ = ["AuthoringChoice", "AuthoringField", "AuthoringSchema", "TunableField",

@@ -1,6 +1,8 @@
 """Durable filesystem primitives: write atomically, land where you meant to.
 
-Every package that saves anything depends on this and on nothing else of ours.
+Saving packages use this facade and the independent native client; no plugin
+SDK or application import is required. Publication/durability rules are shared
+with the native archive owner, while scientific content encoders stay Python.
 It deliberately does NOT carry a canonical encoder or content digests -- an
 archive in this project is plain JSON and plain arrays, readable without
 importing any of our packages.

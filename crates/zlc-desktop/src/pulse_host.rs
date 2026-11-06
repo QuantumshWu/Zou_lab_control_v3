@@ -20,10 +20,11 @@ use zlc_plot::interaction::gesture::InteractionDefaults;
 use zlc_plot::render::panel::NativeRendererFactory;
 use zlc_plot::session::{EngineFitLayer, PlotSession, SessionServices};
 use zlc_pulse::board::{Board, Fate, World};
-use zlc_pulse::run::{ScanAxes, ScanRows, describe_document, done_json, estimate_document, fire_loaded, load_sequence, read_document, run_sequence};
+use zlc_pulse::run::{ScanAxes, ScanRows, apply_run_plan, describe_document, done_json, estimate_document, fire_loaded, load_sequence, read_document, run_sequence};
 use zlc_pulse::json::Json;
 use zlc_pulse::model::Sequence;
 use zlc_pulse::scan::ScanTable;
+use zlc_pulse::scan_plan::{ScanPlanRequest, effective_inner, prepare_application};
 use zlc_pulse::transport::Event;
 use zlc_pulse_editor::editor::{Deployed, Editor};
 use zlc_pulse_editor::session::{Job, Outcome};
@@ -90,14 +91,14 @@ pub enum Handled { Now(Result<Value, String>), Later }
 /// What one of a run's `pulse_run`s leaves the run holding: the document it
 /// read (pinned at the first), the FIRE it sent, the program a `load` stage
 /// put on the board (its accepted receipt).
-pub struct RunReply { run: String, pinned: Option<(PathBuf, Arc<Sequence>)>, fired: Option<u32>, loaded: Option<Value> }
+pub struct RunReply { run: String, pinned: Option<(PathBuf, Arc<Sequence>)>, fired: Option<u32>, loaded: Option<Arc<Value>> }
 
 /// A plugin run's use of the board: each pulse document as its first fire read
 /// it (a later fire of a changed file is refused: a run's record names one
 /// pulse), the FIRE it sent last, the program its `load` stage put on the board,
 /// and its `pulse_run`s still on the lane.
 #[derive(Default)]
-struct RunUse { pinned: BTreeMap<PathBuf, Arc<Sequence>>, fire: Option<u32>, loaded: Option<Value>, in_flight: usize, ended: bool }
+struct RunUse { pinned: BTreeMap<PathBuf, Arc<Sequence>>, fire: Option<u32>, loaded: Option<Arc<Value>>, in_flight: usize, ended: bool }
 
 /// The words a refused fire of a changed pulse file says (a node ends its batch on them).
 pub const PULSE_CHANGED: &str = "changed during this run";
@@ -105,7 +106,7 @@ pub const PULSE_CHANGED: &str = "changed during this run";
 /// One `pulse_run` stage of a run (or a client): `load` (LOAD only, v2
 /// `arm_sequencer`), `fire` (FIRE what that LOAD put on the board) or both.
 fn play(board: &Board, stage: &str, document: &Path, pinned: Option<&Sequence>, loaded: Option<&Value>, values: &[(String, (f64, String))],
-        scan: Option<&ScanRows>, runs: u64, sweeps: u64) -> (Result<Value, String>, Option<(PathBuf, Arc<Sequence>)>, Option<u32>, Option<Value>) {
+        scan: Option<&ScanRows>, native: Option<&ScanPlanRequest>, runs: u64, sweeps: u64) -> (Result<Value, String>, Option<(PathBuf, Arc<Sequence>)>, Option<u32>, Option<Arc<Value>>) {
     let fired = |receipt: &Json| receipt.get("command_id").and_then(Json::as_int).map(|id| id as u32);
     if stage == "fire" {
         let Some(loaded) = loaded else { return (Err("stage fire plays what this run's stage load put on the board; load it first".into()), None, None, None) };
@@ -134,15 +135,36 @@ fn play(board: &Board, stage: &str, document: &Path, pinned: Option<&Sequence>, 
         return (Err(format!("the pulse {name} {PULSE_CHANGED}: the run's record names the pulse it began with, so the changed file is not played; \
                              start the run again to play it")), None, None, None);
     }
-    let played = if stage == "load" { load_sequence(board, &sequence, values, scan) } else { run_sequence(board, &sequence, values, scan, runs, sweeps) };
+    let played = if let Some(native)=native {
+        prepare_application(&sequence,native,values,&board.description().geometry)
+            .and_then(|plan|apply_run_plan(board,&plan,(stage!="load").then_some((runs,sweeps))))
+    } else if stage == "load" { load_sequence(board, &sequence, values, scan) } else { run_sequence(board, &sequence, values, scan, runs, sweeps) };
     match played {
         Err(error) => (Err(error.message), None, None, None),
         Ok(receipt) => {
-            let loaded = (stage == "load").then(|| to_value(&receipt));
+            let loaded = (stage == "load").then(|| Arc::new(to_value(&receipt)));
             let id = fired(&receipt);
             (Ok(to_value(&receipt)), Some((path, Arc::new(sequence))), id, loaded)
         }
     }
+}
+
+/// Full applied facts and quantized rows remain native. The plugin gets only
+/// the receipt identity, Config witness and table dimensions it needs to proceed.
+fn accept_native_receipt(plugins: &PluginHost, run: &str, handle: &str, request: &ScanPlanRequest,
+                         board: &Board, receipt: &mut Value) -> Result<(), String> {
+    let held = board.applied().map_err(|e|e.message)?.ok_or("the board has no applied native scan")?;
+    let sequence = held.source.as_ref().ok_or("the board has no applied pulse source")?;
+    let played = receipt["scan"].is_object().then(|| ScanRows { fields: strings(&receipt["scan"]["fields"]), rows: rows(&receipt["scan"]["rows"]) });
+    let effective = effective_inner(sequence, &request.plan, played.as_ref()).map_err(|e|e.message)?;
+    plugins.accept_scan_pulse(run, handle, effective, receipt["applied"].clone()).map_err(|e|e.to_string())?;
+    let mut compact = json!({"applied":{"config":receipt["applied"]["config"],
+        "program":{"digest":receipt["applied"]["program"]["digest"]}},
+        "scan":{"handle":handle,"outer_index":request.outer_index,"fields":played.as_ref().map(|p|p.fields.clone()).unwrap_or_default(),
+                "row_count":request.plan.inner_count()}});
+    for key in ["command_id","api_values"] { if let Some(value) = receipt.get(key) { compact[key] = value.clone(); } }
+    *receipt = compact;
+    Ok(())
 }
 
 /// The apparatus device the board is: its instance, a local server child, and for the virtual
@@ -711,7 +733,21 @@ impl PulseHost {
                 let document = PathBuf::from(command["document"].as_str().unwrap_or(""));
                 let values = api_values(&command["api_values"]);
                 let scan = command["scan"].is_object().then(|| ScanRows { fields: strings(&command["scan"]["fields"]), rows: rows(&command["scan"]["rows"]) });
+                let native = if command["scan_plan"].is_object() {
+                    if scan.is_some() { return Handled::Now(Err("scan and scan_plan are mutually exclusive".into())); }
+                    let (Some(run), Some(plugins)) = (run, self.plugins.as_ref()) else { return Handled::Now(Err("scan_plan belongs to a live plugin run".into())); };
+                    let Some(handle) = command["scan_plan"]["handle"].as_str().filter(|s|!s.is_empty()) else { return Handled::Now(Err("scan_plan needs its native handle".into())); };
+                    let Some(outer_index) = command["scan_plan"]["outer_index"].as_u64().and_then(|v|usize::try_from(v).ok()) else { return Handled::Now(Err("scan_plan needs an outer point index".into())); };
+                    let plan = match plugins.scan_plan(run,handle) { Ok(plan)=>plan,Err(error)=>return Handled::Now(Err(error.to_string())) };
+                    Some((ScanPlanRequest { plan, outer_index },handle.to_owned()))
+                } else { None };
                 let (runs, sweeps) = (command["run_repeats"].as_u64().unwrap_or(1), command["scan_repeats"].as_u64().unwrap_or(1));
+                if let Some((native,_)) = &native {
+                    let expected_sweeps = if native.plan.outer_axis_count() == 0 { native.plan.spec().scan_repeats } else { 1 };
+                    if stage != "load" && (runs as u128 != native.plan.spec().run_repeats as u128 || sweeps as u128 != expected_sweeps as u128) {
+                        return Handled::Now(Err("pulse repeats differ from the armed native scan plan".into()));
+                    }
+                }
                 let owner = run.map(str::to_owned);
                 let used = owner.as_ref().map(|run| self.runs.entry(run.clone()).or_default());
                 let (pinned, loaded) = used.map_or((None, None), |used| {
@@ -719,8 +755,21 @@ impl PulseHost {
                     (used.pinned.get(&zlc_pulse::codec::absolute(&document)).cloned(), used.loaded.clone())
                 });
                 let post = self.post.clone();
+                let plugins = self.plugins.clone();
                 self.device.run(move || {
-                    let (result, pin, fired, loaded) = play(&board, &stage, &document, pinned.as_deref(), loaded.as_ref(), &values, scan.as_ref(), runs, sweeps);
+                    let descriptor = native.as_ref().map(|(request,handle)|json!({"handle":handle,"outer_index":request.outer_index}));
+                    let mismatch = stage == "fire" && loaded.as_ref().and_then(|value|value.get("native_scan")) != descriptor.as_ref();
+                    let (mut result, pin, fired, mut loaded) = if mismatch {
+                        (Err("stage fire must use the native scan handle and outer point accepted by stage load".into()),None,None,None)
+                    } else {
+                        play(&board, &stage, &document, pinned.as_deref(), loaded.as_deref(), &values, scan.as_ref(), native.as_ref().map(|(request,_)|request), runs, sweeps)
+                    };
+                    if let Some((native,handle)) = &native {
+                        if let Some(value) = &mut loaded { Arc::make_mut(value)["native_scan"] = descriptor.clone().unwrap(); }
+                        if let Ok(receipt) = &mut result {
+                            if let Err(error) = accept_native_receipt(plugins.as_ref().unwrap(),owner.as_deref().unwrap(),handle,native,&board,receipt) { result=Err(error); }
+                        }
+                    }
                     let run = owner.map(|run| RunReply { run, pinned: pin, fired, loaded });
                     post(PulseEvent::Reply { request, result, touched: true, run });
                 });
@@ -1123,6 +1172,79 @@ mod tests {
         let direct=ask(&mut host,&events,"pulse_run",played(&document,"scan#1",1),None).unwrap();
         ask(&mut host,&events,"pulse_wait_done",json!({"command_id":direct["command_id"],"timeout_seconds":30,"_run":"scan#1"}),None).unwrap();
         assert!(ask(&mut host,&events,"pulse_run",fire,None).unwrap_err().contains("load it first"),"a combined run supersedes any staged LOAD");
+    }
+
+    #[test]
+    fn native_scan_plugin_and_real_board_keep_tables_out_of_python_receipts() {
+        use zlc_core::{DType,OwnedBuffer};
+        use zlc_core::control::Origin;
+        use zlc_core::dataset::{DataBlock,Validity};
+        use zlc_core::runtime::{Bundle,Declaration,Input,Runtime,Storage};
+        use zlc_core::schema::{Axis,Coordinates,DatasetSchema,Domain,ValueSchema,ValidityContract};
+        use zlc_plugin_host::{HostConfig,HostEvent,RunRequest};
+        let Some(python)=std::env::var_os("ZLC_PLUGIN_PYTHON") else { return };
+        let (mut pulse,events,document)=host("native_scan_bridge");
+        let root=PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let runtime=Runtime::new();
+        let (sender,plugin_events)=channel(); let sender=Mutex::new(sender);
+        let plugins=PluginHost::new(HostConfig {python:python.into(),python_path:vec![root.join("../../science/src"),root.join("../zlc-plugin-host/tests/plugins")],
+            packages:vec!["zlc_test_plugins".into()],memory_limit_mib:Some(3072)},runtime.clone(),SafeActions::new(),
+            move|event|{let _=sender.lock().unwrap().send(event);}).unwrap();
+        pulse.plugins=Some(plugins.clone());
+        let singleton=Domain::new(vec![1],vec![],vec![]).unwrap();
+        let site=Axis::new("site".into(),"site".into(),"coordinate".into(),Coordinates::Index {origin:0,len:1},None,None,None,None).unwrap();
+        let schema=DatasetSchema::new(singleton.clone(),singleton,Domain::dense(vec![1],vec![site]).unwrap(),
+            ValueSchema::new(DType::U16,None,None,ValidityContract::Value).unwrap()).unwrap();
+        let source=runtime.begin("camera",vec![Declaration {signal:"source".into(),schema:schema.clone(),storage:Storage::Latest}],json!({})).unwrap();
+        plugins.open("scan","native_scan",json!({}),json!({})).unwrap();
+        let spec=json!({"axes":[{"port":"pulse:param:duration:long_before","identity":"duration:long_before","label":"Before","unit":"s",
+            "values":[0.000200003,0.000300007],"coordinate_of":null,"host_advanced":false}],"scan_repeats":2,"run_repeats":2,"pulse_path":document});
+        let run=plugins.start_run("scan",RunRequest {prepared:None,device_labels:Default::default(),devices:Default::default(),shared:Default::default(),
+            values:json!({"spec":spec.to_string(),"mode":"seamless","configure_first":true,"effective_inner":""}),origin:Origin::Operator,
+            resources:json!({}),source_signal:Some("source".into()),run_directory:None,outputs:[("scan".into(),"output".into())].into(),record_devices:false}).unwrap();
+        let mut fired=false; let mut saw_load=false;
+        let (outcome,result,error)=loop {
+            match plugin_events.recv_timeout(Duration::from_secs(30)).expect("native scan event") {
+                HostEvent::Request {run:id,ticket,op,params,..} if id==run=>{
+                    assert_eq!(op,"core");
+                    let action=params["command"].as_str().unwrap();
+                    let mut command=params["params"].clone(); command["_run"]=json!(run);
+                    assert!(command.get("scan").is_none(),"plugin expanded the board table");
+                    let answer=ask(&mut pulse,&events,action,command.clone(),None);
+                    if action=="pulse_run" {
+                        let receipt=answer.as_ref().expect("native pulse accepted");
+                        assert!(receipt["scan"].get("rows").is_none());
+                        assert!(receipt["applied"]["program"].get("rows").is_none());
+                        assert_eq!(receipt["scan"]["row_count"],2);
+                        assert!(receipt.to_string().len()<4096);
+                        if command["stage"]=="load" {
+                            saw_load=true;
+                            assert_eq!(pulse.runs[&run].loaded.as_ref().unwrap()["applied"]["program"]["rows"].as_array().unwrap().len(),2);
+                        }
+                    }
+                    plugins.respond(ticket,answer.map_err(zlc_plugin_host::CallError::from));
+                    if action=="pulse_run" && command["stage"]=="fire" {
+                        assert!(saw_load); fired=true;
+                        for ordinal in 0..8 {
+                            let data=DataBlock::new(schema.clone(),OwnedBuffer::from_vec(vec![ordinal as u16]).into(),Validity::Uniform(true),None).unwrap();
+                            runtime.commit(&source,&Bundle {inputs:vec![Input::Event {signal:"source".into(),ordinal,data,origin:None,shot_time:None}],
+                                metadata:json!({}),parents:vec![]}).unwrap();
+                        }
+                    }
+                },
+                HostEvent::RunFinished {run:id,outcome,result,error,..} if id==run=>break(outcome,result,error),
+                HostEvent::Failed {reason,..}=>panic!("plugin failed: {reason}"),
+                _=>{},
+            }
+        };
+        assert_eq!(outcome,"completed","{error:?}"); assert!(fired);
+        assert_eq!(result,json!({"points":2,"shots":8}));
+        let output=runtime.signals().into_iter().find(|signal|&*signal.signal=="output").unwrap();
+        let latest=runtime.read_latest(&output.generation,"output").unwrap();
+        assert_eq!(latest.canonical().unwrap().written_cells(),8);
+        assert_eq!(latest.run().metadata["device_snapshots"]["sequencer"]["program"]["rows"].as_array().unwrap().len(),2);
+        assert_ne!(latest.run().metadata["plan"]["axes"][0]["values"][0],json!(0.000200003));
+        plugins.shutdown(); pulse.shutdown();
     }
 
 }

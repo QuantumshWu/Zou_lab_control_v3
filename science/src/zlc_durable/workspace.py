@@ -20,7 +20,7 @@ from pathlib import Path
 import re
 from typing import Callable, Iterator
 
-from .durability import _atomic_write_unique_path, _flush_published, durable_makedirs
+from .durability import _atomic_write_unique_path, _claim_directory, durable_makedirs
 
 
 __all__ = [
@@ -124,11 +124,9 @@ def unique_path(
             raise TypeError("a directory allocation does not accept a writer")
         for candidate in candidates():
             try:
-                candidate.mkdir()
+                _claim_directory(candidate)
             except FileExistsError:
                 continue
-            _flush_published(candidate, candidate)
-            _flush_published(directory, candidate)
             return candidate
 
     if _SUFFIX.fullmatch(suffix) is None:
