@@ -14,6 +14,7 @@ pub mod ledger;
 pub mod linear;
 pub mod model;
 pub mod request;
+pub(crate) mod read;
 pub mod rng;
 pub mod solve;
 pub mod stats;
