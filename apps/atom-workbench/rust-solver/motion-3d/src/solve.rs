@@ -1597,16 +1597,11 @@ fn orbits(engine:&Engine,probes:&Probes,period:f64,tolerance:f64,floor:f64,run:f
     // the read was of another integrator than the run's, at many times its work (a saturated probe's rung, 2 ms a step on a grid of 3000 nodes where the run takes its plain path).
     let mut held=engine.settings.clone();held.truncation=held.truncation.min(NUMERICAL_SHARE*POPULATION_TARGET*held.dt/period);
     let engine=&Engine::new(engine.model,held);
-    let(dt,model)=(engine.settings.dt,engine.model);let steps=((period/dt).ceil() as usize).max(1);
-    // A flow's mean κ² per axis, its no-jump survival and its steps: at most `n`, ending where the survival lies within `least`.
-    let flow=|t:&Trajectory,h:f64,n:usize,least:f64|->([f64;3],f64,usize){
-        let mut x=t.clone();let size=model.dimension(x.cluster);let square=|x:&Trajectory|x.psi[..size].iter().map(|z|z.norm_sqr()).sum::<f64>();
-        let(mut sum,mut kept,mut last)=([0.;3],1_f64,square(&x));let mut taken=0;
-        while taken<n&&kept>least{
-            x=engine.coast(&x,h,1);let now=square(&x);kept*=now/last;let root=now.sqrt();for z in x.psi[..size].iter_mut(){*z=*z*(1./root);}last=1.;
-            for a in 0..3{sum[a]+=x.kappa[a]*x.kappa[a];}taken+=1;}
-        (sum.map(|v|v/taken as f64),kept,taken)};
-    let pair=|t:&Trajectory|{let(a,kept,taken)=flow(t,dt,steps,NUMERICAL_SHARE*tolerance);let(b,also,_)=flow(t,0.5*dt,2*taken,0.);at_share(a,b,kept.min(also))};
+    let dt=engine.settings.dt;let steps=((period/dt).ceil() as usize).max(1);
+    let pair=|t:&Trajectory|{
+        let(a,kept,taken)=flow_window(engine,&mut t.clone(),dt,steps,steps,Some(NUMERICAL_SHARE*tolerance));
+        let(b,also,_)=flow_window(engine,&mut t.clone(),0.5*dt,2*taken,2*taken,Some(0.));
+        at_share(a.unwrap(),b.unwrap(),kept.min(also))};
     let first=probes.first.min(probes.states.len());let mut windows:Vec<[[f64;3];2]>=vec![];let mut count=first.min(TASK as usize);
     loop{
         windows.extend(probes.states[windows.len()..count].par_iter().map(|t|pair(t)).collect::<Vec<_>>());
@@ -1618,6 +1613,23 @@ fn orbits(engine:&Engine,probes:&Probes,period:f64,tolerance:f64,floor:f64,run:f
         if !read_pays(((next-count)*steps) as f64,run,high,low){return bound;}
         count=next;
     }
+}
+
+/// The same kinetic-window integral for conditional no-jump or full jump flow.
+/// A conditional window averages every step actually taken, with its survival
+/// stopping rule; a full window averages its requested tail and requires survival.
+fn flow_window(engine:&Engine,x:&mut Trajectory,dt:f64,count:usize,tail:usize,survival:Option<f64>)->(Option<[f64;3]>,f64,usize){
+    let size=engine.model.dimension(x.cluster);let square=|t:&Trajectory|t.psi[..size].iter().map(|z|z.norm_sqr()).sum::<f64>();
+    let(mut sum,mut kept,mut last,mut taken)=([0.;3],1_f64,if survival.is_some(){square(x)}else{1.},0);
+    while taken<count&&survival.is_none_or(|least|kept>least){
+        if survival.is_some(){
+            *x=engine.coast(x,dt,1);let now=square(x);kept*=now/last;
+            let root=now.sqrt();for z in &mut x.psi[..size]{*z=*z*(1./root);}last=1.;
+        }else{if !x.alive{return(None,0.,taken);}engine.step(x);}
+        if survival.is_some()||taken+tail>=count{for a in 0..3{sum[a]+=x.kappa[a]*x.kappa[a];}}taken+=1;
+    }
+    let divisor=if survival.is_some(){taken}else{tail};
+    ((survival.is_some()||x.alive).then(||sum.map(|v|v/divisor as f64)),kept,taken)
 }
 
 /// A pair's windows, at dt and at dt/2, with their difference at a share of the atoms (`orbits`): what `paired_error` reads of it.
@@ -1667,10 +1679,6 @@ pub fn drift(model:&Model,settings:&dyn Fn(usize)->Settings,steps:usize,probes:&
     let window=drift_window(period,duration,dt);let end=((duration/dt).ceil() as usize).max(window);
     let wider=looks_confidence(3.*(1.+(end as f64/window as f64).log2().ceil()))/CONFIDENCE;
     struct Pair{coarse:Trajectory,fine:Trajectory,done:usize,window:Option<[[f64;3];2]>}
-    // A flow's next `count` steps, the κ² of the last `tail`; none once its atom is lost.
-    let flow=|e:&Engine,x:&mut Trajectory,count:usize,tail:usize|->Option<[f64;3]>{let mut sum=[0.;3];
-        for i in 0..count{if !x.alive{return None;}e.step(x);if i+tail>=count{for a in 0..3{sum[a]+=x.kappa[a]*x.kappa[a];}}}
-        x.alive.then(||sum.map(|v|v/tail as f64))};
     let(total,first)=(probes.states.len(),probes.first.min(probes.states.len()));
     let mut pairs:Vec<Pair>=vec![];let(mut reach,mut most,mut quiet)=(window,Drift::default(),0);
     loop{
@@ -1678,7 +1686,8 @@ pub fn drift(model:&Model,settings:&dyn Fn(usize)->Settings,steps:usize,probes:&
         let(largest,at)=loop{
             if pairs.len()<count{pairs.extend(probes.states[pairs.len()..count].iter().map(|t|Pair{coarse:t.clone(),fine:t.clone(),done:0,window:None}));}
             pairs[..count].par_iter_mut().for_each(|p|{let left=reach-p.done;let tail=window.min(left);
-                if left>0{let(a,b)=(flow(&coarse,&mut p.coarse,left,tail),flow(&fine,&mut p.fine,2*left,2*tail));p.done=reach;p.window=a.zip(b).map(|(a,b)|[a,b]);}});
+                if left>0{let(a,_,_)=flow_window(&coarse,&mut p.coarse,dt,left,tail,None);
+                    let(b,_,_)=flow_window(&fine,&mut p.fine,0.5*dt,2*left,2*tail,None);p.done=reach;p.window=a.zip(b).map(|(a,b)|[a,b]);}});
             let windows:Vec<[[f64;3];2]>=pairs[..count].iter().filter_map(|p|p.window).collect();let axes=if !reads_spread(windows.len() as f64){[[0.;2];3]}else{paired_error(&windows).map(|[size,errors]|[size,wider*errors])};
             let at=count as f64/probes.states[..count].iter().map(|t|1./limit(t.time+reach as f64*dt)).sum::<f64>();
             let largest=axes.into_iter().max_by(|a,b|standing(*a,at).total_cmp(&standing(*b,at))).unwrap();
