@@ -16,24 +16,34 @@ fn finite_repeat_count(value: u64, field_name: &str) -> Result<u64> {
     Ok(value)
 }
 
-/// Finite execution rows in `scan -> row -> run` order.
-fn scan_points(program: &CompiledProgram, table: Option<&[Vec<u64>]>, run_repeats: u64, scan_repeats: u64) -> Result<Vec<Vec<u64>>> {
+/// A validated finite scan, retaining its table once instead of expanding repeats.
+struct ScanPoints<'a> { rows: &'a [Vec<u64>], run_repeats: u64, scan_repeats: u64 }
+
+impl<'a> ScanPoints<'a> {
+    /// Finite execution rows in `scan -> row -> run` order, borrowed as needed.
+    fn iter(&self) -> impl Iterator<Item = &'a [u64]> + '_ {
+        (0..self.scan_repeats).flat_map(move |_| self.rows.iter()
+            .flat_map(move |row| (0..self.run_repeats).map(move |_| row.as_slice())))
+    }
+}
+
+fn scan_points<'a>(program: &CompiledProgram, table: Option<&'a [Vec<u64>]>, run_repeats: u64, scan_repeats: u64) -> Result<ScanPoints<'a>> {
     let run_repeats = finite_repeat_count(run_repeats, "run_repeats")?;
     let scan_repeats = finite_repeat_count(scan_repeats, "scan_repeats")?;
-    let rows: Vec<Vec<u64>> = match table {
+    static FIXED_ROWS: [Vec<u64>; 1] = [Vec::new()];
+    let rows = match table {
         None => {
             if program.slot_count() > 0 { return value_error("a slotted program requires an explicit value table"); }
             if scan_repeats != 1 { return value_error("scan_repeats must be 1 when there is no scan table"); }
-            vec![Vec::new()]
+            &FIXED_ROWS[..]
         }
         Some(rows) => {
             if rows.iter().any(|row| row.len() != program.slot_count()) { return value_error("table width differs from the program slot count"); }
             if rows.is_empty() { return value_error("table must contain at least one row"); }
-            rows.to_vec()
+            rows
         }
     };
-    let sweep: Vec<Vec<u64>> = rows.iter().flat_map(|row| std::iter::repeat_n(row.clone(), run_repeats as usize)).collect();
-    Ok((0..scan_repeats).flat_map(|_| sweep.iter().cloned()).collect())
+    Ok(ScanPoints { rows, run_repeats, scan_repeats })
 }
 
 type Shapes = BTreeMap<Vec<u64>, (Vec<(usize, u128)>, u128)>;
@@ -64,7 +74,7 @@ fn channel_edges(program: &CompiledProgram, channels: &[&str], table: Option<&[V
         bits.push(bit);
     }
     let points = scan_points(program, table, run_repeats, scan_repeats)?;
-    let shapes = point_shapes(program, &points, bracket_bodies)?;
+    let shapes = point_shapes(program, points.rows, bracket_bodies)?;
     let mut streams = Vec::new();
     for bit in bits {
         let delay = u128::from(program.channel_delays[bit]);
@@ -72,7 +82,7 @@ fn channel_edges(program: &CompiledProgram, channels: &[&str], table: Option<&[V
         let mut ticks = Vec::new();
         let mut previous = false;
         let mut offset: u128 = 0;
-        for point in &points {
+        for point in points.iter() {
             let (visits, total) = &shapes[point];
             for &(row, tick) in visits {
                 let level = levels[row];
@@ -112,9 +122,9 @@ pub fn bus_action_ticks(program: &CompiledProgram, table: Option<&[Vec<u64>]>, r
     for action in &program.bus_actions { by_row.entry(action.row as usize).or_default().push(action.bus_index as usize); }
     let mut ticks = vec![Vec::new(); program.bus_names.len()];
     let points = scan_points(program, table, run_repeats, scan_repeats)?;
-    let shapes = point_shapes(program, &points, bracket_bodies)?;
+    let shapes = point_shapes(program, points.rows, bracket_bodies)?;
     let mut offset: u128 = 0;
-    for point in &points {
+    for point in points.iter() {
         let (visits, total) = &shapes[point];
         for &(row, tick) in visits {
             for &bus in by_row.get(&row).map(Vec::as_slice).unwrap_or(&[]) {
@@ -128,10 +138,14 @@ pub fn bus_action_ticks(program: &CompiledProgram, table: Option<&[Vec<u64>]>, r
 
 /// `run_duration_seconds`: the exact finite playback duration of one run.
 pub fn run_duration_seconds(program: &CompiledProgram, table: Option<&[Vec<u64>]>, run_repeats: u64, scan_repeats: u64) -> Result<f64> {
-    let mut total = BigUint::zero();
-    for point in scan_points(program, table, run_repeats, scan_repeats)? {
-        total = total.add(&BigUint::from_u128(program.frame_ticks(&point)?));
+    let points = scan_points(program, table, run_repeats, scan_repeats)?;
+    let mut sweep = BigUint::zero();
+    for point in points.rows {
+        sweep = sweep.add(&BigUint::from_u128(program.frame_ticks(point)?));
     }
+    // Keep the exact integer sum until the same final float conversion as an
+    // expanded run. A run's total may exceed u128 even when each Pulse fits.
+    let total = sweep.mul_small(points.run_repeats).mul_small(points.scan_repeats);
     Ok(big_to_f64(&total) / program.clock_hz)
 }
 
