@@ -335,9 +335,45 @@ mod snapshot_tests {
             python_path: vec![root.join("../../science/src"), root.join("tests/plugins")],
             packages: vec!["zlc_test_plugins".into()], memory_limit_mib: Some(3072),
         }, Runtime::new(), SafeActions::new(), |_| {}).unwrap();
+        crate::test_application::install(&host).unwrap();
         host.open("echo", "test.echo", json!({}), json!({})).unwrap();
         let process = host.inner.state.lock().unwrap().instances["echo"].serving.process().unwrap().clone();
         Some((host, process))
+    }
+
+    #[test]
+    fn service_workers_release_failed_arrays_and_cannot_restore_exited_process_resources() {
+        let Some((host, process)) = host() else { return };
+        let names = Arc::new(Mutex::new(Vec::<String>::new()));
+        let exported = names.clone();
+        let (started, ready) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        let resumed = Mutex::new(resumed);
+        *host.inner.services.lock().unwrap() = Some(Arc::new(move |_, params, context| {
+            if params["wait"] == true {
+                context.install_resource("fixture", Arc::new(7_u64))?;
+                started.send(()).unwrap();
+                resumed.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+                assert!(context.install_resource("late", Arc::new(8_u64)).is_err());
+            }
+            let values = zlc_core::OwnedBuffer::from_vec(vec![9_u8; crate::wire::INLINE_BYTES]);
+            let value = context.write_array(&values.into(), &[crate::wire::INLINE_BYTES])?;
+            exported.lock().unwrap().push(value["$array"]["block"].as_str().unwrap().to_owned());
+            if params["wait"] == true { Ok(value) } else { Err(CallError::new(ErrorKind::Failed, "fixture failure")) }
+        }));
+        let result = host.inner.service_request(&process, &json!({"operation":"fixture", "params":{}}), Vec::new());
+        assert_eq!(result.err().unwrap().kind, ErrorKind::Failed);
+        assert_eq!(host.registry().holds(&names.lock().unwrap()[0]), 0, "failed handlers retain no output holds");
+        let (inner, caller) = (host.inner.clone(), process.clone());
+        let pending = std::thread::spawn(move || inner.service_request(&caller,
+            &json!({"operation":"fixture", "params":{"wait":true}}), Vec::new()));
+        ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        host.shutdown();
+        assert!(!process.alive.load(Ordering::Acquire));
+        resume.send(()).unwrap();
+        assert!(pending.join().unwrap().is_err());
+        assert!(!host.inner.process_resources.lock().unwrap().contains_key(&process.pid()));
+        for name in names.lock().unwrap().iter() { assert_eq!(host.registry().holds(name), 0, "late output {name} leaked"); }
     }
 
     #[test]

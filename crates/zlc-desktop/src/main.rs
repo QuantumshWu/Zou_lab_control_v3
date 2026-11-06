@@ -27,6 +27,9 @@ mod bench;
 mod share;
 mod slm_host;
 mod readers;
+mod plugin_services;
+#[cfg(test)]
+mod scan_service_tests;
 mod run_artifacts;
 mod run_fit;
 mod viewer_logic;
@@ -452,6 +455,10 @@ fn window_setup() -> Result<(WebContext, windows::Setup), Box<dyn std::error::Er
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--plugin-services") {
+        if let Err(error)=plugin_services::offline(){eprintln!("{error}");std::process::exit(1);}
+        return;
+    }
     trace::point("startup.main", || json!({"created_ns": trace::process_created_ns()}));
     let routed = diagnostics::route(if std::env::args().any(|arg| arg == "--installer") { "installation" } else { "zlc-desktop" });
     // `run` returns only when the application cannot start; its event loop ends the process.
@@ -616,7 +623,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     }).and_then(|config| zlc_plugin_host::PluginHost::new(
         config, runtime.clone(), safe_actions.clone(), move |event| {
             if let Ok(proxy) = plugin_proxy.lock() { let _ = proxy.send_event(AppEvent::Plugin(event)); }
-        }));
+        })).and_then(|host| { plugin_services::install(&host)?; Ok(host) });
     match &plugins {
         Ok(host) if !matches!(mode, Mode::PulseEditor(_)) => {
             let (warming, ready) = (host.clone(), std::sync::Mutex::new(event_loop.create_proxy()));

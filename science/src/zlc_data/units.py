@@ -34,6 +34,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
+import math
 from threading import RLock
 
 import numpy as np
@@ -100,7 +101,8 @@ class Scaled:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "factor", float(self.factor))
-        _conversion_facts(self)
+        if not math.isfinite(self.factor) or self.factor == 0.0:
+            raise UnitError("unit factor must be finite and non-zero")
 
     def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
         return _apply_conversion(self, values, inverse=False)
@@ -123,7 +125,8 @@ class Offset:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "offset", float(self.offset))
-        _conversion_facts(self)
+        if not math.isfinite(self.offset):
+            raise UnitError("unit offset must be finite")
 
     def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
         return _apply_conversion(self, values, inverse=False)
@@ -153,7 +156,10 @@ class Decibel:
     def __post_init__(self) -> None:
         object.__setattr__(self, "reference", float(self.reference))
         object.__setattr__(self, "factor", float(self.factor))
-        _conversion_facts(self)
+        if not math.isfinite(self.reference) or self.reference <= 0.0:
+            raise UnitError("decibel reference must be finite and positive")
+        if not math.isfinite(self.factor) or self.factor == 0.0:
+            raise UnitError("decibel factor must be finite and non-zero")
 
     def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
         return _apply_conversion(self, values, inverse=False)
@@ -178,7 +184,10 @@ class VoltageIntoLoad:
     def __post_init__(self) -> None:
         object.__setattr__(self, "load_ohms", float(self.load_ohms))
         object.__setattr__(self, "mean_square_divisor", float(self.mean_square_divisor))
-        _conversion_facts(self)
+        if not math.isfinite(self.load_ohms) or self.load_ohms <= 0.0:
+            raise UnitError("a load must be finite and positive")
+        if not math.isfinite(self.mean_square_divisor) or self.mean_square_divisor <= 0.0:
+            raise UnitError("a mean-square divisor must be finite and positive")
 
     def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
         return _apply_conversion(self, values, inverse=False)
@@ -203,7 +212,10 @@ class Prefixed:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "factor", float(self.factor))
-        _conversion_facts(self)
+        if not math.isfinite(self.factor) or self.factor <= 0.0:
+            raise UnitError("a prefix factor must be finite and positive")
+        if not isinstance(self.inner, (Scaled, Offset, Decibel, VoltageIntoLoad, Prefixed)):
+            raise UnitError("unknown unit conversion")
 
     def to_base(self, values: ArrayLike) -> NDArray[np.generic]:
         return _apply_conversion(self, values, inverse=False)
@@ -254,15 +266,53 @@ class Unit:
     #: duration into device ticks -- reads the integer and builds its own
     #: exact ratio from it.  ``None`` for a unit that is not a power of ten
     #: (a degree) and for a level (dBm).
-    decade: int | None = field(init=False, default=None)
+    _decade: int | None = field(init=False, default=None, repr=False, compare=False)
+    _coordinate_scale: tuple[str, float] | None = field(init=False, default=None, repr=False, compare=False)
+    _decade_known: bool = field(init=False, default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        # Construction is a local immutable-value operation. Binding to a
+        # registry, requesting derived facts and converting values use the
+        # native rules explicitly; importing a descriptor needs no engine.
+        for name in ("symbol", "dimension"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value or value.strip() != value:
+                raise UnitError(f"unit {name} must be a non-empty, trimmed string")
+        if not isinstance(self.conversion, (Scaled, Offset, Decibel, VoltageIntoLoad, Prefixed)):
+            raise UnitError("unknown unit conversion")
         if isinstance(self.prefixes, str) or isinstance(self.aliases, str):
             raise UnitError("unit prefixes and aliases must be sequences, not strings")
-        answer = _unit_native("units.validate", unit=_unit_tree(self))
-        object.__setattr__(self, "prefixes", tuple(answer["prefixes"]))
-        object.__setattr__(self, "aliases", tuple(answer["aliases"]))
-        object.__setattr__(self, "decade", answer["decade"])
+        prefixes, aliases = tuple(self.prefixes), tuple(self.aliases)
+        allowed = {prefix.symbol for prefix in PREFIXES if prefix.symbol}
+        if any(not isinstance(prefix, str) or prefix not in allowed for prefix in prefixes):
+            raise UnitError(f"unit {self.symbol!r} names prefixes the table lacks")
+        if len(set(prefixes)) != len(prefixes):
+            raise UnitError(f"unit {self.symbol!r} names a prefix twice")
+        if any(not isinstance(alias, str) or not alias or alias.strip() != alias for alias in aliases):
+            raise UnitError("unit aliases must be non-empty, trimmed strings")
+        if len(set((self.symbol, *aliases))) != len(aliases) + 1:
+            raise UnitError(f"unit {self.symbol!r} contains duplicate names")
+        if self.inverse_dimension is not None and (not isinstance(self.inverse_dimension, str)
+                or not self.inverse_dimension or self.inverse_dimension.strip() != self.inverse_dimension):
+            raise UnitError("unit inverse_dimension must be a non-empty, trimmed string or None")
+        object.__setattr__(self, "prefixes", prefixes)
+        object.__setattr__(self, "aliases", aliases)
+
+    @property
+    def decade(self) -> int | None:
+        """An exact decade derived by the native owner, cached on first request."""
+        self.validate()
+        return self._decade
+
+    def validate(self) -> "Unit":
+        """Explicitly bind this definition to the native unit rules, once."""
+        if not self._decade_known:
+            facts = _unit_facts(self)
+            object.__setattr__(self, "_decade", facts["decade"])
+            scale = facts["coordinate_scale"]
+            object.__setattr__(self, "_coordinate_scale", None if scale is None else tuple(scale))
+            object.__setattr__(self, "_decade_known", True)
+        return self
 
     @property
     def ladder(self) -> tuple[Prefix, ...]:
@@ -274,17 +324,16 @@ class Unit:
         unit are spelled and ordered the same way.
         """
 
-        offered = _unit_facts(self)["ladder"]
-        return tuple(prefix for symbol in offered for prefix in PREFIXES if prefix.symbol == symbol)
+        return tuple(prefix for prefix in PREFIXES if prefix.exponent == 0 or prefix.symbol in self.prefixes)
 
     @property
     def is_linear(self) -> bool:
-        return bool(_unit_facts(self)["linear"])
+        return isinstance(self.conversion, Scaled)
 
     @property
     def coordinate_scale(self) -> tuple[str, float] | None:
-        result = _unit_facts(self)["coordinate_scale"]
-        return None if result is None else tuple(result)
+        self.validate()
+        return self._coordinate_scale
 
     @property
     def scale(self) -> float:
@@ -312,7 +361,7 @@ class Unit:
         microsecond axis.
         """
 
-        return bool(_unit_facts(self)["base"])
+        return isinstance(self.conversion, Scaled) and self.conversion.factor == 1.0
 
     def compatible_with(self, other: "Unit") -> bool:
         return self.dimension == other.dimension
@@ -331,6 +380,7 @@ class Unit:
         """Values in this unit, in ``target`` -- the one conversion callers use."""
 
         if self == target:
+            self.validate()
             return np.asarray(values)
         facts = _conversion_facts(self.conversion)
         array = np.asarray(values, dtype=float if facts["initial_real_to"] else None)
@@ -402,16 +452,20 @@ def _unit_from_tree(value):
     # Native definitions are already validated. Reconstructing a Python value
     # must not recursively ask the backend to validate the backend's own answer.
     unit = object.__new__(Unit)
-    for name in ("symbol", "dimension", "inverse_dimension", "decade"):
+    for name in ("symbol", "dimension", "inverse_dimension"):
         object.__setattr__(unit, name, value[name])
     for name in ("prefixes", "aliases"):
         object.__setattr__(unit, name, tuple(value[name]))
     object.__setattr__(unit, "conversion", _conversion_from_tree(value["conversion"]))
+    object.__setattr__(unit, "_decade", value["decade"])
+    scale = value["coordinate_scale"]
+    object.__setattr__(unit, "_coordinate_scale", None if scale is None else tuple(scale))
+    object.__setattr__(unit, "_decade_known", True)
     return unit
 
 
 def _unit_native(operation, **params):
-    from zlc_native import call
+    from zlc_plugin.services import call
     try:
         return call(operation, **params)
     except ValueError as error:
@@ -493,7 +547,7 @@ class UnitRegistry:
 
     def resolve(self, unit: UnitLike) -> Unit:
         if isinstance(unit, Unit):
-            return unit
+            return unit.validate()
         if not isinstance(unit, str):
             raise TypeError("unit must be a Unit or registered symbol")
         with self._lock:

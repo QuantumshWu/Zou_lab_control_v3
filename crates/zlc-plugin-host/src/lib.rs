@@ -8,17 +8,22 @@
 //! registers physical outputs for Stop all. The core holds no interpreter: an
 //! instance whose call hangs is a failed instance, a process that stops
 //! answering is failed instances, and each can be opened again.
+#[cfg(test)]
+extern crate self as zlc_plugin_host;
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_application;
+
 pub mod blocks;
 mod cache;
 pub mod descriptor;
 mod files;
 mod frame;
 mod lifecycle;
-mod native;
 mod native_input;
 mod outgoing;
 mod process;
-mod scan;
+pub mod services;
 pub mod schema;
 pub mod wire;
 pub mod workers;
@@ -323,8 +328,7 @@ struct RunState {
     lifecycle: lifecycle::RunLifecycle,
     /// An exact input consumed by a core service, never encoded for Python.
     core_input: Option<Arc<Mutex<native_input::CoreInput>>>,
-    scan: Option<Arc<Mutex<scan::Session>>>,
-    native: Arc<Mutex<zlc_native::Service>>,
+    resources: services::Resources,
 }
 
 /// What work done for a run watches: set when the run is asked to stop, and when it is gone.
@@ -416,9 +420,9 @@ struct Inner {
     gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Where a node's device calls wait, beside the channels they arrived on.
     device_calls: workers::Workers,
-    scan_calls: workers::Workers,
-    native_calls: workers::Workers,
-    native_services: Mutex<HashMap<u32, Arc<Mutex<zlc_native::Service>>>>,
+    service_calls: workers::Workers,
+    services: Mutex<Option<services::Handler>>,
+    process_resources: Mutex<HashMap<u32, services::Resources>>,
 }
 
 /// The plugin host. Cheap to clone; clones share it.
@@ -455,8 +459,7 @@ impl PluginHost {
             Inner { environment: plugin_environment(&config.python), config, session, runtime, safe, registry, job, catalog: Mutex::new(None),
                     state: Mutex::default(), processes: Mutex::default(), events: Box::new(events), gates: Mutex::default(),
                     device_calls: workers::Workers::new("zlc-plugin-device-call"),
-                    scan_calls: workers::Workers::new("zlc-plugin-scan"),
-                    native_calls: workers::Workers::new("zlc-plugin-native"), native_services: Mutex::default() }
+                    service_calls: workers::Workers::new("zlc-plugin-service"), services: Mutex::default(), process_resources: Mutex::default() }
         });
         let watched = Arc::downgrade(&inner);
         std::thread::Builder::new().name("zlc-plugin-watch".into()).spawn(move || watch(watched)).map_err(|error| error.to_string())?;
@@ -855,8 +858,7 @@ impl PluginHost {
             });
             state.instances.get_mut(instance).unwrap().run = Some(RunState { id: run.clone(), origin: request.origin.clone(),
                 devices: request.devices.clone(), signals: request.outputs.clone(), generation: None, route, consumer, outputs: HashMap::new(),
-                histories: Vec::new(), apparatus: None, stop: RunStop(Arc::default()), lifecycle: lifecycle::RunLifecycle::default(), core_input: native_input, scan: None,
-                native: Arc::new(Mutex::new(zlc_native::Service::default())) });
+                histories: Vec::new(), apparatus: None, stop: RunStop(Arc::default()), lifecycle: lifecycle::RunLifecycle::default(), core_input: native_input, resources: Default::default() });
             (process, devices, source, following)
         };
         let started = process.request("run.start", json!({"instance": instance, "run": run, "values": request.values,
@@ -1150,8 +1152,8 @@ impl Inner {
     }
 
     fn process_exited(&self, process: &Arc<PluginProcess>, reason: String) {
-        self.native_services.lock().unwrap().remove(&process.pid());
         process.ended();
+        self.process_resources.lock().unwrap().remove(&process.pid());
         self.registry.holder_gone(process.pid());
         let retiring = process.retiring.load(Ordering::Acquire);
         let names: Vec<String> = process.instances.lock().unwrap().iter().cloned().collect();
@@ -1248,21 +1250,11 @@ impl Inner {
     fn plugin_request(self: &Arc<Self>, process: &Arc<PluginProcess>, message: Value, lends: Vec<Arc<Lend>>) {
         let id = message["id"].clone();
         let op = message["op"].as_str().unwrap_or("").to_owned();
-        if op == "native" {
+        if op == "service" {
             let (inner, process) = (self.clone(), process.clone());
-            self.native_calls.run(move || {
-                let answer = inner.native_request(&process, &message["p"], &lends);
+            self.service_calls.run(move || {
+                let answer = inner.service_request(&process, &message["p"], lends);
                 inner.answer(&process, &id, answer);
-            });
-            return;
-        }
-        if op.starts_with("run.scan.") {
-            // Input waits must never hold the plugin reader (the source can be
-            // another node in that same process). Services reuse warm workers.
-            let (inner, process) = (self.clone(), process.clone());
-            self.scan_calls.run(move || {
-                let answer = inner.scan_request(process.pid(), &op, &message["p"]);
-                inner.answer(&process, &id, answer.map(|value| (value, Vec::new())));
             });
             return;
         }
@@ -1312,12 +1304,20 @@ impl Inner {
             Ok((value, blocks)) => json!({"t": "res", "id": id, "ok": value, "blocks": blocks}),
             Err(error) => json!({"t": "res", "id": id, "error": error.wire()}),
         };
-        if let Err(error) = process.send(&message) { eprintln!("Plugin {} answer: {error}", process.key); }
+        if let Err(error) = process.send(&message) {
+            let blocks: Vec<_> = message["blocks"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+            self.registry.released_by(process.pid(), &blocks);
+            eprintln!("Plugin {} answer: {error}", process.key);
+        }
     }
 
     fn run_of<'a>(state: &'a mut State, params: &Value) -> Result<&'a mut RunState, CallError> {
         let instance = params["instance"].as_str().unwrap_or("");
         let run = params["run"].as_str().unwrap_or("");
+        Self::run_named(state, instance, run)
+    }
+
+    fn run_named<'a>(state: &'a mut State, instance: &str, run: &str) -> Result<&'a mut RunState, CallError> {
         state.instances.get_mut(instance).and_then(|entry| entry.run.as_mut()).filter(|current| current.id == run)
             .ok_or_else(|| CallError::new(ErrorKind::StaleRun, format!("{run} is not {instance}'s current run")))
     }
@@ -1903,6 +1903,7 @@ mod tests {
             python_path: vec![root.join("../../science/src"), root.join("tests/plugins")],
             packages: vec!["zlc_test_plugins".into()], memory_limit_mib: Some(3072),
         }, Runtime::new(), SafeActions::new(), |_| {}).unwrap();
+        crate::test_application::install(&host).unwrap();
         host.open("rf", "test.fabric", json!({}), json!({})).unwrap();
         let request = host.admit_local("rf", true).unwrap();
         host.lend_out("rf", Arc::new(|_, _, _| {})).unwrap();

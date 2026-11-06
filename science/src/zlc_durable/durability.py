@@ -26,12 +26,12 @@ class DirectoryDurabilityError(RuntimeError):
 
 
 def _context():
-    from zlc_native import current_context
+    from zlc_plugin.services import current_context
     return current_context()
 
 
 def _native(operation: str, **params):
-    from zlc_native import call
+    from zlc_plugin.services import call
     answer = call("durable." + operation, params)
     if "error" not in answer:
         return answer["ok"]

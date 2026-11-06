@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import functools
 import numpy as np
-from zlc_plugin.native import call
+from zlc_plugin.services import call
 from zlc_data.codec import dataset_schema_to_tree, dataset_schema_from_tree
 
 

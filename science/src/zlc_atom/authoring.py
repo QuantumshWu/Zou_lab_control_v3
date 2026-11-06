@@ -380,7 +380,7 @@ class AuthoringSchema:
         require_complete: bool,
     ) -> dict[str, Any]:
         from zlc_plugin.declare import field_json
-        from zlc_plugin.native import call
+        from zlc_plugin.services import call
 
         answer = call("fields.project", fields=[field_json(field) for field in self.fields],
                       values=dict(values or {}), complete=require_complete)
@@ -425,7 +425,7 @@ def project_field(
     """
 
     from zlc_plugin.declare import field_json
-    from zlc_plugin.native import call
+    from zlc_plugin.services import call
 
     answer = call("fields.value", field=field_json(field), value=value, complete=require_complete)
     _native_projection_error(answer)

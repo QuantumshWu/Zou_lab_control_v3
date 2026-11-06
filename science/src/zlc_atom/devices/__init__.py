@@ -7,138 +7,231 @@ import time
 
 
 class RecordQueue:
-    """Owned Python records over the process-local Rust capture ledger.
+    """Bounded FIFO of already-owned records, shared by device adapters.
 
-    Native policy decides admission, ordinals, capacity, readiness and terminal
-    evidence. Python retains object lifetime, SDK workers and condition wakeups.
+    Adapters construct their records and own SDK start/read/stop. This queue
+    checks capture ordinals, preserves every accepted record, and reports
+    overflow/failure before handing out data. An optional producer worker is
+    stopped and joined here; a device-owned SDK lane is never replaced.
     """
 
     def __init__(self, what: str, *, join_timeout_seconds: float) -> None:
-        from zlc_plugin.capture import CaptureLedger
         self._what = str(what)
         self._join_timeout = float(join_timeout_seconds)
         self._condition = threading.Condition()
         self._queue: deque[object] = deque()
-        self._ledger = CaptureLedger(self._what)
-        self._cause: BaseException | None = None
+        self._armed = False
+        self._accepting = False
+        self._expected: int | None = None
+        self._buffer_record_count = 1
+        self._produced_count = 0
+        self._failure: BaseException | None = None
         self._worker: threading.Thread | None = None
         self._stop: threading.Event | None = None
         self._ready = threading.Event()
 
-    def _state(self, key):
-        with self._condition:
-            return self._ledger.state()[key]
-
     @property
     def armed(self) -> bool:
-        return self._state("armed")
+        with self._condition:
+            return self._armed
 
     @property
     def accepting(self) -> bool:
-        return self._state("accepting")
+        with self._condition:
+            return self._accepting
 
     @property
     def produced_count(self) -> int:
-        return self._state("produced")
+        with self._condition:
+            return self._produced_count
 
     @property
     def pending_count(self) -> int:
-        return self._state("pending")
+        with self._condition:
+            return len(self._queue)
 
     @property
     def capacity(self) -> int:
-        return self._state("capacity")
+        with self._condition:
+            return self._buffer_record_count
 
     @property
     def failure(self) -> BaseException | None:
-        message = self._state("failure")
-        return None if message is None else self._cause or RuntimeError(f"{self._what} {message}")
-
-    def arm(self, records: int | None, *, buffer_record_count: int,
-            worker: Callable[[threading.Event], threading.Thread] | None = None) -> None:
         with self._condition:
-            self._ledger.call("arm", expected=None if records is None else int(records), capacity=int(buffer_record_count),
-                              worker_alive=self._worker is not None and self._worker.is_alive())
+            return self._failure
+
+    def arm(
+        self,
+        records: int | None,
+        *,
+        buffer_record_count: int,
+        worker: Callable[[threading.Event], threading.Thread] | None = None,
+    ) -> None:
+        """Start a capture; ``worker`` builds the producer thread from its stop event."""
+
+        buffer_count = int(buffer_record_count)
+        if buffer_count <= 0:
+            raise ValueError("buffer_record_count must be positive")
+        expected = None if records is None else int(records)
+        if expected is not None and expected <= 0:
+            raise ValueError("finite records must be positive")
+        with self._condition:
+            if self._armed:
+                raise RuntimeError(f"{self._what} is already armed")
+            if self._worker is not None and self._worker.is_alive():
+                raise RuntimeError(f"{self._what} is still finishing its previous capture")
             self._queue.clear()
-            self._cause = None
+            self._failure = None
+            self._armed = True
+            self._accepting = True
+            self._expected = expected
+            self._buffer_record_count = buffer_count
+            self._produced_count = 0
             self._ready.clear()
             if worker is None:
                 return
             stop = threading.Event()
             try:
                 thread = worker(stop)
-                self._worker, self._stop = thread, stop
+                self._worker = thread
+                self._stop = stop
                 thread.start()
             except BaseException:
-                self._worker = self._stop = None
-                self._ledger.call("close", worker_alive=False)
+                self._worker = None
+                self._stop = None
+                self._armed = False
+                self._accepting = False
                 raise
 
     def mark_ready(self) -> None:
-        with self._condition:
-            self._ledger.call("ready")
-            self._ready.set()
+        """The producer has started the hardware needed for this capture."""
+
+        self._ready.set()
 
     def wait_ready(self, timeout: float) -> None:
         if not self._ready.wait(timeout):
             raise TimeoutError(f"{self._what} did not become ready")
         with self._condition:
-            self._ledger.call("check_ready")
+            if self._failure is not None:
+                raise RuntimeError(f"{self._what} failed while arming: {self._failure}") from self._failure
+            if not self._armed:
+                raise RuntimeError(f"{self._what} stopped before becoming ready")
 
     def push(self, record: object) -> bool:
+        """Keep one complete record; failures stop acceptance without dropping."""
+
         with self._condition:
+            if not self._accepting:
+                return False
             ordinal = getattr(record, "source_ordinal", None)
-            answer = self._ledger.call("push", ordinal=ordinal if type(ordinal) is int else None,
-                                       observed_at_ns=time.time_ns())
-            if answer["accepted"]:
-                self._queue.append(record)
-            else:
-                self._ready.set()
+            if type(ordinal) is not int or ordinal != self._produced_count:
+                self.fail(RuntimeError(
+                    f"{self._what} record ordinal {ordinal!r} is not "
+                    f"the expected {self._produced_count} "
+                    f"(observed_at_ns={time.time_ns()})"
+                ))
+                return False
+            if len(self._queue) >= self._buffer_record_count:
+                self.fail(RuntimeError(
+                    f"{self._what} capture buffer overflow at record {self._produced_count} "
+                    f"(capacity {self._buffer_record_count}, observed_at_ns={time.time_ns()}); "
+                    "no queued record was discarded"
+                ))
+                return False
+            self._produced_count += 1
+            self._queue.append(record)
+            if self._expected is not None and self._produced_count >= self._expected:
+                self._accepting = False
             self._condition.notify_all()
-            return bool(answer["accepted"])
+            return True
 
     def fail(self, error: BaseException) -> None:
+        """Fail this capture and notify readers; device lifetime is independent."""
+
         with self._condition:
-            if self._ledger.state()["failure"] is None:
-                self._cause = error
-            self._ledger.call("fail", message=str(error))
+            if self._failure is None:
+                self._failure = error
+            self._accepting = False
             self._ready.set()
             self._condition.notify_all()
 
     def read(self, n: int, *, timeout: float, exact: bool) -> list[object]:
+        """``exact``: wait up to ``timeout`` for all ``n`` records, else raise.
+
+        Not exact: up to ``n`` records, as soon as there is one -- what a
+        reader that drains the queue in batches needs, so a backlog is taken
+        in one call instead of one call per record.
+        """
+
         requested = int(n)
+        if requested <= 0:
+            raise ValueError("n must be positive")
+        wanted = requested if exact else 1
         deadline = time.monotonic() + max(0.0, float(timeout))
         with self._condition:
             while True:
+                if self._failure is not None:
+                    raise RuntimeError(
+                        f"{self._what} failed while producing records: {self._failure}"
+                    ) from self._failure
+                if len(self._queue) >= wanted:
+                    break
+                if not self._armed or not self._accepting:
+                    break
                 remaining = deadline - time.monotonic()
-                answer = self._ledger.call("read", count=requested, exact=bool(exact), timed_out=remaining <= 0.0)
-                if not answer["wait"]:
-                    return [self._queue.popleft() for _ in range(answer["count"])]
+                if remaining <= 0.0:
+                    break
                 self._condition.wait(remaining)
+            if exact and len(self._queue) < requested:
+                raise TimeoutError(f"{self._what} did not deliver the requested exact records")
+            count = requested if exact else min(requested, len(self._queue))
+            return [self._queue.popleft() for _ in range(count)]
 
     def finish(self) -> int:
+        """End queue acceptance and join its worker, retaining queued records."""
+
         with self._condition:
-            self._ledger.call("begin_finish")
+            if not self._armed:
+                if self._failure is not None:
+                    raise RuntimeError(
+                        f"{self._what} failed while producing records: {self._failure}"
+                    ) from self._failure
+                return self._produced_count
+            self._accepting = False
             self._ready.set()
-            worker, stop = self._worker, self._stop
+            worker = self._worker
+            stop = self._stop
             if stop is not None:
                 stop.set()
             self._condition.notify_all()
         if worker is not None:
             worker.join(timeout=self._join_timeout)
         with self._condition:
-            joined = worker is None or not worker.is_alive()
-            if joined:
-                self._worker = self._stop = None
+            if worker is not None and worker.is_alive():
+                raise RuntimeError(
+                    f"{self._what} did not stop producing within {self._join_timeout:g} s"
+                )
+            self._worker = None
+            self._stop = None
+            self._armed = False
             self._condition.notify_all()
-            return int(self._ledger.call("finish", joined=joined)["produced"])
+            if self._failure is not None:
+                raise RuntimeError(
+                    f"{self._what} failed while producing records: {self._failure}"
+                ) from self._failure
+            return self._produced_count
 
     def close(self) -> None:
+        """Release a stopped device's tail and failure, unlike capture Stop."""
         with self._condition:
-            self._ledger.call("close", worker_alive=self._worker is not None and self._worker.is_alive())
+            if self._worker is not None and self._worker.is_alive():
+                raise RuntimeError(f"{self._what} is still producing records")
+            self._accepting = False
+            self._armed = False
             self._queue.clear()
-            self._cause = None
-            self._worker = self._stop = None
+            self._failure = None
+            self._worker = None
+            self._stop = None
             self._ready.set()
             self._condition.notify_all()
 

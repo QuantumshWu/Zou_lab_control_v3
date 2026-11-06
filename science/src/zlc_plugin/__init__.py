@@ -15,15 +15,24 @@ NodeExecutionContext methods (commit_live, report_ready, cancel_requested, ...);
 its device arguments are proxies implementing the capability's Protocol.
 """
 
-from .context import LiveDatasetOutput, LiveEvents, Read, RunContext
-from .declare import (Command, DatasetInput, DatasetOutputDeclaration, DeviceRequirement, DeviceType, FileParam,
-                      NodeKind, NodeType, Opened, PhysicalOutput)
-from .fit import FitAnswer, fit_models
-from .host import allocate, core, notifier, share, simulation_parameters
-from .wire import PluginError, Refused
+# Keep the SDK namespace light: importing its data/service adapters must not
+# import the plugin server or start an interpreter/engine process.
+import importlib
 
-__all__ = [
-    "Command", "DatasetInput", "DatasetOutputDeclaration", "DeviceRequirement", "DeviceType", "FileParam", "FitAnswer", "LiveDatasetOutput", "LiveEvents",
-    "NodeKind", "NodeType", "Opened", "PhysicalOutput", "PluginError", "Read", "Refused", "RunContext", "allocate", "core",
-    "fit_models", "notifier", "share", "simulation_parameters",
-]
+_EXPORTS = {
+    **{name: "context" for name in ("LiveDatasetOutput", "LiveEvents", "Read", "RunContext")},
+    **{name: "declare" for name in ("Command", "DatasetInput", "DatasetOutputDeclaration", "DeviceRequirement", "DeviceType", "FileParam", "NodeKind", "NodeType", "Opened", "PhysicalOutput")},
+    **{name: "fit" for name in ("FitAnswer", "fit_models")},
+    **{name: "host" for name in ("allocate", "core", "notifier", "share", "simulation_parameters")},
+    **{name: "wire" for name in ("PluginError", "Refused")},
+}
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name):
+    module = _EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(name)
+    value = getattr(importlib.import_module("." + module, __name__), name)
+    globals()[name] = value
+    return value

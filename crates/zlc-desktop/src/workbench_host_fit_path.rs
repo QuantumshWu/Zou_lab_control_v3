@@ -27,6 +27,7 @@ fn stage() -> Option<Stage> {
     let (sender, events) = mpsc::channel();
     let sender = Mutex::new(sender);
     let host = PluginHost::new(config, runtime.clone(), SafeActions::new(), move |event| { let _ = sender.lock().unwrap().send(event); }).unwrap();
+        crate::plugin_services::install(&host).unwrap();
     // What main.rs's `fit_models` arm answers; any other command is not this path's.
     let core: Arc<dyn Fn(crate::remote::RemoteCall) -> Result<(), String> + Send + Sync> = Arc::new(|call| {
         assert_eq!(call.name, "fit_models");

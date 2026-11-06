@@ -1,7 +1,6 @@
 //! Arrays and datasets on the wire (PLUGIN_PROTOCOL.md §6), core side.
 use std::sync::Arc;
 
-use base64::Engine;
 use serde_json::{Value, json};
 use zlc_core::dataset::{DataBlock, Validity};
 use zlc_core::schema::{DatasetSchema, DomainRole, ValidityContract};
@@ -12,10 +11,7 @@ use crate::blocks::{Lend, Registry};
 /// Arrays smaller than this are sent inline (as the SDK does).
 pub const INLINE_BYTES: usize = 16 << 10;
 
-pub use zlc_native::arrays::{dtype, dtype_name};
-
-/// One decoded array: its values (borrowed from a block when lent) and shape.
-pub struct Array { pub values: AnyBuffer, pub shape: Vec<usize> }
+pub use zlc_archive::array_wire::{Array, dtype, dtype_name};
 
 fn shape_of(spec: &Value) -> Result<Vec<usize>, String> {
     spec["shape"].as_array().ok_or("Array has no shape")?.iter()
@@ -36,8 +32,7 @@ pub fn array(reference: &Value, lends: &[Arc<Lend>]) -> Result<Array, String> {
         return Ok(Array { values: AnyBuffer::from_foreign(kind, owner, offset, count)?, shape });
     }
     if reference.get("$inline").is_some() {
-        let tensor = zlc_native::arrays::decode(reference)?;
-        return Ok(Array { values: tensor.values, shape: tensor.shape });
+        return zlc_archive::array_wire::decode(reference);
     }
     Err(format!("Expected an array, got {reference}"))
 }
@@ -48,7 +43,7 @@ pub fn encode_array(values: &AnyBuffer, shape: &[usize], registry: &Arc<Registry
     let kind = dtype_name(values.dtype());
     let bytes = values.as_bytes();
     if bytes.len() < INLINE_BYTES {
-        return Ok(json!({"$inline": {"b64": base64::engine::general_purpose::STANDARD.encode(bytes), "dtype": kind, "shape": shape}}));
+        return zlc_archive::array_wire::encode(values, shape);
     }
     let borrowed = values.foreign().and_then(|(owner, offset)| owner.as_any().downcast_ref::<Lend>().map(|lend| (lend, offset)));
     let (name, size, offset) = match borrowed {

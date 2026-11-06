@@ -1,5 +1,20 @@
 # Architecture
 
+The Cargo workspace has 17 crates. Scan, scientific, parameter and capture rules
+extend the existing core and workbench modules; they are not separate workspace
+products.
+
+## Ownership
+
+| Layer | Responsibility |
+|---|---|
+| `zlc-core` | Typed storage, schemas, Runtime identity/history/lineage, and domain rules in `scan`, `scientific`, `parameters`, `capture` and `units`. Scan geometry and numerical kernels are independent of service dispatch and device calls. |
+| `zlc-workbench` | Application state and authoring; `scan` and `services` adapt requests, schemas, diagnostics and service handles to the typed core. |
+| `zlc-archive` | Artifact formats, durable publication primitives and generic inline array codecs in `array_wire`. |
+| `zlc-plugin-host` | Processes, framing, deadlines, authoritative run lifecycle, device claims, exact inputs, shared-memory holds and opaque run/process resources. The application installs its service handler. |
+| `zlc-desktop` | Composes and injects Workbench services, connects scan execution to Runtime/Pulse, applies service cancellation policy, and owns UI/run-artifact integration. The same executable provides the offline service entry point. |
+| Python / TypeScript | Python owns device SDK glue, driver queues and scientific workflow/payload authoring. TypeScript owns controls, interaction and draft edits. |
+
 ## Processes
 
 - **The desktop** (`crates/zlc-desktop`, one process). It holds the runtime, the
@@ -21,8 +36,9 @@
 
 A source commits complete events to the runtime (`crates/zlc-core`), which owns
 identity, values, validity, geometry, lineage and history. Logic nodes and
-processors read events in order; nothing a consumer needs is lost when it starts
-late.
+processors use their declared delivery policy. Exact inputs retain events within
+their configured bounds and fail explicitly on overflow; Latest inputs coalesce
+updates. A finite source can replay its retained committed events.
 
 Panels show data at their own update interval, as in v2: a panel takes the newest
 published data when it is due, and its fit, readouts and the values it publishes are
@@ -44,21 +60,24 @@ Async editor and device replies apply only to the request that is still current.
 
 ## Scan execution
 
-`crates/zlc-scan` owns immutable execution geometry: independent and linked
+`zlc-core::scan` owns immutable execution geometry: independent and linked
 axes, host/board grouping, bounded row pages, effective board coordinates and
 the scan's Dataset mappings. It stores axis vectors and mixed-radix strides,
 not a Cartesian table. Repeat coordinates and code mappings stay factored.
 It has no device calls, scheduler, plotting or Python dependency.
 
-The plugin host's run-scoped scan service consumes an exact Runtime input
-directly. It places each original immutable DataBlock into the native finite
+`zlc-workbench::scan::execution` consumes an exact Runtime input through a
+run-scoped context supplied by the desktop. The plugin host owns that input
+and the run resources without interpreting scan operations. The scan service
+places each original immutable DataBlock into the native finite
 store with its real parent publication, source ordinal and event metadata.
 No source pixels, per-shot schema or placement messages travel through the
 Python scan. Runtime still owns storage, overlap checks, subscriptions,
 lineage and sealing; the scan service does not create a second data store.
 
-Rust also compiles the authored Range/Values/formula banks and supplies the
-editor's preview, validation, binding and ordering. Authored documents retain
+`zlc-workbench::scan::authoring` compiles the authored Range/Values/formula
+banks and supplies the editor's preview, validation, binding and ordering, using
+core parameter and scan rules. Authored documents retain
 their inactive banks; execution plans contain only selected values. TypeScript
 edits those documents and only applies a preview matching its current draft.
 Python supplies device-specific facts and conversions, manual prompts, device
@@ -79,44 +98,56 @@ wheel gestures and authored-bank memory. It contains no second scan compiler.
 
 ## Shared rules and plugin services
 
-`zlc-authoring` projects generic field values for both the workbench and Python
-adapters. Scientific cross-field validators and device-dependent conversions
-remain plugin code. Package `configuration.APPARATUS_SCHEMAS` declarations own
-scientific apparatus settings, including the simulation world; the workbench
-does not hardcode those fields or defaults and preserves saved settings when
-their declaring package is unavailable.
+`zlc-core::parameters` owns generic value contracts and projection rules.
+Workbench keeps presentation fields and adapts Python-facing values and errors
+in its service boundary. Scientific cross-field validators and device-dependent
+conversions remain plugin code. Package `configuration.APPARATUS_SCHEMAS`
+declarations own scientific apparatus settings, including the simulation world;
+the workbench preserves saved settings when their declaring package is unavailable.
 
-`zlc-core::units` is the common registry, conversion, quantity formatting and
-parsing implementation. Python exposes immutable unit values and bounded
-caches. `zlc-scientific` owns named-axis geometry, typed array operations,
-statistical reductions and grouped accumulators, shared by Derive and Plot.
-Python retains expression authoring/dependencies and research-specific policy;
-bulk arrays use the existing shared-memory channel. Mutable native kernel
-handles belong to one run and cannot alias a later run's state.
+`zlc-core::units` provides the common registry, conversion and quantity
+parsing/formatting rules. `zlc-core::scientific` provides typed named-axis geometry,
+array operations, statistical reductions and accumulator state used by Derive
+and Plot. `zlc-workbench::services` owns the operation names, JSON adaptation and
+opaque service handles. `zlc-archive::array_wire` owns the common inline-array
+representation; the plugin host supplies live shared-memory array ownership.
 
-The small Python `zlc_native` client and codec have no dependency on the plugin
-SDK. Hosted calls use the existing Rust host; offline tools call the same rules
-through a persistent `zlc-native` helper. There is no second Python numerical or
-schema fallback. `zlc-capture` runs inside the plugin process as a small native
-library: it owns queue admission, source ordinals, capture/group counts and
-terminal evidence; Python keeps SDK threads, record objects, waits and vendor
-buffer lifetimes. Capture policy calls do not cross the process channel.
+The SDK entry point is `zlc_plugin.services.call(...)`, or `ctx.service(...)`
+inside a run. The SDK installs its existing plugin-channel transport. The host
+checks process/run ownership and invokes an application-installed handler;
+`zlc-desktop::plugin_services` chooses Workbench implementations and supplies their
+runtime context. The host does not dispatch scientific or scan families itself.
+
+Outside a host, the SDK starts the existing `zlc-desktop.exe --plugin-services`
+entry point. This headless mode serves the same Workbench adapters without opening
+a window, device or plugin interpreter. There is no additional service executable
+or capture library to deploy. Python changes alone need no Rust build; changes
+to these native rules require rebuilding the desktop engine.
+
+Capture has two distinct owners. A Python driver's `RecordQueue` owns its FIFO,
+condition variable, capacity, producer worker and SDK-buffer lifetime locally.
+Queue push/read operations make no service calls. Camera and waveform nodes use
+`zlc-core::capture` through the Workbench adapter to validate batch ordinals,
+group boundaries and stopped/joined terminal evidence. The returned batch facts
+support publication; they do not duplicate the driver's queue state. Capture
+validation remains available for Stop cleanup while its run is active.
 
 The core arbitrates Stop against protected terminal work. The SDK performs
 cleanup before the core accepts its finish token, so immediate restart cannot
 see a still-registered old Python run. Device lanes, concurrent work and wire
-admission are bounded, emergency actions have a separate reserve, and unsent
-or queued expired requests cannot later act. A started call's timeout does not
-release its device or argument-buffer ownership prematurely.
+admission are bounded and emergency actions have a separate reserve. Unsent
+frames and queued requests are checked for expiry before transmission or SDK
+dispatch. Absolute receive-time expiry prevents a late-completed frame from
+acquiring a fresh relative budget. A started call's
+timeout does not release its device or argument-buffer ownership prematurely.
 
-Run artifacts use a core-owned staging/publication service over `zlc-archive`
-durability primitives. Python formats scientific content; the native owner
-reserves names, checks containment, syncs, publishes and registers results.
-Offline durability uses those same primitives. A complete visible file whose
-directory acknowledgement fails remains named as published-but-not-durable.
-The engine bundle includes `zlc-native.exe` and `zlc_capture.dll` alongside the
-application; changing native rules requires rebuilding these products.
-
+Run artifacts use the desktop's run-contained staging/publication service over
+`zlc-archive` durability primitives. Python formats scientific content; native
+publication checks containment, syncs, publishes and registers results. Offline
+durability uses the same primitives through the headless desktop entry point.
+Per-run locks serialize file work; retiring a run marks its slot immediately and
+schedules temporary cleanup on workers. A complete visible file whose directory
+acknowledgement fails remains named as published-but-not-durable.
 
 ## Commands
 

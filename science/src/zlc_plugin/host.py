@@ -1220,7 +1220,7 @@ class Run:
         if writer is None:
             return
         try:
-            from . import native
+            from . import services as native
             with native.scope(self.context):
                 writer(status, error)
         except BaseException as failure:  # noqa: BLE001 -- reported with the run's end
@@ -1254,7 +1254,7 @@ class Run:
                     node = self.declared if self.declared.build is None else self.declared.build(**arguments)
                 finally:
                     _QUERYING.instance = None
-            from . import native
+            from . import services as native
             with native.scope(self.context):
                 result = self._process(node) if self.declared.kind is NodeKind.PROCESSOR else node.execute(self.context)
         except _Invalid as invalid:
@@ -1367,6 +1367,6 @@ def main() -> int:
     null = os.open(os.devnull, os.O_RDONLY)
     os.dup2(null, 0)
     _PROCESS = Process(Channel(source, sink))
-    from .native import install_host_transport
+    from .services import install_host_transport
     install_host_transport(_PROCESS)
     return _PROCESS.serve()

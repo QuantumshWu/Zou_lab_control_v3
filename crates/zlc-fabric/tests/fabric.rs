@@ -1,6 +1,9 @@
 //! Two cores in one process, each with its own plugin host and real plugin
 //! processes (needs ZLC_PLUGIN_PYTHON = the science env's python.exe): one
 //! publishes the test echo device, the other uses it through the fabric.
+#[path="../../zlc-plugin-host/tests/support/mod.rs"]
+mod support;
+
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +31,7 @@ fn core() -> Option<Core> {
     let (sender, events) = mpsc::channel();
     let sender = Mutex::new(sender);
     let host = PluginHost::new(config, runtime.clone(), safe.clone(), move |event| { let _ = sender.lock().unwrap().send(event); }).unwrap();
+        support::install(&host).unwrap();
     Some(Core { host, runtime, safe, events })
 }
 

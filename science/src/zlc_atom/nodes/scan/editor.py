@@ -16,7 +16,7 @@ from dataclasses import asdict, replace
 
 from zlc_data.units import DEFAULT_UNITS, UnitError, format_quantity
 from zlc_plugin.tunable import convert_tunable_value
-from zlc_plugin.native import call as native
+from zlc_plugin.services import call as native
 
 from .plan import (
     API_PARAM_FAMILY,

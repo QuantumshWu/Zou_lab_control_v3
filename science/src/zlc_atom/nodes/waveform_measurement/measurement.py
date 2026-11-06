@@ -18,7 +18,7 @@ from time import monotonic, sleep, time_ns
 
 import numpy as np
 
-from zlc_plugin.capture import CaptureLedger, terminal_evidence
+from zlc_plugin.capture import validate_batch, terminal_evidence
 
 from zlc_data import COMPONENT, READOUT_EVENT, SAMPLE_TIME, AxisSpec, DomainSpec, OwnedSnapshot
 from zlc_plugin import DatasetOutputDeclaration, LiveEvents
@@ -366,7 +366,6 @@ class WaveformMeasurementNode:
         self._time_origin: float | None = None
         self._last_time: float | None = None
         self._next_ordinal = 0
-        self._capture_ledger = CaptureLedger("waveform")
         #: Events published so far: each event's ordinal and its place in a finite run.
         self.published = 0
         #: Records taken from the source so far; what a stopped source still holds is the rest.
@@ -442,7 +441,6 @@ class WaveformMeasurementNode:
         self._time_origin = None
         self._last_time = None
         self._next_ordinal = 0
-        self._capture_ledger = CaptureLedger("waveform")
         self.published = self.records_read = 0
         self._schemas = {}
         self._free_running = point.acquisition_mode == WaveformAcquisitionMode.FREE_RUNNING.value
@@ -473,8 +471,9 @@ class WaveformMeasurementNode:
         for record in records:
             if record.samples.shape[0] != self._record_samples:
                 raise ValueError("waveform record sample count changed during capture")
-        accepted = self._capture_ledger.call("sequence", ordinals=[record.source_ordinal for record in records])
-        self._next_ordinal = int(accepted["next"])
+        if records:
+            accepted = validate_batch((record.source_ordinal for record in records), expected_start=self._next_ordinal)
+            self._next_ordinal = int(accepted["next"])
 
     def _event_schemas(self, samples: int, columns: int) -> dict[str, tuple[object, object]]:
         """One event's schema per output, the same object for the whole run, and for a

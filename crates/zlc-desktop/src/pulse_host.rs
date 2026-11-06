@@ -157,7 +157,7 @@ fn accept_native_receipt(plugins: &PluginHost, run: &str, handle: &str, request:
     let sequence = held.source.as_ref().ok_or("the board has no applied pulse source")?;
     let played = receipt["scan"].is_object().then(|| ScanRows { fields: strings(&receipt["scan"]["fields"]), rows: rows(&receipt["scan"]["rows"]) });
     let effective = effective_inner(sequence, &request.plan, played.as_ref()).map_err(|e|e.message)?;
-    plugins.accept_scan_pulse(run, handle, effective, receipt["applied"].clone()).map_err(|e|e.to_string())?;
+    crate::plugin_services::accept_scan_pulse(plugins, run, handle, effective, receipt["applied"].clone()).map_err(|e|e.to_string())?;
     let mut compact = json!({"applied":{"config":receipt["applied"]["config"],
         "program":{"digest":receipt["applied"]["program"]["digest"]}},
         "scan":{"handle":handle,"outer_index":request.outer_index,"fields":played.as_ref().map(|p|p.fields.clone()).unwrap_or_default(),
@@ -738,7 +738,7 @@ impl PulseHost {
                     let (Some(run), Some(plugins)) = (run, self.plugins.as_ref()) else { return Handled::Now(Err("scan_plan belongs to a live plugin run".into())); };
                     let Some(handle) = command["scan_plan"]["handle"].as_str().filter(|s|!s.is_empty()) else { return Handled::Now(Err("scan_plan needs its native handle".into())); };
                     let Some(outer_index) = command["scan_plan"]["outer_index"].as_u64().and_then(|v|usize::try_from(v).ok()) else { return Handled::Now(Err("scan_plan needs an outer point index".into())); };
-                    let plan = match plugins.scan_plan(run,handle) { Ok(plan)=>plan,Err(error)=>return Handled::Now(Err(error.to_string())) };
+                    let plan = match crate::plugin_services::scan_plan(plugins,run,handle) { Ok(plan)=>plan,Err(error)=>return Handled::Now(Err(error.to_string())) };
                     Some((ScanPlanRequest { plan, outer_index },handle.to_owned()))
                 } else { None };
                 let (runs, sweeps) = (command["run_repeats"].as_u64().unwrap_or(1), command["scan_repeats"].as_u64().unwrap_or(1));
@@ -1190,6 +1190,7 @@ mod tests {
         let plugins=PluginHost::new(HostConfig {python:python.into(),python_path:vec![root.join("../../science/src"),root.join("../zlc-plugin-host/tests/plugins")],
             packages:vec!["zlc_test_plugins".into()],memory_limit_mib:Some(3072)},runtime.clone(),SafeActions::new(),
             move|event|{let _=sender.lock().unwrap().send(event);}).unwrap();
+        crate::plugin_services::install(&plugins).unwrap();
         pulse.plugins=Some(plugins.clone());
         let singleton=Domain::new(vec![1],vec![],vec![]).unwrap();
         let site=Axis::new("site".into(),"site".into(),"coordinate".into(),Coordinates::Index {origin:0,len:1},None,None,None,None).unwrap();

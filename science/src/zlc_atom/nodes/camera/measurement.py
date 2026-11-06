@@ -8,7 +8,7 @@ from functools import lru_cache
 from time import monotonic
 
 import numpy as np
-from zlc_plugin.capture import CaptureLedger, validate_group, terminal_evidence
+from zlc_plugin.capture import validate_batch, terminal_evidence
 
 from zlc_data import (
     AxisId,
@@ -293,36 +293,14 @@ def _monitor_cycle_output(
     )
 
 
-def _strict_cycle_ordinals(
-    records: Sequence[CameraFrameRecord],
-    *,
-    expected_start: int,
-    frames_per_cycle: int,
-) -> tuple[CameraFrameRecord, ...]:
+def _validated_cycle(records: Sequence[CameraFrameRecord], *, expected_start: int,
+                     frames_per_cycle: int, group_ends: frozenset[int]) -> tuple[CameraFrameRecord, ...]:
+    """Assemble owned records only at a boundary already proved by the core."""
     cycle = tuple(records)
-    validate_group((record.source_ordinal for record in cycle), start=expected_start, size=frames_per_cycle)
+    if (len(cycle) != frames_per_cycle or not cycle
+            or cycle[0].source_ordinal != expected_start or cycle[-1].source_ordinal not in group_ends):
+        raise RuntimeError("camera buffer does not match its validated cycle boundary")
     return cycle
-
-
-def _strict_terminal(
-    terminal: CameraCaptureTerminalRecord,
-    *,
-    expected_frames: int,
-    stopped: bool = False,
-) -> CameraCaptureTerminalRecord:
-    """The device's terminal, checked against the cycles this capture kept.
-
-    The device must have stopped and joined, and it must have
-    produced every frame the completed cycles account for.  A capture that was
-    asked to stop may have left a partial cycle behind: the frames of the
-    cycle it walked away from are the device's honest count, not a lie about
-    the cycles it kept, so a surplus is accepted only for a stop.  A run that
-    ended on its own must account for every frame exactly. Accepted FIFO data
-    may still remain for the caller's ordinary-Stop drain.
-    """
-
-    terminal_evidence(terminal, expected=expected_frames, stopped=stopped)
-    return terminal
 
 
 def _camera_working_point_snapshot(point: CameraWorkingPoint) -> dict[str, object]:
@@ -463,15 +441,15 @@ class FiniteCapture:
                     break
                 on_cycle(cycle, index)
             terminal = self.close()
-            complete = min(self.repeat, terminal_evidence(terminal, group_size=self.frames_per_cycle)["complete_groups"])
+            complete = min(self.repeat, self._terminal_proof["complete_groups"])
             while self.completed_cycles < complete:
                 pending = self._pending_records
                 pending.extend(self.node.read_records(
                     self.frames_per_cycle - len(pending), timeout=0.0, exact=True,
                 ))
-                cycle = _strict_cycle_ordinals(
+                cycle = _validated_cycle(
                     pending, expected_start=self.completed_cycles * self.frames_per_cycle,
-                    frames_per_cycle=self.frames_per_cycle,
+                    frames_per_cycle=self.frames_per_cycle, group_ends=self.node._capture_group_ends,
                 )
                 pending.clear()
                 index = self.completed_cycles
@@ -481,7 +459,6 @@ class FiniteCapture:
             if remaining:
                 self.node.read_records(remaining, timeout=0.0, exact=True)
             self._pending_records.clear()
-            self.node._capture_ledger.call("reset_group")
             terminal = replace(terminal, no_more_frames=True)
             self.terminal = terminal
         except BaseException as error:
@@ -545,10 +522,10 @@ class FiniteCapture:
                 "external rising-edge count, spacing, and source state"
             )
         expected = self.completed_cycles * self.frames_per_cycle
-        cycle = _strict_cycle_ordinals(
+        cycle = _validated_cycle(
             records,
             expected_start=expected,
-            frames_per_cycle=self.frames_per_cycle,
+            frames_per_cycle=self.frames_per_cycle, group_ends=self.node._capture_group_ends,
         )
         self.completed_cycles += 1
         records.clear()
@@ -567,11 +544,10 @@ class FiniteCapture:
             return self.terminal
         if self.closed:
             raise RuntimeError("finite capture closed without terminal evidence")
-        terminal = _strict_terminal(
-            self.camera.finish_record_capture(),
-            expected_frames=self.completed_cycles * self.frames_per_cycle,
-            stopped=self.stopped,
-        )
+        terminal = self.camera.finish_record_capture()
+        proof = terminal_evidence(terminal, expected=self.completed_cycles * self.frames_per_cycle,
+                                  stopped=self.stopped, group_size=self.frames_per_cycle)
+        self._terminal_proof = proof
         self.closed = True
         self.terminal = terminal
         return terminal
@@ -602,7 +578,7 @@ class MonitorCapture:
         if self.closed:
             raise RuntimeError("monitor capture is closed")
         records = self.node.read_records(
-            1, timeout=_CANCEL_RESPONSE_SECONDS, exact=False
+            16, timeout=_CANCEL_RESPONSE_SECONDS, exact=False
         )
         if not records:
             return None
@@ -618,7 +594,7 @@ class MonitorCapture:
         # on, so consecutive records ARE the aligned cycle.
         pending = self._pending_records
         pending.append(record)
-        if self.node._capture_ledger.call("append_group", size=self.node.frames_per_cycle)["complete"]:
+        if record.source_ordinal in self.node._capture_group_ends:
             cycle = tuple(pending)
             pending.clear()
             self._revision += 1
@@ -645,15 +621,18 @@ class MonitorCapture:
         if self.terminal is not None:
             return self.terminal
         terminal = self.camera.finish_record_capture()
+        terminal_evidence(terminal, expected=self.node._next_record_ordinal, stopped=True,
+                          group_size=self.node.frames_per_cycle)
         self.closed = True
         if drain:
             remaining = terminal.produced_count - self.node._next_record_ordinal
-            for _ in range(remaining):
-                record, = self.node.read_records(1, timeout=0.0, exact=True)
-                self._accept_record(record)
+            while remaining:
+                records = self.node.read_records(min(16, remaining), timeout=0.0, exact=True)
+                for record in records:
+                    self._accept_record(record)
+                remaining -= len(records)
             # A partial cycle is counted but is not a scientific publication.
             self._pending_records.clear()
-            self.node._capture_ledger.call("reset_group")
             terminal = replace(terminal, no_more_frames=True)
         self.terminal = terminal
         return terminal
@@ -745,7 +724,7 @@ class CameraMeasurementNode:
         self._actual_working_point = None
         self._run_record = None
         self._next_record_ordinal = 0
-        self._capture_ledger = CaptureLedger("camera")
+        self._capture_group_ends: frozenset[int] = frozenset()
         self._canonical = None
         # This measurement owns both: it exists to point the camera.  The
         # geometry first, because it is the expensive one to get wrong.  A
@@ -849,8 +828,11 @@ class CameraMeasurementNode:
         records = tuple(
             self.camera.read_frame_records(read_count, timeout=timeout, exact=exact)
         )
-        accepted = self._capture_ledger.call("sequence", ordinals=[record.source_ordinal for record in records])
-        self._next_record_ordinal = int(accepted["next"])
+        if records:
+            accepted = validate_batch((record.source_ordinal for record in records),
+                                      expected_start=self._next_record_ordinal, group_size=self.frames_per_cycle)
+            self._next_record_ordinal = int(accepted["next"])
+            self._capture_group_ends = frozenset(accepted["group_ends"])
         for record in records:
             if self._record_received is not None:
                 self._record_received(record)

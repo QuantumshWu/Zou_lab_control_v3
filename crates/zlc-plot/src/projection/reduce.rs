@@ -15,7 +15,7 @@ use crate::numeric::{add_reduce, extreme_reduce, int_add_reduce, leading_sum};
 use crate::with_dtype;
 
 // ------------------------------------------------------------------- SEM
-pub use zlc_scientific::statistics::sem_from_moments;
+pub use zlc_core::scientific::statistics::sem_from_moments;
 
 /// `_sem_of_mean`: per bucket, centred on the bucket's own mean.
 pub fn sem_of_mean(means: &[f64], counts: &[i64], samples: &Array, sigma: Option<&Array>,

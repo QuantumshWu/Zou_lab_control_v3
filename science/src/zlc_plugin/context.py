@@ -275,6 +275,10 @@ class RunContext:
         self._run.instance.process.event(op, {"instance": self._run.instance.name, "run": self.generation, **params})
 
     def _request(self, op: str, params: dict[str, Any], **options: Any) -> Any:
+        if op.startswith("run.scan."):
+            return self._run.instance.process.request("service", {
+                "instance": self._run.instance.name, "run": self.generation,
+                "operation": op, "params": params}, **options)
         return self._run.instance.process.request(op, {"instance": self._run.instance.name, "run": self.generation, **params},
                                                   **options)
 
@@ -409,9 +413,9 @@ class RunContext:
             raise PluginError("cancelled", "the run was stopped")
         return fit_answer(self._request("run.fit", request))
 
-    def native(self, operation: str, **params: Any) -> Any:
+    def service(self, operation: str, **params: Any) -> Any:
         """Call a native scientific service under this run's lifetime."""
-        from .native import call, scope
+        from .services import call, scope
         with scope(self):
             return call(operation, params)
 

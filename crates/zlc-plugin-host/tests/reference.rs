@@ -2,6 +2,8 @@
 //! camera_measurement, finite and monitor runs. Needs ZLC_PLUGIN_PYTHON; the
 //! camera_measurement port is line D's (claude/v3-atom): ZLC_PLUGIN_PATH names
 //! the science trees to import (os path list), else this checkout's science/src.
+mod support;
+
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -24,6 +26,7 @@ fn the_virtual_mot_camera_and_camera_measurement_run_through_the_host() {
     let sender = std::sync::Mutex::new(sender);
     let host = PluginHost::new(HostConfig { python: python.into(), python_path, packages: vec!["zlc_atom".into()], memory_limit_mib: Some(4096) },
         runtime.clone(), safe, move |event| { let _ = sender.lock().unwrap().send(event); }).unwrap();
+        support::install(&host).unwrap();
     let catalog = host.catalog().unwrap();
     if catalog.find("camera_measurement").is_none() { eprintln!("this science tree has no camera_measurement: skipped"); return; }
     let opened = host.open("mot", "camera.virtual_mot", json!({"exposure_seconds": 0.02}), json!({"seed": 0})).unwrap();

@@ -1,7 +1,7 @@
 //! A native scan plan's board segment. Expanded rows never visit a plugin.
 use std::sync::Arc;
 use zlc_core::units::DEFAULT_UNITS;
-use zlc_scan::{Plan, Scope};
+use zlc_core::scan::{Plan, Scope};
 use crate::error::{Error, Kind, Result, value_error};
 use crate::model::{FieldKind, MAXIMUM_REPEAT_COUNT, Sequence};
 use crate::run::{ApiValues, RunPlan, ScanRows, plan_run};

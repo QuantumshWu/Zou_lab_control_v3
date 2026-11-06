@@ -34,7 +34,7 @@ from numbers import Real
 
 from zlc_data.units import DEFAULT_UNITS, VoltageIntoLoad, format_quantity
 from zlc_durable import strict_json_loads
-from zlc_plugin.native import call as native
+from zlc_plugin.services import call as native
 
 from zlc_atom.authoring import TunableField, read_tunable_in_unit
 from zlc_atom.nodes._framework.descriptor import (

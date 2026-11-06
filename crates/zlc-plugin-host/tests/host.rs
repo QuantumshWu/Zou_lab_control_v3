@@ -1,4 +1,6 @@
 //! Real plugin processes (needs ZLC_PLUGIN_PYTHON = the science env's python.exe).
+mod support;
+
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -21,6 +23,7 @@ fn host() -> Option<(PluginHost, Runtime, SafeActions, mpsc::Receiver<HostEvent>
     let (sender, events) = mpsc::channel();
     let sender = std::sync::Mutex::new(sender);
     let host = PluginHost::new(config, runtime.clone(), safe.clone(), move |event| { let _ = sender.lock().unwrap().send(event); }).unwrap();
+        support::install(&host).unwrap();
     Some((host, runtime, safe, events))
 }
 

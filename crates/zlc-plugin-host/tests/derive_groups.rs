@@ -1,5 +1,7 @@
 //! Derive's groups through the real host and Runtime: what reaches Runtime is taken.
 //! Needs ZLC_PLUGIN_PYTHON. The numbers against raw arrays are python_derive_groups.py's.
+mod support;
+
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -25,6 +27,7 @@ fn host() -> Option<Host> {
     let (sender, events) = mpsc::channel();
     let sender = std::sync::Mutex::new(sender);
     let host = PluginHost::new(config, runtime.clone(), safe, move |event| { let _ = sender.lock().unwrap().send(event); }).unwrap();
+        support::install(&host).unwrap();
     Some((host, runtime, events))
 }
 

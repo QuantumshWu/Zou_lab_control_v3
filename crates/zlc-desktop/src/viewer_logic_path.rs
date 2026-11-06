@@ -144,6 +144,7 @@ fn stage(python: std::ffi::OsString, file: &Path, out: Option<PathBuf>) -> Stage
     let (sender, events) = mpsc::channel();
     let sender = Mutex::new(sender);
     let host = PluginHost::new(config, runtime.clone(), SafeActions::new(), move |event| { let _ = sender.lock().unwrap().send(event); }).unwrap();
+        crate::plugin_services::install(&host).unwrap();
     let science = Science::new(runtime.clone(), Arc::new(|error: String| panic!("{error}")), Arc::new(|| {}), Arc::new(|_: SelectionNote| {}));
     let decoded = science.open(file.to_str().unwrap()).unwrap();
     let archive = Arc::new(MountedArchive::mount(runtime.clone(), decoded, vec!["figure-1-1".to_owned()]).unwrap());

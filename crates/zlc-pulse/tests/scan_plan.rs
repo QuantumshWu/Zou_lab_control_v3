@@ -1,7 +1,7 @@
 //! The factorized plan reaches Pulse directly, with bounded native expansion.
 use std::path::PathBuf;
 use std::sync::Arc;
-use zlc_scan::{AxisSpec, Plan, PlanSpec};
+use zlc_core::scan::{AxisSpec, Plan, PlanSpec};
 use zlc_pulse::board::Board;
 use zlc_pulse::run::{ScanRows, load_sequence, read_document};
 use zlc_pulse::scan_plan::{ScanPlanRequest, effective_inner, prepare_application, table_for_plan};

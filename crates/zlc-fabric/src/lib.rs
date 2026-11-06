@@ -27,6 +27,10 @@
 //!   requests in flight (never replays one) and redials for 10 s; a link that
 //!   does not come back loses the instance as a crashed plugin is lost
 //!   (v2's error state; Apply opens it again).
+#[cfg(test)]
+#[path = "../../zlc-plugin-host/tests/support/mod.rs"]
+mod test_application;
+
 pub mod wire;
 pub mod server;
 pub mod link;

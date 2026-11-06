@@ -6,10 +6,16 @@ hang loses plugins, never the application or its data. This document is the
 contract between `crates/zlc-plugin-host` (Rust) and `science/src/zlc_plugin`
 (the Python SDK). Changes after announcement are small commits titled `API: ...`.
 
-Version 3 requires core-issued terminal tokens and the matching native service
-runtime. Older SDK processes are rejected during the version handshake, before
+Version 3 requires core-issued terminal tokens and matching SDK/application
+service interfaces. Older protocol major versions are rejected during the handshake, before
 devices or runs are admitted; they cannot silently fall back to plugin-decided
 terminal outcomes. The scientific artifact formats are unchanged.
+
+The workspace has 17 crates. Typed domain rules live in `zlc-core`; Workbench
+adapts application operations; Archive supplies formats and generic inline array
+codecs. The plugin host owns processes, runs, inputs and array/resource lifetimes,
+and accepts an injected service handler. The desktop composes that handler from
+Workbench implementations. Domain operation dispatch is not built into the host.
 
 Terms: a **plugin type** is one discovered declaration (`camera.virtual_mot`, the
 `camera_measurement` node). A **plugin instance** is one configured use of a type:
@@ -521,9 +527,12 @@ in the host; it sends no `run.deliver` messages or arrays to Python. A run may
 prepare one scan service over that input. Other input and processor semantics
 are unchanged.
 
-`ctx.scan(spec)` creates a run-scoped `NativeScan`. The version-3 protocol
-provides these operations; every request carries the current instance/run, and
-every operation after prepare carries the returned opaque handle:
+`ctx.scan(spec)` creates a run-scoped `NativeScan`. The operation names below
+travel as `service` requests with `{operation, params, instance, run}`; the SDK
+wraps the scan calls in that envelope. Workbench's `scan::execution` implements
+the operations using a desktop-supplied context over the host's generic exact
+input and run resources. Every operation after prepare carries the returned
+opaque handle:
 
 | Operation | Parameters / result |
 |---|---|
@@ -554,10 +563,10 @@ Outer coordinates retain their nominal setpoint semantics, including a pulse
 column linked to a host axis; actual carried values remain in the applied Pulse
 snapshot. Device readbacks are recorded separately from those setpoints.
 
-The first collect declares outputs from the first source event's schema via
-the same native declaration path as `run.begin`. The host stamps node identity
-and apparatus facts, and replaces `record.plan`/`scan_shape` with the effective
-factored plan. Each commit reuses the source DataBlock and real parent. It
+Workbench scan configuration freezes `record.plan` and `scan_shape` from the
+effective factored plan. The first collect derives the output schema from its
+source event and uses the host's same declaration path as `run.begin`; the host
+adds node identity and apparatus facts. Each commit reuses the source DataBlock and real parent. It
 preserves the source ordinal and source event record, merging the segment's
 device readbacks into `actual_devices`. The output keeps the prior scan's
 unstamped-shot-time contract; the parent's timing remains in its provenance.
@@ -581,23 +590,29 @@ and adopts the new generation before its first publication, so the old source's
 Stop cannot fail the new collection. A source cannot be replaced this way after
 the scan has published data.
 
-### 5.2 Process-local capture ledger
+### 5.2 Capture ownership and batch evidence
 
-`zlc-capture` supplies the shared acquisition state machine through a small C ABI
-(`zlc_capture.dll`, located by `ZLC_CAPTURE_LIBRARY` or the packaged engine folder).
-`zlc_plugin.capture.CaptureLedger` owns its opaque handle. These calls stay inside
-the plugin process; recording each frame adds no core IPC round trip.
+Each Python driver owns its `RecordQueue`: the record FIFO, condition variable,
+capacity, producer ordinal, readiness, worker, and SDK buffer lifetime change
+under one local owner. Queue push/read operations make no native calls. A failed
+join keeps that worker and capture retryable; overflow retains accepted records
+and reports the failure before data is handed out.
 
-Python retains already-owned record objects in its FIFO, SDK worker/thread
-identity, buffer copying and wakeups. Rust decides arming/readiness, consecutive
-ordinals, finite completion, queue capacity, failure precedence, exact/loose read
-admission, and stopped/joined terminal evidence. A failed join retains the capture
-and worker for cleanup retry. Overflow preserves the accepted queue and fails
-before returning scientific data. Camera and waveform nodes use the same native
-sequence and terminal rules; camera cycle boundaries and partial-cycle evidence
-are checked natively. Borrowed vendor buffers and hardware stop calls remain in
-the adapter. An unavailable native capture library is an installation error;
-there is no second Python policy implementation.
+`zlc-core::capture` supplies pure typed validation of acquisition evidence at
+batch and end boundaries. The Workbench service adapter exposes `capture.batch`,
+`capture.group` and `capture.terminal` through the existing native request path.
+A batch supplies its expected start, observed ordinals and group size; the core
+returns the next ordinal and completed group boundaries. Terminal validation
+checks stopped/joined evidence, expected counts and any partial cycle allowed by
+Stop. These read-only validations remain available during cleanup while the run
+is active.
+
+Camera and waveform nodes validate each nonempty intake batch once. Camera
+buffer assembly uses the returned boundaries, with no per-frame group RPC;
+monitor reads and drains use bounded batches. First-frame action callbacks keep
+their existing read granularity. The driver queue is a local implementation,
+not a second copy of a native queue state machine. No capture DLL, C ABI handle,
+or ctypes/JSON exchange occurs for a queue operation.
 
 ### 5.3 Run artifact publication
 
@@ -630,18 +645,34 @@ visible result is registered with `durable: false` and its publication error;
 it is never silently presented as durable or removed as a failed temporary.
 
 Offline `zlc_durable` calls use the same `zlc-archive::durable::StagedWrite`
-implementation through the native helper. During a hosted run they route through
+implementation through the headless desktop service entry point. During a hosted
+run they route through
 the run-confined artifact facade. Directory fsync, unique-name collision handling
 and atomic replacement have one implementation; payload encoding remains Python.
 
-### 5.4 Shared native rules and offline tools
+### 5.4 Application services and offline tools
 
-The SDK's `native.call(operation, **params)` / `ctx.native(...)` use a `native`
-request `{operation, params, instance?, run?}`. The neutral `zlc_native` Python
-package owns the client/codec; the SDK installs its live transport. Outside a
-host it uses the engine's persistent framed `zlc-native` helper. Both routes
-dispatch the same Rust implementation. Large hosted arrays retain the existing
-shared-memory ownership rules; there are no per-element RPCs.
+The SDK entry point is `zlc_plugin.services.call(operation, **params)` or
+`ctx.service(operation, **params)`. Hosted calls use the `service` request
+`{operation, params, instance?, run?}`. The SDK client and wire codec live in
+`zlc_plugin`; importing them does not import/start the plugin server.
+
+The desktop installs the handler through `PluginHost::install_services` before
+starting plugins. The host checks the calling process/run and supplies generic
+array, input and resource ownership. `zlc-desktop::plugin_services` connects that
+context to `zlc-workbench::services` and `zlc-workbench::scan::execution`.
+Workbench owns JSON adaptation, operation names, diagnostics and opaque service
+handles. Typed plans, parameter contracts, capture validation and numerical
+kernels live in the corresponding `zlc-core` modules. Common inline-array
+encoding is in `zlc-archive::array_wire`; live arrays use the host's shared-memory
+ownership rules.
+
+Outside a host, the SDK starts `zlc-desktop.exe --plugin-services` and reuses its
+framed stdin/stdout connection. The mode dispatches the same Workbench adapters
+before window, device or plugin-host startup. `ZLC_NATIVE_EXECUTABLE` selects an
+explicit desktop executable. There is no separate service executable, capture
+DLL or additional Python client package. Offline arrays use the inline codec;
+hosted arrays keep the shared-memory path.
 
 `scan.compile` normalizes, compiles or previews the authored document. Compact
 Range descriptors `{start,stop,count}`, explicit Values, linked formulas and
@@ -651,29 +682,31 @@ callers, including binding views that select only some axes of a linked group.
 TypeScript sends authored patches and accepts canonical preview rows only when
 their echoed source matches the current draft. It does not expand numeric grids
 or interpret formulas. The run-scoped `scan_plan {handle,outer_index}` Pulse
-parameter resolves directly to its native plan; receipts crossing to Python
-contain identity/count/configuration evidence, not full tables. The host retains
-full applied snapshots for the native run record and LOAD/FIRE checks.
+parameter resolves to the native `zlc-core::scan::Plan`; full applied tables stay
+with the native execution state for run records and LOAD/FIRE checks.
 
-`fields.project` and `fields.value` share `zlc-authoring` with the native
-workbench, preserving typed projection failures and inactive draft values.
-`units.*` uses the core registry, array conversion and quantity parsing/formatting
-rules. Custom unit definitions remain explicit data, including device-specific
-loads; Python caches immutable results with bounded capacity and invalidates
-them when its registry changes.
+`fields.project` and `fields.value` adapt `zlc-core::parameters` for the Workbench
+and Python callers, including typed projection failures and inactive draft values.
+Workbench retains its presentation fields. `units.*` adapts the core registry,
+array conversion and quantity parsing/formatting rules. Custom unit definitions
+remain explicit data, including device-specific loads; Python caches immutable
+results with bounded capacity and invalidates them when its registry changes.
 
-`scientific.*` provides canonical axis/selection/reduction plans, bulk typed
-operations and grouped accumulators. Plot and Derive share numerical kernels
-and SEM rules. Group handles are opaque and unique, belong to a run's native
-service and are released on finish/drop or when the run ends. Invalid or stale
-handles never select a newly created group's state. Protected terminal work may
-still use these services for its final analysis; an ended run cannot.
+`scientific.*` adapts `zlc-core::scientific` axis/selection/reduction plans, bulk
+typed operations and grouped accumulators. Plot and Derive use the same numerical
+kernels and SEM rules. Hosted service handles live in generic run resources;
+ended runs cannot access their former state. The desktop chooses cancellation
+policy: scientific computation checks Stop unless protected terminal work is
+active, scan execution requires a running run, and pure capture evidence remains
+available during cleanup while its run still exists. The host performs the
+common ownership/liveness checks without choosing these domain policies.
 
-The offline helper accepts `durable.*` for local file ownership. Hosted run
-writes use `ctx.artifacts` and its run-directory authority; global native requests
-cannot bypass that containment. Non-run plugin caches use a local helper, without
-acquiring authority over the application's run artifacts. Native products and
-the Python SDK are shipped together in an engine release.
+The offline mode accepts `durable.*` for local file ownership. Hosted run writes
+use `ctx.artifacts` and its run-directory authority; application service dispatch
+refuses a durability request that would bypass that path. Non-run plugin caches
+use the headless desktop mode for their local files. Offline service state is
+keyed by scope and can be released with `scope.release`; it also ends with the
+process. Native engine code and the Python SDK are shipped together.
 
 ## 6. Data plane
 

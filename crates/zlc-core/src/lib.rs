@@ -1,5 +1,9 @@
 //! Immutable numerical storage. Shape, axes and publication identity belong to consumers.
 
+pub mod scan;
+
+pub mod capture;
+
 use std::mem::{align_of, offset_of, size_of};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -12,6 +16,8 @@ pub mod control;
 pub mod pyfmt;
 pub mod decimal;
 pub mod units;
+pub mod scientific;
+pub mod parameters;
 pub mod restrict;
 pub mod checkout;
 

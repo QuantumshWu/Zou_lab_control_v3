@@ -206,7 +206,7 @@ function Get-ZlcSourceStamp {
 }
 
 # The engine the four programs start (bin\engine), and every program a build makes.
-$ZlcEngineNames = @('zlc-desktop.exe', 'zlc-pulse-server.exe', 'zlc-native.exe', 'zlc_capture.dll')
+$ZlcEngineNames = @('zlc-desktop.exe', 'zlc-pulse-server.exe')
 $ZlcProductNames = $ZlcEngineNames + @('zlc-mcp.exe', 'zlc-launch.exe')
 # The four programs at the checkout's root: zlc-launch.exe under the name of the mode it starts.
 $ZlcPrograms = @('experiment', 'figure_viewer', 'pulse_editor', 'installation')
@@ -235,7 +235,7 @@ function Invoke-ZlcBuild([string]$Stamp) {
     if ($gaps.Count) { throw "This machine cannot build the desktop: missing $($gaps -join ', '). Run tools\dev_setup.ps1." }
     $root = Get-ZlcCheckout
     Write-Host "Building the Rust engine from $root ..."
-    & (Join-Path $PSScriptRoot 'dev.ps1') build -Package zlc-desktop, zlc-pulse, zlc-bus, zlc-launch, zlc-native, zlc-capture -Offline | Out-Host
+    & (Join-Path $PSScriptRoot 'dev.ps1') build -Package zlc-desktop, zlc-pulse, zlc-bus, zlc-launch -Offline | Out-Host
     $folder = Get-ZlcDevProducts
     if ($Stamp) { Set-Content -LiteralPath (Join-Path $folder 'SOURCE') -Value "source $Stamp" -Encoding ascii }
     $folder

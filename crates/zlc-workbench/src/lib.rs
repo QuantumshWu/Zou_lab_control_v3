@@ -2,7 +2,8 @@
 //! logic rows and their runs, the board and its layout files
 //! (docs/WORKBENCH_COMMANDS.md). One owner turn applies every command and
 //! every plugin event; plugin work is asked of [`Plugins`] and completes as an
-//! [`Event`]. Scientific data never passes through here.
+//! [`Event`]. Scientific data never passes through that owner turn. Domain
+//! workers in [`scan`] and [`services`] use immutable core data directly.
 pub mod fields;
 pub mod types;
 pub mod workspace;
@@ -11,6 +12,10 @@ mod bench;
 mod choices;
 mod layout;
 mod logic;
+
+pub mod scan;
+
+pub mod services;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};

@@ -16,6 +16,7 @@
 //! Every refusal is an [`ArchiveError`] carrying the Python exception class and
 //! message the scientific reader raises for the same file.
 
+pub mod array_wire;
 pub mod deflate;
 pub mod durable;
 pub mod error;

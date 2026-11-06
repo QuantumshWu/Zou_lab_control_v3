@@ -1,6 +1,8 @@
 //! Waveform Measurement through the real host and Runtime, with a virtual source
 //! in the one plugin process. Needs ZLC_PLUGIN_PYTHON. ZLC_WAVEFORM_BENCH=1 also
 //! runs the measurement of what a free-running source costs.
+mod support;
+
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -25,6 +27,7 @@ fn host() -> Option<Host> {
     let (sender, events) = mpsc::channel();
     let sender = std::sync::Mutex::new(sender);
     let host = PluginHost::new(config, runtime.clone(), safe, move |event| { let _ = sender.lock().unwrap().send(event); }).unwrap();
+        support::install(&host).unwrap();
     Some((host, runtime, events))
 }
 

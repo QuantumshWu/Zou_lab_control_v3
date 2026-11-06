@@ -2960,14 +2960,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zlc-authoring"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "zlc-bus"
 version = "0.1.0"
 dependencies = [
@@ -2980,16 +2972,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "zlc-capture"
-version = "0.1.0"
-dependencies = [
- "serde_json",
-]
-
-[[package]]
 name = "zlc-core"
 version = "0.1.0"
 dependencies = [
+ "rayon",
+ "serde",
  "serde_json",
  "uuid",
 ]
@@ -3028,6 +3015,7 @@ dependencies = [
  "uuid",
  "zlc-core",
  "zlc-plugin-host",
+ "zlc-workbench",
 ]
 
 [[package]]
@@ -3060,19 +3048,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zlc-native"
-version = "0.1.0"
-dependencies = [
- "base64",
- "serde_json",
- "zlc-archive",
- "zlc-authoring",
- "zlc-core",
- "zlc-scan",
- "zlc-scientific",
-]
-
-[[package]]
 name = "zlc-plot"
 version = "0.1.0"
 dependencies = [
@@ -3089,7 +3064,6 @@ dependencies = [
  "zlc-figure",
  "zlc-mathtext",
  "zlc-render",
- "zlc-scientific",
  "zlc-text",
 ]
 
@@ -3104,8 +3078,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "zlc-archive",
  "zlc-core",
- "zlc-native",
- "zlc-scan",
+ "zlc-workbench",
 ]
 
 [[package]]
@@ -3116,7 +3089,6 @@ dependencies = [
  "windows-sys 0.61.2",
  "zlc-core",
  "zlc-resources",
- "zlc-scan",
 ]
 
 [[package]]
@@ -3143,27 +3115,6 @@ name = "zlc-resources"
 version = "0.1.0"
 
 [[package]]
-name = "zlc-scan"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "zlc-core",
-]
-
-[[package]]
-name = "zlc-scientific"
-version = "0.1.0"
-dependencies = [
- "rayon",
- "serde",
- "serde_json",
- "uuid",
- "zlc-archive",
- "zlc-core",
-]
-
-[[package]]
 name = "zlc-text"
 version = "0.1.0"
 
@@ -3171,14 +3122,15 @@ version = "0.1.0"
 name = "zlc-workbench"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "caseless",
  "serde",
  "serde_json",
  "unicode-general-category",
  "unicode-normalization",
+ "uuid",
  "windows-sys 0.61.2",
  "zlc-archive",
- "zlc-authoring",
  "zlc-core",
 ]
 
