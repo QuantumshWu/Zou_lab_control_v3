@@ -697,7 +697,7 @@ __device__ void coherent_metric(const Warp& W,const Cluster& C,const Entries<>& 
 template<int S,int U>
 __device__ void fourth_hamiltonian(const Warp& W,const Cluster& C,const Entries<S>& E,double t,int lane,float2 (&h)[S]){
     #pragma unroll
-    for(int j=0;j<SLOTS;j++)h[j]=zero2();
+    for(int j=0;j<S;j++)h[j]=zero2();
     if(C.fourth<0)return;
     const Fourth F=P.fourths[C.fourth];float2 buf[SLOTS],unused[MOST_FOCUSED][SLOTS];double nu=0.;float2 phase=make_float2(1.f,0.f);
     for(int q=0;q<F.nquartic;q++){
@@ -706,7 +706,7 @@ __device__ void fourth_hamiltonian(const Warp& W,const Cluster& C,const Entries<
         const float2 c=m*phase;
         gather<false>(W,false,P.tables+C.table+Q.at,C.size,E.nn,lane,buf,unused);
         #pragma unroll
-        for(int j=0;j<SLOTS;j++)h[j]+=c*buf[j];
+        for(int j=0;j<S;j++)h[j]+=c*buf[j];
     }
     in_frames(C,E,t,lane,h);
 }

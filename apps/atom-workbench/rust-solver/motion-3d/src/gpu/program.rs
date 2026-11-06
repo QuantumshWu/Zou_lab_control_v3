@@ -428,6 +428,8 @@ impl Program{
     }
     /// The tables' nodes per intensity axis.
     pub fn nodes(&self)->usize{self.params.nodes as usize}
+    /// Whether the packed execution plan contains an exact-step cluster.
+    pub fn has_exact_steps(&self)->bool{self.exact!=0}
     /// A jump's working space per trajectory (float2): the exact response's -- every near beam's
     /// photon tables at each cluster column --, the photons' matrices per axis, the classes' weights and the fourth order's
     /// (the kernel's `Program::classes_at` and `Program::weights` are where they start), the exact step's and the transient's

@@ -371,6 +371,20 @@ fn at_fourth_order_a_step_and_a_jump_are_the_cpu_s(){
     let r=request(PGC);compare(&r,None,f64::INFINITY,false,true);compare(&r,Some(0.999),f64::INFINITY,true,true);compare(&r,Some(0.999),0.,true,true);
 }
 
+/// Exercise the two-slot ordinary specialization with nonzero fourth-order
+/// slabs. The loose beat budget selects that backend path; this checks device
+/// agreement, not the physical accuracy of discarding those beats.
+#[test]
+fn at_fourth_order_the_wide_ordinary_slots_are_the_cpu_s(){
+    let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
+    let r=request(MOLASSES);let m=model(&r,true);
+    assert_eq!(m.clusters(),1);assert_eq!(m.dimension(0),8);assert!(m.beating(0));
+    let(model,mut settings,trajectories)=setup(&r,m,0.2,Some(1e-300),f64::INFINITY);
+    settings.beats=f64::MAX;
+    let program=gpu.program(&model,&settings).unwrap();assert!(!program.has_exact_steps());
+    compare_from(&gpu,&model,&settings,&trajectories,false,0.);
+}
+
 /// The same on the gray molasses, whose H^(4) beats at the hyperfine splitting: its slabs in the parts of the exact step. A jump-free
 /// step, and a jump at each thermal state: past a step's own crossing the slow part's and the photon's phases at its time, 4.3e4 rad/us between F = 1 and F = 2, are as good as a draw (a crossing moved by 1e-4 us moves (1 − p)/A by 0.5 % and κ by 0.6/um).
 #[test]
