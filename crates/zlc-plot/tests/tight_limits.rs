@@ -27,7 +27,7 @@ impl DocumentRead for Read {
 }
 
 /// One shot whose cell is `cell` samples of `values`, on spatial axes.
-fn shot(cell: &[usize], values: Vec<f64>) -> Read {
+fn shot(cell: &[usize], values: Vec<f64>, sigma: Option<f64>) -> Read {
     let index = |id: &str, role: &str, len: usize| Axis::new(id.into(), id.into(), role.into(), Coordinates::Index { origin: 0, len }, None, None, None, None).unwrap();
     let axes = match cell {
         [x] => vec![index("camera.x", "spatial-x", *x)],
@@ -36,7 +36,8 @@ fn shot(cell: &[usize], values: Vec<f64>) -> Read {
     };
     let schema = DatasetSchema::new(Domain::dense(vec![1], vec![index("camera.repeat", "repeat", 1)]).unwrap(), Domain::dense(vec![1], vec![index("camera.frame", "readout-event", 1)]).unwrap(),
         Domain::dense(cell.to_vec(), axes).unwrap(), ValueSchema::new(DType::F64, None, None, ValidityContract::Value).unwrap()).unwrap();
-    let block = DataBlock::new(schema.clone(), OwnedBuffer::from_vec(values).into(), Validity::Uniform(true), None).unwrap();
+    let errors = sigma.map(|sigma| OwnedBuffer::from_vec(vec![sigma; values.len()]));
+    let block = DataBlock::new(schema.clone(), OwnedBuffer::from_vec(values).into(), Validity::Uniform(true), errors).unwrap();
     let snapshot = DatasetStore::new(schema.clone()).commit(vec![Placement::new([0, 0], [1, 1], block).unwrap()]).unwrap();
     let runtime = Runtime::new();
     let generation = runtime.begin("fixture", vec![Declaration { signal: "shot".into(), schema: snapshot.schema().clone(), storage: Storage::Snapshot }], json!({})).unwrap();
@@ -102,36 +103,41 @@ fn the_limits_are_the_datas_and_a_single_value_still_has_a_span() {
 #[test]
 fn a_tight_image_uses_the_whole_colormap() {
     let checker = |low: f64, high: f64| (0..64 * 64).map(|i| if (i % 64 + i / 64) % 2 == 0 { low } else { high }).collect::<Vec<f64>>();
-    let (front, axes) = draw(shot(&[64, 64], checker(100.0, 200.0)), "image", json!({"relim_mode": "tight", "colormap": "gray"}));
+    let (front, axes) = draw(shot(&[64, 64], checker(100.0, 200.0), None), "image", json!({"relim_mode": "tight", "colormap": "gray"}));
     assert_eq!(extremes(&front, main_axes(&axes, "image")), (0, 255), "the data's extremes are the colormap's ends");
-    let (front, axes) = draw(shot(&[64, 64], checker(-200.0, -100.0)), "image", json!({"relim_mode": "normal", "colormap": "gray"}));
+    let (front, axes) = draw(shot(&[64, 64], checker(-200.0, -100.0), None), "image", json!({"relim_mode": "normal", "colormap": "gray"}));
     let (low, high) = extremes(&front, main_axes(&axes, "image"));
     assert!(low > 0 && high < 255, "normal keeps its padding: {low} {high}");
 }
 
 #[test]
 fn a_constant_tight_image_draws() {
-    let (front, axes) = draw(shot(&[32, 32], vec![5.0; 32 * 32]), "image", json!({"relim_mode": "tight", "colormap": "gray"}));
+    let (front, axes) = draw(shot(&[32, 32], vec![5.0; 32 * 32], None), "image", json!({"relim_mode": "tight", "colormap": "gray"}));
     let (low, high) = extremes(&front, main_axes(&axes, "image"));
     assert_eq!(low, high, "one value is one colour");
 }
 
 #[test]
-fn a_tight_curve_stands_on_its_extremes() {
-    let values: Vec<f64> = (0..50).map(|i| 3.0 + (i as f64 * 0.3).sin()).collect();
-    let (low, high) = values.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), v| (low.min(*v), high.max(*v)));
-    let (_, axes) = draw(shot(&[50], values.clone()), "curve", json!({"relim_mode": "tight"}));
-    assert_eq!(main_axes(&axes, "main").y_limits, (low, high));
-    let (_, axes) = draw(shot(&[50], values), "curve", json!({"relim_mode": "normal"}));
-    assert_eq!(main_axes(&axes, "main").y_limits.0, 0.0, "normal is zero based");
+fn curve_limits_follow_values_when_error_bars_change() {
+    for (mode, expected) in [("tight", (3.0, 7.0)), ("normal", (0.0, 7.0 * 1.2))] {
+        let render = |sigma| {
+            let data = shot(&[5], vec![5.0, 3.0, 5.0, 7.0, 5.0], Some(sigma));
+            draw(data, "curve", json!({"relim_mode": mode, "uncertainty": true}))
+        };
+        let (narrow, narrow_axes) = render(0.1);
+        let (wide, wide_axes) = render(20.0);
+        assert_eq!(main_axes(&narrow_axes, "main").y_limits, expected, "{mode}");
+        assert_eq!(main_axes(&wide_axes, "main").y_limits, expected, "{mode} with bars crossing zero");
+        assert!(narrow.pixels.as_slice() != wide.pixels.as_slice(), "{mode} should draw the wider bars");
+    }
 }
 
 #[test]
 fn a_tight_histogram_reaches_its_peak() {
     let values: Vec<f64> = (0..400).map(|i| (i % 20) as f64 * (i % 7) as f64).collect();
-    let (_, axes) = draw(shot(&[400], values.clone()), "histogram", json!({"relim_mode": "tight", "x_relim_mode": "tight", "bin_count": 20}));
+    let (_, axes) = draw(shot(&[400], values.clone(), None), "histogram", json!({"relim_mode": "tight", "x_relim_mode": "tight", "bin_count": 20}));
     let tight = main_axes(&axes, "main").y_limits;
-    let (_, axes) = draw(shot(&[400], values), "histogram", json!({"relim_mode": "normal", "x_relim_mode": "tight", "bin_count": 20}));
+    let (_, axes) = draw(shot(&[400], values, None), "histogram", json!({"relim_mode": "normal", "x_relim_mode": "tight", "bin_count": 20}));
     let normal = main_axes(&axes, "main").y_limits;
     assert_eq!(tight.0, 0.0);
     assert_eq!(normal.1, tight.1 * 1.08, "the same bins, one with headroom");
