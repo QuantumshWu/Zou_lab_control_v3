@@ -623,6 +623,22 @@ fn a_mirror_phase_s_sites_hold_their_atoms(){
     let(_,base)=retro(0.);
     for(reflectivity,phase)in [(1.,135.),(1.,180.),(0.1,-135.)]{let mut r=mirrored(&base,reflectivity,phase);r.times_us=vec![0.,1.];thermal_atoms_stay(&r);}
 }
+/// The trap the rule reads its reach by, before any table (ground.rs `Ground::holding`), is the model's (`Model::trap`): on an 808 nm tweezer that is a near carrier both hold its own light shift, within 0.1 %, which H(r) alone, what the reach read, leaves out, its ω 8.4 times low.
+#[test]
+fn a_near_carrier_s_trap_is_one_before_the_rule_and_after(){
+    let v:Value=serde_json::from_str(include_str!("fixtures/near_tweezer_probe_motion.json")).unwrap();let mut r=sparse_request(&v);r.times_us=vec![0.,1.];
+    let model=Model::new(&r).unwrap();assert!(model.carriers.iter().any(|c|c.beams.contains(&r.trap_beam)),"the tweezer is a near carrier");
+    let trap=Initial::new(&model,&r).unwrap().traps[0];let before=model.ground.trap;let g=&model.ground;
+    // H(r) alone: the reference state's energy, what the reach read.
+    let state=g.ground_states[g.reference_state(&r).unwrap()];
+    // Independent central difference of the bare diagonal for comparison.
+    let h=5e-4*r.beams[r.trap_beam].waist_um.unwrap();
+    let alone:Vec<f64>=(0..3).map(|a|{let at=|x:f64|{let mut p=before.centre;p[a]+=x;g.hamiltonian_at(p)[(state,state)].re};((at(h)+at(-h)-2.*at(0.))/(h*h)*model.hbar_over_mass).max(0.).sqrt()}).collect();
+    let sorted=|w:[f64;3]|{let mut x=w;x.sort_by(f64::total_cmp);x};
+    eprintln!("808 nm frequencies (rad/us): before {:?}, model {:?}, bare diagonal {:?}",before.frequencies,trap.frequencies,alone);
+    for(x,y)in sorted(before.frequencies).iter().zip(sorted(trap.frequencies)){assert!((x/y-1.).abs()<=5e-3,"{:?} against {:?}",before.frequencies,trap.frequencies);}
+    let largest=|w:&[f64]|w.iter().copied().fold(0.,f64::max);assert!(largest(&before.frequencies)>2.*largest(&alone),"{:?} against H(r)'s {:?}",before.frequencies,alone);
+}
 /// An 808 nm tweezer that is a near carrier, reflected at 102°, as a folded one: its standing wave in the trap's potential through its beams' summed field (model.rs `Model::level`), the trap in its site and its
 /// thermal atoms drawn from it. (Each beam's own shift alone left the ensemble the beams' sum, and the atoms rose from 15 uK to 338 uK within 20 us without a photon: the validation's s5063.)
 #[test]

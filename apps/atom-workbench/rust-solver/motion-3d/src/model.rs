@@ -591,6 +591,24 @@ pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,bo
 /// (rad/us) there, and the frequencies per lab axis.
 #[derive(Clone,Copy,Debug)]
 pub struct Trap{pub centre:[f64;3],pub axes:[[f64;3];3],pub frequencies:[f64;3],pub lab:[f64;3],pub lattice:Option<Lattice>}
+impl Trap{
+    /// Preparation locates the well. The illuminated potential supplies its
+    /// curvature in rad/µs per µm². Both stages use this definition of the trap.
+    pub(crate) fn from_potentials(
+        ground:&Ground,beam:usize,preparation:impl Fn([f64;3])->f64,
+        illuminated:impl Fn([f64;3],[f64;3])->f64,lattice:impl Fn([f64;3])->Option<Lattice>,
+    )->Trap{
+        let centre=ground.well(beam,&preparation);
+        let step=ground::difference(ground.beams[beam].waist_um.unwrap());
+        let(_,_,hessian)=ground::slopes(&|r|illuminated(r,centre),centre,step);
+        let(values,axes)=symmetric_eigen(hessian);
+        let hbar_over_mass=HBAR/ground.mass_kg*1e6;
+        let frequency=|curvature:f64|(curvature*hbar_over_mass).max(0.).sqrt();
+        Trap{centre,axes,frequencies:values.map(frequency),lab:std::array::from_fn(|a|frequency(hessian[a][a])),lattice:lattice(centre)}
+    }
+    /// No trap: no beam focuses.
+    pub(crate) fn none()->Trap{Trap{centre:[0.;3],axes:[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],frequencies:[0.;3],lab:[0.;3],lattice:None}}
+}
 
 /// The trap's standing wave, its beam and reflection one unit (ground.rs `Unit`): on the beam's axis the field is
 /// γ₀ a + γ₁ ā, a = e^{ikz}/(1 + iz/z_R), its antinodes -- the sites -- where Φ(z) = kz − atan(z/z_R) + ½ arg(γ₀ γ̄₁)
@@ -729,23 +747,6 @@ fn field_pairs(hermitian:bool,emitted:usize,absorbed:usize)->Vec<(usize,usize)>{
     if hermitian{(0..absorbed).flat_map(|k1|(k1..absorbed).map(move|k|(k1,k))).collect()}else{(0..emitted).flat_map(|k1|(0..absorbed).map(move|k|(k1,k))).collect()}
 }
 
-/// The trap's beams: the trap beam and the beams of its mode -- of its frequency, along its axis
-/// either way, with its waist: its reflections --, whose light falls off with its own far from the
-/// focus (`Model::trap_potential`).
-fn trap_beams(ground:&Ground,geometry:&[Geometry],trap_beam:usize)->Vec<usize>{
-    let(t,index)=(&geometry[trap_beam],&ground.beams[trap_beam].frequency_index);
-    (0..geometry.len()).filter(|&l|l==trap_beam||(ground.beams[l].frequency_index==*index&&geometry[l].waist==t.waist&&{
-        let c:f64=(0..3).map(|i|geometry[l].direction[i]*t.direction[i]).sum();(c.abs()-1.).abs()<=1e-12})).collect()
-}
-
-/// The trap's light, what holds the atoms before t = 0 (`Model::trap_level`): the trap's beams and every far Gaussian
-/// beam -- a crossed beam's shift is part of the potential the atom's motion conserves --; not a near beam, whose light
-/// the solve turns on at t = 0, nor a beam whose unit holds a plane wave, which does not fall off with it.
-fn trap_light(ground:&Ground,geometry:&[Geometry],trap_beams:&[usize])->Vec<usize>{
-    (0..geometry.len()).filter(|l|trap_beams.contains(l)||(geometry[*l].waist.is_some()&&!ground.carriers.iter().any(|c|c.beams.contains(l))
-        &&ground.units.iter().filter(|u|u.beams.contains(l)).all(|u|u.beams.iter().all(|&b|geometry[b].waist.is_some())))).collect()
-}
-
 impl Model{
     /// The model of a request with every drive folded (`Model::with` at an infinite allowance).
     pub fn new(request:&Request)->Result<Model,String>{Model::with(request,f64::INFINITY)}
@@ -779,7 +780,7 @@ impl Model{
         let trap_beam=request.trap_beam;
         if trap_beam>=geometry.len()||geometry[trap_beam].waist.is_none(){return Err("光镊（trapBeamId 所指的光束）需要束腰：3D 运动计算聚焦在原子处的光镊中的单个原子".into());}
         let hbar_over_mass=HBAR/request.mass_kg*1e6;
-        let trap_unit=ground.units.iter().position(|u|u.beams.contains(&trap_beam)).unwrap();let trap_beams=trap_beams(&ground,&geometry,trap_beam);
+        let trap_unit=ground.units.iter().position(|u|u.beams.contains(&trap_beam)).unwrap();let trap_beams=ground.trap_beams(trap_beam);
         // Each carrier's couplings: an orthonormal basis and the beams' coefficients on it.
         let mut carriers=vec![];let mut bases:Vec<Vec<Vec<Complex>>>=vec![];
         for c in &ground.carriers{
@@ -808,10 +809,10 @@ impl Model{
         if carriers.len()>MOST_CARRIERS||geometry.len()>MOST_BEAMS{return Err(format!("3D 运动最多支持 {MOST_CARRIERS} 个近共振频率、{MOST_BEAMS} 束光"));}
         if ground.ground_states.len()!=GROUND{return Err(format!("The ground manifold has {} states, not {GROUND}",ground.ground_states.len()));}
         if ground.clusters.iter().any(|c|c.excited.is_empty()&&c.states.len()>MOST_STATES){return Err("A cluster of ground states has more than eight states".into());}
-        let trap_light=trap_light(&ground,&geometry,&trap_beams);
+        let trap_light=ground.trap_light(&trap_beams);
         for c in &mut carriers{let n=c.beams.len();let of=|j:usize|ground.units.iter().position(|u|u.beams.contains(&c.beams[j]));
             c.interfering=(0..n*n).map(|x|(x/n,x%n)).filter(|&(j,m)|j!=m&&of(j)==of(m)&&trap_light.contains(&c.beams[j])&&trap_light.contains(&c.beams[m])).collect();}
-        let centre=ground.centre;
+        let centre=ground.trap.centre;
         let mut model=Model{ground,geometry,trap_beam,trap_beams,trap_light,focused:vec![trap_unit],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
             layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3],work:0.},table_error:0.,table_limit:None,table_stalled:false,dressing:0.,fourth_dropped:0.,effective_dropped:0.,first_error:0.,resonance:0.,ringing_spread:0.,reach:vec![centre],
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
@@ -828,14 +829,14 @@ impl Model{
     fn stake(&self,request:&Request)->f64{
         let thermal=(KT_PER_UK*request.temperature_uk*self.hbar_over_mass).sqrt();
         let pattern=self.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max)*thermal;
-        let rate=if pattern>0.{pattern}else{self.ground.reference_state(request).map_or(0.,|s|self.bare_trap(s).frequencies.iter().copied().fold(0.,f64::max))};
+        let rate=if pattern>0.{pattern}else{self.ground.trap.frequencies.iter().copied().fold(0.,f64::max)};
         let steps=(self.ground.duration*rate/crate::solve::first_phase()).max(1.);
         let advance=(0..self.layouts.len()).map(|k|advance_work(&self.work(k))).fold(0.,f64::max);
         (crate::solve::FIRST_GROUPS*crate::TASK) as f64*steps*advance
     }
 
     /// The varying units other than the trap beam's (ground.rs `Unit`): each one's profile is judged
-    /// over the atom's reach, the region of the trap within ln(1/budget) k_B T of its bottom (the
+    /// over the atom's reach (ground.rs `Ground::trap`, the region of the trap within ln(1/budget) k_B T of its bottom: the
     /// harmonic trap's thermal ellipsoid holding all but the budget of a Boltzmann ensemble), T the
     /// request's -- at its ends along the principal axes, and inside it for interfering beams
     /// (ground.rs `reach_points`): its intensity changes there by ε from the focus's at worst, and its
@@ -844,8 +845,7 @@ impl Model{
     /// fields (near beams) and its shifts at the focus; beyond, an intensity axis (at most
     /// `MOST_FOCUSED` in all, the largest errors first).
     fn choose_profiles(&mut self,request:&Request)->Result<(),String>{
-        let g=&self.ground;let reference=g.reference_state(request)?;
-        let trap=self.bare_trap(reference);
+        let g=&self.ground;let trap=g.trap;
         let reach:[f64;3]=std::array::from_fn(|a|ground::thermal_reach(trap.frequencies[a],request.temperature_uk,self.hbar_over_mass).unwrap_or(0.));
         self.reach.extend(ground::reach_points(trap.centre,&trap.axes,reach,g.units.iter().any(|u|u.beams.len()>1)));
         let mut errors:Vec<(usize,f64,f64)>=vec![];
@@ -873,21 +873,8 @@ impl Model{
         self.ground.units[u].intensity(|l|self.geometry[l].field(r).0)
     }
 
-    /// The trap a ground state sees in H(r) alone (its energy, the folds and outside shifts at r), at its well there (`Ground::centre`, the same state's).
-    fn bare_trap(&self,state:usize)->Trap{
-        let g=&self.ground;let i=g.ground_states[state];
-        let u=|r:[f64;3]|g.hamiltonian_at(r)[(i,i)].re;
-        self.trap_of(&u,g.centre)
-    }
-    /// The trap of a potential u(r) (rad/us) at a place: its Hessian there, eigen-decomposed.
-    fn trap_of(&self,u:&dyn Fn([f64;3])->f64,centre:[f64;3])->Trap{
-        let(_,_,hessian)=ground::slopes(u,centre,ground::difference(self.geometry[self.trap_beam].waist.unwrap()));
-        let(values,axes)=symmetric_eigen(hessian);
-        let w=|x:f64|(x*self.hbar_over_mass).max(0.).sqrt();
-        Trap{centre,axes,frequencies:values.map(w),lab:std::array::from_fn(|a|w(hessian[a][a])),lattice:self.lattice(centre)}
-    }
-    /// The bottom of the reference state's well in H(r) alone (`Ground::centre`): where what no state's own trap decides is taken: the explicit states' decay.
-    pub fn centre(&self)->[f64;3]{self.ground.centre}
+    /// The bottom of the reference state's well with every drive folded (`Ground::trap`): where what no state's own trap decides is taken: the explicit states' decay.
+    pub fn centre(&self)->[f64;3]{self.ground.trap.centre}
     /// The trap's standing wave, where the trap beam's unit is it and its reflection, its envelope at the trap's centre.
     fn lattice(&self,centre:[f64;3])->Option<Lattice>{
         let unit=&self.ground.units[self.focused[0]];if unit.beams.len()!=2||!unit.beams.iter().all(|l|self.trap_beams.contains(l)){return None;}
@@ -900,7 +887,8 @@ impl Model{
     /// The trap of the model's tables for a cluster's state: at the well of what holds it before the near light comes on (`trap_level`, ground.rs `Ground::well`), its Hessian in its potential
     /// (`potential`), the near light's own shifts in it.
     pub fn trap(&self,cluster:usize,x:usize)->Trap{
-        let centre=self.ground.well(self.trap_beam,&|r|self.trap_level(cluster,x,r));self.trap_of(&|r|self.potential(cluster,x,r,centre),centre)
+        Trap::from_potentials(&self.ground,self.trap_beam,|r|self.trap_level(cluster,x,r),
+            |r,centre|self.potential(cluster,x,r,centre),|centre|self.lattice(centre))
     }
 
     /// Each cluster's table layout: h0, its groups split by residual beat, its carriers' photon
