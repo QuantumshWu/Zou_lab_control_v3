@@ -801,6 +801,15 @@ impl Renderer {
             prepared.color_limits = (low, high);
         }
         if let Some(Child::Image(image)) = self.fig.axes[axes].child_mut(id) { image.clim = Some((low, high)); }
+        if !self.height_bars.active && self.image.points.face_values.is_some() {
+            if let (Some((cmap, _)), Some(rings)) = (self.image.mapping, self.image.points.rings) {
+                let faces = self.point_facecolors(cmap, (low, high));
+                if let Some(Child::Ellipses(artist)) = self.fig.axes[self.image.points.axes].child_mut(rings) {
+                    artist.facecolors = faces;
+                }
+                self.image.points.signature = None;
+            }
+        }
         Ok(())
     }
 }

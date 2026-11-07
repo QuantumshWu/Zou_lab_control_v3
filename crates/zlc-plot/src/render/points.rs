@@ -19,6 +19,7 @@ use crate::session::overlay::{ImagePointOverlay, PointStatus};
 /// The overlay's artists (`{key}:points*`) and the signature they were made for.
 #[derive(Clone, Debug, Default)]
 pub struct PointTables {
+    pub face_values: Option<Arc<[f64]>>,
     pub signature: Option<PointSignature>,
     pub axes: usize,
     pub rings: Option<ChildId>,
@@ -33,6 +34,7 @@ pub struct PointTables {
 /// `{key}:points-signature`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PointSignature {
+    fill_mapping: Option<(&'static str, (f64, f64))>,
     overlay: Option<(u64, usize)>,
     facet_value: Option<Scalar>,
     show_labels: bool,
@@ -84,6 +86,13 @@ fn statuses_for(overlay: &ImagePointOverlay, spec: &PlotSpec, facet_value: Optio
 }
 
 impl Renderer {
+    pub(super) fn point_facecolors(&self, cmap: &str, (low, high): (f64, f64)) -> Vec<[f64; 4]> {
+        self.image.points.face_values.as_deref().unwrap_or_default().iter().map(|&v| {
+            if v.is_finite() { super::mpl::image::colormap_rgba(cmap, ((v - low) / (high - low)).clamp(0.0, 1.0)) }
+            else { [0.0; 4] }
+        }).collect()
+    }
+
     /// `_update_image_point_overlay` of every painted image surface: an Image's
     /// one, or each cell of a grid of images with its own facet coordinate.
     pub(crate) fn update_image_point_overlay(&mut self, overlay: Option<&Arc<ImagePointOverlay>>, state: &DisplayState) {
@@ -109,12 +118,14 @@ impl Renderer {
     /// `_update_image_point_overlay(axes, payload, overlay, state, key, facet_value)`.
     fn update_surface_points(&mut self, axes: usize, data: &ImageData, overlay: Option<&Arc<ImagePointOverlay>>, state: &DisplayState, facet_value: Option<&Scalar>) {
         let show_labels = matches!(state.get("show_point_labels"), Some(Value::Bool(true)));
+        self.image.points.face_values = overlay.and_then(|o| o.face_values.clone());
         let view = overlay.filter(|o| o.paths_xy.is_some()).map(|_| {
             let a = &self.fig.axes[axes];
             let b = a.bbox_exact(self.fig.size_inches, self.fig.dpi);
             ([a.xlim.0, a.xlim.1, a.ylim.0, a.ylim.1].map(f64::to_bits), [b[0], b[1], b[2] - b[0], b[3] - b[1]].map(f64::to_bits), self.fig.dpi.to_bits())
         });
         let signature = PointSignature {
+            fill_mapping: self.image.points.face_values.as_ref().and(self.image.mapping),
             overlay: overlay.map(|o| (o.revision, Arc::as_ptr(o) as usize)), facet_value: facet_value.cloned(), show_labels,
             units: (data.x.display_unit.symbol.to_string(), data.y.display_unit.symbol.to_string()), view,
         };
@@ -174,6 +185,7 @@ impl Renderer {
                 if let Some(id) = self.image.points.joined { self.set_point_child_visible(id, false); }
                 let rings = EllipsesArtist {
                     visible: true, zorder: visual.point_zorder, offsets: points.clone(), widths: vec![2.0 * radii.0; count],
+                    facecolors: self.image.mapping.map_or_else(Vec::new, |(cmap, limits)| self.point_facecolors(cmap, limits)),
                     heights: vec![2.0 * radii.1; count], edgecolors: colours.clone(), linewidths: widths.clone(), dashed: dashed.clone(),
                 };
                 match self.image.points.rings {

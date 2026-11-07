@@ -149,7 +149,7 @@ pub fn table_default(schema: Option<&PlotSchema>, kind: PlotKind, cell_kind: Opt
                     .map(|axis| super::kinds::declared_ref(domain, axis.id()))
             });
             Ok(site.map(|site| PlotSpec::PointMap(PointMapPlot {
-                site, reduction: Reduction::Last, labels: PlotLabels::default(), scope: Vec::new(), coordinates: Vec::new(),
+                site, reduction: Reduction::Mean, labels: PlotLabels::default(), scope: Vec::new(), coordinates: Vec::new(),
             })))
         }
         PlotKind::Curve => Ok(curve_spec(schema, &families, &curve_plan(&families, None), true)?.map(PlotSpec::Curve)),

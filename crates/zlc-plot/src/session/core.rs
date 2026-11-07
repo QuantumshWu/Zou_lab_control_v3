@@ -500,7 +500,17 @@ impl PlotSession {
                 .or_else(|| prior.series_readout.as_ref().filter(|r| r.mode.as_ref() == "hover").map(|r| (&r.target,"hover")));
             let index_and_readout = target.and_then(|(target, mode)| super::point_map::readout(map,target,mode));
             let (index, readout) = index_and_readout.unzip();
-            frame.image_overlay = Some(self.sites.overlay(map,index));
+            let mut overlay = self.sites.overlay(map,index);
+            if frame.state.get("presentation").and_then(Value::as_str) != Some("height_bars") {
+                // The overlay draws the 2D faces. Keep the scalar plane for
+                // Image's colour limits and distribution, without painting its pixel edges.
+                if frame.state.get("show_image") == Some(&Value::Bool(true)) {
+                    Arc::make_mut(&mut frame.state).values.insert("show_image", Value::Bool(false));
+                } else {
+                    Arc::make_mut(&mut overlay).face_values = None;
+                }
+            }
+            frame.image_overlay = Some(overlay);
             frame.payload = self.sites.image(self.scene.projection.payload(),map);
             super::point_map::boolean_scale(&mut frame.state, map.boolean);
             self.renderer.present(&frame, false)?;

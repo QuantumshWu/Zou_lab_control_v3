@@ -137,7 +137,7 @@ class PointMapPlot(_Spec):
     """Colour the calibrated locations of a SITE axis by their scalar values."""
 
     site: AxisRef
-    reduction: Reduction = Reduction.LAST
+    reduction: Reduction = Reduction.MEAN
     labels: PlotLabels = field(default_factory=PlotLabels)
     scope: tuple[tuple[AxisRef, object], ...] = ()
     coordinates: tuple[AxisRef, ...] = ()

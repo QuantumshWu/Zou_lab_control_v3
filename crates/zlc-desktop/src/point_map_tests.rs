@@ -151,6 +151,12 @@ fn spatial_parameter_preserves_geometry_in_live_and_reopened_2d_and_3d_figures()
     let png = folder.join("site-frequency.png");
     panel.save(&png);
     assert!(std::fs::read(&png).unwrap().starts_with(b"\x89PNG"));
+    let vector = folder.join("site-frequency.svg");
+    panel.save(&vector);
+    let svg = std::fs::read_to_string(&vector).unwrap();
+    let filled_circles = svg.lines().filter(|path| path.contains("<path d=") && path.contains(" C ")
+        && path.contains("fill:#") && path.contains(";stroke:")).count();
+    assert_eq!(filled_circles, 33, "each valid site's face and outline must be on the same vector path");
     panel.command(json!({"action":"configure","panel":"p","parameters":{"presentation":"height_bars"}}));
     let bars = folder.join("site-frequency-bars.svg");
     panel.save(&bars);

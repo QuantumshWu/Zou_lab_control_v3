@@ -70,8 +70,8 @@ fn site_image(revision: u64, generation: &Arc<str>, geometry: &SiteGeometry, ind
     let radius = point_ring_radius(&xy, style.point_auto_radius_fraction, span.max(1.0) * style.point_single_radius_fraction);
     let margin = (2.5 * radius).max(if span > 0.0 { span * 0.05 } else { 0.5 });
     let longest = span + 2.0 * margin;
-    // Six samples per radius keeps circles smooth. Cap the image just as a camera
-    // frame is bounded even when two groups are very far apart in calibration space.
+    // The sampled plane supplies Image statistics and Height bars. In 2D the
+    // overlay paints the original value inside the same path as its ring.
     let pitch = (radius / 6.0).max(longest / 1024.0);
     if !pitch.is_finite() || pitch <= 0.0 { return Err(ProjectionError::view("Site positions have no representable image extent")); }
     let coordinates = |d: usize| -> Vec<f64> {
@@ -116,10 +116,12 @@ fn site_image(revision: u64, generation: &Arc<str>, geometry: &SiteGeometry, ind
         valid: Array::from_vec(mask, shape),
     };
     let statuses = valid.iter().map(|&ok| if ok { PointStatus::Empty } else { PointStatus::Invalid }).collect();
-    let overlay = ImagePointOverlay::new(revision.into(), OverlayArray {
+    let mut overlay = ImagePointOverlay::new(revision.into(), OverlayArray {
         values: Some(xy.into_iter().flatten().collect()), shape: vec![points.len(), 2],
     }, Some(points.iter().map(|p| p.id.clone()).collect()), Some(points.iter().map(|p| Some(p.label.clone())).collect()),
        Some(statuses), None, None).map_err(|e| ProjectionError::view(e.message))?;
+    overlay.face_values = Some(valid.iter().enumerate().map(|(i, &ok)|
+        if ok { values.display.get_f64(i) } else { f64::NAN }).collect());
     Ok((image, Arc::new(overlay), radius))
 }
 
@@ -159,7 +161,7 @@ mod tests {
     fn project(read: &Read, reduction: Reduction) -> PointMapData {
         let schema = PlotSchema::new(read.schema().clone());
         let Some(PlotSpec::PointMap(mut spec)) = default_spec(Some(&schema), PlotKind::PointMap).unwrap() else { panic!("admitted point map") };
-        assert_eq!(spec.reduction, Reduction::Last);
+        assert_eq!(spec.reduction, Reduction::Mean);
         spec.reduction = reduction;
         let scope = projection_scope(&schema, &PlotSpec::PointMap(spec.clone()), None).unwrap().into_iter().map(|(axis, value)| {
             assert!(matches!(value, crate::configuration::semantics::ScopeCoordinate::Latest));

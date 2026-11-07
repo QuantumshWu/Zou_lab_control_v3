@@ -75,6 +75,8 @@ pub struct OverlayArray { pub values: Option<Vec<f64>>, pub shape: Vec<usize> }
 #[derive(Clone)]
 pub struct ImagePointOverlay {
     pub revision: u64,
+    /// Optional scalar faces in display units, one per site. NaN leaves the ring hollow.
+    pub face_values: Option<Arc<[f64]>>,
     /// `(N, 2)` canonical x then y, row-major.
     pub coordinates: Arc<[f64]>,
     pub point_ids: Option<Vec<String>>,
@@ -115,7 +117,7 @@ impl ImagePointOverlay {
         if static_statuses.as_ref().is_some_and(|statuses| statuses.len() != count) {
             return Err(PlotError::value("static_statuses must have one item per coordinate"));
         }
-        let overlay = ImagePointOverlay { revision, coordinates: coordinates_values.into(), point_ids, labels, static_statuses, status: None, paths_xy };
+        let overlay = ImagePointOverlay { revision, face_values: None, coordinates: coordinates_values.into(), point_ids, labels, static_statuses, status: None, paths_xy };
         match status { Some(status) => overlay.with_status(Some(status)), None => Ok(overlay) }
     }
 
