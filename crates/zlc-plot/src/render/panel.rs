@@ -173,6 +173,10 @@ impl PanelRenderer for Renderer {
     }
 
     fn show_resolved_series_readout(&mut self, readout: Option<&crate::configuration::SeriesReadout>) {
+        use super::mpl::axes::{Child, TextArtist, TextFrame};
+        use super::rolling::ROLLING_METER_RIGHT;
+        use zlc_figure::ir::{HAlign, VAlign};
+
         let axes = Renderer::primary_axes(self);
         self.curve.hover = None;
         self.curve.locked = None;
@@ -181,9 +185,26 @@ impl PanelRenderer for Renderer {
             let identity = readout.target.key.iter().map(|part| part.clone().map(|s| s.to_string())).collect();
             let focus = super::curve::Focus { axes, identity, label: readout.label.to_string(), x: 0.0, y: 0.0 };
             if locked { self.curve.locked = Some(focus); } else { self.curve.hover = Some(focus); }
-            self.show_focus_label(axes, &readout.label, locked, self.style.artists.point_occupied.color.to_owned());
+            // Numeric readouts sit above the axes, pinned to the same right edge as the Series meter.
+            let pad = self.style.render.compact_axes_title_pad_pt;
+            let size = self.style.fonts.annotation_pt;
+            let id = *self.curve.annotations.entry(axes).or_insert_with(|| {
+                self.fig.axes[axes].add(Child::Text(TextArtist {
+                    visible: true, zorder: 3.0, x: ROLLING_METER_RIGHT, y: 1.0,
+                    text: String::new(), color: self.style.artists.point_occupied.color.to_owned(), size,
+                    ha: HAlign::Left, va: VAlign::Bottom, ma: None, clip_on: false,
+                    frame: TextFrame::AxesOffset(0.0, pad / 72.0), family: None,
+                }))
+            });
+            if let Some(Child::Text(text)) = self.fig.axes[axes].child_mut(id) {
+                text.text = super::labels::literal_text(&readout.label);
+                text.visible = true;
+            }
+            self.fig.axes[axes].title_pad = self.style.render.axes_title_pad_pt + size + pad;
+            self.pin_readout(axes, id, ROLLING_METER_RIGHT, &[]);
         } else if let Some(&id) = self.curve.annotations.get(&axes) {
             super::curve::set_child_visible(&mut self.fig.axes[axes], id, false);
+            self.fig.axes[axes].title_pad = self.style.render.axes_title_pad_pt;
         }
     }
 

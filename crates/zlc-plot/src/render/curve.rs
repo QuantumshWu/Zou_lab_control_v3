@@ -723,10 +723,6 @@ impl Renderer {
         if self.classifier_annotation_owns_inspector() { return; }
         let (Some(active), Some((axes, line))) = (active, focus_line) else { return };
         let colour = self.series_colour(axes, line);
-        self.show_focus_label(axes, &active.label, locked.is_some(), colour);
-    }
-
-    pub(super) fn show_focus_label(&mut self, axes: usize, label: &str, locked: bool, colour: String) {
         let size = self.style.fonts.annotation_pt;
         let id = match self.curve.annotations.get(&axes) {
             Some(&id) => id,
@@ -741,9 +737,9 @@ impl Renderer {
                 id
             }
         };
-        let label = if label.is_empty() { "Series".to_owned() } else { literal_text(label) };
+        let label = if active.label.is_empty() { "Series".to_owned() } else { literal_text(&active.label) };
         if let Some(Child::Text(text)) = self.fig.axes[axes].child_mut(id) {
-            text.text = format!("{}{}", if locked { "* " } else { "" }, label);
+            text.text = format!("{}{}", if locked.is_some() { "* " } else { "" }, label);
             text.color = colour;
             text.visible = true;
         }

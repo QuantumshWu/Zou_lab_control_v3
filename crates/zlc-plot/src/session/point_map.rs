@@ -79,7 +79,7 @@ pub(super) fn readout(map: &PointMapData, target: &SeriesTarget, mode: &str) -> 
     let point = &map.geometry.points[map.indices[index]];
     let value = map.values.display.get_f64(index);
     let number = if point.label.is_empty() { &point.id } else { &point.label };
-    let mut label = format!("Site {number}\n");
+    let mut label = format!("Site {number} · ");
     if map.valid.get_f64(index) == 0.0 || !value.is_finite() {
         label.push_str("invalid");
     } else if map.boolean {
