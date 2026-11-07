@@ -359,8 +359,10 @@ pub fn decode_plot_recipe(value: &Value) -> Result<DecodedRecipe> {
     let selectors = decode_selectors(get("selectors"))?;
     let interaction = InteractionUpdate::from_value(get("interaction"))?;
     let presentation = PresentationUpdate::from_value(get("presentation"))?;
+    let mut parameters = parameters.clone();
+    super::parameters::clear_saved_auto_bounds(&mut parameters);
     Ok(DecodedRecipe {
-        spec, parameters: parameters.clone(), size, viewport, classifier_thresholds: thresholds.clone(), facet_focus,
+        spec, parameters, size, viewport, classifier_thresholds: thresholds.clone(), facet_focus,
         fit: fit.clone(), selectors, overlay: get("overlay").clone(), interaction, presentation,
     })
 }

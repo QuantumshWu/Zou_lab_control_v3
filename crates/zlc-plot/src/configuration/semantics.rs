@@ -375,24 +375,67 @@ pub fn merge_labels(old_spec: &PlotSpec, new_spec: &PlotSpec, schema: Option<&Pl
 
 /// Carry existing semantic intent onto another schema of the chosen kind.
 pub fn rebased_spec(schema: &PlotSchema, kind: PlotKind, values: &ValueMap) -> Result<PlotSpec> {
+    rebase_authored(schema, kind, values).map(|(spec, _)| spec)
+}
+
+/// Rebuild on a new schema and return only the original choices the result honours.
+pub(crate) fn rebase_authored(schema: &PlotSchema, kind: PlotKind, values: &ValueMap) -> Result<(PlotSpec, ValueMap)> {
     let selected_kind = match values.get("kind") { Some(value) => kind_from_value(value)?, None => kind };
-    let cell_kind = values.get("cell_kind").map(kind_from_value).transpose()?;
+    let automatic = values.get("cell_kind").and_then(Value::as_str) == Some("") && selected_kind == PlotKind::FacetGrid;
+    let cell_kind = values.get("cell_kind").filter(|_| !automatic && selected_kind == PlotKind::FacetGrid).map(kind_from_value).transpose()?;
     let candidate = fitting_spec(Some(schema), Some(selected_kind), cell_kind)?
         .ok_or_else(|| PlotError::value(format!("{} has no unambiguous default for this schema", selected_kind.value())))?;
-    let vocabulary: ValueMap = ["kind", "cell_kind"].into_iter().filter_map(|name| values.get(name).map(|value| (name, value.clone()))).collect();
-    let candidate = if vocabulary.is_empty() { candidate } else { composed_spec(Some(schema), &candidate, &vocabulary)? };
-    let names: HashSet<String> = describe_semantics(Some(schema), &candidate, &DEFAULT_LAYOUT)?.fields.into_iter().map(|field| field.name).collect();
-    let rows = fate_row_axes(schema, &candidate, None, None)?;
-    let mut carried = ValueMap::new();
-    for (name, value) in values.iter().filter(|(name, _)| names.contains(*name)) {
-        if is_scope_fate(value) {
-            let admitted = rows.iter().find(|axis| fate_field_name(axis) == name)
-                .map(|axis| axis_admits_scope(schema, axis, value)).transpose()?.unwrap_or(false);
-            if !admitted { continue; }
+    // Pins are expressed in the chosen coordinate's units. First restore the
+    // alternatives still present, then validate each pin against that axis.
+    let fields = describe_semantics(Some(schema), &candidate, &DEFAULT_LAYOUT)?;
+    let mut coordinates = ValueMap::new();
+    let mut missing_coordinates = HashSet::new();
+    for (name, value) in values.iter().filter(|(name, _)| name.starts_with(COORDINATE_PREFIX)) {
+        if fields.field(name).is_some_and(|field| field.choice_values().any(|choice| choice == value)) {
+            coordinates.insert(name, value.clone());
+        } else {
+            missing_coordinates.insert(name.replacen(COORDINATE_PREFIX, FATE_PREFIX, 1));
         }
-        carried.insert(name, value.clone());
     }
-    composed_spec(Some(schema), &candidate, &carried)
+    let candidate = composed_spec(Some(schema), &candidate, &coordinates)?;
+    let fields = describe_semantics(Some(schema), &candidate, &DEFAULT_LAYOUT)?;
+    let mut roles = ValueMap::new();
+    let mut other = ValueMap::new();
+    for (name, value) in values.iter().filter(|(name, _)| *name == "reduction" || name.starts_with(FATE_PREFIX)) {
+        let Some(field) = fields.field(name) else { continue };
+        let offered = field.choice_values().any(|choice| choice == value);
+        let pinned = !missing_coordinates.contains(name) && field.cycle_choices.as_ref().is_some_and(|pins| pins.contains_value(value));
+        if offered || pinned {
+            if name.starts_with(FATE_PREFIX) && value.as_str().and_then(Role::parse).is_some() {
+                roles.insert(name, value.clone());
+            } else {
+                other.insert(name, value.clone());
+            }
+        }
+    }
+    // Compose role swaps atomically. A surviving old assignment can conflict
+    // with the new schema's only holder of a required role. Drop only that
+    // assignment, preserving unrelated group, facet and reduction choices.
+    let apply = |base: &PlotSpec, mut changes: ValueMap| -> Result<PlotSpec> {
+        loop {
+            match composed_spec(Some(schema), base, &changes) {
+                Err(error) if error.kind == ErrorKind::Vacancy => {
+                    let role = error.role.as_deref().and_then(Role::parse);
+                    let Some(axis) = role.and_then(|role| role_holder(base, role)) else { return Err(error) };
+                    let primary = coordinate_axis_ref(schema, &axis)?;
+                    if changes.remove(&fate_field_name(&primary)).is_none() { return Err(error); }
+                }
+                result => return result,
+            }
+        }
+    };
+    let candidate = apply(&candidate, roles)?;
+    let spec = apply(&candidate, other)?;
+    let fields = describe_semantics(Some(schema), &spec, &DEFAULT_LAYOUT)?;
+    let mut kept: ValueMap = values.iter().filter(|(name, value)| fields.field(name).is_some_and(|field| field.value == **value))
+        .map(|(name, value)| (name, value.clone())).collect();
+    if automatic { kept.insert("cell_kind", Value::text("")); }
+    Ok((spec, kept))
 }
 
 /// Compose the candidate one semantic edit produces.
@@ -554,7 +597,9 @@ pub fn composed_spec(schema: Option<&PlotSchema>, spec: &PlotSpec, values: &Valu
         let mut role_targets: OrderedMap<Role, AxisRef> = OrderedMap::new();
         for (axis, value) in fate_values.iter() {
             if is_scope_fate(value) {
-                if !axis_admits_scope(schema, axis, value)? { continue; }
+                if !axis_admits_scope(schema, axis, value)? {
+                    return Err(PlotError::value(format!("scope {} is absent from axis {}", value.py_repr(), axis_repr(axis))));
+                }
                 scope.insert(axis.clone(), scope_coordinate_from_fate(value)?);
             } else if *value == Value::text(FATE_REDUCE) || *value == Value::text(FATE_POOL) {
                 if let Some(previous) = candidate.semantic().reduced() {

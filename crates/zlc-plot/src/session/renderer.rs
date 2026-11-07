@@ -106,6 +106,8 @@ pub trait PanelRenderer: Send {
     fn spec(&self) -> &PlotSpec;
     /// `renderer.spec = spec`: takes effect with the next present or relayout.
     fn set_spec(&mut self, spec: PlotSpec);
+    /// Begin a different signal's automatic ranges, including sibling outputs of a run.
+    fn reset_limit_history(&mut self) {}
     /// Rebuild the figure for `plan` (`relayout`); nothing is composed.
     fn relayout(&mut self, plan: SurfacePlan, facet_index: Option<usize>, facet_focus_index: Option<usize>) -> Result<()>;
     /// Prepare every scene layer of `frame`; compose one canvas front when

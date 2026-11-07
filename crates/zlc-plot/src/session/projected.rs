@@ -249,7 +249,12 @@ impl FitProjection {
         let mut owner = Projection::new();
         owner.registry = settings.registry.clone();
         if let Some(Input::Dataset(previous)) = inherit.map(|previous| &*previous.input) {
-            owner.histogram = previous.histogram.clone();
+            // Canonical bin edges may continue across a restart of the same
+            // camera, while a different Scope or statistic needs its own domain.
+            if previous.plan.same_samples(&plan) {
+                owner.histogram = previous.histogram.clone();
+                owner.histogram_mode = Some(crate::projection::plan::relim_mode(&previous.plan.display));
+            }
             owner.carry = previous.carry.lock().expect("carry lock").take();
             owner.pools = previous.view.lock().expect("view lock").pools.clone();
         }
@@ -326,6 +331,14 @@ impl FitProjection {
     /// Which run the data came out of; an authored pulse timeline has none.
     pub fn data_generation(&self) -> Option<&Arc<str>> {
         match &*self.input { Input::Dataset(built) => Some(&built.source.generation), Input::Pulse { .. } => None }
+    }
+    pub(super) fn shares_limit_history(&self, other: &Self) -> bool {
+        match (self.input.as_ref(), other.input.as_ref()) {
+            (Input::Dataset(a), Input::Dataset(b)) => a.source.generation == b.source.generation
+                && a.plan.same_samples(&b.plan) && a.plan.display.value_display_unit == b.plan.display.value_display_unit,
+            (Input::Pulse {..}, Input::Pulse {..}) => true,
+            _ => false,
+        }
     }
     pub fn payload(&self) -> &Arc<Payload> { &self.payload }
     pub fn spec(&self) -> &PlotSpec { &self.spec }

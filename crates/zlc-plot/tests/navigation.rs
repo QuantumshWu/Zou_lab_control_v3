@@ -74,6 +74,81 @@ fn session(source: Source, kind: PlotKind) -> PlotSession {
     session
 }
 
+#[test]
+fn restoring_a_saved_zoom_with_its_limit_modes_preserves_both_axes() {
+    use zlc_plot::configuration::{Value, ValueMap};
+
+    let schema = PlotSchema::new(frame(4, 4, None).schema.clone());
+    let services = services();
+    let target = Value::from_json(&json!({
+        "semantic": {"kind":"histogram"},
+        "parameters": {"relim_mode":"tight", "x_relim_mode":"fixed", "x_min":0.0, "x_max":200.0},
+        "viewport": {"x":[50.0,90.0], "y":[0.2,0.8]}
+    }));
+    let restore = |target: &ValueMap| resolve_configuration(ResolveRequest {
+        schema: Some(schema.clone()), kind: Some(PlotKind::Histogram), fit: Some(services.fit.clone()),
+        target: Some(target), ..Default::default()
+    }).unwrap();
+    let x = NumericRange::new(50.0, 90.0).unwrap();
+    let y = NumericRange::new(0.2, 0.8).unwrap();
+    let restored = restore(target.as_map().unwrap());
+    assert_eq!(restored.viewport, Some((Some(x), Some(y))));
+    let reopened = restore(&restored.target().unwrap());
+    assert_eq!(reopened.viewport, restored.viewport);
+
+    let edit = |name, mode| resolve_configuration(ResolveRequest {
+        schema: Some(schema.clone()), base: Some(&reopened),
+        parameter_updates: Some(ValueMap::from_pairs([(name, Value::text(mode))])), ..Default::default()
+    }).unwrap();
+    assert_eq!(edit("relim_mode", "normal").viewport, Some((Some(x), None)));
+    assert_eq!(edit("x_relim_mode", "normal").viewport, Some((None, Some(y))));
+    let reset = resolve_configuration(ResolveRequest {
+        schema: Some(schema), base: Some(&reopened),
+        configuration_updates: Some(ConfigurationUpdates { viewport: Some(None), ..Default::default() }),
+        ..Default::default()
+    }).unwrap();
+    assert_eq!(reset.viewport, None);
+}
+
+#[test]
+fn automatic_colour_limits_do_not_reopen_or_rebind_as_a_fixed_pair() {
+    use zlc_plot::configuration::{Value, ValueMap};
+
+    let schema = PlotSchema::new(frame(4, 4, None).schema.clone());
+    let services = services();
+    let restore = |parameters| {
+        let target = Value::from_json(&json!({"semantic":{"kind":"image"}, "parameters":parameters}));
+        resolve_configuration(ResolveRequest { schema: Some(schema.clone()), kind: Some(PlotKind::Image),
+            fit: Some(services.fit.clone()), target: target.as_map(), ..Default::default() }).unwrap()
+    };
+    let bounds = |c: &zlc_plot::configuration::resolve::ResolvedConfiguration| {
+        let values = &c.display_state.values;
+        (values.get("color_min").and_then(Value::real), values.get("color_max").and_then(Value::real))
+    };
+    for mode in ["tight", "normal"] {
+        let two = restore(json!({"relim_mode":mode, "color_min":-30.0, "color_max":70.0}));
+        assert_eq!(bounds(&two), (None, None));
+        assert_eq!(two.display_state.values.get("relim_mode").and_then(Value::as_str), Some(mode));
+        assert_eq!(bounds(&restore(json!({"relim_mode":mode, "color_min":-30.0}))), (Some(-30.0), None));
+        assert_eq!(bounds(&restore(json!({"relim_mode":mode, "color_max":70.0}))), (None, Some(70.0)));
+    }
+    assert_eq!(bounds(&restore(json!({"relim_mode":"fixed", "color_min":-30.0, "color_max":70.0}))), (Some(-30.0), Some(70.0)));
+
+    // A legacy caller could explicitly set both bounds on a live automatic image.
+    // A different signal recomputes from its own samples.
+    let base = restore(json!({"relim_mode":"normal"}));
+    let live = resolve_configuration(ResolveRequest {
+        schema: Some(schema.clone()), base: Some(&base),
+        parameter_updates: Some(ValueMap::from_pairs([("color_min", Value::Float(-30.0)), ("color_max", Value::Float(70.0))])),
+        ..Default::default()
+    }).unwrap();
+    assert_eq!(bounds(&live), (Some(-30.0), Some(70.0)));
+    let rebound = resolve_configuration(ResolveRequest {
+        schema: Some(schema), base: Some(&live), different_source: true, ..Default::default()
+    }).unwrap();
+    assert_eq!(bounds(&rebound), (None, None));
+}
+
 /// The plot's own axes as the frontend last saw them.
 fn plot_axes(session: &PlotSession) -> AxisTransform {
     session.raster_axes_snapshot().unwrap().into_iter().find(|axes| axes.role == "image" || axes.role == "main").expect("the plot's axes")

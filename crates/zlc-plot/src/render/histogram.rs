@@ -225,6 +225,9 @@ impl Renderer {
                 (0.0, if peak > 0.0 { peak * if tight { 1.0 } else { 1.08 } } else { 1.0 })
             };
             let force = previous.is_none_or(|(_, held)| held != semantics) || tight;
+            if peak == 0.0 {
+                return previous.filter(|(_, held)| *held == semantics).map_or(target, |(limits, _)| limits);
+            }
             Some(if force { target } else {
                 let ((prior_low, prior_high), _) = previous.unwrap();
                 let (expand, expanded) = if logarithmic {

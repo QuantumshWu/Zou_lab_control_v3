@@ -439,7 +439,11 @@ impl PlotSession {
     }
 
     fn restore_scene(&mut self, pending: Pending, compose: bool) {
-        let layout_changed = *self.renderer.plan() != pending.renderer_plan || *self.renderer.spec() != pending.snapshot.spec;
+        let layout_changed = *self.renderer.plan() != pending.renderer_plan || *self.renderer.spec() != pending.snapshot.render_spec();
+        if !layout_changed && (!self.scene.projection.shares_limit_history(&pending.snapshot.projection)
+            || self.scene.accepted_configuration.as_ref().is_some_and(|c| !c.same_source)) {
+            self.renderer.reset_limit_history();
+        }
         self.scene = pending.snapshot;
         self.renderer.set_spec(self.scene.render_spec());
         let result = if layout_changed {
@@ -661,6 +665,7 @@ impl PlotSession {
         context.focused_facet_index = candidate.focused_facet_index.map(|i| i as usize);
         let mut projection = prepared.projection.with_context(Arc::new(context));
         if *projection.spec() != candidate.spec { projection = projection.with_spec(candidate.spec.clone()); }
+        let keep_limits = candidate.same_source && self.scene.projection.shares_limit_history(&projection);
         let (old_schema, new_schema) = (self.data().source().map(|s| s.schema.clone()), projection.data().source().map(|s| s.schema.clone()));
         let geometry_changed = !candidate.same_source || spec_changed
             || matches!((&old_schema, &new_schema), (Some(old), Some(new)) if !structure_equal(old, new));
@@ -725,6 +730,7 @@ impl PlotSession {
             self.scene.layout_revision += 1;
             self.apply_layout_plan(plan, true, Some(candidate.presentation.clone()))?;
         } else {
+            if !keep_limits { self.renderer.reset_limit_history(); }
             self.update_renderer(effects | RenderEffect::BASE_GEOMETRY, true, Some(candidate.presentation.clone()))?;
         }
         if clamped {

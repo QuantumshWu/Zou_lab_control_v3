@@ -153,7 +153,7 @@ impl<R: DocumentRead> Panel<R> {
     /// that gave no read is only resolved. A queued edit that fails is undone
     /// and reported; a start that fails fails the command, and `own`'s
     /// failure is returned once the queued edits are presented.
-    fn apply_queue(&mut self, shared: &Shared<'_>, binding: &Binding, read: &R, target: Option<&Json>, queue: Queue, own: Edit) -> Result<Resolution> {
+    fn apply_queue(&mut self, shared: &Shared<'_>, binding: &Binding, read: &R, target: Option<&Json>, mut queue: Queue, own: Edit) -> Result<Resolution> {
         enum Role { Start, Queued, Own }
         let previous = self.configured.clone();
         let mut candidate = previous.as_ref().map(|previous| previous.configuration.clone());
@@ -161,6 +161,10 @@ impl<R: DocumentRead> Panel<R> {
         let shown_source = self.source.as_ref().map(|source| (source.signal.clone(), source.window));
         let shown_signal = self.source.as_ref().map(|source| source.signal.clone());
         let snapshot = read.source().clone();
+        if candidate.is_none() {
+            queue.rebind_unshown(&self.key, binding, target, &schema, &own, &shared.services.defaults.style)?;
+        }
+        queue.edits.retain(|edit| edit.signal.is_empty() || edit.signal == binding.signal || Some(&edit.signal) == shown_signal.as_ref());
         let count = queue.edits.len();
         let mut edits: Vec<Edit> = queue.edits.into_iter().chain([own]).collect();
         let mut start = None;

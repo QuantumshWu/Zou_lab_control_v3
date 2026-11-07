@@ -48,11 +48,15 @@ fn shot(cell: &[usize], values: Vec<f64>, sigma: Option<f64>) -> Read {
 
 const P: &str = "p";
 
-/// A panel drawn from `read` with the first frame's front and its axes.
-fn draw(read: Read, kind: &str, parameters: Json) -> (RgbaFront, Vec<AxisTransform>) {
+fn document() -> FigureDocument<Read> {
     let services = SessionServices { renderers: Arc::new(NativeRendererFactory), fit: Arc::new(EngineFitLayer::new(Arc::new(FitEngine::default()))),
         defaults: Arc::new(Defaults::default()), registry: None, interaction: InteractionDefaults::default() };
-    let mut document = FigureDocument::new(services, None);
+    FigureDocument::new(services, None)
+}
+
+/// A panel drawn from `read` with the first frame's front and its axes.
+fn draw(read: Read, kind: &str, parameters: Json) -> (RgbaFront, Vec<AxisTransform>) {
+    let mut document = document();
     let all: BTreeSet<String> = [P.to_owned()].into();
     let mut front = None;
     let target = json!({"semantic": {"kind": kind}, "size": "2x2", "parameters": parameters});
@@ -141,4 +145,70 @@ fn a_tight_histogram_reaches_its_peak() {
     let normal = main_axes(&axes, "main").y_limits;
     assert_eq!(tight.0, 0.0);
     assert_eq!(normal.1, tight.1 * 1.08, "the same bins, one with headroom");
+}
+
+#[test]
+fn switching_a_panels_signal_applies_its_auto_mode_on_the_first_frame() {
+    for (kind, mode) in [("curve", "tight"), ("curve", "normal"), ("image", "tight")] {
+        let mut document = document();
+        let panels = BTreeSet::from([P.to_owned()]);
+        document.execute(r#"{"id":1,"action":"ready","dpr":1}"#, Default::default(), None, None).unwrap();
+        document.finish_presentation(&panels, &panels);
+        // Another frame of A, a sibling signal, a restart of B, then a run
+        // whose first valid values arrive after an entirely empty frame.
+        let frames = [("A","run1",1.,10.),("A","run1",1.,9.),("B","run1",1.,9.),("B","run2",1.,8.),
+                      ("B","run3",f64::NAN,f64::NAN),("B","run3",0.2,0.8)];
+        for (step, (signal, generation, low, high)) in frames.into_iter().enumerate() {
+            let epoch = if signal == "A" { 1 } else { 2 };
+            let mut command = json!({"id":step+2,"action":"sync_panels","inputs":[{"panel":P,"kind":kind,"window":1,"signal":signal,"epoch":epoch}]});
+            if step == 0 {
+                let mut parameters = json!({"relim_mode":mode});
+                if kind == "image" { parameters["presentation"] = json!("height_bars"); }
+                command["targets"] = json!({P: {"semantic":{"kind":kind},"parameters":parameters}});
+            }
+            let mut read = if kind == "image" { shot(&[2,2],vec![low,high,low,high],None) } else { shot(&[2],vec![low,high],Some(20.)) };
+            let source = Arc::get_mut(&mut read.0).unwrap();
+            source.generation = generation.into();
+            source.block_id = format!("canonical:{signal}").into();
+            source.revision = if matches!(step, 1 | 5) { 2 } else { 1 };
+            let frame = document.execute(&command.to_string(), [(P.to_owned(),read)].into(), None, None).unwrap();
+            document.finish_presentation(&panels,&panels);
+            assert!(frame.state["panels"][0]["error"].is_null(), "{}",frame.state);
+            let handle = document.session(P).unwrap();
+            let session = handle.lock().unwrap();
+            let retained_high = if step == 1 { 10. } else { high };
+            let (shown, expected) = if kind == "image" {
+                let margin = 0.1*(retained_high-low);
+                (session.renderer().resolved_color_limits().unwrap(), (low-margin, retained_high+margin))
+            } else {
+                let axes = session.raster_axes_snapshot().unwrap();
+                (main_axes(&axes,"main").y_limits, if mode == "tight" { (low,high) } else { (0.,retained_high*1.2) })
+            };
+            assert_eq!(shown, if high.is_nan() { (0.,1.) } else { expected }, "{kind}/{mode} step {step}");
+        }
+    }
+}
+
+#[test]
+fn a_new_slice_of_the_same_signal_gets_its_own_normal_range() {
+    let mut document = document();
+    let panels = BTreeSet::from([P.to_owned()]);
+    let read = shot(&[2, 2], vec![1.,10.,1.,9.], None);
+    let scope = "fate:cell_data:camera.y";
+    let commands = [
+        json!({"action":"ready","dpr":1}),
+        json!({"action":"sync_panels","inputs":[{"panel":P,"kind":"curve","window":1,"signal":"shot","epoch":1}],
+            "targets":{P:{"semantic":{"kind":"curve","fate:cell_data:camera.x":"x",scope:["scope-value",0]},"parameters":{"relim_mode":"normal"}}}}),
+        json!({"action":"configure","panel":P,"semantic":{scope:["scope-value",1]}}),
+    ];
+    for (step, mut command) in commands.into_iter().enumerate() {
+        command["id"] = json!(step+1);
+        let frame = document.execute(&command.to_string(), [(P.to_owned(),read.clone())].into(), None, None).unwrap();
+        document.finish_presentation(&panels, &panels);
+        assert!(frame.state["error"].is_null() && frame.state["panels"][0]["error"].is_null(), "{}", frame.state);
+        if step > 0 {
+            let axes = document.session(P).unwrap().lock().unwrap().raster_axes_snapshot().unwrap();
+            assert_eq!(main_axes(&axes,"main").y_limits, (0.,if step == 1 { 12. } else { 9.*1.2 }));
+        }
+    }
 }

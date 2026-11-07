@@ -161,6 +161,15 @@ pub struct ProjectionPlan {
     #[serde(default)] pub defaults: Defaults,
 }
 
+impl ProjectionPlan {
+    /// Which samples are combined and along which axes; styling and error bars
+    /// do not change the data range.
+    pub(crate) fn same_samples(&self, other: &Self) -> bool {
+        self.spec == other.spec && self.scope == other.scope
+            && self.display.window == other.display.window && self.display.trailing == other.display.trailing
+    }
+}
+
 /// `HistogramProjection`: the bins a histogram holds across revisions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HistogramProjection {
@@ -180,6 +189,7 @@ pub struct Projected {
 #[derive(Default)]
 pub struct Projection {
     pub histogram: Option<HistogramProjection>,
+    pub(crate) histogram_mode: Option<RelimMode>,
     pub registry: Option<Arc<UnitRegistry>>,
     schemas: SchemaCache,
     exports: super::model::SegmentExports,

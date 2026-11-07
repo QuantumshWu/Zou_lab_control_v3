@@ -508,7 +508,7 @@ impl Renderer {
                 autoscaled_limits(range, current, policy.image_color_padding_fraction, policy.image_color_deadband_fraction, false, true)
             }
         };
-        self.image.distribution_limits = Some(selected);
+        if data_range.is_some() { self.image.distribution_limits = Some(selected); }
         let rail = (if color_limits.0 < selected.0 { color_limits.0 } else { selected.0 },
                     if color_limits.1 > selected.1 { color_limits.1 } else { selected.1 });
         (selected, rail)

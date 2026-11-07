@@ -99,6 +99,45 @@ impl Edit {
 }
 
 impl Queue {
+    /// A saved panel may change binding before its first signal publishes.
+    /// Rebase only its unconfirmed choices. The replacement binding's own edits
+    /// still go through the normal, strict path when its first read arrives.
+    pub(super) fn rebind_unshown(&mut self, panel: &str, binding: &Binding, target: Option<&Json>,
+                                 schema: &crate::configuration::PlotSchema, own: &Edit, style: &crate::style::PlotStyle) -> Result<()> {
+        use crate::configuration::{kinds::PlotKind, metadata::retained_parameters, parameter_schema_for, semantics::rebase_authored};
+        let Some(old) = self.start.as_ref().filter(|old| !old.signal.is_empty() && old.signal != binding.signal) else { return Ok(()) };
+        let mut next = Edit::start(panel, binding, target)?;
+        if next.target.is_empty() || next.target == old.target {
+            let mut semantic = old.target.get("semantic").and_then(Value::as_map).cloned().unwrap_or_default();
+            let mut parameters = old.target.get("parameters").and_then(Value::as_map).cloned().unwrap_or_default();
+            let mut size = old.target.get("size").cloned();
+            for edit in self.edits.iter().filter(|edit| edit.signal == old.signal) {
+                if let Some(patch) = edit.semantic_map()? { semantic.update(&patch); }
+                if let Some(patch) = edit.parameters.as_ref().map(Value::from_json).and_then(|v| v.as_map().cloned()) { parameters.update(&patch); }
+                if let Some(value) = edit.target.get("size") { size = Some(value.clone()); }
+            }
+            // A kind explicitly selected for the incoming data takes precedence.
+            for edit in self.edits.iter().chain([own]).filter(|edit| edit.signal == binding.signal) {
+                for name in ["kind", "cell_kind"] {
+                    if let Some(value) = edit.semantic.as_ref().and_then(|patch| patch.get(name)) {
+                        semantic.insert(name, Value::from_json(value));
+                    }
+                }
+            }
+            let kind = binding.kind().and_then(PlotKind::parse).ok_or_else(|| PlotError::value("Unknown panel kind"))?;
+            let (spec, mut kept) = rebase_authored(schema, kind, &semantic)?;
+            kept.insert("kind", Value::text(spec.kind().value()));
+            next.target = ValueMap::from_pairs([("semantic", Value::Map(kept))]);
+            if !parameters.is_empty() {
+                let fields = parameter_schema_for(&spec, style);
+                next.target.insert("parameters", Value::Map(retained_parameters(&parameters, &fields)?));
+            }
+            if let Some(size) = size { next.target.insert("size", size); }
+        }
+        self.start = Some(next);
+        Ok(())
+    }
+
     /// `_defer`: one more edit; pointer commands in a row are one gesture,
     /// and of hover moves in a row only the last one matters.
     pub fn push(&mut self, edit: Edit) {

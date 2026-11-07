@@ -574,9 +574,12 @@ impl Projection {
         }
         let fraction = plan.defaults.histogram_domain_padding_fraction.0;
         let mode = relim_mode(display);
-        let previous = self.histogram.clone();
+        let previous = self.histogram.as_ref().filter(|_| self.histogram_mode.is_none_or(|old| old == mode));
+        if !has_values && mode != RelimMode::Fixed {
+            if let Some(held) = previous.filter(|p| p.requested_bins == count) { return Ok(held.edges.clone()); }
+        }
         let (mut low, mut high);
-        if let Some(previous) = previous.as_ref().filter(|p| p.requested_bins == count && mode == RelimMode::Normal) {
+        if let Some(previous) = previous.filter(|p| p.requested_bins == count && mode == RelimMode::Normal) {
             (low, high) = previous.domain;
             if has_values && (data_low < low || data_high > high) {
                 // Python's builtins: a tie keeps the first argument.
@@ -613,8 +616,14 @@ impl Projection {
         if !edges.iter().all(|e| e.is_finite()) || edges.windows(2).any(|w| w[1] - w[0] <= 0.0) {
             return Err(ProjectionError::value("histogram projection edges must be finite and increasing"));
         }
+        if !has_values && mode != RelimMode::Fixed {
+            self.histogram = None;
+            self.histogram_mode = None;
+            return Ok(edges);
+        }
         let selected = HistogramProjection { bin_count: edges.len() - 1, requested_bins: count, domain: (low, high), edges };
         if self.histogram.as_ref() != Some(&selected) { self.histogram = Some(selected); }
+        self.histogram_mode = Some(mode);
         Ok(self.histogram.as_ref().unwrap().edges.clone())
     }
 }

@@ -175,3 +175,26 @@ fn a_rolling_panel_frames_a_finite_run_by_its_records() {
     panel.show("rolling", 2, state["target"].clone(), &whole);
     assert_eq!(panel.main_axes().x_limits, (-4.0, 0.0));
 }
+
+#[test]
+fn a_waiting_panels_portable_choices_apply_to_its_first_available_signal() {
+    let mut panel = Panel::new();
+    let old = json!([{"panel":P,"signal":"old","kind":"curve","window":1,"epoch":1,"waiting":true,"reason":"No data yet"}]);
+    let target = json!({"semantic":{"kind":"curve", "fate:cell_data:old.time":"x",
+        format!("fate:cell_data:{CHANNEL}"):"group"}, "size":"2x2"});
+    panel.execute(json!({"action":"sync_panels","inputs":old,"targets":{P:target}}), None);
+    panel.execute(json!({"action":"configure","panel":P,"inputs":old,"semantic":{"reduction":"max"}}), None);
+    let read = finite(&Runtime::new(), SAMPLES);
+    let (shown, _) = panel.show("curve", 2, target, &read);
+    let controls = rows(&shown);
+    for (name, value) in [("reduction".into(), "max"), (format!("fate:cell_data:{CHANNEL}"), "group"),
+                          (format!("fate:cell_data:{RECORD_TIME}"), "x")] {
+        assert!(controls.contains(&(name, json!(value))), "{controls:?}");
+    }
+    let handle = panel.document.session(P).unwrap();
+    let session = handle.lock().unwrap();
+    let zlc_plot::projection::Payload::Curve(curve) = session.projection().payload().as_ref() else { panic!("expected a curve") };
+    assert_eq!(curve.series.len(), 2);
+    let peak = curve.series[0].y.display.to_f64().into_iter().fold(f64::NEG_INFINITY, f64::max);
+    assert!(peak > 4.9 && peak <= 5.0, "the first frame uses Max over the five records: {peak}");
+}

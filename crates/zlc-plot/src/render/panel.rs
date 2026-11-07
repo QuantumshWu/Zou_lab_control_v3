@@ -53,6 +53,7 @@ impl PanelRenderer for Renderer {
     fn plan(&self) -> &SurfacePlan { &self.plan }
     fn spec(&self) -> &PlotSpec { &self.spec }
     fn set_spec(&mut self, spec: PlotSpec) { Renderer::set_spec(self, spec) }
+    fn reset_limit_history(&mut self) { Renderer::reset_limit_history(self); }
 
     fn relayout(&mut self, plan: SurfacePlan, facet_index: Option<usize>, facet_focus_index: Option<usize>) -> Result<()> {
         Renderer::relayout(self, plan, facet_index, facet_focus_index)

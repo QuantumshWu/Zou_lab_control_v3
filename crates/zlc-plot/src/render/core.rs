@@ -462,6 +462,8 @@ impl Renderer {
     /// `_set_xlim`: only a real change moves the limits (and re-envelopes
     /// the dense lines of the axes).
     pub fn set_xlim(&mut self, axes: usize, limits: (f64, f64)) {
+        // Claim the resolved view even when it equals the axes' initial (0, 1).
+        self.fig.axes[axes].autoscale[0] = false;
         let current = self.fig.axes[axes].xlim;
         if !(scalar_close(current.0, limits.0) && scalar_close(current.1, limits.1)) {
             self.fig.axes[axes].set_xlim(limits.0, limits.1);
@@ -471,6 +473,7 @@ impl Renderer {
     }
 
     pub fn set_ylim(&mut self, axes: usize, limits: (f64, f64)) {
+        self.fig.axes[axes].autoscale[1] = false;
         let current = self.fig.axes[axes].ylim;
         if !(scalar_close(current.0, limits.0) && scalar_close(current.1, limits.1)) {
             self.fig.axes[axes].set_ylim(limits.0, limits.1);
@@ -673,6 +676,20 @@ impl Renderer {
     }
 
     // --------------------------------------------------------------- limits
+    /// These ranges retain live-frame history in the current source's display units.
+    pub(crate) fn reset_limit_history(&mut self) {
+        self.limits.clear();
+        self.home_limits.clear();
+        self.histogram.limits.clear();
+        self.rolling.count_ceiling = 0.0;
+        self.facet.image_signature = None;
+        for image in std::iter::once(&mut self.image).chain(self.facet.images.values_mut()) {
+            image.distribution_limits = None;
+            image.distribution_cache = None;
+            image.distribution.1 = 0.0;
+        }
+    }
+
     /// `_resolve_data_limits(key, data_range, state, quantity, cache_selected=...)`.
     pub(crate) fn resolve_data_limits(&mut self, key: &str, data_range: Option<(f64, f64)>, state: &DisplayState,
                                       quantity: &str, cache_selected: bool) -> (f64, f64) {
@@ -705,11 +722,15 @@ impl Renderer {
         let authored = (real_value(state.get(&format!("{quantity}_min"))), real_value(state.get(&format!("{quantity}_max"))));
         let selected = select_display_limits(mode, automatic, authored, allow_partial)
             .unwrap_or_else(|error| panic!("{error}"));
-        let cached = if cache_selected { Some(selected) } else { automatic };
-        if let Some(cached) = cached {
-            self.limits.entry(limits_key).or_insert(LimitMemo { limits: None, asked: None }).limits = Some(cached);
+        // Empty frames can display a fallback; only measured or explicitly
+        // fixed limits can establish a history for later frames.
+        if data_range.is_some() || mode == RelimMode::Fixed {
+            let cached = if cache_selected { Some(selected) } else { automatic };
+            if let Some(cached) = cached {
+                self.limits.entry(limits_key).or_insert(LimitMemo { limits: None, asked: None }).limits = Some(cached);
+            }
+            self.limits.entry(format!("{key}:relim_mode")).or_insert(LimitMemo { limits: None, asked: None }).asked = Some(asked);
         }
-        self.limits.entry(format!("{key}:relim_mode")).or_insert(LimitMemo { limits: None, asked: None }).asked = Some(asked);
         selected
     }
 

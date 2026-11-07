@@ -352,6 +352,20 @@ pub const LIMIT_PAIRS: [(&str, &str, &str); 3] = [
     ("x_relim_mode", "x_min", "x_max"),
 ];
 
+/// Older recipes can carry both numeric ends alongside an automatic mode.
+/// Recompute that range for the new data. A single authored end can still
+/// constrain Image colour limits; Fixed owns both of its ends.
+pub(crate) fn clear_saved_auto_bounds(values: &mut ValueMap) {
+    for (mode, low, high) in LIMIT_PAIRS {
+        if matches!(values.get(mode).and_then(Value::as_str), Some("tight" | "normal"))
+            && [low, high].iter().all(|name| values.get(name).and_then(Value::real).is_some())
+        {
+            values.insert(low, Value::None);
+            values.insert(high, Value::None);
+        }
+    }
+}
+
 /// Every relim mode name there is.
 pub const LIMIT_MODE_NAMES: [&str; 2] = ["relim_mode", "x_relim_mode"];
 
