@@ -39,6 +39,11 @@
 //! through it, with no switch, though its centre changes there. An atom within its site's region takes the same
 //! symmetric step about its site as the central site's atoms about the focus.
 //!
+//! # One propagation
+//! A step, or the part of one before or after a jump, is one thing on every cluster (`Engine::part`): the flow for τ/2, at the point there the cluster's propagation of ψ through τ and the force it holds, the kick less the harmonic part, the flow for τ/2. Where ‖ψ‖²
+//! reaches the threshold in it the part is redone to that crossing (`Engine::step`), the jump made at the place it reaches, the rest a part of its own in the cluster the jump left. A cluster of ground states whose generator is static takes one node, its middle (`Propagation::Node`:
+//! two half steps at the point's generator, the force on the state there), a cluster with explicit excited states or beats a segment's grid (# The exact step). An error of one node is of second order in τ, in the motion's own splitting, which the step check reads.
+//!
 //! # The exact step (explicit excited states, beats)
 //! An explicit excited state rotates at its detuning in the frame, and its saturation, Rabi
 //! oscillation and decay set the internal state's pace; a beating generator (two colours on one line,
@@ -209,7 +214,7 @@
 use crate::cost::pays;
 use crate::eigen::{decompose,Eigen};
 use crate::linear::{unit_round_off,zeroed};
-use crate::model::{Absorption,Components,Exact,Model,Point,Recoil,MOST_MIXED,MOST_STATES};
+use crate::model::{Absorption,Components,Exact,Local,Model,Point,Recoil,MOST_MIXED,MOST_STATES};
 use crate::rng::{Purpose,Rng};
 use crate::Complex;
 
@@ -455,6 +460,39 @@ fn product(a:&[Complex],b:&[Complex],n:usize,out:&mut Vec<Complex>){
 fn product_right(a:&[Complex],b:&[Complex],n:usize,out:&mut Vec<Complex>){
     zeroed(out,n*n);for k in 0..n{for j in 0..n{let y=b[k*n+j];if y==Complex::ZERO{continue;}for i in 0..n{out[i*n+j]+=a[i*n+k]*y;}}}
 }
+
+/// A part of a step's propagation (module documentation, # One propagation): one node where the state's generator is static and of ground states, the segment's grid otherwise.
+enum Propagation<'a>{
+    /// The generator at the part's middle, the state through it by two half steps (`HalfStep`), its force at the one node there.
+    Node{model:&'a Model,cluster:usize,point:&'a Point,local:Local,half:HalfStep,tau:f64,truncation:f64},
+    Grid(Segment),
+}
+/// What a propagation did: the time it took, whether ‖ψ‖² reached the threshold there (the part to be redone to it, ψ of no further use), and the impulse; of one node the mean force instead, and ψ at it.
+struct Evolved{taken:f64,reached:bool,impulse:[f64;3],node:Option<[Complex;MOST_MIXED]>}
+impl Propagation<'_>{
+    /// ψ (unnormalized) from the time `at` over the part, until ‖ψ‖² reaches `threshold`.
+    fn evolve(&self,psi:&mut [Complex;MOST_MIXED],at:f64,remaining:f64,threshold:f64)->Evolved{
+        match self{
+            Propagation::Grid(segment)=>{let(taken,reached,impulse)=segment.evolve(&mut psi[..],at,remaining,threshold);Evolved{taken,reached,impulse,node:None}}
+            Propagation::Node{model,cluster,point,local,half,tau,truncation}=>{
+                let n=model.dimension(*cluster);let h=&local.hamiltonian;let n0=norm2(&psi[..],n);
+                let mut y=*psi;half.apply(h,n,0.5*tau,&mut y,*truncation);let(nh,middle)=(norm2(&y,n),y);
+                half.apply(h,n,0.5*tau,&mut y,*truncation);let n1=norm2(&y,n);
+                if !(n1>threshold){
+                    // The crossing on ln‖ψ‖², linear on the half where it lies.
+                    let(ta,tb,la,lb)=if nh<=threshold{(0.,0.5*tau,n0.ln(),nh.ln())}else{(0.5*tau,*tau,nh.ln(),n1.ln())};
+                    let taken=if lb<la{(ta+(threshold.ln()-la)/(lb-la)*(tb-ta)).clamp(ta,tb)}else{tb};
+                    return Evolved{taken,reached:true,impulse:[0.;3],node:None};
+                }
+                *psi=y;Evolved{taken:*tau,reached:false,impulse:model.force(*cluster,local,point,&middle),node:Some(middle)}
+            }
+        }
+    }
+}
+/// A part of a step's end: its crossing, where ‖ψ‖² reaches the threshold in it and the part is to be redone to it (the trajectory left for its caller to restore); else its kick and, of one node, the state the loss is judged at
+/// (`Engine::step`): the place and momentum of the node before the kick, the momentum with half the kick, ψ there and the time.
+struct Part{crossing:Option<f64>,kick:[f64;3],node:Option<Node>}
+struct Node{place:([f64;3],[f64;3]),kappa:[f64;3],psi:[Complex;MOST_MIXED],time:f64}
 
 /// A segment's state between its grid's nodes: ψ, or a spectral segment's coordinates R⁻¹ψ.
 type State=[Complex;MOST_MIXED];
@@ -1029,29 +1067,6 @@ impl<'a> Engine<'a>{
         f
     }
 
-    /// One step's flow, kick and internal evolution of length dt without jumps: the norms of ψ at
-    /// the start, the middle and the end, the place and momentum of the middle, the kick's momentum (the light's
-    /// and the trap's anharmonic part) and ψ at the middle. A cluster of ground states (`exact` takes
-    /// the others). Where ‖ψ‖² ends at or below `threshold` the step is to be redone to its crossing (`step`): the norms, the place and the middle's ψ alone, the rest of `t` for its caller to restore.
-    fn advance(&self,t:&mut Trajectory,dt:f64,threshold:f64)->(f64,f64,f64,([f64;3],[f64;3]),[f64;3],[Complex;MOST_MIXED]){
-        let(m,s)=(self.model,&self.settings);
-        let reference=self.reference(t.r);let(c,w)=reference;
-        self.flow(t,0.5*dt,reference);
-        let point=m.point(t.r,t.kappa);
-        let n=m.dimension(t.cluster);let local=m.local(t.cluster,&point,t.time+0.5*dt);
-        let n0=norm2(&t.psi,n);let half=HalfStep::new(&local.hamiltonian,n,0.5*dt,s.truncation);
-        let mut psi=t.psi;half.apply(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let nh=norm2(&psi,n);let middle=psi;
-        half.apply(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let n1=norm2(&psi,n);
-        let place=(point.r,point.kappa);let mut kick=[0.;3];
-        if !(n1>threshold){return(n0,nh,n1,place,kick,middle);}
-        let force=m.force(t.cluster,&local,&point,&middle);let harmonic=self.harmonic(std::array::from_fn(|a|t.r[a]-c[a]));
-        for a in 0..3{if s.free[a]{kick[a]=dt*(force[a]-w*harmonic[a]);t.kappa[a]+=kick[a];}}
-        t.psi=psi;
-        self.flow(t,0.5*dt,reference);
-        t.time+=dt;
-        (n0,nh,n1,place,kick,middle)
-    }
-
     /// A cluster's components over a step of τ from `start` through a point on the atom's path (model.rs `Model::on_path`, # The atom's path), its momentum the step's middle's: the point's and half the kick the step takes, of its reference (c, w)
     /// less its harmonic part, from the force at the point on the state at the step's start.
     fn on_path(&self,cluster:usize,point:&Point,psi:&[Complex],start:f64,tau:f64,(c,w):([f64;3],f64))->Components{
@@ -1063,33 +1078,28 @@ impl<'a> Engine<'a>{
         }
         components
     }
-    /// The exact step of τ (module documentation): the flow for τ/2; at the point there the cluster's
-    /// generator at the middle time once, the internal state propagated exactly (`jumps` false: with no
-    /// jump, the step-doubling check's), the impulse along it; the kick; the flow for τ/2. The kick's
-    /// momentum (the light's and the trap's anharmonic part). Where ‖ψ‖² reaches the threshold in it, the
-    /// step is redone to that crossing, the jump made at the place it reaches and the rest of the step
-    /// taken from there (the kick then none of the caller's: only the check, without jumps, reads it). A part of a step
-    /// leaves out beats within its part of the share (a short part took the step's whole share, and what it left out booked 12 % on the 1 G molasses).
-    fn exact(&self,t:&mut Trajectory,tau:f64,exact:bool,jumps:bool)->[f64;3]{
+    /// A part of a step of τ from a trajectory's state, until ‖ψ‖² reaches `threshold`: the flow for τ/2 about its reference at the part's start; at the point there the cluster's propagation, the kick from its impulse less the
+    /// harmonic part, the flow for τ/2 (# One propagation). A part of a step leaves out beats within its part of the share (a short part took the step's whole share, and what it left out booked 12 % on the 1 G molasses). `grid`: its
+    /// propagation a segment's whatever the cluster's own (a rest of a step begun on one).
+    fn part(&self,t:&mut Trajectory,tau:f64,threshold:f64,grid:bool)->Part{
         let(m,s)=(self.model,&self.settings);
-        let before=jumps.then(||t.clone());
         let reference=self.reference(t.r);let(c,w)=reference;
         self.flow(t,0.5*tau,reference);
         let point=m.point(t.r,t.kappa);let start=t.time;
-        let segment=Segment::new(self.on_path(t.cluster,&point,&t.psi,start,tau,reference),start,tau,s.truncation,s.beats*(tau/s.dt).min(1.),s.horizon,s.node_phase);t.beats=t.beats.max(segment.dropped/tau);
-        let(taken,jumped,impulse)=segment.evolve(&mut t.psi,start,tau,if jumps{t.threshold}else{0.});drop(segment);
-        if let(true,Some(from))=(jumped,before){
-            let beats=t.beats;*t=from;t.beats=beats;
-            self.exact(t,taken,exact,false);self.jump(t,t.r,t.time,exact);
-            if taken<tau{self.exact(t,tau-taken,exact,true);}
-            t.time=start+tau;
-            return [0.;3];
-        }
+        let propagation=if grid{
+            let segment=Segment::new(self.on_path(t.cluster,&point,&t.psi,start,tau,reference),start,tau,s.truncation,s.beats*(tau/s.dt).min(1.),s.horizon,s.node_phase);t.beats=t.beats.max(segment.dropped/tau);
+            Propagation::Grid(segment)
+        }else{
+            let local=m.local(t.cluster,&point,start+0.5*tau);let half=HalfStep::new(&local.hamiltonian,m.dimension(t.cluster),0.5*tau,s.truncation);
+            Propagation::Node{model:m,cluster:t.cluster,point:&point,local,half,tau,truncation:s.truncation}
+        };
+        let evolved=propagation.evolve(&mut t.psi,start,tau,threshold);drop(propagation);
+        if evolved.reached{return Part{crossing:Some(evolved.taken),kick:[0.;3],node:None};}
         let harmonic=self.harmonic(std::array::from_fn(|a|t.r[a]-c[a]));let mut kick=[0.;3];
-        for a in 0..3{if s.free[a]{kick[a]=impulse[a]-tau*w*harmonic[a];t.kappa[a]+=kick[a];}}
-        self.flow(t,0.5*tau,reference);
-        t.time=start+tau;
-        kick
+        let held=evolved.node.is_some();
+        for a in 0..3{if s.free[a]{kick[a]=if held{tau*(evolved.impulse[a]-w*harmonic[a])}else{evolved.impulse[a]-tau*w*harmonic[a]};t.kappa[a]+=kick[a];}}
+        self.flow(t,0.5*tau,reference);t.time+=tau;
+        Part{crossing:None,kick,node:evolved.node.map(|psi|Node{place:(point.r,point.kappa),kappa:std::array::from_fn(|a|point.kappa[a]+0.5*kick[a]),psi,time:t.time-0.5*tau})}
     }
 
     /// The exact step's segment of a cluster at a point over τ from `start` (`Probe`).
@@ -1165,9 +1175,7 @@ impl<'a> Engine<'a>{
     /// One jump-free step of dt from a trajectory's state, by the step its cluster takes: the norms
     /// at its start and end and its kick.
     fn free_step(&self,t:&mut Trajectory,dt:f64)->(f64,f64,[f64;3]){
-        if self.takes_exact(t.cluster){
-            let n=self.model.dimension(t.cluster);let n0=norm2(&t.psi,n);let kick=self.exact(t,dt,false,false);(n0,norm2(&t.psi,n),kick)
-        }else{let(n0,_,n1,_,kick,_)=self.advance(t,dt,0.);(n0,n1,kick)}
+        let n=self.model.dimension(t.cluster);let n0=norm2(&t.psi,n);let part=self.part(t,dt,0.,self.takes_exact(t.cluster));(n0,norm2(&t.psi,n),part.kick)
     }
     /// A trajectory's state after `count` jump-free steps of dt (the deterministic flow the step check
     /// compares): flow, kick and the internal state's no-jump evolution, no jump, no loss.
@@ -1198,23 +1206,22 @@ impl<'a> Engine<'a>{
         // The state the loss is judged at: the step's middle where it went without a jump -- the point
         // the flow's first half reached, κ there with half the kick, ψ after the first half step, the
         // middle's time --, else its end.
-        let(place,middle)=if self.takes_exact(t.cluster){self.exact(t,s.dt,exact(),true);((t.r,t.kappa),None)}else{
-            let mut left=s.dt;
-            if let Some(Some(dropped))=self.quiet.get(t.cluster){t.beats=t.beats.max(dropped/s.dt);}
-            loop{
-                let start=t.clone();
-                let threshold=t.threshold;let(n0,nh,n1,place,kick,half)=self.advance(t,left,threshold);
-                if n1>t.threshold{let kappa:[f64;3]=std::array::from_fn(|a|place.1[a]+0.5*kick[a]);break(place,Some((kappa,half,t.time-0.5*left)));}
-                // The crossing on ln‖ψ‖², linear on the half where it lies; the step redone to it.
-                let(ta,tb,la,lb)=if nh<=t.threshold{(0.,0.5*left,n0.ln(),nh.ln())}else{(0.5*left,left,nh.ln(),n1.ln())};
-                let at=if lb<la{(ta+(t.threshold.ln()-la)/(lb-la)*(tb-ta)).clamp(ta,tb)}else{tb};
-                *t=start;if at>0.{self.advance(t,at,0.);}
-                self.jump(t,t.r,t.time,exact());
-                left-=at;
-                if !(left>0.){break((t.r,t.kappa),None);}
-                if self.takes_exact(t.cluster){self.exact(t,left,exact(),true);break((t.r,t.kappa),None);}
-            }
+        let mut left=s.dt;let mut grid=self.takes_exact(t.cluster);let mut anchor=grid.then_some((t.time,left));
+        if let Some(Some(dropped))=self.quiet.get(t.cluster){t.beats=t.beats.max(dropped/s.dt);}
+        let node=loop{
+            let from=t.clone();
+            let part=self.part(t,left,t.threshold,grid);
+            let Some(at)=part.crossing else{break part.node};
+            // The step redone to the crossing, the jump there, the rest of the step from the state it left.
+            let beats=t.beats;*t=from;t.beats=beats;
+            if at>0.||grid{self.part(t,at,0.,grid);}
+            self.jump(t,t.r,t.time,exact());
+            left-=at;
+            if !(left>0.){break None;}
+            if !grid&&self.takes_exact(t.cluster){grid=true;anchor=Some((t.time,left));}
         };
+        if let Some((from,span))=anchor{t.time=from+span;}
+        let(place,middle)=match node{Some(x)=>(x.place,Some((x.kappa,x.psi,x.time))),None=>((t.r,t.kappa),None)};
         // The loss: an atom unbound -- its mechanical energy above the trap's far level -- outside the trap's
         // region (`Settings::region`), of that one state.
         if s.loss&&self.harmonic_potential({let c=s.about();std::array::from_fn(|a|place.0[a]-c[a])})>s.region{
