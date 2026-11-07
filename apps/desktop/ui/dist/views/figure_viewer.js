@@ -10,6 +10,7 @@
 // Task Console's live board runs on.
 import { ComboBox, InfoPane, TabWidget, command, confirm, element, note } from "../fluent/index.js";
 import { confirmPulseDiscard } from "../pulse/widgets.js";
+import { PANEL_PLOT_KINDS } from "../protocol.js";
 import { queueStatus, saveImage } from "../shell.js";
 import { DataEditorView, saveDataAs } from "./data_editor.js";
 import { LogicEditorView, projectRow } from "./logic.js";
@@ -148,9 +149,8 @@ export class FigureViewerView {
         this.updateEditors();
         this.updatePanelEdits();
         this.updateNodes(state, datasets.length > 0);
-        // v2: the viewer offers the console's five kinds, by their own names, "image" first.
         const offered = new Set((latest.viewer?.plot_kinds ?? latest.plot_kinds ?? []).map(kind => kind.id));
-        const kinds = ["image", "curve", "rolling", "histogram", "facet_grid"].filter(id => offered.has(id)).map(id => ({ id }));
+        const kinds = PANEL_PLOT_KINDS.filter(id => offered.has(id)).map(id => ({ id }));
         this.kind.setChoices(kinds.map(kind => ({ value: kind.id, label: `Plot: ${kind.id}` })));
         if (this.kind.value === null || !kinds.some(kind => kind.id === this.kind.value))
             this.kind.value = kinds[0]?.id ?? null;

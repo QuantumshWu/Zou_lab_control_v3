@@ -3,6 +3,7 @@
 use std::{collections::HashSet, sync::{Arc, OnceLock, atomic::{AtomicBool, AtomicU64, Ordering}}};
 
 use zlc_plot::session::ImagePointOverlay;
+use zlc_plot::projection::site_geometry::SAVED_GEOMETRIES;
 use serde_json::{Map, Value, json};
 use zlc_core::{store::Snapshot,
     runtime::{Bundle, Declaration, Generation, ImportedRun, Input, Read, Runtime, Storage}};
@@ -57,7 +58,7 @@ impl ImportedRun for SavedRecord {
         // A lineage that cannot be read fails the capture: this is no history (the save is refused).
         match self.lineage.read() {
             Ok(lineage) => json!({"source": self.info["sections"].get("source").cloned().unwrap_or_else(|| json!({})),
-                                  "lineage": lineage.map_or_else(|| json!({"root":null,"nodes":[],"device_settings":[]}), |lineage| lineage.to_serde())}),
+                                  "lineage": lineage.map_or_else(|| self.info["sections"].get("lineage").cloned().unwrap_or_else(|| json!({"root":null,"nodes":[],"device_settings":[]})), |lineage| lineage.to_serde())}),
             Err(error) => json!(error.message),
         }
     }
@@ -143,6 +144,7 @@ impl MountedArchive {
         let label = crate::record::label(&sections["source"]);
         let saved = Arc::new(SavedRecord { info: decoded.info, lineage: decoded.lineage, read: OnceLock::new(), asked: AtomicBool::new(false) });
         let mut mounted = Self { runtime, path: decoded.path, items: Vec::new(), saved, label };
+        let single_dataset = prepared.len() == 1;
         for (index, ((item, kind, window), panel)) in prepared.into_iter().zip(panel_ids).enumerate() {
             // Each dataset is its own sealed producer, as in v2. Independent
             // archived datasets must not become one artificial atomic event.
@@ -152,7 +154,14 @@ impl MountedArchive {
             if mounted.items.iter().any(|mounted| mounted.signal == signal) { signal = format!("{FIGURE_SIGNALS}{serial}/dataset-{}", index + 1).into(); }
             let overlay_signal: Option<Arc<str>> = item.overlay_plane.as_ref()
                 .map(|_| format!("{signal}/overlay").into());
-            let metadata = json!({"operation":"figure-import", "archive":mounted.path, "dataset":item.key});
+            let mut metadata = json!({"operation":"figure-import", "archive":mounted.path, "dataset":item.key});
+            if let Some(geometry) = mounted.saved.info["sections"][SAVED_GEOMETRIES].get(&item.key) {
+                metadata[SAVED_GEOMETRIES] = geometry.clone();
+            } else if !single_dataset {
+                // A legacy archive has one shared lineage for all datasets.
+                // It cannot establish which calibration belongs to this item.
+                metadata[SAVED_GEOMETRIES] = json!({});
+            }
             let mut declarations = vec![Declaration { signal:signal.clone(),
                 schema:item.plane.schema().clone(), storage:Storage::Snapshot }];
             let plane = item.plane.clone();

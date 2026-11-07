@@ -40,25 +40,7 @@ pub struct PointSignature {
     view: Option<([u64; 4], [u64; 4], u64)>,
 }
 
-/// `_point_ring_radius(points, fraction=..., fallback=...)`: a fraction of the
-/// median nearest-neighbour distance.
-fn point_ring_radius(points: &[[f64; 2]], fraction: f64, fallback: f64) -> f64 {
-    if points.len() < 2 || !points.iter().all(|p| p[0].is_finite() && p[1].is_finite()) { return fallback; }
-    let mut nearest: Vec<f64> = points.iter().enumerate().map(|(i, a)| {
-        let mut best = f64::INFINITY;
-        for (j, b) in points.iter().enumerate() {
-            let (dx, dy) = (a[0] - b[0], a[1] - b[1]);
-            let squared = if i == j { f64::INFINITY } else { dx * dx + dy * dy };
-            if squared < best || best.is_nan() { best = squared; }
-        }
-        best.sqrt()
-    }).filter(|d| d.is_finite() && *d > 0.0).collect();
-    if nearest.is_empty() { return fallback; }
-    nearest.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = nearest.len();
-    let median = if n % 2 == 1 { nearest[n / 2] } else { (nearest[n / 2 - 1] + nearest[n / 2]) / 2.0 };
-    fraction * median
-}
+use crate::projection::site_geometry::point_ring_radius;
 
 /// `ImagePointOverlay.statuses_for(spec, facet_value)`: the site judgements of
 /// the one exact (repeat, point) cell the image's scope (and a grid cell's facet

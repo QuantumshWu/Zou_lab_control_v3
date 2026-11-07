@@ -12,6 +12,8 @@ export type Axis = Readonly<{ bounds: readonly [number, number, number, number];
 export type Control = FieldSpec & { section: "binding" | "semantic" | "display" | "board"; bound?: boolean };
 export type Signal = { id: string; label: string; available: boolean; reason?: string };
 export type PlotKind = { id: string; label: string };
+/** Display order shared by the live board and the Figure Viewer. */
+export const PANEL_PLOT_KINDS = ["image", "curve", "rolling", "histogram", "facet_grid", "point_map"];
 export type Panel = {
   id: string;
   title: string;

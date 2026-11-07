@@ -8,10 +8,10 @@ use std::sync::LazyLock;
 use crate::layout::LayoutConfig;
 use crate::style::PlotStyle;
 
-use super::data_contract::{classify_axes, resolve_axis, AxisEntry, AxisFamilies, IndexedHistoryLayout, PlotSchema, PRIMARY_INDEX};
+use super::data_contract::{classify_axes, resolve_axis, AxisEntry, AxisFamilies, IndexedHistoryLayout, PlotSchema, PRIMARY_INDEX, SITE};
 use super::error::{PlotError, Result};
 use super::kinds::{AxisDomain, AxisRef, PlotKind};
-use super::spec::{CellPlot, CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, LabelSlot, PlotLabels, PlotSpec, Reduction, RollingPlot, ScopeTerm, GRID_CELL_KINDS};
+use super::spec::{CellPlot, CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, PointMapPlot, LabelSlot, PlotLabels, PlotSpec, Reduction, RollingPlot, ScopeTerm, GRID_CELL_KINDS};
 
 /// The library defaults the registry reads (the immutable `DEFAULTS`).
 pub(crate) static DEFAULT_STYLE: LazyLock<PlotStyle> = LazyLock::new(PlotStyle::default);
@@ -19,7 +19,7 @@ pub(crate) static DEFAULT_LAYOUT: LazyLock<LayoutConfig> = LazyLock::new(LayoutC
 
 /// What a label slot describes; carry-over matches roles, never slots.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub enum LabelRole { Title, Axis(AxisRef), Value, Count, Repeat, X, PulseTime }
+pub enum LabelRole { Title, Axis(AxisRef), Value, Count, Repeat, X, SpatialX, SpatialY, PulseTime }
 
 /// The semantic projection a kind's fit models are authored for.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -41,9 +41,10 @@ pub struct KindHandler {
     pub record_input: bool,
 }
 
-pub const HANDLERS: [KindHandler; 6] = [
+pub const HANDLERS: [KindHandler; 7] = [
     KindHandler { kind: PlotKind::Curve, display_name: "Curve", fit_target: Some(FitTargetKind::Series), semantic_fields: &["kind", "x", "group", "reduction"], record_input: false },
     KindHandler { kind: PlotKind::Image, display_name: "Image", fit_target: Some(FitTargetKind::Image), semantic_fields: &["kind", "x", "y", "reduction"], record_input: false },
+    KindHandler { kind: PlotKind::PointMap, display_name: "Point Map", fit_target: None, semantic_fields: &["kind", "site", "reduction"], record_input: false },
     KindHandler { kind: PlotKind::Histogram, display_name: "Histogram", fit_target: Some(FitTargetKind::Histogram), semantic_fields: &["kind", "group", "reduction"], record_input: false },
     KindHandler { kind: PlotKind::Rolling, display_name: "Rolling", fit_target: Some(FitTargetKind::Series), semantic_fields: &["kind", "group", "reduction"], record_input: true },
     KindHandler { kind: PlotKind::FacetGrid, display_name: "Facet grid", fit_target: None, semantic_fields: &["kind", "facet"], record_input: false },
@@ -69,6 +70,8 @@ pub fn label_roles(spec: &PlotSpec, history: Option<&IndexedHistoryLayout>) -> R
         PlotSpec::Curve(s) => vec![(LabelSlot::Title, LabelRole::Title), (LabelSlot::X, LabelRole::Axis(s.x.clone())), (LabelSlot::Y, LabelRole::Value)],
         PlotSpec::Image(s) => vec![(LabelSlot::Title, LabelRole::Title), (LabelSlot::X, LabelRole::Axis(s.x.clone())),
                                    (LabelSlot::Y, LabelRole::Axis(s.y.clone())), (LabelSlot::Value, LabelRole::Value)],
+        PlotSpec::PointMap(_) => vec![(LabelSlot::Title, LabelRole::Title), (LabelSlot::X, LabelRole::SpatialX),
+            (LabelSlot::Y, LabelRole::SpatialY), (LabelSlot::Value, LabelRole::Value)],
         PlotSpec::Histogram(_) => vec![(LabelSlot::Title, LabelRole::Title), (LabelSlot::X, LabelRole::Value), (LabelSlot::Y, LabelRole::Count)],
         PlotSpec::Rolling(s) => {
             let role = match &s.x {
@@ -140,6 +143,15 @@ pub fn table_default(schema: Option<&PlotSchema>, kind: PlotKind, cell_kind: Opt
     let families = classify_axes(schema);
     match kind {
         PlotKind::FacetGrid => grid(schema, &families, cell_kind),
+        PlotKind::PointMap => {
+            let site = super::kinds::DOMAINS.into_iter().find_map(|domain| {
+                schema.domain(domain).axes().iter().find(|axis| axis.role() == SITE)
+                    .map(|axis| super::kinds::declared_ref(domain, axis.id()))
+            });
+            Ok(site.map(|site| PlotSpec::PointMap(PointMapPlot {
+                site, reduction: Reduction::Last, labels: PlotLabels::default(), scope: Vec::new(), coordinates: Vec::new(),
+            })))
+        }
         PlotKind::Curve => Ok(curve_spec(schema, &families, &curve_plan(&families, None), true)?.map(PlotSpec::Curve)),
         PlotKind::Image => match image_plan(&families) {
             Some(plan) => Ok(Some(PlotSpec::Image(image_spec(schema, &families, &plan, true)?))),

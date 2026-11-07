@@ -13,6 +13,7 @@ use super::error::{PlotError, Result};
 use super::kinds::{canonical_coordinate, declared_ref, domain_role, AxisDomain, AxisRef, DOMAINS};
 use super::value::repr_str;
 
+pub const SITE: &str = "site";
 pub const REPEAT: &str = "repeat";
 pub const PRIMARY_INDEX: &str = "primary-index";
 pub const SHOT_TIME: &str = "shot-time";

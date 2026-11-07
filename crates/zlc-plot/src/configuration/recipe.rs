@@ -13,7 +13,7 @@ use super::selectors::{
     finite_value, normalize_viewport, thresholds_wire, CrosshairPoint, NumericRange, RectangleRange, SelectorKind,
     SelectorState, SelectorValue, ThresholdTarget, Viewport,
 };
-use super::spec::{CellPlot, CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, PlotLabels, PlotSpec, RollingPlot, ScopeTerm};
+use super::spec::{CellPlot, CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, PointMapPlot, PlotLabels, PlotSpec, RollingPlot, ScopeTerm};
 use super::state::{py_iter, Interaction, InteractionUpdate, Presentation, PresentationUpdate};
 use super::value::{Value, ValueMap};
 
@@ -104,6 +104,10 @@ pub fn encode_spec(spec: &PlotSpec) -> Result<ValueMap> {
             common.insert("facet", axis_document(grid.facet.as_ref()));
             common.insert("cell", Value::Map(encode_spec(&grid.cell.as_spec())?));
         }
+        PlotSpec::PointMap(s) => {
+            common.insert("site", axis_document(Some(&s.site)));
+            common.insert("reduction", Value::text(s.reduction.value()));
+        }
         PlotSpec::Curve(s) => {
             common.insert("reduction", Value::text(s.reduction.value()));
             common.insert("group", axis_document(s.group.as_ref()));
@@ -142,6 +146,12 @@ pub fn decode_spec(value: &Value) -> Result<PlotSpec> {
     let missing = Value::None;
     let get = |name: &str| map.get(name).unwrap_or(&missing);
     match kind {
+        PlotKind::PointMap => {
+            keys(value, &["kind", "labels", "scope", "coordinates", "site", "reduction"], "point map recipe")?;
+            let site = axis(get("site"), "site axis")?.ok_or_else(|| PlotError::value("Point Map requires a site axis"))?;
+            Ok(PlotSpec::PointMap(PointMapPlot { site, reduction: reduction_from_value(get("reduction"))?,
+                labels, scope, coordinates: coordinates()? }.validated()?))
+        }
         PlotKind::Histogram => {
             let mut fields = vec!["kind", "labels", "scope", "coordinates", "reduction", "reduced"];
             if map.contains_key("group") { fields.push("group"); }

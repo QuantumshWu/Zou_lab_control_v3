@@ -107,6 +107,7 @@ pub fn selector_key_error(kind: SelectorKind) -> PlotError {
 fn spec_facts(spec: &PlotSpec) -> Result<SpecFacts> {
     Ok(match spec {
         PlotSpec::Curve(s) => SpecFacts::Curve { x: s.x.clone(), group: s.group.clone(), reduction: s.reduction },
+        PlotSpec::PointMap(s) => SpecFacts::PointMap { site: s.site.clone(), reduction: s.reduction },
         PlotSpec::Image(s) => SpecFacts::Image { x: s.x.clone(), y: s.y.clone(), reduction: s.reduction },
         PlotSpec::Histogram(s) => SpecFacts::Histogram { group: s.group.clone(), reduced: s.reduced.clone(), reduction: s.reduction },
         PlotSpec::Rolling(s) => SpecFacts::Rolling { x: s.x.clone(), group: s.group.clone(), reduction: s.reduction },
@@ -371,6 +372,7 @@ impl FitProjection {
         match payload {
             Payload::Curve(curve) if !curve.series.is_empty() => Quantity::of(&curve.series[0].y),
             Payload::Image(image) => Quantity::of(&image.z),
+            Payload::PointMap(data) => Quantity::of(&data.values),
             Payload::Histogram(histogram) => Quantity::of(&histogram.edges),
             _ => {
                 let view = self.view();
@@ -393,6 +395,7 @@ impl FitProjection {
     }
 
     pub fn x_quantity(&self) -> Result<Quantity> {
+        if let Payload::PointMap(data) = &*self.payload { return Ok(Quantity::of(&data.image.x)); }
         if self.semantic().kind() == PlotKind::Rolling { return self.rolling_x_quantity(); }
         self.coordinate(&self.x_ref()?)
     }
@@ -400,12 +403,12 @@ impl FitProjection {
     /// `_x_selector_source`: what a selector's x is measured in.
     pub fn x_selector_quantity(&self) -> Result<Quantity> {
         if self.is_histogram_plot() { return Ok(self.value_quantity()); }
-        if self.semantic().kind() == PlotKind::Rolling { return self.rolling_x_quantity(); }
-        self.coordinate(&self.x_ref()?)
+        self.x_quantity()
     }
 
     /// `_y_ref_or_value`: an image's y axis, else the plotted value.
     pub fn y_quantity(&self) -> Result<Quantity> {
+        if let Payload::PointMap(data) = &*self.payload { return Ok(Quantity::of(&data.image.y)); }
         match self.semantic().y() { Some(y) => self.coordinate(y), None => Ok(self.value_quantity()) }
     }
 
@@ -465,7 +468,7 @@ impl FitProjection {
         let x = match x_range { None => None, Some(range) => canonical(range, &self.x_selector_quantity()?) };
         let y = match y_range {
             None => None,
-            Some(_) if fit && self.semantic().kind() != PlotKind::Image => None,
+            Some(_) if fit && !matches!(self.semantic().kind(), PlotKind::Image | PlotKind::PointMap) => None,
             Some(range) if self.is_histogram_plot() => Some(range),
             Some(range) => canonical(range, &self.y_quantity()?),
         };

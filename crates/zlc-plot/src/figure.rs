@@ -29,6 +29,8 @@ use crate::configuration::resolve::{resolve_configuration, ConfigurationUpdates,
 use crate::configuration::value::{parse_python_float, py_strip, repr_str, Value, ValueMap};
 use crate::document::{DocumentRead, FigureSaver, FigureWrite, SaveRequest};
 use crate::projection::{Source, SourceData};
+use zlc_core::schema::DomainRole;
+use crate::projection::site_geometry::{SiteGeometries, SAVED_GEOMETRIES};
 use crate::session::{real_values, ImagePointOverlay, OverlayArray, PointStatus};
 use crate::units::UnitRegistry;
 
@@ -323,6 +325,8 @@ pub struct PreparedFigure {
     image_path: PathBuf,
     archive_path: PathBuf,
     data: ArchiveDataset,
+    site_geometry: SiteGeometries,
+    site_axes: Vec<String>,
     overlay_arrays: Vec<(String, Entry)>,
     overlay: Json,
     lineage: Json,
@@ -364,20 +368,35 @@ impl PreparedFigure {
         durable_makedirs(image_path.parent().unwrap_or(&image_path))?;
         let archive_path = with_suffix(&image_path, ".npz")?;
         let (overlay_arrays, overlay) = overlay_payload(overlay);
-        Ok(PreparedFigure { image_path, archive_path, data: archive_dataset(data), overlay_arrays, overlay, lineage, source })
+        let site_axes = [DomainRole::Repeat, DomainRole::Point, DomainRole::Cell].into_iter()
+            .flat_map(|domain| data.schema.domain(domain).axes()).filter(|axis| axis.role() == "site")
+            .map(|axis| axis.id().to_owned()).collect();
+        Ok(PreparedFigure { image_path, archive_path, data: archive_dataset(data), site_geometry: data.site_geometry.clone(),
+            site_axes, overlay_arrays, overlay, lineage, source })
     }
 
     /// The archive of `recipe`, then the image `image(format)` renders (none
     /// without it): the written image and archive.
     fn finish(self, recipe: ValueMap, image: Option<&mut dyn FnMut(&str) -> Result<Vec<u8>>>) -> Result<(Option<PathBuf>, PathBuf)> {
-        let PreparedFigure { image_path, archive_path, data, overlay_arrays, overlay, lineage, source } = self;
+        let PreparedFigure { image_path, archive_path, data, site_geometry, site_axes, overlay_arrays, overlay, lineage, source } = self;
         let mut recipe = json_of(&Value::Map(recipe));
         recipe.insert("overlay", overlay);
         let mut source = source;
         if let Some(title) = recipe.get("spec").and_then(|spec| spec.get("labels")).and_then(|labels| labels.get("title")).filter(|title| !title.is_null()) {
             if source.get("title").is_none() { source.insert("title", title.clone()); }
         }
-        let sections = Json::object([("plot", Json::object([("data", recipe)])), ("lineage", lineage), ("source", source)]);
+        let mut geometries = Vec::new();
+        let map_axis = recipe.get("spec").filter(|spec| spec.get("kind").and_then(Json::as_str) == Some("point_map"))
+            .and_then(|spec| spec.get("site")?.get("axis_id")?.as_str());
+        for axis in site_axes {
+            match site_geometry.resolve(&axis) {
+                Ok(geometry) => geometries.push((axis, Json::from_serde(&geometry.document()))),
+                Err(error) if map_axis == Some(&axis) => return Err(PlotError::value(error.message)),
+                Err(_) => {}
+            }
+        }
+        let mut sections = Json::object([("plot", Json::object([("data", recipe)])), ("lineage", lineage), ("source", source)]);
+        if !geometries.is_empty() { sections.insert(SAVED_GEOMETRIES, Json::object([("data", Json::Object(geometries))])); }
         let image_name = image_path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         let mut arrays = vec![("data".to_owned(), Entry::Dataset(data))];
         arrays.extend(overlay_arrays);
@@ -423,8 +442,12 @@ pub struct RunFigure {
 /// recipe gives the archive's recipe and, when `image`, the picture, so the
 /// image is what reopening the archive draws. The written image and archive.
 pub fn save_run_figure(figure: RunFigure, services: &crate::session::SessionServices) -> Result<(Option<PathBuf>, PathBuf)> {
-    let RunFigure { path, data, overlay, recipe, source, lineage, image } = figure;
-    let lineage = match Json::from_serde(&lineage) {
+    let RunFigure { path, mut data, overlay, recipe, source, lineage, image } = figure;
+    let captured = Json::from_serde(&lineage);
+    if lineage.get("root").is_some_and(|root| !root.is_null()) {
+        data.site_geometry = SiteGeometries::from_lineage(lineage);
+    }
+    let lineage = match captured {
         Json::Null => Json::Object(Vec::new()),
         other => other,
     };

@@ -218,8 +218,13 @@ impl Science {
                 }
                 let mut read = held[&key].clone();
                 // A saved Figure keeps the layer it was saved with; a data copy's preview, the one its copy kept.
-                if job.document != 0 { if let Some(layer) = &input.layer { read.overlay = Some(Some(layer.clone())); } }
-                if job.document == 0 {
+                if input.kind == "point_map" {
+                    // The site image owns the overlay resolved from this exact read.
+                    read.overlay = Some(None);
+                    self.overlay_errors.remove(&input.panel);
+                } else if job.document != 0 {
+                    if let Some(layer) = &input.layer { read.overlay = Some(Some(layer.clone())); }
+                } else {
                     // A live image carries its point layer (v2 ImageFrame(snapshot, overlay)).
                     // A point review draws its own candidates.
                     read.overlay = Some(match (&input.layer, self.overlays.layer(&input.panel, source, input.overlay.as_ref())) {

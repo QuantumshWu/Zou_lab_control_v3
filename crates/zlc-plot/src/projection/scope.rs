@@ -11,7 +11,7 @@ use super::output::{Payload, SelectionSubject};
 use super::plan::{DisplayFacts, ProjectionPlan, ScopeValue, SpecFacts};
 use super::view::{DataView, acquired_repeat_count};
 use super::{ErrorKind, ProjectionError, Result};
-use crate::kinds::{AxisDomain, AxisRef, PlotKind};
+use crate::kinds::{AxisDomain, AxisRef};
 
 /// Contiguous or explicit logical/physical indices (`range | tuple`).
 #[derive(Clone, Debug, PartialEq)]
@@ -294,7 +294,7 @@ pub fn restrict_snapshot(snapshot: &Snapshot, terms: &[(Arc<str>, Term)], repeat
             Block::Segments(super::model::Segments::new(kept))
         }
     };
-    Ok(Snapshot { schema: derived, block, window: snapshot.window, block_id: block_id.into(), generation: snapshot.generation.clone(), revision: snapshot.revision })
+    Ok(Snapshot { site_geometry: snapshot.site_geometry.clone(), schema: derived, block, window: snapshot.window, block_id: block_id.into(), generation: snapshot.generation.clone(), revision: snapshot.revision })
 }
 
 /// `FitProjection._scoped_data`: the source cut to the panel's scope and window.
@@ -360,8 +360,7 @@ pub fn selection_subject(view: &DataView, plan: &ProjectionPlan, payload: &Paylo
         };
         scope.push((term.axis.clone(), value));
     }
-    let kind = match semantic { SpecFacts::Curve { .. } => PlotKind::Curve, SpecFacts::Image { .. } => PlotKind::Image,
-        SpecFacts::Histogram { .. } => PlotKind::Histogram, _ => PlotKind::Rolling };
+    let kind = semantic.kind();
     Ok(SelectionSubject { plot_kind: kind, x_coordinate_frame: frame(&x)?, y_coordinate_frame: frame(&y)?, x, y, scope,
         source_window: if view.has_primary_index() { plan.display.window } else { None } })
 }

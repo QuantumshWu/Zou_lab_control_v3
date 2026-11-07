@@ -206,6 +206,30 @@ pub struct WindowRead {
 pub enum ReadKind {
     Event(Arc<Publication>), Canonical(Arc<Publication>), Window(Arc<WindowRead>),
 }
+impl ReadKind {
+    /// Visit the metadata roots actually represented by this read. For a finite
+    /// prefix these are newest first; a consumer that recognizes a previously
+    /// visited immutable prefix can stop by returning false.
+    pub fn visit_record_roots(&self, mut visit: impl FnMut(&Arc<str>, &Arc<RunRecord>, &Arc<EventRecord>) -> bool) {
+        match self {
+            Self::Window(window) => {
+                for entry in window.entries().iter().rev() {
+                    if !visit(&entry.key.signal, entry.run(), entry.event()) { break; }
+                }
+            }
+            Self::Event(publication) | Self::Canonical(publication) => {
+                if !visit(&publication.key.signal, publication.run(), publication.event()) { return; }
+                if matches!(self, Self::Canonical(_)) {
+                    let mut entry = publication.events.as_deref();
+                    while let Some(fact) = entry {
+                        if !Arc::ptr_eq(&fact.event, publication.event()) && !visit(&publication.key.signal, publication.run(), &fact.event) { break; }
+                        entry = fact.previous.as_deref();
+                    }
+                }
+            }
+        }
+    }
+}
 #[derive(Clone)]
 pub struct Read { kind: ReadKind, _lineage: Option<Arc<PayloadLineage>> }
 impl Read {

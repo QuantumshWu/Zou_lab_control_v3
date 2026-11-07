@@ -27,10 +27,10 @@ pub const COORDINATE_PREFIX: &str = "coordinate:";
 pub const FATE_REDUCE: &str = "reduce";
 pub const FATE_POOL: &str = "pool";
 const SCOPE_VALUE_TAG: &str = "scope-value";
-const ROLE_FATES: [Role; 4] = [Role::X, Role::Y, Role::Group, Role::Facet];
+const ROLE_FATES: [Role; 5] = Role::ALL;
 
 fn role_label(role: Role) -> &'static str {
-    match role { Role::X => "X axis", Role::Y => "Y axis", Role::Group => "Group", Role::Facet => "Facet" }
+    match role { Role::X => "X axis", Role::Y => "Y axis", Role::Group => "Group", Role::Facet => "Facet", Role::Site => "Site" }
 }
 
 /// One `(value, label)` choice.
@@ -188,7 +188,7 @@ fn scope_terms(spec: &PlotSpec) -> OrderedMap<AxisRef, Coordinate> { OrderedMap:
 /// Every axis this specification names, in any role.
 fn axes_used_by(spec: &PlotSpec) -> Vec<AxisRef> {
     let semantic = spec.semantic();
-    let mut used: Vec<AxisRef> = [semantic.x(), semantic.y(), semantic.group(), spec.facet()].into_iter().flatten().cloned().collect();
+    let mut used: Vec<AxisRef> = [semantic.x(), semantic.y(), semantic.group(), semantic.role(Role::Site), spec.facet()].into_iter().flatten().cloned().collect();
     used.extend(spec.scope().iter().map(|(axis, _)| axis.clone()));
     used
 }
@@ -196,7 +196,7 @@ fn axes_used_by(spec: &PlotSpec) -> Vec<AxisRef> {
 /// What this specification has already made of one axis.
 pub fn fate_of(spec: &PlotSpec, reference: &AxisRef) -> Value {
     let semantic = spec.semantic();
-    for role in [Role::X, Role::Y, Role::Group] {
+    for role in [Role::X, Role::Y, Role::Group, Role::Site] {
         if semantic.role(role) == Some(reference) { return Value::text(role.name()); }
     }
     if spec.facet() == Some(reference) { return Value::text("facet"); }
@@ -314,7 +314,7 @@ fn coordinate_spec(schema: &PlotSchema, spec: &PlotSpec, primary: &AxisRef, sele
     };
     let semantic = spec.semantic();
     let mut changes: Vec<(Role, Option<AxisRef>)> = Vec::new();
-    for role in [Role::X, Role::Y, Role::Group] {
+    for role in [Role::X, Role::Y, Role::Group, Role::Site] {
         if semantic.has_role(role) { changes.push((role, remap(semantic.role(role))?)); }
     }
     let reduced = match semantic.reduced() {
@@ -440,7 +440,7 @@ pub fn composed_spec(schema: Option<&PlotSchema>, spec: &PlotSpec, values: &Valu
                 inherited.insert(fate_field_name(&coordinate_axis_ref(schema, reference)?), Choice::Raw(scope_fate(value)));
             }
             let cell_roles = field_names(&changed);
-            for role in [Role::X, Role::Y, Role::Group] {
+            for role in [Role::X, Role::Y, Role::Group, Role::Site] {
                 if let Some(reference) = role_holder(&candidate, role) {
                     if cell_roles.contains(&role.name()) {
                         inherited.set_default(fate_field_name(&coordinate_axis_ref(schema, &reference)?), Choice::Raw(Value::text(role.name())));
@@ -569,6 +569,9 @@ pub fn composed_spec(schema: Option<&PlotSchema>, spec: &PlotSpec, values: &Valu
                 if role_targets.get(&role).is_some_and(|previous| previous != axis) {
                     return Err(PlotError::value(format!("fate '{}' is assigned to more than one axis", role.name())));
                 }
+                if role == Role::Site && resolve_axis(schema, axis)?.axis.role() != super::data_contract::SITE {
+                    return Err(PlotError::value("Point Map needs an axis with the site role"));
+                }
                 role_targets.insert(role, axis.clone());
             } else {
                 return Err(PlotError::value(format!("unknown fate {} for axis {}", value.py_repr(), axis_repr(axis))));
@@ -608,7 +611,7 @@ pub fn composed_spec(schema: Option<&PlotSchema>, spec: &PlotSpec, values: &Valu
 
     let settled = |candidate: PlotSpec, scope: &OrderedMap<AxisRef, Coordinate>| -> Result<PlotSpec> {
         let semantic = candidate.semantic();
-        let role_axes: HashSet<AxisRef> = [semantic.x(), semantic.y(), semantic.group(), candidate.facet()].into_iter().flatten().cloned().collect();
+        let role_axes: HashSet<AxisRef> = [semantic.x(), semantic.y(), semantic.group(), semantic.role(Role::Site), candidate.facet()].into_iter().flatten().cloned().collect();
         let mut pinned = scope.clone();
         pinned.retain(|axis, _| !role_axes.contains(axis));
         let candidate = with_scope_if_changed(candidate, &pinned)?;
@@ -682,6 +685,11 @@ pub fn describe_semantics(schema: Option<&PlotSchema>, spec: &PlotSpec, layout: 
         return Ok(SemanticDescription { kind, kind_choices: vec![kind], fields: vec![field], axis_choices: Vec::new(), x: None, y: None,
             group: None, reduction: None, facet: None, facet_max_cells: layout.facet_max_cells(), fate_rows: Vec::new() });
     };
+    if let PlotSpec::PointMap(map) = spec {
+        if resolve_axis(schema, &map.site)?.axis.role() != super::data_contract::SITE {
+            return Err(PlotError::value("Point Map needs an axis with the site role"));
+        }
+    }
     if !admits(spec.kind(), Some(schema))? {
         return Err(PlotError::value(format!("plot specification {} is not admissible for schema", spec_type_name(spec))));
     }
@@ -716,7 +724,11 @@ pub fn describe_semantics(schema: Option<&PlotSchema>, spec: &PlotSpec, layout: 
         let current = fate_of(spec, &reference);
         let mut offered = vec![(Value::text(default), format!("({default_label})"))];
         if default == FATE_POOL && declares_reduced(spec) { offered.push((Value::text(FATE_REDUCE), "reduced".to_owned())); }
-        for role in &roles { offered.push((Value::text(role.name()), role_label(*role).to_owned())); }
+        for role in &roles {
+            if *role != Role::Site || resolved.axis.role() == super::data_contract::SITE {
+                offered.push((Value::text(role.name()), role_label(*role).to_owned()));
+            }
+        }
         let pins = CycleChoices::new(resolved.axis.clone());
         fields.push(SemanticField::new(name.clone(), label, current, offered, true, Some(pins))?);
         fate_rows.push((reference, name));
@@ -744,7 +756,7 @@ pub fn describe_semantics(schema: Option<&PlotSchema>, spec: &PlotSpec, layout: 
 
 pub(crate) fn spec_type_name(spec: &PlotSpec) -> &'static str {
     match spec {
-        PlotSpec::Curve(_) => "CurvePlot", PlotSpec::Image(_) => "ImagePlot", PlotSpec::Histogram(_) => "HistogramPlot",
+        PlotSpec::Curve(_) => "CurvePlot", PlotSpec::Image(_) => "ImagePlot", PlotSpec::PointMap(_) => "PointMapPlot", PlotSpec::Histogram(_) => "HistogramPlot",
         PlotSpec::Rolling(_) => "RollingPlot", PlotSpec::FacetGrid(_) => "FacetGridPlot", PlotSpec::PulseTimeline(_) => "PulseTimelinePlot",
     }
 }

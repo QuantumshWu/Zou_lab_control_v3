@@ -75,6 +75,16 @@ pub struct ImagePlot {
     pub coordinates: Vec<AxisRef>,
 }
 
+/// One sample per coordinate of a SITE axis, placed using its calibration geometry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PointMapPlot {
+    pub site: AxisRef,
+    pub reduction: Reduction,
+    pub labels: PlotLabels,
+    pub scope: Vec<ScopeTerm>,
+    pub coordinates: Vec<AxisRef>,
+}
+
 /// Distribution of the acquired values; `reduced` axes collapse under the
 /// reduction before binning, every other axis pools.
 #[derive(Clone, Debug, PartialEq)]
@@ -120,6 +130,7 @@ pub struct PulseTimelinePlot { pub labels: PlotLabels }
 pub enum PlotSpec {
     Curve(CurvePlot),
     Image(ImagePlot),
+    PointMap(PointMapPlot),
     Histogram(HistogramPlot),
     Rolling(RollingPlot),
     FacetGrid(FacetGridPlot),
@@ -131,12 +142,12 @@ pub const GRID_CELL_KINDS: [PlotKind; 3] = [PlotKind::Curve, PlotKind::Image, Pl
 
 /// The roles a spec can hold an axis in.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum Role { X, Y, Group, Facet }
+pub enum Role { X, Y, Group, Facet, Site }
 
 impl Role {
-    pub const ALL: [Role; 4] = [Role::X, Role::Y, Role::Group, Role::Facet];
+    pub const ALL: [Role; 5] = [Role::X, Role::Y, Role::Group, Role::Facet, Role::Site];
     pub fn name(self) -> &'static str {
-        match self { Role::X => "x", Role::Y => "y", Role::Group => "group", Role::Facet => "facet" }
+        match self { Role::X => "x", Role::Y => "y", Role::Group => "group", Role::Facet => "facet", Role::Site => "site" }
     }
     pub fn parse(name: &str) -> Option<Role> { Self::ALL.into_iter().find(|role| role.name() == name) }
 }
@@ -204,6 +215,15 @@ impl ImagePlot {
         validated_coordinates(&self.coordinates)?;
         validated_scope(&mut self.scope)?;
         require_distinct_axes(&[("x", Some(&self.x)), ("y", Some(&self.y))], &self.scope)?;
+        Ok(self)
+    }
+}
+
+impl PointMapPlot {
+    pub fn validated(mut self) -> Result<Self> {
+        validated_coordinates(&self.coordinates)?;
+        validated_scope(&mut self.scope)?;
+        require_distinct_axes(&[("site", Some(&self.site))], &self.scope)?;
         Ok(self)
     }
 }
@@ -321,6 +341,7 @@ impl FacetGridPlot {
 pub enum Surface<'a> {
     Curve(&'a CurvePlot),
     Image(&'a ImagePlot),
+    PointMap(&'a PointMapPlot),
     Histogram(&'a HistogramPlot),
     Rolling(&'a RollingPlot),
     PulseTimeline(&'a PulseTimelinePlot),
@@ -329,7 +350,7 @@ pub enum Surface<'a> {
 impl<'a> Surface<'a> {
     pub fn kind(self) -> PlotKind {
         match self {
-            Surface::Curve(_) => PlotKind::Curve, Surface::Image(_) => PlotKind::Image, Surface::Histogram(_) => PlotKind::Histogram,
+            Surface::Curve(_) => PlotKind::Curve, Surface::Image(_) => PlotKind::Image, Surface::PointMap(_) => PlotKind::PointMap, Surface::Histogram(_) => PlotKind::Histogram,
             Surface::Rolling(_) => PlotKind::Rolling, Surface::PulseTimeline(_) => PlotKind::PulseTimeline,
         }
     }
@@ -342,7 +363,10 @@ impl<'a> Surface<'a> {
         match self { Surface::Curve(s) => s.group.as_ref(), Surface::Histogram(s) => s.group.as_ref(), Surface::Rolling(s) => s.group.as_ref(), _ => None }
     }
     pub fn role(self, role: Role) -> Option<&'a AxisRef> {
-        match role { Role::X => self.x(), Role::Y => self.y(), Role::Group => self.group(), Role::Facet => None }
+        match role {
+            Role::X => self.x(), Role::Y => self.y(), Role::Group => self.group(), Role::Facet => None,
+            Role::Site => if let Surface::PointMap(map) = self { Some(&map.site) } else { None },
+        }
     }
     /// Whether this kind declares the field at all (`hasattr`).
     pub fn has_role(self, role: Role) -> bool {
@@ -350,6 +374,7 @@ impl<'a> Surface<'a> {
             Role::X => matches!(self, Surface::Curve(_) | Surface::Image(_) | Surface::Rolling(_)),
             Role::Y => matches!(self, Surface::Image(_)),
             Role::Group => matches!(self, Surface::Curve(_) | Surface::Histogram(_) | Surface::Rolling(_)),
+            Role::Site => matches!(self, Surface::PointMap(_)),
             Role::Facet => false,
         }
     }
@@ -359,7 +384,7 @@ impl<'a> Surface<'a> {
     }
     pub fn reduction(self) -> Option<Reduction> {
         match self {
-            Surface::Curve(s) => Some(s.reduction), Surface::Image(s) => Some(s.reduction), Surface::Histogram(s) => Some(s.reduction),
+            Surface::Curve(s) => Some(s.reduction), Surface::Image(s) => Some(s.reduction), Surface::PointMap(s) => Some(s.reduction), Surface::Histogram(s) => Some(s.reduction),
             Surface::Rolling(s) => Some(s.reduction), Surface::PulseTimeline(_) => None,
         }
     }
@@ -367,19 +392,19 @@ impl<'a> Surface<'a> {
     pub fn reduced(self) -> Option<&'a [AxisRef]> { if let Surface::Histogram(s) = self { Some(&s.reduced) } else { None } }
     pub fn labels(self) -> &'a PlotLabels {
         match self {
-            Surface::Curve(s) => &s.labels, Surface::Image(s) => &s.labels, Surface::Histogram(s) => &s.labels,
+            Surface::Curve(s) => &s.labels, Surface::Image(s) => &s.labels, Surface::PointMap(s) => &s.labels, Surface::Histogram(s) => &s.labels,
             Surface::Rolling(s) => &s.labels, Surface::PulseTimeline(s) => &s.labels,
         }
     }
     pub fn scope(self) -> &'a [ScopeTerm] {
         match self {
-            Surface::Curve(s) => &s.scope, Surface::Image(s) => &s.scope, Surface::Histogram(s) => &s.scope,
+            Surface::Curve(s) => &s.scope, Surface::Image(s) => &s.scope, Surface::PointMap(s) => &s.scope, Surface::Histogram(s) => &s.scope,
             Surface::Rolling(s) => &s.scope, Surface::PulseTimeline(_) => &[],
         }
     }
     pub fn coordinates(self) -> &'a [AxisRef] {
         match self {
-            Surface::Curve(s) => &s.coordinates, Surface::Image(s) => &s.coordinates, Surface::Histogram(s) => &s.coordinates,
+            Surface::Curve(s) => &s.coordinates, Surface::Image(s) => &s.coordinates, Surface::PointMap(s) => &s.coordinates, Surface::Histogram(s) => &s.coordinates,
             Surface::Rolling(s) => &s.coordinates, Surface::PulseTimeline(_) => &[],
         }
     }
@@ -388,7 +413,7 @@ impl<'a> Surface<'a> {
 impl PlotSpec {
     pub fn kind(&self) -> PlotKind {
         match self {
-            PlotSpec::Curve(_) => PlotKind::Curve, PlotSpec::Image(_) => PlotKind::Image, PlotSpec::Histogram(_) => PlotKind::Histogram,
+            PlotSpec::Curve(_) => PlotKind::Curve, PlotSpec::Image(_) => PlotKind::Image, PlotSpec::PointMap(_) => PlotKind::PointMap, PlotSpec::Histogram(_) => PlotKind::Histogram,
             PlotSpec::Rolling(_) => PlotKind::Rolling, PlotSpec::FacetGrid(_) => PlotKind::FacetGrid,
             PlotSpec::PulseTimeline(_) => PlotKind::PulseTimeline,
         }
@@ -396,7 +421,7 @@ impl PlotSpec {
     /// `semantic_spec(spec)`: the grid's cell, or the spec itself.
     pub fn semantic(&self) -> Surface<'_> {
         match self {
-            PlotSpec::Curve(s) => Surface::Curve(s), PlotSpec::Image(s) => Surface::Image(s), PlotSpec::Histogram(s) => Surface::Histogram(s),
+            PlotSpec::Curve(s) => Surface::Curve(s), PlotSpec::Image(s) => Surface::Image(s), PlotSpec::PointMap(s) => Surface::PointMap(s), PlotSpec::Histogram(s) => Surface::Histogram(s),
             PlotSpec::Rolling(s) => Surface::Rolling(s), PlotSpec::PulseTimeline(s) => Surface::PulseTimeline(s),
             PlotSpec::FacetGrid(grid) => grid.cell.view(),
         }
@@ -407,27 +432,27 @@ impl PlotSpec {
     }
     pub fn labels(&self) -> &PlotLabels {
         match self {
-            PlotSpec::Curve(s) => &s.labels, PlotSpec::Image(s) => &s.labels, PlotSpec::Histogram(s) => &s.labels,
+            PlotSpec::Curve(s) => &s.labels, PlotSpec::Image(s) => &s.labels, PlotSpec::PointMap(s) => &s.labels, PlotSpec::Histogram(s) => &s.labels,
             PlotSpec::Rolling(s) => &s.labels, PlotSpec::FacetGrid(s) => &s.labels, PlotSpec::PulseTimeline(s) => &s.labels,
         }
     }
     pub fn labels_mut(&mut self) -> &mut PlotLabels {
         match self {
-            PlotSpec::Curve(s) => &mut s.labels, PlotSpec::Image(s) => &mut s.labels, PlotSpec::Histogram(s) => &mut s.labels,
+            PlotSpec::Curve(s) => &mut s.labels, PlotSpec::Image(s) => &mut s.labels, PlotSpec::PointMap(s) => &mut s.labels, PlotSpec::Histogram(s) => &mut s.labels,
             PlotSpec::Rolling(s) => &mut s.labels, PlotSpec::FacetGrid(s) => &mut s.labels, PlotSpec::PulseTimeline(s) => &mut s.labels,
         }
     }
     /// `getattr(spec, "scope", ())`: the outer scope (a grid's own).
     pub fn scope(&self) -> &[ScopeTerm] {
         match self {
-            PlotSpec::Curve(s) => &s.scope, PlotSpec::Image(s) => &s.scope, PlotSpec::Histogram(s) => &s.scope,
+            PlotSpec::Curve(s) => &s.scope, PlotSpec::Image(s) => &s.scope, PlotSpec::PointMap(s) => &s.scope, PlotSpec::Histogram(s) => &s.scope,
             PlotSpec::Rolling(s) => &s.scope, PlotSpec::FacetGrid(s) => &s.scope, PlotSpec::PulseTimeline(_) => &[],
         }
     }
     /// `getattr(spec, "coordinates", ())`.
     pub fn coordinates(&self) -> &[AxisRef] {
         match self {
-            PlotSpec::Curve(s) => &s.coordinates, PlotSpec::Image(s) => &s.coordinates, PlotSpec::Histogram(s) => &s.coordinates,
+            PlotSpec::Curve(s) => &s.coordinates, PlotSpec::Image(s) => &s.coordinates, PlotSpec::PointMap(s) => &s.coordinates, PlotSpec::Histogram(s) => &s.coordinates,
             PlotSpec::Rolling(s) => &s.coordinates, PlotSpec::FacetGrid(s) => &s.coordinates, PlotSpec::PulseTimeline(_) => &[],
         }
     }
@@ -438,7 +463,7 @@ impl PlotSpec {
     pub fn with_scope(&self, scope: Vec<ScopeTerm>) -> Result<PlotSpec> {
         let mut spec = self.clone();
         match &mut spec {
-            PlotSpec::Curve(s) => s.scope = scope, PlotSpec::Image(s) => s.scope = scope, PlotSpec::Histogram(s) => s.scope = scope,
+            PlotSpec::Curve(s) => s.scope = scope, PlotSpec::Image(s) => s.scope = scope, PlotSpec::PointMap(s) => s.scope = scope, PlotSpec::Histogram(s) => s.scope = scope,
             PlotSpec::Rolling(s) => s.scope = scope, PlotSpec::FacetGrid(s) => s.scope = scope,
             PlotSpec::PulseTimeline(_) => return Err(PlotError::type_error("PulseTimelinePlot has no scope")),
         }
@@ -450,6 +475,7 @@ impl PlotSpec {
         Ok(match self {
             PlotSpec::Curve(s) => PlotSpec::Curve(s.validated()?),
             PlotSpec::Image(s) => PlotSpec::Image(s.validated()?),
+            PlotSpec::PointMap(s) => PlotSpec::PointMap(s.validated()?),
             PlotSpec::Histogram(s) => PlotSpec::Histogram(s.validated()?),
             PlotSpec::Rolling(s) => PlotSpec::Rolling(s.validated()?),
             PlotSpec::FacetGrid(s) => PlotSpec::FacetGrid(s.validated()?),
@@ -480,6 +506,7 @@ pub(crate) fn set_role(spec: &mut PlotSpec, role: Role, value: Option<AxisRef>) 
     let missing = |kind: &str, role: Role| PlotError::type_error(format!("{kind}.{} must be AxisRef", role.name()));
     match (spec, role) {
         (PlotSpec::Curve(s), Role::X) => s.x = value.ok_or_else(|| missing("CurvePlot", Role::X))?,
+        (PlotSpec::PointMap(s), Role::Site) => s.site = value.ok_or_else(|| missing("PointMapPlot", Role::Site))?,
         (PlotSpec::Curve(s), Role::Group) => s.group = value,
         (PlotSpec::Image(s), Role::X) => s.x = value.ok_or_else(|| PlotError::type_error("ImagePlot x and y must be AxisRef"))?,
         (PlotSpec::Image(s), Role::Y) => s.y = value.ok_or_else(|| PlotError::type_error("ImagePlot x and y must be AxisRef"))?,
@@ -495,7 +522,7 @@ pub(crate) fn set_role(spec: &mut PlotSpec, role: Role, value: Option<AxisRef>) 
 
 pub(crate) fn set_reduction(spec: &mut PlotSpec, reduction: Reduction) -> Result<()> {
     match spec {
-        PlotSpec::Curve(s) => s.reduction = reduction, PlotSpec::Image(s) => s.reduction = reduction,
+        PlotSpec::Curve(s) => s.reduction = reduction, PlotSpec::Image(s) => s.reduction = reduction, PlotSpec::PointMap(s) => s.reduction = reduction,
         PlotSpec::Histogram(s) => s.reduction = reduction, PlotSpec::Rolling(s) => s.reduction = reduction,
         other => return Err(PlotError::type_error(format!("{} has no reduction", other.kind().value()))),
     }
@@ -511,7 +538,7 @@ pub(crate) fn set_reduced(spec: &mut PlotSpec, reduced: Vec<AxisRef>) -> Result<
 
 pub(crate) fn set_coordinates(spec: &mut PlotSpec, coordinates: Vec<AxisRef>) {
     match spec {
-        PlotSpec::Curve(s) => s.coordinates = coordinates, PlotSpec::Image(s) => s.coordinates = coordinates,
+        PlotSpec::Curve(s) => s.coordinates = coordinates, PlotSpec::Image(s) => s.coordinates = coordinates, PlotSpec::PointMap(s) => s.coordinates = coordinates,
         PlotSpec::Histogram(s) => s.coordinates = coordinates, PlotSpec::Rolling(s) => s.coordinates = coordinates,
         PlotSpec::FacetGrid(s) => s.coordinates = coordinates, PlotSpec::PulseTimeline(_) => {}
     }
@@ -519,7 +546,7 @@ pub(crate) fn set_coordinates(spec: &mut PlotSpec, coordinates: Vec<AxisRef>) {
 
 pub(crate) fn set_scope_raw(spec: &mut PlotSpec, scope: Vec<ScopeTerm>) {
     match spec {
-        PlotSpec::Curve(s) => s.scope = scope, PlotSpec::Image(s) => s.scope = scope, PlotSpec::Histogram(s) => s.scope = scope,
+        PlotSpec::Curve(s) => s.scope = scope, PlotSpec::Image(s) => s.scope = scope, PlotSpec::PointMap(s) => s.scope = scope, PlotSpec::Histogram(s) => s.scope = scope,
         PlotSpec::Rolling(s) => s.scope = scope, PlotSpec::FacetGrid(s) => s.scope = scope, PlotSpec::PulseTimeline(_) => {}
     }
 }

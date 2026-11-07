@@ -339,7 +339,7 @@ impl Panels {
                 requests.push((binding.generation.as_ref().unwrap().clone(), binding.signal.clone(), width));
                 // The Overlay is a member of the picture's group whatever its run's state: the
                 // Runtime keeps the last shot both have until its judgement of a newer one comes.
-                let judgement = overlays.get(panel).filter(|_| width.is_none())
+                let judgement = overlays.get(panel).filter(|_| width.is_none() && kind != "point_map")
                     .and_then(|overlay| sources.iter().find(|source| *source.signal == **overlay));
                 if let Some(judgement) = judgement {
                     positions.push((inputs.len(), true));

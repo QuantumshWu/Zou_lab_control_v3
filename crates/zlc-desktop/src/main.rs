@@ -30,6 +30,8 @@ mod readers;
 mod plugin_services;
 #[cfg(test)]
 mod scan_service_tests;
+#[cfg(test)]
+mod point_map_tests;
 mod run_artifacts;
 mod run_fit;
 mod viewer_logic;

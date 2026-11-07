@@ -393,6 +393,25 @@ fn stored_events(acquisition: &Value, mut visit: impl FnMut(Value) -> Result<(),
     })
 }
 
+/// Inspect scientific records from a saved acquisition in either wire format.
+/// The compressed form decodes one event at a time; no copy of its complete
+/// event or placement tables is needed for metadata-only readers.
+pub fn visit_acquisition_records(table: &Value, mut visit: impl FnMut(usize, &str, &Value, &Value)) -> Result<(), String> {
+    let runs = table["runs"].as_array().ok_or("acquisition has no run table")?;
+    let mut event = |entry: &Value| -> Result<(), String> {
+        let index = entry["run"].as_u64().and_then(|i| usize::try_from(i).ok()).ok_or("invalid saved run index")?;
+        let run = runs.get(index).ok_or("acquisition event names an unknown run")?;
+        let signal = entry["signal"].as_str().ok_or("acquisition event has no signal")?;
+        visit(index, signal, &run["record"], &entry["record"]);
+        Ok(())
+    };
+    match table.get("format") {
+        None => table["events"].as_array().ok_or("acquisition has no events")?.iter().try_for_each(event),
+        Some(format) if format == ACQUISITION_FORMAT => stored_events(table, |entry| event(&entry)),
+        Some(format) => Err(format!("unknown acquisition format {format}")),
+    }
+}
+
 /// An acquisition as readers take it, `{runs, events: [{run, signal, revision, ordinal,
 /// record, parents}], ranges: [{event, origin, extent}]}`, however it is stored.
 pub fn expand_acquisition(stored: &Value) -> Result<Cow<'_, Value>, String> {

@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 /// The plot kinds a live signal can be shown as.
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum PlotKind { Image, Curve, Histogram, Rolling, FacetGrid }
+pub enum PlotKind { Image, Curve, Histogram, Rolling, FacetGrid, PointMap }
 
 /// Open a saved Figure archive in a Figure Viewer of its own (v2: one window per Figure).
 #[derive(Debug, Deserialize, JsonSchema)]

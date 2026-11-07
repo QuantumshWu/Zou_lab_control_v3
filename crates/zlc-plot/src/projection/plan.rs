@@ -95,6 +95,7 @@ impl<'de> Deserialize<'de> for ScopeTerm {
 pub enum SpecFacts {
     Curve { x: AxisRef, group: Option<AxisRef>, reduction: Reduction },
     Image { x: AxisRef, y: AxisRef, reduction: Reduction },
+    PointMap { site: AxisRef, reduction: Reduction },
     Histogram { group: Option<AxisRef>, #[serde(default)] reduced: Vec<AxisRef>, reduction: Reduction },
     Rolling { x: Option<AxisRef>, group: Option<AxisRef>, reduction: Reduction },
     FacetGrid { facet: Option<AxisRef>, cell: Box<SpecFacts> },
@@ -104,13 +105,13 @@ impl SpecFacts {
     /// `semantic_spec`: a facet grid is its cell.
     pub fn semantic(&self) -> &SpecFacts { if let SpecFacts::FacetGrid { cell, .. } = self { cell } else { self } }
     pub fn kind(&self) -> PlotKind {
-        match self { SpecFacts::Curve { .. } => PlotKind::Curve, SpecFacts::Image { .. } => PlotKind::Image,
+        match self { SpecFacts::Curve { .. } => PlotKind::Curve, SpecFacts::Image { .. } => PlotKind::Image, SpecFacts::PointMap { .. } => PlotKind::PointMap,
             SpecFacts::Histogram { .. } => PlotKind::Histogram, SpecFacts::Rolling { .. } => PlotKind::Rolling,
             SpecFacts::FacetGrid { .. } => PlotKind::FacetGrid }
     }
     pub fn reduction(&self) -> Reduction {
         match self.semantic() { SpecFacts::Curve { reduction, .. } | SpecFacts::Image { reduction, .. }
-            | SpecFacts::Histogram { reduction, .. } | SpecFacts::Rolling { reduction, .. } => *reduction,
+            | SpecFacts::Histogram { reduction, .. } | SpecFacts::Rolling { reduction, .. } | SpecFacts::PointMap { reduction, .. } => *reduction,
             SpecFacts::FacetGrid { .. } => Reduction::Mean }
     }
     pub fn x(&self) -> Option<&AxisRef> {
@@ -234,6 +235,7 @@ impl Projection {
         match spec {
             SpecFacts::Curve { x, group, reduction } =>
                 Ok(Payload::Curve(view.curve(x, group.as_slice(), *reduction, uncertainty_on && statistic_mean)?)),
+            SpecFacts::PointMap { site, reduction } => Ok(Payload::PointMap(view.point_map(site, *reduction)?)),
             SpecFacts::Image { x, y, reduction } => Ok(Payload::Image(view.image(x, y, *reduction)?)),
             SpecFacts::Rolling { x, group, reduction } => {
                 let uncertainty = uncertainty_on && statistic_mean;

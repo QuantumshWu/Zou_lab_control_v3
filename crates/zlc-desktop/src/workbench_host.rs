@@ -270,7 +270,7 @@ fn save_figure(params: &Value, lent: &Lent, directory: Option<std::path::PathBuf
     let path = run_path(directory.as_ref(), &params["path"])?;
     let source = |dataset: &Value| -> Result<Source, String> {
         let dataset = lent.dataset(dataset)?;
-        Ok(Source { repeat_counts: None, schema: dataset.block.schema().clone(), data: SourceData::Dense(dataset.block), block_id: dataset.block_id.into(),
+        Ok(Source { site_geometry: Default::default(), repeat_counts: None, schema: dataset.block.schema().clone(), data: SourceData::Dense(dataset.block), block_id: dataset.block_id.into(),
                     generation: dataset.generation.into(), revision: dataset.revision, window: None })
     };
     let array = |reference: &Value| -> Result<Option<OverlayArray>, String> {

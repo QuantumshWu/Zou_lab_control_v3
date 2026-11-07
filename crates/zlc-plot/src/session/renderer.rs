@@ -165,6 +165,10 @@ pub trait PanelRenderer: Send {
     fn height_bars_pick(&self, x: f64, y: f64) -> Option<(f64, f64)>;
 
     /// The committed series lock (`{"series_lock": ...}`).
+    /// The empty-ring ink for the image's current backdrop.
+    fn set_empty_point_style(&mut self, _style: &crate::style::PointRingToken) {}
+    /// Present an already-resolved selection using the ordinary series inspector.
+    fn show_resolved_series_readout(&mut self, _readout: Option<&crate::configuration::SeriesReadout>) {}
     fn series_interaction(&self) -> Interaction;
     /// The presented series readout (`{"series_readout": ...}`).
     fn series_presentation(&self) -> Presentation;

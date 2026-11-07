@@ -14,7 +14,7 @@ use crate::logic::{Draft, Instance, Node, name_problem, name_text, signal_key, s
 use crate::{Host, Workbench, fields, workspace};
 
 pub const FORMAT: &str = "zlc.console-board";
-const KINDS: [&str; 5] = ["image", "curve", "rolling", "histogram", "facet_grid"];
+const KINDS: [&str; 6] = ["image", "curve", "rolling", "histogram", "facet_grid", "point_map"];
 /// v2's panel update intervals (live_policy.refresh_intervals_ms); the first is the default and the board's beat.
 pub const INTERVALS: [u64; 4] = [100, 200, 400, 800];
 /// v2 panel fields the board keeps as written (v3 reads them as selectors).
@@ -482,6 +482,9 @@ impl Workbench {
         let content = contents.iter().find(|content| content.panel == panel).ok_or_else(|| format!("No panel {panel:?} on the board"))?;
         // A Task-protected panel keeps its source, the Overlay with it (v2 science_locked).
         if let Some(reason) = self.panel_frozen(panel, &content.signal) { return Err(reason); }
+        if content.kind == "point_map" && !signal.is_empty() {
+            return Err("Point Map uses the site geometry recorded with its signal".into());
+        }
         if !signal.is_empty() && !self.overlay_choices(&content.signal, &contents).iter().any(|(choice, _)| choice == signal) {
             return Err(format!("{} judges no sites of this panel's image", self.signal_label(signal)));
         }

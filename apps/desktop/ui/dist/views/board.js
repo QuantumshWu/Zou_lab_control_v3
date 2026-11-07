@@ -1022,7 +1022,7 @@ export class PanelView {
         // v2's Overlay (paints_images): a panel whose surfaces are images -- an Image,
         // or a grid of image cells -- is drawn with the site rings of a judgement of
         // its measurement; its display rows then hold the rings' Point labels.
-        if (entry && (panel.controls ?? []).some(control => control.name === "show_point_labels")) {
+        if (entry && panel.kind !== "point_map" && (panel.controls ?? []).some(control => control.name === "show_point_labels")) {
             // No overlay is the box's none row, "Off" in MUTED_INK, as v2's.
             controls.push({ section: "board", name: "overlay_signal", label: "Overlay", kind: "choice", value: entry.overlay_signal || null,
                 allow_none: true, placeholder: "Off", tree: entry.overlay_tree });

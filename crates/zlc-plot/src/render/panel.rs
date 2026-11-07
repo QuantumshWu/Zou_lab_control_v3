@@ -165,6 +165,28 @@ impl PanelRenderer for Renderer {
     }
     fn height_bars_pick(&self, x: f64, y: f64) -> Option<(f64, f64)> { Renderer::height_bars_pick(self, x, y) }
 
+    fn set_empty_point_style(&mut self, style: &crate::style::PointRingToken) {
+        if self.style.artists.point_empty != *style {
+            Arc::make_mut(&mut self.style).artists.point_empty = style.clone();
+            self.image.points.signature = None;
+        }
+    }
+
+    fn show_resolved_series_readout(&mut self, readout: Option<&crate::configuration::SeriesReadout>) {
+        let axes = Renderer::primary_axes(self);
+        self.curve.hover = None;
+        self.curve.locked = None;
+        if let Some(readout) = readout {
+            let locked = readout.mode.as_ref() == "locked";
+            let identity = readout.target.key.iter().map(|part| part.clone().map(|s| s.to_string())).collect();
+            let focus = super::curve::Focus { axes, identity, label: readout.label.to_string(), x: 0.0, y: 0.0 };
+            if locked { self.curve.locked = Some(focus); } else { self.curve.hover = Some(focus); }
+            self.show_focus_label(axes, &readout.label, locked, self.style.artists.point_occupied.color.to_owned());
+        } else if let Some(&id) = self.curve.annotations.get(&axes) {
+            super::curve::set_child_visible(&mut self.fig.axes[axes], id, false);
+        }
+    }
+
     fn series_interaction(&self) -> Interaction { Renderer::series_interaction(self) }
     fn series_presentation(&self) -> Presentation { Renderer::series_presentation(self) }
 

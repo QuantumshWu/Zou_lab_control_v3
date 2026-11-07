@@ -237,7 +237,7 @@ impl PlotSession {
     /// normalized continuous view; sample selection is a separate concern).
     pub(crate) fn committed_view(&self, selected: Option<Viewport>) -> Result<Option<Viewport>> {
         let Some(mut selected) = normalize_viewport(selected) else { return Ok(None) };
-        if self.semantic_kind() == PlotKind::Image && (selected.0.is_none() || selected.1.is_none()) {
+        if matches!(self.semantic_kind(), PlotKind::Image | PlotKind::PointMap) && (selected.0.is_none() || selected.1.is_none()) {
             let (x, y) = self.current_display_limits()?;
             selected = (selected.0.or(Some(x)), selected.1.or(Some(y)));
         }

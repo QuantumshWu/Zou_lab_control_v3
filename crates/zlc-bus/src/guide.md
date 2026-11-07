@@ -145,12 +145,15 @@ before Start. Configure the result panel and its fit before Start: the first swe
 
 ## plot
 
-`add_panel {signal, kind}` (`image`, `curve`, `histogram`, `rolling`, `facet_grid`; a blank panel without
+`add_panel {signal, kind}` (`image`, `curve`, `histogram`, `rolling`, `facet_grid`, `point_map`; a blank panel without
 `signal`, bound later with `configure {binding: {signal}}`); its reply's `added_panels` names it. Its row in
 `get_state panels` has `controls`:
 section `semantic` (`kind`, `cell_kind`, `reduction`, and one `fate:<domain>:<axis>` per data axis),
 `display` (colormap, limits, bins, uncertainty, ...). `configure {panel, semantic: {...}, parameters: {...},
 size, binding: {window}}` sets them with exactly the values the controls list.
+
+`point_map` colours sites by the selected signal's value in their recorded calibration geometry.
+Use the panel's axis controls to select or reduce extra dimensions.
 
 Axis roles: `x` for the scanned coordinate, `facet` for independent cells such as sites, `group` for
 overlaid series, `reduce` (with `reduction: "mean"`) for repeated trials, a scope pin for one coordinate

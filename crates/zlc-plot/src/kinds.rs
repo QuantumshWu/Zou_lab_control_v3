@@ -7,15 +7,15 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PlotKind { Curve, Image, Histogram, Rolling, FacetGrid, PulseTimeline }
+pub enum PlotKind { Curve, Image, Histogram, Rolling, FacetGrid, PointMap, PulseTimeline }
 
 impl PlotKind {
-    pub const ALL: [PlotKind; 6] = [PlotKind::Curve, PlotKind::Image, PlotKind::Histogram, PlotKind::Rolling,
-                                    PlotKind::FacetGrid, PlotKind::PulseTimeline];
+    pub const ALL: [PlotKind; 7] = [PlotKind::Curve, PlotKind::Image, PlotKind::Histogram, PlotKind::Rolling,
+                                    PlotKind::FacetGrid, PlotKind::PointMap, PlotKind::PulseTimeline];
     pub fn value(self) -> &'static str {
         match self {
             PlotKind::Curve => "curve", PlotKind::Image => "image", PlotKind::Histogram => "histogram",
-            PlotKind::Rolling => "rolling", PlotKind::FacetGrid => "facet_grid", PlotKind::PulseTimeline => "pulse_timeline",
+            PlotKind::Rolling => "rolling", PlotKind::FacetGrid => "facet_grid", PlotKind::PointMap => "point_map", PlotKind::PulseTimeline => "pulse_timeline",
         }
     }
     pub fn parse(text: &str) -> Option<Self> { Self::ALL.into_iter().find(|kind| kind.value() == text) }
