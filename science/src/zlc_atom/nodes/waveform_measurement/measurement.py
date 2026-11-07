@@ -99,13 +99,17 @@ def waveform_preview(source: WaveformSource, *, trigger_channel: str | None = No
     if trigger_channel is None:
         return NodePreviewSpec(outputs[0], "rolling" if int(source.record_samples) == 1 else "curve")
     chosen = channel_output(trigger_channel, source.outputs)
-    if chosen is None or node is None:
-        return NodePreviewSpec(outputs[0] if chosen is None else next(o for o in outputs if o.name == chosen.name), "curve")
-    held = AxisRef.cell_data(cell_axis_id(node, chosen.name, 0, COMPONENT).value).fate_field
-    records = AxisRef.repeat(f"{node}.{chosen.name}.repeat").fate_field
-    position = chosen.channel_labels.index(str(trigger_channel).partition("/")[2])
-    return NodePreviewSpec(next(o for o in outputs if o.name == chosen.name), "curve",
-                           semantic={held: ["scope-value", position], records: "group"})
+    output = outputs[0] if chosen is None else next(item for item in outputs if item.name == chosen.name)
+    if node is None:
+        return NodePreviewSpec(output, "curve")
+    record_time = AxisRef.cell_data(cell_axis_id(node, output.name, 1, READOUT_EVENT).value)
+    records = AxisRef.repeat(f"{node}.{output.name}.repeat")
+    semantic: dict[str, object] = {record_time.fate_field: "x", records.fate_field: "group"}
+    if chosen is not None:
+        component = AxisRef.cell_data(cell_axis_id(node, output.name, 0, COMPONENT).value)
+        position = chosen.channel_labels.index(trigger_channel.partition("/")[2])
+        semantic[component.fate_field] = ["scope-value", position]
+    return NodePreviewSpec(output, "curve", semantic=semantic)
 
 
 @lru_cache(maxsize=64)

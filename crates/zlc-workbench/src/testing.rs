@@ -1559,6 +1559,40 @@ mod tests {
         wb.open_previews(&mut host);
         assert_eq!(host.panels.len(),1);
     }
+
+    #[test]
+    fn auto_preview_reuses_the_declared_view_of_a_signal() {
+        let signal = "@logic/camera_measurement/frames";
+        let required = json!({"fate:cell_data:time": "x", "fate:cell_data:channel": ["scope-value", 2]});
+        let mut types = catalog();
+        types["types"][2]["node"]["previews"] = json!([{"output": "frames", "plot_kind": "curve", "semantic": required}]);
+        let (_root, mut wb, _calls, mut host) = rig("preview-view", types);
+        add_open_node(&mut wb, &mut host, json!({"type_id": "camera_measurement"}));
+        host.add_panel("history", signal, "rolling", 100, json!({})).unwrap();
+        let other = json!({"semantic": {"fate:cell_data:time": "x", "fate:cell_data:channel": ["scope-value", 0]}});
+        host.add_panel("other-channel", signal, "curve", 1, other.clone()).unwrap();
+
+        let start = json!({"node": "camera_measurement"});
+        apply(&mut wb, &mut host, "start_node", start.clone()).unwrap();
+        host.signals.push(SignalInfo { name: signal.into(), owner: "camera_measurement".into(), generation: "g1".into(),
+                                       published: true, sealed: false, shape: "".into() });
+        wb.open_previews(&mut host);
+        assert_eq!(host.panels.len(), 3);
+        assert_eq!(host.panels[0].kind, "rolling");
+        assert_eq!(host.panels[1].target, other);
+        assert_eq!(host.panels[2].kind, "curve");
+        assert_eq!(host.panels[2].target["semantic"], required);
+
+        // A later run asks for the same preview after the user has changed an unrelated setting.
+        host.panels[2].target["semantic"]["reduction"] = json!("max");
+        event(&mut wb, Event::RunFinished { run: "camera_measurement#1".into(), outcome: "completed".into(), error: None,
+                                            generation: Some("g1".into()) }, &mut host);
+        apply(&mut wb, &mut host, "start_node", start).unwrap();
+        host.signals[0].generation = "g2".into();
+        wb.open_previews(&mut host);
+        assert_eq!(host.panels.len(), 3);
+        assert_eq!(host.panels[2].target["semantic"]["reduction"], "max");
+    }
     #[test]
     fn a_failed_preparation_preserves_the_active_run() {
         let (_root,mut wb,calls,mut host)=rig("prepare-failure",catalog());

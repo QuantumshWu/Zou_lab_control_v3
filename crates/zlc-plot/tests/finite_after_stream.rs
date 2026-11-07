@@ -63,7 +63,8 @@ fn stream(runtime: &Runtime, samples: usize, window: Option<usize>) -> RuntimeRe
     let generation = runtime.begin("wf", vec![Declaration { signal: "voltage".into(), schema: one.clone(), storage: Storage::Latest }], json!({})).unwrap();
     let lease = window.map(|window| runtime.retain_history(&generation, "voltage", window).unwrap());
     for ordinal in 0..200 {
-        runtime.commit(&generation, &Bundle { inputs: vec![Input::Event { signal: "voltage".into(), ordinal, data: event(&one, samples, 1.0), origin: None, shot_time: None }],
+        let crossing_time = (samples > 0).then_some(ordinal as f64 * 0.1);
+        runtime.commit(&generation, &Bundle { inputs: vec![Input::Event { signal: "voltage".into(), ordinal, data: event(&one, samples, 1.0), origin: None, shot_time: crossing_time }],
             metadata: json!({}), parents: vec![] }).unwrap();
     }
     let read = runtime.read_views(&[(generation.clone(), "voltage".into(), window)]).pop().unwrap().unwrap();
@@ -125,15 +126,29 @@ fn rows(panel: &Json) -> Vec<(String, Json)> {
         .map(|field| (field["name"].as_str().unwrap().to_owned(), field["value"].clone())).collect()
 }
 
+fn triggered_preview() -> Json {
+    json!({"semantic": {"kind": "curve", format!("fate:cell_data:{RECORD_TIME}"): "x",
+        format!("fate:cell_data:{CHANNEL}"): ["scope-value", 0], format!("fate:repeat:{REPEAT}"): "group"}, "size": "2x2"})
+}
+
+#[test]
+fn triggered_curve_uses_time_within_a_record_even_when_the_window_has_crossing_times() {
+    let read = stream(&Runtime::new(), SAMPLES, Some(4));
+    let mut panel = Panel::new();
+    let (state, _) = panel.show("curve", 1, triggered_preview(), &read);
+    assert!(rows(&state).iter().any(|(name, value)| name == &format!("fate:cell_data:{RECORD_TIME}") && value == "x"));
+    let (low, high) = panel.main_axes().x_limits;
+    assert!((low + 0.020).abs() < 1e-9 && (high - 0.019).abs() < 1e-9, "{low}..{high}");
+}
+
 /// Repeat 0 to repeat 5 with the trigger on: the same rows with the same choices, the
 /// time axis from the crossing, and five traces one on the other.
 #[test]
 fn a_triggered_panel_keeps_its_rows_and_draws_each_record() {
     let runtime = Runtime::new();
     let mut panel = Panel::new();
-    let preview = json!({"semantic": {"kind": "curve", format!("fate:cell_data:{CHANNEL}"): ["scope-value", 0], format!("fate:repeat:{REPEAT}"): "group"}, "size": "2x2"});
     let live = stream(&runtime, SAMPLES, None);
-    let (state, _) = panel.show("curve", 1, preview, &live);
+    let (state, _) = panel.show("curve", 1, triggered_preview(), &live);
     let streamed = rows(&state);
     assert!(streamed.iter().any(|(name, value)| name == &format!("fate:cell_data:{RECORD_TIME}") && value == "x"), "{streamed:?}");
     let first = panel.main_axes();

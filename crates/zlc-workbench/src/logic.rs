@@ -1524,7 +1524,6 @@ impl Workbench {
     /// Declared previews get a panel once their signal first publishes in this run.
     pub(crate) fn open_previews(&mut self, host: &mut dyn Host) {
         let signals = host.signals();
-        let shown: BTreeSet<String> = host.panels().into_iter().map(|panel| panel.signal).collect();
         let mut wanted = Vec::new();
         for node in self.nodes.iter().filter(|node| node.auto_preview) {
             let Some(run) = node.run.as_deref().and_then(|id| self.run(id)) else { continue };
@@ -1535,14 +1534,19 @@ impl Workbench {
                 let Some(published) = self.source_published(&signals, &signal) else { continue };
                 if run.preview_baseline.get(&signal).cloned().flatten().as_deref() == Some(published.generation.as_str()) { continue; }
                 let task = descriptor.node().node_kind == "task";
-                wanted.push((run.id.clone(), signal.clone(), preview.plot_kind.clone(), preview.semantic.clone(), task, shown.contains(&signal)));
+                wanted.push((run.id.clone(), signal, preview.plot_kind.clone(), preview.semantic.clone(), task));
             }
         }
-        for (run, signal, kind, semantic, task, already) in wanted {
+        for (run, signal, kind, semantic, task) in wanted {
             if let Some(record) = self.run_mut(&run) { record.previewed.insert(signal.clone()); }
-            if already { continue; }
+            let kind = if kind.is_empty() { "image" } else { &kind };
+            // A run can request a different view of the same signal. Match only the
+            // declared choices so a panel can keep its other authored settings.
+            let shown = host.panels().iter().any(|panel| panel.signal == signal && panel.kind == kind
+                && semantic.as_object().is_none_or(|fields| fields.iter().all(|(key, value)| panel.target["semantic"].get(key) == Some(value))));
+            if shown { continue; }
             let target = if semantic.is_object() { json!({"semantic": semantic}) } else { json!({}) };
-            match host.add_panel("", &signal, if kind.is_empty() { "image" } else { &kind }, 1, target) {
+            match host.add_panel("", &signal, kind, 1, target) {
                 Ok(panel) => {
                     self.board.add(&panel);
                     if task { if let Some(record) = self.run_mut(&run) { record.preview_panels.push(panel); } }

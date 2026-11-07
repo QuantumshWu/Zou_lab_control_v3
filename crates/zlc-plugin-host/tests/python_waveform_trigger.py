@@ -486,9 +486,12 @@ class Form(unittest.TestCase):
         self.assertEqual((free.output.name, free.plot_kind, dict(free.semantic)), ('magnetic_field', 'rolling', {}))
         triggered = waveform_preview(source, trigger_channel='angular_rate/z', node='n1')
         self.assertEqual((triggered.output.name, triggered.plot_kind), ('angular_rate', 'curve'))
-        self.assertEqual(dict(triggered.semantic), {'fate:cell_data:n1.angular_rate.0.component': ['scope-value', 2],
+        self.assertEqual(dict(triggered.semantic), {'fate:cell_data:n1.angular_rate.1.readout-event': 'x',
+                                                    'fate:cell_data:n1.angular_rate.0.component': ['scope-value', 2],
                                                     'fate:repeat:n1.angular_rate.repeat': 'group'})
-        self.assertEqual(waveform_preview(source, trigger_channel='', node='n1').output.name, 'magnetic_field')
+        draft = waveform_preview(source, trigger_channel='', node='n1')
+        self.assertEqual(draft.output.name, 'magnetic_field')
+        self.assertEqual(draft.semantic['fate:cell_data:n1.magnetic_field.1.readout-event'], 'x')
         block = source_of(sine(5.0), samples=50)
         self.assertEqual(waveform_preview(block).plot_kind, 'curve')
         self.assertEqual(waveform_preview(block, trigger_channel='voltage/CH2', node='n').plot_kind, 'curve')
