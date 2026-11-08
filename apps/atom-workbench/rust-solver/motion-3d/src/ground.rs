@@ -300,7 +300,7 @@ use std::f64::consts::TAU;
 /// estimate of its fold.
 pub const SATURATION:f64=2.;
 /// Where a fold exists at all: Stewart's theorem holds the invariant subspace (x, W x) of a coupling V between blocks a sep apart for
-/// ‖V‖²/sep² < ¼, the saturation 2 m² < ½ -- the series' radius the docs measured, S ≲ 0.5. Every rung's allowance is at most it; whether to
+/// ‖V‖²/sep² < ¼, the saturation 2 m² < ½ -- the series' radius the docs measured, S ≲ 0.5: the ladder's first rung (`Ground::rungs`); whether to
 /// fold within it is the measured charge's and the cost's (solve.rs, # The fold's choice).
 pub const EXISTS:f64=0.5;
 /// The numerical share an unmixed block may change its responses by, relative to themselves (`Ground::unmixed_blocks`):
@@ -893,7 +893,7 @@ pub(crate) fn same_frame(a:f64,b:f64)->bool{(a-b).abs()<=round_off(a.abs()+b.abs
 struct Partition{items:Vec<Item>,cut:f64,sets:Vec<Vec<usize>>,set:Vec<Option<usize>>,frames:Vec<f64>,combinations:Vec<Vec<i32>>}
 
 impl Ground{
-    /// The generator of a request with every drive folded whose fold exists (`Ground::with` at an infinite allowance, `EXISTS`).
+    /// The generator of a request with every drive folded (`Ground::with` at an infinite allowance).
     pub fn new(request:&Request)->Result<Ground,String>{Ground::with(request,f64::INFINITY)}
     /// The generator of a request, its drives kept until each ground state's folded rest is within
     /// `allowance` (its total saturation over the light's pattern, the fold's charge), or why it has
@@ -1534,11 +1534,11 @@ impl Ground{
         let mut excited=self.excited_couplings();
         for x in excited.iter_mut(){(x.estimate,x.mean)=excited_estimate(x,0.,floor);}
         for x in excited.iter_mut(){if let ExcitedKind::Static{..}=x.kind{x.folded=x.estimate<=BUDGET;}}
-        Ground::judge_drives(&mut excited,allowance.min(EXISTS),false,&mut |_|false);
+        Ground::judge_drives(&mut excited,allowance,false,&mut |_|false);
         excited
     }
-    /// The allowances at which the rule's explicit excited states change (`Ground::with`), from all
-    /// folded (infinite) down to every drive kept, each the largest that gives its set of explicit
+    /// The allowances at which the rule's explicit excited states change (`Ground::with`), from where every fold that exists folds
+    /// (`EXISTS`) down to every drive kept, each the largest that gives its set of explicit
     /// states before the closure: the totals of a ground state's folded drives as it keeps them from
     /// the most saturated down, its total with none kept among them -- its first kept drive lies below that, with
     /// other ground states' still folded (PGCP_10: the near probe's drives alone, its cooling beams folded).
@@ -1546,15 +1546,15 @@ impl Ground{
     /// The allowances of a generator before the rule (`allowances`, `bare`): the rungs a solve climbs (solve.rs, # The fold's choice), each while it can pay.
     pub(crate) fn rungs(&self)->Vec<f64>{
         let g=self;let ne=g.excited_states.len();
-        let excited=g.judged(f64::INFINITY);
+        let excited=g.judged(EXISTS);
         let mut totals:Vec<f64>=vec![];
         for b in 0..g.ground_states.len(){
             let mut means:Vec<f64>=excited.iter().filter_map(|x|match x.kind{ExcitedKind::Drive(d)if d.ground==b=>Some(x.mean),_=>None}).collect();
             means.sort_by(|x,y|y.total_cmp(x));let mut rest:f64=means.iter().sum();totals.push(rest);
             for m in means{rest-=m;totals.push(rest.max(0.));}
         }
-        totals.sort_by(|x,y|y.total_cmp(x));totals.dedup();
-        let mut out=vec![f64::INFINITY];let mut last=Ground::explicit_states(&excited,ne);
+        totals.retain(|&t|t<EXISTS);totals.sort_by(|x,y|y.total_cmp(x));totals.dedup();
+        let mut out=vec![EXISTS];let mut last=Ground::explicit_states(&excited,ne);
         for t in totals{
             let explicit=Ground::explicit_states(&g.judged(t),ne);
             if explicit!=last{
@@ -1613,7 +1613,7 @@ impl Ground{
             }
             // The drives first, the most saturated of each ground state's folded total beyond the allowance: a folded near drive's
             // light is most of the dressing before it is kept, and estimates taken under it would keep what its keeping lets fold.
-            changed|=Ground::judge_drives(&mut excited,allowance.min(EXISTS),true,&mut |x|{x.promoted=true;true});
+            changed|=Ground::judge_drives(&mut excited,allowance,true,&mut |x|{x.promoted=true;true});
             if !changed{
                 for(i,x)in excited.iter_mut().enumerate().filter(|(_,x)|x.folded){
                     if inside[i]||(matches!(x.kind,ExcitedKind::Static{..})&&x.estimate>BUDGET){x.folded=false;x.promoted=true;changed=true;}

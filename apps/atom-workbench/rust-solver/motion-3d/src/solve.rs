@@ -46,7 +46,7 @@
 //! statistics still run, so only its a-priori excess is).
 //!
 //! # The fold's choice
-//! The rule's candidates (ground.rs `Ground::rungs`) from all folded down, and the
+//! The rule's candidates (ground.rs `Ground::rungs`) from where every fold that exists folds (`EXISTS`) down, and the
 //! first's fourth order, are costed on the pilot's states carried into their clusters (`carried`): each
 //! with its fold's charge as measured (`measured_charge`: per output the charge the run's ledger books, with
 //! the memory). A candidate's cost is its step check's (below) on those states -- the step it would take --:
@@ -342,7 +342,7 @@
 use crate::cost::{advance_work,jump_work,pays,CIS_NS,COMPLEX_MULTIPLY_ADD_NS,SPECTRAL_N3,TERM_NS};
 use crate::engine::{column_norm,halves,node_phase,series,Engine,Halves,Landings,Settings,Trajectory,QUADRATURE};
 use crate::gpu;
-use crate::ground::{ExcitedKind,Ground,Kind};
+use crate::ground::{ExcitedKind,Ground,Kind,EXISTS};
 use crate::ledger::{Ledger,Total};
 use crate::model::{Exact,Model,Trap,MOST_MIXED,MOST_STATES,NOT_LINDBLAD};
 use crate::control::Harmonic;
@@ -760,15 +760,15 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     let pilot=FIRST_GROUPS;
     let duration=times[outputs-1];
     // The fold of the excited states (module documentation, # The fold's choice): the rule's candidates from
-    // all folded down, their order the a-priori estimates'; the pilot runs the first, each candidate's charge
+    // where every fold that exists folds down, their order the a-priori estimates'; the pilot runs the first, each candidate's charge
     // is what its folded drives meet at the pilot's states (`measured_charge`), and of those whose charge
     // leaves the statistics room the one of least predicted cost is taken.
-    // The generator before the rule, every candidate's start (`next_candidate`); the rule's allowances from it, past the first -- every drive folded -- only where a rung is wanted.
+    // The generator before the rule, every candidate's start (`next_candidate`); the rule's allowances from it, past the first -- every fold that exists folded -- only where a rung is wanted.
     let bare=Ground::bare_at(request,reach)?;let mut rungs=None;
-    let mut ladder=std::iter::once(f64::INFINITY).chain(std::iter::from_fn(||rungs.get_or_insert_with(||bare.rungs().into_iter().skip(1)).next()));let mut failed=None;
+    let mut ladder=std::iter::once(EXISTS).chain(std::iter::from_fn(||rungs.get_or_insert_with(||bare.rungs().into_iter().skip(1)).next()));let mut failed=None;
     let Some(mut pilot_candidate)=next_candidate(request,&bare,&mut ladder,&mut failed,&mut vec![])else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
     pilot_candidate.settle();
-    // A generator that gains on the ladder's first rung, every drive folded, is the fold's construction failing
+    // A generator that gains on the ladder's first rung, every fold that exists folded, is the fold's construction failing
     // (model.rs `Model::lindblad`), not a regime to escalate into explicit states: the solve stops with why.
     if let Some(e)=failed.as_ref().filter(|e|e.starts_with(NOT_LINDBLAD)){return Err(Stop::Error(e.clone()));}
     // The reference state: the largest initial population; its trap sets ω per axis, in each model its own (`Candidate::reference`).
@@ -898,7 +898,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     // order's with the pilot's model's T bias: the fourth order folds the force at the second, so that T's charge
     // and the motion's step error are the second order's. Beside a pilot's model whose check was put off (beyond the targets at
     // any step), only where those totals come within the targets: what lies beyond them is no fold's.
-    let promise=pilot_candidate.allowance==f64::INFINITY&&pilot_cost.as_ref().map_or(true,|p|{
+    let promise=pilot_candidate.allowance==EXISTS&&pilot_cost.as_ref().map_or(true,|p|{
         let open=open_saturation(pilot_candidate.model.resonance,memory.atoms as f64);
         let apriori:Vec<[f64;2]>=pilot_candidate.charges.iter().map(|c|p.total.at(Measured::charge([open+c[1]*c[1],c[1]]))).collect();
         let(n,weight)=predicted(&pilot_statistics,&apriori,[0.,p.bias[1]],pilot as f64);

@@ -979,7 +979,7 @@ fn a_beating_grid_s_phase_holds_what_it_lands_over_the_run(){
 #[test]
 fn the_ladder_keeps_more_as_the_allowance_falls_and_the_near_drives_first(){
     let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..101).map(|i|i as f64).collect();
-    let ladder=Ground::allowances(&r).unwrap();assert!(ladder[0]==f64::INFINITY&&ladder.windows(2).all(|w|w[0]>w[1]),"{ladder:?}");
+    let ladder=Ground::allowances(&r).unwrap();assert!(ladder[0]==atom_motion_3d::ground::EXISTS&&ladder.windows(2).all(|w|w[0]>w[1]),"{ladder:?}");
     let grounds:Vec<Ground>=ladder.iter().take(12).map(|&a|Ground::with(&r,a).unwrap()).collect();
     let explicit:Vec<usize>=grounds.iter().map(|g|g.clusters.iter().map(|c|c.excited.len()).sum()).collect();
     assert!(explicit[0]==0&&explicit.windows(2).all(|w|w[0]<=w[1]),"explicit states along the ladder: {explicit:?}");
