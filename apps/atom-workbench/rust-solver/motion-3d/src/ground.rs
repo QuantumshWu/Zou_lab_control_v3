@@ -1871,14 +1871,15 @@ impl Ground{
     fn dressed_poles(&self)->Result<Vec<Vec<f64>>,String>{
         let(ng,nc)=(self.ground_states.len(),self.carriers.len());let mut poles=vec![vec![f64::INFINITY;ng];nc];
         let mut identity=Dense::zeros(self.excited_states.len(),self.excited_states.len());for i in 0..identity.rows{identity[(i,i)]=Complex::ONE;}
-        for intensities in self.points(&|_|LEVELS.to_vec()){
-            let e=self.eliminate(&intensities)?;
+        // Per point on the threads, per block its least: the least of them all whatever their order.
+        let points:Vec<Result<Vec<((usize,usize),f64)>,String>>=self.points(&|_|LEVELS.to_vec()).par_iter().map(|intensities|{
+            let e=self.eliminate(intensities)?;
             let blocks:Vec<(usize,usize)>=(0..nc).flat_map(|c|(0..self.clusters.len()).map(move|k|(c,k))).filter(|&(c,k)|e.blocks[c][k].is_some()).collect();
-            let found:Vec<f64>=blocks.par_iter().map(|&(c,k)|{let mut pole=f64::INFINITY;
+            Ok(blocks.par_iter().map(|&(c,k)|{let mut pole=f64::INFINITY;
                 for mode in &e.blocks[c][k].as_ref().unwrap().modes{for lu in mode.lu.iter().chain(mode.dressed.iter().filter_map(|d|d.lu.as_ref())){pole=pole.min(1./lu.solve_columns(&identity).spectral_norm());}}
-                pole}).collect();
-            for(&(c,k),&pole)in blocks.iter().zip(&found){for &b in self.clusters[k].states.iter().filter(|&&b|self.couples(c,b)){poles[c][b]=poles[c][b].min(pole);}}
-        }
+                ((c,k),pole)}).collect())
+        }).collect();
+        for found in points{for((c,k),pole)in found?{for &b in self.clusters[k].states.iter().filter(|&&b|self.couples(c,b)){poles[c][b]=poles[c][b].min(pole);}}}
         Ok(poles)
     }
 
@@ -1892,9 +1893,10 @@ impl Ground{
     fn unmixed_blocks(&mut self)->Result<(),String>{
         let(nc,nk,ne)=(self.carriers.len(),self.clusters.len(),self.excited_states.len());let mut change=vec![vec![0_f64;nk];nc];
         let norm=|m:&Dense,n:Option<&Dense>,b:usize|(0..ne).map(|i|(m[(i,b)]-n.map_or(Complex::ZERO,|n|n[(i,b)])).norm_sqr()).sum::<f64>().sqrt();
-        for intensities in self.points(&|_|LEVELS.to_vec()){
-            self.unmixed=vec![];let mixed=self.eliminate(&intensities)?;
-            self.unmixed=vec![vec![true;nk];nc];let unmixed=self.eliminate(&intensities)?;
+        // The blocks' eigenstates and their states alone, each point's eliminations on the threads, the largest change of them all whatever their order.
+        let(mut eigen,mut alone)=(self.clone(),self.clone());eigen.unmixed=vec![];alone.unmixed=vec![vec![true;nk];nc];
+        let points:Vec<Result<Vec<Vec<f64>>,String>>=self.points(&|_|LEVELS.to_vec()).par_iter().map(|intensities|{
+            let(mixed,unmixed)=(eigen.eliminate(intensities)?,alone.eliminate(intensities)?);let mut change=vec![vec![0_f64;nk];nc];
             for(c,carrier)in self.carriers.iter().enumerate(){for(k,cl)in self.clusters.iter().enumerate(){
                 let size=|m:&[Dense],n:Option<&[Dense]>,b:usize|carrier.beams.iter().map(|&l|norm(&m[l],n.map(|n|&n[l]),b)).sum::<f64>();
                 let coupled:Vec<usize>=cl.states.iter().copied().filter(|&b|self.couples(c,b)).collect();if coupled.is_empty(){continue;}
@@ -1905,7 +1907,9 @@ impl Ground{
                     change[c][k]=change[c][k].max(apart/if self.couples(c,b){size(&mixed.responses,None,b)}else{largest});
                 }
             }}
-        }
+            Ok(change)
+        }).collect();
+        for point in points{for(x,y)in change.iter_mut().flatten().zip(point?.into_iter().flatten()){*x=x.max(y);}}
         self.unmixed=change.iter().map(|x|x.iter().map(|&y|y<=MIXING_SHARE).collect()).collect();
         self.unmixed_error=change.iter().flatten().copied().filter(|&y|y<=MIXING_SHARE).fold(0.,f64::max);
         Ok(())
