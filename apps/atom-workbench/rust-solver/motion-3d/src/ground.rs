@@ -299,6 +299,10 @@ use std::f64::consts::TAU;
 /// A drive's saturation parameter is 2(g/|ΔE|)²: the relative error of its linear response, the
 /// estimate of its fold.
 pub const SATURATION:f64=2.;
+/// Where a fold exists at all: Stewart's theorem holds the invariant subspace (x, W x) of a coupling V between blocks a sep apart for
+/// ‖V‖²/sep² < ¼, the saturation 2 m² < ½ -- the series' radius the docs measured, S ≲ 0.5. Every rung's allowance is at most it; whether to
+/// fold within it is the measured charge's and the cost's (solve.rs, # The fold's choice).
+pub const EXISTS:f64=0.5;
 /// The numerical share an unmixed block may change its responses by, relative to themselves (`Ground::unmixed_blocks`):
 /// the numerical tolerances' (solve.rs, # Shares; `NUMERICAL_SHARE` of ε = `POPULATION_TARGET`), the one switch between a
 /// block's eigenstates and its states on their own.
@@ -889,7 +893,7 @@ pub(crate) fn same_frame(a:f64,b:f64)->bool{(a-b).abs()<=round_off(a.abs()+b.abs
 struct Partition{items:Vec<Item>,cut:f64,sets:Vec<Vec<usize>>,set:Vec<Option<usize>>,frames:Vec<f64>,combinations:Vec<Vec<i32>>}
 
 impl Ground{
-    /// The generator of a request with every drive folded (`Ground::with` at an infinite allowance).
+    /// The generator of a request with every drive folded whose fold exists (`Ground::with` at an infinite allowance, `EXISTS`).
     pub fn new(request:&Request)->Result<Ground,String>{Ground::with(request,f64::INFINITY)}
     /// The generator of a request, its drives kept until each ground state's folded rest is within
     /// `allowance` (its total saturation over the light's pattern, the fold's charge), or why it has
@@ -1530,7 +1534,7 @@ impl Ground{
         let mut excited=self.excited_couplings();
         for x in excited.iter_mut(){(x.estimate,x.mean)=excited_estimate(x,0.,floor);}
         for x in excited.iter_mut(){if let ExcitedKind::Static{..}=x.kind{x.folded=x.estimate<=BUDGET;}}
-        Ground::judge_drives(&mut excited,allowance,false,&mut |_|false);
+        Ground::judge_drives(&mut excited,allowance.min(EXISTS),false,&mut |_|false);
         excited
     }
     /// The allowances at which the rule's explicit excited states change (`Ground::with`), from all
@@ -1609,7 +1613,7 @@ impl Ground{
             }
             // The drives first, the most saturated of each ground state's folded total beyond the allowance: a folded near drive's
             // light is most of the dressing before it is kept, and estimates taken under it would keep what its keeping lets fold.
-            changed|=Ground::judge_drives(&mut excited,allowance,true,&mut |x|{x.promoted=true;true});
+            changed|=Ground::judge_drives(&mut excited,allowance.min(EXISTS),true,&mut |x|{x.promoted=true;true});
             if !changed{
                 for(i,x)in excited.iter_mut().enumerate().filter(|(_,x)|x.folded){
                     if inside[i]||(matches!(x.kind,ExcitedKind::Static{..})&&x.estimate>BUDGET){x.folded=false;x.promoted=true;changed=true;}
@@ -2086,13 +2090,13 @@ impl Ground{
     pub(crate) fn residual_round_off(&self,cl:&Cluster)->f64{
         round_off(2.*(cl.frames.iter().chain(&cl.excited_frames).map(|f|f.abs()).fold(0.,f64::max)+self.carriers.iter().map(|c|c.detuning.abs()).fold(0.,f64::max)))
     }
-    /// The carriers the fourth order takes on a cluster, those beyond the budget's square (a carrier within it
-    /// adds at most that relatively to the others' rates, its bound in the ledger's quartic item, model.rs
-    /// `Model::quartic`), and the size of its H^(4), b = S l0 (S their saturations' sum, l0 the eliminated
-    /// generator's scale).
+    /// The carriers the fourth order takes on a cluster, and the size of its H^(4), b = S l0 (S their saturations' sum, l0 the eliminated
+    /// generator's scale): none where the cluster's saturation S_k, the largest total of a ground state's folded drives, reaches `EXISTS`
+    /// (no invariant subspace to expand); else those whose fold errs beyond the fourth order's own S_k² (one within it adds at most that).
     pub fn fourth_carriers(&self,cl:&Cluster)->(Vec<usize>,f64){
         let nc=self.carriers.len();
-        let mut on:Vec<usize>=(0..nc).filter(|&c|self.carrier_saturation(c,cl)>BUDGET*BUDGET).collect();
+        let total=cl.states.iter().map(|&b|self.excited_items.iter().filter(|x|x.folded).filter_map(|x|match x.kind{ExcitedKind::Drive(d)if d.ground==b=>Some(x.mean),_=>None}).sum::<f64>()).fold(0.,f64::max);
+        let mut on:Vec<usize>=if total<EXISTS{(0..nc).filter(|&c|self.carrier_saturation(c,cl)>total*total).collect()}else{vec![]};
         // And every carrier whose photons share a class with theirs: a class's jump adds its photons' amplitudes, so
         // the fourth order's corrections of one meet the other's second order in the jumps' products, which the
         // decay holds only between the fourth order's carriers.
@@ -2104,11 +2108,11 @@ impl Ground{
     }
     /// Whether the fourth order keeps a cluster's entry (x, y) at its beat Ω (# Fourth order): where the second
     /// order would keep a coupling at it -- static to the frames' round-off, below the cut, at a kept coupling's
-    /// residual on the entry, or one the rule does not let fold (|Ω| < FOLD_DISTANCE l0, or its mixing
-    /// b/(|Ω| − l0) beyond the budget, b the size of H^(4)).
+    /// residual on the entry --, or where leaving it out errs beyond the fourth order's own S²: its mixing
+    /// b/(|Ω| − l0) beyond S = b/l0, b the size of H^(4) -- a beat within twice the generator's scale.
     pub fn fourth_keeps(&self,cl:&Cluster,x:usize,y:usize,omega:f64,b:f64)->bool{
         let w=omega.abs();let l0=self.generator_scale;let round_off=self.residual_round_off(cl);
-        w<=round_off||w<self.cut||!foldable(omega,b,l0)
+        w<=round_off||w<self.cut||mixing(b,w,l0,f64::MIN_POSITIVE)*l0>b
             ||cl.groups.iter().any(|gr|gr.entries.iter().any(|&(a,c,r)|a==x&&c==y&&(r-omega).abs()<=round_off))
     }
     /// The fourth-order fold of a cluster of ground states at r and t (module documentation, # Fourth

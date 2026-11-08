@@ -949,8 +949,9 @@ impl Model{
             for x in crosses.iter_mut(){x.at=size;x.at2=size+self.carriers[x.carrier].rank;size+=2*self.carriers[x.carrier].rank;}
             for x in decays.iter_mut(){x.at=size;size+=1;}
             // The dressing's drives: from a ground state of the cluster through a folded excited state
-            // H couples to an explicit one, per carrier that drives it there. They take the rule of every coupling (ground.rs): one above the cut whose mixing fits folds (`foldable`), left out with what it leaves booked,
-            // as the fourth order's fast entries (`fourth_keeps`) -- its size H's coupling times the folded state's admixture. Left out, not folded, its second order goes too: its rate over the run and its shift against the state's width, each within the numerical share of the
+            // H couples to an explicit one, per carrier that drives it there. One above the cut is left out where what it leaves is within the numerical share, booked, as the fourth
+            // order's fast entries (`fourth_keeps`) -- its size H's coupling times the folded state's admixture, its mixing (ground.rs `mixing`, infinite where the generator's scale
+            // reaches its beat). Left out, not folded, its second order goes too: its rate over the run and its shift against the state's width, each within the numerical share of the
             // population target (a closer one holds a rate between sublevels of a PGC's probe's rung, 0.011 /us off of 0.30 with it, 0.017 without). Kept, a beat of 13 THz, an 808 nm tweezer's distance from the D2 line, at 550 rad/us of a retro-reflected tweezer's tensor mixing, took
             // the grid to 64 million nodes for a step of 0.7 us, at a mixing² of 4e-11.
             let folded_static=|a:usize,b:usize|g.dressed[a].contains(&b);
@@ -966,7 +967,7 @@ impl Model{
                     let residual=g.beat(0.,&(0..m.len()).map(|i|m[i]-mx[i]-i32::from(i==c)).collect::<Vec<i32>>());
                     let strength:f64=reached.iter().map(|&f|coupling(e,f)*admixture(c,b,f)).sum();
                     let width=g.decay[(e,e)].re.max(f64::MIN_POSITIVE);let left=ground::mixing(strength,residual.abs(),g.generator_scale,f64::MIN_POSITIVE).powi(2)*(1.+width*g.duration)+strength*strength/residual.abs().max(f64::MIN_POSITIVE)/width;
-                    if residual.abs()>=g.cut&&ground::foldable(residual,strength,g.generator_scale)&&left<=crate::solve::NUMERICAL_SHARE*crate::solve::POPULATION_TARGET{effective_dropped+=left;continue;}
+                    if residual.abs()>=g.cut&&left<=crate::solve::NUMERICAL_SHARE*crate::solve::POPULATION_TARGET{effective_dropped+=left;continue;}
                     effective.push(EffectiveLayout{row:n0+p,col:x,carrier:c,residual,at:size,tones:vec![]});size+=carrier.rank;
                 }}
             }
