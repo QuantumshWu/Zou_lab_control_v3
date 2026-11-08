@@ -326,13 +326,19 @@ fn flow(x:f64,kappa:f64,omega:f64,hm:f64,tau:f64)->(f64,f64){
 fn dot(a:[f64;3],b:[f64;3])->f64{a[0]*b[0]+a[1]*b[1]+a[2]*b[2]}
 
 fn norm2(psi:&[Complex],n:usize)->f64{psi[..n].iter().map(|z|z.norm_sqr()).sum()}
+/// Where ‖ψ‖² falls to `threshold` in a part of `width`, from its norms at the part's start, middle and end (the end's at or below it): the half it lies in, (lo, hi), and the
+/// first guess there, linear in ln‖ψ‖² -- a node's crossing, the part redone to it (`Engine::step`), and a grid's root's start (`Segment::root`).
+fn bracket([start,middle,end]:[f64;3],width:f64,threshold:f64)->(f64,f64,f64){
+    let(lo,hi,la,lb)=if middle<=threshold{(0.,0.5*width,start.ln(),middle.ln())}else{(0.5*width,width,middle.ln(),end.ln())};
+    (lo,hi,if lb<la{(lo+(threshold.ln()-la)/(lb-la)*(hi-lo)).clamp(lo,hi)}else{hi})
+}
 
-/// ψ ← exp(−i H τ) ψ for an n × n matrix H (row-major in an 8 × 8 array): Taylor series on the vector
+/// ψ ← exp(−i H τ) ψ for an n × n matrix H (row-major): Taylor series on the vector
 /// in sub-steps of ‖H‖τ ≤ `SUB_STEP` (‖H‖ the largest column sum of |re| + |im|, above the 1-norm), each
 /// summed through the term whose bound (‖H‖τ)^m/m! falls below its share of `truncation` (relative
-/// to ‖ψ‖; the remainder past it is at most half that bound).
-pub fn propagate(h:&[Complex;MOST_STATES*MOST_STATES],n:usize,tau:f64,psi:&mut [Complex],truncation:f64){
-    macro_rules! sized{($($n:literal)*)=>{match n{$($n=>propagate_sized::<$n>(h,tau,psi,truncation),)*_=>unreachable!("a cluster of ground states has 1 to 8 states")}}}
+/// to ‖ψ‖; the remainder past it is at most half that bound; f64::EPSILON to double precision).
+pub fn propagate(h:&[Complex],n:usize,tau:f64,psi:&mut [Complex],truncation:f64){
+    macro_rules! sized{($($n:literal)*)=>{match n{$($n=>propagate_on::<$n>(h,$n,tau,psi,truncation),)*_=>propagate_on::<MOST_MIXED>(h,n,tau,psi,truncation)}}}
     sized!(1 2 3 4 5 6 7 8)
 }
 /// The largest column sum of |re| + |im| of an n × n matrix (row-major): the bound of its 1-norm the
@@ -356,19 +362,21 @@ fn terms_within(y:f64,share:f64,most:usize)->(usize,f64){
     let mut terms=1;let mut size=y;while size>share&&terms<most{terms+=1;size*=y/terms as f64;}
     (terms,size)
 }
-fn propagate_sized<const N:usize>(h:&[Complex;MOST_STATES*MOST_STATES],tau:f64,psi:&mut [Complex],truncation:f64){
-    let(parts,terms)=series(column_norm(h,N),tau,truncation);let step=tau/parts as f64;
-    let mut v=[Complex::ZERO;N];v.copy_from_slice(&psi[..N]);
+/// `propagate` on n ≤ N states (N = n for a cluster of ground states, its loops fixed).
+#[inline(always)]
+fn propagate_on<const N:usize>(h:&[Complex],n:usize,tau:f64,psi:&mut [Complex],truncation:f64){
+    let h=&h[..n*n];let(parts,terms)=series(column_norm(h,n),tau,truncation);let step=tau/parts as f64;
+    let mut v=[Complex::ZERO;N];v[..n].copy_from_slice(&psi[..n]);
     for _ in 0..parts{
         let mut term=v;let mut sum=v;
         for k in 1..=terms{
             let scale=step/k as f64;let mut next=[Complex::ZERO;N];
-            for a in 0..N{let mut s=Complex::ZERO;for b in 0..N{s+=h[a*N+b]*term[b];}next[a]=Complex::new(s.im*scale,-s.re*scale);}
-            term=next;for a in 0..N{sum[a]+=term[a];}
+            for a in 0..n{let mut s=Complex::ZERO;for b in 0..n{s+=h[a*n+b]*term[b];}next[a]=Complex::new(s.im*scale,-s.re*scale);}
+            term=next;for a in 0..n{sum[a]+=term[a];}
         }
         v=sum;
     }
-    psi[..N].copy_from_slice(&v);
+    psi[..n].copy_from_slice(&v[..n]);
 }
 
 /// The fewest n × n products by which scaling and squaring sums exp(−iX), ‖X‖ ≤ x, within `share`: s squarings of the Taylor polynomial of X/2^s, its terms through the first whose
@@ -416,19 +424,6 @@ impl HalfStep{
 
 /// ‖H‖∞ bounded above: the largest row sum (with `column_norm` above the spectral norm, √(‖H‖₁‖H‖∞)).
 fn row_norm(h:&[Complex],n:usize)->f64{(0..n).map(|a|(0..n).map(|b|h[a*n+b].re.abs()+h[a*n+b].im.abs()).sum::<f64>()).fold(0.,f64::max)}
-/// ψ ← exp(−i H τ) ψ on any number of states, to double precision: `propagate`'s series.
-pub fn propagate_dyn(h:&[Complex],n:usize,tau:f64,psi:&mut [Complex]){
-    let(parts,terms)=series(column_norm(h,n),tau,f64::EPSILON);let step=tau/parts as f64;
-    let(mut term,mut next)=([Complex::ZERO;MOST_MIXED],[Complex::ZERO;MOST_MIXED]);
-    for _ in 0..parts{
-        term[..n].copy_from_slice(&psi[..n]);
-        for k in 1..=terms{
-            let scale=step/k as f64;
-            for a in 0..n{let mut s=Complex::ZERO;for b in 0..n{s+=h[a*n+b]*term[b];}next[a]=Complex::new(s.im*scale,-s.re*scale);}
-            term[..n].copy_from_slice(&next[..n]);for a in 0..n{psi[a]+=term[a];}
-        }
-    }
-}
 /// exp(−i H τ) of an n × n matrix with ‖H‖₁τ ≤ 1 (row-major): its Taylor series to double precision.
 fn exponential(h:&[Complex],n:usize,tau:f64)->Vec<Complex>{
     let x:Vec<Complex>=h.iter().map(|z|Complex::new(z.im*tau,-z.re*tau)).collect();
@@ -478,12 +473,7 @@ impl Propagation<'_>{
                 let n=model.dimension(*cluster);let h=&local.hamiltonian;let n0=norm2(&psi[..],n);
                 let mut y=*psi;half.apply(h,n,0.5*tau,&mut y,*truncation);let(nh,middle)=(norm2(&y,n),y);
                 half.apply(h,n,0.5*tau,&mut y,*truncation);let n1=norm2(&y,n);
-                if !(n1>threshold){
-                    // The crossing on ln‖ψ‖², linear on the half where it lies.
-                    let(ta,tb,la,lb)=if nh<=threshold{(0.,0.5*tau,n0.ln(),nh.ln())}else{(0.5*tau,*tau,nh.ln(),n1.ln())};
-                    let taken=if lb<la{(ta+(threshold.ln()-la)/(lb-la)*(tb-ta)).clamp(ta,tb)}else{tb};
-                    return Evolved{taken,reached:true,impulse:[0.;3],node:None};
-                }
+                if !(n1>threshold){return Evolved{taken:bracket([n0,nh,n1],*tau,threshold).2,reached:true,impulse:[0.;3],node:None};}
                 *psi=y;Evolved{taken:*tau,reached:false,impulse:model.force(*cluster,local,point,&middle),node:Some(middle)}
             }
         }
@@ -782,7 +772,7 @@ impl Segment{
         match(&self.how,node){
             (How::Spectral(s),_)=>{for a in 0..n{x[a]=x[a]*rotation(s.eigen.values[a],len);}}
             (How::Taylor{propagator,..},Some(_))=>multiply(propagator,n,x),
-            (How::Taylor{..},None)=>propagate_dyn(self.components.hamiltonian(),n,len,x),
+            (How::Taylor{..},None)=>propagate(self.components.hamiltonian(),n,len,x,f64::EPSILON),
             (How::Beating(e),_)=>{let(c,w)=cf4();e.cf4(&self.components.omegas()[e.pairs()..],[t+c[0]*len,t+c[1]*len],w,len,x);}
         }
     }
@@ -864,10 +854,7 @@ impl Segment{
     /// the width): Newton on ln‖ψ(s)‖² with its derivative −rate/‖ψ‖², from linear interpolation of the
     /// logarithm on the panel's half where it lies, kept inside the bracket (bisection when it steps out).
     fn root(&self,x:&State,middle:&State,t:f64,norms:[f64;3],width:f64,threshold:f64)->f64{
-        let[na,nm,nb]=norms;let(target,half)=(threshold.ln(),0.5*width);
-        let(mut lo,mut hi)=if nm<=threshold{(0.,half)}else{(half,width)};
-        let(la,lb)=if nm<=threshold{(na.ln(),nm.ln())}else{(nm.ln(),nb.ln())};
-        let mut s=if lb<la{(lo+(target-la)/(lb-la)*(hi-lo)).clamp(lo,hi)}else{hi};
+        let(target,half)=(threshold.ln(),0.5*width);let(mut lo,mut hi,mut s)=bracket(norms,width,threshold);
         for _ in 0..64{
             let(mut y,from)=if s<=half{(*x,0.)}else{(*middle,half)};self.advance(&mut y,t+from,s-from,None);
             let norm=self.norm(&y);let g=norm.ln()-target;
@@ -1087,7 +1074,7 @@ impl<'a> Engine<'a>{
         self.flow(t,0.5*tau,reference);
         let point=m.point(t.r,t.kappa);let start=t.time;
         let propagation=if grid{
-            let segment=Segment::new(self.on_path(t.cluster,&point,&t.psi,start,tau,reference),start,tau,s.truncation,s.beats*(tau/s.dt).min(1.),s.horizon,s.node_phase);t.beats=t.beats.max(segment.dropped/tau);
+            let segment=self.segment(self.on_path(t.cluster,&point,&t.psi,start,tau,reference),start,tau,s.node_phase);t.beats=t.beats.max(segment.dropped/tau);
             Propagation::Grid(segment)
         }else{
             let local=m.local(t.cluster,&point,start+0.5*tau);let half=HalfStep::new(&local.hamiltonian,m.dimension(t.cluster),0.5*tau,s.truncation);
@@ -1102,11 +1089,15 @@ impl<'a> Engine<'a>{
         Part{crossing:None,kick,node:evolved.node.map(|psi|Node{place:(point.r,point.kappa),kappa:std::array::from_fn(|a|point.kappa[a]+0.5*kick[a]),psi,time:t.time-0.5*tau})}
     }
 
+    /// A part of τ's segment from `start` on a cluster's components along the atom's path (`on_path`), its grid at `phase`: the beats it leaves out within its part of the share (`part`).
+    fn segment(&self,c:Components,start:f64,tau:f64,phase:f64)->Segment{let s=&self.settings;Segment::new(c,start,tau,s.truncation,s.beats*(tau/s.dt).min(1.),s.horizon,phase)}
+    /// A trajectory's components over a step of dt from its state at a point, its own (the grid's reads: `coarsest_phase`, `grid_error`, `grid_landings`).
+    fn from_state(&self,t:&Trajectory,point:&Point)->Components{self.on_path(t.cluster,point,&t.psi,t.time,self.settings.dt,self.reference(t.r))}
     /// The exact step's segment of a cluster at a point over τ from `start` (`Probe`).
     pub fn probe(&self,cluster:usize,point:&Point,start:f64,tau:f64,psi:&[Complex])->Probe{
         let clock=std::time::Instant::now();let c=self.on_path(cluster,point,psi,start,tau,self.reference(point.r));let built=clock.elapsed().as_secs_f64();
         let mut work=Bounds::default();Segment::bounds(&c,tau,self.settings.beats,self.settings.horizon,&mut work);let half=c.omegas().len()/2;let omegas=c.omegas()[half..].to_vec();
-        let clock=std::time::Instant::now();let s=Segment::new(c,start,tau,self.settings.truncation,self.settings.beats,self.settings.horizon,self.settings.node_phase);let segment=clock.elapsed().as_secs_f64();
+        let clock=std::time::Instant::now();let s=self.segment(c,start,tau,self.settings.node_phase);let segment=clock.elapsed().as_secs_f64();
         let kept=s.components.omegas();
         let(path,node)=match &s.how{How::Spectral(_)=>("spectral",[0.;2]),How::Taylor{..}=>("taylor",[0.;2]),How::Beating(e)=>("beating",e.node_work(s.spacing))};
         let weighted=s.weighted(&s.enter(psi,start),tau,0.).map(|d|(tau/d).round() as usize);
@@ -1116,7 +1107,7 @@ impl<'a> Engine<'a>{
     pub fn coarsest_phase(&self,t:&Trajectory)->Option<f64>{
         if !self.takes_exact(t.cluster){return None;}
         let(m,s)=(self.model,&self.settings);
-        let segment=Segment::new(self.on_path(t.cluster,&m.point(t.r,t.kappa),&t.psi,t.time,s.dt,self.reference(t.r)),t.time,s.dt,s.truncation,s.beats,s.horizon,s.node_phase);
+        let segment=self.segment(self.from_state(t,&m.point(t.r,t.kappa)),t.time,s.dt,s.node_phase);
         matches!(segment.how,How::Beating(_)).then(||s.node_phase*s.dt/(2.*segment.spacing))
     }
     /// A beating segment's grid at `phase` against one of half that spacing, one jump-free step from a trajectory's state at its
@@ -1124,8 +1115,8 @@ impl<'a> Engine<'a>{
     /// takes no beating segment (solve.rs `grid_phase`).
     pub fn grid_error(&self,t:&Trajectory,phase:f64)->Option<[f64;3]>{
         if !self.takes_exact(t.cluster){return None;}
-        let(m,s)=(self.model,&self.settings);let n=m.dimension(t.cluster);let c=self.on_path(t.cluster,&m.point(t.r,t.kappa),&t.psi,t.time,s.dt,self.reference(t.r));
-        let coarse=Segment::new(c,t.time,s.dt,s.truncation,s.beats,s.horizon,phase);if !matches!(coarse.how,How::Beating(_)){return None;}
+        let(m,s)=(self.model,&self.settings);let n=m.dimension(t.cluster);
+        let coarse=self.segment(self.from_state(t,&m.point(t.r,t.kappa)),t.time,s.dt,phase);if !matches!(coarse.how,How::Beating(_)){return None;}
         let fine=coarse.refined(s.dt,s.truncation);let(mut a,mut b)=(t.psi,t.psi);
         let(_,_,one)=coarse.evolve(&mut a,t.time,s.dt,0.);let(_,_,two)=fine.evolve(&mut b,t.time,s.dt,0.);
         let(x,y)=(norm2(&a,n),norm2(&b,n));
@@ -1136,8 +1127,8 @@ impl<'a> Engine<'a>{
     /// One step's landings from a trajectory's state (`Landings`) on a grid of half the spacing at `phase` and on the grid at it, none where its cluster takes no beating grid (the first is then its own
     /// propagation); `draws` the reads' places, each in its equal share of the step, in [0, 1), the same on both (solve.rs `landed_excess`).
     pub fn grid_landings(&self,t:&Trajectory,phase:f64,groups:&[usize],count:usize,draws:&[f64])->(Landings,Option<Landings>){
-        let(m,s)=(self.model,&self.settings);let point=m.point(t.r,t.kappa);let c=self.on_path(t.cluster,&point,&t.psi,t.time,s.dt,self.reference(t.r));
-        let at=|c:Components,phase:f64|Segment::new(c,t.time,s.dt,s.truncation,s.beats,s.horizon,phase);
+        let(m,s)=(self.model,&self.settings);let point=m.point(t.r,t.kappa);let c=self.from_state(t,&point);
+        let at=|c:Components,phase:f64|self.segment(c,t.time,s.dt,phase);
         let coarse=m.beating(t.cluster).then(||at(c.clone(),phase)).filter(|x|matches!(x.how,How::Beating(_)));
         let fine=match &coarse{Some(x)=>x.refined(s.dt,s.truncation),None=>at(c,0.5*phase)};
         (self.landings(t,&point,&fine,groups,count,draws),coarse.map(|x|self.landings(t,&point,&x,groups,count,draws)))
