@@ -1617,14 +1617,18 @@ impl Ground{
             }
             // A folded drive into an explicit state against the drives kept into it.
             if !changed{changed=self.keep_partners(&mut excited,&explicit,&b,&partition.set,&dressing);}
-            // A folded pair of channels between two states of one cluster, judged again with its dressing taken from its
-            // separation: the cluster's static block mixes its states by up to that much, and a pair that is not far
-            // beyond it would beat between the block's eigenstates at their nearness -- kept.
+            // A folded coupling between two states of one cluster: static in its frames it is inside the block, its distance there
+            // zero, and kept, as an excited state's (it costs nothing; folded, it would be the block's own state taken again as a
+            // far channel). A pair of channels beating there is judged again with its dressing taken from its separation: the
+            // cluster's static block mixes its states by up to that much, and a pair not far beyond it would beat between the
+            // block's eigenstates at their nearness -- kept.
             if !changed{for item in partition.items.iter().filter(|i|i.folded){
-                let Kind::Raman{first,second}=item.kind else{continue};
-                let(Some(k),Some(k2))=(partition.set[first.state],partition.set[second.state])else{continue};
+                let(a,b,carriers)=match item.kind{Kind::Raman{first,second}=>(second.state,first.state,[(second.carrier,1),(first.carrier,-1)]),Kind::Static{a,b}=>(a,b,[(0,0);2]),_=>continue};
+                let(Some(k),Some(k2))=(partition.set[a],partition.set[b])else{continue};
                 if k!=k2||kept.contains(&item.kind){continue;}
-                if !foldable((item.frequency-dressing[k]).max(0.),item.size,self.generator_scale){kept.push(item.kind.clone());changed=true;}
+                let m=&partition.combinations;
+                let inside=(0..self.carriers.len()).all(|c|m[a][c]-m[b][c]+carriers.iter().filter(|x|x.0==c).map(|x|x.1).sum::<i32>()==0);
+                if inside||(matches!(item.kind,Kind::Raman{..})&&!foldable((item.frequency-dressing[k]).max(0.),item.size,self.generator_scale)){kept.push(item.kind.clone());changed=true;}
             }}
             if !changed&&!moved{self.charge=Ground::charge_of(&excited,ng);return self.assemble(&b,partition,excited);}
         }
@@ -2474,5 +2478,20 @@ pub(crate) mod tests{
                 assert!(((offset(2)-offset(1))/TAU-detuning).abs()<=1e-6,"{} MHz against {detuning} MHz",(offset(2)-offset(1))/TAU);
             }
         }
+    }
+
+    /// A weak static coupling between two ground states a block already joins, static in its frames, is the block's own: kept in its
+    /// generator as it stands, not folded as a far path of itself -- three levels at 0, 2 and 4 rad/us joined by 0.16, the weak
+    /// 0.002 e^{0.7i} between the outer two (m² 1e-6: the rule alone folded it, a first-order error of the block's dynamics).
+    #[test]
+    fn a_weak_coupling_inside_a_block_is_the_block_s_own(){
+        let mut r=request(&fixture()["request"]);r.beams.clear();r.times_us=vec![0.,1.];
+        let mut g=Ground::bare(&r).unwrap();g.hamiltonian=Dense::zeros(STATES,STATES);
+        for i in 0..STATES{g.hamiltonian[(i,i)]=Complex::new(if i<3{2.*i as f64}else{10000.+i as f64},0.);}
+        for(a,b,z)in [(0,1,Complex::new(0.16,0.)),(1,2,Complex::new(0.16,0.)),(0,2,Complex::cis(0.7)*0.002)]{g.hamiltonian[(a,b)]=z;g.hamiltonian[(b,a)]=z.conj();}
+        let g=g.clustered(f64::INFINITY).unwrap();let k=g.cluster[0];assert_eq!(g.clusters[k].states,vec![0,1,2]);
+        let e=g.eliminate(&g.focus_intensities()).unwrap();let h=g.local_at(&e,k,[0.;3],0.).unwrap().effective;
+        for i in 0..3{for j in 0..3{let expected=g.hamiltonian[(i,j)]-if i==j{Complex::new(g.clusters[k].frames[i],0.)}else{Complex::ZERO};
+            assert!((h[(i,j)]-expected).abs()<1e-13,"H[{i},{j}] {:?} against {:?}",h[(i,j)],expected);}}
     }
 }
