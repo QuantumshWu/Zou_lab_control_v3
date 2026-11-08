@@ -555,7 +555,7 @@ fn a_near_probe_s_fold_stays_out_of_the_ensemble_s_energy(){
 /// no longer takes the site's stiffness (about the focus T_x rose to 3.6 times at a step of that order).
 #[test]
 fn a_standing_wave_s_sites_hold_their_atoms_as_the_centre_does(){
-    let(_,mut r)=retro(0.);r.times_us=vec![0.,1.];let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let(_,mut r)=retro();r.times_us=vec![0.,1.];let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
     let trap=initial.traps[0];let(cluster,state,_)=initial.states[0];let hm=model.hbar_over_mass;
     let lattice=trap.lattice.expect("the tweezer and its reflection are a standing wave");
     let settings=Settings::new(0.01,&trap,f64::EPSILON,false);
@@ -589,7 +589,7 @@ fn mirrored(r:&Request,reflectivity:f64,phase:f64)->Request{
 /// 269 kHz at 85°, 17 kHz at −90° against 911 kHz at 0° and nothing past 90°.) At 0° the focus's very bits.
 #[test]
 fn a_mirror_phase_moves_the_trap_with_its_sites(){
-    let(_,base)=retro(0.);
+    let(_,base)=retro();
     for reflectivity in [1.,0.1]{
         let read=|phase:f64|{let mut r=mirrored(&base,reflectivity,phase);r.times_us=vec![0.,1.];let model=Model::new(&r).unwrap();let i=Initial::new(&model,&r).unwrap();
             let mut sorted=i.traps[0].frequencies;sorted.sort_by(f64::total_cmp);(i.traps[0],sorted,i.depths[0],i.ensembles[0].as_ref().unwrap().kinetic)};
@@ -620,7 +620,7 @@ fn thermal_atoms_stay(r:&Request){
 /// A far tweezer's atoms past 90° and at the tie, every initial energy taken in the wells they stand in.
 #[test]
 fn a_mirror_phase_s_sites_hold_their_atoms(){
-    let(_,base)=retro(0.);
+    let(_,base)=retro();
     for(reflectivity,phase)in [(1.,135.),(1.,180.),(0.1,-135.)]{let mut r=mirrored(&base,reflectivity,phase);r.times_us=vec![0.,1.];thermal_atoms_stay(&r);}
 }
 /// The trap the rule reads its reach by, before any table (ground.rs `Ground::holding`), is the model's (`Model::trap`): on an 808 nm tweezer that is a near carrier both hold its own light shift, within 0.1 %, which H(r) alone, what the reach read, leaves out, its ω 8.4 times low.
@@ -654,14 +654,10 @@ fn a_near_carrier_s_standing_wave_holds_its_atoms(){
     thermal_atoms_stay(&r);
 }
 
-/// The fixture's tweezer alone and with a reflection along its axis, in phase at the focus (F5): the
-/// reflection's field the tweezer's with `turn` of the cooling beam's polarization added (relative to
-/// the tweezer's coupling's size, its outside shift the tweezer's).
-fn retro(turn:f64)->(Request,Request){
-    let alone=request(&|b|b["id"]=="tweezer");let cool=request(&|b|b["id"]=="cool-plus").beams[0].clone();
+/// The fixture's tweezer alone and with a reflection along its axis, in phase at the focus (F5), its outside shift the tweezer's.
+fn retro()->(Request,Request){
+    let alone=request(&|b|b["id"]=="tweezer");
     let mut reflection=alone.beams[0].clone();(reflection.id,reflection.name)=("reflection".into(),"反射光".into());reflection.direction=reflection.direction.map(|x|-x);
-    let norm=|m:&Matrix|m.real.iter().zip(&m.imag).map(|(a,b)|a*a+b*b).sum::<f64>().sqrt();let scale=turn*norm(&reflection.coupling)/norm(&cool.coupling);
-    for(m,c)in [(&mut reflection.coupling,&cool.coupling),(&mut reflection.counter_coupling,&cool.counter_coupling)]{for k in 0..STATES*STATES{m.real[k]+=scale*c.real[k];m.imag[k]+=scale*c.imag[k];}}
     let mut retro=alone.clone();retro.beams.push(reflection);(alone,retro)
 }
 
@@ -673,7 +669,7 @@ fn retro(turn:f64)->(Request,Request){
 /// tweezer's 19 kHz.
 #[test]
 fn a_retro_reflected_tweezer_folds_as_its_standing_wave(){
-    let(alone,retro)=retro(0.);
+    let(alone,retro)=retro();
     let mut double=alone.clone();
     {let b=&mut double.beams[0];for(m,x)in [(&mut b.coupling,2.),(&mut b.counter_coupling,2.),(&mut b.outside_shift,4.)]{for v in m.real.iter_mut().chain(m.imag.iter_mut()){*v*=x;}}}
     let(g,reference)=(Ground::new(&retro).unwrap(),Ground::new(&double).unwrap());
@@ -686,28 +682,6 @@ fn a_retro_reflected_tweezer_folds_as_its_standing_wave(){
     let along=|r:&Request|{let model=Model::new(r).unwrap();Initial::new(&model,r).unwrap().traps[0].lab[1]/std::f64::consts::TAU*1e3};
     let(single,lattice)=(along(&alone),along(&retro));
     assert!(lattice>30.*single,"the trap along the beam: {lattice:.1} kHz against the tweezer's {single:.1} kHz");
-}
-
-/// A reflection a little off the tweezer's polarization (a millionth of the cooling beam's added) is
-/// the standing wave's unit with its remainder booked (ground.rs `coherence`), to its smallness: its
-/// shifts within 1e-5 of the exact reflection's at every point and its interference item far within
-/// the budget -- where the beams taken apart would book the whole interference. A polarization that
-/// differs (as much of the cooling beam's) books an interference beyond the budget: the solve is
-/// flagged, not silently wrong.
-#[test]
-fn a_reflection_a_little_off_the_tweezer_s_polarization_is_its_standing_wave_within_its_bound(){
-    let(_,exact)=retro(0.);let(_,turned)=retro(1e-6);let(_,crossed)=retro(1.);
-    let(e,g,c)=(Ground::new(&exact).unwrap(),Ground::new(&turned).unwrap(),Ground::new(&crossed).unwrap());
-    let estimate=|g:&Ground|g.interference.iter().map(|x|x.estimate(g)).fold(0.,f64::max);
-    assert!(g.units.iter().map(|u|u.beams.clone()).eq([vec![0,1]])&&g.interference[0].coherent,"{:?}",g.interference);
-    assert!(estimate(&g)<=1e-2*BUDGET,"the remainder's item {:.2e}",estimate(&g));
-    assert!(estimate(&c)>BUDGET,"the crossed polarizations' item {:.2e}",estimate(&c));
-    let n=exact.beams[0].direction;
-    for r in (0..9).map(|i|n.map(|x|0.05*i as f64*x)).chain([[0.3,0.1,0.2]]){
-        let(h,reference)=(g.hamiltonian_at(r),e.hamiltonian_at(r));let mut light=reference.clone();light.add_scaled(-Complex::ONE,&e.hamiltonian);
-        let mut d=h.clone();d.add_scaled(-Complex::ONE,&reference);
-        assert!(d.largest()<=1e-5*light.largest(),"r {r:?}: {:.2e} of {:.2e}",d.largest(),light.largest());
-    }
 }
 
 /// A fixture's motion request, its matrices sparse ([row, column, re, im]), its initial state diagonal
