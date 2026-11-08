@@ -209,12 +209,19 @@ const FIRST_SHARE:f64=crate::solve::NUMERICAL_SHARE*crate::solve::TEMPERATURE_TA
 /// What a coupling within an excited manifold may move a ringing photon's amplitude by and be left out (`Model::ringing`): the numerical tolerances' share of the rule's budget.
 pub(crate) const RINGING_SHARE:f64=crate::solve::NUMERICAL_SHARE*BUDGET;
 
+/// A beam's wave vector k_l (rad/um) on the lab axes, from its direction and |k|.
+pub fn wave_vector(direction:[f64;3],wave_number:f64)->[f64;3]{direction.map(|n|n*wave_number)}
+/// A term's Doppler shift q·v (rad/us) at the velocity v (um/us): q its wave vector, the k of the beams it absorbs less those it emits (`wave_vector`) -- a kept drive's beam's k_l, a ground
+/// Raman pair's k_c − k_d per pair of their beams. In the frame of an atom moving at v the term's frequency is Ω̃ + q·v, its residual's in the cluster's frames and this: the phase e^{i(Ω̃ + q·v)t}
+/// it takes along the atom's straight path (module documentation, # The atom's path; the exact step's beats, `on_path`).
+pub fn doppler(q:[f64;3],v:[f64;3])->f64{q[0]*v[0]+q[1]*v[1]+q[2]*v[2]}
+
 /// A beam's geometry: its direction and wave number, and its waist when Gaussian.
 #[derive(Clone,Debug)]
 pub struct Geometry{pub direction:[f64;3],pub wave_number:f64,pub waist:Option<f64>}
 impl Geometry{
-    /// The wave vector (rad/um).
-    pub fn wave_vector(&self)->[f64;3]{self.direction.map(|n|n*self.wave_number)}
+    /// The wave vector (rad/um): `wave_vector`'s.
+    pub fn wave_vector(&self)->[f64;3]{wave_vector(self.direction,self.wave_number)}
     /// A unit vector across the beam: a lab axis less its part along the beam.
     pub(crate) fn across(&self)->[f64;3]{
         let n=self.direction;let pick=if n[0].abs()<0.9{[1.,0.,0.]}else{[0.,1.,0.]};let along=pick[0]*n[0]+pick[1]*n[1]+pick[2]*n[2];
@@ -1889,15 +1896,15 @@ impl Model{
     /// its matrices e^{−iq·v t_m}, so that e^{i(Ω̃ + q·v)t} at t_m is e^{iΩ̃t_m}, the fields' phases at the point; the states with wave vectors take their diagonal shifts K_s·v.
     pub fn on_path(&self,cluster:usize,c:&mut Components,kappa:[f64;3],middle:f64){
         if !self.doppler{return;}
-        let layout=&self.layouts[cluster];let v=kappa.map(|x|x*self.hbar_over_mass);let(n,parts)=(layout.n,c.parts);let nn=n*n;let dot=|k:&[f64;3]|k[0]*v[0]+k[1]*v[1]+k[2]*v[2];
+        let layout=&self.layouts[cluster];let v=kappa.map(|x|x*self.hbar_over_mass);let(n,parts)=(layout.n,c.parts);let nn=n*n;
         for j in 0..parts-1{
-            let rate=dot(&layout.beats.waves[j]);if rate==0.{continue;}
+            let rate=doppler(layout.beats.waves[j],v);if rate==0.{continue;}
             c.omegas[j]+=rate;let phase=Complex::cis(-rate*middle);let q=j+1;
             for z in &mut c.matrices[q*nn..(q+1)*nn]{*z=*z*phase;}
             let at=(parts+3*q)*nn;for z in &mut c.matrices[at..at+3*nn]{*z=*z*phase;}
         }
         if layout.gauged{
-            for a in 0..n{c.gauge[a]=dot(&layout.labels[a]);c.matrices[a*n+a]+=Complex::new(c.gauge[a],0.);}
+            for a in 0..n{c.gauge[a]=doppler(layout.labels[a],v);c.matrices[a*n+a]+=Complex::new(c.gauge[a],0.);}
             c.middle=middle;c.gauged=true;
         }
     }
