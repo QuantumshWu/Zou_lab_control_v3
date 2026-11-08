@@ -1,6 +1,6 @@
 import type {ComplexAmplitude,Scene,DynamicsSettings,Laser,Level,InitialStateSpec,Vec3} from './types.js';
 import {resolveInitialState} from './types.js';
-import {laserModelCorrection,staticModelBackground} from './spectroscopy.js';
+import {laserModelCorrection,outsideFieldForm,staticModelBackground} from './spectroscopy.js';
 import {atomicSystem,composeMagneticField,drivingLasers,laserIntensityMWcm2,laserCarrierOffsetMHz,laserFrequencyMHz,captureLaserFrequencyAnchor,RB87,sinCosDegrees,accurateSum} from './physics.js';
 import {directionVector,invert,rotate,type Frame} from './direction.js';
 import {MOTION_FRAME,type MotionRequest} from './motion.js';
@@ -46,7 +46,11 @@ interface MasterDrive {omega:number;cos:MasterMatrix;sin:MasterMatrix;laserIds:s
  *   drives a(r) X e^{−i 2π (ν − ν_frame) t} + a(r)* R e^{+i 2π (ν + ν_frame) t} + h.c.;
  *   `outsideShift`, its static shift through the states outside the model and the Rb⁺ core at the
  *   atom (rad/us, Hermitian, in the model basis): its share of `hamiltonian`, which scales with
- *   |a(r)|².
+ *   |a(r)|²; `electricField`, its field at the atom (V/m) on the spherical components q = −1, 0, +1
+ *   of the quantization axis, polarization and initial phase in it: the field X and R are of.
+ * - `outsideForms`, per frequency (`frequencyIndex`) the outside shift as a form in the summed field
+ *   E of its beams (spectroscopy.ts `outsideFieldForm`, rad/us/(V/m)²): beams of one frequency
+ *   interfere there too, which their `outsideShift`s leave out.
  * - `emission`: the lowering dipole operator's Cartesian components (1/sqrt(us)) on the motion
  *   frame's axes: Σ_a D[C_a] is the model's spontaneous emission, and the photon of C_a has the
  *   angular pattern of a dipole along a, so its recoil follows from that pattern.
@@ -54,12 +58,13 @@ interface MasterDrive {omega:number;cos:MasterMatrix;sin:MasterMatrix;laserIds:s
  *   thermal along each axis), `massKg` and the lab field `fieldVectorG` (G). */
 export interface MotionModel {
   axis:'3d';trapBeamId:string;temperatureUK:number;massKg:number;fieldVectorG:Vec3;
-  hamiltonian:MasterMatrix;frameFrequenciesMHz:number[];beams:MotionModelBeam[];emission:[MasterMatrix,MasterMatrix,MasterMatrix];
+  hamiltonian:MasterMatrix;frameFrequenciesMHz:number[];beams:MotionModelBeam[];outsideForms:MotionOutsideForm[];emission:[MasterMatrix,MasterMatrix,MasterMatrix];
 }
 export interface MotionModelBeam {
   id:string;name:string;direction:Vec3;waveNumberPerUm:number;waistUm?:number;intensityMWcm2:number;frequencyIndex:number[];coupling:MasterMatrix;counterCoupling:MasterMatrix;
-  outsideShift:MasterMatrix;
+  outsideShift:MasterMatrix;electricField:[ComplexAmplitude,ComplexAmplitude,ComplexAmplitude];
 }
+export interface MotionOutsideForm {frequencyIndex:number[];matrices:MasterMatrix[]}
 const N=32,TAU=2*Math.PI,HBAR=1.0545718176461565e-34,H_PLANCK=6.62607015e-34,EPS=8.8541878128e-12,C=299792458,zeros=()=>Array(N*N).fill(0),matrix=():MasterMatrix=>({real:zeros(),imag:zeros()});
 /** h * 1 MHz / k_B, in kelvin. */
 const MHZ_KELVIN=6.62607015e-34*1e6/1.380649e-23;
@@ -216,7 +221,7 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
  const h=matrix(),groundReference=states.find(s=>s.id==='ground-2-0')!.energyMHz;
  states.forEach((s,i)=>h.real[i*N+i]=TAU*(s.energyMHz-groundReference-(s.manifold==='ground'?0:offsets[s.manifold])));
  // H0 before the static couplings of the beams at the reference carrier join it: a moving atom has those per beam.
- const staticHamiltonian={real:h.real.slice(),imag:h.imag.slice()},couplings:{laser:Laser;beat:number[];A:MasterMatrix;R:MasterMatrix}[]=[];
+ const staticHamiltonian={real:h.real.slice(),imag:h.imag.slice()},couplings:{laser:Laser;beat:number[];A:MasterMatrix;R:MasterMatrix;field:MotionModelBeam['electricField']}[]=[];
  const drives:MasterDrive[]=[],driveIndices:number[][]=[],driveByKey=new Map<string,MasterDrive>(),terms=new Map<number[],Map<number,number[]>>();
  const put=(m:number[],i:number,v:number)=>{let entries=terms.get(m);if(!entries){entries=new Map();terms.set(m,entries);}let values=entries.get(i);if(!values){values=[];entries.set(i,values);}values.push(v);};
  /** Adds X e^{+i q.omega t} + h.c. with X_ij = value. */
@@ -244,7 +249,7 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
    for(const line of ['D1','D2'] as const){const sys=bare.systems[line],start=line==='D1'?8:16;for(let e=0;e<sys.excited.length;e++)for(let g=0;g<8;g++){const q=sys.excited[e]!.m-sys.ground[g]!.m;if(q< -1||q>1)continue;const p=field[q+1]!,v=-.5*sys.dipoles[e*8+g]!*RB87.D2.dipole*E/HBAR*1e-6;out.real[(start+e)*N+g]=v*p.re;out.imag[(start+e)*N+g]=v*p.im;}}
    return transformOperator(out,u);};
   const A=absorption(co),R=absorption(counter),beat=beatIndex(laserIndex),coIndex=beat.map(n=>n===0?0:-n),counterIndex=beat.map((n,k)=>k===axes-1?n+2:n);
-  if(motion)couplings.push({laser:l,beat,A,R});
+  if(motion)couplings.push({laser:l,beat,A,R,field:co.map(p=>({re:E*p.re,im:E*p.im})) as MotionModelBeam['electricField']});
   for(let e=8;e<N;e++)for(let g=0;g<8;g++){const k=e*N+g;harmonic(coIndex,e,g,A.real[k]!,A.imag[k]!,l.id);harmonic(counterIndex,e,g,R.real[k]!,R.imag[k]!,l.id);}
  }
  for(const [m,entries]of terms)for(const [i,v]of entries)m[i]=accurateSum([m[i]!,...v]);
@@ -272,10 +277,11 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
  fieldVector:a.fieldVector,fieldMagnitudeG:a.fieldMagnitudeG,laserCount:lasers.length,referenceLaserId:reference?.id,carrierMHz,
  frameFrequenciesMHz,staticMixingRatio:background.maximumMixingRatio,
  ...(motion?{motion:{axis:'3d',trapBeamId:tweezerOf(scene)!.id,temperatureUK:motion.temperatureUK,massKg:RB87.massKg,fieldVectorG:a.fieldVector,hamiltonian:staticHamiltonian,frameFrequenciesMHz,
-  beams:couplings.map(({laser,beat,A,R})=>{const k=directionVector(scene.fields,laser.direction);return {id:laser.id,name:laser.name,
+  beams:couplings.map(({laser,beat,A,R,field})=>{const k=directionVector(scene.fields,laser.direction);return {id:laser.id,name:laser.name,
    direction:MOTION_FRAME.map(n=>n[0]*k[0]+n[1]*k[1]+n[2]*k[2]) as Vec3,waveNumberPerUm:TAU*laserFrequencyMHz(laser)/C,
    ...(laser.intensityMode==='intensity'?{}:{waistUm:laserWaistUm(laser)}),intensityMWcm2:laserIntensityMWcm2(laser),frequencyIndex:beat,coupling:A,counterCoupling:R,
-   outsideShift:scaled(transformOperator(laserModelCorrection(scene,laser),u),TAU)};}),
+   outsideShift:scaled(transformOperator(laserModelCorrection(scene,laser),u),TAU),electricField:field};}),
+  outsideForms:couplings.filter((c,i)=>couplings.findIndex(x=>x.beat.join()===c.beat.join())===i).map(({laser,beat})=>({frequencyIndex:beat,matrices:outsideFieldForm(a,laser).map(m=>scaled(transformOperator(m,u),TAU))})),
   emission:MOTION_FRAME.map(n=>cartesianEmission(n,composeMagneticField(scene.fields).frame,spherical)) as MotionModel['emission']} satisfies MotionModel}:{}),
  assumptions:[
   `每束开启且强度非零的激光（${lasers.length} 束）都是 32 态主方程中的显式光学驱动：保留 D1、D2 全部允许电偶极耦合，旋转项与反旋转项都保留（不作 RWA），不按近/远失谐区分。`,

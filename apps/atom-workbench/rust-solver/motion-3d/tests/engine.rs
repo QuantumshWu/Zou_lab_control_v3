@@ -33,10 +33,10 @@ fn request(keep:&dyn Fn(&Value)->bool)->Request{
     let beams=r["beams"].as_array().unwrap().iter().filter(|b|keep(b)).map(|b|{let d=floats(&b["direction"]);Beam{id:b["id"].as_str().unwrap().into(),name:b["name"].as_str().unwrap().into(),
         direction:[d[0],d[1],d[2]],wave_number_per_um:b["waveNumberPerUm"].as_f64().unwrap(),waist_um:b["waistUm"].as_f64(),intensity_mw_cm2:b["intensityMWcm2"].as_f64().unwrap(),
         frequency_index:b["frequencyIndex"].as_array().unwrap().iter().map(|n|n.as_i64().unwrap() as i32).collect(),coupling:matrix(&b["coupling"]),
-        counter_coupling:matrix(&b["counterCoupling"]),outside_shift:matrix(&b["outsideShift"])}}).collect::<Vec<Beam>>();
+        counter_coupling:matrix(&b["counterCoupling"]),outside_shift:matrix(&b["outsideShift"]),field:None}}).collect::<Vec<Beam>>();
     let trap_beam=beams.iter().position(|b|b.waist_um.is_some()).unwrap_or(0);
     let e=r["emission"].as_array().unwrap();
-    Request{states,hamiltonian:matrix(&r["hamiltonian"]),frame_frequencies_mhz:floats(&r["frameFrequenciesMHz"]),frequencies_mhz:floats(&r["frequenciesMHz"]),beams,
+    Request{states,hamiltonian:matrix(&r["hamiltonian"]),frame_frequencies_mhz:floats(&r["frameFrequenciesMHz"]),frequencies_mhz:floats(&r["frequenciesMHz"]),beams,outside_forms:vec![],
         emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],field_vector_g:[0.;3],mass_kg:r["massKg"].as_f64().unwrap(),initial_density:density,
         temperature_uk:r["temperatureUK"].as_f64().unwrap(),trap_beam,times_us:vec![]}
 }
@@ -717,12 +717,12 @@ fn sparse_request(v:&Value)->Request{
     let beams=v["beams"].as_array().unwrap().iter().map(|b|{let d=floats(&b["direction"]);Beam{id:b["id"].as_str().unwrap().into(),name:b["name"].as_str().unwrap().into(),
         direction:[d[0],d[1],d[2]],wave_number_per_um:b["waveNumberPerUm"].as_f64().unwrap(),waist_um:b["waistUm"].as_f64(),intensity_mw_cm2:b["intensityMWcm2"].as_f64().unwrap(),
         frequency_index:b["frequencyIndex"].as_array().unwrap().iter().map(|n|n.as_i64().unwrap() as i32).collect(),coupling:matrix(&b["coupling"]),
-        counter_coupling:matrix(&b["counterCoupling"]),outside_shift:matrix(&b["outsideShift"])}}).collect::<Vec<Beam>>();
+        counter_coupling:matrix(&b["counterCoupling"]),outside_shift:matrix(&b["outsideShift"]),field:None}}).collect::<Vec<Beam>>();
     let trap_beam=beams.iter().position(|b|b.id==v["trapBeamId"].as_str().unwrap()).unwrap();
     let initial=floats(&v["initial"]);let mut density=vec![Complex::ZERO;STATES*STATES];for i in 0..STATES{density[i*STATES+i]=Complex::new(initial[i],0.);}
     let(e,f)=(v["emission"].as_array().unwrap(),floats(&v["fieldVectorG"]));
     Request{states:v["states"].as_array().unwrap().iter().map(|s|s.as_str().unwrap().into()).collect(),hamiltonian:matrix(&v["hamiltonian"]),
-        frame_frequencies_mhz:floats(&v["frameFrequenciesMHz"]),frequencies_mhz:floats(&v["frequenciesMHz"]),beams,emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],
+        frame_frequencies_mhz:floats(&v["frameFrequenciesMHz"]),frequencies_mhz:floats(&v["frequenciesMHz"]),beams,outside_forms:vec![],emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],
         field_vector_g:[f[0],f[1],f[2]],mass_kg:v["massKg"].as_f64().unwrap(),initial_density:density,temperature_uk:v["temperatureUK"].as_f64().unwrap(),trap_beam,times_us:vec![]}
 }
 /// The frozen atom's F = 1 population each microsecond, its eliminated master equation's at the focus, every drive folded, at second or fourth order:
@@ -1252,9 +1252,9 @@ fn synthetic(levels:&[(&str,f64)],emissions:&[(&str,&str,[Complex;3],f64)],beams
     for &(e,g,d,rate)in emissions{let(i,j)=(at(g),at(e));for a in 0..3{let c=d[a]*rate.sqrt();emission[a].real[i*STATES+j]=c.re;emission[a].imag[i*STATES+j]=c.im;}}
     let frames:Vec<f64>=r.states.iter().map(|s|if s.starts_with("ground"){0.}else{3.8e8}).collect();
     let mut list:Vec<Beam>=beams.iter().enumerate().map(|(n,(d,couplings))|{let mut x=zero();for &(e,g,v)in couplings{x.real[at(e)*STATES+at(g)]=v;}
-        Beam{id:format!("b{n}"),name:format!("b{n}"),direction:*d,wave_number_per_um:WAVE,waist_um:None,intensity_mw_cm2:1.,frequency_index:vec![0,0],coupling:x,counter_coupling:zero(),outside_shift:zero()}}).collect();
+        Beam{id:format!("b{n}"),name:format!("b{n}"),direction:*d,wave_number_per_um:WAVE,waist_um:None,intensity_mw_cm2:1.,frequency_index:vec![0,0],coupling:x,counter_coupling:zero(),outside_shift:zero(),field:None}}).collect();
     let mut x=zero();x.real[at("D1-1-0")*STATES+at(initial)]=1e-3;
-    list.push(Beam{id:"tweezer".into(),name:"tweezer".into(),direction:[1.,0.,0.],wave_number_per_um:7.4,waist_um:Some(1.),intensity_mw_cm2:1.,frequency_index:vec![1,0],coupling:x,counter_coupling:zero(),outside_shift:zero()});
+    list.push(Beam{id:"tweezer".into(),name:"tweezer".into(),direction:[1.,0.,0.],wave_number_per_um:7.4,waist_um:Some(1.),intensity_mw_cm2:1.,frequency_index:vec![1,0],coupling:x,counter_coupling:zero(),outside_shift:zero(),field:None});
     let i=at(initial);let mut density=vec![Complex::ZERO;STATES*STATES];density[i*STATES+i]=Complex::ONE;
     r.trap_beam=list.len()-1;r.mass_kg*=1e6;(r.hamiltonian,r.emission,r.frame_frequencies_mhz,r.frequencies_mhz,r.beams,r.initial_density,r.field_vector_g,r.times_us)=(h,emission,frames,vec![1e7,0.],list,density,[0.;3],vec![0.,100.]);r
 }

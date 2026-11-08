@@ -53,7 +53,15 @@ pub struct Beam{
     /// O, the beam's static shift through the states outside the model and the Rb⁺ core at the focus
     /// (rad/us, Hermitian): its share of `Request::hamiltonian`, which scales with |a(r)|².
     pub outside_shift:Matrix,
+    /// E, its field at the focus (V/m) on the spherical components q = −1, 0, +1 of the quantization axis, its
+    /// polarization and initial phase in it: the field X, R and O are of (None in a request from before it).
+    pub field:Option<[Complex;3]>,
 }
+/// The outside shift of the beams of one frequency (`frequency_index`) as a form in their summed field E
+/// (rad/us/(V/m)², src/spectroscopy.ts `outsideFieldForm`): O(E) = Σ_k c_k(E) O_k, c = (|E_q|² per q, then per pair
+/// p < q Re(E_p* E_q), Im(E_p* E_q)) -- with the beams' interference, which each one's `outside_shift` leaves out.
+#[derive(Clone,Debug,PartialEq)]
+pub struct OutsideForm{pub frequency_index:Vec<i32>,pub matrices:[Matrix;9]}
 impl Beam{
     /// The beam's complex amplitude at r (um from the focus), relative to its amplitude at the
     /// focus: a plane wave e^{ikζ}, or the paraxial Gaussian beam focused there,
@@ -87,6 +95,8 @@ pub struct Request{
     /// The beams' frequency axes (MHz).
     pub frequencies_mhz:Vec<f64>,
     pub beams:Vec<Beam>,
+    /// Per frequency of the beams the form of its outside shift (none in a request from before them).
+    pub outside_forms:Vec<OutsideForm>,
     /// The trap beam (an index into `beams`): the tweezer whose focus is the origin.
     pub trap_beam:usize,
     /// The lowering dipole's Cartesian components on the lab axes x, y, z (1/sqrt(us)):
@@ -108,7 +118,7 @@ mod tests{
     use super::*;
     fn zero()->Matrix{Matrix{real:vec![0.;STATES*STATES],imag:vec![0.;STATES*STATES]}}
     fn beam(direction:[f64;3],waist_um:Option<f64>)->Beam{
-        Beam{id:"beam".into(),name:"光".into(),direction,wave_number_per_um:7.37,waist_um,intensity_mw_cm2:1.,frequency_index:vec![],coupling:zero(),counter_coupling:zero(),outside_shift:zero()}
+        Beam{id:"beam".into(),name:"光".into(),direction,wave_number_per_um:7.37,waist_um,intensity_mw_cm2:1.,frequency_index:vec![],coupling:zero(),counter_coupling:zero(),outside_shift:zero(),field:None}
     }
     /// A plane wave's amplitude is its phase along the beam; a beam focused at the origin falls off
     /// across its axis as exp(−ρ²/w²) (intensity exp(−2ρ²/w²)) with no phase; along its own axis it

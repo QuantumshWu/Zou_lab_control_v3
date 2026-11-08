@@ -19,7 +19,7 @@ pub mod rng;
 pub mod solve;
 pub mod stats;
 
-pub use request::{Beam,Complex,Matrix,Request,STATES};
+pub use request::{Beam,Complex,Matrix,OutsideForm,Request,STATES};
 use engine::{Engine,Settings,Trajectory};
 use ensemble::Ensemble;
 use model::{Model,Trap};
