@@ -956,7 +956,7 @@ impl Model{
                     let(m,mx)=(&cl.combinations[n0+p],&cl.combinations[x]);
                     let residual=g.beat(0.,&(0..m.len()).map(|i|m[i]-mx[i]-i32::from(i==c)).collect::<Vec<i32>>());
                     let strength:f64=reached.iter().map(|&f|coupling(e,f)*admixture(c,b,f)).sum();
-                    let width=g.decay[(e,e)].re.max(f64::MIN_POSITIVE);let left=ground::mixing(residual,strength,g.generator_scale).powi(2)*(1.+width*g.duration)+strength*strength/residual.abs().max(f64::MIN_POSITIVE)/width;
+                    let width=g.decay[(e,e)].re.max(f64::MIN_POSITIVE);let left=ground::mixing(strength,residual.abs(),g.generator_scale,f64::MIN_POSITIVE).powi(2)*(1.+width*g.duration)+strength*strength/residual.abs().max(f64::MIN_POSITIVE)/width;
                     if residual.abs()>=g.cut&&ground::foldable(residual,strength,g.generator_scale)&&left<=crate::solve::NUMERICAL_SHARE*crate::solve::POPULATION_TARGET{effective_dropped+=left;continue;}
                     effective.push(EffectiveLayout{row:n0+p,col:x,carrier:c,residual,at:size,tones:vec![]});size+=carrier.rank;
                 }}
@@ -1157,7 +1157,7 @@ impl Model{
             let nu=g.frequency(&[fields[p1].0,fields[p2].0],&[fields[q1].0,fields[q2].0]);let k=keep(nu);
             if k.iter().any(|&x|x){quartic.push(QuarticSlab{conj:(p1,p2),plain:(q1,q2),nu,keep:k,part:vec![],at:*size});*size+=n*n;}
         }}
-        let dropped=left.iter().fold(0.,|s,&(_,_,w)|s+crate::ground::mixing(w,b,l0).powi(2));
+        let dropped=left.iter().fold(0.,|s,&(_,_,w)|s+crate::ground::mixing(b,w,l0,f64::MIN_POSITIVE).powi(2));
         // The metric's and Π's slabs per carrier pair, the metric on the coherent entries (the readout's).
         let group=|c:usize,s:usize|cl.coherent.iter().position(|gr|gr.iter().any(|x|x.0.carrier==c&&x.0.state==s));
         let mut slow=vec![];
