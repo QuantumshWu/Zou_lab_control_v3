@@ -28,8 +28,8 @@ use atom_motion_3d::ground::Ground;
 use atom_motion_3d::ledger::BUDGET;
 use atom_motion_3d::model::{Generator,Model};
 use atom_motion_3d::solve::{CONFIDENCE,POPULATION_TARGET,TEMPERATURE_TARGET};
-use atom_motion_3d::stats::{summarize,Means,Scales,KT_PER_UK};
-use atom_motion_3d::{initial_trajectory,sample_states,simulate,simulate_from,Complex,Initial,Request,Stratum,Variates,STATES};
+use atom_motion_3d::stats::{summarize,Scales,KT_PER_UK};
+use atom_motion_3d::{initial_trajectory,sample_states,simulate,simulate_from,Complex,Initial,Request,Stratum,STATES};
 use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
 use rayon::prelude::*;
 use std::f64::consts::TAU;
@@ -44,9 +44,8 @@ fn candidate(request:&Request,which:&str)->(f64,Model){
     let a=ladder[which.parse::<usize>().unwrap()];(a,Model::with(request,a).unwrap())
 }
 fn describe(m:&Model)->String{
-    (0..m.clusters()).map(|k|{let(beats,period)=m.beats(k);let half=beats.len()/2;
-        format!("{}({}){}",m.dimension(k),m.dimension(k)-m.ground_dimension(k),if half>0{format!(" beats {:?} MHz period {}",beats[half..].iter().map(|w|(w/TAU*1e4).round()/1e4).collect::<Vec<_>>(),
-            period.map_or("none".into(),|t|format!("{t:.5} us")))}else{String::new()})}).collect::<Vec<_>>().join(", ")
+    (0..m.clusters()).map(|k|{let beats=m.beats(k);let half=beats.len()/2;
+        format!("{}({}){}",m.dimension(k),m.dimension(k)-m.ground_dimension(k),if half>0{format!(" beats {:?} MHz",beats[half..].iter().map(|w|(w/TAU*1e4).round()/1e4).collect::<Vec<_>>())}else{String::new()})}).collect::<Vec<_>>().join(", ")
 }
 
 fn main(){
@@ -199,10 +198,9 @@ fn solve(name:&str,mut request:Request,which:&str,duration:f64,samples:usize,cou
     println!("step: dt {:.4} us (the bound rule's {:.4} us), {:.1} s",s.dt,interval/grown.steps as f64,clock.elapsed().as_secs_f64());
     let harmonic=Harmonic::new(&model,&s,&initial,steps,outputs);
     let clock=Instant::now();
-    let outcome=simulate(&model,&s,&initial,seed,0,count,(count/(2*threads)).max(1),steps,outputs,&[],Some(&Variates{harmonic:&harmonic,twin:None}));
+    let outcome=simulate(&model,&s,&initial,seed,0,count,(count/(2*threads)).max(1),steps,outputs,&[],Some(&harmonic));
     let wall=clock.elapsed().as_secs_f64();
-    let means:Vec<Means>=(0..outputs).map(|i|Means{harmonic:harmonic.mean[i],twin:None}).collect();
-    let est=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab},&means);
+    let est=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab},&harmonic.mean);
     println!("{count} trajectories: {wall:.1} s wall, {} jumps, {:.1} ms per trajectory-ms; beats left out: their bound over the horizon {:.2e} (pilot {:.2e})",outcome.jumps,
         wall*1e3*threads as f64/(count as f64*duration*1e-3),outcome.beats*horizon,states.iter().map(|t|t.beats).fold(0.,f64::max)*horizon);
     let pick=|label:&str|request.states.iter().position(|x|x==label).unwrap();let m22=pick("ground-2-2");

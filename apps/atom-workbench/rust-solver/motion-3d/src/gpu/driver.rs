@@ -42,7 +42,6 @@ api!{
     cuDeviceGet:fn(*mut i32,i32);
     cuDeviceGetName:fn(*mut c_char,i32,i32);
     cuDeviceGetAttribute:fn(*mut i32,i32,i32);
-    cuDeviceTotalMem_v2:fn(*mut usize,i32);
     cuDevicePrimaryCtxSetFlags_v2:fn(i32,u32);
     cuDevicePrimaryCtxRetain:fn(*mut Handle,i32);
     cuDevicePrimaryCtxRelease_v2:fn(i32);
@@ -118,9 +117,6 @@ pub struct DeviceInfo{
     pub name:String,
     pub compute_capability:(i32,i32),
     pub multiprocessors:i32,
-    pub total_memory:usize,
-    /// Whether the display watchdog bounds every kernel's run time (WDDM).
-    pub watchdog:bool,
 }
 
 /// Every CUDA device the driver lists.
@@ -130,10 +126,9 @@ pub fn devices()->Result<Vec<DeviceInfo>,String>{
         let mut device=0;call!("cuDeviceGet",cuDeviceGet(&mut device,ordinal))?;
         let mut name=[0 as c_char;256];call!("cuDeviceGetName",cuDeviceGetName(name.as_mut_ptr(),256,device))?;
         let attribute=|a:i32|->Result<i32,String>{let mut v=0;call!("cuDeviceGetAttribute",cuDeviceGetAttribute(&mut v,a,device))?;Ok(v)};
-        let mut total=0;call!("cuDeviceTotalMem",cuDeviceTotalMem_v2(&mut total,device))?;
-        // CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR/MINOR, MULTIPROCESSOR_COUNT, KERNEL_EXEC_TIMEOUT.
+        // CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR/MINOR, MULTIPROCESSOR_COUNT.
         Ok(DeviceInfo{ordinal,name:unsafe{CStr::from_ptr(name.as_ptr())}.to_string_lossy().into_owned(),
-            compute_capability:(attribute(75)?,attribute(76)?),multiprocessors:attribute(16)?,total_memory:total,watchdog:attribute(17)?!=0})
+            compute_capability:(attribute(75)?,attribute(76)?),multiprocessors:attribute(16)?})
     }).collect()
 }
 

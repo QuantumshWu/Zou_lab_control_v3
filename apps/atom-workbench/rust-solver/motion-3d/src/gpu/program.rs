@@ -4,7 +4,7 @@
 //! and ground.rs and kept on the device while its batches run.
 use super::driver::{Buffer,Stream};
 use crate::engine::Settings;
-use crate::linear::Dense;
+use crate::linear::{single_round_off,Dense};
 use crate::model::{Model,GROUND,MOST_BEAMS,MOST_CARRIERS,MOST_FOCUSED,MOST_RANK,MOST_STATES,RINGING_SHARE};
 use crate::Complex;
 
@@ -48,7 +48,7 @@ pub struct NearUnit{carrier:i32,focused:i32,norm:f32,focus:f32}
 /// decay cross term (1), a decay (2) or a dressing's drive (3), its row, column, carrier, a decay's part, its tables' place
 /// (a cross term's X_k, and at `at2` its X2_k), its beams' tones, a drive's U_k.
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
-pub struct Term{kind:i32,row:i32,col:i32,carrier:i32,part:i32,at:i32,at2:i32,tones:i32,ntones:i32,u:[[f32;2];MOST_RANK]}
+pub struct Term{kind:i32,row:i32,col:i32,carrier:i32,part:i32,at:i32,at2:i32,tones:i32,ntones:i32,u:[[f32;2];MOST_RANK],residual:f64}
 /// The kernel's `Tone` (model.rs `Tone`): a beam's share of a term: the beam, the part of its beat and of its negative.
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Tone{beam:i32,part:i32,mirror:i32}
@@ -115,19 +115,16 @@ pub struct Params{
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct State{
     pub(crate) q:[f64;3],pub(crate) p:[f64;3],pub(crate) time:f64,pub(crate) logn:f64,pub(crate) threshold:f64,pub(crate) log_threshold:f64,pub(crate) prefix:[f64;9],
-    pub(crate) q0:[f64;3],pub(crate) p0:[f64;3],pub(crate) twin_logn:f64,pub(crate) twin_threshold:f64,pub(crate) twin_log_threshold:f64,
-    pub(crate) psi:[[f32;2];MAXM],pub(crate) twin:[[f32;2];MAXN],pub(crate) cluster:i32,pub(crate) jumps:i32,pub(crate) death:i32,
-    pub(crate) index:u32,pub(crate) twin_cluster:i32,pub(crate) twin_jumps:i32,pub(crate) beats:f32,
+    pub(crate) q0:[f64;3],pub(crate) p0:[f64;3],
+    pub(crate) psi:[[f32;2];MAXM],pub(crate) cluster:i32,pub(crate) jumps:i32,pub(crate) death:i32,
+    pub(crate) index:u32,pub(crate) beats:f32,
     pub(crate) interval:i32,pub(crate) step:i32,
 }
-/// The kernel's `Held`: the held twin's device data (all zero: no twin).
-#[repr(C)]#[derive(Clone,Copy,Default,Debug)]
-pub struct Held{pub(crate) u:u64,pub(crate) h:u64,pub(crate) l:u64,pub(crate) readout:u64,pub(crate) blocks:u64,pub(crate) jumps:u64}
 /// The kernel's `Run`: a launch's wave and output intervals.
 #[repr(C)]#[derive(Clone,Copy,Debug)]
 pub struct Run{
     pub(crate) states:u64,pub(crate) rings:u64,pub(crate) samples:u64,pub(crate) sums:u64,pub(crate) scratch:u64,pub(crate) tasks:u64,pub(crate) profile:u64,
-    pub(crate) records:u64,pub(crate) harmonic:u64,pub(crate) costs:u64,pub(crate) held:Held,pub(crate) seed:u64,pub(crate) budget:i64,
+    pub(crate) records:u64,pub(crate) harmonic:u64,pub(crate) costs:u64,pub(crate) seed:u64,pub(crate) budget:i64,
     pub(crate) outputs:i32,pub(crate) steps:i32,pub(crate) reach:i32,pub(crate) begin:i32,pub(crate) end:i32,
     pub(crate) half:[i32;3],pub(crate) ring:[i32;3],pub(crate) ring_at:[i32;3],
     pub(crate) ring_stride:i32,pub(crate) scratch_stride:i32,pub(crate) nlisted:i32,pub(crate) pad:i32,
@@ -136,18 +133,18 @@ pub struct Run{
 
 impl Run{
     /// A launch of no wave (a check's entry, `Gpu::jump_probe`): every buffer null, the seed zero.
-    pub(crate) fn empty()->Run{Run{states:0,rings:0,samples:0,sums:0,scratch:0,tasks:0,profile:0,records:0,harmonic:0,costs:0,held:Held::default(),seed:0,budget:0,
+    pub(crate) fn empty()->Run{Run{states:0,rings:0,samples:0,sums:0,scratch:0,tasks:0,profile:0,records:0,harmonic:0,costs:0,seed:0,budget:0,
         outputs:0,steps:0,reach:0,begin:0,end:0,half:[0;3],ring:[0;3],ring_at:[0;3],ring_stride:0,scratch_stride:0,nlisted:0,pad:0,listed:[0;MOST_LISTED]}}
 }
 
 /// The sizes, offsets and constants the kernel's `layout` reports, for the check that the twins and
 /// the constants they share match.
-pub fn layout()->[u32;28]{
+pub fn layout()->[u32;27]{
     use std::mem::{offset_of,size_of};
-    use super::{HARMONIC,MOST_INTERVALS,MOTION,RECORD,SLOT_RECORD,TWIN,WARPS};
+    use super::{HARMONIC,MOST_INTERVALS,MOTION,RECORD,SLOT_RECORD,WARPS};
     [size_of::<Beam>(),size_of::<Carrier>(),size_of::<Cluster>(),size_of::<Group>(),size_of::<Class>(),size_of::<Photon>(),size_of::<Coherent>(),size_of::<Channel>(),
         size_of::<Params>(),size_of::<State>(),size_of::<Run>(),offset_of!(Params,hm),offset_of!(Params,half_flow),offset_of!(Run,listed),offset_of!(State,psi),offset_of!(State,index),
-        MOST_INTERVALS,SLOT_RECORD,RECORD,WARPS,MAXN,TWIN,MOTION,HARMONIC,size_of::<Fourth>(),size_of::<NearUnit>(),size_of::<FirstField>(),MOST_FIRST].map(|x|x as u32)
+        MOST_INTERVALS,SLOT_RECORD,RECORD,WARPS,MAXN,MOTION,HARMONIC,size_of::<Fourth>(),size_of::<NearUnit>(),size_of::<FirstField>(),MOST_FIRST].map(|x|x as u32)
 }
 
 /// The model on the device: the program the kernels read (`Gpu::set`), the buffers it points into, the most
@@ -165,10 +162,10 @@ impl Program{
         if ng!=GROUND||ne!=NE{return Err(beyond(format!("{ng} 个基态、{ne} 个激发态")));}
         if settings.free!=[true;3]{return Err(beyond("运动只沿部分坐标轴".into()));}
         // The exact step's clusters (explicit excited states, beats not all left out: engine.rs `quiet_clusters`) in its bucket; where one takes it, any cluster a jump lands it in in its parts.
-        let quiet=crate::engine::quiet_clusters(model,settings);let exact_of=|k:usize|model.mixed(k)||(model.beating(k)&&quiet[k].is_none());let takes=(0..model.clusters()).any(exact_of);
+        let quiet=crate::engine::quiet_clusters(model,settings);let exact_of=|k:usize|model.takes_exact(k,&quiet);let takes=(0..model.clusters()).any(exact_of);
         if let Some(k)=(0..model.clusters()).find(|&k|exact_of(k)&&model.dimension(k)>MAXM){
             return Err(beyond(format!("子空间 {} 个态（{} 个激发态显式）超出精确步的 {MAXM} 个",model.dimension(k),model.dimension(k)-model.ground_dimension(k))));}
-        if let Some(k)=(0..model.clusters()).find(|&k|takes&&1+model.beats(k).0.len()>MOST_PARTS){return Err(beyond(format!("子空间 {} 的 {} 个残余拍频",k,model.beats(k).0.len()/2)));}
+        if let Some(k)=(0..model.clusters()).find(|&k|takes&&1+model.beats(k).len()>MOST_PARTS){return Err(beyond(format!("子空间 {} 的 {} 个残余拍频",k,model.beats(k).len()/2)));}
         if model.geometry.len()>MOST_BEAMS||model.carriers.len()>MOST_CARRIERS||model.focused.len()>MOST_FOCUSED{return Err(beyond("光束或强度维度太多".into()));}
         if let Some(c)=g.clusters.iter().find(|c|c.states.len()>MAXN){return Err(beyond(format!("子空间 {} 个态",c.states.len())));}
         let hm=model.hbar_over_mass;
@@ -220,7 +217,7 @@ impl Program{
             for c in (0..nc).filter(|&c|(mixed(k,states)>>c)&1==1){for d in (0..nc).filter(|&d|d!=c){for &b in states{if g.couples(d,b){bits|=1<<(d*GROUND+b);}}}}
             bits};
         for(k,(layout,cl))in model.layouts.iter().zip(&g.clusters).enumerate(){
-            let parts=1+model.beats(k).0.len();let(n,n0)=(layout.n,layout.n0);
+            let parts=1+model.beats(k).len();let(n,n0)=(layout.n,layout.n0);
             let(list,u,tone_list,emission)=model.exact_terms(k);let(beat_waves,state_waves)=model.beat_waves(k);
             // The beams of its kept drives, in the order of their first drive (the kernel's `absorption`).
             let driven=driven_beams.len();for t in list.iter().filter(|t|t[0]==0){for &l in &model.carriers[t[3]].beams{if !driven_beams[driven..].contains(&(l as i32)){driven_beams.push(l as i32);}}}
@@ -231,9 +228,9 @@ impl Program{
                 group_parts:group_parts.len() as i32,residual_parts:residual_parts.len() as i32,first_fields:first_fields.len() as i32,nfirst:0,states:[0;MAXM],shifts:shifts(k,&cl.states),mixed:mixed(k,&cl.states),driven:driven as i32,ndriven:(driven_beams.len()-driven) as i32,labels:state_waves.map_or(-1,|_|labels.len() as i32),moves:model.moves(k) as i32,pad:0};
             for(x,&b)in cl.states.iter().enumerate(){cluster.states[x]=b as i32;}
             // Its beats, its explicit states and its terms (model.rs `exact_terms`).
-            omegas.extend(model.beats(k).0);waves.extend(beat_waves.iter().flatten().copied());labels.extend(state_waves.iter().flat_map(|x|x.iter().flatten()).map(|&x|x as f32));excited_list.extend(cl.excited.iter().map(|&e|e as i32));
-            for((t,u),per)in list.iter().zip(&u).zip(&tone_list){
-                terms.push(Term{kind:t[0] as i32,row:t[1] as i32,col:t[2] as i32,carrier:t[3] as i32,part:t[4] as i32,at:t[5] as i32,at2:t[6] as i32,tones:tones.len() as i32,ntones:per.len() as i32,u:u.map(|z|[z.re as f32,z.im as f32])});
+            omegas.extend(model.beats(k));waves.extend(beat_waves.iter().flatten().copied());labels.extend(state_waves.iter().flat_map(|x|x.iter().flatten()).map(|&x|x as f32));excited_list.extend(cl.excited.iter().map(|&e|e as i32));
+            for(i,((t,u),per))in list.iter().zip(&u).zip(&tone_list).enumerate(){
+                terms.push(Term{kind:t[0] as i32,row:t[1] as i32,col:t[2] as i32,carrier:t[3] as i32,part:t[4] as i32,at:t[5] as i32,at2:t[6] as i32,tones:tones.len() as i32,ntones:per.len() as i32,u:u.map(|z|[z.re as f32,z.im as f32]),residual:if t[0]==0{layout.drives[i].residual}else{0.}});
                 tones.extend(per.iter().map(|x|Tone{beam:x[0] as i32,part:x[1] as i32,mirror:x[2] as i32}));
             }
             group_parts.extend(layout.groups.iter().map(|gl|model.part(k,gl.residual) as i32));
@@ -364,7 +361,7 @@ impl Program{
         let term_floor:Vec<f32>=(0..nc).flat_map(|c|(0..ng).map(move|b|(c,b))).map(|(c,b)|{
             let strength=|s:usize|g.carriers[c].beams.iter().map(|&l|(0..ne).map(|i|g.folded[l][(i,s)].norm_sqr()).sum::<f64>().sqrt()).sum::<f64>();
             let k=g.cluster[b];let most=g.clusters[k].states.iter().map(|&s|strength(s)).fold(0.,f64::max);let floor=g.floors.get(k).copied().unwrap_or(0.);
-            if strength(b)>0.{(f32::EPSILON as f64*g.generator_scale*floor/(3.*most*strength(b))) as f32}else{0.}}).collect();
+            if strength(b)>0.{(single_round_off(g.generator_scale*floor)/(3.*most*strength(b))) as f32}else{0.}}).collect();
         // Per channel (d, a) its near units at their focus intensity summed (the kernel's `self_energy`), lane-major.
         let powers:Vec<[f32;2]>=(0..nc).flat_map(|d|(0..ng).map(move|a|(d,a))).flat_map(|(d,a)|{let mut m=vec![Complex::ZERO;ne*ne];
             for &(u,x)in order.iter().filter(|(u,x)|x.carrier==d&&!model.focused.contains(u)){let scale=g.units[u].focus*g.units[u].norm;
@@ -431,6 +428,8 @@ impl Program{
     }
     /// The tables' nodes per intensity axis.
     pub fn nodes(&self)->usize{self.params.nodes as usize}
+    /// Whether the packed execution plan contains an exact-step cluster.
+    pub fn has_exact_steps(&self)->bool{self.exact!=0}
     /// A jump's working space per trajectory (float2): the exact response's -- every near beam's
     /// photon tables at each cluster column --, the photons' matrices per axis, the classes' weights and the fourth order's
     /// (the kernel's `Program::classes_at` and `Program::weights` are where they start), the exact step's and the transient's

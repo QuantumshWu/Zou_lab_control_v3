@@ -251,7 +251,7 @@ test('a motion result is read strictly: the 3D block with the total temperature,
     ['one axis missing',d=>{delete d.motion.temperatureUK.z;}],['no regime',d=>{delete d.motion.classical;}],['no trajectories',d=>{d.motion.trajectories=0;}],
     ['a loss that decreases',d=>{d.motion.lossProbability[2]=0;}],['an unknown key',d=>{d.motion.axes=['x','y','z'];}],
     ['no device',d=>{delete d.diagnostics.device;}],['another device',d=>{d.diagnostics.device='tpu';}],['an empty note',d=>{d.diagnostics.deviceNote=' ';}],
-    ['no ledger',d=>{delete d.diagnostics.approximations;}],['a ledger key',d=>{d.diagnostics.approximations.total=1;}],['a negative estimate',d=>{d.diagnostics.approximations.items[0].estimate=-1;}],
+    ['no ledger',d=>{delete d.diagnostics.approximations;}],['a ledger key',d=>{d.diagnostics.approximations.total=1;}],['no totals',d=>{delete d.diagnostics.approximations.totals;}],['a negative total',d=>{d.diagnostics.approximations.totals.temperature.error=-1;}],['a negative estimate',d=>{d.diagnostics.approximations.items[0].estimate=-1;}],
     ['an item without its action',d=>{delete d.diagnostics.approximations.items[1].action;}],['an empty flag',d=>{d.diagnostics.approximations.flagged='';}],['an empty ledger note',d=>{d.diagnostics.approximations.note='';}],
   ])assert.throws(()=>readMotion(change),/运动结果/,label);
   assert.throws(()=>readMotion(d=>{d.populationAccuracy.requestedTolerance=.01;}),/布居精度/);
@@ -334,7 +334,7 @@ test('the motion engine\'s sentences are shown in Chinese',()=>{
   assert.deepEqual(notes,['GPU 计算出错（{error}）：本次在 CPU 上计算','{reason}：本次在 CPU 上计算']);
   const gpu=readFileSync(new URL('../rust-solver/motion-3d/src/gpu/mod.rs',import.meta.url),'utf8');
   for(const reason of ['NVIDIA 驱动太旧','没有 NVIDIA 显卡','驱动无法编译 GPU 内核'])assert.ok(gpu.includes(reason),reason);
-  // A result short of its statistical target says why in Chinese.
-  const partial=[...adapter.matchAll(/format!\("(The statistical error is[^"]*)"\)/g)].map(m=>m[1].replace(/\{[A-Za-z_]*(?::[^}]*)?\}/g,'1'));
-  assert.equal(partial.length,1);assert.equal(solverText(partial[0]),'统计误差为 1，目标 1。');
+  // A result short of its target says why in Chinese.
+  const partial=[...adapter.matchAll(/format!\("(The estimated error is[^"]*)"\)/g)].map(m=>m[1].replace(/\{[A-Za-z_]*(?::[^}]*)?\}/g,'1'));
+  assert.equal(partial.length,1);assert.equal(solverText(partial[0]),'估计误差为 1，目标 1。');
 });

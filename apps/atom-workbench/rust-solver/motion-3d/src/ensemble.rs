@@ -163,8 +163,7 @@ impl Mode{
     fn new(g:&Geometry)->Result<Mode,String>{
         let(waist,n)=(g.waist.ok_or("The trap beam has no waist")?,g.direction);
         let rayleigh=g.wave_number*waist*waist/2.;
-        let pick=if n[0].abs()<0.9{[1.,0.,0.]}else{[0.,1.,0.]};let along:f64=(0..3).map(|i|pick[i]*n[i]).sum();
-        let e1:[f64;3]={let v:[f64;3]=std::array::from_fn(|i|pick[i]-along*n[i]);let l=(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]).sqrt();v.map(|x|x/l)};
+        let e1=g.across();
         let e2=[n[1]*e1[2]-n[2]*e1[1],n[2]*e1[0]-n[0]*e1[2],n[0]*e1[1]-n[1]*e1[0]];
         Ok(Mode{frame:[e1,e2,n],waist,rayleigh})
     }
@@ -183,7 +182,7 @@ impl Mode{
     fn whitening(&self,free:[bool;3])->([[f64;3];3],f64){
         let n=self.frame[2];let(across,axial)=(2./(self.waist*self.waist),1./(self.rayleigh*self.rayleigh));
         let form:[[f64;3];3]=std::array::from_fn(|i|std::array::from_fn(|j|if free[i]&&free[j]{across*(if i==j{1.}else{0.})+(axial-across)*n[i]*n[j]}else if i==j{1.}else{0.}));
-        let(values,vectors)=crate::model::symmetric_eigen(form);
+        let(values,vectors)=crate::linear::symmetric_eigen(form);
         (std::array::from_fn(|i|std::array::from_fn(|j|if free[i]&&free[j]{(0..3).map(|k|vectors[k][i]*vectors[k][j]/values[k].sqrt()).sum()}else{0.})),values.iter().map(|v|v.sqrt().recip()).product())
     }
 }

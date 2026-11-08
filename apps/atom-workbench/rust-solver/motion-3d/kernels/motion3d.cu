@@ -8,7 +8,7 @@
 // the force, the photons. Double precision where it accumulates or decides: the time, the position
 // and the momentum with the harmonic flow that turns them, ln‖ψ‖² against ln θ, the random
 // deviates and every choice made with them, the kicks, the phases' angles, the exact response's
-// diagonal, the motion windows and every sum -- and the readouts of the atom's and the held twin's
+// diagonal, the motion windows and every sum -- and the readout of the atom's
 // populations, whose rows then sum to one to double precision.
 //
 // # Layout
@@ -49,14 +49,13 @@ typedef unsigned long long u64;
 #define MOST_LISTED 32
 #define WARPS 8                         // trajectories per block: lib.rs `TASK`
 // An output's sums (stats.rs `Sums`; src/gpu/mod.rs `sums_of`): held, profile, doppler, the 32
-// populations; the held twin's 32 populations, Σ_k c_k² and Σ_k c_k p_k; the folded excited population
+// populations; the folded excited population
 // (η²); per lab axis the motion's Σκ, Σκ²; per lab axis the harmonic control's Σc, Σc², Σc κ².
-#define TWIN 35                         // where the held twin's sums start
-#define FOLDED 69                       // where the folded excited population's sum is
-#define POINT_RECORD 70                 // the part taken at the output time
-#define MOTION 70                       // where the motion windows' means start
-#define HARMONIC 76                     // where the harmonic control's sums start
-#define RECORD 85
+#define FOLDED 35                       // where the folded excited population's sum is
+#define POINT_RECORD 36                 // the part taken at the output time
+#define MOTION 36                       // where the motion windows' means start
+#define HARMONIC 42                     // where the harmonic control's sums start
+#define RECORD 51
 #define CLOSE 6                         // a closing window's record: held, ⟨κ⟩, ⟨κ²⟩, the harmonic control's c, c², c ⟨κ²⟩
 #define SLOT_RECORD (POINT_RECORD+3*2*CLOSE)   // a trajectory's record of an interval: the point's, per lab axis two closing windows' 
 #define MOST_INTERVALS 64               // the most output intervals of a launch (the records' room)
@@ -76,7 +75,7 @@ typedef unsigned long long u64;
 // the parts of its work, and the advances and jumps it makes, per trajectory into Run::profile.
 // Without PROFILE the spans are nothing.
 enum Span{SPAN_POINT,SPAN_GENERATOR,SPAN_EXPONENTIAL,SPAN_EVOLVE,SPAN_JUMP,SPAN_EXACT,SPAN_PHOTONS,SPAN_ABSORPTION,SPAN_LOSS,SPAN_STEP,SPAN_READOUT,SPAN_WINDOWS,
-    SPAN_TWIN,SPAN_TOTAL,COUNT_ADVANCES,COUNT_JUMPS,COUNT_EXACT,SPAN_JUMPPOINT,SPAN_DRAW,SPAN_EMIT,SPAN_KICK,SPAN_TRANSIENT,SPAN_ITEMS,SPAN_BEAMS,SPAN_MATRICES,SPAN_WEIGHTS,COUNT_NODES,COUNT_PRODUCTS,SPAN_COMPONENTS,SPAN_FORCES,SPAN_CHECKPOINT,COUNT_LAUNCHES,SPANS};  // at most 32: a lane each
+    SPAN_TOTAL,COUNT_ADVANCES,COUNT_JUMPS,COUNT_EXACT,SPAN_JUMPPOINT,SPAN_DRAW,SPAN_EMIT,SPAN_KICK,SPAN_TRANSIENT,SPAN_ITEMS,SPAN_BEAMS,SPAN_MATRICES,SPAN_WEIGHTS,COUNT_NODES,COUNT_PRODUCTS,SPAN_COMPONENTS,SPAN_FORCES,SPAN_CHECKPOINT,COUNT_LAUNCHES,SPANS};  // at most 32: a lane each
 #ifdef PROFILE
 #define SPAN_BEGIN(name) const long long name=clock64()
 #define SPAN_END(span,name) do{if(lane==0)W.profile[span]+=clock64()-name;}while(0)
@@ -243,7 +242,7 @@ struct Channel{int carrier,col;double residual;};
 // A term of a cluster's explicit states (model.rs `exact_terms`): a kept drive (kind 0), a decay cross term
 // (1), a decay (2) or a dressing's drive (3); its entry, carrier, a decay's part, its tables' place (a cross term's X_k, and at `at2` its X2_k),
 // its beams' tones tones[tones, tones + ntones), a drive's U_k.
-struct Term{int kind,row,col,carrier,part,at,at2,tones,ntones;float u[MOST_RANK][2];};
+struct Term{int kind,row,col,carrier,part,at,at2,tones,ntones;float u[MOST_RANK][2];double residual;};
 // A beam's share of a term (model.rs `Tone`): the beam, the part of its beat and of its negative.
 struct Tone{int beam,part,mirror;};
 // A class's photon from an explicit state (ground.rs `Class::direct`): its place in the cluster, the ground
@@ -321,18 +320,11 @@ struct State{
     double time,logn,threshold,log_threshold;
     double prefix[9];                   // per lab axis: steps, Σκ, Σκ² through the last step (lib.rs `Windows`)
     double q0[3],p0[3];                 // the initial ones: the harmonic control's
-    double twin_logn,twin_threshold,twin_log_threshold;   // the held twin's (control.rs)
     float2 psi[MAXM];                   // ψ/‖ψ‖ on its cluster
-    float2 twin[MAXN];                  // the held twin's
     int cluster,jumps,death;            // death: the step it was lost at, −1 while held
-    u32 index;int twin_cluster,twin_jumps;float beats;   // beats: the largest bound per unit time of the beats its exact steps left out
+    u32 index;float beats;              // beats: the largest bound per unit time of the beats its exact steps left out
     int interval,step;                  // where it stands: the output interval it is in, its last step (−1 before the first)
 };
-// The held twin (control.rs `Twin`, engine.rs `Engine::held`), none when `u` is null: per cluster k
-// its half step's propagator `u` and its H_eff `h` (n_k² entries from blocks[k], row-major) and its
-// populations' readout (32 coefficients per density entry from 32·blocks[k], control.rs `readout`);
-// per class its jump operators `l` (3 × target × cluster from jumps[class]).
-struct Held{const float2* u;const float2* h;const float2* l;const double* readout;const int* blocks;const int* jumps;};
 // A launch: a wave's tasks over the output intervals [begin, end).
 struct Run{
     State* states;double* rings;double* samples;double* sums;float2* scratch;
@@ -340,8 +332,7 @@ struct Run{
     unsigned long long* profile;        // per slot SPANS counters (with PROFILE)
     double* records;                    // per slot MOST_INTERVALS records of SLOT_RECORD: a ring over the intervals not yet summed
     const double* harmonic;             // per output and lab axis the harmonic control's A and B (control.rs `Harmonic`); none: no control
-    unsigned long long* costs;          // in host memory, per slot this launch's cycles of the held twin and in all (lib.rs `Outcome::seconds`), and the interval it stands in
-    Held held;
+    unsigned long long* costs;          // in host memory, per slot this launch's cycles and the interval it stands in
     u64 seed;
     long long budget;                   // the cycles a warp takes in a launch, a step at least (src/gpu/mod.rs)
     int outputs,steps,reach,begin,end;  // the output times, the steps between two, the steps past the last; the first interval not yet summed, the end of the records' room (`task_sums`: of the intervals every slot has passed)
@@ -371,12 +362,12 @@ struct Point{
 // eigenvectors, its terms' weights over the columns, its eigenvalues and its states' own energies.
 struct BlockSpace{float shift[MOST_CARRIERS*NG];float2 a[MAXN*MAXN],u[MAXN*MAXN],weights[MAXN];double values[MAXN],own[MAXN];};
 // A jump's working space.
-struct JumpSpace{float2 u[3][MAXN],f[MAXN];float landing[NG],shares[MOST_BEAMS],projections[MOST_BEAMS],drives[MOST_BEAMS],into[MAXM],direct;int beams[MOST_BEAMS],driven[MOST_BEAMS],ndrives;};
+struct JumpSpace{float2 u[3][MAXN],f[MAXN];float landing[NG],shares[MOST_BEAMS],projections[MOST_BEAMS],drives[MOST_BEAMS],into[MAXM],direct;
+    float state_weight[MAXM],energy[MAXM],slope[MAXM][3];int beams[MOST_BEAMS],driven[MOST_BEAMS],ndrives;};
 struct Warp{
     Point pt;
     float2 psi[MAXM],start[MAXM];       // ψ, ψ at a step's start
     double2 readout[MAXN];              // the readout's Y ψ
-    float2 twin[MAXN];                  // the held twin's ψ
     // vec: the exact step's vectors (`half_of`); dressing: the exact responses' shifts ΔE_a^d (`exact_responses`); first: a generator's
     // first orders (`first_table`), clear of m[2].
     union{float2 m[3][MAXN*MAXN];FirstPair first[MOST_FIRST];float2 gradient_a[MOST_BEAMS][3];JumpSpace jump;float4 vec[MAXM/2];BlockSpace block;};
@@ -388,8 +379,6 @@ static_assert(sizeof(FirstPair)*MOST_FIRST<=2*MAXN*MAXN*sizeof(float2),"a genera
 
 // The trajectory's scalars (uniform over the warp).
 struct Traj{double q[3],p[3],time,logn,threshold,log_threshold;int cluster,jumps,death;u32 index;float beats;};
-// The held twin's (control.rs): it does not move.
-struct Twin{double logn,threshold,log_threshold;int cluster,jumps;};
 
 // A lane's entries of an n × n matrix: e = lane + 32 j, its row and column.
 template<int S=SLOTS> struct Entries{
@@ -418,13 +407,14 @@ __device__ __forceinline__ void lab32(const double v[3],float out[3]){
 
 // a(r) and ∇a(r) (model.rs `Geometry::field`): the plane wave e^{ikζ}, or the paraxial Gaussian
 // beam focused at the origin e^{ikζ} exp(−ρ²/(w² q))/q, q = 1 + iζ/z_R.
+template<bool Log=false>
 __device__ void field(const Beam& b,const float r[3],float2& a,float2 g[3]){
     const float zeta=r[0]*b.direction[0]+r[1]*b.direction[1]+r[2]*b.direction[2];
     float sn,cs;sincosf(b.k*zeta,&sn,&cs);const float2 wave=make_float2(cs,sn);
     if(b.inv_w2==0.f){
         a=wave;const float2 ika=make_float2(-b.k*sn,b.k*cs);
         #pragma unroll
-        for(int i=0;i<3;i++)g[i]=b.direction[i]*ika;
+        for(int i=0;i<3;i++)g[i]=b.direction[i]*(Log?make_float2(0.f,b.k):ika);
         return;
     }
     const float2 inv=cdiv(make_float2(1.f,0.f),make_float2(1.f,zeta*b.inv_rayleigh));
@@ -433,7 +423,7 @@ __device__ void field(const Beam& b,const float r[3],float2& a,float2 g[3]){
     const float2 along=make_float2(0.f,b.k)+b.inv_rayleigh*(make_float2(0.f,rho2*b.inv_w2)*inv*inv-make_float2(-inv.y,inv.x));
     const float2 across=(-2.f*b.inv_w2)*inv;
     #pragma unroll
-    for(int i=0;i<3;i++)g[i]=a*(b.direction[i]*along+(r[i]-zeta*b.direction[i])*across);
+    for(int i=0;i<3;i++){const float2 v=b.direction[i]*along+(r[i]-zeta*b.direction[i])*across;g[i]=Log?v:a*v;}
 }
 
 // The C1 cubic Hermite weights with Catmull-Rom's central slopes (one-sided at the grid's ends) on four consecutive
@@ -707,7 +697,7 @@ __device__ void coherent_metric(const Warp& W,const Cluster& C,const Entries<>& 
 template<int S,int U>
 __device__ void fourth_hamiltonian(const Warp& W,const Cluster& C,const Entries<S>& E,double t,int lane,float2 (&h)[S]){
     #pragma unroll
-    for(int j=0;j<SLOTS;j++)h[j]=zero2();
+    for(int j=0;j<S;j++)h[j]=zero2();
     if(C.fourth<0)return;
     const Fourth F=P.fourths[C.fourth];float2 buf[SLOTS],unused[MOST_FOCUSED][SLOTS];double nu=0.;float2 phase=make_float2(1.f,0.f);
     for(int q=0;q<F.nquartic;q++){
@@ -716,7 +706,7 @@ __device__ void fourth_hamiltonian(const Warp& W,const Cluster& C,const Entries<
         const float2 c=m*phase;
         gather<false>(W,false,P.tables+C.table+Q.at,C.size,E.nn,lane,buf,unused);
         #pragma unroll
-        for(int j=0;j<SLOTS;j++)h[j]+=c*buf[j];
+        for(int j=0;j<S;j++)h[j]+=c*buf[j];
     }
     in_frames(C,E,t,lane,h);
 }
@@ -1564,6 +1554,11 @@ __device__ int absorption(Warp& W,const Cluster& C,const Class& K,int nt,const d
         }
         total=warp_sum(lane<nt?norm2(v):0.f);
         for(int s=0;s<ne;s++)weight[s]=warp_sum(lane<nt?norm2(part[s]):0.f);
+        if(lane<C.n){
+            float2 ds[MOST_FOCUSED];J.energy[lane]=entry_slopes(W,tables+C.h0+lane*C.n+lane,C.size,ds).x;
+            for(int a=0;a<3;a++){float v=0.f;for(int f=0;f<P.focused;f++)v+=ds[f].x*pt.grad_s[f][a];J.slope[lane][a]=v;}
+        }
+        if(lane<ne)J.state_weight[lane]=weight[lane];
         const auto driving=[&](const Term& T,int rank,int l){const Beam& b=P.beams[l];float2 z=zero2();
             for(int k=0;k<rank;k++)z+=make_float2(b.coefficients[k][0],b.coefficients[k][1])*make_float2(T.u[k][0],T.u[k][1]);
             return norm2(z*pt.a[l]*W.psi[T.col]);};
@@ -1639,7 +1634,7 @@ __device__ __forceinline__ int picked(const float* weights,int n,double x){
 }
 // A jump's first draws (engine.rs `jump`), each class's weight in `weights` and their total positive:
 // the class, the next threshold, the polarization's and the absorbed beam's uniforms -- before the
-// direction's rejection loop, so that a twin on the same stream keeps its thresholds and choices.
+// direction's rejection loop.
 struct Draws{int pick;double threshold,polarization,absorbed;};
 __device__ Draws draw(Rng& rng,const float* weights,int nclasses,double total){
     Draws d;const double x=rng.uniform()*total;d.threshold=rng.open_uniform();d.polarization=rng.uniform();d.absorbed=rng.uniform();
@@ -1750,7 +1745,8 @@ __device__ __forceinline__ bool part_weights(double s,const double mu[3],double 
 // mean on the photon of ‖f‖² `size` (`part_weights`); `absorbed` picks the part, its leftover the explicit part's beam by J.drives,
 // its lower bits the sign of its drives' mean's shot noise, and the rest of the exact conditional mean `mean` is added -- onto
 // the momentum on the trap's principal axes.
-__device__ void recoil(const JumpSpace& J,Traj& t,const double n[3],double wave_number,const double mean[3],int count,double size,double absorbed,int lane){
+__device__ void recoil(const Warp& W,const Cluster& C,Traj& t,const double n[3],double wave_number,const double mean[3],int count,double size,double absorbed,int lane){
+    const JumpSpace& J=W.jump;const Point& pt=W.pt;
     double kick[3],mu[3]={0.,0.,0.},target[3],s=0.,on=0.,q,qx;
     if(lane<count){
         const Beam& b=P.beams[J.beams[lane]];const double k=(double)b.k;s=(double)J.shares[lane];on=(double)J.projections[lane]/size;
@@ -1774,13 +1770,28 @@ __device__ void recoil(const JumpSpace& J,Traj& t,const double n[3],double wave_
             const double left=fmin(fmax(x/qx,0.),1.);
             double total=0.;for(int i=0;i<J.ndrives;i++)total+=(double)J.drives[i];
             if(total>0.){
-                double average[3]={0.,0.,0.};
-                for(int i=0;i<J.ndrives;i++){const Beam& b=P.beams[J.driven[i]];const double w=(double)J.drives[i]*(double)b.k/total;for(int a=0;a<3;a++)average[a]+=w*(double)b.direction[a];}
                 double y=left*total;int l=0;for(int i=J.ndrives-1;i>=0;i--)if(J.drives[i]>0.f){l=i;break;}
                 for(int i=0;i<J.ndrives;i++){const double v=(double)J.drives[i];if(y<v){l=i;break;}y-=v;}
-                const double bits=absorbed*67108864.,sign=bits-floor(bits)<0.5?1.:-1.;const Beam& b=P.beams[J.driven[l]];  // engine.rs `SIGN_BITS`
-                #pragma unroll
-                for(int a=0;a<3;a++)kick[a]+=(double)b.direction[a]*(double)b.k-average[a]+sign*average[a];
+                const int beam=J.driven[l];const Beam& b=P.beams[beam];const Carrier Rc=P.carriers[b.carrier];int chosen=-1;
+                for(int i=0;i<C.nterms;i++){
+                    const Term T=P.terms[C.terms+i];if(T.kind!=0)break;if(T.carrier!=b.carrier)continue;const int s=T.row-C.n0;
+                    float2 v=zero2();for(int k=0;k<Rc.rank;k++)v+=make_float2(b.coefficients[k][0],b.coefficients[k][1])*make_float2(T.u[k][0],T.u[k][1]);
+                    const float weight=J.into[s]>0.f?J.state_weight[s]*norm2(v*pt.a[beam]*W.psi[T.col])/J.into[s]:0.f;
+                    if(weight<=0.f)continue;chosen=i;if(y<(double)weight)break;y-=(double)weight;
+                }
+                if(chosen>=0){
+                    const Term T=P.terms[C.terms+chosen];const int e=P.excited_list[C.excited+T.row-C.n0];
+                    const double delta=(double)J.energy[T.row]-(double)J.energy[T.col]+T.residual+(double)pt.shift[beam],gamma=0.5*(double)P.decay[e*NE+e].x;
+                    const double inv=1./(delta*delta+gamma*gamma),bits=absorbed*67108864.;
+                    const double sign=bits-floor(bits)<0.5?1.:-1.,quadrature=2.*bits-floor(2.*bits)<0.5?1.:-1.;
+                    float2 field_value,ds[3];field<true>(b,pt.r,field_value,ds);
+                    for(int a=0;a<3;a++){
+                        const double gradient=(double)J.slope[T.row][a]-(double)J.slope[T.col][a];
+                        const double phase=(double)ds[a].y-gamma*inv*gradient;
+                        const double amplitude=(double)ds[a].x-delta*inv*gradient;
+                        kick[a]+=sign*phase+quadrature*amplitude;
+                    }
+                }
             }
         }
     }
@@ -1828,7 +1839,7 @@ __device__ __noinline__ void jump(u64 seed,Warp& W,Traj& t,bool exact,int lane,f
     SPAN_END(SPAN_ABSORPTION,absorbed);
     SPAN_BEGIN(kicking);double mean[3];
     for(int x=0;x<3;x++)mean[x]=(double)m[x]/(double)size;
-    recoil(J,t,n,K.wave_number,mean,count,(double)size,d.absorbed,lane);
+    recoil(W,C,t,n,K.wave_number,mean,count,(double)size,d.absorbed,lane);
     const float scale=1.f/sqrtf(size);
     __syncwarp();if(lane<MAXM)W.psi[lane]=lane<nt?scale*J.f[lane]:zero2();__syncwarp();
     t.cluster=K.target;t.logn=0.;t.threshold=d.threshold;t.log_threshold=log(d.threshold);
@@ -1836,95 +1847,6 @@ __device__ __noinline__ void jump(u64 seed,Warp& W,Traj& t,bool exact,int lane,f
     transient(W,t,tu,rng,lane,scratch+P.transient_at);SPAN_END(SPAN_TRANSIENT,transiting);
 }
 
-// ---------------------------------------------------------------------------------------------
-// The held twin (control.rs, engine.rs `Engine::held`): the trajectory's internal state on its own
-// streams at the twin's point, its generator and jumps there computed once; it does not move.
-
-// The twin's flow for τ without jumps: ψ ← U ψ twice, U the half step's propagator for a whole step,
-// exp(−i H τ/2) by the exponentials' series for a step's part; ln‖ψ‖² at the middle (`lh`) and the end.
-__device__ void hold_advance(const Run& R,Warp& W,Twin& h,double tau,int lane,double& lh){
-    const int n=P.clusters[h.cluster].n,at=R.held.blocks[h.cluster];const float2* U=R.held.u+at;
-    if(tau!=P.dt){
-        const Entries E(n,lane);
-        __syncwarp();
-        #pragma unroll
-        for(int j=0;j<SLOTS;j++)if(E.has(j,lane))W.m[0][lane+32*j]=R.held.h[at+lane+32*j];
-        __syncwarp();
-        exponential(W,E,0.5*tau,lane);U=W.m[2];
-    }
-    const float nh=apply(U,W.twin,n,lane);lh=h.logn+(double)logf(nh);
-    const float n1=apply(U,W.twin,n,lane);h.logn=lh+(double)logf(n1);
-}
-
-// The twin's jump (engine.rs `Engine::jump` of a held atom): the trajectory's stream of the twin's
-// jump number, the classes' amplitudes from the jump operators at its point, the same draws as a
-// moving atom's, no kicks.
-__device__ void hold_jump(const Run& R,Warp& W,Twin& h,u32 index,int lane,float2* scratch){
-    h.jumps++;Rng rng(R.seed,PURPOSE_JUMP,index,(u32)h.jumps);
-    const Cluster C=P.clusters[h.cluster];JumpSpace& J=W.jump;float* weights=(float*)(scratch+P.classes_at);
-    // u_x = L_x ψ of a class at the lane's (x, row).
-    auto amplitude=[&](int c,int nt)->float2{
-        float2 u=zero2();if(lane>=3*nt)return u;
-        const int x=lane%3,row=lane/3;const float2* l=R.held.l+R.held.jumps[C.classes+c]+(x*nt+row)*C.n;
-        for(int j=0;j<C.n;j++)u+=l[j]*W.twin[j];
-        return u;
-    };
-    double total=0.;
-    for(int c=0;c<C.nclasses;c++){
-        const int nt=P.clusters[P.classes[C.classes+c].target].n;
-        const float w=warp_sum(norm2(amplitude(c,nt)));if(lane==0)weights[c]=w;total+=(double)w;
-    }
-    __syncwarp();
-    if(!(total>0.)){h.threshold=rng.open_uniform();h.log_threshold=log(h.threshold);return;}
-    const Draws d=draw(rng,weights,C.nclasses,total);
-    const Class K=P.classes[C.classes+d.pick];const int nt=P.clusters[K.target].n;
-    const float2 u=amplitude(d.pick,nt);if(lane<3*nt)J.u[lane%3][lane/3]=u;
-    __syncwarp();
-    double n[3],e[3];const float size=emit(rng,J,nt,d.polarization,lane,n,e);
-    const float scale=1.f/sqrtf(size);
-    __syncwarp();if(lane<MAXN)W.twin[lane]=lane<nt?scale*J.f[lane]:zero2();__syncwarp();
-    h.cluster=K.target;h.logn=0.;h.threshold=d.threshold;h.log_threshold=log(d.threshold);
-}
-
-// One step of the twin (engine.rs `Engine::step` of a held atom): where ‖ψ‖² crosses the threshold
-// the step is redone to the crossing, the jump made there and the rest taken from the state it left.
-__device__ void hold_step(const Run& R,Warp& W,Twin& h,u32 index,int lane,float2* scratch){
-    double left=P.dt;
-    for(;;){
-        const Twin start=h;
-        if(lane<MAXN)W.start[lane]=W.twin[lane];
-        double lh;hold_advance(R,W,h,left,lane,lh);
-        if(h.logn>h.log_threshold)break;
-        double ta,tb,la,lb;
-        if(lh<=h.log_threshold){ta=0.;tb=0.5*left;la=start.logn;lb=lh;}else{ta=0.5*left;tb=left;la=lh;lb=h.logn;}
-        const double at=lb<la?fmin(fmax(ta+(h.log_threshold-la)/(lb-la)*(tb-ta),ta),tb):tb;
-        h=start;__syncwarp();if(lane<MAXN)W.twin[lane]=W.start[lane];__syncwarp();
-        if(at>0.){double unused;hold_advance(R,W,h,at,lane,unused);}
-        hold_jump(R,W,h,index,lane,scratch);
-        left-=at;
-        if(!(left>0.))break;
-    }
-}
-
-// The twin's record of an output (control.rs `Twin::populations`, stats.rs `Group::add`): its 32
-// populations c_k at its point -- the readout's map of its density ψψ†/‖ψ‖² -- and Σ_k c_k², Σ_k c_k p_k
-// with the atom's populations p (already in `out`, zero when lost).
-__device__ void hold_record(const Run& R,Warp& W,const Twin& h,int lane,double* out){
-    // In double precision from ψ as it is, the map's coefficients the CPU's: Σ_k c_k is one to rounding.
-    const int n=P.clusters[h.cluster].n;const double* map=R.held.readout+32*R.held.blocks[h.cluster];
-    double norm=0.;for(int b=0;b<n;b++)norm+=dnorm2(d2(W.twin[b]));
-    double c=0.;
-    for(int i=0;i<n;i++){
-        const double2 pi=d2(W.twin[i]);c+=dnorm2(pi)*map[32*(i*n+i)+lane];
-        for(int j=i+1;j<n;j++){const double2 r=dmul(pi,d2(conj(W.twin[j])));c+=r.x*map[32*(i*n+j)+lane]+r.y*map[32*(j*n+i)+lane];}
-    }
-    c/=norm;
-    out[TWIN+lane]=c;
-    const double cc=warp_sum(c*c),cy=warp_sum(c*out[3+lane]);
-    if(lane==0){out[TWIN+32]=cc;out[TWIN+33]=cy;}
-}
-
-// ---------------------------------------------------------------------------------------------
 // The step.
 
 // The trap's potential of ψ at the point (model.rs `trap_potential`, with `bound` its upper bound
@@ -2657,7 +2579,7 @@ __device__ __noinline__ void ringing_photon(Warp& W,Traj& t,double x,const doubl
     if(lane==0){J.direct=0.f;J.ndrives=0;}
     __syncwarp();
     // The photon's wave number: its group's first channel's carrier's.
-    recoil(J,t,n,P.carriers[P.channels[G.channels].carrier].wave,exact_mean,count,(double)size,u[4],lane);
+    recoil(W,C,t,n,P.carriers[P.channels[G.channels].carrier].wave,exact_mean,count,(double)size,u[4],lane);
     const float scale=1.f/sqrtf(size);
     __syncwarp();if(lane<MAXM)W.psi[lane]=lane<nt?scale*J.f[lane]:zero2();__syncwarp();
     t.cluster=target;
@@ -2844,20 +2766,18 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Run R){
     const int lane=threadIdx.x,slot=blockIdx.x;if(R.tasks[3*(slot/WARPS)+1]<=slot%WARPS)return;
     State* S=R.states+slot;
     const int through=R.tasks[3*(slot/WARPS)],intervals=through+1+(R.reach+R.steps-1)/R.steps,until=min(R.end,intervals);
-    if(S->interval>=until){if(lane==0){R.costs[3*slot]=0;R.costs[3*slot+1]=0;R.costs[3*slot+2]=S->interval>=intervals?PAST_ALL:(unsigned long long)S->interval;}return;}
+    if(S->interval>=until){if(lane==0){R.costs[2*slot]=0;R.costs[2*slot+1]=S->interval>=intervals?PAST_ALL:(unsigned long long)S->interval;}return;}
     double* ring=R.rings+(size_t)slot*R.ring_stride;float2* scratch=R.scratch+(size_t)slot*R.scratch_stride;
     double* records=R.records+(size_t)slot*MOST_INTERVALS*SLOT_RECORD;
-    Traj t;Twin h;double prefix=0.,q0[3],p0[3];const bool held=R.held.u!=nullptr;
-    long long twin_cycles=0;const long long launched=clock64();
+    Traj t;double prefix=0.,q0[3],p0[3];
+    const long long launched=clock64();
     {
         #pragma unroll
         for(int i=0;i<3;i++){t.q[i]=S->q[i];t.p[i]=S->p[i];q0[i]=S->q0[i];p0[i]=S->p0[i];}
         t.time=S->time;t.logn=S->logn;t.threshold=S->threshold;t.log_threshold=S->log_threshold;
         t.cluster=S->cluster;t.jumps=S->jumps;t.death=S->death;t.index=S->index;t.beats=S->beats;
-        h.logn=S->twin_logn;h.threshold=S->twin_threshold;h.log_threshold=S->twin_log_threshold;h.cluster=S->twin_cluster;h.jumps=S->twin_jumps;
         if(lane<9)prefix=S->prefix[lane];
         if(lane<MAXM)W.psi[lane]=S->psi[lane];
-        if(lane<MAXN)W.twin[lane]=S->twin[lane];
     }
 #ifdef PROFILE
     if(lane<SPANS)W.profile[lane]=0;
@@ -2891,12 +2811,6 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Run R){
                 spent=__shfl_sync(FULL,clock64()-launched>=R.budget?1:0,0)!=0;
             }
             if(k<hi)break;
-            // The held twin's steps of the interval, up to the last output.
-            if(held&&i>0&&i<=through){
-                const long long begun=clock64();
-                for(int m=lo+1;m<=hi;m++)hold_step(R,W,h,t.index,lane,scratch);
-                twin_cycles+=clock64()-begun;
-            }
             // The record of output i.
             double* out=records+(size_t)(i%MOST_INTERVALS)*SLOT_RECORD;
             for(int x=lane;x<SLOT_RECORD;x+=32)out[x]=0.;
@@ -2910,7 +2824,6 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Run R){
                     if(lane<3){sample[lane]=r[lane];sample[3+lane]=kappa[lane];}if(lane==0)sample[6]=1.;
                 }
             }
-            if(held&&i<=through){const long long begun=clock64();__syncwarp();hold_record(R,W,h,lane,out);twin_cycles+=clock64()-begun;}
             SPAN_END(SPAN_READOUT,readout);SPAN_BEGIN(windows);
             // The windows ending in the interval: their means while held at their output.
             #pragma unroll
@@ -2942,7 +2855,6 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Run R){
         }
     }
 #ifdef PROFILE
-    if(lane==0)W.profile[SPAN_TWIN]+=twin_cycles;
     SPAN_END(SPAN_TOTAL,launch);
     const long long storing=clock64();
 #endif
@@ -2955,11 +2867,7 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Run R){
         }
         if(lane<9)S->prefix[lane]=prefix;
         if(lane<MAXM)S->psi[lane]=W.psi[lane];
-        if(lane<MAXN)S->twin[lane]=W.twin[lane];
-        if(lane==0){
-            S->twin_logn=h.logn;S->twin_threshold=h.threshold;S->twin_log_threshold=h.log_threshold;S->twin_cluster=h.cluster;S->twin_jumps=h.jumps;
-            R.costs[3*slot]=(unsigned long long)twin_cycles;R.costs[3*slot+1]=(unsigned long long)(clock64()-launched);R.costs[3*slot+2]=i>=intervals?PAST_ALL:(unsigned long long)i;
-        }
+        if(lane==0){R.costs[2*slot]=(unsigned long long)(clock64()-launched);R.costs[2*slot+1]=i>=intervals?PAST_ALL:(unsigned long long)i;}
     }
 #ifdef PROFILE
     if(lane==0)W.profile[SPAN_CHECKPOINT]+=clock64()-storing;
@@ -3067,5 +2975,5 @@ extern "C" __global__ void layout(u32* out){
     out[6]=sizeof(Coherent);out[7]=sizeof(Channel);out[8]=sizeof(Program);out[9]=sizeof(State);out[10]=sizeof(Run);
     out[11]=(u32)OFFSET(Program,hm);out[12]=(u32)OFFSET(Program,half_flow);out[13]=(u32)OFFSET(Run,listed);
     out[14]=(u32)OFFSET(State,psi);out[15]=(u32)OFFSET(State,index);
-    out[16]=MOST_INTERVALS;out[17]=SLOT_RECORD;out[18]=RECORD;out[19]=WARPS;out[20]=MAXN;out[21]=TWIN;out[22]=MOTION;out[23]=HARMONIC;out[24]=sizeof(Fourth);out[25]=sizeof(NearUnit);out[26]=sizeof(FirstField);out[27]=MOST_FIRST;
+    out[16]=MOST_INTERVALS;out[17]=SLOT_RECORD;out[18]=RECORD;out[19]=WARPS;out[20]=MAXN;out[21]=MOTION;out[22]=HARMONIC;out[23]=sizeof(Fourth);out[24]=sizeof(NearUnit);out[25]=sizeof(FirstField);out[26]=MOST_FIRST;
 }

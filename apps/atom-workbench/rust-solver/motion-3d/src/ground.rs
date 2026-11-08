@@ -284,7 +284,8 @@
 //! - first order in the Doppler shift: (kv/σ_min)² (engine.rs), what its transfer leaves on T (model.rs `Model::first_error`);
 //! - an emitted photon has its carrier's wave number: ≤ 1e-7 on the D2 line.
 use crate::ledger::BUDGET;
-use crate::linear::{hermitian_eigen,hermitian_eigenvalues,Dense,Lu};
+use crate::linear::{hermitian_eigen,hermitian_eigenvalues,round_off,unit_round_off,Dense,Lu};
+use crate::model::Trap;
 use crate::{Beam,Complex,Request,STATES};
 use atom_population_core::lattice::classification::FOLD_DISTANCE;
 use rayon::prelude::*;
@@ -312,10 +313,10 @@ pub struct Component{pub beams:Vec<usize>,pub counter:bool,pub nu:f64,pub size:f
 #[derive(Clone,Debug)]
 pub struct Unit{pub beams:Vec<usize>,pub weights:Vec<Complex>,pub norm:f64,pub focus:f64,pub combination:Vec<Complex>}
 impl Unit{
-    /// Its intensity s = |Σ_l a_l γ_l|²/N at the beams' amplitudes a (indexed by beam), in [0, 1].
-    pub fn intensity(&self,a:&[Complex])->f64{self.field(a).norm_sqr()/self.norm}
-    /// Σ_l a_l γ_l at the beams' amplitudes a (indexed by beam).
-    pub fn field(&self,a:&[Complex])->Complex{self.beams.iter().zip(&self.weights).fold(Complex::ZERO,|s,(&l,&w)|s+a[l]*w)}
+    /// Its intensity s = |Σ_l a_l γ_l|²/N at the beams' amplitudes a, in [0, 1].
+    pub fn intensity(&self,a:impl Fn(usize)->Complex)->f64{self.field(a).norm_sqr()/self.norm}
+    /// Σ_l a_l γ_l at the beams' amplitudes a.
+    pub fn field(&self,a:impl Fn(usize)->Complex)->Complex{self.beams.iter().zip(&self.weights).fold(Complex::ZERO,|s,(&l,&w)|s+a(l)*w)}
     /// Whether its intensity varies over the trap: a Gaussian beam's, or interfering beams'.
     pub fn varies(&self,beams:&[Beam])->bool{self.beams.len()>1||beams[self.beams[0]].waist_um.is_some()}
 }
@@ -370,6 +371,10 @@ pub enum ExcitedKind{Drive(Drive),Static{a:usize,b:usize}}
 /// closure kept it.
 #[derive(Clone,Debug)]
 pub struct ExcitedItem{pub kind:ExcitedKind,pub size:f64,pub power:f64,pub distance:f64,pub estimate:f64,pub mean:f64,pub folded:bool,pub promoted:bool}
+impl ExcitedItem{
+    /// Whether it mixes at all: an admixture beyond double precision's.
+    fn mixes(&self)->bool{self.size/self.distance>unit_round_off(1.)}
+}
 
 /// The kept couplings of a cluster from one carrier to another: absorbing `absorbed`, emitting
 /// into `emitted`, each entry (row a, column b, in the cluster's order) with its residual beat
@@ -538,10 +543,12 @@ pub struct Ground{
     pub carriers:Vec<Carrier>,
     /// The solve's duration T (us; 0 without one): a mismatch below 1/T is a resonance over the run.
     pub duration:f64,
+    /// The atom's mass (kg), used in the Hessian of the preparation potential.
+    pub mass_kg:f64,
     /// Per unit, its least intensity within the atom's reach (`Ground::reach`): 1 for a plane wave.
     pub reach:Vec<f64>,
-    /// The bottom of the reference state's well in H(r) alone (`Ground::well`): the atoms' reach is about it.
-    pub centre:[f64;3],
+    /// The all-folded reference state's well and frequencies before state selection.
+    pub trap:Trap,
     /// The couplings of the excited states, classified, with the closure's verdicts.
     pub excited_items:Vec<ExcitedItem>,
     /// The fold's charge: the largest total saturation over the light's pattern of a ground state's
@@ -640,7 +647,7 @@ impl Interference{
 /// A matrix of the request with its entries at the round-off of its largest set to zero: what a selection rule forbids and the polarizations' rotation leaves at 1e-16 of the allowed is no coupling,
 /// whatever its frequency (`Ground::couples`, the rule's items).
 fn rounded(mut m:Dense)->Dense{
-    let floor=64.*f64::EPSILON*m.entries.iter().map(|z|z.abs()).fold(0.,f64::max);
+    let floor=round_off(m.entries.iter().map(|z|z.abs()).fold(0.,f64::max));
     for z in m.entries.iter_mut(){if z.abs()<=floor{*z=Complex::ZERO;}}
     m
 }
@@ -824,7 +831,7 @@ pub(crate) fn slopes(u:&dyn Fn([f64;3])->f64,r:[f64;3],h:f64)->(f64,[f64;3],[[f6
 pub(crate) fn descent(u:&dyn Fn([f64;3])->f64,start:[f64;3],h:f64,inside:&dyn Fn([f64;3])->bool)->[f64;3]{
     let(mut r,mut radius)=(start,h);let(mut u0,mut g,mut c)=slopes(u,r,h);
     loop{
-        let(values,vectors)=crate::model::symmetric_eigen(c);let round=64.*f64::EPSILON*u0.abs();
+        let(values,vectors)=crate::linear::symmetric_eigen(c);let round=round_off(u0.abs());
         let along=vectors.map(|v|v[0]*g[0]+v[1]*g[1]+v[2]*g[2]);
         let bowl=values.iter().all(|&l|l*h*h>round);
         let steps:[f64;3]=std::array::from_fn(|i|if values[i]*h*h>round{-along[i]/values[i]}else if along[i].abs()*h>round{-along[i].signum()*radius}else if values[i]*h*h< -round{radius}else{0.});
@@ -859,8 +866,13 @@ fn spread(cl:&Cluster,r:&[Complex],weights:&[Complex],out:&mut Dense){
     for(&b,&w)in cl.states.iter().zip(weights){if w==Complex::ZERO{continue;}for(x,&y)in r.iter().enumerate(){out[(x,b)]+=y*w;}}
 }
 
+/// The atoms' reach along an axis of a harmonic trap at ω (rad/us): the end of the thermal ellipsoid, the region within ln(1/`BUDGET`) k_B T of its bottom, which holds all but the budget of a Boltzmann ensemble (T in μK, hm = ħ/m). None where the axis does not confine.
+pub(crate) fn thermal_reach(w:f64,temperature_uk:f64,hm:f64)->Option<f64>{
+    (w>0.).then(||(2.*BUDGET.recip().ln()*crate::stats::KT_PER_UK*temperature_uk*hm).sqrt()/w)
+}
+
 /// Two frames are one: equal to the rounding of the sums of detunings they are made of.
-pub(crate) fn same_frame(a:f64,b:f64)->bool{(a-b).abs()<=64.*f64::EPSILON*(a.abs()+b.abs())}
+pub(crate) fn same_frame(a:f64,b:f64)->bool{(a-b).abs()<=round_off(a.abs()+b.abs())}
 
 /// The partition the rule leaves for one set of verdicts on the excited couplings: the ground
 /// couplings classified, the cut, the clusters (sets of nodes: the ground states, then the excited
@@ -942,14 +954,14 @@ impl Ground{
         for(i,&s)in excited_states.iter().enumerate(){match manifolds.iter().position(|&m|m==labels[s].0){Some(m)=>excited_groups[m].push(i),None=>{manifolds.push(labels[s].0);excited_groups.push(vec![i]);}}}
         let duration=request.times_us.last().copied().unwrap_or(0.).max(0.);
         let mut ground=Ground{ground_states,excited_states,levels,decay,emission,beams:request.beams.clone(),folded:couplings.clone(),couplings,hamiltonian,units,outside:unit_outside,folds:unit_folds,interference,
-            components,l0,carriers,duration,reach:vec![],excited_items:vec![],charge:0.,items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![],
-            explicit_of:vec![],excited_groups,dressed:vec![],vias:vec![],near_units:vec![],dressing:false,floors:vec![],unmixed:vec![],unmixed_error:0.,channel_poles:vec![],centre:[0.;3]};
-        (ground.reach,ground.centre)=ground.reach(request);
+            components,l0,carriers,duration,mass_kg:request.mass_kg,reach:vec![],excited_items:vec![],charge:0.,items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![],
+            explicit_of:vec![],excited_groups,dressed:vec![],vias:vec![],near_units:vec![],dressing:false,floors:vec![],unmixed:vec![],unmixed_error:0.,channel_poles:vec![],trap:Trap::none()};
+        (ground.reach,ground.trap)=ground.reach(request);
         Ok(ground)
     }
 
     /// Every unit's intensity at a point r (um from the focus).
-    pub fn intensities_at(&self,r:[f64;3])->Vec<f64>{let a=self.amplitudes_at(r);self.units.iter().map(|u|u.intensity(&a)).collect()}
+    pub fn intensities_at(&self,r:[f64;3])->Vec<f64>{let a=self.amplitudes_at(r);self.units.iter().map(|u|u.intensity(|l|a[l])).collect()}
     /// H at a point r (um from the focus): H0 with each unit's outside shift and fold at its
     /// intensity there.
     pub fn hamiltonian_at(&self,r:[f64;3])->Dense{self.hamiltonian_with(&self.intensities_at(r))}
@@ -1155,7 +1167,7 @@ impl Ground{
             // A term's bound, (2/γ) ‖V^f[:,b]‖ |P_E[b,:]| (‖(K + Σ − z)⁻¹‖ ≤ 2/γ, `Ground::floors`; |P_E[b,x]| ≤ sqrt(P_E[b,b])), moves
             // the generator by at most 3 ‖V^f‖ times it: left out where that is below double precision's round-off of its scale.
             let strength:Vec<f64>=cl.states.iter().map(|&b|self.carriers[c].beams.iter().map(|&l|norm(&column(&self.folded[l],b))).sum()).collect();
-            let ceiling=f64::EPSILON*self.generator_scale/(3.*strength.iter().copied().fold(0.,f64::max)).max(f64::MIN_POSITIVE);
+            let ceiling=unit_round_off(self.generator_scale)/(3.*strength.iter().copied().fold(0.,f64::max)).max(f64::MIN_POSITIVE);
             let modes=groups.into_iter().map(|members|{
                 let z=members.iter().map(|&j|values[j]).sum::<f64>()/members.len() as f64+self.carriers[c].detuning;
                 let mut mode=Mode{members,energy:z,plain:vec![],lu:None,dressed:vec![],skipped:vec![]};
@@ -1339,27 +1351,66 @@ impl Ground{
         Ok(out)
     }
 
-    /// Each unit's least intensity within the atom's reach: the region of the trap within
-    /// ln(1/budget) k_B T of its bottom, the harmonic trap's thermal ellipsoid holding all but the
-    /// budget of a Boltzmann ensemble at the request's temperature (model.rs `choose_profiles` judges
-    /// the units' profiles over it too), the trap the most populated initial ground state's in
-    /// its well in H(r) alone (`Ground::well`); at the ellipsoid's ends along its principal axes, and inside it for
-    /// interfering beams (`reach_points`). 1 for a plane wave, 0 for every varying unit when the trap
-    /// does not confine. Beyond the reach, what an atom meets is measured along its trajectory (the
-    /// folded excited population, the ledger's η²). And that well's place.
-    fn reach(&self,request:&Request)->(Vec<f64>,[f64;3]){
-        let unconfined=|centre:[f64;3]|(self.units.iter().map(|u|if u.varies(&self.beams){0.}else{1.}).collect(),centre);
-        let Some(waist)=request.beams.get(request.trap_beam).and_then(|b|b.waist_um)else{return unconfined([0.;3])};
+    /// The reference state: the request's largest initial population, a ground state (its position in `ground_states`).
+    pub fn reference_state(&self,request:&Request)->Result<usize,String>{
         let rho=&request.initial_density;
-        let reference=*self.ground_states.iter().max_by(|&&a,&&b|rho[a*STATES+a].re.total_cmp(&rho[b*STATES+b].re)).unwrap();
-        // The reference state's well and its Hessian there.
-        let u=|r:[f64;3]|self.hamiltonian_at(r)[(reference,reference)].re;
-        let centre=self.well(request.trap_beam,&u);let(values,axes)=crate::model::symmetric_eigen(slopes(&u,centre,difference(waist)).2);
-        let hm=crate::model::HBAR/request.mass_kg*1e6;let kt=crate::stats::KT_PER_UK*request.temperature_uk;
-        let reach:[f64;3]=std::array::from_fn(|a|{let w=(values[a]*hm).max(0.).sqrt();if w>0.{(2.*BUDGET.recip().ln()*kt*hm).sqrt()/w}else{f64::INFINITY}});
-        if reach.iter().any(|x|!x.is_finite()){return unconfined(centre);}
+        self.ground_states.iter().enumerate().max_by(|a,b|rho[a.1*STATES+a.1].re.total_cmp(&rho[b.1*STATES+b.1].re)).map(|x|x.0).ok_or("No ground state".into())
+    }
+    /// The thermal ellipsoid is centered on the reference state's preparation well.
+    /// Folding bounds still sample the full intensity range in `intensity_points`.
+    fn reach(&self,request:&Request)->(Vec<f64>,Trap){
+        let unconfined=|trap:Trap|(self.units.iter().map(|u|if u.varies(&self.beams){0.}else{1.}).collect(),trap);
+        if request.beams.get(request.trap_beam).and_then(|b|b.waist_um).is_none(){return unconfined(Trap::none());}
+        let trap=self.holding(self.reference_state(request).unwrap(),request.trap_beam);
+        let hm=crate::model::HBAR/request.mass_kg*1e6;
+        let reach:[f64;3]=trap.frequencies.map(|w|thermal_reach(w,request.temperature_uk,hm).unwrap_or(f64::INFINITY));
+        if reach.iter().any(|x|!x.is_finite()){return unconfined(trap);}
         (self.units.iter().map(|u|if !u.varies(&self.beams){1.}else{
-            reach_points(centre,&axes,reach,u.beams.len()>1).into_iter().map(|r|u.intensity(&self.amplitudes_at(r))).fold(1_f64,f64::min)}).collect(),centre)
+            reach_points(trap.centre,&trap.axes,reach,u.beams.len()>1).into_iter().map(|r|{let a=self.amplitudes_at(r);u.intensity(|l|a[l])}).fold(1_f64,f64::min)}).collect(),trap)
+    }
+    /// The trap of a ground state with every drive folded, before the rule and its tables: as a model's (model.rs `Model::trap`) at the well of what holds it before the near light comes on, its Hessian in its potential with the near light's own shifts in it -- its energy in H(r) and each near beam's second order,
+    /// −Re(V_l† G V_l) at its intensity there with G its channel's resolvent, the interference of the trap's light's beams of one unit with them (`Ground::level`). H(r) alone holds no near carrier's own light shift: a tweezer that is one reads there its outside part alone.
+    pub(crate) fn holding(&self,state:usize,trap_beam:usize)->Trap{
+        let light=self.trap_light(&self.trap_beams(trap_beam));let on=|l:usize|light.contains(&l);
+        let unit_of=|l:usize|self.units.iter().position(|u|u.beams.contains(&l));
+        let interfering:Vec<(usize,usize)>=self.carriers.iter().flat_map(|c|c.beams.iter().flat_map(|&l|c.beams.iter().map(move|&m|(l,m)))).filter(|&(l,m)|l!=m&&unit_of(l)==unit_of(m)&&on(l)&&on(m)).collect();
+        let products=|r:[f64;3]|{let a=self.amplitudes_at(r);move|l:usize,m:usize|a[l].conj()*a[m]};
+        let held=|r:[f64;3]|{let a=self.amplitudes_at(r);let off:Vec<f64>=self.units.iter().map(|u|{let field=u.beams.iter().zip(&u.weights).filter(|(l,_)|!on(**l)).fold(Complex::ZERO,|s,(&l,&w)|s+a[l]*w);field.norm_sqr()/u.norm}).collect();
+            let at=products(r);self.level(state,&self.intensities_at(r),&|l,m|if on(l){at(l,m)}else{Complex::ZERO},&interfering)-self.level(state,&off,&|_,_|Complex::ZERO,&interfering)};
+        Trap::from_potentials(self,trap_beam,held,
+            |r,_|self.level(state,&self.intensities_at(r),&products(r),&interfering),|_|None)
+    }
+    /// A ground state's level before the rule's clusters (`Ground::holding`; model.rs `Model::level` its tables' with the rule's drives): its energy at the units' intensities and each near beam's own light shift at the fields' products ā_l a_m, with `interfering` two beams' cross term.
+    fn level(&self,state:usize,intensities:&[f64],products:&dyn Fn(usize,usize)->Complex,interfering:&[(usize,usize)])->f64{
+        let h=self.hamiltonian_with(intensities);let ne=self.excited_states.len();let energy=h[(self.ground_states[state],self.ground_states[state])].re;
+        let mut k=sub(&h,&self.excited_states,&self.excited_states);k.add_scaled(Complex::new(0.,-0.5),&self.decay);
+        let mut u=energy;
+        for carrier in &self.carriers{
+            let on:Vec<usize>=carrier.beams.iter().copied().filter(|&l|products(l,l)!=Complex::ZERO&&(0..ne).any(|e|self.couplings[l][(e,state)]!=Complex::ZERO)).collect();if on.is_empty(){continue;}
+            let Ok(lu)=denominator(&k,-energy-carrier.detuning)else{continue};
+            for &m in &on{
+                let mut g:Vec<Complex>=(0..ne).map(|e|self.couplings[m][(e,state)]).collect();lu.solve(&mut g);
+                for &l in on.iter().filter(|&&l|l==m||interfering.contains(&(l,m))){
+                    u-=(products(l,m)*(0..ne).fold(Complex::ZERO,|s,e|s+self.couplings[l][(e,state)].conj()*g[e])).re;
+                }
+            }
+        }
+        u
+    }
+    /// The trap's beams: the trap beam and the beams of its mode -- of its frequency, along its axis
+    /// either way, with its waist: its reflections --, whose light falls off with its own far from the
+    /// focus (model.rs `Model::trap_potential`).
+    pub(crate) fn trap_beams(&self,trap_beam:usize)->Vec<usize>{
+        let t=&self.beams[trap_beam];
+        (0..self.beams.len()).filter(|&l|l==trap_beam||{let b=&self.beams[l];b.frequency_index==t.frequency_index&&b.waist_um==t.waist_um&&{
+            let c:f64=(0..3).map(|i|b.direction[i]*t.direction[i]).sum();(c.abs()-1.).abs()<=1e-12}}).collect()
+    }
+    /// The trap's light, what holds the atoms before t = 0 (model.rs `Model::trap_level`): the trap's beams and every far Gaussian
+    /// beam -- a crossed beam's shift is part of the potential the atom's motion conserves --; not a near beam, whose light
+    /// the solve turns on at t = 0, nor a beam whose unit holds a plane wave, which does not fall off with it.
+    pub(crate) fn trap_light(&self,trap_beams:&[usize])->Vec<usize>{
+        (0..self.beams.len()).filter(|l|trap_beams.contains(l)||(self.beams[*l].waist_um.is_some()&&!self.carriers.iter().any(|c|c.beams.contains(l))
+            &&self.units.iter().filter(|u|u.beams.contains(l)).all(|u|u.beams.iter().all(|&b|self.beams[b].waist_um.is_some())))).collect()
     }
     /// Where a potential u of the trap beam's light has its trap: the bottom of the well its descent from the focus reaches (`descent`, module documentation, # Where the trap is), the focus where that
     /// leaves the beam's focal volume, its harmonic coordinate 2ρ²/w² + ζ²/z_R² past one, or finds no well.
@@ -1460,14 +1511,8 @@ impl Ground{
     /// the most saturated down, its total with none kept among them -- its first kept drive lies below that, with
     /// other ground states' still folded (PGCP_10: the near probe's drives alone, its cooling beams folded).
     pub fn allowances(request:&Request)->Result<Vec<f64>,String>{Ok(Ground::bare(request)?.rungs())}
-    /// The allowances of a generator before the rule (`allowances`, `bare`).
-    pub(crate) fn rungs(&self)->Vec<f64>{self.rungs_where(false)}
-    /// The rungs a solve climbs (solve.rs, # The fold's choice): `rungs` less those that add explicit states no drive takes past the rule's per-item threshold at any position (`BUDGET`, the drive's
-    /// `estimate`, a bound over the trap). Such a rung keeps what no run's statistics could read, and it can cost without limit: a tensor scene's D1 light on the D2 states, 7 THz away at 1e-12 of saturation, merges
-    /// the hyperfine levels into one cluster of 23 states on a grid of that beat, and its first read of the grid outlasted five minutes where the rungs before it took a second in all. (A drive that nears
-    /// resonance anywhere in the trap reads there, however low its mean: the retro-reflected tweezer's chosen rung stands at a mean of 2e-3.)
-    pub(crate) fn ladder(&self)->Vec<f64>{self.rungs_where(true)}
-    fn rungs_where(&self,worth:bool)->Vec<f64>{
+    /// The allowances of a generator before the rule (`allowances`, `bare`): the rungs a solve climbs (solve.rs, # The fold's choice), each while it can pay.
+    pub(crate) fn rungs(&self)->Vec<f64>{
         let g=self;let ne=g.excited_states.len();
         let excited=g.judged(f64::INFINITY);
         let mut totals:Vec<f64>=vec![];
@@ -1481,9 +1526,7 @@ impl Ground{
         for t in totals{
             let explicit=Ground::explicit_states(&g.judged(t),ne);
             if explicit!=last{
-                let reads=excited.iter().any(|x|matches!(x.kind,ExcitedKind::Drive(d)if explicit[d.excited]&&!last[d.excited])&&x.estimate>BUDGET);
-                if !worth||reads{out.push(t);}
-                last=explicit;
+                out.push(t);last=explicit;
             }
         }
         out
@@ -1564,10 +1607,9 @@ impl Ground{
     /// one cluster with its dressing taken from their separation: kept where one may not fold. Whether any was.
     fn keep_partners(&self,excited:&mut [ExcitedItem],explicit:&[bool],b:&Bounds,set:&[Option<usize>],dressing:&[f64])->bool{
         let(ng,l0)=(self.ground_states.len(),self.generator_scale);
-        let mixes=|x:&ExcitedItem|x.size/x.distance>f64::EPSILON;
-        let kept:Vec<(Drive,f64,f64)>=excited.iter().filter(|x|!x.folded&&mixes(x)).filter_map(|x|match x.kind{ExcitedKind::Drive(d)=>Some((d,x.size,x.distance)),_=>None}).collect();
+        let kept:Vec<(Drive,f64,f64)>=excited.iter().filter(|x|!x.folded&&x.mixes()).filter_map(|x|match x.kind{ExcitedKind::Drive(d)=>Some((d,x.size,x.distance)),_=>None}).collect();
         let mut changed=false;
-        for x in excited.iter_mut().filter(|x|x.folded&&mixes(x)){
+        for x in excited.iter_mut().filter(|x|x.folded&&x.mixes()){
             let ExcitedKind::Drive(d)=x.kind else{continue};if !explicit[d.excited]{continue;}
             let gamma=self.decay[(d.excited,d.excited)].re;
             let within=if set[d.ground]==set[ng+d.excited]{set[d.ground].map_or(0.,|k|dressing[k])}else{0.};
@@ -1589,7 +1631,7 @@ impl Ground{
         let l0=2.*b.light+2.*b.scattering;self.generator_scale=l0;self.light=b.light;
         let separation=|a:usize,c:usize,beat:f64|b.separation(a,c,beat);
         // A coupling at the generator's round-off is no term, whatever its frequency: neither kept, for a beat within the generator's scale, nor a far channel of the responses' dressing (`Model::prune` for the tables).
-        let term=|size:f64|size>f64::EPSILON*l0;
+        let term=|size:f64|size>unit_round_off(l0);
         let mut items:Vec<Item>=vec![];
         for a in 0..ng{for c in a+1..ng{if term(2.*b.statics[a][c].max(b.statics[c][a])){
             items.push(Item{kind:Kind::Static{a,b:c},frequency:separation(a,c,0.),size:2.*b.statics[a][c].max(b.statics[c][a]),folded:false});}}}
@@ -1748,7 +1790,7 @@ impl Ground{
         enum Source{Folded(Photon),Direct(usize,usize)}
         // The frequencies an explicit state's amplitude holds: its frame's and each kept drive's reaching it, through H's kept couplings too.
         let mut holds:Vec<Vec<Vec<i32>>>=(0..ne).map(|e|vec![combination(&[(ng+e,1)],&[])]).collect();
-        for x in excited.iter().filter(|x|!x.folded&&x.size/x.distance>f64::EPSILON){if let ExcitedKind::Drive(d)=x.kind{
+        for x in excited.iter().filter(|x|!x.folded&&x.mixes()){if let ExcitedKind::Drive(d)=x.kind{
             let f=combination(&[(d.ground,1)],&[(d.carrier,1)]);if !holds[d.excited].contains(&f){holds[d.excited].push(f);}
         }}
         loop{
@@ -2002,6 +2044,10 @@ impl Ground{
     pub fn carrier_saturation(&self,c:usize,cl:&Cluster)->f64{
         cl.states.iter().map(|&b|self.excited_items.iter().filter(|x|x.folded).filter_map(|x|match x.kind{ExcitedKind::Drive(d)if d.carrier==c&&d.ground==b=>Some(x.mean),_=>None}).sum::<f64>()).fold(0.,f64::max)
     }
+    /// Within what a residual of a cluster is static and two are one: `same_frame`'s tolerance at its largest frame and detuning, the round-off of the frames' differences.
+    pub(crate) fn residual_round_off(&self,cl:&Cluster)->f64{
+        round_off(2.*(cl.frames.iter().chain(&cl.excited_frames).map(|f|f.abs()).fold(0.,f64::max)+self.carriers.iter().map(|c|c.detuning.abs()).fold(0.,f64::max)))
+    }
     /// The carriers the fourth order takes on a cluster, those beyond the budget's square (a carrier within it
     /// adds at most that relatively to the others' rates, its bound in the ledger's quartic item, model.rs
     /// `Model::quartic`), and the size of its H^(4), b = S l0 (S their saturations' sum, l0 the eliminated
@@ -2023,8 +2069,7 @@ impl Ground{
     /// residual on the entry, or one the rule does not let fold (|Ω| < FOLD_DISTANCE l0, or its mixing
     /// b/(|Ω| − l0) beyond the budget, b the size of H^(4)).
     pub fn fourth_keeps(&self,cl:&Cluster,x:usize,y:usize,omega:f64,b:f64)->bool{
-        let w=omega.abs();let l0=self.generator_scale;
-        let round_off=64.*f64::EPSILON*2.*(cl.frames.iter().chain(&cl.excited_frames).map(|f|f.abs()).fold(0.,f64::max)+self.carriers.iter().map(|c|c.detuning.abs()).fold(0.,f64::max));
+        let w=omega.abs();let l0=self.generator_scale;let round_off=self.residual_round_off(cl);
         w<=round_off||w<self.cut||!(w>=FOLD_DISTANCE*l0&&mixing(omega,b,l0).powi(2)<=BUDGET)
             ||cl.groups.iter().any(|gr|gr.entries.iter().any(|&(a,c,r)|a==x&&c==y&&(r-omega).abs()<=round_off))
     }

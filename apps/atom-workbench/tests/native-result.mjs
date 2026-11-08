@@ -42,7 +42,7 @@ export function motionBlock(samples,loss=.1){
 /** The motion entries of a motion result's diagnostics: the device used, a fallback's note and the
  * approximation ledger. */
 export const MOTION_DIAGNOSTICS={device:'cpu',deviceNote:'尚无 GPU 版本：本次在 CPU 上计算',
-  approximations:{budget:.005,used:.0021,items:[{label:'谐振近似',estimate:.0012,action:'计入预算'},{label:'一阶多普勒',estimate:.0009,action:'计入预算'}]}};
+  approximations:{totals:{population:{error:.0021,target:.05},temperature:{error:.003,target:.1}},items:[{label:'谐振近似',estimate:.0012,action:'计入预算'},{label:'一阶多普勒',estimate:.0009,action:'计入预算'}]}};
 /** A motion result over timesUs: the held atom in its initial state, at the method's own target. */
 export function motionResult({states,initialIndex,timesUs,block=motionBlock(timesUs.length),diagnostics=MOTION_DIAGNOSTICS}){
   const data=nativeResult({states,initialIndex,timesUs,mean:false,tolerance:SEMICLASSICAL_POPULATION_TARGET});

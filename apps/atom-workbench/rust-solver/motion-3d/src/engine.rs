@@ -39,6 +39,11 @@
 //! through it, with no switch, though its centre changes there. An atom within its site's region takes the same
 //! symmetric step about its site as the central site's atoms about the focus.
 //!
+//! # One propagation
+//! A step, or the part of one before or after a jump, is one thing on every cluster (`Engine::part`): the flow for τ/2, at the point there the cluster's propagation of ψ through τ and the force it holds, the kick less the harmonic part, the flow for τ/2. Where ‖ψ‖²
+//! reaches the threshold in it the part is redone to that crossing (`Engine::step`), the jump made at the place it reaches, the rest a part of its own in the cluster the jump left. A cluster of ground states whose generator is static takes one node, its middle (`Propagation::Node`:
+//! two half steps at the point's generator, the force on the state there), a cluster with explicit excited states or beats a segment's grid (# The exact step). An error of one node is of second order in τ, in the motion's own splitting, which the step check reads.
+//!
 //! # The exact step (explicit excited states, beats)
 //! An explicit excited state rotates at its detuning in the frame, and its saturation, Rabi
 //! oscillation and decay set the internal state's pace; a beating generator (two colours on one line,
@@ -125,12 +130,14 @@
 //! ‖∇f‖²/⟨f|f⟩ (the second-order Wigner value at a point), is not taken: against the tweezer PGC's 1D quantum reference
 //! (TW2, x alone) it cools 2–4 % further below it at 4–5 ħω, where the incoherent one is 4–8 % low (# What the kicks leave out).
 //! An explicit state's absorbed light acts through the Ehrenfest force -- the stimulated force of its kept drives,
-//! −∇Re⟨ψ|V|ψ⟩ --, which carries its mean: its part's recoil has mean zero at the jump, the recoil of a beam drawn by
-//! its drives -- each explicit state's weight in the photon shared by the drives into it, Σ |a_l Σ_k c_lk U_k ψ_b|² -- less
-//! their mean a, plus the mean's shot noise ±a with equal chance --
-//! per photon the beams' second moment, without the mean twice. A running wave's beam axis takes R E_r (1 + ⟨n²⟩) so; with
-//! the spread alone it took R E_r ⟨n²⟩. The draw's uniform picks the part, its leftover the explicit part's beam, its
-//! lower bits the sign: no further deviate. The momentum diffusion beyond these kicks is the hook `Diffusion`'s.
+//! −∇Re⟨ψ|V|ψ⟩ --, which carries its mean. Its jump therefore draws independent signs on the real and imaginary parts
+//! of ∇ln σ, σ = a_l/(δ − iΓ/2), from its driven transition. Its mean is zero and its covariance is Re[∇σ*⊗∇σ]/|σ|²:
+//! the low-saturation force diffusion Γħ² Re[∇σ*⊗∇σ] (Murr et al., https://arxiv.org/abs/quant-ph/0512001, Eq. 1),
+//! including spatial Stark shifts. The phase gradient contains both the wave vector and the detuning gradient;
+//! independent extra kicks miss their cross terms. A uniform running wave recovers ±ħk. The transition's weight is
+//! the explicit state's photon weight shared by the drives into it, as before; this incoherent attribution is an
+//! approximation for coupled multilevel states, not a general saturation correction. The draw's lower two bits supply
+//! the signs, independently of its upper bits selecting the part and drive.
 //!
 //! # The transient after a jump
 //! A jump leaves the atom in a bare ground state ψ′, while the fold's photons are those of the steady excited amplitude of that state, v = X ψ′ (X = −Σ e^{−iε̃t} R_c per
@@ -203,17 +210,11 @@
 //! jump's number), so runs that differ only in the time step make the same choices: the
 //! step-doubling check compares them. A jump draws its class, the next threshold, the polarization,
 //! the absorbed beam and the transient's five first and the
-//! directions' rejection loops last, so that
-//! a trajectory's twin on the same streams (control.rs) keeps its thresholds and choices whatever its
-//! loops take.
-//!
-//! # A held atom
-//! A held twin (control.rs) does not move and its generator is static: its engine (`Engine::held`)
-//! takes every cluster's generator and jump operators at its point once, steps by the
-//! half step's propagators, and draws a jump's direction and polarization without the kicks.
+//! directions' rejection loops last.
+use crate::cost::pays;
 use crate::eigen::{decompose,Eigen};
-use crate::linear::zeroed;
-use crate::model::{Absorption,Components,Exact,Local,Model,Point,MOST_MIXED,MOST_STATES};
+use crate::linear::{unit_round_off,zeroed};
+use crate::model::{Absorption,Components,Exact,Local,Model,Point,Recoil,MOST_MIXED,MOST_STATES};
 use crate::rng::{Purpose,Rng};
 use crate::Complex;
 
@@ -316,15 +317,6 @@ impl Settings{
     }
 }
 
-/// A momentum diffusion scheme beyond the per-beam kicks: the hook for one (none by default). It
-/// may change κ at the end of each exact step's internal evolution, given the step's point and
-/// length, and at each photon, given its amplitude f (the target cluster's ground states) and the
-/// kick the engine has drawn.
-pub trait Diffusion:Sync{
-    fn step(&self,_model:&Model,_t:&mut Trajectory,_point:&Point,_tau:f64){}
-    fn photon(&self,_model:&Model,_t:&Trajectory,_point:&Point,_f:&[Complex],_kick:&mut [f64;3]){}
-}
-
 /// The harmonic flow along one axis for τ: (x, κ) turned by ωτ in phase space (x in um, κ in 1/um,
 /// hm = ħ/m); free flight when ω is 0.
 fn flow(x:f64,kappa:f64,omega:f64,hm:f64,tau:f64)->(f64,f64){
@@ -357,8 +349,12 @@ const SUB_STEP:f64=6.;
 /// truncation bound.
 pub fn series(norm:f64,tau:f64,truncation:f64)->(usize,usize){
     let x=norm*tau.abs();let parts=((x/SUB_STEP).ceil() as usize).max(1);
-    let y=x/parts as f64;let share=truncation/parts as f64;let mut terms=1;let mut size=y;while size>share&&terms<40{terms+=1;size*=y/terms as f64;}
-    (parts,terms)
+    (parts,terms_within(x/parts as f64,truncation/parts as f64,40).0)
+}
+/// The terms that sum exp(y)'s series within `share`, through the first whose bound y^m/m! is within it, at most `most`, and that bound.
+fn terms_within(y:f64,share:f64,most:usize)->(usize,f64){
+    let mut terms=1;let mut size=y;while size>share&&terms<most{terms+=1;size*=y/terms as f64;}
+    (terms,size)
 }
 fn propagate_sized<const N:usize>(h:&[Complex;MOST_STATES*MOST_STATES],tau:f64,psi:&mut [Complex],truncation:f64){
     let(parts,terms)=series(column_norm(h,N),tau,truncation);let step=tau/parts as f64;
@@ -381,7 +377,7 @@ fn squarings(x:f64,share:f64)->Option<(i32,usize)>{
     let mut best:Option<(i32,usize)>=None;
     for s in 0..64{
         let scale=0.5_f64.powi(s);let(y,part)=(x*scale,share*scale);if part<=f64::EPSILON{break;}
-        let mut terms=1;let mut size=y;while size>part&&terms<40{terms+=1;size*=y/terms as f64;}
+        let(terms,size)=terms_within(y,part,40);
         if size>part{continue;}
         match best{Some((b,m))if m-1+b as usize<=terms-1+s as usize=>break,_=>best=Some((s,terms))}
     }
@@ -397,14 +393,19 @@ fn scaled_exponential<const N:usize>(h:&[Complex;MOST_STATES*MOST_STATES],tau:f6
     for _ in 0..s{sum=times(&sum,&sum);}
     sum
 }
-/// A step's half steps on one generator (`Engine::advance`), exp(−iHτ) twice: its series on the vector (`propagate`), or, where that takes more than one part and more products
-/// (n² each, against n³ of `squarings`, and two by U) -- a generator of ‖H‖τ ≫ 1, a cluster's states' frames apart: THREE's half of its CPU solve, 200 products a half step --, U once.
+/// How a step's two half steps go on a generator of norm `norm` (exp(−iHτ) twice, `HalfStep`, and the step's cost, solve.rs): its series on the vector (`propagate`), parts × terms, or, where that takes more than one part and U pays (cost.rs `pays`) -- a generator of ‖H‖τ ≫ 1, a cluster's states' frames apart:
+/// THREE's half of its CPU solve, 200 products a half step --, `squarings`'s s and terms once. In n² products each way, n³ a product of `squarings` and two by U: the unit divides out, a count has no error of its own, and each way's own overhead, a term's or an array's, stands aside.
+pub(crate) enum Halves{Series(usize,usize),Matrix(i32,usize)}
+pub(crate) fn halves(norm:f64,tau:f64,truncation:f64,n:usize)->Halves{
+    let(parts,terms)=series(norm,tau,truncation);
+    if parts>1{if let Some((s,m))=squarings(norm*tau.abs(),truncation){if pays(((m-1+s as usize)*n+2) as f64,(2*parts*terms) as f64,0.){return Halves::Matrix(s,m);}}}
+    Halves::Series(parts,terms)
+}
+/// A step's half steps on one generator (`Engine::advance`), as `halves` has them.
 enum HalfStep{Series,Matrix(Box<[Complex;MOST_STATES*MOST_STATES]>)}
 impl HalfStep{
     fn new(h:&[Complex;MOST_STATES*MOST_STATES],n:usize,tau:f64,truncation:f64)->HalfStep{
-        let norm=column_norm(h,n);let(parts,terms)=series(norm,tau,truncation);if parts==1{return HalfStep::Series;}
-        let Some((s,m))=squarings(norm*tau.abs(),truncation)else{return HalfStep::Series};
-        if (m-1+s as usize)*n+2>=2*parts*terms{return HalfStep::Series;}
+        let Halves::Matrix(s,m)=halves(column_norm(h,n),tau,truncation,n)else{return HalfStep::Series};
         macro_rules! sized{($($n:literal)*)=>{match n{$($n=>Box::new(scaled_exponential::<$n>(h,tau,(s,m))),)*_=>unreachable!("a cluster of ground states has 1 to 8 states")}}}
         HalfStep::Matrix(sized!(1 2 3 4 5 6 7 8))
     }
@@ -417,8 +418,7 @@ impl HalfStep{
 fn row_norm(h:&[Complex],n:usize)->f64{(0..n).map(|a|(0..n).map(|b|h[a*n+b].re.abs()+h[a*n+b].im.abs()).sum::<f64>()).fold(0.,f64::max)}
 /// ψ ← exp(−i H τ) ψ on any number of states, to double precision: `propagate`'s series.
 pub fn propagate_dyn(h:&[Complex],n:usize,tau:f64,psi:&mut [Complex]){
-    let x=column_norm(h,n)*tau.abs();let parts=((x/SUB_STEP).ceil() as usize).max(1);let step=tau/parts as f64;
-    let y=x/parts as f64;let share=f64::EPSILON/parts as f64;let mut terms=1;let mut size=y;while size>share&&terms<40{terms+=1;size*=y/terms as f64;}
+    let(parts,terms)=series(column_norm(h,n),tau,f64::EPSILON);let step=tau/parts as f64;
     let(mut term,mut next)=([Complex::ZERO;MOST_MIXED],[Complex::ZERO;MOST_MIXED]);
     for _ in 0..parts{
         term[..n].copy_from_slice(&psi[..n]);
@@ -460,6 +460,39 @@ fn product(a:&[Complex],b:&[Complex],n:usize,out:&mut Vec<Complex>){
 fn product_right(a:&[Complex],b:&[Complex],n:usize,out:&mut Vec<Complex>){
     zeroed(out,n*n);for k in 0..n{for j in 0..n{let y=b[k*n+j];if y==Complex::ZERO{continue;}for i in 0..n{out[i*n+j]+=a[i*n+k]*y;}}}
 }
+
+/// A part of a step's propagation (module documentation, # One propagation): one node where the state's generator is static and of ground states, the segment's grid otherwise.
+enum Propagation<'a>{
+    /// The generator at the part's middle, the state through it by two half steps (`HalfStep`), its force at the one node there.
+    Node{model:&'a Model,cluster:usize,point:&'a Point,local:Local,half:HalfStep,tau:f64,truncation:f64},
+    Grid(Segment),
+}
+/// What a propagation did: the time it took, whether ‖ψ‖² reached the threshold there (the part to be redone to it, ψ of no further use), and the impulse; of one node the mean force instead, and ψ at it.
+struct Evolved{taken:f64,reached:bool,impulse:[f64;3],node:Option<[Complex;MOST_MIXED]>}
+impl Propagation<'_>{
+    /// ψ (unnormalized) from the time `at` over the part, until ‖ψ‖² reaches `threshold`.
+    fn evolve(&self,psi:&mut [Complex;MOST_MIXED],at:f64,remaining:f64,threshold:f64)->Evolved{
+        match self{
+            Propagation::Grid(segment)=>{let(taken,reached,impulse)=segment.evolve(&mut psi[..],at,remaining,threshold);Evolved{taken,reached,impulse,node:None}}
+            Propagation::Node{model,cluster,point,local,half,tau,truncation}=>{
+                let n=model.dimension(*cluster);let h=&local.hamiltonian;let n0=norm2(&psi[..],n);
+                let mut y=*psi;half.apply(h,n,0.5*tau,&mut y,*truncation);let(nh,middle)=(norm2(&y,n),y);
+                half.apply(h,n,0.5*tau,&mut y,*truncation);let n1=norm2(&y,n);
+                if !(n1>threshold){
+                    // The crossing on ln‖ψ‖², linear on the half where it lies.
+                    let(ta,tb,la,lb)=if nh<=threshold{(0.,0.5*tau,n0.ln(),nh.ln())}else{(0.5*tau,*tau,nh.ln(),n1.ln())};
+                    let taken=if lb<la{(ta+(threshold.ln()-la)/(lb-la)*(tb-ta)).clamp(ta,tb)}else{tb};
+                    return Evolved{taken,reached:true,impulse:[0.;3],node:None};
+                }
+                *psi=y;Evolved{taken:*tau,reached:false,impulse:model.force(*cluster,local,point,&middle),node:Some(middle)}
+            }
+        }
+    }
+}
+/// A part of a step's end: its crossing, where ‖ψ‖² reaches the threshold in it and the part is to be redone to it (the trajectory left for its caller to restore); else its kick and, of one node, the state the loss is judged at
+/// (`Engine::step`): the place and momentum of the node before the kick, the momentum with half the kick, ψ there and the time.
+struct Part{crossing:Option<f64>,kick:[f64;3],node:Option<Node>}
+struct Node{place:([f64;3],[f64;3]),kappa:[f64;3],psi:[Complex;MOST_MIXED],time:f64}
 
 /// A segment's state between its grid's nodes: ψ, or a spectral segment's coordinates R⁻¹ψ.
 type State=[Complex;MOST_MIXED];
@@ -542,13 +575,13 @@ impl Entries{
         let Entries{entries,parts,sizes,forms,beats,fixed,working,..}=&mut e;
         sizes.clear();sizes.push(column_norm(c.hamiltonian(),n));sizes.extend(c.beats().map(|b|column_norm(b.hamiltonian,n)));
         // Entries within the generator's round-off are none (a cluster keeps drives of 1e-30, static in its frames).
-        let floor=(f64::EPSILON*sizes.iter().sum::<f64>()).powi(2);
+        let floor=unit_round_off(sizes.iter().sum::<f64>()).powi(2);
         entries.clear();parts.clear();parts.push(0);
         for h in std::iter::once(c.hamiltonian()).chain(c.beats().map(|b|b.hamiltonian)){entries.extend(h.iter().enumerate().filter(|(_,z)|z.norm_sqr()>floor).map(|(k,&z)|(k/n,k%n,z)));parts.push(entries.len());}
         let scale={let(_,w)=cf4();w[0]+w[1]};for x in fixed.iter_mut(){zeroed(x,n*n);}for &(a,b,z)in &entries[..parts[1]]{let k=b*n+a;fixed[0][k]=z.re*scale;fixed[1][k]=z.im*scale;}
         let statics=[c.gradient(0),c.gradient(1),c.gradient(2)];
         let gradients=std::iter::once(statics).chain((half..c.omegas().len()).map(|j|c.beat(j).gradient));
-        let top=gradients.clone().flat_map(|g|g.into_iter().flatten()).fold(0_f64,|m,z|m.max(z.norm_sqr()))*f64::EPSILON*f64::EPSILON;
+        let top=unit_round_off(unit_round_off(gradients.clone().flat_map(|g|g.into_iter().flatten()).fold(0_f64,|m,z|m.max(z.norm_sqr()))));
         let form=|g:&[&[Complex];3],a:usize,b:usize,scale:f64|->Option<(usize,usize,[Complex;3])>{let k=a*n+b;g.iter().any(|x|x[k].norm_sqr()>top).then(||(a,b,[g[0][k]*scale,g[1][k]*scale,g[2][k]*scale]))};
         forms.clear();beats.clear();
         forms.extend((0..n).flat_map(|a|(a..n).map(move|b|(a,b))).filter_map(|(a,b)|form(&statics,a,b,if a==b{1.}else{2.})));beats.push(forms.len());
@@ -601,7 +634,7 @@ impl Entries{
 fn series_within(x:f64,share:f64)->(usize,usize){
     let widest=(share/f64::EPSILON).ln().max(1.);let mut parts=((x/widest).ceil() as usize).max(1);let mut best=(parts,usize::MAX);
     loop{
-        let(y,part)=(x/parts as f64,share/parts as f64);let mut terms=1;let mut size=y;while size>part&&terms<64{terms+=1;size*=y/terms as f64;}
+        let part=share/parts as f64;let(terms,size)=terms_within(x/parts as f64,part,64);
         if size>part{parts+=1;continue;}
         if parts*terms>=best.0.saturating_mul(best.1){return best;}
         best=(parts,terms);parts+=1;
@@ -901,22 +934,6 @@ fn emit(rng:&mut Rng,u:&[[Complex;MOST_STATES];3],nt:usize,polarization:f64)->([
     (direction,pair[chosen],amplitudes[chosen],weights[chosen])
 }
 
-/// The eigen-decomposition of a symmetric 3 × 3 matrix (Jacobi's rotations to double precision): the values and
-/// the unit vectors (rows).
-fn symmetric(mut a:[[f64;3];3])->([f64;3],[[f64;3];3]){
-    let mut v=[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]];
-    for _ in 0..64{
-        let(mut p,mut q,mut big)=(0,1,0.);for i in 0..3{for j in i+1..3{if a[i][j].abs()>big{big=a[i][j].abs();p=i;q=j;}}}
-        if !(big>f64::EPSILON*(a[0][0].abs()+a[1][1].abs()+a[2][2].abs())){break;}
-        let theta=0.5*(a[q][q]-a[p][p])/a[p][q];let t=theta.signum()/(theta.abs()+(theta*theta+1.).sqrt());
-        let c=1./(t*t+1.).sqrt();let s=t*c;
-        for k in 0..3{let(x,y)=(a[k][p],a[k][q]);a[k][p]=c*x-s*y;a[k][q]=s*x+c*y;}
-        for k in 0..3{let(x,y)=(a[p][k],a[q][k]);a[p][k]=c*x-s*y;a[q][k]=s*x+c*y;}
-        for k in 0..3{let(x,y)=(v[k][p],v[k][q]);v[k][p]=c*x-s*y;v[k][q]=s*x+c*y;}
-    }
-    ([a[0][0],a[1][1],a[2][2]],std::array::from_fn(|i|[v[0][i],v[1][i],v[2][i]]))
-}
-
 /// A part's share below the largest by single precision's round-off squared is the GPU's amplitudes' round-off: C's eigenvalues below this of its trace, 2⁻⁴⁶, 64 of double
 /// precision's, are no direction on either device (`part_weights`).
 const SHARE_ROUNDING:f64=f32::EPSILON as f64*f32::EPSILON as f64;
@@ -941,7 +958,7 @@ pub fn part_weights(s:&[f64],mu:&[[f64;3]],target:[f64;3])->Vec<f64>{
         let centre:[f64;3]=std::array::from_fn(|a|(0..n).map(|c|on[c]*mu[c][a]).sum::<f64>()/sum);
         let g:[f64;3]=std::array::from_fn(|a|target[a]-(0..n).map(|c|q[c]*mu[c][a]).sum::<f64>());
         let mut h=[[0.;3];3];for c in 0..n{for i in 0..3{for j in 0..3{h[i][j]+=on[c]*(mu[c][i]-centre[i])*(mu[c][j]-centre[j]);}}}
-        let(values,vectors)=symmetric(h);let floor=SHARE_ROUNDING*values.iter().map(|v|v.abs()).sum::<f64>();
+        let(values,vectors)=crate::linear::symmetric_eigen_pivoted(h);let floor=SHARE_ROUNDING*values.iter().map(|v|v.abs()).sum::<f64>();
         let mut beta=[0.;3];
         for i in 0..3{
             let spreads=(0..n).any(|c|on[c]>0.&&(0..3).map(|a|vectors[i][a]*(mu[c][a]-centre[a])).sum::<f64>().abs()>spread);
@@ -963,9 +980,9 @@ pub const SIGN_BITS:f64=(1u64<<26) as f64;
 /// A photon's absorbed recoil (# Absorption) from the uniform u: its parts -- per near beam its wave vector, share and
 /// projection on the photon; the explicit states' share and their beams' wave vectors and drive weights --, and its exact
 /// conditional mean. u picks the part by its weight (`part_weights`, the explicit part's recoil mean zero), its leftover the
-/// explicit part's beam, and its lower bits (`SIGN_BITS`) the sign of its mean's shot noise; the kick is the picked beam's
-/// recoil (the explicit part's less its drives' mean, ± that mean) and the rest of the exact mean.
-pub fn absorbed_recoil(beams:&[([f64;3],f64,f64)],explicit:Option<(f64,&[([f64;3],f64)])>,mean:[f64;3],u:f64)->[f64;3]{
+/// explicit transition, and its lower bits (`SIGN_BITS`) the independent signs of that response's two quadratures.
+/// The explicit part has zero mean; the folded part retains its exact conditional mean.
+pub fn absorbed_recoil(beams:&[([f64;3],f64,f64)],explicit:Option<(f64,&[Recoil])>,mean:[f64;3],u:f64)->[f64;3]{
     let mut s:Vec<f64>=beams.iter().map(|x|x.1).collect();let mut mu:Vec<[f64;3]>=beams.iter().map(|x|x.0).collect();
     if let Some((v,_))=explicit{s.push(v);mu.push([0.;3]);}
     let target:[f64;3]=std::array::from_fn(|a|beams.iter().map(|x|x.2*x.0[a]).sum());
@@ -975,13 +992,13 @@ pub fn absorbed_recoil(beams:&[([f64;3],f64,f64)],explicit:Option<(f64,&[([f64;3
     for(c,&v)in q.iter().enumerate(){if x<v{pick=c;break;}x-=v;}
     let left=(x/q[pick]).clamp(0.,1.);
     let mut kick=if pick<beams.len(){beams[pick].0}else{
-        let drives=explicit.map_or(&[][..],|x|x.1);let total:f64=drives.iter().map(|d|d.1).sum();
+        let drives=explicit.map_or(&[][..],|x|x.1);let total:f64=drives.iter().map(|d|d.weight).sum();
         if !(total>0.){[0.;3]}else{
-            let average:[f64;3]=std::array::from_fn(|a|drives.iter().map(|d|d.1*d.0[a]).sum::<f64>()/total);
-            let mut y=left*total;let mut l=(0..drives.len()).rev().find(|&i|drives[i].1>0.).unwrap();
-            for(i,d)in drives.iter().enumerate(){if y<d.1{l=i;break;}y-=d.1;}
+            let mut y=left*total;let mut l=(0..drives.len()).rev().find(|&i|drives[i].weight>0.).unwrap();
+            for(i,d)in drives.iter().enumerate(){if y<d.weight{l=i;break;}y-=d.weight;}
             let sign=if (u*SIGN_BITS).fract()<0.5{1.}else{-1.};
-            std::array::from_fn(|a|drives[l].0[a]-average[a]+sign*average[a])
+            let quadrature=if (u*(2.*SIGN_BITS)).fract()<0.5{1.}else{-1.};
+            std::array::from_fn(|a|sign*drives[l].phase[a]+quadrature*drives[l].amplitude[a])
         }
     };
     for a in 0..3{kick[a]+=mean[a]-(0..q.len()).map(|c|q[c]*mu[c][a]).sum::<f64>();}
@@ -991,13 +1008,6 @@ pub fn absorbed_recoil(beams:&[([f64;3],f64,f64)],explicit:Option<(f64,&[([f64;3
 /// The stream of a trajectory's jump number `jump` (the initial threshold is jump 0's).
 pub fn jump_stream(seed:u64,index:u64,jump:u64)->Rng{Rng::new(seed,Purpose::Jump,index,jump)}
 
-/// An atom held at a point (control.rs `Twin`), its generator static there: every cluster's H_eff,
-/// per class and photon axis its jump operator L (target × cluster, row-major), and its post-jump
-/// transient, computed once.
-pub struct Held{pub point:Point,pub locals:Vec<Local>,pub jumps:Vec<Vec<[Vec<Complex>;3]>>}
-
-/// The engine: a model and its settings; for a held atom its generator and jumps there, and each
-/// cluster's propagator exp(−i H dt/2) over half the settings' step; the momentum diffusion's hook.
 /// Per cluster of ground states with beats the largest bound of those beats (`Segment::resolve`, its step's) where the exact step leaves them all out at the model's reach -- wherever the atom goes:
 /// a generator static within the exponentials' share, the plain step's, at a tenth of the work (# The exact step). None for the others.
 pub(crate) fn quiet_clusters(model:&Model,s:&Settings)->Vec<Option<f64>>{
@@ -1012,19 +1022,11 @@ pub(crate) fn quiet_clusters(model:&Model,s:&Settings)->Vec<Option<f64>>{
     }).collect()
 }
 
-pub struct Engine<'a>{pub model:&'a Model,pub settings:Settings,held:Option<(&'a Held,Vec<[Complex;MOST_STATES*MOST_STATES]>)>,pub diffusion:Option<&'a dyn Diffusion>,quiet:Vec<Option<f64>>}
+/// The engine: a model and its settings, and the clusters it steps as static (`quiet_clusters`).
+pub struct Engine<'a>{pub model:&'a Model,pub settings:Settings,quiet:Vec<Option<f64>>}
 
 impl<'a> Engine<'a>{
-    pub fn new(model:&'a Model,settings:Settings)->Engine<'a>{let quiet=quiet_clusters(model,&settings);Engine{model,settings,held:None,diffusion:None,quiet}}
-    /// The engine of an atom held at a point: no axis free, no loss, the held generator and jumps;
-    /// the half step's propagators by the exponentials' own series on the basis states. Its clusters
-    /// are of ground states (a twin exists for those alone, control.rs).
-    pub fn held(model:&'a Model,settings:&Settings,held:&'a Held)->Engine<'a>{
-        let mut s=settings.clone();s.free=[false;3];s.loss=false;
-        let half=held.locals.iter().enumerate().map(|(k,local)|{let n=model.dimension(k);let mut u=[Complex::ZERO;MOST_STATES*MOST_STATES];
-            for j in 0..n{let mut e=[Complex::ZERO;MOST_STATES];e[j]=Complex::ONE;propagate(&local.hamiltonian,n,0.5*s.dt,&mut e,s.truncation);for i in 0..n{u[i*n+j]=e[i];}}u}).collect();
-        Engine{model,settings:s,held:Some((held,half)),diffusion:None,quiet:vec![]}
-    }
+    pub fn new(model:&'a Model,settings:Settings)->Engine<'a>{let quiet=quiet_clusters(model,&settings);Engine{model,settings,quiet}}
     /// The trap's harmonic flow for τ about c, its part weighted by w (`reference`): along its principal axes
     /// when every lab axis is free, else along the free lab axes, at the frequencies ω √w.
     fn flow(&self,t:&mut Trajectory,tau:f64,(c,w):([f64;3],f64)){
@@ -1065,38 +1067,6 @@ impl<'a> Engine<'a>{
         f
     }
 
-    /// One step's flow, kick and internal evolution of length dt without jumps: the norms of ψ at
-    /// the start, the middle and the end, the place and momentum of the middle, the kick's momentum (the light's
-    /// and the trap's anharmonic part) and ψ at the middle. A cluster of ground states (`exact` takes
-    /// the others). Where ‖ψ‖² ends at or below `threshold` the step is to be redone to its crossing (`step`): the norms, the place and the middle's ψ alone, the rest of `t` for its caller to restore.
-    fn advance(&self,t:&mut Trajectory,dt:f64,threshold:f64)->(f64,f64,f64,([f64;3],[f64;3]),[f64;3],[Complex;MOST_MIXED]){
-        let(m,s)=(self.model,&self.settings);
-        if let Some((h,half))=&self.held{
-            // Held: the internal state alone, by the generator there -- a whole step by the half
-            // step's propagator, a step's part by the series.
-            let n=m.dimension(t.cluster);let local=&h.locals[t.cluster];let n0=norm2(&t.psi,n);let mut psi=t.psi;
-            let half_step=|psi:&mut [Complex;MOST_MIXED]|if dt==s.dt{let u=&half[t.cluster];let v=*psi;for i in 0..n{let mut z=Complex::ZERO;for j in 0..n{z+=u[i*n+j]*v[j];}psi[i]=z;}}
-                else{propagate(&local.hamiltonian,n,0.5*dt,psi,s.truncation);};
-            half_step(&mut psi);let nh=norm2(&psi,n);let middle=psi;half_step(&mut psi);let n1=norm2(&psi,n);
-            t.psi=psi;t.time+=dt;return(n0,nh,n1,(h.point.r,h.point.kappa),[0.;3],middle);
-        }
-        let reference=self.reference(t.r);let(c,w)=reference;
-        self.flow(t,0.5*dt,reference);
-        let point=m.point(t.r,t.kappa);
-        let n=m.dimension(t.cluster);let local=m.local(t.cluster,&point,t.time+0.5*dt);
-        let n0=norm2(&t.psi,n);let half=HalfStep::new(&local.hamiltonian,n,0.5*dt,s.truncation);
-        let mut psi=t.psi;half.apply(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let nh=norm2(&psi,n);let middle=psi;
-        half.apply(&local.hamiltonian,n,0.5*dt,&mut psi,s.truncation);let n1=norm2(&psi,n);
-        let place=(point.r,point.kappa);let mut kick=[0.;3];
-        if !(n1>threshold){return(n0,nh,n1,place,kick,middle);}
-        let force=m.force(t.cluster,&local,&point,&middle);let harmonic=self.harmonic(std::array::from_fn(|a|t.r[a]-c[a]));
-        for a in 0..3{if s.free[a]{kick[a]=dt*(force[a]-w*harmonic[a]);t.kappa[a]+=kick[a];}}
-        t.psi=psi;
-        self.flow(t,0.5*dt,reference);
-        t.time+=dt;
-        (n0,nh,n1,place,kick,middle)
-    }
-
     /// A cluster's components over a step of τ from `start` through a point on the atom's path (model.rs `Model::on_path`, # The atom's path), its momentum the step's middle's: the point's and half the kick the step takes, of its reference (c, w)
     /// less its harmonic part, from the force at the point on the state at the step's start.
     fn on_path(&self,cluster:usize,point:&Point,psi:&[Complex],start:f64,tau:f64,(c,w):([f64;3],f64))->Components{
@@ -1108,34 +1078,28 @@ impl<'a> Engine<'a>{
         }
         components
     }
-    /// The exact step of τ (module documentation): the flow for τ/2; at the point there the cluster's
-    /// generator at the middle time once, the internal state propagated exactly (`jumps` false: with no
-    /// jump, the step-doubling check's), the impulse along it; the kick; the flow for τ/2. The kick's
-    /// momentum (the light's and the trap's anharmonic part). Where ‖ψ‖² reaches the threshold in it, the
-    /// step is redone to that crossing, the jump made at the place it reaches and the rest of the step
-    /// taken from there (the kick then none of the caller's: only the check, without jumps, reads it). A part of a step
-    /// leaves out beats within its part of the share (a short part took the step's whole share, and what it left out booked 12 % on the 1 G molasses).
-    fn exact(&self,t:&mut Trajectory,tau:f64,exact:bool,jumps:bool)->[f64;3]{
+    /// A part of a step of τ from a trajectory's state, until ‖ψ‖² reaches `threshold`: the flow for τ/2 about its reference at the part's start; at the point there the cluster's propagation, the kick from its impulse less the
+    /// harmonic part, the flow for τ/2 (# One propagation). A part of a step leaves out beats within its part of the share (a short part took the step's whole share, and what it left out booked 12 % on the 1 G molasses). `grid`: its
+    /// propagation a segment's whatever the cluster's own (a rest of a step begun on one).
+    fn part(&self,t:&mut Trajectory,tau:f64,threshold:f64,grid:bool)->Part{
         let(m,s)=(self.model,&self.settings);
-        let before=jumps.then(||t.clone());
         let reference=self.reference(t.r);let(c,w)=reference;
         self.flow(t,0.5*tau,reference);
         let point=m.point(t.r,t.kappa);let start=t.time;
-        let segment=Segment::new(self.on_path(t.cluster,&point,&t.psi,start,tau,reference),start,tau,s.truncation,s.beats*(tau/s.dt).min(1.),s.horizon,s.node_phase);t.beats=t.beats.max(segment.dropped/tau);
-        let(taken,jumped,impulse)=segment.evolve(&mut t.psi,start,tau,if jumps{t.threshold}else{0.});drop(segment);
-        if let(true,Some(from))=(jumped,before){
-            let beats=t.beats;*t=from;t.beats=beats;
-            self.exact(t,taken,exact,false);self.jump(t,t.r,t.time,exact);
-            if taken<tau{self.exact(t,tau-taken,exact,true);}
-            t.time=start+tau;
-            return [0.;3];
-        }
+        let propagation=if grid{
+            let segment=Segment::new(self.on_path(t.cluster,&point,&t.psi,start,tau,reference),start,tau,s.truncation,s.beats*(tau/s.dt).min(1.),s.horizon,s.node_phase);t.beats=t.beats.max(segment.dropped/tau);
+            Propagation::Grid(segment)
+        }else{
+            let local=m.local(t.cluster,&point,start+0.5*tau);let half=HalfStep::new(&local.hamiltonian,m.dimension(t.cluster),0.5*tau,s.truncation);
+            Propagation::Node{model:m,cluster:t.cluster,point:&point,local,half,tau,truncation:s.truncation}
+        };
+        let evolved=propagation.evolve(&mut t.psi,start,tau,threshold);drop(propagation);
+        if evolved.reached{return Part{crossing:Some(evolved.taken),kick:[0.;3],node:None};}
         let harmonic=self.harmonic(std::array::from_fn(|a|t.r[a]-c[a]));let mut kick=[0.;3];
-        for a in 0..3{if s.free[a]{kick[a]=impulse[a]-tau*w*harmonic[a];t.kappa[a]+=kick[a];}}
-        if let Some(d)=self.diffusion{d.step(m,t,&point,tau);}
-        self.flow(t,0.5*tau,reference);
-        t.time=start+tau;
-        kick
+        let held=evolved.node.is_some();
+        for a in 0..3{if s.free[a]{kick[a]=if held{tau*(evolved.impulse[a]-w*harmonic[a])}else{evolved.impulse[a]-tau*w*harmonic[a]};t.kappa[a]+=kick[a];}}
+        self.flow(t,0.5*tau,reference);t.time+=tau;
+        Part{crossing:None,kick,node:evolved.node.map(|psi|Node{place:(point.r,point.kappa),kappa:std::array::from_fn(|a|point.kappa[a]+0.5*kick[a]),psi,time:t.time-0.5*tau})}
     }
 
     /// The exact step's segment of a cluster at a point over τ from `start` (`Probe`).
@@ -1200,7 +1164,7 @@ impl<'a> Engine<'a>{
     }
     /// Whether a cluster takes the exact step: one with explicit excited states or a beating generator
     /// (a held atom's clusters are of ground states and static, control.rs).
-    pub(crate) fn takes_exact(&self,cluster:usize)->bool{self.held.is_none()&&(self.model.mixed(cluster)||(self.model.beating(cluster)&&self.quiet[cluster].is_none()))}
+    pub(crate) fn takes_exact(&self,cluster:usize)->bool{self.model.takes_exact(cluster,&self.quiet)}
     /// The mechanical energy of a trajectory's state (rad/us): ħ²κ²/2m and its potential, the
     /// Hermitian part of its generator's expectation (the trap's and the light's, the force's).
     pub fn energy(&self,t:&Trajectory)->f64{
@@ -1211,9 +1175,7 @@ impl<'a> Engine<'a>{
     /// One jump-free step of dt from a trajectory's state, by the step its cluster takes: the norms
     /// at its start and end and its kick.
     fn free_step(&self,t:&mut Trajectory,dt:f64)->(f64,f64,[f64;3]){
-        if self.takes_exact(t.cluster){
-            let n=self.model.dimension(t.cluster);let n0=norm2(&t.psi,n);let kick=self.exact(t,dt,false,false);(n0,norm2(&t.psi,n),kick)
-        }else{let(n0,_,n1,_,kick,_)=self.advance(t,dt,0.);(n0,n1,kick)}
+        let n=self.model.dimension(t.cluster);let n0=norm2(&t.psi,n);let part=self.part(t,dt,0.,self.takes_exact(t.cluster));(n0,norm2(&t.psi,n),part.kick)
     }
     /// A trajectory's state after `count` jump-free steps of dt (the deterministic flow the step check
     /// compares): flow, kick and the internal state's no-jump evolution, no jump, no loss.
@@ -1244,23 +1206,22 @@ impl<'a> Engine<'a>{
         // The state the loss is judged at: the step's middle where it went without a jump -- the point
         // the flow's first half reached, κ there with half the kick, ψ after the first half step, the
         // middle's time --, else its end.
-        let(place,middle)=if self.takes_exact(t.cluster){self.exact(t,s.dt,exact(),true);((t.r,t.kappa),None)}else{
-            let mut left=s.dt;
-            if let Some(Some(dropped))=self.quiet.get(t.cluster){t.beats=t.beats.max(dropped/s.dt);}
-            loop{
-                let start=t.clone();
-                let threshold=t.threshold;let(n0,nh,n1,place,kick,half)=self.advance(t,left,threshold);
-                if n1>t.threshold{let kappa:[f64;3]=std::array::from_fn(|a|place.1[a]+0.5*kick[a]);break(place,Some((kappa,half,t.time-0.5*left)));}
-                // The crossing on ln‖ψ‖², linear on the half where it lies; the step redone to it.
-                let(ta,tb,la,lb)=if nh<=t.threshold{(0.,0.5*left,n0.ln(),nh.ln())}else{(0.5*left,left,nh.ln(),n1.ln())};
-                let at=if lb<la{(ta+(t.threshold.ln()-la)/(lb-la)*(tb-ta)).clamp(ta,tb)}else{tb};
-                *t=start;if at>0.{self.advance(t,at,0.);}
-                self.jump(t,t.r,t.time,exact());
-                left-=at;
-                if !(left>0.){break((t.r,t.kappa),None);}
-                if self.takes_exact(t.cluster){self.exact(t,left,exact(),true);break((t.r,t.kappa),None);}
-            }
+        let mut left=s.dt;let mut grid=self.takes_exact(t.cluster);let mut anchor=grid.then_some((t.time,left));
+        if let Some(Some(dropped))=self.quiet.get(t.cluster){t.beats=t.beats.max(dropped/s.dt);}
+        let node=loop{
+            let from=t.clone();
+            let part=self.part(t,left,t.threshold,grid);
+            let Some(at)=part.crossing else{break part.node};
+            // The step redone to the crossing, the jump there, the rest of the step from the state it left.
+            let beats=t.beats;*t=from;t.beats=beats;
+            if at>0.||grid{self.part(t,at,0.,grid);}
+            self.jump(t,t.r,t.time,exact());
+            left-=at;
+            if !(left>0.){break None;}
+            if !grid&&self.takes_exact(t.cluster){grid=true;anchor=Some((t.time,left));}
         };
+        if let Some((from,span))=anchor{t.time=from+span;}
+        let(place,middle)=match node{Some(x)=>(x.place,Some((x.kappa,x.psi,x.time))),None=>((t.r,t.kappa),None)};
         // The loss: an atom unbound -- its mechanical energy above the trap's far level -- outside the trap's
         // region (`Settings::region`), of that one state.
         if s.loss&&self.harmonic_potential({let c=s.about();std::array::from_fn(|a|place.0[a]-c[a])})>s.region{
@@ -1278,51 +1239,41 @@ impl<'a> Engine<'a>{
         let n=m.dimension(t.cluster);let norm=norm2(&t.psi,n).sqrt();
         let mut psi=t.psi;for z in psi[..n].iter_mut(){*z=*z*(1./norm);}
         let classes=&m.ground.clusters[t.cluster].classes;
-        // Each class's amplitudes u_x = J_{φ,x} ψ: from the photons at the point, or a held atom's
-        // jump operators; the photons kept for the kicks of a moving one.
-        let point=self.held.as_ref().map_or_else(||m.point(r,t.kappa),|(h,_)|h.point);
-        let photons=self.held.is_none().then(||{let responses=if exact{Exact::new(m,r,t.kappa).ok()}else{None};m.photons(t.cluster,&point,&psi,time,responses)});
-        let held:Vec<[[Complex;MOST_STATES];3]>=self.held.as_ref().map_or(vec![],|(h,_)|h.jumps[t.cluster].iter().zip(classes).map(|(l,c)|{let nt=m.ground_dimension(c.target);
-            std::array::from_fn(|x|{let mut u=[Complex::ZERO;MOST_STATES];for i in 0..nt{for j in 0..n{u[i]+=l[x][i*n+j]*psi[j];}}u})}).collect());
-        let amplitude=photons.as_ref().map_or(&held,|p|&p.amplitude);
+        // Each class's amplitudes u_x = J_{φ,x} ψ, from the photons at the point, kept for the kicks.
+        let point=m.point(r,t.kappa);
+        let responses=if exact{Exact::new(m,r,t.kappa).ok()}else{None};let photons=m.photons(t.cluster,&point,&psi,time,responses);
+        let amplitude=&photons.amplitude;
         // The class, and the cluster it lands the atom in.
         let weights:Vec<f64>=classes.iter().zip(amplitude).map(|(c,u)|{let nt=m.ground_dimension(c.target);(0..3).map(|a|norm2(&u[a],nt)).sum()}).collect();
         let total:f64=weights.iter().sum();
         if !(total>0.){t.threshold=rng.open_uniform();return;}
         // The draws the state and the kicks depend on first -- the class, the next threshold, the
-        // polarization, the absorbed beam, the transient's --, the directions' rejection loops after
-        // them: a twin trajectory on the same stream (control.rs) keeps its thresholds and choices
-        // whatever its loops take.
+        // polarization, the absorbed beam, the transient's --, the directions' rejection loops after them.
         let(mut x,threshold,polarization,absorbed)=(rng.uniform()*total,rng.open_uniform(),rng.uniform(),rng.uniform());
         let mut pick=weights.len()-1;
         for(i,&w)in weights.iter().enumerate(){if x<w{pick=i;break;}x-=w;}
         let class=&classes[pick];let nt=m.ground_dimension(class.target);
-        let transient:Option<[f64;5]>=self.held.is_none().then(||std::array::from_fn(|_|rng.uniform()));
+        let transient:[f64;5]=std::array::from_fn(|_|rng.uniform());
         let(direction,e,f,size)=emit(&mut rng,&amplitude[pick],nt,polarization);
-        // The recoils of a moving atom: the photon's, the absorbed beam's and the exact conditional
-        // mean's correction.
-        if let Some(photons)=&photons{
-            let(gradient,parts)=photons.absorption(pick,e,&f);
-            self.kick(t,&point,direction,class.wave_number,&f,size,&gradient,&parts,absorbed);
-        }
+        // The recoils: the photon's, the absorbed beam's and the exact conditional mean's correction.
+        let(gradient,parts)=photons.absorption(pick,e,&f);
+        self.kick(t,direction,class.wave_number,&f,size,&gradient,&parts,absorbed);
         let mut next=[Complex::ZERO;MOST_MIXED];for i in 0..nt{next[i]=f[i]*(1./size.sqrt());}
         t.cluster=class.target;t.psi=next;t.threshold=threshold;
-        if let Some(draws)=transient{self.transient(t,&point,time,draws,&mut rng);}
+        self.transient(t,&point,time,transient,&mut rng);
     }
 
     /// A moving atom's recoils from a photon (direction n, wave number k, the state it leaves f and
     /// ‖f‖², the gradient of its amplitudes along the polarization ε per row and axis, and its absorbed
     /// light's parts): −k n, and the absorbed light's with the exact conditional mean Im⟨f|∇f⟩/‖f‖²
     /// (`absorbed_recoil`, by the uniform `absorbed`).
-    fn kick(&self,t:&mut Trajectory,point:&Point,direction:[f64;3],k:f64,f:&[Complex;MOST_STATES],size:f64,du:&[[Complex;3];MOST_STATES],parts:&Absorption,absorbed:f64){
+    fn kick(&self,t:&mut Trajectory,direction:[f64;3],k:f64,f:&[Complex;MOST_STATES],size:f64,du:&[[Complex;3];MOST_STATES],parts:&Absorption,absorbed:f64){
         let m=self.model;let mut kick=direction.map(|x|-k*x);
         let mean:[f64;3]=std::array::from_fn(|x|{let mut s=0.;for i in 0..MOST_STATES{s+=(f[i].conj()*du[i][x]).im;}s/size});
         let beams:Vec<([f64;3],f64,f64)>=parts.beams.iter().map(|&(l,s,w)|(m.geometry[l].wave_vector(),s,w)).collect();
-        let drives=parts.explicit.as_ref().map(|(_,d)|d.iter().map(|&(l,w)|(m.geometry[l].wave_vector(),w)).collect::<Vec<_>>());
-        let explicit=parts.explicit.as_ref().zip(drives.as_deref()).map(|((w,_),d)|(*w,d));
+        let explicit=parts.explicit.as_ref().map(|(w,d)|(*w,d.as_slice()));
         let recoil=absorbed_recoil(&beams,explicit,mean,absorbed);
         for a in 0..3{kick[a]+=recoil[a];}
-        if let Some(d)=self.diffusion{d.photon(m,t,point,f,&mut kick);}
         for a in 0..3{if self.settings.free[a]{t.kappa[a]+=kick[a];}}
     }
 
@@ -1372,7 +1323,7 @@ impl<'a> Engine<'a>{
         let parts=Absorption{beams:beams.iter().map(|(l,u)|{let along=|i:usize|(0..3).fold(Complex::ZERO,|s,a|s+u[a][i]*polar[a]);
             (*l,(0..nt).map(|i|along(i).norm_sqr()).sum(),-(0..nt).map(|i|(f[i].conj()*along(i)).re).sum::<f64>()/size)}).collect(),explicit:None};
         let along:[[Complex;3];MOST_STATES]=std::array::from_fn(|i|std::array::from_fn(|x|-(0..3).fold(Complex::ZERO,|s,a|s+du[a][x][i]*polar[a])));
-        self.kick(t,point,direction,m.carriers[g.clusters[k].coherent[c][0].0.carrier].wave_number,&f,size,&along,&parts,draws[4]);
+        self.kick(t,direction,m.carriers[g.clusters[k].coherent[c][0].0.carrier].wave_number,&f,size,&along,&parts,draws[4]);
         let mut next=[Complex::ZERO;MOST_MIXED];for i in 0..nt{next[i]=f[i]*(1./size.sqrt());}
         t.cluster=target;t.psi=next;
     }
@@ -1401,7 +1352,7 @@ mod tests{
     fn a_running_wave_s_photon_takes_its_recoil_in_either_model(){
         let k=[3.,0.,7.];
         for u in [0.01,0.4,0.99]{assert!(close(absorbed_recoil(&[(k,0.3,1.)],None,k,u),k,1e-12));}
-        let(mean,second)=over_the_draw(|u|absorbed_recoil(&[],Some((1.,&[(k,0.7)])),[0.;3],u));
+        let(mean,second)=over_the_draw(|u|absorbed_recoil(&[],Some((1.,&[Recoil{phase:k,amplitude:[0.;3],weight:0.7}])),[0.;3],u));
         assert!(close(mean,[0.;3],1e-3),"{mean:?}");assert!(close(second,[9.,0.,49.],1e-9),"{second:?}");
     }
     /// The draw over a photon's beams: without interference (the projections the shares) the shares, the second moment
@@ -1454,12 +1405,34 @@ mod tests{
     /// kicks have mean zero, the Ehrenfest force carrying its mean); the explicit part's second moment is its drives'.
     #[test]
     fn the_explicit_part_s_kicks_add_no_mean(){
-        let k=pairs();let drives:Vec<([f64;3],f64)>=k.iter().copied().zip([0.4,0.1,0.2,0.1,0.15,0.05]).collect();
+        let k=pairs();let drives:Vec<Recoil>=k.iter().copied().zip([0.4,0.1,0.2,0.1,0.15,0.05]).map(|(phase,weight)|Recoil{phase,amplitude:[0.;3],weight}).collect();
         let beams=[(k[0],0.02,0.02),(k[1],0.01,-0.01)];let mean:[f64;3]=std::array::from_fn(|a|0.02*k[0][a]-0.01*k[1][a]);
         let(got,_)=over_the_draw(|u|absorbed_recoil(&beams,Some((0.97,&drives)),mean,u));assert!(close(got,mean,3e-3),"{got:?}");
         let(got,second)=over_the_draw(|u|absorbed_recoil(&[],Some((1.,&drives)),[0.;3],u));assert!(close(got,[0.;3],3e-3),"{got:?}");
-        let total:f64=drives.iter().map(|d|d.1).sum();
-        for a in 0..3{let incoherent=drives.iter().map(|d|d.1*d.0[a]*d.0[a]).sum::<f64>()/total;assert!((second[a]-incoherent).abs()<=2e-2,"{second:?}");}
+        let total:f64=drives.iter().map(|d|d.weight).sum();
+        for a in 0..3{let incoherent=drives.iter().map(|d|d.weight*d.phase[a]*d.phase[a]).sum::<f64>()/total;assert!((second[a]-incoherent).abs()<=2e-2,"{second:?}");}
+    }
+    #[test]
+    fn the_explicit_response_kicks_keep_the_full_covariance(){
+        let k=[3.,-2.,7.];let gradient=[31.,17.,-11.];let gamma=19.;
+        for delta in [0.,12.,-25.,400.]{
+            let slope=k.map(|x|Complex::new(0.,x));
+            let r=Recoil::response(slope,delta,gamma,gradient,1.);
+            // Differentiate the complex response itself, independently of its logarithmic formula.
+            let h=1e-5;let response=|a:usize,x:f64|Complex::cis(k[a]*x)/Complex::new(delta+gradient[a]*x,-gamma);
+            let sigma=response(0,0.);let derivative:[Complex;3]=std::array::from_fn(|a|(response(a,h)-response(a,-h))*(0.5/h));
+            let(mut mean,mut covariance)=([0.;3],[[0.;3];3]);
+            for bit in 0..4{
+                let u=(12345.+(bit as f64+0.5)/4.)/SIGN_BITS;
+                let v=absorbed_recoil(&[],Some((1.,std::slice::from_ref(&r))),[0.;3],u);
+                for a in 0..3{mean[a]+=v[a]/4.;for b in 0..3{covariance[a][b]+=v[a]*v[b]/4.;}}
+            }
+            assert!(close(mean,[0.;3],1e-12),"{mean:?}");
+            for a in 0..3{for b in 0..3{
+                let expected=(derivative[a].conj()*derivative[b]).re/sigma.norm_sqr();
+                assert!((covariance[a][b]-expected).abs()<1e-6,"δ={delta}, {a},{b}: {} vs {expected}",covariance[a][b]);
+            }}
+        }
     }
     /// A random Hermitian n × n matrix of entries up to `size`.
     fn hermitian(next:&mut impl FnMut()->f64,n:usize,size:f64)->Vec<Complex>{

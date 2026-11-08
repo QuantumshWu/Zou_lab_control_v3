@@ -66,7 +66,6 @@ impl Dense{
         assert_eq!((self.rows,self.cols),(b.rows,b.cols));for(x,&y)in self.entries.iter_mut().zip(&b.entries){*x+=z*y;}
     }
     pub fn scaled(&self,z:Complex)->Dense{Dense{rows:self.rows,cols:self.cols,entries:self.entries.iter().map(|&x|z*x).collect()}}
-    pub fn is_zero(&self)->bool{self.entries.iter().all(|&x|x==Complex::ZERO)}
     /// The largest entry's modulus.
     pub fn largest(&self)->f64{self.entries.iter().fold(0.,|a,x|a.max(x.abs()))}
     /// ‖self‖₂, the largest singular value.
@@ -113,6 +112,38 @@ pub(crate) fn lu_solve(a:&[Complex],pivots:&[usize],n:usize,b:&mut [Complex]){
     for(k,&p)in pivots.iter().enumerate(){b.swap(k,p);}
     for i in 0..n{let mut x=b[i];for j in 0..i{x-=a[i*n+j]*b[j];}b[i]=x;}
     for i in (0..n).rev(){let mut x=b[i];for j in i+1..n{x-=a[i*n+j]*b[j];}b[i]=x/a[i*n+i];}
+}
+/// A term of a sum of size `scale` at or within this is that sum's rounding, no term: 64 ε of the scale.
+pub(crate) fn round_off(scale:f64)->f64{64.*f64::EPSILON*scale}
+/// The same at one ε of `scale`: the sites that read a term against a single number's precision.
+pub(crate) fn unit_round_off(scale:f64)->f64{f64::EPSILON*scale}
+/// The same at the kernel's single precision, one ε of `f32`: what the GPU's generator cannot hold.
+pub(crate) fn single_round_off(scale:f64)->f64{f32::EPSILON as f64*scale}
+/// One Jacobi rotation of a real symmetric 3 × 3 matrix in the plane (p, q), a[p][q] ≠ 0, its eigenvectors the rows of v.
+fn rotate_symmetric(a:&mut [[f64;3];3],v:&mut [[f64;3];3],p:usize,q:usize){
+    let theta=(a[q][q]-a[p][p])/(2.*a[p][q]);let t=theta.signum()/(theta.abs()+(theta*theta+1.).sqrt());let c=1./(t*t+1.).sqrt();let s=t*c;
+    for k in 0..3{let(x,y)=(a[k][p],a[k][q]);a[k][p]=c*x-s*y;a[k][q]=s*x+c*y;}
+    for k in 0..3{let(x,y)=(a[p][k],a[q][k]);a[p][k]=c*x-s*y;a[q][k]=s*x+c*y;}
+    for k in 0..3{let(x,y)=(v[p][k],v[q][k]);v[p][k]=c*x-s*y;v[q][k]=s*x+c*y;}
+}
+/// The eigen-decomposition of a real symmetric 3 × 3 matrix: its eigenvalues and orthonormal eigenvectors (rows), by cyclic Jacobi rotations.
+pub(crate) fn symmetric_eigen(m:[[f64;3];3])->([f64;3],[[f64;3];3]){
+    let mut a=m;let mut v=[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]];
+    for _ in 0..64{
+        let off=a[0][1].abs()+a[0][2].abs()+a[1][2].abs();if off<=1e-15*(a[0][0].abs()+a[1][1].abs()+a[2][2].abs()){break;}
+        for(p,q)in [(0,1),(0,2),(1,2)]{if a[p][q]!=0.{rotate_symmetric(&mut a,&mut v,p,q);}}
+    }
+    ([a[0][0],a[1][1],a[2][2]],v)
+}
+/// The same with the largest off-diagonal entry rotated first, to one ε: the order the CPU's `part_weights` (engine.rs) takes. Either order on the other's matrices moves every chaotic trajectory's digits, none of their statistics.
+pub(crate) fn symmetric_eigen_pivoted(m:[[f64;3];3])->([f64;3],[[f64;3];3]){
+    let mut a=m;let mut v=[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]];
+    for _ in 0..64{
+        let(mut p,mut q,mut big)=(0,1,0.);for i in 0..3{for j in i+1..3{if a[i][j].abs()>big{big=a[i][j].abs();p=i;q=j;}}}
+        if !(big>f64::EPSILON*(a[0][0].abs()+a[1][1].abs()+a[2][2].abs())){break;}
+        rotate_symmetric(&mut a,&mut v,p,q);
+    }
+    ([a[0][0],a[1][1],a[2][2]],v)
 }
 /// `x` emptied and filled with `len` zeros: a buffer kept for its capacity.
 pub(crate) fn zeroed<T:Clone+Default>(x:&mut Vec<T>,len:usize){x.clear();x.resize(len,T::default());}

@@ -32,7 +32,7 @@ import type {ScopeNote} from './spectroscopy.js';
 import {defaultScene,newLaser,MAXIMUM_LASERS,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
 import {addReflection,detachReflection,reflectionOf,sourceOf} from './reflection.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,MotionDevice,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
-import type {ApproximationLedger,Distributions,DynamicsResult} from './solver-types.js';
+import type {ApproximationLedger,Distributions,DynamicsResult,LedgerTotal} from './solver-types.js';
 import {SEMICLASSICAL_REGIME} from './solver-types.js';
 import {MOTION_AXES,asksGpu,motionRefusal,motionTemperatureReading,setMotionTemperature} from './motion.js';
 import {AXIS_INKS,MOTION_INKS,TOTAL_INK,TOTAL_WIDTH,bindDistribution,bindSeries,distributionChart,distributions,lengthText,motionSeries,rootMeanSquare,seriesChart} from './motion-chart.js';
@@ -1166,11 +1166,9 @@ function solverDetails():string{
     readout('概率守恒误差',small(result.validation.maxTraceError)),readout('最小布居',small(result.validation.minPopulation)),
     // p̄(T) at a T shorter than this is still relaxing.
     ...(result.mean?.slowestRelaxationUs!=null?[readout('最慢弛豫时间',(()=>{const unit=timeDisplayUnit(result.mean.slowestRelaxationUs!);return withUnit(result.mean.slowestRelaxationUs!*unit.factor,unit.name,{digits:3});})())]:[]),
-    // Its approximation ledger: the approximations' total against the population target, and whether
-    // an output's total error exceeds a target (`flagged`); then the budget its a-priori choices are
-    // made against, which does not bound the total (the η² of the excited states' elimination is in it).
-    ...(motion?[readout('近似误差',approximationTotal(motion.approximations,accuracy?.requestedTolerance)),
-      readout('取舍预算',`${errorPercent(motion.approximations.budget)}（折叠或保留、平面波或强度维度、一阶或精确多普勒）`),
+    // Its approximation ledger: the approximations' totals against their targets, and whether
+    // an output's total error exceeds a target (`flagged`).
+    ...(motion?[readout('近似误差',approximationTotal(motion.approximations)),
       ...(motion.approximations.flagged?[`<p class="horizon-note">${esc(motion.approximations.flagged)}</p>`]:[]),
       // What the setup's initial ensemble leaves out: true of the setup, no error of the solve's, so no warning; beside the ledger.
       ...(motion.approximations.note?[`<p class="ledger-note">${esc(motion.approximations.note)}</p>`]:[])]:[]),
@@ -1178,13 +1176,12 @@ function solverDetails():string{
   const notes=result?[...(result.method?[`时间演化：${solverText(result.method)}`]:[]),...(result.mean.method?[`长期布居：${solverText(result.mean.method)}`]:[]),...(result.mean.reason?[solverText(result.mean.reason)]:[]),...result.assumptions.map(labelStateIds)]:[];
   return `<section class="solver-details"><h4>计算详情</h4>${error?`<p class="solver-error">${esc(solverText(error))}</p>`:''}${result?`<div class="form solver-readouts">${rows}</div>${motion?approximationLedger(motion.approximations):''}${notes.map(text=>`<p>${esc(text)}</p>`).join('')}`:'<p>没有当前参数的求解结果。</p>'}${failureRecords.length?'<button data-export-solver-failures>导出失败记录</button>':''}</section>`;
 }
-/** A ledger's total (`used`, the items' estimates summed) with its largest item named by its `label`
- * and the others summed, against the population target, and whether an output's total estimated
+/** A ledger's a-priori totals, the populations' and T's, each against its target, with its largest item named by its `label`, and whether an output's total estimated
  * error exceeds a target, or the a-priori resonance bound does (`flagged`, its reason on the next line). */
-function approximationTotal(ledger:ApproximationLedger,target:number|undefined):string{
-  const [largest,...others]=[...ledger.items].sort((a,b)=>b.estimate-a.estimate);
-  const parts=largest?[`${largest.label} ${errorPercent(largest.estimate)}`,...(others.length?[`其余 ${others.length} 项 ${errorPercent(others.reduce((sum,item)=>sum+item.estimate,0))}`]:[])]:[];
-  return `合计 ${errorPercent(ledger.used)}${parts.length?`（${parts.join('，')}）`:''}${target!==undefined?`，布居目标 ${errorPercent(target)}`:''}，${ledger.flagged?'超出目标（见下）':'未超出'}`;
+function approximationTotal(ledger:ApproximationLedger):string{
+  const [largest]=[...ledger.items].sort((a,b)=>b.estimate-a.estimate);
+  const total=(name:string,t:LedgerTotal)=>`${name} ${errorPercent(t.error)}（目标 ${errorPercent(t.target)}）`;
+  return `${total('布居',ledger.totals.population)}，${total('温度',ledger.totals.temperature)}${largest?`；最大一项：${largest.label} ${errorPercent(largest.estimate)}`:''}；${ledger.flagged?'超出目标（见下）':'未超出'}`;
 }
 /** A motion result's approximation ledger (solver-types.ts ApproximationLedger): each approximation,
  * its estimated error and what the engine did about it. */
