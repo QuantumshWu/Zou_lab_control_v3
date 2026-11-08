@@ -234,7 +234,7 @@ impl Geometry{
         let(a,log)=self.field_log(r);(a,log.map(|x|a*x))
     }
     /// The analytic logarithmic slope stays finite when the Gaussian amplitude underflows.
-    fn field_log(&self,r:[f64;3])->(Complex,[Complex;3]){
+    pub(crate) fn field_log(&self,r:[f64;3])->(Complex,[Complex;3]){
         let(k,n)=(self.wave_number,self.direction);let zeta=r[0]*n[0]+r[1]*n[1]+r[2]*n[2];let wave=Complex::cis(k*zeta);
         match self.waist{
             None=>(wave,n.map(|x|Complex::new(0.,k*x))),
@@ -586,6 +586,8 @@ fn quadratic<const N:usize>(x:&[f64],psi:&[Complex])->Complex{
 /// One node of the tables: every cluster's tables there, and its bounds: the dressing's (what it leaves
 /// out, `Model::dressing`), the elimination's (`Model::resonance`) and the transient's (`Model::ringing_spread`).
 type Node=(Vec<Vec<Complex>>,[f64;3]);
+/// A beam's part of a ringing photon (`Model::transient_photon`): the beam, its amplitude [axis a][row] and that amplitude's gradient through the intensities [lab axis][axis a][row].
+pub type BeamPhoton=(usize,[[Complex;MOST_STATES];3],[[[Complex;MOST_STATES];3];3]);
 
 /// The tables on one grid of n nodes per focused unit: per cluster, node-major, its layout's size per
 /// node (re/im interleaved); per node its bounds (`Node`); and each bound's largest over the nodes
@@ -2447,8 +2449,9 @@ impl Model{
     }
     /// The ringing photon of a coherent group from the ground state ψ′ (engine.rs `ringing_photon`), for the kicks of a
     /// moving atom: on `target`'s ground states, through the photon's operators on `levels` (`ringing_photon`), its amplitude
-    /// Σ_a ops_a (Σ e^{−iε̃t} R ψ′), the amplitude's gradient [axis a][lab axis] through the fields and the intensities, and each beam's part of it.
-    pub fn transient_photon(&self,cluster:usize,p:&Point,t:f64,coherent:usize,levels:&[usize],target:usize,ops:&[Dense;3],psi:&[Complex])->([[Complex;MOST_STATES];3],[[[Complex;MOST_STATES];3];3],Vec<(usize,[[Complex;MOST_STATES];3])>){
+    /// Σ_a ops_a (Σ e^{−iε̃t} R ψ′), the amplitude's gradient [axis a][lab axis] through the fields and the intensities, and each beam's part of it with
+    /// that part's gradient through the intensities [lab axis][axis a].
+    pub fn transient_photon(&self,cluster:usize,p:&Point,t:f64,coherent:usize,levels:&[usize],target:usize,ops:&[Dense;3],psi:&[Complex])->([[Complex;MOST_STATES];3],[[[Complex;MOST_STATES];3];3],Vec<BeamPhoton>){
         let g=&self.ground;let cl=&g.clusters[cluster];let layout=&self.layouts[cluster];let(n0,ne)=(layout.n0,g.excited_states.len());
         let group=&cl.coherent[coherent];let target=&g.clusters[target];
         // T_k (and ∂_f T_k) at the point, per carrier and rank.
@@ -2473,11 +2476,16 @@ impl Model{
                 for a in 0..3{for r in 0..MOST_STATES{du[a][x][r]+=part[a][r];}}
             }
         }
-        let beams:Vec<(usize,[[Complex;MOST_STATES];3])>={
+        let beams:Vec<BeamPhoton>={
             let mut carriers:Vec<usize>=group.iter().map(|x|x.0.carrier).collect();carriers.sort();carriers.dedup();
             carriers.iter().flat_map(|&c|self.carriers[c].beams.iter().enumerate().map(move|(j,&l)|(c,j,l))).map(|(c,j,l)|{
                 let amplitude=self.geometry[l].field(p.r).0;let coefficients=self.carriers[c].coefficients[j];
-                (l,photon(&|d,k|if d==c{amplitude*coefficients[k]}else{Complex::ZERO},&tables))}).collect()
+                let mut slope=[[[Complex::ZERO;MOST_STATES];3];3];
+                for(f,s)in slopes.iter().enumerate(){for(x,out)in slope.iter_mut().enumerate(){
+                    let part=photon(&|d,k|if d==c{amplitude*coefficients[k]*p.intensity_gradient[f][x]}else{Complex::ZERO},s);
+                    for a in 0..3{for r in 0..MOST_STATES{out[a][r]+=part[a][r];}}
+                }}
+                (l,photon(&|d,k|if d==c{amplitude*coefficients[k]}else{Complex::ZERO},&tables),slope)}).collect()
         };
         (u,du,beams)
     }
@@ -2649,23 +2657,48 @@ impl Transient{
 /// One excited manifold's ringing at a point (`Model::ringing`): its states, the eigenstates of H's block on them, H = U diag(E) U†, and its width, its states' mean decay (they agree to 1e-4 of it).
 #[derive(Clone,Debug)]
 pub struct Ringing{pub levels:Vec<usize>,pub energies:Vec<f64>,pub vectors:Dense,pub width:f64}
-/// A photon's absorbed light by its parts (`Photons::absorption`, engine.rs # Absorption): per near beam of its class's
-/// carriers its folded share and its amplitude's projection on the photon, and its explicit states' part -- its share and
-/// the beams' weights by their drives into the explicit states.
+/// A photon's absorbed light by its sources (`Photons::absorption`, engine.rs # Absorption): one per near beam of its class's
+/// carriers, then its explicit states' where it has any.
 #[derive(Clone,Debug,Default)]
-pub struct Absorption{pub beams:Vec<(usize,f64,f64)>,pub explicit:Option<(f64,Vec<Recoil>)>}
-/// One driven transition's logarithmic response gradient. Independent signs on its two quadratures
-/// give zero mean and covariance Re[∇ln σ* ⊗ ∇ln σ], σ = a/(δ − iΓ/2), at low saturation.
-/// This extends the existing incoherent attribution of an explicit photon; it does not eliminate
-/// coherences between ground states or assert a diffusion theorem at arbitrary saturation.
-#[derive(Clone,Debug)]
-pub struct Recoil{pub phase:[f64;3],pub amplitude:[f64;3],pub weight:f64}
-impl Recoil{
-    pub fn response(log_field:[Complex;3],delta:f64,half_width:f64,gradient:[f64;3],weight:f64)->Self{
-        let inverse=Complex::ONE/Complex::new(delta,-half_width);
-        let log:[Complex;3]=std::array::from_fn(|a|log_field[a]-inverse*gradient[a]);
-        Self{phase:log.map(|z|z.im),amplitude:log.map(|z|z.re),weight}
+pub struct Absorption{pub sources:Vec<Source>}
+/// A source of a photon's absorbed light (engine.rs # Absorption): the recoil its draw holds -- a near beam's wave vector; none
+/// for the explicit states, whose mean the Ehrenfest force holds --, its share ‖f_s‖² of the photon f, a beam's projection
+/// Re⟨f|f_s⟩/⟨f|f⟩, and its response's covariance about the mean the jump holds of it (`spread`).
+#[derive(Clone,Copy,Debug,Default)]
+pub struct Source{pub recoil:[f64;3],pub share:f64,pub projection:f64,pub spread:[[f64;3];3]}
+impl Source{
+    /// A near beam's part of a photon f (‖f‖² `size`): its wave vector k, its field's ∇ln a = λ, its rows f_i = a z_i and their
+    /// gradients through the intensities a ∇z_i. Its covariance about its mean (the jump holds the mean): Re Σ η_i*⊗η_i/Σ|f_i|²,
+    /// η_i = a ∇z_i + (Re λ − iν) f_i, ν = Im Σ f_i* a∇z_i/Σ|f_i|² -- of one row (Re ∇ln a + Re ∇ln z)⊗(the same), the response's
+    /// amplitude; the wave's phase is its mean's alone.
+    pub fn beam(k:[f64;3],log:[Complex;3],part:&[Complex],slopes:&[[Complex;3]],f:&[Complex],size:f64)->Source{
+        let share:f64=part.iter().map(|x|x.norm_sqr()).sum();
+        let projection=part.iter().zip(f).map(|(x,y)|if size>0.{(y.conj()*(*x)).re/size}else{0.}).sum();
+        let mut spread=[[0.;3];3];
+        if share>0.{
+            let nu:[f64;3]=std::array::from_fn(|x|part.iter().zip(slopes).map(|(v,d)|(v.conj()*d[x]).im).sum::<f64>()/share);
+            for(v,d)in part.iter().zip(slopes){
+                let eta:[Complex;3]=std::array::from_fn(|x|d[x]+Complex::new(log[x].re,-nu[x])*(*v));
+                for x in 0..3{for y in 0..3{spread[x][y]+=(eta[x].conj()*eta[y]).re/share;}}
+            }
+        }
+        Source{recoil:k,share,projection,spread}
     }
+    /// The explicit states' part of weight `share`, its drives (weight, response second moment `response`): their second moments by their
+    /// weights -- the jump holds none of its mean.
+    pub fn explicit(share:f64,drives:&[(f64,[[f64;3];3])])->Source{
+        let total:f64=drives.iter().map(|d|d.0).sum();let mut spread=[[0.;3];3];
+        if total>0.{for(w,m)in drives{for x in 0..3{for y in 0..3{spread[x][y]+=w*m[x][y]/total;}}}}
+        Source{recoil:[0.;3],share,projection:0.,spread}
+    }
+}
+/// A driven transition's response second moment Re[∇ln σ*⊗∇ln σ], σ = a/(δ − iΓ/2) (λ = ∇ln a, the detuning's gradient ∇δ): the
+/// low-saturation momentum diffusion of its absorption over its rate, Γħ² Re[∇σ*⊗∇σ]/|σ|² (Murr et al.,
+/// https://arxiv.org/abs/quant-ph/0512001, Eq. 1), the wave's recoil, the detuning's gradient and their cross terms.
+pub fn response_moment(log:[Complex;3],delta:f64,half_width:f64,gradient:[f64;3])->[[f64;3];3]{
+    let inverse=Complex::ONE/Complex::new(delta,-half_width);
+    let g:[Complex;3]=std::array::from_fn(|a|log[a]-inverse*gradient[a]);
+    std::array::from_fn(|x|std::array::from_fn(|y|(g[x].conj()*g[y]).re))
 }
 /// The photon amplitudes of every class of a cluster's jumps at a point: per class and axis the
 /// target cluster's amplitude u_a; for a class drawn, its gradient and its absorbed light's parts
@@ -2697,7 +2730,8 @@ impl Photons<'_>{
     /// Σ_l ∇a_l z_l + Σ_k Σ_f E_k ∂_f A_k ∇s_f, z_l = Σ_k c_lk (A_k − w_l B_k) -- beyond the first order its exact
     /// response's Σ e^{iω̃t} ψ[from] Σ_a e_a (C_a R_l)[to, from], the intensities' slopes still the rest response's --; and the parts
     /// (`Absorption`) of the photon f along e: per beam l of the class's carriers its share ‖f_l‖² and projection
-    /// Re⟨f|f_l⟩/⟨f|f⟩, f_l = a_l z_l per row, and the explicit states' part.
+    /// Re⟨f|f_l⟩/⟨f|f⟩, f_l = a_l z_l per row, and its response's covariance from z_l's gradient through the intensities (`Source::beam`); and the explicit states' part
+    /// (`Source::explicit`).
     pub fn absorption(&self,class:usize,e:[f64;3],f:&[Complex;MOST_STATES])->([[Complex;3];MOST_STATES],Absorption){
         if self.model.wide{unsafe{self.absorption_wide(class,e,f)}}else{self.absorption_body(class,e,f)}
     }
@@ -2741,11 +2775,11 @@ impl Photons<'_>{
                 for x in 0..3{for k in 0..m.carriers[c].rank{for f in 0..d{out[x]+=fl.e[k]*sum[k][2+f]*p.intensity_gradient[f][x];}}}
             }
         }
-        let size:f64=f[..nt].iter().map(|z|z.norm_sqr()).sum();let on_f=|row:usize,z:Complex|if size>0.{(f[row].conj()*z).re/size}else{0.};
-        let mut beams:Vec<(usize,f64,f64)>=vec![];
+        let size:f64=f[..nt].iter().map(|z|z.norm_sqr()).sum();
+        let mut sources:Vec<Source>=vec![];
         for(ci,&c)in carriers.iter().enumerate(){for(j,&l)in m.carriers[c].beams.iter().enumerate(){
-            let(amplitude,slope)=m.geometry[l].field(p.r);
-            // The beam's part per row without its amplitude, z_l: f_l = a_l z_l, its gradient through the field ∇a_l z_l.
+            let(amplitude,log)=m.geometry[l].field_log(p.r);let slope=log.map(|x|amplitude*x);let coefficients=&m.carriers[c].coefficients[j];
+            // The beam's part per row without its amplitude, z_l: f_l = a_l z_l, its gradient through the field ∇a_l z_l, through the intensities a_l Σ_k c_lk Σ_f ∂_f A_k ∇s_f.
             let rows:[Complex;MOST_STATES]=match &self.exact{
                 Some(exact)=>{
                     let product:[Dense;3]=std::array::from_fn(|a|g.emission[a].product(&exact.responses[l]));let mut rows=[Complex::ZERO;MOST_STATES];let mut rotation=Rotation::new(self.time);
@@ -2756,14 +2790,17 @@ impl Photons<'_>{
                     rows
                 }
                 None=>{let w=m.first_shift(c,l,p.kappa);std::array::from_fn(|row|{let sum=&sums[ci*MOST_STATES+row];
-                    (0..m.carriers[c].rank).fold(Complex::ZERO,|z,k|z+m.carriers[c].coefficients[j][k]*(sum[k][0]-sum[k][1]*w))})}
+                    (0..m.carriers[c].rank).fold(Complex::ZERO,|z,k|z+coefficients[k]*(sum[k][0]-sum[k][1]*w))})}
             };
             for row in 0..nt{for x in 0..3{gradient[row][x]+=slope[x]*rows[row];}}
-            beams.push((l,rows[..nt].iter().map(|z|(amplitude*(*z)).norm_sqr()).sum(),(0..nt).map(|row|on_f(row,amplitude*rows[row])).sum()));
+            let part:Vec<Complex>=rows[..nt].iter().map(|z|amplitude*(*z)).collect();
+            let slopes:Vec<[Complex;3]>=(0..nt).map(|row|{let sum=&sums[ci*MOST_STATES+row];
+                std::array::from_fn(|x|amplitude*(0..m.carriers[c].rank).fold(Complex::ZERO,|z,k|z+coefficients[k]*(0..d).fold(Complex::ZERO,|s,f|s+sum[k][2+f]*p.intensity_gradient[f][x])))}).collect();
+            sources.push(Source::beam(m.geometry[l].wave_vector(),log,&part,&slopes,&f[..nt],size));
         }}
-        // The explicit states' part of the photon: its weight along e, and the beams' weights: each explicit state's weight
-        // in the photon shared by the drives into it, Σ |a_l Σ_k c_lk U_k[e,b] ψ_b|² -- a photon of that state.
-        let explicit=(!class.direct.is_empty()).then(||{
+        // The explicit states' part of the photon: its weight along e, and the drives' weights: each explicit state's weight
+        // in the photon shared by the drives into it, Σ |a_l Σ_k c_lk U_k[e,b] ψ_b|² -- a photon of that state --, each its transition's response.
+        if !class.direct.is_empty(){
             let dimension=m.dimension(self.cluster);let mut parts=vec![[Complex::ZERO;MOST_STATES];dimension];
             for &(i,to,w)in &class.direct{let row=target.position(to).unwrap();let phase=Complex::cis(w*self.time)*self.psi[i];
                 for a in 0..3{parts[i][row]+=phase*m.photon(self.cluster,&p.stencil,i-n0,a,to)*e[a];}}
@@ -2789,10 +2826,11 @@ impl Photons<'_>{
                 let delta=e.0-b.0+dr.residual+m.kinetic_shift(l,p.kappa);
                 let half_width=0.5*g.decay[(cl.excited[dr.row-n0],cl.excited[dr.row-n0])].re;
                 let(_,log_field)=m.geometry[l].field_log(p.r);
-                drives.push(Recoil::response(log_field,delta,half_width,std::array::from_fn(|a|e.1[a]-b.1[a]),weight));
+                drives.push((weight,response_moment(log_field,delta,half_width,std::array::from_fn(|a|e.1[a]-b.1[a]))));
             }}
-            (total,drives)});
-        (gradient,Absorption{beams,explicit})
+            sources.push(Source::explicit(total,&drives));
+        }
+        (gradient,Absorption{sources})
     }
 }
 
@@ -2804,9 +2842,9 @@ mod tests{
     fn a_vanishing_drive_has_a_finite_logarithmic_response(){
         let geometry=super::Geometry{direction:[0.,0.,1.],wave_number:8.,waist:Some(1.)};
         let(field,log)=geometry.field_log([1000.,0.,0.]);assert_eq!(field,crate::Complex::ZERO);
-        let response=super::Recoil::response(log,0.,19.,[31.,-7.,11.],0.);
-        assert!(response.phase.iter().chain(&response.amplitude).all(|x|x.is_finite()));
-        assert_eq!(response.amplitude[0],-2000.);
+        let moment=super::response_moment(log,0.,19.,[31.,-7.,11.]);
+        assert!(moment.iter().flatten().all(|x|x.is_finite()));
+        assert!((moment[0][0]-(2000_f64.powi(2)+(31_f64/19.).powi(2))).abs()<1e-6,"{moment:?}");
     }
 
     /// The interpolant (`cubic`) is C¹ -- its derivative, the force the tables give, the same from either side of every
