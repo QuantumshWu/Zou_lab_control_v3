@@ -975,7 +975,7 @@ fn a_beating_grid_s_phase_holds_what_it_lands_over_the_run(){
 /// the first rung holds probe drives and, into those states, the cooling beams' (their pairs with the probe's lie within the dressing's reach of their 36 MHz, `Ground::keep_partners`),
 /// the cooling beams' others folded: four with the bounds over the atoms' reach (five over the whole trap). (With the closure's estimates taken under the folded probe's light, and no
 /// rung above each ground state's first kept drive, the first rung held 7 excited states, its T 5 % above the fully explicit F = 2 cluster's at 100 us, where this rung's is within its
-/// 2 % of statistics; PGCP_10 at four: Tt +1.6 ± 2.4 % at 100 us against 3+20 explicit states.)
+/// 2 % of statistics; PGCP_10 at four: Tt +2.2 ± 2.7 % at 100 us against 3+20 explicit states.)
 #[test]
 fn the_ladder_keeps_more_as_the_allowance_falls_and_the_near_drives_first(){
     let mut r=scene::request(&serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap());r.times_us=(0..101).map(|i|i as f64).collect();
