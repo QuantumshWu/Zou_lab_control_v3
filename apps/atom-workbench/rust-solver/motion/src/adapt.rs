@@ -189,7 +189,9 @@ pub fn advance<D: Dynamics>(model: &D, tolerances: &Tolerances, trajectory: &mut
             trajectory.capped.get_or_insert(trajectory.time);
             match counted(model, trajectory, &from, tau) {
                 Some(s) => {
-                    take(model, trajectory, &s, each);
+                    if take(model, trajectory, &s, each) && tau == to - from.time {
+                        trajectory.time = to;
+                    }
                     trajectory.tau = f64::INFINITY;
                 }
                 None => trajectory.tau = 0.5 * tau,
@@ -205,10 +207,10 @@ pub fn advance<D: Dynamics>(model: &D, tolerances: &Tolerances, trajectory: &mut
             trajectory.tau = 0.5 * tau;
             continue;
         };
-        // The split's error and the grid's, each over the tolerance; the eigen-propagation's rounding (relative to ‖ψ‖, a
-        // population's twice that) with the grid's, on the rows.
+        // The split's error and the grid's, each over the tolerance. (The eigen-propagation's rounding, `Step::rounding`, is
+        // per step and grows with their number: no smaller τ reduces it, so it steers nothing.)
         let split = differences(model, tolerances, &full.end, &second.end, tau).map(|d| d / ((1 << ORDER) - 1) as f64);
-        let mut grid = match full.regrid() {
+        let grid = match full.regrid() {
             Some((finer, work)) => {
                 trajectory.work += work;
                 let g = (1 << GRID_ORDER) as f64;
@@ -216,7 +218,6 @@ pub fn advance<D: Dynamics>(model: &D, tolerances: &Tolerances, trajectory: &mut
             }
             None => [0.0; 5],
         };
-        grid[4] += 2.0 * [&full, &first, &second].iter().map(|s| s.rounding).fold(0.0, f64::max) / (tolerances.population * tau);
         let total = (0..5).map(|q| split[q] + grid[q]).fold(0.0, f64::max);
         let (e_split, e_grid) = (split.iter().copied().fold(0.0, f64::max), grid.iter().copied().fold(0.0, f64::max));
         if !total.is_finite() {
@@ -234,8 +235,10 @@ pub fn advance<D: Dynamics>(model: &D, tolerances: &Tolerances, trajectory: &mut
         if full.grid_work > 0.0 {
             trajectory.grid = spacing * level((best_grid / spacing).powf(grid_exponent));
         }
-        if accepted && take(model, trajectory, &first, each) {
-            take(model, trajectory, &second, each);
+        if accepted && take(model, trajectory, &first, each) && take(model, trajectory, &second, each) && tau == to - from.time {
+            // The doubling spanned the rest of the interval: it ends on the output time, not an ulp short of it (the
+            // halves' sum of times rounds), which would leave an interval of the time's round-off to be stepped.
+            trajectory.time = to;
         }
     }
 }

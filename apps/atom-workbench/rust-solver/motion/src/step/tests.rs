@@ -266,20 +266,22 @@ fn evolve(h: &Mat, psi: &[C64], tau: f64) -> Vec<C64> {
 }
 
 /// Galilei covariance (propagation.md §1.2): an atom moving uniformly through a running wave is an atom at rest at the
-/// detuning less k·v. A mass so large that the kicks leave the velocity unchanged to round-off; one step of the moving
-/// atom's internal state against e^{−iH′τ} at rest: populations and the norm, gauge-invariant, to round-off.
+/// detuning less k·v, v the step's path velocity (the mean of its momenta before and after the kick). A mass so large
+/// that the kicks barely move the velocity; one step of the moving atom's internal state against e^{−iH′τ} at rest:
+/// populations and the norm, gauge-invariant, to round-off.
 #[test]
 fn a_moving_atom_is_an_atom_at_rest_at_the_shifted_detuning() {
-    let hm = 1e-13;
+    let hm = 1e-9;
     let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
     let (rabi, detuning) = (18.85, -10.0);
     let beam = Beam { k: [0.0, 0.3 * K, 0.95 * K], rabi, phase: 0.4 };
     let model = Atom::new(hm, flat, vec![beam], detuning, GAMMA);
     for v in [[0.0, 0.0, 0.0], [0.2, -0.4, 0.6], [0.0, 0.0, -1.5]] {
-        let kv: f64 = (0..3).map(|a| beam.k[a] * v[a]).sum();
         let kappa = v.map(|x| x / hm);
         let tau = 0.3;
         let s = step::step(&model, &held(&model, [0.1, 0.2, 0.3], kappa), tau).unwrap();
+        // The path's velocity: the mean of the momenta before and after the kick (flat trap: κ_h = κ₀).
+        let kv: f64 = (0..3).map(|a| beam.k[a] * hm * 0.5 * (kappa[a] + s.segment.kicked.1[a])).sum();
         let mut rest = Mat::zeros(2, 2);
         rest[(1, 0)] = C64::real(0.5 * rabi);
         rest[(0, 1)] = C64::real(0.5 * rabi);
@@ -313,7 +315,7 @@ fn rk4_state(h: &dyn Fn(f64) -> Mat, psi: &[C64], tau: f64, steps: usize) -> Vec
 /// fine spacing.
 #[test]
 fn a_moving_atom_in_a_standing_wave_is_an_atom_at_rest_with_two_detunings() {
-    let hm = 1e-13;
+    let hm = 1e-9;
     let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
     let (rabi, detuning) = (12.0, -15.0);
     let beams = vec![Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi, phase: 0.7 }];
@@ -343,7 +345,8 @@ fn excited(rabi: f64, delta: f64) -> f64 {
     0.25 * rabi * rabi / (delta * delta + 0.25 * GAMMA * GAMMA + 0.5 * rabi * rabi)
 }
 
-/// The mean force (1/µm per µs) over trajectories of a uniformly moving atom (a mass the kicks do not move), from `from`
+/// The mean force (1/µm per µs) over trajectories of a uniformly moving atom (a mass the kicks do not move: ħ/m of 10⁻⁹
+/// µm²/µs, its κ's round-off still far below the tolerances), from `from`
 /// to `to` µs, the jumps without recoil (the Ehrenfest force alone, whose mean the unraveling makes the master
 /// equation's): per lab axis the mean and its standard error.
 fn mean_force(model: &Atom, r: [f64; 3], v: [f64; 3], trajectories: u64, from: f64, to: f64, tol: &Tolerances) -> ([f64; 3], [f64; 3]) {
@@ -365,7 +368,7 @@ fn mean_force(model: &Atom, r: [f64; 3], v: [f64; 3], trajectories: u64, from: f
 /// state), at several velocities through the Doppler profile, within three standard errors and 2 %.
 #[test]
 fn a_running_wave_s_force_is_the_bloch_equations_at_the_doppler_shifted_detuning() {
-    let hm = 1e-13;
+    let hm = 1e-9;
     let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
     let (rabi, detuning) = (15.0, -12.0);
     let model = Atom::new(hm, flat, vec![Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }], detuning, GAMMA);
@@ -424,7 +427,7 @@ fn bloch_force(beams: &[Beam], detuning: f64, z0: f64, v: f64, from: f64, to: f6
 /// errors and 3 % of the running wave's force, at several velocities.
 #[test]
 fn a_standing_wave_s_force_is_the_bloch_equations_along_the_path() {
-    let hm = 1e-13;
+    let hm = 1e-9;
     let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
     let (rabi, detuning) = (10.0, -15.0);
     let beams = vec![Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi, phase: 0.0 }];
@@ -493,7 +496,11 @@ fn a_conservative_trap_keeps_its_energy() {
     let mut t = start.clone();
     let mut adaptive = Vec::new();
     for k in 1..=outputs {
-        adapt::advance(&model, &tol, &mut t, run * k as f64 / outputs as f64, &mut |_| {});
+        let to = run * k as f64 / outputs as f64;
+        adapt::advance(&model, &tol, &mut t, to, &mut |_| {});
+        // Every advance lands on its output time exactly: an ulp short, the rest is an interval of the time's round-off
+        // whose doubling reads only rounding (a trajectory once ran into the step cap there).
+        assert_eq!(t.time, to, "advanced to {} for the output at {to}", t.time);
         adaptive.push(model.energy(0, &t.point(), &t.psi) - e0);
     }
     let largest = adaptive.iter().map(|e| e.abs()).fold(0.0, f64::max);
@@ -582,10 +589,9 @@ fn the_stumpff_functions_are_their_series() {
 fn the_quadrature_integrates_a_bandwidth_to_round_off() {
     for (omega, decay, tau) in [(1.0, 0.0, 1e-3), (3.0, 0.0, 1.0), (40.0, 0.0, 0.7), (900.0, 0.0, 1.1), (60.0, 19.0, 0.3)] {
         let w = C64::new(omega, decay);
-        let nodes = super::quadrature(0.0, tau, w.abs());
-        let sum: C64 = nodes.iter().map(|&(s, weight)| (C64::I * w * s).exp() * weight).sum();
+        let sum: C64 = super::quadrature(0.0, tau, w.abs()).map(|(s, weight)| (C64::I * w * s).exp() * weight).sum();
         let exact = ((C64::I * w * tau).exp() - C64::ONE) / (C64::I * w);
-        assert!((sum - exact).abs() <= 1e-14 * tau, "ω {omega}, γ {decay}, τ {tau}: {sum:?} against {exact:?} on {} nodes", nodes.len());
+        assert!((sum - exact).abs() <= 1e-14 * tau, "ω {omega}, γ {decay}, τ {tau}: {sum:?} against {exact:?} on {} nodes", super::nodes(tau, w.abs()));
     }
 }
 
@@ -668,7 +674,7 @@ fn conservative_trap(name: &str) {
     let state = (0..crate::model::GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
     let mut p = [0.0; crate::model::GROUND];
     p[state] = 1.0;
-    let trap = model.trap(&p).unwrap();
+    let trap = model.trap(&p, &model.prepared()).unwrap();
     let run = crate::model::Run::new(&model, p);
     let hm = run.hbar_over_mass();
     let kt = KT_PER_UK * request.temperature_uk;
@@ -732,51 +738,43 @@ fn r1_a_retro_reflected_lattice_keeps_its_atoms_energies() {
     conservative_trap("R1_RETRO");
 }
 
-
-
-
+/// The step control's guard against a non-asymptotic first doubling (`adapt::level`): R2_RECOIL with its probe's drives
+/// from ground 4 into D2 kept (their excited states explicit), the solve's product trajectory 500 of seed 0 at its first
+/// output, τ unbounded at entry. (The solve's repro kept the probe's drives into D1 too, 7 THz off: a generator of
+/// ‖H‖₁ ≈ 4.5·10⁷ rad/µs whose impulse quadrature takes some 10⁸ nodes per µs -- a stiffness `step::step_work` prices,
+/// not a fault of the control.) Before the bound the first doubling over the whole interval read errors of 10³⁰ of the
+/// tolerance, the error model asked a step of 10⁻¹³ µs, and there the doubling read the energy's round-off: rejected
+/// again and again, the trajectory never reached 2 µs. Now it does, and every accepted step lies above the round-off's
+/// scale, the step at which u|E_s| reaches the energy's tolerance.
 #[test]
-fn zz_diagnostic_retro() {
-    use crate::units::{KT_PER_UK, POPULATION_TARGET, STEP_SHARE, TEMPERATURE_TARGET};
-    let request = scene("R1_RETRO");
+fn a_non_asymptotic_first_doubling_does_not_collapse_the_step() {
+    use crate::model::{Component, Model, Run, Unit, GROUND};
+    use crate::units::{KT_PER_UK, POPULATION_TARGET, STEP_SHARE, TEMPERATURE_TARGET, UNIT_ROUNDOFF};
+    let request = scene("R2_RECOIL");
     let light = crate::field::Light::new(&request);
-    let model = crate::model::Model::new(&request, &light, &[]).expect("the far light folds");
-    let state = (0..crate::model::GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-    let mut p = [0.0; crate::model::GROUND];
+    let probe = (0..light.frequencies.len()).find(|&f| light.frequencies[f].beams.iter().any(|&l| request.beams[l].id == "probe")).unwrap();
+    let near = Component { frequency: probe, counter: false };
+    let mut kept = vec![Unit::Far { component: near }];
+    kept.extend([16, 18, 22, 28].map(|excited| Unit::Drive { carrier: near, excited, ground: 4 }));
+    let model = Model::new(&request, &light, &kept).unwrap();
+    let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let mut p = [0.0; GROUND];
     p[state] = 1.0;
-    let trap = model.trap(&p).unwrap();
-    let run = crate::model::Run::new(&model, p);
-    let hm = run.hbar_over_mass();
-    let kt = KT_PER_UK * request.temperature_uk;
-    let duration = 1000.0;
-    let thermal = (kt / hm).sqrt();
-    eprintln!("trap: minimum {}, frequencies {:?}, axes {:?}", trap.minimum, trap.frequencies, trap.axes);
+    let run = Run::new(&model, p);
+    let (hm, kt, duration) = (run.hbar_over_mass(), KT_PER_UK * request.temperature_uk, *request.times_us.last().unwrap());
     let tol = Tolerances {
-        momentum: [STEP_SHARE * TEMPERATURE_TARGET * thermal / duration; 3],
+        momentum: [STEP_SHARE * TEMPERATURE_TARGET * (kt / hm).sqrt() / (2.0 * duration); 3],
         energy: STEP_SHARE * TEMPERATURE_TARGET * kt / duration,
         population: STEP_SHARE * POPULATION_TARGET / duration,
     };
-    let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, 0, 0);
-    let (mut r, mut kappa) = (trap.centre, [0.0; 3]);
-    for axis in 0..3 {
-        let (x, k) = (stream.normal() * (kt * hm).sqrt() / trap.frequencies[axis], stream.normal() * thermal);
-        for a in 0..3 {
-            r[a] += x * trap.axes[axis][a];
-            kappa[a] += k * trap.axes[axis][a];
-        }
-    }
-    let start = Trajectory::new(&run, state, r, kappa, 17, 0);
-    let generator = run.generator(start.cluster, &start.point());
-    eprintln!("cluster {:?}, parts {}", run.cluster(start.cluster).states, generator.parts.len());
-    for tau in [1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125] {
-        let full = step::step(&run, &start, tau).unwrap();
-        let first = step::step(&run, &start, 0.5 * tau).unwrap();
-        let second = step::step(&run, &first.end, 0.5 * tau).unwrap();
-        let (pa, pb) = (full.end.point(), second.end.point());
-        let de = (run.energy(full.end.cluster, &pa, &full.end.psi) - run.energy(second.end.cluster, &pb, &second.end.psi)).abs() / 3.0;
-        let dk: Vec<f64> = (0..3).map(|a| (full.end.kappa[a] - second.end.kappa[a]).abs() / 3.0 / (tol.momentum[a] * tau)).collect();
-        let (ra, rb) = (run.readout(full.end.cluster, &pa, &full.end.psi), run.readout(second.end.cluster, &pb, &second.end.psi));
-        let dp = ra.iter().zip(&rb).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max) / 3.0;
-        eprintln!("τ {tau}: κ/tol {:.3e} {:.3e} {:.3e}, E/tol {:.3e}, rows/tol {:.3e}", dk[0], dk[1], dk[2], de / (tol.energy * tau), dp / (tol.population * tau));
-    }
+    let r = [0.022570157873194684, 0.03557204701765085, 0.34007333797674333];
+    let kappa = [31.75598642152794, -145.69989434161738, -59.92757803634648];
+    let mut t = Trajectory::new(&run, 4, r, kappa, 0, 500);
+    let energy = run.energy(t.cluster, &t.point(), &t.psi).abs();
+    let round_off = UNIT_ROUNDOFF * energy / tol.energy;
+    let mut shortest = f64::INFINITY;
+    adapt::advance(&run, &tol, &mut t, request.times_us[1], &mut |s| shortest = shortest.min(s.tau.abs()));
+    eprintln!("R2 trajectory 500: {} steps, {} jumps, shortest step {shortest:.3e} µs against the round-off's {round_off:.3e}", t.steps, t.jumps);
+    assert!(t.lost.is_some() || t.time == request.times_us[1], "stopped at {}", t.time);
+    assert!(shortest > round_off, "a step of {shortest:e} µs at the round-off's scale {round_off:e}");
 }

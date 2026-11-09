@@ -365,24 +365,25 @@ fn rules() -> &'static [Rule] {
     RULES.get_or_init(|| (1..=6).map(|k| Rule::new(1 << k)).collect())
 }
 
-/// The nodes and weights over [a, b] of an entire integrand of bandwidth ν to round-off: the rule and panels with the
-/// fewest nodes, each panel of width w within its rule's phase, νw ≤ x_m.
-fn quadrature(a: f64, b: f64, bandwidth: f64) -> Vec<(f64, f64)> {
-    let width = (b - a).abs();
-    let (rule, panels) = rules()
+/// The rule and the panels over a width of an entire integrand of bandwidth ν to round-off: the fewest nodes, each panel
+/// of width w within its rule's phase, νw ≤ x_m. Its node count is the quadrature's work (`count::spectral`).
+fn plan(width: f64, bandwidth: f64) -> (&'static Rule, usize) {
+    rules()
         .iter()
         .map(|rule| (rule, ((bandwidth * width / rule.phase).ceil() as usize).max(1)))
         .min_by_key(|(rule, panels)| rule.nodes.len() * panels)
-        .unwrap();
+        .unwrap()
+}
+
+/// The nodes and weights over [a, b] of an entire integrand of bandwidth ν to round-off (`plan`), panel by panel as they
+/// are read: a stiff generator's millions of nodes are never held at once.
+fn quadrature(a: f64, b: f64, bandwidth: f64) -> impl Iterator<Item = (f64, f64)> {
+    let (rule, panels) = plan((b - a).abs(), bandwidth);
     let w = (b - a) / panels as f64;
-    let mut out = Vec::with_capacity(rule.nodes.len() * panels);
-    for p in 0..panels {
+    (0..panels).flat_map(move |p| {
         let centre = a + (p as f64 + 0.5) * w;
-        for (x, weight) in rule.nodes.iter().zip(&rule.weights) {
-            out.push((centre + 0.5 * w * x, 0.5 * w * weight));
-        }
-    }
-    out
+        rule.nodes.iter().zip(&rule.weights).map(move |(x, weight)| (centre + 0.5 * w * x, 0.5 * w * weight))
+    })
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -617,6 +618,12 @@ mod count {
     }
 }
 
+/// The node count of a quadrature over τ at a bandwidth (`plan`).
+fn nodes(tau: f64, bandwidth: f64) -> usize {
+    let (rule, panels) = plan(tau.abs(), bandwidth);
+    rule.nodes.len() * panels
+}
+
 /// The bandwidth of the forms on a state propagated through the eigenvalues λ: max|λ_b* − λ_c| (their frequencies and
 /// decay rates).
 fn spread(lambda: &[C64]) -> f64 {
@@ -639,9 +646,8 @@ fn spectral(path: &Path, psi: &[C64], tau: f64, threshold: Option<f64>) -> Optio
     let at = |s: f64| -> Vec<C64> { d0.iter().zip(lambda).map(|(d, l)| *d * (C64::new(0.0, -s) * *l).exp()).collect() };
     let middle = e.vectors.apply(&at(0.5 * tau));
     let start = path.middle - 0.5 * tau;
-    let nodes = quadrature(0.0, tau, bandwidth);
     let mut change = [0.0; 3];
-    for &(s, w) in &nodes {
+    for (s, w) in quadrature(0.0, tau, bandwidth) {
         let d = at(s);
         let norm = form(&gram, &d).re;
         let (held, _) = path.force(&middle, start + s);
@@ -670,7 +676,7 @@ fn spectral(path: &Path, psi: &[C64], tau: f64, threshold: Option<f64>) -> Optio
         crossing,
         rounding: e.condition * UNIT_ROUNDOFF * (1.0 + tau.abs() * growth),
         panels: None,
-        work: count::spectral(n, nodes.len()),
+        work: count::spectral(n, nodes(tau, bandwidth)),
     })
 }
 
@@ -916,7 +922,7 @@ pub fn step_work(generator: &Generator, waves: &[[f64; 3]], velocity: [f64; 3], 
     };
     let spectral = (beats == 0).then(|| linalg::eigen(&path.still)).flatten();
     let (propagation, regrid) = match spectral {
-        Some(e) => (count::spectral(n, quadrature(0.0, tau, spread(&e.values)).len()), 0.0),
+        Some(e) => (count::spectral(n, nodes(tau, spread(&e.values))), 0.0),
         None => {
             let panels = panels(tau, grid);
             (grid_work(panels), grid_work(2 * panels))
