@@ -226,14 +226,16 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     let hm = hbar_over_mass(request.mass_kg);
     let initial = components(request)?;
     let reference = alone(initial.iter().max_by(|a, b| a.1.total_cmp(&b.1)).ok_or("运动计算的初态需在基态上")?.0);
-    // The model: every unit whose fold does not exist over the reach kept (SPEC §1.5), closed again until none fails.
+    // The model: every unit whose fold does not exist over the reach kept (SPEC §1.5), closed again until none fails that is
+    // not kept already (a unit kept is moot whether a later model lists it or not).
     let mut kept = kept.to_vec();
     let (model, trap) = loop {
         let model = Model::new(request, light, &kept)?;
         let trap = model.trap(&reference, &model.prepared())?;
         let judged = model.reach(&trap, &reference, reach, unseen(MOST_TRAJECTORIES as f64));
         let units = model.units();
-        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &judged)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
+        let failing: Vec<Unit> =
+            units.iter().zip(model.gates(&units, &judged)).filter(|(u, g)| !g.exists() && !kept.contains(u)).map(|(u, _)| u.clone()).collect();
         if failing.is_empty() {
             break (model, trap);
         }
