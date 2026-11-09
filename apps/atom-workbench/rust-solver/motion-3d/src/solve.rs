@@ -357,7 +357,7 @@
 use crate::cost::{advance_work,jump_work,pays,CIS_NS,COMPLEX_MULTIPLY_ADD_NS,SPECTRAL_N3,TERM_NS};
 use crate::engine::{column_norm,halves,node_phase,series,Engine,Halves,Landings,Settings,Trajectory,QUADRATURE};
 use crate::gpu;
-use crate::ground::{ExcitedKind,Ground,Kind,Shape,EXISTS,OUTSIDE_REACH};
+use crate::ground::{ExcitedKind,Ground,Shape,EXISTS,OUTSIDE_REACH};
 use crate::ledger::{Ledger,Total};
 use crate::read::Read;
 use crate::model::{Exact,Model,Trap,MOST_MIXED,MOST_STATES,NOT_LINDBLAD};
@@ -509,6 +509,8 @@ fn beyond_reach(e:&Estimate,reach:f64,cap:f64)->f64{
 /// the share stays booked (`beyond_reach`).
 #[derive(Clone,Copy,Debug)]
 struct Judged{reach:f64,differs:Option<f64>}
+/// The ledger's item of the couplings between ground states (ground.rs `Ground::pair_charges`), charged as measured (`pair_charge`).
+const PAIRS:&str="基态之间的耦合（塞曼子能级、拉曼项、两组光的拍频）";
 /// The ledger's item of the reach the folds were judged over (module documentation, # The reach).
 const REACH:&str="折叠判定时原子所及的范围";
 /// Per output the last at or before it that `holds` (the first must).
@@ -638,9 +640,9 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
         else{format!("{fold} 个驱动{order}，{kept} 个显式保留、{explicit} 个激发态精确传播：按预计总耗时选取")});
     let(kept,fold)=count(false);
     if kept+fold>0{ledger.add("激发态之间的耦合（光镊混合超精细能级）",statics,format!("{fold} 个二阶折叠，{kept} 个显式保留"));}
-    let(kept,fold)=g.items.iter().filter(|i|matches!(i.kind,Kind::Static{..}|Kind::Raman{..})).fold((0,0),|(k,f),i|if i.folded{(k,f+1)}else{(k+1,f)});
+    let(kept,fold)=g.items.iter().fold((0,0),|(k,f),i|if i.folded{(k,f+1)}else{(k+1,f)});
     let sizes:Vec<String>=g.clusters.iter().map(|c|c.dimension().to_string()).collect();
-    ledger.add("基态之间的耦合（塞曼子能级、拉曼项、两组光的拍频）",near,format!("{fold} 对二阶折叠，{kept} 对显式保留；子空间 {}",sizes.join("+")));
+    ledger.add(PAIRS,near,format!("{fold} 对二阶折叠，{kept} 对显式保留；子空间 {}",sizes.join("+")));
     // The reach the rule judged at, where the pilot's atoms took it past the request's (module documentation, # The reach).
     if g.temperature_uk>request.temperature_uk{ledger.add(REACH,0.,format!("按全程实测：试探的原子升温至 {:.0} μK（请求 {:.0} μK），各耦合在该温度的热分布范围与速度内判定",g.temperature_uk,request.temperature_uk));}
     if model.dressing>0.{ledger.add("近共振光的相互缀饰（彼此的光移）",model.dressing,"各近共振光的光移全阶计入彼此的分母；同频多束光的干涉与缀饰的下一阶略去".into());}
@@ -665,20 +667,33 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
 }
 
 /// What an output's a-priori total takes as measured along the trajectories (module documentation, # Ledger and the total error): the fold's
-/// charges per target (`fold_charges`), the profiles' error and the mean (kv/σ)² at the atoms, what the first order's transfer leaves on T, and the share of
-/// the atoms past the reach the folds were judged to (`beyond_reach`); and the share of atoms they weigh at, errors of the held atoms'
-/// quantities as the statistics are (`held_share`). Before a run, the charge alone, at every atom.
+/// charges per target (`fold_charges`) and beside them the pairs' (`pair_charge`, T's at √2 as the drives'), the profiles' error and the mean (kv/σ)² at
+/// the atoms, what the first order's transfer leaves on T, and the share of the atoms past the reach the folds were judged to (`beyond_reach`); and
+/// the share of atoms they weigh at, errors of the held atoms' quantities as the statistics are (`held_share`). Before a run, the charges alone, at every atom.
 #[derive(Clone,Copy,Debug,Default)]
-struct Measured{charge:[f64;2],profile:f64,doppler:f64,transfer:f64,beyond:f64,held:f64}
-impl Measured{fn charge(charge:[f64;2])->Measured{Measured{charge,held:1.,..Measured::default()}}}
-/// A model's a-priori total, its one definition: its ledger's estimates, with what a run has booked there (`gained`, `booked`), but the fold's charge,
-/// which takes its measured value, and the profiles' peaks, which their measured value replaces where larger (`at`).
+struct Measured{charge:[f64;2],pairs:f64,profile:f64,doppler:f64,transfer:f64,beyond:f64,held:f64}
+impl Measured{
+    /// Before a run: the fold's charges and the pairs' a priori (ground.rs `Ground::pair_charge`), at every atom.
+    fn apriori(charge:[f64;2],pairs:f64)->Measured{Measured{charge,pairs,held:1.,..Measured::default()}}
+}
+/// A model's a-priori total, its one definition: its ledger's estimates, with what a run has booked there (`gained`, `booked`), but the fold's charge
+/// and the pairs', which take their measured values, and the profiles' peaks, which their measured value replaces where larger (`at`).
 #[derive(Clone,Copy,Debug)]
 struct Apriori{rest:f64,peak:f64}
 impl Apriori{
-    fn of(base:&Ledger,model:&Model)->Apriori{Apriori{rest:base.sum()-fold_charge(model,model.ground.charge),peak:model.profiles.iter().map(|p|p.1).sum()}}
+    fn of(base:&Ledger,model:&Model)->Apriori{Apriori{rest:base.sum()-fold_charge(model,model.ground.charge)-model.ground.pair_charge(),peak:model.profiles.iter().map(|p|p.1).sum()}}
     /// The total per target, the populations' and T's, at what is measured, at the share of atoms it weighs at (`held_share`).
-    fn at(&self,m:Measured)->[f64;2]{let[p,t]=m.charge.map(|c|self.rest+(m.profile-self.peak).max(0.)+m.doppler+c+m.beyond);[p*m.held,(t+m.transfer)*m.held]}
+    fn at(&self,m:Measured)->[f64;2]{
+        let pairs=[m.pairs,std::f64::consts::SQRT_2*m.pairs];
+        let[p,t]=std::array::from_fn(|k|self.rest+(m.profile-self.peak).max(0.)+m.doppler+m.charge[k]+pairs[k]+m.beyond);[p*m.held,(t+m.transfer)*m.held]
+    }
+}
+/// The pairs' charge on the populations p of the 32 states (module documentation, # Ledger and the total error): Σ_b p_b P_b over the ground
+/// states, P_b the m² of the folded couplings between ground states b is one of (ground.rs `Ground::pair_charges`) -- Σ m² (p_a + p_b), the
+/// population their folds may move, read where the atoms are as the drives' 2η² is --, and what the atoms read leave open of its bound, as the
+/// charge's (`with_open`).
+fn pair_charge(model:&Model,populations:&[f64],atoms:f64)->f64{
+    let g=&model.ground;g.ground_states.iter().zip(&g.pairs).map(|(&s,&m2)|populations[s]*m2).sum::<f64>()+g.pair_charge()*unseen(atoms)
 }
 /// One target's errors at an output (module documentation, # Shares): the statistics at CONFIDENCE (`statistics_of`), what the
 /// trajectories leave open of what none of them met (`unseen`, the populations' alone, # Batches), the time step's bias, the a-priori
@@ -714,13 +729,14 @@ fn records<'a>(model:&Model,base:&Ledger,estimates:&'a [Estimate],bias:[f64;2],f
     // bound takes on the paths they go (an atom that gathers where the light is bright, as red-detuned
     // molasses holds it at its lattice's bright sites, meets more than the pattern's mean). The a-priori
     // estimate over the reach decided the fold (`Candidate`); the atoms an output's T takes past the reach the folds were judged to
-    // (`Judged`), their folds unjudged, apart (`beyond_reach`).
+    // (`Judged`), their folds unjudged, apart (`beyond_reach`). The pairs' on the populations the atoms hold, with the same memory (`pair_charge`).
     let measured=memory.charges(&estimates.iter().map(|e|with_open(fold_charges(model,2.*e.folded),model,held_atoms(e))).collect::<Vec<_>>());let cap=reach_cap(depth);
+    let pairs=memory.charges(&estimates.iter().map(|e|[pair_charge(model,&e.populations,held_atoms(e));2]).collect::<Vec<_>>());
     let(apriori,statistics)=(Apriori::of(base,model),statistics_of(estimates,frequencies));
     estimates.iter().zip(&statistics).zip(measured).enumerate().map(|(i,((e,s),charge))|{
         let(population,temperature)=(POPULATION_TARGET,TEMPERATURE_TARGET/s.weight);
         // What the first order's transfer leaves out (model.rs `Model::first_error`), on T alone: its friction against the recoil heating at the T the atoms have.
-        let measured=Measured{charge,profile:e.profile,doppler:e.doppler,transfer:model.first_error*e.temperature_total,beyond:beyond_reach(e,reach,cap),held:held_share(e)};
+        let measured=Measured{charge,pairs:pairs[i][0],profile:e.profile,doppler:e.doppler,transfer:model.first_error*e.temperature_total,beyond:beyond_reach(e,reach,cap),held:held_share(e)};
         if i==0{return Record{estimate:e,population:Account::initial(population),temperature:Account::initial(temperature),measured,reads:true};}
         let[p,t]=apriori.at(measured);
         Record{estimate:e,measured,reads:reads_temperature(e),
@@ -742,6 +758,8 @@ fn ledger(model:&Model,base:&Ledger,records:&[Record],times:&[f64],allowance:f64
     ledger.add("一阶多普勒项的转移（温度）",largest(&|r|r.measured.transfer),"一阶项按各组衰减表的比例给出，超出份额的表项单独保留；其余按其摩擦对反冲加热的比值计入温度".into());
     if !model.profiles.is_empty(){ledger.add("聚焦光在原子处的强度（沿轨迹）",largest(&|r|r.measured.profile),"按峰值强度的平面波".into());}
     let met=largest(&|r|r.measured.charge[0]+r.measured.beyond);let beyond=largest(&|r|r.measured.beyond);
+    if let Some(item)=ledger.items.iter_mut().find(|i|i.label==PAIRS){
+        item.action=format!("{}；计入沿轨迹实测的 Σ m²(p_a + p_b)（先验估计 {:.2}%）",item.action,100.*item.estimate);item.estimate=largest(&|r|r.measured.pairs);}
     if let Some(item)=ledger.items.iter_mut().find(|i|i.label==FOLD){
         item.action=format!("{}；计入沿轨迹实测的饱和参数 2η²{}（先验估计 {:.2}%{}）与轨迹未及之处的近共振上界{}{}",item.action,if model.fourth{" 的平方"}else{""},100.*charge,if met>charge{"，实测高于先验估计"}else{""},
             if model.fourth{"；温度仍计 2η²（力按二阶折叠）"}else{""},
@@ -799,10 +817,9 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     // where every fold that exists folds down, their order the a-priori estimates'; the pilot runs the first, each candidate's charge
     // is what its folded drives meet at the pilot's states (`measured_charge`), and of those whose charge
     // leaves the statistics room the one of least predicted cost is taken.
-    // The generator before the rule, every candidate's start (`next_candidate`); the rule's allowances from it, past the first -- every fold that exists folded -- only where a rung is wanted.
-    let bare=Ground::bare_at(request,reach)?;let mut rungs=None;
-    let mut ladder=std::iter::once(EXISTS).chain(std::iter::from_fn(||rungs.get_or_insert_with(||bare.rungs().into_iter().skip(1)).next()));let mut failed=None;
-    let Some(mut pilot_candidate)=next_candidate(request,&bare,&mut ladder,&mut failed,&mut vec![])else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
+    // The generator before the rule, every candidate's start, and its first rung, whose allowances the rungs below are (`Ladder`).
+    let mut ladder=Ladder::new(Ground::bare_at(request,reach)?);let mut failed=None;
+    let Some(mut pilot_candidate)=next_candidate(request,&mut ladder,&mut failed,&mut vec![])else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
     pilot_candidate.settle();
     // A generator that gains on the ladder's first rung, every fold that exists folded, is the fold's construction failing
     // (model.rs `Model::lindblad`), not a regime to escalate into explicit states: the solve stops with why.
@@ -812,7 +829,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     // estimates lie past the targets hands over to the next rung, which keeps that drive (a resonant probe of 300 mW/cm², cooling of 30: 146 % of resonance with every drive folded); the last refuses.
     let mut shapes=vec![pilot_candidate.model.ground.shape()];
     while pilot_candidate.reference().0.frequencies.iter().any(|&w|!(w>0.)){
-        let next=if pilot_candidate.past_their_targets(){next_candidate(request,&bare,&mut ladder,&mut failed,&mut shapes)}else{None};
+        let next=if pilot_candidate.past_their_targets(){next_candidate(request,&mut ladder,&mut failed,&mut shapes)}else{None};
         let Some(next)=next else{return Err(Stop::Error(match resonance(&pilot_candidate.model){Some(r)=>format!("{r}：光镊的势阱无从判断"),None=>NOT_CONFINED.into()}))};
         pilot_candidate=next;pilot_candidate.settle();
     }
@@ -864,7 +881,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     let(pilot_harmonic,pilot_states,pilot_jumps,pilot_groups)=loop{
         let harmonic=Harmonic::new(&pilot_candidate.model,&piloting(pilot_candidate.reference(),steps,start_waiting,pilot_candidate.phase),&pilot_candidate.initial,steps,outputs);
         let(states,jumps,groups)=sample_states(&pilot_candidate.model,&piloting(pilot_candidate.reference(),steps,start_waiting,pilot_candidate.phase),&pilot_candidate.initial,seed,pilot,steps,outputs,&harmonic);
-        if states.is_empty()&&pilot_candidate.past_their_targets(){if let Some(next)=next_candidate(request,&bare,&mut ladder,&mut failed,&mut shapes){pilot_candidate=next;(starts,start_waiting)=begin(&mut pilot_candidate);continue;}}
+        if states.is_empty()&&pilot_candidate.past_their_targets(){if let Some(next)=next_candidate(request,&mut ladder,&mut failed,&mut shapes){pilot_candidate=next;(starts,start_waiting)=begin(&mut pilot_candidate);continue;}}
         break(harmonic,states,jumps,groups);
     };
     let(trap,period)={let t=pilot_candidate.reference().0;(t,slowest_period(&t))};
@@ -961,7 +978,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     // size between them, its biases the same at the rung's tolerances.
     let(mut rung,mut doubled)=(None,Vec::<(Vec<(Vec<usize>,Vec<usize>)>,usize,[f64;3],[f64;2])>::new());
     if open{
-        while let Some(mut c)=next_candidate(request,&bare,&mut ladder,&mut failed,&mut shapes){
+        while let Some(mut c)=next_candidate(request,&mut ladder,&mut failed,&mut shapes){
             c.charged(charge_of(&pilot_candidate.model,&c.model));
             // Its grid on the pilot's states carried into it, bare as a jump leaves them (`grid_phase`).
             let period=slowest_period(&c.reference().0);let mut at=running(c.reference(),steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase);
@@ -1227,7 +1244,7 @@ struct Costed{cost:f64,check:f64,work:f64,steps:usize,bias:[f64;2],total:Apriori
 impl Candidate{
     fn new(request:&Request,ground:Ground,allowance:f64,fourth:bool)->Result<Candidate,String>{
         let model=Model::of_ground(request,ground,fourth)?;let initial=Initial::deferred(&model,request)?;let base=model_ledger(&model,request);
-        let items=vec![Measured::charge(fold_charges(&model,model.ground.charge));request.times_us.len()];
+        let items=vec![Measured::apriori(fold_charges(&model,model.ground.charge),model.ground.pair_charge());request.times_us.len()];
         Ok(Candidate{model,initial,base,allowance,items,settled:false,phase:node_phase()})
     }
     /// The initial ensemble's quadrature (ensemble.rs), which none of the fold's choices reads, for the pilot's and
@@ -1251,13 +1268,24 @@ impl Candidate{
 }
 /// The next candidate along the rule's allowances that builds (a model that fails, its tables not
 /// converging, is passed over with its error kept), past the rungs whose closure gives the shape of one in `shapes` (ground.rs `Shape`), the same model, before their tables.
-fn next_candidate(request:&Request,bare:&Ground,ladder:&mut dyn Iterator<Item=f64>,failed:&mut Option<String>,shapes:&mut Vec<Shape>)->Option<Candidate>{
-    for a in ladder{
-        let ground=match bare.clustered(a){Ok(ground)=>ground,Err(e)=>{failed.get_or_insert(e);continue;}};
+fn next_candidate(request:&Request,ladder:&mut Ladder,failed:&mut Option<String>,shapes:&mut Vec<Shape>)->Option<Candidate>{
+    while let Some((a,ground))=ladder.next(){
+        let ground=match ground{Ok(ground)=>ground,Err(e)=>{failed.get_or_insert(e);continue;}};
         let shape=ground.shape();if shapes.contains(&shape){continue;}
         match Candidate::new(request,ground,a,false){Ok(c)=>{shapes.push(shape);return Some(c);},Err(e)=>{failed.get_or_insert(e);}}
     }
     None
+}
+/// The rule's candidates in the ladder's order (module documentation, # The fold's choice): the generator before the rule, its first rung
+/// (every fold that exists folded, ground.rs `Ground::with` at `EXISTS`) and the allowances below it, the drives' and the pairs' (`Ground::rungs`).
+struct Ladder{bare:Ground,first:Option<Result<Ground,String>>,below:std::vec::IntoIter<f64>}
+impl Ladder{
+    fn new(bare:Ground)->Ladder{let first=bare.clustered(EXISTS);let below=first.as_ref().unwrap_or(&bare).rungs().into_iter().skip(1).collect::<Vec<f64>>().into_iter();Ladder{bare,first:Some(first),below}}
+    /// The next rung: its allowance and the rule's generator there.
+    fn next(&mut self)->Option<(f64,Result<Ground,String>)>{
+        if let Some(first)=self.first.take(){return Some((EXISTS,first));}
+        let a=self.below.next()?;Some((a,self.bare.clustered(a)))
+    }
 }
 /// A trap's slowest axis's period: the span of T's step error (`orbits`).
 fn slowest_period(trap:&Trap)->f64{std::f64::consts::TAU/trap.frequencies.iter().copied().fold(f64::INFINITY,f64::min)}
@@ -1274,20 +1302,23 @@ fn slowest_period(trap:&Trap)->f64{std::f64::consts::TAU/trap.frequencies.iter()
 /// transfer's at the T the pilot reads, all at the share of atoms it holds (`pilot`, its estimates). (R5040's atoms at 600 uK took a Doppler term of 5.2 % the choice had not seen.)
 fn measured_charge(from:&Model,to:&Model,states:&[Trajectory],starts:&[Trajectory],memory:&Memory,interval:f64,outputs:usize,pilot:&[Estimate])->Vec<Measured>{
     // Per state its charges and, as the run's atoms take them (lib.rs `walk`), the first-order Doppler term and the profiles' error.
-    let item=|t:&Trajectory|{let x=carried(from,to,t);let p=to.point(x.r,x.kappa);let c=fold_charges(to,2.*to.readout(x.cluster,&p,&x.psi,x.time).1);[c[0],c[1],to.doppler_ratio(x.kappa),to.profile_error(x.r)]};
+    let item=|t:&Trajectory|{let x=carried(from,to,t);let p=to.point(x.r,x.kappa);let(populations,folded)=to.readout(x.cluster,&p,&x.psi,x.time);let c=fold_charges(to,2.*folded);
+        [c[0],c[1],to.doppler_ratio(x.kappa),to.profile_error(x.r),pair_charge(to,&populations,f64::INFINITY)]};
     // Per output the states' items: their sums, their counts, and over the outputs after t = 0 their first two moments and largest.
-    let(mut sums,mut counts,mut moments,mut largest)=(vec![[0.;4];outputs],vec![0.;outputs],[[0.;4];2],[0_f64;4]);
+    let(mut sums,mut counts,mut moments,mut largest)=(vec![[0.;5];outputs],vec![0.;outputs],[[0.;5];2],[0_f64;5]);
     for group in by_output(starts).into_iter().chain(by_output(states)){
         let i=((group[0].time/interval).round() as usize).min(outputs-1);counts[i]+=group.len() as f64;
-        let items:Vec<[f64;4]>=group.par_iter().map(|&t|item(t)).collect();
-        for c in &items{for k in 0..4{sums[i][k]+=c[k];if i>0{moments[0][k]+=c[k];moments[1][k]+=c[k]*c[k];largest[k]=largest[k].max(c[k]);}}}
+        let items:Vec<[f64;5]>=group.par_iter().map(|&t|item(t)).collect();
+        for c in &items{for k in 0..5{sums[i][k]+=c[k];if i>0{moments[0][k]+=c[k];moments[1][k]+=c[k]*c[k];largest[k]=largest[k].max(c[k]);}}}
     }
-    let held:f64=counts[1..].iter().sum();if held==0.{return vec![Measured::charge(fold_charges(to,to.ground.charge));outputs];}
-    let means:[Vec<f64>;4]=std::array::from_fn(|k|{let sum:Vec<f64>=sums.iter().map(|s|s[k]).collect();let mean=moments[0][k]/held;
+    let held:f64=counts[1..].iter().sum();if held==0.{return vec![Measured::apriori(fold_charges(to,to.ground.charge),to.ground.pair_charge());outputs];}
+    let means:[Vec<f64>;5]=std::array::from_fn(|k|{let sum:Vec<f64>=sums.iter().map(|s|s[k]).collect();let mean=moments[0][k]/held;
         steady_means(&sum,&counts,(moments[1][k]/held-mean*mean).max(0.).sqrt(),largest[k])});
     let charges=memory.charges(&(0..outputs).map(|i|with_open([means[0][i],means[1][i]],to,memory.held(i))).collect::<Vec<[f64;2]>>());
+    // The pairs' with what the atoms leave open (`pair_charge`), with the populations' memory as the drives' (`Memory::charges`).
+    let pairs=memory.charges(&(0..outputs).map(|i|[means[4][i]+to.ground.pair_charge()*unseen(memory.held(i));2]).collect::<Vec<[f64;2]>>());
     // The transfer's at the T the pilot reads there, and the share of atoms it holds there, as the run's (`records`).
-    charges.into_iter().enumerate().map(|(i,charge)|Measured{charge,doppler:means[2][i],profile:means[3][i],transfer:to.first_error*pilot[i].temperature_total,beyond:0.,held:held_share(&pilot[i])}).collect()
+    charges.into_iter().enumerate().map(|(i,charge)|Measured{charge,pairs:pairs[i][0],doppler:means[2][i],profile:means[3][i],transfer:to.first_error*pilot[i].temperature_total,beyond:0.,held:held_share(&pilot[i])}).collect()
 }
 /// Means per output (`sums` over `counts` states, the first output's left alone) over their neighbours as far as they agree: the mean
 /// within the widest window, doubling from the output's own, that agrees with every narrower one within Bernstein's bound on that one's
@@ -2134,7 +2165,7 @@ mod tests{
         let account=Account{statistic:s1.population,open:0.,bias:0.,model:quarter[0],target:POPULATION_TARGET};assert!(whole[0]>POPULATION_TARGET&&account.total()<POPULATION_TARGET,"{}",account.total());
         e.loss=1.;assert_eq!(apriori.at(item(&e)),[0.;2]);assert_eq!(statistics(&e,[1.;3]).temperature,0.);
         e.loss_error=0.03;assert_eq!(statistics(&e,[1.;3]).population,CONFIDENCE*0.03);
-        assert_eq!(Measured::charge([0.04,0.05]).held,1.);
+        assert_eq!(Measured::apriori([0.04,0.05],0.01).held,1.);
     }
     /// A population's statistic is its error as the app shows it: among the held atoms at no loss, a quarter of that with a quarter of the atoms held, the loss's own where that is the larger; a single group's infinite errors stay so, lost or not.
     #[test]
