@@ -525,6 +525,24 @@ fn a_lone_state_s_round_off_is_no_gain(){
         Model::new(&r).unwrap_or_else(|e|panic!("k_BT = D/{f}: {e}"));}
 }
 
+/// Two crossed far beams (the validation's F9) are a lattice along q = k₀ − k₁ (model.rs `Model::lattice`), of period 2π/|q|, its
+/// sites the wells of the trap's potential on its axis: the centre's and its neighbours', within a fiftieth of the period (their
+/// envelope's tilt, about a hundredth, aside).
+#[test]
+fn a_crossed_pair_s_lattice_has_its_sites_at_the_wells(){
+    let fixture:Value=serde_json::from_str(include_str!("fixtures/crossed_far_beam_motion.json")).unwrap();
+    let mut r=scene::request(&fixture);r.times_us=vec![0.,1.];let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let(trap,(cluster,state,_))=(initial.traps[0],initial.states[0]);let l=trap.lattice.expect("two crossed beams are a lattice");
+    let beams=&model.ground.units[model.focused[0]].beams;let(a,b)=(model.geometry[beams[0]].wave_vector(),model.geometry[beams[1]].wave_vector());
+    let q:[f64;3]=std::array::from_fn(|i|a[i]-b[i]);let size=(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]).sqrt();
+    assert!((0..3).all(|i|(l.axis[i]-q[i]/size).abs()<=1e-12)&&(2.*l.wave_number/size-1.).abs()<=1e-12,"axis {:?}, k {} against q {q:?}",l.axis,l.wave_number);
+    let(period,level)=(std::f64::consts::PI/l.wave_number,|z:f64|model.trap_level(cluster,state,l.axis.map(|x|x*z)));
+    let n=l.nearest((0..3).map(|i|l.axis[i]*trap.centre[i]).sum()).0;
+    for m in [n-1.,n,n+1.]{let(site,g)=(l.site(m),0.5*(5_f64.sqrt()-1.));let(mut lo,mut hi)=(site-period/4.,site+period/4.);
+        for _ in 0..80{let(x,y)=(hi-g*(hi-lo),lo+g*(hi-lo));if level(x)<level(y){hi=y;}else{lo=x;}}
+        assert!((0.5*(lo+hi)-site).abs()<=period/50.,"site {m} at {site} um, its well's bottom at {} um (period {period} um)",0.5*(lo+hi));}
+}
+
 /// The near light comes on at t = 0, and its fold's shift is no part of the ensemble's energy: on the tweezer PGC's
 /// all-folded model the 10 MHz probe's denominator closes on a shell about the focus, where with it the envelope's top
 /// stood at 137 k_BT against the focus's 34 and no proposal in e^100 was kept (the solve never reached its first

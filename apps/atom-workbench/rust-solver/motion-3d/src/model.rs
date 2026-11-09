@@ -623,9 +623,10 @@ impl Trap{
 #[derive(Clone,Copy,Debug)]
 pub struct Axis{pub unit:usize,pub coordinate:usize,pub lo:f64,pub hi:f64}
 
-/// The trap's standing wave, its beam and reflection one unit (ground.rs `Unit`): on the beam's axis the field is
-/// γ₀ a + γ₁ ā, a = e^{ikz}/(1 + iz/z_R), its antinodes -- the sites -- where Φ(z) = kz − atan(z/z_R) + ½ arg(γ₀ γ̄₁)
-/// is a multiple of π, its nodes half way between. Its axis (a unit vector), k, z_R and that phase; the envelope's inverse 1 + z²/z_R² at the trap's centre, where the trap's frequencies are read.
+/// The trap's lattice, the interference of its field's two beams (`Model::lattice`): its sites where Φ(z) = kz − atan(z/z_R) + φ, z along its
+/// axis, is a multiple of π, the barriers between them half way -- a retro-reflected tweezer's on the beam's axis, its k and z_R, φ = ½ arg(γ₀ γ̄₁):
+/// its antinodes, the field on the axis γ₀ a + γ₁ ā, a = e^{ikz}/(1 + iz/z_R). Its axis (a unit vector), k, z_R and φ; the envelope's inverse
+/// 1 + z²/z_R² at the trap's centre, where the trap's frequencies are read.
 #[derive(Clone,Copy,Debug)]
 pub struct Lattice{pub axis:[f64;3],pub wave_number:f64,pub rayleigh:f64,pub phase:f64,pub central:f64}
 impl Lattice{
@@ -921,14 +922,23 @@ impl Model{
 
     /// The bottom of the reference state's well with every drive folded (`Ground::trap`): where what no state's own trap decides is taken: the explicit states' decay.
     pub fn centre(&self)->[f64;3]{self.ground.trap.centre}
-    /// The trap's standing wave, where the trap beam's unit is it and its reflection, its envelope at the trap's centre.
+    /// The trap's lattice (`Lattice`), where its field is two beams': along q = k₀ − k₁, its period
+    /// 2π/|q| (k = |q|/2), its Gouy phase the beams' mean's, ½ Σ_l atan(|n_l·q̂| z/z_Rl), taken as one beam's of z_R = 2/Σ_l |n_l·q̂|/z_Rl, its
+    /// sites at the centre's relative phase -- a field of one polarization's at its antinodes (its nodes where its light repels), the centre's
+    /// phase rounded to them, the centre there but for its envelope's tilt --; two beams exactly opposed, a retro-reflected tweezer, on the
+    /// beam's own axis, k and z_R. A field of three beams or more is a lattice of several axes, which the harmonic reference does not take.
     fn lattice(&self,centre:[f64;3])->Option<Lattice>{
-        let unit=&self.ground.units[self.focused[0]];if unit.rank!=1||unit.beams.len()!=2||!unit.beams.iter().all(|l|self.trap_beams.contains(l)){return None;}
-        let(a,b)=(&self.geometry[unit.beams[0]],&self.geometry[unit.beams[1]]);let waist=a.waist?;
-        if (0..3).map(|i|a.direction[i]*b.direction[i]).sum::<f64>()>0.{return None;}
-        let z=unit.weights[0]*unit.weights[1].conj();
-        let(rayleigh,along)=(a.wave_number*waist*waist/2.,(0..3).map(|i|a.direction[i]*centre[i]).sum::<f64>());
-        Some(Lattice{axis:a.direction,wave_number:a.wave_number,rayleigh,phase:0.5*z.im.atan2(z.re),central:1.+(along/rayleigh).powi(2)})
+        let unit=&self.ground.units[self.focused[0]];let[l0,l1]=unit.beams[..]else{return None};let(a,b)=(&self.geometry[l0],&self.geometry[l1]);
+        let rayleigh=|g:&Geometry|g.waist.map_or(f64::INFINITY,|w|g.wave_number*w*w/2.);
+        let(axis,wave_number,range)=if b.direction==a.direction.map(|x|-x)&&b.wave_number==a.wave_number&&b.waist==a.waist{(a.direction,a.wave_number,rayleigh(a))}else{
+            let q:[f64;3]=std::array::from_fn(|i|a.wave_number*a.direction[i]-b.wave_number*b.direction[i]);let size=(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]).sqrt();
+            if !(size>0.){return None;}let axis=q.map(|x|x/size);let along=|g:&Geometry|(0..3).map(|i|g.direction[i]*axis[i]).sum::<f64>().abs()/rayleigh(g);
+            (axis,0.5*size,2./(along(a)+along(b)))};
+        let along=(0..3).map(|i|axis[i]*centre[i]).sum::<f64>();
+        let mut lattice=Lattice{axis,wave_number,rayleigh:range,phase:if unit.rank==1{let z=unit.weights[0]*unit.weights[1].conj();0.5*z.im.atan2(z.re)}else{0.},central:1.+(along/range).powi(2)};
+        let(_,offset)=lattice.nearest(along);let quarter=std::f64::consts::FRAC_PI_2;
+        lattice.phase-=if unit.rank==1{quarter*(offset/quarter).round()}else{offset};
+        Some(lattice)
     }
     /// The trap of the model's tables for a cluster's state: at the well of what holds it before the near light comes on (`trap_level`, ground.rs `Ground::well`), its Hessian in its potential
     /// (`potential`), the near light's own shifts in it.
