@@ -201,13 +201,13 @@ impl Well for Prepared<'_> {
 
 /// The step's tolerances per µs of the run (SPEC §2.2: each output's error ≤ s·ε·τ/T_run of its scale, adapt.rs), from the
 /// temperature scales (µK) per lab axis and the density of the atoms' loss energy at the escape (per rad/µs,
-/// `escape_density`): the momentum's against T's target (T ∝ κ², so κ's error δ moves T by 2δ/κ_T relative: δ ≤ s ε_T κ_T/2,
-/// κ_T² = k_BT/(ħ/m)); the loss energy's against the population target (an error δE carries the atoms within δE of the
-/// escape across it, a share ρ(E_esc) δE: δE ≤ s ε/ρ); the displayed rows' against the population target.
-fn tolerances(momentum: V3, density: f64, run: f64, hbar_over_mass: f64) -> Tolerances {
+/// `escape_density`): a principal axis's energy against T's target on the coldest axis's thermal energy (an axis's T is its
+/// energy over k_B: δE ≤ s ε_T k_BT); the loss energy's against the population target (an error δE carries the atoms within
+/// δE of the escape across it, a share ρ(E_esc) δE: δE ≤ s ε/ρ); the displayed rows' against the population target.
+fn tolerances(momentum: V3, density: f64, run: f64) -> Tolerances {
     let [bp, bt] = step_bound();
     Tolerances {
-        momentum: momentum.map(|t| bt * (KT_PER_UK * t / hbar_over_mass).sqrt() / (2. * run)),
+        axes: bt * KT_PER_UK * momentum.iter().copied().fold(f64::INFINITY, f64::min) / run,
         energy: bp / (density * run),
         population: bp / run,
     }
@@ -237,7 +237,7 @@ fn escape_density(model: &Model, states: &[State], output: &[usize], outputs: us
 }
 /// Tolerances tightened (or loosened) by a factor.
 fn scaled(t: &Tolerances, factor: f64) -> Tolerances {
-    Tolerances { momentum: t.momentum.map(|x| x * factor), energy: t.energy * factor, population: t.population * factor }
+    Tolerances { axes: t.axes * factor, energy: t.energy * factor, population: t.population * factor }
 }
 
 /// The estimates, the listed outputs' atoms and the counts of some groups.
@@ -319,7 +319,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     };
 
     // The pilot (module documentation, # The pipeline): its own trajectory numbers, the step at the request's temperature.
-    let pilot_tolerances = tolerances([request.temperature_uk; 3], 1. / (KT_PER_UK * request.temperature_uk), context.plan.end, hm);
+    let pilot_tolerances = tolerances([request.temperature_uk; 3], 1. / (KT_PER_UK * request.temperature_uk), context.plan.end);
     let first = MOST_TRAJECTORIES / GROUP;
     let pilot = run_groups(first, first + pilot_size() / GROUP, Shape::of(&context.plan, true), &|i| trajectory(&run, &ensemble, &pilot_tolerances, &context.plan, true, i), &mut |prefix| {
         let (e, l, c) = pooled(prefix, &context.scales);
@@ -394,7 +394,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     let momentum: V3 = std::array::from_fn(|a| held_to.iter().map(|t| t[a]).fold(f64::INFINITY, f64::min));
     let momentum = momentum.map(|t| if t.is_finite() { t } else { request.temperature_uk });
     let thermal = KT_PER_UK * coldest(&|m| m.temperature_total).min(request.temperature_uk);
-    let mut tolerance = tolerances(momentum, escape_density(&model, &samples, &at, outputs, thermal), context.plan.end, hm);
+    let mut tolerance = tolerances(momentum, escape_density(&model, &samples, &at, outputs, thermal), context.plan.end);
     let round = |n: f64| ((n / GROUP as f64).ceil() as u64 * GROUP).clamp(pilot_size(), MOST_TRAJECTORIES);
     let mut want = round(targets.need(&estimates));
     let mut parts: Vec<Part> = vec![];

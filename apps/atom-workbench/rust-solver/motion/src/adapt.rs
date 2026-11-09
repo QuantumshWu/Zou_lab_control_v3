@@ -6,8 +6,16 @@
 //! (`step::Step::regrid`) also has the grid's error, which the doubling cannot see (both its steps take the grid's
 //! spacing): the full step redone on twice the panels differs from it by (1 − 2⁻⁴) of its grid error (CF4 and Simpson
 //! are of fourth order), so the grid's error is 2⁴/(2⁴ − 1) of that difference -- the halves' grid no coarser. The two
-//! add into one local error per displayed quantity: per lab axis the momentum, the loss energy E_s, the displayed rows'
-//! largest difference (`Tolerances`); within the tolerance of every quantity the halves are taken, else τ is redone.
+//! add into one local error per displayed quantity (`Tolerances`, `Read`); within the tolerance of every quantity the
+//! halves are taken, else τ is redone.
+//!
+//! # What is read
+//! - Per principal axis of the full step's reference the axis's energy E_i = (ħ/m)k_i²/2 + g_i y_i + λ_i y_i²/2
+//!   (y_i = e_i·(r − p), k_i = e_i·κ), not the momentum: T_a is the window mean of κ_a² over one trap period (SPEC §1.7),
+//!   for which an axis's energy is what counts -- E_i/ħω_i of action at its frequency --, while an error of the orbit's
+//!   phase moves κ_a by up to its amplitude and that mean not at all. Read on κ the phase error had bound the steps of a
+//!   lattice of 39 steps a period (R1_RETRO) by 1.6 times its energy's.
+//! - The loss energy E_s, and the displayed rows' largest difference.
 //!
 //! # The next τ and the next grid
 //! The doubling's three steps take one spacing: h′ = τ/4m, m = ⌈τ/4h⌉, the full step 2m panels and each half m
@@ -31,8 +39,9 @@
 //! error -- and the jump made at its end (`step::jump`); the rest of the step is dropped, the next starts from the state
 //! the jump left. The loss is tested at every step's end and after every jump (SPEC §1.7).
 
-use crate::model::Generator;
-use crate::step::{jump, panels, step, step_work, Dynamics, Segment, Step, Trajectory};
+use crate::linalg::dot3;
+use crate::model::{Generator, STATES};
+use crate::step::{jump, panels, step, step_work, Dynamics, Flow, Segment, Step, Trajectory};
 use crate::units::{MOST_STEPS, ORDER};
 
 /// The local errors allowed per µs of a step (SPEC §2.2: the error ≤ s·ε·τ/T_run of each output's scale), which the solve
@@ -40,10 +49,11 @@ use crate::units::{MOST_STEPS, ORDER};
 /// The errors add over the run as the steps' local errors do, to at most s·ε of each scale.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tolerances {
-    /// Per lab axis, κ's error (1/µm) per µs: T_a ∝ ⟨κ_a²⟩ moves by 2δκ/κ_T of itself for an error δκ on the axis's thermal
-    /// scale κ_T, so T's share is s·ε_T κ_T/(2 T_run).
-    pub momentum: [f64; 3],
-    /// E_s's error (rad/µs) per µs: on the thermal energy k_BT_s, s·ε_T k_BT_s/T_run.
+    /// A principal axis's energy's error (rad/µs) per µs: an axis's T is its energy over k_B, so T's share on the thermal
+    /// energy k_BT of the coldest axis, s·ε_T k_BT/T_run.
+    pub axes: f64,
+    /// The loss energy E_s's error (rad/µs) per µs: the loss moves by the atoms within δE of the escape, at most δE/k_BT,
+    /// so the loss's share on the thermal energy, s·ε_P k_BT/T_run.
     pub energy: f64,
     /// The displayed rows' largest error per µs: s·ε_P/T_run.
     pub population: f64,
@@ -98,21 +108,30 @@ fn optimum(a_work: f64, b_work: f64, c: f64, d: f64) -> (f64, f64) {
     ((a_work / (lambda * p * c)).powf(1.0 / (p + 1.0)), (b_work / (lambda * q * d)).powf(1.0 / (q + 1.0)))
 }
 
-/// The differences of the displayed quantities of two states at one time, each over its tolerance per µs times τ: per
-/// lab axis the momentum, E_s, the displayed rows; [κ_x, κ_y, κ_z, E_s, rows].
-fn differences<D: Dynamics>(model: &D, tolerances: &Tolerances, a: &Trajectory, b: &Trajectory, tau: f64) -> [f64; 5] {
-    let (pa, pb) = (a.point(), b.point());
-    let energy = (model.energy(a.cluster, &pa, &a.psi) - model.energy(b.cluster, &pb, &b.psi)).abs();
-    let (ra, rb) = (model.readout(a.cluster, &pa, &a.psi), model.readout(b.cluster, &pb, &b.psi));
-    let rows = ra.iter().zip(&rb).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+/// What the doubling reads of a state (module documentation, # What is read): per principal axis of a reference flow
+/// (the full step's) the axis's energy, the loss energy E_s, the displayed rows.
+struct Read {
+    axes: [f64; 3],
+    energy: f64,
+    rows: [f64; STATES],
+}
+
+fn read<D: Dynamics>(model: &D, flow: &Flow, t: &Trajectory) -> Read {
+    let at = t.point();
+    let d = [t.r[0] - flow.centre[0], t.r[1] - flow.centre[1], t.r[2] - flow.centre[2]];
+    let axes = std::array::from_fn(|i| {
+        let (y, k) = (dot3(flow.axes[i], d), dot3(flow.axes[i], t.kappa));
+        0.5 * flow.hbar_over_mass * k * k + flow.gradient[i] * y + 0.5 * flow.curvatures[i] * y * y
+    });
+    Read { axes, energy: model.energy(t.cluster, &at, &t.psi), rows: model.readout(t.cluster, &at, &t.psi) }
+}
+
+/// The differences of two reads at one time, each over its tolerance per µs times τ: [the axes' energies, E_s, the rows].
+fn differences(tolerances: &Tolerances, a: &Read, b: &Read, tau: f64) -> [f64; 5] {
     let t = tau.abs();
-    [
-        (a.kappa[0] - b.kappa[0]).abs() / (tolerances.momentum[0] * t),
-        (a.kappa[1] - b.kappa[1]).abs() / (tolerances.momentum[1] * t),
-        (a.kappa[2] - b.kappa[2]).abs() / (tolerances.momentum[2] * t),
-        energy / (tolerances.energy * t),
-        rows / (tolerances.population * t),
-    ]
+    let axis = |i: usize| (a.axes[i] - b.axes[i]).abs() / (tolerances.axes * t);
+    let rows = a.rows.iter().zip(&b.rows).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+    [axis(0), axis(1), axis(2), (a.energy - b.energy).abs() / (tolerances.energy * t), rows / (tolerances.population * t)]
 }
 
 /// The trajectory's physical state from a step's end, its step control's counters kept.
@@ -209,12 +228,14 @@ pub fn advance<D: Dynamics>(model: &D, tolerances: &Tolerances, trajectory: &mut
         };
         // The split's error and the grid's, each over the tolerance. (The eigen-propagation's rounding, `Step::rounding`, is
         // per step and grows with their number: no smaller τ reduces it, so it steers nothing.)
-        let split = differences(model, tolerances, &full.end, &second.end, tau).map(|d| d / ((1 << ORDER) - 1) as f64);
+        let on = full.segment.flow;
+        let full_read = read(model, &on, &full.end);
+        let split = differences(tolerances, &full_read, &read(model, &on, &second.end), tau).map(|d| d / ((1 << ORDER) - 1) as f64);
         let grid = match full.regrid() {
             Some((finer, work)) => {
                 trajectory.work += work;
                 let g = (1 << GRID_ORDER) as f64;
-                differences(model, tolerances, &full.end, &finer, tau).map(|d| d * g / (g - 1.0))
+                differences(tolerances, &full_read, &read(model, &on, &finer), tau).map(|d| d * g / (g - 1.0))
             }
             None => [0.0; 5],
         };
