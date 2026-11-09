@@ -201,10 +201,14 @@ impl AxisFamilies {
     pub fn live_data(&self) -> Vec<AxisEntry> { live(&self.data) }
 }
 
-/// Group a dataset's axes by declared role and place, never by name.
+/// Group a dataset's axes by declared role and place, never by name. An alternative
+/// coordinate (a linked scan parameter's values along its axis) is not an axis of its
+/// own: it is counted and placed as its primary, which a plot reads in either coordinate.
+/// Only the record's time coordinates are found among them, by their roles.
 pub fn classify_axes(schema: &PlotSchema) -> AxisFamilies {
     let entry = |domain: AxisDomain, axis: &Arc<Axis>| (declared_ref(domain, axis.id()), axis.len());
-    let repeat = schema.domain(AxisDomain::Repeat).axes().iter().map(|axis| entry(AxisDomain::Repeat, axis)).collect();
+    let repeat = schema.domain(AxisDomain::Repeat).axes().iter().filter(|axis| axis.coordinate_of().is_none())
+        .map(|axis| entry(AxisDomain::Repeat, axis)).collect();
     let point_axes = schema.domain(AxisDomain::Point).axes();
     let (mut history, mut history_time, mut sample_time) = (None, None, None);
     let (mut scan, mut events, mut point_content) = (Vec::new(), Vec::new(), Vec::new());
@@ -214,6 +218,7 @@ pub fn classify_axes(schema: &PlotSchema) -> AxisFamilies {
             PRIMARY_INDEX => { if history.is_none() { history = Some(item); } }
             SHOT_TIME => { if history_time.is_none() { history_time = Some(item); } }
             SAMPLE_TIME => { if sample_time.is_none() { sample_time = Some(item); } }
+            _ if axis.coordinate_of().is_some() => {}
             SCAN_POINT => scan.push(item),
             READOUT_EVENT => events.push(item),
             _ => point_content.push(item),
@@ -223,7 +228,7 @@ pub fn classify_axes(schema: &PlotSchema) -> AxisFamilies {
     let picture = pair.as_ref().map(|(x, y)| (entry(AxisDomain::CellData, x), entry(AxisDomain::CellData, y)));
     let picture_ids: Vec<&str> = pair.as_ref().map(|(x, y)| vec![x.id(), y.id()]).unwrap_or_default();
     let cell_axes: Vec<AxisEntry> = schema.domain(AxisDomain::CellData).axes().iter()
-        .filter(|axis| axis.role() != SCALAR).map(|axis| entry(AxisDomain::CellData, axis)).collect();
+        .filter(|axis| axis.role() != SCALAR && axis.coordinate_of().is_none()).map(|axis| entry(AxisDomain::CellData, axis)).collect();
     let mut content = point_content.clone();
     content.extend(cell_axes.iter().filter(|entry| !picture_ids.contains(&&*entry.0.axis_id)).cloned());
     let mut data = point_content;
