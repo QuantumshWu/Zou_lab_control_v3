@@ -191,6 +191,9 @@ impl Request {
             if b.field.iter().any(|z| !z.is_finite()) {
                 return Err(format!("Beam {}'s electric field has a nonfinite entry", b.name));
             }
+            if b.field.iter().all(|&z| z == C64::ZERO) {
+                return Err(format!("Beam {}'s electric field is zero: the app sends only the beams that shine", b.name));
+            }
         }
         for f in &self.outside_forms {
             if f.frequency_index.len() != axes {
@@ -342,6 +345,7 @@ pub(crate) mod tests {
         refused(&|r| r.times_us[0] = 1e-3, "the first at 0");
         refused(&|r| r.states[0] = "ground-x-0".into(), "not manifold-F-m");
         refused(&|r| r.beams[1].field[2] = C64::new(f64::NAN, 0.0), "electric field");
+        refused(&|r| r.beams[1].field = [C64::ZERO; 3], "electric field is zero");
         refused(&|r| r.emission[1][(20, 0)] = C64::real(1.0), "ground ← excited");
     }
 }
