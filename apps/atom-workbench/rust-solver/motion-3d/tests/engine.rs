@@ -567,6 +567,24 @@ fn a_near_probe_s_fold_stays_out_of_the_ensemble_s_energy(){
         let kinetic=0.5*model.hbar_over_mass*t.kappa.iter().map(|k|k*k).sum::<f64>();assert!(kinetic+model.trap_level(cluster,state,t.r)<0.,"an atom the trap does not bind");}
 }
 
+/// The loss's potential (engine.rs # Loss, model.rs `Model::trap_potential`) is the trap's of the atom's ground populations: an explicit
+/// excited state's amplitude and the ground states' coherences, which ring at the drives', the detunings' and the beats' frequencies, do not
+/// move it -- a state's potential with either is its ground populations' mean of their own.
+#[test]
+fn the_loss_s_potential_is_the_ground_populations_mean(){
+    let fixture:Value=serde_json::from_str(include_str!("fixtures/pgc_probe_10mhz.json")).unwrap();
+    let mut r=scene::request(&fixture);r.times_us=vec![0.,1.];
+    let model=Model::with(&r,Ground::allowances(&r).unwrap()[1]).unwrap();
+    let k=(0..model.clusters()).find(|&k|model.mixed(k)&&model.ground_dimension(k)>=2).expect("a cluster with explicit states and two ground states");
+    let n0=model.ground_dimension(k);let point=model.point([0.2,0.1,-0.1],[3.,-2.,1.]);
+    let at=|psi:&[Complex;MOST_MIXED]|model.trap_potential(k,&point,psi,0.3);
+    let basis=|i:usize|{let mut psi=[Complex::ZERO;MOST_MIXED];psi[i]=Complex::ONE;psi};
+    let(u0,u1)=(at(&basis(0)),at(&basis(1)));
+    let mut excited=basis(0);excited[n0]=Complex::new(0.3,0.4);assert_eq!(at(&excited),u0,"an excited amplitude moved it");
+    let mut coherent=[Complex::ZERO;MOST_MIXED];coherent[0]=Complex::new(0.6,0.);coherent[1]=Complex::new(0.,0.8);
+    let mean=0.36*u0+0.64*u1;assert!((at(&coherent)-mean).abs()<=1e-12*mean.abs().max(1.),"{} against {mean}",at(&coherent));
+}
+
 /// A standing wave's neighbouring sites: their atoms start about their own sites' bottoms (lib.rs `initial_trajectory`:
 /// scaled about the focus site 1's stood 67 times as high up its well as the centre's), and the harmonic part about each
 /// atom's own site (engine.rs, # A standing wave's sites) keeps T, no atom lost, at a step of ω dt = 1.5: the kick
