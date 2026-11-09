@@ -24,7 +24,7 @@
 //! kick has mean zero and the second moment of its drives' responses σ_d, Re[∇ln σ_d*⊗∇ln σ_d] by their shares (eliminate.rs).
 //! The kick is b_J + ξ, Cov ξ = M − b_J b_Jᵀ, b_J = the folded mean: positive semidefinite by Cauchy–Schwarz.
 
-use super::{Beat, Gate, Lights, Model, Photon, Point, Reach, Recoil, Sample, Unit, UnitError, Wave};
+use super::{Beat, Gate, Lights, Model, Photon, Point, Recoil, Sample, Unit, UnitError, Wave};
 use crate::field::Amplitude;
 use crate::linalg::{Mat, C64};
 use crate::request::{GROUND, STATES};
@@ -384,7 +384,7 @@ impl Model {
     }
 
     /// A coherence's gate: its mixing with every beam at its peak (|a_l| ≤ 1 everywhere: a bound over any reach).
-    pub(crate) fn coherence_gate(&self, unit: &Unit, _reach: &Reach) -> Gate {
+    pub(crate) fn coherence_gate(&self, unit: &Unit) -> Gate {
         let m = self.coherence_mixing(unit, &|_| 1.0);
         Gate { saturation: 2.0 * m * m, sweep: 0.0 }
     }
