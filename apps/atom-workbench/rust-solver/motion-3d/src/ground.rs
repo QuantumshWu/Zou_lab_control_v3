@@ -164,7 +164,9 @@
 //! block, the block's spread about it (its row's other entries, Gershgorin's radius) -- changes a
 //! response at first order by G times it; its bound (`Ground::dressing_bounds`, through the dressed resolvent applied to the
 //! intermediates' fields and projected on the response), weighted by the channel's share of the
-//! generator, is the ledger's.
+//! generator. The units' interference is measured where the atoms go, the dressing with each carrier's
+//! beams' coherent sum at a point (`Ground::eliminate_with`) against its units apart, the bound kept for
+//! the share of atoms the points may miss (model.rs `Model::measure_dressing`): that is the ledger's.
 //!
 //! # The static ground block
 //! A cluster's ground states need not be the eigenstates of what moves them statically: a tweezer's
