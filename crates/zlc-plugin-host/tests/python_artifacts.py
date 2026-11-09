@@ -1,4 +1,5 @@
 """Durable artifact publication through the native helper and hosted SDK facade."""
+import json
 import pathlib
 import sys
 import tempfile
@@ -50,6 +51,16 @@ class ArtifactsTests(unittest.TestCase):
             self.assertEqual(calls[-2:], ["stage", "abort"])
             self.assertEqual(path.read_bytes(), b"science")
             self.assertFalse(list(root.glob(".*.tmp")))
+
+    def test_hosted_json_is_written_as_readable_text(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = pathlib.Path(folder) / "summary.json"
+            def request(op, params):
+                self.assertEqual((op, params["action"]), ("run.artifacts", "write_text"))
+                return {"ok": {"path": str(atomic_write_text(params["path"], params["text"]))}}
+            written = Artifacts(types.SimpleNamespace(_request=request)).write_json(path, {"a": [1, 2]}, role="summary")
+            self.assertEqual(written, path)
+            self.assertEqual(json.loads(path.read_text()), {"a": [1, 2]})
 
     def test_published_but_not_durable_is_not_reported_as_no_file(self):
         with tempfile.TemporaryDirectory() as folder:

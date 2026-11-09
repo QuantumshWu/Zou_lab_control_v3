@@ -4,6 +4,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from zlc_durable import readable_json
+
 
 class Artifacts:
     def __init__(self, context):
@@ -78,7 +80,6 @@ class Artifacts:
         return Path(self._call("write_text", text=text, **self._options(path, **options))["path"])
 
     def write_json(self, path, value: Any, *, indent: int = 2, **options) -> Path:
-        from zlc_durable import readable_json
         return self.write_text(path, readable_json(value, indent=indent), **options)
 
     def write_bytes(self, path, value: bytes | bytearray | memoryview, **options) -> Path:
