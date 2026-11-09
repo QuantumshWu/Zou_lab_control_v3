@@ -128,6 +128,11 @@
 //! - the loss, within the populations' tolerance: an escape over the trap's top moves with the motion's energy -- the pilot's
 //!   escaped share L by L ln(1/L) per relative error of it (`escape`) --, by the larger of the orbits'
 //!   and the jumps' errors.
+//! Every criterion is a read (read.rs `Read`): a doubling's estimate of the step's error -- Richardson's share of the difference
+//! between the step and its half at the integrator's order (`richardson`) --, and its standard error over the states it was read on. A read
+//! that authorizes a step stands at its size and CONFIDENCE errors (`Read::upper`): what it cannot read never authorizes a larger step;
+//! the one that checks the kept step against the run (`drift`, below) moves it only by what stands beyond its errors (`standing`).
+//! The tolerances are per output and target (`tolerances`), a read over the whole run taking their least.
 //! T's criteria take the step's share of T's room at T's target there (`ceiling`, # Regime), at most the T target itself
 //! (`tolerances`): the share of a target the method's own error sets would refine for a value no one can read, while a
 //! step that leaves the motion unresolved still moves the loss (the retro-reflected tweezer over 10 us
@@ -331,6 +336,7 @@ use crate::engine::{column_norm,halves,node_phase,series,Engine,Halves,Landings,
 use crate::gpu;
 use crate::ground::{ExcitedKind,Ground,Kind};
 use crate::ledger::{Ledger,Total};
+use crate::read::Read;
 use crate::model::{Exact,Model,Trap,MOST_MIXED,MOST_STATES,NOT_LINDBLAD};
 use crate::control::Harmonic;
 use crate::stats::{largest_look,reads_spread,summarize,variance_noise,Estimate,Group,Scales,Sums,KT_PER_UK};
@@ -352,6 +358,9 @@ pub const CONFIDENCE:f64=2.;
 /// splitting): a step's bias over the run and its doubling's difference go as dt^p, Richardson's 2^p/(2^p − 1)
 /// the difference's share of the bias.
 pub const ORDER:f64=2.;
+/// Richardson's share of a step's bias in a doubling's difference at order p, 2^p/(2^p − 1): the bias at the coarser of two steps a
+/// factor two apart per unit of their difference -- the integrator's at `ORDER`, a fourth-order grid's (CF4's and Simpson's, `grid_phase`) at 4.
+fn richardson(order:f64)->f64{let f=2_f64.powi(order as i32);f/(f-1.)}
 /// The share s² of the run's room's square the step's bias takes beside the a-priori estimates (module documentation, # Shares):
 /// 1/(1 + 2p), its cost-optimal share beside the statistics.
 pub const BIAS_VARIANCE:f64=1./(1.+2.*ORDER);
@@ -779,7 +788,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // first step, at the a-priori estimates of its model -- the largest step met there, else the search's last. With explicit states their exact steps take the populations, whose bound over-counts many
     // times there, and bare states ring (`relaxed`; a resonant probe of 100 mW/cm²: 502 steps per us for the choice's 5): that first step, the light's pattern's.
     let steps=if pilot_candidate.model.ground.clusters.iter().any(|x|!x.excited.is_empty()){first}else{let c=&pilot_candidate;let allowance=doppler_allowance(&c.base,&c.model);
-        let weights={let mut e=Estimate::default();start(&mut e,&c.initial);vec![regime(&e,trap.lab);outputs]};let total=Apriori::of(&c.base,&c.model);let tolerances=tolerances(&weights,&c.charges.iter().map(|&x|total.at(Measured::charge(x))).collect::<Vec<_>>());
+        let weights={let mut e=Estimate::default();start(&mut e,&c.initial);vec![regime(&e,trap.lab);outputs]};let total=Apriori::of(&c.base,&c.model);let tolerances=tolerances(&weights,&c.charges.iter().map(|&x|total.at(Measured::charge(x))).collect::<Vec<_>>()).least;
         let binding=vec![1.;starts.len()];let probes=bound_probes(&c.model,&starts,&binding);
         let deposits=Deposits::default();
         let doubled=|k:usize|{let r=step_excess(&Engine::new(&c.model,running(c.reference(),k,start_waiting,allowance,c.phase)),&starts,&binding,start_waiting,&probes,period,0.,tolerances,&deposits,(FIRST_GROUPS*TASK) as f64*duration);Check{steps:k,population:r[0],loss:r[1],motion:r[2]}};
@@ -832,7 +841,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         let work=|s:usize|->f64{if let Some(&(_,w))=counted.borrow().iter().find(|x|x.0==s){return w;}
             let w=interval_work(&c.model,&parts,&settings(s),interval,pilot_waiting);counted.borrow_mut().push((s,w));w};
         let apriori:Vec<[f64;2]>=c.charges.iter().map(|&x|total.at(Measured::charge(x))).collect();
-        let tolerances=tolerances(&ceilings,&apriori);let bias=|k:&Check|{let r=k.ratios();[r[0]*tolerances[0],r[1]*tolerances[1]]};
+        let tolerances=tolerances(&ceilings,&apriori).least;let bias=|k:&Check|{let r=k.ratios();[r[0]*tolerances[0],r[1]*tolerances[1]]};
         let cost=|k:&Check|{let(n,weight)=predicted(&pilot_statistics,&apriori,bias(k),pilot as f64);work(k.steps)*n*weight*(outputs-1) as f64};
         // Beyond the targets with no step bias at all (a pole its tables do not resolve, a charge past the rooms): what the step can move of its
         // cost is little beside that weight, and its check is put off until it is the choice -- its cost at the first step with no bias.
@@ -914,7 +923,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
             // (the population's bound may yet be measured smaller), and the work there any step's it keeps -- the explicit
             // states' exact steps resolve what the folded model's step left to the fold (CONTROL_CYCLE's first rung: 118 steps
             // per interval against the folded 34, its evaluation ten CPU-s for a cost twice the least's).
-            let tolerances=tolerances(&ceilings,&apriori);let clusters=c.clusters();let deposits=Deposits::default();
+            let tolerances=tolerances(&ceilings,&apriori).least;let clusters=c.clusters();let deposits=Deposits::default();
             let coarse=((at_least*steps as f64/(at_work-at_least)).ceil() as usize).clamp(1,steps);
             let(coarse,r)=match doubled.iter().find(|x|x.0==clusters){
                 Some(x)=>(x.1,[x.2[0]*x.3[0]/tolerances[0],x.2[1]*x.3[0]/tolerances[0],x.2[2]*x.3[1]/tolerances[1]]),
@@ -960,7 +969,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // hold T's step error within the step's share of T's room at its target there, at most the T target itself
     // (`ceilings`, `tolerances`): a step that leaves the motion unresolved still moves the loss.
     let total=Apriori::of(&booked(&base,pilot_beats*horizon),&model);let apriori:Vec<[f64;2]>=charges.iter().map(|&x|total.at(Measured::charge(x))).collect();let parts=state_work(&model,&states,&begun);
-    let checked=match known{Some(checked)=>checked,None=>{let tolerances=tolerances(&ceilings,&apriori);
+    let checked=match known{Some(checked)=>checked,None=>{let tolerances=tolerances(&ceilings,&apriori).least;
         let cost=|k:&Check|{let r=k.ratios();let(n,weight)=predicted(&pilot_statistics,&apriori,[r[0]*tolerances[0],r[1]*tolerances[1]],pilot as f64);
             interval_work(&model,&parts,&settings(k.steps),interval,waiting)*n*weight};
         let reach=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64).0*duration;
@@ -969,7 +978,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // The kept step against T's error over the run (`drift`), each output against T's tolerance there and the loss's: read where its error per period could add up past that;
     // where more stands than that, as dt² the step where it would come to it and its bias, checked again at least as far as that span.
     let chosen={let(probes,sensitivity)=(bound_probes(&model,&states,&binding_at(&states,&weights,interval)),escape(&model,&states,&pilot_groups));
-        let limits:Vec<f64>=apriori.iter().zip(&ceilings).map(|(a,&w)|temperature_tolerance(w,a[1]).min(if sensitivity>0.{tolerances[0]/sensitivity}else{f64::INFINITY})).collect();
+        let limits:Vec<f64>=self::tolerances(&ceilings,&apriori).per.iter().map(|x|x[1].min(if sensitivity>0.{tolerances[0]/sensitivity}else{f64::INFINITY})).collect();
         let limit=|t:f64|limits[((t/interval).round() as usize).clamp(1,outputs-1)];
         let run_steps=|k:&Check|{let r=k.ratios();predicted(&pilot_statistics,&apriori,[r[0]*tolerances[0],r[1]*tolerances[1]],pilot as f64).0*(k.steps*(outputs-1)) as f64};
         let mut through=0.;let mut kept=checked.chosen;
@@ -1441,13 +1450,16 @@ fn checked_work(checked:&Steps,states:usize,subsample:usize,horizon:f64,interval
 /// state, and from every probe the orbits' over the trap's period in steps of dt and of dt/2.
 fn checked_step(states:usize,probes:usize,steps:usize,interval:f64,period:f64)->f64{3.*states as f64+3.*probes as f64*(period*steps as f64/interval).ceil()}
 
-/// The tolerances of a step's criteria (module documentation, # Shares): per target the step's share s of the run's room
-/// beside the a-priori totals `apriori` per output (`run_room`), its least over the outputs after t = 0 -- T's at its target ε_T/w
-/// there (`weights`, `ceiling`), at most ε_T: a step that leaves the motion unresolved still moves the loss.
-fn tolerances(weights:&[f64],apriori:&[[f64;2]])->[f64;2]{
-    let population=BIAS_SHARE*apriori.iter().skip(1).map(|a|run_room(POPULATION_TARGET,a[0])).fold(POPULATION_TARGET,f64::min);
-    let temperature=apriori.iter().zip(weights).skip(1).map(|(a,&w)|temperature_tolerance(w,a[1])).fold(TEMPERATURE_TARGET,f64::min);
-    [population,temperature]}
+/// The tolerances of a step's reads (module documentation, # Shares): per output and target the step's share s of the run's room
+/// beside the a-priori totals `apriori` there (`run_room`) -- T's at its target ε_T/w there (`weights`, `ceiling`), at most ε_T: a step
+/// that leaves the motion unresolved still moves the loss --, t = 0's the targets' own; and per target their least, which a read over the
+/// whole run takes.
+struct Tolerances{per:Vec<[f64;2]>,least:[f64;2]}
+fn tolerances(weights:&[f64],apriori:&[[f64;2]])->Tolerances{
+    let per:Vec<[f64;2]>=apriori.iter().zip(weights).enumerate().map(|(i,(a,&w))|if i==0{[BIAS_SHARE*POPULATION_TARGET,TEMPERATURE_TARGET]}else{[BIAS_SHARE*run_room(POPULATION_TARGET,a[0]),temperature_tolerance(w,a[1])]}).collect();
+    let least=[0,1].map(|k|per.iter().map(|x|x[k]).fold(f64::INFINITY,f64::min));
+    Tolerances{per,least}
+}
 /// T's tolerance at an output (`tolerances`): the step's share of the run's room at its target there, ε_T/w (`regime`), beside its a-priori total, at most ε_T.
 fn temperature_tolerance(weight:f64,apriori:f64)->f64{(BIAS_SHARE*run_room(TEMPERATURE_TARGET/weight,apriori)).min(TEMPERATURE_TARGET)}
 
@@ -1458,7 +1470,7 @@ fn temperature_tolerance(weight:f64,apriori:f64)->f64{(BIAS_SHARE*run_room(TEMPE
 /// motion's, the largest of the light impulse's relative error over one step (the same doublings, over the states as T's target weighs them, `binding`), the
 /// orbits' error over a trap period (`orbits`, `reach` the time the run's trajectories take together) and the jumps' (`jumps`).
 fn step_excess(engine:&Engine,states:&[Trajectory],binding:&[f64],waiting:f64,probes:&Probes,period:f64,escape:f64,tolerances:[f64;2],deposits:&Deposits,reach:f64)->[f64;3]{
-    let dt=engine.settings.dt;let richardson=4./3.;let count=states.len().max(1) as f64;
+    let dt=engine.settings.dt;let richardson=richardson(ORDER);let count=states.len().max(1) as f64;
     // The states' doublings on the threads, summed in their order (the sums do not depend on the threads).
     let doubled:Vec<([f64;2],[f64;3],([f64;3],[f64;3]))>=states.par_iter().map(|t|engine.doubling(t,dt)).collect();
     // The impulse's relative error: over the states as T's target weighs them against its tolerance where it binds, and over all against the T target itself.
@@ -1515,8 +1527,8 @@ fn heating(engine:&Engine,states:&[Trajectory],deposits:&[[f64;3]],ends:&[([f64;
         [rate,rate*rate,cross*(hazard(model,t,&psi,r,kappa)-rate),rate*recoil]}).collect();
     let n=parts.len() as f64;let sum=|k:usize|parts.iter().map(|x|x[k]).sum::<f64>();
     let(rate,square,heating)=(sum(0),sum(1),sum(3));if !(n>1.&&rate>0.&&heating>0.){return 0.;}
-    let mean=sum(2)/n;let error=(parts.iter().map(|x|(x[2]-mean).powi(2)).sum::<f64>()/(n*(n-1.))).sqrt();
-    dt/12.*square/rate*(mean.abs()+CONFIDENCE*error)/(heating/n)
+    let mean=sum(2)/n;let read=Read{value:mean,error:(parts.iter().map(|x|(x[2]-mean).powi(2)).sum::<f64>()/(n*(n-1.))).sqrt()};
+    dt/12.*square/rate*read.upper()/(heating/n)
 }
 
 /// A jump's expected deposit at a state of normalized ψ (rad/us): its cross term (ħ²/m) κ·E[Δκ] and its recoil
@@ -1606,10 +1618,10 @@ fn orbits(engine:&Engine,probes:&Probes,period:f64,tolerance:f64,floor:f64,run:f
     loop{
         windows.extend(probes.states[windows.len()..count].par_iter().map(|t|pair(t)).collect::<Vec<_>>());
         let axes=paired_error(&windows);
-        let bound=axes.iter().map(|x|x[0]+x[1]).fold(0.,f64::max);
-        if count>=first&&(axes.iter().map(|x|x[1]).fold(0.,f64::max)<=BIAS_SHARE*tolerance||axes.iter().any(|x|x[0]-x[1]>tolerance)||count==probes.states.len()){return bound;}
+        let bound=axes.iter().map(Read::upper).fold(0.,f64::max);
+        if count>=first&&(axes.iter().map(|x|CONFIDENCE*x.error).fold(0.,f64::max)<=BIAS_SHARE*tolerance||axes.iter().any(|x|x.value.abs()-CONFIDENCE*x.error>tolerance)||count==probes.states.len()){return bound;}
         let next=if count<first{(2*count).min(first)}else{(2*count).min(probes.states.len())};
-        let(high,low)=(axes.iter().map(|x|x[0]+x[1]).fold(0.,f64::max)/tolerance,axes.iter().map(|x|x[0]-x[1]).fold(floor,f64::max)/tolerance);
+        let(high,low)=(axes.iter().map(Read::upper).fold(0.,f64::max)/tolerance,axes.iter().map(|x|x.value.abs()-CONFIDENCE*x.error).fold(floor,f64::max)/tolerance);
         if !read_pays(((next-count)*steps) as f64,run,high,low){return bound;}
         count=next;
     }
@@ -1635,18 +1647,18 @@ fn flow_window(engine:&Engine,x:&mut Trajectory,dt:f64,count:usize,tail:usize,su
 /// A pair's windows, at dt and at dt/2, with their difference at a share of the atoms (`orbits`): what `paired_error` reads of it.
 fn at_share(coarse:[f64;3],fine:[f64;3],share:f64)->[[f64;3];2]{[std::array::from_fn(|a|fine[a]+share*(coarse[a]-fine[a])),fine]}
 
-/// Per axis the magnitude of the paired windows' error, 4/3 the difference of the mean κ² at dt (a window's first) and at dt/2
-/// relative to the latter's mean, and its CONFIDENCE standard errors. Zeros on an axis without κ².
-fn paired_error(windows:&[[[f64;3];2]])->[[f64;2];3]{
-    let n=windows.len() as f64;
+/// Per axis the paired windows' read: Richardson's share of the difference of the mean κ² at dt (a window's first) and at dt/2
+/// relative to the latter's mean, and its standard error. None on an axis without κ².
+fn paired_error(windows:&[[[f64;3];2]])->[Read;3]{
+    let n=windows.len() as f64;let richardson=richardson(ORDER);
     std::array::from_fn(|a|{
-        let reference=windows.iter().map(|w|w[1][a]).sum::<f64>()/n;if !(reference>0.){return [0.;2];}
-        let d:Vec<f64>=windows.iter().map(|w|4./3.*(w[0][a]-w[1][a])/reference).collect();let m=d.iter().sum::<f64>()/n;
-        [m.abs(),CONFIDENCE*(d.iter().map(|x|(x-m).powi(2)).sum::<f64>()/(n*(n-1.).max(1.))).sqrt()]
+        let reference=windows.iter().map(|w|w[1][a]).sum::<f64>()/n;if !(reference>0.){return Read{value:0.,error:0.};}
+        let d:Vec<f64>=windows.iter().map(|w|richardson*(w[0][a]-w[1][a])/reference).collect();let m=d.iter().sum::<f64>()/n;
+        Read{value:m,error:(d.iter().map(|x|(x-m).powi(2)).sum::<f64>()/(n*(n-1.).max(1.))).sqrt()}
     })
 }
 
-/// What of an error stands against a limit: its magnitude less its errors up to the limit, and from there on the limit and what lies beyond it, the squares' difference with the errors, as the totals' quadrature: zero at the noise, at the limit where the magnitude lies beyond it by its errors, the magnitude far above them.
+/// A check's read (module documentation, # Time step), what of an error stands against a limit: its magnitude less its errors up to the limit, and from there on the limit and what lies beyond it, the squares' difference with the errors, as the totals' quadrature: zero at the noise, at the limit where the magnitude lies beyond it by its errors, the magnitude far above them.
 fn standing(error:[f64;2],limit:f64)->f64{let beyond=error[0]-limit;if beyond>error[1]{limit+(beyond*beyond-error[1]*error[1]).sqrt()}else{(error[0]-error[1]).max(0.)}}
 
 /// The spans in succession on which nothing stands that stop T's step error over the run (`drift`). A real error x, its errors at a span e (z standard errors, z the read's `looks_confidence`), reads quiet with the
@@ -1688,7 +1700,7 @@ pub fn drift(model:&Model,settings:&dyn Fn(usize)->Settings,steps:usize,probes:&
             pairs[..count].par_iter_mut().for_each(|p|{let left=reach-p.done;let tail=window.min(left);
                 if left>0{let(a,_,_)=flow_window(&coarse,&mut p.coarse,dt,left,tail,None);
                     let(b,_,_)=flow_window(&fine,&mut p.fine,0.5*dt,2*left,2*tail,None);p.done=reach;p.window=a.zip(b).map(|(a,b)|[a,b]);}});
-            let windows:Vec<[[f64;3];2]>=pairs[..count].iter().filter_map(|p|p.window).collect();let axes=if !reads_spread(windows.len() as f64){[[0.;2];3]}else{paired_error(&windows).map(|[size,errors]|[size,wider*errors])};
+            let windows:Vec<[[f64;3];2]>=pairs[..count].iter().filter_map(|p|p.window).collect();let axes=if !reads_spread(windows.len() as f64){[[0.;2];3]}else{paired_error(&windows).map(|r|[r.value.abs(),wider*(CONFIDENCE*r.error)])};
             let at=count as f64/probes.states[..count].iter().map(|t|1./limit(t.time+reach as f64*dt)).sum::<f64>();
             let largest=axes.into_iter().max_by(|a,b|standing(*a,at).total_cmp(&standing(*b,at))).unwrap();
             let(layers,top)=((count as f64/total as f64).sqrt(),most.excess.max(1.));let could=axes.iter().map(|x|x[0]-x[1]*layers).fold(0.,f64::max)/at;
@@ -1712,7 +1724,7 @@ pub fn drift(model:&Model,settings:&dyn Fn(usize)->Settings,steps:usize,probes:&
 /// step over 76 seeds at 10 us outputs: 0.24-0.77 us on 32 states alone, one seed's few bright states holding it at 0.24 us where the populations' true error stays within half the tolerance to 0.71 us
 /// against 0.167 us; 0.56-0.77 us so, 90 % within 0.56-0.63 us either way.)
 fn accumulated_excess(engine:&Engine,states:&[Trajectory],horizon:f64,subsample:usize,tolerance:f64)->f64{
-    let dt=engine.settings.dt;let richardson=4./3.;let count=((horizon/dt).ceil() as usize).max(1);
+    let dt=engine.settings.dt;let richardson=richardson(ORDER);let count=((horizon/dt).ceil() as usize).max(1);
     let flow=|t:&&Trajectory|->f64{
         let n=engine.model.dimension(t.cluster);let(one,two)=(engine.coast(t,dt,count),engine.coast(t,0.5*dt,2*count));
         let(a,b)=(one.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>(),two.psi[..n].iter().map(|z|z.norm_sqr()).sum::<f64>());
@@ -1722,8 +1734,8 @@ fn accumulated_excess(engine:&Engine,states:&[Trajectory],horizon:f64,subsample:
     let mut errors:Vec<f64>=states.iter().step_by(stride).collect::<Vec<&Trajectory>>().par_iter().map(flow).collect();
     loop{
         let m=errors.len().max(1) as f64;let mean=errors.iter().sum::<f64>()/m;
-        let spread=CONFIDENCE*(errors.iter().map(|e|(e-mean).powi(2)).sum::<f64>()/(m*(m-1.).max(1.))).sqrt();
-        if spread<=BIAS_SHARE*tolerance||mean-spread>tolerance||stride==1||errors.len()>=most{return (mean+spread)/tolerance;}
+        let read=Read{value:mean,error:(errors.iter().map(|e|(e-mean).powi(2)).sum::<f64>()/(m*(m-1.).max(1.))).sqrt()};let spread=CONFIDENCE*read.error;
+        if spread<=BIAS_SHARE*tolerance||mean-spread>tolerance||stride==1||errors.len()>=most{return read.upper()/tolerance;}
         errors.extend(states.iter().skip(stride/2).step_by(stride).collect::<Vec<&Trajectory>>().par_iter().map(flow).collect::<Vec<f64>>());stride/=2;
     }
 }
@@ -1800,9 +1812,9 @@ fn grid_within(model:&Model,states:&[Trajectory],at:&Settings,landing:Option<(&[
         let errors:Vec<[f64;3]>=picked.par_iter().filter_map(|t|engine.grid_error(t,phase)).collect();
         let m=errors.len() as f64;let sum=|k:usize|errors.iter().map(|e|e[k]).sum::<f64>();let mean=sum(0)/m;
         let spread=(errors.iter().map(|e|(e[0]-mean).powi(2)).sum::<f64>()/(m*(m-1.).max(1.))).sqrt();
-        let kicks:Vec<f64>=landed.par_iter().filter_map(|t|engine.grid_error(t,phase)).map(|e|(16./15.*e[1]).powi(2)).collect();
+        let kicks:Vec<f64>=landed.par_iter().filter_map(|t|engine.grid_error(t,phase)).map(|e|(richardson(4.)*e[1]).powi(2)).collect();
         let heat=kicks.iter().sum::<f64>()/(kicks.len().max(1) as f64*recoil.max(f64::MIN_POSITIVE));
-        (16./15.*((mean+CONFIDENCE*spread)/at.beats).max(sum(1)/sum(2).max(f64::MIN_POSITIVE)/QUADRATURE)).max(heat/QUADRATURE)
+        (richardson(4.)*(Read{value:mean,error:spread}.upper()/at.beats).max(sum(1)/sum(2).max(f64::MIN_POSITIVE)/QUADRATURE)).max(heat/QUADRATURE)
     };
     let phase=largest_met(coarsest,excess(coarsest),&excess,within)?;
     // What it lands between the groups over the run.
@@ -1857,8 +1869,8 @@ fn landed_excess(engine:&Engine,picked:&[&Trajectory],phase:f64,groups:&[usize],
         if let Some(y)=y{let own=x.from;for h in (0..count).filter(|&h|h!=own){d[h]=(scale(1,t.cluster)*y.sources[h]-scale(0,t.cluster)*x.sources[h]+y.stay[h]-x.stay[h])/dt;d[own]-=d[h];}}
         (0..count).map(|h|(0..count).map(|g|response[h*count+g]*d[g]).sum()).collect()}).collect();
     let m=picked.len() as f64;
-    16./15.*(0..count).map(|h|{let mean=moved.iter().map(|d|d[h]).sum::<f64>()/m;
-        mean.abs()+CONFIDENCE*(moved.iter().map(|d|(d[h]-mean).powi(2)).sum::<f64>()/(m*(m-1.).max(1.))).sqrt()}).fold(0.,f64::max)/(NUMERICAL_SHARE*POPULATION_TARGET)
+    richardson(4.)*(0..count).map(|h|{let mean=moved.iter().map(|d|d[h]).sum::<f64>()/m;
+        Read{value:mean,error:(moved.iter().map(|d|(d[h]-mean).powi(2)).sum::<f64>()/(m*(m-1.).max(1.))).sqrt()}.upper()}).fold(0.,f64::max)/(NUMERICAL_SHARE*POPULATION_TARGET)
 }
 /// ∫₀^span e^{Rs} ds of rates R (m × m, row-major): the series over a span whose ‖R s‖ lies within one, then doubling it, S(2s) = S(s) + e^{Rs} S(s), e^{2Rs} = (e^{Rs})², e^{Rs} = 1 + R S(s).
 fn response(rates:&[f64],m:usize,span:f64)->Vec<f64>{
@@ -2020,8 +2032,8 @@ mod tests{
     #[test]
     fn an_orbit_s_read_counts_at_the_share_of_atoms_that_keep_it(){
         let pairs=|share:f64|{let w:Vec<[[f64;3];2]>=(0..8).map(|i|at_share([2.;3],[1.+0.1*i as f64;3],share)).collect();paired_error(&w)[0]};
-        let whole=pairs(1.);let half=pairs(0.5);assert!((half[0]-0.5*whole[0]).abs()<1e-12&&(half[1]-0.5*whole[1]).abs()<1e-12);
-        assert_eq!(pairs(0.),[0.;2]);assert!(whole[0]>0.5,"{whole:?}");
+        let whole=pairs(1.);let half=pairs(0.5);assert!((half.value-0.5*whole.value).abs()<1e-12&&(half.error-0.5*whole.error).abs()<1e-12);
+        let none=pairs(0.);assert!(none.value==0.&&none.error==0.);assert!(whole.value.abs()>0.5,"{whole:?}");
         assert_eq!(at_share([3.,4.,5.],[1.,2.,3.],1.)[0],[3.,4.,5.]);assert_eq!(at_share([3.,4.,5.],[1.,2.,3.],0.)[0],[1.,2.,3.]);
     }
     /// T's statistic stands at the share of atoms it reads: its relative error at no loss, a quarter of it with a quarter of the atoms held, nothing where none is; and a few atoms held, their relative error √(2/x), ask no more trajectories than the batch that holds them, as none or one do: no cliff.
@@ -2183,9 +2195,9 @@ mod tests{
         let w=2.;let limit=CLASSICAL*w/KT_PER_UK;let at=|m:f64|{let mut e=Estimate::default();e.temperature=[1e9,m*limit,3.*limit];regime(&e,[w;3])};
         assert_eq!(at(1.),1.);assert_eq!(at(2.),1.);assert!((at(0.75)-0.5625).abs()<1e-12);assert!((at(0.5)-0.25).abs()<1e-12);assert_eq!(at(0.),0.);
         let mut last=at(0.);for i in 1..=2000{let x=at(i as f64*1e-3);assert!((x-last).abs()<=0.0021&&x>=last,"{i}: {x} after {last}");last=x;}
-        let a=[[0.;2],[0.02,0.02]];let t=|w:f64|tolerances(&[w,w],&a)[1];
+        let a=[[0.;2],[0.02,0.02]];let t=|w:f64|tolerances(&[w,w],&a).least[1];
         assert!((t(1.)-BIAS_SHARE*run_room(TEMPERATURE_TARGET,0.02)).abs()<1e-15&&t(0.)==TEMPERATURE_TARGET&&t(0.25)==TEMPERATURE_TARGET);
-        assert!(t(0.6)>t(1.)&&t(0.6)<TEMPERATURE_TARGET);assert!((tolerances(&[0.,1.],&a)[1]-t(1.)).abs()<1e-15||tolerances(&[0.,1.],&a)[1]==t(1.));
+        assert!(t(0.6)>t(1.)&&t(0.6)<TEMPERATURE_TARGET);assert!((tolerances(&[0.,1.],&a).least[1]-t(1.)).abs()<1e-15||tolerances(&[0.,1.],&a).least[1]==t(1.));
         // Its upper bound, for the step's tolerance: T within the limit by its errors reads the limit; no errors read T itself; a group alone, its errors unknown, reads the limit.
         let mut e=Estimate::default();e.temperature=[1e9,0.77*limit,3.*limit];assert!((regime(&e,[w;3])-0.5929).abs()<1e-12);assert!((ceiling(&e,[w;3])-0.5929).abs()<1e-12);
         e.temperature_error=[0.,0.1*limit,0.];assert!((ceiling(&e,[w;3])-0.9409).abs()<1e-12);assert!((regime(&e,[w;3])-0.5929).abs()<1e-12);
@@ -2241,9 +2253,9 @@ mod tests{
         // A met step leaves the statistics their balance by construction: the all-folded model's a-priori T estimate at 0.0905 of
         // 0.1, T's tolerance the step's share s of the run's room -- at that bias the statistics' room is exactly the rest;
         // T a reference, its tolerance the target itself.
-        let(t,run)=(tolerances(&[1.;2],&[[0.;2],[0.,0.0905]]),run_room(TEMPERATURE_TARGET,0.0905));
+        let(t,run)=(tolerances(&[1.;2],&[[0.;2],[0.,0.0905]]).least,run_room(TEMPERATURE_TARGET,0.0905));
         assert!((t[1]-BIAS_SHARE*run).abs()<1e-15&&(room(TEMPERATURE_TARGET,floor(0.0905,t[1]))-(1.-BIAS_VARIANCE).sqrt()*run).abs()<1e-12,"{t:?} {run}");
-        assert_eq!(tolerances(&[0.;2],&[[0.;2],[0.,0.0905]])[1],TEMPERATURE_TARGET);
+        assert_eq!(tolerances(&[0.;2],&[[0.;2],[0.,0.0905]]).least[1],TEMPERATURE_TARGET);
     }
     /// The first batch: its first groups through the run, each one beyond them as far as the reach wants it; the batches after it, each output's own need.
     #[test]
