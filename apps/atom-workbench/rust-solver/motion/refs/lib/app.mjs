@@ -85,7 +85,9 @@ export async function levelShifts(scene,shown){
   const s=JSON.parse(JSON.stringify(scene));physics.resolveSceneFrequencies(s);s.lasers.forEach(intensity.normalizeLaserIntensity);for(const l of s.lasers)l.showLightShift=shown.includes(l.id);
   const a=spectroscopy.spectroscopyAnalysis(s,undefined,false);
   if(a.spectroscopy?.status!==(shown.length?'dispersive':'bare'))throw new Error(`levels chart: ${a.spectroscopy?.status} (${a.spectroscopy?.warnings?.[0]??''})`);
-  const out={};
+  // `mixing`: the largest |Ω/2Δ| of the shown light (the static shift's validity, STATIC_MIXING_LIMIT): a second-order
+  // shift differs from this all-order one by a relative (Ω/2Δ)².
+  const out={mixing:a.spectroscopy.maximumMixingRatio??0};
   for(const l of [...a.ground,...a.D1,...a.D2])out[l.id]={shiftMHz:l.starkShiftMHz,energyMHz:l.energyMHz,absoluteMHz:spectroscopyAbsolute(l),boundMHz:(l.shiftBound?.floquetMHz??0)+(l.shiftBound?.outsideMHz??0),mixed:!!l.mixed};
   return out;
 }

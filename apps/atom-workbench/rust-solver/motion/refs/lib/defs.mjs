@@ -43,7 +43,7 @@ export const SCENES={
   // R2 -- the two-level atom |2,2⟩ ↔ |3′,3′⟩: photon rate, radiation pressure, recoil heating 7/5, 3/10, 3/10.
   R2_RECOIL:{ref:'R2',title:'R2 二能级辐射压与反冲加热（σ⁺ 光沿 B，δ = −100Γ，s = 200）',async build(){
     const s=await base({name:'R2 二能级反冲加热',initialStateId:'ground-2-2',temperatureUK:30,durationUs:1000,samples:101});
-    await tweezer(s,{nm:852,powerMW:7.9,waistUm:1.2,along:'+z',ellipticityDeg:45});
+    await tweezer(s,{nm:852,powerMW:15.8,waistUm:1.2,along:'+z',ellipticityDeg:45});
     const offset=await offsetFor(s,'D2',2,3,'ground-2-2','D2-3-3',['tweezer'],-100*GAMMA_D2);
     await beam(s,{id:'probe',name:'σ+ 探测光',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:200*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
     return s;}},
@@ -96,29 +96,29 @@ async function raman(along){
   };
   let I=1000,shift=0;
   for(let pass=0;pass<3;pass++){
-    const s=await finish(await make(I,shift)),line=await motionRequest('R6',s,{device:'cpu'}),r=ramanNumbers(line,s);
+    const s=await finish(await make(I,shift)),line=await motionRequest('R6',s,{device:'cpu'}),r=await ramanNumbers(line,s);
     I*=2*Math.PI*0.25/r.omegaR;shift+=r.twoPhotonMHz;
   }
   return make(I,shift);
 }
 
-/** The Λ |1,0⟩ ↔ |2,0⟩ of R6 in second order (Ω/2Δ ≪ 1): Ω_R = 2 Σ_e X^A_{e,1} conj(X^B_{e,2})/Δ_e (rad/µs, Δ_e the
- * mean of the two single-photon detunings, every D1 and D2 excited state), and the two-photon detuning (MHz) from the
- * frequencies and the light shifts ΔE_g = Σ_{l,e} |X^l_{eg}|²/δ^l_{eg} of the two states by every beam at the focus (the
- * tweezer's differential hyperfine shift included; its variation over the cloud, ~5 % of a few kHz, is ≪ Ω_R). */
-export function ramanNumbers(line,scene){
-  const g1=index(line,'ground-1-0'),g2=index(line,'ground-2-0'),m=line.model.motion,N=32;
-  const E=m.hamiltonian.real.filter((_,k)=>k%(N+1)===0),nu=line.model.frequencyCoordinates.frequenciesMHz;
-  const freq=id=>RAD_PER_MHZ*m.beams.find(b=>b.id===id).frequencyIndex.reduce((s,n,k)=>s+n*nu[k],0);
-  const dA=freq('ramanA'),dB=freq('ramanB'),abs2=z=>z.re*z.re+z.im*z.im;
+/** The Λ |1,0⟩ ↔ |2,0⟩ of R6 in second order in the Raman beams (Ω/2Δ ≈ 2e-3): Ω_R = 2 Σ_e X^A_{e,1} conj(X^B_{e,2})/Δ_e
+ * (rad/µs; every D1 and D2 excited state, Δ_e the mean of the two single-photon detunings), the Raman beams' light
+ * shifts ΔE_g = Σ_{l,e} |X^l_{eg}|²/δ^l_{eg}, and the two-photon detuning (MHz). The detunings are between the levels
+ * dressed by the tweezer -- the level chart's all-order energies with the tweezer shown: its 12 MHz shift of the ground
+ * and its shift of 5P move Δ_e by ~10⁻³ of 20 GHz, Ω_R by as much, and the two-photon resonance by the tweezer's
+ * differential hyperfine shift (kHz; its spread over the cloud, ~5 % of that, is ≪ Ω_R). */
+export async function ramanNumbers(line,scene){
+  const g1=index(line,'ground-1-0'),g2=index(line,'ground-2-0'),states=line.model.states,N=32;
+  const levels=await levelShifts(scene,['tweezer']),nu={ramanA:await laserMHz(scene,'ramanA'),ramanB:await laserMHz(scene,'ramanB')};
+  const delta=(id,e,g)=>RAD_PER_MHZ*(nu[id]-(levels[states[e]].absoluteMHz-levels[states[g]].absoluteMHz)),abs2=z=>z.re*z.re+z.im*z.im;
   let omega={re:0,im:0};const shift=[0,0];
   for(let e=8;e<N;e++){
-    const a1=coupling(line,'ramanA',e,g1),b2=coupling(line,'ramanB',e,g2);
-    const deltaA1=dA-(E[e]-E[g1]),deltaB2=dB-(E[e]-E[g2]),D=(deltaA1+deltaB2)/2;
+    const a1=coupling(line,'ramanA',e,g1),b2=coupling(line,'ramanB',e,g2),D=(delta('ramanA',e,g1)+delta('ramanB',e,g2))/2;
     omega.re+=2*(a1.re*b2.re+a1.im*b2.im)/D;omega.im+=2*(a1.im*b2.re-a1.re*b2.im)/D;
-    for(const [k,g] of [[0,g1],[1,g2]])for(const b of m.beams)shift[k]+=abs2(coupling(line,b.id,e,g))/(freq(b.id)-(E[e]-E[g]));
+    for(const [k,g] of [[0,g1],[1,g2]])for(const id of ['ramanA','ramanB'])shift[k]+=abs2(coupling(line,id,e,g))/delta(id,e,g);
   }
-  // Two-photon detuning of A − B against |2,0⟩ − |1,0⟩ with both shifted (rad/µs → MHz).
-  const two=((dA-dB)-((E[g2]+shift[1])-(E[g1]+shift[0])))/RAD_PER_MHZ;
-  return {omegaR:Math.hypot(omega.re,omega.im),twoPhotonMHz:two,shifts:shift};
+  // Two-photon detuning of A − B against |2,0⟩ − |1,0⟩, both dressed and shifted (MHz).
+  const two=(nu.ramanA-nu.ramanB)-((levels['ground-2-0'].absoluteMHz+shift[1]/RAD_PER_MHZ)-(levels['ground-1-0'].absoluteMHz+shift[0]/RAD_PER_MHZ));
+  return {omegaR:Math.hypot(omega.re,omega.im),twoPhotonMHz:two,shiftsMHz:shift.map(x=>x/RAD_PER_MHZ)};
 }

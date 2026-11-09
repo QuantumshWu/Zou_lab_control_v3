@@ -1,0 +1,374 @@
+{
+ "id": "R5068_cpu",
+ "reference": "regress",
+ "kind": "regression-consistency",
+ "title": "旧门 R5068_cpu 的真值（线头 7231b1e9 的模型 explicit 3 exc/27 drives 2nd [6+5] 收敛值）",
+ "request": "out/regress/R5068_cpu.json",
+ "durationUs": 1000,
+ "samples": 51,
+ "derivation": "The old engine's own model at its line head, run to convergence (gate/truth/README.md): a regression value, not a physical one. u = hypot(SE, last step-halving residual).",
+ "excluded": null,
+ "series": [
+  {
+   "quantity": "loss",
+   "indices": [
+    5,
+    25,
+    50
+   ],
+   "values": [
+    1,
+    1,
+    1
+   ],
+   "u": [
+    0,
+    0,
+    0
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "ground-2--2",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "ground-2--1",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "ground-2-0",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "ground-2-1",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "ground-2-2",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D1-1--1",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D1-1-0",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D1-1-1",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D1-2--2",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D1-2--1",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D1-2-0",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D1-2-1",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D1-2-2",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-0-0",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-1--1",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-1-0",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-1-1",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-2--2",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-2--1",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-2-0",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-2-1",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-2-2",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-3--3",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-3--2",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-3--1",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-3-0",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-3-1",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-3-2",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-3-3",
+   "indices": [],
+   "values": [],
+   "u": [],
+   "judged": [],
+   "target": {
+    "absolute": 0.05
+   }
+  }
+ ],
+ "info": {
+  "lineHead": {
+   "reachUk": 30,
+   "commit": "7231b1e9",
+   "record": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/baseline/7231b1e9/R5068_cpu.json",
+   "model": "explicit 3 exc/27 drives 2nd [6+5]",
+   "dt": 0.16806722689075632,
+   "stepsPerInterval": 119
+  },
+  "truthLevel": {
+   "steps": 952,
+   "dt": 0.02100840336134454,
+   "N": 768
+  },
+  "converged": true
+ }
+}
