@@ -1401,8 +1401,11 @@ impl Model{
         let peak:Vec<[f64;MOST_RANK]>=self.carriers.iter().map(|c|std::array::from_fn(|k|c.coefficients.iter().map(|x|x[k].abs()).sum())).collect();
         for(k,layout)in self.layouts.iter().enumerate(){
             let modulus=|node:usize,x:usize|{let i=2*(node*layout.size+x);first.data[k][i].hypot(first.data[k][i+1])};
-            let rates:Vec<Vec<f64>>=layout.groups.iter().map(|gl|{let count=gl.entries.len();(0..count).map(|j|gl.pairs.iter().enumerate().map(|(p,&(k1,k0))|{
-                let largest=(0..nodes).map(|node|modulus(node,gl.s+p*count+j).max(modulus(node,gl.q+p*count+j))).fold(0.,f64::max);largest*peak[gl.emitted][k1]*peak[gl.absorbed][k0]}).fold(0.,f64::max)).collect()}).collect();
+            let rates:Vec<Vec<f64>>=layout.groups.iter().map(|gl|{let count=gl.entries.len();let own:Vec<f64>=(0..count).map(|j|gl.pairs.iter().enumerate().map(|(p,&(k1,k0))|{
+                let largest=(0..nodes).map(|node|modulus(node,gl.s+p*count+j).max(modulus(node,gl.q+p*count+j))).fold(0.,f64::max);largest*peak[gl.emitted][k1]*peak[gl.absorbed][k0]}).fold(0.,f64::max)).collect();
+                // A Hermitian group holds the field pairs k1 ≤ k0 alone, an entry's transposed pairs on its transpose's slots: its rate is its transpose's too (the
+                // field-free σ⁺σ⁻ molasses lost its Raman coupling one way, populations 0.21 and 0.55 for ±1 against 0.38 each).
+                (0..count).map(|j|{let(x,y)=gl.entries[j];own[j].max(if gl.hermitian{gl.entries.iter().position(|&e|e==(y,x)).map_or(0.,|t|own[t])}else{0.})}).collect()}).collect();
             let floor=unit_round_off(rates.iter().flatten().copied().fold(0.,f64::max));
             let cl=&mut self.ground.clusters[k];
             for(gl,rate)in layout.groups.iter().zip(&rates){for(&(x,y),_)in gl.entries.iter().zip(rate).filter(|(_,&r)|r<=floor){
