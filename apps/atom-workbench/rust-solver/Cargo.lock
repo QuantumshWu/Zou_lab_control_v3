@@ -19,6 +19,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "atom-motion"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "serde_json",
+]
+
+[[package]]
 name = "atom-motion-3d"
 version = "0.1.0"
 dependencies = [

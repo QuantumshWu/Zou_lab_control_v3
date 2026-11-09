@@ -1,0 +1,1 @@
+//! Units and their existence gates, clusters, frames, the elimination (Reiter-Sorensen, dressing, first-order Doppler), the one generator assembly (H, G, jump operators), the readout, the hazard, photon sources and recoil (SPEC §1.4-§1.7).
