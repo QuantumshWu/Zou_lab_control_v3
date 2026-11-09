@@ -44,7 +44,7 @@ fn main(){
     let every=(outputs/10).max(1);
     for(i,x)in e.iter().enumerate().step_by(every){
         println!("t {:6.0}  T(y,z,x) {:6.2}±{:4.2} {:6.2}±{:4.2} {:6.2}±{:4.2}  nbar {:5.2} {:5.2} {:5.2}  loss {:.1e}",i as f64*interval,
-            x.temperature[0],x.temperature_error[0],x.temperature[1],x.temperature_error[1],x.temperature[2],x.temperature_error[2],x.occupation[0],x.occupation[1],x.occupation[2],x.loss);
+            x.temperature[0],x.temperature_error[0].error,x.temperature[1],x.temperature_error[1].error,x.temperature[2],x.temperature_error[2].error,x.occupation[0],x.occupation[1],x.occupation[2],x.loss);
     }
     let rate=outcome.jumps as f64/count as f64/t_end;
     println!("{count} trajectories, dt {dt}, {wall:.1} s wall; scattering rate {rate:.4}/us");

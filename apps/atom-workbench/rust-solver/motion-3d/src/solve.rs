@@ -355,7 +355,7 @@ use crate::ledger::{Ledger,Total};
 use crate::read::Read;
 use crate::model::{Exact,Model,Trap,MOST_MIXED,MOST_STATES,NOT_LINDBLAD};
 use crate::control::Harmonic;
-use crate::stats::{largest_look,reads_spread,summarize,variance_noise,Estimate,Group,Scales,Sums,KT_PER_UK};
+use crate::stats::{largest_look,reads_spread,summarize,variance_noise,Estimate,Group,Scales,Spread,Sums,KT_PER_UK};
 use crate::{pilot_start,sample_states,simulate_to,Initial,Outcome,TASK};
 use crate::{Complex,Request,STATES};
 use rayon::prelude::*;
@@ -456,12 +456,12 @@ fn classical(e:&Estimate,frequencies:[f64;3])->bool{(0..3).all(|a|KT_PER_UK*e.te
 /// axis's margin k_B T/(CLASSICAL ħω).
 fn regime(e:&Estimate,frequencies:[f64;3])->f64{weight_at(e.temperature,frequencies)}
 /// T's weight at its upper confidence bound, CONFIDENCE standard errors per axis above T, for the step's tolerance (module documentation, # Regime).
-fn ceiling(e:&Estimate,frequencies:[f64;3])->f64{weight_at(std::array::from_fn(|a|e.temperature[a]+CONFIDENCE*e.temperature_error[a]),frequencies)}
+fn ceiling(e:&Estimate,frequencies:[f64;3])->f64{weight_at(std::array::from_fn(|a|e.temperature[a]+e.temperature_error[a].above(CONFIDENCE)),frequencies)}
 fn weight_at(temperature:[f64;3],frequencies:[f64;3])->f64{
     (0..3).filter(|&a|frequencies[a]>0.).map(|a|(KT_PER_UK*temperature[a]/(CLASSICAL*frequencies[a])).max(0.)).fold(1_f64,f64::min).powi(2)
 }
-/// An output's largest standard error of what is shown of the atom (# Batches): a population as the probability p (1 − L) that it is in that state and held, its error among the held atoms times the held share, and the loss's.
-fn shown_error(e:&Estimate)->f64{let held=held_share(e);e.population_errors.iter().map(|&x|held*x).fold(e.loss_error,f64::max)}
+/// An output's largest error at z standard errors of what is shown of the atom (# Batches, stats.rs `Spread`): a population as the probability p (1 − L) that it is in that state and held, its error among the held atoms times the held share, and the loss's.
+fn shown_error(e:&Estimate,z:f64)->f64{let held=held_share(e);e.population_errors.iter().map(|x|x.scaled(held).at(z)).fold(e.loss_error.at(z),f64::max)}
 /// The share of atoms an output's held-atom quantities are read on (# Batches), the one weight of their errors, statistics and model items
 /// alike (`statistics`, `Measured`): its populations, shown as p (1 − L), and its T at the held share 1 − L; the loss as it is.
 fn held_share(e:&Estimate)->f64{(1.-e.loss).max(0.)}
@@ -470,8 +470,8 @@ fn held_share(e:&Estimate)->f64{(1.-e.loss).max(0.)}
 #[derive(Clone,Copy,Debug)]
 struct Statistic{population:f64,temperature:f64,weight:f64}
 fn statistics(e:&Estimate,frequencies:[f64;3])->Statistic{
-    Statistic{population:CONFIDENCE*shown_error(e),
-        temperature:CONFIDENCE*held_share(e)*(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a]/e.temperature[a]}else{0.}).fold(0.,f64::max),weight:regime(e,frequencies)}
+    Statistic{population:shown_error(e,CONFIDENCE),
+        temperature:held_share(e)*(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a].at(CONFIDENCE)/e.temperature[a]}else{0.}).fold(0.,f64::max),weight:regime(e,frequencies)}
 }
 /// Whether an output holds the atoms a temperature, a variance over them, takes (`reads_spread`).
 fn reads_temperature(e:&Estimate)->bool{reads_spread(held_atoms(e).round())}
@@ -482,7 +482,7 @@ fn held_atoms(e:&Estimate)->f64{e.trajectories*(1.-e.loss).max(0.)}
 /// largest T they read, at most the trap's (`reach_cap`); none where they stay within it, or the reach is there already.
 fn outgrown(estimates:&[Estimate],reach:f64,depth:f64)->Option<f64>{
     let read:Vec<&Estimate>=estimates.iter().skip(1).filter(|e|reads_temperature(e)).collect();let z=looks_confidence((3*read.len()).max(1) as f64);
-    if !read.iter().any(|e|(0..3).any(|a|e.temperature[a]-z*e.temperature_error[a]>reach)){return None;}
+    if !read.iter().any(|e|(0..3).any(|a|e.temperature[a]-e.temperature_error[a].below(z)>reach)){return None;}
     let top=read.iter().flat_map(|e|e.temperature).fold(reach,f64::max).min(reach_cap(depth));
     (top>reach).then_some(top)
 }
@@ -689,7 +689,7 @@ struct Record<'a>{estimate:&'a Estimate,population:Account,temperature:Account,m
 impl Record<'_>{
     /// T's standard errors, per axis and of its total, as the app shows them: its own (the estimate's, stats.rs), whose largest relative one at the share of atoms it reads the
     /// statistic stands on (`statistics`); none, infinite here and null in the contract, where fewer than two atoms read a T (`reads_temperature`).
-    fn temperature_errors(&self)->([f64;3],f64){if self.reads{(self.estimate.temperature_error,self.estimate.temperature_total_error)}else{([f64::INFINITY;3],f64::INFINITY)}}
+    fn temperature_errors(&self)->([f64;3],f64){if self.reads{(self.estimate.temperature_error.map(|s|s.error),self.estimate.temperature_total_error.error)}else{([f64::INFINITY;3],f64::INFINITY)}}
 }
 
 /// The records of a solve's estimates so far.
@@ -1986,8 +1986,8 @@ fn least_work(model:&Model,states:&[StateWork],s:&Settings,interval:f64,waiting:
 /// velocity zero -- the trajectories' estimates there carry only the sampling's error.
 fn start(e:&mut Estimate,initial:&Initial){
     let t=initial.temperature();
-    e.temperature=t;e.temperature_error=[0.;3];e.mean_velocity=[0.;3];
-    e.temperature_total=t.iter().sum::<f64>()/3.;e.temperature_total_error=0.;
+    e.temperature=t;e.temperature_error=[Spread::EXACT;3];e.mean_velocity=[0.;3];
+    e.temperature_total=t.iter().sum::<f64>()/3.;e.temperature_total_error=Spread::EXACT;
 }
 
 /// The solution of the estimates so far.
@@ -2038,6 +2038,8 @@ fn assemble(model:&Model,records:&[Record],outcome:&Outcome,listed:&[usize],time
 mod tests{
     use super::*;
     const TARGETS:[f64;2]=[POPULATION_TARGET,TEMPERATURE_TARGET];
+    /// A standard error read on unlimited groups (stats.rs `Spread`).
+    fn spread(error:f64)->Spread{Spread{error,..Spread::EXACT}}
     /// The fold's charge with the memory: a bright transient's charge stays with atoms that go dark (b1/128's
     /// optical pumping, the validation's M1), and atoms that scatter forget it within their next photons.
     #[test]
@@ -2093,18 +2095,18 @@ mod tests{
     /// T's statistic stands at the share of atoms it reads: its relative error at no loss, a quarter of it with a quarter of the atoms held, nothing where none is; and a few atoms held, their relative error √(2/x), ask no more trajectories than the batch that holds them, as none or one do: no cliff.
     #[test]
     fn t_s_statistic_stands_at_the_share_of_atoms_it_reads(){
-        let mut e=Estimate::default();e.temperature=[10.;3];e.temperature_error=[1.;3];let at=|e:&Estimate|statistics(e,[1.;3]).temperature;
+        let mut e=Estimate::default();e.temperature=[10.;3];e.temperature_error=[spread(1.);3];let at=|e:&Estimate|statistics(e,[1.;3]).temperature;
         let whole=at(&e);assert!((whole-CONFIDENCE*0.1).abs()<1e-15,"{whole}");
         e.loss=0.75;assert!((at(&e)-0.25*whole).abs()<1e-15);e.loss=1.;assert_eq!(at(&e),0.);
         let room=room(TEMPERATURE_TARGET,BIAS_SHARE*TEMPERATURE_TARGET);
-        for held in 2..=6{let x=f64::from(held);let mut few=Estimate::default();few.trajectories=80.;few.loss=1.-x/80.;few.temperature=[10.;3];few.temperature_error=[10.*(2./x).sqrt();3];assert!(at(&few)<room,"{held}: {}",at(&few));}
+        for held in 2..=6{let x=f64::from(held);let mut few=Estimate::default();few.trajectories=80.;few.loss=1.-x/80.;few.temperature=[10.;3];few.temperature_error=[spread(10.*(2./x).sqrt());3];assert!(at(&few)<room,"{held}: {}",at(&few));}
     }
     /// An output's model items weigh at the share of atoms its statistics are read on (`held_share`): a quarter of the atoms held, a quarter of
     /// the a-priori total and of the statistics alike, so that an output 75 % lost whose fold charges 8 % among its held atoms totals 2 % of what
     /// the app shows and stays within the 5 % target, as its statistic does; no atom held, none of either. The loss's own statistic stands unscaled.
     #[test]
     fn model_items_weigh_at_the_share_their_atoms_are_read_on(){
-        let apriori=Apriori{rest:0.01,peak:0.};let mut e=Estimate::default();e.population_errors=vec![0.02];e.temperature=[10.;3];e.temperature_error=[1.;3];
+        let apriori=Apriori{rest:0.01,peak:0.};let mut e=Estimate::default();e.population_errors=vec![spread(0.02)];e.temperature=[10.;3];e.temperature_error=[spread(1.);3];
         let item=|e:&Estimate|Measured{charge:[0.08,0.08*std::f64::consts::SQRT_2],transfer:0.01,held:held_share(e),..Measured::default()};
         let whole=apriori.at(item(&e));let s0=statistics(&e,[1.;3]);assert!((whole[0]-0.09).abs()<1e-15&&(whole[1]-(0.02+0.08*std::f64::consts::SQRT_2)).abs()<1e-15,"{whole:?}");
         e.loss=0.75;let quarter=apriori.at(item(&e));let s1=statistics(&e,[1.;3]);
@@ -2112,18 +2114,18 @@ mod tests{
         assert!((s1.population-0.25*s0.population).abs()<1e-15&&(s1.temperature-0.25*s0.temperature).abs()<1e-15);
         let account=Account{statistic:s1.population,open:0.,bias:0.,model:quarter[0],target:POPULATION_TARGET};assert!(whole[0]>POPULATION_TARGET&&account.total()<POPULATION_TARGET,"{}",account.total());
         e.loss=1.;assert_eq!(apriori.at(item(&e)),[0.;2]);assert_eq!(statistics(&e,[1.;3]).temperature,0.);
-        e.loss_error=0.03;assert_eq!(statistics(&e,[1.;3]).population,CONFIDENCE*0.03);
+        e.loss_error=spread(0.03);assert_eq!(statistics(&e,[1.;3]).population,CONFIDENCE*0.03);
         assert_eq!(Measured::charge([0.04,0.05]).held,1.);
     }
     /// A population's statistic is its error as the app shows it: among the held atoms at no loss, a quarter of that with a quarter of the atoms held, the loss's own where that is the larger; a single group's infinite errors stay so, lost or not.
     #[test]
     fn a_population_s_statistic_is_its_error_as_shown(){
-        let mut e=Estimate::default();e.population_errors=vec![0.2,0.1];e.loss_error=0.01;let at=|e:&Estimate|statistics(e,[1.;3]).population;
+        let mut e=Estimate::default();e.population_errors=vec![spread(0.2),spread(0.1)];e.loss_error=spread(0.01);let at=|e:&Estimate|statistics(e,[1.;3]).population;
         assert!((at(&e)-CONFIDENCE*0.2).abs()<1e-15);
         e.loss=0.75;assert!((at(&e)-CONFIDENCE*0.05).abs()<1e-15);
         e.loss=0.99;assert!((at(&e)-CONFIDENCE*0.01).abs()<1e-15);
         e.loss=1.;assert_eq!(at(&e),CONFIDENCE*0.01);
-        e.population_errors=vec![f64::INFINITY;2];e.loss_error=f64::INFINITY;assert_eq!(at(&e),f64::INFINITY);e.loss=0.5;assert_eq!(at(&e),f64::INFINITY);
+        e.population_errors=vec![spread(f64::INFINITY);2];e.loss_error=spread(f64::INFINITY);assert_eq!(at(&e),f64::INFINITY);e.loss=0.5;assert_eq!(at(&e),f64::INFINITY);
     }
     /// What trajectories alike leave open (`unseen`): 16 atoms all lost leave 20 % possible, a jackknife's zero says nothing of it. An output's populations and loss take at least the trajectories that bring it within their room, 76 at the target, in the pilot's prediction and in a run's
     /// ratio alike; beyond them it asks nothing, and a statistic above it stands. The reported error is at least its far end.
@@ -2270,9 +2272,9 @@ mod tests{
         assert!(t(0.6)>t(1.)&&t(0.6)<TEMPERATURE_TARGET);assert!((tolerances(&[0.,1.],&a).least[1]-t(1.)).abs()<1e-15||tolerances(&[0.,1.],&a).least[1]==t(1.));
         // Its upper bound, for the step's tolerance: T within the limit by its errors reads the limit; no errors read T itself; a group alone, its errors unknown, reads the limit.
         let mut e=Estimate::default();e.temperature=[1e9,0.77*limit,3.*limit];assert!((regime(&e,[w;3])-0.5929).abs()<1e-12);assert!((ceiling(&e,[w;3])-0.5929).abs()<1e-12);
-        e.temperature_error=[0.,0.1*limit,0.];assert!((ceiling(&e,[w;3])-0.9409).abs()<1e-12);assert!((regime(&e,[w;3])-0.5929).abs()<1e-12);
-        e.temperature_error=[0.,0.2*limit,0.];assert_eq!(ceiling(&e,[w;3]),1.);
-        e.temperature_error=[f64::INFINITY;3];assert_eq!(ceiling(&e,[w;3]),1.);
+        e.temperature_error=[0.,0.1*limit,0.].map(spread);assert!((ceiling(&e,[w;3])-0.9409).abs()<1e-12);assert!((regime(&e,[w;3])-0.5929).abs()<1e-12);
+        e.temperature_error=[0.,0.2*limit,0.].map(spread);assert_eq!(ceiling(&e,[w;3]),1.);
+        e.temperature_error=[spread(f64::INFINITY);3];assert_eq!(ceiling(&e,[w;3]),1.);
     }
     /// After a miss the search moves by the criteria it evaluated (`next_step`): the D1 gray molasses at 10 us
     /// outputs, with the near light's dressing, missed at 33 steps by 1 % on the motion, its population not

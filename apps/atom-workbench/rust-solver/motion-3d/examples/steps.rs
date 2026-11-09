@@ -24,7 +24,7 @@ fn main(){
         for i in (0..outputs).step_by((outputs/8).max(1)).chain([outputs-1]){
             let x=&e[i];let p:f64=f1.iter().map(|&k|x.populations[k]).sum();
             println!("  t {:7.0}  T {:6.2}±{:4.2} {:6.2}±{:4.2} {:6.2}±{:4.2}  Ttot {:6.2}±{:4.2}  pF1 {:.4}  loss {:.1e}",i as f64*interval,
-                x.temperature[0],x.temperature_error[0],x.temperature[1],x.temperature_error[1],x.temperature[2],x.temperature_error[2],x.temperature_total,x.temperature_total_error,p,x.loss);
+                x.temperature[0],x.temperature_error[0].error,x.temperature[1],x.temperature_error[1].error,x.temperature[2],x.temperature_error[2].error,x.temperature_total,x.temperature_total_error.error,p,x.loss);
         }
     }
 }
