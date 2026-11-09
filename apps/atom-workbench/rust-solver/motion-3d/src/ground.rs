@@ -887,6 +887,19 @@ pub(crate) fn thermal_reach(w:f64,temperature_uk:f64,hm:f64)->Option<f64>{
 /// Two frames are one: equal to the rounding of the sums of detunings they are made of.
 pub(crate) fn same_frame(a:f64,b:f64)->bool{(a-b).abs()<=round_off(a.abs()+b.abs())}
 
+/// What the rule's verdicts make of a request (`Ground::shape`): which couplings of the excited states fold, which couplings between
+/// ground states fold, and the clusters, their ground and explicit excited states. Two judgements of one shape are one model.
+#[derive(Clone,Debug,PartialEq)]
+pub struct Shape{folded:Vec<bool>,items:Vec<(Kind,bool)>,clusters:Vec<(Vec<usize>,Vec<usize>)>}
+impl Shape{
+    /// Whether every fold of this shape exists in another judgement (`other`: the rule's first rung at another reach, where every fold that
+    /// exists folds): each coupling it folds is folded there too, or is no coupling there.
+    pub fn exists_within(&self,other:&Shape)->bool{
+        self.folded.len()==other.folded.len()&&self.folded.iter().zip(&other.folded).all(|(&a,&b)|!a||b)
+            &&self.items.iter().filter(|x|x.1).all(|(k,_)|other.items.iter().find(|y|y.0==*k).is_none_or(|y|y.1))
+    }
+}
+
 /// The partition the rule leaves for one set of verdicts on the excited couplings: the ground
 /// couplings classified, the cut, the clusters (sets of nodes: the ground states, then the excited
 /// states at ng + e), each node's cluster, and the frames (NaN off the clusters).
@@ -2298,6 +2311,11 @@ impl Ground{
     }
     /// Whether a cluster has explicit excited states.
     pub fn mixed(&self,k:usize)->bool{!self.clusters[k].excited.is_empty()}
+    /// Its shape (`Shape`): the rule's verdicts as a model takes them.
+    pub fn shape(&self)->Shape{
+        Shape{folded:self.excited_items.iter().map(|x|x.folded).collect(),items:self.items.iter().map(|i|(i.kind.clone(),i.folded)).collect(),
+            clusters:self.clusters.iter().map(|c|(c.states.clone(),c.excited.clone())).collect()}
+    }
 }
 
 #[cfg(test)]
