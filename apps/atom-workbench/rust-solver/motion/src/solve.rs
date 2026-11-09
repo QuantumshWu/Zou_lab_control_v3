@@ -159,7 +159,7 @@ struct Prepared<'a> {
 }
 impl<'a> Prepared<'a> {
     fn new(model: &'a Model, light: &'a Light, populations: [f64; GROUND]) -> Result<Prepared<'a>, String> {
-        Ok(Prepared { trap: model.trap(&populations)?, envelope: model.envelope(&populations), lights: model.prepared(), model, light, populations })
+        Ok(Prepared { trap: model.trap(&populations, &model.prepared())?, envelope: model.envelope(&populations), lights: model.prepared(), model, light, populations })
     }
 }
 impl Well for Prepared<'_> {
@@ -225,7 +225,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     let mut kept = kept.to_vec();
     let (model, trap) = loop {
         let model = Model::new(request, light, &kept)?;
-        let trap = model.trap(&reference)?;
+        let trap = model.trap(&reference, &model.prepared())?;
         let judged = model.reach(&trap, &reference, reach, unseen(MOST_TRAJECTORIES as f64));
         let units = model.units();
         let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &judged)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
