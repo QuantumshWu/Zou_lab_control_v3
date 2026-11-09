@@ -74,7 +74,7 @@ impl Group{
 /// fewer than two groups. (Over 16 gate scenes, sets of the solve's size and of 16 groups against the rest: T outside two of
 /// its standard errors at 5.6 % and 7.8 % of the outputs where 4.55 % is the normal's, at 4.7 % and 5.4 % with this quantile;
 /// R5040's few held groups 10.3 % and 5.0 %. Satterthwaite's degrees of freedom from the fourth moment covered less, 7.3 % there,
-/// and Hall's shift for the skew of the group values covered no more of each quantity for 20 % more trajectories.)
+/// and Hall's shift for the skew of the group values no more of each quantity, 4.7 % at the solve's size, for a wider record.)
 #[derive(Clone,Copy,Debug,PartialEq)]
 pub struct Spread{pub error:f64,pub groups:f64}
 impl Default for Spread{fn default()->Spread{Spread::EXACT}}
