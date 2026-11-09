@@ -4,7 +4,7 @@
 //! (the decay is the photons' rate, the readout sums to one, a kept and a folded drive give the same recoil second moment).
 use atom_motion::field::Light;
 use atom_motion::linalg::{C64, Mat};
-use atom_motion::model::{hazard, Component, Lights, Model, Point, Sample, Unit, GROUND};
+use atom_motion::model::{hazard, Component, Lights, Model, Point, Sample, Unit, GROUND, STATES};
 use atom_motion::request::Request;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -285,5 +285,54 @@ fn the_expansion_s_derivatives_are_exact_with_near_light() {
                 }
             }
         }
+    }
+}
+
+/// A model built with units kept lists as candidates only the units it folds (`Model::units`): none it keeps, none its clusters
+/// hold for free. The gates' closure from nothing kept (R2_RECOIL, its σ⁺ probe on |2,2⟩ → |3′,3′⟩) adds only units it has not
+/// kept each round and ends; in R6_RAMAN_CO with the Raman pair and the drive of its A leg kept, the B leg's drive is in the
+/// cluster at a residual beat of exactly zero (θ_e − θ_5 = δ_B) and the two ground states' static coupling is assembled within
+/// it: neither is a candidate any more.
+#[test]
+fn a_kept_unit_is_no_longer_a_candidate() {
+    let request = scene("R2_RECOIL");
+    let light = Light::new(&request);
+    let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
+    let mut kept: Vec<Unit> = vec![];
+    loop {
+        let model = Model::new(&request, &light, &kept).unwrap();
+        let units = model.units();
+        let again: Vec<&Unit> = units.iter().filter(|u| kept.contains(u)).collect();
+        assert!(again.is_empty(), "R2_RECOIL: kept units listed again: {again:?}");
+        let trap = model.trap(&p, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &p, request.temperature_uk, 2e-3);
+        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
+        if failing.is_empty() {
+            break;
+        }
+        kept.extend(failing);
+    }
+    let probe = Component { frequency: frequency_of(&request, &light, "probe"), counter: false };
+    eprintln!("R2_RECOIL: kept {kept:?}");
+    assert!(kept.contains(&Unit::Far { component: probe }), "R2_RECOIL: the probe's far fold fails: {kept:?}");
+
+    let request = scene("R6_RAMAN_CO");
+    let light = Light::new(&request);
+    let (ca, cb) = (Component { frequency: frequency_of(&request, &light, "ramanA"), counter: false }, Component { frequency: frequency_of(&request, &light, "ramanB"), counter: false });
+    let (beam_a, beam_b) = (&request.beams[light.frequencies[ca.frequency].beams[0]], &request.beams[light.frequencies[cb.frequency].beams[0]]);
+    let e = (GROUND..STATES).max_by(|&x, &y| (beam_a.coupling[(x, 1)] * beam_b.coupling[(x, 5)]).abs().total_cmp(&(beam_a.coupling[(y, 1)] * beam_b.coupling[(y, 5)]).abs())).unwrap();
+    let raman = Unit::Term { a: 1, b: 5, from: Some(cb), to: Some(ca) };
+    let (leg_a, leg_b) = (Unit::Drive { carrier: ca, excited: e, ground: 1 }, Unit::Drive { carrier: cb, excited: e, ground: 5 });
+    let static_coupling = Unit::Term { a: 1, b: 5, from: None, to: None };
+    let near = [Unit::Far { component: ca }, Unit::Far { component: cb }];
+    let folded = Model::new(&request, &light, &near).unwrap().units();
+    for u in [&raman, &leg_a, &leg_b, &static_coupling] {
+        assert!(folded.contains(u), "R6_RAMAN_CO: {u:?} a candidate while folded");
+    }
+    let kept: Vec<Unit> = near.iter().cloned().chain([raman, leg_a]).collect();
+    let units = Model::new(&request, &light, &kept).unwrap().units();
+    for u in kept.iter().chain([&leg_b, &static_coupling]) {
+        assert!(!units.contains(u), "R6_RAMAN_CO: {u:?} listed though in the generator");
     }
 }

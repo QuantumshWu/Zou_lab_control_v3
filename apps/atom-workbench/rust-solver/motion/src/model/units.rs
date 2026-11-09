@@ -167,7 +167,8 @@ impl Model {
 
     /// The candidate units of this model (model.rs `Unit`): every component's fold, the beats of two folded far components of one
     /// rotation, the far light's static couplings of two ground states and of an explicit excited state, and the near carriers'
-    /// drives, couplings and photon coherences (eliminate.rs, photon.rs).
+    /// drives, couplings and photon coherences (eliminate.rs, photon.rs) -- those it folds: a unit kept, or one its clusters hold
+    /// for free, is no candidate (`Model::in_generator`).
     pub fn units(&self) -> Vec<Unit> {
         let mut out = vec![];
         let components = self.components();
@@ -197,7 +198,28 @@ impl Model {
         }
         out.extend(self.near_units());
         out.extend(self.coherence_units());
+        out.retain(|u| !self.in_generator(u));
         out
+    }
+
+    /// Whether a unit's coupling is in this model's generators as it is (SPEC §1.4), nothing of it folded: kept, or held for free
+    /// -- a static coupling of two states of one cluster (the assembly takes every far static entry within a cluster,
+    /// assemble.rs), a drive or a near coupling within one cluster at a residual beat of exactly zero (eliminate.rs
+    /// `Model::drive_kept`, `Model::term_included`).
+    fn in_generator(&self, u: &Unit) -> bool {
+        let together = |a: usize, b: usize| self.clusters.iter().position(|c| c.states.contains(&a) && c.states.contains(&b));
+        self.kept.contains(u)
+            || match u {
+                Unit::Drive { carrier, excited, ground } => self.drive_kept(self.carrier_index(carrier.frequency), *excited, *ground),
+                Unit::Term { a, b, from: None, to: None } | Unit::Excited { excited: a, other: b } => together(*a, *b).is_some(),
+                Unit::Term { a, b, from: Some(from), to: Some(to) } => together(*a, *b).is_some_and(|k| {
+                    let c = &self.clusters[k];
+                    let place = |s: usize| c.states.iter().position(|&x| x == s).unwrap();
+                    let beat = self.carriers[self.carrier_index(to.frequency)].beat.plus(-1, &self.carriers[self.carrier_index(from.frequency)].beat);
+                    self.term_included(k, place(*a), place(*b), *from, *to, &beat)
+                }),
+                _ => false,
+            }
     }
 
     /// A static coupling's (two ground states, or two excited states) mixing bound over a cell: its coherent peak there over the
@@ -259,48 +281,42 @@ impl Model {
             .collect()
     }
 
-    /// Each folded unit's errors at each sample, [unit][sample]: its small parameter at the sample's point mapped to the outputs
-    /// (module documentation, # The errors); zero for a kept unit.
+    /// Each candidate unit's errors at each sample (`Model::units`), [unit][sample]: its small parameter at the sample's point
+    /// mapped to the outputs (module documentation, # The errors).
     pub fn errors(&self, units: &[Unit], samples: &[Sample]) -> Vec<Vec<UnitError>> {
-        let zero = UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 };
         units
             .iter()
             .map(|u| {
                 samples
                     .iter()
-                    .map(|s| {
-                        if self.kept.contains(u) {
-                            return zero;
+                    .map(|s| match u {
+                        Unit::Far { component } => {
+                            let amplitudes: Vec<f64> = self.light.amplitudes(s.at.r).iter().map(|a| a.value.abs()).collect();
+                            let m = self.far_mixing_at(*component, &amplitudes);
+                            UnitError { parameter: m * m, population: m * m, temperature: m * m }
                         }
-                        match u {
-                            Unit::Far { component } => {
-                                let amplitudes: Vec<f64> = self.light.amplitudes(s.at.r).iter().map(|a| a.value.abs()).collect();
-                                let m = self.far_mixing_at(*component, &amplitudes);
-                                UnitError { parameter: m * m, population: m * m, temperature: m * m }
-                            }
-                            Unit::FarBeat { first, second } => {
-                                let amplitudes = self.light.amplitudes(s.at.r);
-                                let (f1, f2) = (&self.light.frequencies[first.frequency], &self.light.frequencies[second.frequency]);
-                                let cross = self.far_cross(*first, *second);
-                                let mut size = 0.0;
-                                for (j, &l2) in f2.beams.iter().enumerate() {
-                                    for (i, &l1) in f1.beams.iter().enumerate() {
-                                        size += cross[j * f1.beams.len() + i].frobenius() * amplitudes[l2].value.abs() * amplitudes[l1].value.abs();
-                                    }
+                        Unit::FarBeat { first, second } => {
+                            let amplitudes = self.light.amplitudes(s.at.r);
+                            let (f1, f2) = (&self.light.frequencies[first.frequency], &self.light.frequencies[second.frequency]);
+                            let cross = self.far_cross(*first, *second);
+                            let mut size = 0.0;
+                            for (j, &l2) in f2.beams.iter().enumerate() {
+                                for (i, &l1) in f1.beams.iter().enumerate() {
+                                    size += cross[j * f1.beams.len() + i].frobenius() * amplitudes[l2].value.abs() * amplitudes[l1].value.abs();
                                 }
-                                let beat = self.omega(&self.axes.component(&self.light, *first).plus(-1, &self.axes.component(&self.light, *second)));
-                                let m = mixing(size, beat.abs(), self.spread());
-                                UnitError { parameter: m * m, population: m * m, temperature: m * m }
                             }
-                            Unit::Term { a, b, from: None, to: None } | Unit::Excited { excited: a, other: b } => {
-                                let cell = Cell { centre: s.at.r, half: [0.0; 3] };
-                                let speed = self.hbar_over_mass * norm3(s.at.kappa);
-                                let m2 = 0.5 * self.static_cell(*a, *b, &self.spans(&cell), speed).centre.max(0.0);
-                                let p = self.state_populations(s);
-                                UnitError { parameter: m2, population: m2 * (p[*a] + p[*b]), temperature: m2 }
-                            }
-                            _ => self.near_error(u, s),
+                            let beat = self.omega(&self.axes.component(&self.light, *first).plus(-1, &self.axes.component(&self.light, *second)));
+                            let m = mixing(size, beat.abs(), self.spread());
+                            UnitError { parameter: m * m, population: m * m, temperature: m * m }
                         }
+                        Unit::Term { a, b, from: None, to: None } | Unit::Excited { excited: a, other: b } => {
+                            let cell = Cell { centre: s.at.r, half: [0.0; 3] };
+                            let speed = self.hbar_over_mass * norm3(s.at.kappa);
+                            let m2 = 0.5 * self.static_cell(*a, *b, &self.spans(&cell), speed).centre.max(0.0);
+                            let p = self.state_populations(s);
+                            UnitError { parameter: m2, population: m2 * (p[*a] + p[*b]), temperature: m2 }
+                        }
+                        _ => self.near_error(u, s),
                     })
                     .collect()
             })
