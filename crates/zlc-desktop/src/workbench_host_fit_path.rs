@@ -43,12 +43,23 @@ fn request(values: Value, source: Option<&str>, outputs: &[(String, String)]) ->
 }
 
 impl Stage {
-    /// A run, known to the application under its host id as a started workbench run is.
+    /// A run, known to the application under a workbench id of its own (`node#n`), as a
+    /// started workbench run is: never the host's id, so a value of one used for the other fails here.
     fn start(&self, node: &str, kind: &str, request: RunRequest) -> String {
         if self.host.instances().iter().all(|(name, _, _)| name != node) { self.host.open(node, kind, json!({}), json!({})).unwrap(); }
-        let run = self.host.start_run(node, request).unwrap();
-        self.builtin.0.borrow().runs.lock().unwrap().mapped.insert(run.clone(), (node.to_owned(), run.clone()));
-        run
+        let hosted = self.host.start_run(node, request).unwrap();
+        let runs = self.builtin.0.borrow().runs.clone();
+        let mut runs = runs.lock().unwrap();
+        let ours = format!("{node}#{}", &hosted[..8]);
+        runs.mapped.insert(hosted, (node.to_owned(), ours.clone()));
+        ours
+    }
+
+    /// The host's id of a workbench run.
+    fn hosted(&self, ours: &str) -> String {
+        let runs = self.builtin.0.borrow().runs.clone();
+        let runs = runs.lock().unwrap();
+        runs.mapped.iter().find(|(_, (_, mapped))| mapped == ours).map(|(hosted, _)| hosted.clone()).expect("a started run")
     }
 
     fn scan(&self, values: Value) -> String {
@@ -222,7 +233,7 @@ fn stopped_during_a_fit(stage: &Stage, node: &str, variables: &Value) -> f64 {
     let mut asked: Option<Instant> = None;
     loop {
         if stopped.is_none() && asked.is_some_and(|when| when.elapsed() > Duration::from_millis(50)) {
-            stage.host.stop_run(node, &run).unwrap();
+            stage.host.stop_run(node, &stage.hosted(&run)).unwrap();
             stopped = Some(Instant::now());
         }
         let Ok(event) = stage.events.recv_timeout(Duration::from_millis(5)) else { continue };

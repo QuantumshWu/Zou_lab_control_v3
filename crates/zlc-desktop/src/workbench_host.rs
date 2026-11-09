@@ -406,7 +406,7 @@ impl Builtin {
                 stand.requests.retain(|request, _| !request.starts_with(&format!("{ours}:")));
                 vec![Event::RunFinished { run: ours, outcome, error, generation }]
             }
-            HostEvent::Request { ticket, op, params, origin, lent, .. } => self.request(ours, ticket, &op, params, origin, lent),
+            HostEvent::Request { run: hosted, ticket, op, params, origin, lent, .. } => self.request(ours, hosted, ticket, &op, params, origin, lent),
             // A device's own facts are its window's (main.rs gives them to slm_host).
             HostEvent::CatalogChanged | HostEvent::Notice { .. } => Vec::new(),
             HostEvent::DeviceLog { instance, line } => vec![Event::Log { instance, line }],
@@ -448,7 +448,8 @@ impl Builtin {
     }
 
     /// What a run asks of the application (PLUGIN_PROTOCOL §5).
-    fn request(&self, run: String, ticket: u64, op: &str, params: Value, origin: Origin, lent: Lent) -> Vec<Event> {
+    /// `run` is the workbench's run, `hosted` the plugin host's own id of it.
+    fn request(&self, run: String, hosted: String, ticket: u64, op: &str, params: Value, origin: Origin, lent: Lent) -> Vec<Event> {
         match op {
             "run.figure" | "run.animation" => {
                 // Drawn off the window's turn; the run's thread waits for the paths.
@@ -498,9 +499,12 @@ impl Builtin {
             "core" => {
                 // The same command a client would send, under the run's origin.
                 let (reply, answer) = std::sync::mpsc::channel();
-                // `_run` names the asking run, so a command can hold it to that run's claims.
+                // `_run` names the asking run, so a command can hold it to that run's claims;
+                // `_plugin_run` is the plugin host's id of it, what its native services know
+                // it by (a seamless scan's plan).
                 let mut arguments = params.get("params").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
                 arguments["_run"] = json!(run);
+                arguments["_plugin_run"] = json!(hosted);
                 let call = crate::remote::RemoteCall { origin, name: params["command"].as_str().unwrap_or("").to_owned(), params: arguments, reply };
                 let host = self.0.borrow().host.clone();
                 let sent = (self.0.borrow().core)(call);

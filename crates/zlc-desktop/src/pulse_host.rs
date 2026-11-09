@@ -713,6 +713,8 @@ impl PulseHost {
         let drives = matches!(action, "pulse_fire" | "pulse_hold" | "pulse_step" | "pulse_run" | "pulse_wait_done" | "pulse_sync" | "pulse_estimate");
         if drives && self.given.as_ref().is_some_and(|given| given.published) { return Handled::Now(Err(PUBLISHED_BOARD.into())); }
         let run = command["_run"].as_str();
+        // The plugin host's id of the asking run: its native scan plan is held under it.
+        let plugin_run = command["_plugin_run"].as_str();
         let mut args: Map<String, Value> = crate::remote::parameters(command).as_object().cloned().unwrap_or_default();
         match action {
             "pulse_describe" => return Handled::Now(describe_document(Path::new(command["document"].as_str().unwrap_or("")))
@@ -735,10 +737,10 @@ impl PulseHost {
                 let scan = command["scan"].is_object().then(|| ScanRows { fields: strings(&command["scan"]["fields"]), rows: rows(&command["scan"]["rows"]) });
                 let native = if command["scan_plan"].is_object() {
                     if scan.is_some() { return Handled::Now(Err("scan and scan_plan are mutually exclusive".into())); }
-                    let (Some(run), Some(plugins)) = (run, self.plugins.as_ref()) else { return Handled::Now(Err("scan_plan belongs to a live plugin run".into())); };
+                    let (Some(plugin_run), Some(plugins)) = (plugin_run.filter(|_| run.is_some()), self.plugins.as_ref()) else { return Handled::Now(Err("scan_plan belongs to a live plugin run".into())); };
                     let Some(handle) = command["scan_plan"]["handle"].as_str().filter(|s|!s.is_empty()) else { return Handled::Now(Err("scan_plan needs its native handle".into())); };
                     let Some(outer_index) = command["scan_plan"]["outer_index"].as_u64().and_then(|v|usize::try_from(v).ok()) else { return Handled::Now(Err("scan_plan needs an outer point index".into())); };
-                    let plan = match crate::plugin_services::scan_plan(plugins,run,handle) { Ok(plan)=>plan,Err(error)=>return Handled::Now(Err(error.to_string())) };
+                    let plan = match crate::plugin_services::scan_plan(plugins,plugin_run,handle) { Ok(plan)=>plan,Err(error)=>return Handled::Now(Err(error.to_string())) };
                     Some((ScanPlanRequest { plan, outer_index },handle.to_owned()))
                 } else { None };
                 let (runs, sweeps) = (command["run_repeats"].as_u64().unwrap_or(1), command["scan_repeats"].as_u64().unwrap_or(1));
@@ -749,6 +751,7 @@ impl PulseHost {
                     }
                 }
                 let owner = run.map(str::to_owned);
+                let plugin_owner = plugin_run.map(str::to_owned);
                 let used = owner.as_ref().map(|run| self.runs.entry(run.clone()).or_default());
                 let (pinned, loaded) = used.map_or((None, None), |used| {
                     used.in_flight += 1;
@@ -767,7 +770,7 @@ impl PulseHost {
                     if let Some((native,handle)) = &native {
                         if let Some(value) = &mut loaded { Arc::make_mut(value)["native_scan"] = descriptor.clone().unwrap(); }
                         if let Ok(receipt) = &mut result {
-                            if let Err(error) = accept_native_receipt(plugins.as_ref().unwrap(),owner.as_deref().unwrap(),handle,native,&board,receipt) { result=Err(error); }
+                            if let Err(error) = accept_native_receipt(plugins.as_ref().unwrap(),plugin_owner.as_deref().unwrap(),handle,native,&board,receipt) { result=Err(error); }
                         }
                     }
                     let run = owner.map(|run| RunReply { run, pinned: pin, fired, loaded });
@@ -1209,7 +1212,8 @@ mod tests {
                 HostEvent::Request {run:id,ticket,op,params,..} if id==run=>{
                     assert_eq!(op,"core");
                     let action=params["command"].as_str().unwrap();
-                    let mut command=params["params"].clone(); command["_run"]=json!(run);
+                    // As the workbench forwards it: its own run name, and the host's id of the run.
+                    let mut command=params["params"].clone(); command["_run"]=json!("scan#1"); command["_plugin_run"]=json!(run);
                     assert!(command.get("scan").is_none(),"plugin expanded the board table");
                     let answer=ask(&mut pulse,&events,action,command.clone(),None);
                     if action=="pulse_run" {
@@ -1220,7 +1224,7 @@ mod tests {
                         assert!(receipt.to_string().len()<4096);
                         if command["stage"]=="load" {
                             saw_load=true;
-                            assert_eq!(pulse.runs[&run].loaded.as_ref().unwrap()["applied"]["program"]["rows"].as_array().unwrap().len(),2);
+                            assert_eq!(pulse.runs["scan#1"].loaded.as_ref().unwrap()["applied"]["program"]["rows"].as_array().unwrap().len(),2);
                         }
                     }
                     plugins.respond(ticket,answer.map_err(zlc_plugin_host::CallError::from));
