@@ -187,10 +187,10 @@ test('a motion trajectory is its own request: its key holds the motion, the devi
 test('the native payload carries the motion block with its trap beam, and the device; a malformed motion or device is refused',()=>{
   const scene=pgc(),{motion:_,...dynamics}=scene.dynamics,options={...dynamics,samples:3,includeMean:false,meanOnly:false,motion:request(scene),device:'gpu'};
   const {payload}=prepareNativeSolve({scene,options});
-  assert.deepEqual(Object.keys(payload.model.motion).sort(),['axis','beams','emission','fieldVectorG','frameFrequenciesMHz','hamiltonian','massKg','temperatureUK','trapBeamId']);
+  assert.deepEqual(Object.keys(payload.model.motion).sort(),['axis','beams','emission','fieldVectorG','frameFrequenciesMHz','hamiltonian','massKg','outsideForms','temperatureUK','trapBeamId']);
   assert.deepEqual([payload.model.motion.axis,payload.model.motion.trapBeamId,payload.options.device],['3d','tweezer','gpu']);
   assert.deepEqual(Object.keys(payload.model.motion.beams.find(b=>b.id==='tweezer')).sort(),
-    ['counterCoupling','coupling','direction','frequencyIndex','id','intensityMWcm2','name','outsideShift','waistUm','waveNumberPerUm']);
+    ['counterCoupling','coupling','direction','electricField','frequencyIndex','id','intensityMWcm2','name','outsideShift','waistUm','waveNumberPerUm']);
   // Each beam's static shift through the states outside the model: Hermitian; the tweezer's on |2,+2⟩ about −0.11 MHz at its focus.
   const shift=payload.model.motion.beams.find(b=>b.id==='tweezer').outsideShift,two=payload.model.states.indexOf('ground-2-2');
   const size=Math.max(...shift.real.map(Math.abs)),transposed=k=>(k%N)*N+Math.floor(k/N);
