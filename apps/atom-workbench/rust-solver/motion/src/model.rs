@@ -477,9 +477,10 @@ pub struct Run<'a> {
     pub reference: [f64; GROUND],
     running: Lights,
     prepared: Lights,
-    /// The counted real multiply-adds of one assembly (`decide::COMPLEX` per complex one, assemble.rs # Work): the largest over the
-    /// clusters at the focus, every light on -- the integrator's price of a generator, made once.
+    /// The counted real multiply-adds of one assembly (`decide::COMPLEX` per complex one, assemble.rs # Work) and of one jump's
+    /// photons (photon.rs `Model::photons_counted`): the largest over the clusters at the focus, every light on, made once.
     assembly: f64,
+    photons: f64,
 }
 
 impl<'a> Run<'a> {
@@ -487,7 +488,18 @@ impl<'a> Run<'a> {
         let running = model.running();
         let at = Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 };
         let assembly = (0..model.clusters.len()).map(|c| model.assembled(c, &at, &running).1).fold(0.0, f64::max) * crate::decide::COMPLEX;
-        Run { model, reference, running, prepared: model.prepared(), assembly }
+        let photons = (0..model.clusters.len())
+            .map(|c| {
+                let psi: Vec<C64> = (0..model.clusters[c].states.len()).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
+                model.photons_counted(c, &at, &psi).1
+            })
+            .fold(0.0, f64::max)
+            * crate::decide::COMPLEX;
+        Run { model, reference, running, prepared: model.prepared(), assembly, photons }
+    }
+    /// The counted real multiply-adds of one jump's photons (the integrator's price of a jump), made once per run.
+    pub fn photon_work(&self) -> f64 {
+        self.photons
     }
 }
 

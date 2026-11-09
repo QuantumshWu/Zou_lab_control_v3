@@ -249,9 +249,23 @@ impl Model {
     /// The photon classes of a cluster's state ψ (its frame amplitudes) at a point, every light on (SPEC §1.6; module
     /// documentation): per class u_a on the landing cluster's states, the folded part's gradients, the explicit sources.
     pub fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
+        self.photons_counted(cluster, at, psi).0
+    }
+
+    /// The photons (`photons`) and the complex multiply-adds that made them: the near light's elimination at the point (or the far
+    /// light's energies alone), each entry's jump and sums, the explicit sources' shares.
+    pub(crate) fn photons_counted(&self, cluster: usize, at: &Point, psi: &[C64]) -> (Vec<Photon>, f64) {
         let amplitudes = self.light.amplitudes(at.r);
         let lights = self.running();
         let near = self.carriers.iter().any(|x| lights.on(x.frequency)).then(|| self.near_at(cluster, at, &amplitudes, &lights, 1));
+        let far;
+        let (energies, mut work) = match &near {
+            Some(n) => (&n.energies, n.work),
+            None => {
+                far = self.far_energies(&amplitudes, &lights, 1);
+                (&far.0, far.1)
+            }
+        };
         let mut out = vec![];
         for class in &self.classes[cluster] {
             let n = self.clusters[class.landing].states.len();
@@ -274,15 +288,19 @@ impl Model {
                         let x = j * psi[sp] * phase;
                         own[a][bp] += x;
                         u[a][bp] += c.value * x;
+                        work += self.jump_work(source) + 3.0;
                         if source.folded {
                             for i in 0..3 {
                                 gradients[i][a][bp] += c.gradient[i] * x + c.value * dj[i] * psi[sp] * phase;
                             }
+                            work += 9.0;
                         }
                     }
                 }
                 if !source.folded {
-                    explicit.extend(self.explicit_recoil(cluster, at, m.source, own, psi));
+                    let (shares, w) = self.explicit_recoil(cluster, &amplitudes, energies, m.source, own, psi);
+                    explicit.extend(shares);
+                    work += w;
                 }
             }
             if u.iter().all(|v| v.iter().all(|z| *z == C64::ZERO)) {
@@ -296,7 +314,7 @@ impl Model {
                 explicit,
             });
         }
-        out
+        (out, work)
     }
 
     /// A class's photon wave number: its light's k = 2π ν/c, the absorbed light's (the photon's frequency differs from it by the
