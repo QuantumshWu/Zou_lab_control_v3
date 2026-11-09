@@ -255,3 +255,35 @@ fn weak_drives_fold_within_their_provable_gates() {
         eprintln!("{name}: {} drive gates in {:?}, S bound {:.3e} measured {:.3e}, sweep {:.3e}", units.len(), started.elapsed(), gates[0].saturation, measured, gates[0].sweep);
     }
 }
+
+/// The potential's expansion is exact with near light in it: on the reported lights (the trap light coherent, every other light
+/// averaged: R3's σ⁺ cooling pair, R5's pump and repump) the gradient is the central difference of the value and the Hessian that of
+/// the gradient, to the differences' own truncation (h² of the third derivative; h = 1e-4 µm) -- the near light's responses
+/// differentiated twice through their resolvents (jet.rs), not left out.
+#[test]
+fn the_expansion_s_derivatives_are_exact_with_near_light() {
+    for (name, ids) in [("R3_DOPPLER", vec!["cool-plus"]), ("R5_PUMP", vec!["pump", "repump"])] {
+        let request = scene(name);
+        let light = Light::new(&request);
+        let kept: Vec<Unit> = ids.iter().map(|id| Unit::Far { component: Component { frequency: frequency_of(&request, &light, id), counter: false } }).collect();
+        let model = Model::new(&request, &light, &kept).unwrap();
+        let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+        let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
+        let lights = model.reported();
+        let h = 1e-4;
+        for r in [[0.11, -0.07, 0.23], [-0.3, 0.2, -0.15]] {
+            let q = model.expansion(r, &p, &lights);
+            let shifted = |a: usize, s: f64| { let mut x = r; x[a] += s; x };
+            for a in 0..3 {
+                let value = (model.potential(shifted(a, h), &p, &lights) - model.potential(shifted(a, -h), &p, &lights)) / (2.0 * h);
+                assert!((value - q.gradient[a]).abs() <= 1e-6 * q.gradient.iter().map(|x| x.abs()).fold(1e-12, f64::max), "{name}: ∂_{a}V {} against its difference {value}", q.gradient[a]);
+                let (up, down) = (model.expansion(shifted(a, h), &p, &lights), model.expansion(shifted(a, -h), &p, &lights));
+                let scale = q.hessian.iter().flatten().map(|x| x.abs()).fold(1e-12, f64::max);
+                for c in 0..3 {
+                    let second = (up.gradient[c] - down.gradient[c]) / (2.0 * h);
+                    assert!((second - q.hessian[a][c]).abs() <= 1e-6 * scale, "{name}: ∂_{a}∂_{c}V {} against its difference {second}", q.hessian[a][c]);
+                }
+            }
+        }
+    }
+}

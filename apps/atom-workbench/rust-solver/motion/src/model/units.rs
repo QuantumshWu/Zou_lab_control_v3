@@ -236,9 +236,12 @@ impl Model {
 
     /// Each unit's existence gate over the reach (SPEC §1.5), provable bounds at this model's clusters and dressing.
     pub fn gates(&self, units: &[Unit], reach: &Reach) -> Vec<Gate> {
+        // A drive's gate is its ground state's: once per ground state.
+        let mut drives: Vec<Option<Gate>> = vec![None; GROUND];
         units
             .iter()
             .map(|u| match u {
+                Unit::Drive { ground, .. } => *drives[*ground].get_or_insert_with(|| self.near_gate(u, reach)),
                 Unit::Far { component } => Gate { saturation: self.far_gate(*component).saturation, sweep: self.far_sweep(*component, reach) },
                 Unit::FarBeat { first, second } => {
                     let size: f64 = self.far_cross(*first, *second).iter().map(|m| m.frobenius()).sum();
@@ -335,7 +338,7 @@ impl Model {
                 }
                 Some(Edge { a, b, beat: self.axes.zero(), wave: best.1, strength: self.static_size(a, b) })
             }
-            Unit::Far { .. } | Unit::FarBeat { .. } | Unit::Coherence { .. } => None,
+            Unit::Far { .. } | Unit::FarBeat { .. } | Unit::Coherence { .. } | Unit::Dressing { .. } => None,
             _ => self.near_edge(unit),
         }
     }
