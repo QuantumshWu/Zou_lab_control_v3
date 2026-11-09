@@ -75,7 +75,14 @@
 //! On the path the terms are the field's at the point times their phases, the rest held; left out, each of second order about the middle:
 //! - a beam's envelope along the path, (v·∇ln|a_l|) τ of its amplitude, as the tables' intensities and the first order's denominators: a tweezer's within v τ/w of a waist w;
 //! - the velocity's change within the step, a phase k·(F/m) τ²/2, the flow–kick–flow splitting's own order, which the step-doubling check measures;
-//! - the groups' couplings Φ_k′k = E^d_k′* E^c_k, held at r_h, whose beam pairs' (k_c − k_d)·v have no in-step phase, as in a cluster of ground states. They stand between states of one wave vector by construction (`state_waves`: what they couple has one), so that they stay static in any gauge.
+//! - the groups' couplings Φ_k′k = E^d_k′* E^c_k, held at r_h, whose beam pairs' (k_c − k_d)·v have no in-step phase. They stand between states of one wave vector by construction (`state_waves`: what they couple has one), so that they stay static in any gauge.
+//!
+//! A cluster of ground states takes wave vectors the same way, from its groups' couplings (`Model::frame`): per pair of beams (l′, l) a coupling's share stands at q = k_l − k_l′, and along a spanning tree of
+//! them, the strongest first, K_a − K_b = q. Where every pair of states holds one wave vector -- a σ⁺σ⁻ pair's Raman chain, Δm = 2 at 2k -- the generator H(r_h) + diag(K_s·v) is static on the path, and the
+//! cluster's plain step goes through it (engine.rs # One propagation, at the path's momentum as above): its Raman phases follow the path at any step, the impulse over a static segment's panels. Held at r_h, as
+//! the line had them, those phases moved only between steps, a splitting of K_s·v whose error the step-doubling check cannot see: PGC1D_BIAS_OFF's T_x at 10 ms swung between 113 and 188 uK over 77-100 steps
+//! per 50 us (dt 0.50-0.65 us; truth 130.5 ± 2.9). Where a pair holds terms of several wave vectors -- lin⊥lin's light shifts on the diagonal, a bias field's coupling across the chain -- what the tree
+//! leaves beating is held, and the cluster keeps no frame unless that stays within `QUADRATURE`.
 //! The path's velocity is the step's middle's, of κ_h and half the kick I the step takes, known from the state at the step's start (engine.rs `Engine::on_path`). That keeps the step reversible: reversed, it takes the same line back only at the mean of the momenta before and
 //! after its kick. At κ_h the impulse along the path depends on the momentum it changes, and phase space grows where the force is a potential's: for a force of wave vector q the kick's factor from the path falls with κ as (q (ħ/m) κ τ)²/24 and is read half a kick off the middle, an area
 //! of 1 + (q (ħ/m) I τ)²/24 per step over an orbit. PGC1D's rung of 3+3 and 2+2 explicit states, a lattice of its kept drives (4 ms, 2048 atoms): T_x 13.4 ± 0.6 uK at 1.25 us and 7.2 ± 0.3 at 0.31 us at κ_h, at the middle's momentum 7.2 ± 0.5 and 7.4 ± 0.3, where the phases held in the step
@@ -308,7 +315,8 @@ struct DecayLayout{row:usize,col:usize,residual:f64,tos:Vec<usize>,at:usize,part
 struct EffectiveLayout{row:usize,col:usize,carrier:usize,residual:f64,at:usize,tones:Vec<Tone>}
 /// Where one cluster's tables lie in a node's slice, and its explicit states' terms: the kept drives
 /// (without a table), the decays, the cross terms, the dressing's drives and the explicit states'
-/// dressed photons ĉ_a[to] (explicit × 3 axes × ng, at `emission`); its states' wave vectors K_s on the atom's path where they leave fewer beats (module documentation, # The atom's path; `gauged`, else none).
+/// dressed photons ĉ_a[to] (explicit × 3 axes × ng, at `emission`); its states' wave vectors K_s on the atom's path where they leave fewer beats, a cluster of ground states' where they hold its
+/// couplings (module documentation, # The atom's path; `Model::frame`; `gauged`, else none).
 #[derive(Clone,Debug)]
 pub(crate) struct Layout{pub(crate) n:usize,pub(crate) n0:usize,pub(crate) size:usize,base:usize,pub(crate) h0:usize,pub(crate) groups:Vec<GroupLayout>,pub(crate) carriers:Vec<CarrierLayout>,crosses:Vec<CrossLayout>,pub(crate) drives:Vec<DriveLayout>,
     decays:Vec<DecayLayout>,effective:Vec<EffectiveLayout>,effective_dropped:f64,emission:usize,pub(crate) fourth:Option<FourthLayout>,pub(crate) beats:Beats,pub(crate) labels:Vec<[f64;3]>,pub(crate) gauged:bool}
@@ -797,6 +805,7 @@ impl Model{
         model.linear=model.layouts.iter().map(|l|(0..l.n).map(|_|Default::default()).collect()).collect();
         model.transfer_tables(request.temperature_uk);
         model.lindblad()?;
+        model.frame();
         Ok(model)
     }
     /// Each cluster's counted work (`work`) in the model on this front end at this order, from its layout alone: its tables
@@ -1747,6 +1756,8 @@ impl Model{
         }
         let classes=&self.ground.clusters[cluster].classes;
         let absorption=classes.iter().map(|c|c.photons.iter().map(|(ph,_)|self.carriers[ph.carrier].rank as f64*(6.+2.*nodes*(3.+d))).sum::<f64>()).sum::<f64>()/classes.len().max(1) as f64;
+        // In its states' frame (`frame`, known once the tables are made) a plain step reads the force on its start's state and at a static segment's Simpson nodes, at the fewest three.
+        if layout.gauged&&!self.mixed(cluster){force*=4.;}
         Work{generator,force,photons,absorption,pairs:layout.groups.iter().map(|g|g.pairs.len()).sum()}
     }
     /// The number of clusters.
@@ -1784,6 +1795,8 @@ impl Model{
     }
     /// A cluster's beats' wave vectors and its states' (`Beats`, `Layout::labels`), none where it has no gauge: gpu/program.rs's.
     pub(crate) fn beat_waves(&self,cluster:usize)->(&[[f64;3]],Option<&[[f64;3]]>){let l=&self.layouts[cluster];(&l.beats.waves,l.gauged.then_some(&l.labels[..]))}
+    /// A cluster's states' wave vectors on the atom's path, where it has them (`frame`, `laid_out`).
+    pub fn path_waves(&self,cluster:usize)->Option<&[[f64;3]]>{self.beat_waves(cluster).1}
 
     /// The table slice [start, start + value.len()) of a cluster at a stencil, and with `slopes` its
     /// derivatives in every s_f (each at f times the given stride), in one pass over the stencil's nodes.
@@ -1926,6 +1939,93 @@ impl Model{
     }
     /// Whether a cluster's step has a path to take (`on_path`): a beat with a wave vector, or states with theirs.
     pub fn moves(&self,cluster:usize)->bool{let l=&self.layouts[cluster];self.doppler&&(l.gauged||l.beats.waves.iter().any(|w|*w!=[0.;3]))}
+    /// A cluster of ground states' wave vectors on the atom's path (module documentation, # The atom's path), its states' K_s where they hold its generator's terms: along a spanning tree of its off-diagonal
+    /// terms (`wave_terms`) at the reach's points, the strongest first (`state_waves`). A term the held step holds at the step's middle, of wave vector q − K_a + K_b, misses its step's mean by 1 − sinc(φ/2)
+    /// at most, φ the range of its phase over the reach; per residual and wave vector its traceless part's norm times that, summed over the generator's traceless norm, is what holding the terms leaves
+    /// out, its largest over the reach's points. A cluster takes the states' wave vectors where at none it leaves out more than `QUADRATURE` and at theirs no more than it: its plain step then in their
+    /// frame (engine.rs # One propagation), its generator static on the path, the terms' Doppler shifts exact whatever the step, none to alias, the impulse over a static segment's panels. A cluster with
+    /// explicit states keeps its own (`laid_out`).
+    fn frame(&mut self){
+        if !self.doppler{return;}
+        for k in 0..self.layouts.len(){
+            if self.mixed(k)||self.layouts[k].n<2{continue;}
+            if let Some(labels)=self.frame_of(k){let l=&mut self.layouts[k];l.labels=labels;l.gauged=true;}
+        }
+    }
+    fn frame_of(&self,cluster:usize)->Option<Vec<[f64;3]>>{
+        let n=self.layouts[cluster].n;let quadrature=crate::engine::QUADRATURE;
+        let wave_round_off=round_off(2.*self.carriers.iter().map(|c|c.wave_number).fold(0.,f64::max));
+        let close=|a:[f64;3],b:[f64;3]|(0..3).all(|i|(a[i]-b[i]).abs()<=wave_round_off);
+        let points:Vec<Vec<(f64,[f64;3],Vec<Complex>)>>=self.reach.iter().map(|&r|self.wave_terms(cluster,&self.point(r,[0.;3]))).collect();
+        // Along an axis the trap does not hold the reach has no bound: there the whole term.
+        let trap=&self.ground.trap;
+        let held=|q:[f64;3]|{
+            if (0..3).any(|i|!(trap.frequencies[i]>0.)&&doppler(q,trap.axes[i]).abs()>wave_round_off){return 1.;}
+            let(lo,hi)=self.reach.iter().map(|&r|doppler(q,r)).fold((f64::INFINITY,f64::NEG_INFINITY),|(a,b),x|(a.min(x),b.max(x)));let x=0.5*(hi-lo);if x>0.{1.-x.sin()/x}else{0.}};
+        let traceless=|m:&[Complex]|{let mean=(0..n).fold(Complex::ZERO,|s,a|s+m[a*n+a])*(1./n as f64);let mut x=m.to_vec();for a in 0..n{x[a*n+a]-=mean;}crate::engine::column_norm(&x,n)};
+        let left=|labels:&[[f64;3]]|->f64{points.iter().map(|terms|{
+            let mut whole=vec![Complex::ZERO;n*n];let mut beats:Vec<(f64,[f64;3],Vec<Complex>)>=vec![];
+            for(w,q,m)in terms{for a in 0..n{for b in 0..n{
+                let z=m[a*n+b];if z==Complex::ZERO{continue;}whole[a*n+b]+=z;
+                let beat:[f64;3]=std::array::from_fn(|x|q[x]-labels[a][x]+labels[b][x]);if beat.iter().all(|x|x.abs()<=wave_round_off){continue;}
+                let i=match beats.iter().position(|x|x.0==*w&&close(x.1,beat)){Some(i)=>i,None=>{beats.push((*w,beat,vec![Complex::ZERO;n*n]));beats.len()-1}};beats[i].2[a*n+b]+=z;
+            }}}
+            beats.iter().map(|x|traceless(&x.2)*held(x.1)).sum::<f64>()/traceless(&whole)
+        }).fold(0.,f64::max)};
+        if !(left(&vec![[0.;3];n])>quadrature){return None;}
+        // Each pair of states and wave vector at its largest over the points, the strongest first: K_a = K_b + q along them.
+        let mut edges:Vec<(f64,usize,usize,[f64;3])>=vec![];
+        for terms in &points{for(_,q,m)in terms{for a in 0..n{for b in 0..n{
+            let size=m[a*n+b].abs();if a==b||size==0.{continue;}
+            match edges.iter_mut().find(|x|x.1==a&&x.2==b&&close(x.3,*q)){Some(x)=>x.0=x.0.max(size),None=>edges.push((size,a,b,*q))}
+        }}}}
+        edges.sort_by(|x,y|y.0.total_cmp(&x.0));
+        let labels=state_waves(n,&[],&edges);
+        (left(&labels)<=quadrature).then_some(labels)
+    }
+    /// A cluster of ground states' generator at a point by its terms' beats, per residual and wave vector q its matrix (`frame`): h0 at none; each group's S and Q per pair of its carriers' beams (l′, l)
+    /// at q = k_l − k_l′, a Hermitian group's pair k′ < k with its adjoint at −q; the fourth order's slabs per four beams at k_l + k_l′ − k_m − k_m′, their entries' residuals the frames'. The first order's
+    /// terms go with their pairs' beams and are left out.
+    fn wave_terms(&self,cluster:usize,p:&Point)->Vec<(f64,[f64;3],Vec<Complex>)>{
+        let layout=&self.layouts[cluster];let n=layout.n;let mut terms:Vec<(f64,[f64;3],Vec<Complex>)>=vec![];
+        let mut add=|w:f64,q:[f64;3],a:usize,b:usize,z:Complex|{if z==Complex::ZERO{return;}
+            let i=match terms.iter().position(|x|x.0==w&&x.1==q){Some(i)=>i,None=>{terms.push((w,q,vec![Complex::ZERO;n*n]));terms.len()-1}};terms[i].2[a*n+b]+=z;};
+        // A carrier's beams' parts of its field k at the point, and their wave vectors.
+        let beams=|c:usize,k:usize|->Vec<(Complex,[f64;3])>{let carrier=&self.carriers[c];
+            carrier.beams.iter().enumerate().map(|(j,&l)|(self.geometry[l].field(p.r).0*carrier.coefficients[j][k],self.geometry[l].wave_vector())).filter(|x|x.0!=Complex::ZERO).collect()};
+        let mut h0=vec![Complex::ZERO;n*n];self.interpolate(cluster,&p.stencil,None,layout.h0,&mut h0);
+        for a in 0..n{for b in 0..n{add(0.,[0.;3],a,b,h0[a*n+b]);}}
+        for gl in &layout.groups{
+            let count=gl.entries.len();let(mut s,mut q)=(vec![Complex::ZERO;count],vec![Complex::ZERO;count]);
+            for(i,&(k1,k))in gl.pairs.iter().enumerate(){
+                self.interpolate(cluster,&p.stencil,None,gl.s+i*count,&mut s);self.interpolate(cluster,&p.stencil,None,gl.q+i*count,&mut q);
+                let mirror=gl.hermitian&&k1<k;
+                for &(fa,ka)in &beams(gl.absorbed,k){for &(fe,ke)in &beams(gl.emitted,k1){
+                    // −Φ S − (i/2) Φ Q on the entries (`assemble`), Φ the pair of beams' part of E_k′* E_k.
+                    let ee=fe.conj()*fa;let wave:[f64;3]=std::array::from_fn(|x|ka[x]-ke[x]);
+                    for(j,&(a,b))in gl.entries.iter().enumerate(){
+                        let(x,y)=(ee*s[j],ee*q[j]);add(gl.residual,wave,a,b,Complex::new(0.5*y.im-x.re,-x.im-0.5*y.re));
+                        if mirror{add(0.-gl.residual,wave.map(|x|0.-x),b,a,Complex::new(-x.re-0.5*y.im,x.im-0.5*y.re));}
+                    }
+                }}
+            }
+        }
+        if let Some(f)=&layout.fourth{
+            let frames=&self.ground.clusters[cluster].frames;let mut slab=vec![Complex::ZERO;n*n];
+            let fields:Vec<Vec<(Complex,[f64;3])>>=f.fields.iter().map(|&(c,k)|beams(c,k)).collect();
+            for qs in &f.quartic{
+                // The monomial E*_p E*_p′ E_q E_q′ by the wave vectors of its four beams, then the slab once per wave vector.
+                let mut waves:Vec<([f64;3],Complex)>=vec![];
+                for x0 in &fields[qs.conj.0]{for x1 in &fields[qs.conj.1]{for y0 in &fields[qs.plain.0]{for y1 in &fields[qs.plain.1]{
+                    let m=x0.0.conj()*x1.0.conj()*y0.0*y1.0;let wave:[f64;3]=std::array::from_fn(|x|y0.1[x]+y1.1[x]-x0.1[x]-x1.1[x]);
+                    match waves.iter_mut().find(|x|x.0==wave){Some(x)=>x.1+=m,None=>waves.push((wave,m))}
+                }}}}
+                self.interpolate(cluster,&p.stencil,None,qs.at,&mut slab);
+                for(wave,m)in waves{for a in 0..n{for b in 0..n{if qs.keep[a*n+b]{add(qs.nu+frames[a]-frames[b],wave,a,b,m*slab[a*n+b]);}}}}
+            }
+        }
+        terms
+    }
     /// A cluster's components at rest (`components`) along the atom's straight path through their point at the time `middle`, at the momentum κ (module documentation, # The atom's path): every beat's frequency takes its q·v and
     /// its matrices e^{−iq·v t_m}, so that e^{i(Ω̃ + q·v)t} at t_m is e^{iΩ̃t_m}, the fields' phases at the point; the states with wave vectors take their diagonal shifts K_s·v.
     pub fn on_path(&self,cluster:usize,c:&mut Components,kappa:[f64;3],middle:f64){
@@ -1941,6 +2041,14 @@ impl Model{
             for a in 0..n{c.gauge[a]=doppler(layout.labels[a],v);c.matrices[a*n+a]+=Complex::new(c.gauge[a],0.);}
             c.middle=middle;c.gauged=true;
         }
+    }
+    /// A cluster of ground states' generator at its point (`local`) along the atom's path at the momentum κ, where its states have wave vectors (`frame`): their diagonal shifts K_s·v, returned for
+    /// the state's entry and exit (engine.rs `Engine::part`) as the exact step's (`on_path`); none without them.
+    pub(crate) fn local_on_path(&self,cluster:usize,local:&mut Local,kappa:[f64;3])->Option<[f64;MOST_STATES]>{
+        let layout=&self.layouts[cluster];if !(self.doppler&&layout.gauged){return None;}
+        let(n,v)=(layout.n,kappa.map(|x|x*self.hbar_over_mass));let mut gauge=[0.;MOST_STATES];
+        for a in 0..n{gauge[a]=doppler(layout.labels[a],v);local.hamiltonian[a*n+a]+=Complex::new(gauge[a],0.);}
+        Some(gauge)
     }
 
     /// A cluster's generator at a point and time t (`Local`): a cluster of ground states' (one with
