@@ -150,10 +150,10 @@
 //! interference left out but within a unit of the trap's light (`Model::potential`; its standing wave is in it, the fields of a near carrier's beams as of a folded one's); its
 //! Hessian at the well of that light (ground.rs # Where the trap is, `Trap::centre`) gives the trap's principal axes and frequencies (`Trap`). An atom is held while its
 //! mechanical energy, ħ²κ²/2m plus its potential relative to far from the trap, is negative -- or,
-//! unbound, until it leaves the trap's region (engine.rs # Loss): the potential the engine's force
-//! derives from, Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ of its current internal state, less the same with the trap's light
-//! off (`Model::trap_potential`) -- the trap beam and the beams of its mode, along its axis with its
-//! waist and frequency (its reflections, `Model::trap_beams`).
+//! unbound, until it leaves the trap's region (engine.rs # Loss): the generator's part the trap's light
+//! makes, H_eff less the same with the trap's light off -- the trap beam and the beams of its mode, along its axis with its
+//! waist and frequency (its reflections, `Model::trap_beams`) --, on the cluster's ground states weighted by their
+//! populations in ψ (`Model::trap_potential`).
 use crate::ground::{self,Ground};
 use crate::ledger::BUDGET;
 use crate::linear::{hermitian_eigen_within,hermitian_eigenvalues,round_off,single_round_off,symmetric_eigen,unit_round_off,Dense};
@@ -574,6 +574,11 @@ unsafe fn four_nodes_wide(w:[f64;4],nodes:[&[f64];4],out:&mut [Complex]){four_no
 #[inline(always)]
 fn caxpy<const W:usize>(c:Complex,x:&[f64;W],acc:&mut [f64;W]){
     for j in (0..W).step_by(2){let(u,v)=(x[j],x[j+1]);acc[j]+=c.re*u-c.im*v;acc[j+1]+=c.re*v+c.im*u;}
+}
+/// A diagonal's mean over ψ's first `ground` states weighted by their populations, Σ_a |ψ_a|² X_aa / Σ_a |ψ_a|² (`Model::trap_potential`).
+fn populated(psi:&[Complex],ground:usize,diagonal:impl Fn(usize)->f64)->f64{
+    let(mut sum,mut weight)=(0.,0.);for(a,z)in psi[..ground].iter().enumerate(){let w=z.norm_sqr();sum+=w*diagonal(a);weight+=w;}
+    sum/weight
 }
 /// ⟨ψ|X|ψ⟩ for an interleaved N × N matrix X.
 #[inline(always)]
@@ -2124,11 +2129,19 @@ impl Model{
         for m in g.iter_mut(){for x in 0..n{for y in x..n{let z=(m[x*n+y]+m[y*n+x].conj())*0.5;m[x*n+y]=z;m[y*n+x]=z.conj();}}}
         g
     }
-    /// The trap's potential of ψ at a point (rad/us): Re⟨ψ|H_eff|ψ⟩ less the same with the trap's light
-    /// off (`trap_beams`), per ⟨ψ|ψ⟩ -- (h0 − M) at the point's stencil and fields less at its far
-    /// stencil with the trap beams' fields taken out of their units' and carriers': the tweezer's
-    /// whole light shift whether it is folded (in h0) or a near carrier (in M, through its field) -- a
-    /// tweezer alone is always one, the light's frame rotating at it.
+    /// The trap's potential of ψ's ground populations at a point (rad/us): of H_eff less the same with the trap's light
+    /// off (`trap_beams`) -- (h0 − M) at the point's stencil and fields less at its far stencil with the trap beams' fields
+    /// taken out of their units' and carriers': the tweezer's whole light shift whether it is folded (in h0) or a near
+    /// carrier (in M, through its field), a tweezer alone always one, the light's frame rotating at it --, the diagonal on
+    /// the cluster's ground states, weighted by their populations in ψ (`populated`). What holds the atom over the internal
+    /// dynamics faster than its motion: an explicit excited state's population and the coherences ring at the drives', the
+    /// detunings' and the beats' frequencies, and their instantaneous ⟨ψ|·|ψ⟩ swings far faster than the motion -- a loss
+    /// judged on it took every brief "unbound" moment a finer step samples, and had no limit as the step went to zero (on a
+    /// near-resonant Λ scheme, R5053: 0.074, 0.087, 0.105, 0.139, 0.184 at 100 us from dt/4 to dt/64). The diagonal is the model's
+    /// basis's, the request's |F, m_F⟩ along its quantization axis: in the ground block's adiabatic eigenbasis instead (the Hermitian
+    /// generator's eigenstates, their populations) the potential moves by at most 2 % of the depth (the 3D PGC, its light shifts' vector
+    /// and tensor parts: rms 1.3 rad/us of 135), and the loss within its errors (PGC1D_BIAS_OFF at 10 ms, 4096 atoms at two steps: every
+    /// atom's loss the same; R5047, a gray molasses losing 0.44 by 1 ms: 0.0005 ± 0.0003 at most).
     pub fn trap_potential(&self,cluster:usize,p:&Point,psi:&[Complex],t:f64)->f64{
         if self.mixed(cluster){return self.trap_mixed(cluster,p,psi,t,false);}
         macro_rules! sized{($($n:literal)*)=>{match self.dimension(cluster){$($n=>self.trap_sized::<$n,{2*$n*$n}>(cluster,p,psi,t,false),)*_=>unreachable!("a cluster has 1 to 8 states")}}}
@@ -2144,8 +2157,8 @@ impl Model{
         let layout=&self.layouts[cluster];let(mut here,mut far,mut difference)=([0.;W],[0.;W],[0.;W]);
         self.gather_value(cluster,&p.stencil,layout.h0,W,&mut here);self.gather_value(cluster,&p.far,layout.h0,W,&mut far);
         for j in 0..W{difference[j]=here[j]-far[j];}
-        let norm:f64=psi[..N].iter().map(|z|z.norm_sqr()).sum();
-        if bound{return quadratic::<N>(&difference,psi).re/norm+2.*self.ground.light;}
+        let diagonal=|x:&[f64;W]|populated(psi,N,|a|x[2*(a*N+a)]);
+        if bound{return diagonal(&difference)+2.*self.ground.light;}
         let off=self.fields_off(p);
         for gl in &layout.groups{
             let(f,e)=(&p.fields[gl.absorbed],&p.fields[gl.emitted]);let(f0,e0)=(&off[gl.absorbed],&off[gl.emitted]);let phase=Complex::cis(gl.residual*t);
@@ -2159,7 +2172,7 @@ impl Model{
                 for(j,&(a,b))in gl.entries.iter().enumerate(){let w=c*Complex::new(here[2*j],here[2*j+1])+c0*Complex::new(far[2*j],far[2*j+1]);let i=2*(a*N+b);difference[i]+=w.re;difference[i+1]+=w.im;}
             }
         }
-        quadratic::<N>(&difference,psi).re/norm
+        diagonal(&difference)
     }
 
     /// An explicit state's dressed photon ĉ_a[to] at a stencil (the p-th explicit state of a cluster).
@@ -2183,9 +2196,8 @@ impl Model{
         let layout=&self.layouts[cluster];let n=layout.n;let nn=n*n;let(mut here,mut far)=(vec![Complex::ZERO;nn],vec![Complex::ZERO;nn]);
         self.gather_dyn(cluster,&p.stencil,layout.h0,&mut here,None);self.gather_dyn(cluster,&p.far,layout.h0,&mut far,None);
         let mut difference:Vec<Complex>=here.iter().zip(&far).map(|(a,b)|*a-*b).collect();
-        let norm:f64=psi[..n].iter().map(|z|z.norm_sqr()).sum();
-        let form=|x:&[Complex]|->f64{let mut s=Complex::ZERO;for a in 0..n{for b in 0..n{s+=psi[a].conj()*x[a*n+b]*psi[b];}}s.re};
-        if bound{return form(&difference)/norm+2.*self.ground.light;}
+        let diagonal=|x:&[Complex]|populated(psi,layout.n0,|a|x[a*n+a].re);
+        if bound{return diagonal(&difference)+2.*self.ground.light;}
         let off=self.fields_off(p);
         for gl in &layout.groups{
             let(f,e)=(&p.fields[gl.absorbed],&p.fields[gl.emitted]);let(f0,e0)=(&off[gl.absorbed],&off[gl.emitted]);let count=gl.entries.len();let phase=Complex::cis(gl.residual*t);
@@ -2196,7 +2208,7 @@ impl Model{
                 for(j,&(a,b))in gl.entries.iter().enumerate(){difference[a*n+b]+=c*here[j]+c0*far[j];}
             }
         }
-        form(&difference)/norm
+        diagonal(&difference)
     }
 
     /// The photon amplitudes at a point of every class of a cluster's jumps (`Photons`), with the
