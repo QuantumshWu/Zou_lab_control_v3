@@ -1721,7 +1721,8 @@ fn the_loss_s_check_refines_the_retro_tweezer(){
     let(truth,tolerance)=(0.169,BIAS_SHARE*POPULATION_TARGET);
     assert!((s.loss_probability[20]-truth).abs()<=tolerance+2.*s.sample_errors[20],"the loss {} against the truth {truth}",s.loss_probability[20]);
     let flagged=s.approximations.flagged.as_deref().unwrap_or("");
-    assert_eq!(c.verified,!flagged.contains("步长对损失的偏差未能验证"),"an unverified step is flagged: {flagged}");
+    assert_eq!(c.verified,!flagged.contains("步长对损失的偏差在本次计算的预算内未能确认"),"an unverified step is flagged: {flagged}");
+    println!("{flagged}");
 }
 
 /// The loss's check verifies the shallow trap's cycling control (check.rs; the gate's CONTROL_CYCLE, rust-solver/tests/fixtures/

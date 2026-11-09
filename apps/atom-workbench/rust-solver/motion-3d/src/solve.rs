@@ -1220,8 +1220,8 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
                     let x=(steps as f64/finer as f64).powf(ORDER);previous=Some([verdict.upper,verdict.lower]);
                     refined.push(steps);chosen=Check{steps:finer,population:chosen.population*x,motion:chosen.motion*x};continue 'product;
                 }
-                check::Round::Unreadable=>unverified=Some("读不清"),
-                check::Round::Stalled=>unverified=Some("细化后不再收敛"),
+                check::Round::Unreadable=>unverified=Some("读数分辨不出"),
+                check::Round::Stalled=>unverified=Some("细化未见改善"),
                 check::Round::Bounded=>unverified=Some("已达步数上限"),
             }
             // The step's bias on the loss in the record: the read's own where verified, its interval's far end where not.
@@ -1232,7 +1232,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
         let mut ledger=ledger(&model,&booked,&records,times,allowance,last.is_none(),judged);
         if let(Some(note),Some(flag))=(&bounded,&ledger.flagged){ledger.flagged=Some(format!("{note}；{flag}"));}
         if let(Some(why),Some(c))=(unverified,&report){
-            let note=format!("步长对损失的偏差未能验证（{why}）：{:.4e} μs 处区间远端为容差的 {:.1} 倍，已计入误差",times[c.binding.min(outputs-1)],c.upper);
+            let note=format!("步长对损失的偏差在本次计算的预算内未能确认（{why}）：{} 处其区间上端为容差的 {:.1} 倍，已按上端计入误差",when(times[c.binding.min(outputs-1)]),c.upper);
             ledger.flagged=Some(match &ledger.flagged{Some(f)=>format!("{note}；{f}"),None=>note});}
         let mut solution=assemble(&model,&records,&outcome,&listed,times,trap.lab,done,counts[outputs-1],dt,&request.initial_density,ledger);
         solution.device=used;solution.device_note=note.clone();solution.needed=wanted;solution.loss_check=report;
