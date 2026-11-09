@@ -1,4 +1,5 @@
-//! Shared jackknife arithmetic. Observable definitions and validity checks stay with their callers.
+//! A read (solve.rs # Time step): an estimate and its standard error, the jackknife's arithmetic shared. Observable definitions and validity
+//! checks stay with their callers.
 
 /// The delete-one-group standard error. Product statistics call this on their existing valid
 /// group domain, preserving their former IEEE behavior if a moment is non-finite.
@@ -12,6 +13,9 @@ pub(crate) fn jackknife_error(leave:impl ExactSizeIterator<Item=f64>+Clone)->f64
 #[derive(Clone,Copy,Debug)]
 pub(crate) struct Read{pub value:f64,pub error:f64}
 impl Read{
+    /// What authorizes a step (solve.rs # Time step): the magnitude and CONFIDENCE standard errors -- an estimate the read cannot tell
+    /// from nothing stands at its errors.
+    pub fn upper(&self)->f64{self.value.abs()+crate::solve::CONFIDENCE*self.error}
     /// A paired numerical read cannot certify a non-finite statistic or fewer than two groups.
     /// Its guarded domain is distinct from the product's legacy presentation semantics;
     /// both use the one arithmetic kernel above.
