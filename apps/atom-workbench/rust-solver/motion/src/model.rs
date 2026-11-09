@@ -497,10 +497,6 @@ impl<'a> Run<'a> {
             * crate::decide::COMPLEX;
         Run { model, reference, running, prepared: model.prepared(), assembly, photons }
     }
-    /// The counted real multiply-adds of one jump's photons (the integrator's price of a jump), made once per run.
-    pub fn photon_work(&self) -> f64 {
-        self.photons
-    }
 }
 
 impl crate::step::Dynamics for Run<'_> {
@@ -509,6 +505,9 @@ impl crate::step::Dynamics for Run<'_> {
     }
     fn assembly_work(&self) -> f64 {
         self.assembly
+    }
+    fn photon_work(&self) -> f64 {
+        self.photons
     }
     fn reference(&self, r: [f64; 3]) -> Quadratic {
         self.model.expansion(r, &self.reference, &self.prepared)
