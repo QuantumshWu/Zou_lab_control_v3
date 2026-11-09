@@ -124,7 +124,7 @@ fn held(name:&str,request:&Request,which:&str,count:u64,t_end:f64,interval:f64,d
         println!("t {:6.1}  F1 {:.4}  F2 {:.4}  excited {:.5}",i as f64*interval,level(p,"ground-1-"),level(p,"ground-2-"),1.-level(p,"ground-"));}
     let pops:Vec<Vec<f64>>=est.iter().map(|e|e.populations.clone()).collect();
     let json=format!("{{\"scene\":\"{name}\",\"states\":{:?},\"timesUs\":{:?},\"eliminated\":{pops:?},\"engine\":{pops:?},\"engineErrors\":{:?},\"trajectories\":{count}}}",
-        request.states,(0..outputs).map(|i|i as f64*interval).collect::<Vec<_>>(),est.iter().map(|e|e.population_errors.clone()).collect::<Vec<_>>());
+        request.states,(0..outputs).map(|i|i as f64*interval).collect::<Vec<_>>(),est.iter().map(|e|e.population_errors.iter().map(|s|s.error).collect::<Vec<f64>>()).collect::<Vec<_>>());
     std::fs::write(out,json).unwrap();println!("written {out}");
 }
 
@@ -205,9 +205,9 @@ fn solve(name:&str,mut request:Request,which:&str,duration:f64,samples:usize,cou
         wall*1e3*threads as f64/(count as f64*duration*1e-3),outcome.beats*horizon,states.iter().map(|t|t.beats).fold(0.,f64::max)*horizon);
     let pick=|label:&str|request.states.iter().position(|x|x==label).unwrap();let m22=pick("ground-2-2");
     let level=|p:&[f64],f:&str|request.states.iter().enumerate().filter(|(_,s)|s.starts_with(f)).map(|(i,_)|p[i]).sum::<f64>();
-    for i in 1..outputs{let e=&est[i];let t=&e.temperature;let te=&e.temperature_error;
+    for i in 1..outputs{let e=&est[i];let t=&e.temperature;let te=&e.temperature_error.map(|s|s.error);
         println!("t {:7.0}  T {:6.2}±{:4.2} {:6.2}±{:4.2} {:6.2}±{:4.2}  m22 {:.4}  pF1 {:.4}±{:.4}  excited {:.5}  loss {:.1e}",request.times_us[i],t[0],te[0],t[1],te[1],t[2],te[2],
-            e.populations[m22],level(&e.populations,"ground-1-"),e.population_errors.iter().fold(0_f64,|m,&x|m.max(x)),1.-level(&e.populations,"ground-"),e.loss);}
+            e.populations[m22],level(&e.populations,"ground-1-"),e.population_errors.iter().fold(0_f64,|m,x|m.max(x.error)),1.-level(&e.populations,"ground-"),e.loss);}
 }
 
 /// Atoms from the same initial states and jump streams at each step (the research's floquet_motion

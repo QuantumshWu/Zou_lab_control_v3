@@ -170,8 +170,8 @@ fn a_thermal_state_stays_thermal_with_the_light_off(){
     let outcome=simulate(&model,&settings,&initial,5,0,1024,8,40,21,&[],None);assert_eq!(outcome.jumps,0);
     let e=summarize(&outcome.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab},&[]);
     for a in 0..3{let start=e[0].temperature[a];for x in &e{
-        assert!((x.temperature[a]-start).abs()<=3.*(x.temperature_error[a].hypot(e[0].temperature_error[a])),"axis {a}: {} against {start}",x.temperature[a]);
-        assert!((x.temperature[a]-r.temperature_uk).abs()<=4.*x.temperature_error[a],"axis {a}: {} against {}",x.temperature[a],r.temperature_uk);
+        assert!((x.temperature[a]-start).abs()<=3.*(x.temperature_error[a].error.hypot(e[0].temperature_error[a].error)),"axis {a}: {} against {start}",x.temperature[a]);
+        assert!((x.temperature[a]-r.temperature_uk).abs()<=4.*x.temperature_error[a].error,"axis {a}: {} against {}",x.temperature[a],r.temperature_uk);
         assert_eq!(x.loss,0.);
     }}
     let _=(Engine::new(&model,settings),initial_trajectory);
@@ -284,8 +284,8 @@ fn a_thermal_state_s_temperature_over_a_trap_period_is_its_temperature_with_smal
     let(at,over)=(run(false),run(true));let mut ratio=0.;
     for i in 1..at.len(){for a in 0..3{
         let(x,y)=(&at[i],&over[i]);
-        assert!((x.temperature[a]-y.temperature[a]).abs()<=4.*x.temperature_error[a],"output {i}, axis {a}: {} against {}",y.temperature[a],x.temperature[a]);
-        ratio+=y.temperature_error[a]/x.temperature_error[a]/(3*(at.len()-1)) as f64;
+        assert!((x.temperature[a]-y.temperature[a]).abs()<=4.*x.temperature_error[a].error,"output {i}, axis {a}: {} against {}",y.temperature[a],x.temperature[a]);
+        ratio+=y.temperature_error[a].error/x.temperature_error[a].error/(3*(at.len()-1)) as f64;
     }}
     // An oscillator's mean kinetic energy over a period is half its energy: the variance of T halves.
     assert!(ratio<0.85,"standard errors over a period / at the time: {ratio:.2}");
@@ -423,7 +423,7 @@ fn a_shallow_trap_s_step_holds_t_within_its_share(){
     // correlated along the trajectories: the mean's is at most theirs).
     let share=BIAS_SHARE*TEMPERATURE_TARGET;let n=(outputs-1) as f64;
     for a in 0..3{
-        let(d,e)=(1..outputs).fold((0.,0.),|(d,e),i|{let t=fine[i].temperature[a];(d+(coarse[i].temperature[a]-t)/t,e+coarse[i].temperature_error[a].hypot(fine[i].temperature_error[a])/t)});
+        let(d,e)=(1..outputs).fold((0.,0.),|(d,e),i|{let t=fine[i].temperature[a];(d+(coarse[i].temperature[a]-t)/t,e+coarse[i].temperature_error[a].error.hypot(fine[i].temperature_error[a].error)/t)});
         println!("axis {a}: dt {dt:.3} us against {:.3} us, mean ΔT/T {:+.2} % ± {:.2} %",dt/4.,100.*d/n,100.*e/n);
         assert!((d/n).abs()<=share+3.*e/n,"axis {a}: mean ΔT/T {:.2} % ± {:.2} %",100.*d/n,100.*e/n);
     }
@@ -479,7 +479,7 @@ fn a_shallow_trap_s_bound_ensemble_stays_with_the_light_off(){
         let e=summarize(&outcome.groups,&Scales{hbar_over_mass:hm,frequencies:trap.lab},&[]);
         for(i,x)in e.iter().enumerate(){
             assert_eq!(x.loss,0.,"dt {dt}, output {i}");
-            for a in 0..3{assert!((x.temperature[a]-exact[a]).abs()<=4.*x.temperature_error[a],"dt {dt}, output {i}, axis {a}: {} ± {} against {}",x.temperature[a],x.temperature_error[a],exact[a]);}
+            for a in 0..3{assert!((x.temperature[a]-exact[a]).abs()<=4.*x.temperature_error[a].error,"dt {dt}, output {i}, axis {a}: {} ± {} against {}",x.temperature[a],x.temperature_error[a].error,exact[a]);}
         }
     }
 }
@@ -501,7 +501,7 @@ fn a_crossed_far_beam_is_part_of_the_bound_ensemble(){
     let outcome=simulate(&model,&settings,&initial,5,0,1024,8,20,11,&[],None);assert_eq!(outcome.jumps,0);
     let estimates=summarize(&outcome.groups,&Scales{hbar_over_mass:hm,frequencies:trap.lab},&[]);
     for(i,x)in estimates.iter().enumerate(){assert_eq!(x.loss,0.);
-        for a in 0..3{assert!((x.temperature[a]-exact[a]).abs()<=4.*x.temperature_error[a],"output {i}, axis {a}: {} ± {} against {}",x.temperature[a],x.temperature_error[a],exact[a]);}}
+        for a in 0..3{assert!((x.temperature[a]-exact[a]).abs()<=4.*x.temperature_error[a].error,"output {i}, axis {a}: {} ± {} against {}",x.temperature[a],x.temperature_error[a].error,exact[a]);}}
     // A few k_BT deep.
     let kt=initial.depths[0]/4.;r.temperature_uk=kt/KT_PER_UK;
     let model=Model::new(&r).unwrap();
@@ -608,7 +608,7 @@ fn a_standing_wave_s_sites_hold_their_atoms_as_the_centre_does(){
     let outcome=simulate(&model,&s,&initial,5,0,1024,8,steps,11,&[],None);assert_eq!(outcome.jumps,0);
     let estimates=summarize(&outcome.groups,&Scales{hbar_over_mass:hm,frequencies:trap.lab},&[]);
     for(i,x)in estimates.iter().enumerate(){assert_eq!(x.loss,0.);
-        for a in 0..3{assert!((x.temperature[a]-exact[a]).abs()<=5.*x.temperature_error[a],"output {i}, axis {a}: {} ± {} against {}",x.temperature[a],x.temperature_error[a],exact[a]);}}
+        for a in 0..3{assert!((x.temperature[a]-exact[a]).abs()<=5.*x.temperature_error[a].error,"output {i}, axis {a}: {} ± {} against {}",x.temperature[a],x.temperature_error[a].error,exact[a]);}}
 }
 
 /// A retro-reflected tweezer's last beam, its reflection in phase at the focus, at reflectivity R and mirror phase φ (degrees): its coupling by √R e^{iφ}, its counter-rotating one by √R e^{−iφ}, its outside
@@ -649,9 +649,9 @@ fn thermal_atoms_stay(r:&Request){
     let outcome=simulate(&model,&s,&initial,5,0,1024,8,steps,11,&[],None);
     let estimates=summarize(&outcome.groups,&Scales{hbar_over_mass:hm,frequencies:trap.lab},&[]);
     for(i,x)in estimates.iter().enumerate(){assert_eq!(x.loss,0.,"output {i}");
-        for a in 0..3{assert!((x.temperature[a]-exact[a]).abs()<=5.*x.temperature_error[a],"output {i}, axis {a}: {} ± {} against {}",x.temperature[a],x.temperature_error[a],exact[a]);
+        for a in 0..3{assert!((x.temperature[a]-exact[a]).abs()<=5.*x.temperature_error[a].error,"output {i}, axis {a}: {} ± {} against {}",x.temperature[a],x.temperature_error[a].error,exact[a]);
             // n̄ takes no place: on a standing wave's axis a neighbouring site's atom is at its own well's energy (read from the focus: 377 where k_BT/ħω − ½ was 0.2).
-            let oscillator=KT_PER_UK*x.temperature[a]/trap.lab[a]-0.5;assert!((x.occupation[a]-oscillator).abs()<=5.*x.occupation_error[a]+1e-9,"output {i}, axis {a}: n̄ {} against k_BT/ħω − ½ {oscillator}",x.occupation[a]);}}
+            let oscillator=KT_PER_UK*x.temperature[a]/trap.lab[a]-0.5;assert!((x.occupation[a]-oscillator).abs()<=5.*x.occupation_error[a].error+1e-9,"output {i}, axis {a}: n̄ {} against k_BT/ħω − ½ {oscillator}",x.occupation[a]);}}
 }
 /// A far tweezer's atoms past 90° and at the tie, every initial energy taken in the wells they stand in.
 #[test]

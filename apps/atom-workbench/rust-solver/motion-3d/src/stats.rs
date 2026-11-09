@@ -66,26 +66,48 @@ impl Group{
     }
 }
 
+/// A quantity's statistical error, from its jackknife over the groups behind an estimate (`summarize`): its standard error,
+/// the groups that read it -- every group that reaches the output for the loss, those holding an atom there for the held
+/// atoms' quantities -- and the skew of the group values, their third central moment over their second per group
+/// (`skew`). An error at z standard errors reads it through one definition: the interval's distances below and above the
+/// value (`below`, `above`), the larger of them (`at`).
+#[derive(Clone,Copy,Debug,PartialEq)]
+pub struct Spread{pub error:f64,pub groups:f64,pub skew:f64}
+impl Default for Spread{fn default()->Spread{Spread::EXACT}}
+impl Spread{
+    /// No error: a value known exactly (t = 0, the request's initial state).
+    pub const EXACT:Spread=Spread{error:0.,groups:f64::INFINITY,skew:0.};
+    /// Too few groups to read a spread on (`reads_spread`): its error unknown.
+    fn unread(groups:f64)->Spread{Spread{error:f64::INFINITY,groups,skew:0.}}
+    /// The same quantity times a factor: a held atoms' row as shown, at the held share.
+    pub fn scaled(self,factor:f64)->Spread{Spread{error:factor*self.error,skew:factor*self.skew,..self}}
+    /// The distances of its interval at z standard errors below the value and above it.
+    pub fn below(&self,z:f64)->f64{z*self.error}
+    pub fn above(&self,z:f64)->f64{z*self.error}
+    /// Its error at z standard errors: the larger distance.
+    pub fn at(&self,z:f64)->f64{self.below(z).max(self.above(z))}
+}
+
 /// The estimates at one output time.
 #[derive(Clone,Debug,Default)]
 pub struct Estimate{
-    /// T = m Var(v)/k_B per axis (μK), its standard error, the mean velocity (um/us).
+    /// T = m Var(v)/k_B per axis (μK), its error, the mean velocity (um/us).
     pub temperature:[f64;3],
-    pub temperature_error:[f64;3],
+    pub temperature_error:[Spread;3],
     /// T_total = (T_x + T_y + T_z)/3, the temperature of the 3D velocity variance (μK), and its
-    /// standard error from the same jackknife, so the axes' correlations are in it.
+    /// error from the same jackknife, so the axes' correlations are in it.
     pub temperature_total:f64,
-    pub temperature_total_error:f64,
+    pub temperature_total_error:Spread,
     pub mean_velocity:[f64;3],
     /// n̄ per axis relative to its trap frequency, ħ⟨κ²⟩/mω − ½ -- the energy on the axis over ħω, twice its kinetic part in a harmonic well (the virial theorem), which takes no
-    /// place: the same in whichever well of a standing wave the atom sits --, and its standard error.
+    /// place: the same in whichever well of a standing wave the atom sits --, and its error.
     pub occupation:[f64;3],
-    pub occupation_error:[f64;3],
+    pub occupation_error:[Spread;3],
     pub populations:Vec<f64>,
-    pub population_errors:Vec<f64>,
-    /// The probability that the atom has been lost, and its standard error.
+    pub population_errors:Vec<Spread>,
+    /// The probability that the atom has been lost, and its error.
     pub loss:f64,
-    pub loss_error:f64,
+    pub loss_error:Spread,
     /// The held atoms' mean folded excited population (the elimination's η²), mean profile error
     /// and mean (kv/σ)² of the first order in the Doppler shift.
     pub folded:f64,
@@ -145,10 +167,19 @@ pub(crate) fn reads_spread(samples:f64)->bool{samples>=2.}
 pub(crate) fn variance_noise(groups:f64)->f64{(2./(groups-1.).max(1.)).sqrt()}
 /// The largest of n noisy looks at one quantity, in standard errors: z = √(2 ln n), what a read that takes their largest must allow for.
 pub(crate) fn largest_look(looks:f64)->f64{(2.*looks.ln()).sqrt()}
-/// The jackknife's standard error of a value over the groups left out.
-fn spread(leave:&[Moments],f:impl Fn(&Moments)->f64)->f64{crate::read::jackknife_error(leave.iter().map(&f))}
+/// A value's spread over the groups left out (`Spread`), `groups` of them reading it: the jackknife's standard error and the skew.
+fn spread(leave:&[Moments],f:impl Fn(&Moments)->f64,groups:f64)->Spread{
+    Spread{error:crate::read::jackknife_error(leave.iter().map(&f)),groups,skew:skew(leave.iter().map(&f))}
+}
+/// The skew of a jackknife's group values (`Spread::skew`), of the values left out: a group's value moves the estimate against
+/// its own leave-one-out, so with d a value left out less their mean, −(g − 1) Σd³/(g Σd²); none without a spread.
+fn skew(leave:impl ExactSizeIterator<Item=f64>+Clone)->f64{
+    let n=leave.len() as f64;let mean=leave.clone().sum::<f64>()/n;
+    let(two,three)=leave.fold((0.,0.),|(a,b),x|{let d=x-mean;(a+d*d,b+d*d*d)});
+    if two>0.{-(n-1.)*three/(n*two)}else{0.}
+}
 
-/// The pooled estimates at every output time, with jackknife standard errors over the groups that reach it (a batch's
+/// The pooled estimates at every output time, with jackknife errors over the groups that reach it (a batch's
 /// trajectories run only as far as the outputs need them, solve.rs # Batches), the
 /// harmonic control's means per output and lab axis where given: its β from every trajectory, held when a group
 /// is left out -- recomputed with it, a β that rests on a few trajectories at an early output
@@ -160,12 +191,15 @@ pub fn summarize<G:std::borrow::Borrow<Group>+Sync>(groups:&[G],s:&Scales,means:
         let mut all=Sums::zero();for x in &present{all.add(x,1.);}
         let correction=means.get(i).map(|&m|Correction::new(&all,m));let m=correction.as_ref();
         let mut e=estimate(&all,s,m);e.groups=count as f64;
-        if !reads_spread(count as f64){e.population_errors=vec![f64::INFINITY;STATES];e.temperature_error=[f64::INFINITY;3];e.temperature_total_error=f64::INFINITY;e.occupation_error=[f64::INFINITY;3];e.loss_error=f64::INFINITY;return e;}
+        // The groups that read each quantity: every one the loss, those holding an atom the held atoms'.
+        let(every,holding)=(count as f64,present.iter().filter(|x|x.held>0.).count() as f64);
+        if !reads_spread(count as f64){let held=Spread::unread(holding);
+            e.population_errors=vec![held;STATES];e.temperature_error=[held;3];e.temperature_total_error=held;e.occupation_error=[held;3];e.loss_error=Spread::unread(every);return e;}
         let leave:Vec<Moments>=present.iter().map(|x|moments(&all.combine(x,-1.),s,m)).collect();
-        for a in 0..3{e.temperature_error[a]=spread(&leave,|x|x.temperature[a]);e.occupation_error[a]=spread(&leave,|x|x.occupation[a]);}
-        e.temperature_total_error=spread(&leave,|x|x.temperature_total);
-        e.population_errors=(0..STATES).map(|k|spread(&leave,|x|x.populations[k])).collect();
-        e.loss_error=spread(&leave,|x|x.loss);
+        for a in 0..3{e.temperature_error[a]=spread(&leave,|x|x.temperature[a],holding);e.occupation_error[a]=spread(&leave,|x|x.occupation[a],holding);}
+        e.temperature_total_error=spread(&leave,|x|x.temperature_total,holding);
+        e.population_errors=(0..STATES).map(|k|spread(&leave,|x|x.populations[k],holding)).collect();
+        e.loss_error=spread(&leave,|x|x.loss,every);
         e
     }).collect()
 }
@@ -266,6 +300,24 @@ mod tests{
         assert_eq!(skipped[0].populations[0].value,0.);
     }
 
+    /// A spread reads its groups and their skew off the jackknife: a plain mean of five groups of one atom, one of them bright,
+    /// 0 0 0 0 1 -- its standard error √(Σ(x − x̄)²/(g(g − 1))) = 0.2 and the third central moment over the second per group,
+    /// 0.096/(0.16·5) = 0.12, positive (the bright group pulls the mean up) --; the loss read on every group, the held atoms'
+    /// quantities on those holding one.
+    #[test]
+    fn a_spread_reads_its_groups_and_skew(){
+        use super::*;
+        let scales=Scales{hbar_over_mass:1.,frequencies:[1.;3]};
+        let mut groups:Vec<Group>=[0.,0.,0.,0.,1.].into_iter().map(|x|{let mut g=Group::new(1,1);let mut population=[0.;STATES];population[0]=x;
+            g.add(0,Some(&Atom{motion:[[x,1.+x*x];3],populations:&population,folded:0.,profile:0.,doppler:0.}),[0.;3]);g}).collect();
+        let e=&summarize(&groups,&scales,&[])[0];let p=e.population_errors[0];
+        assert!((p.error-0.2).abs()<1e-15&&(p.skew-0.12).abs()<1e-15,"{p:?}");
+        assert_eq!(p.at(2.),2.*p.error);assert_eq!(Spread::EXACT.at(2.),0.);
+        let mut lost=Group::new(1,1);lost.add(0,None,[0.;3]);groups.push(lost);
+        let e=&summarize(&groups,&scales,&[])[0];
+        assert_eq!((e.population_errors[0].groups,e.temperature_error[0].groups,e.loss_error.groups),(5.,5.,6.));
+    }
+
     use super::*;
     use crate::rng::{normal_quantile,Purpose,Rng};
     /// The harmonic control's estimate on drawn sums: an atom's κ² on one axis 1 + 0.1 x + noise and its
@@ -284,7 +336,7 @@ mod tests{
                     g.add(0,Some(&atom),[c;3]);
                 }g}).collect();
             let(with,plain)=(&summarize(&groups,&scales,&[[1.;3]])[0],&summarize(&groups,&scales,&[])[0]);
-            let(t,e)=(with.temperature[0]*KT_PER_UK,with.temperature_error[0]*KT_PER_UK);let(p,o)=(plain.temperature[0]*KT_PER_UK,plain.temperature_error[0]*KT_PER_UK);
+            let(t,e)=(with.temperature[0]*KT_PER_UK,with.temperature_error[0].error*KT_PER_UK);let(p,o)=(plain.temperature[0]*KT_PER_UK,plain.temperature_error[0].error*KT_PER_UK);
             assert!((t-1.).abs()<=4.*e,"{t} ± {e}");
             if correlated{assert!(e<0.2*o,"{e} against {o}");}
             else{assert!((t-p).abs()<=o&&e<=1.1*o);}
