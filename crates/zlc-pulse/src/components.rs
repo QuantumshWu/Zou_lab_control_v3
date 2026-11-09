@@ -43,7 +43,18 @@ pub fn ungroup_component(sequence: &Sequence, component_id: &str) -> Result<Sequ
         }
         periods.push(period);
     }
-    sequence.with(|parts| { parts.periods = periods; parts.components.retain(|item| *item != component); })
+    // Its brackets join the top level's: a name taken there is qualified as its periods' are.
+    let mut taken: BTreeSet<String> = sequence.brackets.iter().filter(|b| !component.bracket_ids.contains(&b.bracket_id)
+        && sequence.component_for_field(&FieldRef::bracket_count(&b.bracket_id)).is_none()).map(|b| b.name.clone()).collect();
+    let brackets: Vec<Bracket> = sequence.brackets.iter().map(|bracket| {
+        let mut bracket = bracket.clone();
+        if component.bracket_ids.contains(&bracket.bracket_id) {
+            if taken.contains(&bracket.name) { bracket.name = available_name(&format!("{} / {}", component.name, bracket.name), &mut taken); }
+            else { taken.insert(bracket.name.clone()); }
+        }
+        bracket
+    }).collect();
+    sequence.with(|parts| { parts.periods = periods; parts.brackets = brackets; parts.components.retain(|item| *item != component); })
 }
 
 /// `extract_subpulse`: copy one group's contents; its parent's loops and delays stay.

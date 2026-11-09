@@ -240,7 +240,7 @@ fn check_delay_window(events: &[u128], delay: u128, capacity: u64, clock_hz: f64
             let room = capacity as usize;
             let fits = events.windows(room + 1).map(|window| window[room] - window[0]).min().unwrap_or(0);
             let time = |ticks: u128| readable_seconds(ticks as f64 / clock_hz);
-            return value_error(format!("{label} {what} {required} times within its delay of {}, and the board holds {capacity} in flight:                 a delay of at most {} fits, or it must {what_verb} less often", time(delay), time(fits),
+            return value_error(format!("{label} {what} {required} times within its delay of {}, and the board holds {capacity} in flight: a delay of at most {} fits, or it must {what_verb} less often", time(delay), time(fits),
                 what_verb = if what == "toggles" { "toggle" } else { "act" }));
         }
     }

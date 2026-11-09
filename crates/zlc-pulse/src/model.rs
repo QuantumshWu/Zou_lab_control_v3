@@ -726,6 +726,16 @@ impl Sequence {
         })
     }
 
+    /// This pulse with each bracket named as `names` names the bracket of its id: a copy
+    /// from the board, whose wire carries no names, read as the pulse it came from.
+    /// Unchanged when a name would not fit (the brackets are not that pulse's).
+    pub fn bracket_names_of(self: &Arc<Sequence>, names: &Sequence) -> Arc<Sequence> {
+        let renamed = self.with(|parts| for bracket in &mut parts.brackets {
+            if let Some(named) = names.brackets.iter().find(|other| other.bracket_id == bracket.bracket_id) { bracket.name = named.name.clone(); }
+        });
+        renamed.map(Arc::new).unwrap_or_else(|_| self.clone())
+    }
+
     /// A copy of the parts, to edit and rebuild (`dataclasses.replace`).
     pub fn parts(&self) -> SequenceParts { self.parts.clone() }
 

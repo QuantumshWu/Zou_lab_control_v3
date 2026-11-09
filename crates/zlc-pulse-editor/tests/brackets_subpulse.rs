@@ -135,4 +135,64 @@ fn a_subpulse_edit_opens_it_and_save_writes_its_own_file() {
     assert_eq!(editor.state()["subpulse"]["dirty"], false);
     let written: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert!(written["periods"].as_array().unwrap().iter().any(|p| p["duration"] == json!(7) && p["unit"] == "µs"), "{written}");
+    // Ungrouped, its id free again: a new block under that id has saved nothing.
+    command(&mut editor, "pulse_subpulse", json!({"op": "ungroup", "component_id": component}));
+    let ids = period_ids(&mut editor);
+    command(&mut editor, "pulse_subpulse", json!({"op": "group", "items": [["period", ids[1]], ["period", ids[2]]]}));
+    command(&mut editor, "pulse_subpulse", json!({"op": "select", "component_id": component}));
+    assert_eq!(editor.state()["subpulse"]["context_id"], component.as_str(), "the id is reused");
+    assert_eq!(editor.state()["subpulse"]["dirty"], true, "a new block is not the old one's save");
+}
+
+#[test]
+fn ungrouping_a_block_qualifies_a_bracket_name_taken_outside() {
+    let (_folder, mut editor) = pulse("ungroup");
+    let ids = period_ids(&mut editor);
+    edit(&mut editor, json!({"edit": "bracket_add", "start": ids[0], "end": ids[0], "count": 2}));
+    edit(&mut editor, json!({"edit": "bracket_add", "start": ids[1], "end": ids[1], "count": 3}));
+    let inner = editor.state()["schedule"]["brackets"].as_array().unwrap().iter().find(|b| b["start_period_id"] == ids[1]).unwrap()["bracket_id"].as_str().unwrap().to_owned();
+    let outer_name = brackets(&mut editor).into_iter().find(|(id, _)| *id != inner).unwrap().1;
+    command(&mut editor, "pulse_subpulse", json!({"op": "group", "items": [["bracket", format!("{inner}:start")], ["period", ids[1]],
+        ["bracket", format!("{inner}:end")], ["period", ids[2]]]}));
+    let component = editor.state()["subpulse"]["contexts"].as_array().unwrap().iter().find_map(|c| c[0].as_str().filter(|id| !id.is_empty()).map(str::to_owned)).unwrap();
+    // Inside the block the name may repeat the outer one's.
+    edit(&mut editor, json!({"edit": "bracket_name", "bracket_id": inner, "name": outer_name}));
+    command(&mut editor, "pulse_subpulse", json!({"op": "ungroup", "component_id": component}));
+    let after: Vec<String> = brackets(&mut editor).into_iter().map(|(_, name)| name).collect();
+    assert_eq!(after.iter().collect::<std::collections::BTreeSet<_>>().len(), 2, "{after:?}");
+    assert!(after.contains(&outer_name), "{after:?}");
+}
+
+#[test]
+fn ports_labelled_alike_do_not_stop_adding_or_renaming_periods() {
+    let (folder, mut editor) = pulse("ports_alike");
+    let path = folder.join("alike.json");
+    command(&mut editor, "pulse_save", json!({"path": path.display().to_string()}));
+    let mut tree: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let dacs: Vec<usize> = tree["target"]["ports"].as_array().unwrap().iter().enumerate().filter(|(_, p)| p["kind"] == "dac").map(|(i, _)| i).take(2).collect();
+    for index in &dacs { tree["target"]["ports"][*index]["label"] = json!("Coil"); }
+    std::fs::write(&path, serde_json::to_string(&tree).unwrap()).unwrap();
+    let mut reopened = Editor::new(Some(Deployed::load().unwrap()), folder.clone());
+    command(&mut reopened, "pulse_open", json!({"path": path.display().to_string()}));
+    edit(&mut reopened, json!({"edit": "period_add", "before_item": null}));
+    let ids = period_ids(&mut reopened);
+    edit(&mut reopened, json!({"edit": "period_name", "period_id": ids[0], "name": "load"}));
+}
+
+#[test]
+fn the_boards_copy_reads_under_the_drafts_bracket_names() {
+    let (folder, mut editor) = pulse("sync_names");
+    let ids = period_ids(&mut editor);
+    edit(&mut editor, json!({"edit": "bracket_add", "start": ids[0], "end": ids[1], "count": 3}));
+    let first = brackets(&mut editor)[0].0.clone();
+    edit(&mut editor, json!({"edit": "bracket_name", "bracket_id": first, "name": "load_loop"}));
+    let path = folder.join("sync.json");
+    command(&mut editor, "pulse_save", json!({"path": path.display().to_string()}));
+    let (draft, _) = zlc_pulse::codec::read_pulse_document(&path).unwrap();
+    let draft = std::sync::Arc::new(draft);
+    // The board's wire carries no names: its copy reads as "Bracket 1" until named as the draft's.
+    let copy = std::sync::Arc::new(zlc_pulse::remote::sequence_from_remote(&zlc_pulse::remote::sequence_tree(&draft)).unwrap());
+    assert_eq!(copy.brackets[0].name, "Bracket 1");
+    assert_ne!(*copy, *draft);
+    assert_eq!(*copy.bracket_names_of(&draft), *draft);
 }

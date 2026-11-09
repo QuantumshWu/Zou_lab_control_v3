@@ -827,7 +827,13 @@ impl Editor {
         let action = text_arg(args, "op")?;
         let before = (self.selected_subpulse.clone(), self.component_context.clone(), self.subpulse_draft.clone(), self.subpulse_path.clone());
         let revision = self.revision;
+        let components = |editor: &Self| -> BTreeSet<String> { editor.state.sequence.as_ref().map(|s| s.components.iter().map(|c| c.component_id.clone()).collect()).unwrap_or_default() };
+        let existed = components(self);
         let result = self.subpulse_action(&action, args).map_err(|error| format!("Cannot {action} Component: {}", error.message));
+        // What a block saved stays with that block: one removed or ungrouped forgets it, and a
+        // new block that reuses its id starts unsaved.
+        let now = components(self);
+        self.instance_saved.retain(|id, _| now.contains(id) && existed.contains(id));
         if (self.selected_subpulse.clone(), self.component_context.clone(), self.subpulse_draft.clone(), self.subpulse_path.clone()) != before
             && self.revision == revision { self.revision += 1; }
         result
