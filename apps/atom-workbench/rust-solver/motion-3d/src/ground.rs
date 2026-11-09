@@ -661,6 +661,8 @@ pub struct Ground{
     pub charge:f64,
     /// The pairs' charge per ground state (`Ground::pair_charges`): Σ m² of the folded couplings between ground states it is one of.
     pub pairs:Vec<f64>,
+    /// The folded pairs of channels through an explicit state (`Ground::partners`): their ground states and m², pairs as the items' are.
+    pub partner_pairs:Vec<((usize,usize),f64)>,
     /// The ground states' couplings, classified, the rule's cut between near and far frequencies
     /// and the eliminated generator's ‖L0‖ they were judged against (rad/us).
     pub items:Vec<Item>,
@@ -1129,7 +1131,7 @@ impl Ground{
         let duration=request.times_us.last().copied().unwrap_or(0.).max(0.);
         let speed=(2.*OUTSIDE_REACH.recip().ln()*crate::stats::KT_PER_UK*temperature_uk*crate::model::HBAR/request.mass_kg*1e6).sqrt();
         let mut ground=Ground{ground_states,excited_states,levels,decay,emission,beams:request.beams.clone(),folded:couplings.clone(),couplings,hamiltonian,units,outside:unit_outside,folds:unit_folds,interference,
-            components,l0,carriers,duration,mass_kg:request.mass_kg,reach:vec![],speed,temperature_uk,excited_items:vec![],charge:0.,pairs:vec![],items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![],
+            components,l0,carriers,duration,mass_kg:request.mass_kg,reach:vec![],speed,temperature_uk,excited_items:vec![],charge:0.,pairs:vec![],partner_pairs:vec![],items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![],
             explicit_of:vec![],excited_groups,dressed:vec![],vias:vec![],near_units:vec![],dressing:false,floors:vec![],unmixed:vec![],unmixed_error:0.,channel_poles:vec![],trap:Trap::none()};
         (ground.reach,ground.trap)=ground.reach(request);
         Ok(ground)
@@ -1847,28 +1849,43 @@ impl Ground{
                 let inside=(0..self.carriers.len()).all(|c|m[a][c]-m[b][c]+carriers.iter().filter(|x|x.0==c).map(|x|x.1).sum::<i32>()==0);
                 if inside||(matches!(item.kind,Kind::Raman{..})&&!pair_folds(mixing(item.size,(item.frequency-dressing[k]).max(0.),self.generator_scale,f64::MIN_POSITIVE),allowance)){kept.push(item.kind.clone());changed=true;}
             }}
-            if !changed&&!moved{self.charge=Ground::charge_of(&excited,ng);self.assemble(&b,partition,excited)?;self.pairs=self.pair_charges();return Ok(());}
+            if !changed&&!moved{
+                self.charge=Ground::charge_of(&excited,ng);
+                self.partner_pairs=self.partners(&excited,&explicit,&b,&partition.set,&dressing).into_iter().filter(|x|excited[x.0].folded).map(|x|(x.1,x.2)).collect();
+                self.assemble(&b,partition,excited)?;self.pairs=self.pair_charges();return Ok(());
+            }
         }
     }
 
     /// The pairs of channels through an explicit state (module documentation, # One rule over the ground and the excited states): each folded drive
     /// into one, against every drive kept into it -- those whose admixture g/d lies above double precision's round-off --, by the ground states' pairs' rule, within
-    /// one cluster with its dressing taken from their separation: kept where one may not fold. Whether any was.
+    /// one cluster with its dressing taken from their separation: kept where one may not fold (`pair_folds`) -- within the numerical share at most
+    /// (`MIXING_SHARE`): such a pair lies in neither part, X takes V^f and the explicit state's amplitude does not feel the folded drive, so no
+    /// measured charge reads its fold (its m² is booked, `Ground::partner_pairs`); the probe PGC's rung that folded them at m < ½ moved a rate between
+    /// sublevels by 0.045 of 0.30 /us against the second order of every excited state. Whether any was kept.
     fn keep_partners(&self,excited:&mut [ExcitedItem],explicit:&[bool],b:&Bounds,set:&[Option<usize>],dressing:&[f64],allowance:f64)->bool{
+        let mut changed=false;
+        for(i,_,m2)in self.partners(excited,explicit,b,set,dressing){if excited[i].folded&&!pair_folds(m2.sqrt(),allowance.min(MIXING_SHARE)){excited[i].folded=false;excited[i].promoted=true;changed=true;}}
+        changed
+    }
+    /// The pairs of channels through an explicit state (`keep_partners`): per folded drive into one (its place in `excited`) and each drive kept into
+    /// it, the pair's ground states and its m² -- its size g g′ (1/d + 1/d′ + Γ/(d d′)) at its worst separation over the trap less the cluster's dressing.
+    fn partners(&self,excited:&[ExcitedItem],explicit:&[bool],b:&Bounds,set:&[Option<usize>],dressing:&[f64])->Vec<(usize,(usize,usize),f64)>{
         let(ng,l0)=(self.ground_states.len(),self.generator_scale);
         let kept:Vec<(Drive,f64,f64)>=excited.iter().filter(|x|!x.folded&&x.mixes()).filter_map(|x|match x.kind{ExcitedKind::Drive(d)=>Some((d,x.size,x.distance)),_=>None}).collect();
-        let mut changed=false;
-        for x in excited.iter_mut().filter(|x|x.folded&&x.mixes()){
+        let mut out=vec![];
+        for(i,x)in excited.iter().enumerate().filter(|(_,x)|x.folded&&x.mixes()){
             let ExcitedKind::Drive(d)=x.kind else{continue};if !explicit[d.excited]{continue;}
             let gamma=self.decay[(d.excited,d.excited)].re;
             let within=if set[d.ground]==set[ng+d.excited]{set[d.ground].map_or(0.,|k|dressing[k])}else{0.};
-            if kept.iter().filter(|p|p.0.excited==d.excited).any(|&(p,size,distance)|{
+            for &(p,size,distance)in kept.iter().filter(|p|p.0.excited==d.excited){
                 let motion=self.carriers[p.carrier].beams.iter().flat_map(|&l|self.carriers[d.carrier].beams.iter().map(move|&k|(l,k))).map(|(l,k)|self.motion(l,Some(k))).fold(0.,f64::max);
                 let frequency=b.separation(p.ground,d.ground,self.carriers[p.carrier].detuning-self.carriers[d.carrier].detuning,motion);
-                !pair_folds(mixing(x.size*size*(1./x.distance+1./distance+gamma/(x.distance*distance)),(frequency-within).max(0.),l0,f64::MIN_POSITIVE),allowance)
-            }){x.folded=false;x.promoted=true;changed=true;}
+                let m=mixing(x.size*size*(1./x.distance+1./distance+gamma/(x.distance*distance)),(frequency-within).max(0.),l0,f64::MIN_POSITIVE);
+                out.push((i,(p.ground,d.ground),m*m));
+            }
         }
-        changed
+        out
     }
 
     /// The couplings between ground states classified (`classify`) with the folded drives, and the
@@ -2299,6 +2316,7 @@ impl Ground{
         for i in self.items.iter().filter(|i|i.folded&&i.size>0.){
             let m2=mixing(i.size,i.frequency.abs(),self.generator_scale,f64::MIN_POSITIVE).powi(2);let(a,b)=i.kind.states();out[a]+=m2;out[b]+=m2;
         }
+        for &((a,b),m2)in &self.partner_pairs{out[a]+=m2;out[b]+=m2;}
         out
     }
     /// The pairs' charge a priori: the largest of a ground state's (`pairs`), its population's error bound.
