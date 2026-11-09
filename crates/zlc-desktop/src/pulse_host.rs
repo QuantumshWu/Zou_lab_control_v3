@@ -1203,7 +1203,7 @@ mod tests {
         plugins.open("scan","native_scan",json!({}),json!({})).unwrap();
         let spec=json!({"axes":[{"port":"pulse:param:duration:long_before","identity":"duration:long_before","label":"Before","unit":"s",
             "values":[0.000200003,0.000300007],"coordinate_of":null,"host_advanced":false}],"scan_repeats":2,"run_repeats":2,"pulse_path":document});
-        let run=plugins.start_run("scan",RunRequest {prepared:None,device_labels:Default::default(),devices:Default::default(),shared:Default::default(),
+        let run=plugins.start_run("scan",RunRequest {prepared:None,device_labels:Default::default(),device_units:Default::default(),devices:Default::default(),shared:Default::default(),
             values:json!({"spec":spec.to_string(),"mode":"seamless","configure_first":true,"effective_inner":""}),origin:Origin::Operator,
             resources:json!({}),source_signal:Some("source".into()),run_directory:None,outputs:[("scan".into(),"output".into())].into(),record_devices:false}).unwrap();
         let mut fired=false; let mut saw_load=false;

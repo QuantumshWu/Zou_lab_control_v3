@@ -216,8 +216,17 @@ try {
    const t=setup({live:false,fields:[frequency]});
    t.view.read();const first=t.calls.at(-1).id;
    chooseUnit(t,'kHz');equal(unitReads(t),[{frequency:'kHz'}],'the pick');
+   equal(t.calls.findLast(c=>c.action==='read_device').keep,true,'the apparatus keeps the pick');
    t.project({},first);await Promise.resolve();
    equal(unitReads(t),[{frequency:'kHz'}],'the first reading replaced the pick');
+ });
+ await check('a field opens in the unit the apparatus keeps, and no default replaces it',async()=>{
+   const kept={...frequency,unit:'kHz',units:hertz('kHz'),current:80e3,desired:80e3,minimum:5e4,maximum:2e5,unit_kept:true};
+   const t=setup({live:false,fields:[kept,power]});
+   equal(t.input().value,'80000','opened in the kept unit: Desired in kHz');
+   t.view.read();t.project({},t.calls.at(-1).id);await Promise.resolve();
+   equal(unitReads(t),[],'80000 kHz stays: the default chose for a kept unit');
+   assert(t.calls.every(c=>!c.keep),'nothing picked, nothing kept');
  });
  await check('a device\'s commands are buttons, never held back by an Apply in flight, and their answer is the note',async()=>{
    const t=setup();const asked=[];let answer;

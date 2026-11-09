@@ -1464,8 +1464,11 @@ class CalibrationTask:
         request[PHOTOELECTRONS] = bool(photoelectrons)
         return {
             "request": request,
+            # Keyed by the device's id; the camera's Device Manager name beside it (the board's is
+            # the bench record's, which this run takes too).
             "actual_devices": {
-                self.request.camera_key: _camera_snapshot(actual),
+                self.request.camera_key: {"role": getattr(self.camera, "role", "") or self.request.camera_key,
+                                          **_camera_snapshot(actual)},
                 self.request.sequencer_key: dict(sequencer_snapshot),
             },
             "pulse": dict(pulse_facts),

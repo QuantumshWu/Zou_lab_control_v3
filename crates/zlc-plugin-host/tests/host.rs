@@ -86,7 +86,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
         "devices":{"echo":{"instance":"echo","type_id":"test.echo","capabilities":["test.echo"],"tunable":true,"reads":opened["reads"]}}});
     let prepared = host.call("counter","query",prepare(128),Duration::from_secs(20)).unwrap().value["prepared"].as_str().unwrap().to_owned();
     host.set_node_name("counter", "Imaging camera");
-    let run = host.start_run("counter", RunRequest { prepared: Some(prepared), device_labels: Default::default(), values: json!({"count": 3, "size": 128}),
+    let run = host.start_run("counter", RunRequest { prepared: Some(prepared), device_labels: Default::default(), device_units: Default::default(), values: json!({"count": 3, "size": 128}),
         devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
         source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into(), record_devices: false }).unwrap();
     assert!(host.call("counter","query",prepare(13),Duration::from_secs(20)).err().unwrap().message.contains("unsupported test frame shape"));
@@ -138,7 +138,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     // commits it with that event as parent and the same ordinal, then completes.
     host.open("doubler", "doubler", json!({}), json!({})).unwrap();
     let doubled_signal = "@logic/doubler/doubled";
-    let run = host.start_run("doubler", RunRequest { prepared: None, device_labels: Default::default(), values: json!({}), devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
+    let run = host.start_run("doubler", RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values: json!({}), devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
         resources: json!({}), source_signal: Some(frames_signal.to_owned()), run_directory: None,
         outputs: [("doubled".to_owned(), doubled_signal.to_owned())].into(), record_devices: false }).unwrap();
     let (outcome, result, error, ..) = finished(&run);
@@ -162,7 +162,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while host.registry().holds(&lent) > 1 && std::time::Instant::now() < deadline { std::thread::sleep(Duration::from_millis(20)); }
     assert_eq!(host.registry().holds(&lent), 1, "only Runtime holds the last frame");
-    let run = host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(), values: json!({"count": 1, "size": 128}),
+    let run = host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values: json!({"count": 1, "size": 128}),
         devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
         source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into(), record_devices: false }).unwrap();
     let (outcome, _, error, ..) = finished(&run);
@@ -172,11 +172,11 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     // A following processor reads its source's next generation from its first commit,
     // however late its own run starts: here, after that source has sealed.
     host.follow("doubler", Some(frames_signal));
-    let run = host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(), values: json!({"count": 3, "size": 128}),
+    let run = host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values: json!({"count": 3, "size": 128}),
         devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
         source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into(), record_devices: false }).unwrap();
     assert_eq!(finished(&run).0, "completed");
-    let run = host.start_run("doubler", RunRequest { prepared: None, device_labels: Default::default(), values: json!({}), devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
+    let run = host.start_run("doubler", RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values: json!({}), devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
         resources: json!({}), source_signal: Some(frames_signal.to_owned()), run_directory: None,
         outputs: [("doubled".to_owned(), doubled_signal.to_owned())].into(), record_devices: false }).unwrap();
     let (outcome, result, error, ..) = finished(&run);
@@ -238,7 +238,7 @@ fn a_run_follows_only_an_exact_input_and_what_ends_early_leaves_with_its_signals
             _ => {}
         }
     };
-    let request = |values, source: Option<&str>, output: (&str, &str)| RunRequest { prepared: None, device_labels: Default::default(), values, devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
+    let request = |values, source: Option<&str>, output: (&str, &str)| RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values, devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
         resources: json!({}), source_signal: source.map(str::to_owned), run_directory: None, outputs: [(output.0.to_owned(), output.1.to_owned())].into(), record_devices: false };
     let published = |signal: &str| {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -352,7 +352,7 @@ fn close_releases_a_handle_left_by_a_failed_init_before_host_admission() {
 #[test]
 fn a_start_records_the_bench_its_devices_report_and_a_busy_one_is_not_lost() {
     let Some((host, runtime, _safe, events)) = host() else { return };
-    let snapshot = |instance: &str, wait_ms: u64| host.snapshot(instance, Duration::from_millis(wait_ms));
+    let snapshot = |instance: &str, wait_ms: u64| host.snapshot(instance, &json!({}), Duration::from_millis(wait_ms));
     // A tunable device answers its quartet's reads; one with a snapshot of its own answers that;
     // any other does not report its settings. Its open answer says which.
     for (instance, type_id, reports) in [("echo", "test.echo", true), ("pattern", "test.pattern", true), ("plain", "test.plain", false)] {
@@ -377,7 +377,7 @@ fn a_start_records_the_bench_its_devices_report_and_a_busy_one_is_not_lost() {
     let frames = "@logic/counter/frames";
     let bench = json!({"taken_at": "2026-10-25T12:00:00.000+00:00", "devices": {"echo": {"type_id": "test.echo", "role": "echo", "values": {"amplitude": 0.0}}},
                        "sequencer": {}});
-    let start = |record_devices: bool| host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(),
+    let start = |record_devices: bool| host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(),
         values: json!({"count": 1, "size": 128}), devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator,
         resources: json!({}), source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames.to_owned())].into(), record_devices }).unwrap();
     let recorded = |run: String| {
@@ -432,7 +432,7 @@ fn scans_and_resolves_are_handed_the_bound_resources() {
 fn a_run_asks_for_fits_on_lent_arrays_and_its_stop_ends_them() {
     let Some((host, _runtime, _safe, events)) = host() else { return };
     host.open("fitter", "fitter", json!({}), json!({})).unwrap();
-    let start = || host.start_run("fitter", RunRequest { prepared: None, device_labels: Default::default(), values: json!({}), devices: Default::default(), shared: Default::default(),
+    let start = || host.start_run("fitter", RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values: json!({}), devices: Default::default(), shared: Default::default(),
         origin: Origin::Operator, resources: json!({}), source_signal: None, run_directory: None, outputs: Default::default(), record_devices: false }).unwrap();
     let cells = |count: usize| json!({"parameters": ["a", "b"], "values": vec![json!([1.0, 2.0]); count], "errors": vec![json!([0.5, null]); count],
         "success": vec![true; count], "reduced_chi_square": vec![1.0; count], "messages": vec![""; count]});

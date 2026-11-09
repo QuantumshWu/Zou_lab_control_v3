@@ -287,6 +287,30 @@ fn record_devices(record: &Value, named: &[(String, String)]) -> Vec<(String, St
     result
 }
 
+/// What each device (by its key) was called when its records were written: the Device Manager name
+/// (`role`) a bench entry, a device snapshot or an actual device's entry carries, the first one
+/// found; a device no record names is called by its key.
+fn device_names(nodes: &[Node], source: &Value) -> HashMap<String, String> {
+    let mut names = HashMap::new();
+    let saved = source_run_record(source, nodes).map(|(_, _, record)| record);
+    let records = nodes.iter().flat_map(|node| {
+        let outputs = node.event_record.get("records").and_then(Value::as_object).into_iter().flatten().map(|(_, record)| record);
+        [&*node.record, &node.event_record].into_iter().chain(outputs)
+    }).chain(saved.as_ref());
+    for record in records {
+        let entries = bench_devices(record).into_iter().chain(record_devices(record, &named_devices(record)).into_iter().map(|(_, key, entry)| (key, entry)));
+        for (key, entry) in entries {
+            if let Some(name) = entry.get("role").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()) {
+                names.entry(key).or_insert_with(|| name.to_owned());
+            }
+        }
+    }
+    names
+}
+
+/// A device as saved data shows it: its name, else its key.
+fn device_name<'a>(names: &'a HashMap<String, String>, key: &'a str) -> &'a str { names.get(key).map_or(key, String::as_str) }
+
 /// The snapshot as the Devices tab reads it: a played pulse named and counted, a scan table counted.
 fn device_tab_snapshot(snapshot: &Value) -> Value {
     let mut shown = snapshot.clone();
@@ -356,6 +380,7 @@ fn played_pulses(nodes: &[Node], source: &Value) -> Vec<(PlayedPulse, String, Op
 }
 
 fn device_rows(lineage: &Value, nodes: &[Node], source: &Value, played: &[(PlayedPulse, String, Option<Value>, &'static str)]) -> Rows {
+    let names = device_names(nodes, source);
     let mut devices: Vec<(String, Value)> = Vec::new();
     fn entry<'a>(devices: &'a mut Vec<(String, Value)>, key: &str) -> &'a mut Value {
         if let Some(index) = devices.iter().position(|(existing, _)| existing == key) { return &mut devices[index].1; }
@@ -414,11 +439,14 @@ fn device_rows(lineage: &Value, nodes: &[Node], source: &Value, played: &[(Playe
             push_unique(&mut facts["roles"], json!(role));
             push_unique(&mut facts["used_by"], origin["logic"].clone());
         }
-        for (role, key, snapshot) in record_devices(record, named) {
+        for (role, key, mut snapshot) in record_devices(record, named) {
             let facts = entry(&mut devices, &key);
             push_unique(&mut facts["roles"], json!(role));
             push_unique(&mut facts["used_by"], origin["logic"].clone());
-            add_snapshot(&mut devices, &mut seen, &key, "snapshots", snapshot, origin.clone());
+            // Its name says who it was, not how it stood (as a bench entry's does).
+            let mut origin = origin.clone();
+            if let Some(name) = snapshot.as_object_mut().and_then(|state| state.remove("role")) { origin["name"] = name; }
+            add_snapshot(&mut devices, &mut seen, &key, "snapshots", snapshot, origin);
         }
         for (role, reference) in record["device_settings"].as_object().into_iter().flatten() {
             if let Some((_, key)) = named.iter().find(|(name, _)| name == role) {
@@ -481,12 +509,13 @@ fn device_rows(lineage: &Value, nodes: &[Node], source: &Value, played: &[(Playe
           }
           facts[section] = if snapshots.is_empty() { json!([]) } else { fields(snapshots) };
         }
-        (key, fields(["roles", "used_by", "snapshots", "settings_epochs"].into_iter()
+        (device_name(&names, &key).to_owned(), fields(["roles", "used_by", "snapshots", "settings_epochs"].into_iter()
             .filter(|name| !facts[*name].as_array().is_some_and(Vec::is_empty))
             .map(|name| (name.to_owned(), facts[name].clone())).collect()))
     }).collect();
     // The pulse a run played is offered, not printed: it opens in the Pulse Editor.
     for (pulse, device, sequence, what) in played {
+        let device = device_name(&names, device);
         let label = match sequence { None => format!("{device} {what}"), Some(sequence) => format!("{device} {what} {sequence}") };
         rows.push((label, json!({"text": pulse.name, "action": format!("pulse:{}", pulse.key)})));
     }
@@ -497,9 +526,14 @@ fn device_rows(lineage: &Value, nodes: &[Node], source: &Value, played: &[(Playe
 fn lineage_graph(root: Option<&str>, nodes: &[Node], source: &Value) -> Result<Value, String> {
     let mut graph_nodes: Vec<Value> = Vec::new();
     let mut edges: Vec<Value> = Vec::new();
-    let device_node = |key: &str, roles: &[String], users: &[String]| json!({"id": format!("device:{key}"), "kind": "device", "title": key,
-        "subtitle": roles.join(", "), "root": false, "tooltip": format!("Device: {key}\nRoles: {}\nUsed by: {}", roles.join(", "), users.join(", ")),
-        "row": ["Devices", key]});
+    let names = device_names(nodes, source);
+    // A device is shown by its name; its key stays the node's id (and is said where it is not the name).
+    let device_node = |key: &str, roles: &[String], users: &[String]| {
+        let name = device_name(&names, key);
+        let called = if name == key { key.to_owned() } else { format!("{name} ({key})") };
+        json!({"id": format!("device:{key}"), "kind": "device", "title": name, "subtitle": roles.join(", "), "root": false,
+               "tooltip": format!("Device: {called}\nRoles: {}\nUsed by: {}", roles.join(", "), users.join(", ")), "row": ["Devices", name]})
+    };
     let saved = source_run_record(source, nodes);
     let Some(root) = root else {
         let Some((name, output, record)) = saved else { return Ok(json!({"nodes": [], "edges": []})) };
@@ -705,7 +739,7 @@ mod tests {
         assert_eq!(record.tabs[1][1], json!([["camera_measurement", {"$fields": [["outputs", ["frames"]]]}]]), "device truth is the Devices tab's");
         let rows = record.tabs[2][1].as_array().unwrap();
         let labels: Vec<&str> = rows.iter().map(|row| row[0].as_str().unwrap()).collect();
-        assert_eq!(labels, ["mot_camera", "rf", "sequencer", "sequencer pulse at Start 7"]);
+        assert_eq!(labels, ["mot_camera", "Trap RF", "sequencer", "sequencer pulse at Start 7"], "a device is shown by its Device Manager name");
         let snapshot = field(field(&rows[1][1], "snapshots"), "camera_measurement · Before acquisition");
         assert_eq!(field(snapshot, "state"), &json!({"values": {"ch1_frequency": "80 MHz", "ch1_power": "\u{2248} -23.98 dBm", "ch1_output": true},
             "provenance": {"settings_epoch": 2}}), "each number in words, with its unit");
@@ -718,11 +752,31 @@ mod tests {
         let record = describe(&info(json!({"node": "seamless_scan", "named_devices": {"sequencer": "sequencer"}, "apparatus": bench,
             "device_snapshots": {"sequencer": {"program": {"digest": "5f0c"}, "pulse": pulse}}})));
         let rows = record.tabs[2][1].as_array().unwrap();
-        assert_eq!(rows.iter().map(|row| row[0].as_str().unwrap()).collect::<Vec<_>>(), ["sequencer", "rf", "sequencer pulse 7"]);
+        assert_eq!(rows.iter().map(|row| row[0].as_str().unwrap()).collect::<Vec<_>>(), ["sequencer", "Trap RF", "sequencer pulse 7"]);
         let shown = field(field(&rows[0][1], "snapshots"), "seamless_scan · Before acquisition");
         assert_eq!(field(shown, "state")["digest"], json!("5f0c"));
         assert!(field(shown, "state")["snapshot"].is_object(), "the board state remains separate from the run's played program");
         assert_eq!(record.pulses.len(), 1);
+    }
+
+    /// A scan's device snapshot keeps its device under the id and names it: the Devices tab and the
+    /// flow show the Device Manager name, the state reads in the unit it was recorded in.
+    #[test]
+    fn a_recorded_device_is_shown_by_its_name_and_kept_by_its_id() {
+        let record = json!({"node": "seamless_scan", "named_devices": {"tunable:rf_1": "rf_1"},
+            "device_snapshots": {"tunable:rf_1": {"role": "Trap RF", "values": {"ch1_power": 40.0}, "units": {"ch1_power": "mVpp"}}}});
+        let info = json!({"members": {}, "sections": {"plot": {}, "source": {}, "lineage": {"root": "event-1", "device_settings": [], "nodes": [
+            {"id": "event-1", "parents": [], "event_record": {}, "event": {"generation": "g", "sequence": 1, "stream": "seamless_scan"},
+             "record": record, "signals": ["@logic/seamless_scan/scan"]}]}}});
+        let shown = describe(&info);
+        let rows = shown.tabs[2][1].as_array().unwrap();
+        assert_eq!(rows[0][0], "Trap RF");
+        let snapshot = &field(&rows[0][1], "snapshots")["$fields"][0][1];
+        assert_eq!(field(snapshot, "state"), &json!({"values": {"ch1_power": "40 mVpp"}}), "in its recorded unit; the name is not state");
+        assert_eq!(field(snapshot, "sources")["$fields"][0][1]["name"], "Trap RF");
+        let device = shown.flow["nodes"].as_array().unwrap().iter().find(|node| node["kind"] == "device").unwrap().clone();
+        assert_eq!((&device["id"], &device["title"], &device["row"]), (&json!("device:rf_1"), &json!("Trap RF"), &json!(["Devices", "Trap RF"])));
+        assert!(device["tooltip"].as_str().unwrap().starts_with("Device: Trap RF (rf_1)"));
     }
 
     #[test]
