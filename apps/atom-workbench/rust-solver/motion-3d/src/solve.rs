@@ -67,6 +67,18 @@
 //! unsaturated rate says the fold does not hold (a resonant probe of 100 mW/cm² with cooling of 30, every drive folded: all atoms lost within 1 us, its 3+12 rung none by 2 us and 63 % by 100 us). The next rung
 //! takes the pilot's place, and the choice goes on from it; a model within its targets has lost its atoms by its physics (`Candidate::past_their_targets`).
 //!
+//! # The reach
+//! The rule judges every coupling where the atoms are and as they move (ground.rs, the reach in position and speed), and the
+//! model's profiles and first-order tables take the same reach (model.rs): the thermal ellipsoid at a temperature, the
+//! request's -- where the atoms start. Where they heat, they go past it: a bound for where they could go, the measurement for
+//! where they went. A pilot's T past the reach's temperature at some output, beyond its errors over the axes and outputs it
+//! looks at (`outgrown`), grows the reach to the largest T the pilot reads, at most where its ln(1/budget) k_B T reaches the
+//! trap's depth (atoms past it are lost), and the choice starts again there with a new pilot -- the reach only grows, until a
+//! pilot stays within it. (PGC1D_BIAS_OFF heats from 30 to 144 uK in 10 ms: judged at 30 uK its F = 1 sublevels' Raman pair
+//! folded, the repump off its resonance in the tweezer's light there, and T came 30 % above the kept pair's; at 60 uK and
+//! above the rule keeps it. R5038's D2 F' = 0 fold, S = 0.34 at its 35 uK, is 1.3 at 70 uK: past Stewart's bound where the
+//! atoms go.) The run's own T past the reach the model was built for is flagged (`assemble`).
+//!
 //! # Time step
 //! The trap's harmonic part is moved exactly (engine.rs); what the step must resolve is the light's
 //! pattern crossed by the moving atom and the internal state's response to it, which carries the
@@ -447,6 +459,21 @@ fn statistics(e:&Estimate,frequencies:[f64;3])->Statistic{
 }
 /// Whether an output holds the atoms a temperature, a variance over them, takes (`reads_spread`).
 fn reads_temperature(e:&Estimate)->bool{reads_spread((e.trajectories*(1.-e.loss)).round())}
+/// Where a T read past the rule's reach (module documentation, # The reach): the first output after t = 0 whose T on an axis lies past
+/// `reach` (uK) by more than its errors over the looks at every axis of the outputs that read one (`looks_confidence`).
+fn past_reach(estimates:&[&Estimate],reach:f64)->Option<usize>{
+    let read=|e:&Estimate|reads_temperature(e);let z=looks_confidence((3*estimates.iter().skip(1).filter(|e|read(e)).count()).max(1) as f64);
+    (1..estimates.len()).find(|&i|read(estimates[i])&&(0..3).any(|a|estimates[i].temperature[a]-z*estimates[i].temperature_error[a]>reach))
+}
+/// The temperature (uK) a pilot's atoms grow the reach to (module documentation, # The reach): where they read past it, the largest T
+/// they read at any output and axis, at most what takes the reach's ln(1/budget) k_B T to the trap's `depth` (rad/us), past which an
+/// atom is lost; none where they stay within it, or the reach is there already.
+fn outgrown(estimates:&[Estimate],reach:f64,depth:f64)->Option<f64>{
+    let cap=depth/(KT_PER_UK*crate::ledger::BUDGET.recip().ln());let all:Vec<&Estimate>=estimates.iter().collect();
+    past_reach(&all,reach)?;
+    let top=estimates.iter().skip(1).filter(|e|reads_temperature(e)).flat_map(|e|e.temperature).fold(reach,f64::max).min(cap);
+    (top>reach).then_some(top)
+}
 /// Per output the last at or before it that `holds` (the first must).
 fn last_holding(outputs:usize,holds:&dyn Fn(usize)->bool)->Vec<usize>{(0..outputs).scan(0,|last,i|{if holds(i){*last=i;}Some(*last)}).collect()}
 /// An output's statistics as the stopping rule and the flags take them (module documentation, # Batches): `statistics`, each
@@ -577,6 +604,8 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
     let(kept,fold)=g.items.iter().filter(|i|matches!(i.kind,Kind::Static{..}|Kind::Raman{..})).fold((0,0),|(k,f),i|if i.folded{(k,f+1)}else{(k+1,f)});
     let sizes:Vec<String>=g.clusters.iter().map(|c|c.dimension().to_string()).collect();
     ledger.add("基态之间的耦合（塞曼子能级、拉曼项、两组光的拍频）",near,format!("{fold} 对二阶折叠，{kept} 对显式保留；子空间 {}",sizes.join("+")));
+    // The reach the rule judged at, where the pilot's atoms took it past the request's (module documentation, # The reach).
+    if g.temperature_uk>request.temperature_uk{ledger.add("折叠判定时原子所及的范围",0.,format!("按全程实测：试探的原子升温至 {:.0} μK（请求 {:.0} μK），各耦合在该温度的热分布范围与速度内判定",g.temperature_uk,request.temperature_uk));}
     if model.dressing>0.{ledger.add("近共振光的相互缀饰（彼此的光移）",model.dressing,"各近共振光的光移全阶计入彼此的分母；同频多束光的干涉与缀饰的下一阶略去".into());}
     if g.unmixed_error>0.{ledger.add("近共振光的静态基态块（块内混合）",g.unmixed_error,"混合可略的块按各态自身能量（每态一个分解），块内非对角部分对各通道响应的改变按其界计入".into());}
     if model.fourth_dropped>0.{ledger.add("四阶折叠的快拍频项",model.fourth_dropped,"略去（与二阶相同的截断频率）".into());}
@@ -713,7 +742,9 @@ enum Stop{Error(String),Gpu(String)}
 impl From<String> for Stop{fn from(error:String)->Stop{Stop::Error(error)}}
 impl Stop{fn message(self)->String{match self{Stop::Error(e)|Stop::Gpu(e)=>e}}}
 
-fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))->Result<Solution,Stop>{
+fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))->Result<Solution,Stop>{run_at(request,request.temperature_uk,device,checkpoint)}
+/// A solve with the rule's reach judged at `reach` (uK; module documentation, # The reach).
+fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))->Result<Solution,Stop>{
     let times=&request.times_us;let outputs=times.len();
     if outputs<2||times[0]!=0.{return Err(Stop::Error("A 3D motion solve needs at least two times, the first at 0".into()));}
     let interval=times[1]-times[0];
@@ -726,7 +757,7 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
     // is what its folded drives meet at the pilot's states (`measured_charge`), and of those whose charge
     // leaves the statistics room the one of least predicted cost is taken.
     // The generator before the rule, every candidate's start (`next_candidate`); the rule's allowances from it, past the first -- every drive folded -- only where a rung is wanted.
-    let bare=Ground::bare(request)?;let mut rungs=None;
+    let bare=Ground::bare_at(request,reach)?;let mut rungs=None;
     let mut ladder=std::iter::once(f64::INFINITY).chain(std::iter::from_fn(||rungs.get_or_insert_with(||bare.rungs().into_iter().skip(1)).next()));let mut failed=None;
     let Some(mut pilot_candidate)=next_candidate(request,&bare,&mut ladder,&mut failed,&mut vec![])else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
     pilot_candidate.settle();
@@ -794,19 +825,20 @@ fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option
         break(harmonic,states,jumps,groups);
     };
     let(trap,period)={let t=pilot_candidate.reference().0;(t,slowest_period(&t))};
+    // The pilot's estimates per output (its trajectories each a group of one, with the harmonic control).
+    let pilot_estimates={let scales=Scales{hbar_over_mass:pilot_candidate.model.hbar_over_mass,frequencies:trap.lab};
+        let mut e=summarize(&pilot_groups,&scales,&pilot_harmonic.mean);start(&mut e[0],&pilot_candidate.initial);e};
+    // The reach (module documentation, # The reach): atoms past it start the choice again where they came to.
+    if let Some(grown)=outgrown(&pilot_estimates,reach,pilot_candidate.reference().1){return run_at(request,grown,device,checkpoint);}
     // The fold's memory (module documentation, # Ledger): per pilot atom its jumps at the outputs; the pilot's
     // initial states, where the charge starts.
     let memory=Memory::of(&pilot_states,interval,outputs);
     let charge_of=|from:&Model,m:&Model|measured_charge(from,m,&pilot_states,&starts,&memory,interval,outputs);
     let charge=charge_of(&pilot_candidate.model,&pilot_candidate.model);pilot_candidate.charged(charge);
-        // The pilot's statistics per output (its trajectories each a group of one, with the harmonic control): CONFIDENCE
-    // standard errors, the populations' and the loss's largest and T's with its regime's weight (`statistics`). The
-    // trajectories a model needs are (statistic/room)² times the pilot's at the output and target that bind (`predicted`).
-    let(pilot_statistics,ceilings):(Vec<Statistic>,Vec<f64>)={
-        let scales=Scales{hbar_over_mass:pilot_candidate.model.hbar_over_mass,frequencies:trap.lab};
-        let mut e=summarize(&pilot_groups,&scales,&pilot_harmonic.mean);start(&mut e[0],&pilot_candidate.initial);
-        (statistics_of(&e,trap.lab),e.iter().map(|x|ceiling(x,trap.lab)).collect())
-    };
+    // The pilot's statistics per output: CONFIDENCE standard errors, the populations' and the loss's largest and T's with its
+    // regime's weight (`statistics`). The trajectories a model needs are (statistic/room)² times the pilot's at the output and
+    // target that bind (`predicted`).
+    let(pilot_statistics,ceilings):(Vec<Statistic>,Vec<f64>)=(statistics_of(&pilot_estimates,trap.lab),pilot_estimates.iter().map(|x|ceiling(x,trap.lab)).collect());
     // T's target's weight per output where the pilot's atoms are: over the states, where T's criteria read (`regime`, `binding_at`), and at its upper bound against the step's tolerance (`ceiling`, `tolerances`).
     let weights:Vec<f64>=pilot_statistics.iter().map(|s|s.weight).collect();
     // The relative standard error of the need the pilot predicts (`need_error`): the margin a finer step must save
@@ -1945,6 +1977,8 @@ fn assemble(model:&Model,records:&[Record],outcome:&Outcome,listed:&[usize],time
     let mut flag=|note:String|ledger.flagged=Some(match ledger.flagged.take(){Some(r)=>format!("{note}；{r}"),None=>note});
     if let Some(gone)=(0..estimates.len()).find(|&i|!held(i)){flag(format!("{} 起已无原子被俘获（丢失概率 1）：此后的布居、温度与分布沿用 {} 的值，仅供参考",when(times[gone]),when(times[source[gone]])));}
     if let Some(few)=(0..estimates.len()).find(|&i|held(i)&&!read(i)){flag(format!("{} 起有时刻被俘获的原子不足两个：这些时刻的温度沿用此前的值，误差未知",when(times[few])));}
+    // The rule's reach (module documentation, # The reach): T past the temperature the model was judged at.
+    if let Some(i)=past_reach(&estimates,model.ground.temperature_uk){flag(format!("{} 起温度超出折叠判定时所取的原子范围（{:.0} μK）：原子此后所及之处的折叠未经判定，误差未计入",when(times[i]),model.ground.temperature_uk));}
     let carried=|f:&dyn Fn(&Estimate)->[f64;3]|->Vec<[f64;3]>{measured.iter().map(|&j|f(estimates[j])).collect()};
     Solution{
         populations:source.iter().map(|&j|if j==0{first.clone()}else{estimates[j].populations.clone()}).collect(),

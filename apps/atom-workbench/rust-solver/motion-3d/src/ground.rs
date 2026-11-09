@@ -551,9 +551,11 @@ pub struct Ground{
     /// The atom's mass (kg), used in the Hessian of the preparation potential.
     pub mass_kg:f64,
     /// Per unit, its least intensity within the atom's reach (`Ground::reach`): 1 for a plane wave; and the atoms' reach in speed
-    /// (um/us), the thermal ellipsoid's in momentum, within ln(1/`BUDGET`) k_B T as its reach in position.
+    /// (um/us), the thermal ellipsoid's in momentum, within ln(1/`BUDGET`) k_B T as its reach in position; T (uK) the
+    /// temperature the reach is judged at, the request's or the largest the atoms come to over the run (solve.rs, # The reach).
     pub reach:Vec<f64>,
     pub speed:f64,
+    pub temperature_uk:f64,
     /// The all-folded reference state's well and frequencies before state selection.
     pub trap:Trap,
     /// The couplings of the excited states, classified, with the closure's verdicts.
@@ -896,8 +898,10 @@ impl Ground{
     pub fn with(request:&Request,allowance:f64)->Result<Ground,String>{Ground::bare(request)?.clustered(allowance)}
     /// The rule at an allowance on a generator before it (`bare`), which a solve's candidates share.
     pub(crate) fn clustered(&self,allowance:f64)->Result<Ground,String>{let mut ground=self.clone();ground.cluster_states(allowance)?;Ok(ground)}
-    /// A request's generator before the rule: its states, components, carriers and reach.
-    pub(crate) fn bare(request:&Request)->Result<Ground,String>{
+    /// A request's generator before the rule: its states, components, carriers and reach (at the request's temperature).
+    pub(crate) fn bare(request:&Request)->Result<Ground,String>{Ground::bare_at(request,request.temperature_uk)}
+    /// The same with the reach judged at a temperature (uK): the largest the atoms come to over the run (solve.rs, # The reach).
+    pub(crate) fn bare_at(request:&Request,temperature_uk:f64)->Result<Ground,String>{
         let labels=request.states.iter().map(|s|level(s)).collect::<Result<Vec<_>,_>>()?;
         let ground_states:Vec<usize>=(0..STATES).filter(|&i|labels[i].0=="ground").collect();
         let excited_states:Vec<usize>=(0..STATES).filter(|&i|labels[i].0!="ground").collect();
@@ -960,9 +964,9 @@ impl Ground{
         let mut excited_groups:Vec<Vec<usize>>=vec![];let mut manifolds:Vec<&str>=vec![];
         for(i,&s)in excited_states.iter().enumerate(){match manifolds.iter().position(|&m|m==labels[s].0){Some(m)=>excited_groups[m].push(i),None=>{manifolds.push(labels[s].0);excited_groups.push(vec![i]);}}}
         let duration=request.times_us.last().copied().unwrap_or(0.).max(0.);
-        let speed=(2.*BUDGET.recip().ln()*crate::stats::KT_PER_UK*request.temperature_uk*crate::model::HBAR/request.mass_kg*1e6).sqrt();
+        let speed=(2.*BUDGET.recip().ln()*crate::stats::KT_PER_UK*temperature_uk*crate::model::HBAR/request.mass_kg*1e6).sqrt();
         let mut ground=Ground{ground_states,excited_states,levels,decay,emission,beams:request.beams.clone(),folded:couplings.clone(),couplings,hamiltonian,units,outside:unit_outside,folds:unit_folds,interference,
-            components,l0,carriers,duration,mass_kg:request.mass_kg,reach:vec![],speed,excited_items:vec![],charge:0.,items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![],
+            components,l0,carriers,duration,mass_kg:request.mass_kg,reach:vec![],speed,temperature_uk,excited_items:vec![],charge:0.,items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![],
             explicit_of:vec![],excited_groups,dressed:vec![],vias:vec![],near_units:vec![],dressing:false,floors:vec![],unmixed:vec![],unmixed_error:0.,channel_poles:vec![],trap:Trap::none()};
         (ground.reach,ground.trap)=ground.reach(request);
         Ok(ground)
@@ -1389,7 +1393,7 @@ impl Ground{
         if request.beams.get(request.trap_beam).and_then(|b|b.waist_um).is_none(){return unconfined(Trap::none());}
         let trap=self.holding(self.reference_state(request).unwrap(),request.trap_beam);
         let hm=crate::model::HBAR/request.mass_kg*1e6;
-        let reach:[f64;3]=trap.frequencies.map(|w|thermal_reach(w,request.temperature_uk,hm).unwrap_or(f64::INFINITY));
+        let reach:[f64;3]=trap.frequencies.map(|w|thermal_reach(w,self.temperature_uk,hm).unwrap_or(f64::INFINITY));
         if reach.iter().any(|x|!x.is_finite()){return unconfined(trap);}
         (self.units.iter().map(|u|if !u.varies(&self.beams){1.}else{
             reach_points(trap.centre,&trap.axes,reach,u.beams.len()>1).into_iter().map(|r|{let a=self.amplitudes_at(r);u.intensity(|l|a[l])}).fold(1_f64,f64::min)}).collect(),trap)
