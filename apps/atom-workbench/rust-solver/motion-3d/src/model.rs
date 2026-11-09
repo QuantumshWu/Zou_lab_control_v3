@@ -95,8 +95,16 @@
 //! dressing): the elimination at each node takes it, each near carrier's field at its units'
 //! intensities there, and the tables hold the dressed responses -- the folded pairs' far channels in
 //! their denominators, where the release added their first order as van Vleck paths. What the
-//! dressing leaves out (a carrier's beams' interference, its next order) is bounded at each node
-//! against the pole, its largest over the tables in the ledger (`Model::dressing`).
+//! dressing leaves out is bounded at each node against the pole (`Ground::dressing_bounds`): its next
+//! order, the intermediates' energies, and the interference of a carrier's units taken apart -- the
+//! tables hold intensities, not the beams' phases, so their dressing is the light pattern's mean. That
+//! interference is measured where the atoms go, the bound kept for the share of them its points may
+//! miss (`Model::measure_dressing`): the generator with each carrier's beams' coherent sum at a point
+//! against its units apart. Every beam at its peak and in phase, with the most resonant column's slope
+//! and the strongest coupling's share, the bound over-counts it 50-2000 times (thermal points: PGCP_10's
+//! probe rung 4.3e-4 at most against 1.1-2.0e-2 there, the 3D PGC 5e-6 against 2.9e-4, a 1D molasses
+//! 1.3e-6 against 2.9e-3): a light shift's interference of several rad/us moves the responses nearly
+//! orthogonally to their couplings.
 //!
 //! # The photons and the Doppler term
 //! The photon of axis x scattered from carrier c leaves the atom in C_x A_c ψ = −C_x R_c ψ, from the
@@ -725,10 +733,12 @@ pub struct Model{
     pub table_error:f64,
     pub table_limit:Option<usize>,
     pub table_stalled:bool,
-    /// The near light's dressing (ground.rs `Ground::dressing_bounds`), relative to the generator's
-    /// scale, its largest over the tables' nodes inside the reach's intensities (as `resonance`): the bound
-    /// of what it leaves out.
+    /// What the near light's dressing leaves out, relative to the generator's scale (`measure_dressing`): its bound's
+    /// largest over the tables' nodes inside the reach's intensities (ground.rs `Ground::dressing_bounds`, as `resonance`),
+    /// or, where it pays, the units' interference measured at `dressing_points` points of the atoms' reach, the bound for
+    /// the share they may miss.
     pub dressing:f64,
+    pub dressing_points:usize,
     /// The fourth order's H^(4) entries left out at beats the second order folds: their mixings' squares
     /// (`FourthLayout`).
     pub fourth_dropped:f64,
@@ -790,6 +800,8 @@ fn first_coefficients(lambda_s:Complex,lambda_q:Complex)->(Complex,Complex){
 /// What a booked population error e costs a run, in runs: its trajectories go as the inverse square of the room its estimates leave the statistics, 1/(1 − e/ε)² of itself against the
 /// whole target ε (2e/ε at first order); no number of them reaches the target past it.
 fn room_cost(e:f64)->f64{let room=1.-e/POPULATION_TARGET;if room>0.{1./(room*room)}else{f64::INFINITY}}
+/// The radical inverse of i ≥ 1 in a base, Halton's sequence: its digits mirrored about the point, within (0, 1).
+fn radical_inverse(mut i:usize,base:usize)->f64{let(mut x,mut f)=(0.,1./base as f64);while i>0{x+=(i%base) as f64*f;i/=base;f/=base as f64;}x}
 
 /// The pairs k′ ≤ k of a Hermitian group of rank r, or every (k′, k) of ranks (r′, r).
 /// Each state's wave vector on the atom's path (module documentation, # The atom's path): zero at the first state of each tree, one along what `held` couples, and across each of the `edges` (size, row, column, beam's wave vector), the strongest
@@ -839,7 +851,7 @@ impl Model{
         // again in the layouts `prune` leaves (`regrid`).
         if !model.within(FIRST_NODES,FIRST_NODES,most_bytes,most_nodes){return Err(model.beyond());}
         let first=model.prune(&bases)?;
-        let stake=model.stake(request);model.tabulate(&bases,first,most_bytes,most_nodes,stake)?;
+        let stake=model.stake(request);model.tabulate(&bases,first,most_bytes,most_nodes,stake)?;model.measure_dressing(stake);
         model.linear=model.layouts.iter().map(|l|(0..l.n).map(|_|Default::default()).collect()).collect();
         let reach=model.ground.temperature_uk;model.transfer_tables(reach);
         model.lindblad()?;
@@ -891,7 +903,7 @@ impl Model{
             c.interfering=(0..n*n).map(|x|(x/n,x%n)).filter(|&(j,m)|j!=m&&of(j)==of(m)&&trap_light.contains(&c.beams[j])&&trap_light.contains(&c.beams[m])).collect();}
         let centre=ground.trap.centre;
         let mut model=Model{ground,geometry,trap_beam,trap_beams,trap_light,focused:vec![trap_unit],axes:vec![],held:vec![],weights:vec![],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
-            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3],work:0.},linear:vec![],table_error:0.,table_limit:None,table_stalled:false,dressing:0.,fourth_dropped:0.,effective_dropped:0.,first_error:0.,resonance:0.,ringing_spread:0.,reach:vec![centre],
+            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3],work:0.},linear:vec![],table_error:0.,table_limit:None,table_stalled:false,dressing:0.,dressing_points:0,fourth_dropped:0.,effective_dropped:0.,first_error:0.,resonance:0.,ringing_spread:0.,reach:vec![centre],
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
         model.choose_profiles()?;
         model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();model.effective_dropped=model.layouts.iter().map(|l|l.effective_dropped).sum();
@@ -1597,6 +1609,58 @@ impl Model{
     fn within(&self,n:usize,coarse:usize,most_bytes:usize,most_nodes:usize)->bool{fits(self.focused.len() as u32,self.entries(),n,coarse,most_bytes,most_nodes)}
     /// Why tables beyond the work bounds are not made.
     fn beyond(&self)->String{format!("The elimination's tables take {} complex entries per node: beyond the work bounds",self.entries())}
+    /// The near light's dressing where the atoms go (module documentation, # The near light's dressing): the interference of each
+    /// near carrier's units, which the tables' dressing leaves out, measured at points of the atoms' reach (`dressing_point`), its
+    /// bound (the tables' largest, `dressing`) only for the share the points may miss. At each point what the dressing leaves out
+    /// (`dressing_at`); the booked estimate is its mean over N points plus the bound times the share of atoms N points may have
+    /// missed (solve.rs `unseen`, as `with_open` books the elimination's), at most the bound. N doubles from none while the next
+    /// points' counted work pays for what their smaller estimate saves the run (cost.rs `pays`, `stake` at `room_cost`, as the
+    /// tables' grid), the first points predicted at two eliminations each (the tables' counted work per node) and no interference
+    /// at all; it stops where the measured mean alone leaves no room. A point whose eliminations cannot be read (a resolvent singular
+    /// there) takes the bound. Without a near carrier of two units there is no interference, and its bound stands, as where no point pays.
+    fn measure_dressing(&mut self,stake:f64){
+        let(g,bound)=(&self.ground,self.dressing);
+        if !g.dressing||bound==0.||(0..g.carriers.len()).all(|d|g.near_units.iter().flatten().filter(|u|u.carrier==d).count()<2){return;}
+        let mut eigen=g.clone();eigen.unmixed=vec![];
+        let point=|i:usize|->f64{let(r,t)=self.dressing_point(i);self.dressing_at(&eigen,r,t).map_or(bound,|(change,left)|change+left)};
+        let estimate=|mean:f64,n:usize|if n==0{bound}else{bound.min(mean+bound*crate::solve::unseen(n as f64))};
+        let(nodes,d)=(self.tables.nodes,self.focused.len() as u32);let computed=if nodes>FIRST_NODES{nodes.pow(d)-nodes.div_ceil(2).pow(d)}else{nodes.pow(d)};
+        let(mut n,mut sum,mut spent,mut per_point)=(0,0.,0.,2.*self.tables.work/computed.max(1) as f64);
+        loop{
+            let(next,mean)=((2*n).max(1),if n>0{sum/n as f64}else{0.});
+            if next>MOST_TABLE_NODES||mean>=POPULATION_TARGET{break;}
+            let(now,then)=(estimate(mean,n),estimate(mean,next));
+            if room_cost(now).is_finite()&&!pays(COMPLEX_MULTIPLY_ADD_NS*(next-n) as f64*per_point,stake*(room_cost(now)-room_cost(then)),0.){break;}
+            let batch:Vec<(f64,f64)>=(n+1..=next).into_par_iter().map(|i|{let before=crate::linear::counted();let f=point(i);(f,crate::linear::counted()-before)}).collect();
+            for(f,w)in batch{sum+=f;spent+=w;}
+            n=next;per_point=spent/n as f64;
+        }
+        self.dressing=estimate(if n>0{sum/n as f64}else{0.},n);self.dressing_points=n;
+    }
+    /// Point i ≥ 1 of the dressing's measure (`measure_dressing`), (r, t): r of the thermal ensemble at the reach's temperature in
+    /// the reference trap (ground.rs `Ground::trap`; per principal axis a normal of σ = v_T/ω), t uniform over the run (the beats'
+    /// phases) -- Halton's sequence in bases 2, 3, 5 and 7 (`radical_inverse`, through the normal's quantile): the same points on any
+    /// machine, a doubling keeping the ones before.
+    fn dressing_point(&self,i:usize)->([f64;3],f64){
+        let(g,u):(&Ground,[f64;4])=(&self.ground,std::array::from_fn(|k|radical_inverse(i,[2,3,5,7][k])));let trap=&g.trap;
+        let thermal=(KT_PER_UK*g.temperature_uk*self.hbar_over_mass).sqrt();let mut r=trap.centre;
+        for a in 0..3{if trap.frequencies[a]>0.{let z=thermal/trap.frequencies[a]*crate::rng::normal_quantile(u[a]);for x in 0..3{r[x]+=trap.axes[a][x]*z;}}}
+        (r,u[3]*g.duration)
+    }
+    /// What the dressing leaves out at a point (r, t) (`measure_dressing`), relative to the generator's scale: the generator's largest
+    /// column change between the elimination with each near carrier's beams' coherent sum there and with its units apart (`Ground::eliminate_with`,
+    /// `Ground::local_at`), measured, and the bound the dressing leaves with the fields whole (its next order, the intermediates' energies,
+    /// the terms left out: `Ground::dressing_bounds_with`); `eigen` the model's ground with every block by its eigenstates.
+    fn dressing_at(&self,eigen:&Ground,r:[f64;3],t:f64)->Result<(f64,f64),String>{
+        let(x,amplitudes)=(self.intensities_at_point(r),eigen.amplitudes_at(r));
+        let(apart,whole)=(eigen.eliminate(&x)?,eigen.eliminate_with(&x,Some(&amplitudes))?);
+        let mut change=0_f64;
+        for k in 0..eigen.clusters.len(){
+            let(a,b)=(eigen.local_at(&apart,k,r,t)?.effective,eigen.local_at(&whole,k,r,t)?.effective);
+            for j in 0..a.cols{change=change.max((0..a.rows).map(|i|(b[(i,j)]-a[(i,j)]).norm_sqr()).sum::<f64>().sqrt());}
+        }
+        Ok((change/eigen.generator_scale.max(f64::MIN_POSITIVE),eigen.dressing_bounds_with(&whole,&x,Some(&amplitudes))?))
+    }
 
     /// The first order's tables from W^S and W^Q on the settled grid (module documentation, # The photons and the Doppler term): per group and
     /// node λ^S and λ^Q, their least squares on Q over the group's pairs and entries, into their places; and what they leave of each pair
@@ -3165,6 +3229,23 @@ mod tests{
         // Over a run the same gain is refused only where the norm it grows can show: not over a nanosecond, over ten seconds.
         model.ground.duration=1e-3;assert!(model.lindblad().is_ok());
         model.ground.duration=1e7;assert!(model.lindblad().is_err());
+    }
+    /// The near light's dressing where the atoms go (`Model::measure_dressing`): on the tweezer PGC over 1 ms, its cooling and repump
+    /// carriers two beams each, the units' interference is measured at points of the reach, the estimate at most the tables' bound
+    /// and at least that bound's share for the atoms the points may miss; at each point the generator's change measured, the beams'
+    /// coherent sum against their units apart, lies within the bound there (`Ground::dressing_bounds`), which over-counts it.
+    #[test]
+    fn the_dressing_s_interference_is_measured_within_its_bound(){
+        let f:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/tweezer_pgc.json")).unwrap();
+        let mut r=crate::ground::tests::request(&f["request"]);r.times_us=(0..=100).map(|i|10.*i as f64).collect();
+        let m=Model::new(&r).unwrap();let(g,bound,n)=(&m.ground,m.tables.reach[0],m.dressing_points);
+        assert!(n>0&&m.dressing<=bound&&m.dressing>=bound*crate::solve::unseen(n as f64),"{:e} at {n} points against {bound:e}",m.dressing);
+        let mut eigen=g.clone();eigen.unmixed=vec![];
+        for i in 1..=8{
+            let(p,t)=m.dressing_point(i);let(change,_)=m.dressing_at(&eigen,p,t).unwrap();
+            let x=m.intensities_at_point(p);let here=g.dressing_bounds(&g.eliminate(&x).unwrap(),&x).unwrap();
+            assert!(change>0.&&change<=here,"point {i} at {p:?}: {change:e} against the bound {here:e}");
+        }
     }
     /// Residuals within the round-off of zero are static and of each other one beat; the beats come in
     /// pairs ±Ω.
