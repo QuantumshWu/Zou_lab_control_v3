@@ -276,8 +276,8 @@
 //! On the GPU a wave's time grows with its trajectories (a laptop's RTX 5070 at the 3D PGC's step: 2.1 s for 8, 2.7 for 256, 3.96 for 576 -- its clock falls with the load, its cycles per step about stay), and a wave costs at least a trajectory's time as far as it goes, so that its first
 //! wave runs what the pilot predicts is needed and the need's own error (`first_ends`), each group as far as the reach wants it: a group that stops early leaves the others its clock. (Over 12 seeds: the need alone ran a second wave on 4 of DEFAULT's and 7 of THREE's, against 1 and 2 with its error; twice its error took the kernel's mean up 4-17 % on GMD1C, TET and PGC3D.)
 //! T rests on the atoms still held, and its statistic stands at the share of atoms it reads, its relative error times the held share, as a population's below: read among the held atoms alone a share f would ask 1/f the trajectories, for the T of atoms the light has mostly blown out (a probe at 100 mW/cm², 97 % lost by 25 us: 16384 trajectories, the cap, against 7300-8100). Its need goes as that share, 8 f/R² with x = f N atoms' relative error √(2/x) and R its room, from nothing with no atom held: at the root of the share every count from two asked 8/R² and none or one nothing, so that on a probe at 1 W/cm², 96-98 % lost at its first output of 50 us, a first batch's 2 or 3 held atoms went on to 800-2000 trajectories for T's of a few atoms and one holding fewer stopped at 80; at the share all stop at 80. The reported errors stay T's own, of one estimate (`Record::temperature_errors`): where few atoms remain the output says so.
-//! The populations' target is the app's, whose rows are the probabilities p (1 − L) that the atom is in a state and still held, beside the loss L, adding up to one: a population's statistic, and its reported error, are its error among the held atoms times the held share (`shown_error`), the loss's as it is. Read among the held atoms alone they asked those 7300-8100 of that probe, about 1000 now, and of a probe at 10 W/cm², 99.5 % lost by 600 us, 130 000-420 000 for numbers shown at 0.5 % of their size.
-//! One share per kind (`held_share`), statistics and model items alike: an error of a held-atom quantity -- a population shown as p (1 − L), T -- weighs at the held share, whether
+//! The populations' target is the app's, whose rows are the probabilities p (1 − L) that the atom is in a state and still held, beside the loss L, adding up to one: a population's statistic, and its reported error, are the row's own (`shown_error`, stats.rs `Estimate::shown_errors`), the jackknife of p (1 − L) itself, the loss's as it is. Read among the held atoms alone they asked those 7300-8100 of that probe, about 1000 now, and of a probe at 10 W/cm², 99.5 % lost by 600 us, 130 000-420 000 for numbers shown at 0.5 % of their size; their error among the held atoms times the held share left the loss's variance out (RETRO's dominant state at 100 us: 0.0008 against a spread of 0.0110 between disjoint runs of the solve's size, CONTROL_CYCLE's rows outside two of those errors at 28 % of its outputs, against 3 % read on the rows themselves).
+//! One share per kind (`held_share`), statistics and model items alike: an error of a held-atom quantity -- T, a population's model items -- weighs at the held share, whether
 //! its statistic or a model item (the fold's charge, the first-order Doppler term, the ledger's estimates, `Measured`), and the loss as it is; a model item counted whole beside a
 //! statistic at the held share flagged an output 94 % lost for an error of 6 % among its last atoms (R5040), and the choice weighs the same totals.
 //! What is too few to read has two forms. A spread takes two samples (stats.rs `reads_spread`): two atoms for a T, two groups for a standard error. A count of none takes more, as far as its room asks:
@@ -460,8 +460,8 @@ fn ceiling(e:&Estimate,frequencies:[f64;3])->f64{weight_at(std::array::from_fn(|
 fn weight_at(temperature:[f64;3],frequencies:[f64;3])->f64{
     (0..3).filter(|&a|frequencies[a]>0.).map(|a|(KT_PER_UK*temperature[a]/(CLASSICAL*frequencies[a])).max(0.)).fold(1_f64,f64::min).powi(2)
 }
-/// An output's largest error at z standard errors of what is shown of the atom (# Batches, stats.rs `Spread`): a population as the probability p (1 − L) that it is in that state and held, its error among the held atoms times the held share, and the loss's.
-fn shown_error(e:&Estimate,z:f64)->f64{let held=held_share(e);e.population_errors.iter().map(|x|x.scaled(held).at(z)).fold(e.loss_error.at(z),f64::max)}
+/// An output's largest error at z standard errors of what is shown of the atom (# Batches, stats.rs `Spread`): each row as the probability p (1 − L) that it is in that state and held (stats.rs `Estimate::shown_errors`), and the loss's.
+fn shown_error(e:&Estimate,z:f64)->f64{e.shown_errors.iter().map(|x|x.at(z)).fold(e.loss_error.at(z),f64::max)}
 /// The share of atoms an output's held-atom quantities are read on (# Batches), the one weight of their errors, statistics and model items
 /// alike (`statistics`, `Measured`): its populations, shown as p (1 − L), and its T at the held share 1 − L; the loss as it is.
 fn held_share(e:&Estimate)->f64{(1.-e.loss).max(0.)}
@@ -2106,26 +2106,27 @@ mod tests{
     /// the app shows and stays within the 5 % target, as its statistic does; no atom held, none of either. The loss's own statistic stands unscaled.
     #[test]
     fn model_items_weigh_at_the_share_their_atoms_are_read_on(){
-        let apriori=Apriori{rest:0.01,peak:0.};let mut e=Estimate::default();e.population_errors=vec![spread(0.02)];e.temperature=[10.;3];e.temperature_error=[spread(1.);3];
+        let apriori=Apriori{rest:0.01,peak:0.};let mut e=Estimate::default();e.shown_errors=vec![spread(0.02)];e.temperature=[10.;3];e.temperature_error=[spread(1.);3];
         let item=|e:&Estimate|Measured{charge:[0.08,0.08*std::f64::consts::SQRT_2],transfer:0.01,held:held_share(e),..Measured::default()};
         let whole=apriori.at(item(&e));let s0=statistics(&e,[1.;3]);assert!((whole[0]-0.09).abs()<1e-15&&(whole[1]-(0.02+0.08*std::f64::consts::SQRT_2)).abs()<1e-15,"{whole:?}");
-        e.loss=0.75;let quarter=apriori.at(item(&e));let s1=statistics(&e,[1.;3]);
+        e.loss=0.75;let quarter=apriori.at(item(&e));
         for k in 0..2{assert!((quarter[k]-0.25*whole[k]).abs()<1e-15,"{quarter:?}");}
+        // The rows' statistics are their own errors as shown (stats.rs `Estimate::shown_errors`), a quarter held reading a quarter of the rows' sums.
+        e.shown_errors=vec![spread(0.25*0.02)];let s1=statistics(&e,[1.;3]);
         assert!((s1.population-0.25*s0.population).abs()<1e-15&&(s1.temperature-0.25*s0.temperature).abs()<1e-15);
         let account=Account{statistic:s1.population,open:0.,bias:0.,model:quarter[0],target:POPULATION_TARGET};assert!(whole[0]>POPULATION_TARGET&&account.total()<POPULATION_TARGET,"{}",account.total());
         e.loss=1.;assert_eq!(apriori.at(item(&e)),[0.;2]);assert_eq!(statistics(&e,[1.;3]).temperature,0.);
         e.loss_error=spread(0.03);assert_eq!(statistics(&e,[1.;3]).population,CONFIDENCE*0.03);
         assert_eq!(Measured::charge([0.04,0.05]).held,1.);
     }
-    /// A population's statistic is its error as the app shows it: among the held atoms at no loss, a quarter of that with a quarter of the atoms held, the loss's own where that is the larger; a single group's infinite errors stay so, lost or not.
+    /// A population's statistic is its error as the app shows it: the largest of the rows' own (stats.rs `Estimate::shown_errors`) and the loss's, whatever the share held; a single group's infinite errors stay so, lost or not.
     #[test]
     fn a_population_s_statistic_is_its_error_as_shown(){
-        let mut e=Estimate::default();e.population_errors=vec![spread(0.2),spread(0.1)];e.loss_error=spread(0.01);let at=|e:&Estimate|statistics(e,[1.;3]).population;
+        let mut e=Estimate::default();e.shown_errors=vec![spread(0.2),spread(0.1)];e.loss_error=spread(0.01);let at=|e:&Estimate|statistics(e,[1.;3]).population;
         assert!((at(&e)-CONFIDENCE*0.2).abs()<1e-15);
-        e.loss=0.75;assert!((at(&e)-CONFIDENCE*0.05).abs()<1e-15);
-        e.loss=0.99;assert!((at(&e)-CONFIDENCE*0.01).abs()<1e-15);
-        e.loss=1.;assert_eq!(at(&e),CONFIDENCE*0.01);
-        e.population_errors=vec![spread(f64::INFINITY);2];e.loss_error=spread(f64::INFINITY);assert_eq!(at(&e),f64::INFINITY);e.loss=0.5;assert_eq!(at(&e),f64::INFINITY);
+        e.loss=0.75;assert!((at(&e)-CONFIDENCE*0.2).abs()<1e-15);
+        e.shown_errors=vec![spread(0.005),spread(0.001)];assert!((at(&e)-CONFIDENCE*0.01).abs()<1e-15);
+        e.shown_errors=vec![spread(f64::INFINITY);2];e.loss_error=spread(f64::INFINITY);assert_eq!(at(&e),f64::INFINITY);e.loss=0.5;assert_eq!(at(&e),f64::INFINITY);
     }
     /// What trajectories alike leave open (`unseen`): 16 atoms all lost leave 20 % possible, a jackknife's zero says nothing of it. An output's populations and loss take at least the trajectories that bring it within their room, 76 at the target, in the pilot's prediction and in a run's
     /// ratio alike; beyond them it asks nothing, and a statistic above it stands. The reported error is at least its far end.

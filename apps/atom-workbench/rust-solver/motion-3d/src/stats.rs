@@ -67,10 +67,10 @@ impl Group{
 }
 
 /// A quantity's statistical error, from its jackknife over the groups behind an estimate (`summarize`): its standard error,
-/// the groups that read it -- every group that reaches the output for the loss, those holding an atom there for the held
-/// atoms' quantities -- and the skew of the group values, their third central moment over their second per group
-/// (`skew`). An error at z standard errors reads it through one definition: the interval's distances below and above the
-/// value (`below`, `above`), the larger of them (`at`).
+/// the groups that read it -- every group that reaches the output for the loss and the rows as shown, those holding an atom
+/// there for the held atoms' quantities -- and the skew of the group values, their third central moment over their second
+/// per group (`skew`). An error at z standard errors reads it through one definition: the interval's distances below and
+/// above the value (`below`, `above`), the larger of them (`at`).
 #[derive(Clone,Copy,Debug,PartialEq)]
 pub struct Spread{pub error:f64,pub groups:f64,pub skew:f64}
 impl Default for Spread{fn default()->Spread{Spread::EXACT}}
@@ -79,8 +79,6 @@ impl Spread{
     pub const EXACT:Spread=Spread{error:0.,groups:f64::INFINITY,skew:0.};
     /// Too few groups to read a spread on (`reads_spread`): its error unknown.
     fn unread(groups:f64)->Spread{Spread{error:f64::INFINITY,groups,skew:0.}}
-    /// The same quantity times a factor: a held atoms' row as shown, at the held share.
-    pub fn scaled(self,factor:f64)->Spread{Spread{error:factor*self.error,skew:factor*self.skew,..self}}
     /// The distances of its interval at z standard errors below the value and above it.
     pub fn below(&self,z:f64)->f64{z*self.error}
     pub fn above(&self,z:f64)->f64{z*self.error}
@@ -105,6 +103,11 @@ pub struct Estimate{
     pub occupation_error:[Spread;3],
     pub populations:Vec<f64>,
     pub population_errors:Vec<Spread>,
+    /// The errors of the rows as the app shows them, p (1 − L) the probability that the atom is in a state and held: each
+    /// row's own jackknife, of its sum over every trajectory reaching the output, so that the loss's variance and
+    /// covariance are in it -- (1 − L) times its error among the held atoms left them out, RETRO's dominant state at
+    /// 100 us 0.0008 where its rows spread 0.0110 between disjoint runs of the solve's size (the own jackknife 0.0100).
+    pub shown_errors:Vec<Spread>,
     /// The probability that the atom has been lost, and its error.
     pub loss:f64,
     pub loss_error:Spread,
@@ -144,9 +147,9 @@ pub fn estimate(g:&Sums,s:&Scales,correction:Option<&Correction>)->Estimate{
         folded:if n>0.{g.folded/n}else{0.},profile:if n>0.{g.profile/n}else{0.},doppler:if n>0.{g.doppler/n}else{0.},..Default::default()}
 }
 /// What the jackknife spreads (`summarize`), of `estimate`: no allocation per group left out.
-struct Moments{temperature:[f64;3],temperature_total:f64,occupation:[f64;3],populations:[f64;STATES],loss:f64}
+struct Moments{temperature:[f64;3],temperature_total:f64,occupation:[f64;3],populations:[f64;STATES],shown:[f64;STATES],loss:f64}
 fn moments(g:&Sums,s:&Scales,correction:Option<&Correction>)->Moments{
-    let n=g.held;let all=g.trajectories;let mut e=Moments{temperature:[0.;3],temperature_total:0.,occupation:[0.;3],populations:[0.;STATES],loss:1.-n/all};
+    let n=g.held;let all=g.trajectories;let mut e=Moments{temperature:[0.;3],temperature_total:0.,occupation:[0.;3],populations:[0.;STATES],shown:[0.;STATES],loss:1.-n/all};
     if n<=0.{return e;}
     let mut kappa2=g.kappa2;
     if let Some(c)=correction{for a in 0..3{kappa2[a]-=c.harmonic[a]*(g.harmonic[a][0]-all*c.means[a]);}}
@@ -156,7 +159,7 @@ fn moments(g:&Sums,s:&Scales,correction:Option<&Correction>)->Moments{
         let w=s.frequencies[a];e.occupation[a]=if w>0.{second*s.hbar_over_mass/w-0.5}else{0.};
     }
     e.temperature_total=e.temperature.iter().sum::<f64>()/3.;
-    for k in 0..STATES{e.populations[k]=g.populations[k]/n;}
+    for k in 0..STATES{e.populations[k]=g.populations[k]/n;e.shown[k]=g.populations[k]/all;}
     e
 }
 /// Whether so many independent samples read a spread: a variance has one degree of freedom fewer than its samples, so it takes two. What is too few to read
@@ -191,14 +194,15 @@ pub fn summarize<G:std::borrow::Borrow<Group>+Sync>(groups:&[G],s:&Scales,means:
         let mut all=Sums::zero();for x in &present{all.add(x,1.);}
         let correction=means.get(i).map(|&m|Correction::new(&all,m));let m=correction.as_ref();
         let mut e=estimate(&all,s,m);e.groups=count as f64;
-        // The groups that read each quantity: every one the loss, those holding an atom the held atoms'.
+        // The groups that read each quantity: every one the loss and the rows as shown, those holding an atom the held atoms'.
         let(every,holding)=(count as f64,present.iter().filter(|x|x.held>0.).count() as f64);
-        if !reads_spread(count as f64){let held=Spread::unread(holding);
-            e.population_errors=vec![held;STATES];e.temperature_error=[held;3];e.temperature_total_error=held;e.occupation_error=[held;3];e.loss_error=Spread::unread(every);return e;}
+        if !reads_spread(count as f64){let(held,all)=(Spread::unread(holding),Spread::unread(every));
+            e.population_errors=vec![held;STATES];e.temperature_error=[held;3];e.temperature_total_error=held;e.occupation_error=[held;3];e.shown_errors=vec![all;STATES];e.loss_error=all;return e;}
         let leave:Vec<Moments>=present.iter().map(|x|moments(&all.combine(x,-1.),s,m)).collect();
         for a in 0..3{e.temperature_error[a]=spread(&leave,|x|x.temperature[a],holding);e.occupation_error[a]=spread(&leave,|x|x.occupation[a],holding);}
         e.temperature_total_error=spread(&leave,|x|x.temperature_total,holding);
         e.population_errors=(0..STATES).map(|k|spread(&leave,|x|x.populations[k],holding)).collect();
+        e.shown_errors=(0..STATES).map(|k|spread(&leave,|x|x.shown[k],every)).collect();
         e.loss_error=spread(&leave,|x|x.loss,every);
         e
     }).collect()
@@ -315,7 +319,19 @@ mod tests{
         assert_eq!(p.at(2.),2.*p.error);assert_eq!(Spread::EXACT.at(2.),0.);
         let mut lost=Group::new(1,1);lost.add(0,None,[0.;3]);groups.push(lost);
         let e=&summarize(&groups,&scales,&[])[0];
-        assert_eq!((e.population_errors[0].groups,e.temperature_error[0].groups,e.loss_error.groups),(5.,5.,6.));
+        assert_eq!((e.population_errors[0].groups,e.temperature_error[0].groups,e.shown_errors[0].groups,e.loss_error.groups),(5.,5.,6.,6.));
+    }
+    /// A row as shown, p (1 − L), carries the loss's variance: every held atom in one state shows that state at 1 − L, its error
+    /// the loss's own, where its error among the held atoms is none (the held share times that read nothing of it).
+    #[test]
+    fn a_row_as_shown_carries_the_loss_s_variance(){
+        use super::*;
+        let scales=Scales{hbar_over_mass:1.,frequencies:[1.;3]};let mut population=[0.;STATES];population[0]=1.;
+        let groups:Vec<Group>=[true,true,false,true,false,true].into_iter().map(|held|{let mut g=Group::new(1,1);
+            g.add(0,held.then_some(&Atom{motion:[[0.,1.];3],populations:&population,folded:0.,profile:0.,doppler:0.}),[0.;3]);g}).collect();
+        let e=&summarize(&groups,&scales,&[])[0];
+        assert_eq!(e.population_errors[0].error,0.);assert!(e.loss_error.error>0.1);
+        assert!((e.shown_errors[0].error-e.loss_error.error).abs()<1e-15&&(e.shown_errors[0].skew+e.loss_error.skew).abs()<1e-15,"{:?} {:?}",e.shown_errors[0],e.loss_error);
     }
 
     use super::*;
