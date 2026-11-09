@@ -10,7 +10,7 @@ importing any of our packages.
 
 from __future__ import annotations
 
-from .readable import readable_json_bytes, strict_json_loads, write_readable_json
+from .readable import readable_json, readable_json_bytes, strict_json_loads, write_readable_json
 from .durability import (
     DirectoryDurabilityError,
     atomic_write_bytes,
@@ -28,6 +28,7 @@ __all__ = [
     "atomic_write_bytes",
     "atomic_write_file",
     "atomic_write_text",
+    "readable_json",
     "readable_json_bytes",
     "strict_json_loads",
     "write_readable_json",

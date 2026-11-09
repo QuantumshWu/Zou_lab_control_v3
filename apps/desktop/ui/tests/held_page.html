@@ -1,0 +1,57 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>A held page says why once</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. While a running task owns the console a node's page says so
+// once, above its rows; each row is disabled and says nothing under itself, unless it has a
+// reason of its own. When the task ends the note goes and the rows open again.
+import {LogicEditorView, projectRow} from '../dist/views/logic.js';
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const results = [];
+const check = async (name, test) => { await test(); results.push(name); };
+const shown = node => !node.hidden && node.getClientRects().length > 0;
+
+const row = {
+  node_id: 'cal', name: 'Calibration', type_id: 'calibration', node_kind: 'task', draft_revision: 1, values: {},
+  controls: [
+    {name: 'exposure', label: 'Exposure', kind: 'float', value: 1, unit: 's'},
+    {name: 'repeats', label: 'Repeats', kind: 'integer', value: 3},
+    {name: 'spacing', label: 'Spacing', kind: 'float', value: 2, unavailable_reason: 'Derived from the lattice'},
+  ],
+  source_signal: null, source_label: 'Signal', source_choices: [['camera.image', 'Camera image']],
+  device_keys: {camera: 'cam0'}, device_choices: {camera: [['cam0', 'Camera 0']]}, device_labels: {camera: 'Camera'},
+  artifact_inputs: {}, artifact_specs: [], auto_preview: false, outputs: [], issues: [], can_start: true, can_stop: false,
+  preview_offered: false, edited: false, state: 'idle', status: '', phase: 'idle', run: null, editor_facts: null,
+};
+const intents = new Proxy({}, {get: () => () => 0});
+const view = new LogicEditorView('cal', intents);
+document.body.append(view.root);
+const notes = () => [...view.root.querySelectorAll('.field-note')].filter(shown).map(node => node.textContent);
+const held = () => [...view.root.querySelectorAll('.held-note')].filter(shown).map(node => node.textContent);
+const inputs = () => [...view.root.querySelectorAll('.field-control input, .field-control select')].filter(node => node.closest('.field').querySelector('.field-label')?.textContent !== 'Name');
+
+try {
+  await check('a running task is said once, and each row keeps only its own reason', () => {
+    view.update(row, projectRow(row), {active: true, owns: false});
+    const said = held();
+    assert(said.length === 1 && /running task/.test(said[0]), `one note for the page: ${JSON.stringify(said)}`);
+    assert(JSON.stringify(notes()) === JSON.stringify(['Derived from the lattice']), `rows say only their own reasons: ${JSON.stringify(notes())}`);
+    const open = inputs().filter(node => !node.disabled);
+    assert(open.length === 0, `every row is closed: ${open.map(node => node.outerHTML.slice(0, 80))}`);
+    assert([...view.root.querySelectorAll('.field-control input')].some(node => /running task/.test(node.title)), 'a closed row says why in its tip');
+  });
+  await check('when the task ends the note goes and the rows open', () => {
+    view.update(row, projectRow(row), {active: false, owns: false});
+    assert(held().length === 0, `no note: ${JSON.stringify(held())}`);
+    assert(JSON.stringify(notes()) === JSON.stringify(['Derived from the lattice']), JSON.stringify(notes()));
+    const closed = inputs().filter(node => node.disabled).map(node => node.closest('.field').querySelector('.field-label')?.textContent.replace(/ \*$/, ''));
+    assert(JSON.stringify(closed) === JSON.stringify(['Spacing']), `only the derived row stays closed: ${JSON.stringify(closed)}`);
+  });
+  document.getElementById('result').textContent = JSON.stringify({passed: true, count: results.length, results});
+} catch (error) {
+  document.getElementById('result').textContent = JSON.stringify({passed: false, error: String(error.stack || error), results});
+}
+</script>
