@@ -204,10 +204,10 @@ impl Well for Prepared<'_> {
 /// `escape_density`): a principal axis's energy against T's target on the coldest axis's thermal energy (an axis's T is its
 /// energy over k_B: δE ≤ s ε_T k_BT); the loss energy's against the population target (an error δE carries the atoms within
 /// δE of the escape across it, a share ρ(E_esc) δE: δE ≤ s ε/ρ); the displayed rows' against the population target.
-fn tolerances(momentum: V3, density: f64, run: f64) -> Tolerances {
+fn tolerances(temperatures: V3, density: f64, run: f64) -> Tolerances {
     let [bp, bt] = step_bound();
     Tolerances {
-        axes: bt * KT_PER_UK * momentum.iter().copied().fold(f64::INFINITY, f64::min) / run,
+        axes: bt * KT_PER_UK * temperatures.iter().copied().fold(f64::INFINITY, f64::min) / run,
         energy: bp / (density * run),
         population: bp / run,
     }
