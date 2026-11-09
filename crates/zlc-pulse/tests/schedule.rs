@@ -176,3 +176,22 @@ fn duration_repeat_scaling_benchmark() {
         eprintln!("duration: 3 rows, run/scan repeats {repeats}, 5000 queries: {:?}", started.elapsed());
     }
 }
+
+/// A toggle train under a delay: 25 ticks high, 27 low, looped. Thirty-three toggles
+/// span 832 ticks; the board frees one in the cycle it plays, so a delay of 832 ticks
+/// holds 32 in flight and fits, one tick more does not, and the refusal says what fits.
+#[test]
+fn a_delay_holds_what_the_board_holds_and_says_the_longest_that_fits() {
+    let train = |delay: u64| CompiledProgram {
+        clock_hz: 50_000_000.0, target_abi_fingerprint: String::new(), geometry_fingerprint: 0,
+        channels: vec!["ch09".into()], durations: vec![25, 27], duration_slots: vec![0, 0], masks: vec![1, 0],
+        loops: vec![(0, 1, 1200)], duration_seconds: 0.0, slot_kinds: vec![], bus_names: vec![], bus_actions: vec![],
+        bus_delays: vec![], channel_delays: vec![delay], clk_enable: 0,
+        logical_digital_outputs: vec![("trap".into(), "ch09".into())], bus_safe_values: vec![],
+    };
+    let params = zlc_pulse::wire::StreamerParams::default();
+    assert_eq!(params.evt_fifo_depth, 32);
+    zlc_pulse::schedule::validate_delay_capacity(&train(832), &[], &params, 1, 1).expect("32 in flight fit");
+    let error = zlc_pulse::schedule::validate_delay_capacity(&train(833), &[], &params, 1, 1).expect_err("33 do not");
+    assert!(error.message.contains("'ch09' (trap) toggles 33 times") && error.message.contains("at most 16.64 µs"), "{}", error.message);
+}

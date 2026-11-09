@@ -483,8 +483,8 @@ export class SubpulsePage {
     this.commands = {
       new: command("New file", op("new")), open: command("Open…", op("open", {}, "Opening…")),
       save: command("Save", op("save", {}, "Saving…")),
-      // An instance in the Pulse is exported to a file; an independent file is saved as another (v2 component_view).
-      save_as: command("Save as…", () => send({ action: "pulse_subpulse", op: this.page?.context_id ? "export" : "save_as", component_id: this.page?.context_id ?? "" }, "Saving…")),
+      // A block of the Pulse or an independent file alike: Save to its file, Save as to another it then names.
+      save_as: command("Save as…", op("save_as", {}, "Saving…")),
       // v2 component_action("insert"): where the Edit page's selection says, then the new block's name ready to type.
       insert: command("Insert into Pulse", () => { edit.expectComponent(); op("insert", { before_item: edit.before() }, "Inserting…")(); }),
     };
@@ -540,8 +540,6 @@ export class SubpulsePage {
     this.choose.value = page.selected_id;
     const schedule = page.document;
     const instance = Boolean(page.context_id);
-    this.commands.save.text = instance ? "Save Pulse" : "Save";
-    this.commands.save_as.text = instance ? "Export file..." : "Save as...";
     this.commands.insert.text = instance ? "Duplicate in Pulse" : "Insert into Pulse";
     for (const [name, button] of Object.entries(this.commands)) button.disabled = page.busy || (!schedule && name !== "new" && name !== "open");
     this.commands.save.setDirty(page.dirty);
@@ -556,10 +554,10 @@ export class SubpulsePage {
       setState(this.status, record.word as "idle");
     }
     this.status.hidden = !(record && record.status && !(page.context_id && record.source !== "config"));
-    setText(this.pathLine, page.path || (instance ? "Embedded in the current Pulse" : "Unsaved Subpulse"));
+    setText(this.pathLine, page.path || (instance ? "Embedded in the current Pulse; Save as gives it a file" : "Unsaved Subpulse"));
     setTitle(this.pathLine, page.path);
     this.pathLine.hidden = !schedule || Boolean(page.selected_id);
-    setText(this.scope, instance ? "Default in Pulse — Save Pulse keeps these edits." : page.selected_id ? "Config source — Save writes this Subpulse file." : "Independent file — Save writes this file.");
+    setText(this.scope, instance ? "A block of this Pulse — Save writes its Subpulse file; saving the Pulse keeps these edits too." : page.selected_id ? "Config source — Save writes this Subpulse file." : "Independent file — Save writes this file.");
     this.hint.hidden = !schedule;
     this.toolbar.hidden = this.body.hidden = !schedule;
     this.root.classList.toggle("open", Boolean(schedule));

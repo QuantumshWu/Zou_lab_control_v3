@@ -192,16 +192,49 @@ pub fn field_label(sequence: &Sequence, reference: &FieldRef) -> Result<String> 
     })
 }
 
-/// `bracket_label`: "Bracket N" among the pulse's brackets, under its Subpulse's name.
+/// `bracket_label`: the bracket's name, under its Subpulse's name.
 pub fn bracket_label(sequence: &Sequence, bracket_id: &str) -> Result<String> {
-    let Some(ordinal) = sequence.brackets.iter().position(|bracket| bracket.bracket_id == bracket_id) else {
+    let Some(bracket) = sequence.brackets.iter().find(|bracket| bracket.bracket_id == bracket_id) else {
         return value_error(format!("no bracket exists with id {}", repr(bracket_id)));
     };
-    let label = format!("Bracket {}", ordinal + 1);
+    let label = bracket.name.clone();
     Ok(match sequence.component_for_field(&FieldRef::bracket_count(bracket_id)) {
         None => label,
         Some(component) => format!("{} / {label}", component.name),
     })
+}
+
+/// Every field the pulse has, as it reads, with its stable id: a period's duration and
+/// its DACs, each port's delay, each bracket's count.
+pub fn field_labels(sequence: &Sequence) -> Result<Vec<(String, String)>> {
+    let dacs: Vec<&str> = sequence.target.ports.iter().filter(|port| port.kind == crate::model::PortKind::Dac).map(|port| port.key.as_str()).collect();
+    let mut fields = Vec::new();
+    for period in &sequence.periods {
+        fields.push(FieldRef::duration(&period.period_id));
+        if !period.is_spacer() { fields.extend(dacs.iter().map(|port| FieldRef::dac(&period.period_id, port))); }
+    }
+    fields.extend(sequence.target.ports.iter().filter(|port| matches!(port.kind, crate::model::PortKind::Digital | crate::model::PortKind::Dac))
+        .map(|port| FieldRef::delay(&port.key)));
+    fields.extend(sequence.brackets.iter().map(|bracket| FieldRef::bracket_count(&bracket.bracket_id)));
+    fields.iter().map(|field| Ok((field_label(sequence, field)?, field.key()))).collect()
+}
+
+/// Refuses an edit after which two fields read alike that did not before: a name
+/// (of a period, a bracket, a port or a Subpulse) is how the field is asked for by
+/// label, and two fields under one label could be asked for only by id.
+pub fn refuse_new_label_clash(before: &Sequence, after: &Sequence) -> Result<()> {
+    let clashes = |sequence: &Sequence| -> Result<BTreeMap<String, Vec<String>>> {
+        let mut by_label: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (label, id) in field_labels(sequence)? { by_label.entry(label).or_default().push(id); }
+        by_label.retain(|_, ids| ids.len() > 1);
+        Ok(by_label)
+    };
+    let old = clashes(before)?;
+    for (label, ids) in clashes(after)? {
+        if old.get(&label).is_some_and(|known| known.len() >= ids.len()) { continue; }
+        return value_error(format!("two fields would both read {} ({}); choose another name", repr(&label), ids.join(" and ")));
+    }
+    Ok(())
 }
 
 /// `authored_api_entries`: every API parameter as `(value, unit)`, both the pulse's own.

@@ -396,12 +396,14 @@ select.unit-picker { flex: none; width: auto; field-sizing: content; }
 /* _StepChip: the step one notch moves by, left of the stepper -- a quiet
  * ghost in the chip's smaller font; under the pointer an ACCENT_TINT pill in
  * TEXT ink, SELECTED held down; disabled with its box.  The digits end the
- * chip's room before it, or take that room when they need it (chip-yields). */
-.spin.step-hint input { padding-right: calc(var(--combo-width) + var(--edge) + var(--qline-margin) + max(0px, var(--chip-text-w, 0px) + var(--chip-chrome))); }
-.spin.step-hint.chip-yields input { padding-right: calc(var(--combo-width) + var(--edge) + var(--qline-margin)); }
+ * chip's room before it, or take that room when they need it (chip-yields).  A box that
+ * holds something of its own before its chevrons (a source badge) says how wide in
+ * --spin-trailing: the chip and the digits both stand before it. */
+.spin.step-hint input { padding-right: calc(var(--combo-width) + var(--edge) + var(--qline-margin) + var(--spin-trailing, 0px) + max(0px, var(--chip-text-w, 0px) + var(--chip-chrome))); }
+.spin.step-hint.chip-yields input { padding-right: calc(var(--combo-width) + var(--edge) + var(--qline-margin) + var(--spin-trailing, 0px)); }
 .spin .step-chip {
   display: flex; align-items: center; justify-content: center;
-  position: absolute; top: var(--edge); bottom: var(--edge); right: calc(2 * var(--edge) + var(--combo-width) + var(--step-chip-gap));
+  position: absolute; top: var(--edge); bottom: var(--edge); right: calc(2 * var(--edge) + var(--combo-width) + var(--step-chip-gap) + var(--spin-trailing, 0px));
   height: auto; min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent;
   color: var(--muted-ink); cursor: pointer;
 }

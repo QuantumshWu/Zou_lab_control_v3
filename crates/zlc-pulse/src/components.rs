@@ -106,6 +106,7 @@ fn remap(subpulse: &Subpulse, component_id: &str, used_periods: &mut BTreeSet<St
         start_period_id: bracket.start_period_id.as_deref().and_then(|id| mapped(&period_ids, id)).or_else(|| next.map(str::to_owned)),
         end_period_id: bracket.end_period_id.as_deref().and_then(|id| mapped(&period_ids, id)).or_else(|| previous.map(str::to_owned)),
         count: bracket.count,
+        name: bracket.name.clone(),
     }).collect();
     (periods, bindings, brackets)
 }

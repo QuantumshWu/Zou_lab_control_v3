@@ -183,15 +183,18 @@ pub fn delay_to_tree(delay: &OutputDelay) -> Json {
 }
 
 pub fn bracket_from_tree(item: &Json) -> Result<Bracket> {
-    let bracket = object(item, &["bracket_id", "start_period_id", "end_period_id", "count"], "pulse bracket", &[])?;
-    Bracket::new(&text(member(bracket, "bracket_id"), "bracket_id")?, optional_text(member(bracket, "start_period_id"), "bracket start")?.as_deref(),
-                 optional_text(member(bracket, "end_period_id"), "bracket end")?.as_deref(), integer(member(bracket, "count"), "bracket count")?)
+    let bracket = object(item, &["bracket_id", "start_period_id", "end_period_id", "count"], "pulse bracket", &["name"])?;
+    let name = match optional(bracket, "name") { None => String::new(), Some(value) => text(value, "bracket name")? };
+    Ok(Bracket::new(&text(member(bracket, "bracket_id"), "bracket_id")?, optional_text(member(bracket, "start_period_id"), "bracket start")?.as_deref(),
+                    optional_text(member(bracket, "end_period_id"), "bracket end")?.as_deref(), integer(member(bracket, "count"), "bracket count")?)?
+        .named(&name))
 }
 
 pub fn bracket_to_tree(bracket: &Bracket) -> Json {
     Json::object(vec![
         ("bracket_id", Json::str(&bracket.bracket_id)), ("start_period_id", Json::opt_str(bracket.start_period_id.as_deref())),
         ("end_period_id", Json::opt_str(bracket.end_period_id.as_deref())), ("count", Json::Int(bracket.count.into())),
+        ("name", Json::str(&bracket.name)),
     ])
 }
 

@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
-use zlc_pulse::binding::prune_orphaned_bindings;
+use zlc_pulse::binding::{prune_orphaned_bindings, refuse_new_label_clash};
 use zlc_pulse::components::extract_subpulse;
 use zlc_pulse::error::repr;
 use zlc_pulse::model::{
@@ -63,7 +63,7 @@ pub fn reordered_sequence(sequence: &Sequence, order: &[Item], periods: Option<&
         if end < start { return Err(Error::new(Kind::Value, format!("bracket {} end precedes its start", bracket.bracket_id))); }
         let first = order[start + 1..].iter().find(|(kind, _)| kind == PERIOD).map(|(_, key)| key.as_str());
         let last = order[..end].iter().rev().find(|(kind, _)| kind == PERIOD).map(|(_, key)| key.as_str());
-        brackets.push(Bracket::new(&bracket.bracket_id, first, last, bracket.count.into())?);
+        brackets.push(Bracket::new(&bracket.bracket_id, first, last, bracket.count.into())?.named(&bracket.name));
     }
     let bracket_ids: BTreeSet<&str> = brackets.iter().map(|b| b.bracket_id.as_str()).collect();
     let ids: Vec<&str> = order.iter().filter(|(kind, _)| kind == PERIOD).map(|(_, key)| key.as_str()).collect();
@@ -265,11 +265,20 @@ pub fn sequence_edited(sequence: &Sequence, action: &str, args: &[Value]) -> Res
             let start = py_optional_str(at(rest, 0)?);
             let end = py_optional_str(at(rest, 1)?);
             let count = py_count(at(rest, 2)?, "bracket count")?;
-            let changed = Bracket::new(&key, start.as_deref(), end.as_deref(), count)?;
+            // A bracket moved or recounted keeps its name; a new one is named by the pulse.
+            let name = sequence.brackets.iter().find(|b| b.bracket_id == key).map_or("", |b| b.name.as_str());
+            let changed = Bracket::new(&key, start.as_deref(), end.as_deref(), count)?.named(name);
             sequence.with(|parts| {
                 if action == "bracket_add" { parts.brackets.insert(0, changed); }
                 else { for b in &mut parts.brackets { if b.bracket_id == key { *b = changed.clone(); } } }
             })
+        }
+        "bracket_name" => {
+            let key = py_str(at(args, 0)?);
+            let name = py_str(at(args, 1)?).trim().to_owned();
+            if name.is_empty() { return Err(Error::new(Kind::Value, "a bracket needs a name")); }
+            if !sequence.brackets.iter().any(|b| b.bracket_id == key) { return Err(key_error(&key)); }
+            sequence.with(|parts| for b in &mut parts.brackets { if b.bracket_id == key { b.name = name.clone(); } })
         }
         other => Err(Error::new(Kind::Value, format!("unknown Pulse edit {}", repr(other)))),
     }
@@ -277,7 +286,9 @@ pub fn sequence_edited(sequence: &Sequence, action: &str, args: &[Value]) -> Res
 
 /// An edit and the bindings it orphaned (`prune_orphaned_bindings`).
 pub fn edited(sequence: &Sequence, action: &str, args: &[Value]) -> Result<(Sequence, Vec<String>)> {
-    prune_orphaned_bindings(&sequence_edited(sequence, action, args)?)
+    let (candidate, dropped) = prune_orphaned_bindings(&sequence_edited(sequence, action, args)?)?;
+    refuse_new_label_clash(sequence, &candidate)?;
+    Ok((candidate, dropped))
 }
 
 /// `_control_edit_arguments`: the flat named arguments of a command as the
@@ -302,6 +313,7 @@ pub fn control_edit_arguments(action: &str, values: &Map<String, Value>) -> Resu
         "config_binding" => (action.into(), vec![get("field_id")?, get("key")?]),
         "bracket" => (action.into(), vec![get("bracket_id")?, get("start")?, get("end")?, get("count")?]),
         "bracket_add" => (action.into(), vec![get("start")?, get("end")?, get("count")?]),
+        "bracket_name" => (action.into(), vec![get("bracket_id")?, get("name")?]),
         "period_add" | "spacer_add" => {
             let name = if action == "period_add" { "insert_period" } else { "insert_spacer" };
             (name.into(), vec![opt("before_item")])

@@ -483,11 +483,15 @@ body.carrying, body.carrying * { cursor: grabbing !important; }
 .pulse-period.readonly { background: var(--bg); }
 .pulse-dac > select { flex: none; width: calc(var(--pulse-unit-w) + var(--row-gap)); }
 .pulse-post { width: var(--pulse-post-w); border-color: var(--bracket-ink, var(--divider)) !important; }
-/* The end post's count: a count box with its stepper, the source badge inside its edit. */
-.pulse-count { flex: none !important; width: var(--pulse-post-count-w); max-width: none; }
-.pulse-count > input { padding-right: calc(var(--combo-width) + var(--edge) + var(--pulse-badge) + 2 * var(--edit-pad-h)); }
-/* field_room_end of a spin box: the chevrons' ink, the badge a gap before it, on a device px. */
-.pulse-count > .pulse-badge { right: round(calc(var(--edge) + var(--combo-width) / 2 + var(--chevron-half) + var(--chevron-stroke) / 2 + var(--edit-pad-h)), var(--dpx)); }
+/* The end post's count: a count box with its stepper, the source badge inside its edit
+ * (field_room_end of a spin box: the chevrons' ink, the badge a gap before it, on a device
+ * px); the step chip and the digits stand before the badge (--spin-trailing). */
+.pulse-count { flex: none !important; width: var(--pulse-post-count-w); max-width: none;
+  --pulse-badge-right: round(calc(var(--edge) + var(--combo-width) / 2 + var(--chevron-half) + var(--chevron-stroke) / 2 + var(--edit-pad-h)), var(--dpx));
+  --spin-trailing: max(0px, calc(var(--pulse-badge-right) + var(--pulse-badge) - 2 * var(--edge) - var(--combo-width))); }
+.pulse-count > .pulse-badge { right: var(--pulse-badge-right); }
+/* The start post's Name: the post's width. */
+.pulse-post-name { flex: 1; min-width: 0; width: 100%; }
 /* A Subpulse: white with the selection edge and a derived-ink title; green while Config supplies it. */
 .pulse-component { width: var(--pulse-period-w); border-color: var(--selection-edge) !important; }
 .pulse-component.framing { width: var(--pulse-spacer-w); }

@@ -252,7 +252,7 @@
   --pulse-badge-room: calc(round(up, calc(round(calc(var(--edge) + var(--combo-width) / 2 + var(--chevron-half) + var(--chevron-stroke) / 2 + var(--pulse-badge-gap)), var(--dpx)) + var(--pulse-badge) - var(--q) / 1000), var(--q))
     - var(--edge) - var(--edit-pad-h) - var(--stepper-extent) - var(--qline-margin) + var(--chip-text-gap));
   --pulse-badge-gap: calc(max(3px, round(calc(4px * var(--fluent)), 1px)) * var(--qt)); /* _BindingButton.gap() */
-  --pulse-post-count-w: calc(var(--count-box-w) + var(--pulse-badge-room));
+  --pulse-post-count-w: calc(var(--count-box-w) + var(--pulse-badge-room) + var(--chip-reserve));  /* and its ±1 chip's room */
   --pulse-post-w: calc(var(--pulse-post-count-w) + 2 * var(--card-pad));
   --pulse-label-w: calc(max(84px, round(calc(100px * var(--fluent)), 1px)) * var(--qt));   /* CHANNEL_LABEL_WIDTH */
   --pulse-name-w: calc(max(88px, round(calc(108px * var(--fluent)), 1px)) * var(--qt));    /* channel_name_edit_width() */

@@ -422,9 +422,11 @@ impl OutputDelay {
 
 /// Loop one continuous range of periods a whole number of times. A missing
 /// start anchor means "after the last period", a missing end "before the
-/// first", so an empty bracket can wait at either edge of the timeline.
+/// first", so an empty bracket can wait at either edge of the timeline. Its
+/// `name` is how its fields read (`name.repeats`); the pulse names one that has
+/// none (`Sequence::new`), so a name never follows a bracket's place.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Bracket { pub bracket_id: String, pub start_period_id: Option<String>, pub end_period_id: Option<String>, pub count: u64 }
+pub struct Bracket { pub bracket_id: String, pub start_period_id: Option<String>, pub end_period_id: Option<String>, pub count: u64, pub name: String }
 
 impl Bracket {
     pub fn new(bracket_id: &str, start: Option<&str>, end: Option<&str>, count: i128) -> Result<Bracket> {
@@ -436,8 +438,11 @@ impl Bracket {
         })?;
         if count < MINIMUM_BRACKET_COUNT { return value_error(format!("a bracket loops at least {MINIMUM_BRACKET_COUNT} time(s)")); }
         if count > MAXIMUM_REPEAT_COUNT { return value_error("bracket count does not fit the hardware 32-bit count"); }
-        Ok(Bracket { bracket_id, start_period_id, end_period_id, count })
+        Ok(Bracket { bracket_id, start_period_id, end_period_id, count, name: String::new() })
     }
+
+    /// The same bracket under this name (blank: the pulse names it).
+    pub fn named(mut self, name: &str) -> Bracket { self.name = name.trim().to_owned(); self }
 }
 
 fn bracket_gap_bounds(bracket: &Bracket, ids: &[&str]) -> (usize, usize) {
@@ -693,6 +698,24 @@ impl Sequence {
         // Outer first; a stable sort keeps the authored order for identical bounds.
         ordered.sort_by_key(|bracket| { let (start, end) = bounds[bracket.bracket_id.as_str()]; (start, std::cmp::Reverse(end)) });
         let bracket_bounds = ordered.iter().map(|bracket| bounds[bracket.bracket_id.as_str()]).collect();
+        // A bracket keeps the name it was given, unique in its Subpulse (or the pulse
+        // outside them). One without -- from a file older than names, or just added -- is
+        // named once, as it read then: "Bracket N" by its place, the next N free there.
+        let scope = |id: &str| components.iter().find(|c| c.bracket_ids.iter().any(|b| b == id)).map(|c| c.component_id.clone());
+        let mut taken: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+        for bracket in &ordered {
+            if !bracket.name.is_empty() && !taken.insert((scope(&bracket.bracket_id), bracket.name.clone())) {
+                return value_error(format!("bracket names must be unique within their Subpulse: {}", repr(&bracket.name)));
+            }
+        }
+        for (index, bracket) in ordered.iter_mut().enumerate() {
+            if !bracket.name.is_empty() { continue; }
+            let within = scope(&bracket.bracket_id);
+            let mut number = index + 1;
+            while taken.contains(&(within.clone(), format!("Bracket {number}"))) { number += 1; }
+            bracket.name = format!("Bracket {number}");
+            taken.insert((within, bracket.name.clone()));
+        }
         if run_repeats > MAXIMUM_REPEAT_COUNT { return value_error("run_repeats does not fit the hardware 32-bit count"); }
         text(&name, "sequence name")?;
         let mut components = components;
