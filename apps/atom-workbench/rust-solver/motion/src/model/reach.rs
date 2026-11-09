@@ -19,22 +19,43 @@
 
 use super::{Model, Reach, Trap};
 use crate::field::Geometry;
-use crate::linalg::dot3;
+use crate::linalg::{dot3, norm3, C64};
 use crate::request::GROUND;
 use crate::units::{rounding, KT_PER_UK};
 use std::collections::BinaryHeap;
 
-/// A beam's Lipschitz constant L = sup |∇a| (1/µm): k for a plane wave; for a paraxial Gaussian beam, with ∇a = a g,
-/// g = ik n − 2t/(w₀²q) + (i/z_R)(ρ²/(w₀²q²) − 1/q) n (field.rs) and |a| = e^{−x}/√(1 + s), x = ρ²/(w₀²(1 + s)), s = ζ²/z_R²:
-/// |a| k ≤ k; |a| 2ρ/(w₀²|q|) = 2√x e^{−x}/(w₀ √(1 + s)) ≤ √(2/e)/w₀ (√x e^{−x} ≤ 1/√(2e)); and |a| |ρ²/(w₀²q²) − 1/q|/z_R ≤
-/// (x e^{−x} + e^{−x})/z_R ≤ (1/e + 1)/z_R -- so L = k + √(2/e)/w₀ + (1 + 1/e)/z_R.
-pub(crate) fn lipschitz(beam: &Geometry) -> f64 {
+/// A beam's envelope Lipschitz constant L_b = sup |∇b| (1/µm), a = e^{ik·r} b the amplitude with its plane-wave phase taken out:
+/// 0 for a plane wave; for a paraxial Gaussian beam ∇b = b g_b, g_b = −2t/(w₀²q) + (i/z_R)(ρ²/(w₀²q²) − 1/q) n (field.rs, less ik n),
+/// and with |b| = e^{−x}/√(1 + s), x = ρ²/(w₀²(1 + s)), s = ζ²/z_R²: |b| 2ρ/(w₀²|q|) = 2√x e^{−x}/(w₀ √(1 + s)) ≤ √(2/e)/w₀
+/// (√x e^{−x} ≤ 1/√(2e)), |b| |ρ²/(w₀²q²) − 1/q|/z_R ≤ (x e^{−x} + e^{−x})/z_R ≤ (1 + 1/e)/z_R: L_b = √(2/e)/w₀ + (1 + 1/e)/z_R.
+pub(crate) fn envelope_lipschitz(beam: &Geometry) -> f64 {
     match (beam.waist, beam.rayleigh()) {
         (Some(w), Some(z)) => {
             let e = std::f64::consts::E;
-            beam.wave_number + (2.0 / e).sqrt() / w + (1.0 + 1.0 / e) / z
+            (2.0 / e).sqrt() / w + (1.0 + 1.0 / e) / z
         }
-        _ => beam.wave_number,
+        _ => 0.0,
+    }
+}
+
+/// A beam's Lipschitz constant L = sup |∇a| ≤ k + L_b (`envelope_lipschitz`).
+pub(crate) fn lipschitz(beam: &Geometry) -> f64 {
+    beam.wave_number + envelope_lipschitz(beam)
+}
+
+/// A beam's envelope curvature bound M_b = sup |∇∇b| (1/µm²): 0 for a plane wave; for a paraxial Gaussian beam ∇∇b = b(g_b g_bᵀ + ∇g)
+/// with ∇g = −2(1 − nnᵀ)/(w₀²q) + 2i(ntᵀ + tnᵀ)/(z_R w₀² q²) − (1/q² − 2ρ²/(w₀²q³)) nnᵀ/z_R² (field.rs). With x, s as in
+/// `envelope_lipschitz`, |g_b| ≤ 2√x/w₀ + (x + 1)/z_R, so |b||g_b|² ≤ (2e^{−1/2}/w₀ + 2e^{−1/2}/z_R)² (√x e^{−x/2} ≤ e^{−1/2},
+/// (x + 1)e^{−x/2} ≤ 2e^{−1/2}); and |b||∇g| ≤ e^{−x}(2/w₀² + 4√x/(z_R w₀) + (1 + 2x)/z_R²) ≤ 2/w₀² + 4/(√(2e) z_R w₀) + 2e^{−1/2}/z_R²
+/// ((1 + 2x)e^{−x} ≤ 2e^{−1/2}).
+pub(crate) fn envelope_curvature(beam: &Geometry) -> f64 {
+    match (beam.waist, beam.rayleigh()) {
+        (Some(w), Some(z)) => {
+            let h = (-0.5_f64).exp();
+            let e = std::f64::consts::E;
+            (2.0 * h / w + 2.0 * h / z).powi(2) + 2.0 / (w * w) + 4.0 / ((2.0 * e).sqrt() * z * w) + 2.0 * h / (z * z)
+        }
+        _ => 0.0,
     }
 }
 
@@ -73,13 +94,53 @@ pub(crate) struct Bounds {
     pub(crate) centre: f64,
 }
 
-/// A beam's amplitude over a cell: its value at the centre and the bound of |a_l| over the cell.
+/// A beam over a cell, its amplitude a = e^{ik·r} b written by its envelope b (module documentation of units.rs): a and ∇a at the
+/// centre, its wave vector, the bound of |a| = |b| over the cell, how far b moves within it (L_b ρ), the bound of |∇b| over it
+/// (|∇b(c)| + M_b ρ, at most L_b), and the cell's radius ρ (infinite: the whole space, its global bounds).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Span {
-    pub(crate) centre: crate::linalg::C64,
+    pub(crate) centre: C64,
+    pub(crate) gradient: [C64; 3],
+    pub(crate) wave: [f64; 3],
     pub(crate) most: f64,
-    /// L_l ρ: how far a_l moves from its centre value within the cell.
     pub(crate) spread: f64,
+    pub(crate) slope: f64,
+    pub(crate) rho: f64,
+}
+
+impl Span {
+    /// The same beam on the cell's centre point alone: no spread, its envelope's slope there.
+    pub(crate) fn point(&self) -> Span {
+        let k = self.wave;
+        let slope = (0..3).map(|i| (self.gradient[i] - C64::new(0.0, k[i]) * self.centre).norm_sqr()).sum::<f64>().sqrt();
+        Span { most: self.centre.abs(), spread: 0.0, slope, rho: 0.0, ..*self }
+    }
+}
+
+/// A beam pair's coefficient a_j'* a_i = e^{iq·r} b_j* b_i (q = k_i − k_j) over a cell: its value at the centre, the radius of its
+/// range (|q|ρ max|b_j| max|b_i| + the envelopes' moves, at most |c₀| + max|a_j| max|a_i|), and the bound of its gradient
+/// (|q| max|b_j| max|b_i| + max|∇b_j| max|b_i| + max|b_j| max|∇b_i|; exact at a point: conj(∇a_j) a_i + conj(a_j) ∇a_i).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PairSpan {
+    pub(crate) centre: C64,
+    pub(crate) radius: f64,
+    pub(crate) slope: f64,
+}
+
+/// The pair (j, i) of beams over a cell (`PairSpan`).
+pub(crate) fn pair_span(spans: &[Span], j: usize, i: usize) -> PairSpan {
+    let (a, b) = (&spans[j], &spans[i]);
+    let q = norm3(std::array::from_fn(|x| b.wave[x] - a.wave[x]));
+    if !a.rho.is_finite() {
+        return PairSpan { centre: C64::ZERO, radius: a.most * b.most, slope: q * a.most * b.most + a.slope * b.most + a.most * b.slope };
+    }
+    let centre = a.centre.conj() * b.centre;
+    if a.rho == 0.0 {
+        let g: [C64; 3] = std::array::from_fn(|x| a.gradient[x].conj() * b.centre + a.centre.conj() * b.gradient[x]);
+        return PairSpan { centre, radius: 0.0, slope: g.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() };
+    }
+    let radius = (q * a.rho * a.most * b.most + a.spread * b.most + a.centre.abs() * b.spread).min(centre.abs() + a.most * b.most);
+    PairSpan { centre, radius, slope: q * a.most * b.most + a.slope * b.most + a.most * b.slope }
 }
 
 /// A cell in the bound's queue, ordered by its upper bound.
@@ -142,11 +203,16 @@ impl Model {
         }
     }
 
-    /// Every beam's amplitude over a cell (`Span`).
+    /// Every beam over a cell (`Span`).
     pub(crate) fn spans(&self, cell: &Cell) -> Vec<Span> {
         let rho = cell.radius();
         if !rho.is_finite() {
-            return self.light.beams.iter().map(|_| Span { centre: crate::linalg::C64::ZERO, most: 1.0, spread: f64::INFINITY }).collect();
+            return self
+                .light
+                .beams
+                .iter()
+                .map(|b| Span { centre: C64::ZERO, gradient: [C64::ZERO; 3], wave: b.wave_vector(), most: 1.0, spread: f64::INFINITY, slope: envelope_lipschitz(b), rho })
+                .collect();
         }
         let amplitudes = self.light.amplitudes(cell.centre);
         self.light
@@ -154,14 +220,24 @@ impl Model {
             .iter()
             .zip(&amplitudes)
             .map(|(beam, a)| {
-                let spread = lipschitz(beam) * rho;
-                Span { centre: a.value, most: (a.value.abs() + spread).min(1.0), spread }
+                let spread = envelope_lipschitz(beam) * rho;
+                let k = beam.wave_vector();
+                let envelope = (0..3).map(|i| (a.gradient[i] - C64::new(0.0, k[i]) * a.value).norm_sqr()).sum::<f64>().sqrt();
+                Span {
+                    centre: a.value,
+                    gradient: a.gradient,
+                    wave: k,
+                    most: (a.value.abs() + spread).min(1.0),
+                    spread,
+                    slope: (envelope + envelope_curvature(beam) * rho).min(envelope_lipschitz(beam)),
+                    rho,
+                }
             })
             .collect()
     }
 
-    /// A lower bound of V_prep(r; p) over a cell from its centre: each beam pair's coefficient a_l'* a_l moves by at most
-    /// L_l' ρ max|a_l| + |a_l'(c)| L_l ρ (far.rs), its weight |[P_l'l]_p|; the near part's (eliminate.rs) bound added.
+    /// A lower bound of V_prep(r; p) over a cell from its centre: each beam pair's coefficient moves by at most its radius
+    /// (`pair_span`), weighted by the envelope's |Q_l'l| (the near trap light's included, potential.rs).
     pub(crate) fn prepared_below(&self, cell: &Cell, spans: &[Span], p: &[f64; GROUND]) -> f64 {
         if !cell.bounded() {
             return f64::NEG_INFINITY;
@@ -174,7 +250,7 @@ impl Model {
             for (i, &li) in envelope.beams.iter().enumerate() {
                 let w = envelope.weights[j * n + i];
                 if w != 0.0 {
-                    slack += w * (spans[lj].spread * spans[li].most + spans[lj].centre.abs() * spans[li].spread);
+                    slack += w * pair_span(spans, lj, li).radius;
                 }
             }
         }
