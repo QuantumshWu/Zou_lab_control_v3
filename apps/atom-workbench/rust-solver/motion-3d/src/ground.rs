@@ -1079,7 +1079,8 @@ impl Ground{
                 names(&c.beams),c.nu.abs()/TAU/1e6,c.nu.abs()/l0,mixing(c.size,c.nu.abs(),l0,f64::MIN_POSITIVE).powi(2)));}
         // The frequencies' fields (`Unit`), in the order of their first beams, and their coordinates' outside shifts and folds; a field of
         // rank two or three its outside shift from the request's form (`OutsideForm`) in its beams' fields. A frequency whose fields the
-        // request does not give takes the default (`coherence`), the interference its units leave out bounded.
+        // request does not give takes the default (`coherence`), the interference its units leave out bounded; so does a near carrier,
+        // whose drive is its beams' coherent field already (its carrier basis, `Carrier`), its units the dressing's on either device.
         let fold=|a:&Dense,b:&Dense,nu:f64|van_vleck(&energies,a,b,nu,&ground_states,&excited_states);
         let(mut units,mut unit_outside,mut unit_folds,mut extra_outside,mut extra_folds)=(vec![],vec![],vec![],vec![],vec![]);
         let(mut parts,mut interference):(Vec<(Unit,Vec<Dense>,Vec<Dense>)>,Vec<Interference>)=(vec![],vec![]);
@@ -1090,7 +1091,7 @@ impl Ground{
                 let form=request.outside_forms.iter().find(|f|f.frequency_index==request.beams[beams[0]].frequency_index)
                     .ok_or_else(||format!("「{}」偏振不平行，外层态光移需要该频率的光移形式（请重新导出）",names(beams)))?;
                 Ok((beams.iter().map(|&l|request.beams[l].field).collect(),form.matrices.iter().map(|m|Dense::block(m,&all,&all)).collect()))};
-            let given=beams.iter().all(|&l|request.beams[l].field.is_some())&&request.outside_forms.iter().any(|f|f.frequency_index==request.beams[beams[0]].frequency_index);
+            let given=co.folded&&beams.iter().all(|&l|request.beams[l].field.is_some())&&request.outside_forms.iter().any(|f|f.frequency_index==request.beams[beams[0]].frequency_index);
             if given{parts.push(field(beams,&couplings,&counters,&outside,folded,&fold,&form)?);}else{let(own,item)=coherence(beams,&couplings,&counters,&outside,folded,&fold);parts.extend(own);interference.extend(item);}
         }
         // In the order of their first beams: a scene of single beams has a unit per beam, in its order.

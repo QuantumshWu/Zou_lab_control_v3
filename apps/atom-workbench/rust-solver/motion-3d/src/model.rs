@@ -2632,7 +2632,11 @@ impl Model{
     pub fn trap_slope(&self,cluster:usize,x:usize,depth:f64,centre:[f64;3])->Result<f64,String>{
         let g=&self.ground;let trapped=|l:&usize|self.trap_light.contains(l);
         let traps:Vec<usize>=(0..self.axes.len()).filter(|&f|self.axes[f].coordinate==0&&g.units[self.focused[f]].beams.iter().any(trapped)).collect();let traps=&traps[..];
-        if traps.iter().any(|&f|!g.units[self.focused[f]].beams.iter().all(trapped)){return Err("光镊与同频率、同偏振的其他光束相干叠加：其干涉项随光镊强度的平方根衰减，束缚的初始热分布无界".into());}
+        // Light of the trap's frequency that is not the trap's (a near carrier's, or a plane wave's) interferes with it: what holds the
+        // atoms before t = 0 is not what the run starts with, and that light's interference falls off as √A.
+        let frequency=&g.beams[self.trap_beam].frequency_index;
+        let strangers:Vec<&str>=(0..g.beams.len()).filter(|l|&g.beams[*l].frequency_index==frequency&&!trapped(l)).map(|l|g.beams[l].name.as_str()).collect();
+        if !strangers.is_empty(){return Err(format!("「{}」与光镊同频率、彼此相干，却不属于阱光（近共振光或平面波：t = 0 才打开，或不随离焦衰减）：它与光镊的干涉改变阱势，束缚的初始热分布无法定义。请把它的频率与光镊错开（不再相干），或改成与光镊一样聚焦的远失谐光束",strangers.join("、")));}
         let others:Vec<usize>=(0..self.axes.len()).filter(|f|!traps.contains(f)).collect();let others=&others[..];
         let t=traps.len();
         // −V_T D_T at intensities q (the trap's units', then the other units').
