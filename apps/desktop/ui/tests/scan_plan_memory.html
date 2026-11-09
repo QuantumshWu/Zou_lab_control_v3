@@ -136,7 +136,9 @@ try {
   const toggle=()=>t.root.querySelector('.axis-link');
   assert(toggle().getAttribute('aria-checked')==='false','link defaults off');
   toggle().click();assert(plan().link_enabled&&plan().links.length===1,'link adds first parameter');
-  assert(t.root.querySelector('.linked-marker')?.textContent==='','group marker has no arrow text');
+  assert(t.root.querySelector('.linked-lead')?.textContent==='','group band has no text');
+  equal(t.root.querySelector('.axis-kind .link-badge')?.textContent,'x','the axis is x');
+  equal(t.root.querySelector('.linked-values .link-chip')?.textContent,'f(x)','the formula is of x');
   const formula=t.root.querySelector('input[aria-label="Linked formula"]');formula.value='120 - x';formula.dispatchEvent(new Event('change',{bubbles:true}));
   const values=[...plan().links[0].values];choose(t.root.querySelector('.linked-unit'),'ms');
   equal(plan().links[0].formula,'120 - x','unit switch preserves formula');equal(plan().links[0].values,values,'unit switch preserves numbers');
@@ -151,10 +153,34 @@ try {
    const box=t.root.querySelector(selector).getBoundingClientRect();
    assert(Math.abs((box.top+box.bottom)-(linked.top+linked.bottom))<2,`${selector} wraps onto another row`);
   }
-  for(const [parent,child] of [['.axis-port','.linked-port'],['.axis-values','.linked-values'],['.axis-unit','.linked-unit']]) {
+  for(const [parent,child] of [['.axis-values','.linked-values'],['.axis-unit','.linked-unit']]) {
    assert(Math.abs(t.root.querySelector(parent).getBoundingClientRect().left-t.root.querySelector(child).getBoundingClientRect().left)<1,`${child} is not aligned`);
   }
-
+  // The linked knob is indented under the axis's, its right end on the same column.
+  const master=t.root.querySelector('.axis-port').getBoundingClientRect();
+  assert(linked.left>master.left+4&&Math.abs(linked.right-master.right)<1,'linked knob is indented in the knob column');
+  t.manager.update(t.row(),'running');
+  for(const control of t.root.querySelectorAll('.linked-port, .linked-unit, .linked-add, .linked-remove, input[aria-label="Linked formula"], .axis-link')) assert(control.disabled,'linked controls are locked while a task runs');
+ });
+ await check('a linked group says what x is, what each formula plays, in its own colour',()=>{
+  const t=setup();t.root.style.cssText='width:1450px;position:fixed;left:0;top:0;--label-width:110px';
+  const amp={...duration,port:'pulse:param:amplitude:hold',label:'hold amplitude',leaf:'amplitude:hold'};
+  const formulaRow=(port,unit,formula)=>({port,unit,mode:'formula',formula,values:[],value_text:''});
+  const axes=[{...initial,values:[],range:{start:120,stop:130,count:3},link_enabled:true,links:[formulaRow(duration.port,'ms','x - 100')]},
+   {port:other.port,unit:'MHz',values:[],range:{start:800,stop:801,count:2},mode:'range',value_text:'',link_enabled:true,links:[formulaRow(amp.port,'s','x +')]}];
+  t.ack({values:{...t.row().values,plan:JSON.stringify({axes})}},{...model([freq,duration,other,amp]),
+   link_facts:{[duration.port]:{first:20,last:30,count:3},[amp.port]:{first:null,last:null,count:0,problem:'formula accepts numbers, x, parentheses and + - * / **'}}});
+  const badges=[...t.root.querySelectorAll('.axis-kind .link-badge')];equal(badges.length,2,'one x badge per linked axis');
+  equal(badges[0].title,'x = frequency (120 … 130 MHz, 3 points)','the badge names the axis and what x plays');
+  const previews=[...t.root.querySelectorAll('.linked-preview')];
+  equal(previews[0].textContent,'20 … 30 ms (3 points)','the preview says what the formula plays');
+  assert(previews[1].textContent.startsWith('formula accepts')&&previews[1].classList.contains('problem'),'an invalid formula says why');
+  const preview=previews[0].getBoundingClientRect(),formula=t.root.querySelector('.linked-values').getBoundingClientRect();
+  assert(preview.top>=formula.bottom-1&&Math.abs(preview.left-formula.left)<1,'the preview stands under the formula');
+  const colour=node=>getComputedStyle(node).backgroundColor;
+  assert(colour(badges[0])!==colour(badges[1]),'two groups take two colours');
+  const band=getComputedStyle(t.root.querySelector('.linked-lead'),'::after').backgroundColor;
+  equal([colour(t.root.querySelector('.link-chip')),band],[colour(badges[0]),colour(badges[0])],'chip and band in the group colour');
  });
  await check('wheel focus and fractional travel survive plan edits and accepted refreshes',()=>{
   const t=setup(true);t.root.style.cssText='position:fixed;left:0;top:0;width:1450px';
