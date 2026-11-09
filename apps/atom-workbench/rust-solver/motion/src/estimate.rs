@@ -353,8 +353,9 @@ fn temperature(s: &Sums, hbar_over_mass: f64) -> Option<[f64; 3]> {
 fn moments(s: &Sums, hbar_over_mass: f64) -> Moments {
     Moments { loss: 1. - s.held / s.trajectories, shown: s.rows.map(|r| r / s.trajectories), temperature: temperature(s, hbar_over_mass) }
 }
-/// The jackknife's standard error of the values left out (module documentation, # Errors), read on `groups`.
-fn spread(leave: impl ExactSizeIterator<Item = f64> + Clone, groups: f64) -> Spread {
+/// The jackknife's standard error of the values with each group left out (module documentation, # Errors), read on
+/// `groups`.
+pub fn spread(leave: impl ExactSizeIterator<Item = f64> + Clone, groups: f64) -> Spread {
     let g = leave.len() as f64;
     let mean = leave.clone().sum::<f64>() / g;
     Spread { error: ((g - 1.) / g * leave.map(|x| (x - mean).powi(2)).sum::<f64>()).sqrt(), groups }
