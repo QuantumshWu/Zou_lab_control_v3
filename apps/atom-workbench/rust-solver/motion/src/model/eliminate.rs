@@ -41,8 +41,8 @@
 use super::assemble::Parts;
 use super::cluster::Edge;
 use super::potential::Expansion;
-use super::reach::{distance, Bounds, Span};
-use super::{Beat, Component, Gate, Lights, Model, Point, Quadratic, Reach, Sample, Unit, UnitError};
+use super::reach::{distance, Region};
+use super::{Beat, Component, Lights, Model, Point, Quadratic, Sample, Unit, UnitError};
 use crate::field::Amplitude;
 use crate::linalg::{dot3, Lu, Mat, C64};
 use crate::request::{Request, GROUND, STATES};
@@ -646,17 +646,6 @@ impl Model {
         }
     }
 
-    /// A near unit's gate over the reach (units.rs, photon.rs).
-    pub(crate) fn near_gate(&self, unit: &Unit, reach: &Reach) -> Gate {
-        match unit {
-            Unit::Coherence { .. } => self.coherence_gate(unit, reach),
-            Unit::Drive { .. } => self.drive_gate(unit, reach),
-            Unit::Term { .. } => self.term_gate(unit, reach),
-            Unit::Dressing { .. } => Gate { saturation: 0.0, sweep: 0.0 },
-            _ => unreachable!("the far units' gates are units.rs'"),
-        }
-    }
-
     /// A near unit's error at a sample.
     pub(crate) fn near_error(&self, unit: &Unit, sample: &Sample) -> UnitError {
         match unit {
@@ -706,21 +695,12 @@ impl Model {
         UnitError { parameter: delta, population: delta * weight, temperature: delta * weight }
     }
 
-    /// The bound of the near light's differential shift of two states over a cell (the static gates' separations): per lit
-    /// carrier Σ_l'l |a_l'||a_l| (‖X^f_l'[:,a]‖‖X^f_l[:,a]‖ + ‖X^f_l'[:,b]‖‖X^f_l[:,b]‖) 2/Γ_min, the resolvent's norm at most 2/Γ_min.
-    pub(crate) fn near_spread(&self, a: usize, b: usize, spans: &[Span]) -> f64 {
-        let gamma = (0..EXCITED).map(|x| self.decay[(x, x)].re).fold(f64::INFINITY, f64::min);
-        let mut out = 0.0;
-        for cc in &self.carriers {
-            let column = |m: &Mat, s: usize| -> f64 { if s >= GROUND { 0.0 } else { (0..EXCITED).map(|e| m[(GROUND + e, s)].norm_sqr()).sum::<f64>().sqrt() } };
-            for (lj, x) in cc.folded.iter().enumerate() {
-                for (li, y) in cc.folded.iter().enumerate() {
-                    let amp = spans[cc.beams[lj]].most * spans[cc.beams[li]].most;
-                    out += amp * (column(x, a) * column(y, a) + column(x, b) * column(y, b)) * 2.0 / gamma;
-                }
-            }
-        }
-        out
+    /// The bound of the near light's differential shift of two states over a region (the static gates' separations): per lit
+    /// carrier (‖u_a‖² + ‖u_b‖²) 2/Γ_min, u_s its coherent field's couplings of ground state s (`Couplings`), the resolvent's norm
+    /// at most 2/Γ_min.
+    pub(crate) fn near_spread(&self, a: usize, b: usize, region: &Region) -> f64 {
+        let column = |c: &Couplings, s: usize| if s < GROUND { c.column[s] } else { 0.0 };
+        self.couplings(region).iter().map(|c| column(c, a).powi(2) + column(c, b).powi(2)).sum::<f64>() * 2.0 / self.least_decay()
     }
 
     /// The frequency whose kept drives feed an explicit state's photons (photon.rs): the first carrier with a kept drive into it.
@@ -735,7 +715,7 @@ impl Model {
     }
 }
 
-/// The far light's energies over a cell (the near gates' separations): per state its value at the centre and the bound of how
+/// The far light's energies over a region (the near gates' separations): per state its value at the centre and the bound of how
 /// far it moves within the cell, and per excited state the Gershgorin radius of the far couplings among the excited states.
 pub(crate) struct CellEnergies {
     pub(crate) centre: Vec<f64>,
@@ -743,21 +723,32 @@ pub(crate) struct CellEnergies {
     pub(crate) radius: Vec<f64>,
 }
 
+/// A carrier's coherent couplings over a region (reach.rs `Region`). With u_s = Σ_l a_l X^f_l[:, s] the excited amplitudes its
+/// field drives from ground state s -- its beams coherent at the request's phases (SPEC §1.2), what the atom feels at r --, per
+/// ground state the bounds over the region of |u_s[e]| per excited state, of ‖u_s‖, and of ‖u_s‖ per polarization unit (its beams
+/// alone): the value at the centre plus the cell's radius times the Lipschitz bound Σ_l max|∇a_l| |X^f_l| (|∇a_l| ≤ k_l max|a_l| +
+/// max|∇b_l|, reach.rs `Span`), at most every beam at its largest amplitude and in phase; on a point, the value there.
+pub(crate) struct Couplings {
+    /// [s][e − GROUND].
+    pub(crate) entry: Vec<Vec<f64>>,
+    /// [s].
+    pub(crate) column: Vec<f64>,
+    /// [unit][s], over the carrier's distinct polarization units.
+    pub(crate) units: Vec<Vec<f64>>,
+}
+
 impl Model {
-    /// The far light's energies over a cell (`CellEnergies`), every light on: each beam pair's coefficient a_l'* a_l within its
-    /// centre value ± (L_l' ρ max|a_l| + |a_l'(c)| L_l ρ) on a bounded cell, within the disk of radius 1 on an unbounded one.
-    pub(crate) fn cell_energies(&self, spans: &[Span]) -> CellEnergies {
-        let mut centre: Vec<f64> = (0..STATES).map(|s| self.base[(s, s)].re).collect();
-        let mut slack = vec![0.0; STATES];
-        let mut off = Mat::from_fn(STATES, STATES, |x, y| if x == y { C64::ZERO } else { self.base[(x, y)] });
-        let mut off_slack = Mat::zeros(STATES, STATES);
-        for (f, tone) in self.light.frequencies.iter().zip(&self.tones) {
-            let n = f.beams.len();
-            for j in 0..n {
-                for i in 0..n {
-                    let pair = super::reach::pair_span(spans, f.beams[j], f.beams[i]);
+    /// The far light's energies over a region (`CellEnergies`), made once per region, every light on: each beam pair's
+    /// coefficient a_l'* a_l within its centre value ± its radius (reach.rs `PairSpan`).
+    pub(crate) fn energies<'r>(&self, region: &'r Region) -> &'r CellEnergies {
+        region.energies.get_or_init(|| {
+            let mut centre: Vec<f64> = (0..STATES).map(|s| self.base[(s, s)].re).collect();
+            let mut slack = vec![0.0; STATES];
+            let mut off = Mat::from_fn(STATES, STATES, |x, y| if x == y { C64::ZERO } else { self.base[(x, y)] });
+            let mut off_slack = Mat::zeros(STATES, STATES);
+            for (tone, pairs) in self.tones.iter().zip(&region.pairs) {
+                for (p, pair) in tone.pairs.iter().zip(pairs) {
                     let (c0, rad) = (pair.centre, pair.radius);
-                    let p = &tone.pairs[j * n + i];
                     for s in 0..STATES {
                         centre[s] += (c0 * p[(s, s)]).re;
                         slack[s] += rad * p[(s, s)].abs();
@@ -772,11 +763,63 @@ impl Model {
                     }
                 }
             }
-        }
-        let radius = (0..STATES)
-            .map(|x| if x < GROUND { 0.0 } else { (GROUND..STATES).filter(|&y| y != x).map(|y| off[(x, y)].abs() + off_slack[(x, y)].re).sum() })
-            .collect();
-        CellEnergies { centre, slack, radius }
+            let radius = (0..STATES)
+                .map(|x| if x < GROUND { 0.0 } else { (GROUND..STATES).filter(|&y| y != x).map(|y| off[(x, y)].abs() + off_slack[(x, y)].re).sum() })
+                .collect();
+            CellEnergies { centre, slack, radius }
+        })
+    }
+
+    /// The carriers' coherent couplings over a region (`Couplings`), made once per region.
+    pub(crate) fn couplings<'r>(&self, region: &'r Region) -> &'r [Couplings] {
+        region.couplings.get_or_init(|| {
+            let spans = &region.spans;
+            // The bound over the region of |Σ_{l ∈ beams} a_l x_l| from its centre value, its Lipschitz bound Σ |x_l| max|∇a_l| and
+            // its phase-blind bound Σ |x_l| max|a_l| (an unbounded region: the last).
+            let bound = |centre: f64, lipschitz: f64, blind: f64| if region.rho.is_finite() { (centre + region.rho * lipschitz).min(blind) } else { blind };
+            self.carriers
+                .iter()
+                .map(|cc| {
+                    let mut units: Vec<usize> = cc.units.clone();
+                    units.sort();
+                    units.dedup();
+                    let mut entry = vec![vec![0.0; EXCITED]; GROUND];
+                    let mut column = vec![0.0; GROUND];
+                    let mut per_unit = vec![vec![0.0; GROUND]; units.len()];
+                    for s in 0..GROUND {
+                        // Per polarization unit and in all: the centre amplitudes, and per excited state the Lipschitz and blind sums.
+                        let mut all = (vec![C64::ZERO; EXCITED], vec![0.0; EXCITED], vec![0.0; EXCITED], 0.0, 0.0);
+                        for (ui, &unit) in units.iter().enumerate() {
+                            let (mut u, mut lipschitz, mut blind) = (vec![C64::ZERO; EXCITED], 0.0, 0.0);
+                            for (l, x) in cc.folded.iter().enumerate().filter(|(l, _)| cc.units[*l] == unit) {
+                                let span = &spans[cc.beams[l]];
+                                let norm = (0..EXCITED).map(|e| x[(GROUND + e, s)].norm_sqr()).sum::<f64>().sqrt();
+                                if norm == 0.0 {
+                                    continue;
+                                }
+                                for e in 0..EXCITED {
+                                    let v = x[(GROUND + e, s)];
+                                    u[e] += span.centre * v;
+                                    all.0[e] += span.centre * v;
+                                    all.1[e] += v.abs() * span.lipschitz();
+                                    all.2[e] += v.abs() * span.most;
+                                }
+                                lipschitz += norm * span.lipschitz();
+                                blind += norm * span.most;
+                            }
+                            per_unit[ui][s] = bound(u.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt(), lipschitz, blind);
+                            all.3 += lipschitz;
+                            all.4 += blind;
+                        }
+                        for e in 0..EXCITED {
+                            entry[s][e] = bound(all.0[e].abs(), all.1[e], all.2[e]);
+                        }
+                        column[s] = bound(all.0.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt(), all.3, all.4);
+                    }
+                    Couplings { entry, column, units: per_unit }
+                })
+                .collect()
+        })
     }
 
     /// The least decay rate of the excited states, Γ_min: every folded response's resolvent is at most 2/Γ_min.
@@ -784,174 +827,178 @@ impl Model {
         (0..EXCITED).map(|x| self.decay[(x, x)].re).fold(f64::INFINITY, f64::min)
     }
 
-    /// The bound of the dressing ΔE_b^d of ground state b by one carrier over a cell: Σ over its units' beam pairs of
-    /// max|a_l'| max|a_l| ‖X^f_l'[:,b]‖ ‖X^f_l[:,b]‖ · 2/Γ_min.
-    fn dressing_bound(&self, carrier: &Carrier, b: usize, spans: &[Span]) -> f64 {
-        let column = |m: &Mat| (GROUND..STATES).map(|e| m[(e, b)].norm_sqr()).sum::<f64>().sqrt();
-        let mut out = 0.0;
-        for j in 0..carrier.beams.len() {
-            for i in 0..carrier.beams.len() {
-                if carrier.units[j] == carrier.units[i] {
-                    out += spans[carrier.beams[j]].most * spans[carrier.beams[i]].most * column(&carrier.folded[j]) * column(&carrier.folded[i]);
-                }
-            }
+    /// The bound over a region of ‖(K − z)⁻¹‖, z = E_b + δ_d (carrier d's resolvent from ground state b in its dressing): the
+    /// dissipation's 2/Γ_min (Im⟨x|K − z|x⟩ ≤ −(Γ_min/2)‖x‖²), and where every excited row of K − z is diagonally dominant, Varah's
+    /// 1/min_e (|E_e − z − iΓ_e/2| − r_e), r_e the far couplings' Gershgorin radius (`CellEnergies`).
+    fn resolvent(&self, d: usize, b: usize, region: &Region) -> f64 {
+        let energies = self.energies(region);
+        let delta = self.carriers[d].detuning;
+        let mut least = f64::INFINITY;
+        for e in GROUND..STATES {
+            let lo = energies.centre[e] - energies.slack[e] - energies.centre[b] - energies.slack[b] - delta;
+            let hi = energies.centre[e] + energies.slack[e] - energies.centre[b] + energies.slack[b] - delta;
+            let (x, gamma) = (distance(lo, hi), self.decay[(e - GROUND, e - GROUND)].re);
+            least = least.min((x * x + gamma * gamma / 4.0).sqrt() - energies.radius[e]);
         }
-        out * 2.0 / self.least_decay()
+        let dissipation = 2.0 / self.least_decay();
+        if least > 0.0 {
+            dissipation.min(1.0 / least)
+        } else {
+            dissipation
+        }
     }
 
-    /// A cell's spans on its centre point: each beam's amplitude and gradient there exactly (`Span::point`).
-    fn point_spans(&self, spans: &[Span]) -> Vec<Span> {
-        spans.iter().map(|x| x.point()).collect()
+    /// The carriers' dressings ΔE_b^d of the ground states over a region, [carrier][state], made once per region: Σ over the
+    /// carrier's polarization units of ‖u_b‖² (`Couplings`; T̄ keeps each unit's beams coherent) times its resolvent's bound
+    /// (`resolvent`).
+    fn dressings<'r>(&self, region: &'r Region) -> &'r [Vec<f64>] {
+        region.dressings.get_or_init(|| {
+            let couplings = self.couplings(region);
+            (0..self.carriers.len()).map(|d| (0..GROUND).map(|b| couplings[d].units.iter().map(|u| u[b] * u[b]).sum::<f64>() * self.resolvent(d, b, region)).collect()).collect()
+        })
     }
 
-    /// The bound of |∇(E_x − E_y)| of the far light's diagonal over a cell (rad/µs/µm): Σ_pairs |[P]_xx − [P]_yy| times the bound of
-    /// |∇(a_l'* a_l)| ≤ max|∇a_l'| max|a_l| + max|a_l'| max|∇a_l| (reach.rs `Span::slope`).
-    pub(crate) fn energy_slope_cell(&self, x: usize, y: usize, spans: &[Span]) -> f64 {
-        let mut out = 0.0;
-        for (f, tone) in self.light.frequencies.iter().zip(&self.tones) {
-            let n = f.beams.len();
-            for j in 0..n {
-                for i in 0..n {
-                    let p = &tone.pairs[j * n + i];
-                    let d = (p[(x, x)] - if y == x { C64::ZERO } else { p[(y, y)] }).abs();
-                    if d == 0.0 {
-                        continue;
-                    }
-                    out += d * super::reach::pair_span(spans, f.beams[j], f.beams[i]).slope;
-                }
-            }
-        }
-        out
-    }
-
-    /// The bound of the force on a cluster's state over a cell (rad/µs/µm), −⟨ψ|∇H_h|ψ⟩ at most the gradient's norm, at most the
-    /// largest over its states of their rows' sums: the far light's (its diagonal slope and its couplings' slopes to the others),
-    /// and each lit carrier's light shift of a ground state b, Σ_l'l [|∇(a_l'* a_l)| ‖X^f_l'[:,b]‖ ‖X^f_l[:,b]‖ 2/Γ_min +
-    /// max|a_l'| max|a_l| ‖X^f_l'[:,b]‖ ‖X^f_l[:,b]‖ L_b (2/Γ_min)²] -- its response's resolvent at most 2/Γ_min, and its derivative's
-    /// the slopes L_b of the levels the column reaches (b's and its excited states', `energy_slope_cell`) over its square --; and the
-    /// scattering's mean recoil k_max Γ_max/2 (the jumps' mean force at most).
-    fn force_cell(&self, cluster: usize, spans: &[Span]) -> f64 {
-        let states = &self.clusters[cluster].states;
-        let gamma = self.least_decay();
-        let mut most = 0.0_f64;
-        let mut k_max = 0.0_f64;
-        for carrier in &self.carriers {
-            for &l in &carrier.beams {
-                k_max = k_max.max(self.light.beams[l].wave_number);
-            }
-        }
-        for &x in states {
-            let mut row = self.energy_slope_cell(x, x, spans);
-            for &y in states.iter().filter(|&&y| y != x) {
-                for (f, tone) in self.light.frequencies.iter().zip(&self.tones) {
-                    let n = f.beams.len();
-                    for j in 0..n {
-                        for i in 0..n {
-                            row += tone.pairs[j * n + i][(x, y)].abs() * super::reach::pair_span(spans, f.beams[j], f.beams[i]).slope;
-                        }
-                    }
-                }
-            }
-            if x < GROUND {
-                for carrier in &self.carriers {
-                    let columns: Vec<f64> = carrier.folded.iter().map(|m| (GROUND..STATES).map(|e| m[(e, x)].norm_sqr()).sum::<f64>().sqrt()).collect();
-                    let levels = (GROUND..STATES)
-                        .filter(|&e| carrier.folded.iter().any(|m| m[(e, x)] != C64::ZERO))
-                        .map(|e| self.energy_slope_cell(e, x, spans))
-                        .fold(0.0, f64::max);
-                    for (j, &lj) in carrier.beams.iter().enumerate() {
-                        for (i, &li) in carrier.beams.iter().enumerate() {
-                            let size = columns[j] * columns[i];
-                            if size == 0.0 {
-                                continue;
-                            }
-                            let slope = super::reach::pair_span(spans, lj, li).slope;
-                            row += slope * size * 2.0 / gamma + spans[lj].most * spans[li].most * size * levels * (2.0 / gamma).powi(2);
-                        }
-                    }
-                }
-            }
-            most = most.max(row);
-        }
-        let gamma_max = (0..EXCITED).map(|x| self.decay[(x, x)].re).fold(0.0, f64::max);
-        most + k_max * gamma_max / 2.0
-    }
-
-    /// A ground state's folded drives' saturation and sweep bounds over a cell (module documentation of units.rs): per lit
-    /// carrier and excited state, v_e = Σ_l max|a_l| |X^f_l[e,b]| over |ΔE_e| ≥ √(d² + Γ_e²/4), d the distance of E_e − z_b − k·v
-    /// from zero over the cell and the reach's speeds less the excited states' Gershgorin radius and the self-energy's bound;
-    /// S = 2 Σ v_e²/|ΔE_e|², a = max (v L + k a_max)/|ΔE_e|².
-    fn drive_cell(&self, b: usize, cluster: usize, spans: &[Span], speed: f64) -> (Bounds, Bounds) {
-        let (s, a) = self.drive_bound(b, cluster, spans, speed);
-        if !spans.iter().all(|s| s.rho.is_finite()) {
-            return (Bounds { upper: s, centre: f64::NEG_INFINITY }, Bounds { upper: a, centre: f64::NEG_INFINITY });
-        }
-        // At the centre: the same bound on the point (every amplitude its own value there), which the true value does not exceed.
-        let point = self.point_spans(spans);
-        let (sc, ac) = self.drive_bound(b, cluster, &point, speed);
-        (Bounds { upper: s, centre: sc }, Bounds { upper: a, centre: ac })
-    }
-
-    /// The bounds of `drive_cell` over a cell's spans: on a point (every spread zero) the couplings are the point's exact sums.
-    fn drive_bound(&self, b: usize, cluster: usize, spans: &[Span], speed: f64) -> (f64, f64) {
-        let energies = self.cell_energies(spans);
-        let point = spans.iter().all(|s| s.rho == 0.0);
-        let outside: Vec<usize> = (0..GROUND).filter(|&a| self.membership[a] != cluster).collect();
-        let dress: Vec<f64> = (0..GROUND).map(|a| self.carriers.iter().map(|d| self.dressing_bound(d, a, spans)).sum()).collect();
-        let acceleration = self.hbar_over_mass * self.force_cell(cluster, spans);
-        let (mut s, mut a) = (0.0_f64, 0.0_f64);
-        for (ci, carrier) in self.carriers.iter().enumerate() {
-            let others: f64 = self.carriers.iter().enumerate().filter(|&(d, _)| d != ci).map(|(_, d)| self.dressing_bound(d, b, spans)).sum();
-            let (z_lo, z_hi) = (energies.centre[b] - energies.slack[b] + carrier.detuning - others, energies.centre[b] + energies.slack[b] + carrier.detuning + others);
-            let k = carrier.beams.iter().map(|&l| self.light.beams[l].wave_number).fold(0.0, f64::max);
-            // The self-energy's bound per excited state: its Gershgorin row, Σ_{d, a∉C} |v_a[e]| ‖v_a‖/|z − Ẽ_a − δ_d|, v_a the folded
-            // channel's coupling at its peak (only the states a channel reaches move).
-            let mut sigma = vec![0.0; STATES];
-            for d in &self.carriers {
-                for &o in &outside {
-                    let (lo, hi) = (z_lo - energies.centre[o] - energies.slack[o] - dress[o] - d.detuning, z_hi - energies.centre[o] + energies.slack[o] + dress[o] - d.detuning);
-                    let den = distance(lo, hi);
-                    let size: f64 = d.beams.iter().zip(&d.folded).map(|(&l, x)| spans[l].most * (GROUND..STATES).map(|e| x[(e, o)].norm_sqr()).sum::<f64>().sqrt()).sum();
-                    if size == 0.0 {
-                        continue;
-                    }
-                    for e in GROUND..STATES {
-                        let reach: f64 = d.beams.iter().zip(&d.folded).map(|(&l, x)| spans[l].most * x[(e, o)].abs()).sum();
-                        if reach > 0.0 {
-                            sigma[e] += reach * size / den;
-                        }
-                    }
-                }
-            }
-            for e in GROUND..STATES {
-                let v: f64 = if point {
-                    carrier.beams.iter().zip(&carrier.folded).map(|(&l, x)| spans[l].centre * x[(e, b)]).sum::<C64>().abs()
-                } else {
-                    carrier.beams.iter().zip(&carrier.folded).map(|(&l, x)| spans[l].most * x[(e, b)].abs()).sum()
-                };
-                if v == 0.0 {
+    /// The bound over a region of |∇ Σ_pairs c_l'l w(P_l'l)|, the far light's static forms each weighted by `w` (an entry, a
+    /// diagonal's difference): its value at the centre plus the cell's radius times Σ |w| max|∇∇c_l'l|, at most Σ |w| max|∇c_l'l|
+    /// (reach.rs `PairSpan`); on a point, its value there (rad/µs/µm).
+    pub(crate) fn far_gradient(&self, region: &Region, w: &dyn Fn(&Mat) -> C64) -> f64 {
+        let (mut g, mut curvature, mut blind) = ([C64::ZERO; 3], 0.0, 0.0);
+        for (tone, pairs) in self.tones.iter().zip(&region.pairs) {
+            for (p, pair) in tone.pairs.iter().zip(pairs) {
+                let x = w(p);
+                if x == C64::ZERO {
                     continue;
                 }
-                let (lo, hi) = (energies.centre[e] - energies.slack[e] - z_hi - k * speed, energies.centre[e] + energies.slack[e] - z_lo + k * speed);
-                let d = (distance(lo, hi) - energies.radius[e] - sigma[e]).max(0.0);
-                let gamma = self.decay[(e - GROUND, e - GROUND)].re;
-                let width = d * d + gamma * gamma / 4.0;
-                s += 2.0 * v * v / width;
-                let slope = self.energy_slope_cell(e, b, spans) + others;
-                a = a.max((speed * slope + k * acceleration) / width);
+                for i in 0..3 {
+                    g[i] += pair.gradient[i] * x;
+                }
+                curvature += x.abs() * pair.hessian;
+                blind += x.abs() * pair.slope;
             }
         }
-        (s, a)
+        if !region.rho.is_finite() {
+            return blind;
+        }
+        (g.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() + region.rho * curvature).min(blind)
     }
 
-    /// A drive's gate over the reach: its ground state's total folded saturation S_b and its drives' sweep (SPEC §1.5), the same for
-    /// every drive from that state (`Model::gates` asks once per ground state).
-    pub(crate) fn drive_gate(&self, unit: &Unit, reach: &Reach) -> Gate {
-        let Unit::Drive { ground, .. } = unit else { unreachable!() };
-        let cluster = self.membership[*ground];
-        let saturation = self.bound_over(reach, super::units::EXISTS, &|_c: &super::reach::Cell, spans: &[Span]| self.drive_cell(*ground, cluster, spans, reach.speed).0);
-        let sweep = self.bound_over(reach, super::units::EXISTS, &|_c: &super::reach::Cell, spans: &[Span]| self.drive_cell(*ground, cluster, spans, reach.speed).1);
-        Gate { saturation, sweep }
+    /// The bound of |∇(E_x − E_y)| of the far light's diagonal over a region (rad/µs/µm, `far_gradient`).
+    pub(crate) fn energy_slope_over(&self, x: usize, y: usize, region: &Region) -> f64 {
+        self.far_gradient(region, &|p: &Mat| p[(x, x)] - if y == x { C64::ZERO } else { p[(y, y)] })
+    }
+
+    /// The bound over a region of |∇| of a carrier's light shift of ground state b (module documentation, # Derivatives): over its
+    /// beam pairs -- all of them, or those within one polarization unit (its dressing, T̄) -- Σ max|∇(a_l'* a_l)| ‖X^f_l'[:,b]‖
+    /// ‖X^f_l[:,b]‖ ‖R‖, plus ‖u_b‖² L_b ‖R‖², the resolvent's derivative at most the slope L_b of the levels the column reaches (b's
+    /// and its excited states', `energy_slope_over`) times its square (‖u_b‖ in all, or per unit, `Couplings`); ‖R‖ the dressing's
+    /// resolvent bound (`resolvent`), or the dissipation's 2/Γ_min for the shift in the generator (its self-energy and dressing
+    /// unbounded here).
+    fn shift_slope(&self, carrier: usize, b: usize, region: &Region, dressing: bool) -> f64 {
+        let cc = &self.carriers[carrier];
+        let couplings = &self.couplings(region)[carrier];
+        let columns: Vec<f64> = cc.folded.iter().map(|m| (GROUND..STATES).map(|e| m[(e, b)].norm_sqr()).sum::<f64>().sqrt()).collect();
+        if columns.iter().all(|&c| c == 0.0) {
+            return 0.0;
+        }
+        let levels = (GROUND..STATES)
+            .filter(|&e| cc.folded.iter().any(|m| m[(e, b)] != C64::ZERO))
+            .map(|e| self.energy_slope_over(e, b, region))
+            .fold(0.0, f64::max);
+        let resolvent = if dressing { self.resolvent(carrier, b, region) } else { 2.0 / self.least_decay() };
+        let n = cc.beams.len();
+        let pairs = &region.pairs[cc.frequency];
+        let mut out = 0.0;
+        for j in 0..n {
+            for i in 0..n {
+                let size = columns[j] * columns[i];
+                if size > 0.0 && (!dressing || cc.units[j] == cc.units[i]) {
+                    out += pairs[j * n + i].slope * size * resolvent;
+                }
+            }
+        }
+        let square = if dressing { couplings.units.iter().map(|u| u[b] * u[b]).sum::<f64>() } else { couplings.column[b] * couplings.column[b] };
+        out + square * levels * resolvent * resolvent
+    }
+
+    /// The bound of the force on a cluster's state over a region (rad/µs/µm), made once per region and cluster: −⟨ψ|∇H_h|ψ⟩ at most
+    /// the gradient's norm, at most the largest over its states of their rows' sums -- the far light's |∇H_xy| (`far_gradient`)
+    /// and each lit carrier's light shift's (`shift_slope`) --, and the scattering's mean recoil k_max Γ_max/2 (the jumps' mean
+    /// force at most).
+    fn force_over(&self, cluster: usize, region: &Region) -> f64 {
+        *region.forces[cluster].get_or_init(|| {
+            let states = &self.clusters[cluster].states;
+            let k_max = self.carriers.iter().flat_map(|c| c.beams.iter().map(|&l| self.light.beams[l].wave_number)).fold(0.0, f64::max);
+            let mut most = 0.0_f64;
+            for &x in states {
+                let mut row = 0.0;
+                for &y in states {
+                    row += self.far_gradient(region, &|p: &Mat| p[(x, y)]);
+                }
+                if x < GROUND {
+                    row += (0..self.carriers.len()).map(|c| self.shift_slope(c, x, region, false)).sum::<f64>();
+                }
+                most = most.max(row);
+            }
+            let gamma_max = (0..EXCITED).map(|x| self.decay[(x, x)].re).fold(0.0, f64::max);
+            most + k_max * gamma_max / 2.0
+        })
+    }
+
+    /// A ground state's folded drives' saturation and sweep bounds over a region (module documentation of units.rs), made once per
+    /// region and ground state: per lit carrier and excited state, v_e = |Σ_l a_l X^f_l[e,b]| (`Couplings`) over |ΔE_e| ≥
+    /// √(d² + Γ_e²/4), d the distance of E_e − z_b − k·v from zero over the region and its speeds less the excited states'
+    /// Gershgorin radius and the self-energy's bound; S = 2 Σ v_e²/|ΔE_e|², a = max (v L + k a_max)/|ΔE_e|², L the slope of
+    /// E_e − E_b and of the other carriers' dressings of b.
+    pub(crate) fn drive_bound(&self, b: usize, cluster: usize, region: &Region) -> (f64, f64) {
+        *region.drives[b].get_or_init(|| {
+            let speed = region.speed;
+            let energies = self.energies(region);
+            let couplings = self.couplings(region);
+            let dressings = self.dressings(region);
+            let outside: Vec<usize> = (0..GROUND).filter(|&a| self.membership[a] != cluster).collect();
+            let dress: Vec<f64> = (0..GROUND).map(|a| dressings.iter().map(|d| d[a]).sum()).collect();
+            let acceleration = self.hbar_over_mass * self.force_over(cluster, region);
+            let (mut s, mut a) = (0.0_f64, 0.0_f64);
+            for (ci, carrier) in self.carriers.iter().enumerate() {
+                let others: f64 = dressings.iter().enumerate().filter(|&(d, _)| d != ci).map(|(_, d)| d[b]).sum();
+                let others_slope: f64 = (0..self.carriers.len()).filter(|&d| d != ci).map(|d| self.shift_slope(d, b, region, true)).sum();
+                let (z_lo, z_hi) = (energies.centre[b] - energies.slack[b] + carrier.detuning - others, energies.centre[b] + energies.slack[b] + carrier.detuning + others);
+                let k = carrier.beams.iter().map(|&l| self.light.beams[l].wave_number).fold(0.0, f64::max);
+                // The self-energy's bound per excited state: its Gershgorin row, Σ_{d, a∉C} |u_a[e]| ‖u_a‖/|z − Ẽ_a − δ_d|, u_a the
+                // folded channel's coupling (only the states a channel reaches move).
+                let mut sigma = vec![0.0; STATES];
+                for (d, cd) in self.carriers.iter().zip(couplings) {
+                    for &o in &outside {
+                        let (lo, hi) = (z_lo - energies.centre[o] - energies.slack[o] - dress[o] - d.detuning, z_hi - energies.centre[o] + energies.slack[o] + dress[o] - d.detuning);
+                        let den = distance(lo, hi);
+                        let size = cd.column[o];
+                        if size == 0.0 {
+                            continue;
+                        }
+                        for e in GROUND..STATES {
+                            let reach = cd.entry[o][e - GROUND];
+                            if reach > 0.0 {
+                                sigma[e] += reach * size / den;
+                            }
+                        }
+                    }
+                }
+                for e in GROUND..STATES {
+                    let v = couplings[ci].entry[b][e - GROUND];
+                    if v == 0.0 {
+                        continue;
+                    }
+                    let (lo, hi) = (energies.centre[e] - energies.slack[e] - z_hi - k * speed, energies.centre[e] + energies.slack[e] - z_lo + k * speed);
+                    let d = (distance(lo, hi) - energies.radius[e] - sigma[e]).max(0.0);
+                    let gamma = self.decay[(e - GROUND, e - GROUND)].re;
+                    let width = d * d + gamma * gamma / 4.0;
+                    s += 2.0 * v * v / width;
+                    let slope = self.energy_slope_over(e, b, region) + others_slope;
+                    a = a.max((speed * slope + k * acceleration) / width);
+                }
+            }
+            (s, a)
+        })
     }
 
     /// The force on a sample's state, −Re⟨ψ|G|ψ⟩/‖ψ‖² of its generator's parts at the point (rad/µs/µm).
@@ -1004,22 +1051,15 @@ impl Model {
         }
     }
 
-    /// A near coupling's (`Unit::Term`) magnitude and beat over a cell: |X_ab| ≤ ½ Σ_e |V_to[e,a]||V_from[e,b]| (1/σ_eb + 1/σ'_ea +
-    /// Γ_e/(σ_eb σ'_ea)), σ the drives' denominators' bounds; its beat Ω = E_a − E_b + δ_to − δ_from over the cell, less the
-    /// Doppler shift of its strongest beam pair at the reach's speed and the near light's differential shift. S = 2m².
-    fn term_cell(&self, a: usize, b: usize, from: Component, to: Component, spans: &[Span], speed: f64) -> Bounds {
-        let upper = self.term_bound(a, b, from, to, spans, speed);
-        if !spans.iter().all(|s| s.rho.is_finite()) {
-            return Bounds { upper, centre: f64::NEG_INFINITY };
-        }
-        let point = self.point_spans(spans);
-        Bounds { upper, centre: self.term_bound(a, b, from, to, &point, speed) }
-    }
-
-    /// The bound of `term_cell` over a cell's spans (S = 2m²).
-    fn term_bound(&self, a: usize, b: usize, from: Component, to: Component, spans: &[Span], speed: f64) -> f64 {
-        let energies = self.cell_energies(spans);
-        let (cf, ct) = (&self.carriers[self.carrier_index(from.frequency)], &self.carriers[self.carrier_index(to.frequency)]);
+    /// A near coupling's (`Unit::Term`) saturation bound S = 2m² over a region: |X_ab| ≤ ½ Σ_e |u_to,a[e]||u_from,b[e]| (1/σ_eb +
+    /// 1/σ'_ea + Γ_e/(σ_eb σ'_ea)), the carriers' coherent couplings (`Couplings`) and σ the drives' denominators' bounds; its beat
+    /// Ω = E_a − E_b + δ_to − δ_from over the region, less the Doppler shift of its strongest beam pair at the region's speeds and
+    /// the near light's differential shift; on a point, its measured value there.
+    pub(crate) fn term_bound(&self, a: usize, b: usize, from: Component, to: Component, region: &Region) -> f64 {
+        let energies = self.energies(region);
+        let couplings = self.couplings(region);
+        let (fi, ti) = (self.carrier_index(from.frequency), self.carrier_index(to.frequency));
+        let (cf, ct) = (&self.carriers[fi], &self.carriers[ti]);
         let sigma = |c: &Carrier, g: usize, e: usize| -> f64 {
             let (lo, hi) = (energies.centre[e] - energies.slack[e] - energies.centre[g] - energies.slack[g] - c.detuning, energies.centre[e] + energies.slack[e] - energies.centre[g] + energies.slack[g] - c.detuning);
             let d = (distance(lo, hi) - energies.radius[e]).max(0.0);
@@ -1028,8 +1068,7 @@ impl Model {
         };
         let mut size = 0.0;
         for e in GROUND..STATES {
-            let vf: f64 = cf.beams.iter().zip(&cf.folded).map(|(&l, x)| spans[l].most * x[(e, b)].abs()).sum();
-            let vt: f64 = ct.beams.iter().zip(&ct.folded).map(|(&l, x)| spans[l].most * x[(e, a)].abs()).sum();
+            let (vf, vt) = (couplings[fi].entry[b][e - GROUND], couplings[ti].entry[a][e - GROUND]);
             if vf == 0.0 || vt == 0.0 {
                 continue;
             }
@@ -1040,25 +1079,17 @@ impl Model {
         let beat = self.omega(&ct.beat.plus(-1, &cf.beat));
         let (lo, hi) = (energies.centre[a] - energies.slack[a] - energies.centre[b] - energies.slack[b] + beat, energies.centre[a] + energies.slack[a] - energies.centre[b] + energies.slack[b] + beat);
         let k = cf.beams.iter().chain(&ct.beams).map(|&l| self.light.beams[l].wave_number).fold(0.0, f64::max);
-        let sep = distance(lo, hi) - 2.0 * k * speed - self.near_spread(a, b, spans);
+        let sep = distance(lo, hi) - 2.0 * k * region.speed - self.near_spread(a, b, region);
         let m = if size == 0.0 { 0.0 } else if sep > 0.0 { size / sep } else { f64::INFINITY };
         2.0 * m * m
     }
 
-    /// A near coupling's gate over the reach.
-    pub(crate) fn term_gate(&self, unit: &Unit, reach: &Reach) -> Gate {
-        let Unit::Term { a, b, from: Some(from), to: Some(to) } = unit else { unreachable!("a far static coupling's gate is units.rs'") };
-        let saturation = self.bound_over(reach, super::units::EXISTS, &|_c: &super::reach::Cell, spans: &[Span]| self.term_cell(*a, *b, *from, *to, spans, reach.speed));
-        Gate { saturation, sweep: 0.0 }
-    }
-
     /// A near coupling's error at a sample: m² (p_a + p_b) with m its magnitude over its beat at the point and the sample's
-    /// velocity (the beat moved by the strongest beam pair's q·v), the cell bound's formula on the point.
+    /// velocity (the beat moved by the strongest beam pair's q·v): its bound on the point (`term_bound`).
     pub(crate) fn term_error(&self, unit: &Unit, sample: &Sample) -> UnitError {
         let Unit::Term { a, b, from: Some(from), to: Some(to) } = unit else { unreachable!() };
-        let cell = super::reach::Cell { centre: sample.at.r, half: [0.0; 3] };
         let speed = self.hbar_over_mass * crate::linalg::norm3(sample.at.kappa);
-        let m2 = 0.5 * self.term_bound(*a, *b, *from, *to, &self.spans(&cell), speed);
+        let m2 = 0.5 * self.term_bound(*a, *b, *from, *to, &self.point_region(sample.at.r, speed));
         let p = self.state_populations(sample);
         UnitError { parameter: m2, population: m2 * (p[*a] + p[*b]), temperature: m2 * (p[*a] + p[*b]) }
     }

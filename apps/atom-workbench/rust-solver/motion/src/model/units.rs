@@ -24,7 +24,7 @@
 //! the far units book. They are folded and dropped, booked under the far units.
 
 use super::cluster::Edge;
-use super::reach::{distance, doppler, lipschitz, Bounds, Cell, Span};
+use super::reach::{distance, doppler, lipschitz, Region};
 use crate::linalg::norm3;
 use super::{Component, Gate, Model, Reach, Sample, Unit, UnitError, Wave};
 use crate::linalg::{Mat, C64};
@@ -224,61 +224,81 @@ impl Model {
             }
     }
 
-    /// A static coupling's (two ground states, or two excited states) mixing bound over a cell: its coherent peak there over the
-    /// least separation of the two states' energies there, less the Doppler shift of its parts' largest wave vector at the
-    /// reach's speed.
-    fn static_cell(&self, a: usize, b: usize, spans: &[Span], speed: f64) -> Bounds {
-        let mut size = 0.0;
+    /// A static coupling's (two ground states, or two excited states) saturation bound S = 2m² over a region: its value
+    /// |Σ_l'l c_l'l [P_l'l]_ab| at the centre plus Σ |[P_l'l]_ab| times each pair's radius (reach.rs `PairSpan`), at most every beam at
+    /// its largest amplitude and in phase, over the least separation of the two states' energies there, less the Doppler shift of
+    /// its parts' largest wave vector at the region's speeds and the near light's differential shift; on a point, its measured
+    /// value there.
+    fn static_bound(&self, a: usize, b: usize, region: &Region) -> f64 {
+        let (mut centre, mut moved, mut blind) = (C64::ZERO, 0.0, 0.0);
         let (mut at, mut slack) = (self.energies[a] - self.energies[b], 0.0);
-        let mut size_centre = C64::ZERO;
         let mut wave = 0.0_f64;
-        for (f, t) in self.light.frequencies.iter().zip(&self.tones) {
+        for (f, (t, pairs)) in self.light.frequencies.iter().zip(self.tones.iter().zip(&region.pairs)) {
             let n = f.beams.len();
-            for j in 0..n {
-                for i in 0..n {
-                    let (lj, li) = (f.beams[j], f.beams[i]);
-                    let p = &t.pairs[j * n + i];
-                    let pair = super::reach::pair_span(spans, lj, li);
-                    let (c, moved) = (pair.centre, pair.radius);
-                    size += p[(a, b)].abs() * spans[lj].most * spans[li].most;
-                    size_centre += c * p[(a, b)];
-                    let d = p[(a, a)] - p[(b, b)];
-                    at += (c * d).re;
-                    slack += d.abs() * moved;
-                    if p[(a, b)] != C64::ZERO {
-                        let k = self.wave_value(&self.beam_wave(li).plus(-1, &self.beam_wave(lj)));
-                        wave = wave.max(doppler(k, speed));
-                    }
+            for (x, (p, pair)) in t.pairs.iter().zip(pairs).enumerate() {
+                let (lj, li) = (f.beams[x / n], f.beams[x % n]);
+                let v = p[(a, b)];
+                centre += pair.centre * v;
+                moved += v.abs() * pair.radius;
+                blind += v.abs() * region.spans[lj].most * region.spans[li].most;
+                let d = p[(a, a)] - p[(b, b)];
+                at += (pair.centre * d).re;
+                slack += d.abs() * pair.radius;
+                if v != C64::ZERO {
+                    let k = self.wave_value(&self.beam_wave(li).plus(-1, &self.beam_wave(lj)));
+                    wave = wave.max(doppler(k, region.speed));
                 }
             }
         }
-        let sep = distance(at - slack, at + slack) - wave - self.near_spread(a, b, spans);
-        let upper = mixing(size, sep, 0.0);
-        let centre = if spans.iter().all(|s| s.rho.is_finite()) { mixing(size_centre.abs(), at.abs() - wave, 0.0) } else { f64::NEG_INFINITY };
-        Bounds { upper: 2.0 * upper * upper, centre: 2.0 * centre * centre }
+        let size = (centre.abs() + moved).min(blind);
+        let m = mixing(size, distance(at - slack, at + slack) - wave - self.near_spread(a, b, region), 0.0);
+        2.0 * m * m
     }
 
-    /// Each unit's existence gate over the reach (SPEC §1.5), provable bounds at this model's clusters and dressing.
+    /// Each unit's existence gate over the reach (SPEC §1.5), provable bounds at this model's clusters and dressing: a far
+    /// component's, a far beat's and a photon coherence's over all space in closed form; the drives' (per ground state its folded
+    /// drives' saturation and sweep) and the couplings' proven together over the reach's cells (reach.rs `Model::bounds_over`).
     pub fn gates(&self, units: &[Unit], reach: &Reach) -> Vec<Gate> {
-        // A drive's gate is its ground state's: once per ground state.
-        let mut drives: Vec<Option<Gate>> = vec![None; GROUND];
+        let mut quantities: Vec<Box<dyn Fn(&Region) -> f64 + '_>> = vec![];
+        let mut grounds: Vec<Option<usize>> = vec![None; GROUND];
+        let asked: Vec<Option<usize>> = units
+            .iter()
+            .map(|u| match *u {
+                Unit::Drive { ground, .. } => Some(*grounds[ground].get_or_insert_with(|| {
+                    let cluster = self.membership[ground];
+                    quantities.push(Box::new(move |r: &Region| self.drive_bound(ground, cluster, r).0));
+                    quantities.push(Box::new(move |r: &Region| self.drive_bound(ground, cluster, r).1));
+                    quantities.len() - 2
+                })),
+                Unit::Term { a, b, from: None, to: None } | Unit::Excited { excited: a, other: b } => {
+                    quantities.push(Box::new(move |r: &Region| self.static_bound(a, b, r)));
+                    Some(quantities.len() - 1)
+                }
+                Unit::Term { a, b, from: Some(from), to: Some(to) } => {
+                    quantities.push(Box::new(move |r: &Region| self.term_bound(a, b, from, to, r)));
+                    Some(quantities.len() - 1)
+                }
+                _ => None,
+            })
+            .collect();
+        let refs: Vec<&dyn Fn(&Region) -> f64> = quantities.iter().map(|q| q.as_ref() as &dyn Fn(&Region) -> f64).collect();
+        let proven = self.bounds_over(reach, EXISTS, &refs);
         units
             .iter()
-            .map(|u| match u {
-                Unit::Drive { ground, .. } => *drives[*ground].get_or_insert_with(|| self.near_gate(u, reach)),
-                Unit::Far { component } => Gate { saturation: self.far_gate(*component).saturation, sweep: self.far_sweep(*component, reach) },
-                Unit::FarBeat { first, second } => {
+            .zip(asked)
+            .map(|(u, q)| match (u, q) {
+                (Unit::Drive { .. }, Some(i)) => Gate { saturation: proven[i], sweep: proven[i + 1] },
+                (_, Some(i)) => Gate { saturation: proven[i], sweep: 0.0 },
+                (Unit::Far { component }, None) => Gate { saturation: self.far_gate(*component).saturation, sweep: self.far_sweep(*component, reach) },
+                (Unit::FarBeat { first, second }, None) => {
                     let size: f64 = self.far_cross(*first, *second).iter().map(|m| m.frobenius()).sum();
                     let beat = self.omega(&self.axes.component(&self.light, *first).plus(-1, &self.axes.component(&self.light, *second)));
                     let m = mixing(size, beat.abs(), self.spread());
                     Gate { saturation: 2.0 * m * m, sweep: 0.0 }
                 }
-                Unit::Term { a, b, from: None, to: None } | Unit::Excited { excited: a, other: b } => {
-                    let (a, b) = (*a, *b);
-                    let saturation = self.bound_over(reach, EXISTS, &|_cell: &Cell, spans: &[Span]| self.static_cell(a, b, spans, reach.speed));
-                    Gate { saturation, sweep: 0.0 }
-                }
-                _ => self.near_gate(u, reach),
+                (Unit::Coherence { .. }, None) => self.coherence_gate(u),
+                (Unit::Dressing { .. }, None) => Gate { saturation: 0.0, sweep: 0.0 },
+                _ => unreachable!("every coupling's gate is proven over the reach"),
             })
             .collect()
     }
@@ -312,9 +332,7 @@ impl Model {
                             UnitError { parameter: m * m, population: m * m, temperature: m * m }
                         }
                         Unit::Term { a, b, from: None, to: None } | Unit::Excited { excited: a, other: b } => {
-                            let cell = Cell { centre: s.at.r, half: [0.0; 3] };
-                            let speed = self.hbar_over_mass * norm3(s.at.kappa);
-                            let m2 = 0.5 * self.static_cell(*a, *b, &self.spans(&cell), speed).centre.max(0.0);
+                            let m2 = 0.5 * self.static_bound(*a, *b, &self.point_region(s.at.r, self.hbar_over_mass * norm3(s.at.kappa)));
                             let p = self.state_populations(s);
                             UnitError { parameter: m2, population: m2 * (p[*a] + p[*b]), temperature: m2 * (p[*a] + p[*b]) }
                         }
@@ -367,4 +385,3 @@ impl Model {
     }
 
 }
-
