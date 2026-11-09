@@ -18,7 +18,7 @@
 // and an API override keep their digits, read in the new unit; an API box
 // still at the pulse's own number is that number re-read in it.
 import { Field, Segmented, SpinBox, TreeCombo, switchButton, setChecked, alignUnitPickers, button, choiceTree, defaultUnit, element, sectionTitle, setText, shifted, token, unitTree } from "../../fluent/index.js";
-const copyAxis = (entry) => ({ ...entry, values: [...entry.values], ...(entry.range ? { range: { ...entry.range } } : {}), ...(entry.links ? { links: entry.links.map(link => ({ ...link, values: [...link.values], ...(link.range ? { range: { ...link.range } } : {}) })) } : {}) });
+const copyAxis = (entry) => ({ ...entry, values: [...entry.values], ...(entry.range ? { range: { ...entry.range } } : {}), ...(entry.links ? { links: entry.links.map(link => ({ ...link, values: [...link.values] })) } : {}) });
 /** The word a manual axis carries in the label column: a hand moves it. */
 const BY_HAND = "By hand";
 /** The UI authors a range; the native compiler alone expands its numbers. */
@@ -157,7 +157,7 @@ class AxisRowView {
         this.notes.append(this.custom);
     }
     get cells() {
-        const signature = JSON.stringify([this.entry.link_enabled, (this.entry.links ?? []).map(link => [link.port, link.unit, link.mode, this.owner.portTree(link.port), this.owner.ports.find(port => port.port === link.port)?.units])]);
+        const signature = JSON.stringify([this.entry.link_enabled, (this.entry.links ?? []).map(link => [link.port, link.unit, this.owner.portTree(link.port), this.owner.ports.find(port => port.port === link.port)?.units])]);
         if (signature === this.linkedSignature && this.linkedCells.length) {
             this.linkedUpdates.forEach(update => update());
             return [this.kind, this.axis, this.values, this.unit, this.mode.root, this.linkedCells[0], this.remove, this.notes, ...this.linkedCells.slice(1)];
@@ -181,57 +181,25 @@ class AxisRowView {
                     link.unit = firstSweep(port).unit; this.owner.emitPlan(); });
                 picker.root.classList.add("linked-port");
                 picker.setTree(this.owner.portTree(link.port), link.port);
+                // A linked parameter is not scanned: it follows this axis by a formula of x.
                 const holder = element("div", "linked-values");
-                if (link.mode === "range") {
-                    const bank = element("div", "range-bank");
-                    const start = rangeSpin("linked from", () => 1, () => [null, null], value => { if (link.range)
-                        link.range.start = value;
-                    else
-                        link.values[0] = value; this.owner.emitPlan(); });
-                    const stop = rangeSpin("linked to", () => 1, () => [null, null], value => { if (link.range)
-                        link.range.stop = value;
-                    else
-                        link.values[link.values.length - 1] = value; this.owner.emitPlan(); });
-                    const update = () => {
-                        if (document.activeElement !== start.input)
-                            start.input.value = String(link.range?.start ?? link.values[0] ?? 0);
-                        if (document.activeElement !== stop.input)
-                            stop.input.value = String(link.range?.stop ?? link.values.at(-1) ?? 1);
-                        start.refresh();
-                        stop.refresh();
-                    };
-                    update();
-                    this.linkedUpdates.push(update);
-                    bank.append(element("span", "bank-word", "from"), start.root, element("span", "bank-word", "to"), stop.root);
-                    holder.append(bank);
-                    this.linkControls.push(start.input, stop.input);
-                }
-                else {
-                    const input = element("input");
-                    input.type = "text";
-                    input.spellcheck = false;
-                    const update = () => { if (document.activeElement !== input)
-                        input.value = link.mode === "formula" ? link.formula : link.value_text; };
-                    update();
-                    this.linkedUpdates.push(update);
-                    input.setAttribute("aria-label", link.mode === "formula" ? "Linked formula" : "Linked values");
-                    input.placeholder = link.mode === "formula" ? "120 - x" : "1, 2, 3";
-                    input.title = link.mode === "formula" ? "x is this axis's number; write numeric constants directly" : LIST_TIP;
-                    input.addEventListener("change", () => { if (link.mode === "formula")
-                        link.formula = input.value;
-                    else
-                        link.value_text = input.value; this.owner.emitPlan(); });
-                    holder.append(input);
-                    this.linkControls.push(input);
-                }
+                const input = element("input");
+                input.type = "text";
+                input.spellcheck = false;
+                const update = () => { if (document.activeElement !== input)
+                    input.value = link.formula ?? ""; };
+                update();
+                this.linkedUpdates.push(update);
+                input.setAttribute("aria-label", "Linked formula");
+                input.placeholder = "x + 6.37";
+                input.title = "x is this axis's number; write numeric constants directly";
+                input.addEventListener("change", () => { link.formula = input.value; link.mode = "formula"; this.owner.emitPlan(); });
+                holder.append(input);
+                this.linkControls.push(input);
                 const unit = new TreeCombo(value => { link.unit = value; this.owner.emitPlan(); });
                 unit.root.classList.add("linked-unit");
                 const port = this.owner.ports.find(p => p.port === link.port);
                 unit.setTree(unitTree((port?.units.length ? port.units : [[link.unit, 0]]).map(([symbol]) => ({ value: symbol, label: symbol || "1", group: port?.families[symbol] })), link.unit), link.unit);
-                const mode = new Segmented(value => { link.mode = value; this.owner.emitPlan(); });
-                mode.root.classList.add("linked-mode");
-                mode.setChoices([["range", "Range"], ["values", "Values"], ["formula", "Formula"]]);
-                mode.setCurrent(link.mode);
                 const add = button("+", () => this.addLink(), "quiet glyph square linked-add");
                 add.title = "Add linked parameter";
                 add.setAttribute("aria-label", add.title);
@@ -239,11 +207,11 @@ class AxisRowView {
                     this.entry.link_enabled = false; this.owner.emitPlan(); }, "destructive glyph square linked-remove");
                 remove.title = "Remove linked parameter";
                 remove.setAttribute("aria-label", remove.title);
-                const nodes = [marker, picker.root, holder, unit.root, mode.root, add, remove];
+                const nodes = [marker, picker.root, holder, unit.root, add, remove];
                 nodes.forEach(node => node.classList.add("linked-row-cell"));
                 if (index === (this.entry.links?.length ?? 0) - 1)
                     marker.classList.add("last");
-                this.linkControls.push(picker.root, unit.root, ...mode.root.querySelectorAll("button"), add, remove);
+                this.linkControls.push(picker.root, unit.root, add, remove);
                 cells.push(...nodes);
             }
         for (const control of this.linkControls)

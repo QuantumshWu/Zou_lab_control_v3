@@ -15,7 +15,6 @@ fn inactive_banks_and_disabled_links_survive_without_being_evaluated() {
     assert_eq!(compiled["axes"][0]["values"], json!([1.0,2.0,3.0]));
     assert_eq!(compiled["rows"][0]["value_text"], "unfinished,");
     assert_eq!(compiled["rows"][0]["links"][0]["formula"], "unfinished(");
-    assert_eq!(compiled["rows"][0]["links"][0]["values"], json!([7.0,9.0]));
     let mut active = document;
     active["axes"][0]["link_enabled"] = json!(true);
     let preview = compile(active, "preview").unwrap();
@@ -42,21 +41,30 @@ fn compact_ranges_and_values_are_independent_and_keep_endpoint_precision() {
     assert!(range_values(0.0,1.0,100_001).is_err());
 }
 
+/// A linked parameter is not scanned: it follows its axis by a formula of x, one value
+/// per point, a coordinate of that axis. Range and Values links are not offered.
 #[test]
-fn linked_modes_compile_at_the_parent_count_and_move_the_whole_group_outside() {
+fn linked_formulas_follow_their_axis_and_move_the_whole_group_outside() {
     let document = json!({"axes":[
         {"port":"pulse:param:inner","values":[7,8]},
         {"port":"pulse:param:A","values":[1,2,3],"link_enabled":true,"links":[
-            {"port":"api:B","values":[10,20],"mode":"range"},
-            {"port":"device:rf:frequency","values":[0],"mode":"formula","formula":"120 - x * 2"},
-            {"port":"pulse:param:C","values":[0],"mode":"values","value_text":"3,2,1"}]}]});
+            {"port":"api:B","mode":"formula","formula":"x + 6.5"},
+            {"port":"device:rf:frequency","values":[0],"mode":"formula","formula":"120 - x * 2"}]}]});
     let result = compile(document,"compile").unwrap();
     let axes = result["axes"].as_array().unwrap();
     assert_eq!(axes.iter().map(|a|a["port"].as_str().unwrap()).collect::<Vec<_>>(),
-        ["pulse:param:A","api:B","device:rf:frequency","pulse:param:C","pulse:param:inner"]);
-    assert_eq!(axes[1]["values"],json!([10.0,15.0,20.0]));
+        ["pulse:param:A","api:B","device:rf:frequency","pulse:param:inner"]);
+    assert_eq!(axes[1]["values"],json!([7.5,8.5,9.5]));
     assert_eq!(axes[2]["values"],json!([118.0,116.0,114.0]));
-    assert_eq!(axes[3]["coordinate_of"],"pulse:param:A");
+    assert_eq!(axes[2]["coordinate_of"],"pulse:param:A");
+    for mode in ["range", "values"] {
+        let old = json!({"axes":[{"port":"pulse:param:A","values":[1,2,3],"link_enabled":true,
+            "links":[{"port":"api:B","values":[10,20],"mode":mode,"value_text":"3,2,1"}]}]});
+        assert!(compile(old.clone(),"compile").unwrap_err().contains("formula of x"), "{mode}");
+        let preview = compile(old,"preview").unwrap();
+        assert_eq!(preview["rows"][0]["port"], "pulse:param:A", "the plan's rows are still shown");
+        assert!(preview["problem"].as_str().unwrap().contains("formula of x"));
+    }
     assert_eq!((result["outer_count"].as_u64(),result["inner_count"].as_u64()),(Some(3),Some(2)));
     assert_eq!(result["shape"],json!([3,2]));
     assert_eq!(result["point_count"],6);

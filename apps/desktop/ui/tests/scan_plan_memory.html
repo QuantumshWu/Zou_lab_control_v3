@@ -147,7 +147,7 @@ try {
   t.ack({},t.facts());equal(plan().links.length,1,'accepted re-render retains links');
   t.root.style.cssText='width:1450px;position:fixed;left:0;top:0;--label-width:110px';
   const linked=t.root.querySelector('.linked-port').getBoundingClientRect();
-  for(const selector of ['.linked-values','.linked-unit','.linked-mode','.linked-add','.linked-remove']) {
+  for(const selector of ['.linked-values','.linked-unit','.linked-add','.linked-remove']) {
    const box=t.root.querySelector(selector).getBoundingClientRect();
    assert(Math.abs((box.top+box.bottom)-(linked.top+linked.bottom))<2,`${selector} wraps onto another row`);
   }
@@ -164,10 +164,10 @@ try {
   for(let i=0;i<8;i++){wheel(primary);t.ack();assert(document.activeElement===primary,'main spin lost focus');}
   equal(Number(primary.value),before+4,'all primary notches applied');
   t.root.querySelector('.axis-link').click();
-  const mode=[...t.root.querySelectorAll('.linked-mode button')].find(b=>b.textContent==='Range');mode.click();
-  const linked=t.root.querySelector('input[aria-label="linked from"]');linked.focus();const first=Number(linked.value);
-  for(let i=0;i<8;i++){wheel(linked);t.ack();assert(document.activeElement===linked,'linked spin was replaced');}
-  equal(Number(linked.value),first+4,'all linked notches applied');
+  // A linked parameter is its formula of x: its box keeps focus and text through accepted refreshes.
+  const linked=t.root.querySelector('input[aria-label="Linked formula"]');linked.focus();linked.value='x + 6.37';
+  for(let i=0;i<4;i++){t.ack();assert(document.activeElement===linked,'linked formula box was replaced');}
+  equal(linked.value,'x + 6.37','the typed formula stays');
  });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:checks.length,checks});
 }catch(error){document.getElementById('result').textContent=JSON.stringify({passed:false,completed:checks,error:error.stack})}

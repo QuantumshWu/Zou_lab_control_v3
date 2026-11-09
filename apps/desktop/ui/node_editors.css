@@ -140,9 +140,9 @@
 .linked-marker { grid-column: 1; justify-self: end; align-self: stretch; border-right: var(--edge) solid var(--divider); margin-top: calc(-1 * var(--row-gap)); width: var(--row-gap); }
 .linked-marker.last { border-bottom: var(--edge) solid var(--divider); border-radius: 0 0 var(--radius) 0; }
 .linked-port { grid-column: 2; min-width: 0; width: 100%; }
-.linked-values { grid-column: 3; display: flex; min-width: 0; }
+/* A linked parameter's formula of x: the values and mode columns, it has no mode. */
+.linked-values { grid-column: 3 / span 1; display: flex; min-width: 0; }
 .linked-values > input { width: 100%; min-width: 0; }
 .linked-unit { grid-column: 4; width: 100%; min-width: 0; }
-.linked-mode { grid-column: 5; }
 .scan-axes > button.linked-add { grid-column: 6; justify-self: center; }
 .scan-axes > button.linked-remove { grid-column: 7; }
