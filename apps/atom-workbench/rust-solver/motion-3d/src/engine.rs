@@ -321,7 +321,7 @@ impl Settings{
     /// Where the harmonic part stands: the trap's centre when every lab axis is free, else the focus, the free axes' origin.
     pub fn about(&self)->[f64;3]{if self.free==[true;3]{self.centre}else{[0.;3]}}
     /// The same at half the step (the loss's check's reads, check.rs `read`): its exponentials' and beats' shares with it.
-    pub(crate) fn halved(&self)->Settings{let mut s=self.clone();s.dt*=0.5;s.truncation*=0.5;s.beats*=0.5;s}
+    pub fn halved(&self)->Settings{let mut s=self.clone();s.dt*=0.5;s.truncation*=0.5;s.beats*=0.5;s}
     /// r less its own site's place where the harmonic part is the atom's own site's (`Engine::reference`), else less the trap's centre: the start of
     /// the harmonic control's twin (control.rs), which turns about that site as the atom does.
     pub fn about_site(&self,r:[f64;3])->[f64;3]{

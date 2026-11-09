@@ -598,9 +598,11 @@ fn the_check_s_traces_are_the_cpu_s(){
     let mut settings=Settings::new(dt,&initial.traps[0],1e-6,true);settings.region=initial.depths[0];
     let(seed,first,group)=(0x3D_5EED,40,8);
     let program=gpu.program(&model,&settings).unwrap();let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
-    let sampling=check::Sampling::alike(outputs-1,2,(outputs-1) as f64);
-    let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&[],Some(&harmonic),Some(&ends),Some(&sampling)).unwrap();
-    let c=atom_motion_3d::simulate_to(&model,&settings,&initial,seed,first,count,group,steps,outputs,&[],Some(&harmonic),&ends,Some(&sampling));
+    let sampling=check::Sampling::alike(outputs-1,(outputs-1) as f64);
+    let mut g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&[],Some(&harmonic),Some(&ends),Some(&sampling)).unwrap();
+    let mut c=atom_motion_3d::simulate_to(&model,&settings,&initial,seed,first,count,group,steps,outputs,&[],Some(&harmonic),&ends,Some(&sampling));
+    let(coarse,fine)=(Engine::new(&model,settings.clone()),Engine::new(&model,settings.halved()));
+    for t in g.traces.iter_mut().chain(c.traces.iter_mut()){t.read(&coarse,&fine,2);}
     assert_eq!(g.traces.len(),c.traces.len());
     let(mut energy,mut change)=(0_f64,0_f64);
     for(k,(x,y))in g.traces.iter().zip(&c.traces).enumerate(){

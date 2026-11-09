@@ -222,7 +222,7 @@ pub fn simulate_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,f
     run(model,settings,initial,seed,first,count,group,steps,outputs,listed,Some(r),None,None,None)
 }
 fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],origin:Option<[f64;3]>,harmonic:Option<&Harmonic>,ends:Option<&[usize]>,check:Option<&check::Sampling>)->Outcome{
-    let engine=Engine::new(model,settings.clone());let fine=check.map(|_|Engine::new(model,settings.halved()));let check=check.zip(fine.as_ref());
+    let engine=Engine::new(model,settings.clone());
     // The tasks in order: (their group, their first trajectory, the one after their last).
     let bounds=|g:u64|(first+g*group,(first+(g+1)*group).min(first+count));
     let tasks:Vec<(u64,u64,u64)>=(0..count.div_ceil(group)).flat_map(|g|{let(start,end)=bounds(g);(start..end).step_by(TASK as usize).map(move|s|(g,s,(s+TASK).min(end)))}).collect();
@@ -267,7 +267,7 @@ fn atom_of(m:&Moment)->Atom<'_>{Atom{motion:m.0,populations:&m.1,folded:m.2,prof
 /// the listed outputs, with `keep` its state at every keep-th output after t = 0 (staggered by its
 /// index), and the jumps it made up to the last output; with `check`, what it leaves the loss's check (check.rs `Trace`): its
 /// energy at every output, and in every interval at the step drawn there its read where drawn.
-fn walk(model:&Model,engine:&Engine,t:&mut Trajectory,steps:usize,outputs:usize,listed:&[usize],windows:&mut Windows,held:&mut [Option<([f64;STATES],f64,f64,f64)>],keep:Option<usize>,check:Option<(&check::Sampling,&Engine)>)
+fn walk(model:&Model,engine:&Engine,t:&mut Trajectory,steps:usize,outputs:usize,listed:&[usize],windows:&mut Windows,held:&mut [Option<([f64;STATES],f64,f64,f64)>],keep:Option<usize>,check:Option<&check::Sampling>)
     ->(Vec<Option<Moment>>,Vec<Option<([f64;3],[f64;3])>>,Vec<Trajectory>,u64,Option<check::Trace>){
     windows.clear();held.fill(None);let mut samples=vec![None;listed.len()];let mut kept=vec![];
     let mut trace=check.map(|_|check::Trace::new(outputs));
@@ -282,7 +282,7 @@ fn walk(model:&Model,engine:&Engine,t:&mut Trajectory,steps:usize,outputs:usize,
     for i in 1..outputs{
         let drawn=check.map(|_|check::drawn(t.seed,t.index,i,steps));
         for k in 1..=steps{
-            if let(Some((sampling,fine)),Some((at,deviate)),Some(x))=(check,drawn,trace.as_mut()){if k-1==at&&t.alive{x.look(engine,fine,sampling,t,i,deviate);}}
+            if let(Some(sampling),Some((at,deviate)),Some(x))=(check,drawn,trace.as_mut()){if k-1==at&&t.alive{x.look(engine,sampling,t,i,deviate);}}
             if t.alive{engine.step(t);if t.alive{windows.add((i-1)*steps+k,t);}}
         }
         record(t,i,held);energy(t,&mut trace);
@@ -363,7 +363,6 @@ impl Windows{
 pub fn sample_states(model:&Model,settings:&Settings,initial:&Initial,seed:u64,count:u64,steps:usize,outputs:usize,harmonic:&Harmonic,check:Option<&check::Sampling>)->(Vec<Trajectory>,u64,Vec<Group>,Vec<check::Trace>){
     let engine=Engine::new(model,settings.clone());
     let every=((count as usize*outputs)/4096).max(1);
-    let fine=check.map(|_|Engine::new(model,settings.halved()));let check=check.zip(fine.as_ref());
     let runs:Vec<(Vec<Trajectory>,u64,Group,Option<check::Trace>)>=(0..count).into_par_iter().map_init(||(Windows::new(settings,steps,outputs),vec![None;outputs]),|(windows,held),index|{
         let mut t=pilot_start(model,settings,initial,seed,index);let(r0,k0)=(settings.about_site(t.r),t.kappa);
         let(atoms,_,kept,jumps,trace)=walk(model,&engine,&mut t,steps,outputs,&[],windows,held,Some(every),check);

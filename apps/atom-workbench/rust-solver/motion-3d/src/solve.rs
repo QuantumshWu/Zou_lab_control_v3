@@ -907,7 +907,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     // hands it to the next rung, at the same step, what the choice's check starts from; a model within them has lost its atoms by its physics.
     let(pilot_harmonic,pilot_states,pilot_jumps,pilot_groups,pilot_traces)=loop{
         let harmonic=Harmonic::new(&pilot_candidate.model,&piloting(pilot_candidate.reference(),steps,start_waiting,pilot_candidate.phase),&pilot_candidate.initial,steps,outputs);
-        let(states,jumps,groups,traces)=sample_states(&pilot_candidate.model,&piloting(pilot_candidate.reference(),steps,start_waiting,pilot_candidate.phase),&pilot_candidate.initial,seed,pilot,steps,outputs,&harmonic,Some(&check::Sampling::alike(outputs-1,1,0.)));
+        let(states,jumps,groups,traces)=sample_states(&pilot_candidate.model,&piloting(pilot_candidate.reference(),steps,start_waiting,pilot_candidate.phase),&pilot_candidate.initial,seed,pilot,steps,outputs,&harmonic,Some(&check::Sampling::alike(outputs-1,0.)));
         if states.is_empty()&&pilot_candidate.past_their_targets(){if let Some(next)=next_candidate(request,&mut ladder,&mut failed,&mut shapes){pilot_candidate=next;(starts,start_waiting)=begin(&mut pilot_candidate);continue;}}
         break(harmonic,states,jumps,groups,traces);
     };
@@ -1109,8 +1109,9 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     // where the step's bias on the loss lies beyond its tolerance by its errors, or the check is unsettled, the product again at the
     // step that brings its upper side within it, checked again, until the check verifies the step, the rounds make no progress or
     // the work bound stops them. The check reads on the product's trajectories (their traces, lib.rs `walk`, on the GPU from the
-    // kernel's looks, src/gpu/mod.rs `Gpu::simulate`); its tolerance per output the step's share of the populations' room there,
-    // the loss's (`tolerances`).
+    // kernel's looks, src/gpu/mod.rs `Gpu::simulate`) where the pilot or the product lost atoms -- a run that loses none is not
+    // checked, its drawn reads never made --; its tolerance per output the step's share of the populations' room there, the loss's
+    // (`tolerances`).
     let loss_tolerance:Vec<f64>=self::tolerances(&ceilings,&apriori).per.iter().map(|x|x[0]).collect();
     let lossy=pilot_estimates.iter().any(|e|e.loss>0.);
     let pilot_steps=steps;let mut chosen=chosen;let mut refined=vec![];let mut previous:Option<[f64;2]>=None;
@@ -1152,9 +1153,11 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     // dual weighs them in the first batch and the product's in the next ones (`check::sampling`): a probe whose atoms wait 265 us
     // between jumps takes 279 steps a read, 1.6 runs of a trajectory, and a read per trajectory 70 % of its product.
     let span=((waiting/dt).round() as usize).clamp(1,(outputs-1)*steps);
-    let budget=pilot as f64*((outputs-1)*steps) as f64;let spent=|o:&Outcome|o.traces.iter().map(|t|t.reads.len() as f64).sum::<f64>()*3.*span as f64;
+    let budget=pilot as f64*((outputs-1)*steps) as f64;let spent=|o:&Outcome|o.traces.iter().map(|t|(t.reads.len()+t.drawn.len()) as f64).sum::<f64>()*3.*span as f64;
     let reads=|rate:f64,count:u64,spent:f64|rate.min(((budget-spent)/(3.*span as f64*count as f64)).max(0.));
-    let mut sampling=check::sampling(&pilot_traces,steps,&loss_tolerance,span,reads(f64::INFINITY,count,0.));
+    let mut sampling=check::sampling(&pilot_traces,steps,&loss_tolerance,reads(f64::INFINITY,count,0.));
+    // The engines the drawn reads are made with, at dt and dt/2 (check.rs `Trace::read`): built where the run is checked.
+    let mut reading:Option<(Engine,Engine)>=None;
     // A batch's trajectories, each group through its output `ends`.
     let batch=|first:u64,count:u64,ends:&[usize],sampling:&check::Sampling|->Result<Outcome,Stop>{
         match &gpu{
@@ -1175,6 +1178,9 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     // The reach the folds are judged to (`Judged`): the model's, grown where the run's atoms outgrow it and the rule there gives the model again.
     let mut judged=Judged{reach:model.ground.temperature_uk,differs:None};let shape=model.ground.shape();
     loop{
+        // The drawn reads made once the run is checked: the pilot or the product lost atoms.
+        let lost=outcome.traces.iter().any(|t|t.lost());
+        if lossy||lost{let(coarse,fine)=reading.get_or_insert_with(||(Engine::new(&model,settings.clone()),Engine::new(&model,settings.halved())));outcome.traces.par_iter_mut().for_each(|t|t.read(coarse,fine,span));}
         let mut estimates=summarize(&outcome.groups,&scales,&harmonic.mean);start(&mut estimates[0],&initial);
         if judged.differs.is_none(){if let Some(t)=outgrown(&estimates,judged.reach,reference.1){
             match Ground::bare_at(request,t).and_then(|g|g.clustered(EXISTS)){Ok(g)if shape.exists_within(&g.shape())=>judged.reach=t,_=>judged.differs=Some(t)}}}
@@ -1186,16 +1192,15 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
             need_of(n,p.statistic,e.loss_error.groups,p.room()).max(unseen_need(p.room())).max(need_of(n,t.statistic,e.temperature_error[0].groups,t.room()))}).collect::<Vec<f64>>());
         let wanted=reach[1].ceil() as u64;let reach:Vec<u64>=reach.iter().map(|x|(x.ceil() as u64).min(MOST_TRAJECTORIES)).collect();
         let last=(1..outputs).rev().find(|&i|reach[i]>counts[i]);
-        // The statistics met: the loss's check (check.rs # The verdict), on every run -- its reads at dt/2 see the escapes a step
-        // suppresses where the product lost none. The loss unread at a step larger than the pilot's -- the pilot lost atoms, the run
-        // at the larger step none: the escapes the step suppressed -- the run again at the pilot's step.
-        let lost=outcome.traces.iter().any(|t|t.lost());
+        // The statistics met: the loss's check (check.rs # The verdict) where the pilot or the product lost atoms. The loss unread at a
+        // step larger than the pilot's -- the pilot lost atoms, the run at the larger step none: the escapes the step suppressed -- the
+        // run again at the pilot's step.
         if last.is_none()&&lossy&&!lost&&steps<pilot_steps{
             let x=(steps as f64/pilot_steps as f64).powf(ORDER);refined.push(steps);
             chosen=Check{steps:pilot_steps,population:chosen.population*x,motion:chosen.motion*x};continue 'product;
         }
         let mut report=None;let mut records=records;let mut unverified=None;
-        if last.is_none(){
+        if last.is_none()&&(lossy||lost){
             let verdict=check::verdict(&outcome.traces,TASK as usize,steps,&loss_tolerance);
             // Unsettled, more reads -- a batch of the first's size, its trajectories and their reads at twice the rate, or a first look as
             // the first batch would have taken where none was read -- where they could save more of the refinement than they cost (cost.rs
@@ -1203,7 +1208,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
             let run=(done*((outputs-1)*steps) as u64) as f64;let more=if verdict.reads==0{reads(f64::INFINITY,count,spent(&outcome))}else{2.*rate};
             let spend=(count*((outputs-1)*steps) as u64) as f64+more*count as f64*3.*span as f64;
             if verdict.unsettled()&&more>0.&&(verdict.reads==0||pays(spend,run*(verdict.factor()-verdict.read_factor()),0.)){
-                rate=more;sampling=check::sampling(&outcome.traces,steps,&loss_tolerance,span,rate);
+                rate=more;sampling=check::sampling(&outcome.traces,steps,&loss_tolerance,rate);
                 let extra=batch(done,count,&vec![outputs-1;(count/TASK) as usize],&sampling)?;
                 outcome.extend(extra);done+=count;continue;
             }
@@ -1239,7 +1244,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
         checkpoint(&solution,Some(pace*remaining as f64*1e3));
         let ends=next_groups(&reach,&counts);
         let next=ends.len() as u64*TASK;
-        sampling=check::sampling(&outcome.traces,steps,&loss_tolerance,span,reads(f64::INFINITY,next,spent(&outcome)));
+        sampling=check::sampling(&outcome.traces,steps,&loss_tolerance,reads(f64::INFINITY,next,spent(&outcome)));
         let clock=Instant::now();
         let more=batch(done,next,&ends,&sampling)?;
         pace=clock.elapsed().as_secs_f64()/ends.iter().map(|&e|TASK*e as u64).sum::<u64>().max(1) as f64;

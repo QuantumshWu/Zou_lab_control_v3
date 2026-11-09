@@ -23,7 +23,7 @@
 //! does not wait for one of dear ones. The intervals every slot has passed are summed per task after the launch; the
 //! tasks' sums come back per output and are merged per group in order, as the CPU's are. With the loss's check (check.rs), the
 //! kernel looks at each trajectory at every output and at the step drawn in every output interval while it is held (`Look`);
-//! the CPU makes its trace from them as lib.rs `walk` does, the reads on the CPU: they cost at most a pilot's work (solve.rs).
+//! the CPU makes its trace from them as lib.rs `walk` does, its reads made on the CPU where the run is checked (solve.rs).
 pub mod driver;
 pub mod program;
 pub mod ptx;
@@ -167,10 +167,10 @@ impl Gpu{
     /// settings' dt between `outputs` output times, in groups of `group`, as tasks of at most `TASK`
     /// trajectories inside a group, (r, κ) kept at `listed`, with the control of `harmonic`; with `ends`, the g-th group's
     /// trajectories only through the output `ends[g]` (lib.rs `simulate_to`), half a period past it, its sums counting none beyond;
-    /// with `check`, each trajectory's trace for the loss's check (check.rs `Trace`), its reads at the kernel's looks on the CPU.
+    /// with `check`, each trajectory's trace for the loss's check (check.rs `Trace`), its reads drawn at the kernel's looks.
     pub fn simulate(&self,program:&Program,model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],
         harmonic:Option<&Harmonic>,ends:Option<&[usize]>,check:Option<&check::Sampling>)->Result<Outcome,String>{
-        self.set(program)?;let engine=check.map(|_|Engine::new(model,settings.clone()));let fine=check.map(|_|Engine::new(model,settings.halved()));let mut traces=vec![];
+        self.set(program)?;let engine=check.map(|_|Engine::new(model,settings.clone()));let mut traces=vec![];
         let control=harmonic.map(|h|control_tables(&self.stream,h)).transpose()?;
         // The tasks in order: (their group, their first trajectory, the one after their last), as lib.rs `run`.
         let bounds=|g:u64|(first+g*group,(first+(g+1)*group).min(first+count));
@@ -201,13 +201,13 @@ impl Gpu{
             }
             // The loss's check's traces in the trajectories' order (lib.rs `walk`): per output its energy where the kernel looked at it
             // held, NaN past that; per interval it ran through its look at the step drawn there, a chance, read where its inclusion falls.
-            if let(Some(sampling),Some(engine),Some(fine))=(check,&engine,&fine){
+            if let(Some(sampling),Some(engine))=(check,&engine){
                 let at:Vec<(usize,u64,usize)>=wave.iter().enumerate().flat_map(|(i,&(g,from,to))|(0..(to-from) as usize).map(move|w|(WARPS*i+w,from+w as u64,through(g)))).collect();
                 traces.par_extend(at.par_iter().map(|&(slot,index,last)|{
                     let looks=&looks[2*outputs*slot..][..2*outputs];let held=|l:&Look|(l.held!=0).then(||l.trajectory(settings,seed,index));
                     let mut trace=check::Trace::new(last+1);
                     for i in 0..=last{trace.output(engine,held(&looks[2*i]).as_ref());}
-                    for i in 1..=last{if let Some(t)=held(&looks[2*i+1]){trace.look(engine,fine,sampling,&t,i,check::drawn(seed,index,i,steps).1);}}
+                    for i in 1..=last{if let Some(t)=held(&looks[2*i+1]){trace.look(engine,sampling,&t,i,check::drawn(seed,index,i,steps).1);}}
                     trace
                 }));
             }

@@ -26,7 +26,8 @@
 //! crossing, their kicks, the transients after them.
 //! The reads are drawn in the product's own batches (lib.rs `walk`): per trajectory and output interval at a step drawn
 //! uniformly in it, with the inclusion probability of the interval and the state's energy bin (`Sampling`), and weighted by
-//! its inverse (Horvitz and Thompson): no state is kept, and the check's trajectories count for the statistics. A batch's
+//! its inverse (Horvitz and Thompson); the check's trajectories count for the statistics. A drawn state is read only once the
+//! run is checked (`Trace::read`, solve.rs): a run that loses no atom pays no read. A batch's
 //! inclusion takes `rate` reads per trajectory, half of them alike over the intervals and bins the atoms hold, half as the
 //! dual weighs them (`sampling`: the sensitivity of the loss at every later output to the bin's features over its
 //! tolerance, times the reads' mean magnitude there) -- the first batch the pilot's dual (its trajectories' energies), the next
@@ -67,13 +68,19 @@ pub(crate) fn bin(e:f64)->usize{KNOTS[1..BINS].iter().take_while(|&&k|e>k).count
 #[derive(Clone,Debug)]
 pub struct Read{pub interval:u32,pub bin:u8,pub weight:f64,pub change:[f64;FEATURES]}
 
+/// A read drawn (`Trace::look`), not yet made: its output interval, its energy bin, its inverse inclusion probability and the state.
+#[derive(Clone,Debug)]
+pub struct Drawn{pub interval:u32,pub bin:u8,pub weight:f64,pub state:Trajectory}
+
 /// What a trajectory leaves the check (lib.rs `walk`).
 #[derive(Clone,Debug,Default)]
 pub struct Trace{
     /// Per output it ran through its energy while held (`Engine::loss_energy`), NaN once lost.
     pub energies:Vec<f32>,
-    /// Its reads.
+    /// Its reads made (`read`).
     pub reads:Vec<Read>,
+    /// Its reads drawn, made where the run is checked.
+    pub drawn:Vec<Drawn>,
     /// The intervals where a read could have been drawn: the atom held at the drawn step.
     pub chances:u32,
 }
@@ -84,20 +91,24 @@ impl Trace{
     pub(crate) fn output(&mut self,engine:&Engine,held:Option<&Trajectory>){self.energies.push(held.map_or(f32::NAN,|t|engine.loss_energy(t) as f32));}
     /// Whether it was lost by the last output it ran through.
     pub(crate) fn lost(&self)->bool{self.energies.iter().any(|e|e.is_nan())}
-    /// Its state at the step drawn in output interval i, held (`drawn`, `deviate` its inclusion's): a chance, read (`read`, `fine`
-    /// the engine at dt/2) where the deviate falls below its energy bin's inclusion, weighted by its inverse (Horvitz and Thompson).
-    pub(crate) fn look(&mut self,engine:&Engine,fine:&Engine,sampling:&Sampling,t:&Trajectory,interval:usize,deviate:f64){
+    /// Its state at the step drawn in output interval i, held (`drawn`, `deviate` its inclusion's): a chance, a read drawn where the
+    /// deviate falls below its energy bin's inclusion, weighted by its inverse (Horvitz and Thompson).
+    pub(crate) fn look(&mut self,engine:&Engine,sampling:&Sampling,t:&Trajectory,interval:usize,deviate:f64){
         self.chances+=1;let b=bin(engine.loss_energy(t));let p=sampling.inclusion[interval-1][b];
-        if deviate<p{self.reads.push(Read{interval:interval as u32,bin:b as u8,weight:1./p,change:read(engine,fine,t,sampling.span,interval)});}
+        if deviate<p{self.drawn.push(Drawn{interval:interval as u32,bin:b as u8,weight:1./p,state:t.clone()});}
+    }
+    /// Its drawn reads made (`read`, `fine` the engine at dt/2, `span` steps each), in their order.
+    pub fn read(&mut self,engine:&Engine,fine:&Engine,span:usize){
+        for d in self.drawn.drain(..){self.reads.push(Read{interval:d.interval,bin:d.bin,weight:d.weight,change:read(engine,fine,&d.state,span,d.interval as usize)});}
     }
 }
 
-/// A batch's reads (`walk`): per output interval and energy bin a read's inclusion probability, and the reads' span in steps.
+/// A batch's reads (`walk`): per output interval and energy bin a read's inclusion probability.
 #[derive(Clone,Debug)]
-pub struct Sampling{pub inclusion:Vec<[f64;BINS]>,pub span:usize}
+pub struct Sampling{pub inclusion:Vec<[f64;BINS]>}
 impl Sampling{
     /// Every read's probability `rate` over the intervals: a trajectory's reads, alike everywhere.
-    pub fn alike(intervals:usize,span:usize,rate:f64)->Sampling{let p=(rate/intervals.max(1) as f64).min(1.);Sampling{inclusion:vec![[p;BINS];intervals],span}}
+    pub fn alike(intervals:usize,rate:f64)->Sampling{let p=(rate/intervals.max(1) as f64).min(1.);Sampling{inclusion:vec![[p;BINS];intervals]}}
 }
 
 /// A trajectory's read in output interval i (the steps after output i − 1): the step it is drawn at and its inclusion's
@@ -252,7 +263,7 @@ fn looks(replicates:&[Vec<f64>],error:&[f64])->f64{
 /// intervals and bins the traces' atoms hold, half as the dual weighs each bin -- the largest over later outputs of the loss's
 /// sensitivity to its features over the output's tolerance, times the reads' mean magnitude there (one per feature before any
 /// read) --, each at most 1.
-pub(crate) fn sampling(traces:&[Trace],steps:usize,tolerance:&[f64],span:usize,rate:f64)->Sampling{
+pub(crate) fn sampling(traces:&[Trace],steps:usize,tolerance:&[f64],rate:f64)->Sampling{
     let intervals=tolerance.len()-1;let mut total=Sums::new(intervals);for t in traces{total.add(t);}let c=total.transfers();
     // The sensitivity per interval and feature: steps C_d ⋯ C_{k−1} e_lost over tol_k, the largest over k > d.
     let mut sensitivity=vec![[0.;FEATURES];intervals];
@@ -267,9 +278,9 @@ pub(crate) fn sampling(traces:&[Trace],steps:usize,tolerance:&[f64],span:usize,r
     for t in traces{for d in 0..intervals{if let Some(&e)=t.energies.get(d){if !e.is_nan(){held[d][bin(e as f64)]+=1./traces.len() as f64;}}}}
     let weight:Vec<[f64;BINS]>=(0..intervals).map(|d|std::array::from_fn(|b|(0..FEATURES).map(|a|sensitivity[d][a]*mean(b,a)).sum())).collect();
     let(atoms,weighed)=(0..intervals).fold((0.,0.),|s,d|(s.0+held[d].iter().sum::<f64>(),s.1+(0..BINS).map(|b|held[d][b]*weight[d][b]).sum::<f64>()));
-    if !(atoms>0.){return Sampling::alike(intervals,span,0.);}
+    if !(atoms>0.){return Sampling::alike(intervals,0.);}
     let inclusion=(0..intervals).map(|d|std::array::from_fn(|b|(rate*if weighed>0.{0.5/atoms+0.5*weight[d][b]/weighed}else{1./atoms}).min(1.))).collect();
-    Sampling{inclusion,span}
+    Sampling{inclusion}
 }
 
 #[cfg(test)]
@@ -321,10 +332,10 @@ mod tests{
     #[test]
     fn the_sampling_takes_its_rate(){
         let traces:Vec<Trace>=(0..64).map(|i|Trace{energies:(0..=5).map(|d|if i%7==0&&d>3{f32::NAN}else{-0.9+0.1*(d as f32)}).collect(),..Default::default()}).collect();
-        let tolerance=vec![0.02;6];let s=sampling(&traces,10,&tolerance,3,2.);
+        let tolerance=vec![0.02;6];let s=sampling(&traces,10,&tolerance,2.);
         let mut held=vec![[0.;BINS];5];for t in &traces{for d in 0..5{let e=t.energies[d];if !e.is_nan(){held[d][bin(e as f64)]+=1./64.;}}}
         let expected:f64=(0..5).map(|d|(0..BINS).map(|b|held[d][b]*s.inclusion[d][b]).sum::<f64>()).sum();
         assert!((expected-2.).abs()<1e-12,"{expected}");
-        let alike=Sampling::alike(5,3,2.);assert!(alike.inclusion.iter().all(|x|x.iter().all(|&p|(p-0.4).abs()<1e-15)));
+        let alike=Sampling::alike(5,2.);assert!(alike.inclusion.iter().all(|x|x.iter().all(|&p|(p-0.4).abs()<1e-15)));
     }
 }
