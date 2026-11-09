@@ -723,6 +723,23 @@ impl Interference{
     pub fn estimate(&self,g:&Ground)->f64{self.bound*(1./g.pole.max(f64::MIN_POSITIVE)).max(1./g.generator_scale.max(self.shift).max(f64::MIN_POSITIVE))}
 }
 
+/// The largest of xᵀQx over x ∈ [0, 1]^n (Q real symmetric, in a Dense's real parts): over every face -- each coordinate at 0, at 1 or
+/// free -- its free coordinates' stationary point where it lies inside, a face of none its corner.
+fn box_peak(q:&Dense)->f64{
+    let n=q.rows;let mut best=0_f64;
+    for code in 0..3_usize.pow(n as u32){
+        let state:Vec<usize>=(0..n).map(|i|code/3_usize.pow(i as u32)%3).collect();let free:Vec<usize>=(0..n).filter(|&i|state[i]==2).collect();
+        let mut x:Vec<f64>=state.iter().map(|&v|if v==1{1.}else{0.}).collect();
+        if !free.is_empty(){
+            let Some(lu)=Lu::new(&Dense::from_fn(free.len(),free.len(),|i,j|q[(free[i],free[j])]))else{continue};
+            let mut b:Vec<Complex>=free.iter().map(|&i|Complex::new(-(0..n).filter(|&j|state[j]!=2).map(|j|q[(i,j)].re*x[j]).sum::<f64>(),0.)).collect();lu.solve(&mut b);
+            if b.iter().any(|z|!(z.re>0.&&z.re<1.)){continue;}for(i,&j)in free.iter().enumerate(){x[j]=b[i].re;}
+        }
+        best=best.max((0..n).map(|i|(0..n).map(|j|q[(i,j)].re*x[i]*x[j]).sum::<f64>()).sum());
+    }
+    best
+}
+
 /// A matrix of the request with its entries at the round-off of its largest set to zero: what a selection rule forbids and the polarizations' rotation leaves at 1e-16 of the allowed is no coupling,
 /// whatever its frequency (`Ground::couples`, the rule's items).
 fn rounded(mut m:Dense)->Dense{
@@ -1109,6 +1126,19 @@ impl Ground{
     /// The places of field u's T coordinates' matrices in `outside` and `folds`: |E_0|²/N's at u, its others after every field's (`Unit::t_coordinates`).
     fn t_places(&self,u:usize)->Vec<usize>{let n=self.units.len();let start=n+self.units[..u].iter().map(|v|v.rank*v.rank-1).sum::<usize>();
         std::iter::once(u).chain(start..start+self.units[u].rank*self.units[u].rank-1).collect()}
+    /// Field u's static shift on state s per T coordinate (`Unit::t_coordinates`): G_i = (O_i + F_i)_ss -- the far light's shift Σ_i t_i G_i,
+    /// linear in T (module documentation, # Far components).
+    pub fn linear_shift(&self,u:usize,s:usize)->Vec<f64>{self.t_places(u).into_iter().map(|p|self.outside[p][(s,s)].re+self.folds[p][(s,s)].re).collect()}
+    /// The largest depth field u's linear shift on state s gives, −Σ_i t_i G_i, over its beams' amplitudes within their peaks (|a_l| ≤ 1, any
+    /// phases): a† K a, K = −Γ† F Γ (E = Γ a, Γ_kl = γ_lk; E† F E = Σ_i t_i G_i at T = E E†/N), at most the largest of Σ_l K_ll x_l² +
+    /// 2 Σ_{l<m} |K_lm| x_l x_m over x ∈ [0, 1]^n -- the phases aligned, which two beams' are (`box_peak`).
+    pub fn linear_peak(&self,u:usize,s:usize)->f64{
+        let(unit,g)=(&self.units[u],self.linear_shift(u,s));let(r,n,norm)=(unit.rank,unit.beams.len(),unit.norm);
+        let mut f=Dense::zeros(r,r);for k in 0..r{f[(k,k)]=Complex::new(-g[k]/norm,0.);}
+        let mut at=r;for j in 0..r{for k in j+1..r{let z=Complex::new(g[at],-g[at+1])*(-0.5/norm);f[(j,k)]=z;f[(k,j)]=z.conj();at+=2;}}
+        let gamma=Dense::from_fn(r,n,|k,l|unit.weights[l*r+k]);let k=gamma.adjoint().product(&f.product(&gamma));
+        box_peak(&Dense::from_fn(n,n,|l,m|Complex::new(if l==m{k[(l,l)].re}else{k[(l,m)].abs()},0.)))
+    }
     /// H at a point r (um from the focus): H0 with each coordinate's outside shift and fold there.
     pub fn hamiltonian_at(&self,r:[f64;3])->Dense{self.hamiltonian_with(&self.intensities_at(r))}
     /// H at the fields' charts x (module documentation, # Far components): each field's T there and at the focus.

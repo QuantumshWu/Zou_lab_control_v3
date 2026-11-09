@@ -669,6 +669,9 @@ pub struct Model{
     pub mass_kg:f64,
     pub(crate) layouts:Vec<Layout>,
     pub(crate) tables:Tables,
+    /// Per cluster and state, once asked (`Model::polar`): the fields of rank above one among the axes, their linear shift's coefficients on
+    /// the state and its value at every table node.
+    pub(crate) linear:Vec<Vec<std::sync::OnceLock<(Vec<usize>,Vec<Vec<f64>>,Vec<f64>)>>>,
     /// The interpolation's measured largest relative error where the atoms go (`tabulate`), and where the
     /// work bounds -- or `STALLED_DOUBLINGS` above its smallest error (`table_stalled`) -- stopped the grid's refinement the nodes per axis it kept.
     pub table_error:f64,
@@ -786,6 +789,7 @@ impl Model{
         let(mut model,bases)=Model::laid_out(request,ground,fourth)?;
         model.prune(&bases)?;
         let stake=model.stake(request);model.tabulate(&bases,most_bytes,most_nodes,stake)?;
+        model.linear=model.layouts.iter().map(|l|(0..l.n).map(|_|Default::default()).collect()).collect();
         model.transfer_tables(request.temperature_uk);
         model.lindblad()?;
         Ok(model)
@@ -835,7 +839,7 @@ impl Model{
             c.interfering=(0..n*n).map(|x|(x/n,x%n)).filter(|&(j,m)|j!=m&&of(j)==of(m)&&trap_light.contains(&c.beams[j])&&trap_light.contains(&c.beams[m])).collect();}
         let centre=ground.trap.centre;
         let mut model=Model{ground,geometry,trap_beam,trap_beams,trap_light,focused:vec![trap_unit],axes:vec![],held:vec![],weights:vec![],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
-            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3],work:0.},table_error:0.,table_limit:None,table_stalled:false,dressing:0.,fourth_dropped:0.,effective_dropped:0.,first_error:0.,resonance:0.,ringing_spread:0.,reach:vec![centre],
+            layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3],work:0.},linear:vec![],table_error:0.,table_limit:None,table_stalled:false,dressing:0.,fourth_dropped:0.,effective_dropped:0.,first_error:0.,resonance:0.,ringing_spread:0.,reach:vec![centre],
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
         model.choose_profiles(request)?;
         model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();model.effective_dropped=model.layouts.iter().map(|l|l.effective_dropped).sum();
@@ -1075,6 +1079,21 @@ impl Model{
     }
 
     /// Every unit's intensity with the focused ones at s, the others at the focus.
+    /// The fields of rank above one among the axes (their polarizations'), their linear shift's coefficients on cluster state x
+    /// (`Ground::linear_shift`) and its value at every table node: once, none without such a field.
+    fn polar(&self,cluster:usize,x:usize)->Option<&(Vec<usize>,Vec<Vec<f64>>,Vec<f64>)>{
+        let g=&self.ground;
+        let entry=self.linear.get(cluster)?.get(x)?.get_or_init(||{
+            let mut fields:Vec<usize>=self.axes.iter().map(|a|a.unit).filter(|&u|g.units[u].rank>1).collect();fields.sort();fields.dedup();
+            let Some(&b)=g.clusters[cluster].states.get(x).filter(|_|!fields.is_empty())else{return(vec![],vec![],vec![])};
+            let coeffs:Vec<Vec<f64>>=fields.iter().map(|&u|g.linear_shift(u,g.ground_states[b])).collect();let(n,d)=(self.tables.nodes,self.focused.len());
+            let nodes=(0..n.pow(d as u32)).into_par_iter().map(|i|self.polar_shift(&fields,&coeffs,&self.grid_point(n,i)[..d])).collect();
+            (fields,coeffs,nodes)});
+        (!entry.0.is_empty()).then_some(entry)
+    }
+    /// Fields' linear shift at the table's coordinates s: their T there (ground.rs `Unit::t_coordinates`) against their coefficients.
+    fn polar_shift(&self,fields:&[usize],coeffs:&[Vec<f64>],s:&[f64])->f64{let(g,x)=(&self.ground,self.unit_intensities(s));
+        fields.iter().zip(coeffs).map(|(&u,c)|{let t=g.units[u].t_coordinates(&g.chart_of(u,&x));c.iter().zip(&t).map(|(a,b)|a*b).sum::<f64>()}).sum()}
     pub fn unit_intensities(&self,s:&[f64])->Vec<f64>{
         let mut x=self.held.clone();
         for(axis,&s)in self.axes.iter().zip(s){let at=if axis.coordinate==0{axis.unit}else{self.ground.extras(axis.unit).start+axis.coordinate-1};x[at]=axis.lo+s*(axis.hi-axis.lo);}
@@ -2604,7 +2623,10 @@ impl Model{
     /// others' --, −V_T too, zero where the trap's light is off. A polynomial lies below the largest of its Bernstein
     /// coefficients on the cell and L is linear, so −V_T ≤ R L on the cell wherever each coefficient of −V_T is at most
     /// R times L at its control point: the cell's R, from −V_T at the cell's equally spaced points (to the evaluations'
-    /// round-off). A trap with no unit of its own (its shift linear in its intensity) takes L = 1. An error where a
+    /// round-off). A trap of a polarization (a field of rank above one) takes its linear part's peak exactly, its depth over its beams'
+    /// profiles within their peaks (ground.rs `Ground::linear_peak`), the cells' bound only for the remainder the tables add to it (−V_T
+    /// less that part: `level` holds it exact, a polynomial on each cell what is left), c = (peak + B R)/D_T, B its `Unit::reach`.
+    /// A trap with no unit of its own (its shift linear in its intensity) takes L = 1. An error where a
     /// unit of the trap's light holds a beam not of it: its interference with the trap's field falls off as √A, and
     /// the trap's bound states fill an unbounded phase space.
     pub fn trap_slope(&self,cluster:usize,x:usize,depth:f64,centre:[f64;3])->Result<f64,String>{
@@ -2637,6 +2659,13 @@ impl Model{
                 for r in 0..=m{if r!=c{let f=a[r][c];let row=a[c].clone();for(e,q)in a[r].iter_mut().zip(row){*e-=f*q;}}}}
             a.into_iter().map(|row|row[m+1..].to_vec()).collect()};
         let inverses:Vec<Vec<Vec<f64>>>=degrees.iter().map(|&m|inverse(m)).collect();
+        // A polarization's trap: its linear part's peak, and −V_T less that part (`polar_shift` at the trap's axes, the others' its own).
+        let polar:Vec<usize>={let mut p:Vec<usize>=traps.iter().map(|&f|self.focused[f]).filter(|&u|g.units[u].rank>1).collect();p.sort();p.dedup();p};
+        let state=g.ground_states[g.clusters[cluster].states[x]];
+        let(peak,coeffs)=(polar.iter().map(|&u|g.linear_peak(u,state)).sum::<f64>(),polar.iter().map(|&u|g.linear_shift(u,state)).collect::<Vec<_>>());
+        let remainder=|q:&[f64]|->f64{if polar.is_empty(){return at(q);}
+            let s:Vec<f64>=(0..self.axes.len()).map(|f|match traps.iter().position(|&v|v==f){Some(i)=>q[i],None=>others.iter().position(|&v|v==f).map_or(0.,|i|q[t+i])}).collect();
+            at(q)+self.polar_shift(&polar,&coeffs,&s)};
         let n=self.tables.nodes;let h=1./(n-1) as f64;let cells=n-1;let d=degrees.len();
         let sizes:Vec<usize>=degrees.iter().map(|m|m+1).collect();let size:usize=sizes.iter().product();
         let bounds:Vec<f64>=(0..cells.pow(d as u32)).into_par_iter().map(|c|{
@@ -2644,7 +2673,7 @@ impl Model{
             // The cell's points: index p ↦ per dimension j_i of its degree m_i, at corner + h j_i/m_i.
             let digit=|p:usize,i:usize|(p/sizes[..i].iter().product::<usize>())%sizes[i];
             let place=|p:usize,i:usize|corner(i)+h*digit(p,i) as f64/degrees[i] as f64;
-            let mut v:Vec<f64>=(0..size).map(|p|{let q:Vec<f64>=(0..d).map(|i|place(p,i)).collect();at(&q)}).collect();
+            let mut v:Vec<f64>=(0..size).map(|p|{let q:Vec<f64>=(0..d).map(|i|place(p,i)).collect();remainder(&q)}).collect();
             for i in 0..d{let stride:usize=sizes[..i].iter().product();
                 for p in 0..size{if digit(p,i)!=0{continue;}
                     let line:Vec<f64>=(0..sizes[i]).map(|k|v[p+k*stride]).collect();
@@ -2653,8 +2682,8 @@ impl Model{
             // where −V_T is 0); L = 1 throughout without a unit.
             (0..size).filter_map(|p|{let l:f64=if t>0{(0..t).map(|i|weights[i]*place(p,i)).sum()}else{1.};(l>0.).then(||v[p]/l)}).fold(f64::NEG_INFINITY,f64::max)
         }).collect();
-        let reach=if t>0{traps.iter().map(|&f|g.units[self.focused[f]].reach()).fold(0_f64,f64::max)}else{1.};
-        Ok(bounds.into_iter().fold(f64::NEG_INFINITY,f64::max)/depth*reach)
+        let reach=if t>0{traps.iter().map(|&f|g.units[self.focused[f]].reach()).fold(0_f64,f64::max)}else{1.};let bound=bounds.into_iter().fold(f64::NEG_INFINITY,f64::max);
+        Ok(if polar.is_empty(){bound/depth*reach}else{(peak+reach*bound.max(0.))/depth})
     }
     /// The diagonal of h0 and of the near light's shift for a cluster state, the units at
     /// the intensities `units(u)` and the near beams' fields' products ā_l a_m at `beams(l, m)` (`potential`): the groups' S at the
@@ -2663,6 +2692,9 @@ impl Model{
         let layout=&self.layouts[cluster];let n=layout.n;
         let s:Vec<f64>=(0..self.axes.len()).map(|f|units(f).min(1.)).collect();let stencil=self.stencil(&s);
         let mut entry=[Complex::ZERO];self.interpolate(cluster,&stencil,None,layout.h0+x*n+x,&mut entry);let mut u=entry[0].re;
+        // A field of rank above one: its linear shift exact, the tables' interpolation of it taken out (`polar`) -- they keep their remainder.
+        if let Some((fields,coeffs,nodes))=self.polar(cluster,x){
+            u+=self.polar_shift(fields,coeffs,&s)-(0..stencil.count()).map(|i|{let(index,w,_)=stencil.node(i);w*nodes[index]}).sum::<f64>();}
         for gl in layout.groups.iter().filter(|g|g.hermitian){
             let Ok(diagonal)=gl.entries.binary_search(&(x,x)) else{continue};
             let carrier=&self.carriers[gl.absorbed];let mut value=[Complex::ZERO];
