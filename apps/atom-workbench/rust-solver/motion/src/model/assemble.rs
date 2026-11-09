@@ -13,7 +13,9 @@
 //!
 //! # Work
 //! The assembly counts its complex multiply-adds as it makes them (`Work::assembly`): four per Hermitian entry (its value and
-//! its gradient), one per decay entry, and the decay's products L_j†L_i entry by entry.
+//! its gradient), one per decay entry, the decay's products L_j†L_i entry by entry with their jumps' sums, the near light's
+//! elimination at the point (eliminate.rs `NearAt::work`: the far light's H, the factorizations and solves of its resolvents,
+//! the dressings and self-energies) and its terms' entries.
 
 use super::photon::Class;
 use super::{Beat, Generator, Lights, Model, Part, Point, Sample, Wave, Work};
@@ -155,11 +157,12 @@ impl Model {
                 self.add_far_beat(&mut parts, *first, *second, &amplitudes);
             }
         }
-        let near = self.carriers.iter().any(|x| lights.on(x.frequency)).then(|| self.near_at(cluster, at, &amplitudes, lights));
+        let near = self.carriers.iter().any(|x| lights.on(x.frequency)).then(|| self.near_at(cluster, at, &amplitudes, lights, 1));
         for class in &self.classes[cluster] {
             self.add_decay(&mut parts, cluster, class, &amplitudes, lights, near.as_ref());
         }
         if let Some(near) = &near {
+            parts.work += near.work;
             self.add_near_terms(&mut parts, cluster, near, &amplitudes, lights);
         }
         let work = parts.work;
@@ -212,7 +215,7 @@ impl Model {
                                 let (vj, _) = self.jump(sj, a, b, c.states[xj], xj, near);
                                 let (vi, _) = self.jump(si, a, b, c.states[xi], xi, near);
                                 product[(xj, xi)] += vj.conj() * vi;
-                                parts.work += 1.0;
+                                parts.work += 1.0 + self.jump_work(sj) + self.jump_work(si);
                             }
                         }
                     }

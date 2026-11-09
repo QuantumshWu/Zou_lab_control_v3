@@ -21,6 +21,19 @@
 //! windows never overlap (each at most half an interval on either side), the first is the instant t = 0, and the run goes
 //! on through the last output's window (`Plan`).
 //!
+//! # The model (SPEC §5.2)
+//! The units are the model's (model.rs), listed again in every model a keep closes. A unit whose fold does not exist over
+//! the reach is kept, and so is one whose measured error leaves an output no room for the statistics. Beyond these the
+//! model keeps a unit where keeping it pays (decide.rs `pays`): the run's predicted total work W = w·N, N the trajectories
+//! the statistics need in the room √(ε² − A² − b²) its errors leave (`Targets::need` on the pilot's estimates) and w the
+//! counted work a trajectory spends per µs (`rate`, the step's count through the model's generator at the pilot's states),
+//! falls by a share of itself beyond that share's spread, the jackknife over the pilot's groups (`candidates`) -- the kept
+//! model's W counting the pilot its attempt runs again: every keep is a new attempt, a new model and its own pilot. The
+//! model's falsifier keeps one more unit on the product's first trajectories (common random numbers) and refutes the
+//! fold where an output reads beyond the unit's booked error (`refuted`): the unit of the largest booked error among those
+//! whose pairs cost no more than the product they check -- a check dearer than what it checks is not one; the booked
+//! errors then stand, as an unreadable read leaves them.
+//!
 //! # Stopping (SPEC §3)
 //! Each output's total error against its target is E² = A² + b² + S² (ledger.rs): the statistics may take the room
 //! R² = ε² − A² − b² the model and the step leave. The targets the stopping rule reads are fixed by the pilot alone (`Fixed`),
@@ -34,11 +47,13 @@
 //! # Checkpoints
 //! The decisions take counts, never the wall clock, so a request gives the same result on any machine. The wall clock only
 //! times the checkpoints: one after the pilot, then whenever `CHECKPOINT` has passed, each a complete result of the groups
-//! finished so far in their order (a prefix: whole groups chosen by their number alone).
+//! finished so far in their order (a prefix: whole groups chosen by their number alone). One is passed on only where it rests
+//! on two groups at least (the jackknife's least for a spread) and on no fewer trajectories than the attempt's last one: a
+//! product's first groups, or a product the step's falsifier restarted, are no better than the result before them.
 use crate::adapt::{self, Tolerances};
-use crate::decide::Outcome;
+use crate::decide::{pays, Outcome, Read};
 use crate::ensemble::{Ensemble, Start, Well, GROUP};
-use crate::estimate::{half_window, paired, summarize, unseen, Estimate, Group, Held, Scales};
+use crate::estimate::{half_window, paired, spread, summarize, unseen, Estimate, Group, Held, Scales, Spread};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, span, when, Account, Ledger};
 use crate::linalg::V3;
@@ -47,6 +62,7 @@ use crate::request::STATES;
 use crate::step::{Dynamics, Segment, Trajectory};
 use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, STEP_SHARE, TEMPERATURE_TARGET};
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -115,7 +131,15 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     let light = Light::new(request);
     let (mut kept, mut reach) = (vec![], request.temperature_uk);
     loop {
-        match attempt(request, &light, &kept, reach, checkpoint)? {
+        // The attempt's checkpoints that improve on its last (module documentation, # Checkpoints).
+        let mut last = 2 * GROUP;
+        let mut better = |s: &Solution, remaining: Option<f64>| {
+            if s.trajectories >= last {
+                last = s.trajectories;
+                checkpoint(s, remaining);
+            }
+        };
+        match attempt(request, &light, &kept, reach, &mut better)? {
             Attempt::Grow(t) => reach = t,
             Attempt::Keep(u) => kept.push(u),
             Attempt::Done(s) => return Ok(s),
@@ -221,22 +245,32 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     let hm = hbar_over_mass(request.mass_kg);
     let initial = components(request)?;
     let reference = alone(initial.iter().max_by(|a, b| a.1.total_cmp(&b.1)).ok_or("运动计算的初态需在基态上")?.0);
-    // The model: every unit whose fold does not exist over the reach kept (SPEC §1.5), closed again until none fails.
+    // The model: every unit whose fold does not exist over the reach kept (SPEC §1.5), closed again until none fails (a
+    // model lists only what it folds, model.rs `units`).
     let mut kept = kept.to_vec();
     let (model, trap) = loop {
         let model = Model::new(request, light, &kept)?;
         let trap = model.trap(&reference, &model.prepared())?;
         let judged = model.reach(&trap, &reference, reach, unseen(MOST_TRAJECTORIES as f64));
         let units = model.units();
-        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &judged)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
+        let failing: Vec<Unit> =
+            units.iter().zip(model.gates(&units, &judged)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
         if failing.is_empty() {
             break (model, trap);
         }
         kept.extend(failing);
     };
     let run = Run::new(&model, reference);
-    let scales = Scales { hbar_over_mass: hm, frequencies: trap.lab };
-    let plan = Plan::new(&request.times_us, trap.lab);
+    // The trap every reported quantity describes (SPEC §1.3: trapFrequencyKHz, n̄, the validated regime, T's targeting and
+    // its windows): the trap light's potential with the other lights' phase-averaged shifts at the reference state
+    // (`Model::reported`). Where it has no minimum the descent reaches -- the atoms are not held by the light they run in: a
+    // mathematical object that does not exist, not a kind of scene -- the prepared trap's is reported, and flagged.
+    let (report, unheld) = match model.trap(&reference, &model.reported()) {
+        Ok(t) => (t, false),
+        Err(_) => (trap.clone(), true),
+    };
+    let scales = Scales { hbar_over_mass: hm, frequencies: report.lab };
+    let plan = Plan::new(&request.times_us, report.lab);
     let outputs = plan.times.len();
     let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, light, alone(s))).collect::<Result<_, _>>()?;
     let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm)?;
@@ -244,6 +278,9 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     let depth = ensemble.depths()[initial.iter().position(|c| alone(c.0) == reference).unwrap_or(0)];
     let mut ledger = Ledger::default();
     ledger.note = Some(format!("初始系综：各初态在自己的准备阱中的束缚原子（降低的等温分布乘每轴谐振子的 Wigner 因子，T = {} μK），参考态阱深 {:.1} k_BT", request.temperature_uk, depth));
+    if unheld {
+        ledger.flag("运行中的势没有极小：阱频与 n̄ 按准备阱报告".into());
+    }
     let exact = |kinetic: Vec<(f64, f64)>| -> (V3, f64) {
         (ensemble.momentum(&kinetic.iter().map(|k| k.0).collect::<Vec<_>>()), kinetic.iter().map(|k| k.1 / k.0).fold(0., f64::max))
     };
@@ -255,13 +292,13 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
         scales,
         initial: row,
         ledger,
-        method: format!("半经典 3D：{}", model.describe()),
+        method: format!("半经典 3D：{}", model.describe().trim_end_matches('。')),
     };
 
     // The pilot (module documentation, # The pipeline): its own trajectory numbers, the step at the request's temperature.
     let pilot_tolerances = tolerances([request.temperature_uk; 3], request.temperature_uk, context.plan.end);
     let first = MOST_TRAJECTORIES / GROUP;
-    let pilot = run_groups(first, first + pilot_size() / GROUP, &|g| group(&run, &ensemble, &pilot_tolerances, &context.plan, g, true), &mut |prefix| {
+    let pilot = run_groups(first, first + pilot_size() / GROUP, Shape::of(&context.plan, true), &|i| trajectory(&run, &ensemble, &pilot_tolerances, &context.plan, true, i), &mut |prefix| {
         let (e, l, c) = pooled(prefix, &context.scales);
         checkpoint(&assemble(&context, &e, &l, &c, prefix.len() as u64 * GROUP), None);
     });
@@ -274,27 +311,23 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
 
     // The model's errors at the pilot's states (SPEC §5.2): each folded unit's per output, the held atoms' mean.
     let units = model.units();
-    let (samples, at): (Vec<Sample>, Vec<usize>) =
-        pilot.iter().flat_map(|p| p.samples.iter().enumerate().flat_map(|(k, s)| s.iter().map(move |x| (x.clone(), k)))).unzip();
-    let errors = model.errors(&units, &samples);
-    let per_output = |f: &dyn Fn(&UnitError) -> f64| -> Vec<Vec<f64>> {
-        errors
-            .iter()
-            .map(|unit| {
-                let (mut sum, mut count) = (vec![0.; outputs], vec![0.; outputs]);
-                for (e, &k) in unit.iter().zip(&at) {
-                    sum[k] += f(e);
-                    count[k] += 1.;
-                }
-                sum.iter().zip(&count).map(|(s, c)| if *c > 0. { s / c } else { 0. }).collect()
-            })
-            .collect()
-    };
-    let (population, temperature) = (per_output(&|e| e.population), per_output(&|e| e.temperature));
+    let mut samples: Vec<State> = vec![];
+    let (mut at, mut from) = (vec![], vec![]);
+    for (g, p) in pilot.iter().enumerate() {
+        for (k, s) in p.samples.iter().enumerate() {
+            samples.extend(s.iter().cloned());
+            at.extend(std::iter::repeat_n(k, s.len()));
+            from.extend(std::iter::repeat_n(g, s.len()));
+        }
+    }
+    let each: Vec<Vec<UnitError>> = samples.par_iter().map(|s| model.errors(&units, std::slice::from_ref(&s.sample)).into_iter().map(|e| e[0]).collect()).collect();
+    let errors: Vec<Vec<UnitError>> = (0..units.len()).map(|u| each.iter().map(|e| e[u]).collect()).collect();
+    let measured = Measured { errors: &errors, output: &at, group: &from };
+    let means = measured.means(outputs, None);
+    let (population, temperature): (Vec<Vec<f64>>, Vec<Vec<f64>>) =
+        means.iter().map(|unit| (unit.iter().map(|m| m[0]).collect(), unit.iter().map(|m| m[1]).collect())).unzip();
     let unsampled = unseen(MOST_TRAJECTORIES as f64);
-    context.fixed.model = (0..outputs)
-        .map(|k| if k == 0 { [0.; 2] } else { [population.iter().map(|u| u[k]).sum::<f64>() + unsampled, temperature.iter().map(|u| u[k]).sum::<f64>() + unsampled] })
-        .collect();
+    context.fixed.model = model_error(&means, None, unsampled);
     context.fixed.held = estimates.iter().map(|e| 1. - e.loss).collect();
     context.fixed.temperature = estimates
         .iter()
@@ -302,7 +335,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
         .map(|(k, e)| {
             let m = e.motion.as_ref().filter(|_| k > 0)?;
             let upper: V3 = std::array::from_fn(|a| m.temperature[a] + m.temperature_errors[a].interval());
-            (m.temperature.iter().all(|&t| t > 0.) && (0..3).all(|a| KT_PER_UK * upper[a] >= CLASSICAL * trap.lab[a])).then_some(m.temperature)
+            (m.temperature.iter().all(|&t| t > 0.) && (0..3).all(|a| KT_PER_UK * upper[a] >= CLASSICAL * report.lab[a])).then_some(m.temperature)
         })
         .collect();
     let targets = Targets::new(&context.fixed);
@@ -314,6 +347,11 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     };
     if let Some(u) = (0..units.len()).max_by(|&a, &b| weight(a).total_cmp(&weight(b))).filter(|&u| weight(u) > 0.) {
         return Ok(Attempt::Keep(units[u].clone()));
+    }
+    // The greedy keep by pays (SPEC §5.2): the unit whose keeping saves the most predicted work beyond its spread.
+    let ranked = candidates(request, light, &kept, &model, reference, &units, &measured, &samples, &pilot, &context.fixed, &context.scales, unsampled);
+    if let Some(c) = ranked.first().filter(|c| pays(0., c.saving)) {
+        return Ok(Attempt::Keep(units[c.unit].clone()));
     }
     // The ledger's items: each folded unit's error on what is shown and on T (its largest over the outputs, weighed by the
     // held share as the totals are), the unsampled share, the step.
@@ -342,7 +380,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
         loop {
             let have = parts.len() as u64 * GROUP;
             let pace = |done: u64| (done > 0).then(|| started.elapsed().as_secs_f64() * 1e3 / done as f64);
-            let new = run_groups(have / GROUP, want / GROUP, &|g| group(&run, &ensemble, &tolerance, &context.plan, g, false), &mut |prefix| {
+            let new = run_groups(have / GROUP, want / GROUP, Shape::of(&context.plan, false), &|i| trajectory(&run, &ensemble, &tolerance, &context.plan, false, i), &mut |prefix| {
                 let all: Vec<&Part> = parts.iter().chain(prefix.iter().copied()).collect();
                 let n = all.len() as u64 * GROUP;
                 let (e, l, c) = pooled(&all, &context.scales);
@@ -363,9 +401,9 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
         let all: Vec<&Part> = parts.iter().collect();
         let (e, l, c) = pooled(&all, &context.scales);
         let current = assemble(&context, &e, &l, &c, all.len() as u64 * GROUP);
-        let fine = run_groups(0, checked, &|g| group(&run, &ensemble, &scaled(&tolerance, 0.25), &context.plan, g, false), &mut |_| checkpoint(&current, None));
+        let fine = run_groups(0, checked, Shape::of(&context.plan, false), &|i| trajectory(&run, &ensemble, &scaled(&tolerance, 0.25), &context.plan, false, i), &mut |_| checkpoint(&current, None));
         let coarse: Vec<&Part> = parts[..checked as usize].iter().collect();
-        match falsify(&coarse, &fine, &context.scales, &targets) {
+        match refuted(&coarse, &fine, &context.scales, &targets, 0.25, 1., &|_| context.fixed.step) {
             Some(factor) if c.capped.is_none() => {
                 tolerance = scaled(&tolerance, factor);
                 want = parts.len() as u64 * GROUP;
@@ -380,7 +418,29 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     }
     let all: Vec<&Part> = parts.iter().collect();
     let (e, l, c) = pooled(&all, &context.scales);
-    Ok(Attempt::Done(assemble(&context, &e, &l, &c, all.len() as u64 * GROUP)))
+    let result = assemble(&context, &e, &l, &c, all.len() as u64 * GROUP);
+    // The model's falsifier (SPEC §5.2; module documentation, # The model): one more unit kept on the product's first groups,
+    // the unit of the largest booked error (its measured errors on what is shown and on T, each over its target and weighed by
+    // the held share) among those whose pairs cost no more than the product; read beyond what its fold is booked at, it is
+    // kept.
+    let checked = pilot_size() / GROUP;
+    let total = |u: usize| -> f64 {
+        (1..outputs).map(|k| context.fixed.held[k] * (population[u][k] / POPULATION_TARGET + temperature[u][k] / TEMPERATURE_TARGET)).sum()
+    };
+    let next = ranked
+        .iter()
+        .filter(|c| total(c.unit) > 0. && (checked * GROUP) as f64 * c.ratio <= all.len() as f64 * GROUP as f64)
+        .max_by(|a, b| total(a.unit).total_cmp(&total(b.unit)))
+        .map(|c| c.unit);
+    if let Some((u, with)) = next.and_then(|u| Some((u, Model::new(request, light, &[kept.as_slice(), std::slice::from_ref(&units[u])].concat()).ok()?))) {
+        let finer = Run::new(&with, reference);
+        let fine = run_groups(0, checked, Shape::of(&context.plan, false), &|i| trajectory(&finer, &ensemble, &tolerance, &context.plan, false, i), &mut |_| checkpoint(&result, None));
+        let booked = |k: usize| [population[u][k] * context.fixed.held[k], temperature[u][k]];
+        if refuted(&all[..checked as usize], &fine, &context.scales, &targets, 0., 1., &booked).is_some() {
+            return Ok(Attempt::Keep(units[u].clone()));
+        }
+    }
+    Ok(Attempt::Done(result))
 }
 
 /// The pilot's size: the fewest whole groups whose unseen share fits the statistics' share of the population target,
@@ -435,12 +495,23 @@ impl Counts {
     }
 }
 
+/// A pilot trajectory's state at an output (model.rs `Sample`) with the τ and the grid spacing its next doubling takes
+/// (`Trajectory::tau`, at most the output interval, and `Trajectory::grid`) and the trajectory's number: where the units'
+/// errors are measured and a model is priced (`rate`).
+#[derive(Clone)]
+struct State {
+    sample: Sample,
+    tau: f64,
+    grid: f64,
+    index: u64,
+}
+
 /// What one trajectory leaves: per output its atom where held (estimate.rs `Held`), its (r, κ) at the listed outputs
-/// where held, its states at the outputs where held (`keep`: the pilot's, for the model's errors), its counts.
+/// where held, its states at the outputs where held (`keep`: the pilot's, for the model's errors and prices), its counts.
 struct Record {
     held: Vec<Option<Held>>,
     listed: Vec<Option<(V3, V3)>>,
-    samples: Vec<Option<Sample>>,
+    samples: Vec<Option<State>>,
     counts: Counts,
 }
 
@@ -454,7 +525,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tolerances: &Tolerances
     let mut windows = vec![[[0.; 3]; 3]; outputs];
     let mut rows: Vec<Option<[f64; STATES]>> = vec![None; outputs];
     let mut listed = vec![None; plan.listed.len()];
-    let mut samples: Vec<Option<Sample>> = vec![None; if keep { outputs } else { 0 }];
+    let mut samples: Vec<Option<State>> = vec![None; if keep { outputs } else { 0 }];
     let mut steps = 0;
     let mut record = |k: usize, t: &Trajectory, rows: &mut Vec<Option<[f64; STATES]>>| {
         rows[k] = Some(model.readout(t.cluster, &t.point(), &t.psi));
@@ -462,7 +533,8 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tolerances: &Tolerances
             listed[j] = Some((t.r, t.kappa));
         }
         if keep {
-            samples[k] = Some(Sample { cluster: t.cluster, at: t.point(), psi: t.psi.clone() });
+            let sample = Sample { cluster: t.cluster, at: t.point(), psi: t.psi.clone() };
+            samples[k] = Some(State { sample, tau: t.tau.min(interval), grid: t.grid, index });
         }
     };
     record(0, &t, &mut rows);
@@ -521,7 +593,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tolerances: &Tolerances
 struct Part {
     sums: Group,
     listed: Vec<Vec<(V3, V3)>>,
-    samples: Vec<Vec<Sample>>,
+    samples: Vec<Vec<State>>,
     counts: Counts,
 }
 impl std::borrow::Borrow<Group> for &Part {
@@ -530,57 +602,84 @@ impl std::borrow::Borrow<Group> for &Part {
     }
 }
 
-/// Group g's trajectories, its members run in parallel and added in their order.
-fn group<D: Dynamics + Sync>(model: &D, ensemble: &Ensemble, tolerances: &Tolerances, plan: &Plan, g: u64, keep: bool) -> Part {
-    let records: Vec<Record> = (0..GROUP)
-        .into_par_iter()
-        .map(|m| {
-            let index = g * GROUP + m;
-            run(model, ensemble.draw(SEED, index), index, tolerances, plan, keep)
-        })
-        .collect();
-    let outputs = plan.times.len();
-    let mut part = Part {
-        sums: Group::new(outputs),
-        listed: vec![vec![]; plan.listed.len()],
-        samples: vec![vec![]; if keep { outputs } else { 0 }],
-        counts: Counts::default(),
-    };
-    for r in records {
-        part.sums.add(&r.held);
-        for (l, x) in part.listed.iter_mut().zip(r.listed) {
-            l.extend(x);
-        }
-        for (s, x) in part.samples.iter_mut().zip(r.samples) {
-            s.extend(x);
-        }
-        part.counts.add(&r.counts);
+/// What a group's records fold into (`Part`): the outputs, the listed outputs, and whether the states are kept.
+#[derive(Clone, Copy)]
+struct Shape {
+    outputs: usize,
+    listed: usize,
+    keep: bool,
+}
+impl Shape {
+    fn of(plan: &Plan, keep: bool) -> Shape {
+        Shape { outputs: plan.times.len(), listed: plan.listed.len(), keep }
     }
-    part
+    /// A group's records added in their order.
+    fn fold(&self, records: impl Iterator<Item = Record>) -> Part {
+        let mut part = Part {
+            sums: Group::new(self.outputs),
+            listed: vec![vec![]; self.listed],
+            samples: vec![vec![]; if self.keep { self.outputs } else { 0 }],
+            counts: Counts::default(),
+        };
+        for r in records {
+            part.sums.add(&r.held);
+            for (l, x) in part.listed.iter_mut().zip(r.listed) {
+                l.extend(x);
+            }
+            for (s, x) in part.samples.iter_mut().zip(r.samples) {
+                s.extend(x);
+            }
+            part.counts.add(&r.counts);
+        }
+        part
+    }
 }
 
-/// Groups `first..end` run in parallel, returned in their order; whenever `CHECKPOINT` has passed, `progress` takes the
-/// groups finished so far in order (module documentation, # Checkpoints).
-fn run_groups(first: u64, end: u64, part: &(dyn Fn(u64) -> Part + Sync), progress: &mut dyn FnMut(&[&Part])) -> Vec<Part> {
+/// Trajectory `index` of a run: its initial state from the ensemble (ensemble.rs `Ensemble::draw`), run through the plan.
+fn trajectory<D: Dynamics>(model: &D, ensemble: &Ensemble, tolerances: &Tolerances, plan: &Plan, keep: bool, index: u64) -> Record {
+    run(model, ensemble.draw(SEED, index), index, tolerances, plan, keep)
+}
+
+/// Groups `first..end`, their trajectories run on every core in their numbers' order -- each thread takes the next number,
+/// so the groups finish nearly in order and the first after about one trajectory's time --, each group's records added in
+/// its members' order on this thread (`Shape::fold`, nothing depends on the threads), the groups returned in their order;
+/// whenever `CHECKPOINT` has passed and a group has finished, `progress` takes the groups finished so far in order (module
+/// documentation, # Checkpoints; no group, no result to give).
+fn run_groups(first: u64, end: u64, shape: Shape, record: &(dyn Fn(u64) -> Record + Sync), progress: &mut dyn FnMut(&[&Part])) -> Vec<Part> {
+    let (start, stop) = (first * GROUP, end * GROUP);
     let count = (end - first) as usize;
+    let next = AtomicU64::new(start);
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min((stop - start) as usize);
+    let mut waiting: Vec<Vec<Option<Record>>> = (0..count).map(|_| (0..GROUP).map(|_| None).collect()).collect();
     let mut parts: Vec<Option<Part>> = (0..count).map(|_| None).collect();
     std::thread::scope(|scope| {
-        let (sender, receiver) = mpsc::channel::<(usize, Part)>();
-        scope.spawn(move || {
-            (0..count).into_par_iter().for_each_with(sender, |s, i| {
-                let _ = s.send((i, part(first + i as u64)));
-            })
-        });
-        let (mut received, mut last) = (0, Instant::now());
-        while received < count {
+        let (sender, receiver) = mpsc::channel::<(u64, Record)>();
+        for _ in 0..threads {
+            let (sender, next) = (sender.clone(), &next);
+            scope.spawn(move || loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= stop || sender.send((i, record(i))).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(sender);
+        let (mut done, mut last) = (0, Instant::now());
+        while done < count {
             match receiver.recv_timeout(CHECKPOINT.saturating_sub(last.elapsed())) {
-                Ok((i, p)) => {
-                    parts[i] = Some(p);
-                    received += 1;
+                Ok((i, r)) => {
+                    let (g, m) = (((i - start) / GROUP) as usize, ((i - start) % GROUP) as usize);
+                    waiting[g][m] = Some(r);
+                    if waiting[g].iter().all(Option::is_some) {
+                        parts[g] = Some(shape.fold(waiting[g].iter_mut().map(|r| r.take().expect("a member's record"))));
+                        done += 1;
+                    }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     let prefix: Vec<&Part> = parts.iter().map_while(Option::as_ref).collect();
-                    progress(&prefix);
+                    if !prefix.is_empty() {
+                        progress(&prefix);
+                    }
                     last = Instant::now();
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -594,6 +693,7 @@ fn run_groups(first: u64, end: u64, part: &(dyn Fn(u64) -> Part + Sync), progres
 /// (populations absolute, T relative), the held share, and T's scale per axis (µK) where T is held to its target; the
 /// step's error booked on what is shown and on T (`step_bound`); and T(0)'s relative error, its quadrature's last two
 /// levels' difference (ensemble.rs `Ensemble::kinetic`).
+#[derive(Clone)]
 struct Fixed {
     model: Vec<[f64; 2]>,
     held: Vec<f64>,
@@ -689,24 +789,21 @@ fn accounts(estimates: &[Estimate], fixed: &Fixed) -> (Vec<Account>, Vec<Option<
         .unzip()
 }
 
-/// The step's falsifier (SPEC §5.3; decide.rs): the same trajectories at a quarter of the tolerances, read on every shown row,
-/// the loss and T where held to its target against the step's bound, the coarse level's error 4/3 of the difference (the
-/// global error goes as the tolerance), Šidák over all the looks. Beyond somewhere: the factor on the tolerances at which
-/// the largest measured error meets its share; else none.
-fn falsify(coarse: &[&Part], fine: &[Part], scales: &Scales, targets: &Targets) -> Option<f64> {
-    let [bp, bt] = step_bound();
+/// A falsifier's refutation (SPEC §5.2, §5.3; decide.rs): a coarse and a finer level on the same trajectories, read on
+/// every row as shown, the loss and T where held to its target (relative to its scale) against what is booked for the
+/// coarse level there (`share`: per output, on what is shown and on T), the coarse level's own error from the difference at
+/// the finer level's parameter `ratio` and the level's `order` (`Read::level`), Šidák over all the looks. Beyond somewhere:
+/// the factor on the coarse level's parameter at which the largest measured error meets its share; else none.
+fn refuted(coarse: &[&Part], fine: &[Part], scales: &Scales, targets: &Targets, ratio: f64, order: f64, share: &dyn Fn(usize) -> [f64; 2]) -> Option<f64> {
     let reads = paired(coarse, &fine.iter().collect::<Vec<_>>(), scales);
-    let mut looks: Vec<(crate::decide::Read, f64)> = vec![];
+    let mut looks: Vec<(Read, f64)> = vec![];
     for (k, p) in reads.iter().enumerate().skip(1) {
-        looks.extend(p.shown.iter().chain([&p.loss]).map(|r| (r.level(0.25, 1.), bp)));
+        let [sp, st] = share(k);
+        looks.extend(p.shown.iter().chain([&p.loss]).map(|r| (r.level(ratio, order), sp)));
         if let (Some((scale, _)), Some(t)) = (targets.temperature[k], p.temperature) {
             for a in 0..3 {
-                let r = t[a].level(0.25, 1.);
-                let relative = crate::decide::Read {
-                    value: r.value / scale[a],
-                    spread: crate::estimate::Spread { error: r.spread.error / scale[a], groups: r.spread.groups },
-                };
-                looks.push((relative, bt));
+                let r = t[a].level(ratio, order);
+                looks.push((Read { value: r.value / scale[a], spread: Spread { error: r.spread.error / scale[a], groups: r.spread.groups } }, st));
             }
         }
     }
@@ -714,8 +811,147 @@ fn falsify(coarse: &[&Part], fine: &[Part], scales: &Scales, targets: &Targets) 
     looks
         .iter()
         .filter(|(r, share)| r.outcome(*share, m) == Outcome::Beyond)
-        .map(|(r, share)| r.refined(*share, 1.))
+        .map(|(r, share)| r.refined(*share, order))
         .fold(None, |f: Option<f64>, x| Some(f.map_or(x, |f| f.min(x))))
+}
+
+/// What the pilot measured of the model's units (SPEC §5.2): each folded unit's errors at the pilot's states, and each
+/// state's output and group.
+struct Measured<'a> {
+    errors: &'a [Vec<UnitError>],
+    output: &'a [usize],
+    group: &'a [usize],
+}
+impl Measured<'_> {
+    /// Per unit and output the held atoms' mean error (on their populations, absolute; on T, relative) over the pilot's
+    /// groups but `left`.
+    fn means(&self, outputs: usize, left: Option<usize>) -> Vec<Vec<[f64; 2]>> {
+        self.errors
+            .iter()
+            .map(|unit| {
+                let (mut sum, mut count) = (vec![[0.; 2]; outputs], vec![0.; outputs]);
+                for ((e, &k), &g) in unit.iter().zip(self.output).zip(self.group) {
+                    if Some(g) != left {
+                        sum[k][0] += e.population;
+                        sum[k][1] += e.temperature;
+                        count[k] += 1.;
+                    }
+                }
+                sum.iter().zip(&count).map(|(s, &c)| if c > 0. { [s[0] / c, s[1] / c] } else { [0.; 2] }).collect()
+            })
+            .collect()
+    }
+}
+
+/// The model's error per output (populations, T; none at t = 0, the request's state) from the units' mean errors, every
+/// folded unit's but `without`'s added (SPEC §4), and the unsampled share.
+fn model_error(means: &[Vec<[f64; 2]>], without: Option<usize>, unsampled: f64) -> Vec<[f64; 2]> {
+    let outputs = means.first().map_or(0, Vec::len);
+    (0..outputs)
+        .map(|k| {
+            if k == 0 {
+                return [0.; 2];
+            }
+            let mut a = [unsampled; 2];
+            for (u, m) in means.iter().enumerate() {
+                if Some(u) != without {
+                    a[0] += m[k][0];
+                    a[1] += m[k][1];
+                }
+            }
+            a
+        })
+        .collect()
+}
+
+/// The counted work (decide.rs `Work`) a trajectory spends per µs at a pilot state under a model, the state on the model's
+/// `cluster`: one doubling's -- the integrator's (adapt.rs `advance_work`, through the model's generator at the state's
+/// point, its velocity, τ and grid) and its assemblies' (`assembly`, the model's count of one) -- over its τ.
+fn rate(run: &Run, assembly: f64, cluster: usize, state: &State) -> f64 {
+    let at = state.sample.at;
+    let generator = run.generator(cluster, &at);
+    let velocity = at.kappa.map(|k| run.hbar_over_mass() * k);
+    let (work, assemblies) = adapt::advance_work(&generator, &run.cluster(cluster).waves, velocity, state.tau, state.grid);
+    (work + assemblies as f64 * assembly) / state.tau
+}
+
+/// A unit to keep (`candidates`): its predicted saving, and the kept model's work per µs over the current one's.
+struct Candidate {
+    unit: usize,
+    saving: Read,
+    ratio: f64,
+}
+
+/// The candidates to keep by pays (SPEC §5.2; module documentation, # The model), best margin first: for every folded unit
+/// the predicted saving of total work W = w·N by keeping it, as a share of the current model's -- N the trajectories the
+/// statistics need at the model's errors (`Targets::need` on the pilot's estimates), and for the kept model the pilot its
+/// new attempt runs as well (the current one's is spent); w the mean of `rate` --, spread by the jackknife over the
+/// pilot's groups (each recomputed without one: its estimates, the units' errors, the rates). A share, not the work saved:
+/// both models' N are the one variance the pilot estimates over their rooms (N ∝ σ̂²), and σ̂²'s spread, common to both,
+/// scales the work saved without ever changing its sign; in the share it cancels, and what spreads is what the keep
+/// changes -- the rooms and the rates. Every unit the model can keep is priced, a keep costing less per µs than the fold
+/// it replaces or far more (a drive kept across a fine-structure splitting, its generator's norm ~10⁷ rad/µs): at one state
+/// of each pilot trajectory -- the trajectory is the pilot's independent unit, its outputs taken in turn by its number --,
+/// the same states for every model.
+#[allow(clippy::too_many_arguments)]
+fn candidates(
+    request: &Request,
+    light: &Light,
+    kept: &[Unit],
+    model: &Model,
+    reference: [f64; GROUND],
+    units: &[Unit],
+    measured: &Measured,
+    states: &[State],
+    pilot: &[&Part],
+    fixed: &Fixed,
+    scales: &Scales,
+    unsampled: f64,
+) -> Vec<Candidate> {
+    let outputs = fixed.model.len();
+    let groups = pilot.len();
+    // Per level -- every group (None), then each left out -- the pilot's estimates and the units' mean errors.
+    let levels: Vec<Option<usize>> = std::iter::once(None).chain((0..groups).map(Some)).collect();
+    let data: Vec<(Vec<Estimate>, Vec<Vec<[f64; 2]>>)> = levels
+        .iter()
+        .map(|&left| {
+            let parts: Vec<&Part> = pilot.iter().enumerate().filter(|(g, _)| Some(*g) != left).map(|(_, p)| *p).collect();
+            (pooled(&parts, scales).0, measured.means(outputs, left))
+        })
+        .collect();
+    let priced: Vec<usize> = (0..states.len()).filter(|&j| measured.output[j] as u64 == 1 + states[j].index % (outputs as u64 - 1)).collect();
+    let mean = |rates: &[f64], left: Option<usize>| {
+        let (sum, count) = priced.iter().zip(rates).filter(|(&j, _)| Some(measured.group[j]) != left).fold((0., 0.), |a, (_, r)| (a.0 + r, a.1 + 1.));
+        sum / count
+    };
+    // A model's W at a level (per µs of run): its mean rate times its product's trajectories and `pilot` more.
+    let work = |level: usize, without: Option<usize>, rates: &[f64], pilot: f64| {
+        let (estimates, means) = &data[level];
+        let f = Fixed { model: model_error(means, without, unsampled), ..fixed.clone() };
+        mean(rates, levels[level]) * (Targets::new(&f).need(estimates) + pilot)
+    };
+    let again = (groups as u64 * GROUP) as f64;
+    let current = Run::new(model, reference);
+    let assembly = current.assembly_work();
+    let own: Vec<f64> = priced.par_iter().map(|&j| rate(&current, assembly, states[j].sample.cluster, &states[j])).collect();
+    let base: Vec<f64> = (0..levels.len()).map(|i| work(i, None, &own, 0.)).collect();
+    let mut out: Vec<Candidate> = (0..units.len())
+        .into_par_iter()
+        .filter_map(|u| {
+            let with = Model::new(request, light, &[kept, std::slice::from_ref(&units[u])].concat()).ok()?;
+            let finer = Run::new(&with, reference);
+            let assembly = finer.assembly_work();
+            let rates: Vec<f64> = priced
+                .par_iter()
+                .map(|&j| rate(&finer, assembly, finer.cluster_of(model.clusters()[states[j].sample.cluster].states[0]), &states[j]))
+                .collect();
+            let x: Vec<f64> = (0..levels.len()).map(|i| 1. - work(i, Some(u), &rates, again) / base[i]).collect();
+            let saving = Read { value: x[0], spread: spread(x[1..].iter().copied(), groups as f64) };
+            Some(Candidate { unit: u, saving, ratio: mean(&rates, None) / mean(&own, None) })
+        })
+        .collect();
+    out.sort_by(|a, b| (b.saving.value - b.saving.spread.interval()).total_cmp(&(a.saving.value - a.saving.spread.interval())));
+    out
 }
 
 /// Histograms of one coordinate of the held atoms at the listed outputs on one grid symmetric about 0 that holds them all
@@ -786,7 +1022,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
         classical: Vec::with_capacity(outputs),
         trajectories,
         time_step_us: if counts.steps > 0 { counts.held / counts.steps as f64 } else { c.plan.end },
-        method: format!("{}；{trajectories} 条轨迹（每组 {GROUP} 条拉丁超立方），逐轨迹自适应步长", c.method),
+        method: format!("{}；{trajectories} 条轨迹（每组 {GROUP} 条拉丁超立方），逐轨迹自适应步长。", c.method),
         reason: None,
         approximations: ledger,
     };
@@ -905,6 +1141,27 @@ mod tests {
         assert!((d.probabilities[0].iter().sum::<f64>() - 1.).abs() < 1e-15);
     }
 
+    /// The groups come back in their order whatever the threads do: 37 groups' records -- each trajectory's own, its rows
+    /// marking its number -- folded by `run_groups` equal the same records folded one after another.
+    #[test]
+    fn the_groups_come_back_in_order() {
+        let shape = Shape { outputs: 2, listed: 1, keep: false };
+        let record = |i: u64| {
+            let mut rows = [0.; STATES];
+            rows[(i % STATES as u64) as usize] = 1.;
+            let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3] };
+            Record { held: vec![Some(held.clone()), (i % 3 > 0).then_some(held)], listed: vec![Some(([i as f64; 3], [0.; 3]))], samples: vec![], counts: Counts { steps: i, ..Counts::default() } }
+        };
+        let parts = run_groups(5, 42, shape, &record, &mut |_| {});
+        assert_eq!(parts.len(), 37);
+        for (g, part) in parts.iter().enumerate() {
+            let one = shape.fold((0..GROUP).map(|m| record((5 + g as u64) * GROUP + m)));
+            assert_eq!(part.sums, one.sums);
+            assert_eq!(part.listed, one.listed);
+            assert_eq!(part.counts.steps, one.counts.steps);
+        }
+    }
+
     /// The initial ensembles of the conservative reference traps (refs/scenes R1, the app's own requests: a lone tweezer, a
     /// standing wave, crossed beams of one frequency, a σ⁺ tweezer) in the model's prepared wells under the model's proven
     /// envelopes: 2¹² draws each -- every one within its envelope (the draw's debug check) -- read the exact moments
@@ -933,5 +1190,41 @@ mod tests {
                 assert!((mean - exact[a]).abs() <= 4. * se, "{name} axis {a}: {mean} against {} ± {se}", exact[a]);
             }
         }
+    }
+
+    /// A falsifier refutes only a clear excess (`refuted`): two levels on the same 16 groups of 8 atoms, the finer one moving
+    /// one state's row by δ at one output for every atom alike (the pair's difference has no spread). At the step's level
+    /// (a quarter of the tolerance, order 1) the coarse level's error is 4δ/3: δ = 0.3 against a share of 0.05 is refuted
+    /// with the factor 0.05/0.4 on the tolerance; δ = 0.01 is within.
+    #[test]
+    fn a_falsifier_refutes_only_a_clear_excess() {
+        let outputs = 3;
+        let level = |shift: f64| -> Vec<Part> {
+            (0..16)
+                .map(|g| {
+                    let mut sums = Group::new(outputs);
+                    for m in 0..8 {
+                        let x = ((g * 8 + m) as f64 * 0.37).fract();
+                        let held: Vec<Option<Held>> = (0..outputs)
+                            .map(|k| {
+                                let mut rows = [0.; STATES];
+                                let d = if k == 2 { shift } else { 0. };
+                                (rows[0], rows[1]) = (0.5 + 0.1 * x + d, 0.5 - 0.1 * x - d);
+                                Some(Held { rows, kappa: [x; 3], kappa2: [1. + x * x; 3] })
+                            })
+                            .collect();
+                        sums.add(&held);
+                    }
+                    Part { sums, listed: vec![], samples: vec![], counts: Counts::default() }
+                })
+                .collect()
+        };
+        let coarse = level(0.);
+        let coarse: Vec<&Part> = coarse.iter().collect();
+        let targets = Targets { population: vec![1.; outputs], temperature: vec![None; outputs], held: vec![1.; outputs] };
+        let scales = Scales { hbar_over_mass: KT_PER_UK, frequencies: [1.; 3] };
+        let factor = refuted(&coarse, &level(-0.3), &scales, &targets, 0.25, 1., &|_| [0.05, 0.1]).unwrap();
+        assert!((factor - 0.05 / 0.4).abs() < 1e-12, "{factor}");
+        assert!(refuted(&coarse, &level(-0.01), &scales, &targets, 0.25, 1., &|_| [0.05, 0.1]).is_none());
     }
 }

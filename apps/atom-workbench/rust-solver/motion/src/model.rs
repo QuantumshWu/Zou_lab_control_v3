@@ -32,6 +32,7 @@ pub mod eliminate;
 pub mod assemble;
 pub mod readout;
 pub mod photon;
+pub(crate) mod jet;
 
 use crate::field::Light;
 use crate::linalg::{C64, Mat};
@@ -167,6 +168,10 @@ pub enum Unit {
     FarBeat { first: Component, second: Component },
     /// A static coupling of an explicit excited state `excited` to another excited state `other`. Kept: `other` is explicit too.
     Excited { excited: usize, other: usize },
+    /// A near carrier's dressing of the other channels (its light shifts of their ground states and its folded channels'
+    /// self-energy) with its polarization units' T̄, their interference averaged (eliminate.rs). Kept: its coherent field at the
+    /// point.
+    Dressing { carrier: Component },
     /// The coherence of the photons landing in ground state `landing` at two frame frequencies `first` and `second` (in the
     /// landing cluster's frames). Kept: one class, their interference with its beat; folded: two classes.
     Coherence { landing: usize, first: Beat, second: Beat },
@@ -472,23 +477,26 @@ pub struct Run<'a> {
     pub reference: [f64; GROUND],
     running: Lights,
     prepared: Lights,
+    /// The counted real multiply-adds of one assembly (`decide::COMPLEX` per complex one, assemble.rs # Work): the largest over the
+    /// clusters at the focus, every light on -- the integrator's price of a generator, made once.
+    assembly: f64,
 }
 
 impl<'a> Run<'a> {
     pub fn new(model: &'a Model, reference: [f64; GROUND]) -> Run<'a> {
-        Run { model, reference, running: model.running(), prepared: model.prepared() }
-    }
-    /// The counted real multiply-adds of one assembly (`decide::COMPLEX` per complex one): the largest over the clusters at the
-    /// focus, every light on -- the integrator's price of a generator (its step's two assemblies).
-    pub fn assembly_work(&self) -> f64 {
+        let running = model.running();
         let at = Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 };
-        (0..self.model.clusters.len()).map(|c| self.model.assembled(c, &at, &self.running).1).fold(0.0, f64::max) * crate::decide::COMPLEX
+        let assembly = (0..model.clusters.len()).map(|c| model.assembled(c, &at, &running).1).fold(0.0, f64::max) * crate::decide::COMPLEX;
+        Run { model, reference, running, prepared: model.prepared(), assembly }
     }
 }
 
 impl crate::step::Dynamics for Run<'_> {
     fn hbar_over_mass(&self) -> f64 {
         self.model.hbar_over_mass
+    }
+    fn assembly_work(&self) -> f64 {
+        self.assembly
     }
     fn reference(&self, r: [f64; 3]) -> Quadratic {
         self.model.expansion(r, &self.reference, &self.prepared)

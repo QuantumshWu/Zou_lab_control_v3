@@ -25,7 +25,12 @@ const read=file=>JSON.parse(fs.readFileSync(file,'utf8'));
  * recoil 10⁻³ and 10⁻⁶ of the usual: m → ∞ decouples the motion, and the jump ensemble's mean is the Lindblad equation
  * at the focus. */
 export const HELD={mass:1e6,temperatureUK:1e-3};
-function held(line){const m=structuredClone(line);m.model.motion.massKg*=HELD.mass;m.model.motion.temperatureUK=HELD.temperatureUK;return m;}
+function held(line,mass=HELD.mass){const m=structuredClone(line);m.model.motion.massKg*=mass;m.model.motion.temperatureUK=HELD.temperatureUK;return m;}
+/** R8's mass factor: the momentum diffusion D adds (ħ²/Mm)·2Dt to k_BT while the held atom's zero-point floor is
+ * ħω/2 ∝ 1/√M, so their ratio falls as 1/√M -- at ×10⁶ the diffusion is ~10⁻³ of the floor (invisible). ×100 keeps the
+ * atom within its zero-point spread √(ħ/2Mmω) ≈ λ/150 of the trap centre (no motional decorrelation: held) while the
+ * diffusion of R5051 over 100 µs is ~15 % of the floor at the QRT's γ = 1/µs cutoff. */
+export const R8_MASS=100;
 
 /** R4: the 1D quantum references' scenes (TW1, TW2; contract §3.5, the 1D GMW engine's LONGREF_TW*.json) rebuilt from
  * their own specification: the app's 1D PGC example (a lin⊥lin D2 cooling pair along ±z, E ∥ x on +z and ∥ y on −z,
@@ -60,11 +65,11 @@ async function main(){
   for(const [id,d] of Object.entries(SCENES))await emit(id,await d.build(),d.title,d.ref);
   await emit('R4_TW1',await twScene('TW1',3000),'R4 西西弗斯 TW1：app 的 1D PGC 例子加光镊（加热）','R4');
   await emit('R4_TW2',await twScene('TW2',1000),'R4 西西弗斯 TW2：典型阱内 PGC（冷却）','R4');
-  // R8: R5051 (a retro-reflected 880 nm tweezer, a D2 probe near F′=3 and a weak F=1 → F′=0 beam) held at the focus.
+  // R8: R5051 (a retro-reflected 880 nm tweezer, a D2 probe near F′=3 and a weak F=1 → F′=0 beam) held at its trap's centre.
   {const src=read(path.join(here,'regress','R5051.scene.json'));src.dynamics.samples=101;
-   const s=await finish(src),line=held(await motionRequest('R8_R5051',s,{device:'cpu'}));const c=checkRequest(line);
+   const s=await finish(src),line=held(await motionRequest('R8_R5051',s,{device:'cpu'}),R8_MASS);const c=checkRequest(line);
    write(out('scenes','R8_R5051.scene.json'),s);write(out('scenes','R8_R5051.json'),line);
-   manifest.scenes.R8_R5051={ref:'R8',title:'R8 静止原子的动量扩散（R5051，质量 ×10⁶）',...c,held:HELD};console.log('R8_R5051',JSON.stringify(c));}
+   manifest.scenes.R8_R5051={ref:'R8',title:'R8 静止原子的动量扩散（R5051，质量 ×100）',...c,held:{mass:R8_MASS,temperatureUK:HELD.temperatureUK}};console.log('R8_R5051',JSON.stringify(c));}
   for(const [id,[durationUs,samples]] of Object.entries(R0_SET)){
     const src=sources[id]??read(path.join(here,'regress',`${id}.scene.json`));
     const s=await finish({...structuredClone(src),dynamics:{...src.dynamics,durationUs,samples}});

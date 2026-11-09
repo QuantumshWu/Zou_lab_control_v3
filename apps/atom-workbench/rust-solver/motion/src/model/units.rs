@@ -11,10 +11,12 @@
 //! light's static forms and the near carriers' couplings at their peaks (`Model::spread`).
 //!
 //! # The errors (SPEC §1.5), measured at a trajectory state
-//! A unit's small parameter at the state's point and momentum, mapped to the outputs by its leading order: a far component's
-//! and a far beat's fold mix m² (populations, and T relative); a coupling of two ground states mixes m²(p_a + p_b); an
-//! excited static coupling m²(p_e + p_f); a near drive's fold, its ground state's S_b on the populations and √2 S_b on T
-//! (eliminate.rs); a photon coherence m²√(p_i p_j) (photon.rs).
+//! A unit's small parameter at the state's point and momentum, mapped to the outputs by its leading order, the populations and T
+//! by the same weight -- the populations of the states it couples, so that a unit whose states are empty books nothing: a far
+//! component's and a far beat's fold mix m² (every ground state is the far light's); a coupling of two ground states mixes
+//! m²(p_a + p_b); an excited static coupling m²(p_e + p_f); a near drive's fold, its ground state's S_b p_b on the populations and
+//! √2 S_b p_b on T (eliminate.rs); a carrier's dressing its relative rate error on the state's rates (eliminate.rs); a photon
+//! coherence m²√(p_i p_j) (photon.rs).
 //!
 //! # What is no unit
 //! Cross terms of a co- and a counter-rotating component, and of a near and a far one, beat at an optical frequency or at
@@ -22,7 +24,7 @@
 //! the far units book. They are folded and dropped, booked under the far units.
 
 use super::cluster::Edge;
-use super::reach::{distance, doppler, lipschitz, Bounds, Cell, Span};
+use super::reach::{distance, doppler, lipschitz, Region};
 use crate::linalg::norm3;
 use super::{Component, Gate, Model, Reach, Sample, Unit, UnitError, Wave};
 use crate::linalg::{Mat, C64};
@@ -167,7 +169,8 @@ impl Model {
 
     /// The candidate units of this model (model.rs `Unit`): every component's fold, the beats of two folded far components of one
     /// rotation, the far light's static couplings of two ground states and of an explicit excited state, and the near carriers'
-    /// drives, couplings and photon coherences (eliminate.rs, photon.rs).
+    /// drives, couplings and photon coherences (eliminate.rs, photon.rs) -- those it folds: a unit kept, or one its clusters hold
+    /// for free, is no candidate (`Model::in_generator`).
     pub fn units(&self) -> Vec<Unit> {
         let mut out = vec![];
         let components = self.components();
@@ -197,107 +200,143 @@ impl Model {
         }
         out.extend(self.near_units());
         out.extend(self.coherence_units());
+        out.retain(|u| !self.in_generator(u));
         out
     }
 
-    /// A static coupling's (two ground states, or two excited states) mixing bound over a cell: its coherent peak there over the
-    /// least separation of the two states' energies there, less the Doppler shift of its parts' largest wave vector at the
-    /// reach's speed.
-    fn static_cell(&self, a: usize, b: usize, spans: &[Span], speed: f64) -> Bounds {
-        let mut size = 0.0;
+    /// Whether a unit's coupling is in this model's generators as it is (SPEC §1.4), nothing of it folded: kept, or held for free
+    /// -- a static coupling of two states of one cluster (the assembly takes every far static entry within a cluster,
+    /// assemble.rs), a drive or a near coupling within one cluster at a residual beat of exactly zero (eliminate.rs
+    /// `Model::drive_kept`, `Model::term_included`).
+    fn in_generator(&self, u: &Unit) -> bool {
+        let together = |a: usize, b: usize| self.clusters.iter().position(|c| c.states.contains(&a) && c.states.contains(&b));
+        self.kept.contains(u)
+            || match u {
+                Unit::Drive { carrier, excited, ground } => self.drive_kept(self.carrier_index(carrier.frequency), *excited, *ground),
+                Unit::Term { a, b, from: None, to: None } | Unit::Excited { excited: a, other: b } => together(*a, *b).is_some(),
+                Unit::Term { a, b, from: Some(from), to: Some(to) } => together(*a, *b).is_some_and(|k| {
+                    let c = &self.clusters[k];
+                    let place = |s: usize| c.states.iter().position(|&x| x == s).unwrap();
+                    let beat = self.carriers[self.carrier_index(to.frequency)].beat.plus(-1, &self.carriers[self.carrier_index(from.frequency)].beat);
+                    self.term_included(k, place(*a), place(*b), *from, *to, &beat)
+                }),
+                _ => false,
+            }
+    }
+
+    /// A static coupling's (two ground states, or two excited states) saturation bound S = 2m² over a region: its value
+    /// |Σ_l'l c_l'l [P_l'l]_ab| at the centre plus Σ |[P_l'l]_ab| times each pair's radius (reach.rs `PairSpan`), at most every beam at
+    /// its largest amplitude and in phase, over the least separation of the two states' energies there, less the Doppler shift of
+    /// its parts' largest wave vector at the region's speeds and the near light's differential shift; on a point, its measured
+    /// value there.
+    fn static_bound(&self, a: usize, b: usize, region: &Region) -> f64 {
+        let (mut centre, mut moved, mut blind) = (C64::ZERO, 0.0, 0.0);
         let (mut at, mut slack) = (self.energies[a] - self.energies[b], 0.0);
-        let mut size_centre = C64::ZERO;
         let mut wave = 0.0_f64;
-        for (f, t) in self.light.frequencies.iter().zip(&self.tones) {
+        for (f, (t, pairs)) in self.light.frequencies.iter().zip(self.tones.iter().zip(&region.pairs)) {
             let n = f.beams.len();
-            for j in 0..n {
-                for i in 0..n {
-                    let (lj, li) = (f.beams[j], f.beams[i]);
-                    let p = &t.pairs[j * n + i];
-                    let pair = super::reach::pair_span(spans, lj, li);
-                    let (c, moved) = (pair.centre, pair.radius);
-                    size += p[(a, b)].abs() * spans[lj].most * spans[li].most;
-                    size_centre += c * p[(a, b)];
-                    let d = p[(a, a)] - p[(b, b)];
-                    at += (c * d).re;
-                    slack += d.abs() * moved;
-                    if p[(a, b)] != C64::ZERO {
-                        let k = self.wave_value(&self.beam_wave(li).plus(-1, &self.beam_wave(lj)));
-                        wave = wave.max(doppler(k, speed));
-                    }
+            for (x, (p, pair)) in t.pairs.iter().zip(pairs).enumerate() {
+                let (lj, li) = (f.beams[x / n], f.beams[x % n]);
+                let v = p[(a, b)];
+                centre += pair.centre * v;
+                moved += v.abs() * pair.radius;
+                blind += v.abs() * region.spans[lj].most * region.spans[li].most;
+                let d = p[(a, a)] - p[(b, b)];
+                at += (pair.centre * d).re;
+                slack += d.abs() * pair.radius;
+                if v != C64::ZERO {
+                    let k = self.wave_value(&self.beam_wave(li).plus(-1, &self.beam_wave(lj)));
+                    wave = wave.max(doppler(k, region.speed));
                 }
             }
         }
-        let sep = distance(at - slack, at + slack) - wave - self.near_spread(a, b, spans);
-        let upper = mixing(size, sep, 0.0);
-        let centre = if spans.iter().all(|s| s.rho.is_finite()) { mixing(size_centre.abs(), at.abs() - wave, 0.0) } else { f64::NEG_INFINITY };
-        Bounds { upper: 2.0 * upper * upper, centre: 2.0 * centre * centre }
+        let size = (centre.abs() + moved).min(blind);
+        let m = mixing(size, distance(at - slack, at + slack) - wave - self.near_spread(a, b, region), 0.0);
+        2.0 * m * m
     }
 
-    /// Each unit's existence gate over the reach (SPEC §1.5), provable bounds at this model's clusters and dressing.
+    /// Each unit's existence gate over the reach (SPEC §1.5), provable bounds at this model's clusters and dressing: a far
+    /// component's, a far beat's and a photon coherence's over all space in closed form; the drives' (per ground state its folded
+    /// drives' saturation and sweep) and the couplings' proven together over the reach's cells (reach.rs `Model::bounds_over`).
     pub fn gates(&self, units: &[Unit], reach: &Reach) -> Vec<Gate> {
+        let mut quantities: Vec<Box<dyn Fn(&Region) -> f64 + '_>> = vec![];
+        let mut grounds: Vec<Option<usize>> = vec![None; GROUND];
+        let asked: Vec<Option<usize>> = units
+            .iter()
+            .map(|u| match *u {
+                Unit::Drive { ground, .. } => Some(*grounds[ground].get_or_insert_with(|| {
+                    let cluster = self.membership[ground];
+                    quantities.push(Box::new(move |r: &Region| self.drive_bound(ground, cluster, r).0));
+                    quantities.push(Box::new(move |r: &Region| self.drive_bound(ground, cluster, r).1));
+                    quantities.len() - 2
+                })),
+                Unit::Term { a, b, from: None, to: None } | Unit::Excited { excited: a, other: b } => {
+                    quantities.push(Box::new(move |r: &Region| self.static_bound(a, b, r)));
+                    Some(quantities.len() - 1)
+                }
+                Unit::Term { a, b, from: Some(from), to: Some(to) } => {
+                    quantities.push(Box::new(move |r: &Region| self.term_bound(a, b, from, to, r)));
+                    Some(quantities.len() - 1)
+                }
+                _ => None,
+            })
+            .collect();
+        let refs: Vec<&dyn Fn(&Region) -> f64> = quantities.iter().map(|q| q.as_ref() as &dyn Fn(&Region) -> f64).collect();
+        let proven = self.bounds_over(reach, EXISTS, &refs);
         units
             .iter()
-            .map(|u| match u {
-                Unit::Far { component } => Gate { saturation: self.far_gate(*component).saturation, sweep: self.far_sweep(*component, reach) },
-                Unit::FarBeat { first, second } => {
+            .zip(asked)
+            .map(|(u, q)| match (u, q) {
+                (Unit::Drive { .. }, Some(i)) => Gate { saturation: proven[i], sweep: proven[i + 1] },
+                (_, Some(i)) => Gate { saturation: proven[i], sweep: 0.0 },
+                (Unit::Far { component }, None) => Gate { saturation: self.far_gate(*component).saturation, sweep: self.far_sweep(*component, reach) },
+                (Unit::FarBeat { first, second }, None) => {
                     let size: f64 = self.far_cross(*first, *second).iter().map(|m| m.frobenius()).sum();
                     let beat = self.omega(&self.axes.component(&self.light, *first).plus(-1, &self.axes.component(&self.light, *second)));
                     let m = mixing(size, beat.abs(), self.spread());
                     Gate { saturation: 2.0 * m * m, sweep: 0.0 }
                 }
-                Unit::Term { a, b, from: None, to: None } | Unit::Excited { excited: a, other: b } => {
-                    let (a, b) = (*a, *b);
-                    let saturation = self.bound_over(reach, EXISTS, &|_cell: &Cell, spans: &[Span]| self.static_cell(a, b, spans, reach.speed));
-                    Gate { saturation, sweep: 0.0 }
-                }
-                _ => self.near_gate(u, reach),
+                (Unit::Coherence { .. }, None) => self.coherence_gate(u),
+                (Unit::Dressing { .. }, None) => Gate { saturation: 0.0, sweep: 0.0 },
+                _ => unreachable!("every coupling's gate is proven over the reach"),
             })
             .collect()
     }
 
-    /// Each folded unit's errors at each sample, [unit][sample]: its small parameter at the sample's point mapped to the outputs
-    /// (module documentation, # The errors); zero for a kept unit.
+    /// Each candidate unit's errors at each sample (`Model::units`), [unit][sample]: its small parameter at the sample's point
+    /// mapped to the outputs (module documentation, # The errors).
     pub fn errors(&self, units: &[Unit], samples: &[Sample]) -> Vec<Vec<UnitError>> {
-        let zero = UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 };
         units
             .iter()
             .map(|u| {
                 samples
                     .iter()
-                    .map(|s| {
-                        if self.kept.contains(u) {
-                            return zero;
+                    .map(|s| match u {
+                        Unit::Far { component } => {
+                            let amplitudes: Vec<f64> = self.light.amplitudes(s.at.r).iter().map(|a| a.value.abs()).collect();
+                            let m = self.far_mixing_at(*component, &amplitudes);
+                            UnitError { parameter: m * m, population: m * m, temperature: m * m }
                         }
-                        match u {
-                            Unit::Far { component } => {
-                                let amplitudes: Vec<f64> = self.light.amplitudes(s.at.r).iter().map(|a| a.value.abs()).collect();
-                                let m = self.far_mixing_at(*component, &amplitudes);
-                                UnitError { parameter: m * m, population: m * m, temperature: m * m }
-                            }
-                            Unit::FarBeat { first, second } => {
-                                let amplitudes = self.light.amplitudes(s.at.r);
-                                let (f1, f2) = (&self.light.frequencies[first.frequency], &self.light.frequencies[second.frequency]);
-                                let cross = self.far_cross(*first, *second);
-                                let mut size = 0.0;
-                                for (j, &l2) in f2.beams.iter().enumerate() {
-                                    for (i, &l1) in f1.beams.iter().enumerate() {
-                                        size += cross[j * f1.beams.len() + i].frobenius() * amplitudes[l2].value.abs() * amplitudes[l1].value.abs();
-                                    }
+                        Unit::FarBeat { first, second } => {
+                            let amplitudes = self.light.amplitudes(s.at.r);
+                            let (f1, f2) = (&self.light.frequencies[first.frequency], &self.light.frequencies[second.frequency]);
+                            let cross = self.far_cross(*first, *second);
+                            let mut size = 0.0;
+                            for (j, &l2) in f2.beams.iter().enumerate() {
+                                for (i, &l1) in f1.beams.iter().enumerate() {
+                                    size += cross[j * f1.beams.len() + i].frobenius() * amplitudes[l2].value.abs() * amplitudes[l1].value.abs();
                                 }
-                                let beat = self.omega(&self.axes.component(&self.light, *first).plus(-1, &self.axes.component(&self.light, *second)));
-                                let m = mixing(size, beat.abs(), self.spread());
-                                UnitError { parameter: m * m, population: m * m, temperature: m * m }
                             }
-                            Unit::Term { a, b, from: None, to: None } | Unit::Excited { excited: a, other: b } => {
-                                let cell = Cell { centre: s.at.r, half: [0.0; 3] };
-                                let speed = self.hbar_over_mass * norm3(s.at.kappa);
-                                let m2 = 0.5 * self.static_cell(*a, *b, &self.spans(&cell), speed).centre.max(0.0);
-                                let p = self.state_populations(s);
-                                UnitError { parameter: m2, population: m2 * (p[*a] + p[*b]), temperature: m2 }
-                            }
-                            _ => self.near_error(u, s),
+                            let beat = self.omega(&self.axes.component(&self.light, *first).plus(-1, &self.axes.component(&self.light, *second)));
+                            let m = mixing(size, beat.abs(), self.spread());
+                            UnitError { parameter: m * m, population: m * m, temperature: m * m }
                         }
+                        Unit::Term { a, b, from: None, to: None } | Unit::Excited { excited: a, other: b } => {
+                            let m2 = 0.5 * self.static_bound(*a, *b, &self.point_region(s.at.r, self.hbar_over_mass * norm3(s.at.kappa)));
+                            let p = self.state_populations(s);
+                            UnitError { parameter: m2, population: m2 * (p[*a] + p[*b]), temperature: m2 * (p[*a] + p[*b]) }
+                        }
+                        _ => self.near_error(u, s),
                     })
                     .collect()
             })
@@ -335,7 +374,7 @@ impl Model {
                 }
                 Some(Edge { a, b, beat: self.axes.zero(), wave: best.1, strength: self.static_size(a, b) })
             }
-            Unit::Far { .. } | Unit::FarBeat { .. } | Unit::Coherence { .. } => None,
+            Unit::Far { .. } | Unit::FarBeat { .. } | Unit::Coherence { .. } | Unit::Dressing { .. } => None,
             _ => self.near_edge(unit),
         }
     }
@@ -346,4 +385,3 @@ impl Model {
     }
 
 }
-

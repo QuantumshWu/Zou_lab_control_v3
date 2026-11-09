@@ -4,7 +4,7 @@
 //! (the decay is the photons' rate, the readout sums to one, a kept and a folded drive give the same recoil second moment).
 use atom_motion::field::Light;
 use atom_motion::linalg::{C64, Mat};
-use atom_motion::model::{hazard, Component, Lights, Model, Point, Sample, Unit, GROUND};
+use atom_motion::model::{hazard, Component, Lights, Model, Point, Sample, Unit, GROUND, STATES};
 use atom_motion::request::Request;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -254,4 +254,139 @@ fn weak_drives_fold_within_their_provable_gates() {
         }
         eprintln!("{name}: {} drive gates in {:?}, S bound {:.3e} measured {:.3e}, sweep {:.3e}", units.len(), started.elapsed(), gates[0].saturation, measured, gates[0].sweep);
     }
+}
+
+/// The potential's expansion is exact with near light in it: on the reported lights (the trap light coherent, every other light
+/// averaged: R3's σ⁺ cooling pair, R5's pump and repump) the gradient is the central difference of the value and the Hessian that of
+/// the gradient, to the differences' own truncation (h² of the third derivative; h = 1e-4 µm) -- the near light's responses
+/// differentiated twice through their resolvents (jet.rs), not left out.
+#[test]
+fn the_expansion_s_derivatives_are_exact_with_near_light() {
+    for (name, ids) in [("R3_DOPPLER", vec!["cool-plus"]), ("R5_PUMP", vec!["pump", "repump"])] {
+        let request = scene(name);
+        let light = Light::new(&request);
+        let kept: Vec<Unit> = ids.iter().map(|id| Unit::Far { component: Component { frequency: frequency_of(&request, &light, id), counter: false } }).collect();
+        let model = Model::new(&request, &light, &kept).unwrap();
+        let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+        let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
+        let lights = model.reported();
+        let h = 1e-4;
+        for r in [[0.11, -0.07, 0.23], [-0.3, 0.2, -0.15]] {
+            let q = model.expansion(r, &p, &lights);
+            let shifted = |a: usize, s: f64| { let mut x = r; x[a] += s; x };
+            for a in 0..3 {
+                let value = (model.potential(shifted(a, h), &p, &lights) - model.potential(shifted(a, -h), &p, &lights)) / (2.0 * h);
+                assert!((value - q.gradient[a]).abs() <= 1e-6 * q.gradient.iter().map(|x| x.abs()).fold(1e-12, f64::max), "{name}: ∂_{a}V {} against its difference {value}", q.gradient[a]);
+                let (up, down) = (model.expansion(shifted(a, h), &p, &lights), model.expansion(shifted(a, -h), &p, &lights));
+                let scale = q.hessian.iter().flatten().map(|x| x.abs()).fold(1e-12, f64::max);
+                for c in 0..3 {
+                    let second = (up.gradient[c] - down.gradient[c]) / (2.0 * h);
+                    assert!((second - q.hessian[a][c]).abs() <= 1e-6 * scale, "{name}: ∂_{a}∂_{c}V {} against its difference {second}", q.hessian[a][c]);
+                }
+            }
+        }
+    }
+}
+
+/// A model built with units kept lists as candidates only the units it folds (`Model::units`): none it keeps, none its clusters
+/// hold for free. The gates' closure from nothing kept (R2_RECOIL, its σ⁺ probe on |2,2⟩ → |3′,3′⟩) adds only units it has not
+/// kept each round and ends; in R6_RAMAN_CO with the Raman pair and the drive of its A leg kept, the B leg's drive is in the
+/// cluster at a residual beat of exactly zero (θ_e − θ_5 = δ_B) and the two ground states' static coupling is assembled within
+/// it: neither is a candidate any more.
+#[test]
+fn a_kept_unit_is_no_longer_a_candidate() {
+    let request = scene("R2_RECOIL");
+    let light = Light::new(&request);
+    let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
+    let mut kept: Vec<Unit> = vec![];
+    loop {
+        let model = Model::new(&request, &light, &kept).unwrap();
+        let units = model.units();
+        let again: Vec<&Unit> = units.iter().filter(|u| kept.contains(u)).collect();
+        assert!(again.is_empty(), "R2_RECOIL: kept units listed again: {again:?}");
+        let trap = model.trap(&p, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &p, request.temperature_uk, 2e-3);
+        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
+        if failing.is_empty() {
+            break;
+        }
+        kept.extend(failing);
+    }
+    let probe = Component { frequency: frequency_of(&request, &light, "probe"), counter: false };
+    eprintln!("R2_RECOIL: kept {kept:?}");
+    assert!(kept.contains(&Unit::Far { component: probe }), "R2_RECOIL: the probe's far fold fails: {kept:?}");
+
+    let request = scene("R6_RAMAN_CO");
+    let light = Light::new(&request);
+    let (ca, cb) = (Component { frequency: frequency_of(&request, &light, "ramanA"), counter: false }, Component { frequency: frequency_of(&request, &light, "ramanB"), counter: false });
+    let (beam_a, beam_b) = (&request.beams[light.frequencies[ca.frequency].beams[0]], &request.beams[light.frequencies[cb.frequency].beams[0]]);
+    let e = (GROUND..STATES).max_by(|&x, &y| (beam_a.coupling[(x, 1)] * beam_b.coupling[(x, 5)]).abs().total_cmp(&(beam_a.coupling[(y, 1)] * beam_b.coupling[(y, 5)]).abs())).unwrap();
+    let raman = Unit::Term { a: 1, b: 5, from: Some(cb), to: Some(ca) };
+    let (leg_a, leg_b) = (Unit::Drive { carrier: ca, excited: e, ground: 1 }, Unit::Drive { carrier: cb, excited: e, ground: 5 });
+    let static_coupling = Unit::Term { a: 1, b: 5, from: None, to: None };
+    let near = [Unit::Far { component: ca }, Unit::Far { component: cb }];
+    let folded = Model::new(&request, &light, &near).unwrap().units();
+    for u in [&raman, &leg_a, &leg_b, &static_coupling] {
+        assert!(folded.contains(u), "R6_RAMAN_CO: {u:?} a candidate while folded");
+    }
+    let kept: Vec<Unit> = near.iter().cloned().chain([raman, leg_a]).collect();
+    let units = Model::new(&request, &light, &kept).unwrap().units();
+    for u in kept.iter().chain([&leg_b, &static_coupling]) {
+        assert!(!units.contains(u), "R6_RAMAN_CO: {u:?} listed though in the generator");
+    }
+}
+
+/// A folded unit books no error where the states it couples are empty (SPEC §1.5: a coupling's mixing m²(p_a + p_b), a drive's
+/// S_b p_b, on the populations and on T alike): R2_RECOIL with its probe near and the atom in |2,2⟩ at the trap's centre -- every
+/// coupling of two other states and every drive from another ground state books nothing on either output, however large its
+/// measured parameter.
+#[test]
+fn a_unit_books_no_error_where_its_states_are_empty() {
+    let request = scene("R2_RECOIL");
+    let light = Light::new(&request);
+    let probe = Component { frequency: frequency_of(&request, &light, "probe"), counter: false };
+    let model = Model::new(&request, &light, &[Unit::Far { component: probe }]).unwrap();
+    let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
+    let trap = model.trap(&p, &model.prepared()).unwrap();
+    let cluster = model.cluster_of(b);
+    let psi = model.clusters()[cluster].states.iter().map(|&s| if s == b { C64::ONE } else { C64::ZERO }).collect();
+    let sample = Sample { cluster, at: Point { r: trap.centre, kappa: [0.0; 3], t: 0.0 }, psi };
+    let units = model.units();
+    let errors = model.errors(&units, &[sample]);
+    let mut measured = 0.0_f64;
+    for (u, e) in units.iter().zip(&errors) {
+        let states = match u {
+            Unit::Term { a, b, .. } => vec![*a, *b],
+            Unit::Excited { excited, other } => vec![*excited, *other],
+            Unit::Drive { ground, .. } => vec![*ground],
+            _ => continue,
+        };
+        if states.contains(&b) {
+            continue;
+        }
+        measured = measured.max(e[0].parameter);
+        assert!(e[0].population == 0.0 && e[0].temperature == 0.0, "{u:?} books {:?} with its states empty", e[0]);
+    }
+    eprintln!("the largest parameter measured on empty states: {measured:.3e}");
+    assert!(measured > 0.0, "a unit of empty states with a measured parameter");
+}
+
+/// The assembly's price counts the near light's elimination (assemble.rs # Work): R2_RECOIL with its probe near prices a
+/// generator at no less than the factorizations its elimination makes, one per ground state for the probe's dressing and one
+/// for the response of the cluster's ground state -- (n³ − n)/3 complex multiply-adds each on the n excited states.
+#[test]
+fn the_assembly_s_price_counts_the_near_elimination() {
+    use atom_motion::step::Dynamics;
+    let request = scene("R2_RECOIL");
+    let light = Light::new(&request);
+    let probe = Component { frequency: frequency_of(&request, &light, "probe"), counter: false };
+    let model = Model::new(&request, &light, &[Unit::Far { component: probe }]).unwrap();
+    let mut p = [0.0; GROUND];
+    p[7] = 1.0;
+    let run = atom_motion::model::Run::new(&model, p);
+    let n = STATES - GROUND;
+    let factorizations = (GROUND + 1) as f64 * ((n * n * n - n) / 3) as f64 * atom_motion::decide::COMPLEX;
+    assert!(run.assembly_work() >= factorizations, "an assembly priced {} below its factorizations' {factorizations}", run.assembly_work());
 }
