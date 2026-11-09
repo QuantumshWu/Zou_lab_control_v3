@@ -155,7 +155,7 @@ impl Model {
                 self.add_far_beat(&mut parts, *first, *second, &amplitudes);
             }
         }
-        let near = self.carriers.iter().any(|x| lights.on(x.frequency)).then(|| self.near_at(cluster, at, &amplitudes, lights));
+        let near = self.carriers.iter().any(|x| lights.on(x.frequency)).then(|| self.near_at(cluster, at, &amplitudes, lights, 1));
         for class in &self.classes[cluster] {
             self.add_decay(&mut parts, cluster, class, &amplitudes, lights, near.as_ref());
         }
