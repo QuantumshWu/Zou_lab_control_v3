@@ -1204,8 +1204,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
             if verdict.unsettled()&&more>0.&&(verdict.reads==0||pays(spend,run*(verdict.factor()-verdict.read_factor()),0.)){
                 rate=more;sampling=check::sampling(&outcome.traces,steps,&loss_tolerance,span,rate);
                 let extra=batch(done,count,&vec![outputs-1;(count/TASK) as usize],&sampling)?;
-                outcome.groups.extend(extra.groups);for(a,b)in outcome.samples.iter_mut().zip(extra.samples){a.extend(b);}outcome.jumps+=extra.jumps;outcome.beats=outcome.beats.max(extra.beats);outcome.traces.extend(extra.traces);
-                done+=count;continue;
+                outcome.extend(extra);done+=count;continue;
             }
             // Not verified: the next round (check.rs `Verdict::round`) at B⁺^(1/p), or the step stands unverified -- the far end of
             // its bias's interval in the record and the flag saying why.
@@ -1243,8 +1242,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
         let clock=Instant::now();
         let more=batch(done,next,&ends,&sampling)?;
         pace=clock.elapsed().as_secs_f64()/ends.iter().map(|&e|TASK*e as u64).sum::<u64>().max(1) as f64;
-        outcome.groups.extend(more.groups);for(a,b)in outcome.samples.iter_mut().zip(more.samples){a.extend(b);}outcome.jumps+=more.jumps;outcome.beats=outcome.beats.max(more.beats);outcome.traces.extend(more.traces);
-        done+=next;
+        outcome.extend(more);done+=next;
     }
     }
 }

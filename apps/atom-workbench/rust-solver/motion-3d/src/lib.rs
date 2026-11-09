@@ -181,6 +181,12 @@ fn initial_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,purpos
 /// largest bound per unit time of the beats the exact steps left out (`Trajectory::beats`); with the loss's check's sampling, per
 /// trajectory in their order what it leaves the check (check.rs `Trace`).
 pub struct Outcome{pub groups:Vec<Group>,pub samples:Vec<Vec<([f64;3],[f64;3])>>,pub jumps:u64,pub beats:f64,pub traces:Vec<check::Trace>}
+impl Outcome{
+    /// A later batch's after it (solve.rs # Batches).
+    pub(crate) fn extend(&mut self,more:Outcome){
+        self.groups.extend(more.groups);for(a,b)in self.samples.iter_mut().zip(more.samples){a.extend(b);}self.jumps+=more.jumps;self.beats=self.beats.max(more.beats);self.traces.extend(more.traces);
+    }
+}
 
 /// The most trajectories a task sums one after another: its sums (one per output time) stay few
 /// while the trajectories run one at a time on whichever thread is free.

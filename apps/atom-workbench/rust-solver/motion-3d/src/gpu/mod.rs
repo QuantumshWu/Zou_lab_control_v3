@@ -382,13 +382,10 @@ impl program::State{
     }
 }
 impl Look{
-    /// The trajectory looked at (`State::trajectory`): on the lab axes, ψ with its norm, its threshold and its jumps (a read's
-    /// dynamics go on from them, check.rs `read`), held; its run's seed and its index, no beat of its own.
+    /// The trajectory looked at, a held state's (`State::trajectory`): its threshold and jumps, from which a read's dynamics go
+    /// on (check.rs `read`); its run's seed and its index, no beat of its own.
     fn trajectory(&self,settings:&Settings,seed:u64,index:u64)->Trajectory{
-        let lab=|v:[f64;3]|->[f64;3]{std::array::from_fn(|a|(0..3).map(|i|v[i]*settings.axes[i][a]).sum())};
-        let scale=(0.5*self.logn).exp();
-        let mut psi=[Complex::ZERO;crate::model::MOST_MIXED];for(x,z)in self.psi.iter().enumerate(){psi[x]=Complex::new(z[0] as f64*scale,z[1] as f64*scale);}
-        Trajectory{cluster:self.cluster as usize,psi,r:lab(self.q),kappa:lab(self.p),time:self.time,threshold:self.threshold,alive:true,jumps:self.jumps as u64,beats:0.,seed,index}
+        program::State{q:self.q,p:self.p,time:self.time,logn:self.logn,threshold:self.threshold,psi:self.psi,cluster:self.cluster,jumps:self.jumps,death:-1,index:index as u32,..Default::default()}.trajectory(settings,seed)
     }
 }
 const _:()=assert!(MAXN==crate::model::MOST_STATES);
