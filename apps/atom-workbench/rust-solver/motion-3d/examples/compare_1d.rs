@@ -52,7 +52,7 @@ fn main(){
         if t>0.{dt_sum+=e.temperature[axis]/tr-1.;dt_n+=1.;worst_pop=worst_pop.max(dpop);}
         if i%report_every==0||i+1==estimates.len(){
             println!("t {:6.0}  T {:6.2}±{:4.2} ref {:6.2} ({:+5.1}%)  nbar {:5.2} ref {:5.2}  pF1 {:.4} ref {:.4}  m22 {:.4} ref {:.4}  m20 {:.4} ref {:.4}  exc {:.5} ref {:.5}  max|dpop| {:.4}  loss {:.1e} ref {:.1e}",
-                t,e.temperature[axis],e.temperature_error[axis],tr,100.*(e.temperature[axis]/tr-1.),e.occupation[axis],row["nbar"].as_f64().unwrap(),
+                t,e.temperature[axis],e.temperature_error[axis].error,tr,100.*(e.temperature[axis]/tr-1.),e.occupation[axis],row["nbar"].as_f64().unwrap(),
                 pops[..3].iter().sum::<f64>(),row["pF1"].as_f64().unwrap(),pops[7],rp[7],pops[5],rp[5],excited,row["excited"].as_f64().unwrap(),dpop,e.loss,row["loss"].as_f64().unwrap());
         }
     }

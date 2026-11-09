@@ -122,7 +122,7 @@ fn main(){
     let mut worst=0_f64;
     for i in (0..outputs).step_by((outputs/10).max(1)).chain([outputs-1]){
         let(ex,mc)=(&exact[i],&est[i]);
-        let z=(0..STATES).map(|k|((mc.populations[k]-ex[k])/mc.population_errors[k].max(1e-9)).abs()).fold(0.,f64::max);worst=worst.max(z);
+        let z=(0..STATES).map(|k|((mc.populations[k]-ex[k])/mc.population_errors[k].error.max(1e-9)).abs()).fold(0.,f64::max);worst=worst.max(z);
         let d=(0..STATES).map(|k|(mc.populations[k]-ex[k]).abs()).fold(0.,f64::max);
         println!("t {:6.0}  F1 {:.4}/{:.4}  F2 {:.4}/{:.4}  exc {:.5}/{:.5}  max |Δp| {d:.4} ({z:.1} SE)",i as f64*interval,
             level(&mc.populations,"ground-1-"),level(ex,"ground-1-"),level(&mc.populations,"ground-2-"),level(ex,"ground-2-"),
@@ -130,6 +130,6 @@ fn main(){
     }
     println!("largest deviation {worst:.1} SE");
     let json=format!("{{\"scene\":\"{name}\",\"r\":{r:?},\"states\":{:?},\"timesUs\":{:?},\"eliminated\":{:?},\"engine\":{:?},\"engineErrors\":{:?},\"trajectories\":{count}}}",
-        request.states,(0..outputs).map(|i|i as f64*interval).collect::<Vec<_>>(),exact,est.iter().map(|e|e.populations.clone()).collect::<Vec<_>>(),est.iter().map(|e|e.population_errors.clone()).collect::<Vec<_>>());
+        request.states,(0..outputs).map(|i|i as f64*interval).collect::<Vec<_>>(),exact,est.iter().map(|e|e.populations.clone()).collect::<Vec<_>>(),est.iter().map(|e|e.population_errors.iter().map(|s|s.error).collect::<Vec<f64>>()).collect::<Vec<_>>());
     std::fs::write(&out,json).unwrap();println!("written {out}");
 }

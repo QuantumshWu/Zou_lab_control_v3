@@ -34,7 +34,7 @@ fn main(){
     }
     let pick=|label:&str|request.states.iter().position(|x|x==label).unwrap();
     let group=|e:&Estimate,prefix:&str|->(f64,f64){let idx:Vec<usize>=request.states.iter().enumerate().filter(|(_,s)|s.starts_with(prefix)).map(|(i,_)|i).collect();
-        (idx.iter().map(|&i|e.populations[i]).sum(),idx.iter().map(|&i|e.population_errors[i]).fold(0.,f64::max))};
+        (idx.iter().map(|&i|e.populations[i]).sum(),idx.iter().map(|&i|e.population_errors[i].error).fold(0.,f64::max))};
     let m22=pick("ground-2-2");
     // Per output: each model's F = 1 total, |m=2⟩ and T_total with standard errors; the second order
     // less the fourth, against their combined standard error; the largest |Δp| over the 32 states.
@@ -44,11 +44,11 @@ fn main(){
         let e=|j:usize|&results[j].1[i];
         let f1:Vec<(f64,f64)>=(0..k).map(|j|group(e(j),"ground-1-")).collect();
         let fmt=|v:Vec<(f64,f64)>,d:usize|v.iter().map(|x|format!("{:.prec$}±{:.prec$}",x.0,x.1,prec=d)).collect::<Vec<_>>().join(" ");
-        let dmax=(0..e(0).populations.len()).map(|s|((e(0).populations[s]-e(1).populations[s]).abs(),(e(0).population_errors[s].powi(2)+e(1).population_errors[s].powi(2)).sqrt()))
+        let dmax=(0..e(0).populations.len()).map(|s|((e(0).populations[s]-e(1).populations[s]).abs(),(e(0).population_errors[s].error.powi(2)+e(1).population_errors[s].error.powi(2)).sqrt()))
             .fold((0.,0.),|a:(f64,f64),b|if b.0>a.0{b}else{a});
         println!("{:6.0} | {} | {} | {} | {:.4} | {:+.4} {:+.4} {:.4} (SE {:.4} {:.4} {:.4})",i as f64*interval,fmt(f1.clone(),4),
-            fmt((0..k).map(|j|(e(j).populations[m22],e(j).population_errors[m22])).collect(),4),fmt((0..k).map(|j|(e(j).temperature_total,e(j).temperature_total_error)).collect(),2),
+            fmt((0..k).map(|j|(e(j).populations[m22],e(j).population_errors[m22].error)).collect(),4),fmt((0..k).map(|j|(e(j).temperature_total,e(j).temperature_total_error.error)).collect(),2),
             2.*e(0).folded,f1[0].0-f1[1].0,e(0).populations[m22]-e(1).populations[m22],dmax.0,(f1[0].1.powi(2)+f1[1].1.powi(2)).sqrt(),
-            (e(0).population_errors[m22].powi(2)+e(1).population_errors[m22].powi(2)).sqrt(),dmax.1);
+            (e(0).population_errors[m22].error.powi(2)+e(1).population_errors[m22].error.powi(2)).sqrt(),dmax.1);
     }
 }
