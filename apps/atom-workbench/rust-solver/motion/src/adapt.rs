@@ -22,7 +22,8 @@
 //! grid τ* = C^{−1/p}, the tolerance's own step. After a rejection the next doubling takes (τ*, h*), which lands on the
 //! tolerance under the error model; after an acceptance it moves toward them by the exponents p/(p+1) and q/(q+1) of
 //! the ratio -- τ (τ*/τ)^{p/(p+1)} = τ (tolerance/error)^{1/(p+1)} for one variable --, approaching the tolerance from
-//! below without crossing it. All from the orders and the counted work; no safety factor, no share.
+//! below without crossing it. Either way by one factor of two at most, the range the doubling validated (`level`). All
+//! from the orders, the doubling's levels and the counted work; no safety factor, no share.
 //!
 //! # Jumps and the loss
 //! The doubling compares the jump-free flows. Accepted, where the halves' propagation crosses the trajectory's jump
@@ -50,6 +51,15 @@ pub struct Tolerances {
 
 /// The grid's order in its spacing h: CF4's local error O(h⁵) and composite Simpson's, per unit time O(h⁴).
 const GRID_ORDER: i32 = 4;
+
+/// A step's or a spacing's change within the range the doubling validated: it compares τ with τ/2 (h with h/2), one
+/// factor of two, so the error model is read on that range and a change beyond one factor of two either way extrapolates
+/// it -- a wildly non-asymptotic step (an output interval of a 1 MHz trap) read errors of 10³⁰ of the tolerance, the
+/// model asked τ = 10⁻¹³ µs, and there the doubling's difference was the energy's round-off, ever above a tolerance ∝ τ: a
+/// spiral to zero. One level at a time, each next doubling validates the range adjacent to the last.
+fn level(ratio: f64) -> f64 {
+    if ratio.is_nan() { 0.5 } else { ratio.clamp(0.5, 2.0) }
+}
 
 /// The least-work step and spacing (module documentation, # The next τ and the next grid): (τ*, h*) minimizing
 /// A/τ + B/h subject to Cτ^p + Dh^q = 1, p = `units::ORDER`, q = `GRID_ORDER`. λ solves a λ^{−α} + b λ^{−β} = 1
@@ -167,11 +177,14 @@ fn take<D: Dynamics>(model: &D, trajectory: &mut Trajectory, s: &Step, each: &mu
 /// accurate level.
 pub fn advance<D: Dynamics>(model: &D, tolerances: &Tolerances, trajectory: &mut Trajectory, to: f64, each: &mut dyn FnMut(&Segment)) {
     let p = ORDER as f64;
+    let assembly = model.assembly_work();
     while trajectory.lost.is_none() && trajectory.time < to {
         let tau = trajectory.tau.min(to - trajectory.time);
-        // One spacing for the doubling's three steps: τ/4m, no wider than the grid's.
-        trajectory.grid = tau / (4 * panels(0.5 * tau, trajectory.grid)) as f64;
-        let from = trajectory.clone();
+        // One spacing for the doubling's three steps: τ/4m, no wider than the grid's (the trajectory's own grid moves only
+        // where a step takes one).
+        let spacing = tau / (4 * panels(0.5 * tau, trajectory.grid)) as f64;
+        let mut from = trajectory.clone();
+        from.grid = spacing;
         if trajectory.steps >= MOST_STEPS {
             trajectory.capped.get_or_insert(trajectory.time);
             match counted(model, trajectory, &from, tau) {
@@ -211,16 +224,15 @@ pub fn advance<D: Dynamics>(model: &D, tolerances: &Tolerances, trajectory: &mut
             continue;
         }
         // The least-work (τ*, h*) on the error model read here (`optimum`), and the move toward it.
-        let spacing = trajectory.grid;
-        let a_work = full.work - full.grid_work + full.assemblies as f64 * model.assembly_work();
+        let a_work = full.work - full.grid_work + full.assemblies as f64 * assembly;
         let b_work = full.grid_work * spacing / tau;
         let (best_tau, best_grid) = optimum(a_work, b_work, e_split / tau.powi(ORDER), e_grid / spacing.powi(GRID_ORDER));
         let accepted = total <= 1.0;
         let q = GRID_ORDER as f64;
         let (time_exponent, grid_exponent) = if accepted { (p / (p + 1.0), q / (q + 1.0)) } else { (1.0, 1.0) };
-        trajectory.tau = tau * (best_tau / tau).powf(time_exponent);
+        trajectory.tau = tau * level((best_tau / tau).powf(time_exponent));
         if full.grid_work > 0.0 {
-            trajectory.grid = spacing * (best_grid / spacing).powf(grid_exponent);
+            trajectory.grid = spacing * level((best_grid / spacing).powf(grid_exponent));
         }
         if accepted && take(model, trajectory, &first, each) {
             take(model, trajectory, &second, each);
