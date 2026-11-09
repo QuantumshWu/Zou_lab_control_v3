@@ -43,7 +43,7 @@ export const SCENES={
   // R2 -- the two-level atom |2,2⟩ ↔ |3′,3′⟩: photon rate, radiation pressure, recoil heating 7/5, 3/10, 3/10.
   R2_RECOIL:{ref:'R2',title:'R2 二能级辐射压与反冲加热（σ⁺ 光沿 B，δ = −100Γ，s = 200）',async build(){
     const s=await base({name:'R2 二能级反冲加热',initialStateId:'ground-2-2',temperatureUK:30,durationUs:1000,samples:101});
-    await tweezer(s,{nm:852,powerMW:7.9,waistUm:1.2,along:'+z',ellipticityDeg:45});
+    await tweezer(s,{nm:852,powerMW:15.8,waistUm:1.2,along:'+z',ellipticityDeg:45});
     const offset=await offsetFor(s,'D2',2,3,'ground-2-2','D2-3-3',['tweezer'],-100*GAMMA_D2);
     await beam(s,{id:'probe',name:'σ+ 探测光',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:200*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
     return s;}},
