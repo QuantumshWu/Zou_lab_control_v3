@@ -181,6 +181,9 @@ impl Dynamics for Atom {
     fn assembly_work(&self) -> f64 {
         (self.n() * self.n()) as f64
     }
+    fn photon_work(&self) -> f64 {
+        self.n() as f64
+    }
 }
 
 /// ħ/m of Rb87 (µm²/µs).

@@ -116,6 +116,10 @@ pub trait Dynamics {
     /// The counted work of one generator assembly (`decide::Work`, real multiply-adds), made once per run: the step control
     /// weighs the split's error against the beating grid's by it (`adapt`).
     fn assembly_work(&self) -> f64;
+
+    /// The counted real multiply-adds of one jump's photons (`Dynamics::photons`), made once per run: `jump` adds it to the
+    /// trajectory's work.
+    fn photon_work(&self) -> f64;
 }
 
 /// A trajectory's state (SPEC §1.6, §1.7, §2.2).
@@ -149,8 +153,9 @@ pub struct Trajectory {
     pub steps: u64,
     pub capped: Option<f64>,
     /// The work counted (`decide::Work`, real multiply-adds) of the integrator's own algorithms over the trajectory --
-    /// exponentials, eigen-propagation, CF4 nodes, the doubling and the grid's doubling (`adapt` adds each step's) --, and
-    /// the model's generator assemblies it asked for (each costed by `Dynamics::assembly_work`).
+    /// exponentials, eigen-propagation, CF4 nodes, the doubling and the grid's doubling (`adapt` adds each step's) --, the
+    /// model's generator assemblies it asked for (each costed by `Dynamics::assembly_work`) and its jumps' photons
+    /// (`Dynamics::photon_work`).
     pub work: f64,
     pub assemblies: u64,
 }
@@ -964,6 +969,7 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) {
     trajectory.threshold = threshold;
     let at = trajectory.point();
     let photons = model.photons(trajectory.cluster, &at, &trajectory.psi);
+    trajectory.work += model.photon_work();
     let weights: Vec<f64> = photons.iter().map(|p| p.amplitudes.iter().map(|u| norm_sqr(u)).sum()).collect();
     let total: f64 = weights.iter().sum();
     if !(total > 0.0) {
