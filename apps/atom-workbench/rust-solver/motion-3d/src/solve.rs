@@ -272,6 +272,9 @@
 //! wave runs what the pilot predicts is needed and the need's own error (`first_ends`), each group as far as the reach wants it: a group that stops early leaves the others its clock. (Over 12 seeds: the need alone ran a second wave on 4 of DEFAULT's and 7 of THREE's, against 1 and 2 with its error; twice its error took the kernel's mean up 4-17 % on GMD1C, TET and PGC3D.)
 //! T rests on the atoms still held, and its statistic stands at the share of atoms it reads, its relative error times the held share, as a population's below: read among the held atoms alone a share f would ask 1/f the trajectories, for the T of atoms the light has mostly blown out (a probe at 100 mW/cm², 97 % lost by 25 us: 16384 trajectories, the cap, against 7300-8100). Its need goes as that share, 8 f/R² with x = f N atoms' relative error √(2/x) and R its room, from nothing with no atom held: at the root of the share every count from two asked 8/R² and none or one nothing, so that on a probe at 1 W/cm², 96-98 % lost at its first output of 50 us, a first batch's 2 or 3 held atoms went on to 800-2000 trajectories for T's of a few atoms and one holding fewer stopped at 80; at the share all stop at 80. The reported errors stay T's own, of one estimate (`Record::temperature_errors`): where few atoms remain the output says so.
 //! The populations' target is the app's, whose rows are the probabilities p (1 − L) that the atom is in a state and still held, beside the loss L, adding up to one: a population's statistic, and its reported error, are its error among the held atoms times the held share (`shown_error`), the loss's as it is. Read among the held atoms alone they asked those 7300-8100 of that probe, about 1000 now, and of a probe at 10 W/cm², 99.5 % lost by 600 us, 130 000-420 000 for numbers shown at 0.5 % of their size.
+//! One share per kind (`held_share`), statistics and model items alike: an error of a held-atom quantity -- a population shown as p (1 − L), T -- weighs at the held share, whether
+//! its statistic or a model item (the fold's charge, the first-order Doppler term, the ledger's estimates, `Measured`), and the loss as it is; a model item counted whole beside a
+//! statistic at the held share flagged an output 94 % lost for an error of 6 % among its last atoms (R5040), and the choice weighs the same totals.
 //! What is too few to read has two forms. A spread takes two samples (stats.rs `reads_spread`): two atoms for a T, two groups for a standard error. A count of none takes more, as far as its room asks:
 //! trajectories alike read no error: N atoms all lost, or none of them in a state, stand at a jackknife of zero, which says nothing of what none of them met; Wilson's interval at `CONFIDENCE` leaves it up to z²/(N + z²) away (`unseen`). So an output's populations and loss take at least the trajectories that bring that within their room, z²(1/R − 1), 76 at the target (`population_ratio`), and the reported error is at least that far end. (A probe at 1 W/cm², 2.5 % held at its first output of 10 us: its pilot of 32 kept none, its run of 16 read all lost.) It is what a count of none says, and below what any output with counts to read asks but for a run of very few trajectories, whose N it sets.
 //! An output's need is its trajectories so far times its worst ratio squared (the statistics over their rooms); a trajectory
@@ -449,14 +452,17 @@ fn weight_at(temperature:[f64;3],frequencies:[f64;3])->f64{
     (0..3).filter(|&a|frequencies[a]>0.).map(|a|(KT_PER_UK*temperature[a]/(CLASSICAL*frequencies[a])).max(0.)).fold(1_f64,f64::min).powi(2)
 }
 /// An output's largest standard error of what is shown of the atom (# Batches): a population as the probability p (1 − L) that it is in that state and held, its error among the held atoms times the held share, and the loss's.
-fn shown_error(e:&Estimate)->f64{let held=(1.-e.loss).max(0.);e.population_errors.iter().map(|&x|held*x).fold(e.loss_error,f64::max)}
+fn shown_error(e:&Estimate)->f64{let held=held_share(e);e.population_errors.iter().map(|&x|held*x).fold(e.loss_error,f64::max)}
+/// The share of atoms an output's held-atom quantities are read on (# Batches), the one weight of their errors, statistics and model items
+/// alike (`statistics`, `Measured`): its populations, shown as p (1 − L), and its T at the held share 1 − L; the loss as it is.
+fn held_share(e:&Estimate)->f64{(1.-e.loss).max(0.)}
 /// An output's statistical errors at CONFIDENCE: the populations' as shown and the loss's largest (`shown_error`, absolute) and T's largest
 /// relative one over the axes, at the share of atoms it reads (# Batches), with its target's weight there (`regime`).
 #[derive(Clone,Copy,Debug)]
 struct Statistic{population:f64,temperature:f64,weight:f64}
 fn statistics(e:&Estimate,frequencies:[f64;3])->Statistic{
     Statistic{population:CONFIDENCE*shown_error(e),
-        temperature:CONFIDENCE*(1.-e.loss).max(0.)*(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a]/e.temperature[a]}else{0.}).fold(0.,f64::max),weight:regime(e,frequencies)}
+        temperature:CONFIDENCE*held_share(e)*(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a]/e.temperature[a]}else{0.}).fold(0.,f64::max),weight:regime(e,frequencies)}
 }
 /// Whether an output holds the atoms a temperature, a variance over them, takes (`reads_spread`).
 fn reads_temperature(e:&Estimate)->bool{reads_spread(held_atoms(e).round())}
@@ -637,18 +643,19 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
 
 /// What an output's a-priori total takes as measured along the trajectories (module documentation, # Ledger and the total error): the fold's
 /// charges per target (`fold_charges`), the profiles' error and the mean (kv/σ)² at the atoms, what the first order's transfer leaves on T, and the share of
-/// the atoms past the reach the fold was judged at (`beyond_reach`). Before a run, the charge alone.
+/// the atoms past the reach the fold was judged at (`beyond_reach`); and the share of atoms they weigh at, errors of the held atoms'
+/// quantities as the statistics are (`held_share`). Before a run, the charge alone, at every atom.
 #[derive(Clone,Copy,Debug,Default)]
-struct Measured{charge:[f64;2],profile:f64,doppler:f64,transfer:f64,beyond:f64}
-impl Measured{fn charge(charge:[f64;2])->Measured{Measured{charge,..Measured::default()}}}
+struct Measured{charge:[f64;2],profile:f64,doppler:f64,transfer:f64,beyond:f64,held:f64}
+impl Measured{fn charge(charge:[f64;2])->Measured{Measured{charge,held:1.,..Measured::default()}}}
 /// A model's a-priori total, its one definition: its ledger's estimates, with what a run has booked there (`gained`, `booked`), but the fold's charge,
 /// which takes its measured value, and the profiles' peaks, which their measured value replaces where larger (`at`).
 #[derive(Clone,Copy,Debug)]
 struct Apriori{rest:f64,peak:f64}
 impl Apriori{
     fn of(base:&Ledger,model:&Model)->Apriori{Apriori{rest:base.sum()-fold_charge(model,model.ground.charge),peak:model.profiles.iter().map(|p|p.1).sum()}}
-    /// The total per target, the populations' and T's, at what is measured.
-    fn at(&self,m:Measured)->[f64;2]{let[p,t]=m.charge.map(|c|self.rest+(m.profile-self.peak).max(0.)+m.doppler+c+m.beyond);[p,t+m.transfer]}
+    /// The total per target, the populations' and T's, at what is measured, at the share of atoms it weighs at (`held_share`).
+    fn at(&self,m:Measured)->[f64;2]{let[p,t]=m.charge.map(|c|self.rest+(m.profile-self.peak).max(0.)+m.doppler+c+m.beyond);[p*m.held,(t+m.transfer)*m.held]}
 }
 /// One target's errors at an output (module documentation, # Shares): the statistics at CONFIDENCE (`statistics_of`), what the
 /// trajectories leave open of what none of them met (`unseen`, the populations' alone, # Batches), the time step's bias, the a-priori
@@ -689,7 +696,7 @@ fn records<'a>(model:&Model,base:&Ledger,estimates:&'a [Estimate],bias:[f64;2],f
     estimates.iter().zip(&statistics).zip(measured).enumerate().map(|(i,((e,s),charge))|{
         let(population,temperature)=(POPULATION_TARGET,TEMPERATURE_TARGET/s.weight);
         // What the first order's transfer leaves out (model.rs `Model::first_error`), on T alone: its friction against the recoil heating at the T the atoms have.
-        let measured=Measured{charge,profile:e.profile,doppler:e.doppler,transfer:model.first_error*e.temperature_total,beyond:beyond_reach(e,model.ground.temperature_uk,cap)};
+        let measured=Measured{charge,profile:e.profile,doppler:e.doppler,transfer:model.first_error*e.temperature_total,beyond:beyond_reach(e,model.ground.temperature_uk,cap),held:held_share(e)};
         if i==0{return Record{estimate:e,population:Account::initial(population),temperature:Account::initial(temperature),measured,reads:true};}
         let[p,t]=apriori.at(measured);
         Record{estimate:e,measured,reads:reads_temperature(e),
@@ -842,8 +849,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     // The fold's memory (module documentation, # Ledger): per pilot atom its jumps at the outputs; the pilot's
     // initial states, where the charge starts.
     let memory=Memory::of(&pilot_states,interval,outputs);
-    let pilot_temperatures:Vec<f64>=pilot_estimates.iter().map(|e|e.temperature_total).collect();
-    let charge_of=|from:&Model,m:&Model|measured_charge(from,m,&pilot_states,&starts,&memory,interval,outputs,&pilot_temperatures);
+    let charge_of=|from:&Model,m:&Model|measured_charge(from,m,&pilot_states,&starts,&memory,interval,outputs,&pilot_estimates);
     let charge=charge_of(&pilot_candidate.model,&pilot_candidate.model);pilot_candidate.charged(charge);
     // The pilot's statistics per output: CONFIDENCE standard errors, the populations' and the loss's largest and T's with its
     // regime's weight (`statistics`). The trajectories a model needs are (statistic/room)² times the pilot's at the output and
@@ -1236,8 +1242,8 @@ fn slowest_period(trap:&Trap)->f64{std::f64::consts::TAU/trap.frequencies.iter()
 /// gathered at a red-detuned lattice's bright sites meets more than its mean). The a-priori charge at every output
 /// where the pilot kept no state after t = 0. Beside it every other item the run books there (`Measured`, `records`), so that the
 /// choice reads the totals the run will show: the first-order Doppler term and the profiles' error over the same states, the
-/// transfer's at the T the pilot reads (`temperatures`). (R5040's atoms at 600 uK took a Doppler term of 5.2 % the choice had not seen.)
-fn measured_charge(from:&Model,to:&Model,states:&[Trajectory],starts:&[Trajectory],memory:&Memory,interval:f64,outputs:usize,temperatures:&[f64])->Vec<Measured>{
+/// transfer's at the T the pilot reads, all at the share of atoms it holds (`pilot`, its estimates). (R5040's atoms at 600 uK took a Doppler term of 5.2 % the choice had not seen.)
+fn measured_charge(from:&Model,to:&Model,states:&[Trajectory],starts:&[Trajectory],memory:&Memory,interval:f64,outputs:usize,pilot:&[Estimate])->Vec<Measured>{
     // Per state its charges and, as the run's atoms take them (lib.rs `walk`), the first-order Doppler term and the profiles' error.
     let item=|t:&Trajectory|{let x=carried(from,to,t);let p=to.point(x.r,x.kappa);let c=fold_charges(to,2.*to.readout(x.cluster,&p,&x.psi,x.time).1);[c[0],c[1],to.doppler_ratio(x.kappa),to.profile_error(x.r)]};
     // Per output the states' items: their sums, their counts, and over the outputs after t = 0 their first two moments and largest.
@@ -1251,8 +1257,8 @@ fn measured_charge(from:&Model,to:&Model,states:&[Trajectory],starts:&[Trajector
     let means:[Vec<f64>;4]=std::array::from_fn(|k|{let sum:Vec<f64>=sums.iter().map(|s|s[k]).collect();let mean=moments[0][k]/held;
         steady_means(&sum,&counts,(moments[1][k]/held-mean*mean).max(0.).sqrt(),largest[k])});
     let charges=memory.charges(&(0..outputs).map(|i|with_open([means[0][i],means[1][i]],to,memory.held(i))).collect::<Vec<[f64;2]>>());
-    // The transfer's at the T the pilot reads there, as the run's (`records`).
-    charges.into_iter().enumerate().map(|(i,charge)|Measured{charge,doppler:means[2][i],profile:means[3][i],transfer:to.first_error*temperatures[i],beyond:0.}).collect()
+    // The transfer's at the T the pilot reads there, and the share of atoms it holds there, as the run's (`records`).
+    charges.into_iter().enumerate().map(|(i,charge)|Measured{charge,doppler:means[2][i],profile:means[3][i],transfer:to.first_error*pilot[i].temperature_total,beyond:0.,held:held_share(&pilot[i])}).collect()
 }
 /// Means per output (`sums` over `counts` states, the first output's left alone) over their neighbours as far as they agree: the mean
 /// within the widest window, doubling from the output's own, that agrees with every narrower one within Bernstein's bound on that one's
@@ -2081,6 +2087,22 @@ mod tests{
         e.loss=0.75;assert!((at(&e)-0.25*whole).abs()<1e-15);e.loss=1.;assert_eq!(at(&e),0.);
         let room=room(TEMPERATURE_TARGET,BIAS_SHARE*TEMPERATURE_TARGET);
         for held in 2..=6{let x=f64::from(held);let mut few=Estimate::default();few.trajectories=80.;few.loss=1.-x/80.;few.temperature=[10.;3];few.temperature_error=[10.*(2./x).sqrt();3];assert!(at(&few)<room,"{held}: {}",at(&few));}
+    }
+    /// An output's model items weigh at the share of atoms its statistics are read on (`held_share`): a quarter of the atoms held, a quarter of
+    /// the a-priori total and of the statistics alike, so that an output 75 % lost whose fold charges 8 % among its held atoms totals 2 % of what
+    /// the app shows and stays within the 5 % target, as its statistic does; no atom held, none of either. The loss's own statistic stands unscaled.
+    #[test]
+    fn model_items_weigh_at_the_share_their_atoms_are_read_on(){
+        let apriori=Apriori{rest:0.01,peak:0.};let mut e=Estimate::default();e.population_errors=vec![0.02];e.temperature=[10.;3];e.temperature_error=[1.;3];
+        let item=|e:&Estimate|Measured{charge:[0.08,0.08*std::f64::consts::SQRT_2],transfer:0.01,held:held_share(e),..Measured::default()};
+        let whole=apriori.at(item(&e));let s0=statistics(&e,[1.;3]);assert!((whole[0]-0.09).abs()<1e-15&&(whole[1]-(0.02+0.08*std::f64::consts::SQRT_2)).abs()<1e-15,"{whole:?}");
+        e.loss=0.75;let quarter=apriori.at(item(&e));let s1=statistics(&e,[1.;3]);
+        for k in 0..2{assert!((quarter[k]-0.25*whole[k]).abs()<1e-15,"{quarter:?}");}
+        assert!((s1.population-0.25*s0.population).abs()<1e-15&&(s1.temperature-0.25*s0.temperature).abs()<1e-15);
+        let account=Account{statistic:s1.population,open:0.,bias:0.,model:quarter[0],target:POPULATION_TARGET};assert!(whole[0]>POPULATION_TARGET&&account.total()<POPULATION_TARGET,"{}",account.total());
+        e.loss=1.;assert_eq!(apriori.at(item(&e)),[0.;2]);assert_eq!(statistics(&e,[1.;3]).temperature,0.);
+        e.loss_error=0.03;assert_eq!(statistics(&e,[1.;3]).population,CONFIDENCE*0.03);
+        assert_eq!(Measured::charge([0.04,0.05]).held,1.);
     }
     /// A population's statistic is its error as the app shows it: among the held atoms at no loss, a quarter of that with a quarter of the atoms held, the loss's own where that is the larger; a single group's infinite errors stay so, lost or not.
     #[test]
