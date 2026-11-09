@@ -45,6 +45,7 @@ use crate::decide::Read;
 use crate::request::STATES;
 use crate::units::{CONFIDENCE, KT_PER_UK};
 use rayon::prelude::*;
+use std::borrow::Borrow;
 use std::f64::consts::{PI, TAU};
 
 /// The far end of Wilson's score interval at confidence z for a count of zero in `draws` independent draws, z²/(N + z²):
@@ -313,10 +314,15 @@ pub struct Motion {
     pub mean_velocity: [f64; 3],
 }
 impl Estimate {
-    /// The interval of what is shown of the atom at the confidence z (module documentation): the largest of the rows as
-    /// shown and of the loss, at least what its trajectories leave unseen (`unseen`).
+    /// The jackknife interval of what is shown of the atom at the confidence z (module documentation): the largest of the
+    /// rows as shown and of the loss.
     pub fn shown_interval(&self) -> f64 {
-        self.shown_errors.iter().map(Spread::interval).fold(self.loss_error.interval(), f64::max).max(unseen(self.trajectories))
+        self.shown_errors.iter().map(Spread::interval).fold(self.loss_error.interval(), f64::max)
+    }
+    /// The statistics' error of what is shown (ledger.rs `Account::statistics`): the jackknife interval, at least what the
+    /// trajectories leave unseen (`unseen`) -- a loss or a state none of them reached reads no spread.
+    pub fn shown_statistics(&self) -> f64 {
+        self.shown_interval().max(unseen(self.trajectories))
     }
     /// T's largest interval at the confidence z over the lab axes, each relative to its `scale` (µK); unbounded where T is
     /// not read.
@@ -365,19 +371,19 @@ struct Jackknife {
     count: f64,
     holding: f64,
 }
-fn jackknife(levels: &[&[Group]], k: usize, hm: f64) -> Jackknife {
+fn jackknife<G: Borrow<Group>>(levels: &[&[G]], k: usize, hm: f64) -> Jackknife {
     let all: Vec<Sums> = levels
         .iter()
         .map(|groups| {
             let mut s = Sums::ZERO;
             for g in *groups {
-                s.combine(&g.sums[k], 1.);
+                s.combine(&g.borrow().sums[k], 1.);
             }
             s
         })
         .collect();
     let count = levels[0].len();
-    let holding = (0..count).filter(|&i| levels.iter().any(|l| l[i].sums[k].held > 0.)).count() as f64;
+    let holding = (0..count).filter(|&i| levels.iter().any(|l| l[i].borrow().sums[k].held > 0.)).count() as f64;
     let leave = if count >= 2 {
         (0..count)
             .map(|i| {
@@ -386,7 +392,7 @@ fn jackknife(levels: &[&[Group]], k: usize, hm: f64) -> Jackknife {
                     .zip(&all)
                     .map(|(l, s)| {
                         let mut rest = s.clone();
-                        rest.combine(&l[i].sums[k], -1.);
+                        rest.combine(&l[i].borrow().sums[k], -1.);
                         moments(&rest, hm)
                     })
                     .collect()
@@ -417,8 +423,8 @@ impl Jackknife {
 }
 
 /// The estimates at every output from the groups' sums (module documentation).
-pub fn summarize(groups: &[Group], scales: &Scales) -> Vec<Estimate> {
-    let outputs = groups.first().map_or(0, |g| g.sums.len());
+pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<Estimate> {
+    let outputs = groups.first().map_or(0, |g| g.borrow().sums.len());
     let hm = scales.hbar_over_mass;
     (0..outputs)
         .into_par_iter()
@@ -463,9 +469,9 @@ pub struct Paired {
 }
 
 /// The reads between a coarse and a fine level at every output, their groups the same trajectories in the same order.
-pub fn paired(coarse: &[Group], fine: &[Group], scales: &Scales) -> Vec<Paired> {
+pub fn paired<G: Borrow<Group> + Sync>(coarse: &[G], fine: &[G], scales: &Scales) -> Vec<Paired> {
     assert_eq!(coarse.len(), fine.len(), "paired levels run the same groups");
-    let outputs = coarse.first().map_or(0, |g| g.sums.len());
+    let outputs = coarse.first().map_or(0, |g| g.borrow().sums.len());
     (0..outputs)
         .into_par_iter()
         .map(|k| {
