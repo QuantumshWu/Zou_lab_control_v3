@@ -1,0 +1,219 @@
+{
+ "version": 3,
+ "name": "验证 random 5040",
+ "fields": [
+  {
+   "id": "bias",
+   "name": "偏置磁场",
+   "enabled": true,
+   "magnitudeG": 14.855846678998924,
+   "direction": {
+    "reference": {
+     "kind": "axis",
+     "axis": "+y"
+    },
+    "thetaDeg": 0,
+    "phiDeg": 0
+   }
+  }
+ ],
+ "lasers": [
+  {
+   "id": "tweezer",
+   "name": "光镊",
+   "enabled": true,
+   "line": "D2",
+   "frequency": {
+    "wavelengthNm": 850
+   },
+   "frequencyUnit": "nm",
+   "showLightShift": true,
+   "intensityMode": "power",
+   "intensityMWcm2": 99848472.19790831,
+   "powerUnit": "mW",
+   "waistUnit": "μm",
+   "intensityUnit": "kW/cm²",
+   "direction": {
+    "reference": {
+     "kind": "axis",
+     "axis": "-z"
+    },
+    "thetaDeg": 0,
+    "phiDeg": 0
+   },
+   "polarizationAngleDeg": 87.65067048527587,
+   "ellipticityDeg": 0,
+   "phaseDeg": 0,
+   "frequencyAnchor": {
+    "line": "D2",
+    "offsetMHz": -31533475.056735337,
+    "viewKey": "[\"expr\",{\"wavelengthNm\":850}]"
+   },
+   "intensityAnchor": {
+    "intensityMWcm2": 99848472.19790831,
+    "viewKey": "[\"power\",2.1553084242151765,1.1722603144102948]"
+   },
+   "powerMW": 2.1553084242151765,
+   "waistUm": 1.1722603144102948
+  },
+  {
+   "id": "l1",
+   "name": "l1",
+   "enabled": true,
+   "line": "D1",
+   "frequency": {
+    "base": {
+     "kind": "transition",
+     "line": "D1",
+     "Fg": 1,
+     "Fe": 1
+    },
+    "offsetMHz": -0.14158041484883
+   },
+   "frequencyUnit": "MHz",
+   "showLightShift": false,
+   "intensityMode": "power",
+   "intensityMWcm2": 0.4549200595241552,
+   "powerUnit": "mW",
+   "waistUnit": "μm",
+   "intensityUnit": "mW/cm²",
+   "direction": {
+    "reference": {
+     "kind": "angles",
+     "thetaDeg": 73.90673863298844,
+     "phiDeg": -136.37287379503266
+    },
+    "thetaDeg": 0,
+    "phiDeg": 0
+   },
+   "polarizationAngleDeg": 20.557546740504165,
+   "ellipticityDeg": -45,
+   "phaseDeg": -119.72557230396183,
+   "frequencyAnchor": {
+    "line": "D1",
+    "offsetMHz": 3762.4725514003326,
+    "viewKey": "[\"expr\",{\"base\":{\"kind\":\"transition\",\"line\":\"D1\",\"Fg\":1,\"Fe\":1},\"offsetMHz\":-0.14158041484883}]"
+   },
+   "intensityAnchor": {
+    "intensityMWcm2": 0.4549200595241552,
+    "viewKey": "[\"power\",0.00003250474653557055,67.44440222399301]"
+   },
+   "powerMW": 0.00003250474653557055,
+   "waistUm": 67.44440222399301
+  },
+  {
+   "id": "l2",
+   "name": "l2",
+   "enabled": true,
+   "line": "D1",
+   "frequency": {
+    "base": {
+     "kind": "transition",
+     "line": "D1",
+     "Fg": 1,
+     "Fe": 2
+    },
+    "offsetMHz": -51.295879542550765
+   },
+   "frequencyUnit": "MHz",
+   "showLightShift": false,
+   "intensityMode": "intensity",
+   "intensityMWcm2": 22.342845676160447,
+   "powerUnit": "mW",
+   "waistUnit": "μm",
+   "intensityUnit": "mW/cm²",
+   "direction": {
+    "reference": {
+     "kind": "angles",
+     "thetaDeg": 101.58019309447903,
+     "phiDeg": 175.58089182469234
+    },
+    "thetaDeg": 0,
+    "phiDeg": 0
+   },
+   "polarizationAngleDeg": 36.668009753072155,
+   "ellipticityDeg": 0,
+   "phaseDeg": 108.3771412320391,
+   "frequencyAnchor": {
+    "line": "D1",
+    "offsetMHz": 4525.81825227263,
+    "viewKey": "[\"expr\",{\"base\":{\"kind\":\"transition\",\"line\":\"D1\",\"Fg\":1,\"Fe\":2},\"offsetMHz\":-51.295879542550765}]"
+   },
+   "intensityAnchor": {
+    "intensityMWcm2": 22.342845676160447,
+    "viewKey": "[\"intensity\",22.342845676160447]"
+   }
+  },
+  {
+   "id": "l3",
+   "name": "l3",
+   "enabled": true,
+   "line": "D2",
+   "frequency": {
+    "base": {
+     "kind": "transition",
+     "line": "D2",
+     "Fg": 2,
+     "Fe": 3
+    },
+    "offsetMHz": -11.883733560712425
+   },
+   "frequencyUnit": "MHz",
+   "showLightShift": false,
+   "intensityMode": "intensity",
+   "intensityMWcm2": 22.670462572728304,
+   "powerUnit": "mW",
+   "waistUnit": "μm",
+   "intensityUnit": "mW/cm²",
+   "direction": {
+    "reference": {
+     "kind": "axis",
+     "axis": "-z"
+    },
+    "thetaDeg": 0,
+    "phiDeg": 0
+   },
+   "polarizationAngleDeg": 34.17280229396461,
+   "ellipticityDeg": -45,
+   "phaseDeg": 21.651299761897548,
+   "frequencyAnchor": {
+    "line": "D2",
+    "offsetMHz": -2381.1489626498214,
+    "viewKey": "[\"expr\",{\"base\":{\"kind\":\"transition\",\"line\":\"D2\",\"Fg\":2,\"Fe\":3},\"offsetMHz\":-11.883733560712425}]"
+   },
+   "intensityAnchor": {
+    "intensityMWcm2": 22.670462572728304,
+    "viewKey": "[\"intensity\",22.670462572728304]"
+   }
+  }
+ ],
+ "tweezerId": "tweezer",
+ "referenceFrequencies": [],
+ "references": [],
+ "marks": {},
+ "dynamics": {
+  "initialStateId": "ground-2-0",
+  "monitoredStateIds": [
+   "ground-2-0",
+   "ground-1--1",
+   "ground-1-0",
+   "ground-1-1"
+  ],
+  "monitorMode": "auto",
+  "monitoredGroupIds": [],
+  "durationUs": 100,
+  "durationUnit": "μs",
+  "samples": 21,
+  "meanHorizonUs": 1000000,
+  "motion": {
+   "enabled": true,
+   "temperatureUK": 85.2368409661149,
+   "temperatureUnit": "μK",
+   "device": "cpu"
+  },
+  "initialState": {
+   "kind": "unpolarized",
+   "manifold": "F2"
+  }
+ }
+}
