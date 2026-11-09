@@ -244,9 +244,13 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     let depth = ensemble.depths()[initial.iter().position(|c| alone(c.0) == reference).unwrap_or(0)];
     let mut ledger = Ledger::default();
     ledger.note = Some(format!("初始系综：各初态在自己的准备阱中的束缚原子（降低的等温分布乘每轴谐振子的 Wigner 因子，T = {} μK），参考态阱深 {:.1} k_BT", request.temperature_uk, depth));
+    let exact = |kinetic: Vec<(f64, f64)>| -> (V3, f64) {
+        (ensemble.momentum(&kinetic.iter().map(|k| k.0).collect::<Vec<_>>()), kinetic.iter().map(|k| k.1 / k.0).fold(0., f64::max))
+    };
+    let (momentum, start) = exact(ensemble.kinetic(0));
     let mut context = Context {
-        momentum: ensemble.momentum(&ensemble.kinetic(0).iter().map(|k| k.0).collect::<Vec<_>>()),
-        fixed: Fixed { model: vec![[0.; 2]; outputs], held: vec![1.; outputs], temperature: vec![None; outputs], step: step_bound() },
+        momentum,
+        fixed: Fixed { model: vec![[0.; 2]; outputs], held: vec![1.; outputs], temperature: vec![None; outputs], step: step_bound(), start },
         plan,
         scales,
         initial: row,
@@ -266,7 +270,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     if let Some(t) = outgrown(&estimates, reach) {
         return Ok(Attempt::Grow(t));
     }
-    context.momentum = ensemble.momentum(&ensemble.kinetic(counts.steps).iter().map(|k| k.0).collect::<Vec<_>>());
+    (context.momentum, context.fixed.start) = exact(ensemble.kinetic(counts.steps));
 
     // The model's errors at the pilot's states (SPEC §5.2): each folded unit's per output, the held atoms' mean.
     let units = model.units();
@@ -587,13 +591,15 @@ fn run_groups(first: u64, end: u64, part: &(dyn Fn(u64) -> Part + Sync), progres
 }
 
 /// What the pilot fixes for the run (module documentation, # Stopping), per output: the model's error on the held atoms
-/// (populations absolute, T relative), the held share, and T's scale per axis (µK) where T is held to its target; and the
-/// step's error booked on what is shown and on T (`step_bound`).
+/// (populations absolute, T relative), the held share, and T's scale per axis (µK) where T is held to its target; the
+/// step's error booked on what is shown and on T (`step_bound`); and T(0)'s relative error, its quadrature's last two
+/// levels' difference (ensemble.rs `Ensemble::kinetic`).
 struct Fixed {
     model: Vec<[f64; 2]>,
     held: Vec<f64>,
     temperature: Vec<Option<V3>>,
     step: [f64; 2],
+    start: f64,
 }
 
 /// The step's error booked on what is shown and on T (relative): the bound its tolerance gives, s·ε (SPEC §2.2, §4).
@@ -660,7 +666,8 @@ impl Targets {
 
 /// Each output's accounts of what is shown and of T (ledger.rs `Account`) by the run's estimates, the model's errors on the
 /// held atoms per output and the step's (`Fixed`), T's where read: the held share 1 − L weighs the model's error on the rows as shown, and
-/// T's whole account (module documentation, # Stopping); t = 0 is exact.
+/// T's whole account (module documentation, # Stopping); t = 0 is the request's state and the ensemble's moments, T's
+/// by quadrature (`Fixed::start`).
 fn accounts(estimates: &[Estimate], fixed: &Fixed) -> (Vec<Account>, Vec<Option<Account>>) {
     let [bp, bt] = fixed.step;
     estimates
@@ -669,7 +676,7 @@ fn accounts(estimates: &[Estimate], fixed: &Fixed) -> (Vec<Account>, Vec<Option<
         .enumerate()
         .map(|(k, (e, a))| {
             if k == 0 {
-                return (Account::default(), Some(Account::default()));
+                return (Account::default(), Some(Account { step: fixed.start, ..Account::default() }));
             }
             let h = 1. - e.loss;
             let population = Account { model: a[0] * h, step: bp, statistics: e.shown_statistics() };
