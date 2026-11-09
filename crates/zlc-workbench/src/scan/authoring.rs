@@ -73,19 +73,33 @@ fn range(row: &Value) -> Result<Option<(f64, f64, usize)>> {
     Ok(Some((start, stop, count)))
 }
 
+/// A linked parameter: it is not scanned, it follows its axis by a formula of `x` (a
+/// coordinate of that axis, one value per point). Its `formula` and unit are all it holds.
+fn normalize_link(entry: &Value) -> Result<Value> {
+    let fields = entry.as_object().ok_or("a linked parameter is its port, its formula of x and an optional unit")?;
+    if !fields.contains_key("port") || fields.keys().any(|key| !["port", "unit", "mode", "formula", "values", "value_text", "range"].contains(&key.as_str())) {
+        return Err("a linked parameter is its port, its formula of x and an optional unit".into());
+    }
+    if let Some(mode) = entry.get("mode") {
+        if text(mode, "linked mode")? != "formula" { return Err("a linked parameter follows its axis by a formula of x; Range and Values links are not offered".into()); }
+    }
+    let port = text(&entry["port"], "scan port")?;
+    let unit = entry.get("unit").map(|v| text(v, "scan unit")).transpose()?.unwrap_or("");
+    let formula = entry.get("formula").map(|v| text(v, "formula")).transpose()?.unwrap_or("x");
+    Ok(json!({"port":port,"unit":unit,"mode":"formula","formula":formula,"values":[],"value_text":""}))
+}
+
 fn normalize_row(entry: &Value, linked: bool, index: usize) -> Result<Value> {
+    if linked { return normalize_link(entry); }
     let fields = entry.as_object().ok_or("scan axis fields must be port, values, and optional unit, mode, value_text")?;
-    let allowed: HashSet<&str> = if linked { ["port", "values", "range", "unit", "mode", "value_text", "formula"].into_iter().collect() }
-        else { ["port", "values", "range", "unit", "mode", "value_text", "formula", "links", "link_enabled", "coordinate_of"].into_iter().collect() };
+    let allowed: HashSet<&str> = ["port", "values", "range", "unit", "mode", "value_text", "formula", "links", "link_enabled", "coordinate_of"].into_iter().collect();
     if !fields.contains_key("port") || (!fields.contains_key("values") && !fields.contains_key("range")) || fields.keys().any(|key| !allowed.contains(key.as_str())) {
         return Err("scan axis fields must be port, values or range, and optional unit, mode, value_text, links".into());
     }
     let port = text(&entry["port"], "scan port")?;
     let unit = entry.get("unit").map(|v| text(v, "scan unit")).transpose()?.unwrap_or("");
-    let mode = entry.get("mode").map(|v| text(v, "scan mode")).transpose()?.unwrap_or(if linked { "formula" } else { "range" });
-    if !["range", "values"].contains(&mode) && !(linked && mode == "formula") {
-        return Err(if linked { "linked mode must be range, values or formula".into() } else { format!("scan axis {index} ({port:?}): mode must be range or values") });
-    }
+    let mode = entry.get("mode").map(|v| text(v, "scan mode")).transpose()?.unwrap_or("range");
+    if !["range", "values"].contains(&mode) { return Err(format!("scan axis {index} ({port:?}): mode must be range or values")); }
     let values = entry.get("values").map(|v| numbers(v, "Range values")).transpose()?.unwrap_or_default();
     let value_text = entry.get("value_text").map(|v| text(v, "value_text")).transpose()?.unwrap_or("");
     let mut row = json!({"port":port,"values":values,"unit":unit,"mode":mode,"value_text":value_text});
@@ -94,7 +108,6 @@ fn normalize_row(entry: &Value, linked: bool, index: usize) -> Result<Value> {
         if !parent.is_null() && !parent.is_string() { return Err("coordinate_of must be text or null".into()); }
         row["coordinate_of"] = parent.clone();
     }
-    if linked { row["formula"] = json!(entry.get("formula").map(|v| text(v, "formula")).transpose()?.unwrap_or("x")); }
     if fields.contains_key("links") || fields.contains_key("link_enabled") {
         let enabled = entry.get("link_enabled").map(|v| v.as_bool().ok_or("link_enabled must be boolean")).transpose()?.unwrap_or(false);
         let links = entry.get("links").map(|v| v.as_array().ok_or("linked parameters must be a list")).transpose()?;
@@ -265,14 +278,7 @@ fn compile(rows: &[Value]) -> Result<Plan> {
             let mut axes = vec![axis(row, values.clone(), row["coordinate_of"].as_str().map(str::to_owned))?];
             if row["link_enabled"] == true {
                 for linked in row["links"].as_array().into_iter().flatten() {
-                    let played = match linked["mode"].as_str().unwrap() {
-                        "formula" => formula_values(linked["formula"].as_str().unwrap(), &values)?,
-                        "values" => parse_values(linked["value_text"].as_str().unwrap())?,
-                        _ => { let ends = bank(linked)?;
-                            if ends.is_empty() { return Err("linked Range needs endpoints".into()); }
-                            (0..values.len()).map(|i| ends[0]+(ends[ends.len()-1]-ends[0])*i as f64/values.len().saturating_sub(1).max(1) as f64).collect() },
-                    };
-                    if played.len() != values.len() { return Err(format!("linked parameter {:?} needs {} values", linked["port"].as_str().unwrap(), values.len())); }
+                    let played = formula_values(linked["formula"].as_str().unwrap(), &values)?;
                     if linked["port"].as_str().unwrap().starts_with("manual:") { return Err("a linked parameter must be a scan slot, API or device parameter".into()); }
                     axes.push(axis(linked, played, Some(row["port"].as_str().unwrap().into()))?);
                 }
