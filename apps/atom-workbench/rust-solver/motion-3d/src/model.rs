@@ -813,7 +813,7 @@ impl Model{
     fn built(request:&Request,ground:Ground,fourth:bool,most_bytes:usize,most_nodes:usize)->Result<Model,String>{
         let(mut model,bases)=Model::laid_out(request,ground,fourth)?;
         model.prune(&bases)?;
-        let stake=model.stake(request);model.tabulate(&bases,most_bytes,most_nodes,stake)?;model.measure_dressing(stake)?;
+        let stake=model.stake(request);model.tabulate(&bases,most_bytes,most_nodes,stake)?;model.measure_dressing(stake);
         model.linear=model.layouts.iter().map(|l|(0..l.n).map(|_|Default::default()).collect()).collect();
         let reach=model.ground.temperature_uk;model.transfer_tables(reach);
         model.lindblad()?;
@@ -1569,13 +1569,13 @@ impl Model{
     /// missed (solve.rs `unseen`, as `with_open` books the elimination's), at most the bound. N doubles from none while the next
     /// points' counted work pays for what their smaller estimate saves the run (cost.rs `pays`, `stake` at `room_cost`, as the
     /// tables' grid), the first points predicted at two eliminations each (the tables' counted work per node) and no interference
-    /// at all; it stops where the measured mean alone leaves no room. Without a near carrier of two units there is no
-    /// interference, and its bound stands, as where no point pays.
-    fn measure_dressing(&mut self,stake:f64)->Result<(),String>{
+    /// at all; it stops where the measured mean alone leaves no room. A point whose eliminations cannot be read (a resolvent singular
+    /// there) takes the bound. Without a near carrier of two units there is no interference, and its bound stands, as where no point pays.
+    fn measure_dressing(&mut self,stake:f64){
         let(g,bound)=(&self.ground,self.dressing);
-        if !g.dressing||bound==0.||(0..g.carriers.len()).all(|d|g.near_units.iter().flatten().filter(|u|u.carrier==d).count()<2){return Ok(());}
+        if !g.dressing||bound==0.||(0..g.carriers.len()).all(|d|g.near_units.iter().flatten().filter(|u|u.carrier==d).count()<2){return;}
         let mut eigen=g.clone();eigen.unmixed=vec![];
-        let point=|i:usize|->Result<f64,String>{let(r,t)=self.dressing_point(i);self.dressing_at(&eigen,r,t).map(|(change,left)|change+left)};
+        let point=|i:usize|->f64{let(r,t)=self.dressing_point(i);self.dressing_at(&eigen,r,t).map_or(bound,|(change,left)|change+left)};
         let estimate=|mean:f64,n:usize|if n==0{bound}else{bound.min(mean+bound*crate::solve::unseen(n as f64))};
         let(nodes,d)=(self.tables.nodes,self.focused.len() as u32);let computed=if nodes>FIRST_NODES{nodes.pow(d)-nodes.div_ceil(2).pow(d)}else{nodes.pow(d)};
         let(mut n,mut sum,mut spent,mut per_point)=(0,0.,0.,2.*self.tables.work/computed.max(1) as f64);
@@ -1584,13 +1584,11 @@ impl Model{
             if next>MOST_TABLE_NODES||mean>=POPULATION_TARGET{break;}
             let(now,then)=(estimate(mean,n),estimate(mean,next));
             if room_cost(now).is_finite()&&!pays(COMPLEX_MULTIPLY_ADD_NS*(next-n) as f64*per_point,stake*(room_cost(now)-room_cost(then)),0.){break;}
-            let batch:Vec<Result<(f64,f64),String>>=(n+1..=next).into_par_iter().map(|i|{let before=crate::linear::counted();point(i).map(|f|(f,crate::linear::counted()-before))}).collect();
-            for x in batch{let(f,w)=x?;sum+=f;spent+=w;}
+            let batch:Vec<(f64,f64)>=(n+1..=next).into_par_iter().map(|i|{let before=crate::linear::counted();let f=point(i);(f,crate::linear::counted()-before)}).collect();
+            for(f,w)in batch{sum+=f;spent+=w;}
             n=next;per_point=spent/n as f64;
         }
-        let measured=estimate(if n>0{sum/n as f64}else{0.},n);
-        self.dressing=measured;self.dressing_points=n;
-        Ok(())
+        self.dressing=estimate(if n>0{sum/n as f64}else{0.},n);self.dressing_points=n;
     }
     /// Point i ≥ 1 of the dressing's measure (`measure_dressing`), (r, t): r of the thermal ensemble at the reach's temperature in
     /// the reference trap (ground.rs `Ground::trap`; per principal axis a normal of σ = v_T/ω), t uniform over the run (the beats'
