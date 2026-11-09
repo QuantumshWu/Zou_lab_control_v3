@@ -18,7 +18,7 @@
 //! some output's total exceeds its target -- the span, the largest total and its three parts --, and every other reason
 //! a span is less than the solve claims; `note`: what is true of the setup whatever the solve does, never an accuracy
 //! conclusion.
-use crate::units::{POPULATION_TARGET, TEMPERATURE_TARGET};
+use crate::units::{POPULATION_TARGET, TEMPERATURE_TARGET, UNIT_ROUNDOFF};
 
 /// One approximation: what it is, its estimated error and what the engine did with it (Chinese, as the app shows them).
 #[derive(Clone, Debug, PartialEq)]
@@ -70,10 +70,13 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    /// An approximation with its estimated error, finite and not negative (the contract's).
+    /// An approximation with its estimated error, finite and not negative (the contract's); one below u·ε, which adds
+    /// nothing to the population target at the format's resolution (ε(1 + u) rounds to ε), is no item.
     pub fn item(&mut self, label: &str, estimate: f64, action: &str) {
         debug_assert!(estimate.is_finite() && estimate >= 0., "{label}: {estimate}");
-        self.items.push(Item { label: label.into(), estimate, action: action.into() });
+        if estimate >= UNIT_ROUNDOFF * POPULATION_TARGET {
+            self.items.push(Item { label: label.into(), estimate, action: action.into() });
+        }
     }
     /// A reason a span of the outputs is less than the solve claims, after those before it.
     pub fn flag(&mut self, reason: String) {
@@ -82,11 +85,13 @@ impl Ledger {
             None => reason,
         });
     }
-    /// The totals and the flags of the outputs at `times` (µs): the populations' accounts at every output; T's where it
+    /// The items from the largest estimate down, the totals and the flags of the outputs at `times` (µs): the populations'
+    /// accounts at every output; T's where it
     /// is read, `held` where it is held to its target. T's a-priori total is taken over the outputs it is held to, over
     /// every one where it is read when it is held to none (its error is then the solve's, not a target's), and only the
     /// outputs it is held to are flagged.
     pub fn close(&mut self, times: &[f64], population: &[Account], temperature: &[Option<Account>], held: &[bool]) {
+        self.items.sort_by(|a, b| b.estimate.total_cmp(&a.estimate));
         let held_to = held.iter().zip(temperature).any(|(&h, t)| h && t.is_some());
         let temperatures: Vec<Option<Account>> =
             temperature.iter().zip(held).map(|(t, &h)| t.filter(|_| h || !held_to)).collect();
@@ -210,6 +215,17 @@ mod tests {
         let mut none_held = Ledger::default();
         none_held.close(&times, &within, &temperature, &[false; 6]);
         assert!((none_held.totals.temperature.error - read[0].unwrap().a_priori()).abs() < 1e-16 && none_held.flagged.is_none());
+    }
+
+    /// An item below u·ε is none; the items come out largest first.
+    #[test]
+    fn items_are_the_approximations_that_count() {
+        let mut l = Ledger::default();
+        l.item("small", 1e-3, "");
+        l.item("nothing", 1e-32, "");
+        l.item("step", 0.022, "");
+        l.close(&[0., 1.], &[Account::default(); 2], &[None, None], &[false; 2]);
+        assert_eq!(l.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["step", "small"]);
     }
 
     /// Spans and numbers in the app's words.
