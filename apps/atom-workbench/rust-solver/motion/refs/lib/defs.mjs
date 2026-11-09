@@ -81,6 +81,14 @@ export const SCENES={
     const bottom=await transitionMHz(s,'ground-2-2','D2-3-3',['tweezer']),free=await transitionMHz(s,'ground-2-2','D2-3-3',[]);
     await beam(s,{id:'push',name:'σ+ 推出光',line:'D2',Fg:2,Fe:3,offsetMHz:(bottom+free)/2-(await zeroFieldMHz('D2',2,3)),intensityMWcm2:100*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
     return s;}},
+  // R9 (c) -- heating-driven escape: R2's far-detuned σ+ heating (δ = −100Γ) in a shallow σ+ tweezer (~200 µK), so
+  // the recoil heating (2E_rec per photon, ~70 µK/ms) carries atoms over the depth within the run.
+  R9_HEAT:{ref:'R9',title:'R9 加热逃逸：浅光镊中的反冲加热（能量 Fokker–Planck）',async build(){
+    const s=await base({name:'R9 加热逃逸',initialStateId:'ground-2-2',temperatureUK:20,durationUs:4000,samples:201});
+    await tweezer(s,{nm:852,powerMW:1.05,waistUm:1.2,along:'+z',ellipticityDeg:45});
+    const offset=await offsetFor(s,'D2',2,3,'ground-2-2','D2-3-3',['tweezer'],-100*GAMMA_D2);
+    await beam(s,{id:'probe',name:'σ+ 加热光',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:420*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
+    return s;}},
 };
 
 /** R6: beam A on F=1 → F′=2 and beam B on F=2 → F′=2 of D1, both 20 GHz red, σ+ (A along +z; B along `along`), of one

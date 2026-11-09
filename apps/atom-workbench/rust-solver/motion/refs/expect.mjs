@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {levelShifts,laserMHz} from './lib/app.mjs';
-import {KT_PER_UK,RAD_PER_MHZ,beamMeasure,beamTrap,branchRate,coupling,decayRates,hbarOverMass,index,kineticRatio,rayleigh,recoilUK,uKOfMHz,wignerTemperature} from './lib/phys.mjs';
+import {KT_PER_UK,RAD_PER_MHZ,beamMeasure,beamTrap,branchRate,coupling,decayRates,gaussLegendre,hbarOverMass,index,integrate,kineticRatio,rayleigh,recoilUK,uKOfMHz,wignerTemperature} from './lib/phys.mjs';
 import {ramanNumbers} from './lib/defs.mjs';
 
 const here=path.dirname(fileURLToPath(import.meta.url));
@@ -424,6 +424,50 @@ async function r9(){
     series,info:{mandelQ:Q,zR,edge,sz,sk,N}}));
 }
 
+/** R9 (c). Heating-driven escape (contract §6 R9c): R2's far-detuned σ+ heating in a shallow σ+ tweezer. The energy
+ * ε above the trap's bottom diffuses: per unit time the photon kicks add A(ε) = Σ_a D_a/m = E_rec(2 + Q)⟨R⟩_ε exactly
+ * (zero-mean kicks; R at the local detuning δ_b + κV, averaged over the shell), with variance rate B(ε) =
+ * Σ_a 2(D_a/m)⟨p_a²/m⟩_ε = (4/3)⟨KE⟩_ε A(ε) when the momenta are shared ergodically (⟨p_a²/m⟩ = (2/3)⟨KE⟩); the
+ * microcanonical shell averages use the exact Gaussian-beam potential V = U₀(1 − |a|²): weight (ε − V)^{1/2}, kinetic
+ * (ε − V)^{3/2} (the beam measure, lib/phys.mjs). The Fokker–Planck equation ∂P/∂t = −∂(AP) + ½∂²(BP) on [0, U₀]
+ * (B → 0 at the bottom; absorbing at ε = U₀, the far level, where the atom is unbound) from the prepared lowered
+ * isothermal P ∝ g(ε)(e^{−ε/k_BT} − e^{−U₀/k_BT}) gives the escape; an unbound atom is counted lost when it leaves the
+ * 1/20 region: within µs radially (ρ = w₀√(ln 20/2) ≈ 1.5 µm), up to τ_max (the axial run from the centre to
+ * √19 z_R at E = 0) along the axis -- L(t) is averaged over a delay uniform in [0, τ_max], u holds half that spread
+ * and the ergodic closure's error: the motion in a Gaussian beam is nearly separable and the heating puts 7/10 of the
+ * energy on z, so the escape is neither ergodic nor one-dimensional (contract: 10–20 %): 20 % of L. */
+async function r9heat(){
+  const id='R9_HEAT',c=await cycle(id,['probe']),{line,gamma,U0,kappa}=c,p=c.beams.probe,m=line.model.motion,mass=m.massKg,T=m.temperatureUK;
+  const tw=beamOf(line,'tweezer'),zR=rayleigh(tw.waveNumberPerUm,tw.waistUm),Erec=recoilUK(p.k,mass),Q=mandelQ(gamma,p.omega,p.delta),times=grid(line);
+  const U=U0/KT_PER_UK;  // depth in µK
+  // Shell integrals over the beam: ∫d³r F(y), y = |a|², = (πw₀²z_R/2)∫ sec⁴θ G(cos²θ) dθ, G(Y) = ∫₀^Y F(y) dy/y.
+  const shell=(eps,f)=>{const ymin=1-eps/U;const G=Y=>{if(Y<=ymin)return 0;let s=0;const a=Math.max(ymin,0),L=Math.log(Y/Math.max(a,1e-12));
+      for(const [v,w] of gaussLegendre(24,0,Math.min(L,40)))s+=w*f(Y*Math.exp(-v));return s;};
+    return integrate(th=>{const cs=Math.cos(th);return G(cs*cs)/(cs**4);},-Math.PI/2*0.9999,Math.PI/2*0.9999,{panels:16,n:16});};
+  const R=V=>rate(gamma,p.omega,p.delta+kappa*V*KT_PER_UK);
+  const n=160,de=U/n,eps=Array.from({length:n},(_,i)=>(i+0.5)*de);
+  const stats=eps.map(e=>{const g=shell(e,y=>Math.sqrt(Math.max(0,e-U*(1-y)))),k=shell(e,y=>Math.max(0,e-U*(1-y))**1.5),r=shell(e,y=>Math.sqrt(Math.max(0,e-U*(1-y)))*R(U*(1-y)));
+    return {g,KE:k/g,R:r/g};});
+  const A=stats.map(s=>Erec*(2+Q)*s.R),B=stats.map((s,i)=>4/3*s.KE*A[i]);
+  let P=stats.map((s,i)=>s.g*(Math.exp(-eps[i]/T)-Math.exp(-U/T)));const norm=P.reduce((a,b)=>a+b,0)*de;P=P.map(x=>x/norm);
+  // Explicit flux-form steps: J_{i+1/2} = (A P)_{mid} − ½ ∂(B P)/∂ε; reflecting at 0, absorbing at U.
+  const dtMax=0.4*de*de/Math.max(...B),Lfp=[0];let t=0;
+  for(let i=1;i<times.length;i++){while(t<times[i]-1e-9){const h=Math.min(dtMax,times[i]-t),J=new Array(n+1).fill(0);
+      for(let j=1;j<n;j++)J[j]=0.5*(A[j-1]*P[j-1]+A[j]*P[j])-0.5*(B[j]*P[j]-B[j-1]*P[j-1])/de;
+      J[n]=A[n-1]*P[n-1]+0.5*B[n-1]*P[n-1]/(de/2);  // P = 0 at ε = U: the outgoing flux
+      P=P.map((x,j)=>x-h*(J[j+1]-J[j])/de);t+=h;}
+    Lfp.push(1-P.reduce((a,b)=>a+b,0)*de);}
+  // The axial run from the centre to √19 z_R at E = 0: ∫dz/v, v = √(2U₀/(m(1 + z²/z_R²))) (µm/µs = m/s).
+  const r=hbarOverMass(mass),edge=Math.sqrt(19)*zR,tauMax=integrate(z=>1/Math.sqrt(2*U0*r/(1+z*z/(zR*zR))),0,edge,{panels:8,n:16});
+  const Lat=t=>{if(t<=0)return 0;const k=t/(times[1]-times[0]),j=Math.floor(k);return j>=times.length-1?Lfp.at(-1):Lfp[j]+(Lfp[j+1]-Lfp[j])*(k-j);};
+  const Ldel=times.map(t=>{let s=0;const K=40;for(let q=0;q<K;q++)s+=Lat(t-tauMax*(q+0.5)/K);return s/K;});
+  const series=[{quantity:'loss',indices:all(line),values:Ldel,u:times.map((t,i)=>Math.hypot(0.5*Math.abs(Lat(t)-Lat(t-tauMax)),0.2*Ldel[i])),target:POPULATION}];
+  write(id,expectation(id,'R9','R9 加热逃逸：反冲加热越过阱深（能量 Fokker–Planck）',line,{
+    derivation:'Energy Fokker–Planck with A = Σ D_a/m (exact) and B = (4/3)⟨KE⟩A (ergodic momenta) from the Gaussian beam\'s microcanonical shells, absorbing at the depth, from the lowered isothermal; L delayed by the run to the 1/20 region (0 to τ_max); u: half the delay spread and 20 % of L for the ergodic closure (contract 10–20 %).',
+    conditions:[{what:'depth (µK)',value:U},{what:'initial depth over k_BT',value:U/T},{what:'heating 2E_rec R at the bottom (µK/µs)',value:A[0]},{what:'E_rec/U₀ (diffusion approximation)',value:Erec/U,limit:'≪ 1'},{what:'axial run to the region edge at E = 0 (µs)',value:tauMax}],
+    series,info:{zR,edge,tauMax,mandelQ:Q,Lfp}}));
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // R4: Sisyphus against the 1D quantum references TW1/TW2.
 
@@ -461,7 +505,29 @@ async function r4(id){
     series,info:{reference:`LONGREF_${name}.json`,note:ref.note,wall_s:ref.wall_s,trapKHz:trap.map(kHz),referenceRadialKHz:ref.physics.omega_r_over_2pi_kHz}}));
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// R8: momentum diffusion of the held atom (characterization).
+
+/** R8 (characterization only, contract §6). The exact local momentum diffusion of R5051's atom held at its trap's centre
+ * (the quantum regression theorem on the master equation with every D2 state explicit, the force operator −∇H, the
+ * spontaneous photons' recoil: kick/runs/qrt_R5051_n.jsonl, d⟨κ_a²⟩/dt = 2D_a, D in 1/(µm² µs)), with the force
+ * correlation cut off by e^{−γτ}: γ → 0 holds the slow intra-state fluctuations a point particle's Ehrenfest force
+ * leaves out (SPEC §8), which a moving atom's motion cuts off at about its trap frequency. The held atom (mass ×100,
+ * scenes.mjs R8_MASS) does not cut them off; its T grows by ΔT_a = (ħ/Mm)·2D_a t/k_B, here at γ = 1/µs (the
+ * cutoff kick.md compared the engines at) with u reaching the γ = 0.3/µs value -- reported, not judged; the γ = 0
+ * values are in the info. */
+async function r8(){
+  const id='R8_R5051',line=read(`scenes/${id}.json`),times=grid(line),r=hbarOverMass(line.model.motion.massKg);
+  const qrt=fs.readFileSync('C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/kick/runs/qrt_R5051_n.jsonl','utf8').split('\n').filter(x=>x.trim()).map(x=>JSON.parse(x));
+  const centre=qrt.slice(1).find(q=>q.offset.every(v=>v===0)),D=g=>centre.cutoffs.find(c=>c.gamma===g).D;
+  const series=['x','y','z'].map((a,i)=>({quantity:'Tincrease',axis:a,indices:all(line),values:times.map(t=>r*2*D(1)[i]*t/KT_PER_UK),u:times.map(t=>r*2*Math.abs(D(0.3)[i]-D(1)[i])*t/KT_PER_UK),target:TEMPERATURE}));
+  write(id,{...expectation(id,'R8','R8 静止原子的动量扩散（R5051，QRT；只作表征）',line,{
+    derivation:'Held atom (mass ×100): Var κ_a grows as 2D_a t with the QRT diffusion of the exact master equation at the trap centre; D at the correlation cutoff γ = 1/µs, u to γ = 0.3/µs. The γ → 0 limit (slow intra-state fluctuations) is beyond the semiclassical point particle (SPEC §8).',
+    conditions:[{what:'photon rate at the centre (1/µs)',value:centre.photonRate},{what:'excited population',value:centre.excited}],
+    series,info:{source:'kick/runs/qrt_R5051_n.jsonl (NS scratchpad)',cutoffs:centre.cutoffs.map(c=>({gamma:c.gamma,D:c.D,Dforce:c.Dforce})),Drecoil:centre.Drecoil}}),kind:'characterization'});
+}
+
 const RUN={R1_TWEEZER:()=>r1('R1_TWEEZER'),R1_RETRO:()=>r1('R1_RETRO'),R1_SIGMA_P:()=>r1('R1_SIGMA_P'),R1_SIGMA_M:()=>r1('R1_SIGMA_M'),R1_CROSSED:()=>r1('R1_CROSSED'),
-  R2_RECOIL:r2,R3_DOPPLER:r3,R5_PUMP:r5,R6_RAMAN_CO:()=>r6('R6_RAMAN_CO'),R6_RAMAN_COUNTER:()=>r6('R6_RAMAN_COUNTER'),R9_PUSH:r9,R4_TW1:()=>r4('R4_TW1'),R4_TW2:()=>r4('R4_TW2')};
+  R2_RECOIL:r2,R3_DOPPLER:r3,R5_PUMP:r5,R6_RAMAN_CO:()=>r6('R6_RAMAN_CO'),R6_RAMAN_COUNTER:()=>r6('R6_RAMAN_COUNTER'),R9_PUSH:r9,R4_TW1:()=>r4('R4_TW1'),R4_TW2:()=>r4('R4_TW2'),R8_R5051:r8,R9_HEAT:r9heat};
 const ids=process.argv.slice(2);
 for(const [id,f] of Object.entries(RUN))if(!ids.length||ids.includes(id))await f();
