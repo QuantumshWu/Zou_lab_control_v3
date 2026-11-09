@@ -10,16 +10,19 @@
 //! largest difference (`Tolerances`); within the tolerance of every quantity the halves are taken, else τ is redone.
 //!
 //! # The next τ and the next grid
-//! The tolerance is per unit time, so the split's error over its tolerance goes as τ^p and the grid's as φ⁴ (φ the grid's
-//! phase, `step::Trajectory::grid`): after a rejection τ ← τ (share/error)^{1/p} and φ ← φ (share/error)^{1/4}, which land
-//! on the tolerance under the error model; after an acceptance the exponents 1/(p + 1) and 1/5, which approach it from
-//! below without crossing it. Both from the orders; no safety factor.
+//! The doubling's three steps take one spacing: h′ = τ/4m, m = ⌈τ/4h⌉, the full step 2m panels and each half m
+//! (`step::panels`), so that their grid errors per unit time are one and their difference is the split's alone.
 //!
-//! The shares: the split's error per unit time goes as τ^p at a work ∝ 1/τ (the assemblies and the reference), the
-//! grid's as φ⁴ at a work ∝ 1/φ (its CF4 nodes, whatever τ). The least work at a total error e minimizes W_s/τ + W_g/φ
-//! subject to C τ^p + D φ⁴ = e: the Lagrange condition puts the errors in the ratio of the works over the orders,
-//! e_s : e_g = W_s/p : W_g/4, measured on each step's counted work (`step::Step::work`, `Dynamics::assembly_work`).
-//! Without a grid the split takes the whole tolerance.
+//! The tolerance is per unit time, so over it the split's error goes as C τ^p and the grid's as D h^q (h the grid's
+//! spacing, `step::Trajectory::grid`; q = 4), at a work per unit time A/τ + B/h: A the step's own work (the assemblies,
+//! `Dynamics::assembly_work`, the reference, the forms), B/h the grid's (its CF4 nodes, whatever τ). Read on the doubling,
+//! C = e_s/τ^p, D = e_g/h′^q, A and B from the counted work (`step::Step::work`). The least work within the tolerance,
+//! min A/τ + B/h subject to Cτ^p + Dh^q = 1, is the Lagrange point τ^{p+1} = A/(λpC), h^{q+1} = B/(λqD) with λ the root of
+//! a λ^{−p/(p+1)} + b λ^{−q/(q+1)} = 1, a = C^{1/(p+1)}(A/p)^{p/(p+1)}, b = D^{1/(q+1)}(B/q)^{q/(q+1)} (`optimum`); without a
+//! grid τ* = C^{−1/p}, the tolerance's own step. After a rejection the next doubling takes (τ*, h*), which lands on the
+//! tolerance under the error model; after an acceptance it moves toward them by the exponents p/(p+1) and q/(q+1) of
+//! the ratio -- τ (τ*/τ)^{p/(p+1)} = τ (tolerance/error)^{1/(p+1)} for one variable --, approaching the tolerance from
+//! below without crossing it. All from the orders and the counted work; no safety factor, no share.
 //!
 //! # Jumps and the loss
 //! The doubling compares the jump-free flows. Accepted, where the halves' propagation crosses the trajectory's jump
@@ -27,23 +30,63 @@
 //! error -- and the jump made at its end (`step::jump`); the rest of the step is dropped, the next starts from the state
 //! the jump left. The loss is tested at every step's end and after every jump (SPEC §1.7).
 
-use crate::step::{jump, step, Dynamics, Segment, Step, Trajectory};
+use crate::model::Generator;
+use crate::step::{jump, panels, step, step_work, Dynamics, Segment, Step, Trajectory};
 use crate::units::{MOST_STEPS, ORDER};
 
 /// The local errors allowed per µs of a step (SPEC §2.2: the error ≤ s·ε·τ/T_run of each output's scale), which the solve
 /// computes from the targets ε, the step share s (`units::STEP_SHARE`), the run's length T_run and the pilot's scales.
+/// The errors add over the run as the steps' local errors do, to at most s·ε of each scale.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tolerances {
-    /// Per lab axis, κ's error (1/µm) per µs.
+    /// Per lab axis, κ's error (1/µm) per µs: T_a ∝ ⟨κ_a²⟩ moves by 2δκ/κ_T of itself for an error δκ on the axis's thermal
+    /// scale κ_T, so T's share is s·ε_T κ_T/(2 T_run).
     pub momentum: [f64; 3],
-    /// E_s's error (rad/µs) per µs.
+    /// E_s's error (rad/µs) per µs: on the thermal energy k_BT_s, s·ε_T k_BT_s/T_run.
     pub energy: f64,
-    /// The displayed rows' largest error per µs.
+    /// The displayed rows' largest error per µs: s·ε_P/T_run.
     pub population: f64,
 }
 
-/// The grid's order in its phase: CF4's local error O(h⁵) and composite Simpson's, per unit time O(φ⁴).
+/// The grid's order in its spacing h: CF4's local error O(h⁵) and composite Simpson's, per unit time O(h⁴).
 const GRID_ORDER: i32 = 4;
+
+/// The least-work step and spacing (module documentation, # The next τ and the next grid): (τ*, h*) minimizing
+/// A/τ + B/h subject to Cτ^p + Dh^q = 1, p = `units::ORDER`, q = `GRID_ORDER`. λ solves a λ^{−α} + b λ^{−β} = 1
+/// (α = p/(p+1), β = q/(q+1)), decreasing in ln λ, bracketed by where either term alone is 1 and ½, by Newton on ln λ kept
+/// in the bracket until it no longer moves. A source without error (C or D zero) takes an unbounded step or spacing.
+fn optimum(a_work: f64, b_work: f64, c: f64, d: f64) -> (f64, f64) {
+    let (p, q) = (ORDER as f64, GRID_ORDER as f64);
+    let (alpha, beta) = (p / (p + 1.0), q / (q + 1.0));
+    let a = c.powf(1.0 / (p + 1.0)) * (a_work / p).powf(alpha);
+    let b = d.powf(1.0 / (q + 1.0)) * (b_work / q).powf(beta);
+    let terms = [(a, alpha), (b, beta)];
+    let live = terms.iter().filter(|(w, _)| *w > 0.0);
+    let lo = live.clone().map(|(w, e)| w.ln() / e).fold(f64::INFINITY, f64::min);
+    let hi = live.map(|(w, e)| (2.0 * w).ln() / e).fold(f64::NEG_INFINITY, f64::max);
+    if !(lo.is_finite() && hi.is_finite()) {
+        return (f64::INFINITY, f64::INFINITY);
+    }
+    let g = |mu: f64| terms.iter().map(|(w, e)| w * (-e * mu).exp()).sum::<f64>() - 1.0;
+    let slope = |mu: f64| -terms.iter().map(|(w, e)| e * w * (-e * mu).exp()).sum::<f64>();
+    let (mut lo, mut hi, mut mu) = (lo, hi, 0.5 * (lo + hi));
+    for _ in 0..64 {
+        let value = g(mu);
+        if value > 0.0 {
+            lo = mu;
+        } else {
+            hi = mu;
+        }
+        let newton = mu - value / slope(mu);
+        let next = if newton > lo && newton < hi { newton } else { 0.5 * (lo + hi) };
+        if next == mu {
+            break;
+        }
+        mu = next;
+    }
+    let lambda = mu.exp();
+    ((a_work / (lambda * p * c)).powf(1.0 / (p + 1.0)), (b_work / (lambda * q * d)).powf(1.0 / (q + 1.0)))
+}
 
 /// The differences of the displayed quantities of two states at one time, each over its tolerance per µs times τ: per
 /// lab axis the momentum, E_s, the displayed rows; [κ_x, κ_y, κ_z, E_s, rows].
@@ -118,19 +161,23 @@ fn take<D: Dynamics>(model: &D, trajectory: &mut Trajectory, s: &Step, each: &mu
 /// Advances a held trajectory to the time `to` (the next output time; the steps never cross it) by doubled steps, its
 /// jumps and its loss test (module documentation); `each` takes every accepted step's path (a jump's step is the one
 /// redone to its root, the jump at its end). A trajectory lost on the way stops at its loss time. Past `units::MOST_STEPS`
-/// the steps go on unchecked at the last length and `Trajectory::capped` records from when (SPEC §2.2). A step that cannot
-/// be made (`step::Refused`) or whose error is not a number is redone at half its length, the doubling's more accurate
-/// level.
+/// the trajectory ends as usual (SPEC §2.2): unchecked steps, each the rest of the output interval (halved while it cannot
+/// be made), so that its work stays bounded, and `Trajectory::capped` records from when -- that span is flagged. A step
+/// that cannot be made (`step::Refused`) or whose error is not a number is redone at half its length, the doubling's more
+/// accurate level.
 pub fn advance<D: Dynamics>(model: &D, tolerances: &Tolerances, trajectory: &mut Trajectory, to: f64, each: &mut dyn FnMut(&Segment)) {
     let p = ORDER as f64;
     while trajectory.lost.is_none() && trajectory.time < to {
         let tau = trajectory.tau.min(to - trajectory.time);
+        // One spacing for the doubling's three steps: τ/4m, no wider than the grid's.
+        trajectory.grid = tau / (4 * panels(0.5 * tau, trajectory.grid)) as f64;
         let from = trajectory.clone();
         if trajectory.steps >= MOST_STEPS {
             trajectory.capped.get_or_insert(trajectory.time);
             match counted(model, trajectory, &from, tau) {
                 Some(s) => {
                     take(model, trajectory, &s, each);
+                    trajectory.tau = f64::INFINITY;
                 }
                 None => trajectory.tau = 0.5 * tau,
             }
@@ -145,9 +192,10 @@ pub fn advance<D: Dynamics>(model: &D, tolerances: &Tolerances, trajectory: &mut
             trajectory.tau = 0.5 * tau;
             continue;
         };
-        // The split's error, the grid's, and their shares by the counted work.
+        // The split's error and the grid's, each over the tolerance; the eigen-propagation's rounding (relative to ‖ψ‖, a
+        // population's twice that) with the grid's, on the rows.
         let split = differences(model, tolerances, &full.end, &second.end, tau).map(|d| d / ((1 << ORDER) - 1) as f64);
-        let grid = match full.regrid() {
+        let mut grid = match full.regrid() {
             Some((finer, work)) => {
                 trajectory.work += work;
                 let g = (1 << GRID_ORDER) as f64;
@@ -155,22 +203,38 @@ pub fn advance<D: Dynamics>(model: &D, tolerances: &Tolerances, trajectory: &mut
             }
             None => [0.0; 5],
         };
-        let split_work = full.work - full.grid_work + full.assemblies as f64 * model.assembly_work();
-        let share = if full.grid_work > 0.0 { split_work / p / (split_work / p + full.grid_work / GRID_ORDER as f64) } else { 1.0 };
+        grid[4] += 2.0 * [&full, &first, &second].iter().map(|s| s.rounding).fold(0.0, f64::max) / (tolerances.population * tau);
         let total = (0..5).map(|q| split[q] + grid[q]).fold(0.0, f64::max);
         let (e_split, e_grid) = (split.iter().copied().fold(0.0, f64::max), grid.iter().copied().fold(0.0, f64::max));
         if !total.is_finite() {
             trajectory.tau = 0.5 * tau;
             continue;
         }
+        // The least-work (τ*, h*) on the error model read here (`optimum`), and the move toward it.
+        let spacing = trajectory.grid;
+        let a_work = full.work - full.grid_work + full.assemblies as f64 * model.assembly_work();
+        let b_work = full.grid_work * spacing / tau;
+        let (best_tau, best_grid) = optimum(a_work, b_work, e_split / tau.powi(ORDER), e_grid / spacing.powi(GRID_ORDER));
         let accepted = total <= 1.0;
-        let (time_exponent, grid_exponent) = if accepted { (1.0 / (p + 1.0), 1.0 / (GRID_ORDER as f64 + 1.0)) } else { (1.0 / p, 1.0 / GRID_ORDER as f64) };
-        trajectory.tau = tau * (share / e_split).powf(time_exponent);
+        let q = GRID_ORDER as f64;
+        let (time_exponent, grid_exponent) = if accepted { (p / (p + 1.0), q / (q + 1.0)) } else { (1.0, 1.0) };
+        trajectory.tau = tau * (best_tau / tau).powf(time_exponent);
         if full.grid_work > 0.0 {
-            trajectory.grid *= ((1.0 - share) / e_grid).powf(grid_exponent);
+            trajectory.grid = spacing * (best_grid / spacing).powf(grid_exponent);
         }
         if accepted && take(model, trajectory, &first, each) {
             take(model, trajectory, &second, each);
         }
     }
+}
+
+/// The integrator's counted work of one doubled advance of τ through a cluster's generator at a point, the path at the
+/// velocity v (µm/µs), and the generator assemblies it asks: what `advance` adds to `Trajectory::work` and
+/// `Trajectory::assemblies` per accepted doubling, priced without taking it (`step::step_work`) -- the full step, its two
+/// halves and, on a beating generator, the grid's doubling of the full step; two assemblies a step. The model's price
+/// is the assemblies times its `assembly_work`.
+pub fn advance_work(generator: &Generator, waves: &[[f64; 3]], velocity: [f64; 3], tau: f64, grid: f64) -> (f64, u64) {
+    let (full, regrid) = step_work(generator, waves, velocity, tau, grid);
+    let (half, _) = step_work(generator, waves, velocity, 0.5 * tau, grid);
+    (full + 2.0 * half + regrid, 6)
 }
