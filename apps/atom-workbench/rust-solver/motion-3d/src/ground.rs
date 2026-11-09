@@ -565,10 +565,11 @@ impl Block{
 /// its energy's error; and its factorization at the elimination.
 #[derive(Clone,Debug)]
 pub struct Dressing{pub place:usize,pub sigma:Dense,pub vias:Vec<(Channel,f64,f64)>,pub lu:Option<Lu>}
-/// A near carrier's field for the dressing (`Ground::dress_light`): its carrier and its basis's folded couplings W^f_k = Σ_l u_lk V_l^f
-/// (a beam alone its own V_l^f).
+/// A near carrier's field for the dressing (`Ground::dress_light`): its carrier, its basis's folded couplings W^f_k = Σ_l u_lk V_l^f
+/// (a beam alone its own V_l^f), and a field of rank one's beams' remainders off it, V_l^f − γ_l W^f (a unit by its dominant
+/// polarization, `coherence`, holds them; a field of parallel beams within its rounding).
 #[derive(Clone,Debug)]
-pub struct NearUnit{pub carrier:usize,pub couplings:Vec<Dense>}
+pub struct NearUnit{pub carrier:usize,pub couplings:Vec<Dense>,pub remainders:Vec<Dense>}
 
 /// A cluster of ground states' fourth-order fold at a point and a time (`Ground::fourth`, the dense
 /// reference): H̃ (its anti-Hermitian part its jumps' −(i/2) Σ L̃†L̃), every class's jumps L̃ per axis
@@ -608,11 +609,13 @@ pub struct Ground{
     pub folded:Vec<Dense>,
     /// H0 at the focus (32 × 32, rad/us); the frequencies' fields, and per coordinate its shift through the states outside
     /// the model O_i and of the folded components F_i (32 × 32, per unit of it): every field's intensity, in the fields'
-    /// order, then the others' coordinates (`Unit::extra`), field by field (module documentation, # Far components).
+    /// order, then the others' coordinates (`Unit::extra`), field by field (module documentation, # Far components); per
+    /// frequency whose fields the request does not give, the interference its units leave out (`coherence`).
     pub hamiltonian:Dense,
     pub units:Vec<Unit>,
     pub outside:Vec<Dense>,
     pub folds:Vec<Dense>,
+    pub interference:Vec<Interference>,
     /// Every frequency's two components, classified, and the bare ‖L0‖ they were judged against.
     pub components:Vec<Component>,
     pub l0:f64,
@@ -706,12 +709,83 @@ fn van_vleck(energies:&[f64],a:&Dense,b:&Dense,nu:f64,ground:&[usize],excited:&[
     out
 }
 
+/// The interference of the beams of one frequency their units leave out (`coherence`): the beams,
+/// the bound of its shift over the trap (rad/us), whether they are one unit (their dominant
+/// polarization's) or a unit each, whether they are a near carrier (their co-rotating field summed
+/// in its tables, exactly: the units hold only their counter-rotating fold and outside shift), and
+/// the largest of their units' shifts O_u + F_u (rad/us).
+#[derive(Clone,Debug)]
+pub struct Interference{pub beams:Vec<usize>,pub bound:f64,pub coherent:bool,pub near:bool,pub shift:f64}
+impl Interference{
+    /// Its estimate in the ledger: its bound relative to the nearest pole (the elimination's) and to
+    /// the generator's scale -- the eliminated generator's, or the units' shifts where larger (the far
+    /// light's energies: a trap of far light alone) --, as a profile's.
+    pub fn estimate(&self,g:&Ground)->f64{self.bound*(1./g.pole.max(f64::MIN_POSITIVE)).max(1./g.generator_scale.max(self.shift).max(f64::MIN_POSITIVE))}
+}
+
 /// A matrix of the request with its entries at the round-off of its largest set to zero: what a selection rule forbids and the polarizations' rotation leaves at 1e-16 of the allowed is no coupling,
 /// whatever its frequency (`Ground::couples`, the rule's items).
 fn rounded(mut m:Dense)->Dense{
     let floor=round_off(m.entries.iter().map(|z|z.abs()).fold(0.,f64::max));
     for z in m.entries.iter_mut(){if z.abs()<=floor{*z=Complex::ZERO;}}
     m
+}
+/// The default where the request does not give the fields of the beams of one frequency (`Beam::field`, `OutsideForm`): their units
+/// and the interference they leave out, bounded over the trap (every beam at most its peak), whichever of two leaves out less:
+/// - one unit, their dominant polarization: W = Σ_l u_l V_l, u the leading eigenvector of their couplings' Gram matrix ⟨V_l, V_k⟩
+///   (the best rank-one approximation V_l ≈ γ_l W, γ_l = ⟨W, V_l⟩/‖W‖²), the counter-rotating R_W = Σ_l u_l* R_l and the outside shift
+///   O_W = Σ_l |γ_l|² O_l/Σ_l |γ_l|⁴, exact for parallel fields (V_l = γ_l W, R_l = γ_l* R_W, O_l = |γ_l|² O_W). It leaves out the
+///   remainders Δ_l = V_l − γ_l W (Δ′_l = R_l − γ_l* R_W): per folded component 2Γ Σ_l ‖C(W, Δ_l)‖ + Σ_lk ‖C(Δ_l, Δ_k)‖, Γ = Σ_l |γ_l| and
+///   C the van Vleck shift's sesquilinear part, ‖C(A, B)‖ ≤ ½(‖X‖ + ‖Y‖) with X = C(A + B) − C(A) − C(B) and Y = C(A + iB) − C(A) − C(B);
+///   and of the outside shifts the beams' own mismatch Σ_l ‖O_l − |γ_l|² O_W‖ and their cross terms' Σ_{l≠k} ‖O_W‖(|γ_l| ρ_k + ρ_l |γ_k| +
+///   ρ_l ρ_k), ρ_l = ‖Δ_l‖/‖W‖ the remainder's field relative to W's;
+/// - a unit per beam, which leaves out their interference: per pair of beams 2‖C(V_l, V_k)‖ of the folded components and
+///   2 sqrt(‖O_l‖ ‖O_k‖) of the outside shifts (exact were they of one sign).
+fn coherence(beams:&[usize],couplings:&[Dense],counters:&[Dense],outside:&[Dense],folded:[Option<f64>;2],fold:&dyn Fn(&Dense,&Dense,f64)->Dense)->(Vec<(Unit,Vec<Dense>,Vec<Dense>)>,Option<Interference>){
+    let folds_of=|v:&Dense,r:&Dense|{let mut f=Dense::zeros(STATES,STATES);
+        if let Some(nu)=folded[0]{f.add_scaled(Complex::ONE,&fold(v,v,nu));}if let Some(nu)=folded[1]{f.add_scaled(Complex::ONE,&fold(r,r,nu));}f};
+    let unit=|beams:Vec<usize>,weights:Vec<Complex>,norm:f64,focus:f64,combination:Vec<Complex>|Unit{beams,rank:1,weights,combination,norm,pivot:0,origin:[0.;MOST_RANK],focus,extra:vec![]};
+    let single=|l:usize|(unit(vec![l],vec![Complex::ONE],1.,1.,vec![Complex::ONE]),vec![outside[l].clone()],vec![folds_of(&couplings[l],&counters[l])]);
+    if beams.len()==1{return (vec![single(beams[0])],None);}
+    let inner=|a:&Dense,b:&Dense|a.entries.iter().zip(&b.entries).fold(Complex::ZERO,|s,(x,y)|s+x.conj()**y);
+    let combination=|m:&[Dense],w:&dyn Fn(usize)->Complex|{let mut out=Dense::zeros(m[0].rows,m[0].cols);for(i,&l)in beams.iter().enumerate(){out.add_scaled(w(i),&m[l]);}out};
+    // ‖C(A, B)‖'s bound by the polarization identity.
+    let cross=|a:&Dense,b:&Dense,nu:f64|{let mut base=fold(a,a,nu);base.add_scaled(Complex::ONE,&fold(b,b,nu));
+        let(mut sum,mut turned)=(a.clone(),a.clone());sum.add_scaled(Complex::ONE,b);turned.add_scaled(Complex::new(0.,1.),b);
+        let(mut x,mut y)=(fold(&sum,&sum,nu),fold(&turned,&turned,nu));x.add_scaled(-Complex::ONE,&base);y.add_scaled(-Complex::ONE,&base);0.5*(x.spectral_norm()+y.spectral_norm())};
+    let n=beams.len();
+    // A unit per beam: their interference.
+    let mut apart=0.;
+    for i in 0..n{for k in i+1..n{let(l,m)=(beams[i],beams[k]);
+        for(nu,v)in [(folded[0],couplings),(folded[1],counters)]{if let Some(nu)=nu{apart+=2.*cross(&v[l],&v[m],nu);}}
+        apart+=2.*(outside[l].spectral_norm()*outside[m].spectral_norm()).sqrt();
+    }}
+    // The dominant polarization's unit and its remainders.
+    let gram:Vec<Complex>=(0..n*n).map(|x|inner(&couplings[beams[x/n]],&couplings[beams[x%n]])).collect();
+    let together=crate::eigen::eigen(&gram,n).and_then(|e|{
+        let j=(0..n).max_by(|&a,&b|e.values[a].re.total_cmp(&e.values[b].re))?;let u:Vec<Complex>=(0..n).map(|i|e.vectors[i*n+j]).collect();
+        let w=combination(couplings,&|i|u[i]);let ww=inner(&w,&w).re;if !(ww>0.){return None;}
+        let rw=combination(counters,&|i|u[i].conj());
+        let gamma:Vec<Complex>=beams.iter().map(|&l|inner(&w,&couplings[l])*(1./ww)).collect();
+        let quartic:f64=gamma.iter().map(|g|g.norm_sqr().powi(2)).sum();
+        let ow=combination(outside,&|i|Complex::new(gamma[i].norm_sqr()/quartic,0.));
+        let remainder=|m:&[Dense],base:&Dense,g:&dyn Fn(Complex)->Complex|->Vec<Dense>{beams.iter().zip(&gamma).map(|(&l,&c)|{let mut d=m[l].clone();d.add_scaled(-g(c),base);d}).collect()};
+        let(dv,dr)=(remainder(couplings,&w,&|c|c),remainder(counters,&rw,&|c|c.conj()));
+        let total:f64=gamma.iter().map(|g|g.abs()).sum();
+        let mut bound=0.;
+        for(nu,base,d)in [(folded[0],&w,&dv),(folded[1],&rw,&dr)]{
+            let Some(nu)=nu else{continue};
+            for i in 0..n{bound+=2.*total*cross(base,&d[i],nu)+fold(&d[i],&d[i],nu).spectral_norm();for k in i+1..n{bound+=2.*cross(&d[i],&d[k],nu);}}
+        }
+        let rho:Vec<f64>=dv.iter().map(|d|(inner(d,d).re/ww).sqrt()).collect();let size=ow.spectral_norm();
+        for(i,&l)in beams.iter().enumerate(){let mut d=outside[l].clone();d.add_scaled(Complex::new(-gamma[i].norm_sqr(),0.),&ow);bound+=d.spectral_norm();
+            for k in 0..n{if k!=i{bound+=size*(gamma[i].abs()*rho[k]+rho[i]*gamma[k].abs()+rho[i]*rho[k]);}}}
+        let norm=total*total;let focus=gamma.iter().fold(Complex::ZERO,|s,&g|s+g).norm_sqr()/norm;
+        Some(((unit(beams.to_vec(),gamma,norm,focus,u),vec![ow.scaled(Complex::new(norm,0.))],vec![folds_of(&w,&rw).scaled(Complex::new(norm,0.))]),bound))
+    });
+    let(units,bound,coherent)=match together{Some((unit,bound))if bound<=apart=>(vec![unit],bound,true),_=>(beams.iter().map(|&l|single(l)).collect(),apart,false)};
+    let shift=units.iter().map(|(_,o,f)|{let mut x=o[0].clone();x.add_scaled(Complex::ONE,&f[0]);x.spectral_norm()}).fold(0.,f64::max);
+    (units,Some(Interference{beams:beams.to_vec(),bound,coherent,near:folded[0].is_none(),shift}))
 }
 /// The field of the beams of one frequency (module documentation, # Far components) and per coordinate its outside shift O_i and
 /// its folded components' shift F_i (`folded`: the co- and the counter-rotating component's frequency where it folds): a beam alone
@@ -987,9 +1061,11 @@ impl Ground{
             return Err(format!("「{}」的反旋耦合不能按 van Vleck 折叠：频率 {:.1} THz（生成元尺度的 {:.1} 倍，须至少 {FOLD_DISTANCE} 倍），混合 m² = {:.1e}（预算 {BUDGET:.0e}）；3D 运动的近共振载波只取同旋分量，无法保留它",
                 names(&c.beams),c.nu.abs()/TAU/1e6,c.nu.abs()/l0,mixing(c.size,c.nu.abs(),l0,f64::MIN_POSITIVE).powi(2)));}
         // The frequencies' fields (`Unit`), in the order of their first beams, and their coordinates' outside shifts and folds; a field of
-        // rank two or three its outside shift from the request's form (`OutsideForm`) in its beams' fields.
+        // rank two or three its outside shift from the request's form (`OutsideForm`) in its beams' fields. A frequency whose fields the
+        // request does not give takes the default (`coherence`), the interference its units leave out bounded.
         let fold=|a:&Dense,b:&Dense,nu:f64|van_vleck(&energies,a,b,nu,&ground_states,&excited_states);
         let(mut units,mut unit_outside,mut unit_folds,mut extra_outside,mut extra_folds)=(vec![],vec![],vec![],vec![],vec![]);
+        let(mut parts,mut interference):(Vec<(Unit,Vec<Dense>,Vec<Dense>)>,Vec<Interference>)=(vec![],vec![]);
         for beams in &frequencies{
             let(co,counter)=(components.iter().find(|c|!c.counter&&c.beams==*beams).unwrap(),components.iter().find(|c|c.counter&&c.beams==*beams).unwrap());
             let folded=[co.folded.then_some(co.nu),counter.folded.then_some(counter.nu)];
@@ -997,10 +1073,12 @@ impl Ground{
                 let form=request.outside_forms.iter().find(|f|f.frequency_index==request.beams[beams[0]].frequency_index)
                     .ok_or_else(||format!("「{}」偏振不平行，外层态光移需要该频率的光移形式（请重新导出）",names(beams)))?;
                 Ok((beams.iter().map(|&l|request.beams[l].field).collect(),form.matrices.iter().map(|m|Dense::block(m,&all,&all)).collect()))};
-            let(unit,o,f)=field(beams,&couplings,&counters,&outside,folded,&fold,&form)?;
-            let mut o=o.into_iter();unit_outside.extend(o.next());extra_outside.extend(o);
-            let mut f=f.into_iter();unit_folds.extend(f.next());extra_folds.extend(f);units.push(unit);
+            let given=beams.iter().all(|&l|request.beams[l].field.is_some())&&request.outside_forms.iter().any(|f|f.frequency_index==request.beams[beams[0]].frequency_index);
+            if given{parts.push(field(beams,&couplings,&counters,&outside,folded,&fold,&form)?);}else{let(own,item)=coherence(beams,&couplings,&counters,&outside,folded,&fold);parts.extend(own);interference.extend(item);}
         }
+        // In the order of their first beams: a scene of single beams has a unit per beam, in its order.
+        parts.sort_by_key(|p|p.0.beams[0]);
+        for(unit,o,f)in parts{let(mut o,mut f)=(o.into_iter(),f.into_iter());unit_outside.extend(o.next());extra_outside.extend(o);unit_folds.extend(f.next());extra_folds.extend(f);units.push(unit);}
         unit_outside.extend(extra_outside);unit_folds.extend(extra_folds);
         // The near carriers: the near co-rotating components, each one's beams that drive.
         let carriers:Vec<Carrier>=components.iter().filter(|c|!c.counter&&!c.folded&&c.size>0.).map(|c|{
@@ -1011,7 +1089,7 @@ impl Ground{
         let mut excited_groups:Vec<Vec<usize>>=vec![];let mut manifolds:Vec<&str>=vec![];
         for(i,&s)in excited_states.iter().enumerate(){match manifolds.iter().position(|&m|m==labels[s].0){Some(m)=>excited_groups[m].push(i),None=>{manifolds.push(labels[s].0);excited_groups.push(vec![i]);}}}
         let duration=request.times_us.last().copied().unwrap_or(0.).max(0.);
-        let mut ground=Ground{ground_states,excited_states,levels,decay,emission,beams:request.beams.clone(),folded:couplings.clone(),couplings,hamiltonian,units,outside:unit_outside,folds:unit_folds,
+        let mut ground=Ground{ground_states,excited_states,levels,decay,emission,beams:request.beams.clone(),folded:couplings.clone(),couplings,hamiltonian,units,outside:unit_outside,folds:unit_folds,interference,
             components,l0,carriers,duration,mass_kg:request.mass_kg,reach:vec![],excited_items:vec![],charge:0.,items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![],
             explicit_of:vec![],excited_groups,dressed:vec![],vias:vec![],near_units:vec![],dressing:false,floors:vec![],unmixed:vec![],unmixed_error:0.,channel_poles:vec![],trap:Trap::none()};
         (ground.reach,ground.trap)=ground.reach(request);
@@ -1058,16 +1136,16 @@ impl Ground{
     pub fn unit_of(&self,beam:usize)->usize{self.units.iter().position(|u|u.beams.contains(&beam)).unwrap()}
     /// The places of field u's coordinates other than its intensity among the coordinates (`Ground::units`).
     pub fn extras(&self,u:usize)->std::ops::Range<usize>{let start=self.units.len()+self.units[..u].iter().map(|v|v.extra.len()).sum::<usize>();start..start+self.units[u].extra.len()}
-    /// Near carrier d's fields at the charts x as the dressing takes them (`Ground::dress_light`): each one's amplitude √(I N) and its folded
-    /// coupling Σ_k w_k W^f_k along its polarization w (`Unit::polarization`) -- a field of rank one its own W^f.
-    pub fn near_modes(&self,d:usize,x:&[f64])->Vec<(f64,Cow<'_,Dense>)>{
+    /// Near carrier d's fields at the charts x as the dressing takes them (`Ground::dress_light`): each one's amplitude √(I N), its folded
+    /// coupling Σ_k w_k W^f_k along its polarization w (`Unit::polarization`) -- a field of rank one its own W^f -- and its remainders.
+    pub fn near_modes(&self,d:usize,x:&[f64])->Vec<(f64,Cow<'_,Dense>,&[Dense])>{
         let mut out=vec![];
         for(u,near)in self.near_units.iter().enumerate(){
             let Some(near)=near.as_ref().filter(|n|n.carrier==d)else{continue};let unit=&self.units[u];let amplitude=(x[u]*unit.norm).max(0.).sqrt();
-            if unit.rank==1{out.push((amplitude,Cow::Borrowed(&near.couplings[0])));continue;}
+            if unit.rank==1{out.push((amplitude,Cow::Borrowed(&near.couplings[0]),&near.remainders[..]));continue;}
             let w=unit.polarization(&self.chart_of(u,x));
             let mut coupling=Dense::zeros(near.couplings[0].rows,near.couplings[0].cols);for(k,z)in w[..unit.rank].iter().enumerate(){coupling.add_scaled(*z,&near.couplings[k]);}
-            out.push((amplitude,Cow::Owned(coupling)));
+            out.push((amplitude,Cow::Owned(coupling),&near.remainders[..]));
         }
         out
     }
@@ -1196,7 +1274,7 @@ impl Ground{
         let dot=|x:&[Complex],y:&[Complex]|x.iter().zip(y).fold(Complex::ZERO,|s,(a,b)|s+a.conj()**b);
         let norm=|x:&[Complex]|x.iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();
         // Per carrier its units at this node: the amplitude sqrt(s_u N_u), W^f and the remainders.
-        let units:Vec<Vec<(f64,Cow<Dense>)>>=(0..nc).map(|d|self.near_modes(d,intensities)).collect();
+        let units:Vec<Vec<(f64,Cow<Dense>,&[Dense])>>=(0..nc).map(|d|self.near_modes(d,intensities)).collect();
         // Per carrier d and ground state b: its units' fields there, their images under (K − E_b − δ_d)⁻¹ and
         // b's admixture under d.
         type Fields=Vec<(f64,Vec<Complex>,Vec<Vec<Complex>>)>;type Images=Vec<(Vec<Complex>,Vec<Vec<Complex>>)>;
@@ -1207,7 +1285,7 @@ impl Ground{
             if !holds[self.cluster[b]]&&!(0..nc).any(|c|c!=d&&cl.states.iter().any(|&b2|self.couples(c,b2))){continue;}
             let lu=denominator(decoupled.get(b).and_then(|x|x.as_ref()).unwrap_or(k),-energies[b]-self.carriers[d].detuning)?;
             let solved=|v:&[Complex]|{let mut g=v.to_vec();lu.solve(&mut g);g};
-            let fields:Fields=units[d].iter().map(|(a,x)|(*a,column(x,b),vec![])).collect();
+            let fields:Fields=units[d].iter().map(|(a,x,rest)|(*a,column(x,b),rest.iter().map(|r|column(r,b)).collect())).collect();
             let images:Images=fields.iter().map(|(_,v,rest)|(solved(v),rest.iter().map(|r|solved(r)).collect())).collect();
             let admixture=fields.iter().zip(&images).map(|((a,_,_),(g,_))|a*a*norm(g).powi(2)).sum();
             parts[d][b]=Some((fields,images,admixture));
@@ -1277,7 +1355,7 @@ impl Ground{
                     for &via in &self.vias[c][b]{
                         let(d,a)=(via.carrier,via.state);let inside=self.cluster[a]==k;
                         let denominator=1./(if inside{own}else{z}-dressed[a]-self.carriers[d].detuning);
-                        for(amp,x)in &units[d]{let w=column(x,a);let scale=amp*amp*denominator;for p in 0..ne{for q in 0..ne{sigma[(p,q)]+=w[p]*w[q].conj()*scale;}}}
+                        for(amp,x,_)in &units[d]{let w=column(x,a);let scale=amp*amp*denominator;for p in 0..ne{for q in 0..ne{sigma[(p,q)]+=w[p]*w[q].conj()*scale;}}}
                         vias.push((via,denominator,denominator*denominator*(doubt[a]+if inside{(z-own).abs()}else{0.})));
                     }
                     mode.dressed.push(Dressing{place:i,sigma,vias,lu:None});
@@ -1332,7 +1410,7 @@ impl Ground{
                     let projection=|w:&[Complex]|responses.iter().map(|r|dot(w,r)).sum::<f64>();
                     let weight=projector[m][d.place*n0+d.place].sqrt();
                     for &(via,denominator,doubt)in &d.vias{
-                        let fields:Vec<(f64,Vec<Complex>,Vec<Vec<Complex>>)>=self.near_modes(via.carrier,intensities).iter().map(|(a,x)|(*a,column(x,via.state),vec![])).collect();
+                        let fields:Vec<(f64,Vec<Complex>,Vec<Vec<Complex>>)>=self.near_modes(via.carrier,intensities).iter().map(|(a,x,rest)|(*a,column(x,via.state),rest.iter().map(|r|column(r,via.state)).collect())).collect();
                         for(i,(amp,w,rest))in fields.iter().enumerate(){
                             let(g,p)=(solved(w),projection(w));
                             // Σ_b's own slope, −Σ D_a² w w†: the term's slope beyond G_b² V^f.
@@ -1941,7 +2019,9 @@ impl Ground{
         self.vias=(0..nc).map(|c|(0..ng).map(|b|{let x=Channel{carrier:c,state:b};
             channels.iter().copied().filter(|&y|self.couples(c,b)&&folded_raman(x,y)==Some(true)).collect()}).collect()).collect();
         self.near_units=self.units.iter().map(|u|{let c=self.carriers.iter().position(|c|c.beams.contains(&u.beams[0]))?;
-            Some(NearUnit{carrier:c,couplings:(0..u.rank).map(|k|{let mut w=Dense::zeros(ne,ng);for(j,&l)in u.beams.iter().enumerate(){w.add_scaled(u.combination[j*u.rank+k],&self.folded[l]);}w}).collect()})}).collect();
+            let couplings:Vec<Dense>=(0..u.rank).map(|k|{let mut w=Dense::zeros(ne,ng);for(j,&l)in u.beams.iter().enumerate(){w.add_scaled(u.combination[j*u.rank+k],&self.folded[l]);}w}).collect();
+            let remainders=if u.rank==1&&u.beams.len()>1{u.beams.iter().zip(&u.weights).map(|(&l,&g)|{let mut r=self.folded[l].clone();r.add_scaled(-g,&couplings[0]);r}).collect()}else{vec![]};
+            Some(NearUnit{carrier:c,couplings,remainders})}).collect();
         self.items=items;self.cut=cut;self.clusters=clusters;self.cluster=cluster;self.excited_items=excited;self.dressed=dressed;
         self.floors=self.clusters.iter().map(|cl|0.5*hermitian_eigenvalues(&self.cluster_hamiltonian(&self.decay,cl)).into_iter().fold(f64::INFINITY,f64::min).max(0.)).collect();
         self.dressing=true;self.unmixed_blocks()?;self.channel_poles=self.dressed_poles()?;

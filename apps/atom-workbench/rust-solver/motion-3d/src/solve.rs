@@ -584,6 +584,15 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
     let names=|beams:&[usize]|beams.iter().map(|&l|request.beams[l].name.as_str()).collect::<Vec<_>>().join(" + ");
     for &(u,error,_)in &model.profiles{ledger.add(&format!("「{}」的光强分布",names(&g.units[u].beams)),error,"取焦点处的光强".into());}
     for &u in &model.focused[1..]{ledger.add(&format!("「{}」的光强分布",names(&g.units[u].beams)),0.,"按位置插值（强度维度）".into());}
+    // The interference the units of beams of one frequency leave out where the request gives no fields (ground.rs `coherence`).
+    for x in &g.interference{
+        let action=match(x.near,x.coherent){
+            (true,true)=>"近共振光场按相干叠加精确计入；远失谐部分（反旋项、32 态以外能级的光移）按主偏振合成，偏离主偏振的剩余分量略去",
+            (true,false)=>"近共振光场按相干叠加精确计入；远失谐部分（反旋项、32 态以外能级的光移）按各光束光强相加，其偏振干涉略去",
+            (false,true)=>"同频光束按主偏振合成一个光场（驻波精确）；偏离主偏振的剩余分量略去",
+            (false,false)=>"同频而偏振不同：远失谐光移按各光束光强相加，干涉项（偏振光晶格）略去"};
+        ledger.add(&format!("「{}」的干涉",names(&x.beams)),x.estimate(g),action.into());
+    }
     ledger.add("聚焦光的光强插值表",model.table_error,match(model.table_limit,model.table_stalled){
         (Some(n),true)=>format!("三次插值；网格加密不再减小误差，止于每维 {n} 个节点"),(Some(n),false)=>format!("三次插值；网格细化到工作量上限（每维 {n} 个节点）为止"),
         (None,_)=>format!("三次插值（每维 {} 个节点：再加密的代价超过其误差所省的轨迹）",model.tables.nodes)});
@@ -1152,7 +1161,7 @@ impl Candidate{
     /// The estimates no candidate of the fold changes: the far components' fold, the same in
     /// every model of the request. (The others move with the fold: a folded drive's line, narrow across the intensities, takes the tables more nodes
     /// -- RETRO's every drive folded holds 0.55 at 33 nodes and 1.4e-3 at 513, the rung that keeps its drive 1.4e-3 at 65.)
-    fn fixed(&self)->f64{self.model.ground.fold_estimates().0}
+    fn fixed(&self)->f64{let g=&self.model.ground;g.fold_estimates().0+g.interference.iter().map(|x|x.estimate(g)).sum::<f64>()}
     /// Its clusters: each one's ground states and explicit excited states.
     fn clusters(&self)->Vec<(Vec<usize>,Vec<usize>)>{self.model.ground.clusters.iter().map(|c|(c.states.clone(),c.excited.clone())).collect()}
     /// Which of its drives and couplings of the excited states fold.
