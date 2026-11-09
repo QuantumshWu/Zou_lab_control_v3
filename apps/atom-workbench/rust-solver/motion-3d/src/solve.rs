@@ -78,7 +78,10 @@
 //! pair's; at 60 uK and above the rule keeps it. R5038's D2 F' = 0 fold, S = 0.34 at its 35 uK, is 1.3 at 70 uK: past Stewart's
 //! bound where the atoms go.) A pilot of few atoms reads a T only so far: the run's own T past the reach books the share of a
 //! thermal ensemble beyond it, up to the trap's depth (past it the loss's), on its totals beside the fold's charge (`beyond_reach`),
-//! their folds unjudged. The model's profiles and first-order tables keep the request's reach, their errors measured along the run.
+//! their folds unjudged. The model's profiles and first-order tables take the same reach (model.rs): one domain for every judgement
+//! of the model. (PGC1D_BIAS_LIN's model with its tables at 80 uK, the next explicit rung and the line's model agree at 10 ms on 512
+//! shared trajectories at an eighth of the run's step, paired z ≤ 0.4: the 26-37 % a reach branch read there was its step's resonance,
+//! 88 steps per 50 us, where the line's model reads 20-22 % too.)
 //!
 //! # Time step
 //! The trap's harmonic part is moved exactly (engine.rs); what the step must resolve is the light's
