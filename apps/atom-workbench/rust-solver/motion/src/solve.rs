@@ -897,4 +897,34 @@ mod tests {
         assert_eq!(d.probabilities[1], d.probabilities[0]);
         assert!((d.probabilities[0].iter().sum::<f64>() - 1.).abs() < 1e-15);
     }
+
+    /// The initial ensembles of the conservative reference traps (refs/scenes R1, the app's own requests: a lone tweezer, a
+    /// standing wave, crossed beams of one frequency, a σ⁺ tweezer) in the model's prepared wells under the model's proven
+    /// envelopes: 2¹² draws each -- every one within its envelope (the draw's debug check) -- read the exact moments
+    /// (ħ/m)⟨κ_a²⟩ = Σ_b p_b η_b k_BT (S_b²)_aa per lab axis within four of their standard errors, η from the quadrature on
+    /// a pilot's budget of evaluations (2¹⁶), its last two levels within a tenth of the draws' relative error.
+    #[test]
+    fn the_reference_traps_draw_their_exact_moments() {
+        for name in ["R1_TWEEZER", "R1_RETRO", "R1_CROSSED", "R1_SIGMA_P"] {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
+            let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            let request = Request::from_native(&line).unwrap();
+            let light = Light::new(&request);
+            let model = Model::new(&request, &light, &[]).unwrap();
+            let initial = components(&request).unwrap();
+            let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, &light, alone(s)).unwrap()).collect();
+            let hm = hbar_over_mass(request.mass_kg);
+            let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm).unwrap();
+            let kinetic = ensemble.kinetic(1 << 16);
+            assert!(kinetic.iter().all(|k| k.0 > 0. && k.0 <= 1. && k.1 < 1.5e-3 * k.0), "{name}: η {kinetic:?}");
+            let exact = ensemble.momentum(&kinetic.iter().map(|k| k.0).collect::<Vec<_>>());
+            let draws: Vec<V3> = (0..1 << 12).map(|i| ensemble.draw(SEED, i).kappa.map(|k| hm * k * k)).collect();
+            let n = draws.len() as f64;
+            for a in 0..3 {
+                let mean = draws.iter().map(|d| d[a]).sum::<f64>() / n;
+                let se = (draws.iter().map(|d| (d[a] - mean).powi(2)).sum::<f64>() / (n - 1.) / n).sqrt();
+                assert!((mean - exact[a]).abs() <= 4. * se, "{name} axis {a}: {mean} against {} ± {se}", exact[a]);
+            }
+        }
+    }
 }
