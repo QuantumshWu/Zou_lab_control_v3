@@ -306,8 +306,22 @@ fn facts(row: &Value) -> Value {
         [values.iter().copied().fold(f64::INFINITY,f64::min),values.iter().copied().fold(f64::NEG_INFINITY,f64::max)]);
     let values_bounds=parse_values(row["value_text"].as_str().unwrap()).ok().map(|values|
         [values.iter().copied().fold(f64::INFINITY,f64::min),values.iter().copied().fold(f64::NEG_INFINITY,f64::max)]);
+    // What plays, as its ends and count: the axis's own bank, and each linked parameter's
+    // formula of it -- or why that formula cannot be evaluated (an editor's preview line).
+    let ends = |values: &[f64]| json!({"first":values.first(),"last":values.last(),"count":values.len()});
+    let played = active.as_ref().ok().filter(|values| !values.is_empty());
+    let links: Vec<Value> = match played {
+        Some(values) if row["link_enabled"] == true => row["links"].as_array().into_iter().flatten().map(|link| {
+            match formula_values(link["formula"].as_str().unwrap(), values) {
+                Ok(linked) => { let mut fact = ends(&linked); fact["port"] = link["port"].clone(); fact["problem"] = json!(""); fact },
+                Err(error) => json!({"port":link["port"],"first":null,"last":null,"count":0,"problem":error}),
+            }
+        }).collect(),
+        _ => Vec::new(),
+    };
     json!({"port":row["port"],"range_start":start,"range_stop":stop,"range_count":count,"range_uniform":uniform,
-        "mode":row["mode"],"value_text":row["value_text"],"active_bounds":bounds,"values_bounds":values_bounds,"problem":active.err().unwrap_or_default()})
+        "mode":row["mode"],"value_text":row["value_text"],"active_bounds":bounds,"values_bounds":values_bounds,
+        "played":played.map(|values| ends(values)),"links":links,"problem":active.err().unwrap_or_default()})
 }
 
 /// Ordering/binding may inspect a filtered view whose linked parent is outside

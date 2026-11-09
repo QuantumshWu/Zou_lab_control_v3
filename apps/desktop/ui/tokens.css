@@ -74,6 +74,11 @@
   --axis-group-0: #5A4A8A;     /* AXIS_GROUP_COLORS[0] (repeat) */
   --axis-group-1: #8A4B1F;     /* AXIS_GROUP_COLORS[1] (point) */
   --axis-group-2: #004578;     /* AXIS_GROUP_COLORS[2] (cell) */
+  /* A scan axis's linked group, by its place among the plan's groups: its band and "x" badge. */
+  --link-group-0: var(--accent-strong);
+  --link-group-1: var(--config-green-dark);
+  --link-group-2: var(--api-violet-dark);
+  --link-group-3: var(--orange-dark);
 
   /* ---- derived faces (fluent.py, computed with QColor/_mixed) ----------- */
   --button-hover: #BDD6EF;          /* _mixed(BUTTON_TINT, ACCENT, 0.25) */

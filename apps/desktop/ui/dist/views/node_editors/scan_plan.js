@@ -85,6 +85,15 @@ function rangeSpin(label, step, bounds, commit, decimal = true) {
     });
     return spin;
 }
+/** A played number as the operator would write it: no binary noise (0.30000000000000004 is 0.3). */
+const spoken = (value) => value === null ? "" : String(Number(value.toPrecision(12)));
+/** What plays, in two words: "first … last unit" (one point: its value) and "n points". */
+function endsText(ends, unit) {
+    const suffix = unit && unit !== "1" ? ` ${unit}` : "";
+    return ends.count === 1 ? [`${spoken(ends.first)}${suffix}`, "1 point"] : [`${spoken(ends.first)} … ${spoken(ends.last)}${suffix}`, `${ends.count} points`];
+}
+/** How many colours link groups take in turn (--link-group-0 … in tokens.css). */
+const LINK_COLOURS = 4;
 /** The Values list's tooltip: what it is. */
 const LIST_TIP = "Scan these values in the written order";
 class AxisRowView {
@@ -113,6 +122,8 @@ class AxisRowView {
     linkedSignature = "";
     linkedCells = [];
     linkedUpdates = [];
+    /** The master's "x": what its linked formulas call this axis, its tooltip what x plays. */
+    badge = element("span", "link-badge", "x");
     /** A list nobody's ends describe, kept until a spin is edited. */
     customValues = null;
     constructor(owner, manual, entry) {
@@ -158,10 +169,20 @@ class AxisRowView {
     }
     get cells() {
         const signature = JSON.stringify([this.entry.link_enabled, (this.entry.links ?? []).map(link => [link.port, link.unit, this.owner.portTree(link.port), this.owner.ports.find(port => port.port === link.port)?.units])]);
+        let cells;
         if (signature === this.linkedSignature && this.linkedCells.length) {
             this.linkedUpdates.forEach(update => update());
-            return [this.kind, this.axis, this.values, this.unit, this.mode.root, this.linkedCells[0], this.remove, this.notes, ...this.linkedCells.slice(1)];
+            cells = [this.kind, this.axis, this.values, this.unit, this.mode.root, this.linkedCells[0], this.remove, this.notes, ...this.linkedCells.slice(1)];
         }
+        else
+            cells = this.linkedRows(signature);
+        this.paintGroup(cells);
+        return cells;
+    }
+    /** The Link switch and, while it is on, one row per linked parameter, which reads as an
+     * equation: "↳ knob = f(x) [formula] unit", under it what that formula plays (or why it
+     * cannot be evaluated), from the native preview's facts. */
+    linkedRows(signature) {
         this.linkedSignature = signature;
         this.linkedUpdates = [];
         this.linkControls = [];
@@ -176,25 +197,25 @@ class AxisRowView {
         this.linkControls.push(toggle);
         if (this.entry.link_enabled)
             for (const [index, link] of (this.entry.links ?? []).entries()) {
-                const marker = element("span", "linked-marker");
+                // The group's band, beside this row and its preview line.
+                const lead = element("span", "linked-lead");
+                const param = element("div", "linked-param");
                 const picker = new TreeCombo(value => { link.port = value; const port = this.owner.ports.find(p => p.port === value); if (port)
                     link.unit = firstSweep(port).unit; this.owner.emitPlan(); });
                 picker.root.classList.add("linked-port");
                 picker.setTree(this.owner.portTree(link.port), link.port);
+                param.append(element("span", "linked-arrow", "↳"), picker.root);
                 // A linked parameter is not scanned: it follows this axis by a formula of x.
                 const holder = element("div", "linked-values");
+                const chip = element("span", "link-chip", "f(x)");
                 const input = element("input");
                 input.type = "text";
                 input.spellcheck = false;
-                const update = () => { if (document.activeElement !== input)
-                    input.value = link.formula ?? ""; };
-                update();
-                this.linkedUpdates.push(update);
                 input.setAttribute("aria-label", "Linked formula");
                 input.placeholder = "x + 6.37";
                 input.title = "x is this axis's number; write numeric constants directly";
                 input.addEventListener("change", () => { link.formula = input.value; link.mode = "formula"; this.owner.emitPlan(); });
-                holder.append(input);
+                holder.append(element("span", "linked-eq", "="), chip, input);
                 this.linkControls.push(input);
                 const unit = new TreeCombo(value => { link.unit = value; this.owner.emitPlan(); });
                 unit.root.classList.add("linked-unit");
@@ -207,18 +228,55 @@ class AxisRowView {
                     this.entry.link_enabled = false; this.owner.emitPlan(); }, "destructive glyph square linked-remove");
                 remove.title = "Remove linked parameter";
                 remove.setAttribute("aria-label", remove.title);
-                const nodes = [marker, picker.root, holder, unit.root, add, remove];
-                nodes.forEach(node => node.classList.add("linked-row-cell"));
-                if (index === (this.entry.links?.length ?? 0) - 1)
-                    marker.classList.add("last");
+                const preview = element("p", "note linked-preview");
+                const update = () => {
+                    if (document.activeElement !== input)
+                        input.value = link.formula ?? "";
+                    chip.title = `x is ${this.axisLabel()}`;
+                    const fact = this.owner.axisFacts(this.entry.port)?.links?.[index];
+                    const known = fact?.port === link.port ? fact : undefined;
+                    const [span, count] = known ? endsText(known, link.unit) : ["", ""];
+                    setText(preview, known ? known.problem || `${span} (${count})` : "");
+                    preview.classList.toggle("problem", Boolean(known?.problem));
+                };
+                update();
+                this.linkedUpdates.push(update);
                 this.linkControls.push(picker.root, unit.root, add, remove);
-                cells.push(...nodes);
+                cells.push(lead, param, holder, unit.root, add, remove, preview);
             }
         for (const control of this.linkControls)
             if ("disabled" in control)
                 control.disabled = this.linkLocked;
         this.linkedCells = [toggle, ...cells.slice(8)];
         return cells;
+    }
+    /** The knob as its picker names it (a manual axis: its name). */
+    axisLabel() {
+        const port = this.port();
+        if (port)
+            return port.port.startsWith(this.owner.families.device) ? port.leaf : port.label;
+        if (this.manual)
+            return this.entry.port.slice(this.owner.families.manual.length);
+        return this.owner.unofferedLeaf(this.entry.port) ?? this.entry.port;
+    }
+    /** A linked group in its colour (by its place among the plan's groups): a band down the
+     * left of the axis and its linked rows, the axis's "x" badge saying what x plays. */
+    paintGroup(cells) {
+        const group = this.entry.link_enabled && this.entry.links?.length ? this.owner.linkGroup(this) : -1;
+        this.kind.classList.toggle("link-master", group >= 0);
+        this.notes.classList.toggle("in-link", group >= 0);
+        if (group < 0) {
+            this.badge.remove();
+            for (const cell of cells)
+                cell.style.removeProperty("--link");
+            return;
+        }
+        for (const cell of cells)
+            cell.style.setProperty("--link", `var(--link-group-${group % LINK_COLOURS})`);
+        if (this.badge.parentElement !== this.kind)
+            this.kind.append(this.badge);
+        const played = this.owner.axisFacts(this.entry.port)?.played;
+        this.badge.title = `x = ${this.axisLabel()}${played ? ` (${endsText(played, this.entry.unit).join(", ")})` : ""}`;
     }
     addLink() {
         const port = this.owner.unusedPort();
@@ -481,6 +539,9 @@ export class ScanPlanEditor {
         return choiceTree(entries, current, "ports");
     }
     axisFacts(port) { return this.facts?.axis_facts.find(axis => axis.port === port); }
+    unofferedLeaf(port) { return this.facts?.unoffered[port]?.leaf; }
+    /** A linked axis's place among the plan's linked axes: its group's colour. */
+    linkGroup(view) { return this.rows.filter(row => row.entry.link_enabled && row.entry.links?.length).indexOf(view); }
     /** The rows brought to the plan, kept wherever they can be: a row of the
      * right kind at its position is re-pointed, not rebuilt. */
     reconcileRows(axes) {

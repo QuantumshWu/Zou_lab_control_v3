@@ -57,6 +57,19 @@ fn linked_formulas_follow_their_axis_and_move_the_whole_group_outside() {
     assert_eq!(axes[1]["values"],json!([7.5,8.5,9.5]));
     assert_eq!(axes[2]["values"],json!([118.0,116.0,114.0]));
     assert_eq!(axes[2]["coordinate_of"],"pulse:param:A");
+    // The editor's facts say what each plays, its ends and count, without the whole bank.
+    let facts = &result["axis_facts"][0];
+    assert_eq!(facts["played"], json!({"first":1.0,"last":3.0,"count":3}));
+    assert_eq!(facts["links"], json!([{"port":"api:B","first":7.5,"last":9.5,"count":3,"problem":""},
+        {"port":"device:rf:frequency","first":118.0,"last":114.0,"count":3,"problem":""}]));
+    assert_eq!(result["axis_facts"][1]["links"], json!([]));
+    let broken = json!({"axes":[{"port":"pulse:param:A","values":[1,2],"link_enabled":true,"links":[
+        {"port":"api:B","mode":"formula","formula":"x +"},{"port":"api:C","mode":"formula","formula":"1 / (x - 1)"}]}]});
+    let preview = compile(broken,"preview").unwrap();
+    let links = preview["axis_facts"][0]["links"].as_array().unwrap();
+    assert!(links[0]["problem"].as_str().unwrap().contains("formula accepts"), "{}", links[0]);
+    assert!(links[1]["problem"].as_str().unwrap().contains("division by zero"), "{}", links[1]);
+    assert_eq!(links[1]["first"], Value::Null);
     for mode in ["range", "values"] {
         let old = json!({"axes":[{"port":"pulse:param:A","values":[1,2,3],"link_enabled":true,
             "links":[{"port":"api:B","values":[10,20],"mode":mode,"value_text":"3,2,1"}]}]});

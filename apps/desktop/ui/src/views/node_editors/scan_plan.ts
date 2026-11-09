@@ -53,7 +53,12 @@ type Facts = EditorFacts & {
 };
 /** One axis as the plan document writes it: both input banks, and which one plays. */
 type Range = { start: number; stop: number; count: number };
-type AxisFacts = { port: string; range_uniform: boolean; mode: string; value_text: string; active_bounds: [number, number] | null; values_bounds: [number, number] | null };
+/** What plays, as its ends and count (the native preview's facts, never the whole bank). */
+type Ends = { first: number | null; last: number | null; count: number };
+/** A linked parameter's formula evaluated on its axis, or why it cannot be. */
+type LinkFacts = Ends & { port: string; problem: string };
+type AxisFacts = { port: string; range_uniform: boolean; mode: string; value_text: string; active_bounds: [number, number] | null; values_bounds: [number, number] | null;
+  played?: Ends | null; links?: LinkFacts[] };
 type Linked = { port: string; values: number[]; unit: string; mode: "formula"; value_text: string; formula: string };
 type Axis = { port: string; values: number[]; range?: Range; coordinate_of?: string | null; unit: string; mode: "range" | "values"; value_text: string; link_enabled?: boolean; links?: Linked[] };
 type AxisMemory = { entry: Axis; steps: [number | null, number | null, number | null]; nativeUnit: string | null; integer: boolean | null };
@@ -126,6 +131,16 @@ function rangeSpin(label: string, step: () => number, bounds: () => [number | nu
   return spin;
 }
 
+/** A played number as the operator would write it: no binary noise (0.30000000000000004 is 0.3). */
+const spoken = (value: number | null): string => value === null ? "" : String(Number(value.toPrecision(12)));
+/** What plays, in two words: "first … last unit" (one point: its value) and "n points". */
+function endsText(ends: Ends, unit: string): [span: string, count: string] {
+  const suffix = unit && unit !== "1" ? ` ${unit}` : "";
+  return ends.count === 1 ? [`${spoken(ends.first)}${suffix}`, "1 point"] : [`${spoken(ends.first)} … ${spoken(ends.last)}${suffix}`, `${ends.count} points`];
+}
+/** How many colours link groups take in turn (--link-group-0 … in tokens.css). */
+const LINK_COLOURS = 4;
+
 /** The Values list's tooltip: what it is. */
 const LIST_TIP = "Scan these values in the written order";
 
@@ -153,6 +168,8 @@ class AxisRowView {
   private linkedSignature = "";
   private linkedCells: HTMLElement[] = [];
   private linkedUpdates: (() => void)[] = [];
+  /** The master's "x": what its linked formulas call this axis, its tooltip what x plays. */
+  private badge = element("span", "link-badge", "x");
   /** A list nobody's ends describe, kept until a spin is edited. */
   private customValues: number[] | null = null;
 
@@ -198,10 +215,19 @@ class AxisRowView {
 
   get cells(): HTMLElement[] {
     const signature = JSON.stringify([this.entry.link_enabled, (this.entry.links ?? []).map(link => [link.port, link.unit, this.owner.portTree(link.port), this.owner.ports.find(port => port.port === link.port)?.units])]);
+    let cells: HTMLElement[];
     if (signature === this.linkedSignature && this.linkedCells.length) {
       this.linkedUpdates.forEach(update => update());
-      return [this.kind, this.axis, this.values, this.unit, this.mode.root, this.linkedCells[0]!, this.remove, this.notes, ...this.linkedCells.slice(1)];
-    }
+      cells = [this.kind, this.axis, this.values, this.unit, this.mode.root, this.linkedCells[0]!, this.remove, this.notes, ...this.linkedCells.slice(1)];
+    } else cells = this.linkedRows(signature);
+    this.paintGroup(cells);
+    return cells;
+  }
+
+  /** The Link switch and, while it is on, one row per linked parameter, which reads as an
+   * equation: "↳ knob = f(x) [formula] unit", under it what that formula plays (or why it
+   * cannot be evaluated), from the native preview's facts. */
+  private linkedRows(signature: string): HTMLElement[] {
     this.linkedSignature = signature;
     this.linkedUpdates = [];
     this.linkControls = [];
@@ -210,32 +236,64 @@ class AxisRowView {
     const cells = [this.kind, this.axis, this.values, this.unit, this.mode.root, toggle, this.remove, this.notes];
     this.linkControls.push(toggle);
     if (this.entry.link_enabled) for (const [index, link] of (this.entry.links ?? []).entries()) {
-      const marker = element("span", "linked-marker");
+      // The group's band, beside this row and its preview line.
+      const lead = element("span", "linked-lead");
+      const param = element("div", "linked-param");
       const picker = new TreeCombo(value => { link.port = value; const port = this.owner.ports.find(p => p.port === value); if (port) link.unit = firstSweep(port).unit; this.owner.emitPlan(); });
       picker.root.classList.add("linked-port"); picker.setTree(this.owner.portTree(link.port), link.port);
+      param.append(element("span", "linked-arrow", "↳"), picker.root);
       // A linked parameter is not scanned: it follows this axis by a formula of x.
       const holder = element("div", "linked-values");
+      const chip = element("span", "link-chip", "f(x)");
       const input = element("input"); input.type = "text"; input.spellcheck = false;
-      const update = (): void => { if (document.activeElement !== input) input.value = link.formula ?? ""; };
-      update(); this.linkedUpdates.push(update);
       input.setAttribute("aria-label", "Linked formula");
       input.placeholder = "x + 6.37";
       input.title = "x is this axis's number; write numeric constants directly";
       input.addEventListener("change", () => { link.formula = input.value; link.mode = "formula"; this.owner.emitPlan(); });
-      holder.append(input); this.linkControls.push(input);
+      holder.append(element("span", "linked-eq", "="), chip, input); this.linkControls.push(input);
       const unit = new TreeCombo(value => { link.unit = value; this.owner.emitPlan(); }); unit.root.classList.add("linked-unit");
       const port = this.owner.ports.find(p => p.port === link.port);
       unit.setTree(unitTree((port?.units.length ? port.units : [[link.unit, 0] as const]).map(([symbol]) => ({ value: symbol, label: symbol || "1", group: port?.families[symbol] })), link.unit), link.unit);
       const add = button("+", () => this.addLink(), "quiet glyph square linked-add"); add.title = "Add linked parameter"; add.setAttribute("aria-label", add.title);
       const remove = button("×", () => { this.entry.links!.splice(index, 1); if (!this.entry.links!.length) this.entry.link_enabled = false; this.owner.emitPlan(); }, "destructive glyph square linked-remove"); remove.title = "Remove linked parameter"; remove.setAttribute("aria-label", remove.title);
-      const nodes = [marker, picker.root, holder, unit.root, add, remove];
-      nodes.forEach(node => node.classList.add("linked-row-cell")); if (index === (this.entry.links?.length ?? 0)-1) marker.classList.add("last");
+      const preview = element("p", "note linked-preview");
+      const update = (): void => {
+        if (document.activeElement !== input) input.value = link.formula ?? "";
+        chip.title = `x is ${this.axisLabel()}`;
+        const fact = this.owner.axisFacts(this.entry.port)?.links?.[index];
+        const known = fact?.port === link.port ? fact : undefined;
+        const [span, count] = known ? endsText(known, link.unit) : ["", ""];
+        setText(preview, known ? known.problem || `${span} (${count})` : "");
+        preview.classList.toggle("problem", Boolean(known?.problem));
+      };
+      update(); this.linkedUpdates.push(update);
       this.linkControls.push(picker.root, unit.root, add, remove);
-      cells.push(...nodes);
+      cells.push(lead, param, holder, unit.root, add, remove, preview);
     }
     for (const control of this.linkControls) if ("disabled" in control) (control as HTMLInputElement).disabled = this.linkLocked;
     this.linkedCells = [toggle, ...cells.slice(8)];
     return cells;
+  }
+
+  /** The knob as its picker names it (a manual axis: its name). */
+  private axisLabel(): string {
+    const port = this.port();
+    if (port) return port.port.startsWith(this.owner.families.device) ? port.leaf : port.label;
+    if (this.manual) return this.entry.port.slice(this.owner.families.manual.length);
+    return this.owner.unofferedLeaf(this.entry.port) ?? this.entry.port;
+  }
+
+  /** A linked group in its colour (by its place among the plan's groups): a band down the
+   * left of the axis and its linked rows, the axis's "x" badge saying what x plays. */
+  private paintGroup(cells: HTMLElement[]): void {
+    const group = this.entry.link_enabled && this.entry.links?.length ? this.owner.linkGroup(this) : -1;
+    this.kind.classList.toggle("link-master", group >= 0);
+    this.notes.classList.toggle("in-link", group >= 0);
+    if (group < 0) { this.badge.remove(); for (const cell of cells) cell.style.removeProperty("--link"); return; }
+    for (const cell of cells) cell.style.setProperty("--link", `var(--link-group-${group % LINK_COLOURS})`);
+    if (this.badge.parentElement !== this.kind) this.kind.append(this.badge);
+    const played = this.owner.axisFacts(this.entry.port)?.played;
+    this.badge.title = `x = ${this.axisLabel()}${played ? ` (${endsText(played, this.entry.unit).join(", ")})` : ""}`;
   }
 
   private addLink(): void {
@@ -481,6 +539,9 @@ export class ScanPlanEditor implements NodeEditor {
   }
 
   axisFacts(port: string): AxisFacts | undefined { return this.facts?.axis_facts.find(axis => axis.port === port); }
+  unofferedLeaf(port: string): string | undefined { return this.facts?.unoffered[port]?.leaf; }
+  /** A linked axis's place among the plan's linked axes: its group's colour. */
+  linkGroup(view: AxisRowView): number { return this.rows.filter(row => row.entry.link_enabled && row.entry.links?.length).indexOf(view); }
 
   /** The rows brought to the plan, kept wherever they can be: a row of the
    * right kind at its position is re-pointed, not rebuilt. */
