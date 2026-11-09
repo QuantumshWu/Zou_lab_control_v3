@@ -147,9 +147,10 @@
 //!   of the deposit itself cancels by the motion's time reversal (the cross term is odd in v) and misses it;
 //! The loss is read after the product, by its own check (check.rs): the step's local errors on the run's own trajectories, weighted by
 //! the loss's dual -- the chance an atom's energy then leaves it lost at each later output --; where the bias they make lies beyond
-//! the loss's tolerance by its errors, the run again at a finer step, until the check verifies it. Where it cannot -- its reads do not
-//! settle the bias, a finer step made no progress, or the work bound stops it -- the step stands unverified, its bias booked at its
-//! interval's far end and the flag saying why (`run_at`). A sensitivity of the loss read before the run on the
+//! the loss's tolerance by its errors, the run again at a finer step, until the check verifies it. Each output's record books the
+//! bias's readable part, its interval's distance from none. Where the check cannot verify the step -- its reads do not settle the
+//! bias, a finer step made no progress, or the work bound stops it -- the step stands unverified, the ledger's note saying why and
+//! where (`run_at`). A sensitivity of the loss read before the run on the
 //! pilot's escapes (L ln(1/L) of the motion's energy error) missed the retro-reflected tweezer's hot tail, whose jump rate's error is ten
 //! times the bulk's: its loss −0.066 at the line's step, three times its tolerance.
 //! Every criterion is a read (read.rs `Read`): a doubling's estimate of the step's error -- Richardson's share of the difference
@@ -650,6 +651,12 @@ fn histograms(samples:&[Vec<([f64;3],[f64;3])>],listed:&[usize],value:&dyn Fn(&(
 
 /// A time in the words of the app (μs below a millisecond, ms above).
 fn when(us:f64)->String{if us<1e3{format!("{us:.0} μs")}else{format!("{:.2} ms",us/1e3)}}
+/// Output times `at` (indices in order) in the words of the app: from the first on where they run through the last output, else
+/// between the first and the last, their count.
+fn moments(at:&[usize],times:&[f64])->String{
+    let(first,last)=(at[0],at[at.len()-1]);
+    if at.len()==last-first+1&&last==times.len()-1{format!("{} 起",when(times[first]))}else{format!("{} 至 {} 之间 {} 个时刻",when(times[first]),when(times[last]),at.len())}
+}
 
 /// The model's approximations (fixed before the run): the far components' fold, the couplings'
 /// fold, the near light's dressing left out, the Gaussian beams' profiles and the tables.
@@ -801,9 +808,7 @@ fn ledger(model:&Model,base:&Ledger,records:&[Record],times:&[f64],allowance:f64
         let at=|a:&Account,name:&'static str,charge:f64|{let(s,total)=if last{(a.read(),a.total())}else{(0.,a.floor())};(total>a.target).then_some((i,name,total,a.floor(),s,a.target,charge))};
         at(&r.population,"布居",r.measured.charge[0]).or_else(||at(&r.temperature,"温度",r.measured.charge[1]))}).collect();
     if !over.is_empty(){
-        let(first,last_over)=(over[0].0,over[over.len()-1].0);
-        let span=if over.len()==last_over-first+1&&last_over==records.len()-1{format!("{} 起",when(times[first]))}
-            else{format!("{} 至 {} 之间 {} 个时刻",when(times[first]),when(times[last_over]),over.len())};
+        let span=moments(&over.iter().map(|o|o.0).collect::<Vec<_>>(),times);
         let worst=over.iter().max_by(|a,b|(a.2/a.5).total_cmp(&(b.2/b.5))).unwrap();let target=worst.5;
         let over=format!("{span}估计误差超出目标：{}误差最大 {:.1}%（目标 {:.0}%；三项平方和开方：近似与步长 {:.1}%，其中消去激发态 {:.1}%；统计 {:.1}%）",
             worst.1,100.*worst.2,100.*target,100.*worst.3,100.*worst.6,100.*worst.4);
@@ -1199,7 +1204,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
             let x=(steps as f64/pilot_steps as f64).powf(ORDER);refined.push(steps);
             chosen=Check{steps:pilot_steps,population:chosen.population*x,motion:chosen.motion*x};continue 'product;
         }
-        let mut report=None;let mut records=records;let mut unverified=None;
+        let mut report=None;let mut records=records;let(mut unverified,mut unconfirmed)=(None,vec![]);
         if last.is_none()&&(lossy||lost){
             let verdict=check::verdict(&outcome.traces,TASK as usize,steps,&loss_tolerance);
             // Unsettled, more reads -- a batch of the first's size, its trajectories and their reads at twice the rate, or a first look as
@@ -1212,28 +1217,30 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
                 let extra=batch(done,count,&vec![outputs-1;(count/TASK) as usize],&sampling)?;
                 outcome.extend(extra);done+=count;continue;
             }
-            // Not verified: the next round (check.rs `Verdict::round`) at B⁺^(1/p), or the step stands unverified -- the far end of
-            // its bias's interval in the record and the flag saying why.
+            // Not verified: the next round (check.rs `Verdict::round`) at B⁺^(1/p), or the step stands unverified -- a note saying why
+            // and at which outputs.
             match verdict.round(steps,most,previous){
                 check::Round::Verified=>{}
                 check::Round::Refine(finer)=>{
                     let x=(steps as f64/finer as f64).powf(ORDER);previous=Some([verdict.upper,verdict.lower]);
                     refined.push(steps);chosen=Check{steps:finer,population:chosen.population*x,motion:chosen.motion*x};continue 'product;
                 }
-                check::Round::Unreadable=>unverified=Some("读数分辨不出"),
+                check::Round::Unreadable=>unverified=Some("读数噪声大于信号"),
                 check::Round::Stalled=>unverified=Some("细化未见改善"),
                 check::Round::Bounded=>unverified=Some("已达步数上限"),
             }
-            // The step's bias on the loss in the record: the read's own where verified, its interval's far end where not.
-            let far=unverified.is_some();let read=verdict.bias.iter().map(|b|b[0].abs()+if far{b[1]}else{0.}).filter(|x|x.is_finite()).fold(0.,f64::max);
-            records=self::records(&model,&booked,&estimates,[bias[0].max(read),bias[1]],trap.lab,&memory,reference.1,judged.reach);
+            // The step's bias on the loss in each output's record: its interval's readable part, (|b| − at)₊ (B⁻'s) -- what the reads
+            // cannot tell from no bias, noise at z standard errors, is not booked. Unverified, the outputs whose interval reaches past
+            // the tolerance: what the run's budget could not confirm.
+            for(r,b)in records.iter_mut().zip(&verdict.bias){r.population.bias=r.population.bias.max((b[0].abs()-b[1]).max(0.));}
+            if unverified.is_some(){unconfirmed=(1..outputs).filter(|&k|verdict.bias[k][0].abs()+verdict.bias[k][1]>loss_tolerance[k]).collect();}
             report=Some(check::Report{reads:verdict.reads,chances:verdict.chances,span,lower:verdict.lower,upper:verdict.upper,could:verdict.could,binding:verdict.binding,refined:refined.clone(),verified:verdict.verified()});
         }
         let mut ledger=ledger(&model,&booked,&records,times,allowance,last.is_none(),judged);
         if let(Some(note),Some(flag))=(&bounded,&ledger.flagged){ledger.flagged=Some(format!("{note}；{flag}"));}
-        if let(Some(why),Some(c))=(unverified,&report){
-            let note=format!("步长对损失的偏差在本次计算的预算内未能确认（{why}）：{} 处其区间上端为容差的 {:.1} 倍，已按上端计入误差",when(times[c.binding.min(outputs-1)]),c.upper);
-            ledger.flagged=Some(match &ledger.flagged{Some(f)=>format!("{note}；{f}"),None=>note});}
+        // An unverified step's note: information beside the ledger's own (no error booked for it, no flag).
+        if let Some(why)=unverified{let note=format!("损失的步长偏差在本次预算内未能确认（{why}），涉及 {}",moments(&unconfirmed,times));
+            ledger.note=Some(match ledger.note.take(){Some(n)=>format!("{n}；{note}"),None=>note});}
         let mut solution=assemble(&model,&records,&outcome,&listed,times,trap.lab,done,counts[outputs-1],dt,&request.initial_density,ledger);
         solution.device=used;solution.device_note=note.clone();solution.needed=wanted;solution.loss_check=report;
         if last.is_none(){

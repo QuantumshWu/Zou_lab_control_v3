@@ -1710,7 +1710,7 @@ fn a_kept_standing_wave_keeps_its_energy_along_the_atom_s_path(){
 /// two to three times its tolerance -- the hot tail's jump rate errs ten times the bulk's, and no read before the run sees it. The
 /// check reads it in the product's batches -- unsettled (B⁻ 0.44, B⁺ 2.93) where more reads cost more than they could save --,
 /// refines by B⁺^(1/2) to 0.027 us, where its reads no longer settle the bias (B⁺ 1.70, every chance read 0.95): the step stands
-/// unverified and flagged, its loss within its tolerance of the truth and the solve's own statistics.
+/// unverified, said in the ledger's note (no flag), its loss within its tolerance of the truth and the solve's own statistics.
 #[test]
 fn the_loss_s_check_refines_the_retro_tweezer(){
     let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/retro_tweezer_motion.json")).unwrap();
@@ -1720,9 +1720,9 @@ fn the_loss_s_check_refines_the_retro_tweezer(){
     assert!(!c.refined.is_empty()&&s.time_step_us<0.05,"the check refines the step the local reads keep: {c:?}, dt {}",s.time_step_us);
     let(truth,tolerance)=(0.169,BIAS_SHARE*POPULATION_TARGET);
     assert!((s.loss_probability[20]-truth).abs()<=tolerance+2.*s.sample_errors[20],"the loss {} against the truth {truth}",s.loss_probability[20]);
-    let flagged=s.approximations.flagged.as_deref().unwrap_or("");
-    assert_eq!(c.verified,!flagged.contains("步长对损失的偏差在本次计算的预算内未能确认"),"an unverified step is flagged: {flagged}");
-    println!("{flagged}");
+    let(note,flagged)=(s.approximations.note.as_deref().unwrap_or(""),s.approximations.flagged.as_deref().unwrap_or(""));
+    assert_eq!(c.verified,!note.contains("损失的步长偏差在本次预算内未能确认"),"an unverified step is noted: {note}");
+    assert!(!flagged.contains("步长偏差"),"and not flagged: {flagged}");println!("{note}");
 }
 
 /// The loss's check verifies the shallow trap's cycling control (check.rs; the gate's CONTROL_CYCLE, rust-solver/tests/fixtures/
