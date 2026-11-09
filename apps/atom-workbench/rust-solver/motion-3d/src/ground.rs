@@ -878,8 +878,10 @@ pub fn exists(m:f64)->bool{SATURATION*m*m<EXISTS}
 /// (`Ground::with`). The first rung (`EXISTS`) folds every pair that exists; the rungs below keep more as the allowance falls, the drives and
 /// the pairs alike (`Ground::rungs`).
 pub fn pair_folds(m:f64,allowance:f64)->bool{exists(m)&&m*m<=allowance}
-/// A far component's verdict (# Far components): its fold exists (`exists`) and its mixing m² lies within the budget, its error booked --
-/// the far light is no rung of the ladder.
+/// A far component's verdict (# Far components): its fold exists (`exists`) and its mixing m² lies within the budget, its error booked.
+/// The budget stays here because the far light is no rung of the ladder: a component folded here is folded in every candidate, its scattering
+/// dropped and its m² booked where no choice can undo it (`Candidate::fixed`); one between the budget and existence is a near carrier instead,
+/// whose drives the ladder judges by their measured charge and cost.
 pub fn far_folds(nu:f64,size:f64,l0:f64)->bool{let m=mixing(size,nu.abs(),l0,f64::MIN_POSITIVE);exists(m)&&m*m<=BUDGET}
 /// The rule over the couplings between ground states, of frequency ν and size g, at a rung's allowance: each by `pair_folds`, m = g/(|ν| − l0)
 /// (one of size zero trivially) -- a van Vleck fold's denominators are exact, and it needs no gap between the frequencies it keeps and those it
