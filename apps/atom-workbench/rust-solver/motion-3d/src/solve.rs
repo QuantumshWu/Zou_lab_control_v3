@@ -68,16 +68,17 @@
 //! takes the pilot's place, and the choice goes on from it; a model within its targets has lost its atoms by its physics (`Candidate::past_their_targets`).
 //!
 //! # The reach
-//! The rule judges every coupling where the atoms are and as they move (ground.rs, the reach in position and speed), and the
-//! model's profiles and first-order tables take the same reach (model.rs): the thermal ellipsoid at a temperature, the
-//! request's -- where the atoms start. Where they heat, they go past it: a bound for where they could go, the measurement for
-//! where they went. A pilot's T past the reach's temperature at some output, beyond its errors over the axes and outputs it
-//! looks at (`outgrown`), grows the reach to the largest T the pilot reads, at most where its ln(1/budget) k_B T reaches the
-//! trap's depth (atoms past it are lost), and the choice starts again there with a new pilot -- the reach only grows, until a
-//! pilot stays within it. (PGC1D_BIAS_OFF heats from 30 to 144 uK in 10 ms: judged at 30 uK its F = 1 sublevels' Raman pair
-//! folded, the repump off its resonance in the tweezer's light there, and T came 30 % above the kept pair's; at 60 uK and
-//! above the rule keeps it. R5038's D2 F' = 0 fold, S = 0.34 at its 35 uK, is 1.3 at 70 uK: past Stewart's bound where the
-//! atoms go.) The run's own T past the reach the model was built for is flagged (`assemble`).
+//! The rule judges every coupling where the atoms are and as they move (ground.rs, the reach in position and speed): the
+//! thermal ellipsoid at a temperature, the request's -- where the atoms start. Where they heat, they go past it: a bound for
+//! where they could go, the measurement for where they went. A pilot's T past the reach's temperature at some output, beyond its
+//! errors over the axes and outputs it looks at (`outgrown`), grows the reach to the largest T the pilot reads, at most where its
+//! ln(1/budget) k_B T reaches the trap's depth (atoms past it are lost), and the choice starts again there with a new pilot --
+//! the reach only grows, until a pilot stays within it. (PGC1D_BIAS_OFF heats from 30 to 144 uK in 10 ms: judged at 30 uK its
+//! F = 1 sublevels' Raman pair folded, the repump off its resonance in the tweezer's light there, and T came 30 % above the kept
+//! pair's; at 60 uK and above the rule keeps it. R5038's D2 F' = 0 fold, S = 0.34 at its 35 uK, is 1.3 at 70 uK: past Stewart's
+//! bound where the atoms go.) A pilot of few atoms reads a T only so far: the run's own T past the reach books the share of a
+//! thermal ensemble beyond it on the fold's charge (`beyond_reach`), its folds unjudged. The model's profiles and first-order
+//! tables keep the request's reach, their errors measured along the run (the ledger's).
 //!
 //! # Time step
 //! The trap's harmonic part is moved exactly (engine.rs); what the step must resolve is the light's
@@ -459,20 +460,22 @@ fn statistics(e:&Estimate,frequencies:[f64;3])->Statistic{
 }
 /// Whether an output holds the atoms a temperature, a variance over them, takes (`reads_spread`).
 fn reads_temperature(e:&Estimate)->bool{reads_spread((e.trajectories*(1.-e.loss)).round())}
-/// Where a T read past the rule's reach (module documentation, # The reach): the first output after t = 0 whose T on an axis lies past
-/// `reach` (uK) by more than its errors over the looks at every axis of the outputs that read one (`looks_confidence`).
-fn past_reach(estimates:&[&Estimate],reach:f64)->Option<usize>{
-    let read=|e:&Estimate|reads_temperature(e);let z=looks_confidence((3*estimates.iter().skip(1).filter(|e|read(e)).count()).max(1) as f64);
-    (1..estimates.len()).find(|&i|read(estimates[i])&&(0..3).any(|a|estimates[i].temperature[a]-z*estimates[i].temperature_error[a]>reach))
-}
-/// The temperature (uK) a pilot's atoms grow the reach to (module documentation, # The reach): where they read past it, the largest T
-/// they read at any output and axis, at most what takes the reach's ln(1/budget) k_B T to the trap's `depth` (rad/us), past which an
-/// atom is lost; none where they stay within it, or the reach is there already.
+/// The temperature (uK) a pilot's atoms grow the reach to (module documentation, # The reach): where their T at an output after t = 0 lies
+/// past `reach` on an axis by more than its errors over the looks at every axis of the outputs that read one (`looks_confidence`), the
+/// largest T they read, at most what takes the reach's ln(1/budget) k_B T to the trap's `depth` (rad/us), past which an atom is lost;
+/// none where they stay within it, or the reach is there already.
 fn outgrown(estimates:&[Estimate],reach:f64,depth:f64)->Option<f64>{
-    let cap=depth/(KT_PER_UK*crate::ledger::BUDGET.recip().ln());let all:Vec<&Estimate>=estimates.iter().collect();
-    past_reach(&all,reach)?;
-    let top=estimates.iter().skip(1).filter(|e|reads_temperature(e)).flat_map(|e|e.temperature).fold(reach,f64::max).min(cap);
+    let read:Vec<&Estimate>=estimates.iter().skip(1).filter(|e|reads_temperature(e)).collect();let z=looks_confidence((3*read.len()).max(1) as f64);
+    if !read.iter().any(|e|(0..3).any(|a|e.temperature[a]-z*e.temperature_error[a]>reach)){return None;}
+    let top=read.iter().flat_map(|e|e.temperature).fold(reach,f64::max).min(depth/(KT_PER_UK*crate::ledger::BUDGET.recip().ln()));
     (top>reach).then_some(top)
+}
+/// The share of an output's atoms past the reach its model was judged at (`reach`, uK; module documentation, # The reach): of a thermal
+/// ensemble at its largest axis's T, what lies beyond the reach's ln(1/budget) k_B T_r past the budget the reach leaves out there,
+/// budget^(T_r/T) − budget -- their folds unjudged, on the fold's charge (`records`). Zero within the reach, or with no T read.
+fn beyond_reach(e:&Estimate,reach:f64)->f64{
+    let t=e.temperature.iter().copied().fold(0.,f64::max);let budget=crate::ledger::BUDGET;
+    if reads_temperature(e)&&t>reach{budget.powf(reach/t)-budget}else{0.}
 }
 /// Per output the last at or before it that `holds` (the first must).
 fn last_holding(outputs:usize,holds:&dyn Fn(usize)->bool)->Vec<usize>{(0..outputs).scan(0,|last,i|{if holds(i){*last=i;}Some(*last)}).collect()}
@@ -675,8 +678,9 @@ fn records<'a>(model:&Model,base:&Ledger,estimates:&'a [Estimate],bias:[f64;2],f
     // each output with the populations' memory of the earlier ones (`Memory::charges`) -- what the fold's
     // bound takes on the paths they go (an atom that gathers where the light is bright, as red-detuned
     // molasses holds it at its lattice's bright sites, meets more than the pattern's mean). The a-priori
-    // estimate over the reach decided the fold (`Candidate`).
-    let measured=memory.charges(&estimates.iter().map(|e|with_open(fold_charges(model,2.*e.folded),model,e.trajectories)).collect::<Vec<_>>());
+    // estimate over the reach decided the fold (`Candidate`); the atoms an output's T takes past that reach, their folds unjudged, on top (`beyond_reach`).
+    let measured=memory.charges(&estimates.iter().map(|e|with_open(fold_charges(model,2.*e.folded),model,e.trajectories)).collect::<Vec<_>>())
+        .into_iter().zip(estimates).map(|(c,e)|c.map(|x|x+beyond_reach(e,model.ground.temperature_uk))).collect::<Vec<_>>();
     let(apriori,statistics)=(Apriori::of(base,model),statistics_of(estimates,frequencies));
     estimates.iter().zip(&statistics).zip(measured).enumerate().map(|(i,((e,s),charge))|{
         let(population,temperature)=(POPULATION_TARGET,TEMPERATURE_TARGET/s.weight);
@@ -700,10 +704,11 @@ fn ledger(model:&Model,base:&Ledger,records:&[Record],times:&[f64],allowance:f64
     ledger.add("多普勒与反冲频移",largest(&|r|r.measured.doppler),format!("一阶（kv/σ）²；单步超过 {:.1e} 时用精确响应",allowance));
     ledger.add("一阶多普勒项的转移（温度）",largest(&|r|r.measured.transfer),"一阶项按各组衰减表的比例给出，超出份额的表项单独保留；其余按其摩擦对反冲加热的比值计入温度".into());
     if !model.profiles.is_empty(){ledger.add("聚焦光在原子处的强度（沿轨迹）",largest(&|r|r.measured.profile),"按峰值强度的平面波".into());}
-    let met=largest(&|r|r.measured.charge[0]);
+    let met=largest(&|r|r.measured.charge[0]);let beyond=largest(&|r|beyond_reach(r.estimate,model.ground.temperature_uk));
     if let Some(item)=ledger.items.iter_mut().find(|i|i.label==FOLD){
-        item.action=format!("{}；计入沿轨迹实测的饱和参数 2η²{}（先验估计 {:.2}%{}）与轨迹未及之处的近共振上界{}",item.action,if model.fourth{" 的平方"}else{""},100.*charge,if met>charge{"，实测高于先验估计"}else{""},
-            if model.fourth{"；温度仍计 2η²（力按二阶折叠）"}else{""});item.estimate=met;
+        item.action=format!("{}；计入沿轨迹实测的饱和参数 2η²{}（先验估计 {:.2}%{}）与轨迹未及之处的近共振上界{}{}",item.action,if model.fourth{" 的平方"}else{""},100.*charge,if met>charge{"，实测高于先验估计"}else{""},
+            if model.fourth{"；温度仍计 2η²（力按二阶折叠）"}else{""},
+            if beyond>0.{format!("；温度超出折叠判定所取的原子范围（{:.0} μK），其外原子的份额（最多 {:.2}%）未经判定，计入",model.ground.temperature_uk,100.*beyond)}else{String::new()});item.estimate=met;
     }
     // What the a-priori totals take of their targets (T's only where it has one: an output with no atom held to read).
     let total=|account:&dyn Fn(&Record)->Account,target:f64|records.iter().skip(1).map(account).filter(|a|a.target.is_finite()).max_by(|a,b|(a.model/a.target).total_cmp(&(b.model/b.target))).map_or(Total{error:0.,target},|a|Total{error:a.model,target:a.target});
@@ -1977,8 +1982,6 @@ fn assemble(model:&Model,records:&[Record],outcome:&Outcome,listed:&[usize],time
     let mut flag=|note:String|ledger.flagged=Some(match ledger.flagged.take(){Some(r)=>format!("{note}；{r}"),None=>note});
     if let Some(gone)=(0..estimates.len()).find(|&i|!held(i)){flag(format!("{} 起已无原子被俘获（丢失概率 1）：此后的布居、温度与分布沿用 {} 的值，仅供参考",when(times[gone]),when(times[source[gone]])));}
     if let Some(few)=(0..estimates.len()).find(|&i|held(i)&&!read(i)){flag(format!("{} 起有时刻被俘获的原子不足两个：这些时刻的温度沿用此前的值，误差未知",when(times[few])));}
-    // The rule's reach (module documentation, # The reach): T past the temperature the model was judged at.
-    if let Some(i)=past_reach(&estimates,model.ground.temperature_uk){flag(format!("{} 起温度超出折叠判定时所取的原子范围（{:.0} μK）：原子此后所及之处的折叠未经判定，误差未计入",when(times[i]),model.ground.temperature_uk));}
     let carried=|f:&dyn Fn(&Estimate)->[f64;3]|->Vec<[f64;3]>{measured.iter().map(|&j|f(estimates[j])).collect()};
     Solution{
         populations:source.iter().map(|&j|if j==0{first.clone()}else{estimates[j].populations.clone()}).collect(),
