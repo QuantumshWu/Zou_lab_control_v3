@@ -1,1 +1,1 @@
-//! Beams, one coherent field per frequency, the coherence T, the bounded chart, the far light's exact H_far, the one potential V_L, the region, the trap's centre and analytic Hessian, the reach (SPEC §1.2, §1.3, §1.8).
+//! Beams and their analytic derivatives, one coherent field per frequency, the coherence T and the bounded chart, the region by intensity (SPEC §1.2, §1.3).
