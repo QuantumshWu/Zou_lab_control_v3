@@ -1319,9 +1319,9 @@ impl<'a> Engine<'a>{
         // The beams' parts and the photon's gradient along the polarization (`kick`), of the photon's own sign:
         // transient_photon's amplitude is Σ e^{−iε̃t} R ψ′, the photon its negative (X = −Σ e^{−iε̃t} R, model.rs `transient`).
         let parts=Absorption{sources:beams.iter().map(|(l,u,slope)|{
-            let part:Vec<Complex>=(0..nt).map(|i|-(0..3).fold(Complex::ZERO,|s,a|s+u[a][i]*polar[a])).collect();
-            let slopes:Vec<[Complex;3]>=(0..nt).map(|i|std::array::from_fn(|x|-(0..3).fold(Complex::ZERO,|s,a|s+slope[x][a][i]*polar[a]))).collect();
-            let geometry=&m.geometry[*l];Source::beam(geometry.wave_vector(),geometry.field_log(point.r).1,&part,&slopes,&f[..nt],size)}).collect()};
+            let part:[Complex;MOST_STATES]=std::array::from_fn(|i|-(0..3).fold(Complex::ZERO,|s,a|s+u[a][i]*polar[a]));
+            let slopes:[[Complex;3];MOST_STATES]=std::array::from_fn(|i|std::array::from_fn(|x|-(0..3).fold(Complex::ZERO,|s,a|s+slope[x][a][i]*polar[a])));
+            let geometry=&m.geometry[*l];Source::beam(geometry.wave_vector(),geometry.field_log(point.r).1,&part[..nt],&slopes[..nt],&f[..nt],size)}).collect()};
         let along:[[Complex;3];MOST_STATES]=std::array::from_fn(|i|std::array::from_fn(|x|-(0..3).fold(Complex::ZERO,|s,a|s+du[a][x][i]*polar[a])));
         self.kick(t,direction,m.carriers[g.clusters[k].coherent[c][0].0.carrier].wave_number,&f,size,&along,&parts,draws[4]);
         let mut next=[Complex::ZERO;MOST_MIXED];for i in 0..nt{next[i]=f[i]*(1./size.sqrt());}

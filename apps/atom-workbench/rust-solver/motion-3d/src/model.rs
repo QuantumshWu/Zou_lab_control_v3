@@ -2793,10 +2793,10 @@ impl Photons<'_>{
                     (0..m.carriers[c].rank).fold(Complex::ZERO,|z,k|z+coefficients[k]*(sum[k][0]-sum[k][1]*w))})}
             };
             for row in 0..nt{for x in 0..3{gradient[row][x]+=slope[x]*rows[row];}}
-            let part:Vec<Complex>=rows[..nt].iter().map(|z|amplitude*(*z)).collect();
-            let slopes:Vec<[Complex;3]>=(0..nt).map(|row|{let sum=&sums[ci*MOST_STATES+row];
-                std::array::from_fn(|x|amplitude*(0..m.carriers[c].rank).fold(Complex::ZERO,|z,k|z+coefficients[k]*(0..d).fold(Complex::ZERO,|s,f|s+sum[k][2+f]*p.intensity_gradient[f][x])))}).collect();
-            sources.push(Source::beam(m.geometry[l].wave_vector(),log,&part,&slopes,&f[..nt],size));
+            let part:[Complex;MOST_STATES]=std::array::from_fn(|row|amplitude*rows[row]);
+            let slopes:[[Complex;3];MOST_STATES]=std::array::from_fn(|row|{let sum=&sums[ci*MOST_STATES+row];
+                std::array::from_fn(|x|amplitude*(0..m.carriers[c].rank).fold(Complex::ZERO,|z,k|z+coefficients[k]*(0..d).fold(Complex::ZERO,|s,f|s+sum[k][2+f]*p.intensity_gradient[f][x])))});
+            sources.push(Source::beam(m.geometry[l].wave_vector(),log,&part[..nt],&slopes[..nt],&f[..nt],size));
         }}
         // The explicit states' part of the photon: its weight along e, and the drives' weights: each explicit state's weight
         // in the photon shared by the drives into it, Σ |a_l Σ_k c_lk U_k[e,b] ψ_b|² -- a photon of that state --, each its transition's response.
