@@ -82,11 +82,13 @@ impl Ledger {
             None => reason,
         });
     }
-    /// The totals and the flags of the outputs at `times` (µs): the populations' accounts at every output; T's where it
+    /// The items from the largest estimate down, the totals and the flags of the outputs at `times` (µs): the populations'
+    /// accounts at every output; T's where it
     /// is read, `held` where it is held to its target. T's a-priori total is taken over the outputs it is held to, over
     /// every one where it is read when it is held to none (its error is then the solve's, not a target's), and only the
     /// outputs it is held to are flagged.
     pub fn close(&mut self, times: &[f64], population: &[Account], temperature: &[Option<Account>], held: &[bool]) {
+        self.items.sort_by(|a, b| b.estimate.total_cmp(&a.estimate));
         let held_to = held.iter().zip(temperature).any(|(&h, t)| h && t.is_some());
         let temperatures: Vec<Option<Account>> =
             temperature.iter().zip(held).map(|(t, &h)| t.filter(|_| h || !held_to)).collect();

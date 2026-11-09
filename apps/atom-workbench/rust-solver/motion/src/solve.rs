@@ -271,7 +271,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
         scales,
         initial: row,
         ledger,
-        method: format!("半经典 3D：{}", model.describe()),
+        method: format!("半经典 3D：{}", model.describe().trim_end_matches('。')),
     };
 
     // The pilot (module documentation, # The pipeline): its own trajectory numbers, the step at the request's temperature.
@@ -831,7 +831,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
         classical: Vec::with_capacity(outputs),
         trajectories,
         time_step_us: if counts.steps > 0 { counts.held / counts.steps as f64 } else { c.plan.end },
-        method: format!("{}；{trajectories} 条轨迹（每组 {GROUP} 条拉丁超立方），逐轨迹自适应步长", c.method),
+        method: format!("{}；{trajectories} 条轨迹（每组 {GROUP} 条拉丁超立方），逐轨迹自适应步长。", c.method),
         reason: None,
         approximations: ledger,
     };
