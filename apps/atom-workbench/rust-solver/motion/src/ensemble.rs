@@ -43,6 +43,13 @@
 //! y → 0, and y ≤ a(1 − τ²)) --, every node count doubled from the least that reads a curvature (two per coordinate)
 //! until two levels agree within their sums' rounding.
 //!
+//! # The atoms near the escape at t = 0
+//! The same quadrature gives the share of the atoms within k_BT below the escape energy, ∫ (kept(3/2, y, y) − kept(3/2, y,
+//! y − 1)) d³r over the number's integral (the momenta whose kinetic energy is within k_BT of the depth): over k_BT, the
+//! density the pilot's step takes at the escape before anything is measured (`Ensemble::escape`, solve.rs `tolerances`). Its
+//! integrand is not smooth where y = 1 (it turns as (y − 1)^{5/2}), so its levels converge more slowly than η's, which
+//! alone decide the doubling; the share is read with the difference of its last two levels added.
+//!
 //! # Latin hypercube
 //! A group's members draw each of the `DEVIATES` uniform deviates of a first proposal and a momentum -- the component, the
 //! piece, the radial coordinate, the direction's two, the kinetic energy's quantile, the momentum direction's two -- in
@@ -304,6 +311,16 @@ pub struct Start {
     pub kappa: V3,
 }
 
+/// A component's quadrature at t = 0 (`Ensemble::kinetic`): η, the share of its atoms within k_BT below the escape, and each
+/// one's difference between the last two levels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Quadrature {
+    pub eta: f64,
+    pub difference: f64,
+    pub escape: f64,
+    pub escape_difference: f64,
+}
+
 /// The initial ensemble of a request (module documentation).
 pub struct Ensemble<'a> {
     components: Vec<Component<'a>>,
@@ -389,36 +406,43 @@ impl<'a> Ensemble<'a> {
         Start { state: c.state, r, kappa }
     }
 
-    /// Each component's η, the classical kinetic temperature relative to T (module documentation, # The exact moments), with
-    /// the difference of its last two levels: every node count doubled until the levels' integrals agree within their sums'
-    /// rounding, or the next level would take more than `most` evaluations of the potential (two levels at least).
-    pub fn kinetic(&self, most: u64) -> Vec<(f64, f64)> {
+    /// Each component's quadrature at t = 0 (module documentation, # The exact moments, # The atoms near the escape): every
+    /// node count doubled until η's integrals at two levels agree within their sums' rounding, or the next level would take
+    /// more than `most` evaluations of the potential (two levels at least).
+    pub fn kinetic(&self, most: u64) -> Vec<Quadrature> {
         self.components
             .iter()
             .map(|c| {
+                let (eta, escape) = (|x: &[f64; 3]| x[1] / x[0], |x: &[f64; 3]| x[2] / x[0]);
                 let mut n = 2;
                 let mut last = self.integrals(c, n);
                 loop {
                     n *= 2;
                     let next = self.integrals(c, n);
                     let within = (0..2).all(|s| (next.0[s] - last.0[s]).abs() <= rounding(next.1) * next.0[s] + rounding(last.1) * last.0[s]);
-                    let difference = (next.0[1] / next.0[0] - last.0[1] / last.0[0]).abs();
+                    let read = Quadrature {
+                        eta: eta(&next.0),
+                        difference: (eta(&next.0) - eta(&last.0)).abs(),
+                        escape: escape(&next.0),
+                        escape_difference: (escape(&next.0) - escape(&last.0)).abs(),
+                    };
                     last = next;
                     if within || (2 * n as u64).pow(3) * c.modes.len() as u64 > most {
-                        break (last.0[1] / last.0[0], difference);
+                        break read;
                     }
                 }
             })
             .collect()
     }
-    /// ∫ kept(3/2, y) d³r and ∫ kept(5/2, y) d³r (at shift a) with n nodes per coordinate per beam, and the evaluations.
-    fn integrals(&self, c: &Component, n: usize) -> ([f64; 2], usize) {
+    /// ∫ kept(3/2, y) d³r, ∫ kept(5/2, y) d³r and the first's part within k_BT below the escape, ∫ (kept(3/2, y, y) −
+    /// kept(3/2, y, y − 1)) d³r (at shift a), with n nodes per coordinate per beam, and the evaluations.
+    fn integrals(&self, c: &Component, n: usize) -> ([f64; 3], usize) {
         let nodes = legendre(n);
-        let rows: Vec<[f64; 2]> = (0..c.modes.len() * n)
+        let rows: Vec<[f64; 3]> = (0..c.modes.len() * n)
             .into_par_iter()
             .map(|row| {
                 let (mode, (mu, w_mu)) = (&c.modes[row / n], nodes[row % n]);
-                let mut sums = [0.; 2];
+                let mut sums = [0.; 3];
                 for j in 0..n {
                     let unit = direction(mu, TAU * (j as f64 + 0.5) / n as f64);
                     for &(z, w_z) in &nodes {
@@ -430,8 +454,10 @@ impl<'a> Ensemble<'a> {
                             let own = 1. / (1. + mode.coordinate(r));
                             let share = own / c.modes.iter().map(|m| 1. / (1. + m.coordinate(r))).sum::<f64>();
                             let weight = mode.volume() * w_mu * (TAU / n as f64) * 0.5 * w_z * t * (1. - t).powf(-2.5) * share;
-                            sums[0] += weight * kept(1.5, y, y, c.top);
+                            let number = kept(1.5, y, y, c.top);
+                            sums[0] += weight * number;
                             sums[1] += weight * kept(2.5, y, y, c.top);
+                            sums[2] += weight * (number - kept(1.5, y, y - 1., c.top));
                         }
                     }
                 }
@@ -439,7 +465,14 @@ impl<'a> Ensemble<'a> {
             })
             .collect();
         // The rows summed in their order: the result does not depend on the threads.
-        (rows.iter().fold([0.; 2], |s, x| [s[0] + x[0], s[1] + x[1]]), c.modes.len() * n * n * n)
+        (rows.iter().fold([0.; 3], |s, x| [s[0] + x[0], s[1] + x[1], s[2] + x[2]]), c.modes.len() * n * n * n)
+    }
+
+    /// The density (per rad/µs) of the ensemble's loss energy at the escape before anything is measured: its share within
+    /// k_BT below the escape (each component's in its prepared well, `kinetic`, read with its levels' difference) over k_BT
+    /// (module documentation, # The atoms near the escape).
+    pub fn escape(&self, quadratures: &[Quadrature]) -> f64 {
+        self.components.iter().zip(quadratures).map(|(c, q)| c.weight * (q.escape + q.escape_difference)).sum::<f64>() / self.kt
     }
 
     /// (ħ/m)⟨κ_a²⟩ per lab axis (rad/µs) of the ensemble with the components' η (`kinetic`): Σ_b p_b η_b k_BT (S_b²)_aa (module
@@ -527,23 +560,27 @@ mod tests {
     }
 
     /// The Lorentzian well's radial integrals at a = D/k_BT by a 1D rule independent of the module's 3D one: ∫ g(y) kept(3/2, y)
-    /// √u du for g = 1, y and the kept(5/2, y) one, y = a/(1 + u), in u = τ²/(1 − τ²) (√u du = 2τ²(1 − τ²)^{−5/2} dτ,
-    /// y = a(1 − τ²)) by composite Simpson on 20000 panels, at the shift a as the module's; at τ = 1 the integrands' limits,
-    /// e^{−a} a^{5/2}/Γ(7/2) for the number (kept(s, y) → y^{s+1}/Γ(s + 2)) and zero for the others.
-    fn lorentzian(a: f64) -> [f64; 3] {
+    /// √u du for g = 1, y and the kept(5/2, y) one, and the number's part within k_BT below the escape, y = a/(1 + u), in
+    /// u = τ²/(1 − τ²) (√u du = 2τ²(1 − τ²)^{−5/2} dτ, y = a(1 − τ²)) by composite Simpson on 20000 panels, at the shift a as
+    /// the module's; at τ = 1 the integrands' limits, e^{−a} a^{5/2}/Γ(7/2) for the number and its part near the escape
+    /// (kept(s, y) → y^{s+1}/Γ(s + 2), every momentum there within k_BT of it) and zero for the others.
+    fn lorentzian(a: f64) -> [f64; 4] {
         let panels = 20000;
-        let mut sums = [0.; 3];
+        let mut sums = [0.; 4];
         for i in 1..=2 * panels {
             let tau = i as f64 / (2 * panels) as f64;
             let w = if i == 2 * panels { 1. } else if i % 2 == 1 { 4. } else { 2. };
             if i == 2 * panels {
-                sums[0] += w * (-a).exp() * a.powf(2.5) / gamma(3.5);
+                let limit = (-a).exp() * a.powf(2.5) / gamma(3.5);
+                sums[0] += w * limit;
+                sums[3] += w * limit;
             } else {
                 let (t, y) = (tau * tau, a * (1. - tau * tau));
                 let measure = t * (1. - t).powf(-2.5);
                 sums[0] += w * measure * kept(1.5, y, y, a);
                 sums[1] += w * measure * kept(2.5, y, y, a);
                 sums[2] += w * measure * y * kept(1.5, y, y, a);
+                sums[3] += w * measure * (kept(1.5, y, y, a) - kept(1.5, y, y - 1., a));
             }
         }
         sums
@@ -554,6 +591,20 @@ mod tests {
         s[1] / s[0]
     }
 
+    /// The share near the escape by the module's 3D quadrature meets the independent 1D rule within the difference of its last
+    /// two levels, at a shallow and a deep top; the shallow well holds a large share there, the deep one a small one.
+    #[test]
+    fn the_share_near_the_escape_is_its_integral() {
+        for (a, least, most) in [(3., 0.1, 1.), (40., 0., 1e-3)] {
+            let well = Lorentzian { depth: a * KT_PER_UK, radius: 1.3, hbar_over_mass: 1e-6 };
+            let q = Ensemble::new(&[(0, 1., &well)], 1., 1e-6).unwrap().kinetic(u64::MAX)[0];
+            let s = lorentzian(a);
+            let reference = s[3] / s[0];
+            assert!((q.escape - reference).abs() <= q.escape_difference + 1e-12, "a {a}: {q:?} against {reference}");
+            assert!(reference > least && reference < most, "a {a}: {reference}");
+        }
+    }
+
     /// η by the module's 3D quadrature meets the independent 1D rule to 1e-9 at a shallow and a deep top, the levels converged
     /// within the rounding; and a deep well's η is near the Boltzmann value 1.
     #[test]
@@ -561,12 +612,12 @@ mod tests {
         for a in [3., 40.] {
             let well = Lorentzian { depth: a * KT_PER_UK, radius: 1.3, hbar_over_mass: 1e-6 };
             let ensemble = Ensemble::new(&[(0, 1., &well)], 1., 1e-6).unwrap();
-            let (eta, difference) = ensemble.kinetic(u64::MAX)[0];
+            let Quadrature { eta, difference, .. } = ensemble.kinetic(u64::MAX)[0];
             let reference = lorentzian_eta(a);
             assert!((eta - reference).abs() <= 1e-9 && difference < 1e-9, "a {a}: η {eta} against {reference} (levels {difference})");
         }
         let well = Lorentzian { depth: 400. * KT_PER_UK, radius: 1.3, hbar_over_mass: 1e-6 };
-        let eta = Ensemble::new(&[(0, 1., &well)], 1., 1e-6).unwrap().kinetic(u64::MAX)[0].0;
+        let eta = Ensemble::new(&[(0, 1., &well)], 1., 1e-6).unwrap().kinetic(u64::MAX)[0].eta;
         assert!((eta - 1.).abs() < 0.01, "{eta}");
     }
 
@@ -621,7 +672,7 @@ mod tests {
         let hm = KT_PER_UK * KT_PER_UK * radius * radius / (2. * depth);
         let well = Lorentzian { depth, radius, hbar_over_mass: hm };
         let ensemble = Ensemble::new(&[(0, 1., &well)], 1., hm).unwrap();
-        let eta = ensemble.kinetic(u64::MAX)[0].0;
+        let eta = ensemble.kinetic(u64::MAX)[0].eta;
         let factor = 0.5 / 0.5f64.tanh();
         let exact = ensemble.momentum(&[eta]);
         assert!((exact[2] - eta * KT_PER_UK * factor).abs() < 1e-12 * exact[2]);
