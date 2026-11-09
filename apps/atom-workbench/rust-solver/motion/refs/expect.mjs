@@ -111,6 +111,11 @@ async function cycle(id,beams){
 /** The steady-state photon rate of a two-level atom: R = (Γ/2) s/(1 + s + (2δ/Γ)²), s = 2Ω²/Γ² (exact for the
  * optical Bloch equations' steady state). */
 const rate=(gamma,omega,delta)=>{const s=2*omega*omega/(gamma*gamma);return gamma/2*s/(1+s+(2*delta/gamma)**2);};
+/** The running trap's curvature over the prepared one's (SPEC §1.3: the reported trap frequency is the running trap's)
+ * when one far-detuned beam (|δ| ≫ Γ) drives the cycle: its dressed ground shift U_g(δ) = (−δ + sgn δ·√(δ² + Ω²))/2 at
+ * the local detuning δ_b + κV adds to V, so ∂²V_run = ∂²V_prep·(1 + κ dU_g/dδ), dU_g/dδ = −(1 − |δ|/√(δ² + Ω²))/2
+ * (to leading order −Ω²/4δ²). */
+const runningSoftening=(kappa,omega,delta)=>1-kappa*(1-Math.abs(delta)/Math.hypot(delta,omega))/2;
 /** Mandel's Q of the two-level atom's photon count, Q = 2R ∫₀^∞ [g²(τ) − 1] dτ, g²(τ) = ρ_ee(τ | ground)/ρ_ee^ss (the
  * quantum regression theorem): with the Bloch equations ẋ = Mx + b, ∫(x(τ) − x_ss) dτ = −M⁻¹(x(0) − x_ss). The
  * variance of the number of absorbed photons is (1 + Q) times their mean, the absorption part of the momentum
@@ -135,7 +140,8 @@ function mandelQ(gamma,omega,delta){
  * k_BT/U₀ an axis' potential energy is k_BT/2 + (3/4)ε(k_BT)²/U₀; the cross terms (−2U₀su, −U₀s_xs_y), not in C_a, are
  * of the same order and bound the rest by (k_BT_other/U₀)·ΔT_a. Radiation pressure: the mean force ħk⟨R⟩ moves the
  * axial equilibrium by z₀ = ħk⟨R⟩/(mω_dyn²), ω_dyn² = ω_z²(1 − κΩ²/4δ_b²): the probe's own light shift Ω²/4δ(r),
- * δ(r) = δ_b + κV, softens the spring the atoms feel (trapFrequencyKHz is V_prep's, the trap light alone, SPEC §1.3).
+ * δ(r) = δ_b + κV, softens the spring the atoms feel: the running trap, whose frequencies are the reported
+ * trapFrequencyKHz (SPEC §1.3; the prepared trap, the tweezer alone, gives only the initial ensemble's Wigner factors).
  * Switched on at t = 0 the cloud oscillates about it and dephases; each atom's orbit centre is F/(mω(E)²) with its own
  * anharmonic frequency ω(E) = ω(1 − (3/4)E_z/U₀ − (1/2)E_ρ/U₀) (action-angle, first order), so the time average of
  * ⟨z⟩ is z₀(1 + 2(3/4 + 1)k_BT/U₀) = z₀(1 + 3.5k_BT/U₀); the thermal-equilibrium response F·Var z/k_BT gives
@@ -153,7 +159,7 @@ async function r2(){
   const times=grid(line),Ts=[T0.slice()],Rs=[meanR(T0)];let state=T0.slice();
   for(let i=1;i<times.length;i++){const n=20,dt=(times[i]-times[i-1])/n;for(let j=0;j<n;j++){const k1=derivative(state),k2=derivative(state.map((x,a)=>x+dt/2*k1[a])),k3=derivative(state.map((x,a)=>x+dt/2*k2[a])),k4=derivative(state.map((x,a)=>x+dt*k3[a]));state=state.map((x,a)=>x+dt/6*(k1[a]+2*k2[a]+2*k3[a]+k4[a]));}Ts.push(state.slice());Rs.push(meanR(state));}
   // The radiation-pressure offset, the spring softened by the probe's light shift and by the cloud's anharmonicity.
-  const rbar=Rs.reduce((a,b)=>a+b,0)/Rs.length,r=hbarOverMass(mass),soft=1-kappa*p.omega**2/(4*p.delta**2),dyn=axial*Math.sqrt(soft);
+  const rbar=Rs.reduce((a,b)=>a+b,0)/Rs.length,r=hbarOverMass(mass),soft=runningSoftening(kappa,p.omega,p.delta),dyn=axial*Math.sqrt(soft);
   const z0=r*p.k*rbar/(dyn*dyn),kTbar=KT_PER_UK*Ts.reduce((a,s)=>a+(s[0]+s[1]+s[2])/3,0)/Ts.length/U0;
   // The oscillation's remainder in the average over the 20 evenly spaced distribution samples after t = 0 (contract §2.2:
   // at most 21 times with 0 and the end): at most max |mean cos ωt_i| over the anharmonic frequency window
@@ -162,7 +168,11 @@ async function r2(){
   for(let w=dyn*(1-5*kTbar);w<=dyn;w+=dyn*1e-5)rest=Math.max(rest,Math.abs(tS.reduce((s,t)=>s+Math.cos(w*t),0))/tS.length);
   const zbar=z0*(1+3.5*kTbar),zu=Math.hypot(z0*1.5*kTbar,z0*Math.abs(Rs.at(-1)-Rs[0])/(2*rbar),z0*rest);
   const series=[];
-  ['x','y','z'].forEach((a,i)=>series.push({quantity:'trapFrequency',axis:a,value:kHz(omegas[i]),u:kHz(omegas[i])*c.mixing**2/2,target:{relative:0}}));
+  // The reported trap is the running one (SPEC §1.3): V_prep plus the probe's dressed ground shift, ω² ×(1 + κ dU_g/dδ).
+  // A second-order elimination has the shift Ω²/4δ and the softening κΩ²/4δ² instead (relative (3/4)(Ω/δ)² of it): both
+  // are the model to its order, so their difference is in u.
+  const second=1-kappa*p.omega**2/(4*p.delta**2);
+  ['x','y','z'].forEach((a,i)=>series.push({quantity:'trapFrequency',axis:a,value:kHz(omegas[i]*Math.sqrt(soft)),u:Math.hypot(kHz(omegas[i])*c.mixing**2/2,kHz(omegas[i])*Math.abs(Math.sqrt(soft)-Math.sqrt(second))),target:{relative:0}}));
   // u(T): the cross-axis quartic terms (k_BT_other/U₀)·ΔT_a; the centre-of-mass energy ½mω²z₀² that dephasing turns
   // into heat (z, after t = 0); the Wigner scaling's non-stationarity (R1). Mandel's Q is in the rate.
   const push=0.5*mass*(dyn*1e6)**2*(z0*1e-6)**2/1.380649e-23*1e6;
