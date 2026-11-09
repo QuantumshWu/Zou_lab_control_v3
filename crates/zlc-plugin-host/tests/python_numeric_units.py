@@ -214,7 +214,7 @@ class LinkedScan(unittest.TestCase):
         return ScanPlan.from_tree({'axes': [
             {'port':'pulse:param:B','values':[1,2,3],'unit':'us','link_enabled':enabled,'links':[
                 {'port':'pulse:param:A','values':[0,1],'unit':'ms','mode':'formula','formula':'5 - x'},
-                {'port':'api:delay','values':[10,30],'unit':'us','mode':'range'}]},
+                {'port':'api:delay','unit':'us','mode':'formula','formula':'10 * x'}]},
             {'port':'pulse:param:D','values':[7,8],'unit':'us'}]})
 
     def test_numeric_formula_pairing_and_disabled_memory(self):
