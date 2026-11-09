@@ -49,6 +49,9 @@ pub struct Node {
     pub pending: Option<PendingStart>,
     pub preparing: Option<u64>,
     pub removing: bool,
+    /// The panel each declared preview opened (`signal|kind` -> panel): while it is open it is
+    /// that preview, whatever its kind or choices became since, and a later run opens no other.
+    pub preview_panels: BTreeMap<String, String>,
     pub instance: Instance,
     /// Plugin query answers, the newest of each: name -> (draft revision, answer). What the
     /// page draws and the issues it shows come from them, a newer draft's too until its own land.
@@ -72,7 +75,7 @@ impl Node {
     pub(crate) fn new(id: String, name: String, type_id: String, draft: Draft, auto_preview: bool, descriptor: Option<&TypeDescriptor>) -> Self {
         let answers = descriptor.map(|item| item.node().answers.iter().map(|(query, answer)| (query.clone(), (0, Ok(answer.clone())))).collect()).unwrap_or_default();
         Node { id, name, type_id, draft, auto_preview, revision: 1, running: None, frozen: None, run: None, error: None, follow: false, follow_attempted: None,
-               pending: None, preparing: None, removing: false, instance: Instance::Opening, answers, checked: BTreeSet::new(), resources: Map::new(), resource_issues: Vec::new(),
+               pending: None, preparing: None, removing: false, preview_panels: BTreeMap::new(), instance: Instance::Opening, answers, checked: BTreeSet::new(), resources: Map::new(), resource_issues: Vec::new(),
                start_after_check: None }
     }
 
@@ -464,10 +467,19 @@ impl Workbench {
     }
 
     /// The bench's devices changed: editors that offer them ask again.
-    pub(crate) fn refresh_editors(&mut self) {
-        let editors: Vec<String> = self.nodes.iter().filter(|node| self.catalog.get(&node.type_id)
-            .is_some_and(|item| item.node().queries.iter().any(|name| name == "editor_facts"))).map(|node| node.id.clone()).collect();
-        for id in editors { self.send_queries(&id); }
+    /// The bench changed (a device opened, failed, closed, or an Apply): every draft query
+    /// reads the devices' facts (`device_infos`: whether the device a node names is open, what
+    /// it reads and tunes; an editor also every tunable device of the bench). A node that names
+    /// one, and every node with an editor, asks again under a new revision, so an answer given
+    /// before the change -- a camera not yet open when a layout loaded -- cannot stand after it.
+    pub(crate) fn bench_changed(&mut self) {
+        let asking: Vec<String> = self.nodes.iter().filter(|node| !node.draft.device_keys.values().all(String::is_empty)
+            || self.catalog.get(&node.type_id).is_some_and(|item| item.node().queries.iter().any(|name| name == "editor_facts")))
+            .map(|node| node.id.clone()).collect();
+        for id in asking {
+            if let Ok(node) = self.node_mut(&id) { node.revision += 1; node.recheck(); }
+            self.send_queries(&id);
+        }
     }
 
     /// The devices the draft itself names (`resolve_device_claims`: a scan's device
@@ -1332,7 +1344,7 @@ impl Workbench {
             }
         } else if self.device_opened(instance, working_point) {
             self.default_device_keys(instance);
-            self.refresh_editors();
+            self.bench_changed();
             self.launch_pending(host);
             // Starts that waited for this device go now.
             let waiting: Vec<String> = self.nodes.iter().filter(|node| node.start_after_check.is_some()).map(|node| node.id.clone()).collect();
@@ -1363,6 +1375,7 @@ impl Workbench {
     pub(crate) fn instance_failed(&mut self, instance: &str, error: String, host: &mut dyn Host) {
         let Some(id) = instance.strip_prefix(NODE_INSTANCE) else {
             if self.device_failed(instance, error) {
+                self.bench_changed();
                 self.cancel_device_starts(instance, "a required device failed");
                 for node in self.claiming_nodes(instance) { self.stop_run_of(&node, "its device failed"); }
                 self.close_released();
@@ -1383,7 +1396,7 @@ impl Workbench {
     pub(crate) fn instance_closed(&mut self, instance: &str, error: Option<String>, host: &mut dyn Host) {
         match instance.strip_prefix(NODE_INSTANCE) {
             Some(id) => if let (Ok(node), Some(error)) = (self.node_mut(id), error) { node.instance = Instance::Failed(error); },
-            None => if self.device_closed(instance, error) { self.refresh_editors(); self.launch_pending(host); },
+            None => if self.device_closed(instance, error) { self.bench_changed(); self.launch_pending(host); },
         }
     }
 
@@ -1534,21 +1547,32 @@ impl Workbench {
                 let Some(published) = self.source_published(&signals, &signal) else { continue };
                 if run.preview_baseline.get(&signal).cloned().flatten().as_deref() == Some(published.generation.as_str()) { continue; }
                 let task = descriptor.node().node_kind == "task";
-                wanted.push((run.id.clone(), signal, preview.plot_kind.clone(), preview.semantic.clone(), task));
+                wanted.push((node.id.clone(), run.id.clone(), signal, preview.plot_kind.clone(), preview.semantic.clone(), task));
             }
         }
-        for (run, signal, kind, semantic, task) in wanted {
+        for (node, run, signal, kind, semantic, task) in wanted {
             if let Some(record) = self.run_mut(&run) { record.previewed.insert(signal.clone()); }
             let kind = if kind.is_empty() { "image" } else { &kind };
-            // A run can request a different view of the same signal. Match only the
-            // declared choices so a panel can keep its other authored settings.
-            let shown = host.panels().iter().any(|panel| panel.signal == signal && panel.kind == kind
+            let key = format!("{signal}|{kind}");
+            let panels = host.panels();
+            // The panel this preview opened before is it still, however the operator has
+            // changed it since (another channel, another kind).
+            let opened = self.node(&node).and_then(|node| node.preview_panels.get(&key));
+            if opened.is_some_and(|opened| panels.iter().any(|panel| panel.panel == *opened)) { continue; }
+            // Else a panel showing the declared view: a run can request a different view of
+            // the same signal, so match only the declared choices, and let a panel keep its
+            // other authored settings.
+            let shown = panels.iter().find(|panel| panel.signal == signal && panel.kind == kind
                 && semantic.as_object().is_none_or(|fields| fields.iter().all(|(key, value)| panel.target["semantic"].get(key) == Some(value))));
-            if shown { continue; }
+            if let Some(shown) = shown.map(|panel| panel.panel.clone()) {
+                if let Ok(node) = self.node_mut(&node) { node.preview_panels.insert(key, shown); }
+                continue;
+            }
             let target = if semantic.is_object() { json!({"semantic": semantic}) } else { json!({}) };
             match host.add_panel("", &signal, kind, 1, target) {
                 Ok(panel) => {
                     self.board.add(&panel);
+                    if let Ok(node) = self.node_mut(&node) { node.preview_panels.insert(key, panel.clone()); }
                     if task { if let Some(record) = self.run_mut(&run) { record.preview_panels.push(panel); } }
                 }
                 Err(error) => self.notes.push(format!("preview {signal}: {error}")),

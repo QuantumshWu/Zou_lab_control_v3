@@ -221,15 +221,19 @@ class Smc100Link:
         The first TE consumes a previous session's command error, separately
         from the version query. Only these read-only exchanges are retried.
         In particular, a failed handshake never resets or homes the stage.
-        Discovery can use a shorter per-reply budget for absent addresses.
+        Discovery can use a shorter per-reply budget for absent addresses. Nothing
+        answering TE or VE ends an attempt without its closing TE, and ends a probe:
+        a port with no controller costs one TE and one VE, while a controller that
+        answers gets the same recovery an Init gives it.
         """
 
         timeout = STARTUP_REPLY_TIMEOUT_SECONDS if reply_timeout is None else reply_timeout
+        attempts = STARTUP_ATTEMPTS
         history: list[str] = []
         with self._lock:
             previous_timeout = self.port.timeout
             try:
-                for attempt in range(1, STARTUP_ATTEMPTS + 1):
+                for attempt in range(1, attempts + 1):
                     exchanges: list[str] = []
                     try:
                         try:
@@ -250,6 +254,10 @@ class Smc100Link:
                             version = self._startup_query("VE", timeout, exchanges)
                         except Smc100Error as error:
                             version_error = error
+                        if before is None and isinstance(version_error, Smc100NoReply):
+                            if reply_timeout is not None:
+                                attempts = attempt  # a probe of silence: no retry
+                            raise version_error
                         try:
                             after = self._startup_query("TE", timeout, exchanges)
                         except Smc100NoReply as error:
@@ -275,8 +283,9 @@ class Smc100Link:
                         detail = f"attempt {attempt}: {error}; " + "; ".join(exchanges)
                         history.append(detail)
                         _LOG.info("SMC100 CONNECT address %d: %s", self.address, detail)
-                        if attempt < STARTUP_ATTEMPTS:
-                            time.sleep(STARTUP_RETRY_SECONDS)
+                        if attempt >= attempts:
+                            break
+                        time.sleep(STARTUP_RETRY_SECONDS)
                     else:
                         _LOG.info(
                             "SMC100 CONNECT address %d succeeded on attempt %d: %s",
@@ -287,7 +296,7 @@ class Smc100Link:
                 self.port.timeout = previous_timeout
         raise Smc100ConnectionError(
             f"SMC100 startup handshake failed at address {self.address} "
-            f"after {STARTUP_ATTEMPTS} attempts ({timeout:g} s per reply). "
+            f"after {attempts} attempt{'s' if attempts > 1 else ''} ({timeout:g} s per reply). "
             + " | ".join(history)
         )
 

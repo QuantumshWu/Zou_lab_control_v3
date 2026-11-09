@@ -230,8 +230,15 @@ pub fn refuse_new_label_clash(before: &Sequence, after: &Sequence) -> Result<()>
         Ok(by_label)
     };
     let old = clashes(before)?;
+    let read_before: BTreeMap<String, String> = field_labels(before)?.into_iter().map(|(label, id)| (id, label)).collect();
     for (label, ids) in clashes(after)? {
         if old.get(&label).is_some_and(|known| known.len() >= ids.len()) { continue; }
+        // The same fields that already read alike, under a new name (a period renamed beside
+        // two ports labelled alike): no clash the edit made.
+        let mut these = ids.clone(); these.sort();
+        if old.values().any(|known| { let mut known = known.clone(); known.sort(); known == these }) { continue; }
+        // A clash only fields just made share (they had no name before) is not a rename's.
+        if !ids.iter().any(|id| read_before.get(id).is_some_and(|was| *was != label)) { continue; }
         return value_error(format!("two fields would both read {} ({}); choose another name", repr(&label), ids.join(" and ")));
     }
     Ok(())

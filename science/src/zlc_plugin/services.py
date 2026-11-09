@@ -125,6 +125,13 @@ def _offline(operation: str, params: Mapping[str, Any], scope_id: str = ""):
         return Decoder(None)(reply["ok"])
 
 
+def durable(operation: str, params: Mapping[str, Any]) -> Any:
+    """A file of no run's (a cache, a library entry), written by the local native helper,
+    whether or not a run is calling: it is never published or registered as a run's file.
+    zlc_durable decides which paths are a run's artifacts and sends only the others here."""
+    return _offline("durable." + operation, _tree(dict(params)))
+
+
 def call(operation: str, params: Mapping[str, Any] | None = None, **kwargs: Any) -> Any:
     """One coarse native operation; mutable kernel handles belong to this run."""
     arguments = _tree({**dict(params or {}), **kwargs})

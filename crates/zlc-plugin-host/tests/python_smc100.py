@@ -222,6 +222,16 @@ class Startup(unittest.TestCase):
         self.assertFalse(port.is_open)
         self.assertTrue(set(sim.commands) <= {'TE', 'VE'})
 
+    def test_a_probe_of_a_silent_port_asks_once(self):
+        # Discovery walks every free port: one with no controller costs one TE and one VE,
+        # not the retries an Init gives the controller it was told is there.
+        sim = controller(); port = StartupPort(sim); port.silent = True
+        started = time.monotonic()
+        with self.assertRaises(protocol_module.Smc100Error):
+            Smc100Link(port, 1).identify(reply_timeout=protocol_module.REPLY_TIMEOUT_SECONDS)
+        self.assertEqual([line[-2:] for line in port.sent], ['TE', 'VE'])
+        self.assertLess(time.monotonic() - started, 4 * protocol_module.REPLY_TIMEOUT_SECONDS)
+
     def test_normal_operations_keep_refusals_and_frame_errors_strict(self):
         sim = controller(); port = StartupPort(sim, ('refuse',))
         link = Smc100Link(port, 1)

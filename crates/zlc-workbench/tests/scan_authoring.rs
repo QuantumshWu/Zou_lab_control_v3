@@ -119,3 +119,19 @@ fn direct_axis_order_and_binding_share_native_policy_without_requiring_external_
     absent["withheld"]=json!({"pulse:param:paired":"this bracket is empty"});
     assert!(dispatch("scan.bind",&absent).unwrap_err().contains("this bracket is empty"));
 }
+
+/// A row the rules refuse (a Range past its point limit) is still previewed as written,
+/// beside the others, with the reason: the editor keeps every row it was showing.
+#[test]
+fn a_preview_keeps_every_row_when_one_breaks_a_rule() {
+    let document = json!({"axes":[
+        {"port":"pulse:param:A","mode":"range","values":[1.0,2.0],"range":{"start":1.0,"stop":2.0,"count":200000},"unit":"s","value_text":""},
+        {"port":"pulse:param:B","mode":"values","values":[3.0,4.0],"unit":"","value_text":"3, 4"}]});
+    assert!(compile(document.clone(),"compile").is_err());
+    let preview = compile(document,"preview").unwrap();
+    let ports: Vec<&str> = preview["rows"].as_array().unwrap().iter().map(|row| row["port"].as_str().unwrap()).collect();
+    assert_eq!(ports, ["pulse:param:A","pulse:param:B"]);
+    assert_eq!(preview["rows"][0]["range"]["count"], 200000, "as written");
+    assert!(preview["problem"].as_str().unwrap().contains("Range points"), "{}", preview["problem"]);
+    assert!(compile(json!("not json"),"preview").is_err(), "an unreadable document is still refused");
+}
