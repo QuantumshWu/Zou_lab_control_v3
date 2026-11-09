@@ -51,6 +51,7 @@ use crate::model::{Envelope, Lights, Model, Run, Sample, Trap, Unit, UnitError, 
 use crate::request::STATES;
 use crate::step::{Dynamics, Segment, Trajectory};
 use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, STEP_SHARE, TEMPERATURE_TARGET};
+use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -300,7 +301,8 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
             at.extend(std::iter::repeat_n(k, s.len()));
         }
     }
-    let errors = model.errors(&units, &samples);
+    let each: Vec<Vec<UnitError>> = samples.par_iter().map(|s| model.errors(&units, std::slice::from_ref(s)).into_iter().map(|e| e[0]).collect()).collect();
+    let errors: Vec<Vec<UnitError>> = (0..units.len()).map(|u| each.iter().map(|e| e[u]).collect()).collect();
     let per_output = |f: &dyn Fn(&UnitError) -> f64| -> Vec<Vec<f64>> {
         errors
             .iter()
