@@ -476,6 +476,8 @@ pub struct Stencil{pub dimensions:usize,pub first:[usize;MOST_FOCUSED],pub weigh
 impl Stencil{
     /// The number of nodes (4^D).
     pub fn count(&self)->usize{1<<(2*self.dimensions)}
+    /// The node of the largest weight: a stencil at a node, that node.
+    fn nearest(&self)->usize{(0..self.count()).map(|i|self.node(i)).max_by(|a,b|a.1.total_cmp(&b.1)).unwrap().0}
     /// Node i's index, its weight and its weights' derivatives in each s_f.
     pub fn node(&self,i:usize)->(usize,f64,[f64;MOST_FOCUSED]){
         let(mut index,mut weight,mut derivative)=(0,1.,[1.;MOST_FOCUSED]);
@@ -677,6 +679,8 @@ pub type BeamPhoton=(usize,[[Complex;MOST_STATES];3],[[[Complex;MOST_STATES];3];
 /// nodes took, counted (linear.rs `counted`: complex multiply-adds).
 #[derive(Clone,Debug)]
 pub(crate) struct Tables{pub(crate) nodes:usize,pub(crate) data:Vec<Vec<f64>>,bounds:Vec<[f64;3]>,reach:[f64;3],work:f64}
+/// A grid's tables in the making (`Model::grid_tables`): each node's counted work, and whether it is made.
+pub(crate) struct Making{tables:Tables,works:Vec<f64>,made:Vec<bool>}
 
 /// The trap of the trap beam for a reference state: its place, the well's bottom (ground.rs # Where the trap is), its principal axes (unit rows on the lab axes) and frequencies
 /// (rad/us) there, and the frequencies per lab axis.
@@ -1486,21 +1490,34 @@ impl Model{
     /// elimination's bound over the nodes inside the reach's intensities -- each focused unit's from its smallest over the reach (less
     /// one node, the interval holding it) to 1. Nothing of a node is held beside its places but its computation, so that the tables
     /// and the nodes in the making are all a grid takes.
-    fn grid_tables(&self,n:usize,mixing:&[Vec<Vec<Complex>>],coarse:Option<&Tables>,most_bytes:usize)->Result<Tables,String>{
-        let(d,m)=(self.focused.len(),n.div_ceil(2));let count=n.pow(d as u32);
-        let mut data:Vec<Vec<f64>>=self.layouts.iter().map(|l|vec![0.;2*count*l.size]).collect();let mut bounds=vec![[0.;3];count];
+    fn grid_tables(&self,n:usize,mixing:&[Vec<Vec<Complex>>],coarse:Option<&Tables>,begun:Option<Making>,most_bytes:usize)->Result<Tables,String>{
+        // The nodes not made yet (`begun`: the first grid's that the Lindblad check read, `checked_first`), each made once.
+        let mut making=begun.unwrap_or_else(||self.making(n));let rest:Vec<usize>=(0..making.made.len()).filter(|&i|!making.made[i]).collect();
+        self.make(&mut making,&rest,mixing,coarse,most_bytes)?;
         // Per node its counted work, computed (a node is one thread's), summed in their order.
-        let mut works=vec![0.;count];
+        let Making{mut tables,works,..}=making;tables.work=works.iter().sum();
+        let inside=self.inside(n);
+        tables.reach=std::array::from_fn(|k|inside.iter().map(|&i|tables.bounds[i][k]).fold(0.,f64::max));
+        Ok(tables)
+    }
+    /// A grid of n nodes per focused unit, its tables whole and no node made.
+    fn making(&self,n:usize)->Making{let count=n.pow(self.focused.len() as u32);
+        Making{tables:Tables{nodes:n,data:self.layouts.iter().map(|l|vec![0.;2*count*l.size]).collect(),bounds:vec![[0.;3];count],reach:[0.;3],work:0.},works:vec![0.;count],made:vec![false;count]}}
+    /// The listed nodes (ascending) made into their places (`grid_tables`), as many at once as the work bound leaves room for (`at_once`).
+    fn make(&self,making:&mut Making,nodes:&[usize],mixing:&[Vec<Vec<Complex>>],coarse:Option<&Tables>,most_bytes:usize)->Result<(),String>{
+        let n=making.tables.nodes;let(d,m)=(self.focused.len(),n.div_ceil(2));let count=n.pow(d as u32);
         let batch=at_once(16*self.entries()*(count+coarse.map_or(0,|c|c.nodes.pow(d as u32))),self.scratch(),most_bytes);
-        for first in (0..count).step_by(batch){
-            let last=(first+batch).min(count);
-            // The batch's nodes, each with its places in every cluster's table.
-            let mut places:Vec<Vec<&mut [f64]>>=(first..last).map(|_|Vec::with_capacity(self.layouts.len())).collect();
-            for(table,layout)in data.iter_mut().zip(&self.layouts){
-                for(place,node)in table[2*first*layout.size..2*last*layout.size].chunks_mut(2*layout.size).zip(places.iter_mut()){node.push(place);}
+        for chunk in nodes.chunks(batch){
+            let(lo,hi)=(chunk[0],chunk[chunk.len()-1]+1);let mut take=vec![false;hi-lo];for &i in chunk{take[i-lo]=true;}
+            // The chunk's nodes, each with its places in every cluster's table, its bound and its counted work.
+            let mut places:Vec<Vec<&mut [f64]>>=chunk.iter().map(|_|Vec::with_capacity(self.layouts.len())).collect();
+            for(table,layout)in making.tables.data.iter_mut().zip(&self.layouts){
+                for(place,node)in table[2*lo*layout.size..2*hi*layout.size].chunks_mut(2*layout.size).zip(&take).filter(|x|*x.1).map(|x|x.0).zip(places.iter_mut()){node.push(place);}
             }
-            places.into_par_iter().zip(bounds[first..last].par_iter_mut()).zip(works[first..last].par_iter_mut()).enumerate().try_for_each(|(j,((mut node,bound),work))|{
-                let i=first+j;let digits:Vec<usize>=(0..d).map(|f|(i/n.pow(f as u32))%n).collect();
+            let bounds:Vec<&mut [f64;3]>=making.tables.bounds[lo..hi].iter_mut().zip(&take).filter(|x|*x.1).map(|x|x.0).collect();
+            let works:Vec<&mut f64>=making.works[lo..hi].iter_mut().zip(&take).filter(|x|*x.1).map(|x|x.0).collect();
+            places.into_par_iter().zip(bounds).zip(works).zip(chunk.par_iter()).try_for_each(|(((mut node,bound),work),&i)|{
+                let digits:Vec<usize>=(0..d).map(|f|(i/n.pow(f as u32))%n).collect();
                 match coarse{
                     Some(c)if digits.iter().all(|x|x%2==0)=>{let k:usize=digits.iter().enumerate().map(|(f,x)|x/2*m.pow(f as u32)).sum();
                         for((place,table),layout)in node.iter_mut().zip(&c.data).zip(&self.layouts){place.copy_from_slice(&table[2*k*layout.size..2*(k+1)*layout.size]);}*bound=c.bounds[k];}
@@ -1508,11 +1525,32 @@ impl Model{
                 }
                 Ok::<(),String>(())
             })?;
+            for &i in chunk{making.made[i]=true;}
         }
-        let work=works.iter().sum();
-        let inside=self.inside(n);
-        let reach=std::array::from_fn(|k|inside.iter().map(|&i|bounds[i][k]).fold(0.,f64::max));
-        Ok(Tables{nodes:n,data,bounds,reach,work})
+        Ok(())
+    }
+    /// The first grid's nodes the Lindblad check reads (`lindblad`: those nearest the reach's points), made before any other node and
+    /// checked there (`checked`): a generator that gains at one of them is refused before the rest of any grid is made -- a fourth
+    /// order's node can hold half a gigabyte (`FourthLayout::scratch`; s5111's all-folded rung on the closure branch built its first
+    /// grid, 2.3 GB, before the check at the end refused it). The check at the end reads the finest grid's nodes, as before.
+    fn checked_first(&mut self,mixing:&[Vec<Vec<Complex>>],most_bytes:usize)->Result<Making,String>{
+        let mut making=self.making(FIRST_NODES);let nodes=self.checked_nodes(FIRST_NODES);
+        self.make(&mut making,&nodes,mixing,None,most_bytes)?;
+        self.checked(making)
+    }
+    /// The nodes of a grid of n per focused unit that the Lindblad check reads (`checked_point`), ascending, each once.
+    fn checked_nodes(&mut self,n:usize)->Vec<usize>{
+        let shell=std::mem::replace(&mut self.tables,Tables{nodes:n,data:vec![],bounds:vec![],reach:[0.;3],work:0.});
+        let mut nodes:Vec<usize>=self.reach.iter().map(|&r|self.checked_point(r).stencil.nearest()).collect();nodes.sort();nodes.dedup();
+        self.tables=shell;nodes
+    }
+    /// The Lindblad check (`lindblad`) on a grid's nodes made so far, the model's own tables aside meanwhile: the grid, or why not.
+    fn checked(&mut self,mut making:Making)->Result<Making,String>{
+        let shell=std::mem::replace(&mut self.tables,making.tables);
+        self.linear=self.layouts.iter().map(|l|(0..l.n).map(|_|Default::default()).collect()).collect();
+        let verdict=self.lindblad();
+        making.tables=std::mem::replace(&mut self.tables,shell);self.linear=vec![];
+        verdict.map(|_|making)
     }
     /// The nodes of a grid of n per focused unit inside the reach's intensities: each focused unit's from its
     /// smallest over the reach (less one node, the interval holding it) to 1.
@@ -1572,9 +1610,11 @@ impl Model{
     /// The groups' entries that hold nothing out of the clusters and the layouts: those whose term, its fields at their peak times its S or Q over the first grid, stays within the round-off of the
     /// cluster's largest. What the dressed responses leave between channels a selection rule keeps apart is no term, whatever its beat: 1e-23 rad/us on a resonant probe's rung of 3+10 against its 8, 24 of its
     /// 36 groups, all computed in every generator call, as is the decay's between folded photons a class joins (`Ground`'s rule keeps a pair by its undressed size; `Model::lindblad` holds a cluster's decay to its jumps at this round-off).
-    /// The first grid it reads is the tables' first, in the layouts it leaves (`regrid`; none where a cluster's other tables moved, `tabulate` makes it again).
+    /// The first grid it reads is the tables' first, in the layouts it leaves (`regrid`; none where a cluster's other tables moved, `tabulate` makes it again), its
+    /// nodes the Lindblad check reads made and checked before the others (`checked_first`).
     fn prune(&mut self,mixing:&[Vec<Vec<Complex>>],most_bytes:usize)->Result<Option<Tables>,String>{
-        let first=self.grid_tables(FIRST_NODES,mixing,None,most_bytes)?;let nodes=first.nodes.pow(self.focused.len() as u32);
+        let checked=self.checked_first(mixing,most_bytes)?;
+        let first=self.grid_tables(FIRST_NODES,mixing,None,Some(checked),most_bytes)?;let nodes=first.nodes.pow(self.focused.len() as u32);
         let peak:Vec<[f64;MOST_RANK]>=self.carriers.iter().map(|c|std::array::from_fn(|k|c.coefficients.iter().map(|x|x[k].abs()).sum())).collect();
         for(k,layout)in self.layouts.iter().enumerate(){
             let modulus=|node:usize,x:usize|{let i=2*(node*layout.size+x);first.data[k][i].hypot(first.data[k][i+1])};
@@ -1614,7 +1654,7 @@ impl Model{
         let measured:usize=self.layouts.iter().map(|l|l.size-l.groups.iter().map(|g|2*g.first.len()*g.entries.len()).sum::<usize>()).sum();
         let(entries,scratch)=(self.entries(),self.scratch());let within=|n:usize,coarse:usize|fits(d,entries,scratch,n,coarse,most_bytes,most_nodes);
         if !within(2*FIRST_NODES-1,FIRST_NODES){return Err(self.beyond());}
-        self.tables=match first{Some(first)=>first,None=>self.grid_tables(FIRST_NODES,mixing,None,most_bytes)?};self.dressing=self.tables.reach[0];
+        self.tables=match first{Some(first)=>first,None=>self.grid_tables(FIRST_NODES,mixing,None,None,most_bytes)?};self.dressing=self.tables.reach[0];
         // The counted work per computed node, and the errors measured so far.
         let(mut per_node,mut errors)=(self.tables.work/FIRST_NODES.pow(d) as f64,vec![]);
         loop{
@@ -1627,7 +1667,7 @@ impl Model{
                 if room_cost(error).is_finite()&&!pays(work,stake*(room_cost(error)-room_cost(rate*error)),0.){break;}
             }
             if !within(n,coarse){self.table_limit=Some(coarse);break;}
-            let fine=self.grid_tables(n,mixing,Some(&self.tables),most_bytes)?;let worst=self.interpolation_error(&fine);
+            let fine=self.grid_tables(n,mixing,Some(&self.tables),None,most_bytes)?;let worst=self.interpolation_error(&fine);
             per_node=fine.work/(n.pow(d)-coarse.pow(d)) as f64;
             self.dressing=self.dressing.max(fine.reach[0]);
             self.tables=fine;self.table_error=worst;errors.push(worst);
@@ -2629,6 +2669,14 @@ impl Model{
         let((low,_),(_,rate),(g0,g1))=(extreme(&d),extreme(&jumps),extreme(&decay));
         Balance{d,jumps:whole,low,rate,scale:rate.abs().max(g0.abs()).max(g1.abs()).max(largest)}
     }
+    /// A reach point at the tables' node nearest it, its own fields there (`lindblad`): its stencil wholly on that node, a grid of
+    /// 2^m + 1 nodes per axis holding each node's coordinate exactly.
+    fn checked_point(&self,r:[f64;3])->Point{
+        let last=(self.tables.nodes-1).max(1) as f64;let mut p=self.point(r,[0.;3]);
+        let s:Vec<f64>=(0..p.stencil.dimensions).map(|f|{let w=&p.stencil.weights[f];
+            let k=(0..4).max_by(|&a,&b|w[a].abs().total_cmp(&w[b].abs())).unwrap();(p.stencil.first[f]+k) as f64/last}).collect();
+        p.stencil=self.stencil(&s);p
+    }
     /// A Lindblad generator where the atoms go, or why not (`balance` at rest, at the focus and the reach's
     /// points -- `reach`, the ends of the trap's principal axes --, at t = 0 and at a generic instant `GENERIC`,
     /// the beats' phases), the tables at their node nearest each point with the point's fields: there they are
@@ -2646,12 +2694,8 @@ impl Model{
     /// THz) parts the decay's phases from the jumps' as t goes on -- 1e-12 to 1e-9 of the jump rate at the generic instant, none at t = 0, smooth in the beams' amplitudes -- and that alone refused a D1 scene of three
     /// colours at 12.7 G at twice the round-off here, and a neighbour of it at 575 times, with a norm of 1e-7 over its 100 us.
     fn lindblad(&self)->Result<(),String>{
-        let last=(self.tables.nodes-1).max(1) as f64;
         for &r in &self.reach{
-            let mut p=self.point(r,[0.;3]);
-            let s:Vec<f64>=(0..p.stencil.dimensions).map(|f|{let w=&p.stencil.weights[f];
-                let k=(0..4).max_by(|&a,&b|w[a].abs().total_cmp(&w[b].abs())).unwrap();(p.stencil.first[f]+k) as f64/last}).collect();
-            p.stencil=self.stencil(&s);
+            let p=self.checked_point(r);
             for t in [0.,GENERIC]{for k in 0..self.clusters(){
                 let b=self.balance(k,&p,t);let round=round_off(self.dimension(k) as f64*b.scale);
                 // Its round-off, or what the norm it grows over the run cannot show.
@@ -3284,12 +3328,12 @@ mod tests{
         let f:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/tweezer_gray_molasses.json")).unwrap();
         let r=crate::ground::tests::request(&f["request"]);
         let(mut m,bases)=Model::laid_out(&r,crate::ground::Ground::new(&r).unwrap(),false).unwrap();
-        let first=m.grid_tables(super::FIRST_NODES,&bases,None,MOST_TABLE_BYTES).unwrap();let mut taken=0;
+        let first=m.grid_tables(super::FIRST_NODES,&bases,None,None,MOST_TABLE_BYTES).unwrap();let mut taken=0;
         for cl in m.ground.clusters.iter_mut(){for g in cl.groups.iter_mut(){if g.entries.len()>1{g.entries.pop();taken+=1;}}}
         assert!(taken>0);
         let now=m.layouts(&bases);let was=std::mem::replace(&mut m.layouts,now);
         let carried=super::regrid(&was,&m.layouts,first).expect("a second order's other tables do not move");
-        let made=m.grid_tables(super::FIRST_NODES,&bases,None,MOST_TABLE_BYTES).unwrap();
+        let made=m.grid_tables(super::FIRST_NODES,&bases,None,None,MOST_TABLE_BYTES).unwrap();
         assert!(carried.data==made.data&&carried.bounds==made.bounds&&carried.work==made.work);
     }
     /// A node's fourth order holds its G(ω) T_f columns per triple frequency, field and pair of states (`FourthLayout::scratch`): the work
@@ -3306,8 +3350,8 @@ mod tests{
         let first=16*entries*2*super::FIRST_NODES.pow(d);
         let(refused,work)=tally.measure(||Model::built(&r,ground.clone(),true,first+scratch-1,MOST_TABLE_NODES));
         assert!(refused.is_err_and(|e|e.contains("beyond the work bounds")));assert_eq!(work,layout,"no node computed");
-        let one=laid.grid_tables(super::FIRST_NODES,&bases,None,16*entries*super::FIRST_NODES.pow(d)+scratch).unwrap();
-        let all=laid.grid_tables(super::FIRST_NODES,&bases,None,MOST_TABLE_BYTES).unwrap();
+        let one=laid.grid_tables(super::FIRST_NODES,&bases,None,None,16*entries*super::FIRST_NODES.pow(d)+scratch).unwrap();
+        let all=laid.grid_tables(super::FIRST_NODES,&bases,None,None,MOST_TABLE_BYTES).unwrap();
         assert!(one.data==all.data&&one.bounds==all.bounds&&one.work==all.work);
         assert_eq!(FOURTH_MISCOUNT.load(std::sync::atomic::Ordering::Relaxed),0,"the arrays as the layout counts them");
         assert!(super::at_once(100,0,50)==super::NODE_BATCH&&super::at_once(100,10,135)==3&&super::at_once(100,10,105)==1&&super::at_once(0,1,usize::MAX)==super::NODE_BATCH);
@@ -3327,6 +3371,35 @@ mod tests{
         // Over a run the same gain is refused only where the norm it grows can show: not over a nanosecond, over ten seconds.
         model.ground.duration=1e-3;assert!(model.lindblad().is_ok());
         model.ground.duration=1e7;assert!(model.lindblad().is_err());
+    }
+    /// The Lindblad check reads the first grid's nodes nearest the reach's points before any other node is made (`Model::checked_first`):
+    /// the generator there is the whole first grid's, its balance the same to the last bit; the first grid made on from them is the grid
+    /// made at once, no node made twice (the counted work of the rest alone); and a gain at those nodes alone -- one kept group's decay Q a
+    /// millionth smaller -- refuses the model with no other node made.
+    #[test]
+    fn the_lindblad_check_reads_its_nodes_before_the_rest_of_any_grid(){
+        let f:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/tweezer_pgc.json")).unwrap();
+        let r=crate::ground::tests::request(&f["request"]);
+        let(mut m,bases)=Model::laid_out(&r,crate::ground::Ground::new(&r).unwrap(),false).unwrap();
+        let tally=crate::linear::Tally::new().unwrap();
+        let nodes=m.checked_nodes(super::FIRST_NODES);let count=super::FIRST_NODES.pow(m.focused.len() as u32);assert!(!nodes.is_empty()&&nodes.len()<count,"{nodes:?}");
+        let(whole,whole_work)=tally.measure(||m.grid_tables(super::FIRST_NODES,&bases,None,None,MOST_TABLE_BYTES).unwrap());
+        let mut making=m.making(super::FIRST_NODES);m.make(&mut making,&nodes,&bases,None,MOST_TABLE_BYTES).unwrap();
+        fn balances(m:&mut Model,tables:super::Tables)->(Vec<[f64;3]>,super::Tables){
+            let shell=std::mem::replace(&mut m.tables,tables);m.linear=m.layouts.iter().map(|l|(0..l.n).map(|_|Default::default()).collect()).collect();
+            let mut out=vec![];for r in m.reach.clone(){let p=m.checked_point(r);for t in [0.,super::GENERIC]{for k in 0..m.clusters(){let b=m.balance(k,&p,t);out.push([b.low,b.rate,b.scale]);}}}
+            let tables=std::mem::replace(&mut m.tables,shell);m.linear=vec![];(out,tables)
+        }
+        let(alone,tables)=balances(&mut m,making.tables);making.tables=tables;let(all,whole)=balances(&mut m,whole);
+        assert!(alone==all,"{alone:?} against {all:?}");
+        let made:f64=making.works.iter().sum();let checked=m.checked(making).unwrap();
+        let(on,on_work)=tally.measure(||m.grid_tables(super::FIRST_NODES,&bases,None,Some(checked),MOST_TABLE_BYTES).unwrap());
+        assert!(on.data==whole.data&&on.bounds==whole.bounds&&on.work==whole.work);assert_eq!(on_work,whole_work-made,"the rest alone made");
+        let mut making=m.making(super::FIRST_NODES);m.make(&mut making,&nodes,&bases,None,MOST_TABLE_BYTES).unwrap();
+        let(k,q,square)=m.layouts.iter().enumerate().find_map(|(k,l)|l.groups.iter().find(|g|!g.decay).map(|g|(k,g.q,g.pairs.len()*g.entries.len()))).unwrap();
+        let size=m.layouts[k].size;for &node in &nodes{for i in q..q+square{for c in 0..2{making.tables.data[k][2*(node*size+i)+c]*=1.-1e-6;}}}
+        assert_eq!(making.made.iter().filter(|&&x|x).count(),nodes.len());
+        let refused=m.checked(making);assert!(refused.as_ref().is_err_and(|e|e.starts_with(NOT_LINDBLAD)),"{:?}",refused.err());
     }
     /// The near light's dressing where the atoms go (`Model::measure_dressing`): on the tweezer PGC over 1 ms, its cooling and repump
     /// carriers two beams each, the units' interference is measured at points of the reach, the estimate at most the tables' bound
