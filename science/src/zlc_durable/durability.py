@@ -25,14 +25,30 @@ class DirectoryDurabilityError(RuntimeError):
         self.published = published
 
 
-def _context():
+def _context(path: str | os.PathLike[str]):
+    """The calling run, when ``path`` is one of its artifacts: a relative path, or one below
+    its run directory (what the core publishes and registers). Anything else a run writes --
+    a cache, a library file, a device's own state -- is written as offline work is, by the
+    native helper, so a run may keep a cache beside its data without making it an artifact."""
     from zlc_plugin.services import current_context
-    return current_context()
+    context = current_context()
+    if context is None:
+        return None
+    target = Path(path)
+    if not target.is_absolute():
+        return context
+    try:
+        root = Path(context.run_directory)
+    except Exception:  # noqa: BLE001 -- a run with no run directory has no artifacts
+        return None
+    root_text = os.path.normcase(os.path.abspath(root))
+    target_text = os.path.normcase(os.path.abspath(target))
+    return context if target_text == root_text or target_text.startswith(root_text.rstrip("\\/") + os.sep) else None
 
 
 def _native(operation: str, **params):
-    from zlc_plugin.services import call
-    answer = call("durable." + operation, params)
+    from zlc_plugin.services import durable
+    answer = durable(operation, params)
     if "error" not in answer:
         return answer["ok"]
     error = answer["error"]
@@ -48,7 +64,7 @@ def _native(operation: str, **params):
 
 def flush_directory(directory: str | os.PathLike[str]) -> None:
     """Acknowledge directory durability through the shared native implementation."""
-    context = _context()
+    context = _context(directory)
     if context is not None:
         context.artifacts.flush_directory(directory)
     else:
@@ -69,7 +85,7 @@ def atomic_write_file(target: str | os.PathLike[str], writer: Callable[[BinaryIO
     """Python writes scientific content; native code stages, syncs and publishes."""
     if not callable(writer):
         raise TypeError("writer must be callable")
-    context = _context()
+    context = _context(target)
     if context is not None:
         return context.artifacts.write_file(target, writer)
     staged = _native("stage", path=str(target))
@@ -94,7 +110,7 @@ def _atomic_write_unique_path(candidates: Iterable[Path], writer: Callable[[Path
         first = next(choices)
     except StopIteration as error:
         raise ValueError("candidates must not be empty") from error
-    context = _context()
+    context = _context(first)
     if context is not None:
         import itertools
         return context.artifacts.write_unique_path(itertools.chain((first,), choices), writer,
@@ -133,15 +149,15 @@ def atomic_write_text(target: str | os.PathLike[str], text: str, *, encoding: st
 
 
 def durable_mkdir(directory: str | os.PathLike[str]) -> Path:
-    context = _context()
+    context = _context(directory)
     return context.artifacts.mkdir(directory) if context is not None else Path(_native("mkdir", path=str(directory))["path"])
 
 
 def durable_makedirs(directory: str | os.PathLike[str]) -> Path:
-    context = _context()
+    context = _context(directory)
     return context.artifacts.makedirs(directory) if context is not None else Path(_native("makedirs", path=str(directory))["path"])
 
 
 def _claim_directory(directory: Path) -> Path:
-    context = _context()
+    context = _context(directory)
     return context.artifacts.claim_directory(directory) if context is not None else Path(_native("claim_directory", path=str(directory))["path"])

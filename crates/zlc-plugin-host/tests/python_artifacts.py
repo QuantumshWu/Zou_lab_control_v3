@@ -52,6 +52,25 @@ class ArtifactsTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), b"science")
             self.assertFalse(list(root.glob(".*.tmp")))
 
+    def test_a_run_writes_outside_its_directory_as_offline_work_does(self):
+        from zlc_durable import write_readable_json
+        from zlc_plugin.services import scope
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            run_directory, cache = root / "run", root / "cache" / "analysis.json"
+            run_directory.mkdir()
+            asked = []
+            def request(op, params):
+                asked.append(params["action"])
+                return {"ok": {"path": str(atomic_write_text(params["path"], params["text"]))}}
+            context = types.SimpleNamespace(run_directory=run_directory, artifacts=Artifacts(types.SimpleNamespace(_request=request)))
+            with scope(context):
+                cache.parent.mkdir()
+                # A cache beside the data (an SLM's GPU timings): not an artifact of the run.
+                write_readable_json(cache, {"band": 1})
+                self.assertEqual(json.loads(cache.read_text()), {"band": 1})
+                self.assertEqual(asked, [], "the run's artifact service was not asked")
+
     def test_hosted_json_is_written_as_readable_text(self):
         with tempfile.TemporaryDirectory() as folder:
             path = pathlib.Path(folder) / "summary.json"
