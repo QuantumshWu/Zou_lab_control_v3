@@ -361,6 +361,24 @@ fn bind_view(args: &Value) -> Result<Value> {
     Ok(json!({"ports":bound}))
 }
 
+/// The rows of a plan as written, read leniently: each axis's port, mode, unit, value text,
+/// numeric values and links, with no rule applied (what an editor shows of a plan that
+/// does not compile). None: not a readable plan document at all.
+fn authored_rows(document: &Value) -> Option<Vec<Value>> {
+    let parsed;
+    let document = if let Some(source) = document.as_str() { parsed = serde_json::from_str::<Value>(source).ok()?; &parsed } else { document };
+    fn authored_row(entry: &Value) -> Option<Value> {
+        let text = |key: &str| entry.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
+        let mut row = json!({"port": entry.get("port")?.as_str()?, "unit": text("unit"), "value_text": text("value_text"),
+            "mode": entry.get("mode").and_then(Value::as_str).unwrap_or("range"),
+            "values": entry.get("values").and_then(Value::as_array).map(|values| values.iter().filter_map(Value::as_f64).collect::<Vec<_>>()).unwrap_or_default()});
+        for key in ["range", "coordinate_of", "formula", "link_enabled"] { if let Some(value) = entry.get(key) { row[key] = value.clone(); } }
+        if let Some(links) = entry.get("links").and_then(Value::as_array) { row["links"] = Value::Array(links.iter().filter_map(authored_row).collect()); }
+        Some(row)
+    }
+    Some(document.get("axes")?.as_array()?.iter().filter_map(authored_row).collect())
+}
+
 /// Global read-only native operation used by draft validation, editor preview
 /// and execution admission. The offline helper dispatches this same function.
 pub fn dispatch(operation: &str, args: &Value) -> Result<Value> {
@@ -376,7 +394,17 @@ pub fn dispatch(operation: &str, args: &Value) -> Result<Value> {
     }
     let mode = args.get("mode").and_then(Value::as_str).unwrap_or("compile");
     if !["normalize","compile","preview"].contains(&mode) { return Err("scan compile mode must be normalize, compile or preview".into()); }
-    let rows = normalize(&args["document"])?;
+    let rows = match normalize(&args["document"]) {
+        Ok(rows) => rows,
+        // An editor's preview of a plan one of whose rows is wrong (a count past the limit, a
+        // value it cannot read) still shows every row as written, the reason beside them:
+        // rows that vanished would be authored again from what is left.
+        Err(error) if mode == "preview" => match authored_rows(&args["document"]) {
+            Some(rows) => return Ok(json!({"document":{"axes":rows},"rows":rows,"axis_facts":[],"problem":error})),
+            None => return Err(error),
+        },
+        Err(error) => return Err(error),
+    };
     let mut result = json!({"document":{"axes":rows},"rows":rows});
     if mode == "normalize" { return Ok(result); }
     result["axis_facts"] = Value::Array(rows.iter().map(facts).collect());
