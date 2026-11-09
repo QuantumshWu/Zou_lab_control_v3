@@ -40,7 +40,8 @@
 //! envelope its share (1 + u_l)⁻¹/Σ_l′(1 + u_l′)⁻¹ of the integrand (a smooth partition of unity) in its whitened spherical
 //! coordinates -- Gauss–Legendre in cos θ, the trapezoid rule in the azimuth (spectral for a periodic integrand), Gauss–Legendre
 //! in τ with u = τ²/(1 − τ²), where the integrand V_l τ²(1 − τ²)^{−5/2} kept(s, y) is smooth at both ends (kept ∝ y^{s+1} as
-//! y → 0, and y ≤ a(1 − τ²)) --, every node count doubled until two levels agree within their sums' rounding.
+//! y → 0, and y ≤ a(1 − τ²)) --, every node count doubled from the least that reads a curvature (two per coordinate)
+//! until two levels agree within their sums' rounding.
 //!
 //! # Latin hypercube
 //! A group's members draw each of the `DEVIATES` uniform deviates of a first proposal and a momentum -- the component, the
@@ -52,6 +53,7 @@
 //! jackknife over them measures the error (estimate.rs).
 use crate::field::Geometry;
 use crate::linalg::{dot3, perpendicular, V3};
+use crate::request::STATES;
 use crate::random::{Purpose, Stream};
 use crate::units::{rounding, KT_PER_UK, UNIT_ROUNDOFF};
 use rayon::prelude::*;
@@ -371,7 +373,7 @@ impl<'a> Ensemble<'a> {
             let y = -v / self.kt;
             if y > 0. {
                 debug_assert!(
-                    y <= c.top * c.modes.iter().map(|m| 1. / (1. + m.coordinate(r))).fold(0., f64::max) * (1. + rounding(64)),
+                    y <= c.top * c.modes.iter().map(|m| 1. / (1. + m.coordinate(r))).fold(0., f64::max) * (1. + rounding(STATES * STATES)),
                     "the envelope at {r:?}: y {y} above its bound"
                 );
                 if own.open_uniform() * c.envelope(r) <= kept(1.5, y, y, c.top) {
@@ -394,7 +396,7 @@ impl<'a> Ensemble<'a> {
         self.components
             .iter()
             .map(|c| {
-                let mut n = 8;
+                let mut n = 2;
                 let mut last = self.integrals(c, n);
                 loop {
                     n *= 2;
