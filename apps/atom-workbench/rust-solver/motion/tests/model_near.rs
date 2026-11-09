@@ -372,3 +372,21 @@ fn a_unit_books_no_error_where_its_states_are_empty() {
     eprintln!("the largest parameter measured on empty states: {measured:.3e}");
     assert!(measured > 0.0, "a unit of empty states with a measured parameter");
 }
+
+/// The assembly's price counts the near light's elimination (assemble.rs # Work): R2_RECOIL with its probe near prices a
+/// generator at no less than the factorizations its elimination makes, one per ground state for the probe's dressing and one
+/// for the response of the cluster's ground state -- (n³ − n)/3 complex multiply-adds each on the n excited states.
+#[test]
+fn the_assembly_s_price_counts_the_near_elimination() {
+    use atom_motion::step::Dynamics;
+    let request = scene("R2_RECOIL");
+    let light = Light::new(&request);
+    let probe = Component { frequency: frequency_of(&request, &light, "probe"), counter: false };
+    let model = Model::new(&request, &light, &[Unit::Far { component: probe }]).unwrap();
+    let mut p = [0.0; GROUND];
+    p[7] = 1.0;
+    let run = atom_motion::model::Run::new(&model, p);
+    let n = STATES - GROUND;
+    let factorizations = (GROUND + 1) as f64 * ((n * n * n - n) / 3) as f64 * atom_motion::decide::COMPLEX;
+    assert!(run.assembly_work() >= factorizations, "an assembly priced {} below its factorizations' {factorizations}", run.assembly_work());
+}

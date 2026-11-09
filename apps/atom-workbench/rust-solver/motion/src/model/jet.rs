@@ -13,6 +13,24 @@ pub(crate) fn parts(order: usize) -> usize {
     [1, 4, 10][order]
 }
 
+/// The complex multiply-adds of an n × n LU factorization (linalg.rs `Lu::new`): at column k, n − k − 1 multipliers and
+/// (n − k − 1)² updates, Σ = (n³ − n)/3.
+pub(crate) fn factor_work(n: usize) -> f64 {
+    ((n * n * n - n) / 3) as f64
+}
+
+/// The complex multiply-adds of `solve` on n unknowns with `parts` parts: n² per substitution (linalg.rs `Lu::solve`), a matrix
+/// product M_i x (n²) and a substitution per first derivative, three products and a substitution per second.
+pub(crate) fn solve_work(n: usize, parts: usize) -> f64 {
+    let n2 = (n * n) as f64;
+    n2 * (1.0 + if parts >= 4 { 6.0 } else { 0.0 } + if parts >= 10 { 24.0 } else { 0.0 })
+}
+
+/// The complex multiply-adds of `product` of two jets of `parts` parts: one, two per first derivative, four per second.
+pub(crate) fn product_work(parts: usize) -> f64 {
+    1.0 + if parts >= 4 { 6.0 } else { 0.0 } + if parts >= 10 { 24.0 } else { 0.0 }
+}
+
 /// The part of the second derivative ∂_i ∂_j.
 pub(crate) fn second(i: usize, j: usize) -> usize {
     4 + [[0, 1, 2], [1, 3, 4], [2, 4, 5]][i][j]

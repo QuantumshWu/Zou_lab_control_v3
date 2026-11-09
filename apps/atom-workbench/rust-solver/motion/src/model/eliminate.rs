@@ -105,11 +105,12 @@ impl Carrier {
 /// The near light at a point on a cluster (module documentation), its derivatives in jets (jet.rs) to the order asked: per carrier
 /// (all of them; empty where unlit) and beam the response with its Doppler term on the cluster's ground places, T̃_l = T_l − w_l T2_l
 /// (EXCITED × n_g, a part per jet part); per carrier and ground place the Doppler term's relative size w‖T2‖/‖T‖ (its error's
-/// square root, units.rs); and the far light's H (STATES × STATES, its jet).
+/// square root, units.rs); the far light's H (STATES × STATES, its jet); and the complex multiply-adds that made it.
 pub(crate) struct NearAt {
     pub(crate) responses: Vec<Vec<Vec<Mat>>>,
     pub(crate) doppler: Vec<Vec<f64>>,
     pub(crate) hamiltonian: Vec<Mat>,
+    pub(crate) work: f64,
 }
 
 impl Model {
@@ -128,6 +129,12 @@ impl Model {
             }
         }
         h
+    }
+
+    /// The complex multiply-adds of `far_hamiltonian`: each lit beam pair's form added to every part of the jet, STATES² each.
+    pub(crate) fn far_work(&self, lights: &Lights, order: usize) -> f64 {
+        let pairs: usize = self.light.frequencies.iter().enumerate().map(|(w, f)| (0..f.beams.len().pow(2)).filter(|&x| lights.pair(w, x / f.beams.len(), x % f.beams.len())).count()).sum();
+        (pairs * jet::parts(order) * STATES * STATES) as f64
     }
 
     /// Whether a carrier's drive e ← b is kept: as a unit, or for free inside a cluster at a residual beat of exactly zero.
@@ -176,6 +183,7 @@ impl Model {
         let c = &self.clusters[cluster];
         let g = c.ground;
         let h = self.far_hamiltonian(amplitudes, lights, order);
+        let mut work = self.far_work(lights, order);
         let excited: Vec<usize> = (GROUND..STATES).collect();
         let k: Vec<Mat> = h
             .iter()
@@ -219,9 +227,11 @@ impl Model {
                 let m = shifted(&k, &z);
                 let lu = Lu::new(&m[0]).expect("K − z regular: the decay keeps K's spectrum off the real axis");
                 let ys: Vec<Vec<Vec<C64>>> = (0..carrier.beams.len()).map(|l| jet::solve(&lu, &m, &constant(column(&carrier.folded[l], b)))).collect();
+                work += jet::factor_work(EXCITED) + carrier.beams.len() as f64 * jet::solve_work(EXCITED, np);
                 for group in &groups {
                     for &j in group {
                         for &i in group {
+                            work += (EXCITED * np) as f64 + 2.0 * jet::product_work(np);
                             let pair = jet::of(&super::far::pair(&amplitudes[carrier.beams[j]], &amplitudes[carrier.beams[i]]), order);
                             let xj = column(&carrier.folded[j], b);
                             let form: Vec<C64> = ys[i].iter().map(|y| crate::linalg::inner(&xj, y)).collect();
@@ -279,6 +289,7 @@ impl Model {
                         let inverse = jet::reciprocal(&den);
                         for group in self.dressing_groups(other, lights, coherent[d]) {
                             let mut v: Vec<Vec<C64>> = vec![vec![C64::ZERO; EXCITED]; np];
+                            work += (group.len() * EXCITED * np) as f64;
                             for &l in &group {
                                 let a_l = coefficient(other.beams[l]);
                                 for x in 0..EXCITED {
@@ -293,6 +304,7 @@ impl Model {
                             if v[0].iter().all(|z| *z == C64::ZERO) {
                                 continue;
                             }
+                            work += (EXCITED * EXCITED) as f64 * (2.0 * jet::product_work(np) + np as f64);
                             for x in 0..EXCITED {
                                 for y in 0..EXCITED {
                                     let vx: Vec<C64> = v.iter().map(|q| q[x]).collect();
@@ -308,12 +320,14 @@ impl Model {
                     }
                 }
                 let lu = Lu::new(&m[0]).expect("K + Σ − z regular: the decay keeps it off the real axis");
+                work += jet::factor_work(EXCITED);
                 let (mut t_norm, mut t2_norm) = (0.0_f64, 0.0_f64);
                 for l in 0..n {
                     let x = column(&carrier.folded[l], b);
                     if x.iter().all(|v| *v == C64::ZERO) {
                         continue;
                     }
+                    work += 2.0 * jet::solve_work(EXCITED, np) + (EXCITED * np) as f64;
                     let t = jet::solve(&lu, &m, &constant(x));
                     let t2 = jet::solve(&lu, &m, &t);
                     t_norm = t_norm.max(crate::linalg::norm_sqr(&t[0]).sqrt());
@@ -329,7 +343,7 @@ impl Model {
             responses.push(out);
             doppler.push(sizes);
         }
-        NearAt { responses, doppler, hamiltonian: h }
+        NearAt { responses, doppler, hamiltonian: h, work }
     }
 
     /// The near light's terms of a cluster's generator from a point's responses (module documentation, # The generator's near
@@ -348,11 +362,15 @@ impl Model {
                     continue;
                 }
                 let beat = cp.beat.plus(-1, &cc.beat);
+                let (from, to) = (Component { frequency: cc.frequency, counter: false }, Component { frequency: cp.frequency, counter: false });
+                let included = (0..g).flat_map(|x| (0..g).map(move |y| (x, y))).filter(|&(x, y)| self.term_included(cluster, x, y, from, to, &beat)).count();
                 for (lj, &bj) in cp.beams.iter().enumerate() {
                     for (li, &bi) in cc.beams.iter().enumerate() {
                         if ci == cj && !lights.pair(cc.frequency, lj, li) {
                             continue;
                         }
+                        // Each included entry's value and gradients, 2·EXCITED each.
+                        parts.work += (included * 4 * 2 * EXCITED) as f64;
                         let coefficient = super::far::pair(&amplitudes[bj], &amplitudes[bi]);
                         let (xj, xi) = (&cp.folded[lj], &cc.folded[li]);
                         let (tj, ti) = (&near.responses[cj][lj], &near.responses[ci][li]);
@@ -387,6 +405,8 @@ impl Model {
                     }
                     let coefficient = super::far::pair(&amplitudes[bj], &amplitudes[bi]);
                     let (xj, xi) = (&cc.folded[lj], &cc.folded[li]);
+                    // Each explicit entry's value and gradients, two per ground state each.
+                    parts.work += ((c.states.len() - g).pow(2) * GROUND * 4 * 2) as f64;
                     let shift = |x: usize, y: usize, grad: Option<usize>| -> C64 {
                         if x < g || y < g {
                             return C64::ZERO;
