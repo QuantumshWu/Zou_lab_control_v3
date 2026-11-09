@@ -167,6 +167,7 @@ impl Program{
             return Err(beyond(format!("子空间 {} 个态（{} 个激发态显式）超出精确步的 {MAXM} 个",model.dimension(k),model.dimension(k)-model.ground_dimension(k))));}
         if let Some(k)=(0..model.clusters()).find(|&k|takes&&1+model.beats(k).len()>MOST_PARTS){return Err(beyond(format!("子空间 {} 的 {} 个残余拍频",k,model.beats(k).len()/2)));}
         if model.geometry.len()>MOST_BEAMS||model.carriers.len()>MOST_CARRIERS||model.focused.len()>MOST_FOCUSED{return Err(beyond("光束或强度维度太多".into()));}
+        if g.units.iter().any(|u|u.rank>1){return Err(beyond("同频光束偏振不平行（光场的秩大于一）".into()));}
         if let Some(c)=g.clusters.iter().find(|c|c.states.len()>MAXN){return Err(beyond(format!("子空间 {} 个态",c.states.len())));}
         let hm=model.hbar_over_mass;
         // The beams: each one's carrier and place among them, and the near beams' order.
@@ -349,7 +350,7 @@ impl Program{
         let near_first:[i32;MOST_CARRIERS+1]=std::array::from_fn(|d|order.iter().filter(|(_,x)|x.carrier<d).count() as i32);
         let near_units:Vec<NearUnit>=order.iter().map(|&(u,x)|NearUnit{carrier:x.carrier as i32,focused:model.focused.iter().position(|&f|f==u).map_or(-1,|f|f as i32),
             norm:g.units[u].norm as f32,focus:g.units[u].focus as f32}).collect();
-        let unit_couplings:Vec<[f32;2]>=order.iter().flat_map(|(_,x)|(0..ng).flat_map(move|a|(0..ne).map(move|i|c32(x.coupling[(i,a)])))).collect();
+        let unit_couplings:Vec<[f32;2]>=order.iter().flat_map(|(_,x)|(0..ng).flat_map(move|a|(0..ne).map(move|i|c32(x.couplings[0][(i,a)])))).collect();
         let(mut vias,mut via_first):(Vec<[i32;2]>,Vec<i32>)=(vec![],vec![]);
         for c in 0..nc{for b in 0..ng{via_first.push(vias.len() as i32);if g.dressing{vias.extend(g.vias[c][b].iter().map(|v|[v.carrier as i32,v.state as i32]));}}}
         via_first.push(vias.len() as i32);
@@ -365,7 +366,7 @@ impl Program{
         // Per channel (d, a) its near units at their focus intensity summed (the kernel's `self_energy`), lane-major.
         let powers:Vec<[f32;2]>=(0..nc).flat_map(|d|(0..ng).map(move|a|(d,a))).flat_map(|(d,a)|{let mut m=vec![Complex::ZERO;ne*ne];
             for &(u,x)in order.iter().filter(|(u,x)|x.carrier==d&&!model.focused.contains(u)){let scale=g.units[u].focus*g.units[u].norm;
-                for j in 0..ne{for i in 0..ne{m[j*ne+i]+=x.coupling[(i,a)]*x.coupling[(j,a)].conj()*scale;}}}
+                for j in 0..ne{for i in 0..ne{m[j*ne+i]+=x.couplings[0][(i,a)]*x.couplings[0][(j,a)].conj()*scale;}}}
             m.into_iter().map(c32)}).collect();
         let near_focused=order.iter().filter(|(u,_)|model.focused.contains(u)).fold(0u32,|m,(_,x)|m|1<<x.carrier);
         // The settings: the trap's principal axes, their flow for dt/2 and stiffness.

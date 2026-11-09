@@ -14,21 +14,26 @@
 //! population core's lattice does, for its own time scales). A folded component enters as
 //! its second-order (van Vleck) shift on the ground and the excited states, with the exact
 //! bare-energy denominators -- quadratic in its field, so that its beams interfere: a standing wave,
-//! a lattice of crossed beams --; the others are near carriers. Each beam's static shift through the
-//! states outside the model O_l (in H0 at the focus, the beams of one frequency summed there) is
-//! quadratic in its field too. The beams of one frequency whose fields are parallel (`Unit`: a
-//! retro-reflected tweezer, a beam alone) shift the states by their summed field's intensity
-//! s_u(r) = |Σ_l a_l(r) γ_l|²/N_u alone, exactly:
+//! a lattice of crossed beams --; the others are near carriers. The static shift through the states
+//! outside the model (in H0 at the focus) is quadratic in the field too (`OutsideForm`).
+//!
+//! The beams of one frequency are one field (`Unit`). Their couplings span r ≤ 3 matrices (the dipole
+//! operator's three components): the basis W_k = Σ_l u_lk V_l, u_k the eigenvectors of the beams' Gram
+//! matrix ⟨V_l, V_m⟩ from the largest, as many as leave every coupling within `OFF_THE_BASIS` of their
+//! span, V_l = Σ_k γ_lk W_k with γ_lk = ⟨W_k, V_l⟩/‖W_k‖², and R_l = Σ_k γ_lk* RW_k with RW_k = Σ_l u_lk* R_l.
+//! At r the field is E_k(r) = Σ_l a_l(r) γ_lk, and every static shift a Hermitian form in it, linear in
+//! T = E E†: in its r² real coordinates x -- |E_k|²/N per k, Re and Im of E_j* E_k/N per pair j < k,
+//! N = (Σ_l ‖γ_l‖)², the first one the field's intensity s, within [0, 1] wherever no beam is beyond its peak --
 //!
 //! ```text
-//! H(r) = H0 + Σ_u (s_u(r) − s_u(0)) O_u + Σ_u s_u(r) F_u      (`Ground::hamiltonian_at`)
+//! H(r) = H0 + Σ_i (x_i(r) − x_i(0)) O_i + Σ_i x_i(r) F_i      (`Ground::hamiltonian_at`)
 //! ```
 //!
-//! O_u and F_u the unit's outside shift and fold at s_u = 1 (a beam alone: s = |a_l|², O_l, F_l). The
-//! beams of a frequency are one unit, their dominant polarization's, or a unit each, whichever leaves
-//! out the smaller interference (`coherence`): the remainder of polarizations a little off a common
-//! one, or the interference of polarizations that differ -- a polarization lattice, which the beams'
-//! intensities alone do not fix --, its bound in the ledger (`Ground::interference`, solve.rs).
+//! O_i and F_i the outside shift and the folded components' van Vleck shift per unit of coordinate i. Beams of
+//! one polarization (a beam alone, a retro-reflected tweezer) are a field of rank one, s = |Σ_l a_l γ_l|²/N
+//! its one coordinate and O the least squares of its beams' own outside shifts; beams whose polarizations
+//! differ (crossed beams, a polarization lattice) interfere through the pairs' coordinates, their outside
+//! shift from the request's form in their field.
 //!
 //! # Where the trap is
 //! A beam focused at the origin need not hold its atoms there: a reflection's standing wave has its antinodes a mirror phase φ's φ/2k along the axis from the focus, whatever the beam's
@@ -290,7 +295,8 @@
 //! - an emitted photon has its carrier's wave number: ≤ 1e-7 on the D2 line.
 use crate::ledger::BUDGET;
 use crate::linear::{hermitian_eigen,hermitian_eigenvalues,round_off,unit_round_off,Dense,Lu};
-use crate::model::{Trap,doppler,wave_vector};
+use crate::model::{Trap,MOST_RANK,doppler,wave_vector};
+use std::borrow::Cow;
 use crate::{Beam,Complex,Request,STATES};
 use atom_population_core::lattice::classification::FOLD_DISTANCE;
 use rayon::prelude::*;
@@ -314,20 +320,93 @@ pub const MIXING_SHARE:f64=crate::solve::NUMERICAL_SHARE*crate::solve::POPULATIO
 /// peak in phase, and `folded` is the rule's verdict.
 #[derive(Clone,Debug)]
 pub struct Component{pub beams:Vec<usize>,pub counter:bool,pub nu:f64,pub size:f64,pub folded:bool}
-/// A unit of the light's static shifts (module documentation, # Far components): its beams, of one
-/// frequency, and each one's weight γ_l relative to the first's field -- V_l = γ_l V_first,
-/// R_l = γ_l* R_first, O_l = |γ_l|² O_first --, N = (Σ_l |γ_l|)² and its intensity at the focus s(0)
-/// = |Σ_l γ_l|²/N; and its field's coupling as a combination of its beams', W = Σ_l u_l V_l (`coherence`).
-/// A beam alone: γ = 1, N = 1, s(0) = 1, u = 1.
+/// The field of the beams of one frequency (module documentation, # Far components): its beams, its rank r, the beams' coordinates
+/// γ_lk on its basis and the basis's on the beams, u_lk (beam by beam, `weights[j r + k]`, `combination[j r + k]`), N, its pivot p (the
+/// basis vector of its largest field at the focus) and the others' phases against it there, arg(E_k E_p*) (`origin`), and its chart's
+/// coordinates at the focus, every beam at amplitude one: its intensity I(0) = |E(0)|²/N (`focus`) and its polarization's (`extra`). A
+/// beam alone: γ = 1, N = 1, I(0) = 1.
+///
+/// The field's chart (`Unit::chart`): its intensity I = |E|²/N, within [0, 1] wherever no beam is beyond its peak, and its polarization
+/// w = E/|E| up to its global phase: its components in the order o = (p, then the others), per one after the pivot its hyperspherical
+/// angle α_i = atan2(|(E_{o_i}, E_{o_i+1}, ...)|, |E_{o_i−1}|) in [0, π/2] and its phase against the pivot's, arg(E_{o_i} E_p*), less the
+/// focus's, in [−π, π] -- 2r − 1 real coordinates, each bounded (`Unit::range`), every value a field's, so that a table on their whole
+/// ranges meets no atom at an edge. The static shifts are linear in T = E E† (`Unit::t_coordinates`: |E_k|²/N, then Re and Im of
+/// E_j* E_k/N per pair j < k), T = I w w† (`Unit::polarization`), trigonometric in the angles and phases: smooth through their poles,
+/// where a component vanishes and its phase is any.
 #[derive(Clone,Debug)]
-pub struct Unit{pub beams:Vec<usize>,pub weights:Vec<Complex>,pub norm:f64,pub focus:f64,pub combination:Vec<Complex>}
+pub struct Unit{pub beams:Vec<usize>,pub rank:usize,pub weights:Vec<Complex>,pub combination:Vec<Complex>,pub norm:f64,pub pivot:usize,pub origin:[f64;MOST_RANK],pub focus:f64,pub extra:Vec<f64>}
 impl Unit{
-    /// Its intensity s = |Σ_l a_l γ_l|²/N at the beams' amplitudes a, in [0, 1].
-    pub fn intensity(&self,a:impl Fn(usize)->Complex)->f64{self.field(a).norm_sqr()/self.norm}
-    /// Σ_l a_l γ_l at the beams' amplitudes a.
-    pub fn field(&self,a:impl Fn(usize)->Complex)->Complex{self.beams.iter().zip(&self.weights).fold(Complex::ZERO,|s,(&l,&w)|s+a(l)*w)}
-    /// Whether its intensity varies over the trap: a Gaussian beam's, or interfering beams'.
+    /// Its field on its basis, E_k = Σ_l a_l γ_lk at the beams' amplitudes a.
+    pub fn fields(&self,a:impl Fn(usize)->Complex)->[Complex;MOST_RANK]{
+        let mut e=[Complex::ZERO;MOST_RANK];for(j,&l)in self.beams.iter().enumerate(){let x=a(l);for k in 0..self.rank{e[k]+=x*self.weights[j*self.rank+k];}}e
+    }
+    /// Its intensity I = |E|²/N at the beams' amplitudes a, in [0, 1]: its chart's first coordinate.
+    pub fn intensity(&self,a:impl Fn(usize)->Complex)->f64{self.chart(&self.fields(a),None)[0]}
+    /// Its chart's coordinates other than the intensity at its field e, appended to `out`.
+    pub fn extra(&self,e:&[Complex;MOST_RANK],out:&mut Vec<f64>){out.extend_from_slice(&self.chart(e,None)[1..2*self.rank-1]);}
+    /// Its basis's components in the chart's order: the pivot, then the others.
+    fn order(&self)->[usize;MOST_RANK]{let mut o=[self.pivot;MOST_RANK];let mut at=1;for k in (0..self.rank).filter(|&k|k!=self.pivot){o[at]=k;at+=1;}o}
+    /// Its chart at its field e (I, then per component after the pivot its angle and phase) or, with `de`, the field's derivative along a
+    /// direction, the chart's: dI = Σ_k 2 Re(E_k* dE_k)/N, dα = (A dB − B dA)/(A² + B²) of α = atan2(B, A), and the phase's
+    /// Im(dE_k/E_k) − Im(dE_p/E_p) -- a vanishing magnitude's terms zero, at its coordinate's pole. No field at all takes the focus's
+    /// polarization, a vanishing component's phase the focus's.
+    pub fn chart(&self,e:&[Complex;MOST_RANK],de:Option<&[Complex;MOST_RANK]>)->[f64;2*MOST_RANK-1]{
+        let(r,n,o)=(self.rank,self.norm,self.order());let mut out=[0.;2*MOST_RANK-1];
+        let size:[f64;MOST_RANK]=std::array::from_fn(|k|e[k].norm_sqr());let beyond=|i:usize|o[i..r].iter().map(|&j|size[j]).sum::<f64>();
+        let Some(d)=de else{
+            out[0]=size[..r].iter().sum::<f64>()/n;if !(out[0]>0.){for(x,y)in out[1..2*r-1].iter_mut().zip(&self.extra){*x=*y;}return out;}
+            for i in 1..r{let z=e[o[i]]*e[o[0]].conj();let phase=z.im.atan2(z.re)-self.origin[o[i]];
+                out[2*i-1]=beyond(i).sqrt().atan2(size[o[i-1]].sqrt());out[2*i]=if z==Complex::ZERO{0.}else{phase-TAU*(phase/TAU).round()};}
+            return out;
+        };
+        let dot:[Complex;MOST_RANK]=std::array::from_fn(|k|e[k].conj()*d[k]);let over=|x:f64,y:f64|if y>0.{x/y}else{0.};
+        out[0]=dot[..r].iter().map(|z|2.*z.re).sum::<f64>()/n;
+        for i in 1..r{let(a,b)=(size[o[i-1]].sqrt(),beyond(i).sqrt());let db=o[i..r].iter().map(|&j|dot[j].re).sum::<f64>();
+            out[2*i-1]=over(a*over(db,b)-b*over(dot[o[i-1]].re,a),a*a+b*b);out[2*i]=over(dot[o[i]].im,size[o[i]])-over(dot[o[0]].im,size[o[0]]);}
+        out
+    }
+    /// Its chart's coordinate c's range: the intensity's [0, 1], an angle's [0, π/2], a phase's [−π, π].
+    pub fn range(c:usize)->[f64;2]{if c==0{[0.,1.]}else if c%2==1{[0.,std::f64::consts::FRAC_PI_2]}else{[-std::f64::consts::PI,std::f64::consts::PI]}}
+    /// Its polarization w (|w| = 1, w_p ≥ 0) at its chart's coordinates c: w_{o_0} = cos α_1, w_{o_i} = sin α_1 ⋯ sin α_i cos α_{i+1}
+    /// e^{i(φ_i + its focus's phase)}, the last one's without the cosine.
+    pub fn polarization(&self,c:&[f64])->[Complex;MOST_RANK]{
+        let(r,o)=(self.rank,self.order());let mut w=[Complex::ZERO;MOST_RANK];let mut sine=1.;
+        for i in 0..r{let(s,cosine)=if i+1<r{c[2*i+1].sin_cos()}else{(0.,1.)};
+            w[o[i]]=Complex::cis(if i==0{0.}else{c[2*i]+self.origin[o[i]]})*(sine*cosine);sine*=s;}
+        w
+    }
+    /// T's coordinates (|E_k|²/N, then Re and Im of E_j* E_k/N per pair j < k) at its chart's coordinates c: I w̄_j w_k.
+    pub fn t_coordinates(&self,c:&[f64])->[f64;MOST_RANK*MOST_RANK]{
+        let(r,w)=(self.rank,self.polarization(c));let mut out=[0.;MOST_RANK*MOST_RANK];
+        for k in 0..r{out[k]=c[0]*w[k].norm_sqr();}
+        let mut at=r;for j in 0..r{for k in j+1..r{let z=w[j].conj()*w[k];out[at]=c[0]*z.re;out[at+1]=c[0]*z.im;at+=2;}}
+        out
+    }
+    /// A table axis's coordinate s = (c − lo)/(hi − lo) of its chart's coordinate c (`chart`'s place) at the beams' amplitudes and slopes `at`
+    /// (a_l, ∇a_l), the same with the beams `off` turned off (its polarization the field's own), both within [0, 1], and the gradient of s
+    /// (model.rs `Model::point`).
+    pub fn axis_at(&self,c:usize,[lo,hi]:[f64;2],at:impl Fn(usize)->(Complex,[Complex;3]),off:impl Fn(usize)->bool)->(f64,f64,[f64;3]){
+        let r=self.rank;let(mut e,mut slope,mut rest)=([Complex::ZERO;MOST_RANK],[[Complex::ZERO;MOST_RANK];3],[Complex::ZERO;MOST_RANK]);
+        for(j,&l)in self.beams.iter().enumerate(){let(a,g)=at(l);for k in 0..r{let w=self.weights[j*r+k];let x=a*w;e[k]+=x;for d in 0..3{slope[d][k]+=g[d]*w;}if !off(l){rest[k]+=x;}}}
+        let span=hi-lo;let s=self.chart(&e,None)[c];let dark=if c==0{self.chart(&rest,None)[0]}else{s};
+        (((s-lo)/span).clamp(0.,1.),((dark-lo)/span).clamp(0.,1.),std::array::from_fn(|d|self.chart(&e,Some(&slope[d]))[c]/span))
+    }
+    /// B, its intensity's largest over its beams' profiles' largest, I ≤ B max_l |a_l|²: Σ_lm |⟨γ_l, γ_m⟩|/N, |Σ_l a_l γ_l|² ≤ Σ_lm |a_l| |a_m| |⟨γ_l, γ_m⟩| --
+    /// 1 for parallel fields, which reach N in phase.
+    pub fn reach(&self)->f64{
+        if self.rank==1{return 1.;}let(n,r)=(self.beams.len(),self.rank);
+        (0..n).flat_map(|l|(0..n).map(move|m|(l,m))).map(|(l,m)|(0..r).fold(Complex::ZERO,|s,k|s+self.weights[l*r+k].conj()*self.weights[m*r+k]).abs()).sum::<f64>()/self.norm
+    }
+    /// Whether its field varies over the trap: a Gaussian beam's, or interfering beams'.
     pub fn varies(&self,beams:&[Beam])->bool{self.beams.len()>1||beams[self.beams[0]].waist_um.is_some()}
+    /// The matrices of T's coordinates (`t_coordinates`' order) of a Hermitian form Σ_jk E_j* E_k C(j, k) given by its coefficients between
+    /// basis vectors (C(k, j) = C(j, k)†): N C(k, k), then per pair N (C(j, k) + C(k, j)) and N i(C(j, k) − C(k, j)).
+    fn matrices(&self,c:&dyn Fn(usize,usize)->Dense)->Vec<Dense>{
+        let n=Complex::new(self.norm,0.);let mut out:Vec<Dense>=(0..self.rank).map(|k|c(k,k).scaled(n)).collect();
+        for j in 0..self.rank{for k in j+1..self.rank{let(a,b)=(c(j,k),c(k,j));
+            let(mut sum,mut turn)=(a.clone(),a);sum.add_scaled(Complex::ONE,&b);turn.add_scaled(-Complex::ONE,&b);out.extend([sum.scaled(n),turn.scaled(Complex::new(0.,self.norm))]);}}
+        out
+    }
 }
 /// The near components of one frequency.
 #[derive(Clone,Debug)]
@@ -495,11 +574,10 @@ impl Block{
 /// its energy's error; and its factorization at the elimination.
 #[derive(Clone,Debug)]
 pub struct Dressing{pub place:usize,pub sigma:Dense,pub vias:Vec<(Channel,f64,f64)>,pub lu:Option<Lu>}
-/// A near carrier's unit for the dressing (`Ground::dress_light`): its carrier, its folded coupling (the
-/// dominant polarization's W^f = Σ_l u_l V_l^f, a beam alone its own V_l^f) and its beams' remainders
-/// off it, V_l^f − γ_l W^f.
+/// A near carrier's field for the dressing (`Ground::dress_light`): its carrier and its basis's folded couplings W^f_k = Σ_l u_lk V_l^f
+/// (a beam alone its own V_l^f).
 #[derive(Clone,Debug)]
-pub struct NearUnit{pub carrier:usize,pub coupling:Dense,pub remainders:Vec<Dense>}
+pub struct NearUnit{pub carrier:usize,pub couplings:Vec<Dense>}
 
 /// A cluster of ground states' fourth-order fold at a point and a time (`Ground::fourth`, the dense
 /// reference): H̃ (its anti-Hermitian part its jumps' −(i/2) Σ L̃†L̃), every class's jumps L̃ per axis
@@ -537,10 +615,10 @@ pub struct Ground{
     pub beams:Vec<Beam>,
     pub couplings:Vec<Dense>,
     pub folded:Vec<Dense>,
-    /// H0 at the focus (32 × 32, rad/us); the units of the light's static shifts, and per unit its
-    /// shift through the states outside the model O_u and the fold F_u of its folded components (both
-    /// 32 × 32, at s_u = 1); per frequency of several beams the interference its units leave out
-    /// (`coherence`).
+    /// H0 at the focus (32 × 32, rad/us); the frequencies' fields, and per coordinate its shift through the states outside
+    /// the model O_i and of the folded components F_i (32 × 32, per unit of it): every field's intensity, in the fields'
+    /// order, then the others' coordinates (`Unit::extra`), field by field (module documentation, # Far components); what the
+    /// fields leave out, frequency by frequency (`Interference`).
     pub hamiltonian:Dense,
     pub units:Vec<Unit>,
     pub outside:Vec<Dense>,
@@ -629,32 +707,49 @@ fn combine(beams:&[usize],weights:&[Complex],matrices:&[Dense])->Dense{
 /// The rows × cols block of a square matrix.
 fn sub(m:&Dense,rows:&[usize],cols:&[usize])->Dense{Dense::from_fn(rows.len(),cols.len(),|i,j|m[(rows[i],cols[j])])}
 fn frobenius(m:&Dense)->f64{m.entries.iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt()}
-/// The second-order (van Vleck) shift of a coupling V e^{−iνt} + h.c. (V excited ← ground) with the
-/// exact bare-energy denominators: on the ground states ½ Σ_e V_ea* V_ea′ [1/(E_a + ν − E_e) + 1/(E_a′ + ν − E_e)],
-/// on the excited ones ½ Σ_a V_ea V_e′a* [1/(E_e − ν − E_a) + 1/(E_e′ − ν − E_a)].
-fn van_vleck(energies:&[f64],v:&Dense,nu:f64,ground:&[usize],excited:&[usize])->Dense{
+/// The second-order (van Vleck) shift of a coupling V e^{−iνt} + h.c. (V excited ← ground) with the exact bare-energy
+/// denominators, as the sesquilinear form C(A, B) with VV(V) = C(V, V) (conjugate-linear in A): on the ground states
+/// ½ Σ_e A_ea* B_ea′ [1/(E_a + ν − E_e) + 1/(E_a′ + ν − E_e)], on the excited ones ½ Σ_a B_ea A_e′a* [1/(E_e − ν − E_a) + 1/(E_e′ − ν − E_a)].
+fn van_vleck(energies:&[f64],a:&Dense,b:&Dense,nu:f64,ground:&[usize],excited:&[usize])->Dense{
     let mut out=Dense::zeros(STATES,STATES);
-    for(i,&a)in ground.iter().enumerate(){for(j,&b)in ground.iter().enumerate(){let mut z=Complex::ZERO;
-        for(e,&x)in excited.iter().enumerate(){z+=v[(e,i)].conj()*v[(e,j)]*(0.5*(1./(energies[a]+nu-energies[x])+1./(energies[b]+nu-energies[x])));}
-        out[(a,b)]=z;}}
+    for(i,&x)in ground.iter().enumerate(){for(j,&y)in ground.iter().enumerate(){let mut z=Complex::ZERO;
+        for(e,&w)in excited.iter().enumerate(){z+=a[(e,i)].conj()*b[(e,j)]*(0.5*(1./(energies[x]+nu-energies[w])+1./(energies[y]+nu-energies[w])));}
+        out[(x,y)]=z;}}
     for(e,&x)in excited.iter().enumerate(){for(f,&y)in excited.iter().enumerate(){let mut z=Complex::ZERO;
-        for(i,&a)in ground.iter().enumerate(){z+=v[(e,i)]*v[(f,i)].conj()*(0.5*(1./(energies[x]-nu-energies[a])+1./(energies[y]-nu-energies[a])));}
+        for(i,&w)in ground.iter().enumerate(){z+=b[(e,i)]*a[(f,i)].conj()*(0.5*(1./(energies[x]-nu-energies[w])+1./(energies[y]-nu-energies[w])));}
         out[(x,y)]=z;}}
     out
 }
 
-/// The interference of the beams of one frequency their units leave out (`coherence`): the beams,
-/// the bound of its shift over the trap (rad/us), whether they are one unit (their dominant
-/// polarization's) or a unit each, whether they are a near carrier (their co-rotating field summed
-/// in its tables, exactly: the units hold only their counter-rotating fold and outside shift), and
-/// the largest of their units' shifts O_u + F_u (rad/us).
+/// What the fields of the beams of one frequency leave out (`field`, `polarizations`): the beams, the bound of its shift over the trap
+/// (rad/us), whether they are one field (its outside shift's departure from the beams' own) or a near carrier's polarizations apart (their
+/// interference's far part), whether they are a near carrier (their co-rotating field summed in its tables, exactly: the fields hold only
+/// their counter-rotating fold and outside shift), whether their field's outside shift is one scalar for want of the request's form, and the
+/// largest of their fields' shifts O + F (rad/us).
 #[derive(Clone,Debug)]
-pub struct Interference{pub beams:Vec<usize>,pub bound:f64,pub coherent:bool,pub near:bool,pub shift:f64}
+pub struct Interference{pub beams:Vec<usize>,pub bound:f64,pub coherent:bool,pub near:bool,pub scalar:bool,pub shift:f64}
 impl Interference{
     /// Its estimate in the ledger: its bound relative to the nearest pole (the elimination's) and to
     /// the generator's scale -- the eliminated generator's, or the units' shifts where larger (the far
     /// light's energies: a trap of far light alone) --, as a profile's.
     pub fn estimate(&self,g:&Ground)->f64{self.bound*(1./g.pole.max(f64::MIN_POSITIVE)).max(1./g.generator_scale.max(self.shift).max(f64::MIN_POSITIVE))}
+}
+
+/// The largest of xᵀQx over x ∈ [0, 1]^n (Q real symmetric, in a Dense's real parts): over every face -- each coordinate at 0, at 1 or
+/// free -- its free coordinates' stationary point where it lies inside, a face of none its corner.
+fn box_peak(q:&Dense)->f64{
+    let n=q.rows;let mut best=0_f64;
+    for code in 0..3_usize.pow(n as u32){
+        let state:Vec<usize>=(0..n).map(|i|code/3_usize.pow(i as u32)%3).collect();let free:Vec<usize>=(0..n).filter(|&i|state[i]==2).collect();
+        let mut x:Vec<f64>=state.iter().map(|&v|if v==1{1.}else{0.}).collect();
+        if !free.is_empty(){
+            let Some(lu)=Lu::new(&Dense::from_fn(free.len(),free.len(),|i,j|q[(free[i],free[j])]))else{continue};
+            let mut b:Vec<Complex>=free.iter().map(|&i|Complex::new(-(0..n).filter(|&j|state[j]!=2).map(|j|q[(i,j)].re*x[j]).sum::<f64>(),0.)).collect();lu.solve(&mut b);
+            if b.iter().any(|z|!(z.re>0.&&z.re<1.)){continue;}for(i,&j)in free.iter().enumerate(){x[j]=b[i].re;}
+        }
+        best=best.max((0..n).map(|i|(0..n).map(|j|q[(i,j)].re*x[i]*x[j]).sum::<f64>()).sum());
+    }
+    best
 }
 
 /// A matrix of the request with its entries at the round-off of its largest set to zero: what a selection rule forbids and the polarizations' rotation leaves at 1e-16 of the allowed is no coupling,
@@ -664,69 +759,93 @@ fn rounded(mut m:Dense)->Dense{
     for z in m.entries.iter_mut(){if z.abs()<=floor{*z=Complex::ZERO;}}
     m
 }
-/// The units of the beams of one frequency (module documentation, # Far components) and the
-/// interference they leave out, bounded over the trap (every beam at most its peak), whichever of two
-/// leaves out less:
-/// - one unit, their dominant polarization: W = Σ_l u_l V_l, u the leading eigenvector of their
-///   couplings' Gram matrix ⟨V_l, V_k⟩ (the best rank-one approximation V_l ≈ γ_l W, γ_l = ⟨W, V_l⟩/‖W‖²),
-///   the counter-rotating R_W = Σ_l u_l* R_l and the outside shift O_W = Σ_l |γ_l|² O_l/Σ_l |γ_l|⁴, exact
-///   for parallel fields (V_l = γ_l W, R_l = γ_l* R_W, O_l = |γ_l|² O_W). It leaves out the remainders
-///   Δ_l = V_l − γ_l W (Δ′_l = R_l − γ_l* R_W): per folded component 2Γ Σ_l ‖C(W, Δ_l)‖ + Σ_lk ‖C(Δ_l, Δ_k)‖,
-///   Γ = Σ_l |γ_l| and C the van Vleck shift's sesquilinear part (VV(A) = C(A, A)), ‖C(A, B)‖ ≤ ½(‖X‖ + ‖Y‖)
-///   with X = VV(A + B) − VV(A) − VV(B) and Y = VV(A + iB) − VV(A) − VV(B); and of the outside shifts the
-///   beams' own mismatch Σ_l ‖O_l − |γ_l|² O_W‖ and their cross terms' Σ_{l≠k} ‖O_W‖(|γ_l| ρ_k + ρ_l |γ_k| + ρ_l ρ_k),
-///   ρ_l = ‖Δ_l‖/‖W‖ the remainder's field relative to W's (the couplings of the D lines' full multiplets
-///   are an isometry of the field; the request gives no outside cross terms, and the estimate is exact
-///   for a scalar polarizability). Both vanish with the remainders: beams of one polarization to
-///   round-off are their unit to round-off, nearly parallel ones (a reflection's polarization a little
-///   off) their unit with a bound of the same smallness;
-/// - a unit per beam, which leaves out their interference: per pair of beams 2‖C(V_l, V_k)‖ of the
-///   folded components and 2 sqrt(‖O_l‖ ‖O_k‖) of the outside shifts (exact were they of one sign) --
-///   for polarizations that differ (crossed beams, a polarization lattice) the smaller.
-fn coherence(beams:&[usize],couplings:&[Dense],counters:&[Dense],outside:&[Dense],folded:[Option<f64>;2],fold:&dyn Fn(&Dense,f64)->Dense)->(Vec<(Unit,Dense,Dense)>,Option<Interference>){
-    let folds_of=|v:&Dense,r:&Dense|{let mut f=Dense::zeros(STATES,STATES);
-        if let Some(nu)=folded[0]{f.add_scaled(Complex::ONE,&fold(v,nu));}if let Some(nu)=folded[1]{f.add_scaled(Complex::ONE,&fold(r,nu));}f};
-    let single=|l:usize|(Unit{beams:vec![l],weights:vec![Complex::ONE],norm:1.,focus:1.,combination:vec![Complex::ONE]},outside[l].clone(),folds_of(&couplings[l],&counters[l]));
-    if beams.len()==1{return (vec![single(beams[0])],None);}
+/// A near carrier's far parts -- its counter-rotating fold and outside shift -- per polarization: a field of each set of its parallel beams
+/// (`field`, each of rank one; its co-rotating field drives in the carrier's basis whole, `Carrier`), and what their interference leaves out,
+/// bounded over the trap (every beam at most its peak): per pair of beams of two sets 2‖C(V_l, V_k)‖ of the folded components, C the van Vleck
+/// shift's sesquilinear part, ‖C(A, B)‖ ≤ ½(‖X‖ + ‖Y‖) with X = C(A + B) − C(A) − C(B) and Y = C(A + iB) − C(A) − C(B), and 2 sqrt(‖O_l‖ ‖O_k‖)
+/// of the outside shifts (exact were they of one sign). A beam joins the first set whose first coupling it is parallel to (`OFF_THE_BASIS`).
+fn polarizations(beams:&[usize],couplings:&[Dense],counters:&[Dense],outside:&[Dense],folded:[Option<f64>;2],fold:&dyn Fn(&Dense,&Dense,f64)->Dense)
+    ->Result<(Vec<(Unit,Vec<Dense>,Vec<Dense>)>,Vec<Interference>),String>{
+    let inner=|a:&Dense,b:&Dense|a.entries.iter().zip(&b.entries).fold(Complex::ZERO,|s,(x,y)|s+x.conj()**y);
+    let parallel=|l:usize,m:usize|{let(v,w)=(&couplings[l],&couplings[m]);let mut d=v.clone();d.add_scaled(-(inner(w,v)*(1./inner(w,w).re)),w);frobenius(&d)<=crate::model::OFF_THE_BASIS*frobenius(v)};
+    let mut sets:Vec<Vec<usize>>=vec![];for &l in beams{match sets.iter_mut().find(|s|parallel(l,s[0])){Some(s)=>s.push(l),None=>sets.push(vec![l])}}
+    let(mut parts,mut items)=(vec![],vec![]);
+    for set in &sets{let(unit,o,f,item)=field(set,couplings,counters,outside,folded,fold,None)?;parts.push((unit,o,f));items.extend(item);}
+    if sets.len()>1{
+        let cross=|a:&Dense,b:&Dense,nu:f64|{let mut base=fold(a,a,nu);base.add_scaled(Complex::ONE,&fold(b,b,nu));
+            let(mut sum,mut turned)=(a.clone(),a.clone());sum.add_scaled(Complex::ONE,b);turned.add_scaled(Complex::new(0.,1.),b);
+            let(mut x,mut y)=(fold(&sum,&sum,nu),fold(&turned,&turned,nu));x.add_scaled(-Complex::ONE,&base);y.add_scaled(-Complex::ONE,&base);0.5*(x.spectral_norm()+y.spectral_norm())};
+        let(n,set_of)=(beams.len(),|l:usize|sets.iter().position(|s|s.contains(&l)));let mut apart=0.;
+        for i in 0..n{for k in i+1..n{let(l,m)=(beams[i],beams[k]);if set_of(l)==set_of(m){continue;}
+            for(nu,v)in [(folded[0],couplings),(folded[1],counters)]{if let Some(nu)=nu{apart+=2.*cross(&v[l],&v[m],nu);}}
+            apart+=2.*(outside[l].spectral_norm()*outside[m].spectral_norm()).sqrt();
+        }}
+        let shift=parts.iter().map(|(_,o,f):&(Unit,Vec<Dense>,Vec<Dense>)|{let mut x=o[0].clone();x.add_scaled(Complex::ONE,&f[0]);x.spectral_norm()}).fold(0.,f64::max);
+        items.push(Interference{beams:beams.to_vec(),bound:apart,coherent:false,near:folded[0].is_none(),scalar:false,shift});
+    }
+    Ok((parts,items))
+}
+/// The field of the beams of one frequency (module documentation, # Far components) and per coordinate its outside shift O_i and
+/// its folded components' shift F_i (`folded`: the co- and the counter-rotating component's frequency where it folds): a beam alone
+/// its own (γ = 1, O_l, its fold); the others on their Gram matrix's eigenvectors, the largest as the eigensolver gives it, each
+/// later one orthonormalized against those before it, until every coupling lies within `OFF_THE_BASIS` of their span. A field of
+/// rank two or three takes O the request's form in its field where it gives it (`OutsideForm`, `given`: the beams' fields and the form), each
+/// basis vector's field on the quantization axis w_k = Σ_l u_lk E_l, its beams' within `OFF_THE_SPAN` of Σ_k γ_lk w_k; else -- and a field of
+/// rank one always -- one scalar over the field, S |E|², S = Σ_l ‖γ_l‖² O_l/Σ_l ‖γ_l‖⁴ the least squares of the beams' own outside shifts (exact
+/// for parallel fields, O_l = |γ_l|² O_W), what departs from it bounded, (Σ_l sqrt‖O_l − ‖γ_l‖² S‖)², the residual's were it of one sign.
+fn field(beams:&[usize],couplings:&[Dense],counters:&[Dense],outside:&[Dense],folded:[Option<f64>;2],fold:&dyn Fn(&Dense,&Dense,f64)->Dense,
+    given:Option<&(Vec<[Complex;3]>,Vec<Dense>)>)->Result<(Unit,Vec<Dense>,Vec<Dense>,Option<Interference>),String>{
+    // C(j, k) of the folded components between basis vectors j and k: the co-rotating C(W_j, W_k), the counter-rotating C(RW_k, RW_j).
+    let folds_of=|wj:&Dense,wk:&Dense,rj:&Dense,rk:&Dense|{let mut f=Dense::zeros(STATES,STATES);
+        if let Some(nu)=folded[0]{f.add_scaled(Complex::ONE,&fold(wj,wk,nu));}if let Some(nu)=folded[1]{f.add_scaled(Complex::ONE,&fold(rk,rj,nu));}f};
+    if let [l]=beams{let l=*l;return Ok((Unit{beams:vec![l],rank:1,weights:vec![Complex::ONE],combination:vec![Complex::ONE],norm:1.,pivot:0,origin:[0.;MOST_RANK],focus:1.,extra:vec![]},
+        vec![outside[l].clone()],vec![folds_of(&couplings[l],&couplings[l],&counters[l],&counters[l])],None));}
+    let n=beams.len();
     let inner=|a:&Dense,b:&Dense|a.entries.iter().zip(&b.entries).fold(Complex::ZERO,|s,(x,y)|s+x.conj()**y);
     let combination=|m:&[Dense],w:&dyn Fn(usize)->Complex|{let mut out=Dense::zeros(m[0].rows,m[0].cols);for(i,&l)in beams.iter().enumerate(){out.add_scaled(w(i),&m[l]);}out};
-    // ‖C(A, B)‖'s bound by the polarization identity.
-    let cross=|a:&Dense,b:&Dense,nu:f64|{let mut base=fold(a,nu);base.add_scaled(Complex::ONE,&fold(b,nu));
-        let(mut sum,mut turned)=(a.clone(),a.clone());sum.add_scaled(Complex::ONE,b);turned.add_scaled(Complex::new(0.,1.),b);
-        let(mut x,mut y)=(fold(&sum,nu),fold(&turned,nu));x.add_scaled(-Complex::ONE,&base);y.add_scaled(-Complex::ONE,&base);0.5*(x.spectral_norm()+y.spectral_norm())};
-    let n=beams.len();
-    // A unit per beam: their interference.
-    let mut apart=0.;
-    for i in 0..n{for k in i+1..n{let(l,m)=(beams[i],beams[k]);
-        for(nu,v)in [(folded[0],couplings),(folded[1],counters)]{if let Some(nu)=nu{apart+=2.*cross(&v[l],&v[m],nu);}}
-        apart+=2.*(outside[l].spectral_norm()*outside[m].spectral_norm()).sqrt();
-    }}
-    // The dominant polarization's unit and its remainders.
     let gram:Vec<Complex>=(0..n*n).map(|x|inner(&couplings[beams[x/n]],&couplings[beams[x%n]])).collect();
-    let together=crate::eigen::eigen(&gram,n).and_then(|e|{
-        let j=(0..n).max_by(|&a,&b|e.values[a].re.total_cmp(&e.values[b].re))?;let u:Vec<Complex>=(0..n).map(|i|e.vectors[i*n+j]).collect();
-        let w=combination(couplings,&|i|u[i]);let ww=inner(&w,&w).re;if !(ww>0.){return None;}
-        let rw=combination(counters,&|i|u[i].conj());
-        let gamma:Vec<Complex>=beams.iter().map(|&l|inner(&w,&couplings[l])*(1./ww)).collect();
-        let quartic:f64=gamma.iter().map(|g|g.norm_sqr().powi(2)).sum();
-        let ow=combination(outside,&|i|Complex::new(gamma[i].norm_sqr()/quartic,0.));
-        let remainder=|m:&[Dense],base:&Dense,g:&dyn Fn(Complex)->Complex|->Vec<Dense>{beams.iter().zip(&gamma).map(|(&l,&c)|{let mut d=m[l].clone();d.add_scaled(-g(c),base);d}).collect()};
-        let(dv,dr)=(remainder(couplings,&w,&|c|c),remainder(counters,&rw,&|c|c.conj()));
-        let total:f64=gamma.iter().map(|g|g.abs()).sum();
-        let mut bound=0.;
-        for(nu,base,d)in [(folded[0],&w,&dv),(folded[1],&rw,&dr)]{
-            let Some(nu)=nu else{continue};
-            for i in 0..n{bound+=2.*total*cross(base,&d[i],nu)+fold(&d[i],nu).spectral_norm();for k in i+1..n{bound+=2.*cross(&d[i],&d[k],nu);}}
+    let e=crate::eigen::eigen(&gram,n).ok_or("同频光束的耦合 Gram 矩阵无法对角化")?;
+    let lead=(0..n).max_by(|&a,&b|e.values[a].re.total_cmp(&e.values[b].re)).unwrap();
+    let mut order:Vec<usize>=(0..n).filter(|&j|j!=lead).collect();order.sort_by(|&a,&b|e.values[b].re.total_cmp(&e.values[a].re));order.insert(0,lead);
+    let(mut basis,mut w,mut gamma):(Vec<Vec<Complex>>,Vec<Dense>,Vec<Vec<Complex>>)=(vec![],vec![],vec![]);
+    // Each coupling's remainder off the basis so far, relative to its norm.
+    let off=|w:&[Dense],gamma:&[Vec<Complex>]|beams.iter().enumerate().map(|(i,&l)|{let mut d=couplings[l].clone();for(wk,g)in w.iter().zip(gamma){d.add_scaled(-g[i],wk);}
+        frobenius(&d)/frobenius(&couplings[l]).max(f64::MIN_POSITIVE)}).fold(0.,f64::max);
+    for &j in &order{
+        if !w.is_empty()&&off(&w,&gamma)<=crate::model::OFF_THE_BASIS{break;}
+        let mut u:Vec<Complex>=(0..n).map(|i|e.vectors[i*n+j]).collect();
+        if !basis.is_empty(){
+            for _ in 0..2{for b in &basis{let x=b.iter().zip(&u).fold(Complex::ZERO,|s,(p,q)|s+p.conj()**q);for(q,p)in u.iter_mut().zip(b){*q-=x**p;}}}
+            let size=u.iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();if size<=crate::model::OFF_THE_BASIS{continue;}for z in &mut u{*z=*z*(1./size);}
         }
-        let rho:Vec<f64>=dv.iter().map(|d|(inner(d,d).re/ww).sqrt()).collect();let size=ow.spectral_norm();
-        for(i,&l)in beams.iter().enumerate(){let mut d=outside[l].clone();d.add_scaled(Complex::new(-gamma[i].norm_sqr(),0.),&ow);bound+=d.spectral_norm();
-            for k in 0..n{if k!=i{bound+=size*(gamma[i].abs()*rho[k]+rho[i]*gamma[k].abs()+rho[i]*rho[k]);}}}
-        let norm=total*total;let focus=gamma.iter().fold(Complex::ZERO,|s,&g|s+g).norm_sqr()/norm;
-        Some(((Unit{beams:beams.to_vec(),weights:gamma,norm,focus,combination:u},ow.scaled(Complex::new(norm,0.)),folds_of(&w,&rw).scaled(Complex::new(norm,0.))),bound))
-    });
-    let(units,bound,coherent)=match together{Some((unit,bound))if bound<=apart=>(vec![unit],bound,true),_=>(beams.iter().map(|&l|single(l)).collect(),apart,false)};
-    let shift=units.iter().map(|(_,o,f)|{let mut x=o.clone();x.add_scaled(Complex::ONE,f);x.spectral_norm()}).fold(0.,f64::max);
-    (units,Some(Interference{beams:beams.to_vec(),bound,coherent,near:folded[0].is_none(),shift}))
+        let wk=combination(couplings,&|i|u[i]);let ww=inner(&wk,&wk).re;if !(ww>0.){continue;}
+        gamma.push(beams.iter().map(|&l|inner(&wk,&couplings[l])*(1./ww)).collect());w.push(wk);basis.push(u);
+    }
+    if w.is_empty()||w.len()>crate::model::MOST_RANK||off(&w,&gamma)>crate::model::OFF_THE_SPAN{return Err("同频光束的耦合张成超过三个矩阵（偶极算符只有三个分量）".into());}
+    let r=w.len();
+    let rw:Vec<Dense>=basis.iter().map(|u|combination(counters,&|i|u[i].conj())).collect();
+    let total=(0..n).map(|i|(0..r).fold(0_f64,|h,k|h.hypot(gamma[k][i].abs()))).sum::<f64>();let norm=total*total;
+    let mut unit=Unit{beams:beams.to_vec(),rank:r,weights:(0..n*r).map(|x|gamma[x%r][x/r]).collect(),combination:(0..n*r).map(|x|basis[x%r][x/r]).collect(),norm,pivot:0,origin:[0.;MOST_RANK],focus:0.,extra:vec![]};
+    let at_focus=unit.fields(|_|Complex::ONE);let p=(0..r).max_by(|&a,&b|at_focus[a].norm_sqr().total_cmp(&at_focus[b].norm_sqr())).unwrap();unit.pivot=p;
+    unit.origin=std::array::from_fn(|k|{let z=at_focus[k]*at_focus[p].conj();if k==p||z==Complex::ZERO{0.}else{z.im.atan2(z.re)}});
+    unit.focus=unit.chart(&at_focus,None)[0];let mut extra=vec![];unit.extra(&at_focus,&mut extra);unit.extra=extra;
+    let sizes:Vec<f64>=(0..n).map(|i|(0..r).map(|k|gamma[k][i].norm_sqr()).sum()).collect();let quartic:f64=sizes.iter().map(|s|s.powi(2)).sum();
+    let scalar=combination(outside,&|i|Complex::new(sizes[i]/quartic,0.));let formed=given.filter(|_|r>1);
+    let outside_of:Box<dyn Fn(usize,usize)->Dense>=if let Some((fields,form))=formed.filter(|(_,form)|form.iter().any(|m|m.largest()>0.)){
+        let lab:Vec<[Complex;3]>=basis.iter().map(|u|std::array::from_fn(|q|(0..n).fold(Complex::ZERO,|s,i|s+u[i]*fields[i][q]))).collect();
+        for(i,f)in fields.iter().enumerate(){let size=f.iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();
+            let left=(0..3).map(|q|(f[q]-(0..r).fold(Complex::ZERO,|s,k|s+gamma[k][i]*lab[k][q])).norm_sqr()).sum::<f64>().sqrt();
+            if left>crate::model::OFF_THE_SPAN*size{return Err(format!("光束的电场与其耦合不一致（偏离 {:.1e}）",left/size));}}
+        // The form's A_pq: A_qq the |E_q|² matrix, A_pq = (X − iY)/2 and A_qp = (X + iY)/2 from the pair's Re and Im matrices X, Y.
+        let a=move|p:usize,q:usize|->Dense{if p==q{return form[q].clone();}let pair=3+2*(p+q-1);
+            let mut m=form[pair].scaled(Complex::new(0.5,0.));m.add_scaled(Complex::new(0.,if p<q{-0.5}else{0.5}),&form[pair+1]);m};
+        Box::new(move|j,k|{let mut b=Dense::zeros(STATES,STATES);for p in 0..3{for q in 0..3{let z=lab[j][p].conj()*lab[k][q];if z!=Complex::ZERO{b.add_scaled(z,&a(p,q));}}}b})
+    }else if formed.is_some(){Box::new(|_,_|Dense::zeros(STATES,STATES))}else{let s=scalar.clone();Box::new(move|j,k|if j==k{s.clone()}else{Dense::zeros(STATES,STATES)})};
+    let(o,f)=(unit.matrices(&|j,k|outside_of(j,k)),unit.matrices(&|j,k|folds_of(&w[j],&w[k],&rw[j],&rw[k])));
+    let item=formed.is_none().then(||{
+        let rest:f64=beams.iter().enumerate().map(|(i,&l)|{let mut d=outside[l].clone();d.add_scaled(Complex::new(-sizes[i],0.),&scalar);d.spectral_norm().sqrt()}).sum();
+        let mut x=o[0].clone();x.add_scaled(Complex::ONE,&f[0]);Interference{beams:beams.to_vec(),bound:rest*rest,coherent:true,near:folded[0].is_none(),scalar:r>1,shift:x.spectral_norm()}});
+    Ok((unit,o,f,item))
 }
 
 /// A coupling's distance over its domain: how near the range [lo, hi] of its mismatch comes to zero.
@@ -958,20 +1077,24 @@ impl Ground{
         if let Some(c)=components.iter().find(|c|c.counter&&!c.folded&&c.size>0.){
             return Err(format!("「{}」的反旋耦合不能按 van Vleck 折叠：频率 {:.1} THz（生成元尺度的 {:.1} 倍，须至少 {FOLD_DISTANCE} 倍），混合 m² = {:.1e}（预算 {BUDGET:.0e}）；3D 运动的近共振载波只取同旋分量，无法保留它",
                 names(&c.beams),c.nu.abs()/TAU/1e6,c.nu.abs()/l0,mixing(c.size,c.nu.abs(),l0,f64::MIN_POSITIVE).powi(2)));}
-        // The units (`Unit`) and their outside shifts and folds, and per frequency of several beams the
-        // interference they leave out (`coherence`).
-        let fold=|v:&Dense,nu:f64|van_vleck(&energies,v,nu,&ground_states,&excited_states);
-        let(mut parts,mut interference):(Vec<(Unit,Dense,Dense)>,Vec<Interference>)=(vec![],vec![]);
+        // The frequencies' fields (`Unit`), in the order of their first beams, and their coordinates' outside shifts and folds: far light the
+        // frequency's field, its outside shift the request's form where it gives it and its beams' fields (`OutsideForm`, `Beam::field`); a near
+        // carrier's far parts a field per polarization (`polarizations`). What either leaves out is bounded (`Interference`).
+        let fold=|a:&Dense,b:&Dense,nu:f64|van_vleck(&energies,a,b,nu,&ground_states,&excited_states);
+        let(mut units,mut unit_outside,mut unit_folds,mut extra_outside,mut extra_folds)=(vec![],vec![],vec![],vec![],vec![]);
+        let(mut parts,mut interference):(Vec<(Unit,Vec<Dense>,Vec<Dense>)>,Vec<Interference>)=(vec![],vec![]);
         for beams in &frequencies{
             let(co,counter)=(components.iter().find(|c|!c.counter&&c.beams==*beams).unwrap(),components.iter().find(|c|c.counter&&c.beams==*beams).unwrap());
             let folded=[co.folded.then_some(co.nu),counter.folded.then_some(counter.nu)];
-            let(units,item)=coherence(beams,&couplings,&counters,&outside,folded,&fold);
-            parts.extend(units);interference.extend(item);
+            let given=request.outside_forms.iter().find(|f|f.frequency_index==request.beams[beams[0]].frequency_index).and_then(|f|
+                Some((beams.iter().map(|&l|request.beams[l].field).collect::<Option<Vec<_>>>()?,f.matrices.iter().map(|m|Dense::block(m,&all,&all)).collect::<Vec<_>>())));
+            if co.folded{let(unit,o,f,item)=field(beams,&couplings,&counters,&outside,folded,&fold,given.as_ref())?;parts.push((unit,o,f));interference.extend(item);}
+            else{let(own,items)=polarizations(beams,&couplings,&counters,&outside,folded,&fold)?;parts.extend(own);interference.extend(items);}
         }
         // In the order of their first beams: a scene of single beams has a unit per beam, in its order.
         parts.sort_by_key(|p|p.0.beams[0]);
-        let(mut units,mut unit_outside,mut unit_folds)=(vec![],vec![],vec![]);
-        for(u,o,f)in parts{units.push(u);unit_outside.push(o);unit_folds.push(f);}
+        for(unit,o,f)in parts{let(mut o,mut f)=(o.into_iter(),f.into_iter());unit_outside.extend(o.next());extra_outside.extend(o);unit_folds.extend(f.next());extra_folds.extend(f);units.push(unit);}
+        unit_outside.extend(extra_outside);unit_folds.extend(extra_folds);
         // The near carriers: the near co-rotating components, each one's beams that drive.
         let carriers:Vec<Carrier>=components.iter().filter(|c|!c.counter&&!c.folded&&c.size>0.).map(|c|{
             let beams:Vec<usize>=c.beams.iter().copied().filter(|&l|frobenius(&couplings[l])>0.).collect();
@@ -990,16 +1113,42 @@ impl Ground{
     }
 
     /// Every unit's intensity at a point r (um from the focus).
-    pub fn intensities_at(&self,r:[f64;3])->Vec<f64>{let a=self.amplitudes_at(r);self.units.iter().map(|u|u.intensity(|l|a[l])).collect()}
-    /// H at a point r (um from the focus): H0 with each unit's outside shift and fold at its
-    /// intensity there.
+    pub fn intensities_at(&self,r:[f64;3])->Vec<f64>{let a=self.amplitudes_at(r);self.coordinates(|l|a[l])}
+    /// Every field's chart at the beams' amplitudes a: the fields' intensities, then their polarizations (`Unit::chart`, `Ground::extras`).
+    pub fn coordinates(&self,a:impl Fn(usize)->Complex)->Vec<f64>{
+        let fields:Vec<[Complex;MOST_RANK]>=self.units.iter().map(|u|u.fields(&a)).collect();
+        let mut x:Vec<f64>=self.units.iter().zip(&fields).map(|(u,e)|u.chart(e,None)[0]).collect();
+        for(u,e)in self.units.iter().zip(&fields){u.extra(e,&mut x);}x
+    }
+    /// Field u's chart within the coordinates x (its intensity, then its polarization).
+    pub fn chart_of(&self,u:usize,x:&[f64])->Vec<f64>{std::iter::once(x[u]).chain(self.extras(u).map(|i|x[i])).collect()}
+    /// The places of field u's T coordinates' matrices in `outside` and `folds`: |E_0|²/N's at u, its others after every field's (`Unit::t_coordinates`).
+    fn t_places(&self,u:usize)->Vec<usize>{let n=self.units.len();let start=n+self.units[..u].iter().map(|v|v.rank*v.rank-1).sum::<usize>();
+        std::iter::once(u).chain(start..start+self.units[u].rank*self.units[u].rank-1).collect()}
+    /// Field u's static shift on state s per T coordinate (`Unit::t_coordinates`): G_i = (O_i + F_i)_ss -- the far light's shift Σ_i t_i G_i,
+    /// linear in T (module documentation, # Far components).
+    pub fn linear_shift(&self,u:usize,s:usize)->Vec<f64>{self.t_places(u).into_iter().map(|p|self.outside[p][(s,s)].re+self.folds[p][(s,s)].re).collect()}
+    /// The largest depth field u's linear shift on state s gives, −Σ_i t_i G_i, over its beams' amplitudes within their peaks (|a_l| ≤ 1, any
+    /// phases): a† K a, K = −Γ† F Γ (E = Γ a, Γ_kl = γ_lk; E† F E = Σ_i t_i G_i at T = E E†/N), at most the largest of Σ_l K_ll x_l² +
+    /// 2 Σ_{l<m} |K_lm| x_l x_m over x ∈ [0, 1]^n -- the phases aligned, which two beams' are (`box_peak`).
+    pub fn linear_peak(&self,u:usize,s:usize)->f64{
+        let(unit,g)=(&self.units[u],self.linear_shift(u,s));let(r,n,norm)=(unit.rank,unit.beams.len(),unit.norm);
+        let mut f=Dense::zeros(r,r);for k in 0..r{f[(k,k)]=Complex::new(-g[k]/norm,0.);}
+        let mut at=r;for j in 0..r{for k in j+1..r{let z=Complex::new(g[at],-g[at+1])*(-0.5/norm);f[(j,k)]=z;f[(k,j)]=z.conj();at+=2;}}
+        let gamma=Dense::from_fn(r,n,|k,l|unit.weights[l*r+k]);let k=gamma.adjoint().product(&f.product(&gamma));
+        box_peak(&Dense::from_fn(n,n,|l,m|Complex::new(if l==m{k[(l,l)].re}else{k[(l,m)].abs()},0.)))
+    }
+    /// H at a point r (um from the focus): H0 with each coordinate's outside shift and fold there.
     pub fn hamiltonian_at(&self,r:[f64;3])->Dense{self.hamiltonian_with(&self.intensities_at(r))}
-    /// H with every unit at the given intensity s_u (module documentation, # Far components).
+    /// H at the fields' charts x (module documentation, # Far components): each field's T there and at the focus.
     pub fn hamiltonian_with(&self,intensities:&[f64])->Dense{
-        let mut h=self.hamiltonian.clone();
-        for((&s,unit),(outside,fold))in intensities.iter().zip(&self.units).zip(self.outside.iter().zip(&self.folds)){
-            if s!=unit.focus{h.add_scaled(Complex::new(s-unit.focus,0.),outside);}
-            h.add_scaled(Complex::new(s,0.),fold);
+        let(mut h,focus)=(self.hamiltonian.clone(),self.focus_intensities());
+        for(u,unit)in self.units.iter().enumerate(){
+            let(t,t0)=(unit.t_coordinates(&self.chart_of(u,intensities)),unit.t_coordinates(&self.chart_of(u,&focus)));
+            for(i,place)in self.t_places(u).into_iter().enumerate(){
+                if t[i]!=t0[i]{h.add_scaled(Complex::new(t[i]-t0[i],0.),&self.outside[place]);}
+                h.add_scaled(Complex::new(t[i],0.),&self.folds[place]);
+            }
         }
         h
     }
@@ -1008,8 +1157,8 @@ impl Ground{
     fn motion(&self,l:usize,k:Option<usize>)->f64{let wave=|b:&Beam|wave_vector(b.direction,b.wave_number_per_um);
         let(a,b)=(wave(&self.beams[l]),k.map_or([0.;3],|k|wave(&self.beams[k])));let q:[f64;3]=std::array::from_fn(|i|a[i]-b[i]);
         let n=q.iter().map(|x|x*x).sum::<f64>().sqrt();if n>0.{doppler(q,q.map(|x|x*self.speed/n))}else{0.}}
-    /// Every unit at its intensity at the focus.
-    pub fn focus_intensities(&self)->Vec<f64>{self.units.iter().map(|u|u.focus).collect()}
+    /// Every field's coordinates at the focus.
+    pub fn focus_intensities(&self)->Vec<f64>{self.units.iter().map(|u|u.focus).chain(self.units.iter().flat_map(|u|u.extra.iter().copied())).collect()}
     /// The domain of a bound of the rule, every varying unit (`Unit::varies`) at each of its `values` and the others at their own: H is affine in
     /// them, its energies' range at the corners -- the drives' over the reach (`Ground::reach`), a real denominator's over the whole trap --; the responses at `reach_levels`.
     fn points(&self,values:&dyn Fn(usize)->Vec<f64>)->Vec<Vec<f64>>{
@@ -1022,6 +1171,21 @@ impl Ground{
     fn reach_levels(&self,u:usize)->Vec<f64>{let low=self.reach[u];if 1.-low<=MIXING_SHARE{vec![1.]}else{LEVELS.iter().map(|l|low+(1.-low)*l).collect()}}
     /// The unit a beam is in.
     pub fn unit_of(&self,beam:usize)->usize{self.units.iter().position(|u|u.beams.contains(&beam)).unwrap()}
+    /// The places of field u's coordinates other than its intensity among the coordinates (`Ground::units`).
+    pub fn extras(&self,u:usize)->std::ops::Range<usize>{let start=self.units.len()+self.units[..u].iter().map(|v|v.extra.len()).sum::<usize>();start..start+self.units[u].extra.len()}
+    /// Near carrier d's fields at the charts x as the dressing takes them (`Ground::dress_light`): each one's amplitude √(I N), its folded
+    /// coupling Σ_k w_k W^f_k along its polarization w (`Unit::polarization`) -- a field of rank one its own W^f.
+    pub fn near_modes(&self,d:usize,x:&[f64])->Vec<(f64,Cow<'_,Dense>)>{
+        let mut out=vec![];
+        for(u,near)in self.near_units.iter().enumerate(){
+            let Some(near)=near.as_ref().filter(|n|n.carrier==d)else{continue};let unit=&self.units[u];let amplitude=(x[u]*unit.norm).max(0.).sqrt();
+            if unit.rank==1{out.push((amplitude,Cow::Borrowed(&near.couplings[0])));continue;}
+            let w=unit.polarization(&self.chart_of(u,x));
+            let mut coupling=Dense::zeros(near.couplings[0].rows,near.couplings[0].cols);for(k,z)in w[..unit.rank].iter().enumerate(){coupling.add_scaled(*z,&near.couplings[k]);}
+            out.push((amplitude,Cow::Owned(coupling)));
+        }
+        out
+    }
 
     /// K decoupled from a cluster's explicit excited states P: their off-diagonal entries zeroed (each
     /// keeps its own K_ee). A folded amplitude driven from the cluster's ground states follows the
@@ -1147,7 +1311,7 @@ impl Ground{
         let dot=|x:&[Complex],y:&[Complex]|x.iter().zip(y).fold(Complex::ZERO,|s,(a,b)|s+a.conj()**b);
         let norm=|x:&[Complex]|x.iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();
         // Per carrier its units at this node: the amplitude sqrt(s_u N_u), W^f and the remainders.
-        let units:Vec<Vec<(f64,&NearUnit)>>=(0..nc).map(|d|self.near_units.iter().enumerate().filter_map(|(u,x)|x.as_ref().filter(|x|x.carrier==d).map(|x|((intensities[u]*self.units[u].norm).max(0.).sqrt(),x))).collect()).collect();
+        let units:Vec<Vec<(f64,Cow<Dense>)>>=(0..nc).map(|d|self.near_modes(d,intensities)).collect();
         // Per carrier d and ground state b: its units' fields there, their images under (K − E_b − δ_d)⁻¹ and
         // b's admixture under d.
         type Fields=Vec<(f64,Vec<Complex>,Vec<Vec<Complex>>)>;type Images=Vec<(Vec<Complex>,Vec<Vec<Complex>>)>;
@@ -1158,7 +1322,7 @@ impl Ground{
             if !holds[self.cluster[b]]&&!(0..nc).any(|c|c!=d&&cl.states.iter().any(|&b2|self.couples(c,b2))){continue;}
             let lu=denominator(decoupled.get(b).and_then(|x|x.as_ref()).unwrap_or(k),-energies[b]-self.carriers[d].detuning)?;
             let solved=|v:&[Complex]|{let mut g=v.to_vec();lu.solve(&mut g);g};
-            let fields:Fields=units[d].iter().map(|(a,x)|(*a,column(&x.coupling,b),x.remainders.iter().map(|r|column(r,b)).collect())).collect();
+            let fields:Fields=units[d].iter().map(|(a,x)|(*a,column(x,b),vec![])).collect();
             let images:Images=fields.iter().map(|(_,v,rest)|(solved(v),rest.iter().map(|r|solved(r)).collect())).collect();
             let admixture=fields.iter().zip(&images).map(|((a,_,_),(g,_))|a*a*norm(g).powi(2)).sum();
             parts[d][b]=Some((fields,images,admixture));
@@ -1228,7 +1392,7 @@ impl Ground{
                     for &via in &self.vias[c][b]{
                         let(d,a)=(via.carrier,via.state);let inside=self.cluster[a]==k;
                         let denominator=1./(if inside{own}else{z}-dressed[a]-self.carriers[d].detuning);
-                        for(amp,x)in &units[d]{let w=column(&x.coupling,a);let scale=amp*amp*denominator;for p in 0..ne{for q in 0..ne{sigma[(p,q)]+=w[p]*w[q].conj()*scale;}}}
+                        for(amp,x)in &units[d]{let w=column(x,a);let scale=amp*amp*denominator;for p in 0..ne{for q in 0..ne{sigma[(p,q)]+=w[p]*w[q].conj()*scale;}}}
                         vias.push((via,denominator,denominator*denominator*(doubt[a]+if inside{(z-own).abs()}else{0.})));
                     }
                     mode.dressed.push(Dressing{place:i,sigma,vias,lu:None});
@@ -1283,8 +1447,7 @@ impl Ground{
                     let projection=|w:&[Complex]|responses.iter().map(|r|dot(w,r)).sum::<f64>();
                     let weight=projector[m][d.place*n0+d.place].sqrt();
                     for &(via,denominator,doubt)in &d.vias{
-                        let fields:Vec<(f64,Vec<Complex>,Vec<Vec<Complex>>)>=self.near_units.iter().enumerate().filter_map(|(u,x)|x.as_ref().filter(|x|x.carrier==via.carrier)
-                            .map(|x|((intensities[u]*self.units[u].norm).max(0.).sqrt(),column(&x.coupling,via.state),x.remainders.iter().map(|r|column(r,via.state)).collect()))).collect();
+                        let fields:Vec<(f64,Vec<Complex>,Vec<Vec<Complex>>)>=self.near_modes(via.carrier,intensities).iter().map(|(a,x)|(*a,column(x,via.state),vec![])).collect();
                         for(i,(amp,w,rest))in fields.iter().enumerate(){
                             let(g,p)=(solved(w),projection(w));
                             // Σ_b's own slope, −Σ D_a² w w†: the term's slope beyond G_b² V^f.
@@ -1422,7 +1585,7 @@ impl Ground{
         let unit_of=|l:usize|self.units.iter().position(|u|u.beams.contains(&l));
         let interfering:Vec<(usize,usize)>=self.carriers.iter().flat_map(|c|c.beams.iter().flat_map(|&l|c.beams.iter().map(move|&m|(l,m)))).filter(|&(l,m)|l!=m&&unit_of(l)==unit_of(m)&&on(l)&&on(m)).collect();
         let products=|r:[f64;3]|{let a=self.amplitudes_at(r);move|l:usize,m:usize|a[l].conj()*a[m]};
-        let held=|r:[f64;3]|{let a=self.amplitudes_at(r);let off:Vec<f64>=self.units.iter().map(|u|{let field=u.beams.iter().zip(&u.weights).filter(|(l,_)|!on(**l)).fold(Complex::ZERO,|s,(&l,&w)|s+a[l]*w);field.norm_sqr()/u.norm}).collect();
+        let held=|r:[f64;3]|{let a=self.amplitudes_at(r);let off=self.coordinates(|l|if on(l){Complex::ZERO}else{a[l]});
             let at=products(r);self.level(state,&self.intensities_at(r),&|l,m|if on(l){at(l,m)}else{Complex::ZERO},&interfering)-self.level(state,&off,&|_,_|Complex::ZERO,&interfering)};
         Trap::from_potentials(self,trap_beam,held,
             |r,_|self.level(state,&self.intensities_at(r),&products(r),&interfering),|_|None)
@@ -1903,9 +2066,7 @@ impl Ground{
         self.vias=(0..nc).map(|c|(0..ng).map(|b|{let x=Channel{carrier:c,state:b};
             channels.iter().copied().filter(|&y|self.couples(c,b)&&folded_raman(x,y)==Some(true)).collect()}).collect()).collect();
         self.near_units=self.units.iter().map(|u|{let c=self.carriers.iter().position(|c|c.beams.contains(&u.beams[0]))?;
-            let mut coupling=Dense::zeros(ne,ng);for(&l,&x)in u.beams.iter().zip(&u.combination){coupling.add_scaled(x,&self.folded[l]);}
-            let remainders=if u.beams.len()>1{u.beams.iter().zip(&u.weights).map(|(&l,&g)|{let mut r=self.folded[l].clone();r.add_scaled(-g,&coupling);r}).collect()}else{vec![]};
-            Some(NearUnit{carrier:c,coupling,remainders})}).collect();
+            Some(NearUnit{carrier:c,couplings:(0..u.rank).map(|k|{let mut w=Dense::zeros(ne,ng);for(j,&l)in u.beams.iter().enumerate(){w.add_scaled(u.combination[j*u.rank+k],&self.folded[l]);}w}).collect()})}).collect();
         self.items=items;self.cut=cut;self.clusters=clusters;self.cluster=cluster;self.excited_items=excited;self.dressed=dressed;
         self.floors=self.clusters.iter().map(|cl|0.5*hermitian_eigenvalues(&self.cluster_hamiltonian(&self.decay,cl)).into_iter().fold(f64::INFINITY,f64::min).max(0.)).collect();
         self.dressing=true;self.unmixed_blocks()?;self.channel_poles=self.dressed_poles()?;
@@ -2356,19 +2517,22 @@ pub(crate) mod tests{
     }
     fn matrix(v:&Value)->Matrix{let m=entries(v,STATES,STATES);Matrix{real:m.entries.iter().map(|z|z.re).collect(),imag:m.entries.iter().map(|z|z.im).collect()}}
     fn floats(v:&Value)->Vec<f64>{v.as_array().unwrap().iter().map(float).collect()}
-    /// A request from a fixture: the matrices its beams lack (the counter-rotating coupling, the outside shift) are zero.
+    /// A request from a fixture: the matrices its beams lack (the counter-rotating coupling, the outside shift) are zero -- a model
+    /// without states outside it, whose outside forms are zero.
     pub(crate) fn request(v:&Value)->Request{
         let or_zero=|m:&Value|if m.is_null(){Matrix{real:vec![0.;STATES*STATES],imag:vec![0.;STATES*STATES]}}else{matrix(m)};
         let beams=v["beams"].as_array().unwrap().iter().map(|b|{let d=floats(&b["direction"]);Beam{id:b["id"].as_str().unwrap().into(),name:b["name"].as_str().unwrap().into(),
             direction:[d[0],d[1],d[2]],wave_number_per_um:float(&b["waveNumberPerUm"]),waist_um:b["waistUm"].as_f64(),intensity_mw_cm2:float(&b["intensityMWcm2"]),
             frequency_index:b["frequencyIndex"].as_array().unwrap().iter().map(|n|n.as_i64().unwrap() as i32).collect(),coupling:matrix(&b["coupling"]),
-            counter_coupling:or_zero(&b["counterCoupling"]),outside_shift:or_zero(&b["outsideShift"])}}).collect::<Vec<Beam>>();
+            counter_coupling:or_zero(&b["counterCoupling"]),outside_shift:or_zero(&b["outsideShift"]),field:None}}).collect::<Vec<Beam>>();
         // The trap beam: the focused one (none in the free-space fixture).
         let trap_beam=beams.iter().position(|b|b.waist_um.is_some()).unwrap_or(0);
         let e=&v["emission"];
         let frames=if v["frameFrequenciesMHz"].is_null(){vec![0.;STATES]}else{floats(&v["frameFrequenciesMHz"])};
         Request{states:v["states"].as_array().unwrap().iter().map(|s|s.as_str().unwrap().into()).collect(),hamiltonian:matrix(&v["hamiltonian"]),
-            frame_frequencies_mhz:frames,frequencies_mhz:floats(&v["frequenciesMHz"]),beams,
+            frame_frequencies_mhz:frames,frequencies_mhz:floats(&v["frequenciesMHz"]),
+            outside_forms:beams.iter().map(|b|b.frequency_index.clone()).fold(vec![],|mut f:Vec<Vec<i32>>,i|{if !f.contains(&i){f.push(i);}f}).into_iter()
+                .map(|frequency_index|crate::OutsideForm{frequency_index,matrices:std::array::from_fn(|_|or_zero(&Value::Null))}).collect(),beams,
             emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],field_vector_g:[0.;3],mass_kg:float(&v["massKg"]),
             trap_beam,initial_density:vec![Complex::ZERO;STATES*STATES],temperature_uk:30.,times_us:vec![]}
     }
@@ -2498,6 +2662,70 @@ pub(crate) mod tests{
             for cl in &g.clusters{
                 let offset=|f:u8|{let s:Vec<f64>=cl.states.iter().zip(&cl.frames).filter(|x|g.levels[*x.0]==f).map(|(&b,&theta)|e.energies[b]-theta).collect();s.iter().sum::<f64>()/s.len() as f64};
                 assert!(((offset(2)-offset(1))/TAU-detuning).abs()<=1e-6,"{} MHz against {detuning} MHz",(offset(2)-offset(1))/TAU);
+            }
+        }
+    }
+
+    /// Far beams of one frequency at random fields E_l through random dipole operators -- V_l = Σ_q E_lq D_q, R_l = Σ_q E_lq* D′_q,
+    /// a diagonal outside form A, each beam's outside shift A(E_l, E_l) and H0 with A at the focus -- on the free-space PGC's states,
+    /// beams along z (the trap), x and y; with `split` the second split into two halves, and a dark beam added.
+    fn far_beams(seed:u64,split:bool)->Request{
+        let mut next=uniform(seed);let mut r=request(&fixture()["request"]);r.beams.clear();r.frequencies_mhz.push(-1e8);
+        let all:Vec<usize>=(0..STATES).collect();let(ground,excited):(Vec<usize>,Vec<usize>)=all.iter().partition(|&&i|r.states[i].starts_with("ground-"));
+        let dipole=|next:&mut dyn FnMut()->f64|->[Dense;3]{std::array::from_fn(|_|{let mut d=Dense::zeros(STATES,STATES);
+            for &e in &excited{for &g in &ground{d[(e,g)]=Complex::new(next(),next());}}d})};
+        let(d,dc)=(dipole(&mut next),dipole(&mut next));
+        // The form: A_pq diagonal, A_qp = A_pq*; its matrices |E_q|², then Re and Im of E_p* E_q per pair.
+        let a:Vec<Vec<Vec<Complex>>>=(0..3).map(|p|(0..3).map(|q|(0..STATES).map(|_|if p==q{Complex::new(1e-10*next(),0.)}else{Complex::new(1e-10*next(),1e-10*next())}).collect()).collect()).collect();
+        let a=|p:usize,q:usize,i:usize|if p<=q{a[p][q][i]}else{a[q][p][i].conj()};
+        let shift=|e:&[Complex;3]|(0..STATES).map(|i|(0..3).flat_map(|p|(0..3).map(move|q|(p,q))).fold(Complex::ZERO,|s,(p,q)|s+e[p].conj()*e[q]*a(p,q,i))).collect::<Vec<Complex>>();
+        let diagonal=|v:&[Complex]|Matrix{real:(0..STATES*STATES).map(|k|if k%(STATES+1)==0{v[k/STATES].re}else{0.}).collect(),imag:vec![0.;STATES*STATES]};
+        let mut forms:Vec<Vec<Complex>>=(0..3).map(|q|(0..STATES).map(|i|a(q,q,i)).collect()).collect();
+        for p in 0..3{for q in p+1..3{forms.push((0..STATES).map(|i|a(p,q,i)+a(q,p,i)).collect());forms.push((0..STATES).map(|i|(a(p,q,i)-a(q,p,i))*Complex::new(0.,1.)).collect());}}
+        r.outside_forms=vec![crate::OutsideForm{frequency_index:vec![0,0,1],matrices:std::array::from_fn(|k|diagonal(&forms[k]))}];
+        let to=|m:&Dense|Matrix{real:m.entries.iter().map(|z|z.re).collect(),imag:m.entries.iter().map(|z|z.im).collect()};
+        let beam=|id:&str,direction:[f64;3],waist:Option<f64>,e:[Complex;3]|{let(mut v,mut c)=(Dense::zeros(STATES,STATES),Dense::zeros(STATES,STATES));
+            for q in 0..3{v.add_scaled(e[q],&d[q]);c.add_scaled(e[q].conj(),&dc[q]);}
+            Beam{id:id.into(),name:id.into(),direction,wave_number_per_um:5.9,waist_um:waist,intensity_mw_cm2:1.,frequency_index:vec![0,0,1],coupling:to(&v),counter_coupling:to(&c),outside_shift:diagonal(&shift(&e)),field:Some(e)}};
+        let mut field=||->[Complex;3]{std::array::from_fn(|_|Complex::new(3e3*next(),3e3*next()))};
+        let(e0,e1,e2)=(field(),field(),field());
+        r.beams.push(beam("z",[0.,0.,1.],Some(1.1),e0));
+        if split{let half=e1.map(|x|x*0.5);r.beams.push(beam("x",[1.,0.,0.],Some(1.3),half));r.beams.push(beam("x′",[1.,0.,0.],Some(1.3),half));r.beams.push(beam("dark",[0.,1.,0.],Some(0.9),[Complex::ZERO;3]));}
+        else{r.beams.push(beam("x",[1.,0.,0.],Some(1.3),e1));}
+        r.beams.push(beam("y",[0.,1.,0.],None,e2));
+        for b in &mut r.beams{b.frequency_index=vec![0,0,1];}r.trap_beam=0;
+        let focus:[Complex;3]=std::array::from_fn(|q|r.beams.iter().fold(Complex::ZERO,|s,b|s+b.field.unwrap()[q]));let at=shift(&focus);
+        for i in 0..STATES{r.hamiltonian.real[i*STATES+i]+=at[i].re;}
+        r
+    }
+
+    /// The beams of one frequency are one field (module documentation, # Far components): three crossed beams at random fields, a
+    /// field of rank three, shift the states at every point by exactly what their summed coupling's van Vleck shift and the outside form
+    /// at their summed field give -- the interference of every pair of beams in it --; a beam split into two halves, or a dark beam added,
+    /// leaves the field and its shift -- to the light's 1e-11 and H's rounding.
+    #[test]
+    fn crossed_beams_shift_the_states_as_their_summed_field(){
+        for seed in 1..=3{
+            let r=far_beams(seed,false);let g=Ground::new(&r).unwrap();let split=Ground::new(&far_beams(seed,true)).unwrap();
+            assert_eq!((g.units.len(),g.units[0].rank),(1,3));assert_eq!(split.units[0].rank,3);
+            let(co,counter)=(g.components.iter().find(|c|!c.counter).unwrap(),g.components.iter().find(|c|c.counter).unwrap());assert!(co.folded&&counter.folded);
+            let energies:Vec<f64>=(0..STATES).map(|i|g.hamiltonian[(i,i)].re).collect();let all:Vec<usize>=(0..STATES).collect();
+            let block=|m:&Matrix|Dense::block(m,&all,&all);
+            for x in [[0.;3],[0.13,-0.21,0.07],[0.5,0.2,-0.4],[-0.9,0.3,1.7]]{
+                let a=g.amplitudes_at(x);let sub=|m:&Matrix|Dense::block(m,&g.excited_states,&g.ground_states);
+                let(mut v,mut rc)=(Dense::zeros(g.excited_states.len(),g.ground_states.len()),Dense::zeros(g.excited_states.len(),g.ground_states.len()));let mut e=[Complex::ZERO;3];
+                for(b,&z)in r.beams.iter().zip(&a){v.add_scaled(z,&sub(&b.coupling));rc.add_scaled(z.conj(),&sub(&b.counter_coupling));for q in 0..3{e[q]+=z*b.field.unwrap()[q];}}
+                let mut expected=g.hamiltonian.clone();
+                expected.add_scaled(Complex::ONE,&van_vleck(&energies,&v,&v,co.nu,&g.ground_states,&g.excited_states));
+                expected.add_scaled(Complex::ONE,&van_vleck(&energies,&rc,&rc,counter.nu,&g.ground_states,&g.excited_states));
+                let focus:[Complex;3]=std::array::from_fn(|q|r.beams.iter().fold(Complex::ZERO,|s,b|s+b.field.unwrap()[q]));
+                let form=|e:&[Complex;3]|{let c=[e[0].norm_sqr(),e[1].norm_sqr(),e[2].norm_sqr(),(e[0].conj()*e[1]).re,(e[0].conj()*e[1]).im,(e[0].conj()*e[2]).re,(e[0].conj()*e[2]).im,(e[1].conj()*e[2]).re,(e[1].conj()*e[2]).im];
+                    let mut o=Dense::zeros(STATES,STATES);for(k,m)in r.outside_forms[0].matrices.iter().enumerate(){o.add_scaled(Complex::new(c[k],0.),&block(m));}o};
+                expected.add_scaled(Complex::ONE,&form(&e));expected.add_scaled(-Complex::ONE,&form(&focus));
+                let mut light=expected.clone();light.add_scaled(-Complex::ONE,&g.hamiltonian);
+                for(h,what)in [(g.hamiltonian_at(x),"one field"),(split.hamiltonian_at(x),"split and dark")]{
+                    let(d,scale)=mismatch(&h,&expected);assert!(d<=1e-11*light.largest()+4.*f64::EPSILON*scale,"{seed} {x:?} {what}: {d:.2e} of the light's {:.2e} (H {scale:.2e})",light.largest());
+                }
             }
         }
     }

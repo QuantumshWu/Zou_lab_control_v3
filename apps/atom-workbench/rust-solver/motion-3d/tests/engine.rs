@@ -33,10 +33,10 @@ fn request(keep:&dyn Fn(&Value)->bool)->Request{
     let beams=r["beams"].as_array().unwrap().iter().filter(|b|keep(b)).map(|b|{let d=floats(&b["direction"]);Beam{id:b["id"].as_str().unwrap().into(),name:b["name"].as_str().unwrap().into(),
         direction:[d[0],d[1],d[2]],wave_number_per_um:b["waveNumberPerUm"].as_f64().unwrap(),waist_um:b["waistUm"].as_f64(),intensity_mw_cm2:b["intensityMWcm2"].as_f64().unwrap(),
         frequency_index:b["frequencyIndex"].as_array().unwrap().iter().map(|n|n.as_i64().unwrap() as i32).collect(),coupling:matrix(&b["coupling"]),
-        counter_coupling:matrix(&b["counterCoupling"]),outside_shift:matrix(&b["outsideShift"])}}).collect::<Vec<Beam>>();
+        counter_coupling:matrix(&b["counterCoupling"]),outside_shift:matrix(&b["outsideShift"]),field:None}}).collect::<Vec<Beam>>();
     let trap_beam=beams.iter().position(|b|b.waist_um.is_some()).unwrap_or(0);
     let e=r["emission"].as_array().unwrap();
-    Request{states,hamiltonian:matrix(&r["hamiltonian"]),frame_frequencies_mhz:floats(&r["frameFrequenciesMHz"]),frequencies_mhz:floats(&r["frequenciesMHz"]),beams,
+    Request{states,hamiltonian:matrix(&r["hamiltonian"]),frame_frequencies_mhz:floats(&r["frameFrequenciesMHz"]),frequencies_mhz:floats(&r["frequenciesMHz"]),beams,outside_forms:vec![],
         emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],field_vector_g:[0.;3],mass_kg:r["massKg"].as_f64().unwrap(),initial_density:density,
         temperature_uk:r["temperatureUK"].as_f64().unwrap(),trap_beam,times_us:vec![]}
 }
@@ -525,6 +525,24 @@ fn a_lone_state_s_round_off_is_no_gain(){
         Model::new(&r).unwrap_or_else(|e|panic!("k_BT = D/{f}: {e}"));}
 }
 
+/// Two crossed far beams (the validation's F9) are a lattice along q = k₀ − k₁ (model.rs `Model::lattice`), of period 2π/|q|, its
+/// sites the wells of the trap's potential on its axis: the centre's and its neighbours', within a fiftieth of the period (their
+/// envelope's tilt, about a hundredth, aside).
+#[test]
+fn a_crossed_pair_s_lattice_has_its_sites_at_the_wells(){
+    let fixture:Value=serde_json::from_str(include_str!("fixtures/crossed_far_beam_motion.json")).unwrap();
+    let mut r=scene::request(&fixture);r.times_us=vec![0.,1.];let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let(trap,(cluster,state,_))=(initial.traps[0],initial.states[0]);let l=trap.lattice.expect("two crossed beams are a lattice");
+    let beams=&model.ground.units[model.focused[0]].beams;let(a,b)=(model.geometry[beams[0]].wave_vector(),model.geometry[beams[1]].wave_vector());
+    let q:[f64;3]=std::array::from_fn(|i|a[i]-b[i]);let size=(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]).sqrt();
+    assert!((0..3).all(|i|(l.axis[i]-q[i]/size).abs()<=1e-12)&&(2.*l.wave_number/size-1.).abs()<=1e-12,"axis {:?}, k {} against q {q:?}",l.axis,l.wave_number);
+    let(period,level)=(std::f64::consts::PI/l.wave_number,|z:f64|model.trap_level(cluster,state,l.axis.map(|x|x*z)));
+    let n=l.nearest((0..3).map(|i|l.axis[i]*trap.centre[i]).sum()).0;
+    for m in [n-1.,n,n+1.]{let(site,g)=(l.site(m),0.5*(5_f64.sqrt()-1.));let(mut lo,mut hi)=(site-period/4.,site+period/4.);
+        for _ in 0..80{let(x,y)=(hi-g*(hi-lo),lo+g*(hi-lo));if level(x)<level(y){hi=y;}else{lo=x;}}
+        assert!((0.5*(lo+hi)-site).abs()<=period/50.,"site {m} at {site} um, its well's bottom at {} um (period {period} um)",0.5*(lo+hi));}
+}
+
 /// The near light comes on at t = 0, and its fold's shift is no part of the ensemble's energy: on the tweezer PGC's
 /// all-folded model the 10 MHz probe's denominator closes on a shell about the focus, where with it the envelope's top
 /// stood at 137 k_BT against the focus's 34 and no proposal in e^100 was kept (the solve never reached its first
@@ -573,7 +591,7 @@ fn the_loss_s_potential_is_the_ground_populations_mean(){
 /// no longer takes the site's stiffness (about the focus T_x rose to 3.6 times at a step of that order).
 #[test]
 fn a_standing_wave_s_sites_hold_their_atoms_as_the_centre_does(){
-    let(_,mut r)=retro(0.);r.times_us=vec![0.,1.];let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    let(_,mut r)=retro();r.times_us=vec![0.,1.];let model=Model::new(&r).unwrap();let initial=Initial::new(&model,&r).unwrap();
     let trap=initial.traps[0];let(cluster,state,_)=initial.states[0];let hm=model.hbar_over_mass;
     let lattice=trap.lattice.expect("the tweezer and its reflection are a standing wave");
     let settings=Settings::new(0.01,&trap,f64::EPSILON,false);
@@ -607,7 +625,7 @@ fn mirrored(r:&Request,reflectivity:f64,phase:f64)->Request{
 /// 269 kHz at 85°, 17 kHz at −90° against 911 kHz at 0° and nothing past 90°.) At 0° the focus's very bits.
 #[test]
 fn a_mirror_phase_moves_the_trap_with_its_sites(){
-    let(_,base)=retro(0.);
+    let(_,base)=retro();
     for reflectivity in [1.,0.1]{
         let read=|phase:f64|{let mut r=mirrored(&base,reflectivity,phase);r.times_us=vec![0.,1.];let model=Model::new(&r).unwrap();let i=Initial::new(&model,&r).unwrap();
             let mut sorted=i.traps[0].frequencies;sorted.sort_by(f64::total_cmp);(i.traps[0],sorted,i.depths[0],i.ensembles[0].as_ref().unwrap().kinetic)};
@@ -638,7 +656,7 @@ fn thermal_atoms_stay(r:&Request){
 /// A far tweezer's atoms past 90° and at the tie, every initial energy taken in the wells they stand in.
 #[test]
 fn a_mirror_phase_s_sites_hold_their_atoms(){
-    let(_,base)=retro(0.);
+    let(_,base)=retro();
     for(reflectivity,phase)in [(1.,135.),(1.,180.),(0.1,-135.)]{let mut r=mirrored(&base,reflectivity,phase);r.times_us=vec![0.,1.];thermal_atoms_stay(&r);}
 }
 /// The trap the rule reads its reach by, before any table (ground.rs `Ground::holding`), is the model's (`Model::trap`): on an 808 nm tweezer that is a near carrier both hold its own light shift, within 0.1 %, which H(r) alone, what the reach read, leaves out, its ω 8.4 times low.
@@ -672,14 +690,10 @@ fn a_near_carrier_s_standing_wave_holds_its_atoms(){
     thermal_atoms_stay(&r);
 }
 
-/// The fixture's tweezer alone and with a reflection along its axis, in phase at the focus (F5): the
-/// reflection's field the tweezer's with `turn` of the cooling beam's polarization added (relative to
-/// the tweezer's coupling's size, its outside shift the tweezer's).
-fn retro(turn:f64)->(Request,Request){
-    let alone=request(&|b|b["id"]=="tweezer");let cool=request(&|b|b["id"]=="cool-plus").beams[0].clone();
+/// The fixture's tweezer alone and with a reflection along its axis, in phase at the focus (F5), its outside shift the tweezer's.
+fn retro()->(Request,Request){
+    let alone=request(&|b|b["id"]=="tweezer");
     let mut reflection=alone.beams[0].clone();(reflection.id,reflection.name)=("reflection".into(),"反射光".into());reflection.direction=reflection.direction.map(|x|-x);
-    let norm=|m:&Matrix|m.real.iter().zip(&m.imag).map(|(a,b)|a*a+b*b).sum::<f64>().sqrt();let scale=turn*norm(&reflection.coupling)/norm(&cool.coupling);
-    for(m,c)in [(&mut reflection.coupling,&cool.coupling),(&mut reflection.counter_coupling,&cool.counter_coupling)]{for k in 0..STATES*STATES{m.real[k]+=scale*c.real[k];m.imag[k]+=scale*c.imag[k];}}
     let mut retro=alone.clone();retro.beams.push(reflection);(alone,retro)
 }
 
@@ -691,7 +705,7 @@ fn retro(turn:f64)->(Request,Request){
 /// tweezer's 19 kHz.
 #[test]
 fn a_retro_reflected_tweezer_folds_as_its_standing_wave(){
-    let(alone,retro)=retro(0.);
+    let(alone,retro)=retro();
     let mut double=alone.clone();
     {let b=&mut double.beams[0];for(m,x)in [(&mut b.coupling,2.),(&mut b.counter_coupling,2.),(&mut b.outside_shift,4.)]{for v in m.real.iter_mut().chain(m.imag.iter_mut()){*v*=x;}}}
     let(g,reference)=(Ground::new(&retro).unwrap(),Ground::new(&double).unwrap());
@@ -706,28 +720,6 @@ fn a_retro_reflected_tweezer_folds_as_its_standing_wave(){
     assert!(lattice>30.*single,"the trap along the beam: {lattice:.1} kHz against the tweezer's {single:.1} kHz");
 }
 
-/// A reflection a little off the tweezer's polarization (a millionth of the cooling beam's added) is
-/// the standing wave's unit with its remainder booked (ground.rs `coherence`), to its smallness: its
-/// shifts within 1e-5 of the exact reflection's at every point and its interference item far within
-/// the budget -- where the beams taken apart would book the whole interference. A polarization that
-/// differs (as much of the cooling beam's) books an interference beyond the budget: the solve is
-/// flagged, not silently wrong.
-#[test]
-fn a_reflection_a_little_off_the_tweezer_s_polarization_is_its_standing_wave_within_its_bound(){
-    let(_,exact)=retro(0.);let(_,turned)=retro(1e-6);let(_,crossed)=retro(1.);
-    let(e,g,c)=(Ground::new(&exact).unwrap(),Ground::new(&turned).unwrap(),Ground::new(&crossed).unwrap());
-    let estimate=|g:&Ground|g.interference.iter().map(|x|x.estimate(g)).fold(0.,f64::max);
-    assert!(g.units.iter().map(|u|u.beams.clone()).eq([vec![0,1]])&&g.interference[0].coherent,"{:?}",g.interference);
-    assert!(estimate(&g)<=1e-2*BUDGET,"the remainder's item {:.2e}",estimate(&g));
-    assert!(estimate(&c)>BUDGET,"the crossed polarizations' item {:.2e}",estimate(&c));
-    let n=exact.beams[0].direction;
-    for r in (0..9).map(|i|n.map(|x|0.05*i as f64*x)).chain([[0.3,0.1,0.2]]){
-        let(h,reference)=(g.hamiltonian_at(r),e.hamiltonian_at(r));let mut light=reference.clone();light.add_scaled(-Complex::ONE,&e.hamiltonian);
-        let mut d=h.clone();d.add_scaled(-Complex::ONE,&reference);
-        assert!(d.largest()<=1e-5*light.largest(),"r {r:?}: {:.2e} of {:.2e}",d.largest(),light.largest());
-    }
-}
-
 /// A fixture's motion request, its matrices sparse ([row, column, re, im]), its initial state diagonal
 /// (tests/fixtures/*_probe_motion.json: validate/probe_scan payloads with the population core's rows
 /// recorded at the focus).
@@ -735,12 +727,12 @@ fn sparse_request(v:&Value)->Request{
     let beams=v["beams"].as_array().unwrap().iter().map(|b|{let d=floats(&b["direction"]);Beam{id:b["id"].as_str().unwrap().into(),name:b["name"].as_str().unwrap().into(),
         direction:[d[0],d[1],d[2]],wave_number_per_um:b["waveNumberPerUm"].as_f64().unwrap(),waist_um:b["waistUm"].as_f64(),intensity_mw_cm2:b["intensityMWcm2"].as_f64().unwrap(),
         frequency_index:b["frequencyIndex"].as_array().unwrap().iter().map(|n|n.as_i64().unwrap() as i32).collect(),coupling:matrix(&b["coupling"]),
-        counter_coupling:matrix(&b["counterCoupling"]),outside_shift:matrix(&b["outsideShift"])}}).collect::<Vec<Beam>>();
+        counter_coupling:matrix(&b["counterCoupling"]),outside_shift:matrix(&b["outsideShift"]),field:None}}).collect::<Vec<Beam>>();
     let trap_beam=beams.iter().position(|b|b.id==v["trapBeamId"].as_str().unwrap()).unwrap();
     let initial=floats(&v["initial"]);let mut density=vec![Complex::ZERO;STATES*STATES];for i in 0..STATES{density[i*STATES+i]=Complex::new(initial[i],0.);}
     let(e,f)=(v["emission"].as_array().unwrap(),floats(&v["fieldVectorG"]));
     Request{states:v["states"].as_array().unwrap().iter().map(|s|s.as_str().unwrap().into()).collect(),hamiltonian:matrix(&v["hamiltonian"]),
-        frame_frequencies_mhz:floats(&v["frameFrequenciesMHz"]),frequencies_mhz:floats(&v["frequenciesMHz"]),beams,emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],
+        frame_frequencies_mhz:floats(&v["frameFrequenciesMHz"]),frequencies_mhz:floats(&v["frequenciesMHz"]),beams,outside_forms:vec![],emission:[matrix(&e[0]),matrix(&e[1]),matrix(&e[2])],
         field_vector_g:[f[0],f[1],f[2]],mass_kg:v["massKg"].as_f64().unwrap(),initial_density:density,temperature_uk:v["temperatureUK"].as_f64().unwrap(),trap_beam,times_us:vec![]}
 }
 /// The frozen atom's F = 1 population each microsecond, its eliminated master equation's at the focus, every drive folded, at second or fourth order:
@@ -1274,9 +1266,9 @@ fn synthetic(levels:&[(&str,f64)],emissions:&[(&str,&str,[Complex;3],f64)],beams
     for &(e,g,d,rate)in emissions{let(i,j)=(at(g),at(e));for a in 0..3{let c=d[a]*rate.sqrt();emission[a].real[i*STATES+j]=c.re;emission[a].imag[i*STATES+j]=c.im;}}
     let frames:Vec<f64>=r.states.iter().map(|s|if s.starts_with("ground"){0.}else{3.8e8}).collect();
     let mut list:Vec<Beam>=beams.iter().enumerate().map(|(n,(d,couplings))|{let mut x=zero();for &(e,g,v)in couplings{x.real[at(e)*STATES+at(g)]=v;}
-        Beam{id:format!("b{n}"),name:format!("b{n}"),direction:*d,wave_number_per_um:WAVE,waist_um:None,intensity_mw_cm2:1.,frequency_index:vec![0,0],coupling:x,counter_coupling:zero(),outside_shift:zero()}}).collect();
+        Beam{id:format!("b{n}"),name:format!("b{n}"),direction:*d,wave_number_per_um:WAVE,waist_um:None,intensity_mw_cm2:1.,frequency_index:vec![0,0],coupling:x,counter_coupling:zero(),outside_shift:zero(),field:None}}).collect();
     let mut x=zero();x.real[at("D1-1-0")*STATES+at(initial)]=1e-3;
-    list.push(Beam{id:"tweezer".into(),name:"tweezer".into(),direction:[1.,0.,0.],wave_number_per_um:7.4,waist_um:Some(1.),intensity_mw_cm2:1.,frequency_index:vec![1,0],coupling:x,counter_coupling:zero(),outside_shift:zero()});
+    list.push(Beam{id:"tweezer".into(),name:"tweezer".into(),direction:[1.,0.,0.],wave_number_per_um:7.4,waist_um:Some(1.),intensity_mw_cm2:1.,frequency_index:vec![1,0],coupling:x,counter_coupling:zero(),outside_shift:zero(),field:None});
     let i=at(initial);let mut density=vec![Complex::ZERO;STATES*STATES];density[i*STATES+i]=Complex::ONE;
     r.trap_beam=list.len()-1;r.mass_kg*=1e6;(r.hamiltonian,r.emission,r.frame_frequencies_mhz,r.frequencies_mhz,r.beams,r.initial_density,r.field_vector_g,r.times_us)=(h,emission,frames,vec![1e7,0.],list,density,[0.;3],vec![0.,100.]);r
 }

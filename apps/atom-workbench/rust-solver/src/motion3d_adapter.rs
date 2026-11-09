@@ -43,7 +43,7 @@
 use crate::{Device,Model,Operator,Options,lattice_core_adapter};
 use atom_motion_3d::ledger::{Ledger,Total};
 use atom_motion_3d::solve::{self as engine,Distributions,Solution,POPULATION_TARGET};
-use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
+use atom_motion_3d::{Beam,Complex,Matrix,OutsideForm,Request,STATES};
 use atom_population_core::Lapack;
 use atom_population_core::lattice::accuracy;
 use atom_population_core::lattice::pipeline::{self,LONGEST_TIME_US,MOST_SAMPLES};
@@ -74,6 +74,7 @@ pub struct MotionModel{
     #[serde(rename="frameFrequenciesMHz")]
     frame_frequencies_mhz:Vec<f64>,
     beams:Vec<MotionBeam>,
+    #[serde(default)] outside_forms:Vec<MotionOutsideForm>,
     emission:Vec<Operator>,
 }
 #[derive(Clone,Deserialize)]
@@ -82,7 +83,14 @@ struct MotionBeam{
     id:String,name:String,direction:[f64;3],wave_number_per_um:f64,#[serde(default)] waist_um:Option<f64>,outside_shift:Operator,
     #[serde(rename="intensityMWcm2")]
     intensity_mw_cm2:f64,frequency_index:Vec<i32>,coupling:Operator,counter_coupling:Operator,
+    #[serde(default)] electric_field:Option<[Amplitude;3]>,
 }
+#[derive(Clone,Copy,Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Amplitude{re:f64,im:f64}
+#[derive(Clone,Deserialize)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+struct MotionOutsideForm{frequency_index:Vec<i32>,matrices:Vec<Operator>}
 
 /// A 32 × 32 matrix of the model, its entries finite.
 fn matrix(operator:&Operator,what:&str)->Result<Matrix,String>{
@@ -103,15 +111,21 @@ fn request(model:&Model,motion:&MotionModel,options:&Options)->Result<Request,St
         if !b.direction.iter().all(|&x|finite(x))||!(finite(b.wave_number_per_um)&&b.wave_number_per_um>0.)||b.waist_um.is_some_and(|w|!(finite(w)&&w>0.))
             ||!(finite(b.intensity_mw_cm2)&&b.intensity_mw_cm2>=0.)||b.frequency_index.len()!=frequencies.len(){
             return Err(format!("Beam {} needs a finite direction, a positive wave number, a positive waist if focused, a nonnegative intensity and an index on the {} frequency axes",b.id,frequencies.len()));}
+        if b.electric_field.is_some_and(|e|e.iter().any(|z|!(finite(z.re)&&finite(z.im)))){return Err(format!("Beam {}'s electric field has a nonfinite entry",b.id));}
         Ok(Beam{id:b.id.clone(),name:b.name.clone(),direction:b.direction,wave_number_per_um:b.wave_number_per_um,waist_um:b.waist_um,intensity_mw_cm2:b.intensity_mw_cm2,
             frequency_index:b.frequency_index.clone(),coupling:matrix(&b.coupling,"A beam's coupling")?,counter_coupling:matrix(&b.counter_coupling,"A beam's counter-rotating coupling")?,
-            outside_shift:matrix(&b.outside_shift,"A beam's outside shift")?})
+            outside_shift:matrix(&b.outside_shift,"A beam's outside shift")?,field:b.electric_field.map(|e|e.map(|z|Complex{re:z.re,im:z.im}))})
+    }).collect::<Result<Vec<_>,String>>()?;
+    let outside_forms=motion.outside_forms.iter().map(|f|{
+        if f.frequency_index.len()!=frequencies.len(){return Err(format!("An outside form needs an index on the {} frequency axes",frequencies.len()));}
+        let matrices=f.matrices.iter().map(|m|matrix(m,"An outside form's matrix")).collect::<Result<Vec<_>,String>>()?;
+        Ok(OutsideForm{frequency_index:f.frequency_index.clone(),matrices:matrices.try_into().map_err(|_|"An outside form has nine matrices".to_string())?})
     }).collect::<Result<Vec<_>,String>>()?;
     let trap_beam=beams.iter().position(|b|b.id==motion.trap_beam_id).ok_or_else(||format!("The motion block's trapBeamId {} names none of its beams",motion.trap_beam_id))?;
     let [a,b,c]=motion.emission.as_slice()else{return Err("The motion block has three emission operators, one per lab axis".into())};
     let density=lattice_core_adapter::initial_density(model,&Lapack::load()?)?;
     Ok(Request{states:model.states.clone(),hamiltonian:matrix(&motion.hamiltonian,"The motion block's H0")?,frame_frequencies_mhz:motion.frame_frequencies_mhz.clone(),
-        frequencies_mhz:frequencies,beams,trap_beam,emission:[matrix(a,"An emission operator")?,matrix(b,"An emission operator")?,matrix(c,"An emission operator")?],
+        frequencies_mhz:frequencies,beams,outside_forms,trap_beam,emission:[matrix(a,"An emission operator")?,matrix(b,"An emission operator")?,matrix(c,"An emission operator")?],
         field_vector_g:motion.field_vector_g,mass_kg:motion.mass_kg,initial_density:density.iter().map(|z|Complex{re:z.re,im:z.im}).collect(),
         temperature_uk:motion.temperature_uk,times_us:lattice_core_adapter::grid(options)})
 }

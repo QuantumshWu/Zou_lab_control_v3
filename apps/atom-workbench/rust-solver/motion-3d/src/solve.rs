@@ -650,13 +650,12 @@ fn model_ledger(model:&Model,request:&Request)->Ledger{
     let names=|beams:&[usize]|beams.iter().map(|&l|request.beams[l].name.as_str()).collect::<Vec<_>>().join(" + ");
     for &(u,error,_)in &model.profiles{ledger.add(&format!("「{}」的光强分布",names(&g.units[u].beams)),error,"取焦点处的光强".into());}
     for &u in &model.focused[1..]{ledger.add(&format!("「{}」的光强分布",names(&g.units[u].beams)),0.,"按位置插值（强度维度）".into());}
-    // The interference the units of beams of one frequency leave out (ground.rs `coherence`).
+    // What the fields of beams of one frequency leave out (ground.rs `Interference`).
     for x in &g.interference{
-        let action=match(x.near,x.coherent){
-            (true,true)=>"近共振光场按相干叠加精确计入；远失谐部分（反旋项、32 态以外能级的光移）按主偏振合成，偏离主偏振的剩余分量略去",
+        let action=if x.scalar{"同频光束按一个相干光场精确计入；32 态以外能级的光移按一个标量拟合各光束自身的光移（请求未给光移形式），其偏离略去"}else{match(x.near,x.coherent){
+            (true,true)=>"近共振光场按相干叠加精确计入；远失谐部分（反旋项、32 态以外能级的光移）按平行光束的一个光场，32 态以外能级的光移取各光束自身光移的最小二乘，其偏离略去",
             (true,false)=>"近共振光场按相干叠加精确计入；远失谐部分（反旋项、32 态以外能级的光移）按各光束光强相加，其偏振干涉略去",
-            (false,true)=>"同频光束按主偏振合成一个光场（驻波精确）；偏离主偏振的剩余分量略去",
-            (false,false)=>"同频而偏振不同：远失谐光移按各光束光强相加，干涉项（偏振光晶格）略去"};
+            (false,_)=>"同频光束合成一个光场（驻波精确）；32 态以外能级的光移取各光束自身光移的最小二乘，其偏离略去"}};
         ledger.add(&format!("「{}」的干涉",names(&x.beams)),x.estimate(g),action.into());
     }
     ledger.add("聚焦光的光强插值表",model.table_error,match(model.table_limit,model.table_stalled){

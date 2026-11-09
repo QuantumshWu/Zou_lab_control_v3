@@ -243,6 +243,22 @@ function labels(v:Matrix,n:number):number[]{
 export function laserModelCorrection(scene:Scene,laser:Laser):Matrix{
   const analysis=analyze(scene);return modelCorrection(analysis,groups({...scene,lasers:[laser]},analysis)).matrix;
 }
+/** The same correction as a form in the field E of the laser's frequency (MHz/(V/m)², spherical
+ * components q = −1, 0, +1 as `groups`' fields): its nine matrices O_k with O(E) = Σ_k c_k(E) O_k,
+ * c = (|E_q|² per q, then per pair p < q Re(E_p* E_q), Im(E_p* E_q)). The correction is Hermitian
+ * and quadratic in E, Σ_pq E_p* E_q A_pq, so the polarization identity takes its matrices from the
+ * correction itself: A_qq = O(e_q), and A_pq + A_qp, i(A_pq − A_qp) from O(e_p + e_q), O(e_p + i e_q)
+ * less O(e_p) + O(e_q). The beams of one frequency summed into one field then shift the states
+ * with their interference, which per-beam corrections leave out (motion, full-master-model.ts). */
+export function outsideFieldForm(analysis:Analysis,laser:Laser):Matrix[]{
+  const at=(field:Z[])=>modelCorrection(analysis,[{beams:[laser],field}]).matrix,unit=(q:number,z:Z={re:1,im:0}):Z[]=>[0,1,2].map(k=>k===q?z:{re:0,im:0});
+  const diagonal=[0,1,2].map(q=>at(unit(q))),forms=diagonal.slice();
+  for(let p=0;p<3;p++)for(let q=p+1;q<3;q++)for(const z of [{re:1,im:0},{re:0,im:1}]){
+    const both=at(unit(p).map((x,k)=>k===q?z:x));
+    forms.push({real:both.real.map((x,k)=>x-diagonal[p]!.real[k]!-diagonal[q]!.real[k]!),imag:both.imag.map((x,k)=>x-diagonal[p]!.imag[k]!-diagonal[q]!.imag[k]!)});
+  }
+  return forms;
+}
 /** The static part of the master-model H0 and its eigenbasis (the model basis): each
  * fine-structure manifold's bare energies plus the static correction, diagonalized, each
  * eigenvector labelled by the magnetic eigenstate it overlaps most; and the largest mixing
