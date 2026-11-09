@@ -223,14 +223,21 @@ mod tests {
     /// and the deviates' first two moments over 2¹⁶ draws (mean 0 ± 4/256, variance 1 ± 4√2/256: z = 4 standard errors).
     #[test]
     fn the_normal_quantile_and_the_deviates_are_the_normal_s() {
-        let close = |p: f64, x: f64, within: f64| assert!((normal_quantile(p) - x).abs() <= within, "{p}: {}", normal_quantile(p));
-        close(0.841_344_746_068_542_9, 1.0, 4e-16);
-        close(1.0 - 0.841_344_746_068_542_9, -1.0, 4e-15);
-        close(0.977_249_868_051_820_8, 2.0, 1e-15);
-        close(0.975, 1.959_963_984_540_054, 4e-16);
-        close(1e-10, -6.361_340_902_404_056, 4e-15);
+        // Within the algorithm's relative precision of x plus the input's rounding, u·p moved through the slope
+        // dΦ⁻¹/dp = 1/φ(x): γ₄ (|x| + p/φ(x)).
+        let close = |p: f64, x: f64| {
+            let density = (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt();
+            let within = crate::units::rounding(4) * (x.abs() + p / density);
+            assert!((normal_quantile(p) - x).abs() <= within, "{p}: {} against {x} within {within:e}", normal_quantile(p));
+        };
+        close(0.841_344_746_068_542_9, 1.0);
+        close(1.0 - 0.841_344_746_068_542_9, -1.0);
+        close(0.977_249_868_051_820_8, 2.0);
+        close(0.975, 1.959_963_984_540_054);
+        close(1e-10, -6.361_340_902_404_056);
         let l = (1e300_f64).ln();
-        close(1e-300, -(2.0 * l - (4.0 * std::f64::consts::PI * l).ln()).sqrt(), 1e-2);
+        let asymptotic = -(2.0 * l - (4.0 * std::f64::consts::PI * l).ln()).sqrt();
+        assert!((normal_quantile(1e-300) - asymptotic).abs() <= 1e-2, "{}", normal_quantile(1e-300));
         assert_eq!(normal_quantile(0.5), 0.0);
         let mut s = Stream::new(1, Purpose::Initial, 0, 0);
         let n = 1 << 16;
