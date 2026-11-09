@@ -7,8 +7,8 @@
 //! counter-rotating one, R_l e^{+i2π(ν_l + ν_frame)t}, each with its amplitude a_l(r). The beams of
 //! one frequency drive one field, Σ_l a_l(r) V_l (and Σ_l a_l(r)* R_l): its components are one
 //! component each (`Component`, its size the beams' sum, every beam at its peak in phase),
-//! classified by one rule against the 3D solve's budget (ledger.rs, `classify`): a component folds
-//! when it is far, |ν| ≥ FOLD_DISTANCE ‖L0‖ with its mixing m = size/(|ν| − ‖L0‖) within
+//! classified against the 3D solve's budget (ledger.rs, `far_folds`): a component folds where its fold
+//! exists (`exists`, Stewart's bound on its mixing m = size/(|ν| − ‖L0‖), every fold's) within
 //! m² ≤ budget, its error booked -- whatever the frequencies of the others: a van Vleck fold's
 //! denominators are exact, and it needs no gap between what it keeps and what it folds (the
 //! population core's lattice does, for its own time scales). A folded component enters as
@@ -45,7 +45,9 @@
 //! The near components of one frequency (equal `Beam::frequency_index`) form a carrier c at δ_c;
 //! carrier c drives V_c(r) = Σ_{l∈c} a_l(r) V_l e^{−iδ_c t} + h.c., each beam with its own coupling
 //! V_l at the focus and its own amplitude a_l(r). Every coupling of the generator is judged by one
-//! rule against the budget: folded at second order when its mixing fits, kept explicit otherwise. Its
+//! rule: its second-order fold exists where its mixing m < ½ (Stewart, `exists`) -- the ladder's first rung
+//! folds every one that does --, and a rung's allowance keeps those whose estimate passes it, the drives'
+//! and the pairs' alike (`Ground::rungs`); which rung, the measured charge's and the cost's (solve.rs). Its
 //! distance is taken over the atoms' reach in phase space: where they are, and as they move -- a term
 //! absorbing beams of wave vector sum q_a and emitting q_e is at Ω̃ + q·v in a moving atom's frame,
 //! q = q_a − q_e (model.rs `doppler`), widened by its largest over the thermal speeds (`Ground::motion`):
@@ -62,9 +64,9 @@
 //!   s/2 relative), its populations by at most S_b -- S²/(2(1 + S)) for one transition in its steady
 //!   state, at most S/e for a pumping step (R t e^{−Rt}); measured against the 32-state core at the
 //!   focus, 0.01–0.79 S_b (SAT, PUMP, THREE, Λ, the 3D PGC). Each ground state keeps its drives from
-//!   the most saturated down until the rest's total fits the budget; those fold.
+//!   the most saturated down until the rest's total fits the rung's allowance (`EXISTS` at the first); those fold.
 //! - H's static coupling between two excited states (the tweezer's tensor shift between hyperfine
-//!   levels and sublevels): it folds when (g/d)² is within the budget, g its largest size and d their
+//!   levels and sublevels), a pair (`pair_folds`): it folds where m = g/d exists and m² fits the allowance, g its largest size and d their
 //!   smallest separation over the whole trap -- each Gaussian beam's intensity from 0 to its peak, the
 //!   tables' range: a pair whose separation closes anywhere there (sublevels whose Zeeman and tensor
 //!   shifts cross) would make an explicit state's first-order dressing singular there.
@@ -88,7 +90,7 @@
 //!
 //! A folded drive into an explicit state and a kept drive into it are a pair of channels too, and their coupling through that state,
 //! −V′[e,a]* G V[e,b], lies in neither part: X takes V^f, zero on the kept entry, and the state's amplitude does not feel a folded drive. So each
-//! such pair is judged as the ground states' are, by `foldable` at its worst separation over the trap, within one cluster with its dressing taken from
+//! such pair is judged as the ground states' are, by `pair_folds` at its worst separation over the trap, within one cluster with its dressing taken from
 //! that, its size g g′ (1/d + 1/d′ + Γ/(d d′)), and the folded drive is kept where the pair may not fold (`Ground::keep_partners`), a residual beat in the
 //! cluster's frames or none. Read off the frames alone, a kept pair's partner fell out wherever a probe's and a cooling drive's one state split the
 //! ground states' frames by the 36 MHz between them: on PGCP_10 the rungs of 7 explicit states lost Raman couplings between sublevels of 0.3-1.1 rad/us beside
@@ -243,7 +245,7 @@
 //! ```
 //!
 //! (every ground state b′ between), over the carriers the fourth order takes (`fourth_carriers`: those beyond the
-//! budget's square, and every carrier whose photons share a class with theirs). Its frequencies are their carriers'
+//! fourth order's own S², and every carrier whose photons share a class with theirs). Its frequencies are their carriers'
 //! integer combinations, evaluated once (`Ground::frequency`): a photon's triple is at its carrier's δ_c exactly.
 //! The second order's R is dressed by the near light (# The near light's dressing), and the fourth order is its
 //! expansion around that dressing:
@@ -288,7 +290,8 @@
 //!
 //! # Approximations and their estimates (the solve's ledger)
 //! - the far components' fold: Σ m²;
-//! - the couplings' fold: Σ m² of the folded pairs of channels and static couplings;
+//! - the couplings' fold between ground states: per state Σ m² of the folded pairs it is one of, read at the atoms' populations (`Ground::pair_charges`);
+//! - H's folded couplings of the explicit excited states: their largest m²;
 //! - the drives' fold: the largest folded total saturation S_b of a ground state;
 //! - the zeroth-order elimination: η², the folded excited population along the trajectories (lib.rs);
 //! - first order in the Doppler shift: (kv/σ_min)² (engine.rs), what its transfer leaves on T (model.rs `Model::first_error`);
@@ -298,7 +301,6 @@ use crate::linear::{hermitian_eigen,hermitian_eigenvalues,round_off,unit_round_o
 use crate::model::{Trap,MOST_RANK,doppler,wave_vector};
 use std::borrow::Cow;
 use crate::{Beam,Complex,Request,STATES};
-use atom_population_core::lattice::classification::FOLD_DISTANCE;
 use rayon::prelude::*;
 use std::f64::consts::TAU;
 
@@ -313,6 +315,12 @@ pub const EXISTS:f64=0.5;
 /// the numerical tolerances' (solve.rs, # Shares; `NUMERICAL_SHARE` of ε = `POPULATION_TARGET`), the one switch between a
 /// block's eigenstates and its states on their own.
 pub const MIXING_SHARE:f64=crate::solve::NUMERICAL_SHARE*crate::solve::POPULATION_TARGET;
+/// The Boltzmann share the atoms' reach leaves outside its thermal ellipsoid (`thermal_reach`, `Ground::speed`): per axis what a thermal
+/// ensemble holds past ln(1/share) k_B T of the trap's bottom in position, and past that kinetic energy along a term's wave vector in speed.
+/// No coupling is judged out there: a tolerance whose work -- the couplings kept for the atoms it takes in -- grows with its logarithm, as
+/// the numerical tolerances' does, and their share of the population target (solve.rs, # Shares). The run's own atoms past it are booked
+/// as measured (solve.rs `beyond_reach`).
+pub const OUTSIDE_REACH:f64=crate::solve::NUMERICAL_SHARE*crate::solve::POPULATION_TARGET;
 
 /// The co-rotating component of the beams of one frequency (`counter` false: V e^{−iνt},
 /// ν = δ = 2π(ν_beam − ν_frame)) or their counter-rotating one (R e^{−iνt}, ν = −2π(ν_beam + ν_frame)),
@@ -442,6 +450,12 @@ pub enum Kind{
     Photons{first:Photon,second:Photon},
     /// Two photons of an explicit excited state's jump landing in two ground states.
     Direct{excited:usize,first:usize,second:usize},
+}
+impl Kind{
+    /// The two ground states a coupling joins: a static coupling's, a pair of channels' states, a pair of photons' landing states.
+    pub fn states(&self)->(usize,usize){
+        match *self{Kind::Static{a,b}=>(a,b),Kind::Raman{first,second}=>(first.state,second.state),Kind::Photons{first,second}=>(first.to,second.to),Kind::Direct{first,second,..}=>(first,second)}
+    }
 }
 /// A coupling between ground states, its frequency (the worst separation over the trap, rad/us),
 /// its size (the bound of its superoperator) and the rule's verdict.
@@ -633,7 +647,7 @@ pub struct Ground{
     /// The atom's mass (kg), used in the Hessian of the preparation potential.
     pub mass_kg:f64,
     /// Per unit, its least intensity within the atom's reach (`Ground::reach`): 1 for a plane wave; and the atoms' reach in speed
-    /// (um/us), the thermal ellipsoid's in momentum, within ln(1/`BUDGET`) k_B T as its reach in position; T (uK) the
+    /// (um/us), the thermal ellipsoid's in momentum, within ln(1/`OUTSIDE_REACH`) k_B T as its reach in position; T (uK) the
     /// temperature the reach is judged at, the request's or the largest the atoms come to over the run (solve.rs, # The reach).
     pub reach:Vec<f64>,
     pub speed:f64,
@@ -645,6 +659,10 @@ pub struct Ground{
     /// The fold's charge: the largest total saturation over the light's pattern of a ground state's
     /// folded drives (with its cluster's dressing), its populations' error bound.
     pub charge:f64,
+    /// The pairs' charge per ground state (`Ground::pair_charges`): Σ m² of the folded couplings between ground states it is one of.
+    pub pairs:Vec<f64>,
+    /// The folded pairs of channels through an explicit state (`Ground::partners`): their ground states and m², pairs as the items' are.
+    pub partner_pairs:Vec<((usize,usize),f64)>,
     /// The ground states' couplings, classified, the rule's cut between near and far frequencies
     /// and the eliminated generator's ‖L0‖ they were judged against (rad/us).
     pub items:Vec<Item>,
@@ -854,34 +872,42 @@ fn nearest(lo:f64,hi:f64)->f64{if lo<=0.&&hi>=0.{0.}else{lo.abs().min(hi.abs())}
 fn apart(distance:f64,spread:f64,floor:f64)->f64{(distance-spread).max(floor)}
 /// A coupling's mixing m = size/`apart`, the first order of its fold (infinite where nothing separates): every rule of the fold reads it.
 pub fn mixing(size:f64,distance:f64,spread:f64,floor:f64)->f64{let d=apart(distance,spread,floor);if d>0.{size/d}else{f64::INFINITY}}
-/// An item of frequency ν and size g may fold, at second order, when it is beyond the generator's scale l0,
-/// |ν| ≥ FOLD_DISTANCE l0 (the population core's distance: ‖(L0 − iν)⁻¹‖ ≤ 1/(|ν| − l0) with room), with
-/// its mixing m² (`mixing`, its blocks spread by l0) within the budget, the error it leaves (booked: `Ground::fold_estimates`).
-pub fn foldable(nu:f64,size:f64,l0:f64)->bool{nu.abs()>=FOLD_DISTANCE*l0&&mixing(size,nu.abs(),l0,f64::MIN_POSITIVE).powi(2)<=BUDGET}
-/// The smallest ratio of the frequency gap the classes' photons interfere below, far over near: the population
-/// core's for its lattice (`classify`'s cut).
-pub fn fold_gap()->f64{1./BUDGET.sqrt()}
-/// The rule over items of frequency ν and size g: every item that may fold folds (`foldable`; one of size
-/// zero trivially) -- a van Vleck fold's denominators are exact, and it needs no gap between the
-/// frequencies it keeps and those it folds (the population core's lattice cuts its frequencies at a gap
-/// for its own time scales, which kept foldable items below the cut, and refused scenes for them where they
-/// could not stay: the validation's F2). The verdicts (true: folded) and the cut the classes' photons
-/// interfere below, kept the population core's: their largest ratio gap of at least `fold_gap` above every
-/// frequency that may not fold (FOLD_DISTANCE l0 or below where every one may), infinite without one --
-/// photons of frequencies closer than it share a class, their interference kept with its beat.
-pub fn classify(items:&[(f64,f64)],l0:f64)->(Vec<bool>,f64){
-    let mut frequencies:Vec<(f64,bool)>=items.iter().filter(|i|i.1>0.).map(|&(nu,size)|(nu.abs(),foldable(nu,size,l0))).collect();
+/// Whether a fold exists at all (`EXISTS`, Stewart's theorem): a coupling of mixing m (`mixing`) has its invariant subspace for m < ½, its
+/// saturation 2m² below EXISTS -- a drive's, the total of a ground state's (`Ground::rungs`).
+pub fn exists(m:f64)->bool{SATURATION*m*m<EXISTS}
+/// The rule's verdict on a pair -- a coupling between two ground states (`Item`) or two excited states (`ExcitedKind::Static`) -- at a rung's
+/// allowance: folded where its fold exists (`exists`) and its mixing m², what it may move of its states' populations, lies within the allowance
+/// (`Ground::with`). The first rung (`EXISTS`) folds every pair that exists; the rungs below keep more as the allowance falls, the drives and
+/// the pairs alike (`Ground::rungs`).
+pub fn pair_folds(m:f64,allowance:f64)->bool{exists(m)&&m*m<=allowance}
+/// A far component's verdict (# Far components): its fold exists (`exists`) and its mixing m² lies within the budget, its error booked.
+/// The budget stays here because the far light is no rung of the ladder: a component folded here is folded in every candidate, its scattering
+/// dropped and its m² booked where no choice can undo it (`Candidate::fixed`); one between the budget and existence is a near carrier instead,
+/// whose drives the ladder judges by their measured charge and cost.
+pub fn far_folds(nu:f64,size:f64,l0:f64)->bool{let m=mixing(size,nu.abs(),l0,f64::MIN_POSITIVE);exists(m)&&m*m<=BUDGET}
+/// The rule over the couplings between ground states, of frequency ν and size g, at a rung's allowance: each by `pair_folds`, m = g/(|ν| − l0)
+/// (one of size zero trivially) -- a van Vleck fold's denominators are exact, and it needs no gap between the frequencies it keeps and those it
+/// folds (the population core's lattice cuts its frequencies at a gap for its own time scales, which kept foldable items below the cut, and
+/// refused scenes for them where they could not stay: the validation's F2). The verdicts (true: folded) and the cut the classes' photons
+/// interfere below: their largest ratio gap above every frequency kept, where the lower frequency's scale at the upper one's distance has its
+/// fold exist (`exists` of their ratio, Stewart's bound as every fold's) -- or, every frequency folding, at most where a coupling of the
+/// generator's whole scale l0 has it, 2 l0 --, infinite without one: photons of frequencies closer than it share a class, their interference
+/// kept with its beat.
+pub fn classify(items:&[(f64,f64)],l0:f64,allowance:f64)->(Vec<bool>,f64){
+    let verdict=|&(nu,size):&(f64,f64)|size==0.||pair_folds(mixing(size,nu.abs(),l0,f64::MIN_POSITIVE),allowance);
+    let mut frequencies:Vec<(f64,bool)>=items.iter().filter(|i|i.1>0.).map(|i|(i.0.abs(),verdict(i))).collect();
     frequencies.sort_by(|a,b|a.0.total_cmp(&b.0));
     frequencies.dedup_by(|a,b|{let same=a.0==b.0;if same{b.1&=a.1;}same});
     let first=frequencies.iter().rposition(|f|!f.1).map_or(0,|i|i+1);
     let mut best:Option<(f64,usize)>=None;
     for i in first..frequencies.len(){
         let ratio=if i==0{f64::INFINITY}else{frequencies[i].0/frequencies[i-1].0};
-        if i>0&&ratio<fold_gap(){continue;}
+        if i>0&&!exists(ratio.recip()){continue;}
         if best.is_none_or(|(r,_)|ratio>r){best=Some((ratio,i));}
     }
-    let cut=match best{None=>f64::INFINITY,Some((_,0))=>(FOLD_DISTANCE*l0).min(frequencies[0].0),Some((_,i))=>(frequencies[i-1].0*frequencies[i].0).sqrt()};
-    (items.iter().map(|&(nu,size)|size==0.||foldable(nu,size,l0)).collect(),cut)
+    let whole=l0/(EXISTS/SATURATION).sqrt();
+    let cut=match best{None=>f64::INFINITY,Some((_,0))=>whole.min(frequencies[0].0),Some((_,i))=>(frequencies[i-1].0*frequencies[i].0).sqrt()};
+    (items.iter().map(verdict).collect(),cut)
 }
 /// The rule's estimates for a coupling of an excited state: k m² (`mixing`, spread by the dressing, at least 1/T) and over the light's
 /// pattern k P/d², P its power, d what separates (`apart`); k = SATURATION for a drive (its rate's relative error), 1 for a static one (its admixture).
@@ -998,13 +1024,26 @@ fn spread(cl:&Cluster,r:&[Complex],weights:&[Complex],out:&mut Dense){
     for(&b,&w)in cl.states.iter().zip(weights){if w==Complex::ZERO{continue;}for(x,&y)in r.iter().enumerate(){out[(x,b)]+=y*w;}}
 }
 
-/// The atoms' reach along an axis of a harmonic trap at ω (rad/us): the end of the thermal ellipsoid, the region within ln(1/`BUDGET`) k_B T of its bottom, which holds all but the budget of a Boltzmann ensemble (T in μK, hm = ħ/m). None where the axis does not confine.
+/// The atoms' reach along an axis of a harmonic trap at ω (rad/us): the end of the thermal ellipsoid, the region within ln(1/`OUTSIDE_REACH`) k_B T of its bottom, which holds all but that share of a Boltzmann ensemble (T in μK, hm = ħ/m). None where the axis does not confine.
 pub(crate) fn thermal_reach(w:f64,temperature_uk:f64,hm:f64)->Option<f64>{
-    (w>0.).then(||(2.*BUDGET.recip().ln()*crate::stats::KT_PER_UK*temperature_uk*hm).sqrt()/w)
+    (w>0.).then(||(2.*OUTSIDE_REACH.recip().ln()*crate::stats::KT_PER_UK*temperature_uk*hm).sqrt()/w)
 }
 
 /// Two frames are one: equal to the rounding of the sums of detunings they are made of.
 pub(crate) fn same_frame(a:f64,b:f64)->bool{(a-b).abs()<=round_off(a.abs()+b.abs())}
+
+/// What the rule's verdicts make of a request (`Ground::shape`): which couplings of the excited states fold, which couplings between
+/// ground states fold, and the clusters, their ground and explicit excited states. Two judgements of one shape are one model.
+#[derive(Clone,Debug,PartialEq)]
+pub struct Shape{folded:Vec<bool>,items:Vec<(Kind,bool)>,clusters:Vec<(Vec<usize>,Vec<usize>)>}
+impl Shape{
+    /// Whether every fold of this shape exists in another judgement (`other`: the rule's first rung at another reach, where every fold that
+    /// exists folds): each coupling it folds is folded there too, or is no coupling there.
+    pub fn exists_within(&self,other:&Shape)->bool{
+        self.folded.len()==other.folded.len()&&self.folded.iter().zip(&other.folded).all(|(&a,&b)|!a||b)
+            &&self.items.iter().filter(|x|x.1).all(|(k,_)|other.items.iter().find(|y|y.0==*k).is_none_or(|y|y.1))
+    }
+}
 
 /// The partition the rule leaves for one set of verdicts on the excited couplings: the ground
 /// couplings classified, the cut, the clusters (sets of nodes: the ground states, then the excited
@@ -1057,12 +1096,11 @@ impl Ground{
         let mut components:Vec<Component>=frequencies.iter().flat_map(|beams|{let delta=detuning(&request.beams[beams[0]]);
             [Component{beams:beams.clone(),counter:false,nu:TAU*delta,size:beams.iter().map(|&l|2.*frobenius(&couplings[l])).sum(),folded:false},
              Component{beams:beams.clone(),counter:true,nu:-TAU*(delta+2.*frame),size:beams.iter().map(|&l|2.*frobenius(&counters[l])).sum(),folded:false}]}).collect();
-        let(verdicts,_)=classify(&components.iter().map(|c|(c.nu,c.size)).collect::<Vec<_>>(),l0);
-        for(c,v)in components.iter_mut().zip(verdicts){c.folded=v;}
+        for c in components.iter_mut(){c.folded=c.size==0.||far_folds(c.nu,c.size,l0);}
         let names=|beams:&[usize]|beams.iter().map(|&l|request.beams[l].name.as_str()).collect::<Vec<_>>().join(" + ");
         // A counter-rotating component that may not fold has no other place: the near carriers co-rotate.
         if let Some(c)=components.iter().find(|c|c.counter&&!c.folded&&c.size>0.){
-            return Err(format!("「{}」的反旋耦合不能按 van Vleck 折叠：频率 {:.1} THz（生成元尺度的 {:.1} 倍，须至少 {FOLD_DISTANCE} 倍），混合 m² = {:.1e}（预算 {BUDGET:.0e}）；3D 运动的近共振载波只取同旋分量，无法保留它",
+            return Err(format!("「{}」的反旋耦合不能按 van Vleck 折叠：频率 {:.1} THz（生成元尺度的 {:.1} 倍），混合 m² = {:.1e}（折叠须小于 ¼ 且在预算 {BUDGET:.0e} 内）；3D 运动的近共振载波只取同旋分量，无法保留它",
                 names(&c.beams),c.nu.abs()/TAU/1e6,c.nu.abs()/l0,mixing(c.size,c.nu.abs(),l0,f64::MIN_POSITIVE).powi(2)));}
         // The frequencies' fields (`Unit`), in the order of their first beams, and their coordinates' outside shifts and folds: far light the
         // frequency's field, its outside shift the request's form where it gives it and its beams' fields (`OutsideForm`, `Beam::field`); a near
@@ -1091,9 +1129,9 @@ impl Ground{
         let mut excited_groups:Vec<Vec<usize>>=vec![];let mut manifolds:Vec<&str>=vec![];
         for(i,&s)in excited_states.iter().enumerate(){match manifolds.iter().position(|&m|m==labels[s].0){Some(m)=>excited_groups[m].push(i),None=>{manifolds.push(labels[s].0);excited_groups.push(vec![i]);}}}
         let duration=request.times_us.last().copied().unwrap_or(0.).max(0.);
-        let speed=(2.*BUDGET.recip().ln()*crate::stats::KT_PER_UK*temperature_uk*crate::model::HBAR/request.mass_kg*1e6).sqrt();
+        let speed=(2.*OUTSIDE_REACH.recip().ln()*crate::stats::KT_PER_UK*temperature_uk*crate::model::HBAR/request.mass_kg*1e6).sqrt();
         let mut ground=Ground{ground_states,excited_states,levels,decay,emission,beams:request.beams.clone(),folded:couplings.clone(),couplings,hamiltonian,units,outside:unit_outside,folds:unit_folds,interference,
-            components,l0,carriers,duration,mass_kg:request.mass_kg,reach:vec![],speed,temperature_uk,excited_items:vec![],charge:0.,items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![],
+            components,l0,carriers,duration,mass_kg:request.mass_kg,reach:vec![],speed,temperature_uk,excited_items:vec![],charge:0.,pairs:vec![],partner_pairs:vec![],items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![],
             explicit_of:vec![],excited_groups,dressed:vec![],vias:vec![],near_units:vec![],dressing:false,floors:vec![],unmixed:vec![],unmixed_error:0.,channel_poles:vec![],trap:Trap::none()};
         (ground.reach,ground.trap)=ground.reach(request);
         Ok(ground)
@@ -1690,40 +1728,54 @@ impl Ground{
         }
     }
 
-    /// The excited couplings judged before the closure: their estimates without a dressing, H's static
-    /// couplings folded within the budget, the drives within the allowance.
-    fn judged(&self,allowance:f64)->Vec<ExcitedItem>{
+    /// The excited couplings judged before the closure: their estimates without a dressing, H's static couplings as pairs at the allowance
+    /// (`pair_folds`: their estimate is their m²), the drives within it.
+    fn judged(&self,allowance:f64)->Vec<ExcitedItem>{Ground::judge(self.estimated(),allowance)}
+    /// The excited couplings with their estimates without a dressing, unjudged (`judged`).
+    fn estimated(&self)->Vec<ExcitedItem>{
         let floor=if self.duration>0.{1./self.duration}else{0.};
         let mut excited=self.excited_couplings();
         for x in excited.iter_mut(){(x.estimate,x.mean)=excited_estimate(x,0.,floor);}
-        for x in excited.iter_mut(){if let ExcitedKind::Static{..}=x.kind{x.folded=x.estimate<=BUDGET;}}
+        excited
+    }
+    /// Estimated excited couplings judged at an allowance (`judged`).
+    fn judge(mut excited:Vec<ExcitedItem>,allowance:f64)->Vec<ExcitedItem>{
+        for x in excited.iter_mut(){if let ExcitedKind::Static{..}=x.kind{x.folded=pair_folds(x.estimate.sqrt(),allowance);}}
         Ground::judge_drives(&mut excited,allowance,false,&mut |_|false);
         excited
     }
-    /// The allowances at which the rule's explicit excited states change (`Ground::with`), from where every fold that exists folds
-    /// (`EXISTS`) down to every drive kept, each the largest that gives its set of explicit
-    /// states before the closure: the totals of a ground state's folded drives as it keeps them from
-    /// the most saturated down, its total with none kept among them -- its first kept drive lies below that, with
-    /// other ground states' still folded (PGCP_10: the near probe's drives alone, its cooling beams folded).
-    pub fn allowances(request:&Request)->Result<Vec<f64>,String>{Ok(Ground::bare(request)?.rungs())}
-    /// The allowances of a generator before the rule (`allowances`, `bare`): the rungs a solve climbs (solve.rs, # The fold's choice), each while it can pay.
+    /// The allowances at which the rule's model changes (`Ground::with`), from where every fold that exists folds (`EXISTS`) down to every
+    /// coupling kept, one allowance for the drives and the pairs (`pair_folds`): each the largest that gives its set before the closure -- the
+    /// totals of a ground state's folded drives as it keeps them from the most saturated down, its total with none kept among them (its first
+    /// kept drive lies below that, with other ground states' still folded: PGCP_10, the near probe's drives alone, its cooling beams folded),
+    /// and the pairs' m², each kept from the next allowance below its own; their set the clusters before the closure. The pairs
+    /// are the first rung's (`Ground::with` at EXISTS; where its rule fails, the drives' alone).
+    pub fn allowances(request:&Request)->Result<Vec<f64>,String>{let bare=Ground::bare(request)?;Ok(bare.clustered(EXISTS).as_ref().unwrap_or(&bare).rungs())}
+    /// The allowances of the rule's first rung (`allowances`): the rungs a solve climbs (solve.rs, # The fold's choice), each while it can pay.
     pub(crate) fn rungs(&self)->Vec<f64>{
         let g=self;let ne=g.excited_states.len();
-        let excited=g.judged(EXISTS);
-        let mut totals:Vec<f64>=vec![];
+        let estimated=g.estimated();let excited=Ground::judge(estimated.clone(),EXISTS);
+        // The pairs between ground states, their states and m², each a rung's boundary where its fold exists.
+        let pairs:Vec<((usize,usize),f64)>=g.items.iter().filter(|i|i.size>0.).map(|i|(i.kind.states(),mixing(i.size,i.frequency.abs(),g.generator_scale,f64::MIN_POSITIVE).powi(2))).collect();
+        let mut totals:Vec<f64>=vec![0.];
+        totals.extend(pairs.iter().map(|p|p.1).filter(|&m2|exists(m2.sqrt())));
+        totals.extend(excited.iter().filter(|x|matches!(x.kind,ExcitedKind::Static{..})&&exists(x.estimate.sqrt())).map(|x|x.estimate));
         for b in 0..g.ground_states.len(){
             let mut means:Vec<f64>=excited.iter().filter_map(|x|match x.kind{ExcitedKind::Drive(d)if d.ground==b=>Some(x.mean),_=>None}).collect();
             means.sort_by(|x,y|y.total_cmp(x));let mut rest:f64=means.iter().sum();totals.push(rest);
             for m in means{rest-=m;totals.push(rest.max(0.));}
         }
         totals.retain(|&t|t<EXISTS);totals.sort_by(|x,y|y.total_cmp(x));totals.dedup();
-        let mut out=vec![EXISTS];let mut last=Ground::explicit_states(&excited,ne);
-        for t in totals{
-            let explicit=Ground::explicit_states(&g.judged(t),ne);
-            if explicit!=last{
-                out.push(t);last=explicit;
-            }
-        }
+        // A rung's set: its clusters before the closure, the ground states and the explicit ones its kept drives, static couplings and pairs
+        // join (as `partition`'s) -- a pair kept between states already joined is the closure's to judge in their cluster (static in its
+        // frames, or within its dressing), no model of its own.
+        let ng=g.ground_states.len();
+        let set=|t:f64|{let mut union=Union::new(ng+ne);
+            for x in Ground::judge(estimated.clone(),t).iter().filter(|x|!x.folded){match x.kind{ExcitedKind::Drive(d)=>union.join(d.ground,ng+d.excited),ExcitedKind::Static{a,b}=>union.join(ng+a,ng+b)}}
+            for &((a,b),m2)in &pairs{if !pair_folds(m2.sqrt(),t){union.join(a,b);}}
+            union.sets().into_iter().filter(|s|s[0]<ng).collect::<Vec<Vec<usize>>>()};
+        let mut out=vec![EXISTS];let mut last=set(EXISTS);
+        for t in totals{let now=set(t);if now!=last{out.push(t);last=now;}}
         out
     }
 
@@ -1743,7 +1795,7 @@ impl Ground{
             self.folded=self.couplings.clone();
             for x in &excited{if let(ExcitedKind::Drive(d),false)=(x.kind,x.folded){for &l in &self.carriers[d.carrier].beams{self.folded[l][(d.excited,d.ground)]=Complex::ZERO;}}}
             let b=self.bounds()?;
-            let partition=self.partition(&b,&excited,&explicit,&kept)?;
+            let partition=self.partition(&b,&excited,&explicit,&kept,allowance)?;
             // Each ground state's cluster's explicit states, for the eliminations from here on.
             let explicit_of:Vec<Vec<bool>>=(0..ng).map(|x|{let k=partition.set[x];(0..ne).map(|e|explicit[e]&&partition.set[ng+e]==k).collect()}).collect();
             let moved=explicit_of!=self.explicit_of;self.explicit_of=explicit_of;
@@ -1779,11 +1831,11 @@ impl Ground{
             changed|=Ground::judge_drives(&mut excited,allowance,true,&mut |x|{x.promoted=true;true});
             if !changed{
                 for(i,x)in excited.iter_mut().enumerate().filter(|(_,x)|x.folded){
-                    if inside[i]||(matches!(x.kind,ExcitedKind::Static{..})&&x.estimate>BUDGET){x.folded=false;x.promoted=true;changed=true;}
+                    if inside[i]||(matches!(x.kind,ExcitedKind::Static{..})&&!pair_folds(x.estimate.sqrt(),allowance)){x.folded=false;x.promoted=true;changed=true;}
                 }
             }
             // A folded drive into an explicit state against the drives kept into it.
-            if !changed{changed=self.keep_partners(&mut excited,&explicit,&b,&partition.set,&dressing);}
+            if !changed{changed=self.keep_partners(&mut excited,&explicit,&b,&partition.set,&dressing,allowance);}
             // A folded coupling between two states of one cluster: static in its frames it is inside the block, its distance there
             // zero, and kept, as an excited state's (it costs nothing; folded, it would be the block's own state taken again as a
             // far channel). A pair of channels beating there is judged again with its dressing taken from its separation: the
@@ -1795,35 +1847,50 @@ impl Ground{
                 if k!=k2||kept.contains(&item.kind){continue;}
                 let m=&partition.combinations;
                 let inside=(0..self.carriers.len()).all(|c|m[a][c]-m[b][c]+carriers.iter().filter(|x|x.0==c).map(|x|x.1).sum::<i32>()==0);
-                if inside||(matches!(item.kind,Kind::Raman{..})&&!foldable((item.frequency-dressing[k]).max(0.),item.size,self.generator_scale)){kept.push(item.kind.clone());changed=true;}
+                if inside||(matches!(item.kind,Kind::Raman{..})&&!pair_folds(mixing(item.size,(item.frequency-dressing[k]).max(0.),self.generator_scale,f64::MIN_POSITIVE),allowance)){kept.push(item.kind.clone());changed=true;}
             }}
-            if !changed&&!moved{self.charge=Ground::charge_of(&excited,ng);return self.assemble(&b,partition,excited);}
+            if !changed&&!moved{
+                self.charge=Ground::charge_of(&excited,ng);
+                self.partner_pairs=self.partners(&excited,&explicit,&b,&partition.set,&dressing).into_iter().filter(|x|excited[x.0].folded).map(|x|(x.1,x.2)).collect();
+                self.assemble(&b,partition,excited)?;self.pairs=self.pair_charges();return Ok(());
+            }
         }
     }
 
     /// The pairs of channels through an explicit state (module documentation, # One rule over the ground and the excited states): each folded drive
     /// into one, against every drive kept into it -- those whose admixture g/d lies above double precision's round-off --, by the ground states' pairs' rule, within
-    /// one cluster with its dressing taken from their separation: kept where one may not fold. Whether any was.
-    fn keep_partners(&self,excited:&mut [ExcitedItem],explicit:&[bool],b:&Bounds,set:&[Option<usize>],dressing:&[f64])->bool{
+    /// one cluster with its dressing taken from their separation: kept where one may not fold (`pair_folds`) -- within the numerical share at most
+    /// (`MIXING_SHARE`): such a pair lies in neither part, X takes V^f and the explicit state's amplitude does not feel the folded drive, so no
+    /// measured charge reads its fold (its m² is booked, `Ground::partner_pairs`); the probe PGC's rung that folded them at m < ½ moved a rate between
+    /// sublevels by 0.045 of 0.30 /us against the second order of every excited state. Whether any was kept.
+    fn keep_partners(&self,excited:&mut [ExcitedItem],explicit:&[bool],b:&Bounds,set:&[Option<usize>],dressing:&[f64],allowance:f64)->bool{
+        let mut changed=false;
+        for(i,_,m2)in self.partners(excited,explicit,b,set,dressing){if excited[i].folded&&!pair_folds(m2.sqrt(),allowance.min(MIXING_SHARE)){excited[i].folded=false;excited[i].promoted=true;changed=true;}}
+        changed
+    }
+    /// The pairs of channels through an explicit state (`keep_partners`): per folded drive into one (its place in `excited`) and each drive kept into
+    /// it, the pair's ground states and its m² -- its size g g′ (1/d + 1/d′ + Γ/(d d′)) at its worst separation over the trap less the cluster's dressing.
+    fn partners(&self,excited:&[ExcitedItem],explicit:&[bool],b:&Bounds,set:&[Option<usize>],dressing:&[f64])->Vec<(usize,(usize,usize),f64)>{
         let(ng,l0)=(self.ground_states.len(),self.generator_scale);
         let kept:Vec<(Drive,f64,f64)>=excited.iter().filter(|x|!x.folded&&x.mixes()).filter_map(|x|match x.kind{ExcitedKind::Drive(d)=>Some((d,x.size,x.distance)),_=>None}).collect();
-        let mut changed=false;
-        for x in excited.iter_mut().filter(|x|x.folded&&x.mixes()){
+        let mut out=vec![];
+        for(i,x)in excited.iter().enumerate().filter(|(_,x)|x.folded&&x.mixes()){
             let ExcitedKind::Drive(d)=x.kind else{continue};if !explicit[d.excited]{continue;}
             let gamma=self.decay[(d.excited,d.excited)].re;
             let within=if set[d.ground]==set[ng+d.excited]{set[d.ground].map_or(0.,|k|dressing[k])}else{0.};
-            if kept.iter().filter(|p|p.0.excited==d.excited).any(|&(p,size,distance)|{
+            for &(p,size,distance)in kept.iter().filter(|p|p.0.excited==d.excited){
                 let motion=self.carriers[p.carrier].beams.iter().flat_map(|&l|self.carriers[d.carrier].beams.iter().map(move|&k|(l,k))).map(|(l,k)|self.motion(l,Some(k))).fold(0.,f64::max);
                 let frequency=b.separation(p.ground,d.ground,self.carriers[p.carrier].detuning-self.carriers[d.carrier].detuning,motion);
-                !foldable((frequency-within).max(0.),x.size*size*(1./x.distance+1./distance+gamma/(x.distance*distance)),l0)
-            }){x.folded=false;x.promoted=true;changed=true;}
+                let m=mixing(x.size*size*(1./x.distance+1./distance+gamma/(x.distance*distance)),(frequency-within).max(0.),l0,f64::MIN_POSITIVE);
+                out.push((i,(p.ground,d.ground),m*m));
+            }
         }
-        changed
+        out
     }
 
     /// The couplings between ground states classified (`classify`) with the folded drives, and the
     /// clusters they make with the kept excited couplings, and the frames.
-    fn partition(&mut self,b:&Bounds,excited:&[ExcitedItem],explicit:&[bool],kept:&[Kind])->Result<Partition,String>{
+    fn partition(&mut self,b:&Bounds,excited:&[ExcitedItem],explicit:&[bool],kept:&[Kind],allowance:f64)->Result<Partition,String>{
         let(ng,ne,nc)=(self.ground_states.len(),self.excited_states.len(),self.carriers.len());
         self.pole=b.poles.iter().copied().fold(f64::INFINITY,f64::min);self.poles=b.poles.clone();
         // ‖L0‖ of the eliminated generator without the states' energies: its Hermitian part on both
@@ -1859,12 +1926,12 @@ impl Ground{
             let z=(0..3).fold(Complex::ZERO,|s,a|s+self.emission[a][(first,e)]*self.emission[a][(second,e)].conj());
             if term(z.abs()){items.push(Item{kind:Kind::Direct{excited:e,first,second},frequency:separation(first,second,0.),size:z.abs(),folded:false});}
         }}}
-        let(verdicts,cut)=classify(&items.iter().map(|i|(i.frequency,i.size)).collect::<Vec<_>>(),l0);
+        let(verdicts,cut)=classify(&items.iter().map(|i|(i.frequency,i.size)).collect::<Vec<_>>(),l0,allowance);
         for(item,v)in items.iter_mut().zip(verdicts){item.folded=v&&!kept.contains(&item.kind);}
         // A static coupling between F = 1 and F = 2 that may not fold would join the hyperfine levels in one frame,
         // the splitting on its diagonal: the kept static couplings carry no beat.
         if let Some(item)=items.iter().find(|i|!i.folded&&matches!(i.kind,Kind::Static{..})&&{let Kind::Static{a,b}=i.kind else{unreachable!()};self.levels[a]!=self.levels[b]}){
-            return Err(format!("光束在 F=1 与 F=2 之间的静态耦合不能按 van Vleck 折叠：间隔 {:.3} GHz（生成元尺度的 {:.1} 倍，须至少 {FOLD_DISTANCE} 倍），混合 m² = {:.1e}（预算 {BUDGET:.0e}）；保留它须在一个子空间里传播超精细分裂，3D 运动暂不支持",
+            return Err(format!("光束在 F=1 与 F=2 之间的静态耦合不能按 van Vleck 折叠：间隔 {:.3} GHz（生成元尺度的 {:.1} 倍），混合 m² = {:.1e}（折叠须小于 ¼ 且不超过本级的 {allowance:.1e}）；保留它须在一个子空间里传播超精细分裂，3D 运动暂不支持",
                 item.frequency/TAU/1e3,item.frequency/l0,mixing(item.size,item.frequency.abs(),l0,f64::MIN_POSITIVE).powi(2)));}
         // The clusters: the components of the graph of kept couplings over the ground states (nodes
         // 0..ng) and the excited ones (ng + e).
@@ -2232,16 +2299,28 @@ impl Ground{
         Ok(out)
     }
 
-    /// The far components' fold, Σ m² of the folded ones; the couplings', Σ m² of the folded pairs of
-    /// channels and static couplings (the jumps' photons split by frequency are exact); and the
-    /// largest estimate of a folded static coupling between excited states (the drives' fold is its
-    /// charge, `Ground::charge`).
+    /// The far components' fold, Σ m² of the folded ones; the couplings' between ground states, their charge a priori (`pair_charge`);
+    /// and the largest estimate of a folded static coupling of an explicit excited state -- one between two folded states is in their
+    /// resolvent whole (`Ground::decoupled`) -- (the drives' fold is its charge, `Ground::charge`).
     pub fn fold_estimates(&self)->(f64,f64,f64){
         let far=self.components.iter().filter(|c|c.folded&&c.size>0.).map(|c|mixing(c.size,c.nu.abs(),self.l0,f64::MIN_POSITIVE).powi(2)).sum();
-        let near=self.items.iter().filter(|i|i.folded&&matches!(i.kind,Kind::Static{..}|Kind::Raman{..})).map(|i|mixing(i.size,i.frequency.abs(),self.generator_scale,f64::MIN_POSITIVE).powi(2)).sum();
-        let statics=self.excited_items.iter().filter(|x|x.folded&&matches!(x.kind,ExcitedKind::Static{..})).map(|x|x.estimate).fold(0.,f64::max);
-        (far,near,statics)
+        let explicit=|e:usize|self.clusters.iter().any(|c|c.excited.contains(&e));
+        let statics=self.excited_items.iter().filter(|x|x.folded&&matches!(x.kind,ExcitedKind::Static{a,b}if explicit(a)||explicit(b))).map(|x|x.estimate).fold(0.,f64::max);
+        (far,self.pair_charge(),statics)
     }
+    /// The pairs' charge per ground state (module documentation, # Approximations): Σ m² over the folded couplings between ground states
+    /// (`Item`, `Kind::states`) it is one of -- what their folds may move of its population, m² of each of the pair's states' (the second
+    /// order's first error, its admixture), read at the atoms as Σ_b p_b P_b = Σ m² (p_a + p_b) (solve.rs `measured_charge`).
+    fn pair_charges(&self)->Vec<f64>{
+        let mut out=vec![0.;self.ground_states.len()];
+        for i in self.items.iter().filter(|i|i.folded&&i.size>0.){
+            let m2=mixing(i.size,i.frequency.abs(),self.generator_scale,f64::MIN_POSITIVE).powi(2);let(a,b)=i.kind.states();out[a]+=m2;out[b]+=m2;
+        }
+        for &((a,b),m2)in &self.partner_pairs{out[a]+=m2;out[b]+=m2;}
+        out
+    }
+    /// The pairs' charge a priori: the largest of a ground state's (`pairs`), its population's error bound.
+    pub fn pair_charge(&self)->f64{self.pairs.iter().copied().fold(0.,f64::max)}
     /// A carrier's saturation on a cluster's ground states over the light's pattern: the largest of their
     /// folded drives' totals (`ExcitedItem::mean`).
     pub fn carrier_saturation(&self,c:usize,cl:&Cluster)->f64{
@@ -2459,6 +2538,11 @@ impl Ground{
     }
     /// Whether a cluster has explicit excited states.
     pub fn mixed(&self,k:usize)->bool{!self.clusters[k].excited.is_empty()}
+    /// Its shape (`Shape`): the rule's verdicts as a model takes them.
+    pub fn shape(&self)->Shape{
+        Shape{folded:self.excited_items.iter().map(|x|x.folded).collect(),items:self.items.iter().map(|i|(i.kind.clone(),i.folded)).collect(),
+            clusters:self.clusters.iter().map(|c|(c.states.clone(),c.excited.clone())).collect()}
+    }
 }
 
 #[cfg(test)]
@@ -2714,14 +2798,16 @@ pub(crate) mod tests{
 
     /// A weak static coupling between two ground states a block already joins, static in its frames, is the block's own: kept in its
     /// generator as it stands, not folded as a far path of itself -- three levels at 0, 2 and 4 rad/us joined by 0.16, the weak
-    /// 0.002 e^{0.7i} between the outer two (m² 1e-6: the rule alone folded it, a first-order error of the block's dynamics).
+    /// 0.002 e^{0.7i} between the outer two (m² 1e-6: the rule alone folded it, a first-order error of the block's dynamics), at a rung
+    /// that keeps the block's couplings (their m² 0.026 past its allowance of 1e-4; the first rung folds them, m = 0.16 < ½).
     #[test]
     fn a_weak_coupling_inside_a_block_is_the_block_s_own(){
         let mut r=request(&fixture()["request"]);r.beams.clear();r.times_us=vec![0.,1.];
         let mut g=Ground::bare(&r).unwrap();g.hamiltonian=Dense::zeros(STATES,STATES);
         for i in 0..STATES{g.hamiltonian[(i,i)]=Complex::new(if i<3{2.*i as f64}else{10000.+i as f64},0.);}
         for(a,b,z)in [(0,1,Complex::new(0.16,0.)),(1,2,Complex::new(0.16,0.)),(0,2,Complex::cis(0.7)*0.002)]{g.hamiltonian[(a,b)]=z;g.hamiltonian[(b,a)]=z.conj();}
-        let g=g.clustered(f64::INFINITY).unwrap();let k=g.cluster[0];assert_eq!(g.clusters[k].states,vec![0,1,2]);
+        let first=g.clustered(f64::INFINITY).unwrap();assert_eq!(first.clusters[first.cluster[0]].states,vec![0]);
+        let g=g.clustered(1e-4).unwrap();let k=g.cluster[0];assert_eq!(g.clusters[k].states,vec![0,1,2]);
         let e=g.eliminate(&g.focus_intensities()).unwrap();let h=g.local_at(&e,k,[0.;3],0.).unwrap().effective;
         for i in 0..3{for j in 0..3{let expected=g.hamiltonian[(i,j)]-if i==j{Complex::new(g.clusters[k].frames[i],0.)}else{Complex::ZERO};
             assert!((h[(i,j)]-expected).abs()<1e-13,"H[{i},{j}] {:?} against {:?}",h[(i,j)],expected);}}

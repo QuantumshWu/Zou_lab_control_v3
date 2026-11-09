@@ -691,7 +691,7 @@ pub struct Model{
     pub fourth_dropped:f64,
     /// The dressing's drives left out at beats the rule folds (`layouts`): their mixings' squares.
     pub effective_dropped:f64,
-    /// The largest error on T, relative and per µK of T, of what the first order's transfer leaves out (`transfer_tables`): at the request's T within `FIRST_SHARE`.
+    /// The largest error on T, relative and per µK of T, of what the first order's transfer leaves out (`transfer_tables`): at the reach's T within `FIRST_SHARE`.
     pub first_error:f64,
     /// The elimination's a-priori bound over the atoms' reach: the largest excited weight a ground
     /// state b can take, Σ_l ‖R_l[:,b]‖² over the near beams at their peak amplitude (each one's
@@ -795,7 +795,7 @@ impl Model{
         model.prune(&bases)?;
         let stake=model.stake(request);model.tabulate(&bases,most_bytes,most_nodes,stake)?;
         model.linear=model.layouts.iter().map(|l|(0..l.n).map(|_|Default::default()).collect()).collect();
-        model.transfer_tables(request.temperature_uk);
+        let reach=model.ground.temperature_uk;model.transfer_tables(reach);
         model.lindblad()?;
         Ok(model)
     }
@@ -846,7 +846,7 @@ impl Model{
         let mut model=Model{ground,geometry,trap_beam,trap_beams,trap_light,focused:vec![trap_unit],axes:vec![],held:vec![],weights:vec![],profiles:vec![],carriers,hbar_over_mass,mass_kg:request.mass_kg,
             layouts:vec![],tables:Tables{nodes:1,data:vec![],bounds:vec![],reach:[0.;3],work:0.},linear:vec![],table_error:0.,table_limit:None,table_stalled:false,dressing:0.,fourth_dropped:0.,effective_dropped:0.,first_error:0.,resonance:0.,ringing_spread:0.,reach:vec![centre],
             wide:std::arch::is_x86_feature_detected!("avx2")&&std::arch::is_x86_feature_detected!("fma"),doppler:true,fourth};
-        model.choose_profiles(request)?;
+        model.choose_profiles()?;
         model.layouts=model.layouts(&bases);model.fourth_dropped=model.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();model.effective_dropped=model.layouts.iter().map(|l|l.effective_dropped).sum();
         Ok((model,bases))
     }
@@ -866,15 +866,15 @@ impl Model{
     }
 
     /// The tables' axes (`Axis`). Each varying field's chart is judged over the atom's reach (ground.rs `Ground::trap`, the region of the
-    /// trap within ln(1/budget) k_B T of its bottom: the harmonic trap's thermal ellipsoid holding all but the budget of a Boltzmann ensemble),
-    /// T the request's -- at its ends along the principal axes, and inside it for interfering beams (ground.rs `reach_points`): a chart
+    /// trap within ln(1/s) k_B T of its bottom: the harmonic trap's thermal ellipsoid holding all but the share s of a Boltzmann ensemble, ground.rs `OUTSIDE_REACH`),
+    /// T the reach's (ground.rs `Ground::temperature_uk`) -- at its ends along the principal axes, and inside it for interfering beams (ground.rs `reach_points`): a chart
     /// coordinate taken at the focus errs by what that moves the field's T there, Σ_i w_i |ΔT_i|, w_i its T coordinate's weight, its shifts'
     /// size ‖O_i + F_i‖ against the nearest excited pole and the generator's scale -- a field of rank one its intensity's change times its
     /// weight. The trap beam's field takes its intensity; then, the largest error first, the coordinates beyond the budget, at most
     /// `MOST_FOCUSED` in all. The rest stay at the focus, each field's error booked (`profiles`).
-    fn choose_profiles(&mut self,request:&Request)->Result<(),String>{
+    fn choose_profiles(&mut self)->Result<(),String>{
         let g=&self.ground;let trap=g.trap;
-        let reach:[f64;3]=std::array::from_fn(|a|ground::thermal_reach(trap.frequencies[a],request.temperature_uk,self.hbar_over_mass).unwrap_or(0.));
+        let reach:[f64;3]=std::array::from_fn(|a|ground::thermal_reach(trap.frequencies[a],g.temperature_uk,self.hbar_over_mass).unwrap_or(0.));
         self.reach.extend(ground::reach_points(trap.centre,&trap.axes,reach,g.units.iter().any(|u|u.beams.len()>1)));
         let factor=(1./g.pole.max(f64::MIN_POSITIVE)).max(1./g.generator_scale.max(f64::MIN_POSITIVE));
         self.weights=g.outside.iter().zip(&g.folds).map(|(o,f)|{let mut x=o.clone();x.add_scaled(Complex::ONE,f);x.spectral_norm()*factor}).collect();
