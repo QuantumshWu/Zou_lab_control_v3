@@ -151,10 +151,11 @@
 }
 .link-badge {
   flex: none; margin-left: auto; width: var(--link-badge); height: var(--link-badge); border-radius: calc(var(--link-badge) / 2);
-  /* The glyph centred by its box: one line exactly the badge's height, upright. */
-  display: block; padding: 0; text-align: center; line-height: var(--link-badge); font-size: calc(var(--link-badge) * 0.72);
-  background: var(--link); color: var(--surface); font-weight: 600;
+  display: block; padding: 0; background: var(--link); color: var(--surface);
 }
+/* Its "x" is drawn on the disc's centre by the letter's own middle (linkBadge). */
+.link-badge > svg { display: block; width: 100%; height: 100%; }
+.link-badge > svg > text { fill: currentColor; font-family: inherit; font-size: 72px; font-weight: 600; }
 /* A linked row's band runs up through the gap above it and down beside its preview line. */
 .linked-lead { grid-column: 1; grid-row: span 2; align-self: stretch; position: relative; margin-top: calc(-1 * var(--row-gap)); }
 /* A note under the axis (its custom values) keeps the band unbroken. */

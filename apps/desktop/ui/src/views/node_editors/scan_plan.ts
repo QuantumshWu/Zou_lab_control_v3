@@ -169,7 +169,7 @@ class AxisRowView {
   private linkedCells: HTMLElement[] = [];
   private linkedUpdates: (() => void)[] = [];
   /** The master's "x": what its linked formulas call this axis, its tooltip what x plays. */
-  private badge = element("span", "link-badge", "x");
+  private badge = linkBadge();
   /** A list nobody's ends describe, kept until a spin is edited. */
   private customValues: number[] | null = null;
 
@@ -409,6 +409,21 @@ class AxisRowView {
     this.showMode();
     this.owner.emitPlan();
   }
+}
+
+/** The group's "x": a lowercase x centred in its disc by its x-height, not by its line
+ * (a line centres the em box, which leaves a lowercase letter low). */
+function linkBadge(): HTMLElement {
+  const badge = element("span", "link-badge");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 100 100");
+  svg.setAttribute("aria-hidden", "true");
+  const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  for (const [name, value] of [["x", "50"], ["y", "50"], ["text-anchor", "middle"], ["dominant-baseline", "middle"]] as const) text.setAttribute(name, value);
+  text.textContent = "x";
+  svg.append(text);
+  badge.append(svg);
+  return badge;
 }
 
 export class ScanPlanEditor implements NodeEditor {
