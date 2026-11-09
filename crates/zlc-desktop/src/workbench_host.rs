@@ -668,7 +668,7 @@ impl Plugins for Builtin {
         // The bench a Start records waits for no device long: one busy in another run's call misses
         // the bound without being taken for unresponsive.
         let started = self.spawn("call", move |host| Event::Answered { ticket,
-            result: if op == "snapshot" { host.snapshot(&instance, zlc_workbench::SNAPSHOT_WAIT) } else { host.call(&instance, &op, params, CALL).map(|reply| reply.value) }
+            result: if op == "snapshot" { host.snapshot(&instance, &params["units"], zlc_workbench::SNAPSHOT_WAIT) } else { host.call(&instance, &op, params, CALL).map(|reply| reply.value) }
                 .map_err(|error| error.to_string()) });
         if let Err(error) = started { self.0.borrow_mut().events.push(Event::Answered { ticket, result: Err(error) }); }
     }
@@ -692,7 +692,7 @@ impl Plugins for Builtin {
         let (devices, native): (Vec<_>, Vec<_>) = { let stand = self.0.borrow(); run.devices.iter()
             .map(|(argument, instance)| (argument.clone(), instance.clone())).partition(|(_, instance)| !stand.native_instances.contains_key(instance)) };
         let keys = native.into_iter().map(|(argument, instance)| (format!("{argument}_key"), json!(instance)));
-        let request = RunRequest { prepared: run.prepared.clone(), values: Value::Object(run.values.clone()), devices: devices.into_iter().collect(), device_labels: run.device_labels.clone(), shared: run.shared.clone(), origin: origin(&run.origin),
+        let request = RunRequest { prepared: run.prepared.clone(), values: Value::Object(run.values.clone()), devices: devices.into_iter().collect(), device_labels: run.device_labels.clone(), device_units: run.device_units.clone(), shared: run.shared.clone(), origin: origin(&run.origin),
             // Build arguments beside the values: chosen artifacts and resolved workspace resources.
             resources: Value::Object(run.artifacts.iter().chain(&run.resources).map(|(key, value)| (key.clone(), value.clone())).chain(keys).collect()), source_signal: (!run.source_signal.is_empty()).then(|| run.source_signal.clone()),
             run_directory: run.directory.clone(), outputs: run.outputs.clone(), record_devices: run.record_devices };

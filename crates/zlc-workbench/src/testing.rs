@@ -358,6 +358,73 @@ mod tests {
         assert!(refused.unwrap_err().starts_with("amplitude: Stop the active Logic"), "an unnamed field is claimed, not protected");
     }
 
+    /// The unit the operator picks for a field in Device Control is the apparatus's: kept on the
+    /// device's row (unsaved until Save), saved and read back, the device opened in it, its scan
+    /// ports and run proxy told it, and the bench a run records asks for it -- each entry under the
+    /// device's id with its Device Manager name beside it. A window's own default unit is not kept.
+    #[test]
+    fn a_picked_unit_is_kept_by_the_apparatus_and_everything_recorded_uses_it() {
+        let root = scratch("kept-units");
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().extend([
+            json!({"type_id": "rf.virtual", "kind": "device", "family": "rf", "label": "Virtual RF", "capabilities": ["rf.source"], "parameters": []}),
+            json!({"type_id": "device_scan", "kind": "node", "label": "Device scan", "parameters": [{"name": "plan", "type": "text", "label": "Plan", "default": ""}],
+                   "node": {"node_kind": "task", "outputs": [], "queries": ["resolve_device_claims", "editor_facts"]}})]);
+        std::fs::write(root.join("apparatus.json"), r#"{"format": "zlc.installation", "simulation": {},
+            "devices": [{"instance_id": "rf_1", "role": "Trap RF", "type_id": "rf.virtual", "parameters": {}}]}"#).unwrap();
+        let open = |catalog: &Value| {
+            let calls = Rc::new(RefCell::new(Calls::default()));
+            let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog: catalog.clone() })).unwrap();
+            let mut host = FakeHost::default();
+            apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
+            event(&mut workbench, Event::Opened { instance: "rf_1".into(), working_point: json!({"state": "open", "tunable": true, "snapshot": true}) }, &mut host);
+            (workbench, calls, host)
+        };
+        let read = |calls: &Rc<RefCell<Calls>>, op: &str| calls.borrow().2.iter().rev().find(|(name, ..)| name == op).cloned().unwrap();
+        let (mut workbench, calls, mut host) = open(&catalog);
+        workbench.apply("read_device", &json!({"device": "rf_1", "units": {"ch1_frequency": "MHz"}}), &Origin::Operator, 2, &mut host);
+        assert_eq!(workbench.apparatus_state()["dirty"], false, "a window's default is this session's only");
+        workbench.apply("read_device", &json!({"device": "rf_1", "units": {"ch1_power": "mVpp"}, "keep": true}), &Origin::Operator, 3, &mut host);
+        assert_eq!(read(&calls, "fields").2, json!({"units": {"ch1_frequency": "MHz", "ch1_power": "mVpp"}}));
+        assert_eq!(workbench.apparatus_state()["dirty"], true, "kept on the row, saved with the apparatus");
+        assert_eq!(workbench.apparatus_state()["action"], "shut_down", "a kept unit changes nothing the device holds");
+        apply(&mut workbench, &mut host, "save_apparatus", json!({"path": "apparatus.json"})).unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(root.join("apparatus.json")).unwrap()).unwrap();
+        assert_eq!(saved["devices"][0]["units"], json!({"ch1_power": "mVpp"}));
+        assert_eq!((&saved["devices"][0]["instance_id"], &saved["devices"][0]["role"]), (&json!("rf_1"), &json!("Trap RF")), "the key stays the id");
+
+        // Read back: the device opens in the kept unit, and Device Control says it is kept.
+        let (mut workbench, calls, mut host) = open(&catalog);
+        assert_eq!(workbench.apparatus.draft[0].units, [("ch1_power".to_owned(), "mVpp".to_owned())].into());
+        workbench.apply("read_device", &json!({"device": "rf_1"}), &Origin::Operator, 2, &mut host);
+        let (_, ticket, params) = read(&calls, "fields");
+        assert_eq!(params, json!({"units": {"ch1_power": "mVpp"}}));
+        event(&mut workbench, Event::Answered { ticket, result: Ok(json!([
+            {"field": {"name": "ch1_power", "type": "float", "label": "CH1 Power", "default": null, "unit": "mVpp"}, "current": 40.0, "live_write": true, "dependency_group": ["ch1_power"]},
+            {"field": {"name": "ch1_frequency", "type": "float", "label": "CH1 Frequency", "default": null, "unit": "Hz"}, "current": 8.0e7, "live_write": true, "dependency_group": ["ch1_frequency"]}])) }, &mut host);
+        let fields = workbench.device_rows()[0]["fields"].clone();
+        assert_eq!((&fields[0]["unit_kept"], &fields[1]["unit_kept"]), (&json!(true), &json!(false)));
+        // The scan editor's proxy and a run's are told the kept units.
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "device_scan", "values": {"plan": "device:rf_1:ch1_power"}})).unwrap();
+        event(&mut workbench, Event::Opened { instance: node_instance("device_scan"), working_point: Value::Null }, &mut host);
+        let (_, ticket, args) = read(&calls, "editor_facts");
+        assert_eq!((&args["devices"]["tunable:rf_1"]["role"], &args["devices"]["tunable:rf_1"]["units"]), (&json!("Trap RF"), &json!({"ch1_power": "mVpp"})));
+        event(&mut workbench, Event::Answered { ticket, result: Ok(json!({"ports": [{"port": "device:rf_1:ch1_power"}]})) }, &mut host);
+        let (_, ticket, _) = read(&calls, "resolve_device_claims");
+        event(&mut workbench, Event::Answered { ticket, result: Ok(json!({"tunable:rf_1": {"instance": "rf_1", "fields": ["ch1_power"]}})) }, &mut host);
+        apply(&mut workbench, &mut host, "start_node", json!({"node": "device_scan"})).unwrap();
+        let spec = calls.borrow().1.last().cloned().unwrap();
+        assert_eq!((spec.device_labels["rf_1"].as_str(), &spec.device_units["rf_1"]), ("Trap RF", &[("ch1_power".to_owned(), "mVpp".to_owned())].into()));
+        // The bench the run records asks the device in the kept unit; its entry is named.
+        event(&mut workbench, Event::RunStarted { run: spec.run.clone() }, &mut host);
+        event(&mut workbench, Event::RunSnapshot { run: spec.run.clone(), ticket: 101, wait: false }, &mut host);
+        let (_, ticket, params) = read(&calls, "snapshot");
+        assert_eq!(params, json!({"units": {"ch1_power": "mVpp"}}));
+        event(&mut workbench, Event::Answered { ticket, result: Ok(json!({"values": {"ch1_power": 40.0}, "units": {"ch1_power": "mVpp"}})) }, &mut host);
+        let bench = calls.borrow().3.iter().rev().find(|(run, id, _)| *run == spec.run && *id == 101).cloned().unwrap().2.unwrap();
+        assert_eq!(bench["devices"]["rf_1"], json!({"type_id": "rf.virtual", "role": "Trap RF", "values": {"ch1_power": 40.0}, "units": {"ch1_power": "mVpp"}}));
+    }
+
     /// A node is drawn at once from its type's answers for its default draft (the catalogue's),
     /// before its plugin has started; an edit of one field leaves the others as the newest
     /// answers drew them while the plugin checks it (v2 answered at once): the field the plugin
@@ -1702,8 +1769,8 @@ mod tests {
     #[test]
     fn only_the_latest_device_read_can_replace_its_fields() {
         let (_root,mut wb,calls,mut host)=rig("device-read-order",catalog());
-        wb.read_device("mot_camera",None,None).unwrap(); let old=asked(&calls,"fields");
-        wb.read_device("mot_camera",None,None).unwrap(); let fresh=asked(&calls,"fields");
+        wb.read_device("mot_camera",None,false,None).unwrap(); let old=asked(&calls,"fields");
+        wb.read_device("mot_camera",None,false,None).unwrap(); let fresh=asked(&calls,"fields");
         wb.on_event(Event::Answered{ticket:fresh,result:Ok(json!({"marker":"fresh"}))},&mut host);
         wb.on_event(Event::Answered{ticket:old,result:Ok(json!({"marker":"old"}))},&mut host);
         assert_eq!(wb.devices["mot_camera"].fields.as_ref().unwrap()["marker"],"fresh");

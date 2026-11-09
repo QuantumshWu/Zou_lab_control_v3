@@ -57,7 +57,7 @@ A failed device does not stop the others; the operator may keep rows that cannot
 Device Control: `read_device {device}` reads `devices[i].fields` (readback, limits, `editable` and the
 `reason` when not). `tune_device {device, field, value, unit?}` applies one field; its reply holds the
 readback. A field a running node protects is refused; an unprotected live-safe field of a held device needs
-the operator's `accept_device_risk`. `read_device {units: {field: "MHz"}}` reads a field in another unit.
+the operator's `accept_device_risk`. `read_device {units: {field: "MHz"}}` reads a field in another unit; with `keep: true` the apparatus keeps it as the operator's unit.
 Commands a device type declares appear as `<instance>__<command>` tools while it is open
 (an id outside letters, digits and `_` is spelled `<letters>-<hash>`; `get_state` devices list each row's tool names).
 `get_device_log {device}` is its plugin's log.

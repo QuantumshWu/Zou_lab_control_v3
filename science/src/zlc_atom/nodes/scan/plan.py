@@ -28,7 +28,7 @@ import itertools
 import json
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from numbers import Real
 
 
@@ -272,26 +272,21 @@ def unscannable_api_ports(description: Mapping[str, object]) -> dict[str, str]:
             for field, reason in dict(pulse_description(description).get("unscannable") or {}).items()}
 
 
-def label_device_scan_ports(
-    ports: Sequence[ScanPort], device_labels: Mapping[str, str] | None,
-) -> tuple[ScanPort, ...]:
-    """Project accepted Role metadata without reading or renaming a device."""
+#: Between a device's name and its field's in a device port's label ("Trap RF · CH1 Power").
+DEVICE_LABEL_SEPARATOR = " · "
 
-    labels = device_labels or {}
-    result = []
-    for port in ports:
-        if port.port.startswith(DEVICE_PARAM_FAMILY):
-            key, field = device_port_parts(port.port)
-            label = f"{labels.get(key, key)}.{field}"
-            if label != port.label:
-                port = replace(port, label=label)
-        result.append(port)
-    return tuple(result)
+
+def device_port_label(device: str, field: str) -> str:
+    """What a device port is called wherever it is shown: the name Device
+    Manager gives the device, then its field's label.  Its axis identity
+    stays ``<key>.<field>`` (:func:`port_label`), so renaming a device never
+    renames an axis a selection or a saved panel names."""
+
+    return f"{device}{DEVICE_LABEL_SEPARATOR}{field}"
 
 
 def scan_ports_for_devices(
     tunables: Mapping | None, *, units: Mapping[str, str] | None = None,
-    device_labels: Mapping[str, str] | None = None,
     unread: dict[str, str] | None = None,
 ) -> tuple[ScanPort, ...]:
     """Every port the bench's tunable devices offer, from their own words.
@@ -310,9 +305,12 @@ def scan_ports_for_devices(
     interval -- a knob pinned to one value by policy -- is a control, not
     an axis, and is passed over rather than failing the whole projection.
     A ``derived`` field is a reading (a stage's state), never an axis.
-    The port's unit is the field's own declared unit -- an RF frequency
-    axis publishes hertz -- and its label names the device and the knob;
-    it stands at the device's reading, in that unit.
+    The port's unit is the one ``units`` names for it (the plan's axis
+    unit), else the one the operator keeps for the field (the device's
+    ``units``, picked in Device Control), else the field's own declared
+    unit -- an RF frequency axis publishes hertz; its label names the device
+    by its ``role`` and the knob by its label; it stands at the device's
+    reading, in that unit.
     """
 
     ports: list[ScanPort] = []
@@ -330,8 +328,8 @@ def scan_ports_for_devices(
                 raise TypeError("device tunable_fields must contain TunableField values")
             field = tunable.metadata
             port = f"{DEVICE_PARAM_FAMILY}{key}:{field.name}"
-            selected_unit = (units or {}).get(port)
-            if selected_unit:
+            selected_unit = (units or {}).get(port) or dict(getattr(device, "units", None) or {}).get(field.name)
+            if selected_unit and selected_unit != field.unit:
                 tunable = read_tunable_in_unit(device, field.name, selected_unit)
                 field = tunable.metadata
             if field.derived or field.minimum is None or field.maximum is None:
@@ -344,7 +342,7 @@ def scan_ports_for_devices(
             ports.append(
                 ScanPort(
                     port,
-                    port_label(port),
+                    device_port_label(getattr(device, "role", "") or key, field.label or field.name),
                     field.unit or "",
                     float(field.minimum),
                     float(field.maximum),
@@ -354,8 +352,7 @@ def scan_ports_for_devices(
                     display_unit=field.display_unit,
                 )
             )
-    return label_device_scan_ports(ports, device_labels if device_labels is not None else
-                                   {key: getattr(device, "role", "") or key for key, device in dict(tunables or {}).items()})
+    return tuple(ports)
 
 
 class DeviceKnob:
@@ -372,6 +369,7 @@ class DeviceKnob:
     def __init__(self, device: object) -> None:
         self._device = device
         self.role = getattr(device, "role", "")
+        self.units = dict(getattr(device, "units", None) or {})
         native = getattr(device, "tune_in_unit", None)
         if callable(native):
             self.tune_in_unit = native
@@ -870,6 +868,7 @@ SCAN_PLAN_SELECTIONS = (
 
 
 __all__ = [
+    "DEVICE_LABEL_SEPARATOR",
     "DEVICE_PARAM_FAMILY",
     "SCAN_PLAN_SELECTIONS",
     "PULSE_PARAM_FAMILY",
@@ -880,6 +879,7 @@ __all__ = [
     "ScanPort",
     "ambiguous_api_value",
     "bind_plan",
+    "device_port_label",
     "device_port_parts",
     "hardware_scan_ports_for",
     "plan_from_authored",

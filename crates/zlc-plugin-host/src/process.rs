@@ -97,7 +97,7 @@ impl PluginProcess {
     /// Start metadata has one total budget, including pipe contention. A frame
     /// already being written must finish in the background to keep the shared
     /// channel valid, but this caller never waits past its deadline or ends the owner.
-    pub fn snapshot(self: &Arc<Self>, instance: &str, deadline: Duration) -> Result<Incoming, CallError> {
+    pub fn snapshot(self: &Arc<Self>, instance: &str, units: &Value, deadline: Duration) -> Result<Incoming, CallError> {
         let until = Instant::now() + deadline;
         if !self.alive.load(Ordering::Acquire) { return Err(CallError::lost("the plugin process has ended")); }
         {
@@ -111,7 +111,7 @@ impl PluginProcess {
             snapshots.insert(instance.to_owned());
         }
         let (reply, answer) = mpsc::channel();
-        let (process, name) = (self.clone(), instance.to_owned());
+        let (process, name, units) = (self.clone(), instance.to_owned(), units.clone());
         let spawned = std::thread::Builder::new().name("zlc-plugin-snapshot".into()).spawn(move || {
             let mut identity = None;
             let result = (|| {
@@ -120,7 +120,7 @@ impl PluginProcess {
                 identity = Some(id);
                 let (sender, received) = mpsc::channel();
                 process.pending.lock().unwrap().insert(id, (sender, false, Some(name.clone())));
-                let sent = process.writer.send_until(&json!({"t":"req", "id":id, "op":"snapshot", "p":{"instance":name, "plain":true},
+                let sent = process.writer.send_until(&json!({"t":"req", "id":id, "op":"snapshot", "p":{"instance":name, "plain":true, "units":units},
                     "blocks":[], "deadline_ms":until.saturating_duration_since(Instant::now()).as_millis() as u64}), until);
                 if let Err(error) = sent {
                     if !error.started { return Err(error.error); }
@@ -396,7 +396,7 @@ mod snapshot_tests {
         let held = process.writer.pause();
         for name in ["echo", "other"] {
             let started = Instant::now();
-            assert_eq!(host.snapshot(name, Duration::from_millis(50)).unwrap_err().kind, ErrorKind::Timeout);
+            assert_eq!(host.snapshot(name, &json!({}), Duration::from_millis(50)).unwrap_err().kind, ErrorKind::Timeout);
             assert!(started.elapsed() < Duration::from_millis(500));
         }
         let until = Instant::now() + Duration::from_secs(1);
@@ -404,7 +404,7 @@ mod snapshot_tests {
         assert!(process.snapshots.lock().unwrap().is_empty(), "expired unsent metadata must not retain workers");
         assert!(!process.requests_pending("echo") && !process.requests_pending("other"), "nothing was sent after the deadlines");
         drop(held);
-        for name in ["echo", "other"] { assert_eq!(host.snapshot(name, Duration::from_secs(2)).unwrap()["values"]["amplitude"], 0.0); }
+        for name in ["echo", "other"] { assert_eq!(host.snapshot(name, &json!({}), Duration::from_secs(2)).unwrap()["values"]["amplitude"], 0.0); }
         host.shutdown();
     }
 
@@ -416,7 +416,7 @@ mod snapshot_tests {
         let until = Instant::now() + Duration::from_secs(2);
         while !process.requests_pending("echo") && Instant::now() < until { std::thread::sleep(Duration::from_millis(5)); }
         assert!(process.requests_pending("echo"));
-        for _ in 0..3 { assert_eq!(host.snapshot("echo", Duration::from_millis(50)).unwrap_err().kind, ErrorKind::Timeout); }
+        for _ in 0..3 { assert_eq!(host.snapshot("echo", &json!({}), Duration::from_millis(50)).unwrap_err().kind, ErrorKind::Timeout); }
         assert_eq!(process.snapshots.lock().unwrap().len(), 1);
         assert_eq!(process.pending.lock().unwrap().values().filter(|(_, tracked, name)| !tracked && name.as_deref() == Some("echo")).count(), 1);
         let started = Instant::now();
@@ -447,7 +447,7 @@ mod snapshot_tests {
         let reading = std::thread::spawn(move || crate::read_loop(inner, reader, stdout));
         let instance = "snapshot-instance-".repeat(65536);
         let started = Instant::now();
-        assert_eq!(process.snapshot(&instance, Duration::from_millis(200)).err().unwrap().kind, ErrorKind::Timeout);
+        assert_eq!(process.snapshot(&instance, &json!({}), Duration::from_millis(200)).err().unwrap().kind, ErrorKind::Timeout);
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(process.writer.writing(), "the frame write really owns the full pipe");
         assert!(!process.wait_exit(Duration::ZERO), "metadata timeout must leave its owner alive");

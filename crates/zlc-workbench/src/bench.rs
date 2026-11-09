@@ -44,8 +44,9 @@ impl Workbench {
         self.catalog.get(type_id).is_some_and(|descriptor| !descriptor.is_device() && descriptor.node().node_kind != "processor")
     }
 
-    /// Every live device entered as it stands (instance -> `{type_id, role}`), each that reports
-    /// its settings asked; the board's entry also says whether a run or an outside driver holds it.
+    /// Every live device entered as it stands (instance -> `{type_id, role}`: the key stays its id,
+    /// `role` the name Device Manager gives it), each that reports its settings asked, in the units
+    /// its apparatus entry keeps; the board's entry also says whether a run or an outside driver holds it.
     fn take_bench(&mut self, run: &str) -> Bench {
         let mut bench = Bench { taken_at: workspace::utc_now(), ..Bench::default() };
         let ids: Vec<String> = self.devices.keys().cloned().collect();
@@ -74,12 +75,14 @@ impl Workbench {
                     (None, None) => Value::Null,
                 };
             }
+            // A field the operator keeps a unit for is recorded in it, converted by the device itself.
+            let units = json!({"units": live.entry.units});
             match unavailable {
                 Some(why) => entry["unavailable"] = json!(why),
                 None => {
                     let ticket = self.ticket(Ticket::Snapshot { run: run.to_owned(), device: id.clone() });
                     bench.asked.insert(ticket);
-                    self.plugins.call(&id, ticket, "snapshot", &json!({}));
+                    self.plugins.call(&id, ticket, "snapshot", &units);
                 }
             }
             if board { bench.sequencer.insert(id, entry); } else { bench.devices.insert(id, entry); }

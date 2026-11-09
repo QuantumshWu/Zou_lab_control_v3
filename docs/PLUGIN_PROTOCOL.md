@@ -241,9 +241,12 @@ or Close fails, its adapter and closer remain owned and retryable; the Rust host
 Device Manager retain the failed-close state. Apply retries Close before opening a
 replacement. A failed Close must never be shown as a successfully released device.
 
-Device metadata in draft queries and `run.start` includes `instance` (stable ID)
-and `role` (the accepted operator name). Proxies expose `role` for display;
-commands, scan port keys and claims continue to use `instance`.
+Device metadata in draft queries and `run.start` includes `instance` (stable ID),
+`role` (the accepted operator name) and `units` (field -> the unit the operator
+keeps for it, picked in Device Control and saved with the apparatus). Proxies
+expose `role` for display and `units` for the unit a scan port is offered in and
+a device record is written in; commands, scan port keys and claims continue to
+use `instance`, and a recorded device stays keyed by it with `role` beside it.
 Draft and run proxies receive the same declared `reads`. Every tunable proxy
 also offers `tune_in_unit`; the device-side SDK applies its native conversion
 when available, with the same rules as Device Control. Draft queries cannot tune.
@@ -321,7 +324,7 @@ streaming on COM5 (passed over COM3: bound)"}`.
 Core -> plugin requests (each names its `instance`): `hello`, `open`, `configure`,
 `close`, `exit`, `ping`, `spi {method, args, kwargs}` (call the open device's
 adapter; `get:<name>` reads a property), `command {name, params}` (section 8),
-`fields {units?}` / `tune {field, value, unit?}` / `values` (the tunable quartet), `snapshot`
+`fields {units?}` / `tune {field, value, unit?}` / `values` (the tunable quartet), `snapshot {units?}`
 (the device's configured state for an acquisition, below), `make_safe
 {output}`, `publish {published}` (Remote of a type that `announces`: section 10), `query {name, values?, devices?, resources?, source?, output_name?,
 installation?}` (the facts by name; the SDK calls the v2 callable with them in v2's
@@ -354,7 +357,9 @@ inherit their sources' records and do not collect the bench themselves.
 The workbench asks every open device that advertises `snapshot: true` concurrently,
 including static devices that a node does not directly call. The SDK uses the
 adapter's own `snapshot()` when provided, otherwise the tunable quartet returns
-`{values, units, provenance}`. The native sequencer includes its loaded program
+`{values, units, provenance}`; a field the apparatus keeps a unit for (`units`) is
+recorded in that unit only, converted by the device's own conversion when it has
+one (an RF level into its load). The native sequencer includes its loaded program
 and pulse. Missing support, busy devices, read errors and timeouts remain explicit
 `unavailable` values. The 2 s budget includes the local pipe writer; at most one
 snapshot per device is in flight. Expired unsent requests are cancelled; a partially

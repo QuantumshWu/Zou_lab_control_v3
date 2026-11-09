@@ -8,7 +8,8 @@
 // shown or brought forward, a run letting the device go.  A number is read in
 // the unit that shows it between 1 and 1000, in the family its device shows it
 // in (defaultUnit), chosen once, at the window's first reading; a unit the
-// operator picks stays.
+// operator picks stays, and the apparatus keeps it (read_device keep): the
+// field opens in it next time, and is recorded and scanned in it.
 import { Field, StatusStrip, alignUnitPickers, command, defaultUnit, element, readoutText, setChecked, setElided, setState, shifted, statusDot, switchButton, titleRow, heldNote, showHeld, } from "../fluent/index.js";
 import { queueStatus } from "../shell.js";
 /** How long a live field waits after an edit before it tunes (v2: 75 ms). */
@@ -129,6 +130,8 @@ export class DeviceControlView {
                 row.field.acceptEdit();
             }
             row.spec = spec;
+            if (spec.unit_kept)
+                row.picked = true;
             if (!spec.editable || device.state !== "open") {
                 this.cancelLive(row);
                 this.queued.delete(spec.name);
@@ -242,20 +245,20 @@ export class DeviceControlView {
         row.revision = 0;
         row.valid = true;
         row.unitRequest = null;
-        row.picked = false;
+        row.picked = Boolean(spec.unit_kept);
         row.applied = "";
         row.error = "";
         row.outside = false;
         row.field = new Field(`control-${this.id}`, { ...spec, value: spec.desired, spin: true, inexact: true }, {
             // Another spelling is the device's to read (an RF level depends on its
             // load): the row is re-read in it, reading, bounds and limits together
-            // (a draft keeps its digits: update).
+            // (a draft keeps its digits: update). The apparatus keeps the operator's pick.
             unit: unit => {
                 this.cancelLive(row);
                 this.queued.delete(row.spec.name);
                 row.revision++;
                 row.picked = true;
-                row.unitRequest = this.ctx.transport.send({ action: "read_device", device: this.id, units: { [row.spec.name]: unit } }, `Reading ${row.spec.label} in ${unit}…`);
+                row.unitRequest = this.ctx.transport.send({ action: "read_device", device: this.id, units: { [row.spec.name]: unit }, keep: true }, `Reading ${row.spec.label} in ${unit}…`);
                 queueMicrotask(() => { if (this.device)
                     this.update(this.device); });
                 return row.unitRequest;

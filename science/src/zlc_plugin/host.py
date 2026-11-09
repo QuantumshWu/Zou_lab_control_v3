@@ -859,9 +859,10 @@ def _values(instance: Instance, params: dict[str, Any]) -> Any:
 
 
 def _snapshot(instance: Instance, params: dict[str, Any]) -> Any:
-    """The device's configured state as plain JSON, or None when it does not report it."""
+    """The device's configured state as plain JSON, or None when it does not report it;
+    a field `units` names is recorded in that unit (the operator's, kept by the apparatus)."""
     instance.device()
-    return plain(tunable.snapshot(instance.adapter))
+    return plain(tunable.snapshot(instance.adapter, dict(params.get("units") or {})))
 
 
 def _publish(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
@@ -1066,6 +1067,8 @@ class _DeviceProxy:
         self._argument = argument
         self._info = info
         self.role = str(info.get("role") or info.get("instance") or "")
+        #: The unit the operator keeps for a field (field -> spelling): its scan port's and its record's.
+        self.units = {str(field): str(unit) for field, unit in dict(info.get("units") or {}).items()}
 
     def _call(self, method: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         timeout = kwargs.get("timeout")

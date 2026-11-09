@@ -107,6 +107,9 @@ pub struct RunSpec {
     /// Requirement argument -> device instance id.
     pub devices: BTreeMap<String, String>,
     pub device_labels: BTreeMap<String, String>,
+    /// Device instance id -> the units its apparatus entry keeps (field -> spelling): its proxy reads,
+    /// records and scans those fields in them.
+    pub device_units: BTreeMap<String, BTreeMap<String, String>>,
     /// The arguments whose device the run shares (a scan's device axis: its fields protected, not the device).
     pub shared: std::collections::BTreeSet<String>,
     pub artifacts: Map<String, Value>,
@@ -395,7 +398,7 @@ impl Workbench {
             "apply_devices" => self.apply_devices(host).map(Some),
             "close_device" => self.close_device(text(params, "device")?, host).map(Some),
             "shut_down_devices" => self.shut_down_devices(host).map(Some),
-            "read_device" => self.read_device(text(params, "device")?, params["units"].as_object(), Some(request)).map(|()| None),
+            "read_device" => self.read_device(text(params, "device")?, params["units"].as_object(), params["keep"] == true, Some(request)).map(|()| None),
             "tune_device" => self.tune_device(params, request).map(|()| None),
             "accept_device_risk" => self.accept_device_risk(text(params, "device")?, params["accepted"].as_bool().unwrap_or(false)).map(Some),
             "publish_device" => self.publish_device(text(params, "device")?, params["published"].as_bool().ok_or("published is required")?, request).map(|()| None),
@@ -486,7 +489,7 @@ impl Workbench {
             Ticket::Tune { device, request } => {
                 let reply = result.clone().map(|readback| json!({"device": device, "readback": readback}));
                 self.replies.push((request, reply));
-                if result.is_ok() { let _ = self.read_device(&device, None, None); }
+                if result.is_ok() { let _ = self.read_device(&device, None, false, None); }
             }
         }
     }
@@ -510,6 +513,11 @@ impl Workbench {
     /// What a device is called (v2 session.device_labels): its role, else its instance id.
     pub fn device_label(&self, instance: &str) -> String {
         self.devices.get(instance).map(|live| live.entry.role.clone()).filter(|role| !role.is_empty()).unwrap_or_else(|| instance.to_owned())
+    }
+
+    /// The units an open device's apparatus entry keeps (field -> spelling): none for a field never picked.
+    pub fn device_units(&self, instance: &str) -> BTreeMap<String, String> {
+        self.devices.get(instance).map(|live| live.entry.units.clone()).unwrap_or_default()
     }
 
     /// The first logic node of a type (board order).
