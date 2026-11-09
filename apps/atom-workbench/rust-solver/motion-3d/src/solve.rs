@@ -967,14 +967,17 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
         if past_targets(&pilot_statistics,&apriori)&&first.is_none(){let(n,weight)=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64);let at=work(steps);return Costed{cost:at*n*weight*(outputs-1) as f64,check:checked_step(states.len(),bound_probes(&c.model,states,&binding).first,steps,interval,period)*at/steps as f64,work:at,steps,bias:[0.;2],total,checked:None};}
         let known:Vec<Check>=first.iter().map(|&(k,t)|Check{steps:k.steps,population:k.population*t[0]/tolerances[0],loss:k.loss*t[0]/tolerances[0],motion:k.motion*t[1]/tolerances[1]}).collect();
         let(fewest,weight)=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64);let reach=fewest*duration;
-        // The search against the ceiling (# The fold's choice, cost.rs `pays`): before each doubling and measure, the least the candidate can cost -- at the
-        // coarsest step its motion's and loss's criteria have not been seen to miss (the most steps of a check where either missed; the population's bound
-        // may yet be measured smaller), with no bias -- must still save beside what that check takes. A candidate with a met step below the ceiling already
-        // is the choice so far: its search goes on as it would alone.
+        // The search against the ceiling (# The fold's choice, cost.rs `pays`): before each doubling and measure, the least the candidate can cost -- with no
+        // bias, at the least work any step leaves (`least_work`, the grid's nodes and the jumps, at the pilot's step as the walk's floor) and each step's own
+        // advance at the most steps of a check where the motion's or the loss's criterion missed (the population's bound may yet be measured smaller; a
+        // step's counted work need not grow with its steps where one step spans a whole interval: a fourth order's exact step there, 13 times its work at
+        // nine) -- must still save beside what that check takes. A candidate with a met step below the ceiling already is the choice so far: its search goes on as it would alone.
+        let floor=std::cell::OnceCell::new();
         let go=|checks:&[Check],at:usize,count:f64|->bool{
             if !ceiling.is_finite()||checks.iter().any(|k|k.met()&&saves(cost(k),0.,ceiling)){return true;}
             let missed=checks.iter().filter(|k|k.motion.max(k.loss)>1.).map(|k|k.steps).max().unwrap_or(1);
-            saves(work(missed)*fewest*weight*(outputs-1) as f64,count*work(at)/at as f64,ceiling)};
+            let(least,advance)=*floor.get_or_init(||(least_work(&c.model,&parts,&settings(steps),interval,pilot_waiting),parts.iter().map(|x|x.weight*x.advance).sum::<f64>()/self::weights(&parts)));
+            saves((least+missed as f64*advance)*fewest*weight*(outputs-1) as f64,count*work(at)/at as f64,ceiling)};
         let Some(checked)=step_check(&c.model,states,&binding,&settings,first.map_or(steps,|x|x.0.steps),most,pilot_waiting,pilot_horizon,pilot as usize,&pilot_groups,period,tolerances,&cost,need,&known,deposits,reach,&go)
             else{return Costed{cost:f64::INFINITY,check:0.,work:0.,steps:0,bias:[0.;2],total,checked:None}};
         let chosen=checked.chosen;
