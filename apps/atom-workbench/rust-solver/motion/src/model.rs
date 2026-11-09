@@ -74,7 +74,28 @@ pub struct Trap {
     pub axes: [[f64; 3]; 3],
     /// The angular frequencies along them (rad/µs): ω_i = √(λ_i ħ/m), λ_i > 0 the Hessian's eigenvalues (rad/µs/µm²).
     pub frequencies: [f64; 3],
+    /// The angular frequencies along the lab axes x, y, z (rad/µs): √(∂²V/∂x_a² ħ/m) at the centre, the curvature along each
+    /// lab axis (the T windows' and n̄'s periods, the classical flag).
+    pub lab: [f64; 3],
 }
+
+/// A proven envelope of the prepared potential (the initial ensemble's exact rejection sampling): with the trap light's
+/// static form a†Q_b a in its beams' amplitudes a_l (far.rs: V_prep,b = Σ_l'l a_l'* a_l [P_l'l]_bb), −V_prep(r; p) ≤
+/// Σ_l'l |Q_l'l| √(A_l'(r) A_l(r)) ≤ (Σ_l'l |Q_l'l|) max_l A_l(r), since |a†Qa| ≤ Σ|Q_l'l||a_l'||a_l| and a paraxial beam's
+/// |a_l(r)|² ≤ A_l(r) = 1/(1 + u_l(r)), u_l = 2ρ²/w₀² + ζ²/z_R² (|a|² = e^{−t/(1+s)}/(1 + s), s = ζ²/z_R², t = 2ρ²/w₀², and
+/// e^{−x} ≤ 1/(1 + x) give |a|² ≤ 1/(1 + s + t); a plane wave's A = 1).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Envelope {
+    /// The trap light's beams (indices into the request's beams).
+    pub beams: Vec<usize>,
+    /// |Q_l'l| (rad/µs), row-major over `beams`.
+    pub weights: Vec<f64>,
+}
+
+/// The model's counted work at trajectory states (SPEC §5.1, counted by algorithm, not calibrated): the assembly's complex
+/// multiply-adds per call, and what the propagation's count (step's) takes, the cluster's dimension and its parts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Work { pub assembly: f64, pub states: f64, pub parts: f64 }
 
 /// The atoms' reach (SPEC §1.8): the sublevel set {r : V_prep(r) − V_min ≤ ln(1/s) k_B T_r} of the prepared potential, with the
 /// momenta of that kinetic energy. Its extrema are provable bounds: interval subdivision of `cell` with Lipschitz remainders.
@@ -92,13 +113,16 @@ pub struct Reach {
     pub cell: [[f64; 2]; 3],
     /// The largest speed |v| (µm/µs) in the reach: √(2 (ħ/m) energy).
     pub speed: f64,
+    /// The ground populations p of the prepared potential it is the sublevel set of.
+    pub populations: [f64; GROUND],
 }
 
 /// A unit (SPEC §5.2): one coupling the solve keeps or folds. The more exact level of every fold is keeping it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Unit {
     /// A drive of near carrier `carrier` (a co-rotating component) from ground state `ground` into excited state `excited`.
-    /// Kept: the excited state is explicit and the drive enters the generator as it is.
+    /// Kept: the excited state is explicit and the drive enters the generator as it is. Folded into a state another kept drive
+    /// makes explicit, it is a pair of channels through that state, and its error is that pair's (units.rs).
     Drive { carrier: Component, excited: usize, ground: usize },
     /// A coupling between ground states `a` ← `b` at one beat: the second-order term absorbing carrier `from` and emitting
     /// carrier `to` (a Raman or a Zeeman coupling of the light, one state's beat of two carriers), or with both None a static
@@ -112,9 +136,6 @@ pub enum Unit {
     FarBeat { first: Component, second: Component },
     /// A static coupling of an explicit excited state `excited` to another excited state `other`. Kept: `other` is explicit too.
     Excited { excited: usize, other: usize },
-    /// A folded drive (`carrier`, `excited` ← `ground`) into an explicit excited state: a pair of channels with that state's kept
-    /// drives. Kept: the drive is kept.
-    Channel { carrier: Component, excited: usize, ground: usize },
     /// The coherence of the photons landing in ground state `landing` at two frame frequencies `first` and `second` (in the
     /// landing cluster's frames). Kept: one class, their interference with its beat; folded: two classes.
     Coherence { landing: usize, first: Beat, second: Beat },
@@ -143,11 +164,6 @@ pub struct UnitError {
     pub temperature: f64,
 }
 
-/// The counted work of a unit kept and folded (SPEC §5.1: the multiply-adds the engine's algorithms count, per µs of one
-/// trajectory at the samples' pace): kept − folded is the price of keeping it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct UnitWork { pub kept: f64, pub folded: f64 }
-
 /// A trajectory state the units' errors are measured at (the solve's trial states).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sample { pub cluster: usize, pub at: Point, pub psi: Vec<C64> }
@@ -160,11 +176,15 @@ pub struct Cluster {
     pub states: Vec<usize>,
     /// How many of them are ground states.
     pub ground: usize,
-    /// Each state's frame θ_s, exactly: its amplitude x_s = e^{iθ_s t} ψ_s rotates at E_s − θ_s in the generator.
+    /// Each state's frame θ_s, exactly: ψ_s = e^{−iθ_s t} x_s, so that x_s holds E_s − θ_s on the diagonal and a term a ← b of
+    /// beat Ω (∝ e^{iΩt}) is at Ω + θ_a − θ_b.
     pub frames: Vec<Beat>,
-    /// Each state's Doppler frame K_s (1/µm): on a path r_h + v(t − t_m) the state is x_s e^{iK_s·v(t − t_m)}, a term a ← b of
-    /// wave vector q at q − (K_a − K_b). Exact where every pair of its states holds one wave vector; the rest are path beats.
+    /// Each state's Doppler frame K_s (1/µm): on a path r_h + v(t − t_m) the state is ψ_s = e^{iK_s·v(t − t_m)} x_s, so that x_s
+    /// holds K_s·v on the diagonal and a term a ← b of wave vector q is at q − (K_a − K_b). Exact where every pair of its states
+    /// holds one wave vector; the rest are path beats.
     pub waves: Vec<[f64; 3]>,
+    /// The Doppler frames exactly (`Wave`).
+    pub(crate) waves_exact: Vec<Beat>,
 }
 
 /// One part of a cluster's generator at a point (SPEC §1.4): on the step's path H(t) = Σ_j M_j e^{iω_j(t − t_m)},
@@ -217,90 +237,234 @@ pub struct Recoil { pub mean: [f64; 3], pub second: [[f64; 3]; 3] }
 
 /// The model: a request's states and light with a set of units kept (SPEC §1).
 pub struct Model {
-    // Built by `Model::new`: the far light, the near carriers, the clusters, the eliminations.
+    pub(crate) light: Light,
+    pub(crate) axes: far::Axes,
+    /// The light's distinct wave vectors (1/µm): the coordinates of every exact wave vector (`Wave`); per request beam its own.
+    pub(crate) waves: Vec<[f64; 3]>,
+    pub(crate) beam_wave: Vec<usize>,
+    pub(crate) hbar_over_mass: f64,
+    /// The bare energies E_s (H0's diagonal).
+    pub(crate) energies: Vec<f64>,
+    /// H0 less every frequency's outside form at the focus: the states with every light off.
+    pub(crate) base: Mat,
+    pub(crate) emission: [Mat; 3],
+    /// D on the excited states.
+    pub(crate) decay: Mat,
+    /// The far light per frequency (far.rs).
+    pub(crate) tones: Vec<far::Tone>,
+    /// The units kept.
+    pub(crate) kept: Vec<Unit>,
+    pub(crate) clusters: Vec<Cluster>,
+    /// Per ground state its cluster.
+    pub(crate) membership: [usize; GROUND],
+    /// The near carriers (eliminate.rs).
+    pub(crate) carriers: Vec<eliminate::Carrier>,
+    /// The photons' sources (photon.rs) and per cluster its classes.
+    pub(crate) sources: Vec<photon::Source>,
+    pub(crate) classes: Vec<Vec<photon::Class>>,
+    /// The states' labels and the beams' names (the ledger's and the method's words).
+    pub(crate) labels: Vec<String>,
+    pub(crate) names: Vec<String>,
 }
 
-impl Model {
-    /// The candidate units of a request (structure only; their gates need a model and a reach, `Model::gates`).
-    pub fn units(request: &Request, light: &Light) -> Vec<Unit> { let _ = (request, light); todo!() }
+/// An exact wave vector: integer coordinates on the light's distinct wave vectors (`Model::waves`), with a `Beat`'s integer
+/// arithmetic, its value Σ_w n_w k_w. Equal wave vectors have equal coordinates: a Doppler frame exact in exact arithmetic leaves
+/// a residual of exactly zero.
+pub(crate) type Wave = Beat;
 
-    /// The model of a request with the units `kept` (one flag per unit): the clusters they join, the frames, the eliminations of
-    /// what they fold (SPEC §1.4). Refused where a fold cannot be made: a counter-rotating component whose fold does not exist.
-    pub fn new(request: &Request, light: &Light, units: &[Unit], kept: &[bool]) -> Result<Model, String> {
-        let _ = (request, light, units, kept); todo!()
+impl Model {
+    /// The model of a request with the units `kept` (SPEC §1.4): the far light as its far units say, the near carriers'
+    /// eliminations, the clusters the kept couplings join with their frames. Refused where a fold cannot be made: a
+    /// counter-rotating component kept, or whose fold does not exist (units.rs `Model::far_gate`).
+    pub fn new(request: &Request, light: &Light, kept: &[Unit]) -> Result<Model, String> {
+        let axes = far::Axes::new(request)?;
+        let mut waves: Vec<[f64; 3]> = vec![];
+        let beam_wave = light
+            .beams
+            .iter()
+            .map(|b| {
+                let k = b.wave_vector();
+                match waves.iter().position(|w| *w == k) {
+                    Some(at) => at,
+                    None => {
+                        waves.push(k);
+                        waves.len() - 1
+                    }
+                }
+            })
+            .collect();
+        let near = |c: Component| kept.contains(&Unit::Far { component: c });
+        let mut tones = vec![];
+        for frequency in 0..light.frequencies.len() {
+            if near(Component { frequency, counter: true }) {
+                return Err("反旋分量不能作为近共振光保留：其折叠必须存在".into());
+            }
+            tones.push(far::Tone::new(request, light, &axes, frequency, [!near(Component { frequency, counter: false }), true])?);
+        }
+        let mut base = request.hamiltonian.clone();
+        for t in &tones {
+            base.add_scaled(-C64::ONE, &t.focus);
+        }
+        let mut model = Model {
+            light: light.clone(),
+            axes,
+            waves,
+            beam_wave,
+            hbar_over_mass: crate::units::hbar_over_mass(request.mass_kg),
+            energies: far::energies(request),
+            base,
+            emission: request.emission.clone(),
+            decay: far::decay(request),
+            tones,
+            kept: kept.to_vec(),
+            clusters: vec![],
+            membership: [0; GROUND],
+            carriers: vec![],
+            sources: vec![],
+            classes: vec![],
+            labels: request.states.clone(),
+            names: request.beams.iter().map(|b| b.name.clone()).collect(),
+        };
+        for component in model.components().into_iter().filter(|c| c.counter) {
+            let gate = model.far_gate(component);
+            if !gate.exists() {
+                return Err(format!("反旋分量的折叠不存在（S = {:.2}）：请求超出模型的适用范围", gate.saturation));
+            }
+        }
+        model.carriers = eliminate::Carrier::all(&model, request)?;
+        let edges: Vec<cluster::Edge> = kept.iter().filter_map(|u| model.edge(u)).collect();
+        let (mut clusters, membership) = cluster::clusters(STATES, &edges, &model.axes.zero(), &model.no_wave());
+        for c in clusters.iter_mut() {
+            c.waves = c.waves_exact.iter().map(|w| model.wave_value(w)).collect();
+        }
+        model.clusters = clusters;
+        model.membership = membership;
+        model.sources = model.far_sources();
+        model.sources.extend(model.explicit_sources());
+        model.sources.extend(model.near_sources());
+        model.classes = (0..model.clusters.len()).map(|c| model.classes(c)).collect();
+        Ok(model)
     }
 
     /// Every light: L_run.
-    pub fn running(&self) -> Lights { todo!() }
+    pub fn running(&self) -> Lights {
+        Lights(vec![true; self.light.frequencies.len()])
+    }
     /// The trap beam's frequency alone: L_prep.
-    pub fn prepared(&self) -> Lights { todo!() }
-
-    /// V_L(r; p) = Σ_b p_b [h_L(r) − h_{L∖trap}(r)]_bb (SPEC §1.3, rad/µs): h the eliminated generator's static Hermitian part from
-    /// the one assembly, p the ground states' populations (normalized on them), L `lights`, the trap light the whole field of the
-    /// trap beam's frequency. The one potential: the loss energy, the prepared potential, the trap and the reach take it.
-    pub fn potential(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights) -> f64 { let _ = (r, p, lights); todo!() }
-
-    /// V_L(r; p)'s second-order expansion at r, analytic: the far light's from the field's exact derivatives, the near light's from
-    /// its table's interpolant. The integrator's reference takes it for `prepared()` at its reference state; the trap its Hessian.
-    pub fn expansion(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights) -> Quadratic { let _ = (r, p, lights); todo!() }
-
-    /// V_L(r; p) far from the trap: every focused beam's amplitude zero. A lost atom's energy is above it (SPEC §1.7).
-    pub fn asymptote(&self, p: &[f64; GROUND], lights: &Lights) -> f64 { let _ = (p, lights); todo!() }
-
-    /// The loss energy E_s = ħ²κ²/2m + V_run(r; p(ψ)) of a cluster's state at a point (SPEC §1.3), p(ψ) its ground populations.
-    pub fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 { let _ = (cluster, at, psi); todo!() }
-
-    /// The loss test (SPEC §1.7): outside the region (the field's intensity rule) and E_s above its asymptote.
-    pub fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool { let _ = (cluster, at, psi); todo!() }
-
-    /// The trap of the prepared potential for the ground populations p (SPEC §1.3): the descent from the focus to the local
-    /// minimum of V_prep(r; p), the analytic Hessian's eigenvectors and frequencies there. Refused where the descent reaches no
-    /// minimum ("光镊不约束原子"), never the focus instead.
-    pub fn trap(&self, p: &[f64; GROUND]) -> Result<Trap, String> { let _ = p; todo!() }
-
-    /// The reach of a trap at temperature T_r (µK) and unsampled share s (SPEC §1.8).
-    pub fn reach(&self, trap: &Trap, p: &[f64; GROUND], temperature_uk: f64, share: f64) -> Reach { let _ = (trap, p, temperature_uk, share); todo!() }
-
-    /// Each unit's existence gate over the reach (SPEC §1.5), provable bounds, at this model's clusters and dressing.
-    pub fn gates(&self, units: &[Unit], reach: &Reach) -> Vec<Gate> { let _ = (units, reach); todo!() }
-
-    /// Each folded unit's errors at each sample, [unit][sample] (kept units: zero): its small parameter measured where its error
-    /// is made, mapped to the outputs (SPEC §1.5).
-    pub fn errors(&self, units: &[Unit], samples: &[Sample]) -> Vec<Vec<UnitError>> { let _ = (units, samples); todo!() }
-
-    /// Each unit's counted work kept and folded at the samples' pace.
-    pub fn work(&self, units: &[Unit], samples: &[Sample]) -> Vec<UnitWork> { let _ = (units, samples); todo!() }
-
+    pub fn prepared(&self) -> Lights {
+        Lights((0..self.light.frequencies.len()).map(|w| w == self.light.trap).collect())
+    }
     /// The clusters.
-    pub fn clusters(&self) -> &[Cluster] { todo!() }
-
+    pub fn clusters(&self) -> &[Cluster] {
+        &self.clusters
+    }
     /// The cluster a ground state belongs to.
-    pub fn cluster_of(&self, ground: usize) -> usize { let _ = ground; todo!() }
-
-    /// The one generator assembly (SPEC §1.4): a cluster's generator at a point with `lights` on, its parts by beat and wave vector,
-    /// H with the decay −(i/2) Σ J†J of its photons (Lindblad by construction) and G = ∇H_h. The dynamics, the force, the hazard,
-    /// the readout and the potential all take it.
-    pub fn assemble(&self, cluster: usize, at: &Point, lights: &Lights) -> Generator { let _ = (cluster, at, lights); todo!() }
-
-    /// The photon classes of a cluster's state ψ at a point, every light on (SPEC §1.6).
-    pub fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> { let _ = (cluster, at, psi); todo!() }
-
-    /// The readout (SPEC §1.7): the 32 populations of a cluster's state ψ at a point, ρ − ½{Y, ρ} on its states plus the folded
-    /// excited populations, ρ = ψψ†/‖ψ‖².
-    pub fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] { let _ = (cluster, at, psi); todo!() }
-
+    pub fn cluster_of(&self, ground: usize) -> usize {
+        self.membership[ground]
+    }
     /// ħ/m (µm²/µs).
-    pub fn hbar_over_mass(&self) -> f64 { todo!() }
-
+    pub fn hbar_over_mass(&self) -> f64 {
+        self.hbar_over_mass
+    }
     /// A frequency's value (rad/µs).
-    pub fn omega(&self, f: &Beat) -> f64 { let _ = f; todo!() }
+    pub fn omega(&self, f: &Beat) -> f64 {
+        self.axes.omega(f)
+    }
+    /// An exact wave vector's value (1/µm), summed from its coordinates in their order.
+    pub(crate) fn wave_value(&self, w: &Wave) -> [f64; 3] {
+        let mut out = [0.0; 3];
+        for (&n, k) in w.0.iter().zip(&self.waves) {
+            if n != 0 {
+                for i in 0..3 {
+                    out[i] += n as f64 * k[i];
+                }
+            }
+        }
+        out
+    }
+    /// A request beam's wave vector, exactly.
+    pub(crate) fn beam_wave(&self, beam: usize) -> Wave {
+        let mut w = vec![0; self.waves.len()];
+        w[self.beam_wave[beam]] = 1;
+        Beat(w)
+    }
+    /// The zero wave vector.
+    pub(crate) fn no_wave(&self) -> Wave {
+        Beat(vec![0; self.waves.len()])
+    }
+    /// The light's components: per frequency its co- and counter-rotating one.
+    pub(crate) fn components(&self) -> Vec<Component> {
+        (0..self.light.frequencies.len()).flat_map(|frequency| [false, true].map(|counter| Component { frequency, counter })).collect()
+    }
+    /// The loss energy E_s = (ħ/m)κ²/2 + V_run(r; p(ψ)) (rad/µs).
+    pub fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
+        let kinetic = 0.5 * self.hbar_over_mass * at.kappa.iter().map(|k| k * k).sum::<f64>();
+        kinetic + self.potential(at.r, &self.ground_populations(cluster, psi), &self.running())
+    }
+    /// The loss test (SPEC §1.7): outside the trap's region and E_s above V_run's far value.
+    pub fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
+        self.light.outside(&self.light.amplitudes(at.r))
+            && self.energy(cluster, at, psi) > self.asymptote(&self.ground_populations(cluster, psi), &self.running())
+    }
+    /// A cluster state's ground populations, normalized on the ground states (zero elsewhere).
+    pub(crate) fn ground_populations(&self, cluster: usize, psi: &[C64]) -> [f64; GROUND] {
+        let c = &self.clusters[cluster];
+        let total: f64 = psi[..c.ground].iter().map(|z| z.norm_sqr()).sum();
+        let mut p = [0.0; GROUND];
+        for (i, &s) in c.states[..c.ground].iter().enumerate() {
+            p[s] = psi[i].norm_sqr() / total;
+        }
+        p
+    }
 }
 
-impl Photon {
-    /// The absorption recoil's moments of the jump into f = Σ_a ε_a u_a (`Recoil`), ε the drawn real polarization.
-    pub fn recoil(&self, polarization: &[f64; 3]) -> Recoil { let _ = polarization; todo!() }
+/// The model as one run's integrator sees it (`step::Dynamics`): the model, its running and prepared lights, and the reference
+/// state's ground populations.
+pub struct Run<'a> {
+    pub model: &'a Model,
+    pub reference: [f64; GROUND],
+    running: Lights,
+    prepared: Lights,
 }
 
-/// The hazard λ = Σ_φ Σ_a ‖J_{a,φ}ψ‖²/‖ψ‖² (SPEC §1.4, the one definition): ⟨ψ|i(H − H†)|ψ⟩/‖ψ‖² for the generator H at that instant,
-/// the decay being the jumps' Σ J†J by construction (tested, never checked at run time).
-pub fn hazard(h: &Mat, psi: &[C64]) -> f64 { let _ = (h, psi); todo!() }
+impl<'a> Run<'a> {
+    pub fn new(model: &'a Model, reference: [f64; GROUND]) -> Run<'a> {
+        Run { model, reference, running: model.running(), prepared: model.prepared() }
+    }
+}
+
+impl crate::step::Dynamics for Run<'_> {
+    fn hbar_over_mass(&self) -> f64 {
+        self.model.hbar_over_mass
+    }
+    fn reference(&self, r: [f64; 3]) -> Quadratic {
+        self.model.expansion(r, &self.reference, &self.prepared)
+    }
+    fn cluster(&self, cluster: usize) -> &Cluster {
+        &self.model.clusters[cluster]
+    }
+    fn cluster_of(&self, ground: usize) -> usize {
+        self.model.membership[ground]
+    }
+    fn generator(&self, cluster: usize, at: &Point) -> Generator {
+        self.model.assemble(cluster, at, &self.running)
+    }
+    fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
+        self.model.photons(cluster, at, psi)
+    }
+    fn recoil(&self, photon: &Photon, polarization: &[f64; 3]) -> Recoil {
+        photon.recoil(polarization)
+    }
+    fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
+        self.model.energy(cluster, at, psi)
+    }
+    fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
+        self.model.lost(cluster, at, psi)
+    }
+    fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
+        self.model.readout(cluster, at, psi)
+    }
+}
+
+
+pub use photon::hazard;
