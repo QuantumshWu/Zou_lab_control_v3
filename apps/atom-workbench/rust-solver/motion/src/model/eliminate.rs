@@ -669,8 +669,9 @@ impl Model {
     }
 
     /// A carrier's dressing's error at a sample: the other carriers' folded responses there with its coherent field, R', against the
-    /// model's with its units' T̄, R: δ = max_c ‖R'_c − R_c‖/‖R_c‖ over the sample's cluster -- the relative error of the rates and light
-    /// shifts it moves, on the populations δ and on T δ (SPEC §1.5's map of a relative rate error, as a drive's S).
+    /// model's with its units' T̄, R, on the sample's ground amplitudes ψ_g: δ = max_c ‖(R'_c − R_c)ψ_g‖/‖R_c ψ_g‖ -- the relative error
+    /// of the rates and light shifts it moves of the sample's state, zero where nothing drives it --, on the populations and on T
+    /// δ P_g, P_g the sample's ground population (SPEC §1.5's map of a relative rate error, as a drive's S_b p_b).
     pub(crate) fn dressing_error(&self, carrier: Component, sample: &Sample) -> UnitError {
         let lights = self.running();
         let amplitudes = self.light.amplitudes(sample.at.r);
@@ -679,26 +680,30 @@ impl Model {
         let d = self.carrier_index(carrier.frequency);
         toggled[d] = !toggled[d];
         let other = self.near_with(sample.cluster, &sample.at, &amplitudes, &lights, 0, &toggled);
+        let g = self.clusters[sample.cluster].ground;
+        let ground = &sample.psi[..g];
         let mut delta = 0.0_f64;
         for (ci, cc) in self.carriers.iter().enumerate() {
             if ci == d || model.responses[ci].is_empty() {
                 continue;
             }
-            let total = |near: &NearAt| {
-                let mut r = Mat::zeros(EXCITED, self.clusters[sample.cluster].ground);
+            let rates = |near: &NearAt| -> Vec<C64> {
+                let mut r = Mat::zeros(EXCITED, g);
                 for (l, &b) in cc.beams.iter().enumerate() {
                     r.add_scaled(amplitudes[b].value, &near.responses[ci][l][0]);
                 }
-                r
+                r.apply(ground)
             };
-            let (r, s) = (total(&model), total(&other));
-            let mut diff = s.clone();
-            diff.add_scaled(-C64::ONE, &r);
-            if r.frobenius() > 0.0 {
-                delta = delta.max(diff.frobenius() / r.frobenius());
+            let (r, s) = (rates(&model), rates(&other));
+            let size: f64 = r.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+            if size > 0.0 {
+                let diff: f64 = r.iter().zip(&s).map(|(&x, &y)| (y - x).norm_sqr()).sum::<f64>().sqrt();
+                delta = delta.max(diff / size);
             }
         }
-        UnitError { parameter: delta, population: delta, temperature: delta }
+        let total: f64 = sample.psi.iter().map(|z| z.norm_sqr()).sum();
+        let weight = ground.iter().map(|z| z.norm_sqr()).sum::<f64>() / total;
+        UnitError { parameter: delta, population: delta * weight, temperature: delta * weight }
     }
 
     /// The bound of the near light's differential shift of two states over a cell (the static gates' separations): per lit

@@ -336,3 +336,39 @@ fn a_kept_unit_is_no_longer_a_candidate() {
         assert!(!units.contains(u), "R6_RAMAN_CO: {u:?} listed though in the generator");
     }
 }
+
+/// A folded unit books no error where the states it couples are empty (SPEC §1.5: a coupling's mixing m²(p_a + p_b), a drive's
+/// S_b p_b, on the populations and on T alike): R2_RECOIL with its probe near and the atom in |2,2⟩ at the trap's centre -- every
+/// coupling of two other states and every drive from another ground state books nothing on either output, however large its
+/// measured parameter.
+#[test]
+fn a_unit_books_no_error_where_its_states_are_empty() {
+    let request = scene("R2_RECOIL");
+    let light = Light::new(&request);
+    let probe = Component { frequency: frequency_of(&request, &light, "probe"), counter: false };
+    let model = Model::new(&request, &light, &[Unit::Far { component: probe }]).unwrap();
+    let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
+    let trap = model.trap(&p, &model.prepared()).unwrap();
+    let cluster = model.cluster_of(b);
+    let psi = model.clusters()[cluster].states.iter().map(|&s| if s == b { C64::ONE } else { C64::ZERO }).collect();
+    let sample = Sample { cluster, at: Point { r: trap.centre, kappa: [0.0; 3], t: 0.0 }, psi };
+    let units = model.units();
+    let errors = model.errors(&units, &[sample]);
+    let mut measured = 0.0_f64;
+    for (u, e) in units.iter().zip(&errors) {
+        let states = match u {
+            Unit::Term { a, b, .. } => vec![*a, *b],
+            Unit::Excited { excited, other } => vec![*excited, *other],
+            Unit::Drive { ground, .. } => vec![*ground],
+            _ => continue,
+        };
+        if states.contains(&b) {
+            continue;
+        }
+        measured = measured.max(e[0].parameter);
+        assert!(e[0].population == 0.0 && e[0].temperature == 0.0, "{u:?} books {:?} with its states empty", e[0]);
+    }
+    eprintln!("the largest parameter measured on empty states: {measured:.3e}");
+    assert!(measured > 0.0, "a unit of empty states with a measured parameter");
+}

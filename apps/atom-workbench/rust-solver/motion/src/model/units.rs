@@ -11,10 +11,12 @@
 //! light's static forms and the near carriers' couplings at their peaks (`Model::spread`).
 //!
 //! # The errors (SPEC §1.5), measured at a trajectory state
-//! A unit's small parameter at the state's point and momentum, mapped to the outputs by its leading order: a far component's
-//! and a far beat's fold mix m² (populations, and T relative); a coupling of two ground states mixes m²(p_a + p_b); an
-//! excited static coupling m²(p_e + p_f); a near drive's fold, its ground state's S_b on the populations and √2 S_b on T
-//! (eliminate.rs); a photon coherence m²√(p_i p_j) (photon.rs).
+//! A unit's small parameter at the state's point and momentum, mapped to the outputs by its leading order, the populations and T
+//! by the same weight -- the populations of the states it couples, so that a unit whose states are empty books nothing: a far
+//! component's and a far beat's fold mix m² (every ground state is the far light's); a coupling of two ground states mixes
+//! m²(p_a + p_b); an excited static coupling m²(p_e + p_f); a near drive's fold, its ground state's S_b p_b on the populations and
+//! √2 S_b p_b on T (eliminate.rs); a carrier's dressing its relative rate error on the state's rates (eliminate.rs); a photon
+//! coherence m²√(p_i p_j) (photon.rs).
 //!
 //! # What is no unit
 //! Cross terms of a co- and a counter-rotating component, and of a near and a far one, beat at an optical frequency or at
@@ -314,7 +316,7 @@ impl Model {
                             let speed = self.hbar_over_mass * norm3(s.at.kappa);
                             let m2 = 0.5 * self.static_cell(*a, *b, &self.spans(&cell), speed).centre.max(0.0);
                             let p = self.state_populations(s);
-                            UnitError { parameter: m2, population: m2 * (p[*a] + p[*b]), temperature: m2 }
+                            UnitError { parameter: m2, population: m2 * (p[*a] + p[*b]), temperature: m2 * (p[*a] + p[*b]) }
                         }
                         _ => self.near_error(u, s),
                     })
