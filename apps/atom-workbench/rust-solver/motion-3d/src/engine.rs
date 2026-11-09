@@ -43,6 +43,9 @@
 //! A step, or the part of one before or after a jump, is one thing on every cluster (`Engine::part`): the flow for τ/2, at the point there the cluster's propagation of ψ through τ and the force it holds, the kick less the harmonic part, the flow for τ/2. Where ‖ψ‖²
 //! reaches the threshold in it the part is redone to that crossing (`Engine::step`), the jump made at the place it reaches, the rest a part of its own in the cluster the jump left. A cluster of ground states whose generator is static takes one node, its middle (`Propagation::Node`:
 //! two half steps at the point's generator, the force on the state there), a cluster with explicit excited states or beats a segment's grid (# The exact step). An error of one node is of second order in τ, in the motion's own splitting, which the step check reads.
+//! Where its states take wave vectors on the atom's path (model.rs `Model::frame`) the node is in their frame: the generator H(r_h) + diag(K_s·v) at the path's momentum, static there, its Raman phases following
+//! the path whatever τ, the state in and out at e^{iK_s·v τ/2} (`Segment::gauged`); its coherences turn by K_s·v within the step, so the impulse takes a static segment's Simpson panels (`static_panels`) over one
+//! propagator rather than the middle's force alone (PGC1D_BIAS_OFF's T at 10 ms 13 % high at 0.6 us with that one force). A static segment the same, without a generator, a segment or an eigensystem of its own.
 //!
 //! # The exact step (explicit excited states, beats)
 //! An explicit excited state rotates at its detuning in the frame, and its saturation, Rabi
@@ -468,8 +471,8 @@ fn product_right(a:&[Complex],b:&[Complex],n:usize,out:&mut Vec<Complex>){
 
 /// A part of a step's propagation (module documentation, # One propagation): one node where the state's generator is static and of ground states, the segment's grid otherwise.
 enum Propagation<'a>{
-    /// The generator at the part's middle, the state through it by two half steps (`HalfStep`), its force at the one node there.
-    Node{model:&'a Model,cluster:usize,point:&'a Point,local:Local,half:HalfStep,tau:f64,truncation:f64},
+    /// The generator at the part's middle, the state through it by two half steps (`HalfStep`), its force at the one node there; in its states' frame (model.rs `Model::frame`) their K_s·v.
+    Node{model:&'a Model,cluster:usize,point:&'a Point,local:Local,half:HalfStep,tau:f64,truncation:f64,gauge:Option<[f64;MOST_STATES]>},
     Grid(Segment),
 }
 /// What a propagation did: the time it took, whether ‖ψ‖² reached the threshold there (the part to be redone to it, ψ of no further use), and the impulse; of one node the mean force instead.
@@ -479,8 +482,22 @@ impl Propagation<'_>{
     fn evolve(&self,psi:&mut [Complex;MOST_MIXED],at:f64,remaining:f64,threshold:f64)->Evolved{
         match self{
             Propagation::Grid(segment)=>{let(taken,reached,impulse)=segment.evolve(&mut psi[..],at,remaining,threshold);Evolved{taken,reached,impulse}}
-            Propagation::Node{model,cluster,point,local,half,tau,truncation}=>{
+            Propagation::Node{model,cluster,point,local,half,tau,truncation,gauge}=>{
                 let n=model.dimension(*cluster);let h=&local.hamiltonian;let n0=norm2(&psi[..],n);
+                if let Some(g)=gauge{
+                    // In the frame: the state in at e^{iK_s·v τ/2}, through 2P spacings δ of one propagator, the impulse by Simpson's rule over them (`static_panels`, the force at each node
+                    // the lab's at the path's point then), out at e^{iK_s·v τ/2}; ‖ψ‖² at the middle node for the crossing.
+                    let panels=static_panels(column_norm(&h[..n*n],n)*tau);let steps=2*panels;let u=exponential(&h[..n*n],n,tau/steps as f64);
+                    let turn:[Complex;MOST_STATES]=std::array::from_fn(|a|Complex::cis(0.5*tau*g[a]));
+                    let mut y=*psi;for a in 0..n{y[a]=y[a]*turn[a];}let(mut sum,mut nh)=([0.;3],n0);
+                    for j in 0..=steps{
+                        if j>0{multiply(&u,n,&mut y);}if j==panels{nh=norm2(&y,n);}
+                        let(f,w)=(model.force(*cluster,local,point,&y),if j==0||j==steps{1.}else if j%2==1{4.}else{2.});for a in 0..3{sum[a]+=w*f[a];}
+                    }
+                    let n1=norm2(&y,n);
+                    if !(n1>threshold){return Evolved{taken:bracket([n0,nh,n1],*tau,threshold).2,reached:true,impulse:[0.;3]};}
+                    for a in 0..n{y[a]=y[a]*turn[a];}*psi=y;return Evolved{taken:*tau,reached:false,impulse:sum.map(|x|x/(3*steps) as f64)};
+                }
                 let mut y=*psi;half.apply(h,n,0.5*tau,&mut y,*truncation);let(nh,middle)=(norm2(&y,n),y);
                 half.apply(h,n,0.5*tau,&mut y,*truncation);let n1=norm2(&y,n);
                 if !(n1>threshold){return Evolved{taken:bracket([n0,nh,n1],*tau,threshold).2,reached:true,impulse:[0.;3]};}
@@ -1064,14 +1081,15 @@ impl<'a> Engine<'a>{
 
     /// A cluster's components over a step of τ from `start` through a point on the atom's path (model.rs `Model::on_path`, # The atom's path), its momentum the step's middle's: the point's and half the kick the step takes, of its reference (c, w)
     /// less its harmonic part, from the force at the point on the state at the step's start.
-    fn on_path(&self,cluster:usize,point:&Point,psi:&[Complex],start:f64,tau:f64,(c,w):([f64;3],f64))->Components{
-        let(m,s)=(self.model,&self.settings);let mut components=m.components(cluster,point);
-        if m.moves(cluster){
-            let middle=start+0.5*tau;let force=components.force_at(middle,psi);let harmonic=self.harmonic(std::array::from_fn(|a|point.r[a]-c[a]));
-            let kappa=std::array::from_fn(|a|point.kappa[a]+if s.free[a]{0.5*tau*(force[a]-w*harmonic[a])}else{0.});
-            m.on_path(cluster,&mut components,kappa,middle);
-        }
+    fn on_path(&self,cluster:usize,point:&Point,psi:&[Complex],start:f64,tau:f64,reference:([f64;3],f64))->Components{
+        let m=self.model;let mut components=m.components(cluster,point);
+        if m.moves(cluster){let middle=start+0.5*tau;let kappa=self.middle_momentum(point,components.force_at(middle,psi),tau,reference);m.on_path(cluster,&mut components,kappa,middle);}
         components
+    }
+    /// The momentum at a step's middle (# The atom's path): the point's and half the kick of τ the step takes, the force less the harmonic part of its reference (c, w).
+    fn middle_momentum(&self,point:&Point,force:[f64;3],tau:f64,(c,w):([f64;3],f64))->[f64;3]{
+        let harmonic=self.harmonic(std::array::from_fn(|a|point.r[a]-c[a]));
+        std::array::from_fn(|a|point.kappa[a]+if self.settings.free[a]{0.5*tau*(force[a]-w*harmonic[a])}else{0.})
     }
     /// A part of a step of τ from a trajectory's state, until ‖ψ‖² reaches `threshold`: the flow for τ/2 about its reference at the part's start; at the point there the cluster's propagation, the kick from its impulse less the
     /// harmonic part, the flow for τ/2 (# One propagation). A part of a step leaves out beats within its part of the share (a short part took the step's whole share, and what it left out booked 12 % on the 1 G molasses). `grid`: its
@@ -1085,8 +1103,11 @@ impl<'a> Engine<'a>{
             let segment=self.segment(self.on_path(t.cluster,&point,&t.psi,start,tau,reference),start,tau,s.node_phase);t.beats=t.beats.max(segment.dropped/tau);
             Propagation::Grid(segment)
         }else{
-            let local=m.local(t.cluster,&point,start+0.5*tau);let half=HalfStep::new(&local.hamiltonian,m.dimension(t.cluster),0.5*tau,s.truncation);
-            Propagation::Node{model:m,cluster:t.cluster,point:&point,local,half,tau,truncation:s.truncation}
+            // In its states' frame (model.rs `Model::frame`) its path's momentum as the exact step's (`on_path`), from the force at the point on the state at the part's start.
+            let mut local=m.local(t.cluster,&point,start+0.5*tau);
+            let gauge=if m.moves(t.cluster){let kappa=self.middle_momentum(&point,m.force(t.cluster,&local,&point,&t.psi),tau,reference);m.local_on_path(t.cluster,&mut local,kappa)}else{None};
+            let half=if gauge.is_some(){HalfStep::Series}else{HalfStep::new(&local.hamiltonian,m.dimension(t.cluster),0.5*tau,s.truncation)};
+            Propagation::Node{model:m,cluster:t.cluster,point:&point,local,half,tau,truncation:s.truncation,gauge}
         };
         let held=matches!(propagation,Propagation::Node{..});
         let evolved=propagation.evolve(&mut t.psi,start,tau,threshold);drop(propagation);

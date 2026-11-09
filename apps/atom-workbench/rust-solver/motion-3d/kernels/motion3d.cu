@@ -1024,6 +1024,21 @@ __device__ __forceinline__ void moved_back(Traj& t,const Moved& m){
     for(int i=0;i<3;i++){t.q[i]=m.q[i];t.p[i]=m.p[i];}
     t.time=m.time;t.logn=m.logn;}
 
+// The Ehrenfest force −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ on the state in W.psi, from the lane's entries of the generator's gradient (`Local`).
+template<int S>
+__device__ __forceinline__ void held_force(const Warp& W,const Entries<S>& E,const Local<S>& L,int n,int lane,float (&force)[3]){
+    float s[3]={0.f,0.f,0.f};
+    #pragma unroll
+    for(int j=0;j<S;j++)if(E.has(j,lane)){
+        const float2 pa=W.psi[E.row[j]],pb=W.psi[E.col[j]];
+        #pragma unroll
+        for(int a=0;a<3;a++){const float2 z=L.grad[a][j]*pb;s[a]+=pa.x*z.x+pa.y*z.y;}
+    }
+    float norm=0.f;for(int b=0;b<n;b++)norm+=norm2(W.psi[b]);
+    #pragma unroll
+    for(int a=0;a<3;a++)force[a]=-warp_sum(s[a])/norm;
+}
+__device__ int static_panels(float x);
 // One step's flow, kick and internal evolution of length dt without jumps (engine.rs `advance`) on S slots and F focused units:
 // ln‖ψ‖² at the middle (`lh`) and the end (t.logn). Each instance is a function of its own, as the step is: the driver's register allocator serves them far better than the step's inlined together (PGC3D's and TET's kernels −20 % with the narrow instance, PGCP_10's +9 % with the step inlined), and the module is smaller for it.
 template<int S,int F>
@@ -1037,29 +1052,59 @@ __device__ __noinline__ void advance_in(Warp& W,Traj& out,double dt,int lane,dou
     SPAN_END(SPAN_POINT,start);SPAN_BEGIN(generator);
     const Cluster C=P.clusters[t.cluster];const Entries<S> E(C.n,lane);Local<S> L;
     local<S,F>(W,C,E,t.time+0.5*dt,lane,L);
-    SPAN_END(SPAN_GENERATOR,generator);SPAN_BEGIN(propagator);
-    exponential(W,E,0.5*dt,lane);
-    SPAN_END(SPAN_EXPONENTIAL,propagator);SPAN_BEGIN(evolve);
-    const float nh=apply(W.m[2],W.psi,C.n,lane);lh=t.logn+(double)logf(nh);
-    // The Ehrenfest force −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ at the middle, less the weighted harmonic part the flow takes.
-    float s[3]={0.f,0.f,0.f};
-    #pragma unroll
-    for(int j=0;j<S;j++)if(E.has(j,lane)){
-        const float2 pa=W.psi[E.row[j]],pb=W.psi[E.col[j]];
+    // In its states' frame (model.rs `Model::frame`, engine.rs `Engine::part`) the path's momentum the step's middle's, from the force at the point on the state at the step's start, as the exact step's
+    // (`exact_segment`): the states' diagonal shifts K_s·v on the generator, and their phases e^{iK_s·v τ/2} as the state enters and leaves.
+    const bool framed=C.labels>=0&&C.moves;float2 turn=make_float2(1.f,0.f);
+    if(framed){
+        float f[3];held_force<S>(W,E,L,C.n,lane,f);double p[3],v[3];
         #pragma unroll
-        for(int a=0;a<3;a++){const float2 z=L.grad[a][j]*pb;s[a]+=pa.x*z.x+pa.y*z.y;}
+        for(int i=0;i<3;i++)p[i]=t.p[i]+0.5*dt*(P.axes[i][0]*(double)f[0]+P.axes[i][1]*(double)f[1]+P.axes[i][2]*(double)f[2]+R.w*P.stiffness[i]*(P.offset?t.q[i]-R.c[i]:t.q[i]));
+        lab(p,v);__syncwarp();
+        if(lane<C.n){
+            const float* K=P.labels+C.labels+3*lane;const float gauge=(float)(P.hm64*(v[0]*(double)K[0]+v[1]*(double)K[1]+v[2]*(double)K[2]));
+            W.m[0][lane*C.n+lane].x+=gauge;float sn,cs;sincosf(0.5f*(float)dt*gauge,&sn,&cs);turn=make_float2(cs,sn);
+        }
+        __syncwarp();
     }
-    float norm=0.f;for(int b=0;b<C.n;b++)norm+=norm2(W.psi[b]);
+    SPAN_END(SPAN_GENERATOR,generator);SPAN_BEGIN(propagator);
+    // Framed, the generator static there: 2P spacings of one propagator, the impulse by Simpson's rule over them (`static_panels`), ln‖ψ‖² at the middle node for the crossing.
+    int panels=0,steps=0;
+    if(framed){
+        float column=0.f;
+        if(lane<C.n)for(int a=0;a<C.n;a++){const float2 h=W.m[0][a*C.n+lane];column+=fabsf(h.x)+fabsf(h.y);}
+        panels=static_panels(warp_max(column)*(float)dt);steps=2*panels;
+        exponential(W,E,dt/(double)steps,lane);
+    }else exponential(W,E,0.5*dt,lane);
+    SPAN_END(SPAN_EXPONENTIAL,propagator);SPAN_BEGIN(evolve);
     float force[3];
-    #pragma unroll
-    for(int a=0;a<3;a++)force[a]=-warp_sum(s[a])/norm;
+    if(framed){
+        if(lane<C.n)W.psi[lane]=W.psi[lane]*turn;
+        __syncwarp();
+        double logn=t.logn;float sum[3]={0.f,0.f,0.f};
+        for(int j=0;j<=steps;j++){
+            if(j>0)logn+=(double)logf(apply(W.m[2],W.psi,C.n,lane));
+            if(j==panels)lh=logn;
+            float f[3];held_force<S>(W,E,L,C.n,lane,f);const float w=(j==0||j==steps)?1.f:((j&1)?4.f:2.f);
+            #pragma unroll
+            for(int a=0;a<3;a++)sum[a]+=w*f[a];
+        }
+        t.logn=logn;
+        #pragma unroll
+        for(int a=0;a<3;a++)force[a]=sum[a]/(3.f*(float)steps);
+        if(lane<C.n)W.psi[lane]=W.psi[lane]*turn;
+        __syncwarp();
+    }else{
+        const float nh=apply(W.m[2],W.psi,C.n,lane);lh=t.logn+(double)logf(nh);
+        // The Ehrenfest force −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ at the middle, less the weighted harmonic part the flow takes.
+        held_force<S>(W,E,L,C.n,lane,force);
+    }
     const float tau=(float)dt;
     #pragma unroll
     for(int i=0;i<3;i++){
         const double kick=(double)(tau*(P.axes32[i][0]*force[0]+P.axes32[i][1]*force[1]+P.axes32[i][2]*force[2]+(float)R.w*P.stiffness32[i]*(float)(P.offset?t.q[i]-R.c[i]:t.q[i])));
         t.p[i]+=kick;
     }
-    const float n1=apply(W.m[2],W.psi,C.n,lane);t.logn=lh+(double)logf(n1);
+    if(!framed){const float n1=apply(W.m[2],W.psi,C.n,lane);t.logn=lh+(double)logf(n1);}
     flow(t,half,u,R);
     t.time+=dt;
     SPAN_END(SPAN_EVOLVE,evolve);

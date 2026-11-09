@@ -128,7 +128,7 @@ fn compare_model(r:&Request,model:Model,dt:f64,threshold:Option<f64>,allowance:f
 }
 /// `compare_model` from given states. `crossing`: how far off ln‖ψ‖² the GPU's crossing may lie (`a_step_with_its_jump`), per jump of the step, its tolerances then with what that moves on the CPU itself, a step at each of its thresholds moved so.
 fn compare_from(gpu:&gpu::Gpu,model:&Model,settings:&Settings,trajectories:&[Trajectory],jumps:bool,crossing:f64){
-    let dt=settings.dt;let fourth=model.fourth;let exact=(0..model.clusters()).any(|k|model.mixed(k)||model.beating(k));let(tp,tn,tk)=if exact{(5e-4,5e-4,5e-5)}else{(2e-5,2e-5,2e-5)};
+    let dt=settings.dt;let fourth=model.fourth;let exact=(0..model.clusters()).any(|k|model.mixed(k)||model.beating(k)||model.path_waves(k).is_some());let(tp,tn,tk)=if exact{(5e-4,5e-4,5e-5)}else{(2e-5,2e-5,2e-5)};
     let program=gpu.program(model,settings).unwrap();
     let got=gpu.advance(&program,settings,trajectories,1).unwrap();
     // The CPU on the kernel's own grid and so with Simpson's same error: with no truncation a static generator takes its Taylor path, of the kernel's whole panels (engine.rs `static_panels`), not the spectral path's weighted ones.
@@ -164,6 +164,36 @@ fn compare_from(gpu:&gpu::Gpu,model:&Model,settings:&Settings,trajectories:&[Tra
     }
     if jumps{assert_eq!(jumped,trajectories.len(),"every trajectory jumps in the step");}
     println!("{} trajectories, {jumped} jumped",trajectories.len());
+}
+
+/// A σ⁺σ⁻ pair far off a synthetic line (tests/engine.rs `raman_pair`) on the PGC fixture's states, its tweezer far off and weak, its atom a million times heavier: F = 1, m = ±1 a Raman pair at 2k
+/// along z, m = +1 lowered by 2 rad/us; its cluster takes its states' frame (model.rs `Model::frame`).
+fn raman_pair()->Request{
+    let mut r=request(PGC);let at=|s:&str|r.states.iter().position(|x|x==s).unwrap();let(e,minus,plus)=(at("D1-1-0"),at("ground-1--1"),at("ground-1-1"));
+    let zero=||Matrix{real:vec![0.;STATES*STATES],imag:vec![0.;STATES*STATES]};
+    let mut h=zero();for s in 0..STATES{if !r.states[s].starts_with("ground"){h.real[s*STATES+s]=5000.+s as f64;}}h.real[e*STATES+e]=40.;h.real[plus*STATES+plus]=-2.;
+    let mut emission=[zero(),zero(),zero()];let c=(0.25*38.1_f64).sqrt();for(g,sign)in [(minus,1.),(plus,-1.)]{emission[0].real[g*STATES+e]=c;emission[1].imag[g*STATES+e]=sign*c;}
+    let beam=|id:&str,direction:[f64;3],g:usize,k:f64,waist:Option<f64>,index:i32,size:f64|{let mut x=zero();x.real[e*STATES+g]=size;
+        Beam{id:id.into(),name:id.into(),direction,wave_number_per_um:k,waist_um:waist,intensity_mw_cm2:1.,frequency_index:vec![index,0],coupling:x,counter_coupling:zero(),outside_shift:zero(),field:None}};
+    let frames:Vec<f64>=r.states.iter().map(|s|if s.starts_with("ground"){0.}else{3.8e8}).collect();
+    let mut density=vec![Complex::ZERO;STATES*STATES];density[minus*STATES+minus]=Complex::ONE;
+    r.beams=vec![beam("b0",[0.,0.,1.],minus,8.05,None,0,3.),beam("b1",[0.,0.,-1.],plus,8.05,None,0,3.),beam("tweezer",[1.,0.,0.],minus,7.4,Some(1.),1,1e-3)];r.trap_beam=2;r.mass_kg*=1e6;
+    (r.hamiltonian,r.emission,r.frame_frequencies_mhz,r.frequencies_mhz,r.initial_density,r.field_vector_g,r.times_us)=(h,emission,frames,vec![1e7,0.],density,[0.;3],vec![0.,10.]);r
+}
+/// In its states' frame a cluster of ground states' plain step is the CPU's (model.rs `Model::frame`, engine.rs # One propagation, its Simpson panels): on the σ⁺σ⁻ pair (`raman_pair`) atoms moving along it at kv from
+/// 0.5 to 2.75 rad/us and across it, from either state and from a superposition, one step of 2 us -- up to 11 rad of the pair's Raman phase.
+#[test]
+fn in_its_states_frame_a_step_is_the_cpu_s(){
+    let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
+    let r=raman_pair();let model=Model::new(&r).unwrap();
+    let minus=r.states.iter().position(|x|x=="ground-1--1").unwrap();let b=model.ground.ground_states.iter().position(|&i|i==minus).unwrap();let c=model.ground.cluster[b];
+    let(n,x)=(model.dimension(c),model.ground.clusters[c].position(b).unwrap());assert!(n==2&&model.path_waves(c).is_some(),"the pair's cluster takes a frame");
+    let mut settings=Settings::new(2.,&model.trap(c,x),1e-6,false);settings.frequencies=[0.;3];settings.lab=[0.;3];settings.loss=false;
+    let trajectories:Vec<Trajectory>=(0..12).map(|i|{
+        let kv=0.5+0.75*(i%4) as f64;let kappa=[0.3*kv*(i/4) as f64,0.,kv].map(|v|v/(8.05*model.hbar_over_mass));
+        let mut psi=[Complex::ZERO;MOST_MIXED];match i/4{0=>psi[x]=Complex::ONE,1=>psi[1-x]=Complex::ONE,_=>{psi[x]=Complex::new(0.6,0.);psi[1-x]=Complex::new(0.,0.8);}}
+        Trajectory{cluster:c,psi,r:[0.,30.,0.],kappa,time:0.,threshold:1e-12,alive:true,jumps:0,beats:0.,seed:1,index:i as u64}}).collect();
+    compare_from(&gpu,&model,&settings,&trajectories,false,0.);
 }
 
 /// One step from thermal states, the jumps where their thresholds fall.

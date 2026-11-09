@@ -1629,6 +1629,54 @@ fn a_moving_atom_s_kept_drive_is_an_atom_at_rest_at_the_shifted_detuning(){
     println!("{checked} runs, largest difference {worst:.2e}, (kv/σ)² {within:.2e}");assert!(checked>0);
 }
 
+/// A σ⁺σ⁻ pair far off a synthetic line: F = 1, m = ±1 a Raman pair at 2k along z, m = +1 lowered by twice `doppler` (rad/us) -- an atom moving along z at kv = `doppler` on its two-photon line --, each
+/// beam shifted by `shift` against its k_l·v (the atom at rest at the frequencies the moving one sees); with `linear` both beams drive both states, the second with the other sign.
+fn raman_pair(doppler:f64,shift:f64,linear:bool)->Request{
+    let g=3.;let(b0,b1):(Vec<(&str,&str,f64)>,Vec<(&str,&str,f64)>)=if linear{(vec![("D1-1-0","ground-1--1",g),("D1-1-0","ground-1-1",g)],vec![("D1-1-0","ground-1--1",g),("D1-1-0","ground-1-1",-g)])}
+        else{(vec![("D1-1-0","ground-1--1",g)],vec![("D1-1-0","ground-1-1",g)])};
+    let mut r=synthetic(&[("D1-1-0",SIGMA),("ground-1-1",-2.*doppler)],&[("D1-1-0","ground-1--1",circular(1.),0.5*LINE),("D1-1-0","ground-1-1",circular(-1.),0.5*LINE)],&[([0.,0.,1.],b0),([0.,0.,-1.],b1)],"ground-1--1");
+    r.frequencies_mhz.push(shift/std::f64::consts::TAU);for(i,b)in r.beams.iter_mut().enumerate(){b.frequency_index.push([-1,1,0][i.min(2)]);}
+    r.times_us=vec![0.,10.];r
+}
+/// Galilean covariance of a cluster of ground states (model.rs, # The atom's path; `Model::frame`): an atom moving uniformly through a σ⁺σ⁻ pair far off its line, on the pair's two-photon line
+/// (`raman_pair`), is the atom at rest with each beam at its Doppler-shifted frequency -- its cluster's plain step in its states' frame, static there, the Raman phase advancing along the step's path, against
+/// the exact step of the beat the shifted beams make. From m = −1 the no-jump evolution, m = +1's population and ln‖ψ‖², at every step's end of 2.5 to 0.05 us:
+/// - the moving atom's steps agree at their common ends to the series' round-off, 8e-8: in the frame the generator is static and the step exact whatever its size;
+/// - against the atom at rest what is left is the fold's second order in the shift, the first order's Doppler term against the shifted detunings: a quarter at half the shift (kv = 1 rad/us against 0.5 at
+///   σ = 40 rad/us: m = +1 9e-5 and 2e-5, within (kv/σ)², ln‖ψ‖² 2.5e-3 and 6.5e-4 of itself), where a step's own error, of first order in the shift, would halve.
+/// Held at r_h, as the line held it, the Raman phase moved by 2kvτ between steps, 5 rad at the largest: at kv = 1 rad/us the moving atom's m = +1 then lay up to 0.65 off the atom at rest and its
+/// ln‖ψ‖² up to 98 % off, its steps as far off each other. The atom at rest at the unshifted frequencies differs by 0.7. A pair of linear beams, two wave vectors on every entry, keeps no frame.
+#[test]
+fn a_moving_atom_s_raman_pair_is_an_atom_at_rest_at_the_shifted_frequencies(){
+    let linear=raman_pair(1.,0.,true);let m=Model::new(&linear).unwrap();assert!(m.path_waves(place(&m,&linear,"ground-1--1").0).is_none(),"linear beams keep no frame");
+    let run=|m:&Model,r:&Request,kappa:[f64;3],dt:f64|->Vec<[f64;2]>{
+        let(c,b)=place(m,r,"ground-1--1");let up=place(m,r,"ground-1-1").1;let n=m.dimension(c);
+        let mut s=Settings::new(dt,&m.trap(c,b),1e-10,false);s.frequencies=[0.;3];s.lab=[0.;3];s.loss=false;s.beats=1e-10;let engine=Engine::new(m,s);
+        let mut psi=[Complex::ZERO;MOST_MIXED];psi[b]=Complex::ONE;
+        let mut t=Trajectory{cluster:c,psi,r:[0.,30.,0.],kappa,time:0.,threshold:1.,alive:true,jumps:0,beats:0.,seed:1,index:0};
+        (0..(10./dt).round() as usize).map(|_|{t=engine.coast(&t,dt,1);t.kappa=kappa;let norm:f64=t.psi[..n].iter().map(|z|z.norm_sqr()).sum();[t.psi[up].norm_sqr()/norm,norm.ln()]}).collect()};
+    let off=|x:&[f64;2],y:&[f64;2]|(x[0]-y[0]).abs().max((x[1]-y[1]).abs()/y[1].abs().max(f64::MIN_POSITIVE));
+    // Per shift: the largest m = +1 and ln‖ψ‖² differences from the atom at rest over the steps, the largest off the finest step, and the largest from the atom at rest unshifted.
+    let measure=|doppler:f64|->([f64;2],f64,f64){
+        let(base,shifted)=(raman_pair(doppler,0.,false),raman_pair(doppler,doppler,false));let(moving,rest)=(Model::new(&base).unwrap(),Model::new(&shifted).unwrap());
+        let(c,b)=place(&moving,&base,"ground-1--1");let up=place(&moving,&base,"ground-1-1");assert_eq!(up.0,c,"one cluster holds the pair");
+        let k=moving.path_waves(c).expect("the pair's cluster takes a frame");let apart:[f64;3]=std::array::from_fn(|a|k[up.1][a]-k[b][a]);
+        assert!(apart[0]==0.&&apart[1]==0.&&(apart[2].abs()-2.*WAVE).abs()<=1e-9,"its states' wave vectors {k:?}: 2k apart along z");
+        let kappa=[0.,0.,doppler/(WAVE*moving.hbar_over_mass)];let fine=run(&moving,&base,kappa,0.05);let(mut left,mut exact,mut teeth)=([0_f64;2],0_f64,0_f64);
+        for dt in [2.5,1.25,0.25,0.05]{
+            let(a,at_rest,unshifted)=(run(&moving,&base,kappa,dt),run(&rest,&shifted,[0.;3],dt),run(&moving,&base,[0.;3],dt));
+            for(x,y)in a.iter().zip(&at_rest){left[0]=left[0].max((x[0]-y[0]).abs());left[1]=left[1].max((x[1]-y[1]).abs()/y[1].abs());}
+            // The steps' common ends, every 2.5 us.
+            let step=(2.5/dt).round() as usize;exact=exact.max((1..=4).map(|j|off(&a[j*step-1],&fine[50*j-1])).fold(0.,f64::max));
+            teeth=teeth.max(a.iter().zip(&unshifted).map(|(x,z)|(x[0]-z[0]).abs()).fold(0.,f64::max));
+        }
+        println!("kv {doppler} rad/us: off the atom at rest {:.2e} and {:.2e}, off the finest step {exact:.2e}, off the atom at rest unshifted {teeth:.3}",left[0],left[1]);(left,exact,teeth)};
+    let(whole,half)=(measure(1.),measure(0.5));
+    for(left,exact,teeth)in [whole,half]{assert!(exact<=1e-6&&teeth>=0.1,"off the finest step {exact:.2e}, the check's teeth {teeth}");let _=left;}
+    assert!(whole.0[0]<=(1./SIGMA).powi(2),"m = +1 off the atom at rest by {:.2e}, (kv/σ)² {:.2e}",whole.0[0],(1./SIGMA).powi(2));
+    for i in 0..2{let ratio=whole.0[i]/half.0[i];assert!((3. ..=5.).contains(&ratio),"the shift's second order: {:.2e} at kv, {:.2e} at kv/2",whole.0[i],half.0[i]);}
+}
+
 /// The path's momentum is the step's middle's (model.rs, # The atom's path): reversible, the step keeps the energy; at the momentum before the kick phase space grows where the force is a potential's. A kept standing wave far off its line,
 /// an atom out of the tweezer, no jump, its beats real (±k on one state): the mechanical energy over 240 steps within 1 % of the sum of ½(ħ/m)I², where a path at κ_h moved it by 5.7 % at 1 us and 1.5 % at 0.5 us (the phases held in the step 0.07 and 0.55 %).
 #[test]
