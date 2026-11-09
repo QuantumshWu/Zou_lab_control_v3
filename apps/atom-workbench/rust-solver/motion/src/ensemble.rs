@@ -389,7 +389,7 @@ impl<'a> Ensemble<'a> {
 
     /// Each component's η, the classical kinetic temperature relative to T (module documentation, # The exact moments), with
     /// the difference of its last two levels: every node count doubled until the levels' integrals agree within their sums'
-    /// rounding, or the next level would take more than `most` evaluations of the potential.
+    /// rounding, or the next level would take more than `most` evaluations of the potential (two levels at least).
     pub fn kinetic(&self, most: u64) -> Vec<(f64, f64)> {
         self.components
             .iter()
@@ -397,15 +397,12 @@ impl<'a> Ensemble<'a> {
                 let mut n = 8;
                 let mut last = self.integrals(c, n);
                 loop {
-                    if (2 * n as u64).pow(3) * c.modes.len() as u64 > most {
-                        break (last.0[1] / last.0[0], f64::INFINITY);
-                    }
                     n *= 2;
                     let next = self.integrals(c, n);
                     let within = (0..2).all(|s| (next.0[s] - last.0[s]).abs() <= rounding(next.1) * next.0[s] + rounding(last.1) * last.0[s]);
                     let difference = (next.0[1] / next.0[0] - last.0[1] / last.0[0]).abs();
                     last = next;
-                    if within {
+                    if within || (2 * n as u64).pow(3) * c.modes.len() as u64 > most {
                         break (last.0[1] / last.0[0], difference);
                     }
                 }
