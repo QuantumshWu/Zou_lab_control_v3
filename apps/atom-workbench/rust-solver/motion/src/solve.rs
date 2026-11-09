@@ -53,7 +53,7 @@
 use crate::adapt::{self, Tolerances};
 use crate::decide::{pays, Outcome, Read};
 use crate::ensemble::{Ensemble, Start, Well, GROUP};
-use crate::estimate::{half_window, paired, spread, summarize, unseen, Estimate, Group, Held, Scales, Spread};
+use crate::estimate::{half_window, paired, spread, summarize, unseen, wilson, Estimate, Group, Held, Scales, Spread};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, span, when, Account, Ledger};
 use crate::linalg::V3;
@@ -200,17 +200,40 @@ impl Well for Prepared<'_> {
 }
 
 /// The step's tolerances per µs of the run (SPEC §2.2: each output's error ≤ s·ε·τ/T_run of its scale, adapt.rs), from the
-/// temperature scales (µK) per lab axis and of the energy: the momentum's against T's target (T ∝ κ², so κ's error δ moves
-/// T by 2δ/κ_T relative: δ ≤ s ε_T κ_T/2, κ_T² = k_BT/(ħ/m)); the loss energy's against the population target (the loss
-/// moves by the share of atoms within δE of the escape, at most δE/k_BT: δE ≤ s ε k_BT; T moves by δE/k_BT, within it);
-/// the displayed rows' against the population target.
-fn tolerances(momentum: V3, energy: f64, run: f64, hbar_over_mass: f64) -> Tolerances {
+/// temperature scales (µK) per lab axis and the density of the atoms' loss energy at the escape (per rad/µs,
+/// `escape_density`): the momentum's against T's target (T ∝ κ², so κ's error δ moves T by 2δ/κ_T relative: δ ≤ s ε_T κ_T/2,
+/// κ_T² = k_BT/(ħ/m)); the loss energy's against the population target (an error δE carries the atoms within δE of the
+/// escape across it, a share ρ(E_esc) δE: δE ≤ s ε/ρ); the displayed rows' against the population target.
+fn tolerances(momentum: V3, density: f64, run: f64, hbar_over_mass: f64) -> Tolerances {
     let [bp, bt] = step_bound();
     Tolerances {
         momentum: momentum.map(|t| bt * (KT_PER_UK * t / hbar_over_mass).sqrt() / (2. * run)),
-        energy: bp * KT_PER_UK * energy / run,
+        energy: bp / (density * run),
         population: bp / run,
     }
+}
+
+/// The density (per rad/µs) of the held atoms' loss energy E_s at the escape E_esc, the running potential's far value
+/// (model.rs `lost`): per output, the share of the pilot's held atoms within `thermal` (k_BT, rad/µs) below the escape or
+/// past it -- Wilson's far end at that count, so that what none of them met is bounded by what they leave unseen -- over the
+/// window, the largest over the outputs. The window's mean stands for the density at its edge: k_BT, the scale over which
+/// a trapped ensemble's density changes. With no atom held after t = 0 nothing is measured, and the density is taken at
+/// 1/k_BT, as the pilot's tolerances take it before anything is.
+fn escape_density(model: &Model, states: &[State], output: &[usize], outputs: usize, thermal: f64) -> f64 {
+    let running = model.running();
+    let near: Vec<bool> = states
+        .par_iter()
+        .map(|s| {
+            let x = &s.sample;
+            model.asymptote(&model.ground_populations(x.cluster, &x.psi), &running) - model.energy(x.cluster, &x.at, &x.psi) <= thermal
+        })
+        .collect();
+    let (mut count, mut held) = (vec![0.; outputs], vec![0.; outputs]);
+    for (&k, &n) in output.iter().zip(&near) {
+        held[k] += 1.;
+        count[k] += if n { 1. } else { 0. };
+    }
+    (1..outputs).filter(|&k| held[k] > 0.).map(|k| wilson(count[k], held[k]) / thermal).reduce(f64::max).unwrap_or(1. / thermal)
 }
 /// Tolerances tightened (or loosened) by a factor.
 fn scaled(t: &Tolerances, factor: f64) -> Tolerances {
@@ -296,7 +319,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     };
 
     // The pilot (module documentation, # The pipeline): its own trajectory numbers, the step at the request's temperature.
-    let pilot_tolerances = tolerances([request.temperature_uk; 3], request.temperature_uk, context.plan.end, hm);
+    let pilot_tolerances = tolerances([request.temperature_uk; 3], 1. / (KT_PER_UK * request.temperature_uk), context.plan.end, hm);
     let first = MOST_TRAJECTORIES / GROUP;
     let pilot = run_groups(first, first + pilot_size() / GROUP, Shape::of(&context.plan, true), &|i| trajectory(&run, &ensemble, &pilot_tolerances, &context.plan, true, i), &mut |prefix| {
         let (e, l, c) = pooled(prefix, &context.scales);
@@ -370,8 +393,8 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     let held_to: Vec<&V3> = context.fixed.temperature.iter().flatten().collect();
     let momentum: V3 = std::array::from_fn(|a| held_to.iter().map(|t| t[a]).fold(f64::INFINITY, f64::min));
     let momentum = momentum.map(|t| if t.is_finite() { t } else { request.temperature_uk });
-    let energy = coldest(&|m| m.temperature_total).min(request.temperature_uk);
-    let mut tolerance = tolerances(momentum, energy, context.plan.end, hm);
+    let thermal = KT_PER_UK * coldest(&|m| m.temperature_total).min(request.temperature_uk);
+    let mut tolerance = tolerances(momentum, escape_density(&model, &samples, &at, outputs, thermal), context.plan.end, hm);
     let round = |n: f64| ((n / GROUP as f64).ceil() as u64 * GROUP).clamp(pilot_size(), MOST_TRAJECTORIES);
     let mut want = round(targets.need(&estimates));
     let mut parts: Vec<Part> = vec![];

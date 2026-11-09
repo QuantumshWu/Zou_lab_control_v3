@@ -38,9 +38,10 @@
 //! share their trajectories (Šidák's inequality for the centred multivariate normal).
 //!
 //! # What no trajectory saw
-//! A share that none of N independent draws met is bounded at the confidence z by the far end of Wilson's score
-//! interval at a count of zero, z²/(N + z²) (`unseen`): one function for every such share -- an output's statistics,
-//! whose jackknife reads nothing of a loss or a state no trajectory reached, and the reach's unsampled share.
+//! A share that n of N independent draws met is bounded at the confidence z by the far end of Wilson's score interval
+//! (`wilson`); at a count of zero, z²/(N + z²) (`unseen`): one function for every such share -- an output's statistics,
+//! whose jackknife reads nothing of a loss or a state no trajectory reached, the reach's unsampled share, and the atoms
+//! near the escape that set the loss energy's tolerance (solve.rs).
 use crate::decide::Read;
 use crate::request::STATES;
 use crate::units::{CONFIDENCE, KT_PER_UK};
@@ -48,11 +49,17 @@ use rayon::prelude::*;
 use std::borrow::Borrow;
 use std::f64::consts::{PI, TAU};
 
-/// The far end of Wilson's score interval at confidence z for a count of zero in `draws` independent draws, z²/(N + z²):
-/// the largest share that N draws leave unseen (module documentation).
+/// The far end of Wilson's score interval at confidence z for a count n in N independent draws,
+/// (n + z²/2 + z √(n(N − n)/N + z²/4))/(N + z²): the largest share the draws leave plausible (module documentation).
+pub fn wilson(count: f64, draws: f64) -> f64 {
+    let (z, draws) = (CONFIDENCE, draws.max(0.));
+    let spread = if draws > 0. { count * (draws - count) / draws } else { 0. };
+    (count + 0.5 * z * z + z * (spread + 0.25 * z * z).sqrt()) / (draws + z * z)
+}
+
+/// Wilson's far end at a count of zero, z²/(N + z²): the largest share that N draws leave unseen.
 pub fn unseen(draws: f64) -> f64 {
-    let z2 = CONFIDENCE * CONFIDENCE;
-    z2 / (draws.max(0.) + z2)
+    wilson(0., draws)
 }
 
 /// The half width of T's window on a lab axis about an output at t (SPEC §1.7): half of one trap period of the axis,
@@ -523,12 +530,18 @@ mod tests {
         assert_eq!(Spread::EXACT.interval_over(1e6), 0.);
     }
 
-    /// Wilson's far end at a count of zero: z²/(N + z²), at z = 2 four in N + 4; a draw of none leaves all unseen.
+    /// Wilson's far end at a count of zero: z²/(N + z²), at z = 2 four in N + 4; a draw of none leaves all unseen. At a
+    /// count of five in a hundred, the score interval's far end (p̂ + z²/2N + z√(p̂(1 − p̂)/N + z²/4N²))/(1 + z²/N); at a
+    /// count of all, one.
     #[test]
     fn the_unseen_share_is_wilson_s_far_end() {
         assert_eq!(unseen(0.), 1.);
         assert!((unseen(96.) - 0.04).abs() < 1e-16);
         assert!((unseen(16380.) - 4. / 16384.).abs() < 1e-18);
+        let (p, n): (f64, f64) = (0.05, 100.);
+        let far = (p + 2. / n + 2. * (p * (1. - p) / n + 1. / (n * n)).sqrt()) / (1. + 4. / n);
+        assert!((wilson(5., 100.) - far).abs() < 1e-15, "{}", wilson(5., 100.));
+        assert!((wilson(100., 100.) - 1.).abs() < 1e-15);
     }
 
     /// The window: half a period of the axis, at most half an output interval, cut at t = 0.
