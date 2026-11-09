@@ -29,7 +29,7 @@ fn main(){
     // The class of the largest weight at each state.
     let picks:Vec<usize>=states.iter().enumerate().map(|(i,t)|{let p=model.photons(t.cluster,&points[i],&normalized[i],t.time,None);
         let classes=&model.ground.clusters[t.cluster].classes;(0..classes.len()).max_by(|&a,&b|{let w=|c:usize|{let nt=model.dimension(classes[c].target);(0..3).map(|x|p.amplitude[c][x][..nt].iter().map(|z|z.norm_sqr()).sum::<f64>()).sum::<f64>()};w(a).total_cmp(&w(b))}).unwrap()}).collect();
-    let absorption=time(&mut|i|{let t=&states[i];let p=model.photons(t.cluster,&points[i],&normalized[i],t.time,None);let(g,s)=p.absorption(picks[i],[0.6,0.,0.8],&[atom_motion_3d::Complex::ZERO;atom_motion_3d::model::MOST_STATES]);g[0][0].re+s.beams.len() as f64});
+    let absorption=time(&mut|i|{let t=&states[i];let p=model.photons(t.cluster,&points[i],&normalized[i],t.time,None);let(g,s)=p.absorption(picks[i],[0.6,0.,0.8],&[atom_motion_3d::Complex::ZERO;atom_motion_3d::model::MOST_STATES]);g[0][0].re+s.sources.len() as f64});
     // The jump's other parts: its point, the dipole pattern's rejection on the picked class's Gram
     // matrix, and an advance (a jump redoes two in Engine::step: to the crossing and the rest).
     let grams:Vec<[[Complex;3];3]>=states.iter().enumerate().map(|(i,t)|{let p=model.photons(t.cluster,&points[i],&normalized[i],t.time,None);let u=&p.amplitude[picks[i]];
