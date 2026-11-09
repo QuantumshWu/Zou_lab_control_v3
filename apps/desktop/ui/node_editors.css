@@ -47,7 +47,7 @@
 .axis-unit { grid-column: 4; display: flex; align-items: center; min-width: 0; }
 .axis-unit > .unit-picker { width: 100%; }
 .unit-word { padding: 0 0 var(--cap-lift) var(--field-text-inset); white-space: nowrap; }
-.scan-axes > .segmented { grid-column: 5; }
+.scan-axes > .segmented { grid-column: 5; justify-self: start; }
 .scan-axes > .axis-link { grid-column: 6; }
 .scan-axes > button.glyph { grid-column: 7; }
 /* What a row's values are, and what is wrong with them, under the row from the axis's text. */
@@ -145,14 +145,15 @@
   /* From the band to the label column's end: the badge and a gap before it. */
   --link-lead-w: calc(var(--link-badge) + var(--row-gap));
 }
-.scan-axes.has-links > .segmented { min-width: calc(230px * var(--fluent) * var(--qt)); }
 .axis-kind.link-master { display: flex; align-items: center; align-self: stretch; height: auto; padding-right: 0; position: relative; }
 .axis-kind.link-master::after, .linked-lead::after, .axis-notes.in-link::before {
   content: ""; position: absolute; top: 0; bottom: 0; right: var(--link-lead-w); width: var(--link-band-w); background: var(--link);
 }
 .link-badge {
   flex: none; margin-left: auto; width: var(--link-badge); height: var(--link-badge); border-radius: calc(var(--link-badge) / 2);
-  display: grid; place-items: center; background: var(--link); color: var(--surface); font-style: italic; font-weight: 600; line-height: 1;
+  /* The glyph centred by its box: one line exactly the badge's height, upright. */
+  display: block; padding: 0; text-align: center; line-height: var(--link-badge); font-size: calc(var(--link-badge) * 0.72);
+  background: var(--link); color: var(--surface); font-weight: 600;
 }
 /* A linked row's band runs up through the gap above it and down beside its preview line. */
 .linked-lead { grid-column: 1; grid-row: span 2; align-self: stretch; position: relative; margin-top: calc(-1 * var(--row-gap)); }
@@ -168,7 +169,7 @@
 .linked-eq { flex: none; padding: 0 var(--row-gap) var(--cap-lift) 0; }
 .link-chip {
   flex: none; display: flex; align-items: center; height: var(--control); padding: 0 var(--field-text-inset) var(--cap-lift);
-  background: var(--link); color: var(--surface); font-style: italic; border-radius: var(--radius) 0 0 var(--radius);
+  background: var(--link); color: var(--surface); border-radius: var(--radius) 0 0 var(--radius);
 }
 .linked-values > input { flex: 1; width: 100%; min-width: 0; border-top-left-radius: 0; border-bottom-left-radius: 0; }
 .linked-unit { grid-column: 4; width: 100%; min-width: 0; }
