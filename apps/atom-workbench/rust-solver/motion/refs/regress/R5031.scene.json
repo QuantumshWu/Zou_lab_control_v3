@@ -1,0 +1,228 @@
+{
+ "version": 3,
+ "name": "验证 retro 5031",
+ "fields": [
+  {
+   "id": "bias",
+   "name": "偏置磁场",
+   "enabled": true,
+   "magnitudeG": 2.483269871987802,
+   "direction": {
+    "reference": {
+     "kind": "angles",
+     "thetaDeg": 148.53793602038948,
+     "phiDeg": -123.7329263858095
+    },
+    "thetaDeg": 0,
+    "phiDeg": 0
+   }
+  }
+ ],
+ "lasers": [
+  {
+   "id": "tweezer",
+   "name": "光镊",
+   "enabled": true,
+   "line": "D2",
+   "frequency": {
+    "wavelengthNm": 808
+   },
+   "frequencyUnit": "nm",
+   "showLightShift": true,
+   "intensityMode": "power",
+   "intensityMWcm2": 110481991.02337384,
+   "powerUnit": "mW",
+   "waistUnit": "μm",
+   "intensityUnit": "kW/cm²",
+   "direction": {
+    "reference": {
+     "kind": "angles",
+     "thetaDeg": 68.93344641505252,
+     "phiDeg": 18.891408245490226
+    },
+    "thetaDeg": 0,
+    "phiDeg": 0
+   },
+   "polarizationAngleDeg": -13.911138761070603,
+   "ellipticityDeg": 0,
+   "phaseDeg": 0,
+   "frequencyAnchor": {
+    "line": "D2",
+    "offsetMHz": -13200214.66651982,
+    "viewKey": "[\"expr\",{\"wavelengthNm\":808}]"
+   },
+   "intensityAnchor": {
+    "intensityMWcm2": 110481991.02337384,
+    "viewKey": "[\"power\",3.6683347315666315,1.453880776479509]"
+   },
+   "powerMW": 3.6683347315666315,
+   "waistUm": 1.453880776479509
+  },
+  {
+   "id": "tweezer-reflection",
+   "name": "光镊（反射）",
+   "enabled": true,
+   "line": "D2",
+   "frequency": {
+    "base": {
+     "kind": "laser",
+     "id": "tweezer"
+    },
+    "offsetMHz": 0
+   },
+   "frequencyUnit": "MHz",
+   "showLightShift": true,
+   "intensityMode": "power",
+   "intensityMWcm2": 76231509.53198236,
+   "powerUnit": "mW",
+   "waistUnit": "μm",
+   "intensityUnit": "kW/cm²",
+   "direction": {
+    "reference": {
+     "kind": "angles",
+     "thetaDeg": 68.93344641505252,
+     "phiDeg": 18.891408245490226
+    },
+    "thetaDeg": 180,
+    "phiDeg": 180
+   },
+   "polarizationAngleDeg": 13.911138761070603,
+   "ellipticityDeg": 0,
+   "phaseDeg": 113.76738730934676,
+   "frequencyAnchor": {
+    "line": "D2",
+    "offsetMHz": -13200214.66651982,
+    "viewKey": "[\"expr\",{\"base\":{\"kind\":\"laser\",\"id\":\"tweezer\"},\"offsetMHz\":0},[\"D2\",-13200214.66651982]]"
+   },
+   "intensityAnchor": {
+    "intensityMWcm2": 76231509.53198236,
+    "viewKey": "[\"power\",2.531115627675118,1.453880776479509]"
+   },
+   "powerMW": 2.531115627675118,
+   "waistUm": 1.453880776479509,
+   "reflection": {
+    "of": "tweezer",
+    "reflectivity": 0.6899903669898078,
+    "phaseDeg": 113.76738730934676,
+    "quarterWave": false
+   }
+  },
+  {
+   "id": "probe",
+   "name": "probe",
+   "enabled": true,
+   "line": "D1",
+   "frequency": {
+    "base": {
+     "kind": "transition",
+     "line": "D1",
+     "Fg": 1,
+     "Fe": 1
+    },
+    "offsetMHz": 25.37414696647771
+   },
+   "frequencyUnit": "MHz",
+   "showLightShift": false,
+   "intensityMode": "intensity",
+   "intensityMWcm2": 0.8199917576034483,
+   "powerUnit": "mW",
+   "waistUnit": "μm",
+   "intensityUnit": "mW/cm²",
+   "direction": {
+    "reference": {
+     "kind": "angles",
+     "thetaDeg": 119.15199298355051,
+     "phiDeg": -41.69222110096791
+    },
+    "thetaDeg": 0,
+    "phiDeg": 0
+   },
+   "polarizationAngleDeg": 46.55976278657687,
+   "ellipticityDeg": 0,
+   "phaseDeg": 0,
+   "frequencyAnchor": {
+    "line": "D1",
+    "offsetMHz": 3787.988278781659,
+    "viewKey": "[\"expr\",{\"base\":{\"kind\":\"transition\",\"line\":\"D1\",\"Fg\":1,\"Fe\":1},\"offsetMHz\":25.37414696647771}]"
+   },
+   "intensityAnchor": {
+    "intensityMWcm2": 0.8199917576034483,
+    "viewKey": "[\"intensity\",0.8199917576034483]"
+   }
+  },
+  {
+   "id": "l3",
+   "name": "l3",
+   "enabled": true,
+   "line": "D2",
+   "frequency": {
+    "base": {
+     "kind": "transition",
+     "line": "D2",
+     "Fg": 2,
+     "Fe": 3
+    },
+    "offsetMHz": 35.021965129796925
+   },
+   "frequencyUnit": "MHz",
+   "showLightShift": false,
+   "intensityMode": "power",
+   "intensityMWcm2": 71.39271759624198,
+   "powerUnit": "mW",
+   "waistUnit": "μm",
+   "intensityUnit": "mW/cm²",
+   "direction": {
+    "reference": {
+     "kind": "angles",
+     "thetaDeg": 6.71227042864803,
+     "phiDeg": 105.92744501434731
+    },
+    "thetaDeg": 0,
+    "phiDeg": 0
+   },
+   "polarizationAngleDeg": 50.57771253899199,
+   "ellipticityDeg": 45,
+   "phaseDeg": 107.29181837568228,
+   "frequencyAnchor": {
+    "line": "D2",
+    "offsetMHz": -2334.243263959312,
+    "viewKey": "[\"expr\",{\"base\":{\"kind\":\"transition\",\"line\":\"D2\",\"Fg\":2,\"Fe\":3},\"offsetMHz\":35.021965129796925}]"
+   },
+   "intensityAnchor": {
+    "intensityMWcm2": 71.39271759624198,
+    "viewKey": "[\"power\",0.007242159069664865,80.36133342762506]"
+   },
+   "powerMW": 0.007242159069664865,
+   "waistUm": 80.36133342762506
+  }
+ ],
+ "tweezerId": "tweezer",
+ "referenceFrequencies": [],
+ "references": [],
+ "marks": {},
+ "dynamics": {
+  "initialStateId": "ground-2-0",
+  "monitoredStateIds": [
+   "ground-2-0",
+   "ground-1--1",
+   "ground-1-0",
+   "ground-1-1"
+  ],
+  "monitorMode": "auto",
+  "monitoredGroupIds": [],
+  "durationUs": 100,
+  "durationUnit": "μs",
+  "samples": 21,
+  "meanHorizonUs": 1000000,
+  "motion": {
+   "enabled": true,
+   "temperatureUK": 39.7610146246238,
+   "temperatureUnit": "μK",
+   "device": "cpu"
+  },
+  "initialState": {
+   "kind": "unpolarized",
+   "manifold": "F1"
+  }
+ }
+}

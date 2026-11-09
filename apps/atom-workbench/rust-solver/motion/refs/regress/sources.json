@@ -1,0 +1,252 @@
+{
+ "note": "Sources of the old gate scenes (contract §7 Q2): Codex re-export (codex_resume/export_scenes.mjs) kept each as <name>.scene.json. reproducesGatePayload: the app of this worktree re-exports the gate payload bit for bit (couplings, emission, H0, initial state), so the old truths compare state by state.",
+ "sources": {
+  "DEFAULT": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/DEFAULT.scene.json",
+   "sha256": "1a34b8e8a6647f60acfebd4429b2ccbd409a9cb1d7c4f46c6114eb0d60bcb611",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/DEFAULT.json",
+   "reproducesGatePayload": true
+  },
+  "THREE": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/THREE.scene.json",
+   "sha256": "bfcbff55125ca80618eb4c58ee525bf6a15c7ba83b61850a17b2641ba08f30c9",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/THREE.json",
+   "reproducesGatePayload": true
+  },
+  "PGC3D": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/PGC3D.scene.json",
+   "sha256": "ec6a544205d63641081617dd7f3768bc9d71a82edd7f2206ddb7d45310a9077b",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/PGC3D.json",
+   "reproducesGatePayload": true
+  },
+  "TET": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/TET.scene.json",
+   "sha256": "5c5325351ea5f05d93ce704a4ecc4e75ba15773aa907fc65c3a1ec3cdbcbaec2",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/TET.json",
+   "reproducesGatePayload": true
+  },
+  "GMD1C": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/GMD1C.scene.json",
+   "sha256": "393873b25435048d05a957bd980612598c90878e6399ca35cfa39d55db7a94cf",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/GMD1C.json",
+   "reproducesGatePayload": true
+  },
+  "PGCP_10": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/PGCP_10.scene.json",
+   "sha256": "0bb27c9ad843cf0712fab6d55d08e4f385b075ca7788cd170d6d75deda06c035",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/PGCP_10.json",
+   "reproducesGatePayload": true
+  },
+  "SHALLOW_PROBE": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/SHALLOW_PROBE.scene.json",
+   "sha256": "1e2bb514412a7aff737930b0b2d81ecd81c1b3be082cf88f4805f6b329cbc96d",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/SHALLOW_PROBE.json",
+   "reproducesGatePayload": true
+  },
+  "CONTROL_CYCLE": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/CONTROL_CYCLE.scene.json",
+   "sha256": "145925dc23ef8cdeebf336c88ca560f079589d6b9b7d99bd0cc0017b65110094",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/CONTROL_CYCLE.json",
+   "reproducesGatePayload": true
+  },
+  "RETRO": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/RETRO.scene.json",
+   "sha256": "e6f1a8642b5497be08587f67684d9c29b023b4263fc1abec24142429cb2eccc1",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/RETRO.json",
+   "reproducesGatePayload": true
+  },
+  "F10_28MHZ": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/F10_28MHZ.scene.json",
+   "sha256": "6d974aeaaaf1ad855bec99c42088fe254422c3fd21f07778c49d21ccc665bdd8",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/F10_28MHZ.json",
+   "reproducesGatePayload": true
+  },
+  "F5_RETRO80": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/F5_RETRO80.scene.json",
+   "sha256": "0163539e48b130e2f405f76037b5ed22a0fe623b11a7290455a3ac26ed1187eb",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/F5_RETRO80.json",
+   "reproducesGatePayload": true
+  },
+  "B1_128": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/B1_128.scene.json",
+   "sha256": "53f2a7252b5ed6bd3be5bd016731384f25e56ca21db283b5c2a9d4c3c277fd2b",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/B1_128.json",
+   "reproducesGatePayload": true
+  },
+  "F9_CROSSED": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/F9_CROSSED.scene.json",
+   "sha256": "78940dee928a11215e161929a3d6ba3eb69a32364f908f1dc90cdf0be8e06382",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/F9_CROSSED.json",
+   "reproducesGatePayload": true
+  },
+  "F9_CROSSED_P": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/F9_CROSSED.scene.json",
+   "sha256": "78940dee928a11215e161929a3d6ba3eb69a32364f908f1dc90cdf0be8e06382",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/F9_CROSSED_P.json",
+   "reproducesGatePayload": true
+  },
+  "PGC1D": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/PGC1D.scene.json",
+   "sha256": "9d91dfd3bc5412cc236e8d15f21cf4199651403ce1b75eafb1290d2b211d9b83",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/PGC1D.json",
+   "reproducesGatePayload": true
+  },
+  "PGC1D_BIAS": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/PGC1D_BIAS.scene.json",
+   "sha256": "a459b1102cb0b743df3541d12fc7cd153d8caa5617a58a0a2399950aa39832c3",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/PGC1D_BIAS.json",
+   "reproducesGatePayload": true
+  },
+  "PGC1D_BIAS_TILT": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/PGC1D_BIAS_TILT.scene.json",
+   "sha256": "aaa265e0394dc1fec1335945ad0b373eb0009b55b01a01136ada47ef9242a0f3",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/PGC1D_BIAS_TILT.json",
+   "reproducesGatePayload": true
+  },
+  "PGC1D_BIAS_LIN": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/PGC1D_BIAS_LIN.scene.json",
+   "sha256": "78e45e3b72f6b79d4134354509209a3887ccedafc3c53d37f2379c371cffac1a",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/PGC1D_BIAS_LIN.json",
+   "reproducesGatePayload": true
+  },
+  "PGC1D_BIAS5": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/PGC1D_BIAS5.scene.json",
+   "sha256": "f0f43754e4d0e6f66c5ef5cd7a0e503421a32321eaa5ddadae1e609d76f67747",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/PGC1D_BIAS5.json",
+   "reproducesGatePayload": true
+  },
+  "PGC1D_BIAS_OFF": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/PGC1D_BIAS_OFF.scene.json",
+   "sha256": "1811f48fb3227211ceac5d849c3dcecce7e8268370a4cd79901f810fc86aa1c0",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/PGC1D_BIAS_OFF.json",
+   "reproducesGatePayload": true
+  },
+  "R5004": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5004.scene.json",
+   "sha256": "178458c87f116178a13e03a955bb84b59df33445d4ae89ac5c9c1bd785464e86",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5004.json",
+   "reproducesGatePayload": true
+  },
+  "R5009": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5009.scene.json",
+   "sha256": "0245bea3781df9eab54163efaec9f373554cf5f4f36471ccc8474e9d0987be1a",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5009.json",
+   "reproducesGatePayload": true
+  },
+  "R5021": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5021.scene.json",
+   "sha256": "072b8980256b84f955fdede134e16a2db401fa565f1790cbfae3e8fe4bf1342f",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5021.json",
+   "reproducesGatePayload": true
+  },
+  "R5031": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5031.scene.json",
+   "sha256": "d4dbff81e2fd9ff5716f7c5c971e039de56676e19e406fb196bc13c418bb8b84",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5031.json",
+   "reproducesGatePayload": true
+  },
+  "R5038": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5038.scene.json",
+   "sha256": "97ecf70fbcee9adacc2bdf093251e1d6200987292a8912b69fa022d5836125a2",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5038.json",
+   "reproducesGatePayload": true
+  },
+  "R5040": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5040.scene.json",
+   "sha256": "ef4fc9b653871f0e978e074b94554944b9f971068adea16040a5247573cb71ea",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5040.json",
+   "reproducesGatePayload": true
+  },
+  "R5053": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5053.scene.json",
+   "sha256": "5808016af490cddb554d8ddc269074e384c1de9bb45b518c52446aa2c064c774",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5053.json",
+   "reproducesGatePayload": true
+  },
+  "R5068": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5068.scene.json",
+   "sha256": "a935c5b02294de16f0593b92b47056e33bb6212c71705f538e2f5401cdc86579",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5068.json",
+   "reproducesGatePayload": true
+  },
+  "R5006": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5006.scene.json",
+   "sha256": "04f0522656d3a0b2170e7eafa1ce2479deb599010ec5793d4bca54378776d452",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5006.json",
+   "reproducesGatePayload": true
+  },
+  "R5051": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5051.scene.json",
+   "sha256": "c7550b0d9bb36864cf862aa6a98f8b5916e0cedc724017cdd6d3bf2a805fcf28",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5051.json",
+   "reproducesGatePayload": true
+  },
+  "R5013": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5013.scene.json",
+   "sha256": "ff2ac775efc35b56c14e24571c3aeadbb02001e9aa9b896788c620aa995da1af",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5013.json",
+   "reproducesGatePayload": true
+  },
+  "R5033": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5033.scene.json",
+   "sha256": "bf31e35df9352234a4138696f5c233be960860af1551db5a0c4ec6b4bc88cd3a",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5033.json",
+   "reproducesGatePayload": true
+  },
+  "R5047": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5047.scene.json",
+   "sha256": "64c900de7b7d4d1d7c08fe9b8726b7242e0cfbe542b976efafac7bfc0815eb2e",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5047.json",
+   "reproducesGatePayload": true
+  },
+  "R5066": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5066.scene.json",
+   "sha256": "f190a0cd67de0c42f81fb3e97c96b3d180e854ba11bbc056d4d3f1f9af703755",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5066.json",
+   "reproducesGatePayload": true
+  },
+  "R5029": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5029.scene.json",
+   "sha256": "2ada89b0f9c2090aa50d83046f9b0fb2e1086d40b91170e6224c9348caf21fbe",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5029.json",
+   "reproducesGatePayload": true
+  },
+  "R5059": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5059.scene.json",
+   "sha256": "1d12e2e5652908024927495e8d22130030172b1d255e6ab1c7389b488ad86a2c",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5059.json",
+   "reproducesGatePayload": true
+  },
+  "R5063": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5063.scene.json",
+   "sha256": "7c1381d9ef68683aa2ee530d6c08131cd282e0868c15db89f313bc6ac5872529",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5063.json",
+   "reproducesGatePayload": true
+  },
+  "R5039": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5039.scene.json",
+   "sha256": "fd666551e50ceedc60f7a0bffa3aed04644f22918d74e74036e6aa0a17dc4dfa",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5039.json",
+   "reproducesGatePayload": true
+  },
+  "R5062": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5062.scene.json",
+   "sha256": "2f57805323713923b24c50a6d622456f690566039505e232f6f4be71a977159c",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5062.json",
+   "reproducesGatePayload": true
+  },
+  "R5065": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5065.scene.json",
+   "sha256": "25d2b139226d7bc1e04f28015625dd77bbfbf353e45b6030033f33fda7ed6381",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5065.json",
+   "reproducesGatePayload": true
+  },
+  "F2": {
+   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/WEAK_D1_FAR.scene.json",
+   "sha256": "3a4431c3f2a7bbe260387c96e482a2d651c4c2417cea644f2b3724f773e561d9",
+   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/validate/repro/F2_default_plus_weak_D1_beam.json",
+   "reproducesGatePayload": true
+  }
+ },
+ "missing": []
+}
