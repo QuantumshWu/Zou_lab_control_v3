@@ -11,7 +11,7 @@
 // operator picks stays.
 import {
   Field, StatusStrip, alignUnitPickers, command, defaultUnit, element, readoutText, setChecked, setElided, setState, shifted, statusDot, switchButton, titleRow,
-  type FieldSpec, type Value,
+  type FieldSpec, type Value, heldNote, showHeld,
 } from "../fluent/index.js";
 import { queueStatus, type ViewContext } from "../shell.js";
 import type { DeviceRow, TunableField } from "../workbench.js";
@@ -63,6 +63,10 @@ export class DeviceControlView {
   private actionNames = "";
   private risk: HTMLButtonElement;
   private reason = element("p", "note wrap");
+  /** A reason several rows share (a run protecting them), said once above the table; those
+   * rows are held, saying it only in their tips. A reason of one row stays under it. */
+  private shared = heldNote();
+  private sharedReasons = new Set<string>();
   private table = element("div", "control-table");
   private rows = new Map<string, Row>();
   private strip = new StatusStrip();
@@ -90,7 +94,7 @@ export class DeviceControlView {
     const headings = ["Field", "Current", "Desired", "Device limits", "Live", "Apply", "Status"]
       .map((words, index) => element("span", `column-heading${index === 1 ? " right" : index === 2 ? " field" : index === 4 || index === 5 ? " centre" : ""}`, words));
     this.table.append(...headings);
-    this.root.append(title, this.reason, this.table, this.strip.root);
+    this.root.append(title, this.reason, this.shared, this.table, this.strip.root);
   }
 
   /** Read the device's fields; asked again while a read is in flight, that read answers both. */
@@ -116,6 +120,10 @@ export class DeviceControlView {
     this.risk.disabled = !control?.risk_enabled;
     this.showActions(device.state === "open" ? device.commands ?? [] : []);
     const fields: TunableField[] = device.fields ?? [];
+    const byReason = new Map<string, string[]>();
+    for (const field of fields) if (!field.editable && field.reason) byReason.set(field.reason, [...(byReason.get(field.reason) ?? []), field.label || field.name]);
+    this.sharedReasons = new Set([...byReason].filter(([, rows]) => rows.length > 1).map(([reason]) => reason));
+    showHeld(this.shared, [...byReason].filter(([reason]) => this.sharedReasons.has(reason)).map(([reason, rows]) => `${reason}: ${rows.join(", ")}`).join("\n"));
     const alive = new Set(fields.map(field => field.name));
     for (const [name, row] of this.rows) if (!alive.has(name)) { this.dropRow(row); this.rows.delete(name); }
     for (const spec of fields) {
@@ -226,7 +234,10 @@ export class DeviceControlView {
 
   private desiredSpec(row: Row): FieldSpec {
     const spec = row.spec;
-    return { ...spec, value: row.draft !== undefined ? row.draft : spec.desired, unavailable_reason: row.unitRequest !== null ? "Reading the new unit" : spec.editable ? "" : spec.reason || "Read only", spin: true, inexact: true };
+    const reason = row.unitRequest !== null ? "Reading the new unit" : spec.editable ? "" : spec.reason || "Read only";
+    // A reason the page says once (above the table) holds the row; one of its own is said under it.
+    return { ...spec, value: row.draft !== undefined ? row.draft : spec.desired, ...(this.sharedReasons.has(reason) ? { held: reason } : { unavailable_reason: reason }),
+      spin: true, inexact: true };
   }
 
   private makeRow(spec: TunableField): Row {

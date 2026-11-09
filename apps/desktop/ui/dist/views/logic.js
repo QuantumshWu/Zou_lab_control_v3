@@ -3,6 +3,8 @@
 // admission, follow intent, restarts and claims are the workbench's.
 import { Field, Legend, Readout, StatusLine, assign, command, element, fieldKind, form, heldNote, row as formRow, sectionTitle, setChecked, setState, setTitle, shareLabelColumn, showHeld, switchButton, } from "../fluent/index.js";
 import { NodeEditors, editorModels } from "./node_editors/index.js";
+/** The held note's lines: the Task gate, then each reason several rows share. */
+const NEWLINE = "\n";
 /** Every word the Start slot can say, on the row and on its Edit page. */
 export const START_LABELS = ["Start", "Restart", "Starting…"];
 /** Each node state as the status word it is drawn with (v2 STATE_WORDS): a
@@ -198,7 +200,6 @@ export class LogicEditorView {
             this.kind.textContent = kind;
         this.statusLine.show(projection.status, STATE_WORDS[projection.state]);
         const locked = takeover.active ? "A running task owns the console: editing is locked until it ends" : "";
-        showHeld(this.held, locked);
         const specs = [];
         // THE NAME: what the node is called on its row, this page and its tab.
         specs.push({ key: "name", spec: { name: "name", label: "Name", kind: "text", value: row.name, required: false, allow_none: true,
@@ -233,6 +234,21 @@ export class LogicEditorView {
             specs.push({ key: `value:${control.name}`, group: control.group, spec: { ...control, held: locked },
                 commit: value => this.intents.editDraft(row.node_id, { values: { [control.name]: value } }, control.label) });
         }
+        // A reason several rows share is said once above them (with the Task gate), and those
+        // rows are held; a reason of one row stays under it.
+        const byReason = new Map();
+        for (const item of specs) {
+            const reason = item.spec.unavailable_reason;
+            if (reason)
+                byReason.set(reason, [...(byReason.get(reason) ?? []), item.spec.label || item.spec.name]);
+        }
+        const shared = [...byReason].filter(([, rows]) => rows.length > 1);
+        for (const item of specs) {
+            const reason = item.spec.unavailable_reason;
+            if (reason && shared.some(([text]) => text === reason))
+                item.spec = { ...item.spec, unavailable_reason: "", held: item.spec.held || reason };
+        }
+        showHeld(this.held, [locked, ...shared.map(([reason, rows]) => `${reason}: ${rows.join(", ")}`)].filter(Boolean).join(NEWLINE));
         const alive = new Set(specs.map(item => item.key));
         for (const [key, field] of this.fields)
             if (!alive.has(key)) {

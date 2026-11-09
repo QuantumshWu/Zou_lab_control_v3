@@ -45,6 +45,15 @@ try {
  await check('incomplete and out-of-range text never writes or clamps',async()=>{for(const text of ['','-','1e','1.','1001','0x10']){const t=setup();t.type('2');t.type(text);await wait();equal(t.writes().length,0,`invalid ${text}`);equal(t.input().value,text,'typing was normalized');assert(t.apply().disabled,'invalid Apply enabled')}});
  await check('invalid text survives an in-flight acknowledgement',async()=>{const t=setup();t.type('2');await wait();t.type('1e');t.ack(1,2);await wait();equal(t.input().value,'1e','invalid text replaced');equal(t.writes().map(c=>c.value),[2],'stale valid draft was sent')});
  await check('turning Live off cancels the queued write',async()=>{const t=setup();t.type('2');await wait();t.type('3');await wait();t.toggle();t.ack(1,2);await wait();equal(t.writes().map(c=>c.value),[2],'Live-off queue');equal(t.input().value,'3','Live-off draft')});
+ await check('a protection several rows share is said once, above them',async()=>{const t=setup({live:false,fields:[{},{}]});
+   t.project({frequency:{editable:false,reason:'Protected by Calibration'},power:{editable:false,reason:'Protected by Calibration'}});
+   const shown=node=>!node.hidden&&node.textContent.trim()!=='';
+   const notes=[...t.view.root.querySelectorAll('.field-note')].filter(shown);equal(notes.length,0,'no line under each row');
+   const held=[...t.view.root.querySelectorAll('.held-note')].filter(shown);equal(held.map(n=>n.textContent),['Protected by Calibration: Frequency, Power'],'said once');
+   assert(t.input(0).disabled&&t.input(1).disabled,'the rows are held');
+   t.project({frequency:{editable:false,reason:'Read only'},power:{editable:true,reason:''}});
+   equal([...t.view.root.querySelectorAll('.held-note')].filter(shown).length,0,'no shared reason, no note');
+   equal([...t.view.root.querySelectorAll('.field-note')].filter(shown).map(n=>n.textContent),['Read only'],'a row of its own says it under it')});
  await check('locking a field cancels pending Live work',async()=>{const t=setup();t.type('2');t.project({frequency:{editable:false,reason:'Protected'}});await wait();equal(t.writes().length,0,'locked write')});
  await check('removing Live capability cancels pending work',async()=>{const t=setup();t.type('2');t.project({frequency:{live_write:false}});await wait();equal(t.writes().length,0,'unsupported Live write')});
  await check('a unit change discards queued values in the old unit and keeps the draft digits',async()=>{const t=setup({fields:[{unit:'Hz'}]});t.type('2');await wait();t.type('3');await wait();t.project({frequency:{unit:'kHz',current:.001,desired:.001}});t.ack(1,.002);await wait();equal(t.writes().map(c=>[c.value,c.unit]),[[2,'Hz']],'old-unit queue');equal(t.input().value,'3','draft digits')});
