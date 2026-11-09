@@ -10,6 +10,7 @@ use atom_motion_3d::linear::Dense;
 use atom_motion_3d::model::{Exact,Model,GROUND,MOST_MIXED};
 use atom_motion_3d::rng::{Purpose,Rng};
 #[path="../examples/scene/mod.rs"] mod scene;
+use atom_motion_3d::check;
 use atom_motion_3d::control::Harmonic;
 use atom_motion_3d::stats::{summarize,Scales};
 use atom_motion_3d::{initial_trajectory,Beam,Complex,Initial,Matrix,Request,Stratum,STATES};
@@ -68,7 +69,7 @@ fn device()->Option<&'static std::sync::Mutex<gpu::Gpu>>{match gpu::gpu(){Ok(g)=
 fn the_kernel_s_structs_match_their_twins(){
     let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
     let f=gpu.function("layout").unwrap();let out=Buffer::new(128).unwrap();gpu.stream().launch(&f,1,32,&[&out.pointer]).unwrap();
-    let mut words=[0u32;27];gpu.stream().download(&out,&mut words).unwrap();
+    let mut words=[0u32;29];gpu.stream().download(&out,&mut words).unwrap();
     assert_eq!(words,program::layout());
 }
 
@@ -527,7 +528,7 @@ fn batch(r:&Request,fourth:bool,dt:f64){
         s.is_empty()
     }).expect("a batch whose jumps fall in the same steps on both devices");
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
-    let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&harmonic),None).unwrap();
+    let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&harmonic),None,None).unwrap();
     let c=atom_motion_3d::simulate(&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&harmonic));
     assert_eq!(g.groups.len(),c.groups.len());
     let close=|a:f64,b:f64,scale:f64,what:&str|assert!((a-b).abs()<=1e-3*b.abs().max(scale),"{what}: {a} against {b}");
@@ -570,8 +571,8 @@ fn a_group_stops_at_its_last_output_as_on_the_cpu(){
     let(seed,first,count,group,steps,outputs,listed,ends)=(0x3D_5EED,40,32,8,3,6,[2,5],[5,3,1,5]);
     let program=gpu.program(&model,&settings).unwrap();
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
-    let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&harmonic),Some(&ends)).unwrap();
-    let c=atom_motion_3d::simulate_to(&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&harmonic),&ends);
+    let g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&harmonic),Some(&ends),None).unwrap();
+    let c=atom_motion_3d::simulate_to(&model,&settings,&initial,seed,first,count,group,steps,outputs,&listed,Some(&harmonic),&ends,None);
     let close=|a:f64,b:f64,what:&str|assert!((a-b).abs()<=1e-3*b.abs().max(1.),"{what}: {a} against {b}");
     for(k,(gg,cg))in g.groups.iter().zip(&c.groups).enumerate(){for(i,(x,y))in gg.sums.iter().zip(&cg.sums).enumerate(){
         let at=format!("group {k}, output {i}");assert_eq!((x.trajectories,x.held),(y.trajectories,y.held),"{at}");
@@ -580,6 +581,42 @@ fn a_group_stops_at_its_last_output_as_on_the_cpu(){
         if i>ends[k]{assert_eq!(x.held,0.,"{at}: none beyond its last output");}
     }}
     for(gs,cs)in g.samples.iter().zip(&c.samples){assert_eq!(gs.len(),cs.len());}
+}
+/// The loss's check's traces (check.rs `Trace`) from the GPU's looks are the CPU's (lib.rs `walk`), each group through its own last
+/// output: per trajectory its energies at the outputs to single precision, its chances, and its reads -- every drawn step read
+/// here, each the step's whole dynamics from the looked-at state with its threshold and jumps -- in their places, with their
+/// changes to single precision's share through the read's span. The tweezer PGC at the batches' step, the same trajectories as
+/// `a_group_stops_at_its_last_output_as_on_the_cpu`; and the shallow trap's cycling control (the gate's CONTROL_CYCLE,
+/// rust-solver/tests/fixtures/shallow_cycle_motion.json) at its step over 60 us, which loses atoms: the traces the loss's dual is
+/// read from and the reads it weighs, the check's verdict one function of them.
+#[test]
+fn the_check_s_traces_are_the_cpu_s(){
+    let Some(gpu)=device()else{return};let gpu=gpu.lock().unwrap_or_else(|e|e.into_inner());
+    let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/shallow_cycle_motion.json")).unwrap();
+    let lost=[(request(PGC),0.1,32,3,6,vec![5,3,1,5]),(scene::request(&fixture["payload"]),1.25,64,8,7,vec![6;8])].into_iter().map(|(r,dt,count,steps,outputs,ends)|{
+    let model=model(&r,false);let initial=Initial::new(&model,&r).unwrap();
+    let mut settings=Settings::new(dt,&initial.traps[0],1e-6,true);settings.region=initial.depths[0];
+    let(seed,first,group)=(0x3D_5EED,40,8);
+    let program=gpu.program(&model,&settings).unwrap();let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
+    let sampling=check::Sampling::alike(outputs-1,(outputs-1) as f64);
+    let mut g=gpu.simulate(&program,&model,&settings,&initial,seed,first,count,group,steps,outputs,&[],Some(&harmonic),Some(&ends),Some(&sampling)).unwrap();
+    let mut c=atom_motion_3d::simulate_to(&model,&settings,&initial,seed,first,count,group,steps,outputs,&[],Some(&harmonic),&ends,Some(&sampling));
+    let(coarse,fine)=(Engine::new(&model,settings.clone()),Engine::new(&model,settings.halved()));
+    for t in g.traces.iter_mut().chain(c.traces.iter_mut()){t.read(&coarse,&fine,2);}
+    assert_eq!(g.traces.len(),c.traces.len());
+    let(mut energy,mut change)=(0_f64,0_f64);
+    for(k,(x,y))in g.traces.iter().zip(&c.traces).enumerate(){
+        assert_eq!((x.energies.len(),x.chances,x.reads.len()),(y.energies.len(),y.chances,y.reads.len()),"trajectory {k}: outputs, chances and reads");
+        for(a,b)in x.energies.iter().zip(&y.energies){assert_eq!(a.is_nan(),b.is_nan(),"trajectory {k}: held");if !b.is_nan(){energy=energy.max(((a-b)/b.abs().max(1.)).abs() as f64);}}
+        for(a,b)in x.reads.iter().zip(&y.reads){assert_eq!((a.interval,a.bin,a.weight),(b.interval,b.bin,b.weight),"trajectory {k}: a read's place");
+            for(u,v)in a.change.iter().zip(&b.change){change=change.max((u-v).abs());}}
+    }
+    let scale=c.traces.iter().flat_map(|t|t.reads.iter().flat_map(|r|r.change)).fold(0_f64,|m,v|m.max(v.abs()));change/=scale.max(f64::MIN_POSITIVE);
+    let lost=c.traces.iter().filter(|t|t.energies.iter().any(|e|e.is_nan())).count();
+    println!("{} traces, {lost} lost, {} reads: energies {energy:.1e}, the reads' changes {change:.1e} of their largest",c.traces.len(),c.traces.iter().map(|t|t.reads.len()).sum::<usize>());
+    assert!(energy<=1e-4&&change<=1e-2,"energies {energy:.1e}, the reads' changes {change:.1e}");
+    lost}).collect::<Vec<_>>();
+    assert!(lost[1]>0,"the cycling control loses atoms: {lost:?}");
 }
 /// The same at fourth order, on the tweezer PGC.
 #[test]
@@ -598,7 +635,7 @@ fn the_default_scene_s_rows_sum_to_one(){
     let settings=Settings::new(interval/steps as f64,&trap,1e-7,true);
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
     let program=gpu.program(&model,&settings).unwrap();
-    let out=gpu.simulate(&program,&model,&settings,&initial,0x3D_5EED,0,256,32,steps,outputs,&[],Some(&harmonic),None).unwrap();
+    let out=gpu.simulate(&program,&model,&settings,&initial,0x3D_5EED,0,256,32,steps,outputs,&[],Some(&harmonic),None,None).unwrap();
     let estimates=summarize(&out.groups,&Scales{hbar_over_mass:model.hbar_over_mass,frequencies:trap.lab},&harmonic.mean);
     let worst=estimates.iter().filter(|e|e.loss<1.).map(|e|(e.populations.iter().sum::<f64>()-1.).abs()).fold(0.,f64::max);
     println!("the rows' largest |sum - 1|: {worst:.2e}");

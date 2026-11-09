@@ -63,6 +63,7 @@ typedef unsigned long long u64;
 #define PAST_ALL 0xffffffffffffffffull     // a report's interval: the slot has run its task's last (src/gpu/mod.rs `run`)
 #define TAU 6.283185307179586
 #define PURPOSE_JUMP 3u                 // rng.rs `Purpose::Jump`
+#define PURPOSE_CHECK 5u                // rng.rs `Purpose::Check`
 // A mirror item's role (`Program::items`), the low bits of an item's fourth word; above them its pair's `Group::first`.
 #define ITEM_ADJOINT 1                  // the adjoint of a pair standing for two
 #define ITEM_FIRST 2                    // a group between two carriers: its first order's adjoint alone
@@ -325,6 +326,10 @@ struct State{
     u32 index;float beats;              // beats: the largest bound per unit time of the beats its exact steps left out
     int interval,step;                  // where it stands: the output interval it is in, its last step (−1 before the first)
 };
+// Where the loss's check looks at a trajectory (check.rs, src/gpu/mod.rs `Gpu::simulate`): its state there while held, ψ as `State`'s,
+// with its threshold and jumps, from which a read's dynamics go on. held: 0 not held; 1 held at a drawn step where no read can be
+// drawn (`Run::inclusion`), its state not written; 2 held, its state written.
+struct Look{double q[3],p[3],time,logn,threshold;float2 psi[MAXM];int cluster,jumps,held;};
 // A launch: a wave's tasks over the output intervals [begin, end).
 struct Run{
     State* states;double* rings;double* samples;double* sums;float2* scratch;
@@ -333,6 +338,8 @@ struct Run{
     double* records;                    // per slot MOST_INTERVALS records of SLOT_RECORD: a ring over the intervals not yet summed
     const double* harmonic;             // per output and lab axis the harmonic control's A and B (control.rs `Harmonic`); none: no control
     unsigned long long* costs;          // in host memory, per slot this launch's cycles and the interval it stands in
+    Look* looks;                        // per slot 2 · outputs looks of the loss's check: [2i] at output i, [2i + 1] at the step drawn in interval i; none: no check
+    const double* inclusion;            // with the looks, per interval i ≥ 1 at [i − 1] its largest read inclusion (check.rs `Sampling::top`)
     u64 seed;
     long long budget;                   // the cycles a warp takes in a launch, a step at least (src/gpu/mod.rs)
     int outputs,steps,reach,begin,end;  // the output times, the steps between two, the steps past the last; the first interval not yet summed, the end of the records' room (`task_sums`: of the intervals every slot has passed)
@@ -2868,13 +2875,22 @@ __device__ __forceinline__ int window_end(const Run& R,int a,int o){const int at
 __device__ __forceinline__ int ring_at(const Run& R,int a,int k){return R.ring_at[a]+3*(k&(R.ring[a]-1));}
 
 // ---------------------------------------------------------------------------------------------
+// A look of the loss's check (`Look`): the warp's trajectory as it stands, held.
+__device__ void look(const Warp& W,const Traj& t,int lane,Look* L){
+    if(lane<3){L->q[lane]=t.q[lane];L->p[lane]=t.p[lane];}
+    if(lane==0){L->time=t.time;L->logn=t.logn;L->threshold=t.threshold;L->cluster=t.cluster;L->jumps=t.jumps;L->held=2;}
+    if(lane<MAXM)L->psi[lane]=W.psi[lane];
+}
+
 // The kernel: every slot of the wave with a trajectory (each its warp and block) from where it stands to the output
 // interval `end`, for its cycle budget. Interval 0 is the initial state; interval i > 0 takes the steps
 // ((i − 1)·steps, i·steps], the last ones past its task's last output its reach (solve.rs # Batches: a group runs only as far as the outputs that want it). Each warp runs its trajectory on its own,
 // keeping its record of each interval it finishes (the output's point record, the windows closing in it) in its slot's ring
 // of records, and leaves after the step that spends its budget -- a warp of cheap steps does not wait for one of dear ones
 // (an exact step costs ten of a folded one) --, its place in its state and the interval it stands in in `costs`. `task_sums` sums
-// the intervals every slot has passed.
+// the intervals every slot has passed. With the loss's check (`Run::looks`), its looks while held: at each output it reaches, and at the
+// step drawn in each of its intervals (check.rs `drawn`: the first deviate of the check's stream, event 2i) its state only where a read
+// can be drawn there -- the second deviate below the interval's largest inclusion (`Run::inclusion`) --, else that it is held.
 extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Run R){
     __shared__ Warp W;
     const int lane=threadIdx.x,slot=blockIdx.x;if(R.tasks[3*(slot/WARPS)+1]<=slot%WARPS)return;
@@ -2909,8 +2925,13 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Run R){
         for(int a=0;a<3;a++){const int before=i==0?-1:(i-1)*R.steps;int o=max(0,floordiv(before-R.half[a],R.steps));while(window_end(R,a,o)<=before)o++;next[a]=o;}
         for(bool spent=false;i<until&&!spent;i++){
             const int lo=i==0?-1:(i-1)*R.steps,hi=i==0?0:min(i*R.steps,last);
+            // The step drawn for the loss's check in an interval the task runs through, the state after that many of its steps, and
+            // whether a read can be drawn there.
+            int drawn=-2;bool candidate=false;
+            if(R.looks!=nullptr&&i>=1&&i<=through){Rng r(R.seed,PURPOSE_CHECK,t.index,2u*(u32)i);drawn=lo+min((int)(r.uniform()*R.steps),R.steps-1);candidate=r.uniform()<R.inclusion[i-1];}
             // The interval's steps left, their windows' sums (while held) and rings.
             while(k<hi&&!spent){
+                if(k==drawn&&t.death<0){Look* L=R.looks+((size_t)slot*R.outputs+i)*2+1;if(candidate)look(W,t,lane,L);else if(lane==0)L->held=1;}
                 k++;
                 if(t.death<0){
                     SPAN_BEGIN(stepping);
@@ -2931,6 +2952,7 @@ extern "C" __global__ void __launch_bounds__(32,16) motion3d(const Run R){
             __syncwarp();
             SPAN_BEGIN(readout);
             if(i<=through&&t.death<0){
+                if(R.looks!=nullptr)look(W,t,lane,R.looks+((size_t)slot*R.outputs+i)*2);
                 record(W,t,lane,out);
                 __syncwarp();
                 for(int k=0;k<R.nlisted;k++)if(R.listed[k]==i){
@@ -3090,4 +3112,5 @@ extern "C" __global__ void layout(u32* out){
     out[11]=(u32)OFFSET(Program,hm);out[12]=(u32)OFFSET(Program,half_flow);out[13]=(u32)OFFSET(Run,listed);
     out[14]=(u32)OFFSET(State,psi);out[15]=(u32)OFFSET(State,index);
     out[16]=MOST_INTERVALS;out[17]=SLOT_RECORD;out[18]=RECORD;out[19]=WARPS;out[20]=MAXN;out[21]=MOTION;out[22]=HARMONIC;out[23]=sizeof(Fourth);out[24]=sizeof(NearUnit);out[25]=sizeof(FirstField);out[26]=MOST_FIRST;
+    out[27]=sizeof(Look);out[28]=(u32)OFFSET(Look,psi);
 }

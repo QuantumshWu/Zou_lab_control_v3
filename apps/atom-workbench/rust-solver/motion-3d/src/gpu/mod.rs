@@ -21,18 +21,21 @@
 //! wave), each launch of about `LAUNCH_MS` (well inside the display watchdog) by a cycle budget: every trajectory on
 //! from where it stands, on its own, at most `MOST_INTERVALS` past the first interval not yet summed, and only as far as its group's last output (lib.rs `simulate_to`); a warp of cheap steps
 //! does not wait for one of dear ones. The intervals every slot has passed are summed per task after the launch; the
-//! tasks' sums come back per output and are merged per group in order, as the CPU's are.
+//! tasks' sums come back per output and are merged per group in order, as the CPU's are. With the loss's check (check.rs), the
+//! kernel looks at each trajectory at every output and at the step drawn in every output interval while it is held (`Look`);
+//! the CPU makes its trace from them as lib.rs `walk` does, its reads made on the CPU where the run is checked (solve.rs).
 pub mod driver;
 pub mod program;
 pub mod ptx;
 
+use crate::check;
 use crate::control::Harmonic;
-use crate::engine::{Settings,Trajectory};
+use crate::engine::{Engine,Settings,Trajectory};
 use crate::model::Model;
 use crate::stats::{Group,Sums};
 use crate::{initial_trajectory,Complex,Initial,Outcome,Stratum,STATES,TASK};
 use driver::{Buffer,Context,DeviceInfo,Event,Function,HostWords,Module,Stream};
-use program::{Program,MAXM,MAXN,MOST_LISTED};
+use program::{Look,Program,MAXM,MAXN,MOST_LISTED};
 use rayon::prelude::*;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64,Ordering};
@@ -163,17 +166,20 @@ impl Gpu{
     /// Trajectories [first, first + count) of the run `seed` (lib.rs `simulate`): `steps` steps of the
     /// settings' dt between `outputs` output times, in groups of `group`, as tasks of at most `TASK`
     /// trajectories inside a group, (r, κ) kept at `listed`, with the control of `harmonic`; with `ends`, the g-th group's
-    /// trajectories only through the output `ends[g]` (lib.rs `simulate_to`), half a period past it, its sums counting none beyond.
+    /// trajectories only through the output `ends[g]` (lib.rs `simulate_to`), half a period past it, its sums counting none beyond;
+    /// with `check`, each trajectory's trace for the loss's check (check.rs `Trace`), its reads drawn at the kernel's looks.
     pub fn simulate(&self,program:&Program,model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],
-        harmonic:Option<&Harmonic>,ends:Option<&[usize]>)->Result<Outcome,String>{
-        self.set(program)?;
+        harmonic:Option<&Harmonic>,ends:Option<&[usize]>,check:Option<&check::Sampling>)->Result<Outcome,String>{
+        self.set(program)?;let engine=check.map(|_|Engine::new(model,settings.clone()));let mut traces=vec![];
+        // The check's intervals' largest inclusions (check.rs `Sampling::top`): the kernel writes a drawn step's state only where a read can be drawn.
+        let tops=check.map(|s|Buffer::with(&self.stream,&(1..outputs).map(|i|s.top(i)).collect::<Vec<f64>>())).transpose()?;
         let control=harmonic.map(|h|control_tables(&self.stream,h)).transpose()?;
         // The tasks in order: (their group, their first trajectory, the one after their last), as lib.rs `run`.
         let bounds=|g:u64|(first+g*group,(first+(g+1)*group).min(first+count));
         let tasks:Vec<(u64,u64,u64)>=(0..count.div_ceil(group)).flat_map(|g|{let(start,end)=bounds(g);(start..end).step_by(TASK as usize).map(move|s|(g,s,(s+TASK).min(end)))}).collect();
         let windows=Windows::new(settings,steps,outputs,listed)?;let through=|g:u64|ends.map_or(outputs-1,|e|e[g as usize]);
         let(mut groups,mut samples,mut jumps,mut beats)=(Vec::<Group>::new(),vec![vec![];listed.len()],0u64,0f64);let mut last=None;
-        for wave in tasks.chunks(self.wave(program,&windows)?){
+        for wave in tasks.chunks(self.wave(program,&windows,check.is_some())?){
             // The initial states, drawn on the CPU; each task's trajectories in its block's slots.
             let states:Vec<Option<program::State>>=wave.par_iter().flat_map_iter(|&(g,from,to)|{
                 let(start,end)=bounds(g);
@@ -182,7 +188,7 @@ impl Gpu{
             // The wave's runs of tasks of one group, merged on the device in order (lib.rs `run`).
             let mut runs:Vec<(u64,usize,usize)>=vec![];
             for(i,&(g,_,_))in wave.iter().enumerate(){match runs.last_mut(){Some(r)if r.0==g=>r.2+=1,_=>runs.push((g,i,1))}}
-            let(group_sums,kept,finished)=self.run(program,&windows,control.as_ref(),seed,&states,&wave.iter().map(|t|through(t.0) as i32).collect::<Vec<_>>(),&runs.iter().map(|r|[r.1 as i32,r.2 as i32]).collect::<Vec<_>>())?;
+            let(group_sums,kept,finished,looks)=self.run(program,&windows,control.as_ref(),seed,&states,&wave.iter().map(|t|through(t.0) as i32).collect::<Vec<_>>(),&runs.iter().map(|r|[r.1 as i32,r.2 as i32]).collect::<Vec<_>>(),tops.as_ref())?;
             for(k,&(g,i,count))in runs.iter().enumerate(){
                 let trajectories=wave[i..i+count].iter().map(|t|t.2-t.1).sum::<u64>() as f64;
                 let sums=Group{sums:(0..outputs).map(|o|sums_of(&group_sums[(k*outputs+o)*RECORD..][..RECORD],if o<=through(g){trajectories}else{0.})).collect()};
@@ -195,8 +201,20 @@ impl Gpu{
                     for(k,kept_k)in samples.iter_mut().enumerate(){let x=&kept[(slot*listed.len()+k)*7..][..7];if x[6]>0.{kept_k.push(([x[0],x[1],x[2]],[x[3],x[4],x[5]]));}}
                 }
             }
+            // The loss's check's traces in the trajectories' order (lib.rs `walk`): per output its energy where the kernel looked at it
+            // held, NaN past that; per interval it ran through its look at the step drawn there, a chance, read where its inclusion falls.
+            if let(Some(sampling),Some(engine))=(check,&engine){
+                let at:Vec<(usize,u64,usize)>=wave.iter().enumerate().flat_map(|(i,&(g,from,to))|(0..(to-from) as usize).map(move|w|(WARPS*i+w,from+w as u64,through(g)))).collect();
+                traces.par_extend(at.par_iter().map(|&(slot,index,last)|{
+                    let looks=&looks[2*outputs*slot..][..2*outputs];let held=|l:&Look|(l.held!=0).then(||l.trajectory(settings,seed,index));
+                    let mut trace=check::Trace::new(last+1);
+                    for i in 0..=last{trace.output(held(&looks[2*i]).map(|t|engine.loss_energy(&t)));}
+                    for i in 1..=last{let l=&looks[2*i+1];if l.held!=0{trace.look(engine,sampling,(l.held==2).then(||l.trajectory(settings,seed,index)).as_ref(),i,check::drawn(seed,index,i,steps).1);}}
+                    trace
+                }));
+            }
         }
-        Ok(Outcome{groups,samples,jumps,beats})
+        Ok(Outcome{groups,samples,jumps,beats,traces})
     }
 
     /// The trajectories after `steps` steps of the settings' dt on the GPU (engine.rs `Engine::step`
@@ -208,7 +226,7 @@ impl Gpu{
         let mut plain=settings.clone();plain.average=false;
         let windows=Windows::new(&plain,steps,2,&[])?;
         let states:Vec<Option<program::State>>=trajectories.iter().map(|t|Some(program::State::new(t,settings))).chain(std::iter::repeat(None)).take(trajectories.len().div_ceil(WARPS)*WARPS).collect();
-        let(_,_,finished)=self.run(program,&windows,None,seed,&states,&vec![1;states.len()/WARPS],&[])?;
+        let(_,_,finished,_)=self.run(program,&windows,None,seed,&states,&vec![1;states.len()/WARPS],&[],None)?;
         Ok(trajectories.iter().zip(&finished).map(|(t,s)|s.trajectory(settings,t.seed)).collect())
     }
 
@@ -247,9 +265,9 @@ impl Gpu{
         Ok(out[0].trajectory(settings,t.seed))
     }
 
-    /// The tasks a wave holds: as many as a quarter of the free memory takes (at most half a gigabyte).
-    fn wave(&self,program:&Program,w:&Windows)->Result<usize,String>{
-        let slot=std::mem::size_of::<program::State>()+8*w.ring_stride+56*w.listed.len()+8*program.scratch()+8*MOST_INTERVALS*SLOT_RECORD;
+    /// The tasks a wave holds: as many as a quarter of the free memory takes (at most half a gigabyte), with the loss's check's looks where `looks`.
+    fn wave(&self,program:&Program,w:&Windows,looks:bool)->Result<usize,String>{
+        let slot=std::mem::size_of::<program::State>()+8*w.ring_stride+56*w.listed.len()+8*program.scratch()+8*MOST_INTERVALS*SLOT_RECORD+if looks{2*w.outputs*std::mem::size_of::<Look>()}else{0};
         let(free,_)=self.context.memory()?;
         Ok(((free/4).min(1<<29)/(WARPS*slot+8*w.outputs*RECORD)).max(1))
     }
@@ -257,9 +275,11 @@ impl Gpu{
     /// of about LAUNCH_MS: the first a step per warp (its budget zero), each next one's budget the cycles the slowest warp's clock
     /// made in the last per millisecond of it on the device, times LAUNCH_MS. Two launches stand in the stream at a time, each
     /// reporting into its own words of host memory, so that the device does not wait for the host's turn between them. The sums per
-    /// output of each run of tasks ([first task, tasks]), the samples kept per slot, and the slots' final
-    /// states.
-    fn run(&self,program:&Program,w:&Windows,control:Option<&Buffer>,seed:u64,slots:&[Option<program::State>],through:&[i32],runs:&[[i32;2]])->Result<(Vec<f64>,Vec<f64>,Vec<program::State>),String>{
+    /// output of each run of tasks ([first task, tasks]), the samples kept per slot, the slots' final
+    /// states, and with the check's intervals' largest inclusions (`inclusion`, the kernel's `Run::inclusion`) its looks per slot (`Look`,
+    /// `Run::looks`).
+    fn run(&self,program:&Program,w:&Windows,control:Option<&Buffer>,seed:u64,slots:&[Option<program::State>],through:&[i32],runs:&[[i32;2]],inclusion:Option<&Buffer>)
+        ->Result<(Vec<f64>,Vec<f64>,Vec<program::State>,Vec<Look>),String>{
         let n=slots.len()/WARPS;
         let states:Vec<program::State>=slots.iter().map(|s|s.unwrap_or_default()).collect();
         let tasks:Vec<i32>=(0..n).flat_map(|i|{let count=slots[WARPS*i..][..WARPS].iter().filter(|s|s.is_some()).count();[through[i],count as i32,(WARPS*i) as i32]}).collect();
@@ -267,14 +287,15 @@ impl Gpu{
         let rings=Buffer::new(8*w.ring_stride*WARPS*n)?;let samples=Buffer::new(56*w.listed.len().max(1)*WARPS*n)?;
         let sums=Buffer::new(8*w.outputs*RECORD*n)?;let scratch=Buffer::new(8*program.scratch()*WARPS*n)?;let records=Buffer::new(8*MOST_INTERVALS*SLOT_RECORD*WARPS*n)?;
         let profile=Buffer::new(if self.profiled.is_some(){8*SPANS.len()*WARPS*n}else{0})?;
+        let looks=inclusion.is_some();let look_buffer=Buffer::new(if looks{std::mem::size_of::<Look>()*2*w.outputs*WARPS*n}else{0})?;
         // A launch's report per slot: its cycles, and the interval it stands in (a slot without a
         // trajectory, or past its task's last, past them all).
         let mut cycles:Vec<u64>=slots.iter().flat_map(|s|[0,if s.is_some(){0}else{u64::MAX}]).collect();
         let reports=[HostWords::new(&cycles)?,HostWords::new(&cycles)?];
-        self.stream.zero(&rings)?;self.stream.zero(&samples)?;self.stream.zero(&sums)?;self.stream.zero(&profile)?;
+        self.stream.zero(&rings)?;self.stream.zero(&samples)?;self.stream.zero(&sums)?;self.stream.zero(&profile)?;self.stream.zero(&look_buffer)?;
         let mut run=program::Run{states:state_buffer.pointer,rings:rings.pointer,samples:samples.pointer,sums:sums.pointer,scratch:scratch.pointer,tasks:task_buffer.pointer,
             profile:if self.profiled.is_some(){profile.pointer}else{0},records:records.pointer,
-            harmonic:control.map_or(0,|b|b.pointer),costs:reports[0].address(),
+            harmonic:control.map_or(0,|b|b.pointer),costs:reports[0].address(),looks:if looks{look_buffer.pointer}else{0},inclusion:inclusion.map_or(0,|b|b.pointer),
             seed,budget:0,outputs:w.outputs as i32,steps:w.steps as i32,reach:w.reach as i32,begin:0,end:0,half:w.half.map(|h|h as i32),ring:w.ring.map(|l|l as i32),
             ring_at:w.ring_at.map(|x|x as i32),ring_stride:w.ring_stride as i32,scratch_stride:program.scratch() as i32,nlisted:w.listed.len() as i32,pad:0,listed:[0;MOST_LISTED]};
         for(k,&l)in w.listed.iter().enumerate(){run.listed[k]=l as i32;}
@@ -304,11 +325,12 @@ impl Gpu{
         }
         let mut kept=vec![0f64;7*w.listed.len()*WARPS*n];self.stream.download(&samples,&mut kept)?;
         let mut finished=vec![program::State::default();WARPS*n];self.stream.download(&state_buffer,&mut finished)?;
+        let mut seen=vec![Look::default();if looks{2*w.outputs*WARPS*n}else{0}];if looks{self.stream.download(&look_buffer,&mut seen)?;}
         if let Some(spans)=&self.profiled{
             let mut counters=vec![0u64;SPANS.len()*WARPS*n];self.stream.download(&profile,&mut counters)?;
             let mut spans=spans.lock().unwrap_or_else(|e|e.into_inner());for(i,c)in counters.iter().enumerate(){spans[i%SPANS.len()]+=c;}
         }
-        Ok((merged,kept,finished))
+        Ok((merged,kept,finished,seen))
     }
 }
 
@@ -360,6 +382,13 @@ impl program::State{
         let mut psi=[Complex::ZERO;crate::model::MOST_MIXED];for(x,z)in self.psi.iter().enumerate(){psi[x]=Complex::new(z[0] as f64*scale,z[1] as f64*scale);}
         Trajectory{cluster:self.cluster as usize,psi,r:lab(self.q),kappa:lab(self.p),time:self.time,threshold:self.threshold,alive:self.death<0,
             jumps:self.jumps as u64,beats:self.beats as f64,seed,index:self.index as u64}
+    }
+}
+impl Look{
+    /// The trajectory looked at, a held state's (`State::trajectory`): its threshold and jumps, from which a read's dynamics go
+    /// on (check.rs `read`); its run's seed and its index, no beat of its own.
+    fn trajectory(&self,settings:&Settings,seed:u64,index:u64)->Trajectory{
+        program::State{q:self.q,p:self.p,time:self.time,logn:self.logn,threshold:self.threshold,psi:self.psi,cluster:self.cluster,jumps:self.jumps,death:-1,index:index as u32,..Default::default()}.trajectory(settings,seed)
     }
 }
 const _:()=assert!(MAXN==crate::model::MOST_STATES);
