@@ -72,8 +72,9 @@
 //! thermal ellipsoid at a temperature, the request's -- where the atoms start. Where they heat, they go past it: a bound for
 //! where they could go, the measurement for where they went. A pilot's T past the reach's temperature at some output, beyond its
 //! errors over the axes and outputs it looks at (`outgrown`), grows the reach to the largest T the pilot reads, at most where its
-//! ln(1/share) k_B T reaches the trap's depth (atoms past it are lost; ground.rs `OUTSIDE_REACH`), and the choice starts again there with a new pilot --
-//! the reach only grows, until a pilot stays within it. (PGC1D_BIAS_OFF heats from 30 to 144 uK in 10 ms: judged at 30 uK its
+//! ln(1/share) k_B T reaches the trap's depth (atoms past it are lost; ground.rs `OUTSIDE_REACH`), and the choice starts again there on
+//! the pilot's states, carried into the rule's candidates there as into every rung's (`carried`): a second pilot took 15-38 % of a
+//! three-state explicit model's solve (the sweep's s5107). The reach only grows. (PGC1D_BIAS_OFF heats from 30 to 144 uK in 10 ms: judged at 30 uK its
 //! F = 1 sublevels' Raman pair folded, the repump off its resonance in the tweezer's light there, and T came 30 % above the kept
 //! pair's; at 60 uK and above the rule keeps it. R5038's D2 F' = 0 fold, S = 0.34 at its 35 uK, is 1.3 at 70 uK: past Stewart's
 //! bound where the atoms go.) A pilot of few atoms reads a T only so far: where the run's own T outgrows the reach, the rule judges
@@ -826,9 +827,11 @@ enum Stop{Error(String),Gpu(String)}
 impl From<String> for Stop{fn from(error:String)->Stop{Stop::Error(error)}}
 impl Stop{fn message(self)->String{match self{Stop::Error(e)|Stop::Gpu(e)=>e}}}
 
-fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option<f64>),tally:&Tally)->Result<Solution,Stop>{run_at(request,request.temperature_uk,device,checkpoint,tally)}
-/// A solve with the rule's reach judged at `reach` (uK; module documentation, # The reach).
-fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option<f64>),tally:&Tally)->Result<Solution,Stop>{
+fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option<f64>),tally:&Tally)->Result<Solution,Stop>{run_at(request,request.temperature_uk,device,checkpoint,tally,None)}
+/// A pilot's run (module documentation, # The reach): its model's ground, its initial states, its step, its control, the states it kept with its jumps, and its groups.
+struct Pilot{ground:Ground,starts:Vec<Trajectory>,steps:usize,harmonic:Harmonic,states:Vec<Trajectory>,jumps:u64,groups:Vec<Group>}
+/// A solve with the rule's reach judged at `reach` (uK; module documentation, # The reach), the pilot of a lower reach it outgrew (`earlier`).
+fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option<f64>),tally:&Tally,earlier:Option<Pilot>)->Result<Solution,Stop>{
     let times=&request.times_us;let outputs=times.len();
     if outputs<2||times[0]!=0.{return Err(Stop::Error("A 3D motion solve needs at least two times, the first at 0".into()));}
     let interval=times[1]-times[0];
@@ -887,31 +890,40 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
             let(mut form,mut norm)=(Complex::ZERO,0.);for a in 0..n{norm+=t.psi[a].norm_sqr();for b in 0..n{form+=t.psi[a].conj()*g.hamiltonian[a*n+b]*t.psi[b];}}-2.*form.im/norm}).sum::<f64>()/pilot as f64;
         let waiting=if start_rate>0.{(1./start_rate).min(duration)}else{duration};
         c.phase=grid_phase(&c.model,&starts,&running(c.reference(),first,waiting,doppler_allowance(&c.base,&c.model),c.phase),None);(starts,waiting)};
-    let(mut starts,mut start_waiting)=begin(&mut pilot_candidate);
-    // The pilot's step (module documentation, # Time step): the bound rule's search on its own initial states from the
-    // first step, at the a-priori estimates of its model -- the largest step met there, else the search's last. With explicit states their exact steps take the populations, whose bound over-counts many
-    // times there, and bare states ring (`relaxed`; a resonant probe of 100 mW/cm²: 502 steps per us for the choice's 5): that first step, the light's pattern's.
-    let steps=if pilot_candidate.model.ground.clusters.iter().any(|x|!x.excited.is_empty()){first}else{let c=&pilot_candidate;let allowance=doppler_allowance(&c.base,&c.model);
-        let weights={let mut e=Estimate::default();start(&mut e,&c.initial);vec![regime(&e,trap.lab);outputs]};let total=Apriori::of(&c.base,&c.model);let tolerances=tolerances(&weights,&c.items.iter().map(|&m|total.at(m)).collect::<Vec<_>>()).least;
-        let binding=vec![1.;starts.len()];let probes=bound_probes(&c.model,&starts,&binding);
-        let deposits=Deposits::default();
-        let doubled=|k:usize|{let r=step_excess(&Engine::new(&c.model,running(c.reference(),k,start_waiting,allowance,c.phase)),&starts,&binding,start_waiting,&probes,period,0.,tolerances,&deposits,(FIRST_GROUPS*TASK) as f64*duration);Check{steps:k,population:r[0],loss:r[1],motion:r[2]}};
-        let mut bound=vec![];search(first,most,&[],&doubled,None,false,&mut bound,&|_,_,_,_|true);
-        bound.iter().filter(|c|c.met()).map(|c|c.steps).min().unwrap_or(bound[bound.len()-1].steps)};
-    // The pilot's atoms. A pilot that keeps none to the first output measures nothing the choice can read: a model whose own estimates lie past the targets (`Candidate::past_their_targets`)
-    // hands it to the next rung, at the same step, what the choice's check starts from; a model within them has lost its atoms by its physics.
-    let(pilot_harmonic,pilot_states,pilot_jumps,pilot_groups)=loop{
-        let harmonic=Harmonic::new(&pilot_candidate.model,&piloting(pilot_candidate.reference(),steps,start_waiting,pilot_candidate.phase),&pilot_candidate.initial,steps,outputs);
-        let(states,jumps,groups)=sample_states(&pilot_candidate.model,&piloting(pilot_candidate.reference(),steps,start_waiting,pilot_candidate.phase),&pilot_candidate.initial,seed,pilot,steps,outputs,&harmonic);
-        if states.is_empty()&&pilot_candidate.past_their_targets(){if let Some(next)=walk.next(&|_|true){pilot_candidate=next;(starts,start_waiting)=begin(&mut pilot_candidate);continue;}}
-        break(harmonic,states,jumps,groups);
+    // The pilot (module documentation, # The reach): the one a lower reach outgrew, its states carried into this model as into every rung's (`carried`); else its own run.
+    let(starts,steps,pilot_harmonic,pilot_states,pilot_jumps,pilot_groups)=match earlier{
+        Some(p)=>{let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&p.ground,&pilot_candidate.model.ground,t)).collect()};
+            (into(&p.starts),p.steps,p.harmonic,into(&p.states),p.jumps,p.groups)}
+        None=>{
+            let(mut starts,mut start_waiting)=begin(&mut pilot_candidate);
+            // The pilot's step (module documentation, # Time step): the bound rule's search on its own initial states from the
+            // first step, at the a-priori estimates of its model -- the largest step met there, else the search's last. With explicit states their exact steps take the populations, whose bound over-counts many
+            // times there, and bare states ring (`relaxed`; a resonant probe of 100 mW/cm²: 502 steps per us for the choice's 5): that first step, the light's pattern's.
+            let steps=if pilot_candidate.model.ground.clusters.iter().any(|x|!x.excited.is_empty()){first}else{let c=&pilot_candidate;let allowance=doppler_allowance(&c.base,&c.model);
+                let weights={let mut e=Estimate::default();start(&mut e,&c.initial);vec![regime(&e,trap.lab);outputs]};let total=Apriori::of(&c.base,&c.model);let tolerances=tolerances(&weights,&c.items.iter().map(|&m|total.at(m)).collect::<Vec<_>>()).least;
+                let binding=vec![1.;starts.len()];let probes=bound_probes(&c.model,&starts,&binding);
+                let deposits=Deposits::default();
+                let doubled=|k:usize|{let r=step_excess(&Engine::new(&c.model,running(c.reference(),k,start_waiting,allowance,c.phase)),&starts,&binding,start_waiting,&probes,period,0.,tolerances,&deposits,(FIRST_GROUPS*TASK) as f64*duration);Check{steps:k,population:r[0],loss:r[1],motion:r[2]}};
+                let mut bound=vec![];search(first,most,&[],&doubled,None,false,&mut bound,&|_,_,_,_|true);
+                bound.iter().filter(|c|c.met()).map(|c|c.steps).min().unwrap_or(bound[bound.len()-1].steps)};
+            // The pilot's atoms. A pilot that keeps none to the first output measures nothing the choice can read: a model whose own estimates lie past the targets (`Candidate::past_their_targets`)
+            // hands it to the next rung, at the same step, what the choice's check starts from; a model within them has lost its atoms by its physics.
+            let(pilot_harmonic,pilot_states,pilot_jumps,pilot_groups)=loop{
+                let harmonic=Harmonic::new(&pilot_candidate.model,&piloting(pilot_candidate.reference(),steps,start_waiting,pilot_candidate.phase),&pilot_candidate.initial,steps,outputs);
+                let(states,jumps,groups)=sample_states(&pilot_candidate.model,&piloting(pilot_candidate.reference(),steps,start_waiting,pilot_candidate.phase),&pilot_candidate.initial,seed,pilot,steps,outputs,&harmonic);
+                if states.is_empty()&&pilot_candidate.past_their_targets(){if let Some(next)=walk.next(&|_|true){pilot_candidate=next;(starts,start_waiting)=begin(&mut pilot_candidate);continue;}}
+                break(harmonic,states,jumps,groups);
+            };
+            (starts,steps,pilot_harmonic,pilot_states,pilot_jumps,pilot_groups)
+        }
     };
     let(trap,period)={let t=pilot_candidate.reference().0;(t,slowest_period(&t))};
     // The pilot's estimates per output (its trajectories each a group of one, with the harmonic control), a prediction of the run's (stats.rs `Estimate::predicting`).
     let pilot_estimates={let scales=Scales{hbar_over_mass:pilot_candidate.model.hbar_over_mass,frequencies:trap.lab};
         let mut e=summarize(&pilot_groups,&scales,&pilot_harmonic.mean);start(&mut e[0],&pilot_candidate.initial);for x in &mut e{x.predicting();}e};
     // The reach (module documentation, # The reach): atoms past it start the choice again where they came to.
-    if let Some(grown)=outgrown(&pilot_estimates,reach,pilot_candidate.reference().1){return run_at(request,grown,device,checkpoint,tally);}
+    if let Some(grown)=outgrown(&pilot_estimates,reach,pilot_candidate.reference().1){
+        return run_at(request,grown,device,checkpoint,tally,Some(Pilot{ground:pilot_candidate.model.ground,starts,steps,harmonic:pilot_harmonic,states:pilot_states,jumps:pilot_jumps,groups:pilot_groups}));}
     // The fold's memory (module documentation, # Ledger): per pilot atom its jumps at the outputs; the pilot's
     // initial states, where the charge starts.
     let memory=Memory::of(&pilot_states,interval,outputs);
@@ -990,7 +1002,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
         let work=fourth_work(request,&pilot_candidate,&pilot_states,&starts,&running(pilot_candidate.reference(),p.steps,pilot_waiting,doppler_allowance(&pilot_candidate.base,&pilot_candidate.model),pilot_candidate.phase),interval,pilot_waiting);
         saves(work*n*weight*((outputs-1) as f64),p.check*work/p.work,p.cost)});
     let fourth_cost=if measured&&promise{Candidate::new(request,pilot_candidate.model.ground.clone(),pilot_candidate.allowance,true).ok().map(|mut c|{c.charged(charge_of(&pilot_candidate.model,&c.model));
-        let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect()};
+        let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&pilot_candidate.model.ground,&c.model.ground,t)).collect()};
         let(states,begun)=(into(&pilot_states),into(&starts));c.phase=grid_phase(&c.model,&states,&running(c.reference(),steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase),Some((&groups,duration)));
         let costed=evaluate(&c,&states,&begun,None,&Deposits::default(),pilot_cost.as_ref().map_or(f64::INFINITY,|p|p.cost));(costed,c,states,begun)})}else{None};
     // What the choice stands at so far: the pilot's model, or its fourth order where that pays.
@@ -1021,7 +1033,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
         c.charged(charge_of(&pilot_candidate.model,&c.model));
         // Its grid on the pilot's states carried into it, bare as a jump leaves them (`grid_phase`).
         let period=slowest_period(&c.reference().0);let mut at=running(c.reference(),steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase);
-        let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect()};
+        let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&pilot_candidate.model.ground,&c.model.ground,t)).collect()};
         let(bare,begun)=(into(&pilot_states),into(&starts));
         let parts=state_work(&c.model,&bare,&begun);
         let total=Apriori::of(&booked(&c.base,pilot_beats*pilot_horizon),&c.model);let apriori:Vec<[f64;2]>=c.items.iter().map(|&m|total.at(m)).collect();
@@ -1359,7 +1371,7 @@ fn slowest_period(trap:&Trap)->f64{std::f64::consts::TAU/trap.frequencies.iter()
 /// transfer's at the T the pilot reads, all at the share of atoms it holds (`pilot`, its estimates). (R5040's atoms at 600 uK took a Doppler term of 5.2 % the choice had not seen.)
 fn measured_charge(from:&Model,to:&Model,states:&[Trajectory],starts:&[Trajectory],memory:&Memory,interval:f64,outputs:usize,pilot:&[Estimate])->Vec<Measured>{
     // Per state its charges and, as the run's atoms take them (lib.rs `walk`), the first-order Doppler term and the profiles' error.
-    let item=|t:&Trajectory|{let x=carried(from,to,t);let p=to.point(x.r,x.kappa);let(populations,folded)=to.readout(x.cluster,&p,&x.psi,x.time);let c=fold_charges(to,2.*folded);
+    let item=|t:&Trajectory|{let x=carried(&from.ground,&to.ground,t);let p=to.point(x.r,x.kappa);let(populations,folded)=to.readout(x.cluster,&p,&x.psi,x.time);let c=fold_charges(to,2.*folded);
         [c[0],c[1],to.doppler_ratio(x.kappa),to.profile_error(x.r),pair_charge(to,&populations,f64::INFINITY)]};
     // Per output the states' items: their sums, their counts, and over the outputs after t = 0 their first two moments and largest.
     let(mut sums,mut counts,mut moments,mut largest)=(vec![[0.;5];outputs],vec![0.;outputs],[[0.;5];2],[0_f64;5]);
@@ -1454,8 +1466,8 @@ pub fn by_output(states:&[Trajectory])->Vec<Vec<&Trajectory>>{
 /// A trajectory's state carried from one model into another's clusters: into the cluster of its
 /// most populated ground state, its amplitudes on that cluster's ground states and on the explicit
 /// excited states the two clusters share.
-fn carried(from:&Model,to:&Model,t:&Trajectory)->Trajectory{
-    let(f,g)=(&from.ground.clusters[t.cluster],&to.ground);let ng=f.states.len();
+fn carried(from:&Ground,to:&Ground,t:&Trajectory)->Trajectory{
+    let(f,g)=(&from.clusters[t.cluster],to);let ng=f.states.len();
     let most=(0..ng).max_by(|&a,&b|t.psi[a].norm_sqr().total_cmp(&t.psi[b].norm_sqr())).unwrap();
     let k=g.cluster[f.states[most]];let c=&g.clusters[k];
     let mut out=t.clone();out.cluster=k;out.psi=[Complex::ZERO;crate::model::MOST_MIXED];

@@ -20,7 +20,9 @@
 /// The internal states: the 32 Rb87 states of the model basis.
 pub const STATES:usize=32;
 
+/// A complex number, its real and imaginary parts in this order (`repr(C)`: model.rs keeps its tables as their pairs).
 #[derive(Clone,Copy,Debug,Default,PartialEq)]
+#[repr(C)]
 pub struct Complex{pub re:f64,pub im:f64}
 
 /// A complex `STATES` × `STATES` matrix, row-major.

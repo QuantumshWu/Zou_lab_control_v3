@@ -596,14 +596,49 @@ fn quadratic<const N:usize>(x:&[f64],psi:&[Complex])->Complex{
     s
 }
 
-/// One node of the tables: every cluster's tables there, and its bounds: the dressing's (what it leaves
-/// out, `Model::dressing`), the elimination's (`Model::resonance`) and the transient's (`Model::ringing_spread`).
-type Node=(Vec<Vec<Complex>>,[f64;3]);
+/// Whether a grid of n nodes per axis of d, refined from one of `coarse` nodes per axis, stays within the work bounds (`MOST_TABLE_BYTES`,
+/// `MOST_TABLE_NODES`) at so many complex entries a node: its nodes, and its tables with the coarse grid's, 16 bytes an entry -- all a
+/// refinement holds (`grid_tables` writes each node into its places).
+fn fits(d:u32,entries:usize,n:usize,coarse:usize,most_bytes:usize,most_nodes:usize)->bool{n.pow(d)<=most_nodes&&16*entries*(n.pow(d)+coarse.pow(d))<=most_bytes}
+/// A grid's tables in the layouts `prune` leaves (`now`) from those it read (`was`): each group found again by its carriers, beat and kind,
+/// its kept entries' S, Q and first order, its transfer, and every other table where it moved with them -- the same nodes' values, a
+/// node's entries computed alone. None where a cluster's other tables differ in size or in its fourth order's kept entries (`FourthLayout`,
+/// which reads the groups' entries: ground.rs `fourth_keeps`).
+fn regrid(was:&[Layout],now:&[Layout],first:Tables)->Option<Tables>{
+    let nodes=first.bounds.len();let mut data=Vec::with_capacity(now.len());
+    // The end of a layout's groups' S, Q and transfer, where its other tables start, up to its first order's W (`base`).
+    let end=|x:&Layout|x.groups.iter().map(|g|g.transfer+2).max().unwrap_or(x.n*x.n);
+    for((w,l),table)in was.iter().zip(now).zip(&first.data){
+        let(we,le)=(end(w),end(l));if w.base-we!=l.base-le{return None;}
+        if let(Some(a),Some(b))=(&w.fourth,&l.fourth){if a.quartic.len()!=b.quartic.len()||a.quartic.iter().zip(&b.quartic).any(|(x,y)|x.keep!=y.keep||x.nu!=y.nu){return None;}}
+        // Within a node, (from, to, length) in entries.
+        let mut moves:Vec<(usize,usize,usize)>=vec![(0,0,l.n*l.n),(we,le,l.base-le)];
+        for g in &l.groups{
+            let o=w.groups.iter().find(|o|o.absorbed==g.absorbed&&o.emitted==g.emitted&&o.residual==g.residual&&o.decay==g.decay)?;
+            if o.pairs!=g.pairs||o.first!=g.first{return None;}
+            let(co,cn)=(o.entries.len(),g.entries.len());moves.push((o.transfer,g.transfer,2));
+            for(j,e)in g.entries.iter().enumerate(){let i=o.entries.iter().position(|x|x==e)?;
+                for p in 0..g.pairs.len(){moves.push((o.s+p*co+i,g.s+p*cn+j,1));moves.push((o.q+p*co+i,g.q+p*cn+j,1));}
+                for p in 0..g.first.len(){moves.push((o.w+2*p*co+i,g.w+2*p*cn+j,1));moves.push((o.w+2*p*co+co+i,g.w+2*p*cn+cn+j,1));}}
+        }
+        let mut out=vec![0.;2*nodes*l.size];
+        for k in 0..nodes{let(a,b)=(&table[2*k*w.size..2*(k+1)*w.size],&mut out[2*k*l.size..2*(k+1)*l.size]);
+            for &(from,to,len)in &moves{b[2*to..2*(to+len)].copy_from_slice(&a[2*from..2*(from+len)]);}}
+        data.push(out);
+    }
+    Some(Tables{data,..first})
+}
+/// A table's place, f64 pairs, as the complex numbers it holds (`Complex` is `repr(C)`: re, im).
+fn complex_mut(place:&mut [f64])->&mut [Complex]{
+    // SAFETY: `Complex` is two f64 in order (`repr(C)`), of their size and alignment: 2n f64 are n of them in place.
+    unsafe{std::slice::from_raw_parts_mut(place.as_mut_ptr().cast::<Complex>(),place.len()/2)}
+}
 /// A beam's part of a ringing photon (`Model::transient_photon`): the beam, its amplitude [axis a][row] and that amplitude's gradient through the intensities [lab axis][axis a][row].
 pub type BeamPhoton=(usize,[[Complex;MOST_STATES];3],[[[Complex;MOST_STATES];3];3]);
 
 /// The tables on one grid of n nodes per focused unit: per cluster, node-major, its layout's size per
-/// node (re/im interleaved); per node its bounds (`Node`); and each bound's largest over the nodes
+/// node (re/im interleaved); per node its bounds -- the dressing's (what it leaves out, `Model::dressing`), the elimination's (`Model::resonance`) and
+/// the transient's (`Model::ringing_spread`); and each bound's largest over the nodes
 /// inside the reach (`Model::dressing`, `Model::resonance`, `Model::ringing_spread`); the work its computed
 /// nodes took, counted (linear.rs `counted`: complex multiply-adds).
 #[derive(Clone,Debug)]
@@ -800,8 +835,11 @@ impl Model{
     pub(crate) fn of_ground(request:&Request,ground:Ground,fourth:bool)->Result<Model,String>{Model::built(request,ground,fourth,MOST_TABLE_BYTES,MOST_TABLE_NODES)}
     fn built(request:&Request,ground:Ground,fourth:bool,most_bytes:usize,most_nodes:usize)->Result<Model,String>{
         let(mut model,bases)=Model::laid_out(request,ground,fourth)?;
-        model.prune(&bases)?;
-        let stake=model.stake(request);model.tabulate(&bases,most_bytes,most_nodes,stake)?;
+        // The work bound before any grid is made (`within`): the first grid, at the entries its layout holds before `prune`, and that grid
+        // again in the layouts `prune` leaves (`regrid`).
+        if !model.within(FIRST_NODES,FIRST_NODES,most_bytes,most_nodes){return Err(model.beyond());}
+        let first=model.prune(&bases)?;
+        let stake=model.stake(request);model.tabulate(&bases,first,most_bytes,most_nodes,stake)?;
         model.linear=model.layouts.iter().map(|l|(0..l.n).map(|_|Default::default()).collect()).collect();
         let reach=model.ground.temperature_uk;model.transfer_tables(reach);
         model.lindblad()?;
@@ -1117,8 +1155,8 @@ impl Model{
     /// H at the focused units' intensities s, the others at the focus.
     pub fn hamiltonian_at(&self,s:&[f64])->Dense{self.ground.hamiltonian_with(&self.unit_intensities(s))}
 
-    /// Every cluster's tables at the intensities s, and its bounds there (`Node`).
-    fn node(&self,s:&[f64],mixing:&[Vec<Vec<Complex>>])->Result<Node,String>{
+    /// Every cluster's tables at the intensities s, written into its places (`places`, one per cluster, of its layout's size, f64 pairs), and its bounds there (`Tables`).
+    fn node(&self,s:&[f64],mixing:&[Vec<Vec<Complex>>],places:&mut [&mut [f64]])->Result<[f64;3],String>{
         let g=&self.ground;let intensities=self.unit_intensities(s);let e=g.eliminate(&intensities)?;let(ne,ng)=(g.excited_states.len(),g.ground_states.len());
         // Per carrier: U^f_k (the folded basis), T_k, T2_k (ne × ng).
         let combine=|c:usize,matrices:&[Dense]|->Vec<Dense>{mixing[c].iter().map(|g_k|{let mut m=Dense::zeros(ne,ng);
@@ -1129,9 +1167,8 @@ impl Model{
         let jump=|m:&Dense|->[Dense;3]{std::array::from_fn(|a|g.emission[a].product(m))};
         let(j,j2):(Vec<Vec<[Dense;3]>>,Vec<Vec<[Dense;3]>>)=(t.iter().map(|ts|ts.iter().map(jump).collect()).collect(),t2.iter().map(|ts|ts.iter().map(jump).collect()).collect());
         let dt2:Vec<Vec<Dense>>=t2.iter().map(|ts|ts.iter().map(|m|g.decay.product(m)).collect()).collect();
-        let mut out=vec![];
         for(cluster,(cl,layout))in g.clusters.iter().zip(&self.layouts).enumerate(){
-            let(n,n0,states)=(layout.n,layout.n0,&cl.states);let mut node=vec![Complex::ZERO;layout.size];
+            let(n,n0,states)=(layout.n,layout.n0,&cl.states);let node=complex_mut(&mut *places[cluster]);node.fill(Complex::ZERO);
             // h0: the energies less the frames, the kept static couplings (their residual zero) and
             // the folded static couplings' van Vleck shift, of the ground and the explicit states.
             for x in 0..n0{node[layout.h0+x*n+x]=Complex::new(e.energies[states[x]]-cl.frames[x],0.);}
@@ -1222,13 +1259,12 @@ impl Model{
                     }
                 }
             }
-            if let Some(f)=&layout.fourth{self.fourth_node(&e,cluster,f,&u,&t,&mut node)?;}
-            out.push(node);
+            if let Some(f)=&layout.fourth{self.fourth_node(&e,cluster,f,&u,&t,node)?;}
         }
         // The elimination's excited weight per ground state, every near beam at its peak (`resonance`).
         let resonance=(0..ng).map(|b|self.carriers.iter().flat_map(|c|c.beams.iter()).map(|&l|(0..ne).map(|i|e.responses[l][(i,b)].norm_sqr()).sum::<f64>()).sum::<f64>()).fold(0.,f64::max);
         let dressing=g.dressing_bounds(&e,&intensities)?;
-        Ok((out,[dressing,resonance,g.ringing_spread(&e)]))
+        Ok([dressing,resonance,g.ringing_spread(&e)])
     }
 
     /// A cluster of ground states' fourth-order layout (`FourthLayout`), its tables from `size` on: H^(4)'s
@@ -1401,30 +1437,34 @@ impl Model{
     fn grid_point(&self,n:usize,i:usize)->[f64;MOST_FOCUSED]{
         std::array::from_fn(|f|if f<self.focused.len(){((i/n.pow(f as u32))%n) as f64/(n-1).max(1) as f64}else{0.})
     }
-    /// The tables of a grid of n nodes per focused unit: the nodes it shares with the grid of
-    /// (n + 1)/2 before it (`coarse`: every other node along each axis, at the same intensities to the
-    /// last bit) taken from that grid's tables, the others computed, `NODE_BATCH` at a time written
-    /// into the tables; and the elimination's bound over the nodes inside the reach's intensities --
-    /// each focused unit's from its smallest over the reach (less one node, the interval holding it)
-    /// to 1.
+    /// The tables of a grid of n nodes per focused unit, made whole before any node (`within` bounds them) and each node written into
+    /// its places there: the nodes it shares with the grid of (n + 1)/2 before it (`coarse`: every other node along each axis, at the
+    /// same intensities to the last bit) taken from that grid's tables, the others computed, `NODE_BATCH` at a time; and the
+    /// elimination's bound over the nodes inside the reach's intensities -- each focused unit's from its smallest over the reach (less
+    /// one node, the interval holding it) to 1. Nothing of a node is held beside its places, so that the tables are all a grid takes.
     fn grid_tables(&self,n:usize,mixing:&[Vec<Vec<Complex>>],coarse:Option<&Tables>)->Result<Tables,String>{
         let(d,m)=(self.focused.len(),n.div_ceil(2));let count=n.pow(d as u32);
-        let mut data:Vec<Vec<f64>>=self.layouts.iter().map(|l|Vec::with_capacity(2*count*l.size)).collect();let mut bounds=Vec::with_capacity(count);
-        // A node of the coarse grid it shares, or computed (with its counted work: a node is one thread's).
-        enum Made{Shared(usize),Computed(Node,f64)}let mut work=0.;
+        let mut data:Vec<Vec<f64>>=self.layouts.iter().map(|l|vec![0.;2*count*l.size]).collect();let mut bounds=vec![[0.;3];count];
+        // Per node its counted work, computed (a node is one thread's), summed in their order.
+        let mut works=vec![0.;count];
         for first in (0..count).step_by(NODE_BATCH){
-            let batch:Vec<Made>=(first..(first+NODE_BATCH).min(count)).into_par_iter().map(|i|{
-                let digits:Vec<usize>=(0..d).map(|f|(i/n.pow(f as u32))%n).collect();
+            let last=(first+NODE_BATCH).min(count);
+            // The batch's nodes, each with its places in every cluster's table.
+            let mut places:Vec<Vec<&mut [f64]>>=(first..last).map(|_|Vec::with_capacity(self.layouts.len())).collect();
+            for(table,layout)in data.iter_mut().zip(&self.layouts){
+                for(place,node)in table[2*first*layout.size..2*last*layout.size].chunks_mut(2*layout.size).zip(places.iter_mut()){node.push(place);}
+            }
+            places.into_par_iter().zip(bounds[first..last].par_iter_mut()).zip(works[first..last].par_iter_mut()).enumerate().try_for_each(|(j,((mut node,bound),work))|{
+                let i=first+j;let digits:Vec<usize>=(0..d).map(|f|(i/n.pow(f as u32))%n).collect();
                 match coarse{
-                    Some(_)if digits.iter().all(|x|x%2==0)=>Ok(Made::Shared(digits.iter().enumerate().map(|(f,x)|x/2*m.pow(f as u32)).sum())),
-                    _=>{let before=crate::linear::counted();self.node(&self.grid_point(n,i)[..d],mixing).map(|x|Made::Computed(x,crate::linear::counted()-before))}
+                    Some(c)if digits.iter().all(|x|x%2==0)=>{let k:usize=digits.iter().enumerate().map(|(f,x)|x/2*m.pow(f as u32)).sum();
+                        for((place,table),layout)in node.iter_mut().zip(&c.data).zip(&self.layouts){place.copy_from_slice(&table[2*k*layout.size..2*(k+1)*layout.size]);}*bound=c.bounds[k];}
+                    _=>{let before=crate::linear::counted();*bound=self.node(&self.grid_point(n,i)[..d],mixing,&mut node)?;*work=crate::linear::counted()-before;}
                 }
-            }).collect::<Result<_,_>>()?;
-            for made in batch{match made{
-                Made::Shared(j)=>{let c=coarse.unwrap();for(k,l)in self.layouts.iter().enumerate(){data[k].extend_from_slice(&c.data[k][2*j*l.size..2*(j+1)*l.size]);}bounds.push(c.bounds[j]);}
-                Made::Computed(node,w)=>{for(k,t)in node.0.iter().enumerate(){data[k].extend(t.iter().flat_map(|z|[z.re,z.im]));}bounds.push(node.1);work+=w;}
-            }}
+                Ok::<(),String>(())
+            })?;
         }
+        let work=works.iter().sum();
         let inside=self.inside(n);
         let reach=std::array::from_fn(|k|inside.iter().map(|&i|bounds[i][k]).fold(0.,f64::max));
         Ok(Tables{nodes:n,data,bounds,reach,work})
@@ -1487,7 +1527,8 @@ impl Model{
     /// The groups' entries that hold nothing out of the clusters and the layouts: those whose term, its fields at their peak times its S or Q over the first grid, stays within the round-off of the
     /// cluster's largest. What the dressed responses leave between channels a selection rule keeps apart is no term, whatever its beat: 1e-23 rad/us on a resonant probe's rung of 3+10 against its 8, 24 of its
     /// 36 groups, all computed in every generator call, as is the decay's between folded photons a class joins (`Ground`'s rule keeps a pair by its undressed size; `Model::lindblad` holds a cluster's decay to its jumps at this round-off).
-    fn prune(&mut self,mixing:&[Vec<Vec<Complex>>])->Result<(),String>{
+    /// The first grid it reads is the tables' first, in the layouts it leaves (`regrid`; none where a cluster's other tables moved, `tabulate` makes it again).
+    fn prune(&mut self,mixing:&[Vec<Vec<Complex>>])->Result<Option<Tables>,String>{
         let first=self.grid_tables(FIRST_NODES,mixing,None)?;let nodes=first.nodes.pow(self.focused.len() as u32);
         let peak:Vec<[f64;MOST_RANK]>=self.carriers.iter().map(|c|std::array::from_fn(|k|c.coefficients.iter().map(|x|x[k].abs()).sum())).collect();
         for(k,layout)in self.layouts.iter().enumerate(){
@@ -1505,8 +1546,8 @@ impl Model{
             }}
             cl.groups.retain(|g|!g.entries.is_empty());
         }
-        self.layouts=self.layouts(mixing);self.fourth_dropped=self.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();self.effective_dropped=self.layouts.iter().map(|l|l.effective_dropped).sum();
-        Ok(())
+        let now=self.layouts(mixing);let was=std::mem::replace(&mut self.layouts,now);self.fourth_dropped=self.layouts.iter().filter_map(|l|l.fourth.as_ref()).map(|f|f.dropped).sum();self.effective_dropped=self.layouts.iter().map(|l|l.effective_dropped).sum();
+        Ok(regrid(&was,&self.layouts,first))
     }
     /// The tables on grids of FIRST_NODES, then doubled (each grid's nodes computed once), the finer grid
     /// kept with the coarser one's measured error against it (`interpolation_error`, an upper estimate of
@@ -1521,14 +1562,14 @@ impl Model{
     /// A grid beyond the work bounds (`MOST_TABLE_BYTES`, `MOST_TABLE_NODES`) is not made
     /// whatever it saves (`table_limit`). Its error is booked (the ledger's), the room it takes from the
     /// statistics like any estimate's (solve.rs).
-    fn tabulate(&mut self,mixing:&[Vec<Vec<Complex>>],most_bytes:usize,most_nodes:usize,stake:f64)->Result<(),String>{
+    /// `first`: the first grid, made already (`prune`).
+    fn tabulate(&mut self,mixing:&[Vec<Vec<Complex>>],first:Option<Tables>,most_bytes:usize,most_nodes:usize,stake:f64)->Result<(),String>{
         let d=self.focused.len() as u32;
-        let entries:usize=self.layouts.iter().map(|l|l.size).sum();
         // The first order's tables are not measured (`interpolation_error`).
         let measured:usize=self.layouts.iter().map(|l|l.size-l.groups.iter().map(|g|2*g.first.len()*g.entries.len()).sum::<usize>()).sum();
-        let within=|n:usize,coarse:usize|n.pow(d)<=most_nodes&&16*entries*(n.pow(d)+coarse.pow(d))<=most_bytes;
-        if !within(2*FIRST_NODES-1,FIRST_NODES){return Err(format!("The elimination's tables take {entries} complex entries per node: beyond the work bounds"));}
-        self.tables=self.grid_tables(FIRST_NODES,mixing,None)?;self.dressing=self.tables.reach[0];
+        let entries=self.entries();let within=|n:usize,coarse:usize|fits(d,entries,n,coarse,most_bytes,most_nodes);
+        if !within(2*FIRST_NODES-1,FIRST_NODES){return Err(self.beyond());}
+        self.tables=match first{Some(first)=>first,None=>self.grid_tables(FIRST_NODES,mixing,None)?};self.dressing=self.tables.reach[0];
         // The counted work per computed node, and the errors measured so far.
         let(mut per_node,mut errors)=(self.tables.work/FIRST_NODES.pow(d) as f64,vec![]);
         loop{
@@ -1550,6 +1591,12 @@ impl Model{
         self.resonance=self.tables.reach[1];self.ringing_spread=self.tables.reach[2];
         Ok(())
     }
+    /// A node's complex entries, every cluster's tables.
+    fn entries(&self)->usize{self.layouts.iter().map(|l|l.size).sum()}
+    /// Whether a grid of n nodes per focused unit refined from one of `coarse` stays within the work bounds (`fits`), at the layouts' entries.
+    fn within(&self,n:usize,coarse:usize,most_bytes:usize,most_nodes:usize)->bool{fits(self.focused.len() as u32,self.entries(),n,coarse,most_bytes,most_nodes)}
+    /// Why tables beyond the work bounds are not made.
+    fn beyond(&self)->String{format!("The elimination's tables take {} complex entries per node: beyond the work bounds",self.entries())}
 
     /// The first order's tables from W^S and W^Q on the settled grid (module documentation, # The photons and the Doppler term): per group and
     /// node λ^S and λ^Q, their least squares on Q over the group's pairs and entries, into their places; and what they leave of each pair
