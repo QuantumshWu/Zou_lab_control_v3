@@ -369,8 +369,7 @@ pub enum Device{Cpu,Gpu}
 pub const TEMPERATURE_TARGET:f64=0.10;
 pub const POPULATION_TARGET:f64=0.05;
 /// Statistics are run until their errors at this confidence lie within the targets: the normal's two-sided 95.4 % at this
-/// many standard errors, an estimate's interval there Student's t at the groups that read it and Hall's shift for their skew
-/// (stats.rs `Spread`).
+/// many standard errors, an estimate's error there Student's t at the groups that read it (stats.rs `Spread`).
 pub const CONFIDENCE:f64=2.;
 /// The integrator's order p (engine.rs: the flow, the kick and the internal state's half steps in Strang's
 /// splitting): a step's bias over the run and its doubling's difference go as dt^p, Richardson's 2^p/(2^p − 1)
@@ -458,7 +457,7 @@ fn classical(e:&Estimate,frequencies:[f64;3])->bool{(0..3).all(|a|KT_PER_UK*e.te
 /// axis's margin k_B T/(CLASSICAL ħω).
 fn regime(e:&Estimate,frequencies:[f64;3])->f64{weight_at(e.temperature,frequencies)}
 /// T's weight at its upper confidence bound, CONFIDENCE standard errors per axis above T, for the step's tolerance (module documentation, # Regime).
-fn ceiling(e:&Estimate,frequencies:[f64;3])->f64{weight_at(std::array::from_fn(|a|e.temperature[a]+e.temperature_error[a].above(CONFIDENCE)),frequencies)}
+fn ceiling(e:&Estimate,frequencies:[f64;3])->f64{weight_at(std::array::from_fn(|a|e.temperature[a]+e.temperature_error[a].at(CONFIDENCE)),frequencies)}
 fn weight_at(temperature:[f64;3],frequencies:[f64;3])->f64{
     (0..3).filter(|&a|frequencies[a]>0.).map(|a|(KT_PER_UK*temperature[a]/(CLASSICAL*frequencies[a])).max(0.)).fold(1_f64,f64::min).powi(2)
 }
@@ -484,7 +483,7 @@ fn held_atoms(e:&Estimate)->f64{e.trajectories*(1.-e.loss).max(0.)}
 /// largest T they read, at most the trap's (`reach_cap`); none where they stay within it, or the reach is there already.
 fn outgrown(estimates:&[Estimate],reach:f64,depth:f64)->Option<f64>{
     let read:Vec<&Estimate>=estimates.iter().skip(1).filter(|e|reads_temperature(e)).collect();let z=looks_confidence((3*read.len()).max(1) as f64);
-    if !read.iter().any(|e|(0..3).any(|a|e.temperature[a]-e.temperature_error[a].below(z)>reach)){return None;}
+    if !read.iter().any(|e|(0..3).any(|a|e.temperature[a]-e.temperature_error[a].at(z)>reach)){return None;}
     let top=read.iter().flat_map(|e|e.temperature).fold(reach,f64::max).min(reach_cap(depth));
     (top>reach).then_some(top)
 }
@@ -504,10 +503,9 @@ fn last_holding(outputs:usize,holds:&dyn Fn(usize)->bool)->Vec<usize>{(0..output
 /// error over its neighbours as far as they agree (`steady`).
 fn statistics_of(estimates:&[Estimate],frequencies:[f64;3])->Vec<Statistic>{
     let mut all:Vec<Statistic>=estimates.iter().map(|e|statistics(e,frequencies)).collect();
-    // The groups each statistic's variance is read on (stats.rs `Spread::groups`): every reaching one the rows' and the loss's, those holding an atom T's.
-    let(counts,groups):(Vec<f64>,Vec<f64>)=estimates.iter().map(|e|(e.trajectories,e.groups)).unzip();let holding:Vec<f64>=estimates.iter().map(|e|e.temperature_error[0].groups).collect();
+    let(counts,groups):(Vec<f64>,Vec<f64>)=estimates.iter().map(|e|(e.trajectories,e.groups)).unzip();
     let population=steady(&all.iter().map(|s|s.population).collect::<Vec<f64>>(),&counts,&groups);
-    let temperature=steady(&all.iter().map(|s|s.temperature).collect::<Vec<f64>>(),&counts,&holding);
+    let temperature=steady(&all.iter().map(|s|s.temperature).collect::<Vec<f64>>(),&counts,&groups);
     for(i,s)in all.iter_mut().enumerate(){s.population=population[i];s.temperature=temperature[i];}
     all
 }
@@ -852,9 +850,9 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
         break(harmonic,states,jumps,groups);
     };
     let(trap,period)={let t=pilot_candidate.reference().0;(t,slowest_period(&t))};
-    // The pilot's estimates per output (its trajectories each a group of one, with the harmonic control).
+    // The pilot's estimates per output (its trajectories each a group of one, with the harmonic control), a prediction of the run's (stats.rs `Estimate::predicting`).
     let pilot_estimates={let scales=Scales{hbar_over_mass:pilot_candidate.model.hbar_over_mass,frequencies:trap.lab};
-        let mut e=summarize(&pilot_groups,&scales,&pilot_harmonic.mean);start(&mut e[0],&pilot_candidate.initial);e};
+        let mut e=summarize(&pilot_groups,&scales,&pilot_harmonic.mean);start(&mut e[0],&pilot_candidate.initial);for x in &mut e{x.predicting();}e};
     // The reach (module documentation, # The reach): atoms past it start the choice again where they came to.
     if let Some(grown)=outgrown(&pilot_estimates,reach,pilot_candidate.reference().1){return run_at(request,grown,device,checkpoint);}
     // The fold's memory (module documentation, # Ledger): per pilot atom its jumps at the outputs; the pilot's
@@ -1058,7 +1056,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     let harmonic=Harmonic::new(&model,&settings,&initial,steps,outputs);
     // The need the pilot predicts per output and target, the populations' and T's (its trajectories each a group, with the harmonic control).
     let pilot_needs:Vec<[f64;2]>={
-        let mut e=summarize(&pilot_groups,&scales,&pilot_harmonic.mean);start(&mut e[0],&initial);
+        let mut e=summarize(&pilot_groups,&scales,&pilot_harmonic.mean);start(&mut e[0],&initial);for x in &mut e{x.predicting();}
         output_ratios(&records(&model,&booked(&base,pilot_beats*horizon),&e,bias,trap.lab,&memory,reference.1)).iter().map(|r|r.map(|x|(pilot as f64*x*x).min(MOST_TRAJECTORIES as f64))).collect()
     };
     // The first batch, each group as far as the reach wants it (module documentation, # Batches): on the CPU FIRST_GROUPS groups, at most the pilot's need -- another batch costs a tail --;
@@ -1435,7 +1433,7 @@ fn kept(candidates:&[Check],cost:&dyn Fn(&Check)->f64,error:f64)->Option<Check>{
 /// regime's), so twice that statistic's relative error, its jackknife over the groups. Zero where the groups left out read no spread (`reads_spread`) or no
 /// statistic stands.
 fn need_error(groups:&[Group],scales:&Scales,means:&[[f64;3]],initial:&Initial,frequencies:[f64;3])->f64{
-    let statistic=|groups:&[&Group]|->f64{let mut e=summarize(groups,scales,means);start(&mut e[0],initial);
+    let statistic=|groups:&[&Group]|->f64{let mut e=summarize(groups,scales,means);start(&mut e[0],initial);for x in &mut e{x.predicting();}
         statistics_of(&e,frequencies).iter().skip(1).map(|s|(s.population/POPULATION_TARGET).max(s.weight*s.temperature/TEMPERATURE_TARGET)).fold(0.,f64::max)};
     let n=groups.len();if !reads_spread((n as f64)-1.){return 0.;}
     let all=statistic(&groups.iter().collect::<Vec<&Group>>());if !(all>0.){return 0.;}
@@ -2105,8 +2103,8 @@ mod tests{
         let room=room(TEMPERATURE_TARGET,BIAS_SHARE*TEMPERATURE_TARGET);
         for held in 2..=6{let x=f64::from(held);let mut few=Estimate::default();few.trajectories=80.;few.loss=1.-x/80.;few.temperature=[10.;3];few.temperature_error=[spread(10.*(2./x).sqrt());3];assert!(at(&few)<room,"{held}: {}",at(&few));}
         // Read on 16 groups, its error takes Student's t at 15 (stats.rs `Spread`); held by one group, its spread unread, it asks nothing, as none or one atom.
-        e.loss=0.;e.temperature_error=[Spread{error:1.,groups:16.,skew:0.};3];assert!((at(&e)-crate::stats::student(CONFIDENCE,15.)*0.1).abs()<1e-15,"{}",at(&e));
-        e.temperature_error=[Spread{error:f64::INFINITY,groups:1.,skew:0.};3];assert_eq!(at(&e),0.);
+        e.loss=0.;e.temperature_error=[Spread{error:1.,groups:16.};3];assert!((at(&e)-crate::stats::student(CONFIDENCE,15.)*0.1).abs()<1e-15,"{}",at(&e));
+        e.temperature_error=[Spread{error:f64::INFINITY,groups:1.};3];assert_eq!(at(&e),0.);
     }
     /// An output's model items weigh at the share of atoms its statistics are read on (`held_share`): a quarter of the atoms held, a quarter of
     /// the a-priori total and of the statistics alike, so that an output 75 % lost whose fold charges 8 % among its held atoms totals 2 % of what

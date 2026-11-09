@@ -66,31 +66,27 @@ impl Group{
     }
 }
 
-/// A quantity's statistical error, from its jackknife over the groups behind an estimate (`summarize`): its standard error,
+/// A quantity's statistical error, from its jackknife over the groups behind an estimate (`summarize`): its standard error and
 /// the groups that read it -- every group that reaches the output for the loss and the rows as shown, those holding an atom
-/// there for the held atoms' quantities -- and the skew of the group values, their third central moment over their second
-/// per group (`skew`). An error at z standard errors reads it through one definition: the interval's distances below and
-/// above the value (`below`, `above`), the larger of them (`at`).
+/// there for the held atoms' quantities. Its error at a confidence of z normal standard errors is one definition (`at`): the
+/// quantile of Student's t at one degree of freedom fewer than those groups, at the normal's tail beyond z (`student`) -- the
+/// jackknife's t interval (Tukey's), the batch means' t of their batches less one -- times the standard error; unknown on
+/// fewer than two groups. (Over 16 gate scenes, sets of the solve's size and of 16 groups against the rest: T outside two of
+/// its standard errors at 5.6 % and 7.8 % of the outputs where 4.55 % is the normal's, at 4.7 % and 5.4 % with this quantile;
+/// R5040's few held groups 10.3 % and 5.0 %. Satterthwaite's degrees of freedom from the fourth moment covered less, 7.3 % there,
+/// and Hall's shift for the skew of the group values covered no more of each quantity for 20 % more trajectories.)
 #[derive(Clone,Copy,Debug,PartialEq)]
-pub struct Spread{pub error:f64,pub groups:f64,pub skew:f64}
+pub struct Spread{pub error:f64,pub groups:f64}
 impl Default for Spread{fn default()->Spread{Spread::EXACT}}
 impl Spread{
     /// No error: a value known exactly (t = 0, the request's initial state).
-    pub const EXACT:Spread=Spread{error:0.,groups:f64::INFINITY,skew:0.};
+    pub const EXACT:Spread=Spread{error:0.,groups:f64::INFINITY};
     /// Too few groups to read a spread on (`reads_spread`): its error unknown.
-    fn unread(groups:f64)->Spread{Spread{error:f64::INFINITY,groups,skew:0.}}
-    /// Its quantile at z: Student's t at one degree of freedom fewer than the groups that read it, at the normal's tail beyond z
-    /// (`student`) -- the jackknife's t interval (Tukey's), the batch means' t of their batches less one --; z on unlimited groups.
-    fn quantile(&self,z:f64)->f64{if self.groups==f64::INFINITY{z}else{student(z,self.groups-1.)}}
-    /// Hall's shift of its interval at z for the skew of the group values, (2z² + 1)/6 of it: the mean of skewed values lies short of
-    /// its long tail more often than its standard error says, the studentized interval's both ends moved toward that tail.
-    fn shift(&self,z:f64)->f64{(2.*z*z+1.)/6.*self.skew}
-    /// The distances of its interval at z standard errors below the value and above it, [v + d − q SE, v + d + q SE] (q its
-    /// `quantile`, d its `shift`); unknown on fewer than two groups.
-    pub fn below(&self,z:f64)->f64{if reads_spread(self.groups){self.quantile(z)*self.error-self.shift(z)}else{f64::INFINITY}}
-    pub fn above(&self,z:f64)->f64{if reads_spread(self.groups){self.quantile(z)*self.error+self.shift(z)}else{f64::INFINITY}}
-    /// Its error at z standard errors: the larger distance.
-    pub fn at(&self,z:f64)->f64{self.below(z).max(self.above(z))}
+    fn unread(groups:f64)->Spread{Spread{error:f64::INFINITY,groups}}
+    /// Its error at z: Student's t at its groups less one there times its standard error, z on unlimited groups; unknown on fewer than two.
+    pub fn at(&self,z:f64)->f64{
+        if self.groups==f64::INFINITY{z*self.error}else if reads_spread(self.groups){student(z,self.groups-1.)*self.error}else{f64::INFINITY}
+    }
 }
 
 /// Student's t at ν degrees of freedom (a whole number, at least one) at the normal's two-sided tail beyond z: the q with
@@ -176,6 +172,18 @@ pub struct Estimate{
 #[derive(Clone,Copy,Debug)]
 pub struct Scales{pub hbar_over_mass:f64,pub frequencies:[f64;3]}
 
+impl Estimate{
+    /// Its errors as a prediction of a run's (solve.rs, a pilot's estimates): read at the run's groups, unlimited beside these,
+    /// so at the normal's quantile -- the run reads its own (`Spread::at`), and what a pilot's few groups leave open of a prediction
+    /// is the prediction's own error (solve.rs `need_error`). (Read at the pilot's: a T of three held pilot atoms took Student's t at
+    /// two degrees of freedom, 4.5 standard errors, its prediction for the run five times the trajectories, a choice of step or fold
+    /// moved by it.)
+    pub fn predicting(&mut self){
+        for s in self.temperature_error.iter_mut().chain(self.occupation_error.iter_mut()).chain(self.population_errors.iter_mut()).chain(self.shown_errors.iter_mut())
+            .chain([&mut self.temperature_total_error,&mut self.loss_error]){s.groups=f64::INFINITY;}
+    }
+}
+
 /// The harmonic control's correction at one output: its exact means per lab axis (control.rs) and β, the regression of the
 /// held atoms' κ² per lab axis on the control over every trajectory so far.
 pub struct Correction{pub means:[f64;3],pub harmonic:[f64;3]}
@@ -221,19 +229,8 @@ pub(crate) fn reads_spread(samples:f64)->bool{samples>=2.}
 pub(crate) fn variance_noise(groups:f64)->f64{(2./(groups-1.).max(1.)).sqrt()}
 /// The largest of n noisy looks at one quantity, in standard errors: z = √(2 ln n), what a read that takes their largest must allow for.
 pub(crate) fn largest_look(looks:f64)->f64{(2.*looks.ln()).sqrt()}
-/// A value's spread over the groups left out (`Spread`), `groups` of them reading it: the jackknife's standard error and the skew;
-/// unknown where fewer than two groups read it (`reads_spread`) -- a held atoms' quantity whose atoms one group holds.
-fn spread(leave:&[Moments],f:impl Fn(&Moments)->f64,groups:f64)->Spread{
-    if !reads_spread(groups){return Spread::unread(groups);}
-    Spread{error:crate::read::jackknife_error(leave.iter().map(&f)),groups,skew:skew(leave.iter().map(&f))}
-}
-/// The skew of a jackknife's group values (`Spread::skew`), of the values left out: a group's value moves the estimate against
-/// its own leave-one-out, so with d a value left out less their mean, −(g − 1) Σd³/(g Σd²); none without a spread.
-fn skew(leave:impl ExactSizeIterator<Item=f64>+Clone)->f64{
-    let n=leave.len() as f64;let mean=leave.clone().sum::<f64>()/n;
-    let(two,three)=leave.fold((0.,0.),|(a,b),x|{let d=x-mean;(a+d*d,b+d*d*d)});
-    if two>0.{-(n-1.)*three/(n*two)}else{0.}
-}
+/// A value's spread over the groups left out (`Spread`), `groups` of them reading it: the jackknife's standard error.
+fn spread(leave:&[Moments],f:impl Fn(&Moments)->f64,groups:f64)->Spread{Spread{error:crate::read::jackknife_error(leave.iter().map(&f)),groups}}
 
 /// The pooled estimates at every output time, with jackknife errors over the groups that reach it (a batch's
 /// trajectories run only as far as the outputs need them, solve.rs # Batches), the
@@ -357,21 +354,18 @@ mod tests{
         assert_eq!(skipped[0].populations[0].value,0.);
     }
 
-    /// A spread reads its groups and their skew off the jackknife: a plain mean of five groups of one atom, one of them bright,
-    /// 0 0 0 0 1 -- its standard error √(Σ(x − x̄)²/(g(g − 1))) = 0.2 and the third central moment over the second per group,
-    /// 0.096/(0.16·5) = 0.12, positive (the bright group pulls the mean up) --; the loss read on every group, the held atoms'
-    /// quantities on those holding one.
+    /// A spread reads its groups off the jackknife: a plain mean of five groups of one atom, 0 0 0 0 1, its standard error
+    /// √(Σ(x − x̄)²/(g(g − 1))) = 0.2 and its error at 2 Student's t at four degrees of freedom times that; the loss read on every
+    /// group, the held atoms' quantities on those holding one.
     #[test]
-    fn a_spread_reads_its_groups_and_skew(){
+    fn a_spread_reads_its_groups(){
         use super::*;
         let scales=Scales{hbar_over_mass:1.,frequencies:[1.;3]};
         let mut groups:Vec<Group>=[0.,0.,0.,0.,1.].into_iter().map(|x|{let mut g=Group::new(1,1);let mut population=[0.;STATES];population[0]=x;
             g.add(0,Some(&Atom{motion:[[x,1.+x*x];3],populations:&population,folded:0.,profile:0.,doppler:0.}),[0.;3]);g}).collect();
         let e=&summarize(&groups,&scales,&[])[0];let p=e.population_errors[0];
-        assert!((p.error-0.2).abs()<1e-15&&(p.skew-0.12).abs()<1e-15,"{p:?}");
-        // Its interval at 2: t at four degrees of freedom, moved up by (2·4 + 1)/6 of the skew toward the bright group.
-        let(q,d)=(student(2.,4.),1.5*0.12);assert!((p.above(2.)-(q*0.2+d)).abs()<1e-14&&(p.below(2.)-(q*0.2-d)).abs()<1e-14&&p.at(2.)==p.above(2.));
-        assert_eq!(Spread::EXACT.at(2.),0.);
+        assert!((p.error-0.2).abs()<1e-15,"{p:?}");assert_eq!(p.at(2.),student(2.,4.)*p.error);
+        assert_eq!(Spread::EXACT.at(2.),0.);assert_eq!(Spread{error:0.,groups:1.}.at(2.),f64::INFINITY);
         let mut lost=Group::new(1,1);lost.add(0,None,[0.;3]);groups.push(lost);
         let e=&summarize(&groups,&scales,&[])[0];
         assert_eq!((e.population_errors[0].groups,e.temperature_error[0].groups,e.shown_errors[0].groups,e.loss_error.groups),(5.,5.,6.,6.));
@@ -399,7 +393,7 @@ mod tests{
             g.add(0,held.then_some(&Atom{motion:[[0.,1.];3],populations:&population,folded:0.,profile:0.,doppler:0.}),[0.;3]);g}).collect();
         let e=&summarize(&groups,&scales,&[])[0];
         assert_eq!(e.population_errors[0].error,0.);assert!(e.loss_error.error>0.1);
-        assert!((e.shown_errors[0].error-e.loss_error.error).abs()<1e-15&&(e.shown_errors[0].skew+e.loss_error.skew).abs()<1e-15,"{:?} {:?}",e.shown_errors[0],e.loss_error);
+        assert!((e.shown_errors[0].error-e.loss_error.error).abs()<1e-15,"{:?} {:?}",e.shown_errors[0],e.loss_error);
     }
 
     use super::*;
