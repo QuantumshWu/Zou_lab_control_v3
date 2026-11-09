@@ -74,7 +74,28 @@ pub struct Trap {
     pub axes: [[f64; 3]; 3],
     /// The angular frequencies along them (rad/µs): ω_i = √(λ_i ħ/m), λ_i > 0 the Hessian's eigenvalues (rad/µs/µm²).
     pub frequencies: [f64; 3],
+    /// The angular frequencies along the lab axes x, y, z (rad/µs): √(∂²V/∂x_a² ħ/m) at the centre, the curvature along each
+    /// lab axis (the T windows' and n̄'s periods, the classical flag).
+    pub lab: [f64; 3],
 }
+
+/// A proven envelope of the prepared potential (the initial ensemble's exact rejection sampling): with the trap light's
+/// static form a†Q_b a in its beams' amplitudes a_l (far.rs: V_prep,b = Σ_l'l a_l'* a_l [P_l'l]_bb), −V_prep(r; p) ≤
+/// Σ_l'l |Q_l'l| √(A_l'(r) A_l(r)) ≤ (Σ_l'l |Q_l'l|) max_l A_l(r), since |a†Qa| ≤ Σ|Q_l'l||a_l'||a_l| and a paraxial beam's
+/// |a_l(r)|² ≤ A_l(r) = 1/(1 + u_l(r)), u_l = 2ρ²/w₀² + ζ²/z_R² (|a|² = e^{−t/(1+s)}/(1 + s), s = ζ²/z_R², t = 2ρ²/w₀², and
+/// e^{−x} ≤ 1/(1 + x) give |a|² ≤ 1/(1 + s + t); a plane wave's A = 1).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Envelope {
+    /// The trap light's beams (indices into the request's beams).
+    pub beams: Vec<usize>,
+    /// |Q_l'l| (rad/µs), row-major over `beams`.
+    pub weights: Vec<f64>,
+}
+
+/// The model's counted work at trajectory states (SPEC §5.1, counted by algorithm, not calibrated): the assembly's complex
+/// multiply-adds per call, and what the propagation's count (step's) takes, the cluster's dimension and its parts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Work { pub assembly: f64, pub states: f64, pub parts: f64 }
 
 /// The atoms' reach (SPEC §1.8): the sublevel set {r : V_prep(r) − V_min ≤ ln(1/s) k_B T_r} of the prepared potential, with the
 /// momenta of that kinetic energy. Its extrema are provable bounds: interval subdivision of `cell` with Lipschitz remainders.
@@ -143,11 +164,6 @@ pub struct UnitError {
     pub temperature: f64,
 }
 
-/// The counted work of a unit kept and folded (SPEC §5.1: the multiply-adds the engine's algorithms count, per µs of one
-/// trajectory at the samples' pace): kept − folded is the price of keeping it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct UnitWork { pub kept: f64, pub folded: f64 }
-
 /// A trajectory state the units' errors are measured at (the solve's trial states).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sample { pub cluster: usize, pub at: Point, pub psi: Vec<C64> }
@@ -160,10 +176,12 @@ pub struct Cluster {
     pub states: Vec<usize>,
     /// How many of them are ground states.
     pub ground: usize,
-    /// Each state's frame θ_s, exactly: its amplitude x_s = e^{iθ_s t} ψ_s rotates at E_s − θ_s in the generator.
+    /// Each state's frame θ_s, exactly: ψ_s = e^{−iθ_s t} x_s, so that x_s holds E_s − θ_s on the diagonal and a term a ← b of
+    /// beat Ω (∝ e^{iΩt}) is at Ω + θ_a − θ_b.
     pub frames: Vec<Beat>,
-    /// Each state's Doppler frame K_s (1/µm): on a path r_h + v(t − t_m) the state is x_s e^{iK_s·v(t − t_m)}, a term a ← b of
-    /// wave vector q at q − (K_a − K_b). Exact where every pair of its states holds one wave vector; the rest are path beats.
+    /// Each state's Doppler frame K_s (1/µm): on a path r_h + v(t − t_m) the state is ψ_s = e^{iK_s·v(t − t_m)} x_s, so that x_s
+    /// holds K_s·v on the diagonal and a term a ← b of wave vector q is at q − (K_a − K_b). Exact where every pair of its states
+    /// holds one wave vector; the rest are path beats.
     pub waves: Vec<[f64; 3]>,
 }
 
@@ -268,8 +286,15 @@ impl Model {
     /// is made, mapped to the outputs (SPEC §1.5).
     pub fn errors(&self, units: &[Unit], samples: &[Sample]) -> Vec<Vec<UnitError>> { let _ = (units, samples); todo!() }
 
-    /// Each unit's counted work kept and folded at the samples' pace.
-    pub fn work(&self, units: &[Unit], samples: &[Sample]) -> Vec<UnitWork> { let _ = (units, samples); todo!() }
+    /// The counted work at trajectory states (means over the samples): a unit's price is the difference of this between the
+    /// model that keeps it and the one that folds it.
+    pub fn work(&self, samples: &[Sample]) -> Work { let _ = samples; todo!() }
+
+    /// The prepared potential's proven envelope for ground populations p (`Envelope`).
+    pub fn envelope(&self, p: &[f64; GROUND]) -> Envelope { let _ = p; todo!() }
+
+    /// The model in words (Chinese, for the result's method text): its clusters, explicit excited states and what is folded.
+    pub fn describe(&self) -> String { todo!() }
 
     /// The clusters.
     pub fn clusters(&self) -> &[Cluster] { todo!() }
@@ -294,6 +319,13 @@ impl Model {
 
     /// A frequency's value (rad/µs).
     pub fn omega(&self, f: &Beat) -> f64 { let _ = f; todo!() }
+}
+
+impl Envelope {
+    /// Σ_l'l |Q_l'l| √(A_l'(r) A_l(r)) at r: the proven bound of −V_prep(r; p).
+    pub fn bound(&self, light: &Light, r: [f64; 3]) -> f64 { let _ = (light, r); todo!() }
+    /// Σ_l'l |Q_l'l|: the bound's largest value, B_b in −V_prep ≤ B_b max_l A_l(r).
+    pub fn peak(&self) -> f64 { self.weights.iter().sum() }
 }
 
 impl Photon {
