@@ -12,7 +12,8 @@
 //! twice its real part.
 //!
 //! # The trap (`Model::trap`)
-//! The descent from the focus to the local minimum of V_prep: Newton's step along each eigenvector of the analytic Hessian
+//! The descent from the focus to the local minimum of V_L(r; p) -- the prepared lights' for the initial wells, the running ones'
+//! for the reported trap (SPEC §1.3) --: Newton's step along each eigenvector of the analytic Hessian
 //! curved upward, downhill by the trust radius along the others (along an eigenvector without slope at a top: as it is), all
 //! within the trust radius, from the light's shortest length 1/max k_l up; doubled after a cut step that lowered V, halved
 //! where V did not fall. It ends where a step's predicted gain is within the rounding of V's sum; the point is the trap's
@@ -50,14 +51,14 @@ fn contract(m: &crate::linalg::Mat, p: &[f64; GROUND]) -> crate::linalg::C64 {
 impl Model {
     /// The far part of Σ_b p_b [h(r)]_bb of one frequency's light, with its gradient and Hessian: Re Σ_l'l c_l'l(r) [P_l'l]_p
     /// over its beam pairs (far.rs), c_l'l = a_l'* a_l.
-    pub(crate) fn far_potential(&self, frequency: usize, amplitudes: &[Amplitude], p: &[f64; GROUND]) -> Expansion {
+    pub(crate) fn far_potential(&self, frequency: usize, amplitudes: &[Amplitude], p: &[f64; GROUND], lights: &Lights) -> Expansion {
         let (f, tone) = (&self.light.frequencies[frequency], &self.tones[frequency]);
         let n = f.beams.len();
         let mut out = Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
         for j in 0..n {
             for i in 0..n {
                 let m = contract(&tone.pairs[j * n + i], p);
-                if m == crate::linalg::C64::ZERO {
+                if m == crate::linalg::C64::ZERO || !lights.pair(frequency, j, i) {
                     continue;
                 }
                 let c = super::far::pair(&amplitudes[f.beams[j]], &amplitudes[f.beams[i]]);
@@ -79,11 +80,11 @@ impl Model {
     /// V_L(r; p) with its gradient and Hessian, and the rounding of its sum (module documentation).
     pub(crate) fn expand(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights) -> Expansion {
         let trap = self.light.trap;
-        if !lights.0[trap] {
+        if !lights.on(trap) {
             return Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
         }
         let amplitudes = self.light.amplitudes(r);
-        let mut out = self.far_potential(trap, &amplitudes, p);
+        let mut out = self.far_potential(trap, &amplitudes, p, lights);
         let near = self.near_potential(r, &amplitudes, p, lights);
         let q = &mut out.quadratic;
         q.value += near.quadratic.value;
@@ -108,19 +109,18 @@ impl Model {
         self.expand(r, p, lights).quadratic
     }
 
-    /// The light's shortest length 1/max_l k_l over the trap light's beams (µm): the scale on which the potential varies
-    /// (a standing wave's λ/2π), the descent's first trust radius and the bowl's test length.
-    pub(crate) fn shortest_length(&self) -> f64 {
-        let f = &self.light.frequencies[self.light.trap];
-        1.0 / f.beams.iter().map(|&l| self.light.beams[l].wave_number).fold(0.0, f64::max)
+    /// The light's shortest length 1/max_l k_l over the lit beams (µm): the scale on which the potential varies (a standing
+    /// wave's λ/2π), the descent's first trust radius and the bowl's test length.
+    pub(crate) fn shortest_length(&self, lights: &Lights) -> f64 {
+        let k = self.light.frequencies.iter().enumerate().filter(|(w, _)| lights.on(*w)).flat_map(|(_, f)| f.beams.iter().map(|&l| self.light.beams[l].wave_number)).fold(0.0, f64::max);
+        1.0 / k
     }
 
-    /// The trap of the prepared potential for the ground populations p (module documentation, # The trap).
-    pub fn trap(&self, p: &[f64; GROUND]) -> Result<Trap, String> {
-        let lights = self.prepared();
-        let length = self.shortest_length();
+    /// The trap of V_L(r; p) for the ground populations p and the lights `lights` (module documentation, # The trap).
+    pub fn trap(&self, p: &[f64; GROUND], lights: &Lights) -> Result<Trap, String> {
+        let length = self.shortest_length(lights);
         let mut r = [0.0; 3];
-        let mut here = self.expand(r, p, &lights);
+        let mut here = self.expand(r, p, lights);
         let mut radius = length;
         loop {
             let (values, vectors) = symmetric3_eigen(&here.quadratic.hessian);
@@ -154,7 +154,7 @@ impl Model {
                 if self.light.outside(&self.light.amplitudes(next)) {
                     return Err("光镊不约束原子：准备势的下降离开了光镊的区域".into());
                 }
-                let there = self.expand(next, p, &lights);
+                let there = self.expand(next, p, lights);
                 if there.quadratic.value < here.quadratic.value {
                     r = next;
                     here = there;

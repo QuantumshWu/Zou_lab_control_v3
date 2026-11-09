@@ -16,7 +16,7 @@ static-numerics = ["atom-population-core/static-numerics"]
 
 [dependencies]
 atom-population-core = { path = "../../rust-solver/population-core" }
-atom-motion-3d = { path = "../../rust-solver/motion-3d" }
+atom-motion = { path = "../../rust-solver/motion" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 

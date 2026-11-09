@@ -24,7 +24,7 @@
 use super::cluster::Edge;
 use super::reach::{distance, doppler, lipschitz, Bounds, Cell, Span};
 use crate::linalg::norm3;
-use super::{Beat, Component, Gate, Model, Reach, Sample, Unit, UnitError, Wave};
+use super::{Component, Gate, Model, Reach, Sample, Unit, UnitError, Wave};
 use crate::linalg::{Mat, C64};
 use crate::request::{GROUND, STATES};
 
@@ -214,8 +214,8 @@ impl Model {
                 for i in 0..n {
                     let (lj, li) = (f.beams[j], f.beams[i]);
                     let p = &t.pairs[j * n + i];
-                    let c = spans[lj].centre.conj() * spans[li].centre;
-                    let moved = spans[lj].spread * spans[li].most + spans[lj].centre.abs() * spans[li].spread;
+                    let pair = super::reach::pair_span(spans, lj, li);
+                    let (c, moved) = (pair.centre, pair.radius);
                     size += p[(a, b)].abs() * spans[lj].most * spans[li].most;
                     size_centre += c * p[(a, b)];
                     let d = p[(a, a)] - p[(b, b)];
@@ -230,7 +230,7 @@ impl Model {
         }
         let sep = distance(at - slack, at + slack) - wave - self.near_spread(a, b, spans);
         let upper = mixing(size, sep, 0.0);
-        let centre = if spans.iter().all(|s| s.spread.is_finite()) { mixing(size_centre.abs(), at.abs() - wave, 0.0) } else { f64::NEG_INFINITY };
+        let centre = if spans.iter().all(|s| s.rho.is_finite()) { mixing(size_centre.abs(), at.abs() - wave, 0.0) } else { f64::NEG_INFINITY };
         Bounds { upper: 2.0 * upper * upper, centre: 2.0 * centre * centre }
     }
 
@@ -345,9 +345,5 @@ impl Model {
         self.beam_wave(absorbed).plus(-1, &self.beam_wave(emitted))
     }
 
-    /// A beat's exact frame difference: θ_a − θ_b of a term absorbing at ν_from and emitting at ν_to, ν_from − ν_to.
-    pub(crate) fn term_beat(&self, from: Component, to: Component) -> Beat {
-        self.axes.component(&self.light, from).plus(-1, &self.axes.component(&self.light, to))
-    }
 }
 

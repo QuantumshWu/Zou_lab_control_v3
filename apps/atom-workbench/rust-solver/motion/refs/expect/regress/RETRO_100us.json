@@ -1,0 +1,204 @@
+{
+ "id": "RETRO_100us",
+ "reference": "regress",
+ "kind": "regression-anchor",
+ "title": "旧门 RETRO_100us 的真值（线头 e80c43b4 的模型 explicit 3 exc/3 drives 2nd [1+1+1+1+1+1+3+2] 收敛值）",
+ "request": "out/regress/RETRO_100us.json",
+ "durationUs": 100,
+ "samples": 21,
+ "derivation": "The old engine's own model at its line head, run to convergence (gate/truth/README.md): a regression value, not a physical one. u = hypot(SE, last step-halving residual).",
+ "excluded": null,
+ "series": [
+  {
+   "quantity": "T",
+   "axis": "x",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    83.7373139649564,
+    625.8335946635827,
+    1222.5655278259605
+   ],
+   "u": [
+    1.1742801185736436,
+    7.901677579122788,
+    10.573221921765649
+   ],
+   "weights": [
+    0.2294340357921444,
+    0.8920530747471326,
+    1
+   ],
+   "judged": [
+    false,
+    false,
+    true
+   ],
+   "target": {
+    "relative": 0.1
+   }
+  },
+  {
+   "quantity": "T",
+   "axis": "y",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    21.575402442461012,
+    27.068868702508045,
+    32.01234865154508
+   ],
+   "u": [
+    0.20070467743959367,
+    0.3244745744063915,
+    0.4566087657739735
+   ],
+   "weights": [
+    0.2294340357921444,
+    0.8920530747471326,
+    1
+   ],
+   "judged": [
+    false,
+    false,
+    true
+   ],
+   "target": {
+    "relative": 0.1
+   }
+  },
+  {
+   "quantity": "T",
+   "axis": "z",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    31.06323019303725,
+    57.60268378797987,
+    82.8983925845106
+   ],
+   "u": [
+    0.31450664423870994,
+    0.7665793959911686,
+    1.3115496675201455
+   ],
+   "weights": [
+    0.2294340357921444,
+    0.8920530747471326,
+    1
+   ],
+   "judged": [
+    false,
+    false,
+    true
+   ],
+   "target": {
+    "relative": 0.1
+   }
+  },
+  {
+   "quantity": "loss",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    0,
+    0.0014334862385321223,
+    0.1687213302752294
+   ],
+   "u": [
+    0,
+    0.000725084113465772,
+    0.012298288350232351
+   ],
+   "judged": [
+    true,
+    true,
+    true
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "ground-2-2",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    0.9379549272710535,
+    0.9673884929225548,
+    0.9829369425409902
+   ],
+   "u": [
+    0.00030998235835598246,
+    0.0007500417862898808,
+    0.00033562612672562126
+   ],
+   "judged": [
+    true,
+    true,
+    true
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-3-3",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    0.062045072728946576,
+    0.03261150707744539,
+    0.017063057459009788
+   ],
+   "u": [
+    0.0003099823583559383,
+    0.0007500417862889586,
+    0.00033562612672563704
+   ],
+   "judged": [
+    true,
+    true,
+    true
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  }
+ ],
+ "info": {
+  "lineHead": {
+   "commit": "e80c43b4",
+   "record": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/baseline/e80c43b4/RETRO_100us.json",
+   "model": "explicit 3 exc/3 drives 2nd [1+1+1+1+1+1+3+2]",
+   "dt": 0.058823529411764705,
+   "stepsPerInterval": 85
+  },
+  "truthLevel": {
+   "steps": 680,
+   "dt": 0.007352941176470588,
+   "N": 6976
+  },
+  "converged": true
+ }
+}

@@ -78,8 +78,8 @@ because it is small or labelled forbidden.
 Motion (运动, on by default; docs/ui-design.md §6.20–§6.21): a single atom moving in 3D
 in the optical tweezer the operator designates (设为光镊; the motion block's
 `trapBeamId`), semiclassically, served
-by `rust-solver/motion-3d` (`motion3d_adapter.rs`; its front end `ground.rs`
-eliminates the excited states). A request whose model carries the `motion`
+by `rust-solver/motion` (crate `atom-motion`, specified in `motion/SPEC.md`,
+through `src/motion_adapter.rs`; its `model` eliminates the excited states). A request whose model carries the `motion`
 block is a trajectory alone; only 3D motion is served. Each trajectory is a
 classical point carrying the internal state of the eliminated ground manifold
 on one cluster of states, evolved by quantum jumps: dipole-pattern emission

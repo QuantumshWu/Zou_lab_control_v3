@@ -10,7 +10,9 @@
 //! `TEMPERATURE_TARGET` at the outputs it is held to (solve.rs).
 //!
 //! # The contract's shape (contract §2.2)
-//! `totals`: the populations' and T's total at the output where it takes most of its target, with the target; `items`:
+//! `totals`: the populations' and T's a-priori part √(A² + b²) -- what the approximations leave, the statistics aside (the
+//! result reports T's statistical error itself, src/solver-types.ts `LedgerTotal`) -- at the output where it takes most of
+//! its target, with the target; `items`:
 //! each approximation's label, its estimated error (its largest over the outputs on what is shown, so that an output
 //! without atoms takes no part) and what the engine did with it, in Chinese as the app shows them; `flagged`: where
 //! some output's total exceeds its target -- the span, the largest total and its three parts --, and every other reason
@@ -50,7 +52,11 @@ pub struct Account {
 impl Account {
     /// √(A² + b² + S²).
     pub fn total(&self) -> f64 {
-        (self.model * self.model + self.step * self.step + self.statistics * self.statistics).sqrt()
+        (self.a_priori().powi(2) + self.statistics * self.statistics).sqrt()
+    }
+    /// √(A² + b²): the approximations' part (module documentation, # The contract's shape).
+    pub fn a_priori(&self) -> f64 {
+        (self.model * self.model + self.step * self.step).sqrt()
     }
 }
 
@@ -77,9 +83,9 @@ impl Ledger {
         });
     }
     /// The totals and the flags of the outputs at `times` (µs): the populations' accounts at every output; T's where it
-    /// is read, `held` where it is held to its target. T's total is taken over the outputs it is held to, over every one
-    /// where it is read when it is held to none (its error is then the solve's, not a target's), and only the outputs it
-    /// is held to are flagged.
+    /// is read, `held` where it is held to its target. T's a-priori total is taken over the outputs it is held to, over
+    /// every one where it is read when it is held to none (its error is then the solve's, not a target's), and only the
+    /// outputs it is held to are flagged.
     pub fn close(&mut self, times: &[f64], population: &[Account], temperature: &[Option<Account>], held: &[bool]) {
         let held_to = held.iter().zip(temperature).any(|(&h, t)| h && t.is_some());
         let temperatures: Vec<Option<Account>> =
@@ -108,9 +114,10 @@ impl Ledger {
     }
 }
 
-/// The total that takes most of the target among the accounts given, and the target; none given, no error.
+/// The largest a-priori part among the accounts given (module documentation, # The contract's shape), and the target; none
+/// given, no error.
 fn largest(accounts: &[Option<Account>], target: f64) -> Total {
-    let error = accounts.iter().flatten().map(Account::total).fold(0., f64::max);
+    let error = accounts.iter().flatten().map(Account::a_priori).fold(0., f64::max);
     Total { error, target }
 }
 
@@ -172,7 +179,7 @@ mod tests {
         assert_eq!(Account::default().total(), 0.);
     }
 
-    /// The totals take the output where each takes most of its target; the outputs beyond it are flagged as one span,
+    /// The totals take the a-priori part where it takes most of its target; the outputs beyond the target are flagged as one span,
     /// with the largest and its parts; T is totalled and flagged only where it is held to its target, and totalled
     /// where it is read when it is held to none; nothing flagged within the targets, and no note.
     #[test]
@@ -183,7 +190,7 @@ mod tests {
         let mut quiet = Ledger::default();
         quiet.close(&times, &within, &read, &[true; 6]);
         assert_eq!((quiet.flagged.as_ref(), quiet.note.as_ref()), (None, None));
-        assert!((quiet.totals.population.error - within[0].total()).abs() < 1e-16 && quiet.totals.population.target == POPULATION_TARGET);
+        assert!((quiet.totals.population.error - within[0].a_priori()).abs() < 1e-16 && quiet.totals.population.target == POPULATION_TARGET);
 
         let mut population = within.clone();
         population[3] = account(0.01, 0.0224, 0.06);
@@ -194,15 +201,15 @@ mod tests {
         let held = [true, true, true, true, false, true];
         let mut l = Ledger::default();
         l.close(&times, &population, &temperature, &held);
-        assert!((l.totals.population.error - population[3].total()).abs() < 1e-16);
-        assert!((l.totals.temperature.error - temperature[2].unwrap().total()).abs() < 1e-16, "the unheld output takes no part");
+        assert!((l.totals.population.error - population[3].a_priori()).abs() < 1e-16);
+        assert!((l.totals.temperature.error - read[0].unwrap().a_priori()).abs() < 1e-16, "the statistics take no part");
         let flagged = l.flagged.unwrap();
         assert!(flagged.starts_with("750 μs 至 1.25 ms 之间 2 个时刻：布居与损失的估计误差超出目标，最大 6.5%（目标 5%；模型 1%、步长 2.2%、统计 6%）"), "{flagged}");
         assert!(flagged.ends_with("；500 μs：温度的估计误差超出目标，最大 20%（目标 10%；模型 0%、步长 4.5%、统计 20%）"), "{flagged}");
 
         let mut none_held = Ledger::default();
         none_held.close(&times, &within, &temperature, &[false; 6]);
-        assert!((none_held.totals.temperature.error - temperature[4].unwrap().total()).abs() < 1e-16 && none_held.flagged.is_none());
+        assert!((none_held.totals.temperature.error - read[0].unwrap().a_priori()).abs() < 1e-16 && none_held.flagged.is_none());
     }
 
     /// Spans and numbers in the app's words.
