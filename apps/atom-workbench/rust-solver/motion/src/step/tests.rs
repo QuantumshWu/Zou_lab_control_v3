@@ -255,9 +255,9 @@ fn a_step_and_its_reverse_return_to_the_start() {
     }
 }
 
-/// The tolerances a test asks: per µs of momentum (each axis), E_s and the rows.
-fn tolerances(momentum: f64, energy: f64, population: f64) -> Tolerances {
-    Tolerances { momentum: [momentum; 3], energy, population }
+/// The tolerances a test asks: per µs of an energy (each axis's and E_s) and of the rows.
+fn tolerances(energy: f64, population: f64) -> Tolerances {
+    Tolerances { axes: energy, energy, population }
 }
 
 /// e^{−iHτ}ψ of a static generator (`linalg::exp`): the at-rest reference.
@@ -372,7 +372,7 @@ fn a_running_wave_s_force_is_the_bloch_equations_at_the_doppler_shifted_detuning
     let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
     let (rabi, detuning) = (15.0, -12.0);
     let model = Atom::new(hm, flat, vec![Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }], detuning, GAMMA);
-    let tol = tolerances(f64::INFINITY, f64::INFINITY, 1e-6);
+    let tol = tolerances(f64::INFINITY, 1e-6);
     for v in [-3.0, -1.5, 0.0, 1.5, 3.0] {
         let expected = K * GAMMA * excited(rabi, detuning - K * v);
         let (f, e) = mean_force(&model, [0.0; 3], [0.0, 0.0, v], 48, 2.0, 22.0, &tol);
@@ -432,9 +432,10 @@ fn a_standing_wave_s_force_is_the_bloch_equations_along_the_path() {
     let (rabi, detuning) = (10.0, -15.0);
     let beams = vec![Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi, phase: 0.0 }];
     let model = Atom::new(hm, flat, beams.clone(), detuning, GAMMA);
-    let tol = tolerances(0.5, f64::INFINITY, 1e-4);
     let scale = K * GAMMA * excited(rabi, detuning);
     for v in [0.3, 1.0, 2.0] {
+        // The momentum's error 0.5/µm per µs: on the moving axis an energy's error of v δκ.
+        let tol = tolerances(0.5 * v, 1e-4);
         let expected = bloch_force(&beams, detuning, 0.0, v, 3.0, 33.0);
         let (f, e) = mean_force(&model, [0.0; 3], [0.0, 0.0, v], 48, 3.0, 33.0, &tol);
         let miss = (f[2] - expected).abs();
@@ -454,7 +455,7 @@ fn the_jumps_are_at_the_roots_of_the_norm() {
     let model = Atom::new(RB, flat, vec![], 0.0, gamma);
     let mut t = Trajectory::new(&model, 0, [0.0; 3], [0.0; 3], 3, 5);
     let end = 2000.0;
-    adapt::advance(&model, &tolerances(1.0, 1.0, 1e-6), &mut t, end, &mut |_| {});
+    adapt::advance(&model, &tolerances(1.0, 1e-6), &mut t, end, &mut |_| {});
     // The jumps the thresholds put before `end`, and the last one's time.
     let threshold = |j: u32| crate::random::Stream::jump(3, 5, j).open_uniform();
     let (mut last, mut j, mut waits) = (0.0, 0, Vec::new());
@@ -491,7 +492,7 @@ fn a_conservative_trap_keeps_its_energy() {
     let start = Trajectory::new(&model, 0, [0.3, -0.2, 0.8], [20.0, 15.0, -10.0], 1, 0);
     let e0 = model.energy(0, &start.point(), &start.psi);
     let (run, outputs, rate) = (5000.0, 100, 1e-6);
-    let tol = Tolerances { momentum: [1e-3; 3], energy: rate, population: 1.0 };
+    let tol = Tolerances { axes: rate, energy: rate, population: 1.0 };
     let mean = |s: &[f64]| s.iter().sum::<f64>() / s.len() as f64;
     let mut t = start.clone();
     let mut adaptive = Vec::new();
@@ -681,8 +682,8 @@ fn conservative_trap(name: &str) {
     let duration = *request.times_us.last().unwrap();
     let thermal = (kt / hm).sqrt();
     let tol = Tolerances {
-        momentum: [STEP_SHARE * TEMPERATURE_TARGET * thermal / duration; 3],
-        energy: STEP_SHARE * TEMPERATURE_TARGET * kt / duration,
+        axes: STEP_SHARE * TEMPERATURE_TARGET * kt / duration,
+        energy: STEP_SHARE * POPULATION_TARGET * kt / duration,
         population: STEP_SHARE * POPULATION_TARGET / duration,
     };
     let atoms = 16;
@@ -761,10 +762,10 @@ fn a_non_asymptotic_first_doubling_does_not_collapse_the_step() {
     let mut p = [0.0; GROUND];
     p[state] = 1.0;
     let run = Run::new(&model, p);
-    let (hm, kt, duration) = (run.hbar_over_mass(), KT_PER_UK * request.temperature_uk, *request.times_us.last().unwrap());
+    let (kt, duration) = (KT_PER_UK * request.temperature_uk, *request.times_us.last().unwrap());
     let tol = Tolerances {
-        momentum: [STEP_SHARE * TEMPERATURE_TARGET * (kt / hm).sqrt() / (2.0 * duration); 3],
-        energy: STEP_SHARE * TEMPERATURE_TARGET * kt / duration,
+        axes: STEP_SHARE * TEMPERATURE_TARGET * kt / duration,
+        energy: STEP_SHARE * POPULATION_TARGET * kt / duration,
         population: STEP_SHARE * POPULATION_TARGET / duration,
     };
     let r = [0.022570157873194684, 0.03557204701765085, 0.34007333797674333];
