@@ -226,6 +226,12 @@ pub(crate) struct Tone {
     pub(crate) focus: Mat,
     /// Per component ([co, counter]) and beam its folded jumps J_{a,l} (GROUND × GROUND per axis a); empty where unfolded.
     pub(crate) jumps: [Vec<[Mat; 3]>; 2],
+    /// Per component ([co, counter]) and beam its folded responses R_l (EXCITED × GROUND, the readout's); empty where unfolded.
+    pub(crate) responses: [Vec<Mat>; 2],
+    /// Per component ([co, counter]) and beam its coupling at the focus, X_l and R_l (STATES × STATES).
+    pub(crate) couplings: [Vec<Mat>; 2],
+    /// The outside form O_pq in the spherical components (the far beats' cross terms, units.rs).
+    pub(crate) outside: [[Mat; 3]; 3],
 }
 
 /// The bare energies E_s: H0's diagonal (H0 is diagonal in the model basis, request.rs).
@@ -305,33 +311,53 @@ impl Tone {
             k0.add_scaled(C64::new(0.0, -0.5), &decay(request));
             k0
         };
+        // Per component and beam: its coupling at the focus on the basis, and where folded its response and jumps.
+        let weight = |c: usize, j: usize, k: usize| if c == 0 { f.coefficients[j][k] } else { f.coefficients[j][k].conj() };
+        let per_beam = |c: usize, of: &dyn Fn(usize) -> Mat, rows: usize, cols: usize| -> Vec<Mat> {
+            (0..n)
+                .map(|j| {
+                    let mut m = Mat::zeros(rows, cols);
+                    for k in 0..r {
+                        m.add_scaled(weight(c, j, k), &of(k));
+                    }
+                    m
+                })
+                .collect()
+        };
+        let couplings = [0, 1].map(|c| {
+            let basis = if c == 0 { &bases.co } else { &bases.counter };
+            per_beam(c, &|k| basis[k].clone(), STATES, STATES)
+        });
+        let folds: [Vec<(Mat, [Mat; 3])>; 2] = [0, 1].map(|c| {
+            let basis = if c == 0 { &bases.co } else { &bases.counter };
+            if folded[c] { basis.iter().map(|u| far_response(request, &k0, &e, u, nu[c])).collect() } else { vec![] }
+        });
+        let responses = [0, 1].map(|c| if folded[c] { per_beam(c, &|k| folds[c][k].0.clone(), EXCITED, GROUND) } else { vec![] });
         let jumps = [0, 1].map(|c| {
             if !folded[c] {
                 return vec![];
             }
-            let basis = if c == 0 { &bases.co } else { &bases.counter };
-            let per_k: Vec<[Mat; 3]> = basis.iter().map(|u| far_jumps(request, &k0, &e, u, nu[c])).collect();
             (0..n)
                 .map(|j| {
                     std::array::from_fn(|ax| {
                         let mut m = Mat::zeros(GROUND, GROUND);
                         for k in 0..r {
-                            let g = if c == 0 { f.coefficients[j][k] } else { f.coefficients[j][k].conj() };
-                            m.add_scaled(g, &per_k[k][ax]);
+                            m.add_scaled(weight(c, j, k), &folds[c][k].1[ax]);
                         }
                         m
                     })
                 })
                 .collect()
         });
-        Ok(Tone { beat, detuning: nu[0], bases, folded, pairs, focus, jumps })
+        Ok(Tone { beat, detuning: nu[0], bases, folded, pairs, focus, jumps, responses, couplings, outside: o })
     }
 }
 
-/// The jumps C_a R of a coupling U folded at ν (GROUND × GROUND per axis a): R[:,b] = (K₀ − E_b − ν)⁻¹ U[:,b] on the excited
-/// states (module documentation, # The jumps of a folded component).
-fn far_jumps(request: &Request, k0: &Mat, e: &[f64], u: &Mat, nu: f64) -> [Mat; 3] {
+/// The response R and the jumps C_a R of a coupling U folded at ν: R[:,b] = (K₀ − E_b − ν)⁻¹ U[:,b] on the excited states
+/// (EXCITED × GROUND), C_a R (GROUND × GROUND per axis a) (module documentation, # The jumps of a folded component).
+fn far_response(request: &Request, k0: &Mat, e: &[f64], u: &Mat, nu: f64) -> (Mat, [Mat; 3]) {
     let mut out: [Mat; 3] = std::array::from_fn(|_| Mat::zeros(GROUND, GROUND));
+    let mut response = Mat::zeros(EXCITED, GROUND);
     for b in 0..GROUND {
         let mut column: Vec<C64> = (0..EXCITED).map(|x| u[(GROUND + x, b)]).collect();
         if column.iter().all(|z| *z == C64::ZERO) {
@@ -344,13 +370,16 @@ fn far_jumps(request: &Request, k0: &Mat, e: &[f64], u: &Mat, nu: f64) -> [Mat; 
         // K₀ − z is regular wherever an excited state decays: its anti-Hermitian part −D/2 keeps every eigenvalue off the real axis.
         let lu = Lu::new(&shifted).expect("K₀ − z regular");
         lu.solve(&mut column);
+        for x in 0..EXCITED {
+            response[(x, b)] = column[x];
+        }
         for (ax, c) in request.emission.iter().enumerate() {
             for to in 0..GROUND {
                 out[ax][(to, b)] = (0..EXCITED).map(|x| c[(to, GROUND + x)] * column[x]).sum();
             }
         }
     }
-    out
+    (response, out)
 }
 
 /// The product a_l'* a_l of two beams' amplitudes (`first` = l', `second` = l) with its gradient and Hessian: the coefficient
