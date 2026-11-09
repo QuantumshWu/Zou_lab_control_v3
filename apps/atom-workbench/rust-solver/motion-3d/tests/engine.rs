@@ -1194,16 +1194,19 @@ fn the_jumps_criterion_on_a_retro_reflected_tweezer_reads_the_step_as_its_square
 
 /// T's step error over the run (solve.rs `drift`): the retro-reflected tweezer's lattice axis heats all run long and a rate's error adds up,
 /// so at a step whose error over one period lies within T's tolerance more than the tolerance stands over the 100 us, and at half that step less than half of that.
+/// The first explicit rung (the probe's nearest lines kept) at 0.156 us, read from 64 trajectories' states. (At 0.104 us on the fifth rung the jumps' kicks
+/// carried such a rate's error, 4.1 times the tolerance over the run, until the explicit photon's kicks took zero mean, the Ehrenfest force holding it (128c1d5c):
+/// there nothing adds up now. Here on 8 seeds of the states: within the tolerance over a period on 7, 5.5–8.4 times it over the run, nothing at half the step.)
 #[test]
 fn the_t_error_over_the_run_adds_up_on_a_heating_axis_and_goes_with_the_step(){
     let fixture:Value=serde_json::from_str(include_str!("fixtures/retro_probe_motion.json")).unwrap();
     let(outputs,interval)=(21,5.);let mut r=scene::request(&fixture);r.times_us=(0..outputs).map(|i|interval*i as f64).collect();
-    // The rung its solve takes, at the waiting time and Doppler budget it takes them with.
-    let model=Model::with(&r,Ground::allowances(&r).unwrap()[5]).unwrap();let initial=Initial::new(&model,&r).unwrap();
+    // The first explicit rung, at the waiting time and Doppler budget the solve takes its rung with.
+    let model=Model::with(&r,Ground::allowances(&r).unwrap()[1]).unwrap();let initial=Initial::new(&model,&r).unwrap();
     let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();let waiting=0.47;
     let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=Settings::new(dt,&initial.traps[reference],NUMERICAL_SHARE*POPULATION_TARGET*dt/waiting,true);s.doppler=0.02;s.region=initial.depths[reference];s.horizon=waiting;s};
-    let steps=48;let harmonic=Harmonic::new(&model,&settings(steps),&initial,steps,outputs);
-    let(states,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,32,steps,outputs,&harmonic);let probes=bound_probes(&model,&states,&vec![1.;states.len()]);
+    let steps=32;let harmonic=Harmonic::new(&model,&settings(steps),&initial,steps,outputs);
+    let(states,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,64,steps,outputs,&harmonic);let probes=bound_probes(&model,&states,&vec![1.;states.len()]);
     let period=std::f64::consts::TAU/initial.traps[reference].frequencies.iter().copied().fold(f64::INFINITY,f64::min);
     let tolerance=BIAS_SHARE*TEMPERATURE_TARGET;let limit=|_:f64|tolerance;
     let(one,whole)=(drift(&model,&settings,steps,&probes,period,period,&limit,0.,f64::INFINITY),drift(&model,&settings,steps,&probes,period,100.,&limit,0.,f64::INFINITY));let half=drift(&model,&settings,2*steps,&probes,period,100.,&limit,whole.span,f64::INFINITY);
