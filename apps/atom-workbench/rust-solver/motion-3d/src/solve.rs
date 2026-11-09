@@ -990,7 +990,8 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     let pilot_cost=measured.then(||evaluate(&pilot_candidate,&pilot_states,&starts,None,&Deposits::default(),f64::INFINITY));
     // The fourth order is built where it can pay its check and run beyond the need's error, the rule of every model here: its work per interval at least the pilot's
     // model's at its step with its own layout's generators and jumps (`fourth_work`; GMD1C's 2.7 times, its tables eight times the
-    // model's to build), its check's at least that model's at that work, its totals
+    // model's to build), its check's at least that model's at that work, its build at least the pilot's model's counted work (`Walk`: the same
+    // tables' nodes, each the same elimination and its fourth order besides), its totals
     // at least those of its least charges -- per output what the atoms leave open (`with_open`, the same at either order) and the pilot's T charge squared for the populations
     // (`fold_charges`; a mean of squares is at least the square of the mean) with no step bias, and T's the second
     // order's with the pilot's model's T bias: the fourth order folds the force at the second, so that T's charge
@@ -1001,7 +1002,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
         let(n,weight)=predicted(&pilot_statistics,&apriori,[0.,p.bias[1]],pilot as f64);
         if p.checked.is_none()&&past_targets(&pilot_statistics,&apriori){return false;}
         let work=fourth_work(request,&pilot_candidate,&pilot_states,&starts,&running(pilot_candidate.reference(),p.steps,pilot_waiting,doppler_allowance(&pilot_candidate.base,&pilot_candidate.model),pilot_candidate.phase),interval,pilot_waiting);
-        saves(work*n*weight*((outputs-1) as f64),p.check*work/p.work,p.cost)});
+        saves(work*n*weight*((outputs-1) as f64),p.check*work/p.work+walk.build,p.cost)});
     let fourth_cost=if measured&&promise{Candidate::new(request,pilot_candidate.model.ground.clone(),pilot_candidate.allowance,true).ok().map(|mut c|{c.charged(charge_of(&pilot_candidate.model,&c.model));
         let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&pilot_candidate.model.ground,&c.model.ground,t)).collect()};
         let(states,begun)=(into(&pilot_states),into(&starts));c.phase=grid_phase(&c.model,&states,&running(c.reference(),steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase),Some((&groups,duration)));
