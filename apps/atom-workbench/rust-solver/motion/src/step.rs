@@ -113,12 +113,9 @@ pub trait Dynamics {
     /// The displayed rows of the cluster's state at a point (`Model::readout`): the step control's population norm.
     fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES];
 
-    /// The counted work of one generator assembly (`decide::Work`, real multiply-adds; `Model::work`'s): the step control
-    /// weighs the split's error against the beating grid's by it (`adapt`). Until the model counts it, none: the balance
-    /// then prices a step by the integrator's own work alone.
-    fn assembly_work(&self) -> f64 {
-        0.0
-    }
+    /// The counted work of one generator assembly (`decide::Work`, real multiply-adds), made once per run: the step control
+    /// weighs the split's error against the beating grid's by it (`adapt`).
+    fn assembly_work(&self) -> f64;
 }
 
 /// A trajectory's state (SPEC §1.6, §1.7, §2.2).
