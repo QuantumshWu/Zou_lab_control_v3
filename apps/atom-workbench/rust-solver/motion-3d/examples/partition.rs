@@ -59,8 +59,8 @@ fn main(){
         let mut kept_items:Vec<_>=g.items.iter().filter(|i|!i.folded).collect();kept_items.sort_by(|a,b|b.frequency.total_cmp(&a.frequency));
         println!("  ground items: cut {:.3e}; kept {} of {}; highest kept: {}",g.cut,kept_items.len(),g.items.len(),
             kept_items.iter().take(4).map(|i|format!("{:?} f {:.3e} size {:.3e}",i.kind,i.frequency,i.size)).collect::<Vec<_>>().join(" | "));
-        // The items that may not fold (their mixing beyond the budget, or nearer than FOLD_DISTANCE ‖L0‖), the highest frequencies first.
-        let mut stiff:Vec<_>=g.items.iter().filter(|i|i.size>0.&&!atom_motion_3d::ground::foldable(i.frequency,i.size,g.generator_scale)).collect();
+        // The items whose fold does not exist (their mixing m ≥ ½, ground.rs `exists`), the highest frequencies first.
+        let mut stiff:Vec<_>=g.items.iter().filter(|i|i.size>0.&&!atom_motion_3d::ground::exists(atom_motion_3d::ground::mixing(i.size,i.frequency.abs(),g.generator_scale,f64::MIN_POSITIVE))).collect();
         stiff.sort_by(|a,b|b.frequency.total_cmp(&a.frequency));
         println!("  stiff items: {}",stiff.iter().take(4).map(|i|format!("{:?} f {:.3e} size {:.3e}",i.kind,i.frequency,i.size)).collect::<Vec<_>>().join(" | "));
         // Each ground state's total saturation with every drive folded (the rule's estimates over the reach).

@@ -5,16 +5,16 @@
 //! (solve.rs, # Shares); an output whose total exceeds a target is flagged. An item shows its largest over the outputs and the ledger's `totals` the output
 //! where the a-priori total takes most of its target, at most the items' sum: they need not meet at one output.
 //!
-//! # The fold rule's threshold
+//! # The far light's threshold
 //! `BUDGET`, the population core's a-priori share of the population target, is still the per-item
-//! threshold of the couplings' and components' folds (ground.rs `classify`, the excited states' static
-//! couplings), the profiles' intensity axes and the reach's thermal tail (model.rs): their move into the
-//! fold candidates' cost comparison (solve.rs, # The fold's choice) is pending; on the scenes measured no
-//! verdict lies between it and the target where a cost comparison would differ.
+//! threshold of the far components' folds (ground.rs `far_folds`, no rung of the ladder), the profiles'
+//! intensity axes (model.rs) and the ringing's share. The couplings of the excited and the ground states fold
+//! by existence and the ladder's allowance (ground.rs `pair_folds`, `Ground::rungs`), the reach's tail is its
+//! own (ground.rs `OUTSIDE_REACH`).
 use crate::solve::POPULATION_TARGET;
 use atom_population_core::lattice::accuracy::A_PRIORI_SHARE;
 
-/// The fold rule's per-item threshold (module documentation).
+/// The far light's per-item threshold (module documentation).
 pub const BUDGET:f64=A_PRIORI_SHARE*POPULATION_TARGET;
 
 /// One approximation: what it is, its estimated error and what the engine did with it (Chinese,
