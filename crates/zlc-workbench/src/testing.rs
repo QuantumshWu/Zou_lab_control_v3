@@ -905,6 +905,39 @@ mod tests {
 
     fn asked(calls: &Rc<RefCell<Calls>>, name: &str) -> u64 { calls.borrow().2.iter().rev().find(|(query, ..)| query == name).unwrap().1 }
 
+    /// A layout loads its nodes with their devices named before the devices open: what a node
+    /// asked then (its camera not yet open) is asked again once the camera opens, and again when
+    /// it fails, so a Start reads the bench as it is now, not as it was while loading.
+    #[test]
+    fn a_node_asks_again_when_its_device_opens_or_fails() {
+        let root = scratch("bench_changed");
+        std::fs::write(root.join("apparatus.json"), RIG).unwrap();
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "camera_check", "kind": "node", "label": "Camera check", "parameters": [],
+            "node": {"node_kind": "measurement", "outputs": [], "queries": ["resolve_device_claims"],
+                     "devices": [{"capability": "camera.adapter", "argument": "camera", "protected_fields": []}]}}));
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
+        let node = apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_check", "device_keys": {"camera": "mot_camera"}})).unwrap()["node"]
+            .as_str().unwrap().to_owned();
+        event(&mut workbench, Event::Opened { instance: node_instance(&node), working_point: Value::Null }, &mut host);
+        let last = |calls: &Rc<RefCell<Calls>>| calls.borrow().2.iter().rev().find(|(query, ..)| query == "resolve_device_claims").cloned().unwrap();
+        let (_, before, args) = last(&calls);
+        assert_eq!(args["devices"]["camera"]["tunable"], false, "asked while the camera is still opening");
+        event(&mut workbench, Event::Answered { ticket: before, result: Ok(json!({})) }, &mut host);
+        event(&mut workbench, Event::Opened { instance: "mot_camera".into(), working_point: json!({"tunable": true}) }, &mut host);
+        let (_, opened, args) = last(&calls);
+        assert!(opened > before, "asked again once the camera opened");
+        assert_eq!(args["devices"]["camera"]["tunable"], true);
+        // The answer to the first question, late, is not taken for the second.
+        event(&mut workbench, Event::Answered { ticket: before, result: Err("the camera is not open".into()) }, &mut host);
+        assert!(workbench.state(&host)["logic"][0]["issues"].to_string().find("not open").is_none());
+        event(&mut workbench, Event::Failed { instance: "mot_camera".into(), error: "lost".into() }, &mut host);
+        assert!(last(&calls).1 > opened, "and again when it failed");
+    }
+
     /// v2 _active_differs: a failed device and changed simulation settings are an Apply, not a Shut down.
     #[test]
     fn a_failed_device_and_changed_simulation_are_applied() {

@@ -464,10 +464,19 @@ impl Workbench {
     }
 
     /// The bench's devices changed: editors that offer them ask again.
-    pub(crate) fn refresh_editors(&mut self) {
-        let editors: Vec<String> = self.nodes.iter().filter(|node| self.catalog.get(&node.type_id)
-            .is_some_and(|item| item.node().queries.iter().any(|name| name == "editor_facts"))).map(|node| node.id.clone()).collect();
-        for id in editors { self.send_queries(&id); }
+    /// The bench changed (a device opened, failed, closed, or an Apply): every draft query
+    /// reads the devices' facts (`device_infos`: whether the device a node names is open, what
+    /// it reads and tunes; an editor also every tunable device of the bench). A node that names
+    /// one, and every node with an editor, asks again under a new revision, so an answer given
+    /// before the change -- a camera not yet open when a layout loaded -- cannot stand after it.
+    pub(crate) fn bench_changed(&mut self) {
+        let asking: Vec<String> = self.nodes.iter().filter(|node| !node.draft.device_keys.values().all(String::is_empty)
+            || self.catalog.get(&node.type_id).is_some_and(|item| item.node().queries.iter().any(|name| name == "editor_facts")))
+            .map(|node| node.id.clone()).collect();
+        for id in asking {
+            if let Ok(node) = self.node_mut(&id) { node.revision += 1; node.recheck(); }
+            self.send_queries(&id);
+        }
     }
 
     /// The devices the draft itself names (`resolve_device_claims`: a scan's device
@@ -1332,7 +1341,7 @@ impl Workbench {
             }
         } else if self.device_opened(instance, working_point) {
             self.default_device_keys(instance);
-            self.refresh_editors();
+            self.bench_changed();
             self.launch_pending(host);
             // Starts that waited for this device go now.
             let waiting: Vec<String> = self.nodes.iter().filter(|node| node.start_after_check.is_some()).map(|node| node.id.clone()).collect();
@@ -1363,6 +1372,7 @@ impl Workbench {
     pub(crate) fn instance_failed(&mut self, instance: &str, error: String, host: &mut dyn Host) {
         let Some(id) = instance.strip_prefix(NODE_INSTANCE) else {
             if self.device_failed(instance, error) {
+                self.bench_changed();
                 self.cancel_device_starts(instance, "a required device failed");
                 for node in self.claiming_nodes(instance) { self.stop_run_of(&node, "its device failed"); }
                 self.close_released();
@@ -1383,7 +1393,7 @@ impl Workbench {
     pub(crate) fn instance_closed(&mut self, instance: &str, error: Option<String>, host: &mut dyn Host) {
         match instance.strip_prefix(NODE_INSTANCE) {
             Some(id) => if let (Ok(node), Some(error)) = (self.node_mut(id), error) { node.instance = Instance::Failed(error); },
-            None => if self.device_closed(instance, error) { self.refresh_editors(); self.launch_pending(host); },
+            None => if self.device_closed(instance, error) { self.bench_changed(); self.launch_pending(host); },
         }
     }
 
