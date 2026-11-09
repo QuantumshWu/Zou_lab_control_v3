@@ -60,6 +60,11 @@ pub const MOST_TRAJECTORIES: u64 = 1 << 14;
 /// The most steps a trajectory takes over a run (SPEC §2.2; contract §2.3): reached, the trajectory ends as usual and
 /// its time span is flagged.
 pub const MOST_STEPS: u64 = 1 << 24;
+/// The longest trajectory a request asks for (µs): 10 s (contract §1.3, the population core's `LONGEST_TIME_US`; the
+/// app's translated message names "10 s").
+pub const LONGEST_TIME_US: f64 = 1e7;
+/// The most output times a request asks for (contract §1.3, the population core's `MOST_SAMPLES`).
+pub const MOST_SAMPLES: usize = 2000;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Physical constants (SI 2019: h, k_B and c are exact) and the crate's unit conversions.

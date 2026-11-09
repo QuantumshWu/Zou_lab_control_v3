@@ -30,7 +30,9 @@ pub fn philox(counter: [u32; 4], key: [u32; 2]) -> [u32; 4] {
     c
 }
 
-/// What a stream is for: the tag in its key. Each purpose's draws are independent of every other's.
+/// What a stream is for: the tag in its key. Each purpose's draws are independent of every other's; within a
+/// purpose, streams are told apart by the trajectory index alone (the pilot's trajectories, numbered from
+/// `units::MOST_TRAJECTORIES` on, share no stream with any run's).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {
     /// A trajectory's initial state (ensemble.rs; event 0).
@@ -39,8 +41,6 @@ pub enum Purpose {
     Latin = 2,
     /// A trajectory's jumps: event j ≥ 1 the j-th jump's draws, event 0 the first waiting time's threshold.
     Jump = 3,
-    /// A pilot trajectory's initial state (solve.rs; event 0): the pilot's atoms independent of the product's.
-    Pilot = 4,
 }
 
 /// A stream of uniform 32-bit words: Philox blocks at the counter (block, event, trajectory) under the key
