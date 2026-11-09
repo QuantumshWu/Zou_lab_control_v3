@@ -121,7 +121,7 @@ pub struct State{
     pub(crate) interval:i32,pub(crate) step:i32,
 }
 /// The kernel's `Look`: where the loss's check looks at a trajectory (`Gpu::simulate`), its state there while held, with its
-/// threshold and jumps.
+/// threshold and jumps; `held` 1 at a drawn step where no read can be drawn, its state not written, 2 with it.
 #[repr(C)]#[derive(Clone,Copy,Default,Debug)]
 pub struct Look{
     pub(crate) q:[f64;3],pub(crate) p:[f64;3],pub(crate) time:f64,pub(crate) logn:f64,pub(crate) threshold:f64,
@@ -131,7 +131,7 @@ pub struct Look{
 #[repr(C)]#[derive(Clone,Copy,Debug)]
 pub struct Run{
     pub(crate) states:u64,pub(crate) rings:u64,pub(crate) samples:u64,pub(crate) sums:u64,pub(crate) scratch:u64,pub(crate) tasks:u64,pub(crate) profile:u64,
-    pub(crate) records:u64,pub(crate) harmonic:u64,pub(crate) costs:u64,pub(crate) looks:u64,pub(crate) seed:u64,pub(crate) budget:i64,
+    pub(crate) records:u64,pub(crate) harmonic:u64,pub(crate) costs:u64,pub(crate) looks:u64,pub(crate) inclusion:u64,pub(crate) seed:u64,pub(crate) budget:i64,
     pub(crate) outputs:i32,pub(crate) steps:i32,pub(crate) reach:i32,pub(crate) begin:i32,pub(crate) end:i32,
     pub(crate) half:[i32;3],pub(crate) ring:[i32;3],pub(crate) ring_at:[i32;3],
     pub(crate) ring_stride:i32,pub(crate) scratch_stride:i32,pub(crate) nlisted:i32,pub(crate) pad:i32,
@@ -140,7 +140,7 @@ pub struct Run{
 
 impl Run{
     /// A launch of no wave (a check's entry, `Gpu::jump_probe`): every buffer null, the seed zero.
-    pub(crate) fn empty()->Run{Run{states:0,rings:0,samples:0,sums:0,scratch:0,tasks:0,profile:0,records:0,harmonic:0,costs:0,looks:0,seed:0,budget:0,
+    pub(crate) fn empty()->Run{Run{states:0,rings:0,samples:0,sums:0,scratch:0,tasks:0,profile:0,records:0,harmonic:0,costs:0,looks:0,inclusion:0,seed:0,budget:0,
         outputs:0,steps:0,reach:0,begin:0,end:0,half:[0;3],ring:[0;3],ring_at:[0;3],ring_stride:0,scratch_stride:0,nlisted:0,pad:0,listed:[0;MOST_LISTED]}}
 }
 

@@ -87,14 +87,16 @@ pub struct Trace{
 impl Trace{
     /// A trajectory's trace through `outputs` outputs, empty.
     pub(crate) fn new(outputs:usize)->Trace{Trace{energies:Vec::with_capacity(outputs),..Default::default()}}
-    /// Its state at the next output: its energy while held, NaN once lost.
-    pub(crate) fn output(&mut self,engine:&Engine,held:Option<&Trajectory>){self.energies.push(held.map_or(f32::NAN,|t|engine.loss_energy(t) as f32));}
+    /// Its state at the next output: its energy while held (`Engine::loss_energy`), NaN once lost.
+    pub(crate) fn output(&mut self,energy:Option<f64>){self.energies.push(energy.map_or(f32::NAN,|e|e as f32));}
     /// Whether it was lost by the last output it ran through.
     pub(crate) fn lost(&self)->bool{self.energies.iter().any(|e|e.is_nan())}
     /// Its state at the step drawn in output interval i, held (`drawn`, `deviate` its inclusion's): a chance, a read drawn where the
-    /// deviate falls below its energy bin's inclusion, weighted by its inverse (Horvitz and Thompson).
-    pub(crate) fn look(&mut self,engine:&Engine,sampling:&Sampling,t:&Trajectory,interval:usize,deviate:f64){
-        self.chances+=1;let b=bin(engine.loss_energy(t));let p=sampling.inclusion[interval-1][b];
+    /// deviate falls below its energy bin's inclusion, weighted by its inverse (Horvitz and Thompson). The state is read only where
+    /// the deviate falls below the interval's largest inclusion (`Sampling::top`): the GPU looks at none past it (`t` None).
+    pub(crate) fn look(&mut self,engine:&Engine,sampling:&Sampling,t:Option<&Trajectory>,interval:usize,deviate:f64){
+        self.chances+=1;if !(deviate<sampling.top(interval)){return;}
+        let t=t.expect("the state where a read can be drawn");let b=bin(engine.loss_energy(t));let p=sampling.inclusion[interval-1][b];
         if deviate<p{self.drawn.push(Drawn{interval:interval as u32,bin:b as u8,weight:1./p,state:t.clone()});}
     }
     /// Its drawn reads made (`read`, `fine` the engine at dt/2, `span` steps each), in their order.
@@ -109,6 +111,8 @@ pub struct Sampling{pub inclusion:Vec<[f64;BINS]>}
 impl Sampling{
     /// Every read's probability `rate` over the intervals: a trajectory's reads, alike everywhere.
     pub fn alike(intervals:usize,rate:f64)->Sampling{let p=(rate/intervals.max(1) as f64).min(1.);Sampling{inclusion:vec![[p;BINS];intervals]}}
+    /// Output interval i's largest inclusion: no read is drawn there where the deviate reaches it, whatever the state.
+    pub fn top(&self,interval:usize)->f64{self.inclusion[interval-1].iter().copied().fold(0.,f64::max)}
 }
 
 /// A trajectory's read in output interval i (the steps after output i − 1): the step it is drawn at and its inclusion's

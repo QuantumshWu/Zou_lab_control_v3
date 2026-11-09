@@ -171,6 +171,8 @@ impl Gpu{
     pub fn simulate(&self,program:&Program,model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],
         harmonic:Option<&Harmonic>,ends:Option<&[usize]>,check:Option<&check::Sampling>)->Result<Outcome,String>{
         self.set(program)?;let engine=check.map(|_|Engine::new(model,settings.clone()));let mut traces=vec![];
+        // The check's intervals' largest inclusions (check.rs `Sampling::top`): the kernel writes a drawn step's state only where a read can be drawn.
+        let tops=check.map(|s|Buffer::with(&self.stream,&(1..outputs).map(|i|s.top(i)).collect::<Vec<f64>>())).transpose()?;
         let control=harmonic.map(|h|control_tables(&self.stream,h)).transpose()?;
         // The tasks in order: (their group, their first trajectory, the one after their last), as lib.rs `run`.
         let bounds=|g:u64|(first+g*group,(first+(g+1)*group).min(first+count));
@@ -186,7 +188,7 @@ impl Gpu{
             // The wave's runs of tasks of one group, merged on the device in order (lib.rs `run`).
             let mut runs:Vec<(u64,usize,usize)>=vec![];
             for(i,&(g,_,_))in wave.iter().enumerate(){match runs.last_mut(){Some(r)if r.0==g=>r.2+=1,_=>runs.push((g,i,1))}}
-            let(group_sums,kept,finished,looks)=self.run(program,&windows,control.as_ref(),seed,&states,&wave.iter().map(|t|through(t.0) as i32).collect::<Vec<_>>(),&runs.iter().map(|r|[r.1 as i32,r.2 as i32]).collect::<Vec<_>>(),check.is_some())?;
+            let(group_sums,kept,finished,looks)=self.run(program,&windows,control.as_ref(),seed,&states,&wave.iter().map(|t|through(t.0) as i32).collect::<Vec<_>>(),&runs.iter().map(|r|[r.1 as i32,r.2 as i32]).collect::<Vec<_>>(),tops.as_ref())?;
             for(k,&(g,i,count))in runs.iter().enumerate(){
                 let trajectories=wave[i..i+count].iter().map(|t|t.2-t.1).sum::<u64>() as f64;
                 let sums=Group{sums:(0..outputs).map(|o|sums_of(&group_sums[(k*outputs+o)*RECORD..][..RECORD],if o<=through(g){trajectories}else{0.})).collect()};
@@ -206,8 +208,8 @@ impl Gpu{
                 traces.par_extend(at.par_iter().map(|&(slot,index,last)|{
                     let looks=&looks[2*outputs*slot..][..2*outputs];let held=|l:&Look|(l.held!=0).then(||l.trajectory(settings,seed,index));
                     let mut trace=check::Trace::new(last+1);
-                    for i in 0..=last{trace.output(engine,held(&looks[2*i]).as_ref());}
-                    for i in 1..=last{if let Some(t)=held(&looks[2*i+1]){trace.look(engine,sampling,&t,i,check::drawn(seed,index,i,steps).1);}}
+                    for i in 0..=last{trace.output(held(&looks[2*i]).map(|t|engine.loss_energy(&t)));}
+                    for i in 1..=last{let l=&looks[2*i+1];if l.held!=0{trace.look(engine,sampling,(l.held==2).then(||l.trajectory(settings,seed,index)).as_ref(),i,check::drawn(seed,index,i,steps).1);}}
                     trace
                 }));
             }
@@ -224,7 +226,7 @@ impl Gpu{
         let mut plain=settings.clone();plain.average=false;
         let windows=Windows::new(&plain,steps,2,&[])?;
         let states:Vec<Option<program::State>>=trajectories.iter().map(|t|Some(program::State::new(t,settings))).chain(std::iter::repeat(None)).take(trajectories.len().div_ceil(WARPS)*WARPS).collect();
-        let(_,_,finished,_)=self.run(program,&windows,None,seed,&states,&vec![1;states.len()/WARPS],&[],false)?;
+        let(_,_,finished,_)=self.run(program,&windows,None,seed,&states,&vec![1;states.len()/WARPS],&[],None)?;
         Ok(trajectories.iter().zip(&finished).map(|(t,s)|s.trajectory(settings,t.seed)).collect())
     }
 
@@ -274,8 +276,9 @@ impl Gpu{
     /// made in the last per millisecond of it on the device, times LAUNCH_MS. Two launches stand in the stream at a time, each
     /// reporting into its own words of host memory, so that the device does not wait for the host's turn between them. The sums per
     /// output of each run of tasks ([first task, tasks]), the samples kept per slot, the slots' final
-    /// states, and where `looks` the loss's check's looks per slot (`Look`; the kernel's `Run::looks`).
-    fn run(&self,program:&Program,w:&Windows,control:Option<&Buffer>,seed:u64,slots:&[Option<program::State>],through:&[i32],runs:&[[i32;2]],looks:bool)
+    /// states, and with the check's intervals' largest inclusions (`inclusion`, the kernel's `Run::inclusion`) its looks per slot (`Look`,
+    /// `Run::looks`).
+    fn run(&self,program:&Program,w:&Windows,control:Option<&Buffer>,seed:u64,slots:&[Option<program::State>],through:&[i32],runs:&[[i32;2]],inclusion:Option<&Buffer>)
         ->Result<(Vec<f64>,Vec<f64>,Vec<program::State>,Vec<Look>),String>{
         let n=slots.len()/WARPS;
         let states:Vec<program::State>=slots.iter().map(|s|s.unwrap_or_default()).collect();
@@ -284,7 +287,7 @@ impl Gpu{
         let rings=Buffer::new(8*w.ring_stride*WARPS*n)?;let samples=Buffer::new(56*w.listed.len().max(1)*WARPS*n)?;
         let sums=Buffer::new(8*w.outputs*RECORD*n)?;let scratch=Buffer::new(8*program.scratch()*WARPS*n)?;let records=Buffer::new(8*MOST_INTERVALS*SLOT_RECORD*WARPS*n)?;
         let profile=Buffer::new(if self.profiled.is_some(){8*SPANS.len()*WARPS*n}else{0})?;
-        let look_buffer=Buffer::new(if looks{std::mem::size_of::<Look>()*2*w.outputs*WARPS*n}else{0})?;
+        let looks=inclusion.is_some();let look_buffer=Buffer::new(if looks{std::mem::size_of::<Look>()*2*w.outputs*WARPS*n}else{0})?;
         // A launch's report per slot: its cycles, and the interval it stands in (a slot without a
         // trajectory, or past its task's last, past them all).
         let mut cycles:Vec<u64>=slots.iter().flat_map(|s|[0,if s.is_some(){0}else{u64::MAX}]).collect();
@@ -292,7 +295,7 @@ impl Gpu{
         self.stream.zero(&rings)?;self.stream.zero(&samples)?;self.stream.zero(&sums)?;self.stream.zero(&profile)?;self.stream.zero(&look_buffer)?;
         let mut run=program::Run{states:state_buffer.pointer,rings:rings.pointer,samples:samples.pointer,sums:sums.pointer,scratch:scratch.pointer,tasks:task_buffer.pointer,
             profile:if self.profiled.is_some(){profile.pointer}else{0},records:records.pointer,
-            harmonic:control.map_or(0,|b|b.pointer),costs:reports[0].address(),looks:if looks{look_buffer.pointer}else{0},
+            harmonic:control.map_or(0,|b|b.pointer),costs:reports[0].address(),looks:if looks{look_buffer.pointer}else{0},inclusion:inclusion.map_or(0,|b|b.pointer),
             seed,budget:0,outputs:w.outputs as i32,steps:w.steps as i32,reach:w.reach as i32,begin:0,end:0,half:w.half.map(|h|h as i32),ring:w.ring.map(|l|l as i32),
             ring_at:w.ring_at.map(|x|x as i32),ring_stride:w.ring_stride as i32,scratch_stride:program.scratch() as i32,nlisted:w.listed.len() as i32,pad:0,listed:[0;MOST_LISTED]};
         for(k,&l)in w.listed.iter().enumerate(){run.listed[k]=l as i32;}

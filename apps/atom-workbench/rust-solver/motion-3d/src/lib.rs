@@ -271,21 +271,22 @@ fn walk(model:&Model,engine:&Engine,t:&mut Trajectory,steps:usize,outputs:usize,
     ->(Vec<Option<Moment>>,Vec<Option<([f64;3],[f64;3])>>,Vec<Trajectory>,u64,Option<check::Trace>){
     windows.clear();held.fill(None);let mut samples=vec![None;listed.len()];let mut kept=vec![];
     let mut trace=check.map(|_|check::Trace::new(outputs));
-    let energy=|t:&Trajectory,trace:&mut Option<check::Trace>|if let Some(x)=trace{x.output(engine,t.alive.then_some(t));};
-    let mut record=|t:&Trajectory,i:usize,held:&mut [Option<([f64;STATES],f64,f64,f64)>]|{
-        if !t.alive{return;}
-        let point=model.point(t.r,t.kappa);
+    // An output: the held atom's record, and with the check its energy at the same point.
+    let mut record=|t:&Trajectory,i:usize,held:&mut [Option<([f64;STATES],f64,f64,f64)>],trace:&mut Option<check::Trace>|{
+        let point=t.alive.then(||model.point(t.r,t.kappa));
+        if let Some(x)=trace{x.output(point.as_ref().map(|p|engine.loss_energy_at(t,p)));}
+        let Some(point)=point else{return};
         let(populations,folded)=model.readout(t.cluster,&point,&t.psi,t.time);held[i]=Some((populations,folded,model.profile_error(t.r),model.doppler_ratio(t.kappa)));
         if let Some(k)=listed.iter().position(|&l|l==i){samples[k]=Some((t.r,t.kappa));}
     };
-    record(t,0,held);windows.add(0,t);energy(t,&mut trace);
+    record(t,0,held,&mut trace);windows.add(0,t);
     for i in 1..outputs{
         let drawn=check.map(|_|check::drawn(t.seed,t.index,i,steps));
         for k in 1..=steps{
-            if let(Some(sampling),Some((at,deviate)),Some(x))=(check,drawn,trace.as_mut()){if k-1==at&&t.alive{x.look(engine,sampling,t,i,deviate);}}
+            if let(Some(sampling),Some((at,deviate)),Some(x))=(check,drawn,trace.as_mut()){if k-1==at&&t.alive{x.look(engine,sampling,Some(t),i,deviate);}}
             if t.alive{engine.step(t);if t.alive{windows.add((i-1)*steps+k,t);}}
         }
-        record(t,i,held);energy(t,&mut trace);
+        record(t,i,held,&mut trace);
         if let Some(every)=keep{if t.alive&&(i+t.index as usize)%every==0{kept.push(t.clone());}}
     }
     let jumps=t.jumps;

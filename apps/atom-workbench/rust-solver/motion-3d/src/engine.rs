@@ -1249,9 +1249,11 @@ impl<'a> Engine<'a>{
     }
     /// The loss's energy (# Loss) over the trap's depth (`Settings::region`): the kinetic energy and the trap's potential of
     /// the ground populations, −1 at the bottom of the reference well, 0 at the trap's far level (the loss's check, check.rs).
-    pub(crate) fn loss_energy(&self,t:&Trajectory)->f64{
-        let m=self.model;let point=m.point(t.r,t.kappa);let kinetic=0.5*m.hbar_over_mass*t.kappa.iter().map(|k|k*k).sum::<f64>();
-        (kinetic+m.trap_potential(t.cluster,&point,&t.psi,t.time))/self.settings.region
+    pub(crate) fn loss_energy(&self,t:&Trajectory)->f64{self.loss_energy_at(t,&self.model.point(t.r,t.kappa))}
+    /// The same at its point (`Model::point`) where the caller holds it.
+    pub(crate) fn loss_energy_at(&self,t:&Trajectory,point:&Point)->f64{
+        let m=self.model;let kinetic=0.5*m.hbar_over_mass*t.kappa.iter().map(|k|k*k).sum::<f64>();
+        (kinetic+m.trap_potential(t.cluster,point,&t.psi,t.time))/self.settings.region
     }
 
     /// A quantum jump at r and time `time` with the trajectory's (unnormalized) state, with the exact
