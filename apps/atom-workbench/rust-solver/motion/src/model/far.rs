@@ -217,7 +217,6 @@ pub(crate) struct Tone {
     /// δ_ω exactly (its index; no frame coordinate) and its value (rad/µs).
     pub(crate) beat: Beat,
     pub(crate) detuning: f64,
-    pub(crate) bases: Bases,
     /// [co-rotating, counter-rotating]: folded far.
     pub(crate) folded: [bool; 2],
     /// P_l'l (STATES × STATES) at `pairs[l' n + l]`, l' and l in the frequency's beam order.
@@ -349,7 +348,7 @@ impl Tone {
                 })
                 .collect()
         });
-        Ok(Tone { beat, detuning: nu[0], bases, folded, pairs, focus, jumps, responses, couplings, outside: o })
+        Ok(Tone { beat, detuning: nu[0], folded, pairs, focus, jumps, responses, couplings, outside: o })
     }
 }
 

@@ -26,7 +26,7 @@ impl Model {
         let c = &self.clusters[cluster];
         let mut out = vec![];
         for (w, (f, tone)) in self.light.frequencies.iter().zip(&self.tones).enumerate() {
-            if !lights.0[w] {
+            if !lights.on(w) {
                 continue;
             }
             for side in 0..2 {
@@ -89,7 +89,7 @@ impl Model {
     /// (their spatial mean; a term of q ≠ 0 averages out), and the near light's (eliminate.rs).
     pub fn asymptote(&self, p: &[f64; GROUND], lights: &Lights) -> f64 {
         let trap = self.light.trap;
-        if !lights.0[trap] {
+        if !lights.on(trap) {
             return 0.0;
         }
         let (f, tone) = (&self.light.frequencies[trap], &self.tones[trap]);
@@ -99,7 +99,7 @@ impl Model {
             for i in 0..n {
                 let (lj, li) = (f.beams[j], f.beams[i]);
                 let plane = self.light.beams[lj].waist.is_none() && self.light.beams[li].waist.is_none();
-                if plane && self.beam_wave[lj] == self.beam_wave[li] {
+                if plane && self.beam_wave[lj] == self.beam_wave[li] && lights.pair(trap, j, i) {
                     v += (0..GROUND).map(|b| (tone.pairs[j * n + i][(b, b)] * p[b]).re).sum::<f64>();
                 }
             }

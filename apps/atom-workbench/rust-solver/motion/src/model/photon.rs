@@ -30,8 +30,8 @@ use crate::linalg::{Mat, C64};
 use crate::request::{GROUND, STATES};
 
 /// One source of the jump operators (module documentation): its light (the frequency whose field it needs, None for an explicit
-/// state's), its beam (its coefficient a_l, or a_l* where `conjugate`; None: 1), its exact base beat and wave vector, its jumps
-/// per axis (GROUND × STATES, landing × source, in the model basis), and whether the jump carries its absorption's mean.
+/// state's), its beam (its coefficient a_l, or a_l* where `conjugate`; None: 1), its exact base beat and wave vector, its jumps,
+/// and whether the jump carries its absorption's mean.
 #[derive(Clone, Debug)]
 pub(crate) struct Source {
     pub(crate) frequency: Option<usize>,
@@ -39,8 +39,17 @@ pub(crate) struct Source {
     pub(crate) conjugate: bool,
     pub(crate) beat: Beat,
     pub(crate) wave: Wave,
-    pub(crate) jumps: [Mat; 3],
+    pub(crate) jumps: Jumps,
     pub(crate) folded: bool,
+}
+
+/// A source's jumps (landing ground state ← source state, per axis): constant (GROUND × STATES in the model basis: a far beam's
+/// C_a R_l, an explicit state's −C_a -- the excited amplitude a folded drive makes is −R x_g, so that a class's jump is
+/// C_a(R x_g − x_e), the physical photon's sign throughout), or a near carrier's beam's C_a T̃_l at the point (eliminate.rs).
+#[derive(Clone, Debug)]
+pub(crate) enum Jumps {
+    Constant([Mat; 3]),
+    Near { carrier: usize, beam: usize },
 }
 
 /// A member of a class: a source and its entries in the class (landing place in the landing cluster, source place in the
@@ -81,14 +90,14 @@ impl Model {
                         m
                     });
                     let wave = if side == 0 { self.beam_wave(l) } else { self.beam_wave(l).negated() };
-                    out.push(Source { frequency: Some(frequency), beam: Some(l), conjugate: side == 1, beat: nu.negated(), wave, jumps, folded: true });
+                    out.push(Source { frequency: Some(frequency), beam: Some(l), conjugate: side == 1, beat: nu.negated(), wave, jumps: Jumps::Constant(jumps), folded: true });
                 }
             }
         }
         out
     }
 
-    /// The explicit excited states' sources: C_a on each one's column, constant.
+    /// The explicit excited states' sources: −C_a on each one's column, constant (`Jumps`).
     pub(crate) fn explicit_sources(&self) -> Vec<Source> {
         (GROUND..STATES)
             .filter(|&e| self.explicit(e))
@@ -98,10 +107,61 @@ impl Model {
                 conjugate: false,
                 beat: self.axes.zero(),
                 wave: self.no_wave(),
-                jumps: std::array::from_fn(|a| Mat::from_fn(GROUND, STATES, |x, y| if y == e { self.emission[a][(x, e)] } else { C64::ZERO })),
+                jumps: Jumps::Constant(std::array::from_fn(|a| Mat::from_fn(GROUND, STATES, |x, y| if y == e { -self.emission[a][(x, e)] } else { C64::ZERO }))),
                 folded: false,
             })
             .collect()
+    }
+
+    /// Whether a source may jump from state s to b on some axis: a constant one's nonzero entries; a near beam's wherever its
+    /// carrier couples s.
+    fn may_jump(&self, source: &Source, b: usize, s: usize) -> bool {
+        match &source.jumps {
+            Jumps::Constant(m) => (0..3).any(|a| m[a][(b, s)] != C64::ZERO),
+            Jumps::Near { carrier, beam } => {
+                s < GROUND && (GROUND..STATES).any(|e| self.carriers[*carrier].folded[*beam][(e, s)] != C64::ZERO && (0..3).any(|a| self.emission[a][(b, e)] != C64::ZERO))
+            }
+        }
+    }
+
+    /// A source's jump b ← s (s at `place` in its cluster) on axis a at a point, and its matrix's gradient there (the
+    /// coefficient's is the caller's): a constant one's entry; a near beam's Σ_e C_a[b, e] T̃_l[e, place] (eliminate.rs).
+    pub(crate) fn jump(&self, source: &Source, a: usize, b: usize, s: usize, place: usize, near: Option<&super::eliminate::NearAt>) -> (C64, [C64; 3]) {
+        match &source.jumps {
+            Jumps::Constant(m) => (m[a][(b, s)], [C64::ZERO; 3]),
+            Jumps::Near { carrier, beam } => {
+                let t = &near.expect("a near source's jumps need the point's responses").responses[*carrier][*beam];
+                let c = &self.emission[a];
+                let mut value = C64::ZERO;
+                let mut gradient = [C64::ZERO; 3];
+                for e in 0..super::far::EXCITED {
+                    let x = c[(b, GROUND + e)];
+                    if x == C64::ZERO {
+                        continue;
+                    }
+                    value += x * t.value[(e, place)];
+                    for i in 0..3 {
+                        gradient[i] += x * t.gradient[i][(e, place)];
+                    }
+                }
+                (value, gradient)
+            }
+        }
+    }
+
+    /// A bound of a source's jump b ← s on axis a anywhere: a constant one's entry; a near beam's |C_a[b, ·]| times the norm of its
+    /// folded coupling's column at s, times 2/Γ_min (its response's resolvent is at most 2/Γ_min).
+    fn jump_bound(&self, source: &Source, a: usize, b: usize, s: usize) -> f64 {
+        match &source.jumps {
+            Jumps::Constant(m) => m[a][(b, s)].abs(),
+            Jumps::Near { carrier, beam } => {
+                let gamma = (0..super::far::EXCITED).map(|x| self.decay[(x, x)].re).fold(f64::INFINITY, f64::min);
+                let x = &self.carriers[*carrier].folded[*beam];
+                let column = (GROUND..STATES).map(|e| x[(e, s)].norm_sqr()).sum::<f64>().sqrt();
+                let row = (GROUND..STATES).map(|e| self.emission[a][(b, e)].norm_sqr()).sum::<f64>().sqrt();
+                row * column * 2.0 / gamma
+            }
+        }
     }
 
     /// The classes of a cluster's photons (module documentation, # Sources and classes): its sources' entries from its states,
@@ -112,7 +172,7 @@ impl Model {
         for (index, source) in self.sources.iter().enumerate() {
             for (sp, &s) in c.states.iter().enumerate() {
                 for b in 0..GROUND {
-                    if (0..3).all(|a| source.jumps[a][(b, s)] == C64::ZERO) {
+                    if !self.may_jump(source, b, s) {
                         continue;
                     }
                     let landing = self.membership[b];
@@ -175,7 +235,7 @@ impl Model {
 
     /// Whether a source's light is on.
     pub(crate) fn lit(&self, source: &Source, lights: &Lights) -> bool {
-        source.frequency.map_or(true, |f| lights.0[f])
+        source.frequency.map_or(true, |f| lights.on(f))
     }
 
     /// The photon classes of a cluster's state ψ (its frame amplitudes) at a point, every light on (SPEC §1.6; module
@@ -183,6 +243,7 @@ impl Model {
     pub fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
         let amplitudes = self.light.amplitudes(at.r);
         let lights = self.running();
+        let near = self.carriers.iter().any(|x| lights.on(x.frequency)).then(|| self.near_at(cluster, at, &amplitudes, &lights));
         let mut out = vec![];
         for class in &self.classes[cluster] {
             let n = self.clusters[class.landing].states.len();
@@ -201,18 +262,19 @@ impl Model {
                     for &(bp, sp) in &m.entries {
                         let s = self.clusters[cluster].states[sp];
                         let b = self.clusters[class.landing].states[bp];
-                        let x = source.jumps[a][(b, s)] * psi[sp] * phase;
+                        let (j, dj) = self.jump(source, a, b, s, sp, near.as_ref());
+                        let x = j * psi[sp] * phase;
                         own[a][bp] += x;
                         u[a][bp] += c.value * x;
                         if source.folded {
                             for i in 0..3 {
-                                gradients[i][a][bp] += c.gradient[i] * x;
+                                gradients[i][a][bp] += c.gradient[i] * x + c.value * dj[i] * psi[sp] * phase;
                             }
                         }
                     }
                 }
                 if !source.folded {
-                    explicit.extend(self.explicit_recoil(cluster, at, m.source, own));
+                    explicit.extend(self.explicit_recoil(cluster, at, m.source, own, psi));
                 }
             }
             if u.iter().all(|v| v.iter().all(|z| *z == C64::ZERO)) {
@@ -296,7 +358,7 @@ impl Model {
                 let norm: f64 = m
                     .entries
                     .iter()
-                    .map(|&(bp, sp)| source.jumps[a][(self.clusters[class.landing].states[bp], self.clusters[cluster].states[sp])].norm_sqr())
+                    .map(|&(bp, sp)| self.jump_bound(source, a, self.clusters[class.landing].states[bp], self.clusters[cluster].states[sp]).powi(2))
                     .sum::<f64>()
                     .sqrt();
                 out[a] += c * norm;

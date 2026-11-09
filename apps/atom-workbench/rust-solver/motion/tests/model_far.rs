@@ -38,7 +38,7 @@ fn close(a: f64, b: f64, relative: f64) -> bool {
 #[test]
 fn a_lone_tweezer_s_trap_frequencies_are_the_gaussian_beam_s() {
     let (request, _, model, p) = built("R1_TWEEZER");
-    let trap = model.trap(&p).unwrap();
+    let trap = model.trap(&p, &model.prepared()).unwrap();
     assert_eq!(trap.centre, [0.0; 3]);
     let beam = &request.beams[request.trap_beam];
     let (w, k) = (beam.waist.unwrap(), beam.wave_number);
@@ -64,7 +64,7 @@ fn a_lone_tweezer_s_trap_frequencies_are_the_gaussian_beam_s() {
 #[test]
 fn a_retro_reflected_tweezer_s_lattice_is_the_coherent_standing_wave_s() {
     let (request, _, model, p) = built("R1_RETRO");
-    let trap = model.trap(&p).unwrap();
+    let trap = model.trap(&p, &model.prepared()).unwrap();
     assert!(trap.centre.iter().all(|x| x.abs() < 1e-9), "{:?}", trap.centre);
     let beam = &request.beams[request.trap_beam];
     let (w, k) = (beam.waist.unwrap(), beam.wave_number);
@@ -105,7 +105,7 @@ fn the_envelope_bounds_the_prepared_potential() {
 fn the_reach_s_box_holds_its_sublevel_set() {
     for name in ["R1_TWEEZER", "R1_RETRO", "R1_CROSSED"] {
         let (_, _, model, p) = built(name);
-        let trap = model.trap(&p).unwrap();
+        let trap = model.trap(&p, &model.prepared()).unwrap();
         let reach = model.reach(&trap, &p, 100.0, 2e-3);
         let level = reach.minimum + reach.energy;
         assert!(reach.cell.iter().all(|[lo, hi]| lo.is_finite() && hi.is_finite() && lo < hi), "{name}: {:?}", reach.cell);
@@ -185,7 +185,7 @@ fn the_assembly_holds_the_potential_its_force_and_the_photons_rate() {
 fn the_far_scenes_units_fold_within_their_gates() {
     for name in ["R1_TWEEZER", "R1_RETRO", "R1_CROSSED", "R1_SIGMA_P"] {
         let (_, _, model, p) = built(name);
-        let trap = model.trap(&p).unwrap();
+        let trap = model.trap(&p, &model.prepared()).unwrap();
         let reach = model.reach(&trap, &p, 30.0, 2e-3);
         let units = model.units();
         let gates = model.gates(&units, &reach);
