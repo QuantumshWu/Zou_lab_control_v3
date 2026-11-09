@@ -23,14 +23,29 @@
 //! exact: with ψ_s = e^{iK_s·v(t − t_m)} x_s in the cluster's Doppler frame (`Cluster::waves`) x evolves under
 //! Ĥ(t) = Σ_j M_j e^{iω_j(t − t_m)} + diag(K_s·v), ω_j = Ω_j + q_j·v (`Path`), static where every pair of states holds one
 //! wave vector. A static Ĥ is propagated through its eigendecomposition at any time exactly (`spectral`), a beating one by
-//! CF4 on a grid (`beating`). The impulse (`Kick`), exact in its decomposition:
-//! - the shear: the conservative force at the fixed r_h on the start state, −∫⟨ψ₀|G(r_h, t)|ψ₀⟩dt/‖ψ₀‖², its parts' beats
-//!   at Ω_j alone (r is fixed): τ sinc(Ω_jτ/2) each. It depends on r_h and ψ₀ only, so the conservative kick is a shear
-//!   and the step symplectic (propagation.md §2.3);
-//! - what the state's change along the path adds: the evolved state's force along the path less the start state's,
-//!   −∫(⟨ψ(t)|G(path)|ψ(t)⟩/‖ψ(t)‖² − ⟨ψ₀|G(path)|ψ₀⟩/‖ψ₀‖²)dt, the second analytic (a lab beat Ω_j + (q_j + K_a − K_b)·v
-//!   per entry), the first by quadrature on the propagation; the lag that friction and the Sisyphus effect live in;
+//! CF4 on a grid (`beating`). The impulse is exact in its decomposition about the state at the step's middle, held in the
+//! frame, x_m = x(t_m) (= ψ(t_m), U(t_m) = 1):
+//! - the shear: the conservative force at the fixed r_h on x_m, −∫⟨x_m|G(r_h, t)|x_m⟩dt/‖x_m‖², its parts' beats at Ω_j
+//!   alone (r is fixed): τ sinc(Ω_jτ/2) each (`shear`). Of a state that does not change it depends on r_h alone: the
+//!   conservative kick is a shear and the step symplectic (propagation.md §2.3);
+//! - what the state's change along the path adds: the evolved state's force along the path less x_m's held in the frame,
+//!   −∫(⟨x(t)|Ĝ(t)|x(t)⟩/‖x(t)‖² − ⟨x_m|Ĝ(t)|x_m⟩/‖x_m‖²)dt, Ĝ(t) = Σ_j G_j e^{iω_j(t − t_m)}, one quadrature of the
+//!   difference on the propagation's nodes (B1's `force_change`, `Path::change`): it vanishes at every node, and with it
+//!   its quadrature's error, where the state does not change -- a lone ground state in a standing wave's far light takes
+//!   no grid error, however coarse its grid. The lag that friction and the Sisyphus effect live in;
 //! - less the reference's force: + τ∇V_ref(r_h), since V_ref's force is the A flow's.
+//!
+//! Held in the frame, not in the lab: a dressed state's coherences co-rotate with the light's phases along the path, so
+//! its force along the path is the frame's, constant where Ĥ is static (a running wave's radiation pressure, steady on the
+//! moving atom); held in the lab its coherence would slip against the light at K·v and its path force average away
+//! (sinc(k·vτ/2)), counting the steady force twice -- a running wave's pressure came out doubled. Shear and path then differ
+//! only by the frame's beats, the light pattern's spatial modulation the atom crosses, which is what the shear holds at r_h.
+//!
+//! The middle state, not the start's: the step's reverse propagates back through the same x_m, so the decomposition is the
+//! same both ways and the step its own inverse with the internal state changing too. About the start state the reverse
+//! took its own start, x(t₀ + τ), and Q(x) = ∫[F(r_h, x) − F(path, x)]dt, the midpoint rule's O(τ³(v·∇)²F) on that state,
+//! differed between the two: a two-level atom in a far-detuned standing wave missed its start by two hundred times the
+//! step's own error (tests). B1's PGC read the same T on the middle state as on the start state (propagation.md §2.3).
 //!
 //! # The path's momentum
 //! v_m = (ħ/m)(κ_h + Δκ/2), the mean of the momenta before and after the kick: the reverse step goes back on the same line
@@ -57,7 +72,7 @@ use crate::decide::COMPLEX;
 use crate::linalg::{self, inner, norm_sqr, C64, Mat};
 use crate::model::{Cluster, Generator, Part, Photon, Point, Quadratic, Recoil, STATES};
 use crate::random::Stream;
-use crate::units::UNIT_ROUNDOFF;
+use crate::units::{rounding, UNIT_ROUNDOFF};
 
 /// What one step needs from the model (SPEC §2.1, §1.6): defined here by its consumer, implemented by the model for its
 /// `Model` with the run's lights and the reference state. Each method is one model function; the integrator defines
@@ -99,8 +114,11 @@ pub trait Dynamics {
     fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES];
 
     /// The counted work of one generator assembly (`decide::Work`, real multiply-adds; `Model::work`'s): the step control
-    /// weighs the split's error against the beating grid's by it (`adapt`).
-    fn assembly_work(&self) -> f64;
+    /// weighs the split's error against the beating grid's by it (`adapt`). Until the model counts it, none: the balance
+    /// then prices a step by the integrator's own work alone.
+    fn assembly_work(&self) -> f64 {
+        0.0
+    }
 }
 
 /// A trajectory's state (SPEC §1.6, §1.7, §2.2).
@@ -126,9 +144,9 @@ pub struct Trajectory {
     /// The run's seed and the trajectory's number: its jumps' streams.
     pub seed: u64,
     pub index: u64,
-    /// The step control's state (`adapt`): the next step's proposed length (µs); the beating grid's phase, its spacing
-    /// times the generator's frequency bound (`beating`); the steps made (every `step`, the doubling's three and the
-    /// refused ones); the time from which the step cap left the steps unchecked (SPEC §2.2: that span is flagged).
+    /// The step control's state (`adapt`): the next step's proposed length (µs); the beating grid's largest spacing (µs,
+    /// `beating`); the steps made (every `step`, the doubling's three and the refused ones); the time from which the step
+    /// cap left the steps unchecked (SPEC §2.2: that span is flagged).
     pub tau: f64,
     pub grid: f64,
     pub steps: u64,
@@ -143,8 +161,8 @@ pub struct Trajectory {
 impl Trajectory {
     /// A trajectory at a basis state (a ground state of the model basis) at (r, κ) and time 0: ψ the unit vector of that
     /// state on its cluster, the first threshold from jump 0's stream (SPEC §2.4). Its first step is proposed as long as
-    /// its first output interval allows (`adapt` shortens it from there), its beating grid at one radian per spacing of
-    /// its frequency bound, the exponential series' unit radius (`adapt` refines it from there).
+    /// its first output interval allows and its beating grid no finer than its step's quarter (`adapt` refines both from
+    /// there).
     pub fn new<D: Dynamics>(model: &D, state: usize, r: [f64; 3], kappa: [f64; 3], seed: u64, index: u64) -> Trajectory {
         let cluster = model.cluster_of(state);
         let states = &model.cluster(cluster).states;
@@ -164,7 +182,7 @@ impl Trajectory {
             seed,
             index,
             tau: f64::INFINITY,
-            grid: 1.0,
+            grid: f64::INFINITY,
             steps: 0,
             capped: None,
             work: 0.0,
@@ -434,8 +452,8 @@ impl Segment {
 // The generator along the path (B).
 
 /// The cluster's generator along the step's path in its Doppler frame (module documentation, # The kick): the static
-/// Ĥ₀ = Σ_static M + diag(K_s·v) and its force G₀, the beats (ω_j = Ω_j + q_j·v, M_j, G_j), the middle t_m, the path's
-/// velocity v (µm/µs) and per state the gauge's rate K_s·v.
+/// Ĥ₀ = Σ_static M + diag(K_s·v) and its force G₀, the beats (ω_j = Ω_j + q_j·v, M_j, G_j), the middle t_m, and per
+/// state the gauge's rate K_s·v.
 #[derive(Clone, Debug)]
 struct Path {
     n: usize,
@@ -443,7 +461,6 @@ struct Path {
     still_force: [Mat; 3],
     beats: Vec<(f64, Mat, [Mat; 3])>,
     middle: f64,
-    velocity: [f64; 3],
     gauge: Vec<f64>,
 }
 
@@ -469,7 +486,7 @@ impl Path {
                 beats.push((part.omega + linalg::dot3(part.wave, velocity), part.generator.clone(), part.force.clone()));
             }
         }
-        Path { n, still, still_force, beats, middle, velocity, gauge }
+        Path { n, still, still_force, beats, middle, gauge }
     }
     /// w₁Ĥ(t₁) + w₂Ĥ(t₂), Ĥ(t) = Ĥ₀ + Σ_j M_j e^{iω_j(t − t_m)}.
     fn combined(&self, [t1, t2]: [f64; 2], [w1, w2]: [f64; 2]) -> Mat {
@@ -493,6 +510,13 @@ impl Path {
         }
         (f, norm)
     }
+    /// The state's change's force at the time t: the conditional force on the frame's state x less that on the middle
+    /// state held in the frame (module documentation, # The kick).
+    fn change(&self, x: &[C64], middle: &[C64], t: f64) -> [f64; 3] {
+        let (f, _) = self.force(x, t);
+        let (g, _) = self.force(middle, t);
+        std::array::from_fn(|a| f[a] - g[a])
+    }
     /// d‖x‖²/dt = 2 Im⟨x|Ĥ(t)|x⟩: the propagated norm's rate (−‖ψ‖² times the hazard, by the decay's construction).
     fn rate(&self, x: &[C64], t: f64) -> f64 {
         let mut s = form(&self.still, x);
@@ -501,16 +525,15 @@ impl Path {
         }
         2.0 * s.im
     }
-    /// The bound ν of the frequencies a force on the propagated state holds: 2(‖Ĥ₀‖₁ + Σ_j ‖M_j‖₁) + max|ω_j| (the
-    /// state's within the generator's bound, a beat's added).
-    fn bandwidth(&self) -> f64 {
-        2.0 * (self.still.norm1() + self.beats.iter().map(|(_, m, _)| m.norm1()).sum::<f64>())
-            + self.beats.iter().map(|(w, _, _)| w.abs()).fold(0.0, f64::max)
-    }
-    /// The panels of two spacings over τ at the grid's phase: ν|h| ≤ phase (`beating`).
-    fn panels(&self, tau: f64, phase: f64) -> usize {
-        ((self.bandwidth() * tau.abs() / (2.0 * phase)).ceil() as usize).max(1)
-    }
+}
+
+/// The panels of two spacings over τ with spacings no wider than h (`beating`): ⌈|τ|/2h⌉, at least one; a quotient within
+/// its rounding of a whole number is that number (the step control sets h to divide its steps, `adapt`).
+pub fn panels(tau: f64, spacing: f64) -> usize {
+    let x = tau.abs() / (2.0 * spacing);
+    let whole = x.round();
+    let panels = if (x - whole).abs() <= rounding(4) * x { whole } else { x.ceil() };
+    (panels as usize).max(1)
 }
 
 /// ⟨x|X|x⟩.
@@ -527,8 +550,8 @@ fn form(m: &Mat, x: &[C64]) -> C64 {
     s
 }
 
-/// The shear (module documentation, # The kick): −∫⟨ψ₀|G(r_h, t)|ψ₀⟩dt/‖ψ₀‖² over the step, at the fixed r_h each part at
-/// its beat Ω_j alone, ∫e^{iΩ_j(t − t_m)}dt = τ sinc(Ω_jτ/2).
+/// The shear (module documentation, # The kick): −∫⟨ψ|G(r_h, t)|ψ⟩dt/‖ψ‖² over the step of a state held, at the fixed r_h
+/// each part at its beat Ω_j alone, ∫e^{iΩ_j(t − t_m)}dt = τ sinc(Ω_jτ/2).
 fn shear(generator: &Generator, psi: &[C64], tau: f64) -> [f64; 3] {
     let norm = norm_sqr(psi);
     let mut f = [0.0; 3];
@@ -541,34 +564,17 @@ fn shear(generator: &Generator, psi: &[C64], tau: f64) -> [f64; 3] {
     f
 }
 
-/// The start state's force along the path, −∫⟨ψ₀|G(path(t), t)|ψ₀⟩dt/‖ψ₀‖² in the lab: per part and entry (a, b) the lab
-/// beat Ω_j + q_j·v + (K_a − K_b)·v, its integral τ sinc of half its phase over the step.
-fn start_on_path(path: &Path, generator: &Generator, psi: &[C64], tau: f64) -> [f64; 3] {
-    let (n, norm) = (path.n, norm_sqr(psi));
-    let mut f = [0.0; 3];
-    for part in &generator.parts {
-        let omega = part.omega + linalg::dot3(part.wave, path.velocity);
-        for i in 0..n {
-            for j in 0..n {
-                let w = psi[i].conj() * psi[j] * (tau * sinc(0.5 * (omega + path.gauge[i] - path.gauge[j]) * tau));
-                for a in 0..3 {
-                    f[a] -= (w * part.force[a][(i, j)]).re / norm;
-                }
-            }
-        }
-    }
-    f
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // The propagations.
 
-/// What a propagation of the frame's state over the step made: ψ at the step's end (lab), the evolved state's force
-/// along the path integrated, the first crossing of the threshold (from the step's start), the rounding bound of ψ
-/// relative to its norm, the panels of its grid (none: through the eigendecomposition), and its counted work.
+/// What a propagation of the frame's state over the step made: ψ at the step's end (lab) and at its middle (the frame's
+/// there, U(t_m) = 1), the state's change's force integrated over the step (`Path::change`), the first crossing of the
+/// threshold (from the step's start), the rounding bound of ψ relative to its norm, the panels of its grid (none: through
+/// the eigendecomposition), and its counted work.
 struct Propagated {
     psi: Vec<C64>,
-    impulse: [f64; 3],
+    middle: Vec<C64>,
+    change: [f64; 3],
     crossing: Option<f64>,
     rounding: f64,
     panels: Option<usize>,
@@ -584,6 +590,39 @@ fn gauged(path: &Path, x: &[C64], tau: f64) -> Vec<C64> {
 /// shifted QR to Schur form with its vectors, back substitution; R⁻¹ by LU), the count its algorithm takes.
 const EIGEN_WORK: f64 = 25.0;
 
+/// The counted work (`decide::Work`, real multiply-adds) of the integrator's operations on n states, one formula each:
+/// what the propagations add up and what `step_work` prices a step by.
+mod count {
+    use super::{COMPLEX, EIGEN_WORK};
+    /// The eigen-propagation through `nodes` integrand nodes: the decomposition, the four forms R†XR (2n³ each), and per
+    /// node n exponentials and four forms of n², and the held middle state's n gauge phases and three forms.
+    pub fn spectral(n: usize, nodes: usize) -> f64 {
+        let n3 = (n * n * n) as f64;
+        COMPLEX * (EIGEN_WORK * n3 + 8.0 * n3 + (nodes * (2 * n + 7 * n * n)) as f64)
+    }
+    /// One exponential of CF4 on the vector: its Taylor plan's products and the combined matrix of the static part and
+    /// `beats` beats, n² each.
+    pub fn exponential(n: usize, beats: usize, products: usize) -> f64 {
+        COMPLEX * ((products + beats + 1) * n * n) as f64
+    }
+    /// One grid node's change of force: on the propagated and on the held state, the static and every beat's three forms
+    /// and the norm, n² each.
+    pub fn node(n: usize, beats: usize) -> f64 {
+        COMPLEX * (2 * (4 + 3 * beats) * n * n) as f64
+    }
+    /// A step's shears, three forms of n² per part: on the predictor's generator (`first` parts) the start state's and the
+    /// first propagation's middle state's, on the corrector's (`second` parts) the second's.
+    pub fn forms(n: usize, first: usize, second: usize) -> f64 {
+        COMPLEX * (3 * (2 * first + second) * n * n) as f64
+    }
+}
+
+/// The bandwidth of the forms on a state propagated through the eigenvalues λ: max|λ_b* − λ_c| (their frequencies and
+/// decay rates).
+fn spread(lambda: &[C64]) -> f64 {
+    lambda.iter().flat_map(|a| lambda.iter().map(move |b| (a.conj() - *b).abs())).fold(0.0, f64::max)
+}
+
 /// The propagation of a static Ĥ₀ through its eigendecomposition Ĥ₀ = RΛR⁻¹ (exact at any time, its rounding κ(R)·u
 /// grown by the decay rates' spread over the step, `linalg::Eigen`): in the coordinates d = R⁻¹x, d(s) = e^{−iΛs}d₀, the
 /// force's and the norm's forms R†ĜR and R†R, the impulse by Gauss–Legendre to round-off at the bandwidth max|λ_b* − λ_c|
@@ -595,16 +634,19 @@ fn spectral(path: &Path, psi: &[C64], tau: f64, threshold: Option<f64>) -> Optio
     let gram = e.vectors.adjoint_product(&e.vectors);
     let forms: [Mat; 3] = std::array::from_fn(|a| e.vectors.adjoint_product(&path.still_force[a].product(&e.vectors)));
     let lambda = &e.values;
-    let bandwidth = lambda.iter().flat_map(|a| lambda.iter().map(move |b| (a.conj() - *b).abs())).fold(0.0, f64::max);
+    let bandwidth = spread(lambda);
     let growth = lambda.iter().map(|l| l.im).fold(f64::NEG_INFINITY, f64::max) - lambda.iter().map(|l| l.im).fold(f64::INFINITY, f64::min);
     let at = |s: f64| -> Vec<C64> { d0.iter().zip(lambda).map(|(d, l)| *d * (C64::new(0.0, -s) * *l).exp()).collect() };
+    let middle = e.vectors.apply(&at(0.5 * tau));
+    let start = path.middle - 0.5 * tau;
     let nodes = quadrature(0.0, tau, bandwidth);
-    let mut impulse = [0.0; 3];
+    let mut change = [0.0; 3];
     for &(s, w) in &nodes {
         let d = at(s);
         let norm = form(&gram, &d).re;
+        let (held, _) = path.force(&middle, start + s);
         for a in 0..3 {
-            impulse[a] -= w * form(&forms[a], &d).re / norm;
+            change[a] -= w * (form(&forms[a], &d).re / norm + held[a]);
         }
     }
     let end = at(tau);
@@ -621,14 +663,14 @@ fn spectral(path: &Path, psi: &[C64], tau: f64, threshold: Option<f64>) -> Optio
         };
         root(norm, 0.0, tau, theta)
     });
-    let n3 = (n * n * n) as f64;
     Some(Propagated {
         psi: gauged(path, &e.vectors.apply(&end), tau),
-        impulse,
+        middle,
+        change,
         crossing,
         rounding: e.condition * UNIT_ROUNDOFF * (1.0 + tau.abs() * growth),
         panels: None,
-        work: COMPLEX * (EIGEN_WORK * n3 + 8.0 * n3 + nodes.len() as f64 * (n + 4 * n * n) as f64),
+        work: count::spectral(n, nodes.len()),
     })
 }
 
@@ -644,35 +686,29 @@ fn cf4(path: &Path, x: &mut [C64], t: f64, h: f64) -> f64 {
         let a = path.combined(times, w);
         let plan = linalg::Taylor::steps(a.norm1() * h.abs());
         linalg::exp_apply(&a, C64::new(0.0, -h), x);
-        work += COMPLEX * ((plan.parts * plan.terms + path.beats.len() + 1) * path.n * path.n) as f64;
+        work += count::exponential(path.n, path.beats.len(), plan.parts * plan.terms);
     }
     work
 }
 
 /// The propagation of a beating Ĥ(t) by CF4 (`cf4`) on 2P spacings h, P = `panels`, the impulse by composite Simpson on
 /// its nodes: both of fourth order in νh, ν the force's frequency bound (`Path::bandwidth`), an error the step's doubling
-/// does not see (its steps take the same spacing), read by doubling the panels (`Step::regrid`, the step control's). The
-/// norm's root between the nodes that bracket it, by CF4 from the earlier node.
+/// does not see (its steps take the same spacing, `adapt`), read by doubling the panels (`Step::regrid`). The norm's root
+/// between the nodes that bracket it, by CF4 from the earlier node.
 fn beating(path: &Path, psi: &[C64], start: f64, tau: f64, panels: usize, threshold: Option<f64>) -> Propagated {
-    let n = path.n;
-    let h = tau / (2 * panels) as f64;
-    let mut x = gauged(path, psi, tau);
-    let (mut impulse, mut work) = ([0.0; 3], 0.0);
-    let (mut f, mut norm) = path.force(&x, start);
-    let mut crossing = None;
-    for k in 0..2 * panels {
+    let (n, nodes) = (path.n, 2 * panels);
+    let h = tau / nodes as f64;
+    let mut states = Vec::with_capacity(nodes + 1);
+    states.push(gauged(path, psi, tau));
+    let (mut work, mut crossing) = (0.0, None);
+    for k in 0..nodes {
         let t = start + k as f64 * h;
-        let before = x.clone();
+        let mut x = states[k].clone();
         work += cf4(path, &mut x, t, h);
-        let (g, next) = path.force(&x, t + h);
-        let weight = if k % 2 == 0 { 4.0 } else { 2.0 };
-        for a in 0..3 {
-            impulse[a] += h / 3.0 * (if k == 0 { f[a] } else { 0.0 } + weight * g[a]);
-        }
-        work += COMPLEX * ((4 + 3 * path.beats.len()) * n * n) as f64;
-        if let Some(theta) = threshold.filter(|&theta| crossing.is_none() && tau > 0.0 && next <= theta) {
+        if let Some(theta) = threshold.filter(|&theta| crossing.is_none() && tau > 0.0 && norm_sqr(&x) <= theta) {
             let from = k as f64 * h;
-            crossing = Some(if norm <= theta {
+            let before = &states[k];
+            crossing = Some(if norm_sqr(before) <= theta {
                 from
             } else {
                 root(
@@ -687,14 +723,20 @@ fn beating(path: &Path, psi: &[C64], start: f64, tau: f64, panels: usize, thresh
                 )
             });
         }
-        f = g;
-        norm = next;
+        states.push(x);
     }
-    // The last node's Simpson weight is 1, not the 2 its turn gave it.
-    for a in 0..3 {
-        impulse[a] -= h / 3.0 * f[a];
+    // Composite Simpson of the change's force on the nodes, weights 1, 4, 2, …, 4, 1 over h/3.
+    let middle = states[panels].clone();
+    let mut change = [0.0; 3];
+    for (k, x) in states.iter().enumerate() {
+        let weight = if k == 0 || k == nodes { 1.0 } else if k % 2 == 1 { 4.0 } else { 2.0 };
+        let f = path.change(x, &middle, start + k as f64 * h);
+        for a in 0..3 {
+            change[a] += h / 3.0 * weight * f[a];
+        }
     }
-    Propagated { psi: gauged(path, &x, tau), impulse, crossing, rounding: 0.0, panels: Some(panels), work }
+    work += (nodes + 1) as f64 * count::node(n, path.beats.len());
+    Propagated { psi: gauged(path, &states[nodes], tau), middle, change, crossing, rounding: 0.0, panels: Some(panels), work }
 }
 
 /// The first root in [lo, hi] of ln D(s) = ln θ for a non-increasing D with D(hi) ≤ θ, D and its rate from `norm` (lo
@@ -753,16 +795,18 @@ pub struct Step {
     retry: Option<Retry>,
 }
 
-/// What a beating propagation needs to be redone on a finer grid: its path, the start state, the step, its panels, its
-/// impulse.
+/// What a beating propagation needs to be redone on a finer grid: its generator and path, the start state, the step, its
+/// panels, the reference's force, its kick.
 #[derive(Clone, Debug)]
 struct Retry {
+    generator: Generator,
     path: Path,
     psi: Vec<C64>,
     start: f64,
     tau: f64,
     panels: usize,
-    impulse: [f64; 3],
+    reference: [f64; 3],
+    kick: [f64; 3],
 }
 
 impl Step {
@@ -772,8 +816,9 @@ impl Step {
     pub fn regrid(&self) -> Option<(Trajectory, f64)> {
         let r = self.retry.as_ref()?;
         let finer = beating(&r.path, &r.psi, r.start, r.tau, 2 * r.panels, None);
+        let kick = kick(&r.generator, &finer, r.reference, r.tau);
         let s = &self.segment;
-        let kicked = (s.kicked.0, std::array::from_fn(|a| s.kicked.1[a] + finer.impulse[a] - r.impulse[a]));
+        let kicked = (s.kicked.0, std::array::from_fn(|a| s.kicked.1[a] + kick[a] - r.kick[a]));
         let (r1, kappa1) = s.flow.advance(kicked, 0.5 * s.tau);
         let mut end = self.end.clone();
         end.r = r1;
@@ -791,18 +836,22 @@ pub enum Refused {
     Overflow,
 }
 
-/// One propagation of B at the path velocity v (module documentation, # The kick): the propagation, the kick (the shear
-/// `held`, less the start state's force along the path, plus the evolved state's, plus the reference's τ∇V_ref(r_h)) and
-/// the path.
-fn propagate<D: Dynamics>(model: &D, generator: &Generator, held: [f64; 3], from: &Trajectory, reference: [f64; 3], velocity: [f64; 3], tau: f64, threshold: Option<f64>) -> (Propagated, [f64; 3], Path) {
+/// The kick of a propagation (module documentation, # The kick): the shear of the middle state, the state's change's
+/// force along the path, and the reference's τ∇V_ref(r_h).
+fn kick(generator: &Generator, propagated: &Propagated, reference: [f64; 3], tau: f64) -> [f64; 3] {
+    let held = shear(generator, &propagated.middle, tau);
+    std::array::from_fn(|a| held[a] + propagated.change[a] + tau * reference[a])
+}
+
+/// One propagation of B at the path velocity v (module documentation, # The kick): the propagation, its kick and the path.
+fn propagate<D: Dynamics>(model: &D, generator: &Generator, from: &Trajectory, reference: [f64; 3], velocity: [f64; 3], tau: f64, threshold: Option<f64>) -> (Propagated, [f64; 3], Path) {
     let path = Path::new(generator, &model.cluster(from.cluster).waves, velocity, from.time + 0.5 * tau);
     let propagated = match path.beats.is_empty() {
         true => spectral(&path, &from.psi, tau, threshold),
         false => None,
     }
-    .unwrap_or_else(|| beating(&path, &from.psi, from.time, tau, path.panels(tau, from.grid), threshold));
-    let along = start_on_path(&path, generator, &from.psi, tau);
-    let kick = std::array::from_fn(|a| held[a] - along[a] + propagated.impulse[a] + tau * reference[a]);
+    .unwrap_or_else(|| beating(&path, &from.psi, from.time, tau, panels(tau, from.grid), threshold));
+    let kick = kick(generator, &propagated, reference, tau);
     (propagated, kick, path)
 }
 
@@ -820,12 +869,11 @@ pub fn step<D: Dynamics>(model: &D, from: &Trajectory, tau: f64) -> Result<Step,
     let first = model.generator(from.cluster, &Point { r: r_h, kappa: kappa_h, t: t_m });
     let held = shear(&first, &from.psi, tau);
     let predicted: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * (held[a] + tau * reference[a]));
-    let (one, kick_one, _) = propagate(model, &first, held, from, reference, predicted.map(|k| hm * k), tau, None);
+    let (one, kick_one, _) = propagate(model, &first, from, reference, predicted.map(|k| hm * k), tau, None);
     // The correction: the middle momentum of the first propagation's kick.
     let corrected: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * kick_one[a]);
     let second = model.generator(from.cluster, &Point { r: r_h, kappa: corrected, t: t_m });
-    let held = shear(&second, &from.psi, tau);
-    let (two, kick, path) = propagate(model, &second, held, from, reference, corrected.map(|k| hm * k), tau, Some(from.threshold));
+    let (two, kick, path) = propagate(model, &second, from, reference, corrected.map(|k| hm * k), tau, Some(from.threshold));
     let kicked = (r_h, std::array::from_fn(|a| kappa_h[a] + kick[a]));
     let (r1, kappa1) = flow.advance(kicked, half);
     if !(r1.iter().chain(&kappa1).all(|x| x.is_finite()) && two.psi.iter().all(|z| z.is_finite())) {
@@ -836,11 +884,9 @@ pub fn step<D: Dynamics>(model: &D, from: &Trajectory, tau: f64) -> Result<Step,
     end.kappa = kappa1;
     end.psi = two.psi.clone();
     end.time = from.time + tau;
-    let n = path.n as f64;
-    // The integrator's own work besides the propagations: the shears and the start state's path forces, n² per part.
-    let forms = COMPLEX * (3.0 * (first.parts.len() + 2 * second.parts.len()) as f64 * n * n);
+    let forms = count::forms(path.n, first.parts.len(), second.parts.len());
     let grid_work = [&one, &two].iter().filter(|p| p.panels.is_some()).map(|p| p.work).sum();
-    let retry = two.panels.map(|panels| Retry { path, psi: from.psi.clone(), start: from.time, tau, panels, impulse: two.impulse });
+    let retry = two.panels.map(|panels| Retry { generator: second, path, psi: from.psi.clone(), start: from.time, tau, panels, reference, kick });
     Ok(Step {
         end,
         crossing: two.crossing,
@@ -851,6 +897,32 @@ pub fn step<D: Dynamics>(model: &D, from: &Trajectory, tau: f64) -> Result<Step,
         grid_work,
         retry,
     })
+}
+
+/// The integrator's counted work of one step of τ through a cluster's generator at a point, the path at the velocity v
+/// (µm/µs), and of that step's grid doubling (zero without a grid): what `Step::work` and `Step::regrid` count, priced
+/// without taking the step -- the solve's price of a model it has not run, at its pilot's states and steps. Both
+/// propagations through the generator's own path (the eigen-propagation's Gauss–Legendre nodes at its spectrum's
+/// bandwidth, or the grid's CF4 sub-steps at spacings no wider than `grid`, each exponential's Taylor plan at the bound of
+/// (Ĥ₀ + Σ_j M_j)/2 over a spacing, which a sub-step's combination does not exceed) and the shears.
+pub fn step_work(generator: &Generator, waves: &[[f64; 3]], velocity: [f64; 3], tau: f64, grid: f64) -> (f64, f64) {
+    let path = Path::new(generator, waves, velocity, 0.0);
+    let (n, beats) = (path.n, path.beats.len());
+    let grid_work = |panels: usize| {
+        let h = tau / (2 * panels) as f64;
+        let bound = 0.5 * (path.still.norm1() + path.beats.iter().map(|(_, m, _)| m.norm1()).sum::<f64>()) * h.abs();
+        let plan = linalg::Taylor::steps(bound);
+        (2 * panels + 1) as f64 * count::node(n, beats) + (2 * panels) as f64 * 2.0 * count::exponential(n, beats, plan.parts * plan.terms)
+    };
+    let spectral = (beats == 0).then(|| linalg::eigen(&path.still)).flatten();
+    let (propagation, regrid) = match spectral {
+        Some(e) => (count::spectral(n, quadrature(0.0, tau, spread(&e.values)).len()), 0.0),
+        None => {
+            let panels = panels(tau, grid);
+            (grid_work(panels), grid_work(2 * panels))
+        }
+    };
+    (2.0 * propagation + count::forms(n, generator.parts.len(), generator.parts.len()), regrid)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -933,3 +1005,6 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) {
         trajectory.lost = Some(trajectory.time);
     }
 }
+
+#[cfg(test)]
+mod tests;
