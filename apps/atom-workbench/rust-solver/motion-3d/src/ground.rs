@@ -1744,17 +1744,17 @@ impl Ground{
     /// coupling kept, one allowance for the drives and the pairs (`pair_folds`): each the largest that gives its set before the closure -- the
     /// totals of a ground state's folded drives as it keeps them from the most saturated down, its total with none kept among them (its first
     /// kept drive lies below that, with other ground states' still folded: PGCP_10, the near probe's drives alone, its cooling beams folded),
-    /// and the pairs' m², each kept from the next allowance below its own; their set the explicit excited states and the pairs kept. The pairs
+    /// and the pairs' m², each kept from the next allowance below its own; their set the clusters before the closure. The pairs
     /// are the first rung's (`Ground::with` at EXISTS; where its rule fails, the drives' alone).
     pub fn allowances(request:&Request)->Result<Vec<f64>,String>{let bare=Ground::bare(request)?;Ok(bare.clustered(EXISTS).as_ref().unwrap_or(&bare).rungs())}
     /// The allowances of the rule's first rung (`allowances`): the rungs a solve climbs (solve.rs, # The fold's choice), each while it can pay.
     pub(crate) fn rungs(&self)->Vec<f64>{
         let g=self;let ne=g.excited_states.len();
         let estimated=g.estimated();let excited=Ground::judge(estimated.clone(),EXISTS);
-        // The pairs between ground states and their m², each a rung's boundary where its fold exists.
-        let pairs:Vec<f64>=g.items.iter().filter(|i|i.size>0.).map(|i|mixing(i.size,i.frequency.abs(),g.generator_scale,f64::MIN_POSITIVE).powi(2)).collect();
+        // The pairs between ground states, their states and m², each a rung's boundary where its fold exists.
+        let pairs:Vec<((usize,usize),f64)>=g.items.iter().filter(|i|i.size>0.).map(|i|(i.kind.states(),mixing(i.size,i.frequency.abs(),g.generator_scale,f64::MIN_POSITIVE).powi(2))).collect();
         let mut totals:Vec<f64>=vec![0.];
-        totals.extend(pairs.iter().copied().filter(|&m2|exists(m2.sqrt())));
+        totals.extend(pairs.iter().map(|p|p.1).filter(|&m2|exists(m2.sqrt())));
         totals.extend(excited.iter().filter(|x|matches!(x.kind,ExcitedKind::Static{..})&&exists(x.estimate.sqrt())).map(|x|x.estimate));
         for b in 0..g.ground_states.len(){
             let mut means:Vec<f64>=excited.iter().filter_map(|x|match x.kind{ExcitedKind::Drive(d)if d.ground==b=>Some(x.mean),_=>None}).collect();
@@ -1762,7 +1762,14 @@ impl Ground{
             for m in means{rest-=m;totals.push(rest.max(0.));}
         }
         totals.retain(|&t|t<EXISTS);totals.sort_by(|x,y|y.total_cmp(x));totals.dedup();
-        let set=|t:f64|(Ground::explicit_states(&Ground::judge(estimated.clone(),t),ne),pairs.iter().map(|&m2|pair_folds(m2.sqrt(),t)).collect::<Vec<bool>>());
+        // A rung's set: its clusters before the closure, the ground states and the explicit ones its kept drives, static couplings and pairs
+        // join (as `partition`'s) -- a pair kept between states already joined is the closure's to judge in their cluster (static in its
+        // frames, or within its dressing), no model of its own.
+        let ng=g.ground_states.len();
+        let set=|t:f64|{let mut union=Union::new(ng+ne);
+            for x in Ground::judge(estimated.clone(),t).iter().filter(|x|!x.folded){match x.kind{ExcitedKind::Drive(d)=>union.join(d.ground,ng+d.excited),ExcitedKind::Static{a,b}=>union.join(ng+a,ng+b)}}
+            for &((a,b),m2)in &pairs{if !pair_folds(m2.sqrt(),t){union.join(a,b);}}
+            union.sets().into_iter().filter(|s|s[0]<ng).collect::<Vec<Vec<usize>>>()};
         let mut out=vec![EXISTS];let mut last=set(EXISTS);
         for t in totals{let now=set(t);if now!=last{out.push(t);last=now;}}
         out

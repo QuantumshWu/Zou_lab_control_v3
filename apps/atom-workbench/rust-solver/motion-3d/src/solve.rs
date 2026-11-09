@@ -974,6 +974,8 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
         saves(p.work*n*weight*(outputs-1) as f64,checked_step(pilot_states.len(),bound_probes(&pilot_candidate.model,&pilot_states,&binding_at(&pilot_states,&weights,interval)).first,p.steps,interval,period)*p.work/p.steps as f64,least)});
     // A check's work per unit of the work per interval: the same steps' doublings at another model's work (the pilot's model's).
     let per_work=pilot_cost.as_ref().map_or(0.,|p|p.check/p.work);
+    // What no rung can beat on its totals: the trajectories and weight at the estimates no candidate changes (`Candidate::fixed`), no step bias.
+    let below=predicted(&pilot_statistics,&vec![[pilot_candidate.fixed()+pilot_beats*pilot_horizon;2];outputs],[0.;2],pilot as f64);
     // Each rung's first doubling by its clusters (`Candidate::clusters`): the same states' dynamics whatever the drives of round-off's
     // size between them, its biases the same at the rung's tolerances.
     let(mut rung,mut doubled)=(None,Vec::<(Vec<(Vec<usize>,Vec<usize>)>,usize,[f64;3],[f64;2])>::new());
@@ -989,14 +991,19 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
             let(fewest,weight)=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64);
             // Its check as the pilot's model's at its own work: spent whether it is taken or not. A rung is taken only for a saving
             // beyond the need's error: one whose floor cannot make it, its check paid, is passed over with its check unspent -- at
-            // whatever grid its search has come to, so that a rung no drive of which a run could read stops by its cost: the validation's tensor scenes' D1 light on the D2 states, 7 THz away at 1e-12 of
+            // whatever grid its search has come to --, and the walk stops where no rung below can make it (`below`: its work at least
+            // this one's, it keeps more; its totals at least those no candidate changes), so that a rung no drive of which a run could read stops by its cost: the validation's tensor scenes' D1 light on the D2 states, 7 THz away at 1e-12 of
             // saturation, merges the hyperfine levels into one cluster of 23 to 32 states on a grid of that beat, whose read on its 256 probes ran past five minutes where the rungs before it took a second.
+            // (R5038 at 129 uK: the first rung folds F = 1's static Zeeman pairs, m² 0.08, charged 16 %; the rung that keeps them lies below one
+            // that keeps a drive and fixes nothing, which stopped the walk.)
             let work_at=|s:&Settings|(interval_work(&c.model,&parts,s,interval,pilot_waiting),least_work(&c.model,&parts,s,interval,pilot_waiting));
             let floor_pays=|(work,floor):(f64,f64)|saves(floor*fewest*weight*(outputs-1) as f64,per_work*work,least);
-            let Some(phase)=grid_within(&c.model,&bare,&at,Some((&groups,duration)),&|phase|{let mut s=at.clone();s.node_phase=phase;floor_pays(work_at(&s))})else{break};
+            let below_pays=|(work,floor):(f64,f64)|saves(floor*below.0*below.1*(outputs-1) as f64,per_work*work,least);
+            if !below_pays(work_at(&at)){break;}
+            let Some(phase)=grid_within(&c.model,&bare,&at,Some((&groups,duration)),&|phase|{let mut s=at.clone();s.node_phase=phase;floor_pays(work_at(&s))})else{continue};
             c.phase=phase;at.node_phase=phase;
             let(at_work,at_least)=work_at(&at);
-            if !floor_pays((at_work,at_least)){break;}
+            if !floor_pays((at_work,at_least)){continue;}
             let check=per_work*at_work;
             let states=relaxed(&c.model,&at,bare);let binding=binding_at(&states,&weights,interval);let probes=bound_probes(&c.model,&states,&binding);
             // That doubling, made, from the coarse side as the grid's (`grid_phase`): at the fewest steps whose work per interval still is at least the work no step changes (W(s) = a s + least_work), at most the pilot's -- a read of the
@@ -1017,7 +1024,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
             // first) is passed over unchecked; one that saves beyond the error is costed.
             let x=(coarse as f64/fewest_steps as f64).powi(2);
             let(n,weight)=predicted(&pilot_statistics,&apriori,[r[1]*x*tolerances[0],r[2]*x*tolerances[1]],pilot as f64);
-            if !saves(interval_work(&c.model,&parts,&running(c.reference(),fewest_steps,pilot_waiting,at.doppler,at.node_phase),interval,pilot_waiting)*n*weight*(outputs-1) as f64,check,least){break;}
+            if !saves(interval_work(&c.model,&parts,&running(c.reference(),fewest_steps,pilot_waiting,at.doppler,at.node_phase),interval,pilot_waiting)*n*weight*(outputs-1) as f64,check,least){continue;}
             let costed=evaluate(&c,&states,&begun,Some((Check{steps:coarse,population:r[0],loss:r[1],motion:r[2]},tolerances)),&deposits);
             // A rung keeps more of the model explicit: taken only for a saving beyond the prediction's own uncertainty.
             if saves(costed.cost,0.,least){least=costed.cost;rung=Some((c,states,begun,costed.checked));}
