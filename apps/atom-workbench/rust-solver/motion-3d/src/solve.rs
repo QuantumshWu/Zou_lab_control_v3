@@ -282,7 +282,10 @@
 //! statistic at the held share flagged an output 94 % lost for an error of 6 % among its last atoms (R5040), and the choice weighs the same totals.
 //! What is too few to read has two forms. A spread takes two samples (stats.rs `reads_spread`): two atoms for a T, two groups for a standard error. A count of none takes more, as far as its room asks:
 //! trajectories alike read no error: N atoms all lost, or none of them in a state, stand at a jackknife of zero, which says nothing of what none of them met; Wilson's interval at `CONFIDENCE` leaves it up to z²/(N + z²) away (`unseen`). So an output's populations and loss take at least the trajectories that bring that within their room, z²(1/R − 1), 76 at the target (`population_ratio`), and the reported error is at least that far end. (A probe at 1 W/cm², 2.5 % held at its first output of 10 us: its pilot of 32 kept none, its run of 16 read all lost.) It is what a count of none says, and below what any output with counts to read asks but for a run of very few trajectories, whose N it sets.
-//! An output's need is its trajectories so far times its worst ratio squared (the statistics over their rooms); a trajectory
+//! An output's need is the fewest trajectories at which its statistics would lie within their rooms, each standard error going as
+//! N^−½ and its quantile read at the groups those trajectories would give: its trajectories so far times its worst ratio
+//! squared where its groups are many, less where few groups read it now (R5068's T held by two groups of a first batch of 128
+//! asked 1386 trajectories at Student's t of one degree of freedom, 192 where the third group's t of two meets it, `need_of`); a trajectory
 //! that reaches an output passes every earlier one, so that the trajectories an output must be passed by -- its reach -- are the
 //! largest need from it on, and a batch's trajectories run only as far as the outputs that still want them, half a period past
 //! the last (lib.rs `simulate_to`): the outputs where T binds or the fold's memory leaves the populations little room are often
@@ -355,7 +358,7 @@ use crate::ledger::{Ledger,Total};
 use crate::read::Read;
 use crate::model::{Exact,Model,Trap,MOST_MIXED,MOST_STATES,NOT_LINDBLAD};
 use crate::control::Harmonic;
-use crate::stats::{largest_look,reads_spread,summarize,variance_noise,Estimate,Group,Scales,Spread,Sums,KT_PER_UK};
+use crate::stats::{largest_look,quantile,reads_spread,summarize,variance_noise,Estimate,Group,Scales,Spread,Sums,KT_PER_UK};
 use crate::{pilot_start,sample_states,simulate_to,Initial,Outcome,TASK};
 use crate::{Complex,Request,STATES};
 use rayon::prelude::*;
@@ -468,11 +471,13 @@ fn shown_error(e:&Estimate,z:f64)->f64{e.shown_errors.iter().map(|x|x.at(z)).fol
 fn held_share(e:&Estimate)->f64{(1.-e.loss).max(0.)}
 /// An output's statistical errors at CONFIDENCE: the populations' as shown and the loss's largest (`shown_error`, absolute) and T's largest
 /// relative one over the axes, at the share of atoms it reads (# Batches), with its target's weight there (`regime`).
+/// Each with the groups its quantile reads (stats.rs `Spread::groups`, `quantile`): the rows' and the loss's every reaching group, T's those holding an atom.
 #[derive(Clone,Copy,Debug)]
-struct Statistic{population:f64,temperature:f64,weight:f64}
+struct Statistic{population:f64,temperature:f64,weight:f64,groups:[f64;2]}
 fn statistics(e:&Estimate,frequencies:[f64;3])->Statistic{
     Statistic{population:shown_error(e,CONFIDENCE),
-        temperature:held_share(e)*(0..3).map(|a|if e.temperature[a]>0.&&reads_spread(e.temperature_error[a].groups){e.temperature_error[a].at(CONFIDENCE)/e.temperature[a]}else{0.}).fold(0.,f64::max),weight:regime(e,frequencies)}
+        temperature:held_share(e)*(0..3).map(|a|if e.temperature[a]>0.&&reads_spread(e.temperature_error[a].groups){e.temperature_error[a].at(CONFIDENCE)/e.temperature[a]}else{0.}).fold(0.,f64::max),weight:regime(e,frequencies),
+        groups:[e.loss_error.groups,e.temperature_error[0].groups]}
 }
 /// Whether an output holds the atoms a temperature, a variance over them, takes (`reads_spread`).
 fn reads_temperature(e:&Estimate)->bool{reads_spread(held_atoms(e).round())}
@@ -504,9 +509,11 @@ fn last_holding(outputs:usize,holds:&dyn Fn(usize)->bool)->Vec<usize>{(0..output
 fn statistics_of(estimates:&[Estimate],frequencies:[f64;3])->Vec<Statistic>{
     let mut all:Vec<Statistic>=estimates.iter().map(|e|statistics(e,frequencies)).collect();
     let(counts,groups):(Vec<f64>,Vec<f64>)=estimates.iter().map(|e|(e.trajectories,e.groups)).unzip();
-    let population=steady(&all.iter().map(|s|s.population).collect::<Vec<f64>>(),&counts,&groups);
-    let temperature=steady(&all.iter().map(|s|s.temperature).collect::<Vec<f64>>(),&counts,&groups);
-    for(i,s)in all.iter_mut().enumerate(){s.population=population[i];s.temperature=temperature[i];}
+    // The noise smoothed is the standard errors' (`steady`); each output's quantile (stats.rs `quantile`) multiplies after.
+    let q=|s:&Statistic,k:usize|quantile(CONFIDENCE,s.groups[k]);let(part,whole)=(|x:f64,q:f64|if q.is_finite(){x/q}else{x},|x:f64,q:f64|if q.is_finite(){x*q}else{x});
+    let population=steady(&all.iter().map(|s|part(s.population,q(s,0))).collect::<Vec<f64>>(),&counts,&groups);
+    let temperature=steady(&all.iter().map(|s|part(s.temperature,q(s,1))).collect::<Vec<f64>>(),&counts,&groups);
+    for(i,s)in all.iter_mut().enumerate(){s.population=whole(population[i],q(s,0));s.temperature=whole(temperature[i],q(s,1));}
     all
 }
 /// Standard errors per output (`values`, at the trajectories and the groups behind each, the first output's left alone) with their
@@ -571,6 +578,18 @@ fn past_targets(statistics:&[Statistic],apriori:&[[f64;2]])->bool{
 /// The trajectories each output must be passed by (module documentation, # Batches): the largest of its need and every later
 /// output's.
 fn reaches(needs:&[f64])->Vec<f64>{let mut most=0_f64;let mut out:Vec<f64>=needs.iter().rev().map(|&x|{most=most.max(x);most}).collect();out.reverse();out}
+/// The trajectories a statistic read on `n` of them and `groups` groups asks for (module documentation, # Batches): the fewest N at
+/// which it lies within its room, its standard error going as N^−½ and its quantile read at the groups N would give, as many per
+/// trajectory as now (stats.rs `quantile`) -- n times its ratio squared on unlimited groups (a pilot's prediction); where few groups
+/// read it, the least N the quantile at N's groups meets, by halving between its value on unlimited groups and the first doubling that meets.
+fn need_of(n:f64,statistic:f64,groups:f64,room:f64)->f64{
+    if !(statistic>0.){return 0.;}let q=quantile(CONFIDENCE,groups);if !(q.is_finite()&&statistic.is_finite()){return f64::INFINITY;}
+    let part=statistic/q;let asks=|m:f64|n*(quantile(CONFIDENCE,groups*m/n)*part/room).powi(2);
+    let mut low=n*(CONFIDENCE*part/room).powi(2);if groups==f64::INFINITY{return low;}
+    let mut high=low.max(n);while high<asks(high){if high>=MOST_TRAJECTORIES as f64{return high;}low=high;high*=2.;}
+    while high-low>1.{let m=0.5*(low+high);if m>=asks(m){high=m;}else{low=m;}}
+    high
+}
 /// The run's room beside the a-priori estimates -- the step's bias and the statistics together, their work going as
 /// R^−(2+1/p) at their cost-optimal split, in quadrature (module documentation, # Shares): what the estimates leave of the
 /// target's square, or beyond (1 − s²) of it their balance αA²/(k − α), α = 2 + 1/p; at most the target. The step takes its share s (`tolerances`).
@@ -1089,7 +1108,9 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
         let booked=booked(&base,pilot_beats.max(outcome.beats)*horizon);let records=records(&model,&booked,&estimates,bias,trap.lab,&memory,reference.1);
         let counts:Vec<u64>=estimates.iter().map(|e|e.trajectories as u64).collect();
         let worst=output_ratios(&records);let ratio=worst.iter().fold(0_f64,|m,r|m.max(r[0]).max(r[1]));
-        let reach=reaches(&worst.iter().zip(&counts).map(|(r,&n)|n as f64*r[0].max(r[1]).powi(2)).collect::<Vec<f64>>());
+        // Each output's need (`need_of`): its populations' and loss's at least what their count leaves open (`unseen_need`), and T's.
+        let reach=reaches(&records.iter().enumerate().map(|(i,r)|if i==0{0.}else{let(n,p,t,e)=(r.estimate.trajectories,&r.population,&r.temperature,r.estimate);
+            need_of(n,p.statistic,e.loss_error.groups,p.room()).max(unseen_need(p.room())).max(need_of(n,t.statistic,e.temperature_error[0].groups,t.room()))}).collect::<Vec<f64>>());
         let wanted=reach[1].ceil() as u64;let reach:Vec<u64>=reach.iter().map(|x|(x.ceil() as u64).min(MOST_TRAJECTORIES)).collect();
         let last=(1..outputs).rev().find(|&i|reach[i]>counts[i]);
         let mut ledger=ledger(&model,&booked,&records,times,allowance,last.is_none());
@@ -2046,7 +2067,7 @@ mod tests{
     #[test]
     fn past_the_targets_reads_the_estimates_not_the_weight_s_round_off(){
         // A run's need brings its binding total to the target itself: its weight is 1 within round-off, on either side.
-        let statistics:Vec<Statistic>=(0..5).map(|i|Statistic{population:0.2+0.01*i as f64,temperature:0.05,weight:1.}).collect();
+        let statistics:Vec<Statistic>=(0..5).map(|i|Statistic{population:0.2+0.01*i as f64,temperature:0.05,weight:1.,groups:[f64::INFINITY;2]}).collect();
         let within=vec![[0.02,0.03];5];
         let(_,weight)=predicted(&statistics,&within,[0.;2],32.);
         assert!((weight-1.).abs()<1e-12&&!past_targets(&statistics,&within),"{}",weight-1.);
@@ -2133,6 +2154,17 @@ mod tests{
         e.shown_errors=vec![spread(0.005),spread(0.001)];assert!((at(&e)-CONFIDENCE*0.01).abs()<1e-15);
         e.shown_errors=vec![spread(f64::INFINITY);2];e.loss_error=spread(f64::INFINITY);assert_eq!(at(&e),f64::INFINITY);e.loss=0.5;assert_eq!(at(&e),f64::INFINITY);
     }
+    /// An output's need reads the quantile at the groups its trajectories would give (`need_of`): on unlimited groups n times its ratio
+    /// squared; R5068's T held by two of a first batch's 16 groups, at Student's t of one degree of freedom, 192 trajectories where its
+    /// ratio squared asked 1386; a statistic within its room met at the trajectories it has, one beyond it wanting more, at any groups.
+    #[test]
+    fn a_need_reads_the_quantile_at_the_groups_it_would_give(){
+        let(room,n)=(0.0916_f64,128_f64);
+        assert_eq!(need_of(n,0.05,f64::INFINITY,0.1),n*0.25);
+        let s=0.3013;let(naive,asked)=(n*(s/room).powi(2),need_of(n,s,2.,room));assert!((naive-1385.).abs()<2.&&asked==192.,"{naive} {asked}");
+        for g in [4.,16.,64.]{let(met,not)=(need_of(n,0.9*room,g,room),need_of(n,1.1*room,g,room));assert!(met<=n&&not>n,"{g}: {met} {not}");}
+        assert_eq!(need_of(n,0.,1.,room),0.);assert_eq!(need_of(n,f64::INFINITY,1.,room),f64::INFINITY);
+    }
     /// What trajectories alike leave open (`unseen`): 16 atoms all lost leave 20 % possible, a jackknife's zero says nothing of it. An output's populations and loss take at least the trajectories that bring it within their room, 76 at the target, in the pilot's prediction and in a run's
     /// ratio alike; beyond them it asks nothing, and a statistic above it stands. The reported error is at least its far end.
     #[test]
@@ -2141,9 +2173,9 @@ mod tests{
         let n=unseen_need(POPULATION_TARGET);assert!((n-76.).abs()<1e-9&&(unseen(n)-POPULATION_TARGET).abs()<1e-15);
         assert!((population_ratio(0.,POPULATION_TARGET,n)-1.).abs()<1e-15&&population_ratio(0.,POPULATION_TARGET,2.*n)<1.);
         assert_eq!(population_ratio(0.1,POPULATION_TARGET,100.),2.);
-        let none=[Statistic{population:0.,temperature:0.,weight:1.};3];
+        let none=[Statistic{population:0.,temperature:0.,weight:1.,groups:[f64::INFINITY;2]};3];
         let(need,weight)=predicted(&none,&[[0.;2];3],[0.;2],32.);assert!((need-n).abs()<1e-9&&weight==1.,"{need} {weight}");
-        let read=[Statistic{population:0.,temperature:0.,weight:1.},Statistic{population:0.1,temperature:0.,weight:1.},Statistic{population:0.,temperature:0.,weight:1.}];
+        let read=[Statistic{population:0.,temperature:0.,weight:1.,groups:[f64::INFINITY;2]},Statistic{population:0.1,temperature:0.,weight:1.,groups:[f64::INFINITY;2]},Statistic{population:0.,temperature:0.,weight:1.,groups:[f64::INFINITY;2]}];
         let(reach,_)=predicted(&read,&[[0.;2];3],[0.;2],32.);assert!((reach-128.).abs()<1e-9,"{reach}");
         let at=|statistic:f64|Account{statistic,open:unseen(76.),bias:0.,model:0.,target:POPULATION_TARGET}.read();
         assert!((at(0.)-POPULATION_TARGET).abs()<1e-15);
@@ -2246,7 +2278,7 @@ mod tests{
         // The shallow probe's T, 8.99 % a priori, just beyond the turn: the run's room 4.50 %, the step's 2.01 % of it, the statistics' 4.02 %.
         let(run,t)=(run_room(0.1,0.0899),BIAS_SHARE*run_room(0.1,0.0899));assert!((run-0.04495).abs()<1e-12&&(room(0.1,floor(0.0899,t))-0.0402).abs()<1e-4,"{run} {t}");
         // One output after t = 0: the need and the weight across the turn and the target.
-        let need=|f:f64|predicted(&[Statistic{population:0.,temperature:0.,weight:0.},Statistic{population:0.01,temperature:0.,weight:0.}],&[[0.;2],[f,0.]],[0.;2],32.);
+        let need=|f:f64|predicted(&[Statistic{population:0.,temperature:0.,weight:0.,groups:[f64::INFINITY;2]},Statistic{population:0.01,temperature:0.,weight:0.,groups:[f64::INFINITY;2]}],&[[0.;2],[f,0.]],[0.;2],32.);
         let(n,w)=need(0.01);assert!((n-unseen_need(room(POPULATION_TARGET,0.01))).abs()<1e-9&&w==1.,"{n} {w}");
         let(mut last,mut weight)=need(0.);
         for i in 1..=2000{let(n,w)=need(i as f64*5e-5);assert!((n-last).abs()<=0.05*last.max(TASK as f64)&&(w-weight).abs()<=0.03*weight,"{i}: {n} {w} after {last} {weight}");(last,weight)=(n,w);}

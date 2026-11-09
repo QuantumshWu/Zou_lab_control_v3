@@ -83,10 +83,13 @@ impl Spread{
     pub const EXACT:Spread=Spread{error:0.,groups:f64::INFINITY};
     /// Too few groups to read a spread on (`reads_spread`): its error unknown.
     fn unread(groups:f64)->Spread{Spread{error:f64::INFINITY,groups}}
-    /// Its error at z: Student's t at its groups less one there times its standard error, z on unlimited groups; unknown on fewer than two.
-    pub fn at(&self,z:f64)->f64{
-        if self.groups==f64::INFINITY{z*self.error}else if reads_spread(self.groups){student(z,self.groups-1.)*self.error}else{f64::INFINITY}
-    }
+    /// Its error at z: its quantile there (`quantile`) times its standard error; unknown on fewer than two groups.
+    pub fn at(&self,z:f64)->f64{let q=quantile(z,self.groups);if q.is_finite(){q*self.error}else{f64::INFINITY}}
+}
+/// The quantile at z of an error read on `groups` groups (`Spread`): Student's t at one degree of freedom fewer than its whole
+/// groups (`student`), z on unlimited groups; unbounded below two.
+pub(crate) fn quantile(z:f64,groups:f64)->f64{
+    if groups==f64::INFINITY{z}else if reads_spread(groups.floor()){student(z,groups.floor()-1.)}else{f64::INFINITY}
 }
 
 /// Student's t at ν degrees of freedom (a whole number, at least one) at the normal's two-sided tail beyond z: the q with
