@@ -886,8 +886,10 @@ impl Model{
             let free=|k:usize|axes.contains(&(u,k));let e=one(u).unwrap_or_else(||error(u,&|k|!free(k)));
             profiles.push((u,e,self.places(u).iter().map(|&i|self.weights[i]).fold(0_f64,f64::max)));}
         self.profiles=profiles;
-        // The axes on their ranges: an intensity on [0, 1], a polarization's coordinate on its range over the reach.
-        self.axes=axes.iter().map(|&(u,c)|{let(lo,hi)=if c==0{(0.,1.)}else{charts[u].iter().fold((f64::INFINITY,f64::NEG_INFINITY),|(lo,hi),x|(lo.min(x[c]),hi.max(x[c])))};
+        // The axes on their ranges: an intensity on [0, 1], a polarization's coordinate on its range over the reach and at the focus, where the
+        // search for each state's trap starts (`trap`).
+        self.axes=axes.iter().map(|&(u,c)|{let at=self.ground.chart_of(u,&focus)[c];
+            let(lo,hi)=if c==0{(0.,1.)}else{charts[u].iter().fold((at,at),|(lo,hi),x|(lo.min(x[c]),hi.max(x[c])))};
             Axis{unit:u,coordinate:c,lo,hi}}).collect();
         self.focused=self.axes.iter().map(|a|a.unit).collect();self.held=focus;
         Ok(())
@@ -2575,8 +2577,9 @@ impl Model{
     /// its centre: a bound of c = sup −V_T/(D_T L) over the intensities of the units of the trap's light in (0, 1], L
     /// their mean weighted by each one's share of the depth at the centre, every other focused unit's in [0, 1]. Every
     /// point's intensities lie in that set and a
-    /// unit's intensity lies below the largest of its beams' profiles A_l(r), so −V_T(r) ≤ c D_T L ≤ c D_T max_l A_l(r)
-    /// everywhere: the initial ensemble's envelope (ensemble.rs).
+    /// field's intensity lies below B_u times the largest of its beams' profiles A_l(r) (`Unit::reach`: B = 1 where its beams' fields are
+    /// parallel, 1/2 for two crossed at right angles), so −V_T(r) ≤ c D_T L ≤ c D_T max_u B_u max_l A_l(r) everywhere: the initial ensemble's
+    /// envelope (ensemble.rs), c max_u B_u returned.
     ///
     /// Proven, not sampled: on each cell of the tables' grid in the units' intensities `level` is a polynomial -- `cubic`'s weights in
     /// each unit's intensity, times its s where the trap's own near beams scale with it: quartic in those, cubic in the
@@ -2632,7 +2635,8 @@ impl Model{
             // where −V_T is 0); L = 1 throughout without a unit.
             (0..size).filter_map(|p|{let l:f64=if t>0{(0..t).map(|i|weights[i]*place(p,i)).sum()}else{1.};(l>0.).then(||v[p]/l)}).fold(f64::NEG_INFINITY,f64::max)
         }).collect();
-        Ok(bounds.into_iter().fold(f64::NEG_INFINITY,f64::max)/depth)
+        let reach=if t>0{traps.iter().map(|&f|g.units[self.focused[f]].reach()).fold(0_f64,f64::max)}else{1.};
+        Ok(bounds.into_iter().fold(f64::NEG_INFINITY,f64::max)/depth*reach)
     }
     /// The diagonal of h0 and of the near light's shift for a cluster state, the units at
     /// the intensities `units(u)` and the near beams' fields' products ā_l a_m at `beams(l, m)` (`potential`): the groups' S at the

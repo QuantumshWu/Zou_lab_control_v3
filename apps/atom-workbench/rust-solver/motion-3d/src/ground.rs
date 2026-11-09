@@ -360,6 +360,12 @@ impl Unit{
         let span=hi-lo;let s=self.chart(&e,None)[c];let dark=if c==0{self.chart(&rest,None)[0]}else{s};
         (((s-lo)/span).clamp(0.,1.),((dark-lo)/span).clamp(0.,1.),std::array::from_fn(|d|self.chart(&e,Some(&slope[d]))[c]/span))
     }
+    /// B, its intensity's largest over its beams' profiles' largest, I ≤ B max_l |a_l|²: Σ_lm |⟨γ_l, γ_m⟩|/N, |Σ_l a_l γ_l|² ≤ Σ_lm |a_l| |a_m| |⟨γ_l, γ_m⟩| --
+    /// 1 for parallel fields, which reach N in phase.
+    pub fn reach(&self)->f64{
+        if self.rank==1{return 1.;}let(n,r)=(self.beams.len(),self.rank);
+        (0..n).flat_map(|l|(0..n).map(move|m|(l,m))).map(|(l,m)|(0..r).fold(Complex::ZERO,|s,k|s+self.weights[l*r+k].conj()*self.weights[m*r+k]).abs()).sum::<f64>()/self.norm
+    }
     /// Whether its field varies over the trap: a Gaussian beam's, or interfering beams'.
     pub fn varies(&self,beams:&[Beam])->bool{self.beams.len()>1||beams[self.beams[0]].waist_um.is_some()}
     /// The matrices of T's coordinates (`t_coordinates`' order) of a Hermitian form Σ_jk E_j* E_k C(j, k) given by its coefficients between
