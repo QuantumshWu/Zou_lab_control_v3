@@ -24,7 +24,7 @@
 use super::cluster::Edge;
 use super::reach::{distance, doppler, lipschitz, Bounds, Cell, Span};
 use crate::linalg::norm3;
-use super::{Beat, Component, Gate, Model, Reach, Sample, Unit, UnitError, Wave};
+use super::{Component, Gate, Model, Reach, Sample, Unit, UnitError, Wave};
 use crate::linalg::{Mat, C64};
 use crate::request::{GROUND, STATES};
 
@@ -345,9 +345,5 @@ impl Model {
         self.beam_wave(absorbed).plus(-1, &self.beam_wave(emitted))
     }
 
-    /// A beat's exact frame difference: θ_a − θ_b of a term absorbing at ν_from and emitting at ν_to, ν_from − ν_to.
-    pub(crate) fn term_beat(&self, from: Component, to: Component) -> Beat {
-        self.axes.component(&self.light, from).plus(-1, &self.axes.component(&self.light, to))
-    }
 }
 

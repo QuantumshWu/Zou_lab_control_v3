@@ -80,6 +80,28 @@ impl<'a> Parts<'a> {
             }
         }
     }
+    /// Adds a Hermitian term c M(r) whose matrix varies with the point: its entries `value(x, y)` and their gradients
+    /// `gradient(i, x, y)`, the force ∇c M + c ∇M.
+    pub(crate) fn add_varying(&mut self, beat: &Beat, wave: &Wave, c: &Amplitude, value: &dyn Fn(usize, usize) -> C64, gradient: &dyn Fn(usize, usize, usize) -> C64) {
+        let cluster = &self.model.clusters[self.cluster];
+        let n = cluster.states.len();
+        for x in 0..n {
+            for y in 0..n {
+                let m = value(x, y);
+                if m == C64::ZERO {
+                    continue;
+                }
+                let b = beat.plus(1, &cluster.frames[x]).plus(-1, &cluster.frames[y]);
+                let w = wave.plus(-1, &cluster.waves_exact[x]).plus(1, &cluster.waves_exact[y]);
+                let p = self.part(b, w);
+                self.generator[p][(x, y)] += c.value * m;
+                for i in 0..3 {
+                    self.force[p][i][(x, y)] += c.gradient[i] * m + c.value * gradient(i, x, y);
+                }
+                self.work += 7.0;
+            }
+        }
+    }
     /// The parts, the frames' −θ_s on the static part's diagonal.
     pub(crate) fn finish(mut self, at: &Point) -> Generator {
         let model = self.model;
@@ -133,10 +155,13 @@ impl Model {
                 self.add_far_beat(&mut parts, *first, *second, &amplitudes);
             }
         }
+        let near = self.carriers.iter().any(|x| lights.0[x.frequency]).then(|| self.near_at(cluster, at, &amplitudes, lights));
         for class in &self.classes[cluster] {
-            self.add_decay(&mut parts, cluster, class, &amplitudes, lights);
+            self.add_decay(&mut parts, cluster, class, &amplitudes, lights, near.as_ref());
         }
-        self.add_near(&mut parts, cluster, at, &amplitudes, lights);
+        if let Some(near) = &near {
+            self.add_near_terms(&mut parts, cluster, near, &amplitudes, lights);
+        }
         let work = parts.work;
         (parts.finish(at), work)
     }
@@ -164,7 +189,7 @@ impl Model {
 
     /// A class's decay (photon.rs, # The decay): per axis and pair of lit members (j, i), c_j* c_i L_j†L_i on the cluster's places,
     /// at the base beat Ω_i − Ω_j and wave vector q_i − q_j.
-    fn add_decay(&self, parts: &mut Parts, cluster: usize, class: &Class, amplitudes: &[Amplitude], lights: &Lights) {
+    fn add_decay(&self, parts: &mut Parts, cluster: usize, class: &Class, amplitudes: &[Amplitude], lights: &Lights, near: Option<&super::eliminate::NearAt>) {
         let c = &self.clusters[cluster];
         let landing = &self.clusters[class.landing];
         let n = c.states.len();
@@ -184,7 +209,9 @@ impl Model {
                         for &(bi, xi) in &mi.entries {
                             if bj == bi {
                                 let b = landing.states[bj];
-                                product[(xj, xi)] += sj.jumps[a][(b, c.states[xj])].conj() * si.jumps[a][(b, c.states[xi])];
+                                let (vj, _) = self.jump(sj, a, b, c.states[xj], xj, near);
+                                let (vi, _) = self.jump(si, a, b, c.states[xi], xi, near);
+                                product[(xj, xi)] += vj.conj() * vi;
                                 parts.work += 1.0;
                             }
                         }

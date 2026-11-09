@@ -339,6 +339,17 @@ impl Model {
         }
         model.clusters = clusters;
         model.membership = membership;
+        for ci in 0..model.carriers.len() {
+            for l in 0..model.carriers[ci].beams.len() {
+                for e in GROUND..STATES {
+                    for b in 0..GROUND {
+                        if model.carriers[ci].folded[l][(e, b)] != C64::ZERO && model.drive_kept(ci, e, b) {
+                            model.carriers[ci].folded[l][(e, b)] = C64::ZERO;
+                        }
+                    }
+                }
+            }
+        }
         model.sources = model.far_sources();
         model.sources.extend(model.explicit_sources());
         model.sources.extend(model.near_sources());
