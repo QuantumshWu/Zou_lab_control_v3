@@ -934,6 +934,14 @@ __device__ float apply(const float2* U,float2* psi,int n,int lane){
 }
 
 // Re⟨ψ|X|ψ⟩/⟨ψ|ψ⟩ of the lane's entries of X.
+// A diagonal's mean over a cluster of ground states weighted by their populations (model.rs `populated`): Σ_a |ψ_a|² Re X_aa / Σ_a |ψ_a|².
+__device__ float populated(const Warp& W,const Entries<>& E,const float2 (&x)[SLOTS],int lane){
+    float s=0.f;
+    #pragma unroll
+    for(int j=0;j<SLOTS;j++)if(E.has(j,lane)&&E.row[j]==E.col[j])s+=norm2(W.psi[E.row[j]])*x[j].x;
+    float norm=0.f;for(int b=0;b<E.n;b++)norm+=norm2(W.psi[b]);
+    return warp_sum(s)/norm;
+}
 __device__ float quadratic(const Warp& W,const Entries<>& E,const float2 (&x)[SLOTS],int lane){
     float s=0.f;
     #pragma unroll
@@ -1005,9 +1013,6 @@ __device__ __forceinline__ void flow(Traj& t,bool half,const Turn& u,const Refer
     }
 }
 
-// The step's middle state the loss is judged at (engine.rs `Engine::step`): q and κ on the trap's principal axes -- κ before its kick, with half of it to be added
-// where it is judged --, and the lane's entry of ψ after the first half step.
-struct Middle{double q[3],p[3],kick[3];float2 psi;};
 // What an advance moves of the trajectory's scalars: a step's start, should it be redone to the crossing.
 struct Moved{double q[3],p[3],time,logn;};
 __device__ __forceinline__ Moved moved(const Traj& t){Moved m;
@@ -1020,10 +1025,9 @@ __device__ __forceinline__ void moved_back(Traj& t,const Moved& m){
     t.time=m.time;t.logn=m.logn;}
 
 // One step's flow, kick and internal evolution of length dt without jumps (engine.rs `advance`) on S slots and F focused units:
-// ln‖ψ‖² at the middle (`lh`) and the end (t.logn), the midpoint's point in W.pt and h0 there in `h0`, the
-// middle state in M. Each instance is a function of its own, as the step is: the driver's register allocator serves them far better than the step's inlined together (PGC3D's and TET's kernels −20 % with the narrow instance, PGCP_10's +9 % with the step inlined), and the module is smaller for it.
+// ln‖ψ‖² at the middle (`lh`) and the end (t.logn). Each instance is a function of its own, as the step is: the driver's register allocator serves them far better than the step's inlined together (PGC3D's and TET's kernels −20 % with the narrow instance, PGCP_10's +9 % with the step inlined), and the module is smaller for it.
 template<int S,int F>
-__device__ __noinline__ void advance_in(Warp& W,Traj& out,double dt,int lane,double& lh,float2 (&h0)[SLOTS],Middle& M){
+__device__ __noinline__ void advance_in(Warp& W,Traj& out,double dt,int lane,double& lh){
     COUNT(COUNT_ADVANCES);SPAN_BEGIN(start);
     Traj t=out;   // in registers, not on the caller's stack; what it moved back at the end
     const Reference R=reference(t.q);
@@ -1037,7 +1041,6 @@ __device__ __noinline__ void advance_in(Warp& W,Traj& out,double dt,int lane,dou
     exponential(W,E,0.5*dt,lane);
     SPAN_END(SPAN_EXPONENTIAL,propagator);SPAN_BEGIN(evolve);
     const float nh=apply(W.m[2],W.psi,C.n,lane);lh=t.logn+(double)logf(nh);
-    if(lane<MAXN)M.psi=W.psi[lane];
     // The Ehrenfest force −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ at the middle, less the weighted harmonic part the flow takes.
     float s[3]={0.f,0.f,0.f};
     #pragma unroll
@@ -1054,20 +1057,18 @@ __device__ __noinline__ void advance_in(Warp& W,Traj& out,double dt,int lane,dou
     #pragma unroll
     for(int i=0;i<3;i++){
         const double kick=(double)(tau*(P.axes32[i][0]*force[0]+P.axes32[i][1]*force[1]+P.axes32[i][2]*force[2]+(float)R.w*P.stiffness32[i]*(float)(P.offset?t.q[i]-R.c[i]:t.q[i])));
-        M.q[i]=t.q[i];M.p[i]=t.p[i];M.kick[i]=kick;t.p[i]+=kick;
+        t.p[i]+=kick;
     }
     const float n1=apply(W.m[2],W.psi,C.n,lane);t.logn=lh+(double)logf(n1);
     flow(t,half,u,R);
     t.time+=dt;
     SPAN_END(SPAN_EVOLVE,evolve);
-    #pragma unroll
-    for(int j=0;j<S;j++)h0[j]=L.h0[j];
     moved_back(out,moved(t));
 }
 // The instance a step takes in the trajectory's cluster: nearly always one slot, its n² entries a lane each, and one focused unit, its table one row of four.
-__device__ __forceinline__ void advance(Warp& W,Traj& t,double dt,int lane,double& lh,float2 (&h0)[SLOTS],Middle& M){
+__device__ __forceinline__ void advance(Warp& W,Traj& t,double dt,int lane,double& lh){
     const int n=P.clusters[t.cluster].n;
-    if(P.focused==1&&n*n<=32)advance_in<1,1>(W,t,dt,lane,lh,h0,M);else advance_in<SLOTS,MOST_FOCUSED>(W,t,dt,lane,lh,h0,M);
+    if(P.focused==1&&n*n<=32)advance_in<1,1>(W,t,dt,lane,lh);else advance_in<SLOTS,MOST_FOCUSED>(W,t,dt,lane,lh);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1913,8 +1914,8 @@ __device__ __noinline__ void jump(u64 seed,Warp& W,Traj& t,bool exact,int lane,f
 
 // The step.
 
-// The trap's potential of ψ at the point (model.rs `trap_potential`, with `bound` its upper bound
-// `trap_bound`): Re⟨ψ|·|ψ⟩/⟨ψ|ψ⟩ of h0 at the point less with the trap beam off, and of −Φ S less
+// The trap's potential of ψ's ground populations at the point (model.rs `trap_potential`, with `bound` its upper bound
+// `trap_bound`): the diagonal's mean over them (`populated`) of h0 at the point less with the trap beam off, and of −Φ S less
 // −Φ_off S with the trap beam off -- Φ_off of the fields with the trap beam's own part a c_k taken
 // out of its carrier's, so that a tweezer that is a near carrier is in the depth as a folded one
 // is; the bound takes twice the light shift's bound for the latter.
@@ -1924,7 +1925,7 @@ __device__ __noinline__ float trap(const Warp& W,const Cluster& C,const Entries<
     gather<false>(W,true,tables+C.h0,C.size,E.nn,lane,far,slope);
     #pragma unroll
     for(int j=0;j<SLOTS;j++)difference[j]=h0[j]-far[j];
-    if(bound)return quadratic(W,E,difference,lane)+P.light2;
+    if(bound)return populated(W,E,difference,lane)+P.light2;
     // The fields with the trap's light off (its beams' parts out of their carriers'): pt.off.
     float2 here[SLOTS];
     // The sparse groups' entries at the lane's places (their adjoints none: the form takes a pair
@@ -1955,7 +1956,7 @@ __device__ __noinline__ float trap(const Warp& W,const Cluster& C,const Entries<
             for(int j=0;j<SLOTS;j++)difference[j]+=c*here[j]+c0*far[j];
         }
     }
-    return quadratic(W,E,difference,lane);
+    return populated(W,E,difference,lane);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2483,13 +2484,13 @@ __device__ __noinline__ void exact_step(u64 seed,Warp& W,Traj& t,double tau,bool
     t.time=end;
 }
 
-// The trap's potential of ψ (W.psi) at the point for a cluster with explicit states (model.rs
-// `trap_mixed`): Re⟨ψ|(h0 − M) here − (h0 − M) with the trap's light off|ψ⟩/⟨ψ|ψ⟩, the groups' pairs
-// standing for two taken twice; with `bound`, h0's share and twice the light shift's bound.
+// The trap's potential of ψ's ground populations (W.psi) at the point for a cluster with explicit states (model.rs
+// `trap_mixed`): the ground diagonal of (h0 − M) here − (h0 − M) with the trap's light off, weighted by the ground states'
+// populations, the groups' pairs standing for two taken twice; with `bound`, h0's share and twice the light shift's bound.
 __device__ float trap_exact(const Warp& W,const Cluster& C,double t,bool bound,int lane){
     const int n=C.n,nn=n*n;const float2* tables=P.tables+C.table;const Point& pt=W.pt;float s=0.f;
-    for(int e=lane;e<nn;e+=32){
-        const int r=e/n,c=e-r*n;float2 d=entry(W,tables+C.h0+e,C.size)-far_entry(W,tables+C.h0+e,C.size);
+    for(int r=lane;r<C.n0;r+=32){
+        const int e=r*n+r;float2 d=entry(W,tables+C.h0+e,C.size)-far_entry(W,tables+C.h0+e,C.size);
         if(!bound){
             for(int gi=0;gi<C.ngroups;gi++){
                 const Group G=P.groups[C.groups+gi];if(G.count!=nn)continue;
@@ -2511,9 +2512,9 @@ __device__ float trap_exact(const Warp& W,const Cluster& C,double t,bool bound,i
                 }
             }
         }
-        const float2 z=d*W.psi[c];s+=W.psi[r].x*z.x+W.psi[r].y*z.y;
+        s+=norm2(W.psi[r])*d.x;
     }
-    float norm=0.f;for(int b=0;b<n;b++)norm+=norm2(W.psi[b]);
+    float norm=0.f;for(int b=0;b<C.n0;b++)norm+=norm2(W.psi[b]);
     const float v=warp_sum(s)/norm;
     return bound?v+P.light2:v;
 }
@@ -2695,17 +2696,16 @@ __device__ __noinline__ void transient(Warp& W,Traj& t,const double u[5],Rng& rn
 
 // One step of dt (engine.rs `Engine::step`): flow, kick and flow; where ‖ψ‖² crosses the threshold
 // the step is redone to the crossing, the jump made there and the rest taken from the state it left.
-// True when the atom is lost in it: unbound -- its mechanical energy above the trap's far level --
-// outside the trap's region, judged at the step's middle where it went without a jump, else at its
-// end.
+// True when the atom is lost in it (engine.rs # Loss): unbound -- its mechanical energy, with the trap's potential of its ground
+// populations, above the trap's far level -- outside the trap's region, at the step's end.
 __device__ __noinline__ bool step(u64 seed,Warp& W,Traj& t,int lane,float2* scratch){
     // The first order in the Doppler shift where it holds, by the step's start; the exact response beyond: read at its jumps and by an exact step alone.
-    double left=P.dt;float2 h0[SLOTS];Middle M;bool fresh=false,exact=false,asked=false;
+    double left=P.dt;bool fresh=false,exact=false,asked=false;
     if(P.clusters[t.cluster].exact){exact=doppler_ratio(t.p,lane)>P.allowance;exact_step(seed,W,t,left,exact,lane,scratch);point<false>(W,t,lane);fresh=true;}
     else for(;;){
         const Moved start=moved(t);
         if(lane<MAXN)W.start[lane]=W.psi[lane];
-        double lh;advance(W,t,left,lane,lh,h0,M);
+        double lh;advance(W,t,left,lane,lh);
         if(t.logn>t.log_threshold)break;
         // The crossing on ln‖ψ‖², linear on the half where it lies; the step redone to it.
         if(!asked){exact=doppler_ratio(start.p,lane)>P.allowance;asked=true;}
@@ -2713,7 +2713,7 @@ __device__ __noinline__ bool step(u64 seed,Warp& W,Traj& t,int lane,float2* scra
         if(lh<=t.log_threshold){ta=0.;tb=0.5*left;la=start.logn;lb=lh;}else{ta=0.5*left;tb=left;la=lh;lb=t.logn;}
         const double at=lb<la?fmin(fmax(ta+(t.log_threshold-la)/(lb-la)*(tb-ta),ta),tb):tb;
         moved_back(t,start);__syncwarp();if(lane<MAXN)W.psi[lane]=W.start[lane];__syncwarp();
-        if(at>0.){double unused;advance(W,t,at,lane,unused,h0,M);}
+        if(at>0.){double unused;advance(W,t,at,lane,unused);}
         {COUNT(COUNT_JUMPS);SPAN_BEGIN(jumping);jump(seed,W,t,exact,lane,scratch);SPAN_END(SPAN_JUMP,jumping);}
         left-=at;
         if(!(left>0.)){point<false>(W,t,lane);fresh=true;break;}
@@ -2721,36 +2721,27 @@ __device__ __noinline__ bool step(u64 seed,Warp& W,Traj& t,int lane,float2* scra
     }
     if(!P.loss)return false;
     SPAN_BEGIN(loss);
-    // The state judged: the middle's (W.pt and h0 are its point's) where the step went without a jump.
-    const double* q=fresh?t.q:M.q;
     bool lost=false;
     const auto outside=[&](){
-        if(!P.offset&&well_inside(q))return false;
+        if(!P.offset&&well_inside(t.q))return false;
         double harmonic=0.;
         #pragma unroll
-        for(int i=0;i<3;i++){const double x=q[i]-P.centre[i];harmonic+=P.omega[i]*P.omega[i]*x*x;}
+        for(int i=0;i<3;i++){const double x=t.q[i]-P.centre[i];harmonic+=P.omega[i]*P.omega[i]*x*x;}
         return 0.5*harmonic/P.hm64>P.region;
     };
     if(outside()){
-        double p[3];
-        #pragma unroll
-        for(int i=0;i<3;i++)p[i]=fresh?t.p[i]:M.p[i]+0.5*M.kick[i];
-        const double time=fresh?t.time:t.time-0.5*left;
-        const double kinetic=0.5*P.hm64*(p[0]*p[0]+p[1]*p[1]+p[2]*p[2]);
+        // The step's end: its point where the step went without a jump (W.pt holds its middle's).
+        if(!fresh)point<false>(W,t,lane);
+        const double kinetic=0.5*P.hm64*(t.p[0]*t.p[0]+t.p[1]*t.p[1]+t.p[2]*t.p[2]);
         const Cluster C=P.clusters[t.cluster];
         far_stencils(W,lane);
         if(C.n>C.n0){
-            // A cluster with explicit states (after the exact step, its end).
-            lost=kinetic+(double)trap_exact(W,C,time,true,lane)>0.&&kinetic+(double)trap_exact(W,C,time,false,lane)>0.;
+            lost=kinetic+(double)trap_exact(W,C,t.time,true,lane)>0.&&kinetic+(double)trap_exact(W,C,t.time,false,lane)>0.;
             SPAN_END(SPAN_LOSS,loss);return lost;
         }
-        const Entries E(C.n,lane);
-        if(fresh){float2 slope[MOST_FOCUSED][SLOTS];gather<false>(W,false,P.tables+C.table+C.h0,C.size,E.nn,lane,h0,slope);}
-        // ψ at the middle in W.psi while judged, the end's kept.
-        float2 end=zero2();
-        if(!fresh){__syncwarp();if(lane<MAXN){end=W.psi[lane];W.psi[lane]=M.psi;}__syncwarp();}
-        lost=kinetic+(double)trap(W,C,E,h0,time,true,lane)>0.&&kinetic+(double)trap(W,C,E,h0,time,false,lane)>0.;
-        if(!fresh){__syncwarp();if(lane<MAXN)W.psi[lane]=end;__syncwarp();}
+        const Entries E(C.n,lane);float2 h0[SLOTS];
+        {float2 slope[MOST_FOCUSED][SLOTS];gather<false>(W,false,P.tables+C.table+C.h0,C.size,E.nn,lane,h0,slope);}
+        lost=kinetic+(double)trap(W,C,E,h0,t.time,true,lane)>0.&&kinetic+(double)trap(W,C,E,h0,t.time,false,lane)>0.;
     }
     SPAN_END(SPAN_LOSS,loss);
     return lost;
