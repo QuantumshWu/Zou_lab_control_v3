@@ -1625,6 +1625,17 @@ mod tests {
         wb.open_previews(&mut host);
         assert_eq!(host.panels.len(), 3);
         assert_eq!(host.panels[2].target["semantic"]["reduction"], "max");
+
+        // The operator turns the preview to another channel, then to a Rolling trend: it is
+        // still the panel this preview opened, and the next run opens no other.
+        host.panels[2].target["semantic"]["fate:cell_data:channel"] = json!(["scope-value", 1]);
+        host.panels[2].kind = "rolling".into();
+        event(&mut wb, Event::RunFinished { run: "camera_measurement#2".into(), outcome: "completed".into(), error: None,
+                                            generation: Some("g2".into()) }, &mut host);
+        apply(&mut wb, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
+        host.signals[0].generation = "g3".into();
+        wb.open_previews(&mut host);
+        assert_eq!(host.panels.len(), 3, "no second panel for the preview the operator changed");
     }
     #[test]
     fn a_failed_preparation_preserves_the_active_run() {

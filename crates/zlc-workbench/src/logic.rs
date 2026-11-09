@@ -49,6 +49,9 @@ pub struct Node {
     pub pending: Option<PendingStart>,
     pub preparing: Option<u64>,
     pub removing: bool,
+    /// The panel each declared preview opened (`signal|kind` -> panel): while it is open it is
+    /// that preview, whatever its kind or choices became since, and a later run opens no other.
+    pub preview_panels: BTreeMap<String, String>,
     pub instance: Instance,
     /// Plugin query answers, the newest of each: name -> (draft revision, answer). What the
     /// page draws and the issues it shows come from them, a newer draft's too until its own land.
@@ -72,7 +75,7 @@ impl Node {
     pub(crate) fn new(id: String, name: String, type_id: String, draft: Draft, auto_preview: bool, descriptor: Option<&TypeDescriptor>) -> Self {
         let answers = descriptor.map(|item| item.node().answers.iter().map(|(query, answer)| (query.clone(), (0, Ok(answer.clone())))).collect()).unwrap_or_default();
         Node { id, name, type_id, draft, auto_preview, revision: 1, running: None, frozen: None, run: None, error: None, follow: false, follow_attempted: None,
-               pending: None, preparing: None, removing: false, instance: Instance::Opening, answers, checked: BTreeSet::new(), resources: Map::new(), resource_issues: Vec::new(),
+               pending: None, preparing: None, removing: false, preview_panels: BTreeMap::new(), instance: Instance::Opening, answers, checked: BTreeSet::new(), resources: Map::new(), resource_issues: Vec::new(),
                start_after_check: None }
     }
 
@@ -1544,21 +1547,32 @@ impl Workbench {
                 let Some(published) = self.source_published(&signals, &signal) else { continue };
                 if run.preview_baseline.get(&signal).cloned().flatten().as_deref() == Some(published.generation.as_str()) { continue; }
                 let task = descriptor.node().node_kind == "task";
-                wanted.push((run.id.clone(), signal, preview.plot_kind.clone(), preview.semantic.clone(), task));
+                wanted.push((node.id.clone(), run.id.clone(), signal, preview.plot_kind.clone(), preview.semantic.clone(), task));
             }
         }
-        for (run, signal, kind, semantic, task) in wanted {
+        for (node, run, signal, kind, semantic, task) in wanted {
             if let Some(record) = self.run_mut(&run) { record.previewed.insert(signal.clone()); }
             let kind = if kind.is_empty() { "image" } else { &kind };
-            // A run can request a different view of the same signal. Match only the
-            // declared choices so a panel can keep its other authored settings.
-            let shown = host.panels().iter().any(|panel| panel.signal == signal && panel.kind == kind
+            let key = format!("{signal}|{kind}");
+            let panels = host.panels();
+            // The panel this preview opened before is it still, however the operator has
+            // changed it since (another channel, another kind).
+            let opened = self.node(&node).and_then(|node| node.preview_panels.get(&key));
+            if opened.is_some_and(|opened| panels.iter().any(|panel| panel.panel == *opened)) { continue; }
+            // Else a panel showing the declared view: a run can request a different view of
+            // the same signal, so match only the declared choices, and let a panel keep its
+            // other authored settings.
+            let shown = panels.iter().find(|panel| panel.signal == signal && panel.kind == kind
                 && semantic.as_object().is_none_or(|fields| fields.iter().all(|(key, value)| panel.target["semantic"].get(key) == Some(value))));
-            if shown { continue; }
+            if let Some(shown) = shown.map(|panel| panel.panel.clone()) {
+                if let Ok(node) = self.node_mut(&node) { node.preview_panels.insert(key, shown); }
+                continue;
+            }
             let target = if semantic.is_object() { json!({"semantic": semantic}) } else { json!({}) };
             match host.add_panel("", &signal, kind, 1, target) {
                 Ok(panel) => {
                     self.board.add(&panel);
+                    if let Ok(node) = self.node_mut(&node) { node.preview_panels.insert(key, panel.clone()); }
                     if task { if let Some(record) = self.run_mut(&run) { record.preview_panels.push(panel); } }
                 }
                 Err(error) => self.notes.push(format!("preview {signal}: {error}")),
