@@ -47,7 +47,9 @@
 //! # Checkpoints
 //! The decisions take counts, never the wall clock, so a request gives the same result on any machine. The wall clock only
 //! times the checkpoints: one after the pilot, then whenever `CHECKPOINT` has passed, each a complete result of the groups
-//! finished so far in their order (a prefix: whole groups chosen by their number alone).
+//! finished so far in their order (a prefix: whole groups chosen by their number alone). One is passed on only where it rests
+//! on two groups at least (the jackknife's least for a spread) and on no fewer trajectories than the attempt's last one: a
+//! product's first groups, or a product the step's falsifier restarted, are no better than the result before them.
 use crate::adapt::{self, Tolerances};
 use crate::decide::{pays, Outcome, Read};
 use crate::ensemble::{Ensemble, Start, Well, GROUP};
@@ -129,7 +131,15 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     let light = Light::new(request);
     let (mut kept, mut reach) = (vec![], request.temperature_uk);
     loop {
-        match attempt(request, &light, &kept, reach, checkpoint)? {
+        // The attempt's checkpoints that improve on its last (module documentation, # Checkpoints).
+        let mut last = 2 * GROUP;
+        let mut better = |s: &Solution, remaining: Option<f64>| {
+            if s.trajectories >= last {
+                last = s.trajectories;
+                checkpoint(s, remaining);
+            }
+        };
+        match attempt(request, &light, &kept, reach, &mut better)? {
             Attempt::Grow(t) => reach = t,
             Attempt::Keep(u) => kept.push(u),
             Attempt::Done(s) => return Ok(s),
@@ -633,8 +643,8 @@ fn trajectory<D: Dynamics>(model: &D, ensemble: &Ensemble, tolerances: &Toleranc
 /// Groups `first..end`, their trajectories run on every core in their numbers' order -- each thread takes the next number,
 /// so the groups finish nearly in order and the first after about one trajectory's time --, each group's records added in
 /// its members' order on this thread (`Shape::fold`, nothing depends on the threads), the groups returned in their order;
-/// whenever `CHECKPOINT` has passed, `progress` takes the groups finished so far in order (module documentation,
-/// # Checkpoints).
+/// whenever `CHECKPOINT` has passed and a group has finished, `progress` takes the groups finished so far in order (module
+/// documentation, # Checkpoints; no group, no result to give).
 fn run_groups(first: u64, end: u64, shape: Shape, record: &(dyn Fn(u64) -> Record + Sync), progress: &mut dyn FnMut(&[&Part])) -> Vec<Part> {
     let (start, stop) = (first * GROUP, end * GROUP);
     let count = (end - first) as usize;
@@ -667,7 +677,9 @@ fn run_groups(first: u64, end: u64, shape: Shape, record: &(dyn Fn(u64) -> Recor
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     let prefix: Vec<&Part> = parts.iter().map_while(Option::as_ref).collect();
-                    progress(&prefix);
+                    if !prefix.is_empty() {
+                        progress(&prefix);
+                    }
                     last = Instant::now();
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
