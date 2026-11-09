@@ -72,7 +72,7 @@
 //! thermal ellipsoid at a temperature, the request's -- where the atoms start. Where they heat, they go past it: a bound for
 //! where they could go, the measurement for where they went. A pilot's T past the reach's temperature at some output, beyond its
 //! errors over the axes and outputs it looks at (`outgrown`), grows the reach to the largest T the pilot reads, at most where its
-//! ln(1/budget) k_B T reaches the trap's depth (atoms past it are lost), and the choice starts again there with a new pilot --
+//! ln(1/share) k_B T reaches the trap's depth (atoms past it are lost; ground.rs `OUTSIDE_REACH`), and the choice starts again there with a new pilot --
 //! the reach only grows, until a pilot stays within it. (PGC1D_BIAS_OFF heats from 30 to 144 uK in 10 ms: judged at 30 uK its
 //! F = 1 sublevels' Raman pair folded, the repump off its resonance in the tweezer's light there, and T came 30 % above the kept
 //! pair's; at 60 uK and above the rule keeps it. R5038's D2 F' = 0 fold, S = 0.34 at its 35 uK, is 1.3 at 70 uK: past Stewart's
@@ -357,7 +357,7 @@
 use crate::cost::{advance_work,jump_work,pays,CIS_NS,COMPLEX_MULTIPLY_ADD_NS,SPECTRAL_N3,TERM_NS};
 use crate::engine::{column_norm,halves,node_phase,series,Engine,Halves,Landings,Settings,Trajectory,QUADRATURE};
 use crate::gpu;
-use crate::ground::{ExcitedKind,Ground,Kind,Shape,EXISTS};
+use crate::ground::{ExcitedKind,Ground,Kind,Shape,EXISTS,OUTSIDE_REACH};
 use crate::ledger::{Ledger,Total};
 use crate::read::Read;
 use crate::model::{Exact,Model,Trap,MOST_MIXED,MOST_STATES,NOT_LINDBLAD};
@@ -493,15 +493,15 @@ fn outgrown(estimates:&[Estimate],reach:f64,depth:f64)->Option<f64>{
     let top=read.iter().flat_map(|e|e.temperature).fold(reach,f64::max).min(reach_cap(depth));
     (top>reach).then_some(top)
 }
-/// The largest reach (uK) a trap of `depth` (rad/us) takes: its ln(1/budget) k_B T at the depth, past which an atom is lost.
-fn reach_cap(depth:f64)->f64{depth/(KT_PER_UK*crate::ledger::BUDGET.recip().ln())}
+/// The largest reach (uK) a trap of `depth` (rad/us) takes: its ln(1/share) k_B T at the depth (ground.rs `OUTSIDE_REACH`), past which an atom is lost.
+fn reach_cap(depth:f64)->f64{depth/(KT_PER_UK*OUTSIDE_REACH.recip().ln())}
 /// The share of an output's atoms past the reach its folds were judged to (`reach`, uK, `Judged`; module documentation, # The reach): of a thermal
 /// ensemble at its largest axis's T, at most the trap's (`reach_cap`, past it the atoms are the loss's), what lies beyond the reach's
-/// ln(1/budget) k_B T_r past the budget the reach leaves out there, budget^(T_r/T) − budget -- their folds unjudged, on the totals
+/// ln(1/s) k_B T_r past the share s it leaves out there (ground.rs `OUTSIDE_REACH`), s^(T_r/T) − s -- their folds unjudged, on the totals
 /// (`Measured`). Zero within the reach, or with no T read.
 fn beyond_reach(e:&Estimate,reach:f64,cap:f64)->f64{
-    let t=e.temperature.iter().copied().fold(0.,f64::max).min(cap);let budget=crate::ledger::BUDGET;
-    if reads_temperature(e)&&t>reach{budget.powf(reach/t)-budget}else{0.}
+    let t=e.temperature.iter().copied().fold(0.,f64::max).min(cap);let s=OUTSIDE_REACH;
+    if reads_temperature(e)&&t>reach{s.powf(reach/t)-s}else{0.}
 }
 /// The reach a run's folds are judged to (module documentation, # The reach): its model's own, grown to the T the run's atoms read past
 /// it (`outgrown`) where every fold of the model exists there too -- the rule's first rung there folds each (ground.rs `Shape::exists_within`):

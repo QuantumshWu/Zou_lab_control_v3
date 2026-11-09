@@ -866,7 +866,7 @@ impl Model{
     }
 
     /// The tables' axes (`Axis`). Each varying field's chart is judged over the atom's reach (ground.rs `Ground::trap`, the region of the
-    /// trap within ln(1/budget) k_B T of its bottom: the harmonic trap's thermal ellipsoid holding all but the budget of a Boltzmann ensemble),
+    /// trap within ln(1/s) k_B T of its bottom: the harmonic trap's thermal ellipsoid holding all but the share s of a Boltzmann ensemble, ground.rs `OUTSIDE_REACH`),
     /// T the reach's (ground.rs `Ground::temperature_uk`) -- at its ends along the principal axes, and inside it for interfering beams (ground.rs `reach_points`): a chart
     /// coordinate taken at the focus errs by what that moves the field's T there, Σ_i w_i |ΔT_i|, w_i its T coordinate's weight, its shifts'
     /// size ‖O_i + F_i‖ against the nearest excited pole and the generator's scale -- a field of rank one its intensity's change times its

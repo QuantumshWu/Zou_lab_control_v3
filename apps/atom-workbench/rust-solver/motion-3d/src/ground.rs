@@ -313,6 +313,12 @@ pub const EXISTS:f64=0.5;
 /// the numerical tolerances' (solve.rs, # Shares; `NUMERICAL_SHARE` of ε = `POPULATION_TARGET`), the one switch between a
 /// block's eigenstates and its states on their own.
 pub const MIXING_SHARE:f64=crate::solve::NUMERICAL_SHARE*crate::solve::POPULATION_TARGET;
+/// The Boltzmann share the atoms' reach leaves outside its thermal ellipsoid (`thermal_reach`, `Ground::speed`): per axis what a thermal
+/// ensemble holds past ln(1/share) k_B T of the trap's bottom in position, and past that kinetic energy along a term's wave vector in speed.
+/// No coupling is judged out there: a tolerance whose work -- the couplings kept for the atoms it takes in -- grows with its logarithm, as
+/// the numerical tolerances' does, and their share of the population target (solve.rs, # Shares). The run's own atoms past it are booked
+/// as measured (solve.rs `beyond_reach`).
+pub const OUTSIDE_REACH:f64=crate::solve::NUMERICAL_SHARE*crate::solve::POPULATION_TARGET;
 
 /// The co-rotating component of the beams of one frequency (`counter` false: V e^{−iνt},
 /// ν = δ = 2π(ν_beam − ν_frame)) or their counter-rotating one (R e^{−iνt}, ν = −2π(ν_beam + ν_frame)),
@@ -633,7 +639,7 @@ pub struct Ground{
     /// The atom's mass (kg), used in the Hessian of the preparation potential.
     pub mass_kg:f64,
     /// Per unit, its least intensity within the atom's reach (`Ground::reach`): 1 for a plane wave; and the atoms' reach in speed
-    /// (um/us), the thermal ellipsoid's in momentum, within ln(1/`BUDGET`) k_B T as its reach in position; T (uK) the
+    /// (um/us), the thermal ellipsoid's in momentum, within ln(1/`OUTSIDE_REACH`) k_B T as its reach in position; T (uK) the
     /// temperature the reach is judged at, the request's or the largest the atoms come to over the run (solve.rs, # The reach).
     pub reach:Vec<f64>,
     pub speed:f64,
@@ -998,9 +1004,9 @@ fn spread(cl:&Cluster,r:&[Complex],weights:&[Complex],out:&mut Dense){
     for(&b,&w)in cl.states.iter().zip(weights){if w==Complex::ZERO{continue;}for(x,&y)in r.iter().enumerate(){out[(x,b)]+=y*w;}}
 }
 
-/// The atoms' reach along an axis of a harmonic trap at ω (rad/us): the end of the thermal ellipsoid, the region within ln(1/`BUDGET`) k_B T of its bottom, which holds all but the budget of a Boltzmann ensemble (T in μK, hm = ħ/m). None where the axis does not confine.
+/// The atoms' reach along an axis of a harmonic trap at ω (rad/us): the end of the thermal ellipsoid, the region within ln(1/`OUTSIDE_REACH`) k_B T of its bottom, which holds all but that share of a Boltzmann ensemble (T in μK, hm = ħ/m). None where the axis does not confine.
 pub(crate) fn thermal_reach(w:f64,temperature_uk:f64,hm:f64)->Option<f64>{
-    (w>0.).then(||(2.*BUDGET.recip().ln()*crate::stats::KT_PER_UK*temperature_uk*hm).sqrt()/w)
+    (w>0.).then(||(2.*OUTSIDE_REACH.recip().ln()*crate::stats::KT_PER_UK*temperature_uk*hm).sqrt()/w)
 }
 
 /// Two frames are one: equal to the rounding of the sums of detunings they are made of.
@@ -1104,7 +1110,7 @@ impl Ground{
         let mut excited_groups:Vec<Vec<usize>>=vec![];let mut manifolds:Vec<&str>=vec![];
         for(i,&s)in excited_states.iter().enumerate(){match manifolds.iter().position(|&m|m==labels[s].0){Some(m)=>excited_groups[m].push(i),None=>{manifolds.push(labels[s].0);excited_groups.push(vec![i]);}}}
         let duration=request.times_us.last().copied().unwrap_or(0.).max(0.);
-        let speed=(2.*BUDGET.recip().ln()*crate::stats::KT_PER_UK*temperature_uk*crate::model::HBAR/request.mass_kg*1e6).sqrt();
+        let speed=(2.*OUTSIDE_REACH.recip().ln()*crate::stats::KT_PER_UK*temperature_uk*crate::model::HBAR/request.mass_kg*1e6).sqrt();
         let mut ground=Ground{ground_states,excited_states,levels,decay,emission,beams:request.beams.clone(),folded:couplings.clone(),couplings,hamiltonian,units,outside:unit_outside,folds:unit_folds,interference,
             components,l0,carriers,duration,mass_kg:request.mass_kg,reach:vec![],speed,temperature_uk,excited_items:vec![],charge:0.,items:vec![],cut:f64::INFINITY,generator_scale:0.,light:0.,pole:f64::INFINITY,poles:vec![],clusters:vec![],cluster:vec![],
             explicit_of:vec![],excited_groups,dressed:vec![],vias:vec![],near_units:vec![],dressing:false,floors:vec![],unmixed:vec![],unmixed_error:0.,channel_poles:vec![],trap:Trap::none()};
