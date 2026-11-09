@@ -363,6 +363,7 @@ use crate::gpu;
 use crate::ground::{ExcitedKind,Ground,Shape,EXISTS,OUTSIDE_REACH};
 use crate::ledger::{Ledger,Total};
 use crate::read::Read;
+use crate::linear::Tally;
 use crate::model::{Exact,Model,Trap,MOST_MIXED,MOST_STATES,NOT_LINDBLAD};
 use crate::control::Harmonic;
 use crate::stats::{largest_look,quantile,reads_spread,summarize,variance_noise,Estimate,Group,Scales,Spread,Sums,KT_PER_UK};
@@ -809,9 +810,11 @@ fn ledger(model:&Model,base:&Ledger,records:&[Record],times:&[f64],allowance:f64
 pub fn solve(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))->Result<Solution,String>{
     // The GPU starts in the background while the model is made.
     if device==Device::Gpu{gpu::prepare();}
-    match run(request,device,checkpoint){
+    // The candidates' builds, counted on a pool of their own (linear.rs `Tally`, # The fold's choice).
+    let tally=Tally::new()?;
+    match run(request,device,checkpoint,&tally){
         Err(Stop::Gpu(error))=>{
-            let mut solution=run(request,Device::Cpu,checkpoint).map_err(Stop::message)?;
+            let mut solution=run(request,Device::Cpu,checkpoint,&tally).map_err(Stop::message)?;
             solution.device_note=Some(format!("GPU 计算出错（{error}）：本次在 CPU 上计算"));Ok(solution)
         }
         other=>other.map_err(Stop::message),
@@ -823,9 +826,9 @@ enum Stop{Error(String),Gpu(String)}
 impl From<String> for Stop{fn from(error:String)->Stop{Stop::Error(error)}}
 impl Stop{fn message(self)->String{match self{Stop::Error(e)|Stop::Gpu(e)=>e}}}
 
-fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))->Result<Solution,Stop>{run_at(request,request.temperature_uk,device,checkpoint)}
+fn run(request:&Request,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option<f64>),tally:&Tally)->Result<Solution,Stop>{run_at(request,request.temperature_uk,device,checkpoint,tally)}
 /// A solve with the rule's reach judged at `reach` (uK; module documentation, # The reach).
-fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option<f64>))->Result<Solution,Stop>{
+fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&Solution,Option<f64>),tally:&Tally)->Result<Solution,Stop>{
     let times=&request.times_us;let outputs=times.len();
     if outputs<2||times[0]!=0.{return Err(Stop::Error("A 3D motion solve needs at least two times, the first at 0".into()));}
     let interval=times[1]-times[0];
@@ -837,19 +840,18 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     // where every fold that exists folds down, their order the a-priori estimates'; the pilot runs the first, each candidate's charge
     // is what its folded drives meet at the pilot's states (`measured_charge`), and of those whose charge
     // leaves the statistics room the one of least predicted cost is taken.
-    // The generator before the rule, every candidate's start, and its first rung, whose allowances the rungs below are (`Ladder`).
-    let mut ladder=Ladder::new(Ground::bare_at(request,reach)?);let mut failed=None;
-    let Some(mut pilot_candidate)=next_candidate(request,&mut ladder,&mut failed,&mut vec![])else{return Err(Stop::Error(failed.unwrap_or_else(||"No model of the request".into())))};
+    // The generator before the rule, every candidate's start, and the rungs from its first down, built as the walk takes them (`Walk`).
+    let mut walk=Walk::new(request,Ladder::new(Ground::bare_at(request,reach)?),tally);
+    let Some(mut pilot_candidate)=walk.next(&|_|true)else{return Err(Stop::Error(walk.failed.unwrap_or_else(||"No model of the request".into())))};
     pilot_candidate.settle();
     // A generator that gains on the ladder's first rung, every fold that exists folded, is the fold's construction failing
     // (model.rs `Model::lindblad`), not a regime to escalate into explicit states: the solve stops with why.
-    if let Some(e)=failed.as_ref().filter(|e|e.starts_with(NOT_LINDBLAD)){return Err(Stop::Error(e.clone()));}
+    if let Some(e)=walk.failed.as_ref().filter(|e|e.starts_with(NOT_LINDBLAD)){return Err(Stop::Error(e.clone()));}
     // The reference state: the largest initial population; its trap sets ω per axis, in each model its own (`Candidate::reference`).
     // A trap the model gives only where the model holds: a strong near beam whose fold anti-traps the reference state is the elimination's resonance first (the validation's F8). A model whose own
     // estimates lie past the targets hands over to the next rung, which keeps that drive (a resonant probe of 300 mW/cm², cooling of 30: 146 % of resonance with every drive folded); the last refuses.
-    let mut shapes=vec![pilot_candidate.model.ground.shape()];
     while pilot_candidate.reference().0.frequencies.iter().any(|&w|!(w>0.)){
-        let next=if pilot_candidate.past_their_targets(){next_candidate(request,&mut ladder,&mut failed,&mut shapes)}else{None};
+        let next=if pilot_candidate.past_their_targets(){walk.next(&|_|true)}else{None};
         let Some(next)=next else{return Err(Stop::Error(match resonance(&pilot_candidate.model){Some(r)=>format!("{r}：光镊的势阱无从判断"),None=>NOT_CONFINED.into()}))};
         pilot_candidate=next;pilot_candidate.settle();
     }
@@ -894,14 +896,14 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
         let binding=vec![1.;starts.len()];let probes=bound_probes(&c.model,&starts,&binding);
         let deposits=Deposits::default();
         let doubled=|k:usize|{let r=step_excess(&Engine::new(&c.model,running(c.reference(),k,start_waiting,allowance,c.phase)),&starts,&binding,start_waiting,&probes,period,0.,tolerances,&deposits,(FIRST_GROUPS*TASK) as f64*duration);Check{steps:k,population:r[0],loss:r[1],motion:r[2]}};
-        let mut bound=vec![];search(first,most,&[],&doubled,None,false,&mut bound);
+        let mut bound=vec![];search(first,most,&[],&doubled,None,false,&mut bound,&|_,_,_,_|true);
         bound.iter().filter(|c|c.met()).map(|c|c.steps).min().unwrap_or(bound[bound.len()-1].steps)};
     // The pilot's atoms. A pilot that keeps none to the first output measures nothing the choice can read: a model whose own estimates lie past the targets (`Candidate::past_their_targets`)
     // hands it to the next rung, at the same step, what the choice's check starts from; a model within them has lost its atoms by its physics.
     let(pilot_harmonic,pilot_states,pilot_jumps,pilot_groups)=loop{
         let harmonic=Harmonic::new(&pilot_candidate.model,&piloting(pilot_candidate.reference(),steps,start_waiting,pilot_candidate.phase),&pilot_candidate.initial,steps,outputs);
         let(states,jumps,groups)=sample_states(&pilot_candidate.model,&piloting(pilot_candidate.reference(),steps,start_waiting,pilot_candidate.phase),&pilot_candidate.initial,seed,pilot,steps,outputs,&harmonic);
-        if states.is_empty()&&pilot_candidate.past_their_targets(){if let Some(next)=next_candidate(request,&mut ladder,&mut failed,&mut shapes){pilot_candidate=next;(starts,start_waiting)=begin(&mut pilot_candidate);continue;}}
+        if states.is_empty()&&pilot_candidate.past_their_targets(){if let Some(next)=walk.next(&|_|true){pilot_candidate=next;(starts,start_waiting)=begin(&mut pilot_candidate);continue;}}
         break(harmonic,states,jumps,groups);
     };
     let(trap,period)={let t=pilot_candidate.reference().0;(t,slowest_period(&t))};
@@ -909,7 +911,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     let pilot_estimates={let scales=Scales{hbar_over_mass:pilot_candidate.model.hbar_over_mass,frequencies:trap.lab};
         let mut e=summarize(&pilot_groups,&scales,&pilot_harmonic.mean);start(&mut e[0],&pilot_candidate.initial);for x in &mut e{x.predicting();}e};
     // The reach (module documentation, # The reach): atoms past it start the choice again where they came to.
-    if let Some(grown)=outgrown(&pilot_estimates,reach,pilot_candidate.reference().1){return run_at(request,grown,device,checkpoint);}
+    if let Some(grown)=outgrown(&pilot_estimates,reach,pilot_candidate.reference().1){return run_at(request,grown,device,checkpoint,tally);}
     // The fold's memory (module documentation, # Ledger): per pilot atom its jumps at the outputs; the pilot's
     // initial states, where the charge starts.
     let memory=Memory::of(&pilot_states,interval,outputs);
@@ -937,7 +939,8 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     // choice): its step check there (`step_check`), every step weighed by its counted work per interval times the
     // trajectories its rooms at its bias need and the weight of the totals they leave (`predicted`) over the run; at the
     // step it keeps, that cost, the check's own work, its work per interval, its bias and its a-priori totals per output.
-    let evaluate=|c:&Candidate,states:&[Trajectory],begun:&[Trajectory],first:Option<(Check,[f64;2])>,deposits:&Deposits|->Costed{
+    // Against `ceiling`, the least cost so far: a candidate that cannot come below it, its check's next spend paid, is out (`step_check`), its cost infinite.
+    let evaluate=|c:&Candidate,states:&[Trajectory],begun:&[Trajectory],first:Option<(Check,[f64;2])>,deposits:&Deposits,ceiling:f64|->Costed{
         let base=gained(&c.base,&c.model,states);let allowance=doppler_allowance(&base,&c.model);let total=Apriori::of(&booked(&base,pilot_beats*pilot_horizon),&c.model);
         let period=slowest_period(&c.reference().0);let settings=|s:usize|running(c.reference(),s,pilot_waiting,allowance,c.phase);let parts=state_work(&c.model,states,begun);let binding=binding_at(states,&weights,interval);
         let counted:std::cell::RefCell<Vec<(usize,f64)>>=Default::default();
@@ -950,8 +953,17 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
         // cost is little beside that weight, and its check is put off until it is the choice -- its cost at the first step with no bias.
         if past_targets(&pilot_statistics,&apriori)&&first.is_none(){let(n,weight)=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64);let at=work(steps);return Costed{cost:at*n*weight*(outputs-1) as f64,check:checked_step(states.len(),bound_probes(&c.model,states,&binding).first,steps,interval,period)*at/steps as f64,work:at,steps,bias:[0.;2],total,checked:None};}
         let known:Vec<Check>=first.iter().map(|&(k,t)|Check{steps:k.steps,population:k.population*t[0]/tolerances[0],loss:k.loss*t[0]/tolerances[0],motion:k.motion*t[1]/tolerances[1]}).collect();
-        let reach=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64).0*duration;
-        let checked=step_check(&c.model,states,&binding,&settings,first.map_or(steps,|x|x.0.steps),most,pilot_waiting,pilot_horizon,pilot as usize,&pilot_groups,period,tolerances,&cost,need,&known,deposits,reach);
+        let(fewest,weight)=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64);let reach=fewest*duration;
+        // The search against the ceiling (# The fold's choice, cost.rs `pays`): before each doubling and measure, the least the candidate can cost -- at the
+        // coarsest step its motion's and loss's criteria have not been seen to miss (the most steps of a check where either missed; the population's bound
+        // may yet be measured smaller), with no bias -- must still save beside what that check takes. A candidate with a met step below the ceiling already
+        // is the choice so far: its search goes on as it would alone.
+        let go=|checks:&[Check],at:usize,count:f64|->bool{
+            if !ceiling.is_finite()||checks.iter().any(|k|k.met()&&saves(cost(k),0.,ceiling)){return true;}
+            let missed=checks.iter().filter(|k|k.motion.max(k.loss)>1.).map(|k|k.steps).max().unwrap_or(1);
+            saves(work(missed)*fewest*weight*(outputs-1) as f64,count*work(at)/at as f64,ceiling)};
+        let Some(checked)=step_check(&c.model,states,&binding,&settings,first.map_or(steps,|x|x.0.steps),most,pilot_waiting,pilot_horizon,pilot as usize,&pilot_groups,period,tolerances,&cost,need,&known,deposits,reach,&go)
+            else{return Costed{cost:f64::INFINITY,check:0.,work:0.,steps:0,bias:[0.;2],total,checked:None}};
         let chosen=checked.chosen;
         Costed{cost:cost(&chosen),check:checked_work(&checked,states.len(),pilot as usize,pilot_horizon,interval,period,&work),work:work(chosen.steps),steps:chosen.steps,bias:bias(&chosen),total,checked:Some(checked)}
     };
@@ -962,7 +974,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     // jumps (`least_work`) -- times the fewest trajectories it can need and their
     // weight (its totals with no step bias) could still cost less: its check is spent whether it is taken or not.
     let measured=!pilot_states.is_empty();
-    let pilot_cost=measured.then(||evaluate(&pilot_candidate,&pilot_states,&starts,None,&Deposits::default()));
+    let pilot_cost=measured.then(||evaluate(&pilot_candidate,&pilot_states,&starts,None,&Deposits::default(),f64::INFINITY));
     // The fourth order is built where it can pay its check and run beyond the need's error, the rule of every model here: its work per interval at least the pilot's
     // model's at its step with its own layout's generators and jumps (`fourth_work`; GMD1C's 2.7 times, its tables eight times the
     // model's to build), its check's at least that model's at that work, its totals
@@ -980,7 +992,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     let fourth_cost=if measured&&promise{Candidate::new(request,pilot_candidate.model.ground.clone(),pilot_candidate.allowance,true).ok().map(|mut c|{c.charged(charge_of(&pilot_candidate.model,&c.model));
         let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect()};
         let(states,begun)=(into(&pilot_states),into(&starts));c.phase=grid_phase(&c.model,&states,&running(c.reference(),steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase),Some((&groups,duration)));
-        let costed=evaluate(&c,&states,&begun,None,&Deposits::default());(costed,c,states,begun)})}else{None};
+        let costed=evaluate(&c,&states,&begun,None,&Deposits::default(),pilot_cost.as_ref().map_or(f64::INFINITY,|p|p.cost));(costed,c,states,begun)})}else{None};
     // What the choice stands at so far: the pilot's model, or its fourth order where that pays.
     let fourth_wins=fourth_cost.as_ref().is_some_and(|f|pilot_cost.as_ref().map_or(true,|p|saves(f.0.cost,0.,p.cost)));
     let mut least=match(&fourth_cost,&pilot_cost){(Some(f),_)if fourth_wins=>f.0.cost,(_,Some(p))=>p.cost,_=>f64::INFINITY};
@@ -989,66 +1001,70 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     // uncertainty and a rung's least check: more of the model explicit, more work per step, one doubling at least. Below
     // that no rung can win or pay for its check (DEFAULT's, THREE's: a near tie of explicit and folded at 1.3 s of the
     // startup's checks; F10's a run of 1 CPU-s, a rung's check ten, its opening with the pilot's draws).
-    let open=pilot_cost.as_ref().is_some_and(|p|{let fixed=vec![[pilot_candidate.fixed()+pilot_beats*pilot_horizon;2];outputs];
-        let(n,weight)=predicted(&pilot_statistics,&fixed,p.bias,pilot as f64);
-        saves(p.work*n*weight*(outputs-1) as f64,checked_step(pilot_states.len(),bound_probes(&pilot_candidate.model,&pilot_states,&binding_at(&pilot_states,&weights,interval)).first,p.steps,interval,period)*p.work/p.steps as f64,least)});
+    // A rung's closure and build are spent before any of that is known: the walk takes the next one only where they too, at the last ones'
+    // counted work (`Walk`), and the least check pay against what the least a rung to come can cost leaves of the least so far
+    // (cost.rs `pays`) -- below the pilot's model at its step and bias, below a rung at its own least work (`below`). A closure that no saving
+    // could pay is not spent (the 3D PGC's sweep scene s5037: its last rung's closure, 43 CPU-s, where the least was 1.4 CPU-s).
     // A check's work per unit of the work per interval: the same steps' doublings at another model's work (the pilot's model's).
     let per_work=pilot_cost.as_ref().map_or(0.,|p|p.check/p.work);
     // What no rung can beat on its totals: the trajectories and weight at the estimates no candidate changes (`Candidate::fixed`), no step bias.
     let below=predicted(&pilot_statistics,&vec![[pilot_candidate.fixed()+pilot_beats*pilot_horizon;2];outputs],[0.;2],pilot as f64);
+    // The least a rung to come can cost and its least check, first below the pilot's model.
+    let mut ahead=pilot_cost.as_ref().map(|p|{let fixed=vec![[pilot_candidate.fixed()+pilot_beats*pilot_horizon;2];outputs];
+        let(n,weight)=predicted(&pilot_statistics,&fixed,p.bias,pilot as f64);
+        (p.work*n*weight*(outputs-1) as f64,checked_step(pilot_states.len(),bound_probes(&pilot_candidate.model,&pilot_states,&binding_at(&pilot_states,&weights,interval)).first,p.steps,interval,period)*p.work/p.steps as f64)});
     // Each rung's first doubling by its clusters (`Candidate::clusters`): the same states' dynamics whatever the drives of round-off's
     // size between them, its biases the same at the rung's tolerances.
     let(mut rung,mut doubled)=(None,Vec::<(Vec<(Vec<usize>,Vec<usize>)>,usize,[f64;3],[f64;2])>::new());
-    if open{
-        while let Some(mut c)=next_candidate(request,&mut ladder,&mut failed,&mut shapes){
-            c.charged(charge_of(&pilot_candidate.model,&c.model));
-            // Its grid on the pilot's states carried into it, bare as a jump leaves them (`grid_phase`).
-            let period=slowest_period(&c.reference().0);let mut at=running(c.reference(),steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase);
-            let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect()};
-            let(bare,begun)=(into(&pilot_states),into(&starts));
-            let parts=state_work(&c.model,&bare,&begun);
-            let total=Apriori::of(&booked(&c.base,pilot_beats*pilot_horizon),&c.model);let apriori:Vec<[f64;2]>=c.items.iter().map(|&m|total.at(m)).collect();
-            let(fewest,weight)=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64);
-            // Its check as the pilot's model's at its own work: spent whether it is taken or not. A rung is taken only for a saving
-            // beyond the need's error: one whose floor cannot make it, its check paid, is passed over with its check unspent -- at
-            // whatever grid its search has come to --, and the walk stops where no rung below can make it (`below`: its work at least
-            // this one's, it keeps more; its totals at least those no candidate changes), so that a rung no drive of which a run could read stops by its cost: the validation's tensor scenes' D1 light on the D2 states, 7 THz away at 1e-12 of
-            // saturation, merges the hyperfine levels into one cluster of 23 to 32 states on a grid of that beat, whose read on its 256 probes ran past five minutes where the rungs before it took a second.
-            // (R5038 at 129 uK: the first rung folds F = 1's static Zeeman pairs, m² 0.08, charged 16 %; the rung that keeps them lies below one
-            // that keeps a drive and fixes nothing, which stopped the walk.)
-            let work_at=|s:&Settings|(interval_work(&c.model,&parts,s,interval,pilot_waiting),least_work(&c.model,&parts,s,interval,pilot_waiting));
-            let floor_pays=|(work,floor):(f64,f64)|saves(floor*fewest*weight*(outputs-1) as f64,per_work*work,least);
-            let below_pays=|(work,floor):(f64,f64)|saves(floor*below.0*below.1*(outputs-1) as f64,per_work*work,least);
-            if !below_pays(work_at(&at)){break;}
-            let Some(phase)=grid_within(&c.model,&bare,&at,Some((&groups,duration)),&|phase|{let mut s=at.clone();s.node_phase=phase;floor_pays(work_at(&s))})else{continue};
-            c.phase=phase;at.node_phase=phase;
-            let(at_work,at_least)=work_at(&at);
-            if !floor_pays((at_work,at_least)){continue;}
-            let check=per_work*at_work;
-            let states=relaxed(&c.model,&at,bare);let binding=binding_at(&states,&weights,interval);let probes=bound_probes(&c.model,&states,&binding);
-            // That doubling, made, from the coarse side as the grid's (`grid_phase`): at the fewest steps whose work per interval still is at least the work no step changes (W(s) = a s + least_work), at most the pilot's -- a read of the
-            // orbits costs as its steps until there, and the pilot's step is no measure of a rung's: on a Λ scheme's rung of 5 explicit states 0.04 us against the 0.62 us it keeps, each check at 0.04-0.05 us 125-155 CPU-s of a search of 830 for a run of 11.
-            // The motion's and the loss's criteria, as dt², bound the steps the check can keep from below
-            // (the population's bound may yet be measured smaller), and the work there any step's it keeps -- the explicit
-            // states' exact steps resolve what the folded model's step left to the fold (CONTROL_CYCLE's first rung: 118 steps
-            // per interval against the folded 34, its evaluation ten CPU-s for a cost twice the least's).
-            let tolerances=tolerances(&ceilings,&apriori).least;let clusters=c.clusters();let deposits=Deposits::default();
-            let coarse=((at_least*steps as f64/(at_work-at_least)).ceil() as usize).clamp(1,steps);
-            let(coarse,r)=match doubled.iter().find(|x|x.0==clusters){
-                Some(x)=>(x.1,[x.2[0]*x.3[0]/tolerances[0],x.2[1]*x.3[0]/tolerances[0],x.2[2]*x.3[1]/tolerances[1]]),
-                None=>{let read=running(c.reference(),coarse,pilot_waiting,at.doppler,at.node_phase);let r=step_excess(&Engine::new(&c.model,read),&states,&binding,pilot_waiting,&probes,period,escape(&c.model,&states,&pilot_groups),tolerances,&deposits,fewest*duration);doubled.push((clusters,coarse,r,tolerances));(coarse,r)}
-            };
-            let fewest_steps=((coarse as f64*r[1].max(r[2]).sqrt()).ceil() as usize).clamp(1,most);
-            // There the motion's and the loss's biases, as dt², and the trajectories they leave the statistics: the rung's
-            // cost at the largest step its check can keep -- a near tie (RETRO's ladder, ten rungs within its error of the
-            // first) is passed over unchecked; one that saves beyond the error is costed.
-            let x=(coarse as f64/fewest_steps as f64).powi(2);
-            let(n,weight)=predicted(&pilot_statistics,&apriori,[r[1]*x*tolerances[0],r[2]*x*tolerances[1]],pilot as f64);
-            if !saves(interval_work(&c.model,&parts,&running(c.reference(),fewest_steps,pilot_waiting,at.doppler,at.node_phase),interval,pilot_waiting)*n*weight*(outputs-1) as f64,check,least){continue;}
-            let costed=evaluate(&c,&states,&begun,Some((Check{steps:coarse,population:r[0],loss:r[1],motion:r[2]},tolerances)),&deposits);
-            // A rung keeps more of the model explicit: taken only for a saving beyond the prediction's own uncertainty.
-            if saves(costed.cost,0.,least){least=costed.cost;rung=Some((c,states,begun,costed.checked));}
-        }
+    while let Some((floor,check))=ahead{
+        let Some(mut c)=walk.next(&|build|saves(floor,check+build,least))else{break};
+        c.charged(charge_of(&pilot_candidate.model,&c.model));
+        // Its grid on the pilot's states carried into it, bare as a jump leaves them (`grid_phase`).
+        let period=slowest_period(&c.reference().0);let mut at=running(c.reference(),steps,pilot_waiting,doppler_allowance(&c.base,&c.model),c.phase);
+        let into=|v:&[Trajectory]|->Vec<Trajectory>{v.iter().map(|t|carried(&pilot_candidate.model,&c.model,t)).collect()};
+        let(bare,begun)=(into(&pilot_states),into(&starts));
+        let parts=state_work(&c.model,&bare,&begun);
+        let total=Apriori::of(&booked(&c.base,pilot_beats*pilot_horizon),&c.model);let apriori:Vec<[f64;2]>=c.items.iter().map(|&m|total.at(m)).collect();
+        let(fewest,weight)=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64);
+        // Its check as the pilot's model's at its own work: spent whether it is taken or not. A rung is taken only for a saving
+        // beyond the need's error: one whose floor cannot make it, its check paid, is passed over with its check unspent -- at
+        // whatever grid its search has come to --, and the walk stops where no rung below can make it (`below`: its work at least
+        // this one's, it keeps more; its totals at least those no candidate changes), so that a rung no drive of which a run could read stops by its cost: the validation's tensor scenes' D1 light on the D2 states, 7 THz away at 1e-12 of
+        // saturation, merges the hyperfine levels into one cluster of 23 to 32 states on a grid of that beat, whose read on its 256 probes ran past five minutes where the rungs before it took a second.
+        // (R5038 at 129 uK: the first rung folds F = 1's static Zeeman pairs, m² 0.08, charged 16 %; the rung that keeps them lies below one
+        // that keeps a drive and fixes nothing, which stopped the walk.)
+        let work_at=|s:&Settings|(interval_work(&c.model,&parts,s,interval,pilot_waiting),least_work(&c.model,&parts,s,interval,pilot_waiting));
+        let floor_pays=|(work,floor):(f64,f64)|saves(floor*fewest*weight*(outputs-1) as f64,per_work*work,least);
+        let(work,floor_work)=work_at(&at);ahead=Some((floor_work*below.0*below.1*(outputs-1) as f64,per_work*work));
+        if !saves(floor_work*below.0*below.1*(outputs-1) as f64,per_work*work,least){break;}
+        let Some(phase)=grid_within(&c.model,&bare,&at,Some((&groups,duration)),&|phase|{let mut s=at.clone();s.node_phase=phase;floor_pays(work_at(&s))})else{continue};
+        c.phase=phase;at.node_phase=phase;
+        let(at_work,at_least)=work_at(&at);
+        if !floor_pays((at_work,at_least)){continue;}
+        let check=per_work*at_work;
+        let states=relaxed(&c.model,&at,bare);let binding=binding_at(&states,&weights,interval);let probes=bound_probes(&c.model,&states,&binding);
+        // That doubling, made, from the coarse side as the grid's (`grid_phase`): at the fewest steps whose work per interval still is at least the work no step changes (W(s) = a s + least_work), at most the pilot's -- a read of the
+        // orbits costs as its steps until there, and the pilot's step is no measure of a rung's: on a Λ scheme's rung of 5 explicit states 0.04 us against the 0.62 us it keeps, each check at 0.04-0.05 us 125-155 CPU-s of a search of 830 for a run of 11.
+        // The motion's and the loss's criteria, as dt², bound the steps the check can keep from below
+        // (the population's bound may yet be measured smaller), and the work there any step's it keeps -- the explicit
+        // states' exact steps resolve what the folded model's step left to the fold (CONTROL_CYCLE's first rung: 118 steps
+        // per interval against the folded 34, its evaluation ten CPU-s for a cost twice the least's).
+        let tolerances=tolerances(&ceilings,&apriori).least;let clusters=c.clusters();let deposits=Deposits::default();
+        let coarse=((at_least*steps as f64/(at_work-at_least)).ceil() as usize).clamp(1,steps);
+        let(coarse,r)=match doubled.iter().find(|x|x.0==clusters){
+            Some(x)=>(x.1,[x.2[0]*x.3[0]/tolerances[0],x.2[1]*x.3[0]/tolerances[0],x.2[2]*x.3[1]/tolerances[1]]),
+            None=>{let read=running(c.reference(),coarse,pilot_waiting,at.doppler,at.node_phase);let r=step_excess(&Engine::new(&c.model,read),&states,&binding,pilot_waiting,&probes,period,escape(&c.model,&states,&pilot_groups),tolerances,&deposits,fewest*duration);doubled.push((clusters,coarse,r,tolerances));(coarse,r)}
+        };
+        let fewest_steps=((coarse as f64*r[1].max(r[2]).sqrt()).ceil() as usize).clamp(1,most);
+        // There the motion's and the loss's biases, as dt², and the trajectories they leave the statistics: the rung's
+        // cost at the largest step its check can keep -- a near tie (RETRO's ladder, ten rungs within its error of the
+        // first) is passed over unchecked; one that saves beyond the error is costed.
+        let x=(coarse as f64/fewest_steps as f64).powi(2);
+        let(n,weight)=predicted(&pilot_statistics,&apriori,[r[1]*x*tolerances[0],r[2]*x*tolerances[1]],pilot as f64);
+        if !saves(interval_work(&c.model,&parts,&running(c.reference(),fewest_steps,pilot_waiting,at.doppler,at.node_phase),interval,pilot_waiting)*n*weight*(outputs-1) as f64,check,least){continue;}
+        let costed=evaluate(&c,&states,&begun,Some((Check{steps:coarse,population:r[0],loss:r[1],motion:r[2]},tolerances)),&deposits,least);
+        // A rung keeps more of the model explicit: taken only for a saving beyond the prediction's own uncertainty.
+        if saves(costed.cost,0.,least){least=costed.cost;rung=Some((c,states,begun,costed.checked));}
     }
     // The choice: the least weighed cost, one keeping more of the model only for a saving beyond the need's error; with
     // none costed, the pilot's model. Its run takes the pilot's states carried into its clusters, the pilot's statistics
@@ -1082,7 +1098,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
         let cost=|k:&Check|{let r=k.ratios();let(n,weight)=predicted(&pilot_statistics,&apriori,[r[0]*tolerances[0],r[1]*tolerances[1]],pilot as f64);
             interval_work(&model,&parts,&settings(k.steps),interval,waiting)*n*weight};
         let reach=predicted(&pilot_statistics,&apriori,[0.;2],pilot as f64).0*duration;
-        step_check(&model,&states,&binding_at(&states,&weights,interval),&settings,steps,most,waiting,horizon,pilot as usize,&pilot_groups,period,tolerances,&cost,need,&[],&Deposits::default(),reach)}};
+        step_check(&model,&states,&binding_at(&states,&weights,interval),&settings,steps,most,waiting,horizon,pilot as usize,&pilot_groups,period,tolerances,&cost,need,&[],&Deposits::default(),reach,&|_,_,_|true).expect("no ceiling stops a check")}};
     let tolerances=checked.tolerances;
     // The kept step against T's error over the run (`drift`), each output against T's tolerance there and the loss's: read where its error per period could add up past that;
     // where more stands than that, as dt² the step where it would come to it and its bias, checked again at least as far as that span.
@@ -1295,25 +1311,37 @@ impl Candidate{
     /// Its reference state, the largest initial population: its trap (ω per axis) and depth.
     fn reference(&self)->(Trap,f64){let i=&self.initial;let k=i.reference();(i.traps[k],i.depths[k])}
 }
-/// The next candidate along the rule's allowances that builds (a model that fails, its tables not
-/// converging, is passed over with its error kept), past the rungs whose closure gives the shape of one in `shapes` (ground.rs `Shape`), the same model, before their tables.
-fn next_candidate(request:&Request,ladder:&mut Ladder,failed:&mut Option<String>,shapes:&mut Vec<Shape>)->Option<Candidate>{
-    while let Some((a,ground))=ladder.next(){
-        let ground=match ground{Ok(ground)=>ground,Err(e)=>{failed.get_or_insert(e);continue;}};
-        let shape=ground.shape();if shapes.contains(&shape){continue;}
-        match Candidate::new(request,ground,a,false){Ok(c)=>{shapes.push(shape);return Some(c);},Err(e)=>{failed.get_or_insert(e);}}
+/// The rule's candidates as the choice takes them (module documentation, # The fold's choice): its ladder, the shapes built so far, the
+/// first failure, and the counted work (ns, linear.rs `Tally`) of the last closure and of the last candidate built on one -- what the next
+/// of each is estimated at before it is spent.
+struct Walk<'a>{request:&'a Request,ladder:Ladder,tally:&'a Tally,failed:Option<String>,shapes:Vec<Shape>,closure:f64,build:f64}
+impl<'a> Walk<'a>{
+    fn new(request:&'a Request,ladder:Ladder,tally:&'a Tally)->Walk<'a>{Walk{request,ladder,tally,failed:None,shapes:vec![],closure:0.,build:0.}}
+    /// The next candidate along the rule's allowances that builds, each closure and build only where `pays` holds for its estimate (the
+    /// last ones' counted work): a model that fails, its tables not converging, is passed over with its error kept, and a closure that
+    /// gives the shape of one built already (ground.rs `Shape`), the same model, before its tables.
+    fn next(&mut self,pays:&dyn Fn(f64)->bool)->Option<Candidate>{
+        while pays(self.closure+self.build){
+            let(next,closure)=self.tally.measure(||self.ladder.next());self.closure=COMPLEX_MULTIPLY_ADD_NS*closure;
+            let(a,ground)=next?;let ground=match ground{Ok(ground)=>ground,Err(e)=>{self.failed.get_or_insert(e);continue;}};
+            let shape=ground.shape();if self.shapes.contains(&shape){continue;}
+            let request=self.request;let(made,build)=self.tally.measure(||Candidate::new(request,ground,a,false));self.build=COMPLEX_MULTIPLY_ADD_NS*build;
+            match made{Ok(c)=>{self.shapes.push(shape);return Some(c);},Err(e)=>{self.failed.get_or_insert(e);}}
+        }
+        None
     }
-    None
 }
 /// The rule's candidates in the ladder's order (module documentation, # The fold's choice): the generator before the rule, its first rung
 /// (every fold that exists folded, ground.rs `Ground::with` at `EXISTS`) and the allowances below it, the drives' and the pairs' (`Ground::rungs`).
-struct Ladder{bare:Ground,first:Option<Result<Ground,String>>,below:std::vec::IntoIter<f64>}
+struct Ladder{bare:Ground,below:Option<std::vec::IntoIter<f64>>}
 impl Ladder{
-    fn new(bare:Ground)->Ladder{let first=bare.clustered(EXISTS);let below=first.as_ref().unwrap_or(&bare).rungs().into_iter().skip(1).collect::<Vec<f64>>().into_iter();Ladder{bare,first:Some(first),below}}
+    fn new(bare:Ground)->Ladder{Ladder{bare,below:None}}
     /// The next rung: its allowance and the rule's generator there.
     fn next(&mut self)->Option<(f64,Result<Ground,String>)>{
-        if let Some(first)=self.first.take(){return Some((EXISTS,first));}
-        let a=self.below.next()?;Some((a,self.bare.clustered(a)))
+        match self.below.as_mut(){
+            None=>{let first=self.bare.clustered(EXISTS);self.below=Some(first.as_ref().unwrap_or(&self.bare).rungs().into_iter().skip(1).collect::<Vec<f64>>().into_iter());Some((EXISTS,first))}
+            Some(below)=>{let a=below.next()?;Some((a,self.bare.clustered(a)))}
+        }
     }
 }
 /// A trap's slowest axis's period: the span of T's step error (`orbits`).
@@ -1470,16 +1498,18 @@ fn next_groups(reach:&[u64],counts:&[u64])->Vec<usize>{
 /// the criteria going as dt^q with q from 2 to 3 where the square root alone crept up on a step in ten checks (`power`) --,
 /// until a step comes up twice, at most 8 checks;
 /// with `measure` (the measured search) the population error measured where the population decides a step; with `hand_over`, a bound's search that a measured one takes up, until the first step its bound alone misses.
-fn search(first:usize,most:usize,known:&[Check],check:&dyn Fn(usize)->Check,measure:Option<&dyn Fn(usize)->f64>,hand_over:bool,checked:&mut Vec<Check>){
+/// A doubling or a measure is made only where `go` lets it (`step_check`'s ceiling: the checks so far, `known` and its own, the steps, whether it measures); false where it stopped there.
+fn search(first:usize,most:usize,known:&[Check],check:&dyn Fn(usize)->Check,measure:Option<&dyn Fn(usize)->f64>,hand_over:bool,checked:&mut Vec<Check>,go:&dyn Fn(&[Check],&[Check],usize,bool)->bool)->bool{
     let mut steps=first;
     for _ in 0..8{
         if checked.iter().any(|c|c.steps==steps){break;}
-        let mut c=known.iter().find(|c|c.steps==steps).copied().unwrap_or_else(||check(steps));
-        if let Some(m)=measure.filter(|_|c.decided_by_population()){c.population=m(steps);}
+        let mut c=match known.iter().find(|c|c.steps==steps){Some(&c)=>c,None=>{if !go(known,checked,steps,false){return false;}check(steps)}};
+        if let Some(m)=measure.filter(|_|c.decided_by_population()){if !go(known,checked,steps,true){return false;}c.population=m(steps);}
         let q=checked.last().map_or(2.,|last:&Check|power(last,&c));
         checked.push(c);if hand_over&&c.decided_by_population()&&c.population>1.{break;}
         steps=next_step(&c,measure.is_some(),most,q);
     }
+    true
 }
 
 /// The search's next step after a check (module documentation): the square root of its excess away (all scale
@@ -1545,17 +1575,22 @@ impl Check{
 /// last checked when none met. A met step's bias is at most the step's share of the run's room (`tolerances`): it leaves
 /// the statistics their balance by construction. Every check after the searches is the measured list's (for
 /// `checked_work`); the tolerances the checks took, for the step's bias. `known`: checks already made, at those tolerances. `binding`: T's weight at each state (`binding_at`). `reach`: the time (us) the trajectories the run predicts take together (`orbits`).
+/// `ceiling`: whether the search goes on to its next doubling or measure, at so many steps per interval taking so many steps of its own (as `checked_work` counts them), on the checks so far
+/// (module documentation, # The fold's choice); none where it stopped.
 struct Steps{bound:Vec<Check>,measured:Vec<Check>,chosen:Check,probes:usize,tolerances:[f64;2]}
 fn step_check(model:&Model,states:&[Trajectory],binding:&[f64],settings:&dyn Fn(usize)->Settings,first:usize,most:usize,waiting:f64,horizon:f64,subsample:usize,groups:&[Group],period:f64,
-    tolerances:[f64;2],cost:&dyn Fn(&Check)->f64,need:f64,known:&[Check],deposits:&Deposits,reach:f64)->Steps{
+    tolerances:[f64;2],cost:&dyn Fn(&Check)->f64,need:f64,known:&[Check],deposits:&Deposits,reach:f64,ceiling:&dyn Fn(&[Check],usize,f64)->bool)->Option<Steps>{
     // The orbits' probes and the loss's sensitivity (`bound_probes`, `escape`), at the pilot's groups.
     let(probes,escape)=(bound_probes(model,states,binding),escape(model,states,groups));
     let doubled=|steps:usize|{let r=step_excess(&Engine::new(model,settings(steps)),states,binding,waiting,&probes,period,escape,tolerances,deposits,reach);Check{steps,population:r[0],loss:r[1],motion:r[2]}};
     let measure=|steps:usize|accumulated_excess(&Engine::new(model,settings(steps)),states,horizon,subsample,tolerances[0]);
     let checked=|steps:usize|{let mut c=doubled(steps);if c.decided_by_population(){c.population=measure(steps);}c};
-    let mut bound=vec![];search(first,most,known,&doubled,None,true,&mut bound);
+    let go=|known:&[Check],made:&[Check],steps:usize,measuring:bool|{let dt=settings(steps).dt;
+        let count=if measuring{3.*subsample.min(states.len()) as f64*(horizon/dt).max(1.)}else{3.*states.len() as f64+3.*probes.first as f64*(period/dt).ceil()};
+        ceiling(&known.iter().chain(made).copied().collect::<Vec<Check>>(),steps,count)};
+    let mut bound=vec![];if !search(first,most,known,&doubled,None,true,&mut bound,&go){return None;}
     let grown=*bound.iter().filter(|c|c.met()).min_by_key(|c|c.steps).unwrap_or(&bound[bound.len()-1]);
-    let mut measured=vec![];if grown.decided_by_population(){search(grown.steps,most,&bound,&doubled,Some(&measure as &dyn Fn(usize)->f64),false,&mut measured);}
+    let mut measured=vec![];if grown.decided_by_population()&&!search(grown.steps,most,&bound,&doubled,Some(&measure as &dyn Fn(usize)->f64),false,&mut measured,&go){return None;}
     let mut candidates:Vec<Check>=bound.iter().chain(&measured).filter(|c|c.met()).copied().collect();
     let chosen=if candidates.len()>1{
         let mut choice=kept(&candidates,cost,need).unwrap_or(grown);
@@ -1565,12 +1600,13 @@ fn step_check(model:&Model,states:&[Trajectory],binding:&[f64],settings:&dyn Fn(
             let carried=|s:usize|{let x=(largest.steps as f64/s as f64).powi(2);Check{steps:s,population:largest.population*x,loss:largest.loss*x,motion:largest.motion*x}};
             let range:Vec<Check>=(largest.steps..=candidates.iter().map(|c|c.steps).max().unwrap()).map(carried).collect();
             if let Some(s)=kept(&range,cost,need).map(|c|c.steps).filter(|&s|!candidates.iter().any(|c|c.steps==s)){
+                if !go(&bound,&measured,s,false){return None;}
                 let c=checked(s);measured.push(c);if c.met(){candidates.push(c);choice=kept(&candidates,cost,need).unwrap_or(grown);}
             }
         }
         choice
     }else{candidates.first().copied().unwrap_or(grown)};
-    Steps{bound,measured,chosen,probes:probes.first,tolerances}
+    Some(Steps{bound,measured,chosen,probes:probes.first,tolerances})
 }
 /// A step check's own work (ns, `step_check`) at `work`'s work per step (per interval over the steps): per
 /// checked step a step and two halves on every state and the orbits' jump-free flow over the trap's `period` in

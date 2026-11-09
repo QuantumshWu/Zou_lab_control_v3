@@ -252,7 +252,8 @@ impl Ensemble{
                     if t>entered&&t<left{s[2]+=measure*number;s[3]+=measure*(own-a).exp();}
                 }
             }
-            s}).reduce(||[0.;4],|x,y|std::array::from_fn(|i|x[i]+y[i]))
+            // The directions' sums in their order: a reduction's order on the threads would move the last bits with the threads and their load.
+            s}).collect::<Vec<[f64;4]>>().into_iter().fold([0.;4],|x,y|std::array::from_fn(|i|x[i]+y[i]))
         }).fold([0.;4],|x:[f64;4],y|std::array::from_fn(|i|x[i]+y[i]));
         (sums[1]/sums[0],(1.-sums[2]/sums[3]).max(0.))
     }

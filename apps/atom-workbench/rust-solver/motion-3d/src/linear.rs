@@ -1,15 +1,37 @@
 //! Dense complex linear algebra for the elimination's small matrices (a few dozen rows): complex
 //! arithmetic, products, an LU factorization with partial pivoting and the spectral norm. Each thread
 //! counts the complex multiply-adds its products, factorizations, solves and eigenvalue sweeps take
-//! (their nominal counts, `counted`): a table node's work (model.rs `tabulate`), the same on any machine.
+//! (their nominal counts, `counted`): a table node's work (model.rs `tabulate`), the same on any machine. A step that runs on many
+//! threads is counted whole on a pool of its own (`Tally`).
 use crate::{Complex,Matrix,STATES};
-use std::cell::Cell;
+use std::cell::{Cell,OnceCell};
 use std::ops::{Add,AddAssign,Div,Index,IndexMut,Mul,Neg,Sub,SubAssign};
+use std::sync::atomic::{AtomicU64,Ordering::Relaxed};
+use std::sync::{Arc,Mutex};
 
-thread_local!{static WORK:Cell<f64>=const{Cell::new(0.)};}
+thread_local!{
+    static WORK:Cell<f64>=const{Cell::new(0.)};
+    /// This thread's count in its pool's tally (`Tally::pool`), none on a thread of no tally's pool.
+    static SHARE:OnceCell<Arc<AtomicU64>>=const{OnceCell::new()};
+}
 /// The complex multiply-adds this thread's dense algebra has taken so far (nominal counts).
 pub fn counted()->f64{WORK.with(|w|w.get())}
-fn count(work:usize){WORK.with(|w|w.set(w.get()+work as f64));}
+fn count(work:usize){WORK.with(|w|w.set(w.get()+work as f64));SHARE.with(|s|if let Some(s)=s.get(){s.fetch_add(work as u64,Relaxed);});}
+/// A pool of every core whose threads count into it: a step run there (`measure`) is counted whole, whatever ran on which thread,
+/// and its own work alone -- one step at a time on a pool no other work of the process shares (another solve, a concurrent test), so
+/// that its count is the same on any machine and at any load (solve.rs, # The fold's choice).
+pub struct Tally{pool:rayon::ThreadPool,shares:Arc<Mutex<Vec<Arc<AtomicU64>>>>}
+impl Tally{
+    pub fn new()->Result<Tally,String>{
+        let shares:Arc<Mutex<Vec<Arc<AtomicU64>>>>=Default::default();let into=shares.clone();
+        let pool=rayon::ThreadPoolBuilder::new().start_handler(move|_|{let share=Arc::new(AtomicU64::new(0));
+            into.lock().unwrap_or_else(|e|e.into_inner()).push(share.clone());SHARE.with(|s|{let _=s.set(share);});}).build().map_err(|e|e.to_string())?;
+        Ok(Tally{pool,shares})
+    }
+    /// `op` run on the pool, and the complex multiply-adds it took.
+    pub fn measure<R:Send>(&self,op:impl FnOnce()->R+Send)->(R,f64){let before=self.total();let out=self.pool.install(op);(out,self.total()-before)}
+    fn total(&self)->f64{self.shares.lock().unwrap_or_else(|e|e.into_inner()).iter().map(|s|s.load(Relaxed) as f64).sum()}
+}
 
 impl Complex{
     pub const ZERO:Complex=Complex{re:0.,im:0.};
