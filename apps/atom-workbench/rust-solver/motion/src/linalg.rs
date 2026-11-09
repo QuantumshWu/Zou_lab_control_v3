@@ -389,7 +389,7 @@ pub struct Hermitian {
     pub vectors: Mat,
 }
 
-//// The eigendecomposition of the Hermitian part of h, (h + h†)/2, by cyclic complex Jacobi rotations: each rotation
+/// The eigendecomposition of the Hermitian part of h, (h + h†)/2, by cyclic complex Jacobi rotations: each rotation
 /// unitary up to its own rounding, so U stays orthonormal to round-off, in a degenerate eigenspace too. The sweeps run
 /// until the off-diagonal part is within the unit round-off of the matrix, ‖off(A)‖_F ≤ u‖A‖_F, or a sweep no longer
 /// shrinks it (the floating-point format's floor; the convergence is quadratic). Each eigenvalue is then within
