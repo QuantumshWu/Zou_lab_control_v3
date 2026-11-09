@@ -139,9 +139,9 @@ impl Model {
                     if x == C64::ZERO {
                         continue;
                     }
-                    value += x * t.value[(e, place)];
+                    value += x * t[0][(e, place)];
                     for i in 0..3 {
-                        gradient[i] += x * t.gradient[i][(e, place)];
+                        gradient[i] += x * t[1 + i][(e, place)];
                     }
                 }
                 (value, gradient)
@@ -243,7 +243,7 @@ impl Model {
     pub fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
         let amplitudes = self.light.amplitudes(at.r);
         let lights = self.running();
-        let near = self.carriers.iter().any(|x| lights.on(x.frequency)).then(|| self.near_at(cluster, at, &amplitudes, &lights));
+        let near = self.carriers.iter().any(|x| lights.on(x.frequency)).then(|| self.near_at(cluster, at, &amplitudes, &lights, 1));
         let mut out = vec![];
         for class in &self.classes[cluster] {
             let n = self.clusters[class.landing].states.len();

@@ -32,6 +32,7 @@ pub mod eliminate;
 pub mod assemble;
 pub mod readout;
 pub mod photon;
+pub(crate) mod jet;
 
 use crate::field::Light;
 use crate::linalg::{C64, Mat};
@@ -167,6 +168,10 @@ pub enum Unit {
     FarBeat { first: Component, second: Component },
     /// A static coupling of an explicit excited state `excited` to another excited state `other`. Kept: `other` is explicit too.
     Excited { excited: usize, other: usize },
+    /// A near carrier's dressing of the other channels (its light shifts of their ground states and its folded channels'
+    /// self-energy) with its polarization units' T̄, their interference averaged (eliminate.rs). Kept: its coherent field at the
+    /// point.
+    Dressing { carrier: Component },
     /// The coherence of the photons landing in ground state `landing` at two frame frequencies `first` and `second` (in the
     /// landing cluster's frames). Kept: one class, their interference with its beat; folded: two classes.
     Coherence { landing: usize, first: Beat, second: Beat },

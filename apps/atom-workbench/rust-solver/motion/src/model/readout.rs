@@ -147,6 +147,7 @@ impl Model {
             Unit::FarBeat { first, second } => format!("两组远失谐光的拍频（{} 与 {}）", self.component_label(*first), self.component_label(*second)),
             Unit::Excited { excited, other } => format!("{} 与 {} 的静态耦合", self.state_label(*excited), self.state_label(*other)),
             Unit::Coherence { landing, .. } => format!("落到 {} 所在子空间的两组光子的相干", self.state_label(*landing)),
+            Unit::Dressing { carrier } => format!("{} 的缀饰：偏振单元之间的干涉", self.component_label(*carrier)),
         }
     }
 

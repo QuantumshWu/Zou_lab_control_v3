@@ -73,6 +73,7 @@ export function check(e,result,request){
         case 'loss':x=loss[i];se=Math.sqrt(x*(1-x)/N);reported=errors[i];break;
         case 'T':{x=m.temperatureUK[s.axis][i];const t=m.temperatureErrorUK[s.axis][i];se=t==null?Infinity:t;reported=Math.hypot(se,tLedger*x);
           if(s.regime==='classical'&&!m.classical[i])o.judge=false;break;}
+        case 'Tincrease':{x=m.temperatureUK[s.axis][i]-m.temperatureUK[s.axis][0];const t=m.temperatureErrorUK[s.axis][i];se=t==null?Infinity:t;break;}
         case 'trapFrequency':x=m.trapFrequencyKHz[s.axis];se=0;break;
         case 'meanVelocity':x=m.meanVelocityMps[s.axis][i];se=Math.sqrt(KB*m.temperatureUK[s.axis][i]*1e-6/mass)/Math.sqrt(held(i));break;
         case 'meanPosition':{const p=m.position?.[s.axis],j=p?.samples.indexOf(i);if(!p||j<0){x=undefined;break;}

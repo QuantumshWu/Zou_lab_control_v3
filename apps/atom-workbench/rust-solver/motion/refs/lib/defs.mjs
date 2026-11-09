@@ -48,14 +48,16 @@ export const SCENES={
     await beam(s,{id:'probe',name:'σ+ 探测光',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:200*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
     return s;}},
   // R3 -- 1D Doppler cooling on the closed cycle with a σ+σ+ standing wave along the tweezer's axis (B).
-  R3_DOPPLER:{ref:'R3',title:'R3 一维多普勒冷却（σ⁺σ⁺ 沿 ±z，s = 0.02，δ ≈ −Γ/2）',async build(){
+  R3_DOPPLER:{ref:'R3',title:'R3 一维多普勒冷却（σ⁺σ⁺ 沿 ±z，s = 0.02，阱底 δ = −1.5Γ）',async build(){
     const s=await base({name:'R3 一维多普勒冷却',initialStateId:'ground-2-2',temperatureUK:30,durationUs:4000,samples:201});
     await tweezer(s,{nm:852,powerMW:32,waistUm:2,along:'+z',ellipticityDeg:-45});
-    // The beams sit −Γ/2 from the line at the cloud's mean potential energy (3/2)k_B·60 µK above the bottom: the
-    // differential shift κV moves the line by κ = δ_LS(0)/U₀ per unit potential energy (expect.mjs R3).
-    const sh=await levelShifts(s,['tweezer']);
-    const U0=-sh['ground-2-2'].shiftMHz,kappa=(sh['D2-3-3'].shiftMHz-sh['ground-2-2'].shiftMHz)/U0,meanV=1.5*60*1.380649e-23/6.62607015e-34*1e-12;
-    const offset=await offsetFor(s,'D2',2,3,'ground-2-2','D2-3-3',['tweezer'],-GAMMA_D2/2-kappa*meanV);
+    // The beams sit 1.5Γ red of the line at the trap's bottom: the tweezer's differential shift moves the line by κV with
+    // the potential energy V (no magic wavelength exists in the model), and the transverse axes, never cooled, heat by
+    // ~0.3ħΓ/k_B·(1 + x²)/(8|x|) per cooling time -- the cloud's detuning drifts toward the blue by Δx ≈ 0.2 per cooling
+    // time and the cooled axis' own rise toward T_D adds as much: started at x = −3 the cloud stays red (x ≈ −2.7 → −2.2)
+    // over 4 ms, while from x = −2 it runs away to the blue within 6 ms (the averaged Monte Carlo, expect.mjs R3). The run
+    // is a transient: T_z climbs from 30 µK toward T_D with the friction holding it ~40 µK below free heating.
+    const offset=await offsetFor(s,'D2',2,3,'ground-2-2','D2-3-3',['tweezer'],-1.5*GAMMA_D2);
     await beam(s,{id:'cool-plus',name:'冷却光 +z',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:0.02*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
     await beam(s,{id:'cool-minus',name:'冷却光 −z',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:0.02*ISAT_CYCLING,along:'-z',ellipticityDeg:-45});
     return s;}},
@@ -78,6 +80,14 @@ export const SCENES={
     await tweezer(s,{...DEFAULT_TWEEZER,along:'+z',ellipticityDeg:45});
     const bottom=await transitionMHz(s,'ground-2-2','D2-3-3',['tweezer']),free=await transitionMHz(s,'ground-2-2','D2-3-3',[]);
     await beam(s,{id:'push',name:'σ+ 推出光',line:'D2',Fg:2,Fe:3,offsetMHz:(bottom+free)/2-(await zeroFieldMHz('D2',2,3)),intensityMWcm2:100*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
+    return s;}},
+  // R9 (c) -- heating-driven escape: R2's far-detuned σ+ heating (δ = −100Γ) in a shallow σ+ tweezer (~200 µK), so
+  // the recoil heating (2E_rec per photon, ~70 µK/ms) carries atoms over the depth within the run.
+  R9_HEAT:{ref:'R9',title:'R9 加热逃逸：浅光镊中的反冲加热（能量 Fokker–Planck）',async build(){
+    const s=await base({name:'R9 加热逃逸',initialStateId:'ground-2-2',temperatureUK:20,durationUs:4000,samples:201});
+    await tweezer(s,{nm:852,powerMW:1.05,waistUm:1.2,along:'+z',ellipticityDeg:45});
+    const offset=await offsetFor(s,'D2',2,3,'ground-2-2','D2-3-3',['tweezer'],-100*GAMMA_D2);
+    await beam(s,{id:'probe',name:'σ+ 加热光',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:420*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
     return s;}},
 };
 
