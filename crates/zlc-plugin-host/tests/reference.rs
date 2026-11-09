@@ -34,7 +34,7 @@ fn the_virtual_mot_camera_and_camera_measurement_run_through_the_host() {
     let start = |values: serde_json::Value| {
         let token = host.call("camera_measurement1", "query", json!({"name":"prepare_run","values":values,"resources":{},
             "devices":{"camera":{"instance":"mot","role":"mot","type_id":"camera.virtual_mot","capabilities":["camera.adapter"],"tunable":true,"reads":opened["reads"]}}}), Duration::from_secs(30)).unwrap().value["prepared"].as_str().unwrap().to_owned();
-        host.start_run("camera_measurement1", RunRequest { prepared: Some(token), device_labels: Default::default(), values,
+        host.start_run("camera_measurement1", RunRequest { prepared: Some(token), device_labels: Default::default(), device_units: Default::default(), values,
         devices: [("camera".to_owned(), "mot".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
         source_signal: None, run_directory: None,
         outputs: [("frames".to_owned(), "@logic/camera_measurement1/frames".to_owned())].into(), record_devices: false }).unwrap() };
@@ -93,7 +93,7 @@ fn the_virtual_mot_camera_and_camera_measurement_run_through_the_host() {
     let variables = json!([{"name": "doubled", "terms": [{"of": "frames"}, {"op": "*", "number": 2}]}]);
     let token = host.call("derive1", "query", json!({"name":"prepare_run","values":{"variables":variables},"resources":{},"devices":{},"source_signal":frames}),
         Duration::from_secs(30)).unwrap().value["prepared"].as_str().unwrap().to_owned();
-    let derive = host.start_run("derive1", RunRequest { prepared: Some(token), device_labels: Default::default(), values: json!({"variables": variables}), devices: Default::default(),
+    let derive = host.start_run("derive1", RunRequest { prepared: Some(token), device_labels: Default::default(), device_units: Default::default(), values: json!({"variables": variables}), devices: Default::default(),
         shared: Default::default(), origin: Origin::Operator, resources: json!({}), source_signal: Some(frames.to_owned()), run_directory: None,
         outputs: [("doubled".to_owned(), "@logic/derive1/doubled".to_owned())].into(), record_devices: false }).unwrap();
     std::thread::sleep(Duration::from_secs(2));

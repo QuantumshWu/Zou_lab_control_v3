@@ -60,6 +60,8 @@ export type TunableField = WorkbenchControl & {
   /** The row at rest: Ready, Protected, Stands outside its bounds. */
   status: string;
   severity: "idle" | "warning";
+  /** Read in the unit the apparatus keeps for it (the operator's pick, saved with the apparatus). */
+  unit_kept?: boolean;
 };
 
 export type DeviceRow = {

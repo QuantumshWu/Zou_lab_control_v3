@@ -275,7 +275,9 @@ class SeamlessScanMeasurement:
             actual = knobs.move(port, value, unit)
             key, field = device_port_parts(port)
             previous = readbacks.get(key, {})
+            # Keyed by the device's id; its Device Manager name beside it, for whoever shows it.
             readbacks[key] = {
+                "role": getattr(self.tunables[key], "role", "") or key,
                 "values": {**previous.get("values", {}), field: actual},
                 "units": {**previous.get("units", {}), field: unit},
                 "provenance": dict(self.tunables[key].settings_provenance()),
@@ -330,8 +332,11 @@ class SeamlessScanMeasurement:
                        new_source=not state.get("configured") and bool(self.acquisition_logic))
             check_cancelled(context)
             if not state.get("configured"):
-                # The first point is configured; restoration values stay in ScanDeviceKnobs.
-                state["tunables"] = {key: device_snapshot(device) for key, device in sorted(self.tunables.items())}
+                # The first point is configured; restoration values stay in ScanDeviceKnobs. Each
+                # device is recorded under its id, named, in the units its operator keeps.
+                state["tunables"] = {
+                    key: {**device_snapshot(device, getattr(device, "units", None)), "role": getattr(device, "role", "") or key}
+                    for key, device in sorted(self.tunables.items())}
                 board.load(self.pulse_path, api_values=self._api_values_for(outer_row), scan_plan=scan_plan)
                 if self.acquisition_logic:
                     context.report_progress("Preparing the acquisition")

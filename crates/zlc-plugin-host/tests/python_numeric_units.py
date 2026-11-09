@@ -10,7 +10,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / 'science' /
 from zlc_atom.authoring import AuthoringField, TunableField
 from zlc_atom.devices.rf.contract import FREQUENCY_FIELD, POWER_FIELD
 from zlc_atom.devices.rf.rigol_dg4000.source import RigolDg4000RfSource
-from zlc_plugin.tunable import convert_tunable_field, read_tunable_in_unit, tune_in_unit
+from zlc_plugin.tunable import convert_tunable_field, read_tunable_in_unit, snapshot, tune_in_unit
 from scan_reference import attach_scan_oracle
 
 
@@ -113,6 +113,8 @@ class NumericUnits(unittest.TestCase):
         for fail_second in (False, True):
             with self.subTest(fail_second=fail_second):
                 knob = Knob(); outputs = []; ordering = []; run_record = {}
+                # Device Manager's name and the unit the operator keeps for the field (the proxy's).
+                knob.role, knob.units = 'Trap RF', {'frequency': 'MHz'}
                 def core(command, **params):
                     ordering.append((command, params.get('stage', 'run')))
                     if command == 'pulse_run':
@@ -139,8 +141,8 @@ class NumericUnits(unittest.TestCase):
                 arms = [params for op, params in scan_services[0].calls if op == "run.scan.arm"]
                 self.assertEqual([arm["new_source"] for arm in arms], [True, False])
                 baseline = run_record['device_snapshots']['tunable:rf']
-                self.assertEqual(baseline, {'values': {'frequency': 1000000.0}, 'units': {'frequency': 'Hz'},
-                    'provenance': {'device_session_id': 'rf-test', 'settings_epoch': 1}})
+                self.assertEqual(baseline, {'role': 'Trap RF', 'values': {'frequency': 1.0}, 'units': {'frequency': 'MHz'},
+                    'provenance': {'device_session_id': 'rf-test', 'settings_epoch': 1}}, 'named, in the kept unit only')
                 self.assertEqual(knob.snapshot_reads, [1000000.0])
                 self.assertEqual(knob.entry.current, 1234000.0)
                 self.assertEqual(knob.writes, [1000400.0, 2000600.0, 1234000.0])
@@ -151,11 +153,59 @@ class NumericUnits(unittest.TestCase):
                 self.assertEqual(run_record['plan']['axes'][0]['values'], [1.0004, 2.0006])
                 for index, output in enumerate(outputs):
                     recorded = output.event_record['actual_devices']['rf']
+                    self.assertEqual(recorded['role'], 'Trap RF')
                     self.assertEqual(recorded['values']['frequency'], [1.0, 2.001][index])
                     self.assertEqual(recorded['units']['frequency'], 'MHz')
                     self.assertEqual(recorded['provenance']['settings_epoch'], index + 1)
                     self.assertEqual(output.cell_origin, (0, index))
                     self.assertEqual(output.event_record['source_fact'], 'kept')
+
+
+class KeptUnits(unittest.TestCase):
+    """The unit the operator keeps for a field (Device Control) is the one its record and its scan port use."""
+
+    class Tunable(Device):
+        def __init__(self, unit='Hz', current=1001000.0):
+            super().__init__(field(unit=unit, current=current))
+        def tunable_values(self): return {'frequency': self.entry.current, 'output': True}
+        def settings_provenance(self): return {'settings_epoch': 4}
+
+    def test_snapshot_records_a_kept_unit_only_and_never_a_switch(self):
+        device = self.Tunable()
+        self.assertEqual(snapshot(device), {'values': {'frequency': 1001000.0, 'output': True}, 'units': {'frequency': 'Hz'},
+                                            'provenance': {'settings_epoch': 4}})
+        self.assertEqual(snapshot(device, {'frequency': 'MHz', 'output': 'MHz'}),
+                         {'values': {'frequency': 1.001, 'output': True}, 'units': {'frequency': 'MHz'}, 'provenance': {'settings_epoch': 4}})
+
+    def test_snapshot_converts_a_level_through_the_device_and_keeps_one_it_cannot_say(self):
+        # An RF level into its load is the device's own conversion (dBm -> mVpp), never the registry's.
+        device = self.Tunable(unit='dBm', current=-10.0)
+        asked = []
+        def convert(name, value, source, target):
+            asked.append((name, value, source, target))
+            if value > 0: raise ValueError('no such level')
+            return 200.0
+        device.convert_tunable_value = convert
+        self.assertEqual(snapshot(device, {'frequency': 'mVpp'})['values']['frequency'], 200.0)
+        self.assertEqual(asked, [('frequency', -10.0, 'dBm', 'mVpp')])
+        device.entry = replace(device.entry, current=3.0)
+        kept = snapshot(device, {'frequency': 'mVpp'})
+        self.assertEqual((kept['values']['frequency'], kept['units']['frequency']), (3.0, 'dBm'), 'a reading the unit cannot say keeps its own')
+
+    def test_a_device_port_is_named_by_the_device_and_offered_in_its_kept_unit(self):
+        from zlc_atom.nodes.scan.editor import _port, _Spellings
+        from zlc_atom.nodes.scan.plan import scan_ports_for_devices
+        device = self.Tunable()
+        device.role, device.units = 'Trap RF', {'frequency': 'MHz'}
+        (port,) = scan_ports_for_devices({'rf': device})
+        self.assertEqual((port.port, port.label, port.unit, port.current), ('device:rf:frequency', 'Trap RF · Frequency', 'MHz', 1.001))
+        (planned,) = scan_ports_for_devices({'rf': device}, units={'device:rf:frequency': 'kHz'})
+        self.assertEqual(planned.unit, 'kHz', "the plan's own axis unit comes first")
+        shown = _port(port, _Spellings({'rf': device}))
+        self.assertEqual((shown['group'], shown['leaf']), ('Trap RF', 'frequency'))
+        device.units = {}
+        (own,) = scan_ports_for_devices({'rf': device})
+        self.assertEqual((own.label, own.unit), ('Trap RF · Frequency', 'Hz'), 'a field never picked stays in its own unit')
 
 
 class LinkedScan(unittest.TestCase):
@@ -164,7 +214,7 @@ class LinkedScan(unittest.TestCase):
         return ScanPlan.from_tree({'axes': [
             {'port':'pulse:param:B','values':[1,2,3],'unit':'us','link_enabled':enabled,'links':[
                 {'port':'pulse:param:A','values':[0,1],'unit':'ms','mode':'formula','formula':'5 - x'},
-                {'port':'api:delay','values':[10,30],'unit':'us','mode':'range'}]},
+                {'port':'api:delay','unit':'us','mode':'formula','formula':'10 * x'}]},
             {'port':'pulse:param:D','values':[7,8],'unit':'us'}]})
 
     def test_numeric_formula_pairing_and_disabled_memory(self):

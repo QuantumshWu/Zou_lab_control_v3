@@ -538,6 +538,9 @@ pub struct ReadDevice {
     /// Read these fields in another spelling of their unit from now on (field -> unit,
     /// one of the field's `units`; "" = its own unit again).
     pub units: Option<BTreeMap<String, String>>,
+    /// The operator picked these units: the apparatus keeps them (saved with it), and the
+    /// device's recorded state and its scan axes use them too.
+    pub keep: Option<bool>,
 }
 
 /// Apply one Device Control field to an open device.

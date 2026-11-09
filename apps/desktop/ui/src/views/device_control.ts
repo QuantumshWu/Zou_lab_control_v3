@@ -8,7 +8,8 @@
 // shown or brought forward, a run letting the device go.  A number is read in
 // the unit that shows it between 1 and 1000, in the family its device shows it
 // in (defaultUnit), chosen once, at the window's first reading; a unit the
-// operator picks stays.
+// operator picks stays, and the apparatus keeps it (read_device keep): the
+// field opens in it next time, and is recorded and scanned in it.
 import {
   Field, StatusStrip, alignUnitPickers, command, defaultUnit, element, readoutText, setChecked, setElided, setState, shifted, statusDot, switchButton, titleRow,
   type FieldSpec, type Value, heldNote, showHeld,
@@ -36,7 +37,7 @@ type Row = {
   revision: number;
   valid: boolean;
   unitRequest: number | null;
-  /** The operator picked the unit it is read in: no default replaces it. */
+  /** The operator picked the unit it is read in (here, or the apparatus keeps it): no default replaces it. */
   picked: boolean;
   /** The last Apply's outcome until the next edit: "" or v2's Applied / the refusal. */
   applied: string;
@@ -145,6 +146,7 @@ export class DeviceControlView {
         row.field.acceptEdit();
       }
       row.spec = spec;
+      if (spec.unit_kept) row.picked = true;
       if (!spec.editable || device.state !== "open") { this.cancelLive(row); this.queued.delete(spec.name); }
       else if (!spec.live_write) this.cancelLive(row);
       if (completed?.row === row) {
@@ -247,17 +249,17 @@ export class DeviceControlView {
     row.liveOn = false;
     row.timer = 0;
     row.tuning = null;
-    row.revision = 0; row.valid = true; row.unitRequest = null; row.picked = false;
+    row.revision = 0; row.valid = true; row.unitRequest = null; row.picked = Boolean(spec.unit_kept);
     row.applied = "";
     row.error = "";
     row.outside = false;
     row.field = new Field(`control-${this.id}`, { ...spec, value: spec.desired, spin: true, inexact: true }, {
       // Another spelling is the device's to read (an RF level depends on its
       // load): the row is re-read in it, reading, bounds and limits together
-      // (a draft keeps its digits: update).
+      // (a draft keeps its digits: update). The apparatus keeps the operator's pick.
       unit: unit => {
         this.cancelLive(row); this.queued.delete(row.spec.name); row.revision++; row.picked = true;
-        row.unitRequest = this.ctx.transport.send({ action: "read_device", device: this.id, units: { [row.spec.name]: unit } }, `Reading ${row.spec.label} in ${unit}…`);
+        row.unitRequest = this.ctx.transport.send({ action: "read_device", device: this.id, units: { [row.spec.name]: unit }, keep: true }, `Reading ${row.spec.label} in ${unit}…`);
         queueMicrotask(() => { if (this.device) this.update(this.device); });
         return row.unitRequest;
       },

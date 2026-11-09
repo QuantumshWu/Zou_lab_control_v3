@@ -38,7 +38,7 @@ fn stage() -> Option<Stage> {
 }
 
 fn request(values: Value, source: Option<&str>, outputs: &[(String, String)]) -> RunRequest {
-    RunRequest { prepared: None, device_labels: Default::default(), values, devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
+    RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values, devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
         resources: json!({}), source_signal: source.map(str::to_owned), run_directory: None, outputs: outputs.iter().cloned().collect(), record_devices: false }
 }
 

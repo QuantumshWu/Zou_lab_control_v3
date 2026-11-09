@@ -13,6 +13,7 @@ adapter's own answer when it has one, else its quartet's reads.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
@@ -130,23 +131,49 @@ def reports_settings(device: Any) -> bool:
     return callable(getattr(device, "snapshot", None)) or all(callable(getattr(device, name, None)) for name in TUNABLE)
 
 
-def snapshot(device: Any) -> Any:
+def snapshot(device: Any, units: Mapping[str, str] | None = None) -> Any:
     """The device's settings at acquisition (PROTOCOL §5), never a device command.
 
     A device whose state is more than its knobs answers for itself (its own
     ``snapshot()``); a tunable one answers what the ``values`` op does, its
     quartet's reads, and the unit each is in (a number is never recorded
     without what it counts); any other does not report its settings (None).
+    ``units`` (field -> spelling) are the ones the operator keeps for some
+    fields: each recorded value of those is converted into its unit, by the
+    device's own conversion where it has one (an RF level into its load),
+    and recorded in that unit only.
     """
     native = getattr(device, "snapshot", None)
     if callable(native):
-        return native()
+        return in_units(device, native(), units)
     if all(callable(getattr(device, name, None)) for name in TUNABLE):
         values = dict(device.tunable_values())
-        units = {field.metadata.name: field.metadata.unit for field in device.tunable_fields()
-                 if field.metadata.name in values and field.metadata.unit not in (None, "", "1")}
-        return {"values": values, "units": units, "provenance": dict(device.settings_provenance())}
+        own = {field.metadata.name: field.metadata.unit for field in device.tunable_fields()
+               if field.metadata.name in values and field.metadata.unit not in (None, "", "1")}
+        return in_units(device, {"values": values, "units": own, "provenance": dict(device.settings_provenance())}, units)
     return None
 
 
-__all__ = ["convert_tunable_field", "convert_tunable_value", "read_tunable_in_unit", "refresh_tunable_fields", "reports_settings", "snapshot", "tune_in_unit"]
+def in_units(device: Any, record: Any, units: Mapping[str, str] | None) -> Any:
+    """A settings record (``{values, units}``) with each field ``units`` names in that unit.
+
+    A field recorded without a unit is not a quantity and stays as it is; so
+    does any record that is not of that shape (a board's program), and a
+    reading the unit cannot say (0 Vpp in dBm), which keeps its own unit beside it.
+    """
+    if not units or not isinstance(record, Mapping) or not isinstance(record.get("values"), Mapping):
+        return record
+    values, recorded = dict(record["values"]), dict(record.get("units") or {})
+    for name, unit in units.items():
+        source = recorded.get(name)
+        if not unit or not source or name not in values or source == unit or isinstance(values[name], bool):
+            continue
+        try:
+            converted = convert_tunable_value(device, name, values[name], source, unit)
+        except Exception:  # noqa: BLE001 -- the device's own conversion, of any type
+            continue
+        values[name], recorded[name] = converted, unit
+    return {**record, "values": values, "units": recorded}
+
+
+__all__ = ["convert_tunable_field", "convert_tunable_value", "in_units", "read_tunable_in_unit", "refresh_tunable_fields", "reports_settings", "snapshot", "tune_in_unit"]

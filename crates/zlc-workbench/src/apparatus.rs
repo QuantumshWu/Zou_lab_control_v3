@@ -13,14 +13,23 @@ use crate::{Host, Ticket, Workbench, fields, text, workspace};
 
 pub const FORMAT: &str = "zlc.installation";
 const ENTRY_KEYS: [&str; 4] = ["instance_id", "role", "type_id", "parameters"];
+/// A device entry's optional key: the unit the operator reads each field in (field -> spelling).
+const UNITS: &str = "units";
 /// How long an Apply or Close waits for the runs it stopped (v2 device maintenance).
 const MAINTENANCE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// One device of the apparatus. `units`: the spelling the operator picked in Device Control for each
+/// field they read in another (field -> unit), kept with the apparatus; a field not named is read,
+/// recorded and offered to a scan in the device's own unit.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Entry { pub instance_id: String, pub role: String, pub type_id: String, pub parameters: Map<String, Value> }
+pub struct Entry { pub instance_id: String, pub role: String, pub type_id: String, pub parameters: Map<String, Value>, pub units: BTreeMap<String, String> }
 
 impl Entry {
-    fn tree(&self) -> Value { json!({"instance_id": self.instance_id, "role": self.role, "type_id": self.type_id, "parameters": self.parameters}) }
+    fn tree(&self) -> Value {
+        let mut tree = json!({"instance_id": self.instance_id, "role": self.role, "type_id": self.type_id, "parameters": self.parameters});
+        if !self.units.is_empty() { tree[UNITS] = json!(self.units); }
+        tree
+    }
 }
 
 pub struct Apparatus {
@@ -79,7 +88,8 @@ pub struct Live {
     pub reopen: Option<Entry>,
     /// The run whose claim the operator accepted tuning risk for.
     pub risk: Option<String>,
-    /// Device Control: the spelling the operator reads a field in (field -> unit).
+    /// Device Control: the spelling each field is read in (field -> unit) this session: the
+    /// entry's kept units, then any default a window chose.
     pub units: BTreeMap<String, String>,
     /// The type it opened as, when that is not its row's (a device another
     /// computer publishes: its working point names the publisher's type).
@@ -260,7 +270,7 @@ impl Workbench {
         let supplied = params["parameters"].as_object().cloned().unwrap_or_default();
         let parameters = self.draft_parameters(&type_id, &supplied)?;
         self.report = (format!("added {role} ({type_id})"), "task");
-        self.apparatus.draft.push(Entry { instance_id: id.clone(), role, type_id, parameters });
+        self.apparatus.draft.push(Entry { instance_id: id.clone(), role, type_id, parameters, units: BTreeMap::new() });
         Ok(json!({"device": id}))
     }
 
@@ -390,7 +400,7 @@ impl Workbench {
                     let role = item["role"].as_str().map(str::trim).filter(|role| !role.is_empty()).unwrap_or(&instance_id).to_owned();
                     let kind = item["type_id"].as_str().filter(|kind| self.catalog.get(kind).is_some_and(|item| item.is_device())).unwrap_or(type_id);
                     match parameters(kind, item["parameters"].as_object().unwrap_or(&Map::new())) {
-                        Ok(parameters) => finds.push(Entry { instance_id, role, type_id: kind.to_owned(), parameters }),
+                        Ok(parameters) => finds.push(Entry { instance_id, role, type_id: kind.to_owned(), parameters, units: BTreeMap::new() }),
                         Err(error) => reasons.push(error),
                     }
                 }
@@ -522,7 +532,14 @@ impl Workbench {
         let saved = entry["parameters"].as_object().ok_or_else(|| format!("{role}: device parameters must be an object"))?;
         if let Some(other) = read.iter().find(|other| other.instance_id == instance_id) { return Err(format!("{instance_id} is already used by device {}", other.role)); }
         if read.iter().any(|other| other.role == role) { return Err(format!("another device is already called {role}")); }
-        for key in entry.keys().filter(|key| !ENTRY_KEYS.contains(&key.as_str())) {
+        let units = match entry.get(UNITS) {
+            None => BTreeMap::new(),
+            Some(Value::Object(units)) => units.iter().map(|(field, unit)| unit.as_str().map(str::trim).filter(|unit| !unit.is_empty())
+                .map(|unit| (field.clone(), unit.to_owned())).ok_or_else(|| format!("{role}: the unit of {field} must be a spelling such as MHz")))
+                .collect::<Result<_, _>>()?,
+            Some(_) => return Err(format!("{role}: device units must be an object")),
+        };
+        for key in entry.keys().filter(|key| !ENTRY_KEYS.contains(&key.as_str()) && *key != UNITS) {
             notes.push(format!("{role}: {key} is not part of a device entry; it was dropped"));
             *lost += 1;
         }
@@ -541,7 +558,7 @@ impl Workbench {
             None if self.plugins.discovering() => saved.clone(),
             None => { notes.push(self.not_installed(&format!("{role}: device type {type_id} is not installed"), &type_id)); saved.clone() }
         };
-        Ok(Entry { instance_id, role, type_id, parameters })
+        Ok(Entry { instance_id, role, type_id, parameters, units })
     }
 
     pub(crate) fn save_apparatus(&mut self, path: &Path, replace_unread: bool) -> Result<Value, String> {
@@ -622,8 +639,9 @@ impl Workbench {
         let failure = failure.or_else(|| (!resolving).then(|| self.bound(&id, identity.as_deref(), &resources)).flatten());
         let state = if failure.is_some() { LiveState::Failed } else { LiveState::Opening };
         if failure.is_none() && !resolving { self.plugins.open(&id, &entry.type_id, &Value::Object(entry.parameters.clone()), &context); }
+        let units = entry.units.clone();
         self.devices.insert(id, Live { entry, state, error: failure, working_point: Value::Null, fields: None, fields_ticket: None, close_pending: false, close_failed: false, reopen: None,
-            risk: None, units: BTreeMap::new(), descriptor: None, published: false, identity, resources, resolving });
+            risk: None, units, descriptor: None, published: false, identity, resources, resolving });
         if resolving { self.next_resolution(); }
     }
 
@@ -785,8 +803,13 @@ impl Workbench {
             self.report = (error.clone(), "error");
             return Err(error);
         }
+        // A name or a kept unit changes nothing the device holds: the open one takes it as it stands.
         for entry in &self.apparatus.draft {
-            if let Some(live) = self.devices.get_mut(&entry.instance_id) { live.entry.role = entry.role.clone(); }
+            if let Some(live) = self.devices.get_mut(&entry.instance_id) {
+                for (field, unit) in &entry.units { if live.entry.units.get(field) != Some(unit) { live.units.insert(field.clone(), unit.clone()); } }
+                live.entry.role = entry.role.clone();
+                live.entry.units = entry.units.clone();
+            }
         }
         for id in &reopened { self.devices.remove(id); }
         self.found.clear();
@@ -954,15 +977,28 @@ impl Workbench {
         true
     }
 
-    /// Device Control open/Refresh, or a unit picked for some fields (`units`:
+    /// Device Control open/Refresh, or a unit chosen for some fields (`units`:
     /// field -> spelling, "" = its own unit): the device reads every field,
-    /// those in the spelling the operator reads them in.
-    pub(crate) fn read_device(&mut self, id: &str, units: Option<&Map<String, Value>>, request: Option<u64>) -> Result<(), String> {
+    /// those in the spelling they are read in. `keep`: the operator picked
+    /// those units, and the apparatus keeps them (unsaved until Save) -- the
+    /// unit the field is then read, recorded and scanned in; a window's own
+    /// default is this session's only.
+    pub(crate) fn read_device(&mut self, id: &str, units: Option<&Map<String, Value>>, keep: bool, request: Option<u64>) -> Result<(), String> {
         self.refuse_published(&[id])?;
         let live = self.devices.get_mut(id).filter(|live| live.state == LiveState::Open).ok_or_else(|| format!("{id} is not open"))?;
+        let mut picked: Vec<(String, &str)> = Vec::new();
         for (field, unit) in units.into_iter().flatten() {
             let unit = unit.as_str().ok_or("A unit is a spelling such as MHz")?.trim();
             if unit.is_empty() { live.units.remove(field); } else { live.units.insert(field.clone(), unit.to_owned()); }
+            picked.push((field.clone(), unit));
+        }
+        if keep {
+            let row = self.apparatus.draft.iter_mut().find(|entry| entry.instance_id == id);
+            for entry in row.into_iter().map(|entry| &mut entry.units).chain([&mut live.entry.units]) {
+                for (field, unit) in &picked {
+                    if unit.is_empty() { entry.remove(field); } else { entry.insert(field.clone(), (*unit).to_owned()); }
+                }
+            }
         }
         let call = json!({"units": live.units});
         let ticket = self.ticket(Ticket::Fields { device: id.to_owned(), request });
@@ -1050,6 +1086,8 @@ impl Workbench {
                 ("current_text", json!(current_text)), ("current_exact", json!(current_exact)),
                 ("limits_text", json!(limits_text)), ("limits_exact", json!(limits_exact)),
                 ("units", json!(if numeric { unit_choices(unit) } else { Vec::new() })),
+                // Read in the unit the apparatus keeps for it: a window's default does not replace it.
+                ("unit_kept", json!(live.entry.units.contains_key(&field.name))),
                 ("status", json!(status)), ("severity", json!(severity)),
                 ("editable", json!(policy.is_ok())), ("reason", json!(policy.err().unwrap_or_default()))] { row[key] = value; }
             Some(row)

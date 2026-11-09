@@ -32,7 +32,7 @@ fn occupancy_and_frame_survival_follow_a_finite_site_frame_run() {
         runtime.clone(), safe, move |event| { let _ = sender.lock().unwrap().send(event); }).unwrap();
         support::install(&host).unwrap();
     let request = |values: serde_json::Value, resources: serde_json::Value, source: Option<&str>, outputs: &[(&str, &str)]| {
-        RunRequest { prepared: None, device_labels: Default::default(), values, devices: Default::default(), shared: Default::default(), origin: Origin::Operator, resources,
+        RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values, devices: Default::default(), shared: Default::default(), origin: Origin::Operator, resources,
             source_signal: source.map(str::to_owned), run_directory: None,
             outputs: outputs.iter().map(|(output, signal)| (output.to_string(), signal.to_string())).collect(), record_devices: false }
     };

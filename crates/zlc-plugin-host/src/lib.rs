@@ -295,6 +295,8 @@ pub struct RunRequest {
     /// Device instance per requirement argument.
     pub devices: BTreeMap<String, String>,
     pub device_labels: BTreeMap<String, String>,
+    /// Device instance -> the units its apparatus entry keeps (field -> spelling), told to its proxy.
+    pub device_units: BTreeMap<String, BTreeMap<String, String>>,
     /// The arguments whose device the run shares (a scan's device axis); it takes every other one exclusively.
     pub shared: std::collections::BTreeSet<String>,
     pub origin: Origin,
@@ -631,7 +633,7 @@ impl PluginHost {
             // fabric has checked that this connection owns the instance.
             params["plain"] = json!(true);
             let Serving::Process(process) = serving else { return Err(CallError::new(ErrorKind::Refused, "a published snapshot must come from its owning process")); };
-            return process.snapshot(instance, deadline)
+            return process.snapshot(instance, &params["units"], deadline)
                 .map(|incoming| Reply::new(incoming.message["ok"].clone(), incoming.lends));
         }
         serving.request(&self.inner.registry, op, params, lends, deadline)
@@ -727,10 +729,10 @@ impl PluginHost {
     }
 
     /// The bench at a Start (`snapshot`, §5): an open device's settings as plain JSON, null when it
-    /// does not report them. A device busy in another run's call may miss `deadline`, which says
+    /// does not report them; a field `units` names is recorded in that unit (field -> spelling). A device busy in another run's call may miss `deadline`, which says
     /// nothing of its health (untracked: the late answer is dropped). A remote
     /// device uses its owner's identical snapshot operation over the fabric.
-    pub fn snapshot(&self, instance: &str, deadline: Duration) -> Result<Value, CallError> {
+    pub fn snapshot(&self, instance: &str, units: &Value, deadline: Duration) -> Result<Value, CallError> {
         let _request = self.admit_local(instance, false)?;
         let serving = {
             let state = self.inner.state.lock().unwrap();
@@ -739,9 +741,9 @@ impl PluginHost {
             if entry.published.is_some() { return Err(published_refusal(instance)); }
             entry.serving.clone()
         };
-        let params = json!({"instance": instance, "plain": true});
+        let params = json!({"instance": instance, "plain": true, "units": units});
         match serving {
-            Serving::Process(process) => process.snapshot(instance, deadline).map(|reply| reply.message["ok"].clone()),
+            Serving::Process(process) => process.snapshot(instance, units, deadline).map(|reply| reply.message["ok"].clone()),
             Serving::Remote(endpoint) => endpoint.request("snapshot", params, Vec::new(), deadline).map(|reply| reply.value),
         }
     }
@@ -843,7 +845,8 @@ impl PluginHost {
                 }
                 if target.published.is_some() { return Err(published_refusal(device)); }
                 devices.insert(argument.clone(), json!({"instance": device, "role": request.device_labels.get(device).unwrap_or(device), "type_id": target.descriptor.type_id,
-                    "capabilities": target.descriptor.capabilities, "tunable": target.tunable, "reads": target.reads}));
+                    "capabilities": target.descriptor.capabilities, "tunable": target.tunable, "reads": target.reads,
+                    "units": request.device_units.get(device).cloned().unwrap_or_default()}));
             }
             for (argument, device) in &request.devices {
                 state.instances.get_mut(device).unwrap().claims.push((run.clone(), !request.shared.contains(argument)));

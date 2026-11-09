@@ -541,12 +541,13 @@ impl Workbench {
     /// Selected devices as the plugin's device proxies are described.
     fn device_infos(&self, keys: &BTreeMap<String, String>) -> Value {
         // `tunable`: the proxy reads and tunes its knobs (the SDK's tunable quartet);
-        // `reads`: the read-only methods the device implements (its own unit conversions).
+        // `reads`: the read-only methods the device implements (its own unit conversions);
+        // `units`: the spelling the operator keeps for a field (its scan port's unit, its recorded unit).
         Value::Object(keys.iter().filter_map(|(argument, key)| self.devices.get(key).map(|live| {
             let kind = self.live_type(live);
             (argument.clone(), json!({"instance": key, "role": self.device_role(key), "type_id": kind.map_or(live.entry.type_id.as_str(), |item| item.type_id.as_str()),
                 "capabilities": kind.map(|item| item.capabilities.clone()).unwrap_or_default(),
-                "tunable": live.working_point["tunable"] == true, "reads": live.working_point["reads"].clone()}))
+                "tunable": live.working_point["tunable"] == true, "reads": live.working_point["reads"].clone(), "units": live.entry.units}))
         })).collect())
     }
 
@@ -1163,6 +1164,7 @@ impl Workbench {
         let outputs = frozen.outputs.clone();
         Ok(RunSpec { node_name: node.name.clone(), run: String::new(), node_id: id.to_owned(), instance: node_instance(id), type_id: node.type_id.clone(),
             values, source_signal: draft.source_signal.clone(), device_labels: devices.values().map(|key| (key.clone(), self.device_role(key).to_owned())).collect(),
+            device_units: devices.values().map(|key| (key.clone(), self.device_units(key))).filter(|(_, units)| !units.is_empty()).collect(),
             devices, shared, artifacts, resources, directory: None, outputs, origin: origin.to_owned(), prepared: None, record_devices: self.takes_bench(&node.type_id) })
     }
 
