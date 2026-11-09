@@ -234,7 +234,7 @@ impl Geometry{
         let(a,log)=self.field_log(r);(a,log.map(|x|a*x))
     }
     /// The analytic logarithmic slope stays finite when the Gaussian amplitude underflows.
-    fn field_log(&self,r:[f64;3])->(Complex,[Complex;3]){
+    pub(crate) fn field_log(&self,r:[f64;3])->(Complex,[Complex;3]){
         let(k,n)=(self.wave_number,self.direction);let zeta=r[0]*n[0]+r[1]*n[1]+r[2]*n[2];let wave=Complex::cis(k*zeta);
         match self.waist{
             None=>(wave,n.map(|x|Complex::new(0.,k*x))),
@@ -586,6 +586,8 @@ fn quadratic<const N:usize>(x:&[f64],psi:&[Complex])->Complex{
 /// One node of the tables: every cluster's tables there, and its bounds: the dressing's (what it leaves
 /// out, `Model::dressing`), the elimination's (`Model::resonance`) and the transient's (`Model::ringing_spread`).
 type Node=(Vec<Vec<Complex>>,[f64;3]);
+/// A beam's part of a ringing photon (`Model::transient_photon`): the beam, its amplitude [axis a][row] and that amplitude's gradient through the intensities [lab axis][axis a][row].
+pub type BeamPhoton=(usize,[[Complex;MOST_STATES];3],[[[Complex;MOST_STATES];3];3]);
 
 /// The tables on one grid of n nodes per focused unit: per cluster, node-major, its layout's size per
 /// node (re/im interleaved); per node its bounds (`Node`); and each bound's largest over the nodes
@@ -1401,8 +1403,11 @@ impl Model{
         let peak:Vec<[f64;MOST_RANK]>=self.carriers.iter().map(|c|std::array::from_fn(|k|c.coefficients.iter().map(|x|x[k].abs()).sum())).collect();
         for(k,layout)in self.layouts.iter().enumerate(){
             let modulus=|node:usize,x:usize|{let i=2*(node*layout.size+x);first.data[k][i].hypot(first.data[k][i+1])};
-            let rates:Vec<Vec<f64>>=layout.groups.iter().map(|gl|{let count=gl.entries.len();(0..count).map(|j|gl.pairs.iter().enumerate().map(|(p,&(k1,k0))|{
-                let largest=(0..nodes).map(|node|modulus(node,gl.s+p*count+j).max(modulus(node,gl.q+p*count+j))).fold(0.,f64::max);largest*peak[gl.emitted][k1]*peak[gl.absorbed][k0]}).fold(0.,f64::max)).collect()}).collect();
+            let rates:Vec<Vec<f64>>=layout.groups.iter().map(|gl|{let count=gl.entries.len();let own:Vec<f64>=(0..count).map(|j|gl.pairs.iter().enumerate().map(|(p,&(k1,k0))|{
+                let largest=(0..nodes).map(|node|modulus(node,gl.s+p*count+j).max(modulus(node,gl.q+p*count+j))).fold(0.,f64::max);largest*peak[gl.emitted][k1]*peak[gl.absorbed][k0]}).fold(0.,f64::max)).collect();
+                // A Hermitian group holds the field pairs k1 ≤ k0 alone, an entry's transposed pairs on its transpose's slots: its rate is its transpose's too (the
+                // field-free σ⁺σ⁻ molasses lost its Raman coupling one way, populations 0.21 and 0.55 for ±1 against 0.38 each).
+                (0..count).map(|j|{let(x,y)=gl.entries[j];own[j].max(if gl.hermitian{gl.entries.iter().position(|&e|e==(y,x)).map_or(0.,|t|own[t])}else{0.})}).collect()}).collect();
             let floor=unit_round_off(rates.iter().flatten().copied().fold(0.,f64::max));
             let cl=&mut self.ground.clusters[k];
             for(gl,rate)in layout.groups.iter().zip(&rates){for(&(x,y),_)in gl.entries.iter().zip(rate).filter(|(_,&r)|r<=floor){
@@ -1961,10 +1966,28 @@ impl Model{
     fn local_body<const N:usize,const W:usize>(&self,cluster:usize,p:&Point,t:f64)->Local{
         let layout=&self.layouts[cluster];let d=self.focused.len();
         let coefficients:usize=layout.groups.iter().map(|g|1+g.pairs.len()).sum();
-        let values:usize=d*W+layout.groups.iter().map(|g|2*((2+d)*g.pairs.len()*g.entries.len()+g.kept.iter().map(|k|k.entries.len()).sum::<usize>())).sum::<usize>();
+        let values:usize=(1+d)*W+layout.groups.iter().map(|g|4*(!g.first.is_empty()) as usize+2*((3+d)*g.pairs.len()*g.entries.len()+2*g.kept.iter().map(|k|k.entries.len()).sum::<usize>())).sum::<usize>();
         let(mut buffer,mut factors)=LOCAL_BUFFERS.with(|b|b.take());buffer.clear();buffer.reserve(values);factors.clear();factors.reserve(coefficients);
-        let mut out=Local{hamiltonian:[Complex::ZERO;MOST_STATES*MOST_STATES],scalar:0.,values:buffer,coefficients:factors,intensity_gradient:p.intensity_gradient};
+        // The tables at the stencil (`Local`): per group its first order's transfer, per pair S, its slopes and Q, what the transfer leaves (ΔW^S, ΔW^Q); h0 and its slopes.
         let mut buf=[0.;W];let mut slope=[[0.;W];MOST_FOCUSED];
+        for gl in &layout.groups{
+            if !gl.first.is_empty(){let mut x=[0.;4];self.gather_value(cluster,&p.stencil,gl.transfer,4,&mut x);buffer.extend_from_slice(&x);}
+            let(count,len)=(gl.entries.len(),2*gl.entries.len());
+            for pi in 0..gl.pairs.len(){
+                self.gather(cluster,&p.stencil,gl.s+pi*count,len,&mut buf,&mut slope);buffer.extend_from_slice(&buf[..len]);for g in 0..d{buffer.extend_from_slice(&slope[g][..len]);}
+                self.gather_value(cluster,&p.stencil,gl.q+pi*count,len,&mut buf);buffer.extend_from_slice(&buf[..len]);
+            }
+            for kept in &gl.kept{let len=2*kept.entries.len();for at in [kept.at,kept.at+kept.entries.len()]{self.gather_value(cluster,&p.stencil,at,len,&mut buf);buffer.extend_from_slice(&buf[..len]);}}
+        }
+        self.gather(cluster,&p.stencil,layout.h0,W,&mut buf,&mut slope);buffer.extend_from_slice(&buf);for g in 0..d{buffer.extend_from_slice(&slope[g]);}
+        let mut out=Local{hamiltonian:[Complex::ZERO;MOST_STATES*MOST_STATES],scalar:0.,values:buffer,coefficients:factors,intensity_gradient:p.intensity_gradient};
+        self.assemble::<N,W>(cluster,&mut out,p,t);
+        out
+    }
+    /// A generator from its tables at a stencil (`Local::values`) at a point's fields and the time t: H_eff less its scalar part, and the force's coefficients.
+    #[inline(always)]
+    fn assemble<const N:usize,const W:usize>(&self,cluster:usize,out:&mut Local,p:&Point,t:f64){
+        let layout=&self.layouts[cluster];let d=self.focused.len();let Local{hamiltonian,scalar,values,coefficients,..}=out;coefficients.clear();
         // m, H's Hermitian part less h0; `decay`, H's part on Q: −(i/2) Γ and the first order.
         let(mut m,mut decay)=([0.;W],[0.;W]);
         // The pair (k, k1)'s tables are (k1, k)'s adjoints in a Hermitian group: c X + (c X)† for k1 < k
@@ -1972,63 +1995,47 @@ impl Model{
         // the two. A group's tables hold its entries alone: a group of every entry is added as
         // matrices, the others entry by entry.
         let adjoint=|c:Complex,x:&[f64;W],acc:&mut [f64;W]|{for a in 0..N{for b in 0..N{let(i,j)=(2*(a*N+b),2*(b*N+a));let(u,v)=(x[j],-x[j+1]);acc[i]+=c.re*u+c.im*v;acc[i+1]+=c.re*v-c.im*u;}}};
-        let scatter=|c:Complex,x:&[f64;W],entries:&[(usize,usize)],mirror:bool,acc:&mut [f64;W]|{
+        let scatter=|c:Complex,x:&[f64],entries:&[(usize,usize)],mirror:bool,acc:&mut [f64;W]|{let x=&x[..2*entries.len()];
             for(j,&(a,b))in entries.iter().enumerate(){let w=c*Complex::new(x[2*j],x[2*j+1]);let i=2*(a*N+b);acc[i]+=w.re;acc[i+1]+=w.im;}
             if mirror{for(j,&(a,b))in entries.iter().enumerate(){let w=c*Complex::new(x[2*j],x[2*j+1]);let i=2*(b*N+a);acc[i]+=w.re;acc[i+1]-=w.im;}}
         };
         // c x and d x† on a group's entries.
-        let both_ways=|c:Complex,d:Complex,x:&[f64;W],entries:&[(usize,usize)],acc:&mut [f64;W]|{
+        let both_ways=|c:Complex,d:Complex,x:&[f64],entries:&[(usize,usize)],acc:&mut [f64;W]|{let x=&x[..2*entries.len()];
             for(j,&(a,b))in entries.iter().enumerate(){let z=Complex::new(x[2*j],x[2*j+1]);let(u,v)=(c*z,d*z.conj());let(i,i2)=(2*(a*N+b),2*(b*N+a));acc[i]+=u.re;acc[i+1]+=u.im;acc[i2]+=v.re;acc[i2+1]+=v.im;}
         };
-        let half_i=Complex::new(0.,-0.5);
+        let half_i=Complex::new(0.,-0.5);let mut at=0;
         for gl in &layout.groups{
-            let(f,e)=(&p.fields[gl.absorbed],&p.fields[gl.emitted]);let phase=if gl.residual==0.{Complex::ONE}else{Complex::cis(gl.residual*t)};let count=gl.entries.len();
+            let(f,e)=(&p.fields[gl.absorbed],&p.fields[gl.emitted]);let phase=if gl.residual==0.{Complex::ONE}else{Complex::cis(gl.residual*t)};let(count,len)=(gl.entries.len(),2*gl.entries.len());
             // The first order's transfer (module documentation, # The photons and the Doppler term).
             let first=!gl.first.is_empty();let(mut lambda_s,mut mu,mut nu)=(Complex::ZERO,Complex::ZERO,Complex::ZERO);
-            if first{let mut x=[0.;4];self.gather_value(cluster,&p.stencil,gl.transfer,4,&mut x);lambda_s=Complex::new(x[0],x[1]);(mu,nu)=first_coefficients(lambda_s,Complex::new(x[2],x[3]));}
-            out.coefficients.push([phase,lambda_s*phase,Complex::ZERO,Complex::ZERO]);
-            for(pi,&(k1,k))in gl.pairs.iter().enumerate(){
-                let at=pi*count;let ee=phase*e.e[k1].conj()*f.e[k];let(both,mirror)=if gl.hermitian&&k1<k{(2.,true)}else{(1.,false)};
+            if first{let x=&values[at..at+4];at+=4;lambda_s=Complex::new(x[0],x[1]);(mu,nu)=first_coefficients(lambda_s,Complex::new(x[2],x[3]));}
+            coefficients.push([phase,lambda_s*phase,Complex::ZERO,Complex::ZERO]);
+            for &(k1,k)in &gl.pairs{
+                let ee=phase*e.e[k1].conj()*f.e[k];let(both,mirror)=if gl.hermitian&&k1<k{(2.,true)}else{(1.,false)};
                 // ∇H_herm ∋ −∇(Φ) S − Φ Σ_f ∂_f S ∇s_f: S, its slopes and the coefficients kept.
                 let c=|a:usize|phase*(e.grad[k1][a].conj()*f.e[k]+e.e[k1].conj()*f.grad[k][a])*(-both);
-                out.coefficients.push([c(0),c(1),c(2),ee*(-both)]);let len=2*count;
-                if count==N*N{
-                    self.gather(cluster,&p.stencil,gl.s+at,W,&mut buf,&mut slope);
-                    caxpy::<W>(ee,&buf,&mut m);if mirror{adjoint(ee,&buf,&mut m);}
-                }else{
-                    self.gather(cluster,&p.stencil,gl.s+at,len,&mut buf,&mut slope);
-                    scatter(ee,&buf,&gl.entries,mirror,&mut m);
-                }
-                out.values.extend_from_slice(&buf[..len]);for g in 0..d{out.values.extend_from_slice(&slope[g][..len]);}
+                coefficients.push([c(0),c(1),c(2),ee*(-both)]);
+                let x=&values[at..at+len];at+=(1+d)*len;
+                if count==N*N{let x:&[f64;W]=x.try_into().unwrap();caxpy::<W>(ee,x,&mut m);if mirror{adjoint(ee,x,&mut m);}}else{scatter(ee,x,&gl.entries,mirror,&mut m);}
                 // H ∋ −(i/2) Φ Q + μ ξ_k′k Q + ν ξ_kk′* Q and on the pair's adjoint its own; between two carriers ν ξ* Q† alone.
                 let xi=phase*e.e[k1].conj()*f.doppler[k];
                 let(a,b)=if gl.hermitian{let other=e.e[k].conj()*f.doppler[k1];(ee*half_i+mu*xi+nu*other.conj(),ee.conj()*half_i+mu*other+nu*xi.conj())}else{(ee*half_i+mu*xi,nu*xi.conj())};
-                let mirrored=mirror||(first&&!gl.hermitian);
-                if count==N*N{
-                    self.gather_value(cluster,&p.stencil,gl.q+at,W,&mut buf);
-                    caxpy::<W>(a,&buf,&mut decay);if mirrored{adjoint(b.conj(),&buf,&mut decay);}
-                }else{
-                    self.gather_value(cluster,&p.stencil,gl.q+at,len,&mut buf);
-                    if mirrored{both_ways(a,b,&buf,&gl.entries,&mut decay);}else{scatter(a,&buf,&gl.entries,false,&mut decay);}
-                }
-                if first{out.values.extend_from_slice(&buf[..len]);}
+                let mirrored=mirror||(first&&!gl.hermitian);let q=&values[at..at+len];at+=len;
+                if count==N*N{let q:&[f64;W]=q.try_into().unwrap();caxpy::<W>(a,q,&mut decay);if mirrored{adjoint(b.conj(),q,&mut decay);}}
+                else if mirrored{both_ways(a,b,q,&gl.entries,&mut decay);}else{scatter(a,q,&gl.entries,false,&mut decay);}
             }
-            // What the transfer leaves: ½(ξ ΔW^S + h.c.) + (i/2)(ξ ΔW^Q + h.c.), ΔW^S kept for the force.
+            // What the transfer leaves: ½(ξ ΔW^S + h.c.) + (i/2)(ξ ΔW^Q + h.c.).
             for kept in &gl.kept{
                 let(k1,k)=kept.pair;let xi=phase*e.e[k1].conj()*f.doppler[k];let len=2*kept.entries.len();
-                self.gather_value(cluster,&p.stencil,kept.at,len,&mut buf);
-                let half=xi*0.5;both_ways(half,half.conj(),&buf,&kept.entries,&mut decay);out.values.extend_from_slice(&buf[..len]);
-                self.gather_value(cluster,&p.stencil,kept.at+kept.entries.len(),len,&mut buf);
-                both_ways(xi*Complex::new(0.,0.5),xi.conj()*Complex::new(0.,0.5),&buf,&kept.entries,&mut decay);
+                let half=xi*0.5;both_ways(half,half.conj(),&values[at..at+len],&kept.entries,&mut decay);at+=len;
+                both_ways(xi*Complex::new(0.,0.5),xi.conj()*Complex::new(0.,0.5),&values[at..at+len],&kept.entries,&mut decay);at+=len;
             }
         }
-        self.gather(cluster,&p.stencil,layout.h0,W,&mut buf,&mut slope);for g in 0..d{out.values.extend_from_slice(&slope[g]);}
-        let at=|v:&[f64;W],a:usize,b:usize|Complex::new(v[2*(a*N+b)],v[2*(a*N+b)+1]);
-        let mut scalar=0.;for a in 0..N{scalar+=buf[2*(a*N+a)]-m[2*(a*N+a)];}scalar/=N as f64;out.scalar=scalar;
+        let h0:&[f64;W]=values[at..at+W].try_into().unwrap();let el=|v:&[f64;W],a:usize,b:usize|Complex::new(v[2*(a*N+b)],v[2*(a*N+b)+1]);
+        let mut s=0.;for a in 0..N{s+=h0[2*(a*N+a)]-m[2*(a*N+a)];}s/=N as f64;*scalar=s;
         for a in 0..N{for b in 0..N{
-            out.hamiltonian[a*N+b]=at(&buf,a,b)-at(&m,a,b)+at(&decay,a,b)-if a==b{Complex::new(scalar,0.)}else{Complex::ZERO};
+            hamiltonian[a*N+b]=el(h0,a,b)-el(&m,a,b)+el(&decay,a,b)-if a==b{Complex::new(s,0.)}else{Complex::ZERO};
         }}
-        out
     }
 
     /// −∇Re⟨ψ|H_eff|ψ⟩/⟨ψ|ψ⟩ (rad/us per um): the Ehrenfest force on ħκ. Its gradient's quadratic
@@ -2049,7 +2056,7 @@ impl Model{
         let mut g=[0.;3];let(mut at,mut pair)=(0,0);
         for gl in &layout.groups{
             let count=gl.entries.len();let len=2*count;let(e,f)=(&p.fields[gl.emitted],&p.fields[gl.absorbed]);
-            let[phase,lambda,_,_]=local.coefficients[pair];pair+=1;let first=!gl.first.is_empty();
+            let[phase,lambda,_,_]=local.coefficients[pair];pair+=1;let first=!gl.first.is_empty();if first{at+=4;}
             // ⟨Q_k′k⟩ of every field pair, Q_kk′ = Q_k′k† in a Hermitian group.
             let mut rates=[[Complex::ZERO;MOST_RANK];MOST_RANK];
             if count==N*N{for a in 0..N{for b in 0..N{products[a*N+b]=psi[a].conj()*psi[b];}}}
@@ -2060,9 +2067,10 @@ impl Model{
                 g[0]+=(c0*sigma).re;g[1]+=(c1*sigma).re;g[2]+=(c2*sigma).re;
                 for f in 0..d{let tau=b*form(&local.values[at+(1+f)*len..at+(2+f)*len]);for a in 0..3{g[a]+=tau.re*local.intensity_gradient[f][a];}}
                 at+=(1+d)*len;pair+=1;
-                if first{let rate=form(&local.values[at..at+len]);rates[k1][k]=rate;if gl.hermitian&&k1<k{rates[k][k1]=rate.conj();}at+=len;}
+                if first{let rate=form(&local.values[at..at+len]);rates[k1][k]=rate;if gl.hermitian&&k1<k{rates[k][k1]=rate.conj();}}
+                at+=len;
             }
-            if !first{continue;}
+            if !first{at+=gl.kept.iter().map(|k|4*k.entries.len()).sum::<usize>();continue;}
             // The first order's −Re λ^S Σ_k′k ∇_aξ_k′k ⟨Q_k′k⟩, ξ_k′k = E^d_k′* E^D_k, on the fields' sums: Σ_k′ ∇_aE^d_k′* u_k′ + Σ_k ∇_aE^D_k v_k.
             let(emitted,absorbed)=(self.carriers[gl.emitted].rank,self.carriers[gl.absorbed].rank);
             let(mut u,mut v)=([Complex::ZERO;MOST_RANK],[Complex::ZERO;MOST_RANK]);
@@ -2075,9 +2083,10 @@ impl Model{
                 let(k1,k)=kept.pair;let values=&local.values[at..];
                 let sigma=phase*kept.entries.iter().enumerate().fold(Complex::ZERO,|s,(j,&(a,b))|s+psi[a].conj()*psi[b]*Complex::new(values[2*j],values[2*j+1]));
                 for a in 0..3{g[a]+=((e.grad[k1][a].conj()*f.doppler[k]+e.e[k1].conj()*f.doppler_grad[k][a])*sigma).re;}
-                at+=2*kept.entries.len();
+                at+=4*kept.entries.len();
             }
         }
+        at+=2*N*N;
         for f in 0..d{let eta=quadratic::<N>(&local.values[at+f*2*N*N..at+(f+1)*2*N*N],psi).re;for a in 0..3{g[a]+=local.intensity_gradient[f][a]*eta;}}
         std::array::from_fn(|a|-g[a]/norm)
     }
@@ -2089,7 +2098,7 @@ impl Model{
         let mut g:[Vec<Complex>;3]=std::array::from_fn(|_|vec![Complex::ZERO;n*n]);let(mut at,mut pair)=(0,0);
         for gl in &layout.groups{
             let len=2*gl.entries.len();let(e,f)=(&p.fields[gl.emitted],&p.fields[gl.absorbed]);
-            let[phase,lambda,_,_]=local.coefficients[pair];pair+=1;
+            let[phase,lambda,_,_]=local.coefficients[pair];pair+=1;if !gl.first.is_empty(){at+=4;}
             let value=|start:usize,j:usize|Complex::new(local.values[start+2*j],local.values[start+2*j+1]);
             let slope=|k1:usize,k:usize,a:usize|e.grad[k1][a].conj()*f.doppler[k]+e.e[k1].conj()*f.doppler_grad[k][a];
             for &(k1,k)in &gl.pairs{
@@ -2101,14 +2110,15 @@ impl Model{
                     let s=value(at,j);
                     for a in 0..3{let mut z=c[a]*s;if first{z+=q[a]*value(at+(1+d)*len,j);}for f in 0..d{z+=b*value(at+(1+f)*len,j)*local.intensity_gradient[f][a];}g[a][x*n+y]+=z;}
                 }
-                at+=(1+d)*len+if first{len}else{0};pair+=1;
+                at+=(2+d)*len;pair+=1;
             }
             for kept in &gl.kept{
                 let(k1,k)=kept.pair;
                 for(j,&(x,y))in kept.entries.iter().enumerate(){let z=phase*value(at,j);for a in 0..3{g[a][x*n+y]+=slope(k1,k,a)*z;}}
-                at+=2*kept.entries.len();
+                at+=4*kept.entries.len();
             }
         }
+        at+=2*n*n;
         for a in 0..3{for f in 0..d{let w=local.intensity_gradient[f][a];let h0=&local.values[at+f*2*n*n..];for k in 0..n*n{g[a][k]+=Complex::new(h0[2*k],h0[2*k+1])*w;}}}
         // Their Hermitian parts: the force reads Re⟨ψ|·|ψ⟩ alone.
         for m in g.iter_mut(){for x in 0..n{for y in x..n{let z=(m[x*n+y]+m[y*n+x].conj())*0.5;m[x*n+y]=z;m[y*n+x]=z.conj();}}}
@@ -2447,8 +2457,9 @@ impl Model{
     }
     /// The ringing photon of a coherent group from the ground state ψ′ (engine.rs `ringing_photon`), for the kicks of a
     /// moving atom: on `target`'s ground states, through the photon's operators on `levels` (`ringing_photon`), its amplitude
-    /// Σ_a ops_a (Σ e^{−iε̃t} R ψ′), the amplitude's gradient [axis a][lab axis] through the fields and the intensities, and each beam's part of it.
-    pub fn transient_photon(&self,cluster:usize,p:&Point,t:f64,coherent:usize,levels:&[usize],target:usize,ops:&[Dense;3],psi:&[Complex])->([[Complex;MOST_STATES];3],[[[Complex;MOST_STATES];3];3],Vec<(usize,[[Complex;MOST_STATES];3])>){
+    /// Σ_a ops_a (Σ e^{−iε̃t} R ψ′), the amplitude's gradient [axis a][lab axis] through the fields and the intensities, and each beam's part of it with
+    /// that part's gradient through the intensities [lab axis][axis a].
+    pub fn transient_photon(&self,cluster:usize,p:&Point,t:f64,coherent:usize,levels:&[usize],target:usize,ops:&[Dense;3],psi:&[Complex])->([[Complex;MOST_STATES];3],[[[Complex;MOST_STATES];3];3],Vec<BeamPhoton>){
         let g=&self.ground;let cl=&g.clusters[cluster];let layout=&self.layouts[cluster];let(n0,ne)=(layout.n0,g.excited_states.len());
         let group=&cl.coherent[coherent];let target=&g.clusters[target];
         // T_k (and ∂_f T_k) at the point, per carrier and rank.
@@ -2473,11 +2484,16 @@ impl Model{
                 for a in 0..3{for r in 0..MOST_STATES{du[a][x][r]+=part[a][r];}}
             }
         }
-        let beams:Vec<(usize,[[Complex;MOST_STATES];3])>={
+        let beams:Vec<BeamPhoton>={
             let mut carriers:Vec<usize>=group.iter().map(|x|x.0.carrier).collect();carriers.sort();carriers.dedup();
             carriers.iter().flat_map(|&c|self.carriers[c].beams.iter().enumerate().map(move|(j,&l)|(c,j,l))).map(|(c,j,l)|{
                 let amplitude=self.geometry[l].field(p.r).0;let coefficients=self.carriers[c].coefficients[j];
-                (l,photon(&|d,k|if d==c{amplitude*coefficients[k]}else{Complex::ZERO},&tables))}).collect()
+                let mut slope=[[[Complex::ZERO;MOST_STATES];3];3];
+                for(f,s)in slopes.iter().enumerate(){for(x,out)in slope.iter_mut().enumerate(){
+                    let part=photon(&|d,k|if d==c{amplitude*coefficients[k]*p.intensity_gradient[f][x]}else{Complex::ZERO},s);
+                    for a in 0..3{for r in 0..MOST_STATES{out[a][r]+=part[a][r];}}
+                }}
+                (l,photon(&|d,k|if d==c{amplitude*coefficients[k]}else{Complex::ZERO},&tables),slope)}).collect()
         };
         (u,du,beams)
     }
@@ -2649,23 +2665,48 @@ impl Transient{
 /// One excited manifold's ringing at a point (`Model::ringing`): its states, the eigenstates of H's block on them, H = U diag(E) U†, and its width, its states' mean decay (they agree to 1e-4 of it).
 #[derive(Clone,Debug)]
 pub struct Ringing{pub levels:Vec<usize>,pub energies:Vec<f64>,pub vectors:Dense,pub width:f64}
-/// A photon's absorbed light by its parts (`Photons::absorption`, engine.rs # Absorption): per near beam of its class's
-/// carriers its folded share and its amplitude's projection on the photon, and its explicit states' part -- its share and
-/// the beams' weights by their drives into the explicit states.
+/// A photon's absorbed light by its sources (`Photons::absorption`, engine.rs # Absorption): one per near beam of its class's
+/// carriers, then its explicit states' where it has any.
 #[derive(Clone,Debug,Default)]
-pub struct Absorption{pub beams:Vec<(usize,f64,f64)>,pub explicit:Option<(f64,Vec<Recoil>)>}
-/// One driven transition's logarithmic response gradient. Independent signs on its two quadratures
-/// give zero mean and covariance Re[∇ln σ* ⊗ ∇ln σ], σ = a/(δ − iΓ/2), at low saturation.
-/// This extends the existing incoherent attribution of an explicit photon; it does not eliminate
-/// coherences between ground states or assert a diffusion theorem at arbitrary saturation.
-#[derive(Clone,Debug)]
-pub struct Recoil{pub phase:[f64;3],pub amplitude:[f64;3],pub weight:f64}
-impl Recoil{
-    pub fn response(log_field:[Complex;3],delta:f64,half_width:f64,gradient:[f64;3],weight:f64)->Self{
-        let inverse=Complex::ONE/Complex::new(delta,-half_width);
-        let log:[Complex;3]=std::array::from_fn(|a|log_field[a]-inverse*gradient[a]);
-        Self{phase:log.map(|z|z.im),amplitude:log.map(|z|z.re),weight}
+pub struct Absorption{pub sources:Vec<Source>}
+/// A source of a photon's absorbed light (engine.rs # Absorption): the recoil its draw holds -- a near beam's wave vector; none
+/// for the explicit states, whose mean the Ehrenfest force holds --, its share ‖f_s‖² of the photon f, a beam's projection
+/// Re⟨f|f_s⟩/⟨f|f⟩, and its response's covariance about the mean the jump holds of it (`spread`).
+#[derive(Clone,Copy,Debug,Default)]
+pub struct Source{pub recoil:[f64;3],pub share:f64,pub projection:f64,pub spread:[[f64;3];3]}
+impl Source{
+    /// A near beam's part of a photon f (‖f‖² `size`): its wave vector k, its field's ∇ln a = λ, its rows f_i = a z_i and their
+    /// gradients through the intensities a ∇z_i. Its covariance about its mean (the jump holds the mean): Re Σ η_i*⊗η_i/Σ|f_i|²,
+    /// η_i = a ∇z_i + (Re λ − iν) f_i, ν = Im Σ f_i* a∇z_i/Σ|f_i|² -- of one row (Re ∇ln a + Re ∇ln z)⊗(the same), the response's
+    /// amplitude; the wave's phase is its mean's alone.
+    pub fn beam(k:[f64;3],log:[Complex;3],part:&[Complex],slopes:&[[Complex;3]],f:&[Complex],size:f64)->Source{
+        let share:f64=part.iter().map(|x|x.norm_sqr()).sum();
+        let projection=part.iter().zip(f).map(|(x,y)|if size>0.{(y.conj()*(*x)).re/size}else{0.}).sum();
+        let mut spread=[[0.;3];3];
+        if share>0.{
+            let nu:[f64;3]=std::array::from_fn(|x|part.iter().zip(slopes).map(|(v,d)|(v.conj()*d[x]).im).sum::<f64>()/share);
+            for(v,d)in part.iter().zip(slopes){
+                let eta:[Complex;3]=std::array::from_fn(|x|d[x]+Complex::new(log[x].re,-nu[x])*(*v));
+                for x in 0..3{for y in 0..3{spread[x][y]+=(eta[x].conj()*eta[y]).re/share;}}
+            }
+        }
+        Source{recoil:k,share,projection,spread}
     }
+    /// The explicit states' part of weight `share`, its drives (weight, response second moment `response`): their second moments by their
+    /// weights -- the jump holds none of its mean.
+    pub fn explicit(share:f64,drives:&[(f64,[[f64;3];3])])->Source{
+        let total:f64=drives.iter().map(|d|d.0).sum();let mut spread=[[0.;3];3];
+        if total>0.{for(w,m)in drives{for x in 0..3{for y in 0..3{spread[x][y]+=w*m[x][y]/total;}}}}
+        Source{recoil:[0.;3],share,projection:0.,spread}
+    }
+}
+/// A driven transition's response second moment Re[∇ln σ*⊗∇ln σ], σ = a/(δ − iΓ/2) (λ = ∇ln a, the detuning's gradient ∇δ): the
+/// low-saturation momentum diffusion of its absorption over its rate, Γħ² Re[∇σ*⊗∇σ]/|σ|² (Murr et al.,
+/// https://arxiv.org/abs/quant-ph/0512001, Eq. 1), the wave's recoil, the detuning's gradient and their cross terms.
+pub fn response_moment(log:[Complex;3],delta:f64,half_width:f64,gradient:[f64;3])->[[f64;3];3]{
+    let inverse=Complex::ONE/Complex::new(delta,-half_width);
+    let g:[Complex;3]=std::array::from_fn(|a|log[a]-inverse*gradient[a]);
+    std::array::from_fn(|x|std::array::from_fn(|y|(g[x].conj()*g[y]).re))
 }
 /// The photon amplitudes of every class of a cluster's jumps at a point: per class and axis the
 /// target cluster's amplitude u_a; for a class drawn, its gradient and its absorbed light's parts
@@ -2697,7 +2738,8 @@ impl Photons<'_>{
     /// Σ_l ∇a_l z_l + Σ_k Σ_f E_k ∂_f A_k ∇s_f, z_l = Σ_k c_lk (A_k − w_l B_k) -- beyond the first order its exact
     /// response's Σ e^{iω̃t} ψ[from] Σ_a e_a (C_a R_l)[to, from], the intensities' slopes still the rest response's --; and the parts
     /// (`Absorption`) of the photon f along e: per beam l of the class's carriers its share ‖f_l‖² and projection
-    /// Re⟨f|f_l⟩/⟨f|f⟩, f_l = a_l z_l per row, and the explicit states' part.
+    /// Re⟨f|f_l⟩/⟨f|f⟩, f_l = a_l z_l per row, and its response's covariance from z_l's gradient through the intensities (`Source::beam`); and the explicit states' part
+    /// (`Source::explicit`).
     pub fn absorption(&self,class:usize,e:[f64;3],f:&[Complex;MOST_STATES])->([[Complex;3];MOST_STATES],Absorption){
         if self.model.wide{unsafe{self.absorption_wide(class,e,f)}}else{self.absorption_body(class,e,f)}
     }
@@ -2741,11 +2783,11 @@ impl Photons<'_>{
                 for x in 0..3{for k in 0..m.carriers[c].rank{for f in 0..d{out[x]+=fl.e[k]*sum[k][2+f]*p.intensity_gradient[f][x];}}}
             }
         }
-        let size:f64=f[..nt].iter().map(|z|z.norm_sqr()).sum();let on_f=|row:usize,z:Complex|if size>0.{(f[row].conj()*z).re/size}else{0.};
-        let mut beams:Vec<(usize,f64,f64)>=vec![];
+        let size:f64=f[..nt].iter().map(|z|z.norm_sqr()).sum();
+        let mut sources:Vec<Source>=vec![];
         for(ci,&c)in carriers.iter().enumerate(){for(j,&l)in m.carriers[c].beams.iter().enumerate(){
-            let(amplitude,slope)=m.geometry[l].field(p.r);
-            // The beam's part per row without its amplitude, z_l: f_l = a_l z_l, its gradient through the field ∇a_l z_l.
+            let(amplitude,log)=m.geometry[l].field_log(p.r);let slope=log.map(|x|amplitude*x);let coefficients=&m.carriers[c].coefficients[j];
+            // The beam's part per row without its amplitude, z_l: f_l = a_l z_l, its gradient through the field ∇a_l z_l, through the intensities a_l Σ_k c_lk Σ_f ∂_f A_k ∇s_f.
             let rows:[Complex;MOST_STATES]=match &self.exact{
                 Some(exact)=>{
                     let product:[Dense;3]=std::array::from_fn(|a|g.emission[a].product(&exact.responses[l]));let mut rows=[Complex::ZERO;MOST_STATES];let mut rotation=Rotation::new(self.time);
@@ -2756,14 +2798,17 @@ impl Photons<'_>{
                     rows
                 }
                 None=>{let w=m.first_shift(c,l,p.kappa);std::array::from_fn(|row|{let sum=&sums[ci*MOST_STATES+row];
-                    (0..m.carriers[c].rank).fold(Complex::ZERO,|z,k|z+m.carriers[c].coefficients[j][k]*(sum[k][0]-sum[k][1]*w))})}
+                    (0..m.carriers[c].rank).fold(Complex::ZERO,|z,k|z+coefficients[k]*(sum[k][0]-sum[k][1]*w))})}
             };
             for row in 0..nt{for x in 0..3{gradient[row][x]+=slope[x]*rows[row];}}
-            beams.push((l,rows[..nt].iter().map(|z|(amplitude*(*z)).norm_sqr()).sum(),(0..nt).map(|row|on_f(row,amplitude*rows[row])).sum()));
+            let part:[Complex;MOST_STATES]=std::array::from_fn(|row|amplitude*rows[row]);
+            let slopes:[[Complex;3];MOST_STATES]=std::array::from_fn(|row|{let sum=&sums[ci*MOST_STATES+row];
+                std::array::from_fn(|x|amplitude*(0..m.carriers[c].rank).fold(Complex::ZERO,|z,k|z+coefficients[k]*(0..d).fold(Complex::ZERO,|s,f|s+sum[k][2+f]*p.intensity_gradient[f][x])))});
+            sources.push(Source::beam(m.geometry[l].wave_vector(),log,&part[..nt],&slopes[..nt],&f[..nt],size));
         }}
-        // The explicit states' part of the photon: its weight along e, and the beams' weights: each explicit state's weight
-        // in the photon shared by the drives into it, Σ |a_l Σ_k c_lk U_k[e,b] ψ_b|² -- a photon of that state.
-        let explicit=(!class.direct.is_empty()).then(||{
+        // The explicit states' part of the photon: its weight along e, and the drives' weights: each explicit state's weight
+        // in the photon shared by the drives into it, Σ |a_l Σ_k c_lk U_k[e,b] ψ_b|² -- a photon of that state --, each its transition's response.
+        if !class.direct.is_empty(){
             let dimension=m.dimension(self.cluster);let mut parts=vec![[Complex::ZERO;MOST_STATES];dimension];
             for &(i,to,w)in &class.direct{let row=target.position(to).unwrap();let phase=Complex::cis(w*self.time)*self.psi[i];
                 for a in 0..3{parts[i][row]+=phase*m.photon(self.cluster,&p.stencil,i-n0,a,to)*e[a];}}
@@ -2789,10 +2834,11 @@ impl Photons<'_>{
                 let delta=e.0-b.0+dr.residual+m.kinetic_shift(l,p.kappa);
                 let half_width=0.5*g.decay[(cl.excited[dr.row-n0],cl.excited[dr.row-n0])].re;
                 let(_,log_field)=m.geometry[l].field_log(p.r);
-                drives.push(Recoil::response(log_field,delta,half_width,std::array::from_fn(|a|e.1[a]-b.1[a]),weight));
+                drives.push((weight,response_moment(log_field,delta,half_width,std::array::from_fn(|a|e.1[a]-b.1[a]))));
             }}
-            (total,drives)});
-        (gradient,Absorption{beams,explicit})
+            sources.push(Source::explicit(total,&drives));
+        }
+        (gradient,Absorption{sources})
     }
 }
 
@@ -2804,9 +2850,9 @@ mod tests{
     fn a_vanishing_drive_has_a_finite_logarithmic_response(){
         let geometry=super::Geometry{direction:[0.,0.,1.],wave_number:8.,waist:Some(1.)};
         let(field,log)=geometry.field_log([1000.,0.,0.]);assert_eq!(field,crate::Complex::ZERO);
-        let response=super::Recoil::response(log,0.,19.,[31.,-7.,11.],0.);
-        assert!(response.phase.iter().chain(&response.amplitude).all(|x|x.is_finite()));
-        assert_eq!(response.amplitude[0],-2000.);
+        let moment=super::response_moment(log,0.,19.,[31.,-7.,11.]);
+        assert!(moment.iter().flatten().all(|x|x.is_finite()));
+        assert!((moment[0][0]-(2000_f64.powi(2)+(31_f64/19.).powi(2))).abs()<1e-6,"{moment:?}");
     }
 
     /// The interpolant (`cubic`) is C¹ -- its derivative, the force the tables give, the same from either side of every
