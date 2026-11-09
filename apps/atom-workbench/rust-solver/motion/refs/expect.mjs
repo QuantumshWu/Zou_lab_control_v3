@@ -130,12 +130,18 @@ function mandelQ(gamma,omega,delta){
  * Var V = Σ (k_BT_a)²/2 (harmonic). Heating (each photon: absorption ħk along z, emission along the σ dipole pattern;
  * Var p_z grows by (ħk)²(1 + Q + ξ) per photon, Var p_x,y by (ħk)²(1 − ξ)/2): per axis energy E_a grows at
  * E_rec R(1 + Q + ξ) on z and E_rec R(1 − ξ)/2 on x, y, and k_BT_a = E_a/C_a with the separable quartic's heat capacity
- * C_a = 1 + (3/2)ε_a k_BT_a/U₀ (V_a = U₀(u − ε u²): axial ε = 1, radial ε = 1/2): to first order in k_BT/U₀ the
- * potential energy is k_BT/2 + (3/4)ε(k_BT)²/U₀. Radiation pressure: the mean force ħk⟨R⟩ moves the equilibrium by
- * z₀ = ħk⟨R⟩/(mω_z²); switched on at t = 0 the cloud oscillates about it, dephasing by the anharmonic frequency spread
- * ω_z(E) = ω_z(1 − (3/4)E_z/U₀ − (1/4)E_ρ/U₀) (action-angle first order of V's quartic and cross terms), so
- * ⟨z⟩(t) = z₀(1 − Re[e^{iω_z t}/((1 + iαt)(1 + iβt)²)]), α = (3/4)ω_z k_BT_z/U₀, β = (1/4)ω_z k_BT_ρ/U₀ (exponential
- * axial and gamma(2) radial energies of the thermal cloud). Populations: ρ_ee = ⟨R⟩/Γ in |3′,3′⟩. */
+ * C_a = 1 + (3/2)ε_a k_BT_a/U₀: the Gaussian beam's potential to fourth order is U₀(s + u − s²/2 − 2su − u²), s =
+ * 2ρ²/w₀², u = z²/z_R² (the −2su: the beam widens along z), so ε = 1 axially and 1/2 radially, and to first order in
+ * k_BT/U₀ an axis' potential energy is k_BT/2 + (3/4)ε(k_BT)²/U₀; the cross terms (−2U₀su, −U₀s_xs_y), not in C_a, are
+ * of the same order and bound the rest by (k_BT_other/U₀)·ΔT_a. Radiation pressure: the mean force ħk⟨R⟩ moves the
+ * axial equilibrium by z₀ = ħk⟨R⟩/(mω_dyn²), ω_dyn² = ω_z²(1 − κΩ²/4δ_b²): the probe's own light shift Ω²/4δ(r),
+ * δ(r) = δ_b + κV, softens the spring the atoms feel (trapFrequencyKHz is V_prep's, the trap light alone, SPEC §1.3).
+ * Switched on at t = 0 the cloud oscillates about it and dephases; each atom's orbit centre is F/(mω(E)²) with its own
+ * anharmonic frequency ω(E) = ω(1 − (3/4)E_z/U₀ − (1/2)E_ρ/U₀) (action-angle, first order), so the time average of
+ * ⟨z⟩ is z₀(1 + 2(3/4 + 1)k_BT/U₀) = z₀(1 + 3.5k_BT/U₀); the thermal-equilibrium response F·Var z/k_BT gives
+ * z₀(1 + 5k_BT/U₀) -- their difference is the uncertainty. Observed as the mean of the position distributions' means
+ * over their samples after t = 0 (the oscillation, aliased by the sampling, averages out over the run's ~20 samples:
+ * its remainder bounded by the oscillation's amplitude over √(samples)). Populations: ρ_ee = ⟨R⟩/Γ in |3′,3′⟩. */
 async function r2(){
   const id='R2_RECOIL',c=await cycle(id,['probe']),{line,gamma,U0,kappa}=c,p=c.beams.probe,m=line.model.motion,mass=m.massKg,T=m.temperatureUK;
   const tw=beamOf(line,'tweezer'),{radial,axial}=beamTrap(U0,tw.waistUm,tw.waveNumberPerUm,mass),omegas=[radial,radial,axial];
@@ -146,35 +152,36 @@ async function r2(){
   const derivative=Ts=>{const r=meanR(Ts);return Ts.map((t,a)=>Erec*rates[a]*r/(1+1.5*eps[a]*KT_PER_UK*t/U0));};
   const times=grid(line),Ts=[T0.slice()],Rs=[meanR(T0)];let state=T0.slice();
   for(let i=1;i<times.length;i++){const n=20,dt=(times[i]-times[i-1])/n;for(let j=0;j<n;j++){const k1=derivative(state),k2=derivative(state.map((x,a)=>x+dt/2*k1[a])),k3=derivative(state.map((x,a)=>x+dt/2*k2[a])),k4=derivative(state.map((x,a)=>x+dt*k3[a]));state=state.map((x,a)=>x+dt/6*(k1[a]+2*k2[a]+2*k3[a]+k4[a]));}Ts.push(state.slice());Rs.push(meanR(state));}
-  // z0 and the dephasing of the centre-of-mass oscillation.
-  const rbar=Rs.reduce((a,b)=>a+b,0)/Rs.length,r=hbarOverMass(mass),z0=r*p.k*rbar/(axial*axial);
-  const meanZ=times.map((t,i)=>{const Tz=Ts.slice(0,i+1).reduce((a,b)=>a+b[2],0)/(i+1),Tr=Ts.slice(0,i+1).reduce((a,b)=>a+b[0],0)/(i+1);
-    const al=0.75*axial*KT_PER_UK*Tz/U0*t,be=0.25*axial*KT_PER_UK*Tr/U0*t;
-    // 1/((1 + iα)(1 + iβ)²) times e^{iω t}, real part.
-    let re=1,im=0;const mul=(a,b)=>{const nr=re*a-im*b,ni=re*b+im*a;re=nr;im=ni;};
-    const inv=(a,b)=>{const d=a*a+b*b;mul(a/d,-b/d);};inv(1,al);inv(1,be);inv(1,be);mul(Math.cos(axial*t),Math.sin(axial*t));
-    return {value:z0*(1-re),amp:z0*Math.hypot(re,im)};});
+  // The radiation-pressure offset, the spring softened by the probe's light shift and by the cloud's anharmonicity.
+  const rbar=Rs.reduce((a,b)=>a+b,0)/Rs.length,r=hbarOverMass(mass),soft=1-kappa*p.omega**2/(4*p.delta**2),dyn=axial*Math.sqrt(soft);
+  const z0=r*p.k*rbar/(dyn*dyn),kTbar=KT_PER_UK*Ts.reduce((a,s)=>a+(s[0]+s[1]+s[2])/3,0)/Ts.length/U0;
+  // The oscillation's remainder in the average over the 20 evenly spaced distribution samples after t = 0 (contract §2.2:
+  // at most 21 times with 0 and the end): at most max |mean cos ωt_i| over the anharmonic frequency window
+  // [ω_dyn(1 − 5k_BT/U₀), ω_dyn], times z₀ (no dephasing credited).
+  const tS=Array.from({length:20},(_,i)=>times.at(-1)*(i+1)/20);let rest=0;
+  for(let w=dyn*(1-5*kTbar);w<=dyn;w+=dyn*1e-5)rest=Math.max(rest,Math.abs(tS.reduce((s,t)=>s+Math.cos(w*t),0))/tS.length);
+  const zbar=z0*(1+3.5*kTbar),zu=Math.hypot(z0*1.5*kTbar,z0*Math.abs(Rs.at(-1)-Rs[0])/(2*rbar),z0*rest);
   const series=[];
   ['x','y','z'].forEach((a,i)=>series.push({quantity:'trapFrequency',axis:a,value:kHz(omegas[i]),u:kHz(omegas[i])*c.mixing**2/2,target:{relative:0}}));
-  // u(T): the cross-axis quartic terms (−U₀ u_ρ u_z, −U₀ u_x u_y: the same order as the diagonal ones, not in C_a) bound
-  // by (1/2)(k_BT_other/U₀)·ΔT_a; the centre-of-mass energy ½mω_z²z₀² that dephasing turns into heat (z); the Wigner
-  // scaling's non-stationarity (R1); Mandel's Q is in the rate.
-  const push=0.5*mass*(axial*1e6)**2*(z0*1e-6)**2/1.380649e-23*1e6;
+  // u(T): the cross-axis quartic terms (k_BT_other/U₀)·ΔT_a; the centre-of-mass energy ½mω²z₀² that dephasing turns
+  // into heat (z, after t = 0); the Wigner scaling's non-stationarity (R1). Mandel's Q is in the rate.
+  const push=0.5*mass*(dyn*1e6)**2*(z0*1e-6)**2/1.380649e-23*1e6;
   ['x','y','z'].forEach((a,i)=>{
-    const u=Ts.map((s,j)=>{const other=Math.max(...s.filter((_,b)=>b!==i)),dT=s[i]-T0[i];return Math.hypot(0.5*KT_PER_UK*other/U0*dT,i===2&&j>0?push:0,T0[i]*Math.abs(wignerTemperature(omegas[i],T)/T-1)*KT_PER_UK*T/U0);});
+    const u=Ts.map((s,j)=>{const other=Math.max(...s.filter((_,b)=>b!==i)),dT=s[i]-T0[i];return Math.hypot(KT_PER_UK*other/U0*dT,i===2&&j>0?push:0,T0[i]*Math.abs(wignerTemperature(omegas[i],T)/T-1)*KT_PER_UK*T/U0);});
     series.push({quantity:'T',axis:a,regime:'any',indices:all(line),values:Ts.map(s=>s[i]),u,target:TEMPERATURE});});
-  series.push({quantity:'meanPosition',axis:'z',indices:all(line),values:meanZ.map(x=>x.value),u:meanZ.map(x=>0.2*x.amp),target:{absolute:0.1*z0}});
+  // The offset's target: the force's, the T target 10 % (the heating that R2 judges is ∝ the same rate R).
+  series.push({quantity:'meanPositionAverage',axis:'z',value:zbar,u:zu,target:{absolute:TEMPERATURE.relative*zbar}});
   series.push({quantity:'loss',indices:all(line),values:times.map(()=>0),u:times.map(()=>0),target:POPULATION});
   const ree=Rs.map(x=>x/gamma);
   series.push({quantity:'population',state:'ground-2-2',indices:all(line),values:ree.map((x,i)=>i?1-x:1),u:ree.map((x,i)=>i?0.1*x:0),target:POPULATION});
   series.push({quantity:'population',state:'D2-3-3',indices:all(line),values:ree.map((x,i)=>i?x:0),u:ree.map((x,i)=>i?0.1*x:0),target:POPULATION});
   const s=2*p.omega**2/gamma**2;
   write(id,expectation(id,'R2','R2 二能级辐射压与反冲加热',line,{
-    derivation:'Two-level photon rate R = (Γ/2)s/(1+s+(2δ/Γ)²) at the local detuning (cloud average to 2nd order in κV); per photon Var p grows by (ħk)²(1+Q+ξ) along the beam and (ħk)²(1−ξ)/2 across (ξ = 2/5, σ dipole): k_B dT_z/dt = (7/5)E_rec R, k_B dT_x,y/dt = (3/10)E_rec R, with the separable quartic heat capacity; radiation pressure offset z₀ = ħkR/(mω_z²) with the thermal dephasing of the switched-on oscillation.',
+    derivation:'Two-level photon rate R = (Γ/2)s/(1+s+(2δ/Γ)²) at the local detuning (cloud average to 2nd order in κV); per photon Var p grows by (ħk)²(1+Q+ξ) along the beam and (ħk)²(1−ξ)/2 across (ξ = 2/5, σ dipole): k_B dT_z/dt = (7/5)E_rec R, k_B dT_x,y/dt = (3/10)E_rec R, with the separable quartic heat capacity; radiation pressure offset z₀ = ħkR/(mω²) (the spring softened by the probe’s light shift), time-averaged over the dephasing oscillation with the anharmonic orbit-centre shift.',
     conditions:[{what:'|δ_b|/Γ',value:Math.abs(p.delta)/gamma,limit:'≫ 1'},{what:'s',value:s},{what:'κ·⟨V⟩/|δ_b| (cloud spread of the detuning)',value:kappa*KT_PER_UK*1.5*T/Math.abs(p.delta),limit:'≪ 1'},
       {what:'k_BT/U₀ at the end (quartic corrections)',value:KT_PER_UK*Math.max(...Ts.at(-1))/U0,limit:'≪ 1'},{what:'Mandel Q',value:Q},{what:'k_BT ≥ 4ħω_radial at t = 0',value:KT_PER_UK*T/radial,limit:'≥ 4'},
       {what:'one beam\'s Doppler damping time m/β (s), β = ħk²|dR/dδ|',value:1/(hbarOverMass(mass)*p.k**2*rbar*8*Math.abs(p.delta)/(gamma*gamma)/(1+s+(2*p.delta/gamma)**2))*1e-6,limit:'≫ the run'}],
-    series,info:{depthUK:uKOfMHz(U0/RAD_PER_MHZ),trapKHz:omegas.map(kHz),kineticRatio:ratio,T0,s,deltaOverGamma:p.delta/gamma,photonRatePerUs:rbar,recoilUK:Erec,mandelQ:Q,z0Um:z0,kappa}}));
+    series,info:{depthUK:uKOfMHz(U0/RAD_PER_MHZ),trapKHz:omegas.map(kHz),kineticRatio:ratio,T0,s,deltaOverGamma:p.delta/gamma,photonRatePerUs:rbar,recoilUK:Erec,mandelQ:Q,z0Um:z0,meanZUm:zbar,springSoftening:soft,kappa}}));
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -242,7 +249,7 @@ async function r5(){
  * the mean momentum ħΔk·P̄₂ moves the centre of mass: ⟨v_z⟩(t) = (ħΔk/m)∫₀^t cos ω(t − s) dP̄₂(s). */
 async function r6(id){
   const line=read(`scenes/${id}.json`),scene=read(`scenes/${id}.scene.json`),m=line.model.motion,mass=m.massKg,T=m.temperatureUK,times=grid(line),states=line.model.states;
-  const {omegaR,twoPhotonMHz}=ramanNumbers(line),d2=twoPhotonMHz*RAD_PER_MHZ,gamma=decayRates(line);
+  const {omegaR,twoPhotonMHz}=await ramanNumbers(line,scene),d2=twoPhotonMHz*RAD_PER_MHZ,gamma=decayRates(line);
   const E=m.hamiltonian.real.filter((_,q)=>q%33===0),g1=index(line,'ground-1-0'),g2=index(line,'ground-2-0');
   let scatter=0;for(const g of [g1,g2])for(const b of ['ramanA','ramanB'])for(let e=8;e<32;e++){const x=coupling(line,b,e,g),d=frameDetuning(line,beamOf(line,b))-(E[e]-E[g]);scatter+=gamma[e]*(x.re*x.re+x.im*x.im)/(d*d+gamma[e]**2/4)/2;}
   const A=beamOf(line,'ramanA'),B=beamOf(line,'ramanB'),dk=A.waveNumberPerUm*A.direction[2]-B.waveNumberPerUm*B.direction[2],r=hbarOverMass(mass),recoil=r*dk*dk/2;
