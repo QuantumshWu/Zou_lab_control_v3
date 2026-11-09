@@ -396,3 +396,92 @@ pub(crate) fn pair(first: &Amplitude, second: &Amplitude) -> Amplitude {
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linalg::hermitian_eigen;
+
+    /// A deterministic pseudo-random coupling (excited ← ground) of entries of modulus up to `scale`.
+    fn coupling(scale: f64, seed: u64) -> Mat {
+        let mut x = seed;
+        let mut next = || {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (x >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        Mat::from_fn(STATES, STATES, |e, b| if e >= GROUND && b < GROUND { C64::new(next(), next()) * scale } else { C64::ZERO })
+    }
+
+    /// The van Vleck form is the second order of the exact Floquet spectrum. One component V e^{−iνt} + h.c. couples the ground
+    /// states at E_b to the excited states at E_e − ν (the rotating frame of the absorbed photon): H_F = [[E_g, V†], [V, E_e − ν]],
+    /// exactly Hermitian. Its ground-like eigenvalues are those of E_g + C(V, V)_gg up to fourth order in V/Δ, and its excited-like
+    /// ones those of E_e − ν + C(V, V)_ee: so halving V cuts the difference sixteenfold, whatever the ground states' degeneracy
+    /// (the vV block is a matrix there; its eigenvalues are compared). Bare energies with the hyperfine and the line spacings of
+    /// Rb87 at the scale of the frame (rad/µs), ν a far detuning.
+    #[test]
+    fn the_van_vleck_shift_is_the_floquet_spectrum_s_second_order() {
+        let e: Vec<f64> = (0..STATES)
+            .map(|s| if s < 3 { -42943.0 + 13.0 * (s as f64 - 1.0) } else if s < GROUND { (s as f64 - 5.0) * 13.2 } else if s < 16 { -4.6e6 + 300.0 * s as f64 } else { 1.0e3 * (s as f64 - 24.0) })
+            .collect();
+        let nu = -2.5e6;
+        let error = |scale: f64| {
+            let v = coupling(scale, 7);
+            let f = van_vleck(&e, &v, nu, &v, nu);
+            let floquet = Mat::from_fn(STATES, STATES, |x, y| {
+                let d = if x == y { C64::real(if x < GROUND { e[x] } else { e[x] - nu }) } else { C64::ZERO };
+                d + if x >= GROUND && y < GROUND { v[(x, y)] } else if x < GROUND && y >= GROUND { v[(y, x)].conj() } else { C64::ZERO }
+            });
+            let exact = hermitian_eigen(&floquet).values;
+            let ground: Vec<usize> = (0..GROUND).collect();
+            let mut effective = f.block(&ground, &ground);
+            for b in 0..GROUND {
+                effective[(b, b)] += C64::real(e[b]);
+            }
+            let second = hermitian_eigen(&effective).values;
+            // The ground-like eigenvalues are the eight nearest the ground energies, the excited ones E_e − ν lying ±2e6 away.
+            let mut near: Vec<f64> = exact.clone();
+            near.sort_by(|a, b| {
+                let d = |x: f64| e[..GROUND].iter().map(|g| (x - g).abs()).fold(f64::INFINITY, f64::min);
+                d(*a).total_cmp(&d(*b))
+            });
+            let mut lowest = near[..GROUND].to_vec();
+            lowest.sort_by(|a, b| a.total_cmp(b));
+            let shift = f.block(&ground, &ground).max_abs();
+            (lowest.iter().zip(&second).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max), shift)
+        };
+        let (big, shift) = error(3000.0);
+        let (small, _) = error(1500.0);
+        assert!(shift > 1.0, "the coupling shifts the ground states visibly: {shift}");
+        assert!(big < 1e-3 * shift, "fourth order: {big} of a shift {shift}");
+        let ratio = big / small;
+        assert!((ratio - 16.0).abs() < 1.0, "the remainder is fourth order: ratio {ratio} ({big}, {small})");
+    }
+
+    /// The outside form's Hermitian form in the spherical components reproduces the request's coordinates: for a field E,
+    /// Σ_pq E_p* E_q O_pq = Σ_i x_i(E) O_i with x = (|E_q|², then per pair (−1, 0), (−1, +1), (0, +1) Re and Im of E_p* E_q).
+    #[test]
+    fn the_outside_form_is_its_coordinates_linear_form() {
+        let m: [Mat; 9] = std::array::from_fn(|i| {
+            let a = coupling(1.0, 100 + i as u64);
+            let mut h = a.clone();
+            h.add_scaled(C64::ONE, &a.adjoint());
+            h
+        });
+        let field = [C64::new(0.3, -1.2), C64::new(-0.7, 0.4), C64::new(1.1, 0.25)];
+        let o = outside_form(&m);
+        let mut by_form = Mat::zeros(STATES, STATES);
+        for p in 0..3 {
+            for q in 0..3 {
+                by_form.add_scaled(field[p].conj() * field[q], &o[p][q]);
+            }
+        }
+        let x = crate::field::coordinates(&field);
+        let mut by_coordinates = Mat::zeros(STATES, STATES);
+        for i in 0..9 {
+            by_coordinates.add_scaled(C64::real(x[i]), &m[i]);
+        }
+        let mut d = by_form.clone();
+        d.add_scaled(-C64::ONE, &by_coordinates);
+        assert!(d.max_abs() <= 1e-14 * by_coordinates.max_abs(), "{}", d.max_abs());
+    }
+}

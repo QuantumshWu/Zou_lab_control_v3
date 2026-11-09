@@ -371,9 +371,9 @@ impl Photon {
 
 /// The hazard λ = ⟨ψ|i(H − H†)|ψ⟩/‖ψ‖² of a generator H at an instant: Σ_φ Σ_a ‖J_{a,φ}ψ‖²/‖ψ‖², the decay being the jumps'
 /// Σ J†J by construction (module documentation, # The decay).
+/// The anti-Hermitian part B = i(H − H†) is formed entry by entry before it meets ψ, so that the Hermitian part's scale (the
+/// states' energies) does not round the rate.
 pub fn hazard(h: &Mat, psi: &[C64]) -> f64 {
-    let hp = h.apply(psi);
-    let hd = h.adjoint().apply(psi);
-    let num: C64 = psi.iter().zip(hp.iter().zip(&hd)).map(|(p, (a, b))| p.conj() * (*a - *b)).sum();
-    -num.im / psi.iter().map(|z| z.norm_sqr()).sum::<f64>()
+    let decay = Mat::from_fn(h.rows, h.cols, |x, y| C64::I * (h[(x, y)] - h[(y, x)].conj()));
+    crate::linalg::inner(psi, &decay.apply(psi)).re / psi.iter().map(|z| z.norm_sqr()).sum::<f64>()
 }

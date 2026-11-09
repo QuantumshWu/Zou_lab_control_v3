@@ -259,6 +259,12 @@ pub struct Model {
     pub(crate) membership: [usize; GROUND],
     /// The near carriers (eliminate.rs).
     pub(crate) carriers: Vec<eliminate::Carrier>,
+    /// The photons' sources (photon.rs) and per cluster its classes.
+    pub(crate) sources: Vec<photon::Source>,
+    pub(crate) classes: Vec<Vec<photon::Class>>,
+    /// The states' labels and the beams' names (the ledger's and the method's words).
+    pub(crate) labels: Vec<String>,
+    pub(crate) names: Vec<String>,
 }
 
 /// An exact wave vector: integer coordinates on the light's distinct wave vectors (`Model::waves`), with a `Beat`'s integer
@@ -314,6 +320,10 @@ impl Model {
             clusters: vec![],
             membership: [0; GROUND],
             carriers: vec![],
+            sources: vec![],
+            classes: vec![],
+            labels: request.states.clone(),
+            names: request.beams.iter().map(|b| b.name.clone()).collect(),
         };
         for component in model.components().into_iter().filter(|c| c.counter) {
             let gate = model.far_gate(component);
@@ -329,6 +339,10 @@ impl Model {
         }
         model.clusters = clusters;
         model.membership = membership;
+        model.sources = model.far_sources();
+        model.sources.extend(model.explicit_sources());
+        model.sources.extend(model.near_sources());
+        model.classes = (0..model.clusters.len()).map(|c| model.classes(c)).collect();
         Ok(model)
     }
 
@@ -452,11 +466,5 @@ impl crate::step::Dynamics for Run<'_> {
     }
 }
 
-impl Photon {
-    /// The absorption recoil's moments of the jump into f = Σ_a ε_a u_a (`Recoil`), ε the drawn real polarization.
-    pub fn recoil(&self, polarization: &[f64; 3]) -> Recoil { let _ = polarization; todo!() }
-}
 
-/// The hazard λ = Σ_φ Σ_a ‖J_{a,φ}ψ‖²/‖ψ‖² (SPEC §1.4, the one definition): ⟨ψ|i(H − H†)|ψ⟩/‖ψ‖² for the generator H at that instant,
-/// the decay being the jumps' Σ J†J by construction (tested, never checked at run time).
-pub fn hazard(h: &Mat, psi: &[C64]) -> f64 { let _ = (h, psi); todo!() }
+pub use photon::hazard;
