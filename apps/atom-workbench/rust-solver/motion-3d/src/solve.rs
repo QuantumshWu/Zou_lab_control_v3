@@ -459,7 +459,9 @@ fn statistics(e:&Estimate,frequencies:[f64;3])->Statistic{
         temperature:CONFIDENCE*(1.-e.loss).max(0.)*(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a]/e.temperature[a]}else{0.}).fold(0.,f64::max),weight:regime(e,frequencies)}
 }
 /// Whether an output holds the atoms a temperature, a variance over them, takes (`reads_spread`).
-fn reads_temperature(e:&Estimate)->bool{reads_spread((e.trajectories*(1.-e.loss)).round())}
+fn reads_temperature(e:&Estimate)->bool{reads_spread(held_atoms(e).round())}
+/// The atoms an output holds, its trajectories less the lost: what its shares of the held atoms are read on (`unseen`, `with_open`).
+fn held_atoms(e:&Estimate)->f64{e.trajectories*(1.-e.loss).max(0.)}
 /// The temperature (uK) a pilot's atoms grow the reach to (module documentation, # The reach): where their T at an output after t = 0 lies
 /// past `reach` on an axis by more than its errors over the looks at every axis of the outputs that read one (`looks_confidence`), the
 /// largest T they read, at most the trap's (`reach_cap`); none where they stay within it, or the reach is there already.
@@ -682,7 +684,7 @@ fn records<'a>(model:&Model,base:&Ledger,estimates:&'a [Estimate],bias:[f64;2],f
     // bound takes on the paths they go (an atom that gathers where the light is bright, as red-detuned
     // molasses holds it at its lattice's bright sites, meets more than the pattern's mean). The a-priori
     // estimate over the reach decided the fold (`Candidate`); the atoms an output's T takes past that reach, their folds unjudged, apart (`beyond_reach`).
-    let measured=memory.charges(&estimates.iter().map(|e|with_open(fold_charges(model,2.*e.folded),model,e.trajectories)).collect::<Vec<_>>());let cap=reach_cap(depth);
+    let measured=memory.charges(&estimates.iter().map(|e|with_open(fold_charges(model,2.*e.folded),model,held_atoms(e))).collect::<Vec<_>>());let cap=reach_cap(depth);
     let(apriori,statistics)=(Apriori::of(base,model),statistics_of(estimates,frequencies));
     estimates.iter().zip(&statistics).zip(measured).enumerate().map(|(i,((e,s),charge))|{
         let(population,temperature)=(POPULATION_TARGET,TEMPERATURE_TARGET/s.weight);
@@ -899,8 +901,7 @@ fn run_at(request:&Request,reach:f64,device:Device,checkpoint:&mut dyn FnMut(&So
     // and the motion's step error are the second order's. Beside a pilot's model whose check was put off (beyond the targets at
     // any step), only where those totals come within the targets: what lies beyond them is no fold's.
     let promise=pilot_candidate.allowance==EXISTS&&pilot_cost.as_ref().map_or(true,|p|{
-        let open=open_saturation(pilot_candidate.model.resonance,memory.atoms as f64);
-        let apriori:Vec<[f64;2]>=pilot_candidate.charges.iter().map(|c|p.total.at(Measured::charge([open+c[1]*c[1],c[1]]))).collect();
+        let apriori:Vec<[f64;2]>=pilot_candidate.charges.iter().enumerate().map(|(i,c)|p.total.at(Measured::charge([open_saturation(pilot_candidate.model.resonance,memory.held(i))+c[1]*c[1],c[1]]))).collect();
         let(n,weight)=predicted(&pilot_statistics,&apriori,[0.,p.bias[1]],pilot as f64);
         if p.checked.is_none()&&past_targets(&pilot_statistics,&apriori){return false;}
         let work=fourth_work(request,&pilot_candidate,&pilot_states,&starts,&running(pilot_candidate.reference(),p.steps,pilot_waiting,doppler_allowance(&pilot_candidate.base,&pilot_candidate.model),pilot_candidate.phase),interval,pilot_waiting);
@@ -1244,7 +1245,7 @@ fn measured_charge(from:&Model,to:&Model,states:&[Trajectory],starts:&[Trajector
     let held:f64=counts[1..].iter().sum();if held==0.{return vec![fold_charges(to,to.ground.charge);outputs];}
     let means:[Vec<f64>;2]=std::array::from_fn(|k|{let sum:Vec<f64>=sums.iter().map(|s|s[k]).collect();let mean=moments[0][k]/held;
         steady_means(&sum,&counts,(moments[1][k]/held-mean*mean).max(0.).sqrt(),largest[k])});
-    memory.charges(&(0..outputs).map(|i|with_open([means[0][i],means[1][i]],to,memory.atoms as f64)).collect::<Vec<[f64;2]>>())
+    memory.charges(&(0..outputs).map(|i|with_open([means[0][i],means[1][i]],to,memory.held(i))).collect::<Vec<[f64;2]>>())
 }
 /// Means per output (`sums` over `counts` states, the first output's left alone) over their neighbours as far as they agree: the mean
 /// within the widest window, doubling from the output's own, that agrees with every narrower one within Bernstein's bound on that one's
@@ -1295,6 +1296,8 @@ impl Memory{
     /// The fold's charges per output and target with the memory: at each output the largest of its own and each
     /// earlier output's times the share kept since the end of the interval after it, over which that one's
     /// error is made -- of an error made by output j, per atom held at output i ≥ j e^{−n}, n its jumps in between, their mean; all of it where none is held at i.
+    /// The atoms held at an output: those kept there or later (principle 6, a share read on the atoms held there).
+    fn held(&self,i:usize)->f64{(0..self.atoms).filter(|&a|self.last[a]>=i).count() as f64}
     fn charges(&self,values:&[[f64;2]])->Vec<[f64;2]>{
         let top:[f64;2]=std::array::from_fn(|k|values.iter().map(|v|v[k]).fold(0.,f64::max));
         (0..values.len()).into_par_iter().map(|i|{let mut most=values[i];
