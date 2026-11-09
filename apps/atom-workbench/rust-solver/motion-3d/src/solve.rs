@@ -212,7 +212,7 @@
 //!
 //! # Shares
 //! The targets are the totals, each output's estimated error E² = A² + b² + S²: A the a-priori estimates (the ledger's, each
-//! booked as measured), b the step's bias and S the statistics' CONFIDENCE standard errors, within each target ε. The three
+//! booked as measured), b the step's bias and S the statistics' errors at CONFIDENCE (stats.rs `Spread`), within each target ε. The three
 //! are independent errors -- the model's, the integrator's, the sample's -- and the field's rule for independent uncertainties
 //! (the GUM's) is their root sum of squares, a bound of width B entering as B: at z = 2 that keeps the chance of an error
 //! beyond ε at 5.2–6.2 % for any A with the bounds' errors uniform within them (their rectangular distribution, the GUM's
@@ -368,7 +368,9 @@ pub enum Device{Cpu,Gpu}
 /// The method's accuracy targets: T relative, populations and loss absolute.
 pub const TEMPERATURE_TARGET:f64=0.10;
 pub const POPULATION_TARGET:f64=0.05;
-/// Statistics are run until this many standard errors lie within the targets.
+/// Statistics are run until their errors at this confidence lie within the targets: the normal's two-sided 95.4 % at this
+/// many standard errors, an estimate's interval there Student's t at the groups that read it and Hall's shift for their skew
+/// (stats.rs `Spread`).
 pub const CONFIDENCE:f64=2.;
 /// The integrator's order p (engine.rs: the flow, the kick and the internal state's half steps in Strang's
 /// splitting): a step's bias over the run and its doubling's difference go as dt^p, Richardson's 2^p/(2^p − 1)
@@ -402,7 +404,7 @@ pub const MOST_STEPS:usize=1<<24;
 /// first prediction stands on them (formerly two per thread of 16 threads).
 pub const FIRST_GROUPS:u64=32;
 /// The groups of a CPU's first batch that run through the whole run whatever the pilot's need says (`first_ends`), half `FIRST_GROUPS`: a jackknife's variance over g groups errs by √(2/(g − 1)), 36 % here against 25 % on those, and
-/// its coverage at CONFIDENCE standard errors is that of t with g − 1 degrees of freedom, 93.6 % here against 94.6 %.
+/// an error read on them takes Student's t at g − 1 degrees of freedom (stats.rs `Spread`), 2.18 standard errors here against 2.08 at 32 groups for the normal's 2.
 const WHOLE_GROUPS:u64=FIRST_GROUPS/2;
 
 pub const NOT_CONFINED:&str="光镊不约束原子：3D 运动计算光镊中的单个原子，需要在焦点附近形成势阱的光镊";
@@ -471,7 +473,7 @@ fn held_share(e:&Estimate)->f64{(1.-e.loss).max(0.)}
 struct Statistic{population:f64,temperature:f64,weight:f64}
 fn statistics(e:&Estimate,frequencies:[f64;3])->Statistic{
     Statistic{population:shown_error(e,CONFIDENCE),
-        temperature:held_share(e)*(0..3).map(|a|if e.temperature[a]>0.{e.temperature_error[a].at(CONFIDENCE)/e.temperature[a]}else{0.}).fold(0.,f64::max),weight:regime(e,frequencies)}
+        temperature:held_share(e)*(0..3).map(|a|if e.temperature[a]>0.&&reads_spread(e.temperature_error[a].groups){e.temperature_error[a].at(CONFIDENCE)/e.temperature[a]}else{0.}).fold(0.,f64::max),weight:regime(e,frequencies)}
 }
 /// Whether an output holds the atoms a temperature, a variance over them, takes (`reads_spread`).
 fn reads_temperature(e:&Estimate)->bool{reads_spread(held_atoms(e).round())}
@@ -502,9 +504,10 @@ fn last_holding(outputs:usize,holds:&dyn Fn(usize)->bool)->Vec<usize>{(0..output
 /// error over its neighbours as far as they agree (`steady`).
 fn statistics_of(estimates:&[Estimate],frequencies:[f64;3])->Vec<Statistic>{
     let mut all:Vec<Statistic>=estimates.iter().map(|e|statistics(e,frequencies)).collect();
-    let(counts,groups):(Vec<f64>,Vec<f64>)=estimates.iter().map(|e|(e.trajectories,e.groups)).unzip();
+    // The groups each statistic's variance is read on (stats.rs `Spread::groups`): every reaching one the rows' and the loss's, those holding an atom T's.
+    let(counts,groups):(Vec<f64>,Vec<f64>)=estimates.iter().map(|e|(e.trajectories,e.groups)).unzip();let holding:Vec<f64>=estimates.iter().map(|e|e.temperature_error[0].groups).collect();
     let population=steady(&all.iter().map(|s|s.population).collect::<Vec<f64>>(),&counts,&groups);
-    let temperature=steady(&all.iter().map(|s|s.temperature).collect::<Vec<f64>>(),&counts,&groups);
+    let temperature=steady(&all.iter().map(|s|s.temperature).collect::<Vec<f64>>(),&counts,&holding);
     for(i,s)in all.iter_mut().enumerate(){s.population=population[i];s.temperature=temperature[i];}
     all
 }
@@ -2093,6 +2096,7 @@ mod tests{
         assert_eq!(at_share([3.,4.,5.],[1.,2.,3.],1.)[0],[3.,4.,5.]);assert_eq!(at_share([3.,4.,5.],[1.,2.,3.],0.)[0],[1.,2.,3.]);
     }
     /// T's statistic stands at the share of atoms it reads: its relative error at no loss, a quarter of it with a quarter of the atoms held, nothing where none is; and a few atoms held, their relative error √(2/x), ask no more trajectories than the batch that holds them, as none or one do: no cliff.
+    /// Read on 16 groups its error is Student's t at 15; held by a single group, its spread unread, it asks nothing.
     #[test]
     fn t_s_statistic_stands_at_the_share_of_atoms_it_reads(){
         let mut e=Estimate::default();e.temperature=[10.;3];e.temperature_error=[spread(1.);3];let at=|e:&Estimate|statistics(e,[1.;3]).temperature;
@@ -2100,6 +2104,9 @@ mod tests{
         e.loss=0.75;assert!((at(&e)-0.25*whole).abs()<1e-15);e.loss=1.;assert_eq!(at(&e),0.);
         let room=room(TEMPERATURE_TARGET,BIAS_SHARE*TEMPERATURE_TARGET);
         for held in 2..=6{let x=f64::from(held);let mut few=Estimate::default();few.trajectories=80.;few.loss=1.-x/80.;few.temperature=[10.;3];few.temperature_error=[spread(10.*(2./x).sqrt());3];assert!(at(&few)<room,"{held}: {}",at(&few));}
+        // Read on 16 groups, its error takes Student's t at 15 (stats.rs `Spread`); held by one group, its spread unread, it asks nothing, as none or one atom.
+        e.loss=0.;e.temperature_error=[Spread{error:1.,groups:16.,skew:0.};3];assert!((at(&e)-crate::stats::student(CONFIDENCE,15.)*0.1).abs()<1e-15,"{}",at(&e));
+        e.temperature_error=[Spread{error:f64::INFINITY,groups:1.,skew:0.};3];assert_eq!(at(&e),0.);
     }
     /// An output's model items weigh at the share of atoms its statistics are read on (`held_share`): a quarter of the atoms held, a quarter of
     /// the a-priori total and of the statistics alike, so that an output 75 % lost whose fold charges 8 % among its held atoms totals 2 % of what

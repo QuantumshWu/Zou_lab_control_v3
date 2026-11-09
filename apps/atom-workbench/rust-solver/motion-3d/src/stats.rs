@@ -79,11 +79,62 @@ impl Spread{
     pub const EXACT:Spread=Spread{error:0.,groups:f64::INFINITY,skew:0.};
     /// Too few groups to read a spread on (`reads_spread`): its error unknown.
     fn unread(groups:f64)->Spread{Spread{error:f64::INFINITY,groups,skew:0.}}
-    /// The distances of its interval at z standard errors below the value and above it.
-    pub fn below(&self,z:f64)->f64{z*self.error}
-    pub fn above(&self,z:f64)->f64{z*self.error}
+    /// Its quantile at z: Student's t at one degree of freedom fewer than the groups that read it, at the normal's tail beyond z
+    /// (`student`) -- the jackknife's t interval (Tukey's), the batch means' t of their batches less one --; z on unlimited groups.
+    fn quantile(&self,z:f64)->f64{if self.groups==f64::INFINITY{z}else{student(z,self.groups-1.)}}
+    /// Hall's shift of its interval at z for the skew of the group values, (2z² + 1)/6 of it: the mean of skewed values lies short of
+    /// its long tail more often than its standard error says, the studentized interval's both ends moved toward that tail.
+    fn shift(&self,z:f64)->f64{(2.*z*z+1.)/6.*self.skew}
+    /// The distances of its interval at z standard errors below the value and above it, [v + d − q SE, v + d + q SE] (q its
+    /// `quantile`, d its `shift`); unknown on fewer than two groups.
+    pub fn below(&self,z:f64)->f64{if reads_spread(self.groups){self.quantile(z)*self.error-self.shift(z)}else{f64::INFINITY}}
+    pub fn above(&self,z:f64)->f64{if reads_spread(self.groups){self.quantile(z)*self.error+self.shift(z)}else{f64::INFINITY}}
     /// Its error at z standard errors: the larger distance.
     pub fn at(&self,z:f64)->f64{self.below(z).max(self.above(z))}
+}
+
+/// Student's t at ν degrees of freedom (a whole number, at least one) at the normal's two-sided tail beyond z: the q with
+/// P(|t_ν| > q) = P(|N| > z), by bisection on t's tail (`student_tail`) to the last bit; kept per thread, a pure function of both.
+pub(crate) fn student(z:f64,nu:f64)->f64{
+    thread_local!{static KEPT:std::cell::RefCell<std::collections::HashMap<(u64,u64),f64>>=std::cell::RefCell::new(std::collections::HashMap::new());}
+    let n=nu.round().max(1.) as u64;
+    KEPT.with(|kept|*kept.borrow_mut().entry((z.to_bits(),n)).or_insert_with(||{
+        let p=normal_tail(z);let(mut low,mut high)=(z,2.*z);
+        while student_tail(high,n)>p{low=high;high*=2.;}
+        loop{let m=0.5*(low+high);if !(m>low&&m<high){break high;}if student_tail(m,n)>p{low=m;}else{high=m;}}
+    }))
+}
+/// The normal's two-sided tail beyond z, P(|N| > z) = erfc(z/√2) = Q(½, z²/2), the regularized upper incomplete gamma at ½:
+/// below ½ + 1 one less its lower part's series, above by its continued fraction (Lentz; Numerical Recipes' gser and gcf),
+/// with Γ(½) = √π.
+fn normal_tail(z:f64)->f64{
+    let(a,x)=(0.5,0.5*z*z);if !(x>0.){return 1.;}
+    let lead=(a*x.ln()-x).exp()/std::f64::consts::PI.sqrt();
+    if x<a+1.{
+        let(mut term,mut sum,mut b)=(1./a,1./a,a);
+        loop{b+=1.;term*=x/b;sum+=term;if term.abs()<=sum.abs()*f64::EPSILON{break;}}
+        1.-sum*lead
+    }else{
+        let tiny=f64::MIN_POSITIVE/f64::EPSILON;let(mut b,mut c)=(x+1.-a,1./tiny);let mut d=1./b;let mut h=d;let mut i=1.;
+        loop{let an=-i*(i-a);b+=2.;d=an*d+b;if d.abs()<tiny{d=tiny;}c=b+an/c;if c.abs()<tiny{c=tiny;}d=1./d;let step=d*c;h*=step;if (step-1.).abs()<=f64::EPSILON{break;}i+=1.;}
+        lead*h
+    }
+}
+/// Student's t at ν degrees of freedom (whole): its two-sided tail beyond q, 1 − A(q|ν), A by the finite sums of Abramowitz and
+/// Stegun 26.7.3–4 in θ = atan(q/√ν): (2/π)(θ + sin θ (cos θ + (2/3) cos³θ + … + (2·4…(ν−3))/(3·5…(ν−2)) cos^(ν−2) θ)) at odd ν
+/// (θ alone at one), sin θ (1 + (1/2) cos²θ + … + (1·3…(ν−3))/(2·4…(ν−2)) cos^(ν−2) θ) at even.
+fn student_tail(q:f64,nu:u64)->f64{
+    let theta=(q/(nu as f64).sqrt()).atan();let(s,c)=theta.sin_cos();let c2=c*c;
+    let a=if nu%2==1{
+        let(mut term,mut sum,mut k)=(c,if nu>1{c}else{0.},1);
+        while 2*k+1<nu{term*=c2*(2*k) as f64/(2*k+1) as f64;sum+=term;k+=1;}
+        2./std::f64::consts::PI*(theta+s*sum)
+    }else{
+        let(mut term,mut sum,mut k)=(1.,1.,1);
+        while 2*k<nu{term*=c2*(2*k-1) as f64/(2*k) as f64;sum+=term;k+=1;}
+        s*sum
+    };
+    1.-a
 }
 
 /// The estimates at one output time.
@@ -170,8 +221,10 @@ pub(crate) fn reads_spread(samples:f64)->bool{samples>=2.}
 pub(crate) fn variance_noise(groups:f64)->f64{(2./(groups-1.).max(1.)).sqrt()}
 /// The largest of n noisy looks at one quantity, in standard errors: z = √(2 ln n), what a read that takes their largest must allow for.
 pub(crate) fn largest_look(looks:f64)->f64{(2.*looks.ln()).sqrt()}
-/// A value's spread over the groups left out (`Spread`), `groups` of them reading it: the jackknife's standard error and the skew.
+/// A value's spread over the groups left out (`Spread`), `groups` of them reading it: the jackknife's standard error and the skew;
+/// unknown where fewer than two groups read it (`reads_spread`) -- a held atoms' quantity whose atoms one group holds.
 fn spread(leave:&[Moments],f:impl Fn(&Moments)->f64,groups:f64)->Spread{
+    if !reads_spread(groups){return Spread::unread(groups);}
     Spread{error:crate::read::jackknife_error(leave.iter().map(&f)),groups,skew:skew(leave.iter().map(&f))}
 }
 /// The skew of a jackknife's group values (`Spread::skew`), of the values left out: a group's value moves the estimate against
@@ -316,10 +369,25 @@ mod tests{
             g.add(0,Some(&Atom{motion:[[x,1.+x*x];3],populations:&population,folded:0.,profile:0.,doppler:0.}),[0.;3]);g}).collect();
         let e=&summarize(&groups,&scales,&[])[0];let p=e.population_errors[0];
         assert!((p.error-0.2).abs()<1e-15&&(p.skew-0.12).abs()<1e-15,"{p:?}");
-        assert_eq!(p.at(2.),2.*p.error);assert_eq!(Spread::EXACT.at(2.),0.);
+        // Its interval at 2: t at four degrees of freedom, moved up by (2·4 + 1)/6 of the skew toward the bright group.
+        let(q,d)=(student(2.,4.),1.5*0.12);assert!((p.above(2.)-(q*0.2+d)).abs()<1e-14&&(p.below(2.)-(q*0.2-d)).abs()<1e-14&&p.at(2.)==p.above(2.));
+        assert_eq!(Spread::EXACT.at(2.),0.);
         let mut lost=Group::new(1,1);lost.add(0,None,[0.;3]);groups.push(lost);
         let e=&summarize(&groups,&scales,&[])[0];
         assert_eq!((e.population_errors[0].groups,e.temperature_error[0].groups,e.shown_errors[0].groups,e.loss_error.groups),(5.,5.,6.,6.));
+    }
+    /// Student's t at the normal's tail: the tables' t at 97.5 % at z = Φ⁻¹(0.975) for ν = 1, 10, 30, its tail there the normal's to
+    /// round-off; at z = 2 the closed forms of one and two degrees of freedom, tan(π(1 − p)/2) and (1 − p)√(2/(1 − (1 − p)²)),
+    /// p = P(|N| > 2); the normal's own 2 as ν grows, (z³ + z)/(4ν) apart.
+    #[test]
+    fn student_s_t_is_the_quantile_at_the_groups_read(){
+        use super::*;
+        let z=1.959963984540054;assert!((normal_tail(z)-0.05).abs()<1e-16,"{}",normal_tail(z));
+        for(nu,q)in [(1.,12.706205),(10.,2.228139),(30.,2.042272)]{let t=student(z,nu);assert!((t-q).abs()<5e-7&&(student_tail(t,nu as u64)-0.05).abs()<1e-15,"{nu}: {t} against {q}");}
+        let p=normal_tail(2.);assert!((p-0.04550026389635842).abs()<1e-16,"{p}");
+        assert!((student(2.,1.)-(std::f64::consts::FRAC_PI_2*(1.-p)).tan()).abs()<1e-10);
+        assert!((student(2.,2.)-(1.-p)*(2./(1.-(1.-p)*(1.-p))).sqrt()).abs()<1e-13);
+        let t=student(2.,1e4);assert!((t-2.-10./4e4).abs()<1e-6,"{t}");
     }
     /// A row as shown, p (1 − L), carries the loss's variance: every held atom in one state shows that state at 1 − L, its error
     /// the loss's own, where its error among the held atoms is none (the held share times that read nothing of it).
