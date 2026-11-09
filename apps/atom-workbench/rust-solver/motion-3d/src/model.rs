@@ -618,10 +618,8 @@ impl Trap{
 }
 
 /// A table axis (module documentation, # Where the generator depends on r): field `unit`'s chart coordinate `coordinate` (ground.rs
-/// `Unit::chart`: 0 its intensity, then its polarization's) on [lo, hi], the table's coordinate s = (c − lo)/(hi − lo): the intensity on
-/// [0, 1], its every value no beam beyond its peak; a polarization's on its range over the reach (ratios of the field's components, which an
-/// atom beyond its site may take without bound: there the table takes the reach's edge, its error measured along the trajectories,
-/// `Model::profile_error`).
+/// `Unit::chart`: 0 its intensity, then its polarization's angles and phases) on its whole range [lo, hi] (`Unit::range`), the table's
+/// coordinate s = (c − lo)/(hi − lo).
 #[derive(Clone,Copy,Debug)]
 pub struct Axis{pub unit:usize,pub coordinate:usize,pub lo:f64,pub hi:f64}
 
@@ -886,11 +884,8 @@ impl Model{
             let free=|k:usize|axes.contains(&(u,k));let e=one(u).unwrap_or_else(||error(u,&|k|!free(k)));
             profiles.push((u,e,self.places(u).iter().map(|&i|self.weights[i]).fold(0_f64,f64::max)));}
         self.profiles=profiles;
-        // The axes on their ranges: an intensity on [0, 1], a polarization's coordinate on its range over the reach and at the focus, where the
-        // search for each state's trap starts (`trap`).
-        self.axes=axes.iter().map(|&(u,c)|{let at=self.ground.chart_of(u,&focus)[c];
-            let(lo,hi)=if c==0{(0.,1.)}else{charts[u].iter().fold((at,at),|(lo,hi),x|(lo.min(x[c]),hi.max(x[c])))};
-            Axis{unit:u,coordinate:c,lo,hi}}).collect();
+        // The axes on their coordinates' whole ranges (ground.rs `Unit::range`): no atom meets an edge.
+        self.axes=axes.iter().map(|&(u,c)|{let[lo,hi]=ground::Unit::range(c);Axis{unit:u,coordinate:c,lo,hi}}).collect();
         self.focused=self.axes.iter().map(|a|a.unit).collect();self.held=focus;
         Ok(())
     }
@@ -905,16 +900,13 @@ impl Model{
     /// What field u's chart b moves its static shift by against its chart a: Σ_i w_i |T_i(a) − T_i(b)| over its T coordinates.
     fn chart_error(&self,u:usize,a:&[f64],b:&[f64])->f64{let unit=&self.ground.units[u];let(ta,tb)=(unit.t_coordinates(a),unit.t_coordinates(b));
         self.places(u).iter().enumerate().map(|(i,&p)|(ta[i]-tb[i]).abs()*self.weights[p]).sum()}
-    /// The profile error at r: over the fields with coordinates held, the largest of what holding them and the edges of the axes' ranges
-    /// move each one's static shift by (`chart_error`) -- a field of rank one its intensity's change times its weight.
+    /// The profile error at r: over the fields with coordinates held, the largest of what holding them moves each one's static shift by
+    /// (`chart_error`) -- a field of rank one its intensity's change times its weight.
     pub fn profile_error(&self,r:[f64;3])->f64{
-        let error=self.profiles.iter().map(|&(u,_,weight)|{
+        self.profiles.iter().map(|&(u,_,weight)|{
             if self.ground.units[u].rank==1{return (self.unit_intensity(u,r)-self.ground.units[u].focus).abs()*weight;}
             let c=self.chart_at(u,|l|self.geometry[l].field(r).0);let free=|k:usize|self.axes.iter().any(|a|a.unit==u&&a.coordinate==k);
-            self.chart_error(u,&c,&self.chart_held(u,&c,&|k|!free(k)))}).fold(0.,f64::max);
-        // An atom beyond a polarization axis's range: the table at its edge.
-        self.axes.iter().filter(|a|a.coordinate>0).fold(error,|e,a|{let c=self.chart_at(a.unit,|l|self.geometry[l].field(r).0);let mut edge=c.clone();
-            edge[a.coordinate]=c[a.coordinate].clamp(a.lo,a.hi);if edge==c{e}else{e.max(self.chart_error(a.unit,&c,&edge))}})
+            self.chart_error(u,&c,&self.chart_held(u,&c,&|k|!free(k)))}).fold(0.,f64::max)
     }
     /// A unit's intensity at r (ground.rs `Unit`), from the beams' geometry.
     pub fn unit_intensity(&self,u:usize,r:[f64;3])->f64{

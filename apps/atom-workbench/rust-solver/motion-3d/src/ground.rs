@@ -313,14 +313,19 @@ pub const MIXING_SHARE:f64=crate::solve::NUMERICAL_SHARE*crate::solve::POPULATIO
 pub struct Component{pub beams:Vec<usize>,pub counter:bool,pub nu:f64,pub size:f64,pub folded:bool}
 /// The field of the beams of one frequency (module documentation, # Far components): its beams, its rank r, the beams' coordinates
 /// γ_lk on its basis and the basis's on the beams, u_lk (beam by beam, `weights[j r + k]`, `combination[j r + k]`), N, its pivot p (the
-/// basis vector of its largest field at the focus), and its chart's coordinates at the focus, every beam at amplitude one: its
-/// intensity I(0) = |E(0)|²/N (`focus`) and its polarization's (`extra`). A beam alone: γ = 1, N = 1, I(0) = 1.
+/// basis vector of its largest field at the focus) and the others' phases against it there, arg(E_k E_p*) (`origin`), and its chart's
+/// coordinates at the focus, every beam at amplitude one: its intensity I(0) = |E(0)|²/N (`focus`) and its polarization's (`extra`). A
+/// beam alone: γ = 1, N = 1, I(0) = 1.
 ///
-/// The field's chart (`Unit::chart`): its intensity I = |E|²/N, within [0, 1] wherever no beam is beyond its peak, and its polarization,
-/// Re and Im of z_k = E_k/E_p per k ≠ p -- 2r − 1 real coordinates, the field up to its global phase, every value a field's. The static
-/// shifts are linear in T = E E† (`Unit::t_coordinates`: |E_k|²/N, then Re and Im of E_j* E_k/N per pair j < k), T = I w w†/|w|², w = (z, 1 at p).
+/// The field's chart (`Unit::chart`): its intensity I = |E|²/N, within [0, 1] wherever no beam is beyond its peak, and its polarization
+/// w = E/|E| up to its global phase: its components in the order o = (p, then the others), per one after the pivot its hyperspherical
+/// angle α_i = atan2(|(E_{o_i}, E_{o_i+1}, ...)|, |E_{o_i−1}|) in [0, π/2] and its phase against the pivot's, arg(E_{o_i} E_p*), less the
+/// focus's, in [−π, π] -- 2r − 1 real coordinates, each bounded (`Unit::range`), every value a field's, so that a table on their whole
+/// ranges meets no atom at an edge. The static shifts are linear in T = E E† (`Unit::t_coordinates`: |E_k|²/N, then Re and Im of
+/// E_j* E_k/N per pair j < k), T = I w w† (`Unit::polarization`), trigonometric in the angles and phases: smooth through their poles,
+/// where a component vanishes and its phase is any.
 #[derive(Clone,Debug)]
-pub struct Unit{pub beams:Vec<usize>,pub rank:usize,pub weights:Vec<Complex>,pub combination:Vec<Complex>,pub norm:f64,pub pivot:usize,pub focus:f64,pub extra:Vec<f64>}
+pub struct Unit{pub beams:Vec<usize>,pub rank:usize,pub weights:Vec<Complex>,pub combination:Vec<Complex>,pub norm:f64,pub pivot:usize,pub origin:[f64;MOST_RANK],pub focus:f64,pub extra:Vec<f64>}
 impl Unit{
     /// Its field on its basis, E_k = Σ_l a_l γ_lk at the beams' amplitudes a.
     pub fn fields(&self,a:impl Fn(usize)->Complex)->[Complex;MOST_RANK]{
@@ -330,25 +335,42 @@ impl Unit{
     pub fn intensity(&self,a:impl Fn(usize)->Complex)->f64{self.chart(&self.fields(a),None)[0]}
     /// Its chart's coordinates other than the intensity at its field e, appended to `out`.
     pub fn extra(&self,e:&[Complex;MOST_RANK],out:&mut Vec<f64>){out.extend_from_slice(&self.chart(e,None)[1..2*self.rank-1]);}
-    /// Its chart at its field e (I, then Re and Im of z_k, k ≠ p) or, with `de`, the field's derivative along a direction, the chart's:
-    /// dI = Σ_k 2 Re(E_k* dE_k)/N, dz_k = (dE_k E_p − E_k dE_p)/E_p². A polarization of no pivot field (E_p = 0) takes its focus's.
+    /// Its basis's components in the chart's order: the pivot, then the others.
+    fn order(&self)->[usize;MOST_RANK]{let mut o=[self.pivot;MOST_RANK];let mut at=1;for k in (0..self.rank).filter(|&k|k!=self.pivot){o[at]=k;at+=1;}o}
+    /// Its chart at its field e (I, then per component after the pivot its angle and phase) or, with `de`, the field's derivative along a
+    /// direction, the chart's: dI = Σ_k 2 Re(E_k* dE_k)/N, dα = (A dB − B dA)/(A² + B²) of α = atan2(B, A), and the phase's
+    /// Im(dE_k/E_k) − Im(dE_p/E_p) -- a vanishing magnitude's terms zero, at its coordinate's pole. No field at all takes the focus's
+    /// polarization, a vanishing component's phase the focus's.
     pub fn chart(&self,e:&[Complex;MOST_RANK],de:Option<&[Complex;MOST_RANK]>)->[f64;2*MOST_RANK-1]{
-        let(r,p,n)=(self.rank,self.pivot,self.norm);let mut out=[0.;2*MOST_RANK-1];
-        out[0]=match de{None=>(0..r).fold(0.,|s,k|s+e[k].norm_sqr())/n,Some(d)=>(0..r).fold(0.,|s,k|s+2.*(e[k].conj()*d[k]).re/n)};
-        let mut at=1;for k in (0..r).filter(|&k|k!=p){
-            let z=match de{None=>e[k]/e[p],Some(d)=>(d[k]*e[p]-e[k]*d[p])/(e[p]*e[p])};
-            let z=if z.re.is_finite()&&z.im.is_finite(){z}else if de.is_some(){Complex::ZERO}else{Complex::new(self.extra.get(at-1).copied().unwrap_or(0.),self.extra.get(at).copied().unwrap_or(0.))};
-            out[at]=z.re;out[at+1]=z.im;at+=2;
-        }
+        let(r,n,o)=(self.rank,self.norm,self.order());let mut out=[0.;2*MOST_RANK-1];
+        let size:[f64;MOST_RANK]=std::array::from_fn(|k|e[k].norm_sqr());let beyond=|i:usize|o[i..r].iter().map(|&j|size[j]).sum::<f64>();
+        let Some(d)=de else{
+            out[0]=size[..r].iter().sum::<f64>()/n;if !(out[0]>0.){for(x,y)in out[1..2*r-1].iter_mut().zip(&self.extra){*x=*y;}return out;}
+            for i in 1..r{let z=e[o[i]]*e[o[0]].conj();let phase=z.im.atan2(z.re)-self.origin[o[i]];
+                out[2*i-1]=beyond(i).sqrt().atan2(size[o[i-1]].sqrt());out[2*i]=if z==Complex::ZERO{0.}else{phase-TAU*(phase/TAU).round()};}
+            return out;
+        };
+        let dot:[Complex;MOST_RANK]=std::array::from_fn(|k|e[k].conj()*d[k]);let over=|x:f64,y:f64|if y>0.{x/y}else{0.};
+        out[0]=dot[..r].iter().map(|z|2.*z.re).sum::<f64>()/n;
+        for i in 1..r{let(a,b)=(size[o[i-1]].sqrt(),beyond(i).sqrt());let db=o[i..r].iter().map(|&j|dot[j].re).sum::<f64>();
+            out[2*i-1]=over(a*over(db,b)-b*over(dot[o[i-1]].re,a),a*a+b*b);out[2*i]=over(dot[o[i]].im,size[o[i]])-over(dot[o[0]].im,size[o[0]]);}
         out
     }
-    /// T's coordinates (|E_k|²/N, then Re and Im of E_j* E_k/N per pair j < k) at its chart's coordinates c: I w̄_j w_k/|w|², w = (z, 1 at p).
+    /// Its chart's coordinate c's range: the intensity's [0, 1], an angle's [0, π/2], a phase's [−π, π].
+    pub fn range(c:usize)->[f64;2]{if c==0{[0.,1.]}else if c%2==1{[0.,std::f64::consts::FRAC_PI_2]}else{[-std::f64::consts::PI,std::f64::consts::PI]}}
+    /// Its polarization w (|w| = 1, w_p ≥ 0) at its chart's coordinates c: w_{o_0} = cos α_1, w_{o_i} = sin α_1 ⋯ sin α_i cos α_{i+1}
+    /// e^{i(φ_i + its focus's phase)}, the last one's without the cosine.
+    pub fn polarization(&self,c:&[f64])->[Complex;MOST_RANK]{
+        let(r,o)=(self.rank,self.order());let mut w=[Complex::ZERO;MOST_RANK];let mut sine=1.;
+        for i in 0..r{let(s,cosine)=if i+1<r{c[2*i+1].sin_cos()}else{(0.,1.)};
+            w[o[i]]=Complex::cis(if i==0{0.}else{c[2*i]+self.origin[o[i]]})*(sine*cosine);sine*=s;}
+        w
+    }
+    /// T's coordinates (|E_k|²/N, then Re and Im of E_j* E_k/N per pair j < k) at its chart's coordinates c: I w̄_j w_k.
     pub fn t_coordinates(&self,c:&[f64])->[f64;MOST_RANK*MOST_RANK]{
-        let(r,p)=(self.rank,self.pivot);let mut w=[Complex::ZERO;MOST_RANK];let mut at=1;
-        for k in 0..r{w[k]=if k==p{Complex::ONE}else{let z=Complex::new(c[at],c[at+1]);at+=2;z};}
-        let size=(0..r).fold(0.,|s,k|s+w[k].norm_sqr());let mut out=[0.;MOST_RANK*MOST_RANK];
-        for k in 0..r{out[k]=c[0]*(w[k].norm_sqr()/size);}
-        let mut at=r;for j in 0..r{for k in j+1..r{let z=w[j].conj()*w[k];out[at]=c[0]*(z.re/size);out[at+1]=c[0]*(z.im/size);at+=2;}}
+        let(r,w)=(self.rank,self.polarization(c));let mut out=[0.;MOST_RANK*MOST_RANK];
+        for k in 0..r{out[k]=c[0]*w[k].norm_sqr();}
+        let mut at=r;for j in 0..r{for k in j+1..r{let z=w[j].conj()*w[k];out[at]=c[0]*z.re;out[at+1]=c[0]*z.im;at+=2;}}
         out
     }
     /// A table axis's coordinate s = (c − lo)/(hi − lo) of its chart's coordinate c (`chart`'s place) at the beams' amplitudes and slopes `at`
@@ -703,7 +725,7 @@ fn field(beams:&[usize],couplings:&[Dense],counters:&[Dense],outside:&[Dense],fo
     // C(j, k) of the folded components between basis vectors j and k: the co-rotating C(W_j, W_k), the counter-rotating C(RW_k, RW_j).
     let folds_of=|wj:&Dense,wk:&Dense,rj:&Dense,rk:&Dense|{let mut f=Dense::zeros(STATES,STATES);
         if let Some(nu)=folded[0]{f.add_scaled(Complex::ONE,&fold(wj,wk,nu));}if let Some(nu)=folded[1]{f.add_scaled(Complex::ONE,&fold(rk,rj,nu));}f};
-    if let [l]=beams{let l=*l;return Ok((Unit{beams:vec![l],rank:1,weights:vec![Complex::ONE],combination:vec![Complex::ONE],norm:1.,pivot:0,focus:1.,extra:vec![]},
+    if let [l]=beams{let l=*l;return Ok((Unit{beams:vec![l],rank:1,weights:vec![Complex::ONE],combination:vec![Complex::ONE],norm:1.,pivot:0,origin:[0.;MOST_RANK],focus:1.,extra:vec![]},
         vec![outside[l].clone()],vec![folds_of(&couplings[l],&couplings[l],&counters[l],&counters[l])]));}
     let n=beams.len();
     let inner=|a:&Dense,b:&Dense|a.entries.iter().zip(&b.entries).fold(Complex::ZERO,|s,(x,y)|s+x.conj()**y);
@@ -730,8 +752,9 @@ fn field(beams:&[usize],couplings:&[Dense],counters:&[Dense],outside:&[Dense],fo
     let r=w.len();
     let rw:Vec<Dense>=basis.iter().map(|u|combination(counters,&|i|u[i].conj())).collect();
     let total=(0..n).map(|i|(0..r).fold(0_f64,|h,k|h.hypot(gamma[k][i].abs()))).sum::<f64>();let norm=total*total;
-    let mut unit=Unit{beams:beams.to_vec(),rank:r,weights:(0..n*r).map(|x|gamma[x%r][x/r]).collect(),combination:(0..n*r).map(|x|basis[x%r][x/r]).collect(),norm,pivot:0,focus:0.,extra:vec![]};
-    let at_focus=unit.fields(|_|Complex::ONE);unit.pivot=(0..r).max_by(|&a,&b|at_focus[a].norm_sqr().total_cmp(&at_focus[b].norm_sqr())).unwrap();
+    let mut unit=Unit{beams:beams.to_vec(),rank:r,weights:(0..n*r).map(|x|gamma[x%r][x/r]).collect(),combination:(0..n*r).map(|x|basis[x%r][x/r]).collect(),norm,pivot:0,origin:[0.;MOST_RANK],focus:0.,extra:vec![]};
+    let at_focus=unit.fields(|_|Complex::ONE);let p=(0..r).max_by(|&a,&b|at_focus[a].norm_sqr().total_cmp(&at_focus[b].norm_sqr())).unwrap();unit.pivot=p;
+    unit.origin=std::array::from_fn(|k|{let z=at_focus[k]*at_focus[p].conj();if k==p||z==Complex::ZERO{0.}else{z.im.atan2(z.re)}});
     unit.focus=unit.chart(&at_focus,None)[0];let mut extra=vec![];unit.extra(&at_focus,&mut extra);unit.extra=extra;
     let(fields,form)=if r==1{(None,vec![])}else{form()?};
     let outside_of:Box<dyn Fn(usize,usize)->Dense>=if r==1{
@@ -1036,15 +1059,14 @@ impl Ground{
     /// The places of field u's coordinates other than its intensity among the coordinates (`Ground::units`).
     pub fn extras(&self,u:usize)->std::ops::Range<usize>{let start=self.units.len()+self.units[..u].iter().map(|v|v.extra.len()).sum::<usize>();start..start+self.units[u].extra.len()}
     /// Near carrier d's fields at the charts x as the dressing takes them (`Ground::dress_light`): each one's amplitude √(I N) and its folded
-    /// coupling Σ_k w_k W^f_k/|w| along its polarization w = (z, 1 at the pivot) -- a field of rank one its own W^f.
+    /// coupling Σ_k w_k W^f_k along its polarization w (`Unit::polarization`) -- a field of rank one its own W^f.
     pub fn near_modes(&self,d:usize,x:&[f64])->Vec<(f64,Cow<'_,Dense>)>{
         let mut out=vec![];
         for(u,near)in self.near_units.iter().enumerate(){
             let Some(near)=near.as_ref().filter(|n|n.carrier==d)else{continue};let unit=&self.units[u];let amplitude=(x[u]*unit.norm).max(0.).sqrt();
             if unit.rank==1{out.push((amplitude,Cow::Borrowed(&near.couplings[0])));continue;}
-            let c=self.chart_of(u,x);let mut at=1;let w:Vec<Complex>=(0..unit.rank).map(|k|if k==unit.pivot{Complex::ONE}else{let z=Complex::new(c[at],c[at+1]);at+=2;z}).collect();
-            let size=w.iter().map(|z|z.norm_sqr()).sum::<f64>().sqrt();
-            let mut coupling=Dense::zeros(near.couplings[0].rows,near.couplings[0].cols);for(k,z)in w.iter().enumerate(){coupling.add_scaled(*z*(1./size),&near.couplings[k]);}
+            let w=unit.polarization(&self.chart_of(u,x));
+            let mut coupling=Dense::zeros(near.couplings[0].rows,near.couplings[0].cols);for(k,z)in w[..unit.rank].iter().enumerate(){coupling.add_scaled(*z,&near.couplings[k]);}
             out.push((amplitude,Cow::Owned(coupling)));
         }
         out
