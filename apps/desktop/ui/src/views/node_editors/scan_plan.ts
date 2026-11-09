@@ -591,7 +591,7 @@ export class ScanPlanEditor implements NodeEditor {
       const spec: FieldSpec = { name: item.name, label: item.label, kind: item.kind, value: shown(item.value), required: false, allow_none: false,
         unit: symbol, units: item.units.map(([value]) => ({ value, label: value, group: item.families[value] })),
         minimum: shown(item.minimum), maximum: shown(item.maximum), description: item.description,
-        unavailable_reason: item.unavailable_reason || this.locked, inexact: true };
+        unavailable_reason: item.unavailable_reason, held: this.locked, inexact: true };
       let field = this.apiFields.get(item.name);
       if (!field) {
         field = new Field(`${row.node_id}-api`, spec, {

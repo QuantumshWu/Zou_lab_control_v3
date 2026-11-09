@@ -40,7 +40,11 @@ export type FieldSpec = {
   minimum?: number | null;
   maximum?: number | null;
   step?: number | null;
+  /** Why this row alone cannot be edited: one sentence under it. */
   unavailable_reason?: string;
+  /** Why the whole page cannot be edited now (a running task, a frozen panel): the row is
+   * disabled and says it only in its tip; the page says it once (`heldNote`). */
+  held?: string;
   cycle?: { count: number; index: number | null; label: string; value: Value };
   /** A choice box never narrower than this many "M"s (setMinimumContentsLength). */
   minimum_contents?: number;
@@ -319,7 +323,8 @@ export class Field {
     setMiddle(this.label, words, "none");
     setTitle(this.label, spec.description || spec.label);
     const reason = this.reason();
-    // What the row must say: what is wrong with it, or why this device cannot do it.
+    // What the row must say: what is wrong with it, or why it alone cannot be edited (a
+    // whole page held says so once, above its rows).
     const message = spec.problem || spec.unavailable_reason || "";
     setText(this.problem, message);
     assign(this.problem, "hidden", !message);
@@ -353,7 +358,7 @@ export class Field {
 
   /** Why the row cannot be edited now (its tip then), or empty. */
   private reason(): string {
-    return this.spec.unavailable_reason || (this.spec.enabled === false ? "Not used with the current settings" : "");
+    return this.spec.unavailable_reason || this.spec.held || (this.spec.enabled === false ? "Not used with the current settings" : "");
   }
 
   /** The box shows Scope (the owner's, or a pick on its way to it) over more than one coordinate. */
@@ -419,7 +424,7 @@ export class Field {
     if (this.automatic) {
       setChecked(this.automatic, automatic);
       // While Auto holds the value its editor shows what Auto resolves to.
-      if (!(this.input instanceof Segmented)) assign(this.input, "disabled", automatic || Boolean(this.spec.unavailable_reason));
+      if (!(this.input instanceof Segmented)) assign(this.input, "disabled", automatic || Boolean(this.reason()));
     }
     const shown = automatic ? (this.spec.automatic_value ?? null) : value;
     if (this.tree) {
@@ -590,6 +595,19 @@ export function defaultUnit(own: string, candidates: readonly UnitCandidate[], i
 /** A form: one label column (setting_label_width) and one control column;
  * rows a row gap apart, section titles a control high, sections a section gap. */
 export function form(className = ""): HTMLDivElement { return element("div", `form ${className}`.trim()); }
+
+/** Why a whole page cannot be edited now, said once above its rows; its rows carry the
+ * same words as `held` (disabled, said in their tips only). Hidden while nothing holds it. */
+export function heldNote(): HTMLParagraphElement {
+  const note = element("p", "form-note held-note");
+  note.hidden = true;
+  return note;
+}
+
+export function showHeld(note: HTMLElement, text: string): void {
+  setText(note, text);
+  assign(note, "hidden", !text);
+}
 
 /** FluentSectionLabel row: the semibold title, its commands at the row's end. */
 export function sectionTitle(text: string, ...trailing: HTMLElement[]): HTMLDivElement {

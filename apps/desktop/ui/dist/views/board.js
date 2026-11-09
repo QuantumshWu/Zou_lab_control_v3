@@ -4,7 +4,7 @@
 // Viewer's opened Figure (each window's pixel mappings are its own). The
 // board only copies finished pixels and forwards pointer and setting
 // intents; every scientific decision is the host's.
-import { Field, armable, button, comboFace, element, fieldKind, hintWidest, setFragments, setState, shareLabelColumn, token } from "../fluent/index.js";
+import { Field, armable, button, comboFace, element, fieldKind, heldNote, hintWidest, showHeld, setFragments, setState, shareLabelColumn, token } from "../fluent/index.js";
 import { BoardMetrics, GeomProxy, drop, firstFreeSlot, minBoardWidth, pack, slotUnder } from "./board_layout.js";
 import { CanvasPointer } from "./pointer.js";
 /** A panel's Edit (`edit-<panel>`): drawn on its Edit page, never a card on the board. */
@@ -592,6 +592,8 @@ export class PanelView {
     settings = element("section", "settings");
     settingsStatus = element("p", "settings-status");
     form = element("div", "form");
+    /** Why its source and semantics are held while a task runs, said once above the rows. */
+    held = heldNote();
     settingButton;
     fields = new Map();
     titles = new Map();
@@ -710,7 +712,7 @@ export class PanelView {
         const edit = button("Edit", () => { this.setSettingsOpen(false); this.board.onEdit?.(this.id); });
         edit.hidden = !this.board.onEdit || isEdit(this.id);
         actions.append(edit, element("span", "spacer"), remove);
-        this.form.append(...SECTIONS.map(([key]) => this.titles.get(key)), actions);
+        this.form.append(this.held, ...SECTIONS.map(([key]) => this.titles.get(key)), actions);
         body.append(this.settingsStatus, this.form);
         this.settings.append(header, body);
         this.settings.addEventListener("keydown", event => {
@@ -1037,8 +1039,9 @@ export class PanelView {
         if (frozen)
             for (const [index, spec] of controls.entries()) {
                 if (spec.section === "binding" || spec.section === "semantic" || spec.name === "overlay_signal")
-                    controls[index] = { ...spec, unavailable_reason: spec.unavailable_reason || frozen };
+                    controls[index] = { ...spec, held: frozen };
             }
+        showHeld(this.held, frozen);
         const rank = (spec) => { const at = PANEL_ORDER.indexOf(`${spec.section}:${spec.name}`); return at < 0 ? PANEL_ORDER.length : at; };
         const ordered = [...controls.filter(spec => this.sectionOf(spec) === "panel").sort((a, b) => rank(a) - rank(b)), ...controls.filter(spec => this.sectionOf(spec) !== "panel")];
         controls.splice(0, controls.length, ...ordered);

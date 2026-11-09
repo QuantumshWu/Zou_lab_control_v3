@@ -451,6 +451,8 @@ select.unit-picker { flex: none; width: auto; field-sizing: content; }
 /* Why the row cannot be edited, said as plainly but not as a fault. */
 .field > .field-error.field-note { color: var(--muted-ink); }
 .form-note { grid-column: 1 / -1; margin: 0; }
+/* A whole page held (a running task, a frozen panel): said once, above its rows. */
+.held-note { color: var(--muted-ink); white-space: normal; overflow-wrap: anywhere; }
 .form-actions { grid-column: 1 / -1; display: flex; gap: var(--row-gap); margin-top: calc(var(--section-gap) - var(--row-gap)); }
 .spacer { flex: 1; }
 
