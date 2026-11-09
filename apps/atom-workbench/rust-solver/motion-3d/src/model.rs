@@ -3214,6 +3214,36 @@ mod tests{
         }
         assert!(Model::bounded(&r,f64::INFINITY,false,MOST_TABLE_BYTES,5).is_err());
     }
+    /// The tables' work bound is read from the layout before any grid is made (`Model::built`): one byte short of the first grid and its
+    /// regrid, no node is computed -- the refused build' counted work is its layout's alone, on any thread (linear.rs `Tally`) --; a
+    /// grid's tables are all a refinement holds (`fits`: the grid's and the coarse one's, 16 bytes an entry, each node written in place).
+    #[test]
+    fn the_tables_bound_their_first_grid_before_making_it(){
+        let f:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/tweezer_pgc.json")).unwrap();
+        let r=crate::ground::tests::request(&f["request"]);let ground=crate::ground::Ground::new(&r).unwrap();
+        let tally=crate::linear::Tally::new().unwrap();
+        let((laid,_),layout)=tally.measure(||Model::laid_out(&r,ground.clone(),false).unwrap());let(entries,d)=(laid.entries(),laid.focused.len() as u32);
+        let short=16*entries*2*super::FIRST_NODES.pow(d)-1;
+        let(refused,work)=tally.measure(||Model::built(&r,ground.clone(),false,short,MOST_TABLE_NODES));
+        assert!(refused.is_err_and(|e|e.contains("beyond the work bounds")));assert_eq!(work,layout,"no node computed");
+        assert!(Model::built(&r,ground,false,16*entries*(9_usize.pow(d)+5_usize.pow(d)),MOST_TABLE_NODES).is_ok());
+        assert!(super::fits(2,10,9,5,16*10*(81+25),81)&&!super::fits(2,10,9,5,16*10*(81+25)-1,81)&&!super::fits(2,10,9,5,usize::MAX,80));
+    }
+    /// prune's first grid carries into the layouts it leaves as that grid made there (`regrid`): its kept entries' values and every other
+    /// table where it moved, the nodes' counted work and bounds the same -- here with the last entry of each group of several taken out.
+    #[test]
+    fn the_first_grid_carries_into_the_pruned_layouts_as_made_there(){
+        let f:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/tweezer_gray_molasses.json")).unwrap();
+        let r=crate::ground::tests::request(&f["request"]);
+        let(mut m,bases)=Model::laid_out(&r,crate::ground::Ground::new(&r).unwrap(),false).unwrap();
+        let first=m.grid_tables(super::FIRST_NODES,&bases,None).unwrap();let mut taken=0;
+        for cl in m.ground.clusters.iter_mut(){for g in cl.groups.iter_mut(){if g.entries.len()>1{g.entries.pop();taken+=1;}}}
+        assert!(taken>0);
+        let now=m.layouts(&bases);let was=std::mem::replace(&mut m.layouts,now);
+        let carried=super::regrid(&was,&m.layouts,first).expect("a second order's other tables do not move");
+        let made=m.grid_tables(super::FIRST_NODES,&bases,None).unwrap();
+        assert!(carried.data==made.data&&carried.bounds==made.bounds&&carried.work==made.work);
+    }
     /// A generator whose no-jump decay misses its jumps' rate beyond round-off is refused (`Model::lindblad`): the
     /// tweezer PGC's model, a Lindblad one to round-off, with one kept group's decay Q a millionth smaller at every
     /// node of its tables -- a decay no jump carries, a millionth of that group's rate.

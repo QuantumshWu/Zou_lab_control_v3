@@ -2441,12 +2441,12 @@ mod tests{
         for delta in [-0.02,-1e-3,0.,1e-3,0.02]{
             let check=|s:usize|{let x=s as f64;Check{steps:s,population:8.86*(33./x).powi(2),loss:0.,motion:0.1075*(99./x).powf(power)*(1.+delta)}};
             let measure=|s:usize|0.016*(99./s as f64).powi(2);
-            let mut bound=vec![];search(43,most,&[],&check,None,false,&mut bound);
+            let mut bound=vec![];search(43,most,&[],&check,None,false,&mut bound,&|_,_,_,_|true);
             let grown=*bound.iter().filter(|c|c.met()).min_by_key(|c|c.steps).unwrap();
-            let mut measured=vec![];search(grown.steps,most,&bound,&check,Some(&measure as &dyn Fn(usize)->f64),false,&mut measured);
+            let mut measured=vec![];search(grown.steps,most,&bound,&check,Some(&measure as &dyn Fn(usize)->f64),false,&mut measured,&|_,_,_,_|true);
             // Handed over at the first step the bound alone misses, the same step, for one finer check less.
-            let mut handed=vec![];search(43,most,&[],&check,None,true,&mut handed);assert!(handed.last().unwrap().decided_by_population()&&handed.last().unwrap().population>1.&&handed.len()<bound.len(),"{handed:?}");
-            let mut over=vec![];search(handed.last().unwrap().steps,most,&handed,&check,Some(&measure as &dyn Fn(usize)->f64),false,&mut over);
+            let mut handed=vec![];search(43,most,&[],&check,None,true,&mut handed,&|_,_,_,_|true);assert!(handed.last().unwrap().decided_by_population()&&handed.last().unwrap().population>1.&&handed.len()<bound.len(),"{handed:?}");
+            let mut over=vec![];search(handed.last().unwrap().steps,most,&handed,&check,Some(&measure as &dyn Fn(usize)->f64),false,&mut over,&|_,_,_,_|true);
             let taken=over.iter().filter(|c|c.met()).map(|c|c.steps).min().unwrap();assert!(taken==33||taken==34,"{over:?}");
             let kept=measured.iter().filter(|c|c.met()).map(|c|c.steps).min().unwrap();
             assert!(grown.steps==99&&(kept==33||kept==34),"δ {delta}: grown {}, kept {kept} steps ({measured:?})",grown.steps);
@@ -2485,5 +2485,29 @@ mod tests{
         assert_eq!(next_groups(&[0,276,276,264,256],&[0,256,256,256,256]),vec![3,2,2]);
         assert_eq!(next_groups(&[0,1000,300,256],&[0,256,256,256]),(0..32).map(|g|if g<6{2}else{1}).collect::<Vec<usize>>());
         assert!(next_groups(&[0,256,100],&[0,256,256]).is_empty());
+    }
+    /// The step search spends only what its ceiling lets it (`step_check`): refused before a doubling, it stops there and says so; let, the
+    /// same search goes on as alone.
+    #[test]
+    fn the_step_search_stops_where_its_ceiling_refuses(){
+        let made=std::cell::RefCell::new(vec![]);let check=|s:usize|{made.borrow_mut().push(s);Check{steps:s,population:0.,loss:0.,motion:4.}};
+        let mut checked=vec![];assert!(!search(8,1<<20,&[],&check,None,false,&mut checked,&|_,so_far,_,_|so_far.len()<2));
+        assert_eq!(*made.borrow(),vec![8,16]);
+        made.borrow_mut().clear();let mut all=vec![];assert!(search(8,1<<20,&[],&check,None,false,&mut all,&|_,_,_,_|true));
+        assert_eq!(*made.borrow(),vec![8,16,32,64,128,256,512,1024]);
+    }
+    /// A rung's closure and build are spent only where their estimate pays (`Walk`): the last ones' counted work on the tally's pool, none before
+    /// the first rung. Refused, nothing is spent and the ladder stays where it was: its next rung is a fresh walk's second.
+    #[test]
+    fn a_rung_is_closed_and_built_only_where_its_estimate_pays(){
+        let f:serde_json::Value=serde_json::from_str(include_str!("../tests/fixtures/tweezer_gray_molasses.json")).unwrap();
+        let mut r=crate::ground::tests::request(&f["request"]);r.times_us=(0..=100).map(|i|10.*i as f64).collect();
+        let s=Ground::bare(&r).unwrap().ground_states[0];r.initial_density[s*STATES+s]=Complex::new(1.,0.);assert!(Ground::allowances(&r).unwrap().len()>1);
+        let tally=Tally::new().unwrap();let walk=||Walk::new(&r,Ladder::new(Ground::bare(&r).unwrap()),&tally);
+        let(mut w,asked)=(walk(),std::cell::Cell::new(f64::NAN));
+        assert!(w.next(&|spend|{asked.set(spend);true}).is_some(),"{:?}",w.failed);assert_eq!(asked.get(),0.);assert!(w.closure>0.&&w.build>0.,"{} {}",w.closure,w.build);
+        assert!(w.next(&|spend|{asked.set(spend);false}).is_none());assert_eq!(asked.get(),w.closure+w.build);
+        let mut fresh=walk();fresh.next(&|_|true).unwrap();
+        assert_eq!(w.next(&|_|true).map(|c|c.allowance),fresh.next(&|_|true).map(|c|c.allowance));
     }
 }
