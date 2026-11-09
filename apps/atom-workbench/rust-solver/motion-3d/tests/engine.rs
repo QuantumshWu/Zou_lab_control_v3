@@ -1705,12 +1705,12 @@ fn a_kept_standing_wave_keeps_its_energy_along_the_atom_s_path(){
 }
 
 /// The loss's check refines the retro-reflected tweezer (check.rs; rust-solver/tests/fixtures/retro_tweezer_motion.json, the
-/// gate's RETRO): at the step the local reads keep, 0.046 us, its loss at 100 us reads 0.107 against the truth table's converged
+/// gate's RETRO): at the step the local reads keep, 0.046 us, its loss at 100 us reads 0.106 against the truth table's converged
 /// 0.169 (7936 trajectories at a step eight times finer than the line's then, 0.059 us, its model one explicit excited state more),
 /// two to three times its tolerance -- the hot tail's jump rate errs ten times the bulk's, and no read before the run sees it. The
-/// check reads it in the product's batches -- 1.3 times its tolerance, unsettled (B⁻ 0.69, B⁺ 1.90) where more reads cost more
-/// than they could save --, refines, and the step it ends at holds the loss within its tolerance of the truth and the solve's own
-/// statistics.
+/// check reads it in the product's batches -- unsettled (B⁻ 0.44, B⁺ 2.93) where more reads cost more than they could save --,
+/// refines by B⁺^(1/2) to 0.027 us, where its reads no longer settle the bias (B⁺ 1.70, every chance read 0.95): the step stands
+/// unverified and flagged, its loss within its tolerance of the truth and the solve's own statistics.
 #[test]
 fn the_loss_s_check_refines_the_retro_tweezer(){
     let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/retro_tweezer_motion.json")).unwrap();
@@ -1725,16 +1725,16 @@ fn the_loss_s_check_refines_the_retro_tweezer(){
 }
 
 /// The loss's check verifies the shallow trap's cycling control (check.rs; the gate's CONTROL_CYCLE, rust-solver/tests/fixtures/
-/// shallow_cycle_motion.json): its reads take at most a pilot's work (32 trajectories over the run), and the bias they read lies
-/// within the loss's tolerance by its errors (its truth: the loss within 0.6 of its tolerance at the line's step); the step the local
-/// reads keep stands, verified.
+/// shallow_cycle_motion.json): its reads take a pilot's work (32 trajectories over the run; their count a draw, within three of its
+/// standard errors), and the bias they read lies within the loss's tolerance by its errors (its truth: the loss within 0.6 of its
+/// tolerance at the line's step); the step the local reads keep stands, verified.
 #[test]
 fn the_loss_s_check_verifies_the_cycling_control_within_a_pilot_s_work(){
     let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/shallow_cycle_motion.json")).unwrap();
     let mut r=scene::request(&fixture["payload"]);r.times_us=(0..31).map(|i|10.*i as f64).collect();
     let s=solve(&r,Device::Cpu,&mut |_,_|{}).unwrap();let c=s.loss_check.as_ref().expect("every run is checked");
-    let steps=(10./s.time_step_us).round();let(work,pilot)=(c.reads as f64*3.*c.span as f64,FIRST_GROUPS as f64*30.*steps);
+    let steps=(10./s.time_step_us).round();let(work,pilot)=(c.reads as f64*3.*c.span as f64,FIRST_GROUPS as f64*30.*steps);let expected=pilot/(3.*c.span as f64);
     println!("dt {:.4} us, {} trajectories, the check's cost {:.2} % of the product; {c:?}",s.time_step_us,s.trajectories,100.*work/(s.trajectories as f64*30.*steps));
     assert!(c.verified&&c.refined.is_empty(),"the check verifies the step: {c:?}");
-    assert!(work<=pilot,"its reads' work {work} against a pilot's {pilot}");
+    assert!(c.reads as f64<=expected+3.*expected.sqrt(),"its reads' work {work} against a pilot's {pilot}");
 }
