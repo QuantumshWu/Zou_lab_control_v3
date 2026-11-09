@@ -1,0 +1,501 @@
+{
+ "id": "F2_100us",
+ "reference": "regress",
+ "kind": "regression-consistency",
+ "title": "旧门 F2_100us 的真值（线头 dab8c7d3 的模型 explicit 2 exc/2 drives 2nd [1+1+1+1+1+1+2+2] 收敛值）",
+ "request": "out/regress/F2_100us.json",
+ "durationUs": 100,
+ "samples": 21,
+ "derivation": "The old engine's own model at its line head, run to convergence (gate/truth/README.md): a regression value, not a physical one. u = hypot(SE, last step-halving residual).",
+ "excluded": null,
+ "series": [
+  {
+   "quantity": "T",
+   "axis": "x",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    21.19836785195396,
+    23.84948843819904,
+    28.01898539027803
+   ],
+   "u": [
+    0.1937790880312128,
+    0.2488400799893675,
+    0.3307125813506115
+   ],
+   "weights": [
+    1,
+    1,
+    1
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "relative": 0.1
+   }
+  },
+  {
+   "quantity": "T",
+   "axis": "y",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    20.59864067377498,
+    25.85250730509323,
+    35.167024033172105
+   ],
+   "u": [
+    0.1695188518503784,
+    0.3291950415997967,
+    0.5666225481425313
+   ],
+   "weights": [
+    1,
+    1,
+    1
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "relative": 0.1
+   }
+  },
+  {
+   "quantity": "T",
+   "axis": "z",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    33.26126791173796,
+    63.499507204895075,
+    96.4582051161934
+   ],
+   "u": [
+    0.3147120201328385,
+    0.7751933789216229,
+    1.2572810921689106
+   ],
+   "weights": [
+    1,
+    1,
+    1
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "relative": 0.1
+   }
+  },
+  {
+   "quantity": "loss",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    0,
+    0,
+    0
+   ],
+   "u": [
+    0,
+    0,
+    0
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "ground-2-2",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    0.941664665674806,
+    0.9493128164205109,
+    0.95301130739079
+   ],
+   "u": [
+    0.0003278673797246693,
+    0.000498146550146413,
+    0.00038855815843479095
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D1-1--1",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    1.3430259266241966e-24,
+    1.3511868672669876e-24,
+    1.3575548029115247e-24
+   ],
+   "u": [
+    4.438143079436317e-28,
+    6.862547160723964e-28,
+    5.811408739613925e-28
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D1-1-1",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    8.347080659325498e-10,
+    8.408774978379485e-10,
+    8.438132538077149e-10
+   ],
+   "u": [
+    2.88495908933459e-13,
+    4.3243172330763324e-13,
+    3.249503955612427e-13
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D1-2--1",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    7.964169237236105e-24,
+    8.010172716421946e-24,
+    8.046572455036026e-24
+   ],
+   "u": [
+    2.6266791606973642e-27,
+    4.0345975762349814e-27,
+    3.364174193771321e-27
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D1-2-1",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    5.513179906476239e-10,
+    5.552271615353674e-10,
+    5.570734726550913e-10
+   ],
+   "u": [
+    1.9000562338930028e-13,
+    2.832479915371551e-13,
+    2.0956225388441666e-13
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-1--1",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    5.366667892455492e-32,
+    5.398750825201709e-32,
+    5.423861939774241e-32
+   ],
+   "u": [
+    1.7724470713661357e-35,
+    2.734068112934358e-35,
+    2.3020517314987027e-35
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-1-1",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    2.6886808605516642e-17,
+    2.7116659132658304e-17,
+    2.7228711930213825e-17
+   ],
+   "u": [
+    9.40432992915356e-21,
+    1.440358791057184e-20,
+    1.1475789752077613e-20
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-2--1",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    6.2723919343422946e-31,
+    6.315387232968224e-31,
+    6.347903204165956e-31
+   ],
+   "u": [
+    2.0845268999886187e-34,
+    3.279752894121858e-34,
+    2.8859710859603107e-34
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-2-1",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    4.1334419347387074e-17,
+    4.168496431824229e-17,
+    4.1855648373121343e-17
+   ],
+   "u": [
+    1.4446969221000333e-20,
+    2.2098362529721872e-20,
+    1.7547755047535508e-20
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-3--3",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    2.058042071392544e-54,
+    2.0724638244843177e-54,
+    2.0833151026820728e-54
+   ],
+   "u": [
+    6.847652112535593e-58,
+    1.0811662742802802e-57,
+    9.58442744201805e-58
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-3--1",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    9.544157530088852e-31,
+    9.611055170781433e-31,
+    9.661387525621317e-31
+   ],
+   "u": [
+    3.1756461061631055e-34,
+    5.0141606911770035e-34,
+    4.445400590265455e-34
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-3-1",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    1.632501122896177e-17,
+    1.6461788748271336e-17,
+    1.6528262879931244e-17
+   ],
+   "u": [
+    5.699510078721004e-21,
+    8.701346500578004e-21,
+    6.87467838494871e-21
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-3-3",
+   "indices": [
+    2,
+    10,
+    20
+   ],
+   "values": [
+    0.05833533293916798,
+    0.05068718218338398,
+    0.04698869120832289
+   ],
+   "u": [
+    0.0003278673802030291,
+    0.0004981465508614429,
+    0.00038855815896818687
+   ],
+   "judged": [
+    false,
+    false,
+    false
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  }
+ ],
+ "info": {
+  "lineHead": {
+   "commit": "dab8c7d3",
+   "record": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/truth/baseline/F2_100us.json",
+   "model": "explicit 2 exc/2 drives 2nd [1+1+1+1+1+1+2+2]",
+   "dt": 1.6666666666666667,
+   "stepsPerInterval": 3
+  },
+  "truthLevel": {
+   "steps": 24,
+   "dt": 0.20833333333333334,
+   "N": 4096
+  },
+  "converged": true
+ }
+}
