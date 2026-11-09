@@ -49,10 +49,41 @@ pub struct Beat(pub Vec<i64>);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Component { pub frequency: usize, pub counter: bool }
 
-/// The lights on, per frequency of the field: L in V_L (SPEC §1.3). `Model::running` is every light, `Model::prepared` the trap
-/// beam's frequency alone (before t = 0).
+/// How one frequency's light is on (`Lights`): off; on as its coherent field; or on with its beams' relative phases averaged --
+/// each beam with its own intensity, no interference between beams: the smooth shift of a light whose fringes the atoms fly over
+/// (the reported trap's, SPEC §1.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lit {
+    Off,
+    Coherent,
+    Averaged,
+}
+
+/// The lights, per frequency of the field: L in V_L (SPEC §1.3) -- the light set as data. `Model::running` has every light
+/// coherent, `Model::prepared` the trap beam's frequency alone (before t = 0), `Model::reported` the trap light coherent and the
+/// others averaged (the reported trap).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Lights(pub Vec<bool>);
+pub struct Lights(pub Vec<Lit>);
+
+impl Lights {
+    /// Whether a frequency's light is on.
+    pub fn on(&self, frequency: usize) -> bool {
+        self.0[frequency] != Lit::Off
+    }
+    /// Whether the beam pair (j, i) of one frequency (its beam order) enters: any pair of a coherent field, a beam with itself of
+    /// an averaged one.
+    pub fn pair(&self, frequency: usize, j: usize, i: usize) -> bool {
+        match self.0[frequency] {
+            Lit::Off => false,
+            Lit::Coherent => true,
+            Lit::Averaged => j == i,
+        }
+    }
+    /// Whether two frequencies' cross terms enter: both coherent.
+    pub fn cross(&self, first: usize, second: usize) -> bool {
+        self.0[first] == Lit::Coherent && self.0[second] == Lit::Coherent
+    }
+}
 
 /// A point of a trajectory: position r (µm), momentum κ = p/ħ (1/µm), time t (µs).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -357,13 +388,18 @@ impl Model {
         Ok(model)
     }
 
-    /// Every light: L_run.
+    /// Every light, coherent: L_run.
     pub fn running(&self) -> Lights {
-        Lights(vec![true; self.light.frequencies.len()])
+        Lights(vec![Lit::Coherent; self.light.frequencies.len()])
     }
     /// The trap beam's frequency alone: L_prep.
     pub fn prepared(&self) -> Lights {
-        Lights((0..self.light.frequencies.len()).map(|w| w == self.light.trap).collect())
+        Lights((0..self.light.frequencies.len()).map(|w| if w == self.light.trap { Lit::Coherent } else { Lit::Off }).collect())
+    }
+    /// The trap light coherent (its own interference kept: a retro-reflected tweezer reports its site) and every other light
+    /// averaged (its smooth shift, no fringes): the reported trap's lights (SPEC §1.3).
+    pub fn reported(&self) -> Lights {
+        Lights((0..self.light.frequencies.len()).map(|w| if w == self.light.trap { Lit::Coherent } else { Lit::Averaged }).collect())
     }
     /// The clusters.
     pub fn clusters(&self) -> &[Cluster] {
@@ -441,6 +477,12 @@ pub struct Run<'a> {
 impl<'a> Run<'a> {
     pub fn new(model: &'a Model, reference: [f64; GROUND]) -> Run<'a> {
         Run { model, reference, running: model.running(), prepared: model.prepared() }
+    }
+    /// The counted real multiply-adds of one assembly (`decide::COMPLEX` per complex one): the largest over the clusters at the
+    /// focus, every light on -- the integrator's price of a generator (its step's two assemblies).
+    pub fn assembly_work(&self) -> f64 {
+        let at = Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 };
+        (0..self.model.clusters.len()).map(|c| self.model.assembled(c, &at, &self.running).1).fold(0.0, f64::max) * crate::decide::COMPLEX
     }
 }
 

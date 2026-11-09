@@ -129,12 +129,12 @@ impl Model {
     pub(crate) fn far_hamiltonian(&self, amplitudes: &[Amplitude], lights: &Lights) -> Slope {
         let mut h = Slope { value: self.base.clone(), gradient: std::array::from_fn(|_| Mat::zeros(STATES, STATES)) };
         for (w, (f, tone)) in self.light.frequencies.iter().zip(&self.tones).enumerate() {
-            if !lights.0[w] {
-                continue;
-            }
             let n = f.beams.len();
             for j in 0..n {
                 for i in 0..n {
+                    if !lights.pair(w, j, i) {
+                        continue;
+                    }
                     let c = super::far::pair(&amplitudes[f.beams[j]], &amplitudes[f.beams[i]]);
                     h.value.add_scaled(c.value, &tone.pairs[j * n + i]);
                     for x in 0..3 {
@@ -170,7 +170,7 @@ impl Model {
         let dk: [Mat; 3] = std::array::from_fn(|i| h.gradient[i].block(&excited, &excited));
         let energy = |b: usize| h.value[(b, b)].re;
         let slope = |b: usize| -> [f64; 3] { std::array::from_fn(|i| h.gradient[i][(b, b)].re) };
-        let lit: Vec<bool> = self.carriers.iter().map(|x| lights.0[x.frequency]).collect();
+        let lit: Vec<bool> = self.carriers.iter().map(|x| lights.on(x.frequency)).collect();
         let column = |m: &Mat, b: usize| -> Vec<C64> { (0..EXCITED).map(|x| m[(GROUND + x, b)]).collect() };
         // The dressing ΔE_b^d of every ground state by every lit carrier, with its gradient.
         let mut shift = vec![[0.0_f64; GROUND]; self.carriers.len()];
@@ -207,7 +207,7 @@ impl Model {
                     .collect();
                 for j in 0..n {
                     for i in 0..n {
-                        if carrier.units[j] != carrier.units[i] {
+                        if carrier.units[j] != carrier.units[i] || !lights.pair(carrier.frequency, j, i) {
                             continue;
                         }
                         let coefficient = super::far::pair(&amplitudes[carrier.beams[j]], &amplitudes[carrier.beams[i]]);
@@ -268,8 +268,12 @@ impl Model {
                             u.dedup();
                             u
                         };
-                        for unit in units {
-                            let members: Vec<usize> = (0..other.beams.len()).filter(|&l| other.units[l] == unit).collect();
+                        let groups: Vec<Vec<usize>> = if lights.0[other.frequency] == super::Lit::Averaged {
+                            (0..other.beams.len()).map(|l| vec![l]).collect()
+                        } else {
+                            units.iter().map(|&u| (0..other.beams.len()).filter(|&l| other.units[l] == u).collect()).collect()
+                        };
+                        for members in groups {
                             let mut v = vec![C64::ZERO; EXCITED];
                             let mut dv: [Vec<C64>; 3] = std::array::from_fn(|_| vec![C64::ZERO; EXCITED]);
                             for &l in &members {
@@ -340,16 +344,19 @@ impl Model {
         let zero_wave = self.no_wave();
         // The folded couplings' light shifts and couplings on the ground states.
         for (cj, cp) in self.carriers.iter().enumerate() {
-            if !lights.0[cp.frequency] {
+            if !lights.on(cp.frequency) {
                 continue;
             }
             for (ci, cc) in self.carriers.iter().enumerate() {
-                if !lights.0[cc.frequency] {
+                if !lights.on(cc.frequency) || (ci != cj && !lights.cross(cp.frequency, cc.frequency)) {
                     continue;
                 }
                 let beat = cp.beat.plus(-1, &cc.beat);
                 for (lj, &bj) in cp.beams.iter().enumerate() {
                     for (li, &bi) in cc.beams.iter().enumerate() {
+                        if ci == cj && !lights.pair(cc.frequency, lj, li) {
+                            continue;
+                        }
                         let coefficient = super::far::pair(&amplitudes[bj], &amplitudes[bi]);
                         let (xj, xi) = (&cp.folded[lj], &cc.folded[li]);
                         let (tj, ti) = (&near.responses[cj][lj], &near.responses[ci][li]);
@@ -375,10 +382,13 @@ impl Model {
         }
         // The explicit states' van Vleck shift by the folded drives, and the kept drives.
         let h = &near.hamiltonian;
-        for cc in self.carriers.iter().filter(|x| lights.0[x.frequency]) {
+        for cc in self.carriers.iter().filter(|x| lights.on(x.frequency)) {
             let zero = self.axes.zero();
             for (lj, &bj) in cc.beams.iter().enumerate() {
                 for (li, &bi) in cc.beams.iter().enumerate() {
+                    if !lights.pair(cc.frequency, lj, li) {
+                        continue;
+                    }
                     let coefficient = super::far::pair(&amplitudes[bj], &amplitudes[bi]);
                     let (xj, xi) = (&cc.folded[lj], &cc.folded[li]);
                     let shift = |x: usize, y: usize, grad: Option<usize>| -> C64 {
@@ -444,11 +454,11 @@ impl Model {
     /// products, the responses' second derivatives left out -- module documentation, # Derivatives).
     pub(crate) fn near_potential(&self, r: [f64; 3], amplitudes: &[Amplitude], p: &[f64; GROUND], lights: &Lights) -> Expansion {
         let mut out = Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
-        if self.carriers.iter().all(|x| !lights.0[x.frequency]) {
+        if self.carriers.iter().all(|x| !lights.on(x.frequency)) {
             return out;
         }
         let mut off = lights.clone();
-        off.0[self.light.trap] = false;
+        off.0[self.light.trap] = super::Lit::Off;
         for (lights, sign) in [(lights, 1.0), (&off, -1.0)] {
             for cluster in 0..self.clusters.len() {
                 let c = &self.clusters[cluster];
@@ -458,11 +468,14 @@ impl Model {
                 let at = Point { r, kappa: [0.0; 3], t: 0.0 };
                 let near = self.near_at(cluster, &at, amplitudes, lights);
                 for (ci, cc) in self.carriers.iter().enumerate() {
-                    if !lights.0[cc.frequency] {
+                    if !lights.on(cc.frequency) {
                         continue;
                     }
                     for (lj, &bj) in cc.beams.iter().enumerate() {
                         for (li, &bi) in cc.beams.iter().enumerate() {
+                            if !lights.pair(cc.frequency, lj, li) {
+                                continue;
+                            }
                             let coefficient = super::far::pair(&amplitudes[bj], &amplitudes[bi]);
                             for (pb, &b) in c.states[..c.ground].iter().enumerate() {
                                 if p[b] == 0.0 {
@@ -521,7 +534,7 @@ impl Model {
 
     /// The near carriers' folded channels on a cluster at a point (readout.rs): per carrier R = Σ_l a_l T̃_l.
     pub(crate) fn near_channels(&self, cluster: usize, at: &Point, amplitudes: &[Amplitude], lights: &Lights) -> Vec<super::readout::Channels> {
-        if self.carriers.iter().all(|x| !lights.0[x.frequency]) {
+        if self.carriers.iter().all(|x| !lights.on(x.frequency)) {
             return vec![];
         }
         let near = self.near_at(cluster, at, amplitudes, lights);
@@ -529,7 +542,7 @@ impl Model {
         self.carriers
             .iter()
             .enumerate()
-            .filter(|(_, x)| lights.0[x.frequency])
+            .filter(|(_, x)| lights.on(x.frequency))
             .map(|(ci, cc)| {
                 let mut response = Mat::zeros(EXCITED, g);
                 for (l, &b) in cc.beams.iter().enumerate() {
@@ -697,12 +710,8 @@ impl Model {
             let n = f.beams.len();
             for j in 0..n {
                 for i in 0..n {
-                    let (sj, si) = (&spans[f.beams[j]], &spans[f.beams[i]]);
-                    let (c0, rad) = if sj.spread.is_finite() && si.spread.is_finite() {
-                        (sj.centre.conj() * si.centre, sj.spread * si.most + sj.centre.abs() * si.spread)
-                    } else {
-                        (C64::ZERO, sj.most * si.most)
-                    };
+                    let pair = super::reach::pair_span(spans, f.beams[j], f.beams[i]);
+                    let (c0, rad) = (pair.centre, pair.radius);
                     let p = &tone.pairs[j * n + i];
                     for s in 0..STATES {
                         centre[s] += (c0 * p[(s, s)]).re;
@@ -745,24 +754,71 @@ impl Model {
         out * 2.0 / self.least_decay()
     }
 
-    /// The bound of the near light's force (rad/µs/µm) anywhere: the far light's slope and each carrier's light shift's,
-    /// Σ_l'l (L_l' + L_l)‖X_l'‖‖X_l‖ 2/Γ_min, and the scattering's mean recoil k_max Γ_max/2 (the jumps' mean force at most).
-    fn force_bound(&self) -> f64 {
-        let mut out = self.energy_slope();
+    /// A cell's spans on its centre point: each beam's amplitude and gradient there exactly (`Span::point`).
+    fn point_spans(&self, spans: &[Span]) -> Vec<Span> {
+        spans.iter().map(|x| x.point()).collect()
+    }
+
+    /// The bound of |∇(E_x − E_y)| of the far light's diagonal over a cell (rad/µs/µm): Σ_pairs |[P]_xx − [P]_yy| times the bound of
+    /// |∇(a_l'* a_l)| ≤ max|∇a_l'| max|a_l| + max|a_l'| max|∇a_l| (reach.rs `Span::slope`).
+    pub(crate) fn energy_slope_cell(&self, x: usize, y: usize, spans: &[Span]) -> f64 {
+        let mut out = 0.0;
+        for (f, tone) in self.light.frequencies.iter().zip(&self.tones) {
+            let n = f.beams.len();
+            for j in 0..n {
+                for i in 0..n {
+                    let p = &tone.pairs[j * n + i];
+                    let d = (p[(x, x)] - if y == x { C64::ZERO } else { p[(y, y)] }).abs();
+                    if d == 0.0 {
+                        continue;
+                    }
+                    out += d * super::reach::pair_span(spans, f.beams[j], f.beams[i]).slope;
+                }
+            }
+        }
+        out
+    }
+
+    /// The bound of the force on a cluster's state over a cell (rad/µs/µm), −⟨ψ|∇H_h|ψ⟩ at most the gradient's norm: the far light's
+    /// on its states (its largest diagonal slope and the Gershgorin sum of its couplings' slopes), each lit carrier's light shift's
+    /// Σ_l'l |∇(a_l'* a_l)| ‖X_l'‖‖X_l‖ 2/Γ_min with its denominators' slope ‖X_l'‖‖X_l‖ L_E (2/Γ_min)², and the scattering's mean
+    /// recoil k_max Γ_max/2 (the jumps' mean force at most).
+    fn force_cell(&self, cluster: usize, spans: &[Span]) -> f64 {
+        let states = &self.clusters[cluster].states;
+        let mut far = 0.0_f64;
+        for &x in states {
+            let mut row = self.energy_slope_cell(x, x, spans);
+            for &y in states.iter().filter(|&&y| y != x) {
+                for (f, tone) in self.light.frequencies.iter().zip(&self.tones) {
+                    let n = f.beams.len();
+                    for j in 0..n {
+                        for i in 0..n {
+                            row += tone.pairs[j * n + i][(x, y)].abs() * super::reach::pair_span(spans, f.beams[j], f.beams[i]).slope;
+                        }
+                    }
+                }
+            }
+            far = far.max(row);
+        }
         let gamma = self.least_decay();
+        let levels = states.iter().map(|&x| self.energy_slope_cell(x, x, spans)).fold(0.0, f64::max)
+            + (GROUND..STATES).map(|e| self.energy_slope_cell(e, e, spans)).fold(0.0, f64::max);
+        let mut near = 0.0;
         let mut k_max = 0.0_f64;
         for carrier in &self.carriers {
             for (j, xj) in carrier.couplings.iter().enumerate() {
-                let lj = &self.light.beams[carrier.beams[j]];
-                k_max = k_max.max(lj.wave_number);
+                let lj = carrier.beams[j];
+                k_max = k_max.max(self.light.beams[lj].wave_number);
                 for (i, xi) in carrier.couplings.iter().enumerate() {
-                    let li = &self.light.beams[carrier.beams[i]];
-                    out += (super::reach::lipschitz(lj) + super::reach::lipschitz(li)) * xj.frobenius() * xi.frobenius() * 2.0 / gamma;
+                    let li = carrier.beams[i];
+                    let slope = super::reach::pair_span(spans, lj, li).slope;
+                    let size = xj.frobenius() * xi.frobenius();
+                    near += slope * size * 2.0 / gamma + spans[lj].most * spans[li].most * size * levels * (2.0 / gamma).powi(2);
                 }
             }
         }
         let gamma_max = (0..EXCITED).map(|x| self.decay[(x, x)].re).fold(0.0, f64::max);
-        out + k_max * gamma_max / 2.0
+        far + near + k_max * gamma_max / 2.0
     }
 
     /// A ground state's folded drives' saturation and sweep bounds over a cell (module documentation of units.rs): per lit
@@ -770,42 +826,66 @@ impl Model {
     /// from zero over the cell and the reach's speeds less the excited states' Gershgorin radius and the self-energy's bound;
     /// S = 2 Σ v_e²/|ΔE_e|², a = max (v L + k a_max)/|ΔE_e|².
     fn drive_cell(&self, b: usize, cluster: usize, spans: &[Span], speed: f64) -> (Bounds, Bounds) {
+        let (s, a) = self.drive_bound(b, cluster, spans, speed);
+        if !spans.iter().all(|s| s.rho.is_finite()) {
+            return (Bounds { upper: s, centre: f64::NEG_INFINITY }, Bounds { upper: a, centre: f64::NEG_INFINITY });
+        }
+        // At the centre: the same bound on the point (every amplitude its own value there), which the true value does not exceed.
+        let point = self.point_spans(spans);
+        let (sc, ac) = self.drive_bound(b, cluster, &point, speed);
+        (Bounds { upper: s, centre: sc }, Bounds { upper: a, centre: ac })
+    }
+
+    /// The bounds of `drive_cell` over a cell's spans: on a point (every spread zero) the couplings are the point's exact sums.
+    fn drive_bound(&self, b: usize, cluster: usize, spans: &[Span], speed: f64) -> (f64, f64) {
         let energies = self.cell_energies(spans);
-        let bounded = spans.iter().all(|s| s.spread.is_finite());
+        let point = spans.iter().all(|s| s.rho == 0.0);
         let outside: Vec<usize> = (0..GROUND).filter(|&a| self.membership[a] != cluster).collect();
         let dress: Vec<f64> = (0..GROUND).map(|a| self.carriers.iter().map(|d| self.dressing_bound(d, a, spans)).sum()).collect();
-        let slope = self.energy_slope();
-        let acceleration = self.hbar_over_mass * self.force_bound();
+        let acceleration = self.hbar_over_mass * self.force_cell(cluster, spans);
         let (mut s, mut a) = (0.0_f64, 0.0_f64);
         for (ci, carrier) in self.carriers.iter().enumerate() {
             let others: f64 = self.carriers.iter().enumerate().filter(|&(d, _)| d != ci).map(|(_, d)| self.dressing_bound(d, b, spans)).sum();
             let (z_lo, z_hi) = (energies.centre[b] - energies.slack[b] + carrier.detuning - others, energies.centre[b] + energies.slack[b] + carrier.detuning + others);
             let k = carrier.beams.iter().map(|&l| self.light.beams[l].wave_number).fold(0.0, f64::max);
-            // The self-energy's bound: the folded channels to the other clusters.
-            let mut sigma = 0.0;
+            // The self-energy's bound per excited state: its Gershgorin row, Σ_{d, a∉C} |v_a[e]| ‖v_a‖/|z − Ẽ_a − δ_d|, v_a the folded
+            // channel's coupling at its peak (only the states a channel reaches move).
+            let mut sigma = vec![0.0; STATES];
             for d in &self.carriers {
                 for &o in &outside {
                     let (lo, hi) = (z_lo - energies.centre[o] - energies.slack[o] - dress[o] - d.detuning, z_hi - energies.centre[o] + energies.slack[o] + dress[o] - d.detuning);
                     let den = distance(lo, hi);
-                    let size: f64 = d.beams.iter().zip(&d.folded).map(|(&l, x)| spans[l].most * (GROUND..STATES).map(|e| x[(e, o)].norm_sqr()).sum::<f64>().sqrt()).sum::<f64>().powi(2);
-                    sigma += if size == 0.0 { 0.0 } else { size / den };
+                    let size: f64 = d.beams.iter().zip(&d.folded).map(|(&l, x)| spans[l].most * (GROUND..STATES).map(|e| x[(e, o)].norm_sqr()).sum::<f64>().sqrt()).sum();
+                    if size == 0.0 {
+                        continue;
+                    }
+                    for e in GROUND..STATES {
+                        let reach: f64 = d.beams.iter().zip(&d.folded).map(|(&l, x)| spans[l].most * x[(e, o)].abs()).sum();
+                        if reach > 0.0 {
+                            sigma[e] += reach * size / den;
+                        }
+                    }
                 }
             }
             for e in GROUND..STATES {
-                let v: f64 = carrier.beams.iter().zip(&carrier.folded).map(|(&l, x)| spans[l].most * x[(e, b)].abs()).sum();
+                let v: f64 = if point {
+                    carrier.beams.iter().zip(&carrier.folded).map(|(&l, x)| spans[l].centre * x[(e, b)]).sum::<C64>().abs()
+                } else {
+                    carrier.beams.iter().zip(&carrier.folded).map(|(&l, x)| spans[l].most * x[(e, b)].abs()).sum()
+                };
                 if v == 0.0 {
                     continue;
                 }
                 let (lo, hi) = (energies.centre[e] - energies.slack[e] - z_hi - k * speed, energies.centre[e] + energies.slack[e] - z_lo + k * speed);
-                let d = (distance(lo, hi) - energies.radius[e] - sigma).max(0.0);
+                let d = (distance(lo, hi) - energies.radius[e] - sigma[e]).max(0.0);
                 let gamma = self.decay[(e - GROUND, e - GROUND)].re;
                 let width = d * d + gamma * gamma / 4.0;
                 s += 2.0 * v * v / width;
-                a = a.max((speed * 2.0 * slope + k * acceleration) / width);
+                let slope = self.energy_slope_cell(e, b, spans) + others;
+                a = a.max((speed * slope + k * acceleration) / width);
             }
         }
-        let centre = |x: f64| if bounded { x } else { f64::NEG_INFINITY };
-        (Bounds { upper: s, centre: centre(s) }, Bounds { upper: a, centre: centre(a) })
+        (s, a)
     }
 
     /// A drive's gate over the reach: its ground state's total folded saturation S_b and its drives' sweep (SPEC §1.5).
@@ -863,8 +943,17 @@ impl Model {
     /// Γ_e/(σ_eb σ'_ea)), σ the drives' denominators' bounds; its beat Ω = E_a − E_b + δ_to − δ_from over the cell, less the
     /// Doppler shift of its strongest beam pair at the reach's speed and the near light's differential shift. S = 2m².
     fn term_cell(&self, a: usize, b: usize, from: Component, to: Component, spans: &[Span], speed: f64) -> Bounds {
+        let upper = self.term_bound(a, b, from, to, spans, speed);
+        if !spans.iter().all(|s| s.rho.is_finite()) {
+            return Bounds { upper, centre: f64::NEG_INFINITY };
+        }
+        let point = self.point_spans(spans);
+        Bounds { upper, centre: self.term_bound(a, b, from, to, &point, speed) }
+    }
+
+    /// The bound of `term_cell` over a cell's spans (S = 2m²).
+    fn term_bound(&self, a: usize, b: usize, from: Component, to: Component, spans: &[Span], speed: f64) -> f64 {
         let energies = self.cell_energies(spans);
-        let bounded = spans.iter().all(|s| s.spread.is_finite());
         let (cf, ct) = (&self.carriers[self.carrier_index(from.frequency)], &self.carriers[self.carrier_index(to.frequency)]);
         let sigma = |c: &Carrier, g: usize, e: usize| -> f64 {
             let (lo, hi) = (energies.centre[e] - energies.slack[e] - energies.centre[g] - energies.slack[g] - c.detuning, energies.centre[e] + energies.slack[e] - energies.centre[g] + energies.slack[g] - c.detuning);
@@ -888,8 +977,7 @@ impl Model {
         let k = cf.beams.iter().chain(&ct.beams).map(|&l| self.light.beams[l].wave_number).fold(0.0, f64::max);
         let sep = distance(lo, hi) - 2.0 * k * speed - self.near_spread(a, b, spans);
         let m = if size == 0.0 { 0.0 } else if sep > 0.0 { size / sep } else { f64::INFINITY };
-        let upper = 2.0 * m * m;
-        Bounds { upper, centre: if bounded { upper } else { f64::NEG_INFINITY } }
+        2.0 * m * m
     }
 
     /// A near coupling's gate over the reach.
@@ -905,7 +993,7 @@ impl Model {
         let Unit::Term { a, b, from: Some(from), to: Some(to) } = unit else { unreachable!() };
         let cell = super::reach::Cell { centre: sample.at.r, half: [0.0; 3] };
         let speed = self.hbar_over_mass * crate::linalg::norm3(sample.at.kappa);
-        let m2 = 0.5 * self.term_cell(*a, *b, *from, *to, &self.spans(&cell), speed).upper;
+        let m2 = 0.5 * self.term_bound(*a, *b, *from, *to, &self.spans(&cell), speed);
         let p = self.state_populations(sample);
         UnitError { parameter: m2, population: m2 * (p[*a] + p[*b]), temperature: m2 * (p[*a] + p[*b]) }
     }

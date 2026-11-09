@@ -58,7 +58,7 @@ fn a_two_level_fold_is_the_linear_response_and_its_error_the_saturation() {
     let gamma = width(&request, e);
     let v2 = request.beams[light.frequencies[probe].beams[0]].coupling[(e, b)].norm_sqr();
     let mut off = model.running();
-    off.0[probe] = false;
+    off.0[probe] = atom_motion::model::Lit::Off;
     for r in [[0.0, 0.0, 0.0], [0.2, -0.1, 0.4], [0.5, 0.3, -0.6]] {
         let at = Point { r, kappa: [0.0, 0.0, -k / 2.0], t: 0.0 };
         let (on, without) = (total(&model, cluster, &at, &model.running()), total(&model, cluster, &at, &off));
@@ -94,7 +94,7 @@ fn a_raman_pair_is_kept_on_resonance_and_couples_at_the_closed_form() {
     let units = folded.units();
     assert!(units.contains(&raman), "the Raman pair is a unit: {:?}", units.iter().filter(|u| matches!(u, Unit::Term { .. })).collect::<Vec<_>>());
     let p = { let mut p = [0.0; GROUND]; p[1] = 1.0; p };
-    let trap = folded.trap(&p).unwrap();
+    let trap = folded.trap(&p, &folded.prepared()).unwrap();
     let reach = folded.reach(&trap, &p, request.temperature_uk, 2e-3);
     let gate = folded.gates(&[raman.clone()], &reach)[0];
     assert!(!gate.exists(), "a Raman-resonant pair cannot fold: {gate:?}");
@@ -223,5 +223,35 @@ fn near_and_explicit_states_keep_the_identities_and_one_recoil_rule() {
                 assert!((m_folded[i][j] - m_kept[i][j]).abs() <= 1e-6 * m_folded[i][i].abs().max(m_folded[j][j].abs()), "M[{i}][{j}]: folded {:?} kept {:?}", m_folded, m_kept);
             }
         }
+    }
+}
+
+/// The near units' gates over the reach (SPEC §1.5): a weak probe's drives fold (R2_RECOIL's 100Γ detuning, R3_DOPPLER's two
+/// beams at s = 0.02 and δ = −Γ/2: S_b of the order of their saturation), their provable bounds above the saturation measured at
+/// the trap's centre; the sweep a is bounded too.
+#[test]
+fn weak_drives_fold_within_their_provable_gates() {
+    for (name, ids) in [("R2_RECOIL", vec!["probe"]), ("R3_DOPPLER", vec!["cool-plus"])] {
+        let request = scene(name);
+        let light = Light::new(&request);
+        let kept: Vec<Unit> = ids.iter().map(|id| Unit::Far { component: Component { frequency: frequency_of(&request, &light, id), counter: false } }).collect();
+        let model = Model::new(&request, &light, &kept).unwrap();
+        let b = 7;
+        let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
+        let trap = model.trap(&p, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &p, request.temperature_uk, 2e-3);
+        let units: Vec<Unit> = model.units().into_iter().filter(|u| matches!(u, Unit::Drive { ground, .. } if *ground == b)).collect();
+        assert!(!units.is_empty(), "{name}: drives from |2,2⟩");
+        let started = std::time::Instant::now();
+        let gates = model.gates(&units, &reach);
+        let cluster = model.cluster_of(b);
+        let sample = Sample { cluster, at: Point { r: trap.centre, kappa: [0.0; 3], t: 0.0 }, psi: vec![C64::ONE; model.clusters()[cluster].states.len()] };
+        let errors = model.errors(&units, &[sample]);
+        let measured: f64 = errors.iter().map(|e| e[0].parameter).sum();
+        for (u, g) in units.iter().zip(&gates) {
+            assert!(g.exists(), "{name}: {u:?} {g:?}");
+            assert!(g.saturation >= measured * (1.0 - 1e-9), "{name}: the bound {} below the measured S {measured}", g.saturation);
+        }
+        eprintln!("{name}: {} drive gates in {:?}, S bound {:.3e} measured {:.3e}, sweep {:.3e}", units.len(), started.elapsed(), gates[0].saturation, measured, gates[0].sweep);
     }
 }

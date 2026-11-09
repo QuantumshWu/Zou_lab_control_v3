@@ -135,12 +135,12 @@ impl Model {
         let still = self.no_wave();
         parts.add(&zero, &still, &one(), &|x, y| self.base[(c.states[x], c.states[y])], true);
         for (w, (f, tone)) in self.light.frequencies.iter().zip(&self.tones).enumerate() {
-            if !lights.0[w] {
-                continue;
-            }
             let n = f.beams.len();
             for j in 0..n {
                 for i in 0..n {
+                    if !lights.pair(w, j, i) {
+                        continue;
+                    }
                     let p = &tone.pairs[j * n + i];
                     let coefficient = super::far::pair(&amplitudes[f.beams[j]], &amplitudes[f.beams[i]]);
                     parts.add(&zero, &self.pair_wave(f.beams[j], f.beams[i]), &coefficient, &|x, y| p[(c.states[x], c.states[y])], true);
@@ -149,13 +149,13 @@ impl Model {
         }
         for unit in &self.kept {
             if let super::Unit::FarBeat { first, second } = unit {
-                if !(lights.0[first.frequency] && lights.0[second.frequency]) {
+                if !lights.cross(first.frequency, second.frequency) {
                     continue;
                 }
                 self.add_far_beat(&mut parts, *first, *second, &amplitudes);
             }
         }
-        let near = self.carriers.iter().any(|x| lights.0[x.frequency]).then(|| self.near_at(cluster, at, &amplitudes, lights));
+        let near = self.carriers.iter().any(|x| lights.on(x.frequency)).then(|| self.near_at(cluster, at, &amplitudes, lights));
         for class in &self.classes[cluster] {
             self.add_decay(&mut parts, cluster, class, &amplitudes, lights, near.as_ref());
         }

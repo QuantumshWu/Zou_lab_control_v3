@@ -235,7 +235,7 @@ impl Model {
 
     /// Whether a source's light is on.
     pub(crate) fn lit(&self, source: &Source, lights: &Lights) -> bool {
-        source.frequency.map_or(true, |f| lights.0[f])
+        source.frequency.map_or(true, |f| lights.on(f))
     }
 
     /// The photon classes of a cluster's state ψ (its frame amplitudes) at a point, every light on (SPEC §1.6; module
@@ -243,7 +243,7 @@ impl Model {
     pub fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
         let amplitudes = self.light.amplitudes(at.r);
         let lights = self.running();
-        let near = self.carriers.iter().any(|x| lights.0[x.frequency]).then(|| self.near_at(cluster, at, &amplitudes, &lights));
+        let near = self.carriers.iter().any(|x| lights.on(x.frequency)).then(|| self.near_at(cluster, at, &amplitudes, &lights));
         let mut out = vec![];
         for class in &self.classes[cluster] {
             let n = self.clusters[class.landing].states.len();
