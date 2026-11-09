@@ -320,6 +320,8 @@ impl Settings{
     }
     /// Where the harmonic part stands: the trap's centre when every lab axis is free, else the focus, the free axes' origin.
     pub fn about(&self)->[f64;3]{if self.free==[true;3]{self.centre}else{[0.;3]}}
+    /// The same at half the step (the loss's check's reads, check.rs `read`): its exponentials' and beats' shares with it.
+    pub(crate) fn halved(&self)->Settings{let mut s=self.clone();s.dt*=0.5;s.truncation*=0.5;s.beats*=0.5;s}
     /// r less its own site's place where the harmonic part is the atom's own site's (`Engine::reference`), else less the trap's centre: the start of
     /// the harmonic control's twin (control.rs), which turns about that site as the atom does.
     pub fn about_site(&self,r:[f64;3])->[f64;3]{
@@ -1244,6 +1246,12 @@ impl<'a> Engine<'a>{
             let point=m.point(t.r,t.kappa);let kinetic=0.5*m.hbar_over_mass*t.kappa.iter().map(|k|k*k).sum::<f64>();
             if kinetic+m.trap_bound(t.cluster,&point,&t.psi)>0.&&kinetic+m.trap_potential(t.cluster,&point,&t.psi,t.time)>0.{t.alive=false;}
         }
+    }
+    /// The loss's energy (# Loss) over the trap's depth (`Settings::region`): the kinetic energy and the trap's potential of
+    /// the ground populations, −1 at the bottom of the reference well, 0 at the trap's far level (the loss's check, check.rs).
+    pub(crate) fn loss_energy(&self,t:&Trajectory)->f64{
+        let m=self.model;let point=m.point(t.r,t.kappa);let kinetic=0.5*m.hbar_over_mass*t.kappa.iter().map(|k|k*k).sum::<f64>();
+        (kinetic+m.trap_potential(t.cluster,&point,&t.psi,t.time))/self.settings.region
     }
 
     /// A quantum jump at r and time `time` with the trajectory's (unnormalized) state, with the exact

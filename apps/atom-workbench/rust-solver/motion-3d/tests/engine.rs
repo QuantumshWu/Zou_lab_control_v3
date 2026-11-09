@@ -13,7 +13,7 @@ use atom_motion_3d::model::{Model,MOST_MIXED,MOST_STATES};
 use atom_motion_3d::rng::{normal_quantile,Purpose,Rng};
 use atom_motion_3d::stats::{summarize,Scales,KT_PER_UK};
 use atom_motion_3d::{initial_trajectory,sample_states,simulate,simulate_to,Initial,Stratum};
-use atom_motion_3d::solve::{bound_probes,drift,grid_phase,jumps,solve,Device,BIAS_SHARE,NUMERICAL_SHARE,POPULATION_TARGET,TEMPERATURE_TARGET};
+use atom_motion_3d::solve::{bound_probes,drift,grid_phase,jumps,solve,Device,BIAS_SHARE,FIRST_GROUPS,NUMERICAL_SHARE,POPULATION_TARGET,TEMPERATURE_TARGET};
 use atom_motion_3d::{Beam,Complex,Matrix,Request,STATES};
 use serde_json::Value;
 #[path="../examples/scene/mod.rs"] mod scene;
@@ -1203,7 +1203,7 @@ fn the_jumps_criterion_on_a_retro_reflected_tweezer_reads_the_step_as_its_square
     let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();
     let settings=|steps:usize|{let mut s=Settings::new(interval/steps as f64,&initial.traps[reference],f64::EPSILON,true);s.doppler=BUDGET;s.region=initial.depths[reference];s};
     let steps=93;let harmonic=Harmonic::new(&model,&settings(steps),&initial,steps,outputs);
-    let(states,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,32,steps,outputs,&harmonic);
+    let(states,_,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,32,steps,outputs,&harmonic,None);
     // A fixed bar: a fifth of the T target, near the criterion at the step the line once took there; a quarter of that step reads a sixteenth of it.
     let bar=0.2*TEMPERATURE_TARGET;
     let(line,quarter)=(jumps(&Engine::new(&model,settings(steps)),&states)/bar,jumps(&Engine::new(&model,settings(4*steps)),&states)/bar);
@@ -1225,7 +1225,7 @@ fn the_t_error_over_the_run_adds_up_on_a_heating_axis_and_goes_with_the_step(){
     let reference=(0..initial.states.len()).max_by(|&a,&b|initial.states[a].2.total_cmp(&initial.states[b].2)).unwrap();let waiting=0.47;
     let settings=|steps:usize|{let dt=interval/steps as f64;let mut s=Settings::new(dt,&initial.traps[reference],NUMERICAL_SHARE*POPULATION_TARGET*dt/waiting,true);s.doppler=0.02;s.region=initial.depths[reference];s.horizon=waiting;s};
     let steps=32;let harmonic=Harmonic::new(&model,&settings(steps),&initial,steps,outputs);
-    let(states,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,64,steps,outputs,&harmonic);let probes=bound_probes(&model,&states,&vec![1.;states.len()]);
+    let(states,_,_,_)=sample_states(&model,&settings(steps),&initial,0x3D_5EED,64,steps,outputs,&harmonic,None);let probes=bound_probes(&model,&states,&vec![1.;states.len()]);
     let period=std::f64::consts::TAU/initial.traps[reference].frequencies.iter().copied().fold(f64::INFINITY,f64::min);
     let tolerance=BIAS_SHARE*TEMPERATURE_TARGET;let limit=|_:f64|tolerance;
     let(one,whole)=(drift(&model,&settings,steps,&probes,period,period,&limit,0.,f64::INFINITY),drift(&model,&settings,steps,&probes,period,100.,&limit,0.,f64::INFINITY));let half=drift(&model,&settings,2*steps,&probes,period,100.,&limit,whole.span,f64::INFINITY);
@@ -1244,7 +1244,7 @@ fn a_group_run_only_through_an_output_sums_what_the_whole_run_sums_there(){
     let mut s=Settings::new(interval/steps as f64,&trap,f64::EPSILON,true);s.doppler=BUDGET;s.region=initial.depths[reference];
     let harmonic=Harmonic::new(&model,&s,&initial,steps,outputs);
     let whole=simulate(&model,&s,&initial,0x3D_5EED,0,24,8,steps,outputs,&[],Some(&harmonic));
-    let ends=[10,7,3];let cut=simulate_to(&model,&s,&initial,0x3D_5EED,0,24,8,steps,outputs,&[],Some(&harmonic),&ends);
+    let ends=[10,7,3];let cut=simulate_to(&model,&s,&initial,0x3D_5EED,0,24,8,steps,outputs,&[],Some(&harmonic),&ends,None);
     for(g,&end)in ends.iter().enumerate(){for i in 0..outputs{let(a,b)=(&whole.groups[g].sums[i],&cut.groups[g].sums[i]);
         if i<=end{assert!(a.held==b.held&&a.kappa2==b.kappa2&&a.populations==b.populations&&a.harmonic==b.harmonic&&a.trajectories==b.trajectories,"group {g} output {i}");}
         else{assert!(b.trajectories==0.&&b.held==0.,"group {g} output {i}");}}}
@@ -1702,4 +1702,39 @@ fn a_kept_standing_wave_keeps_its_energy_along_the_atom_s_path(){
         if heat>1e-2{assert!(moved.abs()<=0.01*heat,"dt {dt}, state {b}: the energy moved {moved:.4} rad/us against {heat:.4}");checked+=1;}
     }}
     assert!(checked>0);
+}
+
+/// The loss's check refines the retro-reflected tweezer (check.rs; rust-solver/tests/fixtures/retro_tweezer_motion.json, the
+/// gate's RETRO): at the step the local reads keep, 0.046 us, its loss at 100 us reads 0.107 against the truth table's converged
+/// 0.169 (7936 trajectories at a step eight times finer than the line's then, 0.059 us, its model one explicit excited state more),
+/// two to three times its tolerance -- the hot tail's jump rate errs ten times the bulk's, and no read before the run sees it. The
+/// check reads it in the product's batches -- 1.3 times its tolerance, unsettled (B⁻ 0.69, B⁺ 1.90) where more reads cost more
+/// than they could save --, refines, and the step it ends at holds the loss within its tolerance of the truth and the solve's own
+/// statistics.
+#[test]
+fn the_loss_s_check_refines_the_retro_tweezer(){
+    let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/retro_tweezer_motion.json")).unwrap();
+    let mut r=scene::request(&fixture["payload"]);r.times_us=(0..21).map(|i|5.*i as f64).collect();
+    let s=solve(&r,Device::Cpu,&mut |_,_|{}).unwrap();let c=s.loss_check.as_ref().expect("a run that loses atoms is checked");
+    println!("dt {:.4} us, {} trajectories, loss at 100 us {:.3} ± {:.3}; {c:?}",s.time_step_us,s.trajectories,s.loss_probability[20],s.sample_errors[20]);
+    assert!(!c.refined.is_empty()&&s.time_step_us<0.05,"the check refines the step the local reads keep: {c:?}, dt {}",s.time_step_us);
+    let(truth,tolerance)=(0.169,BIAS_SHARE*POPULATION_TARGET);
+    assert!((s.loss_probability[20]-truth).abs()<=tolerance+2.*s.sample_errors[20],"the loss {} against the truth {truth}",s.loss_probability[20]);
+    let flagged=s.approximations.flagged.as_deref().unwrap_or("");
+    assert_eq!(c.verified,!flagged.contains("步长对损失的偏差未能验证"),"an unverified step is flagged: {flagged}");
+}
+
+/// The loss's check verifies the shallow trap's cycling control (check.rs; the gate's CONTROL_CYCLE, rust-solver/tests/fixtures/
+/// shallow_cycle_motion.json): its reads take at most a pilot's work (32 trajectories over the run), and the bias they read lies
+/// within the loss's tolerance by its errors (its truth: the loss within 0.6 of its tolerance at the line's step); the step the local
+/// reads keep stands, verified.
+#[test]
+fn the_loss_s_check_verifies_the_cycling_control_within_a_pilot_s_work(){
+    let fixture:Value=serde_json::from_str(include_str!("../../tests/fixtures/shallow_cycle_motion.json")).unwrap();
+    let mut r=scene::request(&fixture["payload"]);r.times_us=(0..31).map(|i|10.*i as f64).collect();
+    let s=solve(&r,Device::Cpu,&mut |_,_|{}).unwrap();let c=s.loss_check.as_ref().expect("every run is checked");
+    let steps=(10./s.time_step_us).round();let(work,pilot)=(c.reads as f64*3.*c.span as f64,FIRST_GROUPS as f64*30.*steps);
+    println!("dt {:.4} us, {} trajectories, the check's cost {:.2} % of the product; {c:?}",s.time_step_us,s.trajectories,100.*work/(s.trajectories as f64*30.*steps));
+    assert!(c.verified&&c.refined.is_empty(),"the check verifies the step: {c:?}");
+    assert!(work<=pilot,"its reads' work {work} against a pilot's {pilot}");
 }

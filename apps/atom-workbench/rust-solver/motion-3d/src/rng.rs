@@ -29,6 +29,8 @@ pub enum Purpose{
     Jump=3,
     /// A pilot trajectory's initial state.
     Pilot=4,
+    /// The loss's check (check.rs `drawn`): the step a trajectory's read is drawn at in output interval i and its inclusion's deviate (event 2i).
+    Check=5,
 }
 
 /// A stream: Philox blocks at the counter (block, event, trajectory) under the key (seed, purpose).

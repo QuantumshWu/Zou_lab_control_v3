@@ -4,6 +4,7 @@
 //! its front end, the generator with the excited states eliminated, on the small dense linear
 //! algebra of `linear`.
 pub mod control;
+pub mod check;
 pub(crate) mod cost;
 pub mod eigen;
 pub mod engine;
@@ -177,8 +178,9 @@ fn initial_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,purpos
 
 /// The outputs of a run: one group per `group` trajectories, sums at every output time, the held
 /// atoms' (r, κ) at the listed outputs, the jumps made, and the
-/// largest bound per unit time of the beats the exact steps left out (`Trajectory::beats`).
-pub struct Outcome{pub groups:Vec<Group>,pub samples:Vec<Vec<([f64;3],[f64;3])>>,pub jumps:u64,pub beats:f64}
+/// largest bound per unit time of the beats the exact steps left out (`Trajectory::beats`); with the loss's check's sampling, per
+/// trajectory in their order what it leaves the check (check.rs `Trace`).
+pub struct Outcome{pub groups:Vec<Group>,pub samples:Vec<Vec<([f64;3],[f64;3])>>,pub jumps:u64,pub beats:f64,pub traces:Vec<check::Trace>}
 
 /// The most trajectories a task sums one after another: its sums (one per output time) stay few
 /// while the trajectories run one at a time on whichever thread is free.
@@ -201,51 +203,52 @@ pub(crate) const TASK:u64=8;
 ///
 /// With `harmonic`, every trajectory's harmonic control at every output (control.rs).
 pub fn simulate(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],harmonic:Option<&Harmonic>)->Outcome{
-    run(model,settings,initial,seed,first,count,group,steps,outputs,listed,None,harmonic,None)
+    run(model,settings,initial,seed,first,count,group,steps,outputs,listed,None,harmonic,None,None)
 }
 /// The same with the g-th group's trajectories run only through the output `ends[g]` (solve.rs # Batches): half a period past
-/// it, as past a run's last, so that T's windows there are whole; its sums count no trajectories beyond.
-pub fn simulate_to(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],harmonic:Option<&Harmonic>,ends:&[usize])->Outcome{
-    run(model,settings,initial,seed,first,count,group,steps,outputs,listed,None,harmonic,Some(ends))
+/// it, as past a run's last, so that T's windows there are whole; its sums count no trajectories beyond. With `check`, the
+/// loss's check's reads in its intervals and each trajectory's trace (check.rs).
+pub fn simulate_to(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],harmonic:Option<&Harmonic>,ends:&[usize],check:Option<&check::Sampling>)->Outcome{
+    run(model,settings,initial,seed,first,count,group,steps,outputs,listed,None,harmonic,Some(ends),check)
 }
 /// The same with every atom started at rest at r.
 pub fn simulate_from(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],r:[f64;3])->Outcome{
-    run(model,settings,initial,seed,first,count,group,steps,outputs,listed,Some(r),None,None)
+    run(model,settings,initial,seed,first,count,group,steps,outputs,listed,Some(r),None,None,None)
 }
-fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],origin:Option<[f64;3]>,harmonic:Option<&Harmonic>,ends:Option<&[usize]>)->Outcome{
-    let engine=Engine::new(model,settings.clone());
+fn run(model:&Model,settings:&Settings,initial:&Initial,seed:u64,first:u64,count:u64,group:u64,steps:usize,outputs:usize,listed:&[usize],origin:Option<[f64;3]>,harmonic:Option<&Harmonic>,ends:Option<&[usize]>,check:Option<&check::Sampling>)->Outcome{
+    let engine=Engine::new(model,settings.clone());let fine=check.map(|_|Engine::new(model,settings.halved()));let check=check.zip(fine.as_ref());
     // The tasks in order: (their group, their first trajectory, the one after their last).
     let bounds=|g:u64|(first+g*group,(first+(g+1)*group).min(first+count));
     let tasks:Vec<(u64,u64,u64)>=(0..count.div_ceil(group)).flat_map(|g|{let(start,end)=bounds(g);(start..end).step_by(TASK as usize).map(move|s|(g,s,(s+TASK).min(end)))}).collect();
     // How many outputs a group's trajectories run through.
     let through=|g:u64|ends.map_or(outputs,|e|e[g as usize]+1);
     let slots:Vec<Mutex<Slot>>=tasks.iter().map(|&(g,from,to)|Mutex::new(Slot{sums:Group::reaching(outputs,through(g),(to-from) as usize),samples:vec![vec![];listed.len()],next:from,
-        waiting:(from..to).map(|_|None).collect(),jumps:0,beats:0.})).collect();
+        waiting:(from..to).map(|_|None).collect(),jumps:0,beats:0.,traces:vec![]})).collect();
     (0..count as usize).into_par_iter().with_max_len(1).for_each_init(||(Windows::new(settings,steps,outputs),vec![None;outputs]),|(windows,held),n|{
         let index=first+n as u64;let k=tasks.partition_point(|t|t.1<=index)-1;let(g,from,to)=tasks[k];let(start,end)=bounds(g);
         let mut bare=initial_from(model,settings,initial,seed,Purpose::Initial,index,Stratum{first:start,size:end-start});
         if let Some(r)=origin{bare.r=r;bare.kappa=[0.;3];}
         let(r0,k0)=(settings.about_site(bare.r),bare.kappa);
         let reach=through(g);let mut t=dressed(model,bare);
-        let(mut atoms,samples,_,_)=walk(model,&engine,&mut t,steps,reach,listed,windows,held,None);atoms.truncate(reach);
-        let record=Record{atoms,start:(r0,k0),samples,jumps:t.jumps,beats:t.beats};
+        let(mut atoms,samples,_,_,trace)=walk(model,&engine,&mut t,steps,reach,listed,windows,held,None,check);atoms.truncate(reach);
+        let record=Record{atoms,start:(r0,k0),samples,jumps:t.jumps,beats:t.beats,trace};
         // Into its task in order: it and every trajectory after it that already waits.
         let mut guard=slots[k].lock().unwrap_or_else(|e|e.into_inner());let slot=&mut *guard;slot.waiting[(index-from) as usize]=Some(record);
         while slot.next<to{
             let at=(slot.next-from) as usize;let Some(r)=slot.waiting[at].take() else{break};
             for(i,atom)in r.atoms.iter().enumerate(){slot.sums.add(i,atom.as_ref().map(atom_of).as_ref(),harmonic.map_or([0.;3],|h|h.value(i,r.start.0,r.start.1)));}
             for(k,x)in r.samples.into_iter().enumerate(){if let Some(x)=x{slot.samples[k].push(x);}}
-            slot.jumps+=r.jumps;slot.beats=slot.beats.max(r.beats);slot.next+=1;
+            slot.jumps+=r.jumps;slot.beats=slot.beats.max(r.beats);if let Some(x)=r.trace{slot.traces.push(x);}slot.next+=1;
         }
     });
     // A group's tasks merged in order: the sums do not depend on the threads.
-    let mut samples=vec![vec![];listed.len()];let(mut jumps,mut beats)=(0,0_f64);let mut out:Vec<Group>=vec![];let mut last=None;
+    let mut samples=vec![vec![];listed.len()];let(mut jumps,mut beats)=(0,0_f64);let mut out:Vec<Group>=vec![];let mut last=None;let mut traces=vec![];
     for(&(g,_,_),slot)in tasks.iter().zip(slots){
         let slot=slot.into_inner().unwrap_or_else(|e|e.into_inner());
         if last==Some(g){out.last_mut().unwrap().merge(&slot.sums);}else{out.push(slot.sums);last=Some(g);}
-        for(k,v)in slot.samples.into_iter().enumerate(){samples[k].extend(v);}jumps+=slot.jumps;beats=beats.max(slot.beats);
+        for(k,v)in slot.samples.into_iter().enumerate(){samples[k].extend(v);}jumps+=slot.jumps;beats=beats.max(slot.beats);traces.extend(slot.traces);
     }
-    Outcome{groups:out,samples,jumps,beats}
+    Outcome{groups:out,samples,jumps,beats,traces}
 }
 
 /// A held atom at an output: its motion's window means, populations, folded excited population (η²),
@@ -256,36 +259,43 @@ fn atom_of(m:&Moment)->Atom<'_>{Atom{motion:m.0,populations:&m.1,folded:m.2,prof
 /// A trajectory's walk through the outputs (`run`, `sample_states`): `steps` steps between outputs and
 /// half a period past the last (its windows' far halves); per output its atom if held, its (r, κ) at
 /// the listed outputs, with `keep` its state at every keep-th output after t = 0 (staggered by its
-/// index), and the jumps it made up to the last output.
-fn walk(model:&Model,engine:&Engine,t:&mut Trajectory,steps:usize,outputs:usize,listed:&[usize],windows:&mut Windows,held:&mut [Option<([f64;STATES],f64,f64,f64)>],keep:Option<usize>)
-    ->(Vec<Option<Moment>>,Vec<Option<([f64;3],[f64;3])>>,Vec<Trajectory>,u64){
+/// index), and the jumps it made up to the last output; with `check`, what it leaves the loss's check (check.rs `Trace`): its
+/// energy at every output, and in every interval at the step drawn there its read where drawn.
+fn walk(model:&Model,engine:&Engine,t:&mut Trajectory,steps:usize,outputs:usize,listed:&[usize],windows:&mut Windows,held:&mut [Option<([f64;STATES],f64,f64,f64)>],keep:Option<usize>,check:Option<(&check::Sampling,&Engine)>)
+    ->(Vec<Option<Moment>>,Vec<Option<([f64;3],[f64;3])>>,Vec<Trajectory>,u64,Option<check::Trace>){
     windows.clear();held.fill(None);let mut samples=vec![None;listed.len()];let mut kept=vec![];
+    let mut trace=check.map(|_|check::Trace::new(outputs));
+    let energy=|t:&Trajectory,trace:&mut Option<check::Trace>|if let Some(x)=trace{x.output(engine,t.alive.then_some(t));};
     let mut record=|t:&Trajectory,i:usize,held:&mut [Option<([f64;STATES],f64,f64,f64)>]|{
         if !t.alive{return;}
         let point=model.point(t.r,t.kappa);
         let(populations,folded)=model.readout(t.cluster,&point,&t.psi,t.time);held[i]=Some((populations,folded,model.profile_error(t.r),model.doppler_ratio(t.kappa)));
         if let Some(k)=listed.iter().position(|&l|l==i){samples[k]=Some((t.r,t.kappa));}
     };
-    record(t,0,held);windows.add(0,t);
+    record(t,0,held);windows.add(0,t);energy(t,&mut trace);
     for i in 1..outputs{
-        for k in 1..=steps{if t.alive{engine.step(t);if t.alive{windows.add((i-1)*steps+k,t);}}}
-        record(t,i,held);
+        let drawn=check.map(|_|check::drawn(t.seed,t.index,i,steps));
+        for k in 1..=steps{
+            if let(Some((sampling,fine)),Some((at,deviate)),Some(x))=(check,drawn,trace.as_mut()){if k-1==at&&t.alive{x.look(engine,fine,sampling,t,i,deviate);}}
+            if t.alive{engine.step(t);if t.alive{windows.add((i-1)*steps+k,t);}}
+        }
+        record(t,i,held);energy(t,&mut trace);
         if let Some(every)=keep{if t.alive&&(i+t.index as usize)%every==0{kept.push(t.clone());}}
     }
     let jumps=t.jumps;
     for k in 1..=windows.reach{if t.alive{engine.step(t);if t.alive{windows.add((outputs-1)*steps+k,t);}}}
-    (held.iter().enumerate().map(|(i,p)|p.map(|(populations,folded,profile,doppler)|(windows.means(i),populations,folded,profile,doppler))).collect(),samples,kept,jumps)
+    (held.iter().enumerate().map(|(i,p)|p.map(|(populations,folded,profile,doppler)|(windows.means(i),populations,folded,profile,doppler))).collect(),samples,kept,jumps,trace)
 }
 
 /// A trajectory's part of its task's sums, kept until the trajectories before it in the task are added
 /// (`run`): per output the held atom's motion means, populations, folded excited population (η²),
 /// profile error and (kv/σ)², its
 /// initial (r, κ) (the harmonic control's), its (r, κ) at the listed outputs and
-/// its jumps.
-struct Record{atoms:Vec<Option<Moment>>,start:([f64;3],[f64;3]),samples:Vec<Option<([f64;3],[f64;3])>>,jumps:u64,beats:f64}
+/// its jumps and its trace for the loss's check.
+struct Record{atoms:Vec<Option<Moment>>,start:([f64;3],[f64;3]),samples:Vec<Option<([f64;3],[f64;3])>>,jumps:u64,beats:f64,trace:Option<check::Trace>}
 /// A task's sums so far: its trajectories added in order up to `next`, the ones after it that
 /// finished early waiting.
-struct Slot{sums:Group,samples:Vec<Vec<([f64;3],[f64;3])>>,next:u64,waiting:Vec<Option<Record>>,jumps:u64,beats:f64}
+struct Slot{sums:Group,samples:Vec<Vec<([f64;3],[f64;3])>>,next:u64,waiting:Vec<Option<Record>>,jumps:u64,beats:f64,traces:Vec<check::Trace>}
 
 /// The T windows' half widths per lab axis (steps): half a trap period with `Settings::average`, else
 /// none.
@@ -344,19 +354,20 @@ impl Windows{
 /// A pilot: `count` trajectories over the outputs, the held atoms' states at every output kept (at
 /// most a few thousand, evenly thinned), the jumps they made, and each trajectory's sums (a group of
 /// one, with its harmonic control): the statistics' first prediction (solve.rs, # Batches).
-pub fn sample_states(model:&Model,settings:&Settings,initial:&Initial,seed:u64,count:u64,steps:usize,outputs:usize,harmonic:&Harmonic)->(Vec<Trajectory>,u64,Vec<Group>){
+pub fn sample_states(model:&Model,settings:&Settings,initial:&Initial,seed:u64,count:u64,steps:usize,outputs:usize,harmonic:&Harmonic,check:Option<&check::Sampling>)->(Vec<Trajectory>,u64,Vec<Group>,Vec<check::Trace>){
     let engine=Engine::new(model,settings.clone());
     let every=((count as usize*outputs)/4096).max(1);
-    let runs:Vec<(Vec<Trajectory>,u64,Group)>=(0..count).into_par_iter().map_init(||(Windows::new(settings,steps,outputs),vec![None;outputs]),|(windows,held),index|{
+    let fine=check.map(|_|Engine::new(model,settings.halved()));let check=check.zip(fine.as_ref());
+    let runs:Vec<(Vec<Trajectory>,u64,Group,Option<check::Trace>)>=(0..count).into_par_iter().map_init(||(Windows::new(settings,steps,outputs),vec![None;outputs]),|(windows,held),index|{
         let mut t=pilot_start(model,settings,initial,seed,index);let(r0,k0)=(settings.about_site(t.r),t.kappa);
-        let(atoms,_,kept,jumps)=walk(model,&engine,&mut t,steps,outputs,&[],windows,held,Some(every));
+        let(atoms,_,kept,jumps,trace)=walk(model,&engine,&mut t,steps,outputs,&[],windows,held,Some(every),check);
         let mut sums=Group::new(outputs,1);
         for(i,atom)in atoms.iter().enumerate(){sums.add(i,atom.as_ref().map(atom_of).as_ref(),harmonic.value(i,r0,k0));}
-        (kept,jumps,sums)
+        (kept,jumps,sums,trace)
     }).collect();
-    let jumps=runs.iter().map(|r|r.1).sum();let mut states=vec![];let mut groups=vec![];
-    for(kept,_,sums)in runs{states.extend(kept);groups.push(sums);}
-    (states,jumps,groups)
+    let jumps=runs.iter().map(|r|r.1).sum();let(mut states,mut groups,mut traces)=(vec![],vec![],vec![]);
+    for(kept,_,sums,trace)in runs{states.extend(kept);groups.push(sums);traces.extend(trace);}
+    (states,jumps,groups,traces)
 }
 
 #[cfg(test)]
