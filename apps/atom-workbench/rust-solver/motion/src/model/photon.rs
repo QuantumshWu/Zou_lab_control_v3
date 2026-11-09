@@ -149,6 +149,14 @@ impl Model {
         }
     }
 
+    /// The complex multiply-adds of one `jump`: a near source's sum over the excited states, its value and gradient.
+    pub(crate) fn jump_work(&self, source: &Source) -> f64 {
+        match source.jumps {
+            Jumps::Constant(_) => 0.0,
+            Jumps::Near { .. } => (4 * super::far::EXCITED) as f64,
+        }
+    }
+
     /// A bound of a source's jump b ← s on axis a anywhere: a constant one's entry; a near beam's |C_a[b, ·]| times the norm of its
     /// folded coupling's column at s, times 2/Γ_min (its response's resolvent is at most 2/Γ_min).
     fn jump_bound(&self, source: &Source, a: usize, b: usize, s: usize) -> f64 {
