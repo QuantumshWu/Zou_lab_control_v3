@@ -1,0 +1,43 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>A bracket's count shows its badge, its step and its digits apart</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. The end post's Repeats box holds a source badge inside its
+// edit, before the chevrons: the ±1 chip and the digits stand before the badge, never on it;
+// the chip gives its room to digits that need it.
+import {ValueBox} from '../dist/pulse/widgets.js';
+import {SpinBox} from '../dist/fluent/spin.js';
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const results = [];
+const field = (source, scan, text) => ({text, editable: true, scan, source, can_scan: true, can_api: true, effective_text: text, source_text: '', config_key: '',
+  validator_kind: 'int', validator_lo: 1, validator_hi: 4294967295, resolution: 0, allow_any: false, field_id: 'bracket_count:b1', config_names: [],
+  config_active: false, config_enabled: false, default_text: text, binding_editable: true});
+const frame = () => new Promise(resolve => setTimeout(resolve, 50));
+try {
+  for (const [source, scan, text] of [['default', false, '5'], ['api', false, '12'], ['default', true, '1200'], ['api', true, '4294967295']]) {
+    const card = document.createElement('section'); card.className = 'card bordered pulse-card pulse-post';
+    const box = new ValueBox(() => 0, () => {}, 'pulse'); box.root.classList.add('pulse-count');
+    const spin = new SpinBox(box.root, box.box.root, {step: () => 1, bounds: () => [1, null], commit: () => {}});
+    card.append(box.root); document.body.append(card); box.show(field(source, scan, text)); spin.refresh();
+    await frame(); await frame();
+    const badge = box.badge.getBoundingClientRect();
+    const chip = box.root.querySelector('.step-chip');
+    const input = box.box.root, style = getComputedStyle(input);
+    const textEnd = input.getBoundingClientRect().right - parseFloat(style.paddingRight) - parseFloat(style.borderRightWidth);
+    assert(textEnd <= badge.left + 0.5, `${text}: digits end ${textEnd} past the badge at ${badge.left}`);
+    if (getComputedStyle(chip).display !== 'none') {
+      const ink = chip.firstElementChild.getBoundingClientRect();
+      assert(ink.right <= badge.left + 0.5, `${text}: the chip ends ${ink.right} past the badge at ${badge.left}`);
+      assert(textEnd <= ink.left + 0.5, `${text}: the digits run into the chip`);
+    } else assert(text !== '5', `${text}: a one-digit count keeps its ±1 chip`);
+    // A longer count takes the chip's room, as in every number box (chip-yields).
+    results.push(`${source}${scan ? '+scan' : ''} ${text}`);
+  }
+  document.getElementById('result').textContent = JSON.stringify({passed: true, count: results.length, results});
+} catch (error) {
+  document.getElementById('result').textContent = JSON.stringify({passed: false, error: String(error.stack || error), results});
+}
+</script>

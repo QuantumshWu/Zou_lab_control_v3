@@ -167,17 +167,24 @@ function readingInk(stroke: string): string {
 }
 
 /** A bracket post (BracketPost): a column of the cards' height and header
- * block, titled "Bracket N" in the bracket's reading ink with its colour on
- * the edge; the end post closes the span with its Repeats count (a count
- * box with its source badge), the start post keeps those lines empty. */
+ * block, titled with the bracket's name in its reading ink with its colour on
+ * the edge; the start post opens the span with its Name (how its fields read,
+ * `name.repeats`), the end post closes it with its Repeats count (a count box
+ * with its source badge). */
 class BracketPost {
   readonly root = element("section", "card bordered pulse-card pulse-post");
   private label = element("div", "heading pulse-title");
   private count: ValueBox | null = null;
   private spin: SpinBox | null = null;
+  private name: TextBox | null = null;
   constructor(readonly bracketId: string, readonly side: "start" | "end", private send: Send, private owner: Owner) {
     this.root.dataset.item = itemKey(["bracket", `${bracketId}:${side}`]);
-    this.root.append(line(this.label), line(side === "end" ? "Repeats" : ""));
+    if (side === "start") {
+      const name = this.name = new TextBox(text => this.rename(text));
+      name.root.placeholder = "Name";
+      name.root.classList.add("pulse-post-name");
+      this.root.append(line(this.label), line(name.root));
+    } else this.root.append(line(this.label), line("Repeats"));
     if (side === "end") {
       const count = this.count = new ValueBox(send, text => this.commitCount(text), owner);
       count.tip = "Edit repeat value source";
@@ -188,6 +195,11 @@ class BracketPost {
     }
   }
   private bracket: BracketVM | null = null;
+  private rename(text: string): void {
+    const bracket = this.bracket;
+    if (!bracket || !text.trim() || text.trim() === bracket.name) { if (bracket) this.name?.show(bracket.name, !bracket.readonly); return; }
+    this.send(editCommand(this.owner, "bracket_name", { bracket_id: bracket.bracket_id, name: text.trim() }), "Renaming the bracket…");
+  }
   private commitCount(text: string): void {
     const bracket = this.bracket;
     const count = Number(text);
@@ -198,8 +210,9 @@ class BracketPost {
     this.bracket = bracket;
     this.root.style.setProperty("--bracket-ink", bracket.color);
     this.label.style.color = readingInk(bracket.color);
-    setText(this.label, `Bracket ${bracket.ordinal}`);
-    setTitle(this.root, `Bracket ${bracket.ordinal}: drag to move this boundary`);
+    setText(this.label, bracket.name);
+    setTitle(this.root, `${bracket.name}: drag to move this boundary`);
+    this.name?.show(bracket.name, !bracket.readonly);
     this.count?.show({ ...bracket.count_field, text: String(bracket.count) }, !bracket.readonly);
     this.spin?.refresh();
   }

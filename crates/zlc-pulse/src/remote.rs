@@ -39,6 +39,18 @@ fn typed(name: &str, mut items: Vec<(&str, Json)>) -> Json {
     Json::object(items)
 }
 
+/// The brackets as the board's wire knows them (v2 PulseBracket): a name only says how a
+/// field reads, which the board never asks.
+fn unnamed(brackets: Json) -> Json {
+    match brackets {
+        Json::Array(items) => Json::Array(items.into_iter().map(|item| match item {
+            Json::Object(fields) => Json::Object(fields.into_iter().filter(|(key, _)| key != "name").collect()),
+            other => other,
+        }).collect()),
+        other => other,
+    }
+}
+
 /// Strip `__type__` markers, leaving the plain dataclass trees.
 fn untyped(value: &Json) -> Json {
     match value {
@@ -98,7 +110,7 @@ pub fn sequence_tree(sequence: &Sequence) -> Json {
     ])).collect());
     typed("PulseSequence", vec![
         ("name", get("name")), ("target", target_tree(&sequence.target)), ("time_step_ns", get("time_step_ns")), ("periods", periods),
-        ("bindings", bindings), ("delays", wrap("OutputDelay", get("delays"))), ("brackets", wrap("PulseBracket", get("brackets"))),
+        ("bindings", bindings), ("delays", wrap("OutputDelay", get("delays"))), ("brackets", wrap("PulseBracket", unnamed(get("brackets")))),
         ("run_repeats", get("run_repeats")),
         ("components", match items.iter().find(|(name, _)| name == "components") { Some((_, value)) => wrap("PulseComponent", value.clone()), None => Json::Array(vec![]) }),
         ("config_enabled", get("config_enabled")),

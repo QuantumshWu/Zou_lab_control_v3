@@ -4,12 +4,12 @@
 //! kept. Board work is handed out as [`Job`]s for the host to run off its
 //! window thread (`session.rs`); their outcomes come back through
 //! [`Editor::deliver`]. The window renders [`Editor::state`] and nothing else.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
-use zlc_pulse::binding::{apply_config_values, field_label, prune_orphaned_bindings, pulse_field_value, resolve_api_parameters,
+use zlc_pulse::binding::{apply_config_values, field_label, prune_orphaned_bindings, refuse_new_label_clash, pulse_field_value, resolve_api_parameters,
                          resolve_subpulse_sources, stale_subpulse_bindings};
 use zlc_pulse::codec::{ConfigValues, EditorSection, absolute, atomic_write, document_to_tree, read_config_values, read_pulse_document,
                        read_subpulse, write_config_values, write_subpulse};
@@ -94,6 +94,9 @@ pub struct Editor {
     pub(crate) selected_subpulse: String,
     pub(crate) subpulse_draft: Option<Subpulse>,
     pub(crate) subpulse_saved: Option<Subpulse>,
+    /// Each Subpulse of the Pulse as it stood when it was opened here or last saved to its
+    /// file: what its Save compares against (an instance is dirty when it differs).
+    pub(crate) instance_saved: BTreeMap<String, Subpulse>,
     pub(crate) subpulse_path: String,
     pub(crate) subpulse_visible: Option<BTreeSet<String>>,
     // ---- Scan, Target, Preview
@@ -139,7 +142,7 @@ impl Editor {
             link: BoardLink { endpoint: format!("{}:{}", zlc_pulse::remote::DEFAULT_HOST, zlc_pulse::remote::DEFAULT_PORT), ..BoardLink::default() },
             config_path: String::new(), config_rows: Vec::new(), config_saved_rows: Vec::new(),
             config_loaded_path: String::new(), config_loaded_values: Vec::new(), config_read_error: String::new(), config_error: String::new(),
-            component_context: String::new(), selected_subpulse: String::new(), subpulse_draft: None, subpulse_saved: None,
+            component_context: String::new(), selected_subpulse: String::new(), subpulse_draft: None, subpulse_saved: None, instance_saved: BTreeMap::new(),
             subpulse_path: String::new(), subpulse_visible: None, scan_progress: (String::new(), "task"), scan_running: false,
             target_feedback: (String::new(), "idle"), target_feedback_at: 0, include_off: false, pinned_size: None, selectors: true, page: "Edit".into(),
             preview_status: (String::new(), "task"), message: None, messages: 0, last_warning: String::new(), summary_note: None,
@@ -303,6 +306,9 @@ impl Editor {
             Ok(sequence) => {
                 self.accept_state(EditorState { sequence: Some(Arc::new(sequence)), section: EditorSection::default() });
                 self.path.clear();
+                self.component_context.clear();
+                self.selected_subpulse.clear();
+                self.instance_saved.clear();
                 true
             }
             Err(error) => { self.warn(format!("Cannot start a pulse for this board: {error}")); false }
@@ -323,6 +329,7 @@ impl Editor {
         self.path = location.display().to_string();
         self.component_context.clear();
         self.selected_subpulse.clear();
+        self.instance_saved.clear();
         if let Some(facts) = self.link.facts.clone() { self.align_sequence_to(&facts.description); }
         Ok(json!({"path": self.path}))
     }
@@ -343,6 +350,7 @@ impl Editor {
         self.path.clear();
         self.component_context.clear();
         self.selected_subpulse.clear();
+        self.instance_saved.clear();
         if let Some(facts) = self.link.facts.clone() { self.align_sequence_to(&facts.description); }
         Ok(json!({"path": null}))
     }
@@ -395,7 +403,12 @@ impl Editor {
             ("pulse_scan", "load_program") => ("Open scan program", "Python source (*.py);;All files (*)", false, pulse_folder),
             ("pulse_subpulse", "open") => ("Open Subpulse", SUBPULSE, false, if self.subpulse_path.is_empty() { pulses.clone() } else { PathBuf::from(&self.subpulse_path) }),
             ("pulse_subpulse", "insert_file") => ("Add subpulse", SUBPULSE, false, pulses.clone()),
-            ("pulse_subpulse", "save_as" | "export") => {
+            ("pulse_subpulse", "save") if !self.component_context.is_empty() && self.state.sequence.as_ref()
+                .and_then(|s| s.components.iter().find(|c| c.component_id == self.component_context)).is_some_and(|c| c.config_path.is_empty()) => {
+                let name = self.state.sequence.as_ref().and_then(|s| s.components.iter().find(|c| c.component_id == self.component_context).map(|c| c.name.clone()));
+                ("Save Subpulse", SUBPULSE, true, pulses.join(format!("{}.subpulse.json", name.unwrap_or_else(|| "component".into()))))
+            }
+            ("pulse_subpulse", "save_as") => {
                 let key = optional_text(args, "component_id").unwrap_or_else(|| self.component_context.clone());
                 let name = if key.is_empty() { self.subpulse_draft.as_ref().map(|draft| draft.to_sequence().name.clone()) }
                            else { self.state.sequence.as_ref().and_then(|s| s.components.iter().find(|c| c.component_id == key).map(|c| c.name.clone())) };
@@ -472,9 +485,9 @@ impl Editor {
             };
             if refused { return refuse("This Subpulse comes from a file. Open its source, or switch to Default to edit its contents."); }
         }
-        if matches!(action, "duration" | "analog" | "digital" | "period_name" | "binding" | "bracket") {
+        if matches!(action, "duration" | "analog" | "digital" | "period_name" | "binding" | "bracket" | "bracket_name") {
             let id = py_str(&args[if action == "binding" { 1 } else { 0 }]);
-            let component = if action == "bracket" || (action == "binding" && args[0].as_str() == Some("bracket_count")) {
+            let component = if action == "bracket" || action == "bracket_name" || (action == "binding" && args[0].as_str() == Some("bracket_count")) {
                 sequence.component_for_field(&FieldRef::bracket_count(&id))
             } else { sequence.component_for_period(&id) };
             if component.is_some_and(|c| c.from_file()) {
@@ -514,6 +527,7 @@ impl Editor {
         let Some(sequence) = self.state.sequence.clone() else { return Err("open a pulse before editing it".into()) };
         let candidate = sequence.with(edit).map_err(|e| e.message)?;
         let (pruned, dropped) = prune_orphaned_bindings(&candidate).map_err(|e| e.message)?;
+        refuse_new_label_clash(&sequence, &pruned).map_err(|e| e.message)?;
         if !dropped.is_empty() { self.warn(format!("Unbound {}: the field it named is no longer set here", dropped.join(", "))); }
         self.edit_state(Some(Arc::new(pruned)), |_| {});
         Ok(Value::Null)
@@ -795,7 +809,15 @@ impl Editor {
                 self.selected_subpulse = key.to_owned();
                 self.component_context.clear();
             }
-            _ => { self.selected_subpulse = key.to_owned(); self.component_context = key.to_owned(); }
+            _ => {
+                self.selected_subpulse = key.to_owned();
+                self.component_context = key.to_owned();
+                if let (Some(component), Some(sequence)) = (component, self.state.sequence.as_ref()) {
+                    if !component.config_path.is_empty() && !self.instance_saved.contains_key(key) {
+                        if let Ok(opened) = extract_subpulse(sequence, key) { self.instance_saved.insert(key.to_owned(), opened); }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -857,7 +879,11 @@ impl Editor {
                 self.component_context.clear();
                 self.subpulse_visible = None;
             }
-            "select" | "context" => self.select_subpulse(&key, discard)?,
+            "select" | "context" => {
+                self.select_subpulse(&key, discard)?;
+                // A card's Edit opens the Subpulse where it is edited.
+                if action == "select" { self.page = "Subpulse Config".to_owned(); }
+            }
             "new" | "open" => {
                 if self.subpulse_draft != self.subpulse_saved && !discard {
                     return Err(value_error("Subpulse has unsaved changes; save it or explicitly pass discard_changes=true to replace the file draft"));
@@ -884,23 +910,33 @@ impl Editor {
                 self.selected_subpulse.clear();
                 self.subpulse_visible = None;
             }
-            "save" | "save_as" | "export" => {
-                if action == "save" && !self.component_context.is_empty() {
-                    let target = path.unwrap_or_else(|| self.path.clone());
-                    if target.is_empty() { return Err(value_error("supply path explicitly when saving the Pulse")); }
-                    self.save_pulse(&target).map_err(|message| Error::new(Kind::Value, message))?;
-                    return Ok(Value::Null);
-                }
-                let context = if action == "export" { if key.is_empty() { self.component_context.clone() } else { key.clone() } } else { self.component_context.clone() };
+            // A Subpulse is saved to its file, whether it is an independent file or a block
+            // of this Pulse: Save to the file it has, Save as to another, which it then names.
+            "save" | "save_as" => {
+                let context = self.component_context.clone();
                 let fragment = if context.is_empty() { self.selected_component_fragment() } else {
                     Some(extract_subpulse(sequence.as_ref().ok_or_else(|| value_error("open a Pulse first"))?, &context)?)
                 }.ok_or_else(|| value_error("create or open a Subpulse first"))?;
-                let target = path.or_else(|| (context.is_empty() && action == "save" && !self.subpulse_path.is_empty()).then(|| self.subpulse_path.clone()))
-                    .ok_or_else(|| value_error("supply path explicitly when saving or exporting a Subpulse"))?;
+                let own = if context.is_empty() { self.subpulse_path.clone() } else {
+                    sequence.as_ref().and_then(|s| s.components.iter().find(|c| c.component_id == context)).map(|c| c.config_path.clone()).unwrap_or_default()
+                };
+                let target = path.or_else(|| (action == "save" && !own.is_empty()).then_some(own))
+                    .ok_or_else(|| value_error("supply path explicitly when saving a Subpulse to a new file"))?;
                 let mut target = absolute(Path::new(&target));
                 if !target.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) { target.as_mut_os_string().push(".subpulse.json"); }
                 if let Some(parent) = target.parent() { let _ = std::fs::create_dir_all(parent); }
                 write_subpulse(&target, &fragment)?;
+                if !context.is_empty() {
+                    let written = target.display().to_string();
+                    if let Some(sequence) = &self.state.sequence {
+                        let current = sequence.components.iter().find(|c| c.component_id == context).cloned();
+                        if let Some(current) = current.filter(|c| c.config_path != written) {
+                            let candidate = set_subpulse_source(sequence, &current.component_id, current.source.name(), Some(&written))?;
+                            self.edit_state(Some(Arc::new(candidate)), |_| {});
+                        }
+                    }
+                    self.instance_saved.insert(context.clone(), fragment.clone());
+                }
                 if context.is_empty() {
                     self.subpulse_path = target.display().to_string();
                     self.subpulse_saved = Some(fragment);
@@ -971,6 +1007,7 @@ impl Editor {
                 if !target.is_empty() {
                     let sequence = sequence.ok_or_else(|| value_error("open a Pulse first"))?;
                     let candidate = sequence.with(|parts| for c in &mut parts.components { if c.component_id == target { c.name = name.clone(); } })?;
+                    refuse_new_label_clash(&sequence, &candidate)?;
                     self.edit_state(Some(Arc::new(candidate)), |_| {});
                 } else if let Some(draft) = self.subpulse_draft.clone() {
                     if self.selected_component_fragment().is_none() { return Err(value_error("open the selected Subpulse source before editing it")); }
@@ -1011,7 +1048,7 @@ impl Editor {
                 self.subpulse_action("rename", &renamed)?;
                 return Ok(());
             }
-            if matches!(action.as_str(), "period_name" | "duration" | "digital" | "analog" | "binding" | "config_binding") {
+            if matches!(action.as_str(), "period_name" | "bracket_name" | "duration" | "digital" | "analog" | "binding" | "config_binding") {
                 return self.edit(&action, &positional, true).map(|_| ()).map_err(|m| Error::new(Kind::Value, m));
             }
         }
@@ -1392,15 +1429,15 @@ impl Editor {
             vm
         });
         let selected_source = sequence.and_then(|s| s.components.iter().find(|c| c.component_id == self.selected_subpulse));
-        let path = if !context.is_empty() { String::new() } else if fragment.is_none() { selected_source.map_or_else(String::new, |c| c.config_path.clone()) }
+        let path = if !context.is_empty() { selected_source.map_or_else(String::new, |c| c.config_path.clone()) } else if fragment.is_none() { selected_source.map_or_else(String::new, |c| c.config_path.clone()) }
                    else { self.subpulse_path.clone() };
         let bindings: Vec<Value> = fragment.as_ref().map(|f| f.to_sequence().config_bindings().iter()
             .map(|b| json!([b.field_id(), field_label(f.to_sequence(), &b.field_ref).unwrap_or_default(), b.config_key])).collect()).unwrap_or_default();
         let page = json!({"sources": sources, "enabled": enabled, "busy": self.link.busy.is_some() || self.link.stopping, "error": self.config_error,
                "contexts": contexts, "context_id": context, "selected_id": self.selected_subpulse, "path": path,
-               "dirty": if context.is_empty() { fragment.is_some() && self.subpulse_draft != self.subpulse_saved } else { self.dirty() },
-               "bindings": bindings, "config_names": self.active_config_values().iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
-               "save_target": if context.is_empty() { "subpulse" } else { "pulse" }});
+               "dirty": if context.is_empty() { fragment.is_some() && self.subpulse_draft != self.subpulse_saved }
+                        else { fragment.is_some() && fragment.as_ref() != self.instance_saved.get(context.as_str()) },
+               "bindings": bindings, "config_names": self.active_config_values().iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()});
         crate::project::with_parts(page, [("document", document.unwrap_or(Value::Null))])
     }
 
@@ -1525,7 +1562,7 @@ impl Editor {
             "authored": sequence.map(|s| json!({"name": s.name, "time_step_ns": s.time_step_ns, "duration_seconds": s.played_nanoseconds() * 1e-9,
                 "total_text": readable(s.played_nanoseconds()),
                 "periods": s.periods.iter().map(|p| json!({"period_id": p.period_id, "name": p.name, "kind": p.kind.name(), "duration": p.duration.to_json_value(), "unit": p.unit})).collect::<Vec<_>>(),
-                "brackets": s.brackets.iter().map(|b| json!({"bracket_id": b.bracket_id, "start_period_id": b.start_period_id, "end_period_id": b.end_period_id, "count": b.count})).collect::<Vec<_>>(),
+                "brackets": s.brackets.iter().map(|b| json!({"bracket_id": b.bracket_id, "name": b.name, "start_period_id": b.start_period_id, "end_period_id": b.end_period_id, "count": b.count})).collect::<Vec<_>>(),
                 "bindings": s.bindings.iter().map(|b| json!({"field_id": b.field_id(), "label": field_label(s, &b.field_ref).unwrap_or_default(), "unit": b.unit,
                     "scan": b.scan, "source": b.source.name(), "config_key": b.config_key, "field_kind": crate::project::field_kind_word(b.kind())})).collect::<Vec<_>>(),
                 "ports": s.target.ports.iter().map(|p| json!({"key": p.key, "label": p.label, "kind": p.kind.name(), "lanes": p.lanes,
