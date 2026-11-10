@@ -196,7 +196,7 @@ impl Model {
         let mut out = vec![];
         for (j, x2) in t2.couplings[side].iter().enumerate() {
             for (i, x1) in t1.couplings[side].iter().enumerate() {
-                let mut m = super::far::van_vleck(&self.energies, x2, nu2, x1, nu1);
+                let mut m = super::far::second_order(&self.energies, x2, &t2.responses[side][j], nu2, x1, &t1.responses[side][i], nu1);
                 if !first.counter {
                     for p in 0..3 {
                         for q in 0..3 {
