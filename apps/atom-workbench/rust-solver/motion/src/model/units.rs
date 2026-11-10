@@ -916,9 +916,9 @@ mod tests {
     use crate::model::Point;
     use crate::request::Request;
 
-    /// A reference scene's model closed over its request's reach (solve.rs `attempt`: every unit whose gate fails kept).
+    /// A scene's model (a reference scene by name, or a native request by its path) closed over its request's reach (solve.rs `attempt`: every unit whose gate fails kept).
     fn closed(scene: &str) -> (Model, [f64; 3]) {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{scene}.json"));
+        let path = if scene.ends_with(".json") { std::path::PathBuf::from(scene) } else { std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{scene}.json")) };
         let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let request = Request::from_native(&line).unwrap();
         let light = Light::new(&request);
@@ -1016,6 +1016,17 @@ mod tests {
     /// drives' couplings V, and the excited block K − δ the eliminations take there --, the eigenvalues nearest the real
     /// axis, by their real parts.
     fn eliminated(model: &Model, cluster: usize, carrier: usize, r: [f64; 3]) -> Vec<C64> {
+        let n = model.clusters[cluster].ground;
+        let mut values = crate::linalg::eigen(&no_jump(model, cluster, carrier, r)).expect("the generator has its eigenvalues").values;
+        values.sort_by(|a, b| b.im.total_cmp(&a.im));
+        values.truncate(n);
+        values.sort_by(|a, b| a.re.total_cmp(&b.re));
+        values
+    }
+
+    /// The no-jump generator of a cluster's ground states with every excited state at a point, the atom at rest
+    /// (`eliminated`): the ground states first.
+    fn no_jump(model: &Model, cluster: usize, carrier: usize, r: [f64; 3]) -> Mat {
         use crate::step::Middle as _;
         let (c, cc) = (&model.clusters[cluster], &model.carriers[carrier]);
         let n = c.ground;
@@ -1026,17 +1037,66 @@ mod tests {
         middle.generator(&middle.path([0.0; 3], [0.0; 3]), 0.0, &mut ground);
         let h = &model.far_hamiltonian(&amplitudes, &model.running(), 0, &model.coherent_dressing())[0];
         let frame = model.omega(&c.frames[0]) + cc.detuning;
-        let whole = Mat::from_fn(n + EXCITED, n + EXCITED, |x, y| match (x < n, y < n) {
+        Mat::from_fn(n + EXCITED, n + EXCITED, |x, y| match (x < n, y < n) {
             (true, true) => ground[(x, y)],
             (false, true) => cc.beams.iter().zip(&cc.folded).map(|(&l, m)| amplitudes[l].value * m[(GROUND + x - n, c.states[y])]).sum(),
             (true, false) => cc.beams.iter().zip(&cc.folded).map(|(&l, m)| amplitudes[l].value * m[(GROUND + y - n, c.states[x])]).sum::<C64>().conj(),
             (false, false) => h[(GROUND + x - n, GROUND + y - n)] - model.decay[(x - n, y - n)] * C64::new(0.0, 0.5) - if x == y { C64::real(frame) } else { C64::ZERO },
-        });
-        let mut values = crate::linalg::eigen(&whole).expect("the generator has its eigenvalues").values;
-        values.sort_by(|a, b| b.im.total_cmp(&a.im));
-        values.truncate(n);
-        values.sort_by(|a, b| a.re.total_cmp(&b.re));
-        values
+        })
+    }
+
+    /// Where a jump lands, against the exact elimination (model.rs `Model::landed`; assemble.rs, # The fourth order): the
+    /// lin-perp-lin scenes, the cluster F=2 m = −2, 0, 2 with its D2 drives at the atom at the fourth order. A bare
+    /// ground state f is the slow subspace's part of it and a fast part that decays at once: exactly, the part is
+    /// P (f, 0) with P the spectral projector of the no-jump generator onto its three slow eigenvectors, the prompt
+    /// photon's probability 1 − ‖P (f, 0)‖²/‖f‖², and the slow state's coordinates (1 + ½X) times the part's ground
+    /// amplitudes. The model's p and Π f are these to the next order, s² -- p itself is about half the landing state's
+    /// share --, and the norm is kept on average by construction: ‖Π f‖² + p ‖f‖² = ‖f‖².
+    #[test]
+    fn a_jump_s_landing_is_the_exact_elimination_s_slow_part() {
+        for scene in ["R4_LIN_1", "R4_LIN_2", "R4_LIN_4"] {
+            let (closed, centre) = closed(scene);
+            let states = closed.clusters[closed.membership[3]].states.clone();
+            let cooling = Component { frequency: closed.driven.iter().find(|d| d.2 == 3 && closed.level(d.0, d.1, d.2) == Level::Atom).expect("a drive at the atom").0.frequency, counter: false };
+            let line = closed.driven.iter().filter(|&&(c, e, g)| c == cooling && states.contains(&g) && closed.bare_distance(c, e, g) < 5000.0);
+            let more: Vec<Unit> = line.map(|&(component, excited, ground)| Unit::Bare { component, excited, ground }).chain([Unit::Dressing { carrier: cooling }, Unit::Second { ground: 3 }]).collect();
+            let fourth = closed.rekept(&[closed.kept.clone(), more].concat()).unwrap();
+            let (cluster, carrier) = (fourth.membership[3], fourth.carrier_of(cooling.frequency).unwrap());
+            let plan = fourth.plan(cluster, &fourth.running());
+            assert!(plan.fourth.is_some(), "{scene}: the cluster's fold is the fourth order's");
+            let (mut s, mut worst, mut turned) = (0.0_f64, 0.0_f64, 0.0_f64);
+            for offset in [0.0, 0.05, 0.1, 0.17, 0.26] {
+                let r = [centre[0], centre[1], centre[2] + offset];
+                let at = Point { r, kappa: [0.0; 3], t: 0.0 };
+                let exact = crate::linalg::eigen(&no_jump(&fourth, cluster, carrier, r)).unwrap();
+                let mut order: Vec<usize> = (0..exact.values.len()).collect();
+                order.sort_by(|&a, &b| exact.values[b].im.total_cmp(&exact.values[a].im));
+                for f in [[C64::ONE, C64::ZERO, C64::ZERO], [C64::ZERO, C64::ONE, C64::ZERO], [C64::real(0.6), C64::new(0.0, 0.5), C64::real(-0.4)]] {
+                    let size = crate::linalg::norm_sqr(&f);
+                    // P (f, 0) = Σ_slow r_i (R⁻¹ (f, 0))_i.
+                    let mut part = vec![C64::ZERO; 3 + EXCITED];
+                    for &i in &order[..3] {
+                        let weight: C64 = (0..3).map(|y| exact.inverse[(i, y)] * f[y]).sum();
+                        for (x, z) in part.iter_mut().enumerate() {
+                            *z += exact.vectors[(x, i)] * weight;
+                        }
+                    }
+                    let prompt = 1.0 - crate::linalg::norm_sqr(&part) / size;
+                    let (slow, p) = fourth.landed(&plan, None, &at, &f);
+                    assert!((crate::linalg::norm_sqr(&slow) + p * size - size).abs() <= 1e-12 * size, "{scene}: the norm on average");
+                    worst = worst.max((p - prompt).abs());
+                    s = s.max(2.0 * prompt);
+                    // The slow state's direction: Π f against the exact part's ground amplitudes (to their common first
+                    // order they differ by the metric's half, of the order of p itself; the angle between them is s²).
+                    let overlap: C64 = (0..3).map(|x| slow[x].conj() * part[x]).sum();
+                    let ground: f64 = part[..3].iter().map(|z| z.norm_sqr()).sum();
+                    turned = turned.max(1.0 - overlap.norm_sqr() / (crate::linalg::norm_sqr(&slow) * ground));
+                }
+            }
+            eprintln!("{scene}: the largest prompt photon's probability {:.4}; the model's differs by at most {worst:.2e}; the slow state turned by at most {turned:.2e}", 0.5 * s);
+            assert!(worst <= 1.5 * s * s, "{scene}: p within the next order: {worst} for s = {s}");
+            assert!(turned <= s * s, "{scene}: the slow state within the next order: {turned} for s = {s}");
+        }
     }
 
     /// The fold's orders against the exact elimination, the atom frozen (module documentation, # The fold's order;
@@ -1112,7 +1172,9 @@ mod tests {
                     middle.generator(&middle.path([0.0; 3], [0.0; 3]), 0.0, &mut h);
                 }
                 let falls: f64 = (0..3).flat_map(|x| (0..3).map(move |y| (x, y))).map(|(x, y)| (psi[x].conj() * C64::I * (h[(x, y)] - h[(y, x)].conj()) * psi[y]).re).sum();
-                assert!((falls - photons).abs() <= 1e-10 * photons, "{scene}: the norm falls at {falls}, the photons' rate is {photons}");
+                // To the product of the fourth order and the first-order Doppler term (here the recoil shift, 3e-5 of the
+                // detuning, times s), which the photons' product holds and the middle's decay, made at rest, does not.
+                assert!((falls - photons).abs() <= 1e-5 * photons, "{scene}: the norm falls at {falls}, the photons' rate is {photons}");
             }
             let force = force.map(|f| f / steepest);
             eprintln!("{scene}: s = {s:.4}, the largest shift {largest:.2} rad/µs: potentials {:.2e} (second), {:.2e} (fourth); forces {:.2e}, {:.2e}; decay rates {:.2e}, {:.2e}", potential[0], potential[1], force[0], force[1], rate[0], rate[1]);
@@ -1172,6 +1234,8 @@ mod tests {
                 }
                 let each = |t: std::time::Duration| t.as_secs_f64() * 1e6 / rounds as f64;
                 let table = tables.of(cluster, &model.running()).map_or(0, |t| t.table.width());
+                let counted = run.middle(cluster, [centre[0] + 0.01, centre[1], centre[2] + 0.1], 0.0).work;
+                eprintln!("{name} {order}: cluster of ground state {ground}: the middle's counted work {counted:.0} complex multiply-adds, {:.2} ns each", each(times[0]) * 1e3 / counted);
                 eprintln!("{name} {order}: cluster of ground state {ground} ({n} states): the model's part of a step {:.2} µs (its middle {:.2}, its scattering {:.2}); table {table} reals a node, {} tables in {built:.2?} [{sink:.3e}]", each(times[1]) + each(times[2]), each(times[0]), each(times[2]), tables.tables.len());
             }
         }

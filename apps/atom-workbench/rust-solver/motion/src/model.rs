@@ -570,6 +570,22 @@ impl Model {
         of.all(|frequency| frequency == first).then_some(first)
     }
 
+    /// Where a jump's bare ground state f lands in a plan's cluster at a point (assemble.rs, # The fourth order). A bare
+    /// state is no slow state: it is the slow state Π f, Π = 1 + ½X − Y in the fold's coordinates, and a fast part that
+    /// decays within 1/Γ by one more photon -- with the probability p = 1 − ‖Π f‖²/‖f‖², about half the landing state's
+    /// share s. The slow state Π f and p; where the cluster's fold is the second order's, f and 0: there the fast part
+    /// is within the fold's own order.
+    pub(crate) fn landed(&self, plan: &assemble::Plan, table: Option<&tabulate::NearTable>, at: &Point, f: &[C64]) -> (Vec<C64>, f64) {
+        let Some(fourth) = &plan.fourth else { return (f.to_vec(), 0.0) };
+        let (n, size) = (fourth.n, fourth.n * fourth.n);
+        let slow: Vec<C64> = self.quartic(plan, fourth, table, at.r, &self.light.amplitudes(at.r), |q, _| {
+            let (partner, metric) = (&q.data[4 * size..5 * size], &q.data[8 * size..9 * size]);
+            (0..n).map(|x| (0..n).fold(f[x], |z, y| z + (metric[x * n + y] * 0.5 - partner[x * n + y]) * f[y])).collect()
+        });
+        let p = 1.0 - crate::linalg::norm_sqr(&slow) / crate::linalg::norm_sqr(f);
+        (slow, p.max(0.0))
+    }
+
     /// A component's exact frequency ν: the co-rotating δ_ω, the counter-rotating −(δ_ω + 2ν_frame).
     pub(crate) fn frequency(&self, component: Component) -> Beat {
         self.axes.component(&self.light, component)
@@ -734,6 +750,12 @@ impl<'a> Run<'a> {
     pub fn scattering_at(&self, cluster: usize, at: &Point, psi: &[C64], populations: Option<&[f64]>) -> Scattering {
         let (plan, table) = &self.plans[cluster];
         self.model.scattering_of(plan, *table, at, psi, populations).0
+    }
+    /// Where a jump's bare state `f` lands in a cluster at a point (assemble.rs, # The fourth order; `Model::landed`): the
+    /// slow state it continues in and the probability of the prompt photon before it.
+    pub fn landed(&self, cluster: usize, at: &Point, f: &[C64]) -> (Vec<C64>, f64) {
+        let (plan, table) = &self.plans[cluster];
+        self.model.landed(plan, *table, at, f)
     }
     /// A cluster's generator at a position and time, for every momentum and along every path through the point (assemble.rs
     /// `Middle`): a step's one middle.

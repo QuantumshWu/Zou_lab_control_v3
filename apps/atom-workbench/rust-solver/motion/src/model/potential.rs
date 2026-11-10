@@ -218,10 +218,9 @@ impl Model {
                 if plan.links.is_empty() {
                     continue;
                 }
-                let near = if order <= 1 {
-                    self.near_values(&plan, amplitudes, &[(plan.near.hermitian(), order)], tables.and_then(|t| t.of(cluster, lights)))
-                } else {
-                    self.near_exact(&plan, amplitudes, order, &self.coherent_dressing())
+                let near = match tables.and_then(|t| t.of(cluster, lights)) {
+                    Some(table) if order <= 1 => self.near_tabulated(table, amplitudes, &[(plan.near.hermitian(), order)]),
+                    _ => self.near_exact(&plan, amplitudes, order, &self.coherent_dressing()),
                 };
                 let fields = self.fields(&plan, amplitudes, [0.0; 3], order);
                 for link in &plan.links {
