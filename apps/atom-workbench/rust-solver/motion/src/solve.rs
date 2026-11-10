@@ -71,7 +71,7 @@
 use crate::adapt::{self, Drift};
 use crate::decide::{halved, judge, pays, Judgement, Read};
 use crate::ensemble::{Ensemble, Quadrature, Start, Well, GROUP};
-use crate::estimate::{half_window, occupation, paired, spread, stepped, summarize, unseen, wilson, Estimate, Fate, Group, Held, Output, Scales, Spread, Stepped};
+use crate::estimate::{draws_for, half_window, occupation, paired, spread, stepped, summarize, unseen, wilson, Estimate, Fate, Group, Held, Output, Scales, Spread, Stepped};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, span, when, Account, Ledger};
 use crate::linalg::V3;
@@ -586,12 +586,11 @@ fn product(run: &Run, ensemble: &Ensemble, context: &Context, targets: &Targets,
 }
 
 /// The pilot's size: the fewest whole groups whose unseen share fits the statistics' share of the population target,
-/// z²/(N + z²) ≤ √(1 − s²) ε (estimate.rs `unseen`, units.rs `STEP_SHARE`) -- the smallest ensemble that can see a share as
-/// large as the target, 88 trajectories. The falsifiers take as many.
+/// z²/(N + z²) ≤ √(1 − s²) ε (estimate.rs `unseen` and its inverse `draws_for`, units.rs `STEP_SHARE`) -- the smallest
+/// ensemble that can see a share as large as the target, 88 trajectories. The falsifiers take as many.
 fn pilot_size() -> u64 {
     let room = (1. - STEP_SHARE * STEP_SHARE).sqrt() * POPULATION_TARGET;
-    let n = CONFIDENCE * CONFIDENCE * (1. / room - 1.);
-    (n / GROUP as f64).ceil() as u64 * GROUP
+    (draws_for(room) / GROUP as f64).ceil() as u64 * GROUP
 }
 
 /// The outputs and T's windows (module documentation, # Outputs and windows): per output and lab axis the window's half
@@ -920,7 +919,7 @@ impl Targets {
             .map(|(k, e)| {
                 let n = e.trajectories;
                 let room = self.population[k];
-                let shown = (n * (e.shown_interval() / room).powi(2)).max(z2 * (1. / room - 1.));
+                let shown = (n * (e.shown_interval() / room).powi(2)).max(draws_for(room));
                 let temperature = match self.temperature[k] {
                     Some((scale, room)) => {
                         let relative = e.temperature_interval(scale);

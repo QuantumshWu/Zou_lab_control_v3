@@ -71,6 +71,11 @@ pub fn unseen(draws: f64) -> f64 {
     wilson(0., draws)
 }
 
+/// The draws that leave `share` unseen: the N with z²/(N + z²) = share (`unseen`), z²(1/share − 1).
+pub fn draws_for(share: f64) -> f64 {
+    CONFIDENCE * CONFIDENCE * (1. / share - 1.)
+}
+
 /// The half width of T's window on a lab axis about an output at t (SPEC §1.7): half of one trap period of the axis,
 /// 2π/ω at its frequency ω > 0, the window no longer than an output interval, cut at t = 0 so that it stays centred there.
 pub fn half_window(frequency: f64, interval: f64, t: f64) -> f64 {
@@ -696,13 +701,14 @@ mod tests {
         assert_eq!(Spread { error: 0., groups: f64::INFINITY }.interval_over(1e6), 0.);
     }
 
-    /// Wilson's far end at a count of zero: z²/(N + z²), at z = 2 four in N + 4; a draw of none leaves all unseen. At a
-    /// count of five in a hundred, the score interval's far end (p̂ + z²/2N + z√(p̂(1 − p̂)/N + z²/4N²))/(1 + z²/N); at a
-    /// count of all, one.
+    /// Wilson's far end at a count of zero: z²/(N + z²), at z = 2 four in N + 4, and the N it is a given share at; a draw of
+    /// none leaves all unseen. At a count of five in a hundred, the score interval's far end
+    /// (p̂ + z²/2N + z√(p̂(1 − p̂)/N + z²/4N²))/(1 + z²/N); at a count of all, one.
     #[test]
     fn the_unseen_share_is_wilson_s_far_end() {
         assert_eq!(unseen(0.), 1.);
         assert!((unseen(96.) - 0.04).abs() < 1e-16);
+        assert_eq!((draws_for(unseen(96.)), draws_for(1.)), (96., 0.));
         assert!((unseen(16380.) - 4. / 16384.).abs() < 1e-18);
         let (p, n): (f64, f64) = (0.05, 100.);
         let far = (p + 2. / n + 2. * (p * (1. - p) / n + 1. / (n * n)).sqrt()) / (1. + 4. / n);
