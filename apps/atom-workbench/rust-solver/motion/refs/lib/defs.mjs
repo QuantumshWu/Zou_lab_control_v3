@@ -1,5 +1,5 @@
 // The reference scenes (contract §6, R0–R9, and R10): each an ordinary app scene -- what an operator could set up -- whose
-// physics has a clear, analytic or nearly analytic answer. `build()` returns the app scene (before the app's importer
+// physics has a clear, analytic or nearly analytic answer (R4's scaling law: a relation between three scenes). `build()` returns the app scene (before the app's importer
 // reads it back); a scene whose parameters depend on the atom (a detuning from a shifted line, a two-photon resonance)
 // takes them from the app's own level chart or model, never from the solver. A scene's `mass` multiplies the request's
 // mass (R10's held atom: a classical point in the same light); R0 and R8 edit the motion block in scenes.mjs: a mass
@@ -28,6 +28,17 @@ export const R10_S0=0.02;
  * photons at the antinode, 5 µK of heating along z at the node). */
 const R10_RB={temperatureUK:2,durationUs:120,samples:49};
 export const R10_HELD={mass:100,temperatureUK:5,durationUs:7200,samples:49};
+/** R4's scaling law (lin⊥lin cooling at one detuning and three intensities I, 2I, 4I): the cooling pair sits 20Γ red of
+ * F = 2 → F′ = 3 in the trap (the line |2,2⟩ → |3′,3′⟩ at the bottom; 22.4Γ for m′ = 0, the π tweezer's tensor shift;
+ * F′ = 2 is 22.6Γ to the red of the light), 40 mW/cm² a beam at I: the lowest light-shift potential is modulated by 216
+ * E_rec there (865 at 4I), the largest excited population is 0.015 (0.060 at 4I) -- the two ends of the law, the recoil
+ * below and the saturation above, are about equally far (expect.mjs R4_LINEAR). The tweezer is wide and deep (90 mW,
+ * waist 5 µm: 1.07 mK, 20 kHz along z), no more than a slow background of the light's wells (167 kHz at I): the cloud
+ * covers many of their periods (kσ_z = 2.7 at 20 µK). The repump pair (F = 1 → F′ = 2, resonant in the trap) is the
+ * same in the three scenes and strong. Each scene runs for the same number of scattered photons (0.48/µs at I: 770),
+ * 41 pumping times of the lowest potential: 1.6 ms at I, 0.4 ms at 4I -- so that what the photons do to the axes the
+ * pair does not cool (their recoil heating, the line's shift with it) is the same in the three. */
+export const R4_LAW={powerMW:90,waistUm:5,detuning:-20,intensityMWcm2:40,repumpMWcm2:2,temperatureUK:30,durationUs:1600,samples:101,times:[1,2,4]};
 /** The detuning (MHz) a beam on `line` F → F′ needs to sit `deltaMHz` from the transition g → e of `scene` with the
  * lasers `shown` shifting it (the app's level chart): its offset from the zero-field transition. */
 async function offsetFor(scene,line,Fg,Fe,groundId,excitedId,shown,deltaMHz){
@@ -74,6 +85,9 @@ export const SCENES={
     await beam(s,{id:'cool-plus',name:'冷却光 +z',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:0.02*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
     await beam(s,{id:'cool-minus',name:'冷却光 −z',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:0.02*ISAT_CYCLING,along:'-z',ellipticityDeg:-45});
     return s;}},
+  // R4 -- Sisyphus cooling's scaling law: lin⊥lin along z at one detuning and the intensities I, 2I, 4I (expect.mjs
+  // R4_LINEAR: the relation between the three scenes' steady T_z).
+  ...Object.fromEntries(R4_LAW.times.map(n=>[`R4_LIN_${n}`,{ref:'R4',title:`R4 西西弗斯标度律：lin⊥lin，阱内 δ = ${R4_LAW.detuning}Γ，每束 ${n*R4_LAW.intensityMWcm2} mW/cm²，${R4_LAW.durationUs/n} µs`,build:()=>sisyphus(n)}])),
   // R5 -- optical pumping into the stretched dark state |2,2⟩: D1 σ+ on F=2 → F′=2, the repump D2 σ+ on F=1 → F′=2
   // (another line: no common excited state, so no coherent population trapping between F=1 and F=2).
   R5_PUMP:{ref:'R5',title:'R5 光泵到拉伸暗态（D1 σ⁺ F=2→F′=2，D2 σ⁺ 回泵 F=1→F′=2，s ≈ 0.02）',async build(){
@@ -119,6 +133,20 @@ export const SCENES={
     [`R10_${at}`,{ref:'R10',title:`R10 驻波中的动量扩散：${where}，⁸⁷Rb，2 µK`,build:()=>standing(theta,R10_RB)}],
     [`R10_HELD_${at}`,{ref:'R10',title:`R10 驻波中的动量扩散：${where}，质量 ×${R10_HELD.mass}，5 µK`,mass:R10_HELD.mass,build:()=>standing(theta,R10_HELD)}]])),
 };
+
+/** R4's scaling law, the scene at `times` × I (R4_LAW): no bias field; the tweezer along +x, π on z; the cooling pair
+ * along ±z on F = 2 → F′ = 3, E ∥ x on +z and ∥ y on −z (lin⊥lin), and a repump pair alike on F = 1 → F′ = 2. */
+async function sisyphus(times){
+  const {powerMW,waistUm,detuning,intensityMWcm2,repumpMWcm2,temperatureUK,durationUs,samples}=R4_LAW;
+  const s=await base({name:`R4 西西弗斯标度律（${times}I）`,fieldG:0,initialStateId:'ground-2-2',temperatureUK,durationUs:durationUs/times,samples});
+  await tweezer(s,{nm:852,powerMW,waistUm,along:'+x',polarizationAngleDeg:0});
+  const cool=await offsetFor(s,'D2',2,3,'ground-2-2','D2-3-3',['tweezer'],detuning*GAMMA_D2),repump=await offsetFor(s,'D2',1,2,'ground-1-1','D2-2-2',['tweezer'],0);
+  for(const [id,along,angle] of [['plus','+z',0],['minus','-z',90]]){
+    await beam(s,{id:`cool-${id}`,name:`冷却光 ${along}`,line:'D2',Fg:2,Fe:3,offsetMHz:cool,intensityMWcm2:times*intensityMWcm2,along,polarizationAngleDeg:angle});
+    await beam(s,{id:`repump-${id}`,name:`回泵光 ${along}`,line:'D2',Fg:1,Fe:2,offsetMHz:repump,intensityMWcm2:repumpMWcm2,along,polarizationAngleDeg:angle});
+  }
+  return s;
+}
 
 /** R10: an 852 nm tweezer along +x, π on z ∥ B (10 mW, waist 1 µm: 3 mK deep, 170 kHz along y and z, so that the cold
  * atom's extent along z is its zero-point one, kσ_z ≈ 0.15; |2,2⟩ and |3′,3′⟩ stay its eigenstates), and a σ+σ+ pair
