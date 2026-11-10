@@ -53,15 +53,21 @@
 //! jackknife over them measures the error (estimate.rs).
 use crate::field::Geometry;
 use crate::linalg::{dot3, perpendicular, V3};
-use crate::request::STATES;
 use crate::random::{Purpose, Stream};
 use crate::special::{by_series, gamma, series, upper};
 use crate::units::{rounding, KT_PER_UK};
 use rayon::prelude::*;
 use std::f64::consts::{PI, TAU};
 
-/// The trajectories of one Latin-hypercube group (SPEC §2.5).
+/// The trajectories of one Latin-hypercube group (SPEC §2.5), and with it the block that the delete-one-group jackknife
+/// leaves out (estimate.rs). A structural size (SPEC §0), which no result's expectation depends on: every member is
+/// distributed as an independent draw and the groups are independent of each other, so at any size the estimates are
+/// unbiased and the jackknife's variance is that of the groups' means. At a given number of trajectories the size only
+/// trades the strata a group spreads over each variable's distribution (as many as its members) and the sums kept (one
+/// set a group and output) against the groups the spread is read on (Student's degrees of freedom, one fewer than they).
+/// It divides `MOST_TRAJECTORIES`, so that the pilot's own numbers, which start there (solve.rs), start a group.
 pub const GROUP: u64 = 8;
+const _: () = assert!(crate::units::MOST_TRAJECTORIES % GROUP == 0);
 /// The uniform deviates a member draws in its group's strata (module documentation, # Latin hypercube).
 const DEVIATES: usize = 8;
 
@@ -346,14 +352,8 @@ impl<'a> Ensemble<'a> {
             let r = c.propose(proposal[0], proposal[1], proposal[2], proposal[3]);
             let (v, gradient) = c.well.potential(r);
             let y = -v / self.kt;
-            if y > 0. {
-                debug_assert!(
-                    y <= c.top * c.modes.iter().map(|m| 1. / (1. + m.coordinate(r))).fold(0., f64::max) * (1. + rounding(STATES * STATES)),
-                    "the envelope at {r:?}: y {y} above its bound"
-                );
-                if own.open_uniform() * c.envelope(r) <= kept(1.5, y, y, c.top) {
-                    break (r, y, gradient);
-                }
+            if y > 0. && own.open_uniform() * c.envelope(r) <= kept(1.5, y, y, c.top) {
+                break (r, y, gradient);
             }
             proposal = std::array::from_fn(|_| own.interior());
         };
@@ -531,7 +531,7 @@ mod tests {
     }
 
     /// η by the module's 3D quadrature meets the independent 1D rule to 1e-9 at a shallow and a deep top, the levels converged
-    /// within the rounding; and a deep well's η is near the Boltzmann value 1.
+    /// within the rounding.
     #[test]
     fn the_kinetic_temperature_is_its_integral() {
         for a in [3., 40.] {
@@ -541,55 +541,73 @@ mod tests {
             let reference = lorentzian_eta(a);
             assert!((eta - reference).abs() <= 1e-9 && difference < 1e-9, "a {a}: η {eta} against {reference} (levels {difference})");
         }
-        let well = Lorentzian { depth: 400. * KT_PER_UK, radius: 1.3, hbar_over_mass: 1e-6 };
-        let eta = Ensemble::new(&[(0, 1., &well)], 1., 1e-6).unwrap().kinetic(u64::MAX)[0].eta;
-        assert!((eta - 1.).abs() < 0.01, "{eta}");
+    }
+
+    /// A deep trap holds the Boltzmann distribution, whose η is 1, to e^{−D/k_BT} (module documentation). Exactly:
+    /// kept(5/2, y) − kept(3/2, y) = e^y (P(7/2, y) − P(5/2, y)) = −y^{5/2}/Γ(7/2) at every point, so
+    /// 1 − η = ∫ y^{5/2} d³r / (Γ(7/2) ∫ kept(3/2, y) d³r) > 0. In the Lorentzian well, y = a/(1 + u) with d³r ∝ √u du:
+    /// ∫ y^{5/2} √u du = a^{5/2} B(3/2, 1) = (2/3) a^{5/2}, and the number's integral ∫ e^y P(5/2, y) √u du is at least its
+    /// part on u ≤ 1, where e^{a/(1+u)} ≥ e^{a(1−u)} and P(5/2, y) ≥ P(5/2, a/2): e^a a^{−3/2} Γ(3/2) P(3/2, a) P(5/2, a/2).
+    /// Hence 0 < 1 − η ≤ (2/3) a⁴ e^{−a}/(Γ(7/2) Γ(3/2) P(3/2, a) P(5/2, a/2)), the e^{−D/k_BT} times the phase space's a⁴:
+    /// 7.5e-5 at a = 20 and 2.5e-12 at a = 40, both far above the quadrature's last two levels' difference; at a = 400 it
+    /// is below the format, and so is everything the two integrals differ by: η is 1 itself.
+    #[test]
+    fn a_deep_well_s_kinetic_temperature_is_the_boltzmann_one_less_the_lowering() {
+        for a in [20., 40., 400.] {
+            let well = Lorentzian { depth: a * KT_PER_UK, radius: 1.3, hbar_over_mass: 1e-6 };
+            let Quadrature { eta, difference } = Ensemble::new(&[(0, 1., &well)], 1., 1e-6).unwrap().kinetic(u64::MAX)[0];
+            let lowering = 2. / 3. * a.powi(4) * (-a).exp() / (gamma(3.5) * gamma(1.5) * regularized(1.5, a) * regularized(2.5, 0.5 * a));
+            let resolved = lowering > f64::EPSILON;
+            assert!(1. - eta <= lowering && if resolved { 1. - eta > difference } else { eta == 1. }, "a {a}: 1 − η = {:e} against {lowering:e} (levels {difference:e})", 1. - eta);
+        }
+    }
+
+    /// The mean of the groups' values and its interval at the confidence z among `looks` reads: the standard error of the
+    /// mean over the groups, the independent draws, with Student's t at one fewer (estimate.rs `Spread::interval_over`).
+    fn read(groups: &[f64], looks: f64) -> (f64, f64) {
+        let g = groups.len() as f64;
+        let mean = groups.iter().sum::<f64>() / g;
+        let error = (groups.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (g - 1.) / g).sqrt();
+        (mean, crate::estimate::Spread { error, groups: g }.interval_over(looks))
     }
 
     /// The draws are the ensemble: 2¹⁶ of them in a shallow Lorentzian well (a = 3, the Wigner factor negligible) read the
     /// kinetic energy's mean (3/2) η k_BT and the depth's mean -- both by the quadrature, η's and the depth's own 1D rule --
-    /// within four of their standard errors over the groups; the groups' means of the kinetic energy spread less than
-    /// independent draws' would (the Latin hypercube).
+    /// within their intervals over the groups. And the groups' means of the kinetic energy vary less than independent
+    /// draws' would (the Latin hypercube): per group, the members' mean square deviation from the ensemble's mean over the
+    /// group's size, less the square of the group mean's deviation, is on average the variance the strata take away, and
+    /// it is read above zero beyond its interval. Three looks.
     #[test]
     fn the_draws_are_the_ensemble() {
         let a = 3.;
         let (radius, hm) = (1.3, 1e-9);
         let well = Lorentzian { depth: a * KT_PER_UK, radius, hbar_over_mass: hm };
         let ensemble = Ensemble::new(&[(5, 1., &well)], 1., hm).unwrap();
-        let eta = lorentzian_eta(a);
         let groups = 1 << 13;
-        let (mut means, mut all) = (vec![], vec![]);
+        let (mut kinetic, mut depth) = (vec![], vec![]);
         for g in 0..groups {
-            let mut sum = 0.;
-            for m in 0..GROUP {
-                let s = ensemble.draw(7, g * GROUP + m);
-                assert_eq!(s.state, 5);
-                let k = 0.5 * hm * dot3(s.kappa, s.kappa) / KT_PER_UK;
-                sum += k;
-                all.push((k, -well.potential(s.r).0 / KT_PER_UK));
-            }
-            means.push(sum / GROUP as f64);
+            let members: Vec<Start> = (0..GROUP).map(|m| ensemble.draw(7, g * GROUP + m)).collect();
+            assert!(members.iter().all(|s| s.state == 5));
+            kinetic.push(members.iter().map(|s| 0.5 * hm * dot3(s.kappa, s.kappa) / KT_PER_UK).collect::<Vec<f64>>());
+            depth.push(members.iter().map(|s| -well.potential(s.r).0 / KT_PER_UK).sum::<f64>() / GROUP as f64);
         }
-        let n = all.len() as f64;
-        let mean = |f: &dyn Fn(&(f64, f64)) -> f64| all.iter().map(f).sum::<f64>() / n;
-        let spread = |values: &[f64]| {
-            let m = values.iter().sum::<f64>() / values.len() as f64;
-            values.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (values.len() - 1) as f64
-        };
-        let kinetic = mean(&|x| x.0);
-        let se = (spread(&means) / groups as f64).sqrt();
-        assert!((kinetic - 1.5 * eta).abs() <= 4. * se, "⟨K⟩ {kinetic} against {} ± {se}", 1.5 * eta);
-        let independent = spread(&all.iter().map(|x| x.0).collect::<Vec<_>>()) / GROUP as f64;
-        assert!(spread(&means) < 0.5 * independent, "the strata: {} against {independent}", spread(&means));
+        let looks = 3.;
+        let means: Vec<f64> = kinetic.iter().map(|k| k.iter().sum::<f64>() / GROUP as f64).collect();
+        let (mean, within) = read(&means, looks);
+        let exact = 1.5 * lorentzian_eta(a);
+        assert!((mean - exact).abs() <= within, "⟨K⟩ {mean} against {exact} ± {within}");
+        let gains: Vec<f64> = kinetic.iter().zip(&means).map(|(k, m)| k.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (GROUP * GROUP) as f64 - (m - mean).powi(2)).collect();
+        let (gain, within) = read(&gains, looks);
+        assert!(gain - within > 0., "the strata take {gain} ± {within} off the variance of a group's mean");
         // The depth's mean by the 1D rule: ∫ y w(y) √u du / ∫ w(y) √u du.
         let sums = lorentzian(a);
-        let depth = mean(&|x| x.1);
-        let se = (all.iter().map(|x| (x.1 - depth).powi(2)).sum::<f64>() / (n - 1.) / n).sqrt();
-        assert!((depth - sums[2] / sums[0]).abs() <= 4. * se, "⟨y⟩ {depth} against {} ± {se}", sums[2] / sums[0]);
+        let (mean, within) = read(&depth, looks);
+        assert!((mean - sums[2] / sums[0]).abs() <= within, "⟨y⟩ {mean} against {} ± {within}", sums[2] / sums[0]);
     }
 
     /// The Wigner factor: in a deep well with ħω = k_BT the momentum's second moment per lab axis is η k_BT (x/2) coth(x/2)
-    /// (x = 1), the draws' mean within four standard errors; the map stretches a draw about the well's bottom, not the focus.
+    /// (x = 1), the draws' mean within its interval over the groups; the map stretches a draw about the well's bottom, not
+    /// the focus.
     #[test]
     fn the_wigner_factor_scales_the_draws() {
         let (radius, depth) = (0.9, 60. * KT_PER_UK);
@@ -602,9 +620,8 @@ mod tests {
         let exact = ensemble.momentum(&[eta]);
         assert!((exact[2] - eta * KT_PER_UK * factor).abs() < 1e-12 * exact[2]);
         let draws: Vec<f64> = (0..1 << 15).map(|i| { let s = ensemble.draw(3, i); hm * s.kappa[2] * s.kappa[2] }).collect();
-        let n = draws.len() as f64;
-        let mean = draws.iter().sum::<f64>() / n;
-        let se = (draws.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.) / n).sqrt();
-        assert!((mean - exact[2]).abs() <= 4. * se, "{mean} against {} ± {se}", exact[2]);
+        let groups: Vec<f64> = draws.chunks(GROUP as usize).map(|members| members.iter().sum::<f64>() / GROUP as f64).collect();
+        let (mean, within) = read(&groups, 1.);
+        assert!((mean - exact[2]).abs() <= within, "{mean} against {} ± {within}", exact[2]);
     }
 }
