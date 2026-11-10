@@ -28,7 +28,10 @@
 //! multiplies no jumps. The Hermitian part is linear in the forms: its interpolant is the interpolated forms' own layout,
 //! number for number. The decay is quadratic in the jumps: its interpolant is not the product of the interpolated jumps --
 //! which the photons take (photon.rs) -- but differs from it by the two interpolations' errors, both third order in the
-//! spacing and both in the table's error (below).
+//! spacing and both in the table's error (below). And last the photons' own: the near jumps as the matrices a state's
+//! photons sum (assemble.rs, # The jumps' matrices; `Plan::lay_jumps`), linear in the jumps -- their interpolant, and
+//! its slopes along the axes, are the interpolated jumps' own, number for number, each real in its place for the
+//! photons' sums (`Model::near_jumps`).
 //!
 //! # Axes
 //! A coordinate's a-priori weight is how far it moves the cluster's lines over the atoms' reach, in pole half-widths: for a chart
@@ -147,7 +150,7 @@ impl NearTable {
 impl Layout {
     /// A node's reals (module documentation, # A node's reals).
     fn width(&self) -> usize {
-        2 * self.plan.near.len() + self.plan.generator_start.len() + self.plan.form_start.len()
+        2 * self.plan.near.len() + self.plan.generator_start.len() + self.plan.form_start.len() + self.plan.jumps_start.len()
     }
 }
 
@@ -322,10 +325,12 @@ impl Model {
             pair.copy_from_slice(&[z.re, z.im]);
         }
         point.fill(0.0);
-        let (generator, forms) = point.split_at_mut(plan.generator_start.len());
+        let (generator, rest) = point.split_at_mut(plan.generator_start.len());
+        let (forms, jumps) = rest.split_at_mut(plan.form_start.len());
         plan.lay(|at| values[at], Some(generator), forms);
         let len = values.len();
         plan.decay(|at| if at < len { values[at] + plan.bare(at) } else { plan.constants[at - len] }, &mut vec![], generator);
+        plan.lay_jumps(|at| values[at], jumps);
         r.work + self.far_work(lights, 0, &coherent) + work
     }
 
@@ -658,19 +663,23 @@ impl Model {
         NearValues { len, order, data, directions: Some(gradients), work }
     }
 
-    /// The jumps at a point from a table, to an order (0 or 1), into a caller's vectors, and their counted work: the axes'
-    /// coordinates there and their gradients, and the jumps' reals -- the values, then to first order their slopes per
-    /// axis.
-    pub(crate) fn near_jumps(&self, table: &NearTable, amplitudes: &[Amplitude], order: usize, coordinates: &mut Vec<f64>, directions: &mut Vec<[f64; 3]>, reals: &mut Vec<f64>) -> f64 {
-        let (d, jumping) = (table.axes(), table.layout.plan.near.jumping());
-        sized(coordinates, d);
-        sized(directions, d);
-        let work = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, amplitudes, coordinates, directions);
-        let (width, slopes) = (2 * jumping.len(), if order >= 1 { d } else { 0 });
-        sized(reals, (1 + slopes) * width);
-        let (value, slope) = reals.split_at_mut(width);
-        table.table.eval_range(coordinates, 2 * jumping.start, value, (order >= 1).then_some(slope));
-        work + (4usize.pow(d as u32) * (1 + slopes) * width) as f64 / crate::decide::COMPLEX
+    /// A point's jumps' matrices from a table (assemble.rs, # The jumps' matrices), to an order (0 or 1), into the
+    /// point's vectors from its beams' amplitudes, and their counted work: the axes' coordinates there and their gradients (the slopes'
+    /// directions; none to order 0), the matrices -- the table's interpolant of them onto their constant part -- and to
+    /// first order their slopes per axis, in one pass over the stencil's rows. Counted as the jumps' own interpolation
+    /// is, each jump once (assemble.rs, # Work).
+    pub(crate) fn near_jumps(&self, table: &NearTable, order: usize, point: &mut Site) -> f64 {
+        let (d, plan) = (table.axes(), &table.layout.plan);
+        let slopes = if order >= 1 { d } else { 0 };
+        sized(&mut point.coordinates, d);
+        sized(&mut point.directions, d);
+        let work = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, &point.beams, &mut point.coordinates, &mut point.directions);
+        point.directions.truncate(slopes);
+        let (first, width) = (2 * plan.near.len() + plan.generator_start.len() + plan.form_start.len(), plan.jumps_start.len());
+        sized(&mut point.jumps, width);
+        sized(&mut point.jump_slopes, slopes * width);
+        table.table.eval_onto(&point.coordinates, first, &plan.jumps_start, &mut point.jumps, (order >= 1).then_some(&mut point.jump_slopes[..]));
+        work + (4usize.pow(d as u32) * (1 + slopes) * 2 * plan.near.jumping().len()) as f64 / crate::decide::COMPLEX
     }
 
     /// A middle's near terms' values at a point from a table (module documentation, # At a point; assemble.rs `Site`), and
