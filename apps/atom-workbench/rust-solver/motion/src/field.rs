@@ -79,39 +79,49 @@ impl Geometry {
     /// a(r), ∇a and ∇∇a (module documentation, # Beams): the transverse part t = r − ζn taken directly, so ρ² = |t|²
     /// is never a difference of nearly equal numbers.
     pub fn amplitude(&self, r: V3) -> Amplitude {
+        self.amplitude_to(r, 2)
+    }
+    /// The same to an order, as its caller reads it: the value alone (0), with ∇a (1), with ∇∇a too (2). What lies
+    /// beyond the order is zero and is not made; what lies within it is the same numbers at every order.
+    pub fn amplitude_to(&self, r: V3, order: usize) -> Amplitude {
         let (k, n) = (self.wave_number, self.direction);
         let zeta = dot3(r, n);
         let wave = C64::cis(k * zeta);
         let ik = C64::new(0.0, k);
-        let (value, g, dg): (C64, [C64; 3], [[C64; 3]; 3]) = match self.waist {
-            None => (wave, n.map(|x| ik * x), [[C64::ZERO; 3]; 3]),
+        let none = ([C64::ZERO; 3], [[C64::ZERO; 3]; 3]);
+        let (value, (g, dg)): (C64, ([C64; 3], [[C64; 3]; 3])) = match self.waist {
+            None => (wave, if order >= 1 { (n.map(|x| ik * x), none.1) } else { none }),
             Some(w) => {
                 let (w2, rayleigh) = (w * w, k * w * w / 2.0);
                 let inverse = C64::new(1.0, zeta / rayleigh).recip();
                 let t: V3 = std::array::from_fn(|j| r[j] - zeta * n[j]);
                 let rho2 = dot3(t, t);
                 let value = wave * (inverse * (-rho2 / w2)).exp() * inverse;
-                // g = (ik + (i/z_R)(ρ²/(w²q²) − 1/q)) n − (2/(w²q)) t.
-                let along = ik + C64::I * (inverse * inverse * (rho2 / w2) - inverse) / rayleigh;
                 let across = inverse * (-2.0 / w2);
-                let g = std::array::from_fn(|j| along * n[j] + across * t[j]);
+                // g = (ik + (i/z_R)(ρ²/(w²q²) − 1/q)) n − (2/(w²q)) t.
+                let g = || {
+                    let along = ik + C64::I * (inverse * inverse * (rho2 / w2) - inverse) / rayleigh;
+                    std::array::from_fn(|j| along * n[j] + across * t[j])
+                };
                 // ∇g = c₁(1 − nnᵀ) + c₂(ntᵀ + tnᵀ) + c₃ nnᵀ.
-                let c1 = across;
-                let c2 = C64::I * inverse * inverse * (2.0 / (rayleigh * w2));
-                let c3 = (inverse * inverse * inverse * (2.0 * rho2 / w2) - inverse * inverse) / (rayleigh * rayleigh);
-                let dg = std::array::from_fn(|p| {
-                    std::array::from_fn(|q| {
-                        let unit = if p == q { 1.0 } else { 0.0 };
-                        c1 * (unit - n[p] * n[q]) + c2 * (n[p] * t[q] + t[p] * n[q]) + c3 * (n[p] * n[q])
+                let dg = || {
+                    let c1 = across;
+                    let c2 = C64::I * inverse * inverse * (2.0 / (rayleigh * w2));
+                    let c3 = (inverse * inverse * inverse * (2.0 * rho2 / w2) - inverse * inverse) / (rayleigh * rayleigh);
+                    std::array::from_fn(|p| {
+                        std::array::from_fn(|q| {
+                            let unit = if p == q { 1.0 } else { 0.0 };
+                            c1 * (unit - n[p] * n[q]) + c2 * (n[p] * t[q] + t[p] * n[q]) + c3 * (n[p] * n[q])
+                        })
                     })
-                });
-                (value, g, dg)
+                };
+                (value, match order { 0 => none, 1 => (g(), none.1), _ => (g(), dg()) })
             }
         };
         Amplitude {
             value,
-            gradient: g.map(|x| value * x),
-            hessian: std::array::from_fn(|p| std::array::from_fn(|q| value * (g[p] * g[q] + dg[p][q]))),
+            gradient: if order >= 1 { g.map(|x| value * x) } else { none.0 },
+            hessian: if order >= 2 { std::array::from_fn(|p| std::array::from_fn(|q| value * (g[p] * g[q] + dg[p][q]))) } else { none.1 },
         }
     }
 }
@@ -125,11 +135,11 @@ pub struct FieldAt {
 }
 
 /// A frequency's chart at a point (module documentation, # The chart): the 2r − 1 coordinates (I, α₁, φ₁, α₂, φ₂)
-/// and their gradients (`gradient[c][a]` = ∂_a s_c).
-#[derive(Clone, Debug, PartialEq)]
+/// and their gradients (`gradient[c][a]` = ∂_a s_c), held in place: those beyond a field's 2r − 1 are zero.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Chart {
-    pub value: Vec<f64>,
-    pub gradient: Vec<[f64; 3]>,
+    pub value: [f64; 5],
+    pub gradient: [[f64; 3]; 5],
 }
 
 /// The range of the chart's coordinate c and whether it is periodic: the intensity [0, 1], an angle [0, π/2], a
@@ -235,11 +245,12 @@ impl Frequency {
         f
     }
     /// Its field's components on the basis, e_k = u_k†E, and their gradients (`[k][a]` = ∂_a e_k).
-    pub fn components(&self, field: &FieldAt) -> (Vec<C64>, Vec<[C64; 3]>) {
+    pub fn components(&self, field: &FieldAt) -> ([C64; 3], [[C64; 3]; 3]) {
         let project = |v: &[C64; 3], u: &[C64; 3]| (0..3).map(|q| u[q].conj() * v[q]).sum::<C64>();
+        let of = |k: usize| self.basis.get(k);
         (
-            self.basis.iter().map(|u| project(&field.value, u)).collect(),
-            self.basis.iter().map(|u| std::array::from_fn(|a| project(&field.gradient[a], u))).collect(),
+            std::array::from_fn(|k| of(k).map_or(C64::ZERO, |u| project(&field.value, u))),
+            std::array::from_fn(|k| of(k).map_or([C64::ZERO; 3], |u| std::array::from_fn(|a| project(&field.gradient[a], u)))),
         )
     }
     /// Its chart at a point, from its field there (module documentation, # The chart): I = min(Σ_k |e_k|²/N, 1),
@@ -250,26 +261,27 @@ impl Frequency {
     pub fn chart(&self, field: &FieldAt) -> Chart {
         let (e, de) = self.components(field);
         let (r, o, n) = (self.rank(), &self.order, self.norm);
-        let size: Vec<f64> = e.iter().map(|z| z.norm_sqr()).collect();
+        let size: [f64; 3] = e.map(|z| z.norm_sqr());
         // Re and Im of e_k* ∂_a e_k.
-        let dot: Vec<[f64; 3]> = (0..r).map(|k| std::array::from_fn(|a| (e[k].conj() * de[k][a]).re)).collect();
-        let turn: Vec<[f64; 3]> = (0..r).map(|k| std::array::from_fn(|a| (e[k].conj() * de[k][a]).im)).collect();
+        let dot: [[f64; 3]; 3] = std::array::from_fn(|k| std::array::from_fn(|a| (e[k].conj() * de[k][a]).re));
+        let turn: [[f64; 3]; 3] = std::array::from_fn(|k| std::array::from_fn(|a| (e[k].conj() * de[k][a]).im));
         let over = |x: f64, y: f64| if y > 0.0 { x / y } else { 0.0 };
-        let mut value = vec![(size.iter().sum::<f64>() / n).min(1.0)];
-        let mut gradient = vec![std::array::from_fn(|a| (0..r).map(|k| 2.0 * dot[k][a]).sum::<f64>() / n)];
+        let mut chart = Chart { value: [0.0; 5], gradient: [[0.0; 3]; 5] };
+        chart.value[0] = (size[..r].iter().sum::<f64>() / n).min(1.0);
+        chart.gradient[0] = std::array::from_fn(|a| (0..r).map(|k| 2.0 * dot[k][a]).sum::<f64>() / n);
         for i in 1..r {
             let (first, rest) = (size[o[i - 1]].sqrt(), o[i..].iter().map(|&j| size[j]).sum::<f64>().sqrt());
-            value.push(rest.atan2(first));
-            gradient.push(std::array::from_fn(|a| {
+            chart.value[2 * i - 1] = rest.atan2(first);
+            chart.gradient[2 * i - 1] = std::array::from_fn(|a| {
                 let d_rest = over(o[i..].iter().map(|&j| dot[j][a]).sum::<f64>(), rest);
                 let d_first = over(dot[o[i - 1]][a], first);
                 over(first * d_rest - rest * d_first, first * first + rest * rest)
-            }));
+            });
             let z = e[o[i]] * e[o[0]].conj();
-            value.push(if z == C64::ZERO { 0.0 } else { z.arg() });
-            gradient.push(std::array::from_fn(|a| over(turn[o[i]][a], size[o[i]]) - over(turn[o[0]][a], size[o[0]])));
+            chart.value[2 * i] = if z == C64::ZERO { 0.0 } else { z.arg() };
+            chart.gradient[2 * i] = std::array::from_fn(|a| over(turn[o[i]][a], size[o[i]]) - over(turn[o[0]][a], size[o[0]]));
         }
-        Chart { value, gradient }
+        chart
     }
     /// The field E (V/m, spherical components) at chart coordinates s: e = √(IN) w, w_{o₀} = cos α₁,
     /// w_{o_i} = sin α₁ ⋯ sin α_i cos α_{i+1} e^{iφ_i} (the last without its cosine), E = Σ_k e_k u_k -- a table node's
@@ -327,14 +339,17 @@ impl Light {
     pub fn amplitudes(&self, r: V3) -> Vec<Amplitude> {
         self.beams.iter().map(|b| b.amplitude(r)).collect()
     }
-    /// Whether a point is outside the trap's region: every focused beam's intensity there below `REGION_INTENSITY` of
-    /// its focus value (module documentation, # The region).
-    pub fn outside(&self, amplitudes: &[Amplitude]) -> bool {
-        self.beams
-            .iter()
-            .zip(amplitudes)
-            .filter(|(b, _)| b.waist.is_some())
-            .all(|(_, a)| a.value.norm_sqr() < crate::units::REGION_INTENSITY)
+    /// The beams' amplitudes at r as a caller reads them, into its vector (kept from one point to the next): of the beams
+    /// `of` takes to `order` (`Geometry::amplitude_to`), zero of the others.
+    pub fn amplitudes_into(&self, r: V3, order: usize, of: impl Fn(usize) -> bool, out: &mut Vec<Amplitude>) {
+        let dark = Amplitude { value: C64::ZERO, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3] };
+        out.clear();
+        out.extend(self.beams.iter().enumerate().map(|(l, b)| if of(l) { b.amplitude_to(r, order) } else { dark }));
+    }
+    /// Whether the point r is outside the trap's region: every focused beam's intensity there below `REGION_INTENSITY`
+    /// of its focus value (module documentation, # The region).
+    pub fn outside(&self, r: V3) -> bool {
+        self.beams.iter().filter(|b| b.waist.is_some()).all(|b| b.amplitude_to(r, 0).value.norm_sqr() < crate::units::REGION_INTENSITY)
     }
 }
 
@@ -440,6 +455,9 @@ mod tests {
         for beam in &beams {
             for r in [[0.0, 0.0, 0.0], [0.3, -0.2, 0.7], [-0.9, 0.4, -1.8], [1.6, 0.0, 0.2]] {
                 let (a, k) = (beam.amplitude(r), scale(beam, r));
+                // To an order (`amplitude_to`): the same numbers within it, zero beyond it.
+                let (zero, lower) = (Amplitude { value: C64::ZERO, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3] }, [beam.amplitude_to(r, 0), beam.amplitude_to(r, 1)]);
+                assert!(lower[0] == Amplitude { value: a.value, ..zero } && lower[1] == Amplitude { hessian: zero.hessian, ..a } && beam.amplitude_to(r, 2) == a, "{beam:?} {r:?}: the amplitude to an order");
                 let h = third / k;
                 let within = difference_error(k, h, own(&[*beam], r)) * a.value.abs();
                 for x in 0..3 {
@@ -562,12 +580,12 @@ mod tests {
         let e = [C64::ZERO, C64::real(1e5), C64::ZERO];
         let probe = ([1.0, 0.0, 0.0], None, 0, [C64::real(10.0), C64::ZERO, C64::ZERO]);
         let light = light_of(&[([0.0, 0.0, 1.0], Some(w), -4, e), probe]);
-        let outside = |r: V3| light.outside(&light.amplitudes(r));
+        let outside = |r: V3| light.outside(r);
         let (axial, radial) = (zr * (1.0 / REGION_INTENSITY - 1.0).sqrt(), w * ((1.0 / REGION_INTENSITY).ln() / 2.0).sqrt());
         let margin = 1.0 + 1e-9;
         assert!(!outside([0.0, 0.0, axial / margin]) && outside([0.0, 0.0, axial * margin]));
         assert!(!outside([radial / margin, 0.0, 0.0]) && outside([0.0, radial * margin, 0.0]));
         let crossed = light_of(&[([0.0, 0.0, 1.0], Some(w), -4, e), ([1.0, 0.0, 0.0], Some(w), 2, e), probe]);
-        assert!(!crossed.outside(&crossed.amplitudes([3.0, 0.0, 0.0])) && crossed.outside(&crossed.amplitudes([0.0, 3.0, 0.0])));
+        assert!(!crossed.outside([3.0, 0.0, 0.0]) && crossed.outside([0.0, 3.0, 0.0]));
     }
 }

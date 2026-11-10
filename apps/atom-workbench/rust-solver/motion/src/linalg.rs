@@ -188,6 +188,43 @@ impl Sum for C64 {
     }
 }
 
+// The kernels below (`axpy`, `dot`; table.rs `blend`) are written once, for 256-bit vectors of reals with fused
+// multiply-add, and the whole build takes those instructions (apps/atom-workbench/.cargo/config.toml; a build that sets
+// RUSTFLAGS itself names them there): no second, scalar form and no choice at run time. Without the features a fused
+// multiply-add is a library call per number -- so such a build is refused here instead of running many times slower.
+#[cfg(not(all(target_feature = "avx2", target_feature = "fma")))]
+compile_error!("atom-motion's kernels are written for AVX2 with FMA: build with -C target-feature=+avx2,+fma (apps/atom-workbench/.cargo/config.toml)");
+
+/// The reals of one vector of the split kernels' sums (`axpy`, `dot`): their vectors' lengths are multiples of it.
+pub const LANES: usize = 4;
+
+/// y ← y + c x on complex vectors given by their real parts and their imaginary parts apart (x: `real`, `imaginary`;
+/// y: `re`, `im`), whole vectors of `LANES`: lane by lane, two fused multiply-adds a real, no element depending on
+/// another.
+pub fn axpy(c: C64, real: &[f64], imaginary: &[f64], re: &mut [f64], im: &mut [f64]) {
+    debug_assert!(re.len() % LANES == 0 && [real.len(), imaginary.len(), im.len()] == [re.len(); 3]);
+    for (((re, im), real), imaginary) in re.chunks_exact_mut(LANES).zip(im.chunks_exact_mut(LANES)).zip(real.chunks_exact(LANES)).zip(imaginary.chunks_exact(LANES)) {
+        for l in 0..LANES {
+            re[l] = c.re.mul_add(real[l], (-c.im).mul_add(imaginary[l], re[l]));
+            im[l] = c.re.mul_add(imaginary[l], c.im.mul_add(real[l], im[l]));
+        }
+    }
+}
+
+/// Σ_i x_i y_i (no conjugate) of two complex vectors given by their real parts and their imaginary parts apart, whole
+/// vectors of `LANES`: one partial sum a lane, so the lanes add side by side.
+pub fn dot(xr: &[f64], xi: &[f64], yr: &[f64], yi: &[f64]) -> C64 {
+    debug_assert!(xr.len() % LANES == 0 && [xi.len(), yr.len(), yi.len()] == [xr.len(); 3]);
+    let (mut re, mut im) = ([0.0; LANES], [0.0; LANES]);
+    for (((xr, xi), yr), yi) in xr.chunks_exact(LANES).zip(xi.chunks_exact(LANES)).zip(yr.chunks_exact(LANES)).zip(yi.chunks_exact(LANES)) {
+        for l in 0..LANES {
+            re[l] = xr[l].mul_add(yr[l], (-xi[l]).mul_add(yi[l], re[l]));
+            im[l] = xr[l].mul_add(yi[l], xi[l].mul_add(yr[l], im[l]));
+        }
+    }
+    C64::new((re[0] + re[1]) + (re[2] + re[3]), (im[0] + im[1]) + (im[2] + im[3]))
+}
+
 /// ⟨a, b⟩ = Σ_i a_i* b_i.
 pub fn inner(a: &[C64], b: &[C64]) -> C64 {
     a.iter().zip(b).map(|(x, y)| x.conj() * *y).sum()
@@ -876,6 +913,38 @@ pub(crate) mod tests {
     use super::*;
     use crate::random::{Purpose, Stream};
     use crate::units::rounding;
+
+    /// The split kernels (`axpy`, `dot`) are the complex sums they stand for, to the rounding of a sum of their length;
+    /// and their pace (printed: ns a complex multiply-add on spans of 28, a five-state cluster's places).
+    #[test]
+    fn the_split_kernels_are_their_complex_sums() {
+        let mut s = Stream::new(11, Purpose::Initial, 0, 0);
+        let n = 28;
+        let mut draw = |count: usize| -> Vec<f64> { (0..count).map(|_| s.uniform() - 0.5).collect() };
+        let (xr, xi, yr, yi) = (draw(n), draw(n), draw(n), draw(n));
+        let c = C64::new(0.3, -0.7);
+        let (x, y): (Vec<C64>, Vec<C64>) = ((0..n).map(|i| C64::new(xr[i], xi[i])).collect(), (0..n).map(|i| C64::new(yr[i], yi[i])).collect());
+        let (mut re, mut im) = (yr.clone(), yi.clone());
+        axpy(c, &xr, &xi, &mut re, &mut im);
+        for i in 0..n {
+            assert!((C64::new(re[i], im[i]) - (y[i] + c * x[i])).abs() <= rounding(3) * (y[i].abs() + c.abs() * x[i].abs()), "axpy at {i}");
+        }
+        let (sum, size): (C64, f64) = ((0..n).map(|i| x[i] * y[i]).sum(), (0..n).map(|i| x[i].abs() * y[i].abs()).sum());
+        assert!((dot(&xr, &xi, &yr, &yi) - sum).abs() <= rounding(2 * n) * size, "dot");
+        let rounds = 200_000;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            axpy(std::hint::black_box(c), std::hint::black_box(&xr), &xi, &mut re, &mut im);
+        }
+        let first = started.elapsed().as_secs_f64() * 1e9 / (rounds * n) as f64;
+        let started = std::time::Instant::now();
+        let mut total = C64::ZERO;
+        for _ in 0..rounds {
+            total += dot(std::hint::black_box(&xr), &xi, &yr, &yi);
+        }
+        std::hint::black_box((total, re, im));
+        eprintln!("axpy {first:.3} ns, dot {:.3} ns a complex multiply-add", started.elapsed().as_secs_f64() * 1e9 / (rounds * n) as f64);
+    }
 
     /// A reproducible matrix of entries uniform in [−½, ½] + i[−½, ½].
     fn sample(rows: usize, cols: usize, seed: u64) -> Mat {

@@ -21,7 +21,7 @@
 //! request is refused where it is not, or where the descent leaves the trap's region: no minimum holds the atom ("光镊不约束
 //! 原子"), and the focus is never taken instead. A focus that is a bowl's bottom is the centre as it stands, bit for bit.
 
-use super::assemble::{LEFT, RIGHT};
+use super::assemble::{Held, Site, LEFT, RIGHT};
 use super::tabulate::Tables;
 use super::{jet, Envelope, Lights, Lit, Model, Quadratic, Trap};
 use crate::linalg::C64;
@@ -80,16 +80,21 @@ impl Model {
         out
     }
 
-    /// V_L(r; p) with, to `order`, its gradient and Hessian, and the rounding of its sum (module documentation); the near light from
-    /// its tables where they serve (tabulate.rs `Model::near`).
+    /// V_L(r; p) with, to `order`, its gradient and Hessian (what lies beyond the order is not made, and no number), and the
+    /// rounding of its sum (module documentation); the near light from its tables where they serve (tabulate.rs `Model::near`).
     pub(crate) fn expand(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights, order: usize, tables: Option<&super::tabulate::Tables>) -> Expansion {
         let trap = self.light.trap;
         if !lights.on(trap) {
             return Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
         }
-        let amplitudes = self.light.amplitudes(r);
-        let mut out = self.far_potential(trap, &amplitudes, p, lights);
-        let near = self.near_potential(&amplitudes, p, lights, order, tables);
+        // The lit beams' amplitudes to the order asked -- V_L and its derivatives read no other light and no further --, into
+        // a thread's spare (assemble.rs `Held`): a step's reference asks the heap for nothing.
+        let mut spare = Held::<Site>::take();
+        let lit = |beam: usize| self.light.frequencies.iter().enumerate().any(|(w, f)| lights.on(w) && f.beams.contains(&beam));
+        self.light.amplitudes_into(r, order, lit, &mut spare.beams);
+        let amplitudes = &spare.beams;
+        let mut out = self.far_potential(trap, amplitudes, p, lights);
+        let near = self.near_potential(amplitudes, p, lights, order, tables);
         let q = &mut out.quadratic;
         q.value += near.quadratic.value;
         for x in 0..3 {
@@ -218,7 +223,7 @@ impl Model {
                     return Ok(Trap { centre: r, minimum: here.quadratic.value, axes: vectors, frequencies, lab });
                 }
                 let next: [f64; 3] = std::array::from_fn(|a| r[a] + (0..3).map(|i| steps[i] * scale * vectors[i][a]).sum::<f64>());
-                if self.light.outside(&self.light.amplitudes(next)) {
+                if self.light.outside(next) {
                     return Err("光镊不约束原子：准备势的下降离开了光镊的区域".into());
                 }
                 let there = self.expand(next, p, lights, 2, None);
