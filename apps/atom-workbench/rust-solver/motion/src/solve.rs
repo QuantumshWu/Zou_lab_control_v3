@@ -70,7 +70,7 @@
 //! first groups, or a pilot at a finer rung, are no better than the result before them --; else the last result goes out
 //! again, so that the app hears from the solve whatever stage it is in.
 use crate::adapt::{self, Drift};
-use crate::decide::{halved, judge, pays, Judgement, Read};
+use crate::decide::{assured, halved, judge, pays, Judgement, Read};
 use crate::ensemble::{Ensemble, Quadrature, Start, Well, GROUP};
 use crate::estimate::{draws_for, half_window, occupation, paired, spread, stepped, summarize, unseen, wilson, Estimate, Fate, Group, Held, Output, Scales, Spread, Stepped};
 use crate::field::{Geometry, Light};
@@ -548,7 +548,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
     }
     // The statistics against the room the re-booked errors leave.
     let n = parts.len() as u64 * GROUP;
-    if !(1..outputs).all(|k| targets.met(&e, k)) && n < MOST_TRAJECTORIES {
+    if !targets.met(&e) && n < MOST_TRAJECTORIES {
         product(&run, &ensemble, &context, &targets, &mut parts, batch(targets.need(&e), n), started, messages);
     }
     let all: Vec<&Part> = parts.iter().collect();
@@ -576,7 +576,6 @@ fn batch(need: f64, have: u64) -> u64 {
 /// trajectories reach `MOST_TRAJECTORIES`; each batch's result is a checkpoint.
 #[allow(clippy::too_many_arguments)]
 fn product(run: &Run, ensemble: &Ensemble, context: &Context, targets: &Targets, parts: &mut Vec<Part>, mut want: u64, started: Instant, messages: &mut Messages) {
-    let outputs = context.plan.times.len();
     loop {
         let have = parts.len() as u64 * GROUP;
         let pace = |done: u64| (done > 0).then(|| started.elapsed().as_secs_f64() * 1e3 / done as f64);
@@ -590,7 +589,7 @@ fn product(run: &Run, ensemble: &Ensemble, context: &Context, targets: &Targets,
         let all: Vec<&Part> = parts.iter().collect();
         let n = all.len() as u64 * GROUP;
         let (e, l, c) = pooled(&all, &context.scales);
-        if (1..outputs).all(|k| targets.met(&e, k)) || n >= MOST_TRAJECTORIES {
+        if targets.met(&e) || n >= MOST_TRAJECTORIES {
             break;
         }
         want = batch(targets.need(&e), n);
@@ -598,12 +597,12 @@ fn product(run: &Run, ensemble: &Ensemble, context: &Context, targets: &Targets,
     }
 }
 
-/// The pilot's size: the fewest whole groups whose unseen share fits the statistics' share of the population target,
-/// z²/(N + z²) ≤ √(1 − s²) ε (estimate.rs `unseen` and its inverse `draws_for`, units.rs `STEP_SHARE`) -- the smallest
-/// ensemble that can see a share as large as the target, 88 trajectories. The falsifiers take as many.
+/// The pilot's size: the fewest whole groups whose unseen share fits the statistics' room in the population target beside
+/// the step's share alone, z²/(N + z²) ≤ √(1 − s²) ε (`room`; estimate.rs `unseen` and its inverse `draws_for`, units.rs
+/// `STEP_SHARE`) -- the smallest ensemble that can see a share as large as the target, 88 trajectories. The falsifiers
+/// take as many.
 fn pilot_size() -> u64 {
-    let room = (1. - STEP_SHARE * STEP_SHARE).sqrt() * POPULATION_TARGET;
-    (draws_for(room) / GROUP as f64).ceil() as u64 * GROUP
+    (draws_for(room(POPULATION_TARGET, 0., step_bound()[0])) / GROUP as f64).ceil() as u64 * GROUP
 }
 
 /// The outputs and T's windows (module documentation, # Outputs and windows): per output and lab axis the window's half
@@ -889,6 +888,12 @@ fn step_bound() -> [f64; 2] {
     [STEP_SHARE * POPULATION_TARGET, STEP_SHARE * TEMPERATURE_TARGET]
 }
 
+/// The room the statistics may take of a target ε beside a model error A and a step error b, √(ε² − A² − b²) (module
+/// documentation, # Stopping); none where the two fill the target.
+fn room(target: f64, model: f64, step: f64) -> f64 {
+    (target * target - model * model - step * step).max(0.).sqrt()
+}
+
 /// The statistics' targets of the run (module documentation, # Stopping): per output the room of the shown rows' and the
 /// loss's interval, and where T is held to its target its scale and the room of its relative interval.
 struct Targets {
@@ -899,7 +904,6 @@ struct Targets {
 impl Targets {
     fn new(fixed: &Fixed) -> Targets {
         let [bp, bt] = step_bound();
-        let room = |eps: f64, a: f64, b: f64| (eps * eps - a * a - b * b).max(0.).sqrt();
         Targets {
             population: fixed.model.iter().zip(&fixed.held).zip(&fixed.cleared).map(|((a, h), c)| room(POPULATION_TARGET, a[0] * h + c, bp)).collect(),
             temperature: fixed
@@ -917,10 +921,10 @@ impl Targets {
     fn crowded(&self) -> Vec<usize> {
         (1..self.population.len()).filter(|&k| self.population[k] == 0. || self.temperature[k].is_some_and(|t| t.1 == 0.)).collect()
     }
-    /// Whether output k's statistics meet their targets.
-    fn met(&self, estimates: &[Estimate], k: usize) -> bool {
-        let e = &estimates[k];
-        e.shown_statistics() <= self.population[k] && self.temperature[k].is_none_or(|(scale, room)| e.temperature_interval(scale) <= room)
+    /// Whether every output's statistics meet their targets.
+    fn met(&self, estimates: &[Estimate]) -> bool {
+        let fits = |(k, e): (usize, &Estimate)| e.shown_statistics() <= self.population[k] && self.temperature[k].is_none_or(|(scale, room)| e.temperature_interval(scale) <= room);
+        estimates.iter().enumerate().skip(1).all(fits)
     }
     /// The trajectories each output needs by the estimates of N (module documentation, # Stopping), their largest.
     fn need(&self, estimates: &[Estimate]) -> f64 {
@@ -1163,7 +1167,7 @@ fn candidates(
             Some(Candidate { unit: u, saving, ratio: mean(&rates, None) / mean(&own, None) })
         })
         .collect();
-    out.sort_by(|a, b| (b.saving.value - b.saving.spread.interval()).total_cmp(&(a.saving.value - a.saving.spread.interval())));
+    out.sort_by(|a, b| assured(b.saving).total_cmp(&assured(a.saving)));
     out
 }
 

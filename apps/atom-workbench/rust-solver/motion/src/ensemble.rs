@@ -60,9 +60,9 @@ use rayon::prelude::*;
 use std::f64::consts::{PI, TAU};
 
 /// The trajectories of one Latin-hypercube group (SPEC §2.5), and with it the block that the delete-one-group jackknife
-/// leaves out (estimate.rs). A structural size (SPEC §0), which no result's expectation depends on: every member is
-/// distributed as an independent draw and the groups are independent of each other, so at any size the estimates are
-/// unbiased and the jackknife's variance is that of the groups' means. At a given number of trajectories the size only
+/// leaves out (estimate.rs). A structural size (SPEC §0): every member is distributed as an independent draw and the
+/// groups are independent of each other, so at any size the means the estimates are made of have the ensemble's
+/// expectations and the jackknife's variance is that of the groups' means. At a given number of trajectories the size only
 /// trades the strata a group spreads over each variable's distribution (as many as its members) and the sums kept (one
 /// set a group and output) against the groups the spread is read on (Student's degrees of freedom, one fewer than they).
 /// It divides `MOST_TRAJECTORIES`, so that the pilot's own numbers, which start there (solve.rs), start a group.

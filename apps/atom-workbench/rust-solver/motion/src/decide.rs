@@ -29,8 +29,9 @@
 //! error is the near end of the read's interval, |e| − t·SE (`Read::clear`).
 //!
 //! # pays
-//! A spend W for a predicted saving ΔC pays where ΔC − t·SE(ΔC) > W (`pays`): only a saving the read tells from nothing
-//! moves the work, its error the jackknife of the difference of the two levels' costs.
+//! A spend W for a predicted saving ΔC pays where ΔC − t·SE(ΔC) > W (`pays`; the left side is `assured`, by which savings
+//! are ranked): only a saving the read tells from nothing moves the work, its error the jackknife of the difference of the
+//! two levels' costs.
 //!
 //! # Work
 //! Work is counted, not timed (SPEC §5.1): the real multiply-adds of the engine's algorithms (`Work`), each counted where
@@ -127,9 +128,15 @@ pub fn judge(reads: &[(Read, f64)], order: f64) -> Judgement {
     }
 }
 
+/// What a predicted saving is at the least at the confidence z, saving − t·SE (module documentation, # pays): negative
+/// for one that may be a loss, no number for a read that is none.
+pub fn assured(saving: Read) -> f64 {
+    saving.value - saving.spread.interval()
+}
+
 /// Whether spending `spend` for the predicted `saving` pays (module documentation, # pays): saving − t·SE > spend.
 pub fn pays(spend: Work, saving: Read) -> bool {
-    saving.value - saving.spread.interval() > spend
+    assured(saving) > spend
 }
 
 #[cfg(test)]
