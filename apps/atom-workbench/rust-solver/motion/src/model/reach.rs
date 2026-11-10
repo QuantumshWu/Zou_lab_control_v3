@@ -416,12 +416,15 @@ pub(crate) struct Forms {
     terms: Mutex<HashMap<Coupling, Arc<TermForm>>>,
     /// Γ_min (eliminate.rs `Model::least_decay`).
     decay: OnceLock<f64>,
+    /// [frequency][pair]: whether the levels the eliminations take hold the pair (eliminate.rs `Model::level_pairs`, every
+    /// light on).
+    taken: OnceLock<Vec<Vec<bool>>>,
 }
 
 impl Forms {
     pub(crate) fn new() -> Forms {
         let cells = || (0..STATES * STATES).map(|_| OnceLock::new()).collect();
-        Forms { levels: OnceLock::new(), mixed: OnceLock::new(), entries: cells(), differences: cells(), folded: OnceLock::new(), drives: OnceLock::new(), terms: Mutex::new(HashMap::new()), decay: OnceLock::new() }
+        Forms { levels: OnceLock::new(), mixed: OnceLock::new(), entries: cells(), differences: cells(), folded: OnceLock::new(), drives: OnceLock::new(), terms: Mutex::new(HashMap::new()), decay: OnceLock::new(), taken: OnceLock::new() }
     }
 
     /// A weighting of the model's far static forms (`Weights`).
@@ -543,6 +546,11 @@ impl Forms {
         *self.decay.get_or_init(|| model.least_decay())
     }
 
+    /// Per frequency and beam pair whether the levels the eliminations take hold it, every light on.
+    pub(crate) fn taken(&self, model: &Model) -> &[Vec<bool>] {
+        self.taken.get_or_init(|| model.level_pairs(&model.running(), &model.coherent_dressing()))
+    }
+
 }
 
 /// A cell's beams, or its centre point's (its radius zero), with what the units' bounds share over it, each part made once for
@@ -570,10 +578,14 @@ pub(crate) struct Region {
     pub(crate) dressings: OnceLock<Vec<[f64; GROUND]>>,
     /// Per cluster.
     pub(crate) forces: Vec<OnceLock<f64>>,
-    /// Per ground state the first places of its drives' gates in the tail rule's order (units.rs `Model::folds`).
+    /// Per ground state its drives' sizes and distances (units.rs `Model::across`), and the first places of their gates
+    /// in the tail rule's order (units.rs `Model::folds`).
+    pub(crate) across: [OnceLock<Vec<super::units::Across>>; GROUND],
     pub(crate) drives: [OnceLock<Vec<[f64; 4]>>; GROUND],
-    /// Per ground state: the slope of its level under the near light (units.rs `Model::near_slope`).
+    /// Per ground state: the slope of its level under the near light (units.rs `Model::near_slope`), and its shift's
+    /// bound (units.rs `Model::near_shift`).
     pub(crate) slopes: [OnceLock<f64>; GROUND],
+    pub(crate) shifts: [OnceLock<f64>; GROUND],
     /// Per ground state: the slopes of the constant forms' levels from it to the excited states its folded drives reach
     /// (units.rs `Model::level_slopes`).
     pub(crate) levels: Vec<OnceLock<[f64; EXCITED]>>,
@@ -800,9 +812,10 @@ struct Asked {
 
 /// A cell halved in a round: per side its halves where this round made them (none where a half cannot meet the reach), and
 /// per quantity asking the side it halves the cell along (`side`), whether each half's centre is in the reach, and its values
-/// on each half (`valued`).
+/// on each half (`valued`). The halves are on the heap: a round's cells go through the pool's recursion by value, and six
+/// nodes a cell at each level of it took 1.2 to 1.7 MB of a worker's 2 MB stack on 7700 cells (0.3 MB so).
 struct Halved {
-    made: [Option<[Option<Node>; 2]>; 3],
+    made: [Option<[Option<Box<Node>>; 2]>; 3],
     of: Vec<(usize, [bool; 2], [Option<(f64, f64)>; 2])>,
 }
 
@@ -827,15 +840,15 @@ impl<Q: Fn(&Region) -> f64 + ?Sized> Round<'_, Q> {
         let node = &self.nodes[asked.node];
         let along: [Region; 3] = std::array::from_fn(|a| self.cells.model.along(&node.over, a));
         let sides: Vec<usize> = asked.quantities.iter().map(|&q| side(self.quantities[q], &node.cell, &along)).collect();
-        let made: [Option<[Option<Node>; 2]>; 3] =
-            std::array::from_fn(|a| (node.halves[a].is_none() && sides.contains(&a)).then(|| node.cell.halves(a).map(|half| self.cells.make(half))));
+        let made: [Option<[Option<Box<Node>>; 2]>; 3] =
+            std::array::from_fn(|a| (node.halves[a].is_none() && sides.contains(&a)).then(|| node.cell.halves(a).map(|half| self.cells.make(half).map(Box::new))));
         let of = asked
             .quantities
             .iter()
             .zip(&sides)
             .map(|(&q, &a)| {
                 let halves: [Option<&Node>; 2] = match &made[a] {
-                    Some(made) => made.each_ref().map(Option::as_ref),
+                    Some(made) => made.each_ref().map(Option::as_deref),
                     None => node.halves[a].expect("the halves made in an earlier round").map(|at| at.map(|at| &self.nodes[at])),
                 };
                 (a, halves.map(|half| half.is_some_and(|half| half.inside)), halves.map(|half| half.map(|half| valued(self.quantities[q], half))))
@@ -966,8 +979,10 @@ impl Model {
             resolvents: OnceLock::new(),
             dressings: OnceLock::new(),
             forces: (0..self.clusters.len()).map(|_| OnceLock::new()).collect(),
+            across: std::array::from_fn(|_| OnceLock::new()),
             drives: std::array::from_fn(|_| OnceLock::new()),
             slopes: std::array::from_fn(|_| OnceLock::new()),
+            shifts: std::array::from_fn(|_| OnceLock::new()),
             levels: (0..GROUND).map(|_| OnceLock::new()).collect(),
             terms: Mutex::new(HashMap::new()),
             moving: OnceLock::new(),
@@ -1036,7 +1051,7 @@ impl Model {
                     if let Some(new) = new {
                         let at = new.map(|half| {
                             half.map(|half| {
-                                nodes.push(half);
+                                nodes.push(*half);
                                 nodes.len() - 1
                             })
                         });
@@ -1204,9 +1219,9 @@ mod tests {
         };
         let trap = model.trap(&p, &model.prepared()).unwrap();
         let reach = model.reach(&trap, &p, 20.0, 2e-3);
-        let s = |r: &Region| model.folds(b, 0, r, usize::MAX, 0.0)[0];
-        let a = |r: &Region| model.folds(b, 0, r, usize::MAX, 0.0)[1];
-        let other = |r: &Region| model.folds(3, 0, r, usize::MAX, 0.0)[0];
+        let s = |r: &Region| model.folds(b, 0, r, usize::MAX)[0];
+        let a = |r: &Region| model.folds(b, 0, r, usize::MAX)[1];
+        let other = |r: &Region| model.folds(3, 0, r, usize::MAX)[0];
         let together = model.bounds_over(&reach, 0.5, &[&s, &a, &other]);
         let alone: Vec<f64> = [&s as &dyn Fn(&Region) -> f64, &a, &other].iter().map(|q| model.bounds_over(&reach, 0.5, &[*q])[0]).collect();
         assert_eq!(together, alone);

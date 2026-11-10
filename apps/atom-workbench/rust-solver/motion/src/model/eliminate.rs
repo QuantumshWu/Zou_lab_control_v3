@@ -156,7 +156,7 @@ impl Model {
     /// Per frequency, row-major over its beams, whether a pair of them enters the levels the eliminations take (module
     /// documentation, # The response): a pair the lights hold (model.rs `Lights::pair`), and of a carrier's frequency one
     /// whose interference its dressing keeps -- two beams of one polarization unit, or any two where its dressing is coherent.
-    fn level_pairs(&self, lights: &Lights, coherent: &[bool]) -> Vec<Vec<bool>> {
+    pub(crate) fn level_pairs(&self, lights: &Lights, coherent: &[bool]) -> Vec<Vec<bool>> {
         (0..self.light.frequencies.len())
             .map(|w| {
                 let n = self.light.frequencies[w].beams.len();
@@ -522,21 +522,24 @@ impl Model {
         UnitError { parameter: delta, population: delta * weight, temperature: delta * weight }
     }
 
-    /// The bound of the near light's differential shift of two states over a region (the static gates' separations): per lit
-    /// carrier (‖u_a‖² + ‖u_b‖²) 2/Γ_min, u_s its coherent field's couplings of ground state s (`Couplings`), the resolvent's norm
-    /// at most 2/Γ_min.
+    /// The bound of the differential shift of two states by the drives folded at the atom over a region (what a coupling's
+    /// distance loses, units.rs # What a folded drive does to its level): each state's own shift's bound (units.rs
+    /// `Model::near_shift`).
     pub(crate) fn near_spread(&self, a: usize, b: usize, region: &Region) -> f64 {
-        let column = |c: &Couplings, s: usize| if s < GROUND { c.column[s] } else { 0.0 };
-        self.couplings(region).iter().map(|c| column(c, a).powi(2) + column(c, b).powi(2)).sum::<f64>() * 2.0 / region.forms.least_decay(self)
+        self.near_shift(a, region) + self.near_shift(b, region)
     }
 }
 
 /// The constant forms' energies over a region (the gates' distances): per state its value at the centre and the bound of how
-/// far it moves within the cell, and per excited state the Gershgorin radius of the forms' couplings among the excited states.
+/// far it moves within the cell, per excited state the Gershgorin radius of the forms' couplings among the excited states,
+/// and per state the bound of how far the level the eliminations take (module documentation, # The response: a carrier's
+/// frequency's form with its polarization units' interference averaged) lies from the level itself -- the beam pairs
+/// that average leaves out, their sum at the centre and how far each moves.
 pub(crate) struct CellEnergies {
     pub(crate) centre: [f64; STATES],
     pub(crate) slack: [f64; STATES],
     pub(crate) radius: [f64; STATES],
+    pub(crate) averaged: [f64; STATES],
 }
 
 /// A carrier's coherent couplings over a region (reach.rs `Region`). With u_s = Σ_l a_l X^f_l[:, s] the excited amplitudes its
@@ -562,13 +565,21 @@ impl Model {
             let forms = &region.forms;
             let mut centre: [f64; STATES] = std::array::from_fn(|s| self.base[(s, s)].re);
             let mut slack = [0.0; STATES];
-            for (levels, pairs) in forms.levels(self).iter().zip(&region.pairs) {
-                for (p, pair) in levels.iter().zip(pairs) {
+            let (mut left, mut averaged) = ([0.0; STATES], [0.0; STATES]);
+            for ((levels, pairs), taken) in forms.levels(self).iter().zip(&region.pairs).zip(forms.taken(self)) {
+                for ((p, pair), taken) in levels.iter().zip(pairs).zip(taken) {
                     for s in 0..STATES {
                         centre[s] += (pair.centre * p[s].0).re;
                         slack[s] += pair.radius * p[s].1;
+                        if !taken {
+                            left[s] += (pair.centre * p[s].0).re;
+                            averaged[s] += pair.radius * p[s].1;
+                        }
                     }
                 }
+            }
+            for s in 0..STATES {
+                averaged[s] += left[s].abs();
             }
             let mut radius = [0.0; STATES];
             for (x, mixed) in (GROUND..STATES).zip(forms.mixed(self)) {
@@ -582,7 +593,7 @@ impl Model {
                     radius[x] += off.abs() + moved;
                 }
             }
-            Box::new(CellEnergies { centre, slack, radius })
+            Box::new(CellEnergies { centre, slack, radius, averaged })
         })
     }
 
@@ -661,8 +672,8 @@ impl Model {
             let of = |delta: f64, b: usize| {
                 let mut least = f64::INFINITY;
                 for e in GROUND..STATES {
-                    let lo = energies.centre[e] - energies.slack[e] - energies.centre[b] - energies.slack[b] - delta;
-                    let hi = energies.centre[e] + energies.slack[e] - energies.centre[b] + energies.slack[b] - delta;
+                    let slack = energies.slack[e] + energies.slack[b] + energies.averaged[e] + energies.averaged[b];
+                    let (lo, hi) = (energies.centre[e] - energies.centre[b] - delta - slack, energies.centre[e] - energies.centre[b] - delta + slack);
                     let (x, gamma) = (distance(lo, hi), self.decay[(e - GROUND, e - GROUND)].re);
                     least = least.min((x * x + gamma * gamma / 4.0).sqrt() - energies.radius[e]);
                 }
@@ -715,8 +726,9 @@ impl Model {
     /// beam pairs -- all of them, or those within one polarization unit (its dressing, T̄) -- Σ max|∇(a_l'* a_l)| ‖X^f_l'[:,b]‖
     /// ‖X^f_l[:,b]‖ ‖R‖, plus ‖u_b‖² L_b ‖R‖², the resolvent's derivative at most the slope L_b of the levels the column reaches (b's
     /// and its excited states', `energy_slope_over`) times its square (‖u_b‖ in all, or per unit, `Couplings`); ‖R‖ the dressing's
-    /// resolvent bound (`resolvent`), or the dissipation's 2/Γ_min for the shift in the generator (its self-energy and dressing
-    /// unbounded here).
+    /// resolvent bound (`resolvent`), or for the shift in the generator one over the least distance of the carrier's drives of b
+    /// folded at the atom, each as its own gate reads it over the region -- its self-energy, the other carriers' dressing and
+    /// the Doppler shift in it (units.rs `Model::least_across`, # What a folded drive does to its level).
     pub(crate) fn shift_slope(&self, carrier: usize, b: usize, region: &Region, dressing: bool) -> f64 {
         let cc = &self.carriers[carrier];
         let couplings = &self.couplings(region)[carrier];
@@ -727,7 +739,7 @@ impl Model {
         }
         let slopes = self.level_slopes(b, region);
         let levels = folded.reached[b].iter().map(|&e| slopes[e]).fold(0.0, f64::max);
-        let resolvent = if dressing { self.resolvent(carrier, b, region) } else { 2.0 / region.forms.least_decay(self) };
+        let resolvent = if dressing { self.resolvent(carrier, b, region) } else { self.least_across(carrier, b, region).map_or(0.0, |distance| 1.0 / distance) };
         let n = cc.beams.len();
         let pairs = &region.pairs[cc.frequency];
         let mut out = 0.0;
