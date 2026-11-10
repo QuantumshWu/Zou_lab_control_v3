@@ -721,11 +721,18 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: Option<
             let first = (((s0 - widest) / interval).floor().max(1.)) as usize;
             let last = (((s1 + widest) / interval).ceil() as usize).min(outputs - 1);
             for k in first..=last {
+                // The step's moments over an axis's cut of it (`Segment::moments` gives every axis's): made once for
+                // the axes whose windows cut the step alike.
+                let mut made: [Option<((f64, f64), (V3, V3))>; 3] = [None; 3];
                 for a in 0..3 {
                     let h = plan.halves[k][a];
                     let (lo, hi) = (s0.max(plan.times[k] - h), s1.min(plan.times[k] + h));
                     if hi > lo {
-                        let (m1, m2) = s.moments(lo, hi);
+                        let (m1, m2) = match made[..a].iter().flatten().find(|(cut, _)| *cut == (lo, hi)) {
+                            Some((_, same)) => *same,
+                            None => s.moments(lo, hi),
+                        };
+                        made[a] = Some(((lo, hi), (m1, m2)));
                         let w = &mut moments[k][a];
                         w[0] += hi - lo;
                         w[1] += m1[a];
