@@ -777,14 +777,16 @@ def _selected_plan(
 
     A Range row keeps its point COUNT and its direction, because that is
     what the plan's form offers (from, to, points): the same effort spent
-    over a smaller range, walked the way it was authored.  Its new ends are
-    held to the span the scan played: past it -- the half pixel beyond an
-    image's last column, a curve's margin -- the picture shows nothing
-    scanned, and a range drawn there would sweep past the knob's limits
-    when the scan ran up to them.  A Values row is an exact statement and
-    stays one: the listed values the region holds, in their order and
-    spelling.  A region holding nothing scanned on an axis it cuts is
-    refused by name.
+    over the drawn range, walked the way it was authored.  Each end is read
+    by itself.  A wall within half a step of the scan's outermost point --
+    the half pixel an image draws beyond its last column, a curve's margin
+    -- is that point's own cell: the row keeps the end it has.  A wall past
+    that, inside the data or beyond it, is the new end as drawn, so a
+    region reaching past what was scanned sweeps there next; the plan's own
+    check against the knob's limits says so when that is too far.  A Values
+    row is an exact statement and stays one: the listed values the region
+    holds, in their order and spelling.  A region holding none of an axis's
+    listed values is refused by name.
     """
 
     rows = plan_input_rows(draft.get("plan"))
@@ -803,21 +805,21 @@ def _selected_plan(
         authored = parse_scan_values(row["value_text"]) if listed else _range_values(row)
         if len(authored) < 2:
             continue
-        played = [float(value) for value in recorded["values"]]
-        first, last = min(played), max(played)
+        played = sorted({float(value) for value in recorded["values"]})
+        if len(played) < 2:
+            continue
+        first, last = played[0], played[-1]
         lower, upper = float(chosen.lower), float(chosen.upper)
-        if lower <= first and upper >= last:
+        # The outermost points' own cells: half a step either side of each.
+        keeps_low = abs(lower - first) <= (played[1] - first) / 2 if not listed else lower <= first
+        keeps_high = abs(upper - last) <= (last - played[-2]) / 2 if not listed else upper >= last
+        if keeps_low and keeps_high:
             continue
         source_unit = context.get("axis_units", {}).get(axis_id)
         if source_unit is None:
             raise ValueError(f"selected scan axis {axis_id!r} has no recorded unit")
-        if not listed:
-            lower, upper = max(lower, first), min(upper, last)
         if not lower < upper:
-            raise ValueError(
-                f"selected scan axis {axis_id!r}: the region lies outside the "
-                f"{first:g} to {last:g} {source_unit} the scan played"
-            )
+            raise ValueError(f"selected scan axis {axis_id!r}: the region has no width")
         low, high = _bounds_in_row_unit(axis_id, row, (lower, upper), source_unit)
         if listed:
             kept = [item for item, value in zip(items, authored, strict=True) if low <= value <= high]
@@ -827,6 +829,11 @@ def _selected_plan(
                 )
             row["value_text"] = ", ".join(kept)
         else:
+            # An end the region leaves in its outermost cell stays as the row has it.
+            low = min(authored[0], authored[-1]) if keeps_low else low
+            high = max(authored[0], authored[-1]) if keeps_high else high
+            if not low < high:
+                raise ValueError(f"selected scan axis {axis_id!r}: the region lies wholly past the end the row keeps")
             start, stop = (low, high) if authored[0] <= authored[-1] else (high, low)
             if "range" in row:
                 row["range"] = {"start": start, "stop": stop, "count": len(authored)}
