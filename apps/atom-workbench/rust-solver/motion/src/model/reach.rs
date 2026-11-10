@@ -33,14 +33,15 @@
 //! A quantity's proof is a sequence -- its next cell is the one of its largest bound among those its earlier halvings left --,
 //! but what a cell holds is a function of the cell alone, and so is a quantity's value on it. The proofs therefore go on in
 //! rounds. In a round every proof still open goes on, in its own order, as far as the halves already made for it reach, and
-//! then names the cells it has to have halved: the one its order has come to and, ahead of its order, those of its largest
-//! bounds that are not settled -- each will be halved unless the proof ends first --, as many in all as cells can be halved at
-//! once. The cells named are halved once each, all at once where the quantities may be asked from any thread (on every core:
-//! `Model::bounds_over_in_parallel`), with the values on their halves of the quantities that named them. Each proof takes its
-//! cells in the order it would take them alone, so its bound is the same number whatever was halved ahead and however many
-//! cores halved it; a proof asks ahead for no more cells a round than can be halved at once, so a round takes the time of
-//! about one cell and advances every open proof by one cell at least -- what a proof that ends early has had halved in vain
-//! costs no time over its halving one cell after another.
+//! then names the cell its order has come to. Where the quantities may be asked from any thread (`AtOnce`:
+//! `Model::bounds_over_in_parallel`) it names, ahead of its order, every half the round before made for it whose bound is not
+//! settled: whatever the order, each of these has to be halved before the proof can end with its bound settled everywhere, so
+//! the cells are halved level by level and the rounds are as many as the cells are deep. The cells named are halved once each,
+//! for all the quantities that named them, one after another or on all the cores at once, as the proofs' own steps are. Each
+//! proof takes its cells in the order it would take them alone, through the same queue, so its bound is the same number
+//! whatever was halved ahead of it and on however many cores. Only a proof that ends otherwise -- a bound attained at a centre
+//! -- has had cells halved in vain: those not settled above the level at which a centre attains it, for the halves made hold
+//! that centre's value from then on (`Proof::sighted`), every cell is settled against it, and the proof asks ahead no more.
 
 use super::eliminate::{CellEnergies, Couplings};
 use super::far::EXCITED;
@@ -50,7 +51,7 @@ use crate::linalg::{norm3, Mat, C64};
 use crate::request::{GROUND, STATES};
 use crate::units::{rounding, KT_PER_UK};
 use rayon::prelude::*;
-use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// A beam's envelope Lipschitz constant L_b = sup |∇b| (1/µm), a = e^{ik·r} b the amplitude with its plane-wave phase taken out:
@@ -352,12 +353,14 @@ struct Node {
     halves: Option<[Option<usize>; 2]>,
 }
 
-/// A cell in a quantity's queue, ordered by its upper bound: the bound, the cell's node, the quantity's value at its centre.
+/// A cell in a quantity's queue, ordered by its upper bound: the bound, the cell's node, the quantity's value at its centre, and
+/// whether the centre is in the reach.
 #[derive(Clone, Copy)]
 struct Queued {
     upper: f64,
     node: usize,
     centre: f64,
+    inside: bool,
 }
 impl PartialEq for Queued {
     fn eq(&self, o: &Self) -> bool {
@@ -428,74 +431,76 @@ fn valued<Q: Fn(&Region) -> f64 + ?Sized>(q: &Q, node: &Node) -> (f64, f64) {
     (node.at.as_ref().map_or(f64::NEG_INFINITY, |r| q(r)), q(&node.over))
 }
 
+/// What ends a proof (`Model::proven_over`): `settled(the largest upper bound of the cells left, the largest value attained at a
+/// centre in the reach)`, and the question's own size.
+#[derive(Clone, Copy)]
+struct Rule<'a> {
+    settled: &'a (dyn Fn(f64, f64) -> bool + Sync),
+    scale: f64,
+}
+
 /// One quantity's proof (module documentation, # Provable extrema, # Rounds): the cells left, by their upper bounds, and the
-/// largest value at a centre in the reach among them and their parents; of the cells left, those it has not yet asked to be
-/// halved (`ahead`, by their upper bounds too) and those it has (`asked`); the halves made of cells it asked for, each as it
-/// enters the queue, until its order comes to their cell; and its bound once it is decided.
+/// largest value at a centre in the reach among them and their parents; the halves made for it, by cell, each as it enters the
+/// queue, until its order comes to their cell; the largest value at a centre in the reach among all the halves made for it,
+/// those waiting too; the cells it has asked to be halved; and its bound once it is decided.
 struct Proof {
     queue: BinaryHeap<Queued>,
     attained: f64,
-    ahead: BinaryHeap<Queued>,
-    asked: HashSet<usize>,
     halved: HashMap<usize, [Option<Queued>; 2]>,
+    sighted: f64,
+    asked: HashSet<usize>,
     bound: Option<f64>,
 }
 
 impl Proof {
-    /// A quantity's proof at the proofs' first cell (none: no cell meets the reach).
+    /// A quantity's proof at the proofs' first cell (none: no cell meets the reach, the bound is 0); on an unbounded cell, which
+    /// is not halved, the bound is the quantity's over it.
     fn new<Q: Fn(&Region) -> f64 + ?Sized>(q: &Q, first: Option<&Node>) -> Proof {
-        let mut proof = Proof { queue: BinaryHeap::new(), attained: f64::NEG_INFINITY, ahead: BinaryHeap::new(), asked: HashSet::new(), halved: HashMap::new(), bound: None };
-        if let Some(node) = first {
-            let (centre, upper) = valued(q, node);
-            proof.push(Queued { upper, node: 0, centre }, node.inside);
+        let mut proof = Proof { queue: BinaryHeap::new(), attained: f64::NEG_INFINITY, halved: HashMap::new(), sighted: f64::NEG_INFINITY, asked: HashSet::new(), bound: None };
+        match first {
+            None => proof.bound = Some(0.0),
+            Some(node) => {
+                let (centre, upper) = valued(q, node);
+                if node.cell.bounded() {
+                    proof.push(Queued { upper, node: 0, centre, inside: node.inside });
+                } else {
+                    proof.bound = Some(upper);
+                }
+            }
         }
         proof
     }
 
     /// A cell into the queue, its centre's value attained where the centre is in the reach.
-    fn push(&mut self, cell: Queued, inside: bool) {
-        if inside {
+    fn push(&mut self, cell: Queued) {
+        if cell.inside {
             self.attained = self.attained.max(cell.centre);
         }
         self.queue.push(cell);
-        self.ahead.push(cell);
     }
 
-    /// The proof as far as the halves made for it reach (`Model::proven_over`), and the cells it asks to be halved next, none
-    /// once it is decided: the cell its order has come to and, ahead of it, those of its largest bounds that are not settled,
-    /// `width` in all. (A settled cell stays settled as the attained value grows, and so does every cell below it.)
-    fn advance(&mut self, nodes: &[Node], settled: &dyn Fn(f64, f64) -> bool, scale: f64, width: usize) -> Vec<usize> {
+    /// The proof as far as the halves made for it reach -- with `made`, those the round before made --, and the cells it asks
+    /// to be halved next, none once it is decided (module documentation, # Rounds): the cell its order has come to and, with
+    /// `ahead`, each of the halves just made that is not settled against the largest value the halves made hold.
+    fn advance(&mut self, made: Vec<(usize, [Option<Queued>; 2])>, rule: Rule, ahead: bool) -> Vec<usize> {
+        let new: Vec<Queued> = made.iter().flat_map(|(_, halves)| halves.iter().flatten().copied()).collect();
+        self.sighted = new.iter().filter(|half| half.inside).fold(self.sighted, |sighted, half| sighted.max(half.centre));
+        self.halved.extend(made);
         while self.bound.is_none() {
             let Some(&top) = self.queue.peek() else {
                 self.bound = Some(0.0);
                 break;
             };
-            if settled(top.upper, self.attained) || !nodes[top.node].cell.bounded() || top.upper - top.centre <= rounding(1) * scale.max(top.centre.abs()) {
+            if (rule.settled)(top.upper, self.attained) || top.upper - top.centre <= rounding(1) * rule.scale.max(top.centre.abs()) {
                 self.bound = Some(top.upper);
                 break;
             }
             let Some(halves) = self.halved.remove(&top.node) else {
-                self.asked.insert(top.node);
-                let mut ask = vec![top.node];
-                while ask.len() < width {
-                    match self.ahead.pop() {
-                        Some(next) if !settled(next.upper, self.attained) => {
-                            if self.asked.insert(next.node) {
-                                ask.push(next.node);
-                            }
-                        }
-                        _ => {
-                            self.ahead.clear();
-                            break;
-                        }
-                    }
-                }
-                return ask;
+                let unsettled = new.iter().filter(|half| ahead && !(rule.settled)(half.upper, self.sighted)).map(|half| half.node);
+                return [top.node].into_iter().chain(unsettled).filter(|&cell| self.asked.insert(cell)).collect();
             };
             self.queue.pop();
-            for half in halves.into_iter().flatten() {
-                self.push(half, nodes[half.node].inside);
-            }
+            halves.into_iter().flatten().for_each(|half| self.push(half));
         }
         vec![]
     }
@@ -507,10 +512,11 @@ struct Asked {
     quantities: Vec<usize>,
 }
 
-/// A cell halved in a round: its halves where this round made them (none where a half cannot meet the reach), and per quantity
-/// asking its values on each half (`valued`).
+/// A cell halved in a round: its halves where this round made them (none where a half cannot meet the reach), whether each
+/// half's centre is in the reach, and per quantity asking its values on each half (`valued`).
 struct Halved {
     made: Option<[Option<Node>; 2]>,
+    inside: [bool; 2],
     values: Vec<[Option<(f64, f64)>; 2]>,
 }
 
@@ -531,8 +537,49 @@ impl<Q: Fn(&Region) -> f64 + ?Sized> Round<'_, Q> {
             None => node.halves.expect("the halves made in an earlier round").map(|at| at.map(|at| &self.nodes[at])),
         };
         let values = asked.quantities.iter().map(|&q| halves.map(|half| half.map(|half| valued(self.quantities[q], half)))).collect();
-        Halved { made, values }
+        Halved { inside: halves.map(|half| half.is_some_and(|half| half.inside)), made, values }
     }
+}
+
+/// The pace of a proving (module documentation, # Rounds): whether its proofs ask for cells ahead of their order, and how a
+/// round's independent pieces are gone through -- the proofs' own steps (each with what the round before made for it), the
+/// halving of the cells asked for.
+trait Pace<Q: ?Sized> {
+    const AHEAD: bool;
+    fn proofs<T: Send, R: Send>(proofs: &mut [Proof], made: Vec<T>, step: impl Fn(&mut Proof, T) -> R + Sync) -> Vec<R>;
+    fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved>;
+}
+
+/// One after another, no cell ahead of a proof's order: the pace of quantities that only their own thread may ask.
+struct InTurn;
+
+impl<Q: Fn(&Region) -> f64 + ?Sized> Pace<Q> for InTurn {
+    const AHEAD: bool = false;
+    fn proofs<T: Send, R: Send>(proofs: &mut [Proof], made: Vec<T>, step: impl Fn(&mut Proof, T) -> R + Sync) -> Vec<R> {
+        proofs.iter_mut().zip(made).map(|(proof, made)| step(proof, made)).collect()
+    }
+    fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved> {
+        asked.iter().map(|cell| round.halve(cell)).collect()
+    }
+}
+
+/// On all the cores at once, each proof asking ahead of its order: the pace of quantities that any thread may ask.
+struct AtOnce;
+
+impl<Q: Fn(&Region) -> f64 + Sync + ?Sized> Pace<Q> for AtOnce {
+    const AHEAD: bool = true;
+    fn proofs<T: Send, R: Send>(proofs: &mut [Proof], made: Vec<T>, step: impl Fn(&mut Proof, T) -> R + Sync) -> Vec<R> {
+        proofs.par_iter_mut().zip(made).map(|(proof, made)| step(proof, made)).collect()
+    }
+    fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved> {
+        asked.par_iter().map(|cell| round.halve(cell)).collect()
+    }
+}
+
+/// Whether a quantity's proof against a threshold is decided (`Model::bounds_over`), by the largest upper bound of the cells left
+/// and the largest value attained at a centre in the reach: below the threshold everywhere, or attained at or above it.
+fn decided(threshold: f64) -> impl Fn(f64, f64) -> bool + Sync {
+    move |upper, attained| upper < threshold || attained >= threshold
 }
 
 impl Model {
@@ -640,61 +687,58 @@ impl Model {
     /// The provable bounds over the reach of quantities given per region, each asked against `threshold` (module documentation,
     /// # Provable extrema): each one's largest upper bound of the cells left when it is decided -- below the threshold everywhere,
     /// or attained at or above it at a centre in the reach --, or within the rounding of its centre's value; 0 where no cell meets
-    /// the reach. A round's cells are halved one after another.
+    /// the reach. The cells are halved one after another (`InTurn`).
     pub(crate) fn bounds_over(&self, reach: &Reach, threshold: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
-        self.proven_over(reach, &|upper, attained| upper < threshold || attained >= threshold, threshold.abs(), quantities, 1, &|round, asked| asked.iter().map(|cell| round.halve(cell)).collect())
+        self.proven_over::<_, InTurn>(reach, Rule { settled: &decided(threshold), scale: threshold.abs() }, quantities)
     }
 
-    /// The bounds against `threshold` (`bounds_over`) of quantities any thread may ask: a round's cells are halved on all the
-    /// cores at once, each proof asking for as many cells a round as there are cores (module documentation, # Rounds). The
-    /// bounds are those of `bounds_over`, to the bit.
+    /// The bounds against `threshold` (`bounds_over`) of quantities any thread may ask, proven on all the cores (`AtOnce`): the
+    /// same bounds, to the bit.
     pub(crate) fn bounds_over_in_parallel(&self, reach: &Reach, threshold: f64, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
-        let settled = |upper: f64, attained: f64| upper < threshold || attained >= threshold;
-        self.proven_over(reach, &settled, threshold.abs(), quantities, rayon::current_num_threads(), &|round, asked| asked.par_iter().map(|cell| round.halve(cell)).collect())
+        self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold), scale: threshold.abs() }, quantities)
     }
 
     /// The provable bounds over the reach of quantities given per region, each to `resolution`: each one's largest upper bound of
-    /// the cells left once it is within the resolution of a value attained at a centre in the reach. A round's cells are halved
-    /// one after another.
+    /// the cells left once it is within the resolution of a value attained at a centre in the reach. The cells are halved one
+    /// after another (`InTurn`).
     pub(crate) fn extents_over(&self, reach: &Reach, resolution: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
-        self.proven_over(reach, &|upper, attained| upper - attained <= resolution, resolution, quantities, 1, &|round, asked| asked.iter().map(|cell| round.halve(cell)).collect())
+        self.proven_over::<_, InTurn>(reach, Rule { settled: &|upper, attained| upper - attained <= resolution, scale: resolution }, quantities)
     }
 
     /// The proofs' subdivision (module documentation, # Provable extrema, # Rounds): per quantity the cell of its largest upper
-    /// bound is halved until `settled(that bound, the largest value attained at a centre in the reach so far)`, the cell is
-    /// unbounded, or the bound is within the rounding of its centre's value (of `scale`, the question's own size, where that is
-    /// larger). The proofs go on in rounds, each asking for `width` cells a round at most, and `halve` halves a round's cells.
-    fn proven_over<Q: Fn(&Region) -> f64 + ?Sized>(
-        &self,
-        reach: &Reach,
-        settled: &dyn Fn(f64, f64) -> bool,
-        scale: f64,
-        quantities: &[&Q],
-        width: usize,
-        halve: &dyn Fn(&Round<Q>, &[Asked]) -> Vec<Halved>,
-    ) -> Vec<f64> {
+    /// bound is halved until the bound is settled against the largest value attained at a centre in the reach so far, the cell
+    /// is unbounded, or the bound is within the rounding of its centre's value (of the question's own size, where that is
+    /// larger: `rule`). The proofs go on in rounds, at the pace `P`.
+    fn proven_over<Q: Fn(&Region) -> f64 + ?Sized, P: Pace<Q>>(&self, reach: &Reach, rule: Rule, quantities: &[&Q]) -> Vec<f64> {
         let cells = Cells { model: self, reach, forms: Arc::new(Forms::new()), prepared: self.prepared(), envelope: self.envelope(&reach.populations) };
         let half = reach.cell.map(|[lo, hi]| 0.5 * (hi - lo));
         let start = Cell { centre: reach.cell.map(|[lo, hi]| if (hi - lo).is_finite() { 0.5 * (lo + hi) } else { 0.0 }), half };
         let mut nodes: Vec<Node> = cells.make(start).into_iter().collect();
         let mut proofs: Vec<Proof> = quantities.iter().map(|q| Proof::new(*q, nodes.first())).collect();
+        // Per proof, the halves the round before made for it.
+        let nothing = || -> Vec<Vec<(usize, [Option<Queued>; 2])>> { quantities.iter().map(|_| vec![]).collect() };
+        let mut made = nothing();
         loop {
-            // The cells the open proofs ask for, each with the quantities asking.
-            let mut asked: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-            for (q, proof) in proofs.iter_mut().enumerate() {
-                for node in proof.advance(&nodes, settled, scale, width) {
-                    asked.entry(node).or_default().push(q);
-                }
-            }
-            if asked.is_empty() {
+            let asking = P::proofs(&mut proofs, made, |proof, made| proof.advance(made, rule, P::AHEAD));
+            // The cells asked for, each with the quantities asking.
+            let mut by_cell: Vec<(usize, usize)> = asking.iter().enumerate().flat_map(|(q, cells)| cells.iter().map(move |&node| (node, q))).collect();
+            if by_cell.is_empty() {
                 break;
             }
-            let asked: Vec<Asked> = asked.into_iter().map(|(node, quantities)| Asked { node, quantities }).collect();
-            let halved = halve(&Round { cells: &cells, nodes: &nodes, quantities }, &asked);
+            by_cell.sort_unstable();
+            let mut asked: Vec<Asked> = vec![];
+            for (node, q) in by_cell {
+                match asked.last_mut() {
+                    Some(cell) if cell.node == node => cell.quantities.push(q),
+                    _ => asked.push(Asked { node, quantities: vec![q] }),
+                }
+            }
+            let halved = P::cells(&Round { cells: &cells, nodes: &nodes, quantities }, &asked);
+            made = nothing();
             for (cell, halved) in asked.iter().zip(halved) {
                 let halves = match halved.made {
-                    Some(made) => {
-                        let at = made.map(|half| {
+                    Some(new) => {
+                        let at = new.map(|half| {
                             half.map(|half| {
                                 nodes.push(half);
                                 nodes.len() - 1
@@ -706,8 +750,8 @@ impl Model {
                     None => nodes[cell.node].halves.expect("the halves made in an earlier round"),
                 };
                 for (&q, values) in cell.quantities.iter().zip(halved.values) {
-                    let queued = std::array::from_fn(|x| halves[x].zip(values[x]).map(|(node, (centre, upper))| Queued { upper, node, centre }));
-                    proofs[q].halved.insert(cell.node, queued);
+                    let queued = std::array::from_fn(|x| halves[x].zip(values[x]).map(|(node, (centre, upper))| Queued { upper, node, centre, inside: halved.inside[x] }));
+                    made[q].push((cell.node, queued));
                 }
             }
         }
