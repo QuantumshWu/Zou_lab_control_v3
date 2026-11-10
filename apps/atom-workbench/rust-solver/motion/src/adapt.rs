@@ -2,16 +2,40 @@
 //!
 //! # The step
 //! Every trajectory of a run advances by steps of one τ (`step::step`). The last step of an output interval is its rest
-//! (the steps never cross an output time); a step that crosses the trajectory's jump threshold is redone to the root and
-//! the jump made at its end (`step::jump`), the next step from there; a step the scheme refuses (`step::Refused`) is
-//! taken at its half, and one refused down to the time's round-off ends the advance with its refusal -- a numerical
-//! failure the solve counts and flags, never a loss. The beating grid's spacing is the step's quarter: two panels a step, one a half step
-//! (`step::panels`), so that a step and its halves take one spacing.
+//! (the steps never cross an output time); the step before a jump ends at the jump (# The jumps' times), the next step
+//! from there; a step the scheme refuses (`step::Refused`) is taken at its half, and one refused down to the time's
+//! round-off ends the advance with its refusal -- a numerical failure the solve counts and flags, never a loss. The
+//! beating grid's spacing is the step's quarter: two panels a step, one a half step (`step::panels`), so that a step and
+//! its halves take one spacing.
 //!
 //! τ is one for the run because the splitting is symplectic in its conservative part and its own inverse: at a constant
 //! step the energy of a trap's motion errs by a bounded amount (measured on the reference traps R1: no drift over 10³
 //! periods), where a step chosen from the last step's error drifts. The steps are then the run's length over τ and its
 //! jumps.
+//!
+//! # The jumps' times
+//! A jump is made at the end of a step whose own propagation reaches the trajectory's threshold there (SPEC §1.6): the
+//! step that is taken sets the jump's time, so the time's error is that step's own, which the read doubles like every
+//! step's. A step's norm is its own curve -- its generator sits at its middle, half its length ahead on the straight
+//! path through it --, so where a longer step's norm crosses the threshold is not when a shorter step reaches it. Timed
+//! by a step of the nominal length and made at the end of a shorter one, the jumps took the hazard of another phase of
+//! the orbit: at ω τ = 3 a held atom at a standing wave's antinode lost its recoil heating along the wave (R10; the read
+//! saw none of it, reading the steps taken). So the step to a jump is the fixed point of "the step of the length L
+//! reaches the threshold at s(L)", L = s(L):
+//! - the length tried first is the time to the threshold at the rate the trajectory has just had -- the last taken
+//!   step's fall of ln‖ψ‖² over its length (`Trajectory::rate`) --, no longer than τ or the interval's rest: where jumps
+//!   are frequent no step of the nominal length is tried and thrown away;
+//! - a step tried says where its own propagation reaches the threshold (`step::Attempt`): nowhere -- it is taken, and
+//!   no jump made; at its end, within the tolerance -- it is taken and the jump made at its end; elsewhere -- before
+//!   its end, or beyond it, where its propagation is followed on its own path for at most its length again and not
+//!   past the nominal end -- it only proposes that length, and the step of that length is tried. Each look at a length
+//!   is the step of that length;
+//! - the lengths found too long and too short bracket the fixed point: a proposal outside the bracket is replaced by the
+//!   bracket's middle, and where the bracket is narrower than the tolerance the step tried is the step taken -- the
+//!   search ends by its tolerance or by its bracket, never by a count.
+//! The tolerance is `units::JUMP_TIMING` of the step's length (derived there: the second order of the step's share of
+//! the tighter target). No read is added: the taken step's own error of the hazard is in the read already
+//! (`Mark::hazard_error`), and the time's distance from the fixed point is held at the order the reads leave out.
 //!
 //! # The read
 //! Where a trajectory is read (the pilot's, solve.rs), every step it takes is doubled: from the same state the step
@@ -65,7 +89,7 @@ use crate::linalg::{dot3, norm_sqr};
 use crate::model::{Point, STATES};
 use crate::step::{jump, step_work, test_loss, Attempt, Dynamics, Flow, Internal, Middle, Midway, Refused, Scratch, Segment, Step, Trajectory};
 use crate::transport::Mark;
-use crate::units::ORDER;
+use crate::units::{JUMP_TIMING, ORDER};
 use std::collections::VecDeque;
 
 /// The grid's order in its spacing h: CF4's local error O(h⁵) and composite Simpson's, per unit time O(h⁴).
@@ -271,42 +295,52 @@ fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, 
 }
 
 /// Advances a held trajectory to the time `to` (the next output time) by steps of τ, with its jumps and its loss test
-/// (module documentation, # The step; the loss is tested at every step's end and after every jump, SPEC §1.7); `each`
-/// takes every step's path (a jump's step is the one redone to its root, the jump at its end). A trajectory lost on the
-/// way stops at its loss time. With a reader, every step taken and every jump is read into it (module documentation,
-/// # The read). Where the scheme refuses a step at every length down to the time's round-off, the advance ends there
-/// with the refusal; so it does where the model gives a jump no photon (`step::jump`). `scratch` is the trajectory's
-/// (`step::Scratch`): its steps' memory, made once with it.
+/// (module documentation, # The step, # The jumps' times; the loss is tested at every step's end and after every jump,
+/// SPEC §1.7); `each` takes every step's path (a jump's step is the one whose own propagation reaches the threshold at
+/// its end, the jump there). A trajectory lost on the way stops at its loss time. With a reader, every step taken and
+/// every jump is read into it (module documentation, # The read). Where the scheme refuses a step at every length down
+/// to the time's round-off, the advance ends there with the refusal; so it does where the model gives a jump no photon
+/// (`step::jump`). `scratch` is the trajectory's (`step::Scratch`): its steps' memory, made once with it.
 pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, scratch: &mut Scratch, mut reader: Option<&mut Reader>, to: f64, each: &mut dyn FnMut(&Segment)) -> Result<(), Refused> {
     let grid = |length: f64| length / (2 * 2 * HALF_PANELS) as f64;
     trajectory.tau = tau;
     while trajectory.lost.is_none() && trajectory.time < to {
         let rest = to - trajectory.time;
-        // The step taken from here: τ or the interval's rest; the one to the jump's root where it crosses the threshold
-        // (none where the root is the start itself); from half the length where the scheme refuses either.
-        let mut length = tau.min(rest);
+        // The step taken from here (module documentation, # The jumps' times): the longest is τ or the interval's rest;
+        // the first tried no longer than the time to the threshold at the last step's rate; then the length each step
+        // tried proposes, inside the bracket of the lengths found too short and too long, until one is the step -- none
+        // where the threshold is within the time's round-off of the start: the jump is made there. From half the
+        // length where the scheme refuses a step, and no longer than that from then on.
+        let (mut most, mut bracket) = (tau.min(rest), (0.0, f64::INFINITY));
+        let ahead = if trajectory.rate > 0.0 { (norm_sqr(&trajectory.psi) / trajectory.threshold).ln() / trajectory.rate } else { f64::INFINITY };
+        let mut length = most.min(ahead);
         let (at, taken, jumps) = loop {
             let mut from = trajectory.clone();
+            if !(trajectory.time + length > trajectory.time) {
+                break (from, None, true);
+            }
             from.grid = grid(length);
-            let tried = midway(model, trajectory, &from, length).and_then(|through| through.attempt(&from, scratch).map(|tried| (tried, through)));
+            let slack = if bracket.1 - bracket.0 <= JUMP_TIMING * length { f64::INFINITY } else { JUMP_TIMING * length };
+            let reach = length.min(most - length);
+            let tried = midway(model, trajectory, &from, length).and_then(|through| through.attempt(&from, slack, reach, scratch).map(|tried| (tried, through)));
             let refusal = match tried {
                 Ok((Attempt::Whole(whole), through)) => {
                     trajectory.work += whole.work;
                     break (from, Some((whole, through)), false);
                 }
-                Ok((Attempt::Crossing { root, work }, _)) => {
+                Ok((Attempt::Reached(whole), through)) => {
+                    trajectory.work += whole.work;
+                    break (from, Some((whole, through)), true);
+                }
+                Ok((Attempt::Proposes { length: proposed, work }, _)) => {
                     trajectory.work += work;
-                    if !(root > 0.0) {
-                        break (from, None, true);
+                    if proposed < length {
+                        bracket.1 = length.min(bracket.1);
+                    } else {
+                        bracket.0 = length.max(bracket.0);
                     }
-                    from.grid = grid(root);
-                    match counted(model, trajectory, &from, root, scratch) {
-                        Ok(taken) => break (from, Some(taken), true),
-                        Err(e) => {
-                            length = root;
-                            e
-                        }
-                    }
+                    length = if proposed > bracket.0 && proposed < bracket.1 || !(trajectory.time + proposed > trajectory.time) { proposed } else { 0.5 * (bracket.0 + bracket.1.min(most)) };
+                    continue;
                 }
                 Err(e) => e,
             };
@@ -314,6 +348,7 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, sc
             if !(trajectory.time + length > trajectory.time) {
                 return Err(refusal);
             }
+            (most, bracket) = (length, (0.0, f64::INFINITY));
         };
         if let Some((s, through)) = &taken {
             if let Some(reader) = reader.as_deref_mut() {
@@ -322,8 +357,9 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, sc
                 reader.drift.mark.level = reader.trail.levels(model.hbar_over_mass());
             }
             each(&s.segment);
+            let fall = (norm_sqr(&at.psi) / norm_sqr(&s.end.psi)).ln();
             adopt(trajectory, &s.end);
-            trajectory.grid = at.grid;
+            (trajectory.grid, trajectory.rate) = (at.grid, fall / s.segment.tau);
             test_loss(model, trajectory);
         }
         if trajectory.lost.is_some() {
