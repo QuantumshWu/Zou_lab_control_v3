@@ -782,3 +782,360 @@ fn a_non_asymptotic_first_doubling_does_not_collapse_the_step() {
     assert!(t.lost.is_some() || t.time == request.times_us[1], "stopped at {}", t.time);
     assert!(shortest > round_off, "a step of {shortest:e} µs at the round-off's scale {round_off:e}");
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The step's cost.
+
+/// A cluster of n ground states at a near-resonant light's sizes in a Gaussian tweezer (the cost harness's):
+/// H(r) = V(r) + L(r) − (i/2)Γ(r) + Σ_j [X_j(r) + X_j(r)†], every entry a ← b a plane wave -- L_ab e^{i(K_a − K_b)·r}, static
+/// in the cluster's Doppler frames K_s, and X_j,ab e^{i(q_j + K_a − K_b)·r}, on a path a beat of wave vector q_j, its
+/// adjoint −q_j's --, G = ∇H_h. V is the tweezer's light shift, on every state alike (the reference); L is Hermitian, Γ
+/// positive semidefinite.
+struct Synthetic {
+    hm: f64,
+    trap: Trap,
+    cluster: Cluster,
+    still: Mat,
+    decay: Mat,
+    beats: Vec<([f64; 3], Mat)>,
+}
+
+impl Synthetic {
+    /// n states in a tweezer `depth` deep (rad/µs): light-shift differences and couplings of 1 to 30 rad/µs (log-uniform
+    /// moduli, uniform phases), decay rates of 0.01 to 5 /µs (Γ's eigenvalues, log-uniform, on a random orthonormal
+    /// basis), the Doppler frames K_s = (s − (n − 1)/2)·`frame`, and a pair of beat parts per wave vector of `waves`,
+    /// the pairs sharing the same sizes.
+    fn new(n: usize, depth: f64, frame: [f64; 3], waves: &[[f64; 3]]) -> Synthetic {
+        let mut s = crate::random::Stream::new(29, crate::random::Purpose::Initial, n as u64, waves.len() as u32);
+        let mut entry = |scale: f64| C64::cis(std::f64::consts::TAU * s.uniform()) * (30.0_f64.powf(s.uniform()) * scale);
+        let full = Mat::from_fn(n, n, |_, _| entry(1.0));
+        let still = Mat::from_fn(n, n, |a, b| if a == b { C64::real(full[(a, a)].re) } else if a < b { full[(a, b)] } else { full[(b, a)].conj() });
+        let basis = crate::linalg::hermitian_eigen(&Mat::from_fn(n, n, |_, _| entry(1.0))).vectors;
+        let beats = waves.iter().map(|&q| (q, Mat::from_fn(n, n, |_, _| entry(1.0 / waves.len() as f64)))).collect();
+        let rates: Vec<C64> = (0..n).map(|_| C64::real(0.01 * 500.0_f64.powf(s.uniform()))).collect();
+        let decay = basis.product(&Mat::diagonal(&rates)).product(&basis.adjoint());
+        let cluster = Cluster {
+            states: (0..n).collect(),
+            ground: n,
+            frames: vec![Beat(vec![0]); n],
+            waves: (0..n).map(|x| frame.map(|k| (x as f64 - 0.5 * (n - 1) as f64) * k)).collect(),
+            waves_exact: vec![Beat(vec![]); n],
+        };
+        Synthetic { hm: RB, trap: Trap::Gaussian { depth, waists: [1.0, 1.0, 3.0] }, cluster, still, decay, beats }
+    }
+}
+
+impl Dynamics for Synthetic {
+    fn hbar_over_mass(&self) -> f64 {
+        self.hm
+    }
+    fn reference(&self, r: [f64; 3]) -> Quadratic {
+        self.trap.expansion(r)
+    }
+    fn cluster(&self, _: usize) -> &Cluster {
+        &self.cluster
+    }
+    fn cluster_of(&self, _: usize) -> usize {
+        0
+    }
+    fn generator(&self, cluster: usize, at: &Point) -> Generator {
+        let (n, v, k) = (self.cluster.states.len(), self.trap.expansion(at.r), &self.cluster.waves);
+        // An entry a ← b of wave vector q: its own q + K_a − K_b, and its phase at the point.
+        let wave = |a: usize, b: usize, q: [f64; 3]| -> ([f64; 3], C64) {
+            let w: [f64; 3] = std::array::from_fn(|i| q[i] + k[a][i] - k[b][i]);
+            (w, C64::cis(w[0] * at.r[0] + w[1] * at.r[1] + w[2] * at.r[2]))
+        };
+        let (mut m, mut g) = (Mat::zeros(n, n), zeros(n));
+        for a in 0..n {
+            for b in 0..n {
+                let (w, phase) = wave(a, b, [0.0; 3]);
+                let h = self.still[(a, b)] * phase;
+                m[(a, b)] = h + C64::new(0.0, -0.5) * self.decay[(a, b)] * phase;
+                for i in 0..3 {
+                    g[i][(a, b)] = C64::new(0.0, w[i]) * h;
+                }
+            }
+            m[(a, a)] += C64::real(v.value);
+            for i in 0..3 {
+                g[i][(a, a)] += C64::real(v.gradient[i]);
+            }
+        }
+        let mut parts = vec![Part { beat: Beat(vec![]), omega: 0.0, wave: [0.0; 3], generator: m, force: g }];
+        for (q, x) in &self.beats {
+            let (mut up, mut down, mut gu, mut gd) = (Mat::zeros(n, n), Mat::zeros(n, n), zeros(n), zeros(n));
+            for a in 0..n {
+                for b in 0..n {
+                    let (w, phase) = wave(a, b, *q);
+                    let h = x[(a, b)] * phase;
+                    up[(a, b)] = h;
+                    down[(b, a)] = h.conj();
+                    for i in 0..3 {
+                        gu[i][(a, b)] = C64::new(0.0, w[i]) * h;
+                        gd[i][(b, a)] = (C64::new(0.0, w[i]) * h).conj();
+                    }
+                }
+            }
+            parts.push(Part { beat: Beat(vec![0]), omega: 0.0, wave: *q, generator: up, force: gu });
+            parts.push(Part { beat: Beat(vec![0]), omega: 0.0, wave: q.map(|x| -x), generator: down, force: gd });
+        }
+        Generator { cluster, at: *at, parts }
+    }
+    fn photons(&self, _: usize, _: &Point, _: &[C64]) -> Vec<Photon> {
+        unreachable!("the cost harness takes no jump")
+    }
+    fn recoil(&self, _: &Photon, _: &[f64; 3]) -> Recoil {
+        unreachable!("the cost harness takes no jump")
+    }
+    fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
+        0.5 * self.hm * at.kappa.iter().map(|k| k * k).sum::<f64>() + self.trap.expansion(at.r).value
+    }
+    fn lost(&self, _: usize, _: &Point, _: &[C64]) -> bool {
+        false
+    }
+    fn readout(&self, _: usize, _: &Point, psi: &[C64]) -> [f64; STATES] {
+        let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
+        let mut rows = [0.0; STATES];
+        for (s, z) in psi.iter().enumerate() {
+            rows[s] = z.norm_sqr() / norm;
+        }
+        rows
+    }
+    fn assembly_work(&self) -> f64 {
+        0.0
+    }
+    fn photon_work(&self) -> f64 {
+        0.0
+    }
+}
+
+/// A model that counts the reference expansions a step asks of it.
+struct Counted<'a, D: Dynamics> {
+    model: &'a D,
+    references: std::cell::Cell<u64>,
+}
+
+impl<D: Dynamics> Dynamics for Counted<'_, D> {
+    fn hbar_over_mass(&self) -> f64 {
+        self.model.hbar_over_mass()
+    }
+    fn reference(&self, r: [f64; 3]) -> Quadratic {
+        self.references.set(self.references.get() + 1);
+        self.model.reference(r)
+    }
+    fn cluster(&self, cluster: usize) -> &Cluster {
+        self.model.cluster(cluster)
+    }
+    fn cluster_of(&self, ground: usize) -> usize {
+        self.model.cluster_of(ground)
+    }
+    fn generator(&self, cluster: usize, at: &Point) -> Generator {
+        self.model.generator(cluster, at)
+    }
+    fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
+        self.model.photons(cluster, at, psi)
+    }
+    fn recoil(&self, photon: &Photon, polarization: &[f64; 3]) -> Recoil {
+        self.model.recoil(photon, polarization)
+    }
+    fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
+        self.model.energy(cluster, at, psi)
+    }
+    fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
+        self.model.lost(cluster, at, psi)
+    }
+    fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
+        self.model.readout(cluster, at, psi)
+    }
+    fn assembly_work(&self) -> f64 {
+        self.model.assembly_work()
+    }
+    fn photon_work(&self) -> f64 {
+        self.model.photon_work()
+    }
+}
+
+/// µs per item of each of the `passes` over `items` items, on this thread: every pass timed in batches of as many
+/// repetitions as take the clock a millisecond, the batches taken in turn over 24 rounds, the least mean of each -- the
+/// machine's other work only adds, and taken in turn it weighs on every pass alike.
+fn microseconds<const N: usize>(items: usize, mut passes: [&mut dyn FnMut() -> f64; N]) -> [f64; N] {
+    let mut batch = |pass: usize, repetitions: usize| {
+        let clock = std::time::Instant::now();
+        for _ in 0..repetitions {
+            std::hint::black_box(passes[pass]());
+        }
+        clock.elapsed().as_secs_f64()
+    };
+    let repetitions: [usize; N] = std::array::from_fn(|pass| {
+        let mut repetitions = 1;
+        while batch(pass, repetitions) < 1e-3 {
+            repetitions *= 2;
+        }
+        repetitions
+    });
+    let mut least = [f64::INFINITY; N];
+    for _ in 0..24 {
+        for pass in 0..N {
+            least[pass] = least[pass].min(batch(pass, repetitions[pass]) / repetitions[pass] as f64);
+        }
+    }
+    least.map(|t| 1e6 * t / items as f64)
+}
+
+/// One case of the cost harness: µs per step of τ and per phase over the case's start states (held: no step reaches
+/// their thresholds), the model's calls apart. Phases: the middle's fixed point less its reference expansions; the two
+/// propagations, each on its own generator with its kick (the second also with the threshold reached halfway down the
+/// step's fall of the norm: its root); the rest -- the shear, the flows, the step's own copies and their release.
+/// Returns the two propagations' times.
+fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> [f64; 2] {
+    let (count, half, hm) = (starts.len(), 0.5 * tau, model.hbar_over_mass());
+    let counted = Counted { model, references: std::cell::Cell::new(0) };
+    let steps: Vec<step::Step> = starts.iter().map(|s| step::step(&counted, s, tau).unwrap()).collect();
+    let rounds = counted.references.get() as f64 / count as f64;
+    // Each start's step, piece by piece as `step::step` makes it.
+    struct Pieces {
+        middle: Point,
+        reference: [f64; 3],
+        generators: [Generator; 2],
+        velocities: [[f64; 3]; 2],
+        crossed: Trajectory,
+    }
+    let pieces: Vec<Pieces> = starts
+        .iter()
+        .zip(&steps)
+        .map(|(from, taken)| {
+            let (flow, (r_h, kappa_h)) = super::middle(model, from.r, from.kappa, half).unwrap();
+            let middle = Point { r: r_h, kappa: kappa_h, t: from.time + half };
+            let reference = flow.gradient_at(r_h);
+            let first = model.generator(from.cluster, &middle);
+            let held = super::shear(&first, &from.psi, tau);
+            let predicted: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * (held[a] + tau * reference[a]));
+            let (_, kick, _) = super::propagate(model, &first, from, reference, predicted.map(|k| hm * k), tau, None);
+            let corrected: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * kick[a]);
+            let second = model.generator(from.cluster, &Point { kappa: corrected, ..middle });
+            let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
+            let mut crossed = from.clone();
+            crossed.threshold = (norm(&from.psi) * norm(&taken.end.psi)).sqrt();
+            Pieces { middle, reference, generators: [first, second], velocities: [predicted.map(|k| hm * k), corrected.map(|k| hm * k)], crossed }
+        })
+        .collect();
+    let propagation = |which: usize, crossing: bool| {
+        pieces
+            .iter()
+            .zip(starts)
+            .map(|(p, s)| {
+                let (from, threshold) = if crossing { (&p.crossed, Some(p.crossed.threshold)) } else { (s, (which == 1).then_some(s.threshold)) };
+                super::propagate(model, &p.generators[which], from, p.reference, p.velocities[which], tau, threshold).1[0]
+            })
+            .sum::<f64>()
+    };
+    let [whole, reference, generator, middle, first, second, root] = microseconds(
+        count,
+        [
+            &mut || starts.iter().map(|s| step::step(model, s, tau).unwrap().end.kappa[0]).sum::<f64>(),
+            &mut || pieces.iter().map(|p| model.reference(p.middle.r).value).sum::<f64>(),
+            &mut || pieces.iter().zip(starts).map(|(p, s)| model.generator(s.cluster, &p.middle).parts.len() as f64).sum::<f64>(),
+            &mut || starts.iter().map(|s| super::middle(model, s.r, s.kappa, half).unwrap().1 .0[0]).sum::<f64>(),
+            &mut || propagation(0, false),
+            &mut || propagation(1, false),
+            &mut || propagation(1, true),
+        ],
+    );
+    let crossings = pieces
+        .iter()
+        .filter(|p| super::propagate(model, &p.generators[1], &p.crossed, p.reference, p.velocities[1], tau, Some(p.crossed.threshold)).0.crossing.is_some())
+        .count();
+    let own = whole - rounds * reference - 2.0 * generator;
+    let fixed = middle - rounds * reference;
+    let (n, parts) = (starts[0].psi.len(), pieces[0].generators[1].parts.len());
+    let work = steps.iter().map(|s| s.work).sum::<f64>() / count as f64;
+    eprintln!(
+        "{name:<22} n {n} parts {parts:>2} τ {tau:<6} | step {whole:8.2} = reference {reference:6.2} × {rounds:4.1} + generator {generator:7.2} × 2 + own {own:8.2} | middle {fixed:6.2}  first {first:8.2}  second {second:8.2}  (root {root:8.2}, {crossings}/{count})  rest {:6.2} | counted {work:9.0}",
+        own - fixed - first - second
+    );
+    [first, second]
+}
+
+/// Atoms of a cluster's cost case: `count` atoms at the tweezer's thermal sizes (positions of 0.1 µm, speeds of
+/// 0.05 µm/µs in uniform directions), each a random state of the cluster, held.
+fn atoms<D: Dynamics>(model: &D, count: u64, grid: f64) -> Vec<Trajectory> {
+    (0..count)
+        .map(|i| {
+            let mut s = crate::random::Stream::new(31, crate::random::Purpose::Initial, i, 0);
+            let r: [f64; 3] = std::array::from_fn(|_| 0.1 * s.normal());
+            let kappa = s.direction().map(|x| 0.05 * x / model.hbar_over_mass());
+            let mut t = Trajectory::new(model, 0, r, kappa, 7, i);
+            let psi: Vec<C64> = t.psi.iter().map(|_| C64::new(s.normal(), s.normal())).collect();
+            let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+            t.psi = psi.iter().map(|z| *z / norm).collect();
+            t.threshold = f64::MIN_POSITIVE;
+            t.grid = grid;
+            t
+        })
+        .collect()
+}
+
+/// An R1 scene's cost case: the scene's far-light model (`model::Run`) from its reference state, sixteen atoms of the
+/// scene's temperature in the trap's harmonic approximation (as `conservative_trap`), held, one step of τ each on a
+/// grid of `panels` panels.
+fn scene_cost(name: &str, tau: f64, panels: usize) -> [f64; 2] {
+    let request = scene(name);
+    let light = crate::field::Light::new(&request);
+    let model = crate::model::Model::new(&request, &light, &[]).expect("the far light folds");
+    let state = (0..crate::model::GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let mut p = [0.0; crate::model::GROUND];
+    p[state] = 1.0;
+    let trap = model.trap(&p, &model.prepared()).unwrap();
+    let run = crate::model::Run::new(&model, p);
+    let (hm, kt) = (run.hbar_over_mass(), crate::units::KT_PER_UK * request.temperature_uk);
+    let starts: Vec<Trajectory> = (0..16)
+        .map(|i| {
+            let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, 0);
+            let (mut r, mut kappa) = (trap.centre, [0.0; 3]);
+            for axis in 0..3 {
+                let (x, k) = (stream.normal() * (kt * hm).sqrt() / trap.frequencies[axis], stream.normal() * (kt / hm).sqrt());
+                for a in 0..3 {
+                    r[a] += x * trap.axes[axis][a];
+                    kappa[a] += k * trap.axes[axis][a];
+                }
+            }
+            let mut t = Trajectory::new(&run, state, r, kappa, 17, i);
+            t.threshold = f64::MIN_POSITIVE;
+            t.grid = tau / (2 * panels) as f64;
+            t
+        })
+        .collect();
+    cost(&format!("{name}/{panels}"), &run, &starts, tau)
+}
+
+/// The step's cost (run by name, alone: `the_step_s_cost -- --ignored --nocapture`): µs per `step::step` and per phase,
+/// single-threaded, on the R1 scenes' far light (a static path and a standing wave's beating one), on a two-level atom
+/// with its excited state explicit in a standing wave in a tweezer, and on clusters of 1, 3, 5 and 8 ground states at a
+/// near-resonant light's sizes (`Synthetic`) on a static path (Doppler frames), on a standing wave's beating one (a pair
+/// of beat parts) and on six beams' (nine pairs). The beating paths on grids of one panel and of four: the difference
+/// over their six CF4 spacings is a spacing's cost.
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn the_step_s_cost() {
+    let spacing = |name: &str, one: [f64; 2], four: [f64; 2]| {
+        eprintln!("{name:<22} a CF4 spacing: first {:7.2}  second {:7.2} µs", (four[0] - one[0]) / 6.0, (four[1] - one[1]) / 6.0)
+    };
+    scene_cost("R1_TWEEZER", 2.5, 1);
+    spacing("R1_RETRO", scene_cost("R1_RETRO", 0.3125, 1), scene_cost("R1_RETRO", 0.3125, 4));
+    let tau = 0.5;
+    let grids = [(1, f64::INFINITY), (4, tau / 8.0)];
+    let standing = vec![Beam { k: [0.0, 0.0, K], rabi: 10.0, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi: 10.0, phase: 0.3 }];
+    let two = Atom::new(RB, Trap::Gaussian { depth: 1000.0, waists: [1.0, 1.0, 3.0] }, standing, -0.5 * GAMMA, GAMMA);
+    let [one, four] = grids.map(|(panels, grid)| cost(&format!("two-level/{panels}"), &two, &atoms(&two, 8, grid), tau));
+    spacing("two-level", one, four);
+    let six = [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0], [1.0, 1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 0.0, 1.0], [1.0, 0.0, -1.0], [0.0, 1.0, 1.0], [0.0, 1.0, -1.0]]
+        .map(|q| q.map(|x| x * K));
+    for (n, depth) in [(1, 300.0), (3, 300.0), (5, 1000.0), (8, 3000.0)] {
+        let still = Synthetic::new(n, depth, [0.0, 0.6 * K, 0.8 * K], &[]);
+        cost(&format!("static {n}"), &still, &atoms(&still, 8, f64::INFINITY), tau);
+        for (label, waves) in [("standing", &six[2..3]), ("six beams", &six[..])] {
+            let model = Synthetic::new(n, depth, [0.0; 3], waves);
+            let [one, four] = grids.map(|(panels, grid)| cost(&format!("{label} {n}/{panels}"), &model, &atoms(&model, 8, grid), tau));
+            spacing(&format!("{label} {n}"), one, four);
+        }
+    }
+}
