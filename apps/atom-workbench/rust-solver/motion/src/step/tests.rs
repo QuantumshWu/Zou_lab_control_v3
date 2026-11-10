@@ -1482,7 +1482,8 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     let paths: Vec<_> = pieces.iter().map(|p| p.middle.path(p.kappa, p.kappa.map(|k| hm * k))).collect();
     let n = starts[0].psi.len();
     let mut h = Mat::zeros(n, n);
-    let [whole, reference, point, generator, force, tones, middle, propagated, root, pace] = microseconds(
+    let populations: Vec<Vec<f64>> = starts.iter().map(|s| s.psi.iter().map(|z| z.norm_sqr()).collect()).collect();
+    let [whole, reference, point, generator, force, tones, middle, propagated, root, scattering, pace] = microseconds(
         count,
         [
             &mut || starts.iter().map(|s| step::step(model, s, tau, &mut kept.borrow_mut()).unwrap().end.kappa[0]).sum::<f64>(),
@@ -1501,6 +1502,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             &mut || starts.iter().map(|s| super::middle(model, s.r, s.kappa, half).unwrap().1 .0[0]).sum::<f64>(),
             &mut || propagation(false),
             &mut || propagation(true),
+            &mut || pieces.iter().zip(starts).zip(&populations).map(|((p, s), populations)| model.scattering(s.cluster, &Point { r: p.at.0, kappa: p.kappa, t: p.at.1 }, &s.psi, populations).force[0]).sum::<f64>(),
             &mut yardstick,
         ],
     );
@@ -1513,7 +1515,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     let fixed = middle - calls[0] * reference;
     let work = steps.iter().map(|s| s.work).sum::<f64>() / count as f64;
     eprintln!(
-        "{name:<22} n {n} τ {tau:<6} | step {whole:8.2} = model {:8.2} (reference {reference:5.2} × {:4.1} + middle {point:7.2} × {:.0} + generator {generator:6.2} × {:4.1} + force {force:6.2} × {:4.1} + tones {tones:6.2} × {:3.1}) + own {own:8.2} | fixed point {fixed:6.2}  propagation {propagated:8.2}  (root {root:8.2}, {crossings}/{count}) | counted {work:9.0} | pace {:.3} ns",
+        "{name:<22} n {n} τ {tau:<6} | step {whole:8.2} = model {:8.2} (reference {reference:5.2} × {:4.1} + middle {point:7.2} × {:.0} + generator {generator:6.2} × {:4.1} + force {force:6.2} × {:4.1} + tones {tones:6.2} × {:3.1}) + own {own:8.2} (scattering {scattering:6.2}) | fixed point {fixed:6.2}  propagation {propagated:8.2}  (root {root:8.2}, {crossings}/{count}) | counted {work:9.0} | pace {:.3} ns",
         whole - own,
         calls[0],
         calls[1],

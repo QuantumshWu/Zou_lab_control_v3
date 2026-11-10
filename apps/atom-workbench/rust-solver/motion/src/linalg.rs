@@ -188,14 +188,15 @@ impl Sum for C64 {
     }
 }
 
-// The kernels below (`axpy`, `dot`; table.rs `blend`) are written once, for 256-bit vectors of reals with fused
+// The kernels below (`axpy`, `dot`, `combine`; table.rs `blend`) are written once, for 256-bit vectors of reals with fused
 // multiply-add, and the whole build takes those instructions (apps/atom-workbench/.cargo/config.toml; a build that sets
 // RUSTFLAGS itself names them there): no second, scalar form and no choice at run time. Without the features a fused
 // multiply-add is a library call per number -- so such a build is refused here instead of running many times slower.
 #[cfg(not(all(target_feature = "avx2", target_feature = "fma")))]
 compile_error!("atom-motion's kernels are written for AVX2 with FMA: build with -C target-feature=+avx2,+fma (apps/atom-workbench/.cargo/config.toml)");
 
-/// The reals of one vector of the split kernels' sums (`axpy`, `dot`): their vectors' lengths are multiples of it.
+/// The reals of one vector of the split kernels' sums (`axpy`, `dot`, `combine`): their vectors' lengths are multiples
+/// of it.
 pub const LANES: usize = 4;
 
 /// y ← y + c x on complex vectors given by their real parts and their imaginary parts apart (x: `real`, `imaginary`;
@@ -223,6 +224,44 @@ pub fn dot(xr: &[f64], xi: &[f64], yr: &[f64], yi: &[f64]) -> C64 {
         }
     }
     C64::new((re[0] + re[1]) + (re[2] + re[3]), (im[0] + im[1]) + (im[2] + im[3]))
+}
+
+/// Sums of complex columns laid for the lanes: per vector of `LANES` rows each column's real parts and then its imaginary
+/// parts, the columns in turn (`columns`: `count` of them; `sums`: `width`, of the same rows). The sums from `at` on, one
+/// per `count` weights of `c`, are y_o ← Σ_k c_ok x_k, or onto what they hold (`onto`) y_o + Σ_k c_ok x_k: a matrix on a
+/// vector, or vectors' combinations. Vector by vector a sum is held in place and written once, two fused multiply-adds a
+/// real and column, no lane depending on another. Its sums are of a few vectors: it is inlined where it is called (a
+/// call would save and restore more registers than they fill), and its places are counted by sums and products alone,
+/// never a quotient.
+#[inline(always)]
+pub fn combine(onto: bool, c: &[C64], count: usize, columns: &[f64], sums: &mut [f64], width: usize, at: usize) {
+    const PAIR: usize = 2 * LANES;
+    debug_assert!(count > 0 && c.len() % count == 0 && at + c.len() / count <= width && columns.len() % (PAIR * count) == 0 && sums.len() / width == columns.len() / count);
+    let (mut from, mut to) = (0, PAIR * at);
+    while from < columns.len() {
+        let x = &columns[from..from + PAIR * count];
+        let (mut first, mut sum) = (0, to);
+        while first < c.len() {
+            let (c, y) = (&c[first..first + count], &mut sums[sum..sum + PAIR]);
+            let (mut re, mut im) = ([0.0; LANES], [0.0; LANES]);
+            if onto {
+                re.copy_from_slice(&y[..LANES]);
+                im.copy_from_slice(&y[LANES..]);
+            }
+            for (c, x) in c.iter().zip(x.chunks_exact(PAIR)) {
+                for l in 0..LANES {
+                    re[l] = c.re.mul_add(x[l], (-c.im).mul_add(x[LANES + l], re[l]));
+                    im[l] = c.re.mul_add(x[LANES + l], c.im.mul_add(x[l], im[l]));
+                }
+            }
+            y[..LANES].copy_from_slice(&re);
+            y[LANES..].copy_from_slice(&im);
+            first += count;
+            sum += PAIR;
+        }
+        from += PAIR * count;
+        to += PAIR * width;
+    }
 }
 
 /// ⟨a, b⟩ = Σ_i a_i* b_i.
@@ -914,8 +953,9 @@ pub(crate) mod tests {
     use crate::random::{Purpose, Stream};
     use crate::units::rounding;
 
-    /// The split kernels (`axpy`, `dot`) are the complex sums they stand for, to the rounding of a sum of their length;
-    /// and their pace (printed: ns a complex multiply-add on spans of 28, a five-state cluster's places).
+    /// The split kernels (`axpy`, `dot`, `combine`) are the complex sums they stand for, to the rounding of a sum of
+    /// their length; and their pace (printed: ns a complex multiply-add on spans of 28, a five-state cluster's places;
+    /// `combine`'s on five columns of 16 rows, a five-state cluster's jumps on its state).
     #[test]
     fn the_split_kernels_are_their_complex_sums() {
         let mut s = Stream::new(11, Purpose::Initial, 0, 0);
@@ -931,6 +971,29 @@ pub(crate) mod tests {
         }
         let (sum, size): (C64, f64) = ((0..n).map(|i| x[i] * y[i]).sum(), (0..n).map(|i| x[i].abs() * y[i].abs()).sum());
         assert!((dot(&xr, &xi, &yr, &yi) - sum).abs() <= rounding(2 * n) * size, "dot");
+        // `combine`: two of three sums of five columns on sixteen rows, the middle one left as it is; alone and onto
+        // what the sums hold.
+        let (rows, count, width) = (16, 5, 3);
+        let (columns, weights, held) = (draw(2 * rows * count), draw(2 * 2 * count), draw(2 * rows * width));
+        let weights: Vec<C64> = weights.chunks(2).map(|w| C64::new(w[0], w[1])).collect();
+        let entry = |values: &[f64], of: usize, k: usize, row: usize| {
+            let at = ((row / LANES) * of + k) * 2 * LANES + row % LANES;
+            C64::new(values[at], values[at + LANES])
+        };
+        for onto in [false, true] {
+            let mut sums = held.clone();
+            combine(onto, &weights[..count], count, &columns, &mut sums, width, 0);
+            combine(onto, &weights[count..], count, &columns, &mut sums, width, 2);
+            for row in 0..rows {
+                assert_eq!(entry(&sums, width, 1, row), entry(&held, width, 1, row), "combine beside its sums");
+                for (o, c) in [(0, &weights[..count]), (2, &weights[count..])] {
+                    let start = if onto { entry(&held, width, o, row) } else { C64::ZERO };
+                    let (sum, size): (C64, f64) = ((0..count).map(|k| c[k] * entry(&columns, count, k, row)).sum(), (0..count).map(|k| c[k].abs() * entry(&columns, count, k, row).abs()).sum());
+                    assert!((entry(&sums, width, o, row) - (start + sum)).abs() <= rounding(2 * count + 1) * (start.abs() + size), "combine at {row}, sum {o}, onto {onto}");
+                }
+            }
+        }
+        let mut sums = vec![0.0; 2 * rows];
         let rounds = 200_000;
         let started = std::time::Instant::now();
         for _ in 0..rounds {
@@ -942,8 +1005,13 @@ pub(crate) mod tests {
         for _ in 0..rounds {
             total += dot(std::hint::black_box(&xr), &xi, &yr, &yi);
         }
-        std::hint::black_box((total, re, im));
-        eprintln!("axpy {first:.3} ns, dot {:.3} ns a complex multiply-add", started.elapsed().as_secs_f64() * 1e9 / (rounds * n) as f64);
+        let second = started.elapsed().as_secs_f64() * 1e9 / (rounds * n) as f64;
+        let started = std::time::Instant::now();
+        for _ in 0..rounds {
+            combine(false, std::hint::black_box(&weights[..count]), count, std::hint::black_box(&columns), &mut sums, 1, 0);
+        }
+        std::hint::black_box((total, re, im, sums));
+        eprintln!("axpy {first:.3} ns, dot {second:.3} ns, combine {:.3} ns a complex multiply-add", started.elapsed().as_secs_f64() * 1e9 / (rounds * rows * count) as f64);
     }
 
     /// A reproducible matrix of entries uniform in [−½, ½] + i[−½, ½].

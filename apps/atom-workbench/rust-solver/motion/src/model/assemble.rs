@@ -64,6 +64,19 @@
 //! (tabulate.rs, # A node's reals), so a middle interpolates each number straight to its place onto its constant and
 //! multiplies no jumps: its decay is the jumps' product to the table's error, and exactly so at the table's nodes.
 //!
+//! # The jumps' matrices
+//! A state's photons (photon.rs) are its classes' jumps on the state: per class the vector u on the rows a n + b' -- the
+//! three axes a of the emitted photon's polarization times the landing cluster's n states b' --, the sum over the class's
+//! members of the member's field component times its jumps' matrix on the state. A member's matrix is laid once, a
+//! column per source place, for the lanes (`laid`): per vector of `LANES` rows each column's real parts and then its
+//! imaginary parts, the columns in turn -- so that a matrix on a state, and the vectors' combinations after it, are sums
+//! over contiguous reals and nothing else (linalg.rs `combine`). A constant member's matrix is the plan's
+//! (`Plan::emitted`); one that holds a near form -- a carrier's member where its response at the atom reaches -- is a
+//! point's (`Site::jumps`): its near jumps laid onto their constant part (`Plan::lay_jumps`), its Doppler partner's
+//! matrix after its own, and with them their slopes along the point's directions. A table holds a point's matrices at
+//! its nodes in this layout (tabulate.rs, # A node's reals): a point takes them and their slopes in one pass over the
+//! stencil's rows, the same interpolant of the same jumps as the forms' own.
+//!
 //! A middle's numbers and a path's are a thread's spares (`Held`): a step takes the vectors the step before left, and the
 //! model's part of a step asks the heap for nothing.
 //!
@@ -279,7 +292,12 @@ impl Laid {
 
 /// One member of a photon class at a point (photon.rs): its source, its field component (None: 1), whether its jumps take the
 /// Doppler partner, its relative beat's value in a merged class (rad/µs), and its entries (axis a, landing place, source place,
-/// where its jump and its partner's lie among a point's values and constants).
+/// where its jump and its partner's lie among a point's values and constants). And the same jumps as one matrix (module
+/// documentation, # The jumps' matrices): the source places that hold an entry (`columns`) and where its columns lie
+/// (`at`) -- among a point's jumps where any of them is a near form (`near`; its partner's matrix after its own), else
+/// among the plan's: a carrier's member whose jumps are all its bare drives' is a constant one, its partner nothing. An
+/// explicit state's member is not `folded`, and `decay` is its rate into the class over its population, Σ |C_a[b, e]|²
+/// of its entries.
 #[derive(Clone, Debug)]
 pub(crate) struct MemberPlan {
     pub(crate) source: usize,
@@ -287,16 +305,25 @@ pub(crate) struct MemberPlan {
     pub(crate) doppler: bool,
     pub(crate) phase: f64,
     pub(crate) entries: Vec<(usize, usize, usize, usize, usize)>,
+    pub(crate) folded: bool,
+    pub(crate) near: bool,
+    pub(crate) columns: Vec<usize>,
+    pub(crate) at: usize,
+    pub(crate) decay: f64,
 }
 
 /// One photon class of the cluster under the plan's lights (photon.rs `Class`): its landing cluster, its wave number, the
-/// largest wave number of the beams its folded members absorb from (`Photon::absorbed`; zero without one), its lit members.
+/// largest wave number of the beams its folded members absorb from (`Photon::absorbed`; zero without one), its lit members;
+/// and the rows of its jumps' matrices (module documentation, # The jumps' matrices): the landing cluster's `states`
+/// states on each of the three axes, row a `states` + b', as whole vectors (`rows`).
 #[derive(Clone, Debug)]
 pub(crate) struct ClassPlan {
     pub(crate) landing: usize,
     pub(crate) wave_number: f64,
     pub(crate) absorbed: f64,
     pub(crate) members: Vec<MemberPlan>,
+    pub(crate) states: usize,
+    pub(crate) rows: usize,
 }
 
 /// A Hermitian near form's place in the generator: the block, flag and entry (x, y) it is the value of, the form's place,
@@ -358,6 +385,12 @@ pub(crate) struct Plan {
     /// values' slopes; and of those per direction of them.
     node: [f64; 3],
     pub(crate) classes: Vec<ClassPlan>,
+    /// The classes' members' jumps as matrices (module documentation, # The jumps' matrices): the constant members'; the
+    /// constant part of a point's (the bare drives' jumps of the same field component); and where a point's near jumps
+    /// lie among them -- (its real part's place, its imaginary part's, the form's place among a point's values).
+    pub(crate) emitted: Vec<f64>,
+    pub(crate) jumps_start: Vec<f64>,
+    jump_links: Vec<([usize; 2], usize)>,
     /// The complex multiply-adds of a point's values from its near forms: the jumps' products and their sums, the merged values.
     values: f64,
 }
@@ -931,16 +964,53 @@ impl<'a> Builder<'a> {
         let fields: usize = self.scalars.iter().map(|s| 2 * s.beams.len()).sum();
         let node = [(fields + merged + 2 * n * n) as f64, (4 * fields + forms + n * n) as f64, forms as f64];
         let statics = self.drafts.iter().map(|d| d.beat.is_zero()).collect();
+        // The classes' members with their jumps as matrices (module documentation, # The jumps' matrices): one that
+        // holds a near form among a point's values -- each near form laid onto its constant part, its partner's after
+        // it --, any other among the plan's.
+        let (len, jumping) = (near.len(), near.jumping().start);
+        let (constants, offsets) = (&self.constants, &self.offsets);
+        let (mut emitted, mut jumps_start, mut jump_links) = (vec![], vec![], vec![]);
         let classes = classes
             .into_iter()
-            .map(|(landing, [wave_number, absorbed], members)| ClassPlan {
-                landing,
-                wave_number,
-                absorbed,
-                members: members
+            .map(|(landing, [wave_number, absorbed], members)| {
+                let states = model.clusters[landing].states.len();
+                let rows = (3 * states).div_ceil(LANES) * LANES;
+                let members = members
                     .into_iter()
-                    .map(|(source, scalar, doppler, phase, entries)| MemberPlan { source, scalar, doppler, phase, entries: entries.into_iter().map(|(a, bp, sp, j, j2)| (a, bp, sp, near.at(j), near.at(j2))).collect() })
-                    .collect(),
+                    .map(|(source, scalar, doppler, phase, entries)| {
+                        let entries: Vec<(usize, usize, usize, usize, usize)> = entries.into_iter().map(|(a, bp, sp, j, j2)| (a, bp, sp, near.at(j), near.at(j2))).collect();
+                        let mut columns: Vec<usize> = entries.iter().map(|e| e.2).collect();
+                        columns.sort();
+                        columns.dedup();
+                        let varies = entries.iter().any(|e| e.3 < len || e.4 < len);
+                        let (matrix, values) = (2 * rows * columns.len(), if varies { &mut jumps_start } else { &mut emitted });
+                        let at = values.len();
+                        values.resize(at + if varies { 2 * matrix } else { matrix }, 0.0);
+                        let folded = !matches!(model.sources[source].origin, Origin::Explicit { .. });
+                        let mut decay = 0.0;
+                        for &(a, bp, sp, first, second) in &entries {
+                            let column = columns.iter().position(|&x| x == sp).expect("an entry's column");
+                            let own = at + laid(a * states + bp, column, columns.len());
+                            // A constant member's partner is nothing: a carrier's constant jump has none.
+                            assert!(varies || !doppler || constants[second - len] == C64::ZERO, "a constant jump's Doppler partner");
+                            for (place, slot) in [(first, own)].into_iter().chain(varies.then_some((second, own + matrix))) {
+                                let constant = if place >= len {
+                                    constants[place - len]
+                                } else {
+                                    jump_links.push(([slot, slot + LANES], place));
+                                    place.checked_sub(jumping).and_then(|jump| offsets.get(jump)).copied().unwrap_or(C64::ZERO)
+                                };
+                                values[slot] += constant.re;
+                                values[slot + LANES] += constant.im;
+                            }
+                            if !folded {
+                                decay += constants[first - len].norm_sqr();
+                            }
+                        }
+                        MemberPlan { source, scalar, doppler, phase, entries, folded, near: varies, columns, at, decay }
+                    })
+                    .collect();
+                ClassPlan { landing, wave_number, absorbed, members, states, rows }
             })
             .collect();
         let values = (products.len() + sums.len() + merged) as f64;
@@ -969,6 +1039,9 @@ impl<'a> Builder<'a> {
             node,
             tones,
             classes,
+            emitted,
+            jumps_start,
+            jump_links,
             values,
         }
     }
@@ -1017,6 +1090,15 @@ impl Plan {
             let z = factor * if conjugated { sums[sum].conj() } else { sums[sum] };
             generator[re] += z.re;
             generator[im] += z.im;
+        }
+    }
+    /// The near jumps into a point's jumps (module documentation, # The jumps' matrices): each form -- `form(place)`, a
+    /// point's or a table node's, or their derivative along a direction -- added where it lies in its member's matrix.
+    pub(crate) fn lay_jumps(&self, form: impl Fn(usize) -> C64, jumps: &mut [f64]) {
+        for &([re, im], place) in &self.jump_links {
+            let z = form(place);
+            jumps[re] += z.re;
+            jumps[im] += z.im;
         }
     }
     /// A dense term's values, their real parts and their imaginary parts: the plan's constants, or a point's (`point`).
@@ -1081,6 +1163,12 @@ impl<T: Spare> DerefMut for Held<T> {
     }
 }
 
+/// Where row `row` of column `column` lies among `count` columns laid for the lanes (module documentation, # The jumps'
+/// matrices), from their start: its real part, its imaginary part `LANES` after it.
+pub(crate) fn laid(row: usize, column: usize, count: usize) -> usize {
+    ((row / LANES) * count + column) * 2 * LANES + row % LANES
+}
+
 /// A vector at a length, whatever it holds: its caller writes every element.
 pub(crate) fn sized<T: Clone + Default>(v: &mut Vec<T>, len: usize) {
     if v.len() != len {
@@ -1105,10 +1193,15 @@ pub(crate) struct Site {
     /// A table's coordinates at the point (tabulate.rs `Model::near_point`); the jumps' products' sums (`formed`).
     pub(crate) coordinates: Vec<f64>,
     sums: Vec<C64>,
-    /// What a jump's photons share (photon.rs `Model::photons_of`): the near jumps' reals from their table, and the plan's
-    /// field components.
-    pub(crate) reals: Vec<f64>,
+    /// What a state's photons read (photon.rs `Model::photons_of`): the point's jumps' matrices (module documentation,
+    /// # The jumps' matrices) with their slopes along `directions` (`jump_slopes[f * jumps + i]`), the plan's field
+    /// components, and the sums in the making, laid as the matrices' columns are: a member's matrices on the state
+    /// (`member`) and a class's u and ∇u (`class`).
+    pub(crate) jumps: Vec<f64>,
+    pub(crate) jump_slopes: Vec<f64>,
     pub(crate) fields: Fields,
+    pub(crate) member: Vec<f64>,
+    pub(crate) class: Vec<f64>,
     /// Its nodes' scratch, one for all its paths: a node's call fills what it reads.
     scratch: RefCell<Scratch>,
 }
@@ -1139,6 +1232,23 @@ impl Site {
         }
         plan.decay(|at| if at < len { near.data[at] + plan.bare(at) } else { plan.constants[at - len] }, &mut self.sums, &mut self.generator);
     }
+    /// The point's jumps' matrices from the near forms there (module documentation, # The jumps' matrices), to the forms'
+    /// order: their constant part and the near jumps, and to first order the jumps' slopes along the forms' directions.
+    /// Without near forms (None): the constant part alone.
+    pub(crate) fn jumped(&mut self, plan: &Plan, near: Option<&NearValues>) {
+        self.jumps.clear();
+        self.jumps.extend_from_slice(&plan.jumps_start);
+        self.directions.clear();
+        self.jump_slopes.clear();
+        let Some(near) = near else { return };
+        self.directions.extend(near.slopes());
+        plan.lay_jumps(|at| near.data[at], &mut self.jumps);
+        let width = self.jumps.len();
+        self.jump_slopes.resize(self.directions.len() * width, 0.0);
+        for (f, slopes) in self.jump_slopes.chunks_mut(width.max(1)).enumerate() {
+            plan.lay_jumps(|at| near.data[(1 + f) * near.len + at], slopes);
+        }
+    }
 }
 
 /// A plan's field components at a point (`Model::fields`): per component its jet to an order, plain and weighted by its beams'
@@ -1148,6 +1258,8 @@ pub(crate) struct Fields {
     parts: usize,
     plain: Vec<C64>,
     doppler: Vec<C64>,
+    /// The plan's beams' Doppler shifts at the momentum the components were weighted at.
+    shifts: Vec<f64>,
 }
 
 impl Fields {
@@ -1329,11 +1441,20 @@ impl Model {
             values.clear();
             values.resize(parts * plan.scalars.len(), C64::ZERO);
         }
+        // Each beam of the plan once: its Doppler shift, and its jet's parts (to first order without its Hessian's).
+        out.shifts.clear();
+        out.shifts.extend(plan.beams.iter().map(|&l| self.doppler_shift(l, kappa)));
         for (s, (plain, doppler)) in plan.scalars.iter().zip(out.plain.chunks_mut(parts).zip(out.doppler.chunks_mut(parts))) {
             for &(at, c) in &s.beams {
-                let (beam, shift) = (jet::whole(&amplitudes[plan.beams[at]]), self.doppler_shift(plan.beams[at], kappa));
+                let (a, shift) = (&amplitudes[plan.beams[at]], out.shifts[at]);
+                let whole = if parts > 4 { jet::whole(a) } else { [C64::ZERO; 10] };
                 for p in 0..parts {
-                    let z = (if s.conjugate { beam[p].conj() } else { beam[p] }) * c;
+                    let part = match p {
+                        0 => a.value,
+                        1..=3 => a.gradient[p - 1],
+                        _ => whole[p],
+                    };
+                    let z = (if s.conjugate { part.conj() } else { part }) * c;
                     plain[p] += z;
                     doppler[p] += z * shift;
                 }

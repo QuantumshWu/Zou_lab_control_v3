@@ -657,3 +657,266 @@ fn a_state_s_photons_in_parts_are_its_photons() {
     check(name, &model, &Run::tabulated(&model, &tables, p), Some(&tables), &mut Stream::new(4, Purpose::Initial, 99, 0));
     assert!(classes > 0 && folded > 0, "classes ({classes}) with folded gradients ({folded})");
 }
+
+/// A class's photon written out entry by entry: u_a and ∇u_a (`[i][a]`) on the landing cluster's states, and the sums of
+/// their terms' moduli.
+struct Entries {
+    u: [Vec<C64>; 3],
+    du: [[Vec<C64>; 3]; 3],
+    sizes: [Vec<f64>; 3],
+    slopes: [[Vec<f64>; 3]; 3],
+    terms: usize,
+}
+
+/// A state's photons by the definition's entries (`MemberPlan::entries`; photon.rs, # Sources and classes, # The absorbed
+/// light's momentum), none of the jumps' matrices: per class and entry (a, b', s) of a member the jump there -- a near
+/// form with its constant part, its gradient the form's (`NearValues::first_order`), or a constant -- times the member's
+/// field component, less the Doppler-weighted component times the partner's, times ψ_s at the member's phase; ∇u of a
+/// folded member by the product rule entry by entry. `bound(place)` is the bound of a near form's modulus in the sums of
+/// moduli (its own, or what its interpolant's terms can reach).
+fn photons_written(model: &Model, plan: &Plan, near: Option<&NearValues>, bound: &dyn Fn(usize) -> f64, amplitudes: &[Amplitude], at: &crate::model::Point, psi: &[C64]) -> Vec<Entries> {
+    let fields = model.fields(plan, amplitudes, at.kappa, 1);
+    let len = plan.near.len();
+    // A jump with its gradient, and their moduli's bounds.
+    let jump = |place: usize| -> ([C64; 4], [f64; 4]) {
+        if place >= len {
+            let v = plan.constants[place - len];
+            return ([v, C64::ZERO, C64::ZERO, C64::ZERO], [v.abs(), 0.0, 0.0, 0.0]);
+        }
+        let near = near.expect("a near form's values");
+        let mut value = near.first_order(place);
+        value[0] += plan.bare(place);
+        let mut size = [bound(place) + plan.bare(place).abs(), 0.0, 0.0, 0.0];
+        match &near.directions {
+            None => (0..3).for_each(|i| size[1 + i] = value[1 + i].abs()),
+            Some(directions) => {
+                for (f, d) in directions.iter().enumerate() {
+                    (0..3).for_each(|i| size[1 + i] += near.data[(1 + f) * near.len + place].abs() * d[i].abs());
+                }
+            }
+        }
+        (value, size)
+    };
+    let one = [C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO];
+    plan.classes
+        .iter()
+        .map(|class| {
+            let n = model.clusters[class.landing].states.len();
+            let mut out = Entries {
+                u: std::array::from_fn(|_| vec![C64::ZERO; n]),
+                du: std::array::from_fn(|_| std::array::from_fn(|_| vec![C64::ZERO; n])),
+                sizes: std::array::from_fn(|_| vec![0.0; n]),
+                slopes: std::array::from_fn(|_| std::array::from_fn(|_| vec![0.0; n])),
+                terms: 0,
+            };
+            for m in &class.members {
+                let folded = !matches!(model.sources[m.source].origin, Origin::Explicit { .. });
+                let (c, cw): (&[C64], &[C64]) = m.scalar.map_or((&one, &one), |s| (fields.plain(s), fields.doppler(s)));
+                let phase = C64::cis(m.phase * at.t);
+                for &(a, bp, sp, first, second) in &m.entries {
+                    let x = psi[sp] * phase;
+                    let (j, js) = jump(first);
+                    let (j2, js2) = if m.doppler { jump(second) } else { ([C64::ZERO; 4], [0.0; 4]) };
+                    out.u[a][bp] += (c[0] * j[0] - cw[0] * j2[0]) * x;
+                    out.sizes[a][bp] += (c[0].abs() * js[0] + cw[0].abs() * js2[0]) * x.abs();
+                    out.terms += 1;
+                    if folded {
+                        for i in 0..3 {
+                            out.du[i][a][bp] += (c[1 + i] * j[0] + c[0] * j[1 + i] - cw[1 + i] * j2[0] - cw[0] * j2[1 + i]) * x;
+                            out.slopes[i][a][bp] += (c[1 + i].abs() * js[0] + c[0].abs() * js[1 + i] + cw[1 + i].abs() * js2[0] + cw[0].abs() * js2[1 + i]) * x.abs();
+                        }
+                    }
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+/// A state's photons (photon.rs `Model::photons_of`: the classes' jumps as matrices on the state, the chain rule after
+/// the sums) are the definition's entries summed one by one (`photons_written`), amplitudes and gradients, to the
+/// rounding of each sum -- γ_N of its terms' moduli, N the entries of the class's row, each a chain of a field's sum over
+/// its beams, the jump's own sum (a form's over the excited states, or an interpolant's over its stencil), the product
+/// rule's four terms and each direction's two; and their moments (`Photon::moments`) are those of the written-out
+/// vectors. With the exact elimination at the point, on every model of the tests; and from tables made over the reach,
+/// whose interpolant of the jumps' matrices is that of the jumps themselves: there a near jump's terms are bounded by
+/// its largest modulus over the table's nodes times the stencil's weights' moduli, at most 3/2 an axis (5/4 inside,
+/// table.rs `Axis::weights`), and its slopes are the same numbers in both.
+#[test]
+fn a_state_s_photons_are_their_entries_summed() {
+    use crate::model::photon::Gradients;
+    let (mut classes, mut folded, mut near_met, mut axes) = (0, 0, 0, 0);
+    // The largest difference met, in unit round-offs of its sum's terms' moduli: with the exact elimination, from tables.
+    let mut apart = [0.0_f64; 2];
+    let mut check = |name: &str, model: &Model, tables: Option<&crate::model::tabulate::Tables>, stream: &mut Stream| {
+        let lights = model.running();
+        let beams = model.light.frequencies.iter().map(|f| f.beams.len()).max().unwrap_or(0);
+        for cluster in 0..model.clusters.len() {
+            let (plan, n) = (model.plan(cluster, &lights), model.clusters[cluster].states.len());
+            let table = tables.and_then(|t| t.of(cluster, &lights));
+            let len = plan.near.len();
+            // Per near form its largest modulus over the table's nodes.
+            let largest: Vec<f64> = table.map_or(vec![], |t| {
+                let mut most = vec![0.0_f64; len];
+                for node in 0..crate::table::Table::nodes(t.table.axes()) {
+                    let reals = t.table.node(node).1;
+                    most.iter_mut().enumerate().for_each(|(at, m)| *m = m.max(C64::new(reals[2 * at], reals[2 * at + 1]).abs()));
+                }
+                most
+            });
+            let d = table.map_or(0, |t| t.axes());
+            axes += d;
+            for _ in 0..8 {
+                let (r, t, kappa, _, _) = drawn(model, stream);
+                let at = crate::model::Point { r, kappa, t };
+                let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
+                let amplitudes = model.light.amplitudes(r);
+                let near = match table {
+                    _ if len == 0 => None,
+                    Some(table) => Some(model.near_tabulated(table, &amplitudes, &[(plan.near.jumping(), 1)])),
+                    None => Some(model.near_exact(&plan, &amplitudes, 1, &model.coherent_dressing())),
+                };
+                near_met += near.is_some() as usize;
+                let bound = |place: usize| match (table, &near) {
+                    (Some(_), _) => 1.5_f64.powi(d as i32) * largest[place],
+                    (None, Some(near)) => near.data[place].abs(),
+                    (None, None) => 0.0,
+                };
+                let written = photons_written(model, &plan, near.as_ref(), &bound, &amplitudes, &at, &psi);
+                let photons = model.photons_of(&plan, table, &at, &psi, Gradients::All).0;
+                for (place, (class, entries)) in plan.classes.iter().zip(&written).enumerate() {
+                    let landing = model.clusters[class.landing].states.len();
+                    // The chain to a row's sum: its entries, each a field's sum over its beams, a jump's own sum and
+                    // the product rule's terms with a direction's two each.
+                    let links = entries.terms.div_ceil(landing.max(1)) + 2 * beams + 2 * EXCITED + 4usize.pow(d as u32) + 4 + 2 * d.max(3) + 8;
+                    let photon = photons.iter().find(|p| p.class == place);
+                    let zero = vec![C64::ZERO; landing];
+                    for a in 0..3 {
+                        for b in 0..landing {
+                            let (ours, size) = (photon.map_or(C64::ZERO, |p| p.amplitudes[a][b]), entries.sizes[a][b]);
+                            assert!((ours - entries.u[a][b]).abs() <= rounding(links) * size, "{name}, cluster {cluster}, class {place}, u[{a}][{b}]: {ours:?} for {:?} of {size:e}", entries.u[a][b]);
+                            let seen = &mut apart[table.is_some() as usize];
+                            *seen = seen.max(if size > 0.0 { (ours - entries.u[a][b]).abs() / size / crate::units::UNIT_ROUNDOFF } else { 0.0 });
+                            for i in 0..3 {
+                                let (ours, size) = (photon.map_or(&zero, |p| &p.gradients[i][a])[b], entries.slopes[i][a][b]);
+                                assert!((ours - entries.du[i][a][b]).abs() <= rounding(links) * size, "{name}, cluster {cluster}, class {place}, ∂{i} u[{a}][{b}]: {ours:?} for {:?} of {size:e}", entries.du[i][a][b]);
+                                let seen = &mut apart[table.is_some() as usize];
+                                *seen = seen.max(if size > 0.0 { (ours - entries.du[i][a][b]).abs() / size / crate::units::UNIT_ROUNDOFF } else { 0.0 });
+                            }
+                        }
+                    }
+                    let Some(photon) = photon else {
+                        assert!(entries.u.iter().flatten().chain(entries.du.iter().flatten().flatten()).all(|z| *z == C64::ZERO), "{name}, cluster {cluster}, class {place}: left out with entries");
+                        continue;
+                    };
+                    assert_eq!((photon.landing, photon.wave_number, photon.absorbed), (class.landing, class.wave_number, class.absorbed));
+                    // The moments of the written-out vectors: W, Σ_a Im⟨u_a|∇u_a⟩, Σ_a Re⟨∇u_a|⊗|∇u_a⟩ with the explicit part.
+                    let moments = photon.moments();
+                    let (u, du) = (&photon.amplitudes, &photon.gradients);
+                    let weight: f64 = u.iter().map(|v| crate::linalg::norm_sqr(v)).sum();
+                    let scale = |x: &[C64], y: &[C64]| x.iter().zip(y).map(|(p, q)| p.abs() * q.abs()).sum::<f64>();
+                    let sum = rounding(2 * 3 * landing + 4);
+                    assert!((moments.weight - weight).abs() <= sum * weight, "{name}, cluster {cluster}, class {place}: the weight {} for {weight}", moments.weight);
+                    for i in 0..3 {
+                        let (mean, size): (f64, f64) = ((0..3).map(|a| crate::linalg::inner(&u[a], &du[i][a]).im).sum(), (0..3).map(|a| scale(&u[a], &du[i][a])).sum());
+                        assert!((moments.mean[i] - mean).abs() <= sum * 2.0 * size, "{name}, cluster {cluster}, class {place}: the mean along {i}, {} for {mean}", moments.mean[i]);
+                        for j in 0..3 {
+                            let (second, size): (f64, f64) = ((0..3).map(|a| crate::linalg::inner(&du[i][a], &du[j][a]).re).sum::<f64>() + photon.explicit[i][j], (0..3).map(|a| scale(&du[i][a], &du[j][a])).sum::<f64>() + photon.explicit[i][j].abs());
+                            assert!((moments.second[i][j] - second).abs() <= sum * 2.0 * size, "{name}, cluster {cluster}, class {place}: the second moment ({i}, {j}), {} for {second}", moments.second[i][j]);
+                        }
+                    }
+                    classes += 1;
+                    folded += du.iter().flatten().flatten().filter(|z| **z != C64::ZERO).count().min(1);
+                }
+            }
+        }
+    };
+    for (index, (name, model)) in models().into_iter().enumerate() {
+        check(name, &model, None, &mut Stream::new(5, Purpose::Initial, index as u64, 0));
+    }
+    for (index, name) in ["R3_DOPPLER", "R4_TW1", "R5_PUMP"].into_iter().enumerate() {
+        let (request, model) = (scene(name), model(name, &others, &|_| false));
+        let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+        let p: [f64; GROUND] = std::array::from_fn(|b| if b == state { 1.0 } else { 0.0 });
+        let reach = model.reach(&model.trap(&p, &model.prepared()).unwrap(), &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
+        let tables = model.tabulate(&reach, 1 << 12);
+        check(&format!("{name} tabulated"), &model, Some(&tables), &mut Stream::new(5, Purpose::Initial, 100 + index as u64, 0));
+    }
+    assert!(classes > 0 && folded > 0 && near_met > 0 && axes > 0, "classes ({classes}) with folded gradients ({folded}), near forms ({near_met}), tables' axes ({axes})");
+    eprintln!("the photons against their entries' sums: at most {:.1} unit round-offs of a sum's terms' moduli apart with the exact elimination, {:.1} from tables ({classes} classes' photons)", apart[0], apart[1]);
+}
+
+/// The scattering's table error on a scene's own model (run by name, alone: `SCENE=<a reference scene's name or a native
+/// request's path> … the_scattering_s_table_error_on_a_scene -- --ignored --nocapture`): the scene's model as the solve
+/// closes it with its near tables (as `the_decay_s_mismatch_on_a_scene`), and per cluster with a table, at 256 atoms of
+/// the scene's temperature in the trap's harmonic approximation, each a random state of the cluster: a step's scattering
+/// (photon.rs `Model::scattering_of`) from the table against the exact elimination's at the point -- the force's
+/// difference over the classes' summed |Σ_a Im⟨u_a|∇u_a⟩|, the diffusion's largest entry's over the summed second
+/// moments' diagonal (`Scattering::size`) --, beside the table's whole read of the generator at the same atoms.
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn the_scattering_s_table_error_on_a_scene() {
+    use crate::model::photon::Gradients;
+    let name = std::env::var("SCENE").expect("SCENE: a reference scene's name or a request file's path");
+    let request = if name.ends_with(".json") { Request::from_native(&serde_json::from_str(&std::fs::read_to_string(&name).unwrap()).unwrap()).unwrap() } else { scene(&name) };
+    let light = Light::new(&request);
+    let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let p: [f64; GROUND] = std::array::from_fn(|b| if b == state { 1.0 } else { 0.0 });
+    let mut kept: Vec<Unit> = vec![];
+    let (model, trap, reach) = loop {
+        let model = Model::new(&request, &light, &kept).unwrap();
+        let trap = model.trap(&p, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
+        let units = model.units();
+        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
+        if failing.is_empty() {
+            break (model, trap, reach);
+        }
+        kept.extend(failing);
+    };
+    let tables = model.tabulate(&reach, 1 << 20);
+    let (lights, kt) = (model.running(), crate::units::KT_PER_UK * request.temperature_uk);
+    let mut stream = Stream::new(3, Purpose::Initial, 0, 0);
+    for cluster in 0..model.clusters.len() {
+        let Some(table) = tables.of(cluster, &lights) else { continue };
+        let (plan, n) = (model.plan(cluster, &lights), model.clusters[cluster].states.len());
+        // (the mean, the largest) of the force's error, the diffusion's, and the generator's whole read.
+        let mut reads = [[0.0_f64; 2]; 3];
+        let atoms = 256;
+        for _ in 0..atoms {
+            let along: [f64; 3] = std::array::from_fn(|i| stream.normal() * (kt * model.hbar_over_mass).sqrt() / trap.frequencies[i]);
+            let r: [f64; 3] = std::array::from_fn(|a| trap.centre[a] + (0..3).map(|i| trap.axes[i][a] * along[i]).sum::<f64>());
+            let kappa: [f64; 3] = std::array::from_fn(|_| stream.normal() * (kt / model.hbar_over_mass).sqrt());
+            let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.normal(), stream.normal())).collect();
+            let at = crate::model::Point { r, kappa, t: 0.0 };
+            let (ours, exact) = (model.scattering_of(&plan, Some(table), &at, &psi, None).0, model.scattering_of(&plan, None, &at, &psi, None).0);
+            let norm = crate::linalg::norm_sqr(&psi);
+            let means: f64 = model.photons_of(&plan, None, &at, &psi, Gradients::All).0.iter().map(|photon| norm3(photon.moments().mean)).sum::<f64>() / norm;
+            let force = norm3(std::array::from_fn(|i| ours.force[i] - exact.force[i])) / means;
+            let diffusion = (0..9).map(|i| (ours.diffusion[i / 3][i % 3] - exact.diffusion[i / 3][i % 3]).abs()).fold(0.0, f64::max) / exact.size;
+            let sample = crate::model::Sample { cluster, at, psi };
+            let amplitudes = model.light.amplitudes(r);
+            let action = |middle: &Middle| model.action(&sample, middle);
+            let far = action(&model.middle_of(&plan, 0.0, &amplitudes, None));
+            let whole = model.form_error(&sample, &far, &action(&model.middle_of(&plan, 0.0, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 1, &model.coherent_dressing())))), &action(&model.middle(&plan, r, 0.0, Some(table))), tables.thermal);
+            for (read, x) in reads.iter_mut().zip([force, diffusion, whole.parameter]) {
+                *read = [read[0] + x / atoms as f64, read[1].max(x)];
+            }
+        }
+        eprintln!(
+            "{name} cluster {cluster} ({n} states; {} axes, {} nodes of {} reals, {} of them the jumps' matrices): the scattering from the table against the exact elimination's -- the force {:.2e} (largest {:.2e}) of the classes' means, the diffusion {:.2e} ({:.2e}) of the second moments | the table's whole read of the generator δ {:.2e} ({:.2e})",
+            table.axes(),
+            crate::table::Table::nodes(table.table.axes()),
+            table.table.width(),
+            plan.jumps_start.len(),
+            reads[0][0],
+            reads[0][1],
+            reads[1][0],
+            reads[1][1],
+            reads[2][0],
+            reads[2][1]
+        );
+    }
+    let (shown, temperature) = crate::model::tabulate::shares();
+    eprintln!("{name}: the tables' shares {shown:.2e} on what is shown, {temperature:.2e} on T");
+}
