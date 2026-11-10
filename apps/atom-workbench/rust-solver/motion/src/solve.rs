@@ -88,7 +88,7 @@ use crate::ledger::{percent, span, when, Account, Ledger};
 use crate::linalg::V3;
 use crate::model::{Envelope, Lights, Model, Run, Sample, Trap, Unit, UnitError, GROUND};
 use crate::request::STATES;
-use crate::step::{Dynamics, Segment, Trajectory};
+use crate::step::{Dynamics, Scratch, Segment, Trajectory};
 use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, ORDER, STEP_SHARE, TEMPERATURE_TARGET};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -777,6 +777,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: Option<
     let interval = plan.times[1] - plan.times[0];
     let widest = plan.halves.iter().flatten().fold(0., |a: f64, &b| a.max(b));
     let mut t = Trajectory::new(model, start.state, start.r, start.kappa, SEED, index);
+    let mut scratch = Scratch::default();
     let mut reader = read.map(Reader::new);
     // Per output and lab axis: the window's time held, ∫κ dt and ∫κ² dt.
     let mut moments = vec![[[0.; 3]; 3]; outputs];
@@ -794,11 +795,11 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: Option<
             listed[j] = Some((t.r, t.kappa));
         }
         if keep {
-            let sample = Sample { cluster: t.cluster, at: t.point(), psi: t.psi.clone() };
+            let sample = Sample { cluster: t.cluster, at: t.point(), psi: t.psi.to_vec() };
             samples[k] = Some(State { sample, tau, index });
         }
     };
-    record(0, &t, reader.as_ref().map(|r| r.drift), &mut out);
+    record(0, &t, reader.as_ref().map(|r| r.drift(model)), &mut out);
     {
         let mut each = |s: &Segment| {
             steps += 1;
@@ -806,11 +807,18 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: Option<
             let first = (((s0 - widest) / interval).floor().max(1.)) as usize;
             let last = (((s1 + widest) / interval).ceil() as usize).min(outputs - 1);
             for k in first..=last {
+                // The step's moments over an axis's cut of it (`Segment::moments` gives every axis's): made once for
+                // the axes whose windows cut the step alike.
+                let mut made: [Option<((f64, f64), (V3, V3))>; 3] = [None; 3];
                 for a in 0..3 {
                     let h = plan.halves[k][a];
                     let (lo, hi) = (s0.max(plan.times[k] - h), s1.min(plan.times[k] + h));
                     if hi > lo {
-                        let (m1, m2) = s.moments(lo, hi);
+                        let (m1, m2) = match made[..a].iter().flatten().find(|(cut, _)| *cut == (lo, hi)) {
+                            Some((_, same)) => *same,
+                            None => s.moments(lo, hi),
+                        };
+                        made[a] = Some(((lo, hi), (m1, m2)));
                         let w = &mut moments[k][a];
                         w[0] += hi - lo;
                         w[1] += m1[a];
@@ -820,16 +828,16 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: Option<
             }
         };
         for k in 1..outputs {
-            failed = adapt::advance(model, tau, &mut t, reader.as_mut(), plan.times[k], &mut each).is_err();
+            failed = adapt::advance(model, tau, &mut t, &mut scratch, reader.as_mut(), plan.times[k], &mut each).is_err();
             if failed || t.lost.is_some() {
                 reached = k;
                 break;
             }
-            record(k, &t, reader.as_ref().map(|r| r.drift), &mut out);
+            record(k, &t, reader.as_ref().map(|r| r.drift(model)), &mut out);
         }
         if reached == outputs {
             // Through the last output's window; a failure there leaves every output read.
-            failed = adapt::advance(model, tau, &mut t, reader.as_mut(), plan.end, &mut each).is_err();
+            failed = adapt::advance(model, tau, &mut t, &mut scratch, reader.as_mut(), plan.end, &mut each).is_err();
         }
     }
     // From the output it does not reach: failed, or lost -- judged at the state it was lost in, its loss energy's error as
@@ -838,7 +846,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: Option<
         let gone = if failed {
             Output { fate: Fate::Failed, near: None, energy: None }
         } else {
-            Output { fate: Fate::Lost, near: windows.map(|w| margin(&t).abs() <= w[reached]), energy: reader.as_ref().map(|r| r.drift.energy) }
+            Output { fate: Fate::Lost, near: windows.map(|w| margin(&t).abs() <= w[reached]), energy: reader.as_ref().map(|r| r.energy()) }
         };
         out[reached..].fill(gone);
     }

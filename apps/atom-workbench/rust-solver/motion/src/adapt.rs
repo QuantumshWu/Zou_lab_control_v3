@@ -17,7 +17,7 @@
 //! Where a trajectory is read (the pilot's, solve.rs), every step it takes is doubled: from the same state the step
 //! and two of its halves, the jump-free flows. The scheme's local error is O(τ^{p+1}), p = `units::ORDER`, so the step's
 //! own local error is their difference times 2^p/(2^p − 1) (decide.rs `richardson`). A step on the beating grid is also
-//! redone on twice its panels (`step::Step::regrid`); CF4 and Simpson are of fourth order, so the grid's local error is
+//! redone on twice its panels (`step::Midway::regrid`); CF4 and Simpson are of fourth order, so the grid's local error is
 //! that difference times 2⁴/(2⁴ − 1).
 //!
 //! A local error is an error of an output only as far as the dynamics carries it there: to first order the step's
@@ -30,8 +30,10 @@
 //! - **The internal state** is carried by linear maps: along a trajectory's path and jumps, ψ after is a product of
 //!   propagators and jump operators applied to ψ before, whatever ψ is. The read carries a second internal state S
 //!   through the same maps -- each step taken once more from the trajectory's position and momentum with S in ψ's
-//!   place, each jump's operator (the class and the polarization the trajectory drew) on S, renormalized as ψ is
-//!   (`step::jump`) -- and adds every step's local error of ψ to it with its sign turned: S is the trajectory's
+//!   place, through the step's own middle (`step::Midway`: the reference flow and the generator do not know the
+//!   internal state, so they are the step's, made once), each jump's operator (the class and the polarization the
+//!   trajectory drew) on S, renormalized as ψ is (`step::jump`) -- and adds every step's local error of ψ to it with
+//!   its sign turned: S is the trajectory's
 //!   internal state with its step errors taken out, to first order, and it forgets them exactly as the internal state
 //!   forgets (optical pumping erases what a step did within a few jumps). The rows' error is the trajectory's rows less
 //!   S's (`Drift::rows`); it is not a sum.
@@ -59,9 +61,9 @@
 //! whose operator annihilates S: the trajectory's read is then no number.
 
 use crate::decide::richardson;
-use crate::linalg::{dot3, norm_sqr, C64};
-use crate::model::STATES;
-use crate::step::{jump, step, step_work, test_loss, Dynamics, Flow, Middle, Refused, Segment, Step, Trajectory};
+use crate::linalg::{dot3, norm_sqr};
+use crate::model::{Point, STATES};
+use crate::step::{jump, step_work, test_loss, Attempt, Dynamics, Flow, Internal, Middle, Midway, Refused, Scratch, Segment, Step, Trajectory};
 use crate::transport::Mark;
 use crate::units::ORDER;
 use std::collections::VecDeque;
@@ -136,19 +138,36 @@ impl Trail {
     }
 }
 
-/// A trajectory's read (module documentation, # The read): what it holds, its recent path, and the carried internal
-/// state S on the trajectory's cluster -- none before the first step, where S is ψ.
+/// A trajectory's read (module documentation, # The read): what it accumulates (`Reader::drift` gives it with the rows),
+/// its recent path, the carried internal state S on the trajectory's cluster -- none before the first step, where S is
+/// ψ --, and the states its rows' error is read at: the trajectory's and S's at the end of the last step read, on that
+/// step's cluster at its end's point. The rows' error is no sum: it is asked at the outputs alone, and made there.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reader {
-    pub drift: Drift,
+    drift: Drift,
     trail: Trail,
-    carried: Option<Vec<C64>>,
+    carried: Option<Internal>,
+    shown: Option<(usize, Point, Internal, Internal)>,
 }
 
 impl Reader {
     /// A reader whose marks average the kinetic energy of each lab axis over `windows` (µs): the axes' trap periods.
     pub fn new(windows: [f64; 3]) -> Reader {
-        Reader { drift: Drift::ZERO, trail: Trail { windows, steps: VecDeque::new() }, carried: None }
+        Reader { drift: Drift::ZERO, trail: Trail { windows, steps: VecDeque::new() }, carried: None, shown: None }
+    }
+    /// What the read holds of the trajectory's step errors: what it accumulated, and the rows' error -- the rows of the
+    /// trajectory's state less those of its carried state as the last step read left them (none read yet: no error).
+    pub fn drift<D: Dynamics>(&self, model: &D) -> Drift {
+        let mut drift = self.drift;
+        if let Some((cluster, at, ours, theirs)) = &self.shown {
+            let (ours, theirs) = (model.readout(*cluster, at, ours), model.readout(*cluster, at, theirs));
+            drift.rows = std::array::from_fn(|q| ours[q] - theirs[q]);
+        }
+        drift
+    }
+    /// The loss energy's accumulated local errors (`Drift::energy`).
+    pub fn energy(&self) -> f64 {
+        self.drift.energy
     }
 }
 
@@ -176,23 +195,40 @@ fn adopt(trajectory: &mut Trajectory, end: &Trajectory) {
         (tau, grid, steps, capped, work, assemblies);
 }
 
-/// A step of `length` from a state on the grid a step of that length takes (module documentation, # The step), counted.
-fn counted<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, length: f64) -> Result<Step, Refused> {
+/// The middle of a step of `length` from a state (`step::Midway`), counted: a step evaluation, and a middle of the model
+/// where the step's fixed point holds.
+fn midway<'a, D: Dynamics>(model: &'a D, trajectory: &mut Trajectory, from: &Trajectory, length: f64) -> Result<Midway<'a, D>, Refused> {
     trajectory.steps += 1;
-    let s = step(model, from, length)?;
-    trajectory.work += s.work;
-    trajectory.assemblies += s.assemblies;
-    Ok(s)
+    let through = Midway::new(model, from, length)?;
+    trajectory.assemblies += 1;
+    Ok(through)
 }
 
-/// A step read (module documentation, # The read): the step `s` taken from `from` against its two halves and, where it
-/// took the grid, its regrid, each by its Richardson factor; and the carried state's step. Where the scheme refuses a
-/// half or the carried step, the step is counted unread and the carried state begins anew from the trajectory's.
-fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, s: &Step, reader: &mut Reader) {
+/// A step of `length` from a state on the grid a step of that length takes (module documentation, # The step), counted,
+/// and the middle it went through: the flow between jumps, whatever the threshold.
+fn counted<'a, D: Dynamics>(model: &'a D, trajectory: &mut Trajectory, from: &Trajectory, length: f64, scratch: &mut Scratch) -> Result<(Step, Midway<'a, D>), Refused> {
+    let through = midway(model, trajectory, from, length)?;
+    let s = through.step(from, scratch)?;
+    trajectory.work += s.work;
+    Ok((s, through))
+}
+
+/// A step read (module documentation, # The read): the step `s` taken from `from` through the middle `through` against
+/// its two halves and, where it took the grid, its regrid, each by its Richardson factor; and the carried state's step.
+/// The carried step and the regrid go through the step's own middle: the same start, the same length, so the same
+/// reference flow and the same generator, made once. Where the scheme refuses a half or the carried step, the step is
+/// counted unread and the carried state begins anew from the trajectory's.
+fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, (s, through): (&Step, &Midway<'_, D>), reader: &mut Reader, scratch: &mut Scratch) {
     let half = 0.5 * s.segment.tau;
-    let halves = counted(model, trajectory, from, half).and_then(|first| counted(model, trajectory, &first.end, half));
+    let halves = counted(model, trajectory, from, half, scratch).and_then(|(first, _)| counted(model, trajectory, &first.end, half, scratch)).map(|(second, _)| second);
     let carried = match reader.carried.take() {
-        Some(psi) => counted(model, trajectory, &Trajectory { psi, ..from.clone() }, s.segment.tau).map(Some),
+        Some(psi) => {
+            trajectory.steps += 1;
+            through.step(&Trajectory { psi, ..from.clone() }, scratch).map(|c| {
+                trajectory.work += c.work;
+                Some(c)
+            })
+        }
         None => Ok(None),
     };
     let (Ok(second), Ok(carried)) = (halves, carried) else {
@@ -211,7 +247,7 @@ fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, 
             }
             c.end.psi
         }
-        None => whole.psi.clone(),
+        None => whole.psi,
     };
     // A level finer in the step or in the grid against the step taken: the finer level's parameter is half.
     let mut finer = |other: &Trajectory, factor: f64| {
@@ -221,17 +257,16 @@ fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, 
         }
         drift.energy += factor * (loss - model.energy(other.cluster, &other.point(), &other.psi));
         drift.mark.hazard_error += factor * (norm_sqr(&other.psi) / size).ln();
-        for (x, (fine, coarse)) in next.iter_mut().zip(other.psi.iter().zip(&whole.psi)) {
+        for (x, (fine, coarse)) in next.iter_mut().zip(other.psi.iter().zip(whole.psi.iter())) {
             *x = *x + (*fine - *coarse) * factor;
         }
     };
     finer(&second.end, richardson(0.5, ORDER as f64));
-    if let Some((regrid, work)) = s.regrid(model) {
+    if let Some((regrid, work)) = through.regrid(s, scratch) {
         trajectory.work += work;
         finer(&regrid, richardson(0.5, GRID_ORDER as f64));
     }
-    let (ours, theirs) = (model.readout(whole.cluster, &whole.point(), &whole.psi), model.readout(whole.cluster, &whole.point(), &next));
-    drift.rows = std::array::from_fn(|q| ours[q] - theirs[q]);
+    reader.shown = Some((whole.cluster, whole.point(), whole.psi, next));
     reader.carried = Some(next);
 }
 
@@ -240,8 +275,9 @@ fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, 
 /// takes every step's path (a jump's step is the one redone to its root, the jump at its end). A trajectory lost on the
 /// way stops at its loss time. With a reader, every step taken and every jump is read into it (module documentation,
 /// # The read). Where the scheme refuses a step at every length down to the time's round-off, the advance ends there
-/// with the refusal; so it does where the model gives a jump no photon (`step::jump`).
-pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, mut reader: Option<&mut Reader>, to: f64, each: &mut dyn FnMut(&Segment)) -> Result<(), Refused> {
+/// with the refusal; so it does where the model gives a jump no photon (`step::jump`). `scratch` is the trajectory's
+/// (`step::Scratch`): its steps' memory, made once with it.
+pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, scratch: &mut Scratch, mut reader: Option<&mut Reader>, to: f64, each: &mut dyn FnMut(&Segment)) -> Result<(), Refused> {
     let grid = |length: f64| length / (2 * 2 * HALF_PANELS) as f64;
     trajectory.tau = tau;
     while trajectory.lost.is_none() && trajectory.time < to {
@@ -252,21 +288,26 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, mu
         let (at, taken, jumps) = loop {
             let mut from = trajectory.clone();
             from.grid = grid(length);
-            let refusal = match counted(model, trajectory, &from, length) {
-                Ok(whole) => match whole.crossing {
-                    None => break (from, Some(whole), false),
-                    Some(root) if root > 0.0 => {
-                        from.grid = grid(root);
-                        match counted(model, trajectory, &from, root) {
-                            Ok(s) => break (from, Some(s), true),
-                            Err(e) => {
-                                length = root;
-                                e
-                            }
+            let tried = midway(model, trajectory, &from, length).and_then(|through| through.attempt(&from, scratch).map(|tried| (tried, through)));
+            let refusal = match tried {
+                Ok((Attempt::Whole(whole), through)) => {
+                    trajectory.work += whole.work;
+                    break (from, Some((whole, through)), false);
+                }
+                Ok((Attempt::Crossing { root, work }, _)) => {
+                    trajectory.work += work;
+                    if !(root > 0.0) {
+                        break (from, None, true);
+                    }
+                    from.grid = grid(root);
+                    match counted(model, trajectory, &from, root, scratch) {
+                        Ok(taken) => break (from, Some(taken), true),
+                        Err(e) => {
+                            length = root;
+                            e
                         }
                     }
-                    Some(_) => break (from, None, true),
-                },
+                }
                 Err(e) => e,
             };
             length *= 0.5;
@@ -274,9 +315,9 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, mu
                 return Err(refusal);
             }
         };
-        if let Some(s) = &taken {
+        if let Some((s, through)) = &taken {
             if let Some(reader) = reader.as_deref_mut() {
-                read(model, trajectory, &at, s, reader);
+                read(model, trajectory, &at, (s, through), reader, scratch);
                 reader.trail.push(&s.segment);
                 reader.drift.mark.level = reader.trail.levels(model.hbar_over_mass());
             }
