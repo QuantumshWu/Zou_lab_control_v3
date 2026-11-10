@@ -14,6 +14,8 @@ import numpy as np
 from zlc_atom.authoring import AuthoringField, TunableField
 from zlc_atom.devices import RecordQueue
 from zlc_atom.devices.camera.contract import (
+    rest_starts_after,
+    rests_before_arm,
     CameraCaptureTerminalRecord,
     CameraFrameRecord,
     CameraWorkingPoint,
@@ -247,6 +249,7 @@ class VirtualCamera:
                 self._condition.notify_all()
             return float(self._exposure_seconds)
 
+    @rests_before_arm
     def arm(
         self,
         frames: int | None,
@@ -449,6 +452,7 @@ class VirtualCamera:
     def read_frame_records(self, n: int, *, timeout: float, exact: bool) -> list[CameraFrameRecord]:
         return self._records.read(n, timeout=timeout, exact=exact)
 
+    @rest_starts_after
     def finish_record_capture(self) -> CameraCaptureTerminalRecord:
         """End the capture once the producer really has.
 
