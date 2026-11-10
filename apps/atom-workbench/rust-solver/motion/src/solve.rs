@@ -313,6 +313,13 @@ fn rung(reads: &[Stepped], held_to: &[Option<V3>], wider: f64) -> Judgement {
     judge(&looks, ORDER as f64)
 }
 
+/// The step's error as a read bounds it, per output on what is shown and on T (`Fixed::step`): a probability's error is at
+/// most 1, T's unbounded where it is not read.
+fn booked(reads: &[Stepped]) -> Vec<[f64; 2]> {
+    let bound = |x: &Read| x.bound(1.);
+    reads.iter().map(|r| [r.shown.iter().map(bound).fold(0., f64::max).min(1.), r.temperature.as_ref().map_or(f64::INFINITY, |t| t.iter().map(bound).fold(0., f64::max))]).collect()
+}
+
 /// The estimates, the listed outputs' atoms and the counts of some groups.
 fn pooled(parts: &[&Part], scales: &Scales) -> (Vec<Estimate>, Vec<Vec<(V3, V3)>>, Counts) {
     let estimates = summarize(parts, scales);
@@ -563,7 +570,7 @@ fn attempt(
     // every pilot group runs once at the first rung, no reader; where its atoms outgrow the reach or a unit is to be kept
     // at its states, the attempt ends here -- for the price of the scout, not of a pilot with its reads. The pilot's read
     // of the same things below stands for the result; it differs from the scout's only by the step it settles on.
-    {
+    let scouted: Vec<[f64; 2]> = {
         let tau = context.tau;
         let scouts = run_groups(first, first + groups, 0..1, shape, &|i| trajectory(&run, &ensemble, tau, None, None, &context.plan, true, i), messages, &mut |_, messages| messages.again());
         let scout: Vec<&Part> = scouts.iter().collect();
@@ -584,7 +591,8 @@ fn attempt(
         if let Some((u, share)) = keep(request, light, kept, &model, reference, trap.centre, &units, &measured, &samples, &scout, &fixed, &context.scales, unsampled, scout.len() as f64, barred) {
             return Ok(Attempt::Keep(units[u].clone(), tau, share));
         }
-    }
+        fixed.model
+    };
     // Between two rungs the step's errors go as 2^p (the scheme's order, the Richardson factors' own premise).
     let between = 2f64.powi(ORDER);
     // A priced keep's model at the step `step` against the model before it at its own (see `priced`).
@@ -628,10 +636,30 @@ fn attempt(
                 break (judgement, fits(below) && judged(&parts, between) == Judgement::Within);
             }
         };
-        if lower && dearer(below) {
+        // The rung by the work it asks (module documentation, # The step): a read that is not within the share is still a
+        // bound, and booked as it is it leaves the statistics a room; the trajectories that room asks (`Targets::need`,
+        // the scout's model errors beside it) at this step against those the rung below would ask, at twice the steps,
+        // with this read over 2^p. The share is where the two meet for an error that falls as τ^p; a read's own noise
+        // does not fall with the step, and a rung it alone keeps from the share is the cheaper one.
+        let worth = judgement != Judgement::Within && !parts.is_empty() && {
+            let read: Vec<&Part> = parts.iter().collect();
+            let estimates = pooled(&read, &context.scales).0;
+            let bounds = booked(&stepped(&read, &context.scales));
+            let (held, temperature): (Vec<f64>, Vec<Option<V3>>) = (estimates.iter().map(|e| 1. - e.loss).collect(), held_to(&estimates));
+            let need = |factor: f64| {
+                let step: Vec<[f64; 2]> = bounds.iter().map(|b| [b[0] * factor, b[1] * factor]).collect();
+                let roomy = (1..outputs).all(|k| {
+                    room(POPULATION_TARGET, scouted[k][0] * held[k], step[k][0]) > 0. && (temperature[k].is_none() || room(TEMPERATURE_TARGET / held[k], scouted[k][1], step[k][1]) > 0.)
+                });
+                if roomy { Targets::new(&Fixed { model: scouted.clone(), held: held.clone(), temperature: temperature.clone(), step, ..context.fixed.clone() }).need(&estimates) } else { f64::INFINITY }
+            };
+            let here = need(1.);
+            here.is_finite() && here * below <= need(1. / between) * tau
+        };
+        if !worth && lower && dearer(below) {
             return Ok(Attempt::Undo);
         }
-        if lower {
+        if !worth && lower {
             // The rung below is the run's: its errors are this read's over 2^p, and its trajectories carry no reader.
             let reads: Vec<Stepped> = stepped(&parts.iter().collect::<Vec<_>>(), &context.scales).iter().map(|r| r.times(1. / between)).collect();
             context.tau = below;
@@ -639,6 +667,7 @@ fn attempt(
             break (parts, reads);
         }
         let next = match judgement {
+            _ if worth => None,
             Judgement::Within => None,
             Judgement::Beyond(factor) => Some(halved(tau, factor)),
             Judgement::Unreadable => Some(below),
@@ -1155,20 +1184,19 @@ struct Targets {
 }
 impl Targets {
     fn new(fixed: &Fixed) -> Targets {
-        // The step's part of an output's account: what its read bounds, at most its share -- the rung is taken only where
-        // every read lies within the share, and a read that is none (booked beyond it, flagged) holds the statistics to
-        // the room the share leaves, not to none.
         let share = step_bound();
-        let step = |b: &[f64; 2], i: usize| b[i].min(share[i]);
+        // The bound as booked where it leaves a room beside the model's error; where it leaves none -- a read that is no
+        // number, or one beyond what the target can hold --, the share (flagged where it is booked).
+        let step = |b: &[f64; 2], i: usize, target: f64, model: f64| if room(target, model, b[i]) > 0. { b[i] } else { b[i].min(share[i]) };
         Targets {
-            population: fixed.model.iter().zip(&fixed.held).zip(&fixed.step).map(|((a, h), b)| room(POPULATION_TARGET, a[0] * h, step(b, 0))).collect(),
+            population: fixed.model.iter().zip(&fixed.held).zip(&fixed.step).map(|((a, h), b)| room(POPULATION_TARGET, a[0] * h, step(b, 0, POPULATION_TARGET, a[0] * h))).collect(),
             temperature: fixed
                 .temperature
                 .iter()
                 .zip(&fixed.model)
                 .zip(&fixed.held)
                 .zip(&fixed.step)
-                .map(|(((t, a), h), b)| t.map(|scale| (scale, room(TEMPERATURE_TARGET / h, a[1], step(b, 1)))))
+                .map(|(((t, a), h), b)| t.map(|scale| (scale, room(TEMPERATURE_TARGET / h, a[1], step(b, 1, TEMPERATURE_TARGET / h, a[1])))))
                 .collect(),
             held: fixed.held.clone(),
         }
