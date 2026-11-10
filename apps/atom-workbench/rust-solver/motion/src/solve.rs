@@ -354,9 +354,10 @@ fn classical(temperature: &V3, frequencies: &V3) -> bool {
     (0..3).all(|a| KT_PER_UK * temperature[a] >= CLASSICAL * frequencies[a])
 }
 
-/// The states the model is read at and the folded units' errors there (SPEC §5.2): the first member of every group of
-/// `parts` at every output -- one a group keeps every group in a mean's spread, and a unit's error is a function of the
-/// state --, with each state's output and group.
+/// The states the model is read at and the folded units' errors there (SPEC §5.2): at every output the first member of
+/// every group of `parts` that still holds its atom -- one a group keeps every group in a mean's spread, and a unit's
+/// error is a function of the state; the first held one, so that an output some atom reaches is read wherever a group
+/// has one there --, with each state's output and group.
 struct Sampled {
     samples: Vec<State>,
     at: Vec<usize>,
@@ -368,7 +369,7 @@ fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Table
     let (mut at, mut from) = (vec![], vec![]);
     for (g, p) in parts.iter().enumerate() {
         for (k, s) in p.samples.iter().enumerate() {
-            for state in s.iter().filter(|x| x.index % GROUP == 0) {
+            if let Some(state) = s.iter().min_by_key(|x| x.index) {
                 samples.push(state.clone());
                 at.push(k);
                 from.push(g);
@@ -383,8 +384,8 @@ fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Table
 
 /// The folded unit to keep, if any (SPEC §5.2), from the units' errors `measured` at `states` of the trajectories
 /// `parts` and the errors `fixed` beside them: a unit whose error leaves an output no room for the statistics -- of the
-/// outputs left none, the unit of the largest weight there (its errors on what is shown and on T, weighed by the held
-/// share as the totals are, each over its target, added up) --; else, of the units whose error's removal alone would pay
+/// outputs left none, the unit of the largest weight there (its errors on what is shown and on T where they were read,
+/// weighed by the held share as the totals are, each over its target, added up) --; else, of the units whose error's removal alone would pay
 /// for the `again` trajectories its model runs before it stands where this one does, each rated with its kept model,
 /// the one whose keeping saves the most predicted work beyond its spread -- with that saving's share, and never a unit
 /// of `barred` (a keep of this kind once made is not priced again: undone or not, its price has been read).
@@ -407,8 +408,11 @@ fn keep(
     barred: &[Unit],
 ) -> Option<(usize, Option<f64>)> {
     let means = measured.means(fixed.model.len(), None);
+    // A unit weighs where it was read: an output with no state read carries every unit's bound alike, and tells none
+    // of them apart.
+    let read = |k: usize| measured.output.contains(&k);
     let weight = |u: usize, over: &[usize]| -> f64 {
-        over.iter().filter(|&&k| fixed.held[k] > 0.).map(|&k| fixed.held[k] * (means[u][k][0] / POPULATION_TARGET + means[u][k][1] / TEMPERATURE_TARGET)).sum()
+        over.iter().filter(|&&k| fixed.held[k] > 0. && read(k)).map(|&k| fixed.held[k] * (means[u][k][0] / POPULATION_TARGET + means[u][k][1] / TEMPERATURE_TARGET)).sum()
     };
     let crowded = Targets::new(fixed).crowded();
     if let Some(u) = (0..units.len()).max_by(|&a, &b| weight(a, &crowded).total_cmp(&weight(b, &crowded))).filter(|&u| weight(u, &crowded) > 0.) {
