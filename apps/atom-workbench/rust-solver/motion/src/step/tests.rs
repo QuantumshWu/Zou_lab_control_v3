@@ -515,6 +515,44 @@ fn a_read_trajectory_holds_its_jumps_input_and_its_hazard() {
     }
 }
 
+/// A jump is a linear map of the internal state (`step::jump`'s carried state; adapt.rs, # The read): on a pumping
+/// scene's model (R5_PUMP), from every ground state in turn, a carried state that is the trajectory's own takes every
+/// jump to the trajectory's own state after it, and so does twice it -- the class's operator found by its place, the
+/// polarization the trajectory drew, the same renormalization --, to the bit. Between the jumps a short step moves the
+/// state on. The jumps land in more than one cluster: more than one class's operator is met.
+#[test]
+fn a_carried_state_takes_the_trajectory_s_jumps() {
+    let request = scene("R5_PUMP");
+    let light = crate::field::Light::new(&request);
+    let model = crate::model::Model::new(&request, &light, &[]).expect("every unit folds");
+    let chief = (0..crate::model::GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let mut p = [0.0; crate::model::GROUND];
+    p[chief] = 1.0;
+    let trap = model.trap(&p, &model.prepared()).unwrap();
+    let run = crate::model::Run::new(&model, p);
+    let (tau, jumps) = (0.25, 3);
+    let mut landed = std::collections::BTreeSet::new();
+    for state in 0..crate::model::GROUND {
+        let mut t = Trajectory::new(&run, state, [trap.centre[0] + 0.05, trap.centre[1] - 0.03, trap.centre[2] + 0.1], [1.0, -2.0, 0.5], 11, state as u64);
+        t.grid = tau / 4.0;
+        for _ in 0..jumps {
+            let (mut own, mut twice) = (Some(t.psi.clone()), Some(t.psi.iter().map(|z| *z * 2.0).collect::<Vec<C64>>()));
+            let mut twin = t.clone();
+            if step::jump(&run, &mut t, &mut own).is_err() {
+                // A state with no photon to emit (the pumping's dark state) makes no jump.
+                break;
+            }
+            step::jump(&run, &mut twin, &mut twice).unwrap();
+            assert_eq!(own.as_ref(), Some(&t.psi), "the trajectory's own state, carried, from state {state} after jump {}", t.jumps);
+            assert_eq!(twice.as_ref(), Some(&t.psi), "twice the trajectory's state, carried, from state {state} after jump {}", t.jumps);
+            landed.insert(t.cluster);
+            let next = step::step(&run, &t, tau).unwrap().end;
+            (t.r, t.kappa, t.psi, t.time) = (next.r, next.kappa, next.psi, next.time);
+        }
+    }
+    assert!(landed.len() > 1, "the jumps landed in the clusters {landed:?} only");
+}
+
 /// R1's mechanism (SPEC §2.2): a conservative anharmonic trap's energy over a long run at one constant step. A hot atom
 /// in a Gaussian tweezer (radial ω = 0.13 rad/µs) for some hundred radial periods at ω τ = 0.8: the splitting, symplectic
 /// and its own inverse, keeps the energy's error bounded -- its last tenth's mean within its first tenth's spread (no
