@@ -1833,3 +1833,32 @@ fn a_step_s_brownian_part_is_the_sum_of_its_halves_and_they_end_together() {
     assert!((taken.r[2] - halves.r[2]).abs() <= 1e-2 * lever, "the ends {} and {} against the lever {lever}", taken.r[2], halves.r[2]);
     assert!((taken.kappa[2] - halves.kappa[2]).abs() <= 1e-2 * (taken.kappa[2] - start.kappa[2]).abs(), "the momenta {} and {}", taken.kappa[2], halves.kappa[2]);
 }
+
+/// The energy a diffusion puts into a trapped atom is (ħ/m) tr(2D) τ/2 a step in the mean at any ω τ (`spreading`): a
+/// white force's work in a harmonic trap does not know the trap. An atom held at a standing wave's node -- no jump, and
+/// 2D_zz = k² c² wherever its small orbit takes it -- in a trap of ω τ = 2.5 along the wave: over 1024 trajectories from
+/// rest, the mean energy after 64 steps is the diffusion's input within its standard error (an energy of the
+/// exponential law: its own size over √1024). With the free flight's lever the potential energy would gain (ω τ)²/12 =
+/// 0.52 of it more.
+#[test]
+fn a_diffusion_s_energy_input_does_not_know_the_trap() {
+    let (k, c, tau, steps, runs) = (8.0, 0.5, 1.0, 64, 1024);
+    let (hm, omega) = (1e-9, 2.5);
+    let node = std::f64::consts::FRAC_PI_2 / k;
+    let mut hessian = [[0.0; 3]; 3];
+    hessian[2][2] = omega * omega / hm;
+    let mut model = Atom::new(hm, Trap::Quadratic { hessian, gradient: [0.0, 0.0, -hessian[2][2] * node] }, vec![], 0.0, 0.0);
+    model.folded = vec![(C64::real(0.5 * c), [0.0, 0.0, k]), (C64::real(0.5 * c), [0.0, 0.0, -k])];
+    let energy = |t: &Trajectory| 0.5 * hm * t.kappa[2] * t.kappa[2] + 0.5 * hessian[2][2] * (t.r[2] - node).powi(2);
+    let mut mean = 0.0;
+    for index in 0..runs {
+        let mut t = Trajectory::new(&model, 0, [0.0, 0.0, node], [0.0; 3], 41, index);
+        adapt::advance(&model, tau, &mut t, &mut step::Scratch::default(), None, tau * steps as f64, &mut |_| {}).unwrap();
+        assert_eq!((t.jumps, t.taken), (0, steps), "trajectory {index}: a node scatters nothing, and every step is whole");
+        assert!((k * (t.r[2] - node)).abs() < 1e-3, "trajectory {index} stays at the node: {}", t.r[2] - node);
+        mean += energy(&t) / runs as f64;
+    }
+    let input = 0.5 * hm * k * k * c * c * tau * steps as f64;
+    eprintln!("the mean energy {mean:.4e} against the diffusion's input {input:.4e}");
+    assert!((mean - input).abs() <= within(input / (runs as f64).sqrt(), 1.0), "the mean energy {mean} against the diffusion's input {input}");
+}

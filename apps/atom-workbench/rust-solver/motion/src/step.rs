@@ -97,13 +97,19 @@
 //!   momentum goes (`Dynamics::kick`: at most k_φ + k_c in all);
 //! - a step carries the rest at its middle, on the state x_m there (`Dynamics::scattering`): the force F_s the jumps do
 //!   not carry, over τ, and the diffusion 2D they do not carry, as the step's part of the trajectory's Brownian path
-//!   (`Brownian`) through a factor Λ of it, Λ Λᵀ = 2D (`factor`): κ += τ F_s + Λ ΔW and r −= (ħ/m) Λ ΔZ, ΔW = ∫dW the
-//!   path's increment over the step and ΔZ = ∫(s − τ/2)dW its first moment about the middle. With ΔZ the kick at the
-//!   middle moves the step's end as the force Λ dW/ds spread over the step moves it in free flight, (ħ/m)∫(τ − s)Λ dW:
-//!   a step and its two halves on the same path (`Brownian::halves`: ΔW = ΔW₁ + ΔW₂, ΔZ = ΔZ₁ + ΔZ₂ + (τ/4)(ΔW₂ − ΔW₁))
+//!   (`Brownian`) through a factor Λ of it, Λ Λᵀ = 2D (`factor`): in free flight κ += τ F_s + Λ ΔW and r −= (ħ/m) Λ ΔZ,
+//!   ΔW = ∫dW the path's increment over the step and ΔZ = ∫(s − τ/2)dW its first moment about the middle. With ΔZ the
+//!   kick at the middle moves the step's end as the force Λ dW/ds spread over the step moves it, (ħ/m)∫(τ − s)Λ dW: a
+//!   step and its two halves on the same path (`Brownian::halves`: ΔW = ΔW₁ + ΔW₂, ΔZ = ΔZ₁ + ΔZ₂ + (τ/4)(ΔW₂ − ΔW₁))
 //!   then end together but for the scheme's own error, which is what the step's doubling reads (adapt.rs). Without it
 //!   they would end (ħ/m)(τ/4)Λ(ΔW₂ − ΔW₁) apart, a difference of zero mean and of order τ^{3/2} that is no error of the
 //!   scheme.
+//!   In the reference's flow (`spreading`): along a principal axis of the rate ω (ω² = (ħ/m)λ) a force spread over
+//!   the step ends as the kick ∫cos(ωu)Λ dW and the displacement −(ħ/m)∫(sin ωu/ω)Λ dW at the middle (u the time from
+//!   it), uncorrelated, of the variances (τ/2)(1 + c₁(x)) and (τ/2)(1 − c₁(x))/ω² an axis of Λ Λᵀ, x = ω²τ² and c₁ the
+//!   Stumpff function. The step takes ΔW and ΔZ at these variances, per principal axis: the energy the diffusion puts
+//!   in is then (ħ/m) tr(2D) τ/2 in the mean at any ωτ, as a white force's is in a harmonic trap. (The free flight's
+//!   lever puts (ωτ)²/12 of it more into the potential energy: three quarters more at the ladder's top rung.)
 //!   The path's momentum κ_m is predicted without the path's increment (its mean is none): the propagation, its norm
 //!   and so the jumps' times do not depend on the deviates.
 //!   F_s and 2D are those of the state at the step's middle; what of them goes with an explicit excited state's decay
@@ -1238,10 +1244,11 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let scattered = self.model.scattering(from.cluster, &Point { r: r_h, kappa: kappa_m, t: from.time + 0.5 * tau }, &made.middle[..n], &made.populations[..n]);
         let spread = spread.copied().unwrap_or_else(|| factor(&scattered.diffusion, scattered.size, scattered.links));
         let heating = std::array::from_fn(|a| 0.5 * hm * scattered.diffusion[a][a] * tau.abs());
-        let along = |w: &[f64; 3], a: usize| -> f64 { (0..3).map(|c| spread[a][c] * w[c]).sum() };
+        let through = |w: &[f64; 3]| -> [f64; 3] { std::array::from_fn(|a| (0..3).map(|c| spread[a][c] * w[c]).sum()) };
+        let (push, shift) = spreading(&flow, tau, through(&brownian.increment), through(&brownian.moment));
         let kicked = (
-            std::array::from_fn(|a| r_h[a] - hm * along(&brownian.moment, a)),
-            std::array::from_fn(|a| kappa_h[a] + made.impulse[a] + tau * (reference[a] + scattered.force[a]) + along(&brownian.increment, a)),
+            std::array::from_fn(|a| r_h[a] - hm * shift[a]),
+            std::array::from_fn(|a| kappa_h[a] + made.impulse[a] + tau * (reference[a] + scattered.force[a]) + push[a]),
         );
         let (r1, kappa1) = flow.advance(kicked, 0.5 * tau);
         if !(r1.iter().chain(&kappa1).all(|x| x.is_finite()) && made.end[..n].iter().all(|z| z.is_finite())) {
@@ -1262,6 +1269,37 @@ impl<'a, D: Dynamics> Midway<'a, D> {
 /// -- the step's drift alone, the scattered light's diffusion left out.
 pub fn step<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, scratch: &mut Scratch) -> Result<Step, Refused> {
     Midway::new(model, from, tau)?.step(from, &Brownian::STILL, None, scratch)
+}
+
+/// The Stumpff function c₃(x) = (1 − c₁(x))/x = Σ_j (−x)^j/(3 + 2j)!, entire in x, by its series to round-off: the
+/// quotient cancels where x is small, and the series' terms fall from the first while |x| is below its second term's
+/// 20 (a step's x = ω²τ² is below π² on a trapping axis, SPEC §2.2; on a hyperbolic one every term is positive).
+fn stumpff3(x: f64) -> f64 {
+    let (mut term, mut sum, mut j) = (1.0 / 6.0, 0.0, 0.0);
+    while sum + term != sum {
+        sum += term;
+        j += 1.0;
+        term *= -x / ((2.0 * j + 2.0) * (2.0 * j + 3.0));
+    }
+    sum
+}
+
+/// A diffusion's part of a step in the reference's flow (module documentation, # The absorbed light's momentum): from
+/// Λ ΔW and Λ ΔZ (lab axes) the kick and the displacement over ħ/m at the step's middle that end the step as the force
+/// Λ dW/ds spread over it does -- per principal axis of the flow, x = (ħ/m)λτ², the increment at the variance
+/// (τ/2)(1 + c₁(x)) of ∫cos(ωu)dW, by √((1 + c₁)/2), and the first moment at the variance (τ³/2) c₃(x) of ∫(sin ωu/ω)dW,
+/// by √(6 c₃). Both are 1 in free flight, and hold on a hyperbolic axis as they stand (c₁ and c₃ entire in x).
+fn spreading(flow: &Flow, tau: f64, increment: [f64; 3], moment: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let (mut push, mut shift) = ([0.0; 3], [0.0; 3]);
+    for (e, lambda) in flow.axes.iter().zip(&flow.curvatures) {
+        let x = flow.hbar_over_mass * lambda * tau * tau;
+        let (kick, lever) = ((0.5 * (1.0 + stumpff(x).1)).sqrt() * linalg::dot3(*e, increment), (6.0 * stumpff3(x)).sqrt() * linalg::dot3(*e, moment));
+        for a in 0..3 {
+            push[a] += kick * e[a];
+            shift[a] += lever * e[a];
+        }
+    }
+    (push, shift)
 }
 
 /// A step's part of its trajectory's Brownian path W, three independent standard ones (module documentation, # The
