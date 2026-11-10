@@ -3,18 +3,13 @@
 //! identities the model holds by construction (the assembly's static diagonal is the potential, its force the potential's
 //! gradient, its decay the photons' rate, the readout's populations sum to one).
 use atom_motion::field::Light;
-use atom_motion::linalg::{C64, Mat};
-use atom_motion::model::{hazard, Model, Point, GROUND};
+use atom_motion::linalg::{dot3, C64, Mat};
+use atom_motion::model::{Model, Point, GROUND};
 use atom_motion::request::Request;
-use serde_json::Value;
-use std::path::PathBuf;
+use atom_motion::step::Middle as _;
 
-/// A reference scene (refs/scenes, the app's native request) through the one parser.
-fn scene(name: &str) -> Request {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
-    let line: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    Request::from_native(&line).unwrap()
-}
+mod model_common;
+use model_common::{decay_rate, scene};
 
 /// The scene's model with every unit folded, its initial ground state's populations e_b.
 fn built(name: &str) -> (Request, Light, Model, [f64; GROUND]) {
@@ -77,7 +72,8 @@ fn a_retro_reflected_tweezer_s_lattice_is_the_coherent_standing_wave_s() {
 }
 
 /// The proven envelope bounds the prepared potential everywhere (model.rs `Envelope`): at points across the trap and far out,
-/// −V_prep(r) ≤ Σ_l'l |Q_l'l| √(A_l' A_l) ≤ B max_l A_l -- a standing wave and a rank-2 crossed field included.
+/// −V_prep(r) ≤ B max_l A_l(r), A_l = 1/(1 + 2ρ²/w₀² + ζ²/z_R²) of the trap light's beams -- the bound the initial ensemble
+/// draws under (ensemble.rs) --, a standing wave and a rank-2 crossed field included.
 #[test]
 fn the_envelope_bounds_the_prepared_potential() {
     for name in ["R1_TWEEZER", "R1_RETRO", "R1_CROSSED", "R1_SIGMA_P"] {
@@ -93,9 +89,18 @@ fn the_envelope_bounds_the_prepared_potential() {
             let scale = if i % 2 == 0 { 2.0 } else { 20.0 };
             let r = [next() * scale, next() * scale, next() * scale];
             let v = model.potential(r, &p, &lights);
-            let bound = envelope.bound(&light, r);
+            let brightest = envelope
+                .beams
+                .iter()
+                .map(|&l| {
+                    let beam = &light.beams[l];
+                    let (w, z) = (beam.waist.expect("a tweezer"), beam.rayleigh().expect("a tweezer"));
+                    let zeta = dot3(beam.direction, r);
+                    1.0 / (1.0 + 2.0 * (dot3(r, r) - zeta * zeta) / (w * w) + zeta * zeta / (z * z))
+                })
+                .fold(0.0, f64::max);
+            let bound = envelope.peak() * brightest;
             assert!(-v <= bound * (1.0 + 1e-12) + 1e-12, "{name}: −V = {} above its bound {} at {:?}", -v, bound, r);
-            assert!(bound <= envelope.peak() * (1.0 + 1e-12));
         }
     }
 }
@@ -140,17 +145,15 @@ fn the_assembly_holds_the_potential_its_force_and_the_photons_rate() {
         let n = model.clusters()[cluster].states.len();
         let place = model.clusters()[cluster].states.iter().position(|&s| s == b).unwrap();
         let lights = model.running();
+        // The generator at a point at rest, and its gradient's entry on the state: the form with ρ = |b⟩⟨b|.
         let total = |r: [f64; 3]| {
-            let g = model.assemble(cluster, &Point { r, kappa: [0.0; 3], t: 0.0 }, &lights);
+            let middle = model.assemble(cluster, r, 0.0, &lights);
+            let path = middle.path([0.0; 3], [0.0; 3]);
             let mut h = Mat::zeros(n, n);
-            let mut f = [C64::ZERO; 3];
-            for part in &g.parts {
-                h.add_scaled(C64::ONE, &part.generator);
-                for i in 0..3 {
-                    f[i] += part.force[i][(place, place)];
-                }
-            }
-            (h, f)
+            middle.generator(&path, 0.0, &mut h);
+            let mut rho = vec![C64::ZERO; n * n];
+            rho[place * n + place] = C64::ONE;
+            (h, middle.force(&path, 0.0, &rho))
         };
         let far = total([1e4, 1e4, 1e4]).0;
         for r in [[0.13, -0.21, 0.07], [0.4, 0.3, -0.2], [-0.05, 0.6, 0.31]] {
@@ -159,12 +162,11 @@ fn the_assembly_holds_the_potential_its_force_and_the_photons_rate() {
             let moved = h[(place, place)].re - far[(place, place)].re;
             assert!(close(moved, q.value, 1e-9), "{name}: the static diagonal moves {moved} against V {}", q.value);
             for i in 0..3 {
-                assert!((f[i].re - q.gradient[i]).abs() <= 1e-9 * q.gradient.iter().map(|x| x.abs()).fold(1e-300, f64::max), "{name}: force {:?} against ∇V {:?}", f, q.gradient);
-                assert!(f[i].im.abs() <= 1e-9 * f[i].re.abs().max(1.0), "{name}: a Hermitian force");
+                assert!((f[i] - q.gradient[i]).abs() <= 1e-9 * q.gradient.iter().map(|x| x.abs()).fold(1e-300, f64::max), "{name}: force {:?} against ∇V {:?}", f, q.gradient);
             }
             let psi: Vec<C64> = (0..n).map(|i| C64::new(1.0 + i as f64, 0.5 - i as f64)).collect();
             let at = Point { r, kappa: [0.0; 3], t: 0.0 };
-            let rate = hazard(&h, &psi);
+            let rate = decay_rate(&h, &psi);
             let photons: f64 = model.photons(cluster, &at, &psi).iter().map(|ph| ph.amplitudes.iter().map(|u| u.iter().map(|z| z.norm_sqr()).sum::<f64>()).sum::<f64>()).sum::<f64>()
                 / psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
             // Equal to the rounding of the parts' sum: the Hermitian parts at ±q are each complex and cancel in the sum's

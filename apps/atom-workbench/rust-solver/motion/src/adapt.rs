@@ -60,8 +60,8 @@
 
 use crate::decide::richardson;
 use crate::linalg::{dot3, norm_sqr, C64};
-use crate::model::{Generator, STATES};
-use crate::step::{jump, step, step_work, test_loss, Dynamics, Flow, Refused, Segment, Step, Trajectory};
+use crate::model::STATES;
+use crate::step::{jump, step, step_work, test_loss, Dynamics, Flow, Middle, Refused, Segment, Step, Trajectory};
 use crate::transport::Mark;
 use crate::units::ORDER;
 use std::collections::VecDeque;
@@ -222,7 +222,7 @@ fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, 
         }
     };
     finer(&second.end, richardson(0.5, ORDER as f64));
-    if let Some((regrid, work)) = s.regrid() {
+    if let Some((regrid, work)) = s.regrid(model) {
         trajectory.work += work;
         finer(&regrid, richardson(0.5, GRID_ORDER as f64));
     }
@@ -309,10 +309,11 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, mu
     Ok(())
 }
 
-/// The integrator's counted work of one step of τ through a cluster's generator at a point, the path at the velocity v
-/// (µm/µs), and the generator assemblies it asks: what `advance` adds to `Trajectory::work` and `Trajectory::assemblies`
-/// per step, priced without taking it (`step::step_work`). The model's price is the assemblies times its `assembly_work`.
-pub fn advance_work(generator: &Generator, waves: &[[f64; 3]], velocity: [f64; 3], tau: f64) -> (f64, u64) {
-    let (work, _) = step_work(generator, waves, velocity, tau, tau / (2 * 2 * HALF_PANELS) as f64);
-    (work, 2)
+/// The counted work of one step of τ on the path through a cluster's middle at a momentum and a velocity (µm/µs), and the
+/// middles a step asks of the model: what `advance` adds to `Trajectory::work` and `Trajectory::assemblies` per step,
+/// priced without taking it and without a middle of its own (`step::step_work`). The model's price of a middle is its
+/// `assembly_work`.
+pub fn advance_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64) -> (f64, u64) {
+    let (work, _) = step_work(middle, kappa, velocity, tau, tau / (2 * 2 * HALF_PANELS) as f64);
+    (work, 1)
 }

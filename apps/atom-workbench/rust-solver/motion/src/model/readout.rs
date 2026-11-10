@@ -50,43 +50,53 @@ impl Model {
 
     /// The readout (module documentation): the 32 populations of a cluster's state ψ at a point.
     pub fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
+        self.readout_with(cluster, at, psi, None)
+    }
+
+    /// The readout with the near light from its tables where they serve (tabulate.rs `Model::near`).
+    pub(crate) fn readout_with(&self, cluster: usize, at: &Point, psi: &[C64], tables: Option<&super::tabulate::Tables>) -> [f64; STATES] {
         let c = &self.clusters[cluster];
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
-        let rho = |x: usize, y: usize| psi[x] * psi[y].conj() / norm;
         let mut out = [0.0; STATES];
-        for (x, &s) in c.states.iter().enumerate() {
-            out[s] = rho(x, x).re;
+        for (z, &s) in psi.iter().zip(&c.states) {
+            out[s] = z.norm_sqr() / norm;
         }
         let amplitudes = self.light.amplitudes(at.r);
         let lights = self.running();
         let mut channels = self.far_channels(cluster, &amplitudes, &lights);
-        channels.extend(self.near_channels(cluster, at, &amplitudes, &lights));
-        let g = c.ground;
-        for p in &channels {
-            for q in &channels {
-                for b1 in 0..g {
-                    for b2 in 0..g {
-                        // Co-resonant: θ_b1 + ν_p = θ_b2 + ν_q.
-                        if c.frames[b1].plus(1, &p.nu) != c.frames[b2].plus(1, &q.nu) {
-                            continue;
-                        }
-                        let r = rho(b2, b1);
-                        let mut y = C64::ZERO;
-                        for i in 0..super::far::EXCITED {
-                            let z = p.response[(i, b1)].conj() * q.response[(i, b2)];
-                            y += z;
-                            out[GROUND + i] += (z * r).re;
-                        }
-                        out[c.states[b1]] -= (y * r).re;
+        channels.extend(self.near_channels(cluster, at, &amplitudes, &lights, tables));
+        // The co-resonant channels and places (p, b1, q, b2), θ_b1 + ν_p = θ_b2 + ν_q: the cluster's own under the running
+        // lights, exact, found once.
+        let resonant = self.resonances[cluster].get_or_init(|| {
+            let sums: Vec<Vec<Beat>> = channels.iter().map(|p| c.frames[..c.ground].iter().map(|theta| theta.plus(1, &p.nu)).collect()).collect();
+            let mut pairs = vec![];
+            for (p, left) in sums.iter().enumerate() {
+                for (q, right) in sums.iter().enumerate() {
+                    for (b1, one) in left.iter().enumerate() {
+                        pairs.extend(right.iter().enumerate().filter(|(_, two)| one == *two).map(|(b2, _)| [p, b1, q, b2]));
                     }
                 }
             }
+            pairs
+        });
+        for &[p, b1, q, b2] in resonant {
+            let r = psi[b2] * psi[b1].conj() / norm;
+            let (left, right) = (&channels[p].response, &channels[q].response);
+            let mut y = C64::ZERO;
+            for i in 0..super::far::EXCITED {
+                let z = left[(i, b1)].conj() * right[(i, b2)];
+                y += z;
+                out[GROUND + i] += (z * r).re;
+            }
+            out[c.states[b1]] -= (y * r).re;
         }
         out
     }
 
     /// V_L(r; p) far from the trap (SPEC §1.7): every focused beam's amplitude zero, the plane waves' terms of one wave vector
-    /// (their spatial mean; a term of q ≠ 0 averages out), and the near light's (eliminate.rs).
+    /// (their spatial mean; a term of q ≠ 0 averages out). The near light's part is zero there: it is the near shifts with the
+    /// trap light on less with it off (potential.rs), and far from the trap the trap light is off but for its plane waves, whose
+    /// part is the far light's above.
     pub fn asymptote(&self, p: &[f64; GROUND], lights: &Lights) -> f64 {
         let trap = self.light.trap;
         if !lights.on(trap) {
@@ -104,21 +114,17 @@ impl Model {
                 }
             }
         }
-        v + self.near_asymptote(p, lights)
+        v
     }
 
     /// A state's label in the model basis (`manifold-F-m`), as the app writes it: "D2 F′=3 m=2", "基态 F=2 m=−1".
     pub(crate) fn state_label(&self, s: usize) -> String {
-        match Level::parse(&self.labels[s]) {
-            Ok(level) => {
-                let m = if level.m < 0 { format!("−{}", -level.m) } else { level.m.to_string() };
-                match level.manifold {
-                    crate::request::Manifold::Ground => format!("基态 F={} m={}", level.f, m),
-                    crate::request::Manifold::D1 => format!("D1 F′={} m={}", level.f, m),
-                    crate::request::Manifold::D2 => format!("D2 F′={} m={}", level.f, m),
-                }
-            }
-            Err(_) => self.labels[s].clone(),
+        let level = Level::parse(&self.labels[s]).expect("a validated request's state labels parse (request.rs `Request::levels`)");
+        let m = if level.m < 0 { format!("−{}", -level.m) } else { level.m.to_string() };
+        match level.manifold {
+            crate::request::Manifold::Ground => format!("基态 F={} m={}", level.f, m),
+            crate::request::Manifold::D1 => format!("D1 F′={} m={}", level.f, m),
+            crate::request::Manifold::D2 => format!("D2 F′={} m={}", level.f, m),
         }
     }
 

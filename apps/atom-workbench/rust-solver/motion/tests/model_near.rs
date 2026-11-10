@@ -4,16 +4,12 @@
 //! (the decay is the photons' rate, the readout sums to one, a kept and a folded drive give the same recoil second moment).
 use atom_motion::field::Light;
 use atom_motion::linalg::{C64, Mat};
-use atom_motion::model::{hazard, Component, Lights, Model, Point, Sample, Unit, GROUND, STATES};
+use atom_motion::model::{Component, Lights, Model, Point, Sample, Unit, GROUND, STATES};
 use atom_motion::request::Request;
-use serde_json::Value;
-use std::path::PathBuf;
+use atom_motion::step::Middle as _;
 
-fn scene(name: &str) -> Request {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
-    let line: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    Request::from_native(&line).unwrap()
-}
+mod model_common;
+use model_common::{decay_rate, scene};
 
 /// The frequency (an index of the light's) of the beam named `id`.
 fn frequency_of(request: &Request, light: &Light, id: &str) -> usize {
@@ -21,14 +17,12 @@ fn frequency_of(request: &Request, light: &Light, id: &str) -> usize {
     light.frequencies.iter().position(|f| f.beams.contains(&beam)).unwrap()
 }
 
-/// The sum of a generator's parts at the point (τ = 0).
+/// A cluster's generator at a point and momentum, at rest there.
 fn total(model: &Model, cluster: usize, at: &Point, lights: &Lights) -> Mat {
-    let g = model.assemble(cluster, at, lights);
+    let middle = model.assemble(cluster, at.r, at.t, lights);
     let n = model.clusters()[cluster].states.len();
     let mut h = Mat::zeros(n, n);
-    for p in &g.parts {
-        h.add_scaled(C64::ONE, &p.generator);
-    }
+    middle.generator(&middle.path(at.kappa, [0.0; 3]), 0.0, &mut h);
     h
 }
 
@@ -103,9 +97,7 @@ fn a_raman_pair_is_kept_on_resonance_and_couples_at_the_closed_form() {
     assert_eq!(model.cluster_of(5), cluster, "the pair joins its states");
     let c = &model.clusters()[cluster];
     let (x, y) = (c.states.iter().position(|&s| s == 1).unwrap(), c.states.iter().position(|&s| s == 5).unwrap());
-    let g = model.assemble(cluster, &Point { r: trap.centre, kappa: [0.0; 3], t: 0.0 }, &model.running());
-    let still = g.parts.iter().find(|p| p.omega == 0.0 && p.wave == [0.0; 3]).unwrap();
-    let coupling = still.generator[(x, y)];
+    let coupling = total(&model, cluster, &Point { r: trap.centre, kappa: [0.0; 3], t: 0.0 }, &model.running())[(x, y)];
     let (beam_a, beam_b) = (&request.beams[light.frequencies[fa].beams[0]], &request.beams[light.frequencies[fb].beams[0]]);
     let omega = |f: usize| model.omega(&atom_motion::model::Beat({
         let mut n: Vec<i64> = light.frequencies[f].index.iter().map(|&i| i as i64).collect();
@@ -134,7 +126,10 @@ fn optical_pumping_lands_by_the_clebsch_gordan_weights() {
     let (fp, fr) = (frequency_of(&request, &light, "pump"), frequency_of(&request, &light, "repump"));
     let kept = [Unit::Far { component: Component { frequency: fp, counter: false } }, Unit::Far { component: Component { frequency: fr, counter: false } }];
     let model = Model::new(&request, &light, &kept).unwrap();
+    // The pump's photons: within the ground states' splitting of its wave number (a Raman photon's 2e-5 of it; the repump's
+    // line is 2 % away).
     let pump_k = request.beams[light.frequencies[fp].beams[0]].wave_number;
+    let of_pump = |k: f64| (k / pump_k - 1.0).abs() < 1e-4;
     let levels = request.levels().unwrap();
     for m in -2..=1_i8 {
         let b = (0..GROUND).find(|&s| levels[s].f == 2 && levels[s].m == m).unwrap();
@@ -144,7 +139,7 @@ fn optical_pumping_lands_by_the_clebsch_gordan_weights() {
         let psi: Vec<C64> = c.states.iter().map(|&s| if s == b { C64::ONE } else { C64::ZERO }).collect();
         let photons = model.photons(cluster, &Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 }, &psi);
         let mut landed = [0.0; GROUND];
-        for ph in photons.iter().filter(|ph| ph.wave_number == pump_k) {
+        for ph in photons.iter().filter(|ph| of_pump(ph.wave_number)) {
             for (i, &s) in model.clusters()[ph.landing].states.iter().enumerate() {
                 if s < GROUND {
                     landed[s] += ph.amplitudes.iter().map(|u| u[i].norm_sqr()).sum::<f64>();
@@ -171,7 +166,7 @@ fn optical_pumping_lands_by_the_clebsch_gordan_weights() {
     let dark = (0..GROUND).find(|&s| levels[s].f == 2 && levels[s].m == 2).unwrap();
     let cluster = model.cluster_of(dark);
     let psi: Vec<C64> = model.clusters()[cluster].states.iter().map(|&s| if s == dark { C64::ONE } else { C64::ZERO }).collect();
-    let pumped: f64 = model.photons(cluster, &Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 }, &psi).iter().filter(|ph| ph.wave_number == pump_k).map(|ph| ph.amplitudes.iter().map(|u| u.iter().map(|z| z.norm_sqr()).sum::<f64>()).sum::<f64>()).sum();
+    let pumped: f64 = model.photons(cluster, &Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 }, &psi).iter().filter(|ph| of_pump(ph.wave_number)).map(|ph| ph.amplitudes.iter().map(|u| u.iter().map(|z| z.norm_sqr()).sum::<f64>()).sum::<f64>()).sum();
     // Dark to the pump's D1 line: what is left is its far scattering through D2's |3′,3′⟩, 7 THz away.
     let bright: f64 = {
         let b = (0..GROUND).find(|&s| levels[s].f == 2 && levels[s].m == 0).unwrap();
@@ -203,18 +198,20 @@ fn near_and_explicit_states_keep_the_identities_and_one_recoil_rule() {
         for (model, psi) in [(&folded, vec![C64::ONE]), (&kept, vec![C64::new(0.9, 0.1), C64::new(-0.2, 0.35)])] {
             let c = model.cluster_of(b);
             let h = total(model, c, &at, &model.running());
-            let rate = hazard(&h, &psi);
+            let rate = decay_rate(&h, &psi);
             let photons: f64 = model.photons(c, &at, &psi).iter().map(|ph| ph.amplitudes.iter().map(|u| u.iter().map(|z| z.norm_sqr()).sum::<f64>()).sum::<f64>()).sum::<f64>()
                 / psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
             assert!((rate - photons).abs() <= 64.0 * f64::EPSILON * h.max_abs(), "hazard {rate} against the photons' {photons}");
             let sum: f64 = model.readout(c, &at, &psi).iter().sum();
             assert!((sum - 1.0).abs() <= 1e-12, "the populations sum to {sum}");
         }
-        // The probe's photon in either model, polarized along x across a direction along y.
-        let probe_k = request.beams[light.frequencies[probe].beams[0]].wave_number;
+        // The probe's photon that leaves the atom in |2,2⟩ in either model -- the strongest class by far, the folded drive's
+        // in one and the explicit state's in the other --, polarized along x across a direction along y.
         let moment = |model: &Model, psi: &[C64]| {
             let c = model.cluster_of(b);
-            let ph = model.photons(c, &at, psi).into_iter().find(|ph| ph.wave_number == probe_k).unwrap();
+            let weight = |ph: &atom_motion::model::Photon| ph.amplitudes.iter().map(|u| u.iter().map(|z| z.norm_sqr()).sum::<f64>()).sum::<f64>();
+            let ph = model.photons(c, &at, psi).into_iter().max_by(|x, y| weight(x).total_cmp(&weight(y))).unwrap();
+            assert_eq!((ph.landing, ph.explicit.len()), (c, model.clusters()[c].states.len() - 1), "the probe's photon back into |2,2⟩");
             ph.recoil(&[1.0, 0.0, 0.0]).second
         };
         let (m_folded, m_kept) = (moment(&folded, &[C64::ONE]), moment(&kept, &[C64::new(0.6, 0.0), C64::new(0.0, 0.8)]));
