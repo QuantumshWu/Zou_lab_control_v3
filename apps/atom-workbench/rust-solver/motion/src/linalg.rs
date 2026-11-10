@@ -412,64 +412,112 @@ pub struct Hermitian {
     pub vectors: Mat,
 }
 
-/// The eigendecomposition of the Hermitian part of h, (h + h†)/2, by cyclic complex Jacobi rotations: each rotation
-/// unitary up to its own rounding, so U stays orthonormal to round-off, in a degenerate eigenspace too. The sweeps run
-/// until the off-diagonal part is within the unit round-off of the matrix, ‖off(A)‖_F ≤ u‖A‖_F, or a sweep no longer
-/// shrinks it (the floating-point format's floor; the convergence is quadratic). Each eigenvalue is then within
-/// ‖off(A)‖₂ ≤ u‖A‖_F of the exact one (Weyl). Cost about 6n³ complex multiply-adds per sweep, some 6-10 sweeps.
-pub fn hermitian_eigen(h: &Mat) -> Hermitian {
-    let n = h.rows;
-    assert_eq!(n, h.cols, "the eigendecomposition of a {}x{} matrix", h.rows, h.cols);
-    let mut a = h.hermitian_part();
-    let mut u = Mat::identity(n);
-    let floor = UNIT_ROUNDOFF * UNIT_ROUNDOFF * norm_sqr(&a.data);
-    let off = |a: &Mat| -> f64 { (0..n).map(|i| (0..n).filter(|&j| j != i).map(|j| a[(i, j)].norm_sqr()).sum::<f64>()).sum() };
+/// The numbers of `jacobi`: the complex ones, or the reals a real symmetric matrix stays in (the same rotations, the
+/// same operations on its real parts: the one implementation).
+trait Scalar: Copy + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Mul<f64, Output = Self> + Div<f64, Output = Self> {
+    const ZERO: Self;
+    fn conj(self) -> Self;
+    fn re(self) -> f64;
+    fn norm_sqr(self) -> f64;
+    fn abs(self) -> f64;
+}
+
+impl Scalar for C64 {
+    const ZERO: C64 = C64::ZERO;
+    fn conj(self) -> C64 {
+        C64::conj(self)
+    }
+    fn re(self) -> f64 {
+        self.re
+    }
+    fn norm_sqr(self) -> f64 {
+        C64::norm_sqr(self)
+    }
+    fn abs(self) -> f64 {
+        C64::abs(self)
+    }
+}
+
+impl Scalar for f64 {
+    const ZERO: f64 = 0.0;
+    fn conj(self) -> f64 {
+        self
+    }
+    fn re(self) -> f64 {
+        self
+    }
+    fn norm_sqr(self) -> f64 {
+        self * self
+    }
+    fn abs(self) -> f64 {
+        f64::abs(self)
+    }
+}
+
+/// The eigendecomposition of a Hermitian matrix a (n × n, row-major) by cyclic Jacobi rotations, in place: a becomes
+/// diagonal (its diagonal the eigenvalues, unordered) and u, the identity on entry, its eigenvectors' columns. Each
+/// rotation is unitary up to its own rounding, so U stays orthonormal to round-off, in a degenerate eigenspace too. The
+/// sweeps run until the off-diagonal part is within the unit round-off of the matrix, ‖off(A)‖_F ≤ u‖A‖_F, or a sweep no
+/// longer shrinks it (the floating-point format's floor; the convergence is quadratic). Each eigenvalue is then within
+/// ‖off(A)‖₂ ≤ u‖A‖_F of the exact one (Weyl). Cost about 6n³ multiply-adds per sweep, some 6-10 sweeps.
+fn jacobi<S: Scalar>(a: &mut [S], u: &mut [S], n: usize) {
+    let floor = UNIT_ROUNDOFF * UNIT_ROUNDOFF * a.iter().map(|z| z.norm_sqr()).sum::<f64>();
+    let off = |a: &[S]| -> f64 { (0..n).map(|i| (0..n).filter(|&j| j != i).map(|j| a[i * n + j].norm_sqr()).sum::<f64>()).sum() };
     let mut previous = f64::INFINITY;
     loop {
-        let left = off(&a);
+        let left = off(a);
         if left <= floor || !(left < previous) {
             break;
         }
         previous = left;
         for p in 0..n {
             for q in p + 1..n {
-                let modulus = a[(p, q)].abs();
+                let modulus = a[p * n + q].abs();
                 if modulus == 0.0 {
                     continue;
                 }
                 // A phase on q makes a_pq real and positive (dividing by the modulus: its reciprocal would overflow
                 // when it is subnormal); a real rotation in (p, q) then zeroes it.
-                let phase = a[(p, q)] / modulus;
+                let phase = a[p * n + q] / modulus;
                 for k in 0..n {
-                    a[(k, q)] = a[(k, q)] * phase.conj();
-                    u[(k, q)] = u[(k, q)] * phase.conj();
+                    a[k * n + q] = a[k * n + q] * phase.conj();
+                    u[k * n + q] = u[k * n + q] * phase.conj();
                 }
                 for k in 0..n {
-                    a[(q, k)] = a[(q, k)] * phase;
+                    a[q * n + k] = a[q * n + k] * phase;
                 }
                 // tan θ, the smaller root of t² + 2τt − 1 = 0 (Rutishauser): |θ| ≤ π/4.
-                let tau = (a[(q, q)].re - a[(p, p)].re) / (2.0 * modulus);
+                let tau = (a[q * n + q].re() - a[p * n + p].re()) / (2.0 * modulus);
                 let t = tau.signum() / (tau.abs() + (1.0 + tau * tau).sqrt());
                 let c = 1.0 / (1.0 + t * t).sqrt();
                 let s = t * c;
                 for k in 0..n {
-                    let (x, y) = (a[(k, p)], a[(k, q)]);
-                    a[(k, p)] = x * c - y * s;
-                    a[(k, q)] = x * s + y * c;
-                    let (x, y) = (u[(k, p)], u[(k, q)]);
-                    u[(k, p)] = x * c - y * s;
-                    u[(k, q)] = x * s + y * c;
+                    let (x, y) = (a[k * n + p], a[k * n + q]);
+                    a[k * n + p] = x * c - y * s;
+                    a[k * n + q] = x * s + y * c;
+                    let (x, y) = (u[k * n + p], u[k * n + q]);
+                    u[k * n + p] = x * c - y * s;
+                    u[k * n + q] = x * s + y * c;
                 }
                 for k in 0..n {
-                    let (x, y) = (a[(p, k)], a[(q, k)]);
-                    a[(p, k)] = x * c - y * s;
-                    a[(q, k)] = x * s + y * c;
+                    let (x, y) = (a[p * n + k], a[q * n + k]);
+                    a[p * n + k] = x * c - y * s;
+                    a[q * n + k] = x * s + y * c;
                 }
-                a[(p, q)] = C64::ZERO;
-                a[(q, p)] = C64::ZERO;
+                a[p * n + q] = S::ZERO;
+                a[q * n + p] = S::ZERO;
             }
         }
     }
+}
+
+/// The eigendecomposition of the Hermitian part of h, (h + h†)/2 (`jacobi`), the eigenvalues ascending.
+pub fn hermitian_eigen(h: &Mat) -> Hermitian {
+    let n = h.rows;
+    assert_eq!(n, h.cols, "the eigendecomposition of a {}x{} matrix", h.rows, h.cols);
+    let mut a = h.hermitian_part();
+    let mut u = Mat::identity(n);
+    jacobi(&mut a.data, &mut u.data, n);
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&i, &j| a[(i, i)].re.total_cmp(&a[(j, j)].re));
     Hermitian { values: order.iter().map(|&i| a[(i, i)].re).collect(), vectors: Mat::from_fn(n, n, |i, k| u[(i, order[k])]) }
@@ -871,12 +919,14 @@ pub fn perpendicular(n: V3) -> (V3, V3) {
     (e1, cross3(n, e1))
 }
 /// The eigendecomposition of a real symmetric 3 × 3 matrix (its symmetric part): eigenvalues ascending and their
-/// orthonormal eigenvectors (rows), by `hermitian_eigen` (the one implementation; real rotations keep them real).
+/// orthonormal eigenvectors (rows), by `jacobi` on the reals (the one implementation, on the stack).
 pub fn symmetric3_eigen(m: &M3) -> (V3, [V3; 3]) {
-    let h = Mat::from_fn(3, 3, |i, j| C64::real(0.5 * (m[i][j] + m[j][i])));
-    let e = hermitian_eigen(&h);
-    let vectors = std::array::from_fn(|k| std::array::from_fn(|i| e.vectors[(i, k)].re));
-    ([e.values[0], e.values[1], e.values[2]], vectors)
+    let mut a: [f64; 9] = std::array::from_fn(|k| 0.5 * (m[k / 3][k % 3] + m[k % 3][k / 3]));
+    let mut u: [f64; 9] = std::array::from_fn(|k| if k / 3 == k % 3 { 1.0 } else { 0.0 });
+    jacobi(&mut a, &mut u, 3);
+    let mut order = [0, 1, 2];
+    order.sort_by(|&i, &j| a[4 * i].total_cmp(&a[4 * j]));
+    (order.map(|i| a[4 * i]), order.map(|k| std::array::from_fn(|i| u[3 * i + k])))
 }
 
 #[cfg(test)]

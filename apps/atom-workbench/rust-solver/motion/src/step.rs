@@ -297,27 +297,44 @@ impl Flow {
 /// after them the distance is the round-off's (derived; a map that contracts less within them refuses the step).
 const ROUNDS: usize = 64;
 
+/// The operations between a flow's inputs and a coordinate of its reach (`Flow::advance`): the coordinate adds three
+/// axes' displacements to the centre (6), each the Stumpff combination of three terms (10) of the axis's coordinate (a
+/// difference and a product of three: 6) and of its x (3) through its functions (3): 28. `units::rounding` of them
+/// times the positions' size is the rounding of a reach.
+const REACH: usize = 28;
+
 /// The step's middle (module documentation, # The reference): the fixed point p of "the first half flow on V_ref(p)
-/// reaches p" from (r, κ) over `half`, from the free flight's middle, iterated until the move is zero or stops shrinking --
-/// the round-off's floor, where a contraction ends --; the flow and (r_h, κ_h). A round moves p by the reference's change
-/// over the move times the flow's response, (ħ/m)|∇K|·|r − p|·half²/2 of the last move: a contraction while the step
-/// resolves the potential's third derivative.
+/// reaches p" from (r, κ) over `half`, from the free flight's middle; the flow and (r_h, κ_h). A round moves p by the
+/// reference's change over the move times the flow's response, (ħ/m)|∇K|·|r − p|·half²/3 of the last move: a contraction
+/// while the step resolves the potential's third derivative, by a factor of 10⁻² to 10⁻⁴ a round at the steps a trap
+/// takes (so that an accelerated iteration -- Broyden's, Anderson's -- gains less than one round of some six).
+///
+/// The step's results depend on the centre p only through that third derivative: taken at p with the reach (r_h, κ_h)
+/// they differ from the fixed point's by the next round's moves of the reach's position and momentum, the last moves'
+/// contraction. So the rounds end where those next moves, the last ones times the largest contraction measured, are
+/// within the rounding of a reach (`REACH`) -- the centre itself then lies a move, not a rounding, from its reach, which
+/// no result sees --; or where the move is zero or stops shrinking, the round-off's floor that a contraction ends at.
 fn middle<D: Dynamics>(model: &D, r: [f64; 3], kappa: [f64; 3], half: f64) -> Result<(Flow, ([f64; 3], [f64; 3])), Refused> {
     let hm = model.hbar_over_mass();
+    let largest = |a: [f64; 3], b: [f64; 3]| (0..3).map(|i| a[i].abs().max(b[i].abs())).fold(0.0, f64::max);
+    let apart = |a: [f64; 3], b: [f64; 3]| (0..3).map(|i| (a[i] - b[i]).abs()).fold(0.0, f64::max);
     let mut p: [f64; 3] = std::array::from_fn(|a| r[a] + hm * kappa[a] * half);
-    let mut last = f64::INFINITY;
+    // The last move of the reach's position, the momentum it reached then, and the largest contraction measured (the
+    // first round measures none: its move over no move before it is zero).
+    let (mut last, mut before, mut contraction) = (f64::INFINITY, kappa, 0.0_f64);
     for _ in 0..ROUNDS {
         let flow = Flow::new(&model.reference(p), p, hm);
         let reached = flow.advance((r, kappa), half);
-        let moved = (0..3).map(|a| (reached.0[a] - p[a]).abs()).fold(0.0, f64::max);
+        let moved = apart(reached.0, p);
         if !moved.is_finite() || !reached.1.iter().all(|k| k.is_finite()) {
             return Err(Refused::Overflow);
         }
-        if moved == 0.0 || moved >= last {
+        contraction = contraction.max(moved / last);
+        let next = [(moved, largest(r, p)), (apart(reached.1, before), largest(kappa, reached.1))];
+        if moved == 0.0 || moved >= last || (last.is_finite() && next.iter().all(|(move_, size)| contraction * move_ <= rounding(REACH) * size)) {
             return Ok((flow, reached));
         }
-        last = moved;
-        p = reached.0;
+        (last, before, p) = (moved, reached.1, reached.0);
     }
     Err(Refused::Reference)
 }
