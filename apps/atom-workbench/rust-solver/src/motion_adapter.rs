@@ -95,7 +95,7 @@ fn result(request: &Request, initial: &[f64], solution: &Solution, groups: &[lat
             "temperatureTotalUK": solution.temperature_total_uk, "temperatureTotalErrorUK": solution.temperature_total_errors_uk,
             "meanVelocityMps": per_axis(&solution.mean_velocity_mps), "meanOccupation": per_axis(&solution.mean_occupation),
             "trapFrequencyKHz": json!({"x": solution.trap_frequency_khz[0], "y": solution.trap_frequency_khz[1], "z": solution.trap_frequency_khz[2]}),
-            "lossProbability": solution.loss_probability, "classical": solution.classical,
+            "lossProbability": solution.loss_probability, "classical": solution.classical.iter().map(|axes| axes.iter().all(|&inside| inside)).collect::<Vec<bool>>(),
             "momentum": distributions(&solution.velocity, "velocitiesMps"), "position": distributions(&solution.position, "positionsUm"),
             "trajectories": solution.trajectories, "timeStepUs": solution.time_step_us}});
     if gpu {
