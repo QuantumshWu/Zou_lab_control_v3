@@ -714,7 +714,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: Option<
             samples[k] = Some(State { sample, tau, index });
         }
     };
-    record(0, &t, reader.as_ref().map(|r| r.drift), &mut out);
+    record(0, &t, reader.as_ref().map(|r| r.drift(model)), &mut out);
     {
         let mut each = |s: &Segment| {
             steps += 1;
@@ -748,7 +748,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: Option<
                 reached = k;
                 break;
             }
-            record(k, &t, reader.as_ref().map(|r| r.drift), &mut out);
+            record(k, &t, reader.as_ref().map(|r| r.drift(model)), &mut out);
         }
         if reached == outputs {
             // Through the last output's window; a failure there leaves every output read.
@@ -761,7 +761,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: Option<
         let gone = if failed {
             Output { fate: Fate::Failed, near: None, energy: None }
         } else {
-            Output { fate: Fate::Lost, near: windows.map(|w| margin(&t).abs() <= w[reached]), energy: reader.as_ref().map(|r| r.drift.energy) }
+            Output { fate: Fate::Lost, near: windows.map(|w| margin(&t).abs() <= w[reached]), energy: reader.as_ref().map(|r| r.energy()) }
         };
         out[reached..].fill(gone);
     }

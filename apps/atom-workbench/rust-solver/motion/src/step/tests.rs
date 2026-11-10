@@ -577,7 +577,7 @@ fn a_read_trajectory_holds_its_jumps_input_and_its_hazard() {
     let start = Trajectory::new(&model, 0, [0.0; 3], [3.0, -2.0, 1.0], 3, 5);
     let (mut t, mut reader, end) = (start.clone(), Reader::new([5.0; 3]), 50.0);
     adapt::advance(&model, 1.0, &mut t, &mut step::Scratch::default(), Some(&mut reader), end, &mut |_| {}).unwrap();
-    let drift = reader.drift;
+    let drift = reader.drift(&model);
     assert!(t.jumps > 50 && drift.unread == 0.0 && drift.rows.iter().all(|x| *x == 0.0), "{} jumps, {drift:?}", t.jumps);
     let round_off = crate::units::rounding(8 * t.steps as usize);
     assert!((drift.mark.hazard - gamma * end).abs() <= round_off * gamma * end, "the hazard's integral {} against {}", drift.mark.hazard, gamma * end);
@@ -667,7 +667,7 @@ fn a_read_trajectory_accumulates_its_steps_doubling_differences() {
     let (tau, steps) = (5.0, 4);
     let (mut read, mut plain, mut reader) = (start.clone(), start.clone(), Reader::new([2.0 * tau; 3]));
     adapt::advance(&model, tau, &mut read, &mut step::Scratch::default(), Some(&mut reader), tau * steps as f64, &mut |_| {}).unwrap();
-    let drift = reader.drift;
+    let drift = reader.drift(&model);
     adapt::advance(&model, tau, &mut plain, &mut step::Scratch::default(), None, tau * steps as f64, &mut |_| {}).unwrap();
     assert_eq!((read.r, read.kappa), (plain.r, plain.kappa));
     let (mut by_hand, mut at) = (0.0, start);
@@ -931,7 +931,7 @@ fn conservative_trap(name: &str) {
             }
             kinetic[k] += 0.5 * hm * t.kappa.iter().map(|x| x * x).sum::<f64>() / atoms as f64;
         }
-        read += reader.drift.energy / (kt * atoms as f64);
+        read += reader.energy() / (kt * atoms as f64);
         steps += t.steps;
         jumps += t.jumps;
     }

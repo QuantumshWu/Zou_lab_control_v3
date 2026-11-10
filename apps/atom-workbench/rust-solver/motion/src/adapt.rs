@@ -60,7 +60,7 @@
 
 use crate::decide::richardson;
 use crate::linalg::{dot3, norm_sqr};
-use crate::model::STATES;
+use crate::model::{Point, STATES};
 use crate::step::{attempt, jump, step, step_work, test_loss, Attempt, Dynamics, Flow, Internal, Middle, Refused, Scratch, Segment, Step, Trajectory};
 use crate::transport::Mark;
 use crate::units::ORDER;
@@ -136,19 +136,36 @@ impl Trail {
     }
 }
 
-/// A trajectory's read (module documentation, # The read): what it holds, its recent path, and the carried internal
-/// state S on the trajectory's cluster -- none before the first step, where S is ψ.
+/// A trajectory's read (module documentation, # The read): what it accumulates (`Reader::drift` gives it with the rows),
+/// its recent path, the carried internal state S on the trajectory's cluster -- none before the first step, where S is
+/// ψ --, and the states its rows' error is read at: the trajectory's and S's at the end of the last step read, on that
+/// step's cluster at its end's point. The rows' error is no sum: it is asked at the outputs alone, and made there.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reader {
-    pub drift: Drift,
+    drift: Drift,
     trail: Trail,
     carried: Option<Internal>,
+    shown: Option<(usize, Point, Internal, Internal)>,
 }
 
 impl Reader {
     /// A reader whose marks average the kinetic energy of each lab axis over `windows` (µs): the axes' trap periods.
     pub fn new(windows: [f64; 3]) -> Reader {
-        Reader { drift: Drift::ZERO, trail: Trail { windows, steps: VecDeque::new() }, carried: None }
+        Reader { drift: Drift::ZERO, trail: Trail { windows, steps: VecDeque::new() }, carried: None, shown: None }
+    }
+    /// What the read holds of the trajectory's step errors: what it accumulated, and the rows' error -- the rows of the
+    /// trajectory's state less those of its carried state as the last step read left them (none read yet: no error).
+    pub fn drift<D: Dynamics>(&self, model: &D) -> Drift {
+        let mut drift = self.drift;
+        if let Some((cluster, at, ours, theirs)) = &self.shown {
+            let (ours, theirs) = (model.readout(*cluster, at, ours), model.readout(*cluster, at, theirs));
+            drift.rows = std::array::from_fn(|q| ours[q] - theirs[q]);
+        }
+        drift
+    }
+    /// The loss energy's accumulated local errors (`Drift::energy`).
+    pub fn energy(&self) -> f64 {
+        self.drift.energy
     }
 }
 
@@ -248,8 +265,7 @@ fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, 
         trajectory.work += work;
         finer(&regrid, richardson(0.5, GRID_ORDER as f64));
     }
-    let (ours, theirs) = (model.readout(whole.cluster, &whole.point(), &whole.psi), model.readout(whole.cluster, &whole.point(), &next));
-    drift.rows = std::array::from_fn(|q| ours[q] - theirs[q]);
+    reader.shown = Some((whole.cluster, whole.point(), whole.psi, next));
     reader.carried = Some(next);
 }
 
