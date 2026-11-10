@@ -29,8 +29,8 @@
   {
    "quantity": "trapFrequency",
    "axis": "x",
-   "value": 19.269887328528856,
-   "u": 0.000004988324284543995,
+   "value": 19.26989516750005,
+   "u": 0.0000032702750957875016,
    "target": {
     "relative": 0
    }
@@ -38,8 +38,8 @@
   {
    "quantity": "trapFrequency",
    "axis": "y",
-   "value": 100.48574369971237,
-   "u": 0.000026012371894133274,
+   "value": 100.48578457721399,
+   "u": 0.000017053344021172112,
    "target": {
     "relative": 0
    }
@@ -47,8 +47,8 @@
   {
    "quantity": "trapFrequency",
    "axis": "z",
-   "value": 100.48574369971237,
-   "u": 0.000026012371894133274,
+   "value": 100.48578457721399,
+   "u": 0.000017053344021172112,
    "target": {
     "relative": 0
    }
@@ -3115,9 +3115,9 @@
   "note": "The app's 1D PGC example (cooler -3 Gamma free space, 0.7 mW/cm2 per beam; repumper 0.1 mW/cm2) with the tweezer on: heats",
   "wall_s": 1896.5810273999814,
   "trapKHz": [
-   19.269887328528856,
-   100.48574369971237,
-   100.48574369971237
+   19.26989516750005,
+   100.48578457721399,
+   100.48578457721399
   ],
   "referenceRadialKHz": 100.54925292422924
  }
