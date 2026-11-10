@@ -21,7 +21,10 @@
 //! request is refused where it is not, or where the descent leaves the trap's region: no minimum holds the atom ("光镊不约束
 //! 原子"), and the focus is never taken instead. A focus that is a bowl's bottom is the centre as it stands, bit for bit.
 
-use super::{Envelope, Lights, Model, Quadratic, Trap};
+use super::assemble::{LEFT, RIGHT};
+use super::tabulate::Tables;
+use super::{jet, Envelope, Lights, Lit, Model, Quadratic, Trap};
+use crate::linalg::C64;
 use crate::field::Amplitude;
 use crate::linalg::{dot3, symmetric3_eigen};
 use crate::request::GROUND;
@@ -77,15 +80,16 @@ impl Model {
         out
     }
 
-    /// V_L(r; p) with its gradient and Hessian, and the rounding of its sum (module documentation).
-    pub(crate) fn expand(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights) -> Expansion {
+    /// V_L(r; p) with, to `order`, its gradient and Hessian, and the rounding of its sum (module documentation); the near light from
+    /// its tables where they serve (tabulate.rs `Model::near`).
+    pub(crate) fn expand(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights, order: usize, tables: Option<&super::tabulate::Tables>) -> Expansion {
         let trap = self.light.trap;
         if !lights.on(trap) {
             return Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
         }
         let amplitudes = self.light.amplitudes(r);
         let mut out = self.far_potential(trap, &amplitudes, p, lights);
-        let near = self.near_potential(r, &amplitudes, p, lights);
+        let near = self.near_potential(&amplitudes, p, lights, order, tables);
         let q = &mut out.quadratic;
         q.value += near.quadratic.value;
         for x in 0..3 {
@@ -99,14 +103,77 @@ impl Model {
         out
     }
 
+    /// The near carriers' part of V_L(r; p) (module documentation, # What of h the difference holds): Σ_b p_b of their static shifts
+    /// on the ground states, each in its cluster -- the cluster's Hermitian near forms on its diagonal at a base beat of zero
+    /// (assemble.rs `Plan::links`), each times its two field components at zero momentum --, with the trap light on less with it
+    /// off, jets to `order`; the near forms from their tables where they serve (to first order).
+    pub(crate) fn near_potential(&self, amplitudes: &[Amplitude], p: &[f64; GROUND], lights: &Lights, order: usize, tables: Option<&Tables>) -> Expansion {
+        let mut out = Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
+        if self.carriers.iter().all(|x| !lights.on(x.frequency)) {
+            return out;
+        }
+        let mut off = lights.clone();
+        off.0[self.light.trap] = Lit::Off;
+        let parts = jet::parts(order);
+        let unit: Vec<C64> = (0..parts).map(|part| if part == 0 { C64::ONE } else { C64::ZERO }).collect();
+        for (lights, sign) in [(lights, 1.0), (&off, -1.0)] {
+            for cluster in 0..self.clusters.len() {
+                let c = &self.clusters[cluster];
+                if c.states[..c.ground].iter().all(|&s| p[s] == 0.0) {
+                    continue;
+                }
+                let plan = self.plan(cluster, lights);
+                if plan.links.is_empty() {
+                    continue;
+                }
+                let near = match tables.and_then(|t| t.of(cluster, lights)) {
+                    Some(table) if order <= 1 => self.near_tabulated(table, amplitudes, &[(plan.near.hermitian(), order)]),
+                    _ => self.near_exact(&plan, amplitudes, order, &self.coherent_dressing()),
+                };
+                let fields = self.fields(&plan, amplitudes, [0.0; 3], order);
+                for link in &plan.links {
+                    let (x, y) = link.place;
+                    if x != y || x >= c.ground || p[c.states[x]] == 0.0 || !plan.statics[link.block] {
+                        continue;
+                    }
+                    let (left, right) = plan.factors(link.block);
+                    let side = |s: Option<usize>, weighted: bool| s.map_or(&unit[..], |s| if weighted { fields.doppler(s) } else { fields.plain(s) });
+                    // A whole jet's parts hold any order's.
+                    let (mut coefficient, mut form, mut term) = ([C64::ZERO; 10], [C64::ZERO; 10], [C64::ZERO; 10]);
+                    jet::multiply(side(left, link.flag == LEFT), side(right, link.flag == RIGHT), &mut coefficient[..parts]);
+                    near.jet(link.operand, &mut form[..parts]);
+                    if link.conjugate {
+                        form.iter_mut().for_each(|z| *z = z.conj());
+                    }
+                    jet::multiply(&coefficient[..parts], &form[..parts], &mut term[..parts]);
+                    let (q, w) = (&mut out.quadratic, sign * p[c.states[x]]);
+                    q.value += w * term[0].re;
+                    for i in 0..3 {
+                        if order >= 1 {
+                            q.gradient[i] += w * term[1 + i].re;
+                        }
+                        for j in 0..3 {
+                            if order >= 2 {
+                                q.hessian[i][j] += w * term[jet::second(i, j)].re;
+                            }
+                        }
+                    }
+                    out.scale += (coefficient[0] * form[0]).abs() * p[c.states[x]];
+                    out.terms += 1;
+                }
+            }
+        }
+        out
+    }
+
     /// V_L(r; p) (rad/µs).
     pub fn potential(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights) -> f64 {
-        self.expand(r, p, lights).quadratic.value
+        self.expand(r, p, lights, 0, None).quadratic.value
     }
 
     /// V_L(r; p)'s second-order expansion at r, analytic.
     pub fn expansion(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights) -> Quadratic {
-        self.expand(r, p, lights).quadratic
+        self.expand(r, p, lights, 2, None).quadratic
     }
 
     /// The light's shortest length 1/max_l k_l over the lit beams (µm): the scale on which the potential varies (a standing
@@ -120,7 +187,7 @@ impl Model {
     pub fn trap(&self, p: &[f64; GROUND], lights: &Lights) -> Result<Trap, String> {
         let length = self.shortest_length(lights);
         let mut r = [0.0; 3];
-        let mut here = self.expand(r, p, lights);
+        let mut here = self.expand(r, p, lights, 2, None);
         let mut radius = length;
         loop {
             let (values, vectors) = symmetric3_eigen(&here.quadratic.hessian);
@@ -147,14 +214,14 @@ impl Model {
                         return Err("光镊不约束原子：准备势从焦点下降没有到达局部极小".into());
                     }
                     let frequencies = values.map(|l| (l * self.hbar_over_mass).sqrt());
-                    let lab = std::array::from_fn(|a| (here.quadratic.hessian[a][a].max(0.0) * self.hbar_over_mass).sqrt());
+                    let lab = std::array::from_fn(|a| (here.quadratic.hessian[a][a] * self.hbar_over_mass).sqrt());
                     return Ok(Trap { centre: r, minimum: here.quadratic.value, axes: vectors, frequencies, lab });
                 }
                 let next: [f64; 3] = std::array::from_fn(|a| r[a] + (0..3).map(|i| steps[i] * scale * vectors[i][a]).sum::<f64>());
                 if self.light.outside(&self.light.amplitudes(next)) {
                     return Err("光镊不约束原子：准备势的下降离开了光镊的区域".into());
                 }
-                let there = self.expand(next, p, lights);
+                let there = self.expand(next, p, lights, 2, None);
                 if there.quadratic.value < here.quadratic.value {
                     r = next;
                     here = there;
@@ -176,33 +243,14 @@ impl Model {
         let tone = &self.tones[self.light.trap];
         let n = f.beams.len();
         let near = self.near_envelope(p);
-        let weights = (0..n * n).map(|x| contract(&tone.pairs[x], p).abs() + near.get(x).copied().unwrap_or(0.0)).collect();
+        let weights = (0..n * n).map(|x| contract(&tone.pairs[x], p).abs() + near[x]).collect();
         Envelope { beams: f.beams.clone(), weights }
     }
 }
 
 impl Envelope {
-    /// Σ_l'l |Q_l'l| √(A_l'(r) A_l(r)) at r, A_l = 1/(1 + u_l), u_l = 2ρ²/w₀² + ζ²/z_R² (a plane wave's A = 1): the proven
-    /// bound of −V_prep(r; p).
-    pub fn bound(&self, light: &crate::field::Light, r: [f64; 3]) -> f64 {
-        let a: Vec<f64> = self.beams.iter().map(|&l| peak(&light.beams[l], r).sqrt()).collect();
-        let n = self.beams.len();
-        (0..n * n).map(|x| self.weights[x] * a[x / n] * a[x % n]).sum()
-    }
-    /// Σ_l'l |Q_l'l|: the bound's largest value, B in −V_prep ≤ B max_l A_l(r).
+    /// Σ_l'l |Q_l'l|: B in −V_prep ≤ B max_l A_l(r).
     pub fn peak(&self) -> f64 {
         self.weights.iter().sum()
-    }
-}
-
-/// A_l(r) = 1/(1 + u), u = 2ρ²/w₀² + ζ²/z_R²: the bound of a paraxial beam's |a_l(r)|² (model.rs `Envelope`); 1 for a plane wave.
-pub(crate) fn peak(beam: &crate::field::Geometry, r: [f64; 3]) -> f64 {
-    match (beam.waist, beam.rayleigh()) {
-        (Some(w), Some(z)) => {
-            let zeta = dot3(beam.direction, r);
-            let rho2 = (dot3(r, r) - zeta * zeta).max(0.0);
-            1.0 / (1.0 + 2.0 * rho2 / (w * w) + zeta * zeta / (z * z))
-        }
-        _ => 1.0,
     }
 }

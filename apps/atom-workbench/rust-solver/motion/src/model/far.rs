@@ -211,7 +211,8 @@ impl Bases {
 }
 
 /// The far light of a frequency (module documentation): its exact co-rotating frequency δ_ω, its coupling bases, which of its
-/// components fold far, its static form per beam pair, the outside form at the focus, and its folded components' jumps per beam.
+/// components fold far, its static form on its field's basis and per beam pair, the outside form at the focus, and its folded
+/// components' jumps on the basis.
 #[derive(Clone, Debug)]
 pub(crate) struct Tone {
     /// δ_ω exactly (its index; no frame coordinate) and its value (rad/µs).
@@ -219,16 +220,21 @@ pub(crate) struct Tone {
     pub(crate) detuning: f64,
     /// [co-rotating, counter-rotating]: folded far.
     pub(crate) folded: [bool; 2],
+    /// A_k'k (STATES × STATES) at `forms[k' r + k]` on the field's basis: the static form F(e) = Σ_k'k e_k'* e_k A_k'k.
+    pub(crate) forms: Vec<Mat>,
     /// P_l'l (STATES × STATES) at `pairs[l' n + l]`, l' and l in the frequency's beam order.
     pub(crate) pairs: Vec<Mat>,
     /// O(E(0)): the outside form at the focus, which H0 holds.
     pub(crate) focus: Mat,
-    /// Per component ([co, counter]) and beam its folded jumps J_{a,l} (GROUND × GROUND per axis a); empty where unfolded.
+    /// Per component ([co, counter]) and basis vector k its folded jumps (GROUND × GROUND per axis a): the field's jump is
+    /// Σ_k e_k J_{a,k} (the counter-rotating Σ_k e_k* J_{a,k}); empty where unfolded.
     pub(crate) jumps: [Vec<[Mat; 3]>; 2],
     /// Per component ([co, counter]) and beam its folded responses R_l (EXCITED × GROUND, the readout's); empty where unfolded.
     pub(crate) responses: [Vec<Mat>; 2],
     /// Per component ([co, counter]) and beam its coupling at the focus, X_l and R_l (STATES × STATES).
     pub(crate) couplings: [Vec<Mat>; 2],
+    /// Per component ([co, counter]) its couplings on the field's basis, U_k and Ũ_k (STATES × STATES).
+    pub(crate) basis: [Vec<Mat>; 2],
     /// The outside form O_pq in the spherical components (the far beats' cross terms, units.rs).
     pub(crate) outside: [[Mat; 3]; 3],
 }
@@ -332,23 +338,8 @@ impl Tone {
             if folded[c] { basis.iter().map(|u| far_response(request, &k0, &e, u, nu[c])).collect() } else { vec![] }
         });
         let responses = [0, 1].map(|c| if folded[c] { per_beam(c, &|k| folds[c][k].0.clone(), EXCITED, GROUND) } else { vec![] });
-        let jumps = [0, 1].map(|c| {
-            if !folded[c] {
-                return vec![];
-            }
-            (0..n)
-                .map(|j| {
-                    std::array::from_fn(|ax| {
-                        let mut m = Mat::zeros(GROUND, GROUND);
-                        for k in 0..r {
-                            m.add_scaled(weight(c, j, k), &folds[c][k].1[ax]);
-                        }
-                        m
-                    })
-                })
-                .collect()
-        });
-        Ok(Tone { beat, detuning: nu[0], folded, pairs, focus, jumps, responses, couplings, outside: o })
+        let jumps = [0, 1].map(|c| folds[c].iter().map(|f| f.1.clone()).collect());
+        Ok(Tone { beat, detuning: nu[0], folded, forms: a, pairs, focus, jumps, responses, couplings, basis: [bases.co, bases.counter], outside: o })
     }
 }
 
@@ -381,19 +372,12 @@ fn far_response(request: &Request, k0: &Mat, e: &[f64], u: &Mat, nu: f64) -> (Ma
     (response, out)
 }
 
-/// The product a_l'* a_l of two beams' amplitudes (`first` = l', `second` = l) with its gradient and Hessian: the coefficient
-/// of a beam pair's term, of wave vector k_l − k_l'.
+/// The product a_l'* a_l of two beams' amplitudes (`first` = l', `second` = l) with its gradient and Hessian (jet.rs
+/// `multiply`): the coefficient of a beam pair's term, of wave vector k_l − k_l'.
 pub(crate) fn pair(first: &Amplitude, second: &Amplitude) -> Amplitude {
-    let (p, q) = (first.value.conj(), second.value);
-    let dp = first.gradient.map(|z| z.conj());
-    let dq = second.gradient;
-    Amplitude {
-        value: p * q,
-        gradient: std::array::from_fn(|i| dp[i] * q + p * dq[i]),
-        hessian: std::array::from_fn(|i| {
-            std::array::from_fn(|j| first.hessian[i][j].conj() * q + dp[i] * dq[j] + dp[j] * dq[i] + p * second.hessian[i][j])
-        }),
-    }
+    let mut out = [C64::ZERO; 10];
+    super::jet::multiply(&super::jet::whole(first).map(|z| z.conj()), &super::jet::whole(second), &mut out);
+    super::jet::amplitude(&out)
 }
 
 #[cfg(test)]
@@ -474,7 +458,8 @@ mod tests {
                 by_form.add_scaled(field[p].conj() * field[q], &o[p][q]);
             }
         }
-        let x = crate::field::coordinates(&field);
+        let z = |p: usize, q: usize| field[p].conj() * field[q];
+        let x = [z(0, 0).re, z(1, 1).re, z(2, 2).re, z(0, 1).re, z(0, 1).im, z(0, 2).re, z(0, 2).im, z(1, 2).re, z(1, 2).im];
         let mut by_coordinates = Mat::zeros(STATES, STATES);
         for i in 0..9 {
             by_coordinates.add_scaled(C64::real(x[i]), &m[i]);

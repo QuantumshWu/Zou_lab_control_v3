@@ -1,7 +1,8 @@
 //! The light (SPEC §1.2, §1.3): each beam's amplitude a_l(r) relative to its focus value with its analytic gradient
-//! and Hessian; one coherent field per frequency, E_ω(r) = Σ_{l∈ω} a_l(r) E_l, with its derivatives; the coherence
-//! coordinates x_{ω,i} of T_ω = E_ω E_ω† with their gradients and Hessians; the bounded chart of each frequency's field
-//! with its gradient; and the trap's region by intensity. The potential, the trap and the reach are the model's.
+//! and Hessian; one coherent field per frequency, E_ω(r) = Σ_{l∈ω} a_l(r) E_l, on the basis of its beams' span; the
+//! bounded chart of each frequency's field with its gradient (the coordinates of the near light's tables, model/tabulate.rs);
+//! and the trap's region by intensity. The far light's shifts, linear in T_ω = E_ω E_ω†, are the model's (model/far.rs), as
+//! are the potential, the trap and the reach.
 //!
 //! # Beams
 //! A plane wave a = e^{ikζ}; a paraxial Gaussian beam focused at the origin a = e^{ikζ} exp(−ρ²/(w₀²q))/q,
@@ -16,20 +17,16 @@
 //! The beams of one frequency are one coherent field, their relative phases the request's (SPEC §1.2, §8); the
 //! couplings are linear in it: V_ω(r) = Σ_l a_l(r) X_l = Σ_q E_{ω,q}(r) D_q. The span of the beams' focus fields has
 //! an orthonormal basis u_k (k < r ≤ 3, the eigenvectors of the Gram matrix G = Σ_l E_l E_l† whose eigenvalues σ_k²
-//! lie above G's rounding), E_l = Σ_k γ_lk u_k with γ_lk = u_k†E_l, so E_ω(r) = Σ_k e_k(r) u_k, e_k = Σ_l a_l γ_lk.
+//! are not zero to G's rounding, `span`), E_l = Σ_k γ_lk u_k with γ_lk = u_k†E_l, so E_ω(r) = Σ_k e_k(r) u_k, e_k = Σ_l a_l γ_lk.
+//! Two fields are parallel where their span is one direction (`parallel`): the one definition of it, the rank's own.
 //! Since Σ_l γ_lk* γ_lk' = σ_k² δ_kk', a quantity Y_l linear in each E_l, Y_l = Σ_k γ_lk Y_k (the couplings X_l), has
 //! the basis components Y_k = Σ_l γ_lk* Y_l/σ_k² (`Frequency::dual`), and one antilinear in E_l (R_l = Σ_k γ_lk* Ỹ_k)
 //! Ỹ_k = Σ_l γ_lk R_l/σ_k²: the model's check that the couplings agree with the fields is the residual of these.
 //!
-//! # Coherence coordinates
-//! T = E E† (T_pq = E_p E_q*) is Hermitian 3 × 3: nine real numbers x = (|E_q|² for q = −1, 0, +1; then per pair
-//! p < q in the order (−1, 0), (−1, +1), (0, +1) Re(E_p* E_q), Im(E_p* E_q)) in (V/m)², the outside forms' order. The far
-//! light's static shift is linear in them, exact at the atom (SPEC §1.2): their gradients and Hessians are exact
-//! quadratic forms in E, ∇E, ∇∇E.
-//!
 //! # The chart
 //! Each frequency's field in bounded coordinates (SPEC §1.2; field.md §1.1): the intensity I = |E|²/N ∈ [0, 1],
-//! N = (Σ_l ‖E_l‖)² (|E| ≤ Σ_l |a_l|‖E_l‖ and |a_l| ≤ 1); and the polarization w = E/|E| on the basis, its components in
+//! N = (Σ_l ‖E_l‖)² (|E| ≤ Σ_l |a_l|‖E_l‖ and |a_l| ≤ 1: a computed I above 1 is its rounding, and is 1); and the
+//! polarization w = E/|E| on the basis, its components in
 //! the chart's order o (the pivot o₀ first, the basis vector of the largest focus field, then the others by their focus
 //! fields) as hyperspherical angles α_i = atan2(√Σ_{j≥i}|e_{o_j}|², |e_{o_{i−1}}|) ∈ [0, π/2] and relative phases
 //! φ_i = arg(e_{o_i} e_{o₀}*) ∈ (−π, π], i = 1 … r − 1: 2r − 1 coordinates in the order (I, α₁, φ₁, α₂, φ₂). Every
@@ -47,9 +44,6 @@
 use crate::linalg::{dot3, hermitian_eigen, Mat, C64, V3};
 use crate::units::rounding;
 use crate::request::Request;
-
-/// The coherence coordinates per frequency.
-pub const COHERENCE: usize = 9;
 
 /// A beam's geometry: its unit direction n (lab axes), its wave number k (rad/µm), its waist w₀ (µm; None: a plane
 /// wave).
@@ -122,75 +116,12 @@ impl Geometry {
     }
 }
 
-/// One frequency's coherent field at a point: E (V/m, spherical components q = −1, 0, +1), ∇E (`gradient[a][q]` =
-/// ∂_a E_q) and ∇∇E (`hessian[a][b][q]` = ∂_a ∂_b E_q).
+/// One frequency's coherent field at a point: E (V/m, spherical components q = −1, 0, +1) and ∇E (`gradient[a][q]` =
+/// ∂_a E_q).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FieldAt {
     pub value: [C64; 3],
     pub gradient: [[C64; 3]; 3],
-    pub hessian: [[[C64; 3]; 3]; 3],
-}
-
-/// The coherence coordinates x of a field (module documentation, # Coherence coordinates; (V/m)²), ∇x
-/// (`gradient[i][a]` = ∂_a x_i) and ∇∇x (`hessian[i][a][b]`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Coherence {
-    pub value: [f64; COHERENCE],
-    pub gradient: [[f64; 3]; COHERENCE],
-    pub hessian: [[[f64; 3]; 3]; COHERENCE],
-}
-
-/// The pairs (p, q), p ≤ q, of T's coordinates in their order: the diagonal (one coordinate, |E_p|²) first, then the
-/// pairs p < q (two, Re and Im of E_p* E_q).
-const PAIRS: [(usize, usize); 6] = [(0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2)];
-
-/// Where the coordinates of pair i of `PAIRS` start: the diagonal's at i, a pair's Re at 3 + 2(i − 3), its Im after.
-fn place(i: usize) -> usize {
-    if i < 3 {
-        i
-    } else {
-        2 * i - 3
-    }
-}
-
-/// The coherence coordinates of a field value alone.
-pub fn coordinates(e: &[C64; 3]) -> [f64; COHERENCE] {
-    let mut x = [0.0; COHERENCE];
-    for (i, &(p, q)) in PAIRS.iter().enumerate() {
-        let z = e[p].conj() * e[q];
-        x[place(i)] = z.re;
-        if p != q {
-            x[place(i) + 1] = z.im;
-        }
-    }
-    x
-}
-
-impl FieldAt {
-    /// Its coherence coordinates with their gradients and Hessians: for z = E_p* E_q, ∇z = ∇E_p* E_q + E_p* ∇E_q and
-    /// ∂_a∂_b z = ∂_a∂_b E_p* E_q + ∂_a E_p* ∂_b E_q + ∂_b E_p* ∂_a E_q + E_p* ∂_a∂_b E_q, exact.
-    pub fn coherence(&self) -> Coherence {
-        let (e, de, dde) = (&self.value, &self.gradient, &self.hessian);
-        let mut c = Coherence { value: coordinates(e), gradient: [[0.0; 3]; COHERENCE], hessian: [[[0.0; 3]; 3]; COHERENCE] };
-        for (i, &(p, q)) in PAIRS.iter().enumerate() {
-            let at = place(i);
-            for a in 0..3 {
-                let z = de[a][p].conj() * e[q] + e[p].conj() * de[a][q];
-                c.gradient[at][a] = z.re;
-                if p != q {
-                    c.gradient[at + 1][a] = z.im;
-                }
-                for b in 0..3 {
-                    let z = dde[a][b][p].conj() * e[q] + de[a][p].conj() * de[b][q] + de[b][p].conj() * de[a][q] + e[p].conj() * dde[a][b][q];
-                    c.hessian[at][a][b] = z.re;
-                    if p != q {
-                        c.hessian[at + 1][a][b] = z.im;
-                    }
-                }
-            }
-        }
-        c
-    }
 }
 
 /// A frequency's chart at a point (module documentation, # The chart): the 2r − 1 coordinates (I, α₁, φ₁, α₂, φ₂)
@@ -238,19 +169,37 @@ pub struct Frequency {
     pub order: Vec<usize>,
 }
 
+/// The span of fields (module documentation, # One field per frequency): the eigenvectors u_k of G = Σ_l E_l E_l† whose
+/// eigenvalues σ_k² are not zero to G's rounding, by decreasing σ_k, with their σ_k². The bound of a zero eigenvalue's computed
+/// value: the computed decomposition G U = U Λ + R gives every λ_k within ‖R‖_F of an eigenvalue of the computed G (U unitary
+/// to its rounding; Weyl), whatever rotations made it, and the computed G lies within γ_n tr G of the exact one (its entries
+/// inner products of the n fields, ‖|G|‖_F ≤ tr G), R's own computation within γ₆ tr G (a row of three products, λ_k u_k and
+/// their difference, ‖G‖_F ≤ tr G; U's unitarity): λ_k ≤ ‖R‖_F + γ_{n+6} tr G is indistinguishable from zero, and the field it
+/// leaves off is at most the square root of that.
+fn span(fields: &[[C64; 3]]) -> (Vec<[C64; 3]>, Vec<f64>) {
+    let g = Mat::from_fn(3, 3, |p, q| fields.iter().map(|e| e[p] * e[q].conj()).sum());
+    let e = hermitian_eigen(&g);
+    let mut residual = g.product(&e.vectors);
+    for k in 0..3 {
+        for q in 0..3 {
+            residual[(q, k)] -= e.vectors[(q, k)] * e.values[k];
+        }
+    }
+    let floor = residual.frobenius() + rounding(fields.len() + 6) * g.trace().re;
+    let kept: Vec<usize> = (0..3).rev().filter(|&k| e.values[k] > floor).collect();
+    (kept.iter().map(|&k| std::array::from_fn(|q| e.vectors[(q, k)])).collect(), kept.iter().map(|&k| e.values[k]).collect())
+}
+
+/// Whether two fields are parallel: their span is one direction (`span`).
+pub fn parallel(first: &[C64; 3], second: &[C64; 3]) -> bool {
+    span(&[*first, *second]).0.len() == 1
+}
+
 impl Frequency {
-    /// The field of the beams `beams` with focus fields `fields`: the basis of their span from the eigendecomposition of
-    /// G = Σ_l E_l E_l†, an eigenvalue kept where it lies above G's rounding, γ_{n+3} tr G (the n beams' sums and the
-    /// rotations' own; Weyl: a computed eigenvalue below it is indistinguishable from zero, the field it leaves off
-    /// at most √(γ tr G)).
+    /// The field of the beams `beams` with focus fields `fields`, on the basis of their span (`span`).
     fn new(index: Vec<i32>, beams: Vec<usize>, fields: Vec<[C64; 3]>, form: usize) -> Frequency {
         let norm = fields.iter().map(|e| e.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()).sum::<f64>().powi(2);
-        let g = Mat::from_fn(3, 3, |p, q| fields.iter().map(|e| e[p] * e[q].conj()).sum());
-        let e = hermitian_eigen(&g);
-        let floor = rounding(fields.len() + 3) * g.trace().re;
-        let kept: Vec<usize> = (0..3).rev().filter(|&k| e.values[k] > floor).collect();
-        let basis: Vec<[C64; 3]> = kept.iter().map(|&k| std::array::from_fn(|q| e.vectors[(q, k)])).collect();
-        let gram = kept.iter().map(|&k| e.values[k]).collect();
+        let (basis, gram) = span(&fields);
         let coefficients: Vec<Vec<C64>> =
             fields.iter().map(|f| basis.iter().map(|u| (0..3).map(|q| u[q].conj() * f[q]).sum()).collect()).collect();
         let focus: Vec<f64> = (0..basis.len()).map(|k| coefficients.iter().map(|c| c[k]).sum::<C64>().abs()).collect();
@@ -273,16 +222,13 @@ impl Frequency {
     }
     /// Its field at a point from all beams' amplitudes there (indexed as the request's beams).
     pub fn field(&self, amplitudes: &[Amplitude]) -> FieldAt {
-        let mut f = FieldAt { value: [C64::ZERO; 3], gradient: [[C64::ZERO; 3]; 3], hessian: [[[C64::ZERO; 3]; 3]; 3] };
+        let mut f = FieldAt { value: [C64::ZERO; 3], gradient: [[C64::ZERO; 3]; 3] };
         for (&l, e) in self.beams.iter().zip(&self.fields) {
             let a = &amplitudes[l];
             for q in 0..3 {
                 f.value[q] += a.value * e[q];
                 for x in 0..3 {
                     f.gradient[x][q] += a.gradient[x] * e[q];
-                    for y in 0..3 {
-                        f.hessian[x][y][q] += a.hessian[x][y] * e[q];
-                    }
                 }
             }
         }
@@ -296,7 +242,8 @@ impl Frequency {
             self.basis.iter().map(|u| std::array::from_fn(|a| project(&field.gradient[a], u))).collect(),
         )
     }
-    /// Its chart at a point, from its field there (module documentation, # The chart): ∇I = Σ_k 2 Re(e_k* ∇e_k)/N;
+    /// Its chart at a point, from its field there (module documentation, # The chart): I = min(Σ_k |e_k|²/N, 1),
+    /// ∇I = Σ_k 2 Re(e_k* ∇e_k)/N;
     /// α = atan2(B, A) with A = |e_{o_{i−1}}|, B = √Σ_{j≥i}|e_{o_j}|², ∇α = (A∇B − B∇A)/(A² + B²), ∇A = Re(e*∇e)/A,
     /// ∇B = Σ_{j≥i} Re(e*∇e)/B; ∇φ_i = Im(e_{o_i}*∇e_{o_i})/|e_{o_i}|² − Im(e_{o₀}*∇e_{o₀})/|e_{o₀}|² -- a vanishing
     /// magnitude's terms zero.
@@ -308,7 +255,7 @@ impl Frequency {
         let dot: Vec<[f64; 3]> = (0..r).map(|k| std::array::from_fn(|a| (e[k].conj() * de[k][a]).re)).collect();
         let turn: Vec<[f64; 3]> = (0..r).map(|k| std::array::from_fn(|a| (e[k].conj() * de[k][a]).im)).collect();
         let over = |x: f64, y: f64| if y > 0.0 { x / y } else { 0.0 };
-        let mut value = vec![size.iter().sum::<f64>() / n];
+        let mut value = vec![(size.iter().sum::<f64>() / n).min(1.0)];
         let mut gradient = vec![std::array::from_fn(|a| (0..r).map(|k| 2.0 * dot[k][a]).sum::<f64>() / n)];
         for i in 1..r {
             let (first, rest) = (size[o[i - 1]].sqrt(), o[i..].iter().map(|&j| size[j]).sum::<f64>().sqrt());
@@ -507,67 +454,10 @@ mod tests {
         }
     }
 
-    /// The coherence is the field's (SPEC §1.2): two beams of one geometry and frequency with fields E₁ and E₂ give the
-    /// coordinates, gradients and Hessians of one beam with E₁ + E₂, to the rounding of the sums; and the analytic
-    /// gradients and Hessians of a three-beam field (a tweezer, its retro-reflection, a crossed beam) agree with central
-    /// differences of the coordinates, quadratic in the field: `difference_error` at 2K and twice the amplitudes'
-    /// rounding, of N (2K N for the Hessian).
-    #[test]
-    fn the_coherence_is_the_summed_field_s() {
-        let e1 = [C64::new(2e4, 1e4), C64::real(9e4), C64::ZERO];
-        let e2 = [C64::ZERO, C64::new(-3e4, 5e3), C64::new(0.0, 4e4)];
-        let sum: [C64; 3] = std::array::from_fn(|q| e1[q] + e2[q]);
-        let probe = ([1.0, 0.0, 0.0], None, 0, [C64::real(10.0), C64::ZERO, C64::ZERO]);
-        let split = light_of(&[([0.0, 0.0, 1.0], Some(0.8), -4, e1), ([0.0, 0.0, 1.0], Some(0.8), -4, e2), probe]);
-        let whole = light_of(&[([0.0, 0.0, 1.0], Some(0.8), -4, sum), probe]);
-        let n = (0..3).map(|q| sum[q].norm_sqr()).sum::<f64>() + split.frequencies[0].norm;
-        for r in points(12, 1) {
-            let (a, b) = (split.frequencies[0].field(&split.amplitudes(r)).coherence(), whole.frequencies[0].field(&whole.amplitudes(r)).coherence());
-            let k = scale(&split.beams[0], r);
-            for i in 0..COHERENCE {
-                assert!((a.value[i] - b.value[i]).abs() <= rounding(16) * n, "{r:?} x{i}");
-                for x in 0..3 {
-                    assert!((a.gradient[i][x] - b.gradient[i][x]).abs() <= rounding(16) * k * n);
-                    for y in 0..3 {
-                        assert!((a.hessian[i][x][y] - b.hessian[i][x][y]).abs() <= rounding(16) * k * k * n);
-                    }
-                }
-            }
-        }
-        let three = light_of(&[
-            ([0.0, 0.0, 1.0], Some(0.8), -4, e1),
-            ([0.0, 0.0, -1.0], Some(0.8), -4, e2),
-            ([0.0, 1.0, 0.0], Some(1.5), -4, [C64::real(3e4), C64::ZERO, C64::new(1e4, -2e4)]),
-        ]);
-        let f = &three.frequencies[0];
-        let third = UNIT_ROUNDOFF.cbrt();
-        for r in points(8, 2) {
-            let c = f.field(&three.amplitudes(r)).coherence();
-            let k = three.beams.iter().map(|b| scale(b, r)).fold(0.0, f64::max);
-            let h = third / k;
-            let within = difference_error(2.0 * k, h, 2.0 * own(&three.beams, r)) * f.norm;
-            let x_at = |p: V3| coordinates(&f.field(&three.amplitudes(p)).value);
-            let g_at = |p: V3| f.field(&three.amplitudes(p)).coherence().gradient;
-            for a in 0..3 {
-                let (mut plus, mut minus) = (r, r);
-                plus[a] += h;
-                minus[a] -= h;
-                let (xp, xm, gp, gm) = (x_at(plus), x_at(minus), g_at(plus), g_at(minus));
-                for i in 0..COHERENCE {
-                    let d = (xp[i] - xm[i]) / (2.0 * h);
-                    assert!((d - c.gradient[i][a]).abs() <= within, "{r:?} ∂{a} x{i}: {d:e} {:e}", c.gradient[i][a]);
-                    for b in 0..3 {
-                        let d = (gp[i][b] - gm[i][b]) / (2.0 * h);
-                        assert!((d - c.hessian[i][a][b]).abs() <= 2.0 * k * within, "{r:?} ∂{a}∂{b} x{i}");
-                    }
-                }
-            }
-        }
-    }
-
     /// The span's basis: parallel fields have rank 1 (also when their difference is below the Gram matrix's rounding),
     /// two independent ones rank 2, three rank 3; the basis is orthonormal, Σ_k γ_lk u_k gives each field back, and the
-    /// dual weights invert the coefficients, Σ_j dual(j, k) γ_jk' = δ_kk'.
+    /// dual weights invert the coefficients, Σ_j dual(j, k) γ_jk' = δ_kk'. Two fields are parallel exactly where their
+    /// span has rank 1 (`parallel`), whatever their sizes and phases.
     #[test]
     fn the_basis_spans_the_fields() {
         let field = |e: [f64; 3], phase: f64| e.map(|x| C64::cis(phase) * x);
@@ -583,6 +473,9 @@ mod tests {
             let light = light_of(&beams);
             let f = &light.frequencies[0];
             assert_eq!(f.rank(), rank, "{fields:?}");
+            if fields.len() == 2 {
+                assert_eq!(parallel(&fields[0], &fields[1]), rank == 1, "{fields:?}");
+            }
             let largest = fields.iter().map(|e| e.iter().map(|z| z.abs()).fold(0.0, f64::max)).fold(0.0, f64::max);
             for (j, e) in fields.iter().enumerate() {
                 for q in 0..3 {
@@ -603,7 +496,7 @@ mod tests {
     }
 
     /// The chart (module documentation, # The chart) of a rank-3 field of three beams: its coordinates lie in their
-    /// ranges; the field it maps back to has the same coherence T (the chart drops only the global phase), to the
+    /// ranges; the field it maps back to has the same coherence T = E E† (the chart drops only the global phase), to the
     /// rounding of N; its gradient agrees with central differences (the phases' wrapped) where no component is small.
     /// At a pole the field it maps to does not depend on the undefined coordinates: α₁ = 0 leaves T the same for every
     /// φ₁, α₂, φ₂.
@@ -616,6 +509,7 @@ mod tests {
         ]);
         let f = &light.frequencies[0];
         assert_eq!((f.rank(), f.chart_dimension()), (3, 5));
+        let coherence = |e: &[C64; 3]| -> Vec<C64> { (0..9).map(|i| e[i / 3] * e[i % 3].conj()).collect() };
         let third = UNIT_ROUNDOFF.cbrt();
         for r in points(40, 3) {
             let field = f.field(&light.amplitudes(r));
@@ -624,9 +518,9 @@ mod tests {
                 let (lo, hi, _) = range(c);
                 assert!(lo <= s && s <= hi, "{r:?} s{c} = {s}");
             }
-            let (t, back) = (coordinates(&field.value), coordinates(&f.chart_field(&chart.value)));
-            for i in 0..COHERENCE {
-                assert!((t[i] - back[i]).abs() <= rounding(32) * f.norm, "{r:?} x{i}: {} {}", t[i], back[i]);
+            let (t, back) = (coherence(&field.value), coherence(&f.chart_field(&chart.value)));
+            for i in 0..9 {
+                assert!((t[i] - back[i]).abs() <= rounding(32) * f.norm, "{r:?} T{i}: {:?} {:?}", t[i], back[i]);
             }
             // The chart's coordinates vary on the length 1/(K/ε), ε = min_k |e_k|/|E| the smallest relative component, and
             // carry the amplitudes' rounding over ε: `difference_error` at K/ε and own/ε.
@@ -651,10 +545,10 @@ mod tests {
                 }
             }
         }
-        let at_pole = coordinates(&f.chart_field(&[0.4, 0.0, 1.0, 0.3, -2.0]));
+        let at_pole = coherence(&f.chart_field(&[0.4, 0.0, 1.0, 0.3, -2.0]));
         for s in [[0.4, 0.0, -2.5, 1.2, 0.7], [0.4, 0.0, 0.0, 0.0, 0.0]] {
-            let other = coordinates(&f.chart_field(&s));
-            assert!((0..COHERENCE).all(|i| (other[i] - at_pole[i]).abs() <= rounding(32) * f.norm), "{s:?}");
+            let other = coherence(&f.chart_field(&s));
+            assert!((0..9).all(|i| (other[i] - at_pole[i]).abs() <= rounding(32) * f.norm), "{s:?}");
         }
     }
 

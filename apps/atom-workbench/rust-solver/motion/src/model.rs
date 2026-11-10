@@ -15,14 +15,18 @@
 //! Every coupling is kept (it enters the cluster's generator as it is and the propagator resolves it) or folded at second order;
 //! which is decided per unit (`Unit`, SPEC §5.2) by `solve`, within the existence gates (`Gate`, SPEC §1.5) this module evaluates.
 //! A folded far component enters through its van Vleck shift and its Reiter–Sørensen jumps (`far`), linear in T_ω = E_ω E_ω† and
-//! exact at the atom; a folded drive of a near carrier through its dressed response (`eliminate`), whose nonlinear dependence on
-//! the far light and the other carriers is tabulated over the field's chart (`table`).
+//! exact at the atom; a folded drive of a near carrier through its dressed response (`eliminate`), a nonlinear function of the
+//! far light and the other carriers at the atom. That elimination is evaluated at every point as it stands (`Run::new`), or
+//! taken from its tables over the coordinates it depends on, refined over the atoms' reach to the resolution of the largest
+//! ensemble (`tabulate`, `Run::tabulated`; SPEC §2.3): one assembly either way (`assemble`).
 //!
 //! # A generator along a step's path (propagation.md §1.2–§1.3)
 //! Every term is a field's value at the point times plane-wave phases: absorbing beam l and emitting beam l′ it holds
-//! e^{i(k_l − k_l′)·r}. On the step's straight path r_h + v(t − t_m) a cluster's generator is Σ_j M_j e^{iω_j(t − t_m)},
-//! ω_j = Ω_j + q_j·v (`Part`): Ω_j the term's beat in the cluster's frames, q_j its wave vector less the Doppler frames'.
-//! The envelopes and the tables are held at the point.
+//! e^{i(k_l − k_l′)·r}. On the step's straight path r_h + v(t − t_m) each beam's plane wave turns by e^{ik_l·v(t − t_m)}, each
+//! state's Doppler frame by e^{iK_s·v(t − t_m)}, and each term by its beat in the cluster's frames; the envelopes and the tables
+//! are held at the point. The generator on the path is given by its fields at a time (assemble.rs `Middle` and `Path`, the
+//! step's `step::Middle`): the point's values once, the momentum's Doppler weights and path rates, and at a time the sum of
+//! its terms there -- no list of beating matrices is made, whatever the number of beams.
 pub mod far;
 pub mod potential;
 pub mod reach;
@@ -32,11 +36,14 @@ pub mod eliminate;
 pub mod assemble;
 pub mod readout;
 pub mod photon;
+pub mod tabulate;
 pub(crate) mod jet;
 
 use crate::field::Light;
 use crate::linalg::{C64, Mat};
 use crate::request::Request;
+use std::sync::{Arc, Mutex};
+pub use assemble::Middle;
 pub use crate::request::{GROUND, STATES};
 
 /// A frequency, exactly: integer coordinates on the request's frequency axes, then on the excited states' frame frequency ν_frame;
@@ -124,20 +131,14 @@ pub struct Envelope {
     pub weights: Vec<f64>,
 }
 
-/// The model's counted work at trajectory states (SPEC §5.1, counted by algorithm, not calibrated): the assembly's complex
-/// multiply-adds per call, and what the propagation's count (step's) takes, the cluster's dimension and its parts.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Work { pub assembly: f64, pub states: f64, pub parts: f64 }
-
 /// The atoms' reach (SPEC §1.8): the sublevel set {r : V_prep(r) − V_min ≤ ln(1/s) k_B T_r} of the prepared potential, with the
 /// momenta of that kinetic energy. Its extrema are provable bounds: interval subdivision of `cell` with Lipschitz remainders.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reach {
     /// T_r (µK): the temperature the atoms reach (never lowered; the solve's trials read it).
     pub temperature_uk: f64,
-    /// s: the unsampled share (SPEC §3).
-    pub share: f64,
-    /// ln(1/s) k_B T_r (rad/µs): the energy above V_min the reach holds, in position and in kinetic energy.
+    /// ln(1/s) k_B T_r (rad/µs), s the unsampled share (SPEC §3): the energy above V_min the reach holds, in position and in
+    /// kinetic energy.
     pub energy: f64,
     /// V_min (rad/µs).
     pub minimum: f64,
@@ -178,13 +179,14 @@ pub enum Unit {
 }
 
 /// A unit's existence gate over the reach (SPEC §1.5): provable upper bounds over the reach in phase space. The fold exists only
-/// where both are below ½ (`Gate::exists`); else the unit is kept.
+/// where both are below ½ (`Gate::exists`); else the unit is kept. Every fold has both (units.rs, # The gates); a dressing
+/// (`Unit::Dressing`), which folds nothing, has neither.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Gate {
     /// The static Stewart bound: the coherent peak's upper bound of S = 2m² (a drive's: its ground state's total S_b over its
     /// folded drives).
     pub saturation: f64,
-    /// The motional bound: the upper bound of a = |dΔE/dt|/|ΔE|², the sweep v·∇ΔE + k·v̇.
+    /// The motional bound: the upper bound of a = |dΔE/dt|/|ΔE|², the sweep v·∇ΔE + q·v̇ of the fold's levels and wave vector.
     pub sweep: f64,
 }
 
@@ -223,28 +225,6 @@ pub struct Cluster {
     pub(crate) waves_exact: Vec<Beat>,
 }
 
-/// One part of a cluster's generator at a point (SPEC §1.4): on the step's path H(t) = Σ_j M_j e^{iω_j(t − t_m)},
-/// ω_j = Ω_j + q_j·v, and the gradient of its Hermitian part G(t) = Σ_j G_j e^{iω_j(t − t_m)}. Parts come in pairs (Ω, q),
-/// (−Ω, −q) (one part where both vanish), their Hermitian parts paired, G_{−j} = G_j†.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Part {
-    /// Its beat in the cluster's frames, exactly.
-    pub beat: Beat,
-    /// Ω (rad/µs): the beat's value.
-    pub omega: f64,
-    /// q (1/µm): its wave vector less the Doppler frames' K_a − K_b.
-    pub wave: [f64; 3],
-    /// M_j at the point, n × n on the cluster's states (rad/µs), its phase e^{i(Ω t + q·r)} there: the Hermitian part of that
-    /// beat with its decay −(i/2) Σ J†J.
-    pub generator: Mat,
-    /// G_j, the gradient of its Hermitian part at the point (rad/µs/µm), per lab axis.
-    pub force: [Mat; 3],
-}
-
-/// A cluster's generator at a point with some lights on: its parts, from the one assembly (`Model::assemble`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Generator { pub cluster: usize, pub at: Point, pub parts: Vec<Part> }
-
 /// One class of photons (SPEC §1.6) of a cluster's state at a point: the photons of one frame frequency landing in one cluster,
 /// folded and explicit amplitudes added. (A class of one frequency landing in two clusters is two of these: the joint law of
 /// direction, polarization and landing is the same either way, ∝ ‖P_C Σ_a ε_a u_a‖².)
@@ -255,7 +235,7 @@ pub struct Photon {
     pub class: usize,
     /// The cluster the jump lands the atom in.
     pub landing: usize,
-    /// |k_φ| (1/µm): the emission recoil is −k_φ n.
+    /// |k_φ| (1/µm), 2π/c times the class's photon frequency (photon.rs, # A class's photon): the emission recoil is −k_φ n.
     pub wave_number: f64,
     /// u_a = J_{a,φ} ψ (a = x, y, z) on the landing cluster's states: the class's probability ∝ Σ_a ‖u_a‖², the direction's
     /// density ∝ tr G − n·Re(G)·n (G_ab = ⟨u_a|u_b⟩), the polarization ε across n by ‖Σ_a ε_a u_a‖², the state after f = Σ_a ε_a u_a.
@@ -278,9 +258,11 @@ pub struct Recoil { pub mean: [f64; 3], pub second: [[f64; 3]; 3] }
 pub struct Model {
     pub(crate) light: Light,
     pub(crate) axes: far::Axes,
-    /// The light's distinct wave vectors (1/µm): the coordinates of every exact wave vector (`Wave`); per request beam its own.
+    /// The light's distinct wave vectors up to their sign (1/µm): the coordinates of every exact wave vector (`Wave`); per request
+    /// beam its own with its sign -- a beam and its counter-propagating one are ±1 on one coordinate, so that what their wave vectors
+    /// cancel in is exactly zero. Two beams' wave vectors are one where they differ by their own rounding (`one_wave`).
     pub(crate) waves: Vec<[f64; 3]>,
-    pub(crate) beam_wave: Vec<usize>,
+    pub(crate) beam_wave: Vec<(usize, i64)>,
     pub(crate) hbar_over_mass: f64,
     /// The bare energies E_s (H0's diagonal).
     pub(crate) energies: Vec<f64>,
@@ -298,9 +280,20 @@ pub struct Model {
     pub(crate) membership: [usize; GROUND],
     /// The near carriers (eliminate.rs).
     pub(crate) carriers: Vec<eliminate::Carrier>,
+    /// Per cluster the blocks of the excited states its eliminations can mix (assemble.rs `Model::mix`).
+    pub(crate) mixing: Vec<Vec<usize>>,
     /// The photons' sources (photon.rs) and per cluster its classes.
     pub(crate) sources: Vec<photon::Source>,
     pub(crate) classes: Vec<Vec<photon::Class>>,
+    /// The clusters' assemblies under the light sets asked so far (assemble.rs `Model::plan`).
+    pub(crate) plans: Mutex<Vec<Arc<assemble::Plan>>>,
+    /// The spread of what moves the folds' spectra (units.rs `Model::spread`), and the far beats' cross forms' sizes asked so far
+    /// (units.rs `Model::far_cross_sizes`).
+    pub(crate) spread: f64,
+    pub(crate) crosses: Mutex<std::collections::HashMap<(Component, Component), Arc<Vec<f64>>>>,
+    /// Per cluster the co-resonant pairs of its folded channels' places under the running lights, found at its first readout
+    /// (readout.rs `Model::readout_with`).
+    pub(crate) resonances: Vec<std::sync::OnceLock<Vec<[usize; 4]>>>,
     /// The states' labels and the beams' names (the ledger's and the method's words).
     pub(crate) labels: Vec<String>,
     pub(crate) names: Vec<String>,
@@ -314,7 +307,7 @@ pub(crate) type Wave = Beat;
 impl Model {
     /// The model of a request with the units `kept` (SPEC §1.4): the far light as its far units say, the near carriers'
     /// eliminations, the clusters the kept couplings join with their frames. Refused where a fold cannot be made: a
-    /// counter-rotating component kept, or whose fold does not exist (units.rs `Model::far_gate`).
+    /// counter-rotating component kept, or whose fold does not exist (units.rs `Model::far_saturation`).
     pub fn new(request: &Request, light: &Light, kept: &[Unit]) -> Result<Model, String> {
         let axes = far::Axes::new(request)?;
         let mut waves: Vec<[f64; 3]> = vec![];
@@ -323,11 +316,11 @@ impl Model {
             .iter()
             .map(|b| {
                 let k = b.wave_vector();
-                match waves.iter().position(|w| *w == k) {
-                    Some(at) => at,
+                match [1_i64, -1].into_iter().find_map(|sign| waves.iter().position(|w| one_wave(w, &k, sign as f64)).map(|at| (at, sign))) {
+                    Some(found) => found,
                     None => {
                         waves.push(k);
-                        waves.len() - 1
+                        (waves.len() - 1, 1)
                     }
                 }
             })
@@ -359,39 +352,44 @@ impl Model {
             clusters: vec![],
             membership: [0; GROUND],
             carriers: vec![],
+            mixing: vec![],
             sources: vec![],
             classes: vec![],
+            plans: Mutex::new(vec![]),
+            spread: 0.0,
+            crosses: Mutex::new(Default::default()),
+            resonances: vec![],
             labels: request.states.clone(),
             names: request.beams.iter().map(|b| b.name.clone()).collect(),
         };
+        model.carriers = eliminate::Carrier::all(&model);
+        model.spread = model.spread_made();
         for component in model.components().into_iter().filter(|c| c.counter) {
-            let gate = model.far_gate(component);
-            if !gate.exists() {
-                return Err(format!("反旋分量的折叠不存在（S = {:.2}）：请求超出模型的适用范围", gate.saturation));
+            let saturation = model.far_saturation(component);
+            if !(saturation < units::EXISTS) {
+                return Err(format!("反旋分量的折叠不存在（S = {:.2}）：请求超出模型的适用范围", saturation));
             }
         }
-        model.carriers = eliminate::Carrier::all(&model, request)?;
         let edges: Vec<cluster::Edge> = kept.iter().filter_map(|u| model.edge(u)).collect();
         let (mut clusters, membership) = cluster::clusters(STATES, &edges, &model.axes.zero(), &model.no_wave());
         for c in clusters.iter_mut() {
             c.waves = c.waves_exact.iter().map(|w| model.wave_value(w)).collect();
         }
+        model.resonances = clusters.iter().map(|_| std::sync::OnceLock::new()).collect();
         model.clusters = clusters;
         model.membership = membership;
         for ci in 0..model.carriers.len() {
-            for l in 0..model.carriers[ci].beams.len() {
-                for e in GROUND..STATES {
-                    for b in 0..GROUND {
-                        if model.carriers[ci].folded[l][(e, b)] != C64::ZERO && model.drive_kept(ci, e, b) {
-                            model.carriers[ci].folded[l][(e, b)] = C64::ZERO;
-                        }
+            for e in GROUND..STATES {
+                for b in 0..GROUND {
+                    if model.drive_kept(ci, e, b) {
+                        let carrier = &mut model.carriers[ci];
+                        carrier.folded.iter_mut().chain(carrier.basis.iter_mut()).for_each(|x| x[(e, b)] = C64::ZERO);
                     }
                 }
             }
         }
-        model.sources = model.far_sources();
-        model.sources.extend(model.explicit_sources());
-        model.sources.extend(model.near_sources());
+        model.mixing = (0..model.clusters.len()).map(|c| model.mix(c)).collect();
+        model.sources = model.all_sources();
         model.classes = (0..model.clusters.len()).map(|c| model.classes(c)).collect();
         Ok(model)
     }
@@ -440,7 +438,7 @@ impl Model {
     /// A request beam's wave vector, exactly.
     pub(crate) fn beam_wave(&self, beam: usize) -> Wave {
         let mut w = vec![0; self.waves.len()];
-        w[self.beam_wave[beam]] = 1;
+        w[self.beam_wave[beam].0] = self.beam_wave[beam].1;
         Beat(w)
     }
     /// The zero wave vector.
@@ -453,56 +451,105 @@ impl Model {
     }
     /// The loss energy E_s = (ħ/m)κ²/2 + V_run(r; p(ψ)) (rad/µs).
     pub fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
+        self.energy_with(cluster, at, psi, None)
+    }
+    /// The loss energy with the near light from its tables where they serve (tabulate.rs `Model::near`).
+    pub(crate) fn energy_with(&self, cluster: usize, at: &Point, psi: &[C64], tables: Option<&tabulate::Tables>) -> f64 {
         let kinetic = 0.5 * self.hbar_over_mass * at.kappa.iter().map(|k| k * k).sum::<f64>();
-        kinetic + self.potential(at.r, &self.ground_populations(cluster, psi), &self.running())
+        kinetic + self.expand(at.r, &self.ground_populations(cluster, psi), &self.running(), 0, tables).quadratic.value
     }
     /// The loss test (SPEC §1.7): outside the trap's region and E_s above V_run's far value.
     pub fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
-        self.light.outside(&self.light.amplitudes(at.r))
-            && self.energy(cluster, at, psi) > self.asymptote(&self.ground_populations(cluster, psi), &self.running())
+        self.lost_with(cluster, at, psi, None)
     }
-    /// A cluster state's ground populations, normalized on the ground states (zero elsewhere).
+    /// The loss test with the near light from its tables where they serve.
+    pub(crate) fn lost_with(&self, cluster: usize, at: &Point, psi: &[C64], tables: Option<&tabulate::Tables>) -> bool {
+        self.light.outside(&self.light.amplitudes(at.r))
+            && self.energy_with(cluster, at, psi, tables) > self.asymptote(&self.ground_populations(cluster, psi), &self.running())
+    }
+    /// p(ψ), the ground populations of a cluster's state (SPEC §1.3): those it holds, and those its explicit excited states
+    /// decay to -- p_b = (|ψ_b|² + Σ_e β_be |ψ_e|²)/‖ψ‖², β_be = Σ_a |C_a[b, e]|²/D_ee the branching of e. An explicit excited state
+    /// lives 1/Γ, far shorter than any motion: the potential its atom moves in is that of the ground states it lands in. Linear in
+    /// the populations, of sum one, defined for every ψ ≠ 0 -- a state with no ground population has its landing states'.
     pub(crate) fn ground_populations(&self, cluster: usize, psi: &[C64]) -> [f64; GROUND] {
-        let c = &self.clusters[cluster];
-        let total: f64 = psi[..c.ground].iter().map(|z| z.norm_sqr()).sum();
+        let total = crate::linalg::norm_sqr(psi);
         let mut p = [0.0; GROUND];
-        for (i, &s) in c.states[..c.ground].iter().enumerate() {
-            p[s] = psi[i].norm_sqr() / total;
+        for (z, &s) in psi.iter().zip(&self.clusters[cluster].states) {
+            let weight = z.norm_sqr() / total;
+            if s < GROUND {
+                p[s] += weight;
+            } else if weight != 0.0 {
+                let rate = self.decay[(s - GROUND, s - GROUND)].re;
+                for (b, landing) in p.iter_mut().enumerate() {
+                    *landing += weight * self.emission.iter().map(|c| c[(b, s)].norm_sqr()).sum::<f64>() / rate;
+                }
+            }
         }
         p
     }
 }
 
-/// The model as one run's integrator sees it (`step::Dynamics`): the model, its running and prepared lights, and the reference
-/// state's ground populations.
+/// Whether two beams' wave vectors are one up to the sign `sign` (k = sign·w): every component within the rounding of the
+/// vectors themselves. Each is its request's direction normalized -- three squares, two sums, a root, a quotient -- times its wave
+/// number, with the request's own decimal rounding nine roundings a component: two that are one vector differ by at most
+/// 2γ₉ max(|k|, |w|) a component, and two that physically differ, by a beat's Δω/c or a direction, by many orders more.
+fn one_wave(w: &[f64; 3], k: &[f64; 3], sign: f64) -> bool {
+    let size = crate::linalg::norm3(*w).max(crate::linalg::norm3(*k));
+    (0..3).all(|i| (k[i] - sign * w[i]).abs() <= 2.0 * crate::units::rounding(9) * size)
+}
+
+/// The model as one run's integrator sees it (`step::Dynamics`): the model, its near tables where it has them (tabulate.rs), its
+/// prepared lights, the reference state's ground populations, and per cluster its plan under the running lights (assemble.rs)
+/// with that plan's table.
 pub struct Run<'a> {
     pub model: &'a Model,
+    pub tables: Option<&'a tabulate::Tables>,
     pub reference: [f64; GROUND],
-    running: Lights,
     prepared: Lights,
-    /// The counted real multiply-adds of one assembly (`decide::COMPLEX` per complex one, assemble.rs # Work) and of one jump's
+    plans: Vec<(Arc<assemble::Plan>, Option<&'a tabulate::NearTable>)>,
+    /// The counted real multiply-adds of one middle (`decide::COMPLEX` per complex one, assemble.rs # Work) and of one jump's
     /// photons (photon.rs `Model::photons_counted`): the largest over the clusters at the focus, every light on, made once.
     assembly: f64,
     photons: f64,
 }
 
 impl<'a> Run<'a> {
+    /// The run of a model with the exact elimination at every point.
     pub fn new(model: &'a Model, reference: [f64; GROUND]) -> Run<'a> {
+        Run::with(model, None, reference)
+    }
+    /// The run of a model with its near tables (`Model::tabulate`).
+    pub fn tabulated(model: &'a Model, tables: &'a tabulate::Tables, reference: [f64; GROUND]) -> Run<'a> {
+        Run::with(model, Some(tables), reference)
+    }
+    fn with(model: &'a Model, tables: Option<&'a tabulate::Tables>, reference: [f64; GROUND]) -> Run<'a> {
         let running = model.running();
         let at = Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 };
-        let assembly = (0..model.clusters.len()).map(|c| model.assembled(c, &at, &running).1).fold(0.0, f64::max) * crate::decide::COMPLEX;
+        let plans = (0..model.clusters.len()).map(|c| (model.plan(c, &running), tables.and_then(|t| t.of(c, &running)))).collect();
+        let plans: Vec<(Arc<assemble::Plan>, Option<&tabulate::NearTable>)> = plans;
+        let assembly = plans.iter().map(|(plan, table)| model.middle(plan, at.r, at.t, *table).work).fold(0.0, f64::max) * crate::decide::COMPLEX;
         let photons = (0..model.clusters.len())
             .map(|c| {
                 let psi: Vec<C64> = (0..model.clusters[c].states.len()).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
-                model.photons_counted(c, &at, &psi).1
+                model.photons_counted(c, &at, &psi, tables).1
             })
             .fold(0.0, f64::max)
             * crate::decide::COMPLEX;
-        Run { model, reference, running, prepared: model.prepared(), assembly, photons }
+        Run { model, tables, reference, prepared: model.prepared(), plans, assembly, photons }
+    }
+    /// A cluster's generator at a position and time, for every momentum and along every path through the point (assemble.rs
+    /// `Middle`): a step's one middle.
+    pub fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Middle<'a> {
+        let (plan, table) = &self.plans[cluster];
+        self.model.middle(plan, r, t, *table)
     }
 }
 
 impl crate::step::Dynamics for Run<'_> {
+    type Middle<'a>
+        = Middle<'a>
+    where
+        Self: 'a;
     fn hbar_over_mass(&self) -> f64 {
         self.model.hbar_over_mass
     }
@@ -521,25 +568,22 @@ impl crate::step::Dynamics for Run<'_> {
     fn cluster_of(&self, ground: usize) -> usize {
         self.model.membership[ground]
     }
-    fn generator(&self, cluster: usize, at: &Point) -> Generator {
-        self.model.assemble(cluster, at, &self.running)
+    fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Middle<'_> {
+        Run::middle(self, cluster, r, t)
     }
     fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
-        self.model.photons(cluster, at, psi)
+        self.model.photons_counted(cluster, at, psi, self.tables).0
     }
     fn recoil(&self, photon: &Photon, polarization: &[f64; 3]) -> Recoil {
         photon.recoil(polarization)
     }
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
-        self.model.energy(cluster, at, psi)
+        self.model.energy_with(cluster, at, psi, self.tables)
     }
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
-        self.model.lost(cluster, at, psi)
+        self.model.lost_with(cluster, at, psi, self.tables)
     }
     fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
-        self.model.readout(cluster, at, psi)
+        self.model.readout_with(cluster, at, psi, self.tables)
     }
 }
-
-
-pub use photon::hazard;
