@@ -1078,10 +1078,7 @@ fn model_error(means: &[Vec<[f64; 2]>], without: Option<usize>, unsampled: f64) 
 /// `cluster`: one step's -- the integrator's (adapt.rs `advance_work`, through the model's generator at the state's
 /// point, its velocity and τ) and its assemblies' (`assembly`, the model's count of one) -- over its τ.
 fn rate(run: &Run, assembly: f64, cluster: usize, state: &State) -> f64 {
-    let at = state.sample.at;
-    let generator = run.generator(cluster, &at);
-    let velocity = at.kappa.map(|k| run.hbar_over_mass() * k);
-    let (work, assemblies) = adapt::advance_work(&generator, &run.cluster(cluster).waves, velocity, state.tau);
+    let (work, assemblies) = adapt::advance_work(run, cluster, &state.sample.at, state.tau);
     (work + assemblies as f64 * assembly) / state.tau
 }
 

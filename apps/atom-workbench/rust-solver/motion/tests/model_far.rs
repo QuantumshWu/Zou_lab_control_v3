@@ -6,6 +6,7 @@ use atom_motion::field::Light;
 use atom_motion::linalg::{dot3, C64, Mat};
 use atom_motion::model::{Model, Point, GROUND};
 use atom_motion::request::Request;
+use atom_motion::step::Middle as _;
 
 mod model_common;
 use model_common::{decay_rate, scene};
@@ -144,17 +145,15 @@ fn the_assembly_holds_the_potential_its_force_and_the_photons_rate() {
         let n = model.clusters()[cluster].states.len();
         let place = model.clusters()[cluster].states.iter().position(|&s| s == b).unwrap();
         let lights = model.running();
+        // The generator at a point at rest, and its gradient's entry on the state: the form with ρ = |b⟩⟨b|.
         let total = |r: [f64; 3]| {
-            let g = model.assemble(cluster, &Point { r, kappa: [0.0; 3], t: 0.0 }, &lights);
+            let middle = model.assemble(cluster, r, 0.0, &lights);
+            let path = middle.path([0.0; 3], [0.0; 3]);
             let mut h = Mat::zeros(n, n);
-            let mut f = [C64::ZERO; 3];
-            for part in &g.parts {
-                h.add_scaled(C64::ONE, &part.generator);
-                for i in 0..3 {
-                    f[i] += part.force[i][(place, place)];
-                }
-            }
-            (h, f)
+            middle.generator(&path, 0.0, &mut h);
+            let mut rho = vec![C64::ZERO; n * n];
+            rho[place * n + place] = C64::ONE;
+            (h, middle.force(&path, 0.0, &rho))
         };
         let far = total([1e4, 1e4, 1e4]).0;
         for r in [[0.13, -0.21, 0.07], [0.4, 0.3, -0.2], [-0.05, 0.6, 0.31]] {
@@ -163,8 +162,7 @@ fn the_assembly_holds_the_potential_its_force_and_the_photons_rate() {
             let moved = h[(place, place)].re - far[(place, place)].re;
             assert!(close(moved, q.value, 1e-9), "{name}: the static diagonal moves {moved} against V {}", q.value);
             for i in 0..3 {
-                assert!((f[i].re - q.gradient[i]).abs() <= 1e-9 * q.gradient.iter().map(|x| x.abs()).fold(1e-300, f64::max), "{name}: force {:?} against ∇V {:?}", f, q.gradient);
-                assert!(f[i].im.abs() <= 1e-9 * f[i].re.abs().max(1.0), "{name}: a Hermitian force");
+                assert!((f[i] - q.gradient[i]).abs() <= 1e-9 * q.gradient.iter().map(|x| x.abs()).fold(1e-300, f64::max), "{name}: force {:?} against ∇V {:?}", f, q.gradient);
             }
             let psi: Vec<C64> = (0..n).map(|i| C64::new(1.0 + i as f64, 0.5 - i as f64)).collect();
             let at = Point { r, kappa: [0.0; 3], t: 0.0 };

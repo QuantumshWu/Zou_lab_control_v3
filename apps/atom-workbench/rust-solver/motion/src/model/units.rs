@@ -420,7 +420,11 @@ impl Model {
         let sections = [(plan.near.hermitian(), 1), (plan.near.jumping(), 0), (plan.near.responding(), 0)];
         let near = self.near_values(&plan, &amplitudes, &sections, tables.and_then(|t| t.of(sample.cluster, &lights)));
         let responses = self.carrier_responses(&plan, &near, &amplitudes, sample.at.kappa);
-        let force = self.middle_of(&plan, sample.at.r, sample.at.t, plan.amplitudes(&amplitudes), Some(&near)).generator(sample.at.kappa).force(&sample.psi, &|_| 1.0);
+        // The force on the state at the point: −tr(G ρ) of its density (step.rs `Middle::force`, at rest on the middle).
+        let middle = self.middle_of(&plan, sample.at.t, plan.amplitudes(&amplitudes), Some(&near));
+        let (n, norm) = (sample.psi.len(), crate::linalg::norm_sqr(&sample.psi));
+        let rho: Vec<C64> = (0..n * n).map(|i| sample.psi[i / n] * sample.psi[i % n].conj() / norm).collect();
+        let force = crate::step::Middle::force(&middle, &crate::step::Middle::path(&middle, sample.at.kappa, [0.0; 3]), 0.0, &rho).map(|f| -f);
         Measured {
             sample,
             sizes: amplitudes.iter().map(|a| a.value.abs()).collect(),

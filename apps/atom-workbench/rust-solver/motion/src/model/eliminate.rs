@@ -863,7 +863,7 @@ impl Model {
 
     /// A folded drive's small parameters at a sample (SPEC §1.5; units.rs `Measured`): its own saturation s = 2|R_c[e,b]|² at the
     /// point (R = Σ_l a_l T̃_l), its sweep a = |v·∇(E_e − E_b) + k·v̇|/|ΔE|² (ΔE = E_e − E_b − δ_c − k·v − iΓ_e/2, k its strongest
-    /// beam's, v̇ the force on the state at the point over m, model.rs `Generator::force`), its Doppler order's (w‖T2‖/‖T‖)², and its
+    /// beam's, v̇ the force on the state at the point over m, units.rs `Measured`), its Doppler order's (w‖T2‖/‖T‖)², and its
     /// ground state's population p_b; None where the sample's cluster does not hold its ground state.
     pub(crate) fn drive_parameters(&self, unit: &Unit, at: &Measured) -> Option<(f64, f64, f64, f64)> {
         let Unit::Drive { carrier, excited, ground } = unit else { unreachable!() };
@@ -1064,8 +1064,9 @@ mod tests {
         let at = Point { r: r0, kappa: [speed / model.hbar_over_mass, 0.0, 0.0], t: 0.0 };
         let sample = Sample { cluster, at, psi: vec![C64::ONE] };
         let unit = Unit::Drive { carrier: Component { frequency: probe, counter: false }, excited: e, ground: b };
-        let (_, sweep, _, _) = model.drive_parameters(&unit, &model.measured(&sample, None)).unwrap();
-        let force = model.assemble(sample.cluster, &sample.at, &model.running()).force(&sample.psi, &|_| 1.0);
+        let measured = model.measured(&sample, None);
+        let (_, sweep, _, _) = model.drive_parameters(&unit, &measured).unwrap();
+        let force = measured.force;
         let k = model.light.beams[model.carriers[0].beams[0]].wave_vector();
         let expected = (speed * slope + model.hbar_over_mass * dot3(k, force)).abs() / (gamma * gamma / 4.0);
         assert!((sweep - expected).abs() <= 1e-9 * expected, "the measured a {sweep} against |v·∂Δ + k·v̇|/(Γ/2)² = {expected}");

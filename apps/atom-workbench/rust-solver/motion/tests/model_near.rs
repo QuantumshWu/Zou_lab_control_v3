@@ -6,6 +6,7 @@ use atom_motion::field::Light;
 use atom_motion::linalg::{C64, Mat};
 use atom_motion::model::{Component, Lights, Model, Point, Sample, Unit, GROUND, STATES};
 use atom_motion::request::Request;
+use atom_motion::step::Middle as _;
 
 mod model_common;
 use model_common::{decay_rate, scene};
@@ -16,14 +17,12 @@ fn frequency_of(request: &Request, light: &Light, id: &str) -> usize {
     light.frequencies.iter().position(|f| f.beams.contains(&beam)).unwrap()
 }
 
-/// The sum of a generator's parts at the point (τ = 0).
+/// A cluster's generator at a point and momentum, at rest there.
 fn total(model: &Model, cluster: usize, at: &Point, lights: &Lights) -> Mat {
-    let g = model.assemble(cluster, at, lights);
+    let middle = model.assemble(cluster, at.r, at.t, lights);
     let n = model.clusters()[cluster].states.len();
     let mut h = Mat::zeros(n, n);
-    for p in &g.parts {
-        h.add_scaled(C64::ONE, &p.generator);
-    }
+    middle.generator(&middle.path(at.kappa, [0.0; 3]), 0.0, &mut h);
     h
 }
 
@@ -98,9 +97,7 @@ fn a_raman_pair_is_kept_on_resonance_and_couples_at_the_closed_form() {
     assert_eq!(model.cluster_of(5), cluster, "the pair joins its states");
     let c = &model.clusters()[cluster];
     let (x, y) = (c.states.iter().position(|&s| s == 1).unwrap(), c.states.iter().position(|&s| s == 5).unwrap());
-    let g = model.assemble(cluster, &Point { r: trap.centre, kappa: [0.0; 3], t: 0.0 }, &model.running());
-    let still = g.parts.iter().find(|p| p.omega == 0.0 && p.wave == [0.0; 3]).unwrap();
-    let coupling = still.generator[(x, y)];
+    let coupling = total(&model, cluster, &Point { r: trap.centre, kappa: [0.0; 3], t: 0.0 }, &model.running())[(x, y)];
     let (beam_a, beam_b) = (&request.beams[light.frequencies[fa].beams[0]], &request.beams[light.frequencies[fb].beams[0]]);
     let omega = |f: usize| model.omega(&atom_motion::model::Beat({
         let mut n: Vec<i64> = light.frequencies[f].index.iter().map(|&i| i as i64).collect();

@@ -35,7 +35,7 @@
 //! damped motion -- the sum reads more than the error: the safe side.
 
 use crate::linalg::dot3;
-use crate::model::{Generator, STATES};
+use crate::model::{Point, STATES};
 use crate::step::{jump, step, step_work, test_loss, Dynamics, Flow, Refused, Segment, Step, Trajectory};
 use crate::units::ORDER;
 
@@ -122,7 +122,7 @@ fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, 
     };
     let richardson = |order: i32| (1 << order) as f64 / ((1 << order) - 1) as f64;
     add(&marks(model, &on, &second.end), richardson(ORDER));
-    if let Some((finer, work)) = s.regrid() {
+    if let Some((finer, work)) = s.regrid(model) {
         trajectory.work += work;
         add(&marks(model, &on, &finer), richardson(GRID_ORDER));
     }
@@ -190,10 +190,10 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, mu
     Ok(())
 }
 
-/// The integrator's counted work of one step of τ through a cluster's generator at a point, the path at the velocity v
-/// (µm/µs), and the generator assemblies it asks: what `advance` adds to `Trajectory::work` and `Trajectory::assemblies`
-/// per step, priced without taking it (`step::step_work`). The model's price is the assemblies times its `assembly_work`.
-pub fn advance_work(generator: &Generator, waves: &[[f64; 3]], velocity: [f64; 3], tau: f64) -> (f64, u64) {
-    let (work, _) = step_work(generator, waves, velocity, tau, tau / (2 * 2 * HALF_PANELS) as f64);
-    (work, 2)
+/// The counted work of one step of τ of a cluster from a point (the middle taken there, the path at its momentum), and the
+/// middles it asks of the model: what `advance` adds to `Trajectory::work` and `Trajectory::assemblies` per step, priced
+/// without taking it (`step::step_work`). The model's price of a middle is its `assembly_work`.
+pub fn advance_work<D: Dynamics>(model: &D, cluster: usize, at: &Point, tau: f64) -> (f64, u64) {
+    let (work, _) = step_work(model, cluster, at, tau, tau / (2 * 2 * HALF_PANELS) as f64);
+    (work, 1)
 }

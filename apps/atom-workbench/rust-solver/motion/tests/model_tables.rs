@@ -8,9 +8,8 @@ use atom_motion::model::tabulate::{Coordinate, Tables};
 use atom_motion::model::{Component, Lights, Lit, Model, Photon, Point, Reach, Run, Sample, Trap, Unit, UnitError, GROUND};
 use atom_motion::random::{Purpose, Stream};
 use atom_motion::request::Request;
-use atom_motion::step::Dynamics;
+use atom_motion::step::{Dynamics, Middle};
 use atom_motion::units::{CONFIDENCE, KT_PER_UK, MOST_TRAJECTORIES};
-use std::collections::BTreeMap;
 use std::time::Instant;
 
 mod model_common;
@@ -56,32 +55,25 @@ fn rate(run: &Run, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
     run.photons(cluster, at, psi).iter().flat_map(|p| p.amplitudes.iter()).map(|u| norm_sqr(u)).sum::<f64>() / norm_sqr(psi)
 }
 
-/// A generator's parts by their beat and wave vector (parts of one key summed): the matrix and the three forces' entries.
-fn parts(run: &Run, cluster: usize, at: &Point) -> BTreeMap<(Vec<i64>, [i64; 3]), Vec<C64>> {
-    let mut out: BTreeMap<(Vec<i64>, [i64; 3]), Vec<C64>> = BTreeMap::new();
-    for p in run.generator(cluster, at).parts {
-        let all: Vec<C64> = p.generator.data.iter().chain(p.force.iter().flat_map(|f| f.data.iter())).copied().collect();
-        let entry = out.entry((p.beat.0.clone(), p.wave.map(|x| (x * 1e9).round() as i64))).or_insert_with(|| vec![C64::ZERO; all.len()]);
-        entry.iter_mut().zip(&all).for_each(|(x, y)| *x += *y);
+/// A cluster's generator at a point as a step meets it (step.rs `Middle`): on the path at the point's own velocity, its
+/// matrix at three times about the middle, and there its gradient's forms with the density of a state.
+fn nodes(model: &Model, middle: &impl Middle, at: &Point, psi: &[C64]) -> (Vec<C64>, Vec<f64>) {
+    let n = psi.len();
+    let path = middle.path(at.kappa, at.kappa.map(|k| model.hbar_over_mass() * k));
+    let rho: Vec<C64> = (0..n * n).map(|i| psi[i / n] * psi[i % n].conj() / norm_sqr(psi)).collect();
+    let (mut matrices, mut forms) = (vec![], vec![]);
+    let mut h = atom_motion::linalg::Mat::zeros(n, n);
+    for s in [-0.2, 0.0, 0.3] {
+        middle.generator(&path, s, &mut h);
+        matrices.extend_from_slice(&h.data);
+        forms.extend(middle.force(&path, s, &rho));
     }
-    out
+    (matrices, forms)
 }
 
-/// The distances of two generators' parts, the matrices' and the forces' (Frobenius, over every part).
-fn distance(a: &BTreeMap<(Vec<i64>, [i64; 3]), Vec<C64>>, b: &BTreeMap<(Vec<i64>, [i64; 3]), Vec<C64>>) -> (f64, f64) {
-    let (mut value, mut force) = (0.0, 0.0);
-    for key in a.keys().chain(b.keys().filter(|k| !a.contains_key(*k))) {
-        let n = a.get(key).or(b.get(key)).unwrap().len() / 4;
-        for i in 0..4 * n {
-            let d = (a.get(key).map_or(C64::ZERO, |v| v[i]) - b.get(key).map_or(C64::ZERO, |v| v[i])).norm_sqr();
-            if i < n {
-                value += d;
-            } else {
-                force += d;
-            }
-        }
-    }
-    (value.sqrt(), force.sqrt())
+/// The distances of two generators' nodes, the matrices' (Frobenius) and the forms'.
+fn distance(a: &(Vec<C64>, Vec<f64>), b: &(Vec<C64>, Vec<f64>)) -> (f64, f64) {
+    (a.0.iter().zip(&b.0).map(|(x, y)| (*x - *y).norm_sqr()).sum::<f64>().sqrt(), a.1.iter().zip(&b.1).map(|(x, y)| (x - y) * (x - y)).sum::<f64>().sqrt())
 }
 
 /// R3_DOPPLER's tweezer carries its cooling line through resonance within reach of atoms that have heated to 100 µK (the line
@@ -89,9 +81,9 @@ fn distance(a: &BTreeMap<(Vec<i64>, [i64; 3]), Vec<C64>>, b: &BTreeMap<(Vec<i64>
 /// intensity, the tables' axis). Across the tweezer from its axis to the reach's edge, at 240 places between the nodes, the
 /// tabulated model is the exact one within the tables' shares (tabulate.rs, # Refinement): the photon rate of an atom moving
 /// along the cooling pair, the error of its generator as the ledger reads it (`Model::table_reads`: δ on what is shown, on T
-/// with the potential's), and the near light's parts and forces themselves to the same size -- the parts' error of the near
-/// light's own parts at the place, the forces' of the near light's largest force over the sweep (its force crosses zero, where
-/// no error is small beside it). The sweep does cross the resonance: the exact rate peaks at several times its value on the
+/// with the potential's), and the generator on the atom's path and its force there to the same size -- the matrices' error of
+/// the near light's own share at the place, the forces' of the near light's largest over the sweep (its force crosses zero,
+/// where no error is small beside it). The sweep does cross the resonance: the exact rate peaks at several times its value on the
 /// axis. (The first grid's seven nodes on the axis, as the tables were first made, missed that rate by −13 % to +77 %.)
 #[test]
 fn a_table_follows_a_line_through_resonance_across_its_axis() {
@@ -125,8 +117,8 @@ fn a_table_follows_a_line_through_resonance_across_its_axis() {
         let (at, psi) = (&sample.at, &sample.psi);
         let (r, t) = (rate(&exact, cluster, at, psi), rate(&fast, cluster, at, psi));
         rates.push(r);
-        let (e, f) = (parts(&exact, cluster, at), parts(&fast, cluster, at));
-        let far: BTreeMap<_, _> = model.assemble(cluster, at, &dark).parts.iter().map(|p| ((p.beat.0.clone(), p.wave.map(|x| (x * 1e9).round() as i64)), p.generator.data.iter().chain(p.force.iter().flat_map(|f| f.data.iter())).copied().collect())).collect();
+        let (e, f) = (nodes(&model, &exact.middle(cluster, at.r, at.t), at, psi), nodes(&model, &fast.middle(cluster, at.r, at.t), at, psi));
+        let far = nodes(&model, &model.assemble(cluster, at.r, at.t, &dark), at, psi);
         let (error, near) = (distance(&e, &f), distance(&e, &far));
         worst = [worst[0].max((t - r).abs() / r), worst[1].max(read.population), worst[2].max(read.temperature), worst[3].max(error.0 / near.0)];
         force = [force[0].max(error.1), force[1].max(near.1)];
@@ -135,7 +127,7 @@ fn a_table_follows_a_line_through_resonance_across_its_axis() {
     eprintln!("R3_DOPPLER over {edge:.2} µm, {} nodes: rate {:.4} on the axis, {peak:.4} at its peak; largest errors: rate {:.2e}, shown {:.2e}, T {:.2e}, parts {:.2e}, forces {forces:.2e}", table.table.axes()[0].nodes, rates[0], worst[0], worst[1], worst[2], worst[3]);
     assert!(peak > 5.0 * rates[0], "the sweep crosses the resonance: {peak} against {} on the axis", rates[0]);
     assert!(worst[0] <= shown && worst[1] <= shown && worst[2] <= temperature, "rate {:.2e}, shown {:.2e} beyond {shown:.2e}, or T {:.2e} beyond {temperature:.2e}", worst[0], worst[1], worst[2]);
-    assert!(worst[3] <= shown && forces <= temperature, "the near light's parts {:.2e} and forces {forces:.2e}", worst[3]);
+    assert!(worst[3] <= shown && forces <= temperature, "the near light's share of the generator {:.2e} and forces {forces:.2e}", worst[3]);
 }
 
 /// R2_RECOIL with its probe near, the atom in |2,2⟩, its reach at the request's temperature and its tables.
@@ -163,8 +155,8 @@ fn points() -> Vec<[f64; 3]> {
 }
 
 /// The tweezer's intensity is the one axis (its weight the line's move in half-widths over the reach; the probe's plane wave
-/// weighs nothing: its intensity is the same everywhere, and the table's build ends), and the tabulated generator -- its matrices
-/// and its force through the chain rule -- is the exact one's to the interpolation's orders: halving the axis's spacing divides
+/// weighs nothing: its intensity is the same everywhere, and the table's build ends), and the tabulated generator -- its matrix
+/// on a path and its force through the chain rule -- is the exact one's to the interpolation's orders: halving the axis's spacing divides
 /// the largest value error over the points by about 2³ and the force's by about 2² (within a factor two of each: the points meet
 /// the cubic's error shape at different places in its intervals).
 #[test]
@@ -182,11 +174,9 @@ fn a_table_is_the_elimination_to_its_interpolation_s_orders() {
             .iter()
             .map(|&r| {
                 let at = Point { r, kappa: [2.0, -1.0, 0.5], t: 0.0 };
-                let (a, b) = (parts(&exact, cluster, &at), parts(&fast, cluster, &at));
-                let n = a.values().next().unwrap().len() / 4;
-                let size = |from: usize, to: usize| a.values().map(|v| norm_sqr(&v[from..to])).sum::<f64>().sqrt();
+                let (a, b) = (nodes(&model, &exact.middle(cluster, r, 0.0), &at, &[C64::ONE]), nodes(&model, &fast.middle(cluster, r, 0.0), &at, &[C64::ONE]));
                 let d = distance(&a, &b);
-                (d.0 / size(0, n), d.1 / size(n, 4 * n))
+                (d.0 / norm_sqr(&a.0).sqrt(), d.1 / a.1.iter().map(|x| x * x).sum::<f64>().sqrt())
             })
             .fold((0.0, 0.0), |a, b| (a.0.max(b.0), a.1.max(b.1)))
     };
@@ -253,8 +243,8 @@ fn samples(model: &Model, trap: &Trap, reach: &Reach, temperature: f64, count: u
 }
 
 /// REPORT (run by name: `SCENE=<name or path> cargo test ... --test model_tables a_scene_s_tables_against_its_exact_elimination --
-/// --ignored --nocapture`): a scene's tables against its exact elimination at samples over its reach -- the near light's parts
-/// (of the near light's own at the sample) and forces (of its largest force over the samples), the photons (their classes,
+/// --ignored --nocapture`): a scene's tables against its exact elimination at samples over its reach -- the generator on the
+/// sample's path (of the near light's own share there) and its forces (of the near light's largest over the samples), the photons (their classes,
 /// rates and amplitudes; the absorption's two moments of a fixed polarization summed over the classes by their rates, of k and
 /// k² times the rate), the loss energy, the readout, and the ledger's reads.
 #[test]
@@ -286,8 +276,8 @@ fn a_scene_s_tables_against_its_exact_elimination() {
     let along = |x: &Photon| (0..x.amplitudes[0].len()).map(|i| (0..3).map(|a| x.amplitudes[a][i] * polarization[a]).sum::<C64>().norm_sqr()).sum::<f64>();
     for (k, sample) in samples.iter().enumerate() {
         let (cluster, at, psi) = (sample.cluster, &sample.at, &sample.psi);
-        let (e, f) = (parts(&exact, cluster, at), parts(&fast, cluster, at));
-        let far: BTreeMap<_, _> = model.assemble(cluster, at, &dark).parts.iter().map(|p| ((p.beat.0.clone(), p.wave.map(|x| (x * 1e9).round() as i64)), p.generator.data.iter().chain(p.force.iter().flat_map(|f| f.data.iter())).copied().collect())).collect();
+        let (e, f) = (nodes(&model, &exact.middle(cluster, at.r, at.t), at, psi), nodes(&model, &fast.middle(cluster, at.r, at.t), at, psi));
+        let far = nodes(&model, &model.assemble(cluster, at.r, at.t, &dark), at, psi);
         let (error, near) = (distance(&e, &f), distance(&e, &far));
         if near.0 > 0.0 {
             worst[0] = worst[0].max(error.0 / near.0);
@@ -335,7 +325,7 @@ fn a_scene_s_tables_against_its_exact_elimination() {
     eprintln!("{name}: {} candidate units' errors at the samples: the largest on T {largest:.2e}; tabulated against exact, the largest difference {apart:.1e}", units.len());
     let (shown, temperature) = shares();
     eprintln!(
-        "{name}: {} samples; largest differences, tabulated against exact: near parts {:.1e}, near forces {:.1e}; photon rate {:.1e}, class weights {:.1e}, amplitudes {:.1e}, absorption's mean {:.1e} k, second moment {:.1e} k²; loss energy {:.1e} µK; readout {:.1e}; ledger reads: shown {:.1e} (share {shown:.1e}), T {:.1e} (share {temperature:.1e})",
+        "{name}: {} samples; largest differences, tabulated against exact: generator {:.1e}, forces {:.1e} (of the near light's); photon rate {:.1e}, class weights {:.1e}, amplitudes {:.1e}, absorption's mean {:.1e} k, second moment {:.1e} k²; loss energy {:.1e} µK; readout {:.1e}; ledger reads: shown {:.1e} (share {shown:.1e}), T {:.1e} (share {temperature:.1e})",
         samples.len(), worst[0], if force[1] > 0.0 { force[0] / force[1] } else { 0.0 }, worst[2], worst[3], worst[4], worst[5], worst[6], worst[7], worst[8], worst[9], worst[10]
     );
 }
@@ -370,20 +360,33 @@ fn the_model_s_calls_timed() {
                 .fold(f64::INFINITY, f64::min)
         };
         let both = |call: &dyn Fn(&Run, &Sample)| (time(&|s| call(&exact, s), 1), time(&|s| call(&fast, s), 256));
-        let generator = both(&|run, s| drop(std::hint::black_box(run.generator(cluster, &s.at))));
-        let middle = time(&|s| drop(std::hint::black_box(fast.middle(cluster, s.at.r, s.at.t))), 256);
-        let expansion = {
-            let middles: Vec<_> = own.iter().map(|s| fast.middle(cluster, s.at.r, s.at.t)).collect();
+        let middle = both(&|run, s| drop(std::hint::black_box(run.middle(cluster, s.at.r, s.at.t))));
+        // A node's calls on the tabulated middles: the path, the generator, the force's form, the tones.
+        let n = model.clusters()[cluster].states.len();
+        let middles: Vec<_> = own.iter().map(|s| fast.middle(cluster, s.at.r, s.at.t)).collect();
+        let velocity = |s: &Sample| s.at.kappa.map(|k| model.hbar_over_mass() * k);
+        let paths: Vec<_> = own.iter().zip(&middles).map(|(s, m)| m.path(s.at.kappa, velocity(s))).collect();
+        let rhos: Vec<Vec<C64>> = own.iter().map(|s| (0..n * n).map(|i| s.psi[i / n] * s.psi[i % n].conj() / norm_sqr(&s.psi)).collect()).collect();
+        let each = |call: &mut dyn FnMut(usize)| {
             (0..8)
                 .map(|_| {
                     let started = Instant::now();
-                    for k in 0..256 {
-                        std::hint::black_box(middles[k % own.len()].generator(own[k % own.len()].at.kappa));
+                    for k in 0..1024 {
+                        call(k % own.len());
                     }
-                    started.elapsed().as_secs_f64() * 1e6 / 256.0
+                    started.elapsed().as_secs_f64() * 1e6 / 1024.0
                 })
                 .fold(f64::INFINITY, f64::min)
         };
+        let mut h = atom_motion::linalg::Mat::zeros(n, n);
+        let path = each(&mut |k| drop(std::hint::black_box(middles[k].path(own[k].at.kappa, velocity(own[k])))));
+        let generator = each(&mut |k| middles[k].generator(&paths[k], 0.1, std::hint::black_box(&mut h)));
+        let force = each(&mut |k| {
+            std::hint::black_box(middles[k].force(&paths[k], 0.1, &rhos[k]));
+        });
+        let tones = each(&mut |k| middles[k].tones(&paths[k], &rhos[k], &mut |omega, f| {
+            std::hint::black_box((omega, f));
+        }));
         let photons = both(&|run, s| drop(std::hint::black_box(run.photons(cluster, &s.at, &s.psi))));
         let readout = both(&|run, s| {
             std::hint::black_box(run.readout(cluster, &s.at, &s.psi));
@@ -394,10 +397,10 @@ fn the_model_s_calls_timed() {
         let reference = time(&|s| {
             std::hint::black_box(exact.reference(s.at.r));
         }, 256);
-        let g = exact.generator(cluster, &own[0].at);
         eprintln!(
-            "{name} cluster {cluster} (n {}, {} parts): generator {:.0} / {:.2} µs (of it the point {middle:.2}, the expansion {expansion:.2}), photons {:.0} / {:.2}, readout {:.0} / {:.2}, energy {:.0} / {:.2} (exact / tabulated); reference {reference:.2} µs",
-            model.clusters()[cluster].states.len(), g.parts.len(), generator.0, generator.1, photons.0, photons.1, readout.0, readout.1, energy.0, energy.1
+            "{name} cluster {cluster} (n {n}, {}): middle {:.0} / {:.2} µs (exact / tabulated); a path {path:.3}, a node's generator {generator:.3}, force {force:.3}, the tones {tones:.3} µs; photons {:.0} / {:.2}, readout {:.0} / {:.2}, energy {:.0} / {:.2} (exact / tabulated); reference {reference:.2} µs",
+            if middles[0].still() { "still" } else { "beating" },
+            middle.0, middle.1, photons.0, photons.1, readout.0, readout.1, energy.0, energy.1
         );
     }
     // The units' errors at a state (units.rs `Model::errors_with`): every candidate unit's, with the exact elimination and with
