@@ -933,6 +933,8 @@ pub struct Middle<'a> {
     slopes: Vec<C64>,
     /// The complex multiply-adds that made it.
     pub(crate) work: f64,
+    /// Its nodes' scratch, one for all its paths: a node's call fills what it reads.
+    scratch: RefCell<Scratch>,
 }
 
 impl Model {
@@ -1147,7 +1149,7 @@ impl Model {
                 merged.extend((0..block.places.len()).map(|i| hermitian.map_or(C64::ZERO, |at| values[at + i]) + decay.map_or(C64::ZERO, |at| values[at + i])));
             }
         }
-        Middle { model: self, plan: plan.clone(), t, amplitudes, values, merged, directions, slopes, work }
+        Middle { model: self, plan: plan.clone(), t, amplitudes, values, merged, directions, slopes, work, scratch: RefCell::default() }
     }
 
     /// The one generator assembly (module documentation): a cluster's generator at a position and a time under a light set, the
@@ -1159,20 +1161,18 @@ impl Model {
 
 /// The momentum's part of a cluster's generator along a straight path through its middle (`Middle::path`): per beam of the
 /// plan its Doppler shift w_l at the momentum the generator is taken at (rad/µs) and its path rate k_l·v at the path's
-/// velocity (rad/µs); per state of the cluster its Doppler frame's rate K_s·v, and whether any frame turns; and the nodes'
-/// scratch.
+/// velocity (rad/µs); per state of the cluster its Doppler frame's rate K_s·v, and whether any frame turns.
 #[derive(Clone, Debug)]
 pub struct Path {
     shifts: Vec<f64>,
     rates: Vec<f64>,
     gauge: Vec<f64>,
     turning: bool,
-    scratch: RefCell<Scratch>,
 }
 
-/// A node's scratch: the beams' amplitudes turned along the path, the plan's field components there (each with its gradient,
-/// plain and weighted by its beams' Doppler shifts), the tones' phases, the Doppler frames' turns, a ρ laid out as the entries
-/// are, per tone its three sums, and a form's slopes.
+/// A node's scratch (`Middle::scratch`): the beams' amplitudes turned along the path, the plan's field components there (each
+/// with its gradient, plain and weighted by its beams' Doppler shifts), the tones' phases, the Doppler frames' turns, a ρ laid
+/// out as the entries are, per tone its three sums, and a form's slopes.
 #[derive(Clone, Debug, Default)]
 struct Scratch {
     turned: Vec<[C64; 4]>,
@@ -1205,7 +1205,6 @@ impl crate::step::Middle for Middle<'_> {
             rates: plan.beams.iter().map(|&l| dot3(model.light.beams[l].wave_vector(), velocity)).collect(),
             turning: gauge.iter().any(|rate| *rate != 0.0),
             gauge,
-            scratch: RefCell::default(),
         }
     }
 
@@ -1216,7 +1215,7 @@ impl crate::step::Middle for Middle<'_> {
     /// Module documentation, # At a point, and along a path through it.
     fn generator(&self, path: &Path, s: f64, h: &mut Mat) {
         let (plan, n) = (&*self.plan, self.plan.states);
-        let mut scratch = path.scratch.borrow_mut();
+        let mut scratch = self.scratch.borrow_mut();
         let scratch = &mut *scratch;
         self.along(path, Some(s), 1, scratch);
         h.data.fill(C64::ZERO);
@@ -1315,7 +1314,7 @@ impl Middle<'_> {
     /// -- of a flag's values and their adjoints, whose forms with a Hermitian ρ are conjugates, one, twice (`Block::weights`).
     fn contract(&self, path: &Path, on: Option<f64>, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
         let (plan, n, q) = (&*self.plan, self.plan.states, self.directions.len());
-        let mut scratch = path.scratch.borrow_mut();
+        let mut scratch = self.scratch.borrow_mut();
         let scratch = &mut *scratch;
         self.along(path, on, 4, scratch);
         // ρ[y, x] in the Doppler frames along the path, laid out as the entries x ← y are.

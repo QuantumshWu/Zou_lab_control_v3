@@ -1078,22 +1078,41 @@ pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau
 // ---------------------------------------------------------------------------------------------------------------------
 // The jump.
 
-/// A zero-mean kick of covariance C (positive semidefinite up to its rounding): C's Cholesky columns, each with its own
-/// sign, E[L s sᵀ Lᵀ] = L Lᵀ = C; a pivot not above zero (C's null directions and their rounding) leaves its column out.
-fn fluctuation(c: &[[f64; 3]; 3], signs: [f64; 3]) -> [f64; 3] {
-    let mut l = [[0.0; 3]; 3];
-    for j in 0..3 {
-        let pivot = c[j][j] - (0..j).map(|k| l[j][k] * l[j][k]).sum::<f64>();
-        if !(pivot > 0.0) {
-            continue;
+/// A zero-mean kick of covariance C = M − b bᵀ (positive semidefinite: Cauchy–Schwarz), M the recoil's second moment and
+/// b its mean: the columns of a Cholesky factor of C, each with its own sign, E[L s sᵀ Lᵀ] = L Lᵀ = C.
+///
+/// In a null direction of C -- a plane wave's absorption has M = b bᵀ -- a pivot is the rounding of its differences, of
+/// either sign, and its root would make a kick of √u of the recoil out of the rounding u. So the factor is taken with
+/// complete pivoting, the largest remaining pivot first, and ends at a pivot within its rounding. C's entries err by at
+/// most γ_N S, S the largest M_jj + b_j² (their terms' moduli; N = `links`, the operations behind an entry: `jump`), so
+/// ‖ΔC‖₂ ≤ 3γ_N S; and after r columns a pivot of the rest is moved by at most ‖ΔC‖₂(1 + ‖W‖₂²), W the eliminated
+/// columns' multipliers on the rest, which the pivoting bounds, ‖W‖₂² ≤ (3 − r)(4^r − 1)/3 (Higham, Accuracy and
+/// Stability of Numerical Algorithms, Lemma 10.13, n = 3). A largest pivot within that is no direction of C, nor are the
+/// rest.
+fn fluctuation(second: &[[f64; 3]; 3], mean: &[f64; 3], links: usize, signs: [f64; 3]) -> [f64; 3] {
+    let mut c: [[f64; 3]; 3] = std::array::from_fn(|i| std::array::from_fn(|k| second[i][k] - mean[i] * mean[k]));
+    let scale = (0..3).map(|j| second[j][j] + mean[j] * mean[j]).fold(0.0, f64::max);
+    let (mut order, mut l) = ([0, 1, 2], [[0.0; 3]; 3]);
+    for r in 0..3 {
+        let largest = (r..3).max_by(|&x, &y| c[order[x]][order[x]].total_cmp(&c[order[y]][order[y]])).expect("a remaining axis");
+        order.swap(r, largest);
+        let p = order[r];
+        let moved = 3.0 * rounding(links) * scale * (1.0 + ((3 - r) * (4_usize.pow(r as u32) - 1)) as f64 / 3.0);
+        if !(c[p][p] > moved) {
+            break;
         }
-        let root = pivot.sqrt();
-        l[j][j] = root;
-        for i in j + 1..3 {
-            l[i][j] = (c[i][j] - (0..j).map(|k| l[i][k] * l[j][k]).sum::<f64>()) / root;
+        let root = c[p][p].sqrt();
+        l[p][r] = root;
+        for &i in &order[r + 1..] {
+            l[i][r] = c[i][p] / root;
+        }
+        for &i in &order[r + 1..] {
+            for &k in &order[r + 1..] {
+                c[i][k] -= l[i][r] * l[k][r];
+            }
         }
     }
-    std::array::from_fn(|i| (0..3).map(|j| l[i][j] * signs[j]).sum())
+    std::array::from_fn(|i| (0..3).map(|r| l[i][r] * signs[r]).sum())
 }
 
 /// The jump of a trajectory at its state (SPEC §1.6): from `Stream::jump(seed, index, jumps + 1)` the next threshold, the
@@ -1150,8 +1169,12 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut O
     let (epsilon, f, w) = if polarization * (w1 + w2) < w1 { (e1, f1, w1) } else { (e2, f2, w2) };
     let recoil = model.recoil(photon, &epsilon);
     let b = recoil.mean;
-    let spread: [[f64; 3]; 3] = std::array::from_fn(|i| std::array::from_fn(|k| recoil.second[i][k] - b[i] * b[k]));
-    let xi = fluctuation(&spread, signs);
+    // The operations behind an entry of M − b bᵀ (`fluctuation`), each bounded by √((M_ii + b_i²)(M_kk + b_k²)) ≤ S: the
+    // second moment's sum over the n landing states and its E explicit sources, over the norm's own sum (2n + E + 4, the
+    // sources' products with them); the mean's sum over the norm's (2n + 1), twice in the product of two with the
+    // product itself (2(2n + 2)); the difference (1).
+    let links = 6 * f.len() + photon.explicit.len() + 9;
+    let xi = fluctuation(&recoil.second, &b, links, signs);
     for a in 0..3 {
         trajectory.kappa[a] += -photon.wave_number * direction[a] + b[a] + xi[a];
     }
