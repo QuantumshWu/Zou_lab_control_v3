@@ -1172,6 +1172,29 @@ mod tests {
                     middle.generator(&middle.path([0.0; 3], [0.0; 3]), 0.0, &mut h);
                 }
                 let falls: f64 = (0..3).flat_map(|x| (0..3).map(move |y| (x, y))).map(|(x, y)| (psi[x].conj() * C64::I * (h[(x, y)] - h[(y, x)].conj()) * psi[y]).re).sum();
+                // The potential is the same generator's (V_L is the light set's less the same without the trap light): a
+                // state's potential differs between the orders by the diagonals of what the fourth adds to the two
+                // generators, and its gradient is its own slope.
+                let dark = crate::model::Lights((0..fourth.light.frequencies.len()).map(|w| if w == fourth.light.trap { crate::model::Lit::Off } else { crate::model::Lit::Coherent }).collect());
+                let diagonal = |model: &Model, lights: &crate::model::Lights, place: usize| -> f64 {
+                    use crate::step::Middle as _;
+                    let middle = model.assemble(model.membership[3], r, 0.0, lights);
+                    let mut g = Mat::zeros(3, 3);
+                    middle.generator(&middle.path([0.0; 3], [0.0; 3]), 0.0, &mut g);
+                    g[(place, place)].re
+                };
+                for (place, &state) in states.iter().enumerate() {
+                    let alone: [f64; GROUND] = std::array::from_fn(|s| if s == state { 1.0 } else { 0.0 });
+                    let of = |model: &Model, by: f64| model.potential([r[0], r[1], r[2] + by], &alone, &model.running());
+                    let lit = fourth.running();
+                    let more = diagonal(&fourth, &lit, place) - diagonal(&second, &lit, place) - (diagonal(&fourth, &dark, place) - diagonal(&second, &dark, place));
+                    let added = of(&fourth, 0.0) - of(&second, 0.0);
+                    assert!((added - more).abs() <= 1e-9 * largest.max(1.0), "{scene}: the potential's fourth order {added} against the generator's {more}");
+                    let slope = fourth.expand(r, &alone, &fourth.running(), 1, None).quadratic.gradient[2];
+                    let difference = (of(&fourth, step) - of(&fourth, -step)) / (2.0 * step);
+                    // (The central difference's own error: (2k step)²/6 of the slope, 4e-7.)
+                    assert!((slope - difference).abs() <= 2e-6 * slope.abs() + 1e-6, "{scene}: the potential's gradient {slope} against its slope {difference}");
+                }
                 // To the product of the fourth order and the first-order Doppler term (here the recoil shift, 3e-5 of the
                 // detuning, times s), which the photons' product holds and the middle's decay, made at rest, does not.
                 assert!((falls - photons).abs() <= 1e-5 * photons, "{scene}: the norm falls at {falls}, the photons' rate is {photons}");
@@ -1211,7 +1234,8 @@ mod tests {
                 let psi: Vec<C64> = (0..n).map(|x| C64::cis(0.7 * x as f64) * (1.0 / n as f64).sqrt()).collect();
                 let rho: Vec<C64> = (0..n * n).map(|i| psi[i / n] * psi[i % n].conj()).collect();
                 let (rounds, mut h, mut sink) = (20_000, Mat::zeros(n, n), 0.0);
-                let mut times = [std::time::Duration::ZERO; 3];
+                let mut times = [std::time::Duration::ZERO; 7];
+                let mut counts = [0.0; 4];
                 for round in 0..rounds {
                     let r = [centre[0] + 0.01, centre[1], centre[2] + 0.39 * (round % 97) as f64 / 97.0];
                     let at = Point { r, kappa: [0.3, -0.2, 2.5], t: 0.0 };
@@ -1219,23 +1243,40 @@ mod tests {
                     let middle = run.middle(cluster, r, 0.0);
                     times[0] += from.elapsed();
                     let path = middle.path(at.kappa, at.kappa.map(|k| k * model.hbar_over_mass));
+                    let part = std::time::Instant::now();
                     for node in 0..16 {
                         middle.generator(&path, 0.004 * (node as f64 - 7.5), &mut h);
                         sink += h.data[0].re;
                     }
+                    times[3] += part.elapsed();
+                    let part = std::time::Instant::now();
                     for node in 0..8 {
                         sink += middle.force(&path, 0.008 * (node as f64 - 3.5), &rho)[2];
                     }
+                    times[4] += part.elapsed();
                     middle.tones(&path, &rho, &mut |_, f| sink += f[2]);
                     times[1] += from.elapsed();
+                    let work = middle.work();
+                    counts = [middle.work, 16.0 * work[0], 8.0 * work[1], 0.0];
+                    drop(path);
+                    drop(middle);
                     let scattering = std::time::Instant::now();
-                    sink += run.scattering_at(cluster, &at, &psi, None).force[2];
+                    let plan = model.plan(cluster, &model.running());
+                    let (scattered, counted) = model.scattering_of(&plan, tables.of(cluster, &model.running()), &at, &psi, None);
+                    sink += scattered.force[2];
+                    counts[3] = counted;
                     times[2] += scattering.elapsed();
+                    let energy = std::time::Instant::now();
+                    sink += run.model.energy_with(cluster, &at, &psi, Some(&tables));
+                    times[5] += energy.elapsed();
                 }
                 let each = |t: std::time::Duration| t.as_secs_f64() * 1e6 / rounds as f64;
                 let table = tables.of(cluster, &model.running()).map_or(0, |t| t.table.width());
-                let counted = run.middle(cluster, [centre[0] + 0.01, centre[1], centre[2] + 0.1], 0.0).work;
-                eprintln!("{name} {order}: cluster of ground state {ground}: the middle's counted work {counted:.0} complex multiply-adds, {:.2} ns each", each(times[0]) * 1e3 / counted);
+                let ns = |time: std::time::Duration, count: f64| each(time) * 1e3 / count;
+                eprintln!(
+                    "{name} {order}: cluster of ground state {ground}: ns a counted multiply-add -- middle {:.2} ({:.0}), generators {:.2} ({:.0}), forces {:.2} ({:.0}), scattering {:.2} ({:.0}); an energy {:.2} µs",
+                    ns(times[0], counts[0]), counts[0], ns(times[3], counts[1]), counts[1], ns(times[4], counts[2]), counts[2], ns(times[2], counts[3]), counts[3], each(times[5])
+                );
                 eprintln!("{name} {order}: cluster of ground state {ground} ({n} states): the model's part of a step {:.2} µs (its middle {:.2}, its scattering {:.2}); table {table} reals a node, {} tables in {built:.2?} [{sink:.3e}]", each(times[1]) + each(times[2]), each(times[0]), each(times[2]), tables.tables.len());
             }
         }

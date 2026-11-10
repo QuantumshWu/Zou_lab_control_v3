@@ -323,6 +323,8 @@ impl Model {
         let order = if gradients == Gradients::None { 0 } else { 1 };
         let mut site = Held::<Site>::take();
         self.light.amplitudes_into(at.r, 1, |_| true, &mut site.beams);
+        // The fourth order's matrices at the point (assemble.rs `Model::quartic`): the step's middle's where it made them.
+        let fourth_work = plan.fourth.as_ref().map_or(0.0, |fourth| self.quartic(plan, fourth, table, Some(at.r), &mut site, false));
         // The point's jumps' matrices, to first order with their slopes: a table's, or the exact elimination's.
         let mut work = match table {
             _ if len == 0 => {
@@ -340,7 +342,8 @@ impl Model {
         // three lab axes' −½∂X ψ and ∂N ψ.
         let bent: Option<[[C64; STATES]; 8]> = plan.fourth.as_ref().map(|fourth| {
             let (n, size) = (fourth.n, fourth.n * fourth.n);
-            self.quartic(plan, fourth, table, at.r, &site.beams, |q, new| {
+            work += fourth_work;
+            crate::model::Model::quartic_read(|q| {
                 let mut out = [[C64::ZERO; STATES]; 8];
                 let (near, metric) = (&q.data[..4 * size], &q.data[8 * size..]);
                 for part in 0..if order >= 1 { 4 } else { 1 } {
@@ -356,7 +359,7 @@ impl Model {
                         }
                     }
                 }
-                work += if new { q.work } else { 0.0 } + (2 * size * if order >= 1 { 4 } else { 1 }) as f64;
+                work += (2 * size * if order >= 1 { 4 } else { 1 }) as f64;
                 out
             })
         });

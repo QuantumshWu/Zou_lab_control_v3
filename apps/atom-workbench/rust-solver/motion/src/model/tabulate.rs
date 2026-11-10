@@ -663,21 +663,6 @@ impl Model {
         NearValues { len, order, data, directions: Some(gradients), work }
     }
 
-    /// A table's interpolant of the first `entries` near forms at a point with its slopes along the axes, as the nodes
-    /// hold them -- each form's real and imaginary part in turn, `slopes[(f entries + e) 2]` along axis f --, into the
-    /// caller's vectors with the axes' coordinates and their gradients; and the counted work.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn near_raw(&self, table: &NearTable, amplitudes: &[Amplitude], entries: usize, coordinates: &mut Vec<f64>, directions: &mut Vec<[f64; 3]>, values: &mut Vec<f64>, slopes: &mut Vec<f64>) -> f64 {
-        let d = table.axes();
-        sized(coordinates, d);
-        sized(directions, d);
-        let work = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, amplitudes, coordinates, directions);
-        sized(values, 2 * entries);
-        sized(slopes, d * 2 * entries);
-        table.table.eval_range(coordinates, 0, values, Some(slopes));
-        work + (4usize.pow(d as u32) * (1 + d) * 2 * entries) as f64 / crate::decide::COMPLEX
-    }
-
     /// A point's jumps' matrices from a table (assemble.rs, # The jumps' matrices), to an order (0 or 1), into the
     /// point's vectors from its beams' amplitudes, and their counted work: the axes' coordinates there and their gradients (the slopes'
     /// directions; none to order 0), the matrices -- the table's interpolant of them onto their constant part -- and to

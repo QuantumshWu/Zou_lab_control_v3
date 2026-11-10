@@ -578,7 +578,10 @@ impl Model {
     pub(crate) fn landed(&self, plan: &assemble::Plan, table: Option<&tabulate::NearTable>, at: &Point, f: &[C64]) -> (Vec<C64>, f64) {
         let Some(fourth) = &plan.fourth else { return (f.to_vec(), 0.0) };
         let (n, size) = (fourth.n, fourth.n * fourth.n);
-        let slow: Vec<C64> = self.quartic(plan, fourth, table, at.r, &self.light.amplitudes(at.r), |q, _| {
+        let mut site = assemble::Held::<assemble::Site>::take();
+        self.light.amplitudes_into(at.r, 1, |_| true, &mut site.beams);
+        self.quartic(plan, fourth, table, Some(at.r), &mut site, false);
+        let slow: Vec<C64> = Model::quartic_read(|q| {
             let (partner, metric) = (&q.data[4 * size..5 * size], &q.data[8 * size..9 * size]);
             (0..n).map(|x| (0..n).fold(f[x], |z, y| z + (metric[x * n + y] * 0.5 - partner[x * n + y]) * f[y])).collect()
         });
