@@ -69,7 +69,7 @@
 //! least (the jackknife's least for a spread) and on no fewer trajectories than the attempt's last one -- a product's
 //! first groups, or a pilot at a finer rung, are no better than the result before them --; else the last result goes out
 //! again, so that the app hears from the solve whatever stage it is in.
-use crate::adapt::{self, Drift};
+use crate::adapt::{self, Drift, Reader};
 use crate::decide::{assured, halved, judge, pays, Judgement, Read};
 use crate::ensemble::{Ensemble, Quadrature, Start, Well, GROUP};
 use crate::estimate::{draws_for, half_window, occupation, paired, spread, stepped, summarize, unseen, wilson, Estimate, Fate, Group, Held, Output, Scales, Spread, Stepped};
@@ -681,7 +681,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: bool, w
     let interval = plan.times[1] - plan.times[0];
     let widest = plan.halves.iter().flatten().fold(0., |a: f64, &b| a.max(b));
     let mut t = Trajectory::new(model, start.state, start.r, start.kappa, SEED, index);
-    let mut drift = read.then_some(Drift::ZERO);
+    let mut reader = read.then(Reader::new);
     // Per output and lab axis: the window's time held, ∫κ dt and ∫κ² dt.
     let mut moments = vec![[[0.; 3]; 3]; outputs];
     let mut out = vec![Output { fate: Fate::Lost, near: None, energy: None }; outputs];
@@ -690,10 +690,10 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: bool, w
     let mut steps = 0;
     // The first output the trajectory does not reach held, and whether the scheme could not advance it.
     let (mut reached, mut failed) = (outputs, false);
-    let mut record = |k: usize, t: &Trajectory, drift: &Option<Drift>, out: &mut Vec<Output>| {
+    let mut record = |k: usize, t: &Trajectory, drift: Option<Drift>, out: &mut Vec<Output>| {
         // The atom at the output's instant; from the first output on its κ and κ² are its window's means (below).
-        let held = Held { rows: model.readout(t.cluster, &t.point(), &t.psi), kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), drift: drift.clone() };
-        out[k] = Output { fate: Fate::Held(held), near: windows.map(|w| margin(t).abs() <= w[k]), energy: drift.as_ref().map(|d| d.energy) };
+        let held = Held { rows: model.readout(t.cluster, &t.point(), &t.psi), kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), drift };
+        out[k] = Output { fate: Fate::Held(held), near: windows.map(|w| margin(t).abs() <= w[k]), energy: drift.map(|d| d.energy) };
         if let Ok(j) = plan.listed.binary_search(&k) {
             listed[j] = Some((t.r, t.kappa));
         }
@@ -702,7 +702,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: bool, w
             samples[k] = Some(State { sample, tau, index });
         }
     };
-    record(0, &t, &drift, &mut out);
+    record(0, &t, reader.as_ref().map(|r| r.drift), &mut out);
     {
         let mut each = |s: &Segment| {
             steps += 1;
@@ -724,16 +724,16 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: bool, w
             }
         };
         for k in 1..outputs {
-            failed = adapt::advance(model, tau, &mut t, drift.as_mut(), plan.times[k], &mut each).is_err();
+            failed = adapt::advance(model, tau, &mut t, reader.as_mut(), plan.times[k], &mut each).is_err();
             if failed || t.lost.is_some() {
                 reached = k;
                 break;
             }
-            record(k, &t, &drift, &mut out);
+            record(k, &t, reader.as_ref().map(|r| r.drift), &mut out);
         }
         if reached == outputs {
             // Through the last output's window; a failure there leaves every output read.
-            failed = adapt::advance(model, tau, &mut t, drift.as_mut(), plan.end, &mut each).is_err();
+            failed = adapt::advance(model, tau, &mut t, reader.as_mut(), plan.end, &mut each).is_err();
         }
     }
     // From the output it does not reach: failed, or lost -- judged at the state it was lost in, its loss energy's error as
@@ -742,7 +742,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: bool, w
         let gone = if failed {
             Output { fate: Fate::Failed, near: None, energy: None }
         } else {
-            Output { fate: Fate::Lost, near: windows.map(|w| margin(&t).abs() <= w[reached]), energy: drift.as_ref().map(|d| d.energy) }
+            Output { fate: Fate::Lost, near: windows.map(|w| margin(&t).abs() <= w[reached]), energy: reader.as_ref().map(|r| r.drift.energy) }
         };
         out[reached..].fill(gone);
     }

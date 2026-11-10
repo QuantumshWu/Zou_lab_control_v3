@@ -1130,7 +1130,11 @@ fn fluctuation(c: &[[f64; 3]; 3], signs: [f64; 3]) -> [f64; 3] {
 /// test (`test_loss`). A norm that reached its threshold with no photon to emit -- every class's weight zero, or not a
 /// number -- is refused (`Refused::Emission`) with the trajectory as it was: the model's decay and its photons
 /// contradict each other, and no jump is made of that.
-pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), Refused> {
+///
+/// `carried` is a second internal state of the trajectory's cluster taken through the same jump (adapt.rs, # The read):
+/// the picked class's operator into the picked polarization on it, renormalized as ψ is -- the jump is a linear map of
+/// the internal state. One the operator annihilates is dropped (None).
+pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut Option<Vec<C64>>) -> Result<(), Refused> {
     let j = trajectory.jumps + 1;
     let mut stream = Stream::jump(trajectory.seed, trajectory.index, j);
     let threshold = stream.open_uniform();
@@ -1177,6 +1181,13 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), R
     let xi = fluctuation(&spread, signs);
     for a in 0..3 {
         trajectory.kappa[a] += -photon.wave_number * direction[a] + b[a] + xi[a];
+    }
+    if let Some(other) = carried.take() {
+        *carried = model.photons(trajectory.cluster, &at, &other).iter().find(|p| p.class == photon.class).and_then(|p| {
+            let g: Vec<C64> = (0..p.amplitudes[0].len()).map(|i| (0..3).map(|a| p.amplitudes[a][i] * epsilon[a]).sum()).collect();
+            let size = norm_sqr(&g);
+            (size > 0.0).then(|| g.iter().map(|z| *z * (1.0 / size.sqrt())).collect())
+        });
     }
     let scale = 1.0 / w.sqrt();
     trajectory.psi = f.iter().map(|z| *z * scale).collect();

@@ -267,7 +267,7 @@ impl Model {
             }
         };
         let mut out = vec![];
-        for class in &self.classes[cluster] {
+        for (place, class) in self.classes[cluster].iter().enumerate() {
             let n = self.clusters[class.landing].states.len();
             let mut u: [Vec<C64>; 3] = std::array::from_fn(|_| vec![C64::ZERO; n]);
             let mut gradients: [[Vec<C64>; 3]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| vec![C64::ZERO; n]));
@@ -307,6 +307,7 @@ impl Model {
                 continue;
             }
             out.push(Photon {
+                class: place,
                 landing: class.landing,
                 wave_number: self.class_wave_number(class),
                 amplitudes: u,
