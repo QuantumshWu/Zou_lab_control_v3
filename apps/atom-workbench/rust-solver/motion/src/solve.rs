@@ -362,8 +362,12 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
     let exact = |kinetic: &[Quadrature]| -> (V3, f64) {
         (ensemble.momentum(&kinetic.iter().map(|k| k.eta).collect::<Vec<_>>()), kinetic.iter().map(|k| k.difference / k.eta).fold(0., f64::max))
     };
-    let first = ensemble.kinetic(0);
-    let (momentum, start) = exact(&first);
+    // T(0) and n̄(0) by quadrature (ensemble.rs `Ensemble::kinetic`), twice. Here with no budget: the two levels it takes
+    // at least -- an error needs two to differ --, for the results the pilot's stages send. After the pilot with as many
+    // evaluations of the potential as the pilot took steps: a step evaluates the potential's expansion at least once (its
+    // reference flow's, SPEC §2.1), so the quadrature costs no more than the pilot the solve has just run, in any trap;
+    // where that budget ends it before its levels agree, their difference is T(0)'s booked error (`Fixed::start`).
+    let (momentum, start) = exact(&ensemble.kinetic(0));
     let mut context = Context {
         momentum,
         fixed: Fixed { model: vec![[0.; 2]; outputs], cleared: vec![0.; outputs], held: vec![1.; outputs], temperature: vec![None; outputs], step: vec![step_bound(); outputs], windows: vec![], start },
@@ -418,6 +422,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
         return Ok(Attempt::Grow(t, tau));
     }
     (context.momentum, context.fixed.start) = exact(&ensemble.kinetic(counts.steps));
+
     // The step's error booked per output: the read's bound on the rows as shown -- a probability's error is at most 1,
     // which an unreadable one is booked at, flagged -- and on T, unbounded where it is not read (T's account is then none,
     // flagged where the run shows T, `assemble`); and the loss energy's window, unbounded where no trajectory reads it.
@@ -551,9 +556,15 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
 }
 
 /// The trajectories a batch brings a run of `have` to, for the `need` its estimates predict: whole groups, more than it
-/// has, at most twice as many -- the need is predicted from a variance read on the groups so far (the pilot's eleven at
-/// first, whose largest read over the outputs runs high), and a batch that only doubles them leaves at most half of the
-/// work to a wrong prediction --, and `MOST_TRAJECTORIES` at most.
+/// has, at most twice as many, and `MOST_TRAJECTORIES` at most.
+///
+/// At most twice: the need is predicted from a variance read on the groups so far (the pilot's eleven at first, whose
+/// largest read over the outputs runs high), and a batch adds no more trajectories than the prediction that sizes it
+/// rests on. What that bounds: the batches accumulate -- every trajectory run is in the result --, so the run ends on the
+/// first total that meets the targets; with totals growing by a factor g at most, the total before it did not meet them
+/// and the last one is below g times the least that does, whatever was predicted. At g = 2 a wrong prediction costs less
+/// than as much again as the run needed (at most half of the work is spent past the need), and a need N times the
+/// pilot's size is reached in log₂ N batches.
 fn batch(need: f64, have: u64) -> u64 {
     ((need / GROUP as f64).ceil() as u64 * GROUP).clamp(have + GROUP, 2 * have).min(MOST_TRAJECTORIES)
 }
@@ -1155,8 +1166,10 @@ fn candidates(
 }
 
 /// Histograms of one coordinate of the held atoms at the listed outputs on one grid symmetric about 0 that holds them all
-/// (the bins' centres; an odd count about √n, n the most atoms at a listed output, at least three): a listed output with no
-/// atom carries the one before it.
+/// (the bins' centres): a listed output with no atom carries the one before it. The number of bins is for the display
+/// alone -- no estimate reads a histogram --: the square-root choice, ⌊√n⌋ for the n atoms of the fullest listed output
+/// (bins of about √n atoms each), made odd so that 0 is a bin's centre, and three at least -- the contract's grid has two
+/// points or more (contract §2.2), and the least odd count that has is three.
 fn histograms(listed: &[Vec<(V3, V3)>], outputs: &[usize], value: &dyn Fn(&(V3, V3)) -> f64) -> Distributions {
     let reach = listed.iter().flatten().map(|s| value(s).abs()).fold(f64::MIN_POSITIVE, f64::max);
     let most = listed.iter().map(Vec::len).max().unwrap_or(0);
@@ -1316,12 +1329,12 @@ mod tests {
     use super::*;
 
     /// The pilot is the smallest ensemble of whole groups that sees a share as large as the statistics' share of the
-    /// population target: z²(1/(√(1 − s²) ε) − 1) = 85.4 at z = 2, s² = 1/5, ε = 0.05, eleven groups of eight.
+    /// population target, z²(1/(√(1 − s²) ε) − 1) = 85.4 trajectories at z = 2, s² = 1/5, ε = 0.05: whole groups whose
+    /// unseen share fits that room, where a group fewer's does not.
     #[test]
     fn the_pilot_sees_the_target() {
-        assert_eq!(pilot_size(), 88);
-        let room = (1. - STEP_SHARE * STEP_SHARE).sqrt() * POPULATION_TARGET;
-        assert!(unseen(88.) <= room && unseen(80.) > room);
+        let (n, room) = (pilot_size(), (1. - STEP_SHARE * STEP_SHARE).sqrt() * POPULATION_TARGET);
+        assert!(n % GROUP == 0 && unseen(n as f64) <= room && unseen((n - GROUP) as f64) > room, "{n}");
     }
 
     /// The ladder's top rung: the output interval over the least power of two below the reference flow's resonance
@@ -1409,12 +1422,15 @@ mod tests {
 
     /// The initial ensembles of the conservative reference traps (refs/scenes R1, the app's own requests: a lone tweezer, a
     /// standing wave, crossed beams of one frequency, a σ⁺ tweezer) in the model's prepared wells under the model's proven
-    /// envelopes: 2¹² draws each -- every one within its envelope (the draw's debug check) -- read the exact moments
-    /// (ħ/m)⟨κ_a²⟩ = Σ_b p_b η_b k_BT (S_b²)_aa per lab axis within four of their standard errors, η from the quadrature on
-    /// a pilot's budget of evaluations (2¹⁶), its last two levels within a tenth of the draws' relative error.
+    /// envelopes: 2¹² draws each read the exact moments (ħ/m)⟨κ_a²⟩ = Σ_b p_b η_b k_BT (S_b²)_aa per lab axis within their
+    /// intervals over the groups at the confidence z -- twelve looks, three axes of four traps -- and the quadrature's own
+    /// error as the solve books it for T(0), its last two levels' relative difference (`Fixed::start`), here on 2¹⁶
+    /// evaluations, fewer than a pilot's steps in these traps (88 trajectories of 800 steps or more). η lies in (0, 1]:
+    /// the lowered isothermal's kinetic temperature, below the Boltzmann one.
     #[test]
     fn the_reference_traps_draw_their_exact_moments() {
-        for name in ["R1_TWEEZER", "R1_RETRO", "R1_CROSSED", "R1_SIGMA_P"] {
+        let names = ["R1_TWEEZER", "R1_RETRO", "R1_CROSSED", "R1_SIGMA_P"];
+        for name in names {
             let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
             let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
             let request = Request::from_native(&line).unwrap();
@@ -1425,14 +1441,17 @@ mod tests {
             let hm = hbar_over_mass(request.mass_kg);
             let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm).unwrap();
             let kinetic = ensemble.kinetic(1 << 16);
-            assert!(kinetic.iter().all(|k| k.eta > 0. && k.eta <= 1. && k.difference < 1.5e-3 * k.eta), "{name}: η {kinetic:?}");
+            assert!(kinetic.iter().all(|k| k.eta > 0. && k.eta <= 1.), "{name}: η {kinetic:?}");
             let exact = ensemble.momentum(&kinetic.iter().map(|k| k.eta).collect::<Vec<_>>());
+            let quadrature = kinetic.iter().map(|k| k.difference / k.eta).fold(0., f64::max);
             let draws: Vec<V3> = (0..1 << 12).map(|i| ensemble.draw(SEED, i).kappa.map(|k| hm * k * k)).collect();
-            let n = draws.len() as f64;
             for a in 0..3 {
-                let mean = draws.iter().map(|d| d[a]).sum::<f64>() / n;
-                let se = (draws.iter().map(|d| (d[a] - mean).powi(2)).sum::<f64>() / (n - 1.) / n).sqrt();
-                assert!((mean - exact[a]).abs() <= 4. * se, "{name} axis {a}: {mean} against {} ± {se}", exact[a]);
+                let groups: Vec<f64> = draws.chunks(GROUP as usize).map(|members| members.iter().map(|d| d[a]).sum::<f64>() / GROUP as f64).collect();
+                let g = groups.len() as f64;
+                let mean = groups.iter().sum::<f64>() / g;
+                let error = (groups.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (g - 1.) / g).sqrt();
+                let within = Spread { error, groups: g }.interval_over((3 * names.len()) as f64) + quadrature * exact[a];
+                assert!((mean - exact[a]).abs() <= within, "{name} axis {a}: {mean} against {} ± {within} (quadrature {quadrature:e})", exact[a]);
             }
         }
     }
