@@ -22,7 +22,24 @@
 //!   E = e^{a/2} a^{5/2} u^{−5/2}/Γ(7/2).
 //! In a beam's whitened coordinates ξ (u = |ξ|², d³r = V_l d³ξ, V_l = w_l² z_{R,l}/2) the first piece is a Gaussian of variance
 //! 1/a per axis within |ξ| ≤ 1, the second ∝ |ξ|⁻⁵ beyond it: the proposal takes a beam and a piece by their masses
-//! (`Component::pieces`), a point from it, and keeps it with probability w(y(r))/Σ_l E(u_l(r)) ≤ 1. The momentum at depth y:
+//! (`Component::pieces`), a point from it, and keeps it with probability w(y(r))/Σ_l E(u_l(r)) ≤ 1.
+//!
+//! The beams' bound is reached only where every beam is at its focus and all are in phase. A well whose bottom lies
+//! elsewhere -- a retro-reflected beam's antinode a mirror phase away from the focus, beams that cannot all be in phase --
+//! is shallower than B: its depth is c = −V(bottom)/k_BT < a, and under the envelope above an atom would be kept with
+//! probability e^{−(a−c)} at best (never, for a cold atom: a − c is the trap's depth times a few 10⁻³, thousands of k_BT
+//! at 1 nK). Nothing is deeper than the bottom, so y(r) ≤ min(a/(1 + u), c) and the envelope is flat at the well's own
+//! depth where the beams' bound exceeds it:
+//! - u ≤ u_c = 2(1 − c/a) (at most 1): E = e^c, a uniform ball in ξ;
+//! - u_c < u ≤ 1: E = e^{c − a(u − u_c)/2} g(u), g = (√u_c + √(u − u_c))/√u ≥ 1 -- the chord again, times a factor of at
+//!   most √2 that makes its radial law two laws drawn exactly: an exponential and a gamma of 3/2 in a(u − u_c)/2;
+//! - u > 1: as before with e^{min(a/2, c)} for e^{a/2}.
+//! With the bottom at the focus and in phase, c = a, u_c = 0 and g = 1: the envelope above. Every weight is carried
+//! relative to e^c, so no depth overflows the format. The acceptance then falls only as the bottom's thermal volume
+//! over the ball's, a power of (a − c). The bottom is the one the descent from the focus reaches (the model's); a
+//! proposal that reads deeper than it is counted (`Ensemble::deeper`) and kept as at the ceiling -- the solve flags it.
+//!
+//! The momentum at depth y:
 //! K with density ∝ (e^{y−K} − 1) K^{1/2} on [0, y] by inverting its distribution kept(3/2, y, K)/kept(3/2, y, y) (`invert`),
 //! the direction uniform. Every draw is exact; the envelope's looseness sets only the acceptance.
 //!
@@ -57,7 +74,7 @@ use crate::random::{Purpose, Stream};
 use crate::special::{by_series, gamma, series, upper};
 use crate::units::{rounding, KT_PER_UK};
 use rayon::prelude::*;
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::TAU;
 
 /// The trajectories of one Latin-hypercube group (SPEC §2.5), and with it the block that the delete-one-group jackknife
 /// leaves out (estimate.rs). A structural size (SPEC §0): every member is distributed as an independent draw and the
@@ -149,30 +166,6 @@ fn invert(y: f64, u: f64) -> f64 {
     root(|v| { let k = v.powf(1. / s); (kept(s, y, k, y), ((-k).exp() - (-y).exp()) / gamma(s + 1.)) }, target, 0., y.powf(s)).powf(1. / s)
 }
 
-/// Gauss–Legendre's nodes and weights on [−1, 1]: Newton's iteration on P_n from Tricomi's start, cos(π(i + ¾)/(n + ½))
-/// for the i-th node from 0, to round-off.
-fn legendre(n: usize) -> Vec<(f64, f64)> {
-    (0..n)
-        .map(|i| {
-            let mut x = (PI * (i as f64 + 0.75) / (n as f64 + 0.5)).cos();
-            loop {
-                let (mut p0, mut p1) = (1., x);
-                for k in 2..=n {
-                    let p2 = ((2 * k - 1) as f64 * x * p1 - (k - 1) as f64 * p0) / k as f64;
-                    p0 = p1;
-                    p1 = p2;
-                }
-                let slope = n as f64 * (x * p1 - p0) / (x * x - 1.);
-                let dx = p1 / slope;
-                x -= dx;
-                if dx.abs() <= 2. * f64::EPSILON {
-                    return (x, 2. / ((1. - x * x) * slope * slope));
-                }
-            }
-        })
-        .collect()
-}
-
 /// A Gaussian beam of the envelope (module documentation, # Its draw): its frame (two axes across it, its direction), its
 /// waist and Rayleigh range.
 #[derive(Clone, Debug)]
@@ -212,14 +205,16 @@ fn direction(mu: f64, phi: f64) -> V3 {
     [s * cp, s * sp, mu]
 }
 
-/// One initial component: its basis state and its share, its well, the envelope's top a = B/k_BT and beams, the cumulative
-/// masses of its pieces (per beam the core, then the tail; module documentation, # Its draw), and its well's bottom, axes,
-/// curvatures λ_i = ω_i²/(ħ/m) and Wigner scales s_i.
+/// One initial component: its basis state and its share, its well, the envelope's top a = B/k_BT, its ceiling c (the
+/// bottom's depth in k_BT, at most a) and beams, the cumulative masses of its pieces relative to e^c (per beam the flat
+/// ball, the two laws of the chord, the tail; module documentation, # Its draw), and its well's bottom, axes, curvatures
+/// λ_i = ω_i²/(ħ/m) and Wigner scales s_i.
 struct Component<'a> {
     state: usize,
     weight: f64,
     well: &'a dyn Well,
     top: f64,
+    ceiling: f64,
     modes: Vec<Mode>,
     pieces: Vec<f64>,
     centre: V3,
@@ -229,14 +224,36 @@ struct Component<'a> {
 }
 
 impl Component<'_> {
-    /// Σ_l E(u_l(r)) e^{−a} (module documentation, # Its draw).
+    /// u_c, where the beams' bound meets the ceiling: 2(1 − c/a), at most 1.
+    fn flat(&self) -> f64 {
+        (2. * (1. - self.ceiling / self.top)).min(1.)
+    }
+    /// The masses of a beam's four pieces over e^c and its volume (module documentation, # Its draw): the flat ball, the
+    /// chord's exponential and its gamma law, the tail.
+    fn masses(&self) -> [f64; 4] {
+        let (a, flat) = (self.top, self.flat());
+        let span = 0.5 * a * (1. - flat);
+        [
+            2. * TAU / 3. * flat.powf(1.5),
+            TAU * flat.sqrt() * (2. / a) * -(-span).exp_m1(),
+            TAU * (2. / a).powf(1.5) * gamma(1.5) * if span > 0. { regularized(1.5, span) } else { 0. },
+            TAU * ((0.5 * a).min(self.ceiling) - self.ceiling).exp() * a.powf(2.5) / gamma(3.5),
+        ]
+    }
+    /// Σ_l E(u_l(r)) e^{−c} (module documentation, # Its draw).
     fn envelope(&self, r: V3) -> f64 {
-        let a = self.top;
+        let (a, flat) = (self.top, self.flat());
         self.modes
             .iter()
             .map(|m| {
                 let u = m.coordinate(r);
-                if u <= 1. { (-0.5 * a * u).exp() } else { (-0.5 * a).exp() * a.powf(2.5) * u.powf(-2.5) / gamma(3.5) }
+                if u <= flat {
+                    1.
+                } else if u <= 1. {
+                    (-0.5 * a * (u - flat)).exp() * (flat.sqrt() + (u - flat).sqrt()) / u.sqrt()
+                } else {
+                    ((0.5 * a).min(self.ceiling) - self.ceiling).exp() * a.powf(2.5) * u.powf(-2.5) / gamma(3.5)
+                }
             })
             .sum()
     }
@@ -244,15 +261,21 @@ impl Component<'_> {
     fn propose(&self, piece: f64, radial: f64, mu: f64, phi: f64) -> V3 {
         let total = self.pieces[self.pieces.len() - 1];
         let j = self.pieces.partition_point(|&c| c <= piece * total).min(self.pieces.len() - 1);
-        let (mode, a) = (&self.modes[j / 2], self.top);
-        let size = if j % 2 == 0 {
-            // The core: x = a u/2 with density ∝ x^{1/2} e^{−x} on [0, a/2], P(3/2, x) = radial P(3/2, a/2), in v = x^{3/2}.
-            let target = radial * regularized(1.5, 0.5 * a);
-            let x = root(|v| { let x = v.powf(2. / 3.); (regularized(1.5, x), (-x).exp() / gamma(2.5)) }, target, 0., (0.5 * a).powf(1.5)).powf(2. / 3.);
-            (2. * x / a).sqrt()
-        } else {
+        let (mode, a, flat) = (&self.modes[j / 4], self.top, self.flat());
+        let span = 0.5 * a * (1. - flat);
+        let size = match j % 4 {
+            // The flat ball: uniform in |ξ|² ≤ u_c.
+            0 => flat.sqrt() * radial.cbrt(),
+            // The chord's exponential: x = a(u − u_c)/2 with density ∝ e^{−x} on [0, span].
+            1 => (flat - 2. / a * (radial * (-span).exp_m1()).ln_1p()).sqrt(),
+            // Its gamma law: density ∝ x^{1/2} e^{−x} on [0, span], P(3/2, x) = radial P(3/2, span), in v = x^{3/2}.
+            2 => {
+                let target = radial * regularized(1.5, span);
+                let x = root(|v| { let x = v.powf(2. / 3.); (regularized(1.5, x), (-x).exp() / gamma(2.5)) }, target, 0., span.powf(1.5)).powf(2. / 3.);
+                (flat + 2. * x / a).sqrt()
+            }
             // The tail: |ξ| with density ∝ |ξ|⁻³ on (1, ∞).
-            (1. - radial).powf(-0.5)
+            _ => (1. - radial).powf(-0.5),
         };
         mode.point(direction(2. * mu - 1., TAU * phi).map(|x| x * size))
     }
@@ -291,6 +314,8 @@ pub struct Ensemble<'a> {
     components: Vec<Component<'a>>,
     kt: f64,
     hbar_over_mass: f64,
+    /// The proposals that read deeper than their well's bottom (`deeper`).
+    over: std::sync::atomic::AtomicU64,
 }
 
 impl<'a> Ensemble<'a> {
@@ -309,26 +334,24 @@ impl<'a> Ensemble<'a> {
                 }
                 let modes = beams.iter().map(Mode::new).collect::<Result<Vec<_>, _>>()?;
                 let a = bound / kt;
-                let core = (TAU / a).powf(1.5) * regularized(1.5, 0.5 * a);
-                let tail = (-0.5 * a).exp() * a.powf(2.5) / gamma(3.5) * TAU;
-                let mut pieces = Vec::with_capacity(2 * modes.len());
-                let mut sum = 0.;
-                for m in &modes {
-                    for mass in [core, tail] {
-                        sum += mass * m.volume();
-                        pieces.push(sum);
-                    }
-                }
                 let (centre, axes, frequencies) = well.trap();
+                let ceiling = (-well.potential(centre).0 / kt).min(a);
+                if !(ceiling > 0.) {
+                    return Err(NO_WELL.to_string());
+                }
                 let curvatures = frequencies.map(|w| w * w / hbar_over_mass);
                 let scales = frequencies.map(|w| {
                     let half = 0.5 * w / kt;
                     (half / half.tanh()).sqrt()
                 });
-                Ok(Component { state, weight: p / total, well, top: a, modes, pieces, centre, axes, curvatures, scales })
+                let mut component = Component { state, weight: p / total, well, top: a, ceiling, modes, pieces: vec![], centre, axes, curvatures, scales };
+                let masses = component.masses();
+                let mut sum = 0.;
+                component.pieces = component.modes.iter().flat_map(|m| masses.map(|mass| mass * m.volume())).map(|mass| { sum += mass; sum }).collect();
+                Ok(component)
             })
             .collect::<Result<Vec<_>, String>>()?;
-        Ok(Ensemble { components, kt, hbar_over_mass })
+        Ok(Ensemble { components, kt, hbar_over_mass, over: std::sync::atomic::AtomicU64::new(0) })
     }
 
     /// The initial state of trajectory `index` of the run `seed`: its group the `GROUP` trajectories from index − index mod
@@ -353,7 +376,10 @@ impl<'a> Ensemble<'a> {
             let r = c.propose(proposal[0], proposal[1], proposal[2], proposal[3]);
             let (v, gradient) = c.well.potential(r);
             let y = -v / self.kt;
-            if y > 0. && own.open_uniform() * c.envelope(r) <= kept(1.5, y, y, c.top) {
+            if y > c.ceiling + rounding(self.components.len()) * c.top {
+                self.over.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if y > 0. && own.open_uniform() * c.envelope(r) <= kept(1.5, y, y, c.ceiling) {
                 break (r, y, gradient);
             }
             proposal = std::array::from_fn(|_| own.interior());
@@ -388,9 +414,9 @@ impl<'a> Ensemble<'a> {
             })
             .collect()
     }
-    /// ∫ kept(3/2, y) d³r and ∫ kept(5/2, y) d³r (at shift a), with n nodes per coordinate per beam, and the evaluations.
+    /// ∫ kept(3/2, y) d³r and ∫ kept(5/2, y) d³r (at shift c), with n nodes per coordinate per beam, and the evaluations.
     fn integrals(&self, c: &Component, n: usize) -> ([f64; 2], usize) {
-        let nodes = legendre(n);
+        let nodes = crate::special::gauss_legendre(n);
         let rows: Vec<[f64; 2]> = (0..c.modes.len() * n)
             .into_par_iter()
             .map(|row| {
@@ -407,8 +433,8 @@ impl<'a> Ensemble<'a> {
                             let own = 1. / (1. + mode.coordinate(r));
                             let share = own / c.modes.iter().map(|m| 1. / (1. + m.coordinate(r))).sum::<f64>();
                             let weight = mode.volume() * w_mu * (TAU / n as f64) * 0.5 * w_z * t * (1. - t).powf(-2.5) * share;
-                            sums[0] += weight * kept(1.5, y, y, c.top);
-                            sums[1] += weight * kept(2.5, y, y, c.top);
+                            sums[0] += weight * kept(1.5, y, y, c.ceiling);
+                            sums[1] += weight * kept(2.5, y, y, c.ceiling);
                         }
                     }
                 }
@@ -433,6 +459,12 @@ impl<'a> Ensemble<'a> {
         out
     }
 
+    /// The proposals so far that read deeper than their well's bottom (module documentation, # Its draw): none where the
+    /// bottom is the potential's lowest point.
+    pub fn deeper(&self) -> u64 {
+        self.over.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// The depth at each component's bottom in k_BT: what the setup's note says of the ensemble (ledger.rs).
     pub fn depths(&self) -> Vec<f64> {
         self.components.iter().map(|c| -c.well.potential(c.centre).0 / self.kt).collect()
@@ -447,7 +479,7 @@ mod tests {
     /// branches, for the number and the energy (s = 3/2, 5/2) and the others the series handles.
     #[test]
     fn the_kept_momenta_are_their_integral() {
-        let nodes = legendre(64);
+        let nodes = crate::special::gauss_legendre(64);
         for s in [0.5, 1., 1.5, 2., 2.5] {
             for y in [1e-4, 0.3, 1.4, 2.6, 3.6, 7., 40.] {
                 for frac in [0.3, 0.99, 1.] {
@@ -604,6 +636,68 @@ mod tests {
         let sums = lorentzian(a);
         let (mean, within) = read(&depth, looks);
         assert!((mean - sums[2] / sums[0]).abs() <= within, "⟨y⟩ {mean} against {} ± {within}", sums[2] / sums[0]);
+    }
+
+    /// A standing wave in a Gaussian envelope whose antinode lies off the focus (a mirror's phase): V = −D cos²(k(z − z₀))
+    /// /(1 + |r|²/R²), bound B = D by the beam's envelope, bottom near z₀ at a depth below B.
+    struct Shifted {
+        depth: f64,
+        radius: f64,
+        wave: f64,
+        site: f64,
+        hbar_over_mass: f64,
+    }
+    impl Shifted {
+        /// The bottom on the axis by Newton from the antinode.
+        fn bottom(&self) -> f64 {
+            let mut z = self.site;
+            for _ in 0..50 {
+                let h = 1e-6 / self.wave;
+                let g = |z: f64| self.potential([0., 0., z]).1[2];
+                z -= g(z) * 2. * h / (g(z + h) - g(z - h));
+            }
+            z
+        }
+    }
+    impl Well for Shifted {
+        fn potential(&self, r: V3) -> (f64, V3) {
+            let q = 1. + dot3(r, r) / (self.radius * self.radius);
+            let (s, c) = (self.wave * (r[2] - self.site)).sin_cos();
+            let mut gradient = r.map(|x| 2. * self.depth * c * c * x / (self.radius * self.radius * q * q));
+            gradient[2] += 2. * self.depth * self.wave * s * c / q;
+            (-self.depth * c * c / q, gradient)
+        }
+        fn trap(&self) -> (V3, [V3; 3], V3) {
+            let z = self.bottom();
+            let q = 1. + z * z / (self.radius * self.radius);
+            let across = (self.hbar_over_mass * 2. * self.depth / (self.radius * self.radius * q * q)).sqrt();
+            let along = (self.hbar_over_mass * 2. * self.depth * self.wave * self.wave / q).sqrt();
+            ([0., 0., z], [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]], [across, across, along])
+        }
+        fn envelope(&self) -> (Vec<Geometry>, f64) {
+            (vec![Geometry::new([0., 0., 1.], 1. / self.radius, Some(2f64.sqrt() * self.radius))], self.depth)
+        }
+    }
+
+    /// A cold atom in a well whose bottom is off the focus is drawn at the bottom: at 5000 k_BT of depth and an antinode
+    /// 0.07 R from the focus (25 k_BT below the beams' bound, where the bound alone would keep one proposal in e^{12}),
+    /// every draw lies in the bottom's site, the positions' spread across and along are the harmonic well's
+    /// √(k_BT/λ_i) within the groups' interval, and no proposal reads deeper than the bottom.
+    #[test]
+    fn a_cold_atom_is_drawn_at_a_bottom_off_the_focus() {
+        let hm = 1e-12;
+        let well = Shifted { depth: 5000. * KT_PER_UK, radius: 1., wave: 20., site: -0.07, hbar_over_mass: hm };
+        let ensemble = Ensemble::new(&[(0, 1., &well)], 1., hm).unwrap();
+        let (centre, _, frequencies) = well.trap();
+        let draws: Vec<Start> = (0..1 << 10).map(|i| ensemble.draw(11, i)).collect();
+        assert_eq!(ensemble.deeper(), 0);
+        assert!(draws.iter().all(|s| (s.r[2] - centre[2]).abs() < 0.5 * std::f64::consts::FRAC_PI_2 / well.wave));
+        for axis in [0, 2] {
+            let exact = KT_PER_UK * hm / (frequencies[axis] * frequencies[axis]);
+            let squares: Vec<f64> = draws.chunks(GROUP as usize).map(|g| g.iter().map(|s| (s.r[axis] - centre[axis]).powi(2)).sum::<f64>() / GROUP as f64).collect();
+            let (mean, within) = read(&squares, 2.);
+            assert!((mean - exact).abs() <= within + 0.01 * exact, "axis {axis}: ⟨δr²⟩ {mean} against {exact} ± {within}");
+        }
     }
 
     /// The Wigner factor: in a deep well with ħω = k_BT the momentum's second moment per lab axis is η k_BT (x/2) coth(x/2)

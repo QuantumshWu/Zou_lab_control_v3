@@ -5,23 +5,26 @@
 //! Every term of the generator is a product of at most two components of the light's fields at the point times a matrix on the
 //! cluster's states, at a base beat Ω (∝ e^{iΩt}), all exact (`Beat`, `Wave`). A field's component is u(r) = Σ_l a_l(r) c_l over
 //! beams of one frequency (`Scalar`): its coherent field's component on its basis, e_k = Σ_l a_l γ_lk (field.rs; an averaged
-//! light's, each beam's alone), a beam's own amplitude (the far beats'), or the conjugate of one. The terms:
+//! light's, each beam's alone), or the conjugate of one. The terms:
 //! - the base (H0 less the outside forms at the focus: every light off) and the frames' −θ_s, constant;
-//! - each lit frequency's far static form, e_k'* e_k A_k'k (far.rs);
-//! - the kept far beats, a_l₂* a_l₁ C_l₂l₁ and their adjoints (units.rs `Model::far_cross`);
-//! - the near light's shifts and couplings of the ground states, e_k'* e_k S_k'k (eliminate.rs), the explicit states' van Vleck
-//!   shift by the folded drives, and the kept drives, e_k U_k[e, b] and their adjoints;
+//! - each pair of lit frequencies' constant form at their beat, e^ω'_k'* e^ω_k C_k'k (far.rs `constant`; a frequency's own is
+//!   its static form): the folds with the bare levels;
+//! - the same pairs' part at the atom, e^ω'_k'* e^ω_k S_k'k on the ground states (eliminate.rs), the explicit states' van Vleck
+//!   shift by the drives folded there, and the explicit drives, e_k U_k[e, b] and their adjoints;
 //! - the decay −(i/2) Σ_φ Σ_a J_{a,φ}†J_{a,φ}: per class and pair of its members their jumps' own product (photon.rs).
+//! One rule takes an entry a ← b of the first two kinds into the generator, whatever light makes it (eliminate.rs
+//! `Model::term_included`): its residual beat in the frames exactly zero, or its unit kept (`Unit::Term`).
 //! A term's entry a ← b lies at the residual beat Ω + θ_a − θ_b in the cluster's frames (cluster.rs), its tone, and each product
 //! of two beams' plane waves in it at the residual wave vector q − (K_a − K_b). A Hermitian term adds c M to the generator and
 //! ∇(c M) to its gradient; a decay term adds no force (the absorption's mean force is the jumps'). Each Hermitian term comes
 //! with its adjoint, so the generator's Hermitian part and its gradient are Hermitian at every time.
 //!
 //! # Near forms
-//! The near light enters through its elimination's responses on each carrier's field basis, T_k and T2_k (eliminate.rs), by a few
-//! complex numbers that are linear in them (`NearLayout`): the shifts' S_k'k = −½(U^f_k'†T_k + T_k'†U^f_k) and their Doppler
-//! partners D_k'k = ½ U^f_k'†T2_k on the cluster's ground places; the jumps C_a T_k and C_a T2_k; the explicit states' van Vleck
-//! shifts; and the responses themselves (the readout's). Each exists where it can differ from zero: the responses of a ground
+//! The drives folded with the levels at the atom enter through their elimination's responses on each carrier's field basis,
+//! T_k and T2_k (eliminate.rs), by a few complex numbers that are linear in them (`NearLayout`): the shifts' S_k'k =
+//! −½(U^f_k'†T_k + T_k'†U^f_k) and their Doppler partners D_k'k = ½ U^f_k'†T2_k on the cluster's ground places, U^f a
+//! frequency's every folded coupling (far.rs `Tone::coupled`) and T its response at the atom, none where it is no carrier; the
+//! jumps C_a T_k and C_a T2_k; the explicit states' van Vleck shifts; and the responses themselves (the readout's). Each exists where it can differ from zero: the responses of a ground
 //! state reach the excited states its coupling reaches through the excited states' own couplings (`Model::reached`). At a point
 //! they are the exact elimination's there with their exact derivatives (`Model::near_exact`), or its table's interpolant
 //! (tabulate.rs): one definition, tabulated or not.
@@ -59,7 +62,7 @@ use super::eliminate::{half, jump, shift, Leg, Responses};
 use super::far::EXCITED;
 use super::photon::{Origin, Source};
 use super::tabulate::NearTable;
-use super::{jet, Beat, Component, Lights, Lit, Model, Unit, Wave};
+use super::{jet, Beat, Component, Level, Lights, Lit, Model, Wave};
 use crate::field::Amplitude;
 use crate::linalg::{dot3, Mat, C64};
 use crate::request::{GROUND, STATES};
@@ -94,7 +97,7 @@ pub(crate) enum Operand {
 /// table's node: S, D, the shifts, the jumps, their Doppler partners, the responses, theirs.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct NearLayout {
-    /// (left carrier, its basis vector k', right carrier, its k, places x, y): S and D of the pair's entry x ← y.
+    /// (left frequency, its basis vector k', right frequency, its k, places x, y): S and D of the pair's entry x ← y.
     pub(crate) pairs: Vec<[usize; 6]>,
     /// (carrier, k', k, places x, y of two explicit states).
     pub(crate) shifts: Vec<[usize; 5]>,
@@ -188,8 +191,8 @@ pub(crate) struct Scalar {
     frequency: usize,
     /// None: the frequency's every beam; Some(j): its beam j alone.
     group: Option<usize>,
-    /// The basis vector k of the frequency's field (c_l = γ_lk), or None: the beam's amplitude itself (c_l = 1).
-    component: Option<usize>,
+    /// The basis vector k of the frequency's field (c_l = γ_lk).
+    component: usize,
     pub(crate) conjugate: bool,
     /// (the beam's place among the plan's beams, c_l).
     pub(crate) beams: Vec<(usize, C64)>,
@@ -259,8 +262,10 @@ pub(crate) struct Plan {
     pub(crate) lights: Lights,
     states: usize,
     pub(crate) near: NearLayout,
-    /// The constants the jumps' products and the photons take, after a point's near forms.
+    /// The constants the jumps' products and the photons take, after a point's near forms; and per jump entry of the near
+    /// forms its constant part, the same field component's bare drives' jump (photon.rs `Origin::Near`).
     pub(crate) constants: Vec<C64>,
+    offsets: Vec<C64>,
     /// The request beams the plan's field components sum.
     pub(crate) beams: Vec<usize>,
     pub(crate) scalars: Vec<Scalar>,
@@ -304,7 +309,7 @@ struct Draft {
     used: ([bool; 3], [bool; 4]),
 }
 
-/// A jump's value at a point: a constant, or a near form with its Doppler partner.
+/// A jump's value at a point: a constant, or a near form (with its constant part, `Plan::offsets`) and its Doppler partner.
 #[derive(Clone, Copy)]
 enum Jump {
     Constant(C64),
@@ -329,6 +334,7 @@ struct Builder<'a> {
     pair_index: HashMap<[usize; 6], usize>,
     jump_index: HashMap<[usize; 5], usize>,
     constants: Vec<C64>,
+    offsets: Vec<C64>,
     beams: Vec<usize>,
     scalars: Vec<Scalar>,
     drafts: Vec<Draft>,
@@ -351,13 +357,13 @@ impl<'a> Builder<'a> {
         }
     }
     /// A field component (`Scalar`), found or made; None where it vanishes (no beam of the group holds the basis vector).
-    fn scalar(&mut self, frequency: usize, group: Option<usize>, component: Option<usize>, conjugate: bool) -> Option<usize> {
+    fn scalar(&mut self, frequency: usize, group: Option<usize>, component: usize, conjugate: bool) -> Option<usize> {
         if let Some(at) = self.scalars.iter().position(|s| (s.frequency, s.group, s.component, s.conjugate) == (frequency, group, component, conjugate)) {
             return Some(at);
         }
         let f = &self.model.light.frequencies[frequency];
         let members: Vec<usize> = group.map_or((0..f.beams.len()).collect(), |j| vec![j]);
-        let weights: Vec<(usize, C64)> = members.iter().map(|&j| (f.beams[j], component.map_or(C64::ONE, |k| f.coefficients[j][k]))).filter(|w| w.1 != C64::ZERO).collect();
+        let weights: Vec<(usize, C64)> = members.iter().map(|&j| (f.beams[j], f.coefficients[j][component])).filter(|w| w.1 != C64::ZERO).collect();
         if weights.is_empty() {
             return None;
         }
@@ -432,11 +438,12 @@ impl<'a> Builder<'a> {
         d.decay[flag][at].1.push((a, b));
     }
 
-    /// Whether U^f_k'†T_k of a pair can differ from zero on x ← y: the left coupling's excited states from x among those the
-    /// right response reaches from y.
+    /// Whether U^f_k'†T_k of a pair of (frequency, basis vector) can differ from zero on x ← y: the left coupling's excited
+    /// states from x among those the right response reaches from y (none where the right frequency is no carrier).
     fn touches(&self, left: (usize, usize), right: (usize, usize), x: usize, y: usize) -> bool {
-        let reach = self.model.reached(self.cluster, right.0, right.1, self.states()[y]);
-        let u = &self.model.carriers[left.0].basis[left.1];
+        let Some(carrier) = self.model.carrier_of(right.0) else { return false };
+        let reach = self.model.reached(self.cluster, carrier, right.1, self.states()[y]);
+        let u = &self.model.tones[left.0].coupled[0][left.1];
         (0..EXCITED).any(|e| reach[e] && u[(GROUND + e, self.states()[x])] != C64::ZERO)
     }
     /// The pair entry of S and D on x ← y, found or made with its adjoint's (the same forms' y ← x of the pair exchanged); None
@@ -469,27 +476,33 @@ impl<'a> Builder<'a> {
         }
         self.jump_index.insert(key, self.near.jumps.len());
         self.near.jumps.push(key);
+        let bare = &self.model.tones[self.model.carriers[carrier].frequency].jumps[0];
+        self.offsets.push(bare.get(k).map_or(C64::ZERO, |jumps| jumps[a][(b, self.states()[y])]));
         Some(self.near.jumps.len() - 1)
     }
     /// A source's field component, conjugated or not (None: 1); the outer None where the component vanishes.
     fn source_scalar(&mut self, source: &Source, conjugated: bool) -> Option<Option<usize>> {
         match source.origin {
-            Origin::Far { frequency, side, component } => self.scalar(frequency, None, Some(component), (side == 1) != conjugated).map(Some),
-            Origin::Near { carrier, component } => self.scalar(self.model.carriers[carrier].frequency, None, Some(component), conjugated).map(Some),
+            Origin::Far { frequency, side, component } => self.scalar(frequency, None, component, (side == 1) != conjugated).map(Some),
+            Origin::Near { carrier, component } => self.scalar(self.model.carriers[carrier].frequency, None, component, conjugated).map(Some),
             Origin::Explicit { .. } => Some(None),
         }
     }
-    /// A source's jump b ← the state at `place` on axis a; None where it is zero.
+    /// A source's jump b ← the state at `place` on axis a; None where it is zero. A carrier's: its near form where its
+    /// response at the atom reaches, its constant part with it; elsewhere its constant part alone.
     fn source_jump(&mut self, source: &Source, a: usize, b: usize, place: usize) -> Option<Jump> {
         let s = self.states()[place];
-        match source.origin {
-            Origin::Near { carrier, component } => self.jump(carrier, component, a, b, place).map(Jump::Near),
-            _ => Some(self.model.constant_jump(source, a, b, s)).filter(|v| *v != C64::ZERO).map(Jump::Constant),
-        }
+        let near = match source.origin {
+            Origin::Near { carrier, component } if place < self.ground() => self.jump(carrier, component, a, b, place),
+            _ => None,
+        };
+        near.map(Jump::Near).or_else(|| Some(self.model.constant_jump(source, a, b, s)).filter(|v| *v != C64::ZERO).map(Jump::Constant))
     }
 
-    /// The base, the frames and the far static forms (module documentation, # Terms).
-    fn statics(&mut self) {
+    /// The base, the frames, and every pair of lit frequencies' constant form at their beat (module documentation, # Terms;
+    /// far.rs `constant`): emitting ω' and absorbing ω, e^ω'_k'* e^ω_k C_k'k at δ_ω' − δ_ω, each entry by the one rule -- the
+    /// base's too, a static one. The pair exchanged is the adjoint's.
+    fn constants(&mut self) {
         let model = self.model;
         let (states, n) = (self.states(), self.states().len());
         let zero = model.axes.zero();
@@ -497,7 +510,7 @@ impl<'a> Builder<'a> {
         for x in 0..n {
             for y in 0..n {
                 let v = model.base[(states[x], states[y])];
-                if v != C64::ZERO {
+                if v != C64::ZERO && model.term_included(self.cluster, x, y, &zero) {
                     self.hermitian(still, PLAIN, x, y, v, None);
                 }
             }
@@ -505,19 +518,25 @@ impl<'a> Builder<'a> {
         for (x, theta) in model.clusters[self.cluster].frames.iter().enumerate() {
             self.hermitian(still, PLAIN, x, x, C64::real(-model.omega(theta)), None);
         }
-        for (w, (f, tone)) in model.light.frequencies.iter().zip(&model.tones).enumerate() {
-            let r = f.rank();
-            for group in self.groups(w) {
-                for kl in 0..r {
-                    for kr in 0..r {
-                        let form = &tone.forms[kl * r + kr];
-                        let entries: Vec<(usize, usize, C64)> =
-                            (0..n * n).map(|i| (i / n, i % n, form[(states[i / n], states[i % n])])).filter(|e| e.2 != C64::ZERO).collect();
+        for (to, emitted) in model.tones.iter().enumerate() {
+            for (from, absorbed) in model.tones.iter().enumerate() {
+                let groups: Vec<(Option<usize>, Option<usize>)> = if to == from { self.groups(to).into_iter().map(|x| (x, x)).collect() } else if self.lights.cross(to, from) { vec![(None, None)] } else { vec![] };
+                if groups.is_empty() {
+                    continue;
+                }
+                let beat = emitted.beat.plus(-1, &absorbed.beat);
+                let (forms, r) = (model.constants(to, from), absorbed.basis[0].len());
+                for (gl, gr) in groups {
+                    for (at, form) in forms.forms.iter().enumerate() {
+                        let entries: Vec<(usize, usize, C64)> = (0..n * n)
+                            .map(|i| (i / n, i % n, form[(states[i / n], states[i % n])]))
+                            .filter(|&(x, y, v)| v != C64::ZERO && model.term_included(self.cluster, x, y, &beat))
+                            .collect();
                         if entries.is_empty() {
                             continue;
                         }
-                        let (Some(left), Some(right)) = (self.scalar(w, group, Some(kl), true), self.scalar(w, group, Some(kr), false)) else { continue };
-                        let block = self.block(Some(left), Some(right), &zero);
+                        let (Some(left), Some(right)) = (self.scalar(to, gl, at / r, true), self.scalar(from, gr, at % r, false)) else { continue };
+                        let block = self.block(Some(left), Some(right), &beat);
                         for (x, y, v) in entries {
                             self.hermitian(block, PLAIN, x, y, v, None);
                         }
@@ -527,68 +546,32 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The kept far beats' cross terms and their adjoints (units.rs `Model::far_cross`): absorbing `first` and emitting `second` at
-    /// the base beat ν₂ − ν₁, coefficient a_l₂* a_l₁ (co-rotating; a_l₁* a_l₂ counter-rotating).
-    fn far_beats(&mut self) {
-        let model = self.model;
-        let (states, n) = (self.states(), self.states().len());
-        for unit in &model.kept {
-            let Unit::FarBeat { first, second } = unit else { continue };
-            if !self.lights.cross(first.frequency, second.frequency) {
-                continue;
-            }
-            let (n1, n2) = (model.light.frequencies[first.frequency].beams.len(), model.light.frequencies[second.frequency].beams.len());
-            let beat = model.axes.component(&model.light, *second).plus(-1, &model.axes.component(&model.light, *first));
-            let cross = model.far_cross(*first, *second);
-            for j in 0..n2 {
-                for i in 0..n1 {
-                    let m = &cross[j * n1 + i];
-                    let (conjugated, plain) = if first.counter { ((first.frequency, i), (second.frequency, j)) } else { ((second.frequency, j), (first.frequency, i)) };
-                    let term = (self.scalar(conjugated.0, Some(conjugated.1), None, true), self.scalar(plain.0, Some(plain.1), None, false));
-                    let adjoint = (self.scalar(plain.0, Some(plain.1), None, true), self.scalar(conjugated.0, Some(conjugated.1), None, false));
-                    let (there, back) = (self.block(term.0, term.1, &beat), self.block(adjoint.0, adjoint.1, &beat.negated()));
-                    for x in 0..n {
-                        for y in 0..n {
-                            let v = m[(states[x], states[y])];
-                            if v != C64::ZERO {
-                                self.hermitian(there, PLAIN, x, y, v, None);
-                                self.hermitian(back, PLAIN, y, x, v.conj(), None);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// The near light's terms (module documentation, # Terms): per pair of lit carriers the shifts and couplings of the ground
-    /// places at the beat δ_c' − δ_c -- an entry at a residual beat of zero in the frames, or its kept unit (eliminate.rs
-    /// `Model::term_included`) --, the explicit states' van Vleck shifts, and the kept drives with their adjoints.
+    /// The terms at the atom (module documentation, # Terms): per pair of lit frequencies the ground places' shifts and
+    /// couplings at the beat δ_ω' − δ_ω where either's response reaches -- each entry by the one rule (eliminate.rs
+    /// `Model::term_included`) --, and per lit carrier the explicit states' van Vleck shifts and the explicit drives with
+    /// their adjoints.
     fn near(&mut self) {
         let model = self.model;
         let (states, n, g) = (self.states(), self.states().len(), self.ground());
-        let lit: Vec<usize> = (0..model.carriers.len()).filter(|&c| self.lights.on(model.carriers[c].frequency)).collect();
         let zero = model.axes.zero();
-        for &cj in &lit {
-            for &ci in &lit {
-                let (cp, cc) = (&model.carriers[cj], &model.carriers[ci]);
-                if ci != cj && !self.lights.cross(cp.frequency, cc.frequency) {
+        for (wj, emitted) in model.tones.iter().enumerate() {
+            for (wi, absorbed) in model.tones.iter().enumerate() {
+                let groups: Vec<(Option<usize>, Option<usize>)> = if wi == wj { self.groups(wi).into_iter().map(|x| (x, x)).collect() } else if self.lights.cross(wj, wi) { vec![(None, None)] } else { vec![] };
+                if groups.is_empty() {
                     continue;
                 }
-                let beat = cp.beat.plus(-1, &cc.beat);
-                let (from, to) = (Component { frequency: cc.frequency, counter: false }, Component { frequency: cp.frequency, counter: false });
-                let groups: Vec<(Option<usize>, Option<usize>)> = if ci == cj { self.groups(cc.frequency).into_iter().map(|x| (x, x)).collect() } else { vec![(None, None)] };
-                for kl in 0..cp.basis.len() {
-                    for kr in 0..cc.basis.len() {
+                let beat = emitted.beat.plus(-1, &absorbed.beat);
+                for kl in 0..emitted.basis[0].len() {
+                    for kr in 0..absorbed.basis[0].len() {
                         for x in 0..g {
                             for y in 0..g {
-                                if !model.term_included(self.cluster, x, y, from, to, &beat) {
+                                if !model.term_included(self.cluster, x, y, &beat) {
                                     continue;
                                 }
-                                let Some(at) = self.pair((cj, kl), (ci, kr), x, y) else { continue };
-                                let exchanged = self.pair((ci, kr), (cj, kl), y, x).expect("a pair's entry comes with its adjoint's");
+                                let Some(at) = self.pair((wj, kl), (wi, kr), x, y) else { continue };
+                                let exchanged = self.pair((wi, kr), (wj, kl), y, x).expect("a pair's entry comes with its adjoint's");
                                 for &(gl, gr) in &groups {
-                                    let (Some(left), Some(right)) = (self.scalar(cp.frequency, gl, Some(kl), true), self.scalar(cc.frequency, gr, Some(kr), false)) else { continue };
+                                    let (Some(left), Some(right)) = (self.scalar(wj, gl, kl, true), self.scalar(wi, gr, kr, false)) else { continue };
                                     let block = self.block(Some(left), Some(right), &beat);
                                     self.hermitian(block, PLAIN, x, y, C64::ZERO, Some((Operand::Pair(at), false)));
                                     self.hermitian(block, RIGHT, x, y, C64::ZERO, Some((Operand::Doppler(at), false)));
@@ -600,21 +583,27 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        for &ci in &lit {
-            let cc = &model.carriers[ci];
-            let unfolded = &model.tones[cc.frequency].basis[0];
+        for (ci, cc) in model.carriers.iter().enumerate() {
+            if !self.lights.on(cc.frequency) {
+                continue;
+            }
+            let (component, tone) = (Component { frequency: cc.frequency, counter: false }, &model.tones[cc.frequency]);
+            let folded = &tone.coupled[0];
             for kl in 0..cc.basis.len() {
                 for kr in 0..cc.basis.len() {
                     for x in g..n {
                         for y in g..n {
-                            let (ul, ur) = (&cc.basis[kl], &cc.basis[kr]);
-                            if !(0..GROUND).any(|b| ur[(states[x], b)] != C64::ZERO && ul[(states[y], b)] != C64::ZERO) {
+                            // The entry e ← f's halves that can differ from zero: a drive folded at the atom of one leg against
+                            // a folded one of the other, from one ground state (`Model::forms`).
+                            let (e, f) = (states[x], states[y]);
+                            let through = |b: usize| (cc.basis[kr][(e, b)] != C64::ZERO && folded[kl][(f, b)] != C64::ZERO) || (folded[kr][(e, b)] != C64::ZERO && cc.basis[kl][(f, b)] != C64::ZERO);
+                            if !(0..GROUND).any(through) {
                                 continue;
                             }
                             self.near.shifts.push([ci, kl, kr, x, y]);
                             let at = self.near.shifts.len() - 1;
                             for group in self.groups(cc.frequency) {
-                                let (Some(left), Some(right)) = (self.scalar(cc.frequency, group, Some(kl), true), self.scalar(cc.frequency, group, Some(kr), false)) else { continue };
+                                let (Some(left), Some(right)) = (self.scalar(cc.frequency, group, kl, true), self.scalar(cc.frequency, group, kr, false)) else { continue };
                                 let block = self.block(Some(left), Some(right), &zero);
                                 self.hermitian(block, PLAIN, x, y, C64::ZERO, Some((Operand::Shift(at), false)));
                             }
@@ -622,18 +611,18 @@ impl<'a> Builder<'a> {
                     }
                 }
             }
-            for (k, u) in unfolded.iter().enumerate() {
-                let kept: Vec<(usize, usize, C64)> = (g..n)
+            for (k, u) in tone.basis[0].iter().enumerate() {
+                let explicit: Vec<(usize, usize, C64)> = (g..n)
                     .flat_map(|p| (0..g).map(move |q| (p, q)))
                     .map(|(p, q)| (p, q, u[(states[p], states[q])]))
-                    .filter(|&(p, q, v)| v != C64::ZERO && model.drive_kept(ci, states[p], states[q]))
+                    .filter(|&(p, q, v)| v != C64::ZERO && model.level(component, states[p], states[q]) == Level::Explicit)
                     .collect();
-                if kept.is_empty() {
+                if explicit.is_empty() {
                     continue;
                 }
-                let (Some(plain), Some(conjugated)) = (self.scalar(cc.frequency, None, Some(k), false), self.scalar(cc.frequency, None, Some(k), true)) else { continue };
+                let (Some(plain), Some(conjugated)) = (self.scalar(cc.frequency, None, k, false), self.scalar(cc.frequency, None, k, true)) else { continue };
                 let (up, down) = (self.block(None, Some(plain), &cc.beat.negated()), self.block(Some(conjugated), None, &cc.beat));
-                for (p, q, v) in kept {
+                for (p, q, v) in explicit {
                     self.hermitian(up, PLAIN, p, q, v, None);
                     self.hermitian(down, PLAIN, q, p, v.conj(), None);
                 }
@@ -659,7 +648,8 @@ impl<'a> Builder<'a> {
                     }
                     let (Some(left), Some(right)) = (self.source_scalar(sj, true), self.source_scalar(si, false)) else { continue };
                     let block = self.block(left, right, &si.beat.plus(-1, &sj.beat));
-                    let partners = |s: &Source| if matches!(s.origin, Origin::Near { .. }) { vec![false, true] } else { vec![false] };
+                    // A jump at the atom comes with its Doppler partner; a constant has none.
+                    let partners = |jump: &Jump| if matches!(jump, Jump::Near(_)) { vec![false, true] } else { vec![false] };
                     for &(bj, xj) in &mj.entries {
                         for &(bi, xi) in &mi.entries {
                             if bj != bi {
@@ -667,8 +657,8 @@ impl<'a> Builder<'a> {
                             }
                             for a in 0..3 {
                                 let (Some(first), Some(second)) = (self.source_jump(sj, a, landing.states[bj], xj), self.source_jump(si, a, landing.states[bi], xi)) else { continue };
-                                for pj in partners(sj) {
-                                    for pi in partners(si) {
+                                for pj in partners(&first) {
+                                    for pi in partners(&second) {
                                         self.decay(block, (pi as usize) * RIGHT + (pj as usize) * LEFT, xj, xi, first, second, (pj, pi));
                                     }
                                 }
@@ -700,9 +690,11 @@ impl<'a> Builder<'a> {
                             None => {}
                             Some(Jump::Near(i)) => entries.push((a, bp, sp, Operand::Jump(i), Operand::Jump2(i))),
                             Some(Jump::Constant(v)) => {
-                                self.constants.push(v);
-                                let c = Operand::Constant(self.constants.len() - 1);
-                                entries.push((a, bp, sp, c, c));
+                                // A constant has no Doppler partner: a carrier's member reads zero for it.
+                                self.constants.extend([v, C64::ZERO]);
+                                let c = Operand::Constant(self.constants.len() - 2);
+                                let partner = if matches!(source.origin, Origin::Near { .. }) { Operand::Constant(self.constants.len() - 1) } else { c };
+                                entries.push((a, bp, sp, c, partner));
                             }
                         }
                     }
@@ -858,6 +850,7 @@ impl<'a> Builder<'a> {
             states: n,
             near,
             constants: self.constants,
+            offsets: self.offsets,
             beams: self.beams,
             scalars: self.scalars,
             blocks,
@@ -879,12 +872,16 @@ impl<'a> Builder<'a> {
 
 impl Plan {
     fn new(model: &Model, cluster: usize, lights: &Lights) -> Plan {
-        let mut b = Builder { model, cluster, lights, near: NearLayout::default(), pair_index: HashMap::new(), jump_index: HashMap::new(), constants: vec![], beams: vec![], scalars: vec![], drafts: vec![] };
-        b.statics();
-        b.far_beats();
+        let mut b = Builder { model, cluster, lights, near: NearLayout::default(), pair_index: HashMap::new(), jump_index: HashMap::new(), constants: vec![], offsets: vec![], beams: vec![], scalars: vec![], drafts: vec![] };
+        b.constants();
         b.near();
         b.decays();
         b.finish()
+    }
+    /// The constant part of a near form at `place` among a point's values: a jump entry's (`Plan::offsets`), zero of any
+    /// other form.
+    pub(crate) fn bare(&self, place: usize) -> C64 {
+        place.checked_sub(self.near.jumping().start).and_then(|jump| self.offsets.get(jump)).copied().unwrap_or(C64::ZERO)
     }
     /// A block's two field components.
     pub(crate) fn factors(&self, block: usize) -> (Option<usize>, Option<usize>) {
@@ -950,7 +947,7 @@ impl Model {
     }
 
     /// The excited states the response of a carrier's basis coupling k from ground state b can reach on a cluster: those in a
-    /// block (`Model::mixing`) with a state U^f_k couples b to.
+    /// block (`Model::mixing`) with a state its drives folded at the atom couple b to.
     pub(crate) fn reached(&self, cluster: usize, carrier: usize, k: usize, b: usize) -> [bool; EXCITED] {
         let (u, blocks) = (&self.carriers[carrier].basis[k], &self.mixing[cluster]);
         let mut out = [false; EXCITED];
@@ -995,23 +992,27 @@ impl Model {
         block
     }
 
-    /// A plan's near forms from the elimination's responses and the far light's energies (jets, [part][state]), into
+    /// A plan's near forms from the elimination's responses and the constant forms' energies (jets, [part][state]), into
     /// `out[part * len + entry]` (module documentation, # Near forms); and their complex multiply-adds (per part each pair's two
     /// sums and its partner's, each jump's two, each shift's two per ground state).
     pub(crate) fn forms(&self, plan: &Plan, responses: &Responses, energies: &[Vec<f64>], out: &mut [C64]) -> f64 {
-        let states = &self.clusters[plan.cluster].states;
+        let cluster = &self.clusters[plan.cluster];
+        let states = &cluster.states;
         let (near, len) = (&plan.near, plan.near.len());
+        // A frequency's carrier; one that is none has no response at the atom.
+        let carriers: Vec<Option<usize>> = (0..self.tones.len()).map(|w| self.carrier_of(w)).collect();
+        let none = Mat::zeros(EXCITED, cluster.ground);
         for part in 0..energies.len() {
             let out = &mut out[part * len..(part + 1) * len];
             let (first, second) = (|c: usize, k: usize| &responses.first[c][k][part], |c: usize, k: usize| &responses.second[c][k][part]);
-            // The fold's one contraction (eliminate.rs `shift`, `jump`) of the legs' responses at the point; a Doppler partner
-            // is the absorbed half with −T2 for T.
-            for (i, &[cl, kl, cr, kr, x, y]) in near.pairs.iter().enumerate() {
-                let (ul, ur) = (&self.carriers[cl].basis[kl], &self.carriers[cr].basis[kr]);
-                let emitted = Leg { coupling: ul, state: states[x], response: first(cl, kl), place: x };
-                let absorbed = Leg { coupling: ur, state: states[y], response: first(cr, kr), place: y };
+            // The fold's one contraction (eliminate.rs `shift`, `jump`) of the legs -- each its frequency's every folded
+            // coupling and its response at the point --; a Doppler partner is the absorbed half with −T2 for T.
+            for (i, &[wl, kl, wr, kr, x, y]) in near.pairs.iter().enumerate() {
+                let (ul, ur) = (&self.tones[wl].coupled[0][kl], &self.tones[wr].coupled[0][kr]);
+                let emitted = Leg { coupling: ul, state: states[x], response: carriers[wl].map_or(&none, |c| first(c, kl)), place: x };
+                let absorbed = Leg { coupling: ur, state: states[y], response: carriers[wr].map_or(&none, |c| first(c, kr)), place: y };
                 out[near.at(Operand::Pair(i))] = shift(emitted, absorbed);
-                out[near.at(Operand::Doppler(i))] = -half(ul, states[x], second(cr, kr), y);
+                out[near.at(Operand::Doppler(i))] = -half(ul, states[x], carriers[wr].map_or(&none, |c| second(c, kr)), y);
             }
             for (i, &[c, k, a, b, y]) in near.jumps.iter().enumerate() {
                 out[near.at(Operand::Jump(i))] = jump(&self.emission[a], b, first(c, k), y);
@@ -1023,17 +1024,19 @@ impl Model {
                 out[responding + near.responses.len() + i] = second(c, k)[(e, y)];
             }
         }
-        // The explicit states' van Vleck shift by the folded drives, ½ Σ_b U^f_k[e,b] U^f_k'[f,b]* (1/(E_e − E_b − δ) + 1/(E_f − E_b − δ)).
+        // The explicit states' van Vleck shift by the drives folded at the atom: each half its own drive's denominator there
+        // against the other leg's folded coupling (far.rs `second_order`, where the bare drives' halves are),
+        // ½ Σ_b (U^a_k[e,b] U^f_k'[f,b]*/(E_e − E_b − δ) + U^f_k[e,b] U^a_k'[f,b]*/(E_f − E_b − δ)).
         for (i, &[c, kl, kr, x, y]) in near.shifts.iter().enumerate() {
             let cc = &self.carriers[c];
+            let folded = &self.tones[cc.frequency].coupled[0];
             let (e, f) = (states[x], states[y]);
             let mut shift = vec![C64::ZERO; energies.len()];
             for b in 0..GROUND {
-                let v = cc.basis[kr][(e, b)] * cc.basis[kl][(f, b)].conj();
-                if v == C64::ZERO {
-                    continue;
-                }
-                for s in [e, f] {
+                for (s, v) in [(e, cc.basis[kr][(e, b)] * folded[kl][(f, b)].conj()), (f, folded[kr][(e, b)] * cc.basis[kl][(f, b)].conj())] {
+                    if v == C64::ZERO {
+                        continue;
+                    }
                     let mut gap: Vec<f64> = energies.iter().map(|h| h[s] - h[b]).collect();
                     gap[0] -= cc.detuning;
                     for (z, r) in shift.iter_mut().zip(jet::reciprocal(&gap)) {
@@ -1056,11 +1059,11 @@ impl Model {
         if len == 0 {
             return NearValues { len, order, data, directions: None, work: 0.0 };
         }
-        let h = self.far_hamiltonian(amplitudes, &plan.lights, order);
+        let h = self.far_hamiltonian(amplitudes, &plan.lights, order, coherent);
         let responses = self.eliminate(plan.cluster, &h, amplitudes, &plan.lights, order, coherent);
         let energies: Vec<Vec<f64>> = h.iter().map(|m| (0..STATES).map(|s| m[(s, s)].re).collect()).collect();
         let work = self.forms(plan, &responses, &energies, &mut data);
-        NearValues { len, order, data, directions: None, work: responses.work + self.far_work(&plan.lights, order) + work }
+        NearValues { len, order, data, directions: None, work: responses.work + self.far_work(&plan.lights, order, coherent) + work }
     }
 
     /// A plan's near forms at a point, the sections asked each to its order (0 or 1): from its table where one is given
@@ -1125,7 +1128,7 @@ impl Model {
                     slopes[l.slot * q + f] = turn(near.data[(1 + f) * near.len + l.operand]);
                 }
             }
-            let value = |at: usize| if at < len { near.data[at] } else { plan.constants[at - len] };
+            let value = |at: usize| if at < len { near.data[at] + plan.bare(at) } else { plan.constants[at - len] };
             let raws: Vec<C64> = plan.raws.iter().map(|products| plan.products[products.clone()].iter().map(|&(x, y)| value(x).conj() * value(y)).sum()).collect();
             for &(slot, raw, conjugated, factor) in &plan.sums {
                 values[slot] += factor * if conjugated { raws[raw].conj() } else { raws[raw] };

@@ -1,15 +1,16 @@
 //! Photons (SPEC §1.6): the jump operators by class, the photons a state emits, the recoil's two moments.
 //!
 //! # Sources and classes
-//! A source is one part of the jump operators, linear in one component of a frequency's field (or constant): a folded
-//! component's photons C_a R from its field's component e_k on its basis (far.rs, eliminate.rs; the counter-rotating from e_k*),
-//! or an explicit excited state's C_a. In the base frame its entries b' ← s carry the beat Ω_J -- −ν of the absorbed component,
+//! A source is one part of the jump operators, linear in one component of a frequency's field (or constant): a component's
+//! folded drives' photons C_a R from its field's component e_k on its basis (the counter-rotating from e_k*) -- R the whole
+//! response of its folded drives, the bare ones' constant and, of a carrier, that of its drives folded at the atom
+//! (far.rs, eliminate.rs): one amplitude, one source --, or an explicit excited state's C_a. In the base frame its entries b' ← s carry the beat Ω_J -- −ν of the absorbed component,
 //! 0 for an explicit state (the excited states' ν_frame, common to every photon, is a global phase) -- and, beam by beam of its
 //! field, the wave vector q_J (the absorbed beam's k_l; −k_l for a counter-rotating component's a_l*). In the frames (cluster.rs)
 //! an entry is at ω̃ = Ω_J + θ_b' − θ_s, its photon's frequency up to the class's common phase; a folded photon and an explicit one
 //! of the same light land at the same ω̃ exactly. A class is the entries of one frame frequency landing in one cluster (model.rs
 //! `Photon`); two frequencies landing in one cluster are two classes unless their coherence is kept (`Unit::Coherence`), then
-//! one, each member at its relative phase e^{i(ω̃ − ω̃₀)t}. A near carrier's jump b' ← s exists where its response from s reaches an
+//! one, each member at its relative phase e^{i(ω̃ − ω̃₀)t}. A carrier's jump b' ← s exists where its response from s reaches an
 //! excited state that decays to b' (assemble.rs `Model::reached`).
 //!
 //! # The decay (assemble.rs)
@@ -32,22 +33,27 @@
 //! and its local second moment M = Re⟨∇f|∇f⟩/‖f‖² (the second Kramers–Moyal coefficient of the method's own expansion). A folded
 //! source's absorption mean is the jump's to carry: its ∇f is its field component's gradient on its entries (each beam's ∇a_l = a_l
 //! (ik_l + ∇ln|a_l|)) and its jumps' own. An explicit state's mean is the Ehrenfest force's (its kept drives' stimulated force),
-//! so its part of the kick has mean zero and the second moment of its drives' responses σ_d, Re[∇ln σ_d*⊗∇ln σ_d] by their shares
-//! (eliminate.rs `Model::explicit_recoil`). The kick is b_J + ξ, Cov ξ = M − b_J b_Jᵀ, b_J = the folded mean: positive semidefinite
-//! by Cauchy–Schwarz.
+//! so its part of the kick has mean zero and the second moment of the response its kept drives would make folded at the atom:
+//! per carrier c the response σ_c of the carrier's whole field on the cluster's ground amplitudes, summed coherently as a
+//! folded jump sums it, gives Re[∇ln σ_c*⊗∇ln σ_c], the carriers sharing the photon by |σ_c|² (eliminate.rs
+//! `Model::explicit_recoil`) -- never beam by beam: a standing wave's photon has k² tan² kz, none at the antinode and the dipole
+//! force's fluctuations towards the node, where its beams one by one would give k² everywhere. The kick is b_J + ξ, Cov ξ =
+//! M − b_J b_Jᵀ, b_J = the folded mean: positive semidefinite by Cauchy–Schwarz.
 
 use super::far::EXCITED;
-use super::units::{mixing, Measured};
+use super::reach::Region;
+use super::units::{gate, Measured};
 use super::{Beat, Lights, Model, Photon, Point, Recoil, Unit, UnitError};
-use crate::field::Amplitude;
+
 use crate::linalg::C64;
 use crate::request::{GROUND, STATES};
 use crate::units::{wave_number, RAD_PER_US_PER_MHZ};
 
-/// What a source's jumps are (module documentation): a folded far component's on its field's basis vector (`side` 0 the
-/// co-rotating, 1 the counter-rotating; constant, far.rs `Tone::jumps`), an explicit excited state's −C_a (the excited amplitude a
-/// folded drive makes is −R x_g, so that a class's jump is C_a(R x_g − x_e), the physical photon's sign throughout), or a near
-/// carrier's C_a(T_k − w T2_k) at the point (eliminate.rs).
+/// What a source's jumps are (module documentation): a component's bare drives' on its field's basis vector (`Far`: `side` 0
+/// the co-rotating, 1 the counter-rotating; constant, far.rs `Tone::jumps`), an explicit excited state's −C_a (the excited
+/// amplitude a folded drive makes is −R x_g, so that a class's jump is C_a(R x_g − x_e), the physical photon's sign
+/// throughout), or a carrier's (`Near`): its bare drives' constant and its drives' folded at the atom, C_a(T_k − w T2_k) at
+/// the point (eliminate.rs), together.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Origin {
     Far { frequency: usize, side: usize, component: usize },
@@ -63,14 +69,12 @@ pub(crate) struct Source {
 }
 
 /// A member of a class: a source and its entries in the class (landing place in the landing cluster, source place in the
-/// source cluster), its relative beat in a merged class (zero otherwise), and per axis the bound of its jumps' size per unit of
-/// its field component, ‖L_a‖_F over its entries (`Model::jump_bound`).
+/// source cluster), and its relative beat in a merged class (zero otherwise).
 #[derive(Clone, Debug)]
 pub(crate) struct Member {
     pub(crate) source: usize,
     pub(crate) entries: Vec<(usize, usize)>,
     pub(crate) phase: Beat,
-    pub(crate) sizes: [f64; 3],
 }
 
 /// A class of a source cluster's photons: its frame frequencies (one, or several kept coherent), its landing cluster, its members.
@@ -82,13 +86,13 @@ pub(crate) struct Class {
 }
 
 impl Model {
-    /// The sources (module documentation): per folded far component and basis vector of its field, per explicit excited state,
-    /// per near carrier and basis vector.
+    /// The sources (module documentation): per component with a bare drive that is no carrier and basis vector of its field,
+    /// per explicit excited state, per carrier and basis vector.
     pub(crate) fn all_sources(&self) -> Vec<Source> {
         let mut out = vec![];
         for (frequency, (f, tone)) in self.light.frequencies.iter().zip(&self.tones).enumerate() {
             for side in 0..2 {
-                if tone.folded[side] {
+                if tone.bare[side] && !(side == 0 && self.carrier_of(frequency).is_some()) {
                     let nu = self.axes.component(&self.light, super::Component { frequency, counter: side == 1 });
                     out.extend((0..f.rank()).map(|component| Source { origin: Origin::Far { frequency, side, component }, beat: nu.negated() }));
                 }
@@ -115,59 +119,59 @@ impl Model {
         self.source_frequency(source).map_or(true, |f| lights.on(f))
     }
 
-    /// A far or explicit source's jump b ← s on axis a (constant).
+    /// The constant part of a source's jump b ← s on axis a: a bare or explicit source's jump, and of a carrier's its bare
+    /// drives'.
     pub(crate) fn constant_jump(&self, source: &Source, a: usize, b: usize, s: usize) -> C64 {
+        let bare = |frequency: usize, side: usize, component: usize| self.tones[frequency].jumps[side].get(component).map_or(C64::ZERO, |jumps| jumps[a][(b, s)]);
         match source.origin {
-            Origin::Far { frequency, side, component } if s < GROUND => self.tones[frequency].jumps[side][component][a][(b, s)],
+            Origin::Far { frequency, side, component } if s < GROUND => bare(frequency, side, component),
+            Origin::Near { carrier, component } if s < GROUND => bare(self.carriers[carrier].frequency, 0, component),
             Origin::Explicit { state } if s == state => -self.emission[a][(b, state)],
-            Origin::Near { .. } => unreachable!("a near source's jumps are the point's"),
             _ => C64::ZERO,
         }
     }
 
-    /// Whether a source may jump from state s of a cluster to b on some axis: a constant one's nonzero entries; a near one's
-    /// wherever its response from s reaches an excited state that decays to b.
+    /// Whether a source may jump from state s of a cluster to b on some axis: where its constant part is not zero, and a
+    /// carrier's wherever its response at the atom from s reaches an excited state that decays to b.
     fn may_jump(&self, source: &Source, cluster: usize, b: usize, s: usize) -> bool {
-        match source.origin {
+        let at_the_atom = match source.origin {
             Origin::Near { carrier, component } => {
                 s < GROUND && {
                     let reach = self.reached(cluster, carrier, component, s);
                     (0..EXCITED).any(|e| reach[e] && (0..3).any(|a| self.emission[a][(b, GROUND + e)] != C64::ZERO))
                 }
             }
-            _ => (0..3).any(|a| self.constant_jump(source, a, b, s) != C64::ZERO),
-        }
+            _ => false,
+        };
+        at_the_atom || (0..3).any(|a| self.constant_jump(source, a, b, s) != C64::ZERO)
     }
 
-    /// A bound of a source's jump b ← s on axis a anywhere, per unit of its field component: a constant one's entry; a near
-    /// one's |C_a[b, ·]| times the norm of its folded coupling's column at s, times 2/Γ_min (its response's resolvent is at most
-    /// 2/Γ_min).
-    fn jump_bound(&self, source: &Source, a: usize, b: usize, s: usize) -> f64 {
-        match source.origin {
-            Origin::Near { carrier, component } => {
-                let x = &self.carriers[carrier].basis[component];
-                let column = (GROUND..STATES).map(|e| x[(e, s)].norm_sqr()).sum::<f64>().sqrt();
-                let row = (GROUND..STATES).map(|e| self.emission[a][(b, e)].norm_sqr()).sum::<f64>().sqrt();
-                row * column * 2.0 / self.least_decay()
+    /// A bound over a region of a source's jump b ← s on axis a per unit of its field component: its constant part's entry,
+    /// and of a carrier's part at the atom Σ_e |C_a[b, e]| |U_k[e, s]|/σ_es, σ_es the drive's denominator's bound there
+    /// (units.rs `Model::denominator_over`) -- each drive at its own distance.
+    fn jump_bound(&self, source: &Source, a: usize, b: usize, s: usize, region: &Region) -> f64 {
+        let at_the_atom = match source.origin {
+            Origin::Near { carrier, component } if s < GROUND => {
+                let cc = &self.carriers[carrier];
+                (GROUND..STATES)
+                    .map(|e| {
+                        let size = (self.emission[a][(b, e)] * cc.basis[component][(e, s)]).abs();
+                        if size > 0.0 { size / self.denominator_over(region, e, s, cc.detuning) } else { 0.0 }
+                    })
+                    .sum()
             }
-            _ => self.constant_jump(source, a, b, s).abs(),
-        }
+            _ => 0.0,
+        };
+        at_the_atom + self.constant_jump(source, a, b, s).abs()
     }
 
-    /// A source's field component at its largest, every beam at its peak and in phase: Σ_l |γ_lk| (1 for an explicit state's).
-    fn source_peak(&self, source: &Source) -> f64 {
-        match (self.source_frequency(source), source.origin) {
-            (Some(f), Origin::Far { component, .. } | Origin::Near { component, .. }) => self.light.frequencies[f].coefficients.iter().map(|c| c[component].abs()).sum(),
-            _ => 1.0,
-        }
-    }
-
-    /// A source's field component's modulus at a point, |Σ_l a_l γ_lk| (1 for an explicit state's).
-    pub(crate) fn source_size(&self, source: &Source, amplitudes: &[Amplitude]) -> f64 {
+    /// A source's field component's coherent bound over a region, |Σ_l a_l γ_lk| (reach.rs `Region::coherent`; 1 for an
+    /// explicit state's).
+    fn source_bound(&self, source: &Source, region: &Region) -> f64 {
         match (self.source_frequency(source), source.origin) {
             (Some(f), Origin::Far { component, .. } | Origin::Near { component, .. }) => {
                 let f = &self.light.frequencies[f];
-                f.beams.iter().zip(&f.coefficients).map(|(&l, c)| amplitudes[l].value * c[component]).sum::<C64>().abs()
+                region.coherent(&f.beams.iter().zip(&f.coefficients).map(|(&l, c)| (l, c[component], c[component].abs())).collect::<Vec<_>>())
             }
             _ => 1.0,
         }
@@ -199,16 +203,9 @@ impl Model {
                     let members = &mut out[class].members;
                     match members.iter_mut().find(|m| m.source == index) {
                         Some(m) => m.entries.push((bp, sp)),
-                        None => members.push(Member { source: index, entries: vec![(bp, sp)], phase: self.axes.zero(), sizes: [0.0; 3] }),
+                        None => members.push(Member { source: index, entries: vec![(bp, sp)], phase: self.axes.zero() }),
                     }
                 }
-            }
-        }
-        for class in out.iter_mut() {
-            let landing = &self.clusters[class.landing];
-            for m in class.members.iter_mut() {
-                let source = &self.sources[m.source];
-                m.sizes = std::array::from_fn(|a| m.entries.iter().map(|&(bp, sp)| self.jump_bound(source, a, landing.states[bp], c.states[sp]).powi(2)).sum::<f64>().sqrt());
             }
         }
         out.sort_by(|x, y| (x.landing, &x.beats[0]).cmp(&(y.landing, &y.beats[0])));
@@ -257,10 +254,14 @@ impl Model {
         let fields = self.fields(&plan, &amplitudes, at.kappa, 1);
         // Each field component's value and gradient from its beams, plain and Doppler-weighted.
         let mut work = near.as_ref().map_or(0.0, |n| n.work) + plan.scalars.iter().map(|s| (8 * s.beams.len()) as f64).sum::<f64>();
-        // A jump with its gradient: a near form's, or a constant.
+        // A jump with its gradient: a near form's with its constant part, or a constant.
         let jump = |place: usize| -> [C64; 4] {
             match &near {
-                Some(n) if place < len => n.first_order(place),
+                Some(n) if place < len => {
+                    let mut value = n.first_order(place);
+                    value[0] += plan.bare(place);
+                    value
+                }
                 _ => [plan.constants[place - len], C64::ZERO, C64::ZERO, C64::ZERO],
             }
         };
@@ -301,7 +302,7 @@ impl Model {
                     work += 2.0 + partner + if folded { 3.0 * (3.0 + 2.0 * partner) } else { 0.0 };
                 }
                 if !folded {
-                    let h = energies.get_or_insert_with(|| self.far_energies(&amplitudes, &lights, 1).0);
+                    let h = energies.get_or_insert_with(|| self.far_energies(&amplitudes, &lights, 1, &self.coherent_dressing()).0);
                     let (shares, w) = self.explicit_recoil(cluster, &amplitudes, h, at.kappa, m.source, own, psi);
                     explicit.extend(shares);
                     work += w;
@@ -363,55 +364,76 @@ impl Model {
         out
     }
 
-    /// A class's jump operators' sizes per axis with the sources' field components bounded by `most` (by source): Σ_members |e|
-    /// ‖L_a‖_F.
-    fn class_size(&self, class: &Class, most: &dyn Fn(usize) -> f64) -> [f64; 3] {
+    /// A bound over a region of a class's jump operators' sizes per axis: Σ_members F ‖L_a‖_F, F the member's field
+    /// component's bound there (`source_bound`) and L_a its entries' (`jump_bound`).
+    fn class_bound(&self, cluster: usize, class: &Class, region: &Region) -> [f64; 3] {
+        let (from, landing) = (&self.clusters[cluster], &self.clusters[class.landing]);
         let mut out = [0.0; 3];
         for m in &class.members {
-            let c = most(m.source);
+            let source = &self.sources[m.source];
+            let field = self.source_bound(source, region);
             for a in 0..3 {
-                out[a] += c * m.sizes[a];
+                out[a] += field * m.entries.iter().map(|&(bp, sp)| self.jump_bound(source, a, landing.states[bp], from.states[sp], region).powi(2)).sum::<f64>().sqrt();
             }
         }
         out
     }
 
-    /// A coherence's mixing with the sources' field components bounded by `most`: m = Σ_a |u_a||u'_a|/(|Ω| − spread), Ω the two
-    /// frequencies' beat (SPEC §1.5: its error m²√(p_i p_j)), the largest over the source clusters it names.
-    fn coherence_mixing(&self, unit: &Unit, most: &dyn Fn(usize) -> f64) -> f64 {
-        let Unit::Coherence { first, second, .. } = unit else { return 0.0 };
-        let beat = self.omega(&first.plus(-1, second)).abs();
-        let mut m = 0.0_f64;
+    /// A coherence's size over a region (the gates', units.rs `Model::gates`): Σ_a ‖L_a‖ ‖L'_a‖ of its two classes' jump
+    /// operators, each bounded there (`class_bound`), the largest over the source clusters it names.
+    pub(crate) fn coherence_bound(&self, unit: &Unit, region: &Region) -> f64 {
+        let mut size = 0.0_f64;
         for (cluster, i, j) in self.coherence_classes(unit) {
             let classes = &self.classes[cluster];
-            let (a, b) = (self.class_size(&classes[i], most), self.class_size(&classes[j], most));
-            m = m.max(mixing((0..3).map(|x| a[x] * b[x]).sum(), beat, self.spread()));
+            let (a, b) = (self.class_bound(cluster, &classes[i], region), self.class_bound(cluster, &classes[j], region));
+            size = size.max((0..3).map(|x| a[x] * b[x]).sum());
         }
-        m
+        size
     }
 
-    /// A coherence's static bound S = 2m²: its mixing with every beam at its peak and in phase (|a_l| ≤ 1 everywhere: a bound over
-    /// any reach). Its sweep is the gates' (units.rs `Model::gates`).
-    pub(crate) fn coherence_saturation(&self, unit: &Unit) -> f64 {
-        let m = self.coherence_mixing(unit, &|s| self.source_peak(&self.sources[s]));
-        2.0 * m * m
+    /// Per class of a sample's cluster and axis, ‖L_a‖_F of its jump operators at the sample's point (units.rs `Measured`):
+    /// its lit members' entries summed as the photons sum them (`photons_counted`) -- each its field component there times
+    /// its jump, a carrier's with its Doppler partner.
+    pub(crate) fn class_sizes(&self, at: &Measured) -> Vec<[f64; 3]> {
+        let plan = &at.plan;
+        let fields = self.fields(plan, &at.amplitudes, at.sample.at.kappa, 0);
+        let len = plan.near.len();
+        let jump = |place: usize| if place < len { at.near.first_order(place)[0] + plan.bare(place) } else { plan.constants[place - len] };
+        let from = self.clusters[plan.cluster].states.len();
+        plan.classes
+            .iter()
+            .map(|class| {
+                let to = self.clusters[class.landing].states.len();
+                let mut entries = vec![C64::ZERO; 3 * to * from];
+                for m in &class.members {
+                    let (c, cw) = m.scalar.map_or((C64::ONE, C64::ONE), |s| (fields.plain(s)[0], fields.doppler(s)[0]));
+                    for &(a, bp, sp, first, second) in &m.entries {
+                        entries[(a * to + bp) * from + sp] += if m.doppler { c * jump(first) - cw * jump(second) } else { c * jump(first) };
+                    }
+                }
+                std::array::from_fn(|a| entries[a * to * from..(a + 1) * to * from].iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt())
+            })
+            .collect()
     }
 
-    /// A coherence's error at a sample (units.rs `Measured`): m² √(p_i p_j), p the populations of the two classes' source states.
+    /// A coherence's error at a sample (units.rs `Measured`): m² √(p_i p_j), m its size at the point -- Σ_a ‖L_a‖ ‖L'_a‖ of
+    /// its two classes' jump operators there (`class_sizes`) -- over its distance, the two frequencies' beat less the spread
+    /// and the Doppler shift of two photons at the sample's speed (the one gate, units.rs `gate`); p the populations of the
+    /// two classes' source states (SPEC §1.5). Zero where the sample's cluster emits no such pair.
     pub(crate) fn coherence_error(&self, unit: &Unit, at: &Measured) -> UnitError {
-        let (sample, p) = (at.sample, &at.populations);
-        let m = self.coherence_mixing(unit, &|s| at.sources[s]);
-        let source_weight = |class: &Class| -> f64 {
-            class.members.iter().flat_map(|m| m.entries.iter().map(|&(_, sp)| self.clusters[sample.cluster].states[sp])).map(|s| p[s]).fold(0.0, f64::max)
-        };
-        let mut weight = 0.0_f64;
-        for (cluster, i, j) in self.coherence_classes(unit) {
-            if cluster == sample.cluster {
-                let classes = &self.classes[cluster];
-                weight = weight.max((source_weight(&classes[i]) * source_weight(&classes[j])).sqrt());
-            }
-        }
-        UnitError { parameter: m * m, population: m * m * weight, temperature: m * m * weight }
+        let nothing = UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 };
+        let Unit::Coherence { first, second, .. } = unit else { return nothing };
+        let Some(&(cluster, i, j)) = self.coherence_classes(unit).iter().find(|of| of.0 == at.sample.cluster) else { return nothing };
+        let sizes = at.classes.get_or_init(|| self.class_sizes(at));
+        let size: f64 = (0..3).map(|a| sizes[i][a] * sizes[j][a]).sum();
+        let wave = 2.0 * self.light.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max);
+        let apart = self.omega(&first.plus(-1, second)).abs() - self.spread() - wave * at.region.speed;
+        let m2 = 0.5 * gate(size, apart, 0.0).saturation;
+        let p = &at.populations;
+        let classes = &self.classes[cluster];
+        let source_weight = |class: &Class| -> f64 { class.members.iter().flat_map(|m| m.entries.iter().map(|&(_, sp)| self.clusters[cluster].states[sp])).map(|s| p[s]).fold(0.0, f64::max) };
+        let weight = (source_weight(&classes[i]) * source_weight(&classes[j])).sqrt();
+        UnitError { parameter: m2, population: m2 * weight, temperature: m2 * weight }
     }
 }
 

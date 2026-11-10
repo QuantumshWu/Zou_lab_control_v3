@@ -1,7 +1,9 @@
-//! What the model's tests share (tests/model_*.rs): the scenes' requests, the generator's side of the hazard's identity, and
-//! normal deviates.
+//! What the model's tests share (tests/model_*.rs): the scenes' requests, the units that fold a light's drives at the atom, the
+//! generator's side of the hazard's identity, and normal deviates.
 #![allow(dead_code)]
+use atom_motion::field::Light;
 use atom_motion::linalg::{inner, norm_sqr, Mat, C64};
+use atom_motion::model::{Component, Model, Unit};
 use atom_motion::random::Stream;
 use atom_motion::request::Request;
 use serde_json::Value;
@@ -13,6 +15,13 @@ pub fn scene(name: &str) -> Request {
     let path = if name.ends_with(".json") { PathBuf::from(name) } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json")) };
     let line: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     Request::from_native(&line).unwrap()
+}
+
+/// The units whose keeping folds every drive of the co-rotating components of the frequencies `of` with the levels at the atom
+/// (`Unit::Bare`: kept, a drive's fold takes the levels there).
+pub fn at_the_atom(request: &Request, light: &Light, of: &[usize]) -> Vec<Unit> {
+    let bare = Model::new(request, light, &[]).unwrap();
+    of.iter().flat_map(|&frequency| bare.bare_units(Component { frequency, counter: false })).collect()
 }
 
 /// The rate at which a generator H lowers a state's norm, ⟨ψ|i(H − H†)|ψ⟩/‖ψ‖²: by the decay's construction (model/photon.rs)

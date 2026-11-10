@@ -61,24 +61,33 @@
 //! step's own error (tests). B1's PGC read the same T on the middle state as on the start state (propagation.md §2.3).
 //!
 //! # The path's momentum
-//! v_m = (ħ/m)(κ_h + Δκ/2), the mean of the momenta before and after the kick: the reverse step goes back on the same line
-//! only at that velocity (propagation.md §2.3). It depends on the kick it makes, so it is found as the fixed point
-//! v = (ħ/m)(κ_h + Δκ(v)/2) by one predictor and one correction: the predictor's kick, the shear and the reference's alone,
-//! errs by τ ΔF/2 (ΔF the force's change over the step through the state), O(1) times τ where the step does not resolve the
-//! internal state (a jump's bare state relaxing in 1/Γ ≪ τ) -- a first-order error in the velocity the friction acts on.
-//! The correction multiplies it by the kick's sensitivity to v_m, (τ/2)|∂Δκ/∂κ_m| = O(τ), so one correction makes it
-//! O(τ²) and the kick's error O(τ³), the scheme's own local order: p − 1 = 1 correction (`step`). The generator is taken
-//! at the predictor's momentum κ_h for the shear and the first propagation, and at the corrected one for the step: one
-//! middle, two paths through it, two propagations.
+//! v_m = (ħ/m)κ_m, κ_m the momentum at the step's middle time: the mean of the momenta before and after the kick,
+//! κ_h + Δκ/2 (propagation.md §2.3). It depends on the kick the step makes, so it is predicted: κ_m = κ_h + K(ψ₀)/2, K(ψ)
+//! the kick of a state that does not change -- its shear at κ_h and the reference's τ∇V_ref(r_h) -- on the step's start
+//! state (`predicted`). The generator and the path are both taken at κ_m: one middle, one propagation a step.
+//! - The prediction errs by half of what the state's change adds to the kick, τ ΔF/2 (ΔF the force's change over the
+//!   step through the state): O(τ²) where the step resolves the internal state. The kick's sensitivity to v_m,
+//!   (τ/2)|∂Δκ/∂κ_m|, is O(τ), so the kick errs by O(τ³), the scheme's own local order; the step's doubling reads it
+//!   with the rest of the step's error (adapt.rs, # The read: the halves predict from their own starts).
+//! - The reverse step predicts from its own start, the step's end: its path's momentum is κ_h + Δκ − K(ψ₁)/2 against the
+//!   step's κ_h + K(ψ₀)/2. They differ by (K(ψ₀) + K(ψ₁))/2 − Δκ, the held kick's trapezoid against the kick: O(τ³), so a
+//!   step and its reverse miss the start by O(τ⁴), beyond the scheme's order (tests), and by nothing where the kick
+//!   does not depend on the path (one internal state: a conservative trap's step is its own inverse to round-off).
+//! - Where the step does not resolve the internal state (a jump's bare state relaxing in 1/Γ ≪ τ) ΔF is O(1) and the
+//!   path's velocity errs in first order over that step; the doubling reads that too.
 //!
 //! # Jumps (SPEC §1.6)
-//! ‖ψ‖² falls monotonically between jumps (the decay is −(i/2)ΣJ†J by the model's construction). Where it reaches the
-//! trajectory's threshold θ within a step the root s* of ln‖ψ(s)‖² = ln θ is found by bracketed inverse interpolation, to
-//! the norm's rounding (`root`); the caller redoes the step to it and jumps at its end (`jump`). A jump draws from its own stream
+//! ‖ψ‖² falls monotonically between jumps (the decay is −(i/2)ΣJ†J by the model's construction). A jump is made at the
+//! end of a step whose own propagation reaches the trajectory's threshold θ there (`jump`). A step tried for it
+//! (`Midway::attempt`) says where its propagation reaches θ: the root s* of ln‖ψ(s)‖² = ln θ on the step's own path,
+//! by bracketed inverse interpolation to the norm's rounding (`root`) -- within the step, or beyond its end, where the
+//! propagation is followed on the same path as far as the caller's reach. A root within the caller's slack of the step's
+//! end is the step's: it is the step to the jump. A root elsewhere is only a length to try next: a step's generator sits
+//! at its own middle, so the norm along a step of another length is another curve, and the time of a jump is never read
+//! off a step that is not taken (adapt.rs, # The jumps' times). A jump draws from its own stream
 //! (`random::Stream::jump`) in a fixed order: the next threshold, the class, the polarization, the fluctuation's three
 //! signs, and the direction's rejection loop last, so that the loop's length moves no other draw.
 
-use std::f64::consts::PI;
 use std::sync::OnceLock;
 
 use crate::decide::COMPLEX;
@@ -174,6 +183,54 @@ pub trait Middle {
     fn work(&self) -> [f64; 3];
 }
 
+/// A cluster's internal state: its amplitudes on the cluster's states -- at most the model's `STATES` --, held in place,
+/// so that whatever holds one (a trajectory, a step's end, the read's carried state, a jump's photon) copies without
+/// the heap. A slice of its amplitudes wherever one is asked; those beyond its length are zero.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Internal {
+    len: usize,
+    amplitudes: [C64; STATES],
+}
+
+impl Internal {
+    /// The zero state on `len` states.
+    pub fn zeros(len: usize) -> Internal {
+        assert!(len <= STATES, "an internal state on {len} states of the model's {STATES}");
+        Internal { len, amplitudes: [C64::ZERO; STATES] }
+    }
+}
+
+impl std::ops::Deref for Internal {
+    type Target = [C64];
+    fn deref(&self) -> &[C64] {
+        &self.amplitudes[..self.len]
+    }
+}
+
+impl std::ops::DerefMut for Internal {
+    fn deref_mut(&mut self) -> &mut [C64] {
+        &mut self.amplitudes[..self.len]
+    }
+}
+
+impl std::fmt::Debug for Internal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl FromIterator<C64> for Internal {
+    fn from_iter<I: IntoIterator<Item = C64>>(amplitudes: I) -> Internal {
+        let mut out = Internal::zeros(0);
+        for z in amplitudes {
+            assert!(out.len < STATES, "an internal state beyond the model's {STATES} states");
+            out.amplitudes[out.len] = z;
+            out.len += 1;
+        }
+        out
+    }
+}
+
 /// A trajectory's state (SPEC §1.6, §1.7, §2.2).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Trajectory {
@@ -183,7 +240,7 @@ pub struct Trajectory {
     pub kappa: [f64; 3],
     /// The internal state on the cluster's states, unnormalized between jumps: ‖ψ‖² is the probability of no jump since
     /// the last one.
-    pub psi: Vec<C64>,
+    pub psi: Internal,
     /// The cluster ψ lives on.
     pub cluster: usize,
     /// Time (µs).
@@ -197,15 +254,17 @@ pub struct Trajectory {
     /// The run's seed and the trajectory's number: its jumps' streams.
     pub seed: u64,
     pub index: u64,
-    /// The step control's own (`adapt`): its step (µs), the grid's largest spacing (µs, `beating`), its count of steps and
-    /// the time its cap was met.
+    /// The step control's own (`adapt`): its step (µs), the beating grid's largest spacing (µs, `beating`: a step takes
+    /// the fewest panels of spacings no wider), its count of steps, the time its cap was met, and the hazard's rate over
+    /// the last step taken (1/µs: that step's fall of ln‖ψ‖² over its length; none before the first).
     pub tau: f64,
     pub grid: f64,
     pub steps: u64,
     pub capped: Option<f64>,
+    pub rate: f64,
     /// The work counted (`decide::Work`, real multiply-adds) of the integrator's own algorithms over the trajectory --
-    /// exponentials, eigen-propagation, CF4 nodes with the model's generators and forces there, the doubling and the
-    /// grid's doubling (`adapt` adds each step's) --, the middles it asked the model for (each costed by
+    /// exponentials, eigen-propagation, CF4 nodes with the model's generators and forces there, the doubling (`adapt`
+    /// adds each step's) --, the middles it asked the model for (each costed by
     /// `Dynamics::assembly_work`) and its jumps' photons (`Dynamics::photon_work`).
     pub work: f64,
     pub assemblies: u64,
@@ -218,7 +277,7 @@ impl Trajectory {
         let cluster = model.cluster_of(state);
         let states = &model.cluster(cluster).states;
         let at = states.iter().position(|&s| s == state).expect("a ground state lies on its cluster");
-        let mut psi = vec![C64::ZERO; states.len()];
+        let mut psi = Internal::zeros(states.len());
         psi[at] = C64::ONE;
         let threshold = Stream::jump(seed, index, 0).open_uniform();
         Trajectory {
@@ -236,6 +295,7 @@ impl Trajectory {
             grid: f64::INFINITY,
             steps: 0,
             capped: None,
+            rate: 0.0,
             work: 0.0,
             assemblies: 0,
         }
@@ -408,38 +468,11 @@ struct Rule {
 
 impl Rule {
     fn new(m: usize) -> Rule {
-        let (mut nodes, mut weights) = (Vec::with_capacity(m), Vec::with_capacity(m));
-        for i in 1..=m {
-            // Newton on P_m from cos(π(i − ¼)/(m + ½)), until the step stops shrinking (the round-off's floor).
-            let mut x = (PI * (i as f64 - 0.25) / (m as f64 + 0.5)).cos();
-            let mut last = f64::INFINITY;
-            let derivative = loop {
-                let (p, dp) = legendre(m, x);
-                let dx = p / dp;
-                if !(dx.abs() < last) {
-                    break dp;
-                }
-                last = dx.abs();
-                x -= dx;
-            };
-            nodes.push(x);
-            weights.push(2.0 / ((1.0 - x * x) * derivative * derivative));
-        }
+        let (nodes, weights) = crate::special::gauss_legendre(m).into_iter().unzip();
         let ln_factorial = |n: usize| (1..=n).map(|k| (k as f64).ln()).sum::<f64>();
         let ln = UNIT_ROUNDOFF.ln() + ((2 * m + 1) as f64).ln() + 3.0 * ln_factorial(2 * m) - 4.0 * ln_factorial(m);
         Rule { nodes, weights, phase: (ln / (2 * m) as f64).exp() }
     }
-}
-
-/// P_m(x) and P_m′(x) by the three-term recurrence.
-fn legendre(m: usize, x: f64) -> (f64, f64) {
-    let (mut p0, mut p1) = (1.0, x);
-    for j in 2..=m {
-        let p2 = ((2 * j - 1) as f64 * x * p1 - (j - 1) as f64 * p0) / j as f64;
-        p0 = p1;
-        p1 = p2;
-    }
-    (p1, m as f64 * (x * p1 - p0) / (x * x - 1.0))
 }
 
 /// The rules of 2, 4, …, 64 nodes (two nodes at least: exact for the cubics a free flight's κ² is).
@@ -485,16 +518,32 @@ pub struct Segment {
     /// (r, κ) at the start, and at the middle after the kick.
     pub from: ([f64; 3], [f64; 3]),
     pub kicked: ([f64; 3], [f64; 3]),
+    /// The moments over the whole step, made where first asked (`moments`): an output's window and a read's trail ask
+    /// them of the same step.
+    whole: std::cell::OnceCell<([f64; 3], [f64; 3])>,
 }
 
 impl Segment {
+    /// The path of a step of τ from the time `start`: its reference flow, its start and its kicked middle.
+    fn new(start: f64, tau: f64, flow: Flow, from: ([f64; 3], [f64; 3]), kicked: ([f64; 3], [f64; 3])) -> Segment {
+        Segment { start, tau, flow, from, kicked, whole: std::cell::OnceCell::new() }
+    }
     /// The middle's time t_m.
     fn middle(&self) -> f64 {
         self.start + 0.5 * self.tau
     }
-    /// ∫κ_a dt and ∫κ_a² dt (1/µm·µs, 1/µm²·µs) per lab axis over [from, to] within the step, on its path: per side of the
-    /// middle, Gauss–Legendre to round-off on the flow, κ² of bandwidth twice the flow's rate (`quadrature`).
+    /// ∫κ_a dt and ∫κ_a² dt (1/µm·µs, 1/µm²·µs) per lab axis over [from, to] within the step, on its path (`integrals`);
+    /// over the whole step, from its start to its end, made once.
     pub fn moments(&self, from: f64, to: f64) -> ([f64; 3], [f64; 3]) {
+        if (from, to) == (self.start, self.start + self.tau) {
+            *self.whole.get_or_init(|| self.integrals(from, to))
+        } else {
+            self.integrals(from, to)
+        }
+    }
+    /// `moments` over [from, to]: per side of the middle, Gauss–Legendre to round-off on the flow, κ² of bandwidth twice
+    /// the flow's rate (`quadrature`).
+    fn integrals(&self, from: f64, to: f64) -> ([f64; 3], [f64; 3]) {
         let (m, (lo, hi)) = (self.middle(), (from.min(to), from.max(to)));
         let sign = if to >= from { 1.0 } else { -1.0 };
         let (first, last) = (self.start.min(self.start + self.tau), self.start.max(self.start + self.tau));
@@ -585,14 +634,21 @@ fn shear<M: Middle>(along: &Along<M>, rho: &mut [C64], psi: &[C64], tau: f64) ->
     f
 }
 
-/// A step's scratch memory, made once and fitted to each use: the matrix of an exponential (or the still Ĥ₀), the
-/// generator at a CF4 spacing's two nodes, and one array carved (`Scratch::carve`) into a grid's node states, the middle
-/// state's density, a node's change of density, their weighted sum (`impulse`), and an exponential's two work vectors
-/// (`linalg::exp_apply`).
-struct Scratch {
+/// A trajectory's scratch memory for its steps, made with it and fitted to each step's cluster (`Scratch::fit`): the
+/// matrix of an exponential (or the still Ĥ₀), the generator at a CF4 spacing's two nodes, and one array carved
+/// (`Scratch::carve`) into a grid's node states, the middle state's density, a node's change of density, their weighted
+/// sum (`impulse`), and an exponential's two work vectors (`linalg::exp_apply`). Every use writes what it reads: nothing
+/// a step left in it is read by another.
+pub struct Scratch {
     matrix: Mat,
     nodes: [Mat; 2],
     rest: Vec<C64>,
+}
+
+impl Default for Scratch {
+    fn default() -> Scratch {
+        Scratch { matrix: Mat::zeros(0, 0), nodes: [Mat::zeros(0, 0), Mat::zeros(0, 0)], rest: Vec::new() }
+    }
 }
 
 struct Carved<'a> {
@@ -606,8 +662,14 @@ struct Carved<'a> {
 }
 
 impl Scratch {
-    fn new(n: usize) -> Scratch {
-        Scratch { matrix: Mat::zeros(n, n), nodes: [Mat::zeros(n, n), Mat::zeros(n, n)], rest: Vec::new() }
+    /// The scratch for a cluster of n states.
+    fn fit(&mut self, n: usize) {
+        for m in std::iter::once(&mut self.matrix).chain(&mut self.nodes) {
+            if m.rows != n {
+                (m.rows, m.cols) = (n, n);
+                m.data.resize(n * n, C64::ZERO);
+            }
+        }
     }
     /// The scratch for a grid of `nodes` spacings.
     fn carve(&mut self, nodes: usize) -> Carved<'_> {
@@ -626,13 +688,31 @@ impl Scratch {
 // The propagations.
 
 /// What a propagation of the frame's state over the step made: ψ at the step's end (lab; the cluster's states first),
-/// the kick's part of the state (`impulse`), the first crossing of the threshold (from the step's start), the panels of
-/// its grid (none: through the eigendecomposition), and its counted work.
+/// the kick's part of the state (`impulse`), its counted work, and whether ‖ψ‖² reaches the watched threshold at the
+/// step's end (`Watch`: within its slack).
 struct Propagated {
     end: [C64; STATES],
     impulse: [f64; 3],
-    crossing: Option<f64>,
-    panels: Option<usize>,
+    work: f64,
+    reached: bool,
+}
+
+/// What a propagation looks at of a jump's threshold (`Midway::attempt`): the threshold θ of ‖ψ‖²; the slack (µs) --
+/// a crossing within it of the step's end is the step's end --; and the reach (µs) to which the propagation is followed
+/// on its path beyond the step's end where it ends above θ.
+#[derive(Clone, Copy, Debug)]
+struct Watch {
+    theta: f64,
+    slack: f64,
+    reach: f64,
+}
+
+/// A watched propagation whose norm reaches the threshold elsewhere than at its end: the first time (from the step's
+/// start) at which ‖ψ‖² reaches it -- before the end less the slack, where the propagation ends, or beyond the end plus
+/// the slack, within the reach --, and the work counted. Its end and its impulse are not made: the step only proposes
+/// that length (adapt.rs, # The jumps' times), and nothing else of it is read.
+struct Crossed {
+    at: f64,
     work: f64,
 }
 
@@ -658,7 +738,7 @@ mod count {
         let forms = if still { (nodes * n * n) as f64 + model[1] } else { model[2] + nodes as f64 * model[1] };
         COMPLEX * (((1 + 2 * nodes) * n * n) as f64 + forms)
     }
-    /// The predictor's shear: the start state's density and its tones.
+    /// The shear of the start state, the prediction of the path's momentum: its density and its tones.
     pub fn shear(n: usize, model: [f64; 3]) -> f64 {
         COMPLEX * ((n * n) as f64 + model[2])
     }
@@ -731,8 +811,8 @@ struct Spectrum {
 /// the eigendecomposition where Ĥ is still along the path, its decomposition exists, and a state propagated through it
 /// rounds no more than through the exponential of Ĥ₀ on the vector, the other exact evaluation of the same state
 /// (`linalg::Chebyshev::rounding` of its plan over the step) -- towards an exceptional point κ(R) grows without bound and
-/// the exponential, whose rounding does not know it, takes over; on the grid otherwise (None), whose error its own
-/// reading books (`Step::regrid`). `matrix` is left Ĥ₀'s traceless part; `sums` holds n numbers.
+/// the exponential, whose rounding does not know it, takes over; on the grid otherwise (None), whose error the step's
+/// doubling reads (`beating`). `matrix` is left Ĥ₀'s traceless part; `sums` holds n numbers.
 fn route<M: Middle>(along: &Along<M>, matrix: &mut Mat, sums: &mut [C64], tau: f64) -> Option<Spectrum> {
     if !along.middle.still() {
         return None;
@@ -740,7 +820,7 @@ fn route<M: Middle>(along: &Along<M>, matrix: &mut Mat, sums: &mut [C64], tau: f
     let n = along.n;
     along.middle.generator(&along.path, 0.0, matrix);
     let scalar = traceless(matrix);
-    let (rho, gamma) = linalg::bounds(matrix, sums);
+    let linalg::Bounds { rho, gamma, .. } = linalg::bounds(matrix, sums);
     let eigen = linalg::eigen(matrix)?;
     let mut lambda = [C64::ZERO; STATES];
     for b in 0..n {
@@ -756,8 +836,9 @@ fn route<M: Middle>(along: &Along<M>, matrix: &mut Mat, sums: &mut [C64], tau: f
 
 /// The propagation of a static Ĥ₀ through its eigendecomposition (`Spectrum`; exact at any time): in the coordinates
 /// d = R⁻¹x, d(s) = e^{−i(c + Λ)s}d₀ and x(s) = R d(s), the impulse by Gauss–Legendre at the bandwidth max|λ_b* − λ_c|
-/// (`quadrature`), the norm's root on ‖x(s)‖² (`root`).
-fn spectral<M: Middle>(path: &Along<M>, scratch: &mut Scratch, spectrum: &Spectrum, psi: &[C64], tau: f64, threshold: Option<f64>) -> Propagated {
+/// (`quadrature`), the norm's root on ‖x(s)‖² (`root`) within the step or, where the step ends above the watched
+/// threshold, within the reach beyond it.
+fn spectral<M: Middle>(path: &Along<M>, scratch: &mut Scratch, spectrum: &Spectrum, psi: &[C64], tau: f64, watch: Option<Watch>) -> Result<Propagated, Crossed> {
     let n = path.n;
     let model = path.middle.work();
     let Carved { held, change, sum, .. } = scratch.carve(0);
@@ -776,6 +857,28 @@ fn spectral<M: Middle>(path: &Along<M>, scratch: &mut Scratch, spectrum: &Spectr
         }
     };
     let (mut middle, mut end, mut x) = ([C64::ZERO; STATES], [C64::ZERO; STATES], [C64::ZERO; STATES]);
+    at(tau, &mut end[..n]);
+    let mut reached = false;
+    if let Some(watch) = watch.filter(|_| tau > 0.0) {
+        let norm = |s: f64| {
+            let mut x = [C64::ZERO; STATES];
+            at(s, &mut x[..n]);
+            norm_sqr(&x[..n])
+        };
+        let (floor, last) = (2.0 * spectrum.rounding + rounding(n + 1), norm_sqr(&end[..n]));
+        let crossing = if last <= watch.theta {
+            Some(root(&norm, (0.0, norm_sqr(psi)), (tau, last), watch.theta, floor))
+        } else {
+            let far = if watch.reach > 0.0 { norm(tau + watch.reach) } else { last };
+            (far <= watch.theta).then(|| root(&norm, (tau, last), (tau + watch.reach, far), watch.theta, floor))
+        };
+        if let Some(crossing) = crossing {
+            if (crossing - tau).abs() > watch.slack {
+                return Err(Crossed { at: crossing, work: count::spectral(n, model, e.work, 0) });
+            }
+            reached = true;
+        }
+    }
     at(0.5 * tau, &mut middle[..n]);
     let impulse = impulse(path, held, change, sum, tau, &middle[..n], &mut |each: &mut dyn FnMut(f64, f64, &[C64])| {
         for (s, w) in quadrature(0.0, tau, spectrum.bandwidth) {
@@ -783,20 +886,11 @@ fn spectral<M: Middle>(path: &Along<M>, scratch: &mut Scratch, spectrum: &Spectr
             each(s - 0.5 * tau, w, &x[..n]);
         }
     });
-    at(tau, &mut end[..n]);
-    let crossing = threshold.filter(|&theta| tau > 0.0 && norm_sqr(&end[..n]) <= theta).map(|theta| {
-        let norm = |s: f64| {
-            let mut x = [C64::ZERO; STATES];
-            at(s, &mut x[..n]);
-            norm_sqr(&x[..n])
-        };
-        root(norm, (0.0, norm_sqr(psi)), (tau, norm_sqr(&end[..n])), theta, 2.0 * spectrum.rounding + rounding(n + 1))
-    });
     for (z, phase) in end[..n].iter_mut().zip(&path.half) {
         *z *= *phase;
     }
     let work = count::spectral(n, model, e.work, spectrum.nodes) + count::impulse(n, model, spectrum.nodes, true);
-    Propagated { end, impulse, crossing, panels: None, work }
+    Ok(Propagated { end, impulse, work, reached })
 }
 
 /// CF4, the fourth-order commutator-free Magnus scheme of two exponentials (Blanes & Moan 2006): over h from the time s
@@ -822,24 +916,27 @@ fn cf4<M: Middle>(path: &Along<M>, a: &mut Mat, generators: &mut [Mat; 2], vecto
 }
 
 /// The propagation of Ĥ(t) by CF4 (`cf4`) on 2P spacings h, P = `panels`, the impulse by composite Simpson on its
-/// nodes: both of fourth order in νh, ν the force's frequency bound, an error the step's doubling does not see (its
-/// steps take the same spacing), read by doubling the panels (`Step::regrid`). The middle state is the middle node's,
-/// whose change is none. The norm's root between the nodes that bracket it, by CF4 from the earlier node.
-fn beating<M: Middle>(path: &Along<M>, scratch: &mut Scratch, psi: &[C64], tau: f64, panels: usize, threshold: Option<f64>) -> Propagated {
+/// nodes: both of fourth order in νh, ν the force's frequency bound -- an error of the step's length where the panels
+/// are the step's (adapt.rs, # The step: one panel a step, a half step one on half the spacing), which the step's
+/// doubling reads with the splitting's. The middle state is the middle node's,
+/// whose change is none. The norm's root between the nodes that bracket it, by CF4 from the earlier node -- within the
+/// step, or, where the step ends above the watched threshold, on further spacings of the same grid beyond its end, as
+/// far as the reach; the grid ends at a crossing that is not the step's end (`Crossed`).
+fn beating<M: Middle>(path: &Along<M>, scratch: &mut Scratch, psi: &[C64], tau: f64, panels: usize, watch: Option<Watch>) -> Result<Propagated, Crossed> {
     let (n, nodes) = (path.n, 2 * panels);
     let h = tau / nodes as f64;
     let Carved { matrix, generators, states, held, change, sum, work: vectors } = scratch.carve(nodes);
     for (x, (z, phase)) in states.iter_mut().zip(psi.iter().zip(&path.half)) {
         *x = *z * *phase;
     }
-    let (mut work, mut crossing) = (0.0, None);
+    let (mut work, mut reached, watch) = (0.0, false, watch.filter(|_| tau > 0.0));
     for k in 0..nodes {
         let s = k as f64 * h - 0.5 * tau;
         let (before, after) = states[k * n..(k + 2) * n].split_at_mut(n);
         after.copy_from_slice(before);
         let (exponentials, bound) = cf4(path, matrix, generators, vectors, after, s, h);
         work += exponentials;
-        if let Some(theta) = threshold.filter(|&theta| crossing.is_none() && tau > 0.0 && norm_sqr(after) <= theta) {
+        if let Some(watch) = watch.filter(|watch| !reached && norm_sqr(after) <= watch.theta) {
             let from = k as f64 * h;
             let norm = |to: f64| {
                 let mut y = [C64::ZERO; STATES];
@@ -847,7 +944,37 @@ fn beating<M: Middle>(path: &Along<M>, scratch: &mut Scratch, psi: &[C64], tau: 
                 cf4(path, matrix, generators, vectors, &mut y[..n], s, to - from);
                 norm_sqr(&y[..n])
             };
-            crossing = Some(root(norm, (from, norm_sqr(before)), (from + h, norm_sqr(after)), theta, 2.0 * bound + rounding(n + 1)));
+            let crossing = root(norm, (from, norm_sqr(before)), (from + h, norm_sqr(after)), watch.theta, 2.0 * bound + rounding(n + 1));
+            if crossing < tau - watch.slack {
+                return Err(Crossed { at: crossing, work });
+            }
+            reached = true;
+        }
+    }
+    // Above the threshold at its end: the same grid on the same path beyond it, a spacing at a time, as far as the reach.
+    if let Some(watch) = watch.filter(|watch| !reached && watch.reach > 0.0) {
+        let mut after = [C64::ZERO; STATES];
+        after[..n].copy_from_slice(&states[nodes * n..(nodes + 1) * n]);
+        let mut k = nodes;
+        while (k as f64) * h < tau + watch.reach {
+            let (s, from, before) = (k as f64 * h - 0.5 * tau, k as f64 * h, after);
+            let (exponentials, bound) = cf4(path, matrix, generators, vectors, &mut after[..n], s, h);
+            work += exponentials;
+            if norm_sqr(&after[..n]) <= watch.theta {
+                let norm = |to: f64| {
+                    let mut y = before;
+                    cf4(path, matrix, generators, vectors, &mut y[..n], s, to - from);
+                    norm_sqr(&y[..n])
+                };
+                let crossing = root(norm, (from, norm_sqr(&before[..n])), (from + h, norm_sqr(&after[..n])), watch.theta, 2.0 * bound + rounding(n + 1));
+                if crossing <= tau + watch.slack {
+                    reached = true;
+                } else if crossing <= tau + watch.reach {
+                    return Err(Crossed { at: crossing, work });
+                }
+                break;
+            }
+            k += 1;
         }
     }
     // Composite Simpson on the nodes, weights 1, 4, 2, …, 4, 1 over h/3.
@@ -863,7 +990,7 @@ fn beating<M: Middle>(path: &Along<M>, scratch: &mut Scratch, psi: &[C64], tau: 
         *z = *x * *phase;
     }
     work += count::impulse(n, path.middle.work(), nodes, false);
-    Propagated { end, impulse, crossing, panels: Some(panels), work }
+    Ok(Propagated { end, impulse, work, reached })
 }
 
 /// A root in [lo, hi] of ln D(s) = ln θ for a non-increasing D with D(hi) ≤ θ, D from `norm` and D at the bracket's ends
@@ -935,50 +1062,13 @@ fn root(mut norm: impl FnMut(f64) -> f64, (lo, at_lo): (f64, f64), (hi, at_hi): 
 /// One step of τ from a trajectory's state (`step`).
 #[derive(Clone, Debug)]
 pub struct Step {
-    /// The state at the step's end: the propagation runs to the end whatever the threshold; jumps, the loss and the
-    /// trajectory's counters are the caller's.
+    /// The state at the step's end; jumps, the loss and the trajectory's counters are the caller's.
     pub end: Trajectory,
-    /// The first time (µs from the step's start) at which ‖ψ‖² reaches the threshold within the step, if it does.
-    pub crossing: Option<f64>,
     /// The step's path.
     pub segment: Segment,
-    /// The step's counted work (real multiply-adds: its own and its nodes' generators and forces) and the middles it
-    /// asked of the model.
+    /// The step's counted work (real multiply-adds: its own and its nodes' generators and forces). The middle it went
+    /// through is counted where it is made (`Midway`: one a step, or one for the steps that share it).
     pub work: f64,
-    pub assemblies: u64,
-    /// The step's propagation to be redone on twice its grid's panels (`Step::regrid`); none through the
-    /// eigendecomposition.
-    retry: Option<Retry>,
-}
-
-/// What a propagation on the grid needs to be redone on a finer one: the path's momentum and velocity through the step's
-/// middle, the start state (the cluster's states first), its panels, and its impulse.
-#[derive(Clone, Debug)]
-struct Retry {
-    kappa: [f64; 3],
-    velocity: [f64; 3],
-    psi: [C64; STATES],
-    panels: usize,
-    impulse: [f64; 3],
-}
-
-impl Step {
-    /// The step's end with its propagation redone on twice its grid's panels (the same middle of the same model, the same
-    /// path, the same kick otherwise), and that work: the grid's error read, the step's grid erring by 2⁴/(2⁴ − 1) of the
-    /// difference (fourth order). None where the step took no grid.
-    pub fn regrid<D: Dynamics>(&self, model: &D) -> Option<(Trajectory, f64)> {
-        let r = self.retry.as_ref()?;
-        let (n, s) = (self.end.psi.len(), &self.segment);
-        let middle = model.middle(self.end.cluster, s.kicked.0, s.middle());
-        let finer = beating(&Along::new(&middle, r.kappa, r.velocity, s.tau), &mut Scratch::new(n), &r.psi[..n], s.tau, 2 * r.panels, None);
-        let kicked = (s.kicked.0, std::array::from_fn(|a| s.kicked.1[a] + finer.impulse[a] - r.impulse[a]));
-        let (r1, kappa1) = s.flow.advance(kicked, 0.5 * s.tau);
-        let mut end = self.end.clone();
-        end.r = r1;
-        end.kappa = kappa1;
-        end.psi.copy_from_slice(&finer.end[..n]);
-        Some((end, finer.work))
-    }
 }
 
 /// Why a step or a jump could not be made: the reference's fixed point is not a contraction at this step (`middle`); the
@@ -991,88 +1081,137 @@ pub enum Refused {
     Emission,
 }
 
-/// One propagation of B on the path through a middle at the velocity v, the generator at the momentum κ (module
-/// documentation, # The kick), by its route (`route`), and its kick: the propagation's impulse and the reference's
-/// τ∇V_ref(r_h).
-#[allow(clippy::too_many_arguments)]
-fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, from: &Trajectory, reference: [f64; 3], kappa: [f64; 3], velocity: [f64; 3], tau: f64, threshold: Option<f64>) -> (Propagated, [f64; 3]) {
-    let along = Along::new(middle, kappa, velocity, tau);
+/// The path's momentum of the step of τ through a middle from a state (module documentation, # The path's momentum),
+/// predicted: κ_h and half the kick of the start state held there -- its shear at κ_h and the reference's τ∇V_ref(r_h).
+fn predicted<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa_h: [f64; 3], reference: [f64; 3], tau: f64) -> [f64; 3] {
+    let held = shear(&Along::new(middle, kappa_h, [0.0; 3], tau), scratch.carve(0).held, psi, tau);
+    std::array::from_fn(|a| kappa_h[a] + 0.5 * (held[a] + tau * reference[a]))
+}
+
+/// The propagation of B over the step on the path through a middle at the momentum κ, the generator taken at it (module
+/// documentation, # The kick), by its route (`route`). Watched for a threshold, it says whether ‖ψ‖² reaches it at the
+/// step's end, and ends where it reaches it elsewhere (`Watch`, `Crossed`).
+fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, from: &Trajectory, kappa: [f64; 3], hbar_over_mass: f64, tau: f64, watch: Option<Watch>) -> Result<Propagated, Crossed> {
+    let along = Along::new(middle, kappa, kappa.map(|k| hbar_over_mass * k), tau);
     let Carved { matrix, work: sums, .. } = scratch.carve(0);
-    let propagated = match route(&along, matrix, sums, tau) {
-        Some(spectrum) => spectral(&along, scratch, &spectrum, &from.psi, tau, threshold),
-        None => beating(&along, scratch, &from.psi, tau, panels(tau, from.grid), threshold),
-    };
-    let kick = std::array::from_fn(|a| propagated.impulse[a] + tau * reference[a]);
-    (propagated, kick)
-}
-
-/// One step of τ (negative: the reverse step) from a trajectory's state (module documentation): the middle and its
-/// reference (`middle`); the model's generator there (`Dynamics::middle`); the predictor's momentum from the shear at κ_h
-/// and the reference's force, the first propagation on its path; the corrected momentum κ_h + Δκ/2 and the step's
-/// propagation at it and on its path; the kick and the second half flow.
-pub fn step<D: Dynamics>(model: &D, from: &Trajectory, tau: f64) -> Result<Step, Refused> {
-    let half = 0.5 * tau;
-    let hm = model.hbar_over_mass();
-    let n = from.psi.len();
-    let (flow, (r_h, kappa_h)) = middle(model, from.r, from.kappa, half)?;
-    let reference = flow.gradient_at(r_h);
-    let mut scratch = Scratch::new(n);
-    let generator = model.middle(from.cluster, r_h, from.time + half);
-    // The predictor: the shear and the reference's force.
-    let held = shear(&Along::new(&generator, kappa_h, [0.0; 3], tau), scratch.carve(0).held, &from.psi, tau);
-    let predicted: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * (held[a] + tau * reference[a]));
-    let (one, kick_one) = propagate(&mut scratch, &generator, from, reference, kappa_h, predicted.map(|k| hm * k), tau, None);
-    // The correction: the middle momentum of the first propagation's kick.
-    let corrected: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * kick_one[a]);
-    let velocity = corrected.map(|k| hm * k);
-    let (two, kick) = propagate(&mut scratch, &generator, from, reference, corrected, velocity, tau, Some(from.threshold));
-    let kicked = (r_h, std::array::from_fn(|a| kappa_h[a] + kick[a]));
-    let (r1, kappa1) = flow.advance(kicked, half);
-    if !(r1.iter().chain(&kappa1).all(|x| x.is_finite()) && two.end[..n].iter().all(|z| z.is_finite())) {
-        return Err(Refused::Overflow);
+    match route(&along, matrix, sums, tau) {
+        Some(spectrum) => spectral(&along, scratch, &spectrum, &from.psi, tau, watch),
+        None => beating(&along, scratch, &from.psi, tau, panels(tau, from.grid), watch),
     }
-    let mut end = from.clone();
-    end.r = r1;
-    end.kappa = kappa1;
-    end.psi.copy_from_slice(&two.end[..n]);
-    end.time = from.time + tau;
-    let work = one.work + two.work + count::shear(n, generator.work());
-    let retry = two.panels.map(|panels| {
-        let mut psi = [C64::ZERO; STATES];
-        psi[..n].copy_from_slice(&from.psi);
-        Retry { kappa: corrected, velocity, psi, panels, impulse: two.impulse }
-    });
-    Ok(Step { end, crossing: two.crossing, segment: Segment { start: from.time, tau, flow, from: (from.r, from.kappa), kicked }, work, assemblies: 1, retry })
 }
 
-/// The counted work of one step of τ on the path through a middle at a momentum and a velocity, and of that step's grid
-/// doubling (zero without a grid): what `Step::work` and `Step::regrid` count, priced without taking the step -- the
-/// solve's price of a model it has not run, at its pilot's states and steps. It makes no middle: the caller's is a
-/// state's own, or one of the cluster made once -- the nodes' counts are the cluster's whatever the point
-/// (`Middle::work`), and the point gives the route alone. Both propagations by the generator's own route (`route`: the
-/// eigen-propagation's decomposition and Gauss–Legendre nodes, or the grid's CF4 spacings no wider than `grid`, each
-/// exponential's Chebyshev plan at the bounds of Ĥ's traceless part at the middle over half a spacing, its two nodes'
-/// weights' sum) and the shear; the middle itself is the model's (`Dynamics::assembly_work`, one a step).
-pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64, grid: f64) -> (f64, f64) {
+/// A step tried for its state's jump (`Midway::attempt`), by where its own propagation reaches the state's threshold
+/// (module documentation, # Jumps).
+#[derive(Clone, Debug)]
+pub enum Attempt {
+    /// Nowhere within the step, nor within the reach beyond it: the step, and no jump.
+    Whole(Step),
+    /// At its end, within the slack: the step to the jump, which is made at its end.
+    Reached(Step),
+    /// Elsewhere -- before its end, where the propagation ended, or beyond it within the reach --: the time from the
+    /// step's start, the length of the step to try next, and the work counted.
+    Proposes { length: f64, work: f64 },
+}
+
+/// A step's middle (module documentation, # The reference, # The kick): the reference's flow of a step of τ and the
+/// point (r_h, κ_h) its first half reaches from the step's start, the reference's gradient there, and the model's
+/// generator there at the step's middle time (`Dynamics::middle`) -- all of a step that its internal state does not
+/// enter. The trajectory's step goes through it; so does the other step a read takes from the same start, the carried
+/// state's (adapt.rs, # The read) -- one middle of the model for the two.
+pub struct Midway<'a, D: Dynamics + 'a> {
+    tau: f64,
+    hbar_over_mass: f64,
+    flow: Flow,
+    reached: ([f64; 3], [f64; 3]),
+    reference: [f64; 3],
+    generator: D::Middle<'a>,
+}
+
+impl<'a, D: Dynamics> Midway<'a, D> {
+    /// The middle of the step of τ (negative: the reverse step) from a trajectory's position, momentum, cluster and
+    /// time: the reference's fixed point (`middle`; refused where it is not one) and the model's generator there.
+    pub fn new(model: &'a D, from: &Trajectory, tau: f64) -> Result<Midway<'a, D>, Refused> {
+        let half = 0.5 * tau;
+        let (flow, reached) = middle(model, from.r, from.kappa, half)?;
+        let generator = model.middle(from.cluster, reached.0, from.time + half);
+        Ok(Midway { tau, hbar_over_mass: model.hbar_over_mass(), flow, reached, reference: flow.gradient_at(reached.0), generator })
+    }
+
+    /// The step through this middle of a state at its start -- the middle's own position, momentum, cluster and time,
+    /// any internal state of the cluster --: the path's momentum predicted from the state (`predicted`), the propagation
+    /// at it and on its path (`propagate`), the kick -- the propagation's impulse and the reference's τ∇V_ref(r_h) --
+    /// and the second half flow. The flow between jumps: the state's threshold is not looked at (`attempt` looks).
+    /// `scratch` is the trajectory's.
+    pub fn step(&self, from: &Trajectory, scratch: &mut Scratch) -> Result<Step, Refused> {
+        match self.tried(from, None, scratch)? {
+            Attempt::Whole(step) => Ok(step),
+            Attempt::Reached(_) | Attempt::Proposes { .. } => unreachable!("a step without a threshold meets no crossing"),
+        }
+    }
+
+    /// The same step tried for the state's jump (module documentation, # Jumps): where its own propagation reaches
+    /// the state's threshold -- nowhere (within the step and `reach` µs beyond its end): the step; at its end within
+    /// `slack` µs: the step to the jump; elsewhere: the length to try next (`Attempt`).
+    pub fn attempt(&self, from: &Trajectory, slack: f64, reach: f64, scratch: &mut Scratch) -> Result<Attempt, Refused> {
+        self.tried(from, Some(Watch { theta: from.threshold, slack, reach }), scratch)
+    }
+
+    /// `step`, or watched for the state's threshold `attempt`.
+    fn tried(&self, from: &Trajectory, watch: Option<Watch>, scratch: &mut Scratch) -> Result<Attempt, Refused> {
+        let (tau, hm, n) = (self.tau, self.hbar_over_mass, from.psi.len());
+        let (flow, (r_h, kappa_h), reference, generator) = (self.flow, self.reached, self.reference, &self.generator);
+        scratch.fit(n);
+        let kappa_m = predicted(scratch, generator, &from.psi, kappa_h, reference, tau);
+        let shear = count::shear(n, generator.work());
+        let made = match propagate(scratch, generator, from, kappa_m, hm, tau, watch) {
+            Ok(made) => made,
+            Err(crossed) => return Ok(Attempt::Proposes { length: crossed.at, work: crossed.work + shear }),
+        };
+        let kicked = (r_h, std::array::from_fn(|a| kappa_h[a] + made.impulse[a] + tau * reference[a]));
+        let (r1, kappa1) = flow.advance(kicked, 0.5 * tau);
+        if !(r1.iter().chain(&kappa1).all(|x| x.is_finite()) && made.end[..n].iter().all(|z| z.is_finite())) {
+            return Err(Refused::Overflow);
+        }
+        let mut end = from.clone();
+        end.r = r1;
+        end.kappa = kappa1;
+        end.psi.copy_from_slice(&made.end[..n]);
+        end.time = from.time + tau;
+        let step = Step { end, segment: Segment::new(from.time, tau, flow, (from.r, from.kappa), kicked), work: made.work + shear };
+        Ok(if made.reached { Attempt::Reached(step) } else { Attempt::Whole(step) })
+    }
+}
+
+/// One step of τ (negative: the reverse step) from a trajectory's state (module documentation): its middle
+/// (`Midway::new`) and the step through it (`Midway::step`).
+pub fn step<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, scratch: &mut Scratch) -> Result<Step, Refused> {
+    Midway::new(model, from, tau)?.step(from, scratch)
+}
+
+/// The counted work of one step of τ on the path through a middle at a momentum and a velocity: what `Step::work`
+/// counts, priced without taking the step -- the solve's price of a model it has not run, at its pilot's states and
+/// steps. It makes no middle: the caller's is a state's own, or one of the cluster made once -- the nodes' counts are
+/// the cluster's whatever the point (`Middle::work`), and the point gives the route alone. The propagation by the
+/// generator's own route (`route`: the eigen-propagation's decomposition and Gauss–Legendre nodes, or the grid's CF4
+/// spacings no wider than `grid`, each exponential's Chebyshev plan at the bounds of Ĥ at the middle (`linalg::bounds`)
+/// over half a spacing, its two nodes' weights' sum) and the shear; the middle itself is the model's
+/// (`Dynamics::assembly_work`, one a step).
+pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64, grid: f64) -> f64 {
     let (n, costs) = (middle.states(), middle.work());
     let along = Along::new(middle, kappa, velocity, tau);
     let (mut a, mut sums) = (Mat::zeros(n, n), vec![C64::ZERO; n]);
-    let (propagation, regrid) = match route(&along, &mut a, &mut sums, tau) {
-        Some(spectrum) => (count::spectral(n, costs, spectrum.eigen.work, spectrum.nodes) + count::impulse(n, costs, spectrum.nodes, true), 0.0),
+    let propagation = match route(&along, &mut a, &mut sums, tau) {
+        Some(spectrum) => count::spectral(n, costs, spectrum.eigen.work, spectrum.nodes) + count::impulse(n, costs, spectrum.nodes, true),
         None => {
             middle.generator(&along.path, 0.0, &mut a);
-            traceless(&mut a);
-            let (rho, gamma) = linalg::bounds(&a, &mut sums);
-            let grid_work = |panels: usize| {
-                let h = (tau / (2 * panels) as f64).abs();
-                let plan = linalg::Chebyshev::plan(0.5 * rho * h, 0.5 * gamma * h);
-                (2 * panels) as f64 * count::cf4(n, costs, 2 * plan.parts * plan.terms) + count::impulse(n, costs, 2 * panels, false)
-            };
+            let linalg::Bounds { rho, gamma, .. } = linalg::bounds(&a, &mut sums);
             let panels = panels(tau, grid);
-            (grid_work(panels), grid_work(2 * panels))
+            let h = (tau / (2 * panels) as f64).abs();
+            let plan = linalg::Chebyshev::plan(0.5 * rho * h, 0.5 * gamma * h);
+            (2 * panels) as f64 * count::cf4(n, costs, 2 * plan.parts * plan.terms) + count::impulse(n, costs, 2 * panels, false)
         }
     };
-    (2.0 * propagation + count::shear(n, costs), regrid)
+    propagation + count::shear(n, costs)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1126,7 +1265,7 @@ fn fluctuation(second: &[[f64; 3]; 3], mean: &[f64; 3], links: usize, signs: [f6
 /// `carried` is a second internal state of the trajectory's cluster taken through the same jump (adapt.rs, # The read):
 /// the picked class's operator into the picked polarization on it, renormalized as ψ is -- the jump is a linear map of
 /// the internal state. One the operator annihilates is dropped (None).
-pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut Option<Vec<C64>>) -> Result<(), Refused> {
+pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut Option<Internal>) -> Result<(), Refused> {
     let j = trajectory.jumps + 1;
     let mut stream = Stream::jump(trajectory.seed, trajectory.index, j);
     let threshold = stream.open_uniform();
@@ -1134,8 +1273,8 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut O
     let signs: [f64; 3] = std::array::from_fn(|_| if stream.uniform() < 0.5 { 1.0 } else { -1.0 });
     let at = trajectory.point();
     let photons = model.photons(trajectory.cluster, &at, &trajectory.psi);
-    let weights: Vec<f64> = photons.iter().map(|p| p.amplitudes.iter().map(|u| norm_sqr(u)).sum()).collect();
-    let total: f64 = weights.iter().sum();
+    let weight = |p: &Photon| -> f64 { p.amplitudes.iter().map(|u| norm_sqr(u)).sum() };
+    let total: f64 = photons.iter().map(weight).sum();
     if !(total > 0.0) {
         return Err(Refused::Emission);
     }
@@ -1143,8 +1282,8 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut O
     trajectory.threshold = threshold;
     trajectory.work += model.photon_work();
     let mut x = class * total;
-    let mut pick = weights.len() - 1;
-    for (i, &w) in weights.iter().enumerate() {
+    let mut pick = photons.len() - 1;
+    for (i, w) in photons.iter().map(weight).enumerate() {
         if x < w {
             pick = i;
             break;
@@ -1163,7 +1302,7 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut O
         }
     };
     let (e1, e2) = linalg::perpendicular(direction);
-    let along = |e: [f64; 3]| -> Vec<C64> { (0..u[0].len()).map(|i| (0..3).map(|a| u[a][i] * e[a]).sum()).collect() };
+    let along = |e: [f64; 3]| -> Internal { (0..u[0].len()).map(|i| (0..3).map(|a| u[a][i] * e[a]).sum()).collect() };
     let (f1, f2) = (along(e1), along(e2));
     let (w1, w2) = (norm_sqr(&f1), norm_sqr(&f2));
     let (epsilon, f, w) = if polarization * (w1 + w2) < w1 { (e1, f1, w1) } else { (e2, f2, w2) };
@@ -1180,7 +1319,7 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut O
     }
     if let Some(other) = carried.take() {
         *carried = model.photons(trajectory.cluster, &at, &other).iter().find(|p| p.class == photon.class).and_then(|p| {
-            let g: Vec<C64> = (0..p.amplitudes[0].len()).map(|i| (0..3).map(|a| p.amplitudes[a][i] * epsilon[a]).sum()).collect();
+            let g: Internal = (0..p.amplitudes[0].len()).map(|i| (0..3).map(|a| p.amplitudes[a][i] * epsilon[a]).sum()).collect();
             let size = norm_sqr(&g);
             (size > 0.0).then(|| g.iter().map(|z| *z * (1.0 / size.sqrt())).collect())
         });

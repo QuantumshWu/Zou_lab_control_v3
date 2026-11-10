@@ -54,7 +54,6 @@
 //! trajectories within the step's error of the escape (solve.rs).
 use crate::adapt::Drift;
 use crate::decide::Read;
-use crate::ensemble::GROUP;
 use crate::transport::{transported, Mark};
 use crate::request::STATES;
 use crate::special::upper;
@@ -327,6 +326,13 @@ impl Group {
     pub fn new(outputs: usize) -> Group {
         Group { sums: vec![Sums::ZERO; outputs], marks: vec![] }
     }
+    /// The group's further trajectories, after those it holds.
+    pub fn absorb(&mut self, other: Group) {
+        for (s, o) in self.sums.iter_mut().zip(&other.sums) {
+            s.combine(o, 1.);
+        }
+        self.marks.extend(other.marks);
+    }
     /// One trajectory's outputs, in order.
     pub fn add(&mut self, outputs: &[Output]) {
         assert_eq!(outputs.len(), self.sums.len(), "a trajectory has every output");
@@ -527,34 +533,6 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
         .collect()
 }
 
-/// One output's reads between two levels run on the same trajectories (decide.rs): the coarse level's loss, rows as
-/// shown and T per lab axis (µK) less the fine level's, each jackknifed with a group left out of both -- the
-/// difference's own error, in which the levels' common noise cancels. T where both levels hold two atoms.
-#[derive(Clone, Debug)]
-pub struct Paired {
-    pub loss: Read,
-    pub shown: [Read; STATES],
-    pub temperature: Option<[Read; 3]>,
-}
-
-/// The reads between a coarse and a fine level at every output, their groups the same trajectories in the same order.
-pub fn paired<G: Borrow<Group> + Sync>(coarse: &[G], fine: &[G], scales: &Scales) -> Vec<Paired> {
-    assert_eq!(coarse.len(), fine.len(), "paired levels run the same groups");
-    let outputs = coarse.first().map_or(0, |g| g.borrow().sums.len());
-    (0..outputs)
-        .into_par_iter()
-        .map(|k| {
-            let j = jackknife(&[coarse, fine], k, scales.hbar_over_mass);
-            let read = |f: &dyn Fn(&Moments) -> f64| Read { value: f(&j.full[0]) - f(&j.full[1]), spread: j.every(|m| f(&m[0]) - f(&m[1])) };
-            let temperature = match (j.full[0].temperature, j.full[1].temperature) {
-                (Some(a), Some(b)) => Some(std::array::from_fn(|x| Read { value: a[x] - b[x], spread: j.held(|t| t[0][x] - t[1][x]) })),
-                _ => None,
-            };
-            Paired { loss: read(&|m| m.loss), shown: std::array::from_fn(|s| read(&|m| m.shown[s])), temperature }
-        })
-        .collect()
-}
-
 /// The step's error at one output, read on the trajectories that are read (module documentation, # The step's error):
 /// T's relative error per lab axis where the transport reads it, each row's as shown, and, where some trajectory's is
 /// read, the loss energy's accumulated error -- its mean and its spread between trajectories (rad/µs).
@@ -565,12 +543,25 @@ pub struct Stepped {
     pub energy: Option<[f64; 2]>,
 }
 
-/// The step's error at every output from the groups' sums and their read trajectories' marks: every group is whole, of
-/// `GROUP` read trajectories or of none.
+impl Stepped {
+    /// The read of a rung whose errors are `factor` times this one's (the scheme's order between two rungs): every
+    /// error and its spread times it.
+    pub fn times(&self, factor: f64) -> Stepped {
+        let scaled = |r: &Read| Read { value: r.value * factor, spread: Spread { error: r.spread.error * factor, groups: r.spread.groups } };
+        Stepped { temperature: self.temperature.as_ref().map(|t| std::array::from_fn(|a| scaled(&t[a]))), shown: std::array::from_fn(|q| scaled(&self.shown[q])), energy: self.energy.map(|e| e.map(|x| x * factor)) }
+    }
+}
+
+/// The step's error at every output from the groups' sums and their read trajectories' marks: every group has as many
+/// read trajectories as the first (its first members, solve.rs), and a row's error as shown is its sum over the read
+/// trajectories' held atoms over all the read trajectories -- held or lost: the error of the share shown.
 pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<Stepped> {
     let outputs = groups.first().map_or(0, |g| g.borrow().sums.len());
     let hm = scales.hbar_over_mass;
     let series: Vec<&[Option<Mark>]> = groups.iter().flat_map(|g| g.borrow().marks.iter().map(Vec::as_slice)).collect();
+    let readers: Vec<f64> = groups.iter().map(|g| g.borrow().marks.len() as f64).collect();
+    let members = groups.first().map_or(0, |g| g.borrow().marks.len());
+    let every: f64 = readers.iter().sum();
     (0..outputs)
         .into_par_iter()
         .map(|k| {
@@ -592,7 +583,7 @@ pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<St
             let unread = Read { value: f64::NAN, spread: Spread::UNREAD };
             // T's relative error per axis: the transported error over k_B T_a, of all the trajectories and without each
             // group.
-            let moved = if complete { transported(&series, GROUP as usize, k) } else { None };
+            let moved = if complete && members > 0 { transported(&series, members, k) } else { None };
             let relative = |a: usize| match (&moved, temperature(&all, hm)) {
                 (Some(m), Some(t)) => Read {
                     value: m.all[a] / (KT_PER_UK * t[a]),
@@ -600,9 +591,9 @@ pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<St
                 },
                 _ => unread,
             };
-            let read = |f: &dyn Fn(&Sums) -> f64, groups: f64| Read {
-                value: if complete { f(&all) } else { f64::NAN },
-                spread: if complete && rest.len() >= 2 { spread(rest.iter().map(|s| f(s)), groups) } else { Spread::UNREAD },
+            let read = |f: &dyn Fn(&Sums, f64) -> f64, groups: f64| Read {
+                value: if complete { f(&all, every) } else { f64::NAN },
+                spread: if complete && rest.len() >= 2 { spread(rest.iter().zip(&readers).map(|(s, r)| f(s, every - r)), groups) } else { Spread::UNREAD },
             };
             let [count, sum, squares] = all.energy;
             let energy = (count > 0.).then(|| {
@@ -611,7 +602,7 @@ pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<St
             });
             Stepped {
                 temperature: (all.read >= 2. && all.held >= 2.).then(|| std::array::from_fn(relative)),
-                shown: std::array::from_fn(|q| read(&|s: &Sums| s.shown[q] / s.trajectories, rest.len() as f64)),
+                shown: std::array::from_fn(|q| read(&|s: &Sums, readers: f64| s.shown[q] / readers, rest.len() as f64)),
                 energy,
             }
         })
@@ -621,6 +612,7 @@ pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ensemble::GROUP;
 
     /// The step's error (`stepped`): three groups of eight read atoms over one output interval, each with ⟨κ²⟩ = 4 on
     /// every axis (k_B T_a = 4 ħ/m) and the local errors 1, 2 and 3 % of k_B T_a made over the interval, its rows' error
@@ -852,40 +844,6 @@ mod tests {
         let p = 1. - normal_tail(CONFIDENCE);
         let within = Spread { error: (p * (1. - p) / repetitions as f64).sqrt(), groups: f64::INFINITY }.interval();
         assert!((coverage - p).abs() <= within, "coverage {coverage} against {p} ± {within}");
-    }
-
-    /// A paired read cancels the levels' common noise: the same atoms with every ⟨κ²⟩ larger by δ at the fine level read
-    /// T's difference −δ with no error, the loss and the rows none at all; one atom lost at the fine level alone reads
-    /// the loss's difference −1/N with an error of one group's.
-    #[test]
-    fn a_paired_read_cancels_the_common_noise() {
-        let mut state = 0x853C_49E6_748F_EA9B_u64;
-        let mut draw = || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            (state >> 11) as f64 / (1u64 << 53) as f64
-        };
-        let atoms: Vec<Vec<(usize, f64)>> = (0..5).map(|_| (0..4).map(|_| ((4. * draw()) as usize, draw() - 0.5)).collect()).collect();
-        let level = |shift: f64, lost: Option<(usize, usize)>| -> Vec<Group> {
-            atoms
-                .iter()
-                .enumerate()
-                .map(|(g, members)| {
-                    group(members.iter().enumerate().map(|(i, &(s, x))| (lost != Some((g, i))).then(|| atom(s, x, x * x + 1. + shift))).collect())
-                })
-                .collect()
-        };
-        let delta = 0.25;
-        let reads = paired(&level(0., None), &level(delta, None), &UNIT);
-        let t = reads[0].temperature.unwrap();
-        assert!((t[1].value + delta).abs() < 1e-14 && t[1].spread.error < 1e-14 && t[1].spread.groups == 5., "{:?}", t[1]);
-        assert!(reads[0].loss.value == 0. && reads[0].loss.spread.error == 0. && reads[0].shown.iter().all(|r| r.value.abs() < 1e-15));
-        let reads = paired(&level(0., None), &level(0., Some((2, 1))), &UNIT);
-        let loss = reads[0].loss;
-        // One group's difference −1/4 among five, the others none: the jackknife of a mean, √(Σ(d − d̄)²/(g(g − 1))).
-        let d: [f64; 5] = [0., 0., -0.25, 0., 0.];
-        let mean = d.iter().sum::<f64>() / 5.;
-        let se = (d.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / 20.).sqrt();
-        assert!((loss.value + 1. / 20.).abs() < 1e-15 && (loss.spread.error - se).abs() < 1e-15, "{loss:?}");
     }
 
     /// n̄ and the mean velocity of the held atoms; no T error from one group; no motion below two atoms held.

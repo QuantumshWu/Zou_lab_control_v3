@@ -2,11 +2,10 @@
 //!
 //! # A decision
 //! Every decision is made of four things (SPEC §5.1): the current level, a more exact one, the output the two are
-//! compared on, and the work. A read is the difference d of the two levels' outputs on the same trajectories (common
-//! random numbers, SPEC §2.4) or on the same sampled states, with its statistical error (`Read`; estimate.rs `paired`).
-//! The current level's own error follows from it (`Read::level`): where the finer level's parameter is the fraction r
-//! of the current one's and the level's error goes as its parameter to the order q, e(h) − e(rh) = d gives
-//! e(h) = d/(1 − r^q) (`richardson`); r = 0 where the finer level is the comparison's exact one. Against the share σ of
+//! compared on, and the work. A read is the difference d of the two levels' outputs on the same trajectories or on the
+//! same sampled states, with its statistical error (`Read`). The current level's own error follows from it: where the
+//! finer level's parameter is the fraction r of the current one's and the level's error goes as its parameter to the
+//! order q, e(h) − e(rh) = d gives e(h) = d/(1 − r^q) (`richardson`). Against the share σ of
 //! its target that the level may take there are three outcomes and no fourth (`Read::outcome`):
 //! - within, |e| + t·SE ≤ σ: keep the level;
 //! - beyond, |e| − t·SE > σ: refine by the measured ratio at the level's order, h' = h (σ/|e|)^{1/q} (`Read::refined`),
@@ -73,12 +72,6 @@ pub fn halved(parameter: f64, factor: f64) -> f64 {
 }
 
 impl Read {
-    /// The current level's own error from its difference with a finer level whose parameter is `ratio` times its own,
-    /// the error going as the parameter to `order` (`richardson`), its error likewise.
-    pub fn level(self, ratio: f64, order: f64) -> Read {
-        let f = richardson(ratio, order);
-        Read { value: self.value * f, spread: Spread { error: self.spread.error * f, groups: self.spread.groups } }
-    }
     /// The readable bound |e| + t·SE among `looks` reads; unbounded for a read that is not a number.
     pub fn bound(&self, looks: f64) -> f64 {
         let bound = self.value.abs() + self.spread.interval_over(looks);
@@ -168,12 +161,6 @@ mod tests {
     /// 2, a quarter at order 1. On a ladder of halvings a factor takes whole halvings, one at least.
     #[test]
     fn the_level_s_error_and_its_refinement_follow_its_order() {
-        let d = read(0.3, 0.03);
-        for (ratio, order) in [(0.5, 2.), (0.25, 1.)] {
-            let e = d.level(ratio, order);
-            assert!((e.value - 0.4).abs() < 1e-15 && (e.spread.error - 0.04).abs() < 1e-15, "{e:?}");
-        }
-        assert_eq!(d.level(0., 2.), d);
         assert_eq!((richardson(0.5, 2.), richardson(0.5, 4.), richardson(0., 1.)), (4. / 3., 16. / 15., 1.));
         let e = read(-0.2, 0.);
         assert!((e.refined(0.05, 2.) - 0.5).abs() < 1e-15 && (e.refined(0.05, 1.) - 0.25).abs() < 1e-15);
