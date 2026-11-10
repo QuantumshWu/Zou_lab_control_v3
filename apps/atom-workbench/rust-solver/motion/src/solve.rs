@@ -52,7 +52,7 @@
 //! product's first groups, or a product the step's falsifier restarted, are no better than the result before them.
 use crate::adapt::{self, Tolerances};
 use crate::decide::{pays, Outcome, Read};
-use crate::ensemble::{Ensemble, Start, Well, GROUP};
+use crate::ensemble::{Ensemble, Quadrature, Start, Well, GROUP};
 use crate::estimate::{half_window, paired, spread, summarize, unseen, wilson, Estimate, Group, Held, Scales, Spread};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, span, when, Account, Ledger};
@@ -218,7 +218,7 @@ fn tolerances(temperatures: V3, density: f64, run: f64) -> Tolerances {
 /// past it -- Wilson's far end at that count, so that what none of them met is bounded by what they leave unseen -- over the
 /// window, the largest over the outputs. The window's mean stands for the density at its edge: k_BT, the scale over which
 /// a trapped ensemble's density changes. With no atom held after t = 0 nothing is measured, and the density is taken at
-/// 1/k_BT, as the pilot's tolerances take it before anything is.
+/// 1/k_BT, the bound of a thermal ensemble's.
 fn escape_density(model: &Model, states: &[State], output: &[usize], outputs: usize, thermal: f64) -> f64 {
     let running = model.running();
     let near: Vec<bool> = states
@@ -304,10 +304,11 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     if unheld {
         ledger.flag("运行中的势没有极小：阱频与 n̄ 按准备阱报告".into());
     }
-    let exact = |kinetic: Vec<(f64, f64)>| -> (V3, f64) {
-        (ensemble.momentum(&kinetic.iter().map(|k| k.0).collect::<Vec<_>>()), kinetic.iter().map(|k| k.1 / k.0).fold(0., f64::max))
+    let exact = |kinetic: &[Quadrature]| -> (V3, f64) {
+        (ensemble.momentum(&kinetic.iter().map(|k| k.eta).collect::<Vec<_>>()), kinetic.iter().map(|k| k.difference / k.eta).fold(0., f64::max))
     };
-    let (momentum, start) = exact(ensemble.kinetic(0));
+    let first = ensemble.kinetic(0);
+    let (momentum, start) = exact(&first);
     let mut context = Context {
         momentum,
         fixed: Fixed { model: vec![[0.; 2]; outputs], held: vec![1.; outputs], temperature: vec![None; outputs], step: step_bound(), start },
@@ -318,8 +319,9 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
         method: format!("半经典 3D：{}", model.describe().trim_end_matches('。')),
     };
 
-    // The pilot (module documentation, # The pipeline): its own trajectory numbers, the step at the request's temperature.
-    let pilot_tolerances = tolerances([request.temperature_uk; 3], 1. / (KT_PER_UK * request.temperature_uk), context.plan.end);
+    // The pilot (module documentation, # The pipeline): its own trajectory numbers, the step at the request's temperature and
+    // the initial ensemble's density at the escape.
+    let pilot_tolerances = tolerances([request.temperature_uk; 3], ensemble.escape(&first), context.plan.end);
     let first = MOST_TRAJECTORIES / GROUP;
     let pilot = run_groups(first, first + pilot_size() / GROUP, Shape::of(&context.plan, true), &|i| trajectory(&run, &ensemble, &pilot_tolerances, &context.plan, true, i), &mut |prefix| {
         let (e, l, c) = pooled(prefix, &context.scales);
@@ -330,7 +332,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     if let Some(t) = outgrown(&estimates, reach) {
         return Ok(Attempt::Grow(t));
     }
-    (context.momentum, context.fixed.start) = exact(ensemble.kinetic(counts.steps));
+    (context.momentum, context.fixed.start) = exact(&ensemble.kinetic(counts.steps));
 
     // The model's errors at the pilot's states (SPEC §5.2): each folded unit's per output, the held atoms' mean.
     let units = model.units();
@@ -1203,8 +1205,8 @@ mod tests {
             let hm = hbar_over_mass(request.mass_kg);
             let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm).unwrap();
             let kinetic = ensemble.kinetic(1 << 16);
-            assert!(kinetic.iter().all(|k| k.0 > 0. && k.0 <= 1. && k.1 < 1.5e-3 * k.0), "{name}: η {kinetic:?}");
-            let exact = ensemble.momentum(&kinetic.iter().map(|k| k.0).collect::<Vec<_>>());
+            assert!(kinetic.iter().all(|k| k.eta > 0. && k.eta <= 1. && k.difference < 1.5e-3 * k.eta), "{name}: η {kinetic:?}");
+            let exact = ensemble.momentum(&kinetic.iter().map(|k| k.eta).collect::<Vec<_>>());
             let draws: Vec<V3> = (0..1 << 12).map(|i| ensemble.draw(SEED, i).kappa.map(|k| hm * k * k)).collect();
             let n = draws.len() as f64;
             for a in 0..3 {
