@@ -11,6 +11,19 @@
 //! Hermitian part is Re Σ c(r) M_bb over the static terms: a term and its adjoint pair (c_l'l = c_ll'*, M_l'l = M_ll'†) sum to
 //! twice its real part.
 //!
+//! # An averaged light (`Model::smooth`)
+//! The reported trap (SPEC §1.3) is the trap light's potential with the other lights' smooth shifts: each beam's own
+//! intensity, their phases averaged (`Lit::Averaged`). Such a light's shift of a ground state changes over the trap only by
+//! what the trap light does to its lines -- a plane wave's own intensity is the same everywhere --, which is the movement
+//! δΔ of its drives' denominators at the atom. A drive folded with the bare levels holds none of it: its shift is a constant
+//! (far.rs), the first term of the series in δΔ/(Δ₀ − iΓ/2) whose whole the fold with the levels at the atom is (units.rs,
+//! # Levels), and constants cancel in h_L − h_{L∖trap}. The dynamics take that first term and book its error; a reported
+//! quantity is the scene's, not the closure's: the level a drive's gate left it at must not show in it. So the potential of
+//! a light set with an averaged light is read with that light's folded drives all at the atom -- on the same request's
+//! model with its bare co-rotating drives kept at the atom, made once per light set. Its explicit drives are the cluster's
+//! dynamics, no light shift of a ground state; its counter-rotating ones are only ever bare (their δΔ against twice the
+//! optical frequency).
+//!
 //! # The trap (`Model::trap`)
 //! The descent from the focus to the local minimum of V_L(r; p) -- the prepared lights' for the initial wells, the running ones'
 //! for the reported trap (SPEC §1.3) --: Newton's step along each eigenvector of the analytic Hessian
@@ -23,12 +36,13 @@
 
 use super::assemble::{LEFT, RIGHT};
 use super::tabulate::Tables;
-use super::{jet, Envelope, Lights, Lit, Model, Quadratic, Trap};
+use super::{jet, Component, Envelope, Level, Lights, Lit, Model, Quadratic, Trap, Unit};
 use crate::linalg::C64;
 use crate::field::Amplitude;
 use crate::linalg::{dot3, symmetric3_eigen};
 use crate::request::GROUND;
 use crate::units::rounding;
+use std::sync::Arc;
 
 /// A potential's expansion with the scale of its sum (Σ of its terms' moduli): the rounding of its value is
 /// `rounding(terms)·scale`.
@@ -80,12 +94,37 @@ impl Model {
         out
     }
 
+    /// The model a light set's potential is read on where it is not this one (module documentation, # An averaged light): with
+    /// an averaged light of which this model folds co-rotating drives with the bare levels, the same request's model with
+    /// those drives folded with the levels at the atom; made once per light set.
+    fn smooth(&self, lights: &Lights) -> Option<Arc<Model>> {
+        if !lights.0.contains(&Lit::Averaged) {
+            return None;
+        }
+        let averaged = |c: Component| !c.counter && lights.0[c.frequency] == Lit::Averaged;
+        let raised: Vec<Unit> =
+            self.driven.iter().filter(|&&(c, e, g)| averaged(c) && self.level(c, e, g) == Level::Bare).map(|&(component, excited, ground)| Unit::Bare { component, excited, ground }).collect();
+        if raised.is_empty() {
+            return None;
+        }
+        let mut made = self.smooth.lock().expect("the smooth models' lock");
+        if let Some(found) = made.iter().find(|of| of.0 == *lights) {
+            return Some(found.1.clone());
+        }
+        let model = Arc::new(self.rekept(&[self.kept.clone(), raised].concat()).expect("a co-rotating drive may be folded at the atom"));
+        made.push((lights.clone(), model.clone()));
+        Some(model)
+    }
+
     /// V_L(r; p) with, to `order`, its gradient and Hessian, and the rounding of its sum (module documentation); the near light from
     /// its tables where they serve (tabulate.rs `Model::near`).
     pub(crate) fn expand(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights, order: usize, tables: Option<&super::tabulate::Tables>) -> Expansion {
         let trap = self.light.trap;
         if !lights.on(trap) {
             return Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
+        }
+        if let Some(model) = self.smooth(lights) {
+            return model.expand(r, p, lights, order, None);
         }
         let amplitudes = self.light.amplitudes(r);
         let mut out = self.far_potential(trap, &amplitudes, p, lights);

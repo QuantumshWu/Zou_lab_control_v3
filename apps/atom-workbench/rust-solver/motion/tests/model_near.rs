@@ -343,6 +343,32 @@ fn the_expansion_s_derivatives_are_exact_with_drives_at_the_atom() {
     }
 }
 
+/// The reported trap is the scene's, not the closure's (SPEC §1.3; potential.rs, # An averaged light): the other lights' smooth
+/// shifts are in it with their drives' levels at the atom, whatever level the model folds those drives at. R3_DOPPLER's
+/// cooling pair and R4_TW1's cooling and repump light in their tweezers, a model with every drive folded with the bare levels
+/// against one with the other lights' drives all folded at the atom: the reported trap is the same to the bit, softer than
+/// the prepared one by the cooling light's shift (the bare folds' constants alone would leave the prepared trap's
+/// frequencies); and the prepared trap, the dynamics' own, is each model's as it stands.
+#[test]
+fn the_reported_trap_does_not_show_the_level_a_drive_is_folded_at() {
+    for name in ["R3_DOPPLER", "R4_TW1"] {
+        let request = scene(name);
+        let light = Light::new(&request);
+        let others: Vec<usize> = (0..light.frequencies.len()).filter(|&f| f != light.trap).collect();
+        let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+        let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
+        let bare = Model::new(&request, &light, &[]).unwrap();
+        let atom = Model::new(&request, &light, &at_the_atom(&request, &light, &others)).unwrap();
+        let (of_bare, of_atom) = (bare.trap(&p, &bare.reported()).unwrap(), atom.trap(&p, &atom.reported()).unwrap());
+        assert_eq!(of_bare, of_atom, "{name}: the reported trap with the drives bare against the drives at the atom");
+        let prepared = bare.trap(&p, &bare.prepared()).unwrap();
+        let softer = (0..3).map(|a| 1.0 - of_bare.lab[a] / prepared.lab[a]).fold(f64::NEG_INFINITY, f64::max);
+        assert!(softer > 1e-4, "{name}: the other lights' smooth shift in the reported trap: softer by {softer:.3e}");
+        assert_eq!(prepared, atom.trap(&p, &atom.prepared()).unwrap(), "{name}: the prepared trap");
+        eprintln!("{name}: the reported trap {:?} kHz, softer than the prepared one by {softer:.3e}", of_bare.lab.map(|w| w / std::f64::consts::TAU * 1e3));
+    }
+}
+
 /// A model built with units kept lists as candidates only the units it folds (`Model::units`): none it keeps, none its clusters
 /// hold for free. The gates' closure from nothing kept (R3_DOPPLER, whose cooling line the tweezer moves by more than its own
 /// detuning: its drives' folds with the bare levels do not exist, those with the levels at the atom do) adds only units it has
