@@ -170,15 +170,24 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     request.validate()?;
     let light = Light::new(request);
     let (mut kept, mut reach, mut step) = (vec![], request.temperature_uk, None);
+    // The last keep made for its predicted saving (`Attempt::Keep`): the units kept before it, the step then and the
+    // saving's share; and the units such a keep has been undone for (`Attempt::Undo`), not priced again.
+    let (mut priced, mut barred): (Option<(Vec<Unit>, f64, f64)>, Vec<Unit>) = (None, vec![]);
     let mut messages = Messages { send: checkpoint, clock: Instant::now(), last: None, least: 0 };
     loop {
         // An attempt's results improve on its own last one, from two groups on (module documentation, # Checkpoints).
         messages.least = 2 * GROUP;
-        match attempt(request, &light, &mut kept, reach, step, &mut messages)? {
+        match attempt(request, &light, &mut kept, reach, step, priced.as_ref().map(|p| (p.1, p.2)), &barred, &mut messages)? {
             Attempt::Grow(t, tau) => (reach, step) = (t, Some(tau)),
-            Attempt::Keep(u, tau) => {
+            Attempt::Keep(u, tau, share) => {
+                priced = share.map(|share| (kept.clone(), tau, share));
+                barred.extend(share.map(|_| u.clone()));
                 kept.push(u);
                 step = Some(tau);
+            }
+            Attempt::Undo => {
+                let (before, tau, _) = priced.take().expect("only an attempt told of a priced keep undoes one");
+                (kept, step) = (before, Some(tau));
             }
             Attempt::Refine(tau) => step = Some(tau),
             Attempt::Done(s) => return Ok(s),
@@ -223,11 +232,14 @@ impl Messages<'_> {
 }
 
 /// How one attempt at a model ends (`attempt`): the pilot's atoms outgrew the reach the model was judged over (its new
-/// temperature, µK), a unit is to be kept -- each with the step the attempt's pilot took, the next attempt's first rung --,
-/// the step is refuted (the step to take), or the solution.
+/// temperature, µK), a unit is to be kept -- each with the step the attempt's pilot took, the next attempt's first rung;
+/// a keep with the share of the work it was predicted to save where that is why it is kept (`keep`) --, the last such
+/// keep is undone (its model's step, once read, makes it dearer than the model before it), the step is refuted (the
+/// step to take), or the solution.
 enum Attempt {
     Grow(f64, f64),
-    Keep(Unit, f64),
+    Keep(Unit, f64, Option<f64>),
+    Undo,
     Refine(f64),
     Done(Solution),
 }
@@ -374,7 +386,8 @@ fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Table
 /// outputs left none, the unit of the largest weight there (its errors on what is shown and on T, weighed by the held
 /// share as the totals are, each over its target, added up) --; else, of the units whose error's removal alone would pay
 /// for the `again` trajectories its model runs before it stands where this one does, each rated with its kept model,
-/// the one whose keeping saves the most predicted work beyond its spread.
+/// the one whose keeping saves the most predicted work beyond its spread -- with that saving's share, and never a unit
+/// of `barred` (a keep of this kind once made is not priced again: undone or not, its price has been read).
 #[allow(clippy::too_many_arguments)]
 fn keep(
     request: &Request,
@@ -391,14 +404,15 @@ fn keep(
     scales: &Scales,
     unsampled: f64,
     again: f64,
-) -> Option<usize> {
+    barred: &[Unit],
+) -> Option<(usize, Option<f64>)> {
     let means = measured.means(fixed.model.len(), None);
     let weight = |u: usize, over: &[usize]| -> f64 {
         over.iter().filter(|&&k| fixed.held[k] > 0.).map(|&k| fixed.held[k] * (means[u][k][0] / POPULATION_TARGET + means[u][k][1] / TEMPERATURE_TARGET)).sum()
     };
     let crowded = Targets::new(fixed).crowded();
     if let Some(u) = (0..units.len()).max_by(|&a, &b| weight(a, &crowded).total_cmp(&weight(b, &crowded))).filter(|&u| weight(u, &crowded) > 0.) {
-        return Some(u);
+        return Some((u, None));
     }
     let pricing = Pricing::new(request, light, kept, model, reference, centre, units, measured, states, parts, fixed, scales, unsampled, again);
     let saving = pricing.saving_at_all();
@@ -406,16 +420,30 @@ fn keep(
         vec![]
     } else {
         let others = pricing.leave_one_out();
-        saving.into_par_iter().filter(|&u| pays(0., pricing.saving(&others, u, &pricing.own))).filter_map(|u| pricing.priced(&others, u)).collect()
+        saving.into_par_iter().filter(|&u| !barred.contains(&units[u]) && pays(0., pricing.saving(&others, u, &pricing.own))).filter_map(|u| pricing.priced(&others, u)).collect()
     };
     ranked.sort_by(|a, b| assured(b.saving).total_cmp(&assured(a.saving)));
-    ranked.first().filter(|c| pays(0., c.saving)).map(|c| c.unit)
+    ranked.first().filter(|c| pays(0., c.saving)).map(|c| (c.unit, Some(c.saving.value)))
 }
 
 /// One attempt at the solve with the units `kept` and the reach at `reach` µK (module documentation, # The pipeline). The
 /// units its model's closure keeps join `kept`, the solve's one set: a unit an attempt keeps after its pilot is a unit of
 /// the closed model (a drive of a carrier the closure made near), and the next attempt's model is built from both.
-fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, step: Option<f64>, messages: &mut Messages) -> Result<Attempt, String> {
+/// `priced`: the model's last unit was kept for a predicted saving -- the step of the model before it and the saving's
+/// share of the work. The price knew the kept model's work a step, not the step it needs (pricing reads no step); where
+/// the ladder below then takes a step at which the kept model costs more than the one before it, (1 − share)·τ_before/τ
+/// > 1, the keep is undone (`Attempt::Undo`): the fold's error stands, measured and booked as before.
+#[allow(clippy::too_many_arguments)]
+fn attempt(
+    request: &Request,
+    light: &Light,
+    kept: &mut Vec<Unit>,
+    reach: f64,
+    step: Option<f64>,
+    priced: Option<(f64, f64)>,
+    barred: &[Unit],
+    messages: &mut Messages,
+) -> Result<Attempt, String> {
     let hm = hbar_over_mass(request.mass_kg);
     let initial = components(request);
     // The reference state (SPEC §2.1): the initial component of the largest population, of equal ones the last.
@@ -525,12 +553,14 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
             temperature: held_to(&estimates),
             ..context.fixed.clone()
         };
-        if let Some(u) = keep(request, light, kept, &model, reference, trap.centre, &units, &measured, &samples, &scout, &fixed, &context.scales, unsampled, scout.len() as f64) {
-            return Ok(Attempt::Keep(units[u].clone(), tau));
+        if let Some((u, share)) = keep(request, light, kept, &model, reference, trap.centre, &units, &measured, &samples, &scout, &fixed, &context.scales, unsampled, scout.len() as f64, barred) {
+            return Ok(Attempt::Keep(units[u].clone(), tau, share));
         }
     }
     // Between two rungs the step's errors go as 2^p (the scheme's order, the Richardson factors' own premise).
     let between = 2f64.powi(ORDER);
+    // A priced keep's model at the step `step` against the model before it at its own (see `priced`).
+    let dearer = |step: f64| priced.is_some_and(|(before, share)| (1. - share) * before / step > 1.);
     let (first_parts, reads) = loop {
         let tau = context.tau;
         let below = halved(tau, 1.);
@@ -573,6 +603,9 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
                 break (judgement, fits(below) && judged(&parts, between) == Judgement::Within);
             }
         };
+        if lower && dearer(below) {
+            return Ok(Attempt::Undo);
+        }
         if lower {
             // The rung below is the run's: its errors are this read's over 2^p, and its trajectories carry no reader.
             let reads: Vec<Stepped> = stepped(&parts.iter().collect::<Vec<_>>(), &context.scales).iter().map(|r| r.times(1. / between)).collect();
@@ -586,6 +619,7 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
             Judgement::Unreadable => Some(below),
         };
         match next {
+            Some(next) if fits(next) && dearer(next) => return Ok(Attempt::Undo),
             Some(next) if fits(next) => context.tau = next,
             _ => {
                 if next.is_some() {
@@ -690,8 +724,8 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
     let held = context.fixed.held.clone();
     let weighed = |u: usize, k: usize| -> [f64; 2] { if held[k] > 0. { [population[u][k] * held[k], temperature[u][k] * held[k]] } else { [0.; 2] } };
     // A unit to keep at the pilot's states (`keep`): its model then runs a scout and a pilot again.
-    if let Some(u) = keep(request, light, kept, &model, reference, trap.centre, &units, &measured, &samples, &pilot, &context.fixed, &context.scales, unsampled, (groups + pilot_size()) as f64) {
-        return Ok(Attempt::Keep(units[u].clone(), tau));
+    if let Some((u, share)) = keep(request, light, kept, &model, reference, trap.centre, &units, &measured, &samples, &pilot, &context.fixed, &context.scales, unsampled, (groups + pilot_size()) as f64, barred) {
+        return Ok(Attempt::Keep(units[u].clone(), tau, share));
     }
     // The ledger's items: each folded unit's error on what is shown and on T (its largest over the outputs, weighed by the
     // held share as the totals are) with the item's place for its unit, the unsampled share, the step.
