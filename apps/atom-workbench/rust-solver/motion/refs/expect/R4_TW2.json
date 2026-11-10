@@ -29,8 +29,8 @@
   {
    "quantity": "trapFrequency",
    "axis": "x",
-   "value": 19.25580267364553,
-   "u": 0.000015261433401905854,
+   "value": 19.25581050688713,
+   "u": 0.000014789982172453179,
    "target": {
     "relative": 0
    }
@@ -38,8 +38,8 @@
   {
    "quantity": "trapFrequency",
    "axis": "y",
-   "value": 100.41229713530981,
-   "u": 0.00007958305407648792,
+   "value": 100.4123379829336,
+   "u": 0.00007712460021006928,
    "target": {
     "relative": 0
    }
@@ -47,8 +47,8 @@
   {
    "quantity": "trapFrequency",
    "axis": "z",
-   "value": 100.41229713530981,
-   "u": 0.00007958305407648792,
+   "value": 100.4123379829336,
+   "u": 0.00007712460021006928,
    "target": {
     "relative": 0
    }
@@ -1115,9 +1115,9 @@
   "note": "Typical in-tweezer PGC: lin-perp-lin cooler -6 Gamma (free space; -10..-12 Gamma at the focus), 3 mW/cm2 per beam; repumper resonant (free space) 0.5 mW/cm2 per beam",
   "wall_s": 4529.908835000126,
   "trapKHz": [
-   19.25580267364553,
-   100.41229713530981,
-   100.41229713530981
+   19.25581050688713,
+   100.4123379829336,
+   100.4123379829336
   ],
   "referenceRadialKHz": 100.54925292422925
  }
