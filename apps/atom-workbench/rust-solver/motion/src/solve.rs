@@ -3,7 +3,11 @@
 //! # The pipeline
 //! 1. The request's checks; the light; the initial components; the reach and the model with every unit whose existence
 //!    gate fails kept (model.rs, SPEC §1.5).
-//! 2. The pilot: the run's first `pilot_size` trajectories (their own numbers, from `MOST_TRAJECTORIES`), at a rung of
+//! 2. The scout: before any step is read, the first member of every pilot group runs once at the first rung, no
+//!    reader. Where its atoms outgrow the reach, or a folded unit is to be kept at its states (`keep`), the attempt ends
+//!    there and the next begins with that model: a model is settled for the price of a few plain trajectories, not of
+//!    a pilot with its reads (the old engine's pilot did the same: it predicted, and no result stood on it).
+//!    The pilot: the run's first `pilot_size` trajectories (their own numbers, from `MOST_TRAJECTORIES`), at a rung of
 //!    the step's ladder. The step and its error are read on a rung's members that carry a reader (# The step), the
 //!    model's units' errors at the states of the first member of every group; from all of them the outputs where T is held to its
 //!    target and T's scale there, the held share, the reach's test. Its result is the first checkpoint, and its
@@ -338,6 +342,76 @@ fn classical(temperature: &V3, frequencies: &V3) -> bool {
     (0..3).all(|a| KT_PER_UK * temperature[a] >= CLASSICAL * frequencies[a])
 }
 
+/// The states the model is read at and the folded units' errors there (SPEC §5.2): the first member of every group of
+/// `parts` at every output -- one a group keeps every group in a mean's spread, and a unit's error is a function of the
+/// state --, with each state's output and group.
+struct Sampled {
+    samples: Vec<State>,
+    at: Vec<usize>,
+    from: Vec<usize>,
+    errors: Vec<Vec<UnitError>>,
+}
+fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Tables, parts: &[&Part]) -> Sampled {
+    let mut samples: Vec<State> = vec![];
+    let (mut at, mut from) = (vec![], vec![]);
+    for (g, p) in parts.iter().enumerate() {
+        for (k, s) in p.samples.iter().enumerate() {
+            for state in s.iter().filter(|x| x.index % GROUP == 0) {
+                samples.push(state.clone());
+                at.push(k);
+                from.push(g);
+            }
+        }
+    }
+    let each: Vec<Vec<UnitError>> =
+        samples.par_iter().map(|s| model.errors_with(units, std::slice::from_ref(&s.sample), Some(tables)).into_iter().map(|e| e[0]).collect()).collect();
+    let errors = (0..units.len()).map(|u| each.iter().map(|e| e[u]).collect()).collect();
+    Sampled { samples, at, from, errors }
+}
+
+/// The folded unit to keep, if any (SPEC §5.2), from the units' errors `measured` at `states` of the trajectories
+/// `parts` and the errors `fixed` beside them: a unit whose error leaves an output no room for the statistics -- of the
+/// outputs left none, the unit of the largest weight there (its errors on what is shown and on T, weighed by the held
+/// share as the totals are, each over its target, added up) --; else, of the units whose error's removal alone would pay
+/// for the `again` trajectories its model runs before it stands where this one does, each rated with its kept model,
+/// the one whose keeping saves the most predicted work beyond its spread.
+#[allow(clippy::too_many_arguments)]
+fn keep(
+    request: &Request,
+    light: &Light,
+    kept: &[Unit],
+    model: &Model,
+    reference: [f64; GROUND],
+    centre: V3,
+    units: &[Unit],
+    measured: &Measured,
+    states: &[State],
+    parts: &[&Part],
+    fixed: &Fixed,
+    scales: &Scales,
+    unsampled: f64,
+    again: f64,
+) -> Option<usize> {
+    let means = measured.means(fixed.model.len(), None);
+    let weight = |u: usize, over: &[usize]| -> f64 {
+        over.iter().filter(|&&k| fixed.held[k] > 0.).map(|&k| fixed.held[k] * (means[u][k][0] / POPULATION_TARGET + means[u][k][1] / TEMPERATURE_TARGET)).sum()
+    };
+    let crowded = Targets::new(fixed).crowded();
+    if let Some(u) = (0..units.len()).max_by(|&a, &b| weight(a, &crowded).total_cmp(&weight(b, &crowded))).filter(|&u| weight(u, &crowded) > 0.) {
+        return Some(u);
+    }
+    let pricing = Pricing::new(request, light, kept, model, reference, centre, units, measured, states, parts, fixed, scales, unsampled, again);
+    let saving = pricing.saving_at_all();
+    let mut ranked: Vec<Candidate> = if saving.is_empty() {
+        vec![]
+    } else {
+        let others = pricing.leave_one_out();
+        saving.into_par_iter().filter(|&u| pays(0., pricing.saving(&others, u, &pricing.own))).filter_map(|u| pricing.priced(&others, u)).collect()
+    };
+    ranked.sort_by(|a, b| assured(b.saving).total_cmp(&assured(a.saving)));
+    ranked.first().filter(|c| pays(0., c.saving)).map(|c| c.unit)
+}
+
 /// One attempt at the solve with the units `kept` and the reach at `reach` µK (module documentation, # The pipeline). The
 /// units its model's closure keeps join `kept`, the solve's one set: a unit an attempt keeps after its pilot is a unit of
 /// the closed model (a drive of a carrier the closure made near), and the next attempt's model is built from both.
@@ -429,6 +503,32 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
     let first = MOST_TRAJECTORIES / GROUP;
     let groups = pilot_size() / GROUP;
     let shape = Shape::of(&context.plan, true);
+    // The scout (module documentation, # The pipeline): the model is settled before the step is read. The first member of
+    // every pilot group runs once at the first rung, no reader; where its atoms outgrow the reach or a unit is to be kept
+    // at its states, the attempt ends here -- for the price of the scout, not of a pilot with its reads. The pilot's read
+    // of the same things below stands for the result; it differs from the scout's only by the step it settles on.
+    {
+        let tau = context.tau;
+        let scouts = run_groups(first, first + groups, 0..1, shape, &|i| trajectory(&run, &ensemble, tau, None, None, &context.plan, true, i), messages, &mut |_, messages| messages.again());
+        let scout: Vec<&Part> = scouts.iter().collect();
+        let estimates = pooled(&scout, &context.scales).0;
+        if let Some(t) = outgrown(&estimates, reach) {
+            return Ok(Attempt::Grow(t, tau));
+        }
+        let units = model.units();
+        let Sampled { samples, at, from, errors } = sampled(&model, &units, &tables, &scout);
+        let measured = Measured { errors: &errors, output: &at, group: &from };
+        let unsampled = unseen(MOST_TRAJECTORIES as f64);
+        let fixed = Fixed {
+            model: model_error(&measured.means(outputs, None), None, unsampled),
+            held: estimates.iter().map(|e| 1. - e.loss).collect(),
+            temperature: held_to(&estimates),
+            ..context.fixed.clone()
+        };
+        if let Some(u) = keep(request, light, kept, &model, reference, trap.centre, &units, &measured, &samples, &scout, &fixed, &context.scales, unsampled, scout.len() as f64) {
+            return Ok(Attempt::Keep(units[u].clone(), tau));
+        }
+    }
     // Between two rungs the step's errors go as 2^p (the scheme's order, the Richardson factors' own premise).
     let between = 2f64.powi(ORDER);
     let (first_parts, reads) = loop {
@@ -535,20 +635,7 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
     // the first member of every group -- one a group keeps every group in the mean's spread, and a unit's error is a
     // function of the state, read as well on eleven states an output as on eighty-eight.
     let units = model.units();
-    let mut samples: Vec<State> = vec![];
-    let (mut at, mut from) = (vec![], vec![]);
-    for (g, p) in pilot.iter().enumerate() {
-        for (k, s) in p.samples.iter().enumerate() {
-            for state in s.iter().filter(|x| x.index % GROUP == 0) {
-                samples.push(state.clone());
-                at.push(k);
-                from.push(g);
-            }
-        }
-    }
-    let each: Vec<Vec<UnitError>> =
-        samples.par_iter().map(|s| model.errors_with(&units, std::slice::from_ref(&s.sample), Some(&tables)).into_iter().map(|e| e[0]).collect()).collect();
-    let errors: Vec<Vec<UnitError>> = (0..units.len()).map(|u| each.iter().map(|e| e[u]).collect()).collect();
+    let Sampled { samples, at, from, errors } = sampled(&model, &units, &tables, &pilot);
     let measured = Measured { errors: &errors, output: &at, group: &from };
     let means = measured.means(outputs, None);
     let (population, temperature): (Vec<Vec<f64>>, Vec<Vec<f64>>) =
@@ -599,30 +686,12 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
     context.fixed.temperature = held_to(&estimates);
     let targets = Targets::new(&context.fixed);
     // A unit's errors at an output on what is shown and on T, weighed by the pilot's held share as the totals are (an
-    // output where the pilot holds no atom weighs nothing: its units' errors are their bounds, `Measured::means`); and its
-    // weight over some outputs (SPEC §5.2): those errors, each over its target, added up.
+    // output where the pilot holds no atom weighs nothing: its units' errors are their bounds, `Measured::means`).
     let held = context.fixed.held.clone();
     let weighed = |u: usize, k: usize| -> [f64; 2] { if held[k] > 0. { [population[u][k] * held[k], temperature[u][k] * held[k]] } else { [0.; 2] } };
-    let weight = |u: usize, over: &[usize]| -> f64 { over.iter().map(|&k| weighed(u, k)[0] / POPULATION_TARGET + weighed(u, k)[1] / TEMPERATURE_TARGET).sum() };
-    // A unit whose error leaves an output no room for the statistics is kept (SPEC §5.2): of the outputs left none, the unit
-    // of the largest weight there.
-    let crowded = targets.crowded();
-    if let Some(u) = (0..units.len()).max_by(|&a, &b| weight(a, &crowded).total_cmp(&weight(b, &crowded))).filter(|&u| weight(u, &crowded) > 0.) {
+    // A unit to keep at the pilot's states (`keep`): its model then runs a scout and a pilot again.
+    if let Some(u) = keep(request, light, kept, &model, reference, trap.centre, &units, &measured, &samples, &pilot, &context.fixed, &context.scales, unsampled, (groups + pilot_size()) as f64) {
         return Ok(Attempt::Keep(units[u].clone(), tau));
-    }
-    // The greedy keep by pays (SPEC §5.2): of the units whose error's removal alone would pay for the new pilot, each
-    // rated with its kept model, the one whose keeping saves the most predicted work beyond its spread.
-    let pricing = Pricing::new(request, light, kept, &model, reference, trap.centre, &units, &measured, &samples, &pilot, &context.fixed, &context.scales, unsampled);
-    let saving = pricing.saving_at_all();
-    let mut ranked: Vec<Candidate> = if saving.is_empty() {
-        vec![]
-    } else {
-        let others = pricing.leave_one_out();
-        saving.into_par_iter().filter(|&u| pays(0., pricing.saving(&others, u, &pricing.own))).filter_map(|u| pricing.priced(&others, u)).collect()
-    };
-    ranked.sort_by(|a, b| assured(b.saving).total_cmp(&assured(a.saving)));
-    if let Some(c) = ranked.first().filter(|c| pays(0., c.saving)) {
-        return Ok(Attempt::Keep(units[c.unit].clone(), tau));
     }
     // The ledger's items: each folded unit's error on what is shown and on T (its largest over the outputs, weighed by the
     // held share as the totals are) with the item's place for its unit, the unsampled share, the step.
@@ -1219,7 +1288,7 @@ struct Pricing<'a> {
     /// The states the rates are read at and the current model's rates there.
     rated: Vec<usize>,
     own: Vec<f64>,
-    /// The trajectories of the pilot a kept model's attempt runs again.
+    /// The trajectories a kept model's attempt runs again before it stands where this one does.
     again: f64,
     /// Every group together.
     all: Level,
@@ -1241,6 +1310,7 @@ impl<'a> Pricing<'a> {
         fixed: &'a Fixed,
         scales: &'a Scales,
         unsampled: f64,
+        again: f64,
     ) -> Pricing<'a> {
         let rated = one_each(states, measured.output, fixed.model.len());
         let current = Run::new(model, reference);
@@ -1248,7 +1318,6 @@ impl<'a> Pricing<'a> {
         let middles: Vec<crate::model::Middle> = (0..model.clusters().len()).map(|c| current.middle(c, centre, 0.)).collect();
         let own: Vec<f64> = rated.iter().map(|&j| rate(&current, assembly, &middles[states[j].sample.cluster], &states[j])).collect();
         drop(middles);
-        let again = (pilot.len() as u64 * GROUP) as f64;
         let all = Level { left: None, estimates: vec![], means: vec![], base: 0. };
         let mut pricing = Pricing { request, light, kept, model, reference, centre, units, states, measured, pilot, fixed, scales, unsampled, rated, own, again, all };
         pricing.all = pricing.level(None);
