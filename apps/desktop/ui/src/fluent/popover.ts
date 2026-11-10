@@ -25,8 +25,9 @@ type Open = { popup: HTMLElement; box: Element | null };
 declare global { interface HTMLElement { showPopover(options?: { source?: HTMLElement }): void } }
 
 const shown: Open[] = [];
-/** A press while a popup is open, until its release: where, and how far it has gone since. */
-let press: { target: Node | null; x: number; y: number; travel: number } | null = null;
+/** A press while a popup is open, until its release: where, the popups it was in (or on whose
+ * box), and how far it has gone since. */
+let press: { target: Node | null; within: HTMLElement[]; x: number; y: number; travel: number } | null = null;
 let watching = false;
 /** A box hidden or taken away closes its popup (its size goes to nothing). */
 const boxes = new ResizeObserver(entries => {
@@ -91,10 +92,16 @@ function forget(popup: HTMLElement): void {
   if (!shown.length) removeEventListener("wheel", grabWheel, { capture: true });
 }
 
-/** Whether `target` is inside an open popup or its box: the popups from the top down to that one close. */
-function dismiss(target: Node | null): void {
+/** Whether a popup or its box holds `target`. */
+const holds = (open: Open, target: Node | null): boolean => Boolean(target && (open.popup.contains(target) || open.box?.contains(target)));
+
+/** The popups from the top down to the one the press was in close. Where the press was is what
+ * it was in when it was made (`within`): a list that redraws its rows before the release has
+ * taken the pressed row out of the page, and the press was in that list all the same. A popup
+ * the press itself opened is found by its box. */
+function dismiss(target: Node | null, within: readonly HTMLElement[]): void {
   for (const open of opened().reverse()) {
-    if (target && (open.popup.contains(target) || open.box?.contains(target))) return;
+    if (within.includes(open.popup) || holds(open, target)) return;
     hidePopup(open.popup);
   }
 }
@@ -104,7 +111,8 @@ function watch(): void {
   watching = true;
   // Capture on the window: heard before any control under the pointer takes the press.
   addEventListener("pointerdown", event => {
-    press = opened().length ? { target: event.target as Node | null, x: event.clientX, y: event.clientY, travel: 0 } : null;
+    const [target, open] = [event.target as Node | null, opened()];
+    press = open.length ? { target, within: open.filter(item => holds(item, target)).map(item => item.popup), x: event.clientX, y: event.clientY, travel: 0 } : null;
   }, true);
   // How far the pointer went, heard on its moves and its release (a scroll bar's drag moves nothing the page hears).
   const travel = (event: PointerEvent): void => {
@@ -117,7 +125,7 @@ function watch(): void {
     const pressed = press;
     press = null;
     // A drag moved the pointer as far as a card's carry starts (board.ts): not a click.
-    if (pressed && pressed.travel < token("--control") / 4) dismiss(pressed.target);
+    if (pressed && pressed.travel < token("--control") / 4) dismiss(pressed.target, pressed.within);
   }, true);
   // Esc closes the top popup only, before the frame or dialog around it hears it.
   addEventListener("keydown", event => {

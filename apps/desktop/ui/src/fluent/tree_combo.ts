@@ -121,7 +121,8 @@ export class TreeCombo {
     const leaf = key !== "" && this.leaf(key) !== undefined;
     if (this.root.value !== (leaf ? key : "")) this.root.value = leaf ? key : "";
     this.root.classList.toggle("blank", !leaf);
-    if (this.open) this.render();
+    // The open tree keeps its rows (a press on one is let go on the same one): only which is picked changes.
+    if (this.open) this.paintPicked();
   }
   set disabled(disabled: boolean) { assign(this.root, "disabled", disabled); if (disabled) hidePopup(this.list); }
   set title(text: string) { if (this.root.title !== text) this.root.title = text; }
@@ -146,7 +147,7 @@ export class TreeCombo {
     this.up = undefined;
     this.render();
     // The picked row is the tree's selection (SELECTED) when it opens.
-    this.move(this.rows.findIndex(row => row.kind === "leaf" ? row.leaf.key === this.current : row.kind === "none" && this.current === ""));
+    this.move(this.rows.findIndex(row => this.picked(row)));
   }
 
   /** What a row is, to find it again among the rows a toggle reveals. */
@@ -180,7 +181,7 @@ export class TreeCombo {
       } else {
         node.setAttribute("role", "treeitem");
         item.textContent = row.kind === "leaf" ? row.leaf.label : this.none!;
-        node.setAttribute("aria-selected", String(row.kind === "leaf" ? row.leaf.key === this.current : this.current === ""));
+        node.setAttribute("aria-selected", String(this.picked(row)));
       }
       node.append(item);
       return node;
@@ -192,6 +193,12 @@ export class TreeCombo {
   /** Every row it reveals, below the box or above it, as far as the window goes on that side; the rest scrolls. */
   private place(): void {
     this.up = placeDrop(this.list, this.root, this.up);
+  }
+
+  private picked(row: Row): boolean { return row.kind === "leaf" ? row.leaf.key === this.current : row.kind === "none" && this.current === ""; }
+
+  private paintPicked(): void {
+    this.rows.forEach((row, index) => { if (row.kind !== "heading") this.list.children[index]?.setAttribute("aria-selected", String(this.picked(row))); });
   }
 
   private paintCursor(): void {
