@@ -52,6 +52,7 @@
 use crate::adapt::Drift;
 use crate::decide::Read;
 use crate::request::STATES;
+use crate::special::upper;
 use crate::units::{CONFIDENCE, KT_PER_UK};
 use rayon::prelude::*;
 use std::borrow::Borrow;
@@ -150,53 +151,10 @@ pub fn student(z: f64, nu: f64) -> f64 {
     quantile(normal_tail(z), Some(nu.round().max(1.) as u64))
 }
 
-/// The normal's two-sided tail beyond z, P(|N| > z) = erfc(z/√2) = Q(½, z²/2), the regularized upper incomplete gamma at
-/// ½: below ½ + 1 one less its lower part's series, above by its continued fraction (Lentz; Numerical Recipes' gser and
-/// gcf), with Γ(½) = √π; each to the format's round-off.
+/// The normal's two-sided tail beyond z, P(|N| > z) = erfc(z/√2) = Q(½, z²/2), the regularized upper incomplete gamma
+/// function at ½ (special.rs).
 fn normal_tail(z: f64) -> f64 {
-    let (a, x) = (0.5, 0.5 * z * z);
-    if !(x > 0.) {
-        return 1.;
-    }
-    let lead = (a * x.ln() - x).exp() / PI.sqrt();
-    if x < a + 1. {
-        let (mut term, mut sum, mut b) = (1. / a, 1. / a, a);
-        loop {
-            b += 1.;
-            term *= x / b;
-            sum += term;
-            if term.abs() <= sum.abs() * f64::EPSILON {
-                break;
-            }
-        }
-        1. - sum * lead
-    } else {
-        let tiny = f64::MIN_POSITIVE / f64::EPSILON;
-        let (mut b, mut c) = (x + 1. - a, 1. / tiny);
-        let mut d = 1. / b;
-        let mut h = d;
-        let mut i = 1.;
-        loop {
-            let an = -i * (i - a);
-            b += 2.;
-            d = an * d + b;
-            if d.abs() < tiny {
-                d = tiny;
-            }
-            c = b + an / c;
-            if c.abs() < tiny {
-                c = tiny;
-            }
-            d = 1. / d;
-            let step = d * c;
-            h *= step;
-            if (step - 1.).abs() <= f64::EPSILON {
-                break;
-            }
-            i += 1.;
-        }
-        lead * h
-    }
+    upper(0.5, 0.5 * z * z)
 }
 
 /// Student's t at ν (whole) degrees of freedom: its two-sided tail beyond q, 1 − A(q|ν), A by the finite sums of

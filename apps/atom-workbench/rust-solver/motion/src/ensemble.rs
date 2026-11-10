@@ -55,7 +55,8 @@ use crate::field::Geometry;
 use crate::linalg::{dot3, perpendicular, V3};
 use crate::request::STATES;
 use crate::random::{Purpose, Stream};
-use crate::units::{rounding, KT_PER_UK, UNIT_ROUNDOFF};
+use crate::special::{by_series, gamma, series, upper};
+use crate::units::{rounding, KT_PER_UK};
 use rayon::prelude::*;
 use std::f64::consts::{PI, TAU};
 
@@ -77,67 +78,24 @@ pub trait Well: Sync {
     fn envelope(&self) -> (Vec<Geometry>, f64);
 }
 
-/// Γ(s) at a positive multiple of ½: Γ(1) = 1, Γ(½) = √π, Γ(s + 1) = s Γ(s).
-fn gamma(s: f64) -> f64 {
-    let (mut g, mut t) = if (2. * s).round() as i64 % 2 == 0 { (1., 1.) } else { (PI.sqrt(), 0.5) };
-    while t < s - 0.25 {
-        g *= t;
-        t += 1.;
-    }
-    g
-}
-
 /// e^{y−shift} P(s, k) − e^{−shift} k^s/Γ(s + 1) = e^{−shift} ∫₀^k (e^{y−q} − 1) q^{s−1} dq/Γ(s) for 0 ≤ k ≤ y: the lowered
 /// isothermal's momenta below kinetic energy k at depth y (both in k_BT; s = 3/2 for their number, 5/2 for their energy), P the
-/// regularized lower incomplete gamma function. To the format's round-off: below s + 1 by P's series, e^k P(s, k) =
-/// k^s/Γ(s + 1) Σ_{n≥0} k^n/((s + 1)…(s + n)), the lowering subtracted from its first term exactly; above by one less its
-/// complement's continued fraction (Lentz; Numerical Recipes' gser and gcf).
+/// regularized lower incomplete gamma function (special.rs). To the format's round-off: where P is taken by its series,
+/// e^k P(s, k) = k^s/Γ(s + 1) (1 + Σ_{n≥1} k^n/((s + 1)…(s + n))), the lowering is subtracted from the series' first term
+/// exactly; elsewhere P is one less the upper function.
 pub fn kept(s: f64, y: f64, k: f64, shift: f64) -> f64 {
     if !(k > 0.) {
         return 0.;
     }
     let g = gamma(s + 1.);
     let base = s * k.ln() - shift;
-    if k < s + 1. {
-        let (mut term, mut rest, mut a) = (1., 0., s);
-        loop {
-            a += 1.;
-            term *= k / a;
-            rest += term;
-            if term <= rest * UNIT_ROUNDOFF {
-                break;
-            }
-        }
+    if by_series(s, k) {
+        let rest = series(s, k);
         let (high, low) = ((base + y - k).exp() / g, base.exp() / g);
         // e^{y−k}(1 + rest) − 1 times the power, its −1 against e^{y−k} without cancellation.
         high * rest + if y - k < 1. { low * (y - k).exp_m1() } else { high - low }
     } else {
-        let tiny = f64::MIN_POSITIVE / f64::EPSILON;
-        let (mut b, mut c) = (k + 1. - s, 1. / tiny);
-        let mut d = 1. / b;
-        let mut h = d;
-        let mut i = 1.;
-        loop {
-            let an = -i * (i - s);
-            b += 2.;
-            d = an * d + b;
-            if d.abs() < tiny {
-                d = tiny;
-            }
-            c = b + an / c;
-            if c.abs() < tiny {
-                c = tiny;
-            }
-            d = 1. / d;
-            let step = d * c;
-            h *= step;
-            if (step - 1.).abs() <= f64::EPSILON {
-                break;
-            }
-            i += 1.;
-        }
-        let q = (s * k.ln() - k).exp() / gamma(s) * h;
-        (y - shift).exp() * (1. - q) - base.exp() / g
+        (y - shift).exp() * (1. - upper(s, k)) - base.exp() / g
     }
 }
 /// P(s, x), the regularized lower incomplete gamma function.
