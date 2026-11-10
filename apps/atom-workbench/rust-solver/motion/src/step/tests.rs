@@ -981,6 +981,19 @@ fn microseconds<const N: usize>(items: usize, mut passes: [&mut dyn FnMut() -> f
     least.map(|t| 1e6 * t / items as f64)
 }
 
+/// The harness's yardstick: 1024 complex multiply-adds (an 8 × 8 matrix on a vector, sixteen times). Timed in turn with a
+/// case's passes it tells the machine's pace while they ran -- another core or a lower clock under the machine's other
+/// work scales every pass alike, by a factor of two and more from one run to the next --, by which runs compare.
+fn yardstick() -> f64 {
+    let matrix: [C64; 64] = std::array::from_fn(|k| C64::cis(0.37 * k as f64) * 0.125);
+    let mut x: [C64; 8] = std::array::from_fn(|k| C64::cis(1.3 * k as f64));
+    for _ in 0..16 {
+        let m = std::hint::black_box(&matrix);
+        x = std::array::from_fn(|i| m[8 * i..8 * i + 8].iter().zip(&x).map(|(a, b)| *a * *b).sum());
+    }
+    x[0].re
+}
+
 /// One case of the cost harness: µs per step of τ and per phase over the case's start states (held: no step reaches
 /// their thresholds), the model's calls apart. Phases: the middle's fixed point less its reference expansions; the two
 /// propagations, each on its own generator with its kick (the second also with the threshold reached halfway down the
@@ -1007,9 +1020,10 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             let middle = Point { r: r_h, kappa: kappa_h, t: from.time + half };
             let reference = flow.gradient_at(r_h);
             let first = model.generator(from.cluster, &middle);
-            let held = super::shear(&first, &from.psi, tau);
+            let mut scratch = super::Scratch::new(from.psi.len());
+            let held = super::shear(&first, scratch.carve(first.parts.len(), 0).held, &from.psi, tau);
             let predicted: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * (held[a] + tau * reference[a]));
-            let (_, kick, _) = super::propagate(model, &first, from, reference, predicted.map(|k| hm * k), tau, None);
+            let (_, kick) = super::propagate(model, &mut scratch, &first, from, reference, predicted.map(|k| hm * k), tau, None);
             let corrected: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * kick[a]);
             let second = model.generator(from.cluster, &Point { kappa: corrected, ..middle });
             let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
@@ -1024,11 +1038,11 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             .zip(starts)
             .map(|(p, s)| {
                 let (from, threshold) = if crossing { (&p.crossed, Some(p.crossed.threshold)) } else { (s, (which == 1).then_some(s.threshold)) };
-                super::propagate(model, &p.generators[which], from, p.reference, p.velocities[which], tau, threshold).1[0]
+                super::propagate(model, &mut super::Scratch::new(from.psi.len()), &p.generators[which], from, p.reference, p.velocities[which], tau, threshold).1[0]
             })
             .sum::<f64>()
     };
-    let [whole, reference, generator, middle, first, second, root] = microseconds(
+    let [whole, reference, generator, middle, first, second, root, pace] = microseconds(
         count,
         [
             &mut || starts.iter().map(|s| step::step(model, s, tau).unwrap().end.kappa[0]).sum::<f64>(),
@@ -1038,19 +1052,21 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             &mut || propagation(0, false),
             &mut || propagation(1, false),
             &mut || propagation(1, true),
+            &mut yardstick,
         ],
     );
     let crossings = pieces
         .iter()
-        .filter(|p| super::propagate(model, &p.generators[1], &p.crossed, p.reference, p.velocities[1], tau, Some(p.crossed.threshold)).0.crossing.is_some())
+        .filter(|p| super::propagate(model, &mut super::Scratch::new(p.crossed.psi.len()), &p.generators[1], &p.crossed, p.reference, p.velocities[1], tau, Some(p.crossed.threshold)).0.crossing.is_some())
         .count();
     let own = whole - rounds * reference - 2.0 * generator;
     let fixed = middle - rounds * reference;
     let (n, parts) = (starts[0].psi.len(), pieces[0].generators[1].parts.len());
     let work = steps.iter().map(|s| s.work).sum::<f64>() / count as f64;
     eprintln!(
-        "{name:<22} n {n} parts {parts:>2} τ {tau:<6} | step {whole:8.2} = reference {reference:6.2} × {rounds:4.1} + generator {generator:7.2} × 2 + own {own:8.2} | middle {fixed:6.2}  first {first:8.2}  second {second:8.2}  (root {root:8.2}, {crossings}/{count})  rest {:6.2} | counted {work:9.0}",
-        own - fixed - first - second
+        "{name:<22} n {n} parts {parts:>2} τ {tau:<6} | step {whole:8.2} = reference {reference:6.2} × {rounds:4.1} + generator {generator:7.2} × 2 + own {own:8.2} | middle {fixed:6.2}  first {first:8.2}  second {second:8.2}  (root {root:8.2}, {crossings}/{count})  rest {:6.2} | counted {work:9.0} | pace {:.3} ns",
+        own - fixed - first - second,
+        pace * count as f64 / 1.024
     );
     [first, second]
 }
