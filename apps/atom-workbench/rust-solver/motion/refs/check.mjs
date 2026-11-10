@@ -23,6 +23,9 @@
 // but a pass there says little. T series of regime "classical" are judged only where the result's `classical` is
 // true; outputs an expectation marks unjudged (old truths outside their class, T below 4ħω) are reported, not judged.
 // Kinds "characterization" and "regression-consistency" are reported, never failed.
+// A series marked `reported` (another engine's old numeric result, an axis whose share a symmetry leaves open) is
+// compared and printed like any other, marked *, and never judged: its outputs enter no total and fail nothing.
+// T and Tincrease take one axis, or `axes`: their mean, its SE bounded by the mean of theirs (fully correlated).
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -59,10 +62,12 @@ export function check(e,result,request){
   const r=result,m=r.motion??{},N=m.trajectories??NaN,loss=m.lossProbability??[],errors=r.populationAccuracy?.sampleErrors??[];
   const tLedger=r.diagnostics?.approximations?.totals?.temperature?.error??0,mass=request?.model?.motion?.massKg;
   const k=s=>r.states.indexOf(s),held=i=>N*(1-(loss[i]??0)),alpha=upperTail(Z);
-  const rows=[];let judged=0,failed=0,under=0,skipped=0,rejected=0;
+  const temperature=(s,i)=>{const axes=s.axes??[s.axis],se=axes.map(a=>m.temperatureErrorUK[a][i]);
+    return {x:axes.reduce((t,a)=>t+m.temperatureUK[a][i],0)/axes.length,se:se.some(e=>e==null)?Infinity:se.reduce((t,e)=>t+e,0)/axes.length};};
+  const rows=[];let judged=0,failed=0,under=0,skipped=0,rejected=0,shown=0;
   if(r.timesUs?.length!==e.samples||Math.abs(r.timesUs.at(-1)-e.durationUs)>1e-9*e.durationUs)return {error:`grid: ${r.timesUs?.length} times to ${r.timesUs?.at(-1)} µs, expected ${e.samples} to ${e.durationUs}`};
   for(const s of e.series){
-    const name=s.quantity+(s.axis?` ${s.axis}`:'')+(s.state?` ${s.state}`:'')+(s.label?` ${s.label}`:'');
+    const name=(s.reported?'* ':'')+s.quantity+(s.axis?` ${s.axis}`:'')+(s.axes?` ${s.axes.join('+')}`:'')+(s.state?` ${s.state}`:'')+(s.label?` ${s.label}`:''),count=!s.reported;
     const outputs=s.indices?s.indices.map((i,j)=>({i,ref:s.values[j],u:s.u[j],judge:s.judged?s.judged[j]:true})):[{i:null,ref:s.value,u:s.u,judge:true}];
     const row={name,n:0,maxD:0,worst:-Infinity,worstAt:null,fail:0,exceed:0,under:0,skipped:0,z:[],neff:null,p:null,reject:false};
     for(const o of outputs){
@@ -71,9 +76,9 @@ export function check(e,result,request){
         case 'population':x=r.populations[i][k(s.state)];se=Math.sqrt(x*(1-x)/held(i));reported=errors[i];break;
         case 'group':x=s.states.reduce((t,st)=>t+r.populations[i][k(st)],0);se=Math.sqrt(Math.max(0,x*(1-x))/held(i));reported=errors[i];break;
         case 'loss':x=loss[i];se=Math.sqrt(x*(1-x)/N);reported=errors[i];break;
-        case 'T':{x=m.temperatureUK[s.axis][i];const t=m.temperatureErrorUK[s.axis][i];se=t==null?Infinity:t;reported=Math.hypot(se,tLedger*x);
+        case 'T':{({x,se}=temperature(s,i));reported=Math.hypot(se,tLedger*x);
           if(s.regime==='classical'&&!m.classical[i])o.judge=false;break;}
-        case 'Tincrease':{x=m.temperatureUK[s.axis][i]-m.temperatureUK[s.axis][0];const t=m.temperatureErrorUK[s.axis][i];se=t==null?Infinity:t;break;}
+        case 'Tincrease':{({x,se}=temperature(s,i));x-=temperature(s,0).x;break;}
         case 'trapFrequency':x=m.trapFrequencyKHz[s.axis];se=0;break;
         case 'meanVelocity':x=m.meanVelocityMps[s.axis][i];se=Math.sqrt(KB*m.temperatureUK[s.axis][i]*1e-6/mass)/Math.sqrt(held(i));break;
         case 'meanPosition':{const p=m.position?.[s.axis],j=p?.samples.indexOf(i);if(!p||j<0){x=undefined;break;}
@@ -86,27 +91,27 @@ export function check(e,result,request){
         default:throw new Error(`unknown quantity ${s.quantity}`);
       }
       if(x===undefined)continue;
-      if(!o.judge||!Number.isFinite(se)){row.skipped++;skipped++;continue;}
+      if(!o.judge||!Number.isFinite(se)){row.skipped++;if(count)skipped++;continue;}
       const target=s.target.absolute??(s.target.relative*Math.abs(o.ref)),d=x-o.ref,sigma=Math.hypot(se,o.u);
-      row.n++;judged++;row.maxD=Math.max(row.maxD,Math.abs(d));
+      row.n++;if(count)judged++;else shown++;row.maxD=Math.max(row.maxD,Math.abs(d));
       const score=target>0?(Math.abs(d)-Z*sigma)/target:(Math.abs(d)-Z*sigma);
       if(score>row.worst){row.worst=score;row.worstAt={i,t:r.timesUs[i??0],x,ref:o.ref,se,u:o.u};}
-      if(Math.abs(d)-Z*sigma>target){row.fail++;failed++;}
+      if(Math.abs(d)-Z*sigma>target){row.fail++;if(count)failed++;}
       if(reported!==null){row.z.push(sigma>0?d/sigma:0);if(Math.abs(d)>2*reported+2*o.u)row.exceed++;}
-      if(target>0&&sigma>POWER*target){row.under++;under++;}
+      if(target>0&&sigma>POWER*target){row.under++;if(count)under++;}
     }
-    if(row.z.length){row.neff=effectiveCount(row.z);row.p=binomialTail(row.exceed*row.neff/row.z.length,row.neff,SHARE);row.reject=row.p<alpha;if(row.reject)rejected++;}
+    if(row.z.length){row.neff=effectiveCount(row.z);row.p=binomialTail(row.exceed*row.neff/row.z.length,row.neff,SHARE);row.reject=row.p<alpha;if(row.reject&&count)rejected++;}
     delete row.z;rows.push(row);
   }
   const judgedKind=!['characterization','regression-consistency'].includes(e.kind);
   const verdict=!judged?'NOT JUDGED':!judgedKind?'REPORT':failed||rejected?'FAIL':'PASS';
-  return {rows,judged,failed,rejected,under,skipped,verdict};
+  return {rows,judged,failed,rejected,under,skipped,shown,verdict};
 }
 
 function print(e,c,run){
   const head=`${e.id} [${e.reference}, ${e.kind}] ${e.title}`;
   if(c.error){console.log(`${head}\n  ${c.error}\n`);return;}
-  console.log(`${head}\n  ${c.verdict}: ${c.judged} outputs judged; rule 1 (beyond target): ${c.failed}; rule 2 (coverage rejected): ${c.rejected} series; ${c.under} underpowered; ${c.skipped} not judged`+
+  console.log(`${head}\n  ${c.verdict}: ${c.judged} outputs judged; rule 1 (beyond target): ${c.failed}; rule 2 (coverage rejected): ${c.rejected} series; ${c.under} underpowered; ${c.skipped} not judged${c.shown?`; ${c.shown} reported (*)`:''}`+
     (run?` | run ${run.wallS.toFixed(1)} s${run.aborted?' ABORTED':''}, first checkpoint ${run.firstCheckpointS?.toFixed(1)??'-'} s, ${run.final?.result?.motion?.trajectories??'-'} trajectories`:''));
   console.log('  '+['series'.padEnd(30),'n'.padStart(4),'max|d|'.padStart(10),'(|d|−2σ)/tgt'.padStart(14),'fail'.padStart(5),'out'.padStart(5),'n_eff'.padStart(7),'p'.padStart(8),'weak'.padStart(5),'  worst output (t: solver vs ref ± se, u)'].join(''));
   for(const r of c.rows){const w=r.worstAt;

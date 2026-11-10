@@ -53,6 +53,19 @@ export function integrate(f,a,b,{panels=16,n=16}={}){
   let s=0;const h=(b-a)/panels;for(let p=0;p<panels;p++)for(const [x,w] of gaussLegendre(n,a+p*h,a+(p+1)*h))s+=w*f(x);return s;
 }
 
+/** Gauss–Hermite nodes and weights of the standard normal, ∫ f(x) e^{−x²/2} dx/√(2π) ≈ Σ w f(x): the eigenvalues of the
+ * Jacobi matrix of the Hermite recurrence (off-diagonal √k; Golub and Welsch, Math. Comp. 23 (1969) 221) by Jacobi's
+ * rotations, the weights the squares of the eigenvectors' first components. */
+const hermiteCache=new Map();
+export function gaussHermite(n){
+  let out=hermiteCache.get(n);if(out)return out;
+  const a=Array.from({length:n},(_,i)=>Array.from({length:n},(_,j)=>Math.abs(i-j)===1?Math.sqrt(Math.max(i,j)):0)),v=Array.from({length:n},(_,i)=>Array.from({length:n},(_,j)=>+(i===j)));
+  for(let it=0;it<200;it++){let off=0;for(let p=0;p<n;p++)for(let q=p+1;q<n;q++){if(Math.abs(a[p][q])<1e-15)continue;off+=a[p][q]**2;const th=0.5*Math.atan2(2*a[p][q],a[q][q]-a[p][p]),c=Math.cos(th),s=Math.sin(th);
+    for(let k=0;k<n;k++){const akp=a[k][p],akq=a[k][q];a[k][p]=c*akp-s*akq;a[k][q]=s*akp+c*akq;}for(let k=0;k<n;k++){const apk=a[p][k],aqk=a[q][k];a[p][k]=c*apk-s*aqk;a[q][k]=s*apk+c*aqk;}
+    for(let k=0;k<n;k++){const vkp=v[k][p],vkq=v[k][q];v[k][p]=c*vkp-s*vkq;v[k][q]=s*vkp+c*vkq;}}if(off<1e-28)break;}
+  out=Array.from({length:n},(_,i)=>[a[i][i],v[0][i]**2]);hermiteCache.set(n,out);return out;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The native request's atomic data.
 
@@ -122,6 +135,12 @@ export function solve3(A,y){
   const a=A.map((r,i)=>[...r,y[i]]);
   for(let c=0;c<3;c++){let p=c;for(let r=c+1;r<3;r++)if(Math.abs(a[r][c])>Math.abs(a[p][c]))p=r;[a[c],a[p]]=[a[p],a[c]];for(let r=0;r<3;r++)if(r!==c){const f=a[r][c]/a[c][c];for(let k=c;k<4;k++)a[r][k]-=f*a[c][k];}}
   return a.map((r,i)=>r[3]/r[i]);
+}
+
+/** The inverse of a 3 × 3 matrix by its cofactors. */
+export function inverse3(m){
+  const [[a,b,c],[d,e,f],[g,h,i]]=m,A=e*i-f*h,B=f*g-d*i,C=d*h-e*g,det=a*A+b*B+c*C;
+  return [[A/det,(c*h-b*i)/det,(b*f-c*e)/det],[B/det,(a*i-c*g)/det,(c*d-a*f)/det],[C/det,(b*g-a*h)/det,(a*e-b*d)/det]];
 }
 
 // The trap light's potential of a ground state and its trap as the solver's model states them (SPEC §1.2, §1.3), from
