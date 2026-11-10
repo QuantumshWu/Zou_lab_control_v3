@@ -1213,7 +1213,7 @@ fn candidates(
     let current = Run::new(model, reference);
     let assembly = current.assembly_work();
     let middles: Vec<crate::model::Middle> = (0..model.clusters().len()).map(|c| current.middle(c, centre, 0.)).collect();
-    let own: Vec<f64> = priced.par_iter().map(|&j| rate(&current, assembly, &middles[states[j].sample.cluster], &states[j])).collect();
+    let own: Vec<f64> = priced.iter().map(|&j| rate(&current, assembly, &middles[states[j].sample.cluster], &states[j])).collect();
     let base: Vec<f64> = (0..levels.len()).map(|i| work(i, None, &own, 0.)).collect();
     let mut out: Vec<Candidate> = (0..units.len())
         .into_par_iter()
@@ -1224,7 +1224,7 @@ fn candidates(
             let assembly = finer.assembly_work();
             let middles: Vec<crate::model::Middle> = (0..with.clusters().len()).map(|c| finer.middle(c, centre, 0.)).collect();
             let rates: Vec<f64> = priced
-                .par_iter()
+                .iter()
                 .map(|&j| rate(&finer, assembly, &middles[finer.cluster_of(model.clusters()[states[j].sample.cluster].states[0])], &states[j]))
                 .collect();
             let x: Vec<f64> = (0..levels.len()).map(|i| 1. - work(i, Some(u), &rates, again) / base[i]).collect();
