@@ -57,9 +57,10 @@ impl Read {
         let f = 1. / (1. - ratio.powf(order));
         Read { value: self.value * f, spread: Spread { error: self.spread.error * f, groups: self.spread.groups } }
     }
-    /// The readable bound |e| + t·SE among `looks` reads.
+    /// The readable bound |e| + t·SE among `looks` reads; unbounded for a read that is not a number.
     pub fn bound(&self, looks: f64) -> f64 {
-        self.value.abs() + self.spread.interval_over(looks)
+        let bound = self.value.abs() + self.spread.interval_over(looks);
+        if bound.is_nan() { f64::INFINITY } else { bound }
     }
     /// Within, beyond or unreadable against `share` among `looks` reads (module documentation); a read that is not a
     /// number is unreadable.
@@ -107,7 +108,7 @@ mod tests {
         assert!((read(-0.5, 0.25).bound(1.) - (0.5 + CONFIDENCE * 0.25)).abs() < 1e-15);
     }
 
-    /// Richardson: a halving at order 2 reads 3/4 of the coarse error, a quarter tolerance at order 1 too, an exact
+    /// Richardson: a halving at order 2 reads 3/4 of the coarse error, a quartering at order 1 too, an exact
     /// finer level all of it; refining by the measured ratio meets the share: an error four times the share takes half
     /// the parameter at order 2, a quarter at order 1.
     #[test]

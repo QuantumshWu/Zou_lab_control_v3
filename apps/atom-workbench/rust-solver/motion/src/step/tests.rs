@@ -8,7 +8,7 @@
 //! one class, u_a = √(Γ/3) ψ_e per lab axis (isotropic), landing in g; the jumps' kicks are the emission's −k n alone, of
 //! a chosen |k| (zero where a test reads the Ehrenfest force).
 
-use crate::adapt::{self, Tolerances};
+use crate::adapt::{self, Drift};
 use crate::linalg::{C64, Mat};
 use crate::model::{Beat, Cluster, Generator, Part, Photon, Point, Quadratic, Recoil, STATES};
 use crate::step::{self, Dynamics, Trajectory};
@@ -258,11 +258,6 @@ fn a_step_and_its_reverse_return_to_the_start() {
     }
 }
 
-/// The tolerances a test asks: per µs of an energy (each axis's and E_s) and of the rows.
-fn tolerances(energy: f64, population: f64) -> Tolerances {
-    Tolerances { axes: energy, energy, population }
-}
-
 /// e^{−iHτ}ψ of a static generator (`linalg::exp`): the at-rest reference.
 fn evolve(h: &Mat, psi: &[C64], tau: f64) -> Vec<C64> {
     crate::linalg::exp(h, C64::new(0.0, -tau)).apply(psi)
@@ -349,16 +344,15 @@ fn excited(rabi: f64, delta: f64) -> f64 {
 }
 
 /// The mean force (1/µm per µs) over trajectories of a uniformly moving atom (a mass the kicks do not move: ħ/m of 10⁻⁹
-/// µm²/µs, its κ's round-off still far below the tolerances), from `from`
-/// to `to` µs, the jumps without recoil (the Ehrenfest force alone, whose mean the unraveling makes the master
-/// equation's): per lab axis the mean and its standard error.
-fn mean_force(model: &Atom, r: [f64; 3], v: [f64; 3], trajectories: u64, from: f64, to: f64, tol: &Tolerances) -> ([f64; 3], [f64; 3]) {
+/// µm²/µs) at the step τ, from `from` to `to` µs, the jumps without recoil (the Ehrenfest force alone, whose mean the
+/// unraveling makes the master equation's): per lab axis the mean and its standard error.
+fn mean_force(model: &Atom, r: [f64; 3], v: [f64; 3], trajectories: u64, from: f64, to: f64, tau: f64) -> ([f64; 3], [f64; 3]) {
     let mut forces = Vec::new();
     for i in 0..trajectories {
         let mut t = Trajectory::new(model, 0, r, v.map(|x| x / model.hm), 11, i);
-        adapt::advance(model, tol, &mut t, from, &mut |_| {});
+        adapt::advance(model, tau, &mut t, None, from, &mut |_| {}).unwrap();
         let start = t.kappa;
-        adapt::advance(model, tol, &mut t, to, &mut |_| {});
+        adapt::advance(model, tau, &mut t, None, to, &mut |_| {}).unwrap();
         forces.push(std::array::from_fn::<f64, 3, _>(|a| (t.kappa[a] - start[a]) / (to - from)));
     }
     let n = forces.len() as f64;
@@ -368,17 +362,17 @@ fn mean_force(model: &Atom, r: [f64; 3], v: [f64; 3], trajectories: u64, from: f
 }
 
 /// The radiation pressure of a running wave on a moving atom: kΓρ_ee(Δ − k·v) along k (the master equation's steady
-/// state), at several velocities through the Doppler profile, within three standard errors and 2 %.
+/// state), at several velocities through the Doppler profile, within three standard errors and 2 %. The path is static
+/// in the atom's frame and the internal state exact along it at any step: steps of 1 µs, some 40/Γ.
 #[test]
 fn a_running_wave_s_force_is_the_bloch_equations_at_the_doppler_shifted_detuning() {
     let hm = 1e-9;
     let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
     let (rabi, detuning) = (15.0, -12.0);
     let model = Atom::new(hm, flat, vec![Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }], detuning, GAMMA);
-    let tol = tolerances(f64::INFINITY, 1e-6);
     for v in [-3.0, -1.5, 0.0, 1.5, 3.0] {
         let expected = K * GAMMA * excited(rabi, detuning - K * v);
-        let (f, e) = mean_force(&model, [0.0; 3], [0.0, 0.0, v], 48, 2.0, 22.0, &tol);
+        let (f, e) = mean_force(&model, [0.0; 3], [0.0, 0.0, v], 48, 2.0, 22.0, 1.0);
         let miss = (f[2] - expected).abs();
         eprintln!("v {v}: F_z {} ± {} against {expected}", f[2], e[2]);
         assert!(miss <= 3.0 * e[2] && miss <= 0.02 * expected, "v {v}: F_z {} ± {} against {expected}", f[2], e[2]);
@@ -427,7 +421,8 @@ fn bloch_force(beams: &[Beam], detuning: f64, z0: f64, v: f64, from: f64, to: f6
 
 /// The force on an atom moving through a standing wave (the velocity-dependent force of Doppler cooling, and its
 /// dipole part averaged over the wave), against the master equation along the same uniform path: within three standard
-/// errors and 3 % of the running wave's force, at several velocities.
+/// errors and 3 % of the running wave's force, at several velocities. The path beats at 2kv, up to 32 rad/µs here: at
+/// steps of 0.02 µs the grid's spacing, a quarter of the step, turns the beat by 0.16 rad at most.
 #[test]
 fn a_standing_wave_s_force_is_the_bloch_equations_along_the_path() {
     let hm = 1e-9;
@@ -437,10 +432,8 @@ fn a_standing_wave_s_force_is_the_bloch_equations_along_the_path() {
     let model = Atom::new(hm, flat, beams.clone(), detuning, GAMMA);
     let scale = K * GAMMA * excited(rabi, detuning);
     for v in [0.3, 1.0, 2.0] {
-        // The momentum's error 0.5/µm per µs: on the moving axis an energy's error of v δκ.
-        let tol = tolerances(0.5 * v, 1e-4);
         let expected = bloch_force(&beams, detuning, 0.0, v, 3.0, 33.0);
-        let (f, e) = mean_force(&model, [0.0; 3], [0.0, 0.0, v], 48, 3.0, 33.0, &tol);
+        let (f, e) = mean_force(&model, [0.0; 3], [0.0, 0.0, v], 48, 3.0, 33.0, 0.02);
         let miss = (f[2] - expected).abs();
         eprintln!("v {v}: F_z {} ± {} against {expected} (scale {scale})", f[2], e[2]);
         assert!(miss <= 3.0 * e[2] && miss <= 0.03 * scale, "v {v}: F_z {} ± {} against {expected} (scale {scale})", f[2], e[2]);
@@ -458,7 +451,7 @@ fn the_jumps_are_at_the_roots_of_the_norm() {
     let model = Atom::new(RB, flat, vec![], 0.0, gamma);
     let mut t = Trajectory::new(&model, 0, [0.0; 3], [0.0; 3], 3, 5);
     let end = 2000.0;
-    adapt::advance(&model, &tolerances(1.0, 1e-6), &mut t, end, &mut |_| {});
+    adapt::advance(&model, 10.0, &mut t, None, end, &mut |_| {}).unwrap();
     // The jumps the thresholds put before `end`, and the last one's time.
     let threshold = |j: u32| crate::random::Stream::jump(3, 5, j).open_uniform();
     let (mut last, mut j, mut waits) = (0.0, 0, Vec::new());
@@ -482,50 +475,59 @@ fn the_jumps_are_at_the_roots_of_the_norm() {
     assert!((variance * gamma * gamma - 1.0).abs() < 4.0 * (8.0 / n).sqrt(), "variance {variance} against {}", 1.0 / (gamma * gamma));
 }
 
-/// R1's mechanism (SPEC §2.2): a conservative anharmonic trap's energy over a long run. A hot atom in a Gaussian tweezer for
-/// some 50 radial periods. At fixed steps the splitting, symplectic and its own inverse, keeps the energy's error bounded:
-/// its last tenth's mean within its first tenth's spread (no drift). At adaptive steps the step's choice, made from the
-/// last step's error, is not a symmetric function of each step, and the energy drifts: measured 2-5 % of the run's
-/// allotted error s·ε, a smaller share at tighter tolerances -- within the booked bound, so the plain controller stays
-/// (SPEC §2.2's symmetric step choice is the remedy were it beyond). Asserted: within the allotment.
+/// R1's mechanism (SPEC §2.2): a conservative anharmonic trap's energy over a long run at one constant step. A hot atom
+/// in a Gaussian tweezer (radial ω = 0.13 rad/µs) for some hundred radial periods at ω τ = 0.8: the splitting, symplectic
+/// and its own inverse, keeps the energy's error bounded -- its last tenth's mean within its first tenth's spread (no
+/// drift) --, and every advance lands on its output time exactly.
 #[test]
 fn a_conservative_trap_keeps_its_energy() {
     let trap = Trap::Gaussian { depth: 6.0, waists: [1.0, 1.0, 3.0] };
     let model = Atom::new(RB, trap, vec![], 0.0, 0.0);
-    let start = Trajectory::new(&model, 0, [0.3, -0.2, 0.8], [20.0, 15.0, -10.0], 1, 0);
-    let e0 = model.energy(0, &start.point(), &start.psi);
-    let (run, outputs, rate) = (5000.0, 100, 1e-6);
-    let tol = Tolerances { axes: rate, energy: rate, population: 1.0 };
-    let mean = |s: &[f64]| s.iter().sum::<f64>() / s.len() as f64;
-    let mut t = start.clone();
-    let mut adaptive = Vec::new();
+    let mut t = Trajectory::new(&model, 0, [0.3, -0.2, 0.8], [20.0, 15.0, -10.0], 1, 0);
+    let e0 = model.energy(0, &t.point(), &t.psi);
+    let (run, outputs) = (5000.0, 800);
+    let tau = run / outputs as f64;
+    let mut errors = Vec::new();
     for k in 1..=outputs {
         let to = run * k as f64 / outputs as f64;
-        adapt::advance(&model, &tol, &mut t, to, &mut |_| {});
-        // Every advance lands on its output time exactly: an ulp short, the rest is an interval of the time's round-off
-        // whose doubling reads only rounding (a trajectory once ran into the step cap there).
+        adapt::advance(&model, tau, &mut t, None, to, &mut |_| {}).unwrap();
+        // Every advance lands on its output time exactly: an ulp short, the rest is an interval of the time's round-off.
         assert_eq!(t.time, to, "advanced to {} for the output at {to}", t.time);
-        adaptive.push(model.energy(0, &t.point(), &t.psi) - e0);
+        errors.push(model.energy(0, &t.point(), &t.psi) - e0);
     }
-    let largest = adaptive.iter().map(|e| e.abs()).fold(0.0, f64::max);
-    let drift = mean(&adaptive[outputs - outputs / 10..]) - mean(&adaptive[..outputs / 10]);
-    eprintln!("adaptive: {} steps, largest |ΔE| {largest:.3e}, drift {drift:.3e}, allotment {:.3e}", t.steps, rate * run);
-    assert!(largest <= rate * run, "largest |ΔE| {largest:e} beyond the run's allotment {:e}", rate * run);
-    let n = (run / (3.0 * run / t.steps as f64)).round() as usize;
-    let tau = run / n as f64;
-    let mut f = start;
-    let mut fixed = Vec::new();
-    for i in 1..=n {
-        f = step::step(&model, &f, tau).unwrap().end;
-        if i % (n / outputs) == 0 {
-            fixed.push(model.energy(0, &f.point(), &f.psi) - e0);
-        }
+    let mean = |s: &[f64]| s.iter().sum::<f64>() / s.len() as f64;
+    let k = errors.len() / 10;
+    let (first, last) = (mean(&errors[..k]), mean(&errors[errors.len() - k..]));
+    let spread = (errors[..k].iter().map(|e| (e - first).powi(2)).sum::<f64>() / (k - 1) as f64).sqrt();
+    eprintln!("τ {tau}: {} steps, first tenth {first:.3e} ± {spread:.3e}, last tenth {last:.3e}", t.steps);
+    assert!((last - first).abs() <= 4.0 * spread, "the energy drifts {:e} against the spread {spread:e}", last - first);
+}
+
+/// A read trajectory's drift is the sum of its steps' doubling differences (adapt.rs, # The read): a hot atom in a
+/// Gaussian tweezer advanced through four steps with a drift, against the same four steps made by hand -- each the step
+/// less its two halves from the same state, 4/3 of the loss energy's difference (second order) --, to the sums' round-off;
+/// and the read leaves the trajectory where the unread one goes.
+#[test]
+fn a_read_trajectory_accumulates_its_steps_doubling_differences() {
+    let trap = Trap::Gaussian { depth: 6.0, waists: [1.0, 1.0, 3.0] };
+    let model = Atom::new(RB, trap, vec![], 0.0, 0.0);
+    let start = held(&model, [0.3, -0.2, 0.8], [20.0, 15.0, -10.0]);
+    let (tau, steps) = (5.0, 4);
+    let (mut read, mut plain, mut drift) = (start.clone(), start.clone(), Drift::ZERO);
+    adapt::advance(&model, tau, &mut read, Some(&mut drift), tau * steps as f64, &mut |_| {}).unwrap();
+    adapt::advance(&model, tau, &mut plain, None, tau * steps as f64, &mut |_| {}).unwrap();
+    assert_eq!((read.r, read.kappa), (plain.r, plain.kappa));
+    let (mut by_hand, mut at) = (0.0, start);
+    for _ in 0..steps {
+        let whole = step::step(&model, &at, tau).unwrap();
+        let first = step::step(&model, &at, 0.5 * tau).unwrap();
+        let second = step::step(&model, &first.end, 0.5 * tau).unwrap();
+        let energy = |t: &Trajectory| model.energy(0, &t.point(), &t.psi);
+        by_hand += 4.0 / 3.0 * (energy(&whole.end) - energy(&second.end));
+        at = whole.end;
     }
-    let k = fixed.len() / 10;
-    let (first, last) = (mean(&fixed[..k]), mean(&fixed[fixed.len() - k..]));
-    let spread = (fixed[..k].iter().map(|e| (e - first).powi(2)).sum::<f64>() / (k - 1) as f64).sqrt();
-    eprintln!("fixed τ {tau:.4}: first tenth {first:.3e} ± {spread:.3e}, last tenth {last:.3e}");
-    assert!((last - first).abs() <= 4.0 * spread, "fixed steps drift {:e} against the spread {spread:e}", last - first);
+    assert!((drift.energy - by_hand).abs() <= 1e-12 * by_hand.abs(), "{} against {by_hand}", drift.energy);
+    assert!(drift.energy.abs() > 1e-6 && drift.rows.iter().all(|x| *x == 0.0), "{drift:?}");
 }
 
 /// The step-doubling estimate is the scheme's local error, O(τ³): a two-level atom in a standing wave in a Gaussian
@@ -665,13 +667,14 @@ fn scene(name: &str) -> crate::request::Request {
 /// R1 (contract §6): a conservative far-light trap holds its atoms' energies. The scene's model (every unit folded: the far
 /// light alone), its run (`model::Run`) from the reference state, sixteen atoms of the scene's temperature in the trap's
 /// harmonic approximation (Gaussian positions and momenta of k_BT along the principal axes), each advanced through the
-/// scene's outputs by the step control at the tolerances SPEC §2.2 gives a run (s·ε of the thermal scales over T_run).
-/// Between jumps every atom's E_s stays within its run's allotted error -- a far-detuned tweezer still scatters, its
-/// folded far light's photons (SPEC §1.2), each a recoil of (ħ/m)κ·k ≈ 0.5 rad/µs at 30 µK, physics the energy is
-/// re-read after --, none is lost, and the ensemble's kinetic energy keeps its time-averaged level (T constant): its
-/// second half's mean within the first half's statistics.
+/// scene's outputs at one constant step, the ladder's second rung (SPEC §2.2: half the largest power-of-two fraction of
+/// the output interval below the trap's resonance ω τ = π), every step read (adapt.rs `Drift`). None is lost; between
+/// jumps -- a far-detuned tweezer still scatters its folded far light's photons (SPEC §1.2), each a recoil the energy is
+/// re-read after -- the atoms' mean E_s moves by less than the step's share of k_BT, s·ε_T; the accumulated read of E_s
+/// stays within it too; and the ensemble's kinetic energy keeps its time-averaged level (T constant): its second half's
+/// mean within the first half's statistics.
 fn conservative_trap(name: &str) {
-    use crate::units::{KT_PER_UK, POPULATION_TARGET, STEP_SHARE, TEMPERATURE_TARGET};
+    use crate::units::{KT_PER_UK, STEP_SHARE, TEMPERATURE_TARGET};
     let request = scene(name);
     let light = crate::field::Light::new(&request);
     let model = crate::model::Model::new(&request, &light, &[]).expect("the far light folds");
@@ -682,16 +685,15 @@ fn conservative_trap(name: &str) {
     let run = crate::model::Run::new(&model, p);
     let hm = run.hbar_over_mass();
     let kt = KT_PER_UK * request.temperature_uk;
-    let duration = *request.times_us.last().unwrap();
     let thermal = (kt / hm).sqrt();
-    let tol = Tolerances {
-        axes: STEP_SHARE * TEMPERATURE_TARGET * kt / duration,
-        energy: STEP_SHARE * POPULATION_TARGET * kt / duration,
-        population: STEP_SHARE * POPULATION_TARGET / duration,
-    };
+    let fastest = trap.frequencies.iter().copied().fold(0.0, f64::max);
+    let mut tau = 0.5 * (request.times_us[1] - request.times_us[0]);
+    while fastest * 2.0 * tau >= std::f64::consts::PI {
+        tau *= 0.5;
+    }
     let atoms = 16;
     let clock = std::time::Instant::now();
-    let (mut kinetic, mut steps, mut worst, mut jumps) = (vec![0.0; request.times_us.len()], 0, 0.0_f64, 0);
+    let (mut kinetic, mut steps, mut moved, mut read, mut jumps) = (vec![0.0; request.times_us.len()], 0, 0.0, 0.0, 0);
     for i in 0..atoms {
         let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, 0);
         let (mut r, mut kappa) = (trap.centre, [0.0; 3]);
@@ -703,19 +705,21 @@ fn conservative_trap(name: &str) {
             }
         }
         let mut t = Trajectory::new(&run, state, r, kappa, 17, i);
+        let mut drift = Drift::ZERO;
         let mut e0 = run.energy(t.cluster, &t.point(), &t.psi);
         for (k, &time) in request.times_us.iter().enumerate().skip(1) {
             let before = t.jumps;
-            adapt::advance(&run, &tol, &mut t, time, &mut |_| {});
+            adapt::advance(&run, tau, &mut t, Some(&mut drift), time, &mut |_| {}).unwrap();
             assert!(t.lost.is_none(), "{name}: atom {i} lost at {:?}", t.lost);
             let e = run.energy(t.cluster, &t.point(), &t.psi);
             if t.jumps == before {
-                worst = worst.max((e - e0).abs() / (tol.energy * duration));
+                moved += (e - e0) / (kt * (atoms as usize * (request.times_us.len() - 1)) as f64);
             } else {
                 e0 = e;
             }
             kinetic[k] += 0.5 * hm * t.kappa.iter().map(|x| x * x).sum::<f64>() / atoms as f64;
         }
+        read += drift.energy / (kt * atoms as f64);
         steps += t.steps;
         jumps += t.jumps;
     }
@@ -723,12 +727,15 @@ fn conservative_trap(name: &str) {
     let mean = |s: &[f64]| s.iter().sum::<f64>() / s.len() as f64;
     let (first, second) = (mean(&kinetic[1..half]), mean(&kinetic[half..]));
     let spread = (kinetic[1..half].iter().map(|e| (e - first).powi(2)).sum::<f64>() / (half - 2) as f64).sqrt();
+    let share = STEP_SHARE * TEMPERATURE_TARGET;
     eprintln!(
-        "{name}: {atoms} atoms × {duration} µs, {:.2} s, {steps} steps, {jumps} jumps, worst |ΔE_s| between jumps {worst:.3} of the run's allotment; kinetic {first:.4} then {second:.4} (± {spread:.4}), k_BT/2 per axis {:.4}",
+        "{name}: {atoms} atoms × {} µs at τ {tau}, {:.2} s, {steps} step evaluations, {jumps} jumps; E_s moved {moved:+.5} k_BT between jumps on average, read {read:+.5} at the end (share {share:.4}); kinetic {first:.4} then {second:.4} (± {spread:.4}), k_BT/2 per axis {:.4}",
+        request.times_us.last().unwrap(),
         clock.elapsed().as_secs_f64(),
         0.5 * kt
     );
-    assert!(worst <= 1.0, "{name}: an atom's E_s moved {worst} of its run's allotment");
+    assert!(moved.abs() <= share, "{name}: the atoms' E_s moved {moved} k_BT between jumps");
+    assert!(read.abs() <= share, "{name}: the accumulated read of E_s {read} k_BT");
     assert!((second - first).abs() <= 4.0 * spread, "{name}: kinetic energy {first} then {second} (spread {spread})");
 }
 
@@ -740,47 +747,6 @@ fn r1_a_lone_tweezer_keeps_its_atoms_energies() {
 #[test]
 fn r1_a_retro_reflected_lattice_keeps_its_atoms_energies() {
     conservative_trap("R1_RETRO");
-}
-
-/// The step control's guard against a non-asymptotic first doubling (`adapt::level`): R2_RECOIL with its probe's drives
-/// from ground 4 into D2 kept (their excited states explicit), the solve's product trajectory 500 of seed 0 at its first
-/// output, τ unbounded at entry. (The solve's repro kept the probe's drives into D1 too, 7 THz off: a generator of
-/// ‖H‖₁ ≈ 4.5·10⁷ rad/µs whose impulse quadrature takes some 10⁸ nodes per µs -- a stiffness `step::step_work` prices,
-/// not a fault of the control.) Before the bound the first doubling over the whole interval read errors of 10³⁰ of the
-/// tolerance, the error model asked a step of 10⁻¹³ µs, and there the doubling read the energy's round-off: rejected
-/// again and again, the trajectory never reached 2 µs. Now it does, and every accepted step lies above the round-off's
-/// scale, the step at which u|E_s| reaches the energy's tolerance.
-#[test]
-fn a_non_asymptotic_first_doubling_does_not_collapse_the_step() {
-    use crate::model::{Component, Model, Run, Unit, GROUND};
-    use crate::units::{KT_PER_UK, POPULATION_TARGET, STEP_SHARE, TEMPERATURE_TARGET, UNIT_ROUNDOFF};
-    let request = scene("R2_RECOIL");
-    let light = crate::field::Light::new(&request);
-    let probe = (0..light.frequencies.len()).find(|&f| light.frequencies[f].beams.iter().any(|&l| request.beams[l].id == "probe")).unwrap();
-    let near = Component { frequency: probe, counter: false };
-    let mut kept = vec![Unit::Far { component: near }];
-    kept.extend([16, 18, 22, 28].map(|excited| Unit::Drive { carrier: near, excited, ground: 4 }));
-    let model = Model::new(&request, &light, &kept).unwrap();
-    let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-    let mut p = [0.0; GROUND];
-    p[state] = 1.0;
-    let run = Run::new(&model, p);
-    let (kt, duration) = (KT_PER_UK * request.temperature_uk, *request.times_us.last().unwrap());
-    let tol = Tolerances {
-        axes: STEP_SHARE * TEMPERATURE_TARGET * kt / duration,
-        energy: STEP_SHARE * POPULATION_TARGET * kt / duration,
-        population: STEP_SHARE * POPULATION_TARGET / duration,
-    };
-    let r = [0.022570157873194684, 0.03557204701765085, 0.34007333797674333];
-    let kappa = [31.75598642152794, -145.69989434161738, -59.92757803634648];
-    let mut t = Trajectory::new(&run, 4, r, kappa, 0, 500);
-    let energy = run.energy(t.cluster, &t.point(), &t.psi).abs();
-    let round_off = UNIT_ROUNDOFF * energy / tol.energy;
-    let mut shortest = f64::INFINITY;
-    adapt::advance(&run, &tol, &mut t, request.times_us[1], &mut |s| shortest = shortest.min(s.tau.abs()));
-    eprintln!("R2 trajectory 500: {} steps, {} jumps, shortest step {shortest:.3e} µs against the round-off's {round_off:.3e}", t.steps, t.jumps);
-    assert!(t.lost.is_some() || t.time == request.times_us[1], "stopped at {}", t.time);
-    assert!(shortest > round_off, "a step of {shortest:e} µs at the round-off's scale {round_off:e}");
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

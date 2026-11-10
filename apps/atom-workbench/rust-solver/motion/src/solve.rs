@@ -4,16 +4,30 @@
 //! 1. The request's checks; the light; the initial components; the reach and the model with every unit whose existence
 //!    gate fails kept (model.rs, SPEC §1.5).
 //! 2. The pilot (`pilot_size` trajectories, numbered from `MOST_TRAJECTORIES` so that none of its streams is a run's):
-//!    it predicts only (decisions.md A4) -- the model's units' errors measured at its states, the outputs where T is held
-//!    to its target and T's scale there, the held share, the step's scales. Its result is the first checkpoint.
-//! 3. The model's decisions (SPEC §5.2) and the step's tolerances (SPEC §2.2), from the pilot alone.
-//! 4. The product: batches of whole groups, each trajectory with its own adaptive steps (adapt.rs), every one run to the
-//!    last output, until every output's statistics meet the targets the pilot fixed (`Targets`), or the trajectories
-//!    reach `MOST_TRAJECTORIES`.
-//! 5. The step's falsifier (SPEC §5.3): the product's first `pilot_size` trajectories again at a quarter of the tolerance
-//!    on the same streams; an output read clearly beyond the step's share tightens the tolerance by the measured ratio and
-//!    the product runs again.
+//!    it predicts only (decisions.md A4) -- the run's step and its error (# The step), the model's units' errors measured
+//!    at its states, the outputs where T is held to its target and T's scale there, the held share. Its result is the
+//!    first checkpoint.
+//! 3. The model's decisions (SPEC §5.2), from the pilot alone.
+//! 4. The product: batches of whole groups at the pilot's step (adapt.rs), every trajectory run to the last output,
+//!    until every output's statistics meet the targets the pilot fixed (`Targets`), or the trajectories reach
+//!    `MOST_TRAJECTORIES`.
+//! 5. The step's falsifier (SPEC §5.3): the product's first `pilot_size` trajectories again at half the step on the same
+//!    streams, and the product's trajectories within the step's error of the escape; an output read clearly beyond the
+//!    step's share takes the step down by the measured ratio, and the attempt runs again.
 //! 6. The result (contract §2.2, `assemble`).
+//!
+//! # The step (SPEC §2.2)
+//! One step τ for the run (adapt.rs). The ladder's rungs are the output interval over powers of two; its top one the
+//! largest below the reference flow's resonance, ω τ < π at the prepared trap's largest frequency (`top_rung`). The pilot
+//! is read at a rung -- every step doubled, the signed differences accumulated (adapt.rs `Drift`) -- and its step error
+//! per output (estimate.rs `stepped`) decides it against the step's share (`rung`; decide.rs): within everywhere, the
+//! rung is the run's step; beyond somewhere, the rung at which the measured error meets the share; unreadable, the next
+//! rung; down to the step at which a trajectory would take `MOST_STEPS` steps, where the readable bound is booked and
+//! flagged. What is booked per output is the read's bound on the rows as shown and on T (`Fixed::step`); the loss's is the
+//! share of the product's trajectories whose loss energy lies within the pilot's accumulated error of the escape -- its
+//! mean and z of the atoms' spread (`Fixed::windows`). That share's statistics are the output's own (what no trajectory
+//! saw is booked there, estimate.rs `unseen`); it refutes the step where Wilson's near end at its count lies beyond the
+//! step's share.
 //!
 //! # Outputs and windows
 //! The outputs are the request's times, from 0 and evenly spaced. T's window about an output (estimate.rs `half_window`)
@@ -29,10 +43,12 @@
 //! counted work a trajectory spends per µs (`rate`, the step's count through the model's generator at the pilot's states),
 //! falls by a share of itself beyond that share's spread, the jackknife over the pilot's groups (`candidates`) -- the kept
 //! model's W counting the pilot its attempt runs again: every keep is a new attempt, a new model and its own pilot. The
-//! model's falsifier keeps one more unit on the product's first trajectories (common random numbers) and refutes the
-//! fold where an output reads beyond the unit's booked error (`refuted`): the unit of the largest booked error among those
-//! whose pairs cost no more than the product they check -- a check dearer than what it checks is not one; the booked
-//! errors then stand, as an unreadable read leaves them.
+//! model's falsifier keeps one more unit on the product's first trajectories (common random numbers): the unit of the
+//! largest booked error among those whose pairs cost no more than the product they check -- a check dearer than what it
+//! checks is not one. What the pairs read clearly beyond the fold's booked error (`cleared`) is booked in its place; the
+//! unit is kept where that leaves an output no room for the statistics -- the rule the pilot's measured errors keep a unit
+//! by --, and else the product goes on until its statistics fit the room left. An unreadable read leaves the booked
+//! errors standing.
 //!
 //! # Stopping (SPEC §3)
 //! Each output's total error against its target is E² = A² + b² + S² (ledger.rs): the statistics may take the room
@@ -46,23 +62,26 @@
 //!
 //! # Checkpoints
 //! The decisions take counts, never the wall clock, so a request gives the same result on any machine. The wall clock only
-//! times the checkpoints: one after the pilot, then whenever `CHECKPOINT` has passed, each a complete result of the groups
-//! finished so far in their order (a prefix: whole groups chosen by their number alone). One is passed on only where it rests
-//! on two groups at least (the jackknife's least for a spread) and on no fewer trajectories than the attempt's last one: a
-//! product's first groups, or a product the step's falsifier restarted, are no better than the result before them.
-use crate::adapt::{self, Tolerances};
+//! times the messages (`Messages`): one clock for the whole solve, set at every message; whenever `CHECKPOINT` has passed
+//! since the last one, the stage that is running sends a complete result of the groups it has finished so far in their
+//! order (a prefix: whole groups chosen by their number alone). A result is passed on where it rests on two groups at
+//! least (the jackknife's least for a spread) and on no fewer trajectories than the attempt's last one -- a product's
+//! first groups, or a pilot at a finer rung, are no better than the result before them --; else the last result goes out
+//! again, so that the app hears from the solve whatever stage it is in.
+use crate::adapt::{self, Drift};
 use crate::decide::{pays, Outcome, Read};
 use crate::ensemble::{Ensemble, Quadrature, Start, Well, GROUP};
-use crate::estimate::{half_window, paired, spread, summarize, unseen, wilson, Estimate, Group, Held, Scales, Spread};
+use crate::estimate::{half_window, paired, spread, stepped, summarize, unseen, wilson, Estimate, Fate, Group, Held, Output, Scales, Spread, Stepped};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, span, when, Account, Ledger};
 use crate::linalg::V3;
 use crate::model::{Envelope, Lights, Model, Run, Sample, Trap, Unit, UnitError, GROUND};
 use crate::request::STATES;
 use crate::step::{Dynamics, Segment, Trajectory};
-use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, STEP_SHARE, TEMPERATURE_TARGET};
+use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, ORDER, STEP_SHARE, TEMPERATURE_TARGET};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::f64::consts::PI;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -116,7 +135,7 @@ pub struct Solution {
     /// Per output: in the validated regime, k_BT ≥ CLASSICAL ħω on every axis (reporting only).
     pub classical: Vec<bool>,
     pub trajectories: u64,
-    /// The mean accepted step over the trajectories (µs): each trajectory takes its own (adapt.rs).
+    /// The run's step τ (µs, adapt.rs).
     pub time_step_us: f64,
     pub method: String,
     /// What keeps the worst output beyond the population target (Chinese): present where its total exceeds it.
@@ -129,29 +148,66 @@ pub struct Solution {
 pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64>)) -> Result<Solution, String> {
     request.validate()?;
     let light = Light::new(request);
-    let (mut kept, mut reach) = (vec![], request.temperature_uk);
+    let (mut kept, mut reach, mut step) = (vec![], request.temperature_uk, None);
+    let mut messages = Messages { send: checkpoint, clock: Instant::now(), last: None, least: 0 };
     loop {
-        // The attempt's checkpoints that improve on its last (module documentation, # Checkpoints).
-        let mut last = 2 * GROUP;
-        let mut better = |s: &Solution, remaining: Option<f64>| {
-            if s.trajectories >= last {
-                last = s.trajectories;
-                checkpoint(s, remaining);
+        // An attempt's results improve on its own last one, from two groups on (module documentation, # Checkpoints).
+        messages.least = 2 * GROUP;
+        match attempt(request, &light, &kept, reach, step, &mut messages)? {
+            Attempt::Grow(t, tau) => (reach, step) = (t, Some(tau)),
+            Attempt::Keep(u, tau) => {
+                kept.push(u);
+                step = Some(tau);
             }
-        };
-        match attempt(request, &light, &kept, reach, &mut better)? {
-            Attempt::Grow(t) => reach = t,
-            Attempt::Keep(u) => kept.push(u),
+            Attempt::Refine(tau) => step = Some(tau),
             Attempt::Done(s) => return Ok(s),
         }
     }
 }
 
+/// The solve's messages to the app (module documentation, # Checkpoints).
+struct Messages<'a> {
+    send: &'a mut dyn FnMut(&Solution, Option<f64>),
+    /// The last message's time.
+    clock: Instant,
+    /// The last result sent.
+    last: Option<Solution>,
+    /// The trajectories a result of this attempt must rest on to be sent.
+    least: u64,
+}
+impl Messages<'_> {
+    /// A result of the solve so far, with the wall time left (ms) where the run's pace gives one: sent where it improves
+    /// on the attempt's last one, else the last result again.
+    fn result(&mut self, s: &Solution, remaining: Option<f64>) {
+        if s.trajectories >= self.least {
+            self.least = s.trajectories;
+            (self.send)(s, remaining);
+            self.last = Some(s.clone());
+            self.clock = Instant::now();
+        } else {
+            self.again();
+        }
+    }
+    /// Nothing new: the last result again; with none yet there is nothing to send, and the next look is a full interval on.
+    fn again(&mut self) {
+        if let Some(s) = &self.last {
+            (self.send)(s, None);
+        }
+        self.clock = Instant::now();
+    }
+    /// The time until the next message is due.
+    fn due(&self) -> Duration {
+        CHECKPOINT.saturating_sub(self.clock.elapsed())
+    }
+}
+
 /// How one attempt at a model ends (`attempt`): the pilot's atoms outgrew the reach the model was judged over (its new
-/// temperature, µK), a unit is to be kept, or the solution.
+/// temperature, µK), a unit is to be kept -- each with the step the attempt's pilot took, the next attempt's first rung --,
+/// the step is refuted (the step to take), or the solution.
 enum Attempt {
-    Grow(f64),
-    Keep(Unit),
+    Grow(f64, f64),
+    Keep(Unit, f64),
+    Refine(f64),
     Done(Solution),
 }
 
@@ -199,45 +255,50 @@ impl Well for Prepared<'_> {
     }
 }
 
-/// The step's tolerances per µs of the run (SPEC §2.2: each output's error ≤ s·ε·τ/T_run of its scale, adapt.rs), from the
-/// temperature scales (µK) per lab axis and the density of the atoms' loss energy at the escape (per rad/µs,
-/// `escape_density`): a principal axis's energy against T's target on the coldest axis's thermal energy (an axis's T is its
-/// energy over k_B: δE ≤ s ε_T k_BT); the loss energy's against the population target (an error δE carries the atoms within
-/// δE of the escape across it, a share ρ(E_esc) δE: δE ≤ s ε/ρ); the displayed rows' against the population target.
-fn tolerances(temperatures: V3, density: f64, run: f64) -> Tolerances {
-    let [bp, bt] = step_bound();
-    Tolerances {
-        axes: bt * KT_PER_UK * temperatures.iter().copied().fold(f64::INFINITY, f64::min) / run,
-        energy: bp / (density * run),
-        population: bp / run,
+/// The ladder's top rung (module documentation, # The step): the output interval over the least power of two that
+/// brings the step below the reference flow's resonance at the frequency ω (rad/µs), ω τ < π -- there the two half
+/// flows of a step turn the motion by π and any kick between them grows.
+fn top_rung(interval: f64, frequency: f64) -> f64 {
+    let mut tau = interval;
+    while frequency * tau >= PI {
+        tau *= 0.5;
+    }
+    tau
+}
+
+/// A rung's outcome on the pilot's step error (module documentation, # The step; decide.rs): every output's rows as
+/// shown, and T per lab axis where it is held to its target, against the step's share.
+enum Rung {
+    Within,
+    /// Beyond somewhere among all the looks: the factor on τ at which the largest measured error meets its share.
+    Refine(f64),
+    Unreadable,
+}
+fn rung(reads: &[Stepped], held_to: &[Option<V3>]) -> Rung {
+    let [sp, st] = step_bound();
+    let mut looks: Vec<(&Read, f64)> = vec![];
+    for (k, r) in reads.iter().enumerate().skip(1) {
+        looks.extend(r.shown.iter().map(|x| (x, sp)));
+        if let (Some(_), Some(t)) = (held_to[k], &r.temperature) {
+            looks.extend(t.iter().map(|x| (x, st)));
+        }
+    }
+    let m = looks.len() as f64;
+    let beyond = looks
+        .iter()
+        .filter(|(r, share)| r.outcome(*share, m) == Outcome::Beyond)
+        .map(|(r, share)| r.refined(*share, ORDER as f64))
+        .fold(None, |f: Option<f64>, x| Some(f.map_or(x, |f| f.min(x))));
+    match beyond {
+        Some(factor) => Rung::Refine(factor),
+        None if looks.iter().all(|(r, share)| r.outcome(*share, 1.) == Outcome::Within) => Rung::Within,
+        None => Rung::Unreadable,
     }
 }
 
-/// The density (per rad/µs) of the held atoms' loss energy E_s at the escape E_esc, the running potential's far value
-/// (model.rs `lost`): per output, the share of the pilot's held atoms within `thermal` (k_BT, rad/µs) below the escape or
-/// past it -- Wilson's far end at that count, so that what none of them met is bounded by what they leave unseen -- over the
-/// window, the largest over the outputs. The window's mean stands for the density at its edge: k_BT, the scale over which
-/// a trapped ensemble's density changes. With no atom held after t = 0 nothing is measured, and the density is taken at
-/// 1/k_BT, the bound of a thermal ensemble's.
-fn escape_density(model: &Model, states: &[State], output: &[usize], outputs: usize, thermal: f64) -> f64 {
-    let running = model.running();
-    let near: Vec<bool> = states
-        .par_iter()
-        .map(|s| {
-            let x = &s.sample;
-            model.asymptote(&model.ground_populations(x.cluster, &x.psi), &running) - model.energy(x.cluster, &x.at, &x.psi) <= thermal
-        })
-        .collect();
-    let (mut count, mut held) = (vec![0.; outputs], vec![0.; outputs]);
-    for (&k, &n) in output.iter().zip(&near) {
-        held[k] += 1.;
-        count[k] += if n { 1. } else { 0. };
-    }
-    (1..outputs).filter(|&k| held[k] > 0.).map(|k| wilson(count[k], held[k]) / thermal).reduce(f64::max).unwrap_or(1. / thermal)
-}
-/// Tolerances tightened (or loosened) by a factor.
-fn scaled(t: &Tolerances, factor: f64) -> Tolerances {
-    Tolerances { axes: t.axes * factor, energy: t.energy * factor, population: t.population * factor }
+/// The rung a factor on τ takes the step down to: the halvings that bring it to the factor, one at least.
+fn refined(tau: f64, factor: f64) -> f64 {
+    tau * 0.5_f64.powf((1. / factor).log2().ceil().max(1.))
 }
 
 /// The estimates, the listed outputs' atoms and the counts of some groups.
@@ -254,8 +315,10 @@ fn pooled(parts: &[&Part], scales: &Scales) -> (Vec<Estimate>, Vec<Vec<(V3, V3)>
     (estimates, listed, counts)
 }
 
-/// The pilot's T where it has outgrown the reach's temperature `reach` (µK, SPEC §1.8): some output's T above it beyond its
-/// interval among all the T read (Šidák over the outputs and axes); then the largest T read, the reach's new temperature.
+/// The reach's falsifier (SPEC §1.8; decide.rs: a booked bound that a read can only refute): the pilot's T where it has
+/// outgrown the reach's temperature `reach` (µK) -- some output's T above it beyond its interval among all the T read
+/// (Šidák over the outputs and axes) --; then the largest T read, the reach's new temperature. A T that reads above the
+/// reach within its interval leaves the reach standing, as every unreadable falsifier's read does.
 fn outgrown(estimates: &[Estimate], reach: f64) -> Option<f64> {
     let read: Vec<&crate::estimate::Motion> = estimates.iter().skip(1).filter_map(|e| e.motion.as_ref()).collect();
     let looks = 3. * read.len() as f64;
@@ -263,8 +326,15 @@ fn outgrown(estimates: &[Estimate], reach: f64) -> Option<f64> {
     beyond.then(|| read.iter().flat_map(|m| m.temperature).fold(reach, f64::max))
 }
 
+/// Whether temperatures per lab axis (µK) lie in the validated regime of the trap's frequencies (rad/µs) on every axis,
+/// k_BT ≥ `CLASSICAL` ħω (SPEC §0, §3): the one test of what the result reports as classical and of where T is held to
+/// its target.
+fn classical(temperature: &V3, frequencies: &V3) -> bool {
+    (0..3).all(|a| KT_PER_UK * temperature[a] >= CLASSICAL * frequencies[a])
+}
+
 /// One attempt at the solve with the units `kept` and the reach at `reach` µK (module documentation, # The pipeline).
-fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoint: &mut dyn FnMut(&Solution, Option<f64>)) -> Result<Attempt, String> {
+fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Option<f64>, messages: &mut Messages) -> Result<Attempt, String> {
     let hm = hbar_over_mass(request.mass_kg);
     let initial = components(request)?;
     let reference = alone(initial.iter().max_by(|a, b| a.1.total_cmp(&b.1)).ok_or("运动计算的初态需在基态上")?.0);
@@ -311,7 +381,8 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     let (momentum, start) = exact(&first);
     let mut context = Context {
         momentum,
-        fixed: Fixed { model: vec![[0.; 2]; outputs], held: vec![1.; outputs], temperature: vec![None; outputs], step: step_bound(), start },
+        fixed: Fixed { model: vec![[0.; 2]; outputs], cleared: vec![0.; outputs], held: vec![1.; outputs], temperature: vec![None; outputs], step: vec![step_bound(); outputs], windows: vec![], start },
+        tau: step.unwrap_or_else(|| top_rung(plan.times[1] - plan.times[0], trap.frequencies.iter().copied().fold(0., f64::max))),
         plan,
         scales,
         initial: row,
@@ -319,20 +390,64 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
         method: format!("半经典 3D：{}", model.describe().trim_end_matches('。')),
     };
 
-    // The pilot (module documentation, # The pipeline): its own trajectory numbers, the step at the request's temperature and
-    // the initial ensemble's density at the escape.
-    let pilot_tolerances = tolerances([request.temperature_uk; 3], ensemble.escape(&first), context.plan.end);
+    // The outputs where T is held to its target, and its scale there (module documentation, # Stopping): the pilot's T
+    // where it is read on every axis and its upper bound lies in the validated regime.
+    let held_to = |estimates: &[Estimate]| -> Vec<Option<V3>> {
+        estimates
+            .iter()
+            .enumerate()
+            .map(|(k, e)| {
+                let m = e.motion.as_ref().filter(|m| k > 0 && m.temperature_errors.iter().all(Spread::read))?;
+                let upper: V3 = std::array::from_fn(|a| m.temperature[a] + m.temperature_errors[a].interval());
+                (m.temperature.iter().all(|&t| t > 0.) && classical(&upper, &report.lab)).then_some(m.temperature)
+            })
+            .collect()
+    };
+
+    // The pilot (module documentation, # The pipeline, # The step): its own trajectory numbers, read at the ladder's rungs
+    // from its first one until its step error fits the step's share.
     let first = MOST_TRAJECTORIES / GROUP;
-    let pilot = run_groups(first, first + pilot_size() / GROUP, Shape::of(&context.plan, true), &|i| trajectory(&run, &ensemble, &pilot_tolerances, &context.plan, true, i), &mut |prefix| {
-        let (e, l, c) = pooled(prefix, &context.scales);
-        checkpoint(&assemble(&context, &e, &l, &c, prefix.len() as u64 * GROUP), None);
-    });
+    let (pilot, reads) = loop {
+        let tau = context.tau;
+        let pilot = run_groups(first, first + pilot_size() / GROUP, Shape::of(&context.plan, true), &|i| trajectory(&run, &ensemble, tau, true, &[], &context.plan, true, i), messages, &mut |prefix, messages| {
+            let (e, l, c) = pooled(prefix, &context.scales);
+            messages.result(&assemble(&context, &e, &l, &c, prefix.len() as u64 * GROUP), None);
+        });
+        let parts: Vec<&Part> = pilot.iter().collect();
+        let reads = stepped(&parts, &context.scales);
+        let next = match rung(&reads, &held_to(&pooled(&parts, &context.scales).0)) {
+            Rung::Within => break (pilot, reads),
+            Rung::Refine(factor) => refined(tau, factor),
+            Rung::Unreadable => refined(tau, 1.),
+        };
+        if context.plan.end / next > MOST_STEPS as f64 {
+            context.ledger.flag(format!("时间步长的误差在每条轨迹 {MOST_STEPS} 步的上限内读不到份额以内：按读到的界记账"));
+            break (pilot, reads);
+        }
+        context.tau = next;
+    };
+    let tau = context.tau;
     let pilot: Vec<&Part> = pilot.iter().collect();
     let (estimates, listed, counts) = pooled(&pilot, &context.scales);
     if let Some(t) = outgrown(&estimates, reach) {
-        return Ok(Attempt::Grow(t));
+        return Ok(Attempt::Grow(t, tau));
     }
     (context.momentum, context.fixed.start) = exact(&ensemble.kinetic(counts.steps));
+    // The step's error booked per output: the read's bound on the rows as shown -- a probability's error is at most 1,
+    // which an unreadable one is booked at, flagged -- and on T, unbounded where it is not read (T's account is then none,
+    // flagged where the run shows T, `assemble`); and the loss energy's window, unbounded where no trajectory reads it.
+    let bound = |x: &Read| x.bound(1.);
+    let rows: Vec<f64> = reads.iter().map(|r| r.shown.iter().map(bound).fold(0., f64::max)).collect();
+    let unread: Vec<usize> = (1..outputs).filter(|&k| !rows[k].is_finite()).collect();
+    if !unread.is_empty() {
+        context.ledger.flag(format!("{}：步长对布居的误差读不出，按 1 记账", span(&unread, &context.plan.times)));
+    }
+    context.fixed.step = reads
+        .iter()
+        .zip(&rows)
+        .map(|(r, &shown)| [shown.min(1.), r.temperature.as_ref().map_or(f64::INFINITY, |t| t.iter().map(bound).fold(0., f64::max))])
+        .collect();
+    context.fixed.windows = reads.iter().map(|r| r.energy.map_or(f64::INFINITY, |e| e[0].abs() + CONFIDENCE * e[1])).collect();
 
     // The model's errors at the pilot's states (SPEC §5.2): each folded unit's per output, the held atoms' mean.
     let units = model.units();
@@ -354,118 +469,137 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, checkpoi
     let unsampled = unseen(MOST_TRAJECTORIES as f64);
     context.fixed.model = model_error(&means, None, unsampled);
     context.fixed.held = estimates.iter().map(|e| 1. - e.loss).collect();
-    context.fixed.temperature = estimates
-        .iter()
-        .enumerate()
-        .map(|(k, e)| {
-            let m = e.motion.as_ref().filter(|_| k > 0)?;
-            let upper: V3 = std::array::from_fn(|a| m.temperature[a] + m.temperature_errors[a].interval());
-            (m.temperature.iter().all(|&t| t > 0.) && (0..3).all(|a| KT_PER_UK * upper[a] >= CLASSICAL * report.lab[a])).then_some(m.temperature)
-        })
-        .collect();
-    let targets = Targets::new(&context.fixed);
+    context.fixed.temperature = held_to(&estimates);
+    let mut targets = Targets::new(&context.fixed);
     // A unit whose error leaves an output no room for the statistics is kept (SPEC §5.2): of the outputs left none, the unit
     // whose errors there, each relative to its target and held share, add up to the most.
     let crowded: Vec<usize> = (1..outputs).filter(|&k| targets.population[k] == 0. || targets.temperature[k].is_some_and(|t| t.1 == 0.)).collect();
-    let weight = |u: usize| -> f64 {
-        crowded.iter().map(|&k| context.fixed.held[k] * (population[u][k] / POPULATION_TARGET + temperature[u][k] / TEMPERATURE_TARGET)).sum()
-    };
+    // A unit's errors at an output on what is shown and on T, weighed by the pilot's held share as the totals are (an
+    // output where the pilot holds no atom weighs nothing: its units' errors are their bounds, `Measured::means`).
+    let held = context.fixed.held.clone();
+    let weighed = |u: usize, k: usize| -> [f64; 2] { if held[k] > 0. { [population[u][k] * held[k], temperature[u][k] * held[k]] } else { [0.; 2] } };
+    let weight = |u: usize| -> f64 { crowded.iter().map(|&k| weighed(u, k)[0] / POPULATION_TARGET + weighed(u, k)[1] / TEMPERATURE_TARGET).sum() };
     if let Some(u) = (0..units.len()).max_by(|&a, &b| weight(a).total_cmp(&weight(b))).filter(|&u| weight(u) > 0.) {
-        return Ok(Attempt::Keep(units[u].clone()));
+        return Ok(Attempt::Keep(units[u].clone(), tau));
     }
     // The greedy keep by pays (SPEC §5.2): the unit whose keeping saves the most predicted work beyond its spread.
     let ranked = candidates(request, light, &kept, &model, reference, &units, &measured, &samples, &pilot, &context.fixed, &context.scales, unsampled);
     if let Some(c) = ranked.first().filter(|c| pays(0., c.saving)) {
-        return Ok(Attempt::Keep(units[c.unit].clone()));
+        return Ok(Attempt::Keep(units[c.unit].clone(), tau));
     }
     // The ledger's items: each folded unit's error on what is shown and on T (its largest over the outputs, weighed by the
     // held share as the totals are), the unsampled share, the step.
     for (u, unit) in units.iter().enumerate() {
-        let shown = (1..outputs).map(|k| (population[u][k] * context.fixed.held[k]).max(temperature[u][k] * context.fixed.held[k])).fold(0., f64::max);
+        let shown = (1..outputs).map(|k| weighed(u, k)[0].max(weighed(u, k)[1])).fold(0., f64::max);
         if shown > 0. {
             context.ledger.item(&model.label(unit), shown, "二阶消去（折叠），沿试探轨迹实测");
         }
     }
     context.ledger.item("折叠判定之外的未采样份额", unsampled, "计入模型误差");
-    context.ledger.item("时间步长（逐轨迹自适应，步长减半检验）", context.fixed.step[0], "容差 s·ε；容差的 1/4 否证");
-    checkpoint(&assemble(&context, &estimates, &listed, &counts, pilot_size()), None);
+    let booked = context.fixed.step.iter().skip(1).map(|b| b[0].max(b[1])).fold(0., f64::max);
+    context.ledger.item(&format!("时间步长 τ = {tau} μs（全程不变）"), booked, "试探上每步减半实测、沿轨迹累加；产品上以 τ/2 否证");
+    messages.result(&assemble(&context, &estimates, &listed, &counts, pilot_size()), None);
 
-    // The product (module documentation, # Stopping), and the step's falsifier.
-    let coldest = |f: &dyn Fn(&crate::estimate::Motion) -> f64| estimates.iter().skip(1).filter_map(|e| e.motion.as_ref()).map(f).filter(|t| *t > 0.).fold(f64::INFINITY, f64::min);
-    let held_to: Vec<&V3> = context.fixed.temperature.iter().flatten().collect();
-    let momentum: V3 = std::array::from_fn(|a| held_to.iter().map(|t| t[a]).fold(f64::INFINITY, f64::min));
-    let momentum = momentum.map(|t| if t.is_finite() { t } else { request.temperature_uk });
-    let thermal = KT_PER_UK * coldest(&|m| m.temperature_total).min(request.temperature_uk);
-    let mut tolerance = tolerances(momentum, escape_density(&model, &samples, &at, outputs, thermal), context.plan.end);
-    let round = |n: f64| ((n / GROUP as f64).ceil() as u64 * GROUP).clamp(pilot_size(), MOST_TRAJECTORIES);
-    let mut want = round(targets.need(&estimates));
+    // The product (module documentation, # Stopping).
     let mut parts: Vec<Part> = vec![];
     let started = Instant::now();
-    loop {
-        loop {
-            let have = parts.len() as u64 * GROUP;
-            let pace = |done: u64| (done > 0).then(|| started.elapsed().as_secs_f64() * 1e3 / done as f64);
-            let new = run_groups(have / GROUP, want / GROUP, Shape::of(&context.plan, false), &|i| trajectory(&run, &ensemble, &tolerance, &context.plan, false, i), &mut |prefix| {
-                let all: Vec<&Part> = parts.iter().chain(prefix.iter().copied()).collect();
-                let n = all.len() as u64 * GROUP;
-                let (e, l, c) = pooled(&all, &context.scales);
-                checkpoint(&assemble(&context, &e, &l, &c, n), pace(n).map(|p| p * (want - n) as f64));
-            });
-            parts.extend(new);
-            let all: Vec<&Part> = parts.iter().collect();
-            let n = all.len() as u64 * GROUP;
-            let (e, l, c) = pooled(&all, &context.scales);
-            if (1..outputs).all(|k| targets.met(&e, k)) || n >= MOST_TRAJECTORIES {
-                break;
-            }
-            want = round(targets.need(&e)).max(n + GROUP).min(MOST_TRAJECTORIES);
-            checkpoint(&assemble(&context, &e, &l, &c, n), pace(n).map(|p| p * (want - n) as f64));
-        }
-        // The step's falsifier on the product's first groups; while it runs, the product's result is the checkpoint.
-        let checked = pilot_size() / GROUP;
-        let all: Vec<&Part> = parts.iter().collect();
-        let (e, l, c) = pooled(&all, &context.scales);
-        let current = assemble(&context, &e, &l, &c, all.len() as u64 * GROUP);
-        let fine = run_groups(0, checked, Shape::of(&context.plan, false), &|i| trajectory(&run, &ensemble, &scaled(&tolerance, 0.25), &context.plan, false, i), &mut |_| checkpoint(&current, None));
-        let coarse: Vec<&Part> = parts[..checked as usize].iter().collect();
-        match refuted(&coarse, &fine, &context.scales, &targets, 0.25, 1., &|_| context.fixed.step) {
-            Some(factor) if c.capped.is_none() => {
-                tolerance = scaled(&tolerance, factor);
-                want = parts.len() as u64 * GROUP;
-                parts.clear();
-            }
-            Some(_) => {
-                context.ledger.flag("步长否证（容差的 1/4）读到超出步长的份额，步数已达上限，无法再收紧".into());
-                break;
-            }
-            None => break,
-        }
-    }
+    product(&run, &ensemble, &context, &targets, &mut parts, batch(targets.need(&estimates), pilot_size()), started, messages);
+    // The step's falsifier (SPEC §5.3) on the product's first groups at half the step, and the product's trajectories
+    // within the step's error of the escape; while it runs, the product's result is the checkpoint. Refuted, the attempt
+    // runs again at the rung the measured ratio gives.
+    let checked = pilot_size() / GROUP;
     let all: Vec<&Part> = parts.iter().collect();
     let (e, l, c) = pooled(&all, &context.scales);
+    let current = assemble(&context, &e, &l, &c, all.len() as u64 * GROUP);
+    let fine = run_groups(0, checked, Shape::of(&context.plan, false), &|i| trajectory(&run, &ensemble, 0.5 * tau, false, &context.fixed.windows, &context.plan, false, i), messages, &mut |_, messages| messages.result(&current, None));
+    let share = step_bound();
+    let pairs = refuted(&all[..checked as usize], &fine, &context.scales, &targets, 0.5, ORDER as f64, &|_| share);
+    let escape = e.iter().skip(1).any(|x| x.judged > 0. && 1. - wilson(x.judged - x.near, x.judged) > share[0]).then_some(1.);
+    if let Some(factor) = [pairs, escape].into_iter().flatten().reduce(f64::min) {
+        let next = refined(tau, factor);
+        if context.plan.end / next <= MOST_STEPS as f64 {
+            return Ok(Attempt::Refine(next));
+        }
+        context.ledger.flag(format!("步长否证读到超出步长的份额，而每条轨迹的步数已达上限 {MOST_STEPS}，无法再减半"));
+    }
     let result = assemble(&context, &e, &l, &c, all.len() as u64 * GROUP);
     // The model's falsifier (SPEC §5.2; module documentation, # The model): one more unit kept on the product's first groups,
     // the unit of the largest booked error (its measured errors on what is shown and on T, each over its target and weighed by
-    // the held share) among those whose pairs cost no more than the product; read beyond what its fold is booked at, it is
-    // kept.
-    let checked = pilot_size() / GROUP;
-    let total = |u: usize| -> f64 {
-        (1..outputs).map(|k| context.fixed.held[k] * (population[u][k] / POPULATION_TARGET + temperature[u][k] / TEMPERATURE_TARGET)).sum()
-    };
+    // the held share) among those whose pairs cost no more than the product.
+    let total = |u: usize| -> f64 { (1..outputs).map(|k| weighed(u, k)[0] / POPULATION_TARGET + weighed(u, k)[1] / TEMPERATURE_TARGET).sum() };
     let next = ranked
         .iter()
         .filter(|c| total(c.unit) > 0. && (checked * GROUP) as f64 * c.ratio <= all.len() as f64 * GROUP as f64)
         .max_by(|a, b| total(a.unit).total_cmp(&total(b.unit)))
         .map(|c| c.unit);
-    if let Some((u, with)) = next.and_then(|u| Some((u, Model::new(request, light, &[kept.as_slice(), std::slice::from_ref(&units[u])].concat()).ok()?))) {
-        let finer = Run::new(&with, reference);
-        let fine = run_groups(0, checked, Shape::of(&context.plan, false), &|i| trajectory(&finer, &ensemble, &tolerance, &context.plan, false, i), &mut |_| checkpoint(&result, None));
-        let booked = |k: usize| [population[u][k] * context.fixed.held[k], temperature[u][k]];
-        if refuted(&all[..checked as usize], &fine, &context.scales, &targets, 0., 1., &booked).is_some() {
-            return Ok(Attempt::Keep(units[u].clone()));
-        }
+    let Some(u) = next else {
+        return Ok(Attempt::Done(result));
+    };
+    let with = Model::new(request, light, &[kept.as_slice(), std::slice::from_ref(&units[u])].concat())?;
+    let finer = Run::new(&with, reference);
+    let fine = run_groups(0, checked, Shape::of(&context.plan, false), &|i| trajectory(&finer, &ensemble, tau, false, &context.fixed.windows, &context.plan, false, i), messages, &mut |_, messages| messages.result(&result, None));
+    // What the pairs read clearly beyond the fold's booked error is booked in its place: on the rows as shown as it is
+    // read there, and on T.
+    let clear = cleared(&all[..checked as usize], &fine, &context.scales, &targets);
+    let mut largest = 0.;
+    for k in 1..outputs {
+        let excess = [clear[k][0] - weighed(u, k)[0], clear[k][1] - temperature[u][k]].map(|x| x.max(0.));
+        context.fixed.cleared[k] += excess[0];
+        context.fixed.model[k][1] += excess[1];
+        largest = f64::max(largest, (weighed(u, k)[0] + excess[0]).max(weighed(u, k)[1] + excess[1] * held[k]));
     }
-    Ok(Attempt::Done(result))
+    targets = Targets::new(&context.fixed);
+    if (1..outputs).any(|k| targets.population[k] == 0. || targets.temperature[k].is_some_and(|t| t.1 == 0.)) {
+        return Ok(Attempt::Keep(units[u].clone(), tau));
+    }
+    let label = model.label(&units[u]);
+    match context.ledger.items.iter_mut().find(|i| i.label == label) {
+        Some(item) => item.estimate = item.estimate.max(largest),
+        None => context.ledger.item(&label, largest, "二阶消去（折叠），沿试探轨迹实测"),
+    }
+    // The statistics against the room the re-booked errors leave.
+    let n = parts.len() as u64 * GROUP;
+    if !(1..outputs).all(|k| targets.met(&e, k)) && n < MOST_TRAJECTORIES {
+        product(&run, &ensemble, &context, &targets, &mut parts, batch(targets.need(&e), n), started, messages);
+    }
+    let all: Vec<&Part> = parts.iter().collect();
+    let (e, l, c) = pooled(&all, &context.scales);
+    Ok(Attempt::Done(assemble(&context, &e, &l, &c, all.len() as u64 * GROUP)))
+}
+
+/// The trajectories a batch brings a run of `have` to, for the `need` its estimates predict: whole groups, more than it
+/// has, at most twice as many -- the need is predicted from a variance read on the groups so far (the pilot's eleven at
+/// first, whose largest read over the outputs runs high), and a batch that only doubles them leaves at most half of the
+/// work to a wrong prediction --, and `MOST_TRAJECTORIES` at most.
+fn batch(need: f64, have: u64) -> u64 {
+    ((need / GROUP as f64).ceil() as u64 * GROUP).clamp(have + GROUP, 2 * have).min(MOST_TRAJECTORIES)
+}
+
+/// The product (module documentation, # Stopping): batches of whole groups at the run's step, from the trajectories it
+/// has to `want` and on by the estimates' prediction (`batch`), until every output's statistics meet the targets or the
+/// trajectories reach `MOST_TRAJECTORIES`; each batch's result is a checkpoint.
+#[allow(clippy::too_many_arguments)]
+fn product(run: &Run, ensemble: &Ensemble, context: &Context, targets: &Targets, parts: &mut Vec<Part>, mut want: u64, started: Instant, messages: &mut Messages) {
+    let outputs = context.plan.times.len();
+    loop {
+        let have = parts.len() as u64 * GROUP;
+        let pace = |done: u64| (done > 0).then(|| started.elapsed().as_secs_f64() * 1e3 / done as f64);
+        let new = run_groups(have / GROUP, want / GROUP, Shape::of(&context.plan, false), &|i| trajectory(run, ensemble, context.tau, false, &context.fixed.windows, &context.plan, false, i), messages, &mut |prefix, messages| {
+            let all: Vec<&Part> = parts.iter().chain(prefix.iter().copied()).collect();
+            let n = all.len() as u64 * GROUP;
+            let (e, l, c) = pooled(&all, &context.scales);
+            messages.result(&assemble(context, &e, &l, &c, n), pace(n).map(|p| p * (want - n) as f64));
+        });
+        parts.extend(new);
+        let all: Vec<&Part> = parts.iter().collect();
+        let n = all.len() as u64 * GROUP;
+        let (e, l, c) = pooled(&all, &context.scales);
+        if (1..outputs).all(|k| targets.met(&e, k)) || n >= MOST_TRAJECTORIES {
+            break;
+        }
+        want = batch(targets.need(&e), n);
+        messages.result(&assemble(context, &e, &l, &c, n), pace(n).map(|p| p * (want - n) as f64));
+    }
 }
 
 /// The pilot's size: the fewest whole groups whose unseen share fits the statistics' share of the population target,
@@ -497,15 +631,17 @@ impl Plan {
     }
 }
 
-/// Counts over trajectories: the accepted steps, the integrator's counted work (decide.rs `Work`) and its generator
-/// assemblies, the time held (µs), and the earliest time from which a trajectory's steps went unchecked (the step cap).
+/// Counts over trajectories: the steps taken, the integrator's counted work (decide.rs `Work`) and its generator
+/// assemblies, the time held (µs), and the trajectories the scheme could not advance (adapt.rs `advance`'s refusal) with
+/// the earliest time one stopped at.
 #[derive(Clone, Copy, Debug, Default)]
 struct Counts {
     steps: u64,
     work: f64,
     assemblies: u64,
     held: f64,
-    capped: Option<f64>,
+    failed: u64,
+    since: Option<f64>,
 }
 impl Counts {
     fn add(&mut self, o: &Counts) {
@@ -513,57 +649,65 @@ impl Counts {
         self.work += o.work;
         self.assemblies += o.assemblies;
         self.held += o.held;
-        self.capped = match (self.capped, o.capped) {
+        self.failed += o.failed;
+        self.since = match (self.since, o.since) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
     }
 }
 
-/// A pilot trajectory's state at an output (model.rs `Sample`) with the τ and the grid spacing its next doubling takes
-/// (`Trajectory::tau`, at most the output interval, and `Trajectory::grid`) and the trajectory's number: where the units'
-/// errors are measured and a model is priced (`rate`).
+/// A pilot trajectory's state at an output (model.rs `Sample`) with the run's step and the trajectory's number: where
+/// the units' errors are measured and a model is priced (`rate`).
 #[derive(Clone)]
 struct State {
     sample: Sample,
     tau: f64,
-    grid: f64,
     index: u64,
 }
 
-/// What one trajectory leaves: per output its atom where held (estimate.rs `Held`), its (r, κ) at the listed outputs
-/// where held, its states at the outputs where held (`keep`: the pilot's, for the model's errors and prices), its counts.
+/// What one trajectory leaves: what it is at every output (estimate.rs `Output`), its (r, κ) at the listed outputs where
+/// held, its states at the outputs where held (`keep`: the pilot's, for the model's errors and prices), its counts.
 struct Record {
-    held: Vec<Option<Held>>,
+    outputs: Vec<Output>,
     listed: Vec<Option<(V3, V3)>>,
     samples: Vec<Option<State>>,
     counts: Counts,
 }
 
-/// One trajectory from its initial state through the plan (module documentation, # Outputs and windows).
-fn run<D: Dynamics>(model: &D, start: Start, index: u64, tolerances: &Tolerances, plan: &Plan, keep: bool) -> Record {
+/// One trajectory from its initial state through the plan at the step τ (module documentation, # Outputs and windows):
+/// `read`, its steps are doubled and their errors accumulated with it (adapt.rs `Drift`, the pilot's); with the loss
+/// energy's `windows` per output, it is judged where `margin` -- its escape energy less its loss energy -- lies within
+/// them: at an output where held, and from its loss on at the state it was lost in (module documentation, # The step). A
+/// trajectory the scheme cannot advance (adapt.rs) fails from the first output it does not reach.
+#[allow(clippy::too_many_arguments)]
+fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: bool, windows: &[f64], margin: &dyn Fn(&Trajectory) -> f64, plan: &Plan, keep: bool) -> Record {
     let outputs = plan.times.len();
     let interval = plan.times[1] - plan.times[0];
     let widest = plan.halves.iter().flatten().fold(0., |a: f64, &b| a.max(b));
     let mut t = Trajectory::new(model, start.state, start.r, start.kappa, SEED, index);
+    let mut drift = read.then_some(Drift::ZERO);
     // Per output and lab axis: the window's time held, ∫κ dt and ∫κ² dt.
-    let mut windows = vec![[[0.; 3]; 3]; outputs];
-    let mut rows: Vec<Option<[f64; STATES]>> = vec![None; outputs];
+    let mut moments = vec![[[0.; 3]; 3]; outputs];
+    let mut out = vec![Output { fate: Fate::Lost, near: None, energy: None }; outputs];
     let mut listed = vec![None; plan.listed.len()];
     let mut samples: Vec<Option<State>> = vec![None; if keep { outputs } else { 0 }];
     let mut steps = 0;
-    let mut record = |k: usize, t: &Trajectory, rows: &mut Vec<Option<[f64; STATES]>>| {
-        rows[k] = Some(model.readout(t.cluster, &t.point(), &t.psi));
+    // The first output the trajectory does not reach held, and whether the scheme could not advance it.
+    let (mut reached, mut failed) = (outputs, false);
+    let mut record = |k: usize, t: &Trajectory, drift: &Option<Drift>, out: &mut Vec<Output>| {
+        // The atom at the output's instant; from the first output on its κ and κ² are its window's means (below).
+        let held = Held { rows: model.readout(t.cluster, &t.point(), &t.psi), kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), drift: drift.clone() };
+        out[k] = Output { fate: Fate::Held(held), near: windows.get(k).map(|w| margin(t).abs() <= *w), energy: drift.as_ref().map(|d| d.energy) };
         if let Ok(j) = plan.listed.binary_search(&k) {
             listed[j] = Some((t.r, t.kappa));
         }
         if keep {
             let sample = Sample { cluster: t.cluster, at: t.point(), psi: t.psi.clone() };
-            samples[k] = Some(State { sample, tau: t.tau.min(interval), grid: t.grid, index });
+            samples[k] = Some(State { sample, tau, index });
         }
     };
-    record(0, &t, &mut rows);
-    let start_kappa = t.kappa;
+    record(0, &t, &drift, &mut out);
     {
         let mut each = |s: &Segment| {
             steps += 1;
@@ -576,7 +720,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tolerances: &Tolerances
                     let (lo, hi) = (s0.max(plan.times[k] - h), s1.min(plan.times[k] + h));
                     if hi > lo {
                         let (m1, m2) = s.moments(lo, hi);
-                        let w = &mut windows[k][a];
+                        let w = &mut moments[k][a];
                         w[0] += hi - lo;
                         w[1] += m1[a];
                         w[2] += m2[a];
@@ -585,32 +729,35 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tolerances: &Tolerances
             }
         };
         for k in 1..outputs {
-            adapt::advance(model, tolerances, &mut t, plan.times[k], &mut each);
-            if t.lost.is_some() {
+            failed = adapt::advance(model, tau, &mut t, drift.as_mut(), plan.times[k], &mut each).is_err();
+            if failed || t.lost.is_some() {
+                reached = k;
                 break;
             }
-            record(k, &t, &mut rows);
+            record(k, &t, &drift, &mut out);
         }
-        if t.lost.is_none() {
-            adapt::advance(model, tolerances, &mut t, plan.end, &mut each);
+        if reached == outputs {
+            // Through the last output's window; a failure there leaves every output read.
+            failed = adapt::advance(model, tau, &mut t, drift.as_mut(), plan.end, &mut each).is_err();
         }
     }
-    let held = rows
-        .into_iter()
-        .enumerate()
-        .map(|(k, r)| {
-            r.map(|rows| {
-                if k == 0 {
-                    Held { rows, kappa: start_kappa, kappa2: start_kappa.map(|x| x * x) }
-                } else {
-                    let w = &windows[k];
-                    Held { rows, kappa: std::array::from_fn(|a| w[a][1] / w[a][0]), kappa2: std::array::from_fn(|a| w[a][2] / w[a][0]) }
-                }
-            })
-        })
-        .collect();
-    let counts = Counts { steps, work: t.work, assemblies: t.assemblies, held: t.lost.unwrap_or(plan.end).min(plan.end), capped: t.capped };
-    Record { held, listed, samples, counts }
+    // From the output it does not reach: failed, or lost -- judged at the state it was lost in, its loss energy's error as
+    // it stood there.
+    let gone = if failed {
+        Output { fate: Fate::Failed, near: None, energy: None }
+    } else {
+        Output { fate: Fate::Lost, near: windows.get(reached).map(|w| margin(&t).abs() <= *w), energy: drift.as_ref().map(|d| d.energy) }
+    };
+    out[reached.min(outputs)..].fill(gone);
+    for (k, o) in out.iter_mut().enumerate().skip(1) {
+        if let Fate::Held(h) = &mut o.fate {
+            let w = &moments[k];
+            h.kappa = std::array::from_fn(|a| w[a][1] / w[a][0]);
+            h.kappa2 = std::array::from_fn(|a| w[a][2] / w[a][0]);
+        }
+    }
+    let counts = Counts { steps, work: t.work, assemblies: t.assemblies, held: t.lost.unwrap_or(t.time).min(plan.end), failed: u64::from(failed), since: failed.then_some(t.time) };
+    Record { outputs: out, listed, samples, counts }
 }
 
 /// What a group of trajectories leaves: its sums (estimate.rs `Group`), its held atoms' (r, κ) at the listed outputs, its
@@ -647,7 +794,7 @@ impl Shape {
             counts: Counts::default(),
         };
         for r in records {
-            part.sums.add(&r.held);
+            part.sums.add(&r.outputs);
             for (l, x) in part.listed.iter_mut().zip(r.listed) {
                 l.extend(x);
             }
@@ -660,17 +807,23 @@ impl Shape {
     }
 }
 
-/// Trajectory `index` of a run: its initial state from the ensemble (ensemble.rs `Ensemble::draw`), run through the plan.
-fn trajectory<D: Dynamics>(model: &D, ensemble: &Ensemble, tolerances: &Tolerances, plan: &Plan, keep: bool, index: u64) -> Record {
-    run(model, ensemble.draw(SEED, index), index, tolerances, plan, keep)
+/// Trajectory `index` of a run: its initial state from the ensemble (ensemble.rs `Ensemble::draw`), run through the plan
+/// (`run`), its margin the running potential's far value less its loss energy (model.rs `Model::lost`).
+#[allow(clippy::too_many_arguments)]
+fn trajectory(model: &Run, ensemble: &Ensemble, tau: f64, read: bool, windows: &[f64], plan: &Plan, keep: bool, index: u64) -> Record {
+    let margin = |t: &Trajectory| {
+        let far = model.model.asymptote(&model.model.ground_populations(t.cluster, &t.psi), &model.model.running());
+        far - model.energy(t.cluster, &t.point(), &t.psi)
+    };
+    run(model, ensemble.draw(SEED, index), index, tau, read, windows, &margin, plan, keep)
 }
 
 /// Groups `first..end`, their trajectories run on every core in their numbers' order -- each thread takes the next number,
 /// so the groups finish nearly in order and the first after about one trajectory's time --, each group's records added in
 /// its members' order on this thread (`Shape::fold`, nothing depends on the threads), the groups returned in their order;
-/// whenever `CHECKPOINT` has passed and a group has finished, `progress` takes the groups finished so far in order (module
-/// documentation, # Checkpoints; no group, no result to give).
-fn run_groups(first: u64, end: u64, shape: Shape, record: &(dyn Fn(u64) -> Record + Sync), progress: &mut dyn FnMut(&[&Part])) -> Vec<Part> {
+/// whenever the solve's next message is due (`Messages::due`), `progress` takes the groups finished so far in order and
+/// sends their result, or with no group finished the last result goes out again (module documentation, # Checkpoints).
+fn run_groups(first: u64, end: u64, shape: Shape, record: &(dyn Fn(u64) -> Record + Sync), messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Part> {
     let (start, stop) = (first * GROUP, end * GROUP);
     let count = (end - first) as usize;
     let next = AtomicU64::new(start);
@@ -689,9 +842,9 @@ fn run_groups(first: u64, end: u64, shape: Shape, record: &(dyn Fn(u64) -> Recor
             });
         }
         drop(sender);
-        let (mut done, mut last) = (0, Instant::now());
+        let mut done = 0;
         while done < count {
-            match receiver.recv_timeout(CHECKPOINT.saturating_sub(last.elapsed())) {
+            match receiver.recv_timeout(messages.due()) {
                 Ok((i, r)) => {
                     let (g, m) = (((i - start) / GROUP) as usize, ((i - start) % GROUP) as usize);
                     waiting[g][m] = Some(r);
@@ -702,10 +855,11 @@ fn run_groups(first: u64, end: u64, shape: Shape, record: &(dyn Fn(u64) -> Recor
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     let prefix: Vec<&Part> = parts.iter().map_while(Option::as_ref).collect();
-                    if !prefix.is_empty() {
-                        progress(&prefix);
+                    if prefix.is_empty() {
+                        messages.again();
+                    } else {
+                        progress(&prefix, messages);
                     }
-                    last = Instant::now();
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
@@ -715,19 +869,24 @@ fn run_groups(first: u64, end: u64, shape: Shape, record: &(dyn Fn(u64) -> Recor
 }
 
 /// What the pilot fixes for the run (module documentation, # Stopping), per output: the model's error on the held atoms
-/// (populations absolute, T relative), the held share, and T's scale per axis (µK) where T is held to its target; the
-/// step's error booked on what is shown and on T (`step_bound`); and T(0)'s relative error, its quadrature's last two
-/// levels' difference (ensemble.rs `Ensemble::kinetic`).
+/// (populations absolute, T relative; T's unbounded where no pilot atom reads it) and what the model's falsifier read
+/// clearly beyond it on the rows as shown, the held share, and T's scale per axis (µK) where T is held to its target; the
+/// step's error read on the rows as shown and on T (relative; unbounded where not read), and the loss energy's window
+/// (rad/µs; module documentation, # The step; none before the pilot is read); and T(0)'s relative error, its
+/// quadrature's last two levels' difference (ensemble.rs `Ensemble::kinetic`).
 #[derive(Clone)]
 struct Fixed {
     model: Vec<[f64; 2]>,
+    cleared: Vec<f64>,
     held: Vec<f64>,
     temperature: Vec<Option<V3>>,
-    step: [f64; 2],
+    step: Vec<[f64; 2]>,
+    windows: Vec<f64>,
     start: f64,
 }
 
-/// The step's error booked on what is shown and on T (relative): the bound its tolerance gives, s·ε (SPEC §2.2, §4).
+/// The step's share of the targets on what is shown and on T (relative), s·ε (SPEC §2.2, §4): what its error may take,
+/// and what the statistics' room leaves it.
 fn step_bound() -> [f64; 2] {
     [STEP_SHARE * POPULATION_TARGET, STEP_SHARE * TEMPERATURE_TARGET]
 }
@@ -741,10 +900,10 @@ struct Targets {
 }
 impl Targets {
     fn new(fixed: &Fixed) -> Targets {
-        let [bp, bt] = fixed.step;
+        let [bp, bt] = step_bound();
         let room = |eps: f64, a: f64, b: f64| (eps * eps - a * a - b * b).max(0.).sqrt();
         Targets {
-            population: fixed.model.iter().zip(&fixed.held).map(|(a, h)| room(POPULATION_TARGET, a[0] * h, bp)).collect(),
+            population: fixed.model.iter().zip(&fixed.held).zip(&fixed.cleared).map(|((a, h), c)| room(POPULATION_TARGET, a[0] * h + c, bp)).collect(),
             temperature: fixed
                 .temperature
                 .iter()
@@ -792,52 +951,76 @@ impl Targets {
 /// Each output's accounts of what is shown and of T (ledger.rs `Account`) by the run's estimates, the model's errors on the
 /// held atoms per output and the step's (`Fixed`), T's where read: the held share 1 − L weighs the model's error on the rows as shown, and
 /// T's whole account (module documentation, # Stopping); t = 0 is the request's state and the ensemble's moments, T's
-/// by quadrature (`Fixed::start`).
+/// by quadrature (`Fixed::start`). The model's error on what is shown is at most 1, a probability's. The step's error on
+/// what is shown is the larger of the rows' and the loss's -- the share of the judged trajectories within the loss
+/// energy's window of the escape (module documentation, # The step), the step's share where none is judged yet (a
+/// pilot's result). T has an account where its statistics, its model error and its step error are all read.
 fn accounts(estimates: &[Estimate], fixed: &Fixed) -> (Vec<Account>, Vec<Option<Account>>) {
-    let [bp, bt] = fixed.step;
     estimates
         .iter()
         .zip(&fixed.model)
+        .zip(&fixed.step)
         .enumerate()
-        .map(|(k, (e, a))| {
+        .map(|(k, ((e, a), &[bp, bt]))| {
             if k == 0 {
                 return (Account::default(), Some(Account { step: fixed.start, ..Account::default() }));
             }
             let h = 1. - e.loss;
-            let population = Account { model: a[0] * h, step: bp, statistics: e.shown_statistics() };
+            let escape = if e.judged > 0. { e.near / e.judged } else { step_bound()[0] };
+            let population = Account { model: (a[0] * h + fixed.cleared[k]).min(1.), step: bp.max(escape), statistics: e.shown_statistics() };
             let temperature = e.motion.and_then(|m| {
                 let relative = (0..3).map(|x| m.temperature_errors[x].interval() / m.temperature[x]).fold(0., f64::max);
-                relative.is_finite().then_some(Account { model: h * a[1], step: h * bt, statistics: h * relative })
+                (relative.is_finite() && a[1].is_finite() && bt.is_finite()).then_some(Account { model: h * a[1], step: h * bt, statistics: h * relative })
             });
             (population, temperature)
         })
         .unzip()
 }
 
-/// A falsifier's refutation (SPEC §5.2, §5.3; decide.rs): a coarse and a finer level on the same trajectories, read on
-/// every row as shown, the loss and T where held to its target (relative to its scale) against what is booked for the
-/// coarse level there (`share`: per output, on what is shown and on T), the coarse level's own error from the difference at
-/// the finer level's parameter `ratio` and the level's `order` (`Read::level`), Šidák over all the looks. Beyond somewhere:
-/// the factor on the coarse level's parameter at which the largest measured error meets its share; else none.
-fn refuted(coarse: &[&Part], fine: &[Part], scales: &Scales, targets: &Targets, ratio: f64, order: f64, share: &dyn Fn(usize) -> [f64; 2]) -> Option<f64> {
+/// A falsifier's looks (SPEC §5.2, §5.3; decide.rs): a coarse and a finer level on the same trajectories, read on every
+/// row as shown, the loss and T where held to its target (relative to its scale) -- per look its output, whether it is
+/// T's, and the coarse level's own error from the difference at the finer level's parameter `ratio` and the level's
+/// `order` (`Read::level`).
+fn looks(coarse: &[&Part], fine: &[Part], scales: &Scales, targets: &Targets, ratio: f64, order: f64) -> Vec<(usize, bool, Read)> {
     let reads = paired(coarse, &fine.iter().collect::<Vec<_>>(), scales);
-    let mut looks: Vec<(Read, f64)> = vec![];
+    let mut looks = vec![];
     for (k, p) in reads.iter().enumerate().skip(1) {
-        let [sp, st] = share(k);
-        looks.extend(p.shown.iter().chain([&p.loss]).map(|r| (r.level(ratio, order), sp)));
+        looks.extend(p.shown.iter().chain([&p.loss]).map(|r| (k, false, r.level(ratio, order))));
         if let (Some((scale, _)), Some(t)) = (targets.temperature[k], p.temperature) {
             for a in 0..3 {
                 let r = t[a].level(ratio, order);
-                looks.push((Read { value: r.value / scale[a], spread: Spread { error: r.spread.error / scale[a], groups: r.spread.groups } }, st));
+                looks.push((k, true, Read { value: r.value / scale[a], spread: Spread { error: r.spread.error / scale[a], groups: r.spread.groups } }));
             }
         }
     }
+    looks
+}
+
+/// A falsifier's refutation: its looks against what the coarse level may take there (`share`: per output, on what is
+/// shown and on T), Šidák over all the looks. Beyond somewhere: the factor on the coarse level's parameter at which the
+/// largest measured error meets its share; else none.
+fn refuted(coarse: &[&Part], fine: &[Part], scales: &Scales, targets: &Targets, ratio: f64, order: f64, share: &dyn Fn(usize) -> [f64; 2]) -> Option<f64> {
+    let looks = looks(coarse, fine, scales, targets, ratio, order);
     let m = looks.len() as f64;
     looks
         .iter()
+        .map(|(k, t, r)| (r, share(*k)[usize::from(*t)]))
         .filter(|(r, share)| r.outcome(*share, m) == Outcome::Beyond)
-        .map(|(r, share)| r.refined(*share, order))
+        .map(|(r, share)| r.refined(share, order))
         .fold(None, |f: Option<f64>, x| Some(f.map_or(x, |f| f.min(x))))
+}
+
+/// What a falsifier's looks read clearly of the coarse level's error, the finer level taken as the exact one: per output,
+/// on what is shown and on T, the largest |d| − t·SE among all the looks (Šidák), none below zero.
+fn cleared(coarse: &[&Part], fine: &[Part], scales: &Scales, targets: &Targets) -> Vec<[f64; 2]> {
+    let looks = looks(coarse, fine, scales, targets, 0., 1.);
+    let m = looks.len() as f64;
+    let mut clear = vec![[0f64; 2]; targets.held.len()];
+    for (k, t, r) in &looks {
+        let c = &mut clear[*k][usize::from(*t)];
+        *c = c.max(r.value.abs() - r.spread.interval_over(m));
+    }
+    clear
 }
 
 /// What the pilot measured of the model's units (SPEC §5.2): each folded unit's errors at the pilot's states, and each
@@ -849,7 +1032,9 @@ struct Measured<'a> {
 }
 impl Measured<'_> {
     /// Per unit and output the held atoms' mean error (on their populations, absolute; on T, relative) over the pilot's
-    /// groups but `left`.
+    /// groups but `left`. Where they hold no atom nothing is measured: the error is its bound there, 1 on a population and
+    /// none on T (the run's atoms at such an output are at most the share the pilot left unseen, and T is not held to its
+    /// target without a pilot's T).
     fn means(&self, outputs: usize, left: Option<usize>) -> Vec<Vec<[f64; 2]>> {
         self.errors
             .iter()
@@ -862,14 +1047,14 @@ impl Measured<'_> {
                         count[k] += 1.;
                     }
                 }
-                sum.iter().zip(&count).map(|(s, &c)| if c > 0. { [s[0] / c, s[1] / c] } else { [0.; 2] }).collect()
+                sum.iter().zip(&count).map(|(s, &c)| if c > 0. { [s[0] / c, s[1] / c] } else { [1., f64::INFINITY] }).collect()
             })
             .collect()
     }
 }
 
 /// The model's error per output (populations, T; none at t = 0, the request's state) from the units' mean errors, every
-/// folded unit's but `without`'s added (SPEC §4), and the unsampled share.
+/// folded unit's but `without`'s added (SPEC §4), and the unsampled share; a population's at most 1.
 fn model_error(means: &[Vec<[f64; 2]>], without: Option<usize>, unsampled: f64) -> Vec<[f64; 2]> {
     let outputs = means.first().map_or(0, Vec::len);
     (0..outputs)
@@ -884,19 +1069,19 @@ fn model_error(means: &[Vec<[f64; 2]>], without: Option<usize>, unsampled: f64) 
                     a[1] += m[k][1];
                 }
             }
-            a
+            [a[0].min(1.), a[1]]
         })
         .collect()
 }
 
 /// The counted work (decide.rs `Work`) a trajectory spends per µs at a pilot state under a model, the state on the model's
-/// `cluster`: one doubling's -- the integrator's (adapt.rs `advance_work`, through the model's generator at the state's
-/// point, its velocity, τ and grid) and its assemblies' (`assembly`, the model's count of one) -- over its τ.
+/// `cluster`: one step's -- the integrator's (adapt.rs `advance_work`, through the model's generator at the state's
+/// point, its velocity and τ) and its assemblies' (`assembly`, the model's count of one) -- over its τ.
 fn rate(run: &Run, assembly: f64, cluster: usize, state: &State) -> f64 {
     let at = state.sample.at;
     let generator = run.generator(cluster, &at);
     let velocity = at.kappa.map(|k| run.hbar_over_mass() * k);
-    let (work, assemblies) = adapt::advance_work(&generator, &run.cluster(cluster).waves, velocity, state.tau, state.grid);
+    let (work, assemblies) = adapt::advance_work(&generator, &run.cluster(cluster).waves, velocity, state.tau);
     (work + assemblies as f64 * assembly) / state.tau
 }
 
@@ -963,6 +1148,7 @@ fn candidates(
     let mut out: Vec<Candidate> = (0..units.len())
         .into_par_iter()
         .filter_map(|u| {
+            // A unit the model refuses to keep (its fold must exist, `Model::new`) is no candidate: its fold's error stands.
             let with = Model::new(request, light, &[kept, std::slice::from_ref(&units[u])].concat()).ok()?;
             let finer = Run::new(&with, reference);
             let assembly = finer.assembly_work();
@@ -1005,11 +1191,12 @@ fn histograms(listed: &[Vec<(V3, V3)>], outputs: &[usize], value: &dyn Fn(&(V3, 
     Distributions { grid, samples: outputs.to_vec(), probabilities }
 }
 
-/// What the result's assembly takes beside the estimates: the plan, the scales, the request's initial diagonal, the exact
-/// moments at t = 0 ((ħ/m)⟨κ_a²⟩ per lab axis, rad/µs), the pilot's fixed errors, the ledger's items and note, and the
-/// method's description.
+/// What the result's assembly takes beside the estimates: the plan, the run's step (µs), the scales, the request's initial
+/// diagonal, the exact moments at t = 0 ((ħ/m)⟨κ_a²⟩ per lab axis, rad/µs), the pilot's fixed errors, the ledger's items
+/// and note, and the method's description.
 struct Context {
     plan: Plan,
+    tau: f64,
     scales: Scales,
     initial: [f64; STATES],
     momentum: V3,
@@ -1025,7 +1212,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     let (times, outputs) = (&c.plan.times, c.plan.times.len());
     let hm = c.scales.hbar_over_mass;
     let w = c.scales.frequencies;
-    let classical = |t: &V3| (0..3).all(|a| KT_PER_UK * t[a] >= CLASSICAL * w[a]);
+    let classical = |t: &V3| classical(t, &w);
     let mut ledger = c.ledger.clone();
     let (population, temperature) = accounts(estimates, &c.fixed);
     ledger.close(times, &population, &temperature, &c.fixed.temperature.iter().map(Option::is_some).collect::<Vec<_>>());
@@ -1046,8 +1233,8 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
         position: std::array::from_fn(|a| histograms(listed, &c.plan.listed, &|x| x.0[a])),
         classical: Vec::with_capacity(outputs),
         trajectories,
-        time_step_us: if counts.steps > 0 { counts.held / counts.steps as f64 } else { c.plan.end },
-        method: format!("{}；{trajectories} 条轨迹（每组 {GROUP} 条拉丁超立方），逐轨迹自适应步长。", c.method),
+        time_step_us: c.tau,
+        method: format!("{}；{trajectories} 条轨迹（每组 {GROUP} 条拉丁超立方），步长 {} μs。", c.method, c.tau),
         reason: None,
         approximations: ledger,
     };
@@ -1104,8 +1291,15 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     if !unread.is_empty() {
         s.approximations.flag(format!("{}：被俘获的原子不足两个组，温度沿用此前读到的值，误差未知", span(&unread, times)));
     }
-    if let Some(t) = counts.capped {
-        s.approximations.flag(format!("{} 起有轨迹的步数达到上限 {MOST_STEPS}：其后的步长未受检", when(t)));
+    // T shown with its statistics where the pilot left its model error or its step error unread.
+    let unbooked: Vec<usize> = (1..outputs)
+        .filter(|&k| estimates[k].motion.as_ref().is_some_and(|m| m.temperature_errors.iter().all(Spread::read)) && !(c.fixed.model[k][1].is_finite() && c.fixed.step[k][1].is_finite()))
+        .collect();
+    if !unbooked.is_empty() {
+        s.approximations.flag(format!("{}：试探在这些时刻被俘获的原子不足，模型与步长对温度的误差读不出", span(&unbooked, times)));
+    }
+    if let Some(t) = counts.since {
+        s.approximations.flag(format!("{} 条轨迹的状态在数值上无法再推进（最早在 {}）：此后不计入结果", counts.failed, when(t)));
     }
     // The worst output beyond the population target: what keeps it there.
     if let Some((k, a)) = population.iter().enumerate().max_by(|x, y| x.1.total().total_cmp(&y.1.total())) {
@@ -1138,6 +1332,38 @@ mod tests {
         assert_eq!(pilot_size(), 88);
         let room = (1. - STEP_SHARE * STEP_SHARE).sqrt() * POPULATION_TARGET;
         assert!(unseen(88.) <= room && unseen(80.) > room);
+    }
+
+    /// The ladder's top rung: the output interval over the least power of two below the reference flow's resonance
+    /// ω τ = π -- of a 10 µs interval, 5 µs at a tweezer's 74.65 kHz (π/ω = 6.7 µs) and 0.3125 µs at a lattice's 910.7 kHz
+    /// (0.55 µs); the interval itself in a slow trap.
+    #[test]
+    fn the_top_rung_lies_below_the_resonance() {
+        let khz = |f: f64| std::f64::consts::TAU * f * 1e-3;
+        assert_eq!(top_rung(10., khz(74.65)), 5.);
+        assert_eq!(top_rung(10., khz(910.7)), 0.3125);
+        assert_eq!(top_rung(10., khz(1.)), 10.);
+    }
+
+    /// A rung's outcomes on T's read at one output (unlimited groups: one look's interval is z of the error): within
+    /// where the error and its interval fit the share; an error four times the share, clear among all the looks, takes
+    /// the step to its half (second order); a small error under a wide interval is unreadable; T that is not held to
+    /// its target is not judged. A factor takes the step down by whole halvings, one at least.
+    #[test]
+    fn a_rung_has_three_outcomes() {
+        let read = |value: f64, error: f64| Read { value, spread: Spread { error, groups: f64::INFINITY } };
+        let quiet = read(0., 0.);
+        let at = |t: Read| Stepped { temperature: Some([t, quiet, quiet]), shown: [quiet; STATES], energy: None };
+        let held = [None, Some([30.; 3])];
+        let st = step_bound()[1];
+        assert!(matches!(rung(&[at(quiet), at(read(0.5 * st, 0.1 * st))], &held), Rung::Within));
+        match rung(&[at(quiet), at(read(4. * st, 0.01 * st))], &held) {
+            Rung::Refine(factor) => assert!((factor - 0.5).abs() < 1e-12, "{factor}"),
+            _ => panic!("an error four times the share is beyond it"),
+        }
+        assert!(matches!(rung(&[at(quiet), at(read(0.5 * st, st))], &held), Rung::Unreadable));
+        assert!(matches!(rung(&[at(quiet), at(read(9. * st, 0.))], &[None, None]), Rung::Within));
+        assert_eq!((refined(1., 0.5), refined(1., 0.3), refined(1., 1.)), (0.5, 0.25, 0.5));
     }
 
     /// The plan: the windows half a period (at most half an interval) cut at t = 0, the listed outputs evenly spread with
@@ -1174,10 +1400,14 @@ mod tests {
         let record = |i: u64| {
             let mut rows = [0.; STATES];
             rows[(i % STATES as u64) as usize] = 1.;
-            let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3] };
-            Record { held: vec![Some(held.clone()), (i % 3 > 0).then_some(held)], listed: vec![Some(([i as f64; 3], [0.; 3]))], samples: vec![], counts: Counts { steps: i, ..Counts::default() } }
+            let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], drift: None };
+            let at = |fate: Fate| Output { fate, near: None, energy: None };
+            let outputs = vec![at(Fate::Held(held.clone())), at(if i % 3 > 0 { Fate::Held(held) } else { Fate::Lost })];
+            Record { outputs, listed: vec![Some(([i as f64; 3], [0.; 3]))], samples: vec![], counts: Counts { steps: i, ..Counts::default() } }
         };
-        let parts = run_groups(5, 42, shape, &record, &mut |_| {});
+        let mut silent = |_: &Solution, _: Option<f64>| {};
+        let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0 };
+        let parts = run_groups(5, 42, shape, &record, &mut messages, &mut |_, _| {});
         assert_eq!(parts.len(), 37);
         for (g, part) in parts.iter().enumerate() {
             let one = shape.fold((0..GROUP).map(|m| record((5 + g as u64) * GROUP + m)));
@@ -1219,8 +1449,9 @@ mod tests {
 
     /// A falsifier refutes only a clear excess (`refuted`): two levels on the same 16 groups of 8 atoms, the finer one moving
     /// one state's row by δ at one output for every atom alike (the pair's difference has no spread). At the step's level
-    /// (a quarter of the tolerance, order 1) the coarse level's error is 4δ/3: δ = 0.3 against a share of 0.05 is refuted
-    /// with the factor 0.05/0.4 on the tolerance; δ = 0.01 is within.
+    /// (half the step, order 2) the coarse level's error is 4δ/3: δ = 0.3 against a share of 0.05 is refuted with the
+    /// factor √(0.05/0.4) on the step; δ = 0.01 is within. What the pairs read clearly (`cleared`) is δ itself at that
+    /// output.
     #[test]
     fn a_falsifier_refutes_only_a_clear_excess() {
         let outputs = 3;
@@ -1230,12 +1461,12 @@ mod tests {
                     let mut sums = Group::new(outputs);
                     for m in 0..8 {
                         let x = ((g * 8 + m) as f64 * 0.37).fract();
-                        let held: Vec<Option<Held>> = (0..outputs)
+                        let held: Vec<Output> = (0..outputs)
                             .map(|k| {
                                 let mut rows = [0.; STATES];
                                 let d = if k == 2 { shift } else { 0. };
                                 (rows[0], rows[1]) = (0.5 + 0.1 * x + d, 0.5 - 0.1 * x - d);
-                                Some(Held { rows, kappa: [x; 3], kappa2: [1. + x * x; 3] })
+                                Output { fate: Fate::Held(Held { rows, kappa: [x; 3], kappa2: [1. + x * x; 3], drift: None }), near: None, energy: None }
                             })
                             .collect();
                         sums.add(&held);
@@ -1248,8 +1479,11 @@ mod tests {
         let coarse: Vec<&Part> = coarse.iter().collect();
         let targets = Targets { population: vec![1.; outputs], temperature: vec![None; outputs], held: vec![1.; outputs] };
         let scales = Scales { hbar_over_mass: KT_PER_UK, frequencies: [1.; 3] };
-        let factor = refuted(&coarse, &level(-0.3), &scales, &targets, 0.25, 1., &|_| [0.05, 0.1]).unwrap();
-        assert!((factor - 0.05 / 0.4).abs() < 1e-12, "{factor}");
-        assert!(refuted(&coarse, &level(-0.01), &scales, &targets, 0.25, 1., &|_| [0.05, 0.1]).is_none());
+        let factor = refuted(&coarse, &level(-0.3), &scales, &targets, 0.5, 2., &|_| [0.05, 0.1]).unwrap();
+        assert!((factor - (0.05_f64 / 0.4).sqrt()).abs() < 1e-12, "{factor}");
+        assert!(refuted(&coarse, &level(-0.01), &scales, &targets, 0.5, 2., &|_| [0.05, 0.1]).is_none());
+        // What the pairs read clearly, the finer level exact: the whole shift where it is (no spread), nothing elsewhere.
+        let clear = cleared(&coarse, &level(-0.3), &scales, &targets);
+        assert!((clear[2][0] - 0.3).abs() < 1e-12 && clear[1] == [0.; 2] && clear[2][1] == 0., "{clear:?}");
     }
 }

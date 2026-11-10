@@ -5,7 +5,7 @@
 //!
 //! Common random numbers: the j-th jump of a trajectory draws from its own stream (`Stream::jump`), whatever the steps
 //! before it took and however many draws earlier jumps used (a rejection sampler draws as many as it needs), so two runs
-//! that differ only in a tolerance or in the model draw the same numbers at the same jump. Within a stream the draws
+//! that differ only in the step or in the model draw the same numbers at the same jump. Within a stream the draws
 //! are taken in a fixed order.
 
 /// Philox4x32's round multipliers and the Weyl key increments (the golden ratio's and √3 − 1's 32-bit fractions):

@@ -4,7 +4,7 @@
 //! An output's error against its target has three parts from independent sources, combined in quadrature (GUM):
 //! E² = A² + b² + S² (`Account`):
 //! - A, the model's: each unit's error measured along the trajectories (SPEC §5.2) and the unseen share's bound;
-//! - b, the step's: the bound its tolerance gives, s·ε (SPEC §2.2), standing unless a falsifier refutes it (SPEC §5.3);
+//! - b, the step's: the bound of its error read on the pilot (SPEC §2.2), standing unless a falsifier refutes it (SPEC §5.3);
 //! - S, the statistics': the interval at the confidence z (estimate.rs).
 //! The populations' are absolute against `POPULATION_TARGET`, every row as shown and the loss; T's relative against
 //! `TEMPERATURE_TARGET` at the outputs it is held to (solve.rs).
@@ -70,11 +70,13 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    /// An approximation with its estimated error, finite and not negative (the contract's); one below u·ε, which adds
-    /// nothing to the population target at the format's resolution (ε(1 + u) rounds to ε), is no item.
+    /// An approximation with its estimated error, not negative; one below u·ε, which adds nothing to the population
+    /// target at the format's resolution (ε(1 + u) rounds to ε), is no item. An estimate that is no finite number (the
+    /// contract's items are) is flagged as unread instead.
     pub fn item(&mut self, label: &str, estimate: f64, action: &str) {
-        debug_assert!(estimate.is_finite() && estimate >= 0., "{label}: {estimate}");
-        if estimate >= UNIT_ROUNDOFF * POPULATION_TARGET {
+        if !estimate.is_finite() {
+            self.flag(format!("{label}：误差读不出"));
+        } else if estimate >= UNIT_ROUNDOFF * POPULATION_TARGET {
             self.items.push(Item { label: label.into(), estimate, action: action.into() });
         }
     }
@@ -101,8 +103,9 @@ impl Ledger {
         for (accounts, target, flaggable, what) in
             [(&populations, POPULATION_TARGET, &everywhere[..], "布居与损失"), (&temperatures, TEMPERATURE_TARGET, held, "温度")]
         {
+            // Not within the target: beyond it, or no number.
             let beyond: Vec<usize> =
-                (0..times.len()).filter(|&k| flaggable[k] && accounts[k].is_some_and(|a| a.total() > target)).collect();
+                (0..times.len()).filter(|&k| flaggable[k] && accounts[k].is_some_and(|a| !(a.total() <= target))).collect();
             if let Some(&worst) = beyond.iter().max_by(|&&i, &&j| accounts[i].unwrap().total().total_cmp(&accounts[j].unwrap().total())) {
                 let a = accounts[worst].unwrap();
                 self.flag(format!(
