@@ -153,7 +153,10 @@ function mandelQ(gamma,omega,delta){
  * ⟨z⟩ is z₀(1 + 2(3/4 + 1)k_BT/U₀) = z₀(1 + 3.5k_BT/U₀); the thermal-equilibrium response F·Var z/k_BT gives
  * z₀(1 + 5k_BT/U₀) -- their difference is the uncertainty. Observed as the mean of the position distributions' means
  * over their samples after t = 0 (the oscillation, aliased by the sampling, averages out over the run's ~20 samples:
- * its remainder bounded by the oscillation's amplitude over √(samples)). Populations: ρ_ee = ⟨R⟩/Γ in |3′,3′⟩. */
+ * its remainder bounded by the oscillation's amplitude over √(samples)). Populations: ρ_ee = ⟨R⟩/Γ in |3′,3′⟩.
+ * The trap's force differs between the two states (the line moves by κV): its fluctuation, the force ħ∇δ P_e, adds
+ * the diffusion 2D_aa = ħ²(∂_aδ)²·ee on every axis (`correlations`, R10; ee = R/(δ² + Γ²/4) at low saturation), and
+ * with ⟨(∂_aδ)²⟩ = κ²mω_a²k_BT_a/ħ² the heating k_B dT_a/dt = κ²ω_a²·ee·k_BT_a/2: 10⁻⁵ of T here, at δ = −100Γ. */
 async function r2(){
   const id='R2_RECOIL',c=await cycle(id,['probe']),{line,gamma,U0,kappa}=c,p=c.beams.probe,m=line.model.motion,mass=m.massKg,T=m.temperatureUK;
   const prep=preparedTrap(line,'ground-2-2'),omegas=prep.omegas,[radial,,axial]=omegas;
@@ -161,7 +164,8 @@ async function r2(){
   const R=delta=>rate(gamma,p.omega,delta),h=1e-3*Math.abs(p.delta),R2=(R(p.delta+h)-2*R(p.delta)+R(p.delta-h))/(h*h);
   const meanR=Ts=>{const kT=Ts.map(t=>KT_PER_UK*t),V=kT.reduce((a,b)=>a+b,0)/2,varV=kT.reduce((a,b)=>a+b*b/2,0);return R(p.delta+kappa*V)+R2*kappa*kappa*varV/2;};
   const rates=[(1-XI_SIGMA)/2,(1-XI_SIGMA)/2,1+Q+XI_SIGMA],eps=[0.5,0.5,1];
-  const derivative=Ts=>{const r=meanR(Ts);return Ts.map((t,a)=>Erec*rates[a]*r/(1+1.5*eps[a]*KT_PER_UK*t/U0));};
+  const stateForce=Ts=>{const ee=correlations(gamma,p.omega,p.delta+kappa*KT_PER_UK*Ts.reduce((a,b)=>a+b,0)/2).ee;return omegas.map(w=>kappa*kappa*w*w*ee/2);};
+  const derivative=Ts=>{const r=meanR(Ts),st=stateForce(Ts);return Ts.map((t,a)=>(Erec*rates[a]*r+st[a]*t)/(1+1.5*eps[a]*KT_PER_UK*t/U0));};
   const times=grid(line),Ts=[T0.slice()],Rs=[meanR(T0)];let state=T0.slice();
   for(let i=1;i<times.length;i++){const n=20,dt=(times[i]-times[i-1])/n;for(let j=0;j<n;j++){const k1=derivative(state),k2=derivative(state.map((x,a)=>x+dt/2*k1[a])),k3=derivative(state.map((x,a)=>x+dt/2*k2[a])),k4=derivative(state.map((x,a)=>x+dt*k3[a]));state=state.map((x,a)=>x+dt/6*(k1[a]+2*k2[a]+2*k3[a]+k4[a]));}Ts.push(state.slice());Rs.push(meanR(state));}
   // The radiation-pressure offset, the spring softened by the probe's light shift and by the cloud's anharmonicity.
@@ -193,9 +197,10 @@ async function r2(){
   series.push({quantity:'population',state:'D2-3-3',indices:all(line),values:ree.map((x,i)=>i?x:0),u:ree.map((x,i)=>i?0.1*x:0),target:POPULATION});
   const s=2*p.omega**2/gamma**2;
   write(id,expectation(id,'R2','R2 二能级辐射压与反冲加热',line,{
-    derivation:'Two-level photon rate R = (Γ/2)s/(1+s+(2δ/Γ)²) at the local detuning (cloud average to 2nd order in κV); per photon Var p grows by (ħk)²(1+Q+ξ) along the beam and (ħk)²(1−ξ)/2 across (ξ = 2/5, σ dipole): k_B dT_z/dt = (7/5)E_rec R, k_B dT_x,y/dt = (3/10)E_rec R, with the separable quartic heat capacity; radiation pressure offset z₀ = ħkR/(mω²) (the spring softened by the probe’s light shift), time-averaged over the dephasing oscillation with the anharmonic orbit-centre shift.',
+    derivation:'Two-level photon rate R = (Γ/2)s/(1+s+(2δ/Γ)²) at the local detuning (cloud average to 2nd order in κV); per photon Var p grows by (ħk)²(1+Q+ξ) along the beam and (ħk)²(1−ξ)/2 across (ξ = 2/5, σ dipole): k_B dT_z/dt = (7/5)E_rec R, k_B dT_x,y/dt = (3/10)E_rec R, with the separable quartic heat capacity, and the trap force’s fluctuation between the two states, κ²ω_a²·ee·k_BT_a/2 (R10); radiation pressure offset z₀ = ħkR/(mω²) (the spring softened by the probe’s light shift), time-averaged over the dephasing oscillation with the anharmonic orbit-centre shift.',
     conditions:[{what:'|δ_b|/Γ',value:Math.abs(p.delta)/gamma,limit:'≫ 1'},{what:'s',value:s},{what:'κ·⟨V⟩/|δ_b| (cloud spread of the detuning)',value:kappa*KT_PER_UK*1.5*T/Math.abs(p.delta),limit:'≪ 1'},
       {what:'k_BT/U₀ at the end (quartic corrections)',value:KT_PER_UK*Math.max(...Ts.at(-1))/U0,limit:'≪ 1'},{what:'Mandel Q',value:Q},{what:'k_BT ≥ 4ħω_radial at t = 0',value:KT_PER_UK*T/radial,limit:'≥ 4'},
+      {what:'state-force diffusion: its relative heating over the run, stiffest axis',value:Math.max(...stateForce(T0))*times.at(-1),limit:'≪ 1'},
       {what:'one beam\'s Doppler damping time m/β (s), β = ħk²|dR/dδ|',value:1/(hbarOverMass(mass)*p.k**2*rbar*8*Math.abs(p.delta)/(gamma*gamma)/(1+s+(2*p.delta/gamma)**2))*1e-6,limit:'≫ the run'}],
     series,info:{depthUK:uKOfMHz(U0/RAD_PER_MHZ),trapKHz:omegas.map(kHz),kineticRatio:ratio,T0,s,deltaOverGamma:p.delta/gamma,photonRatePerUs:rbar,recoilUK:Erec,mandelQ:Q,z0Um:z0,meanZUm:zbar,runningTrapFactor:run.factor,kappa}}));
 }
@@ -218,7 +223,11 @@ async function r2(){
  * (fixed seed) from the prepared ensemble gives ⟨E_a⟩(t), and T_a = E_a/C_a with the separable quartic heat capacity
  * (R2). Uncertainty: the Monte Carlo's standard error; the O(s) saturation (2s/(1 + x²) of the cooled T and of the
  * heating); the quartic cross terms (k_BT_other/U₀)|ΔT_a| and the harmonic phase relation's anharmonic error
- * (k_BT_a/U₀)|ΔT_a|/2. Mandel's Q is in the diffusion. The run's T on x and y only grows (no cooling across). */
+ * (k_BT_a/U₀)|ΔT_a|/2. Mandel's Q is in the diffusion. The run's T on x and y only grows (no cooling across).
+ * The trap's force differs between the two states (the line moves by κV): its fluctuation, the force ħ∇δ P_e, adds
+ * the diffusion 2D_aa = ħ²(∂_aδ)²·ee on every axis (`correlations`, R10; at this low saturation ee = R/(δ² + Γ²/4), R
+ * the photon rate): with ħ²(∂_aδ)² = 2κ²mω_a²V_a the energy of axis a drifts by κ²ω_a²·ee·V_a more, V_a = E_a sin²φ_a,
+ * and its noise takes the same D; about 2 % of T_x,y by the end of the run, nothing on the soft axis z. */
 async function r3(){
   const id='R3_DOPPLER',c=await cycle(id,['cool-plus','cool-minus']),{line,gamma,U0,kappa}=c,b=c.beams['cool-plus'],m=line.model.motion,mass=m.massKg,T=m.temperatureUK;
   const prep=preparedTrap(line,'ground-2-2'),omegas=prep.omegas,axial=omegas[2],eps=[0.5,0.5,1];
@@ -231,8 +240,9 @@ async function r3(){
     let Az=0,Bz=0,Ax=0,Bx=0,Ay=0,By=0;
     for(const sx of nodes)for(const sy of nodes)for(const sz of nodes){
       const V=E[0]*sx+E[1]*sy+E[2]*sz,x=2*(b.delta+kappa*KT_PER_UK*V)/gamma,R=gamma*s/(1+x*x),beta=-8*wrec*s*x/((1+x*x)**2);
-      const Dz=Erec*(1+Q+XI_SIGMA)*R,Dx=Erec*(1-XI_SIGMA)/2*R;
-      Az+=-2*beta*E[2]*(1-sz)+Dz;Bz+=4*E[2]*(1-sz)*Dz;Ax+=Dx;Bx+=4*E[0]*(1-sx)*Dx;Ay+=Dx;By+=4*E[1]*(1-sy)*Dx;}
+      const state=kappa*kappa*4*R/(gamma*gamma*(1+x*x)),recoil=Erec*(1-XI_SIGMA)/2*R;
+      const Dz=Erec*(1+Q+XI_SIGMA)*R+state*omegas[2]**2*E[2]*sz,Dx=recoil+state*omegas[0]**2*E[0]*sx,Dy=recoil+state*omegas[1]**2*E[1]*sy;
+      Az+=-2*beta*E[2]*(1-sz)+Dz;Bz+=4*E[2]*(1-sz)*Dz;Ax+=Dx;Bx+=4*E[0]*(1-sx)*Dx;Ay+=Dy;By+=4*E[1]*(1-sy)*Dy;}
     const w=1/n**3;return [[Ax*w,Bx*w],[Ay*w,By*w],[Az*w,Bz*w]];};
   let seed=0x2545F491;const next=()=>{seed=(seed+0x6D2B79F5)>>>0;let t=seed;t=Math.imul(t^(t>>>15),t|1);t^=t+Math.imul(t^(t>>>7),t|61);return ((t^(t>>>14))>>>0)/4294967296;};
   const normal=()=>{const u=1-next(),v=next();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);};
@@ -259,10 +269,11 @@ async function r3(){
   series.push({quantity:'loss',indices:all(line),values:times.map(()=>0),u:times.map(()=>0),target:POPULATION});
   series.push({quantity:'population',state:'ground-2-2',indices:all(line),values:times.map((_,i)=>i?1-gamma*s/(1+meanX*meanX)/gamma/2:1),u:times.map((_,i)=>i?s:0),target:POPULATION});
   write(id,expectation(id,'R3','R3 一维多普勒冷却（σ⁺σ⁺ 驻波，非魔术光镊：按局域失谐平均）',line,{
-    derivation:'Low-saturation two-beam Doppler friction and diffusion at the local detuning δ_b + κV (the tweezer moves the cycling line with the potential energy; no magic wavelength exists in the model), averaged over each atom\'s fast trap motion: phase-averaged Itô equations for the per-axis energies, solved by Monte Carlo from the prepared ensemble; free-space limit k_BT = ħΓ(1+ξ)(1+x²)/(16|δ|/Γ).',
+    derivation:'Low-saturation two-beam Doppler friction and diffusion at the local detuning δ_b + κV (the tweezer moves the cycling line with the potential energy; no magic wavelength exists in the model), with the trap force\'s fluctuation between the two states (2D_aa = 2κ²mω_a²V_a·ee, R10), averaged over each atom\'s fast trap motion: phase-averaged Itô equations for the per-axis energies, solved by Monte Carlo from the prepared ensemble; free-space limit k_BT = ħΓ(1+ξ)(1+x²)/(16|δ|/Γ).',
     conditions:[{what:'s per beam',value:s,limit:'≤ 0.02'},{what:'x = 2δ/Γ at the bottom',value:xb},{what:'x at the end\'s mean potential energy',value:meanX},{what:'κ = δ_LS(0)/U₀',value:kappa},
       {what:'k v_rms/Γ at the Doppler T',value:b.k*Math.sqrt(hbarOverMass(mass)*KT_PER_UK*doppler(meanX))/gamma,limit:'≪ 1'},{what:'depth over k_BT at the end',value:U0/(KT_PER_UK*Math.max(...Ts.at(-1).map(q=>q[0]))),limit:'≥ 20'},
-      {what:'axial ω over the cooling rate β/m',value:axial/(8*wrec*s*Math.abs(xb)/((1+xb*xb)**2)),limit:'≫ 1'},{what:'Mandel Q',value:Q}],
+      {what:'axial ω over the cooling rate β/m',value:axial/(8*wrec*s*Math.abs(xb)/((1+xb*xb)**2)),limit:'≫ 1'},{what:'Mandel Q',value:Q},
+      {what:'state-force diffusion: its relative heating of a stiff axis over the run, at the end\'s mean detuning',value:kappa*kappa*omegas[0]**2*4*s/(gamma*(1+meanX*meanX)**2)/2*times.at(-1),limit:'≪ 1'}],
     series,info:{depthUK:uKOfMHz(U0/RAD_PER_MHZ),trapKHz:omegas.map(kHz),kineticRatio:ratio,T0,s,kappa,freeDopplerUK:doppler(meanX),freeDopplerAtBottomUK:doppler(xb),runningTrapFactor:run.factor,monteCarlo:{N,dt,phaseNodes:n}}}));
 }
 
