@@ -60,12 +60,17 @@
 //! own local error is their difference times 2^p/(2^p − 1) (decide.rs `richardson`). A half step takes its own three
 //! nodes on half the step's spacing, its own generator at its own middle, and predicts its own path's momentum. What
 //! the difference holds, and what it does not (step.rs, # The kick; spectral.rs):
-//! - the splitting's error and the path momentum's prediction, O(τ³) a step;
-//! - what a hop leaves of the generator's change along the path D, the second Magnus term: second order in D, the
-//!   light shift of the change itself, at most (k·v τ)²/24 of the light shift's turn over the step -- O(τ³) a step, the
-//!   scheme's own order, so the factor takes it whole;
-//! - the three nodes' cubic of D and of the gradient, third order in the slow rate over the step: O(τ⁴) and beyond a
-//!   step, 7/8 of it and more in the difference, booked by the leading order's factor at 7/6 to 5/4 of itself -- the
+//! - the splitting's error and the path momentum's prediction, O(τ³) a step: the kick taken at the fixed r_h, the
+//!   straight path where the reference's flow bends it. On a folded cluster this is most of what the difference
+//!   holds (step.rs, # The kick: on six beams' cooling at k·v τ = 0.25 the propagation's own error is 8 % of the
+//!   kick's difference and three tenths of the state's), so the step a run takes there is the splitting's, whatever
+//!   the propagation's order;
+//! - what a hop leaves of the generator's change along the path D, the second Magnus term. Where the hops do not
+//!   resolve Ĥ₀ (an explicit far-detuned state) it is the light shift of the change itself, at most (k·v τ)²/24 of the
+//!   light shift's turn over the step -- O(τ³) a step, the scheme's own order, so the factor takes it whole. Where
+//!   they do (a folded cluster) it is O(τ⁵) a step;
+//! - the three nodes' representation of D and of the gradient, Simpson's rule's: O(τ⁵) a step where the hops resolve
+//!   Ĥ₀. Of an O(τ⁵) error 15/16 is in the difference, which the leading order's factor books at 5/4 of itself -- the
 //!   safe side, and no step is redone on more nodes for it;
 //! - nothing of the generator's own frequencies: a detuning that turns any number of times over the step is integrated
 //!   exactly in the step and in its halves alike, for the state and for the kick (before, an explicit state's ringing

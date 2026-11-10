@@ -458,22 +458,35 @@ fn a_moving_atom_in_a_standing_wave_is_an_atom_at_rest_with_two_detunings() {
     assert!(relative(&moving, &at_rest) < 1e-6, "{moving:?} vs {at_rest:?}");
 }
 
+/// The light of beams along z at a height: the coupling c(z) = Σ_l (Ω_l/2) e^{i(k_l z + φ_l)} and its gradient ∂_z c.
+fn light(beams: &[Beam], z: f64) -> (C64, C64) {
+    let (mut c, mut g) = (C64::ZERO, C64::ZERO);
+    for b in beams {
+        let term = C64::cis(b.k[2] * z + b.phase) * (0.5 * b.rabi);
+        c += term;
+        g += term * C64::new(0.0, b.k[2]);
+    }
+    (c, g)
+}
+
+/// The force along z on a two-level atom's state (a, e) in that light, −⟨ψ|∂_zH|ψ⟩/⟨ψ|ψ⟩ = −2 Re(e* ∂_z c a)/‖ψ‖².
+fn pull(beams: &[Beam], z: f64, a: C64, e: C64) -> f64 {
+    -2.0 * (e.conj() * light(beams, z).1 * a).re / (a.norm_sqr() + e.norm_sqr())
+}
+
 /// A two-level atom on the uniform path z₀ + vt through beams along z, sub-stepped: RK4 in `steps` steps of the lab's
-/// iψ̇ = H(z(t))ψ, H = [[0, c*], [c, −Δ − iΓ/2]], c(z) = Σ_l (Ω_l/2) e^{i(k_l z + φ_l)}, with the impulse
-/// I = −∫⟨ψ|∂_zH|ψ⟩/⟨ψ|ψ⟩dt as a third unknown. ψ(τ) and I: the dense reference of a step's state and kick.
-fn substepped(beams: &[Beam], detuning: f64, gamma: f64, z0: f64, v: f64, psi: [C64; 2], tau: f64, steps: usize) -> ([C64; 2], f64) {
+/// iψ̇ = H(z(t))ψ, H = [[0, c*], [c, −Δ − iΓ/2]], with the impulse I = −∫⟨ψ|∂_zH|ψ⟩/⟨ψ|ψ⟩dt as a third unknown -- less,
+/// where a state is `held` (the state and its time), that state's force held in the Doppler frame along the path, its
+/// excited amplitude turned by e^{ik₀v(t − t_m)}: what the state's change along the path adds to a step's kick (step.rs,
+/// # The kick). ψ(τ) and I: the dense reference of a step's state and kick.
+fn substepped(beams: &[Beam], detuning: f64, gamma: f64, z0: f64, v: f64, psi: [C64; 2], tau: f64, steps: usize, held: Option<([C64; 2], f64)>) -> ([C64; 2], f64) {
     let derivative = |time: f64, y: &[C64; 3]| -> [C64; 3] {
         let z = z0 + v * time;
-        let (mut c, mut g) = (C64::ZERO, C64::ZERO);
-        for b in beams {
-            let term = C64::cis(b.k[2] * z + b.phase) * (0.5 * b.rabi);
-            c += term;
-            g += term * C64::new(0.0, b.k[2]);
-        }
+        let c = light(beams, z).0;
         let (a, e) = (y[0], y[1]);
         let (da, de) = (c.conj() * e, c * a + C64::new(-detuning, -0.5 * gamma) * e);
-        let force = -2.0 * (e.conj() * g * a).re / (a.norm_sqr() + e.norm_sqr());
-        [C64::new(da.im, -da.re), C64::new(de.im, -de.re), C64::real(force)]
+        let kept = held.map_or(0.0, |(x, at)| pull(beams, z, x[0], x[1] * C64::cis(beams[0].k[2] * v * (time - at))));
+        [C64::new(da.im, -da.re), C64::new(de.im, -de.re), C64::real(pull(beams, z, a, e) - kept)]
     };
     let dt = tau / steps as f64;
     let add = |a: &[C64; 3], b: &[C64; 3], s: f64| -> [C64; 3] { std::array::from_fn(|k| a[k] + b[k] * s) };
@@ -489,6 +502,17 @@ fn substepped(beams: &[Beam], detuning: f64, gamma: f64, z0: f64, v: f64, psi: [
     ([y[0], y[1]], y[2].re)
 }
 
+/// The same atom's step as the step defines it (step.rs, # The kick), sub-stepped in an even number of `steps`: ψ(τ),
+/// and the kick in its decomposition about the state at the step's middle x_m -- that state's force at the fixed middle
+/// point over the step (the shear: these beams do not beat in time), and what the state's change along the path adds.
+/// A step's propagation errs against this by what it leaves of the path's change alone; against the path's own kick
+/// (`substepped`) the step differs besides by its splitting, the shear's O(τ³).
+fn decomposed(beams: &[Beam], detuning: f64, gamma: f64, z0: f64, v: f64, psi: [C64; 2], tau: f64, steps: usize) -> ([C64; 2], f64) {
+    let (middle, _) = substepped(beams, detuning, gamma, z0, v, psi, 0.5 * tau, steps / 2, None);
+    let (end, change) = substepped(beams, detuning, gamma, z0, v, psi, tau, steps, Some((middle, 0.5 * tau)));
+    (end, change + tau * pull(beams, z0 + 0.5 * v * tau, middle[0], middle[1]))
+}
+
 /// One step of a two-level atom from the bare ground state at z₀, at the velocity v along z, against its sub-stepped
 /// reference (`substepped`, 2000 sub-steps a radian of Δτ and no fewer than 20 000): the largest error of ψ's amplitudes
 /// (lab), and the kick's error, relative to the larger of the reference's kick and of the kick of the light's dressed
@@ -501,7 +525,7 @@ fn step_errors(beams: &[Beam], detuning: f64, gamma: f64, z0: f64, v: f64, tau: 
     let start = held(&model, [0.0, 0.0, z0], [0.0, 0.0, v / hm]);
     let s = step::step(&model, &start, tau, &mut step::Scratch::default()).unwrap();
     let steps = ((2000.0 * detuning.abs() * tau) as usize).max(20_000);
-    let (psi, kick) = substepped(beams, detuning, gamma, z0, v, [C64::ONE, C64::ZERO], tau, steps);
+    let (psi, kick) = substepped(beams, detuning, gamma, z0, v, [C64::ONE, C64::ZERO], tau, steps, None);
     let state = (0..2).map(|a| (s.end.psi[a] - psi[a]).abs()).fold(0.0, f64::max);
     // The dressed state's dipole kick at the step's middle: −τ ∂_z(|c|²/Δ)-like, its size k|c|²τ/|Δ̃| at most.
     let size = beams.iter().map(|b| 0.5 * b.rabi).sum::<f64>().powi(2) * K * tau / detuning.hypot(0.5 * gamma);
@@ -553,6 +577,61 @@ fn a_step_integrates_its_internal_frequencies_whatever_the_detuning() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
+/// The step's order in what the path changes (step.rs, # The kick; spectral.rs): the same atom from the bare ground
+/// state at 0.4 µm/µs (k·v = 3.2 rad/µs), over 0.0625 µs in one, two and four steps, with and without the decay, at
+/// detunings that turn 1, 10, 50 and 200 rad over that span (the light shift 3 rad over it at each). A mass the kick
+/// does not move: the steps' paths are the reference's, and a step is its propagation. The state against the path's
+/// sub-stepped reference, and the kick against the reference of the step's own decomposition (`decomposed`): what
+/// the propagation leaves of the path's change, without the splitting.
+/// - Where the hops resolve the generator (Δτ = 1 over the span: two hops a step) both fall as the fourth order,
+///   sixteen a halving: a hop's second Magnus term is then of the fifth order in the step, and so is the three nodes'
+///   representation of the change (Simpson's rule's).
+/// - Where they do not (Δτ = 10 and more: the hops follow the detuning, not the step) the state falls as the second
+///   order: a hop leaves the light shift of the change itself, the second Magnus term, which the hop's width does not
+///   shrink. It does not grow with the detuning. The kick's error there is what that leaves of the state's.
+#[test]
+fn a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the_generator() {
+    let (span, shift, v, z0, hm) = (0.0625, 3.0, 0.4, 0.11, 1e-9);
+    let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
+    let mut failures = Vec::new();
+    for gamma in [0.0, GAMMA] {
+        for turns in [1.0_f64, 10.0, 50.0, 200.0] {
+            let detuning: f64 = -turns / span;
+            let rabi = (shift / span * detuning.abs()).sqrt();
+            let beams = [Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi, phase: 0.3 }];
+            let model = Atom::new(hm, flat, beams.to_vec(), detuning, gamma);
+            // The dressed state's dipole kick over the span (`step_errors`): the kick's scale.
+            let size = beams.iter().map(|b| 0.5 * b.rabi).sum::<f64>().powi(2) * K * span / detuning.hypot(0.5 * gamma);
+            let errors: Vec<[f64; 2]> = [1, 2, 4]
+                .into_iter()
+                .map(|steps: usize| {
+                    let tau = span / steps as f64;
+                    let subs = 2 * ((1000.0 * turns) as usize).max(10_000) / steps;
+                    let start = held(&model, [0.0, 0.0, z0], [0.0, 0.0, v / hm]);
+                    let (mut t, mut exact, mut kick) = (start.clone(), [C64::ONE, C64::ZERO], 0.0);
+                    for i in 0..steps {
+                        let (end, part) = decomposed(&beams, detuning, gamma, z0 + v * i as f64 * tau, v, exact, tau, subs);
+                        (exact, kick) = (end, kick + part);
+                        t = step::step(&model, &t, tau, &mut step::Scratch::default()).unwrap().end;
+                    }
+                    let state = (0..2).map(|a| (t.psi[a] - exact[a]).abs()).fold(0.0, f64::max);
+                    [state, (t.kappa[2] - start.kappa[2] - kick).abs() / kick.abs().max(size)]
+                })
+                .collect();
+            let falls: Vec<[f64; 2]> = (0..2).map(|i| std::array::from_fn(|q| errors[i][q] / errors[i + 1][q])).collect();
+            eprintln!(
+                "Γ {gamma:6.3}, Δτ {turns:5}: in 1, 2, 4 steps ψ {:.2e} {:.2e} {:.2e} (falls {:.1}, {:.1}), kick {:.2e} {:.2e} {:.2e} (falls {:.1}, {:.1})",
+                errors[0][0], errors[1][0], errors[2][0], falls[0][0], falls[1][0], errors[0][1], errors[1][1], errors[2][1], falls[0][1], falls[1][1]
+            );
+            let least = if turns == 1.0 { 12.0 } else { 3.0 };
+            if !falls.iter().all(|f| f[0] > least && (turns > 1.0 || f[1] > least)) {
+                failures.push(format!("Γ {gamma}, Δτ {turns}: {errors:?}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 /// The step's doubling reads what the step leaves (adapt.rs, # The read): the same atom moving at 0.2 µm/µs, the decay
 /// on, at Δτ = 50 and 200 -- the detuning unresolved by the step and by its halves alike. The step's error of the
 /// state's fall of ln‖ψ‖² (the hazard, which times the jumps) against the sub-stepped reference is the doubling's
@@ -570,7 +649,7 @@ fn the_doubling_reads_what_a_step_leaves_of_the_path_s_change() {
         let start = held(&model, [0.0, 0.0, z0], [0.0, 0.0, v / hm]);
         let take = |from: &Trajectory, length: f64| step::step(&model, from, length, &mut step::Scratch::default()).unwrap().end;
         let (whole, halves) = (take(&start, tau), take(&take(&start, 0.5 * tau), 0.5 * tau));
-        let (exact, _) = substepped(&beams, detuning, GAMMA, z0, v, [C64::ONE, C64::ZERO], tau, (2000.0 * turns) as usize);
+        let (exact, _) = substepped(&beams, detuning, GAMMA, z0, v, [C64::ONE, C64::ZERO], tau, (2000.0 * turns) as usize, None);
         let fall = |psi: &[C64]| -psi.iter().map(|z| z.norm_sqr()).sum::<f64>().ln();
         let (error, read) = (fall(&whole.psi) - fall(&exact), 4.0 / 3.0 * (fall(&whole.psi) - fall(&halves.psi)));
         eprintln!("Δτ {turns}: the hazard's integral {:.5}, the step's error of it {error:+.3e}, the doubling reads {read:+.3e}", fall(&exact));

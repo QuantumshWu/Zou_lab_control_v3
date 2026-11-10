@@ -6,8 +6,9 @@
 //! own -- detunings, light shifts, decay rates, of any size against the step --, and D(u) = Ĥ(u) − Ĥ₀ what the motion
 //! along the path and the lights' beats change, slow against the step by the step's own choice. D is taken through the
 //! step's three nodes, the middle and the two ends ±h: D(u) = uA + u²B, A = (Ĥ(h) − Ĥ(−h))/2h and
-//! B = (Ĥ(h) + Ĥ(−h) − 2Ĥ₀)/2h². Its error is the cubic's, (u³ − uh²)D‴/6: third order in the slow rate over the step,
-//! whatever Ĥ₀ is; a half step takes its own three nodes on half the spacing.
+//! B = (Ĥ(h) + Ĥ(−h) − 2Ĥ₀)/2h². Its error is the cubic's, (u³ − uh²)D‴/6: third order in the slow rate at a time of
+//! the step, whatever Ĥ₀ is, and odd about the middle, so that the step's integrals take it at the fourth (# A hop,
+//! below); a half step takes its own three nodes on half the spacing.
 //!
 //! # A hop
 //! With Ĥ₀ = c + RΛR⁻¹ (its scalar part c apart, `linalg::eigen`) and x = R d, i ḋ = (c + Λ + Dᵉ(u)) d, Dᵉ = R⁻¹DR. Over
@@ -29,9 +30,18 @@
 //! Where nothing moves (D = 0: an atom at rest, a generator still along every path) a hop is e^{−i(c + Λ)w} alone:
 //! exact, at any detuning times step.
 //!
-//! What a hop leaves out is the second Magnus term, −½∫∫[D̃(t₁), D̃(t₂)]: second order in D. Where the step resolves
-//! Ĥ₀'s frequencies it is O(w³‖Ĥ₀‖‖D‖²) a hop -- O(τ⁵) a step, the order of the grid it replaces --; where it does not
-//! it is bounded by ½(∫‖D‖)², whatever ‖Ĥ₀‖τ is: the error does not grow with the detuning.
+//! What a hop leaves out is the second Magnus term, −½∫∫[D̃(t₁), D̃(t₂)] = −(w²/2) Σ_l [m_{l+1}, m_l] with m_l the
+//! Legendre moments of D̃ over the hop, (1/w)∫₀ʷ P_l(2t/w − 1) D̃(t) dt: second order in D. Its order in the step
+//! depends on what the hop resolves:
+//! - a hop that resolves Ĥ₀'s frequencies (‖Ĥ₀‖w ≪ 1: a folded cluster's light shifts) leaves w³u²[A, B]/12, u the
+//!   hop's middle -- over the hop D is its value there, u A + u²B, and its slope A + 2uB, which commute but for that --
+//!   and terms of w⁵: the fifth order in the step, so the propagation is of the fourth order there, like the three
+//!   nodes of D (Simpson's rule's: their cubic is odd about the middle; what stays is τ⁵D⁗/2880 a step, and a first
+//!   moment -- the lag a friction lives in -- short by (ω τ)²/60 of itself for a beat of the rate ω);
+//! - a hop that does not (an explicit far-detuned state: the hops follow the detuning, not the step) leaves the light
+//!   shift of the change itself, bounded by ½(∫‖D‖)² whatever ‖Ĥ₀‖τ is -- the second order in the step, and no
+//!   growth with the detuning.
+//! (step/tests.rs, `a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the_generator`.)
 //!
 //! # Towards a defective generator
 //! A state taken through the eigenvectors rounds by κ(R) u (1 + |τ| × the decay rates' spread) relative to its norm
