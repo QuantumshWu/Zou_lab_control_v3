@@ -21,7 +21,10 @@
 //! request is refused where it is not, or where the descent leaves the trap's region: no minimum holds the atom ("光镊不约束
 //! 原子"), and the focus is never taken instead. A focus that is a bowl's bottom is the centre as it stands, bit for bit.
 
-use super::{Envelope, Lights, Model, Quadratic, Trap};
+use super::assemble::{LEFT, RIGHT};
+use super::tabulate::Tables;
+use super::{jet, Envelope, Lights, Lit, Model, Quadratic, Trap};
+use crate::linalg::C64;
 use crate::field::Amplitude;
 use crate::linalg::{dot3, symmetric3_eigen};
 use crate::request::GROUND;
@@ -86,7 +89,7 @@ impl Model {
         }
         let amplitudes = self.light.amplitudes(r);
         let mut out = self.far_potential(trap, &amplitudes, p, lights);
-        let near = self.near_potential(r, &amplitudes, p, lights, order, tables);
+        let near = self.near_potential(&amplitudes, p, lights, order, tables);
         let q = &mut out.quadratic;
         q.value += near.quadratic.value;
         for x in 0..3 {
@@ -97,6 +100,63 @@ impl Model {
         }
         out.scale += near.scale;
         out.terms += near.terms;
+        out
+    }
+
+    /// The near carriers' part of V_L(r; p) (module documentation, # What of h the difference holds): Σ_b p_b of their static shifts
+    /// on the ground states, each in its cluster -- the cluster's Hermitian near forms on its diagonal at a base beat of zero
+    /// (assemble.rs `Plan::links`), each times its two field components at zero momentum --, with the trap light on less with it
+    /// off, jets to `order`; the near forms from their tables where they serve (to first order).
+    pub(crate) fn near_potential(&self, amplitudes: &[Amplitude], p: &[f64; GROUND], lights: &Lights, order: usize, tables: Option<&Tables>) -> Expansion {
+        let mut out = Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
+        if self.carriers.iter().all(|x| !lights.on(x.frequency)) {
+            return out;
+        }
+        let mut off = lights.clone();
+        off.0[self.light.trap] = Lit::Off;
+        let unit: Vec<C64> = (0..jet::parts(order)).map(|part| if part == 0 { C64::ONE } else { C64::ZERO }).collect();
+        for (lights, sign) in [(lights, 1.0), (&off, -1.0)] {
+            for cluster in 0..self.clusters.len() {
+                let c = &self.clusters[cluster];
+                if c.states[..c.ground].iter().all(|&s| p[s] == 0.0) {
+                    continue;
+                }
+                let plan = self.plan(cluster, lights);
+                if plan.links.is_empty() {
+                    continue;
+                }
+                let near = match tables.and_then(|t| t.of(cluster, lights)) {
+                    Some(table) if order <= 1 => self.near_tabulated(table, amplitudes, &[(plan.near.hermitian(), order)]),
+                    _ => self.near_exact(&plan, amplitudes, order, &self.coherent_dressing()),
+                };
+                let fields = self.fields(&plan, amplitudes, [0.0; 3], order);
+                for link in &plan.links {
+                    let (x, y) = link.place;
+                    if x != y || x >= c.ground || p[c.states[x]] == 0.0 || !plan.statics[link.block] {
+                        continue;
+                    }
+                    let (left, right) = plan.factors(link.block);
+                    let side = |s: Option<usize>, weighted: bool| s.map_or(&unit, |s| if weighted { &fields.doppler[s] } else { &fields.plain[s] });
+                    let coefficient = jet::product(side(left, link.flag == LEFT), side(right, link.flag == RIGHT));
+                    let form: Vec<C64> = near.jet(link.operand).into_iter().map(|z| if link.conjugate { z.conj() } else { z }).collect();
+                    let term = jet::product(&coefficient, &form);
+                    let (q, w) = (&mut out.quadratic, sign * p[c.states[x]]);
+                    q.value += w * term[0].re;
+                    for i in 0..3 {
+                        if order >= 1 {
+                            q.gradient[i] += w * term[1 + i].re;
+                        }
+                        for j in 0..3 {
+                            if order >= 2 {
+                                q.hessian[i][j] += w * term[jet::second(i, j)].re;
+                            }
+                        }
+                    }
+                    out.scale += (coefficient[0] * form[0]).abs() * p[c.states[x]];
+                    out.terms += 1;
+                }
+            }
+        }
         out
     }
 

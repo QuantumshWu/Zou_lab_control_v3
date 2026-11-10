@@ -38,6 +38,8 @@ pub(crate) mod jet;
 use crate::field::Light;
 use crate::linalg::{C64, Mat};
 use crate::request::Request;
+use std::sync::{Arc, Mutex};
+pub use assemble::Middle;
 pub use crate::request::{GROUND, STATES};
 
 /// A frequency, exactly: integer coordinates on the request's frequency axes, then on the excited states' frame frequency ν_frame;
@@ -276,9 +278,11 @@ pub struct Recoil { pub mean: [f64; 3], pub second: [[f64; 3]; 3] }
 pub struct Model {
     pub(crate) light: Light,
     pub(crate) axes: far::Axes,
-    /// The light's distinct wave vectors (1/µm): the coordinates of every exact wave vector (`Wave`); per request beam its own.
+    /// The light's distinct wave vectors up to their sign (1/µm): the coordinates of every exact wave vector (`Wave`); per request
+    /// beam its own with its sign -- a beam and its counter-propagating one are ±1 on one coordinate, so that what their wave vectors
+    /// cancel in is exactly zero.
     pub(crate) waves: Vec<[f64; 3]>,
-    pub(crate) beam_wave: Vec<usize>,
+    pub(crate) beam_wave: Vec<(usize, i64)>,
     pub(crate) hbar_over_mass: f64,
     /// The bare energies E_s (H0's diagonal).
     pub(crate) energies: Vec<f64>,
@@ -296,9 +300,13 @@ pub struct Model {
     pub(crate) membership: [usize; GROUND],
     /// The near carriers (eliminate.rs).
     pub(crate) carriers: Vec<eliminate::Carrier>,
+    /// Per cluster the blocks of the excited states its eliminations can mix (assemble.rs `Model::mix`).
+    pub(crate) mixing: Vec<Vec<usize>>,
     /// The photons' sources (photon.rs) and per cluster its classes.
     pub(crate) sources: Vec<photon::Source>,
     pub(crate) classes: Vec<Vec<photon::Class>>,
+    /// The clusters' assemblies under the light sets asked so far (assemble.rs `Model::plan`).
+    pub(crate) plans: Mutex<Vec<Arc<assemble::Plan>>>,
     /// The states' labels and the beams' names (the ledger's and the method's words).
     pub(crate) labels: Vec<String>,
     pub(crate) names: Vec<String>,
@@ -321,11 +329,11 @@ impl Model {
             .iter()
             .map(|b| {
                 let k = b.wave_vector();
-                match waves.iter().position(|w| *w == k) {
-                    Some(at) => at,
+                match waves.iter().position(|w| *w == k || *w == k.map(|x| -x)) {
+                    Some(at) => (at, if waves[at] == k { 1 } else { -1 }),
                     None => {
                         waves.push(k);
-                        waves.len() - 1
+                        (waves.len() - 1, 1)
                     }
                 }
             })
@@ -357,8 +365,10 @@ impl Model {
             clusters: vec![],
             membership: [0; GROUND],
             carriers: vec![],
+            mixing: vec![],
             sources: vec![],
             classes: vec![],
+            plans: Mutex::new(vec![]),
             labels: request.states.clone(),
             names: request.beams.iter().map(|b| b.name.clone()).collect(),
         };
@@ -377,19 +387,17 @@ impl Model {
         model.clusters = clusters;
         model.membership = membership;
         for ci in 0..model.carriers.len() {
-            for l in 0..model.carriers[ci].beams.len() {
-                for e in GROUND..STATES {
-                    for b in 0..GROUND {
-                        if model.carriers[ci].folded[l][(e, b)] != C64::ZERO && model.drive_kept(ci, e, b) {
-                            model.carriers[ci].folded[l][(e, b)] = C64::ZERO;
-                        }
+            for e in GROUND..STATES {
+                for b in 0..GROUND {
+                    if model.drive_kept(ci, e, b) {
+                        let carrier = &mut model.carriers[ci];
+                        carrier.folded.iter_mut().chain(carrier.basis.iter_mut()).for_each(|x| x[(e, b)] = C64::ZERO);
                     }
                 }
             }
         }
-        model.sources = model.far_sources();
-        model.sources.extend(model.explicit_sources());
-        model.sources.extend(model.near_sources());
+        model.mixing = (0..model.clusters.len()).map(|c| model.mix(c)).collect();
+        model.sources = model.all_sources();
         model.classes = (0..model.clusters.len()).map(|c| model.classes(c)).collect();
         Ok(model)
     }
@@ -438,7 +446,7 @@ impl Model {
     /// A request beam's wave vector, exactly.
     pub(crate) fn beam_wave(&self, beam: usize) -> Wave {
         let mut w = vec![0; self.waves.len()];
-        w[self.beam_wave[beam]] = 1;
+        w[self.beam_wave[beam].0] = self.beam_wave[beam].1;
         Beat(w)
     }
     /// The zero wave vector.
@@ -480,13 +488,15 @@ impl Model {
 }
 
 /// The model as one run's integrator sees it (`step::Dynamics`): the model, its near tables where it has them (tabulate.rs), its
-/// running and prepared lights, and the reference state's ground populations.
+/// running and prepared lights, the reference state's ground populations, and per cluster its plan under the running lights
+/// (assemble.rs) with that plan's table.
 pub struct Run<'a> {
     pub model: &'a Model,
     pub tables: Option<&'a tabulate::Tables>,
     pub reference: [f64; GROUND],
     running: Lights,
     prepared: Lights,
+    plans: Vec<(Arc<assemble::Plan>, Option<&'a tabulate::NearTable>)>,
     /// The counted real multiply-adds of one assembly (`decide::COMPLEX` per complex one, assemble.rs # Work) and of one jump's
     /// photons (photon.rs `Model::photons_counted`): the largest over the clusters at the focus, every light on, made once.
     assembly: f64,
@@ -505,6 +515,7 @@ impl<'a> Run<'a> {
     fn with(model: &'a Model, tables: Option<&'a tabulate::Tables>, reference: [f64; GROUND]) -> Run<'a> {
         let running = model.running();
         let at = Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 };
+        let plans = (0..model.clusters.len()).map(|c| (model.plan(c, &running), tables.and_then(|t| t.of(c, &running)))).collect();
         let assembly = (0..model.clusters.len()).map(|c| model.assembled(c, &at, &running, tables).1).fold(0.0, f64::max) * crate::decide::COMPLEX;
         let photons = (0..model.clusters.len())
             .map(|c| {
@@ -513,7 +524,13 @@ impl<'a> Run<'a> {
             })
             .fold(0.0, f64::max)
             * crate::decide::COMPLEX;
-        Run { model, tables, reference, running, prepared: model.prepared(), assembly, photons }
+        Run { model, tables, reference, running, prepared: model.prepared(), plans, assembly, photons }
+    }
+    /// A cluster's generator at a position and time for every momentum (assemble.rs `Middle`): what a step's two assemblies at
+    /// its middle share.
+    pub fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Middle<'a> {
+        let (plan, table) = &self.plans[cluster];
+        self.model.middle(plan, r, t, *table)
     }
 }
 
@@ -537,7 +554,7 @@ impl crate::step::Dynamics for Run<'_> {
         self.model.membership[ground]
     }
     fn generator(&self, cluster: usize, at: &Point) -> Generator {
-        self.model.assembled(cluster, at, &self.running, self.tables).0
+        self.middle(cluster, at.r, at.t).generator(at.kappa)
     }
     fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
         self.model.photons_counted(cluster, at, psi, self.tables).0

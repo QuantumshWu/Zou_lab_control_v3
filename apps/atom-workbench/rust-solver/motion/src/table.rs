@@ -234,7 +234,12 @@ impl Table {
     /// The interpolant at s: `value` (width) and, when asked, `gradient` (axes × width, axis-major: ∂I/∂s_f). A bounded
     /// coordinate is taken within its range, a periodic one modulo its period.
     pub fn eval(&self, s: &[f64], value: &mut [f64], gradient: Option<&mut [f64]>) {
-        self.interpolate(s, None, value, gradient);
+        self.interpolate(s, None, 0, value, gradient);
+    }
+    /// The interpolant at s of the reals from `first` on, as many as `value` holds: `value` and, when asked, `gradient`
+    /// (axes × that many, axis-major).
+    pub fn eval_range(&self, s: &[f64], first: usize, value: &mut [f64], gradient: Option<&mut [f64]>) {
+        self.interpolate(s, None, first, value, gradient);
     }
     /// The read of axis f's error at s (module documentation, # The error read of an axis): the value
     /// (I_f − I)/(2³ − 1) into `value` and the gradient (∇I_f − ∇I)/(2² − 1) into `gradient` (axes × width), I_f the
@@ -243,8 +248,8 @@ impl Table {
         assert!(self.axes[f].readable(), "axis {f} of {} nodes has no coarser grid to read against", self.axes[f].nodes);
         let (w, d) = (self.width, self.axes.len());
         let (mut fine, mut slope) = (vec![0.0; w], vec![0.0; d * w]);
-        self.interpolate(s, None, &mut fine, Some(&mut slope));
-        self.interpolate(s, Some(f), value, Some(gradient));
+        self.interpolate(s, None, 0, &mut fine, Some(&mut slope));
+        self.interpolate(s, Some(f), 0, value, Some(gradient));
         let (p, q) = ((1 << VALUE_ORDER) - 1, (1 << GRADIENT_ORDER) - 1);
         for (x, y) in value.iter_mut().zip(&fine) {
             *x = (*x - y) / p as f64;
@@ -253,12 +258,12 @@ impl Table {
             *x = (*x - y) / q as f64;
         }
     }
-    /// The tensor-product interpolant at s, axis `coarse` (if any) on its grid of every other node: Σ over the 4^D
-    /// stencil nodes of the product of the axes' weights times the node's values; the gradient's axis f takes its slope
-    /// weights in place of its value weights.
-    fn interpolate(&self, s: &[f64], coarse: Option<usize>, value: &mut [f64], mut gradient: Option<&mut [f64]>) {
-        let (w, d) = (self.width, self.axes.len());
-        assert!(s.len() == d && value.len() == w && gradient.as_ref().is_none_or(|g| g.len() == d * w));
+    /// The tensor-product interpolant at s of the node's reals from `first` on (as many as `value` holds), axis `coarse`
+    /// (if any) on its grid of every other node: Σ over the 4^D stencil nodes of the product of the axes' weights times
+    /// the node's values; the gradient's axis f takes its slope weights in place of its value weights.
+    fn interpolate(&self, s: &[f64], coarse: Option<usize>, first: usize, value: &mut [f64], mut gradient: Option<&mut [f64]>) {
+        let (w, d) = (value.len(), self.axes.len());
+        assert!(s.len() == d && first + w <= self.width && gradient.as_ref().is_none_or(|g| g.len() == d * w));
         let stencils: Vec<Stencil> = self
             .axes
             .iter()
@@ -289,7 +294,7 @@ impl Table {
                 c /= STENCIL;
             }
             let node: usize = (0..d).map(|f| stencils[f].nodes[digits[f]] * strides[f]).sum();
-            let row = &self.values[node * w..(node + 1) * w];
+            let row = &self.values[node * self.width + first..node * self.width + first + w];
             let weight: f64 = (0..d).map(|f| stencils[f].value[digits[f]]).product();
             for (x, y) in value.iter_mut().zip(row) {
                 *x += weight * y;

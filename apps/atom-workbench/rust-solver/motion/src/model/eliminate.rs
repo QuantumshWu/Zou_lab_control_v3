@@ -38,19 +38,19 @@
 //! from the far light's exact derivatives (far.rs), ∂_i ΔE from the dressing's own resolvent, ∂_i Σ from the fields' and the
 //! energies' -- the force's exact definition at the point.
 
-use super::assemble::Parts;
+use super::assemble::{NearValues, Plan};
 use super::cluster::Edge;
-use super::potential::Expansion;
+use super::photon::Origin;
 use super::reach::{distance, Region};
-use super::{Beat, Component, Lights, Model, Point, Quadratic, Sample, Unit, UnitError};
+use super::{Beat, Component, Lights, Model, Point, Sample, Unit, UnitError};
 use crate::field::Amplitude;
 use crate::linalg::{dot3, Lu, Mat, C64};
 use crate::request::{Request, GROUND, STATES};
 use super::far::EXCITED;
 use super::jet;
 
-/// A near carrier: a co-rotating component the units keep near, its beams' couplings and folded couplings, and its polarization
-/// units (beams of parallel fields).
+/// A near carrier: a co-rotating component the units keep near, its beams' couplings and folded couplings, its folded couplings
+/// on its field's basis, and its polarization units (beams of parallel fields).
 #[derive(Clone, Debug)]
 pub(crate) struct Carrier {
     pub(crate) frequency: usize,
@@ -61,6 +61,8 @@ pub(crate) struct Carrier {
     pub(crate) beams: Vec<usize>,
     pub(crate) couplings: Vec<Mat>,
     pub(crate) folded: Vec<Mat>,
+    /// Its folded couplings on its field's basis (field.rs), U^f_k (STATES × STATES): X^f_l = Σ_k γ_lk U^f_k, the responses' sources.
+    pub(crate) basis: Vec<Mat>,
     pub(crate) units: Vec<usize>,
 }
 
@@ -95,6 +97,7 @@ impl Carrier {
                 beams: f.beams.clone(),
                 folded: couplings.clone(),
                 couplings,
+                basis: tone.basis[0].clone(),
                 units,
             });
         }
@@ -102,20 +105,10 @@ impl Carrier {
     }
 }
 
-/// The near light at a point on a cluster (module documentation), its derivatives in jets (jet.rs) to the order asked: per carrier
-/// (all of them; empty where unlit) and beam the response with its Doppler term on the cluster's ground places, T̃_l = T_l − w_l T2_l
-/// (EXCITED × n_g, a part per jet part); per carrier and ground place the Doppler term's relative size w‖T2‖/‖T‖ (its error's
-/// square root, units.rs); the far light's energies, H's diagonal ([part][state]); and the complex multiply-adds that made it.
-pub(crate) struct NearAt {
-    pub(crate) responses: Vec<Vec<Vec<Mat>>>,
-    pub(crate) doppler: Vec<Vec<f64>>,
-    pub(crate) energies: Vec<Vec<f64>>,
-    pub(crate) work: f64,
-}
-
-/// The elimination's responses at one far light and near amplitudes (`Model::eliminate`): per carrier (empty where unlit), beam and
-/// jet part, T_l = (K + Σ − z)⁻¹ X^f_l and T2_l = (K + Σ − z)⁻¹ T_l on the cluster's ground places (EXCITED × n_g); and the complex
-/// multiply-adds that made them.
+/// The elimination's responses at one far light and near amplitudes (`Model::eliminate`): per carrier (empty where unlit), basis
+/// vector k of its field and jet part, T_k = (K + Σ − z)⁻¹ U^f_k and T2_k = (K + Σ − z)⁻¹ T_k on the cluster's ground places
+/// (EXCITED × n_g) -- a beam's are T_l = Σ_k γ_lk T_k, the responses being linear in the coupling --; and the complex multiply-adds
+/// that made them.
 pub(crate) struct Responses {
     pub(crate) first: Vec<Vec<Vec<Mat>>>,
     pub(crate) second: Vec<Vec<Vec<Mat>>>,
@@ -203,67 +196,10 @@ impl Model {
         units.iter().map(|&u| (0..n).filter(|&l| carrier.units[l] == u).collect()).collect()
     }
 
-    /// The near light at a point on a cluster (`NearAt`), every carrier lit in `lights`, to `order`, the dressings as the model keeps
-    /// them.
-    pub(crate) fn near_at(&self, cluster: usize, at: &Point, amplitudes: &[Amplitude], lights: &Lights, order: usize) -> NearAt {
-        self.near_with(cluster, at, amplitudes, lights, order, &self.coherent_dressing())
-    }
-
-    /// The near light at a point with each carrier's dressing coherent or not as `coherent` says (module documentation): the
-    /// elimination at the point's far light and amplitudes (`eliminate`), its Doppler term at the point's momentum (`doppler`).
-    pub(crate) fn near_with(&self, cluster: usize, at: &Point, amplitudes: &[Amplitude], lights: &Lights, order: usize, coherent: &[bool]) -> NearAt {
-        let h = self.far_hamiltonian(amplitudes, lights, order);
-        let responses = self.eliminate(cluster, &h, amplitudes, lights, order, coherent);
-        let energies = h.iter().map(|m| (0..STATES).map(|s| m[(s, s)].re).collect()).collect();
-        self.doppler(at, responses, energies, self.far_work(lights, order))
-    }
-
-    /// The near light's responses with their Doppler term (module documentation): T̃_l = T_l − w_l T2_l, w_l = (ħ/m)(k_l·κ +
-    /// k_l²/2) at the point's momentum, and per carrier and ground place the term's relative size max_l |w_l|‖T2_l‖/max_l ‖T_l‖;
-    /// with the far light's energies and the work counted before (`more`).
-    pub(crate) fn doppler(&self, at: &Point, r: Responses, energies: Vec<Vec<f64>>, more: f64) -> NearAt {
-        let mut work = r.work + more;
-        let mut responses = vec![];
-        let mut sizes = vec![];
-        for (ci, carrier) in self.carriers.iter().enumerate() {
-            if r.first[ci].is_empty() {
-                responses.push(vec![]);
-                sizes.push(vec![]);
-                continue;
-            }
-            let g = r.first[ci][0][0].cols;
-            let mut out = vec![];
-            let (mut t_norm, mut t2_norm) = (vec![0.0_f64; g], vec![0.0_f64; g]);
-            for (l, &beam) in carrier.beams.iter().enumerate() {
-                let kv = self.light.beams[beam].wave_vector();
-                let w = self.hbar_over_mass * (dot3(kv, at.kappa) + 0.5 * dot3(kv, kv));
-                let (t, t2) = (&r.first[ci][l], &r.second[ci][l]);
-                for pb in 0..g {
-                    let column = |m: &Mat| (0..EXCITED).map(|e| m[(e, pb)].norm_sqr()).sum::<f64>().sqrt();
-                    t_norm[pb] = t_norm[pb].max(column(&t[0]));
-                    t2_norm[pb] = t2_norm[pb].max(w.abs() * column(&t2[0]));
-                }
-                out.push(
-                    t.iter()
-                        .zip(t2)
-                        .map(|(a, b)| {
-                            let mut m = a.clone();
-                            m.add_scaled(C64::real(-w), b);
-                            m
-                        })
-                        .collect::<Vec<Mat>>(),
-                );
-                work += (t.len() * EXCITED * g) as f64;
-            }
-            responses.push(out);
-            sizes.push((0..g).map(|pb| if t_norm[pb] > 0.0 { t2_norm[pb] / t_norm[pb] } else { 0.0 }).collect());
-        }
-        NearAt { responses, doppler: sizes, energies, work }
-    }
-
     /// The near light's elimination at a far Hamiltonian `h` (its jet) and the near beams' amplitudes (module documentation): per
-    /// lit carrier, beam and cluster ground place its responses T_l and T2_l (`Responses`) -- every carrier's dressing of the ground
-    /// states, the self-energy of the folded channels to the other clusters' ground states, one factorization per ground place.
+    /// lit carrier, basis vector of its field and cluster ground place its responses T_k and T2_k (`Responses`) -- every carrier's
+    /// dressing of the ground states, the self-energy of the folded channels to the other clusters' ground states, one factorization
+    /// per ground place.
     pub(crate) fn eliminate(&self, cluster: usize, h: &[Mat], amplitudes: &[Amplitude], lights: &Lights, order: usize, coherent: &[bool]) -> Responses {
         let np = jet::parts(order);
         let c = &self.clusters[cluster];
@@ -342,7 +278,7 @@ impl Model {
         let outside: Vec<usize> = (0..GROUND).filter(|&a| self.membership[a] != cluster).collect();
         let (mut first, mut second) = (vec![], vec![]);
         for (ci, carrier) in self.carriers.iter().enumerate() {
-            let n = carrier.beams.len();
+            let n = carrier.basis.len();
             if !lit[ci] {
                 first.push(vec![]);
                 second.push(vec![]);
@@ -398,7 +334,7 @@ impl Model {
                 let lu = Lu::new(&m[0]).expect("K + Σ − z regular: the decay keeps it off the real axis");
                 work += jet::factor_work(EXCITED);
                 for l in 0..n {
-                    let x = column(&carrier.folded[l], b);
+                    let x = column(&carrier.basis[l], b);
                     if x.iter().all(|v| *v == C64::ZERO) {
                         continue;
                     }
@@ -419,110 +355,6 @@ impl Model {
         Responses { first, second, work }
     }
 
-    /// The near light's terms of a cluster's generator from a point's responses (module documentation, # The generator's near
-    /// terms).
-    pub(crate) fn add_near_terms(&self, parts: &mut Parts, cluster: usize, near: &NearAt, amplitudes: &[Amplitude], lights: &Lights) {
-        let c = &self.clusters[cluster];
-        let g = c.ground;
-        let zero_wave = self.no_wave();
-        // The folded couplings' light shifts and couplings on the ground states.
-        for (cj, cp) in self.carriers.iter().enumerate() {
-            if !lights.on(cp.frequency) {
-                continue;
-            }
-            for (ci, cc) in self.carriers.iter().enumerate() {
-                if !lights.on(cc.frequency) || (ci != cj && !lights.cross(cp.frequency, cc.frequency)) {
-                    continue;
-                }
-                let beat = cp.beat.plus(-1, &cc.beat);
-                let (from, to) = (Component { frequency: cc.frequency, counter: false }, Component { frequency: cp.frequency, counter: false });
-                let included = (0..g).flat_map(|x| (0..g).map(move |y| (x, y))).filter(|&(x, y)| self.term_included(cluster, x, y, from, to, &beat)).count();
-                for (lj, &bj) in cp.beams.iter().enumerate() {
-                    for (li, &bi) in cc.beams.iter().enumerate() {
-                        if ci == cj && !lights.pair(cc.frequency, lj, li) {
-                            continue;
-                        }
-                        // Each included entry's value and gradients, 2·EXCITED each.
-                        parts.work += (included * 4 * 2 * EXCITED) as f64;
-                        let coefficient = super::far::pair(&amplitudes[bj], &amplitudes[bi]);
-                        let (xj, xi) = (&cp.folded[lj], &cc.folded[li]);
-                        let (tj, ti) = (&near.responses[cj][lj], &near.responses[ci][li]);
-                        let entry = |x: usize, y: usize, grad: Option<usize>| -> C64 {
-                            if x >= g || y >= g || !self.term_included(cluster, x, y, Component { frequency: cc.frequency, counter: false }, Component { frequency: cp.frequency, counter: false }, &beat) {
-                                return C64::ZERO;
-                            }
-                            let (a, b) = (c.states[x], c.states[y]);
-                            let (tiv, tjv) = match grad {
-                                None => (&ti[0], &tj[0]),
-                                Some(i) => (&ti[1 + i], &tj[1 + i]),
-                            };
-                            let mut s = C64::ZERO;
-                            for e in 0..EXCITED {
-                                s += xj[(GROUND + e, a)].conj() * tiv[(e, y)] + tjv[(e, x)].conj() * xi[(GROUND + e, b)];
-                            }
-                            s * -0.5
-                        };
-                        parts.add_varying(&beat, &self.pair_wave(bj, bi), &coefficient, &|x, y| entry(x, y, None), &|i, x, y| entry(x, y, Some(i)));
-                    }
-                }
-            }
-        }
-        // The explicit states' van Vleck shift by the folded drives, and the kept drives.
-        let h = &near.energies;
-        for cc in self.carriers.iter().filter(|x| lights.on(x.frequency)) {
-            let zero = self.axes.zero();
-            for (lj, &bj) in cc.beams.iter().enumerate() {
-                for (li, &bi) in cc.beams.iter().enumerate() {
-                    if !lights.pair(cc.frequency, lj, li) {
-                        continue;
-                    }
-                    let coefficient = super::far::pair(&amplitudes[bj], &amplitudes[bi]);
-                    let (xj, xi) = (&cc.folded[lj], &cc.folded[li]);
-                    // Each explicit entry's value and gradients, two per ground state each.
-                    parts.work += ((c.states.len() - g).pow(2) * GROUND * 4 * 2) as f64;
-                    let shift = |x: usize, y: usize, grad: Option<usize>| -> C64 {
-                        if x < g || y < g {
-                            return C64::ZERO;
-                        }
-                        let (e, f) = (c.states[x], c.states[y]);
-                        let mut s = C64::ZERO;
-                        for b in 0..GROUND {
-                            let v = xi[(e, b)] * xj[(f, b)].conj();
-                            if v == C64::ZERO {
-                                continue;
-                            }
-                            let de = h[0][e] - h[0][b] - cc.detuning;
-                            let df = h[0][f] - h[0][b] - cc.detuning;
-                            s += v * match grad {
-                                None => 0.5 * (1.0 / de + 1.0 / df),
-                                Some(i) => {
-                                    let (se, sf) = (h[1 + i][e] - h[1 + i][b], h[1 + i][f] - h[1 + i][b]);
-                                    -0.5 * (se / (de * de) + sf / (df * df))
-                                }
-                            };
-                        }
-                        s
-                    };
-                    parts.add_varying(&zero, &self.pair_wave(bj, bi), &coefficient, &|x, y| shift(x, y, None), &|i, x, y| shift(x, y, Some(i)));
-                }
-            }
-            for (li, &bi) in cc.beams.iter().enumerate() {
-                let a = &amplitudes[bi];
-                let x = &cc.couplings[li];
-                let drive = |p: usize, q: usize| -> C64 {
-                    let (e, b) = (c.states[p], c.states[q]);
-                    if p < g || q >= g || !self.drive_kept(self.carrier_index(cc.frequency), e, b) {
-                        return C64::ZERO;
-                    }
-                    x[(e, b)]
-                };
-                parts.add(&cc.beat.negated(), &self.beam_wave(bi), a, &drive, true);
-                parts.add(&cc.beat, &self.beam_wave(bi).negated(), &super::assemble::conjugate(a), &|p, q| drive(q, p).conj(), true);
-            }
-        }
-        let _ = zero_wave;
-    }
-
     /// A carrier's index from its frequency.
     pub(crate) fn carrier_index(&self, frequency: usize) -> usize {
         self.carriers.iter().position(|c| c.frequency == frequency).expect("a near carrier")
@@ -536,73 +368,6 @@ impl Model {
             return true;
         }
         self.kept.contains(&term_unit(c.states[x], c.states[y], Some(from), Some(to)))
-    }
-
-    /// The near carriers' part of V_L(r; p) (potential.rs): Σ_b p_b of their static shifts on the ground states (each in its
-    /// cluster), with the trap light on less with it off, with its gradient (the Hessian: the coefficients' and the gradients'
-    /// products, the responses' second derivatives left out -- module documentation, # Derivatives).
-    pub(crate) fn near_potential(&self, r: [f64; 3], amplitudes: &[Amplitude], p: &[f64; GROUND], lights: &Lights, order: usize, tables: Option<&super::tabulate::Tables>) -> Expansion {
-        let mut out = Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
-        if self.carriers.iter().all(|x| !lights.on(x.frequency)) {
-            return out;
-        }
-        let mut off = lights.clone();
-        off.0[self.light.trap] = super::Lit::Off;
-        for (lights, sign) in [(lights, 1.0), (&off, -1.0)] {
-            for cluster in 0..self.clusters.len() {
-                let c = &self.clusters[cluster];
-                if c.states[..c.ground].iter().all(|&s| p[s] == 0.0) {
-                    continue;
-                }
-                let at = Point { r, kappa: [0.0; 3], t: 0.0 };
-                let near = self.near(cluster, &at, amplitudes, lights, order, tables);
-                for (ci, cc) in self.carriers.iter().enumerate() {
-                    if !lights.on(cc.frequency) {
-                        continue;
-                    }
-                    for (lj, &bj) in cc.beams.iter().enumerate() {
-                        for (li, &bi) in cc.beams.iter().enumerate() {
-                            if !lights.pair(cc.frequency, lj, li) {
-                                continue;
-                            }
-                            let coefficient = super::far::pair(&amplitudes[bj], &amplitudes[bi]);
-                            for (pb, &b) in c.states[..c.ground].iter().enumerate() {
-                                if p[b] == 0.0 {
-                                    continue;
-                                }
-                                let s = |m: &Mat, n: &Mat| -> C64 {
-                                    let mut z = C64::ZERO;
-                                    for e in 0..EXCITED {
-                                        z += cc.folded[lj][(GROUND + e, b)].conj() * m[(e, pb)] + n[(e, pb)].conj() * cc.folded[li][(GROUND + e, b)];
-                                    }
-                                    z * -0.5
-                                };
-                                let (ti, tj) = (&near.responses[ci][li], &near.responses[ci][lj]);
-                                let form: Vec<C64> = (0..jet::parts(order)).map(|q| s(&ti[q], &tj[q])).collect();
-                                let term = jet::product(&jet::of(&coefficient, order), &form);
-                                let q = &mut out.quadratic;
-                                let w = sign * p[b];
-                                q.value += w * term[0].re;
-                                for x in 0..3 {
-                                    if order >= 1 {
-                                        q.gradient[x] += w * term[1 + x].re;
-                                    }
-                                    for y in 0..3 {
-                                        if order >= 2 {
-                                            q.hessian[x][y] += w * term[jet::second(x, y)].re;
-                                        }
-                                    }
-                                }
-                                let value = form[0];
-                                out.scale += (coefficient.value * value).abs() * p[b];
-                                out.terms += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        out
     }
 
     /// The near trap light's light-shift bound per beam pair of the trap frequency (potential.rs `Model::envelope`): where the
@@ -626,24 +391,67 @@ impl Model {
             .collect()
     }
 
-    /// The near carriers' folded channels on a cluster at a point (readout.rs): per carrier R = Σ_l a_l T̃_l.
+    /// Per carrier (None where unlit) its folded response on a plan's cluster at a point and momentum, R = Σ_l a_l (T_l − w_l T2_l)
+    /// = Σ_k (e_k T_k − e^w_k T2_k) on its field's basis (EXCITED × the ground places), e^w_k = Σ_l w_l a_l γ_lk its Doppler-weighted
+    /// field (module documentation, # First-order Doppler), from the near forms' responses.
+    pub(crate) fn carrier_responses(&self, plan: &Plan, near: &NearValues, amplitudes: &[Amplitude], kappa: [f64; 3]) -> Vec<Option<Mat>> {
+        let g = self.clusters[plan.cluster].ground;
+        let (start, count) = (plan.near.responding().start, plan.near.responses.len());
+        let mut out: Vec<Option<Mat>> = self.carriers.iter().map(|cc| plan.lights.on(cc.frequency).then(|| Mat::zeros(EXCITED, g))).collect();
+        let fields: Vec<Vec<(C64, C64)>> = self
+            .carriers
+            .iter()
+            .map(|cc| {
+                let f = &self.light.frequencies[cc.frequency];
+                (0..cc.basis.len())
+                    .map(|k| {
+                        f.beams.iter().zip(&f.coefficients).fold((C64::ZERO, C64::ZERO), |(plain, weighted), (&l, c)| {
+                            let z = amplitudes[l].value * c[k];
+                            (plain + z, weighted + z * self.doppler_shift(l, kappa))
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        for (i, &[c, k, e, y]) in plan.near.responses.iter().enumerate() {
+            let (plain, weighted) = fields[c][k];
+            out[c].as_mut().expect("a lit carrier's response")[(e, y)] += plain * near.data[start + i] - weighted * near.data[start + count + i];
+        }
+        out
+    }
+
+    /// The first-order Doppler term's relative size on a ground place y of a plan's cluster (its error's square root, units.rs):
+    /// max_l |w_l| ‖T2_l[:, y]‖ / max_l ‖T_l[:, y]‖ over the carrier's beams, T_l = Σ_k γ_lk T_k.
+    pub(crate) fn doppler_size(&self, plan: &Plan, near: &NearValues, carrier: usize, y: usize, kappa: [f64; 3]) -> f64 {
+        let f = &self.light.frequencies[self.carriers[carrier].frequency];
+        let (start, count) = (plan.near.responding().start, plan.near.responses.len());
+        let (mut first, mut second) = (0.0_f64, 0.0_f64);
+        for (&l, c) in f.beams.iter().zip(&f.coefficients) {
+            let (mut t, mut t2) = ([C64::ZERO; EXCITED], [C64::ZERO; EXCITED]);
+            for (i, &[of, k, e, place]) in plan.near.responses.iter().enumerate() {
+                if of == carrier && place == y {
+                    t[e] += c[k] * near.data[start + i];
+                    t2[e] += c[k] * near.data[start + count + i];
+                }
+            }
+            first = first.max(crate::linalg::norm_sqr(&t).sqrt());
+            second = second.max(self.doppler_shift(l, kappa).abs() * crate::linalg::norm_sqr(&t2).sqrt());
+        }
+        if first > 0.0 { second / first } else { 0.0 }
+    }
+
+    /// The near carriers' folded channels on a cluster at a point (readout.rs): per lit carrier its response there
+    /// (`carrier_responses`), the near forms from their table where one serves.
     pub(crate) fn near_channels(&self, cluster: usize, at: &Point, amplitudes: &[Amplitude], lights: &Lights, tables: Option<&super::tabulate::Tables>) -> Vec<super::readout::Channels> {
-        if self.carriers.iter().all(|x| !lights.on(x.frequency)) {
+        let plan = self.plan(cluster, lights);
+        if plan.near.len() == 0 {
             return vec![];
         }
-        let near = self.near(cluster, at, amplitudes, lights, 0, tables);
-        let g = self.clusters[cluster].ground;
-        self.carriers
-            .iter()
-            .enumerate()
-            .filter(|(_, x)| lights.on(x.frequency))
-            .map(|(ci, cc)| {
-                let mut response = Mat::zeros(EXCITED, g);
-                for (l, &b) in cc.beams.iter().enumerate() {
-                    response.add_scaled(amplitudes[b].value, &near.responses[ci][l][0]);
-                }
-                super::readout::Channels { nu: cc.beat.clone(), response }
-            })
+        let near = self.near_values(&plan, amplitudes, &[(plan.near.responding(), 0)], tables.and_then(|t| t.of(cluster, lights)));
+        self.carrier_responses(&plan, &near, amplitudes, at.kappa)
+            .into_iter()
+            .zip(&self.carriers)
+            .filter_map(|(r, cc)| r.map(|response| super::readout::Channels { nu: cc.beat.clone(), response }))
             .collect()
     }
 
@@ -651,25 +459,6 @@ impl Model {
     /// light on, less off -- zero, since far from the trap the trap light is off (its plane waves aside, which the far part takes).
     pub(crate) fn near_asymptote(&self, _p: &[f64; GROUND], _lights: &Lights) -> f64 {
         0.0
-    }
-
-    /// The near carriers' photon sources (photon.rs): per carrier and beam, its jumps C_a T̃_l at the point.
-    pub(crate) fn near_sources(&self) -> Vec<super::photon::Source> {
-        let mut out = vec![];
-        for (ci, cc) in self.carriers.iter().enumerate() {
-            for (l, &b) in cc.beams.iter().enumerate() {
-                out.push(super::photon::Source {
-                    frequency: Some(cc.frequency),
-                    beam: Some(b),
-                    conjugate: false,
-                    beat: cc.beat.negated(),
-                    wave: self.beam_wave(b),
-                    jumps: super::photon::Jumps::Near { carrier: ci, beam: l },
-                    folded: true,
-                });
-            }
-        }
-        out
     }
 
     /// The near carriers' units: their drives, and the couplings of two ground states (or one state's beat of two carriers) they
@@ -761,26 +550,21 @@ impl Model {
     pub(crate) fn dressing_error(&self, carrier: Component, sample: &Sample) -> UnitError {
         let lights = self.running();
         let amplitudes = self.light.amplitudes(sample.at.r);
-        let model = self.near_at(sample.cluster, &sample.at, &amplitudes, &lights, 0);
+        let plan = self.plan(sample.cluster, &lights);
         let mut toggled = self.coherent_dressing();
         let d = self.carrier_index(carrier.frequency);
         toggled[d] = !toggled[d];
-        let other = self.near_with(sample.cluster, &sample.at, &amplitudes, &lights, 0, &toggled);
+        let responses = |coherent: &[bool]| self.carrier_responses(&plan, &self.near_exact(&plan, &amplitudes, 0, coherent), &amplitudes, sample.at.kappa);
+        let (model, other) = (responses(&self.coherent_dressing()), responses(&toggled));
         let g = self.clusters[sample.cluster].ground;
         let ground = &sample.psi[..g];
         let mut delta = 0.0_f64;
-        for (ci, cc) in self.carriers.iter().enumerate() {
-            if ci == d || model.responses[ci].is_empty() {
+        for (ci, (r, s)) in model.iter().zip(&other).enumerate() {
+            let (Some(r), Some(s)) = (r, s) else { continue };
+            if ci == d {
                 continue;
             }
-            let rates = |near: &NearAt| -> Vec<C64> {
-                let mut r = Mat::zeros(EXCITED, g);
-                for (l, &b) in cc.beams.iter().enumerate() {
-                    r.add_scaled(amplitudes[b].value, &near.responses[ci][l][0]);
-                }
-                r.apply(ground)
-            };
-            let (r, s) = (rates(&model), rates(&other));
+            let (r, s) = (r.apply(ground), s.apply(ground));
             let size: f64 = r.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
             if size > 0.0 {
                 let diff: f64 = r.iter().zip(&s).map(|(&x, &y)| (y - x).norm_sqr()).sum::<f64>().sqrt();
@@ -802,8 +586,7 @@ impl Model {
 
     /// The frequency whose kept drives feed an explicit state's photons (photon.rs): the first carrier with a kept drive into it.
     pub(crate) fn driving_frequency(&self, source: &super::photon::Source) -> Option<usize> {
-        let super::photon::Jumps::Constant(jumps) = &source.jumps else { return None };
-        let e = (GROUND..STATES).find(|&e| (0..GROUND).any(|b| (0..3).any(|a| jumps[a][(b, e)] != C64::ZERO)))?;
+        let Origin::Explicit { state: e } = source.origin else { return None };
         self.carriers
             .iter()
             .enumerate()
@@ -1122,12 +905,13 @@ impl Model {
         let p = self.state_populations(sample)[*ground];
         let lights = self.running();
         let amplitudes = self.light.amplitudes(sample.at.r);
-        let near = self.near_at(sample.cluster, &sample.at, &amplitudes, &lights, 1);
+        let plan = self.plan(sample.cluster, &lights);
+        let near = self.near_exact(&plan, &amplitudes, 0, &self.coherent_dressing());
         let ci = self.carrier_index(carrier.frequency);
         let cc = &self.carriers[ci];
-        let r: C64 = cc.beams.iter().enumerate().map(|(l, &bl)| amplitudes[bl].value * near.responses[ci][l][0][(excited - GROUND, pb)]).sum();
+        let r = self.carrier_responses(&plan, &near, &amplitudes, sample.at.kappa)[ci].as_ref().map_or(C64::ZERO, |m| m[(excited - GROUND, pb)]);
         let s = 2.0 * r.norm_sqr();
-        let h = &near.energies;
+        let h = &self.far_energies(&amplitudes, &lights, 1).0;
         let v: [f64; 3] = sample.at.kappa.map(|k| k * self.hbar_over_mass);
         let force = self.sample_force(sample);
         let strongest = cc.beams.iter().zip(&cc.couplings).max_by(|x, y| x.1[(*excited, *ground)].abs().total_cmp(&y.1[(*excited, *ground)].abs())).map(|(&l, _)| l).unwrap();
@@ -1136,7 +920,7 @@ impl Model {
         let rate: f64 = (0..3).map(|i| v[i] * (h[1 + i][*excited] - h[1 + i][*ground])).sum::<f64>() + self.hbar_over_mass * dot3(k, force);
         let gamma = self.decay[(excited - GROUND, excited - GROUND)].re;
         let sweep = rate.abs() / (delta * delta + gamma * gamma / 4.0);
-        Some((s, sweep, near.doppler[ci][pb].powi(2), p))
+        Some((s, sweep, self.doppler_size(&plan, &near, ci, pb, sample.at.kappa).powi(2), p))
     }
 
     /// A folded drive's error at a sample (SPEC §1.5): on the populations s p_b, on T (√2 s + (w‖T2‖/‖T‖)² + a) p_b
@@ -1197,8 +981,7 @@ impl Model {
     /// drives' responses give it, as the same transition folded would); with the complex multiply-adds that made them (`h` the far
     /// light's energies to first order, `NearAt::energies`).
     pub(crate) fn explicit_recoil(&self, cluster: usize, amplitudes: &[Amplitude], h: &[Vec<f64>], source: usize, own: [Vec<C64>; 3], psi: &[C64]) -> (Vec<([Vec<C64>; 3], [C64; 3])>, f64) {
-        let super::photon::Jumps::Constant(jumps) = &self.sources[source].jumps else { return (vec![], 0.0) };
-        let Some(e) = (GROUND..STATES).find(|&e| (0..GROUND).any(|b| (0..3).any(|a| jumps[a][(b, e)] != C64::ZERO))) else { return (vec![], 0.0) };
+        let Origin::Explicit { state: e } = self.sources[source].origin else { return (vec![], 0.0) };
         let c = &self.clusters[cluster];
         let gamma = self.decay[(e - GROUND, e - GROUND)].re;
         let mut drives = vec![];
