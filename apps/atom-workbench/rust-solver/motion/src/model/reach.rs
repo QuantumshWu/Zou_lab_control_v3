@@ -23,18 +23,37 @@
 //! difference. A range is asked as an extent, never by thresholds closing in on it.)
 //!
 //! All the quantities of a model share one tree of cells: a cell's beams, beam pairs and the parts the units' bounds have in
-//! common (the far light's energies, the carriers' dressings, the clusters' force bounds, the drives' bounds per ground state,
-//! the levels' slope and the atoms' acceleration) are made once, for whichever quantity asks first, and each quantity halves only
-//! the cells it still needs -- one decided on the coarse cells costs nothing further.
+//! common (the far light's energies and their slopes, the carriers' couplings, resolvents and dressings, the clusters' force
+//! bounds, the drives' bounds per ground state, the levels' slope and the atoms' acceleration) are made once, for whichever
+//! quantity asks first, and each quantity halves only the cells it still needs -- one decided on the coarse cells costs nothing
+//! further. What the bounds read of the model itself -- its forms' entries that are not zero, with their moduli (`Forms`) -- is
+//! made once for all the cells of a proof.
+//!
+//! # Rounds (`Model::proven_over`)
+//! A quantity's proof is a sequence -- its next cell is the one of its largest bound among those its earlier halvings left --,
+//! but what a cell holds is a function of the cell alone, and so is a quantity's value on it. The proofs therefore go on in
+//! rounds. In a round every proof still open goes on, in its own order, as far as the halves already made for it reach, and
+//! then names the cell its order has come to. Where the quantities may be asked from any thread (`AtOnce`:
+//! `Model::bounds_over_in_parallel`) it names, ahead of its order, every half the round before made for it whose bound is not
+//! settled: whatever the order, each of these has to be halved before the proof can end with its bound settled everywhere, so
+//! the cells are halved level by level and the rounds are as many as the cells are deep. The cells named are halved once each,
+//! for all the quantities that named them, one after another or on all the cores at once, as the proofs' own steps are. Each
+//! proof takes its cells in the order it would take them alone, through the same queue, so its bound is the same number
+//! whatever was halved ahead of it and on however many cores. Only a proof that ends otherwise has had cells halved in vain.
+//! One whose bound is attained at a centre: the cells not settled above the level at which a centre attains it, for the halves
+//! made hold that centre's value from then on (`Proof::sighted`), every cell is settled against it, and the proof asks ahead no
+//! more. One that ends at a cell whose bound is within the rounding of its centre's value: the cells it had asked for by then.
 
 use super::eliminate::{CellEnergies, Couplings};
-use super::{Component, Model, Reach, Trap};
+use super::far::EXCITED;
+use super::{Component, Envelope, Lights, Model, Reach, Trap};
 use crate::field::Geometry;
-use crate::linalg::{norm3, C64};
-use crate::request::GROUND;
+use crate::linalg::{norm3, Mat, C64};
+use crate::request::{GROUND, STATES};
 use crate::units::{rounding, KT_PER_UK};
-use std::cell::{OnceCell, RefCell};
-use std::collections::{BinaryHeap, HashMap};
+use rayon::prelude::*;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// A beam's envelope Lipschitz constant L_b = sup |∇b| (1/µm), a = e^{ik·r} b the amplitude with its plane-wave phase taken out:
 /// 0 for a plane wave; for a paraxial Gaussian beam ∇b = b g_b, g_b = −2t/(w₀²q) + (i/z_R)(ρ²/(w₀²q²) − 1/q) n (field.rs, less ik n),
@@ -151,11 +170,144 @@ pub(crate) fn pair_span(spans: &[Span], j: usize, i: usize) -> PairSpan {
     PairSpan { centre, gradient, radius: (a.rho * slope).min(centre.abs() + a.most * b.most), slope, hessian }
 }
 
+/// One weighting w of the far light's static forms P_l'l (an entry's, a diagonal difference's), as a sum over the beam pairs
+/// reads it: per pair of non-zero weight, in the pairs' order, its frequency and its place among the frequency's pairs, w(P_l'l)
+/// and |w(P_l'l)|.
+pub(crate) type Weights = Vec<(usize, usize, C64, f64)>;
+
+/// A carrier's folded couplings X^f_l as the regions' bounds read them (eliminate.rs `Model::couplings`, `Model::shift_slope`).
+pub(crate) struct Folded {
+    /// Its polarization units, distinct and ascending.
+    pub(crate) units: Vec<usize>,
+    /// [ground state][beam]: ‖X^f_l[:, s]‖.
+    pub(crate) columns: Vec<Vec<f64>>,
+    /// [ground state][unit]: the unit's beams of a non-zero column, in their order -- the beam's place in the carrier's, and its
+    /// column's entries that are not zero: the excited state (less GROUND), X^f_l[e, s] and its modulus.
+    pub(crate) beams: Vec<Vec<Vec<(usize, Vec<(usize, C64, f64)>)>>>,
+    /// [ground state]: the excited states (less GROUND) its beams' couplings reach from it, ascending.
+    pub(crate) reached: Vec<Vec<usize>>,
+}
+
+/// What the regions' bounds read of the model's forms -- the far light's static forms P_l'l (far.rs), the base and the carriers'
+/// folded couplings (eliminate.rs) --, each as its bound sums it: the entries that are not zero, with their moduli. The same for
+/// every region of a model, it is made once for all that share it (the cells of a proof; a point alone), each part when first
+/// asked.
+pub(crate) struct Forms {
+    /// [frequency][pair][state]: [P_l'l]_ss and its modulus.
+    levels: OnceLock<Vec<Vec<[(C64, f64); STATES]>>>,
+    /// Per excited state x (less GROUND) the excited states y ≠ x it is coupled to somewhere -- by the base or by a form --,
+    /// ascending, each with the base's entry.
+    mixed: OnceLock<Vec<Vec<(usize, C64)>>>,
+    /// Per pair of states (x, y), row-major: the weighting of the forms' entry [P_l'l]_xy.
+    entries: Vec<OnceLock<Weights>>,
+    /// Per pair of states (x, y), row-major: the weighting of the forms' diagonal difference [P_l'l]_xx − [P_l'l]_yy (y = x: of
+    /// the diagonal [P_l'l]_xx).
+    differences: Vec<OnceLock<Weights>>,
+    /// Per carrier; and per ground state the excited states (less GROUND) any carrier reaches from it, ascending.
+    folded: OnceLock<(Vec<Folded>, Vec<Vec<usize>>)>,
+    /// Γ_min (eliminate.rs `Model::least_decay`).
+    decay: OnceLock<f64>,
+    /// [carrier][carrier]: the beat δ_to − δ_from of two carriers (rad/µs).
+    beats: OnceLock<Vec<Vec<f64>>>,
+}
+
+impl Forms {
+    pub(crate) fn new() -> Forms {
+        let cells = || (0..STATES * STATES).map(|_| OnceLock::new()).collect();
+        Forms { levels: OnceLock::new(), mixed: OnceLock::new(), entries: cells(), differences: cells(), folded: OnceLock::new(), decay: OnceLock::new(), beats: OnceLock::new() }
+    }
+
+    /// A weighting of the model's far static forms (`Weights`).
+    fn weights(model: &Model, w: &dyn Fn(&Mat) -> C64) -> Weights {
+        let mut out = vec![];
+        for (frequency, tone) in model.tones.iter().enumerate() {
+            for (pair, p) in tone.pairs.iter().enumerate() {
+                let x = w(p);
+                if x != C64::ZERO {
+                    out.push((frequency, pair, x, x.abs()));
+                }
+            }
+        }
+        out
+    }
+
+    /// The far static forms' diagonals with their moduli, [frequency][pair][state].
+    pub(crate) fn levels(&self, model: &Model) -> &[Vec<[(C64, f64); STATES]>] {
+        self.levels.get_or_init(|| model.tones.iter().map(|t| t.pairs.iter().map(|p| std::array::from_fn(|s| (p[(s, s)], p[(s, s)].abs()))).collect()).collect())
+    }
+
+    /// Per excited state (less GROUND) the excited states it is coupled to somewhere, with the base's entries (`Forms::mixed`).
+    pub(crate) fn mixed(&self, model: &Model) -> &[Vec<(usize, C64)>] {
+        self.mixed.get_or_init(|| {
+            (GROUND..STATES)
+                .map(|x| (GROUND..STATES).filter(|&y| y != x).map(|y| (y, model.base[(x, y)])).filter(|&(y, base)| base != C64::ZERO || !self.entry(model, x, y).is_empty()).collect())
+                .collect()
+        })
+    }
+
+    /// The weighting of the forms' entry [P_l'l]_xy.
+    pub(crate) fn entry(&self, model: &Model, x: usize, y: usize) -> &Weights {
+        self.entries[x * STATES + y].get_or_init(|| Forms::weights(model, &|p| p[(x, y)]))
+    }
+
+    /// The weighting of the forms' diagonal difference [P_l'l]_xx − [P_l'l]_yy; of the diagonal [P_l'l]_xx where y = x.
+    pub(crate) fn difference(&self, model: &Model, x: usize, y: usize) -> &Weights {
+        self.differences[x * STATES + y].get_or_init(|| Forms::weights(model, &|p| p[(x, x)] - if y == x { C64::ZERO } else { p[(y, y)] }))
+    }
+
+    /// The carriers' folded couplings (`Folded`), and per ground state the excited states (less GROUND) any of them reaches.
+    fn carriers(&self, model: &Model) -> &(Vec<Folded>, Vec<Vec<usize>>) {
+        self.folded.get_or_init(|| {
+            let folded: Vec<Folded> = model
+                .carriers
+                .iter()
+                .map(|cc| {
+                    let mut units = cc.units.clone();
+                    units.sort();
+                    units.dedup();
+                    let entries = |l: usize, s: usize| -> Vec<(usize, C64, f64)> {
+                        (0..EXCITED).map(|e| (e, cc.folded[l][(GROUND + e, s)])).filter(|&(_, v)| v != C64::ZERO).map(|(e, v)| (e, v, v.abs())).collect()
+                    };
+                    let columns: Vec<Vec<f64>> =
+                        (0..GROUND).map(|s| cc.folded.iter().map(|x| (0..EXCITED).map(|e| x[(GROUND + e, s)].norm_sqr()).sum::<f64>().sqrt()).collect()).collect();
+                    let beams = (0..GROUND)
+                        .map(|s| units.iter().map(|&unit| (0..cc.folded.len()).filter(|&l| cc.units[l] == unit && columns[s][l] != 0.0).map(|l| (l, entries(l, s))).collect()).collect())
+                        .collect();
+                    let reached = (0..GROUND).map(|s| (0..EXCITED).filter(|&e| cc.folded.iter().any(|m| m[(GROUND + e, s)] != C64::ZERO)).collect()).collect();
+                    Folded { units, columns, beams, reached }
+                })
+                .collect();
+            let reached = (0..GROUND).map(|s| (0..EXCITED).filter(|e| folded.iter().any(|f| f.reached[s].contains(e))).collect()).collect();
+            (folded, reached)
+        })
+    }
+
+    /// Per carrier its folded couplings (`Folded`).
+    pub(crate) fn folded(&self, model: &Model) -> &[Folded] {
+        &self.carriers(model).0
+    }
+
+    /// Per ground state the excited states (less GROUND) the carriers' folded couplings reach from it, ascending.
+    pub(crate) fn reached(&self, model: &Model) -> &[Vec<usize>] {
+        &self.carriers(model).1
+    }
+
+    /// The least decay rate of the excited states, Γ_min.
+    pub(crate) fn least_decay(&self, model: &Model) -> f64 {
+        *self.decay.get_or_init(|| model.least_decay())
+    }
+
+    /// The beat δ_to − δ_from of two carriers (rad/µs).
+    pub(crate) fn beat(&self, model: &Model, to: usize, from: usize) -> f64 {
+        self.beats.get_or_init(|| model.carriers.iter().map(|to| model.carriers.iter().map(|from| model.omega(&to.beat.plus(-1, &from.beat))).collect()).collect())[to][from]
+    }
+}
+
 /// A cell's beams, or its centre point's (its radius zero), with what the units' bounds share over it, each part made once for
 /// every quantity that asks (module documentation, # Provable extrema): the reach's speeds over it, the beam pairs per frequency,
-/// the far light's energies,
-/// the carriers' coherent couplings and dressings of the ground states, the clusters' force bounds and the ground states' drive
-/// bounds (eliminate.rs).
+/// the far light's energies and their slopes,
+/// the carriers' coherent couplings, resolvents and dressings of the ground states, the clusters' force bounds and the ground
+/// states' drive bounds (eliminate.rs).
 pub(crate) struct Region {
     pub(crate) spans: Vec<Span>,
     /// The cell's radius (0: a point).
@@ -165,22 +317,29 @@ pub(crate) struct Region {
     pub(crate) speed: f64,
     /// Per frequency, its beam pairs (j, i) row-major (`PairSpan`).
     pub(crate) pairs: Vec<Vec<PairSpan>>,
-    pub(crate) energies: OnceCell<CellEnergies>,
+    /// What its bounds read of the model's forms.
+    pub(crate) forms: Arc<Forms>,
+    pub(crate) energies: OnceLock<Box<CellEnergies>>,
     /// Per carrier.
-    pub(crate) couplings: OnceCell<Vec<Couplings>>,
+    pub(crate) couplings: OnceLock<Vec<Couplings>>,
+    /// [carrier][ground state]: the bound of its dressing's resolvent (eliminate.rs `Model::resolvent`).
+    pub(crate) resolvents: OnceLock<Vec<[f64; GROUND]>>,
     /// [carrier][ground state].
-    pub(crate) dressings: OnceCell<Vec<Vec<f64>>>,
+    pub(crate) dressings: OnceLock<Vec<[f64; GROUND]>>,
     /// Per cluster.
-    pub(crate) forces: Vec<OnceCell<f64>>,
+    pub(crate) forces: Vec<OnceLock<f64>>,
     /// Per ground state: its folded drives' saturation and sweep.
-    pub(crate) drives: Vec<OnceCell<(f64, f64)>>,
+    pub(crate) drives: [OnceLock<(f64, f64)>; GROUND],
     /// Per ground state: the slope of its level under the near light (units.rs `Model::near_slope`).
-    pub(crate) slopes: Vec<OnceCell<f64>>,
-    /// Per coupling of two states (a, b, the carriers it absorbs and emits, or none: a static one) its saturation and sweep
-    /// (units.rs `Model::static_bound`, eliminate.rs `Model::term_bound`).
-    pub(crate) terms: RefCell<HashMap<Coupling, (f64, f64)>>,
+    pub(crate) slopes: [OnceLock<f64>; GROUND],
+    /// Per ground state: the slopes of the far light's levels from it to the excited states the carriers reach (units.rs
+    /// `Model::level_slopes`).
+    pub(crate) levels: Vec<OnceLock<[f64; EXCITED]>>,
+    /// Per coupling of two states asked (a, b, the carriers it absorbs and emits, or none: a static one) its saturation and
+    /// sweep (units.rs `Model::static_bound`, eliminate.rs `Model::term_bound`).
+    pub(crate) terms: Mutex<Vec<(Coupling, (f64, f64))>>,
     /// The bounds of the slope of any two levels' difference and of an atom's acceleration (units.rs `Model::swept_over`).
-    pub(crate) moving: OnceCell<(f64, f64)>,
+    pub(crate) moving: OnceLock<(f64, f64)>,
 }
 
 /// A coupling of two states a ← b, absorbing and emitting two carriers or static (`Region::terms`' key).
@@ -189,11 +348,12 @@ pub(crate) type Coupling = (usize, usize, Option<Component>, Option<Component>);
 impl Region {
     /// A coupling's saturation and sweep over the region, made once for both of its gates' bounds.
     pub(crate) fn term(&self, coupling: Coupling, make: impl FnOnce() -> (f64, f64)) -> (f64, f64) {
-        if let Some(made) = self.terms.borrow().get(&coupling) {
-            return *made;
+        let terms = || self.terms.lock().expect("the couplings' lock");
+        if let Some(made) = terms().iter().find(|(of, _)| *of == coupling) {
+            return made.1;
         }
         let made = make();
-        self.terms.borrow_mut().insert(coupling, made);
+        terms().push((coupling, made));
         made
     }
 }
@@ -208,11 +368,14 @@ struct Node {
     halves: Option<[Option<usize>; 2]>,
 }
 
-/// A cell in a quantity's queue, ordered by its upper bound.
+/// A cell in a quantity's queue, ordered by its upper bound: the bound, the cell's node, the quantity's value at its centre, and
+/// whether the centre is in the reach.
+#[derive(Clone, Copy)]
 struct Queued {
     upper: f64,
     node: usize,
     centre: f64,
+    inside: bool,
 }
 impl PartialEq for Queued {
     fn eq(&self, o: &Self) -> bool {
@@ -229,6 +392,216 @@ impl Ord for Queued {
     fn cmp(&self, o: &Self) -> std::cmp::Ordering {
         self.upper.total_cmp(&o.upper)
     }
+}
+
+/// What the cells of one proving are made from: the model and the reach, the model's forms as their regions read them, and
+/// the prepared potential's lights and envelope.
+struct Cells<'a> {
+    model: &'a Model,
+    reach: &'a Reach,
+    forms: Arc<Forms>,
+    prepared: Lights,
+    envelope: Envelope,
+}
+
+impl Cells<'_> {
+    /// A cell's node, none where the cell cannot meet the reach: a lower bound of V_prep over it above the reach's level.
+    fn make(&self, cell: Cell) -> Option<Node> {
+        let (model, reach) = (self.model, self.reach);
+        let level = reach.minimum + reach.energy;
+        // The reach's speeds where V_prep is at least v.
+        let speed = |v: f64| reach.speed.min((2.0 * model.hbar_over_mass * (level - v).max(0.0)).sqrt());
+        let spans = model.spans(&cell);
+        if !cell.bounded() {
+            return Some(Node { cell, over: model.region(&self.forms, spans, reach.speed), at: None, inside: false, halves: None });
+        }
+        let centre = model.potential(cell.centre, &reach.populations, &self.prepared);
+        let below = centre - prepared_slack(&self.envelope, &spans);
+        if below > level {
+            return None;
+        }
+        let at = model.region(&self.forms, spans.iter().map(Span::point).collect(), speed(centre));
+        Some(Node { cell, over: model.region(&self.forms, spans, speed(below)), at: Some(at), inside: centre <= level, halves: None })
+    }
+}
+
+/// How far V_prep(r; p) moves over a bounded cell from its centre's value: each beam pair's coefficient by at most its radius
+/// (`pair_span`), weighted by the envelope's |Q_l'l| (the near trap light's included, potential.rs).
+fn prepared_slack(envelope: &Envelope, spans: &[Span]) -> f64 {
+    let n = envelope.beams.len();
+    let mut slack = 0.0;
+    for (j, &lj) in envelope.beams.iter().enumerate() {
+        for (i, &li) in envelope.beams.iter().enumerate() {
+            let w = envelope.weights[j * n + i];
+            if w != 0.0 {
+                slack += w * pair_span(spans, lj, li).radius;
+            }
+        }
+    }
+    slack
+}
+
+/// A quantity on a cell: its value at the centre (−∞ on an unbounded cell, which has none) and its upper bound over the cell.
+fn valued<Q: Fn(&Region) -> f64 + ?Sized>(q: &Q, node: &Node) -> (f64, f64) {
+    (node.at.as_ref().map_or(f64::NEG_INFINITY, |r| q(r)), q(&node.over))
+}
+
+/// What ends a proof (`Model::proven_over`): `settled(the largest upper bound of the cells left, the largest value attained at a
+/// centre in the reach)`, and the question's own size.
+#[derive(Clone, Copy)]
+struct Rule<'a> {
+    settled: &'a (dyn Fn(f64, f64) -> bool + Sync),
+    scale: f64,
+}
+
+/// One quantity's proof (module documentation, # Provable extrema, # Rounds): the cells left, by their upper bounds, and the
+/// largest value at a centre in the reach among them and their parents; the halves made for it, by cell, each as it enters the
+/// queue, until its order comes to their cell; the largest value at a centre in the reach among all the halves made for it,
+/// those waiting too; the cells it has asked to be halved; and its bound once it is decided.
+struct Proof {
+    queue: BinaryHeap<Queued>,
+    attained: f64,
+    halved: HashMap<usize, [Option<Queued>; 2]>,
+    sighted: f64,
+    asked: HashSet<usize>,
+    bound: Option<f64>,
+}
+
+impl Proof {
+    /// A quantity's proof at the proofs' first cell (none: no cell meets the reach, the bound is 0); on an unbounded cell, which
+    /// is not halved, the bound is the quantity's over it.
+    fn new<Q: Fn(&Region) -> f64 + ?Sized>(q: &Q, first: Option<&Node>) -> Proof {
+        let mut proof = Proof { queue: BinaryHeap::new(), attained: f64::NEG_INFINITY, halved: HashMap::new(), sighted: f64::NEG_INFINITY, asked: HashSet::new(), bound: None };
+        match first {
+            None => proof.bound = Some(0.0),
+            Some(node) => {
+                let (centre, upper) = valued(q, node);
+                if node.cell.bounded() {
+                    proof.push(Queued { upper, node: 0, centre, inside: node.inside });
+                } else {
+                    proof.bound = Some(upper);
+                }
+            }
+        }
+        proof
+    }
+
+    /// A cell into the queue, its centre's value attained where the centre is in the reach.
+    fn push(&mut self, cell: Queued) {
+        if cell.inside {
+            self.attained = self.attained.max(cell.centre);
+        }
+        self.queue.push(cell);
+    }
+
+    /// The proof as far as the halves made for it reach -- with `made`, those the round before made --, and the cells it asks
+    /// to be halved next, none once it is decided (module documentation, # Rounds): the cell its order has come to and, with
+    /// `ahead`, each of the halves just made that is not settled against the largest value the halves made hold.
+    fn advance(&mut self, made: Vec<(usize, [Option<Queued>; 2])>, rule: Rule, ahead: bool) -> Vec<usize> {
+        let new: Vec<Queued> = made.iter().flat_map(|(_, halves)| halves.iter().flatten().copied()).collect();
+        self.sighted = new.iter().filter(|half| half.inside).fold(self.sighted, |sighted, half| sighted.max(half.centre));
+        self.halved.extend(made);
+        while self.bound.is_none() {
+            let Some(&top) = self.queue.peek() else {
+                self.bound = Some(0.0);
+                break;
+            };
+            if (rule.settled)(top.upper, self.attained) || top.upper - top.centre <= rounding(1) * rule.scale.max(top.centre.abs()) {
+                self.bound = Some(top.upper);
+                break;
+            }
+            let Some(halves) = self.halved.remove(&top.node) else {
+                let unsettled = new.iter().filter(|half| ahead && !(rule.settled)(half.upper, self.sighted)).map(|half| half.node);
+                return [top.node].into_iter().chain(unsettled).filter(|&cell| self.asked.insert(cell)).collect();
+            };
+            self.queue.pop();
+            halves.into_iter().flatten().for_each(|half| self.push(half));
+        }
+        vec![]
+    }
+}
+
+/// A cell that proofs ask to be halved in a round: its node, and the quantities asking.
+struct Asked {
+    node: usize,
+    quantities: Vec<usize>,
+}
+
+/// A cell halved in a round: its halves where this round made them (none where a half cannot meet the reach), whether each
+/// half's centre is in the reach, and per quantity asking its values on each half (`valued`).
+struct Halved {
+    made: Option<[Option<Node>; 2]>,
+    inside: [bool; 2],
+    values: Vec<[Option<(f64, f64)>; 2]>,
+}
+
+/// A round of the proofs (module documentation, # Rounds): what its cells are made from, the cells made before it, the quantities.
+struct Round<'a, Q: ?Sized> {
+    cells: &'a Cells<'a>,
+    nodes: &'a [Node],
+    quantities: &'a [&'a Q],
+}
+
+impl<Q: Fn(&Region) -> f64 + ?Sized> Round<'_, Q> {
+    /// A cell halved for the quantities asking: its halves made where they are not yet, and those quantities' values on them.
+    fn halve(&self, asked: &Asked) -> Halved {
+        let node = &self.nodes[asked.node];
+        let made = node.halves.is_none().then(|| node.cell.halves().map(|half| self.cells.make(half)));
+        let halves: [Option<&Node>; 2] = match &made {
+            Some(made) => made.each_ref().map(Option::as_ref),
+            None => node.halves.expect("the halves made in an earlier round").map(|at| at.map(|at| &self.nodes[at])),
+        };
+        let values = asked.quantities.iter().map(|&q| halves.map(|half| half.map(|half| valued(self.quantities[q], half)))).collect();
+        Halved { inside: halves.map(|half| half.is_some_and(|half| half.inside)), made, values }
+    }
+}
+
+/// The pace of a proving (module documentation, # Rounds): whether its proofs ask for cells ahead of their order, and how a
+/// round's independent pieces are gone through -- the proofs' own steps (each with what the round before made for it), the
+/// halving of the cells asked for --, and the cells let go in the end.
+trait Pace<Q: ?Sized> {
+    const AHEAD: bool;
+    fn proofs<T: Send, R: Send>(proofs: &mut [Proof], made: Vec<T>, step: impl Fn(&mut Proof, T) -> R + Sync) -> Vec<R>;
+    fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved>;
+    fn release(nodes: Vec<Node>);
+}
+
+/// One after another, no cell ahead of a proof's order: the pace of quantities that only their own thread may ask.
+struct InTurn;
+
+impl<Q: Fn(&Region) -> f64 + ?Sized> Pace<Q> for InTurn {
+    const AHEAD: bool = false;
+    fn proofs<T: Send, R: Send>(proofs: &mut [Proof], made: Vec<T>, step: impl Fn(&mut Proof, T) -> R + Sync) -> Vec<R> {
+        proofs.iter_mut().zip(made).map(|(proof, made)| step(proof, made)).collect()
+    }
+    fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved> {
+        asked.iter().map(|cell| round.halve(cell)).collect()
+    }
+    fn release(nodes: Vec<Node>) {
+        drop(nodes)
+    }
+}
+
+/// On all the cores at once, each proof asking ahead of its order: the pace of quantities that any thread may ask.
+struct AtOnce;
+
+impl<Q: Fn(&Region) -> f64 + Sync + ?Sized> Pace<Q> for AtOnce {
+    const AHEAD: bool = true;
+    fn proofs<T: Send, R: Send>(proofs: &mut [Proof], made: Vec<T>, step: impl Fn(&mut Proof, T) -> R + Sync) -> Vec<R> {
+        proofs.par_iter_mut().zip(made).map(|(proof, made)| step(proof, made)).collect()
+    }
+    fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved> {
+        asked.par_iter().map(|cell| round.halve(cell)).collect()
+    }
+    fn release(nodes: Vec<Node>) {
+        nodes.into_par_iter().for_each(drop)
+    }
+}
+
+/// Whether a quantity's proof against a threshold is decided (`Model::bounds_over`), by the largest upper bound of the cells left
+/// and the largest value attained at a centre in the reach: below the threshold everywhere, or attained at or above it.
+fn decided(threshold: f64) -> impl Fn(f64, f64) -> bool + Sync {
+    move |upper, attained| upper < threshold || attained >= threshold
 }
 
 impl Model {
@@ -300,25 +673,9 @@ impl Model {
             .collect()
     }
 
-    /// How far V_prep(r; p) moves over a bounded cell from its centre's value: each beam pair's coefficient by at most its radius
-    /// (`pair_span`), weighted by the envelope's |Q_l'l| (the near trap light's included, potential.rs).
-    fn prepared_slack(&self, spans: &[Span], p: &[f64; GROUND]) -> f64 {
-        let envelope = self.envelope(p);
-        let n = envelope.beams.len();
-        let mut slack = 0.0;
-        for (j, &lj) in envelope.beams.iter().enumerate() {
-            for (i, &li) in envelope.beams.iter().enumerate() {
-                let w = envelope.weights[j * n + i];
-                if w != 0.0 {
-                    slack += w * pair_span(spans, lj, li).radius;
-                }
-            }
-        }
-        slack
-    }
-
-    /// A region of the beams `spans` at speeds up to `speed` (`Region`): its beam pairs made, the rest when asked.
-    pub(crate) fn region(&self, spans: Vec<Span>, speed: f64) -> Region {
+    /// A region of the beams `spans` at speeds up to `speed` (`Region`), reading the model's forms from `forms`: its beam pairs
+    /// made, the rest when asked.
+    pub(crate) fn region(&self, forms: &Arc<Forms>, spans: Vec<Span>, speed: f64) -> Region {
         let pairs = self
             .light
             .frequencies
@@ -330,99 +687,98 @@ impl Model {
             rho: spans.first().map_or(0.0, |s| s.rho),
             speed,
             spans,
-            energies: OnceCell::new(),
-            couplings: OnceCell::new(),
-            dressings: OnceCell::new(),
-            forces: (0..self.clusters.len()).map(|_| OnceCell::new()).collect(),
-            drives: (0..GROUND).map(|_| OnceCell::new()).collect(),
-            slopes: (0..GROUND).map(|_| OnceCell::new()).collect(),
-            terms: RefCell::new(HashMap::new()),
-            moving: OnceCell::new(),
+            forms: forms.clone(),
+            energies: OnceLock::new(),
+            couplings: OnceLock::new(),
+            resolvents: OnceLock::new(),
+            dressings: OnceLock::new(),
+            forces: (0..self.clusters.len()).map(|_| OnceLock::new()).collect(),
+            drives: std::array::from_fn(|_| OnceLock::new()),
+            slopes: std::array::from_fn(|_| OnceLock::new()),
+            levels: (0..GROUND).map(|_| OnceLock::new()).collect(),
+            terms: Mutex::new(vec![]),
+            moving: OnceLock::new(),
         }
     }
 
     /// The region of a point alone at one speed (a sample's: the errors measured there).
     pub(crate) fn point_region(&self, r: [f64; 3], speed: f64) -> Region {
-        self.region(self.spans(&Cell { centre: r, half: [0.0; 3] }), speed)
+        self.region(&Arc::new(Forms::new()), self.spans(&Cell { centre: r, half: [0.0; 3] }), speed)
     }
 
     /// The provable bounds over the reach of quantities given per region, each asked against `threshold` (module documentation,
     /// # Provable extrema): each one's largest upper bound of the cells left when it is decided -- below the threshold everywhere,
     /// or attained at or above it at a centre in the reach --, or within the rounding of its centre's value; 0 where no cell meets
-    /// the reach.
+    /// the reach. The cells are halved one after another (`InTurn`).
     pub(crate) fn bounds_over(&self, reach: &Reach, threshold: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
-        self.proven_over(reach, &|upper, attained| upper < threshold || attained >= threshold, threshold.abs(), quantities)
+        self.proven_over::<_, InTurn>(reach, Rule { settled: &decided(threshold), scale: threshold.abs() }, quantities)
+    }
+
+    /// The bounds against `threshold` (`bounds_over`) of quantities any thread may ask, proven on all the cores (`AtOnce`): the
+    /// same bounds, to the bit.
+    pub(crate) fn bounds_over_in_parallel(&self, reach: &Reach, threshold: f64, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
+        self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold), scale: threshold.abs() }, quantities)
     }
 
     /// The provable bounds over the reach of quantities given per region, each to `resolution`: each one's largest upper bound of
-    /// the cells left once it is within the resolution of a value attained at a centre in the reach.
+    /// the cells left once it is within the resolution of a value attained at a centre in the reach. The cells are halved one
+    /// after another (`InTurn`).
     pub(crate) fn extents_over(&self, reach: &Reach, resolution: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
-        self.proven_over(reach, &|upper, attained| upper - attained <= resolution, resolution, quantities)
+        self.proven_over::<_, InTurn>(reach, Rule { settled: &|upper, attained| upper - attained <= resolution, scale: resolution }, quantities)
     }
 
-    /// The proofs' subdivision (module documentation, # Provable extrema): per quantity the cell of its largest upper bound is
-    /// halved until `settled(that bound, the largest value attained at a centre in the reach so far)`, the cell is unbounded, or
-    /// the bound is within the rounding of its centre's value (of `scale`, the question's own size, where that is larger).
-    fn proven_over(&self, reach: &Reach, settled: &dyn Fn(f64, f64) -> bool, scale: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
-        let level = reach.minimum + reach.energy;
-        // The reach's speeds where V_prep is at least v.
-        let speed = |v: f64| reach.speed.min((2.0 * self.hbar_over_mass * (level - v).max(0.0)).sqrt());
-        let make = |cell: Cell| -> Option<Node> {
-            let spans = self.spans(&cell);
-            if !cell.bounded() {
-                return Some(Node { cell, over: self.region(spans, reach.speed), at: None, inside: false, halves: None });
-            }
-            let centre = self.potential(cell.centre, &reach.populations, &self.prepared());
-            let below = centre - self.prepared_slack(&spans, &reach.populations);
-            if below > level {
-                return None;
-            }
-            let at = self.region(spans.iter().map(Span::point).collect(), speed(centre));
-            Some(Node { cell, over: self.region(spans, speed(below)), at: Some(at), inside: centre <= level, halves: None })
-        };
+    /// The proofs' subdivision (module documentation, # Provable extrema, # Rounds): per quantity the cell of its largest upper
+    /// bound is halved until the bound is settled against the largest value attained at a centre in the reach so far, the cell
+    /// is unbounded, or the bound is within the rounding of its centre's value (of the question's own size, where that is
+    /// larger: `rule`). The proofs go on in rounds, at the pace `P`.
+    fn proven_over<Q: Fn(&Region) -> f64 + ?Sized, P: Pace<Q>>(&self, reach: &Reach, rule: Rule, quantities: &[&Q]) -> Vec<f64> {
+        let cells = Cells { model: self, reach, forms: Arc::new(Forms::new()), prepared: self.prepared(), envelope: self.envelope(&reach.populations) };
         let half = reach.cell.map(|[lo, hi]| 0.5 * (hi - lo));
         let start = Cell { centre: reach.cell.map(|[lo, hi]| if (hi - lo).is_finite() { 0.5 * (lo + hi) } else { 0.0 }), half };
-        let mut nodes: Vec<Node> = make(start).into_iter().collect();
-        let mut out = vec![];
-        for q in quantities {
-            // The cells left, by their upper bounds, and the largest value at a centre in the reach among them and their parents.
-            let (mut queue, mut attained) = (BinaryHeap::new(), f64::NEG_INFINITY);
-            let push = |queue: &mut BinaryHeap<Queued>, attained: &mut f64, nodes: &[Node], at: usize| {
-                let n = &nodes[at];
-                let centre = n.at.as_ref().map_or(f64::NEG_INFINITY, |r| q(r));
-                if n.inside {
-                    *attained = attained.max(centre);
-                }
-                queue.push(Queued { upper: q(&n.over), node: at, centre });
-            };
-            if !nodes.is_empty() {
-                push(&mut queue, &mut attained, &nodes, 0);
+        let mut nodes: Vec<Node> = cells.make(start).into_iter().collect();
+        let mut proofs: Vec<Proof> = quantities.iter().map(|q| Proof::new(*q, nodes.first())).collect();
+        // Per proof, the halves the round before made for it.
+        let nothing = || -> Vec<Vec<(usize, [Option<Queued>; 2])>> { quantities.iter().map(|_| vec![]).collect() };
+        let mut made = nothing();
+        loop {
+            let asking = P::proofs(&mut proofs, made, |proof, made| proof.advance(made, rule, P::AHEAD));
+            // The cells asked for, each with the quantities asking.
+            let mut by_cell: Vec<(usize, usize)> = asking.iter().enumerate().flat_map(|(q, cells)| cells.iter().map(move |&node| (node, q))).collect();
+            if by_cell.is_empty() {
+                break;
             }
-            out.push(loop {
-                let Some(top) = queue.pop() else { break 0.0 };
-                let cell = nodes[top.node].cell;
-                if settled(top.upper, attained) || !cell.bounded() || top.upper - top.centre <= rounding(1) * scale.max(top.centre.abs()) {
-                    break top.upper;
+            by_cell.sort_unstable();
+            let mut asked: Vec<Asked> = vec![];
+            for (node, q) in by_cell {
+                match asked.last_mut() {
+                    Some(cell) if cell.node == node => cell.quantities.push(q),
+                    _ => asked.push(Asked { node, quantities: vec![q] }),
                 }
-                let halves = match nodes[top.node].halves {
-                    Some(h) => h,
-                    None => {
-                        let h = cell.halves().map(|c| {
-                            make(c).map(|x| {
-                                nodes.push(x);
+            }
+            let halved = P::cells(&Round { cells: &cells, nodes: &nodes, quantities }, &asked);
+            made = nothing();
+            for (cell, halved) in asked.iter().zip(halved) {
+                let halves = match halved.made {
+                    Some(new) => {
+                        let at = new.map(|half| {
+                            half.map(|half| {
+                                nodes.push(half);
                                 nodes.len() - 1
                             })
                         });
-                        nodes[top.node].halves = Some(h);
-                        h
+                        nodes[cell.node].halves = Some(at);
+                        at
                     }
+                    None => nodes[cell.node].halves.expect("the halves made in an earlier round"),
                 };
-                for h in halves.into_iter().flatten() {
-                    push(&mut queue, &mut attained, &nodes, h);
+                for (&q, values) in cell.quantities.iter().zip(halved.values) {
+                    let queued = std::array::from_fn(|x| halves[x].zip(values[x]).map(|(node, (centre, upper))| Queued { upper, node, centre, inside: halved.inside[x] }));
+                    made[q].push((cell.node, queued));
                 }
-            });
+            }
         }
-        out
+        P::release(nodes);
+        proofs.into_iter().map(|proof| proof.bound.expect("a proof left open asks for a cell")).collect()
     }
 }
 
@@ -478,7 +834,8 @@ mod tests {
         let within = |value: f64, bound: f64| value <= bound * (1.0 + 1e-12) + 1e-12;
         let norm = |v: &[C64]| v.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
         for cell in [Cell { centre: [0.13, -0.21, 0.07], half: [0.05, 0.08, 0.03] }, Cell { centre: [-0.4, 0.3, 0.25], half: [0.3, 0.2, 0.25] }] {
-            let region = model.region(model.spans(&cell), 0.0);
+            let forms = Arc::new(Forms::new());
+            let region = model.region(&forms, model.spans(&cell), 0.0);
             let (energies, couplings) = (model.energies(&region), model.couplings(&region));
             for r in points(&cell) {
                 let a = model.light.amplitudes(r);
@@ -527,9 +884,9 @@ mod tests {
                 }
             }
             // On the centre point, the values; on a cell a thousand times smaller, within that factor of them.
-            let point = model.region(region.spans.iter().map(Span::point).collect(), 0.0);
+            let point = model.region(&forms, region.spans.iter().map(Span::point).collect(), 0.0);
             let small = Cell { centre: cell.centre, half: cell.half.map(|h| h * 1e-3) };
-            let tiny = model.region(model.spans(&small), 0.0);
+            let tiny = model.region(&forms, model.spans(&small), 0.0);
             let a = model.light.amplitudes(cell.centre);
             for (ci, cc) in model.carriers.iter().enumerate() {
                 for s in 0..GROUND {
@@ -545,7 +902,8 @@ mod tests {
         }
     }
 
-    /// One tree of cells for many quantities proves each as its own proof would: the shared cells change no bound (R3_DOPPLER's
+    /// One tree of cells for many quantities proves each as its own proof would, and so do its rounds' cells halved on all the
+    /// cores, the proofs asking ahead of their order: the shared cells and the cells made ahead change no bound (R3_DOPPLER's
     /// cooling pair near, its drives' saturations and sweep from two ground states).
     #[test]
     fn one_tree_proves_each_quantity_as_its_own_proof_would() {
@@ -570,5 +928,6 @@ mod tests {
         let together = model.bounds_over(&reach, 0.5, &[&s, &a, &other]);
         let alone: Vec<f64> = [&s as &dyn Fn(&Region) -> f64, &a, &other].iter().map(|q| model.bounds_over(&reach, 0.5, &[*q])[0]).collect();
         assert_eq!(together, alone);
+        assert_eq!(model.bounds_over_in_parallel(&reach, 0.5, &[&s, &a, &other]), alone);
     }
 }
