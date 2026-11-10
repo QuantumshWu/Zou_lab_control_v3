@@ -35,8 +35,8 @@
 //! damped motion -- the sum reads more than the error: the safe side.
 
 use crate::linalg::dot3;
-use crate::model::{Point, STATES};
-use crate::step::{jump, step, step_work, test_loss, Dynamics, Flow, Refused, Segment, Step, Trajectory};
+use crate::model::STATES;
+use crate::step::{jump, step, step_work, test_loss, Dynamics, Flow, Middle, Refused, Segment, Step, Trajectory};
 use crate::units::ORDER;
 
 /// The grid's order in its spacing h: CF4's local error O(h⁵) and composite Simpson's, per unit time O(h⁴).
@@ -190,10 +190,11 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, mu
     Ok(())
 }
 
-/// The counted work of one step of τ of a cluster from a point (the middle taken there, the path at its momentum), and the
-/// middles it asks of the model: what `advance` adds to `Trajectory::work` and `Trajectory::assemblies` per step, priced
-/// without taking it (`step::step_work`). The model's price of a middle is its `assembly_work`.
-pub fn advance_work<D: Dynamics>(model: &D, cluster: usize, at: &Point, tau: f64) -> (f64, u64) {
-    let (work, _) = step_work(model, cluster, at, tau, tau / (2 * 2 * HALF_PANELS) as f64);
+/// The counted work of one step of τ on the path through a cluster's middle at a momentum and a velocity (µm/µs), and the
+/// middles a step asks of the model: what `advance` adds to `Trajectory::work` and `Trajectory::assemblies` per step,
+/// priced without taking it and without a middle of its own (`step::step_work`). The model's price of a middle is its
+/// `assembly_work`.
+pub fn advance_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64) -> (f64, u64) {
+    let (work, _) = step_work(middle, kappa, velocity, tau, tau / (2 * 2 * HALF_PANELS) as f64);
     (work, 1)
 }

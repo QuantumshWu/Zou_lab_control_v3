@@ -1045,17 +1045,17 @@ pub fn step<D: Dynamics>(model: &D, from: &Trajectory, tau: f64) -> Result<Step,
     Ok(Step { end, crossing: two.crossing, segment: Segment { start: from.time, tau, flow, from: (from.r, from.kappa), kicked }, work, assemblies: 1, retry })
 }
 
-/// The counted work of one step of τ of a cluster from a point -- the middle taken at the point itself, the path at its
-/// momentum --, and of that step's grid doubling (zero without a grid): what `Step::work` and `Step::regrid` count,
-/// priced without taking the step -- the solve's price of a model it has not run, at its pilot's states and steps. Both
-/// propagations by the generator's own route (`route`: the eigen-propagation's decomposition and Gauss–Legendre nodes, or
-/// the grid's CF4 spacings no wider than `grid`, each exponential's Chebyshev plan at the bounds of Ĥ's traceless part at
-/// the middle over half a spacing, its two nodes' weights' sum) and the shear; the middle itself is the model's
-/// (`Dynamics::assembly_work`, one a step).
-pub fn step_work<D: Dynamics>(model: &D, cluster: usize, at: &Point, tau: f64, grid: f64) -> (f64, f64) {
-    let middle = model.middle(cluster, at.r, at.t);
+/// The counted work of one step of τ on the path through a middle at a momentum and a velocity, and of that step's grid
+/// doubling (zero without a grid): what `Step::work` and `Step::regrid` count, priced without taking the step -- the
+/// solve's price of a model it has not run, at its pilot's states and steps. It makes no middle: the caller's is a
+/// state's own, or one of the cluster made once -- the nodes' counts are the cluster's whatever the point
+/// (`Middle::work`), and the point gives the route alone. Both propagations by the generator's own route (`route`: the
+/// eigen-propagation's decomposition and Gauss–Legendre nodes, or the grid's CF4 spacings no wider than `grid`, each
+/// exponential's Chebyshev plan at the bounds of Ĥ's traceless part at the middle over half a spacing, its two nodes'
+/// weights' sum) and the shear; the middle itself is the model's (`Dynamics::assembly_work`, one a step).
+pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64, grid: f64) -> (f64, f64) {
     let (n, costs) = (middle.states(), middle.work());
-    let along = Along::new(&middle, at.kappa, at.kappa.map(|k| model.hbar_over_mass() * k), tau);
+    let along = Along::new(middle, kappa, velocity, tau);
     let (mut a, mut sums) = (Mat::zeros(n, n), vec![C64::ZERO; n]);
     let (propagation, regrid) = match route(&along, &mut a, &mut sums, tau) {
         Some(spectrum) => (count::spectral(n, costs, spectrum.eigen.work, spectrum.nodes) + count::impulse(n, costs, spectrum.nodes, true), 0.0),

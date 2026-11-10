@@ -750,9 +750,10 @@ fn a_step_with_light_and_its_reverse_miss_beyond_the_scheme_s_order() {
 // ---------------------------------------------------------------------------------------------------------------------
 // The model's far light (`model::Run`) on the R1 scenes: a conservative trap.
 
-/// A reference scene (refs/scenes, the app's native request) through the one parser.
+/// A scene's request through the one parser: a reference scene by name (refs/scenes, the app's native request), or any
+/// native request file by its path.
 fn scene(name: &str) -> crate::request::Request {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
+    let path = if name.ends_with(".json") { std::path::PathBuf::from(name) } else { std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json")) };
     let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     crate::request::Request::from_native(&line).unwrap()
 }
@@ -1246,18 +1247,11 @@ fn scene_atoms(name: &str, grid: f64, each: &mut dyn FnMut(&crate::model::Run, &
     p[state] = 1.0;
     let trap = model.trap(&p, &model.prepared()).unwrap();
     let run = crate::model::Run::new(&model, p);
-    let (hm, kt) = (run.hbar_over_mass(), crate::units::KT_PER_UK * request.temperature_uk);
+    let kt = crate::units::KT_PER_UK * request.temperature_uk;
     let starts: Vec<Trajectory> = (0..16)
         .map(|i| {
             let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, 0);
-            let (mut r, mut kappa) = (trap.centre, [0.0; 3]);
-            for axis in 0..3 {
-                let (x, k) = (stream.normal() * (kt * hm).sqrt() / trap.frequencies[axis], stream.normal() * (kt / hm).sqrt());
-                for a in 0..3 {
-                    r[a] += x * trap.axes[axis][a];
-                    kappa[a] += k * trap.axes[axis][a];
-                }
-            }
+            let (r, kappa) = thermal(&trap, run.hbar_over_mass(), kt, &mut stream);
             let mut t = Trajectory::new(&run, state, r, kappa, 17, i);
             t.threshold = f64::MIN_POSITIVE;
             t.grid = grid;
@@ -1265,6 +1259,74 @@ fn scene_atoms(name: &str, grid: f64, each: &mut dyn FnMut(&crate::model::Run, &
         })
         .collect();
     each(&run, &starts)
+}
+
+/// An atom's place and momentum at k_BT in a trap's harmonic approximation: Gaussian along its principal axes.
+fn thermal(trap: &crate::model::Trap, hm: f64, kt: f64, stream: &mut crate::random::Stream) -> ([f64; 3], [f64; 3]) {
+    let (mut r, mut kappa) = (trap.centre, [0.0; 3]);
+    for axis in 0..3 {
+        let (x, k) = (stream.normal() * (kt * hm).sqrt() / trap.frequencies[axis], stream.normal() * (kt / hm).sqrt());
+        for a in 0..3 {
+            r[a] += x * trap.axes[axis][a];
+            kappa[a] += k * trap.axes[axis][a];
+        }
+    }
+    (r, kappa)
+}
+
+/// A scene's step on its own model (run by name, alone: `SCENE=<a reference scene's name or a native request's path>
+/// TAU=<µs> … a_scene_s_step_cost -- --ignored --nocapture`): the scene's model as the solve closes it (solve.rs
+/// `attempt`: every unit whose fold does not exist over the reach kept, until none fails) with its near tables
+/// (`Model::tabulate`), and per cluster a cost case (`cost`): sixteen atoms of the scene's temperature in the trap's
+/// harmonic approximation, each a random state of the cluster, held, one step of τ each on the control's grid of two
+/// panels (adapt.rs).
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn a_scene_s_step_cost() {
+    use crate::model::{Model, Run, Unit, GROUND};
+    let name = std::env::var("SCENE").expect("SCENE: a reference scene's name or a request file's path");
+    let tau: f64 = std::env::var("TAU").expect("TAU: the step (µs)").parse().expect("TAU: a number");
+    let request = scene(&name);
+    let light = crate::field::Light::new(&request);
+    let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let mut p = [0.0; GROUND];
+    p[state] = 1.0;
+    let started = std::time::Instant::now();
+    let mut kept: Vec<Unit> = vec![];
+    let (model, trap, reach) = loop {
+        let model = Model::new(&request, &light, &kept).unwrap();
+        let trap = model.trap(&p, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
+        let units = model.units();
+        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
+        if failing.is_empty() {
+            break (model, trap, reach);
+        }
+        kept.extend(failing);
+    };
+    let closure = started.elapsed();
+    let started = std::time::Instant::now();
+    let tables = model.tabulate(&reach, 1 << 20);
+    eprintln!("{name}: closure {closure:.2?}, {} units kept, tabulate {:.2?}, {} tables", kept.len(), started.elapsed(), tables.tables.len());
+    let run = Run::tabulated(&model, &tables, p);
+    let kt = crate::units::KT_PER_UK * request.temperature_uk;
+    let panels = 2;
+    for (cluster, c) in model.clusters().iter().enumerate() {
+        let starts: Vec<Trajectory> = (0..16)
+            .map(|i| {
+                let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, cluster as u32);
+                let (r, kappa) = thermal(&trap, run.hbar_over_mass(), kt, &mut stream);
+                let mut t = Trajectory::new(&run, c.states[0], r, kappa, 17, i);
+                let psi: Vec<C64> = t.psi.iter().map(|_| C64::new(stream.normal(), stream.normal())).collect();
+                let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+                t.psi = psi.iter().map(|z| *z / norm).collect();
+                t.threshold = f64::MIN_POSITIVE;
+                t.grid = tau / (2 * panels) as f64;
+                t
+            })
+            .collect();
+        cost(&format!("{}+{} of {}", c.ground, c.states.len() - c.ground, std::path::Path::new(&name).file_stem().unwrap().to_string_lossy()), &run, &starts, tau);
+    }
 }
 
 
