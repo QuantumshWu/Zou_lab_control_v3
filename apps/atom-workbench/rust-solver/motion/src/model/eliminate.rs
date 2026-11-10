@@ -42,8 +42,8 @@ use super::assemble::{NearValues, Plan};
 use super::cluster::Edge;
 use super::photon::Origin;
 use super::reach::{distance, Region};
-use super::units::{mixing, swept};
-use super::{Beat, Component, Lights, Model, Point, Sample, Unit, UnitError};
+use super::units::{mixing, swept, Measured};
+use super::{Beat, Component, Lights, Model, Point, Unit, UnitError};
 use crate::field::Amplitude;
 use crate::linalg::{dot3, Lu, Mat, C64};
 use crate::request::{GROUND, STATES};
@@ -415,24 +415,28 @@ impl Model {
         out
     }
 
-    /// The first-order Doppler term's relative size on a ground place y of a plan's cluster (its error's square root, units.rs):
-    /// max_l |w_l| ‖T2_l[:, y]‖ / max_l ‖T_l[:, y]‖ over the carrier's beams, T_l = Σ_k γ_lk T_k.
-    pub(crate) fn doppler_size(&self, plan: &Plan, near: &NearValues, carrier: usize, y: usize, kappa: [f64; 3]) -> f64 {
+    /// The first-order Doppler term's relative size on each ground place y of a plan's cluster (its error's square root,
+    /// units.rs): max_l |w_l| ‖T2_l[:, y]‖ / max_l ‖T_l[:, y]‖ over the carrier's beams, T_l = Σ_k γ_lk T_k.
+    pub(crate) fn doppler_sizes(&self, plan: &Plan, near: &NearValues, carrier: usize, kappa: [f64; 3]) -> Vec<f64> {
         let f = &self.light.frequencies[self.carriers[carrier].frequency];
+        let g = self.clusters[plan.cluster].ground;
         let (start, count) = (plan.near.responding().start, plan.near.responses.len());
-        let (mut first, mut second) = (0.0_f64, 0.0_f64);
+        let (mut first, mut second) = (vec![0.0_f64; g], vec![0.0_f64; g]);
         for (&l, c) in f.beams.iter().zip(&f.coefficients) {
-            let (mut t, mut t2) = ([C64::ZERO; EXCITED], [C64::ZERO; EXCITED]);
-            for (i, &[of, k, e, place]) in plan.near.responses.iter().enumerate() {
-                if of == carrier && place == y {
-                    t[e] += c[k] * near.data[start + i];
-                    t2[e] += c[k] * near.data[start + count + i];
+            let (mut t, mut t2) = (vec![[C64::ZERO; EXCITED]; g], vec![[C64::ZERO; EXCITED]; g]);
+            for (i, &[of, k, e, y]) in plan.near.responses.iter().enumerate() {
+                if of == carrier {
+                    t[y][e] += c[k] * near.data[start + i];
+                    t2[y][e] += c[k] * near.data[start + count + i];
                 }
             }
-            first = first.max(crate::linalg::norm_sqr(&t).sqrt());
-            second = second.max(self.doppler_shift(l, kappa).abs() * crate::linalg::norm_sqr(&t2).sqrt());
+            let shift = self.doppler_shift(l, kappa).abs();
+            for y in 0..g {
+                first[y] = first[y].max(crate::linalg::norm_sqr(&t[y]).sqrt());
+                second[y] = second[y].max(shift * crate::linalg::norm_sqr(&t2[y]).sqrt());
+            }
         }
-        if first > 0.0 { second / first } else { 0.0 }
+        first.iter().zip(&second).map(|(&t, &t2)| if t > 0.0 { t2 / t } else { 0.0 }).collect()
     }
 
     /// The near carriers' folded channels on a cluster at a point (readout.rs): per lit carrier its response there
@@ -524,36 +528,32 @@ impl Model {
         }
     }
 
-    /// A near unit's error at a sample.
-    pub(crate) fn near_error(&self, unit: &Unit, sample: &Sample) -> UnitError {
+    /// A near unit's error at a sample (units.rs `Measured`).
+    pub(crate) fn near_error(&self, unit: &Unit, at: &Measured) -> UnitError {
         match unit {
-            Unit::Coherence { .. } => self.coherence_error(unit, sample),
-            Unit::Drive { .. } => self.drive_error(unit, sample),
-            Unit::Term { .. } => self.term_error(unit, sample),
-            Unit::Dressing { carrier } => self.dressing_error(*carrier, sample),
+            Unit::Coherence { .. } => self.coherence_error(unit, at),
+            Unit::Drive { .. } => self.drive_error(unit, at),
+            Unit::Term { .. } => self.term_error(unit, at),
+            Unit::Dressing { carrier } => self.dressing_error(*carrier, at),
             _ => unreachable!("the far units' errors are units.rs'"),
         }
     }
 
-    /// A carrier's dressing's error at a sample: every carrier's folded response there with its coherent field in the dressing, R',
+    /// A carrier's dressing's error at a sample: every carrier's folded response there with its coherent field in the dressing, R'
+    /// -- the exact elimination with that carrier's dressing the other way, the one elimination a unit's error takes of its own --
     /// against the model's with its units' T̄, R, on the sample's ground amplitudes ψ_g -- the other carriers' through its shift of
     /// their denominators, its own through its channels' self-energy and the dressed energies of the states they lead to --:
     /// δ = max_c ‖(R'_c − R_c)ψ_g‖/‖R_c ψ_g‖, the relative error of the rates and light shifts it moves of the sample's state, zero
     /// where nothing drives it; on the populations and on T δ P_g, P_g the sample's ground population (SPEC §1.5's map of a
     /// relative rate error, as a drive's S_b p_b).
-    pub(crate) fn dressing_error(&self, carrier: Component, sample: &Sample) -> UnitError {
-        let lights = self.running();
-        let amplitudes = self.light.amplitudes(sample.at.r);
-        let plan = self.plan(sample.cluster, &lights);
+    pub(crate) fn dressing_error(&self, carrier: Component, at: &Measured) -> UnitError {
         let mut toggled = self.coherent_dressing();
         let d = self.carrier_index(carrier.frequency);
         toggled[d] = !toggled[d];
-        let responses = |coherent: &[bool]| self.carrier_responses(&plan, &self.near_exact(&plan, &amplitudes, 0, coherent), &amplitudes, sample.at.kappa);
-        let (model, other) = (responses(&self.coherent_dressing()), responses(&toggled));
-        let g = self.clusters[sample.cluster].ground;
-        let ground = &sample.psi[..g];
+        let other = self.carrier_responses(&at.plan, &self.near_exact(&at.plan, &at.amplitudes, 0, &toggled), &at.amplitudes, at.sample.at.kappa);
+        let ground = &at.sample.psi[..self.clusters[at.sample.cluster].ground];
         let mut delta = 0.0_f64;
-        for (r, s) in model.iter().zip(&other) {
+        for (r, s) in at.responses.iter().zip(&other) {
             let (Some(r), Some(s)) = (r, s) else { continue };
             let (r, s) = (r.apply(ground), s.apply(ground));
             let size: f64 = r.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
@@ -562,8 +562,7 @@ impl Model {
                 delta = delta.max(diff / size);
             }
         }
-        let total: f64 = sample.psi.iter().map(|z| z.norm_sqr()).sum();
-        let weight = ground.iter().map(|z| z.norm_sqr()).sum::<f64>() / total;
+        let weight: f64 = at.populations[..GROUND].iter().sum();
         UnitError { parameter: delta, population: delta * weight, temperature: delta * weight }
     }
 
@@ -862,39 +861,34 @@ impl Model {
         })
     }
 
-    /// A folded drive's small parameters at a sample (SPEC §1.5): its own saturation s = 2|R_c[e,b]|² at the point (R = Σ_l a_l T̃_l),
-    /// its sweep a = |v·∇(E_e − E_b) + k·v̇|/|ΔE|² (ΔE = E_e − E_b − δ_c − k·v − iΓ_e/2, k its strongest beam's, v̇ the force on the
-    /// state at the point over m, model.rs `Generator::force`), its Doppler order's (w‖T2‖/‖T‖)², and its ground state's
-    /// population p_b; None where the sample's cluster does not hold its ground state.
-    pub(crate) fn drive_parameters(&self, unit: &Unit, sample: &Sample) -> Option<(f64, f64, f64, f64)> {
+    /// A folded drive's small parameters at a sample (SPEC §1.5; units.rs `Measured`): its own saturation s = 2|R_c[e,b]|² at the
+    /// point (R = Σ_l a_l T̃_l), its sweep a = |v·∇(E_e − E_b) + k·v̇|/|ΔE|² (ΔE = E_e − E_b − δ_c − k·v − iΓ_e/2, k its strongest
+    /// beam's, v̇ the force on the state at the point over m, model.rs `Generator::force`), its Doppler order's (w‖T2‖/‖T‖)², and its
+    /// ground state's population p_b; None where the sample's cluster does not hold its ground state.
+    pub(crate) fn drive_parameters(&self, unit: &Unit, at: &Measured) -> Option<(f64, f64, f64, f64)> {
         let Unit::Drive { carrier, excited, ground } = unit else { unreachable!() };
-        let c = &self.clusters[sample.cluster];
+        let c = &self.clusters[at.sample.cluster];
         let pb = c.states[..c.ground].iter().position(|&s| s == *ground)?;
-        let p = self.state_populations(sample)[*ground];
-        let lights = self.running();
-        let amplitudes = self.light.amplitudes(sample.at.r);
-        let plan = self.plan(sample.cluster, &lights);
-        let near = self.near_exact(&plan, &amplitudes, 0, &self.coherent_dressing());
         let ci = self.carrier_index(carrier.frequency);
         let cc = &self.carriers[ci];
-        let r = self.carrier_responses(&plan, &near, &amplitudes, sample.at.kappa)[ci].as_ref().map_or(C64::ZERO, |m| m[(excited - GROUND, pb)]);
+        let r = at.responses[ci].as_ref().map_or(C64::ZERO, |m| m[(excited - GROUND, pb)]);
         let s = 2.0 * r.norm_sqr();
-        let h = &self.far_energies(&amplitudes, &lights, 1).0;
-        let v: [f64; 3] = sample.at.kappa.map(|k| k * self.hbar_over_mass);
-        let force = self.assemble(sample.cluster, &sample.at, &lights).force(&sample.psi, &|_| 1.0);
+        let h = &at.energies;
+        let v: [f64; 3] = at.sample.at.kappa.map(|k| k * self.hbar_over_mass);
         let strongest = cc.beams.iter().zip(&cc.couplings).max_by(|x, y| x.1[(*excited, *ground)].abs().total_cmp(&y.1[(*excited, *ground)].abs())).map(|(&l, _)| l).unwrap();
         let k = self.light.beams[strongest].wave_vector();
         let delta = h[0][*excited] - h[0][*ground] - cc.detuning - dot3(k, v);
-        let rate: f64 = (0..3).map(|i| v[i] * (h[1 + i][*excited] - h[1 + i][*ground])).sum::<f64>() + self.hbar_over_mass * dot3(k, force);
+        let rate: f64 = (0..3).map(|i| v[i] * (h[1 + i][*excited] - h[1 + i][*ground])).sum::<f64>() + self.hbar_over_mass * dot3(k, at.force);
         let gamma = self.decay[(excited - GROUND, excited - GROUND)].re;
         let sweep = rate.abs() / (delta * delta + gamma * gamma / 4.0);
-        Some((s, sweep, self.doppler_size(&plan, &near, ci, pb, sample.at.kappa).powi(2), p))
+        let doppler = at.doppler[ci].get_or_init(|| self.doppler_sizes(&at.plan, &at.near, ci, at.sample.at.kappa))[pb];
+        Some((s, sweep, doppler * doppler, at.populations[*ground]))
     }
 
     /// A folded drive's error at a sample (SPEC §1.5): on the populations s p_b, on T (√2 s + (w‖T2‖/‖T‖)² + a) p_b
     /// (`drive_parameters`).
-    pub(crate) fn drive_error(&self, unit: &Unit, sample: &Sample) -> UnitError {
-        match self.drive_parameters(unit, sample) {
+    pub(crate) fn drive_error(&self, unit: &Unit, at: &Measured) -> UnitError {
+        match self.drive_parameters(unit, at) {
             None => UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 },
             Some((s, sweep, doppler, p)) => UnitError { parameter: s, population: s * p, temperature: (std::f64::consts::SQRT_2 * s + doppler + sweep) * p },
         }
@@ -946,11 +940,9 @@ impl Model {
 
     /// A near coupling's error at a sample: m² (p_a + p_b) with m its magnitude over its beat at the point and the sample's
     /// velocity (the beat moved by the strongest beam pair's q·v): its bound on the point (`term_bound`).
-    pub(crate) fn term_error(&self, unit: &Unit, sample: &Sample) -> UnitError {
+    pub(crate) fn term_error(&self, unit: &Unit, at: &Measured) -> UnitError {
         let Unit::Term { a, b, from: Some(from), to: Some(to) } = unit else { unreachable!() };
-        let speed = self.hbar_over_mass * crate::linalg::norm3(sample.at.kappa);
-        let m2 = 0.5 * self.term_bound(*a, *b, *from, *to, &self.point_region(sample.at.r, speed)).0;
-        let p = self.state_populations(sample);
+        let (m2, p) = (0.5 * self.term_bound(*a, *b, *from, *to, &at.region).0, &at.populations);
         UnitError { parameter: m2, population: m2 * (p[*a] + p[*b]), temperature: m2 * (p[*a] + p[*b]) }
     }
 
@@ -1011,6 +1003,7 @@ pub(crate) fn term_unit(a: usize, b: usize, from: Option<Component>, to: Option<
 mod tests {
     use super::*;
     use crate::field::Light;
+    use crate::model::Sample;
     use crate::request::Request;
 
     fn scene(name: &str) -> Request {
@@ -1071,7 +1064,7 @@ mod tests {
         let at = Point { r: r0, kappa: [speed / model.hbar_over_mass, 0.0, 0.0], t: 0.0 };
         let sample = Sample { cluster, at, psi: vec![C64::ONE] };
         let unit = Unit::Drive { carrier: Component { frequency: probe, counter: false }, excited: e, ground: b };
-        let (_, sweep, _, _) = model.drive_parameters(&unit, &sample).unwrap();
+        let (_, sweep, _, _) = model.drive_parameters(&unit, &model.measured(&sample, None)).unwrap();
         let force = model.assemble(sample.cluster, &sample.at, &model.running()).force(&sample.psi, &|_| 1.0);
         let k = model.light.beams[model.carriers[0].beams[0]].wave_vector();
         let expected = (speed * slope + model.hbar_over_mass * dot3(k, force)).abs() / (gamma * gamma / 4.0);

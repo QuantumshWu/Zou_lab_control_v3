@@ -326,6 +326,13 @@ fn a_scene_s_tables_against_its_exact_elimination() {
             worst[10] = worst[10].max(read.whole[k].temperature);
         }
     }
+    // The candidate units' errors at the samples, from the tables against the exact elimination's: the largest difference of a
+    // unit's error on T.
+    let units = model.units();
+    let (slow, quick) = (model.errors(&units, &samples), model.errors_with(&units, &samples, Some(&tables)));
+    let apart = slow.iter().zip(&quick).flat_map(|(a, b)| a.iter().zip(b).map(|(x, y)| (x.temperature - y.temperature).abs())).fold(0.0, f64::max);
+    let largest = slow.iter().flat_map(|a| a.iter().map(|x| x.temperature)).fold(0.0, f64::max);
+    eprintln!("{name}: {} candidate units' errors at the samples: the largest on T {largest:.2e}; tabulated against exact, the largest difference {apart:.1e}", units.len());
     let (shown, temperature) = shares();
     eprintln!(
         "{name}: {} samples; largest differences, tabulated against exact: near parts {:.1e}, near forces {:.1e}; photon rate {:.1e}, class weights {:.1e}, amplitudes {:.1e}, absorption's mean {:.1e} k, second moment {:.1e} k²; loss energy {:.1e} µK; readout {:.1e}; ledger reads: shown {:.1e} (share {shown:.1e}), T {:.1e} (share {temperature:.1e})",
@@ -378,13 +385,29 @@ fn the_model_s_calls_timed() {
                 .fold(f64::INFINITY, f64::min)
         };
         let photons = both(&|run, s| drop(std::hint::black_box(run.photons(cluster, &s.at, &s.psi))));
-        let readout = both(&|run, s| drop(std::hint::black_box(run.readout(cluster, &s.at, &s.psi))));
-        let energy = both(&|run, s| drop(std::hint::black_box(run.energy(cluster, &s.at, &s.psi))));
-        let reference = time(&|s| drop(std::hint::black_box(exact.reference(s.at.r))), 256);
+        let readout = both(&|run, s| {
+            std::hint::black_box(run.readout(cluster, &s.at, &s.psi));
+        });
+        let energy = both(&|run, s| {
+            std::hint::black_box(run.energy(cluster, &s.at, &s.psi));
+        });
+        let reference = time(&|s| {
+            std::hint::black_box(exact.reference(s.at.r));
+        }, 256);
         let g = exact.generator(cluster, &own[0].at);
         eprintln!(
             "{name} cluster {cluster} (n {}, {} parts): generator {:.0} / {:.2} µs (of it the point {middle:.2}, the expansion {expansion:.2}), photons {:.0} / {:.2}, readout {:.0} / {:.2}, energy {:.0} / {:.2} (exact / tabulated); reference {reference:.2} µs",
             model.clusters()[cluster].states.len(), g.parts.len(), generator.0, generator.1, photons.0, photons.1, readout.0, readout.1, energy.0, energy.1
         );
     }
+    // The units' errors at a state (units.rs `Model::errors_with`): every candidate unit's, with the exact elimination and with
+    // the tables.
+    let units = model.units();
+    let few = &all[..all.len().min(4)];
+    let started = Instant::now();
+    std::hint::black_box(model.errors(&units, few));
+    let slow = started.elapsed().as_secs_f64() * 1e3 / few.len() as f64;
+    let started = Instant::now();
+    std::hint::black_box(model.errors_with(&units, &all, Some(&tables)));
+    eprintln!("{name}: the {} candidate units' errors a state: {slow:.2} ms exact, {:.3} ms tabulated", units.len(), started.elapsed().as_secs_f64() * 1e3 / all.len() as f64);
 }

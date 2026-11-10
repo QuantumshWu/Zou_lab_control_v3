@@ -321,6 +321,10 @@ pub struct Model {
     pub(crate) classes: Vec<Vec<photon::Class>>,
     /// The clusters' assemblies under the light sets asked so far (assemble.rs `Model::plan`).
     pub(crate) plans: Mutex<Vec<Arc<assemble::Plan>>>,
+    /// The spread of what moves the folds' spectra (units.rs `Model::spread`), and the far beats' cross forms' sizes asked so far
+    /// (units.rs `Model::far_cross_sizes`).
+    pub(crate) spread: f64,
+    pub(crate) crosses: Mutex<std::collections::HashMap<(Component, Component), Arc<Vec<f64>>>>,
     /// The states' labels and the beams' names (the ledger's and the method's words).
     pub(crate) labels: Vec<String>,
     pub(crate) names: Vec<String>,
@@ -383,16 +387,19 @@ impl Model {
             sources: vec![],
             classes: vec![],
             plans: Mutex::new(vec![]),
+            spread: 0.0,
+            crosses: Mutex::new(Default::default()),
             labels: request.states.clone(),
             names: request.beams.iter().map(|b| b.name.clone()).collect(),
         };
+        model.carriers = eliminate::Carrier::all(&model);
+        model.spread = model.spread_made();
         for component in model.components().into_iter().filter(|c| c.counter) {
             let saturation = model.far_saturation(component);
             if !(saturation < units::EXISTS) {
                 return Err(format!("反旋分量的折叠不存在（S = {:.2}）：请求超出模型的适用范围", saturation));
             }
         }
-        model.carriers = eliminate::Carrier::all(&model);
         let edges: Vec<cluster::Edge> = kept.iter().filter_map(|u| model.edge(u)).collect();
         let (mut clusters, membership) = cluster::clusters(STATES, &edges, &model.axes.zero(), &model.no_wave());
         for c in clusters.iter_mut() {

@@ -37,8 +37,8 @@
 //! by Cauchy–Schwarz.
 
 use super::far::EXCITED;
-use super::units::mixing;
-use super::{Beat, Lights, Model, Photon, Point, Recoil, Sample, Unit, UnitError};
+use super::units::{mixing, Measured};
+use super::{Beat, Lights, Model, Photon, Point, Recoil, Unit, UnitError};
 use crate::field::Amplitude;
 use crate::linalg::C64;
 use crate::request::{GROUND, STATES};
@@ -63,12 +63,14 @@ pub(crate) struct Source {
 }
 
 /// A member of a class: a source and its entries in the class (landing place in the landing cluster, source place in the
-/// source cluster), and its relative beat in a merged class (zero otherwise).
+/// source cluster), its relative beat in a merged class (zero otherwise), and per axis the bound of its jumps' size per unit of
+/// its field component, ‖L_a‖_F over its entries (`Model::jump_bound`).
 #[derive(Clone, Debug)]
 pub(crate) struct Member {
     pub(crate) source: usize,
     pub(crate) entries: Vec<(usize, usize)>,
     pub(crate) phase: Beat,
+    pub(crate) sizes: [f64; 3],
 }
 
 /// A class of a source cluster's photons: its frame frequencies (one, or several kept coherent), its landing cluster, its members.
@@ -161,7 +163,7 @@ impl Model {
     }
 
     /// A source's field component's modulus at a point, |Σ_l a_l γ_lk| (1 for an explicit state's).
-    fn source_size(&self, source: &Source, amplitudes: &[Amplitude]) -> f64 {
+    pub(crate) fn source_size(&self, source: &Source, amplitudes: &[Amplitude]) -> f64 {
         match (self.source_frequency(source), source.origin) {
             (Some(f), Origin::Far { component, .. } | Origin::Near { component, .. }) => {
                 let f = &self.light.frequencies[f];
@@ -197,9 +199,16 @@ impl Model {
                     let members = &mut out[class].members;
                     match members.iter_mut().find(|m| m.source == index) {
                         Some(m) => m.entries.push((bp, sp)),
-                        None => members.push(Member { source: index, entries: vec![(bp, sp)], phase: self.axes.zero() }),
+                        None => members.push(Member { source: index, entries: vec![(bp, sp)], phase: self.axes.zero(), sizes: [0.0; 3] }),
                     }
                 }
+            }
+        }
+        for class in out.iter_mut() {
+            let landing = &self.clusters[class.landing];
+            for m in class.members.iter_mut() {
+                let source = &self.sources[m.source];
+                m.sizes = std::array::from_fn(|a| m.entries.iter().map(|&(bp, sp)| self.jump_bound(source, a, landing.states[bp], c.states[sp]).powi(2)).sum::<f64>().sqrt());
             }
         }
         out.sort_by(|x, y| (x.landing, &x.beats[0]).cmp(&(y.landing, &y.beats[0])));
@@ -354,20 +363,14 @@ impl Model {
         out
     }
 
-    /// A class's jump operators' sizes per axis with the sources' field components bounded by `most`: Σ_members |e| ‖L_a‖_F.
-    fn class_size(&self, cluster: usize, class: &Class, most: &dyn Fn(&Source) -> f64) -> [f64; 3] {
+    /// A class's jump operators' sizes per axis with the sources' field components bounded by `most` (by source): Σ_members |e|
+    /// ‖L_a‖_F.
+    fn class_size(&self, class: &Class, most: &dyn Fn(usize) -> f64) -> [f64; 3] {
         let mut out = [0.0; 3];
         for m in &class.members {
-            let source = &self.sources[m.source];
-            let c = most(source);
+            let c = most(m.source);
             for a in 0..3 {
-                let norm: f64 = m
-                    .entries
-                    .iter()
-                    .map(|&(bp, sp)| self.jump_bound(source, a, self.clusters[class.landing].states[bp], self.clusters[cluster].states[sp]).powi(2))
-                    .sum::<f64>()
-                    .sqrt();
-                out[a] += c * norm;
+                out[a] += c * m.sizes[a];
             }
         }
         out
@@ -375,13 +378,13 @@ impl Model {
 
     /// A coherence's mixing with the sources' field components bounded by `most`: m = Σ_a |u_a||u'_a|/(|Ω| − spread), Ω the two
     /// frequencies' beat (SPEC §1.5: its error m²√(p_i p_j)), the largest over the source clusters it names.
-    fn coherence_mixing(&self, unit: &Unit, most: &dyn Fn(&Source) -> f64) -> f64 {
+    fn coherence_mixing(&self, unit: &Unit, most: &dyn Fn(usize) -> f64) -> f64 {
         let Unit::Coherence { first, second, .. } = unit else { return 0.0 };
         let beat = self.omega(&first.plus(-1, second)).abs();
         let mut m = 0.0_f64;
         for (cluster, i, j) in self.coherence_classes(unit) {
             let classes = &self.classes[cluster];
-            let (a, b) = (self.class_size(cluster, &classes[i], most), self.class_size(cluster, &classes[j], most));
+            let (a, b) = (self.class_size(&classes[i], most), self.class_size(&classes[j], most));
             m = m.max(mixing((0..3).map(|x| a[x] * b[x]).sum(), beat, self.spread()));
         }
         m
@@ -390,15 +393,14 @@ impl Model {
     /// A coherence's static bound S = 2m²: its mixing with every beam at its peak and in phase (|a_l| ≤ 1 everywhere: a bound over
     /// any reach). Its sweep is the gates' (units.rs `Model::gates`).
     pub(crate) fn coherence_saturation(&self, unit: &Unit) -> f64 {
-        let m = self.coherence_mixing(unit, &|s| self.source_peak(s));
+        let m = self.coherence_mixing(unit, &|s| self.source_peak(&self.sources[s]));
         2.0 * m * m
     }
 
-    /// A coherence's error at a sample: m² √(p_i p_j), p the populations of the two classes' source states.
-    pub(crate) fn coherence_error(&self, unit: &Unit, sample: &Sample) -> UnitError {
-        let amplitudes = self.light.amplitudes(sample.at.r);
-        let m = self.coherence_mixing(unit, &|s| self.source_size(s, &amplitudes));
-        let p = self.state_populations(sample);
+    /// A coherence's error at a sample (units.rs `Measured`): m² √(p_i p_j), p the populations of the two classes' source states.
+    pub(crate) fn coherence_error(&self, unit: &Unit, at: &Measured) -> UnitError {
+        let (sample, p) = (at.sample, &at.populations);
+        let m = self.coherence_mixing(unit, &|s| at.sources[s]);
         let source_weight = |class: &Class| -> f64 {
             class.members.iter().flat_map(|m| m.entries.iter().map(|&(_, sp)| self.clusters[sample.cluster].states[sp])).map(|s| p[s]).fold(0.0, f64::max)
         };
