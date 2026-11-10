@@ -211,6 +211,11 @@ struct Block {
     tones: Vec<usize>,
     /// The entries' tone where they share one.
     tone: Option<usize>,
+    /// Per Hermitian flag its weight in a form with a Hermitian ρ (`Middle::contract`). A flag's values and their adjoints
+    /// -- the two components conjugated, the base beat negated, the entries transposed and conjugated, the Doppler-weighted
+    /// side exchanged -- make conjugate forms: of a block and its adjoint the first is taken twice and the other left out,
+    /// and of a block that is its own adjoint the flag `RIGHT` twice for `LEFT`.
+    weights: [f64; 3],
 }
 
 /// One member of a photon class at a point (photon.rs): its source, its field component (None: 1), whether its jumps take the
@@ -805,17 +810,34 @@ impl<'a> Builder<'a> {
                 })
             });
             let tone = block_tones.first().copied().filter(|t| block_tones.iter().all(|x| x == t));
-            blocks.push(Block { left: d.left, right: d.right, hermitian: hermitian[b], decay: decay[b], merged, places: d.entries.iter().map(|&(x, y)| x * n + y).collect(), tones: block_tones, tone });
+            blocks.push(Block { left: d.left, right: d.right, hermitian: hermitian[b], decay: decay[b], merged, places: d.entries.iter().map(|&(x, y)| x * n + y).collect(), tones: block_tones, tone, weights: [1.0; 3] });
+        }
+        // The Hermitian blocks' adjoints (`Block::weights`): the block of the two components' conjugates at the negated beat.
+        let conjugate = |s: Option<usize>| match s {
+            None => Some(None),
+            Some(i) => {
+                let x = &self.scalars[i];
+                self.scalars.iter().position(|y| (y.frequency, y.group, y.component, y.conjugate) == (x.frequency, x.group, x.component, !x.conjugate)).map(Some)
+            }
+        };
+        for (b, d) in self.drafts.iter().enumerate() {
+            let adjoint = conjugate(d.left).zip(conjugate(d.right)).and_then(|(l, r)| {
+                let (l, r) = if l > r { (r, l) } else { (l, r) };
+                self.drafts.iter().position(|t| t.left == l && t.right == r && t.beat == d.beat.negated())
+            });
+            blocks[b].weights = match adjoint.filter(|&t| hermitian[t].iter().any(|h| h.is_some())) {
+                Some(t) if t > b => [2.0; 3],
+                Some(t) if t < b => [0.0; 3],
+                Some(_) => [1.0, 2.0, 0.0],
+                None => [1.0; 3],
+            };
         }
         // A node: the field components from their beams (plain and Doppler-weighted; with their gradients, fourfold), each
-        // block's entries per flag, the frames' phases on the n² entries.
+        // block's entries per flag -- in a form those of the Hermitian flags taken (`Block::weights`) --, the frames' phases
+        // on the n² entries.
         let fields: usize = self.scalars.iter().map(|s| 2 * s.beams.len()).sum();
-        let flags = |b: &Block, of: &dyn Fn(&Block) -> usize| of(b) * b.places.len();
-        let node = [
-            (fields + merged_count + 2 * n * n) as f64,
-            (4 * fields + blocks.iter().map(|b| flags(b, &|b| b.hermitian.iter().flatten().count())).sum::<usize>() + n * n) as f64,
-            blocks.iter().map(|b| flags(b, &|b| b.hermitian.iter().flatten().count())).sum::<usize>() as f64,
-        ];
+        let forms: usize = blocks.iter().map(|b| (0..3).filter(|&flag| b.hermitian[flag].is_some() && b.weights[flag] > 0.0).count() * b.places.len()).sum();
+        let node = [(fields + merged_count + 2 * n * n) as f64, (4 * fields + forms + n * n) as f64, forms as f64];
         let statics = self.drafts.iter().map(|d| d.beat.is_zero()).collect();
         let classes = classes
             .into_iter()
@@ -1279,7 +1301,8 @@ impl Middle<'_> {
     /// Re tr(Ĝ_a(s) ρ) per lab axis a: the gradient of the generator's Hermitian part along a path at the time s from the
     /// middle (`on`), or at the fixed middle point (None: every tone in turn, to `each` with its beat Ω, its entries at their
     /// phase at the middle's time), contracted with a Hermitian ρ on the cluster's states (n × n, row by row) without forming
-    /// it: per block and flag Σ_entries V[x, y] ρ[y, x] and the same of its slopes, times the fields' product and its gradient.
+    /// it: per block and flag Σ_entries V[x, y] ρ[y, x] and the same of its slopes, times the fields' product and its gradient
+    /// -- of a flag's values and their adjoints, whose forms with a Hermitian ρ are conjugates, one, twice (`Block::weights`).
     fn contract(&self, path: &Path, on: Option<f64>, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
         let (plan, n, q) = (&*self.plan, self.plan.states, self.directions.len());
         let mut scratch = path.scratch.borrow_mut();
@@ -1294,7 +1317,7 @@ impl Middle<'_> {
         scratch.slopes.resize(q, C64::ZERO);
         let (weights, phases, slopes) = (&scratch.weights, &scratch.phases, &mut scratch.slopes);
         for block in &plan.blocks {
-            if block.hermitian.iter().all(|h| h.is_none()) {
+            if (0..3).all(|flag| block.hermitian[flag].is_none() || block.weights[flag] == 0.0) {
                 continue;
             }
             let (l, lw, r, rw) = (side(&scratch.plain, block.left), side(&scratch.doppler, block.left), side(&scratch.plain, block.right), side(&scratch.doppler, block.right));
@@ -1306,26 +1329,42 @@ impl Middle<'_> {
             loop {
                 let mut next = None;
                 for (flag, at) in block.hermitian.iter().enumerate() {
-                    let Some(at) = at else { continue };
+                    let Some(at) = at.filter(|_| block.weights[flag] > 0.0) else { continue };
                     let mut value = C64::ZERO;
                     slopes.fill(C64::ZERO);
-                    for (i, (&place, &entry)) in block.places.iter().zip(&block.tones).enumerate() {
-                        if !whole && entry != tone {
-                            if entry > tone && next.is_none_or(|t| entry < t) {
-                                next = Some(entry);
+                    match block.tone {
+                        // One tone: its phase is the sums' common factor.
+                        Some(shared) => {
+                            for (i, &place) in block.places.iter().enumerate() {
+                                let w = weights[place];
+                                value += self.values[at + i] * w;
+                                for (f, slope) in slopes.iter_mut().enumerate() {
+                                    *slope += self.slopes[(at + i) * q + f] * w;
+                                }
                             }
-                            continue;
+                            value = value * phases[shared];
+                            slopes.iter_mut().for_each(|slope| *slope = *slope * phases[shared]);
                         }
-                        let w = weights[place] * phases[entry];
-                        value += self.values[at + i] * w;
-                        for (f, slope) in slopes.iter_mut().enumerate() {
-                            *slope += self.slopes[(at + i) * q + f] * w;
+                        None => {
+                            for (i, (&place, &entry)) in block.places.iter().zip(&block.tones).enumerate() {
+                                if !whole && entry != tone {
+                                    if entry > tone && next.is_none_or(|t| entry < t) {
+                                        next = Some(entry);
+                                    }
+                                    continue;
+                                }
+                                let w = weights[place] * phases[entry];
+                                value += self.values[at + i] * w;
+                                for (f, slope) in slopes.iter_mut().enumerate() {
+                                    *slope += self.slopes[(at + i) * q + f] * w;
+                                }
+                            }
                         }
                     }
                     let sum = &mut scratch.sums[if on.is_some() { 0 } else { tone }];
                     for a in 0..3 {
                         let along: C64 = slopes.iter().zip(&self.directions).map(|(slope, direction)| *slope * direction[a]).sum();
-                        sum[a] += (c[flag][1 + a] * value + c[flag][0] * along).re;
+                        sum[a] += block.weights[flag] * (c[flag][1 + a] * value + c[flag][0] * along).re;
                     }
                 }
                 match next.filter(|_| !whole) {
