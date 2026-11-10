@@ -39,6 +39,7 @@
 
 use super::assemble::{NearValues, Plan};
 use super::cluster::Edge;
+use super::far::EXCITED;
 use super::reach::{distance, Region};
 use super::tabulate::Tables;
 use super::{Cluster, Component, Gate, Model, Reach, Sample, Unit, UnitError, Wave};
@@ -162,6 +163,19 @@ impl Model {
         } else {
             0.0
         }
+    }
+
+    /// The bounds over a region of the slopes |∇(E_e − E_b)| of the far light's levels (eliminate.rs `Model::energy_slope_over`) from
+    /// ground state b to each excited state a carrier's folded coupling reaches from it (per excited state less GROUND; the others'
+    /// are not asked), made once per region and ground state: the carriers' light shifts' slopes and the drives' sweeps read them.
+    pub(crate) fn level_slopes<'r>(&self, b: usize, region: &'r Region) -> &'r [f64; EXCITED] {
+        region.levels[b].get_or_init(|| {
+            let mut slopes = [0.0; EXCITED];
+            for &e in &region.forms.reached(self)[b] {
+                slopes[e] = self.energy_slope_over(GROUND + e, b, region);
+            }
+            slopes
+        })
     }
 
     /// The bound over a region of an atom's acceleration (µm/µs²) in the clusters `within` picks: ħ/m times the force's bound
