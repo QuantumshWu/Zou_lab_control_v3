@@ -1,7 +1,7 @@
 //! Constants and derived values (SPEC §0, §2.2): the only numbers of the crate that no request gives. Each is one of the
 //! allowed kinds, its source or its derivation beside it: the user's targets, the scheme's order p, the statistics'
 //! confidence z, physical constants, the floating-point format, values derived from these, the validated regime's
-//! boundary (reporting only), and the contract's definitions and caps (contract §1-§2, mirrored in the app).
+//! boundary, and the contract's definitions and caps (contract §1-§2, mirrored in the app).
 //!
 //! Units of the whole crate (SPEC §0): length µm, time µs, energy and frequency rad/µs (an energy E as the rate E/ħ),
 //! momentum as the wave number κ = p/ħ (1/µm), temperature µK, field V/m, wave number rad/µm. A velocity in µm/µs is
@@ -47,8 +47,9 @@ const fn square_root(a: f64) -> f64 {
 // ---------------------------------------------------------------------------------------------------------------------
 // The contract's definitions and caps.
 
-/// The validated regime's boundary (SPEC §0, §3): k_BT ≥ CLASSICAL·ħω on every axis. Reporting only (the result's
-/// `classical`, the UI's grey band, src/model-notes.ts `SEMICLASSICAL_REGIME`); it tunes no decision.
+/// The validated regime's boundary (SPEC §0, §3): k_BT ≥ CLASSICAL·ħω on every axis, mirrored in the app (the result's
+/// `classical`, the UI's grey band, src/model-notes.ts `SEMICLASSICAL_REGIME`). It decides one thing in the solve, the
+/// outputs where T is held to its target (solve.rs `classical`), and tunes no other decision.
 pub const CLASSICAL: f64 = 4.0;
 /// The trap's region (SPEC §1.3, §1.7): an atom is outside it where every focused beam's intensity at the atom is
 /// below this share of its value at the focus -- the contract's definition of a lost atom, the UI's text word for word

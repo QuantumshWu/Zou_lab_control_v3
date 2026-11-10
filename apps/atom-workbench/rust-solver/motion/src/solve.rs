@@ -58,7 +58,8 @@
 //! definition: T describes the atoms held), and T's scale -- the pilot's T, at the outputs where its upper bound
 //! T + t·SE lies in the validated regime on every axis (`CLASSICAL`; elsewhere T is reported, not chased). A batch brings
 //! the trajectories to the number the latest estimates predict every output needs (SE ∝ N^{−1/2}; the shown rows at least
-//! the count whose unseen share fits the room, estimate.rs `unseen`).
+//! the count whose unseen share fits the room, estimate.rs `draws_for`), at most to twice the number the prediction rests
+//! on (`batch`).
 //!
 //! # Checkpoints
 //! The decisions take counts, never the wall clock, so a request gives the same result on any machine. The wall clock only
@@ -555,16 +556,17 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
     Ok(Attempt::Done(assemble(&context, &e, &l, &c, all.len() as u64 * GROUP)))
 }
 
-/// The trajectories a batch brings a run of `have` to, for the `need` its estimates predict: whole groups, more than it
-/// has, at most twice as many, and `MOST_TRAJECTORIES` at most.
+/// The trajectories a batch brings the product to, for the `need` that the estimates of `have` trajectories predict -- the
+/// pilot's for the first batch, the product's own after it: whole groups, more than `have`, at most twice as many, and
+/// `MOST_TRAJECTORIES` at most.
 ///
-/// At most twice: the need is predicted from a variance read on the groups so far (the pilot's eleven at first, whose
-/// largest read over the outputs runs high), and a batch adds no more trajectories than the prediction that sizes it
-/// rests on. What that bounds: the batches accumulate -- every trajectory run is in the result --, so the run ends on the
-/// first total that meets the targets; with totals growing by a factor g at most, the total before it did not meet them
-/// and the last one is below g times the least that does, whatever was predicted. At g = 2 a wrong prediction costs less
-/// than as much again as the run needed (at most half of the work is spent past the need), and a need N times the
-/// pilot's size is reached in log₂ N batches.
+/// At most twice: the need is predicted from a variance read on those trajectories' groups (the pilot's eleven at first,
+/// whose largest read over the outputs runs high), and a batch takes the product no further than to twice what its
+/// prediction rests on. What that bounds: the batches accumulate -- every trajectory of the product is in the result --,
+/// so the product ends on the first total that meets the targets. Each total is at most g times one that did not meet
+/// them -- the one before it, or for the first the pilot's size, which no run meets its targets below (`pilot_size`) --, so
+/// the last total is at most g times the least that meets them, whatever was predicted: at g = 2 no more than half of the
+/// work is spent past the need, and a need N times the pilot's size is reached in log₂ N batches.
 fn batch(need: f64, have: u64) -> u64 {
     ((need / GROUP as f64).ceil() as u64 * GROUP).clamp(have + GROUP, 2 * have).min(MOST_TRAJECTORIES)
 }
@@ -1172,7 +1174,7 @@ fn candidates(
 /// points or more (contract §2.2), and the least odd count that has is three.
 fn histograms(listed: &[Vec<(V3, V3)>], outputs: &[usize], value: &dyn Fn(&(V3, V3)) -> f64) -> Distributions {
     let reach = listed.iter().flatten().map(|s| value(s).abs()).fold(f64::MIN_POSITIVE, f64::max);
-    let most = listed.iter().map(Vec::len).max().unwrap_or(0);
+    let most = listed.iter().map(Vec::len).fold(0, usize::max);
     let bins = ((most as f64).sqrt() as usize | 1).max(3);
     let width = 2. * reach / (bins - 1) as f64;
     let grid: Vec<f64> = (0..bins).map(|i| (i as f64 - (bins / 2) as f64) * width).collect();

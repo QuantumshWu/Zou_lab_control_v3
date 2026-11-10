@@ -84,7 +84,9 @@ impl Stream {
     pub fn open_uniform(&mut self) -> f64 {
         1.0 - self.uniform()
     }
-    /// Uniform on (0, 1), both ends excluded: the middle of one of 2⁵³ equal cells.
+    /// Uniform on (0, 1]: the middle (k + ½)/2⁵³ of one of 2⁵³ equal cells, as the format holds it -- never 0; from
+    /// k = 2⁵² on the middle is no number of the format and rounds to the even one of the cell's two edges, the last
+    /// cell's to 1 itself (one draw in 2⁵³).
     pub fn interior(&mut self) -> f64 {
         ((self.next_u64() >> 11) as f64 + 0.5) / (1u64 << 53) as f64
     }
