@@ -764,6 +764,7 @@ fn spectral(path: &Path, scratch: &mut Scratch, psi: &[C64], tau: f64, threshold
         }
     };
     let bandwidth = spread(lambda);
+    let count = nodes(tau, bandwidth);
     let growth = lambda.iter().map(|l| l.im).fold(f64::NEG_INFINITY, f64::max) - lambda.iter().map(|l| l.im).fold(f64::INFINITY, f64::min);
     let (mut middle, mut end, mut x) = ([C64::ZERO; STATES], [C64::ZERO; STATES], [C64::ZERO; STATES]);
     at(0.5 * tau, &mut middle[..n]);
@@ -792,7 +793,7 @@ fn spectral(path: &Path, scratch: &mut Scratch, psi: &[C64], tau: f64, threshold
         crossing,
         rounding: bound,
         panels: None,
-        work: count::spectral(n, nodes(tau, bandwidth)) + count::impulse(n, path.parts.len(), nodes(tau, bandwidth)),
+        work: count::spectral(n, count) + count::impulse(n, path.parts.len(), count),
     })
 }
 
