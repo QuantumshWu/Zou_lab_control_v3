@@ -163,7 +163,7 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     loop {
         // An attempt's results improve on its own last one, from two groups on (module documentation, # Checkpoints).
         messages.least = 2 * GROUP;
-        match attempt(request, &light, &kept, reach, step, &mut messages)? {
+        match attempt(request, &light, &mut kept, reach, step, &mut messages)? {
             Attempt::Grow(t, tau) => (reach, step) = (t, Some(tau)),
             Attempt::Keep(u, tau) => {
                 kept.push(u);
@@ -321,8 +321,10 @@ fn classical(temperature: &V3, frequencies: &V3) -> bool {
     (0..3).all(|a| KT_PER_UK * temperature[a] >= CLASSICAL * frequencies[a])
 }
 
-/// One attempt at the solve with the units `kept` and the reach at `reach` µK (module documentation, # The pipeline).
-fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Option<f64>, messages: &mut Messages) -> Result<Attempt, String> {
+/// One attempt at the solve with the units `kept` and the reach at `reach` µK (module documentation, # The pipeline). The
+/// units its model's closure keeps join `kept`, the solve's one set: a unit an attempt keeps after its pilot is a unit of
+/// the closed model (a drive of a carrier the closure made near), and the next attempt's model is built from both.
+fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, step: Option<f64>, messages: &mut Messages) -> Result<Attempt, String> {
     let hm = hbar_over_mass(request.mass_kg);
     let initial = components(request);
     // The reference state (SPEC §2.1): the initial component of the largest population, of equal ones the last.
@@ -330,9 +332,8 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
     let reference = alone(initial[chief].0);
     // The model: every unit whose fold does not exist over the reach kept (SPEC §1.5), closed again until none fails (a
     // model lists only what it folds, model.rs `units`).
-    let mut kept = kept.to_vec();
     let (model, trap, judged) = loop {
-        let model = Model::new(request, light, &kept)?;
+        let model = Model::new(request, light, kept)?;
         let trap = model.trap(&reference, &model.prepared())?;
         let judged = model.reach(&trap, &reference, reach, unseen(MOST_TRAJECTORIES as f64));
         let units = model.units();
@@ -528,7 +529,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
         return Ok(Attempt::Keep(units[u].clone(), tau));
     }
     // The greedy keep by pays (SPEC §5.2): the unit whose keeping saves the most predicted work beyond its spread.
-    let ranked = candidates(request, light, &kept, &model, reference, trap.centre, &units, &measured, &samples, &pilot, &context.fixed, &context.scales, unsampled);
+    let ranked = candidates(request, light, kept, &model, reference, trap.centre, &units, &measured, &samples, &pilot, &context.fixed, &context.scales, unsampled);
     if let Some(c) = ranked.first().filter(|c| pays(0., c.saving)) {
         return Ok(Attempt::Keep(units[c.unit].clone(), tau));
     }
