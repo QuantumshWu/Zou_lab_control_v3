@@ -12,10 +12,10 @@
 use crate::units::UNIT_ROUNDOFF;
 use std::f64::consts::PI;
 
-/// Γ(s) at a positive multiple of ½: Γ(1) = 1, Γ(½) = √π, Γ(s + 1) = s Γ(s).
+/// Γ(s) at a positive multiple of ½, each one exact in the format: Γ(1) = 1 or Γ(½) = √π, then Γ(t + 1) = t Γ(t) up to s.
 pub fn gamma(s: f64) -> f64 {
-    let (mut g, mut t) = if (2. * s).round() as i64 % 2 == 0 { (1., 1.) } else { (PI.sqrt(), 0.5) };
-    while t < s - 0.25 {
+    let (mut g, mut t) = if (2. * s) as i64 % 2 == 0 { (1., 1.) } else { (PI.sqrt(), 0.5) };
+    while t < s {
         g *= t;
         t += 1.;
     }

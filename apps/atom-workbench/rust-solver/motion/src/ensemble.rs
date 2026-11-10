@@ -149,7 +149,8 @@ fn invert(y: f64, u: f64) -> f64 {
     root(|v| { let k = v.powf(1. / s); (kept(s, y, k, y), ((-k).exp() - (-y).exp()) / gamma(s + 1.)) }, target, 0., y.powf(s)).powf(1. / s)
 }
 
-/// Gauss–Legendre's nodes and weights on [−1, 1]: Newton's iteration on P_n from Tricomi's start, to round-off.
+/// Gauss–Legendre's nodes and weights on [−1, 1]: Newton's iteration on P_n from Tricomi's start, cos(π(i + ¾)/(n + ½))
+/// for the i-th node from 0, to round-off.
 fn legendre(n: usize) -> Vec<(f64, f64)> {
     (0..n)
         .map(|i| {
