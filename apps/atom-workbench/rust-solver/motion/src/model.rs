@@ -230,6 +230,9 @@ pub struct Cluster {
 /// direction, polarization and landing is the same either way, ∝ ‖P_C Σ_a ε_a u_a‖².)
 #[derive(Clone, Debug, PartialEq)]
 pub struct Photon {
+    /// The class's place among its cluster's classes: the same for every state of the cluster (a state the class's
+    /// operator annihilates has no photon of it).
+    pub class: usize,
     /// The cluster the jump lands the atom in.
     pub landing: usize,
     /// |k_φ| (1/µm), 2π/c times the class's photon frequency (photon.rs, # A class's photon): the emission recoil is −k_φ n.

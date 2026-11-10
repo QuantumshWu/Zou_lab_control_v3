@@ -267,7 +267,7 @@ impl Model {
         let one = [C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO];
         let mut energies: Option<Vec<Vec<f64>>> = None;
         let mut out = vec![];
-        for class in &plan.classes {
+        for (place, class) in plan.classes.iter().enumerate() {
             let n = self.clusters[class.landing].states.len();
             let mut u: [Vec<C64>; 3] = std::array::from_fn(|_| vec![C64::ZERO; n]);
             let mut gradients: [[Vec<C64>; 3]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| vec![C64::ZERO; n]));
@@ -310,7 +310,7 @@ impl Model {
             if u.iter().all(|v| v.iter().all(|z| *z == C64::ZERO)) {
                 continue;
             }
-            out.push(Photon { landing: class.landing, wave_number: class.wave_number, amplitudes: u, gradients, explicit });
+            out.push(Photon { class: place, landing: class.landing, wave_number: class.wave_number, amplitudes: u, gradients, explicit });
         }
         (out, work)
     }
