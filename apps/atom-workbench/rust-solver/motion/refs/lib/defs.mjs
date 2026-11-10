@@ -100,13 +100,17 @@ export const SCENES={
     const offset=await offsetFor(s,'D2',2,3,'ground-2-2','D2-3-3',['tweezer'],40*GAMMA_D2);
     await beam(s,{id:'push',name:'σ+ 推出光',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:711*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
     return s;}},
-  // R9 (c) -- heating-driven escape: R2's far-detuned σ+ heating (δ = −100Γ) in a shallow σ+ tweezer (~200 µK), so
-  // the recoil heating (2E_rec per photon, ~70 µK/ms) carries atoms over the depth within the run.
-  R9_HEAT:{ref:'R9',title:'R9 加热逃逸：浅光镊中的反冲加热（能量 Fokker–Planck）',async build(){
+  // R9 (c) -- heating-driven escape without a mean force: a shallow σ+ tweezer (~200 µK) and two σ+ beams of one
+  // intensity along its axis, one 100Γ red along +z and one 100Γ blue along −z: their radiation pressures, light
+  // shifts and Doppler forces cancel, and the recoil heating (2E_rec per photon, ~70 µK/ms) carries the atoms over
+  // the depth within the run. (One beam alone tilts the axial potential by kRz_R/U₀ = 0.32 and lowers its barrier
+  // to a quarter: the atoms are then pushed out, not heated out.)
+  R9_HEAT:{ref:'R9',title:'R9 加热逃逸：红蓝对向 σ⁺ 光（平均力为零），浅光镊中的反冲加热（能量 Fokker–Planck）',async build(){
     const s=await base({name:'R9 加热逃逸',initialStateId:'ground-2-2',temperatureUK:20,durationUs:4000,samples:201});
     await tweezer(s,{nm:852,powerMW:1.05,waistUm:1.2,along:'+z',ellipticityDeg:45});
-    const offset=await offsetFor(s,'D2',2,3,'ground-2-2','D2-3-3',['tweezer'],-100*GAMMA_D2);
-    await beam(s,{id:'probe',name:'σ+ 加热光',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:420*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
+    const line=await offsetFor(s,'D2',2,3,'ground-2-2','D2-3-3',['tweezer'],0);
+    await beam(s,{id:'red',name:'σ+ 加热光（红，+z）',line:'D2',Fg:2,Fe:3,offsetMHz:line-100*GAMMA_D2,intensityMWcm2:210*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
+    await beam(s,{id:'blue',name:'σ+ 加热光（蓝，−z）',line:'D2',Fg:2,Fe:3,offsetMHz:line+100*GAMMA_D2,intensityMWcm2:210*ISAT_CYCLING,along:'-z',ellipticityDeg:-45});
     return s;}},
   // R10 -- the absorption kick where beams interfere: the momentum diffusion of the closed cycle in a weak resonant
   // σ+σ+ standing wave along z ∥ B, the atom held within kσ ≈ 0.15 of a chosen phase of the wave by a tight tweezer:

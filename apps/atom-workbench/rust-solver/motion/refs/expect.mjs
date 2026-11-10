@@ -466,48 +466,75 @@ async function r9(){
     series,info:{mandelQ:Q,zR,edge,sz,sk,N,kappa,depthUK:U0/KT_PER_UK,T0,axisAloneLoss:axis.L}}));
 }
 
-/** R9 (c). Heating-driven escape (contract §6 R9c): R2's far-detuned σ+ heating in a shallow σ+ tweezer. The energy
- * ε above the trap's bottom diffuses: per unit time the photon kicks add A(ε) = Σ_a D_a/m = E_rec(2 + Q)⟨R⟩_ε exactly
- * (zero-mean kicks; R at the local detuning δ_b + κV, averaged over the shell), with variance rate B(ε) =
- * Σ_a 2(D_a/m)⟨p_a²/m⟩_ε = (4/3)⟨KE⟩_ε A(ε) when the momenta are shared ergodically (⟨p_a²/m⟩ = (2/3)⟨KE⟩); the
- * microcanonical shell averages use the exact Gaussian-beam potential V = U₀(1 − |a|²): weight (ε − V)^{1/2}, kinetic
- * (ε − V)^{3/2} (the beam measure, lib/phys.mjs). The Fokker–Planck equation ∂P/∂t = −∂(AP) + ½∂²(BP) on [0, U₀]
- * (B → 0 at the bottom; absorbing at ε = U₀, the far level, where the atom is unbound) from the prepared lowered
- * isothermal P ∝ g(ε)(e^{−ε/k_BT} − e^{−U₀/k_BT}) gives the escape; an unbound atom is counted lost when it leaves the
- * 1/20 region: within µs radially (ρ = w₀√(ln 20/2) ≈ 1.5 µm), up to τ_max (the axial run from the centre to
- * √19 z_R at E = 0) along the axis -- L(t) is averaged over a delay uniform in [0, τ_max], u holds half that spread
- * and the ergodic closure's error: the motion in a Gaussian beam is nearly separable and the heating puts 7/10 of the
- * energy on z, so the escape is neither ergodic nor one-dimensional (contract: 10–20 %): 20 % of L. */
+/** R9 (c). Heating-driven escape with no mean force: a red and a blue σ+ beam of one intensity counter-propagate along
+ * the tweezer's axis, 100Γ below and above the line. Their radiation pressures, their light shifts and their Doppler
+ * forces cancel -- each to the order κU₀/ħ|δ|, the line's shift across the trap over the detuning -- and what is left
+ * is the photons' momentum diffusion, the same everywhere: D_zz = (1 + Q + ξ)(ħk)²R/2 along the beams and
+ * (1 − ξ)(ħk)²R/4 across, R the two beams' rate (two frequencies: their excitations add). A classical particle
+ * diffusing in momentum in the Gaussian beam's potential V = U₀(1 − |a|²): its energy ε above the bottom drifts by
+ * A = Σ_a D_aa/m = E_rec(2 + Q)R, exactly, and spreads by B = Σ_a 2(D_aa/m)⟨p_a²/m⟩_ε, which depends on how the
+ * kinetic energy is shared among the axes. Two closures bound it: the ergodic one, ⟨p_a²/m⟩ = (2/3)⟨KE⟩ on every
+ * axis, B = (4/3)⟨KE⟩A; and the axial one, all the kinetic energy along the beams, B = 4⟨KE⟩(1 + Q + ξ)E_rec R --
+ * the motion in a Gaussian beam is nearly separable, 7/10 of the heating goes to z, and the radial action is
+ * adiabatically invariant (ω_ρ/ω_z = πw₀√2/λ), so the truth lies between. ⟨·⟩_ε are microcanonical shell averages
+ * over the exact beam (weight (ε − V)^{1/2}, kinetic (ε − V)^{3/2}; lib/phys.mjs' measure). The Fokker–Planck
+ * equation ∂P/∂t = −∂(AP) + ½∂²(BP) on [0, U₀] (reflecting at the bottom, absorbing at the far level, where the atom
+ * is unbound) from the prepared lowered isothermal P ∝ g(ε)(e^{−ε/k_BT} − e^{−U₀/k_BT}) gives the escape; an unbound
+ * atom is counted lost when it leaves the 1/20 region: within µs across the beam, up to τ_max along it (the run from
+ * the centre to √19 z_R at E = 0) -- L(t) is averaged over a delay uniform in [0, τ_max].
+ * The expectation is the mean of the two closures. u: half their difference; half the delay's spread; the forces
+ * that do not cancel -- off the centre the red beam is nearer the line and the blue farther by κV, so that the pair
+ * pushes with ħkR·2κV/ħ|δ|, a tilt kRz_R·2κ/|δ| of the depth over a Rayleigh range: that fraction of t·dL/dt --; and
+ * the boundary itself: an atom above the depth is lost only at the region's edge, up to τ_max later, and until then
+ * its energy goes on spreading by √(Bτ_max/2), some of it back below the depth, which the absorbing boundary does not
+ * allow: L is late by up to the time the drift takes over that layer, √(Bτ_max/2)/A.
+ *
+ * Characterization, not a judge: that last term is a third to a half of a millisecond here, 0.1 to 0.2 of L where L
+ * rises -- several times the loss's target --, and no closure of the energy equation removes it (the loss is a
+ * passage in space, not in energy). The equation is kept so that the solver's loss stands beside an estimate. */
 async function r9heat(){
-  const id='R9_HEAT',c=await cycle(id,['probe']),{line,gamma,U0,kappa}=c,p=c.beams.probe,m=line.model.motion,mass=m.massKg,T=m.temperatureUK;
-  const tw=beamOf(line,'tweezer'),zR=rayleigh(tw.waveNumberPerUm,tw.waistUm),Erec=recoilUK(p.k,mass),Q=mandelQ(gamma,p.omega,p.delta),times=grid(line);
+  const id='R9_HEAT',c=await cycle(id,['red','blue']),{line,gamma,U0,kappa}=c,beams=Object.values(c.beams),m=line.model.motion,mass=m.massKg,T=m.temperatureUK;
+  const tw=beamOf(line,'tweezer'),zR=rayleigh(tw.waveNumberPerUm,tw.waistUm),k=beams[0].k,Erec=recoilUK(k,mass),Q=beams.map(b=>mandelQ(gamma,b.omega,b.delta)),times=grid(line);
   const U=U0/KT_PER_UK;  // depth in µK
   // Shell integrals over the beam: ∫d³r F(y), y = |a|², = (πw₀²z_R/2)∫ sec⁴θ G(cos²θ) dθ, G(Y) = ∫₀^Y F(y) dy/y.
   const shell=(eps,f)=>{const ymin=1-eps/U;const G=Y=>{if(Y<=ymin)return 0;let s=0;const a=Math.max(ymin,0),L=Math.log(Y/Math.max(a,1e-12));
       for(const [v,w] of gaussLegendre(24,0,Math.min(L,40)))s+=w*f(Y*Math.exp(-v));return s;};
     return integrate(th=>{const cs=Math.cos(th);return G(cs*cs)/(cs**4);},-Math.PI/2*0.9999,Math.PI/2*0.9999,{panels:16,n:16});};
-  const R=V=>rate(gamma,p.omega,p.delta+kappa*V*KT_PER_UK);
-  const n=160,de=U/n,eps=Array.from({length:n},(_,i)=>(i+0.5)*de);
-  const stats=eps.map(e=>{const g=shell(e,y=>Math.sqrt(Math.max(0,e-U*(1-y)))),k=shell(e,y=>Math.max(0,e-U*(1-y))**1.5),r=shell(e,y=>Math.sqrt(Math.max(0,e-U*(1-y)))*R(U*(1-y)));
-    return {g,KE:k/g,R:r/g};});
-  const A=stats.map(s=>Erec*(2+Q)*s.R),B=stats.map((s,i)=>4/3*s.KE*A[i]);
-  let P=stats.map((s,i)=>s.g*(Math.exp(-eps[i]/T)-Math.exp(-U/T)));const norm=P.reduce((a,b)=>a+b,0)*de;P=P.map(x=>x/norm);
+  // Per beam the rate at the potential energy V (µK); the drift's and the axial spread's sums over the beams.
+  const R=(b,V)=>rate(gamma,b.omega,b.delta+kappa*V*KT_PER_UK),sum=(V,f)=>beams.reduce((t,b,i)=>t+f(Q[i])*R(b,V),0);
+  const n=160,de=U/n,eps=Array.from({length:n},(_,i)=>(i+0.5)*de),root=(e,y)=>Math.sqrt(Math.max(0,e-U*(1-y)));
+  const stats=eps.map(e=>{const g=shell(e,y=>root(e,y)),KE=shell(e,y=>root(e,y)**3)/g;
+    return {g,KE,drift:Erec*shell(e,y=>root(e,y)*sum(U*(1-y),q=>2+q))/g,axial:Erec*shell(e,y=>root(e,y)*sum(U*(1-y),q=>1+q+XI_SIGMA))/g};});
+  const A=stats.map(s=>s.drift),closures={ergodic:stats.map(s=>4/3*s.KE*s.drift),axial:stats.map(s=>4*s.KE*s.axial)};
+  const start=(()=>{const P=stats.map((s,i)=>s.g*(Math.exp(-eps[i]/T)-Math.exp(-U/T))),norm=P.reduce((a,b)=>a+b,0)*de;return P.map(x=>x/norm);})();
   // Explicit flux-form steps: J_{i+1/2} = (A P)_{mid} − ½ ∂(B P)/∂ε; reflecting at 0, absorbing at U.
-  const dtMax=0.4*de*de/Math.max(...B),Lfp=[0];let t=0;
-  for(let i=1;i<times.length;i++){while(t<times[i]-1e-9){const h=Math.min(dtMax,times[i]-t),J=new Array(n+1).fill(0);
-      for(let j=1;j<n;j++)J[j]=0.5*(A[j-1]*P[j-1]+A[j]*P[j])-0.5*(B[j]*P[j]-B[j-1]*P[j-1])/de;
-      J[n]=A[n-1]*P[n-1]+0.5*B[n-1]*P[n-1]/(de/2);  // P = 0 at ε = U: the outgoing flux
-      P=P.map((x,j)=>x-h*(J[j+1]-J[j])/de);t+=h;}
-    Lfp.push(1-P.reduce((a,b)=>a+b,0)*de);}
+  const escape=B=>{let P=start.slice(),t=0;const dtMax=0.4*de*de/Math.max(...B),L=[0];
+    for(let i=1;i<times.length;i++){while(t<times[i]-1e-9){const h=Math.min(dtMax,times[i]-t),J=new Array(n+1).fill(0);
+        for(let j=1;j<n;j++)J[j]=0.5*(A[j-1]*P[j-1]+A[j]*P[j])-0.5*(B[j]*P[j]-B[j-1]*P[j-1])/de;
+        J[n]=A[n-1]*P[n-1]+0.5*B[n-1]*P[n-1]/(de/2);  // P = 0 at ε = U: the outgoing flux
+        P=P.map((x,j)=>x-h*(J[j+1]-J[j])/de);t+=h;}
+      L.push(1-P.reduce((a,b)=>a+b,0)*de);}
+    return L;};
   // The axial run from the centre to √19 z_R at E = 0: ∫dz/v, v = √(2U₀/(m(1 + z²/z_R²))) (µm/µs = m/s).
   const r=hbarOverMass(mass),edge=Math.sqrt(19)*zR,tauMax=integrate(z=>1/Math.sqrt(2*U0*r/(1+z*z/(zR*zR))),0,edge,{panels:8,n:16});
-  const Lat=t=>{if(t<=0)return 0;const k=t/(times[1]-times[0]),j=Math.floor(k);return j>=times.length-1?Lfp.at(-1):Lfp[j]+(Lfp[j+1]-Lfp[j])*(k-j);};
-  const Ldel=times.map(t=>{let s=0;const K=40;for(let q=0;q<K;q++)s+=Lat(t-tauMax*(q+0.5)/K);return s/K;});
-  const series=[{quantity:'loss',indices:all(line),values:Ldel,u:times.map((t,i)=>Math.hypot(0.5*Math.abs(Lat(t)-Lat(t-tauMax)),0.2*Ldel[i])),target:POPULATION}];
-  write(id,expectation(id,'R9','R9 加热逃逸：反冲加热越过阱深（能量 Fokker–Planck）',line,{
-    derivation:'Energy Fokker–Planck with A = Σ D_a/m (exact) and B = (4/3)⟨KE⟩A (ergodic momenta) from the Gaussian beam\'s microcanonical shells, absorbing at the depth, from the lowered isothermal; L delayed by the run to the 1/20 region (0 to τ_max); u: half the delay spread and 20 % of L for the ergodic closure (contract 10–20 %).',
-    conditions:[{what:'depth (µK)',value:U},{what:'initial depth over k_BT',value:U/T},{what:'heating 2E_rec R at the bottom (µK/µs)',value:A[0]},{what:'E_rec/U₀ (diffusion approximation)',value:Erec/U,limit:'≪ 1'},{what:'axial run to the region edge at E = 0 (µs)',value:tauMax}],
-    series,info:{zR,edge,tauMax,mandelQ:Q,Lfp}}));
+  const at=(L,t)=>{if(t<=0)return 0;const x=t/(times[1]-times[0]),j=Math.floor(x);return j>=times.length-1?L.at(-1):L[j]+(L[j+1]-L[j])*(x-j);};
+  const delayed=L=>times.map(t=>{let s=0;const K=40;for(let q=0;q<K;q++)s+=at(L,t-tauMax*(q+0.5)/K);return s/K;});
+  const raw=Object.fromEntries(Object.entries(closures).map(([name,B])=>[name,escape(B)])),ergodic=delayed(raw.ergodic),axial=delayed(raw.axial),value=ergodic.map((x,i)=>(x+axial[i])/2);
+  const bottom=sum(0,()=>1),tilt=k*bottom*zR*2*kappa/Math.abs(beams[0].delta),mid=L=>times.map(t=>(at(L,t)-at(L,t-tauMax))/2);
+  const other=mid(raw.axial),spread=mid(raw.ergodic).map((x,i)=>(x+other[i])/2),pushed=times.map((t,i)=>Math.abs((at(value,t*(1+tilt))-at(value,t*(1-tilt)))/2));
+  const late=Math.sqrt(closures.ergodic.at(-1)*tauMax/2)/A.at(-1),returned=times.map(t=>at(value,t)-at(value,t-late));
+  const series=[{quantity:'loss',indices:all(line),values:value,u:value.map((x,i)=>Math.hypot((ergodic[i]-axial[i])/2,spread[i],pushed[i],returned[i])),target:POPULATION}];
+  const crossing=(L,q)=>{const i=L.findIndex(x=>x>=q);return i<1?NaN:times[i-1]+(times[i]-times[i-1])*(q-L[i-1])/(L[i]-L[i-1]);};
+  write(id,{...expectation(id,'R9','R9 加热逃逸：红蓝对向光的动量扩散越过阱深（能量 Fokker–Planck，两种闭合；只作表征）',line,{
+    derivation:'A red and a blue σ+ beam of one intensity counter-propagating along the tweezer’s axis, ∓100Γ: radiation pressure, light shift and Doppler force cancel; uniform momentum diffusion remains. Energy Fokker–Planck with the exact drift A = E_rec(2+Q)R and the spread B between two closures (ergodic momenta, B = (4/3)⟨KE⟩A; all kinetic energy along the beams, B = 4⟨KE⟩(1+Q+ξ)E_rec R), microcanonical shells of the Gaussian beam, absorbing at the depth, from the lowered isothermal; L delayed by the run to the 1/20 region (0 to τ_max). Value: the closures’ mean; u: half their difference, half the delay’s spread, the uncancelled forces’ tilt, and the return below the depth before the edge is reached (a delay up to √(Bτ_max/2)/A): too wide to judge a loss to 0.05 -- reported, not judged.',
+    conditions:[{what:'depth (µK)',value:U},{what:'initial depth over k_BT',value:U/T},{what:'δ of the two beams at the bottom / Γ',value:beams.map(b=>b.delta/gamma)},{what:'s of each beam',value:beams.map(b=>2*b.omega**2/gamma**2)},
+      {what:'excited population (both beams)',value:bottom/gamma,limit:'≪ 1'},{what:'heating E_rec(2 + Q)R at the bottom (µK/µs)',value:A[0]},{what:'time for the drift to cross the depth, U/A (µs)',value:U/A[0]},
+      {what:'rate imbalance of the two beams at the bottom, (R_red − R_blue)/R',value:(R(beams[0],0)-R(beams[1],0))/bottom,limit:'≪ 1'},
+      {what:'tilt of the uncancelled push over a Rayleigh range, kRz_R·2κ/|δ| (of the depth)',value:tilt,limit:'≪ 1'},{what:'E_rec/U₀ (diffusion approximation)',value:Erec/U,limit:'≪ 1'},
+      {what:'axial run to the region edge at E = 0, τ_max (µs)',value:tauMax},{what:'time at which L = 0.05, 0.5, 0.95: ergodic closure (µs)',value:[0.05,0.5,0.95].map(q=>crossing(ergodic,q))},
+      {what:'the same: axial closure (µs)',value:[0.05,0.5,0.95].map(q=>crossing(axial,q))},{what:'largest difference of the two closures in L',value:Math.max(...ergodic.map((x,i)=>Math.abs(x-axial[i])))},
+      {what:'energy spread during the run to the edge, √(Bτ_max/2) (µK), and the drift’s time over it (µs)',value:[Math.sqrt(closures.ergodic.at(-1)*tauMax/2),late]},{what:'largest u of L',value:Math.max(...series[0].u),limit:'≤ 0.05 to judge'}],
+    series,info:{zR,edge,tauMax,mandelQ:Q,kappa,closures:{ergodic,axial}}}),kind:'characterization'});
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
