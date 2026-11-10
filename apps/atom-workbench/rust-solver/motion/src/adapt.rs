@@ -59,9 +59,9 @@
 //! whose operator annihilates S: the trajectory's read is then no number.
 
 use crate::decide::richardson;
-use crate::linalg::{dot3, norm_sqr, C64};
+use crate::linalg::{dot3, norm_sqr};
 use crate::model::STATES;
-use crate::step::{attempt, jump, step, step_work, test_loss, Attempt, Dynamics, Flow, Middle, Refused, Scratch, Segment, Step, Trajectory};
+use crate::step::{attempt, jump, step, step_work, test_loss, Attempt, Dynamics, Flow, Internal, Middle, Refused, Scratch, Segment, Step, Trajectory};
 use crate::transport::Mark;
 use crate::units::ORDER;
 use std::collections::VecDeque;
@@ -142,7 +142,7 @@ impl Trail {
 pub struct Reader {
     pub drift: Drift,
     trail: Trail,
-    carried: Option<Vec<C64>>,
+    carried: Option<Internal>,
 }
 
 impl Reader {
@@ -229,7 +229,7 @@ fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, 
             }
             c.end.psi
         }
-        None => whole.psi.clone(),
+        None => whole.psi,
     };
     // A level finer in the step or in the grid against the step taken: the finer level's parameter is half.
     let mut finer = |other: &Trajectory, factor: f64| {
@@ -239,7 +239,7 @@ fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, 
         }
         drift.energy += factor * (loss - model.energy(other.cluster, &other.point(), &other.psi));
         drift.mark.hazard_error += factor * (norm_sqr(&other.psi) / size).ln();
-        for (x, (fine, coarse)) in next.iter_mut().zip(other.psi.iter().zip(&whole.psi)) {
+        for (x, (fine, coarse)) in next.iter_mut().zip(other.psi.iter().zip(whole.psi.iter())) {
             *x = *x + (*fine - *coarse) * factor;
         }
     };

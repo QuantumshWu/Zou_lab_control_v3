@@ -173,6 +173,54 @@ pub trait Middle {
     fn work(&self) -> [f64; 3];
 }
 
+/// A cluster's internal state: its amplitudes on the cluster's states -- at most the model's `STATES` --, held in place,
+/// so that whatever holds one (a trajectory, a step's end, the read's carried state, a jump's photon) copies without
+/// the heap. A slice of its amplitudes wherever one is asked; those beyond its length are zero.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Internal {
+    len: usize,
+    amplitudes: [C64; STATES],
+}
+
+impl Internal {
+    /// The zero state on `len` states.
+    pub fn zeros(len: usize) -> Internal {
+        assert!(len <= STATES, "an internal state on {len} states of the model's {STATES}");
+        Internal { len, amplitudes: [C64::ZERO; STATES] }
+    }
+}
+
+impl std::ops::Deref for Internal {
+    type Target = [C64];
+    fn deref(&self) -> &[C64] {
+        &self.amplitudes[..self.len]
+    }
+}
+
+impl std::ops::DerefMut for Internal {
+    fn deref_mut(&mut self) -> &mut [C64] {
+        &mut self.amplitudes[..self.len]
+    }
+}
+
+impl std::fmt::Debug for Internal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl FromIterator<C64> for Internal {
+    fn from_iter<I: IntoIterator<Item = C64>>(amplitudes: I) -> Internal {
+        let mut out = Internal::zeros(0);
+        for z in amplitudes {
+            assert!(out.len < STATES, "an internal state beyond the model's {STATES} states");
+            out.amplitudes[out.len] = z;
+            out.len += 1;
+        }
+        out
+    }
+}
+
 /// A trajectory's state (SPEC §1.6, §1.7, §2.2).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Trajectory {
@@ -182,7 +230,7 @@ pub struct Trajectory {
     pub kappa: [f64; 3],
     /// The internal state on the cluster's states, unnormalized between jumps: ‖ψ‖² is the probability of no jump since
     /// the last one.
-    pub psi: Vec<C64>,
+    pub psi: Internal,
     /// The cluster ψ lives on.
     pub cluster: usize,
     /// Time (µs).
@@ -217,7 +265,7 @@ impl Trajectory {
         let cluster = model.cluster_of(state);
         let states = &model.cluster(cluster).states;
         let at = states.iter().position(|&s| s == state).expect("a ground state lies on its cluster");
-        let mut psi = vec![C64::ZERO; states.len()];
+        let mut psi = Internal::zeros(states.len());
         psi[at] = C64::ONE;
         let threshold = Stream::jump(seed, index, 0).open_uniform();
         Trajectory {
@@ -1155,7 +1203,7 @@ fn fluctuation(second: &[[f64; 3]; 3], mean: &[f64; 3], links: usize, signs: [f6
 /// `carried` is a second internal state of the trajectory's cluster taken through the same jump (adapt.rs, # The read):
 /// the picked class's operator into the picked polarization on it, renormalized as ψ is -- the jump is a linear map of
 /// the internal state. One the operator annihilates is dropped (None).
-pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut Option<Vec<C64>>) -> Result<(), Refused> {
+pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut Option<Internal>) -> Result<(), Refused> {
     let j = trajectory.jumps + 1;
     let mut stream = Stream::jump(trajectory.seed, trajectory.index, j);
     let threshold = stream.open_uniform();
@@ -1163,8 +1211,8 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut O
     let signs: [f64; 3] = std::array::from_fn(|_| if stream.uniform() < 0.5 { 1.0 } else { -1.0 });
     let at = trajectory.point();
     let photons = model.photons(trajectory.cluster, &at, &trajectory.psi);
-    let weights: Vec<f64> = photons.iter().map(|p| p.amplitudes.iter().map(|u| norm_sqr(u)).sum()).collect();
-    let total: f64 = weights.iter().sum();
+    let weight = |p: &Photon| -> f64 { p.amplitudes.iter().map(|u| norm_sqr(u)).sum() };
+    let total: f64 = photons.iter().map(weight).sum();
     if !(total > 0.0) {
         return Err(Refused::Emission);
     }
@@ -1172,8 +1220,8 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut O
     trajectory.threshold = threshold;
     trajectory.work += model.photon_work();
     let mut x = class * total;
-    let mut pick = weights.len() - 1;
-    for (i, &w) in weights.iter().enumerate() {
+    let mut pick = photons.len() - 1;
+    for (i, w) in photons.iter().map(weight).enumerate() {
         if x < w {
             pick = i;
             break;
@@ -1192,7 +1240,7 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut O
         }
     };
     let (e1, e2) = linalg::perpendicular(direction);
-    let along = |e: [f64; 3]| -> Vec<C64> { (0..u[0].len()).map(|i| (0..3).map(|a| u[a][i] * e[a]).sum()).collect() };
+    let along = |e: [f64; 3]| -> Internal { (0..u[0].len()).map(|i| (0..3).map(|a| u[a][i] * e[a]).sum()).collect() };
     let (f1, f2) = (along(e1), along(e2));
     let (w1, w2) = (norm_sqr(&f1), norm_sqr(&f2));
     let (epsilon, f, w) = if polarization * (w1 + w2) < w1 { (e1, f1, w1) } else { (e2, f2, w2) };
@@ -1209,7 +1257,7 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut O
     }
     if let Some(other) = carried.take() {
         *carried = model.photons(trajectory.cluster, &at, &other).iter().find(|p| p.class == photon.class).and_then(|p| {
-            let g: Vec<C64> = (0..p.amplitudes[0].len()).map(|i| (0..3).map(|a| p.amplitudes[a][i] * epsilon[a]).sum()).collect();
+            let g: Internal = (0..p.amplitudes[0].len()).map(|i| (0..3).map(|a| p.amplitudes[a][i] * epsilon[a]).sum()).collect();
             let size = norm_sqr(&g);
             (size > 0.0).then(|| g.iter().map(|z| *z * (1.0 / size.sqrt())).collect())
         });

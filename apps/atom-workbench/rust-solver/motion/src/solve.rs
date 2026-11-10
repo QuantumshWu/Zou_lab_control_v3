@@ -710,7 +710,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: Option<
             listed[j] = Some((t.r, t.kappa));
         }
         if keep {
-            let sample = Sample { cluster: t.cluster, at: t.point(), psi: t.psi.clone() };
+            let sample = Sample { cluster: t.cluster, at: t.point(), psi: t.psi.to_vec() };
             samples[k] = Some(State { sample, tau, index });
         }
     };

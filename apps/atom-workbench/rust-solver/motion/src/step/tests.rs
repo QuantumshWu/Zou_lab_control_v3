@@ -609,7 +609,7 @@ fn a_carried_state_takes_the_trajectory_s_jumps() {
         let mut t = Trajectory::new(&run, state, [trap.centre[0] + 0.05, trap.centre[1] - 0.03, trap.centre[2] + 0.1], [1.0, -2.0, 0.5], 11, state as u64);
         t.grid = tau / 4.0;
         for _ in 0..jumps {
-            let (mut own, mut twice) = (Some(t.psi.clone()), Some(t.psi.iter().map(|z| *z * 2.0).collect::<Vec<C64>>()));
+            let (mut own, mut twice) = (Some(t.psi.clone()), Some(t.psi.iter().map(|z| *z * 2.0).collect::<step::Internal>()));
             let mut twin = t.clone();
             if step::jump(&run, &mut t, &mut own).is_err() {
                 // A state with no photon to emit (the pumping's dark state) makes no jump.
@@ -1487,7 +1487,7 @@ fn split<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
     };
     combine(&mut acting, -h);
     let kept = acting.matrix.clone();
-    let mut state: Vec<C64> = from.psi.clone();
+    let mut state: Vec<C64> = from.psi.to_vec();
     let mut plan = crate::linalg::Chebyshev { parts: 0, terms: 0 };
     let [propagation, combinations, exponentials, pace] = microseconds(
         1,
