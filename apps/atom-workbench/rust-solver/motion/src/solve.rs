@@ -56,7 +56,9 @@
 //!
 //! # Stopping (SPEC §3)
 //! Each output's total error against its target is E² = A² + b² + S² (ledger.rs): the statistics may take the room
-//! R² = ε² − A² − b² the model and the step leave. The targets the stopping rule reads are fixed by the pilot alone (`Fixed`),
+//! R² = ε² − A² − b² the model and the step leave -- b the step's error as the pilot read it (its bound, `Fixed::step`),
+//! which a taken rung holds within the step's share: the share is what the step may take when its rung is chosen
+//! (units.rs `STEP_SHARE`), the read is what it took. The targets the stopping rule reads are fixed by the pilot alone (`Fixed`),
 //! never by the run's own estimates, so that the stopping depends on the run's standard errors and nothing else: the
 //! model's error A from the units measured at the pilot's states, the held share by which T's error counts (the user's
 //! definition: T describes the atoms held), and T's scale -- the pilot's T, at the outputs where its upper bound
@@ -953,8 +955,8 @@ struct Fixed {
     start: f64,
 }
 
-/// The step's share of the targets on what is shown and on T (relative), s·ε (SPEC §2.2, §4): what its error may take,
-/// and what the statistics' room leaves it.
+/// The step's share of the targets on what is shown and on T (relative), s·ε (SPEC §2.2, §4): what its error may take
+/// -- a rung is judged against it, and the statistics' room leaves it no more.
 fn step_bound() -> [f64; 2] {
     [STEP_SHARE * POPULATION_TARGET, STEP_SHARE * TEMPERATURE_TARGET]
 }
@@ -974,15 +976,20 @@ struct Targets {
 }
 impl Targets {
     fn new(fixed: &Fixed) -> Targets {
-        let [bp, bt] = step_bound();
+        // The step's part of an output's account: what its read bounds, at most its share -- the rung is taken only where
+        // every read lies within the share, and a read that is none (booked beyond it, flagged) holds the statistics to
+        // the room the share leaves, not to none.
+        let share = step_bound();
+        let step = |b: &[f64; 2], i: usize| b[i].min(share[i]);
         Targets {
-            population: fixed.model.iter().zip(&fixed.held).zip(&fixed.cleared).map(|((a, h), c)| room(POPULATION_TARGET, a[0] * h + c, bp)).collect(),
+            population: fixed.model.iter().zip(&fixed.held).zip(&fixed.cleared).zip(&fixed.step).map(|(((a, h), c), b)| room(POPULATION_TARGET, a[0] * h + c, step(b, 0))).collect(),
             temperature: fixed
                 .temperature
                 .iter()
                 .zip(&fixed.model)
                 .zip(&fixed.held)
-                .map(|((t, a), h)| t.map(|scale| (scale, room(TEMPERATURE_TARGET / h, a[1], bt))))
+                .zip(&fixed.step)
+                .map(|(((t, a), h), b)| t.map(|scale| (scale, room(TEMPERATURE_TARGET / h, a[1], step(b, 1)))))
                 .collect(),
             held: fixed.held.clone(),
         }
