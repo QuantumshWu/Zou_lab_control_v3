@@ -688,6 +688,57 @@ fn the_doubling_estimate_falls_as_tau_cubed() {
 
 /// The Stumpff functions are their series Σ_j (−x)^j/(k + 2j)! on both signs, near zero and far from it, to round-off
 /// of their scale.
+/// The kick's fluctuation (`fluctuation`) has the covariance M − b bᵀ of the recoil's moments (`Photon::recoil`) and
+/// none in a null direction of it. A photon absorbed from a plane wave of wave vector k has ∇f = ik f: M = k kᵀ = b bᵀ,
+/// as computed to the rounding of the two sums, and the kick is exactly zero (the root of that rounding is ~1e-8 of the
+/// recoil). An envelope's gradient α beside it, ∇f = (ik + α)f, makes C = α αᵀ: one column, the kick along α and of its
+/// length whatever the signs -- also where α's first component is its least by far, which a factor taken in the axes'
+/// order turns into a spurious second column --, to the entries' rounding γ_N S over the pivot's root. An explicit
+/// source's ∇ln σ adds its own directions (SPEC §1.6). Over the signs E[ξ ξᵀ] = C, to the same rounding.
+#[test]
+fn the_kick_s_fluctuation_has_its_covariance_and_none_in_a_null_direction() {
+    let mut stream = crate::random::Stream::new(53, crate::random::Purpose::Initial, 0, 0);
+    let (k, n) = ([3.1, -4.2, 5.9], 5);
+    let epsilon = [0.6, 0.0, 0.8];
+    let amplitudes: [Vec<C64>; 3] = std::array::from_fn(|_| (0..n).map(|_| C64::new(stream.normal(), stream.normal())).collect());
+    let source = ([vec![C64::new(0.3, 0.1); n], vec![C64::ZERO; n], vec![C64::new(-0.2, 0.4); n]], [C64::new(0.05, 7.0), C64::new(-0.3, 1.0), C64::new(0.0, -2.0)]);
+    for (alpha, explicit) in [([0.0; 3], vec![]), ([0.21, -0.13, 0.08], vec![]), ([1e-5, 0.2, 0.0], vec![]), ([0.21, -0.13, 0.08], vec![source])] {
+        let gradients: [[Vec<C64>; 3]; 3] = std::array::from_fn(|i| std::array::from_fn(|a| amplitudes[a].iter().map(|u| *u * C64::new(alpha[i], k[i])).collect()));
+        let links = 6 * n + explicit.len() + 9;
+        let photon = Photon { class: 0, landing: 0, wave_number: 0.0, amplitudes: amplitudes.clone(), gradients, explicit };
+        let recoil = photon.recoil(&epsilon);
+        let exact: [[f64; 3]; 3] = std::array::from_fn(|i| std::array::from_fn(|j| recoil.second[i][j] - recoil.mean[i] * recoil.mean[j]));
+        let rounded = crate::units::rounding(links) * (0..3).map(|j| recoil.second[j][j] + recoil.mean[j] * recoil.mean[j]).fold(0.0, f64::max);
+        let length = alpha.iter().map(|a| a * a).sum::<f64>().sqrt();
+        let mut covariance = [[0.0; 3]; 3];
+        for pattern in 0..8 {
+            let signs: [f64; 3] = std::array::from_fn(|j| if pattern >> j & 1 == 0 { 1.0 } else { -1.0 });
+            let xi = super::fluctuation(&recoil.second, &recoil.mean, links, signs);
+            if length == 0.0 {
+                assert_eq!(xi, [0.0; 3], "a plane wave's absorption fluctuates (the moments' rounding {:e})", exact[0][0]);
+            } else if photon.explicit.is_empty() {
+                // One column: ±α, each component to the entries' rounding over the pivot's root (at least α's largest
+                // component, over √3 of its length).
+                let side = if dot3(xi, alpha) > 0.0 { 1.0 } else { -1.0 };
+                for i in 0..3 {
+                    assert!((xi[i] - side * alpha[i]).abs() <= 2.0 * 3.0_f64.sqrt() * rounded / length, "α {alpha:?}, signs {signs:?}: the kick {xi:?}");
+                }
+            }
+            for i in 0..3 {
+                for j in 0..3 {
+                    covariance[i][j] += xi[i] * xi[j] / 8.0;
+                }
+            }
+        }
+        for i in 0..3 {
+            for j in 0..3 {
+                // The factor's own backward error and the columns left out: the pivots' bound, 18 γ_N S at most.
+                assert!((covariance[i][j] - exact[i][j]).abs() <= 2.0 * 18.0 * rounded, "α {alpha:?}: C[{i}][{j}] {} against {}", covariance[i][j], exact[i][j]);
+            }
+        }
+    }
+}
+
 #[test]
 fn the_stumpff_functions_are_their_series() {
     for x in [0.0, 1e-12, -1e-12, 1e-3, -1e-3, 0.7, -0.7, 4.0, -4.0, 30.0, -30.0] {
