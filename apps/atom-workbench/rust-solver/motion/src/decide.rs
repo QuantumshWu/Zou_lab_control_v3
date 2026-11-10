@@ -6,23 +6,32 @@
 //! random numbers, SPEC §2.4) or on the same sampled states, with its statistical error (`Read`; estimate.rs `paired`).
 //! The current level's own error follows from it (`Read::level`): where the finer level's parameter is the fraction r
 //! of the current one's and the level's error goes as its parameter to the order q, e(h) − e(rh) = d gives
-//! e(h) = d/(1 − r^q) (Richardson); r = 0 where the finer level is the comparison's exact one. Against the share σ of
+//! e(h) = d/(1 − r^q) (`richardson`); r = 0 where the finer level is the comparison's exact one. Against the share σ of
 //! its target that the level may take there are three outcomes and no fourth (`Read::outcome`):
 //! - within, |e| + t·SE ≤ σ: keep the level;
 //! - beyond, |e| − t·SE > σ: refine by the measured ratio at the level's order, h' = h (σ/|e|)^{1/q} (`Read::refined`),
-//!   the parameter at which the measured error meets the share;
-//! - unreadable, neither: refine within the work bound; where it is spent, flag the output and book the readable bound
-//!   |e| + t·SE (`Read::bound`) into its total.
+//!   the parameter at which the measured error meets the share -- on a ladder of halvings, the first rung at or below it
+//!   (`halved`);
+//! - unreadable, neither: refine within the work bound (on a ladder, the next rung); where it is spent, flag the output
+//!   and book the readable bound |e| + t·SE (`Read::bound`) into its total.
 //!
-//! t·SE is the interval at the confidence z over the looks the decision takes (estimate.rs `Spread::interval_over`):
-//! a decision that refines where any of m outputs reads beyond takes the largest of m noisy reads.
+//! t·SE is the interval at the confidence z over the looks the decision takes (estimate.rs `Spread::interval_over`).
+//!
+//! # Many reads
+//! A decision that looks at a family of m reads, each against its own share (`judge`; SPEC §5.1), refines where any of
+//! them lies beyond, and so takes the largest of m noisy reads: beyond is judged with the family's interval (Šidák over
+//! the m looks, so that the largest noisy read refines no more often than one look would), by the read that asks for the
+//! finest level. Within is judged with each read's own interval, one look: every read has to lie within its share by
+//! itself, whatever the others are. Any other family is unreadable.
 //!
 //! A falsifier is a decision whose current level is already booked at a bound that the read can only refute (SPEC §5.2,
-//! §5.3): beyond refines; within and unreadable leave the booked bound standing.
+//! §5.3): beyond refines; within and unreadable leave the booked bound standing. What it reads clearly of the level's
+//! error is the near end of the read's interval, |e| − t·SE (`Read::clear`).
 //!
 //! # pays
-//! A spend W for a predicted saving ΔC pays where ΔC − t·SE(ΔC) > W (`pays`): only a saving the read tells from nothing
-//! moves the work, its error the jackknife of the difference of the two levels' costs.
+//! A spend W for a predicted saving ΔC pays where ΔC − t·SE(ΔC) > W (`pays`; the left side is `assured`, by which savings
+//! are ranked): only a saving the read tells from nothing moves the work, its error the jackknife of the difference of the
+//! two levels' costs.
 //!
 //! # Work
 //! Work is counted, not timed (SPEC §5.1): the real multiply-adds of the engine's algorithms (`Work`), each counted where
@@ -50,11 +59,24 @@ pub enum Outcome {
     Unreadable,
 }
 
+/// Richardson's factor 1/(1 − r^q) (module documentation): a level's own error over its difference with a finer level
+/// whose parameter is `ratio` times its own, the error going as the parameter to `order`.
+pub fn richardson(ratio: f64, order: f64) -> f64 {
+    1. / (1. - ratio.powf(order))
+}
+
+/// The parameter a refinement by `factor` takes a level's `parameter` to on a ladder of halvings (module documentation):
+/// the fewest whole halvings that bring it to the factor, one at least -- a refinement takes a finer level, and an
+/// unreadable read (the factor 1) the next one.
+pub fn halved(parameter: f64, factor: f64) -> f64 {
+    parameter * 0.5_f64.powf((1. / factor).log2().ceil().max(1.))
+}
+
 impl Read {
     /// The current level's own error from its difference with a finer level whose parameter is `ratio` times its own,
-    /// the error going as the parameter to `order` (module documentation): d/(1 − r^q), its error likewise.
+    /// the error going as the parameter to `order` (`richardson`), its error likewise.
     pub fn level(self, ratio: f64, order: f64) -> Read {
-        let f = 1. / (1. - ratio.powf(order));
+        let f = richardson(ratio, order);
         Read { value: self.value * f, spread: Spread { error: self.spread.error * f, groups: self.spread.groups } }
     }
     /// The readable bound |e| + t·SE among `looks` reads; unbounded for a read that is not a number.
@@ -62,13 +84,17 @@ impl Read {
         let bound = self.value.abs() + self.spread.interval_over(looks);
         if bound.is_nan() { f64::INFINITY } else { bound }
     }
+    /// What the read shows clearly of the error among `looks` reads, |e| − t·SE: nothing (−∞) where its spread is unread,
+    /// no number for a read that is none.
+    pub fn clear(&self, looks: f64) -> f64 {
+        self.value.abs() - self.spread.interval_over(looks)
+    }
     /// Within, beyond or unreadable against `share` among `looks` reads (module documentation); a read that is not a
     /// number is unreadable.
     pub fn outcome(&self, share: f64, looks: f64) -> Outcome {
-        let t = self.spread.interval_over(looks);
-        if self.value.abs() + t <= share {
+        if self.bound(looks) <= share {
             Outcome::Within
-        } else if self.value.abs() - t > share {
+        } else if self.clear(looks) > share {
             Outcome::Beyond
         } else {
             Outcome::Unreadable
@@ -80,9 +106,37 @@ impl Read {
     }
 }
 
+/// A family's outcome (module documentation, # Many reads).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Judgement {
+    /// Every read lies within its share by itself.
+    Within,
+    /// Some read lies beyond its share among them all: the least factor on the level's parameter at which a read beyond
+    /// meets its share (`Read::refined`).
+    Beyond(f64),
+    Unreadable,
+}
+
+/// The outcome of a family of reads, each with its share, at the level's `order` (module documentation, # Many reads).
+pub fn judge(reads: &[(Read, f64)], order: f64) -> Judgement {
+    let looks = reads.len() as f64;
+    let beyond = reads.iter().filter(|(r, share)| r.outcome(*share, looks) == Outcome::Beyond).map(|(r, share)| r.refined(*share, order)).reduce(f64::min);
+    match beyond {
+        Some(factor) => Judgement::Beyond(factor),
+        None if reads.iter().all(|(r, share)| r.outcome(*share, 1.) == Outcome::Within) => Judgement::Within,
+        None => Judgement::Unreadable,
+    }
+}
+
+/// What a predicted saving is at the least at the confidence z, saving − t·SE (module documentation, # pays): negative
+/// for one that may be a loss, no number for a read that is none.
+pub fn assured(saving: Read) -> f64 {
+    saving.value - saving.spread.interval()
+}
+
 /// Whether spending `spend` for the predicted `saving` pays (module documentation, # pays): saving − t·SE > spend.
 pub fn pays(spend: Work, saving: Read) -> bool {
-    saving.value - saving.spread.interval() > spend
+    assured(saving) > spend
 }
 
 #[cfg(test)]
@@ -109,8 +163,9 @@ mod tests {
     }
 
     /// Richardson: a halving at order 2 reads 3/4 of the coarse error, a quartering at order 1 too, an exact
-    /// finer level all of it; refining by the measured ratio meets the share: an error four times the share takes half
-    /// the parameter at order 2, a quarter at order 1.
+    /// finer level all of it -- a halving's factors at the orders 2 and 4 are 4/3 and 16/15 to the bit, 2^q/(2^q − 1);
+    /// refining by the measured ratio meets the share: an error four times the share takes half the parameter at order
+    /// 2, a quarter at order 1. On a ladder of halvings a factor takes whole halvings, one at least.
     #[test]
     fn the_level_s_error_and_its_refinement_follow_its_order() {
         let d = read(0.3, 0.03);
@@ -119,8 +174,29 @@ mod tests {
             assert!((e.value - 0.4).abs() < 1e-15 && (e.spread.error - 0.04).abs() < 1e-15, "{e:?}");
         }
         assert_eq!(d.level(0., 2.), d);
+        assert_eq!((richardson(0.5, 2.), richardson(0.5, 4.), richardson(0., 1.)), (4. / 3., 16. / 15., 1.));
         let e = read(-0.2, 0.);
         assert!((e.refined(0.05, 2.) - 0.5).abs() < 1e-15 && (e.refined(0.05, 1.) - 0.25).abs() < 1e-15);
+        assert_eq!((halved(1., 0.5), halved(1., 0.3), halved(1., 0.25), halved(1., 1.), halved(3., 2.)), (0.5, 0.25, 0.25, 0.5, 1.5));
+    }
+
+    /// A family's outcome (`judge`; one look's interval is z of the error on unlimited groups): within where every read
+    /// lies within its own share; an error four times its share, clear among all the looks, is beyond with the factor ½
+    /// at order 2, and of two reads beyond the finer level is taken; one read within and one whose interval straddles its
+    /// share are unreadable; a read that is clear at one look but not among the family's looks is unreadable too, not
+    /// beyond; a read that is no number makes its family unreadable; no read at all is within.
+    #[test]
+    fn a_family_is_beyond_by_all_its_looks_and_within_by_each() {
+        let quiet = (read(0., 0.), 1.);
+        assert_eq!(judge(&[quiet, (read(0.5, 0.1), 1.)], 2.), Judgement::Within);
+        assert_eq!(judge(&[quiet, (read(4., 0.01), 1.)], 2.), Judgement::Beyond(0.5));
+        assert_eq!(judge(&[(read(4., 0.01), 1.), (read(-0.5, 0.001), 0.03125)], 2.), Judgement::Beyond(0.25));
+        assert_eq!(judge(&[quiet, (read(0.5, 1.), 1.)], 2.), Judgement::Unreadable);
+        // 1.5 ± 0.24: beyond 1 at one look (z = 2), not at Šidák's interval over a thousand (about 4.08).
+        let family: Vec<(Read, f64)> = std::iter::once((read(1.5, 0.24), 1.)).chain(std::iter::repeat_n(quiet, 999)).collect();
+        assert_eq!((family[0].0.outcome(1., 1.), judge(&family, 2.)), (Outcome::Beyond, Judgement::Unreadable));
+        assert_eq!(judge(&[quiet, (read(f64::NAN, 0.), 1.)], 2.), Judgement::Unreadable);
+        assert_eq!(judge(&[], 2.), Judgement::Within);
     }
 
     /// A spend pays only for a saving beyond it and the saving's interval; a saving that is not a number pays nothing.
@@ -131,8 +207,10 @@ mod tests {
     }
 
     /// Over m looks of pure noise against a zero share, some read lies beyond by chance as often as one look does at z
-    /// (Šidák): 4000 repetitions of 100 independent normal reads, the family-wise share within four of its standard
-    /// errors of P(|N| > 2) = 0.0455, where one look's interval at every read would refute in 99 % of them.
+    /// (Šidák): of 4000 repetitions of 100 independent normal reads, the share with a read beyond the family's interval
+    /// is P(|N| > 2) = 0.0455, where one look's interval at every read refutes in 1 − (1 − 0.0455)¹⁰⁰ = 99 % of them --
+    /// each share a count's, with the standard error √(p(1 − p)/4000), within its interval at the confidence z over the
+    /// two looks.
     #[test]
     fn many_looks_refute_by_chance_as_rarely_as_one() {
         let (repetitions, looks) = (4000, 100);
@@ -143,9 +221,10 @@ mod tests {
             sidak += usize::from(draws.iter().any(|r| r.outcome(0., looks as f64) == Outcome::Beyond));
             single += usize::from(draws.iter().any(|r| r.outcome(0., 1.) == Outcome::Beyond));
         }
-        let (p, n) = (0.04550026389635842, repetitions as f64);
-        let rate = sidak as f64 / n;
-        assert!((rate - p).abs() <= 4. * (p * (1. - p) / n).sqrt(), "{rate}");
-        assert!(single as f64 / n > 0.98, "{single}");
+        let (p, n) = (0.04550026389635842_f64, repetitions as f64);
+        for (count, share) in [(sidak, p), (single, 1. - (1. - p).powi(looks))] {
+            let within = Spread { error: (share * (1. - share) / n).sqrt(), groups: f64::INFINITY }.interval_over(2.);
+            assert!((count as f64 / n - share).abs() <= within, "{count} of {n} against {share} ± {within}");
+        }
     }
 }
