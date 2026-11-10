@@ -69,7 +69,7 @@
 //! first groups, or a pilot at a finer rung, are no better than the result before them --; else the last result goes out
 //! again, so that the app hears from the solve whatever stage it is in.
 use crate::adapt::{self, Drift};
-use crate::decide::{pays, Outcome, Read};
+use crate::decide::{halved, judge, pays, Judgement, Read};
 use crate::ensemble::{Ensemble, Quadrature, Start, Well, GROUP};
 use crate::estimate::{half_window, paired, spread, stepped, summarize, unseen, wilson, Estimate, Fate, Group, Held, Output, Scales, Spread, Stepped};
 use crate::field::{Geometry, Light};
@@ -266,39 +266,19 @@ fn top_rung(interval: f64, frequency: f64) -> f64 {
     tau
 }
 
-/// A rung's outcome on the pilot's step error (module documentation, # The step; decide.rs): every output's rows as
-/// shown, and T per lab axis where it is held to its target, against the step's share.
-enum Rung {
-    Within,
-    /// Beyond somewhere among all the looks: the factor on τ at which the largest measured error meets its share.
-    Refine(f64),
-    Unreadable,
-}
-fn rung(reads: &[Stepped], held_to: &[Option<V3>]) -> Rung {
+/// A rung's outcome on the pilot's step error (module documentation, # The step; decide.rs `judge`): the family of every
+/// output's rows as shown, and of T per lab axis where it is held to its target, each against the step's share, at the
+/// scheme's order -- beyond, the factor on τ at which the largest measured error meets its share.
+fn rung(reads: &[Stepped], held_to: &[Option<V3>]) -> Judgement {
     let [sp, st] = step_bound();
-    let mut looks: Vec<(&Read, f64)> = vec![];
+    let mut looks: Vec<(Read, f64)> = vec![];
     for (k, r) in reads.iter().enumerate().skip(1) {
-        looks.extend(r.shown.iter().map(|x| (x, sp)));
+        looks.extend(r.shown.iter().map(|x| (*x, sp)));
         if let (Some(_), Some(t)) = (held_to[k], &r.temperature) {
-            looks.extend(t.iter().map(|x| (x, st)));
+            looks.extend(t.iter().map(|x| (*x, st)));
         }
     }
-    let m = looks.len() as f64;
-    let beyond = looks
-        .iter()
-        .filter(|(r, share)| r.outcome(*share, m) == Outcome::Beyond)
-        .map(|(r, share)| r.refined(*share, ORDER as f64))
-        .fold(None, |f: Option<f64>, x| Some(f.map_or(x, |f| f.min(x))));
-    match beyond {
-        Some(factor) => Rung::Refine(factor),
-        None if looks.iter().all(|(r, share)| r.outcome(*share, 1.) == Outcome::Within) => Rung::Within,
-        None => Rung::Unreadable,
-    }
-}
-
-/// The rung a factor on τ takes the step down to: the halvings that bring it to the factor, one at least.
-fn refined(tau: f64, factor: f64) -> f64 {
-    tau * 0.5_f64.powf((1. / factor).log2().ceil().max(1.))
+    judge(&looks, ORDER as f64)
 }
 
 /// The estimates, the listed outputs' atoms and the counts of some groups.
@@ -416,9 +396,9 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
         let parts: Vec<&Part> = pilot.iter().collect();
         let reads = stepped(&parts, &context.scales);
         let next = match rung(&reads, &held_to(&pooled(&parts, &context.scales).0)) {
-            Rung::Within => break (pilot, reads),
-            Rung::Refine(factor) => refined(tau, factor),
-            Rung::Unreadable => refined(tau, 1.),
+            Judgement::Within => break (pilot, reads),
+            Judgement::Beyond(factor) => halved(tau, factor),
+            Judgement::Unreadable => halved(tau, 1.),
         };
         if context.plan.end / next > MOST_STEPS as f64 {
             context.ledger.flag(format!("时间步长的误差在每条轨迹 {MOST_STEPS} 步的上限内读不到份额以内：按读到的界记账"));
@@ -516,7 +496,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
     let pairs = refuted(&all[..checked as usize], &fine, &context.scales, &targets, 0.5, ORDER as f64, &|_| share);
     let escape = e.iter().skip(1).any(|x| x.judged > 0. && 1. - wilson(x.judged - x.near, x.judged) > share[0]).then_some(1.);
     if let Some(factor) = [pairs, escape].into_iter().flatten().reduce(f64::min) {
-        let next = refined(tau, factor);
+        let next = halved(tau, factor);
         if context.plan.end / next <= MOST_STEPS as f64 {
             return Ok(Attempt::Refine(next));
         }
@@ -996,29 +976,27 @@ fn looks(coarse: &[&Part], fine: &[Part], scales: &Scales, targets: &Targets, ra
     looks
 }
 
-/// A falsifier's refutation: its looks against what the coarse level may take there (`share`: per output, on what is
-/// shown and on T), Šidák over all the looks. Beyond somewhere: the factor on the coarse level's parameter at which the
-/// largest measured error meets its share; else none.
+/// A falsifier's refutation: the family of its looks, each against what the coarse level may take there (`share`: per
+/// output, on what is shown and on T), judged as every family is (decide.rs `judge`). Beyond: the factor on the coarse
+/// level's parameter at which the largest measured error meets its share; else none -- a falsifier's read only refutes.
 fn refuted(coarse: &[&Part], fine: &[Part], scales: &Scales, targets: &Targets, ratio: f64, order: f64, share: &dyn Fn(usize) -> [f64; 2]) -> Option<f64> {
-    let looks = looks(coarse, fine, scales, targets, ratio, order);
-    let m = looks.len() as f64;
-    looks
-        .iter()
-        .map(|(k, t, r)| (r, share(*k)[usize::from(*t)]))
-        .filter(|(r, share)| r.outcome(*share, m) == Outcome::Beyond)
-        .map(|(r, share)| r.refined(share, order))
-        .fold(None, |f: Option<f64>, x| Some(f.map_or(x, |f| f.min(x))))
+    let reads: Vec<(Read, f64)> = looks(coarse, fine, scales, targets, ratio, order).into_iter().map(|(k, t, r)| (r, share(k)[usize::from(t)])).collect();
+    match judge(&reads, order) {
+        Judgement::Beyond(factor) => Some(factor),
+        Judgement::Within | Judgement::Unreadable => None,
+    }
 }
 
 /// What a falsifier's looks read clearly of the coarse level's error, the finer level taken as the exact one: per output,
-/// on what is shown and on T, the largest |d| − t·SE among all the looks (Šidák), none below zero.
+/// on what is shown and on T, the largest of what its looks show clearly among them all (decide.rs `Read::clear`, the
+/// family's interval as for a read beyond), none below zero.
 fn cleared(coarse: &[&Part], fine: &[Part], scales: &Scales, targets: &Targets) -> Vec<[f64; 2]> {
     let looks = looks(coarse, fine, scales, targets, 0., 1.);
     let m = looks.len() as f64;
     let mut clear = vec![[0f64; 2]; targets.held.len()];
     for (k, t, r) in &looks {
         let c = &mut clear[*k][usize::from(*t)];
-        *c = c.max(r.value.abs() - r.spread.interval_over(m));
+        *c = c.max(r.clear(m));
     }
     clear
 }
@@ -1348,7 +1326,7 @@ mod tests {
     /// A rung's outcomes on T's read at one output (unlimited groups: one look's interval is z of the error): within
     /// where the error and its interval fit the share; an error four times the share, clear among all the looks, takes
     /// the step to its half (second order); a small error under a wide interval is unreadable; T that is not held to
-    /// its target is not judged. A factor takes the step down by whole halvings, one at least.
+    /// its target is not judged, and neither is the output at t = 0.
     #[test]
     fn a_rung_has_three_outcomes() {
         let read = |value: f64, error: f64| Read { value, spread: Spread { error, groups: f64::INFINITY } };
@@ -1356,14 +1334,14 @@ mod tests {
         let at = |t: Read| Stepped { temperature: Some([t, quiet, quiet]), shown: [quiet; STATES], energy: None };
         let held = [None, Some([30.; 3])];
         let st = step_bound()[1];
-        assert!(matches!(rung(&[at(quiet), at(read(0.5 * st, 0.1 * st))], &held), Rung::Within));
+        assert_eq!(rung(&[at(quiet), at(read(0.5 * st, 0.1 * st))], &held), Judgement::Within);
         match rung(&[at(quiet), at(read(4. * st, 0.01 * st))], &held) {
-            Rung::Refine(factor) => assert!((factor - 0.5).abs() < 1e-12, "{factor}"),
-            _ => panic!("an error four times the share is beyond it"),
+            Judgement::Beyond(factor) => assert!((factor - 0.5).abs() < 1e-12, "{factor}"),
+            other => panic!("an error four times the share is beyond it: {other:?}"),
         }
-        assert!(matches!(rung(&[at(quiet), at(read(0.5 * st, st))], &held), Rung::Unreadable));
-        assert!(matches!(rung(&[at(quiet), at(read(9. * st, 0.))], &[None, None]), Rung::Within));
-        assert_eq!((refined(1., 0.5), refined(1., 0.3), refined(1., 1.)), (0.5, 0.25, 0.5));
+        assert_eq!(rung(&[at(quiet), at(read(0.5 * st, st))], &held), Judgement::Unreadable);
+        assert_eq!(rung(&[at(quiet), at(read(9. * st, 0.))], &[None, None]), Judgement::Within);
+        assert_eq!(rung(&[at(read(9. * st, 0.)), at(quiet)], &[Some([30.; 3]), Some([30.; 3])]), Judgement::Within);
     }
 
     /// The plan: the windows half a period (at most half an interval) cut at t = 0, the listed outputs evenly spread with

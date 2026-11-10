@@ -16,9 +16,10 @@
 //! # The read
 //! Where a trajectory is read (the pilot's, solve.rs), every step it takes is doubled: from the same state the step
 //! and two of its halves, the jump-free flows. The scheme's local error is O(τ^{p+1}), p = `units::ORDER`, so the step's
-//! own error is their difference times 2^p/(2^p − 1) (Richardson). A step on the beating grid is also redone on twice
-//! its panels (`step::Step::regrid`); CF4 and Simpson are of fourth order, so the grid's error is that difference times
-//! 2⁴/(2⁴ − 1). The two add, signed, over the steps the trajectory takes, per displayed quantity (`Drift`):
+//! own error is their difference times 2^p/(2^p − 1) (Richardson, decide.rs `richardson`). A step on the beating grid is
+//! also redone on twice its panels (`step::Step::regrid`); CF4 and Simpson are of fourth order, so the grid's error is
+//! that difference times 2⁴/(2⁴ − 1). The two add, signed, over the steps the trajectory takes, per displayed quantity
+//! (`Drift`):
 //! - per lab axis a, the errors of the principal axes' energies E_i = (ħ/m)k_i²/2 + g_i y_i + λ_i y_i²/2 of the step's
 //!   reference (y_i = e_i·(r − p), k_i = e_i·κ), each mapped by its direction cosine squared e_ia²: T_a is the window
 //!   mean of (ħ/m)κ_a² over one trap period (SPEC §1.7), which of a harmonic axis is its energy, while an error of the
@@ -34,6 +35,7 @@
 //! and the sum reads it). Where the motion does forget them -- a trap without scattering, whose error stays bounded; a
 //! damped motion -- the sum reads more than the error: the safe side.
 
+use crate::decide::richardson;
 use crate::linalg::dot3;
 use crate::model::{Generator, STATES};
 use crate::step::{jump, step, step_work, Dynamics, Flow, Refused, Segment, Step, Trajectory};
@@ -127,11 +129,11 @@ fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, 
             drift.rows[q] += factor * (whole.rows[q] - other.rows[q]);
         }
     };
-    let richardson = |order: i32| (1 << order) as f64 / ((1 << order) - 1) as f64;
-    add(&marks(model, &on, &second.end), richardson(ORDER));
+    // A step against its halves, a grid against the one of half its spacing: the finer level's parameter is half.
+    add(&marks(model, &on, &second.end), richardson(0.5, ORDER as f64));
     if let Some((finer, work)) = s.regrid() {
         trajectory.work += work;
-        add(&marks(model, &on, &finer), richardson(GRID_ORDER));
+        add(&marks(model, &on, &finer), richardson(0.5, GRID_ORDER as f64));
     }
 }
 
