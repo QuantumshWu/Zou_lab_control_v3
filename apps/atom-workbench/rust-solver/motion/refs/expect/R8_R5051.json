@@ -15,6 +15,89 @@
   {
    "what": "excited population",
    "value": 0.004953841031411314
+  },
+  {
+   "what": "held atom (mass factor, initial T in µK)",
+   "value": {
+    "mass": 100,
+    "temperatureUK": 0.03
+   }
+  },
+  {
+   "what": "the site’s centre from the focus (µm)",
+   "value": 0.1896956366870678
+  },
+  {
+   "what": "trap frequencies along x, y, z (kHz)",
+   "value": [
+    21.01308844119698,
+    25.08436703221293,
+    23.462475114515456
+   ]
+  },
+  {
+   "what": "across and along the standing wave (kHz); the fit’s largest relative residual in ω_a²",
+   "value": [
+    8.96702315897952,
+    38.21580936047599,
+    8.04880599010765e-8
+   ]
+  },
+  {
+   "what": "ħω/k_BT across and along",
+   "value": [
+    14.344974594815653,
+    61.1356527887828
+   ],
+   "limit": "≫ 1: the site’s ground state"
+  },
+  {
+   "what": "Wigner factor less 1, across and along: coth(ħω/2k_BT) − 1",
+   "value": [
+    0.0000011778417432495303,
+    0
+   ],
+   "limit": "≪ 1"
+  },
+  {
+   "what": "position spread across and along (µm)",
+   "value": [
+    0.008052892142913357,
+    0.0039008050071537835
+   ]
+  },
+  {
+   "what": "the classical thermal part of it, √(k_BT/Mm)/ω (µm)",
+   "value": [
+    0.0030068844055130247,
+    0.0007055405224125766
+   ]
+  },
+  {
+   "what": "kσ: the probe’s wave number times the larger spread",
+   "value": 0.06484961784064823,
+   "limit": "≪ 1: held"
+  },
+  {
+   "what": "2k_tσ_∥: the standing wave’s phase over the spread along it",
+   "value": 0.05570336524345731,
+   "limit": "≪ 1: held"
+  },
+  {
+   "what": "initial T along x, y, z (µK): Σ_j (e_j·a)² T*_j",
+   "value": [
+    0.39884438134976796,
+    0.4942922810798023,
+    0.45424787412993806
+   ]
+  },
+  {
+   "what": "expected increase over the run along x, y, z (µK)",
+   "value": [
+    0.08698633850856145,
+    0.07913382137965691,
+    0.0235810826849697
+   ]
   }
  ],
  "series": [

@@ -1,6 +1,8 @@
-// node check.mjs <id>... | --r | --r0 | --regress [--result=<file>] -- applies the references' acceptance rules (contract
-// §6, SPEC §6) to the solver's results (out/results/<id>.json from run.mjs, or any file holding the contract's result:
-// the bare result, a native line {result}, or run.mjs's {final:{result}}) and prints a compact table.
+// node check.mjs <id>... | --r | --r0 | --regress [--result=<file>] [--results=<file>,<file>,...] -- applies the
+// references' acceptance rules (contract §6, SPEC §6) to the solver's results (out/results/<id>.json from run.mjs, or
+// any file holding the contract's result: the bare result, a native line {result}, or run.mjs's {final:{result}}) and
+// prints a compact table. A relation (kind "relation": one statement about several scenes' results, `relation` below)
+// reads its members' results (out/results/<member>.json, or --results in the members' order).
 //
 // Per output (a series' value at an output index): d = solver − reference, σ = √(SE² + u²) with u the reference's
 // standard uncertainty and SE the solver's statistical standard error:
@@ -31,7 +33,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const here=path.dirname(fileURLToPath(import.meta.url));
-const KB=1.380649e-23,Z=2,SHARE=0.05,POWER=0.3;
+const KB=1.380649e-23,HBAR=6.62607015e-34/(2*Math.PI),Z=2,SHARE=0.05,POWER=0.3;
 const read=f=>JSON.parse(fs.readFileSync(f,'utf8'));
 const expectationFile=id=>fs.existsSync(id)?id:[path.join(here,'expect',`${id}.json`),path.join(here,'expect','regress',`${id}.json`)].find(f=>fs.existsSync(f));
 const resultOf=v=>v.final?.result??v.result??(v.populations?v:null);
@@ -108,6 +110,49 @@ export function check(e,result,request){
   return {rows,judged,failed,rejected,under,skipped,shown,verdict};
 }
 
+/** A relation between the steady states of several results (kind "relation": R4's scaling law, expect.mjs
+ * r4linear): D = Σ c_k T̄_k, T̄_k the mean of member k's T on the relation's axis over its window, against `value`.
+ * A window mean's SE is bounded by the mean of its outputs' (fully correlated in time); the members are separate runs,
+ * so SE_D² = Σ c_k² SE_k². The scale is the T̄ of the member `scale`: the target and u are relative to it, and u adds to
+ * the scenes' part what only the results tell -- the trap light's line shift over the cloud against the detuning,
+ * κk_BT̄/ħ|δ|, and the polarization pattern's first harmonic over the coldest cloud, e^{−2k²σ²}, σ² = k_BT̄/mω².
+ * The law is of steady states in the method's validated regime: a member whose window is not classical throughout, or
+ * whose T̄ over the window's two halves differ by more than Z of their standard errors, leaves the relation NOT
+ * JUDGED (said with the numbers). Then rule 1 as for an output: fail when |D − value| − Zσ > target; the coverage of
+ * rule 2 (|D| against 2·(SE ⊕ Σ|c_k|·ledger_k·T̄_k) + 2u) is one output and only reported. */
+export function relation(e,results){
+  const mean=xs=>xs.reduce((a,b)=>a+b,0)/xs.length;
+  const members=e.members.map((mb,k)=>{
+    const r=results[k],m=r?.motion;if(!m)return {id:mb.id,error:'no result'};
+    if(r.timesUs?.length!==mb.samples||Math.abs(r.timesUs.at(-1)-mb.durationUs)>1e-9*mb.durationUs)return {id:mb.id,error:`grid: ${r.timesUs?.length} times to ${r.timesUs?.at(-1)} µs, expected ${mb.samples} to ${mb.durationUs}`};
+    const [lo,hi]=mb.window,idx=Array.from({length:hi-lo+1},(_,j)=>lo+j),mid=idx.length>>1;
+    const part=ix=>{const se=ix.map(i=>m.temperatureErrorUK[e.axis][i]);return {x:mean(ix.map(i=>m.temperatureUK[e.axis][i])),se:se.some(s=>s==null)?Infinity:mean(se)};};
+    const whole=part(idx),early=part(idx.slice(0,mid)),late=part(idx.slice(mid));
+    return {id:mb.id,...whole,early,late,from:r.timesUs[lo],start:m.temperatureUK[e.axis][0],classical:idx.every(i=>m.classical[i]),steady:Math.abs(late.x-early.x)<=Z*Math.hypot(early.se,late.se),
+      ledger:r.diagnostics?.approximations?.totals?.temperature?.error??0,trajectories:m.trajectories,step:m.timeStepUs};
+  });
+  if(members.some(m=>m.error))return {members,verdict:'NO RESULT'};
+  const c=e.coefficients,D=members.reduce((t,m,k)=>t+c[k]*m.x,0),se=Math.hypot(...members.map((m,k)=>c[k]*m.se)),scale=members[e.scale].x,i=e.info,kT=KB/HBAR*1e-12;
+  const shift=i.kappa*kT*scale/Math.abs(i.deltaRadPerUs),pattern=Math.max(...members.map(m=>Math.exp(-2*i.k*i.k*i.hbarOverMass*kT*m.x/(i.trapZ*i.trapZ))));
+  const u=scale*(e.u.relative+shift+pattern),sigma=Math.hypot(se,u),target=e.target.relative*scale,d=D-e.value;
+  const reported=Math.hypot(se,members.reduce((t,m,k)=>t+Math.abs(c[k])*m.ledger*m.x,0));
+  const reasons=[...members.filter(m=>!m.classical).map(m=>`${m.id}: below 4ħω in its window (the semiclassical limit)`),...members.filter(m=>!m.steady).map(m=>`${m.id}: not steady (T̄ ${m.early.x.toFixed(2)} ± ${m.early.se.toFixed(2)} then ${m.late.x.toFixed(2)} ± ${m.late.se.toFixed(2)} µK over the window's halves)`),
+    ...members.filter(m=>!Number.isFinite(m.se)).map(m=>`${m.id}: no error estimate`)];
+  return {members,D,se,u,terms:{scenes:e.u.relative,shift,pattern},sigma,target,score:(Math.abs(d)-Z*sigma)/target,covered:Math.abs(d)<=2*reported+2*u,under:sigma>POWER*target,reasons,
+    verdict:reasons.length?'NOT JUDGED':Math.abs(d)-Z*sigma>target?'FAIL':'PASS'};
+}
+
+function printRelation(e,c){
+  console.log(`${e.id} [${e.reference}, ${e.kind}] ${e.title}`);
+  for(const m of c.members)console.log('  '+m.id.padEnd(12)+(m.error??`T̄_${e.axis} ${m.x.toFixed(3)} ± ${m.se.toFixed(3)} µK from ${m.from} µs (halves ${m.early.x.toFixed(2)}, ${m.late.x.toFixed(2)}; T(0) ${m.start.toFixed(2)}) | ${m.classical?'classical':'BELOW 4ħω'}, ${m.steady?'steady':'NOT STEADY'} | ${m.trajectories} trajectories, step ${m.step} µs, ledger ${(100*m.ledger).toFixed(1)} %`));
+  if(c.verdict==='NO RESULT'){console.log('  NO RESULT\n');return;}
+  const U=e.info?.modulationUK,first=c.members[0],last=c.members.at(-1),slope=U?(last.x-first.x)/(U.at(-1)-U[0]):null;
+  console.log(`  ${c.verdict}: D = ${e.coefficients.map((q,k)=>`${q>0?'+':'−'}${Math.abs(q)}·T̄(${e.members[k].id})`).join(' ')} = ${c.D.toFixed(3)} µK against ${e.value}; SE ${c.se.toFixed(3)}, u ${c.u.toFixed(3)} (relative to T̄ ${c.members[e.scale].x.toFixed(2)}: scenes ${c.terms.scenes.toFixed(4)}, line shift ${c.terms.shift.toFixed(4)}, pattern ${c.terms.pattern.toExponential(1)}), target ${c.target.toFixed(3)}`);
+  console.log(`  (|D| − 2σ)/target = ${c.score.toFixed(2)}${c.under?'; underpowered (σ > 0.3 target)':''}; reported errors ${c.covered?'cover':'DO NOT cover'} D`+(slope===null?'':`; line through the outer two: T̄ = ${slope.toFixed(4)}·U + ${(first.x-slope*U[0]).toFixed(2)} µK (U the light potential's modulation)`));
+  for(const r of c.reasons)console.log(`  not judged: ${r}`);
+  console.log('');
+}
+
 function print(e,c,run){
   const head=`${e.id} [${e.reference}, ${e.kind}] ${e.title}`;
   if(c.error){console.log(`${head}\n  ${c.error}\n`);return;}
@@ -122,7 +167,7 @@ function print(e,c,run){
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
-  const args=process.argv.slice(2),one=args.find(a=>a.startsWith('--result='))?.slice(9);
+  const args=process.argv.slice(2),one=args.find(a=>a.startsWith('--result='))?.slice(9),many=args.find(a=>a.startsWith('--results='))?.slice(10).split(',');
   const listed=f=>fs.existsSync(f)?fs.readdirSync(f).filter(x=>x.endsWith('.json')).map(x=>x.slice(0,-5)):[];
   let ids=args.filter(a=>!a.startsWith('--'));
   if(args.includes('--r'))ids.push(...listed(path.join(here,'expect')).filter(id=>/^R[1-9]/.test(id)));
@@ -131,7 +176,12 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
   const summary=[];let bad=0;
   for(const id of ids){
     const ef=expectationFile(id);if(!ef){console.log(id,'no expectation');continue;}
-    const e=read(ef),rf=one??path.join(here,'out','results',`${e.id}.json`);
+    const e=read(ef);
+    if(e.kind==='relation'){
+      const files=many??e.members.map(m=>path.join(here,'out','results',`${m.id}.json`)),c=relation(e,e.members.map((_,k)=>fs.existsSync(files[k]??'')?resultOf(read(files[k])):null));
+      printRelation(e,c);summary.push([e.id,c.verdict]);if(c.verdict==='FAIL')bad++;continue;
+    }
+    const rf=one??path.join(here,'out','results',`${e.id}.json`);
     if(!fs.existsSync(rf)){summary.push([e.id,'NO RESULT']);continue;}
     const raw=read(rf),r=resultOf(raw);if(!r){summary.push([e.id,raw.final?.error?`ERROR ${raw.final.error}`:'NO RESULT']);continue;}
     const c=check(e,r,read(path.join(here,e.request)));print(e,c,raw.final?raw:null);summary.push([e.id,c.error?'GRID MISMATCH':c.verdict]);if(c.verdict==='FAIL'||c.error)bad++;

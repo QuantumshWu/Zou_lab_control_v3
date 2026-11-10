@@ -53,17 +53,30 @@ export function integrate(f,a,b,{panels=16,n=16}={}){
   let s=0;const h=(b-a)/panels;for(let p=0;p<panels;p++)for(const [x,w] of gaussLegendre(n,a+p*h,a+(p+1)*h))s+=w*f(x);return s;
 }
 
+/** The eigenvalues and eigenvectors of a real symmetric matrix by Jacobi's rotations (cyclic sweeps until the
+ * off-diagonal part is below `floor` times the matrix' scale): `values[i]` with the vector `vectors[k][i]` over k. The
+ * matrix is used up. */
+export function symmetricEigen(a,floor=1e-15){
+  const n=a.length,v=Array.from({length:n},(_,i)=>Array.from({length:n},(_,j)=>+(i===j))),scale=Math.max(...a.map(row=>Math.max(...row.map(Math.abs))))||1;
+  for(let it=0;it<200;it++){let off=0;for(let p=0;p<n;p++)for(let q=p+1;q<n;q++){if(Math.abs(a[p][q])<floor*scale)continue;off+=(a[p][q]/scale)**2;const th=0.5*Math.atan2(2*a[p][q],a[q][q]-a[p][p]),c=Math.cos(th),s=Math.sin(th);
+    for(let k=0;k<n;k++){const akp=a[k][p],akq=a[k][q];a[k][p]=c*akp-s*akq;a[k][q]=s*akp+c*akq;}for(let k=0;k<n;k++){const apk=a[p][k],aqk=a[q][k];a[p][k]=c*apk-s*aqk;a[q][k]=s*apk+c*aqk;}
+    for(let k=0;k<n;k++){const vkp=v[k][p],vkq=v[k][q];v[k][p]=c*vkp-s*vkq;v[k][q]=s*vkp+c*vkq;}}if(off<1e-28)break;}
+  return {values:a.map((row,i)=>row[i]),vectors:v};
+}
+/** A Hermitian matrix A + iB (A symmetric, B antisymmetric, n × n) through the real symmetric [[A, −B], [B, A]], whose
+ * eigenvalues are its own, each twice, with the vectors (Re c; Im c): sorted upward, one of each pair. */
+export function hermitianEigen(A,B){
+  const n=A.length,{values,vectors}=symmetricEigen([...A.map((row,i)=>[...row,...B[i].map(x=>-x)]),...B.map((row,i)=>[...row,...A[i]])]);
+  return values.map((value,i)=>({value,vector:Array.from({length:n},(_,k)=>({re:vectors[k][i],im:vectors[n+k][i]}))})).sort((x,y)=>x.value-y.value).filter((_,i)=>i%2===0);
+}
 /** Gauss–Hermite nodes and weights of the standard normal, ∫ f(x) e^{−x²/2} dx/√(2π) ≈ Σ w f(x): the eigenvalues of the
- * Jacobi matrix of the Hermite recurrence (off-diagonal √k; Golub and Welsch, Math. Comp. 23 (1969) 221) by Jacobi's
- * rotations, the weights the squares of the eigenvectors' first components. */
+ * Jacobi matrix of the Hermite recurrence (off-diagonal √k; Golub and Welsch, Math. Comp. 23 (1969) 221), the weights
+ * the squares of the eigenvectors' first components. */
 const hermiteCache=new Map();
 export function gaussHermite(n){
   let out=hermiteCache.get(n);if(out)return out;
-  const a=Array.from({length:n},(_,i)=>Array.from({length:n},(_,j)=>Math.abs(i-j)===1?Math.sqrt(Math.max(i,j)):0)),v=Array.from({length:n},(_,i)=>Array.from({length:n},(_,j)=>+(i===j)));
-  for(let it=0;it<200;it++){let off=0;for(let p=0;p<n;p++)for(let q=p+1;q<n;q++){if(Math.abs(a[p][q])<1e-15)continue;off+=a[p][q]**2;const th=0.5*Math.atan2(2*a[p][q],a[q][q]-a[p][p]),c=Math.cos(th),s=Math.sin(th);
-    for(let k=0;k<n;k++){const akp=a[k][p],akq=a[k][q];a[k][p]=c*akp-s*akq;a[k][q]=s*akp+c*akq;}for(let k=0;k<n;k++){const apk=a[p][k],aqk=a[q][k];a[p][k]=c*apk-s*aqk;a[q][k]=s*apk+c*aqk;}
-    for(let k=0;k<n;k++){const vkp=v[k][p],vkq=v[k][q];v[k][p]=c*vkp-s*vkq;v[k][q]=s*vkp+c*vkq;}}if(off<1e-28)break;}
-  out=Array.from({length:n},(_,i)=>[a[i][i],v[0][i]**2]);hermiteCache.set(n,out);return out;
+  const {values,vectors}=symmetricEigen(Array.from({length:n},(_,i)=>Array.from({length:n},(_,j)=>Math.abs(i-j)===1?Math.sqrt(Math.max(i,j)):0)));
+  out=values.map((x,i)=>[x,vectors[0][i]**2]);hermiteCache.set(n,out);return out;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

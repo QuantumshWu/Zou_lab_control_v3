@@ -23,6 +23,7 @@ for(const id of ids){
   const file=expectationFile(id);if(!file){console.log(id,'no expectation');continue;}
   const e=JSON.parse(fs.readFileSync(file,'utf8'));
   if(e.excluded){console.log(id,'excluded:',e.excluded);continue;}
+  if(e.members){console.log(id,'a relation of',e.members.map(m=>m.id).join(', '),'(run under their own ids)');continue;}
   const line=JSON.parse(fs.readFileSync(path.join(here,e.request),'utf8'));
   const run=await runWorker(line,{limitS:limit});
   const out={id,request:e.request,worker:WORKER,wallS:run.wallS,aborted:run.aborted,firstCheckpointS:run.checkpoints[0]?.s??null,checkpoints:run.checkpoints,final:run.final,stderr:run.stderr.slice(-2000)};
