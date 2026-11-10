@@ -41,8 +41,9 @@ for(const file of files){
   clean.forEach((text,i)=>{
     const named=text.match(/^\s*(?:pub(?:\([a-z]+\))?\s+)?(?:const|static)\s+([A-Z_0-9]+)\s*:\s*([^=]+)=\s*(.*)$/);
     if(named){constants.push({file:rel,line:i+1,name:named[1],type:named[2].trim(),value:named[3].trim()});return;}
-    // tuple and array indices (`.0`, `[3]`) and type lengths (`[f64; 3]`) are structure, not quantities
-    const stripped=text.replace(/\.\d+(?![\d.eE])/g,' ').replace(/;\s*\d+\s*\]/g,'; N]').replace(/\[\s*\d+\s*\]/g,'[N]');
+    // tuple and array indices (`.0`, `[3]`) and type lengths (`[f64; 3]`) are structure, not quantities; a tuple index
+    // follows an identifier or a closing bracket (`c.1`, `f(x).0`, `m[k].0`), which a number's fraction (`0.25`) never does
+    const stripped=text.replace(/(?<=\b[A-Za-z_]\w*|[)\]])\.\d+/g,' ').replace(/;\s*\d+\s*\]/g,'; N]').replace(/\[\s*\d+\s*\]/g,'[N]');
     const found=[...stripped.matchAll(NUMBER)].map(m=>m[1].replaceAll('_','')).filter(v=>!STRUCTURAL.has(v));
     if(found.length)lines.push({file:rel,line:i+1,text:raw[i].trim(),literals:found});});
 }

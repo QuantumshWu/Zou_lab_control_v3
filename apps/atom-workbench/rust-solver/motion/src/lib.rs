@@ -3,6 +3,7 @@
 
 pub mod units;
 pub mod linalg;
+mod special;
 pub mod random;
 pub mod request;
 pub mod field;
