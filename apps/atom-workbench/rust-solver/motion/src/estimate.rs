@@ -61,7 +61,7 @@ use std::f64::consts::{PI, TAU};
 /// The far end of Wilson's score interval at confidence z for a count n in N independent draws,
 /// (n + z²/2 + z √(n(N − n)/N + z²/4))/(N + z²): the largest share the draws leave plausible (module documentation).
 pub fn wilson(count: f64, draws: f64) -> f64 {
-    let (z, draws) = (CONFIDENCE, draws.max(0.));
+    let z = CONFIDENCE;
     let spread = if draws > 0. { count * (draws - count) / draws } else { 0. };
     (count + 0.5 * z * z + z * (spread + 0.25 * z * z).sqrt()) / (draws + z * z)
 }
@@ -86,8 +86,6 @@ pub struct Spread {
     pub groups: f64,
 }
 impl Spread {
-    /// No error: a value known exactly (t = 0).
-    pub const EXACT: Spread = Spread { error: 0., groups: f64::INFINITY };
     /// An error read on fewer than two groups: unknown.
     pub const UNREAD: Spread = Spread { error: f64::INFINITY, groups: 0. };
     /// Whether it is read: a variance over independent groups has one degree of freedom fewer than the groups.
@@ -98,9 +96,9 @@ impl Spread {
     pub fn interval(&self) -> f64 {
         self.interval_over(1.)
     }
-    /// Its interval at the confidence z among `looks` reads (module documentation, # Many looks): the quantile at Šidák's
-    /// tail of Student's t at the groups that read it less one, the normal's on unlimited groups, times its standard
-    /// error; unbounded when unread.
+    /// Its interval at the confidence z among `looks` reads, one at least (module documentation, # Many looks): the
+    /// quantile at Šidák's tail of Student's t at the groups that read it less one, the normal's on unlimited groups, times
+    /// its standard error; unbounded when unread.
     pub fn interval_over(&self, looks: f64) -> f64 {
         if !self.read() {
             return f64::INFINITY;
@@ -108,20 +106,20 @@ impl Spread {
         if self.error == 0. {
             return 0.;
         }
-        let tail = -((-normal_tail(CONFIDENCE)).ln_1p() / looks.max(1.)).exp_m1();
+        let tail = -((-normal_tail(CONFIDENCE)).ln_1p() / looks).exp_m1();
         let freedom = (self.groups < f64::INFINITY).then(|| (self.groups.floor() - 1.) as u64);
         quantile(tail, freedom) * self.error
     }
 }
 
-/// The two-sided quantile at the tail p: the q with P(|t_ν| > q) = p for Student's t at ν degrees of freedom (`None`:
+/// The two-sided quantile at the tail p: the q with P(|t_ν| > q) = p for Student's t at ν ≥ 1 degrees of freedom (`None`:
 /// the normal), by bisection on the tail to the last bit; kept per thread, a pure function of both.
-fn quantile(tail: f64, freedom: Option<u64>) -> f64 {
+pub(crate) fn quantile(tail: f64, freedom: Option<u64>) -> f64 {
     thread_local! {
         static KEPT: std::cell::RefCell<std::collections::HashMap<(u64, Option<u64>), f64>> = Default::default();
     }
     let beyond = |q: f64| match freedom {
-        Some(nu) => student_tail(q, nu.max(1)),
+        Some(nu) => student_tail(q, nu),
         None => normal_tail(q),
     };
     KEPT.with(|kept| {
@@ -144,11 +142,6 @@ fn quantile(tail: f64, freedom: Option<u64>) -> f64 {
             }
         })
     })
-}
-
-/// Student's t at ν degrees of freedom (whole, at least one) at the normal's two-sided tail beyond z (`quantile`).
-pub fn student(z: f64, nu: f64) -> f64 {
-    quantile(normal_tail(z), Some(nu.round().max(1.) as u64))
 }
 
 /// The normal's two-sided tail beyond z, P(|N| > z) = erfc(z/√2) = Q(½, z²/2), the regularized upper incomplete gamma
@@ -336,12 +329,11 @@ pub struct Scales {
 }
 
 /// The estimates at one output (module documentation): the loss, the rows as shown and the held atoms' populations, the
-/// held atoms' motion where at least two are held; each spread over the groups that read it, and the trajectories, groups
-/// and held atoms behind them.
+/// held atoms' motion where at least two are held; each spread over the groups that read it, and the trajectories and
+/// held atoms behind them.
 #[derive(Clone, Debug)]
 pub struct Estimate {
     pub trajectories: f64,
-    pub groups: f64,
     pub held: f64,
     pub loss: f64,
     pub loss_error: Spread,
@@ -500,7 +492,6 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
             });
             Estimate {
                 trajectories: all.trajectories,
-                groups: j.count,
                 held: n,
                 loss: full.loss,
                 loss_error: j.every(|m| m[0].loss),
@@ -648,6 +639,11 @@ mod tests {
         assert!(read.shown[2].value.is_nan() && !read.shown[2].spread.read() && read.shown[2].bound(1.) == f64::INFINITY);
     }
 
+    /// Student's t at ν degrees of freedom at the normal's two-sided tail beyond z.
+    fn student(z: f64, nu: u64) -> f64 {
+        quantile(normal_tail(z), Some(nu))
+    }
+
     /// Student's t at the normal's tail: the tables' t at 97.5 % (z = Φ⁻¹(0.975)) for ν = 1, 10, 30, its tail there the
     /// normal's to round-off; at z = 2 the closed forms of one and two degrees of freedom, tan(π(1 − p)/2) and
     /// (1 − p)√(2/(1 − (1 − p)²)), p = P(|N| > 2); the normal's own z as ν grows, (z³ + z)/(4ν) apart (Cornish–Fisher).
@@ -655,16 +651,33 @@ mod tests {
     fn student_s_t_is_the_quantile_at_the_normal_s_tail() {
         let z = 1.959963984540054;
         assert!((normal_tail(z) - 0.05).abs() < 1e-16, "{}", normal_tail(z));
-        for (nu, q) in [(1., 12.706205), (10., 2.228139), (30., 2.042272)] {
+        for (nu, q) in [(1, 12.706205), (10, 2.228139), (30, 2.042272)] {
             let t = student(z, nu);
-            assert!((t - q).abs() < 5e-7 && (student_tail(t, nu as u64) - 0.05).abs() < 1e-15, "{nu}: {t} against {q}");
+            assert!((t - q).abs() < 5e-7 && (student_tail(t, nu) - 0.05).abs() < 1e-15, "{nu}: {t} against {q}");
         }
         let p = normal_tail(2.);
         assert!((p - 0.04550026389635842).abs() < 1e-16, "{p}");
-        assert!((student(2., 1.) - (std::f64::consts::FRAC_PI_2 * (1. - p)).tan()).abs() < 1e-10);
-        assert!((student(2., 2.) - (1. - p) * (2. / (1. - (1. - p) * (1. - p))).sqrt()).abs() < 1e-13);
-        let t = student(2., 1e4);
+        assert!((student(2., 1) - (std::f64::consts::FRAC_PI_2 * (1. - p)).tan()).abs() < 1e-10);
+        assert!((student(2., 2) - (1. - p) * (2. / (1. - (1. - p) * (1. - p))).sqrt()).abs() < 1e-13);
+        let t = student(2., 10_000);
         assert!((t - 2. - 10. / 4e4).abs() < 1e-6, "{t}");
+    }
+
+    /// The quantile is the tail's inverse to the last bit (`quantile`), the normal's and Student's, from the centre to the
+    /// far tail: the tail at q is no more than the tail asked, the tail at the number before q is more. The whole tail
+    /// asks for 0 and gets the least positive number.
+    #[test]
+    fn the_quantile_is_the_tail_s_inverse_to_the_last_bit() {
+        for freedom in [None, Some(1), Some(2), Some(7), Some(40)] {
+            let beyond = |q: f64| freedom.map_or(normal_tail(q), |nu| student_tail(q, nu));
+            for tail in [0.999, 0.5, 0.31731050786291415, 0.05, 0.04550026389635842, 2e-10] {
+                let q = quantile(tail, freedom);
+                assert!(beyond(q) <= tail && beyond(q.next_down()) > tail, "{freedom:?} at {tail}: {q}");
+            }
+        }
+        let far = quantile(2e-300, None);
+        assert!(normal_tail(far) <= 2e-300 && normal_tail(far.next_down()) > 2e-300, "{far}");
+        assert_eq!(quantile(1., None), f64::from_bits(1));
     }
 
     /// The interval over many looks (Šidák): one look reads z itself on unlimited groups; m looks read the quantile q
@@ -677,7 +690,7 @@ mod tests {
         let p = normal_tail(CONFIDENCE);
         assert!(((1. - normal_tail(q)).powf(1000.) - (1. - p)).abs() < 1e-13 && (q - 4.08).abs() < 0.01, "{q}");
         assert!(Spread { error: 1., groups: 8. }.interval_over(1000.) > q, "Student's tail is the wider");
-        assert_eq!(Spread::EXACT.interval_over(1e6), 0.);
+        assert_eq!(Spread { error: 0., groups: f64::INFINITY }.interval_over(1e6), 0.);
     }
 
     /// Wilson's far end at a count of zero: z²/(N + z²), at z = 2 four in N + 4; a draw of none leaves all unseen. At a
@@ -729,7 +742,7 @@ mod tests {
         let mut groups: Vec<Group> = [1, 1, 1, 1, 0].into_iter().map(|s| group(vec![Some(atom(s, 0., 1.))])).collect();
         let e = &summarize(&groups, &UNIT)[0];
         assert!((e.shown[0] - 0.2).abs() < 1e-15 && (e.shown_errors[0].error - 0.2).abs() < 1e-15, "{:?}", e.shown_errors[0]);
-        assert_eq!(e.shown_errors[0].interval(), student(CONFIDENCE, 4.) * e.shown_errors[0].error);
+        assert_eq!(e.shown_errors[0].interval(), student(CONFIDENCE, 4) * e.shown_errors[0].error);
         groups.push(group(vec![None]));
         let e = &summarize(&groups, &UNIT)[0];
         let m = e.motion.unwrap();
