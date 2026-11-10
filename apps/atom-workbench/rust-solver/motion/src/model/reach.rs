@@ -204,12 +204,16 @@ pub(crate) struct Forms {
     differences: Vec<OnceLock<Weights>>,
     /// Per carrier; and per ground state the excited states (less GROUND) any carrier reaches from it, ascending.
     folded: OnceLock<(Vec<Folded>, Vec<Vec<usize>>)>,
+    /// Γ_min (eliminate.rs `Model::least_decay`).
+    decay: OnceLock<f64>,
+    /// [carrier][carrier]: the beat δ_to − δ_from of two carriers (rad/µs).
+    beats: OnceLock<Vec<Vec<f64>>>,
 }
 
 impl Forms {
     pub(crate) fn new() -> Forms {
         let cells = || (0..STATES * STATES).map(|_| OnceLock::new()).collect();
-        Forms { levels: OnceLock::new(), mixed: OnceLock::new(), entries: cells(), differences: cells(), folded: OnceLock::new() }
+        Forms { levels: OnceLock::new(), mixed: OnceLock::new(), entries: cells(), differences: cells(), folded: OnceLock::new(), decay: OnceLock::new(), beats: OnceLock::new() }
     }
 
     /// A weighting of the model's far static forms (`Weights`).
@@ -286,6 +290,16 @@ impl Forms {
     pub(crate) fn reached(&self, model: &Model) -> &[Vec<usize>] {
         &self.carriers(model).1
     }
+
+    /// The least decay rate of the excited states, Γ_min.
+    pub(crate) fn least_decay(&self, model: &Model) -> f64 {
+        *self.decay.get_or_init(|| model.least_decay())
+    }
+
+    /// The beat δ_to − δ_from of two carriers (rad/µs).
+    pub(crate) fn beat(&self, model: &Model, to: usize, from: usize) -> f64 {
+        self.beats.get_or_init(|| model.carriers.iter().map(|to| model.carriers.iter().map(|from| model.omega(&to.beat.plus(-1, &from.beat))).collect()).collect())[to][from]
+    }
 }
 
 /// A cell's beams, or its centre point's (its radius zero), with what the units' bounds share over it, each part made once for
@@ -304,25 +318,25 @@ pub(crate) struct Region {
     pub(crate) pairs: Vec<Vec<PairSpan>>,
     /// What its bounds read of the model's forms.
     pub(crate) forms: Arc<Forms>,
-    pub(crate) energies: OnceLock<CellEnergies>,
+    pub(crate) energies: OnceLock<Box<CellEnergies>>,
     /// Per carrier.
     pub(crate) couplings: OnceLock<Vec<Couplings>>,
     /// [carrier][ground state]: the bound of its dressing's resolvent (eliminate.rs `Model::resolvent`).
-    pub(crate) resolvents: OnceLock<Vec<Vec<f64>>>,
+    pub(crate) resolvents: OnceLock<Vec<[f64; GROUND]>>,
     /// [carrier][ground state].
-    pub(crate) dressings: OnceLock<Vec<Vec<f64>>>,
+    pub(crate) dressings: OnceLock<Vec<[f64; GROUND]>>,
     /// Per cluster.
     pub(crate) forces: Vec<OnceLock<f64>>,
     /// Per ground state: its folded drives' saturation and sweep.
-    pub(crate) drives: Vec<OnceLock<(f64, f64)>>,
+    pub(crate) drives: [OnceLock<(f64, f64)>; GROUND],
     /// Per ground state: the slope of its level under the near light (units.rs `Model::near_slope`).
-    pub(crate) slopes: Vec<OnceLock<f64>>,
+    pub(crate) slopes: [OnceLock<f64>; GROUND],
     /// Per ground state: the slopes of the far light's levels from it to the excited states the carriers reach (units.rs
     /// `Model::level_slopes`).
     pub(crate) levels: Vec<OnceLock<[f64; EXCITED]>>,
-    /// Per coupling of two states (a, b, the carriers it absorbs and emits, or none: a static one) its saturation and sweep
-    /// (units.rs `Model::static_bound`, eliminate.rs `Model::term_bound`).
-    pub(crate) terms: Mutex<HashMap<Coupling, (f64, f64)>>,
+    /// Per coupling of two states asked (a, b, the carriers it absorbs and emits, or none: a static one) its saturation and
+    /// sweep (units.rs `Model::static_bound`, eliminate.rs `Model::term_bound`).
+    pub(crate) terms: Mutex<Vec<(Coupling, (f64, f64))>>,
     /// The bounds of the slope of any two levels' difference and of an atom's acceleration (units.rs `Model::swept_over`).
     pub(crate) moving: OnceLock<(f64, f64)>,
 }
@@ -334,11 +348,11 @@ impl Region {
     /// A coupling's saturation and sweep over the region, made once for both of its gates' bounds.
     pub(crate) fn term(&self, coupling: Coupling, make: impl FnOnce() -> (f64, f64)) -> (f64, f64) {
         let terms = || self.terms.lock().expect("the couplings' lock");
-        if let Some(made) = terms().get(&coupling) {
-            return *made;
+        if let Some(made) = terms().iter().find(|(of, _)| *of == coupling) {
+            return made.1;
         }
         let made = make();
-        terms().insert(coupling, made);
+        terms().push((coupling, made));
         made
     }
 }
@@ -543,11 +557,12 @@ impl<Q: Fn(&Region) -> f64 + ?Sized> Round<'_, Q> {
 
 /// The pace of a proving (module documentation, # Rounds): whether its proofs ask for cells ahead of their order, and how a
 /// round's independent pieces are gone through -- the proofs' own steps (each with what the round before made for it), the
-/// halving of the cells asked for.
+/// halving of the cells asked for --, and the cells let go in the end.
 trait Pace<Q: ?Sized> {
     const AHEAD: bool;
     fn proofs<T: Send, R: Send>(proofs: &mut [Proof], made: Vec<T>, step: impl Fn(&mut Proof, T) -> R + Sync) -> Vec<R>;
     fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved>;
+    fn release(nodes: Vec<Node>);
 }
 
 /// One after another, no cell ahead of a proof's order: the pace of quantities that only their own thread may ask.
@@ -561,6 +576,9 @@ impl<Q: Fn(&Region) -> f64 + ?Sized> Pace<Q> for InTurn {
     fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved> {
         asked.iter().map(|cell| round.halve(cell)).collect()
     }
+    fn release(nodes: Vec<Node>) {
+        drop(nodes)
+    }
 }
 
 /// On all the cores at once, each proof asking ahead of its order: the pace of quantities that any thread may ask.
@@ -573,6 +591,9 @@ impl<Q: Fn(&Region) -> f64 + Sync + ?Sized> Pace<Q> for AtOnce {
     }
     fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved> {
         asked.par_iter().map(|cell| round.halve(cell)).collect()
+    }
+    fn release(nodes: Vec<Node>) {
+        nodes.into_par_iter().for_each(drop)
     }
 }
 
@@ -671,10 +692,10 @@ impl Model {
             resolvents: OnceLock::new(),
             dressings: OnceLock::new(),
             forces: (0..self.clusters.len()).map(|_| OnceLock::new()).collect(),
-            drives: (0..GROUND).map(|_| OnceLock::new()).collect(),
-            slopes: (0..GROUND).map(|_| OnceLock::new()).collect(),
+            drives: std::array::from_fn(|_| OnceLock::new()),
+            slopes: std::array::from_fn(|_| OnceLock::new()),
             levels: (0..GROUND).map(|_| OnceLock::new()).collect(),
-            terms: Mutex::new(HashMap::new()),
+            terms: Mutex::new(vec![]),
             moving: OnceLock::new(),
         }
     }
@@ -755,6 +776,7 @@ impl Model {
                 }
             }
         }
+        P::release(nodes);
         proofs.into_iter().map(|proof| proof.bound.expect("a proof left open asks for a cell")).collect()
     }
 }

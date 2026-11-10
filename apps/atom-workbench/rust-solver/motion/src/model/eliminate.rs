@@ -571,16 +571,16 @@ impl Model {
     /// at most 2/Γ_min.
     pub(crate) fn near_spread(&self, a: usize, b: usize, region: &Region) -> f64 {
         let column = |c: &Couplings, s: usize| if s < GROUND { c.column[s] } else { 0.0 };
-        self.couplings(region).iter().map(|c| column(c, a).powi(2) + column(c, b).powi(2)).sum::<f64>() * 2.0 / self.least_decay()
+        self.couplings(region).iter().map(|c| column(c, a).powi(2) + column(c, b).powi(2)).sum::<f64>() * 2.0 / region.forms.least_decay(self)
     }
 }
 
 /// The far light's energies over a region (the near gates' separations): per state its value at the centre and the bound of how
 /// far it moves within the cell, and per excited state the Gershgorin radius of the far couplings among the excited states.
 pub(crate) struct CellEnergies {
-    pub(crate) centre: Vec<f64>,
-    pub(crate) slack: Vec<f64>,
-    pub(crate) radius: Vec<f64>,
+    pub(crate) centre: [f64; STATES],
+    pub(crate) slack: [f64; STATES],
+    pub(crate) radius: [f64; STATES],
 }
 
 /// A carrier's coherent couplings over a region (reach.rs `Region`). With u_s = Σ_l a_l X^f_l[:, s] the excited amplitudes its
@@ -590,11 +590,11 @@ pub(crate) struct CellEnergies {
 /// max|∇b_l|, reach.rs `Span`), at most every beam at its largest amplitude and in phase; on a point, the value there.
 pub(crate) struct Couplings {
     /// [s][e − GROUND].
-    pub(crate) entry: Vec<Vec<f64>>,
+    pub(crate) entry: [[f64; EXCITED]; GROUND],
     /// [s].
-    pub(crate) column: Vec<f64>,
+    pub(crate) column: [f64; GROUND],
     /// [unit][s], over the carrier's distinct polarization units.
-    pub(crate) units: Vec<Vec<f64>>,
+    pub(crate) units: Vec<[f64; GROUND]>,
 }
 
 impl Model {
@@ -604,8 +604,8 @@ impl Model {
     pub(crate) fn energies<'r>(&self, region: &'r Region) -> &'r CellEnergies {
         region.energies.get_or_init(|| {
             let forms = &region.forms;
-            let mut centre: Vec<f64> = (0..STATES).map(|s| self.base[(s, s)].re).collect();
-            let mut slack = vec![0.0; STATES];
+            let mut centre: [f64; STATES] = std::array::from_fn(|s| self.base[(s, s)].re);
+            let mut slack = [0.0; STATES];
             for (levels, pairs) in forms.levels(self).iter().zip(&region.pairs) {
                 for (p, pair) in levels.iter().zip(pairs) {
                     for s in 0..STATES {
@@ -614,7 +614,7 @@ impl Model {
                     }
                 }
             }
-            let mut radius = vec![0.0; STATES];
+            let mut radius = [0.0; STATES];
             for (x, mixed) in (GROUND..STATES).zip(forms.mixed(self)) {
                 for &(y, base) in mixed {
                     let (mut off, mut moved) = (base, 0.0);
@@ -626,7 +626,7 @@ impl Model {
                     radius[x] += off.abs() + moved;
                 }
             }
-            CellEnergies { centre, slack, radius }
+            Box::new(CellEnergies { centre, slack, radius })
         })
     }
 
@@ -642,9 +642,9 @@ impl Model {
                 .iter()
                 .zip(region.forms.folded(self))
                 .map(|(cc, folded)| {
-                    let mut entry = vec![vec![0.0; EXCITED]; GROUND];
-                    let mut column = vec![0.0; GROUND];
-                    let mut per_unit = vec![vec![0.0; GROUND]; folded.units.len()];
+                    let mut entry = [[0.0; EXCITED]; GROUND];
+                    let mut column = [0.0; GROUND];
+                    let mut per_unit = vec![[0.0; GROUND]; folded.units.len()];
                     for s in 0..GROUND {
                         // Per polarization unit and in all: the centre amplitudes, and per excited state the Lipschitz and blind sums.
                         let mut all = ([C64::ZERO; EXCITED], [0.0; EXCITED], [0.0; EXCITED], 0.0, 0.0);
@@ -688,7 +688,7 @@ impl Model {
     pub(crate) fn resolvent(&self, d: usize, b: usize, region: &Region) -> f64 {
         let made = region.resolvents.get_or_init(|| {
             let energies = self.energies(region);
-            let dissipation = 2.0 / self.least_decay();
+            let dissipation = 2.0 / region.forms.least_decay(self);
             let of = |delta: f64, b: usize| {
                 let mut least = f64::INFINITY;
                 for e in GROUND..STATES {
@@ -703,7 +703,7 @@ impl Model {
                     dissipation
                 }
             };
-            self.carriers.iter().map(|carrier| (0..GROUND).map(|b| of(carrier.detuning, b)).collect()).collect()
+            self.carriers.iter().map(|carrier| std::array::from_fn(|b| of(carrier.detuning, b))).collect()
         });
         made[d][b]
     }
@@ -711,10 +711,10 @@ impl Model {
     /// The carriers' dressings ΔE_b^d of the ground states over a region, [carrier][state], made once per region: Σ over the
     /// carrier's polarization units of ‖u_b‖² (`Couplings`; T̄ keeps each unit's beams coherent) times its resolvent's bound
     /// (`resolvent`).
-    fn dressings<'r>(&self, region: &'r Region) -> &'r [Vec<f64>] {
+    fn dressings<'r>(&self, region: &'r Region) -> &'r [[f64; GROUND]] {
         region.dressings.get_or_init(|| {
             let couplings = self.couplings(region);
-            (0..self.carriers.len()).map(|d| (0..GROUND).map(|b| couplings[d].units.iter().map(|u| u[b] * u[b]).sum::<f64>() * self.resolvent(d, b, region)).collect()).collect()
+            (0..self.carriers.len()).map(|d| std::array::from_fn(|b| couplings[d].units.iter().map(|u| u[b] * u[b]).sum::<f64>() * self.resolvent(d, b, region))).collect()
         })
     }
 
@@ -758,7 +758,7 @@ impl Model {
         }
         let slopes = self.level_slopes(b, region);
         let levels = folded.reached[b].iter().map(|&e| slopes[e]).fold(0.0, f64::max);
-        let resolvent = if dressing { self.resolvent(carrier, b, region) } else { 2.0 / self.least_decay() };
+        let resolvent = if dressing { self.resolvent(carrier, b, region) } else { 2.0 / region.forms.least_decay(self) };
         let n = cc.beams.len();
         let pairs = &region.pairs[cc.frequency];
         let mut out = 0.0;
@@ -807,8 +807,8 @@ impl Model {
             let energies = self.energies(region);
             let couplings = self.couplings(region);
             let dressings = self.dressings(region);
-            let outside: Vec<usize> = (0..GROUND).filter(|&a| self.membership[a] != cluster).collect();
-            let dress: Vec<f64> = (0..GROUND).map(|a| dressings.iter().map(|d| d[a]).sum()).collect();
+            let folded = region.forms.folded(self);
+            let dress: [f64; GROUND] = std::array::from_fn(|a| dressings.iter().map(|d| d[a]).sum());
             let acceleration = self.hbar_over_mass * self.force_over(cluster, region);
             let slopes = self.level_slopes(b, region);
             let (mut s, mut a) = (0.0_f64, 0.0_f64);
@@ -817,36 +817,36 @@ impl Model {
                 let others_slope: f64 = (0..self.carriers.len()).filter(|&d| d != ci).map(|d| self.shift_slope(d, b, region, true)).sum();
                 let (z_lo, z_hi) = (energies.centre[b] - energies.slack[b] + carrier.detuning - others, energies.centre[b] + energies.slack[b] + carrier.detuning + others);
                 let k = carrier.beams.iter().map(|&l| self.light.beams[l].wave_number).fold(0.0, f64::max);
-                // The self-energy's bound per excited state: its Gershgorin row, Σ_{d, a∉C} |u_a[e]| ‖u_a‖/|z − Ẽ_a − δ_d|, u_a the
-                // folded channel's coupling (only the states a channel reaches move).
-                let mut sigma = vec![0.0; STATES];
-                for (d, cd) in self.carriers.iter().zip(couplings) {
-                    for &o in &outside {
+                // The self-energy's bound per excited state (less GROUND): its Gershgorin row, Σ_{d, a∉C} |u_a[e]| ‖u_a‖/|z − Ẽ_a − δ_d|,
+                // u_a the folded channel's coupling (only the states a channel reaches move).
+                let mut sigma = [0.0; EXCITED];
+                for ((d, cd), of) in self.carriers.iter().zip(couplings).zip(folded) {
+                    for o in (0..GROUND).filter(|&o| self.membership[o] != cluster) {
                         let (lo, hi) = (z_lo - energies.centre[o] - energies.slack[o] - dress[o] - d.detuning, z_hi - energies.centre[o] + energies.slack[o] + dress[o] - d.detuning);
                         let den = distance(lo, hi);
                         let size = cd.column[o];
                         if size == 0.0 {
                             continue;
                         }
-                        for e in GROUND..STATES {
-                            let reach = cd.entry[o][e - GROUND];
+                        for &x in &of.reached[o] {
+                            let reach = cd.entry[o][x];
                             if reach > 0.0 {
-                                sigma[e] += reach * size / den;
+                                sigma[x] += reach * size / den;
                             }
                         }
                     }
                 }
-                for e in GROUND..STATES {
-                    let v = couplings[ci].entry[b][e - GROUND];
+                for &x in &folded[ci].reached[b] {
+                    let (e, v) = (GROUND + x, couplings[ci].entry[b][x]);
                     if v == 0.0 {
                         continue;
                     }
                     let (lo, hi) = (energies.centre[e] - energies.slack[e] - z_hi - k * speed, energies.centre[e] + energies.slack[e] - z_lo + k * speed);
-                    let d = (distance(lo, hi) - energies.radius[e] - sigma[e]).max(0.0);
-                    let gamma = self.decay[(e - GROUND, e - GROUND)].re;
+                    let d = (distance(lo, hi) - energies.radius[e] - sigma[x]).max(0.0);
+                    let gamma = self.decay[(x, x)].re;
                     let width = d * d + gamma * gamma / 4.0;
                     s += 2.0 * v * v / width;
-                    let slope = slopes[e - GROUND] + others_slope;
+                    let slope = slopes[x] + others_slope;
                     a = a.max((speed * slope + k * acceleration) / width);
                 }
             }
@@ -918,7 +918,7 @@ impl Model {
             let gamma = self.decay[(e - GROUND, e - GROUND)].re;
             size += 0.5 * vt * vf * (1.0 / s1 + 1.0 / s2 + gamma / (s1 * s2));
         }
-        let beat = self.omega(&ct.beat.plus(-1, &cf.beat));
+        let beat = region.forms.beat(self, ti, fi);
         let (lo, hi) = (energies.centre[a] - energies.slack[a] - energies.centre[b] - energies.slack[b] + beat, energies.centre[a] + energies.slack[a] - energies.centre[b] + energies.slack[b] + beat);
         let k = cf.beams.iter().chain(&ct.beams).map(|&l| self.light.beams[l].wave_number).fold(0.0, f64::max);
         if size == 0.0 {
