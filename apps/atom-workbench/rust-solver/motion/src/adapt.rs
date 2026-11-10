@@ -5,8 +5,9 @@
 //! (the steps never cross an output time); the step before a jump ends at the jump (# The jumps' times), the next step
 //! from there; a step the scheme refuses (`step::Refused`) is taken at its half, and one refused down to the time's
 //! round-off ends the advance with its refusal -- a numerical failure the solve counts and flags, never a loss. A step
-//! on the beating grid takes one panel, whatever its length (`PANELS`, `step::panels`): the grid's spacing is half the
-//! step, so the grid's error is an error of the step's length like the splitting's, and one read holds both.
+//! takes its generator's change along the path through its own three nodes, its middle and its ends, whatever its
+//! length (step.rs, # The kick): what that leaves is an error of the step's length like the splitting's, and one read
+//! holds both. The generator's own frequencies are no matter of the step's length: they are integrated exactly.
 //!
 //! τ is one for the run because the splitting is symplectic in its conservative part and its own inverse: at a constant
 //! step the energy of a trap's motion errs by a bounded amount (measured on the reference traps R1: no drift over 10³
@@ -56,11 +57,21 @@
 //! # The read
 //! Where a trajectory is read (the pilot's, solve.rs), every step it takes is doubled: from the same state the step
 //! and two of its halves, the jump-free flows. The scheme's local error is O(τ^{p+1}), p = `units::ORDER`, so the step's
-//! own local error is their difference times 2^p/(2^p − 1) (decide.rs `richardson`). A half step takes its own panel of
-//! the beating grid, on half the step's spacing, and predicts its own path's momentum: the difference holds the
-//! splitting's error, the path momentum's and the grid's. The grid's (CF4 and Simpson, fourth order in the spacing:
-//! O(τ⁵) a step, 15/16 of it in the difference) is booked by the leading order's factor at 5/4 of itself -- the safe
-//! side, and no step is redone on a finer grid for it.
+//! own local error is their difference times 2^p/(2^p − 1) (decide.rs `richardson`). A half step takes its own three
+//! nodes on half the step's spacing, its own generator at its own middle, and predicts its own path's momentum. What
+//! the difference holds, and what it does not (step.rs, # The kick; spectral.rs):
+//! - the splitting's error and the path momentum's prediction, O(τ³) a step;
+//! - what a hop leaves of the generator's change along the path D, the second Magnus term: second order in D, the
+//!   light shift of the change itself, at most (k·v τ)²/24 of the light shift's turn over the step -- O(τ³) a step, the
+//!   scheme's own order, so the factor takes it whole;
+//! - the three nodes' cubic of D and of the gradient, third order in the slow rate over the step: O(τ⁴) and beyond a
+//!   step, 7/8 of it and more in the difference, booked by the leading order's factor at 7/6 to 5/4 of itself -- the
+//!   safe side, and no step is redone on more nodes for it;
+//! - nothing of the generator's own frequencies: a detuning that turns any number of times over the step is integrated
+//!   exactly in the step and in its halves alike, for the state and for the kick (before, an explicit state's ringing
+//!   was sampled at three nodes in both, and the difference read none of an error of 6 to 40 % on T). The one thing of
+//!   theirs that is not exact, a decaying state's kick as a quotient by its ringing norm (10⁻⁷ to 10⁻⁵ of the kick at
+//!   twenty linewidths), is not read either.
 //!
 //! A local error is an error of an output only as far as the dynamics carries it there: to first order the step's
 //! error of an ensemble mean is Σ_n E[∇u(t_n, X_n)·ℓ_n], ℓ_n the local errors and u(t, x) the exact dynamics'
@@ -114,15 +125,6 @@ use std::collections::VecDeque;
 /// The step evaluations a read step takes (module documentation, # The read): the step, its two halves, and the carried
 /// state's step.
 pub const READ_STEPS: u64 = 4;
-
-/// The panels a step takes of the beating grid (module documentation, # The step): the least grid, whatever the step's
-/// length.
-const PANELS: usize = 1;
-
-/// The beating grid's spacing of a step of a length (µs): a panel is two spacings.
-fn spacing(length: f64) -> f64 {
-    length / (2 * PANELS) as f64
-}
 
 /// What a read trajectory holds of its step errors at a time (module documentation, # The read): the motion's mark
 /// (transport.rs), the loss energy's accumulated local errors (rad/µs), the displayed rows' error -- the trajectory's
@@ -229,11 +231,9 @@ fn lab(flow: &Flow, axes: [f64; 3]) -> [f64; 3] {
 /// The trajectory's physical state from the end of a step taken, its counters kept and the step counted among those
 /// taken: the next step's part of the Brownian path is the next one's (module documentation, # The Brownian path).
 fn adopt(trajectory: &mut Trajectory, end: &Trajectory) {
-    let (tau, grid, steps, capped, work, assemblies, taken) =
-        (trajectory.tau, trajectory.grid, trajectory.steps, trajectory.capped, trajectory.work, trajectory.assemblies, trajectory.taken);
+    let (tau, steps, capped, work, assemblies, taken) = (trajectory.tau, trajectory.steps, trajectory.capped, trajectory.work, trajectory.assemblies, trajectory.taken);
     *trajectory = end.clone();
-    (trajectory.tau, trajectory.grid, trajectory.steps, trajectory.capped, trajectory.work, trajectory.assemblies, trajectory.taken) =
-        (tau, grid, steps, capped, work, assemblies, taken + 1);
+    (trajectory.tau, trajectory.steps, trajectory.capped, trajectory.work, trajectory.assemblies, trajectory.taken) = (tau, steps, capped, work, assemblies, taken + 1);
 }
 
 /// The middle of a step of `length` from a state (`step::Midway`), counted: a step evaluation, and a middle of the model
@@ -245,12 +245,10 @@ fn midway<'a, D: Dynamics>(model: &'a D, trajectory: &mut Trajectory, from: &Tra
     Ok(through)
 }
 
-/// A step of `length` from a state on the grid a step of that length takes (module documentation, # The step) and on
-/// its part of the Brownian path, through the factor `spread` of the diffusion (None: its own), counted: the flow
-/// between jumps, whatever the threshold.
+/// A step of `length` from a state on its part of the Brownian path, through the factor `spread` of the diffusion
+/// (None: its own), counted: the flow between jumps, whatever the threshold.
 fn counted<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, length: f64, brownian: &Brownian, spread: Option<&[[f64; 3]; 3]>, scratch: &mut Scratch) -> Result<Step, Refused> {
-    let from = Trajectory { grid: spacing(length), ..from.clone() };
-    let s = midway(model, trajectory, &from, length)?.step(&from, brownian, spread, scratch)?;
+    let s = midway(model, trajectory, from, length)?.step(from, brownian, spread, scratch)?;
     trajectory.work += s.work;
     Ok(s)
 }
@@ -336,11 +334,10 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, sc
         let ahead = if trajectory.rate > 0.0 { (norm_sqr(&trajectory.psi) / trajectory.threshold).ln() / trajectory.rate } else { f64::INFINITY };
         let mut length = most.min(ahead);
         let (at, taken, jumps) = loop {
-            let mut from = trajectory.clone();
+            let from = trajectory.clone();
             if !(trajectory.time + length > trajectory.time) {
                 break (from, None, true);
             }
-            from.grid = spacing(length);
             let slack = if bracket.1 - bracket.0 <= JUMP_TIMING * length { f64::INFINITY } else { JUMP_TIMING * length };
             let reach = length.min(most - length);
             let brownian = Brownian::over(length, &deviates);
@@ -382,7 +379,7 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, sc
             }
             let fall = (norm_sqr(&at.psi) / norm_sqr(&s.end.psi)).ln();
             adopt(trajectory, &s.end);
-            (trajectory.grid, trajectory.rate) = (at.grid, fall / s.segment.tau);
+            trajectory.rate = fall / s.segment.tau;
             test_loss(model, trajectory);
         }
         if trajectory.lost.is_some() {
@@ -418,5 +415,5 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, sc
 /// priced without taking it and without a middle of its own (`step::step_work`). The model's price of a middle is its
 /// `assembly_work`.
 pub fn advance_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64) -> (f64, u64) {
-    (step_work(middle, kappa, velocity, tau, spacing(tau)), 1)
+    (step_work(middle, kappa, velocity, tau), 1)
 }

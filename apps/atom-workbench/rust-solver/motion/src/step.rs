@@ -24,29 +24,54 @@
 //! generator on the path in that frame with the frame's diag(K_s·v). The model gives it by its fields, not by a list of
 //! beating matrices (`Middle`): at the middle point, once a step, everything that depends on neither the momentum nor the
 //! time; per momentum the beams' Doppler weights and path rates (`Middle::path`); and at a time s from the middle Ĥ(s)
-//! itself, each beam's plane wave turned by e^{ik_l·v s} (`Middle::generator`). Ĥ is the same at every time where no
-//! term beats in the frames (`Middle::still`: every pair of states holds one wave vector): then it is propagated through
-//! its eigendecomposition at any time exactly (`spectral`), else by CF4 on a grid (`beating`). The impulse is exact in
-//! its decomposition about the state at the step's middle, held in the frame, x_m = x(t_m) (= ψ(t_m), U(t_m) = 1):
+//! itself, each beam's plane wave turned by e^{ik_l·v s} (`Middle::generator`).
+//!
+//! One propagation, whatever the generator (`propagate`; spectral.rs). Ĥ(s) = Ĥ₀ + D(s): Ĥ₀ = Ĥ(0), the generator at
+//! the step's middle, holds the atom's own frequencies -- detunings, light shifts, decay rates --, which may turn any
+//! number of times over the step (an explicit excited state twenty linewidths off its light turns 48 rad in 0.0625 µs,
+//! and rings at that for 2/Γ after every jump); D(s) is what the motion along the path and the lights' beats change,
+//! slow by the step's own choice. The two are integrated apart:
+//! - Ĥ₀ exactly, for the state and for every time integral of the step: in its eigenbasis its phases and decays are
+//!   factors over any width (the interaction picture, `spectral::Picture`), and the state is taken through the nodes of
+//!   a Gauss–Legendre quadrature at the bandwidth of the forms ⟨x|·|x⟩ on a state Ĥ₀ propagates (`quadrature`: to
+//!   round-off) -- the kick, the mean populations and the norm's root are read there. These nodes meet no model;
+//! - D through the step's three nodes alone, its middle and its two ends (two more generators of the model; none where
+//!   Ĥ is the same at every time, `Middle::still`: every pair of states holds one wave vector): D(s) = sA + s²B, and
+//!   between two quadrature nodes the first Magnus term of the interaction picture with its integral over Ĥ₀'s
+//!   oscillation exact (`spectral::Picture::hop`). The gradient's slow change is taken through the same three nodes
+//!   (`propagate`).
+//! What is left is of the slow change alone (spectral.rs): the second Magnus term, second order in D -- the light shift
+//! of the change itself over a hop, at most (k·v τ)²/24 of the light shift's turn over the step, O(τ³) a step like the
+//! splitting's own error and a fraction of it --, and the three nodes' cubic, third order in the slow rate. Neither
+//! grows with the detuning times the step. An atom at rest, or a generator still along the path, has D = 0: its state
+//! and its kick are exact. The step's doubling reads what is left (adapt.rs, # The read).
+//!
+//! The impulse is exact in its decomposition about the state at the step's middle, held in the frame, x_m = x(t_m)
+//! (= ψ(t_m), U(t_m) = 1):
 //! - the shear: the conservative force at the fixed r_h on x_m, −∫⟨x_m|G(r_h, t)|x_m⟩dt/‖x_m‖². At a fixed point the
 //!   gradient beats in time alone, G(r_h, t) = Σ_m G_m e^{iΩ_m(t − t_m)} over its tones (`Middle::tones`), each
 //!   τ sinc(Ω_mτ/2) (`shear`). Of a state that does not change it depends on r_h alone: the conservative kick is a shear
 //!   and the step symplectic (propagation.md §2.3);
 //! - what the state's change along the path adds: the evolved state's force along the path less x_m's held in the frame,
 //!   −∫(⟨x(t)|Ĝ(t)|x(t)⟩/‖x(t)‖² − ⟨x_m|Ĝ(t)|x_m⟩/‖x_m‖²)dt, Ĝ(t) the gradient on the path, one quadrature of the
-//!   difference on the propagation's nodes (B1's `force_change`): it vanishes at every node, and with it its
-//!   quadrature's error, where the state does not change -- a lone ground state in a standing wave's far light takes no
-//!   grid error, however coarse its grid. The lag that friction and the Sisyphus effect live in;
+//!   difference on the propagation's nodes (B1's `force_change`): it vanishes at every node where the state does not
+//!   change -- a lone ground state in a standing wave's far light takes no error of the path's nodes, however long its
+//!   step. The lag that friction and the Sisyphus effect live in;
 //! - less the reference's force: + τ∇V_ref(r_h), since V_ref's force is the A flow's.
 //!
-//! The first two are read together (`impulse`): a mean ⟨x|G|x⟩/‖x‖² is tr(Gρ) of the state's density ρ, which the model
-//! contracts without forming G (`Middle::force`). With ρ_m the middle state's and (s_k, w_k, ρ_k) the nodes' times from
-//! the middle, weights and densities they are −Σ_m τ sinc(Ω_mτ/2) Re tr(G_m ρ_m) − Σ_k w_k Re tr(Ĝ(s_k)(ρ_k − ρ_m)); where
-//! Ĥ is still, Ĝ is one matrix and the two are its one form with Q = τρ_m + Σ_k w_k(ρ_k − ρ_m).
+//! The first two are read together (`propagate`): a mean ⟨x|G|x⟩/‖x‖² is tr(Gρ) of the state's density ρ, which the
+//! model contracts without forming G (`Middle::force`). With ρ_m the middle state's, (s_k, w_k, ρ_k) the quadrature's
+//! times from the middle, weights and densities, and ℓ_j the Lagrange polynomials of the step's three nodes s_j, they are
+//! −Σ_m τ sinc(Ω_mτ/2) Re tr(G_m ρ_m) − Σ_j Re tr(Ĝ(s_j) Q_j), Q_j = Σ_k w_k ℓ_j(s_k)(ρ_k − ρ_m): the atom's own frequencies
+//! are in the Q_j, integrated to round-off, and the model's forms are three. Where Ĥ is still, Ĝ is one matrix and the
+//! whole is its one form with ∫ρ = Σ_k w_k ρ_k. (With a decay the mean is a quotient by the norm, whose own ringing --
+//! of the size Γ/Δ times the excited share -- puts a part of the quotient at twice the forms' bandwidth, which the
+//! quadrature does not resolve: the kick errs by a part of that ringing, measured 2·10⁻⁷ of the dipole kick at twenty
+//! linewidths and Δτ = 50, 10⁻⁵ at Δτ = 200 (tests). Without a decay nothing does.)
 //!
 //! A generator's scalar part, tr/n -- the trap's light shift and the decay every state shares --, is a phase and a
-//! factor on the whole state: the propagations take it out exactly (`traceless`, `linalg::exp_apply`), so that their
-//! work and their rounding go with the states' differences alone.
+//! factor on the whole state: it goes with Ĥ₀'s eigenvalues, exactly, and the exponentials take it out
+//! (`linalg::exp_apply`), so that their work and their rounding go with the states' differences alone.
 //!
 //! Held in the frame, not in the lab: a dressed state's coherences co-rotate with the light's phases along the path, so
 //! its force along the path is the frame's, constant where Ĥ is static (a running wave's radiation pressure, steady on the
@@ -113,7 +138,7 @@
 //!   The path's momentum κ_m is predicted without the path's increment (its mean is none): the propagation, its norm
 //!   and so the jumps' times do not depend on the deviates.
 //!   F_s and 2D are those of the state at the step's middle; what of them goes with an explicit excited state's decay
-//!   takes that state's population averaged over the step, by the impulse's own quadrature (`impulse`): a jump's bare
+//!   takes that state's population averaged over the step, by the kick's own quadrature (`propagate`): a jump's bare
 //!   state fills its excited state in 1/Γ, which a step need not resolve, and the photons it scatters over the step
 //!   are its decay's integral, not its middle's value times τ.
 
@@ -123,6 +148,7 @@ use crate::decide::COMPLEX;
 use crate::linalg::{self, inner, norm_sqr, C64, Mat};
 use crate::model::{Cluster, Photon, Point, Quadratic, Scattering, STATES};
 use crate::random::Stream;
+use crate::spectral::Picture;
 use crate::units::{rounding, UNIT_ROUNDOFF};
 
 /// What one step needs from the model (SPEC §2.1, §1.6): defined here by its consumer, implemented by the model for its
@@ -294,17 +320,16 @@ pub struct Trajectory {
     /// The run's seed and the trajectory's number: its jumps' streams.
     pub seed: u64,
     pub index: u64,
-    /// The step control's own (`adapt`): its step (µs), the beating grid's largest spacing (µs, `beating`: a step takes
-    /// the fewest panels of spacings no wider), its count of steps, the time its cap was met, and the hazard's rate over
-    /// the last step taken (1/µs: that step's fall of ln‖ψ‖² over its length; none before the first).
+    /// The step control's own (`adapt`): its step (µs), its count of steps, the time its cap was met, and the hazard's
+    /// rate over the last step taken (1/µs: that step's fall of ln‖ψ‖² over its length; none before the first).
     pub tau: f64,
-    pub grid: f64,
     pub steps: u64,
     pub capped: Option<f64>,
     pub rate: f64,
     /// The work counted (`decide::Work`, real multiply-adds) of the integrator's own algorithms over the trajectory --
-    /// exponentials, eigen-propagation, CF4 nodes with the model's generators and forces there, the doubling (`adapt`
-    /// adds each step's) --, the middles it asked the model for (each costed by
+    /// the generator's decomposition, its hops and their exponentials, the kick's sums, with the model's generators
+    /// and forces at the step's nodes, the doubling (`adapt` adds each step's) --, the middles it asked the model for
+    /// (each costed by
     /// `Dynamics::assembly_work`) and its jumps' photons (`Dynamics::photon_work`).
     pub work: f64,
     pub assemblies: u64,
@@ -333,7 +358,6 @@ impl Trajectory {
             seed,
             index,
             tau: f64::INFINITY,
-            grid: f64::INFINITY,
             steps: 0,
             capped: None,
             rate: 0.0,
@@ -516,14 +540,15 @@ impl Rule {
     }
 }
 
-/// The rules of 2, 4, …, 64 nodes (two nodes at least: exact for the cubics a free flight's κ² is).
+/// The rules of 2 to 64 nodes (two nodes at least: exact for the cubics a free flight's κ² is).
 fn rules() -> &'static [Rule] {
     static RULES: OnceLock<Vec<Rule>> = OnceLock::new();
-    RULES.get_or_init(|| (1..=6).map(|k| Rule::new(1 << k)).collect())
+    RULES.get_or_init(|| (2..=64).map(Rule::new).collect())
 }
 
 /// The rule and the panels over a width of an entire integrand of bandwidth ν to round-off: the fewest nodes, each panel
-/// of width w within its rule's phase, νw ≤ x_m. Its node count is the quadrature's work (`count::spectral`).
+/// of width w within its rule's phase, νw ≤ x_m. Its node count is the propagation's hops and the kick's sums
+/// (`propagate`, `count::impulse`).
 fn plan(width: f64, bandwidth: f64) -> (&'static Rule, usize) {
     rules()
         .iter()
@@ -532,14 +557,15 @@ fn plan(width: f64, bandwidth: f64) -> (&'static Rule, usize) {
         .unwrap()
 }
 
-/// The nodes and weights over [a, b] of an entire integrand of bandwidth ν to round-off (`plan`), panel by panel as they
-/// are read: a stiff generator's millions of nodes are never held at once.
+/// The nodes and weights over [a, b] of an entire integrand of bandwidth ν to round-off (`plan`), in their order from a
+/// to b (the rule's nodes are held from the largest down), panel by panel as they are read: a stiff generator's
+/// millions of nodes are never held at once.
 fn quadrature(a: f64, b: f64, bandwidth: f64) -> impl Iterator<Item = (f64, f64)> {
     let (rule, panels) = plan((b - a).abs(), bandwidth);
     let w = (b - a) / panels as f64;
     (0..panels).flat_map(move |p| {
         let centre = a + (p as f64 + 0.5) * w;
-        rule.nodes.iter().zip(&rule.weights).map(move |(x, weight)| (centre + 0.5 * w * x, 0.5 * w * weight))
+        rule.nodes.iter().zip(&rule.weights).rev().map(move |(x, weight)| (centre + 0.5 * w * x, 0.5 * w * weight))
     })
 }
 
@@ -640,13 +666,28 @@ impl<'a, M: Middle> Along<'a, M> {
     }
 }
 
-/// The panels of two spacings over τ with spacings no wider than h (`beating`): ⌈|τ|/2h⌉, at least one; a quotient within
-/// its rounding of a whole number is that number (a spacing that divides the step).
-pub fn panels(tau: f64, spacing: f64) -> usize {
-    let x = tau.abs() / (2.0 * spacing);
-    let whole = x.round();
-    let panels = if (x - whole).abs() <= rounding(4) * x { whole } else { x.ceil() };
-    (panels as usize).max(1)
+/// The upper triangles (a ≤ b, row by row in n × n) of Hermitian sums, each with its weight times a state's density
+/// more: sums[j] += w_j |x⟩⟨x|/⟨x|x⟩ (`mirror` makes them whole).
+fn accumulate(x: &[C64], weights: &[f64], sums: &mut [C64]) {
+    let (n, scale) = (x.len(), 1.0 / norm_sqr(x));
+    for (a, left) in x.iter().enumerate() {
+        let left = *left * scale;
+        for b in a..n {
+            let z = left * x[b].conj();
+            for (sum, w) in sums.chunks_mut(n * n).zip(weights) {
+                sum[a * n + b] += z * *w;
+            }
+        }
+    }
+}
+
+/// A Hermitian matrix whole from its upper triangle.
+fn mirror(sum: &mut [C64], n: usize) {
+    for a in 0..n {
+        for b in 0..a {
+            sum[a * n + b] = sum[b * n + a].conj();
+        }
+    }
 }
 
 /// A state's density matrix ρ = |x⟩⟨x|/⟨x|x⟩, ρ_ab = x_a x_b*/‖x‖², row by row: a mean ⟨x|G|x⟩/⟨x|x⟩ is tr(Gρ), which the
@@ -676,52 +717,32 @@ fn shear<M: Middle>(along: &Along<M>, rho: &mut [C64], psi: &[C64], tau: f64) ->
 }
 
 /// A trajectory's scratch memory for its steps, made with it and fitted to each step's cluster (`Scratch::fit`): the
-/// matrix of an exponential (or the still Ĥ₀), the generator at a CF4 spacing's two nodes, and one array carved
-/// (`Scratch::carve`) into a grid's node states, the middle state's density, a node's change of density, their weighted
-/// sum (`impulse`), and an exponential's two work vectors (`linalg::exp_apply`). Every use writes what it reads: nothing
-/// a step left in it is read by another.
+/// generator's picture along the step's path (`spectral::Picture`: the generator at the step's nodes, its decomposition,
+/// a hop's exponent), and one array carved (`Scratch::carve`) into the middle state's density and the nodes' weighted
+/// sums of theirs (`propagate`). Every use writes what it reads: nothing a step left in it is read by another.
+#[derive(Default)]
 pub struct Scratch {
-    matrix: Mat,
-    nodes: [Mat; 2],
+    picture: Picture,
     rest: Vec<C64>,
 }
 
-impl Default for Scratch {
-    fn default() -> Scratch {
-        Scratch { matrix: Mat::zeros(0, 0), nodes: [Mat::zeros(0, 0), Mat::zeros(0, 0)], rest: Vec::new() }
-    }
-}
-
 struct Carved<'a> {
-    matrix: &'a mut Mat,
-    generators: &'a mut [Mat; 2],
-    states: &'a mut [C64],
+    picture: &'a mut Picture,
     held: &'a mut [C64],
-    change: &'a mut [C64],
-    sum: &'a mut [C64],
-    work: &'a mut [C64],
+    sums: &'a mut [C64],
 }
 
 impl Scratch {
     /// The scratch for a cluster of n states.
     fn fit(&mut self, n: usize) {
-        for m in std::iter::once(&mut self.matrix).chain(&mut self.nodes) {
-            if m.rows != n {
-                (m.rows, m.cols) = (n, n);
-                m.data.resize(n * n, C64::ZERO);
-            }
-        }
+        self.picture.fit(n);
+        self.rest.resize(4 * n * n, C64::ZERO);
     }
-    /// The scratch for a grid of `nodes` spacings.
-    fn carve(&mut self, nodes: usize) -> Carved<'_> {
-        let n = self.matrix.rows;
-        let sizes = [(nodes + 1) * n, n * n, n * n, n * n];
-        self.rest.resize(sizes.iter().sum::<usize>() + 2 * n, C64::ZERO);
-        let (states, rest) = self.rest.split_at_mut(sizes[0]);
-        let (held, rest) = rest.split_at_mut(sizes[1]);
-        let (change, rest) = rest.split_at_mut(sizes[2]);
-        let (sum, work) = rest.split_at_mut(sizes[3]);
-        Carved { matrix: &mut self.matrix, generators: &mut self.nodes, states, held, change, sum, work }
+    /// The scratch's parts.
+    fn carve(&mut self) -> Carved<'_> {
+        let n = self.picture.states();
+        let (held, sums) = self.rest.split_at_mut(n * n);
+        Carved { picture: &mut self.picture, held, sums }
     }
 }
 
@@ -730,7 +751,7 @@ impl Scratch {
 
 /// What a propagation of the frame's state over the step made: ψ at the step's end (lab; the cluster's states first),
 /// the state at the step's middle x_m (the frame's, which is the lab's there), the states' populations averaged over
-/// the step, the kick's part of the state (`impulse`), its counted work, and whether ‖ψ‖² reaches the watched threshold
+/// the step, the kick's part of the state, its counted work, and whether ‖ψ‖² reaches the watched threshold
 /// at the step's end (`Watch`: within its slack).
 struct Propagated {
     end: [C64; STATES],
@@ -762,25 +783,21 @@ struct Crossed {
 
 /// The counted work (`decide::Work`, real multiply-adds) of the integrator's operations on n states, one formula each,
 /// the model's own counts of its generator, its force and its tones at a node with them (`Middle::work`): what the
-/// propagations add up and what `step_work` prices a step by.
+/// propagation adds up and what `step_work` prices a step by.
 mod count {
     use super::COMPLEX;
-    /// The eigen-propagation through `nodes` quadrature nodes: the still generator, the decomposition's own count
-    /// (`linalg::Eigen::work`), and per node n exponentials and the state R d of n².
-    pub fn spectral(n: usize, model: [f64; 3], decomposition: f64, nodes: usize) -> f64 {
-        COMPLEX * (model[0] + decomposition + (nodes * (n + n * n)) as f64)
+    /// The propagation: the model's generator at the step's nodes -- three, or the one of a path it is still along --
+    /// and the picture's own count of its complex multiply-adds (`spectral::Picture::work`: the decomposition, the
+    /// slopes, the hops).
+    pub fn propagation(model: [f64; 3], still: bool, picture: f64) -> f64 {
+        COMPLEX * (if still { 1.0 } else { 3.0 } * model[0] + picture)
     }
-    /// One spacing of CF4: the generator at its two nodes, their two combinations of n² each, and the two exponentials'
-    /// `products` matrix-vector products of n² in all.
-    pub fn cf4(n: usize, model: [f64; 3], products: usize) -> f64 {
-        COMPLEX * (2.0 * model[0] + ((4 + products) * n * n) as f64)
-    }
-    /// The kick's part of the state through `nodes` nodes (`impulse`): the middle state's density; per node its density
-    /// and its change (2n²); and of a still generator the changes' sum (n² a node) and its one form, of a beating one
-    /// the middle state's tones and a form a node.
+    /// The kick's part of the state through `nodes` nodes: per node its density's upper triangle into the weighted
+    /// sums (one on a still path, three on a beating one); then the model's one form of the sum, or on a beating path
+    /// the middle state's density, its tones, and the three nodes' forms.
     pub fn impulse(n: usize, model: [f64; 3], nodes: usize, still: bool) -> f64 {
-        let forms = if still { (nodes * n * n) as f64 + model[1] } else { model[2] + nodes as f64 * model[1] };
-        COMPLEX * (((1 + 2 * nodes) * n * n) as f64 + forms)
+        let (sums, forms) = if still { (1, model[1]) } else { (3, (n * n) as f64 + model[2] + 3.0 * model[1]) };
+        COMPLEX * ((nodes * (1 + sums) * n * (n + 1) / 2) as f64 + forms)
     }
     /// The shear of the start state, the prediction of the path's momentum: its density and its tones.
     pub fn shear(n: usize, model: [f64; 3]) -> f64 {
@@ -794,263 +811,160 @@ fn nodes(tau: f64, bandwidth: f64) -> usize {
     rule.nodes.len() * panels
 }
 
-/// A generator's scalar part c = tr(A)/n, taken out of it: e^{−iAs} = e^{−ics} e^{−i(A − c)s} exactly, c a phase and a
-/// decay every state shares -- the trap's light shift, hundreds of rad/µs on every state alike, is one. The propagations
-/// take the rest, whose norm sizes their work and their rounding, and the scalar's exponential beside it.
-fn traceless(a: &mut Mat) -> C64 {
-    let scalar = a.trace() / a.rows as f64;
-    for i in 0..a.rows {
-        a[(i, i)] -= scalar;
+/// The picture of the generator along a step's path (`spectral::Picture`), prepared: the model's generator at the
+/// step's middle and, unless it is still along every path, at the step's two ends.
+fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64) {
+    let (h, still) = (0.5 * tau, along.middle.still());
+    along.middle.generator(&along.path, 0.0, &mut picture.base);
+    if !still {
+        along.middle.generator(&along.path, -h, &mut picture.ends[0]);
+        along.middle.generator(&along.path, h, &mut picture.ends[1]);
     }
-    scalar
+    picture.prepare(h, still);
 }
 
-/// The kick's part of the state (module documentation, # The kick): the shear of the middle state and the state's
-/// change's force integrated on the propagation's nodes, −Σ_m τ sinc(Ω_mτ/2) Re tr(G_m ρ_m) − Σ_k w_k Re tr(Ĝ(s_k)
-/// (ρ_k − ρ_m)): ρ_m the middle state's density, held in the frame, and (s_k, w_k, x_k) the nodes' times from the middle,
-/// their weights and their states, which `visit` gives in turn. Where Ĥ is still its gradient is one matrix at every
-/// time, and the whole is its one form with Q = τρ_m + Σ_k w_k(ρ_k − ρ_m) (into `sum`). The change vanishes at every node
-/// where the state does not.
+/// The propagation of B over the step on the path through a middle at the momentum κ, the generator taken at it (module
+/// documentation, # The kick): the frame's state hopped from the step's start through the nodes of a quadrature that
+/// resolves the generator's own frequencies -- Gauss–Legendre over the step at the bandwidth of the forms on a state it
+/// propagates (`quadrature`) --, by way of the step's middle and to its end, each hop exact in those frequencies
+/// (`spectral::Picture::hop`); and the kick's part of the state by that quadrature.
 ///
-/// `mean` takes the states' populations averaged over the step by the same quadrature, the diagonal of Q/τ: what a
-/// rate that goes with a population is over the step (`Dynamics::scattering`).
-#[allow(clippy::too_many_arguments)]
-fn impulse<M: Middle>(along: &Along<M>, held: &mut [C64], change: &mut [C64], sum: &mut [C64], mean: &mut [f64], tau: f64, middle: &[C64], visit: &mut dyn FnMut(&mut dyn FnMut(f64, f64, &[C64]))) -> [f64; 3] {
-    let n = mean.len();
-    if along.middle.still() {
-        density(middle, held);
-        for (q, rho) in sum.iter_mut().zip(held.iter()) {
-            *q = *rho * tau;
-        }
-        visit(&mut |_, w, x| {
-            density(x, change);
-            for ((q, d), rho) in sum.iter_mut().zip(change.iter()).zip(held.iter()) {
-                *q += (*d - *rho) * w;
-            }
-        });
-        for (s, p) in mean.iter_mut().enumerate() {
-            *p = sum[s * n + s].re / tau;
-        }
-        return along.middle.force(&along.path, 0.0, sum).map(|f| -f);
-    }
-    let mut out = shear(along, held, middle, tau);
-    for (s, p) in mean.iter_mut().enumerate() {
-        *p = held[s * n + s].re;
-    }
-    visit(&mut |s, w, x| {
-        density(x, change);
-        for (d, rho) in change.iter_mut().zip(held.iter()) {
-            *d -= *rho;
-        }
-        for (state, p) in mean.iter_mut().enumerate() {
-            *p += w / tau * change[state * n + state].re;
-        }
-        let form = along.middle.force(&along.path, s, change);
-        for a in 0..3 {
-            out[a] -= w * form[a];
-        }
-    });
-    out
-}
-
-/// A static Ĥ₀'s eigendecomposition for its propagation: Ĥ₀ = c + RΛR⁻¹ with the scalar part c apart (`traceless`), the
-/// eigenvalues c + Λ, the bandwidth max|λ_b* − λ_c| of the forms on a state propagated through them (their frequencies
-/// and decay rates), its quadrature's nodes over the step, and the rounding bound of a state propagated through it
-/// relative to its norm, κ(R)·u grown by the decay rates' spread over the step (`linalg::Eigen`).
-struct Spectrum {
-    eigen: linalg::Eigen,
-    lambda: [C64; STATES],
-    bandwidth: f64,
-    nodes: usize,
-    rounding: f64,
-}
-
-/// The route of a propagation over τ, one rule for the propagation and for its price (`propagate`, `step_work`): through
-/// the eigendecomposition where Ĥ is still along the path, its decomposition exists, and a state propagated through it
-/// rounds no more than through the exponential of Ĥ₀ on the vector, the other exact evaluation of the same state
-/// (`linalg::Chebyshev::rounding` of its plan over the step) -- towards an exceptional point κ(R) grows without bound and
-/// the exponential, whose rounding does not know it, takes over; on the grid otherwise (None), whose error the step's
-/// doubling reads (`beating`). `matrix` is left Ĥ₀'s traceless part; `sums` holds n numbers.
-fn route<M: Middle>(along: &Along<M>, matrix: &mut Mat, sums: &mut [C64], tau: f64) -> Option<Spectrum> {
-    if !along.middle.still() {
-        return None;
-    }
-    let n = along.n;
-    along.middle.generator(&along.path, 0.0, matrix);
-    let scalar = traceless(matrix);
-    let linalg::Bounds { rho, gamma, .. } = linalg::bounds(matrix, sums);
-    let eigen = linalg::eigen(matrix)?;
-    let mut lambda = [C64::ZERO; STATES];
-    for b in 0..n {
-        lambda[b] = eigen.values[b] + scalar;
-    }
-    let values = &lambda[..n];
-    let bandwidth = values.iter().flat_map(|a| values.iter().map(move |b| (a.conj() - *b).abs())).fold(0.0, f64::max);
-    let growth = values.iter().map(|l| l.im).fold(f64::NEG_INFINITY, f64::max) - values.iter().map(|l| l.im).fold(f64::INFINITY, f64::min);
-    let rounding = eigen.condition * UNIT_ROUNDOFF * (1.0 + tau.abs() * growth);
-    let exponential = linalg::Chebyshev::plan(rho * tau.abs(), gamma * tau.abs()).rounding(n);
-    (rounding <= exponential).then(|| Spectrum { eigen, lambda, bandwidth, nodes: nodes(tau, bandwidth), rounding })
-}
-
-/// The propagation of a static Ĥ₀ through its eigendecomposition (`Spectrum`; exact at any time): in the coordinates
-/// d = R⁻¹x, d(s) = e^{−i(c + Λ)s}d₀ and x(s) = R d(s), the impulse by Gauss–Legendre at the bandwidth max|λ_b* − λ_c|
-/// (`quadrature`), the norm's root on ‖x(s)‖² (`root`) within the step or, where the step ends above the watched
-/// threshold, within the reach beyond it.
-fn spectral<M: Middle>(path: &Along<M>, scratch: &mut Scratch, spectrum: &Spectrum, psi: &[C64], tau: f64, watch: Option<Watch>) -> Result<Propagated, Crossed> {
-    let n = path.n;
-    let model = path.middle.work();
-    let Carved { held, change, sum, .. } = scratch.carve(0);
-    let (e, lambda) = (&spectrum.eigen, &spectrum.lambda[..n]);
-    let mut d0 = [C64::ZERO; STATES];
-    for b in 0..n {
-        d0[b] = (0..n).map(|c| e.inverse[(b, c)] * (psi[c] * path.half[c])).sum();
-    }
-    let at = |s: f64, x: &mut [C64]| {
-        let mut d = [C64::ZERO; STATES];
-        for b in 0..n {
-            d[b] = d0[b] * (C64::new(0.0, -s) * lambda[b]).exp();
-        }
-        for (a, x) in x.iter_mut().enumerate() {
-            *x = e.vectors.data[a * n..(a + 1) * n].iter().zip(&d).map(|(r, d)| *r * *d).sum();
-        }
-    };
-    let (mut middle, mut end, mut x) = ([C64::ZERO; STATES], [C64::ZERO; STATES], [C64::ZERO; STATES]);
-    at(tau, &mut end[..n]);
-    let mut reached = false;
-    if let Some(watch) = watch.filter(|_| tau > 0.0) {
-        let norm = |s: f64| {
-            let mut x = [C64::ZERO; STATES];
-            at(s, &mut x[..n]);
-            norm_sqr(&x[..n])
-        };
-        let (floor, last) = (2.0 * spectrum.rounding + rounding(n + 1), norm_sqr(&end[..n]));
-        let crossing = if last <= watch.theta {
-            Some(root(&norm, (0.0, norm_sqr(psi)), (tau, last), watch.theta, floor))
-        } else {
-            let far = if watch.reach > 0.0 { norm(tau + watch.reach) } else { last };
-            (far <= watch.theta).then(|| root(&norm, (tau, last), (tau + watch.reach, far), watch.theta, floor))
-        };
-        if let Some(crossing) = crossing {
-            if (crossing - tau).abs() > watch.slack {
-                return Err(Crossed { at: crossing, work: count::spectral(n, model, e.work, 0) });
-            }
-            reached = true;
-        }
-    }
-    at(0.5 * tau, &mut middle[..n]);
-    let mut populations = [0.0; STATES];
-    let impulse = impulse(path, held, change, sum, &mut populations[..n], tau, &middle[..n], &mut |each: &mut dyn FnMut(f64, f64, &[C64])| {
-        for (s, w) in quadrature(0.0, tau, spectrum.bandwidth) {
-            at(s, &mut x[..n]);
-            each(s - 0.5 * tau, w, &x[..n]);
-        }
-    });
-    for (z, phase) in end[..n].iter_mut().zip(&path.half) {
-        *z *= *phase;
-    }
-    let work = count::spectral(n, model, e.work, spectrum.nodes) + count::impulse(n, model, spectrum.nodes, true);
-    Ok(Propagated { end, middle, populations, impulse, work, reached })
-}
-
-/// CF4, the fourth-order commutator-free Magnus scheme of two exponentials (Blanes & Moan 2006): over h from the time s
-/// (from the middle), x ← e^{−ih(w₂Ĥ₁ + w₁Ĥ₂)} e^{−ih(w₁Ĥ₁ + w₂Ĥ₂)} x, Ĥ_i = Ĥ(s + c_i h) at the Gauss nodes c = ½ ∓ √3/6,
-/// w = ¼ ± √3/6; exact where Ĥ is still (w₁ + w₂ = ½ each). The generator at the two nodes is made once, into
-/// `generators`; each exponential on the vector to round-off (`linalg::exp_apply`, which takes the combination's scalar
-/// part out and overwrites `a`; `vectors` its work). Its counted work and its rounding of x relative to its norm
-/// (`linalg::Chebyshev::rounding`).
-fn cf4<M: Middle>(path: &Along<M>, a: &mut Mat, generators: &mut [Mat; 2], vectors: &mut [C64], x: &mut [C64], s: f64, h: f64) -> (f64, f64) {
-    let r = 3.0_f64.sqrt() / 6.0;
-    path.middle.generator(&path.path, s + (0.5 - r) * h, &mut generators[0]);
-    path.middle.generator(&path.path, s + (0.5 + r) * h, &mut generators[1]);
-    let (mut products, mut bound) = (0, 0.0);
-    for [w1, w2] in [[0.25 + r, 0.25 - r], [0.25 - r, 0.25 + r]] {
-        for (z, (one, two)) in a.data.iter_mut().zip(generators[0].data.iter().zip(&generators[1].data)) {
-            *z = *one * w1 + *two * w2;
-        }
-        let plan = linalg::exp_apply(a, C64::new(0.0, -h), x, vectors);
-        products += plan.parts * plan.terms;
-        bound += plan.rounding(path.n);
-    }
-    (count::cf4(path.n, path.middle.work(), products), bound)
-}
-
-/// The propagation of Ĥ(t) by CF4 (`cf4`) on 2P spacings h, P = `panels`, the impulse by composite Simpson on its
-/// nodes: both of fourth order in νh, ν the force's frequency bound -- an error of the step's length where the panels
-/// are the step's (adapt.rs, # The step: one panel a step, a half step one on half the spacing), which the step's
-/// doubling reads with the splitting's. The middle state is the middle node's,
-/// whose change is none. The norm's root between the nodes that bracket it, by CF4 from the earlier node -- within the
-/// step, or, where the step ends above the watched threshold, on further spacings of the same grid beyond its end, as
-/// far as the reach; the grid ends at a crossing that is not the step's end (`Crossed`).
-fn beating<M: Middle>(path: &Along<M>, scratch: &mut Scratch, psi: &[C64], tau: f64, panels: usize, watch: Option<Watch>) -> Result<Propagated, Crossed> {
-    let (n, nodes) = (path.n, 2 * panels);
-    let h = tau / nodes as f64;
-    let Carved { matrix, generators, states, held, change, sum, work: vectors } = scratch.carve(nodes);
-    for (x, (z, phase)) in states.iter_mut().zip(psi.iter().zip(&path.half)) {
+/// The kick is exact in its decomposition about the middle state x_m held in the frame: its shear at r_h, each tone at
+/// its beat alone (`shear`), and −∫Re tr(Ĝ(u)(ρ(u) − ρ_m))du of the state's change along the path. Ĝ(u) changes along
+/// the path only as the generator's slow part does, so it is taken through the step's three nodes u_j = −h, 0, h, their
+/// Lagrange polynomials ℓ_j: the integral is Σ_j Re tr(Ĝ(u_j) Q_j) with Q_j = ∫ℓ_j(u)(ρ(u) − ρ_m)du, three forms of the
+/// model, and the quadrature's nodes meet no model at all. Q_j is summed as Σ_k w_k ℓ_j(u_k) ρ_k less its weights' sum
+/// times ρ_m (the middle state is not known before the first half is through): of a state that does not change it is
+/// the rounding of that difference, and nothing where there is one state. Where Ĥ is still along every path Ĝ is one
+/// matrix, and the kick its one form with ∫ρ(u)du.
+///
+/// Watched for a threshold (`Watch`), it says whether ‖ψ‖² reaches it at the step's end, and ends where it reaches it
+/// elsewhere (`Crossed`): the norm's root between the nodes that bracket it, by the hop from the earlier one (`root`) --
+/// within the step, or, where the step ends above the threshold, on further nodes of the same quadrature on the same
+/// path beyond its end, as far as the reach.
+fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [f64; 3], hbar_over_mass: f64, tau: f64, watch: Option<Watch>) -> Result<Propagated, Crossed> {
+    let along = Along::new(middle, kappa, kappa.map(|k| hbar_over_mass * k), tau);
+    let (n, h, still, model) = (along.n, 0.5 * tau, middle.still(), middle.work());
+    let Carved { picture, held, sums } = scratch.carve();
+    pictured(&along, picture, tau);
+    let (bandwidth, watch) = (picture.bandwidth, watch.filter(|_| tau > 0.0));
+    let (mut state, mut x) = ([C64::ZERO; STATES], [C64::ZERO; STATES]);
+    for (x, (z, phase)) in x.iter_mut().zip(psi.iter().zip(&along.half)) {
         *x = *z * *phase;
     }
-    let (mut work, mut reached, watch) = (0.0, false, watch.filter(|_| tau > 0.0));
-    for k in 0..nodes {
-        let s = k as f64 * h - 0.5 * tau;
-        let (before, after) = states[k * n..(k + 2) * n].split_at_mut(n);
-        after.copy_from_slice(before);
-        let (exponentials, bound) = cf4(path, matrix, generators, vectors, after, s, h);
-        work += exponentials;
-        if let Some(watch) = watch.filter(|watch| !reached && norm_sqr(after) <= watch.theta) {
-            let from = k as f64 * h;
-            let norm = |to: f64| {
-                let mut y = [C64::ZERO; STATES];
-                y[..n].copy_from_slice(before);
-                cf4(path, matrix, generators, vectors, &mut y[..n], s, to - from);
-                norm_sqr(&y[..n])
-            };
-            let crossing = root(norm, (from, norm_sqr(before)), (from + h, norm_sqr(after)), watch.theta, 2.0 * bound + rounding(n + 1));
+    picture.enter(&x[..n], &mut state[..n]);
+    // The norm at a time from the step's start, by the hop from the coordinates `from` at the time `at` from the middle.
+    let through = |picture: &mut Picture, from: &[C64; STATES], at: f64, time: f64| {
+        let (mut y, mut z) = (*from, [C64::ZERO; STATES]);
+        picture.hop(&mut y[..n], at, time - h - at);
+        picture.leave(&y[..n], &mut z[..n]);
+        norm_sqr(&z[..n])
+    };
+    let (mut ends, mut weights, mut counted) = ([[C64::ZERO; STATES]; 2], [0.0; 3], 0);
+    let (mut at, mut norm, mut reached) = (-h, norm_sqr(psi), false);
+    sums.fill(C64::ZERO);
+    // The stops in the path's order: the quadrature's nodes, each with its weight, and the step's middle and end, where
+    // the state is kept -- a node within the time's round-off of the middle (an odd rule's) is the middle.
+    let (mut nodes, mut kept) = (quadrature(-h, h, bandwidth).peekable(), [0.0, h].into_iter().enumerate().peekable());
+    let ahead = |u: f64| (u + h) / tau;
+    loop {
+        let (u, weight, keep) = match (nodes.peek().copied(), kept.peek().copied()) {
+            (Some((u, w)), Some((end, stop))) if (u - stop).abs() <= f64::EPSILON * h.abs() => {
+                nodes.next();
+                kept.next();
+                (stop, Some(w), Some(end))
+            }
+            (Some((u, w)), stop) if stop.map_or(true, |(_, stop)| ahead(u) < ahead(stop)) => {
+                nodes.next();
+                (u, Some(w), None)
+            }
+            (_, Some((end, stop))) => {
+                kept.next();
+                (stop, None, Some(end))
+            }
+            (_, None) => break,
+        };
+        let before = state;
+        let bound = picture.hop(&mut state[..n], at, u - at);
+        picture.leave(&state[..n], &mut x[..n]);
+        let now = norm_sqr(&x[..n]);
+        if let Some(watch) = watch.filter(|watch| !reached && now <= watch.theta) {
+            let floor = 2.0 * (picture.rounding + bound) + rounding(n + 1);
+            let crossing = root(|time| through(picture, &before, at, time), (at + h, norm), (u + h, now), watch.theta, floor);
             if crossing < tau - watch.slack {
-                return Err(Crossed { at: crossing, work });
+                return Err(Crossed { at: crossing, work: count::propagation(model, still, picture.work) });
             }
             reached = true;
         }
+        if let Some(w) = weight {
+            counted += 1;
+            if still {
+                accumulate(&x[..n], &[w], sums);
+            } else {
+                let s = u / h;
+                let lagrange = [0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)].map(|l| w * l);
+                for (sum, l) in weights.iter_mut().zip(lagrange) {
+                    *sum += l;
+                }
+                accumulate(&x[..n], &lagrange, sums);
+            }
+        }
+        if let Some(end) = keep {
+            ends[end] = x;
+        }
+        (at, norm) = (u, now);
     }
-    // Above the threshold at its end: the same grid on the same path beyond it, a spacing at a time, as far as the reach.
+    // Above the threshold at its end: the same hops on the same path beyond it, as far as the reach.
     if let Some(watch) = watch.filter(|watch| !reached && watch.reach > 0.0) {
-        let mut after = [C64::ZERO; STATES];
-        after[..n].copy_from_slice(&states[nodes * n..(nodes + 1) * n]);
-        let mut k = nodes;
-        while (k as f64) * h < tau + watch.reach {
-            let (s, from, before) = (k as f64 * h - 0.5 * tau, k as f64 * h, after);
-            let (exponentials, bound) = cf4(path, matrix, generators, vectors, &mut after[..n], s, h);
-            work += exponentials;
-            if norm_sqr(&after[..n]) <= watch.theta {
-                let norm = |to: f64| {
-                    let mut y = before;
-                    cf4(path, matrix, generators, vectors, &mut y[..n], s, to - from);
-                    norm_sqr(&y[..n])
-                };
-                let crossing = root(norm, (from, norm_sqr(&before[..n])), (from + h, norm_sqr(&after[..n])), watch.theta, 2.0 * bound + rounding(n + 1));
+        for u in quadrature(h, h + watch.reach, bandwidth).map(|(u, _)| u).chain(std::iter::once(h + watch.reach)) {
+            let before = state;
+            let bound = picture.hop(&mut state[..n], at, u - at);
+            picture.leave(&state[..n], &mut x[..n]);
+            let now = norm_sqr(&x[..n]);
+            if now <= watch.theta {
+                let floor = 2.0 * (picture.rounding + bound) + rounding(n + 1);
+                let crossing = root(|time| through(picture, &before, at, time), (at + h, norm), (u + h, now), watch.theta, floor);
                 if crossing <= tau + watch.slack {
                     reached = true;
                 } else if crossing <= tau + watch.reach {
-                    return Err(Crossed { at: crossing, work });
+                    return Err(Crossed { at: crossing, work: count::propagation(model, still, picture.work) });
                 }
                 break;
             }
-            k += 1;
+            (at, norm) = (u, now);
         }
     }
-    // Composite Simpson on the nodes, weights 1, 4, 2, …, 4, 1 over h/3.
-    let states = &*states;
+    let [middle, mut end] = ends;
     let mut populations = [0.0; STATES];
-    let impulse = impulse(path, held, change, sum, &mut populations[..n], tau, &states[panels * n..(panels + 1) * n], &mut |each: &mut dyn FnMut(f64, f64, &[C64])| {
-        for k in (0..=nodes).filter(|&k| k != panels) {
-            let weight = if k == 0 || k == nodes { 1.0 } else if k % 2 == 1 { 4.0 } else { 2.0 };
-            each(k as f64 * h - 0.5 * tau, h / 3.0 * weight, &states[k * n..(k + 1) * n]);
+    let impulse = if still {
+        let sum = &mut sums[..n * n];
+        mirror(sum, n);
+        for (s, p) in populations[..n].iter_mut().enumerate() {
+            *p = sum[s * n + s].re / tau;
         }
-    });
-    let (mut end, mut middle) = ([C64::ZERO; STATES], [C64::ZERO; STATES]);
-    for (z, (x, phase)) in end.iter_mut().zip(states[nodes * n..].iter().zip(&path.half)) {
-        *z = *x * *phase;
+        along.middle.force(&along.path, 0.0, sum).map(|f| -f)
+    } else {
+        let mut out = shear(&along, held, &middle[..n], tau);
+        for (j, at) in [-h, 0.0, h].into_iter().enumerate() {
+            let sum = &mut sums[j * n * n..(j + 1) * n * n];
+            mirror(sum, n);
+            for (s, p) in populations[..n].iter_mut().enumerate() {
+                *p += sum[s * n + s].re / tau;
+            }
+            for (q, rho) in sum.iter_mut().zip(held.iter()) {
+                *q -= *rho * weights[j];
+            }
+            let form = along.middle.force(&along.path, at, sum);
+            for a in 0..3 {
+                out[a] -= form[a];
+            }
+        }
+        out
+    };
+    for (z, phase) in end[..n].iter_mut().zip(&along.half) {
+        *z *= *phase;
     }
-    middle[..n].copy_from_slice(&states[panels * n..(panels + 1) * n]);
-    work += count::impulse(n, path.middle.work(), nodes, false);
+    let work = count::propagation(model, still, picture.work) + count::impulse(n, model, counted, still);
     Ok(Propagated { end, middle, populations, impulse, work, reached })
 }
 
@@ -1065,8 +979,8 @@ fn beating<M: Middle>(path: &Along<M>, scratch: &mut Scratch, psi: &[C64], tau: 
 /// the two logarithms' beside it: within it s is the root as far as the norm tells, and the interpolation's next point,
 /// taken without another evaluation, is the root to the norm's actual rounding over its rate. (Beyond it the points
 /// wander in that rounding until the bracket closes on neighbouring numbers: some ten evaluations more.) The norm's rate
-/// 2 Im⟨x|Ĥ|x⟩ is not asked: on a grid it is not the slope of the grid's own norm, and a Newton iteration with it
-/// converged at the grid's error's pace, in twice the evaluations.
+/// 2 Im⟨x|Ĥ|x⟩ is not asked: along a hop it is not the slope of the hop's own norm to the last digit, and a Newton
+/// iteration with it converged at that difference's pace, in twice the evaluations.
 fn root(mut norm: impl FnMut(f64) -> f64, (lo, at_lo): (f64, f64), (hi, at_hi): (f64, f64), theta: f64, floor: f64) -> f64 {
     let target = theta.ln();
     let floor = floor + 2.0 * UNIT_ROUNDOFF * target.abs();
@@ -1150,20 +1064,8 @@ pub enum Refused {
 /// The path's momentum of the step of τ through a middle from a state (module documentation, # The path's momentum),
 /// predicted: κ_h and half the kick of the start state held there -- its shear at κ_h and the reference's τ∇V_ref(r_h).
 fn predicted<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa_h: [f64; 3], reference: [f64; 3], tau: f64) -> [f64; 3] {
-    let held = shear(&Along::new(middle, kappa_h, [0.0; 3], tau), scratch.carve(0).held, psi, tau);
+    let held = shear(&Along::new(middle, kappa_h, [0.0; 3], tau), scratch.carve().held, psi, tau);
     std::array::from_fn(|a| kappa_h[a] + 0.5 * (held[a] + tau * reference[a]))
-}
-
-/// The propagation of B over the step on the path through a middle at the momentum κ, the generator taken at it (module
-/// documentation, # The kick), by its route (`route`). Watched for a threshold, it says whether ‖ψ‖² reaches it at the
-/// step's end, and ends where it reaches it elsewhere (`Watch`, `Crossed`).
-fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, from: &Trajectory, kappa: [f64; 3], hbar_over_mass: f64, tau: f64, watch: Option<Watch>) -> Result<Propagated, Crossed> {
-    let along = Along::new(middle, kappa, kappa.map(|k| hbar_over_mass * k), tau);
-    let Carved { matrix, work: sums, .. } = scratch.carve(0);
-    match route(&along, matrix, sums, tau) {
-        Some(spectrum) => spectral(&along, scratch, &spectrum, &from.psi, tau, watch),
-        None => beating(&along, scratch, &from.psi, tau, panels(tau, from.grid), watch),
-    }
 }
 
 /// A step tried for its state's jump (`Midway::attempt`), by where its own propagation reaches the state's threshold
@@ -1235,7 +1137,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         scratch.fit(n);
         let kappa_m = predicted(scratch, generator, &from.psi, kappa_h, reference, tau);
         let shear = count::shear(n, generator.work());
-        let made = match propagate(scratch, generator, from, kappa_m, hm, tau, watch) {
+        let made = match propagate(scratch, generator, &from.psi, kappa_m, hm, tau, watch) {
             Ok(made) => made,
             Err(crossed) => return Ok(Attempt::Proposes { length: crossed.at, work: crossed.work + shear }),
         };
@@ -1347,27 +1249,24 @@ impl Brownian {
 /// The counted work of one step of τ on the path through a middle at a momentum and a velocity: what `Step::work`
 /// counts, priced without taking the step -- the solve's price of a model it has not run, at its pilot's states and
 /// steps. It makes no middle: the caller's is a state's own, or one of the cluster made once -- the nodes' counts are
-/// the cluster's whatever the point (`Middle::work`), and the point gives the route alone. The propagation by the
-/// generator's own route (`route`: the eigen-propagation's decomposition and Gauss–Legendre nodes, or the grid's CF4
-/// spacings no wider than `grid`, each exponential's Chebyshev plan at the bounds of Ĥ at the middle (`linalg::bounds`)
-/// over half a spacing, its two nodes' weights' sum) and the shear; the middle itself is the model's
-/// (`Dynamics::assembly_work`, one a step).
-pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64, grid: f64) -> f64 {
-    let (n, costs) = (middle.states(), middle.work());
+/// the cluster's whatever the point (`Middle::work`), and the point gives the generator's picture alone: its
+/// decomposition and its slopes as the step makes them (`pictured`), the quadrature's nodes at its bandwidth, and a hop
+/// to each of them and to each half's end at the hops' mean width (`spectral::Picture::price`), a state in and out at
+/// each; the kick's sums and forms, and the shear. The middle itself is the model's (`Dynamics::assembly_work`, one a
+/// step).
+pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64) -> f64 {
+    let (n, costs, still) = (middle.states(), middle.work(), middle.still());
     let along = Along::new(middle, kappa, velocity, tau);
-    let (mut a, mut sums) = (Mat::zeros(n, n), vec![C64::ZERO; n]);
-    let propagation = match route(&along, &mut a, &mut sums, tau) {
-        Some(spectrum) => count::spectral(n, costs, spectrum.eigen.work, spectrum.nodes) + count::impulse(n, costs, spectrum.nodes, true),
-        None => {
-            middle.generator(&along.path, 0.0, &mut a);
-            let linalg::Bounds { rho, gamma, .. } = linalg::bounds(&a, &mut sums);
-            let panels = panels(tau, grid);
-            let h = (tau / (2 * panels) as f64).abs();
-            let plan = linalg::Chebyshev::plan(0.5 * rho * h, 0.5 * gamma * h);
-            (2 * panels) as f64 * count::cf4(n, costs, 2 * plan.parts * plan.terms) + count::impulse(n, costs, 2 * panels, false)
-        }
-    };
-    propagation + count::shear(n, costs)
+    let mut scratch = Scratch::default();
+    scratch.fit(n);
+    let picture = &mut scratch.picture;
+    pictured(&along, picture, tau);
+    let nodes = nodes(tau, picture.bandwidth);
+    let hops = nodes + 2;
+    let width = tau / hops as f64;
+    let states = if picture.decomposed() { ((hops + 1) * n * n) as f64 } else { 0.0 };
+    let own = picture.work + picture.powers(width) + hops as f64 * picture.price(0.5 * tau, width) + states;
+    count::propagation(costs, still, own) + count::impulse(n, costs, nodes, still) + count::shear(n, costs)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

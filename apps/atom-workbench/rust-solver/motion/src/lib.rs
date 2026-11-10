@@ -9,6 +9,7 @@ pub mod request;
 pub mod field;
 pub mod model;
 pub mod table;
+pub mod spectral;
 pub mod step;
 pub mod adapt;
 pub mod ensemble;

@@ -428,9 +428,8 @@ fn rk4_state(h: &dyn Fn(f64) -> Mat, psi: &[C64], tau: f64, steps: usize) -> Vec
     y
 }
 
-/// The same in a standing wave: the moving atom sees the two beams at Δ ∓ k·v, a beat at 2k·v the path's CF4 grid
-/// resolves; against RK4 of the at-rest atom's beating generator at a 10⁻⁵ µs step, within the grid's fourth order at a
-/// fine spacing.
+/// The same in a standing wave: the moving atom sees the two beams at Δ ∓ k·v, a beat at 2k·v that steps of 1/250 of
+/// its turn resolve; against RK4 of the at-rest atom's beating generator at a 10⁻⁵ µs step.
 #[test]
 fn a_moving_atom_in_a_standing_wave_is_an_atom_at_rest_with_two_detunings() {
     let hm = 1e-9;
@@ -439,9 +438,10 @@ fn a_moving_atom_in_a_standing_wave_is_an_atom_at_rest_with_two_detunings() {
     let beams = vec![Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi, phase: 0.7 }];
     let model = Atom::new(hm, flat, beams.clone(), detuning, GAMMA);
     let (v, z0, tau) = (0.8, 0.13, 0.5);
-    let mut t = held(&model, [0.0, 0.0, z0], [0.0, 0.0, v / hm]);
-    t.grid = 1e-4;
-    let s = step::step(&model, &t, tau, &mut step::Scratch::default()).unwrap();
+    let (mut t, steps) = (held(&model, [0.0, 0.0, z0], [0.0, 0.0, v / hm]), 250);
+    for _ in 0..steps {
+        t = step::step(&model, &t, tau / steps as f64, &mut step::Scratch::default()).unwrap().end;
+    }
     // At rest, the lab generator along z(t) = z₀ + v t.
     let h = |time: f64| -> Mat {
         let z = z0 + v * time;
@@ -453,9 +453,129 @@ fn a_moving_atom_in_a_standing_wave_is_an_atom_at_rest_with_two_detunings() {
         m
     };
     let y = rk4_state(&h, &[C64::ONE, C64::ZERO], tau, 50_000);
-    let moving: Vec<f64> = s.end.psi.iter().map(|z| z.norm_sqr()).collect();
+    let moving: Vec<f64> = t.psi.iter().map(|z| z.norm_sqr()).collect();
     let at_rest: Vec<f64> = y.iter().map(|z| z.norm_sqr()).collect();
     assert!(relative(&moving, &at_rest) < 1e-6, "{moving:?} vs {at_rest:?}");
+}
+
+/// A two-level atom on the uniform path z₀ + vt through beams along z, sub-stepped: RK4 in `steps` steps of the lab's
+/// iψ̇ = H(z(t))ψ, H = [[0, c*], [c, −Δ − iΓ/2]], c(z) = Σ_l (Ω_l/2) e^{i(k_l z + φ_l)}, with the impulse
+/// I = −∫⟨ψ|∂_zH|ψ⟩/⟨ψ|ψ⟩dt as a third unknown. ψ(τ) and I: the dense reference of a step's state and kick.
+fn substepped(beams: &[Beam], detuning: f64, gamma: f64, z0: f64, v: f64, psi: [C64; 2], tau: f64, steps: usize) -> ([C64; 2], f64) {
+    let derivative = |time: f64, y: &[C64; 3]| -> [C64; 3] {
+        let z = z0 + v * time;
+        let (mut c, mut g) = (C64::ZERO, C64::ZERO);
+        for b in beams {
+            let term = C64::cis(b.k[2] * z + b.phase) * (0.5 * b.rabi);
+            c += term;
+            g += term * C64::new(0.0, b.k[2]);
+        }
+        let (a, e) = (y[0], y[1]);
+        let (da, de) = (c.conj() * e, c * a + C64::new(-detuning, -0.5 * gamma) * e);
+        let force = -2.0 * (e.conj() * g * a).re / (a.norm_sqr() + e.norm_sqr());
+        [C64::new(da.im, -da.re), C64::new(de.im, -de.re), C64::real(force)]
+    };
+    let dt = tau / steps as f64;
+    let add = |a: &[C64; 3], b: &[C64; 3], s: f64| -> [C64; 3] { std::array::from_fn(|k| a[k] + b[k] * s) };
+    let mut y = [psi[0], psi[1], C64::ZERO];
+    for i in 0..steps {
+        let t0 = i as f64 * dt;
+        let k1 = derivative(t0, &y);
+        let k2 = derivative(t0 + 0.5 * dt, &add(&y, &k1, 0.5 * dt));
+        let k3 = derivative(t0 + 0.5 * dt, &add(&y, &k2, 0.5 * dt));
+        let k4 = derivative(t0 + dt, &add(&y, &k3, dt));
+        y = std::array::from_fn(|k| y[k] + (k1[k] + k2[k] * 2.0 + k3[k] * 2.0 + k4[k]) * (dt / 6.0));
+    }
+    ([y[0], y[1]], y[2].re)
+}
+
+/// One step of a two-level atom from the bare ground state at z₀, at the velocity v along z, against its sub-stepped
+/// reference (`substepped`, 2000 sub-steps a radian of Δτ and no fewer than 20 000): the largest error of ψ's amplitudes
+/// (lab), and the kick's error, relative to the larger of the reference's kick and of the kick of the light's dressed
+/// state held over the step (its dipole force's: the bare state's kick may pass through zero). The mass is one the
+/// kick does not move (ħ/m = 10⁻⁹ µm²/µs), so the path is the reference's.
+fn step_errors(beams: &[Beam], detuning: f64, gamma: f64, z0: f64, v: f64, tau: f64) -> [f64; 2] {
+    let hm = 1e-9;
+    let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
+    let model = Atom::new(hm, flat, beams.to_vec(), detuning, gamma);
+    let start = held(&model, [0.0, 0.0, z0], [0.0, 0.0, v / hm]);
+    let s = step::step(&model, &start, tau, &mut step::Scratch::default()).unwrap();
+    let steps = ((2000.0 * detuning.abs() * tau) as usize).max(20_000);
+    let (psi, kick) = substepped(beams, detuning, gamma, z0, v, [C64::ONE, C64::ZERO], tau, steps);
+    let state = (0..2).map(|a| (s.end.psi[a] - psi[a]).abs()).fold(0.0, f64::max);
+    // The dressed state's dipole kick at the step's middle: −τ ∂_z(|c|²/Δ)-like, its size k|c|²τ/|Δ̃| at most.
+    let size = beams.iter().map(|b| 0.5 * b.rabi).sum::<f64>().powi(2) * K * tau / detuning.hypot(0.5 * gamma);
+    let impulse = (s.end.kappa[2] - start.kappa[2] - kick).abs() / kick.abs().max(size);
+    [state, impulse]
+}
+
+/// The step integrates its generator's own frequencies exactly, whatever the detuning turns over the step (step.rs, # The
+/// kick; spectral.rs): a two-level atom in a standing wave whose light shift turns its dressed state by 3 rad a step,
+/// from the bare ground state -- the state after a jump, whose excited amplitude rings at the detuning --, with and
+/// without the decay, at Δτ = 1, 10, 50, 200.
+/// - At rest the generator is one matrix over the step: the state is the sub-stepped reference's to its rounding, and
+///   so is the kick without the decay. With it the kick is a quotient by the norm, whose own ringing -- Γ/|Δ| times
+///   the excited share, the bare state's 4U/|Δ| at most -- is beyond the bandwidth the quadrature resolves to round-off
+///   (step.rs, # The kick): the kick errs by a part of that ringing, 10⁻⁵ of the dipole kick at the most here (at Δτ =
+///   200) and 2·10⁻⁷ at Δτ = 50; held to the ringing itself and to 10⁻⁴.
+/// - Moving, the light changes along the path by k·v τ: the errors are of the scheme's order, the second in that
+///   change, and at one light shift they do not grow with Δτ. The state's is what a hop leaves out (spectral.rs: the
+///   second Magnus term), the light shift of the change itself over a hop, at most half of (k v τ)²/12 of the light
+///   shift's turn Uτ over the step -- held here to all of it, and falling threefold at least per halving of the
+///   velocity. The kick's against the path's is the splitting's own beside it: the middle state's force is read at the
+///   fixed r_h, (k v τ)²/6 of it off its mean along the path.
+#[test]
+fn a_step_integrates_its_internal_frequencies_whatever_the_detuning() {
+    let (tau, shift) = (0.0625, 3.0);
+    let mut failures = Vec::new();
+    for gamma in [0.0, GAMMA] {
+        for turns in [1.0_f64, 10.0, 50.0, 200.0] {
+            let detuning: f64 = -turns / tau;
+            let rabi = (shift / tau * detuning.abs()).sqrt();
+            let beams = [Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi, phase: 0.3 }];
+            let rest = step_errors(&beams, detuning, gamma, 0.11, 0.0, tau);
+            let speeds = [0.4, 0.2, 0.1];
+            let moving: Vec<[f64; 2]> = speeds.iter().map(|&v| step_errors(&beams, detuning, gamma, 0.11, v, tau)).collect();
+            eprintln!("Γ {gamma:6.3}, Δτ {turns:5}: at rest ψ {:.2e}, kick {:.2e}; moving at 0.4, 0.2, 0.1 µm/µs ψ {:.2e} {:.2e} {:.2e}, kick {:.2e} {:.2e} {:.2e}", rest[0], rest[1], moving[0][0], moving[1][0], moving[2][0], moving[0][1], moving[1][1], moving[2][1]);
+            let ringing = (gamma / detuning.abs() * 4.0 * shift / tau / detuning.abs()).min(1e-4);
+            if !(rest[0] < 1e-11 && rest[1] < if gamma == 0.0 { 1e-11 } else { ringing }) {
+                failures.push(format!("Γ {gamma}, Δτ {turns}: at rest {rest:?}"));
+            }
+            for q in 0..2 {
+                let within = (0..3).all(|i| moving[i][q] < (K * speeds[i] * tau).powi(2) * (shift / 12.0 + [0.0, 1.0 / 6.0][q]));
+                let falls = q == 1 || (0..2).all(|i| moving[i + 1][q] < moving[i][q] / 3.0);
+                if !(within && falls) {
+                    failures.push(format!("Γ {gamma}, Δτ {turns}: moving, {} {:?}", ["ψ", "kick"][q], [moving[0][q], moving[1][q], moving[2][q]]));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// The step's doubling reads what the step leaves (adapt.rs, # The read): the same atom moving at 0.2 µm/µs, the decay
+/// on, at Δτ = 50 and 200 -- the detuning unresolved by the step and by its halves alike. The step's error of the
+/// state's fall of ln‖ψ‖² (the hazard, which times the jumps) against the sub-stepped reference is the doubling's
+/// estimate of it, 4/3 of the step less its two halves, within a half of itself; before, the two agreed in an error the
+/// difference held none of.
+#[test]
+fn the_doubling_reads_what_a_step_leaves_of_the_path_s_change() {
+    let (hm, tau, shift, v, z0) = (1e-9, 0.0625, 3.0, 0.2, 0.11);
+    let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
+    for turns in [50.0_f64, 200.0] {
+        let detuning: f64 = -turns / tau;
+        let rabi = (shift / tau * detuning.abs()).sqrt();
+        let beams = [Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi, phase: 0.3 }];
+        let model = Atom::new(hm, flat, beams.to_vec(), detuning, GAMMA);
+        let start = held(&model, [0.0, 0.0, z0], [0.0, 0.0, v / hm]);
+        let take = |from: &Trajectory, length: f64| step::step(&model, from, length, &mut step::Scratch::default()).unwrap().end;
+        let (whole, halves) = (take(&start, tau), take(&take(&start, 0.5 * tau), 0.5 * tau));
+        let (exact, _) = substepped(&beams, detuning, GAMMA, z0, v, [C64::ONE, C64::ZERO], tau, (2000.0 * turns) as usize);
+        let fall = |psi: &[C64]| -psi.iter().map(|z| z.norm_sqr()).sum::<f64>().ln();
+        let (error, read) = (fall(&whole.psi) - fall(&exact), 4.0 / 3.0 * (fall(&whole.psi) - fall(&halves.psi)));
+        eprintln!("Δτ {turns}: the hazard's integral {:.5}, the step's error of it {error:+.3e}, the doubling reads {read:+.3e}", fall(&exact));
+        assert!((read - error).abs() < 0.5 * error.abs() && error.abs() > 1e-7, "Δτ {turns}: error {error:e}, read {read:e}");
+    }
 }
 
 /// The steady excited population of a two-level atom at the detuning δ: (Ω²/4)/(δ² + Γ²/4 + Ω²/2).
@@ -617,7 +737,6 @@ fn a_jump_is_made_where_its_own_step_reaches_the_threshold() {
     let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
     let (mut twin, mut scratch, mut longest) = (start.clone(), step::Scratch::default(), 0.0_f64);
     for &length in &steps {
-        twin.grid = length / 2.0;
         let taken = step::step(&model, &twin, length, &mut scratch).unwrap().end;
         let fall = (norm(&twin.psi) / norm(&taken.psi)).ln();
         (twin.r, twin.kappa, twin.psi, twin.time) = (taken.r, taken.kappa, taken.psi, taken.time);
@@ -676,7 +795,6 @@ fn a_carried_state_takes_the_trajectory_s_jumps() {
     let mut landed = std::collections::BTreeSet::new();
     for state in 0..crate::model::GROUND {
         let mut t = Trajectory::new(&run, state, [trap.centre[0] + 0.05, trap.centre[1] - 0.03, trap.centre[2] + 0.1], [1.0, -2.0, 0.5], 11, state as u64);
-        t.grid = tau / 2.0;
         for _ in 0..jumps {
             let (mut own, mut twice) = (Some(t.psi.clone()), Some(t.psi.iter().map(|z| *z * 2.0).collect::<step::Internal>()));
             let mut twin = t.clone();
@@ -768,7 +886,6 @@ fn the_doubling_estimate_falls_as_tau_cubed() {
     for (beams, gamma, orders) in [(beams, GAMMA, [3.0, 3.0]), (vec![], 0.0, [3.0, 4.0])] {
         let model = Atom::new(RB, trap, beams, -40.0, gamma);
         let mut start = held(&model, [0.2, -0.1, 0.4], [30.0, -20.0, 50.0]);
-        start.grid = 2.5e-4;
         start = step::step(&model, &start, 0.5, &mut step::Scratch::default()).unwrap().end;
         let difference = |tau: f64| -> [f64; 2] {
             let full = step::step(&model, &start, tau, &mut step::Scratch::default()).unwrap();
@@ -911,8 +1028,7 @@ fn a_step_with_light_and_its_reverse_miss_beyond_the_scheme_s_order() {
     let lambda = 0.5 * (d - (d * d + 4.0 * c.norm_sqr()).sqrt());
     let mut dressed = bare.clone();
     dressed.psi = [C64::ONE, c / (lambda - d)].into_iter().collect();
-    for (name, mut start) in [("dressed", dressed), ("bare", bare)] {
-        start.grid = 1e-3;
+    for (name, start) in [("dressed", dressed), ("bare", bare)] {
         let mut misses = Vec::new();
         for tau in [0.2, 0.1, 0.05] {
             let there = step::step(&model, &start, tau, &mut step::Scratch::default()).unwrap();
@@ -1316,9 +1432,11 @@ fn watched(theta: f64) -> super::Watch {
 /// and tones, each timed alone and counted as the step calls them -- and the step's own, the rest. Then the step's
 /// phases, the model's calls within them: the middle's fixed point less its reference expansions; the propagation on
 /// its path with its impulse (also with the threshold reached halfway down the step's fall of the norm: its root).
-/// Returns the propagation's time.
+/// The timed steps and propagations share one scratch, as a trajectory's steps do (adapt.rs). Returns the
+/// propagation's time.
 fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> f64 {
     let (count, half, hm) = (starts.len(), 0.5 * tau, model.hbar_over_mass());
+    let kept = std::cell::RefCell::new(fitted(starts[0].psi.len()));
     let counted = Counted { model, calls: std::cell::Cell::new([0; 5]) };
     let steps: Vec<step::Step> = starts.iter().map(|s| step::step(&counted, s, tau, &mut step::Scratch::default()).unwrap()).collect();
     let calls = counted.calls.get().map(|c| c as f64 / count as f64);
@@ -1353,7 +1471,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             .zip(starts)
             .map(|(p, s)| {
                 let from = if crossing { &p.crossed } else { s };
-                match super::propagate(&mut fitted(from.psi.len()), &p.middle, from, p.kappa, hm, tau, Some(watched(from.threshold))) {
+                match super::propagate(&mut kept.borrow_mut(), &p.middle, &from.psi, p.kappa, hm, tau, Some(watched(from.threshold))) {
                     Ok(made) => made.impulse[0],
                     Err(crossed) => crossed.at,
                 }
@@ -1367,7 +1485,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     let [whole, reference, point, generator, force, tones, middle, propagated, root, pace] = microseconds(
         count,
         [
-            &mut || starts.iter().map(|s| step::step(model, s, tau, &mut step::Scratch::default()).unwrap().end.kappa[0]).sum::<f64>(),
+            &mut || starts.iter().map(|s| step::step(model, s, tau, &mut kept.borrow_mut()).unwrap().end.kappa[0]).sum::<f64>(),
             &mut || pieces.iter().map(|p| model.reference(p.at.0).value).sum::<f64>(),
             &mut || pieces.iter().zip(starts).map(|(p, s)| model.middle(s.cluster, p.at.0, p.at.1).states() as f64).sum::<f64>(),
             &mut || {
@@ -1388,7 +1506,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     );
     let crossings = pieces
         .iter()
-        .filter(|p| super::propagate(&mut fitted(p.crossed.psi.len()), &p.middle, &p.crossed, p.kappa, hm, tau, Some(watched(p.crossed.threshold))).is_err())
+        .filter(|p| super::propagate(&mut fitted(p.crossed.psi.len()), &p.middle, &p.crossed.psi, p.kappa, hm, tau, Some(watched(p.crossed.threshold))).is_err())
         .count();
     let nodes = calls[2] * generator + calls[3] * force + calls[4] * tones;
     let own = whole - calls[0] * reference - calls[1] * point - nodes;
@@ -1409,7 +1527,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
 
 /// Atoms of a cluster's cost case: `count` atoms at the tweezer's thermal sizes (positions of 0.1 µm, speeds of
 /// 0.05 µm/µs in uniform directions), each a random state of the cluster, held.
-fn atoms<D: Dynamics>(model: &D, count: u64, grid: f64) -> Vec<Trajectory> {
+fn atoms<D: Dynamics>(model: &D, count: u64) -> Vec<Trajectory> {
     (0..count)
         .map(|i| {
             let mut s = crate::random::Stream::new(31, crate::random::Purpose::Initial, i, 0);
@@ -1420,23 +1538,21 @@ fn atoms<D: Dynamics>(model: &D, count: u64, grid: f64) -> Vec<Trajectory> {
             let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
             t.psi = psi.iter().map(|z| *z / norm).collect();
             t.threshold = f64::MIN_POSITIVE;
-            t.grid = grid;
             t
         })
         .collect()
 }
 
 /// An R1 scene's cost case: the scene's far-light model (`model::Run`) from its reference state, sixteen atoms of the
-/// scene's temperature in the trap's harmonic approximation (as `conservative_trap`), held, one step of τ each on a
-/// grid of `panels` panels.
-fn scene_cost(name: &str, tau: f64, panels: usize) -> f64 {
+/// scene's temperature in the trap's harmonic approximation (as `conservative_trap`), held, one step of τ each.
+fn scene_cost(name: &str, tau: f64) -> f64 {
     let mut time = 0.0;
-    scene_atoms(name, tau / (2 * panels) as f64, &mut |run, starts| time = cost(&format!("{name}/{panels}"), run, starts, tau));
+    scene_atoms(name, &mut |run, starts| time = cost(name, run, starts, tau));
     time
 }
 
-/// An R1 scene's far-light model and its atoms on the grid's spacing `grid`, to `each`.
-fn scene_atoms(name: &str, grid: f64, each: &mut dyn FnMut(&crate::model::Run, &[Trajectory])) {
+/// An R1 scene's far-light model and its atoms, to `each`.
+fn scene_atoms(name: &str, each: &mut dyn FnMut(&crate::model::Run, &[Trajectory])) {
     let request = scene(name);
     let light = crate::field::Light::new(&request);
     let model = crate::model::Model::new(&request, &light, &[]).expect("the far light folds");
@@ -1452,7 +1568,6 @@ fn scene_atoms(name: &str, grid: f64, each: &mut dyn FnMut(&crate::model::Run, &
             let (r, kappa) = thermal(&trap, run.hbar_over_mass(), kt, &mut stream);
             let mut t = Trajectory::new(&run, state, r, kappa, 17, i);
             t.threshold = f64::MIN_POSITIVE;
-            t.grid = grid;
             t
         })
         .collect();
@@ -1476,10 +1591,9 @@ fn thermal(trap: &crate::model::Trap, hm: f64, kt: f64, stream: &mut crate::rand
 /// TAU=<µs> … a_scene_s_step_cost -- --ignored --nocapture`): the scene's model as the solve closes it (solve.rs
 /// `attempt`: every unit whose fold does not exist over the reach kept, until none fails) with its near tables
 /// (`Model::tabulate`); what the ensemble's draw meets (the prepared well's depth against its envelope's top); and per
-/// cluster what the exponentials meet (the generator at the trap's centre, at rest, less its trace, its fastest tone,
-/// each times τ, its bounds and the plan of one exponential) and a cost case (`cost`): sixteen atoms of the scene's
-/// temperature in the trap's harmonic approximation, each a random state of the cluster, held, one step of τ each on
-/// the control's grid of one panel (adapt.rs).
+/// cluster what the propagation meets (the generator at the trap's centre, at rest, less its trace, its fastest tone,
+/// each times τ, and the bounds of its Hermitian and decay parts) and a cost case (`cost`): sixteen atoms of the scene's
+/// temperature in the trap's harmonic approximation, each a random state of the cluster, held, one step of τ each.
 #[test]
 #[ignore = "a measurement, not a check: run by name"]
 fn a_scene_s_step_cost() {
@@ -1518,9 +1632,8 @@ fn a_scene_s_step_cost() {
         model.envelope(&p).peak() / kt,
         trap.frequencies
     );
-    let panels = 1;
     for (cluster, c) in model.clusters().iter().enumerate() {
-        // What the exponentials meet: the generator at the trap's centre, at rest, less its trace, and its fastest tone.
+        // What the propagation meets: the generator at the trap's centre, at rest, less its trace, and its fastest tone.
         {
             let (middle, n) = (run.middle(cluster, trap.centre, 0.0), c.states.len());
             let path = middle.path([0.0; 3], [0.0; 3]);
@@ -1539,10 +1652,8 @@ fn a_scene_s_step_cost() {
                 norm * tau,
                 fastest * tau
             );
-            // The exponential's bounds there and its plan over half a spacing (`step_work`'s price of one).
             let crate::linalg::Bounds { rho, gamma, .. } = crate::linalg::bounds(&h, &mut vec![C64::ZERO; n]);
-            let spacing = tau / (2 * panels) as f64;
-            eprintln!("{name} cluster {cluster}: its exponential's bounds ρ {rho:.3e}, γ {gamma:.3e} rad/µs; over half a spacing {:?}", crate::linalg::Chebyshev::plan(0.5 * rho * spacing, 0.5 * gamma * spacing));
+            eprintln!("{name} cluster {cluster}: its generator's bounds ρ {rho:.3e}, γ {gamma:.3e} rad/µs, times τ {:.3e}, {:.3e}", rho * tau, gamma * tau);
         }
         let starts: Vec<Trajectory> = (0..16)
             .map(|i| {
@@ -1553,7 +1664,6 @@ fn a_scene_s_step_cost() {
                 let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
                 t.psi = psi.iter().map(|z| *z / norm).collect();
                 t.threshold = f64::MIN_POSITIVE;
-                t.grid = tau / (2 * panels) as f64;
                 t
             })
             .collect();
@@ -1561,104 +1671,43 @@ fn a_scene_s_step_cost() {
     }
 }
 
-
-/// What a propagation on a grid of one panel spends where (µs, a start's): the model's generator at the spacings' nodes
-/// and their combinations into the exponentials' matrices, the exponentials on the vector (their products of n²), and
-/// the rest -- the kick's densities and the model's forms of them. On the path at the middle's momentum, at the first
-/// start.
-fn split<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
-    let from = &starts[0];
-    let n = from.psi.len();
-    let hm = model.hbar_over_mass();
-    let (_, (r_h, kappa_h)) = super::middle(model, from.r, from.kappa, 0.5 * tau).unwrap();
-    let middle = model.middle(from.cluster, r_h, from.time + 0.5 * tau);
-    let path = super::Along::new(&middle, kappa_h, kappa_h.map(|k| hm * k), tau);
-    let h = 0.5 * tau;
-    let (mut whole, mut combining, mut acting) = (fitted(n), fitted(n), fitted(n));
-    // One spacing's two generators and their two combinations as `cf4` makes them, the last one kept for the exponentials.
-    let combine = |scratch: &mut super::Scratch, s: f64| {
-        let c = scratch.carve(2);
-        let r = 3.0_f64.sqrt() / 6.0;
-        path.middle.generator(&path.path, s + (0.5 - r) * h, &mut c.generators[0]);
-        path.middle.generator(&path.path, s + (0.5 + r) * h, &mut c.generators[1]);
-        let mut sum = 0.0;
-        for [w1, w2] in [[0.25 + r, 0.25 - r], [0.25 - r, 0.25 + r]] {
-            for (z, (one, two)) in c.matrix.data.iter_mut().zip(c.generators[0].data.iter().zip(&c.generators[1].data)) {
-                *z = *one * w1 + *two * w2;
-            }
-            sum += c.matrix.data[0].re;
-        }
-        sum
-    };
-    combine(&mut acting, -h);
-    let kept = acting.matrix.clone();
-    let mut state: Vec<C64> = from.psi.to_vec();
-    let mut plan = crate::linalg::Chebyshev { parts: 0, terms: 0 };
-    let [propagation, combinations, exponentials, pace] = microseconds(
-        1,
-        [
-            &mut || super::beating(&path, &mut whole, &from.psi, tau, 1, None).map_or(0.0, |made| made.impulse[0]),
-            &mut || combine(&mut combining, -h) + combine(&mut combining, 0.0),
-            &mut || {
-                for _ in 0..4 {
-                    state.copy_from_slice(&from.psi);
-                    acting.matrix.data.copy_from_slice(&kept.data);
-                    let c = acting.carve(2);
-                    plan = crate::linalg::exp_apply(c.matrix, C64::new(0.0, -h), &mut state, c.work);
-                }
-                state[0].re
-            },
-            &mut yardstick,
-        ],
-    );
-    eprintln!(
-        "{name:<22} n {n:>2} | a propagation {propagation:8.2} = generators and combinations {combinations:8.2} + exponentials {exponentials:8.2} ({} × {} products each) + kick and rest {:8.2} | pace {:.3} ns",
-        plan.parts,
-        plan.terms,
-        propagation - combinations - exponentials,
-        pace / 1.024
-    );
-}
-
 /// The step's cost (run by name, alone: `the_step_s_cost -- --ignored --nocapture`): µs per `step::step` and per phase,
 /// single-threaded, on the R1 scenes' far light (a static path and a standing wave's beating one), on a two-level atom
-/// with its excited state explicit in a standing wave in a tweezer, and on clusters of 1, 3, 5 and 8 ground states at a
-/// near-resonant light's sizes (`Synthetic`) on a static path (Doppler frames), on a standing wave's beating one (a pair
-/// of beat parts) and on six beams' (nine pairs). The beating paths on grids of one panel and of four: the difference
-/// over their six CF4 spacings is a spacing's cost. Then clusters of 5 to 32 states with 19 and 201 parts (dense), each
-/// with what a propagation spends where (`split`).
+/// with its excited state explicit in a standing wave in a tweezer -- near resonance, and twenty linewidths off it at
+/// the steps 0.0625 and 0.5 µs --, and on clusters of 1, 3, 5 and 8 ground states at a near-resonant light's sizes
+/// (`Synthetic`) on a static path (Doppler frames), on a standing wave's beating one (a pair of beat parts) and on six
+/// beams' (nine pairs). Then clusters of 5 to 32 states with 19 and 201 parts (dense).
 #[test]
 #[ignore = "a measurement, not a check: run by name"]
 fn the_step_s_cost() {
-    let spacing = |name: &str, one: f64, four: f64| eprintln!("{name:<22} a CF4 spacing: {:7.2} µs", (four - one) / 6.0);
-    scene_cost("R1_TWEEZER", 2.5, 1);
-    spacing("R1_RETRO", scene_cost("R1_RETRO", 0.3125, 1), scene_cost("R1_RETRO", 0.3125, 4));
+    scene_cost("R1_TWEEZER", 2.5);
+    scene_cost("R1_RETRO", 0.3125);
     let tau = 0.5;
-    let grids = [(1, f64::INFINITY), (4, tau / 8.0)];
-    let standing = vec![Beam { k: [0.0, 0.0, K], rabi: 10.0, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi: 10.0, phase: 0.3 }];
-    let two = Atom::new(RB, Trap::Gaussian { depth: 1000.0, waists: [1.0, 1.0, 3.0] }, standing, -0.5 * GAMMA, GAMMA);
-    let [one, four] = grids.map(|(panels, grid)| cost(&format!("two-level/{panels}"), &two, &atoms(&two, 8, grid), tau));
-    spacing("two-level", one, four);
+    let standing = |rabi: f64| vec![Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi, phase: 0.3 }];
+    let tweezer = Trap::Gaussian { depth: 1000.0, waists: [1.0, 1.0, 3.0] };
+    let two = Atom::new(RB, tweezer, standing(10.0), -0.5 * GAMMA, GAMMA);
+    cost("two-level", &two, &atoms(&two, 8), tau);
+    let far = Atom::new(RB, tweezer, standing(187.0), -20.0 * GAMMA, GAMMA);
+    for tau in [0.0625, 0.5] {
+        cost("two-level, 20 Γ", &far, &atoms(&far, 8), tau);
+    }
     let six = [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0], [1.0, 1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 0.0, 1.0], [1.0, 0.0, -1.0], [0.0, 1.0, 1.0], [0.0, 1.0, -1.0]]
         .map(|q| q.map(|x| x * K));
     for (n, depth) in [(1, 300.0), (3, 300.0), (5, 1000.0), (8, 3000.0)] {
         let still = Synthetic::new(n, depth, [0.0, 0.6 * K, 0.8 * K], &[]);
-        cost(&format!("static {n}"), &still, &atoms(&still, 8, f64::INFINITY), tau);
+        cost(&format!("static {n}"), &still, &atoms(&still, 8), tau);
         for (label, waves) in [("standing", &six[2..3]), ("six beams", &six[..])] {
             let model = Synthetic::new(n, depth, [0.0; 3], waves);
-            let [one, four] = grids.map(|(panels, grid)| cost(&format!("{label} {n}/{panels}"), &model, &atoms(&model, 8, grid), tau));
-            spacing(&format!("{label} {n}"), one, four);
+            cost(&format!("{label} {n}"), &model, &atoms(&model, 8), tau);
         }
     }
-    // Larger clusters and many parts: 9 pairs of beats (19 parts) and 100 pairs (201 parts), one panel.
+    // Larger clusters and many parts: 9 pairs of beats (19 parts) and 100 pairs (201 parts).
     let mut directions = crate::random::Stream::new(37, crate::random::Purpose::Initial, 0, 0);
     let hundred: Vec<[f64; 3]> = (0..100).map(|_| directions.direction().map(|x| 2.0 * K * x)).collect();
     for n in [5, 8, 16, 32] {
         for waves in [&six[..], &hundred[..]] {
             let model = Synthetic::new(n, 1000.0, [0.0; 3], waves);
-            let starts = atoms(&model, 4, f64::INFINITY);
-            cost(&format!("{} parts {n}/1", 1 + 2 * waves.len()), &model, &starts, tau);
-            split(&format!("{} parts {n}/1", 1 + 2 * waves.len()), &model, &starts, tau);
+            cost(&format!("{} parts {n}", 1 + 2 * waves.len()), &model, &atoms(&model, 4), tau);
         }
     }
 }
