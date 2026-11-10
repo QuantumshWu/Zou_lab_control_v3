@@ -40,11 +40,23 @@
 //!   between two quadrature nodes the first Magnus term of the interaction picture with its integral over Ĥ₀'s
 //!   oscillation exact (`spectral::Picture::hop`). The gradient's slow change is taken through the same three nodes
 //!   (`propagate`).
-//! What is left is of the slow change alone (spectral.rs): the second Magnus term, second order in D -- the light shift
-//! of the change itself over a hop, at most (k·v τ)²/24 of the light shift's turn over the step, O(τ³) a step like the
-//! splitting's own error and a fraction of it --, and the three nodes' cubic, third order in the slow rate. Neither
-//! grows with the detuning times the step. An atom at rest, or a generator still along the path, has D = 0: its state
-//! and its kick are exact. The step's doubling reads what is left (adapt.rs, # The read).
+//! What is left is of the slow change alone (spectral.rs), and neither part of it grows with the detuning times the
+//! step:
+//! - the three nodes are Simpson's rule's: of the fourth order, for the generator and for the gradient alike (their
+//!   cubic is odd about the middle and drops out of the step's integrals);
+//! - a hop leaves the second Magnus term. Where the hops resolve Ĥ₀ -- a folded cluster, whose own frequencies are its
+//!   light shifts -- that is of the fifth order in the step, and the propagation on its path is of the fourth order,
+//!   state and kick. Where they do not -- an explicit far-detuned state, whose hops follow the detuning -- it is the
+//!   light shift of the change itself, at most (k·v τ)²/24 of the light shift's turn over the step: O(τ³) a step like
+//!   the splitting's own error, and a fraction of it.
+//! An atom at rest, or a generator still along the path, has D = 0: its state and its kick are exact.
+//!
+//! The step is of the second order all the same: its splitting's. The position is held at r_h through the kick, the
+//! path is straight where the reference's flow bends it, and the path's momentum is predicted (below). Measured on six
+//! beams' cooling in a tweezer (PGC3D, F = 2, atoms at 25 µK, τ = 0.625 µs: k·v τ = 0.25): the propagation's own error
+//! on the step's path is 8 % of the step's difference from its two halves in the kick and three tenths in the state,
+//! and at half the step it falls seventyfold and fiftyfold, where the difference falls fourteenfold and eightfold. The
+//! step's doubling reads all of it (adapt.rs, # The read).
 //!
 //! The impulse is exact in its decomposition about the state at the step's middle, held in the frame, x_m = x(t_m)
 //! (= ψ(t_m), U(t_m) = 1):
