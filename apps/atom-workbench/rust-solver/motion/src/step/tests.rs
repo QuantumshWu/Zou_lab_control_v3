@@ -350,9 +350,9 @@ fn mean_force(model: &Atom, r: [f64; 3], v: [f64; 3], trajectories: u64, from: f
     let mut forces = Vec::new();
     for i in 0..trajectories {
         let mut t = Trajectory::new(model, 0, r, v.map(|x| x / model.hm), 11, i);
-        adapt::advance(model, tau, &mut t, None, from, &mut |_| {});
+        adapt::advance(model, tau, &mut t, None, from, &mut |_| {}).unwrap();
         let start = t.kappa;
-        adapt::advance(model, tau, &mut t, None, to, &mut |_| {});
+        adapt::advance(model, tau, &mut t, None, to, &mut |_| {}).unwrap();
         forces.push(std::array::from_fn::<f64, 3, _>(|a| (t.kappa[a] - start[a]) / (to - from)));
     }
     let n = forces.len() as f64;
@@ -451,7 +451,7 @@ fn the_jumps_are_at_the_roots_of_the_norm() {
     let model = Atom::new(RB, flat, vec![], 0.0, gamma);
     let mut t = Trajectory::new(&model, 0, [0.0; 3], [0.0; 3], 3, 5);
     let end = 2000.0;
-    adapt::advance(&model, 10.0, &mut t, None, end, &mut |_| {});
+    adapt::advance(&model, 10.0, &mut t, None, end, &mut |_| {}).unwrap();
     // The jumps the thresholds put before `end`, and the last one's time.
     let threshold = |j: u32| crate::random::Stream::jump(3, 5, j).open_uniform();
     let (mut last, mut j, mut waits) = (0.0, 0, Vec::new());
@@ -490,7 +490,7 @@ fn a_conservative_trap_keeps_its_energy() {
     let mut errors = Vec::new();
     for k in 1..=outputs {
         let to = run * k as f64 / outputs as f64;
-        adapt::advance(&model, tau, &mut t, None, to, &mut |_| {});
+        adapt::advance(&model, tau, &mut t, None, to, &mut |_| {}).unwrap();
         // Every advance lands on its output time exactly: an ulp short, the rest is an interval of the time's round-off.
         assert_eq!(t.time, to, "advanced to {} for the output at {to}", t.time);
         errors.push(model.energy(0, &t.point(), &t.psi) - e0);
@@ -514,8 +514,8 @@ fn a_read_trajectory_accumulates_its_steps_doubling_differences() {
     let start = held(&model, [0.3, -0.2, 0.8], [20.0, 15.0, -10.0]);
     let (tau, steps) = (5.0, 4);
     let (mut read, mut plain, mut drift) = (start.clone(), start.clone(), Drift::ZERO);
-    adapt::advance(&model, tau, &mut read, Some(&mut drift), tau * steps as f64, &mut |_| {});
-    adapt::advance(&model, tau, &mut plain, None, tau * steps as f64, &mut |_| {});
+    adapt::advance(&model, tau, &mut read, Some(&mut drift), tau * steps as f64, &mut |_| {}).unwrap();
+    adapt::advance(&model, tau, &mut plain, None, tau * steps as f64, &mut |_| {}).unwrap();
     assert_eq!((read.r, read.kappa), (plain.r, plain.kappa));
     let (mut by_hand, mut at) = (0.0, start);
     for _ in 0..steps {
@@ -709,7 +709,7 @@ fn conservative_trap(name: &str) {
         let mut e0 = run.energy(t.cluster, &t.point(), &t.psi);
         for (k, &time) in request.times_us.iter().enumerate().skip(1) {
             let before = t.jumps;
-            adapt::advance(&run, tau, &mut t, Some(&mut drift), time, &mut |_| {});
+            adapt::advance(&run, tau, &mut t, Some(&mut drift), time, &mut |_| {}).unwrap();
             assert!(t.lost.is_none(), "{name}: atom {i} lost at {:?}", t.lost);
             let e = run.energy(t.cluster, &t.point(), &t.psi);
             if t.jumps == before {

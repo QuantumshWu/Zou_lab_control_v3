@@ -57,9 +57,10 @@ impl Read {
         let f = 1. / (1. - ratio.powf(order));
         Read { value: self.value * f, spread: Spread { error: self.spread.error * f, groups: self.spread.groups } }
     }
-    /// The readable bound |e| + t·SE among `looks` reads.
+    /// The readable bound |e| + t·SE among `looks` reads; unbounded for a read that is not a number.
     pub fn bound(&self, looks: f64) -> f64 {
-        self.value.abs() + self.spread.interval_over(looks)
+        let bound = self.value.abs() + self.spread.interval_over(looks);
+        if bound.is_nan() { f64::INFINITY } else { bound }
     }
     /// Within, beyond or unreadable against `share` among `looks` reads (module documentation); a read that is not a
     /// number is unreadable.
