@@ -1,12 +1,14 @@
 //! The existence gates over the reach on the solve's own closure (SPEC §1.5, §5.2): a scene's model closed as solve.rs `attempt`
 //! closes it -- every unit whose gate fails kept, the model made again until none fails --, each pass's unit counts, the time of
-//! each of its calls, and the digest of its gates: every candidate unit, whether its fold exists, and its two bounds to the bit.
-//! The digest is what a change of the gates' evaluation must leave as it is.
+//! each of its calls, and the digest of its gates: every candidate unit, whether its fold exists, and its two bounds to the bit;
+//! then the closed model's units' errors at a few states of each cluster, to the bit -- the gates' bounds on a point are the
+//! couplings' measured parameters (units.rs). The digests are what a change of the gates' evaluation must leave as it is.
 use atom_motion::estimate::unseen;
 use atom_motion::field::Light;
-use atom_motion::model::{Model, Unit, GROUND};
+use atom_motion::linalg::C64;
+use atom_motion::model::{Model, Point, Sample, Unit, GROUND};
 use atom_motion::request::Request;
-use atom_motion::units::MOST_TRAJECTORIES;
+use atom_motion::units::{KT_PER_UK, MOST_TRAJECTORIES};
 use std::fmt::Write;
 use std::path::Path;
 use std::time::Instant;
@@ -41,9 +43,39 @@ fn reference(request: &Request) -> [f64; GROUND] {
     std::array::from_fn(|s| if s == state { 1.0 } else { 0.0 })
 }
 
-/// A scene's closure (solve.rs `attempt`, from no unit kept, the reach at the request's temperature): its digest, and on stderr
-/// each pass's times.
-fn closure(name: &str) -> String {
+/// The closed model's units' errors at three states of each cluster -- the trap's centre at rest, and two points off it moving
+/// at the request's thermal momentum's scale, every state of the cluster equally held with phases apart --, as a digest: per
+/// unit and state its parameter and its errors on the populations and on T, to the bit; the time per state on stderr.
+fn errors(name: &str, model: &Model, units: &[Unit], centre: [f64; 3], temperature_uk: f64) -> String {
+    let thermal = (KT_PER_UK * temperature_uk / model.hbar_over_mass()).sqrt();
+    let samples: Vec<Sample> = (0..model.clusters().len())
+        .flat_map(|cluster| {
+            let n = model.clusters()[cluster].states.len();
+            let psi: Vec<C64> = (0..n).map(|x| C64::cis(x as f64) * (1.0 / n as f64).sqrt()).collect();
+            (0..3).map(move |k| {
+                let s = k as f64;
+                let r = [centre[0] + 0.03 * s, centre[1] - 0.02 * s, centre[2] + 0.11 * s];
+                Sample { cluster, at: Point { r, kappa: [0.6 * s * thermal, -0.5 * s * thermal, 0.4 * s * thermal], t: 0.0 }, psi: psi.clone() }
+            })
+        })
+        .collect();
+    let s = Instant::now();
+    let errors = model.errors(units, &samples);
+    eprintln!("{name}: errors of {} units at {} states, {:.4} s a state", units.len(), samples.len(), s.elapsed().as_secs_f64() / samples.len() as f64);
+    let mut digest = String::new();
+    for (u, of) in units.iter().zip(&errors) {
+        write!(digest, "{u:?}").unwrap();
+        for e in of {
+            write!(digest, " | {:e} {:016x} {:016x} {:016x}", e.parameter, e.parameter.to_bits(), e.population.to_bits(), e.temperature.to_bits()).unwrap();
+        }
+        writeln!(digest).unwrap();
+    }
+    digest
+}
+
+/// A scene's closure (solve.rs `attempt`, from no unit kept, the reach at the request's temperature): its gates' digest and its
+/// closed model's errors' digest, and on stderr each pass's times.
+fn closure(name: &str) -> [String; 2] {
     let request = scene(name);
     let light = Light::new(&request);
     let reference = reference(&request);
@@ -76,23 +108,25 @@ fn closure(name: &str) -> String {
             writeln!(digest, "{} | {u:?} | exists {} | S {:e} {:016x} | a {:e} {:016x}", model.label(u), g.exists(), g.saturation, g.saturation.to_bits(), g.sweep, g.sweep.to_bits()).unwrap();
         }
         if failing.is_empty() {
-            break;
+            return [digest, errors(name, &model, &units, trap.centre, request.temperature_uk)];
         }
         kept.extend(failing);
     }
-    digest
+    unreachable!("the closure ends in a pass without a failing gate")
 }
 
 /// The closures of the scenes `GATES_SCENES` names (reference scenes by name or native requests by path, `;` between them):
-/// each one's digest written to the folder `GATES_DIGESTS` as `<the scene's file stem>.txt`, the passes' times on stderr.
+/// each one's digests written to the folder `GATES_DIGESTS` as `<the scene's file stem>.txt` (the gates) and `.errors.txt` (the
+/// closed model's errors), the times on stderr.
 #[test]
 #[ignore]
 fn the_closure_s_gates() {
     let scenes = std::env::var("GATES_SCENES").expect("GATES_SCENES: the scenes, `;` between them");
     let folder = std::env::var("GATES_DIGESTS").expect("GATES_DIGESTS: the folder the digests are written to");
     for name in scenes.split(';').filter(|s| !s.is_empty()) {
-        let digest = closure(name);
+        let [gates, errors] = closure(name);
         let stem = Path::new(name).file_stem().unwrap().to_str().unwrap();
-        std::fs::write(Path::new(&folder).join(format!("{stem}.txt")), digest).unwrap();
+        std::fs::write(Path::new(&folder).join(format!("{stem}.txt")), gates).unwrap();
+        std::fs::write(Path::new(&folder).join(format!("{stem}.errors.txt")), errors).unwrap();
     }
 }
