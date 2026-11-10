@@ -9,19 +9,42 @@
 //! exact one of data perturbed relatively by a modest multiple of the unit round-off u (`units::UNIT_ROUNDOFF`); its
 //! forward error is then the problem's own condition times that.
 //!
-//! # The Taylor plan of the exponential (`Taylor`)
-//! e^X for ‖X‖₁ ≤ x is summed as Taylor polynomials of degree m on q parts Y = X/q of norm y = x/q: sub-steps on a
-//! vector, or q = 2^s and s squarings for the matrix. Per part, on a vector of norm one:
+//! # The Taylor plan of the matrix exponential (`Taylor`)
+//! e^X for ‖X‖₁ ≤ x is summed as the Taylor polynomial of degree m of Y = X/q, q = 2^s, of norm y = x/q, squared s
+//! times. Per part, on a vector of norm one:
 //! - the truncation is at most R_m(y) = Σ_{k>m} y^k/k! ≤ (y^{m+1}/(m+1)!)/(1 − y/(m+2));
 //! - the rounding of the sum is at most γ Σ_k ‖Y^k v‖/k! ≤ γ e^y (γ the products' and the sum's γ_{n+m}, Higham §3.1).
 //! Over the q = x/y parts the rounding adds up to (x/y) γ e^y: per unit of ‖X‖ it is γ e^y/y, least at y* = 1
-//! (d/dy (e^y/y) = e^y (y − 1)/y²). So the parts are the fewest of norm ≤ 1, q = ⌈x⌉ on a vector, 2^⌈log₂ x⌉ for the
-//! matrix, and each part's degree the least m whose truncation R_m(y) is within the unit round-off u: at y = 1, m = 18.
-//! Both follow from the floating-point format alone; the result's error is then a modest multiple of u‖X‖, the
-//! problem's own sensitivity to the rounding of X (backward stable). The squarings keep it so for a contraction
-//! (‖e^{tX}‖ ≤ 1 for t ≥ 0, as e^{−iH_eff t} with H_eff's anti-Hermitian part negative semidefinite): no hump.
-//! The vector route costs q·m matrix-vector products (n² each), the matrix route (m − 1 + s) products (n³ each) and
-//! one application; the caller picks by its cost.
+//! (d/dy (e^y/y) = e^y (y − 1)/y²). So the parts are the fewest power of two of norm ≤ 1, 2^⌈log₂ x⌉, and their degree
+//! the least m whose truncation R_m(y) is within the unit round-off u: at y = 1, m = 18. Both follow from the
+//! floating-point format alone; the result's error is then a modest multiple of u‖X‖, the problem's own sensitivity to
+//! the rounding of X (backward stable). The squarings keep it so for a contraction (‖e^{tX}‖ ≤ 1 for t ≥ 0, as
+//! e^{−iH_eff t} with H_eff's anti-Hermitian part negative semidefinite): no hump. It costs (m − 1 + s) matrix products
+//! (n³ each).
+//!
+//! # The Chebyshev plan of the exponential's action (`Chebyshev`)
+//! On a vector, e^{tA}v = e^{t tr(A)/n} e^{−iX}v with X = it(A − tr(A)/n) = H + iK, H and K Hermitian: of a generator,
+//! tA = −iH_eff s, H is its Hermitian part's s (less its mean) and K its decay's deviation from its mean. The scalar
+//! part goes out exactly: the trap's light shift, hundreds of rad/µs on every state alike, costs nothing. For the rest
+//! the Jacobi–Anger expansion e^{−iσx} = J₀(σ) + 2 Σ_{k≥1} (−i)^k J_k(σ) T_k(x) at x = X/σ sums the exponential in
+//! Chebyshev polynomials of X/σ. Of a Hermitian X with σ ≥ ‖X‖₂, ‖T_k(X/σ)‖ ≤ 1 and the terms fall as J_k(σ),
+//! |J_k(σ)| ≤ (σ/2)^k/k!, once k is beyond σ: about σ products of n², where Taylor polynomials on parts of norm one take
+//! 18 σ.
+//! - The bounds: ρ ≥ ‖H‖₂ and γ ≥ ‖K‖₂, of each the lesser of its 1-norm and its Frobenius norm (`bounds`), and
+//!   σ = max(ρ, γ).
+//! - The truncation: the numerical range of X/σ lies in the rectangle |Re| ≤ ρ/σ, |Im| ≤ γ/σ, inside the ellipse of foci
+//!   ±1 through its corner w = (ρ + iγ)/σ, on which |T_k| ≤ r^k, r = |w + √(w² − 1)| (1 for a Hermitian X); so
+//!   ‖T_k(X/σ)‖ ≤ (1 + √2) r^k (Crouzeix & Palencia 2017), and on a part of σ/q the terms beyond K sum to at most
+//!   2(1 + √2) Σ_{k>K} y^k/k! ‖v‖, y = σr/2q: K is the least for which this is within u, as the Taylor plan's degree.
+//! - The rounding: the terms reach r^{σ/q} ≤ e^{(σ/q)(r − 1)}, and σ(r − 1) ≤ γ + √(2σγ + γ²): a hump where the states'
+//!   decay rates differ, which the rounding of a part's sum scales with while the parts' roundings add up. As in the
+//!   Taylor plan the rounding is least where a part's exponent is one: the fewest parts with σγ/q² ≤ 1, q = ⌈√(σγ)⌉
+//!   (γ/q ≤ 1 with it, as σ ≥ γ) -- one part for a Hermitian X of any norm. (A part's y is also kept within
+//!   ln(f64::MAX): the plan's own y^k/k! stay in range.)
+//! - The sum: Clenshaw's recurrence b_k = c_k v + 2(X/σ) b_{k+1} − b_{k+2} downwards from K, the part's sum
+//!   c₀v + (X/σ) b₁ − b₂; the coefficients' J_k(σ/q) by Miller's backward recurrence J_{k−1} = (2k/z) J_k − J_{k+1} in
+//!   step with it, from K + 2 and unnormalized -- the sum is linear in them and is divided by J₀ + 2 Σ_m J_{2m} = 1 at its
+//!   end --, so no coefficient is stored. K products a part.
 
 use crate::units::UNIT_ROUNDOFF;
 use std::iter::Sum;
@@ -633,9 +656,8 @@ impl Eigen {
 // ---------------------------------------------------------------------------------------------------------------------
 // The exponential.
 
-/// The Taylor plan of e^X for ‖X‖₁ ≤ x (module documentation, # The Taylor plan): `parts` of norm ≤ x/parts ≤ 1, each
-/// summed through degree `terms`. Its work: parts × terms matrix-vector products (n² each), or for the matrix
-/// exponential terms − 1 + log₂ parts matrix products (n³ each).
+/// The Taylor plan of the matrix e^X for ‖X‖₁ ≤ x (module documentation, # The Taylor plan): `parts` of norm
+/// ≤ x/parts ≤ 1, a power of two, each summed through degree `terms` -- terms − 1 + log₂ parts matrix products (n³ each).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Taylor {
     pub parts: usize,
@@ -656,12 +678,6 @@ impl Taylor {
             bound *= y / (m as f64 + 1.0);
         }
         m
-    }
-    /// The plan on a vector: the fewest parts of norm within y*, ⌈x/y*⌉, and the least degree for their norm.
-    pub fn steps(x: f64) -> Taylor {
-        assert!(x.is_finite() && x >= 0.0, "the exponential of a matrix of norm {x}");
-        let parts = ((x / WIDEST).ceil() as usize).max(1);
-        Taylor { parts, terms: Taylor::degree(x / parts as f64) }
     }
     /// The plan of the matrix exponential: the parts the fewest power of two whose norm is within y* (its squarings
     /// log₂ parts), and the least degree for their norm.
@@ -701,29 +717,119 @@ pub fn exp(a: &Mat, t: C64) -> Mat {
     sum
 }
 
-/// v ← e^{tA} v to round-off: the Taylor series on the vector in the parts of `Taylor::steps` of ‖tA‖₁; no matrix is
-/// formed.
-pub fn exp_apply(a: &Mat, t: C64, v: &mut [C64]) {
-    let n = v.len();
-    assert_eq!((a.rows, a.cols), (n, n), "the exponential of a {}x{} matrix on a vector of {n}", a.rows, a.cols);
-    let plan = Taylor::steps(a.norm1() * t.abs());
-    let step = t / plan.parts as f64;
-    let (mut term, mut next) = (vec![C64::ZERO; n], vec![C64::ZERO; n]);
-    for _ in 0..plan.parts {
-        term.copy_from_slice(v);
-        for k in 1..=plan.terms {
-            let scale = step / k as f64;
-            for (i, x) in next.iter_mut().enumerate() {
-                *x = a.data[i * n..(i + 1) * n].iter().zip(&term).map(|(h, y)| *h * *y).sum::<C64>() * scale;
-            }
-            std::mem::swap(&mut term, &mut next);
-            for (x, y) in v.iter_mut().zip(&term) {
-                *x += *y;
-            }
+/// The Chebyshev plan of e^{−iX} on a vector (module documentation, # The Chebyshev plan): `parts` equal parts, each
+/// summed through degree `terms` -- parts × terms matrix-vector products (n² each).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Chebyshev {
+    pub parts: usize,
+    pub terms: usize,
+}
+
+impl Chebyshev {
+    /// The plan for X = H + iK with ρ ≥ ‖H‖₂ and γ ≥ ‖K‖₂: σ = max(ρ, γ); the fewest parts q with σγ/q² ≤ 1 (and a
+    /// part's y = σr/2q within ln(f64::MAX)); the least degree K with 2(1 + √2) Σ_{k>K} y^k/k! ≤ u, the sum within its
+    /// first term over 1 − y/(K + 2). Nothing to sum where X is zero.
+    pub fn plan(rho: f64, gamma: f64) -> Chebyshev {
+        let sigma = rho.max(gamma);
+        assert!(sigma.is_finite() && rho >= 0.0 && gamma >= 0.0, "the exponential of a matrix of bounds {rho}, {gamma}");
+        if sigma == 0.0 {
+            return Chebyshev { parts: 1, terms: 0 };
         }
+        let corner = C64::new(rho / sigma, gamma / sigma);
+        let r = (corner + (corner * corner - C64::ONE).sqrt()).abs();
+        let parts = ((sigma * gamma).sqrt().max(0.5 * sigma * r / f64::MAX.ln()).ceil() as usize).max(1);
+        let y = 0.5 * sigma * r / parts as f64;
+        let (mut terms, mut next) = (0, y);
+        while !((terms + 2) as f64 > y && 2.0 * (1.0 + std::f64::consts::SQRT_2) * next / (1.0 - y / (terms + 2) as f64) <= UNIT_ROUNDOFF) {
+            terms += 1;
+            next *= y / (terms + 1) as f64;
+        }
+        Chebyshev { parts, terms }
     }
 }
 
+/// (ρ, γ) ≥ (‖H‖₂, ‖K‖₂) of X = H + iK, H = (X + X†)/2 and K = (X − X†)/2i: of each the lesser of its 1-norm (the
+/// largest column sum of its entries' moduli; it bounds a Hermitian matrix's 2-norm, closely where few entries couple a
+/// state) and its Frobenius norm (closely where the spectrum is spread). `sums` holds the n column sums.
+pub fn bounds(x: &Mat, sums: &mut [C64]) -> (f64, f64) {
+    let n = x.rows;
+    sums[..n].fill(C64::ZERO);
+    let mut squares = C64::ZERO;
+    for i in 0..n {
+        let diagonal = x[(i, i)];
+        sums[i] += C64::new(diagonal.re.abs(), diagonal.im.abs());
+        squares += C64::new(diagonal.re * diagonal.re, diagonal.im * diagonal.im);
+        for j in i + 1..n {
+            let (above, below) = (x[(i, j)], x[(j, i)].conj());
+            let pair = C64::new((above + below).norm_sqr(), (above - below).norm_sqr()) * 0.25;
+            squares += pair * 2.0;
+            let pair = C64::new(pair.re.sqrt(), pair.im.sqrt());
+            sums[i] += pair;
+            sums[j] += pair;
+        }
+    }
+    let (rho, gamma) = sums[..n].iter().fold((0.0, 0.0), |(rho, gamma): (f64, f64), s| (rho.max(s.re), gamma.max(s.im)));
+    (rho.min(squares.re.sqrt()), gamma.min(squares.im.sqrt()))
+}
+
+/// v ← e^{tA} v to round-off (module documentation, # The Chebyshev plan), and the plan it took. A is overwritten (by
+/// 2X/σ, the matrix of Clenshaw's recurrence); `work` holds 2n numbers.
+pub fn exp_apply(a: &mut Mat, t: C64, v: &mut [C64], work: &mut [C64]) -> Chebyshev {
+    let n = v.len();
+    assert_eq!((a.rows, a.cols), (n, n), "the exponential of a {}x{} matrix on a vector of {n}", a.rows, a.cols);
+    // X = it(A − tr(A)/n), its bounds and its plan.
+    let scalar = a.trace() / n as f64;
+    for i in 0..n {
+        a[(i, i)] -= scalar;
+    }
+    let turn = C64::I * t;
+    for x in &mut a.data {
+        *x = turn * *x;
+    }
+    let (rho, gamma) = bounds(a, work);
+    let plan = Chebyshev::plan(rho, gamma);
+    if plan.terms > 0 {
+        let sigma = rho.max(gamma);
+        let z = sigma / plan.parts as f64;
+        for x in &mut a.data {
+            *x *= 2.0 / sigma;
+        }
+        let (mut b1, mut b2) = work[..2 * n].split_at_mut(n);
+        for _ in 0..plan.parts {
+            // Downwards from K + 2: (J_{k+1}, J_k) unnormalized, the even orders' sum, and (b_{k+1}, b_{k+2}).
+            let (mut above, mut here, mut even) = (0.0, 1.0, 0.0);
+            b1.fill(C64::ZERO);
+            b2.fill(C64::ZERO);
+            for k in (1..=plan.terms + 2).rev() {
+                if k <= plan.terms {
+                    // c_k = 2(−i)^k J_k; b_k = c_k v + (2X/σ) b_{k+1} − b_{k+2}, into b_{k+2}'s place. (b_{K+1} = 0: no product.)
+                    let c = [C64::ONE, -C64::I, -C64::ONE, C64::I][k % 4] * (2.0 * here);
+                    for i in 0..n {
+                        let product: C64 = if k < plan.terms { a.data[i * n..(i + 1) * n].iter().zip(b1.iter()).map(|(m, b)| *m * *b).sum() } else { C64::ZERO };
+                        b2[i] = c * v[i] + product - b2[i];
+                    }
+                    std::mem::swap(&mut b1, &mut b2);
+                }
+                if k % 2 == 0 {
+                    even += here;
+                }
+                (above, here) = (here, 2.0 * k as f64 / z * here - above);
+            }
+            // The part's sum J₀v + (X/σ) b₁ − b₂ over J₀ + 2 Σ_m J_{2m}.
+            let norm = here + 2.0 * even;
+            for i in 0..n {
+                let product: C64 = a.data[i * n..(i + 1) * n].iter().zip(b1.iter()).map(|(m, b)| *m * *b).sum();
+                b2[i] = (v[i] * here + product * 0.5 - b2[i]) / norm;
+            }
+            v.copy_from_slice(b2);
+        }
+    }
+    let phase = (t * scalar).exp();
+    for x in v.iter_mut() {
+        *x *= phase;
+    }
+    plan
+}
 // ---------------------------------------------------------------------------------------------------------------------
 // 3 × 3 real helpers.
 
@@ -873,15 +979,24 @@ mod tests {
         assert!(at(g / 2.0 * (1.0 + 1e-8)) > 1e3 * at(2.0 * g), "{} {}", at(g / 2.0 * (1.0 + 1e-8)), at(2.0 * g));
     }
 
-    /// The Taylor plan: at the widest part y = 1 the least degree whose truncation is within u is 18 (1/19! = 8.2e-18,
-    /// while 1/18!·19/18 = 1.65e-16 > u); zero norm takes nothing; the vector takes ⌈x⌉ parts, the matrix 2^⌈log₂ x⌉.
+    /// The plans. The matrix's Taylor plan: at the widest part y = 1 the least degree whose truncation is within u is 18
+    /// (1/19! = 8.2e-18, while 1/18!·19/18 = 1.65e-16 > u), in 2^⌈log₂ x⌉ parts. The vector's Chebyshev plan: nothing for
+    /// a zero matrix; for a Hermitian one a single part, of degree 15 at σ = 1 (2(1 + √2)(½)¹⁶/16! = 3.5e-18 within u,
+    /// (½)¹⁵/15! not) and about σ beyond it (between σ and 2σ at σ = 100, where parts of norm one took 1800 products);
+    /// where the decay rates differ the fewest parts with σγ/q² ≤ 1.
     #[test]
-    fn the_taylor_plan_follows_from_the_round_off() {
-        assert_eq!(Taylor::steps(1.0), Taylor { parts: 1, terms: 18 });
-        assert_eq!(Taylor::steps(0.0), Taylor { parts: 1, terms: 0 });
-        assert_eq!(Taylor::steps(2.5).parts, 3);
+    fn the_plans_follow_from_the_round_off() {
+        assert_eq!(Taylor::squarings(1.0), Taylor { parts: 1, terms: 18 });
+        assert_eq!(Taylor::squarings(0.0), Taylor { parts: 1, terms: 0 });
         assert_eq!(Taylor::squarings(2.5).parts, 4);
-        assert!(Taylor::steps(1e-3).terms <= 6);
+        assert_eq!(Chebyshev::plan(0.0, 0.0), Chebyshev { parts: 1, terms: 0 });
+        assert_eq!(Chebyshev::plan(1.0, 0.0), Chebyshev { parts: 1, terms: 15 });
+        assert!(Chebyshev::plan(1e-3, 0.0).terms <= 5);
+        let wide = Chebyshev::plan(100.0, 0.0);
+        assert!(wide.parts == 1 && wide.terms > 100 && wide.terms < 200, "{wide:?}");
+        assert_eq!(Chebyshev::plan(28.0, 0.3).parts, 3);
+        assert_eq!(Chebyshev::plan(0.0, 5.0).parts, 5);
+        assert_eq!(Chebyshev::plan(3000.0, 0.0).parts, 3);
     }
 
     /// e^{−iHτ} of a Hermitian H with a known spectrum, U e^{−idτ} U†: the matrix exponential and its action on a
@@ -901,7 +1016,7 @@ mod tests {
             let m = exp(&h, C64::new(0.0, -tau));
             assert!(difference(&m, &exact) <= bound, "τ {tau}: matrix {:e} > {bound:e}", difference(&m, &exact));
             let mut w = v.clone();
-            exp_apply(&h, C64::new(0.0, -tau), &mut w);
+            exp_apply(&mut h.clone(), C64::new(0.0, -tau), &mut w, &mut vec![C64::ZERO; 2 * n]);
             let want = exact.apply(&v);
             let error = w.iter().zip(&want).fold(0.0_f64, |m, (x, y)| m.max((*x - *y).abs()));
             assert!(error <= bound, "τ {tau}: vector {error:e} > {bound:e}");
@@ -922,7 +1037,7 @@ mod tests {
             let t = C64::new(0.0, -tau);
             let m = exp(&k, t);
             let (mut a, mut b) = (v.clone(), v.clone());
-            exp_apply(&k, t, &mut a);
+            exp_apply(&mut k.clone(), t, &mut a, &mut vec![C64::ZERO; 2 * n]);
             e.apply_exp(t, &mut b);
             let want = m.apply(&v);
             let bound = rounding(4 * n * n) * e.condition * (1.0 + k.norm1() * tau);
