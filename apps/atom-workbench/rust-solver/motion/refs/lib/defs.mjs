@@ -87,12 +87,18 @@ export const SCENES={
   // R6 -- the Λ system |1,0⟩ ↔ |2,0⟩ through D1 σ+σ+ Raman beams 20 GHz red of F′=2, two-photon resonance compensated.
   R6_RAMAN_CO:{ref:'R6',title:'R6 拉曼 Λ：同向 σ⁺σ⁺（Δ = −20 GHz，Ω_R ≈ 2π·0.25 MHz）',build:()=>raman('+z')},
   R6_RAMAN_COUNTER:{ref:'R6',title:'R6 拉曼 Λ：对向 σ⁺σ⁺（Δk = 2k，多普勒与 2ħk 反冲）',build:()=>raman('-z')},
-  // R9 -- loss by a push out of the trap's region.
-  R9_PUSH:{ref:'R9',title:'R9 推出：σ⁺ 辐射压远大于阱力（s = 100，沿光镊轴）',async build(){
-    const s=await base({name:'R9 推出',initialStateId:'ground-2-2',temperatureUK:30,durationUs:40,samples:401});
-    await tweezer(s,{...DEFAULT_TWEEZER,along:'+z',ellipticityDeg:45});
-    const bottom=await transitionMHz(s,'ground-2-2','D2-3-3',['tweezer']),free=await transitionMHz(s,'ground-2-2','D2-3-3',[]);
-    await beam(s,{id:'push',name:'σ+ 推出光',line:'D2',Fg:2,Fe:3,offsetMHz:(bottom+free)/2-(await zeroFieldMHz('D2',2,3)),intensityMWcm2:100*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
+  // R9 -- loss by a push out of the trap's region: a σ+ tweezer along z (7 mW, waist 2 µm: 0.48 mK, z_R = 14.7 µm)
+  // and a σ+ beam along its axis 40Γ blue of the line at the bottom, saturating to ρ_ee = 0.05 there (0.043 outside):
+  // its radiation pressure is five times the trap's largest axial force, the trap keeps 0.89 of its radial force
+  // (1 − κρ_ee), and the line's shift across the trap (3.7Γ) and the Doppler shift at the exit (0.2Γ) change the rate
+  // by a sixth and by a hundredth. Blue, because F′ = 3 is the highest level of the line: no other transition of the
+  // ground states comes near the light (red by 40Γ it sits 4Γ from F = 2 → F′ = 2). About 200 photons carry the atom
+  // out of the 1/20 region (64 µm on the axis) in 0.12 ms.
+  R9_PUSH:{ref:'R9',title:'R9 推出：σ⁺ 辐射压为阱的最大轴向力的 5 倍，ρ_ee ≤ 0.05（δ = +40Γ，s = 711）',async build(){
+    const s=await base({name:'R9 推出',initialStateId:'ground-2-2',temperatureUK:20,durationUs:200,samples:201});
+    await tweezer(s,{nm:852,powerMW:7,waistUm:2,along:'+z',ellipticityDeg:45});
+    const offset=await offsetFor(s,'D2',2,3,'ground-2-2','D2-3-3',['tweezer'],40*GAMMA_D2);
+    await beam(s,{id:'push',name:'σ+ 推出光',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:711*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
     return s;}},
   // R9 (c) -- heating-driven escape: R2's far-detuned σ+ heating (δ = −100Γ) in a shallow σ+ tweezer (~200 µK), so
   // the recoil heating (2E_rec per photon, ~70 µK/ms) carries atoms over the depth within the run.

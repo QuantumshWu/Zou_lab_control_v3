@@ -378,44 +378,92 @@ async function r6(id){
 // ---------------------------------------------------------------------------------------------------------------------
 // R9 (b): the push out of the trap.
 
-/** R9 (b). A σ+ beam along the tweezer's axis z, power-broadened (s = 100) over the differential shift, pushes the
- * atom out. On the axis, κ̇ = F/ħ with F/ħ = k R(δ) − ∂_zU_g/ħ − ρ_ee ∂_zδ_LS (radiation pressure at the exact
- * steady-state rate, the ground state's trap force and the excited state's extra force while excited), δ = δ_free −
- * δ_LS(z) − k v (δ_free from the free line; δ_LS(z) = δ_LS(0)/(1 + z²/z_R²) since both shifts ∝ |a|²), ż = (ħ/m)κ.
- * The photon kicks add the momentum diffusion d Var κ/dt = k²(1 + Q + ξ)R (absorption with Mandel's Q, σ emission).
- * An atom is lost when it leaves the 1/20 region, z > √19 z_R on the axis (its kinetic energy there is far above the
- * trap: E_s > 0 holds). L(t) = P(τ ≤ t) by a Monte Carlo of this 1D Langevin equation from the prepared axial
- * distribution (Gaussian: T*_z and T(0)_z of the deep trap), N paths with a fixed seed; u = the binomial error plus
- * |dL/dt|·u_τ, u_τ the exit time's change when the neglected parts are added (the radial offset's 2ρ²/w² ≈ 1 % of the
- * trap force, the internal state's lag 1/Γ_eff of the rate's changes): estimated by rerunning with the trap force
- * ×(1 ± 2ρ²/w²) and the rate delayed by 1/Γ. */
+/** R9 (b). A σ+ beam along the tweezer's axis z pushes the atom out of the trap's region: the contract's 1D equation
+ *   m z̈ = ħk R(δ − kż) − ∂_zU_g + ρ_ee ħ∂_zδ,
+ * the radiation pressure at the two-level atom's steady rate R = Γρ_ee, ρ_ee = (s/2)/(1 + s + (2δ/Γ)²), the ground
+ * state's trap force on the axis, U_g = −U₀g, g = 1/(1 + z²/z_R²), and the force the excited atom feels more (ħ∇δ P_e
+ * in the mean); δ = δ_free − δ_LS(z) − kż with δ_free the detuning from the free line and δ_LS(z) = δ_LS(0)g (both
+ * shifts ∝ |a|²). The photon kicks add the momentum diffusion d Var p/dt = (ħk)²(1 + Q + ξ)R (absorption with
+ * Mandel's Q, σ emission): a Langevin equation, solved by a Monte Carlo from the prepared axial distribution
+ * (Gaussian: T*_z and T(0)_z of the deep trap), N paths with a fixed seed.
+ *
+ * The region's edge is not at one z: the atom is outside where the tweezer's intensity g e^{−2ρ²g/w₀²} is below 1/20,
+ * that is where ρ² > ρ_c²(z) = (w₀²/2g) ln(20g) -- on the axis at z = √19 z_R, earlier off it by kρ²/(2√19·…) ≈ 1 µm
+ * per µm² --, and the emitted photons spread the atom across the axis as they push it along. So each path carries
+ * the second moments of one radial axis (the two are alike), B = ⟨x²⟩, C = ⟨xv⟩, A = ⟨v²⟩:
+ *   dB/dt = 2C,  dC/dt = A − ω_ρ²g²(1 − κρ_ee)B,  dA/dt = −2ω_ρ²g²(1 − κρ_ee)C + (ħk/m)²(1 − ξ)R/2,
+ * the radial spring of the beam at z (4U₀g²/w₀², less the excited atom's share) and the emission's recoil -- exact for
+ * ρ ≪ w(z), adiabatic near the focus and ballistic once the spring has gone --, from the prepared radial ensemble. With
+ * x, y Gaussian of variance B, ρ² is exponential of mean 2B: the path is outside with the probability e^{−ρ_c²/2B},
+ * and L(t) is the paths' mean of its largest value up to t (the kinetic energy there is far above the trap: E_s > 0).
+ * The same B gives the cloud's average of what the axis' force leaves out: off the axis the trap's axial force is
+ * (1 − sg)e^{−sg} of the axis' and the line's shift e^{−sg} of it, s = 2ρ²/w₀², ⟨sg⟩ = 4Bg/w₀²: the force
+ * (1 − 2⟨sg⟩) and the shift (1 − ⟨sg⟩) of the axis', in the equation.
+ *
+ * The scene makes this its physics: the push is far off resonance (δ = +40Γ at the bottom, +44Γ outside) and
+ * saturates only to ρ_ee ≤ 0.05, so that the trap keeps its radial force (it scales as 1 − κρ_ee, κ = δ_LS(0)/U₀),
+ * the rate changes little where the atom sits off the axis or moves (the line's shift across the trap and the Doppler
+ * shift at the exit are a few Γ at most, against 40Γ), and the plane wave's own light shift is uniform; the radiation
+ * pressure is about five times the trap's largest axial force, (3√3/8)U₀/z_R at z_R/√3.
+ *
+ * u: the paths' standard error; the radial moments' next order -- they hold for ρ ≪ w(z), and the beam's radial
+ * expansion goes on in sg, whose cloud average at the edge is ⟨sg⟩ = 4Bg/w₀²: 2⟨sg⟩ of what the moments move L by
+ * (the run again without them) --; and the internal state's lag, the rate relaxing at Γ (the run again, common
+ * random numbers). */
 async function r9(){
-  const id='R9_PUSH',c=await cycle(id,['push']),{line,gamma,U0,dLS}=c,p=c.beams.push,m=line.model.motion,mass=m.massKg,T=m.temperatureUK,r=hbarOverMass(mass);
-  const tw=beamOf(line,'tweezer'),zR=rayleigh(tw.waveNumberPerUm,tw.waistUm),prep=preparedTrap(line,'ground-2-2'),[radial,,axial]=prep.omegas,{T0}=initialTemperatures(prep,T);
-  const deltaFree=p.delta+dLS,Q=mandelQ(gamma,p.omega,deltaFree-dLS),edge=Math.sqrt(19)*zR,times=grid(line);
+  const id='R9_PUSH',c=await cycle(id,['push']),{line,gamma,U0,dLS,kappa}=c,p=c.beams.push,m=line.model.motion,mass=m.massKg,T=m.temperatureUK,r=hbarOverMass(mass);
+  const tw=beamOf(line,'tweezer'),zR=rayleigh(tw.waveNumberPerUm,tw.waistUm),w2=tw.waistUm**2,prep=preparedTrap(line,'ground-2-2'),[radial,,axial]=prep.omegas,{T0}=initialTemperatures(prep,T);
+  const deltaFree=p.delta+dLS,Q=mandelQ(gamma,p.omega,p.delta),edge=Math.sqrt(19)*zR,times=grid(line),s=2*p.omega**2/gamma**2;
+  const excited=delta=>s/2/(1+s+(2*delta/gamma)**2);
   const sz=Math.sqrt(r*KT_PER_UK*wignerTemperature(axial,T))/axial,sk=Math.sqrt(KT_PER_UK*T0[2]/r);
   // A seeded generator (mulberry32; each run restarts it: common random numbers between the runs) and normal deviates
   // (Box–Muller).
   let seed=0;const next=()=>{seed=(seed+0x6D2B79F5)>>>0;let t=seed;t=Math.imul(t^(t>>>15),t|1);t^=t+Math.imul(t^(t>>>7),t|61);return ((t^(t>>>14))>>>0)/4294967296;};
   const normal=()=>{const u=1-next(),v=next();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);};
-  const run=({N,trapScale=1,lag=0})=>{
-    const tau=[];const dt=0.01;seed=0x9E3779B9;
-    for(let n=0;n<N;n++){let z=sz*normal(),kap=sk*normal(),t=0,R=0,ree=0;
-      while(t<times.at(-1)+dt){
-        const g=1/(1+z*z/(zR*zR)),delta=deltaFree-dLS*g-p.k*r*kap,s=2*p.omega**2/gamma**2,target=gamma/2*s/(1+s+(2*delta/gamma)**2);
-        R=lag?R+(target-R)*Math.min(1,dt*gamma*Math.sqrt(1+s)/1):target;ree=R/gamma;
-        const force=p.k*R-trapScale*2*U0*z*g*g/(zR*zR)+ree*2*dLS*z*g*g/(zR*zR);
-        kap+=force*dt+Math.sqrt(p.k*p.k*(1+Q+XI_SIGMA)*R*dt)*normal();z+=r*kap*dt;t+=dt;
-        if(z>edge){tau.push(t);break;}}
-      if(z<=edge)tau.push(Infinity);}
-    return times.map(t=>tau.filter(x=>x<=t).length/N);};
-  const N=4000,L=run({N}),Lt=run({N,trapScale:1+2*(sz*axial/radial/tw.waistUm)**2}),Ll=run({N,lag:1});
-  const series=[{quantity:'loss',indices:all(line),values:L,u:L.map((x,i)=>Math.hypot(Math.sqrt(x*(1-x)/N),Math.abs(Lt[i]-x),Math.abs(Ll[i]-x))),target:POPULATION},
+  /** The paths: per path its probability of being outside at every output (the largest so far), and its exit on the
+   * axis (time, velocity µm/µs, photons, B there). `across` false leaves the radial moments out of the edge and of
+   * the force (the axis' equation alone); `lag` lets the rate relax at Γ. */
+  const run=({N,across=true,lag=false})=>{
+    const outside=times.map(()=>0),square=times.map(()=>0),exits=[],dt=0.02,every=Math.round((times[1]-times[0])/dt);seed=0x9E3779B9;
+    for(let n=0;n<N;n++){
+      let z=sz*normal(),kap=sk*normal(),R=0,photons=0,B=r*KT_PER_UK*wignerTemperature(radial,T)/(radial*radial),C=0,A=r*KT_PER_UK*T0[0],most=0,exit=null;
+      for(let i=1;i<times.length;i++){
+        for(let j=0;j<every&&!exit;j++){
+          const g=1/(1+z*z/(zR*zR)),off=across?4*B*g/w2:0,delta=deltaFree-dLS*g*(1-off)-p.k*r*kap,target=gamma*excited(delta);
+          R=lag?R+(target-R)*Math.min(1,dt*gamma):target;
+          const force=p.k*R-(1-2*off)*2*U0*z*g*g/(zR*zR)+R/gamma*2*dLS*z*g*g/(zR*zR);
+          // The radial moments through dt: the oscillator's own rotation at the local spring (exact for a constant one,
+          // whatever its size: sin(ωdt)/ω → dt as the spring goes), then the emission's kicks.
+          const spring=radial*radial*g*g*(1-kappa*R/gamma),w=Math.sqrt(spring),co=Math.cos(w*dt),si=w*dt>1e-8?Math.sin(w*dt)/w:dt;
+          [A,B,C]=[spring*spring*si*si*B-2*spring*si*co*C+co*co*A+dt*(r*p.k)**2*(1-XI_SIGMA)/2*R,co*co*B+2*co*si*C+si*si*A,-spring*si*co*B+(co*co-spring*si*si)*C+co*si*A];
+          kap+=force*dt+Math.sqrt(p.k*p.k*(1+Q+XI_SIGMA)*R*dt)*normal();z+=r*kap*dt;photons+=R*dt;
+          if(z>edge)exit={t:times[i-1]+(j+1)*dt,v:r*kap,photons,B};
+          else if(across)most=Math.max(most,Math.exp(-w2/(2*g)*Math.log(20*g)/(2*B)));
+        }
+        const P=exit?1:most;outside[i]+=P;square[i]+=P*P;
+      }
+      exits.push(exit);
+    }
+    return {L:outside.map(x=>x/N),se:outside.map((x,i)=>Math.sqrt(Math.max(0,square[i]/N-(x/N)**2)/N)),exits};};
+  const N=4000,full=run({N}),axis=run({N,across:false}),lagged=run({N,lag:true}),left=axis.exits.filter(x=>x),mean=f=>left.reduce((a,x)=>a+f(x),0)/left.length;
+  const next2=2*4*mean(x=>x.B)/(20*w2);
+  const series=[{quantity:'loss',indices:all(line),values:full.L,u:full.L.map((x,i)=>Math.hypot(full.se[i],next2*(x-axis.L[i]),lagged.L[i]-x)),target:POPULATION},
     {quantity:'population',state:'ground-2-2',indices:[0],values:[1],u:[0],target:POPULATION}];
+  const crossing=(L,q)=>{const i=L.findIndex(x=>x>=q);return i<1?NaN:times[i-1]+(times[i]-times[i-1])*(q-L[i-1])/(L[i]-L[i-1]);},Erec=recoilUK(p.k,mass),photons=mean(x=>x.photons),spread=mean(x=>x.B);
   write(id,expectation(id,'R9','R9 推出：离开 1/20 区域的时刻给出 L(t) 的台阶',line,{
-    derivation:'1D Langevin equation along the axis: radiation pressure at the exact steady-state two-level rate with the Doppler and position-dependent detuning, the ground trap force and the excited state\'s extra force, momentum diffusion k²(1+Q+ξ)R; exit at z = √19 z_R (1/20 of the focus intensity, energy far above the trap); Monte Carlo from the prepared axial distribution.',
-    conditions:[{what:'s',value:2*p.omega**2/gamma**2},{what:'δ at the bottom / Γ',value:p.delta/gamma},{what:'δ outside / Γ',value:deltaFree/gamma},{what:'max trap force over radiation pressure at the bottom',value:(0.65*U0/zR)/(p.k*rate(gamma,p.omega,p.delta)),limit:'≪ 1'},{what:'region edge z (µm)',value:edge}],
-    series,info:{mandelQ:Q,zR,edge,sz,sk,N}}));
+    derivation:'Langevin equation along the axis: radiation pressure at the two-level steady rate with the Doppler and position-dependent detuning, the ground trap force and the excited state’s extra force, momentum diffusion (ħk)²(1+Q+ξ)R; each path carries the second moments of the radial motion (the beam’s radial spring at z, the emission’s recoil), which place the 1/20 contour for the atom off the axis: outside with probability exp(−ρ_c²(z)/2⟨x²⟩), ρ_c² = (w₀²/2g)ln(20g). Monte Carlo from the prepared ensemble. The push is 40Γ off resonance and excites at most 5 %: the trap keeps its radial force, and the rate does not depend on where the atom sits.',
+    conditions:[{what:'s = 2Ω²/Γ²',value:s},{what:'δ at the bottom / Γ',value:p.delta/gamma},{what:'δ outside / Γ',value:deltaFree/gamma},
+      {what:'ρ_ee at the bottom',value:excited(p.delta),limit:'≤ 0.05'},{what:'ρ_ee outside, at rest',value:excited(deltaFree),limit:'≤ 0.05'},
+      {what:'radial trap force kept, 1 − κρ_ee, least',value:1-kappa*Math.max(excited(p.delta),excited(deltaFree)),limit:'≥ 0.89'},
+      {what:'radiation pressure at the bottom over the trap’s largest axial force (3√3/8)U₀/z_R',value:p.k*gamma*excited(p.delta)/(3*Math.sqrt(3)/8*U0/zR),limit:'≈ 5'},
+      {what:'photons scattered until the axis’ edge (mean)',value:photons},{what:'velocity at the axis’ edge (m/s, mean)',value:mean(x=>x.v)},
+      {what:'Doppler shift there over Γ',value:p.k*mean(x=>x.v)/gamma},{what:'Doppler shift there over |δ| outside',value:p.k*mean(x=>x.v)/Math.abs(deltaFree),limit:'≪ 1'},
+      {what:'time at which L = 0.05, 0.5, 0.95 (µs)',value:[0.05,0.5,0.95].map(q=>crossing(full.L,q))},{what:'the same for the axis’ equation alone (µs)',value:[0.05,0.5,0.95].map(q=>crossing(axis.L,q))},
+      {what:'radial rms per axis at the axis’ edge (µm), and ⟨sg⟩ = 2⟨ρ²⟩/w(z)² there',value:[Math.sqrt(spread),4*spread/(20*w2)],limit:'≪ 1'},
+      {what:'radial recoil heating over the push (µK per axis), of the depth',value:[(1-XI_SIGMA)/2*Erec*photons,KT_PER_UK*(1-XI_SIGMA)/2*Erec*photons/U0],limit:'≪ 1'},
+      {what:'line shift across the trap over |δ| at the bottom',value:dLS/Math.abs(p.delta),limit:'≪ 1'},{what:'atoms that do not reach the axis’ edge within the run',value:1-left.length/N},
+      {what:'region edge on the axis (µm)',value:edge}],
+    series,info:{mandelQ:Q,zR,edge,sz,sk,N,kappa,depthUK:U0/KT_PER_UK,T0,axisAloneLoss:axis.L}}));
 }
 
 /** R9 (c). Heating-driven escape (contract §6 R9c): R2's far-detuned σ+ heating in a shallow σ+ tweezer. The energy
