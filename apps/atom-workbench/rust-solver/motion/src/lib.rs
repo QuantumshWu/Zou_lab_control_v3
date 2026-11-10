@@ -12,6 +12,7 @@ pub mod step;
 pub mod adapt;
 pub mod ensemble;
 pub mod estimate;
+pub mod transport;
 pub mod decide;
 pub mod ledger;
 pub mod solve;
