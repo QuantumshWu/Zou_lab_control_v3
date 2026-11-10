@@ -78,7 +78,6 @@
 //! (`random::Stream::jump`) in a fixed order: the next threshold, the class, the polarization, the fluctuation's three
 //! signs, and the direction's rejection loop last, so that the loop's length moves no other draw.
 
-use std::f64::consts::PI;
 use std::sync::OnceLock;
 
 use crate::decide::COMPLEX;
@@ -408,38 +407,11 @@ struct Rule {
 
 impl Rule {
     fn new(m: usize) -> Rule {
-        let (mut nodes, mut weights) = (Vec::with_capacity(m), Vec::with_capacity(m));
-        for i in 1..=m {
-            // Newton on P_m from cos(π(i − ¼)/(m + ½)), until the step stops shrinking (the round-off's floor).
-            let mut x = (PI * (i as f64 - 0.25) / (m as f64 + 0.5)).cos();
-            let mut last = f64::INFINITY;
-            let derivative = loop {
-                let (p, dp) = legendre(m, x);
-                let dx = p / dp;
-                if !(dx.abs() < last) {
-                    break dp;
-                }
-                last = dx.abs();
-                x -= dx;
-            };
-            nodes.push(x);
-            weights.push(2.0 / ((1.0 - x * x) * derivative * derivative));
-        }
+        let (nodes, weights) = crate::special::gauss_legendre(m).into_iter().unzip();
         let ln_factorial = |n: usize| (1..=n).map(|k| (k as f64).ln()).sum::<f64>();
         let ln = UNIT_ROUNDOFF.ln() + ((2 * m + 1) as f64).ln() + 3.0 * ln_factorial(2 * m) - 4.0 * ln_factorial(m);
         Rule { nodes, weights, phase: (ln / (2 * m) as f64).exp() }
     }
-}
-
-/// P_m(x) and P_m′(x) by the three-term recurrence.
-fn legendre(m: usize, x: f64) -> (f64, f64) {
-    let (mut p0, mut p1) = (1.0, x);
-    for j in 2..=m {
-        let p2 = ((2 * j - 1) as f64 * x * p1 - (j - 1) as f64 * p0) / j as f64;
-        p0 = p1;
-        p1 = p2;
-    }
-    (p1, m as f64 * (x * p1 - p0) / (x * x - 1.0))
 }
 
 /// The rules of 2, 4, …, 64 nodes (two nodes at least: exact for the cubics a free flight's κ² is).

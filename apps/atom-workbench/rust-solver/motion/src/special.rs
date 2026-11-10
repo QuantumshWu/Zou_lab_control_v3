@@ -1,6 +1,8 @@
-//! The incomplete gamma function's two expansions (Abramowitz & Stegun 6.5.29 and 6.5.31; Numerical Recipes §6.2, gser and
-//! gcf), each summed to the format's round-off, written once for the two that take them: the normal's tail (estimate.rs)
-//! and the lowered isothermal's momenta (ensemble.rs).
+//! The special functions more than one module takes, each written once: the incomplete gamma function's two expansions
+//! (Abramowitz & Stegun 6.5.29 and 6.5.31; Numerical Recipes §6.2, gser and gcf), each summed to the format's round-off,
+//! for the normal's tail (estimate.rs) and the lowered isothermal's momenta (ensemble.rs); and Gauss–Legendre's nodes and
+//! weights (`gauss_legendre`), for the ensemble's integrals over the trap (ensemble.rs) and the step's quadrature of an
+//! entire integrand (step.rs).
 //!
 //! With P(s, x) = γ(s, x)/Γ(s) the regularized lower function and Q = 1 − P the upper one, for x > 0:
 //! - the lower one's series, e^x x^{−s} Γ(s + 1) P(s, x) = 1 + Σ_{n ≥ 1} x^n/((s + 1)…(s + n)) -- `series` is the sum from
@@ -160,4 +162,37 @@ mod tests {
             }
         }
     }
+}
+
+/// Gauss–Legendre's nodes and weights on [−1, 1], from the largest node down: Newton's iteration on P_n from Tricomi's
+/// start cos(π(i − ¼)/(n + ½)), i = 1…n, until the step stops shrinking (the round-off's floor); the weight
+/// 2/((1 − x²) P_n′(x)²).
+pub fn gauss_legendre(n: usize) -> Vec<(f64, f64)> {
+    (1..=n)
+        .map(|i| {
+            let mut x = (PI * (i as f64 - 0.25) / (n as f64 + 0.5)).cos();
+            let mut last = f64::INFINITY;
+            let slope = loop {
+                let (p, slope) = legendre(n, x);
+                let dx = p / slope;
+                if !(dx.abs() < last) {
+                    break slope;
+                }
+                last = dx.abs();
+                x -= dx;
+            };
+            (x, 2. / ((1. - x * x) * slope * slope))
+        })
+        .collect()
+}
+
+/// P_n(x) and P_n′(x) by the three-term recurrence.
+fn legendre(n: usize, x: f64) -> (f64, f64) {
+    let (mut p0, mut p1) = (1., x);
+    for k in 2..=n {
+        let p2 = ((2 * k - 1) as f64 * x * p1 - (k - 1) as f64 * p0) / k as f64;
+        p0 = p1;
+        p1 = p2;
+    }
+    (p1, n as f64 * (x * p1 - p0) / (x * x - 1.))
 }

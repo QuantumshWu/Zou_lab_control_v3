@@ -57,7 +57,7 @@ use crate::random::{Purpose, Stream};
 use crate::special::{by_series, gamma, series, upper};
 use crate::units::{rounding, KT_PER_UK};
 use rayon::prelude::*;
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::TAU;
 
 /// The trajectories of one Latin-hypercube group (SPEC §2.5), and with it the block that the delete-one-group jackknife
 /// leaves out (estimate.rs). A structural size (SPEC §0): every member is distributed as an independent draw and the
@@ -147,30 +147,6 @@ fn invert(y: f64, u: f64) -> f64 {
     let s = 1.5;
     let target = u * kept(s, y, y, y);
     root(|v| { let k = v.powf(1. / s); (kept(s, y, k, y), ((-k).exp() - (-y).exp()) / gamma(s + 1.)) }, target, 0., y.powf(s)).powf(1. / s)
-}
-
-/// Gauss–Legendre's nodes and weights on [−1, 1]: Newton's iteration on P_n from Tricomi's start, cos(π(i + ¾)/(n + ½))
-/// for the i-th node from 0, to round-off.
-fn legendre(n: usize) -> Vec<(f64, f64)> {
-    (0..n)
-        .map(|i| {
-            let mut x = (PI * (i as f64 + 0.75) / (n as f64 + 0.5)).cos();
-            loop {
-                let (mut p0, mut p1) = (1., x);
-                for k in 2..=n {
-                    let p2 = ((2 * k - 1) as f64 * x * p1 - (k - 1) as f64 * p0) / k as f64;
-                    p0 = p1;
-                    p1 = p2;
-                }
-                let slope = n as f64 * (x * p1 - p0) / (x * x - 1.);
-                let dx = p1 / slope;
-                x -= dx;
-                if dx.abs() <= 2. * f64::EPSILON {
-                    return (x, 2. / ((1. - x * x) * slope * slope));
-                }
-            }
-        })
-        .collect()
 }
 
 /// A Gaussian beam of the envelope (module documentation, # Its draw): its frame (two axes across it, its direction), its
@@ -390,7 +366,7 @@ impl<'a> Ensemble<'a> {
     }
     /// ∫ kept(3/2, y) d³r and ∫ kept(5/2, y) d³r (at shift a), with n nodes per coordinate per beam, and the evaluations.
     fn integrals(&self, c: &Component, n: usize) -> ([f64; 2], usize) {
-        let nodes = legendre(n);
+        let nodes = crate::special::gauss_legendre(n);
         let rows: Vec<[f64; 2]> = (0..c.modes.len() * n)
             .into_par_iter()
             .map(|row| {
@@ -447,7 +423,7 @@ mod tests {
     /// branches, for the number and the energy (s = 3/2, 5/2) and the others the series handles.
     #[test]
     fn the_kept_momenta_are_their_integral() {
-        let nodes = legendre(64);
+        let nodes = crate::special::gauss_legendre(64);
         for s in [0.5, 1., 1.5, 2., 2.5] {
             for y in [1e-4, 0.3, 1.4, 2.6, 3.6, 7., 40.] {
                 for frac in [0.3, 0.99, 1.] {
