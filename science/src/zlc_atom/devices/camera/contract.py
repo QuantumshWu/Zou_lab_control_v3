@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from functools import wraps
 from typing import Protocol, Sequence, runtime_checkable
 import time
 
@@ -41,6 +42,41 @@ def roi_request(
         integer(item, f"roi_xywh[{index}]", minimum=0 if index < 2 else 1)
         for index, item in enumerate(value)
     )
+
+
+#: How long a camera rests between the end of one capture and the start of the next. A capture
+#: that has only just stopped may still have an exposure or a readout on its way; started at
+#: once, the next capture could count it as its own first frame, and every cycle after it
+#: would be grouped one frame late with nothing to report.
+CAPTURE_REST_SECONDS = 0.2
+
+
+def rests_before_arm(arm):
+    """An ``arm`` that first lets the rest since this camera's last capture run out."""
+
+    @wraps(arm)
+    def rested(self, *args, **kwargs):
+        ended = getattr(self, "_capture_ended_at", None)
+        if ended is not None:
+            time.sleep(max(0.0, ended + CAPTURE_REST_SECONDS - time.monotonic()))
+        return arm(self, *args, **kwargs)
+
+    return rested
+
+
+def rest_starts_after(finish):
+    """A ``finish_record_capture`` that notes when a capture that was armed came to its end."""
+
+    @wraps(finish)
+    def noted(self, *args, **kwargs):
+        armed = self.capture_state()
+        try:
+            return finish(self, *args, **kwargs)
+        finally:
+            if armed:
+                self._capture_ended_at = time.monotonic()
+
+    return noted
 
 
 def arm_groups(

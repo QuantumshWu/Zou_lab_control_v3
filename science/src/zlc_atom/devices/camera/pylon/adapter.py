@@ -28,6 +28,8 @@ from zlc_atom.devices import RecordQueue
 from ....authoring import AuthoringField, TunableField
 from ..roi_grid import snap_roi_axis
 from ..contract import (
+    rest_starts_after,
+    rests_before_arm,
     CameraAcquisitionMode,
     CameraCaptureTerminalRecord,
     CameraFrameRecord,
@@ -649,6 +651,7 @@ class PylonCameraAdapter:
         )
 
     @_serialized
+    @rests_before_arm
     def arm(
         self,
         frames: int | None,
@@ -815,6 +818,7 @@ class PylonCameraAdapter:
         finally:
             self._worker_stop.set()
 
+    @rest_starts_after
     def finish_record_capture(self) -> CameraCaptureTerminalRecord:
         """End this arm and restore the finite external-trigger working point."""
         self._worker_stop.set()
