@@ -32,6 +32,7 @@ pub mod eliminate;
 pub mod assemble;
 pub mod readout;
 pub mod photon;
+pub mod tabulate;
 pub(crate) mod jet;
 
 use crate::field::Light;
@@ -450,13 +451,21 @@ impl Model {
     }
     /// The loss energy E_s = (ħ/m)κ²/2 + V_run(r; p(ψ)) (rad/µs).
     pub fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
+        self.energy_with(cluster, at, psi, None)
+    }
+    /// The loss energy with the near light from its tables where they serve (tabulate.rs `Model::near`).
+    pub(crate) fn energy_with(&self, cluster: usize, at: &Point, psi: &[C64], tables: Option<&tabulate::Tables>) -> f64 {
         let kinetic = 0.5 * self.hbar_over_mass * at.kappa.iter().map(|k| k * k).sum::<f64>();
-        kinetic + self.potential(at.r, &self.ground_populations(cluster, psi), &self.running())
+        kinetic + self.expand(at.r, &self.ground_populations(cluster, psi), &self.running(), 0, tables).quadratic.value
     }
     /// The loss test (SPEC §1.7): outside the trap's region and E_s above V_run's far value.
     pub fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
+        self.lost_with(cluster, at, psi, None)
+    }
+    /// The loss test with the near light from its tables where they serve.
+    pub(crate) fn lost_with(&self, cluster: usize, at: &Point, psi: &[C64], tables: Option<&tabulate::Tables>) -> bool {
         self.light.outside(&self.light.amplitudes(at.r))
-            && self.energy(cluster, at, psi) > self.asymptote(&self.ground_populations(cluster, psi), &self.running())
+            && self.energy_with(cluster, at, psi, tables) > self.asymptote(&self.ground_populations(cluster, psi), &self.running())
     }
     /// A cluster state's ground populations, normalized on the ground states (zero elsewhere).
     pub(crate) fn ground_populations(&self, cluster: usize, psi: &[C64]) -> [f64; GROUND] {
@@ -470,10 +479,11 @@ impl Model {
     }
 }
 
-/// The model as one run's integrator sees it (`step::Dynamics`): the model, its running and prepared lights, and the reference
-/// state's ground populations.
+/// The model as one run's integrator sees it (`step::Dynamics`): the model, its near tables where it has them (tabulate.rs), its
+/// running and prepared lights, and the reference state's ground populations.
 pub struct Run<'a> {
     pub model: &'a Model,
+    pub tables: Option<&'a tabulate::Tables>,
     pub reference: [f64; GROUND],
     running: Lights,
     prepared: Lights,
@@ -484,18 +494,26 @@ pub struct Run<'a> {
 }
 
 impl<'a> Run<'a> {
+    /// The run of a model with the exact elimination at every point.
     pub fn new(model: &'a Model, reference: [f64; GROUND]) -> Run<'a> {
+        Run::with(model, None, reference)
+    }
+    /// The run of a model with its near tables (`Model::tabulate`).
+    pub fn tabulated(model: &'a Model, tables: &'a tabulate::Tables, reference: [f64; GROUND]) -> Run<'a> {
+        Run::with(model, Some(tables), reference)
+    }
+    fn with(model: &'a Model, tables: Option<&'a tabulate::Tables>, reference: [f64; GROUND]) -> Run<'a> {
         let running = model.running();
         let at = Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 };
-        let assembly = (0..model.clusters.len()).map(|c| model.assembled(c, &at, &running).1).fold(0.0, f64::max) * crate::decide::COMPLEX;
+        let assembly = (0..model.clusters.len()).map(|c| model.assembled(c, &at, &running, tables).1).fold(0.0, f64::max) * crate::decide::COMPLEX;
         let photons = (0..model.clusters.len())
             .map(|c| {
                 let psi: Vec<C64> = (0..model.clusters[c].states.len()).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
-                model.photons_counted(c, &at, &psi).1
+                model.photons_counted(c, &at, &psi, tables).1
             })
             .fold(0.0, f64::max)
             * crate::decide::COMPLEX;
-        Run { model, reference, running, prepared: model.prepared(), assembly, photons }
+        Run { model, tables, reference, running, prepared: model.prepared(), assembly, photons }
     }
 }
 
@@ -519,22 +537,22 @@ impl crate::step::Dynamics for Run<'_> {
         self.model.membership[ground]
     }
     fn generator(&self, cluster: usize, at: &Point) -> Generator {
-        self.model.assemble(cluster, at, &self.running)
+        self.model.assembled(cluster, at, &self.running, self.tables).0
     }
     fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
-        self.model.photons(cluster, at, psi)
+        self.model.photons_counted(cluster, at, psi, self.tables).0
     }
     fn recoil(&self, photon: &Photon, polarization: &[f64; 3]) -> Recoil {
         photon.recoil(polarization)
     }
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
-        self.model.energy(cluster, at, psi)
+        self.model.energy_with(cluster, at, psi, self.tables)
     }
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
-        self.model.lost(cluster, at, psi)
+        self.model.lost_with(cluster, at, psi, self.tables)
     }
     fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
-        self.model.readout(cluster, at, psi)
+        self.model.readout_with(cluster, at, psi, self.tables)
     }
 }
 

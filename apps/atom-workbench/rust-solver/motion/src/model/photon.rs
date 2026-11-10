@@ -249,15 +249,15 @@ impl Model {
     /// The photon classes of a cluster's state ψ (its frame amplitudes) at a point, every light on (SPEC §1.6; module
     /// documentation): per class u_a on the landing cluster's states, the folded part's gradients, the explicit sources.
     pub fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
-        self.photons_counted(cluster, at, psi).0
+        self.photons_counted(cluster, at, psi, None).0
     }
 
-    /// The photons (`photons`) and the complex multiply-adds that made them: the near light's elimination at the point (or the far
-    /// light's energies alone), each entry's jump and sums, the explicit sources' shares.
-    pub(crate) fn photons_counted(&self, cluster: usize, at: &Point, psi: &[C64]) -> (Vec<Photon>, f64) {
+    /// The photons (`photons`) and the complex multiply-adds that made them: the near light at the point (from its tables where they
+    /// serve, tabulate.rs `Model::near`; or the far light's energies alone), each entry's jump and sums, the explicit sources' shares.
+    pub(crate) fn photons_counted(&self, cluster: usize, at: &Point, psi: &[C64], tables: Option<&super::tabulate::Tables>) -> (Vec<Photon>, f64) {
         let amplitudes = self.light.amplitudes(at.r);
         let lights = self.running();
-        let near = self.carriers.iter().any(|x| lights.on(x.frequency)).then(|| self.near_at(cluster, at, &amplitudes, &lights, 1));
+        let near = self.carriers.iter().any(|x| lights.on(x.frequency)).then(|| self.near(cluster, at, &amplitudes, &lights, 1, tables));
         let far;
         let (energies, mut work) = match &near {
             Some(n) => (&n.energies, n.work),

@@ -50,6 +50,11 @@ impl Model {
 
     /// The readout (module documentation): the 32 populations of a cluster's state ψ at a point.
     pub fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
+        self.readout_with(cluster, at, psi, None)
+    }
+
+    /// The readout with the near light from its tables where they serve (tabulate.rs `Model::near`).
+    pub(crate) fn readout_with(&self, cluster: usize, at: &Point, psi: &[C64], tables: Option<&super::tabulate::Tables>) -> [f64; STATES] {
         let c = &self.clusters[cluster];
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
         let rho = |x: usize, y: usize| psi[x] * psi[y].conj() / norm;
@@ -60,7 +65,7 @@ impl Model {
         let amplitudes = self.light.amplitudes(at.r);
         let lights = self.running();
         let mut channels = self.far_channels(cluster, &amplitudes, &lights);
-        channels.extend(self.near_channels(cluster, at, &amplitudes, &lights));
+        channels.extend(self.near_channels(cluster, at, &amplitudes, &lights, tables));
         let g = c.ground;
         for p in &channels {
             for q in &channels {

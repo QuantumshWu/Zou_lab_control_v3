@@ -77,15 +77,16 @@ impl Model {
         out
     }
 
-    /// V_L(r; p) with its gradient and Hessian, and the rounding of its sum (module documentation).
-    pub(crate) fn expand(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights) -> Expansion {
+    /// V_L(r; p) with, to `order`, its gradient and Hessian, and the rounding of its sum (module documentation); the near light from
+    /// its tables where they serve (tabulate.rs `Model::near`).
+    pub(crate) fn expand(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights, order: usize, tables: Option<&super::tabulate::Tables>) -> Expansion {
         let trap = self.light.trap;
         if !lights.on(trap) {
             return Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
         }
         let amplitudes = self.light.amplitudes(r);
         let mut out = self.far_potential(trap, &amplitudes, p, lights);
-        let near = self.near_potential(r, &amplitudes, p, lights);
+        let near = self.near_potential(r, &amplitudes, p, lights, order, tables);
         let q = &mut out.quadratic;
         q.value += near.quadratic.value;
         for x in 0..3 {
@@ -101,12 +102,12 @@ impl Model {
 
     /// V_L(r; p) (rad/µs).
     pub fn potential(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights) -> f64 {
-        self.expand(r, p, lights).quadratic.value
+        self.expand(r, p, lights, 0, None).quadratic.value
     }
 
     /// V_L(r; p)'s second-order expansion at r, analytic.
     pub fn expansion(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights) -> Quadratic {
-        self.expand(r, p, lights).quadratic
+        self.expand(r, p, lights, 2, None).quadratic
     }
 
     /// The light's shortest length 1/max_l k_l over the lit beams (µm): the scale on which the potential varies (a standing
@@ -120,7 +121,7 @@ impl Model {
     pub fn trap(&self, p: &[f64; GROUND], lights: &Lights) -> Result<Trap, String> {
         let length = self.shortest_length(lights);
         let mut r = [0.0; 3];
-        let mut here = self.expand(r, p, lights);
+        let mut here = self.expand(r, p, lights, 2, None);
         let mut radius = length;
         loop {
             let (values, vectors) = symmetric3_eigen(&here.quadratic.hessian);
@@ -154,7 +155,7 @@ impl Model {
                 if self.light.outside(&self.light.amplitudes(next)) {
                     return Err("光镊不约束原子：准备势的下降离开了光镊的区域".into());
                 }
-                let there = self.expand(next, p, lights);
+                let there = self.expand(next, p, lights, 2, None);
                 if there.quadratic.value < here.quadratic.value {
                     r = next;
                     here = there;

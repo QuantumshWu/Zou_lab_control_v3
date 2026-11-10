@@ -541,7 +541,7 @@ impl Model {
     /// The near carriers' part of V_L(r; p) (potential.rs): Σ_b p_b of their static shifts on the ground states (each in its
     /// cluster), with the trap light on less with it off, with its gradient (the Hessian: the coefficients' and the gradients'
     /// products, the responses' second derivatives left out -- module documentation, # Derivatives).
-    pub(crate) fn near_potential(&self, r: [f64; 3], amplitudes: &[Amplitude], p: &[f64; GROUND], lights: &Lights) -> Expansion {
+    pub(crate) fn near_potential(&self, r: [f64; 3], amplitudes: &[Amplitude], p: &[f64; GROUND], lights: &Lights, order: usize, tables: Option<&super::tabulate::Tables>) -> Expansion {
         let mut out = Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
         if self.carriers.iter().all(|x| !lights.on(x.frequency)) {
             return out;
@@ -555,7 +555,7 @@ impl Model {
                     continue;
                 }
                 let at = Point { r, kappa: [0.0; 3], t: 0.0 };
-                let near = self.near_at(cluster, &at, amplitudes, lights, 2);
+                let near = self.near(cluster, &at, amplitudes, lights, order, tables);
                 for (ci, cc) in self.carriers.iter().enumerate() {
                     if !lights.on(cc.frequency) {
                         continue;
@@ -578,15 +578,19 @@ impl Model {
                                     z * -0.5
                                 };
                                 let (ti, tj) = (&near.responses[ci][li], &near.responses[ci][lj]);
-                                let form: Vec<C64> = (0..jet::parts(2)).map(|q| s(&ti[q], &tj[q])).collect();
-                                let term = jet::product(&jet::of(&coefficient, 2), &form);
+                                let form: Vec<C64> = (0..jet::parts(order)).map(|q| s(&ti[q], &tj[q])).collect();
+                                let term = jet::product(&jet::of(&coefficient, order), &form);
                                 let q = &mut out.quadratic;
                                 let w = sign * p[b];
                                 q.value += w * term[0].re;
                                 for x in 0..3 {
-                                    q.gradient[x] += w * term[1 + x].re;
+                                    if order >= 1 {
+                                        q.gradient[x] += w * term[1 + x].re;
+                                    }
                                     for y in 0..3 {
-                                        q.hessian[x][y] += w * term[jet::second(x, y)].re;
+                                        if order >= 2 {
+                                            q.hessian[x][y] += w * term[jet::second(x, y)].re;
+                                        }
                                     }
                                 }
                                 let value = form[0];
@@ -623,11 +627,11 @@ impl Model {
     }
 
     /// The near carriers' folded channels on a cluster at a point (readout.rs): per carrier R = Σ_l a_l T̃_l.
-    pub(crate) fn near_channels(&self, cluster: usize, at: &Point, amplitudes: &[Amplitude], lights: &Lights) -> Vec<super::readout::Channels> {
+    pub(crate) fn near_channels(&self, cluster: usize, at: &Point, amplitudes: &[Amplitude], lights: &Lights, tables: Option<&super::tabulate::Tables>) -> Vec<super::readout::Channels> {
         if self.carriers.iter().all(|x| !lights.on(x.frequency)) {
             return vec![];
         }
-        let near = self.near_at(cluster, at, amplitudes, lights, 0);
+        let near = self.near(cluster, at, amplitudes, lights, 0, tables);
         let g = self.clusters[cluster].ground;
         self.carriers
             .iter()
@@ -923,7 +927,7 @@ impl Model {
     /// The bound over a region of ‖(K − z)⁻¹‖, z = E_b + δ_d (carrier d's resolvent from ground state b in its dressing): the
     /// dissipation's 2/Γ_min (Im⟨x|K − z|x⟩ ≤ −(Γ_min/2)‖x‖²), and where every excited row of K − z is diagonally dominant, Varah's
     /// 1/min_e (|E_e − z − iΓ_e/2| − r_e), r_e the far couplings' Gershgorin radius (`CellEnergies`).
-    fn resolvent(&self, d: usize, b: usize, region: &Region) -> f64 {
+    pub(crate) fn resolvent(&self, d: usize, b: usize, region: &Region) -> f64 {
         let energies = self.energies(region);
         let delta = self.carriers[d].detuning;
         let mut least = f64::INFINITY;

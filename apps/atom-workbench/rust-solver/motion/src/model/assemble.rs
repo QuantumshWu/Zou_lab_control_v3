@@ -18,6 +18,7 @@
 //! the dressings and self-energies) and its terms' entries.
 
 use super::photon::Class;
+use super::tabulate::Tables;
 use super::{Beat, Generator, Lights, Model, Part, Point, Sample, Wave, Work};
 use crate::field::Amplitude;
 use crate::linalg::{Mat, C64};
@@ -125,11 +126,11 @@ impl<'a> Parts<'a> {
 impl Model {
     /// The one generator assembly (module documentation).
     pub fn assemble(&self, cluster: usize, at: &Point, lights: &Lights) -> Generator {
-        self.assembled(cluster, at, lights).0
+        self.assembled(cluster, at, lights, None).0
     }
 
-    /// The assembly and the multiply-adds it counted.
-    pub(crate) fn assembled(&self, cluster: usize, at: &Point, lights: &Lights) -> (Generator, f64) {
+    /// The assembly and the multiply-adds it counted, the near light from its tables where they serve (tabulate.rs `Model::near`).
+    pub(crate) fn assembled(&self, cluster: usize, at: &Point, lights: &Lights, tables: Option<&Tables>) -> (Generator, f64) {
         let c = &self.clusters[cluster];
         let amplitudes = self.light.amplitudes(at.r);
         let mut parts = Parts::new(self, cluster);
@@ -157,7 +158,7 @@ impl Model {
                 self.add_far_beat(&mut parts, *first, *second, &amplitudes);
             }
         }
-        let near = self.carriers.iter().any(|x| lights.on(x.frequency)).then(|| self.near_at(cluster, at, &amplitudes, lights, 1));
+        let near = self.carriers.iter().any(|x| lights.on(x.frequency)).then(|| self.near(cluster, at, &amplitudes, lights, 1, tables));
         for class in &self.classes[cluster] {
             self.add_decay(&mut parts, cluster, class, &amplitudes, lights, near.as_ref());
         }
@@ -234,7 +235,7 @@ impl Model {
         let lights = self.running();
         let mut out = Work { assembly: 0.0, states: 0.0, parts: 0.0 };
         for s in samples {
-            let (g, w) = self.assembled(s.cluster, &s.at, &lights);
+            let (g, w) = self.assembled(s.cluster, &s.at, &lights, None);
             out.assembly += w;
             out.states += self.clusters[s.cluster].states.len() as f64;
             out.parts += g.parts.len() as f64;
