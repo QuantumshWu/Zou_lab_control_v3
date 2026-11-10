@@ -518,16 +518,32 @@ pub struct Segment {
     /// (r, κ) at the start, and at the middle after the kick.
     pub from: ([f64; 3], [f64; 3]),
     pub kicked: ([f64; 3], [f64; 3]),
+    /// The moments over the whole step, made where first asked (`moments`): an output's window and a read's trail ask
+    /// them of the same step.
+    whole: std::cell::OnceCell<([f64; 3], [f64; 3])>,
 }
 
 impl Segment {
+    /// The path of a step of τ from the time `start`: its reference flow, its start and its kicked middle.
+    fn new(start: f64, tau: f64, flow: Flow, from: ([f64; 3], [f64; 3]), kicked: ([f64; 3], [f64; 3])) -> Segment {
+        Segment { start, tau, flow, from, kicked, whole: std::cell::OnceCell::new() }
+    }
     /// The middle's time t_m.
     fn middle(&self) -> f64 {
         self.start + 0.5 * self.tau
     }
-    /// ∫κ_a dt and ∫κ_a² dt (1/µm·µs, 1/µm²·µs) per lab axis over [from, to] within the step, on its path: per side of the
-    /// middle, Gauss–Legendre to round-off on the flow, κ² of bandwidth twice the flow's rate (`quadrature`).
+    /// ∫κ_a dt and ∫κ_a² dt (1/µm·µs, 1/µm²·µs) per lab axis over [from, to] within the step, on its path (`integrals`);
+    /// over the whole step, from its start to its end, made once.
     pub fn moments(&self, from: f64, to: f64) -> ([f64; 3], [f64; 3]) {
+        if (from, to) == (self.start, self.start + self.tau) {
+            *self.whole.get_or_init(|| self.integrals(from, to))
+        } else {
+            self.integrals(from, to)
+        }
+    }
+    /// `moments` over [from, to]: per side of the middle, Gauss–Legendre to round-off on the flow, κ² of bandwidth twice
+    /// the flow's rate (`quadrature`).
+    fn integrals(&self, from: f64, to: f64) -> ([f64; 3], [f64; 3]) {
         let (m, (lo, hi)) = (self.middle(), (from.min(to), from.max(to)));
         let sign = if to >= from { 1.0 } else { -1.0 };
         let (first, last) = (self.start.min(self.start + self.tau), self.start.max(self.start + self.tau));
@@ -1161,7 +1177,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         end.kappa = kappa1;
         end.psi.copy_from_slice(&made.end[..n]);
         end.time = from.time + tau;
-        let step = Step { end, segment: Segment { start: from.time, tau, flow, from: (from.r, from.kappa), kicked }, work: made.work + shear };
+        let step = Step { end, segment: Segment::new(from.time, tau, flow, (from.r, from.kappa), kicked), work: made.work + shear };
         Ok(if made.reached { Attempt::Reached(step) } else { Attempt::Whole(step) })
     }
 }

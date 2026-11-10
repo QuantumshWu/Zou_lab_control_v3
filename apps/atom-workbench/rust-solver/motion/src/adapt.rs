@@ -123,42 +123,37 @@ impl Drift {
 }
 
 /// A read trajectory's recent path (module documentation, # The read): per lab axis the window (µs, the axis's trap
-/// period), and the steps' paths back to the longest window behind the last one, each with its ∫κ_a² dt.
+/// period), and the steps' paths back to the longest window behind the last one.
 #[derive(Clone, Debug, PartialEq)]
 struct Trail {
     windows: [f64; 3],
-    steps: VecDeque<(Segment, [f64; 3])>,
+    steps: VecDeque<Segment>,
 }
 
 impl Trail {
     /// The trail a step longer.
     fn push(&mut self, segment: &Segment) {
         let end = segment.start + segment.tau;
-        self.steps.push_back((segment.clone(), segment.moments(segment.start, end).1));
+        self.steps.push_back(segment.clone());
         let longest = self.windows.iter().fold(0.0, |a: f64, &b| a.max(b));
-        while self.steps.front().is_some_and(|(s, _)| s.start + s.tau <= end - longest) {
+        while self.steps.front().is_some_and(|s| s.start + s.tau <= end - longest) {
             self.steps.pop_front();
         }
     }
 
     /// The mean of the kinetic energy (ħ/m)κ_a²/2 per lab axis over the axis's window behind the trail's end, the window
-    /// cut where the trail begins (the trajectory's start); exact on the steps' paths (`Segment::moments`).
+    /// cut where the trail begins (the trajectory's start); exact on the steps' paths (`Segment::moments`: a step that
+    /// lies in the window is asked whole, which it makes once).
     fn levels(&self, hbar_over_mass: f64) -> [f64; 3] {
-        let Some(end) = self.steps.back().map(|(s, _)| s.start + s.tau) else { return [0.0; 3] };
+        let Some(end) = self.steps.back().map(|s| s.start + s.tau) else { return [0.0; 3] };
         std::array::from_fn(|a| {
             let from = end - self.windows[a];
             let (mut integral, mut time) = (0.0, 0.0);
-            for (s, whole) in &self.steps {
-                let (first, last) = (s.start, s.start + s.tau);
-                if last <= from {
-                    continue;
-                }
-                if first >= from {
-                    integral += whole[a];
+            for s in &self.steps {
+                let (first, last) = (s.start.max(from), s.start + s.tau);
+                if last > from {
+                    integral += s.moments(first, last).1[a];
                     time += last - first;
-                } else {
-                    integral += s.moments(from, last).1[a];
-                    time += last - from;
                 }
             }
             0.5 * hbar_over_mass * integral / time
@@ -349,12 +344,13 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, sc
             (most, bracket) = (length, (0.0, f64::INFINITY));
         };
         if let Some((s, through)) = &taken {
+            // The step's path to the caller first: the moments it asks of the whole step are then the trail's too.
+            each(&s.segment);
             if let Some(reader) = reader.as_deref_mut() {
                 read(model, trajectory, &at, (s, through), reader, scratch);
                 reader.trail.push(&s.segment);
                 reader.drift.mark.level = reader.trail.levels(model.hbar_over_mass());
             }
-            each(&s.segment);
             let fall = (norm_sqr(&at.psi) / norm_sqr(&s.end.psi)).ln();
             adopt(trajectory, &s.end);
             (trajectory.grid, trajectory.rate) = (at.grid, fall / s.segment.tau);
