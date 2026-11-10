@@ -55,7 +55,7 @@
 //! conjugate and is not made again); at a node the components from their beams and, per block and flag, its entries. A node's
 //! counts are the plan's: no generator is made to know them.
 
-use super::eliminate::Responses;
+use super::eliminate::{half, jump, shift, Leg, Responses};
 use super::far::EXCITED;
 use super::photon::{Origin, Source};
 use super::tabulate::NearTable;
@@ -1004,29 +1004,18 @@ impl Model {
         for part in 0..energies.len() {
             let out = &mut out[part * len..(part + 1) * len];
             let (first, second) = (|c: usize, k: usize| &responses.first[c][k][part], |c: usize, k: usize| &responses.second[c][k][part]);
+            // The fold's one contraction (eliminate.rs `shift`, `jump`) of the legs' responses at the point; a Doppler partner
+            // is the absorbed half with −T2 for T.
             for (i, &[cl, kl, cr, kr, x, y]) in near.pairs.iter().enumerate() {
                 let (ul, ur) = (&self.carriers[cl].basis[kl], &self.carriers[cr].basis[kr]);
-                let (mut s, mut d) = (C64::ZERO, C64::ZERO);
-                for e in 0..EXCITED {
-                    let left = ul[(GROUND + e, states[x])].conj();
-                    s += left * first(cr, kr)[(e, y)] + first(cl, kl)[(e, x)].conj() * ur[(GROUND + e, states[y])];
-                    d += left * second(cr, kr)[(e, y)];
-                }
-                out[near.at(Operand::Pair(i))] = s * -0.5;
-                out[near.at(Operand::Doppler(i))] = d * 0.5;
+                let emitted = Leg { coupling: ul, state: states[x], response: first(cl, kl), place: x };
+                let absorbed = Leg { coupling: ur, state: states[y], response: first(cr, kr), place: y };
+                out[near.at(Operand::Pair(i))] = shift(emitted, absorbed);
+                out[near.at(Operand::Doppler(i))] = -half(ul, states[x], second(cr, kr), y);
             }
             for (i, &[c, k, a, b, y]) in near.jumps.iter().enumerate() {
-                let emission = &self.emission[a];
-                let (mut j, mut j2) = (C64::ZERO, C64::ZERO);
-                for e in 0..EXCITED {
-                    let x = emission[(b, GROUND + e)];
-                    if x != C64::ZERO {
-                        j += x * first(c, k)[(e, y)];
-                        j2 += x * second(c, k)[(e, y)];
-                    }
-                }
-                out[near.at(Operand::Jump(i))] = j;
-                out[near.at(Operand::Jump2(i))] = j2;
+                out[near.at(Operand::Jump(i))] = jump(&self.emission[a], b, first(c, k), y);
+                out[near.at(Operand::Jump2(i))] = jump(&self.emission[a], b, second(c, k), y);
             }
             let responding = near.responding().start;
             for (i, &[c, k, e, y]) in near.responses.iter().enumerate() {

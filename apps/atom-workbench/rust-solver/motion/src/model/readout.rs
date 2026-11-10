@@ -174,7 +174,7 @@ impl Model {
         let near = self.carriers.len();
         let far = self.components().into_iter().filter(|c| self.folded(*c)).count();
         format!(
-            "内态分为 {} 个子空间（{}）；{} 个远失谐分量以二阶 van Vleck 移和散射折叠，{} 个近共振载波以缀饰的二阶消去折叠，其余耦合显式保留。",
+            "内态分为 {} 个子空间（{}）；{} 个远失谐分量以裸能级的二阶消去（光移和散射）折叠，{} 个近共振载波以缀饰的二阶消去折叠，其余耦合显式保留。",
             self.clusters.len(),
             clusters.join("；"),
             far,

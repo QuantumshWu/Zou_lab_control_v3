@@ -25,13 +25,21 @@
 //! T2 = (K + Σ − z)⁻¹ T (internal.md 1.4): in the generator and the photons alike. Its error is the second order,
 //! (w_l ‖T2_l‖/‖T_l‖)² measured at the atom (units.rs); no clamp, no switch (SPEC §1.4).
 //!
+//! # The fold's terms: one contraction
+//! A folded drive leaves the ground states two things, both made of its response (`shift`, `jump`): with an emitted leg
+//! (coupling V', response R') and an absorbed one (V, R), the ground block −½(V'†R + R'†V) -- the light shifts, the Raman and
+//! Zeeman couplings of the light, the beats of two components --, and the photons' jumps C_a R, whose own product is the decay
+//! −(i/2)Σ J†J (photon.rs). A response is (K − z)⁻¹V with the levels it is taken at: the bare ones (K₀ = H0_ee − (i/2)D,
+//! z = E_b + ν: a constant, far.rs), or those at the atom (`Model::eliminate`: the far light's H(r), the other carriers'
+//! dressing, the folded channels' self-energy -- the bare folds' results are its inputs, so they are made first). One
+//! definition for both: what differs is the response handed in.
+//!
 //! # The generator's near terms (assemble.rs)
-//! Per pair of carriers (c', c) and of their beams (l', l): a_l'* a_l S_l'l on the cluster's ground states, S_l'l =
-//! −½(X^f_l'† T_l + T_l'† X^f_l), at the beat δ_c' − δ_c and wave vector k_l − k_l' -- the light shifts, the Raman and Zeeman
-//! couplings of the light, the beats of two carriers; an entry whose residual beat in the frames is not zero only where its unit
-//! (`Unit::Term`) is kept. The decay −(i/2)Σ J†J is the photons' (photon.rs): per beam the jumps C_a T_l. The explicit states'
-//! energies take the folded drives' van Vleck shift ½ Σ_b V^f[e,b] V^f[f,b]* (1/(E_e − E_b − δ_c) + 1/(E_f − E_b − δ_c)). The kept
-//! drives enter as they are: a_l X_l[e,b] e^{−iδ_c t} and its adjoint.
+//! Per pair of carriers (c', c) and of their beams (l', l): a_l'* a_l S_l'l on the cluster's ground states, S_l'l the
+//! contraction of the two beams' legs (X^f_l', T_l') and (X^f_l, T_l), at the beat δ_c' − δ_c and wave vector k_l − k_l'; an
+//! entry whose residual beat in the frames is not zero only where its unit (`Unit::Term`) is kept. Per beam the jumps
+//! C_a T_l. The explicit states' energies take the folded drives' van Vleck shift ½ Σ_b V^f[e,b] V^f[f,b]* (1/(E_e − E_b − δ_c)
+//! + 1/(E_f − E_b − δ_c)). The kept drives enter as they are: a_l X_l[e,b] e^{−iδ_c t} and its adjoint.
 //!
 //! # Derivatives
 //! Everything above is a resolvent of the far light's H(r) and the fields: ∂_i T = −(K + Σ − z)⁻¹ ∂_i(K + Σ − z) T, with ∂_i K, ∂_i E_b
@@ -49,6 +57,34 @@ use crate::linalg::{dot3, Lu, Mat, C64};
 use crate::request::{GROUND, STATES};
 use super::far::EXCITED;
 use super::jet;
+
+/// One leg of a second-order term (module documentation, # The fold's terms): a coupling's column from a ground state,
+/// U[GROUND + e, `state`], and its response's, R[e, `place`] = ((K − z)⁻¹U)[e, `state`] -- a constant with the bare levels
+/// (far.rs), or the elimination's at the atom (`Model::eliminate`, or its table).
+#[derive(Clone, Copy)]
+pub(crate) struct Leg<'a> {
+    pub(crate) coupling: &'a Mat,
+    pub(crate) state: usize,
+    pub(crate) response: &'a Mat,
+    pub(crate) place: usize,
+}
+
+/// −½ (U†R)[state, place] of a coupling's column and a response's: the half of a ground block's entry whose response is the
+/// absorbed leg's.
+pub(crate) fn half(coupling: &Mat, state: usize, response: &Mat, place: usize) -> C64 {
+    (0..EXCITED).map(|e| coupling[(GROUND + e, state)].conj() * response[(e, place)]).sum::<C64>() * -0.5
+}
+
+/// The ground block's entry of an emitted leg and an absorbed one, −½(V'†R + R'†V) (the one definition, module documentation):
+/// the absorbed response against the emitted coupling, and the emitted response against the absorbed coupling, conjugated.
+pub(crate) fn shift(emitted: Leg, absorbed: Leg) -> C64 {
+    half(emitted.coupling, emitted.state, absorbed.response, absorbed.place) + half(absorbed.coupling, absorbed.state, emitted.response, emitted.place).conj()
+}
+
+/// A jump's entry (C_a R)[b, place] of a response's column (the one definition).
+pub(crate) fn jump(emission: &Mat, b: usize, response: &Mat, place: usize) -> C64 {
+    (0..EXCITED).map(|e| emission[(b, GROUND + e)] * response[(e, place)]).sum()
+}
 
 /// A near carrier: a co-rotating component the units keep near, its beams' couplings and folded couplings, its folded couplings
 /// on its field's basis, and its polarization units (beams of parallel fields).

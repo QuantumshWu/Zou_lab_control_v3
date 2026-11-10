@@ -14,7 +14,7 @@
 //! # What is exact and what is folded
 //! Every coupling is kept (it enters the cluster's generator as it is and the propagator resolves it) or folded at second order;
 //! which is decided per unit (`Unit`, SPEC §5.2) by `solve`, within the existence gates (`Gate`, SPEC §1.5) this module evaluates.
-//! A folded far component enters through its van Vleck shift and its Reiter–Sørensen jumps (`far`), linear in T_ω = E_ω E_ω† and
+//! A folded far component enters through its second-order shift and its Reiter–Sørensen jumps (`far`), linear in T_ω = E_ω E_ω† and
 //! exact at the atom; a folded drive of a near carrier through its dressed response (`eliminate`), a nonlinear function of the
 //! far light and the other carriers at the atom. That elimination is evaluated at every point as it stands (`Run::new`), or
 //! taken from its tables over the coordinates it depends on, refined over the atoms' reach to the resolution of the largest
@@ -161,7 +161,7 @@ pub enum Unit {
     /// carrier `to` (a Raman or a Zeeman coupling of the light, one state's beat of two carriers), or with both None a static
     /// coupling of the far light. Between two clusters, kept joins them; within one, kept resolves its beat (a far beat).
     Term { a: usize, b: usize, from: Option<Component>, to: Option<Component> },
-    /// A far component's fold (its van Vleck shift and Reiter–Sørensen jumps). Kept: a co-rotating component is a near carrier;
+    /// A far component's fold (its second-order shift and Reiter–Sørensen jumps). Kept: a co-rotating component is a near carrier;
     /// a counter-rotating one cannot be kept (its fold must exist, else the request is refused).
     Far { component: Component },
     /// The beat T^{ωω′} e^{−i(ν − ν′)t} of two far components' fields in the far light's shifts. Kept: a beat of the generator;

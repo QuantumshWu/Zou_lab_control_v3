@@ -1,5 +1,5 @@
 //! The far light (SPEC §1.2): every frequency's coupling bases, the static shift of its field -- the request's outside form and
-//! the van Vleck shift of its folded components --, linear in T_ω = E_ω E_ω† and exact at the atom, and the Reiter–Sørensen
+//! the second-order shift of its folded components --, linear in T_ω = E_ω E_ω† and exact at the atom, and the Reiter–Sørensen
 //! jumps of its folded components.
 //!
 //! # The couplings on the field's basis
@@ -9,19 +9,23 @@
 //! co-rotating coupling V(r) = Σ_k e_k U_k and the counter-rotating W(r) = Σ_k e_k* Ũ_k. A request whose couplings leave
 //! that span beyond their rounding is not the dipole operator contracted with its fields, and is refused (`Bases::new`).
 //!
-//! # The van Vleck form (second order, exact real denominators)
-//! A coupling absorbed at ν_B (B e^{−iν_B t}, B excited ← ground) and one emitted at ν_A (A† e^{iν_A t}) make at second order,
-//! with the time dependence e^{−i(ν_B − ν_A)t},
+//! # A fold with the bare levels
+//! A component folded here is eliminated as every drive is (eliminate.rs, # The fold's terms), with the levels of H0: its
+//! response from ground state b is R[:,b] = (K₀ − E_b − ν)⁻¹ V[:,b], K₀ = H0_ee − (i/2) D -- no light in the denominator, so R
+//! is linear in the field and its terms are constants. A coupling absorbed at ν_B (B e^{−iν_B t}, B excited ← ground) and one
+//! emitted at ν_A (A† e^{iν_A t}) make at second order, with the time dependence e^{−i(ν_B − ν_A)t} (`second_order`),
 //!
 //! ```text
-//! ground   (a ← b):  C(A, B)_ab = ½ Σ_e A_ea* B_eb [1/(E_b + ν_B − E_e) + 1/(E_a + ν_A − E_e)]
-//! excited  (f ← e):  C(A, B)_fe = ½ Σ_b B_fb A_eb* [1/(E_e − E_b − ν_A) + 1/(E_f − E_b − ν_B)]
+//! ground   (a ← b):  −½ (A†R_B + R_A†B)_ab            the elimination's contraction of the two legs (eliminate.rs `shift`)
+//! excited  (f ← e):  ½ Σ_b B_fb A_eb* [1/(E_e − E_b − ν_A) + 1/(E_f − E_b − ν_B)]
 //! ```
 //!
-//! -- the symmetric (van Vleck) mean of the initial and final denominators, the bare energies E of H0 exact: a far component
-//! folds with no gap between what it keeps and what it folds. C(A, B)† = C(B, A), at the opposite beat. One component, A = B
-//! at ν: its static shift C(V, V), Hermitian. Its error is the fold's, O(m²) of the shift (m its size over its distance,
-//! units.rs); its real denominators hold no scattering, which its jumps carry (below).
+//! -- the excited block the van Vleck mean through the ground states, which do not decay (real denominators). The ground
+//! block holds the width: on a line of detuning Δ it is the dispersive −|V|²Δ/(Δ² + Γ²/4), which the real-denominator form
+//! −|V|²/Δ misses by (Γ/2Δ)² of itself; the two legs' responses are the jumps' own (below), so a fold's shift and its
+//! scattering are one response's. Both blocks are Hermitian forms: C(A, B)† = C(B, A), at the opposite beat. One component,
+//! A = B at ν: its static shift C(V, V). Its error is the fold's: O(m²) of the shift (m its size over its distance,
+//! units.rs), and what its bare levels leave out.
 //!
 //! # The static form of a frequency, per pair of beams
 //! The outside form O(E) = Σ_pq E_p* E_q O_pq (the request's nine matrices as a Hermitian form in the spherical components:
@@ -34,9 +38,9 @@
 //! leaves the bare H0.
 //!
 //! # The jumps of a folded component (Reiter–Sørensen)
-//! The excited amplitude a folded component drives from ground state b is −R[:,b] ψ_b, R[:,b] = (K₀ − E_b − ν)⁻¹ V[:,b],
-//! K₀ = H0_ee − (i/2) D; its photon of axis a is the jump C_a R (an overall sign is no physics; the near light's photons take the
-//! same, eliminate.rs). Linear in the field: per beam J_{a,l} = Σ_k γ_lk C_a R(U_k), of wave vector k_l (the counter-rotating
+//! The excited amplitude a folded component drives from ground state b is −R[:,b] ψ_b, R the bare response above; its photon
+//! of axis a is the jump C_a R (eliminate.rs `jump`; an overall sign is no physics; the near light's photons take the same).
+//! Linear in the field: per beam J_{a,l} = Σ_k γ_lk C_a R(U_k), of wave vector k_l (the counter-rotating
 //! Σ_k γ_lk* C_a R(Ũ_k), of −k_l). Their decay Σ_a J_a†J_a is formed from them at the assembly: the generator is a Lindblad
 //! one by construction, and the far light's scattering, about Γm² per unit time, is not dropped (SPEC §1.2).
 //!
@@ -46,6 +50,7 @@
 //! generator, the cross outside form the mean of the two frequencies' forms: a kept beat is slow, and two frequencies that
 //! close differ in their forms, made through the far outside states, by their beat over those states' detunings.
 
+use super::eliminate::{jump, shift, Leg};
 use super::{Beat, Component};
 use crate::field::{Amplitude, Light};
 use crate::linalg::{Lu, Mat, C64};
@@ -106,20 +111,15 @@ impl Beat {
     }
 }
 
-/// The van Vleck form C(A, B) of an emitted coupling A at ν_A and an absorbed one B at ν_B (module documentation), on all the
-/// states (STATES × STATES: its ground and excited blocks), with the bare energies `e`.
-pub(crate) fn van_vleck(e: &[f64], a: &Mat, nu_a: f64, b: &Mat, nu_b: f64) -> Mat {
+/// The second-order form C(A, B) of an emitted coupling A at ν_A and an absorbed one B at ν_B (module documentation, # A fold
+/// with the bare levels), on all the states (STATES × STATES): the ground block the contraction of the two legs, each
+/// coupling with its bare response (`response`: `ra`, `rb`); the excited block through the ground states, with the bare
+/// energies `e`.
+pub(crate) fn second_order(e: &[f64], a: &Mat, ra: &Mat, nu_a: f64, b: &Mat, rb: &Mat, nu_b: f64) -> Mat {
     let mut out = Mat::zeros(STATES, STATES);
     for x in 0..GROUND {
         for y in 0..GROUND {
-            let mut z = C64::ZERO;
-            for w in GROUND..STATES {
-                let (p, q) = (a[(w, x)], b[(w, y)]);
-                if p != C64::ZERO && q != C64::ZERO {
-                    z += p.conj() * q * (0.5 * (1.0 / (e[y] + nu_b - e[w]) + 1.0 / (e[x] + nu_a - e[w])));
-                }
-            }
-            out[(x, y)] = z;
+            out[(x, y)] = shift(Leg { coupling: a, state: x, response: ra, place: x }, Leg { coupling: b, state: y, response: rb, place: y });
         }
     }
     for f in GROUND..STATES {
@@ -229,7 +229,8 @@ pub(crate) struct Tone {
     /// Per component ([co, counter]) and basis vector k its folded jumps (GROUND × GROUND per axis a): the field's jump is
     /// Σ_k e_k J_{a,k} (the counter-rotating Σ_k e_k* J_{a,k}); empty where unfolded.
     pub(crate) jumps: [Vec<[Mat; 3]>; 2],
-    /// Per component ([co, counter]) and beam its folded responses R_l (EXCITED × GROUND, the readout's); empty where unfolded.
+    /// Per component ([co, counter]) and beam its bare response R_l (EXCITED × GROUND): a folded component's is the readout's
+    /// and a far beat's leg.
     pub(crate) responses: [Vec<Mat>; 2],
     /// Per component ([co, counter]) and beam its coupling at the focus, X_l and R_l (STATES × STATES).
     pub(crate) couplings: [Vec<Mat>; 2],
@@ -288,13 +289,24 @@ impl Tone {
                 focus.add_scaled(e0[k].conj() * e0[kk], &a[k * r + kk]);
             }
         }
+        // Each component's bare responses on its field's basis; a folded one's second-order form of every pair of them.
+        let k0 = {
+            let excited: Vec<usize> = (GROUND..STATES).collect();
+            let mut k0 = request.hamiltonian.block(&excited, &excited);
+            k0.add_scaled(C64::new(0.0, -0.5), &decay(request));
+            k0
+        };
+        let folds: [Vec<Mat>; 2] = [0, 1].map(|c| {
+            let basis = if c == 0 { &bases.co } else { &bases.counter };
+            basis.iter().map(|u| response(&k0, &e, u, nu[c])).collect()
+        });
         for k in 0..r {
             for kk in 0..r {
                 if folded[0] {
-                    a[k * r + kk].add_scaled(C64::ONE, &van_vleck(&e, &bases.co[k], nu[0], &bases.co[kk], nu[0]));
+                    a[k * r + kk].add_scaled(C64::ONE, &second_order(&e, &bases.co[k], &folds[0][k], nu[0], &bases.co[kk], &folds[0][kk], nu[0]));
                 }
                 if folded[1] {
-                    a[k * r + kk].add_scaled(C64::ONE, &van_vleck(&e, &bases.counter[kk], nu[1], &bases.counter[k], nu[1]));
+                    a[k * r + kk].add_scaled(C64::ONE, &second_order(&e, &bases.counter[kk], &folds[1][kk], nu[1], &bases.counter[k], &folds[1][k], nu[1]));
                 }
             }
         }
@@ -310,13 +322,7 @@ impl Tone {
                 m
             })
             .collect();
-        let k0 = {
-            let excited: Vec<usize> = (GROUND..STATES).collect();
-            let mut k0 = request.hamiltonian.block(&excited, &excited);
-            k0.add_scaled(C64::new(0.0, -0.5), &decay(request));
-            k0
-        };
-        // Per component and beam: its coupling at the focus on the basis, and where folded its response and jumps.
+        // Per component and beam: its coupling at the focus and its bare response, on the basis; a folded one's jumps.
         let weight = |c: usize, j: usize, k: usize| if c == 0 { f.coefficients[j][k] } else { f.coefficients[j][k].conj() };
         let per_beam = |c: usize, of: &dyn Fn(usize) -> Mat, rows: usize, cols: usize| -> Vec<Mat> {
             (0..n)
@@ -333,20 +339,18 @@ impl Tone {
             let basis = if c == 0 { &bases.co } else { &bases.counter };
             per_beam(c, &|k| basis[k].clone(), STATES, STATES)
         });
-        let folds: [Vec<(Mat, [Mat; 3])>; 2] = [0, 1].map(|c| {
-            let basis = if c == 0 { &bases.co } else { &bases.counter };
-            if folded[c] { basis.iter().map(|u| far_response(request, &k0, &e, u, nu[c])).collect() } else { vec![] }
+        let responses = [0, 1].map(|c| per_beam(c, &|k| folds[c][k].clone(), EXCITED, GROUND));
+        let jumps = [0, 1].map(|c| {
+            let of = |response: &Mat| -> [Mat; 3] { std::array::from_fn(|a| Mat::from_fn(GROUND, GROUND, |to, b| jump(&request.emission[a], to, response, b))) };
+            if folded[c] { folds[c].iter().map(of).collect() } else { vec![] }
         });
-        let responses = [0, 1].map(|c| if folded[c] { per_beam(c, &|k| folds[c][k].0.clone(), EXCITED, GROUND) } else { vec![] });
-        let jumps = [0, 1].map(|c| folds[c].iter().map(|f| f.1.clone()).collect());
         Ok(Tone { beat, detuning: nu[0], folded, forms: a, pairs, focus, jumps, responses, couplings, basis: [bases.co, bases.counter], outside: o })
     }
 }
 
-/// The response R and the jumps C_a R of a coupling U folded at ν: R[:,b] = (K₀ − E_b − ν)⁻¹ U[:,b] on the excited states
-/// (EXCITED × GROUND), C_a R (GROUND × GROUND per axis a) (module documentation, # The jumps of a folded component).
-fn far_response(request: &Request, k0: &Mat, e: &[f64], u: &Mat, nu: f64) -> (Mat, [Mat; 3]) {
-    let mut out: [Mat; 3] = std::array::from_fn(|_| Mat::zeros(GROUND, GROUND));
+/// The bare response of a coupling U at ν (module documentation, # A fold with the bare levels): R[:,b] = (K₀ − E_b − ν)⁻¹
+/// U[:,b] on the excited states (EXCITED × GROUND).
+pub(crate) fn response(k0: &Mat, e: &[f64], u: &Mat, nu: f64) -> Mat {
     let mut response = Mat::zeros(EXCITED, GROUND);
     for b in 0..GROUND {
         let mut column: Vec<C64> = (0..EXCITED).map(|x| u[(GROUND + x, b)]).collect();
@@ -363,13 +367,8 @@ fn far_response(request: &Request, k0: &Mat, e: &[f64], u: &Mat, nu: f64) -> (Ma
         for x in 0..EXCITED {
             response[(x, b)] = column[x];
         }
-        for (ax, c) in request.emission.iter().enumerate() {
-            for to in 0..GROUND {
-                out[ax][(to, b)] = (0..EXCITED).map(|x| c[(to, GROUND + x)] * column[x]).sum();
-            }
-        }
     }
-    (response, out)
+    response
 }
 
 /// The product a_l'* a_l of two beams' amplitudes (`first` = l', `second` = l) with its gradient and Hessian (jet.rs
@@ -395,21 +394,24 @@ mod tests {
         Mat::from_fn(STATES, STATES, |e, b| if e >= GROUND && b < GROUND { C64::new(next(), next()) * scale } else { C64::ZERO })
     }
 
-    /// The van Vleck form is the second order of the exact Floquet spectrum. One component V e^{−iνt} + h.c. couples the ground
-    /// states at E_b to the excited states at E_e − ν (the rotating frame of the absorbed photon): H_F = [[E_g, V†], [V, E_e − ν]],
-    /// exactly Hermitian. Its ground-like eigenvalues are those of E_g + C(V, V)_gg up to fourth order in V/Δ, and its excited-like
-    /// ones those of E_e − ν + C(V, V)_ee: so halving V cuts the difference sixteenfold, whatever the ground states' degeneracy
-    /// (the vV block is a matrix there; its eigenvalues are compared). Bare energies with the hyperfine and the line spacings of
-    /// Rb87 at the scale of the frame (rad/µs), ν a far detuning.
+    /// A bare fold's ground block is the second order of the exact Floquet spectrum. One component V e^{−iνt} + h.c. couples the
+    /// ground states at E_b to the excited states at E_e − ν (the rotating frame of the absorbed photon): H_F = [[E_g, V†],
+    /// [V, E_e − ν]], exactly Hermitian -- levels that do not decay, whose bare response has real denominators. Its ground-like
+    /// eigenvalues are those of E_g + C(V, V)_gg up to fourth order in V/Δ: so halving V cuts the difference sixteenfold,
+    /// whatever the ground states' degeneracy (the block is a matrix there; its eigenvalues are compared). Bare energies with
+    /// the hyperfine and the line spacings of Rb87 at the scale of the frame (rad/µs), ν a far detuning.
     #[test]
-    fn the_van_vleck_shift_is_the_floquet_spectrum_s_second_order() {
+    fn a_bare_fold_s_shift_is_the_floquet_spectrum_s_second_order() {
         let e: Vec<f64> = (0..STATES)
             .map(|s| if s < 3 { -42943.0 + 13.0 * (s as f64 - 1.0) } else if s < GROUND { (s as f64 - 5.0) * 13.2 } else if s < 16 { -4.6e6 + 300.0 * s as f64 } else { 1.0e3 * (s as f64 - 24.0) })
             .collect();
         let nu = -2.5e6;
+        // Levels that do not decay: K₀ is their energies.
+        let k0 = Mat::from_fn(EXCITED, EXCITED, |x, y| if x == y { C64::real(e[GROUND + x]) } else { C64::ZERO });
         let error = |scale: f64| {
             let v = coupling(scale, 7);
-            let f = van_vleck(&e, &v, nu, &v, nu);
+            let r = response(&k0, &e, &v, nu);
+            let f = second_order(&e, &v, &r, nu, &v, &r, nu);
             let floquet = Mat::from_fn(STATES, STATES, |x, y| {
                 let d = if x == y { C64::real(if x < GROUND { e[x] } else { e[x] - nu }) } else { C64::ZERO };
                 d + if x >= GROUND && y < GROUND { v[(x, y)] } else if x < GROUND && y >= GROUND { v[(y, x)].conj() } else { C64::ZERO }
@@ -438,6 +440,43 @@ mod tests {
         assert!(big < 1e-3 * shift, "fourth order: {big} of a shift {shift}");
         let ratio = big / small;
         assert!((ratio - 16.0).abs() < 1.0, "the remainder is fourth order: ratio {ratio} ({big}, {small})");
+    }
+
+    /// A bare fold's ground block holds its lines' widths. With excited states that decay each at its own rate, K₀ =
+    /// diag(E_e − iΓ_e/2), the bare response is R[e,b] = V[e,b]/(E_e − E_b − ν − iΓ_e/2) and the contraction of two legs is
+    /// −½ Σ_e A_ea* B_eb [1/(E_e − E_b − ν_B − iΓ_e/2) + 1/(E_e − E_a − ν_A + iΓ_e/2)], entry by entry to the rounding of its
+    /// sum of two products over the excited states (γ of the entry's terms' moduli) -- on the diagonal of one component the
+    /// dispersive −Σ_e |V_eb|² Δ_e/(Δ_e² + Γ_e²/4), which the real-denominator −Σ_e |V_eb|²/Δ_e exceeds by (Γ_e/2Δ_e)² of each
+    /// term. Two near detunings (lines a few widths off) and two components' beat.
+    #[test]
+    fn a_bare_fold_s_ground_block_holds_its_lines_widths() {
+        let e: Vec<f64> = (0..STATES).map(|s| if s < GROUND { 3.0 * s as f64 } else { 200.0 + 17.0 * s as f64 }).collect();
+        let gamma: Vec<f64> = (0..EXCITED).map(|x| 30.0 + x as f64).collect();
+        let k0 = Mat::from_fn(EXCITED, EXCITED, |x, y| if x == y { C64::new(e[GROUND + x], -0.5 * gamma[x]) } else { C64::ZERO });
+        let (a, b) = (coupling(5.0, 11), coupling(7.0, 12));
+        let (nu_a, nu_b) = (310.0, 345.0);
+        let form = second_order(&e, &a, &response(&k0, &e, &a, nu_a), nu_a, &b, &response(&k0, &e, &b, nu_b), nu_b);
+        for x in 0..GROUND {
+            for y in 0..GROUND {
+                let (mut closed, mut size) = (C64::ZERO, 0.0);
+                for w in 0..EXCITED {
+                    let (absorbed, emitted) = (C64::new(e[GROUND + w] - e[y] - nu_b, -0.5 * gamma[w]), C64::new(e[GROUND + w] - e[x] - nu_a, 0.5 * gamma[w]));
+                    let term = a[(GROUND + w, x)].conj() * b[(GROUND + w, y)];
+                    closed += term * (absorbed.recip() + emitted.recip()) * -0.5;
+                    size += term.abs() * (absorbed.recip().abs() + emitted.recip().abs()) * 0.5;
+                }
+                assert!((form[(x, y)] - closed).abs() <= rounding(2 * EXCITED + 6) * size, "({x}, {y}): {:?} against {closed:?}", form[(x, y)]);
+            }
+        }
+        let own = second_order(&e, &b, &response(&k0, &e, &b, nu_b), nu_b, &b, &response(&k0, &e, &b, nu_b), nu_b);
+        let (mut dispersive, mut real) = (0.0, 0.0);
+        for w in 0..EXCITED {
+            let (delta, v2) = (e[GROUND + w] - e[0] - nu_b, b[(GROUND + w, 0)].norm_sqr());
+            dispersive -= v2 * delta / (delta * delta + 0.25 * gamma[w] * gamma[w]);
+            real -= v2 / delta;
+        }
+        assert!((own[(0, 0)].re - dispersive).abs() <= rounding(2 * EXCITED + 6) * dispersive.abs().max(real.abs()) && own[(0, 0)].im.abs() <= rounding(2 * EXCITED + 6) * real.abs(), "{:?} against {dispersive}", own[(0, 0)]);
+        assert!((real - dispersive).abs() > 1e-3 * real.abs(), "lines a few widths off: the width shows ({real} against {dispersive})");
     }
 
     /// The outside form's Hermitian form in the spherical components reproduces the request's coordinates: for a field E,
