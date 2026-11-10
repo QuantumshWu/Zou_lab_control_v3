@@ -4,7 +4,7 @@
 //! An output's error against its target has three parts from independent sources, combined in quadrature (GUM):
 //! E² = A² + b² + S² (`Account`):
 //! - A, the model's: each unit's error measured along the trajectories (SPEC §5.2) and the unseen share's bound;
-//! - b, the step's: the bound its tolerance gives, s·ε (SPEC §2.2), standing unless a falsifier refutes it (SPEC §5.3);
+//! - b, the step's: the bound of its error read on the pilot (SPEC §2.2), standing unless a falsifier refutes it (SPEC §5.3);
 //! - S, the statistics': the interval at the confidence z (estimate.rs).
 //! The populations' are absolute against `POPULATION_TARGET`, every row as shown and the loss; T's relative against
 //! `TEMPERATURE_TARGET` at the outputs it is held to (solve.rs).
