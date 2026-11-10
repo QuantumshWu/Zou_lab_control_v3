@@ -45,7 +45,7 @@
 //! falls by a share of itself beyond that share's spread, the jackknife over the pilot's groups (`Pricing`) -- the kept
 //! model's W counting the pilot its attempt runs again: every keep is a new attempt, a new model and its own pilot. A
 //! kept model is built and rated only for a unit whose keep would pay were it to cost no more per µs than the fold
-//! (`Pricing::free`: the trajectories its error's removal saves, less the new pilot): a fold is made to cost less than
+//! (`Pricing::saving_at_all`: the trajectories its error's removal saves, less the new pilot): a fold is made to cost less than
 //! what it folds, so a keep that pays by its rate alone is not looked for -- where one exists the fold is at fault, not
 //! the choice. The model's falsifier keeps one more unit on the product's first trajectories (common random numbers):
 //! the unit of the largest booked error among those whose pairs cost no more than the product they check -- a check
@@ -534,7 +534,13 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
     // The greedy keep by pays (SPEC §5.2): of the units whose error's removal alone would pay for the new pilot, each
     // rated with its kept model, the one whose keeping saves the most predicted work beyond its spread.
     let pricing = Pricing::new(request, light, kept, &model, reference, trap.centre, &units, &measured, &samples, &pilot, &context.fixed, &context.scales, unsampled);
-    let mut ranked: Vec<Candidate> = pricing.worth().into_par_iter().filter_map(|u| pricing.priced(u)).collect();
+    let saving = pricing.saving_at_all();
+    let mut ranked: Vec<Candidate> = if saving.is_empty() {
+        vec![]
+    } else {
+        let others = pricing.leave_one_out();
+        saving.into_par_iter().filter(|&u| pays(0., pricing.saving(&others, u, &pricing.own))).filter_map(|u| pricing.priced(&others, u)).collect()
+    };
     ranked.sort_by(|a, b| assured(b.saving).total_cmp(&assured(a.saving)));
     if let Some(c) = ranked.first().filter(|c| pays(0., c.saving)) {
         return Ok(Attempt::Keep(units[c.unit].clone(), tau));
@@ -579,7 +585,7 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
     heaviest.sort_by(|&a, &b| weight(b, &every).total_cmp(&weight(a, &every)));
     let checks = |ratio: f64| (checked * GROUP) as f64 * ratio <= all.len() as f64 * GROUP as f64;
     let next = heaviest.chunks(rayon::current_num_threads()).find_map(|some| {
-        let ratios: Vec<Option<f64>> = some.par_iter().map(|&u| ranked.iter().find(|c| c.unit == u).map(|c| c.ratio).or_else(|| pricing.priced(u).map(|c| c.ratio))).collect();
+        let ratios: Vec<Option<f64>> = some.par_iter().map(|&u| ranked.iter().find(|c| c.unit == u).map(|c| c.ratio).or_else(|| pricing.kept_rates(u).map(|r| pricing.ratio(&r)))).collect();
         some.iter().zip(ratios).find(|(_, ratio)| ratio.is_some_and(checks)).map(|(&u, _)| u)
     });
     let Some(u) = next else {
@@ -1169,6 +1175,15 @@ struct Candidate {
     ratio: f64,
 }
 
+/// The pilot's groups but one (or all of them) as the pricing reads them (`Pricing`): the estimates and the units' mean
+/// errors over them, and the current model's W there.
+struct Level {
+    left: Option<usize>,
+    estimates: Vec<Estimate>,
+    means: Vec<Vec<[f64; 2]>>,
+    base: f64,
+}
+
 /// The pricing of keeps (SPEC §5.2; module documentation, # The model): the predicted saving of total work W = w·N by
 /// keeping a folded unit, as a share of the current model's -- N the trajectories the statistics need at the model's
 /// errors (`Targets::need` on the pilot's estimates), and for the kept model the pilot its new attempt runs as well (the
@@ -1188,17 +1203,17 @@ struct Pricing<'a> {
     units: &'a [Unit],
     states: &'a [State],
     measured: &'a Measured<'a>,
+    pilot: &'a [&'a Part],
     fixed: &'a Fixed,
+    scales: &'a Scales,
     unsampled: f64,
-    /// Every group (None), then each left out; and per level the pilot's estimates and the units' mean errors.
-    levels: Vec<Option<usize>>,
-    data: Vec<(Vec<Estimate>, Vec<Vec<[f64; 2]>>)>,
-    /// The states the rates are read at, the current model's rates there and its W per level.
+    /// The states the rates are read at and the current model's rates there.
     rated: Vec<usize>,
     own: Vec<f64>,
-    base: Vec<f64>,
     /// The trajectories of the pilot a kept model's attempt runs again.
     again: f64,
+    /// Every group together.
+    all: Level,
 }
 
 impl<'a> Pricing<'a> {
@@ -1213,48 +1228,36 @@ impl<'a> Pricing<'a> {
         units: &'a [Unit],
         measured: &'a Measured<'a>,
         states: &'a [State],
-        pilot: &[&Part],
+        pilot: &'a [&'a Part],
         fixed: &'a Fixed,
-        scales: &Scales,
+        scales: &'a Scales,
         unsampled: f64,
     ) -> Pricing<'a> {
-        let outputs = fixed.model.len();
-        let groups = pilot.len();
-        let levels: Vec<Option<usize>> = std::iter::once(None).chain((0..groups).map(Some)).collect();
-        let data: Vec<(Vec<Estimate>, Vec<Vec<[f64; 2]>>)> = levels
-            .iter()
-            .map(|&left| {
-                let parts: Vec<&Part> = pilot.iter().enumerate().filter(|(g, _)| Some(*g) != left).map(|(_, p)| *p).collect();
-                (pooled(&parts, scales).0, measured.means(outputs, left))
-            })
-            .collect();
-        let rated = one_each(states, measured.output, outputs);
+        let rated = one_each(states, measured.output, fixed.model.len());
         let current = Run::new(model, reference);
         let assembly = current.assembly_work();
         let middles: Vec<crate::model::Middle> = (0..model.clusters().len()).map(|c| current.middle(c, centre, 0.)).collect();
         let own: Vec<f64> = rated.iter().map(|&j| rate(&current, assembly, &middles[states[j].sample.cluster], &states[j])).collect();
         drop(middles);
-        let mut pricing = Pricing {
-            request,
-            light,
-            kept,
-            model,
-            reference,
-            centre,
-            units,
-            states,
-            measured,
-            fixed,
-            unsampled,
-            levels,
-            data,
-            rated,
-            own,
-            base: vec![],
-            again: (groups as u64 * GROUP) as f64,
-        };
-        pricing.base = (0..pricing.levels.len()).map(|i| pricing.work(i, None, &pricing.own, 0.)).collect();
+        let again = (pilot.len() as u64 * GROUP) as f64;
+        let all = Level { left: None, estimates: vec![], means: vec![], base: 0. };
+        let mut pricing = Pricing { request, light, kept, model, reference, centre, units, states, measured, pilot, fixed, scales, unsampled, rated, own, again, all };
+        pricing.all = pricing.level(None);
         pricing
+    }
+
+    /// The pilot's groups but `left` as the pricing reads them. Its pooling runs on the thread pool: made on the calling
+    /// thread, never inside one of the pool's tasks.
+    fn level(&self, left: Option<usize>) -> Level {
+        let parts: Vec<&Part> = self.pilot.iter().enumerate().filter(|(g, _)| Some(*g) != left).map(|(_, p)| *p).collect();
+        let (estimates, means) = (pooled(&parts, self.scales).0, self.measured.means(self.fixed.model.len(), left));
+        let base = self.mean(&self.own, left) * self.need(&estimates, &means, None);
+        Level { left, estimates, means, base }
+    }
+
+    /// The jackknife's levels: each group left out.
+    fn leave_one_out(&self) -> Vec<Level> {
+        (0..self.pilot.len()).map(|g| self.level(Some(g))).collect()
     }
 
     /// The mean of the rates over the rated states of the groups but `left`.
@@ -1263,46 +1266,51 @@ impl<'a> Pricing<'a> {
         sum / count
     }
 
-    /// A model's W at a level (per µs of run): its mean rate times its product's trajectories -- those the statistics
-    /// need in the room the units' errors but `without`'s leave -- and `pilot` more.
-    fn work(&self, level: usize, without: Option<usize>, rates: &[f64], pilot: f64) -> f64 {
-        let (estimates, means) = &self.data[level];
-        let f = Fixed { model: model_error(means, without, self.unsampled), ..self.fixed.clone() };
-        self.mean(rates, self.levels[level]) * (Targets::new(&f).need(estimates) + pilot)
+    /// The trajectories the statistics need in the room the units' errors but `without`'s leave.
+    fn need(&self, estimates: &[Estimate], means: &[Vec<[f64; 2]>], without: Option<usize>) -> f64 {
+        Targets::new(&Fixed { model: model_error(means, without, self.unsampled), ..self.fixed.clone() }).need(estimates)
     }
 
-    /// The saving of keeping unit `u` at the rates `rates` of its kept model, the new attempt's pilot counted.
-    fn saving(&self, u: usize, rates: &[f64]) -> Read {
-        let x: Vec<f64> = (0..self.levels.len()).map(|i| 1. - self.work(i, Some(u), rates, self.again) / self.base[i]).collect();
-        Read { value: x[0], spread: spread(x[1..].iter().copied(), (self.levels.len() - 1) as f64) }
+    /// The share of the current model's W at a level that keeping unit `u` saves at the rates `rates` of its kept model:
+    /// a model's W (per µs of run) is its mean rate times its product's trajectories (`need`), the kept model's with the
+    /// pilot its new attempt runs.
+    fn share(&self, level: &Level, u: usize, rates: &[f64]) -> f64 {
+        1. - self.mean(rates, level.left) * (self.need(&level.estimates, &level.means, Some(u)) + self.again) / level.base
     }
 
-    /// What keeping unit `u` would save were its kept model to cost no more per µs than the current one: the
-    /// trajectories its error's removal saves, less the new pilot.
-    fn free(&self, u: usize) -> Read {
-        self.saving(u, &self.own)
+    /// The saving of keeping unit `u` at the rates `rates` of its kept model, spread over the jackknife's levels `others`.
+    fn saving(&self, others: &[Level], u: usize, rates: &[f64]) -> Read {
+        Read { value: self.share(&self.all, u, rates), spread: spread(others.iter().map(|l| self.share(l, u, rates)), others.len() as f64) }
     }
 
-    /// The units worth a kept model of their own (module documentation, # The model): those whose keep would pay at the
-    /// current model's rate.
-    fn worth(&self) -> Vec<usize> {
-        (0..self.units.len()).filter(|&u| pays(0., self.free(u))).collect()
+    /// The units whose keep would save at all were its model to cost no more per µs than the current one -- the
+    /// trajectories its error's removal saves, less the new pilot (module documentation, # The model). A saving that is
+    /// none before its spread pays at no confidence: only these are read on the jackknife's levels and given a kept
+    /// model.
+    fn saving_at_all(&self) -> Vec<usize> {
+        (0..self.units.len()).into_par_iter().filter(|&u| self.share(&self.all, u, &self.own) > 0.).collect()
     }
 
-    /// Unit `u` with its kept model built and rated: a keep costs less per µs than the fold it replaces or far more (a
-    /// drive kept across a fine-structure splitting, its generator's norm ~10⁷ rad/µs). None for a unit the model refuses
-    /// to keep (its fold must exist, `Model::new`): its fold's error stands.
-    fn priced(&self, u: usize) -> Option<Candidate> {
+    /// The rates of the model that keeps unit `u`, built for it, at the rated states: a keep costs less per µs than the
+    /// fold it replaces or far more (a drive kept across a fine-structure splitting, its generator's norm ~10⁷ rad/µs).
+    /// None for a unit the model refuses to keep (its fold must exist, `Model::new`): its fold's error stands.
+    fn kept_rates(&self, u: usize) -> Option<Vec<f64>> {
         let with = Model::new(self.request, self.light, &[self.kept, std::slice::from_ref(&self.units[u])].concat()).ok()?;
         let finer = Run::new(&with, self.reference);
         let assembly = finer.assembly_work();
         let middles: Vec<crate::model::Middle> = (0..with.clusters().len()).map(|c| finer.middle(c, self.centre, 0.)).collect();
-        let rates: Vec<f64> = self
-            .rated
-            .iter()
-            .map(|&j| rate(&finer, assembly, &middles[finer.cluster_of(self.model.clusters()[self.states[j].sample.cluster].states[0])], &self.states[j]))
-            .collect();
-        Some(Candidate { unit: u, saving: self.saving(u, &rates), ratio: self.mean(&rates, None) / self.mean(&self.own, None) })
+        Some(self.rated.iter().map(|&j| rate(&finer, assembly, &middles[finer.cluster_of(self.model.clusters()[self.states[j].sample.cluster].states[0])], &self.states[j])).collect())
+    }
+
+    /// A kept model's work per µs over the current one's, from its rates.
+    fn ratio(&self, rates: &[f64]) -> f64 {
+        self.mean(rates, None) / self.mean(&self.own, None)
+    }
+
+    /// Unit `u` with its kept model built and rated, its saving spread over the jackknife's levels `others`.
+    fn priced(&self, others: &[Level], u: usize) -> Option<Candidate> {
+        let rates = self.kept_rates(u)?;
+        Some(Candidate { unit: u, saving: self.saving(others, u, &rates), ratio: self.ratio(&rates) })
     }
 }
 
