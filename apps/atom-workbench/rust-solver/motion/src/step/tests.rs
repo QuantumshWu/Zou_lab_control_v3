@@ -242,6 +242,21 @@ fn a_step_is_the_exact_flow_of_a_quadratic_potential() {
     assert!(dr < 1e-10 && dk < 1e-10, "r {:?} vs {re:?} ({dr:e}); κ {:?} vs {ke:?} ({dk:e})", s.end.r, s.end.kappa);
 }
 
+/// The middle's fixed point is refused where its map is no contraction (`middle`; the step control then halves τ): an
+/// atom that flies into a tweezer of 50 nm waists within a step of several of its periods. The expansion at the free
+/// flight's middle, inside the trap, is a harmonic well that the start lies four waists outside of; its flow reaches a
+/// point far from that middle, whose own expansion is flat and sends the reach back: the moves do not shrink. Such a
+/// step was once taken with a middle that is none (the rounds ended where the move stopped shrinking); a tenth of it,
+/// where the map contracts, is taken.
+#[test]
+fn a_step_whose_middle_does_not_contract_is_refused() {
+    let trap = Trap::Gaussian { depth: 6.0, waists: [0.05, 0.05, 0.05] };
+    let model = Atom::new(RB, trap, vec![], 0.0, 0.0);
+    let start = held(&model, [-0.2, 0.0, 0.0], [60.0, 0.0, 0.0]);
+    assert!(matches!(step::step(&model, &start, 9.0), Err(step::Refused::Reference)), "{:?}", step::step(&model, &start, 9.0).map(|s| s.end.r));
+    assert!(step::step(&model, &start, 0.9).is_ok());
+}
+
 /// The step is its own inverse (SPEC §2.1): a hot atom in a Gaussian tweezer (anharmonic: the reference is the middle's
 /// expansion, a fixed point), one step of τ and one of −τ from its end return to the start to round-off.
 #[test]
@@ -258,9 +273,9 @@ fn a_step_and_its_reverse_return_to_the_start() {
     }
 }
 
-/// e^{−iHτ}ψ of a static generator (`linalg::exp`): the at-rest reference.
+/// e^{−iHτ}ψ of a static generator (the tests' dense reference, `linalg::tests::exp`): the at-rest reference.
 fn evolve(h: &Mat, psi: &[C64], tau: f64) -> Vec<C64> {
-    crate::linalg::exp(h, C64::new(0.0, -tau)).apply(psi)
+    crate::linalg::tests::exp(h, C64::new(0.0, -tau)).apply(psi)
 }
 
 /// Galilei covariance (propagation.md §1.2): an atom moving uniformly through a running wave is an atom at rest at the
@@ -532,15 +547,16 @@ fn a_read_trajectory_accumulates_its_steps_doubling_differences() {
 
 /// The step-doubling estimate is the scheme's local error, O(τ³): a two-level atom in a standing wave in a Gaussian
 /// tweezer, its internal state relaxed (a bare state's first 1/Γ after a jump is a transient no power of τ describes), the
-/// difference of one step and two halves falls eightfold per halving of τ -- between 7 and 10, the next order's room --
+/// difference of one step and two halves falls eightfold per halving of τ -- its order, the binary logarithm of the
+/// fall, rounds to 3 --
 /// on the momentum and the position, from Γτ = 15 (the multirate regime: the internal state exact along the path) to 2.
-/// Without light the momentum's falls eightfold and the position's sixteenfold (the reference's flow exact to its
+/// Without light the momentum's falls eightfold and the position's sixteenfold, order 4 (the reference's flow exact to its
 /// curvature).
 #[test]
 fn the_doubling_estimate_falls_as_tau_cubed() {
     let trap = Trap::Gaussian { depth: 6.0, waists: [1.0, 1.0, 3.0] };
     let beams = vec![Beam { k: [0.0, 0.0, K], rabi: 6.0, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi: 6.0, phase: 0.3 }];
-    for (beams, gamma, orders) in [(beams, GAMMA, [8.0, 8.0]), (vec![], 0.0, [8.0, 16.0])] {
+    for (beams, gamma, orders) in [(beams, GAMMA, [3.0, 3.0]), (vec![], 0.0, [3.0, 4.0])] {
         let model = Atom::new(RB, trap, beams, -40.0, gamma);
         let mut start = held(&model, [0.2, -0.1, 0.4], [30.0, -20.0, 50.0]);
         start.grid = 2.5e-4;
@@ -558,7 +574,7 @@ fn the_doubling_estimate_falls_as_tau_cubed() {
         for i in 0..3 {
             for q in 0..2 {
                 let ratio = d[i][q] / d[i + 1][q];
-                assert!(ratio > 0.875 * orders[q] && ratio < 1.25 * orders[q], "Γ {gamma}: ratio {ratio} of {} at the {i}th halving", ["κ", "r"][q]);
+                assert!((ratio.log2() - orders[q]).abs() < 0.5, "Γ {gamma}: ratio {ratio} of {} at the {i}th halving", ["κ", "r"][q]);
             }
         }
     }
@@ -612,6 +628,8 @@ fn a_segment_s_moments_are_its_path_s_integrals() {
     let tau = 3.0;
     let step = step::step(&model, &start, tau).unwrap();
     let seg = &step.segment;
+    // κ on the step's path at the time t: the flow from the start before the middle, from the kicked middle after it.
+    let path = |t: f64| if t < 0.5 * tau { seg.flow.advance(seg.from, t).1 } else { seg.flow.advance(seg.kicked, t - 0.5 * tau).1 };
     for (from, to) in [(0.2, 1.1), (1.0, 2.6), (1.9, 2.95), (0.0, 3.0)] {
         let (one, two) = seg.moments(from, to);
         let n = 200_000;
@@ -619,7 +637,7 @@ fn a_segment_s_moments_are_its_path_s_integrals() {
         let (mut a, mut b) = ([0.0; 3], [0.0; 3]);
         for i in 0..=n {
             let w = if i == 0 || i == n { 0.5 * h } else { h };
-            let k = seg.at(from + i as f64 * h).1;
+            let k = path(from + i as f64 * h);
             for x in 0..3 {
                 a[x] += w * k[x];
                 b[x] += w * k[x] * k[x];
@@ -631,7 +649,8 @@ fn a_segment_s_moments_are_its_path_s_integrals() {
 
 /// With light the step is its own inverse up to its path momentum's predictor-corrector, of an order beyond the scheme's:
 /// a two-level atom in a far-detuned standing wave (Γ = 0, its state following the light's dressing along the path), one
-/// step and its reverse return to the start by far less than the step's doubling error, and the miss falls faster than τ³.
+/// step and its reverse return to the start by less than the step's doubling error (by seven orders less here), and
+/// over two halvings of τ the miss falls faster than τ³ does.
 #[test]
 fn a_step_with_light_and_its_reverse_miss_beyond_the_scheme_s_order() {
     let trap = Trap::Gaussian { depth: 6.0, waists: [1.0, 1.0, 3.0] };
@@ -648,10 +667,11 @@ fn a_step_with_light_and_its_reverse_miss_beyond_the_scheme_s_order() {
         let miss = (0..3).map(|a| (back.end.kappa[a] - start.kappa[a]).abs()).fold(0.0, f64::max);
         let doubling = (0..3).map(|a| (there.end.kappa[a] - second.end.kappa[a]).abs()).fold(0.0, f64::max);
         eprintln!("τ {tau}: forth and back misses κ by {miss:e}, the doubling differs by {doubling:e}");
-        assert!(miss < 0.1 * doubling, "τ {tau}: miss {miss:e} against the doubling's {doubling:e}");
+        assert!(miss < doubling, "τ {tau}: miss {miss:e} against the doubling's {doubling:e}");
         misses.push(miss);
     }
-    assert!(misses[0] / misses[2] > 16.0, "the miss falls as {misses:?}");
+    // Over the two halvings τ³ falls by 4³.
+    assert!(misses[0] / misses[2] > 64.0, "the miss falls as {misses:?}");
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

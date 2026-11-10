@@ -1,26 +1,14 @@
 //! Complex numbers and small dense complex matrices (n ≤ 32), what the model and the integrator need (SPEC §2.1):
 //! products and the adjoint, the LU solve, the Hermitian eigendecomposition, the general (non-Hermitian)
-//! eigendecomposition with its condition, the matrix exponential and its action on a vector to round-off, and 3 × 3 real
+//! eigendecomposition with its condition, the exponential's action on a vector to round-off, and 3 × 3 real
 //! helpers. One implementation per operation; a real symmetric matrix is a Hermitian one.
 //!
 //! # To round-off
-//! Every iteration here runs until the floating-point format, not a tolerance, ends it: its cost is logarithmic in the
+//! Every iteration here runs until the floating-point format, not a tolerance, ends it (the QR iteration besides within
+//! LAPACK's count, beyond which the decomposition is refused): its cost is logarithmic in the
 //! accuracy (SPEC §2.1), so there is no tolerance to choose. "At round-off" means backward stable: the result is the
 //! exact one of data perturbed relatively by a modest multiple of the unit round-off u (`units::UNIT_ROUNDOFF`); its
 //! forward error is then the problem's own condition times that.
-//!
-//! # The Taylor plan of the matrix exponential (`Taylor`)
-//! e^X for ‖X‖₁ ≤ x is summed as the Taylor polynomial of degree m of Y = X/q, q = 2^s, of norm y = x/q, squared s
-//! times. Per part, on a vector of norm one:
-//! - the truncation is at most R_m(y) = Σ_{k>m} y^k/k! ≤ (y^{m+1}/(m+1)!)/(1 − y/(m+2));
-//! - the rounding of the sum is at most γ Σ_k ‖Y^k v‖/k! ≤ γ e^y (γ the products' and the sum's γ_{n+m}, Higham §3.1).
-//! Over the q = x/y parts the rounding adds up to (x/y) γ e^y: per unit of ‖X‖ it is γ e^y/y, least at y* = 1
-//! (d/dy (e^y/y) = e^y (y − 1)/y²). So the parts are the fewest power of two of norm ≤ 1, 2^⌈log₂ x⌉, and their degree
-//! the least m whose truncation R_m(y) is within the unit round-off u: at y = 1, m = 18. Both follow from the
-//! floating-point format alone; the result's error is then a modest multiple of u‖X‖, the problem's own sensitivity to
-//! the rounding of X (backward stable). The squarings keep it so for a contraction (‖e^{tX}‖ ≤ 1 for t ≥ 0, as
-//! e^{−iH_eff t} with H_eff's anti-Hermitian part negative semidefinite): no hump. It costs (m − 1 + s) matrix products
-//! (n³ each).
 //!
 //! # The Chebyshev plan of the exponential's action (`Chebyshev`)
 //! On a vector, e^{tA}v = e^{t tr(A)/n} e^{−iX}v with X = it(A − tr(A)/n) = H + iK, H and K Hermitian: of a generator,
@@ -35,12 +23,13 @@
 //! - The truncation: the numerical range of X/σ lies in the rectangle |Re| ≤ ρ/σ, |Im| ≤ γ/σ, inside the ellipse of foci
 //!   ±1 through its corner w = (ρ + iγ)/σ, on which |T_k| ≤ r^k, r = |w + √(w² − 1)| (1 for a Hermitian X); so
 //!   ‖T_k(X/σ)‖ ≤ (1 + √2) r^k (Crouzeix & Palencia 2017), and on a part of σ/q the terms beyond K sum to at most
-//!   2(1 + √2) Σ_{k>K} y^k/k! ‖v‖, y = σr/2q: K is the least for which this is within u, as the Taylor plan's degree.
-//! - The rounding: the terms reach r^{σ/q} ≤ e^{(σ/q)(r − 1)}, and σ(r − 1) ≤ γ + √(2σγ + γ²): a hump where the states'
-//!   decay rates differ, which the rounding of a part's sum scales with while the parts' roundings add up. As in the
-//!   Taylor plan the rounding is least where a part's exponent is one: the fewest parts with σγ/q² ≤ 1, q = ⌈√(σγ)⌉
-//!   (γ/q ≤ 1 with it, as σ ≥ γ) -- one part for a Hermitian X of any norm. (A part's y is also kept within
-//!   ln(f64::MAX): the plan's own y^k/k! stay in range.)
+//!   2(1 + √2) Σ_{k>K} y^k/k! ‖v‖ with y = σr/2q, a sum within its first term over 1 − y/(K + 2): K is the least for
+//!   which this is within u.
+//! - The rounding: the terms reach r^{σ/q} ≤ e^{(σ/q)(r − 1)}, and σ(r − 1) ≤ γ + √(2σγ + γ²) = Y: a hump where the
+//!   states' decay rates differ, which the rounding of a part's sum scales with while the parts' roundings add up: over
+//!   q parts q e^{Y/q}, least where a part's exponent is of order one (its derivative in q vanishes at q = Y). So the
+//!   parts are the fewest with σγ/q² ≤ 1, q = ⌈√(σγ)⌉ (γ/q ≤ 1 with it, as σ ≥ γ) -- one part for a Hermitian X of any
+//!   norm. (A part's y is also kept within ln(f64::MAX): the plan's own y^k/k! stay in range.)
 //! - The sum: Clenshaw's recurrence b_k = c_k v + 2(X/σ) b_{k+1} − b_{k+2} downwards from K, the part's sum
 //!   c₀v + (X/σ) b₁ − b₂; the coefficients' J_k(σ/q) by Miller's backward recurrence J_{k−1} = (2k/z) J_k − J_{k+1} in
 //!   step with it, from K + 2 and unnormalized -- the sum is linear in them and is divided by J₀ + 2 Σ_m J_{2m} = 1 at its
@@ -298,9 +287,9 @@ impl Mat {
     pub fn trace(&self) -> C64 {
         (0..self.rows.min(self.cols)).map(|i| self[(i, i)]).sum()
     }
-    /// ‖A‖₁ bounded above: the largest column sum of |re| + |im| (within √2 of the 1-norm, above it).
+    /// ‖A‖₁: the largest column sum of the entries' moduli.
     pub fn norm1(&self) -> f64 {
-        (0..self.cols).map(|j| (0..self.rows).map(|i| self[(i, j)].abs1()).sum::<f64>()).fold(0.0, f64::max)
+        (0..self.cols).map(|j| (0..self.rows).map(|i| self[(i, j)].abs()).sum::<f64>()).fold(0.0, f64::max)
     }
     /// The Frobenius norm √Σ|a_ij|².
     pub fn frobenius(&self) -> f64 {
@@ -525,14 +514,17 @@ pub fn hermitian_eigen(h: &Mat) -> Hermitian {
 
 /// A = R diag(λ) R⁻¹ of a general square matrix: the eigenvalues (in the complex Schur form's order), R with columns
 /// of unit 2-norm, R⁻¹, and the condition κ(R) = ‖R‖₁‖R⁻¹‖₁, which bounds what is computed through the
-/// decomposition: e^{tA}v through it errs by about κ(R)·u·(1 + |t|·(max Re λ − min Re λ)) relative to ‖v‖ (`apply_exp`),
-/// and κ grows without bound towards an exceptional point.
+/// decomposition: e^{tA}v through it errs by about κ(R)·u·(1 + |t|·(max Re λ − min Re λ)) relative to ‖v‖,
+/// and κ grows without bound towards an exceptional point. `work` is the count of its complex multiply-adds as its
+/// algorithm made them (`decide::Work` counts, SPEC §5.1): the reduction's, the QR iteration's rotations', the back
+/// substitution's, R's and its inverse's.
 #[derive(Clone, Debug)]
 pub struct Eigen {
     pub values: Vec<C64>,
     pub vectors: Mat,
     pub inverse: Mat,
     pub condition: f64,
+    pub work: f64,
 }
 
 /// The Givens rotation G = [[c, s], [−s*, c]] (c real) with G [x, y]ᵀ = [r, 0]ᵀ.
@@ -548,11 +540,6 @@ fn givens(x: C64, y: C64) -> (f64, C64) {
     (ax / norm, (x / ax) * y.conj() / norm)
 }
 
-/// The 1-norm, the largest column sum of |a_ij|.
-fn one_norm(a: &Mat) -> f64 {
-    (0..a.cols).map(|j| (0..a.rows).map(|i| a[(i, j)].abs()).sum::<f64>()).fold(0.0, f64::max)
-}
-
 /// The eigendecomposition of a general complex matrix: Householder reduction to Hessenberg form; the single-shift
 /// implicit QR iteration to the complex Schur form T = Q†AQ, with Wilkinson shifts (an exceptional shift every tenth
 /// iteration) and deflation where a subdiagonal entry is within the precision of its two diagonal neighbours (LAPACK
@@ -563,6 +550,7 @@ pub fn eigen(a: &Mat) -> Option<Eigen> {
     let n = a.rows;
     assert_eq!(n, a.cols, "the eigendecomposition of a {}x{} matrix", a.rows, a.cols);
     let mut h = a.clone();
+    let mut work = 0;
     let mut q = Mat::identity(n);
     // Householder reduction: H ← P H P, Q ← Q P, P = I − β v v† zeroing column k below its subdiagonal.
     let mut v = vec![C64::ZERO; n];
@@ -578,6 +566,8 @@ pub fn eigen(a: &Mat) -> Option<Eigen> {
         }
         v[k + 1] += phase * alpha;
         let beta = 2.0 / (k + 1..n).map(|i| v[i].norm_sqr()).sum::<f64>();
+        // The two norms, the reflection on H's rows, and on H's and Q's columns: of n − k − 1 terms each.
+        work += (2 + 6 * n) * (n - k - 1);
         for j in 0..n {
             let s = (k + 1..n).map(|i| v[i].conj() * h[(i, j)]).sum::<C64>() * beta;
             for i in k + 1..n {
@@ -640,6 +630,8 @@ pub fn eigen(a: &Mat) -> Option<Eigen> {
         for k in lo..hi - 1 {
             let (x, y) = if k == lo { (h[(k, k)] - mu, h[(k + 1, k)]) } else { (h[(k, k - 1)], h[(k + 1, k - 1)]) };
             let (c, sn) = givens(x, y);
+            // Two products an entry of each rotated pair: H's rows from the bulge on, H's columns above it, Q's columns.
+            work += 4 * ((n - if k == lo { lo } else { k - 1 }) + (k + 3).min(hi) + n);
             for j in if k == lo { lo } else { k - 1 }..n {
                 let (u, w) = (h[(k, j)], h[(k + 1, j)]);
                 h[(k, j)] = u * c + w * sn;
@@ -668,6 +660,7 @@ pub fn eigen(a: &Mat) -> Option<Eigen> {
         y[(k, k)] = C64::ONE;
         for j in (0..k).rev() {
             let s: C64 = (j + 1..=k).map(|m| h[(j, m)] * y[(m, k)]).sum();
+            work += k - j + 1;
             let mut d = h[(j, j)] - values[k];
             if d.abs1() < floor {
                 d = C64::real(floor);
@@ -676,6 +669,8 @@ pub fn eigen(a: &Mat) -> Option<Eigen> {
         }
     }
     let mut r = q.product(&y);
+    // R = QY and its columns' norms and scaling; its LU (Σ_k (n − k − 1)(n − k)), its inverse (n solves of n²), the norms.
+    work += n * n * n + 2 * n * n + (0..n).map(|k| (n - k - 1) * (n - k)).sum::<usize>() + n * n * n + 2 * n * n;
     for k in 0..n {
         let norm = (0..n).map(|i| r[(i, k)].norm_sqr()).sum::<f64>().sqrt();
         if !(norm > 0.0 && norm.is_finite()) {
@@ -686,84 +681,12 @@ pub fn eigen(a: &Mat) -> Option<Eigen> {
         }
     }
     let inverse = Lu::new(&r)?.inverse();
-    let condition = one_norm(&r) * one_norm(&inverse);
-    condition.is_finite().then_some(Eigen { values, vectors: r, inverse, condition })
-}
-
-impl Eigen {
-    /// v ← R e^{tΛ} R⁻¹ v: e^{tA} v through the decomposition, exact at any t up to the rounding `Eigen` states.
-    pub fn apply_exp(&self, t: C64, v: &mut [C64]) {
-        let mut w = self.inverse.apply(v);
-        for (x, &l) in w.iter_mut().zip(&self.values) {
-            *x = *x * (l * t).exp();
-        }
-        v.copy_from_slice(&self.vectors.apply(&w));
-    }
+    let condition = r.norm1() * inverse.norm1();
+    condition.is_finite().then_some(Eigen { values, vectors: r, inverse, condition, work: work as f64 })
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The exponential.
-
-/// The Taylor plan of the matrix e^X for ‖X‖₁ ≤ x (module documentation, # The Taylor plan): `parts` of norm
-/// ≤ x/parts ≤ 1, a power of two, each summed through degree `terms` -- terms − 1 + log₂ parts matrix products (n³ each).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Taylor {
-    pub parts: usize,
-    pub terms: usize,
-}
-
-/// The widest part y* = 1: where the rounding per unit of norm, γ e^y/y, is least (module documentation).
-const WIDEST: f64 = 1.0;
-
-impl Taylor {
-    /// The least degree m whose truncation R_m(y) ≤ (y^{m+1}/(m+1)!)/(1 − y/(m+2)) is within the unit round-off,
-    /// for y ≤ `WIDEST` (so y < m + 2).
-    fn degree(y: f64) -> usize {
-        let mut m = 0;
-        let mut bound = y;
-        while !(bound / (1.0 - y / (m as f64 + 2.0)) <= UNIT_ROUNDOFF) {
-            m += 1;
-            bound *= y / (m as f64 + 1.0);
-        }
-        m
-    }
-    /// The plan of the matrix exponential: the parts the fewest power of two whose norm is within y* (its squarings
-    /// log₂ parts), and the least degree for their norm.
-    pub fn squarings(x: f64) -> Taylor {
-        assert!(x.is_finite() && x >= 0.0, "the exponential of a matrix of norm {x}");
-        let mut parts = 1;
-        while (parts as f64) * WIDEST < x {
-            parts *= 2;
-        }
-        Taylor { parts, terms: Taylor::degree(x / parts as f64) }
-    }
-}
-
-/// e^{tA} to round-off: the Taylor polynomial of tA/2^s (`Taylor::squarings` of ‖tA‖₁) squared s times.
-pub fn exp(a: &Mat, t: C64) -> Mat {
-    let n = a.rows;
-    assert_eq!(n, a.cols, "the exponential of a {}x{} matrix", a.rows, a.cols);
-    let plan = Taylor::squarings(a.norm1() * t.abs());
-    let mut sum = Mat::identity(n);
-    if plan.terms > 0 {
-        let x = a.scaled(t / plan.parts as f64);
-        let mut term = x.clone();
-        sum.add_scaled(C64::ONE, &x);
-        for k in 2..=plan.terms {
-            term = term.product(&x);
-            for z in &mut term.data {
-                *z *= 1.0 / k as f64;
-            }
-            sum.add_scaled(C64::ONE, &term);
-        }
-    }
-    let mut parts = plan.parts;
-    while parts > 1 {
-        sum = sum.product(&sum);
-        parts /= 2;
-    }
-    sum
-}
 
 /// The Chebyshev plan of e^{−iX} on a vector (module documentation, # The Chebyshev plan): `parts` equal parts, each
 /// summed through degree `terms` -- parts × terms matrix-vector products (n² each).
@@ -902,10 +825,6 @@ pub fn norm3(a: V3) -> f64 {
 pub fn cross3(a: V3, b: V3) -> V3 {
     [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
-/// M v.
-pub fn apply3(m: &M3, v: V3) -> V3 {
-    [dot3(m[0], v), dot3(m[1], v), dot3(m[2], v)]
-}
 /// Two unit vectors that complete the unit vector n to a right-handed orthonormal basis (e₁, e₂, n): e₁ the lab axis
 /// least along n less its part along n, normalized; e₂ = n × e₁.
 pub fn perpendicular(n: V3) -> (V3, V3) {
@@ -930,7 +849,7 @@ pub fn symmetric3_eigen(m: &M3) -> (V3, [V3; 3]) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::random::{Purpose, Stream};
     use crate::units::rounding;
@@ -952,6 +871,26 @@ mod tests {
     }
     fn difference(a: &Mat, b: &Mat) -> f64 {
         a.data.iter().zip(&b.data).fold(0.0, |m, (x, y)| m.max((*x - *y).abs()))
+    }
+
+    /// The tests' dense reference of an exponential: e^{tA} by the Taylor polynomial of tA/2^s, of norm ≤ 1 and degree 18
+    /// (1/19! = 8.2e-18 is within u, 1/18! is not), squared s times. n³ a product: for references only.
+    pub(crate) fn exp(a: &Mat, t: C64) -> Mat {
+        let mut parts = 1;
+        while (parts as f64) < a.norm1() * t.abs() {
+            parts *= 2;
+        }
+        let x = a.scaled(t / parts as f64);
+        let (mut sum, mut term) = (Mat::identity(a.rows), Mat::identity(a.rows));
+        for k in 1..=18 {
+            term = term.product(&x).scaled(C64::real(1.0 / k as f64));
+            sum.add_scaled(C64::ONE, &term);
+        }
+        while parts > 1 {
+            sum = sum.product(&sum);
+            parts /= 2;
+        }
+        sum
     }
 
     /// LU with partial pivoting is backward stable: the residual of a random 24 × 24 system is within its normwise
@@ -1036,16 +975,12 @@ mod tests {
         assert!(at(g / 2.0 * (1.0 + 1e-8)) > 1e3 * at(2.0 * g), "{} {}", at(g / 2.0 * (1.0 + 1e-8)), at(2.0 * g));
     }
 
-    /// The plans. The matrix's Taylor plan: at the widest part y = 1 the least degree whose truncation is within u is 18
-    /// (1/19! = 8.2e-18, while 1/18!·19/18 = 1.65e-16 > u), in 2^⌈log₂ x⌉ parts. The vector's Chebyshev plan: nothing for
-    /// a zero matrix; for a Hermitian one a single part, of degree 15 at σ = 1 (2(1 + √2)(½)¹⁶/16! = 3.5e-18 within u,
-    /// (½)¹⁵/15! not) and about σ beyond it (between σ and 2σ at σ = 100, where parts of norm one took 1800 products);
-    /// where the decay rates differ the fewest parts with σγ/q² ≤ 1.
+    /// The vector's Chebyshev plan: nothing for a zero matrix; for a Hermitian one a single part, of degree 15 at σ = 1
+    /// (2(1 + √2)(½)¹⁶/16! = 3.5e-18 within u, (½)¹⁵/15! not) and about σ beyond it (between σ and 2σ at σ = 100, where
+    /// Taylor polynomials on parts of norm one take 1800 products); where the decay rates differ the fewest parts with
+    /// σγ/q² ≤ 1; and parts that keep y within ln(f64::MAX) (three at σ = 3000).
     #[test]
-    fn the_plans_follow_from_the_round_off() {
-        assert_eq!(Taylor::squarings(1.0), Taylor { parts: 1, terms: 18 });
-        assert_eq!(Taylor::squarings(0.0), Taylor { parts: 1, terms: 0 });
-        assert_eq!(Taylor::squarings(2.5).parts, 4);
+    fn the_plan_follows_from_the_round_off() {
         assert_eq!(Chebyshev::plan(0.0, 0.0), Chebyshev { parts: 1, terms: 0 });
         assert_eq!(Chebyshev::plan(1.0, 0.0), Chebyshev { parts: 1, terms: 15 });
         assert!(Chebyshev::plan(1e-3, 0.0).terms <= 5);
@@ -1095,7 +1030,11 @@ mod tests {
             let m = exp(&k, t);
             let (mut a, mut b) = (v.clone(), v.clone());
             exp_apply(&mut k.clone(), t, &mut a, &mut vec![C64::ZERO; 2 * n]);
-            e.apply_exp(t, &mut b);
+            let mut d = e.inverse.apply(&b);
+            for (x, l) in d.iter_mut().zip(&e.values) {
+                *x = *x * (*l * t).exp();
+            }
+            b = e.vectors.apply(&d);
             let want = m.apply(&v);
             let bound = rounding(4 * n * n) * e.condition * (1.0 + k.norm1() * tau);
             for (route, x) in [("vector", &a), ("eigen", &b)] {
@@ -1112,7 +1051,7 @@ mod tests {
         let m = [[2.0, 0.3, -1.0], [0.3, -4.0, 0.5], [-1.0, 0.5, 1.0]];
         let (values, vectors) = symmetric3_eigen(&m);
         for k in 0..3 {
-            let mv = apply3(&m, vectors[k]);
+            let mv: V3 = std::array::from_fn(|i| dot3(m[i], vectors[k]));
             for i in 0..3 {
                 assert!((mv[i] - values[k] * vectors[k][i]).abs() <= rounding(24) * 6.0);
             }
