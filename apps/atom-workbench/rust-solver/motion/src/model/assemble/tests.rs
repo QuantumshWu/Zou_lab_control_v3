@@ -443,8 +443,9 @@ fn the_tones_are_the_held_force_s_even_part() {
 
 /// A table's middle (tabulate.rs `Model::near_point`: the table's interpolant of a point's values, each straight to its
 /// place) against the middle of the table's forms at the point (`Model::near_tabulated`, laid by `Site::formed`). Their
-/// Hermitian values are the same reals under the same weights in the same order: the force's form is the same number, bit
-/// for bit, and so is the counted work. Their decays are the interpolant of the jumps' product and the product of the
+/// Hermitian values are the same reals under the same weights, the one summed onto its constant in the interpolation's own
+/// fused sum and the other added to it afterwards: the force's forms agree to the rounding of their sums (the bound of
+/// the definitions' own test), and the counted work is the same number. Their decays are the interpolant of the jumps' product and the product of the
 /// interpolated jumps: the generators differ by an anti-Hermitian part alone (the Hermitian part of their difference
 /// within the rounding of the entries' sums), and that mismatch is an interpolation error -- of the third order in the
 /// spacing: with every axis halved (`Model::halved`) its sum over a scene's points and clusters falls by more than 2²,
@@ -490,7 +491,11 @@ fn a_table_s_middle_is_the_middle_of_its_forms_but_for_the_decay_s_interpolation
                         let apart = ((h.data[i] - g.data[i]) + (h.data[j] - g.data[j]).conj()).abs();
                         assert!(apart <= rounding(links) * size, "{name}, cluster {cluster}, s {s}, entry ({}, {}): the Hermitian parts are {apart:e} apart of {size:e}", i / n, i % n);
                     }
-                    assert_eq!(ours.force(&path, s, &rho), theirs.force(&other, s, &rho), "{name}, cluster {cluster}, s {s}: the force's forms");
+                    let (pull, pulled) = (ours.force(&path, s, &rho), theirs.force(&other, s, &rho));
+                    for a in 0..3 {
+                        let (apart, size) = ((pull[a] - pulled[a]).abs(), form_size(&sizes, a, &rho, n));
+                        assert!(apart <= rounding(2 * links + n * n) * size, "{name}, cluster {cluster}, s {s}, axis {a}: the force's forms are {apart:e} apart of {size:e}");
+                    }
                 }
                 // The decay's mismatch on a state, as the table's reads take an error of the generator; and the same on the
                 // finer table.

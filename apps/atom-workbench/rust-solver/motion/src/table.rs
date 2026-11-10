@@ -347,18 +347,18 @@ enum Onto<'a> {
 }
 
 /// out ← (what `onto` says) + Σ_j w_j rows_j, element by element: one pass over four rows, no element depending on
-/// another (the compiler's vector loop).
+/// another -- the compiler's vector loop, four fused multiply-adds a real (linalg.rs: the build's instructions).
 fn blend(out: &mut [f64], onto: Onto, rows: [&[f64]; STENCIL], w: [f64; STENCIL]) {
     let n = out.len();
     let [a, b, c, d] = rows.map(|row| &row[..n]);
-    let sum = |i: usize| (w[0] * a[i] + w[1] * b[i]) + (w[2] * c[i] + w[3] * d[i]);
+    let sum = |i: usize, onto: f64| w[0].mul_add(a[i], w[1].mul_add(b[i], w[2].mul_add(c[i], w[3].mul_add(d[i], onto))));
     match onto {
-        Onto::Nothing => (0..n).for_each(|i| out[i] = sum(i)),
+        Onto::Nothing => (0..n).for_each(|i| out[i] = sum(i, 0.0)),
         Onto::Start(base) => {
             let base = &base[..n];
-            (0..n).for_each(|i| out[i] = base[i] + sum(i))
+            (0..n).for_each(|i| out[i] = sum(i, base[i]))
         }
-        Onto::Itself => (0..n).for_each(|i| out[i] += sum(i)),
+        Onto::Itself => (0..n).for_each(|i| out[i] = sum(i, out[i])),
     }
 }
 
