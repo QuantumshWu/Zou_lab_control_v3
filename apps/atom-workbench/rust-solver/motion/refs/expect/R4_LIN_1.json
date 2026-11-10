@@ -1,0 +1,80 @@
+{
+ "id": "R4_LIN_1",
+ "reference": "R4",
+ "title": "R4 西西弗斯标度律：每束 40 mW/cm²，阱内 δ = -20.0Γ",
+ "request": "scenes/R4_LIN_1.json",
+ "durationUs": 1600,
+ "samples": 101,
+ "kind": "pass-fail",
+ "derivation": "A member of R4_LINEAR (the scaling law at three intensities): alone it is judged by its reported trap only, the prepared one of |2,2⟩ with the lin⊥lin pairs’ phase-averaged shift.",
+ "conditions": [
+  {
+   "what": "δ from the cycle’s line in the trap / Γ",
+   "value": -20.000369973166872
+  },
+  {
+   "what": "largest excited population in the lowest light-shift potential",
+   "value": 0.01496695697889908,
+   "limit": "≪ 1"
+  },
+  {
+   "what": "the lowest light-shift potential’s modulation over E_rec",
+   "value": 216.27554125753497,
+   "limit": "≫ 100"
+  },
+  {
+   "what": "Ω_osc τ_p: oscillations in the light’s wells between two pumpings",
+   "value": 41.15072088956392,
+   "limit": "≫ 1"
+  },
+  {
+   "what": "photons scattered over the run",
+   "value": 767.6190105259184
+  },
+  {
+   "what": "pumping times over the run",
+   "value": 40.77832369268502
+  }
+ ],
+ "series": [
+  {
+   "quantity": "trapFrequency",
+   "axis": "x",
+   "value": 0.7780635882479128,
+   "u": 0.000007720362638905318,
+   "target": {
+    "relative": 0
+   }
+  },
+  {
+   "quantity": "trapFrequency",
+   "axis": "y",
+   "value": 20.286651649230794,
+   "u": 0.00020129458385060832,
+   "target": {
+    "relative": 0
+   }
+  },
+  {
+   "quantity": "trapFrequency",
+   "axis": "z",
+   "value": 20.286651649230794,
+   "u": 0.00020129458385060832,
+   "target": {
+    "relative": 0
+   }
+  }
+ ],
+ "info": {
+  "trapKHz": [
+   0.7780635882479128,
+   20.286651649230794,
+   20.286651649230794
+  ],
+  "modulationUK": 39.140655282501626,
+  "deepestShiftUK": 87.15154616442871,
+  "oscillationKHz": 166.91945790462688,
+  "photonRatePerUs": 0.479761881578699,
+  "pumpRatePerUs": 0.025486452307928138
+ }
+}

@@ -9,12 +9,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {levelShifts,laserMHz} from './lib/app.mjs';
-import {KT_PER_UK,RAD_PER_MHZ,beamMeasure,branchRate,coupling,decayRates,gaussHermite,gaussLegendre,hbarOverMass,index,integrate,inverse3,kineticRatio,preparedTrap,rayleigh,recoilUK,solve3,uKOfMHz,wignerTemperature} from './lib/phys.mjs';
+import {KT_PER_UK,RAD_PER_MHZ,beamMeasure,branchRate,coupling,decayRates,gaussHermite,gaussLegendre,hbarOverMass,hermitianEigen,index,integrate,inverse3,kineticRatio,preparedTrap,rayleigh,recoilRate,recoilUK,solve3,uKOfMHz,wignerTemperature} from './lib/phys.mjs';
 import {ramanNumbers,standingPhase} from './lib/defs.mjs';
 
 const here=path.dirname(fileURLToPath(import.meta.url));
 const read=f=>JSON.parse(fs.readFileSync(path.join(here,f),'utf8'));
-const write=(id,e)=>{const f=path.join(here,'expect',`${id}.json`);fs.mkdirSync(path.dirname(f),{recursive:true});fs.writeFileSync(f,JSON.stringify(e,null,1));console.log(id,e.series.length,'series');};
+const write=(id,e)=>{const f=path.join(here,'expect',`${id}.json`);fs.mkdirSync(path.dirname(f),{recursive:true});fs.writeFileSync(f,JSON.stringify(e,null,1));console.log(id,e.series?`${e.series.length} series`:`relation of ${e.members.map(m=>m.id).join(', ')}`);};
 const grid=line=>{const {durationUs:T,samples:n}=line.options;return Array.from({length:n},(_,i)=>T*i/(n-1));};
 const all=line=>grid(line).map((_,i)=>i);
 const beamOf=(line,id)=>line.model.motion.beams.find(b=>b.id===id);
@@ -713,13 +713,14 @@ async function r10(id){
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// R4: Sisyphus against the 1D quantum references TW1/TW2.
+// R4: Sisyphus cooling -- the scaling law (judged), and the old 1D quantum results TW1/TW2 (reported).
 
-/** R4. The 1D GMW quantum references (LONGREF_TW*.json, contract §3.5: reused, not recomputed) along the radial axis z
- * through the focus: T_z(t) and the F = 1 population at the scene's output times (every 10 µs, the references' rows).
- * Judged only where k_BT ≥ 4ħω (the method's validated regime; below it the semiclassical method is known to run 10–55 %
- * cold). The reference's own uncertainty: its step (dt 0.2 vs 0.1 µs: ≤ 1.2 % in T, its companions) and grid; the
- * 3D scene's other axes are assumed separable (their coupling through the tweezer's light shift ~1 % at 30 µK). */
+/** R4, reported only (another engine's old numeric result is never a judge: check.mjs `reported`, kind
+ * "characterization"). The 1D GMW quantum results (LONGREF_TW*.json, contract §3.5: reused, not recomputed) along the
+ * radial axis z through the focus: T_z(t) and the F = 1 population at the scene's output times (every 10 µs, their
+ * rows), compared where k_BT ≥ 4ħω (below it the semiclassical method is known to run 10–55 % cold). Their own
+ * uncertainty: the step (dt 0.2 vs 0.1 µs: ≤ 1.2 % in T, the companions) and grid; the 3D scene's other axes are
+ * assumed separable (their coupling through the tweezer's light shift ~1 % at 30 µK). */
 async function r4(id){
   const line=read(`scenes/${id}.json`),name=id.slice(3),ref=JSON.parse(fs.readFileSync(`${(await import('./scenes.mjs')).TW_REFERENCES}/LONGREF_${name}.json`,'utf8'));
   const times=grid(line),rows=new Map(ref.rows.map(r=>[Math.round(r.t_us),r])),hw=ref.physics.omega_r_over_2pi_kHz*1e-3*2*Math.PI/KT_PER_UK;
@@ -739,14 +740,104 @@ async function r4(id){
   // preparedTrap, with its uncertainty) with the lin⊥lin pairs' phase-averaged shift.
   const scene=read(`scenes/${id}.scene.json`),prep=preparedTrap(line,'ground-2-2'),run=await runningFactor(line,scene,'ground-2-2',line.model.motion.beams.filter(b=>b.id!=='tweezer').map(b=>b.id));
   const trap=prep.omegas.map(w=>w*Math.sqrt(run.factor));
-  const series=[...['x','y','z'].map((a2,i)=>({quantity:'trapFrequency',axis:a2,value:kHz(trap[i]),u:Math.hypot(kHz(prep.u[i])*Math.sqrt(run.factor),kHz(trap[i])*run.u/2),target:{relative:0}})),{quantity:'T',axis:'z',regime:'classical',indices:idx,values:idx.map(i=>rows.get(Math.round(times[i])).T_uK),u:idx.map(i=>relT(times[i])*rows.get(Math.round(times[i])).T_uK),
+  const series=[...['x','y','z'].map((a2,i)=>({quantity:'trapFrequency',axis:a2,value:kHz(trap[i]),u:Math.hypot(kHz(prep.u[i])*Math.sqrt(run.factor),kHz(trap[i])*run.u/2),target:{relative:0}})),{quantity:'T',axis:'z',reported:true,regime:'classical',indices:idx,values:idx.map(i=>rows.get(Math.round(times[i])).T_uK),u:idx.map(i=>relT(times[i])*rows.get(Math.round(times[i])).T_uK),
       judged:idx.map(i=>rows.get(Math.round(times[i])).T_uK>=4*hw),target:TEMPERATURE},
-    {quantity:'group',label:'F=1',states:line.model.states.filter(s=>s.startsWith('ground-1-')),indices:idx,values:idx.map(i=>rows.get(Math.round(times[i])).pF1),u:idx.map(()=>0.003),target:POPULATION},
-    {quantity:'loss',indices:idx,values:idx.map(i=>Math.max(0,rows.get(Math.round(times[i])).loss)),u:idx.map(()=>0.002),target:POPULATION}];
-  write(id,expectation(id,'R4',`R4 西西弗斯 ${name}：1D GMW 量子参照`,line,{
-    derivation:'The 1D quantum (GMW) reference of the same scene along the radial axis z: T_z and p(F=1); T judged where k_BT ≥ 4ħω.',
+    {quantity:'group',label:'F=1',reported:true,states:line.model.states.filter(s=>s.startsWith('ground-1-')),indices:idx,values:idx.map(i=>rows.get(Math.round(times[i])).pF1),u:idx.map(()=>0.003),target:POPULATION},
+    {quantity:'loss',reported:true,indices:idx,values:idx.map(i=>Math.max(0,rows.get(Math.round(times[i])).loss)),u:idx.map(()=>0.002),target:POPULATION}];
+  write(id,expectation(id,'R4',`R4 西西弗斯 ${name}：1D GMW 量子结果（只报告）`,line,{kind:'characterization',
+    derivation:'Reported, never judged: the old 1D quantum (GMW) result of the same scene along the radial axis z, T_z and p(F=1), compared where k_BT ≥ 4ħω. R4 is judged by its scaling law (R4_LINEAR).',
     conditions:[{what:'ħω_r/k_B (µK) of the reference',value:hw},{what:'reference numerical error in T at the end (relative)',value:relNum(times.at(-1))},{what:'separability κk_BT/|δ_eff| at t = 0',value:kap*KT_PER_UK*30/dEff},{what:'running trap factor (ω² over the tweezer’s)',value:run.factor}],
     series,info:{reference:`LONGREF_${name}.json`,note:ref.note,wall_s:ref.wall_s,trapKHz:trap.map(kHz),referenceRadialKHz:ref.physics.omega_r_over_2pi_kHz}}));
+}
+
+/** The lin⊥lin pair's light on F = 2 along its axis, at low saturation: the field X(z) = X₊e^{ikz} + X₋e^{−ikz} of the
+ * two beams `ids` (their couplings at the focus), the light-shift operator on the ground states of F = 2,
+ * W(z) = Σ_e X_e†X_e δ_e/(δ_e² + Γ_e²/4) (δ_e the light's detuning from each excited level as the trap light shifts
+ * it: `detuning(e)`), and its lowest eigenstate c(z) -- the adiabatic potential the cold atom sits in --, on `points`
+ * equal steps of one period π/k of the polarization. Of that state: the excited population Σ_e |X_e c|²/(δ_e² + Γ_e²/4),
+ * the photon rate (Γ_e times it) and the rate of the jumps that leave it, Σ_a (‖B_a c‖² − |⟨c|B_a|c⟩|²),
+ * B_a = Σ_e C_a X_e/(δ_e + iΓ_e/2) (an emission that returns the atom to c is no pumping). Returns the potential's
+ * modulation and its deepest shift (rad/µs), the oscillation frequency in its well Ω_osc = √((ħ/m)∂²W_low) at the
+ * minimum, the largest excited population, and the period's means of the photon and the pumping rates. */
+function lightWells(line,ids,detuning,points=200){
+  const m=line.model.motion,gamma=decayRates(line),k=beamOf(line,ids[0]).waveNumberPerUm,n=line.model.dimension,labelled=prefix=>line.model.states.map((s,i)=>[s,i]).filter(([s])=>s.startsWith(prefix)).map(([,i])=>i);
+  const F2=labelled('ground-2-'),grounds=labelled('ground-'),excited=gamma.map((g,i)=>[g,i]).filter(([g])=>g>0).map(([,i])=>i).filter(e=>F2.some(g=>ids.some(id=>{const x=coupling(line,id,e,g);return x.re||x.im;})));
+  const at=z=>{
+    const c=Math.cos(k*z),s=Math.sin(k*z),xs=excited.map(e=>F2.map(g=>{const p=coupling(line,ids[0],e,g),q=coupling(line,ids[1],e,g);return {re:(p.re+q.re)*c-(p.im-q.im)*s,im:(p.im+q.im)*c+(p.re-q.re)*s};}));
+    const A=F2.map(()=>F2.map(()=>0)),B=F2.map(()=>F2.map(()=>0));
+    excited.forEach((e,ei)=>{const d=detuning(e),w=d/(d*d+gamma[e]**2/4);for(let a=0;a<F2.length;a++)for(let b=0;b<F2.length;b++){const x=xs[ei][a],y=xs[ei][b];A[a][b]+=w*(x.re*y.re+x.im*y.im);B[a][b]+=w*(x.re*y.im-x.im*y.re);}});
+    const low=hermitianEigen(A,B)[0],v=low.vector;
+    // X_e c per excited level, then the populations and the jumps.
+    const amp=excited.map((e,ei)=>{let re=0,im=0;for(let a=0;a<F2.length;a++){re+=xs[ei][a].re*v[a].re-xs[ei][a].im*v[a].im;im+=xs[ei][a].re*v[a].im+xs[ei][a].im*v[a].re;}return {re,im};});
+    let population=0,photons=0,pump=0;
+    excited.forEach((e,ei)=>{const d=detuning(e),p=(amp[ei].re**2+amp[ei].im**2)/(d*d+gamma[e]**2/4);population+=p;photons+=gamma[e]*p;});
+    for(const C of m.emission){let total=0,back={re:0,im:0};
+      for(const g of grounds){let re=0,im=0;
+        excited.forEach((e,ei)=>{const cr=C.real[g*n+e],ci=C.imag[g*n+e];if(!cr&&!ci)return;const d=detuning(e),den=d*d+gamma[e]**2/4,ar=(amp[ei].re*d+amp[ei].im*gamma[e]/2)/den,ai=(amp[ei].im*d-amp[ei].re*gamma[e]/2)/den;re+=cr*ar-ci*ai;im+=cr*ai+ci*ar;});
+        total+=re*re+im*im;const j=F2.indexOf(g);if(j>=0){back.re+=v[j].re*re+v[j].im*im;back.im+=v[j].re*im-v[j].im*re;}}
+      pump+=total-(back.re**2+back.im**2);}
+    return {low:low.value,population,photons,pump};
+  };
+  const h=Math.PI/(k*points),pts=Array.from({length:points},(_,i)=>at(i*h)),lows=pts.map(p=>p.low),i0=lows.indexOf(Math.min(...lows)),mean=f=>pts.reduce((t,p)=>t+f(p),0)/points;
+  const curvature=(lows[(i0+1)%points]-2*lows[i0]+lows[(i0+points-1)%points])/(h*h);
+  return {k,modulation:Math.max(...lows)-lows[i0],deepest:-lows[i0],oscillation:Math.sqrt(hbarOverMass(m.massKg)*curvature),saturation:Math.max(...pts.map(p=>p.population)),photons:mean(p=>p.photons),pump:mean(p=>p.pump)};
+}
+
+/** R4, the scaling law (contract §6 R4): for |δ| ≫ Γ and low saturation the steady state of lin⊥lin cooling is
+ * k_BT = c·ħΩ²/|δ| + O(E_rec) (Dalibard and Cohen-Tannoudji, J. Opt. Soc. Am. B 6 (1989) 2023; for F = 2 → F′ = 3 the
+ * number c is known from numerics only), so at one detuning T is linear in the intensity, and three intensities
+ * I, 2I, 4I satisfy T(4I) − 3T(2I) + 2T(I) = 0 whatever c and the offset are. The relation is between three scenes
+ * (lib/defs.mjs `sisyphus`): its expectation names them (`members`), the combination's coefficients and each member's
+ * window, the outputs the steady state is read over (the run's last third); check.mjs forms D = Σ c_k T̄_k from the
+ * three results. Each member is judged alone by its reported trap only.
+ *
+ * What the law needs, as numbers of the scenes (the conditions) or of the results (the requirements, which check.mjs
+ * reads before it judges): the detuning from the cycle's line in the trap, (Γ/2δ)² ≪ 1; the largest excited
+ * population of the atom in the lowest light-shift potential, p ≪ 1, at 4I; that potential's modulation U well above
+ * the recoil at I (below some hundred E_rec the law bends toward its minimum: no closed form for this atom, so a
+ * condition and not a term of u) and the atom oscillating in its wells many times between two pumpings, Ω_osc τ_p ≫ 1
+ * (the regime in which T depends on U alone); the tweezer no more than a slow background of the molasses -- its
+ * frequency against that oscillation, (ω_z/Ω_osc)², and its line shift over the cloud against the detuning,
+ * κk_BT/ħ|δ| --; the cloud over many periods of the polarization (the pattern's first harmonic averages to
+ * e^{−2k²σ_z²}, σ_z² = k_BT/mω_z²); k_BT ≥ 4ħω on every axis (the method's validated regime); and the steady state
+ * reached (T̄ over the window's two halves equal within twice their standard errors). u, relative to T(4I):
+ * p(4I) + (Γ/2δ)² + (ω_z/Ω_osc(I))² from the scenes, and what check.mjs adds from the results,
+ * κk_BT(4I)/ħ|δ| + e^{−2k²σ_z²(I)}. The target is the user's 10 % of T(4I): a point 10 % off the line through the
+ * other two. */
+async function r4linear(){
+  const ids=['R4_LIN_1','R4_LIN_2','R4_LIN_4'],facts=[];
+  for(const id of ids){
+    const line=read(`scenes/${id}.json`),scene=read(`scenes/${id}.scene.json`),m=line.model.motion,states=line.model.states,gamma=decayRates(line)[index(line,'D2-3-3')],cool=m.beams.filter(b=>/^cool/.test(b.id)).map(b=>b.id);
+    const sh=await levelShifts(scene,['tweezer']),nu=await laserMHz(scene,cool[0]),detuning=e=>RAD_PER_MHZ*(nu-(sh[states[e]].absoluteMHz-sh['ground-2-2'].absoluteMHz));
+    const delta=detuning(index(line,'D2-3-3')),kappa=(sh['D2-3-3'].shiftMHz-sh['ground-2-2'].shiftMHz)/(-sh['ground-2-2'].shiftMHz),wells=lightWells(line,cool,detuning);
+    const prep=preparedTrap(line,'ground-2-2'),run=await runningFactor(line,scene,'ground-2-2',m.beams.filter(b=>b.id!=='tweezer').map(b=>b.id)),trap=prep.omegas.map(w=>w*Math.sqrt(run.factor));
+    const {durationUs,samples}=line.options,recoil=recoilRate(wells.k,m.massKg),intensity=beamOf(line,cool[0]).intensityMWcm2;
+    facts.push({id,delta,gamma,kappa,wells,trap,recoil,durationUs,samples,intensity,mass:m.massKg});
+    write(id,expectation(id,'R4',`R4 西西弗斯标度律：每束 ${intensity} mW/cm²，阱内 δ = ${(delta/gamma).toFixed(1)}Γ`,line,{
+      derivation:'A member of R4_LINEAR (the scaling law at three intensities): alone it is judged by its reported trap only, the prepared one of |2,2⟩ with the lin⊥lin pairs’ phase-averaged shift.',
+      conditions:[{what:'δ from the cycle’s line in the trap / Γ',value:delta/gamma},{what:'largest excited population in the lowest light-shift potential',value:wells.saturation,limit:'≪ 1'},
+        {what:'the lowest light-shift potential’s modulation over E_rec',value:wells.modulation/recoil,limit:'≫ 100'},{what:'Ω_osc τ_p: oscillations in the light’s wells between two pumpings',value:wells.oscillation/wells.pump,limit:'≫ 1'},
+        {what:'photons scattered over the run',value:wells.photons*durationUs},{what:'pumping times over the run',value:wells.pump*durationUs}],
+      series:['x','y','z'].map((a,i)=>({quantity:'trapFrequency',axis:a,value:kHz(trap[i]),u:Math.hypot(kHz(prep.u[i])*Math.sqrt(run.factor),kHz(trap[i])*run.u/2),target:{relative:0}})),
+      info:{trapKHz:trap.map(kHz),modulationUK:wells.modulation/KT_PER_UK,deepestShiftUK:wells.deepest/KT_PER_UK,oscillationKHz:kHz(wells.oscillation),photonRatePerUs:wells.photons,pumpRatePerUs:wells.pump}}));
+  }
+  const low=facts[0],high=facts.at(-1),fixed=high.wells.saturation+(low.gamma/(2*low.delta))**2+(low.trap[2]/low.wells.oscillation)**2;
+  write('R4_LINEAR',{id:'R4_LINEAR',reference:'R4',title:'R4 西西弗斯标度律：T(4I) − 3T(2I) + 2T(I) = 0（lin⊥lin 稳态 T_z 对光强线性）',kind:'relation',
+    members:facts.map(f=>({id:f.id,request:`scenes/${f.id}.json`,durationUs:f.durationUs,samples:f.samples,window:[Math.ceil(2*(f.samples-1)/3),f.samples-1]})),
+    quantity:'T',axis:'z',coefficients:[2,-3,1],scale:facts.length-1,value:0,u:{relative:fixed},target:TEMPERATURE,
+    derivation:'k_BT = c·ħΩ²/|δ| + O(E_rec) at |δ| ≫ Γ and low saturation: at one detuning T is linear in the intensity, so T(4I) − 3T(2I) + 2T(I) = 0 for the steady states of three scenes that differ in the intensity alone. Judged against 10 % of T(4I) once the requirements hold in all three results.',
+    conditions:[{what:'δ from the cycle’s line in the trap / Γ',value:low.delta/low.gamma},{what:'(Γ/2δ)²',value:(low.gamma/(2*low.delta))**2,limit:'≪ 1'},
+      {what:'largest excited population in the lowest light-shift potential, at I, 2I, 4I',value:facts.map(f=>f.wells.saturation),limit:'≪ 1'},
+      {what:'the lowest light-shift potential’s modulation over E_rec, at I, 2I, 4I',value:facts.map(f=>f.wells.modulation/f.recoil),limit:'≫ 100'},
+      {what:'that modulation U (µK), at I, 2I, 4I',value:facts.map(f=>f.wells.modulation/KT_PER_UK)},
+      {what:'Ω_osc τ_p, at I, 2I, 4I: oscillations in the light’s wells between two pumpings',value:facts.map(f=>f.wells.oscillation/f.wells.pump),limit:'≫ 1'},
+      {what:'pumping times over the run, at I, 2I, 4I',value:facts.map(f=>f.wells.pump*f.durationUs)},
+      {what:'photons scattered over the run, at I, 2I, 4I',value:facts.map(f=>f.wells.photons*f.durationUs)},
+      {what:'(ω_z/Ω_osc)² at I: the tweezer against the oscillation in the light’s wells',value:(low.trap[2]/low.wells.oscillation)**2,limit:'≪ 1'},
+      {what:'4ħω_z/k_B (µK): T̄ of every member must stay above it',value:4*low.trap[2]/KT_PER_UK},
+      {what:'κ = δ_LS(0)/U₀ (the line’s shift over the cloud is κk_BT)',value:low.kappa},{what:'u from the scenes (relative to T(4I))',value:fixed}],
+    requirements:['classical: k_BT ≥ 4ħω on every axis over the window, in every member','steady: T̄ over the window’s two halves equal within twice their standard errors, in every member'],
+    info:{k:low.wells.k,kappa:low.kappa,deltaRadPerUs:low.delta,trapZ:low.trap[2],hbarOverMass:hbarOverMass(low.mass),modulationUK:facts.map(f=>f.wells.modulation/KT_PER_UK),intensities:facts.map(f=>f.intensity)}});
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -757,22 +848,41 @@ async function r4(id){
  * spontaneous photons' recoil: kick/runs/qrt_R5051_n.jsonl, d⟨κ_a²⟩/dt = 2D_a, D in 1/(µm² µs)), with the force
  * correlation cut off by e^{−γτ}: γ → 0 holds the slow intra-state fluctuations a point particle's Ehrenfest force
  * leaves out (SPEC §8), which a moving atom's motion cuts off at about its trap frequency. The held atom (mass ×100,
- * scenes.mjs R8_MASS) does not cut them off; its T grows by ΔT_a = (ħ/Mm)·2D_a t/k_B, here at γ = 1/µs (the
+ * scenes.mjs R8_HELD) does not cut them off; its T grows by ΔT_a = (ħ/Mm)·2D_a t/k_B, here at γ = 1/µs (the
  * cutoff kick.md compared the engines at) with u reaching the γ = 0.3/µs value -- reported, not judged; the γ = 0
- * values are in the info. */
+ * values are in the info.
+ * Held: the trap is a site of the retro-reflected tweezer's standing wave, 0.19 µm from the focus (the QRT's own
+ * centre and its frequencies along the lab axes, ω_a² = (ħ/m)∂_a²V there, for ⁸⁷Rb: 1/√M of them here). With the
+ * site's Hessian ω_⊥²(1 − nnᵀ) + ω_∥²nnᵀ about the tweezer's axis n (the two numbers fitted to the three lab values,
+ * the fit's residual listed) the initial ensemble at k_BT ≪ ħω_⊥ is the site's ground state: spreads √(ħ/2Mmω) along
+ * and across, to be far below the probe's wavelength (kσ ≪ 1) and the standing wave's period (2k_tσ_∥ ≪ 1); its
+ * temperature along a lab axis is Σ_j (e_j·a)² ħω_j/2k_B, below ħω_a/2k_B of that axis' own frequency (the mean of the
+ * roots against the root of the mean). */
 async function r8(){
-  const id='R8_R5051',line=read(`scenes/${id}.json`),times=grid(line),r=hbarOverMass(line.model.motion.massKg);
+  const id='R8_R5051',line=read(`scenes/${id}.json`),times=grid(line),m=line.model.motion,r=hbarOverMass(m.massKg),{R8_HELD}=await import('./scenes.mjs');
   const qrt=fs.readFileSync('C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/kick/runs/qrt_R5051_n.jsonl','utf8').split('\n').filter(x=>x.trim()).map(x=>JSON.parse(x));
   const centre=qrt.slice(1).find(q=>q.offset.every(v=>v===0)),D=g=>centre.cutoffs.find(c=>c.gamma===g).D;
+  // The site: ω_a along the lab axes, and ω_⊥², ω_∥² by least squares on ω_a² = ω_⊥² + (ω_∥² − ω_⊥²) n_a².
+  const lab=qrt[0].trap.lab.map(w=>w/Math.sqrt(R8_HELD.mass)),tw=beamOf(line,m.trapBeamId),norm=Math.hypot(...tw.direction),n2=tw.direction.map(x=>(x/norm)**2);
+  const my=lab.reduce((t,w)=>t+w*w,0)/3,slope=lab.reduce((t,w,a)=>t+(w*w-my)*(n2[a]-1/3),0)/n2.reduce((t,x)=>t+(x-1/3)**2,0),across=Math.sqrt(my-slope/3),along=Math.sqrt(my-slope/3+slope);
+  const residual=Math.max(...lab.map((w,a)=>Math.abs(across**2+slope*n2[a]-w*w)/(w*w))),T=m.temperatureUK,spread=w=>Math.sqrt(r*KT_PER_UK*wignerTemperature(w,T))/w,probe=Math.max(...m.beams.filter(b=>b.id!==tw.id&&String(b.frequencyIndex)!==String(tw.frequencyIndex)).map(b=>b.waveNumberPerUm));
   const series=['x','y','z'].map((a,i)=>({quantity:'Tincrease',axis:a,indices:all(line),values:times.map(t=>r*2*D(1)[i]*t/KT_PER_UK),u:times.map(t=>r*2*Math.abs(D(0.3)[i]-D(1)[i])*t/KT_PER_UK),target:TEMPERATURE}));
   write(id,{...expectation(id,'R8','R8 静止原子的动量扩散（R5051，QRT；只作表征）',line,{
     derivation:'Held atom (mass ×100): Var κ_a grows as 2D_a t with the QRT diffusion of the exact master equation at the trap centre; D at the correlation cutoff γ = 1/µs, u to γ = 0.3/µs. The γ → 0 limit (slow intra-state fluctuations) is beyond the semiclassical point particle (SPEC §8).',
-    conditions:[{what:'photon rate at the centre (1/µs)',value:centre.photonRate},{what:'excited population',value:centre.excited}],
+    conditions:[{what:'photon rate at the centre (1/µs)',value:centre.photonRate},{what:'excited population',value:centre.excited},
+      {what:'held atom (mass factor, initial T in µK)',value:R8_HELD},{what:'the site’s centre from the focus (µm)',value:Math.hypot(...qrt[0].trap.centre)},
+      {what:'trap frequencies along x, y, z (kHz)',value:lab.map(kHz)},{what:'across and along the standing wave (kHz); the fit’s largest relative residual in ω_a²',value:[kHz(across),kHz(along),residual]},
+      {what:'ħω/k_BT across and along',value:[across,along].map(w=>w/(KT_PER_UK*T)),limit:'≫ 1: the site’s ground state'},
+      {what:'Wigner factor less 1, across and along: coth(ħω/2k_BT) − 1',value:[across,along].map(w=>1/Math.tanh(w/(2*KT_PER_UK*T))-1),limit:'≪ 1'},
+      {what:'position spread across and along (µm)',value:[spread(across),spread(along)]},{what:'the classical thermal part of it, √(k_BT/Mm)/ω (µm)',value:[across,along].map(w=>Math.sqrt(r*KT_PER_UK*T)/w)},
+      {what:'kσ: the probe’s wave number times the larger spread',value:probe*spread(across),limit:'≪ 1: held'},{what:'2k_tσ_∥: the standing wave’s phase over the spread along it',value:2*tw.waveNumberPerUm*spread(along),limit:'≪ 1: held'},
+      {what:'initial T along x, y, z (µK): Σ_j (e_j·a)² T*_j',value:n2.map(c=>c*wignerTemperature(along,T)+(1-c)*wignerTemperature(across,T))},
+      {what:'expected increase over the run along x, y, z (µK)',value:[0,1,2].map(i=>r*2*D(1)[i]*times.at(-1)/KT_PER_UK)}],
     series,info:{source:'kick/runs/qrt_R5051_n.jsonl (NS scratchpad)',cutoffs:centre.cutoffs.map(c=>({gamma:c.gamma,D:c.D,Dforce:c.Dforce})),Drecoil:centre.Drecoil}}),kind:'characterization'});
 }
 
 const RUN={R1_TWEEZER:()=>r1('R1_TWEEZER'),R1_RETRO:()=>r1('R1_RETRO'),R1_SIGMA_P:()=>r1('R1_SIGMA_P'),R1_SIGMA_M:()=>r1('R1_SIGMA_M'),R1_CROSSED:()=>r1('R1_CROSSED'),
-  R2_RECOIL:r2,R3_DOPPLER:r3,R5_PUMP:r5,R6_RAMAN_CO:()=>r6('R6_RAMAN_CO'),R6_RAMAN_COUNTER:()=>r6('R6_RAMAN_COUNTER'),R9_PUSH:r9,R4_TW1:()=>r4('R4_TW1'),R4_TW2:()=>r4('R4_TW2'),R8_R5051:r8,R9_HEAT:r9heat,
+  R2_RECOIL:r2,R3_DOPPLER:r3,R5_PUMP:r5,R6_RAMAN_CO:()=>r6('R6_RAMAN_CO'),R6_RAMAN_COUNTER:()=>r6('R6_RAMAN_COUNTER'),R9_PUSH:r9,R4_TW1:()=>r4('R4_TW1'),R4_TW2:()=>r4('R4_TW2'),R4_LINEAR:r4linear,R8_R5051:r8,R9_HEAT:r9heat,
   ...Object.fromEntries(['ANTINODE','QUARTER','NODE'].flatMap(at=>[`R10_${at}`,`R10_HELD_${at}`]).map(id=>[id,()=>r10(id)]))};
 const ids=process.argv.slice(2);
 for(const [id,f] of Object.entries(RUN))if(!ids.length||ids.includes(id))await f();

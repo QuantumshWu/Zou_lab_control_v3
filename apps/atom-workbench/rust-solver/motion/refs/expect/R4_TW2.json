@@ -1,12 +1,12 @@
 {
  "id": "R4_TW2",
  "reference": "R4",
- "title": "R4 西西弗斯 TW2：1D GMW 量子参照",
+ "title": "R4 西西弗斯 TW2：1D GMW 量子结果（只报告）",
  "request": "scenes/R4_TW2.json",
  "durationUs": 1000,
  "samples": 101,
- "kind": "pass-fail",
- "derivation": "The 1D quantum (GMW) reference of the same scene along the radial axis z: T_z and p(F=1); T judged where k_BT ≥ 4ħω.",
+ "kind": "characterization",
+ "derivation": "Reported, never judged: the old 1D quantum (GMW) result of the same scene along the radial axis z, T_z and p(F=1), compared where k_BT ≥ 4ħω. R4 is judged by its scaling law (R4_LINEAR).",
  "conditions": [
   {
    "what": "ħω_r/k_B (µK) of the reference",
@@ -56,6 +56,7 @@
   {
    "quantity": "T",
    "axis": "z",
+   "reported": true,
    "regime": "classical",
    "indices": [
     0,
@@ -476,6 +477,7 @@
   {
    "quantity": "group",
    "label": "F=1",
+   "reported": true,
    "states": [
     "ground-1--1",
     "ground-1-0",
@@ -796,6 +798,7 @@
   },
   {
    "quantity": "loss",
+   "reported": true,
    "indices": [
     0,
     1,
