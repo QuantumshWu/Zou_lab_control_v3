@@ -96,6 +96,11 @@ const SEED: u64 = 0;
 const DISTRIBUTION_TIMES: usize = 21;
 /// Half the time the app waits for a message before it kills the worker (contract §2.5: 120 s): the checkpoints' interval.
 const CHECKPOINT: Duration = Duration::from_secs(60);
+/// What the engine did with a folded unit (the ledger's `action`, shown by the app), by where its booked error was read:
+/// at the pilot's states (SPEC §5.2); or, where the model's falsifier read more, with what the product's pairs against
+/// the model that keeps the unit read clearly beyond that.
+const FOLD_MEASURED: &str = "二阶消去（折叠），沿试探轨迹实测";
+const FOLD_PAIRED: &str = "二阶消去（折叠），沿试探轨迹实测，加上产品轨迹与保留该单元的模型配对读清的超出部分";
 
 /// A distribution along one lab axis on one grid (strictly increasing, at least two points) at some of the output
 /// times (`samples`: increasing indices, the last output among them), each the probability at every grid point
@@ -469,16 +474,12 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
         return Ok(Attempt::Keep(units[c.unit].clone(), tau));
     }
     // The ledger's items: each folded unit's error on what is shown and on T (its largest over the outputs, weighed by the
-    // held share as the totals are), the unsampled share, the step.
-    for (u, unit) in units.iter().enumerate() {
-        let shown = (1..outputs).map(|k| weighed(u, k)[0].max(weighed(u, k)[1])).fold(0., f64::max);
-        if shown > 0. {
-            context.ledger.item(&model.label(unit), shown, "二阶消去（折叠），沿试探轨迹实测");
-        }
-    }
+    // held share as the totals are) with the item's place for its unit, the unsampled share, the step.
+    let booked: Vec<f64> = (0..units.len()).map(|u| (1..outputs).map(|k| weighed(u, k)[0].max(weighed(u, k)[1])).fold(0., f64::max)).collect();
+    let places: Vec<Option<usize>> = units.iter().zip(&booked).map(|(unit, &error)| context.ledger.item(&model.label(unit), error, FOLD_MEASURED)).collect();
     context.ledger.item("折叠判定之外的未采样份额", unsampled, "计入模型误差");
-    let booked = context.fixed.step.iter().skip(1).map(|b| b[0].max(b[1])).fold(0., f64::max);
-    context.ledger.item(&format!("时间步长 τ = {tau} μs（全程不变）"), booked, "试探上每步减半实测、沿轨迹累加；产品上以 τ/2 否证");
+    let step_error = context.fixed.step.iter().skip(1).map(|b| b[0].max(b[1])).fold(0., f64::max);
+    context.ledger.item(&format!("时间步长 τ = {tau} μs（全程不变）"), step_error, "试探上每步减半实测、沿轨迹累加；产品上以 τ/2 否证");
     messages.result(&assemble(&context, &estimates, &listed, &counts, pilot_size()), None);
 
     // The product (module documentation, # Stopping).
@@ -532,10 +533,12 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
     if !targets.crowded().is_empty() {
         return Ok(Attempt::Keep(units[u].clone(), tau));
     }
-    let label = model.label(&units[u]);
-    match context.ledger.items.iter_mut().find(|i| i.label == label) {
-        Some(item) => item.estimate = item.estimate.max(largest),
-        None => context.ledger.item(&label, largest, "二阶消去（折叠），沿试探轨迹实测"),
+    // The unit's item, where the pairs read more than the pilot measured: their number, and what was done to get it.
+    if largest > booked[u] {
+        match places[u] {
+            Some(i) => (context.ledger.items[i].estimate, context.ledger.items[i].action) = (largest, FOLD_PAIRED.into()),
+            None => drop(context.ledger.item(&model.label(&units[u]), largest, FOLD_PAIRED)),
+        }
     }
     // The statistics against the room the re-booked errors leave.
     let n = parts.len() as u64 * GROUP;
@@ -938,8 +941,9 @@ impl Targets {
 
 /// Each output's accounts of what is shown and of T (ledger.rs `Account`) by the run's estimates, the model's errors on the
 /// held atoms per output and the step's (`Fixed`), T's where read: the held share 1 − L weighs the model's error on the rows as shown, and
-/// T's whole account (module documentation, # Stopping); t = 0 is the request's state and the ensemble's moments, T's
-/// by quadrature (`Fixed::start`). The model's error on what is shown is at most 1, a probability's. The step's error on
+/// T's whole account (module documentation, # Stopping); t = 0 is the request's state, without error, and the ensemble's
+/// moments, T's by quadrature: its account is the quadrature's error alone (`Fixed::start`), in the discretization's part
+/// (SPEC §4). The model's error on what is shown is at most 1, a probability's. The step's error on
 /// what is shown is the larger of the rows' and the loss's -- the share of the judged trajectories within the loss
 /// energy's window of the escape (module documentation, # The step), the step's share where none is judged yet (a
 /// pilot's result). T has an account where its statistics, its model error and its step error are all read.
