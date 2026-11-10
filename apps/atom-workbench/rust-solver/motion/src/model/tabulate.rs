@@ -52,8 +52,8 @@
 //! by its own measured error where an interpolant is worst, between its nodes. Halving an axis' spacing (crate::table
 //! `Axis::halved`) puts the new nodes at the middles of its intervals: there the table before the halving is compared with the
 //! elimination itself -- the new nodes' own values, so the check costs nothing beyond the finer table --, over every interval the
-//! reach meets: an intensity's range over the reach is its focus value ± the proven bound of its distance from it (reach.rs
-//! `Model::bounds_over`, its threshold bisected down to the axis' first spacing); an angle's or a phase's is its whole range.
+//! reach meets: an intensity's range over the reach is its focus value ± the proven bound of its distance from it, to the axis'
+//! first spacing (reach.rs `Model::extents_over`); an angle's or a phase's is its whole range.
 //! Two measures, per node the largest: the responses' relative error, max over the lit carriers of (‖ΔT‖ + w‖ΔT2‖)/‖T‖ (Frobenius
 //! norms over the carrier's basis vectors and the cluster's ground places; w the largest Doppler shift of the carrier's beams at
 //! the reach's speed), of which the rates take twice (they are quadratic in the responses); and the bound of the potential's
@@ -356,20 +356,9 @@ impl Model {
         if !intensity(coordinate) {
             return (axis.lo, axis.hi);
         }
-        // The largest distance from the focus value over the reach: at least `attained`, at most `bound`.
         let quantity = |r: &Region| self.intensity_moved(coordinate, &layout.polarizations, at, r);
-        let (mut attained, mut bound) = (0.0, axis.hi - axis.lo);
-        while bound - attained > axis.spacing() {
-            let threshold = 0.5 * (attained + bound);
-            let proven = self.bounds_over(reach, threshold, &[&quantity])[0];
-            if proven < threshold {
-                bound = proven.max(attained);
-            } else {
-                attained = threshold;
-                bound = bound.min(proven);
-            }
-        }
-        ((at - bound).max(axis.lo), (at + bound).min(axis.hi))
+        let moved = self.extents_over(reach, axis.spacing(), &[&quantity])[0];
+        ((at - moved).max(axis.lo), (at + moved).min(axis.hi))
     }
 
     /// A table refined over the atoms' reach (module documentation, # Refinement), and the complex multiply-adds of its new
@@ -603,39 +592,30 @@ impl Model {
         (hi * hi / norm - at).abs().max((at - lo * lo / norm).abs())
     }
 
-    /// A table's reals and their slopes along its axes as near forms' jets: the values, and to first order ∇v = Σ_f ∂v/∂s_f ∇s_f
-    /// (module documentation, # At a point), the forms of `entries` from the reals of the same range.
-    fn interpolated(&self, data: &mut [C64], len: usize, entries: Range<usize>, value: &[f64], slope: &[f64], gradients: &[[f64; 3]]) {
-        let (d, w) = (gradients.len(), value.len());
-        for (i, e) in entries.enumerate() {
-            data[e] = C64::new(value[2 * i], value[2 * i + 1]);
-            if !slope.is_empty() {
-                for a in 0..3 {
-                    let along = |q: usize| (0..d).map(|f| slope[f * w + 2 * i + q] * gradients[f][a]).sum::<f64>();
-                    data[(1 + a) * len + e] = C64::new(along(0), along(1));
-                }
-            }
-        }
-    }
-
-    /// The near forms at a point from a table (module documentation, # At a point), the sections asked each to its order (0 or 1).
+    /// The near forms at a point from a table (module documentation, # At a point), the sections asked each to its order (0 or
+    /// 1): their values and, to first order, their slopes along the axes with the coordinates' gradients.
     pub(crate) fn near_tabulated(&self, table: &NearTable, amplitudes: &[Amplitude], sections: &[(Range<usize>, usize)]) -> NearValues {
         let d = table.axes();
         let (x, gradients, mut work) = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, amplitudes);
-        let len = table.layout.plan.near.len();
-        let parts = super::jet::parts(sections.iter().map(|s| s.1).max().unwrap_or(0));
-        let mut data = vec![C64::ZERO; parts * len];
+        let len = sections.iter().map(|s| s.0.end).max().unwrap_or(0);
+        let order = sections.iter().map(|s| s.1).max().unwrap_or(0);
+        let mut data = vec![C64::ZERO; (1 + if order >= 1 { d } else { 0 }) * len];
         for (entries, order) in sections {
             let w = 2 * entries.len();
             let (mut value, mut slope) = (vec![0.0; w], vec![0.0; if *order >= 1 { d * w } else { 0 }]);
             table.table.eval_range(&x, 2 * entries.start, &mut value, if *order >= 1 { Some(&mut slope) } else { None });
-            self.interpolated(&mut data, len, entries.clone(), &value, &slope, &gradients);
-            // The interpolation (4^D nodes, the value and, to first order, D slopes of each real, then the chain rule), in complex
-            // multiply-adds.
-            let real = if *order >= 1 { (4usize.pow(d as u32) * (1 + d) + 3 * d) * w } else { 4usize.pow(d as u32) * w };
-            work += real as f64 / crate::decide::COMPLEX;
+            for (i, e) in entries.clone().enumerate() {
+                data[e] = C64::new(value[2 * i], value[2 * i + 1]);
+                if *order >= 1 {
+                    for f in 0..d {
+                        data[(1 + f) * len + e] = C64::new(slope[f * w + 2 * i], slope[f * w + 2 * i + 1]);
+                    }
+                }
+            }
+            // The interpolation (4^D nodes: the value and, to first order, D slopes of each real), in complex multiply-adds.
+            work += (4usize.pow(d as u32) * (1 + if *order >= 1 { d } else { 0 }) * w) as f64 / crate::decide::COMPLEX;
         }
-        NearValues { len, parts, data, work }
+        NearValues { len, order, data, directions: Some(gradients), work }
     }
 
     /// The tables' error reads at samples (module documentation; SPEC §2.3, §5.4): per table, per axis the read of its
@@ -657,15 +637,19 @@ impl Model {
                         continue;
                     }
                     let amplitudes = self.light.amplitudes(sample.at.r);
-                    let (x, gradients, _) = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, &amplitudes);
+                    let (x, _, _) = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, &amplitudes);
                     let tabulated = self.near_tabulated(table, &amplitudes, &[(0..len, 1)]);
                     for (f, read) in axes.iter_mut().enumerate() {
+                        // The axis' read of the reals and of their slopes, on the table's forms.
                         let (mut dv, mut ds) = (vec![0.0; w], vec![0.0; d * w]);
                         table.table.axis_error(f, &x, &mut dv, &mut ds);
                         let mut moved = tabulated.clone();
-                        let mut error = vec![C64::ZERO; 4 * len];
-                        self.interpolated(&mut error, len, 0..len, &dv, &ds, &gradients);
-                        moved.data.iter_mut().zip(&error).for_each(|(v, e)| *v += *e);
+                        for e in 0..len {
+                            moved.data[e] += C64::new(dv[2 * e], dv[2 * e + 1]);
+                            for g in 0..d {
+                                moved.data[(1 + g) * len + e] += C64::new(ds[g * w + 2 * e], ds[g * w + 2 * e + 1]);
+                            }
+                        }
                         read[k] = self.form_error(sample, plan, &tabulated, &moved, &amplitudes, tables.thermal);
                     }
                     let exact = self.near_exact(plan, &amplitudes, 1, &self.coherent_dressing());

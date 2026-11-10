@@ -16,9 +16,11 @@
 //! or its centre point's, its radius zero. Monotone in the beams' bounds, on the cell it bounds the quantity over the cell and
 //! on the point it is the quantity's bound there (a drive's coherent peak: every beam at its amplitude there, in phase); the
 //! first tends to the second as the cell shrinks. The cell of a quantity's largest bound is halved along its longest side until
-//! the bound decides the question asked -- below the threshold everywhere (the largest remaining bound is the answer), or
-//! reached at a centre in the reach (attained) -- or until it is within the rounding of its centre's value. No point is sampled
-//! as a bound. All the quantities of a model share one tree of cells: a cell's beams, beam pairs and the parts the units' bounds
+//! the bound answers the question asked -- a threshold decided: below it everywhere (the largest remaining bound is the answer), or
+//! reached at a centre in the reach (attained); or an extent known: within a resolution of a value attained at a centre in the
+//! reach -- or until it is within the rounding of its centre's value. No point is sampled as a bound. (A threshold near the
+//! quantity's true largest value is the expensive question: every cell along the place of that value has to shrink to their
+//! difference. A range is asked as an extent, never by thresholds closing in on it.) All the quantities of a model share one tree of cells: a cell's beams, beam pairs and the parts the units' bounds
 //! have in common (the far light's energies, the carriers' dressings, the clusters' force bounds, the drives' bounds per ground
 //! state) are made once, for whichever quantity asks first, and each quantity halves only the cells it still needs -- one decided
 //! on the coarse cells costs nothing further.
@@ -324,10 +326,23 @@ impl Model {
     }
 
     /// The provable bounds over the reach of quantities given per region, each asked against `threshold` (module documentation,
-    /// # Provable extrema): each one's largest upper bound of the cells left when it decides (below the threshold everywhere, or
-    /// attained at or above it at a centre in the reach, or within the rounding of its centre's value); 0 where no cell meets the
-    /// reach.
+    /// # Provable extrema): each one's largest upper bound of the cells left when it is decided -- below the threshold everywhere,
+    /// or attained at or above it at a centre in the reach --, or within the rounding of its centre's value; 0 where no cell meets
+    /// the reach.
     pub(crate) fn bounds_over(&self, reach: &Reach, threshold: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
+        self.proven_over(reach, &|upper, attained| upper < threshold || attained >= threshold, threshold.abs(), quantities)
+    }
+
+    /// The provable bounds over the reach of quantities given per region, each to `resolution`: each one's largest upper bound of
+    /// the cells left once it is within the resolution of a value attained at a centre in the reach.
+    pub(crate) fn extents_over(&self, reach: &Reach, resolution: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
+        self.proven_over(reach, &|upper, attained| upper - attained <= resolution, resolution, quantities)
+    }
+
+    /// The proofs' subdivision (module documentation, # Provable extrema): per quantity the cell of its largest upper bound is
+    /// halved until `settled(that bound, the largest value attained at a centre in the reach so far)`, the cell is unbounded, or
+    /// the bound is within the rounding of its centre's value (of `scale`, the question's own size, where that is larger).
+    fn proven_over(&self, reach: &Reach, settled: &dyn Fn(f64, f64) -> bool, scale: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
         let level = reach.minimum + reach.energy;
         // The reach's speeds where V_prep is at least v.
         let speed = |v: f64| reach.speed.min((2.0 * self.hbar_over_mass * (level - v).max(0.0)).sqrt());
@@ -349,26 +364,26 @@ impl Model {
         let mut nodes: Vec<Node> = make(start).into_iter().collect();
         let mut out = vec![];
         for q in quantities {
-            let queued = |nodes: &[Node], at: usize| {
+            // The cells left, by their upper bounds, and the largest value at a centre in the reach among them and their parents.
+            let (mut queue, mut attained) = (BinaryHeap::new(), f64::NEG_INFINITY);
+            let push = |queue: &mut BinaryHeap<Queued>, attained: &mut f64, nodes: &[Node], at: usize| {
                 let n = &nodes[at];
-                Queued { upper: q(&n.over), node: at, centre: n.at.as_ref().map_or(f64::NEG_INFINITY, |r| q(r)) }
+                let centre = n.at.as_ref().map_or(f64::NEG_INFINITY, |r| q(r));
+                if n.inside {
+                    *attained = attained.max(centre);
+                }
+                queue.push(Queued { upper: q(&n.over), node: at, centre });
             };
-            let mut queue = BinaryHeap::new();
             if !nodes.is_empty() {
-                queue.push(queued(&nodes, 0));
+                push(&mut queue, &mut attained, &nodes, 0);
             }
             out.push(loop {
                 let Some(top) = queue.pop() else { break 0.0 };
-                let n = &nodes[top.node];
-                let cell = n.cell;
-                if top.upper < threshold
-                    || !cell.bounded()
-                    || (n.inside && top.centre >= threshold)
-                    || top.upper - top.centre <= rounding(1) * threshold.abs().max(top.centre.abs())
-                {
+                let cell = nodes[top.node].cell;
+                if settled(top.upper, attained) || !cell.bounded() || top.upper - top.centre <= rounding(1) * scale.max(top.centre.abs()) {
                     break top.upper;
                 }
-                let halves = match n.halves {
+                let halves = match nodes[top.node].halves {
                     Some(h) => h,
                     None => {
                         let h = cell.halves().map(|c| {
@@ -382,7 +397,7 @@ impl Model {
                     }
                 };
                 for h in halves.into_iter().flatten() {
-                    queue.push(queued(&nodes, h));
+                    push(&mut queue, &mut attained, &nodes, h);
                 }
             });
         }

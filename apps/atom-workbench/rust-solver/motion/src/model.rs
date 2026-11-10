@@ -488,13 +488,12 @@ impl Model {
 }
 
 /// The model as one run's integrator sees it (`step::Dynamics`): the model, its near tables where it has them (tabulate.rs), its
-/// running and prepared lights, the reference state's ground populations, and per cluster its plan under the running lights
-/// (assemble.rs) with that plan's table.
+/// prepared lights, the reference state's ground populations, and per cluster its plan under the running lights (assemble.rs)
+/// with that plan's table.
 pub struct Run<'a> {
     pub model: &'a Model,
     pub tables: Option<&'a tabulate::Tables>,
     pub reference: [f64; GROUND],
-    running: Lights,
     prepared: Lights,
     plans: Vec<(Arc<assemble::Plan>, Option<&'a tabulate::NearTable>)>,
     /// The counted real multiply-adds of one assembly (`decide::COMPLEX` per complex one, assemble.rs # Work) and of one jump's
@@ -524,7 +523,7 @@ impl<'a> Run<'a> {
             })
             .fold(0.0, f64::max)
             * crate::decide::COMPLEX;
-        Run { model, tables, reference, running, prepared: model.prepared(), plans, assembly, photons }
+        Run { model, tables, reference, prepared: model.prepared(), plans, assembly, photons }
     }
     /// A cluster's generator at a position and time for every momentum (assemble.rs `Middle`): what a step's two assemblies at
     /// its middle share.

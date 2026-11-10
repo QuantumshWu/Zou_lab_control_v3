@@ -239,7 +239,7 @@ impl Model {
         // A jump with its gradient: a near form's, or a constant.
         let jump = |place: usize| -> [C64; 4] {
             match &near {
-                Some(n) if place < len => std::array::from_fn(|p| n.data[p * len + place]),
+                Some(n) if place < len => n.first_order(place),
                 _ => [plan.constants[place - len], C64::ZERO, C64::ZERO, C64::ZERO],
             }
         };

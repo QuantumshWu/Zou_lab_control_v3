@@ -34,11 +34,18 @@
 //!
 //! # At a point
 //! `Middle`: the plan's beams' amplitudes with their gradients, the near forms there, and from them every term's values --
-//! the momentum does not enter. `Middle::generator` expands them at a momentum into the parts.
+//! the momentum does not enter. `Middle::generator` expands them at a momentum into the parts: a term's two field components are
+//! sums over beams, so its value multiplies every pair of their beams' amplitudes, a_l' a_l (each conjugated or not) -- the pair's
+//! plane waves give its wave vector, its two beams' Doppler shifts its weights. Per pair of beams the terms of every block that
+//! holds it are summed first, each with its two components' weights γ; one product with the pair's amplitudes and its gradient then
+//! gives the pair's entries of the parts. The Hermitian values' gradients are carried as slopes along a few directions -- a table's
+//! along its axes' coordinates' gradients, the exact elimination's along the lab axes --, so that a table of one axis sums one
+//! slope where the gradient has three components.
 //!
 //! # Work
 //! The complex multiply-adds are counted where they are made (`Middle::work`, `Plan::expansion`): the near forms (the table's
-//! interpolation or the elimination), the jumps' products, and per beam pair and entry the value and its gradient.
+//! interpolation or the elimination), the jumps' products (a product's adjoint, the same jumps exchanged, is its conjugate and is
+//! not made again), and per beam pair, block and entry the values, then per beam pair and entry its part's.
 
 use super::eliminate::Responses;
 use super::far::EXCITED;
@@ -117,20 +124,51 @@ impl NearLayout {
     }
 }
 
-/// The near forms at a point, jets to an order (jet.rs): `data[part * len + entry]`, zero outside the sections evaluated; and
-/// the complex multiply-adds that made them.
+/// The near forms at a point over the entries before `len` (zero outside the sections evaluated), to an order, and the complex
+/// multiply-adds that made them: jets in the position (jet.rs: `data[part * len + entry]`), or, from a table, the values and to
+/// first order their slopes along its axes, whose coordinates' gradients are `directions` (`data[(1 + f) * len + entry]` =
+/// ∂v/∂s_f).
 #[derive(Clone, Debug)]
 pub(crate) struct NearValues {
     pub(crate) len: usize,
-    pub(crate) parts: usize,
+    pub(crate) order: usize,
     pub(crate) data: Vec<C64>,
+    pub(crate) directions: Option<Vec<[f64; 3]>>,
     pub(crate) work: f64,
 }
 
 impl NearValues {
-    /// An entry's jet.
+    /// An entry's value and its gradient in the position (of forms to first order).
+    pub(crate) fn first_order(&self, entry: usize) -> [C64; 4] {
+        match &self.directions {
+            None => std::array::from_fn(|p| self.data[p * self.len + entry]),
+            Some(directions) => {
+                let mut out = [self.data[entry], C64::ZERO, C64::ZERO, C64::ZERO];
+                for (f, d) in directions.iter().enumerate() {
+                    let slope = self.data[(1 + f) * self.len + entry];
+                    for i in 0..3 {
+                        out[1 + i] += slope * d[i];
+                    }
+                }
+                out
+            }
+        }
+    }
+    /// An entry's jet in the position to the forms' order.
     pub(crate) fn jet(&self, entry: usize) -> Vec<C64> {
-        (0..self.parts).map(|p| self.data[p * self.len + entry]).collect()
+        match (&self.directions, self.order) {
+            (None, _) => (0..jet::parts(self.order)).map(|p| self.data[p * self.len + entry]).collect(),
+            (Some(_), 0) => vec![self.data[entry]],
+            (Some(_), _) => self.first_order(entry).to_vec(),
+        }
+    }
+    /// The directions the forms' first-order parts are slopes along: a table's coordinates' gradients, or the lab axes.
+    fn slopes(&self) -> Vec<[f64; 3]> {
+        match (&self.directions, self.order) {
+            (_, 0) => vec![],
+            (Some(directions), _) => directions.clone(),
+            (None, _) => (0..3).map(|i| std::array::from_fn(|j| if i == j { 1.0 } else { 0.0 })).collect(),
+        }
     }
 }
 
@@ -148,18 +186,21 @@ pub(crate) struct Scalar {
     pub(crate) beams: Vec<(usize, C64)>,
 }
 
-/// A beam pair of a block: the two factors' beams (place among the plan's beams and weight; None for a factor that is 1) and
-/// per entry of the block its part and its place x n + y there.
+/// A pair of beams whose amplitudes' product multiplies terms (module documentation, # At a point): the two beams (place among
+/// the plan's beams, conjugated or not; None for a factor that is 1), the entries x ← y its blocks hold with their parts and
+/// places x n + y there, and per block the two field components' weights' product and where each of the block's entries lies
+/// among the pair's.
 #[derive(Clone, Debug)]
 struct Pair {
-    left: Option<(usize, C64)>,
-    right: Option<(usize, C64)>,
+    left: Option<(usize, bool)>,
+    right: Option<(usize, bool)>,
     places: Vec<(usize, usize)>,
+    blocks: Vec<(usize, C64, Vec<usize>)>,
 }
 
-/// The terms of one product of field components at one base beat (module documentation, # Terms): its entries x ← y, per flag
-/// (`PLAIN`, `RIGHT`, `LEFT`; and `BOTH` for the decay) where its Hermitian values and its decay's start among a point's values
-/// (one per entry), and its beam pairs.
+/// The terms of one product of field components at one base beat (module documentation, # Terms): its entries' count and, per
+/// flag (`PLAIN`, `RIGHT`, `LEFT`; and `BOTH` for the decay), where its Hermitian values and its decay's start among a point's
+/// values (one per entry).
 #[derive(Clone, Debug)]
 struct Block {
     left: Option<usize>,
@@ -167,7 +208,6 @@ struct Block {
     entries: usize,
     hermitian: [Option<usize>; 3],
     decay: [Option<usize>; 4],
-    pairs: Vec<Pair>,
 }
 
 /// A part's key: its exact residual beat with its value Ω (rad/µs) and its residual wave vector (1/µm).
@@ -225,19 +265,23 @@ pub(crate) struct Plan {
     pub(crate) beams: Vec<usize>,
     pub(crate) scalars: Vec<Scalar>,
     blocks: Vec<Block>,
-    /// Per block its two factors' frequencies and whether its base beat is exactly zero (the potential's static shifts).
+    pairs: Vec<Pair>,
+    /// Per block whether its base beat is exactly zero (the potential's static shifts).
     pub(crate) statics: Vec<bool>,
     /// A point's values without the near light: the Hermitian slots first.
     template: Vec<C64>,
     hermitian: usize,
     pub(crate) links: Vec<Link>,
-    /// The decay's slots: (slot, its products' range, the flag's factor −(i/2)(−1)^{Doppler partners}).
-    sums: Vec<(usize, Range<usize>, C64)>,
+    /// The jumps' products conj(first) second, by sums (each a range of them), and the decay's slots: (slot, its sum, whether
+    /// it takes the sum's conjugate -- the adjoint's, the same jumps exchanged --, the flag's factor −(i/2)(−1)^{Doppler partners}).
     products: Vec<(usize, usize)>,
+    raws: Vec<Range<usize>>,
+    sums: Vec<(usize, usize, bool, C64)>,
     keys: Vec<Key>,
     pub(crate) classes: Vec<ClassPlan>,
-    /// The complex multiply-adds of one expansion (`Middle::generator`) and of a point's values from its near forms.
-    expansion: f64,
+    /// The complex multiply-adds of one expansion (`Middle::generator`): without the gradients' slopes, and per direction of
+    /// them; and of a point's values from its near forms.
+    expansion: [f64; 2],
     values: f64,
 }
 
@@ -263,6 +307,11 @@ enum Jump {
 /// The decay's factor of a flag: −(i/2) for each product, the Doppler partner's amplitude −w C_a T2 turning its sign.
 fn decay_factor(flag: usize) -> C64 {
     C64::new(0.0, if flag == RIGHT || flag == LEFT { 0.5 } else { -0.5 })
+}
+
+/// A flag with its two sides exchanged, where a block's factors are (`Builder::block`).
+fn flip(flag: usize, exchanged: bool) -> usize {
+    if exchanged { [PLAIN, LEFT, RIGHT, BOTH][flag] } else { flag }
 }
 
 struct Builder<'a> {
@@ -316,13 +365,17 @@ impl<'a> Builder<'a> {
         self.scalars.push(Scalar { frequency, group, component, conjugate, beams });
         Some(self.scalars.len() - 1)
     }
-    /// The block of a product of field components at a base beat, found or made.
-    fn block(&mut self, left: Option<usize>, right: Option<usize>, beat: &Beat) -> usize {
-        if let Some(at) = self.drafts.iter().position(|d| d.left == left && d.right == right && d.beat == *beat) {
-            return at;
-        }
-        self.drafts.push(Draft { left, right, beat: beat.clone(), entries: vec![], hermitian: Default::default(), decay: Default::default(), used: Default::default() });
-        self.drafts.len() - 1
+    /// The block of a product of two field components at a base beat, found or made, and whether its factors are exchanged in it:
+    /// a product is one block whatever the order of its factors (the lesser component first, none before any), so that a
+    /// counter-rotating component's e_k e_k'* joins the co-rotating e_k'* e_k -- the same beam pairs, expanded once.
+    fn block(&mut self, left: Option<usize>, right: Option<usize>, beat: &Beat) -> (usize, bool) {
+        let exchanged = left > right;
+        let (left, right) = if exchanged { (right, left) } else { (left, right) };
+        let at = self.drafts.iter().position(|d| d.left == left && d.right == right && d.beat == *beat).unwrap_or_else(|| {
+            self.drafts.push(Draft { left, right, beat: beat.clone(), entries: vec![], hermitian: Default::default(), decay: Default::default(), used: Default::default() });
+            self.drafts.len() - 1
+        });
+        (at, exchanged)
     }
     /// A block's entry x ← y, found or made.
     fn entry(&mut self, block: usize, x: usize, y: usize) -> usize {
@@ -336,8 +389,8 @@ impl<'a> Builder<'a> {
         d.entries.len() - 1
     }
     /// Adds a Hermitian value to a block's entry: a constant and, where given, a near form (conjugated where the flag says).
-    fn hermitian(&mut self, block: usize, flag: usize, x: usize, y: usize, constant: C64, form: Option<(Operand, bool)>) {
-        let at = self.entry(block, x, y);
+    fn hermitian(&mut self, (block, exchanged): (usize, bool), flag: usize, x: usize, y: usize, constant: C64, form: Option<(Operand, bool)>) {
+        let (at, flag) = (self.entry(block, x, y), flip(flag, exchanged));
         let d = &mut self.drafts[block];
         d.used.0[flag] = true;
         let slot = &mut d.hermitian[flag][at];
@@ -348,8 +401,8 @@ impl<'a> Builder<'a> {
         }
     }
     /// Adds a product of two jumps, conj(first) second, to a block's decay.
-    fn decay(&mut self, block: usize, flag: usize, x: usize, y: usize, first: Jump, second: Jump, partners: (bool, bool)) {
-        let at = self.entry(block, x, y);
+    fn decay(&mut self, (block, exchanged): (usize, bool), flag: usize, x: usize, y: usize, first: Jump, second: Jump, partners: (bool, bool)) {
+        let (at, flag) = (self.entry(block, x, y), flip(flag, exchanged));
         let operand = |b: &mut Builder, j: Jump, partner: bool| match j {
             Jump::Constant(v) => {
                 let found = b.constants.iter().position(|c| *c == v).unwrap_or_else(|| {
@@ -691,7 +744,8 @@ impl<'a> Builder<'a> {
             }
         }
         let slots = template.len();
-        let (mut sums, mut products) = (vec![], vec![]);
+        let (mut sums, mut products, mut raws) = (vec![], vec![], vec![]);
+        let mut made: HashMap<Vec<(usize, usize)>, usize> = HashMap::new();
         let mut decay: Vec<[Option<usize>; 4]> = vec![[None; 4]; self.drafts.len()];
         for (b, d) in self.drafts.iter().enumerate() {
             for flag in 0..4 {
@@ -701,15 +755,27 @@ impl<'a> Builder<'a> {
                 decay[b][flag] = Some(template.len());
                 for (constant, terms) in &d.decay[flag] {
                     if !terms.is_empty() {
-                        let first = products.len();
-                        products.extend(terms.iter().map(|(x, y)| (near.at(*x), near.at(*y))));
-                        sums.push((template.len(), first..products.len(), decay_factor(flag)));
+                        let mut list: Vec<(usize, usize)> = terms.iter().map(|(x, y)| (near.at(*x), near.at(*y))).collect();
+                        list.sort();
+                        let mut exchanged: Vec<(usize, usize)> = list.iter().map(|&(x, y)| (y, x)).collect();
+                        exchanged.sort();
+                        let (raw, conjugated) = match (made.get(&list), made.get(&exchanged)) {
+                            (Some(&at), _) => (at, false),
+                            (None, Some(&at)) => (at, true),
+                            (None, None) => {
+                                raws.push(products.len()..products.len() + list.len());
+                                products.extend(list.iter().copied());
+                                made.insert(list, raws.len() - 1);
+                                (raws.len() - 1, false)
+                            }
+                        };
+                        sums.push((template.len(), raw, conjugated, decay_factor(flag)));
                     }
                     template.push(*constant);
                 }
             }
         }
-        // The parts: the static one first; each block's beam pairs with their entries' parts.
+        // The parts, the static one first; and the beam pairs, each with the blocks whose two field components hold its beams.
         let mut index: HashMap<(Beat, Wave), usize> = HashMap::new();
         let mut keys: Vec<Key> = vec![];
         let mut part = |beat: Beat, wave: Wave| -> usize {
@@ -719,39 +785,51 @@ impl<'a> Builder<'a> {
             })
         };
         part(model.axes.zero(), model.no_wave());
+        let mut pairs: Vec<Pair> = vec![];
+        let mut found: HashMap<(Option<(usize, bool)>, Option<(usize, bool)>), usize> = HashMap::new();
+        let mut placed: Vec<HashMap<(usize, usize), usize>> = vec![];
         let mut blocks = vec![];
-        let mut expansion = 0.0;
+        // The multiply-adds of an expansion: per beam pair, block and entry each flag's value and the pair's weight on their sum
+        // (the Hermitian ones', the decay's; and per direction the Hermitian slopes'), then per beam pair and entry its part's value
+        // and, of Hermitian terms, its three forces' (and per direction the slopes' share of them).
+        let mut expansion = [0.0; 2];
         for (b, d) in self.drafts.iter().enumerate() {
-            let sides = |s: Option<usize>| -> Vec<Option<(usize, C64)>> { s.map_or(vec![None], |i| self.scalars[i].beams.iter().map(|x| Some(*x)).collect()) };
-            let wave_of = |s: Option<usize>, beam: &Option<(usize, C64)>| -> Wave {
-                match (s, beam) {
-                    (Some(i), Some((at, _))) => model.no_wave().plus(if self.scalars[i].conjugate { -1 } else { 1 }, &model.beam_wave(self.beams[*at])),
-                    _ => model.no_wave(),
-                }
-            };
-            let mut pairs = vec![];
+            let sides = |s: Option<usize>| -> Vec<Option<(usize, bool, C64)>> { s.map_or(vec![None], |i| self.scalars[i].beams.iter().map(|&(at, c)| Some((at, self.scalars[i].conjugate, c))).collect()) };
+            let wave_of = |beam: &Option<(usize, bool, C64)>| -> Wave { beam.map_or(model.no_wave(), |(at, conjugate, _)| model.no_wave().plus(if conjugate { -1 } else { 1 }, &model.beam_wave(self.beams[at]))) };
+            let count = |used: &[bool]| used.iter().filter(|u| **u).count();
+            let each = |flags: usize| if flags > 0 { (d.entries.len() * (flags + 1)) as f64 } else { 0.0 };
             for l in sides(d.left) {
                 for r in sides(d.right) {
-                    let wave = wave_of(d.left, &l).plus(1, &wave_of(d.right, &r));
-                    let places = d
-                        .entries
-                        .iter()
-                        .map(|&(x, y)| {
-                            let beat = d.beat.plus(1, &cluster.frames[x]).plus(-1, &cluster.frames[y]);
-                            let residual = wave.plus(-1, &cluster.waves_exact[x]).plus(1, &cluster.waves_exact[y]);
-                            (part(beat, residual), x * n + y)
-                        })
-                        .collect();
-                    pairs.push(Pair { left: l, right: r, places });
+                    let key = (l.map(|x| (x.0, x.1)), r.map(|x| (x.0, x.1)));
+                    let at = *found.entry(key).or_insert_with(|| {
+                        pairs.push(Pair { left: key.0, right: key.1, places: vec![], blocks: vec![] });
+                        placed.push(HashMap::new());
+                        pairs.len() - 1
+                    });
+                    let wave = wave_of(&l).plus(1, &wave_of(&r));
+                    let weight = l.map_or(C64::ONE, |x| x.2) * r.map_or(C64::ONE, |x| x.2);
+                    let mut map = vec![];
+                    for &(x, y) in &d.entries {
+                        let beat = d.beat.plus(1, &cluster.frames[x]).plus(-1, &cluster.frames[y]);
+                        let residual = wave.plus(-1, &cluster.waves_exact[x]).plus(1, &cluster.waves_exact[y]);
+                        let place = (part(beat, residual), x * n + y);
+                        let places = &mut pairs[at].places;
+                        map.push(*placed[at].entry(place).or_insert_with(|| {
+                            places.push(place);
+                            places.len() - 1
+                        }));
+                    }
+                    pairs[at].blocks.push((b, weight, map));
+                    expansion[0] += each(count(&d.used.0)) + each(count(&d.used.1));
+                    expansion[1] += each(count(&d.used.0));
                 }
             }
-            // Per beam pair and entry: the value (one multiply-add, one more per Doppler flag of each kind) and, of a Hermitian
-            // block, the three gradients (two each, three more per Hermitian Doppler flag).
-            let flags = |used: &[bool]| used.iter().skip(1).filter(|u| **u).count() as f64;
-            let own = d.used.0.iter().any(|u| *u);
-            let each = 1.0 + flags(&d.used.0) + flags(&d.used.1) + if own { 6.0 + 3.0 * flags(&d.used.0) } else { 0.0 };
-            expansion += (pairs.len() * d.entries.len()) as f64 * each;
-            blocks.push(Block { left: d.left, right: d.right, entries: d.entries.len(), hermitian: hermitian[b], decay: decay[b], pairs });
+            blocks.push(Block { left: d.left, right: d.right, entries: d.entries.len(), hermitian: hermitian[b], decay: decay[b] });
+        }
+        for pair in &pairs {
+            let own = pair.blocks.iter().any(|(b, _, _)| blocks[*b].hermitian.iter().any(|h| h.is_some()));
+            expansion[0] += (pair.places.len() * if own { 4 } else { 1 }) as f64;
+            expansion[1] += (pair.places.len() * if own { 3 } else { 0 }) as f64;
         }
         let statics = self.drafts.iter().map(|d| d.beat.is_zero()).collect();
         let classes = classes
@@ -767,6 +845,8 @@ impl<'a> Builder<'a> {
             .collect();
         let values = (products.len() + sums.len()) as f64;
         Plan {
+            pairs,
+            raws,
             cluster: self.cluster,
             lights: self.lights.clone(),
             states: n,
@@ -798,10 +878,6 @@ impl Plan {
         b.decays();
         b.finish()
     }
-    /// The plan's parts.
-    pub(crate) fn parts(&self) -> usize {
-        self.keys.len()
-    }
     /// A block's two field components.
     pub(crate) fn factors(&self, block: usize) -> (Option<usize>, Option<usize>) {
         (self.blocks[block].left, self.blocks[block].right)
@@ -827,9 +903,12 @@ pub struct Middle<'a> {
     t: f64,
     /// Per beam of the plan: a_l and ∇a_l.
     amplitudes: Vec<[C64; 4]>,
-    /// Every block's values per flag and entry, the Hermitian ones first and their gradients.
+    /// Every block's values per flag and entry, the Hermitian ones first.
     values: Vec<C64>,
-    gradients: Vec<[C64; 3]>,
+    /// The directions the Hermitian values' gradients are slopes along (1/µm per unit of each), and per Hermitian value its slopes
+    /// (`slopes[slot * directions + f]`).
+    directions: Vec<[f64; 3]>,
+    slopes: Vec<C64>,
     /// The complex multiply-adds that made it.
     pub(crate) work: f64,
 }
@@ -867,7 +946,7 @@ impl Model {
     /// blocks: the factorization of K + Σ − z and its solves leave every other entry exactly zero.
     pub(crate) fn mix(&self, cluster: usize) -> Vec<usize> {
         let mut block: Vec<usize> = (0..EXCITED).collect();
-        let mut join = |block: &mut Vec<usize>, a: usize, b: usize| {
+        let join = |block: &mut Vec<usize>, a: usize, b: usize| {
             let (x, y) = (block[a], block[b]);
             if x != y {
                 block.iter_mut().filter(|z| **z == y).for_each(|z| *z = x);
@@ -959,16 +1038,16 @@ impl Model {
     /// A plan's near forms at a point from the exact elimination there, jets to `order`, each carrier's dressing coherent or not as
     /// `coherent` says (eliminate.rs).
     pub(crate) fn near_exact(&self, plan: &Plan, amplitudes: &[Amplitude], order: usize, coherent: &[bool]) -> NearValues {
-        let (len, parts) = (plan.near.len(), jet::parts(order));
-        let mut data = vec![C64::ZERO; parts * len];
+        let len = plan.near.len();
+        let mut data = vec![C64::ZERO; jet::parts(order) * len];
         if len == 0 {
-            return NearValues { len, parts, data, work: 0.0 };
+            return NearValues { len, order, data, directions: None, work: 0.0 };
         }
         let h = self.far_hamiltonian(amplitudes, &plan.lights, order);
         let responses = self.eliminate(plan.cluster, &h, amplitudes, &plan.lights, order, coherent);
         let energies: Vec<Vec<f64>> = h.iter().map(|m| (0..STATES).map(|s| m[(s, s)].re).collect()).collect();
         let work = self.forms(plan, &responses, &energies, &mut data);
-        NearValues { len, parts, data, work: responses.work + self.far_work(&plan.lights, order) + work }
+        NearValues { len, order, data, directions: None, work: responses.work + self.far_work(&plan.lights, order) + work }
     }
 
     /// A plan's near forms at a point, the sections asked each to its order (0 or 1): from its table where one is given
@@ -983,8 +1062,8 @@ impl Model {
     /// TEMPORARY: a plan's sizes.
     pub fn plan_summary(&self, cluster: usize) -> String {
         let plan = self.plan(cluster, &self.running());
-        let entry_terms: usize = plan.blocks.iter().map(|b| b.pairs.len() * b.entries).sum();
-        let pairs: usize = plan.blocks.iter().map(|b| b.pairs.len()).sum();
+        let entry_terms: usize = plan.pairs.iter().map(|p| p.blocks.iter().map(|b| b.2.len()).sum::<usize>()).sum();
+        let pairs: usize = plan.pairs.len();
         format!(
             "near: pairs {} shifts {} jumps {} responses {} (len {}); constants {}; beams {}; scalars {}; blocks {} (beam pairs {}, entry-terms {}); slots {} (hermitian {}), links {}, sums {}, products {}; parts {}; classes {} (member entries {}); mixing blocks {}",
             plan.near.pairs.len(), plan.near.shifts.len(), plan.near.jumps.len(), plan.near.responses.len(), plan.near.len(), plan.constants.len(), plan.beams.len(), plan.scalars.len(), plan.blocks.len(), pairs, entry_terms,
@@ -1042,27 +1121,31 @@ impl Model {
     }
 
     /// The same from the plan's beams' amplitudes and the near forms there (the Hermitian ones to first order): every block's
-    /// values, a Hermitian slot its constant and its near form with its gradient, a decay slot its constant and its jumps'
+    /// values, a Hermitian slot its constant and its near form with its slopes, a decay slot its constant and its jumps'
     /// products. Without near forms (None): the terms that hold none.
     pub(crate) fn middle_of(&self, plan: &Arc<Plan>, r: [f64; 3], t: f64, amplitudes: Vec<[C64; 4]>, near: Option<&NearValues>) -> Middle<'_> {
         let len = plan.near.len();
         let mut values = plan.template.clone();
-        let mut gradients = vec![[C64::ZERO; 3]; plan.hermitian];
+        let directions = near.map_or(vec![], |n| n.slopes());
+        let q = directions.len();
+        let mut slopes = vec![C64::ZERO; plan.hermitian * q];
         let mut work = 0.0;
         if let Some(near) = near {
             work = near.work + plan.values;
             for l in &plan.links {
                 let turn = |z: C64| if l.conjugate { z.conj() } else { z };
                 values[l.slot] += turn(near.data[l.operand]);
-                gradients[l.slot] = std::array::from_fn(|i| turn(near.data[(1 + i) * near.len + l.operand]));
+                for f in 0..q {
+                    slopes[l.slot * q + f] = turn(near.data[(1 + f) * near.len + l.operand]);
+                }
             }
             let value = |at: usize| if at < len { near.data[at] } else { plan.constants[at - len] };
-            for (slot, products, factor) in &plan.sums {
-                let sum: C64 = plan.products[products.clone()].iter().map(|&(x, y)| value(x).conj() * value(y)).sum();
-                values[*slot] += *factor * sum;
+            let raws: Vec<C64> = plan.raws.iter().map(|products| plan.products[products.clone()].iter().map(|&(x, y)| value(x).conj() * value(y)).sum()).collect();
+            for &(slot, raw, conjugated, factor) in &plan.sums {
+                values[slot] += factor * if conjugated { raws[raw].conj() } else { raws[raw] };
             }
         }
-        Middle { model: self, plan: plan.clone(), r, t, amplitudes, values, gradients, work }
+        Middle { model: self, plan: plan.clone(), r, t, amplitudes, values, directions, slopes, work }
     }
 
     /// The one generator assembly (module documentation), the exact elimination at the point.
@@ -1074,7 +1157,7 @@ impl Model {
     pub(crate) fn assembled(&self, cluster: usize, at: &Point, lights: &Lights, tables: Option<&Tables>) -> (Generator, f64) {
         let plan = self.plan(cluster, lights);
         let middle = self.middle(&plan, at.r, at.t, tables.and_then(|t| t.of(cluster, lights)));
-        (middle.generator(at.kappa), middle.work + plan.expansion)
+        (middle.generator(at.kappa), middle.work + plan.expansion[0] + middle.directions.len() as f64 * plan.expansion[1])
     }
 
     /// The counted work at trajectory states (model.rs `Work`): the assembly's multiply-adds, the clusters' dimension and parts,
@@ -1094,58 +1177,63 @@ impl Model {
 }
 
 impl Middle<'_> {
-    /// The generator's parts at a momentum (module documentation, # At a point): per block and beam pair the product of the two
-    /// beams' amplitudes with its gradient, times each entry's value at the pair's Doppler shifts, into the entry's part; a part
-    /// at a beat Ω takes its phase e^{iΩt}.
+    /// The generator's parts at a momentum (module documentation, # At a point): per pair of beams the values of its blocks'
+    /// entries at the pair's Doppler shifts, summed with the blocks' weights; then the product of the two beams' amplitudes with
+    /// its gradient on each entry, into the entry's part; a part at a beat Ω takes its phase e^{iΩt}.
     pub fn generator(&self, kappa: [f64; 3]) -> Generator {
-        let (plan, n) = (&*self.plan, self.plan.states);
+        let (plan, n, q) = (&*self.plan, self.plan.states, self.directions.len());
         let shifts: Vec<f64> = plan.beams.iter().map(|&l| self.model.doppler_shift(l, kappa)).collect();
         let mut parts: Vec<Part> = plan.keys.iter().map(|k| Part { beat: k.beat.clone(), omega: k.omega, wave: k.wave, generator: Mat::zeros(n, n), force: std::array::from_fn(|_| Mat::zeros(n, n)) }).collect();
-        let side = |beam: &Option<(usize, C64)>, scalar: Option<usize>| -> ([C64; 4], f64) {
-            match (beam, scalar) {
-                (Some((at, c)), Some(s)) => (self.amplitudes[*at].map(|z| (if plan.scalars[s].conjugate { z.conj() } else { z }) * *c), shifts[*at]),
-                _ => ([C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO], 0.0),
+        let side = |beam: &Option<(usize, bool)>| -> ([C64; 4], f64) {
+            match beam {
+                Some((at, conjugate)) => (self.amplitudes[*at].map(|z| if *conjugate { z.conj() } else { z }), shifts[*at]),
+                None => ([C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO], 0.0),
             }
         };
-        let (mut h, mut gh, mut d) = (vec![], vec![], vec![]);
-        for block in &plan.blocks {
-            let e = block.entries;
-            let own = block.hermitian.iter().any(|x| x.is_some());
-            for pair in &block.pairs {
-                let ((l, wl), (r, wr)) = (side(&pair.left, block.left), side(&pair.right, block.right));
-                let c = l[0] * r[0];
-                let gc: [C64; 3] = std::array::from_fn(|i| l[1 + i] * r[0] + l[0] * r[1 + i]);
-                let weights = [1.0, wr, wl, wl * wr];
-                h.clear();
-                h.resize(e, C64::ZERO);
-                gh.clear();
-                gh.resize(e, [C64::ZERO; 3]);
-                d.clear();
-                d.resize(e, C64::ZERO);
-                for flag in 0..3 {
-                    if let Some(at) = block.hermitian[flag] {
-                        for i in 0..e {
-                            h[i] += self.values[at + i] * weights[flag];
-                            for a in 0..3 {
-                                gh[i][a] += self.gradients[at + i][a] * weights[flag];
-                            }
+        // Per entry of the pair: the Hermitian values' sum, the decay's, and the Hermitian slopes' per direction.
+        let (mut hermitian, mut decay, mut slopes): (Vec<C64>, Vec<C64>, Vec<C64>) = (vec![], vec![], vec![]);
+        for pair in &plan.pairs {
+            let ((l, wl), (r, wr)) = (side(&pair.left), side(&pair.right));
+            let c = l[0] * r[0];
+            let gc: [C64; 3] = std::array::from_fn(|i| l[1 + i] * r[0] + l[0] * r[1 + i]);
+            let mut weights = [1.0; 4];
+            (weights[RIGHT], weights[LEFT], weights[BOTH]) = (wr, wl, wl * wr);
+            let places = pair.places.len();
+            hermitian.clear();
+            hermitian.resize(places, C64::ZERO);
+            decay.clear();
+            decay.resize(places, C64::ZERO);
+            slopes.clear();
+            slopes.resize(places * q, C64::ZERO);
+            let mut own = false;
+            for (block, weight, map) in &pair.blocks {
+                let block = &plan.blocks[*block];
+                for (flag, at) in block.hermitian.iter().enumerate() {
+                    let Some(at) = at else { continue };
+                    own = true;
+                    let scale = *weight * weights[flag];
+                    for (i, &place) in map.iter().enumerate() {
+                        hermitian[place] += scale * self.values[at + i];
+                        for f in 0..q {
+                            slopes[place * q + f] += scale * self.slopes[(at + i) * q + f];
                         }
                     }
                 }
-                for flag in 0..4 {
-                    if let Some(at) = block.decay[flag] {
-                        for i in 0..e {
-                            d[i] += self.values[at + i] * weights[flag];
-                        }
+                for (flag, at) in block.decay.iter().enumerate() {
+                    let Some(at) = at else { continue };
+                    let scale = *weight * weights[flag];
+                    for (i, &place) in map.iter().enumerate() {
+                        decay[place] += scale * self.values[at + i];
                     }
                 }
-                for (i, &(part, at)) in pair.places.iter().enumerate() {
-                    let p = &mut parts[part];
-                    p.generator.data[at] += c * (h[i] + d[i]);
-                    if own {
-                        for a in 0..3 {
-                            p.force[a].data[at] += gc[a] * h[i] + c * gh[i][a];
-                        }
+            }
+            for (i, &(part, at)) in pair.places.iter().enumerate() {
+                let p = &mut parts[part];
+                p.generator.data[at] += c * (hermitian[i] + decay[i]);
+                if own {
+                    for a in 0..3 {
+                        let along: C64 = (0..q).map(|f| slopes[i * q + f] * self.directions[f][a]).sum();
+                        p.force[a].data[at] += gc[a] * hermitian[i] + c * along;
                     }
                 }
             }
