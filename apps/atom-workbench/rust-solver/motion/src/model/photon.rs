@@ -51,7 +51,7 @@
 //! folded jump sums it, never beam by beam --, Σ_c Re[∇σ_c*⊗∇σ_c]/Σ_c |σ_c|² a photon, at the state's own rate as far as
 //! the response's (eliminate.rs `Model::explicit_moment`).
 
-use super::assemble::{Held, Plan, Site};
+use super::assemble::{ClassPlan, Held, Plan, Site};
 use super::far::EXCITED;
 use super::reach::Region;
 use super::tabulate::NearTable;
@@ -286,6 +286,19 @@ impl Model {
     /// `photons_of`, an explicit state's part of the second moment's rate taken at the populations `populations` of unit
     /// sum on the cluster's states in the stead of the state's own (a step's: its mean over the step, step.rs).
     fn photons_at(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64], populations: Option<&[f64]>, gradients: Gradients) -> (Vec<Photon>, f64) {
+        let mut out = Vec::with_capacity(plan.classes.len());
+        let work = self.classes_at(plan, table, at, psi, populations, gradients, &mut |place, class, u, made, explicit| {
+            out.push(Photon { class: place, landing: class.landing, wave_number: class.wave_number, absorbed: class.absorbed, amplitudes: u.map(|v| v.to_vec()), gradients: made.map(|of| of.map(|v| v.to_vec())), explicit: *explicit });
+        });
+        (out, work)
+    }
+
+    /// What `photons_at` makes, class by class to `each` as it is made -- the class's place and plan, u_a on the landing
+    /// cluster's states, ∇u_a (`[i][a]`; empty where the class takes no gradients) and the explicit states' part --, a
+    /// class the state gives nothing left out; and the complex multiply-adds. The amplitudes are held in place: a step's
+    /// scattering (`scattering_of`) reads them where they are made and asks the heap for nothing.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn classes_at(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64], populations: Option<&[f64]>, gradients: Gradients, each: &mut dyn FnMut(usize, &ClassPlan, [&[C64]; 3], [[&[C64]; 3]; 3], &[[f64; 3]; 3])) -> f64 {
         let (cluster, len, jumping) = (plan.cluster, plan.near.len(), plan.near.jumping());
         let order = if gradients == Gradients::None { 0 } else { 1 };
         let mut site = Held::<Site>::take();
@@ -330,7 +343,7 @@ impl Model {
         };
         let one = [C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO];
         let mut energies: Option<Vec<Vec<f64>>> = None;
-        let mut out = Vec::with_capacity(plan.classes.len());
+        let (mut u, mut made) = ([[C64::ZERO; STATES]; 3], [[[C64::ZERO; STATES]; 3]; 3]);
         for (place, class) in plan.classes.iter().enumerate() {
             let with = match gradients {
                 Gradients::All => true,
@@ -339,8 +352,10 @@ impl Model {
                 Gradients::None => false,
             };
             let n = self.clusters[class.landing].states.len();
-            let mut u: [Vec<C64>; 3] = std::array::from_fn(|_| vec![C64::ZERO; n]);
-            let mut made: [[Vec<C64>; 3]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| vec![C64::ZERO; if with { n } else { 0 }]));
+            let taken = if with { n } else { 0 };
+            for v in u.iter_mut().chain(made.iter_mut().flatten()) {
+                v[..n].fill(C64::ZERO);
+            }
             let mut explicit = [[0.0; 3]; 3];
             for m in &class.members {
                 let folded = !matches!(self.sources[m.source].origin, Origin::Explicit { .. });
@@ -388,12 +403,12 @@ impl Model {
             }
             // A class the state gives nothing: no amplitude, and no gradient either -- at a node of its light a class has
             // no photon and still its gradients' second moment.
-            if u.iter().chain(made.iter().flatten()).all(|v| v.iter().all(|z| *z == C64::ZERO)) {
+            if u.iter().all(|v| v[..n].iter().all(|z| *z == C64::ZERO)) && made.iter().flatten().all(|v| v[..taken].iter().all(|z| *z == C64::ZERO)) {
                 continue;
             }
-            out.push(Photon { class: place, landing: class.landing, wave_number: class.wave_number, absorbed: class.absorbed, amplitudes: u, gradients: made, explicit });
+            each(place, class, std::array::from_fn(|a| &u[a][..n]), std::array::from_fn(|i| std::array::from_fn(|a| &made[i][a][..taken])), &explicit);
         }
-        (out, work)
+        work
     }
 
     /// The wave number |k_φ| (1/µm) of the photons of a cluster's class (module documentation, # A class's photon).
@@ -522,9 +537,36 @@ impl Model {
     /// their gradients, `photons_at`: an explicit state's decay at the given populations), and the complex multiply-adds
     /// that made the photons.
     pub(crate) fn scattering_of(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64], populations: Option<&[f64]>) -> (Scattering, f64) {
-        let (photons, work) = self.photons_at(plan, table, at, psi, populations, Gradients::All);
-        (Scattering::of(&photons, psi.iter().map(|z| z.norm_sqr()).sum()), work)
+        let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
+        let (mut out, mut sizes) = (Scattering::NONE, [0.0; 3]);
+        let work = self.classes_at(plan, table, at, psi, populations, Gradients::All, &mut |_, class, u, made, explicit| {
+            out.add(&mut sizes, &moments(u, made, explicit, class.absorbed), u[0].len(), norm);
+        });
+        out.size = sizes.into_iter().fold(0.0, f64::max);
+        (out, work)
     }
+}
+
+/// The absorbed light's moments of a class per unit time (module documentation, # The absorbed light's momentum) from its
+/// amplitudes u_a, their gradients ∇u_a (`[i][a]`), its explicit states' part and its absorbed light's wave number k_c: W,
+/// the folded part's Σ_a Im⟨u_a|∇u_a⟩, the second moment's rate Σ_a Re⟨∇u_a|⊗|∇u_a⟩ with the explicit part, and the mean a
+/// jump of the class carries.
+fn moments(u: [&[C64]; 3], du: [[&[C64]; 3]; 3], explicit: &[[f64; 3]; 3], absorbed: f64) -> Moments {
+    let weight: f64 = u.iter().map(|v| crate::linalg::norm_sqr(v)).sum();
+    let mean: [f64; 3] = std::array::from_fn(|i| (0..3).map(|a| crate::linalg::inner(u[a], du[i][a]).im).sum());
+    let second = std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|a| crate::linalg::inner(du[i][a], du[j][a]).re).sum::<f64>() + explicit[i][j]));
+    // |b| against k_c as |mean| against k_c W. Beyond it the jump carries k_c along the mean, which is not zero
+    // there; within it b itself, mean/W -- of a class without a rate the mean is nothing (its sum's every term holds
+    // an amplitude), and so is what its jumps, of which there are none, carry.
+    let size = crate::linalg::norm3(mean);
+    let kick = if size > absorbed * weight {
+        mean.map(|x| absorbed * x / size)
+    } else if weight > 0.0 {
+        mean.map(|x| x / weight)
+    } else {
+        [0.0; 3]
+    };
+    Moments { weight, mean, second, kick }
 }
 
 impl Scattering {
@@ -534,21 +576,24 @@ impl Scattering {
     /// landing cluster's states), its explicit part and the carried mean's product over the weight's own 3n: `links`
     /// counts them, `size` their moduli on the diagonal.
     pub fn of(photons: &[Photon], norm: f64) -> Scattering {
-        let mut out = Scattering::NONE;
-        let mut sizes = [0.0; 3];
+        let (mut out, mut sizes) = (Scattering::NONE, [0.0; 3]);
         for photon in photons {
-            let m = photon.moments();
-            for i in 0..3 {
-                out.force[i] += (m.mean[i] - m.weight * m.kick[i]) / norm;
-                sizes[i] += (m.second[i][i] + m.weight * m.kick[i] * m.kick[i]) / norm;
-                for j in 0..3 {
-                    out.diffusion[i][j] += (m.second[i][j] - m.weight * m.kick[i] * m.kick[j]) / norm;
-                }
-            }
-            out.links += 9 * photon.amplitudes[0].len() + 6;
+            out.add(&mut sizes, &photon.moments(), photon.amplitudes[0].len(), norm);
         }
         out.size = sizes.into_iter().fold(0.0, f64::max);
         out
+    }
+
+    /// One class's part (`of`): its moments on `states` landing states, the diagonal's terms' moduli to `sizes`.
+    fn add(&mut self, sizes: &mut [f64; 3], m: &Moments, states: usize, norm: f64) {
+        for i in 0..3 {
+            self.force[i] += (m.mean[i] - m.weight * m.kick[i]) / norm;
+            sizes[i] += (m.second[i][i] + m.weight * m.kick[i] * m.kick[i]) / norm;
+            for j in 0..3 {
+                self.diffusion[i][j] += (m.second[i][j] - m.weight * m.kick[i] * m.kick[j]) / norm;
+            }
+        }
+        self.links += 9 * states + 6;
     }
 }
 
@@ -562,22 +607,8 @@ impl Photon {
     /// of a photon made with its gradients: W, the folded part's Σ_a Im⟨u_a|∇u_a⟩, the second moment's rate Σ_a
     /// Re⟨∇u_a|⊗|∇u_a⟩ with the explicit states' part, and the mean a jump of the class carries.
     pub fn moments(&self) -> Moments {
-        let weight = self.weight();
         let (u, du) = (&self.amplitudes, &self.gradients);
-        let mean: [f64; 3] = std::array::from_fn(|i| (0..3).map(|a| crate::linalg::inner(&u[a], &du[i][a]).im).sum());
-        let second = std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|a| crate::linalg::inner(&du[i][a], &du[j][a]).re).sum::<f64>() + self.explicit[i][j]));
-        // |b| against k_c as |mean| against k_c W. Beyond it the jump carries k_c along the mean, which is not zero
-        // there; within it b itself, mean/W -- of a class without a rate the mean is nothing (its sum's every term holds
-        // an amplitude), and so is what its jumps, of which there are none, carry.
-        let size = crate::linalg::norm3(mean);
-        let kick = if size > self.absorbed * weight {
-            mean.map(|x| self.absorbed * x / size)
-        } else if weight > 0.0 {
-            mean.map(|x| x / weight)
-        } else {
-            [0.0; 3]
-        };
-        Moments { weight, mean, second, kick }
+        moments(std::array::from_fn(|a| &u[a][..]), std::array::from_fn(|i| std::array::from_fn(|a| &du[i][a][..])), &self.explicit, self.absorbed)
     }
 
     /// The mean a jump of the class carries (`Moments::kick`): at most one absorbed photon's momentum k_c.

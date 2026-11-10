@@ -628,6 +628,9 @@ fn a_state_s_photons_in_parts_are_its_photons() {
             let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
             let (whole, work) = model.photons_of(&plan, table, &at, &psi, Gradients::All);
             assert_eq!((&whole, work), (&model.photons_counted(cluster, &at, &psi, tables).0, model.photons_counted(cluster, &at, &psi, tables).1), "{name}, cluster {cluster}: the photons by the cluster's own plan and table");
+            // A step's scattering reads the same photons where they are made: the same sums in the same order.
+            let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
+            assert_eq!(model.scattering_of(&plan, table, &at, &psi, None).0, crate::model::Scattering::of(&whole, norm), "{name}, cluster {cluster}: the scattering");
             let bare = model.photons_of(&plan, table, &at, &psi, Gradients::None).0;
             assert_eq!(bare, run.photon_amplitudes(cluster, &at, &psi));
             assert_eq!(whole.len(), bare.len(), "{name}, cluster {cluster}: the classes");
