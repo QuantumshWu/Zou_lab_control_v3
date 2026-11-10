@@ -78,7 +78,7 @@ use crate::ledger::{percent, span, when, Account, Ledger};
 use crate::linalg::V3;
 use crate::model::{Envelope, Lights, Model, Run, Sample, Trap, Unit, UnitError, GROUND};
 use crate::request::STATES;
-use crate::step::{Dynamics, Segment, Trajectory};
+use crate::step::{Dynamics, Scratch, Segment, Trajectory};
 use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, ORDER, STEP_SHARE, TEMPERATURE_TARGET};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -692,6 +692,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: Option<
     let interval = plan.times[1] - plan.times[0];
     let widest = plan.halves.iter().flatten().fold(0., |a: f64, &b| a.max(b));
     let mut t = Trajectory::new(model, start.state, start.r, start.kappa, SEED, index);
+    let mut scratch = Scratch::default();
     let mut reader = read.map(Reader::new);
     // Per output and lab axis: the window's time held, ∫κ dt and ∫κ² dt.
     let mut moments = vec![[[0.; 3]; 3]; outputs];
@@ -742,7 +743,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: Option<
             }
         };
         for k in 1..outputs {
-            failed = adapt::advance(model, tau, &mut t, reader.as_mut(), plan.times[k], &mut each).is_err();
+            failed = adapt::advance(model, tau, &mut t, &mut scratch, reader.as_mut(), plan.times[k], &mut each).is_err();
             if failed || t.lost.is_some() {
                 reached = k;
                 break;
@@ -751,7 +752,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: Option<
         }
         if reached == outputs {
             // Through the last output's window; a failure there leaves every output read.
-            failed = adapt::advance(model, tau, &mut t, reader.as_mut(), plan.end, &mut each).is_err();
+            failed = adapt::advance(model, tau, &mut t, &mut scratch, reader.as_mut(), plan.end, &mut each).is_err();
         }
     }
     // From the output it does not reach: failed, or lost -- judged at the state it was lost in, its loss energy's error as

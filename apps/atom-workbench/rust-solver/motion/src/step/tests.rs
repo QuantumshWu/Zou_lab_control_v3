@@ -310,7 +310,7 @@ fn a_step_is_the_exact_flow_of_a_quadratic_potential() {
     let model = Atom::new(RB, trap, vec![], 0.0, 0.0);
     let (r, kappa) = ([0.3, -0.2, 0.1], [40.0, 25.0, -60.0]);
     let tau = 20.0;
-    let s = step::step(&model, &held(&model, r, kappa), tau).unwrap();
+    let s = step::step(&model, &held(&model, r, kappa), tau, &mut step::Scratch::default()).unwrap();
     let (re, ke) = rk4(&trap, RB, r, kappa, tau, 200_000);
     let (dr, dk) = (relative(&s.end.r, &re), relative(&s.end.kappa, &ke));
     assert!(dr < 1e-10 && dk < 1e-10, "r {:?} vs {re:?} ({dr:e}); κ {:?} vs {ke:?} ({dk:e})", s.end.r, s.end.kappa);
@@ -327,8 +327,8 @@ fn a_step_whose_middle_does_not_contract_is_refused() {
     let trap = Trap::Gaussian { depth: 6.0, waists: [0.05, 0.05, 0.05] };
     let model = Atom::new(RB, trap, vec![], 0.0, 0.0);
     let start = held(&model, [-0.2, 0.0, 0.0], [60.0, 0.0, 0.0]);
-    assert!(matches!(step::step(&model, &start, 9.0), Err(step::Refused::Reference)), "{:?}", step::step(&model, &start, 9.0).map(|s| s.end.r));
-    assert!(step::step(&model, &start, 0.9).is_ok());
+    assert!(matches!(step::step(&model, &start, 9.0, &mut step::Scratch::default()), Err(step::Refused::Reference)), "{:?}", step::step(&model, &start, 9.0, &mut step::Scratch::default()).map(|s| s.end.r));
+    assert!(step::step(&model, &start, 0.9, &mut step::Scratch::default()).is_ok());
 }
 
 /// The step is its own inverse (SPEC §2.1): a hot atom in a Gaussian tweezer (anharmonic: the reference is the middle's
@@ -340,8 +340,8 @@ fn a_step_and_its_reverse_return_to_the_start() {
     let (r, kappa) = ([0.35, -0.2, 0.9], [60.0, -45.0, 30.0]);
     for tau in [0.5, 2.0, 5.0] {
         let start = held(&model, r, kappa);
-        let there = step::step(&model, &start, tau).unwrap();
-        let back = step::step(&model, &there.end, -tau).unwrap();
+        let there = step::step(&model, &start, tau, &mut step::Scratch::default()).unwrap();
+        let back = step::step(&model, &there.end, -tau, &mut step::Scratch::default()).unwrap();
         let (dr, dk) = (relative(&back.end.r, &r), relative(&back.end.kappa, &kappa));
         assert!(dr < 1e-13 && dk < 1e-13, "τ {tau}: r {:?} ({dr:e}), κ {:?} ({dk:e})", back.end.r, back.end.kappa);
     }
@@ -366,7 +366,7 @@ fn a_moving_atom_is_an_atom_at_rest_at_the_shifted_detuning() {
     for v in [[0.0, 0.0, 0.0], [0.2, -0.4, 0.6], [0.0, 0.0, -1.5]] {
         let kappa = v.map(|x| x / hm);
         let tau = 0.3;
-        let s = step::step(&model, &held(&model, [0.1, 0.2, 0.3], kappa), tau).unwrap();
+        let s = step::step(&model, &held(&model, [0.1, 0.2, 0.3], kappa), tau, &mut step::Scratch::default()).unwrap();
         // The path's velocity: the mean of the momenta before and after the kick (flat trap: κ_h = κ₀).
         let kv: f64 = (0..3).map(|a| beam.k[a] * hm * 0.5 * (kappa[a] + s.segment.kicked.1[a])).sum();
         let mut rest = Mat::zeros(2, 2);
@@ -410,7 +410,7 @@ fn a_moving_atom_in_a_standing_wave_is_an_atom_at_rest_with_two_detunings() {
     let (v, z0, tau) = (0.8, 0.13, 0.5);
     let mut t = held(&model, [0.0, 0.0, z0], [0.0, 0.0, v / hm]);
     t.grid = 1e-4;
-    let s = step::step(&model, &t, tau).unwrap();
+    let s = step::step(&model, &t, tau, &mut step::Scratch::default()).unwrap();
     // At rest, the lab generator along z(t) = z₀ + v t.
     let h = |time: f64| -> Mat {
         let z = z0 + v * time;
@@ -439,9 +439,9 @@ fn mean_force(model: &Atom, r: [f64; 3], v: [f64; 3], trajectories: u64, from: f
     let mut forces = Vec::new();
     for i in 0..trajectories {
         let mut t = Trajectory::new(model, 0, r, v.map(|x| x / model.hm), 11, i);
-        adapt::advance(model, tau, &mut t, None, from, &mut |_| {}).unwrap();
+        adapt::advance(model, tau, &mut t, &mut step::Scratch::default(), None, from, &mut |_| {}).unwrap();
         let start = t.kappa;
-        adapt::advance(model, tau, &mut t, None, to, &mut |_| {}).unwrap();
+        adapt::advance(model, tau, &mut t, &mut step::Scratch::default(), None, to, &mut |_| {}).unwrap();
         forces.push(std::array::from_fn::<f64, 3, _>(|a| (t.kappa[a] - start[a]) / (to - from)));
     }
     let n = forces.len() as f64;
@@ -540,7 +540,7 @@ fn the_jumps_are_at_the_roots_of_the_norm() {
     let model = Atom::new(RB, flat, vec![], 0.0, gamma);
     let mut t = Trajectory::new(&model, 0, [0.0; 3], [0.0; 3], 3, 5);
     let end = 2000.0;
-    adapt::advance(&model, 10.0, &mut t, None, end, &mut |_| {}).unwrap();
+    adapt::advance(&model, 10.0, &mut t, &mut step::Scratch::default(), None, end, &mut |_| {}).unwrap();
     // The jumps the thresholds put before `end`, and the last one's time.
     let threshold = |j: u32| crate::random::Stream::jump(3, 5, j).open_uniform();
     let (mut last, mut j, mut waits) = (0.0, 0, Vec::new());
@@ -576,7 +576,7 @@ fn a_read_trajectory_holds_its_jumps_input_and_its_hazard() {
     let model = Atom::new(RB, flat, vec![], 0.0, gamma);
     let start = Trajectory::new(&model, 0, [0.0; 3], [3.0, -2.0, 1.0], 3, 5);
     let (mut t, mut reader, end) = (start.clone(), Reader::new([5.0; 3]), 50.0);
-    adapt::advance(&model, 1.0, &mut t, Some(&mut reader), end, &mut |_| {}).unwrap();
+    adapt::advance(&model, 1.0, &mut t, &mut step::Scratch::default(), Some(&mut reader), end, &mut |_| {}).unwrap();
     let drift = reader.drift;
     assert!(t.jumps > 50 && drift.unread == 0.0 && drift.rows.iter().all(|x| *x == 0.0), "{} jumps, {drift:?}", t.jumps);
     let round_off = crate::units::rounding(8 * t.steps as usize);
@@ -619,7 +619,7 @@ fn a_carried_state_takes_the_trajectory_s_jumps() {
             assert_eq!(own.as_ref(), Some(&t.psi), "the trajectory's own state, carried, from state {state} after jump {}", t.jumps);
             assert_eq!(twice.as_ref(), Some(&t.psi), "twice the trajectory's state, carried, from state {state} after jump {}", t.jumps);
             landed.insert(t.cluster);
-            let next = step::step(&run, &t, tau).unwrap().end;
+            let next = step::step(&run, &t, tau, &mut step::Scratch::default()).unwrap().end;
             (t.r, t.kappa, t.psi, t.time) = (next.r, next.kappa, next.psi, next.time);
         }
     }
@@ -641,7 +641,7 @@ fn a_conservative_trap_keeps_its_energy() {
     let mut errors = Vec::new();
     for k in 1..=outputs {
         let to = run * k as f64 / outputs as f64;
-        adapt::advance(&model, tau, &mut t, None, to, &mut |_| {}).unwrap();
+        adapt::advance(&model, tau, &mut t, &mut step::Scratch::default(), None, to, &mut |_| {}).unwrap();
         // Every advance lands on its output time exactly: an ulp short, the rest is an interval of the time's round-off.
         assert_eq!(t.time, to, "advanced to {} for the output at {to}", t.time);
         errors.push(model.energy(0, &t.point(), &t.psi) - e0);
@@ -666,15 +666,15 @@ fn a_read_trajectory_accumulates_its_steps_doubling_differences() {
     let start = held(&model, [0.3, -0.2, 0.8], [20.0, 15.0, -10.0]);
     let (tau, steps) = (5.0, 4);
     let (mut read, mut plain, mut reader) = (start.clone(), start.clone(), Reader::new([2.0 * tau; 3]));
-    adapt::advance(&model, tau, &mut read, Some(&mut reader), tau * steps as f64, &mut |_| {}).unwrap();
+    adapt::advance(&model, tau, &mut read, &mut step::Scratch::default(), Some(&mut reader), tau * steps as f64, &mut |_| {}).unwrap();
     let drift = reader.drift;
-    adapt::advance(&model, tau, &mut plain, None, tau * steps as f64, &mut |_| {}).unwrap();
+    adapt::advance(&model, tau, &mut plain, &mut step::Scratch::default(), None, tau * steps as f64, &mut |_| {}).unwrap();
     assert_eq!((read.r, read.kappa), (plain.r, plain.kappa));
     let (mut by_hand, mut at) = (0.0, start);
     for _ in 0..steps {
-        let whole = step::step(&model, &at, tau).unwrap();
-        let first = step::step(&model, &at, 0.5 * tau).unwrap();
-        let second = step::step(&model, &first.end, 0.5 * tau).unwrap();
+        let whole = step::step(&model, &at, tau, &mut step::Scratch::default()).unwrap();
+        let first = step::step(&model, &at, 0.5 * tau, &mut step::Scratch::default()).unwrap();
+        let second = step::step(&model, &first.end, 0.5 * tau, &mut step::Scratch::default()).unwrap();
         let energy = |t: &Trajectory| model.energy(0, &t.point(), &t.psi);
         by_hand += 4.0 / 3.0 * (energy(&whole.end) - energy(&second.end));
         at = whole.end;
@@ -700,11 +700,11 @@ fn the_doubling_estimate_falls_as_tau_cubed() {
         let model = Atom::new(RB, trap, beams, -40.0, gamma);
         let mut start = held(&model, [0.2, -0.1, 0.4], [30.0, -20.0, 50.0]);
         start.grid = 2.5e-4;
-        start = step::step(&model, &start, 0.5).unwrap().end;
+        start = step::step(&model, &start, 0.5, &mut step::Scratch::default()).unwrap().end;
         let difference = |tau: f64| -> [f64; 2] {
-            let full = step::step(&model, &start, tau).unwrap();
-            let first = step::step(&model, &start, 0.5 * tau).unwrap();
-            let second = step::step(&model, &first.end, 0.5 * tau).unwrap();
+            let full = step::step(&model, &start, tau, &mut step::Scratch::default()).unwrap();
+            let first = step::step(&model, &start, 0.5 * tau, &mut step::Scratch::default()).unwrap();
+            let second = step::step(&model, &first.end, 0.5 * tau, &mut step::Scratch::default()).unwrap();
             let dk = (0..3).map(|a| (full.end.kappa[a] - second.end.kappa[a]).abs()).fold(0.0, f64::max);
             let dr = (0..3).map(|a| (full.end.r[a] - second.end.r[a]).abs()).fold(0.0, f64::max);
             [dk, dr]
@@ -817,7 +817,7 @@ fn a_segment_s_moments_are_its_path_s_integrals() {
     let model = Atom::new(RB, trap, vec![], 0.0, 0.0);
     let start = held(&model, [0.3, -0.2, 0.5], [40.0, 25.0, -60.0]);
     let tau = 3.0;
-    let step = step::step(&model, &start, tau).unwrap();
+    let step = step::step(&model, &start, tau, &mut step::Scratch::default()).unwrap();
     let seg = &step.segment;
     // κ on the step's path at the time t: the flow from the start before the middle, from the kicked middle after it.
     let path = |t: f64| if t < 0.5 * tau { seg.flow.advance(seg.from, t).1 } else { seg.flow.advance(seg.kicked, t - 0.5 * tau).1 };
@@ -851,10 +851,10 @@ fn a_step_with_light_and_its_reverse_miss_beyond_the_scheme_s_order() {
     start.grid = 1e-3;
     let mut misses = Vec::new();
     for tau in [0.2, 0.1, 0.05] {
-        let there = step::step(&model, &start, tau).unwrap();
-        let back = step::step(&model, &there.end, -tau).unwrap();
-        let first = step::step(&model, &start, 0.5 * tau).unwrap();
-        let second = step::step(&model, &first.end, 0.5 * tau).unwrap();
+        let there = step::step(&model, &start, tau, &mut step::Scratch::default()).unwrap();
+        let back = step::step(&model, &there.end, -tau, &mut step::Scratch::default()).unwrap();
+        let first = step::step(&model, &start, 0.5 * tau, &mut step::Scratch::default()).unwrap();
+        let second = step::step(&model, &first.end, 0.5 * tau, &mut step::Scratch::default()).unwrap();
         let miss = (0..3).map(|a| (back.end.kappa[a] - start.kappa[a]).abs()).fold(0.0, f64::max);
         let doubling = (0..3).map(|a| (there.end.kappa[a] - second.end.kappa[a]).abs()).fold(0.0, f64::max);
         eprintln!("τ {tau}: forth and back misses κ by {miss:e}, the doubling differs by {doubling:e}");
@@ -921,7 +921,7 @@ fn conservative_trap(name: &str) {
         let mut e0 = run.energy(t.cluster, &t.point(), &t.psi);
         for (k, &time) in request.times_us.iter().enumerate().skip(1) {
             let before = t.jumps;
-            adapt::advance(&run, tau, &mut t, Some(&mut reader), time, &mut |_| {}).unwrap();
+            adapt::advance(&run, tau, &mut t, &mut step::Scratch::default(), Some(&mut reader), time, &mut |_| {}).unwrap();
             assert!(t.lost.is_none(), "{name}: atom {i} lost at {:?}", t.lost);
             let e = run.energy(t.cluster, &t.point(), &t.psi);
             if t.jumps == before {
@@ -1228,6 +1228,13 @@ fn yardstick() -> f64 {
     x[0].re
 }
 
+/// A scratch fitted to n states (the harness takes the step's parts apart).
+fn fitted(n: usize) -> super::Scratch {
+    let mut scratch = super::Scratch::default();
+    scratch.fit(n);
+    scratch
+}
+
 /// One case of the cost harness: µs per step of τ over the case's start states (held: no step reaches their thresholds),
 /// split into the model's part -- its reference expansions, its middle, and at the middle's nodes its generators, forces
 /// and tones, each timed alone and counted as the step calls them -- and the step's own, the rest. Then the step's
@@ -1237,7 +1244,7 @@ fn yardstick() -> f64 {
 fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> [f64; 2] {
     let (count, half, hm) = (starts.len(), 0.5 * tau, model.hbar_over_mass());
     let counted = Counted { model, calls: std::cell::Cell::new([0; 5]) };
-    let steps: Vec<step::Step> = starts.iter().map(|s| step::step(&counted, s, tau).unwrap()).collect();
+    let steps: Vec<step::Step> = starts.iter().map(|s| step::step(&counted, s, tau, &mut step::Scratch::default()).unwrap()).collect();
     let calls = counted.calls.get().map(|c| c as f64 / count as f64);
     // Each start's step, piece by piece as `step::step` makes it.
     struct Pieces<M: Middle> {
@@ -1256,7 +1263,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             let (flow, (r_h, kappa_h)) = super::middle(model, from.r, from.kappa, half).unwrap();
             let reference = flow.gradient_at(r_h);
             let middle = model.middle(from.cluster, r_h, from.time + half);
-            let mut scratch = super::Scratch::new(from.psi.len());
+            let mut scratch = fitted(from.psi.len());
             let held = super::shear(&super::Along::new(&middle, kappa_h, [0.0; 3], tau), scratch.carve(0).held, &from.psi, tau);
             let predicted: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * (held[a] + tau * reference[a]));
             let (_, kick) = super::whole(super::propagate(&mut scratch, &middle, from, reference, kappa_h, predicted.map(|k| hm * k), tau, None));
@@ -1275,7 +1282,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             .zip(starts)
             .map(|(p, s)| {
                 let (from, threshold) = if crossing { (&p.crossed, Some(p.crossed.threshold)) } else { (s, (which == 1).then_some(s.threshold)) };
-                match super::propagate(&mut super::Scratch::new(from.psi.len()), &p.middle, from, p.reference, p.kappas[which], p.velocities[which], tau, threshold) {
+                match super::propagate(&mut fitted(from.psi.len()), &p.middle, from, p.reference, p.kappas[which], p.velocities[which], tau, threshold) {
                     Ok((_, kick)) => kick[0],
                     Err(crossed) => crossed.at,
                 }
@@ -1289,7 +1296,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     let [whole, reference, point, generator, force, tones, middle, first, second, root, pace] = microseconds(
         count,
         [
-            &mut || starts.iter().map(|s| step::step(model, s, tau).unwrap().end.kappa[0]).sum::<f64>(),
+            &mut || starts.iter().map(|s| step::step(model, s, tau, &mut step::Scratch::default()).unwrap().end.kappa[0]).sum::<f64>(),
             &mut || pieces.iter().map(|p| model.reference(p.at.0).value).sum::<f64>(),
             &mut || pieces.iter().zip(starts).map(|(p, s)| model.middle(s.cluster, p.at.0, p.at.1).states() as f64).sum::<f64>(),
             &mut || {
@@ -1311,7 +1318,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     );
     let crossings = pieces
         .iter()
-        .filter(|p| super::propagate(&mut super::Scratch::new(p.crossed.psi.len()), &p.middle, &p.crossed, p.reference, p.kappas[1], p.velocities[1], tau, Some(p.crossed.threshold)).is_err())
+        .filter(|p| super::propagate(&mut fitted(p.crossed.psi.len()), &p.middle, &p.crossed, p.reference, p.kappas[1], p.velocities[1], tau, Some(p.crossed.threshold)).is_err())
         .count();
     let nodes = calls[2] * generator + calls[3] * force + calls[4] * tones;
     let own = whole - calls[0] * reference - calls[1] * point - nodes;
@@ -1462,7 +1469,7 @@ fn split<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
     let middle = model.middle(from.cluster, r_h, from.time + 0.5 * tau);
     let path = super::Along::new(&middle, kappa_h, kappa_h.map(|k| hm * k), tau);
     let h = 0.5 * tau;
-    let (mut whole, mut combining, mut acting) = (super::Scratch::new(n), super::Scratch::new(n), super::Scratch::new(n));
+    let (mut whole, mut combining, mut acting) = (fitted(n), fitted(n), fitted(n));
     // One spacing's two generators and their two combinations as `cf4` makes them, the last one kept for the exponentials.
     let combine = |scratch: &mut super::Scratch, s: f64| {
         let c = scratch.carve(2);

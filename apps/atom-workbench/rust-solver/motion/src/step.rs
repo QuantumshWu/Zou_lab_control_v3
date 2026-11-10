@@ -557,14 +557,21 @@ fn shear<M: Middle>(along: &Along<M>, rho: &mut [C64], psi: &[C64], tau: f64) ->
     f
 }
 
-/// A step's scratch memory, made once and fitted to each use: the matrix of an exponential (or the still Ĥ₀), the
-/// generator at a CF4 spacing's two nodes, and one array carved (`Scratch::carve`) into a grid's node states, the middle
-/// state's density, a node's change of density, their weighted sum (`impulse`), and an exponential's two work vectors
-/// (`linalg::exp_apply`).
-struct Scratch {
+/// A trajectory's scratch memory for its steps, made with it and fitted to each step's cluster (`Scratch::fit`): the
+/// matrix of an exponential (or the still Ĥ₀), the generator at a CF4 spacing's two nodes, and one array carved
+/// (`Scratch::carve`) into a grid's node states, the middle state's density, a node's change of density, their weighted
+/// sum (`impulse`), and an exponential's two work vectors (`linalg::exp_apply`). Every use writes what it reads: nothing
+/// a step left in it is read by another.
+pub struct Scratch {
     matrix: Mat,
     nodes: [Mat; 2],
     rest: Vec<C64>,
+}
+
+impl Default for Scratch {
+    fn default() -> Scratch {
+        Scratch { matrix: Mat::zeros(0, 0), nodes: [Mat::zeros(0, 0), Mat::zeros(0, 0)], rest: Vec::new() }
+    }
 }
 
 struct Carved<'a> {
@@ -578,8 +585,14 @@ struct Carved<'a> {
 }
 
 impl Scratch {
-    fn new(n: usize) -> Scratch {
-        Scratch { matrix: Mat::zeros(n, n), nodes: [Mat::zeros(n, n), Mat::zeros(n, n)], rest: Vec::new() }
+    /// The scratch for a cluster of n states.
+    fn fit(&mut self, n: usize) {
+        for m in std::iter::once(&mut self.matrix).chain(&mut self.nodes) {
+            if m.rows != n {
+                (m.rows, m.cols) = (n, n);
+                m.data.resize(n * n, C64::ZERO);
+            }
+        }
     }
     /// The scratch for a grid of `nodes` spacings.
     fn carve(&mut self, nodes: usize) -> Carved<'_> {
@@ -945,11 +958,12 @@ impl Step {
     /// The step's end with its propagation redone on twice its grid's panels (the same middle of the same model, the same
     /// path, the same kick otherwise), and that work: the grid's error read, the step's grid erring by 2⁴/(2⁴ − 1) of the
     /// difference (fourth order). None where the step took no grid.
-    pub fn regrid<D: Dynamics>(&self, model: &D) -> Option<(Trajectory, f64)> {
+    pub fn regrid<D: Dynamics>(&self, model: &D, scratch: &mut Scratch) -> Option<(Trajectory, f64)> {
         let r = self.retry.as_ref()?;
         let (n, s) = (self.end.psi.len(), &self.segment);
+        scratch.fit(n);
         let middle = model.middle(self.end.cluster, s.kicked.0, s.middle());
-        let finer = whole(beating(&Along::new(&middle, r.kappa, r.velocity, s.tau), &mut Scratch::new(n), &r.psi[..n], s.tau, 2 * r.panels, None));
+        let finer = whole(beating(&Along::new(&middle, r.kappa, r.velocity, s.tau), scratch, &r.psi[..n], s.tau, 2 * r.panels, None));
         let kicked = (s.kicked.0, std::array::from_fn(|a| s.kicked.1[a] + finer.impulse[a] - r.impulse[a]));
         let (r1, kappa1) = s.flow.advance(kicked, 0.5 * s.tau);
         let mut end = self.end.clone();
@@ -1006,9 +1020,9 @@ pub enum Attempt {
 /// reference (`middle`); the model's generator there (`Dynamics::middle`); the predictor's momentum from the shear at κ_h
 /// and the reference's force, the first propagation on its path; the corrected momentum κ_h + Δκ/2 and the step's
 /// propagation at it and on its path; the kick and the second half flow. The flow between jumps: the trajectory's
-/// threshold is not looked at (`attempt` looks).
-pub fn step<D: Dynamics>(model: &D, from: &Trajectory, tau: f64) -> Result<Step, Refused> {
-    match tried(model, from, tau, None)? {
+/// threshold is not looked at (`attempt` looks). `scratch` is the trajectory's.
+pub fn step<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, scratch: &mut Scratch) -> Result<Step, Refused> {
+    match tried(model, from, tau, None, scratch)? {
         Attempt::Whole(step) => Ok(step),
         Attempt::Crossing { .. } => unreachable!("a step without a threshold meets no crossing"),
     }
@@ -1017,27 +1031,27 @@ pub fn step<D: Dynamics>(model: &D, from: &Trajectory, tau: f64) -> Result<Step,
 /// The step of τ tried from a trajectory's state: `step` where ‖ψ‖² stays above the trajectory's threshold through it;
 /// else its crossing, found on the step's own propagation, which ends there (the caller redoes the step to the crossing
 /// and jumps at its end, module documentation, # Jumps).
-pub fn attempt<D: Dynamics>(model: &D, from: &Trajectory, tau: f64) -> Result<Attempt, Refused> {
-    tried(model, from, tau, Some(from.threshold))
+pub fn attempt<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, scratch: &mut Scratch) -> Result<Attempt, Refused> {
+    tried(model, from, tau, Some(from.threshold), scratch)
 }
 
 /// `step`, or with a threshold `attempt`.
-fn tried<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, threshold: Option<f64>) -> Result<Attempt, Refused> {
+fn tried<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, threshold: Option<f64>, scratch: &mut Scratch) -> Result<Attempt, Refused> {
     let half = 0.5 * tau;
     let hm = model.hbar_over_mass();
     let n = from.psi.len();
     let (flow, (r_h, kappa_h)) = middle(model, from.r, from.kappa, half)?;
     let reference = flow.gradient_at(r_h);
-    let mut scratch = Scratch::new(n);
+    scratch.fit(n);
     let generator = model.middle(from.cluster, r_h, from.time + half);
     // The predictor: the shear and the reference's force.
     let held = shear(&Along::new(&generator, kappa_h, [0.0; 3], tau), scratch.carve(0).held, &from.psi, tau);
     let predicted: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * (held[a] + tau * reference[a]));
-    let (one, kick_one) = whole(propagate(&mut scratch, &generator, from, reference, kappa_h, predicted.map(|k| hm * k), tau, None));
+    let (one, kick_one) = whole(propagate(scratch, &generator, from, reference, kappa_h, predicted.map(|k| hm * k), tau, None));
     // The correction: the middle momentum of the first propagation's kick.
     let corrected: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * kick_one[a]);
     let velocity = corrected.map(|k| hm * k);
-    let (two, kick) = match propagate(&mut scratch, &generator, from, reference, corrected, velocity, tau, threshold) {
+    let (two, kick) = match propagate(scratch, &generator, from, reference, corrected, velocity, tau, threshold) {
         Ok(made) => made,
         Err(crossed) => return Ok(Attempt::Crossing { root: crossed.at, work: one.work + crossed.work + count::shear(n, generator.work()), assemblies: 1 }),
     };
