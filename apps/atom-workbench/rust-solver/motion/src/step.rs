@@ -780,7 +780,7 @@ fn route<M: Middle>(along: &Along<M>, matrix: &mut Mat, sums: &mut [C64], tau: f
     let n = along.n;
     along.middle.generator(&along.path, 0.0, matrix);
     let scalar = traceless(matrix);
-    let (rho, gamma) = linalg::bounds(matrix, sums);
+    let linalg::Bounds { rho, gamma, .. } = linalg::bounds(matrix, sums);
     let eigen = linalg::eigen(matrix)?;
     let mut lambda = [C64::ZERO; STATES];
     for b in 0..n {
@@ -1151,7 +1151,7 @@ pub fn step<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, scratch: &mut S
 /// state's own, or one of the cluster made once -- the nodes' counts are the cluster's whatever the point
 /// (`Middle::work`), and the point gives the route alone. Both propagations by the generator's own route (`route`: the
 /// eigen-propagation's decomposition and Gauss–Legendre nodes, or the grid's CF4 spacings no wider than `grid`, each
-/// exponential's Chebyshev plan at the bounds of Ĥ's traceless part at the middle over half a spacing, its two nodes'
+/// exponential's Chebyshev plan at the bounds of Ĥ at the middle (`linalg::bounds`) over half a spacing, its two nodes'
 /// weights' sum) and the shear; the middle itself is the model's (`Dynamics::assembly_work`, one a step).
 pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64, grid: f64) -> (f64, f64) {
     let (n, costs) = (middle.states(), middle.work());
@@ -1161,8 +1161,7 @@ pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau
         Some(spectrum) => (count::spectral(n, costs, spectrum.eigen.work, spectrum.nodes) + count::impulse(n, costs, spectrum.nodes, true), 0.0),
         None => {
             middle.generator(&along.path, 0.0, &mut a);
-            traceless(&mut a);
-            let (rho, gamma) = linalg::bounds(&a, &mut sums);
+            let linalg::Bounds { rho, gamma, .. } = linalg::bounds(&a, &mut sums);
             let grid_work = |panels: usize| {
                 let h = (tau / (2 * panels) as f64).abs();
                 let plan = linalg::Chebyshev::plan(0.5 * rho * h, 0.5 * gamma * h);

@@ -5,25 +5,26 @@
 //! trap's (V_run's subtraction, potential.rs).
 //!
 //! # Coordinates
-//! The elimination at a point depends on the point through the far light's H, linear in each lit frequency's coherence T_ω and
-//! so a function of its chart (field.rs # The chart: intensity, polarization angles, relative phases), and through the near
-//! carriers' dressings and self-energies: with the units' T̄ (eliminate.rs) on each polarization unit's intensity
-//! I_u = |f_u|²/N_u, f_u = Σ_{l∈u} a_l κ_l the unit's field along its polarization ε_u (E_l = κ_l ε_u), N_u = (Σ_{l∈u} |κ_l|)² so
-//! that I_u ∈ [0, 1] (|a_l| ≤ 1: a computed I_u above 1 is its rounding, and is 1); with a carrier's coherent dressing
+//! The elimination at a point depends on the point through the levels' H (eliminate.rs `Model::far_hamiltonian`) and through
+//! the carriers' dressings and self-energies. A frequency that is no carrier enters H by its coherence T_ω, a function of its
+//! chart (field.rs # The chart: intensity, polarization angles, relative phases). A carrier enters both by its dressing: with
+//! its units' T̄ (eliminate.rs) on each polarization unit's intensity I_u = |f_u|²/N_u, f_u = Σ_{l∈u} a_l κ_l the unit's field
+//! along its polarization ε_u (E_l = κ_l ε_u), N_u = (Σ_{l∈u} |κ_l|)² so that I_u ∈ [0, 1] (|a_l| ≤ 1: a computed I_u above 1 is
+//! its rounding, and is 1) -- its frequency's static form in H too, Σ_u I_u N_u F(ε_u) --; with its coherent dressing
 //! (`Unit::Dressing` kept) on its chart. Every coordinate on its whole range: every value is some field's, no atom meets an
 //! edge, and a table is never asked off its axes (crate::table refuses it).
 //!
 //! # A node
 //! At coordinates s the elimination is the one in a light whose fields have them: each lit frequency's field from its chart
 //! (field.rs `Frequency::chart_field`), its beams' amplitudes the least-norm ones that give it, a_l = Σ_k γ_lk* e_k/σ_k² (the
-//! far forms depend on the field alone, far.rs); each unit's field on its first beam, a = √(I_u N_u)/κ₁. The coordinates that
+//! static forms depend on the field alone, far.rs); each unit's field on its first beam, a = √(I_u N_u)/κ₁. The coordinates that
 //! are no axes take their values at the focus.
 //!
 //! # Axes
 //! A coordinate's a-priori weight is how far it moves the cluster's lines over the atoms' reach, in pole half-widths: for a chart
 //! coordinate the largest change of E_e − E_b (e ← b a carrier's coupling from the cluster's ground states) over its first grid's
 //! nodes, the other coordinates at the focus, over Γ_e/2; for a unit, its dressing at full intensity over Γ_min/2 (its resolvent's
-//! Varah bound, eliminate.rs). An intensity's shift is linear in it, so its weight is that per unit intensity times the bound of
+//! Varah bound, eliminate.rs) and the same change of E_e − E_b by its static form at full intensity. An intensity's shift is linear in it, so its weight is that per unit intensity times the bound of
 //! its distance from its focus value over the reach (reach.rs `Model::bounds_over`): a plane wave's intensity, the same everywhere,
 //! weighs nothing; an angle or a phase weighs its whole range. A response is a pole in E_e − E_b, its relative change at most the
 //! weight: a coordinate whose weight is below the population target leaves the responses within it a priori. The axes are the
@@ -190,12 +191,12 @@ impl Model {
             .collect()
     }
 
-    /// Every coordinate an elimination under a light set depends on (module documentation, # Coordinates): every lit frequency's
-    /// chart, and the units of each lit carrier whose dressing takes its units' T̄.
+    /// Every coordinate an elimination under a light set depends on (module documentation, # Coordinates): the chart of every
+    /// lit frequency that enters by its coherent field, and the units of each lit carrier whose dressing takes its units' T̄.
     fn coordinates(&self, lights: &Lights, polarizations: &[Vec<Polarization>]) -> Vec<Coordinate> {
         let mut out = vec![];
         for (frequency, f) in self.light.frequencies.iter().enumerate() {
-            if lights.on(frequency) {
+            if lights.on(frequency) && self.carrier_of(frequency).is_none_or(|d| polarizations[d].is_empty()) {
                 out.extend((0..f.chart_dimension()).map(|index| Coordinate::Chart { frequency, index }));
             }
         }
@@ -280,16 +281,17 @@ impl Model {
     /// The near forms at coordinate values x into a node's reals, and the complex multiply-adds that made them.
     fn node(&self, layout: &Layout, x: &[f64], out: &mut [f64]) -> f64 {
         let lights = &layout.lights;
-        let (far, near) = self.light_at(lights, &layout.coordinates, &layout.polarizations, x);
-        let h = self.far_hamiltonian(&far, lights, 0);
-        let r = self.eliminate(layout.cluster, &h, &near, lights, 0, &self.coherent_dressing());
+        let (_, near) = self.light_at(lights, &layout.coordinates, &layout.polarizations, x);
+        let coherent = self.coherent_dressing();
+        let h = self.far_hamiltonian(&near, lights, 0, &coherent);
+        let r = self.eliminate(layout.cluster, &h, &near, lights, 0, &coherent);
         let energies = vec![(0..STATES).map(|s| h[0][(s, s)].re).collect::<Vec<f64>>()];
         let mut values = vec![C64::ZERO; layout.plan.near.len()];
         let work = self.forms(&layout.plan, &r, &energies, &mut values);
         for (pair, z) in out.chunks_mut(2).zip(&values) {
             pair.copy_from_slice(&[z.re, z.im]);
         }
-        r.work + self.far_work(lights, 0) + work
+        r.work + self.far_work(lights, 0, &coherent) + work
     }
 
     /// The complex multiply-adds of one node (the same at every node: the elimination's loops do not depend on the values).
@@ -383,9 +385,9 @@ impl Model {
     fn halving_error(&self, layout: &Layout, coarse: &Table, fine: &Table, f: usize, ranges: &[(f64, f64)], reach: &Reach) -> (f64, f64) {
         let plan = &layout.plan;
         let (start, count, pairs) = (plan.near.responding().start, plan.near.responses.len(), plan.near.pairs.len());
-        // Per carrier the largest Doppler shift of its beams at the reach's speed; a field component's peak.
-        let shift: Vec<f64> = self.carriers.iter().map(|cc| cc.beams.iter().map(|&l| self.doppler_shift(l, [0.0; 3]) + self.light.beams[l].wave_number * reach.speed).fold(0.0, f64::max)).collect();
-        let peak = |carrier: usize, k: usize| self.light.frequencies[self.carriers[carrier].frequency].coefficients.iter().map(|c| c[k].abs()).sum::<f64>();
+        // Per frequency the largest Doppler shift of its beams at the reach's speed; a field component's peak.
+        let shift: Vec<f64> = self.light.frequencies.iter().map(|f| f.beams.iter().map(|&l| self.doppler_shift(l, [0.0; 3]) + self.light.beams[l].wave_number * reach.speed).fold(0.0, f64::max)).collect();
+        let peak = |frequency: usize, k: usize| self.light.frequencies[frequency].coefficients.iter().map(|c| c[k].abs()).sum::<f64>();
         let ground = self.clusters[layout.cluster].ground;
         let complex = |row: &[f64], at: usize| C64::new(row[2 * at], row[2 * at + 1]);
         let mut interpolated = vec![0.0; fine.width()];
@@ -408,7 +410,8 @@ impl Model {
             }
             coarse.eval(&s, &mut interpolated, None);
             let error = |at: usize| (complex(&interpolated, at) - complex(exact, at)).norm_sqr();
-            for (c, w) in shift.iter().enumerate() {
+            for (c, cc) in self.carriers.iter().enumerate() {
+                let w = shift[cc.frequency];
                 let sum = |of: &dyn Fn(usize) -> f64| (0..count).filter(|&i| plan.near.responses[i][0] == c).map(of).sum::<f64>().sqrt();
                 let size = sum(&|i| complex(exact, start + i).norm_sqr());
                 if !(size == 0.0) {
@@ -506,11 +509,14 @@ impl Model {
                     .map(move |e| (e, b, self.decay[(e - GROUND, e - GROUND)].re / 2.0))
             })
             .collect();
+        let coherent = self.coherent_dressing();
         let energies = |x: &[f64]| -> Vec<f64> {
-            let (far, _) = self.light_at(lights, coordinates, polarizations, x);
-            self.far_energies(&far, lights, 0).0.swap_remove(0)
+            let (_, near) = self.light_at(lights, coordinates, polarizations, x);
+            self.far_energies(&near, lights, 0, &coherent).0.swap_remove(0)
         };
         let at_focus = energies(focus);
+        // The largest change of a line's E_e − E_b from the focus, in its half-widths.
+        let moved = |e: &[f64]| lines.iter().map(|&(a, b, half)| ((e[a] - e[b]) - (at_focus[a] - at_focus[b])).abs() / half).fold(0.0, f64::max);
         let region = self.point_region([0.0; 3], 0.0);
         coordinates
             .iter()
@@ -524,10 +530,7 @@ impl Model {
                         let mut x = focus.to_vec();
                         x[i] = axis.node(n);
                         span = span.max((x[i] - focus[i]).abs());
-                        let e = energies(&x);
-                        for &(a, b, half) in &lines {
-                            most = most.max(((e[a] - e[b]) - (at_focus[a] - at_focus[b])).abs() / half);
-                        }
+                        most = most.max(moved(&energies(&x)));
                     }
                     if index == 0 && span > 0.0 {
                         most / span
@@ -539,10 +542,15 @@ impl Model {
                     let p = &polarizations[carrier][unit];
                     let x = &self.carriers[carrier].folded[p.beams[0]];
                     let k = p.kappa[0].norm_sqr();
-                    (0..GROUND)
+                    let dressing = (0..GROUND)
                         .map(|b| p.norm * (GROUND..STATES).map(|e| x[(e, b)].norm_sqr()).sum::<f64>() / k * self.resolvent(carrier, b, &region))
                         .fold(0.0, f64::max)
-                        / (self.least_decay() / 2.0)
+                        / (self.least_decay() / 2.0);
+                    // Its static form's part, linear in its intensity: from none to all of it.
+                    let (mut dark, mut full) = (focus.to_vec(), focus.to_vec());
+                    (dark[i], full[i]) = (0.0, 1.0);
+                    let (none, all) = (energies(&dark), energies(&full));
+                    dressing + lines.iter().map(|&(a, b, half)| ((all[a] - all[b]) - (none[a] - none[b])).abs() / half).fold(0.0, f64::max)
                 }
             })
             .collect()

@@ -1405,9 +1405,11 @@ fn thermal(trap: &crate::model::Trap, hm: f64, kt: f64, stream: &mut crate::rand
 /// A scene's step on its own model (run by name, alone: `SCENE=<a reference scene's name or a native request's path>
 /// TAU=<µs> … a_scene_s_step_cost -- --ignored --nocapture`): the scene's model as the solve closes it (solve.rs
 /// `attempt`: every unit whose fold does not exist over the reach kept, until none fails) with its near tables
-/// (`Model::tabulate`), and per cluster a cost case (`cost`): sixteen atoms of the scene's temperature in the trap's
-/// harmonic approximation, each a random state of the cluster, held, one step of τ each on the control's grid of two
-/// panels (adapt.rs).
+/// (`Model::tabulate`); what the ensemble's draw meets (the prepared well's depth against its envelope's top); and per
+/// cluster what the exponentials meet (the generator at the trap's centre, at rest, less its trace, its fastest tone,
+/// each times τ, its bounds and the plan of one exponential) and a cost case (`cost`): sixteen atoms of the scene's
+/// temperature in the trap's harmonic approximation, each a random state of the cluster, held, one step of τ each on
+/// the control's grid of two panels (adapt.rs).
 #[test]
 #[ignore = "a measurement, not a check: run by name"]
 fn a_scene_s_step_cost() {
@@ -1438,8 +1440,40 @@ fn a_scene_s_step_cost() {
     eprintln!("{name}: closure {closure:.2?}, {} units kept, tabulate {:.2?}, {} tables", kept.len(), started.elapsed(), tables.tables.len());
     let run = Run::tabulated(&model, &tables, p);
     let kt = crate::units::KT_PER_UK * request.temperature_uk;
+    // What the ensemble's draw meets (ensemble.rs): the prepared well's depth at its bottom against its envelope's top.
+    eprintln!(
+        "{name}: the prepared well at {:?} is {:.3} k_BT deep, its envelope's top {:.3} k_BT; trap frequencies {:?} rad/µs",
+        trap.centre,
+        -model.potential(trap.centre, &p, &model.prepared()) / kt,
+        model.envelope(&p).peak() / kt,
+        trap.frequencies
+    );
     let panels = 2;
     for (cluster, c) in model.clusters().iter().enumerate() {
+        // What the exponentials meet: the generator at the trap's centre, at rest, less its trace, and its fastest tone.
+        {
+            let (middle, n) = (run.middle(cluster, trap.centre, 0.0), c.states.len());
+            let path = middle.path([0.0; 3], [0.0; 3]);
+            let mut h = Mat::zeros(n, n);
+            middle.generator(&path, 0.0, &mut h);
+            let mean = (0..n).map(|x| h[(x, x)]).sum::<C64>() / n as f64;
+            let norm = (0..n * n).map(|i| (h.data[i] - if i / n == i % n { mean } else { C64::ZERO }).norm_sqr()).sum::<f64>().sqrt();
+            let rho: Vec<C64> = (0..n * n).map(|_| C64::real(1.0 / n as f64)).collect();
+            let mut fastest = 0.0_f64;
+            middle.tones(&path, &rho, &mut |omega, _| fastest = fastest.max(omega.abs()));
+            eprintln!(
+                "{name} cluster {cluster} ({}+{}, {}): its generator less its trace {norm:.3e} rad/µs, times τ {:.3e}; its fastest tone {fastest:.3e} rad/µs, times τ {:.3e}",
+                c.ground,
+                n - c.ground,
+                if middle.still() { "still" } else { "beating" },
+                norm * tau,
+                fastest * tau
+            );
+            // The exponential's bounds there and its plan over half a spacing (`step_work`'s price of one).
+            let crate::linalg::Bounds { rho, gamma, .. } = crate::linalg::bounds(&h, &mut vec![C64::ZERO; n]);
+            let spacing = tau / (2 * panels) as f64;
+            eprintln!("{name} cluster {cluster}: its exponential's bounds ρ {rho:.3e}, γ {gamma:.3e} rad/µs; over half a spacing {:?}", crate::linalg::Chebyshev::plan(0.5 * rho * spacing, 0.5 * gamma * spacing));
+        }
         let starts: Vec<Trajectory> = (0..16)
             .map(|i| {
                 let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, cluster as u32);

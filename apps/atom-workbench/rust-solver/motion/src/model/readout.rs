@@ -2,26 +2,26 @@
 //! populations; and the model in words.
 //!
 //! # The readout
-//! A folded component's excited amplitude from ground state b is −R[:,b] x_b (far.rs, eliminate.rs), its channel's excited
-//! frequency θ_b + ν (frames). Two channels at one frequency are co-resonant; the others beat and average out. With ρ = xx†/‖x‖²,
+//! A component's folded drives' excited amplitude from ground state b is −R[:,b] x_b -- its bare drives' and those folded at
+//! the atom, each a channel (far.rs, eliminate.rs) --, its channel's excited frequency θ_b + ν (frames). Two channels at one frequency are co-resonant; the others beat and average out. With ρ = xx†/‖x‖²,
 //! the folded excited populations are Σ (R ρ R†)_ii over co-resonant pairs of channels, and the ground states keep ρ − ½{Y, ρ},
 //! Y = Σ R'†R over the same pairs (the metric 1 + Y's first order): the populations sum to one exactly, Re tr(Yρ) =
 //! Σ_i (RρR†)_ii. An explicit state's population is its own ρ_ee.
 
-use super::{Beat, Component, Lights, Model, Point, Unit, GROUND, STATES};
+use super::{Beat, Component, Level, Lights, Model, Point, Unit, GROUND, STATES};
 use crate::linalg::{Mat, C64};
-use crate::request::Level;
 
-/// A folded component's channels on a cluster at a point: its exact frequency and its response R (EXCITED × the cluster's ground
-/// places).
+/// A component's folded channels on a cluster at a point: the component, its exact frequency and its response R (EXCITED × the
+/// cluster's ground places) -- its bare drives', or those folded at the atom.
 pub(crate) struct Channels {
+    pub(crate) component: Component,
     pub(crate) nu: Beat,
     pub(crate) response: Mat,
 }
 
 impl Model {
-    /// The far light's folded responses on a cluster at a point (far.rs `Tone::responses`): R = Σ_l a_l R_l (co-rotating) or
-    /// Σ_l a_l* R_l (counter-rotating), every light in `lights`.
+    /// The bare drives' responses on a cluster at a point, per component that has one (far.rs `Tone::responses`): R = Σ_l a_l R_l
+    /// (co-rotating) or Σ_l a_l* R_l (counter-rotating), every light in `lights`.
     pub(crate) fn far_channels(&self, cluster: usize, amplitudes: &[crate::field::Amplitude], lights: &Lights) -> Vec<Channels> {
         let c = &self.clusters[cluster];
         let mut out = vec![];
@@ -30,7 +30,7 @@ impl Model {
                 continue;
             }
             for side in 0..2 {
-                if !tone.folded[side] {
+                if !tone.bare[side] {
                     continue;
                 }
                 let mut response = Mat::zeros(super::far::EXCITED, c.ground);
@@ -42,7 +42,8 @@ impl Model {
                         }
                     }
                 }
-                out.push(Channels { nu: self.axes.component(&self.light, Component { frequency: w, counter: side == 1 }), response });
+                let component = Component { frequency: w, counter: side == 1 };
+                out.push(Channels { component, nu: self.frequency(component), response });
             }
         }
         out
@@ -53,7 +54,7 @@ impl Model {
         self.readout_with(cluster, at, psi, None)
     }
 
-    /// The readout with the near light from its tables where they serve (tabulate.rs `Model::near`).
+    /// The readout with the forms at the atom from their tables where they serve (tabulate.rs `Model::near`).
     pub(crate) fn readout_with(&self, cluster: usize, at: &Point, psi: &[C64], tables: Option<&super::tabulate::Tables>) -> [f64; STATES] {
         let c = &self.clusters[cluster];
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
@@ -94,9 +95,9 @@ impl Model {
     }
 
     /// V_L(r; p) far from the trap (SPEC §1.7): every focused beam's amplitude zero, the plane waves' terms of one wave vector
-    /// (their spatial mean; a term of q ≠ 0 averages out). The near light's part is zero there: it is the near shifts with the
+    /// (their spatial mean; a term of q ≠ 0 averages out). The part at the atom is zero there: it is those shifts with the
     /// trap light on less with it off (potential.rs), and far from the trap the trap light is off but for its plane waves, whose
-    /// part is the far light's above.
+    /// part is the constants' above.
     pub fn asymptote(&self, p: &[f64; GROUND], lights: &Lights) -> f64 {
         let trap = self.light.trap;
         if !lights.on(trap) {
@@ -119,7 +120,7 @@ impl Model {
 
     /// A state's label in the model basis (`manifold-F-m`), as the app writes it: "D2 F′=3 m=2", "基态 F=2 m=−1".
     pub(crate) fn state_label(&self, s: usize) -> String {
-        let level = Level::parse(&self.labels[s]).expect("a validated request's state labels parse (request.rs `Request::levels`)");
+        let level = crate::request::Level::parse(&self.labels[s]).expect("a validated request's state labels parse (request.rs `Request::levels`)");
         let m = if level.m < 0 { format!("−{}", -level.m) } else { level.m.to_string() };
         match level.manifold {
             crate::request::Manifold::Ground => format!("基态 F={} m={}", level.f, m),
@@ -134,24 +135,23 @@ impl Model {
         format!("{}{}", names.join("、"), if c.counter { "（反旋）" } else { "" })
     }
 
+    /// A beat's value as the ledger writes it (MHz).
+    fn beat_label(&self, beat: &Beat) -> String {
+        format!("{:.6} MHz", self.omega(beat) / crate::units::RAD_PER_US_PER_MHZ)
+    }
+
     /// A unit's label for the ledger (Chinese).
     pub fn label(&self, unit: &Unit) -> String {
         match unit {
-            Unit::Drive { carrier, excited, ground } => {
-                format!("{} → {} 的驱动（{}）", self.state_label(*ground), self.state_label(*excited), self.component_label(*carrier))
+            Unit::Bare { component, excited, ground } => {
+                format!("{} → {} 的驱动按裸能级折叠（{}）", self.state_label(*ground), self.state_label(*excited), self.component_label(*component))
             }
-            Unit::Term { a, b, from: None, to: None } => format!("{} 与 {} 的远光静态耦合", self.state_label(*a), self.state_label(*b)),
-            Unit::Term { a, b, from, to } => {
-                let name = |c: &Option<Component>| c.map_or(String::new(), |c| self.component_label(c));
-                if a == b {
-                    format!("{} 上两组光的拍频（{} 与 {}）", self.state_label(*a), name(from), name(to))
-                } else {
-                    format!("{} 与 {} 的耦合（吸收 {}，发射 {}）", self.state_label(*a), self.state_label(*b), name(from), name(to))
-                }
+            Unit::Drive { component, excited, ground } => {
+                format!("{} → {} 的驱动按原子处能级折叠（{}）", self.state_label(*ground), self.state_label(*excited), self.component_label(*component))
             }
-            Unit::Far { component } => format!("远失谐光的折叠（{}）", self.component_label(*component)),
-            Unit::FarBeat { first, second } => format!("两组远失谐光的拍频（{} 与 {}）", self.component_label(*first), self.component_label(*second)),
-            Unit::Excited { excited, other } => format!("{} 与 {} 的静态耦合", self.state_label(*excited), self.state_label(*other)),
+            Unit::Term { a, b, beat } if beat.is_zero() => format!("{} 与 {} 的静态耦合", self.state_label(*a), self.state_label(*b)),
+            Unit::Term { a, b, beat } if a == b => format!("{} 上拍频 {} 的能级拍动", self.state_label(*a), self.beat_label(beat)),
+            Unit::Term { a, b, beat } => format!("{} 与 {} 在拍频 {} 上的耦合", self.state_label(*a), self.state_label(*b), self.beat_label(beat)),
             Unit::Coherence { landing, .. } => format!("落到 {} 所在子空间的两组光子的相干", self.state_label(*landing)),
             Unit::Dressing { carrier } => format!("{} 的缀饰：偏振单元之间的干涉", self.component_label(*carrier)),
         }
@@ -171,14 +171,14 @@ impl Model {
                 }
             })
             .collect();
-        let near = self.carriers.len();
-        let far = self.components().into_iter().filter(|c| self.folded(*c)).count();
+        let count = |level: Level| self.driven.iter().filter(|&&(c, e, g)| self.level(c, e, g) == level).count();
         format!(
-            "内态分为 {} 个子空间（{}）；{} 个远失谐分量以裸能级的二阶消去（光移和散射）折叠，{} 个近共振载波以缀饰的二阶消去折叠，其余耦合显式保留。",
+            "内态分为 {} 个子空间（{}）；每个驱动按它自己的失谐处理：{} 个按裸能级的二阶消去（光移和散射）折叠，{} 个按原子处能级的缀饰二阶消去折叠，{} 个显式保留。",
             self.clusters.len(),
             clusters.join("；"),
-            far,
-            near
+            count(Level::Bare),
+            count(Level::Atom),
+            count(Level::Explicit)
         )
     }
 }
