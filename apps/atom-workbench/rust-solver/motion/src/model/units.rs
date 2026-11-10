@@ -342,11 +342,12 @@ impl Model {
     }
 
     /// Each unit's existence gate over the reach (SPEC §1.5; module documentation, # The gates), provable bounds at this model's
-    /// clusters and dressing, proven together over the reach's cells (reach.rs `Model::bounds_over`): the drives' (per ground state
+    /// clusters and dressing, proven together over the reach's cells, on all the cores (reach.rs `Model::bounds_over_in_parallel`):
+    /// the drives' (per ground state
     /// its folded drives' saturation and sweep) and the couplings' both bounds; of a far component, a far beat and a photon
     /// coherence, whose saturation is a closed form over all space, the sweep. A dressing has no gate.
     pub fn gates(&self, units: &[Unit], reach: &Reach) -> Vec<Gate> {
-        let mut quantities: Vec<Box<dyn Fn(&Region) -> f64 + '_>> = vec![];
+        let mut quantities: Vec<Box<dyn Fn(&Region) -> f64 + Sync + '_>> = vec![];
         let mut grounds: Vec<Option<usize>> = vec![None; GROUND];
         // The largest wave number of a frequency's beams; the static bounds' spread.
         let most = |frequency: usize| self.light.frequencies[frequency].beams.iter().map(|&l| self.light.beams[l].wave_number).fold(0.0, f64::max);
@@ -395,8 +396,8 @@ impl Model {
                 (Some(closed), Some(first))
             })
             .collect();
-        let refs: Vec<&dyn Fn(&Region) -> f64> = quantities.iter().map(|q| q.as_ref() as &dyn Fn(&Region) -> f64).collect();
-        let proven = self.bounds_over(reach, EXISTS, &refs);
+        let refs: Vec<&(dyn Fn(&Region) -> f64 + Sync)> = quantities.iter().map(|q| q.as_ref()).collect();
+        let proven = self.bounds_over_in_parallel(reach, EXISTS, &refs);
         asked
             .into_iter()
             .map(|(closed, at)| match (closed, at) {
