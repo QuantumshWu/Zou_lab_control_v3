@@ -1116,12 +1116,75 @@ fn scene_atoms(name: &str, grid: f64, each: &mut dyn FnMut(&crate::model::Run, &
     each(&run, &starts)
 }
 
+
+/// What a propagation on a grid of one panel spends where (µs, a start's): the parts' phases and their combination
+/// into the exponentials' matrices (parts × n² each), the exponentials on the vector (their products of n²), and the
+/// rest -- the kick's densities, sums and contractions (parts × n(n + 1)/2 a node). Of the corrector's generator at
+/// the first start.
+fn split<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
+    let from = &starts[0];
+    let n = from.psi.len();
+    let hm = model.hbar_over_mass();
+    let (flow, (r_h, kappa_h)) = super::middle(model, from.r, from.kappa, 0.5 * tau).unwrap();
+    let _ = flow;
+    let generator = model.generator(from.cluster, &Point { r: r_h, kappa: kappa_h, t: from.time + 0.5 * tau });
+    let velocity = kappa_h.map(|k| hm * k);
+    let path = super::Path::new(&generator.parts, n, super::gauge(&model.cluster(from.cluster).waves, velocity), velocity, from.time + 0.5 * tau, tau);
+    let (parts, h) = (generator.parts.len(), 0.5 * tau);
+    let (mut whole, mut combining, mut acting) = (super::Scratch::new(n), super::Scratch::new(n), super::Scratch::new(n));
+    // One spacing's two combinations as `cf4` makes them, and the first one kept for the exponentials.
+    let combine = |scratch: &mut super::Scratch, t: f64| {
+        let c = scratch.carve(parts, 2);
+        let r = 3.0_f64.sqrt() / 6.0;
+        let times = [t + (0.5 - r) * h - path.middle, t + (0.5 + r) * h - path.middle];
+        for (part, phases) in path.parts.iter().zip(c.phases.chunks_exact_mut(2)) {
+            let omega = path.omega(part);
+            (phases[0], phases[1]) = (C64::cis(omega * times[0]), C64::cis(omega * times[1]));
+        }
+        let mut sum = 0.0;
+        for [w1, w2] in [[0.25 + r, 0.25 - r], [0.25 - r, 0.25 + r]] {
+            path.combination(c.matrix, |j| c.phases[2 * j] * w1 + c.phases[2 * j + 1] * w2, w1 + w2);
+            sum += c.matrix.data[0].re;
+        }
+        sum
+    };
+    combine(&mut acting, from.time);
+    let kept = acting.matrix.clone();
+    let mut state: Vec<C64> = from.psi.clone();
+    let mut plan = crate::linalg::Chebyshev { parts: 0, terms: 0 };
+    let [propagation, combinations, exponentials, pace] = microseconds(
+        1,
+        [
+            &mut || super::beating(&path, &mut whole, &from.psi, from.time, tau, 1, None).impulse[0],
+            &mut || combine(&mut combining, from.time) + combine(&mut combining, from.time + h),
+            &mut || {
+                for _ in 0..4 {
+                    state.copy_from_slice(&from.psi);
+                    acting.matrix.data.copy_from_slice(&kept.data);
+                    let c = acting.carve(parts, 2);
+                    plan = crate::linalg::exp_apply(c.matrix, C64::new(0.0, -h), &mut state, c.work);
+                }
+                state[0].re
+            },
+            &mut yardstick,
+        ],
+    );
+    eprintln!(
+        "{name:<22} n {n:>2} parts {parts:>3} | a propagation {propagation:8.2} = phases and combinations {combinations:8.2} + exponentials {exponentials:8.2} ({} × {} products each) + kick and rest {:8.2} | pace {:.3} ns",
+        plan.parts,
+        plan.terms,
+        propagation - combinations - exponentials,
+        pace / 1.024
+    );
+}
+
 /// The step's cost (run by name, alone: `the_step_s_cost -- --ignored --nocapture`): µs per `step::step` and per phase,
 /// single-threaded, on the R1 scenes' far light (a static path and a standing wave's beating one), on a two-level atom
 /// with its excited state explicit in a standing wave in a tweezer, and on clusters of 1, 3, 5 and 8 ground states at a
 /// near-resonant light's sizes (`Synthetic`) on a static path (Doppler frames), on a standing wave's beating one (a pair
 /// of beat parts) and on six beams' (nine pairs). The beating paths on grids of one panel and of four: the difference
-/// over their six CF4 spacings is a spacing's cost.
+/// over their six CF4 spacings is a spacing's cost. Then clusters of 5 to 32 states with 19 and 201 parts (dense), each
+/// with what a propagation spends where (`split`).
 #[test]
 #[ignore = "a measurement, not a check: run by name"]
 fn the_step_s_cost() {
@@ -1145,6 +1208,17 @@ fn the_step_s_cost() {
             let model = Synthetic::new(n, depth, [0.0; 3], waves);
             let [one, four] = grids.map(|(panels, grid)| cost(&format!("{label} {n}/{panels}"), &model, &atoms(&model, 8, grid), tau));
             spacing(&format!("{label} {n}"), one, four);
+        }
+    }
+    // Larger clusters and many parts: 9 pairs of beats (19 parts) and 100 pairs (201 parts), one panel.
+    let mut directions = crate::random::Stream::new(37, crate::random::Purpose::Initial, 0, 0);
+    let hundred: Vec<[f64; 3]> = (0..100).map(|_| directions.direction().map(|x| 2.0 * K * x)).collect();
+    for n in [5, 8, 16, 32] {
+        for waves in [&six[..], &hundred[..]] {
+            let model = Synthetic::new(n, 1000.0, [0.0; 3], waves);
+            let starts = atoms(&model, 4, f64::INFINITY);
+            cost(&format!("{} parts {n}/1", 1 + 2 * waves.len()), &model, &starts, tau);
+            split(&format!("{} parts {n}/1", 1 + 2 * waves.len()), &model, &starts, tau);
         }
     }
 }
