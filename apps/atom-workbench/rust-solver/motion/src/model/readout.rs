@@ -57,35 +57,38 @@ impl Model {
     pub(crate) fn readout_with(&self, cluster: usize, at: &Point, psi: &[C64], tables: Option<&super::tabulate::Tables>) -> [f64; STATES] {
         let c = &self.clusters[cluster];
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
-        let rho = |x: usize, y: usize| psi[x] * psi[y].conj() / norm;
         let mut out = [0.0; STATES];
-        for (x, &s) in c.states.iter().enumerate() {
-            out[s] = rho(x, x).re;
+        for (z, &s) in psi.iter().zip(&c.states) {
+            out[s] = z.norm_sqr() / norm;
         }
         let amplitudes = self.light.amplitudes(at.r);
         let lights = self.running();
         let mut channels = self.far_channels(cluster, &amplitudes, &lights);
         channels.extend(self.near_channels(cluster, at, &amplitudes, &lights, tables));
-        let g = c.ground;
-        for p in &channels {
-            for q in &channels {
-                for b1 in 0..g {
-                    for b2 in 0..g {
-                        // Co-resonant: θ_b1 + ν_p = θ_b2 + ν_q.
-                        if c.frames[b1].plus(1, &p.nu) != c.frames[b2].plus(1, &q.nu) {
-                            continue;
-                        }
-                        let r = rho(b2, b1);
-                        let mut y = C64::ZERO;
-                        for i in 0..super::far::EXCITED {
-                            let z = p.response[(i, b1)].conj() * q.response[(i, b2)];
-                            y += z;
-                            out[GROUND + i] += (z * r).re;
-                        }
-                        out[c.states[b1]] -= (y * r).re;
+        // The co-resonant channels and places (p, b1, q, b2), θ_b1 + ν_p = θ_b2 + ν_q: the cluster's own under the running
+        // lights, exact, found once.
+        let resonant = self.resonances[cluster].get_or_init(|| {
+            let sums: Vec<Vec<Beat>> = channels.iter().map(|p| c.frames[..c.ground].iter().map(|theta| theta.plus(1, &p.nu)).collect()).collect();
+            let mut pairs = vec![];
+            for (p, left) in sums.iter().enumerate() {
+                for (q, right) in sums.iter().enumerate() {
+                    for (b1, one) in left.iter().enumerate() {
+                        pairs.extend(right.iter().enumerate().filter(|(_, two)| one == *two).map(|(b2, _)| [p, b1, q, b2]));
                     }
                 }
             }
+            pairs
+        });
+        for &[p, b1, q, b2] in resonant {
+            let r = psi[b2] * psi[b1].conj() / norm;
+            let (left, right) = (&channels[p].response, &channels[q].response);
+            let mut y = C64::ZERO;
+            for i in 0..super::far::EXCITED {
+                let z = left[(i, b1)].conj() * right[(i, b2)];
+                y += z;
+                out[GROUND + i] += (z * r).re;
+            }
+            out[c.states[b1]] -= (y * r).re;
         }
         out
     }

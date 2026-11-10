@@ -16,66 +16,155 @@
 //! # The read
 //! Where a trajectory is read (the pilot's, solve.rs), every step it takes is doubled: from the same state the step
 //! and two of its halves, the jump-free flows. The scheme's local error is O(τ^{p+1}), p = `units::ORDER`, so the step's
-//! own error is their difference times 2^p/(2^p − 1) (Richardson). A step on the beating grid is also redone on twice
-//! its panels (`step::Step::regrid`); CF4 and Simpson are of fourth order, so the grid's error is that difference times
-//! 2⁴/(2⁴ − 1). The two add, signed, over the steps the trajectory takes, per displayed quantity (`Drift`):
-//! - per lab axis a, the errors of the principal axes' energies E_i = (ħ/m)k_i²/2 + g_i y_i + λ_i y_i²/2 of the step's
-//!   reference (y_i = e_i·(r − p), k_i = e_i·κ), each mapped by its direction cosine squared e_ia²: T_a is the window
-//!   mean of (ħ/m)κ_a² over one trap period (SPEC §1.7), which of a harmonic axis is its energy, while an error of the
-//!   orbit's phase moves κ_a by its amplitude and that mean not at all;
-//! - the loss energy E_s;
-//! - the displayed rows.
+//! own local error is their difference times 2^p/(2^p − 1) (decide.rs `richardson`). A step on the beating grid is also
+//! redone on twice its panels (`step::Step::regrid`); CF4 and Simpson are of fourth order, so the grid's local error is
+//! that difference times 2⁴/(2⁴ − 1).
 //!
-//! A step whose halves the scheme refuses is counted unread (`Drift::unread`): its trajectory's read is then no number.
+//! A local error is an error of an output only as far as the dynamics carries it there: to first order the step's
+//! error of an ensemble mean is Σ_n E[∇u(t_n, X_n)·ℓ_n], ℓ_n the local errors and u(t, x) the exact dynamics'
+//! expectation of the output's quantity from the state x at the time t (SPEC §2.2). What carries a local error differs
+//! between the internal state and the motion, and the read follows each (measured on a bright scene, six beams' cooling
+//! in a tweezer: a plain sum of the local errors reads 17 to 21 % on a population whose values at τ, τ/2 and τ/8 agree
+//! within their statistics, and grows with the run's length).
 //!
-//! The ensemble's mean of a quantity's accumulated error at an output is the step's error there (solve.rs). Local errors
-//! add along a trajectory wherever the motion does not forget them: every jump cuts a step short, and the cut breaks the
-//! regular sequence that bounds a trap's energy error (R3: at ω τ = 2.5, some 40 jumps an atom raise T by half in 400 µs,
-//! and the sum reads it). Where the motion does forget them -- a trap without scattering, whose error stays bounded; a
-//! damped motion -- the sum reads more than the error: the safe side.
+//! - **The internal state** is carried by linear maps: along a trajectory's path and jumps, ψ after is a product of
+//!   propagators and jump operators applied to ψ before, whatever ψ is. The read carries a second internal state S
+//!   through the same maps -- each step taken once more from the trajectory's position and momentum with S in ψ's
+//!   place, each jump's operator (the class and the polarization the trajectory drew) on S, renormalized as ψ is
+//!   (`step::jump`) -- and adds every step's local error of ψ to it with its sign turned: S is the trajectory's
+//!   internal state with its step errors taken out, to first order, and it forgets them exactly as the internal state
+//!   forgets (optical pumping erases what a step did within a few jumps). The rows' error is the trajectory's rows less
+//!   S's (`Drift::rows`); it is not a sum.
+//! - **The motion** has the three axes' energies for its slow variables. Their local errors are accumulated per lab
+//!   axis (`Mark::error`): the doubling's differences of the principal axes' energies E_i = (ħ/m)k_i²/2 + g_i y_i +
+//!   λ_i y_i²/2 of the step's reference (y_i = e_i·(r − p), k_i = e_i·κ), each mapped by its direction cosine squared
+//!   e_ia² -- T_a is the window mean of (ħ/m)κ_a² over one trap period (SPEC §1.7), which of a harmonic axis is its
+//!   energy, while an error of the orbit's phase moves κ_a by its amplitude and that mean not at all --; and the
+//!   difference between the trajectory's step and S's, the kick an internal error makes. Beside them are accumulated
+//!   the kinetic energy the jumps put in per lab axis (`Mark::input`) and the hazard's integral with its local error
+//!   (`Mark::hazard`, `Mark::hazard_error`): the jump-free doubling sees no recoil, and a hazard off by a share makes
+//!   that share too many or too few of them. Each mark also holds the atom's own part of T (`Mark::level`, `Trail`):
+//!   per lab axis the mean of its kinetic energy (ħ/m)κ_a²/2 over the trap period behind it -- T_a's summand (SPEC
+//!   §1.7), half the axis's energy on a harmonic axis, and bounded and smooth in any trap (the harmonic energy about
+//!   the trap's centre is not: in a crossed trap's arms and across a lattice's sites it is no energy of the atom's).
+//!   The ensemble's regression of them carries the local errors to the outputs (transport.rs).
+//! - **The loss energy** E_s keeps the plain sum of its local errors (`Drift::energy`): a trajectory's loss decision
+//!   is judged against the sum as it stood (solve.rs) -- the safe side for a motion that forgets.
+//!
+//! Left out, each second order in the step's error or bounded by a read above: the shift of a jump's time and of its
+//! outcome's odds by the internal error (S takes the trajectory's jumps; the hazard's share bounds the times'), the
+//! internal error's own part of E_s at an output, and the motion's errors' effect on the rows.
+//!
+//! A step whose halves or whose carried step the scheme refuses is counted unread (`Drift::unread`), and so is a jump
+//! whose operator annihilates S: the trajectory's read is then no number.
 
-use crate::linalg::dot3;
-use crate::model::{Generator, STATES};
-use crate::step::{jump, step, step_work, test_loss, Dynamics, Flow, Refused, Segment, Step, Trajectory};
+use crate::decide::richardson;
+use crate::linalg::{dot3, norm_sqr, C64};
+use crate::model::STATES;
+use crate::step::{jump, step, step_work, test_loss, Dynamics, Flow, Middle, Refused, Segment, Step, Trajectory};
+use crate::transport::Mark;
 use crate::units::ORDER;
+use std::collections::VecDeque;
 
 /// The grid's order in its spacing h: CF4's local error O(h⁵) and composite Simpson's, per unit time O(h⁴).
 const GRID_ORDER: i32 = 4;
+
+/// The step evaluations a read step takes (module documentation, # The read): the step, its two halves, and the carried
+/// state's step.
+pub const READ_STEPS: u64 = 4;
 
 /// The panels a half step takes of the beating grid, a step twice as many (module documentation, # The step): the least
 /// grid a step and its halves share.
 const HALF_PANELS: usize = 1;
 
-/// A trajectory's accumulated signed step errors (module documentation, # The read): per lab axis the axes' energies'
-/// (rad/µs), the loss energy's (rad/µs), the displayed rows'; and the steps whose doubling could not be made.
-#[derive(Clone, Debug, PartialEq)]
+/// What a read trajectory holds of its step errors at a time (module documentation, # The read): the motion's mark
+/// (transport.rs), the loss energy's accumulated local errors (rad/µs), the displayed rows' error -- the trajectory's
+/// rows less its carried state's --, and the steps and jumps the read could not follow.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Drift {
-    pub axes: [f64; 3],
+    pub mark: Mark,
     pub energy: f64,
     pub rows: [f64; STATES],
     pub unread: f64,
 }
 
 impl Drift {
-    pub const ZERO: Drift = Drift { axes: [0.0; 3], energy: 0.0, rows: [0.0; STATES], unread: 0.0 };
+    pub const ZERO: Drift = Drift { mark: Mark::ZERO, energy: 0.0, rows: [0.0; STATES], unread: 0.0 };
 }
 
-/// What the doubling compares of a state: per principal axis of a reference flow (the step's) the axis's energy, the
-/// loss energy E_s, the displayed rows.
-struct Marks {
-    axes: [f64; 3],
-    energy: f64,
-    rows: [f64; STATES],
+/// A read trajectory's recent path (module documentation, # The read): per lab axis the window (µs, the axis's trap
+/// period), and the steps' paths back to the longest window behind the last one, each with its ∫κ_a² dt.
+#[derive(Clone, Debug, PartialEq)]
+struct Trail {
+    windows: [f64; 3],
+    steps: VecDeque<(Segment, [f64; 3])>,
 }
 
-fn marks<D: Dynamics>(model: &D, flow: &Flow, t: &Trajectory) -> Marks {
-    let at = t.point();
+impl Trail {
+    /// The trail a step longer.
+    fn push(&mut self, segment: &Segment) {
+        let end = segment.start + segment.tau;
+        self.steps.push_back((segment.clone(), segment.moments(segment.start, end).1));
+        let longest = self.windows.iter().fold(0.0, |a: f64, &b| a.max(b));
+        while self.steps.front().is_some_and(|(s, _)| s.start + s.tau <= end - longest) {
+            self.steps.pop_front();
+        }
+    }
+
+    /// The mean of the kinetic energy (ħ/m)κ_a²/2 per lab axis over the axis's window behind the trail's end, the window
+    /// cut where the trail begins (the trajectory's start); exact on the steps' paths (`Segment::moments`).
+    fn levels(&self, hbar_over_mass: f64) -> [f64; 3] {
+        let Some(end) = self.steps.back().map(|(s, _)| s.start + s.tau) else { return [0.0; 3] };
+        std::array::from_fn(|a| {
+            let from = end - self.windows[a];
+            let (mut integral, mut time) = (0.0, 0.0);
+            for (s, whole) in &self.steps {
+                let (first, last) = (s.start, s.start + s.tau);
+                if last <= from {
+                    continue;
+                }
+                if first >= from {
+                    integral += whole[a];
+                    time += last - first;
+                } else {
+                    integral += s.moments(from, last).1[a];
+                    time += last - from;
+                }
+            }
+            0.5 * hbar_over_mass * integral / time
+        })
+    }
+}
+
+/// A trajectory's read (module documentation, # The read): what it holds, its recent path, and the carried internal
+/// state S on the trajectory's cluster -- none before the first step, where S is ψ.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reader {
+    pub drift: Drift,
+    trail: Trail,
+    carried: Option<Vec<C64>>,
+}
+
+impl Reader {
+    /// A reader whose marks average the kinetic energy of each lab axis over `windows` (µs): the axes' trap periods.
+    pub fn new(windows: [f64; 3]) -> Reader {
+        Reader { drift: Drift::ZERO, trail: Trail { windows, steps: VecDeque::new() }, carried: None }
+    }
+}
+
+/// What the doubling compares of a state: the principal axes' energies of a reference flow about its expansion point p,
+/// (ħ/m)k_i²/2 + g_i y_i + λ_i y_i²/2, y_i = e_i·(r − p), k_i = e_i·κ.
+fn energies(flow: &Flow, t: &Trajectory) -> [f64; 3] {
     let d = [t.r[0] - flow.centre[0], t.r[1] - flow.centre[1], t.r[2] - flow.centre[2]];
-    let axes = std::array::from_fn(|i| {
+    std::array::from_fn(|i| {
         let (y, k) = (dot3(flow.axes[i], d), dot3(flow.axes[i], t.kappa));
         0.5 * flow.hbar_over_mass * k * k + flow.gradient[i] * y + 0.5 * flow.curvatures[i] * y * y
-    });
-    Marks { axes, energy: model.energy(t.cluster, &at, &t.psi), rows: model.readout(t.cluster, &at, &t.psi) }
+    })
+}
+
+/// Principal axes' quantities per lab axis: each by its direction cosine squared.
+fn lab(flow: &Flow, axes: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|a| (0..3).map(|i| flow.axes[i][a] * flow.axes[i][a] * axes[i]).sum())
 }
 
 /// The trajectory's physical state from a step's end, its counters kept.
@@ -96,45 +185,63 @@ fn counted<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajector
     Ok(s)
 }
 
-/// A step's error added to the drift (module documentation, # The read): the step `s` taken from `from` less its two
-/// halves, and less its regrid where it took the grid, each by its Richardson factor. Where the scheme refuses a half the
-/// step is counted unread.
-fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, s: &Step, drift: &mut Drift) {
+/// A step read (module documentation, # The read): the step `s` taken from `from` against its two halves and, where it
+/// took the grid, its regrid, each by its Richardson factor; and the carried state's step. Where the scheme refuses a
+/// half or the carried step, the step is counted unread and the carried state begins anew from the trajectory's.
+fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, s: &Step, reader: &mut Reader) {
     let half = 0.5 * s.segment.tau;
     let halves = counted(model, trajectory, from, half).and_then(|first| counted(model, trajectory, &first.end, half));
-    let Ok(second) = halves else {
-        drift.unread += 1.0;
+    let carried = match reader.carried.take() {
+        Some(psi) => counted(model, trajectory, &Trajectory { psi, ..from.clone() }, s.segment.tau).map(Some),
+        None => Ok(None),
+    };
+    let (Ok(second), Ok(carried)) = (halves, carried) else {
+        reader.drift.unread += 1.0;
         return;
     };
-    let on = s.segment.flow;
-    let whole = marks(model, &on, &s.end);
-    let mut add = |other: &Marks, factor: f64| {
-        for i in 0..3 {
-            let e = factor * (whole.axes[i] - other.axes[i]);
+    let (on, whole, drift) = (s.segment.flow, &s.end, &mut reader.drift);
+    let (axes, loss, size) = (energies(&on, whole), model.energy(whole.cluster, &whole.point(), &whole.psi), norm_sqr(&whole.psi));
+    drift.mark.hazard += (norm_sqr(&from.psi) / size).ln();
+    // The carried state after the step: S's own step where it differs from ψ, then ψ's local errors taken out.
+    let mut next = match carried {
+        Some(c) => {
+            let kick = lab(&on, std::array::from_fn(|i| axes[i] - energies(&on, &c.end)[i]));
             for a in 0..3 {
-                drift.axes[a] += on.axes[i][a] * on.axes[i][a] * e;
+                drift.mark.error[a] += kick[a];
             }
+            c.end.psi
         }
-        drift.energy += factor * (whole.energy - other.energy);
-        for q in 0..STATES {
-            drift.rows[q] += factor * (whole.rows[q] - other.rows[q]);
+        None => whole.psi.clone(),
+    };
+    // A level finer in the step or in the grid against the step taken: the finer level's parameter is half.
+    let mut finer = |other: &Trajectory, factor: f64| {
+        let moved = lab(&on, std::array::from_fn(|i| factor * (axes[i] - energies(&on, other)[i])));
+        for a in 0..3 {
+            drift.mark.error[a] += moved[a];
+        }
+        drift.energy += factor * (loss - model.energy(other.cluster, &other.point(), &other.psi));
+        drift.mark.hazard_error += factor * (norm_sqr(&other.psi) / size).ln();
+        for (x, (fine, coarse)) in next.iter_mut().zip(other.psi.iter().zip(&whole.psi)) {
+            *x = *x + (*fine - *coarse) * factor;
         }
     };
-    let richardson = |order: i32| (1 << order) as f64 / ((1 << order) - 1) as f64;
-    add(&marks(model, &on, &second.end), richardson(ORDER));
-    if let Some((finer, work)) = s.regrid() {
+    finer(&second.end, richardson(0.5, ORDER as f64));
+    if let Some((regrid, work)) = s.regrid(model) {
         trajectory.work += work;
-        add(&marks(model, &on, &finer), richardson(GRID_ORDER));
+        finer(&regrid, richardson(0.5, GRID_ORDER as f64));
     }
+    let (ours, theirs) = (model.readout(whole.cluster, &whole.point(), &whole.psi), model.readout(whole.cluster, &whole.point(), &next));
+    drift.rows = std::array::from_fn(|q| ours[q] - theirs[q]);
+    reader.carried = Some(next);
 }
 
 /// Advances a held trajectory to the time `to` (the next output time) by steps of τ, with its jumps and its loss test
 /// (module documentation, # The step; the loss is tested at every step's end and after every jump, SPEC §1.7); `each`
 /// takes every step's path (a jump's step is the one redone to its root, the jump at its end). A trajectory lost on the
-/// way stops at its loss time. With a drift, every step taken is read into it (module documentation, # The read). Where
-/// the scheme refuses a step at every length down to the time's round-off, the advance ends there with the refusal; so
-/// it does where the model gives a jump no photon (`step::jump`).
-pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, mut drift: Option<&mut Drift>, to: f64, each: &mut dyn FnMut(&Segment)) -> Result<(), Refused> {
+/// way stops at its loss time. With a reader, every step taken and every jump is read into it (module documentation,
+/// # The read). Where the scheme refuses a step at every length down to the time's round-off, the advance ends there
+/// with the refusal; so it does where the model gives a jump no photon (`step::jump`).
+pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, mut reader: Option<&mut Reader>, to: f64, each: &mut dyn FnMut(&Segment)) -> Result<(), Refused> {
     let grid = |length: f64| length / (2 * 2 * HALF_PANELS) as f64;
     trajectory.tau = tau;
     while trajectory.lost.is_none() && trajectory.time < to {
@@ -168,8 +275,10 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, mu
             }
         };
         if let Some(s) = &taken {
-            if let Some(drift) = drift.as_deref_mut() {
-                read(model, trajectory, &at, s, drift);
+            if let Some(reader) = reader.as_deref_mut() {
+                read(model, trajectory, &at, s, reader);
+                reader.trail.push(&s.segment);
+                reader.drift.mark.level = reader.trail.levels(model.hbar_over_mass());
             }
             each(&s.segment);
             adopt(trajectory, &s.end);
@@ -180,7 +289,21 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, mu
             break;
         }
         if jumps {
-            jump(model, trajectory)?;
+            match reader.as_deref_mut() {
+                Some(reader) => {
+                    // The jump read: the kinetic energy it puts in per lab axis; a carried state its operator
+                    // annihilates is no state to carry on.
+                    let (before, followed) = (trajectory.kappa, reader.carried.is_some());
+                    jump(model, trajectory, &mut reader.carried)?;
+                    for a in 0..3 {
+                        reader.drift.mark.input[a] += 0.5 * model.hbar_over_mass() * (trajectory.kappa[a] * trajectory.kappa[a] - before[a] * before[a]);
+                    }
+                    if followed && reader.carried.is_none() {
+                        reader.drift.unread += 1.0;
+                    }
+                }
+                None => jump(model, trajectory, &mut None)?,
+            }
         } else if length == rest {
             // The step spanned the rest of the interval: it ends on the output time, not an ulp short of it (the sum of
             // the steps' times rounds), which would leave an interval of the time's round-off to be stepped.
@@ -190,10 +313,11 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, mu
     Ok(())
 }
 
-/// The integrator's counted work of one step of τ through a cluster's generator at a point, the path at the velocity v
-/// (µm/µs), and the generator assemblies it asks: what `advance` adds to `Trajectory::work` and `Trajectory::assemblies`
-/// per step, priced without taking it (`step::step_work`). The model's price is the assemblies times its `assembly_work`.
-pub fn advance_work(generator: &Generator, waves: &[[f64; 3]], velocity: [f64; 3], tau: f64) -> (f64, u64) {
-    let (work, _) = step_work(generator, waves, velocity, tau, tau / (2 * 2 * HALF_PANELS) as f64);
-    (work, 2)
+/// The counted work of one step of τ on the path through a cluster's middle at a momentum and a velocity (µm/µs), and the
+/// middles a step asks of the model: what `advance` adds to `Trajectory::work` and `Trajectory::assemblies` per step,
+/// priced without taking it and without a middle of its own (`step::step_work`). The model's price of a middle is its
+/// `assembly_work`.
+pub fn advance_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64) -> (f64, u64) {
+    let (work, _) = step_work(middle, kappa, velocity, tau, tau / (2 * 2 * HALF_PANELS) as f64);
+    (work, 1)
 }

@@ -22,9 +22,11 @@
 //!
 //! # A generator along a step's path (propagation.md §1.2–§1.3)
 //! Every term is a field's value at the point times plane-wave phases: absorbing beam l and emitting beam l′ it holds
-//! e^{i(k_l − k_l′)·r}. On the step's straight path r_h + v(t − t_m) a cluster's generator is Σ_j M_j e^{iω_j(t − t_m)},
-//! ω_j = Ω_j + q_j·v (`Part`): Ω_j the term's beat in the cluster's frames, q_j its wave vector less the Doppler frames'.
-//! The envelopes and the tables are held at the point.
+//! e^{i(k_l − k_l′)·r}. On the step's straight path r_h + v(t − t_m) each beam's plane wave turns by e^{ik_l·v(t − t_m)}, each
+//! state's Doppler frame by e^{iK_s·v(t − t_m)}, and each term by its beat in the cluster's frames; the envelopes and the tables
+//! are held at the point. The generator on the path is given by its fields at a time (assemble.rs `Middle` and `Path`, the
+//! step's `step::Middle`): the point's values once, the momentum's Doppler weights and path rates, and at a time the sum of
+//! its terms there -- no list of beating matrices is made, whatever the number of beams.
 pub mod far;
 pub mod potential;
 pub mod reach;
@@ -223,50 +225,14 @@ pub struct Cluster {
     pub(crate) waves_exact: Vec<Beat>,
 }
 
-/// One part of a cluster's generator at a point (SPEC §1.4): on the step's path H(t) = Σ_j M_j e^{iω_j(t − t_m)},
-/// ω_j = Ω_j + q_j·v, and the gradient of its Hermitian part G(t) = Σ_j G_j e^{iω_j(t − t_m)}. Parts come in pairs (Ω, q),
-/// (−Ω, −q) (one part where both vanish), their Hermitian parts paired, G_{−j} = G_j†.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Part {
-    /// Its beat in the cluster's frames, exactly.
-    pub beat: Beat,
-    /// Ω (rad/µs): the beat's value.
-    pub omega: f64,
-    /// q (1/µm): its wave vector less the Doppler frames' K_a − K_b.
-    pub wave: [f64; 3],
-    /// M_j at the point, n × n on the cluster's states (rad/µs), its phase e^{i(Ω t + q·r)} there: the Hermitian part of that
-    /// beat with its decay −(i/2) Σ J†J.
-    pub generator: Mat,
-    /// G_j, the gradient of its Hermitian part at the point (rad/µs/µm), per lab axis.
-    pub force: [Mat; 3],
-}
-
-/// A cluster's generator at a point with some lights on: its parts, from the one assembly (`Model::assemble`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Generator { pub cluster: usize, pub at: Point, pub parts: Vec<Part> }
-
-impl Generator {
-    /// The force on a state held, −Σ_j w_j Re⟨ψ|G_j|ψ⟩/‖ψ‖² (rad/µs/µm per lab axis), each part by its weight: 1 at the
-    /// generator's own time, the conditional force there (the parts hold their phases); ∫e^{iΩ_j(t − t_m)}dt over a step, the
-    /// step's shear.
-    pub fn force(&self, psi: &[C64], weight: &dyn Fn(&Part) -> f64) -> [f64; 3] {
-        let norm = crate::linalg::norm_sqr(psi);
-        let mut out = [0.0; 3];
-        for part in &self.parts {
-            let w = weight(part);
-            for (a, g) in part.force.iter().enumerate() {
-                out[a] -= w * crate::linalg::inner(psi, &g.apply(psi)).re / norm;
-            }
-        }
-        out
-    }
-}
-
 /// One class of photons (SPEC §1.6) of a cluster's state at a point: the photons of one frame frequency landing in one cluster,
 /// folded and explicit amplitudes added. (A class of one frequency landing in two clusters is two of these: the joint law of
 /// direction, polarization and landing is the same either way, ∝ ‖P_C Σ_a ε_a u_a‖².)
 #[derive(Clone, Debug, PartialEq)]
 pub struct Photon {
+    /// The class's place among its cluster's classes: the same for every state of the cluster (a state the class's
+    /// operator annihilates has no photon of it).
+    pub class: usize,
     /// The cluster the jump lands the atom in.
     pub landing: usize,
     /// |k_φ| (1/µm), 2π/c times the class's photon frequency (photon.rs, # A class's photon): the emission recoil is −k_φ n.
@@ -325,6 +291,9 @@ pub struct Model {
     /// (units.rs `Model::far_cross_sizes`).
     pub(crate) spread: f64,
     pub(crate) crosses: Mutex<std::collections::HashMap<(Component, Component), Arc<Vec<f64>>>>,
+    /// Per cluster the co-resonant pairs of its folded channels' places under the running lights, found at its first readout
+    /// (readout.rs `Model::readout_with`).
+    pub(crate) resonances: Vec<std::sync::OnceLock<Vec<[usize; 4]>>>,
     /// The states' labels and the beams' names (the ledger's and the method's words).
     pub(crate) labels: Vec<String>,
     pub(crate) names: Vec<String>,
@@ -389,6 +358,7 @@ impl Model {
             plans: Mutex::new(vec![]),
             spread: 0.0,
             crosses: Mutex::new(Default::default()),
+            resonances: vec![],
             labels: request.states.clone(),
             names: request.beams.iter().map(|b| b.name.clone()).collect(),
         };
@@ -405,6 +375,7 @@ impl Model {
         for c in clusters.iter_mut() {
             c.waves = c.waves_exact.iter().map(|w| model.wave_value(w)).collect();
         }
+        model.resonances = clusters.iter().map(|_| std::sync::OnceLock::new()).collect();
         model.clusters = clusters;
         model.membership = membership;
         for ci in 0..model.carriers.len() {
@@ -536,7 +507,7 @@ pub struct Run<'a> {
     pub reference: [f64; GROUND],
     prepared: Lights,
     plans: Vec<(Arc<assemble::Plan>, Option<&'a tabulate::NearTable>)>,
-    /// The counted real multiply-adds of one assembly (`decide::COMPLEX` per complex one, assemble.rs # Work) and of one jump's
+    /// The counted real multiply-adds of one middle (`decide::COMPLEX` per complex one, assemble.rs # Work) and of one jump's
     /// photons (photon.rs `Model::photons_counted`): the largest over the clusters at the focus, every light on, made once.
     assembly: f64,
     photons: f64,
@@ -555,7 +526,8 @@ impl<'a> Run<'a> {
         let running = model.running();
         let at = Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 };
         let plans = (0..model.clusters.len()).map(|c| (model.plan(c, &running), tables.and_then(|t| t.of(c, &running)))).collect();
-        let assembly = (0..model.clusters.len()).map(|c| model.assembled(c, &at, &running, tables).1).fold(0.0, f64::max) * crate::decide::COMPLEX;
+        let plans: Vec<(Arc<assemble::Plan>, Option<&tabulate::NearTable>)> = plans;
+        let assembly = plans.iter().map(|(plan, table)| model.middle(plan, at.r, at.t, *table).work).fold(0.0, f64::max) * crate::decide::COMPLEX;
         let photons = (0..model.clusters.len())
             .map(|c| {
                 let psi: Vec<C64> = (0..model.clusters[c].states.len()).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
@@ -565,8 +537,8 @@ impl<'a> Run<'a> {
             * crate::decide::COMPLEX;
         Run { model, tables, reference, prepared: model.prepared(), plans, assembly, photons }
     }
-    /// A cluster's generator at a position and time for every momentum (assemble.rs `Middle`): what a step's two assemblies at
-    /// its middle share.
+    /// A cluster's generator at a position and time, for every momentum and along every path through the point (assemble.rs
+    /// `Middle`): a step's one middle.
     pub fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Middle<'a> {
         let (plan, table) = &self.plans[cluster];
         self.model.middle(plan, r, t, *table)
@@ -574,6 +546,10 @@ impl<'a> Run<'a> {
 }
 
 impl crate::step::Dynamics for Run<'_> {
+    type Middle<'a>
+        = Middle<'a>
+    where
+        Self: 'a;
     fn hbar_over_mass(&self) -> f64 {
         self.model.hbar_over_mass
     }
@@ -592,8 +568,8 @@ impl crate::step::Dynamics for Run<'_> {
     fn cluster_of(&self, ground: usize) -> usize {
         self.model.membership[ground]
     }
-    fn generator(&self, cluster: usize, at: &Point) -> Generator {
-        self.middle(cluster, at.r, at.t).generator(at.kappa)
+    fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Middle<'_> {
+        Run::middle(self, cluster, r, t)
     }
     fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
         self.model.photons_counted(cluster, at, psi, self.tables).0

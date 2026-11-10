@@ -3,18 +3,24 @@
 //! # The total error
 //! An output's error against its target has three parts from independent sources, combined in quadrature (GUM):
 //! E² = A² + b² + S² (`Account`):
-//! - A, the model's: each unit's error measured along the trajectories (SPEC §5.2) and the unseen share's bound;
-//! - b, the step's: the bound of its error read on the pilot (SPEC §2.2), standing unless a falsifier refutes it (SPEC §5.3);
-//! - S, the statistics': the interval at the confidence z (estimate.rs).
-//! The populations' are absolute against `POPULATION_TARGET`, every row as shown and the loss; T's relative against
+//! - A, the model's: each unit's error measured along the trajectories (SPEC §5.2), and the share of the thermal ensemble
+//!   that the model's reach leaves out -- the unseen share at the most trajectories a solve runs (SPEC §1.8);
+//! - b, the discretization's, the part a finer one takes away: the step's, the bound of its error read on the pilot
+//!   (SPEC §2.2), standing unless a falsifier refutes it (SPEC §5.3); and at t = 0, where T is the initial ensemble's exact
+//!   moment by quadrature, that quadrature's last two levels' difference (solve.rs `Fixed::start`);
+//! - S, the statistics': the jackknife's interval at the confidence z, on what is shown no less than what the run's own
+//!   trajectories leave unseen -- an event none of them showed has no spread to read (estimate.rs
+//!   `Estimate::shown_statistics`). The same function as A's share, another error: that one is the model's, at the most
+//!   trajectories; this one the sample's, at its own number.
+//! The populations' are absolute against `POPULATION_TARGET`, every row as shown and the loss; T's relative, against
 //! `TEMPERATURE_TARGET` at the outputs it is held to (solve.rs).
 //!
 //! # The contract's shape (contract §2.2)
 //! `totals`: the populations' and T's a-priori part √(A² + b²) -- what the approximations leave, the statistics aside (the
-//! result reports T's statistical error itself, src/solver-types.ts `LedgerTotal`) -- at the output where it takes most of
-//! its target, with the target; `items`:
+//! result reports T's statistical error itself, src/solver-types.ts `LedgerTotal`) -- at the output where it is largest,
+//! T's over every output where T has an account, with the target; `items`:
 //! each approximation's label, its estimated error (its largest over the outputs on what is shown, so that an output
-//! without atoms takes no part) and what the engine did with it, in Chinese as the app shows them; `flagged`: where
+//! without atoms takes no part) and what the engine did to get it, in Chinese as the app shows them; `flagged`: where
 //! some output's total exceeds its target -- the span, the largest total and its three parts --, and every other reason
 //! a span is less than the solve claims; `note`: what is true of the setup whatever the solve does, never an accuracy
 //! conclusion.
@@ -42,7 +48,7 @@ pub struct Totals {
     pub temperature: Total,
 }
 
-/// One output's error against its target in its three parts (module documentation, # The total error).
+/// One output's error against its target in its three parts A, b, S (module documentation, # The total error).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Account {
     pub model: f64,
@@ -72,13 +78,17 @@ pub struct Ledger {
 impl Ledger {
     /// An approximation with its estimated error, not negative; one below u·ε, which adds nothing to the population
     /// target at the format's resolution (ε(1 + u) rounds to ε), is no item. An estimate that is no finite number (the
-    /// contract's items are) is flagged as unread instead.
-    pub fn item(&mut self, label: &str, estimate: f64, action: &str) {
+    /// contract's items are) is flagged as unread instead. Returns the item's place in `items` until they are closed, none
+    /// where it is no item.
+    pub fn item(&mut self, label: &str, estimate: f64, action: &str) -> Option<usize> {
         if !estimate.is_finite() {
             self.flag(format!("{label}：误差读不出"));
-        } else if estimate >= UNIT_ROUNDOFF * POPULATION_TARGET {
-            self.items.push(Item { label: label.into(), estimate, action: action.into() });
+            return None;
         }
+        (estimate >= UNIT_ROUNDOFF * POPULATION_TARGET).then(|| {
+            self.items.push(Item { label: label.into(), estimate, action: action.into() });
+            self.items.len() - 1
+        })
     }
     /// A reason a span of the outputs is less than the solve claims, after those before it.
     pub fn flag(&mut self, reason: String) {
@@ -88,20 +98,16 @@ impl Ledger {
         });
     }
     /// The items from the largest estimate down, the totals and the flags of the outputs at `times` (µs): the populations'
-    /// accounts at every output; T's where it
-    /// is read, `held` where it is held to its target. T's a-priori total is taken over the outputs it is held to, over
-    /// every one where it is read when it is held to none (its error is then the solve's, not a target's), and only the
-    /// outputs it is held to are flagged.
+    /// accounts at every output; T's where it has one (SPEC §4), `held` where it is held to its target. T's a-priori total
+    /// is taken over every output where T has an account, held to its target or not -- what the approximations leave of
+    /// the T that is shown --; only the outputs T is held to are flagged against the target.
     pub fn close(&mut self, times: &[f64], population: &[Account], temperature: &[Option<Account>], held: &[bool]) {
         self.items.sort_by(|a, b| b.estimate.total_cmp(&a.estimate));
-        let held_to = held.iter().zip(temperature).any(|(&h, t)| h && t.is_some());
-        let temperatures: Vec<Option<Account>> =
-            temperature.iter().zip(held).map(|(t, &h)| t.filter(|_| h || !held_to)).collect();
         let populations: Vec<Option<Account>> = population.iter().map(|&a| Some(a)).collect();
-        self.totals = Totals { population: largest(&populations, POPULATION_TARGET), temperature: largest(&temperatures, TEMPERATURE_TARGET) };
+        self.totals = Totals { population: largest(&populations, POPULATION_TARGET), temperature: largest(temperature, TEMPERATURE_TARGET) };
         let everywhere = vec![true; times.len()];
         for (accounts, target, flaggable, what) in
-            [(&populations, POPULATION_TARGET, &everywhere[..], "布居与损失"), (&temperatures, TEMPERATURE_TARGET, held, "温度")]
+            [(&populations[..], POPULATION_TARGET, &everywhere[..], "布居与损失"), (temperature, TEMPERATURE_TARGET, held, "温度")]
         {
             // Not within the target: beyond it, or no number.
             let beyond: Vec<usize> =
@@ -129,11 +135,13 @@ fn largest(accounts: &[Option<Account>], target: f64) -> Total {
     Total { error, target }
 }
 
-/// A share in percent to two significant digits, as the app writes its errors.
+/// A share in percent to two significant digits, the digits the app writes an error to (src/accuracy.ts `errorPercent`:
+/// `formatNumber(100 error, {digits: 2})`).
 pub fn percent(x: f64) -> String {
     format!("{}%", significant(100. * x, 2))
 }
-/// A time (µs) in the app's words: µs below a millisecond, ms above, to three significant digits.
+/// A time (µs) to three significant digits, the digits the app writes a sample's time to (src/accuracy.ts
+/// `partialSummary`), in μs below a millisecond and in ms from there on.
 pub fn when(us: f64) -> String {
     if us >= 1e3 {
         format!("{} ms", significant(us / 1e3, 3))
@@ -188,8 +196,9 @@ mod tests {
     }
 
     /// The totals take the a-priori part where it takes most of its target; the outputs beyond the target are flagged as one span,
-    /// with the largest and its parts; T is totalled and flagged only where it is held to its target, and totalled
-    /// where it is read when it is held to none; nothing flagged within the targets, and no note.
+    /// with the largest and its parts; T is totalled wherever it has an account -- an output it is not held to at, and all of
+    /// them when it is held to none -- and flagged only where it is held to its target; nothing flagged within the targets,
+    /// and no note.
     #[test]
     fn the_ledger_totals_and_flags_the_outputs_beyond_their_targets() {
         let times: Vec<f64> = (0..6).map(|k| 250. * k as f64).collect();
@@ -205,28 +214,26 @@ mod tests {
         population[5] = account(0.01, 0.0224, 0.05);
         let mut temperature = read.clone();
         temperature[2] = Some(account(0.0, 0.0447, 0.2));
-        temperature[4] = Some(account(0.0, 0.0447, 0.3));
+        temperature[4] = Some(account(0.06, 0.0447, 0.3));
         let held = [true, true, true, true, false, true];
         let mut l = Ledger::default();
         l.close(&times, &population, &temperature, &held);
         assert!((l.totals.population.error - population[3].a_priori()).abs() < 1e-16);
-        assert!((l.totals.temperature.error - read[0].unwrap().a_priori()).abs() < 1e-16, "the statistics take no part");
+        assert_eq!(l.totals.temperature.error, temperature[4].unwrap().a_priori(), "the output T is not held to at; the statistics take no part");
         let flagged = l.flagged.unwrap();
         assert!(flagged.starts_with("750 μs 至 1.25 ms 之间 2 个时刻：布居与损失的估计误差超出目标，最大 6.5%（目标 5%；模型 1%、步长 2.2%、统计 6%）"), "{flagged}");
         assert!(flagged.ends_with("；500 μs：温度的估计误差超出目标，最大 20%（目标 10%；模型 0%、步长 4.5%、统计 20%）"), "{flagged}");
 
         let mut none_held = Ledger::default();
         none_held.close(&times, &within, &temperature, &[false; 6]);
-        assert!((none_held.totals.temperature.error - read[0].unwrap().a_priori()).abs() < 1e-16 && none_held.flagged.is_none());
+        assert_eq!((none_held.totals.temperature, none_held.flagged), (l.totals.temperature, None));
     }
 
-    /// An item below u·ε is none; the items come out largest first.
+    /// An item below u·ε is none, the others have their places; the items come out largest first.
     #[test]
     fn items_are_the_approximations_that_count() {
         let mut l = Ledger::default();
-        l.item("small", 1e-3, "");
-        l.item("nothing", 1e-32, "");
-        l.item("step", 0.022, "");
+        assert_eq!((l.item("small", 1e-3, ""), l.item("nothing", 1e-32, ""), l.item("step", 0.022, "")), (Some(0), None, Some(1)));
         l.close(&[0., 1.], &[Account::default(); 2], &[None, None], &[false; 2]);
         assert_eq!(l.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["step", "small"]);
     }

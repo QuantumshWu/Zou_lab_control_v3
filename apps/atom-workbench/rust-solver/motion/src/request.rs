@@ -4,11 +4,16 @@
 //! the TypeScript model writes it (src/full-master-model.ts `MotionModel`, the only owner of atomic physics).
 //!
 //! `Request::from_native` is the one mapping from the native JSONL request to these types: the options, the model and
-//! its motion block, every field of the motion block required (`electricField` and `outsideForms` included: no request
-//! from before them is served), unknown fields refused at every level of the motion block. It holds the checks of the
-//! JSON layer; `Request::validate` holds those that need the request alone (contract §2.4), and `from_native` ends
-//! with it. The messages are the old adapter's and engine's: the app translates some English ones word for word
-//! (src/solver-words.ts) and shows the Chinese ones as they are.
+//! its motion block, every field of the motion block required (the contract's `MotionModel`; those the engine does not
+//! read -- the magnetic field, a beam's intensity and its own outside shift, all of them in H0, the couplings and the
+//! outside forms already -- for their presence alone), unknown fields refused in the motion block, its beams, their field
+//! components and its outside forms. It holds the checks of the JSON layer: types, presence, unknown fields, and the
+//! shapes without which no request is built. `Request::validate` holds those of the request itself (contract §2.4), and
+//! `from_native` ends with it. The app translates some of the English messages word for word (src/solver-words.ts: the
+//! mean, the duration, the samples) and shows every other one as it is written.
+//!
+//! The model basis holds the ground manifold first: state s is a ground state exactly when s < `GROUND` (`validate`
+//! checks the labels against it once; everything else in the crate goes by the index).
 //!
 //! At the position r (µm from the focus, the origin) the Hamiltonian in the model's frames is (rad/µs)
 //!
@@ -37,12 +42,17 @@ pub const GROUND: usize = 8;
 pub const ONLY_3D: &str = "运动只计算 3D（半经典）：运动轴需为 3d";
 /// Why a tweezer without a waist is refused (contract §2.4; shown in the app).
 pub const NO_WAIST: &str = "光镊（trapBeamId 所指的光束）需要束腰：3D 运动计算聚焦在原子处的光镊中的单个原子";
+/// Why an initial state with population in an excited state is refused (shown in the app): the initial ensemble is each
+/// ground state's atoms in its own prepared well (SPEC §2.5), and no prepared well describes an excited state's motion.
+pub const ON_GROUND: &str = "运动计算的初态需在基态上：初态在激发态上有布居";
 /// Why a motion request with the mean is refused (translated by the app).
 const TRAJECTORY_ALONE: &str = "A motion request is a trajectory alone: meanOnly and includeMean are false";
 /// Why the atom's description is refused.
-const ATOM: &str = "The motion block needs a positive temperature and mass and a finite field";
+const ATOM: &str = "The motion block needs a positive temperature and mass";
 /// Why a model is not the full one.
 const FULL_MODEL: &str = "rb87-full/2 requires the complete 32-state Rb87 model";
+/// The initial density in the messages of its matrix's checks.
+const INITIAL_DENSITY: &str = "The initial density";
 
 /// A state's manifold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,9 +157,10 @@ pub struct Request {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Reading the native line's JSON: what the typed parse of the old adapter did (types, presence, unknown fields).
+// Reading the native line's JSON: types, presence, unknown fields.
 
-/// The motion block's fields; each of its levels refuses any other (as the old adapter's `deny_unknown_fields`).
+/// The motion block's fields, a beam's, an outside form's and a field component's (contract §1.4): each of these objects
+/// refuses any other field.
 const MOTION_FIELDS: [&str; 10] =
     ["axis", "trapBeamId", "temperatureUK", "massKg", "fieldVectorG", "hamiltonian", "frameFrequenciesMHz", "beams", "outsideForms", "emission"];
 const BEAM_FIELDS: [&str; 11] = [
@@ -179,7 +190,7 @@ fn object<'a>(v: &'a Value, what: &str, known: Option<&[&str]>) -> Result<&'a Ma
     }
     Ok(o)
 }
-/// A field that must be present (null counts as absent, as for the typed parse).
+/// A field that must be present; null counts as absent.
 fn get<'a>(o: &'a Map<String, Value>, key: &str, what: &str) -> Result<&'a Value, String> {
     o.get(key).filter(|v| !v.is_null()).ok_or_else(|| invalid(format!("missing field `{key}` in {what}")))
 }
@@ -207,28 +218,29 @@ fn integers(v: &Value, what: &str) -> Result<Vec<i32>, String> {
 fn count(v: &Value, what: &str) -> Result<usize, String> {
     v.as_u64().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| invalid(format!("{what} must be a nonnegative integer")))
 }
-/// A 32 × 32 matrix from its row-major `real` and `imag` arrays (an operator object takes other fields, as before).
-fn operator(v: &Value, what: &str) -> Result<Mat, String> {
-    let o = object(v, what, None)?;
-    let (re, im) = (numbers(get(o, "real", what)?, what)?, numbers(get(o, "imag", what)?, what)?);
+/// A 32 × 32 matrix from its real and imaginary parts, each a row-major array of 32 × 32 numbers.
+fn matrix(re: &Value, im: &Value, what: &str) -> Result<Mat, String> {
+    let (re, im) = (numbers(re, what)?, numbers(im, what)?);
     if re.len() != STATES * STATES || im.len() != STATES * STATES {
         return Err(format!("{what} must be a 32 x 32 row-major matrix"));
     }
     Ok(Mat { rows: STATES, cols: STATES, data: re.iter().zip(&im).map(|(&a, &b)| C64::new(a, b)).collect() })
 }
-/// The message of a beam whose geometry, intensity or frequency index is refused.
-fn beam_refused(id: &str, axes: usize) -> String {
-    format!("Beam {id} needs a finite direction, a positive wave number, a positive waist if focused, a nonnegative intensity and an index on the {axes} frequency axes")
+/// An operator: the matrix of an object's `real` and `imag` (nothing else of the object is read).
+fn operator(v: &Value, what: &str) -> Result<Mat, String> {
+    let o = object(v, what, None)?;
+    matrix(get(o, "real", what)?, get(o, "imag", what)?, what)
 }
 
 impl Request {
     /// The request of a native JSONL line (contract §1.1-§1.4): `{options, model: {dimension, states, initialReal,
-    /// initialImag, initialIndex, frequencyCoordinates, motion, …}, …}`. The options: a trajectory alone (`includeMean`
+    /// initialImag, frequencyCoordinates, motion, …}, …}`. The options: a trajectory alone (`includeMean`
     /// and `meanOnly` false; `includeMean` absent is true, as the native protocol reads it), `durationUs` in
     /// (0, `LONGEST_TIME_US`], `samples` in [2, `MOST_SAMPLES`], `device` "gpu" or "cpu" if given (either is computed on
     /// the CPU). The times are linspace(0, durationUs, samples), t_i = durationUs·i/(samples − 1), the population
-    /// core's grid. The initial density is `initialReal` + i`initialImag`, or the basis state `initialIndex` without
-    /// them. Fields of the line, the options and the model that motion does not read are left to the native worker.
+    /// core's grid. The initial density is `initialReal` + i `initialImag`, both required (motion does not read
+    /// `initialIndex`, contract §1.4). Fields of the line, the options and the model that motion does not read are left
+    /// to the native worker.
     pub fn from_native(line: &Value) -> Result<Request, String> {
         let line = object(line, "the request", None)?;
         let empty = Map::new();
@@ -253,7 +265,7 @@ impl Request {
             return Err("The trajectory duration must be a positive finite time".into());
         }
         if duration > LONGEST_TIME_US {
-            return Err(format!("The trajectory duration is limited to 10 s (requested {} s)", duration / 1e6));
+            return Err(format!("The trajectory duration is limited to {} s (requested {} s)", LONGEST_TIME_US / 1e6, duration / 1e6));
         }
         let samples = count(get(options, "samples", "options")?, "options.samples")?;
         if !(2..=MOST_SAMPLES).contains(&samples) {
@@ -264,7 +276,7 @@ impl Request {
             Some(v) => array(v, "model.states")?.iter().map(|s| text(s, "model.states").map(str::to_owned)).collect::<Result<_, _>>()?,
             None => vec![],
         };
-        if count(get(model, "dimension", "the model")?, "model.dimension")? != STATES || states.len() != STATES {
+        if count(get(model, "dimension", "the model")?, "model.dimension")? != STATES {
             return Err(FULL_MODEL.into());
         }
         let frequencies_mhz = match model.get("frequencyCoordinates").filter(|v| !v.is_null()) {
@@ -280,12 +292,9 @@ impl Request {
             return Err(ONLY_3D.into());
         }
         let (temperature_uk, mass_kg) = (number(field("temperatureUK")?, "motion.temperatureUK")?, number(field("massKg")?, "motion.massKg")?);
-        // The magnetic field is in H0 already: read for its shape and finiteness alone.
-        if !triple(field("fieldVectorG")?, "motion.fieldVectorG")?.iter().all(|x| x.is_finite()) {
-            return Err(ATOM.into());
-        }
+        // The contract's field that the engine does not read (H0 holds the magnetic field): present, no more.
+        field("fieldVectorG")?;
         let frame_frequencies_mhz = numbers(field("frameFrequenciesMHz")?, "motion.frameFrequenciesMHz")?;
-        let axes = frequencies_mhz.len();
         let beams = array(field("beams")?, "motion.beams")?
             .iter()
             .map(|b| {
@@ -293,11 +302,10 @@ impl Request {
                 let id = text(get(o, "id", "a beam")?, "a beam's id")?.to_owned();
                 let what = format!("beam {id}");
                 let at = |key: &str| get(o, key, &what);
-                let intensity = number(at("intensityMWcm2")?, "a beam's intensityMWcm2")?;
-                if !(intensity.is_finite() && intensity >= 0.0) {
-                    return Err(beam_refused(&id, axes));
-                }
-                operator(at("outsideShift")?, "A beam's outside shift")?;
+                // The contract's fields that the engine does not read (the couplings and the field hold the intensity, the
+                // outside forms every beam's outside shift): present, no more.
+                at("intensityMWcm2")?;
+                at("outsideShift")?;
                 let field = array(at("electricField")?, "a beam's electricField")?
                     .iter()
                     .map(|z| {
@@ -325,9 +333,6 @@ impl Request {
             .map(|f| {
                 let o = object(f, "an outside form", Some(&FORM_FIELDS))?;
                 let frequency_index = integers(get(o, "frequencyIndex", "an outside form")?, "an outside form's frequencyIndex")?;
-                if frequency_index.len() != axes {
-                    return Err(format!("An outside form needs an index on the {axes} frequency axes"));
-                }
                 let matrices = array(get(o, "matrices", "an outside form")?, "an outside form's matrices")?
                     .iter()
                     .map(|m| operator(m, "An outside form's matrix"))
@@ -339,26 +344,7 @@ impl Request {
         let trap_beam = beams.iter().position(|b| b.id == trap_id).ok_or_else(|| format!("The motion block's trapBeamId {trap_id} names none of its beams"))?;
         let emission: Vec<Mat> = array(field("emission")?, "motion.emission")?.iter().map(|m| operator(m, "An emission operator")).collect::<Result<_, _>>()?;
         let emission: [Mat; 3] = emission.try_into().map_err(|_| "The motion block has three emission operators, one per lab axis".to_string())?;
-        let initial_density = match (model.get("initialReal").filter(|v| !v.is_null()), model.get("initialImag").filter(|v| !v.is_null())) {
-            (Some(re), Some(im)) => {
-                let (re, im) = (numbers(re, "model.initialReal")?, numbers(im, "model.initialImag")?);
-                if re.len() != STATES * STATES || im.len() != STATES * STATES {
-                    return Err("initialReal/initialImag must be n*n row-major arrays".into());
-                }
-                Mat { rows: STATES, cols: STATES, data: re.iter().zip(&im).map(|(&a, &b)| C64::new(a, b)).collect() }
-            }
-            (None, None) => {
-                let index = match model.get("initialIndex") {
-                    Some(v) => count(v, "model.initialIndex")?,
-                    None => 0,
-                };
-                if index >= STATES {
-                    return Err("initialIndex is outside the state space".into());
-                }
-                Mat::from_fn(STATES, STATES, |i, j| if i == index && j == index { C64::ONE } else { C64::ZERO })
-            }
-            _ => return Err("initialReal and initialImag must be provided together".into()),
-        };
+        let initial_density = matrix(get(model, "initialReal", "the model")?, get(model, "initialImag", "the model")?, INITIAL_DENSITY)?;
         let request = Request {
             states,
             hamiltonian: operator(field("hamiltonian")?, "The motion block's H0")?,
@@ -382,7 +368,7 @@ impl Request {
         self.states.iter().map(|s| Level::parse(s)).collect()
     }
 
-    /// The checks that need the request alone (contract §2.4), in the order a request is read: the states, H0, the
+    /// The checks of the request itself (contract §2.4), in the order a request is read: the states, H0, the
     /// frames, the beams and their forms, the tweezer, the emission, the atom, the initial state, the times. The
     /// model's own checks (the couplings against the fields, the trap, the folds) are the model's.
     pub fn validate(&self) -> Result<(), String> {
@@ -398,10 +384,9 @@ impl Request {
         if self.states.len() != STATES {
             return Err(FULL_MODEL.into());
         }
-        let ground: Vec<bool> = self.levels()?.iter().map(Level::is_ground).collect();
-        let grounds = ground.iter().filter(|&&g| g).count();
-        if grounds != GROUND {
-            return Err(format!("The ground manifold has {grounds} states, not {GROUND}"));
+        // The basis holds the ground manifold first (module documentation): from here on a ground state is an index.
+        if let Some(s) = self.levels()?.iter().enumerate().position(|(s, level)| level.is_ground() != (s < GROUND)) {
+            return Err(format!("The model basis holds its {GROUND} ground states first and no other: {} is out of place", self.states[s]));
         }
         // An operator of only (row, column) entries the rule allows: excited ← ground or ground ← excited.
         let only = |m: &Mat, allowed: &dyn Fn(usize, usize) -> bool| (0..STATES).all(|i| (0..STATES).all(|j| allowed(i, j) || m[(i, j)] == C64::ZERO));
@@ -422,11 +407,11 @@ impl Request {
                 || b.waist.is_some_and(|w| !(w.is_finite() && w > 0.0))
                 || b.frequency_index.len() != axes
             {
-                return Err(beam_refused(&b.id, axes));
+                return Err(format!("Beam {} needs a finite direction, a positive wave number, a positive waist if focused and an index on the {axes} frequency axes", b.id));
             }
             square(&b.coupling, "A beam's coupling")?;
             square(&b.counter_coupling, "A beam's counter-rotating coupling")?;
-            let excitation = |i: usize, j: usize| !ground[i] && ground[j];
+            let excitation = |i: usize, j: usize| i >= GROUND && j < GROUND;
             if !only(&b.coupling, &excitation) || !only(&b.counter_coupling, &excitation) {
                 return Err(format!("Beam {}'s couplings must be excited ← ground", b.id));
             }
@@ -462,29 +447,26 @@ impl Request {
         }
         for m in &self.emission {
             square(m, "An emission operator")?;
-            if !only(m, &|i, j| ground[i] && !ground[j]) {
+            if !only(m, &|i, j| i < GROUND && j >= GROUND) {
                 return Err("The emission operators must be ground ← excited".into());
             }
         }
         if !(self.mass_kg.is_finite() && self.mass_kg > 0.0 && self.temperature_uk.is_finite() && self.temperature_uk > 0.0) {
             return Err(ATOM.into());
         }
+        square(&self.initial_density, INITIAL_DENSITY)?;
         self.check_density()?;
         self.check_times()
     }
 
-    /// The initial density: a 32 × 32 density, its trace one and Hermitian, positive semidefinite, diagonal in the model
-    /// basis with ground population (contract §2.4). A density's entries are assembled from at most 32 terms of size at
-    /// most one, so its trace and its Hermiticity hold to γ₃₂ (`units::rounding`); a diagonal density's eigenvalues are
-    /// its diagonal, nonnegative to the same rounding.
+    /// The initial density (a finite 32 × 32 matrix): its trace one and Hermitian, positive semidefinite, diagonal in the
+    /// model basis, on the ground states (contract §2.4). A density's entries are assembled from at most 32 terms of size
+    /// at most one, so its trace and its Hermiticity hold to γ₃₂ (`units::rounding`); a diagonal density's eigenvalues are
+    /// its diagonal, nonnegative to the same rounding; and to the same rounding an excited state's entry is no
+    /// population -- what a normalisation's round-off leaves there is not refused, a population is (`ON_GROUND`). The
+    /// ground states then hold all of the trace, so some ground state is populated.
     fn check_density(&self) -> Result<(), String> {
         let rho = &self.initial_density;
-        if rho.rows != STATES || rho.cols != STATES {
-            return Err("initialReal/initialImag must be n*n row-major arrays".into());
-        }
-        if rho.data.iter().any(|z| !z.is_finite()) {
-            return Err("Nonfinite initial density".into());
-        }
         let within = rounding(STATES);
         let hermitian = (0..STATES).all(|i| (0..STATES).all(|j| (rho[(i, j)] - rho[(j, i)].conj()).abs() <= within));
         if !((rho.trace() - C64::ONE).abs() <= within && hermitian) {
@@ -496,9 +478,8 @@ impl Request {
         if (0..STATES).any(|i| rho[(i, i)].re < -within) {
             return Err("Initial density is not positive semidefinite".into());
         }
-        let ground = self.levels()?;
-        if !((0..STATES).filter(|&i| ground[i].is_ground()).map(|i| rho[(i, i)].re).sum::<f64>() > 0.0) {
-            return Err("The initial density has no ground population".into());
+        if (GROUND..STATES).any(|s| rho[(s, s)].re > within) {
+            return Err(ON_GROUND.into());
         }
         Ok(())
     }
@@ -611,7 +592,8 @@ pub(crate) mod tests {
 
     /// The sample passes; each structural fault of contract §2.4 is refused with its message: a tweezer without a
     /// waist (the app's Chinese text), a coupling off excited ← ground, a beam frequency without its outside form, a
-    /// non-diagonal H0 or initial density, no ground population, uneven or misplaced times, a bad label.
+    /// non-diagonal H0 or initial density, an initial state with an excited state's population (the app's Chinese text;
+    /// a round-off there is none), uneven or misplaced times, a bad label, a ground state out of the basis's first eight.
     #[test]
     fn a_request_is_refused_for_each_fault_of_its_own() {
         let ok = sample();
@@ -641,8 +623,19 @@ pub(crate) mod tests {
                 r.initial_density = Mat::zeros(STATES, STATES);
                 r.initial_density[(20, 20)] = C64::ONE;
             },
-            "no ground population",
+            ON_GROUND,
         );
+        refused(
+            &|r| {
+                let start = r.states.iter().position(|s| s == "ground-2-0").unwrap();
+                r.initial_density[(start, start)] = C64::real(0.75);
+                r.initial_density[(20, 20)] = C64::real(0.25);
+            },
+            ON_GROUND,
+        );
+        let mut rounded = sample();
+        rounded.initial_density[(20, 20)] = C64::real(crate::units::UNIT_ROUNDOFF);
+        assert_eq!(rounded.validate(), Ok(()));
         refused(
             &|r| {
                 r.initial_density[(0, 0)] = C64::real(-0.25);
@@ -654,6 +647,11 @@ pub(crate) mod tests {
         refused(&|r| r.times_us[50] += 1e-6, "evenly spaced");
         refused(&|r| r.times_us[0] = 1e-3, "the first at 0");
         refused(&|r| r.states[0] = "ground-x-0".into(), "not manifold-F-m");
+        refused(&|r| r.states.swap(7, 8), "ground states first and no other: D1-1--1 is out of place");
+        refused(&|r| r.states[3] = "D2-0-0".into(), "ground states first and no other: D2-0-0 is out of place");
+        refused(&|r| r.states.pop().map(|_| ()).unwrap(), FULL_MODEL);
+        refused(&|r| r.initial_density[(3, 3)] = C64::new(f64::NAN, 0.0), "The initial density has a nonfinite entry");
+        refused(&|r| r.initial_density = Mat::zeros(STATES, STATES - 1), "The initial density must be a 32 x 32 row-major matrix");
         refused(&|r| r.beams[1].field[2] = C64::new(f64::NAN, 0.0), "electric field");
         refused(&|r| r.beams[1].field = [C64::ZERO; 3], "electric field is zero");
         refused(&|r| r.emission[1][(20, 0)] = C64::real(1.0), "ground ← excited");
@@ -662,21 +660,21 @@ pub(crate) mod tests {
     }
 
     /// The native line maps onto the request it was written from, every field (the times linspace(0, durationUs,
-    /// samples) to the last bit, the population core's grid); and each check of the old adapter refuses its fault with
-    /// its message: the mean, the axis (the app's Chinese text), an unknown field at each level of the motion block, a
-    /// missing `electricField` or `outsideForms`, the trap beam's id, the emission's count, the 32-state model, the
-    /// duration and the samples (the texts the app translates), the device, the beam's intensity, the forms' shape, the
-    /// initial density's form.
+    /// samples) to the last bit, the population core's grid), whatever the fields hold that the engine does not read; and
+    /// each check of the JSON layer refuses its fault with its message: the mean, the axis (the app's Chinese text), an
+    /// unknown field at each level of the motion block, a missing field -- read or not --, the trap beam's id, the
+    /// emission's count, the 32-state model, the duration and the samples (the texts the app translates), the device,
+    /// the forms' shape, the initial density's presence and form.
     #[test]
     fn a_native_line_maps_onto_its_request_and_its_faults_are_refused() {
         let r = sample();
         assert_eq!(Request::from_native(&native(&r)), Ok(r.clone()));
-        let mut basis = native(&r);
-        let model = basis["model"].as_object_mut().unwrap();
-        model.remove("initialReal");
-        model.remove("initialImag");
-        model.insert("initialIndex".into(), json!(r.states.iter().position(|s| s == "ground-2-0").unwrap()));
-        assert_eq!(Request::from_native(&basis), Ok(r.clone()));
+        let mut unread = native(&r);
+        unread["model"]["initialIndex"] = json!("none");
+        unread["model"]["motion"]["fieldVectorG"] = json!("in H0");
+        unread["model"]["motion"]["beams"][1]["intensityMWcm2"] = json!(-1);
+        unread["model"]["motion"]["beams"][1]["outsideShift"] = json!({"real": [], "imag": []});
+        assert_eq!(Request::from_native(&unread), Ok(r.clone()));
         let refused = |change: &dyn Fn(&mut Value), says: &str| {
             let mut line = native(&sample());
             change(&mut line);
@@ -693,18 +691,24 @@ pub(crate) mod tests {
         refused(&|l| l["model"]["motion"]["outsideForms"][0]["scale"] = json!(1), "unknown field `scale` in an outside form");
         refused(&|l| drop(l["model"]["motion"]["beams"][1].as_object_mut().unwrap().remove("electricField")), "missing field `electricField` in beam probe");
         refused(&|l| drop(l["model"]["motion"].as_object_mut().unwrap().remove("outsideForms")), "missing field `outsideForms`");
+        refused(&|l| drop(l["model"]["motion"].as_object_mut().unwrap().remove("fieldVectorG")), "missing field `fieldVectorG` in the motion block");
+        refused(&|l| drop(l["model"]["motion"]["beams"][1].as_object_mut().unwrap().remove("intensityMWcm2")), "missing field `intensityMWcm2` in beam probe");
+        refused(&|l| drop(l["model"]["motion"]["beams"][0].as_object_mut().unwrap().remove("outsideShift")), "missing field `outsideShift` in beam tweezer");
         refused(&|l| l["model"]["motion"]["trapBeamId"] = json!("lattice"), "trapBeamId lattice names none of its beams");
         refused(&|l| drop(l["model"]["motion"]["emission"].as_array_mut().unwrap().pop()), "three emission operators");
         refused(&|l| l["model"]["dimension"] = json!(31), FULL_MODEL);
+        refused(&|l| drop(l["model"]["states"].as_array_mut().unwrap().pop()), FULL_MODEL);
         refused(&|l| l["options"]["durationUs"] = json!(0), "The trajectory duration must be a positive finite time");
         refused(&|l| l["options"]["durationUs"] = json!(1.5e7), "The trajectory duration is limited to 10 s (requested 15 s)");
         refused(&|l| l["options"]["samples"] = json!(1), "A trajectory has 2 to 2000 samples (requested 1)");
         refused(&|l| l["options"]["samples"] = json!(2001), "A trajectory has 2 to 2000 samples (requested 2001)");
         refused(&|l| l["options"]["device"] = json!("tpu"), "options.device");
-        refused(&|l| l["model"]["motion"]["beams"][1]["intensityMWcm2"] = json!(-1), "Beam probe needs a finite direction");
+        refused(&|l| l["model"]["motion"]["outsideForms"][0]["frequencyIndex"] = json!([-4, 0]), "An outside form needs an index on the 1 frequency axes");
         refused(&|l| drop(l["model"]["motion"]["outsideForms"][0]["matrices"].as_array_mut().unwrap().pop()), "An outside form has nine matrices");
         refused(&|l| drop(l["model"]["motion"]["hamiltonian"]["real"].as_array_mut().unwrap().pop()), "The motion block's H0 must be a 32 x 32 row-major matrix");
-        refused(&|l| drop(l["model"].as_object_mut().unwrap().remove("initialImag")), "must be provided together");
+        refused(&|l| drop(l["model"].as_object_mut().unwrap().remove("initialImag")), "missing field `initialImag` in the model");
+        refused(&|l| drop(l["model"].as_object_mut().unwrap().remove("initialReal")), "missing field `initialReal` in the model");
+        refused(&|l| drop(l["model"]["initialReal"].as_array_mut().unwrap().pop()), "The initial density must be a 32 x 32 row-major matrix");
         refused(&|l| l["model"]["initialReal"][0] = json!(0.5), "trace/Hermitian");
         refused(&|l| l["model"]["motion"]["temperatureUK"] = json!(-30), ATOM);
     }

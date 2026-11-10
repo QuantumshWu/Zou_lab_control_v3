@@ -7,11 +7,83 @@
 //! beam's coupling is static on the path, every other beam's a beat of wave vector k_l − k₀ (and its adjoint). The photon:
 //! one class, u_a = √(Γ/3) ψ_e per lab axis (isotropic), landing in g; the jumps' kicks are the emission's −k n alone, of
 //! a chosen |k| (zero where a test reads the Ehrenfest force).
+//!
+//! The tests' models give their generator at a point by its parts (`Parts`): matrices M_j with G_j, each a plane wave
+//! along a path, Ĥ(s) = Σ_j M_j e^{iω_j s} + diag(K_s·v), ω_j = Ω_j + q_j·v.
 
-use crate::adapt::{self, Drift};
-use crate::linalg::{C64, Mat};
-use crate::model::{Beat, Cluster, Generator, Part, Photon, Point, Quadratic, Recoil, STATES};
-use crate::step::{self, Dynamics, Trajectory};
+use crate::adapt::{self, Reader};
+use crate::linalg::{dot3, C64, Mat};
+use crate::model::{Beat, Cluster, Photon, Point, Quadratic, Recoil, STATES};
+use crate::step::{self, Dynamics, Middle, Trajectory};
+
+/// One part of a test model's generator at a point: its beat Ω (rad/µs), its wave vector q less the Doppler frames'
+/// (1/µm), M and G = ∇M_h per lab axis there.
+struct Part {
+    omega: f64,
+    wave: [f64; 3],
+    generator: Mat,
+    force: [Mat; 3],
+}
+
+/// A test model's generator at a point (`step::Middle`): its parts and its states' Doppler frames K_s.
+struct Parts {
+    waves: Vec<[f64; 3]>,
+    parts: Vec<Part>,
+}
+
+impl Parts {
+    /// tr(G ρ) of a matrix on the states and a ρ laid out row by row.
+    fn trace(&self, g: &Mat, rho: &[C64]) -> C64 {
+        let n = self.waves.len();
+        (0..n * n).map(|i| g.data[i] * rho[(i % n) * n + i / n]).sum()
+    }
+}
+
+impl Middle for Parts {
+    type Path = [f64; 3];
+    fn states(&self) -> usize {
+        self.waves.len()
+    }
+    fn still(&self) -> bool {
+        self.parts.iter().all(|p| p.omega == 0.0 && p.wave == [0.0; 3])
+    }
+    fn path(&self, _: [f64; 3], velocity: [f64; 3]) -> [f64; 3] {
+        velocity
+    }
+    fn gauge(&self, velocity: &[f64; 3], rates: &mut [f64]) {
+        for (rate, k) in rates.iter_mut().zip(&self.waves) {
+            *rate = dot3(*k, *velocity);
+        }
+    }
+    fn generator(&self, velocity: &[f64; 3], s: f64, h: &mut Mat) {
+        h.data.fill(C64::ZERO);
+        for p in &self.parts {
+            h.add_scaled(C64::cis((p.omega + dot3(p.wave, *velocity)) * s), &p.generator);
+        }
+        for (x, k) in self.waves.iter().enumerate() {
+            h[(x, x)] += C64::real(dot3(*k, *velocity));
+        }
+    }
+    fn force(&self, velocity: &[f64; 3], s: f64, rho: &[C64]) -> [f64; 3] {
+        let mut out = [0.0; 3];
+        for p in &self.parts {
+            let phase = C64::cis((p.omega + dot3(p.wave, *velocity)) * s);
+            for a in 0..3 {
+                out[a] += (phase * self.trace(&p.force[a], rho)).re;
+            }
+        }
+        out
+    }
+    fn tones(&self, _: &[f64; 3], rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
+        for p in &self.parts {
+            each(p.omega, std::array::from_fn(|a| self.trace(&p.force[a], rho).re));
+        }
+    }
+    fn work(&self) -> [f64; 3] {
+        let size = (self.parts.len() * self.waves.len() * self.waves.len()) as f64;
+        [size, 3.0 * size, 3.0 * size]
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Beam {
@@ -92,6 +164,7 @@ fn zeros(n: usize) -> [Mat; 3] {
 }
 
 impl Dynamics for Atom {
+    type Middle<'a> = Parts;
     fn hbar_over_mass(&self) -> f64 {
         self.hm
     }
@@ -104,8 +177,8 @@ impl Dynamics for Atom {
     fn cluster_of(&self, _: usize) -> usize {
         0
     }
-    fn generator(&self, cluster: usize, at: &Point) -> Generator {
-        let (n, v) = (self.n(), self.trap.expansion(at.r));
+    fn middle(&self, _: usize, r: [f64; 3], _: f64) -> Parts {
+        let (n, v) = (self.n(), self.trap.expansion(r));
         let mut m = Mat::zeros(n, n);
         let mut g = zeros(n);
         for s in 0..n {
@@ -120,7 +193,7 @@ impl Dynamics for Atom {
         } else {
             m[(1, 1)] += C64::new(-self.detuning, -0.5 * self.gamma);
             for l in 0..self.beams.len() {
-                let (c, k) = (self.coupling(l, at.r), self.beams[l].k);
+                let (c, k) = (self.coupling(l, r), self.beams[l].k);
                 let grad: [C64; 3] = std::array::from_fn(|a| C64::new(0.0, k[a]) * c);
                 if l == 0 {
                     m[(1, 0)] += c;
@@ -139,13 +212,13 @@ impl Dynamics for Atom {
                         gu[a][(1, 0)] = grad[a];
                         gd[a][(0, 1)] = grad[a].conj();
                     }
-                    parts.push(Part { beat: Beat(vec![0]), omega: 0.0, wave: q, generator: up, force: gu });
-                    parts.push(Part { beat: Beat(vec![0]), omega: 0.0, wave: q.map(|x| -x), generator: down, force: gd });
+                    parts.push(Part { omega: 0.0, wave: q, generator: up, force: gu });
+                    parts.push(Part { omega: 0.0, wave: q.map(|x| -x), generator: down, force: gd });
                 }
             }
         }
-        parts.insert(0, Part { beat: Beat(vec![]), omega: 0.0, wave: [0.0; 3], generator: m, force: g });
-        Generator { cluster, at: *at, parts }
+        parts.insert(0, Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g });
+        Parts { waves: self.cluster.waves.clone(), parts }
     }
     fn photons(&self, _: usize, _: &Point, psi: &[C64]) -> Vec<Photon> {
         let n = self.n();
@@ -154,6 +227,7 @@ impl Dynamics for Atom {
         u[0] = source;
         let none = || vec![C64::ZERO; n];
         vec![Photon {
+            class: 0,
             landing: 0,
             wave_number: self.emission,
             amplitudes: [u.clone(), u.clone(), u],
@@ -490,6 +564,68 @@ fn the_jumps_are_at_the_roots_of_the_norm() {
     assert!((variance * gamma * gamma - 1.0).abs() < 4.0 * (8.0 / n).sqrt(), "variance {variance} against {}", 1.0 / (gamma * gamma));
 }
 
+/// A read trajectory's jumps and hazard (adapt.rs, # The read): a ground state of constant hazard γ in no potential.
+/// The hazard's integral is γ t; a constant hazard is integrated exactly by any step, so its local error is none; no
+/// force acts between the jumps, so the kinetic energy the jumps put in per lab axis is the trajectory's own gain of it;
+/// one internal state has no error of the rows, and its jumps' operator never annihilates the carried state. Each to the
+/// round-off of the steps' norms: a norm's ratio and its logarithm are some eight operations a step.
+#[test]
+fn a_read_trajectory_holds_its_jumps_input_and_its_hazard() {
+    let gamma = 2.0;
+    let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
+    let model = Atom::new(RB, flat, vec![], 0.0, gamma);
+    let start = Trajectory::new(&model, 0, [0.0; 3], [3.0, -2.0, 1.0], 3, 5);
+    let (mut t, mut reader, end) = (start.clone(), Reader::new([5.0; 3]), 50.0);
+    adapt::advance(&model, 1.0, &mut t, Some(&mut reader), end, &mut |_| {}).unwrap();
+    let drift = reader.drift;
+    assert!(t.jumps > 50 && drift.unread == 0.0 && drift.rows.iter().all(|x| *x == 0.0), "{} jumps, {drift:?}", t.jumps);
+    let round_off = crate::units::rounding(8 * t.steps as usize);
+    assert!((drift.mark.hazard - gamma * end).abs() <= round_off * gamma * end, "the hazard's integral {} against {}", drift.mark.hazard, gamma * end);
+    assert!(drift.mark.hazard_error.abs() <= round_off * gamma * end, "the hazard's local error {}", drift.mark.hazard_error);
+    for a in 0..3 {
+        let gain = 0.5 * RB * (t.kappa[a] * t.kappa[a] - start.kappa[a] * start.kappa[a]);
+        assert!((drift.mark.input[a] - gain).abs() <= round_off * gain.abs().max(drift.mark.input[a].abs()), "axis {a}: the jumps put in {} against the gain {gain}", drift.mark.input[a]);
+    }
+}
+
+/// A jump is a linear map of the internal state (`step::jump`'s carried state; adapt.rs, # The read): on a pumping
+/// scene's model (R5_PUMP), from every ground state in turn, a carried state that is the trajectory's own takes every
+/// jump to the trajectory's own state after it, and so does twice it -- the class's operator found by its place, the
+/// polarization the trajectory drew, the same renormalization --, to the bit. Between the jumps a short step moves the
+/// state on. The jumps land in more than one cluster: more than one class's operator is met.
+#[test]
+fn a_carried_state_takes_the_trajectory_s_jumps() {
+    let request = scene("R5_PUMP");
+    let light = crate::field::Light::new(&request);
+    let model = crate::model::Model::new(&request, &light, &[]).expect("every unit folds");
+    let chief = (0..crate::model::GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let mut p = [0.0; crate::model::GROUND];
+    p[chief] = 1.0;
+    let trap = model.trap(&p, &model.prepared()).unwrap();
+    let run = crate::model::Run::new(&model, p);
+    let (tau, jumps) = (0.25, 3);
+    let mut landed = std::collections::BTreeSet::new();
+    for state in 0..crate::model::GROUND {
+        let mut t = Trajectory::new(&run, state, [trap.centre[0] + 0.05, trap.centre[1] - 0.03, trap.centre[2] + 0.1], [1.0, -2.0, 0.5], 11, state as u64);
+        t.grid = tau / 4.0;
+        for _ in 0..jumps {
+            let (mut own, mut twice) = (Some(t.psi.clone()), Some(t.psi.iter().map(|z| *z * 2.0).collect::<Vec<C64>>()));
+            let mut twin = t.clone();
+            if step::jump(&run, &mut t, &mut own).is_err() {
+                // A state with no photon to emit (the pumping's dark state) makes no jump.
+                break;
+            }
+            step::jump(&run, &mut twin, &mut twice).unwrap();
+            assert_eq!(own.as_ref(), Some(&t.psi), "the trajectory's own state, carried, from state {state} after jump {}", t.jumps);
+            assert_eq!(twice.as_ref(), Some(&t.psi), "twice the trajectory's state, carried, from state {state} after jump {}", t.jumps);
+            landed.insert(t.cluster);
+            let next = step::step(&run, &t, tau).unwrap().end;
+            (t.r, t.kappa, t.psi, t.time) = (next.r, next.kappa, next.psi, next.time);
+        }
+    }
+    assert!(landed.len() > 1, "the jumps landed in the clusters {landed:?} only");
+}
+
 /// R1's mechanism (SPEC §2.2): a conservative anharmonic trap's energy over a long run at one constant step. A hot atom
 /// in a Gaussian tweezer (radial ω = 0.13 rad/µs) for some hundred radial periods at ω τ = 0.8: the splitting, symplectic
 /// and its own inverse, keeps the energy's error bounded -- its last tenth's mean within its first tenth's spread (no
@@ -518,18 +654,20 @@ fn a_conservative_trap_keeps_its_energy() {
     assert!((last - first).abs() <= 4.0 * spread, "the energy drifts {:e} against the spread {spread:e}", last - first);
 }
 
-/// A read trajectory's drift is the sum of its steps' doubling differences (adapt.rs, # The read): a hot atom in a
-/// Gaussian tweezer advanced through four steps with a drift, against the same four steps made by hand -- each the step
-/// less its two halves from the same state, 4/3 of the loss energy's difference (second order) --, to the sums' round-off;
-/// and the read leaves the trajectory where the unread one goes.
+/// A read trajectory's loss energy error is the sum of its steps' doubling differences (adapt.rs, # The read): a hot
+/// atom in a Gaussian tweezer advanced through four steps with a reader, against the same four steps made by hand -- each
+/// the step less its two halves from the same state, 4/3 of the loss energy's difference (second order) --, to the sums'
+/// round-off; the read leaves the trajectory where the unread one goes; with one internal state there is no error of
+/// the rows, no jump puts energy in, and the hazard is none.
 #[test]
 fn a_read_trajectory_accumulates_its_steps_doubling_differences() {
     let trap = Trap::Gaussian { depth: 6.0, waists: [1.0, 1.0, 3.0] };
     let model = Atom::new(RB, trap, vec![], 0.0, 0.0);
     let start = held(&model, [0.3, -0.2, 0.8], [20.0, 15.0, -10.0]);
     let (tau, steps) = (5.0, 4);
-    let (mut read, mut plain, mut drift) = (start.clone(), start.clone(), Drift::ZERO);
-    adapt::advance(&model, tau, &mut read, Some(&mut drift), tau * steps as f64, &mut |_| {}).unwrap();
+    let (mut read, mut plain, mut reader) = (start.clone(), start.clone(), Reader::new([2.0 * tau; 3]));
+    adapt::advance(&model, tau, &mut read, Some(&mut reader), tau * steps as f64, &mut |_| {}).unwrap();
+    let drift = reader.drift;
     adapt::advance(&model, tau, &mut plain, None, tau * steps as f64, &mut |_| {}).unwrap();
     assert_eq!((read.r, read.kappa), (plain.r, plain.kappa));
     let (mut by_hand, mut at) = (0.0, start);
@@ -542,7 +680,9 @@ fn a_read_trajectory_accumulates_its_steps_doubling_differences() {
         at = whole.end;
     }
     assert!((drift.energy - by_hand).abs() <= 1e-12 * by_hand.abs(), "{} against {by_hand}", drift.energy);
-    assert!(drift.energy.abs() > 1e-6 && drift.rows.iter().all(|x| *x == 0.0), "{drift:?}");
+    assert!(drift.energy.abs() > 1e-6 && drift.rows.iter().all(|x| *x == 0.0) && drift.unread == 0.0, "{drift:?}");
+    assert!(drift.mark.input == [0.0; 3], "{drift:?}");
+    assert!(drift.mark.level.iter().all(|&e| e > 0.0) && drift.mark.error.iter().any(|&e| e != 0.0), "{drift:?}");
 }
 
 /// The step-doubling estimate is the scheme's local error, O(τ³): a two-level atom in a standing wave in a Gaussian
@@ -677,9 +817,10 @@ fn a_step_with_light_and_its_reverse_miss_beyond_the_scheme_s_order() {
 // ---------------------------------------------------------------------------------------------------------------------
 // The model's far light (`model::Run`) on the R1 scenes: a conservative trap.
 
-/// A reference scene (refs/scenes, the app's native request) through the one parser.
+/// A scene's request through the one parser: a reference scene by name (refs/scenes, the app's native request), or any
+/// native request file by its path.
 fn scene(name: &str) -> crate::request::Request {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
+    let path = if name.ends_with(".json") { std::path::PathBuf::from(name) } else { std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json")) };
     let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     crate::request::Request::from_native(&line).unwrap()
 }
@@ -725,11 +866,11 @@ fn conservative_trap(name: &str) {
             }
         }
         let mut t = Trajectory::new(&run, state, r, kappa, 17, i);
-        let mut drift = Drift::ZERO;
+        let mut reader = Reader::new(trap.lab.map(|w| std::f64::consts::TAU / w));
         let mut e0 = run.energy(t.cluster, &t.point(), &t.psi);
         for (k, &time) in request.times_us.iter().enumerate().skip(1) {
             let before = t.jumps;
-            adapt::advance(&run, tau, &mut t, Some(&mut drift), time, &mut |_| {}).unwrap();
+            adapt::advance(&run, tau, &mut t, Some(&mut reader), time, &mut |_| {}).unwrap();
             assert!(t.lost.is_none(), "{name}: atom {i} lost at {:?}", t.lost);
             let e = run.energy(t.cluster, &t.point(), &t.psi);
             if t.jumps == before {
@@ -739,7 +880,7 @@ fn conservative_trap(name: &str) {
             }
             kinetic[k] += 0.5 * hm * t.kappa.iter().map(|x| x * x).sum::<f64>() / atoms as f64;
         }
-        read += drift.energy / (kt * atoms as f64);
+        read += reader.drift.energy / (kt * atoms as f64);
         steps += t.steps;
         jumps += t.jumps;
     }
@@ -812,6 +953,7 @@ impl Synthetic {
 }
 
 impl Dynamics for Synthetic {
+    type Middle<'a> = Parts;
     fn hbar_over_mass(&self) -> f64 {
         self.hm
     }
@@ -824,12 +966,12 @@ impl Dynamics for Synthetic {
     fn cluster_of(&self, _: usize) -> usize {
         0
     }
-    fn generator(&self, cluster: usize, at: &Point) -> Generator {
-        let (n, v, k) = (self.cluster.states.len(), self.trap.expansion(at.r), &self.cluster.waves);
+    fn middle(&self, _: usize, r: [f64; 3], _: f64) -> Parts {
+        let (n, v, k) = (self.cluster.states.len(), self.trap.expansion(r), &self.cluster.waves);
         // An entry a ← b of wave vector q: its own q + K_a − K_b, and its phase at the point.
         let wave = |a: usize, b: usize, q: [f64; 3]| -> ([f64; 3], C64) {
             let w: [f64; 3] = std::array::from_fn(|i| q[i] + k[a][i] - k[b][i]);
-            (w, C64::cis(w[0] * at.r[0] + w[1] * at.r[1] + w[2] * at.r[2]))
+            (w, C64::cis(w[0] * r[0] + w[1] * r[1] + w[2] * r[2]))
         };
         let (mut m, mut g) = (Mat::zeros(n, n), zeros(n));
         for a in 0..n {
@@ -846,7 +988,7 @@ impl Dynamics for Synthetic {
                 g[i][(a, a)] += C64::real(v.gradient[i]);
             }
         }
-        let mut parts = vec![Part { beat: Beat(vec![]), omega: 0.0, wave: [0.0; 3], generator: m, force: g }];
+        let mut parts = vec![Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g }];
         for (q, x) in &self.beats {
             let (mut up, mut down, mut gu, mut gd) = (Mat::zeros(n, n), Mat::zeros(n, n), zeros(n), zeros(n));
             for a in 0..n {
@@ -861,10 +1003,10 @@ impl Dynamics for Synthetic {
                     }
                 }
             }
-            parts.push(Part { beat: Beat(vec![0]), omega: 0.0, wave: *q, generator: up, force: gu });
-            parts.push(Part { beat: Beat(vec![0]), omega: 0.0, wave: q.map(|x| -x), generator: down, force: gd });
+            parts.push(Part { omega: 0.0, wave: *q, generator: up, force: gu });
+            parts.push(Part { omega: 0.0, wave: q.map(|x| -x), generator: down, force: gd });
         }
-        Generator { cluster, at: *at, parts }
+        Parts { waves: k.clone(), parts }
     }
     fn photons(&self, _: usize, _: &Point, _: &[C64]) -> Vec<Photon> {
         unreachable!("the cost harness takes no jump")
@@ -894,18 +1036,70 @@ impl Dynamics for Synthetic {
     }
 }
 
-/// A model that counts the reference expansions a step asks of it.
+/// A model that counts what a step asks of it: its reference expansions and its middles, and of the middles the
+/// generators, the forces and the tones (`Probe`).
 struct Counted<'a, D: Dynamics> {
     model: &'a D,
-    references: std::cell::Cell<u64>,
+    calls: std::cell::Cell<[u64; 5]>,
+}
+
+/// A middle that counts its node calls into its model's counts.
+struct Probe<'a, M: Middle> {
+    middle: M,
+    calls: &'a std::cell::Cell<[u64; 5]>,
+}
+
+impl<M: Middle> Probe<'_, M> {
+    fn count(&self, which: usize) {
+        let mut calls = self.calls.get();
+        calls[which] += 1;
+        self.calls.set(calls);
+    }
+}
+
+impl<M: Middle> Middle for Probe<'_, M> {
+    type Path = M::Path;
+    fn states(&self) -> usize {
+        self.middle.states()
+    }
+    fn still(&self) -> bool {
+        self.middle.still()
+    }
+    fn path(&self, kappa: [f64; 3], velocity: [f64; 3]) -> M::Path {
+        self.middle.path(kappa, velocity)
+    }
+    fn gauge(&self, path: &M::Path, rates: &mut [f64]) {
+        self.middle.gauge(path, rates)
+    }
+    fn generator(&self, path: &M::Path, s: f64, h: &mut Mat) {
+        self.count(2);
+        self.middle.generator(path, s, h)
+    }
+    fn force(&self, path: &M::Path, s: f64, rho: &[C64]) -> [f64; 3] {
+        self.count(3);
+        self.middle.force(path, s, rho)
+    }
+    fn tones(&self, path: &M::Path, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
+        self.count(4);
+        self.middle.tones(path, rho, each)
+    }
+    fn work(&self) -> [f64; 3] {
+        self.middle.work()
+    }
 }
 
 impl<D: Dynamics> Dynamics for Counted<'_, D> {
+    type Middle<'b>
+        = Probe<'b, D::Middle<'b>>
+    where
+        Self: 'b;
     fn hbar_over_mass(&self) -> f64 {
         self.model.hbar_over_mass()
     }
     fn reference(&self, r: [f64; 3]) -> Quadratic {
-        self.references.set(self.references.get() + 1);
+        let mut calls = self.calls.get();
+        calls[0] += 1;
+        self.calls.set(calls);
         self.model.reference(r)
     }
     fn cluster(&self, cluster: usize) -> &Cluster {
@@ -914,8 +1108,11 @@ impl<D: Dynamics> Dynamics for Counted<'_, D> {
     fn cluster_of(&self, ground: usize) -> usize {
         self.model.cluster_of(ground)
     }
-    fn generator(&self, cluster: usize, at: &Point) -> Generator {
-        self.model.generator(cluster, at)
+    fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Self::Middle<'_> {
+        let mut calls = self.calls.get();
+        calls[1] += 1;
+        self.calls.set(calls);
+        Probe { middle: self.model.middle(cluster, r, t), calls: &self.calls }
     }
     fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
         self.model.photons(cluster, at, psi)
@@ -980,42 +1177,45 @@ fn yardstick() -> f64 {
     x[0].re
 }
 
-/// One case of the cost harness: µs per step of τ and per phase over the case's start states (held: no step reaches
-/// their thresholds), the model's calls apart. Phases: the middle's fixed point less its reference expansions; the two
-/// propagations, each on its own generator with its kick (the second also with the threshold reached halfway down the
-/// step's fall of the norm: its root); the rest -- the shear, the flows, the step's own copies and their release.
-/// Returns the two propagations' times.
+/// One case of the cost harness: µs per step of τ over the case's start states (held: no step reaches their thresholds),
+/// split into the model's part -- its reference expansions, its middle, and at the middle's nodes its generators, forces
+/// and tones, each timed alone and counted as the step calls them -- and the step's own, the rest. Then the step's
+/// phases, the model's calls within them: the middle's fixed point less its reference expansions; the two propagations,
+/// each on its path with its kick (the second also with the threshold reached halfway down the step's fall of the norm:
+/// its root). Returns the two propagations' times.
 fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> [f64; 2] {
     let (count, half, hm) = (starts.len(), 0.5 * tau, model.hbar_over_mass());
-    let counted = Counted { model, references: std::cell::Cell::new(0) };
+    let counted = Counted { model, calls: std::cell::Cell::new([0; 5]) };
     let steps: Vec<step::Step> = starts.iter().map(|s| step::step(&counted, s, tau).unwrap()).collect();
-    let rounds = counted.references.get() as f64 / count as f64;
+    let calls = counted.calls.get().map(|c| c as f64 / count as f64);
     // Each start's step, piece by piece as `step::step` makes it.
-    struct Pieces {
-        middle: Point,
+    struct Pieces<M: Middle> {
+        at: ([f64; 3], f64),
+        middle: M,
         reference: [f64; 3],
-        generators: [Generator; 2],
+        kappas: [[f64; 3]; 2],
         velocities: [[f64; 3]; 2],
         crossed: Trajectory,
+        rho: Vec<C64>,
     }
-    let pieces: Vec<Pieces> = starts
+    let pieces: Vec<Pieces<D::Middle<'_>>> = starts
         .iter()
         .zip(&steps)
         .map(|(from, taken)| {
             let (flow, (r_h, kappa_h)) = super::middle(model, from.r, from.kappa, half).unwrap();
-            let middle = Point { r: r_h, kappa: kappa_h, t: from.time + half };
             let reference = flow.gradient_at(r_h);
-            let first = model.generator(from.cluster, &middle);
+            let middle = model.middle(from.cluster, r_h, from.time + half);
             let mut scratch = super::Scratch::new(from.psi.len());
-            let held = super::shear(&first, scratch.carve(first.parts.len(), 0).held, &from.psi, tau);
+            let held = super::shear(&super::Along::new(&middle, kappa_h, [0.0; 3], tau), scratch.carve(0).held, &from.psi, tau);
             let predicted: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * (held[a] + tau * reference[a]));
-            let (_, kick) = super::propagate(model, &mut scratch, &first, from, reference, predicted.map(|k| hm * k), tau, None);
+            let (_, kick) = super::propagate(&mut scratch, &middle, from, reference, kappa_h, predicted.map(|k| hm * k), tau, None);
             let corrected: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * kick[a]);
-            let second = model.generator(from.cluster, &Point { kappa: corrected, ..middle });
             let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
             let mut crossed = from.clone();
             crossed.threshold = (norm(&from.psi) * norm(&taken.end.psi)).sqrt();
-            Pieces { middle, reference, generators: [first, second], velocities: [predicted.map(|k| hm * k), corrected.map(|k| hm * k)], crossed }
+            let mut rho = vec![C64::ZERO; from.psi.len() * from.psi.len()];
+            super::density(&from.psi, &mut rho);
+            Pieces { at: (r_h, from.time + half), middle, reference, kappas: [kappa_h, corrected], velocities: [predicted.map(|k| hm * k), corrected.map(|k| hm * k)], crossed, rho }
         })
         .collect();
     let propagation = |which: usize, crossing: bool| {
@@ -1024,16 +1224,30 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             .zip(starts)
             .map(|(p, s)| {
                 let (from, threshold) = if crossing { (&p.crossed, Some(p.crossed.threshold)) } else { (s, (which == 1).then_some(s.threshold)) };
-                super::propagate(model, &mut super::Scratch::new(from.psi.len()), &p.generators[which], from, p.reference, p.velocities[which], tau, threshold).1[0]
+                super::propagate(&mut super::Scratch::new(from.psi.len()), &p.middle, from, p.reference, p.kappas[which], p.velocities[which], tau, threshold).1[0]
             })
             .sum::<f64>()
     };
-    let [whole, reference, generator, middle, first, second, root, pace] = microseconds(
+    // The corrector's path of every piece, and a node a fifth of the step off the middle.
+    let paths: Vec<_> = pieces.iter().map(|p| p.middle.path(p.kappas[1], p.velocities[1])).collect();
+    let n = starts[0].psi.len();
+    let mut h = Mat::zeros(n, n);
+    let [whole, reference, point, generator, force, tones, middle, first, second, root, pace] = microseconds(
         count,
         [
             &mut || starts.iter().map(|s| step::step(model, s, tau).unwrap().end.kappa[0]).sum::<f64>(),
-            &mut || pieces.iter().map(|p| model.reference(p.middle.r).value).sum::<f64>(),
-            &mut || pieces.iter().zip(starts).map(|(p, s)| model.generator(s.cluster, &p.middle).parts.len() as f64).sum::<f64>(),
+            &mut || pieces.iter().map(|p| model.reference(p.at.0).value).sum::<f64>(),
+            &mut || pieces.iter().zip(starts).map(|(p, s)| model.middle(s.cluster, p.at.0, p.at.1).states() as f64).sum::<f64>(),
+            &mut || {
+                pieces.iter().zip(&paths).for_each(|(p, path)| p.middle.generator(path, 0.2 * tau, &mut h));
+                h.data[0].re
+            },
+            &mut || pieces.iter().zip(&paths).map(|(p, path)| p.middle.force(path, 0.2 * tau, &p.rho)[0]).sum::<f64>(),
+            &mut || {
+                let mut sum = 0.0;
+                pieces.iter().zip(&paths).for_each(|(p, path)| p.middle.tones(path, &p.rho, &mut |_, f| sum += f[0]));
+                sum
+            },
             &mut || starts.iter().map(|s| super::middle(model, s.r, s.kappa, half).unwrap().1 .0[0]).sum::<f64>(),
             &mut || propagation(0, false),
             &mut || propagation(1, false),
@@ -1043,15 +1257,20 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     );
     let crossings = pieces
         .iter()
-        .filter(|p| super::propagate(model, &mut super::Scratch::new(p.crossed.psi.len()), &p.generators[1], &p.crossed, p.reference, p.velocities[1], tau, Some(p.crossed.threshold)).0.crossing.is_some())
+        .filter(|p| super::propagate(&mut super::Scratch::new(p.crossed.psi.len()), &p.middle, &p.crossed, p.reference, p.kappas[1], p.velocities[1], tau, Some(p.crossed.threshold)).0.crossing.is_some())
         .count();
-    let own = whole - rounds * reference - 2.0 * generator;
-    let fixed = middle - rounds * reference;
-    let (n, parts) = (starts[0].psi.len(), pieces[0].generators[1].parts.len());
+    let nodes = calls[2] * generator + calls[3] * force + calls[4] * tones;
+    let own = whole - calls[0] * reference - calls[1] * point - nodes;
+    let fixed = middle - calls[0] * reference;
     let work = steps.iter().map(|s| s.work).sum::<f64>() / count as f64;
     eprintln!(
-        "{name:<22} n {n} parts {parts:>2} τ {tau:<6} | step {whole:8.2} = reference {reference:6.2} × {rounds:4.1} + generator {generator:7.2} × 2 + own {own:8.2} | middle {fixed:6.2}  first {first:8.2}  second {second:8.2}  (root {root:8.2}, {crossings}/{count})  rest {:6.2} | counted {work:9.0} | pace {:.3} ns",
-        own - fixed - first - second,
+        "{name:<22} n {n} τ {tau:<6} | step {whole:8.2} = model {:8.2} (reference {reference:5.2} × {:4.1} + middle {point:7.2} × {:.0} + generator {generator:6.2} × {:4.1} + force {force:6.2} × {:4.1} + tones {tones:6.2} × {:3.1}) + own {own:8.2} | fixed point {fixed:6.2}  first {first:8.2}  second {second:8.2}  (root {root:8.2}, {crossings}/{count}) | counted {work:9.0} | pace {:.3} ns",
+        whole - own,
+        calls[0],
+        calls[1],
+        calls[2],
+        calls[3],
+        calls[4],
         pace * count as f64 / 1.024
     );
     [first, second]
@@ -1095,18 +1314,11 @@ fn scene_atoms(name: &str, grid: f64, each: &mut dyn FnMut(&crate::model::Run, &
     p[state] = 1.0;
     let trap = model.trap(&p, &model.prepared()).unwrap();
     let run = crate::model::Run::new(&model, p);
-    let (hm, kt) = (run.hbar_over_mass(), crate::units::KT_PER_UK * request.temperature_uk);
+    let kt = crate::units::KT_PER_UK * request.temperature_uk;
     let starts: Vec<Trajectory> = (0..16)
         .map(|i| {
             let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, 0);
-            let (mut r, mut kappa) = (trap.centre, [0.0; 3]);
-            for axis in 0..3 {
-                let (x, k) = (stream.normal() * (kt * hm).sqrt() / trap.frequencies[axis], stream.normal() * (kt / hm).sqrt());
-                for a in 0..3 {
-                    r[a] += x * trap.axes[axis][a];
-                    kappa[a] += k * trap.axes[axis][a];
-                }
-            }
+            let (r, kappa) = thermal(&trap, run.hbar_over_mass(), kt, &mut stream);
             let mut t = Trajectory::new(&run, state, r, kappa, 17, i);
             t.threshold = f64::MIN_POSITIVE;
             t.grid = grid;
@@ -1116,52 +1328,116 @@ fn scene_atoms(name: &str, grid: f64, each: &mut dyn FnMut(&crate::model::Run, &
     each(&run, &starts)
 }
 
+/// An atom's place and momentum at k_BT in a trap's harmonic approximation: Gaussian along its principal axes.
+fn thermal(trap: &crate::model::Trap, hm: f64, kt: f64, stream: &mut crate::random::Stream) -> ([f64; 3], [f64; 3]) {
+    let (mut r, mut kappa) = (trap.centre, [0.0; 3]);
+    for axis in 0..3 {
+        let (x, k) = (stream.normal() * (kt * hm).sqrt() / trap.frequencies[axis], stream.normal() * (kt / hm).sqrt());
+        for a in 0..3 {
+            r[a] += x * trap.axes[axis][a];
+            kappa[a] += k * trap.axes[axis][a];
+        }
+    }
+    (r, kappa)
+}
 
-/// What a propagation on a grid of one panel spends where (µs, a start's): the parts' phases and their combination
-/// into the exponentials' matrices (parts × n² each), the exponentials on the vector (their products of n²), and the
-/// rest -- the kick's densities, sums and contractions (parts × n(n + 1)/2 a node). Of the corrector's generator at
-/// the first start.
+/// A scene's step on its own model (run by name, alone: `SCENE=<a reference scene's name or a native request's path>
+/// TAU=<µs> … a_scene_s_step_cost -- --ignored --nocapture`): the scene's model as the solve closes it (solve.rs
+/// `attempt`: every unit whose fold does not exist over the reach kept, until none fails) with its near tables
+/// (`Model::tabulate`), and per cluster a cost case (`cost`): sixteen atoms of the scene's temperature in the trap's
+/// harmonic approximation, each a random state of the cluster, held, one step of τ each on the control's grid of two
+/// panels (adapt.rs).
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn a_scene_s_step_cost() {
+    use crate::model::{Model, Run, Unit, GROUND};
+    let name = std::env::var("SCENE").expect("SCENE: a reference scene's name or a request file's path");
+    let tau: f64 = std::env::var("TAU").expect("TAU: the step (µs)").parse().expect("TAU: a number");
+    let request = scene(&name);
+    let light = crate::field::Light::new(&request);
+    let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let mut p = [0.0; GROUND];
+    p[state] = 1.0;
+    let started = std::time::Instant::now();
+    let mut kept: Vec<Unit> = vec![];
+    let (model, trap, reach) = loop {
+        let model = Model::new(&request, &light, &kept).unwrap();
+        let trap = model.trap(&p, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
+        let units = model.units();
+        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
+        if failing.is_empty() {
+            break (model, trap, reach);
+        }
+        kept.extend(failing);
+    };
+    let closure = started.elapsed();
+    let started = std::time::Instant::now();
+    let tables = model.tabulate(&reach, 1 << 20);
+    eprintln!("{name}: closure {closure:.2?}, {} units kept, tabulate {:.2?}, {} tables", kept.len(), started.elapsed(), tables.tables.len());
+    let run = Run::tabulated(&model, &tables, p);
+    let kt = crate::units::KT_PER_UK * request.temperature_uk;
+    let panels = 2;
+    for (cluster, c) in model.clusters().iter().enumerate() {
+        let starts: Vec<Trajectory> = (0..16)
+            .map(|i| {
+                let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, cluster as u32);
+                let (r, kappa) = thermal(&trap, run.hbar_over_mass(), kt, &mut stream);
+                let mut t = Trajectory::new(&run, c.states[0], r, kappa, 17, i);
+                let psi: Vec<C64> = t.psi.iter().map(|_| C64::new(stream.normal(), stream.normal())).collect();
+                let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+                t.psi = psi.iter().map(|z| *z / norm).collect();
+                t.threshold = f64::MIN_POSITIVE;
+                t.grid = tau / (2 * panels) as f64;
+                t
+            })
+            .collect();
+        cost(&format!("{}+{} of {}", c.ground, c.states.len() - c.ground, std::path::Path::new(&name).file_stem().unwrap().to_string_lossy()), &run, &starts, tau);
+    }
+}
+
+
+/// What a propagation on a grid of one panel spends where (µs, a start's): the model's generator at the spacings' nodes
+/// and their combinations into the exponentials' matrices, the exponentials on the vector (their products of n²), and
+/// the rest -- the kick's densities and the model's forms of them. On the predictor's path at the first start.
 fn split<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
     let from = &starts[0];
     let n = from.psi.len();
     let hm = model.hbar_over_mass();
-    let (flow, (r_h, kappa_h)) = super::middle(model, from.r, from.kappa, 0.5 * tau).unwrap();
-    let _ = flow;
-    let generator = model.generator(from.cluster, &Point { r: r_h, kappa: kappa_h, t: from.time + 0.5 * tau });
-    let velocity = kappa_h.map(|k| hm * k);
-    let path = super::Path::new(&generator.parts, n, super::gauge(&model.cluster(from.cluster).waves, velocity), velocity, from.time + 0.5 * tau, tau);
-    let (parts, h) = (generator.parts.len(), 0.5 * tau);
+    let (_, (r_h, kappa_h)) = super::middle(model, from.r, from.kappa, 0.5 * tau).unwrap();
+    let middle = model.middle(from.cluster, r_h, from.time + 0.5 * tau);
+    let path = super::Along::new(&middle, kappa_h, kappa_h.map(|k| hm * k), tau);
+    let h = 0.5 * tau;
     let (mut whole, mut combining, mut acting) = (super::Scratch::new(n), super::Scratch::new(n), super::Scratch::new(n));
-    // One spacing's two combinations as `cf4` makes them, and the first one kept for the exponentials.
-    let combine = |scratch: &mut super::Scratch, t: f64| {
-        let c = scratch.carve(parts, 2);
+    // One spacing's two generators and their two combinations as `cf4` makes them, the last one kept for the exponentials.
+    let combine = |scratch: &mut super::Scratch, s: f64| {
+        let c = scratch.carve(2);
         let r = 3.0_f64.sqrt() / 6.0;
-        let times = [t + (0.5 - r) * h - path.middle, t + (0.5 + r) * h - path.middle];
-        for (part, phases) in path.parts.iter().zip(c.phases.chunks_exact_mut(2)) {
-            let omega = path.omega(part);
-            (phases[0], phases[1]) = (C64::cis(omega * times[0]), C64::cis(omega * times[1]));
-        }
+        path.middle.generator(&path.path, s + (0.5 - r) * h, &mut c.generators[0]);
+        path.middle.generator(&path.path, s + (0.5 + r) * h, &mut c.generators[1]);
         let mut sum = 0.0;
         for [w1, w2] in [[0.25 + r, 0.25 - r], [0.25 - r, 0.25 + r]] {
-            path.combination(c.matrix, |j| c.phases[2 * j] * w1 + c.phases[2 * j + 1] * w2, w1 + w2);
+            for (z, (one, two)) in c.matrix.data.iter_mut().zip(c.generators[0].data.iter().zip(&c.generators[1].data)) {
+                *z = *one * w1 + *two * w2;
+            }
             sum += c.matrix.data[0].re;
         }
         sum
     };
-    combine(&mut acting, from.time);
+    combine(&mut acting, -h);
     let kept = acting.matrix.clone();
     let mut state: Vec<C64> = from.psi.clone();
     let mut plan = crate::linalg::Chebyshev { parts: 0, terms: 0 };
     let [propagation, combinations, exponentials, pace] = microseconds(
         1,
         [
-            &mut || super::beating(&path, &mut whole, &from.psi, from.time, tau, 1, None).impulse[0],
-            &mut || combine(&mut combining, from.time) + combine(&mut combining, from.time + h),
+            &mut || super::beating(&path, &mut whole, &from.psi, tau, 1, None).impulse[0],
+            &mut || combine(&mut combining, -h) + combine(&mut combining, 0.0),
             &mut || {
                 for _ in 0..4 {
                     state.copy_from_slice(&from.psi);
                     acting.matrix.data.copy_from_slice(&kept.data);
-                    let c = acting.carve(parts, 2);
+                    let c = acting.carve(2);
                     plan = crate::linalg::exp_apply(c.matrix, C64::new(0.0, -h), &mut state, c.work);
                 }
                 state[0].re
@@ -1170,7 +1446,7 @@ fn split<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
         ],
     );
     eprintln!(
-        "{name:<22} n {n:>2} parts {parts:>3} | a propagation {propagation:8.2} = phases and combinations {combinations:8.2} + exponentials {exponentials:8.2} ({} × {} products each) + kick and rest {:8.2} | pace {:.3} ns",
+        "{name:<22} n {n:>2} | a propagation {propagation:8.2} = generators and combinations {combinations:8.2} + exponentials {exponentials:8.2} ({} × {} products each) + kick and rest {:8.2} | pace {:.3} ns",
         plan.parts,
         plan.terms,
         propagation - combinations - exponentials,

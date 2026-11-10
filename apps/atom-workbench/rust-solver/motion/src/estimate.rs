@@ -31,11 +31,14 @@
 //! shown, the groups holding an atom read the held atoms' quantities.
 //!
 //! # The step's error
-//! The trajectories that are read carry their accumulated signed step errors (adapt.rs `Drift`). An output's step error
-//! is their mean (`stepped`): on T_a the axis's energy error over k_B T_a (relative), on each row as shown its error over
-//! all the trajectories, each jackknifed like the estimate it belongs to; where a step of some atom there went unread
-//! the reads are no numbers. Of the loss energy the mean and the spread over every read trajectory -- a lost one's error
-//! as it stood at its loss, where its loss was decided --, the window within which a loss decision may differ (solve.rs).
+//! The trajectories that are read hold their step errors at every output (adapt.rs `Drift`). An output's step error
+//! (`stepped`): on each row as shown the mean of the trajectories' rows less their carried states', over all the
+//! trajectories, jackknifed like the estimate it belongs to; on T_a the local errors of the axis's energy carried to
+//! the output by the read trajectories' own regression (transport.rs) over k_B T_a -- T_a is the window mean of
+//! (ħ/m)κ_a², which of a bound axis is its energy --, jackknifed with the transport's replicates; where a step of some
+//! atom there went unread the reads are no numbers. Of the loss energy the mean and the spread
+//! over every read trajectory of its accumulated local errors -- a lost one's as they stood at its loss, where its
+//! loss was decided --, the window within which a loss decision may differ (solve.rs).
 //!
 //! # Many looks
 //! A decision that acts where any of m reads lies beyond its interval (decide.rs) takes the largest of m noisy reads: at
@@ -51,7 +54,10 @@
 //! trajectories within the step's error of the escape (solve.rs).
 use crate::adapt::Drift;
 use crate::decide::Read;
+use crate::ensemble::GROUP;
+use crate::transport::{transported, Mark};
 use crate::request::STATES;
+use crate::special::upper;
 use crate::units::{CONFIDENCE, KT_PER_UK};
 use rayon::prelude::*;
 use std::borrow::Borrow;
@@ -60,7 +66,7 @@ use std::f64::consts::{PI, TAU};
 /// The far end of Wilson's score interval at confidence z for a count n in N independent draws,
 /// (n + z²/2 + z √(n(N − n)/N + z²/4))/(N + z²): the largest share the draws leave plausible (module documentation).
 pub fn wilson(count: f64, draws: f64) -> f64 {
-    let (z, draws) = (CONFIDENCE, draws.max(0.));
+    let z = CONFIDENCE;
     let spread = if draws > 0. { count * (draws - count) / draws } else { 0. };
     (count + 0.5 * z * z + z * (spread + 0.25 * z * z).sqrt()) / (draws + z * z)
 }
@@ -70,11 +76,21 @@ pub fn unseen(draws: f64) -> f64 {
     wilson(0., draws)
 }
 
+/// The draws that leave `share` unseen: the N with z²/(N + z²) = share (`unseen`), z²(1/share − 1).
+pub fn draws_for(share: f64) -> f64 {
+    CONFIDENCE * CONFIDENCE * (1. / share - 1.)
+}
+
 /// The half width of T's window on a lab axis about an output at t (SPEC §1.7): half of one trap period of the axis,
-/// 2π/ω, the window no longer than an output interval, cut at t = 0 so that it stays centred there.
+/// 2π/ω at its frequency ω > 0, the window no longer than an output interval, cut at t = 0 so that it stays centred there.
 pub fn half_window(frequency: f64, interval: f64, t: f64) -> f64 {
-    let period = if frequency > 0. { TAU / frequency } else { f64::INFINITY };
-    (0.5 * period.min(interval)).min(t)
+    (0.5 * (TAU / frequency).min(interval)).min(t)
+}
+
+/// n̄ of a lab axis of frequency ω > 0 (rad/µs; module documentation): (ħ/m)Σ⟨κ²⟩ (rad/µs) summed over `atoms` atoms, over
+/// their number and ω, less ½.
+pub fn occupation(kinetic: f64, atoms: f64, frequency: f64) -> f64 {
+    kinetic / (atoms * frequency) - 0.5
 }
 
 /// A quantity's statistical error: its jackknife standard error over the groups behind its estimate and the number of
@@ -85,8 +101,6 @@ pub struct Spread {
     pub groups: f64,
 }
 impl Spread {
-    /// No error: a value known exactly (t = 0).
-    pub const EXACT: Spread = Spread { error: 0., groups: f64::INFINITY };
     /// An error read on fewer than two groups: unknown.
     pub const UNREAD: Spread = Spread { error: f64::INFINITY, groups: 0. };
     /// Whether it is read: a variance over independent groups has one degree of freedom fewer than the groups.
@@ -97,9 +111,9 @@ impl Spread {
     pub fn interval(&self) -> f64 {
         self.interval_over(1.)
     }
-    /// Its interval at the confidence z among `looks` reads (module documentation, # Many looks): the quantile at Šidák's
-    /// tail of Student's t at the groups that read it less one, the normal's on unlimited groups, times its standard
-    /// error; unbounded when unread.
+    /// Its interval at the confidence z among `looks` reads, one at least (module documentation, # Many looks): the
+    /// quantile at Šidák's tail of Student's t at the groups that read it less one, the normal's on unlimited groups, times
+    /// its standard error; unbounded when unread.
     pub fn interval_over(&self, looks: f64) -> f64 {
         if !self.read() {
             return f64::INFINITY;
@@ -107,20 +121,20 @@ impl Spread {
         if self.error == 0. {
             return 0.;
         }
-        let tail = -((-normal_tail(CONFIDENCE)).ln_1p() / looks.max(1.)).exp_m1();
+        let tail = -((-normal_tail(CONFIDENCE)).ln_1p() / looks).exp_m1();
         let freedom = (self.groups < f64::INFINITY).then(|| (self.groups.floor() - 1.) as u64);
         quantile(tail, freedom) * self.error
     }
 }
 
-/// The two-sided quantile at the tail p: the q with P(|t_ν| > q) = p for Student's t at ν degrees of freedom (`None`:
+/// The two-sided quantile at the tail p: the q with P(|t_ν| > q) = p for Student's t at ν ≥ 1 degrees of freedom (`None`:
 /// the normal), by bisection on the tail to the last bit; kept per thread, a pure function of both.
-fn quantile(tail: f64, freedom: Option<u64>) -> f64 {
+pub(crate) fn quantile(tail: f64, freedom: Option<u64>) -> f64 {
     thread_local! {
         static KEPT: std::cell::RefCell<std::collections::HashMap<(u64, Option<u64>), f64>> = Default::default();
     }
     let beyond = |q: f64| match freedom {
-        Some(nu) => student_tail(q, nu.max(1)),
+        Some(nu) => student_tail(q, nu),
         None => normal_tail(q),
     };
     KEPT.with(|kept| {
@@ -145,58 +159,10 @@ fn quantile(tail: f64, freedom: Option<u64>) -> f64 {
     })
 }
 
-/// Student's t at ν degrees of freedom (whole, at least one) at the normal's two-sided tail beyond z (`quantile`).
-pub fn student(z: f64, nu: f64) -> f64 {
-    quantile(normal_tail(z), Some(nu.round().max(1.) as u64))
-}
-
-/// The normal's two-sided tail beyond z, P(|N| > z) = erfc(z/√2) = Q(½, z²/2), the regularized upper incomplete gamma at
-/// ½: below ½ + 1 one less its lower part's series, above by its continued fraction (Lentz; Numerical Recipes' gser and
-/// gcf), with Γ(½) = √π; each to the format's round-off.
+/// The normal's two-sided tail beyond z, P(|N| > z) = erfc(z/√2) = Q(½, z²/2), the regularized upper incomplete gamma
+/// function at ½ (special.rs).
 fn normal_tail(z: f64) -> f64 {
-    let (a, x) = (0.5, 0.5 * z * z);
-    if !(x > 0.) {
-        return 1.;
-    }
-    let lead = (a * x.ln() - x).exp() / PI.sqrt();
-    if x < a + 1. {
-        let (mut term, mut sum, mut b) = (1. / a, 1. / a, a);
-        loop {
-            b += 1.;
-            term *= x / b;
-            sum += term;
-            if term.abs() <= sum.abs() * f64::EPSILON {
-                break;
-            }
-        }
-        1. - sum * lead
-    } else {
-        let tiny = f64::MIN_POSITIVE / f64::EPSILON;
-        let (mut b, mut c) = (x + 1. - a, 1. / tiny);
-        let mut d = 1. / b;
-        let mut h = d;
-        let mut i = 1.;
-        loop {
-            let an = -i * (i - a);
-            b += 2.;
-            d = an * d + b;
-            if d.abs() < tiny {
-                d = tiny;
-            }
-            c = b + an / c;
-            if c.abs() < tiny {
-                c = tiny;
-            }
-            d = 1. / d;
-            let step = d * c;
-            h *= step;
-            if (step - 1.).abs() <= f64::EPSILON {
-                break;
-            }
-            i += 1.;
-        }
-        lead * h
-    }
+    upper(0.5, 0.5 * z * z)
 }
 
 /// Student's t at ν (whole) degrees of freedom: its two-sided tail beyond q, 1 − A(q|ν), A by the finite sums of
@@ -227,7 +193,7 @@ fn student_tail(q: f64, nu: u64) -> f64 {
 }
 
 /// An atom held at an output: its readout's populations (SPEC §1.7), per lab axis its means of κ and κ² over the
-/// output's window (1/µm, 1/µm²), and, where its trajectory is read, its accumulated step errors (adapt.rs `Drift`).
+/// output's window (1/µm, 1/µm²), and, where its trajectory is read, what it holds of its step errors (adapt.rs `Drift`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Held {
     pub rows: [f64; STATES],
@@ -256,9 +222,9 @@ pub struct Output {
 }
 
 /// One output's sums over a group's trajectories: their number (the failed ones apart), the atoms held, and over the held atoms Σρ_s, Σ⟨κ⟩,
-/// Σ⟨κ⟩² (for the U-statistic, module documentation) and Σ⟨κ²⟩ per lab axis; the held atoms that are read and the sums
-/// of their accumulated step errors (`Drift`); the trajectories judged against the step's error and those of them near
-/// the escape; the trajectories whose loss energy's error is read, its sum and its squares' (`Output`).
+/// Σ⟨κ⟩² (for the U-statistic, module documentation) and Σ⟨κ²⟩ per lab axis; the held atoms that are read, the sums of
+/// their rows' step errors and their unread steps (`Drift`); the trajectories judged against the step's error and those
+/// of them near the escape; the trajectories whose loss energy's error is read, its sum and its squares' (`Output`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sums {
     pub trajectories: f64,
@@ -269,7 +235,8 @@ pub struct Sums {
     pub kappa_squared: [f64; 3],
     pub kappa2: [f64; 3],
     pub read: f64,
-    pub drift: Drift,
+    pub shown: [f64; STATES],
+    pub unread: f64,
     pub judged: f64,
     pub near: f64,
     pub energy: [f64; 3],
@@ -284,7 +251,8 @@ impl Sums {
         kappa_squared: [0.; 3],
         kappa2: [0.; 3],
         read: 0.,
-        drift: Drift::ZERO,
+        shown: [0.; STATES],
+        unread: 0.,
         judged: 0.,
         near: 0.,
         energy: [0.; 3],
@@ -315,19 +283,15 @@ impl Sums {
             }
             if let Some(d) = &h.drift {
                 self.read += 1.;
-                self.add_drift(d, 1.);
+                self.add_read(&d.rows, d.unread, 1.);
             }
         }
     }
-    fn add_drift(&mut self, d: &Drift, sign: f64) {
-        for a in 0..3 {
-            self.drift.axes[a] += sign * d.axes[a];
-        }
-        self.drift.energy += sign * d.energy;
-        for (s, r) in self.drift.rows.iter_mut().zip(&d.rows) {
+    fn add_read(&mut self, rows: &[f64; STATES], unread: f64, sign: f64) {
+        for (s, r) in self.shown.iter_mut().zip(rows) {
             *s += sign * r;
         }
-        self.drift.unread += sign * d.unread;
+        self.unread += sign * unread;
     }
     /// Another's sums added in with the sign (−1: left out).
     fn combine(&mut self, o: &Sums, sign: f64) {
@@ -348,18 +312,20 @@ impl Sums {
         for (s, x) in self.energy.iter_mut().zip(&o.energy) {
             *s += sign * x;
         }
-        self.add_drift(&o.drift, sign);
+        self.add_read(&o.shown, o.unread, sign);
     }
 }
 
-/// One group's sums at every output (module documentation, # Errors).
+/// One group's sums at every output (module documentation, # Errors), and of each of its read trajectories, in their
+/// order, the motion's mark at every output it is held at (# The step's error).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Group {
     pub sums: Vec<Sums>,
+    pub marks: Vec<Vec<Option<Mark>>>,
 }
 impl Group {
     pub fn new(outputs: usize) -> Group {
-        Group { sums: vec![Sums::ZERO; outputs] }
+        Group { sums: vec![Sums::ZERO; outputs], marks: vec![] }
     }
     /// One trajectory's outputs, in order.
     pub fn add(&mut self, outputs: &[Output]) {
@@ -367,10 +333,18 @@ impl Group {
         for (s, o) in self.sums.iter_mut().zip(outputs) {
             s.add(o);
         }
+        let mark = |o: &Output| match &o.fate {
+            Fate::Held(h) => h.drift.map(|d| d.mark),
+            _ => None,
+        };
+        if outputs.first().is_some_and(|o| mark(o).is_some()) {
+            self.marks.push(outputs.iter().map(mark).collect());
+        }
     }
 }
 
-/// What the estimates need of the model: ħ/m (µm²/µs) and the reference trap's frequency along each lab axis (rad/µs).
+/// What the estimates need of the model: ħ/m (µm²/µs) and the reported trap's frequency along each lab axis (rad/µs),
+/// positive: the curvatures of a potential's minimum (model.rs `Trap::lab`).
 #[derive(Clone, Copy, Debug)]
 pub struct Scales {
     pub hbar_over_mass: f64,
@@ -378,12 +352,11 @@ pub struct Scales {
 }
 
 /// The estimates at one output (module documentation): the loss, the rows as shown and the held atoms' populations, the
-/// held atoms' motion where at least two are held; each spread over the groups that read it, and the trajectories, groups
-/// and held atoms behind them.
+/// held atoms' motion where at least two are held; each spread over the groups that read it, and the trajectories and
+/// held atoms behind them.
 #[derive(Clone, Debug)]
 pub struct Estimate {
     pub trajectories: f64,
-    pub groups: f64,
     pub held: f64,
     pub loss: f64,
     pub loss_error: Spread,
@@ -534,15 +507,11 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
                 temperature_errors: std::array::from_fn(|a| j.held(|x| x[0][a])),
                 temperature_total: t.iter().sum::<f64>() / 3.,
                 temperature_total_error: j.held(|x| x[0].iter().sum::<f64>() / 3.),
-                occupation: std::array::from_fn(|a| {
-                    let w = scales.frequencies[a];
-                    if w > 0. { hm * all.kappa2[a] / (n * w) - 0.5 } else { 0. }
-                }),
+                occupation: std::array::from_fn(|a| occupation(hm * all.kappa2[a], n, scales.frequencies[a])),
                 mean_velocity: std::array::from_fn(|a| hm * all.kappa[a] / n),
             });
             Estimate {
                 trajectories: all.trajectories,
-                groups: j.count,
                 held: n,
                 loss: full.loss,
                 loss_error: j.every(|m| m[0].loss),
@@ -586,9 +555,9 @@ pub fn paired<G: Borrow<Group> + Sync>(coarse: &[G], fine: &[G], scales: &Scales
         .collect()
 }
 
-/// The step's error at one output, read on the trajectories that carry their drift (module documentation, # The step's
-/// error): T's relative error per lab axis where two atoms are read, each row's as shown, and, where some trajectory's
-/// is read, the loss energy's accumulated error -- its mean and its spread between trajectories (rad/µs).
+/// The step's error at one output, read on the trajectories that are read (module documentation, # The step's error):
+/// T's relative error per lab axis where the transport reads it, each row's as shown, and, where some trajectory's is
+/// read, the loss energy's accumulated error -- its mean and its spread between trajectories (rad/µs).
 #[derive(Clone, Debug)]
 pub struct Stepped {
     pub temperature: Option<[Read; 3]>,
@@ -596,10 +565,12 @@ pub struct Stepped {
     pub energy: Option<[f64; 2]>,
 }
 
-/// The step's error at every output from the groups' sums.
+/// The step's error at every output from the groups' sums and their read trajectories' marks: every group is whole, of
+/// `GROUP` read trajectories or of none.
 pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<Stepped> {
     let outputs = groups.first().map_or(0, |g| g.borrow().sums.len());
     let hm = scales.hbar_over_mass;
+    let series: Vec<&[Option<Mark>]> = groups.iter().flat_map(|g| g.borrow().marks.iter().map(Vec::as_slice)).collect();
     (0..outputs)
         .into_par_iter()
         .map(|k| {
@@ -617,14 +588,21 @@ pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<St
                 .collect();
             let reading = groups.iter().filter(|g| Borrow::<Group>::borrow(*g).sums[k].read > 0.).count() as f64;
             // A read with an unread step behind it is no number (module documentation, # The step's error).
-            let complete = all.drift.unread == 0.;
+            let complete = all.unread == 0.;
+            let unread = Read { value: f64::NAN, spread: Spread::UNREAD };
+            // T's relative error per axis: the transported error over k_B T_a, of all the trajectories and without each
+            // group.
+            let moved = if complete { transported(&series, GROUP as usize, k) } else { None };
+            let relative = |a: usize| match (&moved, temperature(&all, hm)) {
+                (Some(m), Some(t)) => Read {
+                    value: m.all[a] / (KT_PER_UK * t[a]),
+                    spread: spread(rest.iter().zip(&m.without).map(|(s, w)| temperature(s, hm).map_or(f64::NAN, |t| w[a] / (KT_PER_UK * t[a]))), reading),
+                },
+                _ => unread,
+            };
             let read = |f: &dyn Fn(&Sums) -> f64, groups: f64| Read {
                 value: if complete { f(&all) } else { f64::NAN },
                 spread: if complete && rest.len() >= 2 { spread(rest.iter().map(|s| f(s)), groups) } else { Spread::UNREAD },
-            };
-            let relative = |s: &Sums, a: usize| match temperature(s, hm) {
-                Some(t) if s.read > 0. => s.drift.axes[a] / s.read / (KT_PER_UK * t[a]),
-                _ => f64::NAN,
             };
             let [count, sum, squares] = all.energy;
             let energy = (count > 0.).then(|| {
@@ -632,8 +610,8 @@ pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<St
                 [mean, (squares / count - mean * mean).max(0.).sqrt()]
             });
             Stepped {
-                temperature: (all.read >= 2. && all.held >= 2.).then(|| std::array::from_fn(|a| read(&|s: &Sums| relative(s, a), reading))),
-                shown: std::array::from_fn(|q| read(&|s: &Sums| s.drift.rows[q] / s.trajectories, rest.len() as f64)),
+                temperature: (all.read >= 2. && all.held >= 2.).then(|| std::array::from_fn(relative)),
+                shown: std::array::from_fn(|q| read(&|s: &Sums| s.shown[q] / s.trajectories, rest.len() as f64)),
                 energy,
             }
         })
@@ -644,50 +622,55 @@ pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<St
 mod tests {
     use super::*;
 
-    /// The step's error (`stepped`): three groups of two atoms at rest in the mean, each with ⟨κ²⟩ = 4 on every axis
-    /// (T_a = 4 ħ/m k_B), read with one drift -- the axes' energies off by 1, 2 and 3 % of k_B T_a, a row by 0.02, the loss
-    /// energy by 0.5 and 1.5 in turn. T's read is those shares with no spread; the row's as shown is 0.02 on the held
-    /// atoms over all the trajectories (each group's third trajectory is lost: two of three held);
-    /// the loss energy's mean 1 and spread ½.
+    /// The step's error (`stepped`): three groups of eight read atoms over one output interval, each with ⟨κ²⟩ = 4 on
+    /// every axis (k_B T_a = 4 ħ/m) and the local errors 1, 2 and 3 % of k_B T_a made over the interval, its rows' error
+    /// 0.02 on one row, its loss energy's 0.5 and 1.5 in turn; each group's last atom is lost in the interval. T's read
+    /// is those shares with no spread (energies that do not differ carry their errors unchanged, transport.rs); the
+    /// row's as shown is 0.02 on the held atoms over all the trajectories (seven of eight held); the loss energy's mean
+    /// and spread are those of the seven that are read.
     #[test]
-    fn the_step_s_error_is_the_drifts_mean() {
+    fn the_step_s_error_is_the_reads_of_its_trajectories() {
         let scales = Scales { hbar_over_mass: 1e-3, frequencies: [1.; 3] };
         let kt = 4. * scales.hbar_over_mass;
-        let atom = |energy: f64| {
+        let atom = |errors: f64, energy: f64, unread: f64| {
             let mut drift = Drift::ZERO;
-            drift.axes = [0.01 * kt, 0.02 * kt, 0.03 * kt];
-            drift.rows[2] = 0.02;
-            drift.energy = energy;
+            drift.mark.level = [7.; 3];
+            drift.mark.error = [0.01 * kt * errors, 0.02 * kt * errors, 0.03 * kt * errors];
+            drift.rows[2] = 0.02 * errors;
+            (drift.energy, drift.unread) = (energy * errors, unread);
             let mut rows = [0.; STATES];
             rows[2] = 1.;
-            Output { fate: Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [4.; 3], drift: Some(drift) }), near: None, energy: Some(energy) }
+            Output { fate: Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [4.; 3], drift: Some(drift) }), near: None, energy: Some(energy * errors) }
         };
-        let groups: Vec<Group> = (0..3)
-            .map(|_| {
-                let mut g = Group::new(1);
-                g.add(&[atom(0.5)]);
-                g.add(&[atom(1.5)]);
-                g.add(&[Output { fate: Fate::Lost, near: None, energy: None }]);
-                g
-            })
-            .collect();
-        let read = &stepped(&groups, &scales)[0];
-        let t = read.temperature.as_ref().expect("two atoms are read");
+        let group = |unread: f64| {
+            let mut g = Group::new(2);
+            for i in 0..GROUP {
+                let energy = if i % 2 == 0 { 0.5 } else { 1.5 };
+                let last = if i + 1 < GROUP { atom(1., energy, if i == 0 { unread } else { 0. }) } else { Output { fate: Fate::Lost, near: None, energy: None } };
+                g.add(&[atom(0., energy, 0.), last]);
+            }
+            g
+        };
+        let groups: Vec<Group> = (0..3).map(|_| group(0.)).collect();
+        let read = &stepped(&groups, &scales)[1];
+        let t = read.temperature.as_ref().expect("the held atoms are read");
         for (a, share) in [0.01, 0.02, 0.03].into_iter().enumerate() {
             assert!((t[a].value - share).abs() < 1e-15 && t[a].spread.error < 1e-15, "{:?}", t[a]);
         }
-        assert!((read.shown[2].value - 0.02 * 2. / 3.).abs() < 1e-15 && read.shown[0].value == 0., "{:?}", read.shown[2]);
+        let held = (GROUP - 1) as f64 / GROUP as f64;
+        assert!((read.shown[2].value - 0.02 * held).abs() < 1e-15 && read.shown[0].value == 0., "{:?}", read.shown[2]);
         let energy = read.energy.expect("the trajectories' loss energy errors are read");
-        assert!((energy[0] - 1.).abs() < 1e-15 && (energy[1] - 0.5).abs() < 1e-15, "{energy:?}");
+        let (mean, square) = ((4. * 0.5 + 3. * 1.5) / 7., (4. * 0.25 + 3. * 2.25) / 7.);
+        assert!((energy[0] - mean).abs() < 1e-15 && (energy[1] - (square - mean * mean).sqrt()).abs() < 1e-15, "{energy:?}");
         // One unread step among them: the reads are no numbers (unreadable), whatever the others read.
-        let mut unread = atom(0.5);
-        if let Fate::Held(h) = &mut unread.fate {
-            h.drift.as_mut().unwrap().unread = 1.;
-        }
-        let mut spoiled = Group::new(1);
-        spoiled.add(&[unread]);
-        let read = &stepped(&[groups[0].clone(), groups[1].clone(), spoiled], &scales)[0];
+        let read = &stepped(&[groups[0].clone(), groups[1].clone(), group(1.)], &scales)[1];
         assert!(read.shown[2].value.is_nan() && !read.shown[2].spread.read() && read.shown[2].bound(1.) == f64::INFINITY);
+        assert!(read.temperature.as_ref().is_some_and(|t| t.iter().all(|x| x.bound(1.) == f64::INFINITY)));
+    }
+
+    /// Student's t at ν degrees of freedom at the normal's two-sided tail beyond z.
+    fn student(z: f64, nu: u64) -> f64 {
+        quantile(normal_tail(z), Some(nu))
     }
 
     /// Student's t at the normal's tail: the tables' t at 97.5 % (z = Φ⁻¹(0.975)) for ν = 1, 10, 30, its tail there the
@@ -697,16 +680,33 @@ mod tests {
     fn student_s_t_is_the_quantile_at_the_normal_s_tail() {
         let z = 1.959963984540054;
         assert!((normal_tail(z) - 0.05).abs() < 1e-16, "{}", normal_tail(z));
-        for (nu, q) in [(1., 12.706205), (10., 2.228139), (30., 2.042272)] {
+        for (nu, q) in [(1, 12.706205), (10, 2.228139), (30, 2.042272)] {
             let t = student(z, nu);
-            assert!((t - q).abs() < 5e-7 && (student_tail(t, nu as u64) - 0.05).abs() < 1e-15, "{nu}: {t} against {q}");
+            assert!((t - q).abs() < 5e-7 && (student_tail(t, nu) - 0.05).abs() < 1e-15, "{nu}: {t} against {q}");
         }
         let p = normal_tail(2.);
         assert!((p - 0.04550026389635842).abs() < 1e-16, "{p}");
-        assert!((student(2., 1.) - (std::f64::consts::FRAC_PI_2 * (1. - p)).tan()).abs() < 1e-10);
-        assert!((student(2., 2.) - (1. - p) * (2. / (1. - (1. - p) * (1. - p))).sqrt()).abs() < 1e-13);
-        let t = student(2., 1e4);
+        assert!((student(2., 1) - (std::f64::consts::FRAC_PI_2 * (1. - p)).tan()).abs() < 1e-10);
+        assert!((student(2., 2) - (1. - p) * (2. / (1. - (1. - p) * (1. - p))).sqrt()).abs() < 1e-13);
+        let t = student(2., 10_000);
         assert!((t - 2. - 10. / 4e4).abs() < 1e-6, "{t}");
+    }
+
+    /// The quantile is the tail's inverse to the last bit (`quantile`), the normal's and Student's, from the centre to the
+    /// far tail: the tail at q is no more than the tail asked, the tail at the number before q is more. The whole tail
+    /// asks for 0 and gets the least positive number.
+    #[test]
+    fn the_quantile_is_the_tail_s_inverse_to_the_last_bit() {
+        for freedom in [None, Some(1), Some(2), Some(7), Some(40)] {
+            let beyond = |q: f64| freedom.map_or(normal_tail(q), |nu| student_tail(q, nu));
+            for tail in [0.999, 0.5, 0.31731050786291415, 0.05, 0.04550026389635842, 2e-10] {
+                let q = quantile(tail, freedom);
+                assert!(beyond(q) <= tail && beyond(q.next_down()) > tail, "{freedom:?} at {tail}: {q}");
+            }
+        }
+        let far = quantile(2e-300, None);
+        assert!(normal_tail(far) <= 2e-300 && normal_tail(far.next_down()) > 2e-300, "{far}");
+        assert_eq!(quantile(1., None), f64::from_bits(1));
     }
 
     /// The interval over many looks (Šidák): one look reads z itself on unlimited groups; m looks read the quantile q
@@ -719,16 +719,17 @@ mod tests {
         let p = normal_tail(CONFIDENCE);
         assert!(((1. - normal_tail(q)).powf(1000.) - (1. - p)).abs() < 1e-13 && (q - 4.08).abs() < 0.01, "{q}");
         assert!(Spread { error: 1., groups: 8. }.interval_over(1000.) > q, "Student's tail is the wider");
-        assert_eq!(Spread::EXACT.interval_over(1e6), 0.);
+        assert_eq!(Spread { error: 0., groups: f64::INFINITY }.interval_over(1e6), 0.);
     }
 
-    /// Wilson's far end at a count of zero: z²/(N + z²), at z = 2 four in N + 4; a draw of none leaves all unseen. At a
-    /// count of five in a hundred, the score interval's far end (p̂ + z²/2N + z√(p̂(1 − p̂)/N + z²/4N²))/(1 + z²/N); at a
-    /// count of all, one.
+    /// Wilson's far end at a count of zero: z²/(N + z²), at z = 2 four in N + 4, and the N it is a given share at; a draw of
+    /// none leaves all unseen. At a count of five in a hundred, the score interval's far end
+    /// (p̂ + z²/2N + z√(p̂(1 − p̂)/N + z²/4N²))/(1 + z²/N); at a count of all, one.
     #[test]
     fn the_unseen_share_is_wilson_s_far_end() {
         assert_eq!(unseen(0.), 1.);
         assert!((unseen(96.) - 0.04).abs() < 1e-16);
+        assert_eq!((draws_for(unseen(96.)), draws_for(1.)), (96., 0.));
         assert!((unseen(16380.) - 4. / 16384.).abs() < 1e-18);
         let (p, n): (f64, f64) = (0.05, 100.);
         let far = (p + 2. / n + 2. * (p * (1. - p) / n + 1. / (n * n)).sqrt()) / (1. + 4. / n);
@@ -743,7 +744,6 @@ mod tests {
         assert_eq!(half_window(w, 10., 100.), 2.);
         assert_eq!(half_window(w, 1., 100.), 0.5);
         assert_eq!(half_window(w, 10., 0.75), 0.75);
-        assert_eq!(half_window(0., 3., 100.), 1.5);
         assert_eq!(half_window(w, 10., 0.), 0.);
     }
 
@@ -771,7 +771,7 @@ mod tests {
         let mut groups: Vec<Group> = [1, 1, 1, 1, 0].into_iter().map(|s| group(vec![Some(atom(s, 0., 1.))])).collect();
         let e = &summarize(&groups, &UNIT)[0];
         assert!((e.shown[0] - 0.2).abs() < 1e-15 && (e.shown_errors[0].error - 0.2).abs() < 1e-15, "{:?}", e.shown_errors[0]);
-        assert_eq!(e.shown_errors[0].interval(), student(CONFIDENCE, 4.) * e.shown_errors[0].error);
+        assert_eq!(e.shown_errors[0].interval(), student(CONFIDENCE, 4) * e.shown_errors[0].error);
         groups.push(group(vec![None]));
         let e = &summarize(&groups, &UNIT)[0];
         let m = e.motion.unwrap();
@@ -830,21 +830,28 @@ mod tests {
         (mean - truth, ((sum2 / n - mean * mean) / (n - 1.)).sqrt(), covered as f64 / n)
     }
 
-    /// T's estimate is unbiased: over 4000 repetitions of 6 groups of 3 atoms (n = 18) its mean meets σ² + c within four
-    /// of its standard errors, where the plug-in variance's bias σ²/n = 0.094 is ten of them.
+    /// T's estimate is unbiased: over 4000 repetitions of 6 groups of 3 atoms (n = 18) its mean meets σ² + c within its
+    /// interval at the confidence z over the repetitions, where the plug-in variance, lower by its bias σ²/n = 0.094, lies
+    /// beyond it.
     #[test]
     fn the_temperature_is_unbiased() {
-        let (bias, se, _) = repeated(6, 3, 4000);
-        assert!(bias.abs() <= 4. * se, "bias {bias} ± {se}");
-        assert!(1.3 * 1.3 / 18. > 6. * se, "the plug-in's bias is resolved: {se}");
+        let repetitions = 4000;
+        let (bias, se, _) = repeated(6, 3, repetitions);
+        let within = Spread { error: se, groups: repetitions as f64 }.interval();
+        assert!(bias.abs() <= within, "bias {bias} ± {within}");
+        assert!((bias - 1.3 * 1.3 / 18.).abs() > within, "the plug-in's bias is resolved: ± {within}");
     }
 
-    /// T's jackknife interval at z = 2 covers the truth about as often as the normal's 95.45 %: 32 groups of 8 atoms,
-    /// 2000 repetitions (the share's own standard error 0.5 %), where the variance's skew √(8/(n − 1)) = 0.18 is small.
+    /// T's jackknife interval at z = 2 covers the truth as often as the normal's 95.45 %: 32 groups of 8 atoms, where the
+    /// variance's skew √(8/(n − 1)) = 0.18 is small; the share of 2000 repetitions that cover it, a count's with the
+    /// standard error √(p(1 − p)/2000) = 0.5 %, within its interval at the confidence z.
     #[test]
     fn the_temperature_s_interval_covers() {
-        let (_, _, coverage) = repeated(32, 8, 2000);
-        assert!((coverage - 0.9545).abs() < 0.02, "coverage {coverage}");
+        let repetitions = 2000;
+        let (_, _, coverage) = repeated(32, 8, repetitions);
+        let p = 1. - normal_tail(CONFIDENCE);
+        let within = Spread { error: (p * (1. - p) / repetitions as f64).sqrt(), groups: f64::INFINITY }.interval();
+        assert!((coverage - p).abs() <= within, "coverage {coverage} against {p} ± {within}");
     }
 
     /// A paired read cancels the levels' common noise: the same atoms with every ⟨κ²⟩ larger by δ at the fine level read

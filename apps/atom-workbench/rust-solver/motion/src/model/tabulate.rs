@@ -141,7 +141,7 @@ pub struct Tables {
 }
 
 /// The tables' shares of the targets (module documentation, # Refinement): on what is shown, absolute, and on T, relative.
-fn shares() -> (f64, f64) {
+pub(crate) fn shares() -> (f64, f64) {
     let (z, n) = (crate::units::CONFIDENCE, crate::units::MOST_TRAJECTORIES as f64);
     (z / (2.0 * n.sqrt()), z * (2.0 / n).sqrt())
 }
@@ -662,9 +662,9 @@ impl Model {
     fn form_error(&self, sample: &Sample, plan: &Arc<Plan>, reference: &NearValues, other: &NearValues, amplitudes: &[Amplitude], thermal: f64) -> UnitError {
         let n = self.clusters[sample.cluster].states.len();
         let action = |near: Option<&NearValues>| -> Vec<C64> {
-            let g = self.middle_of(plan, sample.at.r, sample.at.t, plan.amplitudes(amplitudes), near).generator(sample.at.kappa);
+            let middle = self.middle_of(plan, sample.at.t, plan.amplitudes(amplitudes), near);
             let mut total = Mat::zeros(n, n);
-            g.parts.iter().for_each(|p| total.add_scaled(C64::ONE, &p.generator));
+            crate::step::Middle::generator(&middle, &crate::step::Middle::path(&middle, sample.at.kappa, [0.0; 3]), 0.0, &mut total);
             total.apply(&sample.psi)
         };
         let (far, first, second) = (action(None), action(Some(reference)), action(Some(other)));
