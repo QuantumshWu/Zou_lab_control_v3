@@ -79,39 +79,49 @@ impl Geometry {
     /// a(r), ∇a and ∇∇a (module documentation, # Beams): the transverse part t = r − ζn taken directly, so ρ² = |t|²
     /// is never a difference of nearly equal numbers.
     pub fn amplitude(&self, r: V3) -> Amplitude {
+        self.amplitude_to(r, 2)
+    }
+    /// The same to an order, as its caller reads it: the value alone (0), with ∇a (1), with ∇∇a too (2). What lies
+    /// beyond the order is zero and is not made; what lies within it is the same numbers at every order.
+    pub fn amplitude_to(&self, r: V3, order: usize) -> Amplitude {
         let (k, n) = (self.wave_number, self.direction);
         let zeta = dot3(r, n);
         let wave = C64::cis(k * zeta);
         let ik = C64::new(0.0, k);
-        let (value, g, dg): (C64, [C64; 3], [[C64; 3]; 3]) = match self.waist {
-            None => (wave, n.map(|x| ik * x), [[C64::ZERO; 3]; 3]),
+        let none = ([C64::ZERO; 3], [[C64::ZERO; 3]; 3]);
+        let (value, (g, dg)): (C64, ([C64; 3], [[C64; 3]; 3])) = match self.waist {
+            None => (wave, if order >= 1 { (n.map(|x| ik * x), none.1) } else { none }),
             Some(w) => {
                 let (w2, rayleigh) = (w * w, k * w * w / 2.0);
                 let inverse = C64::new(1.0, zeta / rayleigh).recip();
                 let t: V3 = std::array::from_fn(|j| r[j] - zeta * n[j]);
                 let rho2 = dot3(t, t);
                 let value = wave * (inverse * (-rho2 / w2)).exp() * inverse;
-                // g = (ik + (i/z_R)(ρ²/(w²q²) − 1/q)) n − (2/(w²q)) t.
-                let along = ik + C64::I * (inverse * inverse * (rho2 / w2) - inverse) / rayleigh;
                 let across = inverse * (-2.0 / w2);
-                let g = std::array::from_fn(|j| along * n[j] + across * t[j]);
+                // g = (ik + (i/z_R)(ρ²/(w²q²) − 1/q)) n − (2/(w²q)) t.
+                let g = || {
+                    let along = ik + C64::I * (inverse * inverse * (rho2 / w2) - inverse) / rayleigh;
+                    std::array::from_fn(|j| along * n[j] + across * t[j])
+                };
                 // ∇g = c₁(1 − nnᵀ) + c₂(ntᵀ + tnᵀ) + c₃ nnᵀ.
-                let c1 = across;
-                let c2 = C64::I * inverse * inverse * (2.0 / (rayleigh * w2));
-                let c3 = (inverse * inverse * inverse * (2.0 * rho2 / w2) - inverse * inverse) / (rayleigh * rayleigh);
-                let dg = std::array::from_fn(|p| {
-                    std::array::from_fn(|q| {
-                        let unit = if p == q { 1.0 } else { 0.0 };
-                        c1 * (unit - n[p] * n[q]) + c2 * (n[p] * t[q] + t[p] * n[q]) + c3 * (n[p] * n[q])
+                let dg = || {
+                    let c1 = across;
+                    let c2 = C64::I * inverse * inverse * (2.0 / (rayleigh * w2));
+                    let c3 = (inverse * inverse * inverse * (2.0 * rho2 / w2) - inverse * inverse) / (rayleigh * rayleigh);
+                    std::array::from_fn(|p| {
+                        std::array::from_fn(|q| {
+                            let unit = if p == q { 1.0 } else { 0.0 };
+                            c1 * (unit - n[p] * n[q]) + c2 * (n[p] * t[q] + t[p] * n[q]) + c3 * (n[p] * n[q])
+                        })
                     })
-                });
-                (value, g, dg)
+                };
+                (value, match order { 0 => none, 1 => (g(), none.1), _ => (g(), dg()) })
             }
         };
         Amplitude {
             value,
-            gradient: g.map(|x| value * x),
-            hessian: std::array::from_fn(|p| std::array::from_fn(|q| value * (g[p] * g[q] + dg[p][q]))),
+            gradient: if order >= 1 { g.map(|x| value * x) } else { none.0 },
+            hessian: if order >= 2 { std::array::from_fn(|p| std::array::from_fn(|q| value * (g[p] * g[q] + dg[p][q]))) } else { none.1 },
         }
     }
 }
@@ -329,15 +339,17 @@ impl Light {
     pub fn amplitudes(&self, r: V3) -> Vec<Amplitude> {
         self.beams.iter().map(|b| b.amplitude(r)).collect()
     }
-    /// The same into a caller's vector, kept from one point to the next.
-    pub fn amplitudes_into(&self, r: V3, out: &mut Vec<Amplitude>) {
+    /// The beams' amplitudes at r as a caller reads them, into its vector (kept from one point to the next): of the beams
+    /// `of` takes to `order` (`Geometry::amplitude_to`), zero of the others.
+    pub fn amplitudes_into(&self, r: V3, order: usize, of: impl Fn(usize) -> bool, out: &mut Vec<Amplitude>) {
+        let dark = Amplitude { value: C64::ZERO, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3] };
         out.clear();
-        out.extend(self.beams.iter().map(|b| b.amplitude(r)));
+        out.extend(self.beams.iter().enumerate().map(|(l, b)| if of(l) { b.amplitude_to(r, order) } else { dark }));
     }
     /// Whether the point r is outside the trap's region: every focused beam's intensity there below `REGION_INTENSITY`
     /// of its focus value (module documentation, # The region).
     pub fn outside(&self, r: V3) -> bool {
-        self.beams.iter().filter(|b| b.waist.is_some()).all(|b| b.amplitude(r).value.norm_sqr() < crate::units::REGION_INTENSITY)
+        self.beams.iter().filter(|b| b.waist.is_some()).all(|b| b.amplitude_to(r, 0).value.norm_sqr() < crate::units::REGION_INTENSITY)
     }
 }
 
@@ -443,6 +455,9 @@ mod tests {
         for beam in &beams {
             for r in [[0.0, 0.0, 0.0], [0.3, -0.2, 0.7], [-0.9, 0.4, -1.8], [1.6, 0.0, 0.2]] {
                 let (a, k) = (beam.amplitude(r), scale(beam, r));
+                // To an order (`amplitude_to`): the same numbers within it, zero beyond it.
+                let (zero, lower) = (Amplitude { value: C64::ZERO, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3] }, [beam.amplitude_to(r, 0), beam.amplitude_to(r, 1)]);
+                assert!(lower[0] == Amplitude { value: a.value, ..zero } && lower[1] == Amplitude { hessian: zero.hessian, ..a } && beam.amplitude_to(r, 2) == a, "{beam:?} {r:?}: the amplitude to an order");
                 let h = third / k;
                 let within = difference_error(k, h, own(&[*beam], r)) * a.value.abs();
                 for x in 0..3 {

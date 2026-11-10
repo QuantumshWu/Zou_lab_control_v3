@@ -274,7 +274,7 @@ impl Model {
         let (cluster, len, jumping) = (plan.cluster, plan.near.len(), plan.near.jumping());
         let order = if gradients == Gradients::None { 0 } else { 1 };
         let mut site = Held::<Site>::take();
-        self.light.amplitudes_into(at.r, &mut site.beams);
+        self.light.amplitudes_into(at.r, 1, |_| true, &mut site.beams);
         let Site { beams: amplitudes, coordinates, directions, reals, fields, .. } = &mut *site;
         // The near jumps there: a table's reals (the values, then per axis their slopes), or the exact elimination's.
         let (exact, mut work) = match table {

@@ -80,16 +80,18 @@ impl Model {
         out
     }
 
-    /// V_L(r; p) with, to `order`, its gradient and Hessian, and the rounding of its sum (module documentation); the near light from
-    /// its tables where they serve (tabulate.rs `Model::near`).
+    /// V_L(r; p) with, to `order`, its gradient and Hessian (what lies beyond the order is not made, and no number), and the
+    /// rounding of its sum (module documentation); the near light from its tables where they serve (tabulate.rs `Model::near`).
     pub(crate) fn expand(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights, order: usize, tables: Option<&super::tabulate::Tables>) -> Expansion {
         let trap = self.light.trap;
         if !lights.on(trap) {
             return Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
         }
-        // The beams' amplitudes into a thread's spare (assemble.rs `Held`): a step's reference asks the heap for nothing.
+        // The lit beams' amplitudes to the order asked -- V_L and its derivatives read no other light and no further --, into
+        // a thread's spare (assemble.rs `Held`): a step's reference asks the heap for nothing.
         let mut spare = Held::<Site>::take();
-        self.light.amplitudes_into(r, &mut spare.beams);
+        let lit = |beam: usize| self.light.frequencies.iter().enumerate().any(|(w, f)| lights.on(w) && f.beams.contains(&beam));
+        self.light.amplitudes_into(r, order, lit, &mut spare.beams);
         let amplitudes = &spare.beams;
         let mut out = self.far_potential(trap, amplitudes, p, lights);
         let near = self.near_potential(amplitudes, p, lights, order, tables);

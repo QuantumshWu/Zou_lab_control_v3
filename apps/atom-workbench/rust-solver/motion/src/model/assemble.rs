@@ -1344,8 +1344,9 @@ impl Model {
 
     /// A cluster's generator at a position and time under a plan (`Middle`), the near forms from a table where one is given.
     pub(crate) fn middle(&self, plan: &Arc<Plan>, r: [f64; 3], t: f64, table: Option<&NearTable>) -> Middle<'_> {
+        // The beams with their gradients: no part of a middle reads a second derivative.
         let mut point = Held::<Site>::take();
-        self.light.amplitudes_into(r, &mut point.beams);
+        self.light.amplitudes_into(r, 1, |_| true, &mut point.beams);
         point.select(plan);
         let work = match table {
             _ if plan.near.len() == 0 => {
