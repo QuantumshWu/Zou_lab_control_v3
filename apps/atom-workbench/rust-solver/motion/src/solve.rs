@@ -718,6 +718,10 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
         }
         context.ledger.flag(format!("落在损失能量窗口内的轨迹超出步长的份额，而每条轨迹的步数已达上限 {MOST_STEPS}，无法再减半"));
     }
+    // A point of the prepared potential below the bottom the ensemble was drawn about (ensemble.rs, # Its draw).
+    if ensemble.deeper() > 0 {
+        context.ledger.flag("准备势在所取阱底之外还有更深的地方：初始系综按该阱底的深度封顶".into());
+    }
     Ok(Attempt::Done(assemble(&context, &e, &l, &c, all.len() as u64 * GROUP)))
 }
 
