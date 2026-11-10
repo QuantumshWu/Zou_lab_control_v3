@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::field::Light;
+use crate::model::Unit;
 use crate::linalg::norm3;
 use crate::random::{Purpose, Stream};
 use crate::request::Request;
@@ -15,45 +16,74 @@ fn scene(name: &str) -> Request {
     Request::from_native(&line).unwrap()
 }
 
-/// A scene's model with every frequency but the trap's a near carrier, and of the units it then folds those `keep` takes kept.
-fn near(name: &str, keep: &dyn Fn(&Unit) -> bool) -> Model {
+/// A scene's model with the drives `at_the_atom` takes folded with the levels at the atom, and of the units it then folds those
+/// `keep` takes kept.
+fn model(name: &str, at_the_atom: &dyn Fn(&Light, &Unit) -> bool, keep: &dyn Fn(&Unit) -> bool) -> Model {
     let request = scene(name);
     let light = Light::new(&request);
-    let carriers: Vec<Unit> = (0..light.frequencies.len()).filter(|&f| f != light.trap).map(|frequency| Unit::Far { component: Component { frequency, counter: false } }).collect();
-    let units = Model::new(&request, &light, &carriers).unwrap().units();
-    let kept: Vec<Unit> = carriers.into_iter().chain(units.into_iter().filter(keep)).collect();
+    let bare = Model::new(&request, &light, &[]).unwrap();
+    let lifted: Vec<Unit> = (0..light.frequencies.len()).flat_map(|frequency| bare.bare_units(Component { frequency, counter: false })).filter(|u| at_the_atom(&light, u)).collect();
+    let units = Model::new(&request, &light, &lifted).unwrap().units();
+    let kept: Vec<Unit> = lifted.into_iter().chain(units.into_iter().filter(keep)).collect();
     Model::new(&request, &light, &kept).unwrap()
 }
 
-/// A scene's model with every light folded far, and of the units it then folds those `keep` takes kept.
-fn far(name: &str, keep: &dyn Fn(&Unit) -> bool) -> Model {
-    let request = scene(name);
-    let light = Light::new(&request);
-    let kept: Vec<Unit> = Model::new(&request, &light, &[]).unwrap().units().into_iter().filter(keep).collect();
-    Model::new(&request, &light, &kept).unwrap()
+/// Every drive of every frequency but the trap's.
+fn others(light: &Light, unit: &Unit) -> bool {
+    matches!(unit, Unit::Bare { component, .. } if component.frequency != light.trap)
 }
 
-/// The models the tests run on, every kind of term among them: one far beam (still clusters) and a standing wave of two
-/// (beating along a path); crossed far beams with their static couplings kept (clusters of four states in Doppler frames that
-/// turn); two far frequencies with their beats kept (tones at rest); near light with its drives of the stretched state kept
-/// (explicit states with their shifts, drives and own photons; one carrier, two of two beats, and eight explicit states);
-/// near light with its couplings of the ground states kept, of one carrier with the photons' coherences (merged classes) and
-/// of two carriers of several beams (the clusters the hyperfine levels, and all eight ground states).
+/// A scene's model with one frequency's drives at all three levels: of the light that is not the trap's, the drives of the
+/// stretched state explicit, and of the others those into every second excited state folded at the atom, the rest bare.
+fn three_levels(name: &str) -> Model {
+    let request = scene(name);
+    let light = Light::new(&request);
+    let bare = Model::new(&request, &light, &[]).unwrap();
+    let mut kept = vec![];
+    for frequency in (0..light.frequencies.len()).filter(|&f| f != light.trap) {
+        for unit in bare.bare_units(Component { frequency, counter: false }) {
+            let Unit::Bare { component, excited, ground } = unit else { unreachable!() };
+            if ground == GROUND - 1 {
+                kept.push(Unit::Drive { component, excited, ground });
+            } else if excited % 2 == 0 {
+                kept.push(unit);
+            }
+        }
+    }
+    let model = Model::new(&request, &light, &kept).unwrap();
+    for level in [Level::Bare, Level::Atom, Level::Explicit] {
+        assert!(model.driven.iter().any(|&(c, e, g)| c.frequency != light.trap && model.level(c, e, g) == level), "{name}: no drive {level:?}");
+    }
+    assert!(model.clusters.iter().any(|c| c.states.len() - c.ground > 1), "{name}: explicit states that share folded drives");
+    model
+}
+
+/// The models the tests run on, every kind of term among them. With every drive bare: one beam (still clusters) and a
+/// standing wave of two (beating along a path); crossed beams with their static couplings kept (clusters of four states in
+/// Doppler frames that turn); two frequencies with every coupling of two states kept, their beats' too (tones at rest). With
+/// the drives of the light that is not the trap's folded at the atom: the drives of the stretched state kept (explicit states
+/// with their shifts, drives and own photons; one carrier, two of two beats, and eight explicit states); every coupling of
+/// two states kept -- of one carrier with the trap's bare light (a bare coupling against a response at the atom), of one
+/// with the photons' coherences (merged classes), of two carriers of several beams (all eight ground states). And one
+/// frequency's drives at all three levels (`three_levels`).
 fn models() -> Vec<(&'static str, Model)> {
     let none = |_: &Unit| false;
+    let nothing = |_: &Light, _: &Unit| false;
     let couplings = |u: &Unit| matches!(u, Unit::Term { .. });
     let drives = |u: &Unit| matches!(u, Unit::Drive { ground: 7, .. });
     vec![
-        ("R1_TWEEZER far", far("R1_TWEEZER", &none)),
-        ("R1_RETRO far", far("R1_RETRO", &none)),
-        ("R1_CROSSED far, static couplings kept", far("R1_CROSSED", &couplings)),
-        ("R2_RECOIL far, beats and couplings kept", far("R2_RECOIL", &|u| matches!(u, Unit::FarBeat { .. } | Unit::Term { .. }))),
-        ("R2_RECOIL near, drives of |2,2> kept", near("R2_RECOIL", &drives)),
-        ("R3_DOPPLER near, couplings and coherences kept", near("R3_DOPPLER", &|u| matches!(u, Unit::Term { .. } | Unit::Coherence { .. }))),
-        ("R4_TW1 near, couplings kept", near("R4_TW1", &couplings)),
-        ("R5_PUMP near, drives of |2,2> kept", near("R5_PUMP", &drives)),
-        ("R6_RAMAN_CO near, drives of |2,2> kept", near("R6_RAMAN_CO", &drives)),
-        ("R8_R5051 near, couplings kept", near("R8_R5051", &couplings)),
+        ("R1_TWEEZER bare", model("R1_TWEEZER", &nothing, &none)),
+        ("R1_RETRO bare", model("R1_RETRO", &nothing, &none)),
+        ("R1_CROSSED bare, couplings kept", model("R1_CROSSED", &nothing, &couplings)),
+        ("R2_RECOIL bare, couplings kept", model("R2_RECOIL", &nothing, &couplings)),
+        ("R2_RECOIL at the atom, drives of |2,2> kept", model("R2_RECOIL", &others, &drives)),
+        ("R2_RECOIL at the atom, couplings kept", model("R2_RECOIL", &others, &couplings)),
+        ("R3_DOPPLER at the atom, couplings and coherences kept", model("R3_DOPPLER", &others, &|u| matches!(u, Unit::Term { .. } | Unit::Coherence { .. }))),
+        ("R4_TW1 at the atom, couplings kept", model("R4_TW1", &others, &couplings)),
+        ("R5_PUMP at the atom, drives of |2,2> kept", model("R5_PUMP", &others, &drives)),
+        ("R6_RAMAN_CO at the atom, drives of |2,2> kept", model("R6_RAMAN_CO", &others, &drives)),
+        ("R8_R5051 at the atom, couplings kept", model("R8_R5051", &others, &couplings)),
+        ("R8_R5051 at three levels", three_levels("R8_R5051")),
     ]
 }
 
@@ -86,13 +116,15 @@ struct Written {
 /// model's definitions on dense matrices (model.rs, far.rs, eliminate.rs, photon.rs), every light on:
 /// - every beam's amplitude the middle's with its gradient, its plane wave turned by e^{ik_l·v s}; a frequency's field
 ///   component e_k = Σ_l a_l γ_lk, and Doppler-weighted Σ_l w_l a_l γ_lk;
-/// - the states with every light off, in their frames; each frequency's far form Σ_k'k e_k'* e_k A_k'k; each kept far beat's
-///   cross forms a_l₂* a_l₁ C_l₂l₁ (a_l₁* a_l₂ of two counter-rotating components) with their adjoints;
-/// - per pair of near carriers −½(V'†R̃ + R̃'†V) on the ground places whose beat the frames or a kept unit hold, V = Σ_k e_k U^f_k
-///   and R̃ = Σ_k (e_k T_k − ẽ_k T2_k) of the elimination at the middle; the explicit states' van Vleck shift by the folded
-///   drives; the kept drives Σ_k e_k U_k and their adjoints;
-/// - the decay −(i/2) Σ_φ Σ_a J_{a,φ}†J_{a,φ}, a class's jump the sum of its members' -- a folded far component's
-///   e_k J_{a,k} (e_k* counter-rotating), a near carrier's C_a R̃, an explicit state's −C_a --, each at its relative beat;
+/// - the states with every light off, in their frames; per pair of frequencies their constant form Σ_k'k e'_k'* e_k C_k'k at
+///   their beat (far.rs `constant`; a frequency's own its static form), an entry where the frames or a kept unit hold its beat;
+/// - per pair of frequencies −½(V'†R̃ + R̃'†V) on the ground places whose beat the frames or a kept unit hold, V = Σ_k e_k U^f_k
+///   a frequency's every folded coupling and R̃ = Σ_k (e_k T_k − ẽ_k T2_k) its response at the atom of the elimination at the
+///   middle, in the levels its dressings make there (`Model::far_hamiltonian`; none where it is no carrier); the explicit states' van Vleck shift by the drives folded at the atom, each its own
+///   denominator against the other leg's folded coupling; the explicit drives Σ_k e_k U_k and their adjoints;
+/// - the decay −(i/2) Σ_φ Σ_a J_{a,φ}†J_{a,φ}, a class's jump the sum of its members' -- a component's bare drives'
+///   e_k J_{a,k} (e_k* counter-rotating), a carrier's C_a R̃ with its own bare drives' e_k J_{a,k}, an explicit state's
+///   −C_a --, each at its relative beat;
 /// - every entry at its beat's phase at t + s and in its two states' Doppler frames, with their diag(K_s·v).
 /// With `moduli` every factor is its modulus: the same sums with nothing cancelling, the scale of their rounding.
 fn written_out(model: &Model, cluster: usize, r: [f64; 3], t: f64, kappa: [f64; 3], velocity: [f64; 3], s: f64, moduli: bool) -> Written {
@@ -128,73 +160,57 @@ fn written_out(model: &Model, cluster: usize, r: [f64; 3], t: f64, kappa: [f64; 
         hermitian[x * n + y] = plus(hermitian[x * n + y], term);
         counts[x * n + y] += 1;
     };
-    // The states with every light off, in their frames; the far forms; the kept far beats.
+    // The states with every light off, in their frames; the constant forms of each pair of frequencies.
     for x in 0..n {
         for y in 0..n {
-            add(x, y, constant(leaf(model.base[(c.states[x], c.states[y])]) * phase(&zero, x, y)));
+            if model.term_included(cluster, x, y, &zero) {
+                add(x, y, constant(leaf(model.base[(c.states[x], c.states[y])]) * phase(&zero, x, y)));
+            }
         }
         add(x, x, constant(real(-model.omega(&c.frames[x]))));
     }
-    for (w, (f, tone)) in model.light.frequencies.iter().zip(&model.tones).enumerate() {
-        let rank = f.rank();
-        for kl in 0..rank {
-            for kr in 0..rank {
-                let product = times(conjugate(field(w, kl, false)), field(w, kr, false));
+    for (to, emitted) in model.tones.iter().enumerate() {
+        for (from, absorbed) in model.tones.iter().enumerate() {
+            let beat = emitted.beat.plus(-1, &absorbed.beat);
+            let forms = if to == from { emitted.forms.clone() } else { crate::model::far::constant(emitted, absorbed) };
+            let rank = absorbed.basis[0].len();
+            for (at, form) in forms.iter().enumerate() {
+                let product = times(conjugate(field(to, at / rank, false)), field(from, at % rank, false));
                 for x in 0..n {
                     for y in 0..n {
-                        add(x, y, scaled(product, leaf(tone.forms[kl * rank + kr][(c.states[x], c.states[y])]) * phase(&zero, x, y)));
+                        if model.term_included(cluster, x, y, &beat) {
+                            add(x, y, scaled(product, leaf(form[(c.states[x], c.states[y])]) * phase(&beat, x, y)));
+                        }
                     }
                 }
             }
         }
     }
-    for unit in &model.kept {
-        let Unit::FarBeat { first, second } = unit else { continue };
-        let (f1, f2) = (&model.light.frequencies[first.frequency], &model.light.frequencies[second.frequency]);
-        let beat = model.axes.component(&model.light, *second).plus(-1, &model.axes.component(&model.light, *first));
-        let cross = model.far_cross(*first, *second);
-        for (j, &l2) in f2.beams.iter().enumerate() {
-            for (i, &l1) in f1.beams.iter().enumerate() {
-                let product = if first.counter { times(conjugate(on[l1]), on[l2]) } else { times(conjugate(on[l2]), on[l1]) };
-                for x in 0..n {
-                    for y in 0..n {
-                        let entry = cross[j * f1.beams.len() + i][(c.states[x], c.states[y])];
-                        add(x, y, scaled(product, leaf(entry) * phase(&beat, x, y)));
-                        add(y, x, scaled(conjugate(product), leaf(entry.conj()) * phase(&beat.negated(), y, x)));
-                    }
-                }
-            }
-        }
-    }
-    // The elimination at the middle with its gradient: a carrier's coupling on its field (folded, or as it is) and its response
-    // on the path.
-    let far = model.far_hamiltonian(&amplitudes, &lights, 1);
+    // The elimination at the middle with its gradient: a frequency's coupling on its field (its every folded drive's, those
+    // folded at the atom alone, or as it is) and its response on the path.
+    let far = model.far_hamiltonian(&amplitudes, &lights, 1, &model.coherent_dressing());
     let responses = model.eliminate(cluster, &far, &amplitudes, &lights, 1, &model.coherent_dressing());
-    let coupling = |carrier: usize, folded: bool, e: usize, b: usize| -> Jet {
-        let cc = &model.carriers[carrier];
-        let basis = if folded { &cc.basis } else { &model.tones[cc.frequency].basis[0] };
-        (0..basis.len()).fold(NONE, |sum, k| plus(sum, scaled(field(cc.frequency, k, false), leaf(basis[k][(e, b)]))))
-    };
-    let response = |carrier: usize, e: usize, y: usize| -> Jet {
-        let cc = &model.carriers[carrier];
-        (0..cc.basis.len()).fold(NONE, |sum, k| {
+    let coupling = |frequency: usize, basis: &[Mat], e: usize, b: usize| -> Jet { (0..basis.len()).fold(NONE, |sum, k| plus(sum, scaled(field(frequency, k, false), leaf(basis[k][(e, b)])))) };
+    let folded = |frequency: usize, e: usize, b: usize| coupling(frequency, &model.tones[frequency].coupled[0], e, b);
+    let response = |frequency: usize, e: usize, y: usize| -> Jet {
+        let Some(carrier) = model.carrier_of(frequency) else { return NONE };
+        (0..model.carriers[carrier].basis.len()).fold(NONE, |sum, k| {
             let first: Jet = std::array::from_fn(|part| leaf(responses.first[carrier][k][part][(e, y)]));
             let second: Jet = std::array::from_fn(|part| leaf(-responses.second[carrier][k][part][(e, y)]));
-            plus(sum, plus(times(field(cc.frequency, k, false), first), times(field(cc.frequency, k, true), second)))
+            plus(sum, plus(times(field(frequency, k, false), first), times(field(frequency, k, true), second)))
         })
     };
-    for (cj, cp) in model.carriers.iter().enumerate() {
-        for (ci, cc) in model.carriers.iter().enumerate() {
-            let beat = cp.beat.plus(-1, &cc.beat);
-            let (from, to) = (Component { frequency: cc.frequency, counter: false }, Component { frequency: cp.frequency, counter: false });
+    for (wj, emitted) in model.tones.iter().enumerate() {
+        for (wi, absorbed) in model.tones.iter().enumerate() {
+            let beat = emitted.beat.plus(-1, &absorbed.beat);
             for x in 0..g {
                 for y in 0..g {
-                    if !model.term_included(cluster, x, y, from, to, &beat) {
+                    if !model.term_included(cluster, x, y, &beat) {
                         continue;
                     }
                     let sum = (0..EXCITED).fold(NONE, |sum, e| {
-                        let there = times(conjugate(coupling(cj, true, GROUND + e, c.states[x])), response(ci, e, y));
-                        let back = times(conjugate(response(cj, e, x)), coupling(ci, true, GROUND + e, c.states[y]));
+                        let there = times(conjugate(folded(wj, GROUND + e, c.states[x])), response(wi, e, y));
+                        let back = times(conjugate(response(wj, e, x)), folded(wi, GROUND + e, c.states[y]));
                         plus(sum, plus(there, back))
                     });
                     add(x, y, scaled(sum, real(-0.5) * phase(&beat, x, y)));
@@ -202,24 +218,28 @@ fn written_out(model: &Model, cluster: usize, r: [f64; 3], t: f64, kappa: [f64; 
             }
         }
     }
-    for (ci, cc) in model.carriers.iter().enumerate() {
+    for cc in &model.carriers {
+        let (w, component) = (cc.frequency, Component { frequency: cc.frequency, counter: false });
+        let at_the_atom = |e: usize, b: usize| coupling(w, &cc.basis, e, b);
         for x in g..n {
             for y in g..n {
                 let (e, f) = (c.states[x], c.states[y]);
                 let sum = (0..GROUND).fold(NONE, |sum, b| {
-                    let halves = [e, f].iter().fold(NONE, |halves, &state| {
+                    let half = |state: usize| -> Jet {
                         let mut gap: Vec<f64> = far.iter().map(|part| part[(state, state)].re - part[(b, b)].re).collect();
                         gap[0] -= cc.detuning;
                         let reciprocal = jet::reciprocal(&gap);
-                        plus(halves, std::array::from_fn(|part| real(0.5 * reciprocal[part])))
-                    });
-                    plus(sum, times(times(coupling(ci, true, e, b), conjugate(coupling(ci, true, f, b))), halves))
+                        std::array::from_fn(|part| real(0.5 * reciprocal[part]))
+                    };
+                    let right = times(times(at_the_atom(e, b), conjugate(folded(w, f, b))), half(e));
+                    let left = times(times(folded(w, e, b), conjugate(at_the_atom(f, b))), half(f));
+                    plus(sum, plus(right, left))
                 });
                 add(x, y, scaled(sum, phase(&zero, x, y)));
             }
             for q in 0..g {
-                if model.drive_kept(ci, c.states[x], c.states[q]) {
-                    let drive = coupling(ci, false, c.states[x], c.states[q]);
+                if model.level(component, c.states[x], c.states[q]) == Level::Explicit {
+                    let drive = coupling(w, &model.tones[w].basis[0], c.states[x], c.states[q]);
                     add(x, q, scaled(drive, phase(&cc.beat.negated(), x, q)));
                     add(q, x, scaled(conjugate(drive), phase(&cc.beat, q, x)));
                 }
@@ -245,7 +265,9 @@ fn written_out(model: &Model, cluster: usize, r: [f64; 3], t: f64, kappa: [f64; 
                             let f = model.carriers[carrier].frequency;
                             let (e, weighted) = (field(f, component, false)[0], field(f, component, true)[0]);
                             let (first, second) = (&responses.first[carrier][component][0], &responses.second[carrier][component][0]);
-                            (0..EXCITED).map(|i| leaf(model.emission[a][(b, GROUND + i)]) * (e * leaf(first[(i, sp)]) + weighted * leaf(-second[(i, sp)]))).sum()
+                            let bare = model.tones[f].jumps[0].get(component).map_or(C64::ZERO, |jumps| jumps[a][(b, state)]);
+                            let at_the_atom: C64 = if sp < g { (0..EXCITED).map(|i| leaf(model.emission[a][(b, GROUND + i)]) * (e * leaf(first[(i, sp)]) + weighted * leaf(-second[(i, sp)]))).sum() } else { C64::ZERO };
+                            at_the_atom + e * leaf(bare)
                         }
                         Origin::Explicit { state: e } => leaf(-model.emission[a][(b, e)]),
                     };

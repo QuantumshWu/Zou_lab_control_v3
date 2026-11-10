@@ -1,6 +1,7 @@
-//! The far light (SPEC §1.2): every frequency's coupling bases, the static shift of its field -- the request's outside form and
-//! the second-order shift of its folded components --, linear in T_ω = E_ω E_ω† and exact at the atom, and the Reiter–Sørensen
-//! jumps of its folded components.
+//! The folds with the bare levels (SPEC §1.2): every frequency's coupling bases, the constant form of its field -- the
+//! request's outside form and the second-order shift of its drives folded with the bare levels --, linear in T_ω = E_ω E_ω†
+//! and exact at the atom, and those drives' Reiter–Sørensen jumps. No light is of this file or of another: each drive of each
+//! component is taken at its own level (model.rs `Level`), and what is here of a frequency is its bare drives' part.
 //!
 //! # The couplings on the field's basis
 //! The beams of frequency ω couple linearly in their fields: X_l = Σ_k γ_lk U_k on the basis u_k of the span of their focus
@@ -10,9 +11,12 @@
 //! that span beyond their rounding is not the dipole operator contracted with its fields, and is refused (`Bases::new`).
 //!
 //! # A fold with the bare levels
-//! A component folded here is eliminated as every drive is (eliminate.rs, # The fold's terms), with the levels of H0: its
-//! response from ground state b is R[:,b] = (K₀ − E_b − ν)⁻¹ V[:,b], K₀ = H0_ee − (i/2) D -- no light in the denominator, so R
-//! is linear in the field and its terms are constants. A coupling absorbed at ν_B (B e^{−iν_B t}, B excited ← ground) and one
+//! A drive folded here is eliminated as every drive is (eliminate.rs, # The fold's terms), with the levels of H0: the
+//! response of a component's bare drives from ground state b is R[:,b] = (K₀ − E_b − ν)⁻¹ V[:,b], K₀ = H0_ee − (i/2) D -- no
+//! light in the denominator, so R is linear in the field and its terms are constants. The other folded drives of the
+//! component, those with the levels at the atom, have their response there (eliminate.rs); a fold's terms are bilinear in
+//! the coupling and the response, so with V^f every folded drive's coupling and R its bare drives' response the constants
+//! below are the whole of the bare drives' part, their cross terms with the others' couplings too. A coupling absorbed at ν_B (B e^{−iν_B t}, B excited ← ground) and one
 //! emitted at ν_A (A† e^{iν_A t}) make at second order, with the time dependence e^{−i(ν_B − ν_A)t} (`second_order`),
 //!
 //! ```text
@@ -44,14 +48,19 @@
 //! Σ_k γ_lk* C_a R(Ũ_k), of −k_l). Their decay Σ_a J_a†J_a is formed from them at the assembly: the generator is a Lindblad
 //! one by construction, and the far light's scattering, about Γm² per unit time, is not dropped (SPEC §1.2).
 //!
-//! # The beat of two far components
-//! Two folded components at ν₁ and ν₂ also make the cross terms C(V₂, V₁) at e^{−i(ν₁ − ν₂)t} and C(V₁, V₂) at the opposite
-//! beat, with the cross terms of their outside forms. Folded (`Unit::FarBeat`) they are dropped; kept they are a beat of the
-//! generator, the cross outside form the mean of the two frequencies' forms: a kept beat is slow, and two frequencies that
-//! close differ in their forms, made through the far outside states, by their beat over those states' detunings.
+//! # Two frequencies' constant form
+//! Two frequencies ω and ω' make the same form of their two fields at the beat δ_ω − δ_ω' (`constant`): the coefficient of
+//! e^ω_k* e^ω'_k' is the mean of their outside forms' cross term (two frequencies whose beat a cluster resolves differ in
+//! their forms, made through the far outside states, by that beat over those states' detunings), the co-rotating
+//! C(U^ω_k, U^ω'_k') and the counter-rotating C(Ũ^ω'_k', Ũ^ω_k). A frequency's own (ω' = ω, beat zero) is its static form
+//! above. Each entry a ← b of it is the generator's where its residual beat in the frames is exactly zero or its unit is
+//! kept (`Unit::Term`: the coupling of a and b at that beat, units.rs); folded, it is dropped, its error the unit's.
+//! A co-rotating leg against a counter-rotating one beats at twice an optical frequency and is no term of the model, as
+//! the request's outside forms hold none: where both folds exist (units.rs, # The model's domain) its mixing is the
+//! product of theirs, a fourth order.
 
 use super::eliminate::{jump, shift, Leg};
-use super::{Beat, Component};
+use super::{Beat, Component, Level};
 use crate::field::{Amplitude, Light};
 use crate::linalg::{Lu, Mat, C64};
 use crate::request::{Request, GROUND, STATES};
@@ -111,24 +120,40 @@ impl Beat {
     }
 }
 
-/// The second-order form C(A, B) of an emitted coupling A at ν_A and an absorbed one B at ν_B (module documentation, # A fold
-/// with the bare levels), on all the states (STATES × STATES): the ground block the contraction of the two legs, each
-/// coupling with its bare response (`response`: `ra`, `rb`); the excited block through the ground states, with the bare
-/// energies `e`.
-pub(crate) fn second_order(e: &[f64], a: &Mat, ra: &Mat, nu_a: f64, b: &Mat, rb: &Mat, nu_b: f64) -> Mat {
+/// One leg of a second-order form (`second_order`): a component's couplings on one basis vector -- those of its folded
+/// drives, whatever their level (`coupled`: what a response contracts with), those of its drives folded with the bare levels
+/// alone (`bare`) --, and the bare response of the latter (`response`, EXCITED × GROUND).
+#[derive(Clone, Copy)]
+pub(crate) struct Fold<'a> {
+    pub(crate) coupled: &'a Mat,
+    pub(crate) bare: &'a Mat,
+    pub(crate) response: &'a Mat,
+}
+
+/// The second-order form C(A, B) of an emitted leg A at ν_A and an absorbed one B at ν_B (module documentation, # A fold with
+/// the bare levels), on all the states (STATES × STATES): the ground block the contraction of the two legs' folded couplings
+/// with their bare responses (eliminate.rs `shift` -- the responses at the atom of the drives folded there contract with the
+/// same couplings, assemble.rs); the excited block through the ground states with the bare energies `e`, each bare drive's
+/// own denominator against the other leg's folded coupling (the drives folded at the atom bring theirs there, assemble.rs).
+pub(crate) fn second_order(e: &[f64], a: Fold, nu_a: f64, b: Fold, nu_b: f64) -> Mat {
     let mut out = Mat::zeros(STATES, STATES);
     for x in 0..GROUND {
         for y in 0..GROUND {
-            out[(x, y)] = shift(Leg { coupling: a, state: x, response: ra, place: x }, Leg { coupling: b, state: y, response: rb, place: y });
+            out[(x, y)] = shift(Leg { coupling: a.coupled, state: x, response: a.response, place: x }, Leg { coupling: b.coupled, state: y, response: b.response, place: y });
         }
     }
     for f in GROUND..STATES {
         for g in GROUND..STATES {
             let mut z = C64::ZERO;
             for w in 0..GROUND {
-                let (p, q) = (b[(f, w)], a[(g, w)]);
-                if p != C64::ZERO && q != C64::ZERO {
-                    z += p * q.conj() * (0.5 * (1.0 / (e[g] - e[w] - nu_a) + 1.0 / (e[f] - e[w] - nu_b)));
+                // Each half holds one drive's own denominator: the emitted leg's g ← w, the absorbed leg's f ← w.
+                let emitted = b.coupled[(f, w)] * a.bare[(g, w)].conj();
+                if emitted != C64::ZERO {
+                    z += emitted * (0.5 / (e[g] - e[w] - nu_a));
+                }
+                let absorbed = b.bare[(f, w)] * a.coupled[(g, w)].conj();
+                if absorbed != C64::ZERO {
+                    z += absorbed * (0.5 / (e[f] - e[w] - nu_b));
                 }
             }
             out[(f, g)] = z;
@@ -210,34 +235,48 @@ impl Bases {
     }
 }
 
-/// The far light of a frequency (module documentation): its exact co-rotating frequency δ_ω, its coupling bases, which of its
-/// components fold far, its static form on its field's basis and per beam pair, the outside form at the focus, and its folded
-/// components' jumps on the basis.
+/// The light of a frequency as the folds with the bare levels take it (module documentation): its exact co-rotating
+/// frequency δ_ω, its coupling bases, its static form on its field's basis and per beam pair, the outside form at the focus,
+/// and its bare drives' responses and jumps on the basis -- each drive at its level (`Tone::fold`).
 #[derive(Clone, Debug)]
 pub(crate) struct Tone {
     /// δ_ω exactly (its index; no frame coordinate) and its value (rad/µs).
     pub(crate) beat: Beat,
     pub(crate) detuning: f64,
-    /// [co-rotating, counter-rotating]: folded far.
-    pub(crate) folded: [bool; 2],
+    /// [co-rotating, counter-rotating]: whether any of its drives is folded with the bare levels.
+    pub(crate) bare: [bool; 2],
     /// A_k'k (STATES × STATES) at `forms[k' r + k]` on the field's basis: the static form F(e) = Σ_k'k e_k'* e_k A_k'k.
     pub(crate) forms: Vec<Mat>,
     /// P_l'l (STATES × STATES) at `pairs[l' n + l]`, l' and l in the frequency's beam order.
     pub(crate) pairs: Vec<Mat>,
     /// O(E(0)): the outside form at the focus, which H0 holds.
     pub(crate) focus: Mat,
-    /// Per component ([co, counter]) and basis vector k its folded jumps (GROUND × GROUND per axis a): the field's jump is
-    /// Σ_k e_k J_{a,k} (the counter-rotating Σ_k e_k* J_{a,k}); empty where unfolded.
+    /// Per component ([co, counter]) and basis vector k its bare drives' jumps (GROUND × GROUND per axis a): the field's jump is
+    /// Σ_k e_k J_{a,k} (the counter-rotating Σ_k e_k* J_{a,k}); empty where none is bare.
     pub(crate) jumps: [Vec<[Mat; 3]>; 2],
-    /// Per component ([co, counter]) and beam its bare response R_l (EXCITED × GROUND): a folded component's is the readout's
-    /// and a far beat's leg.
+    /// Per component ([co, counter]) and beam its bare drives' response R_l (EXCITED × GROUND, the readout's).
     pub(crate) responses: [Vec<Mat>; 2],
     /// Per component ([co, counter]) and beam its coupling at the focus, X_l and R_l (STATES × STATES).
     pub(crate) couplings: [Vec<Mat>; 2],
-    /// Per component ([co, counter]) its couplings on the field's basis, U_k and Ũ_k (STATES × STATES).
+    /// Per component ([co, counter]) its couplings on the field's basis, U_k and Ũ_k (STATES × STATES); those of its folded
+    /// drives, whatever their level (the explicit drives' entries zero: what a fold's responses contract with); those of its
+    /// bare drives alone; and the bare response of the latter (EXCITED × GROUND).
     pub(crate) basis: [Vec<Mat>; 2],
-    /// The outside form O_pq in the spherical components (the far beats' cross terms, units.rs).
+    pub(crate) coupled: [Vec<Mat>; 2],
+    pub(crate) bare_basis: [Vec<Mat>; 2],
+    pub(crate) bare_response: [Vec<Mat>; 2],
+    /// The outside form O_pq in the spherical components (two frequencies' cross terms, units.rs), and on the field's basis
+    /// (the static form without the folds).
     pub(crate) outside: [[Mat; 3]; 3],
+    plain: Vec<Mat>,
+    /// The beams' coefficients on the basis γ_lk, the field's basis vectors, [δ_ω, −(δ_ω + 2ν_frame)] (rad/µs), K₀ = H0_ee −
+    /// (i/2)D, the bare energies and the emission operators: what a fold reads again.
+    pub(crate) coefficients: Vec<Vec<C64>>,
+    pub(crate) vectors: Vec<[C64; 3]>,
+    pub(crate) nu: [f64; 2],
+    k0: Mat,
+    energies: Vec<f64>,
+    emission: [Mat; 3],
 }
 
 /// The bare energies E_s: H0's diagonal (H0 is diagonal in the model basis, request.rs).
@@ -257,17 +296,16 @@ pub(crate) fn decay(request: &Request) -> Mat {
 }
 
 impl Tone {
-    /// A frequency's far light, its components folded as `folded` says ([co, counter]).
-    pub(crate) fn new(request: &Request, light: &Light, axes: &Axes, frequency: usize, folded: [bool; 2]) -> Result<Tone, String> {
+    /// A frequency's light with nothing folded yet: what does not depend on its drives' levels (`Tone::folded` makes the rest).
+    pub(crate) fn new(request: &Request, light: &Light, axes: &Axes, frequency: usize) -> Result<Tone, String> {
         let f = &light.frequencies[frequency];
         let bases = Bases::new(request, light, frequency)?;
         let (n, r) = (f.beams.len(), f.rank());
-        let e = energies(request);
         let beat = axes.component(light, Component { frequency, counter: false });
         let nu = [axes.omega(&beat), axes.omega(&axes.component(light, Component { frequency, counter: true }))];
         let o = outside_form(&request.outside_forms[f.form].matrices);
-        // A_kk' on the basis (row-major r × r): the outside form, the focus value taken before the folds are added.
-        let mut a: Vec<Mat> = (0..r * r)
+        // The outside form on the basis (row-major r × r), and its value at the focus.
+        let plain: Vec<Mat> = (0..r * r)
             .map(|x| {
                 let (k, kk) = (x / r, x % r);
                 let mut m = Mat::zeros(STATES, STATES);
@@ -286,66 +324,144 @@ impl Tone {
         let mut focus = Mat::zeros(STATES, STATES);
         for k in 0..r {
             for kk in 0..r {
-                focus.add_scaled(e0[k].conj() * e0[kk], &a[k * r + kk]);
+                focus.add_scaled(e0[k].conj() * e0[kk], &plain[k * r + kk]);
             }
         }
-        // Each component's bare responses on its field's basis; a folded one's second-order form of every pair of them.
         let k0 = {
             let excited: Vec<usize> = (GROUND..STATES).collect();
             let mut k0 = request.hamiltonian.block(&excited, &excited);
             k0.add_scaled(C64::new(0.0, -0.5), &decay(request));
             k0
         };
-        let folds: [Vec<Mat>; 2] = [0, 1].map(|c| {
-            let basis = if c == 0 { &bases.co } else { &bases.counter };
-            basis.iter().map(|u| response(&k0, &e, u, nu[c])).collect()
-        });
-        for k in 0..r {
-            for kk in 0..r {
-                if folded[0] {
-                    a[k * r + kk].add_scaled(C64::ONE, &second_order(&e, &bases.co[k], &folds[0][k], nu[0], &bases.co[kk], &folds[0][kk], nu[0]));
-                }
-                if folded[1] {
-                    a[k * r + kk].add_scaled(C64::ONE, &second_order(&e, &bases.counter[kk], &folds[1][kk], nu[1], &bases.counter[k], &folds[1][k], nu[1]));
-                }
-            }
-        }
-        let pairs = (0..n * n)
-            .map(|x| {
-                let (j, i) = (x / n, x % n);
-                let mut m = Mat::zeros(STATES, STATES);
-                for k in 0..r {
-                    for kk in 0..r {
-                        m.add_scaled(f.coefficients[j][k].conj() * f.coefficients[i][kk], &a[k * r + kk]);
-                    }
+        let basis = [bases.co, bases.counter];
+        let mut tone = Tone {
+            beat,
+            detuning: nu[0],
+            bare: [false; 2],
+            forms: vec![],
+            pairs: vec![],
+            focus,
+            jumps: [vec![], vec![]],
+            responses: [vec![], vec![]],
+            couplings: [vec![], vec![]],
+            basis,
+            coupled: [vec![], vec![]],
+            bare_basis: [vec![], vec![]],
+            bare_response: [vec![], vec![]],
+            outside: o,
+            plain,
+            coefficients: f.coefficients.clone(),
+            vectors: f.basis.clone(),
+            nu,
+            k0,
+            energies: energies(request),
+            emission: request.emission.clone(),
+        };
+        tone.couplings = [0, 1].map(|c| tone.per_beam(c, &tone.basis[c]));
+        Ok(tone)
+    }
+
+    /// The same light with each drive (component [co, counter], excited, ground) at its level (model.rs `Level`).
+    pub(crate) fn folded(&self, level: &dyn Fn(usize, usize, usize) -> Level) -> Tone {
+        let mut tone = self.clone();
+        tone.fold(level);
+        tone
+    }
+
+    /// Per beam Σ_k γ_lk M_k of a co-rotating component's matrices on the basis (the counter-rotating Σ_k γ_lk* M_k).
+    fn per_beam(&self, side: usize, of: &[Mat]) -> Vec<Mat> {
+        self.coefficients
+            .iter()
+            .map(|gamma| {
+                let mut m = Mat::zeros(of[0].rows, of[0].cols);
+                for (g, x) in gamma.iter().zip(of) {
+                    m.add_scaled(if side == 0 { *g } else { g.conj() }, x);
                 }
                 m
             })
-            .collect();
-        // Per component and beam: its coupling at the focus and its bare response, on the basis; a folded one's jumps.
-        let weight = |c: usize, j: usize, k: usize| if c == 0 { f.coefficients[j][k] } else { f.coefficients[j][k].conj() };
-        let per_beam = |c: usize, of: &dyn Fn(usize) -> Mat, rows: usize, cols: usize| -> Vec<Mat> {
-            (0..n)
-                .map(|j| {
-                    let mut m = Mat::zeros(rows, cols);
-                    for k in 0..r {
-                        m.add_scaled(weight(c, j, k), &of(k));
-                    }
-                    m
-                })
-                .collect()
-        };
-        let couplings = [0, 1].map(|c| {
-            let basis = if c == 0 { &bases.co } else { &bases.counter };
-            per_beam(c, &|k| basis[k].clone(), STATES, STATES)
-        });
-        let responses = [0, 1].map(|c| per_beam(c, &|k| folds[c][k].clone(), EXCITED, GROUND));
-        let jumps = [0, 1].map(|c| {
-            let of = |response: &Mat| -> [Mat; 3] { std::array::from_fn(|a| Mat::from_fn(GROUND, GROUND, |to, b| jump(&request.emission[a], to, response, b))) };
-            if folded[c] { folds[c].iter().map(of).collect() } else { vec![] }
-        });
-        Ok(Tone { beat, detuning: nu[0], folded, forms: a, pairs, focus, jumps, responses, couplings, basis: [bases.co, bases.counter], outside: o })
+            .collect()
     }
+
+    /// Whether a component of it ([co, counter]) couples ground state g to excited state e: some beam's coupling is not zero.
+    pub(crate) fn drives(&self, counter: bool, e: usize, g: usize) -> bool {
+        self.couplings[counter as usize].iter().any(|x| x[(e, g)] != C64::ZERO)
+    }
+
+    /// One leg of its second-order forms (`Fold`): a component's basis vector.
+    pub(crate) fn leg(&self, side: usize, k: usize) -> Fold<'_> {
+        Fold { coupled: &self.coupled[side][k], bare: &self.bare_basis[side][k], response: &self.bare_response[side][k] }
+    }
+
+    /// Takes each drive at its level: the bare drives' responses, jumps and excited block, and the static form of every
+    /// folded drive's coupling with them (`second_order`).
+    fn fold(&mut self, level: &dyn Fn(usize, usize, usize) -> Level) {
+        let r = self.basis[0].len();
+        let only =|side: usize, m: &Mat, keep: &dyn Fn(Level) -> bool| Mat::from_fn(STATES, STATES, |e, g| if e >= GROUND && g < GROUND && keep(level(side, e, g)) { m[(e, g)] } else { C64::ZERO });
+        self.coupled = [0, 1].map(|c| self.basis[c].iter().map(|u| only(c, u, &|l| l != Level::Explicit)).collect());
+        self.bare_basis = [0, 1].map(|c| self.basis[c].iter().map(|u| only(c, u, &|l| l == Level::Bare)).collect());
+        self.bare = [0, 1].map(|c| self.bare_basis[c].iter().any(|u| u.data.iter().any(|z| *z != C64::ZERO)));
+        self.bare_response = [0, 1].map(|c| self.bare_basis[c].iter().map(|u| response(&self.k0, &self.energies, u, self.nu[c])).collect());
+        // A_kk': the outside form, the co-rotating C(U_k, U_k') and the counter-rotating C(Ũ_k', Ũ_k).
+        let mut a = self.plain.clone();
+        for k in 0..r {
+            for kk in 0..r {
+                a[k * r + kk].add_scaled(C64::ONE, &second_order(&self.energies, self.leg(0, k), self.nu[0], self.leg(0, kk), self.nu[0]));
+                a[k * r + kk].add_scaled(C64::ONE, &second_order(&self.energies, self.leg(1, kk), self.nu[1], self.leg(1, k), self.nu[1]));
+            }
+        }
+        self.pairs = per_pair(self, self, &a);
+        self.forms = a;
+        self.responses = [0, 1].map(|c| self.per_beam(c, &self.bare_response[c]));
+        self.jumps = [0, 1].map(|c| {
+            let of = |response: &Mat| -> [Mat; 3] { std::array::from_fn(|a| Mat::from_fn(GROUND, GROUND, |to, b| jump(&self.emission[a], to, response, b))) };
+            if self.bare[c] { self.bare_response[c].iter().map(of).collect() } else { vec![] }
+        });
+    }
+}
+
+/// The constant form of two frequencies on their fields' bases (module documentation, # Two frequencies' constant form):
+/// C_{k k'} at `[k r' + k']`, the coefficient of e^to_k* e^from_k' at the beat δ_to − δ_from -- the mean of their outside
+/// forms' cross term, the co-rotating C(U^to_k, U^from_k') (emitting `to`'s, absorbing `from`'s) and the counter-rotating
+/// C(Ũ^from_k', Ũ^to_k) (emitting `from`'s, absorbing `to`'s: the same product of fields at the same beat). A frequency's
+/// own is its static form (`Tone::forms`).
+pub(crate) fn constant(to: &Tone, from: &Tone) -> Vec<Mat> {
+    let (r, rr) = (to.basis[0].len(), from.basis[0].len());
+    (0..r * rr)
+        .map(|x| {
+            let (k, kk) = (x / rr, x % rr);
+            let mut m = Mat::zeros(STATES, STATES);
+            for p in 0..3 {
+                for q in 0..3 {
+                    let w = to.vectors[k][p].conj() * from.vectors[kk][q] * 0.5;
+                    if w != C64::ZERO {
+                        m.add_scaled(w, &to.outside[p][q]);
+                        m.add_scaled(w, &from.outside[p][q]);
+                    }
+                }
+            }
+            m.add_scaled(C64::ONE, &second_order(&to.energies, to.leg(0, k), to.nu[0], from.leg(0, kk), from.nu[0]));
+            m.add_scaled(C64::ONE, &second_order(&to.energies, from.leg(1, kk), from.nu[1], to.leg(1, k), to.nu[1]));
+            m
+        })
+        .collect()
+}
+
+/// A form on two frequencies' bases (`constant`) per pair of their beams: Σ_kk' γ^to_jk* γ^from_ik' C_kk' at `[j n' + i]`, the
+/// coefficient of a_j* a_i (j of `to`'s beams, i of `from`'s).
+pub(crate) fn per_pair(to: &Tone, from: &Tone, forms: &[Mat]) -> Vec<Mat> {
+    let (n, nn, rr) = (to.coefficients.len(), from.coefficients.len(), from.basis[0].len());
+    (0..n * nn)
+        .map(|x| {
+            let (j, i) = (x / nn, x % nn);
+            let mut m = Mat::zeros(STATES, STATES);
+            for (k, c) in to.coefficients[j].iter().enumerate() {
+                for (kk, d) in from.coefficients[i].iter().enumerate() {
+                    m.add_scaled(c.conj() * *d, &forms[k * rr + kk]);
+                }
+            }
+            m
+        })
+        .collect()
 }
 
 /// The bare response of a coupling U at ν (module documentation, # A fold with the bare levels): R[:,b] = (K₀ − E_b − ν)⁻¹
@@ -411,7 +527,8 @@ mod tests {
         let error = |scale: f64| {
             let v = coupling(scale, 7);
             let r = response(&k0, &e, &v, nu);
-            let f = second_order(&e, &v, &r, nu, &v, &r, nu);
+            let leg = Fold { coupled: &v, bare: &v, response: &r };
+            let f = second_order(&e, leg, nu, leg, nu);
             let floquet = Mat::from_fn(STATES, STATES, |x, y| {
                 let d = if x == y { C64::real(if x < GROUND { e[x] } else { e[x] - nu }) } else { C64::ZERO };
                 d + if x >= GROUND && y < GROUND { v[(x, y)] } else if x < GROUND && y >= GROUND { v[(y, x)].conj() } else { C64::ZERO }
@@ -455,7 +572,9 @@ mod tests {
         let k0 = Mat::from_fn(EXCITED, EXCITED, |x, y| if x == y { C64::new(e[GROUND + x], -0.5 * gamma[x]) } else { C64::ZERO });
         let (a, b) = (coupling(5.0, 11), coupling(7.0, 12));
         let (nu_a, nu_b) = (310.0, 345.0);
-        let form = second_order(&e, &a, &response(&k0, &e, &a, nu_a), nu_a, &b, &response(&k0, &e, &b, nu_b), nu_b);
+        let (ra, rb) = (response(&k0, &e, &a, nu_a), response(&k0, &e, &b, nu_b));
+        let (la, lb) = (Fold { coupled: &a, bare: &a, response: &ra }, Fold { coupled: &b, bare: &b, response: &rb });
+        let form = second_order(&e, la, nu_a, lb, nu_b);
         for x in 0..GROUND {
             for y in 0..GROUND {
                 let (mut closed, mut size) = (C64::ZERO, 0.0);
@@ -468,7 +587,7 @@ mod tests {
                 assert!((form[(x, y)] - closed).abs() <= rounding(2 * EXCITED + 6) * size, "({x}, {y}): {:?} against {closed:?}", form[(x, y)]);
             }
         }
-        let own = second_order(&e, &b, &response(&k0, &e, &b, nu_b), nu_b, &b, &response(&k0, &e, &b, nu_b), nu_b);
+        let own = second_order(&e, lb, nu_b, lb, nu_b);
         let (mut dispersive, mut real) = (0.0, 0.0);
         for w in 0..EXCITED {
             let (delta, v2) = (e[GROUND + w] - e[0] - nu_b, b[(GROUND + w, 0)].norm_sqr());

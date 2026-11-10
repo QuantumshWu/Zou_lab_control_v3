@@ -5,7 +5,7 @@
 use atom_motion::field::Light;
 use atom_motion::linalg::{norm_sqr, C64};
 use atom_motion::model::tabulate::{Coordinate, Tables};
-use atom_motion::model::{Component, Lights, Lit, Model, Photon, Point, Reach, Run, Sample, Trap, Unit, UnitError, GROUND};
+use atom_motion::model::{Lights, Lit, Model, Photon, Point, Reach, Run, Sample, Trap, Unit, UnitError, GROUND};
 use atom_motion::random::{Purpose, Stream};
 use atom_motion::request::Request;
 use atom_motion::step::{Dynamics, Middle};
@@ -98,8 +98,8 @@ fn a_table_follows_a_line_through_resonance_across_its_axis() {
     let table = &tables.tables[index];
     assert_eq!(table.axes(), 1, "{:?} {:?}", table.layout.coordinates, table.layout.weights);
     assert!(matches!(table.layout.coordinates[0], Coordinate::Chart { index: 0, .. }), "the tweezer's intensity: {:?}", table.layout.coordinates[0]);
-    // The near light off: what the exact generator is compared with for the near light's own size.
-    let dark = Lights(model.running().0.iter().enumerate().map(|(f, l)| if kept.contains(&Unit::Far { component: Component { frequency: f, counter: false } }) { Lit::Off } else { *l }).collect());
+    // The light with a drive folded at the atom off: what the exact generator is compared with for that light's own size.
+    let dark = Lights(model.running().0.iter().enumerate().map(|(f, l)| if kept.iter().any(|u| matches!(u, Unit::Bare { component, .. } if component.frequency == f)) { Lit::Off } else { *l }).collect());
     let prepared = model.prepared();
     let edge = (1..).map(|i| 0.01 * i as f64).find(|&rho| model.potential([trap.centre[0] + rho, trap.centre[1], trap.centre[2]], &p, &prepared) > reach.minimum + reach.energy).unwrap();
     let momentum = 0.5 * reach.speed / model.hbar_over_mass();
@@ -136,7 +136,7 @@ fn r2() -> (Model, [f64; GROUND], Tables) {
     let light = Light::new(&request);
     let beam = request.beams.iter().position(|b| b.id == "probe").unwrap();
     let probe = light.frequencies.iter().position(|f| f.beams.contains(&beam)).unwrap();
-    let model = Model::new(&request, &light, &[Unit::Far { component: Component { frequency: probe, counter: false } }]).unwrap();
+    let model = Model::new(&request, &light, &model_common::at_the_atom(&request, &light, &[probe])).unwrap();
     let p = alone(7);
     let trap = model.trap(&p, &model.prepared()).unwrap();
     let reach = model.reach(&trap, &p, request.temperature_uk, 2e-3);
@@ -264,7 +264,7 @@ fn a_scene_s_tables_against_its_exact_elimination() {
         eprintln!("  cluster {} lights {:?}: axes {:?} nodes {:?}, {} reals a node", t.layout.cluster, t.layout.lights.0, &t.layout.coordinates[..t.axes()], t.table.axes().iter().map(|a| a.nodes).collect::<Vec<_>>(), t.table.width());
     }
     let (exact, fast) = (Run::new(&model, p), Run::tabulated(&model, &tables, p));
-    let dark = Lights(model.running().0.iter().enumerate().map(|(f, l)| if kept.contains(&Unit::Far { component: Component { frequency: f, counter: false } }) { Lit::Off } else { *l }).collect());
+    let dark = Lights(model.running().0.iter().enumerate().map(|(f, l)| if kept.iter().any(|u| matches!(u, Unit::Bare { component, .. } if component.frequency == f)) { Lit::Off } else { *l }).collect());
     let count: usize = std::env::var("SAMPLES").ok().and_then(|x| x.parse().ok()).unwrap_or(12);
     let samples = samples(&model, &trap, &reach, request.temperature_uk, count);
     let reads = model.table_reads(&tables, &samples);
@@ -410,7 +410,31 @@ fn the_model_s_calls_timed() {
     let started = Instant::now();
     std::hint::black_box(model.errors(&units, few));
     let slow = started.elapsed().as_secs_f64() * 1e3 / few.len() as f64;
-    let started = Instant::now();
-    std::hint::black_box(model.errors_with(&units, &all, Some(&tables)));
-    eprintln!("{name}: the {} candidate units' errors a state: {slow:.2} ms exact, {:.3} ms tabulated", units.len(), started.elapsed().as_secs_f64() * 1e3 / all.len() as f64);
+    let tabulated = |of: &[Unit]| {
+        (0..4)
+            .map(|_| {
+                let started = Instant::now();
+                std::hint::black_box(model.errors_with(of, &all, Some(&tables)));
+                started.elapsed().as_secs_f64() * 1e3 / all.len() as f64
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    eprintln!("{name}: the {} candidate units' errors a state: {slow:.2} ms exact, {:.3} ms tabulated", units.len(), tabulated(&units));
+    // What a state's cost is made of: what its units share (no unit asked), and each kind's units beyond that.
+    let shared = tabulated(&[]);
+    let kinds: [(&str, &dyn Fn(&Unit) -> bool); 5] = [
+        ("bare folds", &|u| matches!(u, Unit::Bare { .. })),
+        ("folds at the atom", &|u| matches!(u, Unit::Drive { .. })),
+        ("couplings", &|u| matches!(u, Unit::Term { .. })),
+        ("dressings", &|u| matches!(u, Unit::Dressing { .. })),
+        ("coherences", &|u| matches!(u, Unit::Coherence { .. })),
+    ];
+    let parts: Vec<String> = kinds
+        .iter()
+        .map(|(kind, pick)| {
+            let of: Vec<Unit> = units.iter().filter(|u| pick(u)).cloned().collect();
+            format!("{} {kind} {:.3} ms", of.len(), tabulated(&of) - shared)
+        })
+        .collect();
+    eprintln!("{name}: of a state's errors, tabulated: shared {shared:.3} ms; {}", parts.join(", "));
 }

@@ -11,15 +11,17 @@
 //! forward error is then the problem's own condition times that.
 //!
 //! # The Chebyshev plan of the exponential's action (`Chebyshev`)
-//! On a vector, e^{tA}v = e^{t tr(A)/n} e^{−iX}v with X = it(A − tr(A)/n) = H + iK, H and K Hermitian: of a generator,
-//! tA = −iH_eff s, H is its Hermitian part's s (less its mean) and K its decay's deviation from its mean. The scalar
-//! part goes out exactly: the trap's light shift, hundreds of rad/µs on every state alike, costs nothing. For the rest
+//! On a vector, e^{tA}v = e^{−iz} e^{−iX}v with X = itA − z = H + iK, H and K Hermitian and z a scalar: of a generator,
+//! tA = −iH_eff s, H is its Hermitian part's s and K its decay's, each less its part of z -- the middle of its spectrum
+//! as its bound knows it (`bounds`). The scalar part goes out exactly: the trap's light shift, hundreds of rad/µs on
+//! every state alike, costs nothing, nor does a detuning that all of a cluster's excited states share cost more than
+//! half of itself. For the rest
 //! the Jacobi–Anger expansion e^{−iσx} = J₀(σ) + 2 Σ_{k≥1} (−i)^k J_k(σ) T_k(x) at x = X/σ sums the exponential in
 //! Chebyshev polynomials of X/σ. Of a Hermitian X with σ ≥ ‖X‖₂, ‖T_k(X/σ)‖ ≤ 1 and the terms fall as J_k(σ),
 //! |J_k(σ)| ≤ (σ/2)^k/k!, once k is beyond σ: about σ products of n², where Taylor polynomials on parts of norm one take
 //! 18 σ.
-//! - The bounds: ρ ≥ ‖H‖₂ and γ ≥ ‖K‖₂, of each the lesser of its 1-norm and its Frobenius norm (`bounds`), and
-//!   σ = max(ρ, γ).
+//! - The bounds: ρ ≥ ‖H‖₂ and γ ≥ ‖K‖₂, of each the lesser of its Gershgorin hull's half width about the hull's
+//!   middle and its Frobenius norm about its diagonal's mean (`bounds`), and σ = max(ρ, γ).
 //! - The truncation: the numerical range of X/σ lies in the rectangle |Re| ≤ ρ/σ, |Im| ≤ γ/σ, inside the ellipse of foci
 //!   ±1 through its corner w = (ρ + iγ)/σ, on which |T_k| ≤ r^k, r = |w + √(w² − 1)| (1 for a Hermitian X); so
 //!   ‖T_k(X/σ)‖ ≤ (1 + √2) r^k (Crouzeix & Palencia 2017), and on a part of σ/q the terms beyond K sum to at most
@@ -726,17 +728,26 @@ impl Chebyshev {
     }
 }
 
-/// (ρ, γ) ≥ (‖H‖₂, ‖K‖₂) of X = H + iK, H = (X + X†)/2 and K = (X − X†)/2i: of each the lesser of its 1-norm (the
-/// largest column sum of its entries' moduli; it bounds a Hermitian matrix's 2-norm, closely where few entries couple a
-/// state) and its Frobenius norm (closely where the spectrum is spread). `sums` holds the n column sums.
-pub fn bounds(x: &Mat, sums: &mut [C64]) -> (f64, f64) {
+/// The bounds of a matrix less its scalar part (`bounds`): ρ ≥ ‖H‖₂ and γ ≥ ‖K‖₂ of X − z = H + iK, and z.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bounds {
+    pub rho: f64,
+    pub gamma: f64,
+    pub scalar: C64,
+}
+
+/// (ρ, γ) ≥ (‖H‖₂, ‖K‖₂) of X − z = H + iK, H and K Hermitian, at the scalar z that makes each least: of X's Hermitian
+/// part (X + X†)/2 less Re z and of (X − X†)/2i less Im z the lesser of
+/// - the half width of its spectrum's Gershgorin hull about the hull's middle: a Hermitian matrix's eigenvalues lie in
+///   the union of [d_i − r_i, d_i + r_i], d its diagonal and r_i its row's off-diagonal moduli -- close where few
+///   entries couple a state, and half the distance of two groups of levels whatever the group's sizes;
+/// - its Frobenius norm about its diagonal's mean, where that norm is least -- close where the spectrum is spread.
+/// z's two parts are the middles taken. `sums` holds the n rows' sums.
+pub fn bounds(x: &Mat, sums: &mut [C64]) -> Bounds {
     let n = x.rows;
     sums[..n].fill(C64::ZERO);
     let mut squares = C64::ZERO;
     for i in 0..n {
-        let diagonal = x[(i, i)];
-        sums[i] += C64::new(diagonal.re.abs(), diagonal.im.abs());
-        squares += C64::new(diagonal.re * diagonal.re, diagonal.im * diagonal.im);
         for j in i + 1..n {
             let (above, below) = (x[(i, j)], x[(j, i)].conj());
             let pair = C64::new((above + below).norm_sqr(), (above - below).norm_sqr()) * 0.25;
@@ -746,8 +757,21 @@ pub fn bounds(x: &Mat, sums: &mut [C64]) -> (f64, f64) {
             sums[j] += pair;
         }
     }
-    let (rho, gamma) = sums[..n].iter().fold((0.0, 0.0), |(rho, gamma): (f64, f64), s| (rho.max(s.re), gamma.max(s.im)));
-    (rho.min(squares.re.sqrt()), gamma.min(squares.im.sqrt()))
+    let mean = x.trace() / n as f64;
+    // Of the two parts (the complex numbers' real and imaginary ones): the hull's ends and the diagonal's spread.
+    let (mut lo, mut hi, mut spread) = (C64::new(f64::INFINITY, f64::INFINITY), C64::new(f64::NEG_INFINITY, f64::NEG_INFINITY), C64::ZERO);
+    for i in 0..n {
+        let (d, r) = (x[(i, i)], sums[i]);
+        lo = C64::new(lo.re.min(d.re - r.re), lo.im.min(d.im - r.im));
+        hi = C64::new(hi.re.max(d.re + r.re), hi.im.max(d.im + r.im));
+        spread += C64::new((d.re - mean.re).powi(2), (d.im - mean.im).powi(2));
+    }
+    let least = |lo: f64, hi: f64, squares: f64, mean: f64| {
+        let (hull, frobenius) = (0.5 * (hi - lo), squares.sqrt());
+        if hull <= frobenius { (hull, 0.5 * (lo + hi)) } else { (frobenius, mean) }
+    };
+    let ((rho, re), (gamma, im)) = (least(lo.re, hi.re, squares.re + spread.re, mean.re), least(lo.im, hi.im, squares.im + spread.im, mean.im));
+    Bounds { rho, gamma, scalar: C64::new(re, im) }
 }
 
 /// v ← e^{tA} v to round-off (module documentation, # The Chebyshev plan), and the plan it took. A is overwritten (by
@@ -755,16 +779,15 @@ pub fn bounds(x: &Mat, sums: &mut [C64]) -> (f64, f64) {
 pub fn exp_apply(a: &mut Mat, t: C64, v: &mut [C64], work: &mut [C64]) -> Chebyshev {
     let n = v.len();
     assert_eq!((a.rows, a.cols), (n, n), "the exponential of a {}x{} matrix on a vector of {n}", a.rows, a.cols);
-    // X = it(A − tr(A)/n), its bounds and its plan.
-    let scalar = a.trace() / n as f64;
-    for i in 0..n {
-        a[(i, i)] -= scalar;
-    }
+    // X = itA − z, its bounds and its plan.
     let turn = C64::I * t;
     for x in &mut a.data {
         *x = turn * *x;
     }
-    let (rho, gamma) = bounds(a, work);
+    let Bounds { rho, gamma, scalar } = bounds(a, work);
+    for i in 0..n {
+        a[(i, i)] -= scalar;
+    }
     let plan = Chebyshev::plan(rho, gamma);
     if plan.terms > 0 {
         let sigma = rho.max(gamma);
@@ -802,7 +825,7 @@ pub fn exp_apply(a: &mut Mat, t: C64, v: &mut [C64], work: &mut [C64]) -> Chebys
             v.copy_from_slice(b2);
         }
     }
-    let phase = (t * scalar).exp();
+    let phase = (-C64::I * scalar).exp();
     for x in v.iter_mut() {
         *x *= phase;
     }
@@ -989,6 +1012,35 @@ pub(crate) mod tests {
         assert_eq!(Chebyshev::plan(28.0, 0.3).parts, 3);
         assert_eq!(Chebyshev::plan(0.0, 5.0).parts, 5);
         assert_eq!(Chebyshev::plan(3000.0, 0.0).parts, 3);
+    }
+
+    /// The exponential's bounds (`bounds`): of a random matrix X, ρ and γ bound its two Hermitian parts' spectra about
+    /// the scalar taken -- against the spectra themselves --; two groups of levels Δ apart, weakly coupled, cost half
+    /// their distance and the couplings whatever the groups' sizes (their mean would cost the smaller group Δ times
+    /// the larger one's share), a common level nothing; and one state coupled to eight others (norm √8 of a coupling)
+    /// its Frobenius norm, 4 of it, where its row's sum is 8.
+    #[test]
+    fn the_bounds_hold_about_the_spectrum_s_middle() {
+        let n = 9;
+        let x = sample(n, n, 21);
+        let found = bounds(&x, &mut vec![C64::ZERO; n]);
+        let (h, k) = (x.hermitian_part(), Mat::from_fn(n, n, |i, j| (x[(i, j)] - x[(j, i)].conj()) * C64::new(0.0, -0.5)));
+        for (part, bound, scalar) in [(&h, found.rho, found.scalar.re), (&k, found.gamma, found.scalar.im)] {
+            let most = hermitian_eigen(part).values.iter().map(|l| (l - scalar).abs()).fold(0.0, f64::max);
+            assert!(most <= bound && bound <= part.norm1() + scalar.abs(), "{most} against the bound {bound}");
+        }
+        let (delta, coupling, level) = (165.0, 3.0, 4000.0);
+        let groups = Mat::from_fn(13, 13, |i, j| match (i < 8, j < 8) {
+            (true, true) | (false, false) if i == j => C64::real(level + if i < 8 { 0.0 } else { delta }),
+            (true, false) | (false, true) if (i + j) % 5 == 0 => C64::real(coupling),
+            _ => C64::ZERO,
+        });
+        let found = bounds(&groups, &mut vec![C64::ZERO; 13]);
+        assert!(found.rho >= 0.5 * delta && found.rho <= 0.5 * delta + 3.0 * coupling && found.gamma == 0.0, "{found:?}");
+        assert!((found.scalar - C64::real(level + 0.5 * delta)).abs() <= 3.0 * coupling, "{found:?}");
+        let star = Mat::from_fn(n, n, |i, j| if (i == 0) != (j == 0) { C64::real(0.4) } else { C64::ZERO });
+        let found = bounds(&star, &mut vec![C64::ZERO; n]);
+        assert!((found.rho - 1.6).abs() <= 1e-12 && found.scalar == C64::ZERO, "{found:?}");
     }
 
     /// e^{−iHτ} of a Hermitian H with a known spectrum, U e^{−idτ} U†: the matrix exponential and its action on a
