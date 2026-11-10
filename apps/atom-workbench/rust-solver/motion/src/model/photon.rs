@@ -18,6 +18,8 @@
 //! that class, at the beat Ω_i − Ω_j, whose residual in the frames is zero within one frequency: the decay is the jumps' own
 //! product, the generator Lindblad's by construction, and the hazard Σ_φ Σ_a ‖J_{a,φ}ψ‖²/‖ψ‖² (SPEC §1.4, the photons' own
 //! weights) is the propagated norm's rate ⟨ψ|i(H − H†)|ψ⟩/‖ψ‖² identically (step.rs; the identity is the tests').
+//! A table's middle takes the decay's sums interpolated, the photons the interpolated jumps: there the identity holds to the
+//! table's error, which its reads take (tabulate.rs, # A node's reals, # The table's error).
 //!
 //! # A class's photon
 //! Its frequency is the frame's less the class's frame frequency, ω_φ = ω_frame − ω̃ + E_s₀ − E_b₀: the frames are counted from

@@ -21,7 +21,7 @@
 //! request is refused where it is not, or where the descent leaves the trap's region: no minimum holds the atom ("光镊不约束
 //! 原子"), and the focus is never taken instead. A focus that is a bowl's bottom is the centre as it stands, bit for bit.
 
-use super::assemble::{Held, Point, LEFT, RIGHT};
+use super::assemble::{Held, Site, LEFT, RIGHT};
 use super::tabulate::Tables;
 use super::{jet, Envelope, Lights, Lit, Model, Quadratic, Trap};
 use crate::linalg::C64;
@@ -88,7 +88,7 @@ impl Model {
             return Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
         }
         // The beams' amplitudes into a thread's spare (assemble.rs `Held`): a step's reference asks the heap for nothing.
-        let mut spare = Held::<Point>::take();
+        let mut spare = Held::<Site>::take();
         self.light.amplitudes_into(r, &mut spare.beams);
         let amplitudes = &spare.beams;
         let mut out = self.far_potential(trap, amplitudes, p, lights);

@@ -22,10 +22,13 @@
 //!
 //! # A node's reals
 //! The near forms, their real and imaginary parts in the layout's order: what the photons, the readout, the potential and the
-//! refinement read. And after them the middle's own (assemble.rs, # Dense terms): the Hermitian forms laid where the
-//! generator's dense terms and the forms' take them (`Plan::lay`). That part is linear in the forms, so its interpolant is
-//! the interpolated forms' own layout, number for number: a middle takes it in one pass over the stencil's rows, each real
-//! straight to its place (`Model::near_point`).
+//! refinement read. And after them the middle's own (assemble.rs, # Dense terms), where the generator's dense terms and the
+//! forms' take them: the Hermitian forms (`Plan::lay`) and the decay's sums of the node's jumps' products (`Plan::decay`). A
+//! middle takes that part in one pass over the stencil's rows, each real straight to its place (`Model::near_point`), and
+//! multiplies no jumps. The Hermitian part is linear in the forms: its interpolant is the interpolated forms' own layout,
+//! number for number. The decay is quadratic in the jumps: its interpolant is not the product of the interpolated jumps --
+//! which the photons take (photon.rs) -- but differs from it by the two interpolations' errors, both third order in the
+//! spacing and both in the table's error (below).
 //!
 //! # Axes
 //! A coordinate's a-priori weight is how far it moves the cluster's lines over the atoms' reach, in pole half-widths: for a chart
@@ -44,10 +47,12 @@
 //! interpolant of the forms asked and, to first order, its derivatives along the axes, ∇v = Σ_f ∂v/∂s_f ∇s_f.
 //!
 //! # The table's error
-//! A table's forms are ṽ(s) = v(s) + e(s), the elimination's and the interpolation's error, C¹ in the coordinates. The generator
-//! they give is a generator in its own right: its force is the gradient of its own Hermitian part (the interpolant's own
-//! derivative) and its decay its own jumps' product. So the table stands for the model whose forms are ṽ, and its error on the
-//! outputs is that model's distance from the elimination's: the rates and the couplings of a state moved by the relative δ =
+//! A table's values are ṽ(s) = v(s) + e(s), the elimination's and the interpolation's error, C¹ in the coordinates. The
+//! generator they give has the force of its own Hermitian part (the interpolant's own derivative), and its decay is the
+//! interpolant of the jumps' product: the elimination's decay to the same order as every other value, and a Lindblad one with
+//! the interpolated jumps to that order -- at a node exactly. So the table stands for the model whose generator is the
+//! interpolated one, and its error on the outputs is that generator's distance from the elimination's (both reads below take
+//! the generator the steps take, the decay's interpolated sums in it): the rates and the couplings of a state moved by the relative δ =
 //! ‖(Ñ − N)ψ‖/‖Nψ‖ (N the near light's part of the generator at the atom, its Doppler partners at the atom's momentum) -- the
 //! populations by at most δ P_g, and T, which the near light sets through its rates, its friction and the depth of its shifts
 //! (all of them N's), by the relative δ --; and the atom's potential moved by ΔV = ⟨ψ|H̃_h − H_h|ψ⟩, a conservative change that
@@ -84,7 +89,7 @@
 //! asked, 4^D (1 + D) each on D axes (4^D for a value alone), its chain rule (3 D each) and the coordinates (each frequency's
 //! field and chart from its beams).
 
-use super::assemble::{sized, NearValues, Plan, Point};
+use super::assemble::{sized, Middle, NearValues, Plan, Site};
 use super::reach::Region;
 use super::{Lights, Lit, Model, Reach, Sample, UnitError};
 use crate::field::{range, Amplitude, Chart};
@@ -319,6 +324,8 @@ impl Model {
         point.fill(0.0);
         let (generator, forms) = point.split_at_mut(plan.generator_start.len());
         plan.lay(|at| values[at], Some(generator), forms);
+        let len = values.len();
+        plan.decay(|at| if at < len { values[at] + plan.bare(at) } else { plan.constants[at - len] }, &mut vec![], generator);
         r.work + self.far_work(lights, 0, &coherent) + work
     }
 
@@ -651,12 +658,13 @@ impl Model {
         NearValues { len, order, data, directions: Some(gradients), work }
     }
 
-    /// A middle's near terms' values at a point from a table (module documentation, # At a point; assemble.rs `Point`), and
-    /// their counted work: the table's interpolant of the generator's values and of the forms' with their slopes along the
-    /// axes, each straight to its place onto its constant part, in one pass over the stencil's rows; then the decay, the
-    /// product of the jumps there. Counted as the forms' interpolation is (the Hermitian ones to first order, the jumps to
-    /// order 0).
-    pub(crate) fn near_point(&self, table: &NearTable, point: &mut Point) -> f64 {
+    /// A middle's near terms' values at a point from a table (module documentation, # At a point; assemble.rs `Site`), and
+    /// their counted work: the table's interpolant of the generator's values -- the Hermitian forms and the decay's sums of
+    /// the jumps' products, as the nodes hold them -- and of the forms' with their slopes along the axes, each straight to its
+    /// place onto its constant part, in one pass over the stencil's rows. Counted as the forms' interpolation is (the
+    /// Hermitian ones to first order, the jumps to order 0): the count is the definition's, not the layout's (assemble.rs,
+    /// # Work).
+    pub(crate) fn near_point(&self, table: &NearTable, point: &mut Site) -> f64 {
         let (d, plan) = (table.axes(), &table.layout.plan);
         sized(&mut point.coordinates, d);
         sized(&mut point.directions, d);
@@ -667,13 +675,7 @@ impl Model {
         sized(&mut point.slopes, d * forms);
         table.table.eval_onto(&point.coordinates, first, &plan.generator_start, &mut point.generator, None);
         table.table.eval_onto(&point.coordinates, first + generator, &plan.form_start, &mut point.forms, Some(&mut point.slopes));
-        let (jumping, len) = (plan.near.jumping(), plan.near.len());
-        sized(&mut point.jumps, 2 * jumping.len());
-        table.table.eval_range(&point.coordinates, 2 * jumping.start, &mut point.jumps, None);
-        let Point { jumps, sums, generator, .. } = point;
-        let jump = |at: usize| if at < len { C64::new(jumps[2 * (at - jumping.start)], jumps[2 * (at - jumping.start) + 1]) + plan.bare(at) } else { plan.constants[at - len] };
-        plan.decay(jump, sums, generator);
-        for (entries, order) in [(plan.near.hermitian(), 1), (jumping, 0)] {
+        for (entries, order) in [(plan.near.hermitian(), 1), (plan.near.jumping(), 0)] {
             work += (4usize.pow(d as u32) * (1 + if order >= 1 { d } else { 0 }) * 2 * entries.len()) as f64 / crate::decide::COMPLEX;
         }
         work
@@ -690,7 +692,7 @@ impl Model {
             .enumerate()
             .map(|(index, table)| {
                 let (d, plan) = (table.axes(), &table.layout.plan);
-                let (len, w) = (plan.near.len(), table.table.width());
+                let (w, generator) = (table.table.width(), 2 * plan.near.len()..2 * plan.near.len() + plan.generator_start.len());
                 let mut axes = vec![vec![zero; samples.len()]; d];
                 let mut whole = vec![zero; samples.len()];
                 for (k, sample) in samples.iter().enumerate() {
@@ -700,43 +702,38 @@ impl Model {
                     let amplitudes = self.light.amplitudes(sample.at.r);
                     let mut x = vec![0.0; d];
                     self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, &amplitudes, &mut x, &mut vec![[0.0; 3]; d]);
-                    let tabulated = self.near_tabulated(table, &amplitudes, &[(0..len, 1)]);
+                    // The generator the steps take from the table, on the sample's state; and with no near light.
+                    let tabulated = self.middle(plan, sample.at.r, sample.at.t, Some(table));
+                    let (far, ours) = (self.action(sample, &self.middle_of(plan, sample.at.t, &amplitudes, None)), self.action(sample, &tabulated));
                     for (f, read) in axes.iter_mut().enumerate() {
-                        // The axis' read of the reals and of their slopes, on the table's forms.
+                        // The axis' read of the generator's values, the decay's with the Hermitian ones.
                         let (mut dv, mut ds) = (vec![0.0; w], vec![0.0; d * w]);
                         table.table.axis_error(f, &x, &mut dv, &mut ds);
-                        let mut moved = tabulated.clone();
-                        for e in 0..len {
-                            moved.data[e] += C64::new(dv[2 * e], dv[2 * e + 1]);
-                            for g in 0..d {
-                                moved.data[(1 + g) * len + e] += C64::new(ds[g * w + 2 * e], ds[g * w + 2 * e + 1]);
-                            }
-                        }
-                        read[k] = self.form_error(sample, plan, &tabulated, &moved, &amplitudes, tables.thermal);
+                        read[k] = self.form_error(sample, &far, &ours, &self.action(sample, &tabulated.moved(&dv[generator.clone()])), tables.thermal);
                     }
-                    let exact = self.near_exact(plan, &amplitudes, 1, &self.coherent_dressing());
-                    whole[k] = self.form_error(sample, plan, &exact, &tabulated, &amplitudes, tables.thermal);
+                    let exact = self.middle_of(plan, sample.at.t, &amplitudes, Some(&self.near_exact(plan, &amplitudes, 1, &self.coherent_dressing())));
+                    whole[k] = self.form_error(sample, &far, &self.action(sample, &exact), &ours, tables.thermal);
                 }
                 TableRead { table: index, axes, whole }
             })
             .collect()
     }
 
-    /// The error on the outputs of a sample from an error of its near forms (module documentation, # The table's error), the
-    /// forms `other` against `reference`: with N the near light's part of the generator at the sample's point and momentum --
-    /// every term a near form enters, summed over its parts with their phases there --, δ = ‖(N′ − N)ψ‖/‖Nψ‖, and ΔV = ⟨ψ|H′_h −
-    /// H_h|ψ⟩/‖ψ‖²; `thermal` is k_BT_r.
-    fn form_error(&self, sample: &Sample, plan: &Arc<Plan>, reference: &NearValues, other: &NearValues, amplitudes: &[Amplitude], thermal: f64) -> UnitError {
+    /// A middle's generator at a sample's momentum, at rest on the middle, on the sample's state.
+    pub(crate) fn action(&self, sample: &Sample, middle: &Middle) -> Vec<C64> {
         let n = self.clusters[sample.cluster].states.len();
-        let action = |near: Option<&NearValues>| -> Vec<C64> {
-            let middle = self.middle_of(plan, sample.at.t, amplitudes, near);
-            let mut total = Mat::zeros(n, n);
-            crate::step::Middle::generator(&middle, &crate::step::Middle::path(&middle, sample.at.kappa, [0.0; 3]), 0.0, &mut total);
-            total.apply(&sample.psi)
-        };
-        let (far, first, second) = (action(None), action(Some(reference)), action(Some(other)));
-        let moved: Vec<C64> = second.iter().zip(&first).map(|(a, b)| *a - *b).collect();
-        let size = first.iter().zip(&far).map(|(a, b)| (*a - *b).norm_sqr()).sum::<f64>().sqrt();
+        let mut total = Mat::zeros(n, n);
+        crate::step::Middle::generator(middle, &crate::step::Middle::path(middle, sample.at.kappa, [0.0; 3]), 0.0, &mut total);
+        total.apply(&sample.psi)
+    }
+
+    /// The error on the outputs of a sample from an error of its generator's near part (module documentation, # The table's
+    /// error), the generator of `second` against that of `first` -- each on the sample's state (`action`), `far` the one with
+    /// no near light: with N the near light's part of the generator at the sample's point and momentum, δ = ‖(N′ − N)ψ‖/‖Nψ‖,
+    /// and ΔV = ⟨ψ|H′_h − H_h|ψ⟩/‖ψ‖²; `thermal` is k_BT_r.
+    pub(crate) fn form_error(&self, sample: &Sample, far: &[C64], first: &[C64], second: &[C64], thermal: f64) -> UnitError {
+        let moved: Vec<C64> = second.iter().zip(first).map(|(a, b)| *a - *b).collect();
+        let size = first.iter().zip(far).map(|(a, b)| (*a - *b).norm_sqr()).sum::<f64>().sqrt();
         let norm = crate::linalg::norm_sqr(&sample.psi);
         // An error that is no number is unread: +∞ (module documentation, # Refinement).
         let read = |x: f64| if x.is_nan() { f64::INFINITY } else { x };

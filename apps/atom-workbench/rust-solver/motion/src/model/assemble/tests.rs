@@ -442,11 +442,16 @@ fn the_tones_are_the_held_force_s_even_part() {
 }
 
 /// A table's middle (tabulate.rs `Model::near_point`: the table's interpolant of a point's values, each straight to its
-/// place) is the middle of the table's forms at the point (`Model::near_tabulated`, laid by `Point::formed`): the same reals
-/// under the same weights in the same order, so the generator and the force's form are the same numbers, bit for bit, and
-/// so is the counted work. On reference scenes' models with drives folded at the atom, their tables made over the reach.
+/// place) against the middle of the table's forms at the point (`Model::near_tabulated`, laid by `Site::formed`). Their
+/// Hermitian values are the same reals under the same weights in the same order: the force's form is the same number, bit
+/// for bit, and so is the counted work. Their decays are the interpolant of the jumps' product and the product of the
+/// interpolated jumps: the generators differ by an anti-Hermitian part alone (the Hermitian part of their difference
+/// within the rounding of the entries' sums), and that mismatch is an interpolation error -- of the third order in the
+/// spacing: with every axis halved (`Model::halved`) its sum over a scene's points and clusters falls by more than 2²,
+/// and on each cluster it lies within the sum of the two middles' own errors against the exact elimination, the table's
+/// read (`Model::form_error`). On reference scenes' models with drives folded at the atom, their tables made over the reach.
 #[test]
-fn a_table_s_middle_is_the_middle_of_its_forms() {
+fn a_table_s_middle_is_the_middle_of_its_forms_but_for_the_decay_s_interpolation() {
     let (mut tables_met, mut axes) = (0, 0);
     for (index, name) in ["R3_DOPPLER", "R4_TW1", "R5_PUMP"].into_iter().enumerate() {
         let (request, model) = (scene(name), model(name, &others, &|_| false));
@@ -457,28 +462,143 @@ fn a_table_s_middle_is_the_middle_of_its_forms() {
         let reach = model.reach(&trap, &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
         let tables = model.tabulate(&reach, 1 << 12);
         let lights = model.running();
+        let mut all = (0.0, 0.0);
         for cluster in 0..model.clusters.len() {
             let Some(table) = tables.of(cluster, &lights) else { continue };
             tables_met += 1;
             axes += table.axes();
             let (plan, n) = (model.plan(cluster, &lights), model.clusters[cluster].states.len());
-            for _ in 0..4 {
+            let finer = (0..table.axes()).try_fold(table.clone(), |t, f| model.halved(&t, f, usize::MAX).map(|finer| crate::model::tabulate::NearTable { layout: t.layout.clone(), table: finer }));
+            let sections = [(plan.near.hermitian(), 1), (plan.near.jumping(), 0)];
+            let (mut coarse, mut fine, mut read) = (0.0, 0.0, 0.0);
+            for _ in 0..16 {
                 let (r, t, kappa, velocity, times) = drawn(&model, &mut stream);
                 let rho = hermitian(n, &mut stream);
                 let amplitudes = model.light.amplitudes(r);
-                let near = model.near_tabulated(table, &amplitudes, &[(plan.near.hermitian(), 1), (plan.near.jumping(), 0)]);
+                let near = model.near_tabulated(table, &amplitudes, &sections);
                 let (ours, theirs) = (model.middle(&plan, r, t, Some(table)), model.middle_of(&plan, t, &amplitudes, Some(&near)));
                 assert_eq!(ours.work, theirs.work, "{name}, cluster {cluster}: the counted work");
                 let (path, other) = (ours.path(kappa, velocity), theirs.path(kappa, velocity));
+                let sizes = written_out(&model, cluster, r, t, kappa, velocity, 0.0, true);
+                let links = chain(&model, &plan, sizes.terms);
                 for s in times {
                     let (mut h, mut g) = (Mat::zeros(n, n), Mat::zeros(n, n));
                     ours.generator(&path, s, &mut h);
                     theirs.generator(&other, s, &mut g);
-                    assert!(h == g, "{name}, cluster {cluster}, s {s}: the generators differ");
+                    for i in 0..n * n {
+                        let (j, size) = ((i % n) * n + i / n, sizes.hermitian[i][0].re + sizes.decay[i].re);
+                        let apart = ((h.data[i] - g.data[i]) + (h.data[j] - g.data[j]).conj()).abs();
+                        assert!(apart <= rounding(links) * size, "{name}, cluster {cluster}, s {s}, entry ({}, {}): the Hermitian parts are {apart:e} apart of {size:e}", i / n, i % n);
+                    }
                     assert_eq!(ours.force(&path, s, &rho), theirs.force(&other, s, &rho), "{name}, cluster {cluster}, s {s}: the force's forms");
                 }
+                // The decay's mismatch on a state, as the table's reads take an error of the generator; and the same on the
+                // finer table.
+                let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
+                let sample = crate::model::Sample { cluster, at: crate::model::Point { r, kappa, t }, psi };
+                let far = model.action(&sample, &model.middle_of(&plan, t, &amplitudes, None));
+                let exact = model.action(&sample, &model.middle_of(&plan, t, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 1, &model.coherent_dressing()))));
+                let (a, b) = (model.action(&sample, &ours), model.action(&sample, &theirs));
+                let error = |first: &[C64], second: &[C64]| model.form_error(&sample, &far, first, second, tables.thermal).parameter;
+                coarse += error(&b, &a);
+                read += error(&exact, &a) + error(&exact, &b);
+                if let Some(finer) = &finer {
+                    let forms = model.near_tabulated(finer, &amplitudes, &sections);
+                    let (ours, theirs) = (model.middle(&plan, r, t, Some(finer)), model.middle_of(&plan, t, &amplitudes, Some(&forms)));
+                    fine += error(&model.action(&sample, &theirs), &model.action(&sample, &ours));
+                }
+            }
+            eprintln!("{name}, cluster {cluster} ({} axes, {} nodes): the decay's mismatch {:.2e} of the near generator, {:.2e} on the halved table; the two middles' errors {:.2e}", table.axes(), crate::table::Table::nodes(table.table.axes()), coarse / 16.0, fine / 16.0, read / 16.0);
+            assert!(coarse <= read, "{name}, cluster {cluster}: the mismatch {coarse:e} beyond the middles' own errors {read:e}");
+            if finer.is_some() {
+                (all.0, all.1) = (all.0 + coarse, all.1 + fine);
             }
         }
+        assert!(4.0 * all.1 <= all.0, "{name}: the mismatch {:e} falls to {:e} on the halved tables", all.0, all.1);
     }
     assert!(tables_met > 0 && axes > 0, "tables met ({tables_met}) with axes ({axes})");
+}
+
+/// The decay's mismatch on a scene's own model (run by name, alone: `SCENE=<a reference scene's name or a native request's
+/// path> … the_decay_s_mismatch_on_a_scene -- --ignored --nocapture`): the scene's model as the solve closes it (every unit
+/// whose fold does not exist over the reach kept, until none fails) with its near tables, and per cluster with a table, at
+/// 256 atoms of the scene's temperature in the trap's harmonic approximation, each a random state of the cluster: the
+/// generator the steps take (the decay's interpolated sums) against the one of the table's interpolated jumps' own product,
+/// as the table's reads take an error of the generator (`Model::form_error`: δ of the near generator, its error on what is
+/// shown and on T) and as the change of the state's decay rate −2 Im⟨ψ|Ĥ|ψ⟩/⟨ψ|ψ⟩ relative to it, beside the table's whole
+/// read at the same atoms.
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn the_decay_s_mismatch_on_a_scene() {
+    let name = std::env::var("SCENE").expect("SCENE: a reference scene's name or a request file's path");
+    let request = if name.ends_with(".json") { Request::from_native(&serde_json::from_str(&std::fs::read_to_string(&name).unwrap()).unwrap()).unwrap() } else { scene(&name) };
+    let light = Light::new(&request);
+    let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let p: [f64; GROUND] = std::array::from_fn(|b| if b == state { 1.0 } else { 0.0 });
+    let mut kept: Vec<Unit> = vec![];
+    let (model, trap, reach) = loop {
+        let model = Model::new(&request, &light, &kept).unwrap();
+        let trap = model.trap(&p, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
+        let units = model.units();
+        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
+        if failing.is_empty() {
+            break (model, trap, reach);
+        }
+        kept.extend(failing);
+    };
+    let tables = model.tabulate(&reach, 1 << 20);
+    let (lights, kt) = (model.running(), crate::units::KT_PER_UK * request.temperature_uk);
+    let mut stream = Stream::new(3, Purpose::Initial, 0, 0);
+    for cluster in 0..model.clusters.len() {
+        let Some(table) = tables.of(cluster, &lights) else { continue };
+        let (plan, n) = (model.plan(cluster, &lights), model.clusters[cluster].states.len());
+        let sections = [(plan.near.hermitian(), 1), (plan.near.jumping(), 0)];
+        // (the mean, the largest) of the mismatch's δ, of its error on what is shown and on T, and of the whole read's.
+        let mut reads = [[0.0_f64; 2]; 8];
+        let atoms = 256;
+        for _ in 0..atoms {
+            let along: [f64; 3] = std::array::from_fn(|i| stream.normal() * (kt * model.hbar_over_mass).sqrt() / trap.frequencies[i]);
+            let r: [f64; 3] = std::array::from_fn(|a| trap.centre[a] + (0..3).map(|i| trap.axes[i][a] * along[i]).sum::<f64>());
+            let kappa: [f64; 3] = std::array::from_fn(|_| stream.normal() * (kt / model.hbar_over_mass).sqrt());
+            let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.normal(), stream.normal())).collect();
+            let sample = crate::model::Sample { cluster, at: crate::model::Point { r, kappa, t: 0.0 }, psi };
+            let amplitudes = model.light.amplitudes(r);
+            let action = |middle: &Middle| model.action(&sample, middle);
+            let far = action(&model.middle_of(&plan, 0.0, &amplitudes, None));
+            let ours = action(&model.middle(&plan, r, 0.0, Some(table)));
+            let theirs = action(&model.middle_of(&plan, 0.0, &amplitudes, Some(&model.near_tabulated(table, &amplitudes, &sections))));
+            let exact = action(&model.middle_of(&plan, 0.0, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 1, &model.coherent_dressing()))));
+            let (mismatch, whole) = (model.form_error(&sample, &far, &theirs, &ours, tables.thermal), model.form_error(&sample, &far, &exact, &ours, tables.thermal));
+            let rate = |action: &[C64]| -2.0 * crate::linalg::inner(&sample.psi, action).im;
+            let rates = [(rate(&ours) - rate(&theirs)).abs() / rate(&theirs), (rate(&ours) - rate(&exact)).abs() / rate(&exact)];
+            for (read, x) in reads.iter_mut().zip([mismatch.parameter, mismatch.population, mismatch.temperature, whole.parameter, whole.population, whole.temperature, rates[0], rates[1]]) {
+                *read = [read[0] + x / atoms as f64, read[1].max(x)];
+            }
+        }
+        eprintln!(
+            "{name} cluster {cluster} ({n} states; {} axes, {} nodes of {} reals): the decay's mismatch δ {:.2e} (largest {:.2e}), on what is shown {:.2e} ({:.2e}), on T {:.2e} ({:.2e}) | the table's whole read δ {:.2e} ({:.2e}), shown {:.2e} ({:.2e}), T {:.2e} ({:.2e}) | the decay rate moved by {:.2e} ({:.2e}) of itself by the mismatch, {:.2e} ({:.2e}) from the exact one",
+            table.axes(),
+            crate::table::Table::nodes(table.table.axes()),
+            table.table.width(),
+            reads[0][0],
+            reads[0][1],
+            reads[1][0],
+            reads[1][1],
+            reads[2][0],
+            reads[2][1],
+            reads[3][0],
+            reads[3][1],
+            reads[4][0],
+            reads[4][1],
+            reads[5][0],
+            reads[5][1],
+            reads[6][0],
+            reads[6][1],
+            reads[7][0],
+            reads[7][1]
+        );
+    }
+    let (shown, temperature) = crate::model::tabulate::shares();
+    eprintln!("{name}: the tables' shares {shown:.2e} on what is shown, {temperature:.2e} on T");
 }

@@ -33,7 +33,7 @@
 //! A beam's absorption at w_l = (ħ/m)(k_l·κ + k_l²/2) takes T_l − w_l T2_l: with a carrier's field e_k, its Doppler-weighted
 //! field Σ_l w_l a_l γ_lk multiplies the partner form. A term's value at a beam pair is therefore v₀ + w_r v_r + w_l v_l +
 //! w_l w_r v_lr over the factors that are a near carrier's (`PLAIN`, `RIGHT`, `LEFT`, `BOTH`), the jumps' product exactly: the
-//! generator is a Lindblad one at every momentum.
+//! generator is a Lindblad one at every momentum (from a table: to the table's error, # Dense terms).
 //!
 //! # At a point, and along a path through it
 //! `Middle`: the plan's beams' amplitudes with their gradients, the near forms there, and from them every term's values --
@@ -57,11 +57,12 @@
 //! Doppler-weighted as the flag says, times the tone's phase -- times that term's values on the cluster's places x n + y. Each
 //! is a dense term (`Term`): its values the real parts and then the imaginary parts on the span of places that hold any, whole
 //! vectors of `LANES` reals, so that a node is sums over contiguous reals and nothing else (linalg.rs `axpy`, `dot`). A term
-//! of constants keeps its values in the plan; one that a near form or the decay enters has them at the point (`Point`): the
+//! of constants keeps its values in the plan; one that a near form or the decay enters has them at the point (`Site`): the
 //! generator's values, the Hermitian one and the decay's together, and for the forms with ρ the Hermitian values alone with
 //! their slopes. A point's values are their constant part, what the near forms lay there (`Plan::lay`, linear in the forms)
-//! and the decay's sums of the jumps' products (`Plan::decay`). A table holds the linear part at its nodes in this same
-//! layout (tabulate.rs, # A node's reals), so a middle interpolates each number straight to its place onto its constant.
+//! and the decay's sums of the jumps' products (`Plan::decay`). A table holds both at its nodes in this same layout
+//! (tabulate.rs, # A node's reals), so a middle interpolates each number straight to its place onto its constant and
+//! multiplies no jumps: its decay is the jumps' product to the table's error, and exactly so at the table's nodes.
 //!
 //! A middle's numbers and a path's are a thread's spares (`Held`): a step takes the vectors the step before left, and the
 //! model's part of a step asks the heap for nothing.
@@ -1027,13 +1028,13 @@ pub(crate) trait Spare: Default + 'static {
 }
 
 thread_local! {
-    static POINTS: RefCell<Vec<Box<Point>>> = const { RefCell::new(Vec::new()) };
+    static SITES: RefCell<Vec<Box<Site>>> = const { RefCell::new(Vec::new()) };
     static RATES: RefCell<Vec<Box<Rates>>> = const { RefCell::new(Vec::new()) };
 }
 
-impl Spare for Point {
-    fn kept() -> &'static std::thread::LocalKey<RefCell<Vec<Box<Point>>>> {
-        &POINTS
+impl Spare for Site {
+    fn kept() -> &'static std::thread::LocalKey<RefCell<Vec<Box<Site>>>> {
+        &SITES
     }
 }
 
@@ -1085,7 +1086,7 @@ pub(crate) fn sized<T: Clone + Default>(v: &mut Vec<T>, len: usize) {
 
 /// A middle's numbers (`Middle`; a thread's spare, `Held`).
 #[derive(Default)]
-pub(crate) struct Point {
+pub(crate) struct Site {
     /// Every request beam's amplitude at the point.
     pub(crate) beams: Vec<Amplitude>,
     /// Per beam of the plan: a_l and ∇a_l.
@@ -1096,15 +1097,14 @@ pub(crate) struct Point {
     pub(crate) forms: Vec<f64>,
     pub(crate) slopes: Vec<f64>,
     pub(crate) directions: Vec<[f64; 3]>,
-    /// A table's coordinates at the point, the jumps there and their products' sums (tabulate.rs `Model::near_point`).
+    /// A table's coordinates at the point (tabulate.rs `Model::near_point`); the jumps' products' sums (`formed`).
     pub(crate) coordinates: Vec<f64>,
-    pub(crate) jumps: Vec<f64>,
-    pub(crate) sums: Vec<C64>,
+    sums: Vec<C64>,
     /// Its nodes' scratch, one for all its paths: a node's call fills what it reads.
     scratch: RefCell<Scratch>,
 }
 
-impl Point {
+impl Site {
     /// The plan's beams' amplitudes with their gradients, from every beam's (`beams`).
     fn select(&mut self, plan: &Plan) {
         self.amplitudes.clear();
@@ -1158,7 +1158,7 @@ pub struct Middle<'a> {
     plan: Arc<Plan>,
     t: f64,
     /// Its numbers: the beams' amplitudes and the near terms' values at the point.
-    point: Held<Point>,
+    point: Held<Site>,
     /// The complex multiply-adds that made it.
     pub(crate) work: f64,
 }
@@ -1329,7 +1329,7 @@ impl Model {
 
     /// A cluster's generator at a position and time under a plan (`Middle`), the near forms from a table where one is given.
     pub(crate) fn middle(&self, plan: &Arc<Plan>, r: [f64; 3], t: f64, table: Option<&NearTable>) -> Middle<'_> {
-        let mut point = Held::<Point>::take();
+        let mut point = Held::<Site>::take();
         self.light.amplitudes_into(r, &mut point.beams);
         point.select(plan);
         let work = match table {
@@ -1347,10 +1347,10 @@ impl Model {
         Middle { model: self, plan: plan.clone(), t, point, work }
     }
 
-    /// The same from every beam's amplitude and the near forms there (the Hermitian ones to first order; `Point::formed`).
+    /// The same from every beam's amplitude and the near forms there (the Hermitian ones to first order; `Site::formed`).
     /// Without near forms (None): the terms that hold none.
     pub(crate) fn middle_of(&self, plan: &Arc<Plan>, t: f64, amplitudes: &[Amplitude], near: Option<&NearValues>) -> Middle<'_> {
-        let mut point = Held::<Point>::take();
+        let mut point = Held::<Site>::take();
         point.beams.clear();
         point.beams.extend_from_slice(amplitudes);
         point.select(plan);
@@ -1381,7 +1381,7 @@ pub(crate) struct Rates {
     gauge: Vec<f64>,
 }
 
-/// A node's scratch (`Point::scratch`): the beams' amplitudes turned along the path, the plan's field components there (each
+/// A node's scratch (`Site::scratch`): the beams' amplitudes turned along the path, the plan's field components there (each
 /// with its gradient, plain and weighted by its beams' Doppler shifts), the tones' phases, the Doppler frames' turns; a ρ laid
 /// out as the entries are and a generator's sum -- each the real parts on the cluster's places (`Plan::padded`) and then the
 /// imaginary parts --; and per tone its three sums.
@@ -1485,6 +1485,20 @@ fn side(fields: &[[C64; 4]], scalar: Option<usize>) -> [C64; 4] {
 }
 
 impl Middle<'_> {
+    /// This middle with its generator's near values moved by `by` (a table's error read of them, tabulate.rs).
+    pub(crate) fn moved(&self, by: &[f64]) -> Middle<'_> {
+        let (mut point, from) = (Held::<Site>::take(), &*self.point);
+        assert_eq!(by.len(), from.generator.len(), "an error read of the generator's near values");
+        point.beams.clone_from(&from.beams);
+        point.amplitudes.clone_from(&from.amplitudes);
+        point.generator.clear();
+        point.generator.extend(from.generator.iter().zip(by).map(|(value, error)| value + error));
+        point.forms.clone_from(&from.forms);
+        point.slopes.clone_from(&from.slopes);
+        point.directions.clone_from(&from.directions);
+        Middle { model: self.model, plan: self.plan.clone(), t: self.t, point, work: self.work }
+    }
+
     /// A node's field components into its scratch, their first `parts` parts (the value; with the gradient, four): at the
     /// time s from the middle along a path (`on`) each beam's amplitude and gradient at the middle times its plane wave's
     /// phase over the path, e^{i k_l·v s}, with the tones' phases at that time and the Doppler frames' turns; at the fixed
