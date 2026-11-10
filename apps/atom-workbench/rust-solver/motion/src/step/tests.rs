@@ -6,14 +6,16 @@
 //! H = [[V, Σ c_l*], [Σ c_l, V − Δ − iΓ/2]], G = ∇H_h. Its Doppler frame K_g = 0, K_e = k₀ (the first beam's): the first
 //! beam's coupling is static on the path, every other beam's a beat of wave vector k_l − k₀ (and its adjoint). The photon:
 //! one class, u_a = √(Γ/3) ψ_e per lab axis (isotropic), landing in g; the jumps' kicks are the emission's −k n alone, of
-//! a chosen |k| (zero where a test reads the Ehrenfest force).
+//! a chosen |k| (zero where a test reads the Ehrenfest force). The ground state alone may scatter a folded light
+//! (`Atom::folded`): one class of the jump amplitude f(r) = Σ_l c_l e^{ik_l·r} on it, u_a = f ψ/√3 per lab axis with its
+//! gradient, its decay |f(r)|² -- the absorbed light's momentum by the engine's own rule (`Photon::moments`).
 //!
 //! The tests' models give their generator at a point by its parts (`Parts`): matrices M_j with G_j, each a plane wave
 //! along a path, Ĥ(s) = Σ_j M_j e^{iω_j s} + diag(K_s·v), ω_j = Ω_j + q_j·v.
 
 use crate::adapt::{self, Reader};
 use crate::linalg::{dot3, C64, Mat};
-use crate::model::{Beat, Cluster, Photon, Point, Quadratic, Recoil, STATES};
+use crate::model::{Beat, Cluster, Photon, Point, Quadratic, Scattering, STATES};
 use crate::step::{self, Dynamics, Middle, Trajectory};
 
 /// One part of a test model's generator at a point: its beat Ω (rad/µs), its wave vector q less the Doppler frames'
@@ -135,6 +137,8 @@ struct Atom {
     emission: f64,
     /// An unbound atom beyond this distance from the origin is lost.
     region: f64,
+    /// The folded light the ground state alone scatters: per plane wave its amplitude c_l (1/√µs) and wave vector.
+    folded: Vec<(C64, [f64; 3])>,
     cluster: Cluster,
 }
 
@@ -148,7 +152,27 @@ impl Atom {
             waves: if explicit { vec![[0.0; 3], beams[0].k] } else { vec![[0.0; 3]] },
             waves_exact: if explicit { vec![Beat(vec![]), Beat(vec![1])] } else { vec![Beat(vec![])] },
         };
-        Atom { hm, trap, beams, detuning, gamma, emission: 0.0, region: f64::INFINITY, cluster }
+        Atom { hm, trap, beams, detuning, gamma, emission: 0.0, region: f64::INFINITY, folded: vec![], cluster }
+    }
+    /// The folded light's jump amplitude f = Σ_l c_l e^{ik_l·r} at a point and its gradient.
+    fn field(&self, r: [f64; 3]) -> (C64, [C64; 3]) {
+        let (mut f, mut df) = (C64::ZERO, [C64::ZERO; 3]);
+        for (c, k) in &self.folded {
+            let term = *c * C64::cis(dot3(*k, r));
+            f += term;
+            for a in 0..3 {
+                df[a] += term * C64::new(0.0, k[a]);
+            }
+        }
+        (f, df)
+    }
+    /// The folded light's one class of photons of the ground state's amplitude, with its gradients.
+    fn made(&self, r: [f64; 3], psi: &[C64]) -> Vec<Photon> {
+        let ((f, df), third) = (self.field(r), (1.0_f64 / 3.0).sqrt());
+        let u = vec![f * psi[0] * third];
+        let gradients = std::array::from_fn(|i| std::array::from_fn(|_| vec![df[i] * psi[0] * third]));
+        let absorbed = self.folded.iter().map(|(_, k)| crate::linalg::norm3(*k)).fold(0.0, f64::max);
+        vec![Photon { class: 0, landing: 0, wave_number: self.emission, absorbed, amplitudes: [u.clone(), u.clone(), u], gradients, explicit: [[0.0; 3]; 3] }]
     }
     fn n(&self) -> usize {
         self.cluster.states.len()
@@ -189,7 +213,7 @@ impl Dynamics for Atom {
         }
         let mut parts = Vec::new();
         if n == 1 {
-            m[(0, 0)] += C64::new(0.0, -0.5 * self.gamma);
+            m[(0, 0)] += C64::new(0.0, -0.5 * (self.gamma + self.field(r).0.norm_sqr()));
         } else {
             m[(1, 1)] += C64::new(-self.detuning, -0.5 * self.gamma);
             for l in 0..self.beams.len() {
@@ -220,7 +244,10 @@ impl Dynamics for Atom {
         parts.insert(0, Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g });
         Parts { waves: self.cluster.waves.clone(), parts }
     }
-    fn photons(&self, _: usize, _: &Point, psi: &[C64]) -> Vec<Photon> {
+    fn photons(&self, _: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
+        if !self.folded.is_empty() {
+            return self.made(at.r, psi);
+        }
         let n = self.n();
         let source = psi[n - 1] * (self.gamma / 3.0).sqrt();
         let mut u = vec![C64::ZERO; n];
@@ -230,13 +257,17 @@ impl Dynamics for Atom {
             class: 0,
             landing: 0,
             wave_number: self.emission,
+            absorbed: 0.0,
             amplitudes: [u.clone(), u.clone(), u],
             gradients: std::array::from_fn(|_| [none(), none(), none()]),
-            explicit: Vec::new(),
+            explicit: [[0.0; 3]; 3],
         }]
     }
-    fn recoil(&self, _: &Photon, _: &[f64; 3]) -> Recoil {
-        Recoil { mean: [0.0; 3], second: [[0.0; 3]; 3] }
+    fn kick(&self, _: usize, at: &Point, psi: &[C64], _: &Photon) -> [f64; 3] {
+        if self.folded.is_empty() { [0.0; 3] } else { self.made(at.r, psi)[0].kick() }
+    }
+    fn scattering(&self, _: usize, at: &Point, psi: &[C64], _: &[f64]) -> Scattering {
+        if self.folded.is_empty() { Scattering::NONE } else { Scattering::of(&self.made(at.r, psi), psi.iter().map(|z| z.norm_sqr()).sum()) }
     }
     fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
         0.5 * self.hm * at.kappa.iter().map(|k| k * k).sum::<f64>() + self.trap.expansion(at.r).value
@@ -764,52 +795,38 @@ fn the_doubling_estimate_falls_as_tau_cubed() {
 
 /// The Stumpff functions are their series Σ_j (−x)^j/(k + 2j)! on both signs, near zero and far from it, to round-off
 /// of their scale.
-/// The kick's fluctuation (`fluctuation`) has the covariance M − b bᵀ of the recoil's moments (`Photon::recoil`) and
-/// none in a null direction of it. A photon absorbed from a plane wave of wave vector k has ∇f = ik f: M = k kᵀ = b bᵀ,
-/// as computed to the rounding of the two sums, and the kick is exactly zero (the root of that rounding is ~1e-8 of the
-/// recoil). An envelope's gradient α beside it, ∇f = (ik + α)f, makes C = α αᵀ: one column, the kick along α and of its
-/// length whatever the signs -- also where α's first component is its least by far, which a factor taken in the axes'
-/// order turns into a spurious second column --, to the entries' rounding γ_N S over the pivot's root. An explicit
-/// source's ∇ln σ adds its own directions (SPEC §1.6). Over the signs E[ξ ξᵀ] = C, to the same rounding.
+/// A diffusion's factor (`factor`) has its rate, Λ Λᵀ = 2D to the entries' rounding, and no column in a null direction
+/// of it. A class absorbing from a plane wave of wave vector k has ∇u = ik u: its jumps carry k and leave nothing -- the
+/// force and 2D are the rounding of their sums, and the factor is exactly zero (the root of that rounding would be
+/// ~1e-8 of the recoil a step). An envelope's gradient α beside it, ∇u = (ik + α)u, leaves 2D = W α αᵀ: one column, along
+/// α -- also where α's first component is its least by far, which a factor taken in the axes' order turns into a spurious
+/// second column.
 #[test]
-fn the_kick_s_fluctuation_has_its_covariance_and_none_in_a_null_direction() {
+fn a_diffusion_s_factor_has_its_rate_and_no_column_in_a_null_direction() {
     let mut stream = crate::random::Stream::new(53, crate::random::Purpose::Initial, 0, 0);
     let (k, n) = ([3.1, -4.2, 5.9], 5);
-    let epsilon = [0.6, 0.0, 0.8];
     let amplitudes: [Vec<C64>; 3] = std::array::from_fn(|_| (0..n).map(|_| C64::new(stream.normal(), stream.normal())).collect());
-    let source = ([vec![C64::new(0.3, 0.1); n], vec![C64::ZERO; n], vec![C64::new(-0.2, 0.4); n]], [C64::new(0.05, 7.0), C64::new(-0.3, 1.0), C64::new(0.0, -2.0)]);
-    for (alpha, explicit) in [([0.0; 3], vec![]), ([0.21, -0.13, 0.08], vec![]), ([1e-5, 0.2, 0.0], vec![]), ([0.21, -0.13, 0.08], vec![source])] {
+    for alpha in [[0.0; 3], [0.21, -0.13, 0.08], [1e-5, 0.2, 0.0]] {
         let gradients: [[Vec<C64>; 3]; 3] = std::array::from_fn(|i| std::array::from_fn(|a| amplitudes[a].iter().map(|u| *u * C64::new(alpha[i], k[i])).collect()));
-        let links = 6 * n + explicit.len() + 9;
-        let photon = Photon { class: 0, landing: 0, wave_number: 0.0, amplitudes: amplitudes.clone(), gradients, explicit };
-        let recoil = photon.recoil(&epsilon);
-        let exact: [[f64; 3]; 3] = std::array::from_fn(|i| std::array::from_fn(|j| recoil.second[i][j] - recoil.mean[i] * recoil.mean[j]));
-        let rounded = crate::units::rounding(links) * (0..3).map(|j| recoil.second[j][j] + recoil.mean[j] * recoil.mean[j]).fold(0.0, f64::max);
-        let length = alpha.iter().map(|a| a * a).sum::<f64>().sqrt();
-        let mut covariance = [[0.0; 3]; 3];
-        for pattern in 0..8 {
-            let signs: [f64; 3] = std::array::from_fn(|j| if pattern >> j & 1 == 0 { 1.0 } else { -1.0 });
-            let xi = super::fluctuation(&recoil.second, &recoil.mean, links, signs);
-            if length == 0.0 {
-                assert_eq!(xi, [0.0; 3], "a plane wave's absorption fluctuates (the moments' rounding {:e})", exact[0][0]);
-            } else if photon.explicit.is_empty() {
-                // One column: ±α, each component to the entries' rounding over the pivot's root (at least α's largest
-                // component, over √3 of its length).
-                let side = if dot3(xi, alpha) > 0.0 { 1.0 } else { -1.0 };
-                for i in 0..3 {
-                    assert!((xi[i] - side * alpha[i]).abs() <= 2.0 * 3.0_f64.sqrt() * rounded / length, "α {alpha:?}, signs {signs:?}: the kick {xi:?}");
-                }
-            }
-            for i in 0..3 {
-                for j in 0..3 {
-                    covariance[i][j] += xi[i] * xi[j] / 8.0;
-                }
-            }
+        let photon = Photon { class: 0, landing: 0, wave_number: 0.0, absorbed: crate::linalg::norm3(k), amplitudes: amplitudes.clone(), gradients, explicit: [[0.0; 3]; 3] };
+        let (weight, scattered) = (photon.weight(), Scattering::of(std::slice::from_ref(&photon), 1.0));
+        let rounded = crate::units::rounding(scattered.links) * scattered.size;
+        // The jumps carry k: the force they leave is the rounding of the mean's sum.
+        let kick = photon.kick();
+        for i in 0..3 {
+            assert!((kick[i] - k[i]).abs() <= 8.0 * f64::EPSILON * crate::linalg::norm3(k), "α {alpha:?}: the jump carries {kick:?}");
+            assert!(scattered.force[i].abs() <= rounded, "α {alpha:?}: the force left {:?}", scattered.force);
+        }
+        let l = super::factor(&scattered.diffusion, scattered.size, scattered.links);
+        if alpha == [0.0; 3] {
+            assert_eq!(l, [[0.0; 3]; 3], "a plane wave's absorption diffuses (its rate's rounding {:e})", scattered.diffusion[0][0]);
         }
         for i in 0..3 {
+            assert_eq!((l[i][1], l[i][2]), (0.0, 0.0), "α {alpha:?}: a second column {l:?}");
             for j in 0..3 {
                 // The factor's own backward error and the columns left out: the pivots' bound, 18 γ_N S at most.
-                assert!((covariance[i][j] - exact[i][j]).abs() <= 2.0 * 18.0 * rounded, "α {alpha:?}: C[{i}][{j}] {} against {}", covariance[i][j], exact[i][j]);
+                let made: f64 = (0..3).map(|r| l[i][r] * l[j][r]).sum();
+                assert!((made - weight * alpha[i] * alpha[j]).abs() <= 2.0 * 18.0 * rounded, "α {alpha:?}: (Λ Λᵀ)[{i}][{j}] {made} against {}", weight * alpha[i] * alpha[j]);
             }
         }
     }
@@ -1110,8 +1127,11 @@ impl Dynamics for Synthetic {
     fn photons(&self, _: usize, _: &Point, _: &[C64]) -> Vec<Photon> {
         unreachable!("the cost harness takes no jump")
     }
-    fn recoil(&self, _: &Photon, _: &[f64; 3]) -> Recoil {
+    fn kick(&self, _: usize, _: &Point, _: &[C64], _: &Photon) -> [f64; 3] {
         unreachable!("the cost harness takes no jump")
+    }
+    fn scattering(&self, _: usize, _: &Point, _: &[C64], _: &[f64]) -> Scattering {
+        Scattering::NONE
     }
     fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
         0.5 * self.hm * at.kappa.iter().map(|k| k * k).sum::<f64>() + self.trap.expansion(at.r).value
@@ -1216,8 +1236,11 @@ impl<D: Dynamics> Dynamics for Counted<'_, D> {
     fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
         self.model.photons(cluster, at, psi)
     }
-    fn recoil(&self, photon: &Photon, polarization: &[f64; 3]) -> Recoil {
-        self.model.recoil(photon, polarization)
+    fn kick(&self, cluster: usize, at: &Point, psi: &[C64], photon: &Photon) -> [f64; 3] {
+        self.model.kick(cluster, at, psi, photon)
+    }
+    fn scattering(&self, cluster: usize, at: &Point, psi: &[C64], populations: &[f64]) -> Scattering {
+        self.model.scattering(cluster, at, psi, populations)
     }
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
         self.model.energy(cluster, at, psi)
@@ -1638,4 +1661,175 @@ fn the_step_s_cost() {
             split(&format!("{} parts {n}/1", 1 + 2 * waves.len()), &model, &starts, tau);
         }
     }
+}
+
+/// The ground state alone scattering a folded light of plane waves (amplitude, wave vector) in free flight (`Atom::folded`).
+fn scatterer(hm: f64, folded: Vec<(C64, [f64; 3])>) -> Atom {
+    let mut model = Atom::new(hm, Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] }, vec![], 0.0, 0.0);
+    model.folded = folded;
+    model
+}
+
+/// The interval of a statistic's standard error at the tests' confidence over `looks` looks (estimate.rs).
+fn within(error: f64, looks: f64) -> f64 {
+    crate::estimate::Spread { error, groups: f64::INFINITY }.interval_over(looks)
+}
+
+/// SPEC §1.6 in a travelling wave, f = c e^{ik·r}: the class's conditional mean is the wave's k, one photon's, so every
+/// jump carries exactly k and the steps nothing -- no force is left to them and no diffusion (the factor's null
+/// direction). Over a run the momentum is k times the jumps made, to the sums' rounding, whatever the Brownian path; the
+/// jumps come at the rate c², so the absorbed momentum's mean and second moment per unit time are k c² and k kᵀ c².
+#[test]
+fn a_travelling_wave_s_jumps_carry_its_photons_and_its_steps_nothing() {
+    let (k, c) = ([0.0, 0.0, 8.0], 0.5);
+    let model = scatterer(4.6e-3, vec![(C64::real(c), k)]);
+    let (end, mut jumps) = (512.0, 0);
+    for index in 0..8 {
+        let start = [0.3, -0.2, 1.1];
+        let mut t = Trajectory::new(&model, 0, [0.1, 0.2, 0.3], start, 17, index);
+        adapt::advance(&model, 1.0, &mut t, &mut step::Scratch::default(), None, end, &mut |_| {}).unwrap();
+        assert!(t.jumps > 0 && t.taken > 0, "trajectory {index}: {} jumps over {} steps", t.jumps, t.taken);
+        for a in 0..3 {
+            let carried = t.jumps as f64 * k[a];
+            assert!((t.kappa[a] - start[a] - carried).abs() <= crate::units::rounding(2 * t.jumps as usize + 4) * (start[a].abs() + carried.abs()), "trajectory {index}, axis {a}: κ moved by {} over {} jumps of {}", t.kappa[a] - start[a], t.jumps, k[a]);
+        }
+        jumps += t.jumps;
+    }
+    // The jumps' count is Poisson's at the rate c²: its mean over the eight runs within its standard error.
+    let expected = 8.0 * c * c * end;
+    assert!((jumps as f64 - expected).abs() <= within(expected.sqrt(), 1.0), "{jumps} jumps against {expected}");
+}
+
+/// SPEC §1.6 in a standing wave, f = c cos kz, on an atom too heavy to move (ħ/m → 0), at a node, between and at an
+/// antinode. The class's mean is none (f is real), so its jumps carry nothing, and the steps carry the second moment's
+/// rate 2D_zz = k² c² sin² kz as a diffusion: at the node, where there is no jump at all, k² c² -- the dipole force's
+/// fluctuations (Gordon & Ashkin 1980) --, at the antinode nothing. Over unit times the momentum's increments along the
+/// wave have the mean 0 and the variance 2D_zz within their standard errors, a normal's fourth moment (the old rule's
+/// kicks, the second moment over the jumps' rate, had none), and across the wave nothing moves.
+#[test]
+fn a_standing_wave_s_light_diffuses_the_momentum_at_its_closed_form() {
+    let (k, c, n) = (8.0, 0.5, 4096);
+    let model = scatterer(1e-12, vec![(C64::real(0.5 * c), [0.0, 0.0, k]), (C64::real(0.5 * c), [0.0, 0.0, -k])]);
+    for (name, phase) in [("node", std::f64::consts::FRAC_PI_2), ("between", std::f64::consts::FRAC_PI_4), ("antinode", 0.0_f64)] {
+        let rate = k * k * c * c * phase.sin().powi(2);
+        let mut t = Trajectory::new(&model, 0, [0.1, -0.2, phase / k], [0.0; 3], 23, 5);
+        let mut scratch = step::Scratch::default();
+        let (mut sums, mut last) = ([0.0; 4], t.kappa);
+        for i in 0..n {
+            adapt::advance(&model, 1.0, &mut t, &mut scratch, None, (i + 1) as f64, &mut |_| {}).unwrap();
+            let d = t.kappa[2] - last[2];
+            assert_eq!((t.kappa[0], t.kappa[1]), (0.0, 0.0), "{name}: the momentum across the wave");
+            for (p, sum) in sums.iter_mut().enumerate() {
+                *sum += d.powi(p as i32 + 1);
+            }
+            last = t.kappa;
+        }
+        let [mean, second, _, fourth] = sums.map(|s| s / n as f64);
+        eprintln!("{name}: {} jumps; the increments' mean {mean:.3e}, second moment {second:.4} (2D = {rate:.4}), fourth {fourth:.3}", t.jumps);
+        if phase == 0.0 {
+            assert_eq!(sums, [0.0; 4], "the antinode's atom is not moved");
+            assert!(t.jumps > 0, "the antinode scatters");
+            continue;
+        }
+        assert_eq!(t.jumps == 0, name == "node", "{name}: {} jumps", t.jumps);
+        // A normal's moments of the variance 2D: the mean's error √(2D/n), the second's 2D √(2/n), the fourth's
+        // (2D)² √(96/n).
+        let looks = 3.0;
+        assert!(mean.abs() <= within((rate / n as f64).sqrt(), looks), "{name}: the mean {mean}");
+        assert!((second - rate).abs() <= within(rate * (2.0 / n as f64).sqrt(), looks), "{name}: the second moment {second} against {rate}");
+        assert!((fourth - 3.0 * rate * rate).abs() <= within(rate * rate * (96.0 / n as f64).sqrt(), looks), "{name}: the fourth moment {fourth} against {}", 3.0 * rate * rate);
+    }
+}
+
+/// Every jump's kick is one photon's at most (SPEC §1.6), also where the light's phase winds faster than any of its
+/// waves: f = c (cos kz + iε sin kz), two unequal counter-propagating waves, has the conditional mean b_z = kε/(cos² kz +
+/// ε² sin² kz) -- kε at the antinode and k/ε at the node, a hundred photons' at ε = 0.01, where the old rule's jump took
+/// it whole. At every point the jump carries b up to k, and with what the step carries the two moments per unit time are
+/// the closed forms: the mean k c² ε (the two waves' pressures' difference, the same everywhere) and the second moment
+/// k² c² (sin² kz + ε² cos² kz); the diffusion left is not negative.
+#[test]
+fn a_jump_s_kick_is_one_photon_s_at_most() {
+    let (k, c, epsilon) = (8.0, 0.5, 0.01);
+    let mut model = scatterer(4.6e-3, vec![(C64::real(0.5 * c * (1.0 + epsilon)), [0.0, 0.0, k]), (C64::real(0.5 * c * (1.0 - epsilon)), [0.0, 0.0, -k])]);
+    model.emission = 7.5;
+    let mut carried_whole = 0;
+    for i in 0..=64 {
+        // From the antinode to the node, the last points within 1e-6 of it.
+        let phase = if i <= 56 { std::f64::consts::FRAC_PI_2 * i as f64 / 57.0 } else { std::f64::consts::FRAC_PI_2 - 10f64.powi(56 - i) };
+        let (r, psi) = ([0.0, 0.0, phase / k], [C64::new(0.6, -0.3)]);
+        let at = Point { r, kappa: [0.0; 3], t: 0.0 };
+        let (norm, photon) = (psi[0].norm_sqr(), &model.made(r, &psi)[0]);
+        let (weight, b) = (photon.weight() / norm, k * epsilon / (phase.cos().powi(2) + (epsilon * phase.sin()).powi(2)));
+        let kick = model.kick(0, &at, &psi, photon);
+        let expected = b.min(k);
+        assert!((kick[2] - expected).abs() <= 1e-9 * k && kick[0] == 0.0 && kick[1] == 0.0, "kz = {phase}: the jump carries {kick:?} of b = {b}");
+        carried_whole += (b <= k) as usize;
+        let scattered = model.scattering(0, &at, &psi, &[1.0]);
+        let (mean, second) = (scattered.force[2] + weight * kick[2], scattered.diffusion[2][2] + weight * kick[2] * kick[2]);
+        let closed = (k * c * c * epsilon, k * k * c * c * (phase.sin().powi(2) + (epsilon * phase.cos()).powi(2)));
+        assert!((mean - closed.0).abs() <= 1e-9 * closed.0, "kz = {phase}: the mean per unit time {mean} against {}", closed.0);
+        assert!((second - closed.1).abs() <= 1e-9 * k * k * c * c, "kz = {phase}: the second moment per unit time {second} against {}", closed.1);
+        assert!(scattered.diffusion[2][2] >= -crate::units::rounding(scattered.links) * scattered.size, "kz = {phase}: 2D_zz = {}", scattered.diffusion[2][2]);
+        // The jump itself: the emitted photon's recoil and the carried mean, k_φ + k at most.
+        let mut t = Trajectory::new(&model, 0, r, [0.0; 3], 29, i as u64);
+        step::jump(&model, &mut t, &mut None).unwrap();
+        let size = crate::linalg::norm3(t.kappa);
+        assert!(size <= (model.emission + k) * (1.0 + 1e-12), "kz = {phase}: a jump's kick of {size} beyond {} + {k}", model.emission);
+    }
+    assert!(carried_whole > 8 && carried_whole < 65, "points on both sides of b = k: {carried_whole}");
+}
+
+/// A step's part of the Brownian path and its halves' (`Brownian::halves`): the increment is the sum of the halves'
+/// and the first moment about the middle theirs with the halves' increments' lever, exactly (to rounding); the halves'
+/// parts have the law of a step's of half the length -- the variances τ/2 and (τ/2)³/12, nothing between them --; and a
+/// step and its two halves on the same path end together. An atom in free flight at a standing wave's node, where the
+/// light diffuses and makes no jump: the two ends differ by the diffusion's change along the step alone, a hundredth of
+/// the (ħ/m)(τ/4)|Λ(ΔW₂ − ΔW₁)| they would be apart with the increment alone.
+#[test]
+fn a_step_s_brownian_part_is_the_sum_of_its_halves_and_they_end_together() {
+    let (tau, n) = (0.8, 4096);
+    let mut stream = crate::random::Stream::diffusion(31, 2, 0);
+    // The halves' covariances, each over its own scale: ΔW₁², ΔW₂², ΔZ₁², ΔZ₂², and the six products between them.
+    let (mut squares, mut products) = ([0.0; 4], [0.0; 6]);
+    for _ in 0..n {
+        let whole = step::Brownian::over(tau, &[stream.normals(), stream.normals()]);
+        let [first, second] = whole.halves(tau, &[stream.normals(), stream.normals()]);
+        for a in 0..3 {
+            assert!((first.increment[a] + second.increment[a] - whole.increment[a]).abs() <= 4.0 * f64::EPSILON * (first.increment[a].abs() + second.increment[a].abs()), "the increment and its halves'");
+            let moment = first.moment[a] + second.moment[a] + 0.25 * tau * (second.increment[a] - first.increment[a]);
+            assert!((moment - whole.moment[a]).abs() <= 8.0 * f64::EPSILON * (first.moment[a].abs() + second.moment[a].abs() + tau * (first.increment[a].abs() + second.increment[a].abs())), "the first moment and its halves'");
+        }
+        let (w, z) = ((0.5 * tau).sqrt(), ((0.5 * tau).powi(3) / 12.0).sqrt());
+        let x = [first.increment[0] / w, second.increment[0] / w, first.moment[0] / z, second.moment[0] / z];
+        let mut pair = 0;
+        for i in 0..4 {
+            squares[i] += x[i] * x[i] / n as f64;
+            for j in i + 1..4 {
+                products[pair] += x[i] * x[j] / n as f64;
+                pair += 1;
+            }
+        }
+    }
+    let looks = 10.0;
+    for s in squares {
+        assert!((s - 1.0).abs() <= within((2.0 / n as f64).sqrt(), looks), "a half's variance over its own: {s}");
+    }
+    for p in products {
+        assert!(p.abs() <= within((1.0 / n as f64).sqrt(), looks), "two of the halves' deviates' covariance: {p}");
+    }
+    // A step and its two halves on the same path.
+    let (k, c) = (8.0, 0.5);
+    let model = scatterer(4.6e-3, vec![(C64::real(0.5 * c), [0.0, 0.0, k]), (C64::real(0.5 * c), [0.0, 0.0, -k])]);
+    let start = Trajectory::new(&model, 0, [0.0, 0.0, std::f64::consts::FRAC_PI_2 / k], [0.2, -0.1, 0.3], 37, 0);
+    let mut scratch = step::Scratch::default();
+    let whole = step::Brownian::over(tau, &[stream.normals(), stream.normals()]);
+    let [first, second] = whole.halves(tau, &[stream.normals(), stream.normals()]);
+    let taken = step::Midway::new(&model, &start, tau).unwrap().step(&start, &whole, None, &mut scratch).unwrap().end;
+    let half = step::Midway::new(&model, &start, 0.5 * tau).unwrap().step(&start, &first, None, &mut scratch).unwrap().end;
+    let halves = step::Midway::new(&model, &half, 0.5 * tau).unwrap().step(&half, &second, None, &mut scratch).unwrap().end;
+    let lever = model.hm * 0.25 * tau * k * c * (second.increment[2] - first.increment[2]).abs();
+    assert!(lever > 0.0 && (taken.kappa[2] - start.kappa[2]).abs() > 0.0, "the path moves the atom");
+    eprintln!("a step and its halves end {:.2e} µm apart along the wave; with the increment alone {lever:.2e}", (taken.r[2] - halves.r[2]).abs());
+    assert!((taken.r[2] - halves.r[2]).abs() <= 1e-2 * lever, "the ends {} and {} against the lever {lever}", taken.r[2], halves.r[2]);
+    assert!((taken.kappa[2] - halves.kappa[2]).abs() <= 1e-2 * (taken.kappa[2] - start.kappa[2]).abs(), "the momenta {} and {}", taken.kappa[2], halves.kappa[2]);
 }

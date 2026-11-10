@@ -807,21 +807,33 @@ impl Model {
         }
     }
 
-    /// The explicit sources' recoil terms of a photon (photon.rs): the explicit state e's photon amplitudes `own`, shared among
-    /// its carriers c by |σ_c|², each with the log-gradient ∇σ_c/σ_c of the response its kept drives of that carrier would make
-    /// folded at the atom, summed as a folded jump sums it -- over the carrier's beams l and the cluster's ground amplitudes,
-    /// coherently: σ_c = Σ_b ψ_b Σ_l a_l X_l[e,b]/D_bl, ∇σ_c = Σ_b ψ_b Σ_l (∇a_l − a_l ∇δ_b/D_bl) X_l[e,b]/D_bl, D_bl = δ_b + w_l −
-    /// iΓ_e/2, δ_b = E_e − E_b − δ_c at the atom and w_l the beam's Doppler shift at the atom's momentum (module documentation,
-    /// # First-order Doppler). SPEC §1.6, one rule: the explicit state's photon takes the second moment the same transitions
-    /// folded would give it -- a running wave's k⊗k, a standing wave's k⊗k tan², none at its antinode and the dipole force's
-    /// fluctuations towards its node; two carriers beat against each other and share the photon. With the complex
-    /// multiply-adds that made them (`h` the far light's energies to first order, `Model::far_energies`).
+    /// An explicit state's part of a class's second moment's rate (photon.rs, # The absorbed light's momentum): its photons'
+    /// rate into the class -- its decay's `decay` = Γ_{e→class} = Σ |C_a[b, e]|² over the class's entries, times its
+    /// population `population` in ψ's norm (the state's own |ψ_e|², or a step's mean) -- times the second moment a photon
+    /// takes from the response its kept drives would make folded at the atom, T/S: per carrier c the response summed as a
+    /// folded jump sums it -- over the carrier's beams l and the cluster's ground amplitudes, coherently --, σ_c = Σ_b ψ_b
+    /// Σ_l a_l X_l[e,b]/D_bl, ∇σ_c = Σ_b ψ_b Σ_l (∇a_l − a_l ∇δ_b/D_bl) X_l[e,b]/D_bl, D_bl = δ_b + w_l − iΓ_e/2, δ_b = E_e − E_b
+    /// − δ_c at the atom and w_l the beam's Doppler shift at the atom's momentum (module documentation, # First-order
+    /// Doppler); S = Σ_c |σ_c|² and T = Σ_c Re[∇σ_c*⊗∇σ_c] (two carriers beat against each other and share the photon by
+    /// |σ_c|²). SPEC §1.6, one rule: a running wave's photon has k⊗k, a standing wave's k⊗k tan², none at its antinode, and
+    /// towards its node the rate times it stays the dipole force's fluctuations.
+    ///
+    /// The state's population counts as far as the response's: the rate is Γ_{e→class} min(|ψ_e|², S). An excited
+    /// population beyond what the light makes here was not absorbed here -- it came with the atom or with a transient --, and
+    /// T/S, the moment of a photon absorbed here, is not its; where the response vanishes (a node) and the population does
+    /// not, the quotient has no bound. So the rate times the moment is at most Γ_{e→class} T, the folded drives' own value,
+    /// finite everywhere, and no quotient is taken by a response that is nothing. With the complex multiply-adds that made
+    /// it (`h` the far light's energies to first order, `Model::far_energies`).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn explicit_recoil(&self, cluster: usize, amplitudes: &[Amplitude], h: &[Vec<f64>], kappa: [f64; 3], source: usize, own: [Vec<C64>; 3], psi: &[C64]) -> (Vec<([Vec<C64>; 3], [C64; 3])>, f64) {
-        let Origin::Explicit { state: e } = self.sources[source].origin else { return (vec![], 0.0) };
+    pub(crate) fn explicit_moment(&self, cluster: usize, amplitudes: &[Amplitude], h: &[Vec<f64>], kappa: [f64; 3], source: usize, decay: f64, population: f64, psi: &[C64]) -> ([[f64; 3]; 3], f64) {
+        let mut out = [[0.0; 3]; 3];
+        let Origin::Explicit { state: e } = self.sources[source].origin else { return (out, 0.0) };
         let c = &self.clusters[cluster];
+        if !(decay > 0.0 && population > 0.0) {
+            return (out, 0.0);
+        }
         let gamma = self.decay[(e - GROUND, e - GROUND)].re;
-        let (mut drives, mut terms) = (vec![], 0);
+        let (mut response, mut terms) = (0.0, 0);
         for cc in &self.carriers {
             let (mut sigma, mut gradient) = (C64::ZERO, [C64::ZERO; 3]);
             for (pb, &b) in c.states[..c.ground].iter().enumerate() {
@@ -843,21 +855,22 @@ impl Model {
                     terms += 1;
                 }
             }
-            if sigma != C64::ZERO {
-                drives.push((sigma.norm_sqr(), gradient.map(|g| g / sigma)));
+            response += sigma.norm_sqr();
+            for i in 0..3 {
+                for j in 0..3 {
+                    out[i][j] += (gradient[i].conj() * gradient[j]).re;
+                }
             }
         }
-        let total: f64 = drives.iter().map(|d| d.0).sum();
-        // Each term's response and its gradient's three parts; each carrier's share of the amplitudes on every axis.
-        let work = (10 * terms) as f64 + drives.len() as f64 * (5.0 + (3 * own[0].len()) as f64);
-        let shares = drives
-            .into_iter()
-            .map(|(w, g)| {
-                let share = (w / total).sqrt();
-                (own.clone().map(|v| v.into_iter().map(|z| z * share).collect()), g)
-            })
-            .collect();
-        (shares, work)
+        // Γ_{e→class} min(population, S)/S, the quotient taken only by an S that is not below a population above zero.
+        let factor = if population <= response { decay * population / response } else { decay };
+        for row in out.iter_mut() {
+            for x in row.iter_mut() {
+                *x *= factor;
+            }
+        }
+        // Each term's response and its gradient's three parts; each carrier's products.
+        (out, (10 * terms) as f64 + (10 * self.carriers.len()) as f64)
     }
 }
 

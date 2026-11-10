@@ -271,9 +271,6 @@ fn a_scene_s_tables_against_its_exact_elimination() {
     // The largest: parts, photon rate, classes' weights, amplitudes, the absorption's mean and second moment, loss energy (µK),
     // readout, the reads' shown and T; the forces' largest error and the near light's largest force.
     let (mut worst, mut force) = ([0.0_f64; 11], [0.0_f64; 2]);
-    let polarization = [0.48, -0.64, 0.6];
-    // A photon's weight along the polarization, ‖Σ_a ε_a u_a‖².
-    let along = |x: &Photon| (0..x.amplitudes[0].len()).map(|i| (0..3).map(|a| x.amplitudes[a][i] * polarization[a]).sum::<C64>().norm_sqr()).sum::<f64>();
     for (k, sample) in samples.iter().enumerate() {
         let (cluster, at, psi) = (sample.cluster, &sample.at, &sample.psi);
         let (e, f) = (nodes(&model, &exact.middle(cluster, at.r, at.t), at, psi), nodes(&model, &fast.middle(cluster, at.r, at.t), at, psi));
@@ -289,17 +286,16 @@ fn a_scene_s_tables_against_its_exact_elimination() {
         let total: f64 = pe.iter().map(weight).sum();
         if total > 0.0 {
             worst[2] = worst[2].max((pf.iter().map(weight).sum::<f64>() - total).abs() / total);
-            // The classes' sums of the mean and of the second moment by their rates along the polarization, exact less tabulated.
+            // The classes' sums of the absorbed light's mean and second moment per unit time, exact less tabulated.
             let (mut apart, mut rate, mut mean, mut second) = (0.0, 0.0, [0.0; 3], [0.0; 9]);
             for (x, y) in pe.iter().zip(&pf) {
                 worst[3] = worst[3].max((weight(x) - weight(y)).abs() / total);
                 apart += (0..3).map(|a| x.amplitudes[a].iter().zip(&y.amplitudes[a]).map(|(u, v)| (*u - *v).norm_sqr()).sum::<f64>()).sum::<f64>();
-                let (wx, wy) = (along(x), along(y));
-                if wx > 0.0 && wy > 0.0 {
-                    let (rx, ry) = (exact.recoil(x, &polarization), fast.recoil(y, &polarization));
-                    rate += wx;
-                    (0..3).for_each(|i| mean[i] += (wx * rx.mean[i] - wy * ry.mean[i]) / x.wave_number);
-                    (0..9).for_each(|i| second[i] += (wx * rx.second[i / 3][i % 3] - wy * ry.second[i / 3][i % 3]) / x.wave_number.powi(2));
+                let (rx, ry) = (x.moments(), y.moments());
+                if rx.weight > 0.0 && ry.weight > 0.0 {
+                    rate += rx.weight;
+                    (0..3).for_each(|i| mean[i] += (rx.mean[i] - ry.mean[i]) / x.wave_number);
+                    (0..9).for_each(|i| second[i] += (rx.second[i / 3][i % 3] - ry.second[i / 3][i % 3]) / x.wave_number.powi(2));
                 }
             }
             worst[4] = worst[4].max((apart / total).sqrt());

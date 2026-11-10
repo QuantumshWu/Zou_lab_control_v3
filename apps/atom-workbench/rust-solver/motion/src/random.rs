@@ -41,6 +41,8 @@ pub enum Purpose {
     Latin = 2,
     /// A trajectory's jumps: event j ≥ 1 the j-th jump's draws, event 0 the first waiting time's threshold.
     Jump = 3,
+    /// A trajectory's Brownian path (SPEC §1.6: the absorbed light's diffusion): event n the n-th step's deviates.
+    Diffusion = 4,
 }
 
 /// A stream of uniform 32-bit words: Philox blocks at the counter (block, event, trajectory) under the key
@@ -62,6 +64,21 @@ impl Stream {
     /// The stream of a trajectory's j-th jump (j ≥ 1; j = 0 the first waiting time's threshold).
     pub fn jump(seed: u64, trajectory: u64, j: u32) -> Stream {
         Stream::new(seed, Purpose::Jump, trajectory, j)
+    }
+    /// The stream of a trajectory's n-th step's Brownian deviates (step.rs `Brownian`).
+    pub fn diffusion(seed: u64, trajectory: u64, n: u32) -> Stream {
+        Stream::new(seed, Purpose::Diffusion, trajectory, n)
+    }
+    /// Three independent standard normal deviates: Box and Muller's (1958) two from a pair of uniforms, r (cos, sin) 2πu
+    /// with r² = −2 ln v, v on (0, 1] (`interior`), twice; the fourth is not kept.
+    pub fn normals(&mut self) -> [f64; 3] {
+        let mut pair = || {
+            let r = (-2.0 * self.interior().ln()).sqrt();
+            let (s, c) = (std::f64::consts::TAU * self.uniform()).sin_cos();
+            [r * c, r * s]
+        };
+        let (first, second) = (pair(), pair());
+        [first[0], first[1], second[0]]
     }
     pub fn next_u32(&mut self) -> u32 {
         if self.used == 4 {
@@ -90,7 +107,7 @@ impl Stream {
     pub fn interior(&mut self) -> f64 {
         ((self.next_u64() >> 11) as f64 + 0.5) / (1u64 << 53) as f64
     }
-    /// A standard normal deviate, for the tests alone (the engine draws none): Φ⁻¹ of one interior uniform u -- one draw
+    /// A standard normal deviate, for the tests alone (the engine's are `normals`): Φ⁻¹ of one interior uniform u -- one draw
     /// per deviate, so the order of draws stays fixed --, the normal's two-sided quantile at the tail 2 min(u, 1 − u)
     /// (estimate.rs `quantile`) on u's side of ½.
     #[cfg(test)]

@@ -247,22 +247,47 @@ pub struct Photon {
     pub landing: usize,
     /// |k_φ| (1/µm), 2π/c times the class's photon frequency (photon.rs, # A class's photon): the emission recoil is −k_φ n.
     pub wave_number: f64,
+    /// k_c (1/µm): the largest wave number of the beams whose light the class's folded jumps absorb -- what one absorbed
+    /// photon carries at most, the bound of the mean a jump carries (`Photon::moments`); zero for a class of explicit
+    /// states' photons alone, whose absorption's mean is the Ehrenfest force's.
+    pub absorbed: f64,
     /// u_a = J_{a,φ} ψ (a = x, y, z) on the landing cluster's states: the class's probability ∝ Σ_a ‖u_a‖², the direction's
     /// density ∝ tr G − n·Re(G)·n (G_ab = ⟨u_a|u_b⟩), the polarization ε across n by ‖Σ_a ε_a u_a‖², the state after f = Σ_a ε_a u_a.
     pub amplitudes: [Vec<C64>; 3],
-    /// ∇u_a of the folded part, whose absorption's mean the jump carries (`Photon::recoil`): gradients[i][a], i the lab axis.
+    /// ∇u_a of the folded part (`Photon::moments`): gradients[i][a], i the lab axis; empty where none were asked.
     pub gradients: [[Vec<C64>; 3]; 3],
-    /// The explicit states' absorption sources, whose mean the Ehrenfest force carries: per source its amplitudes (u_a's part
-    /// the source holds, with the square root of its share) and its log-gradient ∇ln σ (1/µm, complex per lab axis).
-    pub explicit: Vec<([Vec<C64>; 3], [C64; 3])>,
+    /// The explicit states' part of the second moment's rate, in the amplitudes' norm (1/µm² times ‖u‖²'s unit; eliminate.rs
+    /// `Model::explicit_moment`): their absorption's mean is the Ehrenfest force's. Zero where no gradients were asked.
+    pub explicit: [[f64; 3]; 3],
 }
 
-/// The absorption recoil's first two moments of a jump into f = Σ_a ε_a u_a (SPEC §1.6, one rule): the mean the jump carries
-/// (the folded part's, Im⟨f|∇f_F⟩/‖f‖²) and the total second moment M (1/µm²), the local second Kramers–Moyal coefficient
-/// (the folded part's Re⟨∇f_F|∇f_F⟩/‖f‖² and the explicit sources' Re[∇ln σ*⊗∇ln σ] by their shares). The kick is the mean plus
-/// a zero-mean fluctuation of covariance M − mean meanᵀ, positive semidefinite by Cauchy–Schwarz.
+/// What the light a class's photons absorb does to the momentum per unit time, at the state the photons were made of and
+/// in its norm (divide by ‖ψ‖²; SPEC §1.6): the local Kramers–Moyal coefficients of the method's own expansion, none of
+/// them divided by the class's rate.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Recoil { pub mean: [f64; 3], pub second: [[f64; 3]; 3] }
+pub struct Moments {
+    /// W = Σ_a ‖u_a‖²: the class's rate.
+    pub weight: f64,
+    /// Σ_a Im⟨u_a|∇u_a⟩ (1/µm): the folded part's scattering force.
+    pub mean: [f64; 3],
+    /// Σ_a Re⟨∇u_a|⊗|∇u_a⟩ and the explicit states' part (1/µm²): the second moment's rate.
+    pub second: [[f64; 3]; 3],
+    /// s b (1/µm): what a jump of the class carries of its conditional mean b = mean/W -- all of it up to one absorbed
+    /// photon's momentum, s = min(1, k_c/|b|).
+    pub kick: [f64; 3],
+}
+
+/// The light's action on the momentum per unit time beside the Ehrenfest force and the jumps' kicks (SPEC §1.6), at a
+/// state and a point: the scattering force the jumps do not carry (1/µm/µs), the second moment's rate they do not carry,
+/// 2D (1/µm²/µs; positive semidefinite by Cauchy–Schwarz), and the rounding of 2D's entries as they are summed -- `size`
+/// the largest sum of a diagonal entry's terms' moduli, `links` the operations behind an entry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Scattering { pub force: [f64; 3], pub diffusion: [[f64; 3]; 3], pub size: f64, pub links: usize }
+
+impl Scattering {
+    /// No light scattered.
+    pub const NONE: Scattering = Scattering { force: [0.0; 3], diffusion: [[0.0; 3]; 3], size: 0.0, links: 0 };
+}
 
 /// The model: a request's states and light with a set of units kept (SPEC §1).
 pub struct Model {
@@ -634,8 +659,10 @@ pub struct Run<'a> {
     pub reference: [f64; GROUND],
     prepared: Lights,
     plans: Vec<(Arc<assemble::Plan>, Option<&'a tabulate::NearTable>)>,
-    /// The counted real multiply-adds of one middle (`decide::COMPLEX` per complex one, assemble.rs # Work) and of one jump's
-    /// photons (photon.rs `Model::photons_counted`): the largest over the clusters at the focus, every light on, made once.
+    /// The counted real multiply-adds of one middle (`decide::COMPLEX` per complex one, assemble.rs # Work) with its state's
+    /// scattering (photon.rs `Model::scattering_of`: every class's photons with their gradients, once a step), and of one
+    /// jump's photons (photon.rs `Model::photons_counted`): the largest over the clusters at the focus, every light on, made
+    /// once.
     assembly: f64,
     photons: f64,
 }
@@ -654,7 +681,6 @@ impl<'a> Run<'a> {
         let at = Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 };
         let plans = (0..model.clusters.len()).map(|c| (model.plan(c, &running), tables.and_then(|t| t.of(c, &running)))).collect();
         let plans: Vec<(Arc<assemble::Plan>, Option<&tabulate::NearTable>)> = plans;
-        let assembly = plans.iter().map(|(plan, table)| model.middle(plan, at.r, at.t, *table).work).fold(0.0, f64::max) * crate::decide::COMPLEX;
         let photons = (0..model.clusters.len())
             .map(|c| {
                 let psi: Vec<C64> = (0..model.clusters[c].states.len()).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
@@ -662,6 +688,7 @@ impl<'a> Run<'a> {
             })
             .fold(0.0, f64::max)
             * crate::decide::COMPLEX;
+        let assembly = plans.iter().map(|(plan, table)| model.middle(plan, at.r, at.t, *table).work).fold(0.0, f64::max) * crate::decide::COMPLEX + photons;
         Run { model, tables, reference, prepared: model.prepared(), plans, assembly, photons }
     }
     /// The photon classes of a cluster's state at a point with their amplitudes alone (photon.rs `Gradients::None`): what a
@@ -670,12 +697,18 @@ impl<'a> Run<'a> {
         let (plan, table) = &self.plans[cluster];
         self.model.photons_of(plan, *table, at, psi, photon::Gradients::None).0
     }
-    /// The absorption recoil's moments of the drawn photon into the drawn polarization, from the state it was drawn at:
-    /// that class alone made again, with its gradients (photon.rs `Gradients::Of`).
-    pub fn recoil_at(&self, cluster: usize, at: &Point, psi: &[C64], photon: &Photon, polarization: &[f64; 3]) -> Recoil {
+    /// The mean a jump of the drawn photon's class carries (`Photon::kick`), from the state it was drawn at: that class
+    /// alone made again, with its gradients (photon.rs `Gradients::Of`).
+    pub fn kick_at(&self, cluster: usize, at: &Point, psi: &[C64], photon: &Photon) -> [f64; 3] {
         let (plan, table) = &self.plans[cluster];
         let drawn = self.model.photons_of(plan, *table, at, psi, photon::Gradients::Of(photon.class)).0;
-        drawn.first().expect("the drawn class at the state it was drawn at").recoil(polarization)
+        drawn.first().expect("the drawn class at the state it was drawn at").kick()
+    }
+    /// The scattering of a cluster's state at a point per unit time, an explicit state's decay at the populations
+    /// `populations` of unit sum (None: the state's own; photon.rs `Model::scattering_of`).
+    pub fn scattering_at(&self, cluster: usize, at: &Point, psi: &[C64], populations: Option<&[f64]>) -> Scattering {
+        let (plan, table) = &self.plans[cluster];
+        self.model.scattering_of(plan, *table, at, psi, populations).0
     }
     /// A cluster's generator at a position and time, for every momentum and along every path through the point (assemble.rs
     /// `Middle`): a step's one middle.
@@ -712,11 +745,13 @@ impl crate::step::Dynamics for Run<'_> {
         Run::middle(self, cluster, r, t)
     }
     fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
-        let (plan, table) = &self.plans[cluster];
-        self.model.photons_of(plan, *table, at, psi, photon::Gradients::All).0
+        self.photon_amplitudes(cluster, at, psi)
     }
-    fn recoil(&self, photon: &Photon, polarization: &[f64; 3]) -> Recoil {
-        photon.recoil(polarization)
+    fn kick(&self, cluster: usize, at: &Point, psi: &[C64], photon: &Photon) -> [f64; 3] {
+        self.kick_at(cluster, at, psi, photon)
+    }
+    fn scattering(&self, cluster: usize, at: &Point, psi: &[C64], populations: &[f64]) -> Scattering {
+        self.scattering_at(cluster, at, psi, Some(populations))
     }
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
         self.model.energy_with(cluster, at, psi, self.tables)
