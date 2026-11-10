@@ -1,8 +1,9 @@
-// The reference scenes (contract §6, R0–R9): each an ordinary app scene -- what an operator could set up -- whose
+// The reference scenes (contract §6, R0–R9, and R10): each an ordinary app scene -- what an operator could set up -- whose
 // physics has a clear, analytic or nearly analytic answer. `build()` returns the app scene (before the app's importer
 // reads it back); a scene whose parameters depend on the atom (a detuning from a shifted line, a two-photon resonance)
-// takes them from the app's own level chart or model, never from the solver. `motion` (R0, R8 only) edits the motion
-// block of the request: a mass ×10⁶ and a temperature of 1e-3 µK hold the atom at the focus (the static limit).
+// takes them from the app's own level chart or model, never from the solver. A scene's `mass` multiplies the request's
+// mass (R10's held atom: a classical point in the same light); R0 and R8 edit the motion block in scenes.mjs: a mass
+// ×10⁶ and a temperature of 1e-3 µK hold the atom at the focus (the static limit).
 import {laserMHz,levelShifts,motionRequest,transitionMHz,zeroFieldMHz} from './app.mjs';
 import {base,beam,reflection,tweezer} from './scene.mjs';
 import {RAD_PER_MHZ,coupling,decayRates,index} from './phys.mjs';
@@ -15,6 +16,18 @@ const ISAT_CYCLING=1.66933;
 /** The tweezer of the default scene (types.ts defaultTweezer): 852 nm, 4 mW, waist 1.2 µm. */
 const DEFAULT_TWEEZER={nm:852,powerMW:4,waistUm:1.2};
 
+/** R10's saturation parameter at the standing wave's antinode, s₀ = 2Ω₁²/Γ² (each beam s₀/4): the photon rate there is
+ * Γs₀/2 = 0.38/µs, the heating at the node E_rec Γ s₀/2 ≈ 0.07 µK/µs. */
+export const R10_S0=0.02;
+/** R10's two settings. The app's scene: 87Rb at 2 µK, in the tweezer's radial ground state (ħω/k_B = 8.2 µK: the atom's
+ * extent is the zero-point one, kσ_z = 0.15), 120 µs -- 43 photons at the antinode, 8 µK of heating along z at the
+ * node; k_BT is below 4ħω, where the solver reports T without holding it to its target (it runs 96 trajectories). And
+ * the held atom: the request's mass ×100 (the R8 device) makes it a classical point in the same light and the same
+ * springs -- the extent σ² = k_BT/mω² does not depend on the mass, ħω ∝ m^{−1/2} does: at 5 µK k_BT = 6.1ħω on the
+ * stiff axes and kσ_z = 0.17 --, the recoil energy and with it every heating rate 100 times smaller: 7.2 ms (2700
+ * photons at the antinode, 5 µK of heating along z at the node). */
+const R10_RB={temperatureUK:2,durationUs:120,samples:49};
+export const R10_HELD={mass:100,temperatureUK:5,durationUs:7200,samples:49};
 /** The detuning (MHz) a beam on `line` F → F′ needs to sit `deltaMHz` from the transition g → e of `scene` with the
  * lasers `shown` shifting it (the app's level chart): its offset from the zero-field transition. */
 async function offsetFor(scene,line,Fg,Fe,groundId,excitedId,shown,deltaMHz){
@@ -74,22 +87,73 @@ export const SCENES={
   // R6 -- the Λ system |1,0⟩ ↔ |2,0⟩ through D1 σ+σ+ Raman beams 20 GHz red of F′=2, two-photon resonance compensated.
   R6_RAMAN_CO:{ref:'R6',title:'R6 拉曼 Λ：同向 σ⁺σ⁺（Δ = −20 GHz，Ω_R ≈ 2π·0.25 MHz）',build:()=>raman('+z')},
   R6_RAMAN_COUNTER:{ref:'R6',title:'R6 拉曼 Λ：对向 σ⁺σ⁺（Δk = 2k，多普勒与 2ħk 反冲）',build:()=>raman('-z')},
-  // R9 -- loss by a push out of the trap's region.
-  R9_PUSH:{ref:'R9',title:'R9 推出：σ⁺ 辐射压远大于阱力（s = 100，沿光镊轴）',async build(){
-    const s=await base({name:'R9 推出',initialStateId:'ground-2-2',temperatureUK:30,durationUs:40,samples:401});
-    await tweezer(s,{...DEFAULT_TWEEZER,along:'+z',ellipticityDeg:45});
-    const bottom=await transitionMHz(s,'ground-2-2','D2-3-3',['tweezer']),free=await transitionMHz(s,'ground-2-2','D2-3-3',[]);
-    await beam(s,{id:'push',name:'σ+ 推出光',line:'D2',Fg:2,Fe:3,offsetMHz:(bottom+free)/2-(await zeroFieldMHz('D2',2,3)),intensityMWcm2:100*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
+  // R9 -- loss by a push out of the trap's region: a σ+ tweezer along z (7 mW, waist 2 µm: 0.48 mK, z_R = 14.7 µm)
+  // and a σ+ beam along its axis 40Γ blue of the line at the bottom, saturating to ρ_ee = 0.05 there (0.043 outside):
+  // its radiation pressure is five times the trap's largest axial force, the trap keeps 0.89 of its radial force
+  // (1 − κρ_ee), and the line's shift across the trap (3.7Γ) and the Doppler shift at the exit (0.2Γ) change the rate
+  // by a sixth and by a hundredth. Blue, because F′ = 3 is the highest level of the line: no other transition of the
+  // ground states comes near the light (red by 40Γ it sits 4Γ from F = 2 → F′ = 2). About 200 photons carry the atom
+  // out of the 1/20 region (64 µm on the axis) in 0.12 ms.
+  R9_PUSH:{ref:'R9',title:'R9 推出：σ⁺ 辐射压为阱的最大轴向力的 5 倍，ρ_ee ≤ 0.05（δ = +40Γ，s = 711）',async build(){
+    const s=await base({name:'R9 推出',initialStateId:'ground-2-2',temperatureUK:20,durationUs:200,samples:201});
+    await tweezer(s,{nm:852,powerMW:7,waistUm:2,along:'+z',ellipticityDeg:45});
+    const offset=await offsetFor(s,'D2',2,3,'ground-2-2','D2-3-3',['tweezer'],40*GAMMA_D2);
+    await beam(s,{id:'push',name:'σ+ 推出光',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:711*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
     return s;}},
-  // R9 (c) -- heating-driven escape: R2's far-detuned σ+ heating (δ = −100Γ) in a shallow σ+ tweezer (~200 µK), so
-  // the recoil heating (2E_rec per photon, ~70 µK/ms) carries atoms over the depth within the run.
-  R9_HEAT:{ref:'R9',title:'R9 加热逃逸：浅光镊中的反冲加热（能量 Fokker–Planck）',async build(){
+  // R9 (c) -- heating-driven escape without a mean force: a shallow σ+ tweezer (~200 µK) and two σ+ beams of one
+  // intensity along its axis, one 100Γ red along +z and one 100Γ blue along −z: their radiation pressures, light
+  // shifts and Doppler forces cancel, and the recoil heating (2E_rec per photon, ~70 µK/ms) carries the atoms over
+  // the depth within the run. (One beam alone tilts the axial potential by kRz_R/U₀ = 0.32 and lowers its barrier
+  // to a quarter: the atoms are then pushed out, not heated out.)
+  R9_HEAT:{ref:'R9',title:'R9 加热逃逸：红蓝对向 σ⁺ 光（平均力为零），浅光镊中的反冲加热（能量 Fokker–Planck）',async build(){
     const s=await base({name:'R9 加热逃逸',initialStateId:'ground-2-2',temperatureUK:20,durationUs:4000,samples:201});
     await tweezer(s,{nm:852,powerMW:1.05,waistUm:1.2,along:'+z',ellipticityDeg:45});
-    const offset=await offsetFor(s,'D2',2,3,'ground-2-2','D2-3-3',['tweezer'],-100*GAMMA_D2);
-    await beam(s,{id:'probe',name:'σ+ 加热光',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:420*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
+    const line=await offsetFor(s,'D2',2,3,'ground-2-2','D2-3-3',['tweezer'],0);
+    await beam(s,{id:'red',name:'σ+ 加热光（红，+z）',line:'D2',Fg:2,Fe:3,offsetMHz:line-100*GAMMA_D2,intensityMWcm2:210*ISAT_CYCLING,along:'+z',ellipticityDeg:45});
+    await beam(s,{id:'blue',name:'σ+ 加热光（蓝，−z）',line:'D2',Fg:2,Fe:3,offsetMHz:line+100*GAMMA_D2,intensityMWcm2:210*ISAT_CYCLING,along:'-z',ellipticityDeg:-45});
     return s;}},
+  // R10 -- the absorption kick where beams interfere: the momentum diffusion of the closed cycle in a weak resonant
+  // σ+σ+ standing wave along z ∥ B, the atom held within kσ ≈ 0.15 of a chosen phase of the wave by a tight tweezer:
+  // the app's scene (87Rb, in the trap's ground state), and the same with the request's mass ×100 (a classical point).
+  ...Object.fromEntries([['ANTINODE',0,'阱心在波腹（θ = 0°）'],['QUARTER',45,'阱心在波腹与波节正中（θ = 45°）'],['NODE',90,'阱心在波节（θ = 90°，中心处不散射）']].flatMap(([at,theta,where])=>[
+    [`R10_${at}`,{ref:'R10',title:`R10 驻波中的动量扩散：${where}，⁸⁷Rb，2 µK`,build:()=>standing(theta,R10_RB)}],
+    [`R10_HELD_${at}`,{ref:'R10',title:`R10 驻波中的动量扩散：${where}，质量 ×${R10_HELD.mass}，5 µK`,mass:R10_HELD.mass,build:()=>standing(theta,R10_HELD)}]])),
 };
+
+/** R10: an 852 nm tweezer along +x, π on z ∥ B (10 mW, waist 1 µm: 3 mK deep, 170 kHz along y and z, so that the cold
+ * atom's extent along z is its zero-point one, kσ_z ≈ 0.15; |2,2⟩ and |3′,3′⟩ stay its eigenstates), and a σ+σ+ pair
+ * along ±z on the closed cycle |2,2⟩ ↔ |3′,3′⟩, resonant at the trap's bottom (the level chart's line with the tweezer
+ * shifting it), of one intensity: the standing wave Ω(z) = Ω₁ cos(kz + θ). θ is the wave's phase at the trap's centre
+ * (0: antinode, 90°: node): the app gives each beam its initial phase at the atom (初相位 φ₀), +θ on the +z beam and
+ * −θ on the −z beam, less the relative phase the two beams' couplings of the cycle have at φ₀ = 0 (their polarization
+ * vectors' convention), read from the request the app builds for it. */
+async function standing(thetaDeg,{temperatureUK,durationUs,samples}){
+  const {finish}=await import('./app.mjs');
+  const make=async back=>{
+    const s=await base({name:`R10 驻波中的动量扩散（θ = ${thetaDeg}°）`,initialStateId:'ground-2-2',temperatureUK,durationUs,samples});
+    await tweezer(s,{nm:852,powerMW:10,waistUm:1,along:'+x'});
+    const offset=await offsetFor(s,'D2',2,3,'ground-2-2','D2-3-3',['tweezer'],0);
+    await beam(s,{id:'wave-plus',name:'驻波 +z',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:R10_S0/4*ISAT_CYCLING,along:'+z',ellipticityDeg:45,phaseDeg:thetaDeg});
+    await beam(s,{id:'wave-minus',name:'驻波 −z',line:'D2',Fg:2,Fe:3,offsetMHz:offset,intensityMWcm2:R10_S0/4*ISAT_CYCLING,along:'-z',ellipticityDeg:-45,phaseDeg:back});
+    return s;
+  };
+  const wrap=d=>d-360*Math.round(d/360);
+  let back=wrap(-thetaDeg);
+  for(let pass=0;pass<2;pass++){
+    const line=await motionRequest('R10',await finish(await make(back)),{device:'cpu'});
+    back=wrap(back+2*(standingPhase(line).thetaDeg-thetaDeg));
+  }
+  return make(back);
+}
+/** The standing wave of R10 from the request: the two beams' couplings of the cycle at the focus, X₊ and X₋ (rad/µs),
+ * make the amplitude X₊e^{ikz} + X₋e^{−ikz} = e^{i(a₊+a₋)/2}[(|X₊| + |X₋|) cos(kz + θ) + i(|X₊| − |X₋|) sin(kz + θ)],
+ * θ = (a₊ − a₋)/2: its phase at the focus (degrees), the Rabi frequency at its antinode Ω₁ = 2(|X₊| + |X₋|), the
+ * imbalance (|X₊| − |X₋|)/(|X₊| + |X₋|) (0: no travelling part), and the beams' wave number. */
+export function standingPhase(line){
+  const e=index(line,'D2-3-3'),g=index(line,'ground-2-2'),p=coupling(line,'wave-plus',e,g),m=coupling(line,'wave-minus',e,g);
+  const ap=Math.hypot(p.re,p.im),am=Math.hypot(m.re,m.im),k=line.model.motion.beams.find(b=>b.id==='wave-plus').waveNumberPerUm;
+  return {thetaDeg:(Math.atan2(p.im,p.re)-Math.atan2(m.im,m.re))/2*180/Math.PI,omega1:2*(ap+am),imbalance:(ap-am)/(ap+am),k};
+}
 
 /** R6: beam A on F=1 → F′=2 and beam B on F=2 → F′=2 of D1, both 20 GHz red, σ+ (A along +z; B along `along`), of one
  * intensity; B's frequency moved by the two-photon light shift so that |1,0⟩ → |2,0⟩ is resonant (from the request's

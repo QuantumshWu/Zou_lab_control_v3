@@ -1,7 +1,8 @@
-// node scenes.mjs -- writes every reference request, built by the app's own model builder (lib/app.mjs):
-// - scenes/<id>.scene.json and scenes/<id>.json: the R1–R9 scenes (lib/defs.mjs), R4's TW1/TW2 (from the quantum
+// node scenes.mjs [ids...] -- writes every reference request (or the named ones alone, the manifest keeping the others'
+// entries), built by the app's own model builder (lib/app.mjs):
+// - scenes/<id>.scene.json and scenes/<id>.json: the R1–R10 scenes (lib/defs.mjs), R4's TW1/TW2 (from the quantum
 //   references' own specification) and R8 (R5051 held at the focus): the app scene, and the native request the app
-//   sends for it (a motion trajectory, device "cpu");
+//   sends for it (a motion trajectory, device "cpu"; a scene's `mass` multiplies the request's: R10's held atom);
 // - out/R0/<id>.json and out/R0/<id>.static.json: the static limit (contract §6 R0) of the R0 set -- the scene's motion
 //   request with the mass ×10⁶ and 1e-3 µK, and the same scene without motion for the population core (r0.mjs);
 // Every request is checked against what request::Request needs (lib/contract.mjs). The app commit is recorded in
@@ -53,25 +54,29 @@ async function twScene(name,durationUs){
  * modest cost (the solver's work at m ×10⁶ is its jumps). */
 export const R0_SET={DEFAULT:[100,201],THREE:[1000,201],PGC3D:[200,201],GMD1C:[200,201],F10_28MHZ:[10,101],R5059:[500,101],R5068:[1000,101],RETRO:[100,101],R5_PUMP:[200,201],R6_RAMAN_CO:[20,401]};
 
-async function main(){
+async function main(only){
   const commit=execFileSync('git',['-C',APP,'rev-parse','HEAD'],{encoding:'utf8'}).trim();
-  const manifest={app:commit,device:'cpu',scenes:{},r0:{}};
+  // Named scenes alone: the manifest keeps the others' entries, and a rebuilt scene's entry names its own app commit.
+  const wanted=id=>!only.length||only.includes(id);
+  const manifest=only.length?read(out('scenes','manifest.json')):{app:commit,device:'cpu',scenes:{},r0:{}};
   const sources={};
-  const emit=async(id,scene,title,ref)=>{
-    const s=await finish(scene),line=await motionRequest(id,s,{device:'cpu'});
+  const emit=async(id,scene,title,ref,mass)=>{
+    const s=await finish(scene),line=await motionRequest(id,s,{device:'cpu'});if(mass)line.model.motion.massKg*=mass;
     const c=checkRequest(line);write(out('scenes',`${id}.scene.json`),s);write(out('scenes',`${id}.json`),line);
-    manifest.scenes[id]={ref,title,...c};sources[id]=s;console.log(id,JSON.stringify(c));
+    manifest.scenes[id]={ref,title,...c,...(mass?{held:{mass}}:{}),...(commit===manifest.app?{}:{app:commit})};sources[id]=s;console.log(id,JSON.stringify(c));
   };
-  for(const [id,d] of Object.entries(SCENES))await emit(id,await d.build(),d.title,d.ref);
-  await emit('R4_TW1',await twScene('TW1',3000),'R4 西西弗斯 TW1：app 的 1D PGC 例子加光镊（加热）','R4');
-  await emit('R4_TW2',await twScene('TW2',1000),'R4 西西弗斯 TW2：典型阱内 PGC（冷却）','R4');
+  for(const [id,d] of Object.entries(SCENES))if(wanted(id))await emit(id,await d.build(),d.title,d.ref,d.mass);
+  if(wanted('R4_TW1'))await emit('R4_TW1',await twScene('TW1',3000),'R4 西西弗斯 TW1：app 的 1D PGC 例子加光镊（加热）','R4');
+  if(wanted('R4_TW2'))await emit('R4_TW2',await twScene('TW2',1000),'R4 西西弗斯 TW2：典型阱内 PGC（冷却）','R4');
   // R8: R5051 (a retro-reflected 880 nm tweezer, a D2 probe near F′=3 and a weak F=1 → F′=0 beam) held at its trap's centre.
-  {const src=read(path.join(here,'regress','R5051.scene.json'));src.dynamics.samples=101;
+  if(wanted('R8_R5051')){const src=read(path.join(here,'regress','R5051.scene.json'));src.dynamics.samples=101;
    const s=await finish(src),line=held(await motionRequest('R8_R5051',s,{device:'cpu'}),R8_MASS);const c=checkRequest(line);
    write(out('scenes','R8_R5051.scene.json'),s);write(out('scenes','R8_R5051.json'),line);
    manifest.scenes.R8_R5051={ref:'R8',title:'R8 静止原子的动量扩散（R5051，质量 ×100）',...c,held:{mass:R8_MASS,temperatureUK:HELD.temperatureUK}};console.log('R8_R5051',JSON.stringify(c));}
   for(const [id,[durationUs,samples]] of Object.entries(R0_SET)){
-    const src=sources[id]??read(path.join(here,'regress',`${id}.scene.json`));
+    if(!wanted(`R0_${id}`))continue;
+    // The source: a scene of this run, else the one written before (named runs), else the old gate's.
+    const src=sources[id]??read([path.join(here,'scenes',`${id}.scene.json`),path.join(here,'regress',`${id}.scene.json`)].find(f=>fs.existsSync(f)));
     const s=await finish({...structuredClone(src),dynamics:{...src.dynamics,durationUs,samples}});
     const line=held(await motionRequest(`R0_${id}`,s,{device:'cpu'})),still=await staticRequest(`R0_${id}`,s);
     checkRequest(line);write(out('out','R0',`${id}.json`),line);write(out('out','R0',`${id}.static.json`),still);
@@ -79,4 +84,4 @@ async function main(){
   }
   write(out('scenes','manifest.json'),manifest);
 }
-if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url))await main();
+if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url))await main(process.argv.slice(2));
