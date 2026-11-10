@@ -809,21 +809,28 @@ mod tests {
         (mean - truth, ((sum2 / n - mean * mean) / (n - 1.)).sqrt(), covered as f64 / n)
     }
 
-    /// T's estimate is unbiased: over 4000 repetitions of 6 groups of 3 atoms (n = 18) its mean meets σ² + c within four
-    /// of its standard errors, where the plug-in variance's bias σ²/n = 0.094 is ten of them.
+    /// T's estimate is unbiased: over 4000 repetitions of 6 groups of 3 atoms (n = 18) its mean meets σ² + c within its
+    /// interval at the confidence z over the repetitions, where the plug-in variance, lower by its bias σ²/n = 0.094, lies
+    /// beyond it.
     #[test]
     fn the_temperature_is_unbiased() {
-        let (bias, se, _) = repeated(6, 3, 4000);
-        assert!(bias.abs() <= 4. * se, "bias {bias} ± {se}");
-        assert!(1.3 * 1.3 / 18. > 6. * se, "the plug-in's bias is resolved: {se}");
+        let repetitions = 4000;
+        let (bias, se, _) = repeated(6, 3, repetitions);
+        let within = Spread { error: se, groups: repetitions as f64 }.interval();
+        assert!(bias.abs() <= within, "bias {bias} ± {within}");
+        assert!((bias - 1.3 * 1.3 / 18.).abs() > within, "the plug-in's bias is resolved: ± {within}");
     }
 
-    /// T's jackknife interval at z = 2 covers the truth about as often as the normal's 95.45 %: 32 groups of 8 atoms,
-    /// 2000 repetitions (the share's own standard error 0.5 %), where the variance's skew √(8/(n − 1)) = 0.18 is small.
+    /// T's jackknife interval at z = 2 covers the truth as often as the normal's 95.45 %: 32 groups of 8 atoms, where the
+    /// variance's skew √(8/(n − 1)) = 0.18 is small; the share of 2000 repetitions that cover it, a count's with the
+    /// standard error √(p(1 − p)/2000) = 0.5 %, within its interval at the confidence z.
     #[test]
     fn the_temperature_s_interval_covers() {
-        let (_, _, coverage) = repeated(32, 8, 2000);
-        assert!((coverage - 0.9545).abs() < 0.02, "coverage {coverage}");
+        let repetitions = 2000;
+        let (_, _, coverage) = repeated(32, 8, repetitions);
+        let p = 1. - normal_tail(CONFIDENCE);
+        let within = Spread { error: (p * (1. - p) / repetitions as f64).sqrt(), groups: f64::INFINITY }.interval();
+        assert!((coverage - p).abs() <= within, "coverage {coverage} against {p} ± {within}");
     }
 
     /// A paired read cancels the levels' common noise: the same atoms with every ⟨κ²⟩ larger by δ at the fine level read

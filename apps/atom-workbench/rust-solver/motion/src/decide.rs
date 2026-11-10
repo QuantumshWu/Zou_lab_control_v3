@@ -200,8 +200,10 @@ mod tests {
     }
 
     /// Over m looks of pure noise against a zero share, some read lies beyond by chance as often as one look does at z
-    /// (Šidák): 4000 repetitions of 100 independent normal reads, the family-wise share within four of its standard
-    /// errors of P(|N| > 2) = 0.0455, where one look's interval at every read would refute in 99 % of them.
+    /// (Šidák): of 4000 repetitions of 100 independent normal reads, the share with a read beyond the family's interval
+    /// is P(|N| > 2) = 0.0455, where one look's interval at every read refutes in 1 − (1 − 0.0455)¹⁰⁰ = 99 % of them --
+    /// each share a count's, with the standard error √(p(1 − p)/4000), within its interval at the confidence z over the
+    /// two looks.
     #[test]
     fn many_looks_refute_by_chance_as_rarely_as_one() {
         let (repetitions, looks) = (4000, 100);
@@ -212,9 +214,10 @@ mod tests {
             sidak += usize::from(draws.iter().any(|r| r.outcome(0., looks as f64) == Outcome::Beyond));
             single += usize::from(draws.iter().any(|r| r.outcome(0., 1.) == Outcome::Beyond));
         }
-        let (p, n) = (0.04550026389635842, repetitions as f64);
-        let rate = sidak as f64 / n;
-        assert!((rate - p).abs() <= 4. * (p * (1. - p) / n).sqrt(), "{rate}");
-        assert!(single as f64 / n > 0.98, "{single}");
+        let (p, n) = (0.04550026389635842_f64, repetitions as f64);
+        for (count, share) in [(sidak, p), (single, 1. - (1. - p).powi(looks))] {
+            let within = Spread { error: (share * (1. - share) / n).sqrt(), groups: f64::INFINITY }.interval_over(2.);
+            assert!((count as f64 / n - share).abs() <= within, "{count} of {n} against {share} ± {within}");
+        }
     }
 }
