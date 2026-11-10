@@ -274,7 +274,7 @@ impl Model {
             let mut explicit = vec![];
             for m in &class.members {
                 let folded = !matches!(self.sources[m.source].origin, Origin::Explicit { .. });
-                let (c, cw): (&[C64], &[C64]) = m.scalar.map_or((&one, &one), |s| (&fields.plain[s], &fields.doppler[s]));
+                let (c, cw): (&[C64], &[C64]) = m.scalar.map_or((&one, &one), |s| (fields.plain(s), fields.doppler(s)));
                 let phase = C64::cis(m.phase * at.t);
                 let mut own: [Vec<C64>; 3] = std::array::from_fn(|_| vec![C64::ZERO; if folded { 0 } else { n }]);
                 for &(a, bp, sp, first, second) in &m.entries {

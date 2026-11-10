@@ -291,6 +291,9 @@ pub struct Model {
     /// (units.rs `Model::far_cross_sizes`).
     pub(crate) spread: f64,
     pub(crate) crosses: Mutex<std::collections::HashMap<(Component, Component), Arc<Vec<f64>>>>,
+    /// Per cluster the co-resonant pairs of its folded channels' places under the running lights, found at its first readout
+    /// (readout.rs `Model::readout_with`).
+    pub(crate) resonances: Vec<std::sync::OnceLock<Vec<[usize; 4]>>>,
     /// The states' labels and the beams' names (the ledger's and the method's words).
     pub(crate) labels: Vec<String>,
     pub(crate) names: Vec<String>,
@@ -355,6 +358,7 @@ impl Model {
             plans: Mutex::new(vec![]),
             spread: 0.0,
             crosses: Mutex::new(Default::default()),
+            resonances: vec![],
             labels: request.states.clone(),
             names: request.beams.iter().map(|b| b.name.clone()).collect(),
         };
@@ -371,6 +375,7 @@ impl Model {
         for c in clusters.iter_mut() {
             c.waves = c.waves_exact.iter().map(|w| model.wave_value(w)).collect();
         }
+        model.resonances = clusters.iter().map(|_| std::sync::OnceLock::new()).collect();
         model.clusters = clusters;
         model.membership = membership;
         for ci in 0..model.carriers.len() {

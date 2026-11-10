@@ -114,7 +114,8 @@ impl Model {
         }
         let mut off = lights.clone();
         off.0[self.light.trap] = Lit::Off;
-        let unit: Vec<C64> = (0..jet::parts(order)).map(|part| if part == 0 { C64::ONE } else { C64::ZERO }).collect();
+        let parts = jet::parts(order);
+        let unit: Vec<C64> = (0..parts).map(|part| if part == 0 { C64::ONE } else { C64::ZERO }).collect();
         for (lights, sign) in [(lights, 1.0), (&off, -1.0)] {
             for cluster in 0..self.clusters.len() {
                 let c = &self.clusters[cluster];
@@ -136,10 +137,15 @@ impl Model {
                         continue;
                     }
                     let (left, right) = plan.factors(link.block);
-                    let side = |s: Option<usize>, weighted: bool| s.map_or(&unit, |s| if weighted { &fields.doppler[s] } else { &fields.plain[s] });
-                    let coefficient = jet::product(side(left, link.flag == LEFT), side(right, link.flag == RIGHT));
-                    let form: Vec<C64> = near.jet(link.operand).into_iter().map(|z| if link.conjugate { z.conj() } else { z }).collect();
-                    let term = jet::product(&coefficient, &form);
+                    let side = |s: Option<usize>, weighted: bool| s.map_or(&unit[..], |s| if weighted { fields.doppler(s) } else { fields.plain(s) });
+                    // A whole jet's parts hold any order's.
+                    let (mut coefficient, mut form, mut term) = ([C64::ZERO; 10], [C64::ZERO; 10], [C64::ZERO; 10]);
+                    jet::multiply(side(left, link.flag == LEFT), side(right, link.flag == RIGHT), &mut coefficient[..parts]);
+                    near.jet(link.operand, &mut form[..parts]);
+                    if link.conjugate {
+                        form.iter_mut().for_each(|z| *z = z.conj());
+                    }
+                    jet::multiply(&coefficient[..parts], &form[..parts], &mut term[..parts]);
                     let (q, w) = (&mut out.quadratic, sign * p[c.states[x]]);
                     q.value += w * term[0].re;
                     for i in 0..3 {

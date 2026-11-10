@@ -163,12 +163,12 @@ impl NearValues {
             }
         }
     }
-    /// An entry's jet in the position to the forms' order.
-    pub(crate) fn jet(&self, entry: usize) -> Vec<C64> {
+    /// An entry's jet in the position to the forms' order, into `out` (its parts).
+    pub(crate) fn jet(&self, entry: usize, out: &mut [C64]) {
         match (&self.directions, self.order) {
-            (None, _) => (0..jet::parts(self.order)).map(|p| self.data[p * self.len + entry]).collect(),
-            (Some(_), 0) => vec![self.data[entry]],
-            (Some(_), _) => self.first_order(entry).to_vec(),
+            (None, _) => out.iter_mut().enumerate().for_each(|(p, z)| *z = self.data[p * self.len + entry]),
+            (Some(_), 0) => out[0] = self.data[entry],
+            (Some(_), _) => out.copy_from_slice(&self.first_order(entry)[..out.len()]),
         }
     }
     /// The directions the forms' first-order parts are slopes along: a table's coordinates' gradients, or the lab axes.
@@ -896,11 +896,23 @@ impl Plan {
     }
 }
 
-/// A plan's field components at a point (`Model::scalars`): per component its jet to an order, plain and weighted by its beams'
-/// Doppler shifts.
+/// A plan's field components at a point (`Model::fields`): per component its jet to an order, plain and weighted by its beams'
+/// Doppler shifts (each `parts` numbers a component).
 pub(crate) struct Fields {
-    pub(crate) plain: Vec<Vec<C64>>,
-    pub(crate) doppler: Vec<Vec<C64>>,
+    parts: usize,
+    plain: Vec<C64>,
+    doppler: Vec<C64>,
+}
+
+impl Fields {
+    /// A component's jet.
+    pub(crate) fn plain(&self, scalar: usize) -> &[C64] {
+        &self.plain[scalar * self.parts..(scalar + 1) * self.parts]
+    }
+    /// The same weighted by its beams' Doppler shifts.
+    pub(crate) fn doppler(&self, scalar: usize) -> &[C64] {
+        &self.doppler[scalar * self.parts..(scalar + 1) * self.parts]
+    }
 }
 
 /// A cluster's generator at a position and a time, for every momentum and along every path through the point (module
@@ -1071,19 +1083,17 @@ impl Model {
 
     /// A plan's field components at a point, jets to `order`, plain and weighted by their beams' Doppler shifts at a momentum.
     pub(crate) fn fields(&self, plan: &Plan, amplitudes: &[Amplitude], kappa: [f64; 3], order: usize) -> Fields {
-        let shifts: Vec<f64> = plan.beams.iter().map(|&l| self.doppler_shift(l, kappa)).collect();
-        let mut out = Fields { plain: vec![], doppler: vec![] };
-        for s in &plan.scalars {
-            let (mut plain, mut doppler) = (vec![C64::ZERO; jet::parts(order)], vec![C64::ZERO; jet::parts(order)]);
+        let parts = jet::parts(order);
+        let mut out = Fields { parts, plain: vec![C64::ZERO; parts * plan.scalars.len()], doppler: vec![C64::ZERO; parts * plan.scalars.len()] };
+        for (s, (plain, doppler)) in plan.scalars.iter().zip(out.plain.chunks_mut(parts).zip(out.doppler.chunks_mut(parts))) {
             for &(at, c) in &s.beams {
-                for (p, a) in jet::of(&amplitudes[plan.beams[at]], order).into_iter().enumerate() {
-                    let z = (if s.conjugate { a.conj() } else { a }) * c;
+                let (beam, shift) = (jet::whole(&amplitudes[plan.beams[at]]), self.doppler_shift(plan.beams[at], kappa));
+                for p in 0..parts {
+                    let z = (if s.conjugate { beam[p].conj() } else { beam[p] }) * c;
                     plain[p] += z;
-                    doppler[p] += z * shifts[at];
+                    doppler[p] += z * shift;
                 }
             }
-            out.plain.push(plain);
-            out.doppler.push(doppler);
         }
         out
     }
