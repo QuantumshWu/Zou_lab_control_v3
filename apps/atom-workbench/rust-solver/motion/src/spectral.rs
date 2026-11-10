@@ -359,6 +359,64 @@ impl Picture {
 mod tests {
     use super::*;
 
+    /// Dense RK4 of iẋ = (Ĥ₀ + uA + u²B)x from −h to h in `steps` steps: the tests' reference of a picture's hops.
+    fn flow(base: &Mat, a: &Mat, b: &Mat, half: f64, start: &[C64], steps: usize) -> Vec<C64> {
+        let n = start.len();
+        let at = |u: f64| Mat::from_fn(n, n, |i, j| base[(i, j)] + a[(i, j)] * u + b[(i, j)] * (u * u));
+        let slope = |u: f64, y: &[C64]| -> Vec<C64> { at(u).apply(y).into_iter().map(|z| C64::new(z.im, -z.re)).collect() };
+        let add = |y: &[C64], k: &[C64], s: f64| -> Vec<C64> { y.iter().zip(k).map(|(y, k)| *y + *k * s).collect() };
+        let dt = 2.0 * half / steps as f64;
+        let mut x = start.to_vec();
+        for i in 0..steps {
+            let u = -half + i as f64 * dt;
+            let k1 = slope(u, &x);
+            let k2 = slope(u + 0.5 * dt, &add(&x, &k1, 0.5 * dt));
+            let k3 = slope(u + 0.5 * dt, &add(&x, &k2, 0.5 * dt));
+            let k4 = slope(u + dt, &add(&x, &k3, dt));
+            x = (0..n).map(|s| x[s] + (k1[s] + k2[s] * 2.0 + k3[s] * 2.0 + k4[s]) * (dt / 6.0)).collect();
+        }
+        x
+    }
+
+    /// Towards a defective generator the hops leave the decomposition (module documentation): a resonant two-level atom
+    /// whose coupling is a quarter of its decay rate, [[0, c], [c, −iΓ/2]] at c = Γ/4, has one eigenvector. At that
+    /// point and a millionth of the coupling off it the picture takes the exponential's hops; a hundredth off it, where
+    /// the eigenvectors' condition is some hundreds, it takes the decomposition's. Each way a hop is the generator's flow:
+    /// to the reference's own accuracy where nothing moves, and with slopes within the second order of what they move
+    /// over a hop.
+    #[test]
+    fn a_defective_generator_s_hops_are_the_exponential_s() {
+        let (gamma, half, hops) = (38.117, 0.03, 16);
+        let start = [C64::ONE, C64::new(0.2, -0.1)];
+        for (off, decomposed) in [(0.0, false), (1e-6, false), (1e-2, true)] {
+            let c = 0.25 * gamma * (1.0 + off);
+            let base = Mat::from_fn(2, 2, |i, j| if i != j { C64::real(c) } else if i == 1 { C64::new(0.0, -0.5 * gamma) } else { C64::ZERO });
+            for moving in [false, true] {
+                let slope = |size: f64| Mat::from_fn(2, 2, |i, j| if i != j && moving { C64::new(size, 0.3 * size * (i as f64 - j as f64)) } else { C64::ZERO });
+                let (a, b) = (slope(2.0), slope(30.0));
+                let exact = flow(&base, &a, &b, half, &start, 100_000);
+                let mut picture = Picture::default();
+                picture.fit(2);
+                picture.base = base.clone();
+                picture.ends = [-half, half].map(|u| Mat::from_fn(2, 2, |i, j| base[(i, j)] + a[(i, j)] * u + b[(i, j)] * (u * u)));
+                picture.prepare(half, !moving);
+                assert_eq!(picture.decomposed(), decomposed, "{off} off the exceptional point");
+                let (mut state, mut x) = ([C64::ZERO; 2], [C64::ZERO; 2]);
+                picture.enter(&start, &mut state);
+                let w = 2.0 * half / hops as f64;
+                for k in 0..hops {
+                    picture.hop(&mut state, -half + k as f64 * w, w);
+                }
+                picture.leave(&state, &mut x);
+                let error = x.iter().zip(&exact).map(|(x, e)| (*x - *e).abs()).fold(0.0, f64::max);
+                // What the slopes move over a hop at the step's end: (h‖A‖ + h²‖B‖) w, its square the second order.
+                let moved = (half * 2.0 + half * half * 30.0) * 2.0_f64.sqrt() * w;
+                eprintln!("{off} off the exceptional point, moving {moving}: the state's error {error:e} (the slopes move {moved:e} a hop)");
+                assert!(error < if moving { moved * moved } else { 1e-12 }, "{off} off the exceptional point, moving {moving}: {error:e}");
+            }
+        }
+    }
+
     /// A hop is the generator's flow: Ĥ₀ of detunings up to 600 rad/µs with a decay, slopes that turn the couplings by a
     /// tenth of a radian over the step, on four states -- one hop over the step (60 rad of the detuning: taken in its
     /// parts of a turn), and 320 hops, against RK4 at 4·10⁵ steps of the same Ĥ₀ + uA + u²B. Without slopes a hop
@@ -374,22 +432,11 @@ mod tests {
         }
         let (a, b) = (hermitian(2.1, 2.0), hermitian(0.4, 20.0));
         for moving in [false, true] {
-            let at = |u: f64| Mat::from_fn(n, n, |i, j| base[(i, j)] + if moving { a[(i, j)] * u + b[(i, j)] * (u * u) } else { C64::ZERO });
+            let zero = Mat::zeros(n, n);
+            let (a, b) = if moving { (&a, &b) } else { (&zero, &zero) };
+            let at = |u: f64| Mat::from_fn(n, n, |i, j| base[(i, j)] + a[(i, j)] * u + b[(i, j)] * (u * u));
             let start: Vec<C64> = (0..n).map(|i| C64::cis(0.9 * i as f64) * 0.5).collect();
-            // RK4 of iẋ = Ĥ(u)x from −h to h.
-            let steps = 400_000;
-            let dt = 2.0 * half / steps as f64;
-            let slope = |u: f64, y: &[C64]| -> Vec<C64> { at(u).apply(y).into_iter().map(|z| C64::new(z.im, -z.re)).collect() };
-            let add = |y: &[C64], k: &[C64], s: f64| -> Vec<C64> { y.iter().zip(k).map(|(y, k)| *y + *k * s).collect() };
-            let mut exact = start.clone();
-            for i in 0..steps {
-                let u = -half + i as f64 * dt;
-                let k1 = slope(u, &exact);
-                let k2 = slope(u + 0.5 * dt, &add(&exact, &k1, 0.5 * dt));
-                let k3 = slope(u + 0.5 * dt, &add(&exact, &k2, 0.5 * dt));
-                let k4 = slope(u + dt, &add(&exact, &k3, dt));
-                exact = (0..n).map(|s| exact[s] + (k1[s] + k2[s] * 2.0 + k3[s] * 2.0 + k4[s]) * (dt / 6.0)).collect();
-            }
+            let exact = flow(&base, a, b, half, &start, 400_000);
             let mut errors = Vec::new();
             for hops in [1, 320] {
                 let mut picture = Picture::default();
