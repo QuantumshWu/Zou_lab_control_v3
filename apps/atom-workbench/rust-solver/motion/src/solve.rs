@@ -1377,7 +1377,8 @@ mod tests {
     /// A falsifier refutes only a clear excess (`refuted`): two levels on the same 16 groups of 8 atoms, the finer one moving
     /// one state's row by δ at one output for every atom alike (the pair's difference has no spread). At the step's level
     /// (half the step, order 2) the coarse level's error is 4δ/3: δ = 0.3 against a share of 0.05 is refuted with the
-    /// factor √(0.05/0.4) on the step; δ = 0.01 is within.
+    /// factor √(0.05/0.4) on the step; δ = 0.01 is within. What the pairs read clearly (`cleared`) is δ itself at that
+    /// output.
     #[test]
     fn a_falsifier_refutes_only_a_clear_excess() {
         let outputs = 3;
@@ -1408,5 +1409,8 @@ mod tests {
         let factor = refuted(&coarse, &level(-0.3), &scales, &targets, 0.5, 2., &|_| [0.05, 0.1]).unwrap();
         assert!((factor - (0.05_f64 / 0.4).sqrt()).abs() < 1e-12, "{factor}");
         assert!(refuted(&coarse, &level(-0.01), &scales, &targets, 0.5, 2., &|_| [0.05, 0.1]).is_none());
+        // What the pairs read clearly, the finer level exact: the whole shift where it is (no spread), nothing elsewhere.
+        let clear = cleared(&coarse, &level(-0.3), &scales, &targets);
+        assert!((clear[2][0] - 0.3).abs() < 1e-12 && clear[1] == [0.; 2] && clear[2][1] == 0., "{clear:?}");
     }
 }
