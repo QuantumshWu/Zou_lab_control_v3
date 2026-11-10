@@ -36,7 +36,7 @@
 
 use crate::linalg::dot3;
 use crate::model::{Generator, STATES};
-use crate::step::{jump, step, step_work, Dynamics, Flow, Refused, Segment, Step, Trajectory};
+use crate::step::{jump, step, step_work, test_loss, Dynamics, Flow, Refused, Segment, Step, Trajectory};
 use crate::units::ORDER;
 
 /// The grid's order in its spacing h: CF4's local error O(h⁵) and composite Simpson's, per unit time O(h⁴).
@@ -96,13 +96,6 @@ fn counted<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajector
     Ok(s)
 }
 
-/// The loss test at the trajectory's state (SPEC §1.7): its time once lost.
-fn test_loss<D: Dynamics>(model: &D, trajectory: &mut Trajectory) {
-    if trajectory.lost.is_none() && model.lost(trajectory.cluster, &trajectory.point(), &trajectory.psi) {
-        trajectory.lost = Some(trajectory.time);
-    }
-}
-
 /// A step's error added to the drift (module documentation, # The read): the step `s` taken from `from` less its two
 /// halves, and less its regrid where it took the grid, each by its Richardson factor. Where the scheme refuses a half the
 /// step is counted unread.
@@ -139,7 +132,8 @@ fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, 
 /// (module documentation, # The step; the loss is tested at every step's end and after every jump, SPEC §1.7); `each`
 /// takes every step's path (a jump's step is the one redone to its root, the jump at its end). A trajectory lost on the
 /// way stops at its loss time. With a drift, every step taken is read into it (module documentation, # The read). Where
-/// the scheme refuses a step at every length down to the time's round-off, the advance ends there with the refusal.
+/// the scheme refuses a step at every length down to the time's round-off, the advance ends there with the refusal; so
+/// it does where the model gives a jump no photon (`step::jump`).
 pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, mut drift: Option<&mut Drift>, to: f64, each: &mut dyn FnMut(&Segment)) -> Result<(), Refused> {
     let grid = |length: f64| length / (2 * 2 * HALF_PANELS) as f64;
     trajectory.tau = tau;
@@ -186,7 +180,7 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, mu
             break;
         }
         if jumps {
-            jump(model, trajectory);
+            jump(model, trajectory)?;
         } else if length == rest {
             // The step spanned the rest of the interval: it ends on the output time, not an ulp short of it (the sum of
             // the steps' times rounds), which would leave an interval of the time's round-off to be stepped.
