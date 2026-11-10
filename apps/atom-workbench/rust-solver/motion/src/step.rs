@@ -638,7 +638,11 @@ fn spread(lambda: &[C64]) -> f64 {
 /// (`quadrature`), the norm's root with its rate Σ d_b* d_c (R†R)_bc i(λ_b* − λ_c). None where the decomposition fails.
 fn spectral(path: &Path, psi: &[C64], tau: f64, threshold: Option<f64>) -> Option<Propagated> {
     let n = path.n;
-    let e = linalg::eigen(&path.still)?;
+    let (scalar, rest) = traceless(&path.still);
+    let mut e = linalg::eigen(&rest)?;
+    for l in &mut e.values {
+        *l += scalar;
+    }
     let d0 = e.inverse.apply(&gauged(path, psi, tau));
     let gram = e.vectors.adjoint_product(&e.vectors);
     let forms: [Mat; 3] = std::array::from_fn(|a| e.vectors.adjoint_product(&path.still_force[a].product(&e.vectors)));
@@ -691,12 +695,28 @@ fn cf4(path: &Path, x: &mut [C64], t: f64, h: f64) -> f64 {
     let times = [t + (0.5 - r) * h, t + (0.5 + r) * h];
     let mut work = 0.0;
     for w in [[0.25 + r, 0.25 - r], [0.25 - r, 0.25 + r]] {
-        let a = path.combined(times, w);
+        let (scalar, a) = traceless(&path.combined(times, w));
         let plan = linalg::Taylor::steps(a.norm1() * h.abs());
         linalg::exp_apply(&a, C64::new(0.0, -h), x);
+        let phase = (C64::new(0.0, -h) * scalar).exp();
+        for z in x.iter_mut() {
+            *z *= phase;
+        }
         work += count::exponential(path.n, path.beats.len(), plan.parts * plan.terms);
     }
     work
+}
+
+/// A generator's scalar part c = tr(A)/n and A less it: e^{−iAs} = e^{−ics} e^{−i(A − c)s} exactly, c a phase and a decay
+/// every state shares -- the trap's light shift, hundreds of rad/µs on every state alike, is one. The propagations take
+/// the rest, whose norm sizes their work and their rounding, and multiply by the scalar's exponential.
+fn traceless(a: &Mat) -> (C64, Mat) {
+    let scalar = a.trace() / a.rows as f64;
+    let mut rest = a.clone();
+    for i in 0..a.rows {
+        rest[(i, i)] -= scalar;
+    }
+    (scalar, rest)
 }
 
 /// The propagation of a beating Ĥ(t) by CF4 (`cf4`) on 2P spacings h, P = `panels`, the impulse by composite Simpson on
@@ -918,7 +938,7 @@ pub fn step_work(generator: &Generator, waves: &[[f64; 3]], velocity: [f64; 3], 
     let (n, beats) = (path.n, path.beats.len());
     let grid_work = |panels: usize| {
         let h = tau / (2 * panels) as f64;
-        let bound = 0.5 * (path.still.norm1() + path.beats.iter().map(|(_, m, _)| m.norm1()).sum::<f64>()) * h.abs();
+        let bound = 0.5 * (traceless(&path.still).1.norm1() + path.beats.iter().map(|(_, m, _)| traceless(m).1.norm1()).sum::<f64>()) * h.abs();
         let plan = linalg::Taylor::steps(bound);
         (2 * panels + 1) as f64 * count::node(n, beats) + (2 * panels) as f64 * 2.0 * count::exponential(n, beats, plan.parts * plan.terms)
     };

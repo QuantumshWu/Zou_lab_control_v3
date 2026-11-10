@@ -1078,6 +1078,13 @@ fn atoms<D: Dynamics>(model: &D, count: u64, grid: f64) -> Vec<Trajectory> {
 /// scene's temperature in the trap's harmonic approximation (as `conservative_trap`), held, one step of τ each on a
 /// grid of `panels` panels.
 fn scene_cost(name: &str, tau: f64, panels: usize) -> [f64; 2] {
+    let mut times = [0.0; 2];
+    scene_atoms(name, tau / (2 * panels) as f64, &mut |run, starts| times = cost(&format!("{name}/{panels}"), run, starts, tau));
+    times
+}
+
+/// An R1 scene's far-light model and its atoms on the grid's spacing `grid`, to `each`.
+fn scene_atoms(name: &str, grid: f64, each: &mut dyn FnMut(&crate::model::Run, &[Trajectory])) {
     let request = scene(name);
     let light = crate::field::Light::new(&request);
     let model = crate::model::Model::new(&request, &light, &[]).expect("the far light folds");
@@ -1100,11 +1107,11 @@ fn scene_cost(name: &str, tau: f64, panels: usize) -> [f64; 2] {
             }
             let mut t = Trajectory::new(&run, state, r, kappa, 17, i);
             t.threshold = f64::MIN_POSITIVE;
-            t.grid = tau / (2 * panels) as f64;
+            t.grid = grid;
             t
         })
         .collect();
-    cost(&format!("{name}/{panels}"), &run, &starts, tau)
+    each(&run, &starts)
 }
 
 /// The step's cost (run by name, alone: `the_step_s_cost -- --ignored --nocapture`): µs per `step::step` and per phase,
