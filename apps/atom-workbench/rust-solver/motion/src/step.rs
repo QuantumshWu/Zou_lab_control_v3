@@ -70,8 +70,8 @@
 //!
 //! # Jumps (SPEC §1.6)
 //! ‖ψ‖² falls monotonically between jumps (the decay is −(i/2)ΣJ†J by the model's construction). Where it reaches the
-//! trajectory's threshold θ within a step the root s* of ln‖ψ(s)‖² = ln θ is found by bracketed Newton with bisection's
-//! guarantee (`root`); the caller redoes the step to it and jumps at its end (`jump`). A jump draws from its own stream
+//! trajectory's threshold θ within a step the root s* of ln‖ψ(s)‖² = ln θ is found by bracketed inverse interpolation, to
+//! the norm's rounding (`root`); the caller redoes the step to it and jumps at its end (`jump`). A jump draws from its own stream
 //! (`random::Stream::jump`) in a fixed order: the next threshold, the class, the polarization, the fluctuation's three
 //! signs, and the direction's rejection loop last, so that the loop's length moves no other draw.
 
@@ -518,14 +518,6 @@ impl<'a> Path<'a> {
             a[(s, s)] += C64::real(diagonal * self.gauge[s]);
         }
     }
-    /// d‖x‖²/dt = 2 Im⟨x|Ĥ(t)|x⟩: the propagated norm's rate (−‖ψ‖² times the hazard, by the decay's construction).
-    fn rate(&self, x: &[C64], t: f64) -> f64 {
-        let mut s = C64::ZERO;
-        for part in self.parts {
-            s += C64::cis(self.omega(part) * (t - self.middle)) * form(&part.generator, x);
-        }
-        2.0 * s.im
-    }
 }
 
 /// The panels of two spacings over τ with spacings no wider than h (`beating`): ⌈|τ|/2h⌉, at least one; a quotient within
@@ -535,20 +527,6 @@ pub fn panels(tau: f64, spacing: f64) -> usize {
     let whole = x.round();
     let panels = if (x - whole).abs() <= rounding(4) * x { whole } else { x.ceil() };
     (panels as usize).max(1)
-}
-
-/// ⟨x|X|x⟩.
-fn form(m: &Mat, x: &[C64]) -> C64 {
-    let n = x.len();
-    let mut s = C64::ZERO;
-    for i in 0..n {
-        let mut r = C64::ZERO;
-        for (a, b) in m.data[i * n..(i + 1) * n].iter().zip(x) {
-            r += *a * *b;
-        }
-        s += x[i].conj() * r;
-    }
-    s
 }
 
 /// The entries on and above the diagonal of a Hermitian matrix on n states.
@@ -745,7 +723,7 @@ fn impulse(path: &Path, held: &mut [C64], change: &mut [C64], sums: &mut [C64], 
 /// The propagation of a static Ĥ₀ through its eigendecomposition Ĥ₀ = c + RΛR⁻¹ (its scalar part c apart, `traceless`;
 /// exact at any time, its rounding κ(R)·u grown by the decay rates' spread over the step, `linalg::Eigen`): in the
 /// coordinates d = R⁻¹x, d(s) = e^{−i(c + Λ)s}d₀ and x(s) = R d(s), the impulse by Gauss–Legendre to round-off at the
-/// bandwidth max|λ_b* − λ_c| (`quadrature`), the norm's root with its rate 2 Im⟨x|Ĥ₀|x⟩. None where the decomposition
+/// bandwidth max|λ_b* − λ_c| (`quadrature`), the norm's root on ‖x(s)‖² (`root`). None where the decomposition
 /// fails.
 fn spectral(path: &Path, scratch: &mut Scratch, psi: &[C64], tau: f64, threshold: Option<f64>) -> Option<Propagated> {
     let n = path.n;
@@ -779,14 +757,14 @@ fn spectral(path: &Path, scratch: &mut Scratch, psi: &[C64], tau: f64, threshold
         }
     });
     at(tau, &mut end[..n]);
+    let bound = e.condition * UNIT_ROUNDOFF * (1.0 + tau.abs() * growth);
     let crossing = threshold.filter(|&theta| tau > 0.0 && norm_sqr(&end[..n]) <= theta).map(|theta| {
         let norm = |s: f64| {
             let mut x = [C64::ZERO; STATES];
             at(s, &mut x[..n]);
-            let d = norm_sqr(&x[..n]);
-            (d, 2.0 * (form(matrix, &x[..n]).im + scalar.im * d))
+            norm_sqr(&x[..n])
         };
-        root(norm, (0.0, norm_sqr(psi)), (tau, norm_sqr(&end[..n])), theta)
+        root(norm, (0.0, norm_sqr(psi)), (tau, norm_sqr(&end[..n])), theta, 2.0 * bound + rounding(n + 1))
     });
     for (z, phase) in end[..n].iter_mut().zip(&path.half) {
         *z *= *phase;
@@ -795,7 +773,7 @@ fn spectral(path: &Path, scratch: &mut Scratch, psi: &[C64], tau: f64, threshold
         end,
         impulse,
         crossing,
-        rounding: e.condition * UNIT_ROUNDOFF * (1.0 + tau.abs() * growth),
+        rounding: bound,
         panels: None,
         work: count::spectral(n, nodes(tau, bandwidth)) + count::impulse(n, path.parts.len(), nodes(tau, bandwidth)),
     })
@@ -805,8 +783,9 @@ fn spectral(path: &Path, scratch: &mut Scratch, psi: &[C64], tau: f64, threshold
 /// x ← e^{−ih(w₂Ĥ₁ + w₁Ĥ₂)} e^{−ih(w₁Ĥ₁ + w₂Ĥ₂)} x, Ĥ_i = Ĥ(t + c_i h) at the Gauss nodes c = ½ ∓ √3/6, w = ¼ ± √3/6;
 /// exact where Ĥ is static (w₁ + w₂ = ½ each). Each exponential on the vector to round-off (`linalg::exp_apply`, which
 /// takes the combination's scalar part out and overwrites `a`; `vectors` its work); the parts' phases at the two
-/// nodes are made once, into `phases`. Its counted work.
-fn cf4(path: &Path, a: &mut Mat, phases: &mut [C64], vectors: &mut [C64], x: &mut [C64], t: f64, h: f64) -> f64 {
+/// nodes are made once, into `phases`. Its counted work and its rounding of x relative to its norm
+/// (`linalg::Chebyshev::rounding`).
+fn cf4(path: &Path, a: &mut Mat, phases: &mut [C64], vectors: &mut [C64], x: &mut [C64], t: f64, h: f64) -> (f64, f64) {
     let r = 3.0_f64.sqrt() / 6.0;
     let times = [t + (0.5 - r) * h - path.middle, t + (0.5 + r) * h - path.middle];
     for (part, phases) in path.parts.iter().zip(phases.chunks_exact_mut(2)) {
@@ -814,13 +793,14 @@ fn cf4(path: &Path, a: &mut Mat, phases: &mut [C64], vectors: &mut [C64], x: &mu
         phases[0] = C64::cis(omega * times[0]);
         phases[1] = C64::cis(omega * times[1]);
     }
-    let mut work = 0.0;
+    let (mut work, mut bound) = (0.0, 0.0);
     for [w1, w2] in [[0.25 + r, 0.25 - r], [0.25 - r, 0.25 + r]] {
         path.combination(a, |j| phases[2 * j] * w1 + phases[2 * j + 1] * w2, w1 + w2);
         let plan = linalg::exp_apply(a, C64::new(0.0, -h), x, vectors);
         work += count::exponential(path.n, path.parts.len(), plan.parts * plan.terms);
+        bound += plan.rounding(path.n);
     }
-    work
+    (work, bound)
 }
 
 /// The propagation of a beating Ĥ(t) by CF4 (`cf4`) on 2P spacings h, P = `panels`, the impulse by composite Simpson on
@@ -839,16 +819,17 @@ fn beating(path: &Path, scratch: &mut Scratch, psi: &[C64], start: f64, tau: f64
         let t = start + k as f64 * h;
         let (before, after) = states[k * n..(k + 2) * n].split_at_mut(n);
         after.copy_from_slice(before);
-        work += cf4(path, matrix, phases, vectors, after, t, h);
+        let (exponentials, bound) = cf4(path, matrix, phases, vectors, after, t, h);
+        work += exponentials;
         if let Some(theta) = threshold.filter(|&theta| crossing.is_none() && tau > 0.0 && norm_sqr(after) <= theta) {
             let from = k as f64 * h;
             let norm = |s: f64| {
                 let mut y = [C64::ZERO; STATES];
                 y[..n].copy_from_slice(before);
                 cf4(path, matrix, phases, vectors, &mut y[..n], t, s - from);
-                (norm_sqr(&y[..n]), path.rate(&y[..n], start + s))
+                norm_sqr(&y[..n])
             };
-            crossing = Some(root(norm, (from, norm_sqr(before)), (from + h, norm_sqr(after)), theta));
+            crossing = Some(root(norm, (from, norm_sqr(before)), (from + h, norm_sqr(after)), theta, 2.0 * bound + rounding(n + 1)));
         }
     }
     // Composite Simpson on the nodes, weights 1, 4, 2, …, 4, 1 over h/3.
@@ -867,29 +848,48 @@ fn beating(path: &Path, scratch: &mut Scratch, psi: &[C64], start: f64, tau: f64
     Propagated { end, impulse, crossing, rounding: 0.0, panels: Some(panels), work }
 }
 
-/// The first root in [lo, hi] of ln D(s) = ln θ for a non-increasing D with D(hi) ≤ θ, D and its rate from `norm` and
-/// D at the bracket's ends given (lo itself where D(lo) ≤ θ already): Newton on ln D from the interpolation of ln D
-/// between the bracket's ends, kept inside the bracket (bisection where it steps out or the rate does not fall), until
-/// it no longer moves; bisection's guarantee within `ROUNDS`.
-fn root(mut norm: impl FnMut(f64) -> (f64, f64), (lo, at_lo): (f64, f64), (hi, at_hi): (f64, f64), theta: f64) -> f64 {
+/// A root in [lo, hi] of ln D(s) = ln θ for a non-increasing D with D(hi) ≤ θ, D from `norm` and D at the bracket's ends
+/// given (lo itself where D(lo) ≤ θ already): by the inverse interpolation of ln D − ln θ through its last three points
+/// (their parabola's root; their last two's line where three do not tell), kept inside the bracket (its middle where
+/// both step out), until ln D is within its rounding of ln θ or the iteration no longer moves, at most `ROUNDS` times.
+/// `floor` is the rounding of ln D as it is computed -- twice the state's relative to its norm, and the norm's own sum --,
+/// the two logarithms' beside it: within it s is the root as far as the norm tells, and the interpolation's next point,
+/// taken without another evaluation, is the root to the norm's actual rounding over its rate. (Beyond it the points
+/// wander in that rounding until the bracket closes on neighbouring numbers: some ten evaluations more.) The norm's rate
+/// 2 Im⟨x|Ĥ|x⟩ is not asked: on a grid it is not the slope of the grid's own norm, and a Newton iteration with it
+/// converged at the grid's error's pace, in twice the evaluations.
+fn root(mut norm: impl FnMut(f64) -> f64, (lo, at_lo): (f64, f64), (hi, at_hi): (f64, f64), theta: f64, floor: f64) -> f64 {
     let target = theta.ln();
+    let floor = floor + 2.0 * UNIT_ROUNDOFF * target.abs();
     let (a, b) = (at_lo.ln() - target, at_hi.ln() - target);
-    if !(a > 0.0) {
+    if !(a > floor) {
         return lo;
     }
+    if !(b < -floor) {
+        return hi;
+    }
+    // The last three points (s, ln D − ln θ), the latest first, and their interpolation's root where it lies inside.
+    let interpolated = |[(x1, y1), (x2, y2), (x3, y3)]: [(f64, f64); 3], lo: f64, hi: f64| {
+        let parabola = x1 * y2 * y3 / ((y1 - y2) * (y1 - y3)) + x2 * y1 * y3 / ((y2 - y1) * (y2 - y3)) + x3 * y1 * y2 / ((y3 - y1) * (y3 - y2));
+        let line = x1 - y1 * (x1 - x2) / (y1 - y2);
+        [parabola, line].into_iter().find(|&s| s > lo && s < hi)
+    };
     let (mut lo, mut hi) = (lo, hi);
-    let mut s = if b < a { lo + a / (a - b) * (hi - lo) } else { hi };
+    let mut points = [(hi, b), (lo, a), (f64::NAN, f64::NAN)];
+    let mut s = interpolated(points, lo, hi).unwrap_or(0.5 * (lo + hi));
     for _ in 0..ROUNDS {
-        let (d, rate) = norm(s);
-        let g = d.ln() - target;
+        let g = norm(s).ln() - target;
         if g > 0.0 {
             lo = s;
         } else {
             hi = s;
         }
-        let slope = rate / d;
-        let newton = if slope < 0.0 { s - g / slope } else { f64::NAN };
-        let next = if newton > lo && newton < hi { newton } else { 0.5 * (lo + hi) };
+        points = [(s, g), points[0], points[1]];
+        let refined = interpolated(points, lo, hi);
+        if g.abs() <= floor {
+            return refined.unwrap_or(s);
+        }
+        let next = refined.unwrap_or(0.5 * (lo + hi));
         if next == s || !(hi > lo) {
             return s;
         }

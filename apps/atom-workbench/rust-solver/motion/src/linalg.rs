@@ -46,7 +46,7 @@
 //!   step with it, from K + 2 and unnormalized -- the sum is linear in them and is divided by J₀ + 2 Σ_m J_{2m} = 1 at its
 //!   end --, so no coefficient is stored. K products a part.
 
-use crate::units::UNIT_ROUNDOFF;
+use crate::units::{rounding, UNIT_ROUNDOFF};
 use std::iter::Sum;
 use std::ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
 
@@ -745,6 +745,13 @@ impl Chebyshev {
             next *= y / (terms + 1) as f64;
         }
         Chebyshev { parts, terms }
+    }
+    /// The rounding of the plan's sum on n states relative to ‖v‖, to first order in u: every step of a part rounds a
+    /// product of n terms and two additions, on vectors of ‖v‖'s size within the part's hump, and enters the sum through
+    /// a Chebyshev polynomial of X/σ; the scalar part's exponential and its product round once more. γ of that many
+    /// operations (`units::rounding`).
+    pub fn rounding(&self, n: usize) -> f64 {
+        rounding((n + 2) * self.parts * self.terms + 2)
     }
 }
 
