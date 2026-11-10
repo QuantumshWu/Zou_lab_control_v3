@@ -530,9 +530,11 @@ fn a_standing_wave_s_force_is_the_bloch_equations_along_the_path() {
 }
 
 /// The waiting times (SPEC §1.6): a ground state of constant hazard γ, ‖ψ‖² = e^{−γt} between jumps, jumps at the roots
-/// ln(1/θ_j)/γ of the thresholds its streams draw (θ₀ from jump 0's, θ_j the first draw of jump j's). Over thousands of
-/// jumps the count is the thresholds' and the final norm theirs to round-off: every root found to round-off. Their
-/// waiting times' mean and variance those of the exponential law within four standard errors.
+/// ln(1/θ_j)/γ of the thresholds its streams draw (θ₀ from jump 0's, θ_j the first draw of jump j's). A constant
+/// hazard's norm is one curve along a step of any length, so the step tried at the last step's rate ends at the
+/// threshold to round-off and is the step to the jump: over thousands of jumps the count is the thresholds' and the
+/// final norm theirs to round-off. Their waiting times' mean and variance those of the exponential law within four
+/// standard errors.
 #[test]
 fn the_jumps_are_at_the_roots_of_the_norm() {
     let gamma = 2.0;
@@ -562,6 +564,42 @@ fn the_jumps_are_at_the_roots_of_the_norm() {
     let variance = waits.iter().map(|w| (w - mean).powi(2)).sum::<f64>() / (n - 1.0);
     assert!((mean * gamma - 1.0).abs() < 4.0 / n.sqrt(), "mean {mean} against {}", 1.0 / gamma);
     assert!((variance * gamma * gamma - 1.0).abs() < 4.0 * (8.0 / n).sqrt(), "variance {variance} against {}", 1.0 / (gamma * gamma));
+}
+
+/// The jumps' times (adapt.rs, # The jumps' times): a two-level atom about the antinode of a resonant standing wave
+/// along z, in a trap whose period the nominal step does not resolve (ω τ = 3), jumping some times a nominal step --
+/// the hazard follows the atom through the wave, so a step's norm is its own curve. Every step `advance` takes, taken
+/// again from the same state as the flow between jumps (`step::step`), ends with ‖ψ‖² at the threshold -- within the
+/// tolerance of its length at twice its own mean rate -- exactly where a jump follows it, and above it elsewhere:
+/// replayed so, a jump after each such step, the trajectory is `advance`'s own to the bit. The steps are the jumps' own:
+/// far shorter than the nominal one.
+#[test]
+fn a_jump_is_made_where_its_own_step_reaches_the_threshold() {
+    let (omega, tau, end) = (0.1, 30.0, 900.0);
+    let mut hessian = [[0.0; 3]; 3];
+    hessian[2][2] = omega * omega / RB;
+    let wave = |k: f64| Beam { k: [0.0, 0.0, k], rabi: 1.7, phase: 0.0 };
+    let model = Atom::new(RB, Trap::Quadratic { hessian, gradient: [0.0; 3] }, vec![wave(K), wave(-K)], 0.0, GAMMA);
+    let start = Trajectory::new(&model, 0, [0.0, 0.0, 0.05], [0.0, 0.0, 8.0], 3, 5);
+    let (mut t, mut steps) = (start.clone(), Vec::new());
+    adapt::advance(&model, tau, &mut t, &mut step::Scratch::default(), None, end, &mut |s| steps.push(s.tau)).unwrap();
+    let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
+    let (mut twin, mut scratch, mut longest) = (start.clone(), step::Scratch::default(), 0.0_f64);
+    for &length in &steps {
+        twin.grid = length / 4.0;
+        let taken = step::step(&model, &twin, length, &mut scratch).unwrap().end;
+        let fall = (norm(&twin.psi) / norm(&taken.psi)).ln();
+        (twin.r, twin.kappa, twin.psi, twin.time) = (taken.r, taken.kappa, taken.psi, taken.time);
+        let above = (norm(&twin.psi) / twin.threshold).ln();
+        if above.abs() <= 2.0 * crate::units::JUMP_TIMING * fall {
+            step::jump(&model, &mut twin, &mut None).unwrap();
+            longest = longest.max(length);
+        } else {
+            assert!(above > 0.0, "a step of {length} µs to {} ends {above} below its threshold in ln‖ψ‖² with no jump", twin.time);
+        }
+    }
+    assert!(t.jumps > 100 && steps.len() as f64 * tau > 3.0 * end && longest < tau, "{} jumps in {} steps, the longest to a jump {longest} µs", t.jumps, steps.len());
+    assert_eq!((twin.jumps, twin.r, twin.kappa, &twin.psi), (t.jumps, t.r, t.kappa, &t.psi), "the replay against the advance");
 }
 
 /// A read trajectory's jumps and hazard (adapt.rs, # The read): a ground state of constant hazard γ in no potential.
@@ -1235,6 +1273,11 @@ fn fitted(n: usize) -> super::Scratch {
     scratch
 }
 
+/// A threshold watched within the step alone: a crossing anywhere before the step's end ends the propagation there.
+fn watched(theta: f64) -> super::Watch {
+    super::Watch { theta, slack: 0.0, reach: 0.0 }
+}
+
 /// One case of the cost harness: µs per step of τ over the case's start states (held: no step reaches their thresholds),
 /// split into the model's part -- its reference expansions, its middle, and at the middle's nodes its generators, forces
 /// and tones, each timed alone and counted as the step calls them -- and the step's own, the rest. Then the step's
@@ -1282,7 +1325,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             .zip(starts)
             .map(|(p, s)| {
                 let (from, threshold) = if crossing { (&p.crossed, Some(p.crossed.threshold)) } else { (s, (which == 1).then_some(s.threshold)) };
-                match super::propagate(&mut fitted(from.psi.len()), &p.middle, from, p.reference, p.kappas[which], p.velocities[which], tau, threshold) {
+                match super::propagate(&mut fitted(from.psi.len()), &p.middle, from, p.reference, p.kappas[which], p.velocities[which], tau, threshold.map(watched)) {
                     Ok((_, kick)) => kick[0],
                     Err(crossed) => crossed.at,
                 }
@@ -1318,7 +1361,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     );
     let crossings = pieces
         .iter()
-        .filter(|p| super::propagate(&mut fitted(p.crossed.psi.len()), &p.middle, &p.crossed, p.reference, p.kappas[1], p.velocities[1], tau, Some(p.crossed.threshold)).is_err())
+        .filter(|p| super::propagate(&mut fitted(p.crossed.psi.len()), &p.middle, &p.crossed, p.reference, p.kappas[1], p.velocities[1], tau, Some(watched(p.crossed.threshold))).is_err())
         .count();
     let nodes = calls[2] * generator + calls[3] * force + calls[4] * tones;
     let own = whole - calls[0] * reference - calls[1] * point - nodes;
