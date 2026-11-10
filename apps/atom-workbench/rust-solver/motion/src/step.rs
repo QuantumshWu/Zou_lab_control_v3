@@ -772,7 +772,7 @@ struct Spectrum {
 /// rounds no more than through the exponential of Ĥ₀ on the vector, the other exact evaluation of the same state
 /// (`linalg::Chebyshev::rounding` of its plan over the step) -- towards an exceptional point κ(R) grows without bound and
 /// the exponential, whose rounding does not know it, takes over; on the grid otherwise (None), whose error its own
-/// reading books (`Step::regrid`). `matrix` is left Ĥ₀'s traceless part; `sums` holds n numbers.
+/// reading books (`Midway::regrid`). `matrix` is left Ĥ₀'s traceless part; `sums` holds n numbers.
 fn route<M: Middle>(along: &Along<M>, matrix: &mut Mat, sums: &mut [C64], tau: f64) -> Option<Spectrum> {
     if !along.middle.still() {
         return None;
@@ -864,7 +864,7 @@ fn cf4<M: Middle>(path: &Along<M>, a: &mut Mat, generators: &mut [Mat; 2], vecto
 
 /// The propagation of Ĥ(t) by CF4 (`cf4`) on 2P spacings h, P = `panels`, the impulse by composite Simpson on its
 /// nodes: both of fourth order in νh, ν the force's frequency bound, an error the step's doubling does not see (its
-/// steps take the same spacing), read by doubling the panels (`Step::regrid`). The middle state is the middle node's,
+/// steps take the same spacing), read by doubling the panels (`Midway::regrid`). The middle state is the middle node's,
 /// whose change is none. The norm's root between the nodes that bracket it, by CF4 from the earlier node; the grid
 /// ends at its crossing (`Crossed`).
 fn beating<M: Middle>(path: &Along<M>, scratch: &mut Scratch, psi: &[C64], tau: f64, panels: usize, threshold: Option<f64>) -> Result<Propagated, Crossed> {
@@ -982,11 +982,10 @@ pub struct Step {
     pub end: Trajectory,
     /// The step's path.
     pub segment: Segment,
-    /// The step's counted work (real multiply-adds: its own and its nodes' generators and forces) and the middles it
-    /// asked of the model.
+    /// The step's counted work (real multiply-adds: its own and its nodes' generators and forces). The middle it went
+    /// through is counted where it is made (`Midway`: one a step, or one for the steps that share it).
     pub work: f64,
-    pub assemblies: u64,
-    /// The step's propagation to be redone on twice its grid's panels (`Step::regrid`); none through the
+    /// The step's propagation to be redone on twice its grid's panels (`Midway::regrid`); none through the
     /// eigendecomposition.
     retry: Option<Retry>,
 }
@@ -1000,26 +999,6 @@ struct Retry {
     psi: [C64; STATES],
     panels: usize,
     impulse: [f64; 3],
-}
-
-impl Step {
-    /// The step's end with its propagation redone on twice its grid's panels (the same middle of the same model, the same
-    /// path, the same kick otherwise), and that work: the grid's error read, the step's grid erring by 2⁴/(2⁴ − 1) of the
-    /// difference (fourth order). None where the step took no grid.
-    pub fn regrid<D: Dynamics>(&self, model: &D, scratch: &mut Scratch) -> Option<(Trajectory, f64)> {
-        let r = self.retry.as_ref()?;
-        let (n, s) = (self.end.psi.len(), &self.segment);
-        scratch.fit(n);
-        let middle = model.middle(self.end.cluster, s.kicked.0, s.middle());
-        let finer = whole(beating(&Along::new(&middle, r.kappa, r.velocity, s.tau), scratch, &r.psi[..n], s.tau, 2 * r.panels, None));
-        let kicked = (s.kicked.0, std::array::from_fn(|a| s.kicked.1[a] + finer.impulse[a] - r.impulse[a]));
-        let (r1, kappa1) = s.flow.advance(kicked, 0.5 * s.tau);
-        let mut end = self.end.clone();
-        end.r = r1;
-        end.kappa = kappa1;
-        end.psi.copy_from_slice(&finer.end[..n]);
-        Some((end, finer.work))
-    }
 }
 
 /// Why a step or a jump could not be made: the reference's fixed point is not a contraction at this step (`middle`); the
@@ -1055,75 +1034,119 @@ fn whole<T>(propagated: Result<T, Crossed>) -> T {
     }
 }
 
-/// A step tried from a trajectory's state (`attempt`): taken whole, or the first time (µs from the step's start) at
-/// which ‖ψ‖² reaches the trajectory's threshold within it -- with the work counted up to there and the middles asked,
-/// which the caller books as a step's.
+/// A step tried from a state (`Midway::attempt`): taken whole, or the first time (µs from the step's start) at which
+/// ‖ψ‖² reaches the state's threshold within it, with the work counted up to there.
 #[derive(Clone, Debug)]
 pub enum Attempt {
     Whole(Step),
-    Crossing { root: f64, work: f64, assemblies: u64 },
+    Crossing { root: f64, work: f64 },
 }
 
-/// One step of τ (negative: the reverse step) from a trajectory's state (module documentation): the middle and its
-/// reference (`middle`); the model's generator there (`Dynamics::middle`); the predictor's momentum from the shear at κ_h
-/// and the reference's force, the first propagation on its path; the corrected momentum κ_h + Δκ/2 and the step's
-/// propagation at it and on its path; the kick and the second half flow. The flow between jumps: the trajectory's
-/// threshold is not looked at (`attempt` looks). `scratch` is the trajectory's.
+/// A step's middle (module documentation, # The reference, # The kick): the reference's flow of a step of τ and the
+/// point (r_h, κ_h) its first half reaches from the step's start, the reference's gradient there, and the model's
+/// generator there at the step's middle time (`Dynamics::middle`) -- all of a step that its internal state does not
+/// enter. The trajectory's step goes through it; so do the other steps a read takes from the same start (adapt.rs,
+/// # The read): the carried state's, and the trajectory's own on twice its grid (`Midway::regrid`) -- one middle of the
+/// model for the three.
+pub struct Midway<'a, D: Dynamics + 'a> {
+    tau: f64,
+    hbar_over_mass: f64,
+    flow: Flow,
+    reached: ([f64; 3], [f64; 3]),
+    reference: [f64; 3],
+    generator: D::Middle<'a>,
+}
+
+impl<'a, D: Dynamics> Midway<'a, D> {
+    /// The middle of the step of τ (negative: the reverse step) from a trajectory's position, momentum, cluster and
+    /// time: the reference's fixed point (`middle`; refused where it is not one) and the model's generator there.
+    pub fn new(model: &'a D, from: &Trajectory, tau: f64) -> Result<Midway<'a, D>, Refused> {
+        let half = 0.5 * tau;
+        let (flow, reached) = middle(model, from.r, from.kappa, half)?;
+        let generator = model.middle(from.cluster, reached.0, from.time + half);
+        Ok(Midway { tau, hbar_over_mass: model.hbar_over_mass(), flow, reached, reference: flow.gradient_at(reached.0), generator })
+    }
+
+    /// The step through this middle of a state at its start -- the middle's own position, momentum, cluster and time,
+    /// any internal state of the cluster --: the predictor's momentum from the shear at κ_h and the reference's force,
+    /// the first propagation on its path; the corrected momentum κ_h + Δκ/2 and the step's propagation at it and on its
+    /// path; the kick and the second half flow. The flow between jumps: the state's threshold is not looked at
+    /// (`attempt` looks). `scratch` is the trajectory's.
+    pub fn step(&self, from: &Trajectory, scratch: &mut Scratch) -> Result<Step, Refused> {
+        match self.tried(from, None, scratch)? {
+            Attempt::Whole(step) => Ok(step),
+            Attempt::Crossing { .. } => unreachable!("a step without a threshold meets no crossing"),
+        }
+    }
+
+    /// The same step tried for the state's jump: `step` where ‖ψ‖² stays above the state's threshold through it; else
+    /// its crossing, found on the step's own propagation, which ends there (the caller redoes the step to the crossing
+    /// and jumps at its end, module documentation, # Jumps).
+    pub fn attempt(&self, from: &Trajectory, scratch: &mut Scratch) -> Result<Attempt, Refused> {
+        self.tried(from, Some(from.threshold), scratch)
+    }
+
+    /// `step`, or with a threshold `attempt`.
+    fn tried(&self, from: &Trajectory, threshold: Option<f64>, scratch: &mut Scratch) -> Result<Attempt, Refused> {
+        let (tau, hm, n) = (self.tau, self.hbar_over_mass, from.psi.len());
+        let (flow, (r_h, kappa_h), reference, generator) = (self.flow, self.reached, self.reference, &self.generator);
+        scratch.fit(n);
+        // The predictor: the shear and the reference's force.
+        let held = shear(&Along::new(generator, kappa_h, [0.0; 3], tau), scratch.carve(0).held, &from.psi, tau);
+        let predicted: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * (held[a] + tau * reference[a]));
+        let (one, kick_one) = whole(propagate(scratch, generator, from, reference, kappa_h, predicted.map(|k| hm * k), tau, None));
+        // The correction: the middle momentum of the first propagation's kick.
+        let corrected: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * kick_one[a]);
+        let velocity = corrected.map(|k| hm * k);
+        let (two, kick) = match propagate(scratch, generator, from, reference, corrected, velocity, tau, threshold) {
+            Ok(made) => made,
+            Err(crossed) => return Ok(Attempt::Crossing { root: crossed.at, work: one.work + crossed.work + count::shear(n, generator.work()) }),
+        };
+        let kicked = (r_h, std::array::from_fn(|a| kappa_h[a] + kick[a]));
+        let (r1, kappa1) = flow.advance(kicked, 0.5 * tau);
+        if !(r1.iter().chain(&kappa1).all(|x| x.is_finite()) && two.end[..n].iter().all(|z| z.is_finite())) {
+            return Err(Refused::Overflow);
+        }
+        let mut end = from.clone();
+        end.r = r1;
+        end.kappa = kappa1;
+        end.psi.copy_from_slice(&two.end[..n]);
+        end.time = from.time + tau;
+        let work = one.work + two.work + count::shear(n, generator.work());
+        let retry = two.panels.map(|panels| {
+            let mut psi = [C64::ZERO; STATES];
+            psi[..n].copy_from_slice(&from.psi);
+            Retry { kappa: corrected, velocity, psi, panels, impulse: two.impulse }
+        });
+        Ok(Attempt::Whole(Step { end, segment: Segment { start: from.time, tau, flow, from: (from.r, from.kappa), kicked }, work, retry }))
+    }
+
+    /// A step taken through this middle with its propagation redone on twice its grid's panels (the same middle, the
+    /// same path, the same kick otherwise): its end, and that work -- the grid's error read, the step's grid erring by
+    /// 2⁴/(2⁴ − 1) of the difference (fourth order). None where the step took no grid.
+    pub fn regrid(&self, step: &Step, scratch: &mut Scratch) -> Option<(Trajectory, f64)> {
+        let r = step.retry.as_ref()?;
+        let (n, s) = (step.end.psi.len(), &step.segment);
+        scratch.fit(n);
+        let finer = whole(beating(&Along::new(&self.generator, r.kappa, r.velocity, s.tau), scratch, &r.psi[..n], s.tau, 2 * r.panels, None));
+        let kicked = (s.kicked.0, std::array::from_fn(|a| s.kicked.1[a] + finer.impulse[a] - r.impulse[a]));
+        let (r1, kappa1) = s.flow.advance(kicked, 0.5 * s.tau);
+        let mut end = step.end.clone();
+        end.r = r1;
+        end.kappa = kappa1;
+        end.psi.copy_from_slice(&finer.end[..n]);
+        Some((end, finer.work))
+    }
+}
+
+/// One step of τ (negative: the reverse step) from a trajectory's state (module documentation): its middle
+/// (`Midway::new`) and the step through it (`Midway::step`).
 pub fn step<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, scratch: &mut Scratch) -> Result<Step, Refused> {
-    match tried(model, from, tau, None, scratch)? {
-        Attempt::Whole(step) => Ok(step),
-        Attempt::Crossing { .. } => unreachable!("a step without a threshold meets no crossing"),
-    }
-}
-
-/// The step of τ tried from a trajectory's state: `step` where ‖ψ‖² stays above the trajectory's threshold through it;
-/// else its crossing, found on the step's own propagation, which ends there (the caller redoes the step to the crossing
-/// and jumps at its end, module documentation, # Jumps).
-pub fn attempt<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, scratch: &mut Scratch) -> Result<Attempt, Refused> {
-    tried(model, from, tau, Some(from.threshold), scratch)
-}
-
-/// `step`, or with a threshold `attempt`.
-fn tried<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, threshold: Option<f64>, scratch: &mut Scratch) -> Result<Attempt, Refused> {
-    let half = 0.5 * tau;
-    let hm = model.hbar_over_mass();
-    let n = from.psi.len();
-    let (flow, (r_h, kappa_h)) = middle(model, from.r, from.kappa, half)?;
-    let reference = flow.gradient_at(r_h);
-    scratch.fit(n);
-    let generator = model.middle(from.cluster, r_h, from.time + half);
-    // The predictor: the shear and the reference's force.
-    let held = shear(&Along::new(&generator, kappa_h, [0.0; 3], tau), scratch.carve(0).held, &from.psi, tau);
-    let predicted: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * (held[a] + tau * reference[a]));
-    let (one, kick_one) = whole(propagate(scratch, &generator, from, reference, kappa_h, predicted.map(|k| hm * k), tau, None));
-    // The correction: the middle momentum of the first propagation's kick.
-    let corrected: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * kick_one[a]);
-    let velocity = corrected.map(|k| hm * k);
-    let (two, kick) = match propagate(scratch, &generator, from, reference, corrected, velocity, tau, threshold) {
-        Ok(made) => made,
-        Err(crossed) => return Ok(Attempt::Crossing { root: crossed.at, work: one.work + crossed.work + count::shear(n, generator.work()), assemblies: 1 }),
-    };
-    let kicked = (r_h, std::array::from_fn(|a| kappa_h[a] + kick[a]));
-    let (r1, kappa1) = flow.advance(kicked, half);
-    if !(r1.iter().chain(&kappa1).all(|x| x.is_finite()) && two.end[..n].iter().all(|z| z.is_finite())) {
-        return Err(Refused::Overflow);
-    }
-    let mut end = from.clone();
-    end.r = r1;
-    end.kappa = kappa1;
-    end.psi.copy_from_slice(&two.end[..n]);
-    end.time = from.time + tau;
-    let work = one.work + two.work + count::shear(n, generator.work());
-    let retry = two.panels.map(|panels| {
-        let mut psi = [C64::ZERO; STATES];
-        psi[..n].copy_from_slice(&from.psi);
-        Retry { kappa: corrected, velocity, psi, panels, impulse: two.impulse }
-    });
-    Ok(Attempt::Whole(Step { end, segment: Segment { start: from.time, tau, flow, from: (from.r, from.kappa), kicked }, work, assemblies: 1, retry }))
+    Midway::new(model, from, tau)?.step(from, scratch)
 }
 
 /// The counted work of one step of τ on the path through a middle at a momentum and a velocity, and of that step's grid
-/// doubling (zero without a grid): what `Step::work` and `Step::regrid` count, priced without taking the step -- the
+/// doubling (zero without a grid): what `Step::work` and `Midway::regrid` count, priced without taking the step -- the
 /// solve's price of a model it has not run, at its pilot's states and steps. It makes no middle: the caller's is a
 /// state's own, or one of the cluster made once -- the nodes' counts are the cluster's whatever the point
 /// (`Middle::work`), and the point gives the route alone. Both propagations by the generator's own route (`route`: the
