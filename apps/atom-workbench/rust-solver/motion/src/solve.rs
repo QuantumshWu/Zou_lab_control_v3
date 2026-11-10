@@ -3,10 +3,13 @@
 //! # The pipeline
 //! 1. The request's checks; the light; the initial components; the reach and the model with every unit whose existence
 //!    gate fails kept (model.rs, SPEC §1.5).
-//! 2. The pilot (`pilot_size` trajectories, numbered from `MOST_TRAJECTORIES` so that none of its streams is a run's):
-//!    it predicts only (decisions.md A4) -- the run's step and its error (# The step), the model's units' errors measured
-//!    at its states, the outputs where T is held to its target and T's scale there, the held share. Its result is the
-//!    first checkpoint.
+//! 2. The pilot: the run's first `pilot_size` trajectories (their own numbers, from `MOST_TRAJECTORIES`), at a rung of
+//!    the step's ladder. Some members of each of its groups carry a reader (# The step): from them the run's step and
+//!    its error, and at their states the model's units' errors; from all of them the outputs where T is held to its
+//!    target and T's scale there, the held share, the reach's test. Its result is the first checkpoint, and its
+//!    trajectories stay in the result: they are trajectories of the run's own model and step, and what is judged on
+//!    them -- the step, the model, the rooms -- is judged once, before the product, as QuTiP's mcsolve stops on the
+//!    standard error of the trajectories it reports.
 //! 3. The model's decisions (SPEC §5.2), from the pilot alone.
 //! 4. The product: batches of whole groups at the pilot's step (adapt.rs), every trajectory run to the last output,
 //!    until every output's statistics meet the targets the pilot fixed (`Targets`), or the trajectories reach
@@ -23,7 +26,11 @@
 //! step's share (`rung`; decide.rs): within everywhere, the
 //! rung is the run's step; beyond somewhere, the rung at which the measured error meets the share; unreadable, the next
 //! rung; down to the step at which a trajectory would take `MOST_STEPS` steps, where the readable bound is booked and
-//! flagged. What is booked per output is the read's bound on the rows as shown and on T (`Fixed::step`); the loss's is the
+//! flagged. A read costs several steps a step, so it is taken on as few trajectories as decide it: the first member of
+//! every pilot group -- one a group keeps every group in the spread --, then twice as many members while the rung is
+//! unreadable and its reads could still come within their shares on the whole groups (decide.rs `Read::in_reach`: a
+//! standard error goes as N^{−1/2}; a read that could not, or is no number, sends the ladder to its next rung at once);
+//! a rung that fails costs its read members alone, and the other members of the rung taken run without a reader. What is booked per output is the read's bound on the rows as shown and on T (`Fixed::step`); the loss's is the
 //! share of the product's trajectories whose loss energy lies within the pilot's accumulated error of the escape -- its
 //! mean and z of the atoms' spread (`Fixed::windows`). That share's statistics are the output's own (what no trajectory
 //! saw is booked there, estimate.rs `unseen`); it refutes the step where Wilson's near end at its count lies beyond the
@@ -273,8 +280,10 @@ fn top_rung(interval: f64, frequency: f64) -> f64 {
 
 /// A rung's outcome on the pilot's step error (module documentation, # The step; decide.rs `judge`): the family of every
 /// output's rows as shown, and of T per lab axis where it is held to its target, each against the step's share, at the
-/// scheme's order -- beyond, the factor on τ at which the largest measured error meets its share.
-fn rung(reads: &[Stepped], held_to: &[Option<V3>]) -> Judgement {
+/// scheme's order -- beyond, the factor on τ at which the largest measured error meets its share. And, for a read taken
+/// on the share `part` of the pilot's members, whether every one of its reads could still come within its share on all
+/// of them (decide.rs `Read::in_reach`): a rung that could not is not worth more readers.
+fn rung(reads: &[Stepped], held_to: &[Option<V3>], part: f64) -> (Judgement, bool) {
     let [sp, st] = step_bound();
     let mut looks: Vec<(Read, f64)> = vec![];
     for (k, r) in reads.iter().enumerate().skip(1) {
@@ -283,7 +292,7 @@ fn rung(reads: &[Stepped], held_to: &[Option<V3>]) -> Judgement {
             looks.extend(t.iter().map(|x| (*x, st)));
         }
     }
-    judge(&looks, ORDER as f64)
+    (judge(&looks, ORDER as f64), looks.iter().all(|(read, share)| read.in_reach(*share, part)))
 }
 
 /// The estimates, the listed outputs' atoms and the counts of some groups.
@@ -298,6 +307,15 @@ fn pooled(parts: &[&Part], scales: &Scales) -> (Vec<Estimate>, Vec<Vec<(V3, V3)>
         counts.add(&p.counts);
     }
     (estimates, listed, counts)
+}
+
+/// A message while the pilot's members come in: the result of what is in so far -- the parts in hand and those of the
+/// members now running, each as a group of its own.
+fn so_far(context: &Context, have: &[Part], more: &[&Part], messages: &mut Messages) {
+    let all: Vec<&Part> = have.iter().chain(more.iter().copied()).collect();
+    let (e, l, c) = pooled(&all, &context.scales);
+    let n = e.first().map_or(0., |x| x.trajectories + x.failed) as u64;
+    messages.result(&assemble(context, &e, &l, &c, n), None);
 }
 
 /// The reach's falsifier (SPEC §1.8; decide.rs: a booked bound that a read can only refute): the pilot's T where it has
@@ -402,32 +420,57 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
             .collect()
     };
 
-    // The pilot (module documentation, # The pipeline, # The step): its own trajectory numbers, read at the ladder's rungs
-    // from its first one until its step error fits the step's share; its marks average each atom's kinetic energy over
-    // the reported trap's period of the axis.
+    // The pilot (module documentation, # The pipeline, # The step): the run's first trajectories, at the ladder's rungs
+    // from its first one until the step's error fits the step's share; its readers' marks average each atom's kinetic
+    // energy over the reported trap's period of the axis.
     let periods: V3 = context.scales.frequencies.map(|w| TAU / w);
     let first = MOST_TRAJECTORIES / GROUP;
-    let (pilot, reads) = loop {
+    let groups = pilot_size() / GROUP;
+    let shape = Shape::of(&context.plan, true);
+    let (first_parts, reads, readers) = loop {
         let tau = context.tau;
-        let pilot = run_groups(first, first + pilot_size() / GROUP, Shape::of(&context.plan, true), &|i| trajectory(&run, &ensemble, tau, Some(periods), None, &context.plan, true, i), messages, &mut |prefix, messages| {
-            let (e, l, c) = pooled(prefix, &context.scales);
-            messages.result(&assemble(&context, &e, &l, &c, prefix.len() as u64 * GROUP), None);
-        });
-        let parts: Vec<&Part> = pilot.iter().collect();
-        let reads = stepped(&parts, &context.scales);
-        let next = match rung(&reads, &held_to(&pooled(&parts, &context.scales).0)) {
-            Judgement::Within => break (pilot, reads),
-            Judgement::Beyond(factor) => halved(tau, factor),
-            Judgement::Unreadable => halved(tau, 1.),
+        // The read: on the first member of every group, then on twice as many while the rung is unreadable and could
+        // still come within its share on the whole groups.
+        let mut parts: Vec<Part> = vec![];
+        let mut members = 0;
+        let judgement = loop {
+            let to = (2 * members).clamp(1, GROUP);
+            let more = run_groups(first, first + groups, members..to, shape, &|i| trajectory(&run, &ensemble, tau, Some(periods), None, &context.plan, true, i), messages, &mut |prefix, messages| so_far(&context, &parts, prefix, messages));
+            if parts.is_empty() {
+                parts = more;
+            } else {
+                parts.iter_mut().zip(more).for_each(|(p, m)| p.absorb(m));
+            }
+            members = to;
+            let read: Vec<&Part> = parts.iter().collect();
+            let (judgement, in_reach) = rung(&stepped(&read, &context.scales), &held_to(&pooled(&read, &context.scales).0), members as f64 / GROUP as f64);
+            if judgement != Judgement::Unreadable || members == GROUP || !in_reach {
+                break judgement;
+            }
         };
-        if context.plan.end / next > MOST_STEPS as f64 {
-            context.ledger.flag(format!("时间步长的误差在每条轨迹 {MOST_STEPS} 步的上限内读不到份额以内：按读到的界记账"));
-            break (pilot, reads);
+        let next = match judgement {
+            Judgement::Within => None,
+            Judgement::Beyond(factor) => Some(halved(tau, factor)),
+            Judgement::Unreadable => Some(halved(tau, 1.)),
+        };
+        match next {
+            Some(next) if context.plan.end / next <= MOST_STEPS as f64 => context.tau = next,
+            _ => {
+                if next.is_some() {
+                    context.ledger.flag(format!("时间步长的误差在每条轨迹 {MOST_STEPS} 步的上限内读不到份额以内：按读到的界记账"));
+                }
+                // The rung is the run's: its groups' other members run without a reader.
+                if members < GROUP {
+                    let rest = run_groups(first, first + groups, members..GROUP, shape, &|i| trajectory(&run, &ensemble, tau, None, None, &context.plan, true, i), messages, &mut |prefix, messages| so_far(&context, &parts, prefix, messages));
+                    parts.iter_mut().zip(rest).for_each(|(p, r)| p.absorb(r));
+                }
+                let reads = stepped(&parts.iter().collect::<Vec<_>>(), &context.scales);
+                break (parts, reads, members);
+            }
         }
-        context.tau = next;
     };
     let tau = context.tau;
-    let pilot: Vec<&Part> = pilot.iter().collect();
+    let pilot: Vec<&Part> = first_parts.iter().collect();
     let (estimates, listed, counts) = pooled(&pilot, &context.scales);
     if let Some(t) = outgrown(&estimates, reach) {
         return Ok(Attempt::Grow(t, tau));
@@ -450,15 +493,18 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
         .collect();
     context.fixed.windows = reads.iter().map(|r| r.energy.map_or(f64::INFINITY, |e| e[0].abs() + CONFIDENCE * e[1])).collect();
 
-    // The model's errors at the pilot's states (SPEC §5.2): each folded unit's per output, the held atoms' mean.
+    // The model's errors at the read members' states (SPEC §5.2): each folded unit's per output, the held atoms' mean --
+    // the trajectories the step is read on are the ones the model is read on, as many as the step's read took.
     let units = model.units();
     let mut samples: Vec<State> = vec![];
     let (mut at, mut from) = (vec![], vec![]);
     for (g, p) in pilot.iter().enumerate() {
         for (k, s) in p.samples.iter().enumerate() {
-            samples.extend(s.iter().cloned());
-            at.extend(std::iter::repeat_n(k, s.len()));
-            from.extend(std::iter::repeat_n(g, s.len()));
+            for state in s.iter().filter(|x| x.index % GROUP < readers) {
+                samples.push(state.clone());
+                at.push(k);
+                from.push(g);
+            }
         }
     }
     let each: Vec<Vec<UnitError>> =
@@ -549,8 +595,8 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
     context.ledger.item(&format!("时间步长 τ = {tau} μs（全程不变）"), step_error, "试探上每步减半实测，按动力学带到输出时刻");
     messages.result(&assemble(&context, &estimates, &listed, &counts, pilot_size()), None);
 
-    // The product (module documentation, # Stopping).
-    let mut parts: Vec<Part> = vec![];
+    // The product (module documentation, # Stopping): on from the pilot's trajectories, the run's first.
+    let mut parts: Vec<Part> = first_parts;
     let started = Instant::now();
     product(&run, &ensemble, &context, &targets, &mut parts, batch(targets.need(&estimates), pilot_size()), started, messages);
     // The escape's test (SPEC §5.3): the product's trajectories within the step's error of the escape (Wilson's near end
@@ -590,7 +636,7 @@ fn product(run: &Run, ensemble: &Ensemble, context: &Context, targets: &Targets,
     loop {
         let have = parts.len() as u64 * GROUP;
         let pace = |done: u64| (done > 0).then(|| started.elapsed().as_secs_f64() * 1e3 / done as f64);
-        let new = run_groups(have / GROUP, want / GROUP, Shape::of(&context.plan, false), &|i| trajectory(run, ensemble, context.tau, None, Some(&context.fixed.windows), &context.plan, false, i), messages, &mut |prefix, messages| {
+        let new = run_groups(have / GROUP, want / GROUP, 0..GROUP, Shape::of(&context.plan, false), &|i| trajectory(run, ensemble, context.tau, None, Some(&context.fixed.windows), &context.plan, false, i), messages, &mut |prefix, messages| {
             let all: Vec<&Part> = parts.iter().chain(prefix.iter().copied()).collect();
             let n = all.len() as u64 * GROUP;
             let (e, l, c) = pooled(&all, &context.scales);
@@ -781,6 +827,19 @@ impl std::borrow::Borrow<Group> for &Part {
         &self.sums
     }
 }
+impl Part {
+    /// The same groups' further members, after this part's.
+    fn absorb(&mut self, other: Part) {
+        self.sums.absorb(other.sums);
+        for (l, x) in self.listed.iter_mut().zip(other.listed) {
+            l.extend(x);
+        }
+        for (s, x) in self.samples.iter_mut().zip(other.samples) {
+            s.extend(x);
+        }
+        self.counts.add(&other.counts);
+    }
+}
 
 /// What a group's records fold into (`Part`): the outputs, the listed outputs, and whether the states are kept.
 #[derive(Clone, Copy)]
@@ -826,25 +885,29 @@ fn trajectory(model: &Run, ensemble: &Ensemble, tau: f64, read: Option<V3>, wind
     run(model, ensemble.draw(SEED, index), index, tau, read, windows, &margin, plan, keep)
 }
 
-/// Groups `first..end`, their trajectories run on every core in their numbers' order -- each thread takes the next number,
-/// so the groups finish nearly in order and the first after about one trajectory's time --, each group's records added in
+/// Groups `first..end`, the members `members` of each (all of them: 0..GROUP), their trajectories run on every core in
+/// their numbers' order -- each thread takes the next number, so the groups finish nearly in order and the first after
+/// about one trajectory's time --, each group's records added in
 /// its members' order on this thread (`Shape::fold`, nothing depends on the threads), the groups returned in their order;
 /// whenever the solve's next message is due (`Messages::due`), `progress` takes the groups finished so far in order and
 /// sends their result, or with no group finished the last result goes out again (module documentation, # Checkpoints).
-fn run_groups(first: u64, end: u64, shape: Shape, record: &(dyn Fn(u64) -> Record + Sync), messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Part> {
-    let (start, stop) = (first * GROUP, end * GROUP);
+fn run_groups(first: u64, end: u64, members: std::ops::Range<u64>, shape: Shape, record: &(dyn Fn(u64) -> Record + Sync), messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Part> {
+    let size = members.end - members.start;
     let count = (end - first) as usize;
-    let next = AtomicU64::new(start);
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min((stop - start) as usize);
-    let mut waiting: Vec<Vec<Option<Record>>> = (0..count).map(|_| (0..GROUP).map(|_| None).collect()).collect();
+    let stop = count as u64 * size;
+    // The k-th trajectory run: member k mod size of group k / size.
+    let number = move |k: u64| (first + k / size) * GROUP + members.start + k % size;
+    let next = AtomicU64::new(0);
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(stop as usize);
+    let mut waiting: Vec<Vec<Option<Record>>> = (0..count).map(|_| (0..size).map(|_| None).collect()).collect();
     let mut parts: Vec<Option<Part>> = (0..count).map(|_| None).collect();
     std::thread::scope(|scope| {
         let (sender, receiver) = mpsc::channel::<(u64, Record)>();
         for _ in 0..threads {
             let (sender, next) = (sender.clone(), &next);
             scope.spawn(move || loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                if i >= stop || sender.send((i, record(i))).is_err() {
+                let k = next.fetch_add(1, Ordering::Relaxed);
+                if k >= stop || sender.send((k, record(number(k)))).is_err() {
                     break;
                 }
             });
@@ -853,8 +916,8 @@ fn run_groups(first: u64, end: u64, shape: Shape, record: &(dyn Fn(u64) -> Recor
         let mut done = 0;
         while done < count {
             match receiver.recv_timeout(messages.due()) {
-                Ok((i, r)) => {
-                    let (g, m) = (((i - start) / GROUP) as usize, ((i - start) % GROUP) as usize);
+                Ok((k, r)) => {
+                    let (g, m) = ((k / size) as usize, (k % size) as usize);
                     waiting[g][m] = Some(r);
                     if waiting[g].iter().all(Option::is_some) {
                         parts[g] = Some(shape.fold(waiting[g].iter_mut().map(|r| r.take().expect("a member's record"))));
@@ -1453,7 +1516,7 @@ mod tests {
         };
         let mut silent = |_: &Solution, _: Option<f64>| {};
         let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0 };
-        let parts = run_groups(5, 42, shape, &record, &mut messages, &mut |_, _| {});
+        let parts = run_groups(5, 42, 0..GROUP, shape, &record, &mut messages, &mut |_, _| {});
         assert_eq!(parts.len(), 37);
         for (g, part) in parts.iter().enumerate() {
             let one = shape.fold((0..GROUP).map(|m| record((5 + g as u64) * GROUP + m)));

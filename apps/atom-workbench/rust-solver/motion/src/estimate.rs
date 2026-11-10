@@ -54,7 +54,6 @@
 //! trajectories within the step's error of the escape (solve.rs).
 use crate::adapt::Drift;
 use crate::decide::Read;
-use crate::ensemble::GROUP;
 use crate::transport::{transported, Mark};
 use crate::request::STATES;
 use crate::special::upper;
@@ -327,6 +326,13 @@ impl Group {
     pub fn new(outputs: usize) -> Group {
         Group { sums: vec![Sums::ZERO; outputs], marks: vec![] }
     }
+    /// The group's further trajectories, after those it holds.
+    pub fn absorb(&mut self, other: Group) {
+        for (s, o) in self.sums.iter_mut().zip(&other.sums) {
+            s.combine(o, 1.);
+        }
+        self.marks.extend(other.marks);
+    }
     /// One trajectory's outputs, in order.
     pub fn add(&mut self, outputs: &[Output]) {
         assert_eq!(outputs.len(), self.sums.len(), "a trajectory has every output");
@@ -537,12 +543,16 @@ pub struct Stepped {
     pub energy: Option<[f64; 2]>,
 }
 
-/// The step's error at every output from the groups' sums and their read trajectories' marks: every group is whole, of
-/// `GROUP` read trajectories or of none.
+/// The step's error at every output from the groups' sums and their read trajectories' marks: every group has as many
+/// read trajectories as the first (its first members, solve.rs), and a row's error as shown is its sum over the read
+/// trajectories' held atoms over all the read trajectories -- held or lost: the error of the share shown.
 pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<Stepped> {
     let outputs = groups.first().map_or(0, |g| g.borrow().sums.len());
     let hm = scales.hbar_over_mass;
     let series: Vec<&[Option<Mark>]> = groups.iter().flat_map(|g| g.borrow().marks.iter().map(Vec::as_slice)).collect();
+    let readers: Vec<f64> = groups.iter().map(|g| g.borrow().marks.len() as f64).collect();
+    let members = groups.first().map_or(0, |g| g.borrow().marks.len());
+    let every: f64 = readers.iter().sum();
     (0..outputs)
         .into_par_iter()
         .map(|k| {
@@ -564,7 +574,7 @@ pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<St
             let unread = Read { value: f64::NAN, spread: Spread::UNREAD };
             // T's relative error per axis: the transported error over k_B T_a, of all the trajectories and without each
             // group.
-            let moved = if complete { transported(&series, GROUP as usize, k) } else { None };
+            let moved = if complete && members > 0 { transported(&series, members, k) } else { None };
             let relative = |a: usize| match (&moved, temperature(&all, hm)) {
                 (Some(m), Some(t)) => Read {
                     value: m.all[a] / (KT_PER_UK * t[a]),
@@ -572,9 +582,9 @@ pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<St
                 },
                 _ => unread,
             };
-            let read = |f: &dyn Fn(&Sums) -> f64, groups: f64| Read {
-                value: if complete { f(&all) } else { f64::NAN },
-                spread: if complete && rest.len() >= 2 { spread(rest.iter().map(|s| f(s)), groups) } else { Spread::UNREAD },
+            let read = |f: &dyn Fn(&Sums, f64) -> f64, groups: f64| Read {
+                value: if complete { f(&all, every) } else { f64::NAN },
+                spread: if complete && rest.len() >= 2 { spread(rest.iter().zip(&readers).map(|(s, r)| f(s, every - r)), groups) } else { Spread::UNREAD },
             };
             let [count, sum, squares] = all.energy;
             let energy = (count > 0.).then(|| {
@@ -583,7 +593,7 @@ pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<St
             });
             Stepped {
                 temperature: (all.read >= 2. && all.held >= 2.).then(|| std::array::from_fn(relative)),
-                shown: std::array::from_fn(|q| read(&|s: &Sums| s.shown[q] / s.trajectories, rest.len() as f64)),
+                shown: std::array::from_fn(|q| read(&|s: &Sums, readers: f64| s.shown[q] / readers, rest.len() as f64)),
                 energy,
             }
         })
@@ -593,6 +603,7 @@ pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ensemble::GROUP;
 
     /// The step's error (`stepped`): three groups of eight read atoms over one output interval, each with ⟨κ²⟩ = 4 on
     /// every axis (k_B T_a = 4 ħ/m) and the local errors 1, 2 and 3 % of k_B T_a made over the interval, its rows' error
