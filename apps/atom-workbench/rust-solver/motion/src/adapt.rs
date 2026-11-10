@@ -16,10 +16,9 @@
 //! # The read
 //! Where a trajectory is read (the pilot's, solve.rs), every step it takes is doubled: from the same state the step
 //! and two of its halves, the jump-free flows. The scheme's local error is O(τ^{p+1}), p = `units::ORDER`, so the step's
-//! own error is their difference times 2^p/(2^p − 1) (Richardson, decide.rs `richardson`). A step on the beating grid is
-//! also redone on twice its panels (`step::Step::regrid`); CF4 and Simpson are of fourth order, so the grid's error is
-//! that difference times 2⁴/(2⁴ − 1). The two add, signed, over the steps the trajectory takes, per displayed quantity
-//! (`Drift`):
+//! own error is their difference times 2^p/(2^p − 1) (decide.rs `richardson`). A step on the beating grid is also redone on twice
+//! its panels (`step::Step::regrid`); CF4 and Simpson are of fourth order, so the grid's error is that difference times
+//! 2⁴/(2⁴ − 1). The two add, signed, over the steps the trajectory takes, per displayed quantity (`Drift`):
 //! - per lab axis a, the errors of the principal axes' energies E_i = (ħ/m)k_i²/2 + g_i y_i + λ_i y_i²/2 of the step's
 //!   reference (y_i = e_i·(r − p), k_i = e_i·κ), each mapped by its direction cosine squared e_ia²: T_a is the window
 //!   mean of (ħ/m)κ_a² over one trap period (SPEC §1.7), which of a harmonic axis is its energy, while an error of the
