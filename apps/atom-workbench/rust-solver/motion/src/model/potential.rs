@@ -11,6 +11,30 @@
 //! Hermitian part is Re Σ c(r) M_bb over the static terms: a term and its adjoint pair (c_l'l = c_ll'*, M_l'l = M_ll'†) sum to
 //! twice its real part.
 //!
+//! # An averaged light (`Model::smooth`)
+//! The reported trap (SPEC §1.3) is the trap light's potential with the other lights' smooth shifts: each beam's own
+//! intensity, their phases averaged (`Lit::Averaged`). Such a light's shift of a ground state changes over the trap only by
+//! what the trap light does to its lines -- a plane wave's own intensity is the same everywhere --, which is the movement
+//! δΔ of its drives' denominators at the atom. That shift is the drive's fold with the levels at the atom, and it is there
+//! wherever that fold exists, whatever the dynamics make of the drive:
+//! - folded with the bare levels, the model holds none of it -- a bare fold's shift is a constant (far.rs), the first term
+//!   of the series in δΔ/(Δ₀ − iΓ/2) whose whole the fold at the atom is (units.rs, # Levels), and constants cancel in
+//!   h_L − h_{L∖trap}; the dynamics take that first term and book its error;
+//! - explicit, the model holds it as the cluster's dynamics, no potential of a ground state -- kept because its fold does
+//!   not exist, or because the solve bought its accuracy (SPEC §5.2).
+//! A reported quantity is the scene's, not the solve's: the level a drive was left at must not show in it. And the reported
+//! trap is a local thing, a minimum and its Hessian: what it asks of a fold is that it exists there. So the potential of a
+//! light set with an averaged light is read on the same request's model with that light's co-rotating drives all folded at
+//! the atom, but those whose fold does not exist at the prepared trap's centre, at rest -- the one gate on that point
+//! (units.rs `Model::folds`: a ground state's drives by the tail rule), closed as the solve closes its model: the failing
+//! drives explicit, until none fails. A drive on resonance there has no light shift to give (its weak-field formula would
+//! be the largest term of the potential, and wrong); it stays dynamics. The couplings of two ground states stay as this
+//! model keeps them: they make the clusters the shift is read in, and their folds were judged on this model's own levels
+//! over the reach (a model not closed there -- a degenerate partner's coupling still folded -- has no shift to read: every
+//! drive's distance holds that partner's channel). Those of two excited states follow the explicit states. The
+//! counter-rotating drives are only ever bare (their δΔ against twice the optical frequency). The model is made once per
+//! light set and populations.
+//!
 //! # The trap (`Model::trap`)
 //! The descent from the focus to the local minimum of V_L(r; p) -- the prepared lights' for the initial wells, the running ones'
 //! for the reported trap (SPEC §1.3) --: Newton's step along each eigenvector of the analytic Hessian
@@ -23,12 +47,13 @@
 
 use super::assemble::{Held, Site, LEFT, RIGHT};
 use super::tabulate::Tables;
-use super::{jet, Envelope, Lights, Lit, Model, Quadratic, Trap};
+use super::{jet, Component, Envelope, Gate, Level, Lights, Lit, Model, Quadratic, Trap, Unit};
 use crate::linalg::C64;
 use crate::field::Amplitude;
 use crate::linalg::{dot3, symmetric3_eigen};
 use crate::request::GROUND;
 use crate::units::rounding;
+use std::sync::Arc;
 
 /// A potential's expansion with the scale of its sum (Σ of its terms' moduli): the rounding of its value is
 /// `rounding(terms)·scale`.
@@ -80,9 +105,71 @@ impl Model {
         out
     }
 
+    /// The model a light set's potential is read on where a light of it is averaged (module documentation, # An averaged
+    /// light): the same request's model with the averaged lights' co-rotating drives folded with the levels at the atom, those
+    /// explicit whose fold does not exist at the prepared trap's centre at rest; made once per light set and populations.
+    /// None where no light is averaged, an averaged one drives nothing, or no prepared trap holds the atom: this model.
+    fn smooth(&self, p: &[f64; GROUND], lights: &Lights) -> Option<Arc<Model>> {
+        if !lights.0.contains(&Lit::Averaged) {
+            return None;
+        }
+        let averaged = |c: Component| !c.counter && lights.0[c.frequency] == Lit::Averaged;
+        let drives: Vec<(Component, usize, usize)> = self.driven.iter().copied().filter(|d| averaged(d.0)).collect();
+        if drives.is_empty() {
+            return None;
+        }
+        let mut made = self.smooth.lock().expect("the smooth models' lock");
+        if let Some(found) = made.iter().find(|of| of.0 == *lights && of.1 == *p) {
+            return Some(found.2.clone());
+        }
+        let centre = self.trap(p, &self.prepared()).ok()?.centre;
+        // What this model keeps beside the averaged lights' drives and the couplings of two excited states, with those
+        // drives' bare units: each folded at the atom.
+        let among_excited = |u: &Unit| matches!(u, Unit::Term { a, .. } if *a >= GROUND);
+        let own: Vec<Unit> = self
+            .kept
+            .iter()
+            .filter(|u| !among_excited(u) && !matches!(u, Unit::Bare { component, .. } | Unit::Drive { component, .. } if averaged(*component)))
+            .cloned()
+            .chain(drives.iter().map(|&(component, excited, ground)| Unit::Bare { component, excited, ground }))
+            .collect();
+        // The averaged lights' drives whose fold does not exist at the centre: explicit, with this model's couplings of
+        // an excited state they hold to another.
+        let mut explicit: Vec<Unit> = vec![];
+        let model = loop {
+            let held = |s: usize| own.iter().chain(&explicit).any(|u| matches!(u, Unit::Drive { excited, .. } if *excited == s));
+            let terms = self.kept.iter().filter(|u| matches!(u, Unit::Term { a, b, .. } if *a >= GROUND && (held(*a) || held(*b))));
+            let kept: Vec<Unit> = own.iter().chain(&explicit).chain(terms).cloned().collect();
+            let model = self.rekept(&kept).expect("a co-rotating drive may be folded at the atom or explicit");
+            let region = model.point_region(centre, 0.0);
+            let fails = |&&(c, e, g): &&(Component, usize, usize)| {
+                let place = model.ranked[g].iter().find(|d| d.component == c && d.excited == e).expect("a drive is in its ground state's order").group;
+                let fold = model.folds(g, place, &region, usize::MAX, 0.0);
+                model.level(c, e, g) == Level::Atom && !(Gate { saturation: fold[0], sweep: fold[1] }).exists()
+            };
+            let failing: Vec<Unit> = drives.iter().filter(fails).map(|&(component, excited, ground)| Unit::Drive { component, excited, ground }).collect();
+            if failing.is_empty() {
+                break Arc::new(model);
+            }
+            explicit.extend(failing);
+        };
+        made.push((lights.clone(), *p, model.clone()));
+        Some(model)
+    }
+
     /// V_L(r; p) with, to `order`, its gradient and Hessian (what lies beyond the order is not made, and no number), and the
-    /// rounding of its sum (module documentation); the near light from its tables where they serve (tabulate.rs `Model::near`).
+    /// rounding of its sum (module documentation); the near light from
+    /// its tables where they serve (tabulate.rs `Model::near`). With an averaged light it is read on that light set's own model
+    /// (`smooth`), exactly.
     pub(crate) fn expand(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights, order: usize, tables: Option<&super::tabulate::Tables>) -> Expansion {
+        match self.smooth(p, lights) {
+            Some(model) => model.expand_here(r, p, lights, order, None),
+            None => self.expand_here(r, p, lights, order, tables),
+        }
+    }
+
+    /// V_L(r; p) of this model as it stands (`expand`).
+    fn expand_here(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights, order: usize, tables: Option<&super::tabulate::Tables>) -> Expansion {
         let trap = self.light.trap;
         if !lights.on(trap) {
             return Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };

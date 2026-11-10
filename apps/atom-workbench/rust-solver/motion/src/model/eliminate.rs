@@ -542,8 +542,8 @@ pub(crate) struct CellEnergies {
 /// A carrier's coherent couplings over a region (reach.rs `Region`). With u_s = Σ_l a_l X^f_l[:, s] the excited amplitudes its
 /// field drives from ground state s -- its beams coherent at the request's phases (SPEC §1.2), what the atom feels at r --, per
 /// ground state the bounds over the region of |u_s[e]| per excited state, of ‖u_s‖, and of ‖u_s‖ per polarization unit (its beams
-/// alone): the value at the centre plus the cell's radius times the Lipschitz bound Σ_l max|∇a_l| |X^f_l| (|∇a_l| ≤ k_l max|a_l| +
-/// max|∇b_l|, reach.rs `Span`), at most every beam at its largest amplitude and in phase; on a point, the value there.
+/// alone): each a sum of its beams over the cell, to first and to second order from the centre's (reach.rs `Region::summed`), at
+/// most every beam at its largest amplitude and in phase; on a point, the value there.
 pub(crate) struct Couplings {
     /// [s][e − GROUND].
     pub(crate) entry: [[f64; EXCITED]; GROUND],
@@ -591,9 +591,19 @@ impl Model {
     pub(crate) fn couplings<'r>(&self, region: &'r Region) -> &'r [Couplings] {
         region.couplings.get_or_init(|| {
             let spans = &region.spans;
-            // The bound over the region of |Σ_{l ∈ beams} a_l x_l| from its centre value, its Lipschitz bound Σ |x_l| max|∇a_l| and
-            // its phase-blind bound Σ |x_l| max|a_l| (an unbounded region: the last).
-            let bound = |centre: f64, lipschitz: f64, blind: f64| if region.rho.is_finite() { (centre + region.rho * lipschitz).min(blind) } else { blind };
+            // A sum Σ_{l ∈ beams} a_l x_l over the excited states as its bound over the region reads it (reach.rs
+            // `Region::summed`): its value and slopes at the centre, and how far its beams move from theirs, how far they bow
+            // and their phase-blind sum -- [moved, bowed, blind], of the whole vector and per excited state.
+            #[derive(Clone, Copy)]
+            struct Sum {
+                u: [C64; EXCITED],
+                slopes: [[C64; EXCITED]; 3],
+                whole: [f64; 3],
+                each: [[f64; 3]; EXCITED],
+            }
+            let nothing = Sum { u: [C64::ZERO; EXCITED], slopes: [[C64::ZERO; EXCITED]; 3], whole: [0.0; 3], each: [[0.0; 3]; EXCITED] };
+            let bounded = region.rho.is_finite();
+            let norm_over = |sum: &Sum| region.summed(&sum.u, [&sum.slopes[0], &sum.slopes[1], &sum.slopes[2]], sum.whole[0], sum.whole[1], sum.whole[2]);
             self.carriers
                 .iter()
                 .zip(region.forms.folded(self))
@@ -602,30 +612,33 @@ impl Model {
                     let mut column = [0.0; GROUND];
                     let mut per_unit = vec![[0.0; GROUND]; folded.units.len()];
                     for s in 0..GROUND {
-                        // Per polarization unit and in all: the centre amplitudes, and per excited state the Lipschitz and blind sums.
-                        let mut all = ([C64::ZERO; EXCITED], [0.0; EXCITED], [0.0; EXCITED], 0.0, 0.0);
+                        // Per polarization unit, and in all.
+                        let mut all = nothing;
                         for (ui, beams) in folded.beams[s].iter().enumerate() {
-                            let (mut u, mut lipschitz, mut blind) = ([C64::ZERO; EXCITED], 0.0, 0.0);
+                            let mut unit = nothing;
                             for (l, entries) in beams {
                                 let span = &spans[cc.beams[*l]];
-                                let (norm, slope) = (folded.columns[s][*l], span.lipschitz());
-                                for &(e, v, size) in entries {
-                                    u[e] += span.centre * v;
-                                    all.0[e] += span.centre * v;
-                                    all.1[e] += size * slope;
-                                    all.2[e] += size * span.most;
+                                let over = if bounded { [span.moved(), span.bowed(), span.most] } else { [0.0, 0.0, span.most] };
+                                for sum in [&mut unit, &mut all] {
+                                    for &(e, v, size) in entries {
+                                        sum.u[e] += span.centre * v;
+                                        for a in 0..3 {
+                                            sum.slopes[a][e] += span.gradient[a] * v;
+                                            sum.each[e][a] += size * over[a];
+                                        }
+                                    }
+                                    for a in 0..3 {
+                                        sum.whole[a] += folded.columns[s][*l] * over[a];
+                                    }
                                 }
-                                lipschitz += norm * slope;
-                                blind += norm * span.most;
                             }
-                            per_unit[ui][s] = bound(u.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt(), lipschitz, blind);
-                            all.3 += lipschitz;
-                            all.4 += blind;
+                            per_unit[ui][s] = norm_over(&unit);
                         }
                         for &e in &folded.reached[s] {
-                            entry[s][e] = bound(all.0[e].abs(), all.1[e], all.2[e]);
+                            let slopes: [&[C64]; 3] = std::array::from_fn(|a| std::slice::from_ref(&all.slopes[a][e]));
+                            entry[s][e] = region.summed(&[all.u[e]], slopes, all.each[e][0], all.each[e][1], all.each[e][2]);
                         }
-                        column[s] = bound(all.0.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt(), all.3, all.4);
+                        column[s] = norm_over(&all);
                     }
                     Couplings { entry, column, units: per_unit }
                 })
@@ -675,22 +688,22 @@ impl Model {
     }
 
     /// The bound over a region of |∇ Σ_pairs c_l'l w(P_l'l)|, the far light's static forms each weighted by `w` (an entry, a
-    /// diagonal's difference; reach.rs `Weights`): its value at the centre plus the cell's radius times Σ |w| max|∇∇c_l'l|, at most
+    /// diagonal's difference; reach.rs `Weights`): its value at the centre plus Σ |w| max|∇c_l'l − ∇c_l'l(c)|, at most
     /// Σ |w| max|∇c_l'l| (reach.rs `PairSpan`); on a point, its value there (rad/µs/µm).
     pub(crate) fn far_gradient(&self, region: &Region, w: &Weights) -> f64 {
-        let (mut g, mut curvature, mut blind) = ([C64::ZERO; 3], 0.0, 0.0);
+        let blind: f64 = w.iter().map(|&(frequency, pair, _, size)| size * region.pairs[frequency][pair].slope).sum();
+        if !region.rho.is_finite() {
+            return blind;
+        }
+        let (mut g, mut veer) = ([C64::ZERO; 3], 0.0);
         for &(frequency, pair, x, size) in w {
             let pair = &region.pairs[frequency][pair];
             for i in 0..3 {
                 g[i] += pair.gradient[i] * x;
             }
-            curvature += size * pair.hessian;
-            blind += size * pair.slope;
+            veer += size * pair.veer;
         }
-        if !region.rho.is_finite() {
-            return blind;
-        }
-        (g.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() + region.rho * curvature).min(blind)
+        (g.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() + veer).min(blind)
     }
 
     /// The bound of |∇(E_x − E_y)| of the far light's diagonal over a region (rad/µs/µm, `far_gradient`).

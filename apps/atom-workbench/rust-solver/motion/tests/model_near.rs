@@ -343,6 +343,57 @@ fn the_expansion_s_derivatives_are_exact_with_drives_at_the_atom() {
     }
 }
 
+/// The reported trap is the scene's, not the solve's (SPEC §1.3; potential.rs, # An averaged light): the other lights' smooth
+/// shifts are in it as their drives' folds with the levels at the atom wherever those folds exist at the trap's centre,
+/// whatever level the model takes the drives at. On the solve's own closure of R3_DOPPLER (a cooling pair in a tweezer),
+/// R4_TW1 (cooling and repump light) and R9_PUSH (a push beam 45 linewidths off its line at the centre, in a shallow
+/// trap), the closed model against the one with the other lights' drives all folded at the atom and the one with the
+/// reference state's drives by them explicit: the reported trap is the same to the bit, softer than the prepared one by the
+/// other lights' shift (the bare folds' constants alone would leave the prepared trap's frequencies, and an explicit drive
+/// none of its own); and the prepared trap, the dynamics' own, is each model's as it stands.
+#[test]
+fn the_reported_trap_does_not_show_the_level_a_drive_is_taken_at() {
+    for name in ["R3_DOPPLER", "R4_TW1", "R9_PUSH"] {
+        let request = scene(name);
+        let light = Light::new(&request);
+        let others: Vec<usize> = (0..light.frequencies.len()).filter(|&f| f != light.trap).collect();
+        let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+        let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
+        // The closure (solve.rs `attempt`): every unit whose gate fails over the reach kept, until none fails.
+        let mut closed: Vec<Unit> = vec![];
+        let model = loop {
+            let model = Model::new(&request, &light, &closed).unwrap();
+            let reach = model.reach(&model.trap(&p, &model.prepared()).unwrap(), &p, request.temperature_uk, 2e-3);
+            let units = model.units();
+            let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
+            if failing.is_empty() {
+                break model;
+            }
+            closed.extend(failing);
+        };
+        let reported = model.trap(&p, &model.reported()).unwrap();
+        let prepared = model.trap(&p, &model.prepared()).unwrap();
+        let softer = (0..3).map(|a| 1.0 - reported.lab[a] / prepared.lab[a]).fold(f64::NEG_INFINITY, f64::max);
+        assert!(softer > 1e-4, "{name}: the other lights' smooth shift in the reported trap: softer by {softer:.3e}");
+        // The other lights' drives all at the atom; and the reference state's drives by them explicit.
+        let raised = at_the_atom(&request, &light, &others);
+        let drives: Vec<Unit> = raised
+            .iter()
+            .filter_map(|u| match *u {
+                Unit::Bare { component, excited, ground } if ground == b => Some(Unit::Drive { component, excited, ground }),
+                _ => None,
+            })
+            .collect();
+        let atom = Model::new(&request, &light, &[closed.clone(), raised.clone()].concat()).unwrap();
+        let explicit = Model::new(&request, &light, &[closed.clone(), raised, drives].concat()).unwrap();
+        assert!(explicit.clusters()[explicit.cluster_of(b)].states.len() > model.clusters()[model.cluster_of(b)].states.len(), "{name}: the reference state's drives are explicit");
+        assert_eq!(reported, atom.trap(&p, &atom.reported()).unwrap(), "{name}: the reported trap with the other lights' drives at the atom");
+        assert_eq!(reported, explicit.trap(&p, &explicit.reported()).unwrap(), "{name}: the reported trap with the reference state's drives explicit");
+        assert_eq!(prepared, atom.trap(&p, &atom.prepared()).unwrap(), "{name}: the prepared trap");
+        eprintln!("{name}: the reported trap {:?} kHz, softer than the prepared one by {softer:.3e}", reported.lab.map(|w| w / std::f64::consts::TAU * 1e3));
+    }
+}
+
 /// A model built with units kept lists as candidates only the units it folds (`Model::units`): none it keeps, none its clusters
 /// hold for free. The gates' closure from nothing kept (R3_DOPPLER, whose cooling line the tweezer moves by more than its own
 /// detuning: its drives' folds with the bare levels do not exist, those with the levels at the atom do) adds only units it has

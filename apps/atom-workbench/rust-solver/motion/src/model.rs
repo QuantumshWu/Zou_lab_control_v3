@@ -316,6 +316,28 @@ pub struct Model {
     /// The states' labels and the beams' names (the ledger's and the method's words).
     pub(crate) labels: Vec<String>,
     pub(crate) names: Vec<String>,
+    /// Per light set with an averaged light and ground populations asked so far, the model its potential is read on
+    /// (potential.rs `Model::smooth`).
+    pub(crate) smooth: Mutex<Vec<(Lights, [f64; GROUND], Arc<Model>)>>,
+}
+
+/// What a request gives a model whatever units are kept (`Model::new`, `Model::rekept`): the light, the exact frequencies and
+/// wave vectors, the states' energies and decay, each frequency's light with nothing folded yet (far.rs `Tone::new`; a fold
+/// reads only what no fold changes, so a folded one serves as well), and the drives.
+struct Given {
+    light: Light,
+    axes: far::Axes,
+    waves: Vec<[f64; 3]>,
+    beam_wave: Vec<(usize, i64)>,
+    hbar_over_mass: f64,
+    energies: Vec<f64>,
+    base: Mat,
+    emission: [Mat; 3],
+    decay: Mat,
+    tones: Vec<far::Tone>,
+    driven: Vec<(Component, usize, usize)>,
+    labels: Vec<String>,
+    names: Vec<String>,
 }
 
 /// An exact wave vector: integer coordinates on the light's distinct wave vectors (`Model::waves`), with a `Beat`'s integer
@@ -356,6 +378,51 @@ impl Model {
             .flat_map(|c| (GROUND..STATES).flat_map(move |e| (0..GROUND).map(move |g| (c, e, g))))
             .filter(|&(c, e, g)| tones[c.frequency].drives(c.counter, e, g))
             .collect();
+        let mut base = request.hamiltonian.clone();
+        for t in &tones {
+            base.add_scaled(-C64::ONE, &t.focus);
+        }
+        let given = Given {
+            light: light.clone(),
+            axes,
+            waves,
+            beam_wave,
+            hbar_over_mass: crate::units::hbar_over_mass(request.mass_kg),
+            energies: far::energies(request),
+            base,
+            emission: request.emission.clone(),
+            decay: far::decay(request),
+            tones,
+            driven,
+            labels: request.states.clone(),
+            names: request.beams.iter().map(|b| b.name.clone()).collect(),
+        };
+        Model::settled(given, kept)
+    }
+
+    /// The model of the same request with the units `kept` in its own's stead (`Model::new`).
+    pub(crate) fn rekept(&self, kept: &[Unit]) -> Result<Model, String> {
+        let given = Given {
+            light: self.light.clone(),
+            axes: self.axes.clone(),
+            waves: self.waves.clone(),
+            beam_wave: self.beam_wave.clone(),
+            hbar_over_mass: self.hbar_over_mass,
+            energies: self.energies.clone(),
+            base: self.base.clone(),
+            emission: self.emission.clone(),
+            decay: self.decay.clone(),
+            tones: self.tones.clone(),
+            driven: self.driven.clone(),
+            labels: self.labels.clone(),
+            names: self.names.clone(),
+        };
+        Model::settled(given, kept)
+    }
+
+    /// What a request gives with the units `kept` (`Model::new`).
+    fn settled(given: Given, kept: &[Unit]) -> Result<Model, String> {
+        let Given { light, axes, waves, beam_wave, hbar_over_mass, energies, base, emission, decay, tones, driven, labels, names } = given;
         let mut levels: Vec<Vec<Level>> = (0..2 * tones.len()).map(|_| vec![Level::Bare; far::EXCITED * GROUND]).collect();
         for unit in kept {
             let (component, excited, ground, level) = match *unit {
@@ -372,20 +439,16 @@ impl Model {
             let at = &mut levels[2 * component.frequency][(excited - GROUND) * GROUND + ground];
             *at = (*at).max(level);
         }
-        let mut base = request.hamiltonian.clone();
-        for t in &tones {
-            base.add_scaled(-C64::ONE, &t.focus);
-        }
         let mut model = Model {
-            light: light.clone(),
+            light,
             axes,
             waves,
             beam_wave,
-            hbar_over_mass: crate::units::hbar_over_mass(request.mass_kg),
-            energies: far::energies(request),
+            hbar_over_mass,
+            energies,
             base,
-            emission: request.emission.clone(),
-            decay: far::decay(request),
+            emission,
+            decay,
             tones,
             kept: kept.to_vec(),
             clusters: vec![],
@@ -403,8 +466,9 @@ impl Model {
             beats: vec![],
             forms: Arc::new(reach::Forms::new()),
             resonances: vec![],
-            labels: request.states.clone(),
-            names: request.beams.iter().map(|b| b.name.clone()).collect(),
+            labels,
+            names,
+            smooth: Mutex::new(vec![]),
         };
         model.ranked = model.ranked_made();
         model.beats = model.beats_made();
