@@ -171,6 +171,10 @@ impl Table {
     pub fn nodes(axes: &[Axis]) -> usize {
         axes.iter().fold(1usize, |n, a| n.saturating_mul(a.nodes))
     }
+    /// Node `node`'s index on each axis and its reals (the nodes in the grid's row-major order, `Table::nodes` of them).
+    pub fn node(&self, node: usize) -> (Vec<usize>, &[f64]) {
+        (Table::indices(&self.axes, node), &self.values[node * self.width..(node + 1) * self.width])
+    }
     /// A node's index on each axis.
     fn indices(axes: &[Axis], mut node: usize) -> Vec<usize> {
         let mut out = vec![0; axes.len()];

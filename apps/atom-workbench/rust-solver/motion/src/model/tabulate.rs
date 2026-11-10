@@ -34,6 +34,41 @@
 //! The axes' coordinates and their gradients at the point (field.rs `Frequency::chart`; ∇I_u = 2 Re(f_u* ∇f_u)/N_u), the table's
 //! interpolant of the forms asked and, to first order, its derivatives along the axes, ∇v = Σ_f ∂v/∂s_f ∇s_f.
 //!
+//! # The table's error
+//! A table's forms are ṽ(s) = v(s) + e(s), the elimination's and the interpolation's error, C¹ in the coordinates. The generator
+//! they give is a generator in its own right: its force is the gradient of its own Hermitian part (the interpolant's own
+//! derivative) and its decay its own jumps' product. So the table stands for the model whose forms are ṽ, and its error on the
+//! outputs is that model's distance from the elimination's: the rates and the couplings of a state moved by the relative δ =
+//! ‖(Ñ − N)ψ‖/‖Nψ‖ (N the near light's part of the generator at the atom, its Doppler partners at the atom's momentum) -- the
+//! populations by at most δ P_g, and T, which the near light sets through its rates, its friction and the depth of its shifts
+//! (all of them N's), by the relative δ --; and the atom's potential moved by ΔV = ⟨ψ|H̃_h − H_h|ψ⟩, a conservative change that
+//! moves a kinetic energy by at most itself: T by at most |ΔV|/k_BT_r relative (T_r the reach's temperature). The force's own
+//! relative error does not enter beyond these: it is the gradient of the small ΔV, whatever its slope. `Model::table_reads`
+//! measures δ and ΔV at trajectory states against the exact elimination (the ledger's form: the populations absolute, T relative).
+//!
+//! # Refinement
+//! A response is a pole in its line's detuning, and an axis that moves the line across it within the atoms' reach is the generic
+//! case of near-resonant light in a trap; the first grid resolves nothing of it. A table is therefore refined before it is used,
+//! by its own measured error where an interpolant is worst, between its nodes. Halving an axis' spacing (crate::table
+//! `Axis::halved`) puts the new nodes at the middles of its intervals: there the table before the halving is compared with the
+//! elimination itself -- the new nodes' own values, so the check costs nothing beyond the finer table --, over every interval the
+//! reach meets: an intensity's range over the reach is its focus value ± the proven bound of its distance from it (reach.rs
+//! `Model::bounds_over`, its threshold bisected down to the axis' first spacing); an angle's or a phase's is its whole range.
+//! Two measures, per node the largest: the responses' relative error, max over the lit carriers of (‖ΔT‖ + w‖ΔT2‖)/‖T‖ (Frobenius
+//! norms over the carrier's basis vectors and the cluster's ground places; w the largest Doppler shift of the carrier's beams at
+//! the reach's speed), of which the rates take twice (they are quadratic in the responses); and the bound of the potential's
+//! error, the bound of ‖H̃_h − H_h‖ by its rows: Σ over one carrier's shifts and couplings S_k'k[x, y] of |ΔS| (|ΔD| w with it,
+//! for either factor) times the two field components' peaks Σ_l |γ_lk| (every beam at its peak and in phase), the largest over the
+//! ground places x. An axis is halved until the
+//! table before the halving is within the tables' shares -- twice the responses' error within the populations' and T's, the
+//! potential's within T's of k_BT_r --, and the finer table is kept: its own error is then below the verified one by the
+//! interpolation's orders. Where the next grid would pass the work bound the refinement stops, and the error stands as
+//! `table_reads` reads it at the atoms.
+//!
+//! The tables' shares of the targets are the resolution of the largest ensemble the solve runs (SPEC §3, N = 2¹⁴ trajectories at
+//! the confidence z): an absolute z/(2√N) on what is shown (a share p's standard error is at most 1/(2√N)), a relative z√(2/N) on
+//! T (a variance's, normal theory). An error within them is below what any run can read, so no run is limited by its tables.
+//!
 //! # Work
 //! A node costs its elimination (eliminate.rs `Responses::work`) and its forms; a point the table's interpolation of the reals
 //! asked, 4^D (1 + D) each on D axes (4^D for a value alone), its chain rule (3 D each) and the coordinates (each frequency's
@@ -94,16 +129,25 @@ impl NearTable {
     }
 }
 
-/// The near tables of a model (module documentation), and the complex multiply-adds their nodes took.
+/// The near tables of a model (module documentation), the complex multiply-adds their nodes took, and k_BT_r of the reach they
+/// were made for (rad/µs).
 #[derive(Clone, Debug)]
 pub struct Tables {
     pub tables: Vec<NearTable>,
     pub work: f64,
+    pub thermal: f64,
+}
+
+/// The tables' shares of the targets (module documentation, # Refinement): on what is shown, absolute, and on T, relative.
+fn shares() -> (f64, f64) {
+    let (z, n) = (crate::units::CONFIDENCE, crate::units::MOST_TRAJECTORIES as f64);
+    (z / (2.0 * n.sqrt()), z * (2.0 / n).sqrt())
 }
 
 /// A table's error reads at samples (`Model::table_reads`): per axis the read of its interpolation error, and the table's whole
 /// error against the exact elimination (its coordinates held at the focus moving, its interpolation), each as the error it
-/// makes of the sample's generator (`Model::form_error`); zero on the samples of other clusters.
+/// makes on the outputs through the sample's generator (module documentation, # The table's error: δ in `parameter`, δ P_g on
+/// the populations, the larger of δ P_g and |ΔV|/k_BT_r on T); zero on the samples of other clusters.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableRead {
     pub table: usize,
@@ -280,27 +324,126 @@ impl Model {
         }
     }
 
-    /// The near tables on their first grids for the atoms' reach (module documentation, # Axes), each grid of at most `most` nodes:
-    /// per cluster the running lights' and, where the trap is lit and a carrier stays lit without it, those lights less the trap's
-    /// -- each light set under which the cluster has near forms. A cluster whose first grid exceeds the bound keeps the exact
-    /// elimination.
+    /// The near tables for the atoms' reach (module documentation, # Axes, # Refinement), each grid of at most `most` nodes: per
+    /// cluster the running lights' and, where the trap is lit and a carrier stays lit without it, those lights less the trap's --
+    /// each light set under which the cluster has near forms --, refined over the reach. A cluster whose first grid exceeds the
+    /// bound keeps the exact elimination.
     pub fn tabulate(&self, reach: &Reach, most: usize) -> Tables {
         let running = self.running();
         let mut untrapped = running.clone();
         untrapped.0[self.light.trap] = Lit::Off;
-        let mut out = Tables { tables: vec![], work: 0.0 };
+        let mut out = Tables { tables: vec![], work: 0.0, thermal: crate::units::KT_PER_UK * reach.temperature_uk };
         for cluster in 0..self.clusters.len() {
             for lights in [&running, &untrapped] {
                 if lights == &untrapped && !running.on(self.light.trap) {
                     continue;
                 }
-                if let Some(t) = self.first_table(cluster, lights, reach, most) {
-                    out.work += Table::nodes(t.table.axes()) as f64 * self.node_work(&t.layout);
-                    out.tables.push(t);
+                if let Some(first) = self.first_table(cluster, lights, reach, most) {
+                    let nodes = Table::nodes(first.table.axes());
+                    let (table, more) = self.refined(first, reach, most);
+                    out.work += nodes as f64 * self.node_work(&table.layout) + more;
+                    out.tables.push(table);
                 }
             }
         }
         out
+    }
+
+    /// The range of a table's axis over the atoms' reach (module documentation, # Refinement).
+    fn reach_range(&self, layout: &Layout, f: usize, reach: &Reach) -> (f64, f64) {
+        let (coordinate, at) = (layout.coordinates[f], layout.focus[f]);
+        let axis = first_axis(coordinate);
+        if !intensity(coordinate) {
+            return (axis.lo, axis.hi);
+        }
+        // The largest distance from the focus value over the reach: at least `attained`, at most `bound`.
+        let quantity = |r: &Region| self.intensity_moved(coordinate, &layout.polarizations, at, r);
+        let (mut attained, mut bound) = (0.0, axis.hi - axis.lo);
+        while bound - attained > axis.spacing() {
+            let threshold = 0.5 * (attained + bound);
+            let proven = self.bounds_over(reach, threshold, &[&quantity])[0];
+            if proven < threshold {
+                bound = proven.max(attained);
+            } else {
+                attained = threshold;
+                bound = bound.min(proven);
+            }
+        }
+        ((at - bound).max(axis.lo), (at + bound).min(axis.hi))
+    }
+
+    /// A table refined over the atoms' reach (module documentation, # Refinement), and the complex multiply-adds of its new
+    /// nodes.
+    fn refined(&self, mut table: NearTable, reach: &Reach, most: usize) -> (NearTable, f64) {
+        let d = table.axes();
+        let ranges: Vec<(f64, f64)> = (0..d).map(|f| self.reach_range(&table.layout, f, reach)).collect();
+        let (shown, temperature) = shares();
+        let thermal = crate::units::KT_PER_UK * reach.temperature_uk;
+        let node = self.node_work(&table.layout);
+        let mut work = 0.0;
+        let mut verified = vec![false; d];
+        while let Some(f) = verified.iter().position(|v| !v) {
+            let grid: Vec<Axis> = table.table.axes().iter().enumerate().map(|(g, a)| a.halved(if g == f { 1 } else { 0 })).collect();
+            let fresh = table.table.new_nodes(&grid);
+            let Some(finer) = (Table::nodes(&grid) <= most).then(|| self.build(&table.layout, grid, Some(&table.table), most)).flatten() else { break };
+            work += fresh as f64 * node;
+            let (responses, potential) = self.halving_error(&table.layout, &table.table, &finer, f, &ranges, reach);
+            verified[f] = 2.0 * responses <= shown.min(temperature) && potential <= temperature * thermal;
+            table.table = finer;
+        }
+        (table, work)
+    }
+
+    /// The error of a table against the one a halving of axis f finer, at the finer's new nodes over the reach's ranges (module
+    /// documentation, # Refinement): the responses' relative error and the bound of the potential's error (rad/µs), each the
+    /// largest over the nodes.
+    fn halving_error(&self, layout: &Layout, coarse: &Table, fine: &Table, f: usize, ranges: &[(f64, f64)], reach: &Reach) -> (f64, f64) {
+        let plan = &layout.plan;
+        let (start, count, pairs) = (plan.near.responding().start, plan.near.responses.len(), plan.near.pairs.len());
+        // Per carrier the largest Doppler shift of its beams at the reach's speed; a field component's peak.
+        let shift: Vec<f64> = self.carriers.iter().map(|cc| cc.beams.iter().map(|&l| self.doppler_shift(l, [0.0; 3]) + self.light.beams[l].wave_number * reach.speed).fold(0.0, f64::max)).collect();
+        let peak = |carrier: usize, k: usize| self.light.frequencies[self.carriers[carrier].frequency].coefficients.iter().map(|c| c[k].abs()).sum::<f64>();
+        let ground = self.clusters[layout.cluster].ground;
+        let complex = |row: &[f64], at: usize| C64::new(row[2 * at], row[2 * at + 1]);
+        let mut interpolated = vec![0.0; fine.width()];
+        let (mut responses, mut potential) = (0.0_f64, 0.0_f64);
+        for node in 0..Table::nodes(fine.axes()) {
+            let (at, exact) = fine.node(node);
+            if at[f] % 2 == 0 {
+                continue;
+            }
+            // A new node: the middle of an interval of the coarser grid along f, a node of it along the other axes; within the
+            // reach where the intervals it lies in or bounds meet the ranges.
+            let s: Vec<f64> = at.iter().zip(fine.axes()).map(|(&i, a)| a.node(i)).collect();
+            let within = (0..s.len()).all(|g| {
+                let h = coarse.axes()[g].spacing() * if g == f { 0.5 } else { 1.0 };
+                s[g] - h <= ranges[g].1 && s[g] + h >= ranges[g].0
+            });
+            if !within {
+                continue;
+            }
+            coarse.eval(&s, &mut interpolated, None);
+            let error = |at: usize| (complex(&interpolated, at) - complex(exact, at)).norm_sqr();
+            for (c, w) in shift.iter().enumerate() {
+                let sum = |of: &dyn Fn(usize) -> f64| (0..count).filter(|&i| plan.near.responses[i][0] == c).map(of).sum::<f64>().sqrt();
+                let size = sum(&|i| complex(exact, start + i).norm_sqr());
+                if size > 0.0 {
+                    responses = responses.max((sum(&|i| error(start + i)) + w * sum(&|i| error(start + count + i))) / size);
+                }
+            }
+            for x in 0..ground {
+                let moved: f64 = plan
+                    .near
+                    .pairs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p[0] == p[2] && p[4] == x)
+                    .map(|(i, p)| peak(p[0], p[1]) * peak(p[2], p[3]) * (error(i).sqrt() + 2.0 * shift[p[0]] * error(pairs + i).sqrt()))
+                    .sum();
+                potential = potential.max(moved);
+            }
+        }
+        (responses, potential)
     }
 
     /// A cluster's first table for a light set (module documentation, # Axes); None where it has no near form under it, or where
@@ -523,43 +666,37 @@ impl Model {
                         let mut error = vec![C64::ZERO; 4 * len];
                         self.interpolated(&mut error, len, 0..len, &dv, &ds, &gradients);
                         moved.data.iter_mut().zip(&error).for_each(|(v, e)| *v += *e);
-                        read[k] = self.form_error(sample, plan, &tabulated, &moved, &amplitudes);
+                        read[k] = self.form_error(sample, plan, &tabulated, &moved, &amplitudes, tables.thermal);
                     }
                     let exact = self.near_exact(plan, &amplitudes, 1, &self.coherent_dressing());
-                    whole[k] = self.form_error(sample, plan, &exact, &tabulated, &amplitudes);
+                    whole[k] = self.form_error(sample, plan, &exact, &tabulated, &amplitudes, tables.thermal);
                 }
                 TableRead { table: index, axes, whole }
             })
             .collect()
     }
 
-    /// The error of a sample's generator from an error of its near forms (`TableRead`): with N the near light's part of the
-    /// generator at the sample's point and momentum -- every term a near form enters, summed over its parts with their phases
-    /// there -- and ∇N_h its force's, δ = ‖(N′ − N)ψ‖/‖Nψ‖ and δ_∇ = ‖(∇N′_h − ∇N_h)ψ‖/‖∇N_h ψ‖ for the forms `other` against
-    /// `reference`: the relative error of the rates, shifts and couplings the near light gives the sample's state, and of their
-    /// force. On the populations δ P_g, on T max(δ, δ_∇) P_g, P_g the sample's ground population (a dressing's map, eliminate.rs
-    /// `Model::dressing_error`).
-    fn form_error(&self, sample: &Sample, plan: &Arc<Plan>, reference: &NearValues, other: &NearValues, amplitudes: &[Amplitude]) -> UnitError {
+    /// The error on the outputs of a sample from an error of its near forms (module documentation, # The table's error), the
+    /// forms `other` against `reference`: with N the near light's part of the generator at the sample's point and momentum --
+    /// every term a near form enters, summed over its parts with their phases there --, δ = ‖(N′ − N)ψ‖/‖Nψ‖, and ΔV = ⟨ψ|H′_h −
+    /// H_h|ψ⟩/‖ψ‖²; `thermal` is k_BT_r.
+    fn form_error(&self, sample: &Sample, plan: &Arc<Plan>, reference: &NearValues, other: &NearValues, amplitudes: &[Amplitude], thermal: f64) -> UnitError {
         let n = self.clusters[sample.cluster].states.len();
-        let action = |near: Option<&NearValues>| -> [Vec<C64>; 4] {
+        let action = |near: Option<&NearValues>| -> Vec<C64> {
             let g = self.middle_of(plan, sample.at.r, sample.at.t, plan.amplitudes(amplitudes), near).generator(sample.at.kappa);
-            let total = |of: &dyn Fn(&super::Part) -> &Mat| {
-                let mut m = Mat::zeros(n, n);
-                g.parts.iter().for_each(|p| m.add_scaled(C64::ONE, of(p)));
-                m.apply(&sample.psi)
-            };
-            [total(&|p| &p.generator), total(&|p| &p.force[0]), total(&|p| &p.force[1]), total(&|p| &p.force[2])]
+            let mut total = Mat::zeros(n, n);
+            g.parts.iter().for_each(|p| total.add_scaled(C64::ONE, &p.generator));
+            total.apply(&sample.psi)
         };
         let (far, first, second) = (action(None), action(Some(reference)), action(Some(other)));
-        let distance = |a: &[Vec<C64>], b: &[Vec<C64>]| a.iter().zip(b).map(|(x, y)| x.iter().zip(y).map(|(p, q)| (*p - *q).norm_sqr()).sum::<f64>()).sum::<f64>().sqrt();
-        let ratio = |parts: Range<usize>| {
-            let size = distance(&first[parts.clone()], &far[parts.clone()]);
-            if size > 0.0 { distance(&second[parts.clone()], &first[parts]) / size } else { 0.0 }
-        };
-        let (delta, slope) = (ratio(0..1), ratio(1..4));
+        let moved: Vec<C64> = second.iter().zip(&first).map(|(a, b)| *a - *b).collect();
+        let size = first.iter().zip(&far).map(|(a, b)| (*a - *b).norm_sqr()).sum::<f64>().sqrt();
+        let norm = crate::linalg::norm_sqr(&sample.psi);
+        let delta = if size > 0.0 { crate::linalg::norm_sqr(&moved).sqrt() / size } else { 0.0 };
+        let potential = crate::linalg::inner(&sample.psi, &moved).re.abs() / norm;
         let g = self.clusters[sample.cluster].ground;
-        let weight = sample.psi[..g].iter().map(|z| z.norm_sqr()).sum::<f64>() / sample.psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
-        UnitError { parameter: delta, population: delta * weight, temperature: delta.max(slope) * weight }
+        let weight = crate::linalg::norm_sqr(&sample.psi[..g]) / norm;
+        UnitError { parameter: delta, population: delta * weight, temperature: (delta * weight).max(potential / thermal) }
     }
 }
 
