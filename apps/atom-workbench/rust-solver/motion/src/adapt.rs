@@ -61,7 +61,7 @@
 use crate::decide::richardson;
 use crate::linalg::{dot3, norm_sqr, C64};
 use crate::model::STATES;
-use crate::step::{jump, step, step_work, test_loss, Dynamics, Flow, Middle, Refused, Segment, Step, Trajectory};
+use crate::step::{attempt, jump, step, step_work, test_loss, Attempt, Dynamics, Flow, Middle, Refused, Segment, Step, Trajectory};
 use crate::transport::Mark;
 use crate::units::ORDER;
 use std::collections::VecDeque;
@@ -176,13 +176,31 @@ fn adopt(trajectory: &mut Trajectory, end: &Trajectory) {
         (tau, grid, steps, capped, work, assemblies);
 }
 
-/// A step of `length` from a state on the grid a step of that length takes (module documentation, # The step), counted.
+/// A step of `length` from a state on the grid a step of that length takes (module documentation, # The step), counted:
+/// the flow between jumps, whatever the threshold.
 fn counted<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, length: f64) -> Result<Step, Refused> {
     trajectory.steps += 1;
     let s = step(model, from, length)?;
     trajectory.work += s.work;
     trajectory.assemblies += s.assemblies;
     Ok(s)
+}
+
+/// The same step tried for the trajectory's jump (`step::attempt`), counted: whole, or its crossing's time.
+fn tried<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, length: f64) -> Result<Result<Step, f64>, Refused> {
+    trajectory.steps += 1;
+    match attempt(model, from, length)? {
+        Attempt::Whole(s) => {
+            trajectory.work += s.work;
+            trajectory.assemblies += s.assemblies;
+            Ok(Ok(s))
+        }
+        Attempt::Crossing { root, work, assemblies } => {
+            trajectory.work += work;
+            trajectory.assemblies += assemblies;
+            Ok(Err(root))
+        }
+    }
 }
 
 /// A step read (module documentation, # The read): the step `s` taken from `from` against its two halves and, where it
@@ -252,21 +270,19 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, mu
         let (at, taken, jumps) = loop {
             let mut from = trajectory.clone();
             from.grid = grid(length);
-            let refusal = match counted(model, trajectory, &from, length) {
-                Ok(whole) => match whole.crossing {
-                    None => break (from, Some(whole), false),
-                    Some(root) if root > 0.0 => {
-                        from.grid = grid(root);
-                        match counted(model, trajectory, &from, root) {
-                            Ok(s) => break (from, Some(s), true),
-                            Err(e) => {
-                                length = root;
-                                e
-                            }
+            let refusal = match tried(model, trajectory, &from, length) {
+                Ok(Ok(whole)) => break (from, Some(whole), false),
+                Ok(Err(root)) if root > 0.0 => {
+                    from.grid = grid(root);
+                    match counted(model, trajectory, &from, root) {
+                        Ok(s) => break (from, Some(s), true),
+                        Err(e) => {
+                            length = root;
+                            e
                         }
                     }
-                    Some(_) => break (from, None, true),
-                },
+                }
+                Ok(Err(_)) => break (from, None, true),
                 Err(e) => e,
             };
             length *= 0.5;

@@ -1259,7 +1259,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             let mut scratch = super::Scratch::new(from.psi.len());
             let held = super::shear(&super::Along::new(&middle, kappa_h, [0.0; 3], tau), scratch.carve(0).held, &from.psi, tau);
             let predicted: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * (held[a] + tau * reference[a]));
-            let (_, kick) = super::propagate(&mut scratch, &middle, from, reference, kappa_h, predicted.map(|k| hm * k), tau, None);
+            let (_, kick) = super::whole(super::propagate(&mut scratch, &middle, from, reference, kappa_h, predicted.map(|k| hm * k), tau, None));
             let corrected: [f64; 3] = std::array::from_fn(|a| kappa_h[a] + 0.5 * kick[a]);
             let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
             let mut crossed = from.clone();
@@ -1275,7 +1275,10 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             .zip(starts)
             .map(|(p, s)| {
                 let (from, threshold) = if crossing { (&p.crossed, Some(p.crossed.threshold)) } else { (s, (which == 1).then_some(s.threshold)) };
-                super::propagate(&mut super::Scratch::new(from.psi.len()), &p.middle, from, p.reference, p.kappas[which], p.velocities[which], tau, threshold).1[0]
+                match super::propagate(&mut super::Scratch::new(from.psi.len()), &p.middle, from, p.reference, p.kappas[which], p.velocities[which], tau, threshold) {
+                    Ok((_, kick)) => kick[0],
+                    Err(crossed) => crossed.at,
+                }
             })
             .sum::<f64>()
     };
@@ -1308,7 +1311,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     );
     let crossings = pieces
         .iter()
-        .filter(|p| super::propagate(&mut super::Scratch::new(p.crossed.psi.len()), &p.middle, &p.crossed, p.reference, p.kappas[1], p.velocities[1], tau, Some(p.crossed.threshold)).0.crossing.is_some())
+        .filter(|p| super::propagate(&mut super::Scratch::new(p.crossed.psi.len()), &p.middle, &p.crossed, p.reference, p.kappas[1], p.velocities[1], tau, Some(p.crossed.threshold)).is_err())
         .count();
     let nodes = calls[2] * generator + calls[3] * force + calls[4] * tones;
     let own = whole - calls[0] * reference - calls[1] * point - nodes;
@@ -1482,7 +1485,7 @@ fn split<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
     let [propagation, combinations, exponentials, pace] = microseconds(
         1,
         [
-            &mut || super::beating(&path, &mut whole, &from.psi, tau, 1, None).impulse[0],
+            &mut || super::whole(super::beating(&path, &mut whole, &from.psi, tau, 1, None)).impulse[0],
             &mut || combine(&mut combining, -h) + combine(&mut combining, 0.0),
             &mut || {
                 for _ in 0..4 {
