@@ -57,8 +57,9 @@ pub const REGION_INTENSITY: f64 = 1.0 / 20.0;
 /// The most trajectories a solve runs (SPEC §3; contract §2.3, whose reason text names 16384): reached, the solve
 /// returns as usual, partial.
 pub const MOST_TRAJECTORIES: u64 = 1 << 14;
-/// The most steps a trajectory takes over a run (SPEC §2.2; contract §2.3): reached, the trajectory ends as usual and
-/// its time span is flagged.
+/// The most steps of the run's constant step a trajectory's run may hold (SPEC §2.2; contract §2.3): the step's ladder
+/// goes no further down than the run's length over it; where its error is not within its share there, it is booked as
+/// read and flagged. (A trajectory's jumps and the halves of refused steps come on top; they are not capped.)
 pub const MOST_STEPS: u64 = 1 << 24;
 /// The longest trajectory a request asks for (µs): 10 s (contract §1.3, the population core's `LONGEST_TIME_US`; the
 /// app's translated message names "10 s").
