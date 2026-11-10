@@ -658,6 +658,21 @@ impl Model {
         NearValues { len, order, data, directions: Some(gradients), work }
     }
 
+    /// The jumps at a point from a table, to an order (0 or 1), into a caller's vectors, and their counted work: the axes'
+    /// coordinates there and their gradients, and the jumps' reals -- the values, then to first order their slopes per
+    /// axis.
+    pub(crate) fn near_jumps(&self, table: &NearTable, amplitudes: &[Amplitude], order: usize, coordinates: &mut Vec<f64>, directions: &mut Vec<[f64; 3]>, reals: &mut Vec<f64>) -> f64 {
+        let (d, jumping) = (table.axes(), table.layout.plan.near.jumping());
+        sized(coordinates, d);
+        sized(directions, d);
+        let work = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, amplitudes, coordinates, directions);
+        let (width, slopes) = (2 * jumping.len(), if order >= 1 { d } else { 0 });
+        sized(reals, (1 + slopes) * width);
+        let (value, slope) = reals.split_at_mut(width);
+        table.table.eval_range(coordinates, 2 * jumping.start, value, (order >= 1).then_some(slope));
+        work + (4usize.pow(d as u32) * (1 + slopes) * width) as f64 / crate::decide::COMPLEX
+    }
+
     /// A middle's near terms' values at a point from a table (module documentation, # At a point; assemble.rs `Site`), and
     /// their counted work: the table's interpolant of the generator's values -- the Hermitian forms and the decay's sums of
     /// the jumps' products, as the nodes hold them -- and of the forms' with their slopes along the axes, each straight to its

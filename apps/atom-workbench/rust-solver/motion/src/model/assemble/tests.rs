@@ -607,3 +607,51 @@ fn the_decay_s_mismatch_on_a_scene() {
     let (shown, temperature) = crate::model::tabulate::shares();
     eprintln!("{name}: the tables' shares {shown:.2e} on what is shown, {temperature:.2e} on T");
 }
+
+/// A state's photons made in parts (photon.rs `Gradients`) are the same photons: every class's amplitudes without any
+/// gradients (what a jump's draw reads) are the amplitudes of the photons made whole, and one class alone with its
+/// gradients (what the drawn photon's recoil reads) is that class of them -- the same numbers, bit for bit, so the recoil
+/// of the drawn class made again from the state (`Run::recoil_at`) is the whole photon's. On every model of the tests,
+/// with the exact elimination, and on a scene's tables.
+#[test]
+fn a_state_s_photons_in_parts_are_its_photons() {
+    use crate::model::photon::Gradients;
+    use crate::model::Run;
+    let (mut classes, mut folded) = (0, 0);
+    let mut check = |name: &str, model: &Model, run: &Run, tables: Option<&crate::model::tabulate::Tables>, stream: &mut Stream| {
+        let lights = model.running();
+        for cluster in 0..model.clusters.len() {
+            let (plan, n) = (model.plan(cluster, &lights), model.clusters[cluster].states.len());
+            let table = tables.and_then(|t| t.of(cluster, &lights));
+            let (r, t, kappa, _, _) = drawn(model, stream);
+            let at = crate::model::Point { r, kappa, t };
+            let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
+            let (whole, work) = model.photons_of(&plan, table, &at, &psi, Gradients::All);
+            assert_eq!((&whole, work), (&model.photons_counted(cluster, &at, &psi, tables).0, model.photons_counted(cluster, &at, &psi, tables).1), "{name}, cluster {cluster}: the photons by the cluster's own plan and table");
+            let bare = model.photons_of(&plan, table, &at, &psi, Gradients::None).0;
+            assert_eq!(bare, run.photon_amplitudes(cluster, &at, &psi));
+            assert_eq!(whole.len(), bare.len(), "{name}, cluster {cluster}: the classes");
+            let epsilon = stream.direction();
+            for (photon, alone) in whole.iter().zip(&bare) {
+                assert!(alone.gradients.iter().flatten().all(|g| g.is_empty()), "{name}, cluster {cluster}, class {}: gradients where none are asked", photon.class);
+                assert!((alone.class, &alone.amplitudes, &alone.explicit) == (photon.class, &photon.amplitudes, &photon.explicit), "{name}, cluster {cluster}, class {}: the amplitudes alone", photon.class);
+                let one = model.photons_of(&plan, table, &at, &psi, Gradients::Of(photon.class)).0;
+                assert!(one.len() == 1 && one[0] == *photon, "{name}, cluster {cluster}, class {}: the class alone", photon.class);
+                assert_eq!(run.recoil_at(cluster, &at, &psi, alone, &epsilon), photon.recoil(&epsilon), "{name}, cluster {cluster}, class {}: the recoil", photon.class);
+                classes += 1;
+                folded += photon.gradients.iter().flatten().flatten().filter(|z| **z != C64::ZERO).count().min(1);
+            }
+        }
+    };
+    for (index, (name, model)) in models().into_iter().enumerate() {
+        let mut stream = Stream::new(4, Purpose::Initial, index as u64, 0);
+        check(name, &model, &Run::new(&model, [1.0 / GROUND as f64; GROUND]), None, &mut stream);
+    }
+    let (name, request, model) = ("R4_TW1 tabulated", scene("R4_TW1"), model("R4_TW1", &others, &|_| false));
+    let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let p: [f64; GROUND] = std::array::from_fn(|b| if b == state { 1.0 } else { 0.0 });
+    let reach = model.reach(&model.trap(&p, &model.prepared()).unwrap(), &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
+    let tables = model.tabulate(&reach, 1 << 12);
+    check(name, &model, &Run::tabulated(&model, &tables, p), Some(&tables), &mut Stream::new(4, Purpose::Initial, 99, 0));
+    assert!(classes > 0 && folded > 0, "classes ({classes}) with folded gradients ({folded})");
+}

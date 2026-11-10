@@ -1100,6 +1100,10 @@ pub(crate) struct Site {
     /// A table's coordinates at the point (tabulate.rs `Model::near_point`); the jumps' products' sums (`formed`).
     pub(crate) coordinates: Vec<f64>,
     sums: Vec<C64>,
+    /// What a jump's photons share (photon.rs `Model::photons_of`): the near jumps' reals from their table, and the plan's
+    /// field components.
+    pub(crate) reals: Vec<f64>,
+    pub(crate) fields: Fields,
     /// Its nodes' scratch, one for all its paths: a node's call fills what it reads.
     scratch: RefCell<Scratch>,
 }
@@ -1134,6 +1138,7 @@ impl Site {
 
 /// A plan's field components at a point (`Model::fields`): per component its jet to an order, plain and weighted by its beams'
 /// Doppler shifts (each `parts` numbers a component).
+#[derive(Default)]
 pub(crate) struct Fields {
     parts: usize,
     plain: Vec<C64>,
@@ -1306,8 +1311,19 @@ impl Model {
 
     /// A plan's field components at a point, jets to `order`, plain and weighted by their beams' Doppler shifts at a momentum.
     pub(crate) fn fields(&self, plan: &Plan, amplitudes: &[Amplitude], kappa: [f64; 3], order: usize) -> Fields {
+        let mut out = Fields::default();
+        self.fields_into(plan, amplitudes, kappa, order, &mut out);
+        out
+    }
+
+    /// The same into a caller's components, kept from one use to the next.
+    pub(crate) fn fields_into(&self, plan: &Plan, amplitudes: &[Amplitude], kappa: [f64; 3], order: usize, out: &mut Fields) {
         let parts = jet::parts(order);
-        let mut out = Fields { parts, plain: vec![C64::ZERO; parts * plan.scalars.len()], doppler: vec![C64::ZERO; parts * plan.scalars.len()] };
+        out.parts = parts;
+        for values in [&mut out.plain, &mut out.doppler] {
+            values.clear();
+            values.resize(parts * plan.scalars.len(), C64::ZERO);
+        }
         for (s, (plain, doppler)) in plan.scalars.iter().zip(out.plain.chunks_mut(parts).zip(out.doppler.chunks_mut(parts))) {
             for &(at, c) in &s.beams {
                 let (beam, shift) = (jet::whole(&amplitudes[plan.beams[at]]), self.doppler_shift(plan.beams[at], kappa));
@@ -1318,7 +1334,6 @@ impl Model {
                 }
             }
         }
-        out
     }
 
     /// A beam's first-order Doppler shift w_l = (ħ/m)(k_l·κ + k_l²/2) at a momentum (eliminate.rs, # First-order Doppler).

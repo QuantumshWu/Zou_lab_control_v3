@@ -42,10 +42,13 @@
 //! force's fluctuations towards the node, where its beams one by one would give k² everywhere. The kick is b_J + ξ, Cov ξ =
 //! M − b_J b_Jᵀ, b_J = the folded mean: positive semidefinite by Cauchy–Schwarz.
 
+use super::assemble::{Held, Plan, Site};
 use super::far::EXCITED;
 use super::reach::Region;
+use super::tabulate::NearTable;
 use super::units::{gate, Measured};
-use super::{Beat, Lights, Model, Photon, Point, Recoil, Unit, UnitError};
+use super::{jet, Beat, Lights, Model, Photon, Point, Recoil, Unit, UnitError};
+use std::sync::Arc;
 
 use crate::linalg::C64;
 use crate::request::{GROUND, STATES};
@@ -77,6 +80,16 @@ pub(crate) struct Member {
     pub(crate) source: usize,
     pub(crate) entries: Vec<(usize, usize)>,
     pub(crate) phase: Beat,
+}
+
+/// Which classes' folded gradients a state's photons are made with (`Model::photons_of`): every class's; one class's, that
+/// class the only photon made (the drawn photon's recoil reads no other); or none's, every class's amplitudes alone (what
+/// the draw of a class reads).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Gradients {
+    All,
+    Of(usize),
+    None,
 }
 
 /// A class of a source cluster's photons: its frame frequencies (one, or several kept coherent), its landing cluster, its members.
@@ -244,36 +257,75 @@ impl Model {
         self.photons_counted(cluster, at, psi, None).0
     }
 
-    /// The photons (`photons`) and the complex multiply-adds that made them: the near jumps at the point with their gradients
-    /// (from their table where one serves, tabulate.rs), the field components, each entry's amplitude and its gradient, the
-    /// explicit sources' shares.
+    /// The photons (`photons`) with every class's gradients, and the complex multiply-adds that made them; the near jumps
+    /// from their table where one serves (tabulate.rs).
     pub(crate) fn photons_counted(&self, cluster: usize, at: &Point, psi: &[C64], tables: Option<&super::tabulate::Tables>) -> (Vec<Photon>, f64) {
         let lights = self.running();
-        let plan = self.plan(cluster, &lights);
-        let amplitudes = self.light.amplitudes(at.r);
-        let len = plan.near.len();
-        let near = (len > 0).then(|| self.near_values(&plan, &amplitudes, &[(plan.near.jumping(), 1)], tables.and_then(|t| t.of(cluster, &lights))));
-        let fields = self.fields(&plan, &amplitudes, at.kappa, 1);
-        // Each field component's value and gradient from its beams, plain and Doppler-weighted.
-        let mut work = near.as_ref().map_or(0.0, |n| n.work) + plan.scalars.iter().map(|s| (8 * s.beams.len()) as f64).sum::<f64>();
-        // A jump with its gradient: a near form's with its constant part, or a constant.
-        let jump = |place: usize| -> [C64; 4] {
-            match &near {
-                Some(n) if place < len => {
-                    let mut value = n.first_order(place);
-                    value[0] += plan.bare(place);
-                    value
-                }
-                _ => [plan.constants[place - len], C64::ZERO, C64::ZERO, C64::ZERO],
+        self.photons_of(&self.plan(cluster, &lights), tables.and_then(|t| t.of(cluster, &lights)), at, psi, Gradients::All)
+    }
+
+    /// The photons of a state under a plan's lights (`photons`), made as far as `gradients` says -- every class's amplitudes
+    /// with every class's gradients, one class alone with its gradients, or every class's amplitudes without any (a class's
+    /// gradients are then empty) --, and the complex multiply-adds that made them: the near jumps at the point (with their
+    /// gradients where any class takes them; from their table where one is given), the field components, each entry's
+    /// amplitude and its gradient, the explicit sources' shares. What a jump shares across its classes is in a thread's
+    /// spare (assemble.rs `Held`): beyond the photons' own vectors the heap is asked for nothing.
+    pub(crate) fn photons_of(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64], gradients: Gradients) -> (Vec<Photon>, f64) {
+        let (cluster, len, jumping) = (plan.cluster, plan.near.len(), plan.near.jumping());
+        let order = if gradients == Gradients::None { 0 } else { 1 };
+        let mut site = Held::<Site>::take();
+        self.light.amplitudes_into(at.r, &mut site.beams);
+        let Site { beams: amplitudes, coordinates, directions, reals, fields, .. } = &mut *site;
+        // The near jumps there: a table's reals (the values, then per axis their slopes), or the exact elimination's.
+        let (exact, mut work) = match table {
+            _ if len == 0 => (None, 0.0),
+            Some(table) => (None, self.near_jumps(table, amplitudes, order, coordinates, directions, reals)),
+            None => {
+                let near = self.near_exact(plan, amplitudes, order, &self.coherent_dressing());
+                let work = near.work;
+                (Some(near), work)
             }
+        };
+        self.fields_into(plan, amplitudes, at.kappa, order, fields);
+        // Each field component's value (and gradient) from its beams, plain and Doppler-weighted.
+        work += plan.scalars.iter().map(|s| (2 * jet::parts(order) * s.beams.len()) as f64).sum::<f64>();
+        // A jump with its gradient (zero where none is asked): a near form's with its constant part, or a constant.
+        let (width, reals, directions) = (2 * jumping.len(), &*reals, &*directions);
+        let jump = |place: usize| -> [C64; 4] {
+            if place >= len {
+                return [plan.constants[place - len], C64::ZERO, C64::ZERO, C64::ZERO];
+            }
+            let mut value = match &exact {
+                Some(near) if order == 0 => [near.data[place], C64::ZERO, C64::ZERO, C64::ZERO],
+                Some(near) => near.first_order(place),
+                None => {
+                    let i = 2 * (place - jumping.start);
+                    let mut out = [C64::new(reals[i], reals[i + 1]), C64::ZERO, C64::ZERO, C64::ZERO];
+                    for (f, d) in directions.iter().enumerate().take(if order == 0 { 0 } else { directions.len() }) {
+                        let slope = C64::new(reals[(1 + f) * width + i], reals[(1 + f) * width + i + 1]);
+                        for a in 0..3 {
+                            out[1 + a] += slope * d[a];
+                        }
+                    }
+                    out
+                }
+            };
+            value[0] += plan.bare(place);
+            value
         };
         let one = [C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO];
         let mut energies: Option<Vec<Vec<f64>>> = None;
-        let mut out = vec![];
+        let mut out = Vec::with_capacity(plan.classes.len());
         for (place, class) in plan.classes.iter().enumerate() {
+            let with = match gradients {
+                Gradients::All => true,
+                Gradients::Of(only) if only == place => true,
+                Gradients::Of(_) => continue,
+                Gradients::None => false,
+            };
             let n = self.clusters[class.landing].states.len();
             let mut u: [Vec<C64>; 3] = std::array::from_fn(|_| vec![C64::ZERO; n]);
-            let mut gradients: [[Vec<C64>; 3]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| vec![C64::ZERO; n]));
+            let mut made: [[Vec<C64>; 3]; 3] = std::array::from_fn(|_| std::array::from_fn(|_| vec![C64::ZERO; if with { n } else { 0 }]));
             let mut explicit = vec![];
             for m in &class.members {
                 let folded = !matches!(self.sources[m.source].origin, Origin::Explicit { .. });
@@ -283,29 +335,31 @@ impl Model {
                 for &(a, bp, sp, first, second) in &m.entries {
                     let x = psi[sp] * phase;
                     let j = jump(first);
+                    let partner = m.doppler.then(|| jump(second));
                     let mut value = c[0] * j[0];
-                    let mut gradient: [C64; 3] = std::array::from_fn(|i| c[1 + i] * j[0] + c[0] * j[1 + i]);
-                    if m.doppler {
-                        let j2 = jump(second);
+                    if let Some(j2) = &partner {
                         value -= cw[0] * j2[0];
-                        for i in 0..3 {
-                            gradient[i] -= cw[1 + i] * j2[0] + cw[0] * j2[1 + i];
-                        }
                     }
                     u[a][bp] += value * x;
-                    if folded {
-                        for i in 0..3 {
-                            gradients[i][a][bp] += gradient[i] * x;
+                    if folded && with {
+                        let mut gradient: [C64; 3] = std::array::from_fn(|i| c[1 + i] * j[0] + c[0] * j[1 + i]);
+                        if let Some(j2) = &partner {
+                            for i in 0..3 {
+                                gradient[i] -= cw[1 + i] * j2[0] + cw[0] * j2[1 + i];
+                            }
                         }
-                    } else {
+                        for i in 0..3 {
+                            made[i][a][bp] += gradient[i] * x;
+                        }
+                    } else if !folded {
                         own[a][bp] += value * x;
                     }
                     let partner = if m.doppler { 1.0 } else { 0.0 };
-                    work += 2.0 + partner + if folded { 3.0 * (3.0 + 2.0 * partner) } else { 0.0 };
+                    work += 2.0 + partner + if folded && with { 3.0 * (3.0 + 2.0 * partner) } else { 0.0 };
                 }
                 if !folded {
-                    let h = energies.get_or_insert_with(|| self.far_energies(&amplitudes, &lights, 1, &self.coherent_dressing()).0);
-                    let (shares, w) = self.explicit_recoil(cluster, &amplitudes, h, at.kappa, m.source, own, psi);
+                    let h = energies.get_or_insert_with(|| self.far_energies(amplitudes, &plan.lights, 1, &self.coherent_dressing()).0);
+                    let (shares, w) = self.explicit_recoil(cluster, amplitudes, h, at.kappa, m.source, own, psi);
                     explicit.extend(shares);
                     work += w;
                 }
@@ -313,7 +367,7 @@ impl Model {
             if u.iter().all(|v| v.iter().all(|z| *z == C64::ZERO)) {
                 continue;
             }
-            out.push(Photon { class: place, landing: class.landing, wave_number: class.wave_number, amplitudes: u, gradients, explicit });
+            out.push(Photon { class: place, landing: class.landing, wave_number: class.wave_number, amplitudes: u, gradients: made, explicit });
         }
         (out, work)
     }

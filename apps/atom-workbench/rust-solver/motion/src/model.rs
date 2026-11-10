@@ -600,6 +600,19 @@ impl<'a> Run<'a> {
             * crate::decide::COMPLEX;
         Run { model, tables, reference, prepared: model.prepared(), plans, assembly, photons }
     }
+    /// The photon classes of a cluster's state at a point with their amplitudes alone (photon.rs `Gradients::None`): what a
+    /// jump's draw of its class, direction and polarization reads.
+    pub fn photon_amplitudes(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
+        let (plan, table) = &self.plans[cluster];
+        self.model.photons_of(plan, *table, at, psi, photon::Gradients::None).0
+    }
+    /// The absorption recoil's moments of the drawn photon into the drawn polarization, from the state it was drawn at:
+    /// that class alone made again, with its gradients (photon.rs `Gradients::Of`).
+    pub fn recoil_at(&self, cluster: usize, at: &Point, psi: &[C64], photon: &Photon, polarization: &[f64; 3]) -> Recoil {
+        let (plan, table) = &self.plans[cluster];
+        let drawn = self.model.photons_of(plan, *table, at, psi, photon::Gradients::Of(photon.class)).0;
+        drawn.first().expect("the drawn class at the state it was drawn at").recoil(polarization)
+    }
     /// A cluster's generator at a position and time, for every momentum and along every path through the point (assemble.rs
     /// `Middle`): a step's one middle.
     pub fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Middle<'a> {
@@ -635,7 +648,8 @@ impl crate::step::Dynamics for Run<'_> {
         Run::middle(self, cluster, r, t)
     }
     fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
-        self.model.photons_counted(cluster, at, psi, self.tables).0
+        let (plan, table) = &self.plans[cluster];
+        self.model.photons_of(plan, *table, at, psi, photon::Gradients::All).0
     }
     fn recoil(&self, photon: &Photon, polarization: &[f64; 3]) -> Recoil {
         photon.recoil(polarization)
