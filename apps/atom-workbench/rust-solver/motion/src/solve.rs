@@ -452,7 +452,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
     // The product (module documentation, # Stopping).
     let mut parts: Vec<Part> = vec![];
     let started = Instant::now();
-    product(&run, &ensemble, &context, &targets, &mut parts, batch(targets.need(&estimates)), started, checkpoint);
+    product(&run, &ensemble, &context, &targets, &mut parts, batch(targets.need(&estimates), pilot_size()), started, checkpoint);
     // The step's falsifier (SPEC §5.3) on the product's first groups at half the step, and the product's trajectories
     // within the step's error of the escape; while it runs, the product's result is the checkpoint. Refuted, the attempt
     // runs again at the rung the measured ratio gives.
@@ -513,22 +513,23 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
     // The statistics against the room the re-booked errors leave.
     let n = parts.len() as u64 * GROUP;
     if !(1..outputs).all(|k| targets.met(&e, k)) && n < MOST_TRAJECTORIES {
-        let want = batch(targets.need(&e)).max(n + GROUP).min(MOST_TRAJECTORIES);
-        product(&run, &ensemble, &context, &targets, &mut parts, want, started, checkpoint);
+        product(&run, &ensemble, &context, &targets, &mut parts, batch(targets.need(&e), n), started, checkpoint);
     }
     let all: Vec<&Part> = parts.iter().collect();
     let (e, l, c) = pooled(&all, &context.scales);
     Ok(Attempt::Done(assemble(&context, &e, &l, &c, all.len() as u64 * GROUP)))
 }
 
-/// A batch's size for the trajectories the estimates predict: whole groups, the pilot's size at least, `MOST_TRAJECTORIES`
-/// at most.
-fn batch(n: f64) -> u64 {
-    ((n / GROUP as f64).ceil() as u64 * GROUP).clamp(pilot_size(), MOST_TRAJECTORIES)
+/// The trajectories a batch brings a run of `have` to, for the `need` its estimates predict: whole groups, more than it
+/// has, at most twice as many -- the need is predicted from a variance read on the groups so far (the pilot's eleven at
+/// first, whose largest read over the outputs runs high), and a batch that only doubles them leaves at most half of the
+/// work to a wrong prediction --, and `MOST_TRAJECTORIES` at most.
+fn batch(need: f64, have: u64) -> u64 {
+    ((need / GROUP as f64).ceil() as u64 * GROUP).clamp(have + GROUP, 2 * have).min(MOST_TRAJECTORIES)
 }
 
 /// The product (module documentation, # Stopping): batches of whole groups at the run's step, from the trajectories it
-/// has to `want` and on by the estimates' prediction, until every output's statistics meet the targets or the
+/// has to `want` and on by the estimates' prediction (`batch`), until every output's statistics meet the targets or the
 /// trajectories reach `MOST_TRAJECTORIES`; each batch's result is a checkpoint.
 #[allow(clippy::too_many_arguments)]
 fn product(run: &Run, ensemble: &Ensemble, context: &Context, targets: &Targets, parts: &mut Vec<Part>, mut want: u64, started: Instant, checkpoint: &mut dyn FnMut(&Solution, Option<f64>)) {
@@ -549,7 +550,7 @@ fn product(run: &Run, ensemble: &Ensemble, context: &Context, targets: &Targets,
         if (1..outputs).all(|k| targets.met(&e, k)) || n >= MOST_TRAJECTORIES {
             break;
         }
-        want = batch(targets.need(&e)).max(n + GROUP).min(MOST_TRAJECTORIES);
+        want = batch(targets.need(&e), n);
         checkpoint(&assemble(context, &e, &l, &c, n), pace(n).map(|p| p * (want - n) as f64));
     }
 }
