@@ -502,7 +502,7 @@ fn a_read_trajectory_holds_its_jumps_input_and_its_hazard() {
     let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
     let model = Atom::new(RB, flat, vec![], 0.0, gamma);
     let start = Trajectory::new(&model, 0, [0.0; 3], [3.0, -2.0, 1.0], 3, 5);
-    let (mut t, mut reader, end) = (start.clone(), Reader::new(), 50.0);
+    let (mut t, mut reader, end) = (start.clone(), Reader::new([5.0; 3]), 50.0);
     adapt::advance(&model, 1.0, &mut t, Some(&mut reader), end, &mut |_| {}).unwrap();
     let drift = reader.drift;
     assert!(t.jumps > 50 && drift.unread == 0.0 && drift.rows.iter().all(|x| *x == 0.0), "{} jumps, {drift:?}", t.jumps);
@@ -554,7 +554,7 @@ fn a_read_trajectory_accumulates_its_steps_doubling_differences() {
     let model = Atom::new(RB, trap, vec![], 0.0, 0.0);
     let start = held(&model, [0.3, -0.2, 0.8], [20.0, 15.0, -10.0]);
     let (tau, steps) = (5.0, 4);
-    let (mut read, mut plain, mut reader) = (start.clone(), start.clone(), Reader::new());
+    let (mut read, mut plain, mut reader) = (start.clone(), start.clone(), Reader::new([2.0 * tau; 3]));
     adapt::advance(&model, tau, &mut read, Some(&mut reader), tau * steps as f64, &mut |_| {}).unwrap();
     let drift = reader.drift;
     adapt::advance(&model, tau, &mut plain, None, tau * steps as f64, &mut |_| {}).unwrap();
@@ -571,7 +571,7 @@ fn a_read_trajectory_accumulates_its_steps_doubling_differences() {
     assert!((drift.energy - by_hand).abs() <= 1e-12 * by_hand.abs(), "{} against {by_hand}", drift.energy);
     assert!(drift.energy.abs() > 1e-6 && drift.rows.iter().all(|x| *x == 0.0) && drift.unread == 0.0, "{drift:?}");
     assert!(drift.mark.input == [0.0; 3], "{drift:?}");
-    assert!(drift.mark.level == model.energy(0, &read.point(), &read.psi) && drift.mark.error.iter().any(|&e| e != 0.0), "{drift:?}");
+    assert!(drift.mark.level.iter().all(|&e| e > 0.0) && drift.mark.error.iter().any(|&e| e != 0.0), "{drift:?}");
 }
 
 /// The step-doubling estimate is the scheme's local error, O(τ³): a two-level atom in a standing wave in a Gaussian
@@ -754,7 +754,7 @@ fn conservative_trap(name: &str) {
             }
         }
         let mut t = Trajectory::new(&run, state, r, kappa, 17, i);
-        let mut reader = Reader::new();
+        let mut reader = Reader::new(trap.lab.map(|w| std::f64::consts::TAU / w));
         let mut e0 = run.energy(t.cluster, &t.point(), &t.psi);
         for (k, &time) in request.times_us.iter().enumerate().skip(1) {
             let before = t.jumps;

@@ -82,7 +82,7 @@ use crate::step::{Dynamics, Segment, Trajectory};
 use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, ORDER, STEP_SHARE, TEMPERATURE_TARGET};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::f64::consts::PI;
+use std::f64::consts::{PI, TAU};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -395,11 +395,13 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
     };
 
     // The pilot (module documentation, # The pipeline, # The step): its own trajectory numbers, read at the ladder's rungs
-    // from its first one until its step error fits the step's share.
+    // from its first one until its step error fits the step's share; its marks average each atom's kinetic energy over
+    // the reported trap's period of the axis.
+    let periods: V3 = context.scales.frequencies.map(|w| TAU / w);
     let first = MOST_TRAJECTORIES / GROUP;
     let (pilot, reads) = loop {
         let tau = context.tau;
-        let pilot = run_groups(first, first + pilot_size() / GROUP, Shape::of(&context.plan, true), &|i| trajectory(&run, &ensemble, tau, true, None, &context.plan, true, i), messages, &mut |prefix, messages| {
+        let pilot = run_groups(first, first + pilot_size() / GROUP, Shape::of(&context.plan, true), &|i| trajectory(&run, &ensemble, tau, Some(periods), None, &context.plan, true, i), messages, &mut |prefix, messages| {
             let (e, l, c) = pooled(prefix, &context.scales);
             messages.result(&assemble(&context, &e, &l, &c, prefix.len() as u64 * GROUP), None);
         });
@@ -499,7 +501,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
     let all: Vec<&Part> = parts.iter().collect();
     let (e, l, c) = pooled(&all, &context.scales);
     let current = assemble(&context, &e, &l, &c, all.len() as u64 * GROUP);
-    let fine = run_groups(0, checked, Shape::of(&context.plan, false), &|i| trajectory(&run, &ensemble, 0.5 * tau, false, Some(&context.fixed.windows), &context.plan, false, i), messages, &mut |_, messages| messages.result(&current, None));
+    let fine = run_groups(0, checked, Shape::of(&context.plan, false), &|i| trajectory(&run, &ensemble, 0.5 * tau, None, Some(&context.fixed.windows), &context.plan, false, i), messages, &mut |_, messages| messages.result(&current, None));
     let share = step_bound();
     let pairs = refuted(&all[..checked as usize], &fine, &context.scales, &targets, 0.5, ORDER as f64, &|_| share);
     let escape = e.iter().skip(1).any(|x| x.judged > 0. && 1. - wilson(x.judged - x.near, x.judged) > share[0]).then_some(1.);
@@ -524,7 +526,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
     };
     let with = Model::new(request, light, &[kept.as_slice(), std::slice::from_ref(&units[u])].concat())?;
     let finer = Run::new(&with, reference);
-    let fine = run_groups(0, checked, Shape::of(&context.plan, false), &|i| trajectory(&finer, &ensemble, tau, false, Some(&context.fixed.windows), &context.plan, false, i), messages, &mut |_, messages| messages.result(&result, None));
+    let fine = run_groups(0, checked, Shape::of(&context.plan, false), &|i| trajectory(&finer, &ensemble, tau, None, Some(&context.fixed.windows), &context.plan, false, i), messages, &mut |_, messages| messages.result(&result, None));
     // What the pairs read clearly beyond the fold's booked error is booked in its place: on the rows as shown as it is
     // read there, and on T.
     let clear = cleared(&all[..checked as usize], &fine, &context.scales, &targets);
@@ -579,7 +581,7 @@ fn product(run: &Run, ensemble: &Ensemble, context: &Context, targets: &Targets,
     loop {
         let have = parts.len() as u64 * GROUP;
         let pace = |done: u64| (done > 0).then(|| started.elapsed().as_secs_f64() * 1e3 / done as f64);
-        let new = run_groups(have / GROUP, want / GROUP, Shape::of(&context.plan, false), &|i| trajectory(run, ensemble, context.tau, false, Some(&context.fixed.windows), &context.plan, false, i), messages, &mut |prefix, messages| {
+        let new = run_groups(have / GROUP, want / GROUP, Shape::of(&context.plan, false), &|i| trajectory(run, ensemble, context.tau, None, Some(&context.fixed.windows), &context.plan, false, i), messages, &mut |prefix, messages| {
             let all: Vec<&Part> = parts.iter().chain(prefix.iter().copied()).collect();
             let n = all.len() as u64 * GROUP;
             let (e, l, c) = pooled(&all, &context.scales);
@@ -676,12 +678,12 @@ struct Record {
 /// was lost in (module documentation, # The step). A trajectory the scheme cannot advance (adapt.rs) fails from the first
 /// output it does not reach.
 #[allow(clippy::too_many_arguments)]
-fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: bool, windows: Option<&[f64]>, margin: &dyn Fn(&Trajectory) -> f64, plan: &Plan, keep: bool) -> Record {
+fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, read: Option<V3>, windows: Option<&[f64]>, margin: &dyn Fn(&Trajectory) -> f64, plan: &Plan, keep: bool) -> Record {
     let outputs = plan.times.len();
     let interval = plan.times[1] - plan.times[0];
     let widest = plan.halves.iter().flatten().fold(0., |a: f64, &b| a.max(b));
     let mut t = Trajectory::new(model, start.state, start.r, start.kappa, SEED, index);
-    let mut reader = read.then(Reader::new);
+    let mut reader = read.map(Reader::new);
     // Per output and lab axis: the window's time held, ∫κ dt and ∫κ² dt.
     let mut moments = vec![[[0.; 3]; 3]; outputs];
     let mut out = vec![Output { fate: Fate::Lost, near: None, energy: None }; outputs];
@@ -807,7 +809,7 @@ impl Shape {
 /// Trajectory `index` of a run: its initial state from the ensemble (ensemble.rs `Ensemble::draw`), run through the plan
 /// (`run`), its margin the running potential's far value less its loss energy (model.rs `Model::lost`).
 #[allow(clippy::too_many_arguments)]
-fn trajectory(model: &Run, ensemble: &Ensemble, tau: f64, read: bool, windows: Option<&[f64]>, plan: &Plan, keep: bool, index: u64) -> Record {
+fn trajectory(model: &Run, ensemble: &Ensemble, tau: f64, read: Option<V3>, windows: Option<&[f64]>, plan: &Plan, keep: bool, index: u64) -> Record {
     let margin = |t: &Trajectory| {
         let far = model.model.asymptote(&model.model.ground_populations(t.cluster, &t.psi), &model.model.running());
         far - model.energy(t.cluster, &t.point(), &t.psi)
@@ -1236,7 +1238,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
         temperature_total_errors_uk: Vec::with_capacity(outputs),
         mean_velocity_mps: Vec::with_capacity(outputs),
         mean_occupation: Vec::with_capacity(outputs),
-        trap_frequency_khz: w.map(|x| x / std::f64::consts::TAU * 1e3),
+        trap_frequency_khz: w.map(|x| x / TAU * 1e3),
         loss_probability: estimates.iter().enumerate().map(|(k, e)| if k == 0 { 0. } else { e.loss }).collect(),
         velocity: std::array::from_fn(|a| histograms(listed, &c.plan.listed, &|x| x.1[a] * hm)),
         position: std::array::from_fn(|a| histograms(listed, &c.plan.listed, &|x| x.0[a])),

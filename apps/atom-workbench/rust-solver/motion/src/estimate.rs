@@ -634,7 +634,7 @@ mod tests {
         let kt = 4. * scales.hbar_over_mass;
         let atom = |errors: f64, energy: f64, unread: f64| {
             let mut drift = Drift::ZERO;
-            drift.mark.level = 7.;
+            drift.mark.level = [7.; 3];
             drift.mark.error = [0.01 * kt * errors, 0.02 * kt * errors, 0.03 * kt * errors];
             drift.rows[2] = 0.02 * errors;
             (drift.energy, drift.unread) = (energy * errors, unread);

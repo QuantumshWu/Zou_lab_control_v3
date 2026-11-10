@@ -43,8 +43,11 @@
 //!   difference between the trajectory's step and S's, the kick an internal error makes. Beside them are accumulated
 //!   the kinetic energy the jumps put in per lab axis (`Mark::input`) and the hazard's integral with its local error
 //!   (`Mark::hazard`, `Mark::hazard_error`): the jump-free doubling sees no recoil, and a hazard off by a share makes
-//!   that share too many or too few of them. Each mark also holds the atom's energy itself (`Mark::level`, the loss
-//!   energy E_s): the ensemble's regression of it on itself carries the local errors to the outputs (transport.rs).
+//!   that share too many or too few of them. Each mark also holds the atom's own part of T (`Mark::level`, `Trail`):
+//!   per lab axis the mean of its kinetic energy (ħ/m)κ_a²/2 over the trap period behind it -- T_a's summand (SPEC
+//!   §1.7), half the axis's energy on a harmonic axis, and bounded and smooth in any trap (the harmonic energy about
+//!   the trap's centre is not: in a crossed trap's arms and across a lattice's sites it is no energy of the atom's).
+//!   The ensemble's regression of them carries the local errors to the outputs (transport.rs).
 //! - **The loss energy** E_s keeps the plain sum of its local errors (`Drift::energy`): a trajectory's loss decision
 //!   is judged against the sum as it stood (solve.rs) -- the safe side for a motion that forgets.
 //!
@@ -61,6 +64,7 @@ use crate::model::{Generator, STATES};
 use crate::step::{jump, step, step_work, test_loss, Dynamics, Flow, Refused, Segment, Step, Trajectory};
 use crate::transport::Mark;
 use crate::units::ORDER;
+use std::collections::VecDeque;
 
 /// The grid's order in its spacing h: CF4's local error O(h⁵) and composite Simpson's, per unit time O(h⁴).
 const GRID_ORDER: i32 = 4;
@@ -84,17 +88,63 @@ impl Drift {
     pub const ZERO: Drift = Drift { mark: Mark::ZERO, energy: 0.0, rows: [0.0; STATES], unread: 0.0 };
 }
 
-/// A trajectory's read (module documentation, # The read): what it holds, and the carried internal state S on the
-/// trajectory's cluster -- none before the first step, where S is ψ.
+/// A read trajectory's recent path (module documentation, # The read): per lab axis the window (µs, the axis's trap
+/// period), and the steps' paths back to the longest window behind the last one, each with its ∫κ_a² dt.
+#[derive(Clone, Debug, PartialEq)]
+struct Trail {
+    windows: [f64; 3],
+    steps: VecDeque<(Segment, [f64; 3])>,
+}
+
+impl Trail {
+    /// The trail a step longer.
+    fn push(&mut self, segment: &Segment) {
+        let end = segment.start + segment.tau;
+        self.steps.push_back((segment.clone(), segment.moments(segment.start, end).1));
+        let longest = self.windows.iter().fold(0.0, |a: f64, &b| a.max(b));
+        while self.steps.front().is_some_and(|(s, _)| s.start + s.tau <= end - longest) {
+            self.steps.pop_front();
+        }
+    }
+
+    /// The mean of the kinetic energy (ħ/m)κ_a²/2 per lab axis over the axis's window behind the trail's end, the window
+    /// cut where the trail begins (the trajectory's start); exact on the steps' paths (`Segment::moments`).
+    fn levels(&self, hbar_over_mass: f64) -> [f64; 3] {
+        let Some(end) = self.steps.back().map(|(s, _)| s.start + s.tau) else { return [0.0; 3] };
+        std::array::from_fn(|a| {
+            let from = end - self.windows[a];
+            let (mut integral, mut time) = (0.0, 0.0);
+            for (s, whole) in &self.steps {
+                let (first, last) = (s.start, s.start + s.tau);
+                if last <= from {
+                    continue;
+                }
+                if first >= from {
+                    integral += whole[a];
+                    time += last - first;
+                } else {
+                    integral += s.moments(from, last).1[a];
+                    time += last - from;
+                }
+            }
+            0.5 * hbar_over_mass * integral / time
+        })
+    }
+}
+
+/// A trajectory's read (module documentation, # The read): what it holds, its recent path, and the carried internal
+/// state S on the trajectory's cluster -- none before the first step, where S is ψ.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reader {
     pub drift: Drift,
+    trail: Trail,
     carried: Option<Vec<C64>>,
 }
 
 impl Reader {
-    pub const fn new() -> Reader {
-        Reader { drift: Drift::ZERO, carried: None }
+    /// A reader whose marks average the kinetic energy of each lab axis over `windows` (µs): the axes' trap periods.
+    pub fn new(windows: [f64; 3]) -> Reader {
+        Reader { drift: Drift::ZERO, trail: Trail { windows, steps: VecDeque::new() }, carried: None }
     }
 }
 
@@ -176,7 +226,6 @@ fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, 
         trajectory.work += work;
         finer(&regrid, richardson(0.5, GRID_ORDER as f64));
     }
-    drift.mark.level = loss;
     let (ours, theirs) = (model.readout(whole.cluster, &whole.point(), &whole.psi), model.readout(whole.cluster, &whole.point(), &next));
     drift.rows = std::array::from_fn(|q| ours[q] - theirs[q]);
     reader.carried = Some(next);
@@ -224,6 +273,8 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, mu
         if let Some(s) = &taken {
             if let Some(reader) = reader.as_deref_mut() {
                 read(model, trajectory, &at, s, reader);
+                reader.trail.push(&s.segment);
+                reader.drift.mark.level = reader.trail.levels(model.hbar_over_mass());
             }
             each(&s.segment);
             adopt(trajectory, &s.end);
