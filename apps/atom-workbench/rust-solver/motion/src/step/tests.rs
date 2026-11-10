@@ -514,9 +514,10 @@ fn step_errors(beams: &[Beam], detuning: f64, gamma: f64, z0: f64, v: f64, tau: 
 /// from the bare ground state -- the state after a jump, whose excited amplitude rings at the detuning --, with and
 /// without the decay, at Δτ = 1, 10, 50, 200.
 /// - At rest the generator is one matrix over the step: the state is the sub-stepped reference's to its rounding, and
-///   so is the kick without the decay. With it the kick is a quotient by the norm, whose own ringing (of the size
-///   Γ/Δ times the excited share) is beyond the quadrature's bandwidth: an error of that size times the kick's ringing
-///   part, 10⁻⁶ of the kick at most here.
+///   so is the kick without the decay. With it the kick is a quotient by the norm, whose own ringing -- Γ/|Δ| times
+///   the excited share, the bare state's 4U/|Δ| at most -- is beyond the bandwidth the quadrature resolves to round-off
+///   (step.rs, # The kick): the kick errs by a part of that ringing, 10⁻⁵ of the dipole kick at the most here (at Δτ =
+///   200) and 2·10⁻⁷ at Δτ = 50; held to the ringing itself and to 10⁻⁴.
 /// - Moving, the light changes along the path by k·v τ: the errors are of the scheme's order, the second in that
 ///   change, and at one light shift they do not grow with Δτ. The state's is what a hop leaves out (spectral.rs: the
 ///   second Magnus term), the light shift of the change itself over a hop, at most half of (k v τ)²/12 of the light
@@ -536,7 +537,8 @@ fn a_step_integrates_its_internal_frequencies_whatever_the_detuning() {
             let speeds = [0.4, 0.2, 0.1];
             let moving: Vec<[f64; 2]> = speeds.iter().map(|&v| step_errors(&beams, detuning, gamma, 0.11, v, tau)).collect();
             eprintln!("Γ {gamma:6.3}, Δτ {turns:5}: at rest ψ {:.2e}, kick {:.2e}; moving at 0.4, 0.2, 0.1 µm/µs ψ {:.2e} {:.2e} {:.2e}, kick {:.2e} {:.2e} {:.2e}", rest[0], rest[1], moving[0][0], moving[1][0], moving[2][0], moving[0][1], moving[1][1], moving[2][1]);
-            if !(rest[0] < 1e-11 && rest[1] < if gamma == 0.0 { 1e-11 } else { 1e-6 }) {
+            let ringing = (gamma / detuning.abs() * 4.0 * shift / tau / detuning.abs()).min(1e-4);
+            if !(rest[0] < 1e-11 && rest[1] < if gamma == 0.0 { 1e-11 } else { ringing }) {
                 failures.push(format!("Γ {gamma}, Δτ {turns}: at rest {rest:?}"));
             }
             for q in 0..2 {
@@ -1430,9 +1432,11 @@ fn watched(theta: f64) -> super::Watch {
 /// and tones, each timed alone and counted as the step calls them -- and the step's own, the rest. Then the step's
 /// phases, the model's calls within them: the middle's fixed point less its reference expansions; the propagation on
 /// its path with its impulse (also with the threshold reached halfway down the step's fall of the norm: its root).
-/// Returns the propagation's time.
+/// The timed steps and propagations share one scratch, as a trajectory's steps do (adapt.rs). Returns the
+/// propagation's time.
 fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> f64 {
     let (count, half, hm) = (starts.len(), 0.5 * tau, model.hbar_over_mass());
+    let kept = std::cell::RefCell::new(fitted(starts[0].psi.len()));
     let counted = Counted { model, calls: std::cell::Cell::new([0; 5]) };
     let steps: Vec<step::Step> = starts.iter().map(|s| step::step(&counted, s, tau, &mut step::Scratch::default()).unwrap()).collect();
     let calls = counted.calls.get().map(|c| c as f64 / count as f64);
@@ -1467,7 +1471,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             .zip(starts)
             .map(|(p, s)| {
                 let from = if crossing { &p.crossed } else { s };
-                match super::propagate(&mut fitted(from.psi.len()), &p.middle, &from.psi, p.kappa, hm, tau, Some(watched(from.threshold))) {
+                match super::propagate(&mut kept.borrow_mut(), &p.middle, &from.psi, p.kappa, hm, tau, Some(watched(from.threshold))) {
                     Ok(made) => made.impulse[0],
                     Err(crossed) => crossed.at,
                 }
@@ -1481,7 +1485,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     let [whole, reference, point, generator, force, tones, middle, propagated, root, pace] = microseconds(
         count,
         [
-            &mut || starts.iter().map(|s| step::step(model, s, tau, &mut step::Scratch::default()).unwrap().end.kappa[0]).sum::<f64>(),
+            &mut || starts.iter().map(|s| step::step(model, s, tau, &mut kept.borrow_mut()).unwrap().end.kappa[0]).sum::<f64>(),
             &mut || pieces.iter().map(|p| model.reference(p.at.0).value).sum::<f64>(),
             &mut || pieces.iter().zip(starts).map(|(p, s)| model.middle(s.cluster, p.at.0, p.at.1).states() as f64).sum::<f64>(),
             &mut || {

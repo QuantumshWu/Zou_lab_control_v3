@@ -70,8 +70,8 @@
 //! - nothing of the generator's own frequencies: a detuning that turns any number of times over the step is integrated
 //!   exactly in the step and in its halves alike, for the state and for the kick (before, an explicit state's ringing
 //!   was sampled at three nodes in both, and the difference read none of an error of 6 to 40 % on T). The one thing of
-//!   theirs that is not exact, a decaying state's kick as a quotient by its ringing norm (10⁻⁶ of the kick at twenty
-//!   linewidths), is not read either.
+//!   theirs that is not exact, a decaying state's kick as a quotient by its ringing norm (10⁻⁷ to 10⁻⁵ of the kick at
+//!   twenty linewidths), is not read either.
 //!
 //! A local error is an error of an output only as far as the dynamics carries it there: to first order the step's
 //! error of an ensemble mean is Σ_n E[∇u(t_n, X_n)·ℓ_n], ℓ_n the local errors and u(t, x) the exact dynamics'

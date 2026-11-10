@@ -16,13 +16,15 @@
 //! width. The hop takes the first Magnus term, y(w) = e^{−iJ} y(0) with J = ∫₀ʷ D̃ dt, whose integral over the
 //! oscillation is exact: element by element
 //!   J_ab = Σ_j (iω_ab)^j/j! · w^{j+1} [A_ab (u/(j+1) + w/(j+2)) + B_ab (u²/(j+1) + 2uw/(j+2) + w²/(j+3))],
-//! the series of ∫₀ʷ t^p e^{iωt} dt, summed until its terms are within the round-off of the first (`Picture::exponent`).
+//! the series of ∫₀ʷ t^p e^{iωt} dt, summed until its terms are within the round-off of the state the exponent acts on
+//! or of the exponent's own first term, whichever is the larger (`Picture::exponent`).
 //! The hops are the caller's, between the nodes of a quadrature that resolves Ĥ₀'s frequencies (step.rs `propagate`).
-//! Nodes that resolve a frequency lie within half a turn of it of each other (a Gauss–Legendre rule of m nodes
-//! integrates e^{iνs} over a panel of νw < 2m, and its widest gap is π/(2m + 1) of the panel's width twice over), so
-//! |ω|w ≤ π there: the series is some twenty terms at its longest and loses no more than e^π of the round-off to its
-//! own cancellation. A hop asked wider than that half turn is taken in the fewest equal parts within it. The series'
-//! powers (iω_ab)^j/j! on A and on B are made once a step, as far as its hops ask.
+//! Nodes that resolve a frequency lie within a turn of it of each other (a Gauss–Legendre rule of m nodes is exact to
+//! the degree 2m − 1, which e^{iνs} over a panel needs beyond νw/2: νw < 4m, and its widest gap is π/(2m + 1) of the
+//! panel's width), so |ω|w < 2π there -- 3.5 rad at the 64 nodes the rules end with: the series is some thirty terms
+//! at its longest and loses no more than e^{|ω|w} of the round-off to its own cancellation. A hop asked wider than
+//! that turn is taken in the fewest equal parts within it. The series' powers (iω_ab)^j/j! on A and on B are made once
+//! a step, as far as its hops ask.
 //!
 //! Where nothing moves (D = 0: an atom at rest, a generator still along every path) a hop is e^{−i(c + Λ)w} alone:
 //! exact, at any detuning times step.
@@ -69,7 +71,8 @@ pub struct Picture {
     moving: bool,
     /// max|λ_a − λ_b| (rad/µs): what a hop's series is summed against.
     spread: f64,
-    /// The bounds of Ĥ₀ less its scalar part (`linalg::bounds`) and of the slopes (Frobenius): what a hop is priced by.
+    /// The bounds of Ĥ₀ less its scalar part (`linalg::bounds`), and the slopes' Frobenius norms as the hops take them
+    /// (in the eigenbasis where there is one): what bounds a hop's exponent, and what a hop is priced by.
     bounds: [f64; 2],
     slopes: [f64; 2],
     /// max|λ_a* − λ_b| (rad/µs): the bandwidth of the forms ⟨x|·|x⟩ on a state propagated by Ĥ₀ -- their frequencies and
@@ -107,10 +110,11 @@ impl Default for Picture {
     }
 }
 
-/// The terms of ∫₀¹ t^p e^{zt} dt's series Σ_j z^j/(j!(j + p + 1)) at |z| ≤ x: the least T with x^T/T! within the unit
-/// round-off -- the terms from T on are within the round-off of the first.
-fn series(x: f64) -> usize {
-    let (mut terms, mut next) = (1, x);
+/// The terms of ∫₀¹ t^p e^{zt} dt's series Σ_j z^j/(j!(j + p + 1)) at |z| ≤ x for an integral of the size `size` at
+/// most: the least T with x^T/T! times the size within the unit round-off, the size no more than one -- the terms from T
+/// on are within the round-off of the state the integral acts on, or of its own first term where that is more.
+fn series(x: f64, size: f64) -> usize {
+    let (mut terms, mut next) = (1, x * size.min(1.0));
     while next > UNIT_ROUNDOFF {
         terms += 1;
         next *= x / terms as f64;
@@ -154,18 +158,14 @@ impl Picture {
     pub fn prepare(&mut self, half: f64, still: bool) {
         let n = self.n;
         (self.work, self.terms, self.moving) = (0.0, 0, false);
-        self.slopes = [0.0; 2];
         if !still {
             let [minus, plus] = &mut self.ends;
             let (first, second) = (0.5 / half, 0.5 / (half * half));
             for ((m, p), c) in minus.data.iter_mut().zip(plus.data.iter_mut()).zip(&self.base.data) {
                 let (a, b) = ((*p - *m) * first, (*p + *m - *c * 2.0) * second);
                 (*m, *p) = (a, b);
-                self.slopes[0] += a.norm_sqr();
-                self.slopes[1] += b.norm_sqr();
+                self.moving |= a != C64::ZERO || b != C64::ZERO;
             }
-            self.slopes = self.slopes.map(f64::sqrt);
-            self.moving = self.slopes[0] > 0.0 || self.slopes[1] > 0.0;
             self.work += (2 * n * n) as f64;
         }
         self.matrix.data.copy_from_slice(&self.base.data);
@@ -210,6 +210,14 @@ impl Picture {
             }
             None => (self.bandwidth, self.spread, self.rounding) = (2.0 * (rho + gamma), 0.0, 0.0),
         }
+        self.slopes = if self.moving { [0, 1].map(|i| self.ends[i].data.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()) } else { [0.0; 2] };
+    }
+
+    /// The bound of a hop's exponent from the time u over the width w: ∫‖D‖ at the slopes' norms, D(t) = tA + t²B at the
+    /// farther end of the hop from the middle.
+    fn moved(&self, u: f64, w: f64) -> f64 {
+        let far = u.abs().max((u + w).abs());
+        (far * self.slopes[0] + far * far * self.slopes[1]) * w.abs()
     }
 
     /// A frame's state x in the picture's coordinates: R⁻¹x through the decomposition, x itself without it.
@@ -241,10 +249,10 @@ impl Picture {
     }
 
     /// A hop's exponent J into `matrix` (module documentation, # A hop): from the time u over the width w, the series
-    /// against the largest |ω|w, the slopes' powers made as far as it goes.
+    /// against the largest |ω|w and the exponent's bound, the slopes' powers made as far as it goes.
     fn exponent(&mut self, u: f64, w: f64) {
         let n = self.n;
-        let (terms, size) = (series(self.spread * w.abs()), 2 * n * n);
+        let (terms, size) = (series(self.spread * w.abs(), self.moved(u, w)), 2 * n * n);
         while self.terms < terms {
             let j = self.terms;
             self.powers.resize((j + 1) * size, C64::ZERO);
@@ -287,7 +295,7 @@ impl Picture {
         let mut bound = 0.0;
         if self.basis.is_some() {
             // Where nothing moves the hop is its phases at any width; else in the fewest equal parts within the series' reach.
-            let parts = if self.moving { ((self.spread * w.abs() / std::f64::consts::PI).ceil() as usize).max(1) } else { 1 };
+            let parts = if self.moving { ((self.spread * w.abs() / std::f64::consts::TAU).ceil() as usize).max(1) } else { 1 };
             let part = w / parts as f64;
             for k in 0..parts {
                 if self.moving {
@@ -326,11 +334,11 @@ impl Picture {
     /// CF4's two exponentials at Ĥ₀'s bounds (without it).
     pub fn price(&self, half: f64, w: f64) -> f64 {
         let (n, w, h) = (self.n, w.abs(), half.abs());
-        let moved = (h * self.slopes[0] + h * h * self.slopes[1]) * w;
+        let moved = self.moved(h - w, w);
         if self.basis.is_some() {
             let exponent = if self.moving {
                 let plan = linalg::Chebyshev::plan(moved, moved);
-                ((series(self.spread * w) + plan.parts * plan.terms) * n * n) as f64
+                ((series(self.spread * w, moved) + plan.parts * plan.terms) * n * n) as f64
             } else {
                 0.0
             };
@@ -343,7 +351,7 @@ impl Picture {
 
     /// The counted complex multiply-adds of the slopes' powers a hop of the width w asks for: made once a step.
     pub fn powers(&self, w: f64) -> f64 {
-        if self.basis.is_some() && self.moving { (series(self.spread * w.abs()) * 2 * self.n * self.n) as f64 } else { 0.0 }
+        if self.basis.is_some() && self.moving { (series(self.spread * w.abs(), 1.0) * 2 * self.n * self.n) as f64 } else { 0.0 }
     }
 }
 
@@ -353,7 +361,7 @@ mod tests {
 
     /// A hop is the generator's flow: Ĥ₀ of detunings up to 600 rad/µs with a decay, slopes that turn the couplings by a
     /// tenth of a radian over the step, on four states -- one hop over the step (60 rad of the detuning: taken in its
-    /// parts of half a turn), and 320 hops, against RK4 at 4·10⁵ steps of the same Ĥ₀ + uA + u²B. Without slopes a hop
+    /// parts of a turn), and 320 hops, against RK4 at 4·10⁵ steps of the same Ĥ₀ + uA + u²B. Without slopes a hop
     /// is exact; with them its error is the second Magnus term's, and it falls with the hops.
     #[test]
     fn a_hop_is_the_generator_s_flow() {

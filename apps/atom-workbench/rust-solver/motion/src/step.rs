@@ -65,8 +65,9 @@
 //! −Σ_m τ sinc(Ω_mτ/2) Re tr(G_m ρ_m) − Σ_j Re tr(Ĝ(s_j) Q_j), Q_j = Σ_k w_k ℓ_j(s_k)(ρ_k − ρ_m): the atom's own frequencies
 //! are in the Q_j, integrated to round-off, and the model's forms are three. Where Ĥ is still, Ĝ is one matrix and the
 //! whole is its one form with ∫ρ = Σ_k w_k ρ_k. (With a decay the mean is a quotient by the norm, whose own ringing --
-//! of the size Γ/Δ times the excited share -- is beyond the forms' bandwidth: the kick's ringing part errs by that
-//! share, 10⁻⁶ of the kick at twenty linewidths; without a decay nothing does.)
+//! of the size Γ/Δ times the excited share -- puts a part of the quotient at twice the forms' bandwidth, which the
+//! quadrature does not resolve: the kick errs by a part of that ringing, measured 2·10⁻⁷ of the dipole kick at twenty
+//! linewidths and Δτ = 50, 10⁻⁵ at Δτ = 200 (tests). Without a decay nothing does.)
 //!
 //! A generator's scalar part, tr/n -- the trap's light shift and the decay every state shares --, is a phase and a
 //! factor on the whole state: it goes with Ĥ₀'s eigenvalues, exactly, and the exponentials take it out
@@ -539,10 +540,10 @@ impl Rule {
     }
 }
 
-/// The rules of 2, 4, …, 64 nodes (two nodes at least: exact for the cubics a free flight's κ² is).
+/// The rules of 2 to 64 nodes (two nodes at least: exact for the cubics a free flight's κ² is).
 fn rules() -> &'static [Rule] {
     static RULES: OnceLock<Vec<Rule>> = OnceLock::new();
-    RULES.get_or_init(|| (1..=6).map(|k| Rule::new(1 << k)).collect())
+    RULES.get_or_init(|| (2..=64).map(Rule::new).collect())
 }
 
 /// The rule and the panels over a width of an entire integrand of bandwidth ν to round-off: the fewest nodes, each panel
@@ -665,6 +666,30 @@ impl<'a, M: Middle> Along<'a, M> {
     }
 }
 
+/// The upper triangles (a ≤ b, row by row in n × n) of Hermitian sums, each with its weight times a state's density
+/// more: sums[j] += w_j |x⟩⟨x|/⟨x|x⟩ (`mirror` makes them whole).
+fn accumulate(x: &[C64], weights: &[f64], sums: &mut [C64]) {
+    let (n, scale) = (x.len(), 1.0 / norm_sqr(x));
+    for (a, left) in x.iter().enumerate() {
+        let left = *left * scale;
+        for b in a..n {
+            let z = left * x[b].conj();
+            for (sum, w) in sums.chunks_mut(n * n).zip(weights) {
+                sum[a * n + b] += z * *w;
+            }
+        }
+    }
+}
+
+/// A Hermitian matrix whole from its upper triangle.
+fn mirror(sum: &mut [C64], n: usize) {
+    for a in 0..n {
+        for b in 0..a {
+            sum[a * n + b] = sum[b * n + a].conj();
+        }
+    }
+}
+
 /// A state's density matrix ρ = |x⟩⟨x|/⟨x|x⟩, ρ_ab = x_a x_b*/‖x‖², row by row: a mean ⟨x|G|x⟩/⟨x|x⟩ is tr(Gρ), which the
 /// model contracts (`Middle::force`, `Middle::tones`).
 fn density(x: &[C64], rho: &mut [C64]) {
@@ -693,9 +718,8 @@ fn shear<M: Middle>(along: &Along<M>, rho: &mut [C64], psi: &[C64], tau: f64) ->
 
 /// A trajectory's scratch memory for its steps, made with it and fitted to each step's cluster (`Scratch::fit`): the
 /// generator's picture along the step's path (`spectral::Picture`: the generator at the step's nodes, its decomposition,
-/// a hop's exponent), and one array carved (`Scratch::carve`) into the middle state's density, a node's density and the
-/// nodes' weighted sums of them (`propagate`). Every use writes what it reads: nothing a step left in it is read by
-/// another.
+/// a hop's exponent), and one array carved (`Scratch::carve`) into the middle state's density and the nodes' weighted
+/// sums of theirs (`propagate`). Every use writes what it reads: nothing a step left in it is read by another.
 #[derive(Default)]
 pub struct Scratch {
     picture: Picture,
@@ -705,7 +729,6 @@ pub struct Scratch {
 struct Carved<'a> {
     picture: &'a mut Picture,
     held: &'a mut [C64],
-    change: &'a mut [C64],
     sums: &'a mut [C64],
 }
 
@@ -713,14 +736,13 @@ impl Scratch {
     /// The scratch for a cluster of n states.
     fn fit(&mut self, n: usize) {
         self.picture.fit(n);
-        self.rest.resize(5 * n * n, C64::ZERO);
+        self.rest.resize(4 * n * n, C64::ZERO);
     }
     /// The scratch's parts.
     fn carve(&mut self) -> Carved<'_> {
         let n = self.picture.states();
-        let (held, rest) = self.rest.split_at_mut(n * n);
-        let (change, sums) = rest.split_at_mut(n * n);
-        Carved { picture: &mut self.picture, held, change, sums }
+        let (held, sums) = self.rest.split_at_mut(n * n);
+        Carved { picture: &mut self.picture, held, sums }
     }
 }
 
@@ -770,12 +792,12 @@ mod count {
     pub fn propagation(model: [f64; 3], still: bool, picture: f64) -> f64 {
         COMPLEX * (if still { 1.0 } else { 3.0 } * model[0] + picture)
     }
-    /// The kick's part of the state through `nodes` nodes: per node its density (n²) and its weighted sums (n² on a
-    /// still path, 3n² on a beating one); then the model's one form of the sum, or on a beating path the middle state's
-    /// density, its tones, and the three nodes' forms.
+    /// The kick's part of the state through `nodes` nodes: per node its density's upper triangle into the weighted
+    /// sums (one on a still path, three on a beating one); then the model's one form of the sum, or on a beating path
+    /// the middle state's density, its tones, and the three nodes' forms.
     pub fn impulse(n: usize, model: [f64; 3], nodes: usize, still: bool) -> f64 {
         let (sums, forms) = if still { (1, model[1]) } else { (3, (n * n) as f64 + model[2] + 3.0 * model[1]) };
-        COMPLEX * ((nodes * (1 + sums) * n * n) as f64 + forms)
+        COMPLEX * ((nodes * (1 + sums) * n * (n + 1) / 2) as f64 + forms)
     }
     /// The shear of the start state, the prediction of the path's momentum: its density and its tones.
     pub fn shear(n: usize, model: [f64; 3]) -> f64 {
@@ -803,8 +825,8 @@ fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64) {
 
 /// The propagation of B over the step on the path through a middle at the momentum κ, the generator taken at it (module
 /// documentation, # The kick): the frame's state hopped from the step's start through the nodes of a quadrature that
-/// resolves the generator's own frequencies -- Gauss–Legendre at the bandwidth of the forms on a state it propagates, on
-/// each half of the step (`quadrature`) -- to the middle and to the end, each hop exact in those frequencies
+/// resolves the generator's own frequencies -- Gauss–Legendre over the step at the bandwidth of the forms on a state it
+/// propagates (`quadrature`) --, by way of the step's middle and to its end, each hop exact in those frequencies
 /// (`spectral::Picture::hop`); and the kick's part of the state by that quadrature.
 ///
 /// The kick is exact in its decomposition about the middle state x_m held in the frame: its shear at r_h, each tone at
@@ -823,7 +845,7 @@ fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64) {
 fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [f64; 3], hbar_over_mass: f64, tau: f64, watch: Option<Watch>) -> Result<Propagated, Crossed> {
     let along = Along::new(middle, kappa, kappa.map(|k| hbar_over_mass * k), tau);
     let (n, h, still, model) = (along.n, 0.5 * tau, middle.still(), middle.work());
-    let Carved { picture, held, change, sums } = scratch.carve();
+    let Carved { picture, held, sums } = scratch.carve();
     pictured(&along, picture, tau);
     let (bandwidth, watch) = (picture.bandwidth, watch.filter(|_| tau > 0.0));
     let (mut state, mut x) = ([C64::ZERO; STATES], [C64::ZERO; STATES]);
@@ -841,42 +863,56 @@ fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [
     let (mut ends, mut weights, mut counted) = ([[C64::ZERO; STATES]; 2], [0.0; 3], 0);
     let (mut at, mut norm, mut reached) = (-h, norm_sqr(psi), false);
     sums.fill(C64::ZERO);
-    for (half, to) in [0.0, h].into_iter().enumerate() {
-        for (u, weight) in quadrature(at, to, bandwidth).map(|(u, w)| (u, Some(w))).chain(std::iter::once((to, None))) {
-            let before = state;
-            let bound = picture.hop(&mut state[..n], at, u - at);
-            picture.leave(&state[..n], &mut x[..n]);
-            let now = norm_sqr(&x[..n]);
-            if let Some(watch) = watch.filter(|watch| !reached && now <= watch.theta) {
-                let floor = 2.0 * (picture.rounding + bound) + rounding(n + 1);
-                let crossing = root(|time| through(picture, &before, at, time), (at + h, norm), (u + h, now), watch.theta, floor);
-                if crossing < tau - watch.slack {
-                    return Err(Crossed { at: crossing, work: count::propagation(model, still, picture.work) });
-                }
-                reached = true;
+    // The stops in the path's order: the quadrature's nodes, each with its weight, and the step's middle and end, where
+    // the state is kept -- a node within the time's round-off of the middle (an odd rule's) is the middle.
+    let (mut nodes, mut kept) = (quadrature(-h, h, bandwidth).peekable(), [0.0, h].into_iter().enumerate().peekable());
+    let ahead = |u: f64| (u + h) / tau;
+    loop {
+        let (u, weight, keep) = match (nodes.peek().copied(), kept.peek().copied()) {
+            (Some((u, w)), Some((end, stop))) if (u - stop).abs() <= f64::EPSILON * h.abs() => {
+                nodes.next();
+                kept.next();
+                (stop, Some(w), Some(end))
             }
-            match weight {
-                Some(w) => {
-                    density(&x[..n], change);
-                    counted += 1;
-                    if still {
-                        for (q, rho) in sums.iter_mut().zip(change.iter()) {
-                            *q += *rho * w;
-                        }
-                    } else {
-                        let s = u / h;
-                        for (j, l) in [0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)].into_iter().enumerate() {
-                            weights[j] += w * l;
-                            for (q, rho) in sums[j * n * n..].iter_mut().zip(change.iter()) {
-                                *q += *rho * (w * l);
-                            }
-                        }
-                    }
-                }
-                None => ends[half] = x,
+            (Some((u, w)), stop) if stop.map_or(true, |(_, stop)| ahead(u) < ahead(stop)) => {
+                nodes.next();
+                (u, Some(w), None)
             }
-            (at, norm) = (u, now);
+            (_, Some((end, stop))) => {
+                kept.next();
+                (stop, None, Some(end))
+            }
+            (_, None) => break,
+        };
+        let before = state;
+        let bound = picture.hop(&mut state[..n], at, u - at);
+        picture.leave(&state[..n], &mut x[..n]);
+        let now = norm_sqr(&x[..n]);
+        if let Some(watch) = watch.filter(|watch| !reached && now <= watch.theta) {
+            let floor = 2.0 * (picture.rounding + bound) + rounding(n + 1);
+            let crossing = root(|time| through(picture, &before, at, time), (at + h, norm), (u + h, now), watch.theta, floor);
+            if crossing < tau - watch.slack {
+                return Err(Crossed { at: crossing, work: count::propagation(model, still, picture.work) });
+            }
+            reached = true;
         }
+        if let Some(w) = weight {
+            counted += 1;
+            if still {
+                accumulate(&x[..n], &[w], sums);
+            } else {
+                let s = u / h;
+                let lagrange = [0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)].map(|l| w * l);
+                for (sum, l) in weights.iter_mut().zip(lagrange) {
+                    *sum += l;
+                }
+                accumulate(&x[..n], &lagrange, sums);
+            }
+        }
+        if let Some(end) = keep {
+            ends[end] = x;
+        }
+        (at, norm) = (u, now);
     }
     // Above the threshold at its end: the same hops on the same path beyond it, as far as the reach.
     if let Some(watch) = watch.filter(|watch| !reached && watch.reach > 0.0) {
@@ -901,14 +937,17 @@ fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [
     let [middle, mut end] = ends;
     let mut populations = [0.0; STATES];
     let impulse = if still {
+        let sum = &mut sums[..n * n];
+        mirror(sum, n);
         for (s, p) in populations[..n].iter_mut().enumerate() {
-            *p = sums[s * n + s].re / tau;
+            *p = sum[s * n + s].re / tau;
         }
-        along.middle.force(&along.path, 0.0, &sums[..n * n]).map(|f| -f)
+        along.middle.force(&along.path, 0.0, sum).map(|f| -f)
     } else {
         let mut out = shear(&along, held, &middle[..n], tau);
         for (j, at) in [-h, 0.0, h].into_iter().enumerate() {
             let sum = &mut sums[j * n * n..(j + 1) * n * n];
+            mirror(sum, n);
             for (s, p) in populations[..n].iter_mut().enumerate() {
                 *p += sum[s * n + s].re / tau;
             }
@@ -1222,7 +1261,7 @@ pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau
     scratch.fit(n);
     let picture = &mut scratch.picture;
     pictured(&along, picture, tau);
-    let nodes = 2 * nodes(0.5 * tau, picture.bandwidth);
+    let nodes = nodes(tau, picture.bandwidth);
     let hops = nodes + 2;
     let width = tau / hops as f64;
     let states = if picture.decomposed() { ((hops + 1) * n * n) as f64 } else { 0.0 };
