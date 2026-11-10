@@ -3,18 +3,12 @@
 //! identities the model holds by construction (the assembly's static diagonal is the potential, its force the potential's
 //! gradient, its decay the photons' rate, the readout's populations sum to one).
 use atom_motion::field::Light;
-use atom_motion::linalg::{C64, Mat};
-use atom_motion::model::{hazard, Model, Point, GROUND};
+use atom_motion::linalg::{dot3, C64, Mat};
+use atom_motion::model::{Model, Point, GROUND};
 use atom_motion::request::Request;
-use serde_json::Value;
-use std::path::PathBuf;
 
-/// A reference scene (refs/scenes, the app's native request) through the one parser.
-fn scene(name: &str) -> Request {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
-    let line: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    Request::from_native(&line).unwrap()
-}
+mod model_common;
+use model_common::{decay_rate, scene};
 
 /// The scene's model with every unit folded, its initial ground state's populations e_b.
 fn built(name: &str) -> (Request, Light, Model, [f64; GROUND]) {
@@ -77,7 +71,8 @@ fn a_retro_reflected_tweezer_s_lattice_is_the_coherent_standing_wave_s() {
 }
 
 /// The proven envelope bounds the prepared potential everywhere (model.rs `Envelope`): at points across the trap and far out,
-/// −V_prep(r) ≤ Σ_l'l |Q_l'l| √(A_l' A_l) ≤ B max_l A_l -- a standing wave and a rank-2 crossed field included.
+/// −V_prep(r) ≤ B max_l A_l(r), A_l = 1/(1 + 2ρ²/w₀² + ζ²/z_R²) of the trap light's beams -- the bound the initial ensemble
+/// draws under (ensemble.rs) --, a standing wave and a rank-2 crossed field included.
 #[test]
 fn the_envelope_bounds_the_prepared_potential() {
     for name in ["R1_TWEEZER", "R1_RETRO", "R1_CROSSED", "R1_SIGMA_P"] {
@@ -93,9 +88,18 @@ fn the_envelope_bounds_the_prepared_potential() {
             let scale = if i % 2 == 0 { 2.0 } else { 20.0 };
             let r = [next() * scale, next() * scale, next() * scale];
             let v = model.potential(r, &p, &lights);
-            let bound = envelope.bound(&light, r);
+            let brightest = envelope
+                .beams
+                .iter()
+                .map(|&l| {
+                    let beam = &light.beams[l];
+                    let (w, z) = (beam.waist.expect("a tweezer"), beam.rayleigh().expect("a tweezer"));
+                    let zeta = dot3(beam.direction, r);
+                    1.0 / (1.0 + 2.0 * (dot3(r, r) - zeta * zeta) / (w * w) + zeta * zeta / (z * z))
+                })
+                .fold(0.0, f64::max);
+            let bound = envelope.peak() * brightest;
             assert!(-v <= bound * (1.0 + 1e-12) + 1e-12, "{name}: −V = {} above its bound {} at {:?}", -v, bound, r);
-            assert!(bound <= envelope.peak() * (1.0 + 1e-12));
         }
     }
 }
@@ -164,7 +168,7 @@ fn the_assembly_holds_the_potential_its_force_and_the_photons_rate() {
             }
             let psi: Vec<C64> = (0..n).map(|i| C64::new(1.0 + i as f64, 0.5 - i as f64)).collect();
             let at = Point { r, kappa: [0.0; 3], t: 0.0 };
-            let rate = hazard(&h, &psi);
+            let rate = decay_rate(&h, &psi);
             let photons: f64 = model.photons(cluster, &at, &psi).iter().map(|ph| ph.amplitudes.iter().map(|u| u.iter().map(|z| z.norm_sqr()).sum::<f64>()).sum::<f64>()).sum::<f64>()
                 / psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
             // Equal to the rounding of the parts' sum: the Hermitian parts at ±q are each complex and cancel in the sum's

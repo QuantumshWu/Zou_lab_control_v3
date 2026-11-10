@@ -15,8 +15,17 @@
 //! # The decay (assemble.rs)
 //! −(i/2) Σ_φ Σ_a J_{a,φ}†J_{a,φ}: per class and pair of its members (j, i) the term e_j* e_i L_j†L_i, L the members' entries in
 //! that class, at the beat Ω_i − Ω_j, whose residual in the frames is zero within one frequency: the decay is the jumps' own
-//! product, the generator Lindblad's by construction, and the hazard ⟨ψ|i(H − H†)|ψ⟩/‖ψ‖² is Σ_φ Σ_a ‖J_{a,φ}ψ‖²/‖ψ‖² identically
-//! (`hazard`).
+//! product, the generator Lindblad's by construction, and the hazard Σ_φ Σ_a ‖J_{a,φ}ψ‖²/‖ψ‖² (SPEC §1.4, the photons' own
+//! weights) is the propagated norm's rate ⟨ψ|i(H − H†)|ψ⟩/‖ψ‖² identically (step.rs; the identity is the tests').
+//!
+//! # A class's photon
+//! Its frequency is the frame's less the class's frame frequency, ω_φ = ω_frame − ω̃ + E_s₀ − E_b₀: the frames are counted from
+//! each cluster's first state (cluster.rs), so the bare energies E of the source cluster's first state s₀ and of the landing
+//! cluster's b₀ make the frame frequency the photon's own -- the absorbed light's for a state that comes back (Rayleigh), moved by
+//! the ground states' splitting for one that does not (Raman), the line's for an explicit state's. The states of a cluster differ
+//! from their frames by its residual detunings, a part in 10⁷ of an optical frequency; a class kept coherent over several frame
+//! frequencies takes its first, the others a kept beat away. A counter-rotating component's class has ω_φ < 0, its photon the
+//! light's own: |k_φ| = |ω_φ|/c (units.rs `wave_number`).
 //!
 //! # The recoil (SPEC §1.6, one rule)
 //! The jump into f = Σ_a ε_a u_a has the absorption's conditional mean b = Im⟨f|∇f⟩/‖f‖² (the jump term's first Wigner moment)
@@ -24,13 +33,16 @@
 //! source's absorption mean is the jump's to carry: its ∇f is its field component's gradient on its entries (each beam's ∇a_l = a_l
 //! (ik_l + ∇ln|a_l|)) and its jumps' own. An explicit state's mean is the Ehrenfest force's (its kept drives' stimulated force),
 //! so its part of the kick has mean zero and the second moment of its drives' responses σ_d, Re[∇ln σ_d*⊗∇ln σ_d] by their shares
-//! (eliminate.rs). The kick is b_J + ξ, Cov ξ = M − b_J b_Jᵀ, b_J = the folded mean: positive semidefinite by Cauchy–Schwarz.
+//! (eliminate.rs `Model::explicit_recoil`). The kick is b_J + ξ, Cov ξ = M − b_J b_Jᵀ, b_J = the folded mean: positive semidefinite
+//! by Cauchy–Schwarz.
 
 use super::far::EXCITED;
-use super::{Beat, Gate, Lights, Model, Photon, Point, Recoil, Sample, Unit, UnitError};
+use super::units::mixing;
+use super::{Beat, Lights, Model, Photon, Point, Recoil, Sample, Unit, UnitError};
 use crate::field::Amplitude;
-use crate::linalg::{Mat, C64};
+use crate::linalg::C64;
 use crate::request::{GROUND, STATES};
+use crate::units::{wave_number, RAD_PER_US_PER_MHZ};
 
 /// What a source's jumps are (module documentation): a folded far component's on its field's basis vector (`side` 0 the
 /// co-rotating, 1 the counter-rotating; constant, far.rs `Tone::jumps`), an explicit excited state's −C_a (the excited amplitude a
@@ -281,7 +293,7 @@ impl Model {
                 }
                 if !folded {
                     let h = energies.get_or_insert_with(|| self.far_energies(&amplitudes, &lights, 1).0);
-                    let (shares, w) = self.explicit_recoil(cluster, &amplitudes, h, m.source, own, psi);
+                    let (shares, w) = self.explicit_recoil(cluster, &amplitudes, h, at.kappa, m.source, own, psi);
                     explicit.extend(shares);
                     work += w;
                 }
@@ -294,20 +306,12 @@ impl Model {
         (out, work)
     }
 
-    /// A class's photon wave number: its light's k = 2π ν/c, the absorbed light's (the photon's frequency differs from it by the
-    /// atom's energies, ≤ 1e-7 of it on the D lines) -- the largest beam wave number among its members' lights, the explicit
-    /// states' through the frequencies that drive them.
-    pub(crate) fn class_wave_number(&self, class: &Class) -> f64 {
-        let mut k = 0.0_f64;
-        for m in &class.members {
-            let source = &self.sources[m.source];
-            if let Some(f) = self.source_frequency(source).or_else(|| self.driving_frequency(source)) {
-                for &l in &self.light.frequencies[f].beams {
-                    k = k.max(self.light.beams[l].wave_number);
-                }
-            }
-        }
-        k
+    /// The wave number |k_φ| (1/µm) of the photons of a cluster's class (module documentation, # A class's photon).
+    pub(crate) fn class_wave_number(&self, cluster: usize, class: &Class) -> f64 {
+        let mut frame = self.axes.zero();
+        *frame.0.last_mut().expect("the frame's coordinate") = 1;
+        let omega = self.omega(&frame.plus(-1, &class.beats[0])) + self.energies[self.clusters[cluster].states[0]] - self.energies[self.clusters[class.landing].states[0]];
+        wave_number((omega / RAD_PER_US_PER_MHZ).abs())
     }
 
     /// The candidate photon coherences of this model (`Unit::Coherence`): per source cluster, each pair of its classes landing in
@@ -378,17 +382,16 @@ impl Model {
         for (cluster, i, j) in self.coherence_classes(unit) {
             let classes = &self.classes[cluster];
             let (a, b) = (self.class_size(cluster, &classes[i], most), self.class_size(cluster, &classes[j], most));
-            let size: f64 = (0..3).map(|x| a[x] * b[x]).sum();
-            let d = beat - self.spread();
-            m = m.max(if size == 0.0 { 0.0 } else if d > 0.0 { size / d } else { f64::INFINITY });
+            m = m.max(mixing((0..3).map(|x| a[x] * b[x]).sum(), beat, self.spread()));
         }
         m
     }
 
-    /// A coherence's gate: its mixing with every beam at its peak and in phase (|a_l| ≤ 1 everywhere: a bound over any reach).
-    pub(crate) fn coherence_gate(&self, unit: &Unit) -> Gate {
+    /// A coherence's static bound S = 2m²: its mixing with every beam at its peak and in phase (|a_l| ≤ 1 everywhere: a bound over
+    /// any reach). Its sweep is the gates' (units.rs `Model::gates`).
+    pub(crate) fn coherence_saturation(&self, unit: &Unit) -> f64 {
         let m = self.coherence_mixing(unit, &|s| self.source_peak(s));
-        Gate { saturation: 2.0 * m * m, sweep: 0.0 }
+        2.0 * m * m
     }
 
     /// A coherence's error at a sample: m² √(p_i p_j), p the populations of the two classes' source states.
@@ -431,13 +434,4 @@ impl Photon {
         }
         Recoil { mean, second }
     }
-}
-
-/// The hazard λ = ⟨ψ|i(H − H†)|ψ⟩/‖ψ‖² of a generator H at an instant: Σ_φ Σ_a ‖J_{a,φ}ψ‖²/‖ψ‖², the decay being the jumps'
-/// Σ J†J by construction (module documentation, # The decay).
-/// The anti-Hermitian part B = i(H − H†) is formed entry by entry before it meets ψ, so that the Hermitian part's scale (the
-/// states' energies) does not round the rate.
-pub fn hazard(h: &Mat, psi: &[C64]) -> f64 {
-    let decay = Mat::from_fn(h.rows, h.cols, |x, y| C64::I * (h[(x, y)] - h[(y, x)].conj()));
-    crate::linalg::inner(psi, &decay.apply(psi)).re / psi.iter().map(|z| z.norm_sqr()).sum::<f64>()
 }

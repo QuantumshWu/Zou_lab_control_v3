@@ -42,10 +42,11 @@ use super::assemble::{NearValues, Plan};
 use super::cluster::Edge;
 use super::photon::Origin;
 use super::reach::{distance, Region};
+use super::units::{mixing, swept};
 use super::{Beat, Component, Lights, Model, Point, Sample, Unit, UnitError};
 use crate::field::Amplitude;
 use crate::linalg::{dot3, Lu, Mat, C64};
-use crate::request::{Request, GROUND, STATES};
+use crate::request::{GROUND, STATES};
 use super::far::EXCITED;
 use super::jet;
 
@@ -67,10 +68,9 @@ pub(crate) struct Carrier {
 }
 
 impl Carrier {
-    /// The near carriers of a model: every co-rotating component not folded far, its kept drives' entries zeroed in X^f
-    /// (`Model::drive_kept`). Units: beams whose focus fields are parallel to the rounding of their inner product,
-    /// 1 − |⟨E, E'⟩|²/(‖E‖²‖E'‖²) ≤ γ₆ (Cauchy–Schwarz's equality).
-    pub(crate) fn all(model: &Model, _request: &Request) -> Result<Vec<Carrier>, String> {
+    /// The near carriers of a model: every co-rotating component not folded far (its kept drives' entries are zeroed in X^f
+    /// once the clusters are known, `Model::new`). Units: beams whose focus fields are parallel (field.rs `parallel`).
+    pub(crate) fn all(model: &Model) -> Vec<Carrier> {
         let mut out = vec![];
         for frequency in 0..model.light.frequencies.len() {
             if model.folded(Component { frequency, counter: false }) {
@@ -81,13 +81,7 @@ impl Carrier {
             let couplings = tone.couplings[0].clone();
             let mut units: Vec<usize> = vec![];
             for (j, e) in f.fields.iter().enumerate() {
-                let parallel = |i: usize| {
-                    let o = &f.fields[i];
-                    let inner: C64 = (0..3).map(|q| o[q].conj() * e[q]).sum();
-                    let (n1, n2) = ((0..3).map(|q| o[q].norm_sqr()).sum::<f64>(), (0..3).map(|q| e[q].norm_sqr()).sum::<f64>());
-                    1.0 - inner.norm_sqr() / (n1 * n2) <= crate::units::rounding(6)
-                };
-                let unit = (0..j).find(|&i| parallel(i)).map_or(j, |i| units[i]);
+                let unit = (0..j).find(|&i| crate::field::parallel(&f.fields[i], e)).map_or(j, |i| units[i]);
                 units.push(unit);
             }
             out.push(Carrier {
@@ -101,7 +95,7 @@ impl Carrier {
                 units,
             });
         }
-        Ok(out)
+        out
     }
 }
 
@@ -370,13 +364,14 @@ impl Model {
         self.kept.contains(&term_unit(c.states[x], c.states[y], Some(from), Some(to)))
     }
 
-    /// The near trap light's light-shift bound per beam pair of the trap frequency (potential.rs `Model::envelope`): where the
-    /// trap's co-rotating component is near, |[X^f_l'† G X^f_l]_p| with ‖G‖ ≤ 2/Γ_min (a resolvent of an excited block whose
-    /// decay is at least Γ_min/2 off the real axis) -- the far fold's bound on the folded near drive.
+    /// The near trap light's light-shift bound per beam pair of the trap frequency (potential.rs `Model::envelope`), row-major
+    /// over its beams: where the trap's co-rotating component is near, |[X^f_l'† G X^f_l]_p| with ‖G‖ ≤ 2/Γ_min (a resolvent of an
+    /// excited block whose decay is at least Γ_min/2 off the real axis) -- the far fold's bound on the folded near drive --, and
+    /// zero where it is folded far.
     pub(crate) fn near_envelope(&self, p: &[f64; GROUND]) -> Vec<f64> {
-        let Some(cc) = self.carriers.iter().find(|c| c.frequency == self.light.trap) else { return vec![] };
-        let gamma = (0..EXCITED).map(|x| self.decay[(x, x)].re).fold(f64::INFINITY, f64::min);
-        let n = cc.beams.len();
+        let n = self.light.frequencies[self.light.trap].beams.len();
+        let Some(cc) = self.carriers.iter().find(|c| c.frequency == self.light.trap) else { return vec![0.0; n * n] };
+        let gamma = self.least_decay();
         (0..n * n)
             .map(|x| {
                 let (j, i) = (x / n, x % n);
@@ -455,12 +450,6 @@ impl Model {
             .collect()
     }
 
-    /// The near light's part of V_L far from the trap: the near shifts with every focused beam's amplitude zero and the trap
-    /// light on, less off -- zero, since far from the trap the trap light is off (its plane waves aside, which the far part takes).
-    pub(crate) fn near_asymptote(&self, _p: &[f64; GROUND], _lights: &Lights) -> f64 {
-        0.0
-    }
-
     /// The near carriers' units: their drives, and the couplings of two ground states (or one state's beat of two carriers) they
     /// make at second order (`Unit::Term`, canonical: a < b, or a = b with from < to).
     pub(crate) fn near_units(&self) -> Vec<Unit> {
@@ -475,11 +464,14 @@ impl Model {
                 }
             }
         }
+        // A carrier's dressing: where its T̄ averages an interference (several polarization units) and enters an elimination --
+        // another carrier's denominators, or its own channels' self-energy to the ground states of another cluster (module
+        // documentation, # The response).
         for cc in &self.carriers {
             let mut units = cc.units.clone();
             units.sort();
             units.dedup();
-            if units.len() > 1 && self.carriers.len() > 1 {
+            if units.len() > 1 && (self.carriers.len() > 1 || self.clusters.len() > 1) {
                 out.push(Unit::Dressing { carrier: Component { frequency: cc.frequency, counter: false } });
             }
         }
@@ -543,10 +535,12 @@ impl Model {
         }
     }
 
-    /// A carrier's dressing's error at a sample: the other carriers' folded responses there with its coherent field, R', against the
-    /// model's with its units' T̄, R, on the sample's ground amplitudes ψ_g: δ = max_c ‖(R'_c − R_c)ψ_g‖/‖R_c ψ_g‖ -- the relative error
-    /// of the rates and light shifts it moves of the sample's state, zero where nothing drives it --, on the populations and on T
-    /// δ P_g, P_g the sample's ground population (SPEC §1.5's map of a relative rate error, as a drive's S_b p_b).
+    /// A carrier's dressing's error at a sample: every carrier's folded response there with its coherent field in the dressing, R',
+    /// against the model's with its units' T̄, R, on the sample's ground amplitudes ψ_g -- the other carriers' through its shift of
+    /// their denominators, its own through its channels' self-energy and the dressed energies of the states they lead to --:
+    /// δ = max_c ‖(R'_c − R_c)ψ_g‖/‖R_c ψ_g‖, the relative error of the rates and light shifts it moves of the sample's state, zero
+    /// where nothing drives it; on the populations and on T δ P_g, P_g the sample's ground population (SPEC §1.5's map of a
+    /// relative rate error, as a drive's S_b p_b).
     pub(crate) fn dressing_error(&self, carrier: Component, sample: &Sample) -> UnitError {
         let lights = self.running();
         let amplitudes = self.light.amplitudes(sample.at.r);
@@ -559,11 +553,8 @@ impl Model {
         let g = self.clusters[sample.cluster].ground;
         let ground = &sample.psi[..g];
         let mut delta = 0.0_f64;
-        for (ci, (r, s)) in model.iter().zip(&other).enumerate() {
+        for (r, s) in model.iter().zip(&other) {
             let (Some(r), Some(s)) = (r, s) else { continue };
-            if ci == d {
-                continue;
-            }
             let (r, s) = (r.apply(ground), s.apply(ground));
             let size: f64 = r.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
             if size > 0.0 {
@@ -582,16 +573,6 @@ impl Model {
     pub(crate) fn near_spread(&self, a: usize, b: usize, region: &Region) -> f64 {
         let column = |c: &Couplings, s: usize| if s < GROUND { c.column[s] } else { 0.0 };
         self.couplings(region).iter().map(|c| column(c, a).powi(2) + column(c, b).powi(2)).sum::<f64>() * 2.0 / self.least_decay()
-    }
-
-    /// The frequency whose kept drives feed an explicit state's photons (photon.rs): the first carrier with a kept drive into it.
-    pub(crate) fn driving_frequency(&self, source: &super::photon::Source) -> Option<usize> {
-        let Origin::Explicit { state: e } = source.origin else { return None };
-        self.carriers
-            .iter()
-            .enumerate()
-            .find(|(ci, cc)| (0..GROUND).any(|b| cc.couplings.iter().any(|x| x[(e, b)] != C64::ZERO) && self.drive_kept(*ci, e, b)))
-            .map(|(_, cc)| cc.frequency)
     }
 }
 
@@ -773,7 +754,7 @@ impl Model {
     /// and its excited states', `energy_slope_over`) times its square (‖u_b‖ in all, or per unit, `Couplings`); ‖R‖ the dressing's
     /// resolvent bound (`resolvent`), or the dissipation's 2/Γ_min for the shift in the generator (its self-energy and dressing
     /// unbounded here).
-    fn shift_slope(&self, carrier: usize, b: usize, region: &Region, dressing: bool) -> f64 {
+    pub(crate) fn shift_slope(&self, carrier: usize, b: usize, region: &Region, dressing: bool) -> f64 {
         let cc = &self.carriers[carrier];
         let couplings = &self.couplings(region)[carrier];
         let columns: Vec<f64> = cc.folded.iter().map(|m| (GROUND..STATES).map(|e| m[(e, b)].norm_sqr()).sum::<f64>().sqrt()).collect();
@@ -804,7 +785,7 @@ impl Model {
     /// the gradient's norm, at most the largest over its states of their rows' sums -- the far light's |∇H_xy| (`far_gradient`)
     /// and each lit carrier's light shift's (`shift_slope`) --, and the scattering's mean recoil k_max Γ_max/2 (the jumps' mean
     /// force at most).
-    fn force_over(&self, cluster: usize, region: &Region) -> f64 {
+    pub(crate) fn force_over(&self, cluster: usize, region: &Region) -> f64 {
         *region.forces[cluster].get_or_init(|| {
             let states = &self.clusters[cluster].states;
             let k_max = self.carriers.iter().flat_map(|c| c.beams.iter().map(|&l| self.light.beams[l].wave_number)).fold(0.0, f64::max);
@@ -881,23 +862,10 @@ impl Model {
         })
     }
 
-    /// The force on a sample's state, −Re⟨ψ|G|ψ⟩/‖ψ‖² of its generator's parts at the point (rad/µs/µm).
-    fn sample_force(&self, sample: &Sample) -> [f64; 3] {
-        let g = self.assemble(sample.cluster, &sample.at, &self.running());
-        let norm: f64 = sample.psi.iter().map(|z| z.norm_sqr()).sum();
-        std::array::from_fn(|i| {
-            let mut f = C64::ZERO;
-            for part in &g.parts {
-                f += crate::linalg::inner(&sample.psi, &part.force[i].apply(&sample.psi));
-            }
-            -f.re / norm
-        })
-    }
-
     /// A folded drive's small parameters at a sample (SPEC §1.5): its own saturation s = 2|R_c[e,b]|² at the point (R = Σ_l a_l T̃_l),
-    /// its sweep a = |v·∇(E_e − E_b) + k·v̇|/|ΔE|² (ΔE = E_e − E_b − δ_c − k·v − iΓ_e/2, k its strongest beam's, v̇ the state's force
-    /// over m), its Doppler order's (w‖T2‖/‖T‖)², and its ground state's population p_b; None where the sample's cluster does not
-    /// hold its ground state.
+    /// its sweep a = |v·∇(E_e − E_b) + k·v̇|/|ΔE|² (ΔE = E_e − E_b − δ_c − k·v − iΓ_e/2, k its strongest beam's, v̇ the force on the
+    /// state at the point over m, model.rs `Generator::force`), its Doppler order's (w‖T2‖/‖T‖)², and its ground state's
+    /// population p_b; None where the sample's cluster does not hold its ground state.
     pub(crate) fn drive_parameters(&self, unit: &Unit, sample: &Sample) -> Option<(f64, f64, f64, f64)> {
         let Unit::Drive { carrier, excited, ground } = unit else { unreachable!() };
         let c = &self.clusters[sample.cluster];
@@ -913,7 +881,7 @@ impl Model {
         let s = 2.0 * r.norm_sqr();
         let h = &self.far_energies(&amplitudes, &lights, 1).0;
         let v: [f64; 3] = sample.at.kappa.map(|k| k * self.hbar_over_mass);
-        let force = self.sample_force(sample);
+        let force = self.assemble(sample.cluster, &sample.at, &lights).force(&sample.psi, &|_| 1.0);
         let strongest = cc.beams.iter().zip(&cc.couplings).max_by(|x, y| x.1[(*excited, *ground)].abs().total_cmp(&y.1[(*excited, *ground)].abs())).map(|(&l, _)| l).unwrap();
         let k = self.light.beams[strongest].wave_vector();
         let delta = h[0][*excited] - h[0][*ground] - cc.detuning - dot3(k, v);
@@ -932,11 +900,17 @@ impl Model {
         }
     }
 
-    /// A near coupling's (`Unit::Term`) saturation bound S = 2m² over a region: |X_ab| ≤ ½ Σ_e |u_to,a[e]||u_from,b[e]| (1/σ_eb +
-    /// 1/σ'_ea + Γ_e/(σ_eb σ'_ea)), the carriers' coherent couplings (`Couplings`) and σ the drives' denominators' bounds; its beat
-    /// Ω = E_a − E_b + δ_to − δ_from over the region, less the Doppler shift of its strongest beam pair at the region's speeds and
-    /// the near light's differential shift; on a point, its measured value there.
-    pub(crate) fn term_bound(&self, a: usize, b: usize, from: Component, to: Component, region: &Region) -> f64 {
+    /// A near coupling's (`Unit::Term`) bounds over a region, its saturation S = 2m² and its sweep a: |X_ab| ≤ ½ Σ_e |u_to,a[e]|
+    /// |u_from,b[e]| (1/σ_eb + 1/σ'_ea + Γ_e/(σ_eb σ'_ea)), the carriers' coherent couplings (`Couplings`) and σ the drives'
+    /// denominators' bounds; its beat Ω = E_a − E_b + δ_to − δ_from over the region, less the Doppler shift of its beam pairs' wave
+    /// vectors at the region's speeds (at most 2k v) and the near light's differential shift; and `swept` (units.rs) of
+    /// v |∇(E_a − E_b)| + 2k a_max over that separation -- the two states' far energies and near shifts (one state's beat of two
+    /// carriers moves with neither), the acceleration in their clusters. On a point, its measured values there. Made once per
+    /// region (reach.rs `Region::term`).
+    pub(crate) fn term_bound(&self, a: usize, b: usize, from: Component, to: Component, region: &Region) -> (f64, f64) {
+        region.term((a, b, Some(from), Some(to)), || self.term_bound_made(a, b, from, to, region))
+    }
+    fn term_bound_made(&self, a: usize, b: usize, from: Component, to: Component, region: &Region) -> (f64, f64) {
         let energies = self.energies(region);
         let couplings = self.couplings(region);
         let (fi, ti) = (self.carrier_index(from.frequency), self.carrier_index(to.frequency));
@@ -960,9 +934,14 @@ impl Model {
         let beat = self.omega(&ct.beat.plus(-1, &cf.beat));
         let (lo, hi) = (energies.centre[a] - energies.slack[a] - energies.centre[b] - energies.slack[b] + beat, energies.centre[a] + energies.slack[a] - energies.centre[b] + energies.slack[b] + beat);
         let k = cf.beams.iter().chain(&ct.beams).map(|&l| self.light.beams[l].wave_number).fold(0.0, f64::max);
-        let sep = distance(lo, hi) - 2.0 * k * region.speed - self.near_spread(a, b, region);
-        let m = if size == 0.0 { 0.0 } else if sep > 0.0 { size / sep } else { f64::INFINITY };
-        2.0 * m * m
+        if size == 0.0 {
+            return (0.0, 0.0);
+        }
+        let separation = distance(lo, hi) - 2.0 * k * region.speed - self.near_spread(a, b, region);
+        let m = mixing(size, separation, 0.0);
+        let slope = if a == b { 0.0 } else { self.energy_slope_over(a, b, region) + self.near_slope(a, region) + self.near_slope(b, region) };
+        let acceleration = self.acceleration(region, &|c| c.states.contains(&a) || c.states.contains(&b));
+        (2.0 * m * m, swept(region.speed * slope + 2.0 * k * acceleration, separation))
     }
 
     /// A near coupling's error at a sample: m² (p_a + p_b) with m its magnitude over its beat at the point and the sample's
@@ -970,17 +949,19 @@ impl Model {
     pub(crate) fn term_error(&self, unit: &Unit, sample: &Sample) -> UnitError {
         let Unit::Term { a, b, from: Some(from), to: Some(to) } = unit else { unreachable!() };
         let speed = self.hbar_over_mass * crate::linalg::norm3(sample.at.kappa);
-        let m2 = 0.5 * self.term_bound(*a, *b, *from, *to, &self.point_region(sample.at.r, speed));
+        let m2 = 0.5 * self.term_bound(*a, *b, *from, *to, &self.point_region(sample.at.r, speed)).0;
         let p = self.state_populations(sample);
         UnitError { parameter: m2, population: m2 * (p[*a] + p[*b]), temperature: m2 * (p[*a] + p[*b]) }
     }
 
     /// The explicit sources' recoil terms of a photon (photon.rs): the explicit state e's photon amplitudes `own`, shared among its
     /// kept drives (carrier c, beam l, ground b of the cluster) by |a_l X_l[e,b] ψ_b|², each with its response's log-gradient
-    /// ∇ln σ = ∇ln a_l − ∇δ/(δ − iΓ_e/2), δ = E_e − E_b − δ_c (SPEC §1.6: the explicit state's photon takes the second moment its
-    /// drives' responses give it, as the same transition folded would); with the complex multiply-adds that made them (`h` the far
-    /// light's energies to first order, `NearAt::energies`).
-    pub(crate) fn explicit_recoil(&self, cluster: usize, amplitudes: &[Amplitude], h: &[Vec<f64>], source: usize, own: [Vec<C64>; 3], psi: &[C64]) -> (Vec<([Vec<C64>; 3], [C64; 3])>, f64) {
+    /// ∇ln σ = ∇ln a_l − ∇δ/(δ − iΓ_e/2), δ = E_e − E_b − δ_c + w_l with the beam's Doppler shift at the atom's momentum (module
+    /// documentation, # First-order Doppler) (SPEC §1.6: the explicit state's photon takes the second moment its drives' responses
+    /// give it, as the same transition folded would); with the complex multiply-adds that made them (`h` the far light's energies
+    /// to first order, `Model::far_energies`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn explicit_recoil(&self, cluster: usize, amplitudes: &[Amplitude], h: &[Vec<f64>], kappa: [f64; 3], source: usize, own: [Vec<C64>; 3], psi: &[C64]) -> (Vec<([Vec<C64>; 3], [C64; 3])>, f64) {
         let Origin::Explicit { state: e } = self.sources[source].origin else { return (vec![], 0.0) };
         let c = &self.clusters[cluster];
         let gamma = self.decay[(e - GROUND, e - GROUND)].re;
@@ -996,7 +977,7 @@ impl Model {
                     if weight == 0.0 {
                         continue;
                     }
-                    let delta = h[0][e] - h[0][b] - cc.detuning;
+                    let delta = h[0][e] - h[0][b] - cc.detuning + self.doppler_shift(bl, kappa);
                     let g: [C64; 3] = std::array::from_fn(|i| a.gradient[i] / a.value - C64::real(h[1 + i][e] - h[1 + i][b]) / C64::new(delta, -gamma / 2.0));
                     drives.push((weight, g));
                 }
@@ -1030,6 +1011,7 @@ pub(crate) fn term_unit(a: usize, b: usize, from: Option<Component>, to: Option<
 mod tests {
     use super::*;
     use crate::field::Light;
+    use crate::request::Request;
 
     fn scene(name: &str) -> Request {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
@@ -1090,7 +1072,7 @@ mod tests {
         let sample = Sample { cluster, at, psi: vec![C64::ONE] };
         let unit = Unit::Drive { carrier: Component { frequency: probe, counter: false }, excited: e, ground: b };
         let (_, sweep, _, _) = model.drive_parameters(&unit, &sample).unwrap();
-        let force = model.sample_force(&sample);
+        let force = model.assemble(sample.cluster, &sample.at, &model.running()).force(&sample.psi, &|_| 1.0);
         let k = model.light.beams[model.carriers[0].beams[0]].wave_vector();
         let expected = (speed * slope + model.hbar_over_mass * dot3(k, force)).abs() / (gamma * gamma / 4.0);
         assert!((sweep - expected).abs() <= 1e-9 * expected, "the measured a {sweep} against |v·∂Δ + k·v̇|/(Γ/2)² = {expected}");

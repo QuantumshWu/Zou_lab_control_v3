@@ -39,32 +39,44 @@ pub(crate) fn second(i: usize, j: usize) -> usize {
 /// The axis pairs (i, j), i ≤ j, of the second parts in their order.
 pub(crate) const PAIRS: [(usize, usize); 6] = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)];
 
+/// An amplitude's whole jet: its value, its gradient, its Hessian's six parts.
+pub(crate) fn whole(c: &Amplitude) -> [C64; 10] {
+    std::array::from_fn(|p| match p {
+        0 => c.value,
+        1..=3 => c.gradient[p - 1],
+        _ => c.hessian[PAIRS[p - 4].0][PAIRS[p - 4].1],
+    })
+}
+
+/// The amplitude of a whole jet (`whole`'s inverse: the Hessian symmetric).
+pub(crate) fn amplitude(jet: &[C64; 10]) -> Amplitude {
+    Amplitude { value: jet[0], gradient: std::array::from_fn(|i| jet[1 + i]), hessian: std::array::from_fn(|i| std::array::from_fn(|j| jet[second(i, j)])) }
+}
+
 /// A beam coefficient's jet (an amplitude or a pair's product) to an order.
 pub(crate) fn of(c: &Amplitude, order: usize) -> Vec<C64> {
-    let mut out = vec![c.value];
-    if order >= 1 {
-        out.extend(c.gradient);
+    whole(c)[..parts(order)].to_vec()
+}
+
+/// The product jet of two scalar jets into `out`, as many parts as it holds: Leibniz's rule (module documentation), written once.
+pub(crate) fn multiply(a: &[C64], b: &[C64], out: &mut [C64]) {
+    out[0] = a[0] * b[0];
+    if out.len() >= 4 {
+        for i in 0..3 {
+            out[1 + i] = a[1 + i] * b[0] + a[0] * b[1 + i];
+        }
     }
-    if order >= 2 {
-        out.extend(PAIRS.iter().map(|&(i, j)| c.hessian[i][j]));
+    if out.len() >= 10 {
+        for (k, &(i, j)) in PAIRS.iter().enumerate() {
+            out[4 + k] = a[4 + k] * b[0] + a[1 + i] * b[1 + j] + a[1 + j] * b[1 + i] + a[0] * b[4 + k];
+        }
     }
-    out
 }
 
 /// The product jet of two scalar jets.
 pub(crate) fn product(a: &[C64], b: &[C64]) -> Vec<C64> {
-    let n = a.len();
-    let mut out = vec![a[0] * b[0]];
-    if n >= 4 {
-        for i in 0..3 {
-            out.push(a[1 + i] * b[0] + a[0] * b[1 + i]);
-        }
-    }
-    if n >= 10 {
-        for (k, &(i, j)) in PAIRS.iter().enumerate() {
-            out.push(a[4 + k] * b[0] + a[1 + i] * b[1 + j] + a[1 + j] * b[1 + i] + a[0] * b[4 + k]);
-        }
-    }
+    let mut out = vec![C64::ZERO; a.len()];
+    multiply(a, b, &mut out);
     out
 }
 

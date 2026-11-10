@@ -91,7 +91,9 @@ impl Model {
     }
 
     /// V_L(r; p) far from the trap (SPEC §1.7): every focused beam's amplitude zero, the plane waves' terms of one wave vector
-    /// (their spatial mean; a term of q ≠ 0 averages out), and the near light's (eliminate.rs).
+    /// (their spatial mean; a term of q ≠ 0 averages out). The near light's part is zero there: it is the near shifts with the
+    /// trap light on less with it off (potential.rs), and far from the trap the trap light is off but for its plane waves, whose
+    /// part is the far light's above.
     pub fn asymptote(&self, p: &[f64; GROUND], lights: &Lights) -> f64 {
         let trap = self.light.trap;
         if !lights.on(trap) {
@@ -109,21 +111,17 @@ impl Model {
                 }
             }
         }
-        v + self.near_asymptote(p, lights)
+        v
     }
 
     /// A state's label in the model basis (`manifold-F-m`), as the app writes it: "D2 F′=3 m=2", "基态 F=2 m=−1".
     pub(crate) fn state_label(&self, s: usize) -> String {
-        match Level::parse(&self.labels[s]) {
-            Ok(level) => {
-                let m = if level.m < 0 { format!("−{}", -level.m) } else { level.m.to_string() };
-                match level.manifold {
-                    crate::request::Manifold::Ground => format!("基态 F={} m={}", level.f, m),
-                    crate::request::Manifold::D1 => format!("D1 F′={} m={}", level.f, m),
-                    crate::request::Manifold::D2 => format!("D2 F′={} m={}", level.f, m),
-                }
-            }
-            Err(_) => self.labels[s].clone(),
+        let level = Level::parse(&self.labels[s]).expect("a validated request's state labels parse (request.rs `Request::levels`)");
+        let m = if level.m < 0 { format!("−{}", -level.m) } else { level.m.to_string() };
+        match level.manifold {
+            crate::request::Manifold::Ground => format!("基态 F={} m={}", level.f, m),
+            crate::request::Manifold::D1 => format!("D1 F′={} m={}", level.f, m),
+            crate::request::Manifold::D2 => format!("D2 F′={} m={}", level.f, m),
         }
     }
 

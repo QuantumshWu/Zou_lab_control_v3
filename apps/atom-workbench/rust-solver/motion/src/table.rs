@@ -1,7 +1,9 @@
-//! Per-axis cubic tables (SPEC §2.3): a function of a few chart coordinates, given by the model (the near light's
-//! eliminated nonlinear part), tabulated on a tensor grid and interpolated per axis by the cubic Hermite interpolant
-//! with Catmull–Rom slopes; each axis refined by its own measured error; the work bound checked before any grid is built.
-//! Generic over what is tabulated: `width` reals per node.
+//! Per-axis cubic tables (SPEC §2.3): a function of a few bounded coordinates, given by the model (the near light's
+//! eliminated nonlinear part, model/tabulate.rs), tabulated on a tensor grid and interpolated per axis by the cubic Hermite
+//! interpolant with Catmull–Rom slopes; each axis refined by halving its spacing, every node kept; the work bound checked
+//! before any grid is built. Generic over what is tabulated: `width` reals per node. A table is asked on its axes' ranges
+//! alone: nothing extrapolates, and a bounded coordinate outside its range (or no number) is its caller's error, refused
+//! aloud (`Axis::place`).
 //!
 //! # The interpolant
 //! On a uniform axis of spacing h the interval [x_i, x_{i+1}] takes the cubic Hermite polynomial through f_i, f_{i+1}
@@ -25,9 +27,8 @@
 //! Averaged over points spread through the intervals it is never below the actual error: inside an axis |I_f − I| is
 //! 8 times the mean |e| of the value (the read conservative by 8/7) and 3.9 times that of the gradient (by 1.3); a
 //! bounded axis's end intervals make it more conservative on coarse grids (1.46 and 1.48 on 13 nodes, for a constant
-//! f‴). The reads at the atom's chart coordinates (the pilot's states), weighted by each term's weight in the
-//! generator, are the model's and the decision's (SPEC §5.1); an axis beyond its share is refined by `Axis::halvings`
-//! at the order of what exceeds.
+//! f‴). The reads at the atoms' coordinates, each as the error it makes of the atom's generator, are the model's
+//! (model/tabulate.rs `Model::table_reads`).
 
 use rayon::prelude::*;
 
@@ -67,8 +68,11 @@ impl Axis {
     pub fn spacing(&self) -> f64 {
         (self.hi - self.lo) / if self.periodic { self.nodes } else { self.nodes - 1 } as f64
     }
-    /// The coordinate of node i.
+    /// The coordinate of node i: lo + i h, a bounded axis' last node hi itself (the sum's rounding could leave the range).
     pub fn node(&self, i: usize) -> f64 {
+        if !self.periodic && i + 1 == self.nodes {
+            return self.hi;
+        }
         self.lo + i as f64 * self.spacing()
     }
     /// The axis with its spacing halved `times` times, every node kept: n → 2n − 1 bounded, 2n periodic (a count
@@ -77,14 +81,6 @@ impl Axis {
         let doubled = |n: usize| n.checked_shl(times).filter(|m| m >> times == n).unwrap_or(usize::MAX);
         let nodes = if self.periodic { doubled(self.nodes) } else { doubled(self.nodes - 1).saturating_add(1) };
         Axis { nodes, ..*self }
-    }
-    /// The halvings that bring an error e read at an order p down to a share: the least k ≥ 0 with e 2^{−kp} ≤ share,
-    /// k = ⌈log₂(e/share)/p⌉ (SPEC §5.1: refined by the measured ratio at the layer's order).
-    pub fn halvings(error: f64, share: f64, order: i32) -> u32 {
-        if error <= share {
-            return 0;
-        }
-        ((error / share).log2() / order as f64).ceil() as u32
     }
     /// Whether the grid of every other node is itself a grid of at least a stencil's nodes: the axis's error can be read.
     pub fn readable(&self) -> bool {
@@ -105,12 +101,14 @@ impl Axis {
         }
         (0..usize::BITS).find(|&k| self.halved(k).nodes >= finer.nodes).filter(|&k| self.halved(k).nodes == finer.nodes)
     }
-    /// The interval holding s and the place u ∈ [0, 1] in it: a bounded coordinate taken within the range (its last
-    /// node in the last interval), a periodic one modulo the period.
+    /// The interval holding s and the place u ∈ [0, 1] in it: a periodic coordinate modulo the period; a bounded one on
+    /// its range (its last node in the last interval) -- outside it, or no number, the table has no value and the call
+    /// is refused: the caller's coordinates are bounded by their construction (module documentation).
     fn place(&self, s: f64) -> (usize, f64) {
+        assert!(if self.periodic { s.is_finite() } else { self.lo <= s && s <= self.hi }, "a table's axis on [{}, {}] asked at {s}", self.lo, self.hi);
         let (n, h) = (self.nodes, self.spacing());
-        let (x, last) = if self.periodic { (((s - self.lo) / h).rem_euclid(n as f64), n - 1) } else { ((s.clamp(self.lo, self.hi) - self.lo) / h, n - 2) };
-        let i = (x.floor().max(0.0) as usize).min(last);
+        let (x, last) = if self.periodic { (((s - self.lo) / h).rem_euclid(n as f64), n - 1) } else { ((s - self.lo) / h, n - 2) };
+        let i = (x.floor() as usize).min(last);
         (i, x - i as f64)
     }
     /// The stencil at s (module documentation, # The interpolant).
@@ -235,8 +233,8 @@ impl Table {
         self.values = values;
         Ok(self)
     }
-    /// The interpolant at s: `value` (width) and, when asked, `gradient` (axes × width, axis-major: ∂I/∂s_f). A bounded
-    /// coordinate is taken within its range, a periodic one modulo its period.
+    /// The interpolant at s: `value` (width) and, when asked, `gradient` (axes × width, axis-major: ∂I/∂s_f); s on the
+    /// axes' ranges (`Axis::place`).
     pub fn eval(&self, s: &[f64], value: &mut [f64], gradient: Option<&mut [f64]>) {
         self.interpolate(s, None, 0, value, gradient);
     }
@@ -424,8 +422,7 @@ mod tests {
 
     /// The work bound before any grid: a build or refinement over its bound returns the nodes it would take and calls
     /// the function on none; a refinement evaluates exactly its new nodes and equals the table built at once on the
-    /// finer axes (its nodes' coordinates are the same numbers); the first axes are readable, nested, and halved as
-    /// the measured ratio asks.
+    /// finer axes (its nodes' coordinates are the same numbers); the first axes are readable and nested.
     #[test]
     fn the_work_bound_comes_first_and_refinement_reuses_nodes() {
         let calls = AtomicUsize::new(0);
@@ -450,7 +447,14 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), fresh);
         let direct = Table::build(finer, 2, usize::MAX, &f).unwrap();
         assert_eq!(refined.values, direct.values);
-        assert_eq!((Axis::halvings(1.0, 1.0 / 64.0, 3), Axis::halvings(1.0, 1.0 / 65.0, 3), Axis::halvings(0.5, 1.0, 3)), (2, 3, 0));
+    }
+
+    /// A table has no value outside a bounded axis' range: the call is refused, not answered with the edge's value.
+    #[test]
+    #[should_panic(expected = "a table's axis on [0, 1.3] asked at 1.3000001")]
+    fn a_bounded_axis_is_asked_on_its_range_alone() {
+        let [(bounded, f, _), _] = cases();
+        at(&one(bounded, &f), &[1.3000001]);
     }
 
     /// The error read of an axis (module documentation, # The error read of an axis), averaged over 20000 points spread

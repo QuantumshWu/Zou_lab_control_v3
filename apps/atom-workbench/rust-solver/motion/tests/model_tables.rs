@@ -5,22 +5,16 @@
 use atom_motion::field::Light;
 use atom_motion::linalg::{norm_sqr, C64};
 use atom_motion::model::tabulate::{Coordinate, Tables};
-use atom_motion::model::{Component, Lights, Lit, Model, Point, Reach, Run, Sample, Trap, Unit, UnitError, GROUND};
+use atom_motion::model::{Component, Lights, Lit, Model, Photon, Point, Reach, Run, Sample, Trap, Unit, UnitError, GROUND};
 use atom_motion::random::{Purpose, Stream};
 use atom_motion::request::Request;
 use atom_motion::step::Dynamics;
 use atom_motion::units::{CONFIDENCE, KT_PER_UK, MOST_TRAJECTORIES};
-use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::time::Instant;
 
-/// A scene's request: a reference scene by name (refs/scenes), or any native request file by its path.
-fn scene(name: &str) -> Request {
-    let path = if name.ends_with(".json") { PathBuf::from(name) } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json")) };
-    let line: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    Request::from_native(&line).unwrap()
-}
+mod model_common;
+use model_common::{normal, scene};
 
 /// The populations of a ground state alone.
 fn alone(state: usize) -> [f64; GROUND] {
@@ -95,9 +89,10 @@ fn distance(a: &BTreeMap<(Vec<i64>, [i64; 3]), Vec<C64>>, b: &BTreeMap<(Vec<i64>
 /// intensity, the tables' axis). Across the tweezer from its axis to the reach's edge, at 240 places between the nodes, the
 /// tabulated model is the exact one within the tables' shares (tabulate.rs, # Refinement): the photon rate of an atom moving
 /// along the cooling pair, the error of its generator as the ledger reads it (`Model::table_reads`: δ on what is shown, on T
-/// with the potential's), and the near light's parts and forces themselves to the same size. The sweep does cross the
-/// resonance: the exact rate peaks at several times its value on the axis. (The first grid's seven nodes on the axis, as the
-/// tables were first made, missed that rate by −13 % to +77 %.)
+/// with the potential's), and the near light's parts and forces themselves to the same size -- the parts' error of the near
+/// light's own parts at the place, the forces' of the near light's largest force over the sweep (its force crosses zero, where
+/// no error is small beside it). The sweep does cross the resonance: the exact rate peaks at several times its value on the
+/// axis. (The first grid's seven nodes on the axis, as the tables were first made, missed that rate by −13 % to +77 %.)
 #[test]
 fn a_table_follows_a_line_through_resonance_across_its_axis() {
     let request = scene("R3_DOPPLER");
@@ -125,7 +120,7 @@ fn a_table_follows_a_line_through_resonance_across_its_axis() {
         .collect();
     let (shown, temperature) = shares();
     let reads = &model.table_reads(&tables, &samples)[index];
-    let (mut worst, mut rates) = ([0.0_f64; 5], vec![]);
+    let (mut worst, mut rates, mut force) = ([0.0_f64; 4], vec![], [0.0_f64; 2]);
     for (sample, read) in samples.iter().zip(&reads.whole) {
         let (at, psi) = (&sample.at, &sample.psi);
         let (r, t) = (rate(&exact, cluster, at, psi), rate(&fast, cluster, at, psi));
@@ -133,13 +128,14 @@ fn a_table_follows_a_line_through_resonance_across_its_axis() {
         let (e, f) = (parts(&exact, cluster, at), parts(&fast, cluster, at));
         let far: BTreeMap<_, _> = model.assemble(cluster, at, &dark).parts.iter().map(|p| ((p.beat.0.clone(), p.wave.map(|x| (x * 1e9).round() as i64)), p.generator.data.iter().chain(p.force.iter().flat_map(|f| f.data.iter())).copied().collect())).collect();
         let (error, near) = (distance(&e, &f), distance(&e, &far));
-        worst = [worst[0].max((t - r).abs() / r), worst[1].max(read.population), worst[2].max(read.temperature), worst[3].max(error.0 / near.0), worst[4].max(error.1 / near.1)];
+        worst = [worst[0].max((t - r).abs() / r), worst[1].max(read.population), worst[2].max(read.temperature), worst[3].max(error.0 / near.0)];
+        force = [force[0].max(error.1), force[1].max(near.1)];
     }
-    let peak = rates.iter().copied().fold(0.0, f64::max);
-    eprintln!("R3_DOPPLER over {edge:.2} µm, {} nodes: rate {:.4} on the axis, {peak:.4} at its peak; largest errors: rate {:.2e}, shown {:.2e}, T {:.2e}, parts {:.2e}, forces {:.2e}", table.table.axes()[0].nodes, rates[0], worst[0], worst[1], worst[2], worst[3], worst[4]);
+    let (peak, forces) = (rates.iter().copied().fold(0.0, f64::max), force[0] / force[1]);
+    eprintln!("R3_DOPPLER over {edge:.2} µm, {} nodes: rate {:.4} on the axis, {peak:.4} at its peak; largest errors: rate {:.2e}, shown {:.2e}, T {:.2e}, parts {:.2e}, forces {forces:.2e}", table.table.axes()[0].nodes, rates[0], worst[0], worst[1], worst[2], worst[3]);
     assert!(peak > 5.0 * rates[0], "the sweep crosses the resonance: {peak} against {} on the axis", rates[0]);
     assert!(worst[0] <= shown && worst[1] <= shown && worst[2] <= temperature, "rate {:.2e}, shown {:.2e} beyond {shown:.2e}, or T {:.2e} beyond {temperature:.2e}", worst[0], worst[1], worst[2]);
-    assert!(worst[3] <= shown && worst[4] <= temperature, "the near light's parts {:.2e} and forces {:.2e}", worst[3], worst[4]);
+    assert!(worst[3] <= shown && forces <= temperature, "the near light's parts {:.2e} and forces {forces:.2e}", worst[3]);
 }
 
 /// R2_RECOIL with its probe near, the atom in |2,2⟩, its reach at the request's temperature and its tables.
@@ -196,7 +192,7 @@ fn a_table_is_the_elimination_to_its_interpolation_s_orders() {
     };
     let mut levels = vec![errors(&tables)];
     for _ in 0..2 {
-        tables.refine(&model, index, &[1], usize::MAX).unwrap();
+        tables.tables[index].table = model.halved(&tables.tables[index], 0, usize::MAX).unwrap();
         levels.push(errors(&tables));
     }
     eprintln!("value and force errors at three spacings: {levels:?}");
@@ -246,9 +242,10 @@ fn samples(model: &Model, trap: &Trap, reach: &Reach, temperature: f64, count: u
     for cluster in 0..model.clusters().len() {
         for i in 0..count {
             let scale = if i % 3 == 2 { (1.0 + stream.uniform() * (reach.energy / kt - 1.0).max(0.0)).sqrt() } else { 1.0 };
-            let r: [f64; 3] = std::array::from_fn(|a| trap.centre[a] + trap.axes.iter().zip(&trap.frequencies).map(|(axis, w)| axis[a] * scale * (kt * hm).sqrt() / w * stream.normal()).sum::<f64>());
-            let kappa: [f64; 3] = std::array::from_fn(|_| scale * (kt / hm).sqrt() * stream.normal());
-            let psi = (0..model.clusters()[cluster].states.len()).map(|_| C64::new(stream.normal(), stream.normal())).collect();
+            let along: [f64; 3] = std::array::from_fn(|i| scale * (kt * hm).sqrt() / trap.frequencies[i] * normal(&mut stream));
+            let r: [f64; 3] = std::array::from_fn(|a| trap.centre[a] + (0..3).map(|i| trap.axes[i][a] * along[i]).sum::<f64>());
+            let kappa: [f64; 3] = std::array::from_fn(|_| scale * (kt / hm).sqrt() * normal(&mut stream));
+            let psi = (0..model.clusters()[cluster].states.len()).map(|_| C64::new(normal(&mut stream), normal(&mut stream))).collect();
             out.push(Sample { cluster, at: Point { r, kappa, t: 0.0 }, psi });
         }
     }
@@ -257,7 +254,9 @@ fn samples(model: &Model, trap: &Trap, reach: &Reach, temperature: f64, count: u
 
 /// REPORT (run by name: `SCENE=<name or path> cargo test ... --test model_tables a_scene_s_tables_against_its_exact_elimination --
 /// --ignored --nocapture`): a scene's tables against its exact elimination at samples over its reach -- the near light's parts
-/// and forces, the photons (their classes, rates and amplitudes), the loss energy, the readout, and the ledger's reads.
+/// (of the near light's own at the sample) and forces (of its largest force over the samples), the photons (their classes,
+/// rates and amplitudes; the absorption's two moments of a fixed polarization summed over the classes by their rates, of k and
+/// k² times the rate), the loss energy, the readout, and the ledger's reads.
 #[test]
 #[ignore]
 fn a_scene_s_tables_against_its_exact_elimination() {
@@ -279,9 +278,12 @@ fn a_scene_s_tables_against_its_exact_elimination() {
     let count: usize = std::env::var("SAMPLES").ok().and_then(|x| x.parse().ok()).unwrap_or(12);
     let samples = samples(&model, &trap, &reach, request.temperature_uk, count);
     let reads = model.table_reads(&tables, &samples);
-    // The largest: parts, forces (relative to the near light's), photon rate, classes' weights, amplitudes, recoil mean and
-    // second moment (of k, k²), loss energy (µK), readout, the reads' shown and T.
-    let mut worst = [0.0_f64; 11];
+    // The largest: parts, photon rate, classes' weights, amplitudes, the absorption's mean and second moment, loss energy (µK),
+    // readout, the reads' shown and T; the forces' largest error and the near light's largest force.
+    let (mut worst, mut force) = ([0.0_f64; 11], [0.0_f64; 2]);
+    let polarization = [0.48, -0.64, 0.6];
+    // A photon's weight along the polarization, ‖Σ_a ε_a u_a‖².
+    let along = |x: &Photon| (0..x.amplitudes[0].len()).map(|i| (0..3).map(|a| x.amplitudes[a][i] * polarization[a]).sum::<C64>().norm_sqr()).sum::<f64>();
     for (k, sample) in samples.iter().enumerate() {
         let (cluster, at, psi) = (sample.cluster, &sample.at, &sample.psi);
         let (e, f) = (parts(&exact, cluster, at), parts(&fast, cluster, at));
@@ -289,25 +291,32 @@ fn a_scene_s_tables_against_its_exact_elimination() {
         let (error, near) = (distance(&e, &f), distance(&e, &far));
         if near.0 > 0.0 {
             worst[0] = worst[0].max(error.0 / near.0);
-            worst[1] = worst[1].max(error.1 / near.1);
         }
+        force = [force[0].max(error.1), force[1].max(near.1)];
         let (pe, pf) = (exact.photons(cluster, at, psi), fast.photons(cluster, at, psi));
         assert_eq!(pe.iter().map(|x| x.landing).collect::<Vec<_>>(), pf.iter().map(|x| x.landing).collect::<Vec<_>>(), "the classes and their order");
-        let weight = |x: &atom_motion::model::Photon| x.amplitudes.iter().map(|u| norm_sqr(u)).sum::<f64>();
+        let weight = |x: &Photon| x.amplitudes.iter().map(|u| norm_sqr(u)).sum::<f64>();
         let total: f64 = pe.iter().map(weight).sum();
         if total > 0.0 {
             worst[2] = worst[2].max((pf.iter().map(weight).sum::<f64>() - total).abs() / total);
-            let mut apart = 0.0;
+            // The classes' sums of the mean and of the second moment by their rates along the polarization, exact less tabulated.
+            let (mut apart, mut rate, mut mean, mut second) = (0.0, 0.0, [0.0; 3], [0.0; 9]);
             for (x, y) in pe.iter().zip(&pf) {
                 worst[3] = worst[3].max((weight(x) - weight(y)).abs() / total);
                 apart += (0..3).map(|a| x.amplitudes[a].iter().zip(&y.amplitudes[a]).map(|(u, v)| (*u - *v).norm_sqr()).sum::<f64>()).sum::<f64>();
-                if weight(x) > 1e-3 * total {
-                    let (rx, ry) = (exact.recoil(x, &[0.48, -0.64, 0.6]), fast.recoil(y, &[0.48, -0.64, 0.6]));
-                    worst[5] = worst[5].max((0..3).map(|i| (rx.mean[i] - ry.mean[i]).abs()).fold(0.0, f64::max) / x.wave_number);
-                    worst[6] = worst[6].max((0..9).map(|i| (rx.second[i / 3][i % 3] - ry.second[i / 3][i % 3]).abs()).fold(0.0, f64::max) / x.wave_number.powi(2));
+                let (wx, wy) = (along(x), along(y));
+                if wx > 0.0 && wy > 0.0 {
+                    let (rx, ry) = (exact.recoil(x, &polarization), fast.recoil(y, &polarization));
+                    rate += wx;
+                    (0..3).for_each(|i| mean[i] += (wx * rx.mean[i] - wy * ry.mean[i]) / x.wave_number);
+                    (0..9).for_each(|i| second[i] += (wx * rx.second[i / 3][i % 3] - wy * ry.second[i / 3][i % 3]) / x.wave_number.powi(2));
                 }
             }
             worst[4] = worst[4].max((apart / total).sqrt());
+            if rate > 0.0 {
+                worst[5] = worst[5].max(mean.iter().map(|x| x.abs()).fold(0.0, f64::max) / rate);
+                worst[6] = worst[6].max(second.iter().map(|x| x.abs()).fold(0.0, f64::max) / rate);
+            }
         }
         worst[7] = worst[7].max((exact.energy(cluster, at, psi) - fast.energy(cluster, at, psi)).abs() / KT_PER_UK);
         let (re, rf) = (exact.readout(cluster, at, psi), fast.readout(cluster, at, psi));
@@ -319,8 +328,8 @@ fn a_scene_s_tables_against_its_exact_elimination() {
     }
     let (shown, temperature) = shares();
     eprintln!(
-        "{name}: {} samples; largest differences, tabulated against exact: near parts {:.1e}, near forces {:.1e}; photon rate {:.1e}, class weights {:.1e}, amplitudes {:.1e}, recoil mean {:.1e} k, second moment {:.1e} k²; loss energy {:.1e} µK; readout {:.1e}; ledger reads: shown {:.1e} (share {shown:.1e}), T {:.1e} (share {temperature:.1e})",
-        samples.len(), worst[0], worst[1], worst[2], worst[3], worst[4], worst[5], worst[6], worst[7], worst[8], worst[9], worst[10]
+        "{name}: {} samples; largest differences, tabulated against exact: near parts {:.1e}, near forces {:.1e}; photon rate {:.1e}, class weights {:.1e}, amplitudes {:.1e}, absorption's mean {:.1e} k, second moment {:.1e} k²; loss energy {:.1e} µK; readout {:.1e}; ledger reads: shown {:.1e} (share {shown:.1e}), T {:.1e} (share {temperature:.1e})",
+        samples.len(), worst[0], if force[1] > 0.0 { force[0] / force[1] } else { 0.0 }, worst[2], worst[3], worst[4], worst[5], worst[6], worst[7], worst[8], worst[9], worst[10]
     );
 }
 

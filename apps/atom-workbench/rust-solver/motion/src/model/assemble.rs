@@ -51,7 +51,7 @@ use super::eliminate::Responses;
 use super::far::EXCITED;
 use super::photon::{Origin, Source};
 use super::tabulate::{NearTable, Tables};
-use super::{jet, Beat, Component, Generator, Lights, Lit, Model, Part, Point, Sample, Unit, Wave, Work};
+use super::{jet, Beat, Component, Generator, Lights, Lit, Model, Part, Point, Unit, Wave};
 use crate::field::Amplitude;
 use crate::linalg::{dot3, Mat, C64};
 use crate::request::{GROUND, STATES};
@@ -198,14 +198,12 @@ struct Pair {
     blocks: Vec<(usize, C64, Vec<usize>)>,
 }
 
-/// The terms of one product of field components at one base beat (module documentation, # Terms): its entries' count and, per
-/// flag (`PLAIN`, `RIGHT`, `LEFT`; and `BOTH` for the decay), where its Hermitian values and its decay's start among a point's
-/// values (one per entry).
+/// The terms of one product of field components at one base beat (module documentation, # Terms): per flag (`PLAIN`, `RIGHT`,
+/// `LEFT`; and `BOTH` for the decay) where its Hermitian values and its decay's start among a point's values (one per entry).
 #[derive(Clone, Debug)]
 struct Block {
     left: Option<usize>,
     right: Option<usize>,
-    entries: usize,
     hermitian: [Option<usize>; 3],
     decay: [Option<usize>; 4],
 }
@@ -702,7 +700,7 @@ impl<'a> Builder<'a> {
                 }
                 members.push((m.source, scalar, matches!(source.origin, Origin::Near { .. }), model.omega(&m.phase), entries));
             }
-            out.push((class.landing, model.class_wave_number(class), members));
+            out.push((class.landing, model.class_wave_number(self.cluster, class), members));
         }
         out
     }
@@ -824,7 +822,7 @@ impl<'a> Builder<'a> {
                     expansion[1] += each(count(&d.used.0));
                 }
             }
-            blocks.push(Block { left: d.left, right: d.right, entries: d.entries.len(), hermitian: hermitian[b], decay: decay[b] });
+            blocks.push(Block { left: d.left, right: d.right, hermitian: hermitian[b], decay: decay[b] });
         }
         for pair in &pairs {
             let own = pair.blocks.iter().any(|(b, _, _)| blocks[*b].hermitian.iter().any(|h| h.is_some()));
@@ -1059,31 +1057,6 @@ impl Model {
         }
     }
 
-    /// TEMPORARY: a plan's sizes.
-    pub fn plan_summary(&self, cluster: usize) -> String {
-        let plan = self.plan(cluster, &self.running());
-        let entry_terms: usize = plan.pairs.iter().map(|p| p.blocks.iter().map(|b| b.2.len()).sum::<usize>()).sum();
-        let pairs: usize = plan.pairs.len();
-        format!(
-            "near: pairs {} shifts {} jumps {} responses {} (len {}); constants {}; beams {}; scalars {}; blocks {} (beam pairs {}, entry-terms {}); slots {} (hermitian {}), links {}, sums {}, products {}; parts {}; classes {} (member entries {}); mixing blocks {}",
-            plan.near.pairs.len(), plan.near.shifts.len(), plan.near.jumps.len(), plan.near.responses.len(), plan.near.len(), plan.constants.len(), plan.beams.len(), plan.scalars.len(), plan.blocks.len(), pairs, entry_terms,
-            plan.template.len(), plan.hermitian, plan.links.len(), plan.sums.len(), plan.products.len(), plan.keys.len(), plan.classes.len(), plan.classes.iter().flat_map(|c| c.members.iter().map(|m| m.entries.len())).sum::<usize>(),
-            {
-                let count = |f: &dyn Fn(usize, usize) -> bool| {
-                    let mut block: Vec<usize> = (0..EXCITED).collect();
-                    for a in 0..EXCITED { for b in 0..EXCITED { if f(a, b) { let (x, y) = (block[a], block[b]); if x != y { block.iter_mut().filter(|z| **z == y).for_each(|z| *z = x); } } } }
-                    block.sort(); block.dedup(); block.len()
-                };
-                let mut b = self.mixing[cluster].clone(); b.sort(); b.dedup();
-                format!("{} (base alone {}, decay alone {}, far forms alone {}, off-diagonal decay max {:.2e} of {:.2e})", b.len(),
-                    count(&|a, b| self.base[(GROUND + a, GROUND + b)] != C64::ZERO),
-                    count(&|a, b| self.decay[(a, b)] != C64::ZERO),
-                    count(&|a, b| self.tones.iter().any(|t| t.pairs.iter().any(|p| p[(GROUND + a, GROUND + b)] != C64::ZERO))),
-                    (0..EXCITED * EXCITED).filter(|i| i / EXCITED != i % EXCITED).map(|i| self.decay[(i / EXCITED, i % EXCITED)].abs()).fold(0.0, f64::max), self.decay[(0, 0)].abs())
-            }
-        )
-    }
-
     /// A plan's field components at a point, jets to `order`, plain and weighted by their beams' Doppler shifts at a momentum.
     pub(crate) fn fields(&self, plan: &Plan, amplitudes: &[Amplitude], kappa: [f64; 3], order: usize) -> Fields {
         let shifts: Vec<f64> = plan.beams.iter().map(|&l| self.doppler_shift(l, kappa)).collect();
@@ -1158,21 +1131,6 @@ impl Model {
         let plan = self.plan(cluster, lights);
         let middle = self.middle(&plan, at.r, at.t, tables.and_then(|t| t.of(cluster, lights)));
         (middle.generator(at.kappa), middle.work + plan.expansion[0] + middle.directions.len() as f64 * plan.expansion[1])
-    }
-
-    /// The counted work at trajectory states (model.rs `Work`): the assembly's multiply-adds, the clusters' dimension and parts,
-    /// means over the samples, every light on.
-    pub fn work(&self, samples: &[Sample]) -> Work {
-        let lights = self.running();
-        let mut out = Work { assembly: 0.0, states: 0.0, parts: 0.0 };
-        for s in samples {
-            let (g, w) = self.assembled(s.cluster, &s.at, &lights, None);
-            out.assembly += w;
-            out.states += self.clusters[s.cluster].states.len() as f64;
-            out.parts += g.parts.len() as f64;
-        }
-        let n = samples.len().max(1) as f64;
-        Work { assembly: out.assembly / n, states: out.states / n, parts: out.parts / n }
     }
 }
 

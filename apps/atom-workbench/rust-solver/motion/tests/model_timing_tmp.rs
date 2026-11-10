@@ -1,4 +1,5 @@
 // TEMPORARY timing harness (to be replaced by the named timing test of tests/model_tables.rs).
+mod model_common;
 use atom_motion::field::Light;
 use atom_motion::linalg::C64;
 use atom_motion::model::{Model, Point, Run, Unit, GROUND};
@@ -64,14 +65,14 @@ fn closure_timing() {
         .map(|_| {
             let r: [f64; 3] = std::array::from_fn(|a| {
                 let e = trap.axes.iter().zip(&trap.frequencies).map(|(axis, w)| axis[a] * (kt * hm).sqrt() / w).collect::<Vec<f64>>();
-                trap.centre[a] + e.iter().map(|x| x * stream.normal()).sum::<f64>()
+                trap.centre[a] + e.iter().map(|x| x * model_common::normal(&mut stream)).sum::<f64>()
             });
-            Point { r, kappa: std::array::from_fn(|_| (kt / hm).sqrt() * stream.normal()), t: 0.0 }
+            Point { r, kappa: std::array::from_fn(|_| (kt / hm).sqrt() * model_common::normal(&mut stream)), t: 0.0 }
         })
         .collect();
     for cluster in 0..model.clusters().len() {
         let n = model.clusters()[cluster].states.len();
-        let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.normal(), stream.normal())).collect();
+        let psi: Vec<C64> = (0..n).map(|_| C64::new(model_common::normal(&mut stream), model_common::normal(&mut stream))).collect();
         // The least of eight batches: the machine is shared.
         let time = |f: &dyn Fn(&Point), rounds: usize| {
             (0..8)
@@ -90,7 +91,6 @@ fn closure_timing() {
         let rd = |run: &Run| time(&|at| { std::hint::black_box(run.readout(cluster, at, &psi)); }, rounds(run));
         let en = |run: &Run| time(&|at| { std::hint::black_box(run.energy(cluster, at, &psi)); }, rounds(run));
         let rf = time(&|at| { std::hint::black_box(exact.reference(at.r)); }, 400);
-        eprintln!("  plan {cluster}: {}", model.plan_summary(cluster));
         let parts = exact.generator(cluster, &points[0]).parts.len();
         let classes = exact.photons(cluster, &points[0], &psi).len();
         eprintln!(
@@ -124,9 +124,9 @@ fn golden_dump() {
         .map(|i| {
             let r: [f64; 3] = std::array::from_fn(|a| {
                 let e = trap.axes.iter().zip(&trap.frequencies).map(|(axis, w)| axis[a] * (kt * hm).sqrt() / w).collect::<Vec<f64>>();
-                trap.centre[a] + e.iter().map(|x| x * stream.normal()).sum::<f64>()
+                trap.centre[a] + e.iter().map(|x| x * model_common::normal(&mut stream)).sum::<f64>()
             });
-            Point { r, kappa: std::array::from_fn(|_| (kt / hm).sqrt() * stream.normal()), t: if i == 3 { 0.37 } else { 0.0 } }
+            Point { r, kappa: std::array::from_fn(|_| (kt / hm).sqrt() * model_common::normal(&mut stream)), t: if i == 3 { 0.37 } else { 0.0 } }
         })
         .collect();
     let mut out = String::new();
@@ -134,7 +134,7 @@ fn golden_dump() {
     let c = |z: C64| format!("{:e} {:e}", z.re, z.im);
     for cluster in 0..model.clusters().len() {
         let n = model.clusters()[cluster].states.len();
-        let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.normal(), stream.normal())).collect();
+        let psi: Vec<C64> = (0..n).map(|_| C64::new(model_common::normal(&mut stream), model_common::normal(&mut stream))).collect();
         writeln!(out, "cluster {cluster} states {:?} psi {}", model.clusters()[cluster].states, psi.iter().map(|z| c(*z)).collect::<Vec<_>>().join(" ")).unwrap();
         for (pi, at) in points.iter().enumerate() {
             writeln!(out, "point {pi} r {:e} {:e} {:e} kappa {:e} {:e} {:e} t {:e}", at.r[0], at.r[1], at.r[2], at.kappa[0], at.kappa[1], at.kappa[2], at.t).unwrap();
@@ -370,4 +370,29 @@ fn golden_check() {
         }
     }
     eprintln!("{name}: worst relative differences: generator {:.2e} (t = 0), {:.2e} (t > 0), force {:.2e}, photons {:.2e}, wave number {:.2e}, recoil {:.2e}, readout {:.2e}, energy {:.2e}, reference {:.2e}; missing {missing}", worst[0], worst[1], worst[2], worst[3], worst[4], worst[5], worst[6], worst[7], worst[8]);
+}
+
+#[test]
+#[ignore]
+fn dbg_r2_photons() {
+    use atom_motion::model::{Component, Unit};
+    let request = scene("R2_RECOIL");
+    let light = Light::new(&request);
+    let beam = request.beams.iter().position(|b| b.id == "probe").unwrap();
+    let probe = light.frequencies.iter().position(|f| f.beams.contains(&beam)).unwrap();
+    let near = Component { frequency: probe, counter: false };
+    let (b, e) = (7, 31);
+    let drive = Unit::Drive { carrier: near, excited: e, ground: b };
+    let folded = Model::new(&request, &light, &[Unit::Far { component: near }]).unwrap();
+    let kept = Model::new(&request, &light, &[Unit::Far { component: near }, drive]).unwrap();
+    let at = Point { r: [0.1, 0.2, -0.3], kappa: [0.3, -0.2, 1.1], t: 0.37 };
+    eprintln!("probe k {:e}", request.beams[beam].wave_number);
+    for (name, model, psi) in [("folded", &folded, vec![C64::ONE]), ("kept", &kept, vec![C64::new(0.6, 0.0), C64::new(0.0, 0.8)])] {
+        let c = model.cluster_of(b);
+        for ph in model.photons(c, &at, &psi) {
+            let w: f64 = ph.amplitudes.iter().map(|u| u.iter().map(|z| z.norm_sqr()).sum::<f64>()).sum();
+            let m = ph.recoil(&[1.0, 0.0, 0.0]).second;
+            eprintln!("{name}: landing {} k {:.12e} (k/probe - 1 = {:.3e}) weight {:.4e} explicit {} M00 {:.10e} M22 {:.10e}", ph.landing, ph.wave_number, ph.wave_number / request.beams[beam].wave_number - 1.0, w, ph.explicit.len(), m[0][0], m[2][2]);
+        }
+    }
 }

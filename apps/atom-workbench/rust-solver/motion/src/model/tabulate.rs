@@ -9,8 +9,9 @@
 //! so a function of its chart (field.rs # The chart: intensity, polarization angles, relative phases), and through the near
 //! carriers' dressings and self-energies: with the units' T̄ (eliminate.rs) on each polarization unit's intensity
 //! I_u = |f_u|²/N_u, f_u = Σ_{l∈u} a_l κ_l the unit's field along its polarization ε_u (E_l = κ_l ε_u), N_u = (Σ_{l∈u} |κ_l|)² so
-//! that I_u ∈ [0, 1]; with a carrier's coherent dressing (`Unit::Dressing` kept) on its chart. Every coordinate on its whole
-//! range: every value is some field's, and no atom meets an edge.
+//! that I_u ∈ [0, 1] (|a_l| ≤ 1: a computed I_u above 1 is its rounding, and is 1); with a carrier's coherent dressing
+//! (`Unit::Dressing` kept) on its chart. Every coordinate on its whole range: every value is some field's, no atom meets an
+//! edge, and a table is never asked off its axes (crate::table refuses it).
 //!
 //! # A node
 //! At coordinates s the elimination is the one in a light whose fields have them: each lit frequency's field from its chart
@@ -63,7 +64,8 @@
 //! table before the halving is within the tables' shares -- twice the responses' error within the populations' and T's, the
 //! potential's within T's of k_BT_r --, and the finer table is kept: its own error is then below the verified one by the
 //! interpolation's orders. Where the next grid would pass the work bound the refinement stops, and the error stands as
-//! `table_reads` reads it at the atoms.
+//! `table_reads` reads it at the atoms. An error that is no number (a node on a pole of a real denominator, outside the reach
+//! but in a stencil that serves it) is unread, +∞: never within a share.
 //!
 //! The tables' shares of the targets are the resolution of the largest ensemble the solve runs (SPEC §3, N = 2¹⁴ trajectories at
 //! the confidence z): an absolute z/(2√N) on what is shown (a share p's standard error is at most 1/(2√N)), a relative z√(2/N) on
@@ -165,19 +167,6 @@ impl Tables {
     pub(crate) fn of(&self, cluster: usize, lights: &Lights) -> Option<&NearTable> {
         self.tables.iter().find(|t| t.layout.cluster == cluster && t.layout.lights == *lights)
     }
-
-    /// Table `index` refined, its axis f's spacing halved `halvings[f]` times (crate::table `Axis::halved`), its nodes reused, the
-    /// complex multiply-adds of its new nodes returned: Err(the new nodes) beyond `most`, nothing built.
-    pub fn refine(&mut self, model: &Model, index: usize, halvings: &[u32], most: usize) -> Result<f64, usize> {
-        let t = &self.tables[index];
-        let grid: Vec<Axis> = t.table.axes().iter().zip(halvings).map(|(a, &k)| a.halved(k)).collect();
-        let fresh = t.table.new_nodes(&grid);
-        let table = model.build(&t.layout, grid, Some(&t.table), most).ok_or(fresh)?;
-        let work = fresh as f64 * model.node_work(&t.layout);
-        self.tables[index].table = table;
-        self.work += work;
-        Ok(work)
-    }
 }
 
 impl Model {
@@ -246,7 +235,7 @@ impl Model {
                         }
                     }
                     work += (4 * p.beams.len() + 4) as f64;
-                    values.push(f.norm_sqr() / p.norm);
+                    values.push((f.norm_sqr() / p.norm).min(1.0));
                     gradients.push(std::array::from_fn(|i| 2.0 * (f.conj() * df[i]).re / p.norm));
                 }
             }
@@ -307,6 +296,13 @@ impl Model {
     fn node_work(&self, layout: &Layout) -> f64 {
         let mut out = vec![0.0; 2 * layout.plan.near.len()];
         self.node(layout, &layout.focus, &mut out)
+    }
+
+    /// A near table's grid with axis f's spacing halved (crate::table `Axis::halved`), its nodes reused: the refinement's one step.
+    /// None where the finer grid is beyond `most` nodes.
+    pub fn halved(&self, table: &NearTable, f: usize, most: usize) -> Option<Table> {
+        let grid: Vec<Axis> = table.table.axes().iter().enumerate().map(|(g, a)| a.halved(if g == f { 1 } else { 0 })).collect();
+        (Table::nodes(&grid) <= most).then(|| self.build(&table.layout, grid, Some(&table.table), most)).flatten()
     }
 
     /// A table's grid filled (its coordinates' axes the first, the others at their focus values); refined from `from` where given
@@ -372,10 +368,8 @@ impl Model {
         let mut work = 0.0;
         let mut verified = vec![false; d];
         while let Some(f) = verified.iter().position(|v| !v) {
-            let grid: Vec<Axis> = table.table.axes().iter().enumerate().map(|(g, a)| a.halved(if g == f { 1 } else { 0 })).collect();
-            let fresh = table.table.new_nodes(&grid);
-            let Some(finer) = (Table::nodes(&grid) <= most).then(|| self.build(&table.layout, grid, Some(&table.table), most)).flatten() else { break };
-            work += fresh as f64 * node;
+            let Some(finer) = self.halved(&table, f, most) else { break };
+            work += table.table.new_nodes(finer.axes()) as f64 * node;
             let (responses, potential) = self.halving_error(&table.layout, &table.table, &finer, f, &ranges, reach);
             verified[f] = 2.0 * responses <= shown.min(temperature) && potential <= temperature * thermal;
             table.table = finer;
@@ -385,7 +379,7 @@ impl Model {
 
     /// The error of a table against the one a halving of axis f finer, at the finer's new nodes over the reach's ranges (module
     /// documentation, # Refinement): the responses' relative error and the bound of the potential's error (rad/µs), each the
-    /// largest over the nodes.
+    /// largest over the nodes; +∞ where one is no number.
     fn halving_error(&self, layout: &Layout, coarse: &Table, fine: &Table, f: usize, ranges: &[(f64, f64)], reach: &Reach) -> (f64, f64) {
         let plan = &layout.plan;
         let (start, count, pairs) = (plan.near.responding().start, plan.near.responses.len(), plan.near.pairs.len());
@@ -396,6 +390,7 @@ impl Model {
         let complex = |row: &[f64], at: usize| C64::new(row[2 * at], row[2 * at + 1]);
         let mut interpolated = vec![0.0; fine.width()];
         let (mut responses, mut potential) = (0.0_f64, 0.0_f64);
+        let read = |x: f64| if x.is_nan() { f64::INFINITY } else { x };
         for node in 0..Table::nodes(fine.axes()) {
             let (at, exact) = fine.node(node);
             if at[f] % 2 == 0 {
@@ -416,8 +411,8 @@ impl Model {
             for (c, w) in shift.iter().enumerate() {
                 let sum = |of: &dyn Fn(usize) -> f64| (0..count).filter(|&i| plan.near.responses[i][0] == c).map(of).sum::<f64>().sqrt();
                 let size = sum(&|i| complex(exact, start + i).norm_sqr());
-                if size > 0.0 {
-                    responses = responses.max((sum(&|i| error(start + i)) + w * sum(&|i| error(start + count + i))) / size);
+                if !(size == 0.0) {
+                    responses = responses.max(read((sum(&|i| error(start + i)) + w * sum(&|i| error(start + count + i))) / size));
                 }
             }
             for x in 0..ground {
@@ -429,7 +424,7 @@ impl Model {
                     .filter(|(_, p)| p[0] == p[2] && p[4] == x)
                     .map(|(i, p)| peak(p[0], p[1]) * peak(p[2], p[3]) * (error(i).sqrt() + 2.0 * shift[p[0]] * error(pairs + i).sqrt()))
                     .sum();
-                potential = potential.max(moved);
+                potential = potential.max(read(moved));
             }
         }
         (responses, potential)
@@ -676,11 +671,14 @@ impl Model {
         let moved: Vec<C64> = second.iter().zip(&first).map(|(a, b)| *a - *b).collect();
         let size = first.iter().zip(&far).map(|(a, b)| (*a - *b).norm_sqr()).sum::<f64>().sqrt();
         let norm = crate::linalg::norm_sqr(&sample.psi);
-        let delta = if size > 0.0 { crate::linalg::norm_sqr(&moved).sqrt() / size } else { 0.0 };
-        let potential = crate::linalg::inner(&sample.psi, &moved).re.abs() / norm;
+        // An error that is no number is unread: +∞ (module documentation, # Refinement).
+        let read = |x: f64| if x.is_nan() { f64::INFINITY } else { x };
+        let delta = if size == 0.0 { 0.0 } else { read(crate::linalg::norm_sqr(&moved).sqrt() / size) };
+        let potential = read(crate::linalg::inner(&sample.psi, &moved).re.abs() / norm);
         let g = self.clusters[sample.cluster].ground;
         let weight = crate::linalg::norm_sqr(&sample.psi[..g]) / norm;
-        UnitError { parameter: delta, population: delta * weight, temperature: (delta * weight).max(potential / thermal) }
+        let shown = if weight == 0.0 { 0.0 } else { delta * weight };
+        UnitError { parameter: delta, population: shown, temperature: shown.max(potential / thermal) }
     }
 }
 

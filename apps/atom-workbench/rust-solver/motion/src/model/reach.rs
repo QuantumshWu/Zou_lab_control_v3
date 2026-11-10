@@ -12,7 +12,7 @@
 //! # Provable extrema (`Model::bounds_over`)
 //! A quantity's bound over the reach is the largest of its upper bounds over cells covering the reach's box, a cell taken where
 //! it may meet the reach (a lower bound of V_prep over it at most the level). A quantity is one function of a region (`Region`):
-//! a cell's beams -- each one's centre value and Lipschitz constants (`lipschitz`): |a_l(r) − a_l(c)| ≤ L_l |r − c|, |a_l| ≤ 1 --
+//! a cell's beams -- each one's centre value and Lipschitz constants (`Span`): |a_l(r) − a_l(c)| ≤ L_l |r − c|, |a_l| ≤ 1 --
 //! or its centre point's, its radius zero. Monotone in the beams' bounds, on the cell it bounds the quantity over the cell and
 //! on the point it is the quantity's bound there (a drive's coherent peak: every beam at its amplitude there, in phase); the
 //! first tends to the second as the cell shrinks. The cell of a quantity's largest bound is halved along its longest side until
@@ -20,19 +20,21 @@
 //! reached at a centre in the reach (attained); or an extent known: within a resolution of a value attained at a centre in the
 //! reach -- or until it is within the rounding of its centre's value. No point is sampled as a bound. (A threshold near the
 //! quantity's true largest value is the expensive question: every cell along the place of that value has to shrink to their
-//! difference. A range is asked as an extent, never by thresholds closing in on it.) All the quantities of a model share one tree of cells: a cell's beams, beam pairs and the parts the units' bounds
-//! have in common (the far light's energies, the carriers' dressings, the clusters' force bounds, the drives' bounds per ground
-//! state) are made once, for whichever quantity asks first, and each quantity halves only the cells it still needs -- one decided
-//! on the coarse cells costs nothing further.
+//! difference. A range is asked as an extent, never by thresholds closing in on it.)
+//!
+//! All the quantities of a model share one tree of cells: a cell's beams, beam pairs and the parts the units' bounds have in
+//! common (the far light's energies, the carriers' dressings, the clusters' force bounds, the drives' bounds per ground state,
+//! the levels' slope and the atoms' acceleration) are made once, for whichever quantity asks first, and each quantity halves only
+//! the cells it still needs -- one decided on the coarse cells costs nothing further.
 
 use super::eliminate::{CellEnergies, Couplings};
-use super::{Model, Reach, Trap};
+use super::{Component, Model, Reach, Trap};
 use crate::field::Geometry;
-use crate::linalg::{dot3, norm3, C64};
+use crate::linalg::{norm3, C64};
 use crate::request::GROUND;
 use crate::units::{rounding, KT_PER_UK};
-use std::cell::OnceCell;
-use std::collections::BinaryHeap;
+use std::cell::{OnceCell, RefCell};
+use std::collections::{BinaryHeap, HashMap};
 
 /// A beam's envelope Lipschitz constant L_b = sup |∇b| (1/µm), a = e^{ik·r} b the amplitude with its plane-wave phase taken out:
 /// 0 for a plane wave; for a paraxial Gaussian beam ∇b = b g_b, g_b = −2t/(w₀²q) + (i/z_R)(ρ²/(w₀²q²) − 1/q) n (field.rs, less ik n),
@@ -46,11 +48,6 @@ pub(crate) fn envelope_lipschitz(beam: &Geometry) -> f64 {
         }
         _ => 0.0,
     }
-}
-
-/// A beam's Lipschitz constant L = sup |∇a| ≤ k + L_b (`envelope_lipschitz`).
-pub(crate) fn lipschitz(beam: &Geometry) -> f64 {
-    beam.wave_number + envelope_lipschitz(beam)
 }
 
 /// A beam's envelope curvature bound M_b = sup |∇∇b| (1/µm²): 0 for a plane wave; for a paraxial Gaussian beam ∇∇b = b(g_b g_bᵀ + ∇g)
@@ -177,6 +174,28 @@ pub(crate) struct Region {
     pub(crate) forces: Vec<OnceCell<f64>>,
     /// Per ground state: its folded drives' saturation and sweep.
     pub(crate) drives: Vec<OnceCell<(f64, f64)>>,
+    /// Per ground state: the slope of its level under the near light (units.rs `Model::near_slope`).
+    pub(crate) slopes: Vec<OnceCell<f64>>,
+    /// Per coupling of two states (a, b, the carriers it absorbs and emits, or none: a static one) its saturation and sweep
+    /// (units.rs `Model::static_bound`, eliminate.rs `Model::term_bound`).
+    pub(crate) terms: RefCell<HashMap<Coupling, (f64, f64)>>,
+    /// The bounds of the slope of any two levels' difference and of an atom's acceleration (units.rs `Model::swept_over`).
+    pub(crate) moving: OnceCell<(f64, f64)>,
+}
+
+/// A coupling of two states a ← b, absorbing and emitting two carriers or static (`Region::terms`' key).
+pub(crate) type Coupling = (usize, usize, Option<Component>, Option<Component>);
+
+impl Region {
+    /// A coupling's saturation and sweep over the region, made once for both of its gates' bounds.
+    pub(crate) fn term(&self, coupling: Coupling, make: impl FnOnce() -> (f64, f64)) -> (f64, f64) {
+        if let Some(made) = self.terms.borrow().get(&coupling) {
+            return *made;
+        }
+        let made = make();
+        self.terms.borrow_mut().insert(coupling, made);
+        made
+    }
 }
 
 /// A cell of the proofs' tree: its box, its region and its centre point's (none on an unbounded cell), whether its centre is in
@@ -240,7 +259,6 @@ impl Model {
         }
         Reach {
             temperature_uk,
-            share,
             energy,
             minimum: trap.minimum,
             cell: std::array::from_fn(|a| [-extent[a], extent[a]]),
@@ -317,6 +335,9 @@ impl Model {
             dressings: OnceCell::new(),
             forces: (0..self.clusters.len()).map(|_| OnceCell::new()).collect(),
             drives: (0..GROUND).map(|_| OnceCell::new()).collect(),
+            slopes: (0..GROUND).map(|_| OnceCell::new()).collect(),
+            terms: RefCell::new(HashMap::new()),
+            moving: OnceCell::new(),
         }
     }
 
@@ -412,11 +433,6 @@ pub(crate) fn distance(lo: f64, hi: f64) -> f64 {
     } else {
         lo.abs().min(hi.abs())
     }
-}
-
-/// The dot product's bound |k·v| ≤ |k| v over every velocity of the reach.
-pub(crate) fn doppler(k: [f64; 3], speed: f64) -> f64 {
-    dot3(k, k).sqrt() * speed
 }
 
 #[cfg(test)]

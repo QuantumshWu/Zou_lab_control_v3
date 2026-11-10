@@ -372,19 +372,12 @@ fn far_response(request: &Request, k0: &Mat, e: &[f64], u: &Mat, nu: f64) -> (Ma
     (response, out)
 }
 
-/// The product a_l'* a_l of two beams' amplitudes (`first` = l', `second` = l) with its gradient and Hessian: the coefficient
-/// of a beam pair's term, of wave vector k_l − k_l'.
+/// The product a_l'* a_l of two beams' amplitudes (`first` = l', `second` = l) with its gradient and Hessian (jet.rs
+/// `multiply`): the coefficient of a beam pair's term, of wave vector k_l − k_l'.
 pub(crate) fn pair(first: &Amplitude, second: &Amplitude) -> Amplitude {
-    let (p, q) = (first.value.conj(), second.value);
-    let dp = first.gradient.map(|z| z.conj());
-    let dq = second.gradient;
-    Amplitude {
-        value: p * q,
-        gradient: std::array::from_fn(|i| dp[i] * q + p * dq[i]),
-        hessian: std::array::from_fn(|i| {
-            std::array::from_fn(|j| first.hessian[i][j].conj() * q + dp[i] * dq[j] + dp[j] * dq[i] + p * second.hessian[i][j])
-        }),
-    }
+    let mut out = [C64::ZERO; 10];
+    super::jet::multiply(&super::jet::whole(first).map(|z| z.conj()), &super::jet::whole(second), &mut out);
+    super::jet::amplitude(&out)
 }
 
 #[cfg(test)]
@@ -465,7 +458,8 @@ mod tests {
                 by_form.add_scaled(field[p].conj() * field[q], &o[p][q]);
             }
         }
-        let x = crate::field::coordinates(&field);
+        let z = |p: usize, q: usize| field[p].conj() * field[q];
+        let x = [z(0, 0).re, z(1, 1).re, z(2, 2).re, z(0, 1).re, z(0, 1).im, z(0, 2).re, z(0, 2).im, z(1, 2).re, z(1, 2).im];
         let mut by_coordinates = Mat::zeros(STATES, STATES);
         for i in 0..9 {
             by_coordinates.add_scaled(C64::real(x[i]), &m[i]);

@@ -208,7 +208,7 @@ impl Model {
                         return Err("光镊不约束原子：准备势从焦点下降没有到达局部极小".into());
                     }
                     let frequencies = values.map(|l| (l * self.hbar_over_mass).sqrt());
-                    let lab = std::array::from_fn(|a| (here.quadratic.hessian[a][a].max(0.0) * self.hbar_over_mass).sqrt());
+                    let lab = std::array::from_fn(|a| (here.quadratic.hessian[a][a] * self.hbar_over_mass).sqrt());
                     return Ok(Trap { centre: r, minimum: here.quadratic.value, axes: vectors, frequencies, lab });
                 }
                 let next: [f64; 3] = std::array::from_fn(|a| r[a] + (0..3).map(|i| steps[i] * scale * vectors[i][a]).sum::<f64>());
@@ -237,33 +237,14 @@ impl Model {
         let tone = &self.tones[self.light.trap];
         let n = f.beams.len();
         let near = self.near_envelope(p);
-        let weights = (0..n * n).map(|x| contract(&tone.pairs[x], p).abs() + near.get(x).copied().unwrap_or(0.0)).collect();
+        let weights = (0..n * n).map(|x| contract(&tone.pairs[x], p).abs() + near[x]).collect();
         Envelope { beams: f.beams.clone(), weights }
     }
 }
 
 impl Envelope {
-    /// Σ_l'l |Q_l'l| √(A_l'(r) A_l(r)) at r, A_l = 1/(1 + u_l), u_l = 2ρ²/w₀² + ζ²/z_R² (a plane wave's A = 1): the proven
-    /// bound of −V_prep(r; p).
-    pub fn bound(&self, light: &crate::field::Light, r: [f64; 3]) -> f64 {
-        let a: Vec<f64> = self.beams.iter().map(|&l| peak(&light.beams[l], r).sqrt()).collect();
-        let n = self.beams.len();
-        (0..n * n).map(|x| self.weights[x] * a[x / n] * a[x % n]).sum()
-    }
-    /// Σ_l'l |Q_l'l|: the bound's largest value, B in −V_prep ≤ B max_l A_l(r).
+    /// Σ_l'l |Q_l'l|: B in −V_prep ≤ B max_l A_l(r).
     pub fn peak(&self) -> f64 {
         self.weights.iter().sum()
-    }
-}
-
-/// A_l(r) = 1/(1 + u), u = 2ρ²/w₀² + ζ²/z_R²: the bound of a paraxial beam's |a_l(r)|² (model.rs `Envelope`); 1 for a plane wave.
-pub(crate) fn peak(beam: &crate::field::Geometry, r: [f64; 3]) -> f64 {
-    match (beam.waist, beam.rayleigh()) {
-        (Some(w), Some(z)) => {
-            let zeta = dot3(beam.direction, r);
-            let rho2 = (dot3(r, r) - zeta * zeta).max(0.0);
-            1.0 / (1.0 + 2.0 * rho2 / (w * w) + zeta * zeta / (z * z))
-        }
-        _ => 1.0,
     }
 }
