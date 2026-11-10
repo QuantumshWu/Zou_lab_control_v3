@@ -72,10 +72,15 @@ pub fn unseen(draws: f64) -> f64 {
 }
 
 /// The half width of T's window on a lab axis about an output at t (SPEC §1.7): half of one trap period of the axis,
-/// 2π/ω, the window no longer than an output interval, cut at t = 0 so that it stays centred there.
+/// 2π/ω at its frequency ω > 0, the window no longer than an output interval, cut at t = 0 so that it stays centred there.
 pub fn half_window(frequency: f64, interval: f64, t: f64) -> f64 {
-    let period = if frequency > 0. { TAU / frequency } else { f64::INFINITY };
-    (0.5 * period.min(interval)).min(t)
+    (0.5 * (TAU / frequency).min(interval)).min(t)
+}
+
+/// n̄ of a lab axis of frequency ω > 0 (rad/µs; module documentation): (ħ/m)Σ⟨κ²⟩ (rad/µs) summed over `atoms` atoms, over
+/// their number and ω, less ½.
+pub fn occupation(kinetic: f64, atoms: f64, frequency: f64) -> f64 {
+    kinetic / (atoms * frequency) - 0.5
 }
 
 /// A quantity's statistical error: its jackknife standard error over the groups behind its estimate and the number of
@@ -321,7 +326,8 @@ impl Group {
     }
 }
 
-/// What the estimates need of the model: ħ/m (µm²/µs) and the reference trap's frequency along each lab axis (rad/µs).
+/// What the estimates need of the model: ħ/m (µm²/µs) and the reported trap's frequency along each lab axis (rad/µs),
+/// positive: the curvatures of a potential's minimum (model.rs `Trap::lab`).
 #[derive(Clone, Copy, Debug)]
 pub struct Scales {
     pub hbar_over_mass: f64,
@@ -484,10 +490,7 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
                 temperature_errors: std::array::from_fn(|a| j.held(|x| x[0][a])),
                 temperature_total: t.iter().sum::<f64>() / 3.,
                 temperature_total_error: j.held(|x| x[0].iter().sum::<f64>() / 3.),
-                occupation: std::array::from_fn(|a| {
-                    let w = scales.frequencies[a];
-                    if w > 0. { hm * all.kappa2[a] / (n * w) - 0.5 } else { 0. }
-                }),
+                occupation: std::array::from_fn(|a| occupation(hm * all.kappa2[a], n, scales.frequencies[a])),
                 mean_velocity: std::array::from_fn(|a| hm * all.kappa[a] / n),
             });
             Estimate {
@@ -714,7 +717,6 @@ mod tests {
         assert_eq!(half_window(w, 10., 100.), 2.);
         assert_eq!(half_window(w, 1., 100.), 0.5);
         assert_eq!(half_window(w, 10., 0.75), 0.75);
-        assert_eq!(half_window(0., 3., 100.), 1.5);
         assert_eq!(half_window(w, 10., 0.), 0.);
     }
 
