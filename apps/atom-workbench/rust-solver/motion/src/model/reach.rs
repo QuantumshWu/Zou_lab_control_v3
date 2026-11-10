@@ -39,9 +39,10 @@
 //! the cells are halved level by level and the rounds are as many as the cells are deep. The cells named are halved once each,
 //! for all the quantities that named them, one after another or on all the cores at once, as the proofs' own steps are. Each
 //! proof takes its cells in the order it would take them alone, through the same queue, so its bound is the same number
-//! whatever was halved ahead of it and on however many cores. Only a proof that ends otherwise -- a bound attained at a centre
-//! -- has had cells halved in vain: those not settled above the level at which a centre attains it, for the halves made hold
-//! that centre's value from then on (`Proof::sighted`), every cell is settled against it, and the proof asks ahead no more.
+//! whatever was halved ahead of it and on however many cores. Only a proof that ends otherwise has had cells halved in vain.
+//! One whose bound is attained at a centre: the cells not settled above the level at which a centre attains it, for the halves
+//! made hold that centre's value from then on (`Proof::sighted`), every cell is settled against it, and the proof asks ahead no
+//! more. One that ends at a cell whose bound is within the rounding of its centre's value: the cells it had asked for by then.
 
 use super::eliminate::{CellEnergies, Couplings};
 use super::far::EXCITED;
