@@ -19,8 +19,9 @@
 //! # The step (SPEC §2.2)
 //! One step τ for the run (adapt.rs). The ladder's rungs are the output interval over powers of two; its top one the
 //! largest below the reference flow's resonance, ω τ < π at the prepared trap's largest frequency (`top_rung`). The pilot
-//! is read at a rung -- every step doubled, the signed differences accumulated (adapt.rs `Drift`) -- and its step error
-//! per output (estimate.rs `stepped`) decides it against the step's share (`rung`; decide.rs): within everywhere, the
+//! is read at a rung -- every step doubled, the local errors carried to the outputs as the dynamics carries them
+//! (adapt.rs, # The read; transport.rs) -- and its step error per output (estimate.rs `stepped`) decides it against the
+//! step's share (`rung`; decide.rs): within everywhere, the
 //! rung is the run's step; beyond somewhere, the rung at which the measured error meets the share; unreadable, the next
 //! rung; down to the step at which a trajectory would take `MOST_STEPS` steps, where the readable bound is booked and
 //! flagged. What is booked per output is the read's bound on the rows as shown and on T (`Fixed::step`); the loss's is the
@@ -672,7 +673,8 @@ struct Record {
 }
 
 /// One trajectory from its initial state through the plan at the step τ (module documentation, # Outputs and windows):
-/// `read`, its steps are doubled and their errors accumulated with it (adapt.rs `Drift`, the pilot's); with the loss
+/// with `read` -- the lab axes' windows of its marks, the reported trap's periods -- its steps are read (adapt.rs
+/// `Reader`, the pilot's); with the loss
 /// energy's `windows`, one per output (none for the pilot, whose read gives them), it is judged where `margin` -- its
 /// escape energy less its loss energy -- lies within them: at an output where held, and from its loss on at the state it
 /// was lost in (module documentation, # The step). A trajectory the scheme cannot advance (adapt.rs) fails from the first
