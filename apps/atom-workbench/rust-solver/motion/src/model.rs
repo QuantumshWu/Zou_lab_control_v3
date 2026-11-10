@@ -316,8 +316,9 @@ pub struct Model {
     /// The states' labels and the beams' names (the ledger's and the method's words).
     pub(crate) labels: Vec<String>,
     pub(crate) names: Vec<String>,
-    /// Per light set with an averaged light asked so far, the model its potential is read on (potential.rs `Model::smooth`).
-    pub(crate) smooth: Mutex<Vec<(Lights, Arc<Model>)>>,
+    /// Per light set with an averaged light and ground populations asked so far, the model its potential is read on
+    /// (potential.rs `Model::smooth`).
+    pub(crate) smooth: Mutex<Vec<(Lights, [f64; GROUND], Arc<Model>)>>,
 }
 
 /// What a request gives a model whatever units are kept (`Model::new`, `Model::rekept`): the light, the exact frequencies and
