@@ -810,13 +810,28 @@ impl Model {
         Some((s, gate(0.0, own, rate).sweep, doppler * doppler, at.populations[ground]))
     }
 
-    /// The error at a sample of a drive folded with the levels at the atom (SPEC §1.5): on the populations s p_b, on T
-    /// (√2 s + (w‖T2‖/‖T‖)² + a) p_b (`drive_parameters`).
+    /// The error at a sample of a drive folded with the levels at the atom (SPEC §1.5; units.rs, # The fold's order): its
+    /// motion's part on T, ((w‖T2‖/‖T‖)² + a) p_b, and its order's (`drive_parameters`) -- the second order's s p_b on
+    /// the populations and on T, where its cluster's fold has no other order; where it has, what the fourth order leaves
+    /// -- `ORDER_RATES` s p_b on the populations at either order (the rest is the cluster's own unit's, `Unit::Second`),
+    /// and at the fourth order (`ORDER_FORCE` s² + the cluster's ground levels' spread over the drive's distance times
+    /// s) p_b on T.
     pub(crate) fn drive_error(&self, unit: &Unit, at: &Measured) -> UnitError {
-        match self.drive_parameters(unit, at) {
-            None => UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 },
-            Some((s, sweep, doppler, p)) => UnitError { parameter: s, population: s * p, temperature: (std::f64::consts::SQRT_2 * s + doppler + sweep) * p },
-        }
+        let Some((s, sweep, doppler, p)) = self.drive_parameters(unit, at) else { return UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 } };
+        let cluster = at.sample.cluster;
+        let (rates, force) = match (self.fourth[cluster], self.fold_frequency(cluster)) {
+            (Some(_), _) => {
+                let Unit::Drive { component, excited, ground } = *unit else { unreachable!("a drive's parameters are a drive's") };
+                let (moved, _) = self.drive_motion(component, excited, ground, at);
+                let own = C64::new(self.energies[excited] - self.energies[ground] - self.tones[component.frequency].detuning + moved, 0.5 * self.decay[(excited - GROUND, excited - GROUND)].re).abs();
+                let levels = self.clusters[cluster].states.iter().map(|&b| at.energies[0][b]);
+                let spread = levels.clone().fold(f64::NEG_INFINITY, f64::max) - levels.fold(f64::INFINITY, f64::min);
+                (super::units::ORDER_RATES * s, super::units::ORDER_FORCE * s * s + spread / own * s)
+            }
+            (None, Some(_)) => (super::units::ORDER_RATES * s, 0.0),
+            (None, None) => (s, s),
+        };
+        UnitError { parameter: s, population: rates * p, temperature: (force + doppler + sweep) * p }
     }
 
     /// An explicit state's part of a class's second moment's rate (photon.rs, # The absorbed light's momentum): its photons'

@@ -735,7 +735,7 @@ impl Model {
                         table.table.axis_error(f, &x, &mut dv, &mut ds);
                         read[k] = self.form_error(sample, &far, &ours, &self.action(sample, &tabulated.moved(&dv[generator.clone()])), tables.thermal);
                     }
-                    let exact = self.middle_of(plan, sample.at.t, &amplitudes, Some(&self.near_exact(plan, &amplitudes, 1, &self.coherent_dressing())));
+                    let exact = self.middle_of(plan, sample.at.t, &amplitudes, Some(&self.near_values(plan, &amplitudes, &[(plan.near.hermitian(), 1), (plan.near.jumping(), 0)], None)));
                     whole[k] = self.form_error(sample, &far, &self.action(sample, &exact), &ours, tables.thermal);
                 }
                 TableRead { table: index, axes, whole }

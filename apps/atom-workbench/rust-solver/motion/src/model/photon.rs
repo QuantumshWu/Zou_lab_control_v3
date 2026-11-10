@@ -329,9 +329,9 @@ impl Model {
                 site.jumped(plan, None);
                 0.0
             }
-            Some(table) => self.near_jumps(table, order, &mut site),
-            None => {
-                let near = self.near_exact(plan, &site.beams, order, &self.coherent_dressing());
+            Some(table) if plan.fourth.is_none() => self.near_jumps(table, order, &mut site),
+            _ => {
+                let near = self.near_values(plan, &site.beams, &[(plan.near.jumping(), order)], table);
                 site.jumped(plan, Some(&near));
                 near.work
             }

@@ -80,6 +80,30 @@
 //! A middle's numbers and a path's are a thread's spares (`Held`): a step takes the vectors the step before left, and the
 //! model's part of a step asks the heap for nothing.
 //!
+//! # The fourth order
+//! The fold's next order on a cluster of ground states whose drives folded at the atom are one frequency's
+//! (`Model::fourth`; derivation: fourth.status.md). On the slow invariant subspace Ψ = (x, W x) of the no-jump generator,
+//! W = −R + W3, in the orthonormal coordinates y = (1 + X)^{1/2} x, with the second order's own matrices on the cluster --
+//! N = −V†R the near generator (its Hermitian part the shifts S, its anti-Hermitian part −½ Σ J†J, the model's decay),
+//! Y = V†R2 (twice the Doppler partner D) and X = R†R (the readout's metric) --
+//!
+//! ```text
+//! W3 = −R2 N       H⁽⁴⁾ = Herm[−Y N + ½ [X, N]]       L̃_a = J_a (1 − ½X) + J2_a N       decay −(i/2) Σ L̃†L̃
+//! ```
+//!
+//! W3 with one denominator a column: exact where the cluster's ground levels lie within much less than the drives'
+//! distances of each other (the rest is the level's error, units.rs). Each is a product of four field components. A
+//! term keeps the form of the second order's -- two components times a form at the point -- with its inner pair of
+//! components in the form: H⁽⁴⁾ = Σ e_k'* e_j S⁽⁴⁾_k'j, S⁽⁴⁾_k'j = Herm of −(Σ_k e_k Ȳ_k'k)(Σ_j' e_j'* N̄_j'j) and the
+//! commutator's two products alike, and a jump's L̃ = Σ_k e_k [J̄_k (1 − ½X) + J̄2_k N] with X and N the point's. So the
+//! fourth order is a map of the point's near forms onto themselves (`Model::fourth_forms`): S ← S + S⁽⁴⁾, J ← L̃, their
+//! gradients with them -- the forms' and the inner components'. Everything after takes the forms as before: the
+//! generator's dense terms, the force as the gradient of its Hermitian part, the decay as the jumps' own product, the
+//! photons. Like the dressing's, the inner pair is held at the middle along a step's path and its slope is in the
+//! force. S⁽⁴⁾ has entries the second order has none of (a four-photon coupling, Δm = 4): on such a cluster every pair
+//! of ground places has its forms (`Builder::pair`). Its first-order Doppler partner and the bare drives' part in it
+//! are of the next order and left out.
+//!
 //! # Work
 //! The complex multiply-adds are counted where they are made (`Middle::work`, `Plan::node`): at a point the near forms (the
 //! table's interpolation or the elimination) and the jumps' products (a product's adjoint, the same jumps exchanged, is its
@@ -340,6 +364,83 @@ pub(crate) struct Link {
     form: Option<[usize; 2]>,
 }
 
+/// A jet to first order in the position: a value and its gradient.
+type Jet = [C64; 4];
+
+fn jet_product(a: &Jet, b: &Jet) -> Jet {
+    [a[0] * b[0], a[1] * b[0] + a[0] * b[1], a[2] * b[0] + a[0] * b[2], a[3] * b[0] + a[0] * b[3]]
+}
+
+fn jet_add(to: &mut Jet, a: &Jet, scale: C64) {
+    for (x, y) in to.iter_mut().zip(a) {
+        *x += *y * scale;
+    }
+}
+
+/// What the fourth order of a cluster's fold reads of its plan (module documentation, # The fourth order): the
+/// frequency, its field's basis size m and the cluster's n ground places; per basis vector the request beams that make
+/// its component and their weights; and per (k', k, x, y) -- place ((k' m + k) n + x) n + y -- where the pair's forms lie
+/// among a point's values, the pairs of jumps whose products are Σ_a J_k'†J_k there, and the pairs of responses whose
+/// products are T_k'†T_k; and per near jump (its place, its source place y) the same jump's and its partner's places
+/// from every source place x. `read`: the forms it reads, in their order -- the shifts and their partners, the jumps
+/// and theirs, the responses (not their partners).
+#[derive(Clone, Debug)]
+pub(crate) struct Fourth {
+    m: usize,
+    n: usize,
+    fields: Vec<Vec<(usize, C64)>>,
+    pairs: Vec<Option<usize>>,
+    decays: Vec<Vec<(usize, usize)>>,
+    metrics: Vec<Vec<(usize, usize)>>,
+    read: Vec<usize>,
+    jumps: Vec<(usize, usize, Vec<(usize, usize, usize)>)>,
+}
+
+impl Fourth {
+    fn new(model: &Model, plan: &Plan, frequency: usize) -> Option<Fourth> {
+        let carrier = model.carrier_of(frequency)?;
+        let (near, f) = (&plan.near, &model.light.frequencies[frequency]);
+        let (m, n) = (model.carriers[carrier].basis.len(), plan.states);
+        let fields = (0..m).map(|k| f.beams.iter().zip(&f.coefficients).map(|(&l, c)| (l, c[k])).collect()).collect();
+        let mut pairs = vec![None; m * m * n * n];
+        for (i, &[wl, kl, wr, kr, x, y]) in near.pairs.iter().enumerate() {
+            if wl == frequency && wr == frequency {
+                pairs[((kl * m + kr) * n + x) * n + y] = Some(i);
+            }
+        }
+        let jump: HashMap<[usize; 4], usize> = near.jumps.iter().enumerate().filter(|(_, j)| j[0] == carrier).map(|(i, &[_, k, a, b, y])| ([k, a, b, y], i)).collect();
+        let response: HashMap<[usize; 3], usize> = near.responses.iter().enumerate().filter(|(_, r)| r[0] == carrier).map(|(i, &[_, k, e, y])| ([k, e, y], near.responding().start + i)).collect();
+        let (mut decays, mut metrics) = (vec![vec![]; pairs.len()], vec![vec![]; pairs.len()]);
+        for q in 0..pairs.len() {
+            let (kl, kr, x, y) = (q / (m * n * n), q / (n * n) % m, q / n % n, q % n);
+            for a in 0..3 {
+                for b in 0..GROUND {
+                    if let (Some(&left), Some(&right)) = (jump.get(&[kl, a, b, x]), jump.get(&[kr, a, b, y])) {
+                        decays[q].push((near.at(Operand::Jump(left)), near.at(Operand::Jump(right))));
+                    }
+                }
+            }
+            for e in 0..EXCITED {
+                if let (Some(&left), Some(&right)) = (response.get(&[kl, e, x]), response.get(&[kr, e, y])) {
+                    metrics[q].push((left, right));
+                }
+            }
+        }
+        let read = (0..near.jumping().end).chain(response.values().copied()).collect();
+        let jumps = near
+            .jumps
+            .iter()
+            .enumerate()
+            .filter(|(_, j)| j[0] == carrier)
+            .map(|(i, &[_, k, a, b, y])| {
+                let from = (0..n).filter_map(|x| jump.get(&[k, a, b, x]).map(|&j| (x, near.at(Operand::Jump(j)), near.at(Operand::Jump2(j))))).collect();
+                (near.at(Operand::Jump(i)), y, from)
+            })
+            .collect();
+        Some(Fourth { m, n, fields, pairs, decays, metrics, read, jumps })
+    }
+}
+
 /// A cluster's assembly under a light set, worked out once (module documentation): the near forms, the field components and
 /// their beams, the blocks of terms, the tones, the photon classes.
 #[derive(Clone, Debug)]
@@ -393,6 +494,9 @@ pub(crate) struct Plan {
     jump_links: Vec<([usize; 2], usize)>,
     /// The complex multiply-adds of a point's values from its near forms: the jumps' products and their sums, the merged values.
     values: f64,
+    /// What the fourth order of the cluster's fold reads (module documentation, # The fourth order); none where its fold
+    /// is the second order's under these lights.
+    pub(crate) fourth: Option<Fourth>,
 }
 
 /// A block under construction: its factors, base beat and entries, per flag each entry's constant and near form (Hermitian) or
@@ -441,6 +545,11 @@ struct Builder<'a> {
 impl<'a> Builder<'a> {
     fn states(&self) -> &'a [usize] {
         &self.model.clusters[self.cluster].states
+    }
+    /// The frequency whose fold on the cluster is the fourth order's under the lights (module documentation, # The fourth
+    /// order): the model's (`Model::fourth`), its light coherent.
+    fn fourth(model: &Model, cluster: usize, lights: &Lights) -> Option<usize> {
+        model.fourth[cluster].filter(|&frequency| lights.0[frequency] == Lit::Coherent)
     }
     fn ground(&self) -> usize {
         self.model.clusters[self.cluster].ground
@@ -551,7 +660,9 @@ impl<'a> Builder<'a> {
         if let Some(&at) = self.pair_index.get(&key) {
             return Some(at);
         }
-        if !self.touches(left, right, x, y) && !self.touches(right, left, y, x) {
+        // The fourth order's forms are products of the second order's through every ground place: each has its entry.
+        let whole = left.0 == right.0 && Builder::fourth(self.model, self.cluster, self.lights) == Some(left.0);
+        if !whole && !self.touches(left, right, x, y) && !self.touches(right, left, y, x) {
             return None;
         }
         for k in [key, [right.0, right.1, left.0, left.1, y, x]] {
@@ -1043,6 +1154,7 @@ impl<'a> Builder<'a> {
             jumps_start,
             jump_links,
             values,
+            fourth: None,
         }
     }
 }
@@ -1053,7 +1165,9 @@ impl Plan {
         b.constants();
         b.near();
         b.decays();
-        b.finish()
+        let mut plan = b.finish();
+        plan.fourth = Builder::fourth(model, cluster, lights).and_then(|frequency| Fourth::new(model, &plan, frequency));
+        plan
     }
     /// The constant part of a near form at `place` among a point's values: a jump entry's (`Plan::offsets`), zero of any
     /// other form.
@@ -1418,12 +1532,186 @@ impl Model {
     }
 
     /// A plan's near forms at a point, the sections asked each to its order (0 or 1): from its table where one is given
-    /// (tabulate.rs), else the exact elimination's to the largest order.
+    /// (tabulate.rs), else the exact elimination's to the largest order. Where the cluster's fold is the fourth order's
+    /// they are that order's (`fourth_forms`): the second order's every section to the largest order asked, mapped.
     pub(crate) fn near_values(&self, plan: &Plan, amplitudes: &[Amplitude], sections: &[(Range<usize>, usize)], table: Option<&NearTable>) -> NearValues {
-        match table {
-            Some(table) => self.near_tabulated(table, amplitudes, sections),
-            None => self.near_exact(plan, amplitudes, sections.iter().map(|s| s.1).max().unwrap_or(0), &self.coherent_dressing()),
+        let order = sections.iter().map(|s| s.1).max().unwrap_or(0);
+        match (table, &plan.fourth) {
+            (Some(table), None) => self.near_tabulated(table, amplitudes, sections),
+            (None, None) => self.near_exact(plan, amplitudes, order, &self.coherent_dressing()),
+            (table, Some(fourth)) => {
+                // What is asked of the shifts and of the jumps (None: not asked); the responses make both.
+                let asked = |of: Range<usize>| sections.iter().filter(|s| s.0.start < of.end && of.start < s.0.end).map(|s| s.1).max();
+                let (shifts, jumps) = (asked(plan.near.hermitian()), asked(plan.near.jumping()));
+                let near = match table {
+                    Some(table) => {
+                        // The responses themselves: the fourth order reads no partner of theirs.
+                        let responses = plan.near.responding().start..plan.near.responding().start + plan.near.responses.len();
+                        let mut near = self.near_tabulated(table, amplitudes, &[(plan.near.hermitian(), order), (plan.near.jumping(), order), (responses, order)]);
+                        let slopes = near.data.len() / near.len;
+                        near.data.resize(slopes * plan.near.len(), C64::ZERO);
+                        for part in (1..slopes).rev() {
+                            near.data.copy_within(part * near.len..(part + 1) * near.len, part * plan.near.len());
+                            near.data[part * near.len..part * plan.near.len()].fill(C64::ZERO);
+                        }
+                        near.len = plan.near.len();
+                        near
+                    }
+                    None => self.near_exact(plan, amplitudes, order.min(1), &self.coherent_dressing()),
+                };
+                self.fourth_forms(plan, fourth, &near, amplitudes, shifts, jumps)
+            }
         }
+    }
+
+    /// The fourth order's near forms from the second order's at a point (module documentation, # The fourth order), to
+    /// the second's order (0, or 1: jets along the lab axes): the shifts S + S⁽⁴⁾ where the shifts are asked (`shifts`:
+    /// their order) and the jumps L̃ of the cluster's one frequency where the jumps are (`jumps`), every other form as it
+    /// is; with the complex multiply-adds that made them.
+    pub(crate) fn fourth_forms(&self, plan: &Plan, fourth: &Fourth, near: &NearValues, amplitudes: &[Amplitude], shifts: Option<usize>, jumps: Option<usize>) -> NearValues {
+        let (m, n, len) = (fourth.m, fourth.n, plan.near.len());
+        assert_eq!(near.len, len, "the fourth order reads every near form of the point");
+        let parts = if near.order >= 1 { 4 } else { 1 };
+        let zero: Jet = [C64::ZERO; 4];
+        // The jet along the lab axes of every form read, once.
+        let mut jets: Vec<Jet> = vec![zero; len];
+        for &entry in &fourth.read {
+            jets[entry] = if parts == 4 { near.first_order(entry) } else { [near.data[entry], C64::ZERO, C64::ZERO, C64::ZERO] };
+        }
+        let get = |entry: usize| -> Jet { jets[entry] };
+        let conj = |j: Jet| -> Jet { j.map(|z| z.conj()) };
+        // The frequency's field components at the point.
+        let field: Vec<Jet> = fourth
+            .fields
+            .iter()
+            .map(|beams| {
+                let mut e = zero;
+                for &(l, c) in beams {
+                    let a = &amplitudes[l];
+                    jet_add(&mut e, &[a.value, a.gradient[0], a.gradient[1], a.gradient[2]], c);
+                }
+                if parts == 1 {
+                    e = [e[0], C64::ZERO, C64::ZERO, C64::ZERO];
+                }
+                e
+            })
+            .collect();
+        // Per (k', k) on the ground places: Ȳ = U_k'†T2_k (twice the Doppler partner), N̄ = S − (i/2) Σ_a J_k'†J_k and
+        // X̄ = T_k'†T_k.
+        let size = n * n;
+        let (mut y, mut near_generator, mut metric) = (vec![zero; m * m * size], vec![zero; m * m * size], vec![zero; m * m * size]);
+        for q in 0..m * m * size {
+            if let Some(i) = fourth.pairs[q] {
+                jet_add(&mut y[q], &get(plan.near.at(Operand::Doppler(i))), C64::real(2.0));
+                near_generator[q] = get(plan.near.at(Operand::Pair(i)));
+            }
+            for &(left, right) in &fourth.decays[q] {
+                jet_add(&mut near_generator[q], &jet_product(&conj(get(left)), &get(right)), C64::new(0.0, -0.5));
+            }
+            for &(left, right) in &fourth.metrics[q] {
+                jet_add(&mut metric[q], &jet_product(&conj(get(left)), &get(right)), C64::ONE);
+            }
+        }
+        // A form with its right component summed at the point, per left one: Σ_k e_k F̄_k'k; and with its left one, per
+        // right one: Σ_k' e_k'* F̄_k'k.
+        let right = |form: &[Jet]| -> Vec<Jet> {
+            let mut out = vec![zero; m * size];
+            for kl in 0..m {
+                for kr in 0..m {
+                    for at in 0..size {
+                        jet_add(&mut out[kl * size + at], &jet_product(&field[kr], &form[(kl * m + kr) * size + at]), C64::ONE);
+                    }
+                }
+            }
+            out
+        };
+        let left = |form: &[Jet]| -> Vec<Jet> {
+            let mut out = vec![zero; m * size];
+            for kl in 0..m {
+                for kr in 0..m {
+                    for at in 0..size {
+                        jet_add(&mut out[kr * size + at], &jet_product(&conj(field[kl]), &form[(kl * m + kr) * size + at]), C64::ONE);
+                    }
+                }
+            }
+            out
+        };
+        let (y_right, metric_right, generator_right) = (right(&y), right(&metric), right(&near_generator));
+        let (generator_left, metric_left) = (left(&near_generator), left(&metric));
+        // Z_k'j = −(Y N) + ½ (X N − N X), its outer components e_k'* and e_j left out.
+        let mut z = vec![zero; m * m * size];
+        for kl in (0..m).filter(|_| shifts.is_some()) {
+            for kr in 0..m {
+                for x in 0..n {
+                    for c in 0..n {
+                        let (a, b, g) = (y_right[kl * size + x * n + c], metric_right[kl * size + x * n + c], generator_right[kl * size + x * n + c]);
+                        let mut first = zero;
+                        jet_add(&mut first, &a, -C64::ONE);
+                        jet_add(&mut first, &b, C64::real(0.5));
+                        for yy in 0..n {
+                            let to = &mut z[(kl * m + kr) * size + x * n + yy];
+                            jet_add(to, &jet_product(&first, &generator_left[kr * size + c * n + yy]), C64::ONE);
+                            jet_add(to, &jet_product(&g, &metric_left[kr * size + c * n + yy]), C64::real(-0.5));
+                        }
+                    }
+                }
+            }
+        }
+        // The point's own X and N, every component in.
+        let (mut metric_here, mut generator_here) = (vec![zero; size], vec![zero; size]);
+        for kl in 0..m {
+            for at in 0..size {
+                jet_add(&mut metric_here[at], &jet_product(&conj(field[kl]), &metric_right[kl * size + at]), C64::ONE);
+                jet_add(&mut generator_here[at], &jet_product(&conj(field[kl]), &generator_right[kl * size + at]), C64::ONE);
+            }
+        }
+        // Every form as it is, along the lab axes; then the fourth order's own.
+        let mut data = vec![C64::ZERO; parts * len];
+        for entry in 0..len {
+            let jet = if parts == 4 { near.first_order(entry) } else { [near.data[entry], C64::ZERO, C64::ZERO, C64::ZERO] };
+            for part in 0..parts {
+                data[part * len + entry] = jet[part];
+            }
+        }
+        // S ← S + Herm Z: an entry and its adjoint's, the pair exchanged.
+        for kl in (0..m).filter(|_| shifts.is_some()) {
+            for kr in 0..m {
+                for x in 0..n {
+                    for yy in 0..n {
+                        let Some(i) = fourth.pairs[(kl * m + kr) * size + x * n + yy] else { continue };
+                        let (own, adjoint) = (z[(kl * m + kr) * size + x * n + yy], z[(kr * m + kl) * size + yy * n + x]);
+                        for part in 0..parts {
+                            data[part * len + plan.near.at(Operand::Pair(i))] += (own[part] + adjoint[part].conj()) * 0.5;
+                        }
+                    }
+                }
+            }
+        }
+        // J ← J (1 − ½X) + J2 N on the source places, to the jumps' order.
+        let gradients = jumps.is_some_and(|order| order >= 1) && parts == 4;
+        for (at, yy, from) in fourth.jumps.iter().filter(|_| jumps.is_some()) {
+            let mut jump = zero;
+            for &(x, first, second) in from {
+                let mut bend = metric_here[x * n + yy].map(|v| v * -0.5);
+                if x == *yy {
+                    bend[0] += C64::ONE;
+                }
+                if gradients {
+                    jet_add(&mut jump, &jet_product(&get(first), &bend), C64::ONE);
+                    jet_add(&mut jump, &jet_product(&get(second), &generator_here[x * n + yy]), C64::ONE);
+                } else {
+                    jump[0] += get(first)[0] * bend[0] + get(second)[0] * generator_here[x * n + yy][0];
+                }
+            }
+            for part in 0..parts {
+                data[part * len + at] = jump[part];
+            }
+        }
+        // The jets' products: the responses', the components' sums, Z's, the jumps'.
+        let products = fourth.decays.iter().chain(&fourth.metrics).map(Vec::len).sum::<usize>() + 7 * m * m * size + if shifts.is_some() { 2 * m * m * n * size } else { 0 };
+        let mapped = if jumps.is_some() { 2 * fourth.jumps.iter().map(|j| j.2.len()).sum::<usize>() } else { 0 };
+        let jet = if parts == 4 { 7 } else { 1 };
+        NearValues { len, order: near.order.min(1), data, directions: None, work: near.work + (jet * products + if gradients { jet } else { 1 } * mapped) as f64 }
     }
 
     /// A plan's field components at a point, jets to `order`, plain and weighted by their beams' Doppler shifts at a momentum.
@@ -1479,9 +1767,10 @@ impl Model {
                 point.formed(plan, None);
                 0.0
             }
-            Some(table) => self.near_point(table, &mut point) + plan.values,
-            None => {
-                let near = self.near_exact(plan, &point.beams, 1, &self.coherent_dressing());
+            Some(table) if plan.fourth.is_none() => self.near_point(table, &mut point) + plan.values,
+            // The exact elimination's forms; or the fourth order's, a map of the point's forms themselves.
+            _ => {
+                let near = self.near_values(plan, &point.beams, &[(plan.near.hermitian(), 1), (plan.near.jumping(), 0)], table);
                 point.formed(plan, Some(&near));
                 near.work + plan.values
             }
