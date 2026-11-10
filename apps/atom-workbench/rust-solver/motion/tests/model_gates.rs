@@ -115,6 +115,48 @@ fn closure(name: &str) -> [String; 2] {
     unreachable!("the closure ends in a pass without a failing gate")
 }
 
+/// A scene's closed model (the closure of solve.rs `attempt`, as `closure`): the units kept and its clusters, each as
+/// (ground states, explicit excited states).
+fn closed(name: &str) -> (Vec<Unit>, Vec<(usize, usize)>) {
+    let request = scene(name);
+    let light = Light::new(&request);
+    let reference = reference(&request);
+    let mut kept: Vec<Unit> = vec![];
+    loop {
+        let model = Model::new(&request, &light, &kept).unwrap();
+        let trap = model.trap(&reference, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &reference, request.temperature_uk, unseen(MOST_TRAJECTORIES as f64));
+        let units = model.units();
+        let gates = model.gates(&units, &reach);
+        let failing: Vec<Unit> = units.iter().zip(&gates).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
+        if failing.is_empty() {
+            return (kept, model.clusters().iter().map(|c| (c.ground, c.states.len() - c.ground)).collect());
+        }
+        kept.extend(failing);
+    }
+}
+
+/// A light far from its lines stays folded beside a line that is not, whatever its intensity (SPEC §1.5): in the
+/// lin-perp-lin scenes at 40, 80 and 160 mW/cm² a beam, 20 linewidths red, the closure makes explicit the repump light's
+/// drives F=1 → F′=2 alone (resonant: their gate fails, S 0.6 to 1.4) with the three F′=2 states they reach from F=1
+/// m=±1 and the two from m=0 -- the same clusters at every intensity. No cooling drive (from F=2, the ground states from
+/// the fourth on) is explicit, and no coupling joins F=1 to F=2: the cooling light's own saturation is at most 0.12
+/// there, and its shift of a level is its coupling across its own 121 MHz, a hundredth of the two-photon detuning.
+#[test]
+fn a_far_detuned_light_stays_folded_beside_an_explicit_line() {
+    for name in ["R4_LIN_1", "R4_LIN_2", "R4_LIN_4"] {
+        let (kept, clusters) = closed(name);
+        assert_eq!(clusters, [(2, 3), (1, 2), (3, 0), (2, 0)], "{name}: the closed model's clusters");
+        for unit in &kept {
+            match unit {
+                Unit::Drive { ground, .. } => assert!(*ground < 3, "{name}: a cooling drive is explicit: {unit:?}"),
+                Unit::Term { a, b, .. } => assert!((*a < 3) == (*b < 3) || *a >= GROUND, "{name}: F=1 joined to F=2: {unit:?}"),
+                _ => {}
+            }
+        }
+    }
+}
+
 /// The closures of the scenes `GATES_SCENES` names (reference scenes by name or native requests by path, `;` between them):
 /// each one's digests written to the folder `GATES_DIGESTS` as `<the scene's file stem>.txt` (the gates) and `.errors.txt` (the
 /// closed model's errors), the times on stderr.
