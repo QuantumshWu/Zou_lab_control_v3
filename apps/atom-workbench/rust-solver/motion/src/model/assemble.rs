@@ -52,11 +52,26 @@
 //! slopes' forms times the product. No matrix per beam pair, per beat or per wave vector is made: what grows with the beams is
 //! the components' sums alone. At the fixed point the same forms by tone are the gradient's tones (the step's shear).
 //!
+//! # Dense terms
+//! At a node the generator is Σ over (block, flag, tone) of one complex number -- the two components' product, plain or
+//! Doppler-weighted as the flag says, times the tone's phase -- times that term's values on the cluster's places x n + y. Each
+//! is a dense term (`Term`): its values the real parts and then the imaginary parts on the span of places that hold any, whole
+//! vectors of `LANES` reals, so that a node is sums over contiguous reals and nothing else (linalg.rs `axpy`, `dot`). A term
+//! of constants keeps its values in the plan; one that a near form or the decay enters has them at the point (`Point`): the
+//! generator's values, the Hermitian one and the decay's together, and for the forms with ρ the Hermitian values alone with
+//! their slopes. A point's values are their constant part, what the near forms lay there (`Plan::lay`, linear in the forms)
+//! and the decay's sums of the jumps' products (`Plan::decay`). A table holds the linear part at its nodes in this same
+//! layout (tabulate.rs, # A node's reals), so a middle interpolates each number straight to its place onto its constant.
+//!
+//! A middle's numbers and a path's are a thread's spares (`Held`): a step takes the vectors the step before left, and the
+//! model's part of a step asks the heap for nothing.
+//!
 //! # Work
 //! The complex multiply-adds are counted where they are made (`Middle::work`, `Plan::node`): at a point the near forms (the
 //! table's interpolation or the elimination) and the jumps' products (a product's adjoint, the same jumps exchanged, is its
 //! conjugate and is not made again); at a node the components from their beams and, per block and flag, its entries. A node's
-//! counts are the plan's: no generator is made to know them.
+//! counts are the plan's: no generator is made to know them. They count the definition's operations -- the forms a point
+//! takes, an entry per block and flag --, whatever layout the sums are made in.
 
 use super::eliminate::{half, jump, shift, Leg, Responses};
 use super::far::EXCITED;
@@ -64,11 +79,11 @@ use super::photon::{Origin, Source};
 use super::tabulate::NearTable;
 use super::{jet, Beat, Component, Level, Lights, Lit, Model, Wave};
 use crate::field::Amplitude;
-use crate::linalg::{dot3, Mat, C64};
+use crate::linalg::{axpy, dot, dot3, Mat, C64, LANES};
 use crate::request::{GROUND, STATES};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ops::Range;
+use std::ops::{Deref, DerefMut, Range};
 use std::sync::Arc;
 
 /// Which factors of a term take their beams' Doppler shifts (module documentation, # First-order Doppler).
@@ -198,27 +213,67 @@ pub(crate) struct Scalar {
     pub(crate) beams: Vec<(usize, C64)>,
 }
 
-/// The terms of one product of field components at one base beat (module documentation, # Terms): per flag (`PLAIN`, `RIGHT`,
-/// `LEFT`; and `BOTH` for the decay) where its Hermitian values and its decay's start among a point's values (one per entry),
-/// and where the two together start among a point's merged values.
+/// The terms of one product of field components at one base beat (module documentation, # Terms): its two components
+/// (None: 1).
 #[derive(Clone, Debug)]
 struct Block {
     left: Option<usize>,
     right: Option<usize>,
-    hermitian: [Option<usize>; 3],
-    decay: [Option<usize>; 4],
-    merged: [Option<usize>; 4],
-    /// Per entry x ← y: its place x n + y on the cluster's states, and its tone -- the residual beat of the block's base beat in
-    /// the two states' frames, an index into the plan's tones.
-    places: Vec<usize>,
-    tones: Vec<usize>,
-    /// The entries' tone where they share one.
-    tone: Option<usize>,
-    /// Per Hermitian flag its weight in a form with a Hermitian ρ (`Middle::contract`). A flag's values and their adjoints
-    /// -- the two components conjugated, the base beat negated, the entries transposed and conjugated, the Doppler-weighted
-    /// side exchanged -- make conjugate forms: of a block and its adjoint the first is taken twice and the other left out,
-    /// and of a block that is its own adjoint the flag `RIGHT` twice for `LEFT`.
-    weights: [f64; 3],
+}
+
+/// One dense term (module documentation, # Dense terms): the entries of one block and flag (`PLAIN`, `RIGHT`, `LEFT`; and
+/// `BOTH` for the decay) at one tone -- the residual beat of the block's base beat in the entries' two states' frames, an index
+/// into the plan's tones --, on the span of the cluster's places x n + y from `first` on that holds them (`len` of them, whole
+/// vectors; zero where the term has no entry). Its values are `len` real parts and then `len` imaginary parts from `at` on:
+/// among a point's values where a near form or a decay's sum enters one (`near`), else among the plan's constants.
+#[derive(Clone, Debug)]
+struct Term {
+    block: usize,
+    flag: usize,
+    tone: usize,
+    first: usize,
+    len: usize,
+    at: usize,
+    near: bool,
+    /// In a form with a Hermitian ρ (`Middle::contract`), its weight. A flag's values and their adjoints -- the two
+    /// components conjugated, the base beat negated, the entries transposed and conjugated, the Doppler-weighted side
+    /// exchanged -- make conjugate forms: of a block and its adjoint the first is taken twice and the other left out, and of a
+    /// block that is its own adjoint the flag `RIGHT` twice for `LEFT`.
+    weight: f64,
+}
+
+/// The dense terms of the generator, or of a form with a Hermitian ρ, as they are laid (`Builder::finish`): the terms, the
+/// constant part of a point's values, and each term by its block, flag and tone.
+#[derive(Default)]
+struct Laid {
+    terms: Vec<Term>,
+    start: Vec<f64>,
+    index: HashMap<(usize, usize, usize), usize>,
+}
+
+impl Laid {
+    /// The term of a block, flag and tone from its entries -- (place, constant, whether a near form or a decay's sum enters
+    /// it) --, on the span of those that hold anything; none where none does. A constant term's values go to `constant`.
+    fn push(&mut self, constant: &mut Vec<f64>, key: (usize, usize, usize), weight: f64, entries: &[(usize, C64, bool)]) {
+        let held: Vec<&(usize, C64, bool)> = entries.iter().filter(|e| e.1 != C64::ZERO || e.2).collect();
+        let (Some(low), Some(high)) = (held.iter().map(|e| e.0).min(), held.iter().map(|e| e.0).max()) else { return };
+        let first = low / LANES * LANES;
+        let len = (high + 1).div_ceil(LANES) * LANES - first;
+        let near = held.iter().any(|e| e.2);
+        let values = if near { &mut self.start } else { constant };
+        let at = values.len();
+        values.resize(at + 2 * len, 0.0);
+        for e in held {
+            values[at + e.0 - first] += e.1.re;
+            values[at + len + e.0 - first] += e.1.im;
+        }
+        self.index.insert(key, self.terms.len());
+        self.terms.push(Term { block: key.0, flag: key.1, tone: key.2, first, len, at, near, weight });
+    }
+    /// Where the entry at `place` of a near term's values lies among a point's: its real part and its imaginary part.
+    fn place(&self, key: (usize, usize, usize), place: usize) -> Option<[usize; 2]> {
+        self.index.get(&key).map(|&t| &self.terms[t]).map(|t| [t.at + place - t.first, t.at + t.len + place - t.first])
+    }
 }
 
 /// One member of a photon class at a point (photon.rs): its source, its field component (None: 1), whether its jumps take the
@@ -242,16 +297,18 @@ pub(crate) struct ClassPlan {
     pub(crate) members: Vec<MemberPlan>,
 }
 
-/// A Hermitian near form's place in the generator: the block, flag and entry (x, y) it is the value of, its slot among a
-/// point's values, the form's place, and whether it enters conjugated.
+/// A Hermitian near form's place in the generator: the block, flag and entry (x, y) it is the value of, the form's place,
+/// whether it enters conjugated, and where it lies among a point's values of the generator and of the forms with a
+/// Hermitian ρ (its real and its imaginary part; none where its term is left to its adjoint, `Term::weight`).
 #[derive(Clone, Debug)]
 pub(crate) struct Link {
     pub(crate) block: usize,
     pub(crate) flag: usize,
     pub(crate) place: (usize, usize),
-    slot: usize,
     pub(crate) operand: usize,
     pub(crate) conjugate: bool,
+    generator: [usize; 2],
+    form: Option<[usize; 2]>,
 }
 
 /// A cluster's assembly under a light set, worked out once (module documentation): the near forms, the field components and
@@ -272,17 +329,23 @@ pub(crate) struct Plan {
     blocks: Vec<Block>,
     /// Per block whether its base beat is exactly zero (the potential's static shifts).
     pub(crate) statics: Vec<bool>,
-    /// A point's values without the near light: the Hermitian slots first.
-    template: Vec<C64>,
-    hermitian: usize,
+    /// The cluster's n² places as whole vectors of the dense terms' sums.
+    padded: usize,
+    /// The generator's dense terms -- per block, flag and tone its Hermitian values and its decay's together --, and those of
+    /// a form with a Hermitian ρ: the Hermitian values of the flags that weigh in it. Each in the blocks' order.
+    generator: Vec<Term>,
+    form: Vec<Term>,
+    /// The constant terms' values, and the constant part of a point's values of the generator's terms and of the forms'.
+    constant: Vec<f64>,
+    pub(crate) generator_start: Vec<f64>,
+    pub(crate) form_start: Vec<f64>,
     pub(crate) links: Vec<Link>,
-    /// The jumps' products conj(first) second, by sums (each a range of them), and the decay's slots: (slot, its sum, whether
-    /// it takes the sum's conjugate -- the adjoint's, the same jumps exchanged --, the flag's factor −(i/2)(−1)^{Doppler partners}).
+    /// The jumps' products conj(first) second, by sums (each a range of them), and the decay's values: (where among a point's
+    /// values of the generator, its sum, whether it takes the sum's conjugate -- the adjoint's, the same jumps exchanged --,
+    /// the flag's factor −(i/2)(−1)^{Doppler partners}).
     products: Vec<(usize, usize)>,
     raws: Vec<Range<usize>>,
-    sums: Vec<(usize, usize, bool, C64)>,
-    /// A point's merged values' count (`Block::merged`).
-    merged: usize,
+    sums: Vec<([usize; 2], usize, bool, C64)>,
     /// The distinct residual beats of the terms' entries in the cluster's frames (rad/µs; the first is zero): at a fixed point
     /// the generator is Σ_m (its entries of tone m) e^{iΩ_m t}.
     tones: Vec<f64>,
@@ -724,63 +787,13 @@ impl<'a> Builder<'a> {
             }
         }
         let near = self.near;
-        // The slots: every block's Hermitian values first, then the decay's.
-        let mut template = vec![];
-        let mut links = vec![];
-        let mut hermitian: Vec<[Option<usize>; 3]> = vec![[None; 3]; self.drafts.len()];
-        for (b, d) in self.drafts.iter().enumerate() {
-            for flag in 0..3 {
-                if !d.used.0[flag] {
-                    continue;
-                }
-                hermitian[b][flag] = Some(template.len());
-                for (e, (constant, form)) in d.hermitian[flag].iter().enumerate() {
-                    if let Some((operand, conjugate)) = form {
-                        links.push(Link { block: b, flag, place: d.entries[e], slot: template.len(), operand: near.at(*operand), conjugate: *conjugate });
-                    }
-                    template.push(*constant);
-                }
-            }
-        }
-        let slots = template.len();
-        let (mut sums, mut products, mut raws) = (vec![], vec![], vec![]);
-        let mut made: HashMap<Vec<(usize, usize)>, usize> = HashMap::new();
-        let mut decay: Vec<[Option<usize>; 4]> = vec![[None; 4]; self.drafts.len()];
-        for (b, d) in self.drafts.iter().enumerate() {
-            for flag in 0..4 {
-                if !d.used.1[flag] {
-                    continue;
-                }
-                decay[b][flag] = Some(template.len());
-                for (constant, terms) in &d.decay[flag] {
-                    if !terms.is_empty() {
-                        let mut list: Vec<(usize, usize)> = terms.iter().map(|(x, y)| (near.at(*x), near.at(*y))).collect();
-                        list.sort();
-                        let mut exchanged: Vec<(usize, usize)> = list.iter().map(|&(x, y)| (y, x)).collect();
-                        exchanged.sort();
-                        let (raw, conjugated) = match (made.get(&list), made.get(&exchanged)) {
-                            (Some(&at), _) => (at, false),
-                            (None, Some(&at)) => (at, true),
-                            (None, None) => {
-                                raws.push(products.len()..products.len() + list.len());
-                                products.extend(list.iter().copied());
-                                made.insert(list, raws.len() - 1);
-                                (raws.len() - 1, false)
-                            }
-                        };
-                        sums.push((template.len(), raw, conjugated, decay_factor(flag)));
-                    }
-                    template.push(*constant);
-                }
-            }
-        }
-        // The blocks' entries, their places and tones; whether anything beats -- a residual beat in time, or along a path the
-        // residual wave vector of a pair of the two components' beams in the entry's Doppler frames --; and the merged values.
-        let mut blocks: Vec<Block> = vec![];
+        // The entries' tones; and whether anything beats -- a residual beat in time, or along a path the residual wave vector
+        // of a pair of the two components' beams in the entry's Doppler frames.
         let mut tone_index: HashMap<Beat, usize> = HashMap::from([(model.axes.zero(), 0)]);
         let mut tones = vec![0.0];
-        let (mut still, mut merged_count) = (true, 0);
-        for (b, d) in self.drafts.iter().enumerate() {
+        let mut still = true;
+        let mut entry_tones: Vec<Vec<usize>> = vec![];
+        for d in &self.drafts {
             let waves = |s: Option<usize>| -> Vec<Wave> {
                 s.map_or(vec![model.no_wave()], |i| self.scalars[i].beams.iter().map(|&(at, _)| model.no_wave().plus(if self.scalars[i].conjugate { -1 } else { 1 }, &model.beam_wave(self.beams[at]))).collect())
             };
@@ -795,16 +808,9 @@ impl<'a> Builder<'a> {
                     tones.len() - 1
                 }));
             }
-            let merged = std::array::from_fn(|flag| {
-                (hermitian[b].get(flag).copied().flatten().is_some() || decay[b][flag].is_some()).then(|| {
-                    merged_count += d.entries.len();
-                    merged_count - d.entries.len()
-                })
-            });
-            let tone = block_tones.first().copied().filter(|t| block_tones.iter().all(|x| x == t));
-            blocks.push(Block { left: d.left, right: d.right, hermitian: hermitian[b], decay: decay[b], merged, places: d.entries.iter().map(|&(x, y)| x * n + y).collect(), tones: block_tones, tone, weights: [1.0; 3] });
+            entry_tones.push(block_tones);
         }
-        // The Hermitian blocks' adjoints (`Block::weights`): the block of the two components' conjugates at the negated beat.
+        // The Hermitian blocks' adjoints (`Term::weight`): the block of the two components' conjugates at the negated beat.
         let conjugate = |s: Option<usize>| match s {
             None => Some(None),
             Some(i) => {
@@ -812,24 +818,113 @@ impl<'a> Builder<'a> {
                 self.scalars.iter().position(|y| (y.frequency, y.group, y.component, y.conjugate) == (x.frequency, x.group, x.component, !x.conjugate)).map(Some)
             }
         };
+        let weights: Vec<[f64; 3]> = self
+            .drafts
+            .iter()
+            .enumerate()
+            .map(|(b, d)| {
+                let adjoint = conjugate(d.left).zip(conjugate(d.right)).and_then(|(l, r)| {
+                    let (l, r) = if l > r { (r, l) } else { (l, r) };
+                    self.drafts.iter().position(|t| t.left == l && t.right == r && t.beat == d.beat.negated())
+                });
+                match adjoint.filter(|&t| self.drafts[t].used.0.iter().any(|used| *used)) {
+                    Some(t) if t > b => [2.0; 3],
+                    Some(t) if t < b => [0.0; 3],
+                    Some(_) => [1.0, 2.0, 0.0],
+                    None => [1.0; 3],
+                }
+            })
+            .collect();
+        // The dense terms (module documentation, # Dense terms): per block, flag and tone the generator's -- the Hermitian
+        // value and the decay's of each entry together -- and, of the Hermitian flags that weigh in a form, the form's.
+        let (mut generator, mut form, mut constant) = (Laid::default(), Laid::default(), vec![]);
+        let (mut merged, mut forms) = (0, 0);
         for (b, d) in self.drafts.iter().enumerate() {
-            let adjoint = conjugate(d.left).zip(conjugate(d.right)).and_then(|(l, r)| {
-                let (l, r) = if l > r { (r, l) } else { (l, r) };
-                self.drafts.iter().position(|t| t.left == l && t.right == r && t.beat == d.beat.negated())
-            });
-            blocks[b].weights = match adjoint.filter(|&t| hermitian[t].iter().any(|h| h.is_some())) {
-                Some(t) if t > b => [2.0; 3],
-                Some(t) if t < b => [0.0; 3],
-                Some(_) => [1.0, 2.0, 0.0],
-                None => [1.0; 3],
-            };
+            let place = |e: usize| d.entries[e].0 * n + d.entries[e].1;
+            let mut distinct: Vec<usize> = vec![];
+            for &tone in &entry_tones[b] {
+                if !distinct.contains(&tone) {
+                    distinct.push(tone);
+                }
+            }
+            for flag in 0..4 {
+                let hermitian = (flag < 3 && d.used.0[flag]).then(|| &d.hermitian[flag]);
+                let weighs = hermitian.is_some() && weights[b][flag] > 0.0;
+                if hermitian.is_some() || d.used.1[flag] {
+                    merged += d.entries.len();
+                }
+                if weighs {
+                    forms += d.entries.len();
+                }
+                for &tone in &distinct {
+                    let of = (0..d.entries.len()).filter(|&e| entry_tones[b][e] == tone);
+                    let whole: Vec<(usize, C64, bool)> = of
+                        .clone()
+                        .map(|e| {
+                            let (value, held) = hermitian.map_or((C64::ZERO, false), |h| (h[e].0, h[e].1.is_some()));
+                            (place(e), value + d.decay[flag][e].0, held || !d.decay[flag][e].1.is_empty())
+                        })
+                        .collect();
+                    generator.push(&mut constant, (b, flag, tone), 1.0, &whole);
+                    if let Some(h) = hermitian.filter(|_| weighs) {
+                        let own: Vec<(usize, C64, bool)> = of.map(|e| (place(e), h[e].0, h[e].1.is_some())).collect();
+                        form.push(&mut constant, (b, flag, tone), weights[b][flag], &own);
+                    }
+                }
+            }
         }
-        // A node: the field components from their beams (plain and Doppler-weighted; with their gradients, fourfold), each
-        // block's entries per flag -- in a form those of the Hermitian flags taken (`Block::weights`) --, the frames' phases
-        // on the n² entries.
+        // The near forms' places among a point's values.
+        let mut links = vec![];
+        for (b, d) in self.drafts.iter().enumerate() {
+            for flag in (0..3).filter(|&flag| d.used.0[flag]) {
+                for (e, (_, held)) in d.hermitian[flag].iter().enumerate() {
+                    let Some((operand, conjugate)) = held else { continue };
+                    let (key, place) = ((b, flag, entry_tones[b][e]), d.entries[e].0 * n + d.entries[e].1);
+                    links.push(Link {
+                        block: b,
+                        flag,
+                        place: d.entries[e],
+                        operand: near.at(*operand),
+                        conjugate: *conjugate,
+                        generator: generator.place(key, place).expect("a near form's term"),
+                        form: form.place(key, place),
+                    });
+                }
+            }
+        }
+        // The decay's sums of products: a sum's adjoint, the same jumps exchanged, is its conjugate and is not made again.
+        let (mut sums, mut products, mut raws) = (vec![], vec![], vec![]);
+        let mut made: HashMap<Vec<(usize, usize)>, usize> = HashMap::new();
+        for (b, d) in self.drafts.iter().enumerate() {
+            for flag in (0..4).filter(|&flag| d.used.1[flag]) {
+                for (e, (_, terms)) in d.decay[flag].iter().enumerate() {
+                    if terms.is_empty() {
+                        continue;
+                    }
+                    let mut list: Vec<(usize, usize)> = terms.iter().map(|(x, y)| (near.at(*x), near.at(*y))).collect();
+                    list.sort();
+                    let mut exchanged: Vec<(usize, usize)> = list.iter().map(|&(x, y)| (y, x)).collect();
+                    exchanged.sort();
+                    let (raw, conjugated) = match (made.get(&list), made.get(&exchanged)) {
+                        (Some(&at), _) => (at, false),
+                        (None, Some(&at)) => (at, true),
+                        (None, None) => {
+                            raws.push(products.len()..products.len() + list.len());
+                            products.extend(list.iter().copied());
+                            made.insert(list, raws.len() - 1);
+                            (raws.len() - 1, false)
+                        }
+                    };
+                    let place = generator.place((b, flag, entry_tones[b][e]), d.entries[e].0 * n + d.entries[e].1).expect("a decay's term");
+                    sums.push((place, raw, conjugated, decay_factor(flag)));
+                }
+            }
+        }
+        // A node's counted work: the field components from their beams (plain and Doppler-weighted; with their gradients,
+        // fourfold), each block's entries per flag -- in a form those of the Hermitian flags taken (`Term::weight`) --, the
+        // frames' phases on the n² entries.
         let fields: usize = self.scalars.iter().map(|s| 2 * s.beams.len()).sum();
-        let forms: usize = blocks.iter().map(|b| (0..3).filter(|&flag| b.hermitian[flag].is_some() && b.weights[flag] > 0.0).count() * b.places.len()).sum();
-        let node = [(fields + merged_count + 2 * n * n) as f64, (4 * fields + forms + n * n) as f64, forms as f64];
+        let node = [(fields + merged + 2 * n * n) as f64, (4 * fields + forms + n * n) as f64, forms as f64];
         let statics = self.drafts.iter().map(|d| d.beat.is_zero()).collect();
         let classes = classes
             .into_iter()
@@ -842,7 +937,7 @@ impl<'a> Builder<'a> {
                     .collect(),
             })
             .collect();
-        let values = (products.len() + sums.len() + merged_count) as f64;
+        let values = (products.len() + sums.len() + merged) as f64;
         Plan {
             raws,
             cluster: self.cluster,
@@ -853,14 +948,17 @@ impl<'a> Builder<'a> {
             offsets: self.offsets,
             beams: self.beams,
             scalars: self.scalars,
-            blocks,
+            blocks: self.drafts.iter().map(|d| Block { left: d.left, right: d.right }).collect(),
             statics,
-            template,
-            hermitian: slots,
+            padded: (n * n).div_ceil(LANES) * LANES,
+            generator: generator.terms,
+            form: form.terms,
+            constant,
+            generator_start: generator.start,
+            form_start: form.start,
             links,
             sums,
             products,
-            merged: merged_count,
             still,
             node,
             tones,
@@ -887,9 +985,150 @@ impl Plan {
     pub(crate) fn factors(&self, block: usize) -> (Option<usize>, Option<usize>) {
         (self.blocks[block].left, self.blocks[block].right)
     }
-    /// The plan's beams' amplitudes with their gradients, from every beam's.
-    pub(crate) fn amplitudes(&self, all: &[Amplitude]) -> Vec<[C64; 4]> {
-        self.beams.iter().map(|&l| [all[l].value, all[l].gradient[0], all[l].gradient[1], all[l].gradient[2]]).collect()
+    /// The Hermitian near forms into a point's values (module documentation, # Dense terms): each form -- `form(place)`, a
+    /// point's or a table node's, or their derivative along a direction -- added where it lies among the generator's values
+    /// (where given) and among the forms'.
+    pub(crate) fn lay(&self, form: impl Fn(usize) -> C64, mut generator: Option<&mut [f64]>, forms: &mut [f64]) {
+        for l in &self.links {
+            let z = if l.conjugate { form(l.operand).conj() } else { form(l.operand) };
+            if let Some(g) = generator.as_deref_mut() {
+                g[l.generator[0]] += z.re;
+                g[l.generator[1]] += z.im;
+            }
+            if let Some([re, im]) = l.form {
+                forms[re] += z.re;
+                forms[im] += z.im;
+            }
+        }
+    }
+    /// The decay into a point's values of the generator: the jumps' products conj(first) second summed (`sums`: their
+    /// scratch), each sum with its flag's factor where it lies. `jump(place)` is a jump's value there: a near form with its
+    /// constant part, or a constant.
+    pub(crate) fn decay(&self, jump: impl Fn(usize) -> C64, sums: &mut Vec<C64>, generator: &mut [f64]) {
+        sums.clear();
+        sums.extend(self.raws.iter().map(|products| self.products[products.clone()].iter().map(|&(x, y)| jump(x).conj() * jump(y)).sum::<C64>()));
+        for &([re, im], sum, conjugated, factor) in &self.sums {
+            let z = factor * if conjugated { sums[sum].conj() } else { sums[sum] };
+            generator[re] += z.re;
+            generator[im] += z.im;
+        }
+    }
+    /// A dense term's values, their real parts and their imaginary parts: the plan's constants, or a point's (`point`).
+    fn values<'a>(&'a self, term: &Term, point: &'a [f64]) -> (&'a [f64], &'a [f64]) {
+        (if term.near { point } else { &self.constant[..] })[term.at..term.at + 2 * term.len].split_at(term.len)
+    }
+}
+
+/// What a thread keeps from one use to the next (`Held`): a middle's numbers, a path's. A step's middle and its paths take
+/// what the step before left -- vectors of the sizes they need already --, so the model's part of a step asks the heap for
+/// nothing.
+pub(crate) trait Spare: Default + 'static {
+    fn kept() -> &'static std::thread::LocalKey<RefCell<Vec<Box<Self>>>>;
+}
+
+thread_local! {
+    static POINTS: RefCell<Vec<Box<Point>>> = const { RefCell::new(Vec::new()) };
+    static RATES: RefCell<Vec<Box<Rates>>> = const { RefCell::new(Vec::new()) };
+}
+
+impl Spare for Point {
+    fn kept() -> &'static std::thread::LocalKey<RefCell<Vec<Box<Point>>>> {
+        &POINTS
+    }
+}
+
+impl Spare for Rates {
+    fn kept() -> &'static std::thread::LocalKey<RefCell<Vec<Box<Rates>>>> {
+        &RATES
+    }
+}
+
+/// One of a thread's spare values, held: taken from the thread's kept ones (made where it has none) and given back when
+/// dropped.
+pub(crate) struct Held<T: Spare>(Option<Box<T>>);
+
+impl<T: Spare> Held<T> {
+    pub(crate) fn take() -> Held<T> {
+        Held(Some(T::kept().try_with(|kept| kept.borrow_mut().pop()).ok().flatten().unwrap_or_default()))
+    }
+}
+
+impl<T: Spare> Drop for Held<T> {
+    fn drop(&mut self) {
+        if let Some(held) = self.0.take() {
+            // A thread that is ending keeps nothing: the value goes with it.
+            let _ = T::kept().try_with(|kept| kept.borrow_mut().push(held));
+        }
+    }
+}
+
+impl<T: Spare> Deref for Held<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.0.as_deref().expect("held until dropped")
+    }
+}
+
+impl<T: Spare> DerefMut for Held<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.0.as_deref_mut().expect("held until dropped")
+    }
+}
+
+/// A vector at a length, whatever it holds: its caller writes every element.
+pub(crate) fn sized<T: Clone + Default>(v: &mut Vec<T>, len: usize) {
+    if v.len() != len {
+        v.clear();
+        v.resize(len, T::default());
+    }
+}
+
+/// A middle's numbers (`Middle`; a thread's spare, `Held`).
+#[derive(Default)]
+pub(crate) struct Point {
+    /// Every request beam's amplitude at the point.
+    pub(crate) beams: Vec<Amplitude>,
+    /// Per beam of the plan: a_l and ∇a_l.
+    amplitudes: Vec<[C64; 4]>,
+    /// The near terms' values (module documentation, # Dense terms): the generator's, and the forms' with their slopes along
+    /// `directions` (1/µm per unit of each; `slopes[f * forms + i]` the slope of value i along direction f).
+    pub(crate) generator: Vec<f64>,
+    pub(crate) forms: Vec<f64>,
+    pub(crate) slopes: Vec<f64>,
+    pub(crate) directions: Vec<[f64; 3]>,
+    /// A table's coordinates at the point, the jumps there and their products' sums (tabulate.rs `Model::near_point`).
+    pub(crate) coordinates: Vec<f64>,
+    pub(crate) jumps: Vec<f64>,
+    pub(crate) sums: Vec<C64>,
+    /// Its nodes' scratch, one for all its paths: a node's call fills what it reads.
+    scratch: RefCell<Scratch>,
+}
+
+impl Point {
+    /// The plan's beams' amplitudes with their gradients, from every beam's (`beams`).
+    fn select(&mut self, plan: &Plan) {
+        self.amplitudes.clear();
+        self.amplitudes.extend(plan.beams.iter().map(|&l| &self.beams[l]).map(|a| [a.value, a.gradient[0], a.gradient[1], a.gradient[2]]));
+    }
+    /// The near terms' values from the near forms at the point (the Hermitian ones to first order): a Hermitian value its
+    /// constant and its near form with its slopes, a decay's its constant and its jumps' products. Without near forms (None):
+    /// the constants alone.
+    fn formed(&mut self, plan: &Plan, near: Option<&NearValues>) {
+        self.generator.clear();
+        self.generator.extend_from_slice(&plan.generator_start);
+        self.forms.clear();
+        self.forms.extend_from_slice(&plan.form_start);
+        self.directions.clear();
+        self.slopes.clear();
+        let Some(near) = near else { return };
+        self.directions.extend(near.slopes());
+        let (len, width) = (plan.near.len(), self.forms.len());
+        self.slopes.resize(self.directions.len() * width, 0.0);
+        plan.lay(|at| near.data[at], Some(&mut self.generator), &mut self.forms);
+        for (f, slopes) in self.slopes.chunks_mut(width.max(1)).enumerate() {
+            plan.lay(|at| near.data[(1 + f) * near.len + at], None, slopes);
+        }
+        plan.decay(|at| if at < len { near.data[at] + plan.bare(at) } else { plan.constants[at - len] }, &mut self.sums, &mut self.generator);
     }
 }
 
@@ -918,20 +1157,10 @@ pub struct Middle<'a> {
     model: &'a Model,
     plan: Arc<Plan>,
     t: f64,
-    /// Per beam of the plan: a_l and ∇a_l.
-    amplitudes: Vec<[C64; 4]>,
-    /// Every block's values per flag and entry, the Hermitian ones first; and per block and flag the Hermitian value and the
-    /// decay's together (`Block::merged`), the generator's.
-    values: Vec<C64>,
-    merged: Vec<C64>,
-    /// The directions the Hermitian values' gradients are slopes along (1/µm per unit of each), and per Hermitian value its slopes
-    /// (`slopes[slot * directions + f]`).
-    directions: Vec<[f64; 3]>,
-    slopes: Vec<C64>,
+    /// Its numbers: the beams' amplitudes and the near terms' values at the point.
+    point: Held<Point>,
     /// The complex multiply-adds that made it.
     pub(crate) work: f64,
-    /// Its nodes' scratch, one for all its paths: a node's call fills what it reads.
-    scratch: RefCell<Scratch>,
 }
 
 impl Model {
@@ -1100,48 +1329,33 @@ impl Model {
 
     /// A cluster's generator at a position and time under a plan (`Middle`), the near forms from a table where one is given.
     pub(crate) fn middle(&self, plan: &Arc<Plan>, r: [f64; 3], t: f64, table: Option<&NearTable>) -> Middle<'_> {
-        if plan.near.len() == 0 {
-            let amplitudes = plan.beams.iter().map(|&l| self.light.beams[l].amplitude(r)).map(|a| [a.value, a.gradient[0], a.gradient[1], a.gradient[2]]).collect();
-            return self.middle_of(plan, t, amplitudes, None);
-        }
-        let all = self.light.amplitudes(r);
-        let near = self.near_values(plan, &all, &[(plan.near.hermitian(), 1), (plan.near.jumping(), 0)], table);
-        self.middle_of(plan, t, plan.amplitudes(&all), Some(&near))
+        let mut point = Held::<Point>::take();
+        self.light.amplitudes_into(r, &mut point.beams);
+        point.select(plan);
+        let work = match table {
+            _ if plan.near.len() == 0 => {
+                point.formed(plan, None);
+                0.0
+            }
+            Some(table) => self.near_point(table, &mut point) + plan.values,
+            None => {
+                let near = self.near_exact(plan, &point.beams, 1, &self.coherent_dressing());
+                point.formed(plan, Some(&near));
+                near.work + plan.values
+            }
+        };
+        Middle { model: self, plan: plan.clone(), t, point, work }
     }
 
-    /// The same from the plan's beams' amplitudes and the near forms there (the Hermitian ones to first order): every block's
-    /// values, a Hermitian slot its constant and its near form with its slopes, a decay slot its constant and its jumps'
-    /// products. Without near forms (None): the terms that hold none.
-    pub(crate) fn middle_of(&self, plan: &Arc<Plan>, t: f64, amplitudes: Vec<[C64; 4]>, near: Option<&NearValues>) -> Middle<'_> {
-        let len = plan.near.len();
-        let mut values = plan.template.clone();
-        let directions = near.map_or(vec![], |n| n.slopes());
-        let q = directions.len();
-        let mut slopes = vec![C64::ZERO; plan.hermitian * q];
-        let mut work = 0.0;
-        if let Some(near) = near {
-            work = near.work + plan.values;
-            for l in &plan.links {
-                let turn = |z: C64| if l.conjugate { z.conj() } else { z };
-                values[l.slot] += turn(near.data[l.operand]);
-                for f in 0..q {
-                    slopes[l.slot * q + f] = turn(near.data[(1 + f) * near.len + l.operand]);
-                }
-            }
-            let value = |at: usize| if at < len { near.data[at] + plan.bare(at) } else { plan.constants[at - len] };
-            let raws: Vec<C64> = plan.raws.iter().map(|products| plan.products[products.clone()].iter().map(|&(x, y)| value(x).conj() * value(y)).sum()).collect();
-            for &(slot, raw, conjugated, factor) in &plan.sums {
-                values[slot] += factor * if conjugated { raws[raw].conj() } else { raws[raw] };
-            }
-        }
-        let mut merged = Vec::with_capacity(plan.merged);
-        for block in &plan.blocks {
-            for flag in (0..4).filter(|&flag| block.merged[flag].is_some()) {
-                let (hermitian, decay) = (block.hermitian.get(flag).copied().flatten(), block.decay[flag]);
-                merged.extend((0..block.places.len()).map(|i| hermitian.map_or(C64::ZERO, |at| values[at + i]) + decay.map_or(C64::ZERO, |at| values[at + i])));
-            }
-        }
-        Middle { model: self, plan: plan.clone(), t, amplitudes, values, merged, directions, slopes, work, scratch: RefCell::default() }
+    /// The same from every beam's amplitude and the near forms there (the Hermitian ones to first order; `Point::formed`).
+    /// Without near forms (None): the terms that hold none.
+    pub(crate) fn middle_of(&self, plan: &Arc<Plan>, t: f64, amplitudes: &[Amplitude], near: Option<&NearValues>) -> Middle<'_> {
+        let mut point = Held::<Point>::take();
+        point.beams.clear();
+        point.beams.extend_from_slice(amplitudes);
+        point.select(plan);
+        point.formed(plan, near);
+        Middle { model: self, plan: plan.clone(), t, point, work: near.map_or(0.0, |n| n.work + plan.values) }
     }
 
     /// The one generator assembly (module documentation): a cluster's generator at a position and a time under a light set, the
@@ -1154,27 +1368,33 @@ impl Model {
 /// The momentum's part of a cluster's generator along a straight path through its middle (`Middle::path`): per beam of the
 /// plan its Doppler shift w_l at the momentum the generator is taken at (rad/µs) and its path rate k_l·v at the path's
 /// velocity (rad/µs); per state of the cluster its Doppler frame's rate K_s·v, and whether any frame turns.
-#[derive(Clone, Debug)]
 pub struct Path {
-    shifts: Vec<f64>,
-    rates: Vec<f64>,
-    gauge: Vec<f64>,
+    rates: Held<Rates>,
     turning: bool,
 }
 
-/// A node's scratch (`Middle::scratch`): the beams' amplitudes turned along the path, the plan's field components there (each
-/// with its gradient, plain and weighted by its beams' Doppler shifts), the tones' phases, the Doppler frames' turns, a ρ laid
-/// out as the entries are, per tone its three sums, and a form's slopes.
-#[derive(Clone, Debug, Default)]
+/// A path's numbers (`Path`; a thread's spare, `Held`).
+#[derive(Default)]
+pub(crate) struct Rates {
+    shifts: Vec<f64>,
+    path: Vec<f64>,
+    gauge: Vec<f64>,
+}
+
+/// A node's scratch (`Point::scratch`): the beams' amplitudes turned along the path, the plan's field components there (each
+/// with its gradient, plain and weighted by its beams' Doppler shifts), the tones' phases, the Doppler frames' turns; a ρ laid
+/// out as the entries are and a generator's sum -- each the real parts on the cluster's places (`Plan::padded`) and then the
+/// imaginary parts --; and per tone its three sums.
+#[derive(Default)]
 struct Scratch {
     turned: Vec<[C64; 4]>,
     plain: Vec<[C64; 4]>,
     doppler: Vec<[C64; 4]>,
     phases: Vec<C64>,
     turns: Vec<C64>,
-    weights: Vec<C64>,
+    weights: Vec<f64>,
+    sum: Vec<f64>,
     sums: Vec<[f64; 3]>,
-    slopes: Vec<C64>,
 }
 
 impl crate::step::Middle for Middle<'_> {
@@ -1191,55 +1411,53 @@ impl crate::step::Middle for Middle<'_> {
 
     fn path(&self, kappa: [f64; 3], velocity: [f64; 3]) -> Path {
         let (model, plan) = (self.model, &*self.plan);
-        let gauge: Vec<f64> = model.clusters[plan.cluster].waves.iter().map(|k| dot3(*k, velocity)).collect();
-        Path {
-            shifts: plan.beams.iter().map(|&l| model.doppler_shift(l, kappa)).collect(),
-            rates: plan.beams.iter().map(|&l| dot3(model.light.beams[l].wave_vector(), velocity)).collect(),
-            turning: gauge.iter().any(|rate| *rate != 0.0),
-            gauge,
-        }
+        let mut rates = Held::<Rates>::take();
+        let Rates { shifts, path, gauge } = &mut *rates;
+        shifts.clear();
+        shifts.extend(plan.beams.iter().map(|&l| model.doppler_shift(l, kappa)));
+        path.clear();
+        path.extend(plan.beams.iter().map(|&l| dot3(model.light.beams[l].wave_vector(), velocity)));
+        gauge.clear();
+        gauge.extend(model.clusters[plan.cluster].waves.iter().map(|k| dot3(*k, velocity)));
+        Path { turning: gauge.iter().any(|rate| *rate != 0.0), rates }
     }
 
     fn gauge(&self, path: &Path, rates: &mut [f64]) {
-        rates.copy_from_slice(&path.gauge);
+        rates.copy_from_slice(&path.rates.gauge);
     }
 
-    /// Module documentation, # At a point, and along a path through it.
+    /// Module documentation, # At a point, and along a path through it; # Dense terms.
     fn generator(&self, path: &Path, s: f64, h: &mut Mat) {
-        let (plan, n) = (&*self.plan, self.plan.states);
-        let mut scratch = self.scratch.borrow_mut();
-        let scratch = &mut *scratch;
-        self.along(path, Some(s), 1, scratch);
-        h.data.fill(C64::ZERO);
-        for block in &plan.blocks {
-            let (l, lw, r, rw) = (side(&scratch.plain, block.left), side(&scratch.doppler, block.left), side(&scratch.plain, block.right), side(&scratch.doppler, block.right));
-            let c = [l[0] * r[0], l[0] * rw[0], lw[0] * r[0], lw[0] * rw[0]];
-            for flag in 0..4 {
-                let Some(at) = block.merged[flag] else { continue };
-                let values = &self.merged[at..at + block.places.len()];
-                match block.tone {
-                    Some(tone) => {
-                        let scale = c[flag] * scratch.phases[tone];
-                        for (&place, v) in block.places.iter().zip(values) {
-                            h.data[place] += scale * *v;
-                        }
-                    }
-                    None => {
-                        for ((&place, &tone), v) in block.places.iter().zip(&block.tones).zip(values) {
-                            h.data[place] += c[flag] * *v * scratch.phases[tone];
-                        }
-                    }
-                }
+        let (plan, n, point) = (&*self.plan, self.plan.states, &*self.point);
+        let mut scratch = point.scratch.borrow_mut();
+        self.along(path, Some(s), 1, &mut scratch);
+        let Scratch { plain, doppler, phases, turns, sum, .. } = &mut *scratch;
+        sum.clear();
+        sum.resize(2 * plan.padded, 0.0);
+        let (re, im) = sum.split_at_mut(plan.padded);
+        // A block's products of its two components, per flag: made once for its terms.
+        let mut of = (usize::MAX, [C64::ZERO; 4]);
+        for term in &plan.generator {
+            if of.0 != term.block {
+                let block = &plan.blocks[term.block];
+                let (l, lw, r, rw) = (side(plain, block.left)[0], side(doppler, block.left)[0], side(plain, block.right)[0], side(doppler, block.right)[0]);
+                of = (term.block, [l * r, l * rw, lw * r, lw * rw]);
             }
+            let (real, imaginary) = plan.values(term, &point.generator);
+            let span = term.first..term.first + term.len;
+            axpy(of.1[term.flag] * phases[term.tone], real, imaginary, &mut re[span.clone()], &mut im[span]);
+        }
+        for (place, z) in h.data.iter_mut().enumerate() {
+            *z = C64::new(re[place], im[place]);
         }
         if path.turning {
             for x in 0..n {
-                let turn = scratch.turns[x];
+                let turn = turns[x];
                 for y in 0..n {
                     h.data[x * n + y] *= turn;
                     h.data[y * n + x] *= turn.conj();
                 }
-                h.data[x * n + x] += C64::real(path.gauge[x]);
+                h.data[x * n + x] += C64::real(path.rates.gauge[x]);
             }
         }
     }
@@ -1256,7 +1474,7 @@ impl crate::step::Middle for Middle<'_> {
 
     fn work(&self) -> [f64; 3] {
         let node = self.plan.node;
-        let form = node[1] + self.directions.len() as f64 * node[2];
+        let form = node[1] + self.point.directions.len() as f64 * node[2];
         [node[0], form, form]
     }
 }
@@ -1275,7 +1493,7 @@ impl Middle<'_> {
         let plan = &*self.plan;
         let s = on.unwrap_or(0.0);
         scratch.turned.clear();
-        scratch.turned.extend(self.amplitudes.iter().zip(&path.rates).map(|(a, rate)| {
+        scratch.turned.extend(self.point.amplitudes.iter().zip(&path.rates.path).map(|(a, rate)| {
             let phase = if on.is_some() { C64::cis(rate * s) } else { C64::ONE };
             std::array::from_fn(|part| if part < parts { a[part] * phase } else { C64::ZERO })
         }));
@@ -1287,7 +1505,7 @@ impl Middle<'_> {
                 for part in 0..parts {
                     let z = (if scalar.conjugate { scratch.turned[at][part].conj() } else { scratch.turned[at][part] }) * c;
                     plain[part] += z;
-                    doppler[part] += z * path.shifts[at];
+                    doppler[part] += z * path.rates.shifts[at];
                 }
             }
             scratch.plain.push(plain);
@@ -1296,85 +1514,57 @@ impl Middle<'_> {
         scratch.phases.clear();
         scratch.phases.extend(plan.tones.iter().map(|&omega| if omega == 0.0 { C64::ONE } else { C64::cis(omega * (self.t + s)) }));
         scratch.turns.clear();
-        scratch.turns.extend(path.gauge.iter().map(|rate| if on.is_some() && path.turning { C64::cis(-rate * s) } else { C64::ONE }));
+        scratch.turns.extend(path.rates.gauge.iter().map(|rate| if on.is_some() && path.turning { C64::cis(-rate * s) } else { C64::ONE }));
     }
 
     /// Re tr(Ĝ_a(s) ρ) per lab axis a: the gradient of the generator's Hermitian part along a path at the time s from the
     /// middle (`on`), or at the fixed middle point (None: every tone in turn, to `each` with its beat Ω, its entries at their
     /// phase at the middle's time), contracted with a Hermitian ρ on the cluster's states (n × n, row by row) without forming
-    /// it: per block and flag Σ_entries V[x, y] ρ[y, x] and the same of its slopes, times the fields' product and its gradient
-    /// -- of a flag's values and their adjoints, whose forms with a Hermitian ρ are conjugates, one, twice (`Block::weights`).
+    /// it: per dense term Σ_entries V[x, y] ρ[y, x] and the same of its slopes, times the fields' product and its gradient
+    /// -- of a flag's values and their adjoints, whose forms with a Hermitian ρ are conjugates, one, twice (`Term::weight`).
     fn contract(&self, path: &Path, on: Option<f64>, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
-        let (plan, n, q) = (&*self.plan, self.plan.states, self.directions.len());
-        let mut scratch = self.scratch.borrow_mut();
-        let scratch = &mut *scratch;
-        self.along(path, on, 4, scratch);
+        let (plan, n, point) = (&*self.plan, self.plan.states, &*self.point);
+        let mut scratch = point.scratch.borrow_mut();
+        self.along(path, on, 4, &mut scratch);
+        let Scratch { plain, doppler, phases, turns, weights, sums, .. } = &mut *scratch;
         // ρ[y, x] in the Doppler frames along the path, laid out as the entries x ← y are.
-        scratch.weights.clear();
-        scratch.weights.extend((0..n * n).map(|place| rho[(place % n) * n + place / n] * scratch.turns[place / n] * scratch.turns[place % n].conj()));
-        scratch.sums.clear();
-        scratch.sums.resize(if on.is_some() { 1 } else { plan.tones.len() }, [0.0; 3]);
-        scratch.slopes.clear();
-        scratch.slopes.resize(q, C64::ZERO);
-        let (weights, phases, slopes) = (&scratch.weights, &scratch.phases, &mut scratch.slopes);
-        for block in &plan.blocks {
-            if (0..3).all(|flag| block.hermitian[flag].is_none() || block.weights[flag] == 0.0) {
-                continue;
+        weights.clear();
+        weights.resize(2 * plan.padded, 0.0);
+        let (re, im) = weights.split_at_mut(plan.padded);
+        for place in 0..n * n {
+            let w = rho[(place % n) * n + place / n] * turns[place / n] * turns[place % n].conj();
+            (re[place], im[place]) = (w.re, w.im);
+        }
+        sums.clear();
+        sums.resize(if on.is_some() { 1 } else { plan.tones.len() }, [0.0; 3]);
+        let width = point.forms.len();
+        // A block's products of its two components with their gradients, per Hermitian flag: made once for its terms.
+        let mut of = (usize::MAX, [[C64::ZERO; 4]; 3]);
+        for term in &plan.form {
+            if of.0 != term.block {
+                let block = &plan.blocks[term.block];
+                let (l, lw, r, rw) = (side(plain, block.left), side(doppler, block.left), side(plain, block.right), side(doppler, block.right));
+                let product = |l: &[C64; 4], r: &[C64; 4]| -> [C64; 4] { std::array::from_fn(|part| if part == 0 { l[0] * r[0] } else { l[part] * r[0] + l[0] * r[part] }) };
+                of = (term.block, [product(&l, &r), product(&l, &rw), product(&lw, &r)]);
             }
-            let (l, lw, r, rw) = (side(&scratch.plain, block.left), side(&scratch.doppler, block.left), side(&scratch.plain, block.right), side(&scratch.doppler, block.right));
-            let product = |l: &[C64; 4], r: &[C64; 4]| -> [C64; 4] { std::array::from_fn(|part| if part == 0 { l[0] * r[0] } else { l[part] * r[0] + l[0] * r[part] }) };
-            let c = [product(&l, &r), product(&l, &rw), product(&lw, &r)];
-            // The block's tones in turn: all its entries at once along a path, or where they share one.
-            let whole = on.is_some() || block.tone.is_some();
-            let mut tone = block.tone.unwrap_or(0);
-            loop {
-                let mut next = None;
-                for (flag, at) in block.hermitian.iter().enumerate() {
-                    let Some(at) = at.filter(|_| block.weights[flag] > 0.0) else { continue };
-                    let mut value = C64::ZERO;
-                    slopes.fill(C64::ZERO);
-                    match block.tone {
-                        // One tone: its phase is the sums' common factor.
-                        Some(shared) => {
-                            for (i, &place) in block.places.iter().enumerate() {
-                                let w = weights[place];
-                                value += self.values[at + i] * w;
-                                for (f, slope) in slopes.iter_mut().enumerate() {
-                                    *slope += self.slopes[(at + i) * q + f] * w;
-                                }
-                            }
-                            value = value * phases[shared];
-                            slopes.iter_mut().for_each(|slope| *slope = *slope * phases[shared]);
-                        }
-                        None => {
-                            for (i, (&place, &entry)) in block.places.iter().zip(&block.tones).enumerate() {
-                                if !whole && entry != tone {
-                                    if entry > tone && next.is_none_or(|t| entry < t) {
-                                        next = Some(entry);
-                                    }
-                                    continue;
-                                }
-                                let w = weights[place] * phases[entry];
-                                value += self.values[at + i] * w;
-                                for (f, slope) in slopes.iter_mut().enumerate() {
-                                    *slope += self.slopes[(at + i) * q + f] * w;
-                                }
-                            }
-                        }
-                    }
-                    let sum = &mut scratch.sums[if on.is_some() { 0 } else { tone }];
-                    for a in 0..3 {
-                        let along: C64 = slopes.iter().zip(&self.directions).map(|(slope, direction)| *slope * direction[a]).sum();
-                        sum[a] += block.weights[flag] * (c[flag][1 + a] * value + c[flag][0] * along).re;
-                    }
+            let span = term.first..term.first + term.len;
+            let (real, imaginary) = plan.values(term, &point.forms);
+            let value = dot(real, imaginary, &re[span.clone()], &im[span.clone()]) * phases[term.tone];
+            // The value's gradient by its slopes: a constant term has none.
+            let mut gradient = [C64::ZERO; 3];
+            for (f, direction) in point.directions.iter().enumerate().filter(|_| term.near) {
+                let (real, imaginary) = point.slopes[f * width + term.at..f * width + term.at + 2 * term.len].split_at(term.len);
+                let slope = dot(real, imaginary, &re[span.clone()], &im[span.clone()]) * phases[term.tone];
+                for a in 0..3 {
+                    gradient[a] += slope * direction[a];
                 }
-                match next.filter(|_| !whole) {
-                    Some(t) => tone = t,
-                    None => break,
-                }
+            }
+            let (c, sum) = (&of.1[term.flag], &mut sums[if on.is_some() { 0 } else { term.tone }]);
+            for a in 0..3 {
+                sum[a] += term.weight * (c[1 + a] * value + c[0] * gradient[a]).re;
             }
         }
-        for (m, sum) in scratch.sums.iter().enumerate() {
+        for (m, sum) in sums.iter().enumerate() {
             each(if on.is_some() { 0.0 } else { plan.tones[m] }, *sum);
         }
     }

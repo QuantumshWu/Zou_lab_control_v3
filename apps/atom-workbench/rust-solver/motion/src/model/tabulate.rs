@@ -20,6 +20,13 @@
 //! static forms depend on the field alone, far.rs); each unit's field on its first beam, a = √(I_u N_u)/κ₁. The coordinates that
 //! are no axes take their values at the focus.
 //!
+//! # A node's reals
+//! The near forms, their real and imaginary parts in the layout's order: what the photons, the readout, the potential and the
+//! refinement read. And after them the middle's own (assemble.rs, # Dense terms): the Hermitian forms laid where the
+//! generator's dense terms and the forms' take them (`Plan::lay`). That part is linear in the forms, so its interpolant is
+//! the interpolated forms' own layout, number for number: a middle takes it in one pass over the stencil's rows, each real
+//! straight to its place (`Model::near_point`).
+//!
 //! # Axes
 //! A coordinate's a-priori weight is how far it moves the cluster's lines over the atoms' reach, in pole half-widths: for a chart
 //! coordinate the largest change of E_e − E_b (e ← b a carrier's coupling from the cluster's ground states) over its first grid's
@@ -77,7 +84,7 @@
 //! asked, 4^D (1 + D) each on D axes (4^D for a value alone), its chain rule (3 D each) and the coordinates (each frequency's
 //! field and chart from its beams).
 
-use super::assemble::{NearValues, Plan};
+use super::assemble::{sized, NearValues, Plan, Point};
 use super::reach::Region;
 use super::{Lights, Lit, Model, Reach, Sample, UnitError};
 use crate::field::{range, Amplitude, Chart};
@@ -118,7 +125,7 @@ pub struct Layout {
     plan: Arc<Plan>,
 }
 
-/// A near table: its layout and the table of the near forms (real and imaginary parts, in the layout's order).
+/// A near table: its layout and the table of its nodes' reals (module documentation, # A node's reals).
 #[derive(Clone, Debug)]
 pub struct NearTable {
     pub layout: Layout,
@@ -129,6 +136,13 @@ impl NearTable {
     /// Its axes: the first coordinates.
     pub fn axes(&self) -> usize {
         self.table.axes().len()
+    }
+}
+
+impl Layout {
+    /// A node's reals (module documentation, # A node's reals).
+    fn width(&self) -> usize {
+        2 * self.plan.near.len() + self.plan.generator_start.len() + self.plan.form_start.len()
     }
 }
 
@@ -208,21 +222,30 @@ impl Model {
         out
     }
 
-    /// Coordinates' values at a point and their gradients (module documentation, # At a point), and the complex multiply-adds.
-    fn coordinates_at(&self, coordinates: &[Coordinate], polarizations: &[Vec<Polarization>], amplitudes: &[Amplitude]) -> (Vec<f64>, Vec<[f64; 3]>, f64) {
-        let mut charts: Vec<Option<Chart>> = vec![None; self.light.frequencies.len()];
-        let (mut values, mut gradients, mut work) = (vec![], vec![], 0.0);
-        for c in coordinates {
+    /// Coordinates' values at a point and their gradients (module documentation, # At a point) into `values` and `gradients`,
+    /// and the complex multiply-adds.
+    fn coordinates_at(&self, coordinates: &[Coordinate], polarizations: &[Vec<Polarization>], amplitudes: &[Amplitude], values: &mut [f64], gradients: &mut [[f64; 3]]) -> f64 {
+        let mut work = 0.0;
+        // The chart of the frequency last read: a frequency's coordinates take one chart.
+        let mut held: Option<(usize, Chart)> = None;
+        for (i, c) in coordinates.iter().enumerate() {
             match *c {
                 Coordinate::Chart { frequency, index } => {
-                    let chart = charts[frequency].get_or_insert_with(|| {
-                        let f = &self.light.frequencies[frequency];
-                        // The field and its derivatives from each beam (13 parts of 3 components), its chart from the components.
-                        work += (f.beams.len() * 39 + 6 * f.rank() * f.rank()) as f64;
-                        f.chart(&f.field(amplitudes))
-                    });
-                    values.push(chart.value[index]);
-                    gradients.push(chart.gradient[index]);
+                    let chart = match held {
+                        Some((of, chart)) if of == frequency => chart,
+                        _ => {
+                            let f = &self.light.frequencies[frequency];
+                            // The field and its derivatives from each beam (13 parts of 3 components), its chart from the
+                            // components: counted once a frequency.
+                            if !coordinates[..i].iter().any(|c| matches!(c, Coordinate::Chart { frequency: other, .. } if *other == frequency)) {
+                                work += (f.beams.len() * 39 + 6 * f.rank() * f.rank()) as f64;
+                            }
+                            f.chart(&f.field(amplitudes))
+                        }
+                    };
+                    held = Some((frequency, chart));
+                    values[i] = chart.value[index];
+                    gradients[i] = chart.gradient[index];
                 }
                 Coordinate::Unit { carrier, unit } => {
                     let p = &polarizations[carrier][unit];
@@ -236,12 +259,12 @@ impl Model {
                         }
                     }
                     work += (4 * p.beams.len() + 4) as f64;
-                    values.push((f.norm_sqr() / p.norm).min(1.0));
-                    gradients.push(std::array::from_fn(|i| 2.0 * (f.conj() * df[i]).re / p.norm));
+                    values[i] = (f.norm_sqr() / p.norm).min(1.0);
+                    gradients[i] = std::array::from_fn(|a| 2.0 * (f.conj() * df[a]).re / p.norm);
                 }
             }
         }
-        (values, gradients, work)
+        work
     }
 
     /// The light at coordinate values x (module documentation, # A node): the far beams' amplitudes from each lit frequency's chart,
@@ -278,25 +301,30 @@ impl Model {
         (far, near)
     }
 
-    /// The near forms at coordinate values x into a node's reals, and the complex multiply-adds that made them.
+    /// The near forms at coordinate values x into a node's reals (module documentation, # A node's reals), and the complex
+    /// multiply-adds that made them.
     fn node(&self, layout: &Layout, x: &[f64], out: &mut [f64]) -> f64 {
-        let lights = &layout.lights;
+        let (lights, plan) = (&layout.lights, &layout.plan);
         let (_, near) = self.light_at(lights, &layout.coordinates, &layout.polarizations, x);
         let coherent = self.coherent_dressing();
         let h = self.far_hamiltonian(&near, lights, 0, &coherent);
         let r = self.eliminate(layout.cluster, &h, &near, lights, 0, &coherent);
         let energies = vec![(0..STATES).map(|s| h[0][(s, s)].re).collect::<Vec<f64>>()];
-        let mut values = vec![C64::ZERO; layout.plan.near.len()];
-        let work = self.forms(&layout.plan, &r, &energies, &mut values);
-        for (pair, z) in out.chunks_mut(2).zip(&values) {
+        let mut values = vec![C64::ZERO; plan.near.len()];
+        let work = self.forms(plan, &r, &energies, &mut values);
+        let (forms, point) = out.split_at_mut(2 * values.len());
+        for (pair, z) in forms.chunks_mut(2).zip(&values) {
             pair.copy_from_slice(&[z.re, z.im]);
         }
+        point.fill(0.0);
+        let (generator, forms) = point.split_at_mut(plan.generator_start.len());
+        plan.lay(|at| values[at], Some(generator), forms);
         r.work + self.far_work(lights, 0, &coherent) + work
     }
 
     /// The complex multiply-adds of one node (the same at every node: the elimination's loops do not depend on the values).
     fn node_work(&self, layout: &Layout) -> f64 {
-        let mut out = vec![0.0; 2 * layout.plan.near.len()];
+        let mut out = vec![0.0; layout.width()];
         self.node(layout, &layout.focus, &mut out)
     }
 
@@ -317,7 +345,7 @@ impl Model {
             self.node(layout, &x, out);
         };
         match from {
-            None => Table::build(grid, 2 * layout.plan.near.len(), most, &f).ok(),
+            None => Table::build(grid, layout.width(), most, &f).ok(),
             Some(t) => t.refine(grid, most, &f).ok(),
         }
     }
@@ -444,7 +472,8 @@ impl Model {
         let polarizations: Vec<Vec<Polarization>> = (0..self.carriers.len()).map(|d| if coherent[d] { vec![] } else { self.polarizations(d) }).collect();
         let all = self.coordinates(lights, &polarizations);
         let focus_amplitudes = self.light.amplitudes([0.0; 3]);
-        let (focus, _, _) = self.coordinates_at(&all, &polarizations, &focus_amplitudes);
+        let mut focus = vec![0.0; all.len()];
+        self.coordinates_at(&all, &polarizations, &focus_amplitudes, &mut focus, &mut vec![[0.0; 3]; all.len()]);
         let mut weights = self.weights(cluster, lights, &all, &polarizations, &focus);
         // An intensity's weight per unit intensity times the bound of its distance from the focus value over the reach.
         let target = crate::units::POPULATION_TARGET;
@@ -477,7 +506,7 @@ impl Model {
             }
             let d = axes.len() + 1;
             let first: Vec<Axis> = axes.iter().chain(std::iter::once(&c)).map(|&a| first_axis(all[a])).collect();
-            if (4usize.pow(d as u32) * (1 + d) * width) as f64 >= exact || Table::nodes(&first) > most {
+            if d > crate::table::MOST_AXES || (4usize.pow(d as u32) * (1 + d) * width) as f64 >= exact || Table::nodes(&first) > most {
                 break;
             }
             axes.push(c);
@@ -599,7 +628,8 @@ impl Model {
     /// 1): their values and, to first order, their slopes along the axes with the coordinates' gradients.
     pub(crate) fn near_tabulated(&self, table: &NearTable, amplitudes: &[Amplitude], sections: &[(Range<usize>, usize)]) -> NearValues {
         let d = table.axes();
-        let (x, gradients, mut work) = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, amplitudes);
+        let (mut x, mut gradients) = (vec![0.0; d], vec![[0.0; 3]; d]);
+        let mut work = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, amplitudes, &mut x, &mut gradients);
         let len = sections.iter().map(|s| s.0.end).max().unwrap_or(0);
         let order = sections.iter().map(|s| s.1).max().unwrap_or(0);
         let mut data = vec![C64::ZERO; (1 + if order >= 1 { d } else { 0 }) * len];
@@ -621,6 +651,34 @@ impl Model {
         NearValues { len, order, data, directions: Some(gradients), work }
     }
 
+    /// A middle's near terms' values at a point from a table (module documentation, # At a point; assemble.rs `Point`), and
+    /// their counted work: the table's interpolant of the generator's values and of the forms' with their slopes along the
+    /// axes, each straight to its place onto its constant part, in one pass over the stencil's rows; then the decay, the
+    /// product of the jumps there. Counted as the forms' interpolation is (the Hermitian ones to first order, the jumps to
+    /// order 0).
+    pub(crate) fn near_point(&self, table: &NearTable, point: &mut Point) -> f64 {
+        let (d, plan) = (table.axes(), &table.layout.plan);
+        sized(&mut point.coordinates, d);
+        sized(&mut point.directions, d);
+        let mut work = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, &point.beams, &mut point.coordinates, &mut point.directions);
+        let (first, generator, forms) = (2 * plan.near.len(), plan.generator_start.len(), plan.form_start.len());
+        sized(&mut point.generator, generator);
+        sized(&mut point.forms, forms);
+        sized(&mut point.slopes, d * forms);
+        table.table.eval_onto(&point.coordinates, first, &plan.generator_start, &mut point.generator, None);
+        table.table.eval_onto(&point.coordinates, first + generator, &plan.form_start, &mut point.forms, Some(&mut point.slopes));
+        let (jumping, len) = (plan.near.jumping(), plan.near.len());
+        sized(&mut point.jumps, 2 * jumping.len());
+        table.table.eval_range(&point.coordinates, 2 * jumping.start, &mut point.jumps, None);
+        let Point { jumps, sums, generator, .. } = point;
+        let jump = |at: usize| if at < len { C64::new(jumps[2 * (at - jumping.start)], jumps[2 * (at - jumping.start) + 1]) + plan.bare(at) } else { plan.constants[at - len] };
+        plan.decay(jump, sums, generator);
+        for (entries, order) in [(plan.near.hermitian(), 1), (jumping, 0)] {
+            work += (4usize.pow(d as u32) * (1 + if order >= 1 { d } else { 0 }) * 2 * entries.len()) as f64 / crate::decide::COMPLEX;
+        }
+        work
+    }
+
     /// The tables' error reads at samples (module documentation; SPEC §2.3, §5.4): per table, per axis the read of its
     /// interpolation error (crate::table `Table::axis_error`) and the whole error (the exact elimination against the table's), each
     /// as the error it makes of the sample's generator (`form_error`).
@@ -640,7 +698,8 @@ impl Model {
                         continue;
                     }
                     let amplitudes = self.light.amplitudes(sample.at.r);
-                    let (x, _, _) = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, &amplitudes);
+                    let mut x = vec![0.0; d];
+                    self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, &amplitudes, &mut x, &mut vec![[0.0; 3]; d]);
                     let tabulated = self.near_tabulated(table, &amplitudes, &[(0..len, 1)]);
                     for (f, read) in axes.iter_mut().enumerate() {
                         // The axis' read of the reals and of their slopes, on the table's forms.
@@ -670,7 +729,7 @@ impl Model {
     fn form_error(&self, sample: &Sample, plan: &Arc<Plan>, reference: &NearValues, other: &NearValues, amplitudes: &[Amplitude], thermal: f64) -> UnitError {
         let n = self.clusters[sample.cluster].states.len();
         let action = |near: Option<&NearValues>| -> Vec<C64> {
-            let middle = self.middle_of(plan, sample.at.t, plan.amplitudes(amplitudes), near);
+            let middle = self.middle_of(plan, sample.at.t, amplitudes, near);
             let mut total = Mat::zeros(n, n);
             crate::step::Middle::generator(&middle, &crate::step::Middle::path(&middle, sample.at.kappa, [0.0; 3]), 0.0, &mut total);
             total.apply(&sample.psi)

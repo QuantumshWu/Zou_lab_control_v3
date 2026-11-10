@@ -527,7 +527,7 @@ impl Model {
     }
     /// The loss test with the near light from its tables where they serve.
     pub(crate) fn lost_with(&self, cluster: usize, at: &Point, psi: &[C64], tables: Option<&tabulate::Tables>) -> bool {
-        self.light.outside(&self.light.amplitudes(at.r))
+        self.light.outside(at.r)
             && self.energy_with(cluster, at, psi, tables) > self.asymptote(&self.ground_populations(cluster, psi), &self.running())
     }
     /// p(ψ), the ground populations of a cluster's state (SPEC §1.3): those it holds, and those its explicit excited states

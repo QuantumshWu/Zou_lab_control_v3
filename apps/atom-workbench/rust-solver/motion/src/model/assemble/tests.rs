@@ -440,3 +440,45 @@ fn the_tones_are_the_held_force_s_even_part() {
     }
     assert!(most > 1, "a cluster that beats at rest");
 }
+
+/// A table's middle (tabulate.rs `Model::near_point`: the table's interpolant of a point's values, each straight to its
+/// place) is the middle of the table's forms at the point (`Model::near_tabulated`, laid by `Point::formed`): the same reals
+/// under the same weights in the same order, so the generator and the force's form are the same numbers, bit for bit, and
+/// so is the counted work. On reference scenes' models with drives folded at the atom, their tables made over the reach.
+#[test]
+fn a_table_s_middle_is_the_middle_of_its_forms() {
+    let (mut tables_met, mut axes) = (0, 0);
+    for (index, name) in ["R3_DOPPLER", "R4_TW1", "R5_PUMP"].into_iter().enumerate() {
+        let (request, model) = (scene(name), model(name, &others, &|_| false));
+        let mut stream = Stream::new(2, Purpose::Initial, index as u64, 0);
+        let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+        let p: [f64; GROUND] = std::array::from_fn(|b| if b == state { 1.0 } else { 0.0 });
+        let trap = model.trap(&p, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
+        let tables = model.tabulate(&reach, 1 << 12);
+        let lights = model.running();
+        for cluster in 0..model.clusters.len() {
+            let Some(table) = tables.of(cluster, &lights) else { continue };
+            tables_met += 1;
+            axes += table.axes();
+            let (plan, n) = (model.plan(cluster, &lights), model.clusters[cluster].states.len());
+            for _ in 0..4 {
+                let (r, t, kappa, velocity, times) = drawn(&model, &mut stream);
+                let rho = hermitian(n, &mut stream);
+                let amplitudes = model.light.amplitudes(r);
+                let near = model.near_tabulated(table, &amplitudes, &[(plan.near.hermitian(), 1), (plan.near.jumping(), 0)]);
+                let (ours, theirs) = (model.middle(&plan, r, t, Some(table)), model.middle_of(&plan, t, &amplitudes, Some(&near)));
+                assert_eq!(ours.work, theirs.work, "{name}, cluster {cluster}: the counted work");
+                let (path, other) = (ours.path(kappa, velocity), theirs.path(kappa, velocity));
+                for s in times {
+                    let (mut h, mut g) = (Mat::zeros(n, n), Mat::zeros(n, n));
+                    ours.generator(&path, s, &mut h);
+                    theirs.generator(&other, s, &mut g);
+                    assert!(h == g, "{name}, cluster {cluster}, s {s}: the generators differ");
+                    assert_eq!(ours.force(&path, s, &rho), theirs.force(&other, s, &rho), "{name}, cluster {cluster}, s {s}: the force's forms");
+                }
+            }
+        }
+    }
+    assert!(tables_met > 0 && axes > 0, "tables met ({tables_met}) with axes ({axes})");
+}

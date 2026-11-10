@@ -125,11 +125,11 @@ pub struct FieldAt {
 }
 
 /// A frequency's chart at a point (module documentation, # The chart): the 2r − 1 coordinates (I, α₁, φ₁, α₂, φ₂)
-/// and their gradients (`gradient[c][a]` = ∂_a s_c).
-#[derive(Clone, Debug, PartialEq)]
+/// and their gradients (`gradient[c][a]` = ∂_a s_c), held in place: those beyond a field's 2r − 1 are zero.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Chart {
-    pub value: Vec<f64>,
-    pub gradient: Vec<[f64; 3]>,
+    pub value: [f64; 5],
+    pub gradient: [[f64; 3]; 5],
 }
 
 /// The range of the chart's coordinate c and whether it is periodic: the intensity [0, 1], an angle [0, π/2], a
@@ -235,11 +235,12 @@ impl Frequency {
         f
     }
     /// Its field's components on the basis, e_k = u_k†E, and their gradients (`[k][a]` = ∂_a e_k).
-    pub fn components(&self, field: &FieldAt) -> (Vec<C64>, Vec<[C64; 3]>) {
+    pub fn components(&self, field: &FieldAt) -> ([C64; 3], [[C64; 3]; 3]) {
         let project = |v: &[C64; 3], u: &[C64; 3]| (0..3).map(|q| u[q].conj() * v[q]).sum::<C64>();
+        let of = |k: usize| self.basis.get(k);
         (
-            self.basis.iter().map(|u| project(&field.value, u)).collect(),
-            self.basis.iter().map(|u| std::array::from_fn(|a| project(&field.gradient[a], u))).collect(),
+            std::array::from_fn(|k| of(k).map_or(C64::ZERO, |u| project(&field.value, u))),
+            std::array::from_fn(|k| of(k).map_or([C64::ZERO; 3], |u| std::array::from_fn(|a| project(&field.gradient[a], u)))),
         )
     }
     /// Its chart at a point, from its field there (module documentation, # The chart): I = min(Σ_k |e_k|²/N, 1),
@@ -250,26 +251,27 @@ impl Frequency {
     pub fn chart(&self, field: &FieldAt) -> Chart {
         let (e, de) = self.components(field);
         let (r, o, n) = (self.rank(), &self.order, self.norm);
-        let size: Vec<f64> = e.iter().map(|z| z.norm_sqr()).collect();
+        let size: [f64; 3] = e.map(|z| z.norm_sqr());
         // Re and Im of e_k* ∂_a e_k.
-        let dot: Vec<[f64; 3]> = (0..r).map(|k| std::array::from_fn(|a| (e[k].conj() * de[k][a]).re)).collect();
-        let turn: Vec<[f64; 3]> = (0..r).map(|k| std::array::from_fn(|a| (e[k].conj() * de[k][a]).im)).collect();
+        let dot: [[f64; 3]; 3] = std::array::from_fn(|k| std::array::from_fn(|a| (e[k].conj() * de[k][a]).re));
+        let turn: [[f64; 3]; 3] = std::array::from_fn(|k| std::array::from_fn(|a| (e[k].conj() * de[k][a]).im));
         let over = |x: f64, y: f64| if y > 0.0 { x / y } else { 0.0 };
-        let mut value = vec![(size.iter().sum::<f64>() / n).min(1.0)];
-        let mut gradient = vec![std::array::from_fn(|a| (0..r).map(|k| 2.0 * dot[k][a]).sum::<f64>() / n)];
+        let mut chart = Chart { value: [0.0; 5], gradient: [[0.0; 3]; 5] };
+        chart.value[0] = (size[..r].iter().sum::<f64>() / n).min(1.0);
+        chart.gradient[0] = std::array::from_fn(|a| (0..r).map(|k| 2.0 * dot[k][a]).sum::<f64>() / n);
         for i in 1..r {
             let (first, rest) = (size[o[i - 1]].sqrt(), o[i..].iter().map(|&j| size[j]).sum::<f64>().sqrt());
-            value.push(rest.atan2(first));
-            gradient.push(std::array::from_fn(|a| {
+            chart.value[2 * i - 1] = rest.atan2(first);
+            chart.gradient[2 * i - 1] = std::array::from_fn(|a| {
                 let d_rest = over(o[i..].iter().map(|&j| dot[j][a]).sum::<f64>(), rest);
                 let d_first = over(dot[o[i - 1]][a], first);
                 over(first * d_rest - rest * d_first, first * first + rest * rest)
-            }));
+            });
             let z = e[o[i]] * e[o[0]].conj();
-            value.push(if z == C64::ZERO { 0.0 } else { z.arg() });
-            gradient.push(std::array::from_fn(|a| over(turn[o[i]][a], size[o[i]]) - over(turn[o[0]][a], size[o[0]])));
+            chart.value[2 * i] = if z == C64::ZERO { 0.0 } else { z.arg() };
+            chart.gradient[2 * i] = std::array::from_fn(|a| over(turn[o[i]][a], size[o[i]]) - over(turn[o[0]][a], size[o[0]]));
         }
-        Chart { value, gradient }
+        chart
     }
     /// The field E (V/m, spherical components) at chart coordinates s: e = √(IN) w, w_{o₀} = cos α₁,
     /// w_{o_i} = sin α₁ ⋯ sin α_i cos α_{i+1} e^{iφ_i} (the last without its cosine), E = Σ_k e_k u_k -- a table node's
@@ -327,14 +329,15 @@ impl Light {
     pub fn amplitudes(&self, r: V3) -> Vec<Amplitude> {
         self.beams.iter().map(|b| b.amplitude(r)).collect()
     }
-    /// Whether a point is outside the trap's region: every focused beam's intensity there below `REGION_INTENSITY` of
-    /// its focus value (module documentation, # The region).
-    pub fn outside(&self, amplitudes: &[Amplitude]) -> bool {
-        self.beams
-            .iter()
-            .zip(amplitudes)
-            .filter(|(b, _)| b.waist.is_some())
-            .all(|(_, a)| a.value.norm_sqr() < crate::units::REGION_INTENSITY)
+    /// The same into a caller's vector, kept from one point to the next.
+    pub fn amplitudes_into(&self, r: V3, out: &mut Vec<Amplitude>) {
+        out.clear();
+        out.extend(self.beams.iter().map(|b| b.amplitude(r)));
+    }
+    /// Whether the point r is outside the trap's region: every focused beam's intensity there below `REGION_INTENSITY`
+    /// of its focus value (module documentation, # The region).
+    pub fn outside(&self, r: V3) -> bool {
+        self.beams.iter().filter(|b| b.waist.is_some()).all(|b| b.amplitude(r).value.norm_sqr() < crate::units::REGION_INTENSITY)
     }
 }
 
@@ -562,12 +565,12 @@ mod tests {
         let e = [C64::ZERO, C64::real(1e5), C64::ZERO];
         let probe = ([1.0, 0.0, 0.0], None, 0, [C64::real(10.0), C64::ZERO, C64::ZERO]);
         let light = light_of(&[([0.0, 0.0, 1.0], Some(w), -4, e), probe]);
-        let outside = |r: V3| light.outside(&light.amplitudes(r));
+        let outside = |r: V3| light.outside(r);
         let (axial, radial) = (zr * (1.0 / REGION_INTENSITY - 1.0).sqrt(), w * ((1.0 / REGION_INTENSITY).ln() / 2.0).sqrt());
         let margin = 1.0 + 1e-9;
         assert!(!outside([0.0, 0.0, axial / margin]) && outside([0.0, 0.0, axial * margin]));
         assert!(!outside([radial / margin, 0.0, 0.0]) && outside([0.0, radial * margin, 0.0]));
         let crossed = light_of(&[([0.0, 0.0, 1.0], Some(w), -4, e), ([1.0, 0.0, 0.0], Some(w), 2, e), probe]);
-        assert!(!crossed.outside(&crossed.amplitudes([3.0, 0.0, 0.0])) && crossed.outside(&crossed.amplitudes([0.0, 3.0, 0.0])));
+        assert!(!crossed.outside([3.0, 0.0, 0.0]) && crossed.outside([0.0, 3.0, 0.0]));
     }
 }

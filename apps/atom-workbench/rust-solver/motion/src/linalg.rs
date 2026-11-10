@@ -188,6 +188,34 @@ impl Sum for C64 {
     }
 }
 
+/// The reals of one vector of the split kernels' sums (`axpy`, `dot`): their vectors' lengths are multiples of it.
+pub const LANES: usize = 4;
+
+/// y ← y + c x on complex vectors given by their real parts and their imaginary parts apart (x: `real`, `imaginary`;
+/// y: `re`, `im`): element by element, none depending on another -- the compiler's vector loop.
+pub fn axpy(c: C64, real: &[f64], imaginary: &[f64], re: &mut [f64], im: &mut [f64]) {
+    let n = re.len();
+    let (real, imaginary, im) = (&real[..n], &imaginary[..n], &mut im[..n]);
+    for i in 0..n {
+        re[i] += c.re * real[i] - c.im * imaginary[i];
+        im[i] += c.re * imaginary[i] + c.im * real[i];
+    }
+}
+
+/// Σ_i x_i y_i (no conjugate) of two complex vectors given by their real parts and their imaginary parts apart, whole
+/// vectors of `LANES`: one partial sum a lane, so the lanes add side by side.
+pub fn dot(xr: &[f64], xi: &[f64], yr: &[f64], yi: &[f64]) -> C64 {
+    debug_assert!(xr.len() % LANES == 0 && [xi.len(), yr.len(), yi.len()] == [xr.len(); 3]);
+    let (mut re, mut im) = ([0.0; LANES], [0.0; LANES]);
+    for (((xr, xi), yr), yi) in xr.chunks_exact(LANES).zip(xi.chunks_exact(LANES)).zip(yr.chunks_exact(LANES)).zip(yi.chunks_exact(LANES)) {
+        for l in 0..LANES {
+            re[l] += xr[l] * yr[l] - xi[l] * yi[l];
+            im[l] += xr[l] * yi[l] + xi[l] * yr[l];
+        }
+    }
+    C64::new((re[0] + re[1]) + (re[2] + re[3]), (im[0] + im[1]) + (im[2] + im[3]))
+}
+
 /// ⟨a, b⟩ = Σ_i a_i* b_i.
 pub fn inner(a: &[C64], b: &[C64]) -> C64 {
     a.iter().zip(b).map(|(x, y)| x.conj() * *y).sum()

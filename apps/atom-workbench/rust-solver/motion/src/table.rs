@@ -38,6 +38,12 @@ pub const VALUE_ORDER: i32 = 3;
 pub const GRADIENT_ORDER: i32 = 2;
 /// A cubic's stencil: four nodes per axis.
 const STENCIL: usize = 4;
+/// The most axes of a table: a lookup holds its axes' stencils in place, and at 4^D rows a point a table of more axes
+/// is beyond any work bound long before.
+pub const MOST_AXES: usize = 6;
+/// The reals a lookup takes at a time through its rows, its value and its slopes together: 2 kB a row -- the four rows
+/// and the sums stay in the first-level cache.
+const BLOCK: usize = 256;
 
 /// One axis of a table: its range [lo, hi] (a periodic axis's period is hi − lo, its node n the node 0 again), whether
 /// it is periodic, and its node count.
@@ -51,6 +57,7 @@ pub struct Axis {
 
 /// One axis's stencil at a coordinate: its four nodes (indices on the axis), their weights in the value and in its
 /// derivative along the coordinate.
+#[derive(Clone, Copy)]
 struct Stencil {
     nodes: [usize; STENCIL],
     value: [f64; STENCIL],
@@ -200,6 +207,7 @@ impl Table {
     /// A table of these axes with no values yet.
     fn empty(axes: Vec<Axis>, width: usize) -> Table {
         assert!(width > 0, "a table holds at least one value per node");
+        assert!(axes.len() <= MOST_AXES, "a table of {} axes (at most {MOST_AXES})", axes.len());
         for a in &axes {
             assert!(a.nodes >= STENCIL && a.hi > a.lo, "an axis of {} nodes on [{}, {}]", a.nodes, a.lo, a.hi);
         }
@@ -236,12 +244,17 @@ impl Table {
     /// The interpolant at s: `value` (width) and, when asked, `gradient` (axes × width, axis-major: ∂I/∂s_f); s on the
     /// axes' ranges (`Axis::place`).
     pub fn eval(&self, s: &[f64], value: &mut [f64], gradient: Option<&mut [f64]>) {
-        self.interpolate(s, None, 0, value, gradient);
+        self.interpolate(s, None, 0, None, value, gradient);
     }
     /// The interpolant at s of the reals from `first` on, as many as `value` holds: `value` and, when asked, `gradient`
     /// (axes × that many, axis-major).
     pub fn eval_range(&self, s: &[f64], first: usize, value: &mut [f64], gradient: Option<&mut [f64]>) {
-        self.interpolate(s, None, first, value, gradient);
+        self.interpolate(s, None, first, None, value, gradient);
+    }
+    /// `eval_range` onto a start: `value` = `start` + the interpolant -- what a caller adds its constants to is made
+    /// in the interpolation's own pass over the rows.
+    pub fn eval_onto(&self, s: &[f64], first: usize, start: &[f64], value: &mut [f64], gradient: Option<&mut [f64]>) {
+        self.interpolate(s, None, first, Some(start), value, gradient);
     }
     /// The read of axis f's error at s (module documentation, # The error read of an axis): the value
     /// (I_f − I)/(2³ − 1) into `value` and the gradient (∇I_f − ∇I)/(2² − 1) into `gradient` (axes × width), I_f the
@@ -250,8 +263,8 @@ impl Table {
         assert!(self.axes[f].readable(), "axis {f} of {} nodes has no coarser grid to read against", self.axes[f].nodes);
         let (w, d) = (self.width, self.axes.len());
         let (mut fine, mut slope) = (vec![0.0; w], vec![0.0; d * w]);
-        self.interpolate(s, None, 0, &mut fine, Some(&mut slope));
-        self.interpolate(s, Some(f), 0, value, Some(gradient));
+        self.interpolate(s, None, 0, None, &mut fine, Some(&mut slope));
+        self.interpolate(s, Some(f), 0, None, value, Some(gradient));
         let (p, q) = ((1 << VALUE_ORDER) - 1, (1 << GRADIENT_ORDER) - 1);
         for (x, y) in value.iter_mut().zip(&fine) {
             *x = (*x - y) / p as f64;
@@ -261,55 +274,91 @@ impl Table {
         }
     }
     /// The tensor-product interpolant at s of the node's reals from `first` on (as many as `value` holds), axis `coarse`
-    /// (if any) on its grid of every other node: Σ over the 4^D stencil nodes of the product of the axes' weights times
-    /// the node's values; the gradient's axis f takes its slope weights in place of its value weights.
-    fn interpolate(&self, s: &[f64], coarse: Option<usize>, first: usize, value: &mut [f64], mut gradient: Option<&mut [f64]>) {
+    /// (if any) on its grid of every other node: `start` (where given) + Σ over the 4^D stencil nodes of the product of
+    /// the axes' weights times the node's values; the gradient's axis f takes its slope weights in place of its value
+    /// weights. Nothing is allocated and nothing is written before it is known: the last axis' four nodes are one sum
+    /// (`blend`), and each stretch of `BLOCK` reals takes its value and its slopes together, so the rows pass through
+    /// the cache once.
+    fn interpolate(&self, s: &[f64], coarse: Option<usize>, first: usize, start: Option<&[f64]>, value: &mut [f64], mut gradient: Option<&mut [f64]>) {
         let (w, d) = (value.len(), self.axes.len());
-        assert!(s.len() == d && first + w <= self.width && gradient.as_ref().is_none_or(|g| g.len() == d * w));
-        let stencils: Vec<Stencil> = self
-            .axes
-            .iter()
-            .enumerate()
-            .map(|(f, a)| {
-                if coarse == Some(f) {
-                    let mut st = a.coarser().stencil(s[f]);
-                    st.nodes = st.nodes.map(|i| 2 * i);
-                    st
-                } else {
-                    a.stencil(s[f])
-                }
-            })
-            .collect();
-        let mut strides = vec![1; d];
-        for f in (0..d.saturating_sub(1)).rev() {
+        assert!(s.len() == d && first + w <= self.width && gradient.as_ref().is_none_or(|g| g.len() == d * w) && start.is_none_or(|b| b.len() == w));
+        if d == 0 {
+            // No axis: the one node's reals.
+            let row = &self.values[first..first + w];
+            match start {
+                Some(base) => value.iter_mut().zip(base).zip(row).for_each(|((x, b), y)| *x = b + y),
+                None => value.copy_from_slice(row),
+            }
+            return;
+        }
+        let mut stencils = [Stencil { nodes: [0; STENCIL], value: [0.0; STENCIL], slope: [0.0; STENCIL] }; MOST_AXES];
+        let mut strides = [1; MOST_AXES];
+        for f in 0..d {
+            stencils[f] = if coarse == Some(f) {
+                let mut st = self.axes[f].coarser().stencil(s[f]);
+                st.nodes = st.nodes.map(|i| 2 * i);
+                st
+            } else {
+                self.axes[f].stencil(s[f])
+            };
+        }
+        for f in (0..d - 1).rev() {
             strides[f] = strides[f + 1] * self.axes[f + 1].nodes;
         }
-        value.fill(0.0);
-        if let Some(g) = gradient.as_deref_mut() {
-            g.fill(0.0);
-        }
-        let mut digits = vec![0; d];
-        for combination in 0..STENCIL.pow(d as u32) {
-            let mut c = combination;
-            for digit in digits.iter_mut().rev() {
-                *digit = c % STENCIL;
-                c /= STENCIL;
-            }
-            let node: usize = (0..d).map(|f| stencils[f].nodes[digits[f]] * strides[f]).sum();
-            let row = &self.values[node * self.width + first..node * self.width + first + w];
-            let weight: f64 = (0..d).map(|f| stencils[f].value[digits[f]]).product();
-            for (x, y) in value.iter_mut().zip(row) {
-                *x += weight * y;
-            }
-            if let Some(g) = gradient.as_deref_mut() {
-                for f in 0..d {
-                    let slope: f64 = (0..d).map(|e| if e == f { stencils[e].slope[digits[e]] } else { stencils[e].value[digits[e]] }).product();
-                    for (x, y) in g[f * w..(f + 1) * w].iter_mut().zip(row) {
-                        *x += slope * y;
+        let last = &stencils[d - 1];
+        let mut at = 0;
+        while at < w {
+            let stretch = at..(at + BLOCK).min(w);
+            // The combinations of the axes before the last; the last's four nodes are one sum each.
+            for combination in 0..STENCIL.pow(d as u32 - 1) {
+                let digit = |f: usize| (combination / STENCIL.pow((d - 2 - f) as u32)) % STENCIL;
+                let node: usize = (0..d - 1).map(|f| stencils[f].nodes[digit(f)] * strides[f]).sum();
+                let rows: [&[f64]; STENCIL] = std::array::from_fn(|j| {
+                    let row = (node + last.nodes[j]) * self.width + first;
+                    &self.values[row + stretch.start..row + stretch.end]
+                });
+                // The weights of the axes before the last, axis `slope` (if any) by its slope weights.
+                let before = |slope: Option<usize>| -> f64 { (0..d - 1).map(|f| if slope == Some(f) { stencils[f].slope[digit(f)] } else { stencils[f].value[digit(f)] }).product() };
+                let onto = match (combination, start) {
+                    (0, Some(base)) => Onto::Start(&base[stretch.clone()]),
+                    (0, None) => Onto::Nothing,
+                    _ => Onto::Itself,
+                };
+                blend(&mut value[stretch.clone()], onto, rows, last.value.map(|x| x * before(None)));
+                if let Some(g) = gradient.as_deref_mut() {
+                    let onto = if combination == 0 { Onto::Nothing } else { Onto::Itself };
+                    for f in 0..d {
+                        let weights = if f == d - 1 { last.slope.map(|x| x * before(None)) } else { last.value.map(|x| x * before(Some(f))) };
+                        blend(&mut g[f * w + stretch.start..f * w + stretch.end], onto, rows, weights);
                     }
                 }
             }
+            at = stretch.end;
         }
+    }
+}
+
+/// What a sum of four rows is added to (`blend`): nothing (the sum alone), a start, or what is there.
+#[derive(Clone, Copy)]
+enum Onto<'a> {
+    Nothing,
+    Start(&'a [f64]),
+    Itself,
+}
+
+/// out ← (what `onto` says) + Σ_j w_j rows_j, element by element: one pass over four rows, no element depending on
+/// another (the compiler's vector loop).
+fn blend(out: &mut [f64], onto: Onto, rows: [&[f64]; STENCIL], w: [f64; STENCIL]) {
+    let n = out.len();
+    let [a, b, c, d] = rows.map(|row| &row[..n]);
+    let sum = |i: usize| (w[0] * a[i] + w[1] * b[i]) + (w[2] * c[i] + w[3] * d[i]);
+    match onto {
+        Onto::Nothing => (0..n).for_each(|i| out[i] = sum(i)),
+        Onto::Start(base) => {
+            let base = &base[..n];
+            (0..n).for_each(|i| out[i] = base[i] + sum(i))
+        }
+        Onto::Itself => (0..n).for_each(|i| out[i] += sum(i)),
     }
 }
 
