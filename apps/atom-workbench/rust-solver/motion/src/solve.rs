@@ -216,15 +216,13 @@ enum Attempt {
     Done(Solution),
 }
 
-/// The initial components (SPEC §2.5): the ground states the request's initial density holds (diagonal, validated) and their
-/// populations normalized; refused where it holds an excited state, whose motion no prepared well describes.
-fn components(request: &Request) -> Result<Vec<(usize, f64)>, String> {
-    let diagonal: Vec<f64> = (0..STATES).map(|s| request.initial_density[(s, s)].re).collect();
-    if diagonal[GROUND..].iter().any(|&p| p > 0.) {
-        return Err("运动计算的初态需在基态上".into());
-    }
-    let total: f64 = diagonal[..GROUND].iter().sum();
-    Ok((0..GROUND).filter(|&s| diagonal[s] > 0.).map(|s| (s, diagonal[s] / total)).collect())
+/// The initial components (SPEC §2.5): the ground states the request's initial density holds and their populations
+/// normalized over them -- one at least: a validated request's density is diagonal and on the ground states
+/// (request.rs `Request::validate`).
+fn components(request: &Request) -> Vec<(usize, f64)> {
+    let diagonal: Vec<f64> = (0..GROUND).map(|s| request.initial_density[(s, s)].re).collect();
+    let total: f64 = diagonal.iter().sum();
+    (0..GROUND).filter(|&s| diagonal[s] > 0.).map(|s| (s, diagonal[s] / total)).collect()
 }
 
 /// The ground populations of a basis state alone.
@@ -321,8 +319,10 @@ fn classical(temperature: &V3, frequencies: &V3) -> bool {
 /// One attempt at the solve with the units `kept` and the reach at `reach` µK (module documentation, # The pipeline).
 fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Option<f64>, messages: &mut Messages) -> Result<Attempt, String> {
     let hm = hbar_over_mass(request.mass_kg);
-    let initial = components(request)?;
-    let reference = alone(initial.iter().max_by(|a, b| a.1.total_cmp(&b.1)).ok_or("运动计算的初态需在基态上")?.0);
+    let initial = components(request);
+    // The reference state (SPEC §2.1): the initial component of the largest population, of equal ones the last.
+    let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).expect("a validated request's initial state holds a ground state");
+    let reference = alone(initial[chief].0);
     // The model: every unit whose fold does not exist over the reach kept (SPEC §1.5), closed again until none fails (a
     // model lists only what it folds, model.rs `units`).
     let mut kept = kept.to_vec();
@@ -353,7 +353,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
     let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, light, alone(s))).collect::<Result<_, _>>()?;
     let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm)?;
     let row: [f64; STATES] = std::array::from_fn(|s| request.initial_density[(s, s)].re);
-    let depth = ensemble.depths()[initial.iter().position(|c| alone(c.0) == reference).unwrap_or(0)];
+    let depth = ensemble.depths()[chief];
     let mut ledger = Ledger::default();
     ledger.note = Some(format!("初始系综：各初态在自己的准备阱中的束缚原子（降低的等温分布乘每轴谐振子的 Wigner 因子，T = {} μK），参考态阱深 {:.1} k_BT", request.temperature_uk, depth));
     if unheld {
@@ -1420,7 +1420,7 @@ mod tests {
             let request = Request::from_native(&line).unwrap();
             let light = Light::new(&request);
             let model = Model::new(&request, &light, &[]).unwrap();
-            let initial = components(&request).unwrap();
+            let initial = components(&request);
             let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, &light, alone(s)).unwrap()).collect();
             let hm = hbar_over_mass(request.mass_kg);
             let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm).unwrap();
