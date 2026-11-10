@@ -11,9 +11,8 @@
 //! 4. The product: batches of whole groups at the pilot's step (adapt.rs), every trajectory run to the last output,
 //!    until every output's statistics meet the targets the pilot fixed (`Targets`), or the trajectories reach
 //!    `MOST_TRAJECTORIES`.
-//! 5. The step's falsifier (SPEC §5.3): the product's first `pilot_size` trajectories again at half the step on the same
-//!    streams, and the product's trajectories within the step's error of the escape; an output read clearly beyond the
-//!    step's share takes the step down by the measured ratio, and the attempt runs again.
+//! 5. The escape's test (SPEC §5.3): where more of the product's trajectories lie within the step's error of the escape
+//!    than the step's share, the step is halved and the attempt runs again.
 //! 6. The result (contract §2.2, `assemble`).
 //!
 //! # The step (SPEC §2.2)
@@ -47,12 +46,7 @@
 //! kept model is built and rated only for a unit whose keep would pay were it to cost no more per µs than the fold
 //! (`Pricing::saving_at_all`: the trajectories its error's removal saves, less the new pilot): a fold is made to cost less than
 //! what it folds, so a keep that pays by its rate alone is not looked for -- where one exists the fold is at fault, not
-//! the choice. The model's falsifier keeps one more unit on the product's first trajectories (common random numbers):
-//! the unit of the largest booked error among those whose pairs cost no more than the product they check -- a check
-//! dearer than what it checks is not one --, the units rated in the order of their errors until one is. What the pairs read clearly beyond the fold's booked error (`cleared`) is booked in its place; the
-//! unit is kept where that leaves an output no room for the statistics -- the rule the pilot's measured errors keep a unit
-//! by --, and else the product goes on until its statistics fit the room left. An unreadable read leaves the booked
-//! errors standing.
+//! the choice.
 //!
 //! # Stopping (SPEC §3)
 //! Each output's total error against its target is E² = A² + b² + S² (ledger.rs): the statistics may take the room
@@ -78,7 +72,7 @@
 use crate::adapt::{self, Drift, Reader};
 use crate::decide::{assured, halved, judge, pays, Judgement, Read};
 use crate::ensemble::{Ensemble, Quadrature, Start, Well, GROUP};
-use crate::estimate::{draws_for, half_window, occupation, paired, spread, stepped, summarize, unseen, wilson, Estimate, Fate, Group, Held, Output, Scales, Spread, Stepped};
+use crate::estimate::{draws_for, half_window, occupation, spread, stepped, summarize, unseen, wilson, Estimate, Fate, Group, Held, Output, Scales, Spread, Stepped};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, span, when, Account, Ledger};
 use crate::linalg::V3;
@@ -103,11 +97,9 @@ const SEED: u64 = 0;
 const DISTRIBUTION_TIMES: usize = 21;
 /// Half the time the app waits for a message before it kills the worker (contract §2.5: 120 s): the checkpoints' interval.
 const CHECKPOINT: Duration = Duration::from_secs(60);
-/// What the engine did with a folded unit (the ledger's `action`, shown by the app), by where its booked error was read:
-/// at the pilot's states (SPEC §5.2); or, where the model's falsifier read more, with what the product's pairs against
-/// the model that keeps the unit read clearly beyond that.
+/// What the engine did with a folded unit (the ledger's `action`, shown by the app): its booked error is read at the
+/// pilot's states (SPEC §5.2).
 const FOLD_MEASURED: &str = "二阶消去（折叠），沿试探轨迹实测";
-const FOLD_PAIRED: &str = "二阶消去（折叠），沿试探轨迹实测，加上产品轨迹与保留该单元的模型配对读清的超出部分";
 /// What the engine did with a near table's error (SPEC §5.4): refined over the reach when it was built, and read
 /// against the elimination itself at the pilot's states.
 const TABLE_MEASURED: &str = "按可达范围加密的表，在试探状态上对照消去本身实测";
@@ -380,7 +372,7 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
     let (momentum, start) = exact(&ensemble.kinetic(0));
     let mut context = Context {
         momentum,
-        fixed: Fixed { model: vec![[0.; 2]; outputs], cleared: vec![0.; outputs], held: vec![1.; outputs], temperature: vec![None; outputs], step: vec![step_bound(); outputs], windows: vec![], start },
+        fixed: Fixed { model: vec![[0.; 2]; outputs], held: vec![1.; outputs], temperature: vec![None; outputs], step: vec![step_bound(); outputs], windows: vec![], start },
         tau: step.unwrap_or_else(|| top_rung(plan.times[1] - plan.times[0], trap.frequencies.iter().copied().fold(0., f64::max))),
         plan,
         scales,
@@ -520,7 +512,7 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
     };
     context.fixed.held = estimates.iter().map(|e| 1. - e.loss).collect();
     context.fixed.temperature = held_to(&estimates);
-    let mut targets = Targets::new(&context.fixed);
+    let targets = Targets::new(&context.fixed);
     // A unit's errors at an output on what is shown and on T, weighed by the pilot's held share as the totals are (an
     // output where the pilot holds no atom weighs nothing: its units' errors are their bounds, `Measured::means`); and its
     // weight over some outputs (SPEC §5.2): those errors, each over its target, added up.
@@ -549,82 +541,29 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
     }
     // The ledger's items: each folded unit's error on what is shown and on T (its largest over the outputs, weighed by the
     // held share as the totals are) with the item's place for its unit, the unsampled share, the step.
-    let booked: Vec<f64> = (0..units.len()).map(|u| (1..outputs).map(|k| weighed(u, k)[0].max(weighed(u, k)[1])).fold(0., f64::max)).collect();
-    let places: Vec<Option<usize>> = units.iter().zip(&booked).map(|(unit, &error)| context.ledger.item(&model.label(unit), error, FOLD_MEASURED)).collect();
+    for (u, unit) in units.iter().enumerate() {
+        context.ledger.item(&model.label(unit), (1..outputs).map(|k| weighed(u, k)[0].max(weighed(u, k)[1])).fold(0., f64::max), FOLD_MEASURED);
+    }
     context.ledger.item("折叠判定之外的未采样份额", unsampled, "计入模型误差");
     let step_error = context.fixed.step.iter().skip(1).map(|b| b[0].max(b[1])).fold(0., f64::max);
-    context.ledger.item(&format!("时间步长 τ = {tau} μs（全程不变）"), step_error, "试探上每步减半实测、沿轨迹累加；产品上以 τ/2 否证");
+    context.ledger.item(&format!("时间步长 τ = {tau} μs（全程不变）"), step_error, "试探上每步减半实测，按动力学带到输出时刻");
     messages.result(&assemble(&context, &estimates, &listed, &counts, pilot_size()), None);
 
     // The product (module documentation, # Stopping).
     let mut parts: Vec<Part> = vec![];
     let started = Instant::now();
     product(&run, &ensemble, &context, &targets, &mut parts, batch(targets.need(&estimates), pilot_size()), started, messages);
-    // The step's falsifier (SPEC §5.3) on the product's first groups at half the step, and the product's trajectories
-    // within the step's error of the escape; while it runs, the product's result is the checkpoint. Refuted, the attempt
-    // runs again at the rung the measured ratio gives.
-    let checked = pilot_size() / GROUP;
+    // The escape's test (SPEC §5.3): the product's trajectories within the step's error of the escape (Wilson's near end
+    // of their share) against the step's share on what is shown; beyond it the attempt runs again at half the step.
     let all: Vec<&Part> = parts.iter().collect();
     let (e, l, c) = pooled(&all, &context.scales);
-    let current = assemble(&context, &e, &l, &c, all.len() as u64 * GROUP);
-    let fine = run_groups(0, checked, Shape::of(&context.plan, false), &|i| trajectory(&run, &ensemble, 0.5 * tau, None, Some(&context.fixed.windows), &context.plan, false, i), messages, &mut |_, messages| messages.result(&current, None));
-    let share = step_bound();
-    let pairs = refuted(&all[..checked as usize], &fine, &context.scales, &targets, 0.5, ORDER as f64, &|_| share);
-    let escape = e.iter().skip(1).any(|x| x.judged > 0. && 1. - wilson(x.judged - x.near, x.judged) > share[0]).then_some(1.);
-    if let Some(factor) = [pairs, escape].into_iter().flatten().reduce(f64::min) {
-        let next = halved(tau, factor);
+    if e.iter().skip(1).any(|x| x.judged > 0. && 1. - wilson(x.judged - x.near, x.judged) > step_bound()[0]) {
+        let next = halved(tau, 1.);
         if context.plan.end / next <= MOST_STEPS as f64 {
             return Ok(Attempt::Refine(next));
         }
-        context.ledger.flag(format!("步长否证读到超出步长的份额，而每条轨迹的步数已达上限 {MOST_STEPS}，无法再减半"));
+        context.ledger.flag(format!("落在损失能量窗口内的轨迹超出步长的份额，而每条轨迹的步数已达上限 {MOST_STEPS}，无法再减半"));
     }
-    let result = assemble(&context, &e, &l, &c, all.len() as u64 * GROUP);
-    // The model's falsifier (SPEC §5.2; module documentation, # The model): one more unit kept on the product's first groups,
-    // the unit of the largest weight over every output among those whose pairs cost no more than the product -- the units
-    // rated in the order of their weights, as many at once as there are threads, until one costs no more.
-    let every: Vec<usize> = (1..outputs).collect();
-    let mut heaviest: Vec<usize> = (0..units.len()).filter(|&u| weight(u, &every) > 0.).collect();
-    heaviest.sort_by(|&a, &b| weight(b, &every).total_cmp(&weight(a, &every)));
-    let checks = |ratio: f64| (checked * GROUP) as f64 * ratio <= all.len() as f64 * GROUP as f64;
-    let next = heaviest.chunks(rayon::current_num_threads()).find_map(|some| {
-        let ratios: Vec<Option<f64>> = some.par_iter().map(|&u| ranked.iter().find(|c| c.unit == u).map(|c| c.ratio).or_else(|| pricing.kept_rates(u).map(|r| pricing.ratio(&r)))).collect();
-        some.iter().zip(ratios).find(|(_, ratio)| ratio.is_some_and(checks)).map(|(&u, _)| u)
-    });
-    let Some(u) = next else {
-        return Ok(Attempt::Done(result));
-    };
-    let with = Model::new(request, light, &[kept.as_slice(), std::slice::from_ref(&units[u])].concat())?;
-    let finer_tables = with.tabulate(&with.reach(&with.trap(&reference, &with.prepared())?, &reference, reach, unsampled), most);
-    let finer = Run::tabulated(&with, &finer_tables, reference);
-    let fine = run_groups(0, checked, Shape::of(&context.plan, false), &|i| trajectory(&finer, &ensemble, tau, None, Some(&context.fixed.windows), &context.plan, false, i), messages, &mut |_, messages| messages.result(&result, None));
-    // What the pairs read clearly beyond the fold's booked error is booked in its place: on the rows as shown as it is
-    // read there, and on T.
-    let clear = cleared(&all[..checked as usize], &fine, &context.scales, &targets);
-    let mut largest = 0.;
-    for k in 1..outputs {
-        let excess = [clear[k][0] - weighed(u, k)[0], clear[k][1] - temperature[u][k]].map(|x| x.max(0.));
-        context.fixed.cleared[k] += excess[0];
-        context.fixed.model[k][1] += excess[1];
-        largest = f64::max(largest, (weighed(u, k)[0] + excess[0]).max(weighed(u, k)[1] + excess[1] * held[k]));
-    }
-    targets = Targets::new(&context.fixed);
-    if !targets.crowded().is_empty() {
-        return Ok(Attempt::Keep(units[u].clone(), tau));
-    }
-    // The unit's item, where the pairs read more than the pilot measured: their number, and what was done to get it.
-    if largest > booked[u] {
-        match places[u] {
-            Some(i) => (context.ledger.items[i].estimate, context.ledger.items[i].action) = (largest, FOLD_PAIRED.into()),
-            None => drop(context.ledger.item(&model.label(&units[u]), largest, FOLD_PAIRED)),
-        }
-    }
-    // The statistics against the room the re-booked errors leave.
-    let n = parts.len() as u64 * GROUP;
-    if !targets.met(&e) && n < MOST_TRAJECTORIES {
-        product(&run, &ensemble, &context, &targets, &mut parts, batch(targets.need(&e), n), started, messages);
-    }
-    let all: Vec<&Part> = parts.iter().collect();
-    let (e, l, c) = pooled(&all, &context.scales);
     Ok(Attempt::Done(assemble(&context, &e, &l, &c, all.len() as u64 * GROUP)))
 }
 
@@ -671,8 +610,7 @@ fn product(run: &Run, ensemble: &Ensemble, context: &Context, targets: &Targets,
 
 /// The pilot's size: the fewest whole groups whose unseen share fits the statistics' room in the population target beside
 /// the step's share alone, z²/(N + z²) ≤ √(1 − s²) ε (`room`; estimate.rs `unseen` and its inverse `draws_for`, units.rs
-/// `STEP_SHARE`) -- the smallest ensemble that can see a share as large as the target, 88 trajectories. The falsifiers
-/// take as many.
+/// `STEP_SHARE`) -- the smallest ensemble that can see a share as large as the target, 88 trajectories.
 fn pilot_size() -> u64 {
     (draws_for(room(POPULATION_TARGET, 0., step_bound()[0])) / GROUP as f64).ceil() as u64 * GROUP
 }
@@ -939,15 +877,14 @@ fn run_groups(first: u64, end: u64, shape: Shape, record: &(dyn Fn(u64) -> Recor
 }
 
 /// What the pilot fixes for the run (module documentation, # Stopping), per output: the model's error on the held atoms
-/// (populations absolute, T relative; T's unbounded where no pilot atom reads it) and what the model's falsifier read
-/// clearly beyond it on the rows as shown, the held share, and T's scale per axis (µK) where T is held to its target; the
+/// (populations absolute, T relative; T's unbounded where no pilot atom reads it), the held share, and T's scale per
+/// axis (µK) where T is held to its target; the
 /// step's error read on the rows as shown and on T (relative; unbounded where not read), and the loss energy's window
 /// (rad/µs; module documentation, # The step; none before the pilot is read); and T(0)'s relative error, its
 /// quadrature's last two levels' difference (ensemble.rs `Ensemble::kinetic`).
 #[derive(Clone)]
 struct Fixed {
     model: Vec<[f64; 2]>,
-    cleared: Vec<f64>,
     held: Vec<f64>,
     temperature: Vec<Option<V3>>,
     step: Vec<[f64; 2]>,
@@ -982,7 +919,7 @@ impl Targets {
         let share = step_bound();
         let step = |b: &[f64; 2], i: usize| b[i].min(share[i]);
         Targets {
-            population: fixed.model.iter().zip(&fixed.held).zip(&fixed.cleared).zip(&fixed.step).map(|(((a, h), c), b)| room(POPULATION_TARGET, a[0] * h + c, step(b, 0))).collect(),
+            population: fixed.model.iter().zip(&fixed.held).zip(&fixed.step).map(|((a, h), b)| room(POPULATION_TARGET, a[0] * h, step(b, 0))).collect(),
             temperature: fixed
                 .temperature
                 .iter()
@@ -1053,7 +990,7 @@ fn accounts(estimates: &[Estimate], fixed: &Fixed) -> (Vec<Account>, Vec<Option<
             }
             let h = 1. - e.loss;
             let escape = if e.judged > 0. { e.near / e.judged } else { step_bound()[0] };
-            let population = Account { model: (a[0] * h + fixed.cleared[k]).min(1.), step: bp.max(escape), statistics: e.shown_statistics() };
+            let population = Account { model: (a[0] * h).min(1.), step: bp.max(escape), statistics: e.shown_statistics() };
             let temperature = e.motion.and_then(|m| {
                 let relative = (0..3).map(|x| m.temperature_errors[x].interval() / m.temperature[x]).fold(0., f64::max);
                 (relative.is_finite() && a[1].is_finite() && bt.is_finite()).then_some(Account { model: h * a[1], step: h * bt, statistics: h * relative })
@@ -1061,50 +998,6 @@ fn accounts(estimates: &[Estimate], fixed: &Fixed) -> (Vec<Account>, Vec<Option<
             (population, temperature)
         })
         .unzip()
-}
-
-/// A falsifier's looks (SPEC §5.2, §5.3; decide.rs): a coarse and a finer level on the same trajectories, read on every
-/// row as shown, the loss and T where held to its target (relative to its scale) -- per look its output, whether it is
-/// T's, and the coarse level's own error from the difference at the finer level's parameter `ratio` and the level's
-/// `order` (`Read::level`).
-fn looks(coarse: &[&Part], fine: &[Part], scales: &Scales, targets: &Targets, ratio: f64, order: f64) -> Vec<(usize, bool, Read)> {
-    let reads = paired(coarse, &fine.iter().collect::<Vec<_>>(), scales);
-    let mut looks = vec![];
-    for (k, p) in reads.iter().enumerate().skip(1) {
-        looks.extend(p.shown.iter().chain([&p.loss]).map(|r| (k, false, r.level(ratio, order))));
-        if let (Some((scale, _)), Some(t)) = (targets.temperature[k], p.temperature) {
-            for a in 0..3 {
-                let r = t[a].level(ratio, order);
-                looks.push((k, true, Read { value: r.value / scale[a], spread: Spread { error: r.spread.error / scale[a], groups: r.spread.groups } }));
-            }
-        }
-    }
-    looks
-}
-
-/// A falsifier's refutation: the family of its looks, each against what the coarse level may take there (`share`: per
-/// output, on what is shown and on T), judged as every family is (decide.rs `judge`). Beyond: the factor on the coarse
-/// level's parameter at which the largest measured error meets its share; else none -- a falsifier's read only refutes.
-fn refuted(coarse: &[&Part], fine: &[Part], scales: &Scales, targets: &Targets, ratio: f64, order: f64, share: &dyn Fn(usize) -> [f64; 2]) -> Option<f64> {
-    let reads: Vec<(Read, f64)> = looks(coarse, fine, scales, targets, ratio, order).into_iter().map(|(k, t, r)| (r, share(k)[usize::from(t)])).collect();
-    match judge(&reads, order) {
-        Judgement::Beyond(factor) => Some(factor),
-        Judgement::Within | Judgement::Unreadable => None,
-    }
-}
-
-/// What a falsifier's looks read clearly of the coarse level's error, the finer level taken as the exact one: per output,
-/// on what is shown and on T, the largest of what its looks show clearly among them all (decide.rs `Read::clear`, the
-/// family's interval as for a read beyond), none below zero.
-fn cleared(coarse: &[&Part], fine: &[Part], scales: &Scales, targets: &Targets) -> Vec<[f64; 2]> {
-    let looks = looks(coarse, fine, scales, targets, 0., 1.);
-    let m = looks.len() as f64;
-    let mut clear = vec![[0f64; 2]; targets.held.len()];
-    for (k, t, r) in &looks {
-        let c = &mut clear[*k][usize::from(*t)];
-        *c = c.max(r.clear(m));
-    }
-    clear
 }
 
 /// What the pilot measured of the model's units (SPEC §5.2): each folded unit's errors at the pilot's states, and each
@@ -1175,11 +1068,10 @@ fn one_each(states: &[State], output: &[usize], outputs: usize) -> Vec<usize> {
     (0..states.len()).filter(|&j| output[j] as u64 == 1 + states[j].index % (outputs as u64 - 1)).collect()
 }
 
-/// A unit to keep (`Pricing::priced`): its predicted saving, and the kept model's work per µs over the current one's.
+/// A unit to keep (`Pricing::priced`) and its predicted saving.
 struct Candidate {
     unit: usize,
     saving: Read,
-    ratio: f64,
 }
 
 /// The pilot's groups but one (or all of them) as the pricing reads them (`Pricing`): the estimates and the units' mean
@@ -1309,15 +1201,10 @@ impl<'a> Pricing<'a> {
         Some(self.rated.iter().map(|&j| rate(&finer, assembly, &middles[finer.cluster_of(self.model.clusters()[self.states[j].sample.cluster].states[0])], &self.states[j])).collect())
     }
 
-    /// A kept model's work per µs over the current one's, from its rates.
-    fn ratio(&self, rates: &[f64]) -> f64 {
-        self.mean(rates, None) / self.mean(&self.own, None)
-    }
-
     /// Unit `u` with its kept model built and rated, its saving spread over the jackknife's levels `others`.
     fn priced(&self, others: &[Level], u: usize) -> Option<Candidate> {
         let rates = self.kept_rates(u)?;
-        Some(Candidate { unit: u, saving: self.saving(others, u, &rates), ratio: self.ratio(&rates) })
+        Some(Candidate { unit: u, saving: self.saving(others, u, &rates) })
     }
 }
 
@@ -1612,43 +1499,4 @@ mod tests {
         }
     }
 
-    /// A falsifier refutes only a clear excess (`refuted`): two levels on the same 16 groups of 8 atoms, the finer one moving
-    /// one state's row by δ at one output for every atom alike (the pair's difference has no spread). At the step's level
-    /// (half the step, order 2) the coarse level's error is 4δ/3: δ = 0.3 against a share of 0.05 is refuted with the
-    /// factor √(0.05/0.4) on the step; δ = 0.01 is within. What the pairs read clearly (`cleared`) is δ itself at that
-    /// output.
-    #[test]
-    fn a_falsifier_refutes_only_a_clear_excess() {
-        let outputs = 3;
-        let level = |shift: f64| -> Vec<Part> {
-            (0..16)
-                .map(|g| {
-                    let mut sums = Group::new(outputs);
-                    for m in 0..8 {
-                        let x = ((g * 8 + m) as f64 * 0.37).fract();
-                        let held: Vec<Output> = (0..outputs)
-                            .map(|k| {
-                                let mut rows = [0.; STATES];
-                                let d = if k == 2 { shift } else { 0. };
-                                (rows[0], rows[1]) = (0.5 + 0.1 * x + d, 0.5 - 0.1 * x - d);
-                                Output { fate: Fate::Held(Held { rows, kappa: [x; 3], kappa2: [1. + x * x; 3], drift: None }), near: None, energy: None }
-                            })
-                            .collect();
-                        sums.add(&held);
-                    }
-                    Part { sums, listed: vec![], samples: vec![], counts: Counts::default() }
-                })
-                .collect()
-        };
-        let coarse = level(0.);
-        let coarse: Vec<&Part> = coarse.iter().collect();
-        let targets = Targets { population: vec![1.; outputs], temperature: vec![None; outputs], held: vec![1.; outputs] };
-        let scales = Scales { hbar_over_mass: KT_PER_UK, frequencies: [1.; 3] };
-        let factor = refuted(&coarse, &level(-0.3), &scales, &targets, 0.5, 2., &|_| [0.05, 0.1]).unwrap();
-        assert!((factor - (0.05_f64 / 0.4).sqrt()).abs() < 1e-12, "{factor}");
-        assert!(refuted(&coarse, &level(-0.01), &scales, &targets, 0.5, 2., &|_| [0.05, 0.1]).is_none());
-        // What the pairs read clearly, the finer level exact: the whole shift where it is (no spread), nothing elsewhere.
-        let clear = cleared(&coarse, &level(-0.3), &scales, &targets);
-        assert!((clear[2][0] - 0.3).abs() < 1e-12 && clear[1] == [0.; 2] && clear[2][1] == 0., "{clear:?}");
-    }
 }

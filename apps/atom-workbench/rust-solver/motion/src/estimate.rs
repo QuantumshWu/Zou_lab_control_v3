@@ -527,34 +527,6 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
         .collect()
 }
 
-/// One output's reads between two levels run on the same trajectories (decide.rs): the coarse level's loss, rows as
-/// shown and T per lab axis (µK) less the fine level's, each jackknifed with a group left out of both -- the
-/// difference's own error, in which the levels' common noise cancels. T where both levels hold two atoms.
-#[derive(Clone, Debug)]
-pub struct Paired {
-    pub loss: Read,
-    pub shown: [Read; STATES],
-    pub temperature: Option<[Read; 3]>,
-}
-
-/// The reads between a coarse and a fine level at every output, their groups the same trajectories in the same order.
-pub fn paired<G: Borrow<Group> + Sync>(coarse: &[G], fine: &[G], scales: &Scales) -> Vec<Paired> {
-    assert_eq!(coarse.len(), fine.len(), "paired levels run the same groups");
-    let outputs = coarse.first().map_or(0, |g| g.borrow().sums.len());
-    (0..outputs)
-        .into_par_iter()
-        .map(|k| {
-            let j = jackknife(&[coarse, fine], k, scales.hbar_over_mass);
-            let read = |f: &dyn Fn(&Moments) -> f64| Read { value: f(&j.full[0]) - f(&j.full[1]), spread: j.every(|m| f(&m[0]) - f(&m[1])) };
-            let temperature = match (j.full[0].temperature, j.full[1].temperature) {
-                (Some(a), Some(b)) => Some(std::array::from_fn(|x| Read { value: a[x] - b[x], spread: j.held(|t| t[0][x] - t[1][x]) })),
-                _ => None,
-            };
-            Paired { loss: read(&|m| m.loss), shown: std::array::from_fn(|s| read(&|m| m.shown[s])), temperature }
-        })
-        .collect()
-}
-
 /// The step's error at one output, read on the trajectories that are read (module documentation, # The step's error):
 /// T's relative error per lab axis where the transport reads it, each row's as shown, and, where some trajectory's is
 /// read, the loss energy's accumulated error -- its mean and its spread between trajectories (rad/µs).
@@ -852,40 +824,6 @@ mod tests {
         let p = 1. - normal_tail(CONFIDENCE);
         let within = Spread { error: (p * (1. - p) / repetitions as f64).sqrt(), groups: f64::INFINITY }.interval();
         assert!((coverage - p).abs() <= within, "coverage {coverage} against {p} ± {within}");
-    }
-
-    /// A paired read cancels the levels' common noise: the same atoms with every ⟨κ²⟩ larger by δ at the fine level read
-    /// T's difference −δ with no error, the loss and the rows none at all; one atom lost at the fine level alone reads
-    /// the loss's difference −1/N with an error of one group's.
-    #[test]
-    fn a_paired_read_cancels_the_common_noise() {
-        let mut state = 0x853C_49E6_748F_EA9B_u64;
-        let mut draw = || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            (state >> 11) as f64 / (1u64 << 53) as f64
-        };
-        let atoms: Vec<Vec<(usize, f64)>> = (0..5).map(|_| (0..4).map(|_| ((4. * draw()) as usize, draw() - 0.5)).collect()).collect();
-        let level = |shift: f64, lost: Option<(usize, usize)>| -> Vec<Group> {
-            atoms
-                .iter()
-                .enumerate()
-                .map(|(g, members)| {
-                    group(members.iter().enumerate().map(|(i, &(s, x))| (lost != Some((g, i))).then(|| atom(s, x, x * x + 1. + shift))).collect())
-                })
-                .collect()
-        };
-        let delta = 0.25;
-        let reads = paired(&level(0., None), &level(delta, None), &UNIT);
-        let t = reads[0].temperature.unwrap();
-        assert!((t[1].value + delta).abs() < 1e-14 && t[1].spread.error < 1e-14 && t[1].spread.groups == 5., "{:?}", t[1]);
-        assert!(reads[0].loss.value == 0. && reads[0].loss.spread.error == 0. && reads[0].shown.iter().all(|r| r.value.abs() < 1e-15));
-        let reads = paired(&level(0., None), &level(0., Some((2, 1))), &UNIT);
-        let loss = reads[0].loss;
-        // One group's difference −1/4 among five, the others none: the jackknife of a mean, √(Σ(d − d̄)²/(g(g − 1))).
-        let d: [f64; 5] = [0., 0., -0.25, 0., 0.];
-        let mean = d.iter().sum::<f64>() / 5.;
-        let se = (d.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / 20.).sqrt();
-        assert!((loss.value + 1. / 20.).abs() < 1e-15 && (loss.spread.error - se).abs() < 1e-15, "{loss:?}");
     }
 
     /// n̄ and the mean velocity of the held atoms; no T error from one group; no motion below two atoms held.
