@@ -229,6 +229,14 @@ V_L(r; p) = Σ_b p_b [h_L(r) − h_{L∖阱光}(r)]_bb
 
 ## 9 接口契约（详见 contract.md）
 - 请求：native JSONL 一行（options、model、motion 块）。只收有限轨迹请求；`device` 照收，一律在 CPU 上算，结果报 `device:"cpu"`，并附 deviceNote"GPU 计算尚未提供：本次在 CPU 上计算"。
+- 请求的字段：
+  - motion 块的每个字段都必需（契约的 `MotionModel`）。引擎不读的字段只检查存在、不解析内容：`fieldVectorG`、每束光的 `intensityMWcm2` 与 `outsideShift`（它们已经在 H0、耦合与外层形式里）；
+  - 初始密度矩阵 `initialReal`/`initialImag` 必需，不读 `initialIndex`；
+  - 模型基里基态排在最前：第 s 个态是基态，当且仅当 s < 8。请求校验一次，此后一律按下标。
+- 拒绝（返回错误，界面显示"运动计算失败：…"）。contract.md §2.4 列出的之外，引擎还拒绝下面三种；消息是中文，界面原样显示：
+  - 初态在激发态上有布居（超出密度矩阵自身的舍入 γ₃₂）：初始系综是各基态分量在自己的准备阱里的原子（§2.5），激发态的运动没有准备阱可言；
+  - 阱光（与光镊同频的全部光束，§1.3）里有平面波：平面波的势在远处不降为零，被俘获原子的初始系综无从定义；
+  - 阱光对某个初态分量的势的包络界不为正：这个分量没有被俘获的原子（"光镊不约束原子"）。
 - native 的 `gpu` 操作立刻回答同一句错误，不让界面卡在编译窗口。
 - 结果：
   - 键集合固定；第 0 行等于初态；`requestedTolerance` = 0.05；`estimatedMaximumError` = max(`sampleErrors`)；

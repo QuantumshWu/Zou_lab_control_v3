@@ -65,13 +65,21 @@ pub const GROUP: u64 = 8;
 /// The uniform deviates a member draws in its group's strata (module documentation, # Latin hypercube).
 const DEVIATES: usize = 8;
 
+/// Why a trap light with a plane wave in it is refused (SPEC §9; shown in the app): a plane wave's potential does not
+/// fall off, so the well has no far level to bind atoms below and no envelope of Gaussian beams.
+pub const PLANE_WAVE: &str = "与光镊同频的光束都需要束腰：平面波的势在远处不降为零，被俘获原子的初始系综无从定义";
+/// Why an initial component whose well's envelope is not positive is refused (SPEC §9; shown in the app): the trap light
+/// does not attract that state anywhere.
+pub const NO_WELL: &str = "光镊不约束原子：阱光对初态的势没有吸引的部分";
+
 /// What the ensemble needs of one initial component's preparation well (SPEC §1.3, §2.5): defined here by its consumer,
 /// implemented by the model for each initial ground state.
 pub trait Well: Sync {
     /// The prepared potential relative to its far level, V(r) = V_prep(r) − V_prep(∞) (rad/µs), and its gradient
     /// (rad/µs/µm): an atom is bound where (ħ/m)κ²/2 + V < 0.
     fn potential(&self, r: V3) -> (f64, V3);
-    /// The well's bottom c (µm), its principal axes (unit rows) and the frequencies ω_i (rad/µs) along them.
+    /// The well's bottom c (µm), its principal axes (unit rows) and the frequencies ω_i > 0 (rad/µs) along them: a
+    /// minimum of the potential, every curvature positive (the model refuses a light that holds no such bottom, SPEC §1.3).
     fn trap(&self) -> (V3, [V3; 3], V3);
     /// The proven envelope: the trap light's Gaussian beams and B (rad/µs) with −V(r) ≤ B max_l 1/(1 + u_l(r)) everywhere
     /// (module documentation, # Its draw).
@@ -168,7 +176,9 @@ struct Mode {
 }
 impl Mode {
     fn new(g: &Geometry) -> Result<Mode, String> {
-        let (waist, rayleigh) = (g.waist.ok_or("The trap light's envelope holds a plane wave, which binds no ensemble")?, g.rayleigh().unwrap());
+        let (Some(waist), Some(rayleigh)) = (g.waist, g.rayleigh()) else {
+            return Err(PLANE_WAVE.into());
+        };
         let n = g.direction;
         let (e1, e2) = perpendicular(n);
         Ok(Mode { frame: [e1, e2, n], waist, rayleigh })
@@ -278,8 +288,8 @@ pub struct Ensemble<'a> {
 
 impl<'a> Ensemble<'a> {
     /// The ensemble of the initial components (basis state, population, its well) at the temperature T (µK), with ħ/m
-    /// (µm²/µs); the populations normalized over them. Refused where a well holds no atom (B ≤ 0) or its envelope is not
-    /// one of Gaussian beams.
+    /// (µm²/µs); the populations normalized over them. Refused where a well holds no atom (its envelope's B is not
+    /// positive, `NO_WELL`) or its envelope is not one of Gaussian beams (`PLANE_WAVE`).
     pub fn new(initial: &[(usize, f64, &'a dyn Well)], temperature_uk: f64, hbar_over_mass: f64) -> Result<Ensemble<'a>, String> {
         let kt = KT_PER_UK * temperature_uk;
         let total: f64 = initial.iter().map(|c| c.1).sum();
@@ -288,7 +298,7 @@ impl<'a> Ensemble<'a> {
             .map(|&(state, p, well)| {
                 let (beams, bound) = well.envelope();
                 if !(bound > 0.) || beams.is_empty() {
-                    return Err("The trap's light binds no atom of the initial state".to_string());
+                    return Err(NO_WELL.to_string());
                 }
                 let modes = beams.iter().map(Mode::new).collect::<Result<Vec<_>, _>>()?;
                 let a = bound / kt;
@@ -306,7 +316,7 @@ impl<'a> Ensemble<'a> {
                 let curvatures = frequencies.map(|w| w * w / hbar_over_mass);
                 let scales = frequencies.map(|w| {
                     let half = 0.5 * w / kt;
-                    if half > 0. { (half / half.tanh()).sqrt() } else { 1. }
+                    (half / half.tanh()).sqrt()
                 });
                 Ok(Component { state, weight: p / total, well, top: a, modes, pieces, centre, axes, curvatures, scales })
             })
