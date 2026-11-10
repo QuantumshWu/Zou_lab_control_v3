@@ -535,6 +535,30 @@ fn attempt(
     let first = MOST_TRAJECTORIES / GROUP;
     let groups = pilot_size() / GROUP;
     let shape = Shape::of(&context.plan, true);
+    // A rung's read at the first output alone (# The step): every pilot member with its reader up to the first output,
+    // judged against the shares -- the cost of one interval of the run.
+    let first_output = |tau: f64, messages: &mut Messages| -> Judgement {
+        let short = Plan::new(&request.times_us[..2], report.lab);
+        let parts = run_groups(first, first + groups, 0..GROUP, Shape::of(&short, true), &|i| trajectory(&run, &ensemble, tau, Some(periods), None, &short, true, i), messages, &mut |_, messages| messages.again());
+        let read: Vec<&Part> = parts.iter().collect();
+        rung(&stepped(&read, &context.scales), &held_to(&pooled(&read, &context.scales).0), 1.)
+    };
+    // The scout's rung: the first of the ladder whose first output reads within the shares. At a rung that fails already
+    // there the scout's atoms are not the run's -- a step sixteen times too long heats them tenfold, the reach grows to
+    // that heat and gates fail over a reach no atom of the run sees (R4_LIN_1: its cooling states were kept for it).
+    let mut tau = context.tau;
+    while outputs > 2 {
+        let next = match first_output(tau, messages) {
+            Judgement::Within => break,
+            Judgement::Beyond(factor) => halved(tau, factor),
+            Judgement::Unreadable => halved(tau, 1.),
+        };
+        if context.plan.end / next > MOST_STEPS as f64 {
+            break;
+        }
+        tau = next;
+    }
+    context.tau = tau;
     // The scout (module documentation, # The pipeline): the model is settled before the step is read. The first member of
     // every pilot group runs once at the first rung, no reader; where its atoms outgrow the reach or a unit is to be kept
     // at its states, the attempt ends here -- for the price of the scout, not of a pilot with its reads. The pilot's read
@@ -576,10 +600,7 @@ fn attempt(
         // A rung fails where any of its reads does not lie within its share on the whole pilot. The first output's reads
         // are among them and cost the first interval alone: where the run has more outputs, they are read first, on
         // every member, and a rung that fails there is not read over the run.
-        let early = (outputs > 2).then(|| {
-            let short = Plan::new(&request.times_us[..2], report.lab);
-            judged(&run_groups(first, first + groups, 0..GROUP, Shape::of(&short, true), &|i| trajectory(&run, &ensemble, tau, Some(periods), None, &short, true, i), messages, &mut |_, messages| messages.again()), 1.)
-        });
+        let early = (outputs > 2).then(|| first_output(tau, messages));
         // The read over the run: on the first member of every group, then on twice as many while it is unreadable. The
         // rung within its shares is the run's. One that has failed -- clearly beyond, or unreadable on every member --
         // gives the rung below without a read of its own where this read over 2^p lies within the shares (one rung: an
