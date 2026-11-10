@@ -69,6 +69,10 @@ use std::collections::VecDeque;
 /// The grid's order in its spacing h: CF4's local error O(h⁵) and composite Simpson's, per unit time O(h⁴).
 const GRID_ORDER: i32 = 4;
 
+/// The step evaluations a read step takes (module documentation, # The read): the step, its two halves, and the carried
+/// state's step.
+pub const READ_STEPS: u64 = 4;
+
 /// The panels a half step takes of the beating grid, a step twice as many (module documentation, # The step): the least
 /// grid a step and its halves share.
 const HALF_PANELS: usize = 1;

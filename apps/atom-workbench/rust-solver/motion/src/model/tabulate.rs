@@ -141,7 +141,7 @@ pub struct Tables {
 }
 
 /// The tables' shares of the targets (module documentation, # Refinement): on what is shown, absolute, and on T, relative.
-fn shares() -> (f64, f64) {
+pub(crate) fn shares() -> (f64, f64) {
     let (z, n) = (crate::units::CONFIDENCE, crate::units::MOST_TRAJECTORIES as f64);
     (z / (2.0 * n.sqrt()), z * (2.0 / n).sqrt())
 }

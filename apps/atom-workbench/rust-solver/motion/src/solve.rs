@@ -103,6 +103,9 @@ const CHECKPOINT: Duration = Duration::from_secs(60);
 /// the model that keeps the unit read clearly beyond that.
 const FOLD_MEASURED: &str = "二阶消去（折叠），沿试探轨迹实测";
 const FOLD_PAIRED: &str = "二阶消去（折叠），沿试探轨迹实测，加上产品轨迹与保留该单元的模型配对读清的超出部分";
+/// What the engine did with a near table's error (SPEC §5.4): refined over the reach when it was built, and read
+/// against the elimination itself at the pilot's states.
+const TABLE_MEASURED: &str = "按可达范围加密的表，在试探状态上对照消去本身实测";
 
 /// A distribution along one lab axis on one grid (strictly increasing, at least two points) at some of the output
 /// times (`samples`: increasing indices, the last output among them), each the probability at every grid point
@@ -328,7 +331,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
     // The model: every unit whose fold does not exist over the reach kept (SPEC §1.5), closed again until none fails (a
     // model lists only what it folds, model.rs `units`).
     let mut kept = kept.to_vec();
-    let (model, trap) = loop {
+    let (model, trap, judged) = loop {
         let model = Model::new(request, light, &kept)?;
         let trap = model.trap(&reference, &model.prepared())?;
         let judged = model.reach(&trap, &reference, reach, unseen(MOST_TRAJECTORIES as f64));
@@ -336,11 +339,10 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
         let failing: Vec<Unit> =
             units.iter().zip(model.gates(&units, &judged)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
         if failing.is_empty() {
-            break (model, trap);
+            break (model, trap, judged);
         }
         kept.extend(failing);
     };
-    let run = Run::new(&model, reference);
     // The trap every reported quantity describes (SPEC §1.3: trapFrequencyKHz, n̄, the validated regime, T's targeting and
     // its windows): the trap light's potential with the other lights' phase-averaged shifts at the reference state
     // (`Model::reported`). Where it has no minimum the descent reaches -- the atoms are not held by the light they run in: a
@@ -380,6 +382,13 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
         ledger,
         method: format!("半经典 3D：{}", model.describe().trim_end_matches('。')),
     };
+
+    // The near light's tables (SPEC §2.3, §5.4; model/tabulate.rs): refined over the reach to the largest ensemble's
+    // resolution, no grid of more nodes than the middles the pilot's first rung asks of the model -- a table dearer than
+    // the run it serves is not built, and what it then misses is read at the atoms below.
+    let most = (pilot_size() as f64 * adapt::READ_STEPS as f64 * context.plan.end / context.tau).ceil() as usize;
+    let mut tables = model.tabulate(&judged, most);
+    let run = Run::tabulated(&model, &tables, reference);
 
     // The outputs where T is held to its target, and its scale there (module documentation, # Stopping): the pilot's T
     // where it is read on every axis and its upper bound lies in the validated regime.
@@ -454,7 +463,8 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
             from.extend(std::iter::repeat_n(g, s.len()));
         }
     }
-    let each: Vec<Vec<UnitError>> = samples.par_iter().map(|s| model.errors(&units, std::slice::from_ref(&s.sample)).into_iter().map(|e| e[0]).collect()).collect();
+    let each: Vec<Vec<UnitError>> =
+        samples.par_iter().map(|s| model.errors_with(&units, std::slice::from_ref(&s.sample), Some(&tables)).into_iter().map(|e| e[0]).collect()).collect();
     let errors: Vec<Vec<UnitError>> = (0..units.len()).map(|u| each.iter().map(|e| e[u]).collect()).collect();
     let measured = Measured { errors: &errors, output: &at, group: &from };
     let means = measured.means(outputs, None);
@@ -462,6 +472,46 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
         means.iter().map(|unit| (unit.iter().map(|m| m[0]).collect(), unit.iter().map(|m| m[1]).collect())).unzip();
     let unsampled = unseen(MOST_TRAJECTORIES as f64);
     context.fixed.model = model_error(&means, None, unsampled);
+    // The tables' errors (SPEC §5.4): each table's whole error against the elimination itself, read at one state of
+    // each pilot trajectory (`one_each`) and averaged over them -- a state on another cluster reads none of it. A table
+    // beyond the tables' shares has the axis of its largest read halved and is read again, until it is within them or
+    // its next grid would exceed the work's bound; what it reads then is booked on every output, and flagged where it
+    // still lies beyond.
+    let read_at = one_each(&samples, &at, outputs);
+    let (shown_share, temperature_share) = crate::model::tabulate::shares();
+    let run = {
+        drop(run);
+        let mut stuck = vec![false; tables.tables.len()];
+        let booked = loop {
+            let reads: Vec<Vec<crate::model::tabulate::TableRead>> = read_at.par_iter().map(|&j| model.table_reads(&tables, std::slice::from_ref(&samples[j].sample))).collect();
+            let mean = |f: &dyn Fn(&crate::model::tabulate::TableRead) -> f64, t: usize| reads.iter().map(|r| f(&r[t])).sum::<f64>() / reads.len().max(1) as f64;
+            let whole: Vec<[f64; 2]> = (0..tables.tables.len()).map(|t| [mean(&|r| r.whole[0].population, t), mean(&|r| r.whole[0].temperature, t)]).collect();
+            let beyond = (0..whole.len()).find(|&t| !stuck[t] && (whole[t][0] > shown_share || whole[t][1] > temperature_share));
+            let Some(t) = beyond else { break whole };
+            let axes = tables.tables[t].axes();
+            let weight = |f: usize| mean(&|r| r.axes[f][0].population / shown_share + r.axes[f][0].temperature / temperature_share, t);
+            let worst = (0..axes).max_by(|&a, &b| weight(a).total_cmp(&weight(b)));
+            match worst.and_then(|f| model.halved(&tables.tables[t], f, most)) {
+                Some(finer) => tables.tables[t].table = finer,
+                None => stuck[t] = true,
+            }
+        };
+        for (t, table) in tables.tables.iter().enumerate() {
+            let label = format!(
+                "近共振光的表（{} 所在子空间{}）",
+                model.state_label(model.clusters()[table.layout.cluster].states[0]),
+                if table.layout.lights == model.running() { "" } else { "，光镊关闭时" }
+            );
+            for k in 1..outputs {
+                context.fixed.model[k] = [(context.fixed.model[k][0] + booked[t][0]).min(1.), context.fixed.model[k][1] + booked[t][1]];
+            }
+            context.ledger.item(&label, booked[t][0].max(booked[t][1]), TABLE_MEASURED);
+            if stuck[t] {
+                context.ledger.flag(format!("{label}的误差超出表的份额，而加密已到工作量的界：按实测记账"));
+            }
+        }
+        Run::tabulated(&model, &tables, reference)
+    };
     context.fixed.held = estimates.iter().map(|e| 1. - e.loss).collect();
     context.fixed.temperature = held_to(&estimates);
     let mut targets = Targets::new(&context.fixed);
@@ -478,7 +528,7 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
         return Ok(Attempt::Keep(units[u].clone(), tau));
     }
     // The greedy keep by pays (SPEC §5.2): the unit whose keeping saves the most predicted work beyond its spread.
-    let ranked = candidates(request, light, &kept, &model, reference, &units, &measured, &samples, &pilot, &context.fixed, &context.scales, unsampled);
+    let ranked = candidates(request, light, &kept, &model, reference, trap.centre, &units, &measured, &samples, &pilot, &context.fixed, &context.scales, unsampled);
     if let Some(c) = ranked.first().filter(|c| pays(0., c.saving)) {
         return Ok(Attempt::Keep(units[c.unit].clone(), tau));
     }
@@ -526,7 +576,8 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
         return Ok(Attempt::Done(result));
     };
     let with = Model::new(request, light, &[kept.as_slice(), std::slice::from_ref(&units[u])].concat())?;
-    let finer = Run::new(&with, reference);
+    let finer_tables = with.tabulate(&with.reach(&with.trap(&reference, &with.prepared())?, &reference, reach, unsampled), most);
+    let finer = Run::tabulated(&with, &finer_tables, reference);
     let fine = run_groups(0, checked, Shape::of(&context.plan, false), &|i| trajectory(&finer, &ensemble, tau, None, Some(&context.fixed.windows), &context.plan, false, i), messages, &mut |_, messages| messages.result(&result, None));
     // What the pairs read clearly beyond the fold's booked error is booked in its place: on the rows as shown as it is
     // read there, and on T.
@@ -1084,14 +1135,21 @@ fn model_error(means: &[Vec<[f64; 2]>], without: Option<usize>, unsampled: f64) 
         .collect()
 }
 
-/// The counted work (decide.rs `Work`) a trajectory spends per µs at a pilot state under a model, the state on the model's
-/// `cluster`: one step's -- the integrator's (adapt.rs `advance_work`, through the model's generator at the state's
-/// point, its velocity and τ) and its assemblies' (`assembly`, the model's count of one) -- over its τ.
-fn rate(run: &Run, assembly: f64, cluster: usize, state: &State) -> f64 {
+/// The counted work (decide.rs `Work`) a trajectory spends per µs at a pilot state under a model: one step's -- the
+/// integrator's (adapt.rs `advance_work`) on the path of the state's own momentum, velocity and τ through `middle`, its
+/// cluster's middle at the trap's centre (a price needs the generator's sizes, not the state's own point: one middle a
+/// cluster serves every state of a model), and its middles' (`assembly`, the model's count of one) -- over its τ.
+fn rate(run: &Run, assembly: f64, middle: &crate::model::Middle, state: &State) -> f64 {
     let at = state.sample.at;
     let velocity = at.kappa.map(|k| run.hbar_over_mass() * k);
-    let (work, assemblies) = adapt::advance_work(&run.middle(cluster, at.r, at.t), at.kappa, velocity, state.tau);
+    let (work, assemblies) = adapt::advance_work(middle, at.kappa, velocity, state.tau);
     (work + assemblies as f64 * assembly) / state.tau
+}
+
+/// One state of each pilot trajectory among `states` (their outputs in `output`): its outputs taken in turn by its
+/// number -- the trajectory is the pilot's independent unit.
+fn one_each(states: &[State], output: &[usize], outputs: usize) -> Vec<usize> {
+    (0..states.len()).filter(|&j| output[j] as u64 == 1 + states[j].index % (outputs as u64 - 1)).collect()
 }
 
 /// A unit to keep (`candidates`): its predicted saving, and the kept model's work per µs over the current one's.
@@ -1119,6 +1177,7 @@ fn candidates(
     kept: &[Unit],
     model: &Model,
     reference: [f64; GROUND],
+    centre: V3,
     units: &[Unit],
     measured: &Measured,
     states: &[State],
@@ -1138,7 +1197,7 @@ fn candidates(
             (pooled(&parts, scales).0, measured.means(outputs, left))
         })
         .collect();
-    let priced: Vec<usize> = (0..states.len()).filter(|&j| measured.output[j] as u64 == 1 + states[j].index % (outputs as u64 - 1)).collect();
+    let priced = one_each(states, measured.output, outputs);
     let mean = |rates: &[f64], left: Option<usize>| {
         let (sum, count) = priced.iter().zip(rates).filter(|(&j, _)| Some(measured.group[j]) != left).fold((0., 0.), |a, (_, r)| (a.0 + r, a.1 + 1.));
         sum / count
@@ -1152,7 +1211,8 @@ fn candidates(
     let again = (groups as u64 * GROUP) as f64;
     let current = Run::new(model, reference);
     let assembly = current.assembly_work();
-    let own: Vec<f64> = priced.par_iter().map(|&j| rate(&current, assembly, states[j].sample.cluster, &states[j])).collect();
+    let middles: Vec<crate::model::Middle> = (0..model.clusters().len()).map(|c| current.middle(c, centre, 0.)).collect();
+    let own: Vec<f64> = priced.par_iter().map(|&j| rate(&current, assembly, &middles[states[j].sample.cluster], &states[j])).collect();
     let base: Vec<f64> = (0..levels.len()).map(|i| work(i, None, &own, 0.)).collect();
     let mut out: Vec<Candidate> = (0..units.len())
         .into_par_iter()
@@ -1161,9 +1221,10 @@ fn candidates(
             let with = Model::new(request, light, &[kept, std::slice::from_ref(&units[u])].concat()).ok()?;
             let finer = Run::new(&with, reference);
             let assembly = finer.assembly_work();
+            let middles: Vec<crate::model::Middle> = (0..with.clusters().len()).map(|c| finer.middle(c, centre, 0.)).collect();
             let rates: Vec<f64> = priced
                 .par_iter()
-                .map(|&j| rate(&finer, assembly, finer.cluster_of(model.clusters()[states[j].sample.cluster].states[0]), &states[j]))
+                .map(|&j| rate(&finer, assembly, &middles[finer.cluster_of(model.clusters()[states[j].sample.cluster].states[0])], &states[j]))
                 .collect();
             let x: Vec<f64> = (0..levels.len()).map(|i| 1. - work(i, Some(u), &rates, again) / base[i]).collect();
             let saving = Read { value: x[0], spread: spread(x[1..].iter().copied(), groups as f64) };
