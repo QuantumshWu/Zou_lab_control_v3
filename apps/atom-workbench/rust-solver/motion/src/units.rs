@@ -62,9 +62,9 @@ pub const JUMP_TIMING: f64 = {
 // ---------------------------------------------------------------------------------------------------------------------
 // The contract's definitions and caps.
 
-/// The validated regime's boundary (SPEC §0, §3): k_BT ≥ CLASSICAL·ħω on every axis, mirrored in the app (the result's
-/// `classical`, the UI's grey band, src/model-notes.ts `SEMICLASSICAL_REGIME`). It decides one thing in the solve, the
-/// outputs where T is held to its target (solve.rs `classical`), and tunes no other decision.
+/// The validated regime's boundary (SPEC §0, §3): k_BT ≥ CLASSICAL·ħω, axis by axis, mirrored in the app (the result's
+/// `classical`: every axis's; the UI's grey band, src/model-notes.ts `SEMICLASSICAL_REGIME`). It decides one thing in
+/// the solve, the outputs where each lab axis's T is held to its target (solve.rs `classical`), and tunes no other decision.
 pub const CLASSICAL: f64 = 4.0;
 /// The trap's region (SPEC §1.3, §1.7): an atom is outside it where every focused beam's intensity at the atom is
 /// below this share of its value at the focus -- the contract's definition of a lost atom, the UI's text word for word

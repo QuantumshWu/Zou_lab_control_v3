@@ -399,13 +399,10 @@ impl Estimate {
     pub fn shown_statistics(&self) -> f64 {
         self.shown_interval().max(unseen(self.trajectories))
     }
-    /// T's largest interval at the confidence z over the lab axes, each relative to its `scale` (µK); unbounded where T is
-    /// not read.
-    pub fn temperature_interval(&self, scale: [f64; 3]) -> f64 {
-        match &self.motion {
-            Some(m) => (0..3).map(|a| m.temperature_errors[a].interval() / scale[a]).fold(0., f64::max),
-            None => f64::INFINITY,
-        }
+    /// The interval of T on the lab axis `axis` at the confidence z, relative to `scale` (µK); unbounded where T is not
+    /// read.
+    pub fn temperature_interval(&self, axis: usize, scale: f64) -> f64 {
+        self.motion.as_ref().map_or(f64::INFINITY, |m| m.temperature_errors[axis].interval() / scale)
     }
 }
 

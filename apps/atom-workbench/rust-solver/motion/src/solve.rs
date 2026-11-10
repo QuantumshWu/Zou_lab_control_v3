@@ -9,8 +9,8 @@
 //!    a pilot with its reads (the old engine's pilot did the same: it predicted, and no result stood on it).
 //!    The pilot: the run's first `pilot_size` trajectories (their own numbers, from `MOST_TRAJECTORIES`), at a rung of
 //!    the step's ladder. The step and its error are read on a rung's members that carry a reader (# The step), the
-//!    model's units' errors at the states of the first member of every group; from all of them the outputs where T is held to its
-//!    target and T's scale there, the held share, the reach's test. Its result is the first checkpoint, and its
+//!    model's units' errors at the states of the first member of every group; from all of them the outputs and lab axes
+//!    where T is held to its target and T's scale there, the held share, the reach's test. Its result is the first checkpoint, and its
 //!    trajectories stay in the result: they are trajectories of the run's own model and step, and what is judged on
 //!    them -- the step, the model, the rooms -- is judged once, before the product, as QuTiP's mcsolve stops on the
 //!    standard error of the trajectories it reports.
@@ -37,7 +37,7 @@
 //! one that fails there fails, for the cost of one interval of the run. The rung below a read rung that has failed
 //! needs no read of its own where the read, over 2^p, lies within the shares -- the order the Richardson factors rest on, held between two
 //! neighbouring rungs and no further --: it is the run's step, its booked error the read's over 2^p, and none of its
-//! trajectories carries a reader. What is booked per output is the read's bound on the rows as shown and on T (`Fixed::step`); the loss's is the
+//! trajectories carries a reader. What is booked per output is the read's bound on the rows as shown and on T per lab axis (`Fixed::step`); the loss's is the
 //! share of the product's trajectories whose loss energy lies within the pilot's accumulated error of the escape -- its
 //! mean and z of the atoms' spread (`Fixed::windows`). That share's statistics are the output's own (what no trajectory
 //! saw is booked there, estimate.rs `unseen`); it refutes the step where Wilson's near end at its count lies beyond the
@@ -69,11 +69,32 @@
 //! (units.rs `STEP_SHARE`), the read is what it took. The targets the stopping rule reads are fixed by the pilot alone (`Fixed`),
 //! never by the run's own estimates, so that the stopping depends on the run's standard errors and nothing else: the
 //! model's error A from the units measured at the pilot's states, the held share by which T's error counts (the user's
-//! definition: T describes the atoms held), and T's scale -- the pilot's T, at the outputs where its upper bound
-//! T + t·SE lies in the validated regime on every axis (`CLASSICAL`; elsewhere T is reported, not chased). A batch brings
-//! the trajectories to the number the latest estimates predict every output needs (SE ∝ N^{−1/2}; the shown rows at least
-//! the count whose unseen share fits the room, estimate.rs `draws_for`), at most to twice the number the prediction rests
-//! on (`batch`).
+//! definition: T describes the atoms held), and T's scale per lab axis -- the pilot's T_a, at the outputs where its upper
+//! bound T_a + t·SE lies in that axis's validated regime (`classical`). A batch brings the trajectories to the number the
+//! latest estimates predict every output needs (SE ∝ N^{−1/2}; the shown rows at least the count whose unseen share fits
+//! the room, estimate.rs `draws_for`), at most to twice the number the prediction rests on (`batch`).
+//!
+//! # T is held per lab axis
+//! The semiclassical model is validated where k_BT ≥ `CLASSICAL` ħω and not below (SPEC §0, §8: its one known limit). The
+//! test is taken axis by axis: T_a is held to its target -- the step's read judged against the step's share (`rung`), the
+//! read's bound booked (`Fixed::step`), the statistics chased into the room both leave (`Targets`), the total flagged
+//! where it exceeds the target (ledger.rs) -- at every output where the pilot's T_a may lie in the regime of its own axis;
+//! an axis below it is reported, not chased, and takes no other axis with it: a trap's tight axis that cools to a few ħω
+//! leaves the numerical error of the loose axes, where the model holds, as controlled as before. The result says per
+//! output and axis whether the run's own T_a lies in the regime (`Solution::classical`), whether the axis was held
+//! (`Solution::temperature_held`) and its total estimated error (`Solution::temperature_estimated_errors`).
+//!
+//! The axis's frequency is the reported trap's along the lab axis, ω_a² = (ħ/m) ∂²V/∂x_a² at its bottom (model.rs
+//! `Trap::lab`): T_a is the variance of κ along the lab axis over that frequency's period (# Outputs and windows), n̄_a
+//! and the result's `trapFrequencyKHz` are read against it, and so is the regime -- one frequency for everything said of
+//! an axis; the principal axes' own would test temperatures that are not estimated. In a trap whose principal axes e_i
+//! are tilted against the lab axes it is the root mean square of the principal frequencies the axis is made of,
+//! ω_a² = Σ_i (e_i·x_a)² ω_i², no less than their mean of the same weights (Jensen): with every mode at its own boundary,
+//! k_BT_i = C ħω_i, the axis's T_a = Σ_i (e_i·x_a)² T_i = C ħ Σ_i (e_i·x_a)² ω_i/k_B ≤ C ħω_a/k_B, so a tilted axis is
+//! held only where the modes it is made of are inside the regime in that weighted mean, never further out.
+//!
+//! No feedback comes with it: which axes are held at which outputs, and their scales, are the pilot's, fixed before the
+//! product as they were for the output as a whole; the product's own T moves neither.
 //!
 //! # Checkpoints
 //! The decisions take counts, never the wall clock, so a request gives the same result on any machine. The wall clock only
@@ -153,8 +174,14 @@ pub struct Solution {
     /// Velocities (m/s) and positions (µm from the focus) per lab axis.
     pub velocity: [Distributions; 3],
     pub position: [Distributions; 3],
-    /// Per output: in the validated regime, k_BT ≥ CLASSICAL ħω on every axis (reporting only).
-    pub classical: Vec<bool>,
+    /// Per output and lab axis: in the validated regime, k_BT_a ≥ CLASSICAL ħω_a at the run's own T_a (reporting only; the
+    /// contract's `classical` is every axis's, contract §2.2).
+    pub classical: Vec<[bool; 3]>,
+    /// Per output and lab axis: whether the axis's T is held to its target (module documentation, # T is held per lab axis:
+    /// fixed by the pilot; an axis below its validated regime is not), and its total estimated error (relative, ledger.rs `Account`:
+    /// model, step and statistics, weighed by the held share), none where one of the three is not read.
+    pub temperature_held: Vec<[bool; 3]>,
+    pub temperature_estimated_errors: Vec<[Option<f64>; 3]>,
     pub trajectories: u64,
     /// The run's step τ (µs, adapt.rs).
     pub time_step_us: f64,
@@ -298,26 +325,41 @@ fn top_rung(interval: f64, frequency: f64) -> f64 {
 }
 
 /// A rung's outcome on the pilot's step error (module documentation, # The step; decide.rs `judge`): the family of every
-/// output's rows as shown, and of T per lab axis where it is held to its target, each against the step's share, at the
-/// scheme's order -- beyond, the factor on τ at which the largest measured error meets its share. `wider` times the
-/// shares: 1 for the rung read; 2^p for the rung below it, whose errors are the read ones over 2^p.
-fn rung(reads: &[Stepped], held_to: &[Option<V3>], wider: f64) -> Judgement {
+/// output's rows as shown, and of T on each lab axis where that axis is held to its target (`held_to`: per output and
+/// axis), each against the step's share, at the scheme's order -- beyond, the factor on τ at which the largest measured
+/// error meets its share. `wider` times the shares: 1 for the rung read; 2^p for the rung below it, whose errors are the
+/// read ones over 2^p.
+fn rung(reads: &[Stepped], held_to: &[[Option<f64>; 3]], wider: f64) -> Judgement {
     let [sp, st] = step_bound().map(|share| wider * share);
     let mut looks: Vec<(Read, f64)> = vec![];
     for (k, r) in reads.iter().enumerate().skip(1) {
         looks.extend(r.shown.iter().map(|x| (*x, sp)));
-        if let (Some(_), Some(t)) = (held_to[k], &r.temperature) {
-            looks.extend(t.iter().map(|x| (*x, st)));
+        if let Some(t) = &r.temperature {
+            looks.extend((0..3).filter(|&a| held_to[k][a].is_some()).map(|a| (t[a], st)));
         }
     }
     judge(&looks, ORDER as f64)
 }
 
-/// The step's error as a read bounds it, per output on what is shown and on T (`Fixed::step`): a probability's error is at
-/// most 1, T's unbounded where it is not read.
-fn booked(reads: &[Stepped]) -> Vec<[f64; 2]> {
+/// The step's error at one output as a read bounds it (`Fixed::step`): on the rows as shown, and on T per lab axis
+/// (relative).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Bound {
+    shown: f64,
+    temperature: V3,
+}
+impl Bound {
+    /// The bound `factor` times this one: that of a rung whose errors are so many times the read one's.
+    fn times(&self, factor: f64) -> Bound {
+        Bound { shown: self.shown * factor, temperature: self.temperature.map(|b| b * factor) }
+    }
+}
+
+/// The step's error as a read bounds it, per output: a probability's error is at most 1, T's unbounded on every axis
+/// where it is not read.
+fn booked(reads: &[Stepped]) -> Vec<Bound> {
     let bound = |x: &Read| x.bound(1.);
-    reads.iter().map(|r| [r.shown.iter().map(bound).fold(0., f64::max).min(1.), r.temperature.as_ref().map_or(f64::INFINITY, |t| t.iter().map(bound).fold(0., f64::max))]).collect()
+    reads.iter().map(|r| Bound { shown: r.shown.iter().map(bound).fold(0., f64::max).min(1.), temperature: r.temperature.as_ref().map_or([f64::INFINITY; 3], |t| t.each_ref().map(bound)) }).collect()
 }
 
 /// The estimates, the listed outputs' atoms and the counts of some groups.
@@ -354,11 +396,28 @@ fn outgrown(estimates: &[Estimate], reach: f64) -> Option<f64> {
     beyond.then(|| read.iter().flat_map(|m| m.temperature).fold(reach, f64::max))
 }
 
-/// Whether temperatures per lab axis (µK) lie in the validated regime of the trap's frequencies (rad/µs) on every axis,
-/// k_BT ≥ `CLASSICAL` ħω (SPEC §0, §3): the one test of what the result reports as classical and of where T is held to
-/// its target.
-fn classical(temperature: &V3, frequencies: &V3) -> bool {
-    (0..3).all(|a| KT_PER_UK * temperature[a] >= CLASSICAL * frequencies[a])
+/// Whether a lab axis's temperature (µK) lies in the validated regime of that axis's frequency (rad/µs), k_BT ≥
+/// `CLASSICAL` ħω (SPEC §0, §3): the one test, per axis, of what the result reports as classical and of where the axis's T
+/// is held to its target (module documentation, # T is held per lab axis).
+fn classical(temperature: f64, frequency: f64) -> bool {
+    KT_PER_UK * temperature >= CLASSICAL * frequency
+}
+
+/// The outputs and lab axes where T is held to its target, and its scale there (module documentation, # T is held per lab
+/// axis): the T of `estimates` (the pilot's) on the axis, where its error is read and its upper bound T_a + t·SE lies in
+/// the validated regime of the axis's frequency (rad/µs); none at t = 0, the ensemble's exact moment.
+fn held_to(estimates: &[Estimate], frequencies: &V3) -> Vec<[Option<f64>; 3]> {
+    estimates
+        .iter()
+        .enumerate()
+        .map(|(k, e)| {
+            let Some(m) = e.motion.as_ref().filter(|_| k > 0) else { return [None; 3] };
+            std::array::from_fn(|a| {
+                let (t, error) = (m.temperature[a], &m.temperature_errors[a]);
+                (error.read() && t > 0. && classical(t + error.interval(), frequencies[a])).then_some(t)
+            })
+        })
+        .collect()
 }
 
 /// The states the model is read at and the folded units' errors there (SPEC §5.2): at every output the first member of
@@ -505,7 +564,7 @@ fn attempt(
     let (momentum, start) = exact(&ensemble.kinetic(0));
     let mut context = Context {
         momentum,
-        fixed: Fixed { model: vec![[0.; 2]; outputs], held: vec![1.; outputs], temperature: vec![None; outputs], step: vec![step_bound(); outputs], windows: vec![], start },
+        fixed: Fixed { model: vec![[0.; 2]; outputs], held: vec![1.; outputs], temperature: vec![[None; 3]; outputs], step: vec![Bound { shown: step_bound()[0], temperature: [step_bound()[1]; 3] }; outputs], windows: vec![], start },
         tau: step.unwrap_or_else(|| top_rung(plan.times[1] - plan.times[0], trap.frequencies.iter().copied().fold(0., f64::max))),
         plan,
         scales,
@@ -521,19 +580,7 @@ fn attempt(
     let mut tables = model.tabulate(&judged, most);
     let run = Run::tabulated(&model, &tables, reference);
 
-    // The outputs where T is held to its target, and its scale there (module documentation, # Stopping): the pilot's T
-    // where it is read on every axis and its upper bound lies in the validated regime.
-    let held_to = |estimates: &[Estimate]| -> Vec<Option<V3>> {
-        estimates
-            .iter()
-            .enumerate()
-            .map(|(k, e)| {
-                let m = e.motion.as_ref().filter(|m| k > 0 && m.temperature_errors.iter().all(Spread::read))?;
-                let upper: V3 = std::array::from_fn(|a| m.temperature[a] + m.temperature_errors[a].interval());
-                (m.temperature.iter().all(|&t| t > 0.) && classical(&upper, &report.lab)).then_some(m.temperature)
-            })
-            .collect()
-    };
+    let held_to = |estimates: &[Estimate]| held_to(estimates, &report.lab);
 
     // The pilot (module documentation, # The pipeline, # The step): the run's first trajectories, at the ladder's rungs
     // from its first one until the step's error fits the step's share; its readers' marks average each atom's kinetic
@@ -645,11 +692,12 @@ fn attempt(
             let read: Vec<&Part> = parts.iter().collect();
             let estimates = pooled(&read, &context.scales).0;
             let bounds = booked(&stepped(&read, &context.scales));
-            let (held, temperature): (Vec<f64>, Vec<Option<V3>>) = (estimates.iter().map(|e| 1. - e.loss).collect(), held_to(&estimates));
+            let (held, temperature): (Vec<f64>, Vec<[Option<f64>; 3]>) = (estimates.iter().map(|e| 1. - e.loss).collect(), held_to(&estimates));
             let need = |factor: f64| {
-                let step: Vec<[f64; 2]> = bounds.iter().map(|b| [b[0] * factor, b[1] * factor]).collect();
+                let step: Vec<Bound> = bounds.iter().map(|b| b.times(factor)).collect();
                 let roomy = (1..outputs).all(|k| {
-                    room(POPULATION_TARGET, scouted[k][0] * held[k], step[k][0]) > 0. && (temperature[k].is_none() || room(TEMPERATURE_TARGET / held[k], scouted[k][1], step[k][1]) > 0.)
+                    room(POPULATION_TARGET, scouted[k][0] * held[k], step[k].shown) > 0.
+                        && (0..3).all(|a| temperature[k][a].is_none() || room(TEMPERATURE_TARGET / held[k], scouted[k][1], step[k].temperature[a]) > 0.)
                 });
                 if roomy { Targets::new(&Fixed { model: scouted.clone(), held: held.clone(), temperature: temperature.clone(), step, ..context.fixed.clone() }).need(&estimates) } else { f64::INFINITY }
             };
@@ -703,20 +751,15 @@ fn attempt(
     }
     (context.momentum, context.fixed.start) = exact(&ensemble.kinetic(counts.steps));
 
-    // The step's error booked per output: the read's bound on the rows as shown -- a probability's error is at most 1,
-    // which an unreadable one is booked at, flagged -- and on T, unbounded where it is not read (T's account is then none,
-    // flagged where the run shows T, `assemble`); and the loss energy's window, unbounded where no trajectory reads it.
-    let bound = |x: &Read| x.bound(1.);
-    let rows: Vec<f64> = reads.iter().map(|r| r.shown.iter().map(bound).fold(0., f64::max)).collect();
-    let unread: Vec<usize> = (1..outputs).filter(|&k| !rows[k].is_finite()).collect();
+    // The step's error booked per output (`booked`): the read's bound on the rows as shown -- a probability's error is at
+    // most 1, which an unreadable one is booked at, flagged -- and on T per lab axis, unbounded where it is not read (T's
+    // accounts are then none, flagged where the run shows T, `assemble`); and the loss energy's window, unbounded where
+    // no trajectory reads it.
+    let unread: Vec<usize> = (1..outputs).filter(|&k| reads[k].shown.iter().any(|x| !x.bound(1.).is_finite())).collect();
     if !unread.is_empty() {
         context.ledger.flag(format!("{}：步长对布居的误差读不出，按 1 记账", span(&unread, &context.plan.times)));
     }
-    context.fixed.step = reads
-        .iter()
-        .zip(&rows)
-        .map(|(r, &shown)| [shown.min(1.), r.temperature.as_ref().map_or(f64::INFINITY, |t| t.iter().map(bound).fold(0., f64::max))])
-        .collect();
+    context.fixed.step = booked(&reads);
     context.fixed.windows = reads.iter().map(|r| r.energy.map_or(f64::INFINITY, |e| e[0].abs() + CONFIDENCE * e[1])).collect();
 
     // The model's errors at the pilot's states (SPEC §5.2): each folded unit's per output, the held atoms' mean over
@@ -787,7 +830,7 @@ fn attempt(
         context.ledger.item(&model.label(unit), (1..outputs).map(|k| weighed(u, k)[0].max(weighed(u, k)[1])).fold(0., f64::max), FOLD_MEASURED);
     }
     context.ledger.item("折叠判定之外的未采样份额", unsampled, "计入模型误差");
-    let step_error = context.fixed.step.iter().skip(1).map(|b| b[0].max(b[1])).fold(0., f64::max);
+    let step_error = context.fixed.step.iter().skip(1).map(|b| b.temperature.iter().copied().fold(b.shown, f64::max)).fold(0., f64::max);
     context.ledger.item(&format!("时间步长 τ = {tau} μs（全程不变）"), step_error, "试探上每步减半实测，按动力学带到输出时刻");
     messages.result(&assemble(&context, &estimates, &listed, &counts, pilot_size()), None);
 
@@ -1148,17 +1191,17 @@ fn run_groups(first: u64, end: u64, members: std::ops::Range<u64>, shape: Shape,
 }
 
 /// What the pilot fixes for the run (module documentation, # Stopping), per output: the model's error on the held atoms
-/// (populations absolute, T relative; T's unbounded where no pilot atom reads it), the held share, and T's scale per
-/// axis (µK) where T is held to its target; the
-/// step's error read on the rows as shown and on T (relative; unbounded where not read), and the loss energy's window
-/// (rad/µs; module documentation, # The step; none before the pilot is read); and T(0)'s relative error, its
-/// quadrature's last two levels' difference (ensemble.rs `Ensemble::kinetic`).
+/// (populations absolute, T relative; T's unbounded where no pilot atom reads it), the held share, and per lab axis T's
+/// scale (µK) where that axis's T is held to its target; the step's error read on the rows as shown and on T per lab
+/// axis (`Bound`; unbounded where not read), and the loss energy's window (rad/µs; module documentation, # The step;
+/// none before the pilot is read); and T(0)'s relative error, its quadrature's last two levels' difference (ensemble.rs
+/// `Ensemble::kinetic`).
 #[derive(Clone)]
 struct Fixed {
     model: Vec<[f64; 2]>,
     held: Vec<f64>,
-    temperature: Vec<Option<V3>>,
-    step: Vec<[f64; 2]>,
+    temperature: Vec<[Option<f64>; 3]>,
+    step: Vec<Bound>,
     windows: Vec<f64>,
     start: f64,
 }
@@ -1176,10 +1219,11 @@ fn room(target: f64, model: f64, step: f64) -> f64 {
 }
 
 /// The statistics' targets of the run (module documentation, # Stopping): per output the room of the shown rows' and the
-/// loss's interval, and where T is held to its target its scale and the room of its relative interval.
+/// loss's interval, and per lab axis, where that axis's T is held to its target, its scale and the room of its relative
+/// interval.
 struct Targets {
     population: Vec<f64>,
-    temperature: Vec<Option<(V3, f64)>>,
+    temperature: Vec<[Option<(f64, f64)>; 3]>,
     held: Vec<f64>,
 }
 impl Targets {
@@ -1187,28 +1231,30 @@ impl Targets {
         let share = step_bound();
         // The bound as booked where it leaves a room beside the model's error; where it leaves none -- a read that is no
         // number, or one beyond what the target can hold --, the share (flagged where it is booked).
-        let step = |b: &[f64; 2], i: usize, target: f64, model: f64| if room(target, model, b[i]) > 0. { b[i] } else { b[i].min(share[i]) };
+        let step = |bound: f64, share: f64, target: f64, model: f64| if room(target, model, bound) > 0. { bound } else { bound.min(share) };
         Targets {
-            population: fixed.model.iter().zip(&fixed.held).zip(&fixed.step).map(|((a, h), b)| room(POPULATION_TARGET, a[0] * h, step(b, 0, POPULATION_TARGET, a[0] * h))).collect(),
+            population: fixed.model.iter().zip(&fixed.held).zip(&fixed.step).map(|((a, h), b)| room(POPULATION_TARGET, a[0] * h, step(b.shown, share[0], POPULATION_TARGET, a[0] * h))).collect(),
             temperature: fixed
                 .temperature
                 .iter()
                 .zip(&fixed.model)
                 .zip(&fixed.held)
                 .zip(&fixed.step)
-                .map(|(((t, a), h), b)| t.map(|scale| (scale, room(TEMPERATURE_TARGET / h, a[1], step(b, 1, TEMPERATURE_TARGET / h, a[1])))))
+                .map(|(((t, a), h), b)| std::array::from_fn(|x| t[x].map(|scale| (scale, room(TEMPERATURE_TARGET / h, a[1], step(b.temperature[x], share[1], TEMPERATURE_TARGET / h, a[1]))))))
                 .collect(),
             held: fixed.held.clone(),
         }
     }
-    /// The outputs whose model and step errors leave the statistics no room (SPEC §5.2): on what is shown, or on T where it
-    /// is held to its target.
+    /// The outputs whose model and step errors leave the statistics no room (SPEC §5.2): on what is shown, or on T on an
+    /// axis held to its target.
     fn crowded(&self) -> Vec<usize> {
-        (1..self.population.len()).filter(|&k| self.population[k] == 0. || self.temperature[k].is_some_and(|t| t.1 == 0.)).collect()
+        (1..self.population.len()).filter(|&k| self.population[k] == 0. || self.temperature[k].iter().flatten().any(|t| t.1 == 0.)).collect()
     }
     /// Whether every output's statistics meet their targets.
     fn met(&self, estimates: &[Estimate]) -> bool {
-        let fits = |(k, e): (usize, &Estimate)| e.shown_statistics() <= self.population[k] && self.temperature[k].is_none_or(|(scale, room)| e.temperature_interval(scale) <= room);
+        let fits = |(k, e): (usize, &Estimate)| {
+            e.shown_statistics() <= self.population[k] && (0..3).all(|a| self.temperature[k][a].is_none_or(|(scale, room)| e.temperature_interval(a, scale) <= room))
+        };
         estimates.iter().enumerate().skip(1).all(fits)
     }
     /// The trajectories each output needs by the estimates of N (module documentation, # Stopping), their largest.
@@ -1222,9 +1268,9 @@ impl Targets {
                 let n = e.trajectories;
                 let room = self.population[k];
                 let shown = (n * (e.shown_interval() / room).powi(2)).max(draws_for(room));
-                let temperature = match self.temperature[k] {
+                let temperature = |a: usize| match self.temperature[k][a] {
                     Some((scale, room)) => {
-                        let relative = e.temperature_interval(scale);
+                        let relative = e.temperature_interval(a, scale);
                         if relative.is_finite() {
                             n * (relative / room).powi(2)
                         } else {
@@ -1234,36 +1280,37 @@ impl Targets {
                     }
                     None => 0.,
                 };
-                shown.max(temperature)
+                (0..3).map(temperature).fold(shown, f64::max)
             })
             .fold(0., f64::max)
     }
 }
 
-/// Each output's accounts of what is shown and of T (ledger.rs `Account`) by the run's estimates, the model's errors on the
-/// held atoms per output and the step's (`Fixed`), T's where read: the held share 1 − L weighs the model's error on the rows as shown, and
-/// T's whole account (module documentation, # Stopping); t = 0 is the request's state, without error, and the ensemble's
-/// moments, T's by quadrature: its account is the quadrature's error alone (`Fixed::start`), in the discretization's part
-/// (SPEC §4). The model's error on what is shown is at most 1, a probability's. The step's error on
-/// what is shown is the larger of the rows' and the loss's -- the share of the judged trajectories within the loss
-/// energy's window of the escape (module documentation, # The step), the step's share where none is judged yet (a
-/// pilot's result). T has an account where its statistics, its model error and its step error are all read.
-fn accounts(estimates: &[Estimate], fixed: &Fixed) -> (Vec<Account>, Vec<Option<Account>>) {
+/// Each output's accounts of what is shown and of T per lab axis (ledger.rs `Account`) by the run's estimates, the model's
+/// errors on the held atoms per output and the step's (`Fixed`), T's where read: the held share 1 − L weighs the model's
+/// error on the rows as shown, and T's whole accounts (module documentation, # Stopping); t = 0 is the request's state,
+/// without error, and the ensemble's moments, T's by quadrature: its accounts are the quadrature's error alone
+/// (`Fixed::start`), in the discretization's part (SPEC §4). The model's error on what is shown is at most 1, a
+/// probability's. The step's error on what is shown is the larger of the rows' and the loss's -- the share of the judged
+/// trajectories within the loss energy's window of the escape (module documentation, # The step), the step's share where
+/// none is judged yet (a pilot's result). An axis's T has an account where its statistics, the model's error and the
+/// axis's step error are all read.
+fn accounts(estimates: &[Estimate], fixed: &Fixed) -> (Vec<Account>, Vec<[Option<Account>; 3]>) {
     estimates
         .iter()
         .zip(&fixed.model)
         .zip(&fixed.step)
         .enumerate()
-        .map(|(k, ((e, a), &[bp, bt]))| {
+        .map(|(k, ((e, a), b))| {
             if k == 0 {
-                return (Account::default(), Some(Account { step: fixed.start, ..Account::default() }));
+                return (Account::default(), [Some(Account { step: fixed.start, ..Account::default() }); 3]);
             }
             let h = 1. - e.loss;
             let escape = if e.judged > 0. { e.near / e.judged } else { step_bound()[0] };
-            let population = Account { model: (a[0] * h).min(1.), step: bp.max(escape), statistics: e.shown_statistics() };
-            let temperature = e.motion.and_then(|m| {
-                let relative = (0..3).map(|x| m.temperature_errors[x].interval() / m.temperature[x]).fold(0., f64::max);
-                (relative.is_finite() && a[1].is_finite() && bt.is_finite()).then_some(Account { model: h * a[1], step: h * bt, statistics: h * relative })
+            let population = Account { model: (a[0] * h).min(1.), step: b.shown.max(escape), statistics: e.shown_statistics() };
+            let temperature = std::array::from_fn(|x| {
+                let relative = e.motion.as_ref().map_or(f64::INFINITY, |m| e.temperature_interval(x, m.temperature[x]));
+                (relative.is_finite() && a[1].is_finite() && b.temperature[x].is_finite()).then_some(Account { model: h * a[1], step: h * b.temperature[x], statistics: h * relative })
             });
             (population, temperature)
         })
@@ -1528,10 +1575,11 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     let (times, outputs) = (&c.plan.times, c.plan.times.len());
     let hm = c.scales.hbar_over_mass;
     let w = c.scales.frequencies;
-    let classical = |t: &V3| classical(t, &w);
+    let classical = |t: &V3| -> [bool; 3] { std::array::from_fn(|a| classical(t[a], w[a])) };
     let mut ledger = c.ledger.clone();
     let (population, temperature) = accounts(estimates, &c.fixed);
-    ledger.close(times, &population, &temperature, &c.fixed.temperature.iter().map(Option::is_some).collect::<Vec<_>>());
+    let held: Vec<[bool; 3]> = c.fixed.temperature.iter().map(|t| t.map(|scale| scale.is_some())).collect();
+    ledger.close(times, &population, &temperature, &held);
     // T and the motion at t = 0: exact.
     let start_t = c.momentum.map(|m| m / KT_PER_UK);
     let mut s = Solution {
@@ -1548,6 +1596,8 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
         velocity: std::array::from_fn(|a| histograms(listed, &c.plan.listed, &|x| x.1[a] * hm)),
         position: std::array::from_fn(|a| histograms(listed, &c.plan.listed, &|x| x.0[a])),
         classical: Vec::with_capacity(outputs),
+        temperature_held: held,
+        temperature_estimated_errors: temperature.iter().map(|axes| axes.map(|a| a.map(|a| a.total()))).collect(),
         trajectories,
         time_step_us: c.tau,
         method: format!("{}；{trajectories} 条轨迹（每组 {GROUP} 条拉丁超立方），步长 {} μs。", c.method, c.tau),
@@ -1594,7 +1644,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
                 s.temperature_total_errors_uk.push(None);
                 s.mean_velocity_mps.push(v);
                 s.mean_occupation.push(n);
-                s.classical.push(false);
+                s.classical.push([false; 3]);
                 if e.held > 0. {
                     unread.push(k);
                 }
@@ -1609,7 +1659,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     }
     // T shown with its statistics where the pilot left its model error or its step error unread.
     let unbooked: Vec<usize> = (1..outputs)
-        .filter(|&k| estimates[k].motion.as_ref().is_some_and(|m| m.temperature_errors.iter().all(Spread::read)) && !(c.fixed.model[k][1].is_finite() && c.fixed.step[k][1].is_finite()))
+        .filter(|&k| estimates[k].motion.as_ref().is_some_and(|m| m.temperature_errors.iter().all(Spread::read)) && !(c.fixed.model[k][1].is_finite() && c.fixed.step[k].temperature.iter().all(|b| b.is_finite())))
         .collect();
     if !unbooked.is_empty() {
         s.approximations.flag(format!("{}：试探在这些时刻被俘获的原子不足，模型与步长对温度的误差读不出", span(&unbooked, times)));
@@ -1671,7 +1721,7 @@ mod tests {
         let read = |value: f64, error: f64| Read { value, spread: Spread { error, groups: f64::INFINITY } };
         let quiet = read(0., 0.);
         let at = |t: Read| Stepped { temperature: Some([t, quiet, quiet]), shown: [quiet; STATES], energy: None };
-        let held = [None, Some([30.; 3])];
+        let held = [[None; 3], [Some(30.); 3]];
         let st = step_bound()[1];
         assert_eq!(rung(&[at(quiet), at(read(0.5 * st, 0.1 * st))], &held, 1.), Judgement::Within);
         match rung(&[at(quiet), at(read(4. * st, 0.01 * st))], &held, 1.) {
@@ -1679,14 +1729,109 @@ mod tests {
             other => panic!("an error four times the share is beyond it: {other:?}"),
         }
         assert_eq!(rung(&[at(quiet), at(read(0.5 * st, st))], &held, 1.), Judgement::Unreadable);
-        assert_eq!(rung(&[at(quiet), at(read(9. * st, 0.))], &[None, None], 1.), Judgement::Within);
-        assert_eq!(rung(&[at(read(9. * st, 0.)), at(quiet)], &[Some([30.; 3]), Some([30.; 3])], 1.), Judgement::Within);
+        assert_eq!(rung(&[at(quiet), at(read(9. * st, 0.))], &[[None; 3]; 2], 1.), Judgement::Within);
+        assert_eq!(rung(&[at(read(9. * st, 0.)), at(quiet)], &[[Some(30.); 3]; 2], 1.), Judgement::Within);
+        // Per axis: the axis read beyond its share is judged only where that axis is held; the others' holds do not
+        // bring it in, and its own does not need theirs.
+        assert_eq!(rung(&[at(quiet), at(read(9. * st, 0.))], &[[None; 3], [None, Some(30.), Some(30.)]], 1.), Judgement::Within);
+        assert!(matches!(rung(&[at(quiet), at(read(9. * st, 0.))], &[[None; 3], [Some(30.), None, None]], 1.), Judgement::Beyond(_)));
         let between = 2f64.powi(ORDER);
         let beyond = [at(quiet), at(read(3. * st, 0.1 * st))];
         assert!(matches!(rung(&beyond, &held, 1.), Judgement::Beyond(_)));
         assert_eq!(rung(&beyond, &held, between), Judgement::Within);
         assert_eq!(rung(&beyond.map(|r| r.times(1. / between)), &held, 1.), Judgement::Within);
         assert_eq!(rung(&[at(quiet), at(read(5. * st, 0.1 * st))], &held, between), rung(&[at(quiet), at(read(5. * st, 0.1 * st)).times(1. / between)], &held, 1.));
+    }
+
+    /// An output's estimate with T = `temperature` (µK) and its standard errors per lab axis, read on unlimited groups (the
+    /// interval is z of the error), every atom held, nothing else to chase.
+    fn estimate(temperature: V3, errors: V3, trajectories: f64) -> Estimate {
+        let exact = Spread { error: 0., groups: f64::INFINITY };
+        Estimate {
+            trajectories,
+            held: trajectories,
+            loss: 0.,
+            loss_error: exact,
+            shown: [0.; STATES],
+            shown_errors: [exact; STATES],
+            populations: [0.; STATES],
+            motion: Some(crate::estimate::Motion {
+                temperature,
+                temperature_errors: errors.map(|error| Spread { error, groups: f64::INFINITY }),
+                temperature_total: temperature.iter().sum::<f64>() / 3.,
+                temperature_total_error: exact,
+                occupation: [0.; 3],
+                mean_velocity: [0.; 3],
+            }),
+            judged: 0.,
+            near: 0.,
+            failed: 0.,
+        }
+    }
+
+    /// T is held per lab axis (module documentation): in a trap of 100, 100 and 19 kHz the regime begins at
+    /// CLASSICAL ħω/k_B = 19.2, 19.2 and 3.65 µK. A pilot that reads 25, 6 and 10 µK (± 1 %) holds x and z at their own
+    /// T and leaves y; an axis whose T reads below its boundary within its interval is held (its upper bound is inside);
+    /// one whose error is unread is not; nothing is held at t = 0.
+    #[test]
+    fn an_axis_is_held_where_its_own_temperature_is_in_its_regime() {
+        let frequencies = [100., 100., 19.].map(|khz: f64| TAU * khz * 1e-3);
+        let boundary = frequencies.map(|w| CLASSICAL * w / KT_PER_UK);
+        assert!((boundary[0] - 19.2).abs() < 0.05 && (boundary[2] - 3.65).abs() < 0.05, "{boundary:?}");
+        let cold = estimate([25., 6., 10.], [0.25, 0.06, 0.1], 800.);
+        let held = held_to(&[cold.clone(), cold.clone()], &frequencies);
+        assert_eq!(held, [[None; 3], [Some(25.), None, Some(10.)]]);
+        let edge = estimate([19., 19., 3.6], [0.2, 0.05, 0.1], 800.);
+        assert_eq!(held_to(&[edge.clone(), edge], &frequencies)[1], [Some(19.), None, Some(3.6)]);
+        let mut unread = cold.clone();
+        unread.motion.as_mut().unwrap().temperature_errors[2] = Spread::UNREAD;
+        assert_eq!(held_to(&[cold, unread], &frequencies)[1], [Some(25.), None, None]);
+    }
+
+    /// The targets, the rung and the accounts follow each axis's hold. With x and z held and y not (the pilot's 25, 6,
+    /// 10 µK), a model error of 3 % and a step read of 2 %, 40 % and 1 % on the axes: the statistics' rooms are x's and z's
+    /// alone, each beside its own step bound; an interval of 30 % on y neither keeps the targets from being met nor asks
+    /// for a trajectory, where the same interval on x does both, by (interval/room)²; y's step read, beyond any share,
+    /// crowds no output where it would on a held axis. Every axis has its account, its own step and statistics in it, and
+    /// the result's per-axis totals are those.
+    #[test]
+    fn the_targets_and_the_accounts_follow_each_axis() {
+        let fixed = |held: [Option<f64>; 3]| Fixed {
+            model: vec![[0.; 2], [0., 0.03]],
+            held: vec![1.; 2],
+            temperature: vec![[None; 3], held],
+            step: vec![Bound { shown: 0., temperature: [0.; 3] }, Bound { shown: 0., temperature: [0.02, 0.4, 0.01] }],
+            windows: vec![],
+            start: 0.,
+        };
+        let held = [Some(25.), None, Some(10.)];
+        let targets = Targets::new(&fixed(held));
+        let rooms = targets.temperature[1];
+        assert!(rooms[1].is_none() && targets.crowded().is_empty());
+        for (a, b) in [(0, 0.02_f64), (2, 0.01)] {
+            let (scale, room) = rooms[a].unwrap();
+            assert!(scale == held[a].unwrap() && (room - (0.01 - 0.0009 - b * b).sqrt()).abs() < 1e-15, "{rooms:?}");
+        }
+        // A step read beyond the target on a held axis leaves the statistics the room beside the share, and no room is
+        // none: the output is not crowded by it; a model error that fills the target crowds it.
+        assert!(Targets::new(&fixed([Some(25.), Some(6.), Some(10.)])).crowded().is_empty());
+        let mut full = fixed(held);
+        full.model[1][1] = 0.11;
+        assert_eq!(Targets::new(&full).crowded(), [1]);
+        let n = 800.;
+        let quiet = estimate([25., 6., 10.], [0.25, 0.9, 0.1], n);
+        let run = [quiet.clone(), quiet];
+        assert!(targets.met(&run) && targets.need(&run) < n);
+        let noisy = estimate([25., 6., 10.], [3.75, 0.06, 0.1], n);
+        let run = [noisy.clone(), noisy];
+        let need = n * (CONFIDENCE * 3.75 / 25. / rooms[0].unwrap().1).powi(2);
+        assert!(!targets.met(&run) && (targets.need(&run) - need).abs() < 1e-9 * need, "{} against {need}", targets.need(&run));
+        let (_, accounts) = accounts(&run, &fixed(held));
+        let expected = [(0.02, CONFIDENCE * 3.75 / 25.), (0.4, CONFIDENCE * 0.06 / 6.), (0.01, CONFIDENCE * 0.1 / 10.)];
+        for (a, (step, statistics)) in expected.into_iter().enumerate() {
+            let account = accounts[1][a].unwrap();
+            assert!(account.model == 0.03 && account.step == step && (account.statistics - statistics).abs() < 1e-14, "{account:?}");
+        }
     }
 
     /// The plan: the windows half a period (at most half an interval) cut at t = 0, the listed outputs evenly spread with
