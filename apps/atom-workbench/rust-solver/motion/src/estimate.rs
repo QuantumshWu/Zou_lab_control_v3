@@ -596,6 +596,42 @@ pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<St
 mod tests {
     use super::*;
 
+    /// The step's error (`stepped`): three groups of two atoms at rest in the mean, each with ⟨κ²⟩ = 4 on every axis
+    /// (T_a = 4 ħ/m k_B), read with one drift -- the axes' energies off by 1, 2 and 3 % of k_B T_a, a row by 0.02, the loss
+    /// energy by 0.5 and 1.5 in turn. T's read is those shares with no spread; the row's as shown is 0.02 on the held
+    /// atoms over all the trajectories (each group's third trajectory is lost: two of three held);
+    /// the loss energy's mean 1 and spread ½.
+    #[test]
+    fn the_step_s_error_is_the_drifts_mean() {
+        let scales = Scales { hbar_over_mass: 1e-3, frequencies: [1.; 3] };
+        let kt = 4. * scales.hbar_over_mass;
+        let atom = |energy: f64| {
+            let mut drift = Drift::ZERO;
+            drift.axes = [0.01 * kt, 0.02 * kt, 0.03 * kt];
+            drift.rows[2] = 0.02;
+            drift.energy = energy;
+            let mut rows = [0.; STATES];
+            rows[2] = 1.;
+            Held { rows, kappa: [0.; 3], kappa2: [4.; 3], drift: Some(drift) }
+        };
+        let groups: Vec<Group> = (0..3)
+            .map(|_| {
+                let mut g = Group::new(1);
+                g.add(&[Some(atom(0.5))], &[]);
+                g.add(&[Some(atom(1.5))], &[]);
+                g.add(&[None], &[]);
+                g
+            })
+            .collect();
+        let read = &stepped(&groups, &scales)[0];
+        let t = read.temperature.as_ref().expect("two atoms are read");
+        for (a, share) in [0.01, 0.02, 0.03].into_iter().enumerate() {
+            assert!((t[a].value - share).abs() < 1e-15 && t[a].spread.error < 1e-15, "{:?}", t[a]);
+        }
+        assert!((read.shown[2].value - 0.02 * 2. / 3.).abs() < 1e-15 && read.shown[0].value == 0., "{:?}", read.shown[2]);
+        assert!((read.energy[0] - 1.).abs() < 1e-15 && (read.energy[1] - 0.5).abs() < 1e-15, "{:?}", read.energy);
+    }
+
     /// Student's t at the normal's tail: the tables' t at 97.5 % (z = Φ⁻¹(0.975)) for ν = 1, 10, 30, its tail there the
     /// normal's to round-off; at z = 2 the closed forms of one and two degrees of freedom, tan(π(1 − p)/2) and
     /// (1 − p)√(2/(1 − (1 − p)²)), p = P(|N| > 2); the normal's own z as ν grows, (z³ + z)/(4ν) apart (Cornish–Fisher).

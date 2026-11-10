@@ -503,6 +503,33 @@ fn a_conservative_trap_keeps_its_energy() {
     assert!((last - first).abs() <= 4.0 * spread, "the energy drifts {:e} against the spread {spread:e}", last - first);
 }
 
+/// A read trajectory's drift is the sum of its steps' doubling differences (adapt.rs, # The read): a hot atom in a
+/// Gaussian tweezer advanced through four steps with a drift, against the same four steps made by hand -- each the step
+/// less its two halves from the same state, 4/3 of the loss energy's difference (second order) --, to the sums' round-off;
+/// and the read leaves the trajectory where the unread one goes.
+#[test]
+fn a_read_trajectory_accumulates_its_steps_doubling_differences() {
+    let trap = Trap::Gaussian { depth: 6.0, waists: [1.0, 1.0, 3.0] };
+    let model = Atom::new(RB, trap, vec![], 0.0, 0.0);
+    let start = held(&model, [0.3, -0.2, 0.8], [20.0, 15.0, -10.0]);
+    let (tau, steps) = (5.0, 4);
+    let (mut read, mut plain, mut drift) = (start.clone(), start.clone(), Drift::ZERO);
+    adapt::advance(&model, tau, &mut read, Some(&mut drift), tau * steps as f64, &mut |_| {});
+    adapt::advance(&model, tau, &mut plain, None, tau * steps as f64, &mut |_| {});
+    assert_eq!((read.r, read.kappa), (plain.r, plain.kappa));
+    let (mut by_hand, mut at) = (0.0, start);
+    for _ in 0..steps {
+        let whole = step::step(&model, &at, tau).unwrap();
+        let first = step::step(&model, &at, 0.5 * tau).unwrap();
+        let second = step::step(&model, &first.end, 0.5 * tau).unwrap();
+        let energy = |t: &Trajectory| model.energy(0, &t.point(), &t.psi);
+        by_hand += 4.0 / 3.0 * (energy(&whole.end) - energy(&second.end));
+        at = whole.end;
+    }
+    assert!((drift.energy - by_hand).abs() <= 1e-12 * by_hand.abs(), "{} against {by_hand}", drift.energy);
+    assert!(drift.energy.abs() > 1e-6 && drift.rows.iter().all(|x| *x == 0.0), "{drift:?}");
+}
+
 /// The step-doubling estimate is the scheme's local error, O(τ³): a two-level atom in a standing wave in a Gaussian
 /// tweezer, its internal state relaxed (a bare state's first 1/Γ after a jump is a transient no power of τ describes), the
 /// difference of one step and two halves falls eightfold per halving of τ -- between 7 and 10, the next order's room --

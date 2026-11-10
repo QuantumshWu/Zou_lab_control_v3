@@ -107,7 +107,7 @@ mod tests {
         assert!((read(-0.5, 0.25).bound(1.) - (0.5 + CONFIDENCE * 0.25)).abs() < 1e-15);
     }
 
-    /// Richardson: a halving at order 2 reads 3/4 of the coarse error, a quarter tolerance at order 1 too, an exact
+    /// Richardson: a halving at order 2 reads 3/4 of the coarse error, a quartering at order 1 too, an exact
     /// finer level all of it; refining by the measured ratio meets the share: an error four times the share takes half
     /// the parameter at order 2, a quarter at order 1.
     #[test]

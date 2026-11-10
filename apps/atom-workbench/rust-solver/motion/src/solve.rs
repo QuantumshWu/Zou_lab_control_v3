@@ -371,26 +371,6 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
         });
         let parts: Vec<&Part> = pilot.iter().collect();
         let reads = stepped(&parts, &context.scales);
-        // TRACE (development only, to be removed before landing): the rung's largest reads.
-        if std::env::var_os("ATOM_MOTION_TRACE").is_some() {
-            let chased = held_to(&pooled(&parts, &context.scales).0);
-            let larger = |a: (f64, f64), b: (f64, f64)| if b.0.abs() + b.1 > a.0.abs() + a.1 { b } else { a };
-            let (mut t, mut p) = ((0usize, (0f64, 0f64)), (0usize, (0f64, 0f64)));
-            for (k, r) in reads.iter().enumerate().skip(1) {
-                if let (Some(_), Some(x)) = (chased[k], &r.temperature) {
-                    let w = x.iter().map(|x| (x.value, x.spread.interval())).fold((0f64, 0f64), larger);
-                    if w.0.abs() + w.1 > t.1 .0.abs() + t.1 .1 {
-                        t = (k, w);
-                    }
-                }
-                let w = r.shown.iter().map(|x| (x.value, x.spread.interval())).fold((0f64, 0f64), larger);
-                if w.0.abs() + w.1 > p.1 .0.abs() + p.1 .1 {
-                    p = (k, w);
-                }
-            }
-            let e = reads.last().map_or([0.; 2], |r| r.energy);
-            eprintln!("[rung] tau {tau}: T read {:+.4} ± {:.4} at output {} (share {:.4}); rows {:+.2e} ± {:.2e} at output {} (share {:.4}); E_s at the end {:+.3e} ± {:.3e} per atom (rad/us)", t.1 .0, t.1 .1, t.0, step_bound()[1], p.1 .0, p.1 .1, p.0, step_bound()[0], e[0], e[1]);
-        }
         let next = match rung(&reads, &held_to(&pooled(&parts, &context.scales).0)) {
             Rung::Within => break (pilot, reads),
             Rung::Refine(factor) => refined(tau, factor),
@@ -502,10 +482,6 @@ fn attempt(request: &Request, light: &Light, kept: &[Unit], reach: f64, step: Op
     let share = step_bound();
     let pairs = refuted(&all[..checked as usize], &fine, &context.scales, &targets, 0.5, ORDER as f64, &|_| share);
     let escape = e.iter().skip(1).any(|x| 1. - wilson(x.trajectories - x.near, x.trajectories) > share[0]).then_some(1.);
-    if std::env::var_os("ATOM_MOTION_TRACE").is_some() {
-        // TRACE (development only, to be removed before landing).
-        eprintln!("[falsifier] tau {tau}: pairs {pairs:?}, escape {escape:?}, most near {} of {}", e.iter().skip(1).map(|x| x.near).fold(0., f64::max), e[1].trajectories);
-    }
     if let Some(factor) = [pairs, escape].into_iter().flatten().reduce(f64::min) {
         let next = refined(tau, factor);
         if context.plan.end / next <= MOST_STEPS as f64 {
@@ -1229,6 +1205,38 @@ mod tests {
         assert!(unseen(88.) <= room && unseen(80.) > room);
     }
 
+    /// The ladder's top rung: the output interval over the least power of two below the reference flow's resonance
+    /// ω τ = π -- of a 10 µs interval, 5 µs at a tweezer's 74.65 kHz (π/ω = 6.7 µs) and 0.3125 µs at a lattice's 910.7 kHz
+    /// (0.55 µs); the interval itself in a slow trap.
+    #[test]
+    fn the_top_rung_lies_below_the_resonance() {
+        let khz = |f: f64| std::f64::consts::TAU * f * 1e-3;
+        assert_eq!(top_rung(10., khz(74.65)), 5.);
+        assert_eq!(top_rung(10., khz(910.7)), 0.3125);
+        assert_eq!(top_rung(10., khz(1.)), 10.);
+    }
+
+    /// A rung's outcomes on T's read at one output (unlimited groups: one look's interval is z of the error): within
+    /// where the error and its interval fit the share; an error four times the share, clear among all the looks, takes
+    /// the step to its half (second order); a small error under a wide interval is unreadable; T that is not held to
+    /// its target is not judged. A factor takes the step down by whole halvings, one at least.
+    #[test]
+    fn a_rung_has_three_outcomes() {
+        let read = |value: f64, error: f64| Read { value, spread: Spread { error, groups: f64::INFINITY } };
+        let quiet = read(0., 0.);
+        let at = |t: Read| Stepped { temperature: Some([t, quiet, quiet]), shown: [quiet; STATES], energy: [0.; 2] };
+        let held = [None, Some([30.; 3])];
+        let st = step_bound()[1];
+        assert!(matches!(rung(&[at(quiet), at(read(0.5 * st, 0.1 * st))], &held), Rung::Within));
+        match rung(&[at(quiet), at(read(4. * st, 0.01 * st))], &held) {
+            Rung::Refine(factor) => assert!((factor - 0.5).abs() < 1e-12, "{factor}"),
+            _ => panic!("an error four times the share is beyond it"),
+        }
+        assert!(matches!(rung(&[at(quiet), at(read(0.5 * st, st))], &held), Rung::Unreadable));
+        assert!(matches!(rung(&[at(quiet), at(read(9. * st, 0.))], &[None, None]), Rung::Within));
+        assert_eq!((refined(1., 0.5), refined(1., 0.3), refined(1., 1.)), (0.5, 0.25, 0.5));
+    }
+
     /// The plan: the windows half a period (at most half an interval) cut at t = 0, the listed outputs evenly spread with
     /// the first and the last, the run's end the last window's.
     #[test]
@@ -1308,8 +1316,8 @@ mod tests {
 
     /// A falsifier refutes only a clear excess (`refuted`): two levels on the same 16 groups of 8 atoms, the finer one moving
     /// one state's row by δ at one output for every atom alike (the pair's difference has no spread). At the step's level
-    /// (a quarter of the tolerance, order 1) the coarse level's error is 4δ/3: δ = 0.3 against a share of 0.05 is refuted
-    /// with the factor 0.05/0.4 on the tolerance; δ = 0.01 is within.
+    /// (half the step, order 2) the coarse level's error is 4δ/3: δ = 0.3 against a share of 0.05 is refuted with the
+    /// factor √(0.05/0.4) on the step; δ = 0.01 is within.
     #[test]
     fn a_falsifier_refutes_only_a_clear_excess() {
         let outputs = 3;
@@ -1337,8 +1345,8 @@ mod tests {
         let coarse: Vec<&Part> = coarse.iter().collect();
         let targets = Targets { population: vec![1.; outputs], temperature: vec![None; outputs], held: vec![1.; outputs] };
         let scales = Scales { hbar_over_mass: KT_PER_UK, frequencies: [1.; 3] };
-        let factor = refuted(&coarse, &level(-0.3), &scales, &targets, 0.25, 1., &|_| [0.05, 0.1]).unwrap();
-        assert!((factor - 0.05 / 0.4).abs() < 1e-12, "{factor}");
-        assert!(refuted(&coarse, &level(-0.01), &scales, &targets, 0.25, 1., &|_| [0.05, 0.1]).is_none());
+        let factor = refuted(&coarse, &level(-0.3), &scales, &targets, 0.5, 2., &|_| [0.05, 0.1]).unwrap();
+        assert!((factor - (0.05_f64 / 0.4).sqrt()).abs() < 1e-12, "{factor}");
+        assert!(refuted(&coarse, &level(-0.01), &scales, &targets, 0.5, 2., &|_| [0.05, 0.1]).is_none());
     }
 }
