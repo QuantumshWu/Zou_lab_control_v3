@@ -4,8 +4,8 @@
 //! 1. The request's checks; the light; the initial components; the reach and the model with every unit whose existence
 //!    gate fails kept (model.rs, SPEC §1.5).
 //! 2. The pilot: the run's first `pilot_size` trajectories (their own numbers, from `MOST_TRAJECTORIES`), at a rung of
-//!    the step's ladder. Some members of each of its groups carry a reader (# The step): from them the run's step and
-//!    its error, and at their states the model's units' errors; from all of them the outputs where T is held to its
+//!    the step's ladder. The step and its error are read on a rung's members that carry a reader (# The step), the
+//!    model's units' errors at the states of the first member of every group; from all of them the outputs where T is held to its
 //!    target and T's scale there, the held share, the reach's test. Its result is the first checkpoint, and its
 //!    trajectories stay in the result: they are trajectories of the run's own model and step, and what is judged on
 //!    them -- the step, the model, the rooms -- is judged once, before the product, as QuTiP's mcsolve stops on the
@@ -28,9 +28,12 @@
 //! rung; down to the step at which a trajectory would take `MOST_STEPS` steps, where the readable bound is booked and
 //! flagged. A read costs several steps a step, so it is taken on as few trajectories as decide it: the first member of
 //! every pilot group -- one a group keeps every group in the spread --, then twice as many members while the rung is
-//! unreadable and its reads could still come within their shares on the whole groups (decide.rs `Read::in_reach`: a
-//! standard error goes as N^{−1/2}; a read that could not, or is no number, sends the ladder to its next rung at once);
-//! a rung that fails costs its read members alone, and the other members of the rung taken run without a reader. What is booked per output is the read's bound on the rows as shown and on T (`Fixed::step`); the loss's is the
+//! unreadable, up to the whole groups; the other members of the rung taken run without a reader. And a rung fails where
+//! any one of its reads fails on the whole pilot, so a rung is read first on every member up to the first output alone:
+//! one that fails there fails, for the cost of one interval of the run. The rung below a read rung that has failed
+//! needs no read of its own where the read, over 2^p, lies within the shares -- the order the Richardson factors rest on, held between two
+//! neighbouring rungs and no further --: it is the run's step, its booked error the read's over 2^p, and none of its
+//! trajectories carries a reader. What is booked per output is the read's bound on the rows as shown and on T (`Fixed::step`); the loss's is the
 //! share of the product's trajectories whose loss energy lies within the pilot's accumulated error of the escape -- its
 //! mean and z of the atoms' spread (`Fixed::windows`). That share's statistics are the output's own (what no trajectory
 //! saw is booked there, estimate.rs `unseen`); it refutes the step where Wilson's near end at its count lies beyond the
@@ -280,11 +283,10 @@ fn top_rung(interval: f64, frequency: f64) -> f64 {
 
 /// A rung's outcome on the pilot's step error (module documentation, # The step; decide.rs `judge`): the family of every
 /// output's rows as shown, and of T per lab axis where it is held to its target, each against the step's share, at the
-/// scheme's order -- beyond, the factor on τ at which the largest measured error meets its share. And, for a read taken
-/// on the share `part` of the pilot's members, whether every one of its reads could still come within its share on all
-/// of them (decide.rs `Read::in_reach`): a rung that could not is not worth more readers.
-fn rung(reads: &[Stepped], held_to: &[Option<V3>], part: f64) -> (Judgement, bool) {
-    let [sp, st] = step_bound();
+/// scheme's order -- beyond, the factor on τ at which the largest measured error meets its share. `wider` times the
+/// shares: 1 for the rung read; 2^p for the rung below it, whose errors are the read ones over 2^p.
+fn rung(reads: &[Stepped], held_to: &[Option<V3>], wider: f64) -> Judgement {
+    let [sp, st] = step_bound().map(|share| wider * share);
     let mut looks: Vec<(Read, f64)> = vec![];
     for (k, r) in reads.iter().enumerate().skip(1) {
         looks.extend(r.shown.iter().map(|x| (*x, sp)));
@@ -292,7 +294,7 @@ fn rung(reads: &[Stepped], held_to: &[Option<V3>], part: f64) -> (Judgement, boo
             looks.extend(t.iter().map(|x| (*x, st)));
         }
     }
-    (judge(&looks, ORDER as f64), looks.iter().all(|(read, share)| read.in_reach(*share, part)))
+    judge(&looks, ORDER as f64)
 }
 
 /// The estimates, the listed outputs' atoms and the counts of some groups.
@@ -427,13 +429,34 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
     let first = MOST_TRAJECTORIES / GROUP;
     let groups = pilot_size() / GROUP;
     let shape = Shape::of(&context.plan, true);
-    let (first_parts, reads, readers) = loop {
+    // Between two rungs the step's errors go as 2^p (the scheme's order, the Richardson factors' own premise).
+    let between = 2f64.powi(ORDER);
+    let (first_parts, reads) = loop {
         let tau = context.tau;
-        // The read: on the first member of every group, then on twice as many while the rung is unreadable and could
-        // still come within its share on the whole groups.
+        let below = halved(tau, 1.);
+        let fits = |step: f64| context.plan.end / step <= MOST_STEPS as f64;
+        let judged = |parts: &[Part], wider: f64| {
+            let read: Vec<&Part> = parts.iter().collect();
+            rung(&stepped(&read, &context.scales), &held_to(&pooled(&read, &context.scales).0), wider)
+        };
+        // A rung fails where any of its reads does not lie within its share on the whole pilot. The first output's reads
+        // are among them and cost the first interval alone: where the run has more outputs, they are read first, on
+        // every member, and a rung that fails there is not read over the run.
+        let early = (outputs > 2).then(|| {
+            let short = Plan::new(&request.times_us[..2], report.lab);
+            judged(&run_groups(first, first + groups, 0..GROUP, Shape::of(&short, true), &|i| trajectory(&run, &ensemble, tau, Some(periods), None, &short, true, i), messages, &mut |_, messages| messages.again()), 1.)
+        });
+        // The read over the run: on the first member of every group, then on twice as many while it is unreadable. The
+        // rung within its shares is the run's. One that has failed -- clearly beyond, or unreadable on every member --
+        // gives the rung below without a read of its own where this read over 2^p lies within the shares (one rung: an
+        // order holds between neighbours, not across the ladder); not sooner, a rung that more members would have read
+        // within its shares being worth twice the one below.
         let mut parts: Vec<Part> = vec![];
         let mut members = 0;
-        let judgement = loop {
+        let (judgement, lower) = loop {
+            if let Some(failed) = early.filter(|j| *j != Judgement::Within) {
+                break (failed, false);
+            }
             let to = (2 * members).clamp(1, GROUP);
             let more = run_groups(first, first + groups, members..to, shape, &|i| trajectory(&run, &ensemble, tau, Some(periods), None, &context.plan, true, i), messages, &mut |prefix, messages| so_far(&context, &parts, prefix, messages));
             if parts.is_empty() {
@@ -442,30 +465,45 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
                 parts.iter_mut().zip(more).for_each(|(p, m)| p.absorb(m));
             }
             members = to;
-            let read: Vec<&Part> = parts.iter().collect();
-            let (judgement, in_reach) = rung(&stepped(&read, &context.scales), &held_to(&pooled(&read, &context.scales).0), members as f64 / GROUP as f64);
-            if judgement != Judgement::Unreadable || members == GROUP || !in_reach {
-                break judgement;
+            let judgement = judged(&parts, 1.);
+            if judgement == Judgement::Within {
+                break (judgement, false);
+            }
+            if judgement != Judgement::Unreadable || members == GROUP {
+                break (judgement, fits(below) && judged(&parts, between) == Judgement::Within);
             }
         };
+        if lower {
+            // The rung below is the run's: its errors are this read's over 2^p, and its trajectories carry no reader.
+            let reads: Vec<Stepped> = stepped(&parts.iter().collect::<Vec<_>>(), &context.scales).iter().map(|r| r.times(1. / between)).collect();
+            context.tau = below;
+            let parts = run_groups(first, first + groups, 0..GROUP, shape, &|i| trajectory(&run, &ensemble, below, None, None, &context.plan, true, i), messages, &mut |prefix, messages| so_far(&context, &[], prefix, messages));
+            break (parts, reads);
+        }
         let next = match judgement {
             Judgement::Within => None,
             Judgement::Beyond(factor) => Some(halved(tau, factor)),
-            Judgement::Unreadable => Some(halved(tau, 1.)),
+            Judgement::Unreadable => Some(below),
         };
         match next {
-            Some(next) if context.plan.end / next <= MOST_STEPS as f64 => context.tau = next,
+            Some(next) if fits(next) => context.tau = next,
             _ => {
                 if next.is_some() {
                     context.ledger.flag(format!("时间步长的误差在每条轨迹 {MOST_STEPS} 步的上限内读不到份额以内：按读到的界记账"));
                 }
-                // The rung is the run's: its groups' other members run without a reader.
+                // The rung is the run's: its groups' other members run without a reader -- every member with one where
+                // the rung failed at its first output and is the last the steps' cap allows.
                 if members < GROUP {
-                    let rest = run_groups(first, first + groups, members..GROUP, shape, &|i| trajectory(&run, &ensemble, tau, None, None, &context.plan, true, i), messages, &mut |prefix, messages| so_far(&context, &parts, prefix, messages));
-                    parts.iter_mut().zip(rest).for_each(|(p, r)| p.absorb(r));
+                    let reader = (members == 0).then_some(periods);
+                    let rest = run_groups(first, first + groups, members..GROUP, shape, &|i| trajectory(&run, &ensemble, tau, reader, None, &context.plan, true, i), messages, &mut |prefix, messages| so_far(&context, &parts, prefix, messages));
+                    if parts.is_empty() {
+                        parts = rest;
+                    } else {
+                        parts.iter_mut().zip(rest).for_each(|(p, r)| p.absorb(r));
+                    }
                 }
                 let reads = stepped(&parts.iter().collect::<Vec<_>>(), &context.scales);
-                break (parts, reads, members);
+                break (parts, reads);
             }
         }
     };
@@ -493,14 +531,15 @@ fn attempt(request: &Request, light: &Light, kept: &mut Vec<Unit>, reach: f64, s
         .collect();
     context.fixed.windows = reads.iter().map(|r| r.energy.map_or(f64::INFINITY, |e| e[0].abs() + CONFIDENCE * e[1])).collect();
 
-    // The model's errors at the read members' states (SPEC §5.2): each folded unit's per output, the held atoms' mean --
-    // the trajectories the step is read on are the ones the model is read on, as many as the step's read took.
+    // The model's errors at the pilot's states (SPEC §5.2): each folded unit's per output, the held atoms' mean over
+    // the first member of every group -- one a group keeps every group in the mean's spread, and a unit's error is a
+    // function of the state, read as well on eleven states an output as on eighty-eight.
     let units = model.units();
     let mut samples: Vec<State> = vec![];
     let (mut at, mut from) = (vec![], vec![]);
     for (g, p) in pilot.iter().enumerate() {
         for (k, s) in p.samples.iter().enumerate() {
-            for state in s.iter().filter(|x| x.index % GROUP < readers) {
+            for state in s.iter().filter(|x| x.index % GROUP == 0) {
                 samples.push(state.clone());
                 at.push(k);
                 from.push(g);
@@ -1457,7 +1496,8 @@ mod tests {
     /// A rung's outcomes on T's read at one output (unlimited groups: one look's interval is z of the error): within
     /// where the error and its interval fit the share; an error four times the share, clear among all the looks, takes
     /// the step to its half (second order); a small error under a wide interval is unreadable; T that is not held to
-    /// its target is not judged, and neither is the output at t = 0.
+    /// its target is not judged, and neither is the output at t = 0. The rung below is judged on the same read against
+    /// 2^p shares, which is the read over 2^p (what is booked for it) against the shares.
     #[test]
     fn a_rung_has_three_outcomes() {
         let read = |value: f64, error: f64| Read { value, spread: Spread { error, groups: f64::INFINITY } };
@@ -1465,14 +1505,20 @@ mod tests {
         let at = |t: Read| Stepped { temperature: Some([t, quiet, quiet]), shown: [quiet; STATES], energy: None };
         let held = [None, Some([30.; 3])];
         let st = step_bound()[1];
-        assert_eq!(rung(&[at(quiet), at(read(0.5 * st, 0.1 * st))], &held), Judgement::Within);
-        match rung(&[at(quiet), at(read(4. * st, 0.01 * st))], &held) {
+        assert_eq!(rung(&[at(quiet), at(read(0.5 * st, 0.1 * st))], &held, 1.), Judgement::Within);
+        match rung(&[at(quiet), at(read(4. * st, 0.01 * st))], &held, 1.) {
             Judgement::Beyond(factor) => assert!((factor - 0.5).abs() < 1e-12, "{factor}"),
             other => panic!("an error four times the share is beyond it: {other:?}"),
         }
-        assert_eq!(rung(&[at(quiet), at(read(0.5 * st, st))], &held), Judgement::Unreadable);
-        assert_eq!(rung(&[at(quiet), at(read(9. * st, 0.))], &[None, None]), Judgement::Within);
-        assert_eq!(rung(&[at(read(9. * st, 0.)), at(quiet)], &[Some([30.; 3]), Some([30.; 3])]), Judgement::Within);
+        assert_eq!(rung(&[at(quiet), at(read(0.5 * st, st))], &held, 1.), Judgement::Unreadable);
+        assert_eq!(rung(&[at(quiet), at(read(9. * st, 0.))], &[None, None], 1.), Judgement::Within);
+        assert_eq!(rung(&[at(read(9. * st, 0.)), at(quiet)], &[Some([30.; 3]), Some([30.; 3])], 1.), Judgement::Within);
+        let between = 2f64.powi(ORDER);
+        let beyond = [at(quiet), at(read(3. * st, 0.1 * st))];
+        assert!(matches!(rung(&beyond, &held, 1.), Judgement::Beyond(_)));
+        assert_eq!(rung(&beyond, &held, between), Judgement::Within);
+        assert_eq!(rung(&beyond.map(|r| r.times(1. / between)), &held, 1.), Judgement::Within);
+        assert_eq!(rung(&[at(quiet), at(read(5. * st, 0.1 * st))], &held, between), rung(&[at(quiet), at(read(5. * st, 0.1 * st)).times(1. / between)], &held, 1.));
     }
 
     /// The plan: the windows half a period (at most half an interval) cut at t = 0, the listed outputs evenly spread with

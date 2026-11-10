@@ -543,6 +543,15 @@ pub struct Stepped {
     pub energy: Option<[f64; 2]>,
 }
 
+impl Stepped {
+    /// The read of a rung whose errors are `factor` times this one's (the scheme's order between two rungs): every
+    /// error and its spread times it.
+    pub fn times(&self, factor: f64) -> Stepped {
+        let scaled = |r: &Read| Read { value: r.value * factor, spread: Spread { error: r.spread.error * factor, groups: r.spread.groups } };
+        Stepped { temperature: self.temperature.as_ref().map(|t| std::array::from_fn(|a| scaled(&t[a]))), shown: std::array::from_fn(|q| scaled(&self.shown[q])), energy: self.energy.map(|e| e.map(|x| x * factor)) }
+    }
+}
+
 /// The step's error at every output from the groups' sums and their read trajectories' marks: every group has as many
 /// read trajectories as the first (its first members, solve.rs), and a row's error as shown is its sum over the read
 /// trajectories' held atoms over all the read trajectories -- held or lost: the error of the share shown.

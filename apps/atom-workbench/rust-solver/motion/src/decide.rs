@@ -93,12 +93,6 @@ impl Read {
             Outcome::Unreadable
         }
     }
-    /// Whether a read taken on the share `part` of its trajectories could still lie within `share` on all of them: its
-    /// near end (none below zero) with the interval the whole sample would leave -- a standard error goes as N^{−1/2},
-    /// so the part's times √part. A read that is no number could not.
-    pub fn in_reach(&self, share: f64, part: f64) -> bool {
-        self.value.is_finite() && self.clear(1.).max(0.) + self.spread.interval() * part.sqrt() <= share
-    }
     /// The factor on the level's parameter at which its measured error meets `share` at its `order`, (σ/|e|)^{1/q}.
     pub fn refined(&self, share: f64, order: f64) -> f64 {
         (share / self.value.abs()).powf(1. / order)
