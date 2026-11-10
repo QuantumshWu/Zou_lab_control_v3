@@ -250,6 +250,9 @@ pub struct Generator { pub cluster: usize, pub at: Point, pub parts: Vec<Part> }
 /// direction, polarization and landing is the same either way, ∝ ‖P_C Σ_a ε_a u_a‖².)
 #[derive(Clone, Debug, PartialEq)]
 pub struct Photon {
+    /// The class's place among its cluster's classes: the same for every state of the cluster (a state the class's
+    /// operator annihilates has no photon of it).
+    pub class: usize,
     /// The cluster the jump lands the atom in.
     pub landing: usize,
     /// |k_φ| (1/µm): the emission recoil is −k_φ n.

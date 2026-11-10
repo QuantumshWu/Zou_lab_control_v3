@@ -8,7 +8,7 @@
 //! one class, u_a = √(Γ/3) ψ_e per lab axis (isotropic), landing in g; the jumps' kicks are the emission's −k n alone, of
 //! a chosen |k| (zero where a test reads the Ehrenfest force).
 
-use crate::adapt::{self, Drift};
+use crate::adapt::{self, Reader};
 use crate::linalg::{C64, Mat};
 use crate::model::{Beat, Cluster, Generator, Part, Photon, Point, Quadratic, Recoil, STATES};
 use crate::step::{self, Dynamics, Trajectory};
@@ -154,6 +154,7 @@ impl Dynamics for Atom {
         u[0] = source;
         let none = || vec![C64::ZERO; n];
         vec![Photon {
+            class: 0,
             landing: 0,
             wave_number: self.emission,
             amplitudes: [u.clone(), u.clone(), u],
@@ -490,6 +491,30 @@ fn the_jumps_are_at_the_roots_of_the_norm() {
     assert!((variance * gamma * gamma - 1.0).abs() < 4.0 * (8.0 / n).sqrt(), "variance {variance} against {}", 1.0 / (gamma * gamma));
 }
 
+/// A read trajectory's jumps and hazard (adapt.rs, # The read): a ground state of constant hazard γ in no potential.
+/// The hazard's integral is γ t; a constant hazard is integrated exactly by any step, so its local error is none; no
+/// force acts between the jumps, so the kinetic energy the jumps put in per lab axis is the trajectory's own gain of it;
+/// one internal state has no error of the rows, and its jumps' operator never annihilates the carried state. Each to the
+/// round-off of the steps' norms: a norm's ratio and its logarithm are some eight operations a step.
+#[test]
+fn a_read_trajectory_holds_its_jumps_input_and_its_hazard() {
+    let gamma = 2.0;
+    let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
+    let model = Atom::new(RB, flat, vec![], 0.0, gamma);
+    let start = Trajectory::new(&model, 0, [0.0; 3], [3.0, -2.0, 1.0], 3, 5);
+    let (mut t, mut reader, end) = (start.clone(), Reader::new([5.0; 3]), 50.0);
+    adapt::advance(&model, 1.0, &mut t, Some(&mut reader), end, &mut |_| {}).unwrap();
+    let drift = reader.drift;
+    assert!(t.jumps > 50 && drift.unread == 0.0 && drift.rows.iter().all(|x| *x == 0.0), "{} jumps, {drift:?}", t.jumps);
+    let round_off = crate::units::rounding(8 * t.steps as usize);
+    assert!((drift.mark.hazard - gamma * end).abs() <= round_off * gamma * end, "the hazard's integral {} against {}", drift.mark.hazard, gamma * end);
+    assert!(drift.mark.hazard_error.abs() <= round_off * gamma * end, "the hazard's local error {}", drift.mark.hazard_error);
+    for a in 0..3 {
+        let gain = 0.5 * RB * (t.kappa[a] * t.kappa[a] - start.kappa[a] * start.kappa[a]);
+        assert!((drift.mark.input[a] - gain).abs() <= round_off * gain.abs().max(drift.mark.input[a].abs()), "axis {a}: the jumps put in {} against the gain {gain}", drift.mark.input[a]);
+    }
+}
+
 /// R1's mechanism (SPEC §2.2): a conservative anharmonic trap's energy over a long run at one constant step. A hot atom
 /// in a Gaussian tweezer (radial ω = 0.13 rad/µs) for some hundred radial periods at ω τ = 0.8: the splitting, symplectic
 /// and its own inverse, keeps the energy's error bounded -- its last tenth's mean within its first tenth's spread (no
@@ -518,18 +543,20 @@ fn a_conservative_trap_keeps_its_energy() {
     assert!((last - first).abs() <= 4.0 * spread, "the energy drifts {:e} against the spread {spread:e}", last - first);
 }
 
-/// A read trajectory's drift is the sum of its steps' doubling differences (adapt.rs, # The read): a hot atom in a
-/// Gaussian tweezer advanced through four steps with a drift, against the same four steps made by hand -- each the step
-/// less its two halves from the same state, 4/3 of the loss energy's difference (second order) --, to the sums' round-off;
-/// and the read leaves the trajectory where the unread one goes.
+/// A read trajectory's loss energy error is the sum of its steps' doubling differences (adapt.rs, # The read): a hot
+/// atom in a Gaussian tweezer advanced through four steps with a reader, against the same four steps made by hand -- each
+/// the step less its two halves from the same state, 4/3 of the loss energy's difference (second order) --, to the sums'
+/// round-off; the read leaves the trajectory where the unread one goes; with one internal state there is no error of
+/// the rows, no jump puts energy in, and the hazard is none.
 #[test]
 fn a_read_trajectory_accumulates_its_steps_doubling_differences() {
     let trap = Trap::Gaussian { depth: 6.0, waists: [1.0, 1.0, 3.0] };
     let model = Atom::new(RB, trap, vec![], 0.0, 0.0);
     let start = held(&model, [0.3, -0.2, 0.8], [20.0, 15.0, -10.0]);
     let (tau, steps) = (5.0, 4);
-    let (mut read, mut plain, mut drift) = (start.clone(), start.clone(), Drift::ZERO);
-    adapt::advance(&model, tau, &mut read, Some(&mut drift), tau * steps as f64, &mut |_| {}).unwrap();
+    let (mut read, mut plain, mut reader) = (start.clone(), start.clone(), Reader::new([2.0 * tau; 3]));
+    adapt::advance(&model, tau, &mut read, Some(&mut reader), tau * steps as f64, &mut |_| {}).unwrap();
+    let drift = reader.drift;
     adapt::advance(&model, tau, &mut plain, None, tau * steps as f64, &mut |_| {}).unwrap();
     assert_eq!((read.r, read.kappa), (plain.r, plain.kappa));
     let (mut by_hand, mut at) = (0.0, start);
@@ -542,7 +569,9 @@ fn a_read_trajectory_accumulates_its_steps_doubling_differences() {
         at = whole.end;
     }
     assert!((drift.energy - by_hand).abs() <= 1e-12 * by_hand.abs(), "{} against {by_hand}", drift.energy);
-    assert!(drift.energy.abs() > 1e-6 && drift.rows.iter().all(|x| *x == 0.0), "{drift:?}");
+    assert!(drift.energy.abs() > 1e-6 && drift.rows.iter().all(|x| *x == 0.0) && drift.unread == 0.0, "{drift:?}");
+    assert!(drift.mark.input == [0.0; 3], "{drift:?}");
+    assert!(drift.mark.level.iter().all(|&e| e > 0.0) && drift.mark.error.iter().any(|&e| e != 0.0), "{drift:?}");
 }
 
 /// The step-doubling estimate is the scheme's local error, O(τ³): a two-level atom in a standing wave in a Gaussian
@@ -725,11 +754,11 @@ fn conservative_trap(name: &str) {
             }
         }
         let mut t = Trajectory::new(&run, state, r, kappa, 17, i);
-        let mut drift = Drift::ZERO;
+        let mut reader = Reader::new(trap.lab.map(|w| std::f64::consts::TAU / w));
         let mut e0 = run.energy(t.cluster, &t.point(), &t.psi);
         for (k, &time) in request.times_us.iter().enumerate().skip(1) {
             let before = t.jumps;
-            adapt::advance(&run, tau, &mut t, Some(&mut drift), time, &mut |_| {}).unwrap();
+            adapt::advance(&run, tau, &mut t, Some(&mut reader), time, &mut |_| {}).unwrap();
             assert!(t.lost.is_none(), "{name}: atom {i} lost at {:?}", t.lost);
             let e = run.energy(t.cluster, &t.point(), &t.psi);
             if t.jumps == before {
@@ -739,7 +768,7 @@ fn conservative_trap(name: &str) {
             }
             kinetic[k] += 0.5 * hm * t.kappa.iter().map(|x| x * x).sum::<f64>() / atoms as f64;
         }
-        read += drift.energy / (kt * atoms as f64);
+        read += reader.drift.energy / (kt * atoms as f64);
         steps += t.steps;
         jumps += t.jumps;
     }
