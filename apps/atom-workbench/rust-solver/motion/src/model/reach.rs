@@ -812,9 +812,10 @@ struct Asked {
 
 /// A cell halved in a round: per side its halves where this round made them (none where a half cannot meet the reach), and
 /// per quantity asking the side it halves the cell along (`side`), whether each half's centre is in the reach, and its values
-/// on each half (`valued`).
+/// on each half (`valued`). The halves are on the heap: a round's cells go through the pool's recursion by value, and six
+/// nodes a cell at each level of it took 1.2 to 1.7 MB of a worker's 2 MB stack on 7700 cells (0.3 MB so).
 struct Halved {
-    made: [Option<[Option<Node>; 2]>; 3],
+    made: [Option<[Option<Box<Node>>; 2]>; 3],
     of: Vec<(usize, [bool; 2], [Option<(f64, f64)>; 2])>,
 }
 
@@ -839,15 +840,15 @@ impl<Q: Fn(&Region) -> f64 + ?Sized> Round<'_, Q> {
         let node = &self.nodes[asked.node];
         let along: [Region; 3] = std::array::from_fn(|a| self.cells.model.along(&node.over, a));
         let sides: Vec<usize> = asked.quantities.iter().map(|&q| side(self.quantities[q], &node.cell, &along)).collect();
-        let made: [Option<[Option<Node>; 2]>; 3] =
-            std::array::from_fn(|a| (node.halves[a].is_none() && sides.contains(&a)).then(|| node.cell.halves(a).map(|half| self.cells.make(half))));
+        let made: [Option<[Option<Box<Node>>; 2]>; 3] =
+            std::array::from_fn(|a| (node.halves[a].is_none() && sides.contains(&a)).then(|| node.cell.halves(a).map(|half| self.cells.make(half).map(Box::new))));
         let of = asked
             .quantities
             .iter()
             .zip(&sides)
             .map(|(&q, &a)| {
                 let halves: [Option<&Node>; 2] = match &made[a] {
-                    Some(made) => made.each_ref().map(Option::as_ref),
+                    Some(made) => made.each_ref().map(Option::as_deref),
                     None => node.halves[a].expect("the halves made in an earlier round").map(|at| at.map(|at| &self.nodes[at])),
                 };
                 (a, halves.map(|half| half.is_some_and(|half| half.inside)), halves.map(|half| half.map(|half| valued(self.quantities[q], half))))
@@ -1050,7 +1051,7 @@ impl Model {
                     if let Some(new) = new {
                         let at = new.map(|half| {
                             half.map(|half| {
-                                nodes.push(half);
+                                nodes.push(*half);
                                 nodes.len() - 1
                             })
                         });
