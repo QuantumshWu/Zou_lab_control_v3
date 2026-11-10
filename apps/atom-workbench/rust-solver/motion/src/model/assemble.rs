@@ -289,12 +289,13 @@ pub(crate) struct MemberPlan {
     pub(crate) entries: Vec<(usize, usize, usize, usize, usize)>,
 }
 
-/// One photon class of the cluster under the plan's lights (photon.rs `Class`): its landing cluster, its wave number, its lit
-/// members.
+/// One photon class of the cluster under the plan's lights (photon.rs `Class`): its landing cluster, its wave number, the
+/// largest wave number of the beams its folded members absorb from (`Photon::absorbed`; zero without one), its lit members.
 #[derive(Clone, Debug)]
 pub(crate) struct ClassPlan {
     pub(crate) landing: usize,
     pub(crate) wave_number: f64,
+    pub(crate) absorbed: f64,
     pub(crate) members: Vec<MemberPlan>,
 }
 
@@ -735,18 +736,21 @@ impl<'a> Builder<'a> {
     }
 
     /// The photon classes' lit members with their jumps (`ClassPlan`), the entries' operands still to place.
-    fn classes(&mut self) -> Vec<(usize, f64, Vec<(usize, Option<usize>, bool, f64, Vec<(usize, usize, usize, Operand, Operand)>)>)> {
+    fn classes(&mut self) -> Vec<(usize, [f64; 2], Vec<(usize, Option<usize>, bool, f64, Vec<(usize, usize, usize, Operand, Operand)>)>)> {
         let model = self.model;
         let mut out = vec![];
         for class in &model.classes[self.cluster] {
             let landing = &model.clusters[class.landing];
-            let mut members = vec![];
+            let (mut members, mut absorbed) = (vec![], 0.0_f64);
             for m in &class.members {
                 let source = &model.sources[m.source];
                 if !model.lit(source, self.lights) {
                     continue;
                 }
                 let Some(scalar) = self.source_scalar(source, false) else { continue };
+                if let Some(frequency) = model.source_frequency(source) {
+                    absorbed = model.light.frequencies[frequency].beams.iter().map(|&l| model.light.beams[l].wave_number).fold(absorbed, f64::max);
+                }
                 let mut entries = vec![];
                 for &(bp, sp) in &m.entries {
                     for a in 0..3 {
@@ -765,7 +769,7 @@ impl<'a> Builder<'a> {
                 }
                 members.push((m.source, scalar, matches!(source.origin, Origin::Near { .. }), model.omega(&m.phase), entries));
             }
-            out.push((class.landing, model.class_wave_number(self.cluster, class), members));
+            out.push((class.landing, [model.class_wave_number(self.cluster, class), absorbed], members));
         }
         out
     }
@@ -929,9 +933,10 @@ impl<'a> Builder<'a> {
         let statics = self.drafts.iter().map(|d| d.beat.is_zero()).collect();
         let classes = classes
             .into_iter()
-            .map(|(landing, wave_number, members)| ClassPlan {
+            .map(|(landing, [wave_number, absorbed], members)| ClassPlan {
                 landing,
                 wave_number,
+                absorbed,
                 members: members
                     .into_iter()
                     .map(|(source, scalar, doppler, phase, entries)| MemberPlan { source, scalar, doppler, phase, entries: entries.into_iter().map(|(a, bp, sp, j, j2)| (a, bp, sp, near.at(j), near.at(j2))).collect() })
