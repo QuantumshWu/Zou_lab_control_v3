@@ -1435,6 +1435,10 @@ pub(crate) struct Site {
     pub(crate) responses: Vec<f64>,
     pub(crate) weights: Vec<(C64, C64)>,
     pub(crate) channels: Vec<C64>,
+    /// Per channel and ground place the first of the places co-resonant with it, and per such first place the excited
+    /// amplitudes of its frequency (readout.rs, # The readout).
+    pub(crate) resonant: Vec<usize>,
+    pub(crate) excited: Vec<C64>,
     /// The fourth order's (module documentation, # The fourth order): H⁽⁴⁾ less (i/2) the decay's change on the cluster's
     /// places, then H⁽⁴⁾'s gradient along the three lab axes; and its products' scratch.
     pub(crate) quartic: Vec<C64>,
