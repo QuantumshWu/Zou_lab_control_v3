@@ -475,7 +475,7 @@ fn free(name: &str, dimension: &str, temperature: f64, tau: f64, count: u64, spa
                 let mut sums = [0.0; 7];
                 for s in 0..per {
                     let to = (w * per + s + 1) as f64 * tau;
-                    atom_motion::adapt::advance(&run, tau, &mut t, &mut scratch, &mut path, to, &mut |_| {}).unwrap();
+                    atom_motion::adapt::advance(&run, tau, &mut t, &mut scratch, &mut path, to, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
                     for &axis in &held {
                         // Held at its offset; or, `SWING=1`, on the trap's own oscillation of that amplitude along the
                         // axis, each atom at its own phase: the axis moves as a trapped atom's does and takes nothing
