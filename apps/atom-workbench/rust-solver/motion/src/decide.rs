@@ -23,11 +23,12 @@
 //! t·SE is the interval at the confidence z over the looks the decision takes (estimate.rs `Spread::interval_over`).
 //!
 //! # Many reads
-//! A decision that looks at a family of m reads, each against its own bound (`judge`; SPEC §5.1), refines where any of
-//! them lies beyond, and so takes the largest of m noisy reads: beyond is judged with the family's interval (Šidák over
-//! the m looks, so that the largest noisy read refines no more often than one look would). Within is judged with each
-//! read's own interval, one look: every read has to lie within its bound by itself, whatever the others are. Any other
-//! family is unreadable.
+//! A decision that looks at a family of m reads, each against its own bound (SPEC §5.1; the step's check, solve.rs
+//! `screen` and `blind`), refines where any of them lies beyond, and so takes the largest of m noisy reads: beyond is
+//! `Read::outcome` among the family's m looks (Šidák over them, so that the largest noisy read refines no more often
+//! than one look would). Within is `Read::outcome` at one look, each read's own interval: every read has to lie within
+//! its bound by itself, whatever the others are. A family neither beyond nor within is unreadable: a read that is not
+//! within at one look, a read that is no number among them, is what the decision cannot see.
 //!
 //! # pays
 //! A spend W for a predicted saving ΔC pays where ΔC − t·SE(ΔC) > W (`pays`; the left side is `assured`, by which savings
@@ -91,28 +92,6 @@ impl Read {
     }
 }
 
-/// A family's outcome (module documentation, # Many reads).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Judgement {
-    /// Every read lies within its bound by itself.
-    Within,
-    /// Some read lies beyond its bound among them all.
-    Beyond,
-    Unreadable,
-}
-
-/// The outcome of a family of reads, each with its bound (module documentation, # Many reads).
-pub fn judge(reads: &[(Read, f64)]) -> Judgement {
-    let looks = reads.len() as f64;
-    if reads.iter().any(|(r, bound)| r.outcome(*bound, looks) == Outcome::Beyond) {
-        Judgement::Beyond
-    } else if reads.iter().all(|(r, bound)| r.outcome(*bound, 1.) == Outcome::Within) {
-        Judgement::Within
-    } else {
-        Judgement::Unreadable
-    }
-}
-
 /// What a predicted saving is at the least at the confidence z, saving − t·SE (module documentation, # pays): negative
 /// for one that may be a loss, no number for a read that is none.
 pub fn assured(saving: Read) -> f64 {
@@ -156,25 +135,6 @@ mod tests {
     #[test]
     fn the_level_s_error_follows_its_order() {
         assert_eq!((richardson(0.5, 2.), richardson(0.5, 4.), richardson(0., 1.)), (4. / 3., 16. / 15., 1.));
-    }
-
-    /// A family's outcome (`judge`; one look's interval is z of the error on unlimited groups): within where every read
-    /// lies within its own bound; a size four times its bound, clear among all the looks, is beyond, and so are two
-    /// reads beyond; one read within and one whose interval straddles its bound are unreadable; a read that is clear
-    /// at one look but not among the family's looks is unreadable too, not beyond; a read that is no number makes its
-    /// family unreadable; no read at all is within.
-    #[test]
-    fn a_family_is_beyond_by_all_its_looks_and_within_by_each() {
-        let quiet = (read(0., 0.), 1.);
-        assert_eq!(judge(&[quiet, (read(0.5, 0.1), 1.)]), Judgement::Within);
-        assert_eq!(judge(&[quiet, (read(4., 0.01), 1.)]), Judgement::Beyond);
-        assert_eq!(judge(&[(read(4., 0.01), 1.), (read(0.5, 0.001), 0.03125)]), Judgement::Beyond);
-        assert_eq!(judge(&[quiet, (read(0.5, 1.), 1.)]), Judgement::Unreadable);
-        // 1.5 ± 0.24: beyond 1 at one look (z = 2), not at Šidák's interval over a thousand (about 4.08).
-        let family: Vec<(Read, f64)> = std::iter::once((read(1.5, 0.24), 1.)).chain(std::iter::repeat_n(quiet, 999)).collect();
-        assert_eq!((family[0].0.outcome(1., 1.), judge(&family)), (Outcome::Beyond, Judgement::Unreadable));
-        assert_eq!(judge(&[quiet, (read(f64::NAN, 0.), 1.)]), Judgement::Unreadable);
-        assert_eq!(judge(&[]), Judgement::Within);
     }
 
     /// A spend pays only for a saving beyond it and the saving's interval; a saving that is not a number pays nothing.
