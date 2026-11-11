@@ -54,7 +54,7 @@ impl Model {
         self.readout_with(cluster, at, psi, None)
     }
 
-    /// The readout with the forms at the atom from their tables where they serve (tabulate.rs `Model::near`).
+    /// The readout with the forms at the atom from their tables where they serve (tabulate.rs `Model::near_tabulated`).
     pub(crate) fn readout_with(&self, cluster: usize, at: &Point, psi: &[C64], tables: Option<&super::tabulate::Tables>) -> [f64; STATES] {
         let c = &self.clusters[cluster];
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
@@ -97,7 +97,8 @@ impl Model {
     /// V_L(r; p) far from the trap (SPEC §1.7): every focused beam's amplitude zero, the plane waves' terms of one wave vector
     /// (their spatial mean; a term of q ≠ 0 averages out). The part at the atom is zero there: it is those shifts with the
     /// trap light on less with it off (potential.rs), and far from the trap the trap light is off but for its plane waves, whose
-    /// part is the constants' above.
+    /// part is the constants' above. A request whose trap light holds a plane wave is refused (SPEC §9): for every request
+    /// the solve runs this is 0.
     pub fn asymptote(&self, p: &[f64; GROUND], lights: &Lights) -> f64 {
         let trap = self.light.trap;
         if !lights.on(trap) {

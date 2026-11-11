@@ -307,7 +307,7 @@ fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64,
             let s = &step.segment;
             if t.time >= burn {
                 let kick = s.kicked.1[2] - s.flow.advance(s.from, 0.5 * s.tau).1[2];
-                let spread = 2.0 * step.heating[2] / hm;
+                let spread = step.spread[2].iter().map(|l| l * l).sum::<f64>() * s.tau.abs();
                 let w = course.weights(t.time + 0.5 * s.tau);
                 for (i, w) in [1.0, w[0], w[1]].into_iter().enumerate() {
                     sums[3 * i] += w * kick;

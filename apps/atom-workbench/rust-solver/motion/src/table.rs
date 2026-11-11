@@ -39,10 +39,12 @@ pub const GRADIENT_ORDER: i32 = 2;
 /// A cubic's stencil: four nodes per axis.
 const STENCIL: usize = 4;
 /// The most axes of a table: a lookup holds its axes' stencils in place, and at 4^D rows a point a table of more axes
-/// is beyond any work bound long before.
+/// is beyond any work bound long before. A capacity, not derived: the axes' own rules (model/tabulate.rs, the cost of
+/// an interpolation against the elimination's) stop a table before it.
 pub const MOST_AXES: usize = 6;
 /// The reals a lookup takes at a time through its rows, its value and its slopes together: 2 kB a row -- the four rows
-/// and the sums stay in the first-level cache.
+/// and the sums stay in the first-level cache. A machine's number, not derived; it changes no value (the sums are the
+/// same sums, stretch by stretch), the pace alone.
 const BLOCK: usize = 256;
 
 /// One axis of a table: its range [lo, hi] (a periodic axis's period is hi − lo, its node n the node 0 again), whether

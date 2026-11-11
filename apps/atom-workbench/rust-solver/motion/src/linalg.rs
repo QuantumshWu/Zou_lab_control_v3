@@ -464,16 +464,6 @@ impl Lu {
     pub fn solve(&self, b: &mut [C64]) {
         solve(&self.factors.data, &self.pivots, self.factors.rows, b, 1);
     }
-    /// A⁻¹ B.
-    pub fn solve_columns(&self, b: &Mat) -> Mat {
-        let mut out = b.clone();
-        solve(&self.factors.data, &self.pivots, self.factors.rows, &mut out.data, b.cols);
-        out
-    }
-    /// A⁻¹.
-    pub fn inverse(&self) -> Mat {
-        self.solve_columns(&Mat::identity(self.factors.rows))
-    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -644,8 +634,10 @@ fn rotate(first: &mut [C64], second: &mut [C64], c: f64, s: C64) {
     }
 }
 
-/// The eigendecomposition of a general complex matrix (`Eigen::decompose`), on memory of its own.
-pub fn eigen(a: &Mat) -> Option<Eigen> {
+/// The eigendecomposition of a general complex matrix (`Eigen::decompose`), on memory of its own: the tests' entry (a
+/// step's picture keeps its own, spectral.rs).
+#[cfg(test)]
+pub(crate) fn eigen(a: &Mat) -> Option<Eigen> {
     let mut e = Eigen::default();
     e.decompose(a).then_some(e)
 }
@@ -1051,6 +1043,13 @@ pub(crate) mod tests {
     use crate::random::{Purpose, Stream};
     use crate::units::rounding;
 
+    /// A⁻¹ B by a factorization.
+    fn solve_columns(lu: &Lu, b: &Mat) -> Mat {
+        let mut out = b.clone();
+        solve(&lu.factors.data, &lu.pivots, lu.factors.rows, &mut out.data, b.cols);
+        out
+    }
+
     /// The split kernels (`axpy`, `dot`, `combine`) are the complex sums they stand for, to the rounding of a sum of
     /// their length; and their pace (printed: ns a complex multiply-add on spans of 28, a five-state cluster's places;
     /// `combine`'s on five columns of 16 rows, a five-state cluster's jumps on its state).
@@ -1125,7 +1124,7 @@ pub(crate) mod tests {
             plus[(i, i)] += C64::ONE;
             minus[(i, i)] += C64::ONE;
         }
-        Lu::new(&plus).unwrap().solve_columns(&minus)
+        solve_columns(&Lu::new(&plus).unwrap(), &minus)
     }
     fn difference(a: &Mat, b: &Mat) -> f64 {
         a.data.iter().zip(&b.data).fold(0.0, |m, (x, y)| m.max((*x - *y).abs()))
@@ -1157,7 +1156,7 @@ pub(crate) mod tests {
     fn the_lu_solves_within_its_backward_error() {
         let n = 24;
         let (a, b) = (sample(n, n, 1), sample(n, 3, 2));
-        let x = Lu::new(&a).unwrap().solve_columns(&b);
+        let x = solve_columns(&Lu::new(&a).unwrap(), &b);
         let mut r = a.product(&x);
         r.add_scaled(-C64::ONE, &b);
         let bound = rounding(3 * n) * n as f64 * a.norm1() * x.max_abs();
@@ -1215,7 +1214,7 @@ pub(crate) mod tests {
         for i in 0..n {
             s[(i, i)] += C64::ONE;
         }
-        let a = s.product(&Mat::diagonal(&lambda)).product(&Lu::new(&s).unwrap().inverse());
+        let a = s.product(&Mat::diagonal(&lambda)).product(&solve_columns(&Lu::new(&s).unwrap(), &Mat::identity(n)));
         let e = eigen(&a).unwrap();
         let mut found = e.values.clone();
         found.sort_by(|x, y| x.re.total_cmp(&y.re));

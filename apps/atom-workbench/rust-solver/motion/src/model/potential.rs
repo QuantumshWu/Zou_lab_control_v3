@@ -157,9 +157,11 @@ impl Model {
         Some(model)
     }
 
-    /// V_L(r; p) with, to `order`, its gradient and Hessian (what lies beyond the order is not made, and no number), and the
-    /// rounding of its sum (module documentation); the near light from
-    /// its tables where they serve (tabulate.rs `Model::near`). With an averaged light it is read on that light set's own model
+    /// V_L(r; p) with, to `order`, its gradient and Hessian (what lies beyond the order is not made: zeros), and the
+    /// rounding of its sum (module documentation); the near light from its tables where they serve and the order asked
+    /// is the value's or the gradient's (tabulate.rs `Model::near_tabulated`; to the second order the exact elimination's).
+    /// The fourth order's shift is in the value and the gradient alone (below): a potential asked to the second order
+    /// is the second order's fold, its value too. With an averaged light it is read on that light set's own model
     /// (`smooth`), exactly.
     pub(crate) fn expand(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights, order: usize, tables: Option<&super::tabulate::Tables>) -> Expansion {
         match self.smooth(p, lights) {
@@ -231,7 +233,7 @@ impl Model {
                     let (left, right) = plan.factors(link.block);
                     let side = |s: Option<usize>, weighted: bool| s.map_or(&unit[..], |s| if weighted { fields.doppler(s) } else { fields.plain(s) });
                     // A whole jet's parts hold any order's.
-                    let (mut coefficient, mut form, mut term) = ([C64::ZERO; 10], [C64::ZERO; 10], [C64::ZERO; 10]);
+                    let (mut coefficient, mut form, mut term) = ([C64::ZERO; super::jet::WHOLE], [C64::ZERO; super::jet::WHOLE], [C64::ZERO; super::jet::WHOLE]);
                     jet::multiply(side(left, link.flag == LEFT), side(right, link.flag == RIGHT), &mut coefficient[..parts]);
                     near.jet(link.operand, &mut form[..parts]);
                     if link.conjugate {

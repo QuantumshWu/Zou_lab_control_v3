@@ -1568,14 +1568,14 @@ impl Model {
                 if responses.first[cl].is_empty() || responses.first[cr].is_empty() {
                     continue;
                 }
-                let (mut metric, mut loss) = ([C64::ZERO; 10], [C64::ZERO; 10]);
+                let (mut metric, mut loss) = ([C64::ZERO; jet::WHOLE], [C64::ZERO; jet::WHOLE]);
                 for &(e, f, rate) in &rates {
-                    let left: [C64; 10] = std::array::from_fn(|p| if p < np { responses.first[cl][kl][p][(e, x)].conj() } else { C64::ZERO });
-                    let right: [C64; 10] = std::array::from_fn(|p| if p < np { responses.first[cr][kr][p][(f, y)] } else { C64::ZERO });
+                    let left: [C64; jet::WHOLE] = std::array::from_fn(|p| if p < np { responses.first[cl][kl][p][(e, x)].conj() } else { C64::ZERO });
+                    let right: [C64; jet::WHOLE] = std::array::from_fn(|p| if p < np { responses.first[cr][kr][p][(f, y)] } else { C64::ZERO });
                     if left[..np].iter().all(|z| *z == C64::ZERO) || right[..np].iter().all(|z| *z == C64::ZERO) {
                         continue;
                     }
-                    let mut product = [C64::ZERO; 10];
+                    let mut product = [C64::ZERO; jet::WHOLE];
                     jet::multiply(&left[..np], &right[..np], &mut product[..np]);
                     for p in 0..np {
                         loss[p] += product[p] * rate;
@@ -1983,7 +1983,7 @@ impl Model {
         for (s, (plain, doppler)) in plan.scalars.iter().zip(out.plain.chunks_mut(parts).zip(out.doppler.chunks_mut(parts))) {
             for &(at, c) in &s.beams {
                 let (a, shift) = (&amplitudes[plan.beams[at]], out.shifts[at]);
-                let whole = if parts > 4 { jet::whole(a) } else { [C64::ZERO; 10] };
+                let whole = if parts > 4 { jet::whole(a) } else { [C64::ZERO; jet::WHOLE] };
                 for p in 0..parts {
                     let part = match p {
                         0 => a.value,
