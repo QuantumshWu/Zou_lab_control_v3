@@ -1276,6 +1276,54 @@ impl Plan {
     fn values<'a>(&'a self, term: &Term, point: &'a [f64]) -> (&'a [f64], &'a [f64]) {
         (if term.near { point } else { &self.constant[..] })[term.at..term.at + 2 * term.len].split_at(term.len)
     }
+    /// Per state of the cluster, the bound of what the constant Hermitian terms' plane waves add to the curvature of
+    /// ⟨x|Ĥ_h|x⟩ on a state x held in the cluster's Doppler frames (reach.rs, # The kick's curvature; rad/µs/µm²), the
+    /// beams' moduli at most `most` (per request beam). A term's entry x ← y is its value v times the product of its
+    /// two field components, a sum over their beams of c_l c_r a_l a_r; in the frames each product turns along a
+    /// displacement at q = ±k_l ± k_r − (K_x − K_y) (a conjugated component's wave vectors negated), and its second
+    /// derivative along any direction is at most |q|² of it. In a form with a Hermitian ρ = |x⟩⟨x| the entry weighs
+    /// |x_x||x_y| ≤ ½(|x_x|² + |x_y|²): half its bound to each of its two states' rows, by the form's own weights
+    /// (`Term::weight`: an adjoint left out is its block taken twice) -- Gershgorin's row sums of the symmetrized
+    /// moduli. Left out: the trap light's own form on a state with itself -- its curvature is the trap's, taken whole
+    /// and with its sign where the trap is (potential.rs `Model::stiffer`) --; and an entry between a ground state and
+    /// an excited one, an explicit drive's coupling, whose weight |x_e||x_g| is the drive's own answer and not a held
+    /// state's (reach.rs: what the bound does not hold). What a near form or the first-order Doppler partner enters
+    /// is not a constant: none of it is here.
+    pub(crate) fn fringes(&self, model: &Model, most: &[f64]) -> Vec<f64> {
+        let (n, ground) = (self.states, model.clusters[self.cluster].ground);
+        let mut rows = vec![0.0; n];
+        for term in self.form.iter().filter(|term| term.flag == PLAIN) {
+            let block = &self.blocks[term.block];
+            // A component's beams: |c_l| max|a_l| and the wave vector it turns at.
+            let side = |component: Option<usize>| -> Vec<(f64, [f64; 3])> {
+                component.map_or(vec![(1.0, [0.0; 3])], |s| {
+                    let scalar = &self.scalars[s];
+                    let sign = if scalar.conjugate { -1.0 } else { 1.0 };
+                    scalar.beams.iter().map(|&(at, c)| (c.abs() * most[self.beams[at]], model.light.beams[self.beams[at]].wave_vector().map(|k| sign * k))).collect()
+                })
+            };
+            let (left, right) = (side(block.left), side(block.right));
+            let trap = [block.left, block.right].iter().all(|s| s.is_some_and(|s| self.scalars[s].frequency == model.light.trap));
+            let (re, im) = self.values(term, &self.form_start);
+            for (i, (re, im)) in re.iter().zip(im).enumerate().filter(|(_, (re, im))| **re != 0.0 || **im != 0.0) {
+                let (x, y) = ((term.first + i) / n, (term.first + i) % n);
+                if (trap && x == y) || (x < ground) != (y < ground) {
+                    continue;
+                }
+                let mut turned = 0.0;
+                for (a, k) in &left {
+                    for (b, q) in &right {
+                        let wave: [f64; 3] = std::array::from_fn(|j| k[j] + q[j] - (self.waves[x][j] - self.waves[y][j]));
+                        turned += a * b * dot3(wave, wave);
+                    }
+                }
+                let half = 0.5 * term.weight * re.hypot(*im) * turned;
+                rows[x] += half;
+                rows[y] += half;
+            }
+        }
+        rows
+    }
 }
 
 /// What a thread keeps from one use to the next (`Held`): a middle's numbers, a path's. A step's middle and its paths take
