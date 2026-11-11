@@ -188,7 +188,7 @@
 //! Σ Re⟨∇u|⊗|∇u⟩ of the jumps' amplitudes u = Jψ, neither divided by the jumps' rate (model/photon.rs). They are
 //! delivered so that no increment of the momentum is a quotient by a rate:
 //! - a jump carries the emitted photon's recoil −k_φ n and its class's conditional mean as far as one absorbed photon's
-//!   momentum goes (`Dynamics::kick`: at most k_φ + k_c in all);
+//!   momentum goes (`Emitted::kick`: at most k_φ + k_c in all);
 //! - a step carries the rest at its middle, on the state x_m there (`Dynamics::scattering`): the force F_s the jumps do
 //!   not carry, over τ, and the diffusion 2D they do not carry, as the step's part of the trajectory's Brownian path
 //!   (`Brownian`) through a factor Λ of it, Λ Λᵀ = 2D (`factor`): in free flight κ += τ F_s + Λ ΔW and r −= (ħ/m) Λ ΔZ,
@@ -248,7 +248,7 @@ use std::sync::OnceLock;
 
 use crate::decide::COMPLEX;
 use crate::linalg::{self, inner, norm_sqr, C64, Mat, LANES};
-use crate::model::{Cluster, Photon, Point, Quadratic, Scattering, STATES};
+use crate::model::{Cluster, Point, Quadratic, Scattering, STATES};
 use crate::random::Stream;
 use crate::spectral::Picture;
 use crate::units::{rounding, UNIT_ROUNDOFF};
@@ -280,13 +280,12 @@ pub trait Dynamics {
     /// straight path through the point (`Middle`): made once a step, at its middle.
     fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Self::Middle<'_>;
 
-    /// The photon classes of the cluster's state ψ (unnormalized) at a point, their amplitudes (`Model::photons_of`): what
-    /// a jump's draw of its class, direction and polarization reads.
-    fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon>;
-
-    /// The absorbed light's part of a jump's kick (1/µm): the conditional mean of the class of `photon`, one of the
-    /// state's photons there, as far as one absorbed photon's momentum goes (`Photon::kick`).
-    fn kick(&self, cluster: usize, at: &Point, psi: &[C64], photon: &Photon) -> [f64; 3];
+    /// A jump's photon of the cluster's state ψ (unnormalized) at a point (SPEC §1.6; model/photon.rs
+    /// `Model::emission_of`): the model makes the rate W = Σ_a‖u_a‖² of every class the state emits there, in the
+    /// classes' order; `draw` picks one of them by its place among those rates, or none; and the model makes the photon
+    /// of the class drawn (`Emitted`) -- the one class whose amplitudes and kick a jump reads. None where `draw` picks
+    /// none.
+    fn emit(&self, cluster: usize, at: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted>;
     /// Where a jump's bare state `f` lands in a cluster at a point: the state the trajectory goes on in, with the norm
     /// it goes on with (a fold's bare state is its slow state and a part that is gone within the excited state's
     /// lifetime; the slow state's norm is the bare state's survival extrapolated back to the jump, below ‖f‖ or above
@@ -314,7 +313,7 @@ pub trait Dynamics {
     /// middle beside its own work and its nodes' (`step_work`).
     fn assembly_work(&self) -> f64;
 
-    /// The counted real multiply-adds of one jump's photons (`Dynamics::photons`), made once per run: `jump` adds it to the
+    /// The counted real multiply-adds of one jump's photons (`Dynamics::emit`), made once per run: `jump` adds it to the
     /// trajectory's work.
     fn photon_work(&self) -> f64;
 }
@@ -400,6 +399,20 @@ impl FromIterator<C64> for Internal {
         }
         out
     }
+}
+
+/// The photon a jump emits (`Dynamics::emit`), of the class drawn among its state's classes: the cluster the jump lands
+/// the atom in; |k_φ| (1/µm), 2π/c times the class's photon frequency -- the emission's recoil is −k_φ n --; the
+/// amplitudes u_a = J_{a,φ}ψ (a = x, y, z) on the landing cluster's states -- the direction's density ∝ tr G − n·Re(G)·n
+/// (G_ab = ⟨u_a|u_b⟩), the polarization ε across n by ‖Σ_a ε_a u_a‖², the state after f = Σ_a ε_a u_a --; and the absorbed
+/// light's part of the jump's kick (1/µm): the class's conditional mean as far as one absorbed photon's momentum goes
+/// (model.rs `Moments::kick`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Emitted {
+    pub landing: usize,
+    pub wave_number: f64,
+    pub amplitudes: [Internal; 3],
+    pub kick: [f64; 3],
 }
 
 /// A trajectory's state (SPEC §1.6, §1.7, §2.2).
@@ -1565,10 +1578,11 @@ fn factor(rate: &[[f64; 3]; 3], scale: f64, links: usize) -> [[f64; 3]; 3] {
 }
 
 /// The jump of a trajectory at its state (SPEC §1.6): from `Stream::jump(seed, index, jumps + 1)` the next threshold, the
-/// class ∝ Σ_a‖u_a‖² (`Photon::weight`), the polarization across the direction by ‖Σ_a ε_a u_a‖², and the direction from the dipole pattern
+/// class ∝ Σ_a‖u_a‖² among the rates the model makes of the state's classes, whose photon alone the model then makes
+/// (`Dynamics::emit`), the polarization across the direction by ‖Σ_a ε_a u_a‖², and the direction from the dipole pattern
 /// tr G − n·Re(G)·n (at most tr G, as Re G ≥ 0) by exact rejection from the uniform sphere; then ψ ← f/‖f‖ on the landing
 /// cluster and κ += −k_φ n + s b, the emitted photon's recoil and the class's conditional mean of the absorbed momentum
-/// as far as one photon's goes (`Dynamics::kick`; module documentation, # The absorbed light's momentum) -- at most
+/// as far as one photon's goes (`Emitted::kick`; module documentation, # The absorbed light's momentum) -- at most
 /// k_φ + k_c, whatever the light does at the point. The point is the trajectory's as it is given: a step makes its
 /// jumps on its path's points (module documentation, # Jumps), and the loss after a jump is its caller's to test, on
 /// the trajectory's own place (adapt.rs). A norm that reached its threshold with no photon to emit -- every class's
@@ -1592,30 +1606,35 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), R
     let mut first = true;
     loop {
         let at = trajectory.point();
-        let photons = model.photons(trajectory.cluster, &at, &trajectory.psi);
-        let total: f64 = photons.iter().map(Photon::weight).sum();
-        if !(total > 0.0) {
+        // The class among the state's classes by their rates; none where they have no rate between them.
+        let mut draw = |rates: &[f64]| {
+            let total: f64 = rates.iter().sum();
+            if !(total > 0.0) {
+                return None;
+            }
+            let mut x = class * total;
+            let mut pick = rates.len() - 1;
+            for (i, w) in rates.iter().enumerate() {
+                if x < *w {
+                    pick = i;
+                    break;
+                }
+                x -= w;
+            }
+            Some(pick)
+        };
+        let Some(photon) = model.emit(trajectory.cluster, &at, &trajectory.psi, &mut draw) else {
             // A norm at its threshold with no photon to emit is refused; a bare state with none goes on as it is.
             if first {
                 return Err(Refused::Emission);
             }
             break;
-        }
+        };
         if first {
             trajectory.jumps = j;
             trajectory.threshold = threshold;
         }
         trajectory.work += model.photon_work();
-        let mut x = class * total;
-        let mut pick = photons.len() - 1;
-        for (i, w) in photons.iter().map(Photon::weight).enumerate() {
-            if x < w {
-                pick = i;
-                break;
-            }
-            x -= w;
-        }
-        let photon = &photons[pick];
         let u = &photon.amplitudes;
         let gram: [[f64; 3]; 3] = std::array::from_fn(|a| std::array::from_fn(|b| inner(&u[a], &u[b]).re));
         let trace = gram[0][0] + gram[1][1] + gram[2][2];
@@ -1631,9 +1650,8 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), R
         let (f1, f2) = (along(e1), along(e2));
         let (w1, w2) = (norm_sqr(&f1), norm_sqr(&f2));
         let (f, w) = if polarization * (w1 + w2) < w1 { (f1, w1) } else { (f2, w2) };
-        let absorbed = model.kick(trajectory.cluster, &at, &trajectory.psi, photon);
         for a in 0..3 {
-            trajectory.kappa[a] += -photon.wave_number * direction[a] + absorbed[a];
+            trajectory.kappa[a] += -photon.wave_number * direction[a] + photon.kick[a];
         }
         let scale = 1.0 / w.sqrt();
         trajectory.psi = f.iter().map(|z| *z * scale).collect();

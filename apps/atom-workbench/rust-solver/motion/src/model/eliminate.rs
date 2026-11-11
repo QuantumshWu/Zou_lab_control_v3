@@ -594,6 +594,31 @@ impl Model {
     }
 }
 
+/// A drive folded with the levels at the atom, at a sample (`Model::drive_parameters`): its own saturation s; its
+/// denominator's modulus; its sweep a; its Doppler order's (w‖T2‖/‖T‖)²; its ground state's population; of that state
+/// under the drive's carrier (units.rs `Fold`) the excited share S_b, and how far beyond it the drive reads the level's
+/// own second-order term, L_e/S_b where that is above one (`Model::drive_parameters`); and its response R_c[e, b].
+pub(crate) struct Folded {
+    pub(crate) share: f64,
+    pub(crate) distance: f64,
+    pub(crate) sweep: f64,
+    pub(crate) doppler: f64,
+    pub(crate) population: f64,
+    pub(crate) total: f64,
+    pub(crate) reads: f64,
+    pub(crate) response: C64,
+}
+
+impl Folded {
+    /// The drive's part of what its fold's order leaves of its ground state (units.rs, # The fold's order): its line errs
+    /// by M^k -- M = max(S_b, L_e), the larger of the state's excited share and of twice its level's own second-order
+    /// term across the drive's distance, both s on one line; k = 1 at the second order, 2 at the fourth -- on the
+    /// drive's part s/S_b of the state's excitation: s M^k/S_b = s S_b^{k−1} (M/S_b)^k.
+    pub(crate) fn order(&self, k: i32) -> f64 {
+        self.share * self.total.powi(k - 1) * self.reads.powi(k)
+    }
+}
+
 /// The constant forms' energies over a region (the gates' distances): per state its value at the centre and the bound of how
 /// far it moves within the cell, per excited state the Gershgorin radius of the forms' couplings among the excited states,
 /// and per state the bound of how far the level the eliminations take (module documentation, # The response: a carrier's
@@ -864,46 +889,59 @@ impl Model {
         (moved, rate.abs())
     }
 
-    /// A drive folded with the levels at the atom, its small parameters at a sample (SPEC §1.5; units.rs `Measured`): its own
-    /// saturation s = 2|R_c[e,b]|² at the point (R = Σ_l a_l T̃_l), its sweep a = |v·∇(E_e − E_b) + k·v̇|/|ΔE|² (ΔE its
-    /// denominator there, `drive_motion`; the one gate, units.rs `gate`), its Doppler order's (w‖T2‖/‖T‖)², and its ground
-    /// state's population p_b, with the response R_c[e,b] itself; None where the sample's cluster does not hold its ground
+    /// A drive folded with the levels at the atom, its small parameters at a sample (`Folded`; SPEC §1.5; units.rs
+    /// `Measured`): its own saturation s = 2|R_c[e,b]|² at the point (R = Σ_l a_l T̃_l), its denominator's modulus |ΔE|
+    /// there (`drive_motion`) and its sweep a = |v·∇(E_e − E_b) + k·v̇|/|ΔE|² (the one gate, units.rs `gate`), its Doppler
+    /// order's (w‖T2‖/‖T‖)², its ground state's population p_b and what its carrier's fold makes of that state
+    /// (`Measured::folds`), with the response R_c[e,b] itself; None where the sample's cluster does not hold its ground
     /// state or the model no such fold.
-    pub(crate) fn drive_parameters(&self, unit: &Unit, at: &Measured) -> Option<(f64, f64, f64, f64, C64)> {
+    pub(crate) fn drive_parameters(&self, unit: &Unit, at: &Measured) -> Option<Folded> {
         let Unit::Drive { component, excited, ground } = *unit else { return None };
         let c = &self.clusters[at.sample.cluster];
         let pb = c.states[..c.ground].iter().position(|&s| s == ground)?;
         let ci = self.carrier_of(component.frequency).filter(|_| !component.counter)?;
-        let r = at.responses[ci].as_ref().map_or(C64::ZERO, |m| m[(excited - GROUND, pb)]);
-        let s = 2.0 * r.norm_sqr();
-        let (moved, rate) = self.drive_motion(component, excited, ground, at);
-        let own = C64::new(self.energies[excited] - self.energies[ground] - self.carriers[ci].detuning + moved, 0.5 * self.decay[(excited - GROUND, excited - GROUND)].re).abs();
+        let response = at.responses[ci].as_ref().map_or(C64::ZERO, |m| m[(excited - GROUND, pb)]);
+        let (distance, rate) = self.drive_distance(ci, excited, ground, at);
         let doppler = at.doppler[ci].get_or_init(|| self.doppler_sizes(&at.plan, &at.near, ci, at.sample.at.kappa))[pb];
-        Some((s, gate(0.0, own, rate).sweep, doppler * doppler, at.populations[ground], r))
+        // L_e/S_b as a ratio of distances: the level's own term across this drive's, over the drives' sizes in it each
+        // across its own -- 2|N_bb|/|ΔE_e| over S_b where the responses are V/ΔE, and one on one line whatever the
+        // response holds beside (its first-order Doppler term). At one distance it is |Σ V*R|/Σ |V R|, at most one.
+        let fold = &at.folds[ci][pb];
+        let across = *fold.across.get_or_init(|| (0..EXCITED).filter(|&x| fold.terms[x] > 0.0).map(|x| fold.terms[x] / self.drive_distance(ci, GROUND + x, ground, at).0).sum());
+        let reads = if across > 0.0 { (fold.level.abs() / distance / across).max(1.0) } else { 1.0 };
+        Some(Folded { share: 2.0 * response.norm_sqr(), distance, sweep: gate(0.0, distance, rate).sweep, doppler: doppler * doppler, population: at.populations[ground], total: fold.share, reads, response })
+    }
+
+    /// A drive's denominator at a sample, its modulus |E_e − E_b − δ_c + δΔ − iΓ_e/2| with the levels' motion there, and the
+    /// rate at which its detuning moves (`drive_motion`), of a carrier's co-rotating drive e ← b.
+    fn drive_distance(&self, carrier: usize, excited: usize, ground: usize, at: &Measured) -> (f64, f64) {
+        let (moved, rate) = self.drive_motion(Component { frequency: self.carriers[carrier].frequency, counter: false }, excited, ground, at);
+        (C64::new(self.energies[excited] - self.energies[ground] - self.carriers[carrier].detuning + moved, 0.5 * self.decay[(excited - GROUND, excited - GROUND)].re).abs(), rate)
     }
 
     /// The error at a sample of a drive folded with the levels at the atom (SPEC §1.5; units.rs, # The fold's order): its
-    /// motion's part on T, ((w‖T2‖/‖T‖)² + a) p_b, and its order's (`drive_parameters`) -- the second order's s p_b on
-    /// the populations and on T, where its cluster's fold has no other order; where it has, nothing at the second order
-    /// (the order is the cluster's own unit's, `Unit::Second`), and at the fourth what it leaves: `ORDER_RATES` s² p_b on
-    /// the populations and (`ORDER_FORCE` s² + the cluster's ground levels' spread over the drive's distance times s)
-    /// p_b on T. With the drive's response there, where the cluster holds it (`pair_error` reads it).
+    /// motion's part on T, ((w‖T2‖/‖T‖)² + a) p_b, and its order's (`drive_parameters`). The order's error is its ground
+    /// state's and not the drive's alone (units.rs, # The fold's order): the drive's line errs by M^k, M the larger of the
+    /// state's excited share S_b = 2 Σ_e |R[e, b]|² and of twice its level's own second-order term across the drive's
+    /// distance, 2|N_bb|/|ΔE| -- on one line both are s --, on the drive's part s/S_b of the state's excitation
+    /// (`Folded::order`). The second order's s M/S_b p_b on the populations and on T, where its cluster's fold has no
+    /// other order; where it has, nothing at the second order (the order is the cluster's own unit's, `Unit::Second`),
+    /// and at the fourth what it leaves: `ORDER_RATES` s M²/S_b p_b on the populations and (`ORDER_FORCE` s M²/S_b + the
+    /// cluster's ground levels' spread over the drive's distance times s) p_b on T. A state's drives at one distance add
+    /// up to S_b p_b and c S_b² p_b. With the drive's response there, where the cluster holds it (`pair_error` reads it).
     pub(crate) fn drive_error(&self, unit: &Unit, at: &Measured) -> (UnitError, Option<C64>) {
-        let Some((s, sweep, doppler, p, response)) = self.drive_parameters(unit, at) else { return (UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 }, None) };
-        let cluster = at.sample.cluster;
+        let Some(drive) = self.drive_parameters(unit, at) else { return (UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 }, None) };
+        let (s, cluster) = (drive.share, at.sample.cluster);
         let (rates, force) = match (self.fourth[cluster], self.fold_frequency(cluster)) {
             (Some(_), _) => {
-                let Unit::Drive { component, excited, ground } = *unit else { unreachable!("a drive's parameters are a drive's") };
-                let (moved, _) = self.drive_motion(component, excited, ground, at);
-                let own = C64::new(self.energies[excited] - self.energies[ground] - self.tones[component.frequency].detuning + moved, 0.5 * self.decay[(excited - GROUND, excited - GROUND)].re).abs();
                 let levels = self.clusters[cluster].states.iter().map(|&b| at.energies[0][b]);
                 let spread = levels.clone().fold(f64::NEG_INFINITY, f64::max) - levels.fold(f64::INFINITY, f64::min);
-                (super::units::ORDER_RATES * s * s, super::units::ORDER_FORCE * s * s + spread / own * s)
+                (super::units::ORDER_RATES * drive.order(2), super::units::ORDER_FORCE * drive.order(2) + spread / drive.distance * s)
             }
             (None, Some(_)) => (0.0, 0.0),
-            (None, None) => (s, s),
+            (None, None) => (drive.order(1), drive.order(1)),
         };
-        (UnitError { parameter: s, population: rates * p, temperature: (force + doppler + sweep) * p }, Some(response))
+        (UnitError { parameter: s, population: rates * drive.population, temperature: (force + drive.doppler + drive.sweep) * drive.population }, Some(drive.response))
     }
 
     /// A carrier's explicit coupling e ← a at a point, Σ_l a_l X_l[e, a].
@@ -1152,7 +1190,7 @@ mod tests {
         let sample = Sample { cluster, at, psi: vec![C64::ONE] };
         let unit = Unit::Drive { component: Component { frequency: probe, counter: false }, excited: e, ground: b };
         let measured = model.measured(&sample, None);
-        let (_, sweep, _, _, _) = model.drive_parameters(&unit, &measured).unwrap();
+        let sweep = model.drive_parameters(&unit, &measured).unwrap().sweep;
         let force = measured.force;
         let k = model.light.beams[model.carriers[0].beams[0]].wave_vector();
         let shift = model.hbar_over_mass * (dot3(k, at.kappa) + 0.5 * dot3(k, k));

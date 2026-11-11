@@ -617,9 +617,10 @@ fn the_decay_s_mismatch_on_a_scene() {
 
 /// A state's photons made in parts (photon.rs `Gradients`) are the same photons: every class's amplitudes without any
 /// gradients (what a jump's draw reads) are the amplitudes of the photons made whole, and one class alone with its
-/// gradients (what the drawn photon's kick reads) is that class of them -- the same numbers, bit for bit, so the kick
-/// of the drawn class made again from the state (`Run::kick_at`) is the whole photon's. On every model of the tests,
-/// with the exact elimination, and on a scene's tables.
+/// gradients (what a jump makes of the class it draws) is that class of them but for the explicit states' part of the
+/// second moment's rate, which a class alone does not make -- the same numbers, bit for bit, so a
+/// jump's photon (`Dynamics::emit`: the classes' rates to the draw, the drawn class's amplitudes and kick) is the whole
+/// photon's, whichever class is drawn. On every model of the tests, with the exact elimination, and on a scene's tables.
 #[test]
 fn a_state_s_photons_in_parts_are_its_photons() {
     use crate::model::photon::Gradients;
@@ -641,12 +642,17 @@ fn a_state_s_photons_in_parts_are_its_photons() {
             let bare = model.photons_of(&plan, table, &at, &psi, Gradients::None).0;
             assert_eq!(bare, run.photon_amplitudes(cluster, &at, &psi));
             assert_eq!(whole.len(), bare.len(), "{name}, cluster {cluster}: the classes");
-            for (photon, alone) in whole.iter().zip(&bare) {
+            for (drawn, (photon, alone)) in whole.iter().zip(&bare).enumerate() {
                 assert!(alone.gradients.iter().flatten().all(|g| g.is_empty()), "{name}, cluster {cluster}, class {}: gradients where none are asked", photon.class);
                 assert!((alone.class, &alone.amplitudes) == (photon.class, &photon.amplitudes), "{name}, cluster {cluster}, class {}: the amplitudes alone", photon.class);
                 let one = model.photons_of(&plan, table, &at, &psi, Gradients::Of(photon.class)).0;
-                assert!(one.len() == 1 && one[0] == *photon, "{name}, cluster {cluster}, class {}: the class alone", photon.class);
-                assert_eq!(run.kick_at(cluster, &at, &psi, alone), photon.kick(), "{name}, cluster {cluster}, class {}: the kick", photon.class);
+                assert!(one.len() == 1 && crate::model::Photon { explicit: photon.explicit, ..one[0].clone() } == *photon && one[0].explicit == [[0.0; 3]; 3], "{name}, cluster {cluster}, class {}: the class alone", photon.class);
+                let mut draw = |rates: &[f64]| {
+                    assert!(rates.len() == bare.len() && rates.iter().zip(&bare).all(|(rate, photon)| *rate == photon.weight()), "{name}, cluster {cluster}: the classes' rates to a jump's draw");
+                    Some(drawn)
+                };
+                let emitted = crate::step::Dynamics::emit(run, cluster, &at, &psi, &mut draw).expect("the class drawn");
+                assert!((emitted.landing, emitted.wave_number, emitted.kick) == (photon.landing, photon.wave_number, photon.kick()) && (0..3).all(|a| emitted.amplitudes[a][..] == alone.amplitudes[a][..]), "{name}, cluster {cluster}, class {}: a jump's photon", photon.class);
                 classes += 1;
                 folded += photon.gradients.iter().flatten().flatten().filter(|z| **z != C64::ZERO).count().min(1);
             }

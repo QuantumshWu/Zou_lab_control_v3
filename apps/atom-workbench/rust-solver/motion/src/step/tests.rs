@@ -257,27 +257,21 @@ impl Dynamics for Atom {
         parts.insert(0, Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g });
         Parts { waves: self.cluster.waves.clone(), parts }
     }
-    fn photons(&self, _: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
-        if !self.folded.is_empty() {
-            return self.made(at.r, psi);
-        }
+    fn emit(&self, _: usize, at: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         let n = self.n();
-        let source = psi[n - 1] * (self.gamma / 3.0).sqrt();
-        let mut u = vec![C64::ZERO; n];
+        // The one class: the folded light's amplitude on the ground state with its kick, or the excited state's decay
+        // into the ground state, the same on every axis.
+        let (source, kick) = if self.folded.is_empty() {
+            (psi[n - 1] * (self.gamma / 3.0).sqrt(), [0.0; 3])
+        } else {
+            let photon = &self.made(at.r, psi)[0];
+            (photon.amplitudes[0][0], photon.kick())
+        };
+        let mut u = step::Internal::zeros(n);
         u[0] = source;
-        let none = || vec![C64::ZERO; n];
-        vec![Photon {
-            class: 0,
-            landing: 0,
-            wave_number: self.emission,
-            absorbed: 0.0,
-            amplitudes: [u.clone(), u.clone(), u],
-            gradients: std::array::from_fn(|_| [none(), none(), none()]),
-            explicit: [[0.0; 3]; 3],
-        }]
-    }
-    fn kick(&self, _: usize, at: &Point, psi: &[C64], _: &Photon) -> [f64; 3] {
-        if self.folded.is_empty() { [0.0; 3] } else { self.made(at.r, psi)[0].kick() }
+        let amplitudes = [u; 3];
+        draw(&[amplitudes.iter().map(|u| crate::linalg::norm_sqr(u)).sum::<f64>()])?;
+        Some(step::Emitted { landing: 0, wave_number: self.emission, amplitudes, kick })
     }
     fn scattering(&self, _: usize, at: &Point, psi: &[C64], _: &[f64]) -> Scattering {
         if self.folded.is_empty() { Scattering::NONE } else { Scattering::of(&self.made(at.r, psi), psi.iter().map(|z| z.norm_sqr()).sum()) }
@@ -1336,10 +1330,7 @@ impl Dynamics for Wells {
         }
         Parts { waves: self.cluster.waves.clone(), parts: vec![Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g }] }
     }
-    fn photons(&self, _: usize, _: &Point, _: &[C64]) -> Vec<Photon> {
-        unreachable!("the wells scatter nothing")
-    }
-    fn kick(&self, _: usize, _: &Point, _: &[C64], _: &Photon) -> [f64; 3] {
+    fn emit(&self, _: usize, _: &Point, _: &[C64], _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         unreachable!("the wells scatter nothing")
     }
     fn scattering(&self, _: usize, _: &Point, _: &[C64], _: &[f64]) -> Scattering {
@@ -1699,10 +1690,7 @@ impl Dynamics for Synthetic {
         }
         Parts { waves: k.clone(), parts }
     }
-    fn photons(&self, _: usize, _: &Point, _: &[C64]) -> Vec<Photon> {
-        unreachable!("the cost harness takes no jump")
-    }
-    fn kick(&self, _: usize, _: &Point, _: &[C64], _: &Photon) -> [f64; 3] {
+    fn emit(&self, _: usize, _: &Point, _: &[C64], _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         unreachable!("the cost harness takes no jump")
     }
     fn scattering(&self, _: usize, _: &Point, _: &[C64], _: &[f64]) -> Scattering {
@@ -1808,11 +1796,8 @@ impl<D: Dynamics> Dynamics for Counted<'_, D> {
         self.calls.set(calls);
         Probe { middle: self.model.middle(cluster, r, t), calls: &self.calls }
     }
-    fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
-        self.model.photons(cluster, at, psi)
-    }
-    fn kick(&self, cluster: usize, at: &Point, psi: &[C64], photon: &Photon) -> [f64; 3] {
-        self.model.kick(cluster, at, psi, photon)
+    fn emit(&self, cluster: usize, at: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+        self.model.emit(cluster, at, psi, draw)
     }
     fn scattering(&self, cluster: usize, at: &Point, psi: &[C64], populations: &[f64]) -> Scattering {
         self.model.scattering(cluster, at, psi, populations)
@@ -2315,7 +2300,7 @@ fn a_jump_s_kick_is_one_photon_s_at_most() {
         let at = Point { r, kappa: [0.0; 3], t: 0.0 };
         let (norm, photon) = (psi[0].norm_sqr(), &model.made(r, &psi)[0]);
         let (weight, b) = (photon.weight() / norm, k * epsilon / (phase.cos().powi(2) + (epsilon * phase.sin()).powi(2)));
-        let kick = model.kick(0, &at, &psi, photon);
+        let kick = model.emit(0, &at, &psi, &mut |_| Some(0)).expect("the one class").kick;
         let expected = b.min(k);
         assert!((kick[2] - expected).abs() <= 1e-9 * k && kick[0] == 0.0 && kick[1] == 0.0, "kz = {phase}: the jump carries {kick:?} of b = {b}");
         carried_whole += (b <= k) as usize;

@@ -1373,6 +1373,10 @@ pub(crate) struct Site {
     pub(crate) fields: Fields,
     pub(crate) member: Vec<f64>,
     pub(crate) class: Vec<f64>,
+    /// What a jump's draw reads (photon.rs `Model::emission_of`): the classes its state emits, their places among the
+    /// plan's classes and their rates.
+    pub(crate) emitting: Vec<usize>,
+    pub(crate) rates: Vec<f64>,
     /// What an explicit state's part of the photons reads (eliminate.rs `Model::explicit_moment`): the carriers'
     /// dressings and the levels' energies at the point to first order (eliminate.rs `Model::far_energies`).
     pub(crate) dressing: Vec<bool>,
