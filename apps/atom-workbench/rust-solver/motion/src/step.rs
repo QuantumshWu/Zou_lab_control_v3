@@ -35,7 +35,8 @@
 //!   `spectral::Picture`), so the state is known at any time of the step for n exponentials and two products of n²;
 //! - D through the step's three nodes alone, its middle and its two ends (two more generators of the model; none where
 //!   Ĥ is the same at every time, `Middle::still`: every pair of states holds one wave vector): D(s) = sA + s²B. A pair
-//!   of Ĥ₀'s states that turns a radian and more between two nodes follows the change (a polynomial in the time, to
+//!   of Ĥ₀'s states that turns far between two nodes for what changes -- where its following leaves no more than its
+//!   hops would (`spectral::followed`; spectral.rs, # The split) -- follows the change (a polynomial in the time, to
 //!   the second order: the generator's own eigenvectors along the path); the slower pairs, with the change's own light
 //!   shift, are two hops of the interaction picture a step, the first Magnus term with its integral over the pair's
 //!   turn exact, and a quintic between the nodes (spectral.rs). The propagation's work is the same whatever Ĥ₀'s
