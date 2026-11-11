@@ -220,10 +220,14 @@ pub struct UnitError {
     /// The small parameter measured: s (a drive's share of its ground state), ε (a bare fold's denominator's first order),
     /// m² (a coupling's mixing), a carrier's dressing's relative rate error.
     pub parameter: f64,
-    /// The absolute error it makes on the display rows' populations: s p_g; ε times its part of the state's rates;
-    /// m²(p_a + p_b); m²√(p_i p_j).
+    /// The absolute error it makes on the display rows' populations: s p_g -- where its cluster's fold is the fourth
+    /// order's, its ground state's line's remainder on its part of the state's excitation, `ORDER_RATES` s M²/S_b p_g
+    /// (eliminate.rs `Model::drive_error`) --; ε times its part of the state's rates; m²(p_a + p_b); m²√(p_i p_j).
     pub population: f64,
-    /// The relative error it makes on T: s (the fourth order's 3/2 s²); a; (w/σ)².
+    /// The relative error it makes on T: s -- at the fourth order `ORDER_FORCE` s M²/S_b and the cluster's ground
+    /// levels' spread over the drive's distance times s, M the larger of its ground state's excited share S_b and of
+    /// twice its level's own second-order term over the drive's distance (eliminate.rs `Model::drive_error`) --; a;
+    /// (w/σ)².
     pub temperature: f64,
 }
 
