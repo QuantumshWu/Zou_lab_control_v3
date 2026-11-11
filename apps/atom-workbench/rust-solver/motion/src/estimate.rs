@@ -40,6 +40,18 @@
 //! over every read trajectory of its accumulated local errors -- a lost one's as they stood at its loss, where its
 //! loss was decided --, the window within which a loss decision may differ (solve.rs).
 //!
+//! # The step's error between two ensembles
+//! The scheme is of the order p (units.rs `ORDER`): an output's step error at the step τ is e(τ) = C τ^p + O(τ^{p+1}), so
+//! the same output at twice the step differs by Q(2τ) − Q(τ) = (2^p − 1) e(τ) to the leading order, and
+//! e(τ) = [Q(2τ) − Q(τ)]/(2^p − 1) (decide.rs `richardson` at the ratio ½, less the level's own share). `between` takes it
+//! from two ensembles of the same trajectories -- the same numbers, so the same initial atoms and the same streams -- at
+//! τ and at 2τ: the loss and each row as shown as they are, T per lab axis relative to the finer level's T. Its error is
+//! the delete-one-group jackknife of the difference itself, each group left out of both levels at once: what the two
+//! levels share (the initial atoms, as long as the motion remembers them) cancels in it, and where they have
+//! decorrelated it is the two levels' own errors in quadrature over 2^p − 1 -- at p = 2 and equal numbers √2/3 = 0.47
+//! of the output's own statistical error. Nothing is assumed of how an error is carried from a step to an output: the
+//! two ensembles are carried by the dynamics itself.
+//!
 //! # Many looks
 //! A decision that acts where any of m reads lies beyond its interval (decide.rs) takes the largest of m noisy reads: at
 //! one look's tail p = P(|N| > z) each, some read of m independent ones lies beyond by chance with probability
@@ -53,11 +65,11 @@
 //! whose jackknife reads nothing of a loss or a state no trajectory reached, the reach's unsampled share, and the
 //! trajectories within the step's error of the escape (solve.rs).
 use crate::adapt::Drift;
-use crate::decide::Read;
+use crate::decide::{richardson, Read};
 use crate::transport::{transported, Mark};
 use crate::request::STATES;
 use crate::special::upper;
-use crate::units::{CONFIDENCE, KT_PER_UK};
+use crate::units::{CONFIDENCE, KT_PER_UK, ORDER};
 use rayon::prelude::*;
 use std::borrow::Borrow;
 use std::f64::consts::{PI, TAU};
@@ -606,10 +618,95 @@ pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<St
         .collect()
 }
 
+/// The step's error at one output as two ensembles measure it (module documentation, # The step's error between two
+/// ensembles): the loss's and each row's as shown (absolute), and T's per lab axis relative to T, where both levels
+/// hold two atoms at least.
+#[derive(Clone, Debug)]
+pub struct Between {
+    pub loss: Read,
+    pub shown: [Read; STATES],
+    pub temperature: Option<[Read; 3]>,
+}
+
+/// The step's error of the level `fine` at every output, from it and the level `coarse` at twice its step on the same
+/// trajectories, group by group in the same order (module documentation, # The step's error between two ensembles).
+pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scales) -> Vec<Between> {
+    assert_eq!(fine.len(), coarse.len(), "the two levels hold the same groups");
+    let outputs = fine.first().map_or(0, |g| g.borrow().sums.len());
+    let hm = scales.hbar_over_mass;
+    // The finer level's share of the difference: 1/(2^p − 1).
+    let share = richardson(0.5, ORDER as f64) - 1.;
+    (0..outputs)
+        .into_par_iter()
+        .map(|k| {
+            let j = jackknife(&[fine, coarse], k, hm);
+            let (f, c) = (&j.full[0], &j.full[1]);
+            Between {
+                loss: Read { value: share * (c.loss - f.loss), spread: j.every(|m| share * (m[1].loss - m[0].loss)) },
+                shown: std::array::from_fn(|s| Read { value: share * (c.shown[s] - f.shown[s]), spread: j.every(|m| share * (m[1].shown[s] - m[0].shown[s])) }),
+                temperature: f.temperature.zip(c.temperature).map(|(tf, tc)| std::array::from_fn(|a| Read { value: share * (tc[a] / tf[a] - 1.), spread: j.held(|t| share * (t[1][a] / t[0][a] - 1.)) })),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ensemble::GROUP;
+
+    /// The step's error between two ensembles (`between`) against synthetic levels of a known bias. Each atom has an
+    /// exponential energy E (⟨κ²⟩ = E, ⟨κ⟩ = 0) at the finer level and (1 + 3b)(ρE + (1 − ρ)E') at the coarser, E' an
+    /// independent one: the coarser T is (1 + 3b) times the finer in the mean, so the step's error at p = 2 is b, and
+    /// the levels' correlation is set by ρ. Over 1000 repetitions of 64 groups of 8 atoms: the read's mean meets b
+    /// within its interval at the confidence z; the reads' standard deviation over the repetitions is the jackknife's
+    /// error within the relative error of a standard deviation of 1000 draws at z, z/√(2·1000), twice (the jackknife's
+    /// mean has its own); and against the finer level's own relative error of T it is √2/3 for independent levels
+    /// (ρ = 0) and a small part of that for levels that share their atoms: √(1 + q − 2ρ)/3 times 1 + 3b, q = ρ² + (1 − ρ)²
+    /// the coarser energy's relative variance and ρ its covariance with the finer (0.024 at ρ = 0.95, a twentieth of the
+    /// independent levels'). The rows and the loss are differences of means: a row
+    /// shown by 6 of 8 atoms at the finer level and by 3 of 8 at the coarser reads (3/8 − 6/8)/3.
+    #[test]
+    fn the_step_s_error_between_two_ensembles_is_the_paired_difference() {
+        let (bias, groups, repetitions) = (0.02, 64, 1000);
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut exponential = || {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            -((((z ^ (z >> 31)) >> 11) as f64 + 0.5) / (1u64 << 53) as f64).ln()
+        };
+        for rho in [0., 0.95] {
+            let (mut sum, mut squares, mut errors, mut own) = (0., 0., 0., 0.);
+            for _ in 0..repetitions {
+                let (mut fine, mut coarse) = (vec![], vec![]);
+                for _ in 0..groups {
+                    let energies: Vec<(f64, f64)> = (0..GROUP).map(|_| (exponential(), exponential())).collect();
+                    fine.push(group(energies.iter().map(|&(e, _)| Some(atom(0, 0., e))).collect()));
+                    coarse.push(group(energies.iter().map(|&(e, other)| Some(atom(0, 0., (1. + 3. * bias) * (rho * e + (1. - rho) * other)))).collect()));
+                }
+                let read = between(&fine, &coarse, &UNIT)[0].temperature.unwrap()[0];
+                let m = summarize(&fine, &UNIT)[0].motion.unwrap();
+                sum += read.value;
+                squares += read.value * read.value;
+                errors += read.spread.error;
+                own += m.temperature_errors[0].error / m.temperature[0];
+            }
+            let n = repetitions as f64;
+            let (mean, error, own) = (sum / n, errors / n, own / n);
+            let deviation = (squares / n - mean * mean).sqrt();
+            let within = Spread { error: deviation / n.sqrt(), groups: n }.interval();
+            assert!((mean - bias).abs() <= within, "ρ = {rho}: the read's mean {mean} ± {within} against the bias {bias}");
+            let tolerance = 2. * CONFIDENCE / (2. * n).sqrt();
+            assert!((deviation / error - 1.).abs() <= tolerance, "ρ = {rho}: the reads' deviation {deviation} against the jackknife's error {error}");
+            let expected = (1. + 3. * bias) * (1. + rho * rho + (1. - rho) * (1. - rho) - 2. * rho).sqrt() / 3.;
+            assert!((error / own / expected - 1.).abs() <= 3. * tolerance, "ρ = {rho}: the error over T's own, {}, against {expected}", error / own);
+        }
+        let shows = |count: usize| group((0..GROUP as usize).map(|i| Some(atom(usize::from(i >= count), 0., 1.))).collect());
+        let read = &between(&[shows(6), shows(6)], &[shows(3), shows(3)], &UNIT)[0];
+        assert!((read.shown[0].value + 0.125).abs() < 1e-15 && (read.shown[1].value - 0.125).abs() < 1e-15 && read.loss.value == 0. && read.shown[0].spread.error == 0.);
+    }
 
     /// The step's error (`stepped`): three groups of eight read atoms over one output interval, each with ⟨κ²⟩ = 4 on
     /// every axis (k_B T_a = 4 ħ/m) and the local errors 1, 2 and 3 % of k_B T_a made over the interval, its rows' error
