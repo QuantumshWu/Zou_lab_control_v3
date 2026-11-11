@@ -23,17 +23,12 @@ pub const ORDER: i32 = 2;
 /// The statistics' confidence z (SPEC §0, §5.1): an error is read at z standard errors (the normal's two-sided 95.4 %).
 pub const CONFIDENCE: f64 = 2.0;
 
-/// The step error's share s of a target where the step's error is not read yet (SPEC §2.2): s = √(1/(1 + 2p)),
-/// √(1/5) ≈ 0.447 at p = 2 -- what the pilot's size, the model's decisions and the results sent before the pilot's
-/// check take for it. The check chooses a step by the work each choice is predicted to take beside what it would
-/// book, and books what its reads do not exclude (solve.rs, # The step); the share decides one thing there, what a
-/// rung may book while its order is untested (an attempt's first rung: the rule it had, kept).
+/// The step error's share s of a target (SPEC §2.2): s = √(1/(1 + 2p)), √(1/5) ≈ 0.447 at p = 2.
 ///
 /// Derivation: a run's error is E² = b² + S², the step bias b and the statistics S. The work goes as the trajectories
 /// times the steps, W ∝ S⁻² τ⁻¹, and b ∝ τ^p, so W ∝ S⁻² b^{−1/p}. At a fixed E put b = E sin θ, S = E cos θ:
 /// d ln W/dθ = 2 tan θ − (1/p) cot θ vanishes at tan²θ = 1/(2p), i.e. sin²θ = 1/(1 + 2p). The least work for a
-/// given accuracy gives the step b/E = √(1/(1 + 2p)) of the target -- for a step chosen continuously; the ladder's
-/// rungs are a factor of two apart, and a rung's part lands where its reads put it.
+/// given accuracy gives the step b/E = √(1/(1 + 2p)) of the target.
 pub const STEP_SHARE: f64 = square_root(1.0 / (1.0 + 2.0 * ORDER as f64));
 
 /// √a for a ≥ 0 in a constant (f64::sqrt is not const): Heron's iteration x ← (x + a/x)/2 from max(a, 1) ≥ √a, which

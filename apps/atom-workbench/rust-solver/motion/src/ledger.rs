@@ -6,9 +6,8 @@
 //! - A, the model's: each unit's error measured along the trajectories (SPEC §5.2), and the share of the thermal ensemble
 //!   that the model's reach leaves out -- the unseen share at the most trajectories a solve runs (SPEC §1.8);
 //! - b, the discretization's, the part a finer one takes away: the step's, what the pilot's check between two steps
-//!   does not exclude of its error's rms over the run (SPEC §2.2: the far end of the check's read at the confidence
-//!   z, the same at every output -- a check of the error's size, not a bound at an output; the step's share until it
-//!   is read); and at t = 0, where T is the
+//!   reads clearly of its error at the output (SPEC §2.2: a check at the pilot's resolution, not a bound; the step's
+//!   share until it is read); and at t = 0, where T is the
 //!   initial ensemble's exact moment by quadrature, that quadrature's last two levels' difference (solve.rs
 //!   `Fixed::start`);
 //! - S, the statistics': the jackknife's interval at the confidence z, on what is shown no less than what the run's own

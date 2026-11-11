@@ -1,4 +1,4 @@
-//! A read, its two ends, pays, counted work (SPEC §5).
+//! A read, its three outcomes, pays, counted work (SPEC §5).
 //!
 //! # A decision
 //! Every decision is made of four things (SPEC §5.1): the current level, a more exact one, the output the two are
@@ -8,28 +8,27 @@
 //! (`richardson`). A read (`Read`) is an estimate of the error's size with its statistical error: a quantity x ≥ 0 that
 //! grows with the level's parameter to some order -- the error's mean square over the outputs it is read at, of the
 //! order 2q (estimate.rs `between`) -- estimated without bias, so that the read itself lies on either side of zero
-//! where there is no error. A read has two ends at the confidence z:
-//! - the far end max(x, 0) + t·SE (`Read::most`): what the read does not exclude. A level that is kept is booked at
-//!   it, and what it is held to has to make room for it (the step: solve.rs `unexcluded`);
-//! - the near end x − t·SE (`Read::least`): what the read shows clearly. A level is left for its next finer one on
-//!   what its read shows, where no booking stands for the choice (the step's scout, solve.rs `clear`; an inherited
-//!   read refuted, solve.rs `refuted`).
-//! Between the two the read does not say, and a choice made there is made by the work each side is predicted to take
-//! with the far end booked (the step's check, solve.rs `choose`): no bound that the read is passed or failed against,
-//! so no read that the noise puts on one side of one.
+//! where there is no error. Against the bound b that x may reach -- the square of the share σ of its target that the
+//! level may take -- there are three outcomes and no fourth (`Read::outcome`):
+//! - within, max(x, 0) + t·SE ≤ b: keep the level;
+//! - beyond, x − t·SE > b: refine -- the level's next finer one (the step's half, solve.rs `settle`), and the read is
+//!   taken again there;
+//! - unreadable, neither: the far end (`Read::most`) is what the read does not exclude, the near end x − t·SE
+//!   (`Read::least`) what it shows clearly.
 //!
 //! The far end is taken from zero where the read lies below it: a size is not negative, a read below zero is a read
-//! of none, and a read of none excludes nothing smaller than its own interval -- however far below zero the noise has
-//! put it.
+//! of none, and a read of none excludes nothing smaller than its own interval -- so no read is within a bound that
+//! its interval alone exceeds, however far below zero the noise has put it.
 //!
 //! t·SE is the interval at the confidence z over the looks the decision takes (estimate.rs `Spread::interval_over`).
 //!
 //! # Many reads
-//! A decision that looks at a family of m reads (SPEC §5.1; the step's check) and acts where any of them shows
-//! something clearly takes the largest of m noisy reads: clear is the near end among the family's m looks (Šidák over
-//! them, so that the largest noisy read acts no more often than one look would). What is not excluded is each read's
-//! own statement, its far end at one look: every read's quantity is booked by itself, whatever the others are. A read
-//! that is no number excludes nothing and shows nothing.
+//! A decision that looks at a family of m reads, each against its own bound (SPEC §5.1; the step's check, solve.rs
+//! `screen` and `blind`), refines where any of them lies beyond, and so takes the largest of m noisy reads: beyond is
+//! `Read::outcome` among the family's m looks (Šidák over them, so that the largest noisy read refines no more often
+//! than one look would). Within is `Read::outcome` at one look, each read's own interval: every read has to lie within
+//! its bound by itself, whatever the others are. A family neither beyond nor within is unreadable: a read that is not
+//! within at one look, a read that is no number among them, is what the decision cannot see.
 //!
 //! # pays
 //! A spend W for a predicted saving ΔC pays where ΔC − t·SE(ΔC) > W (`pays`; the left side is `assured`, by which savings
@@ -54,6 +53,14 @@ pub struct Read {
     pub spread: Spread,
 }
 
+/// A read's outcome against a bound (module documentation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Within,
+    Beyond,
+    Unreadable,
+}
+
 /// Richardson's factor 1/(1 − r^q) (module documentation): a level's own error over its difference with a finer level
 /// whose parameter is `ratio` times its own, the error going as the parameter to `order`.
 pub fn richardson(ratio: f64, order: f64) -> f64 {
@@ -71,6 +78,17 @@ impl Read {
     /// unread, no number for a read that is none.
     pub fn least(&self, looks: f64) -> f64 {
         self.value - self.spread.interval_over(looks)
+    }
+    /// Within, beyond or unreadable against `bound` among `looks` reads (module documentation); a read that is not a
+    /// number is unreadable.
+    pub fn outcome(&self, bound: f64, looks: f64) -> Outcome {
+        if self.most(looks) <= bound {
+            Outcome::Within
+        } else if self.least(looks) > bound {
+            Outcome::Beyond
+        } else {
+            Outcome::Unreadable
+        }
     }
 }
 
@@ -95,15 +113,18 @@ mod tests {
         Read { value, spread: Spread { error, groups: f64::INFINITY } }
     }
 
-    /// A read's two ends (one look, unlimited groups: t = z): the far end x + z·SE and the near end x − z·SE. A read
-    /// below zero -- an unbiased read of a size that is none -- has its far end from zero, its own interval, however
-    /// far below it lies, and shows nothing. A read that is not a number excludes nothing and shows nothing (no
-    /// number is above any bound); one on a single group, whose spread is unread, likewise.
+    /// The three outcomes at their edges (one look, unlimited groups: t = z), the unreadable one also for a read that is
+    /// not a number and one on a single group. A read below zero -- an unbiased read of a size that is none -- is
+    /// within where its interval is, and never beyond, however far below it lies.
     #[test]
-    fn a_read_has_two_ends() {
-        assert!((read(-5., 0.1).most(1.) - CONFIDENCE * 0.1).abs() < 1e-15 && read(-5., 0.1).least(1.) < 0.);
-        let (none, single) = (read(f64::NAN, 0.), Read { value: 5., spread: Spread { error: 0.1, groups: 1. } });
-        assert!(none.most(1.) == f64::INFINITY && !(none.least(1.) > 0.) && single.most(1.) == f64::INFINITY && single.least(1.) == f64::NEG_INFINITY);
+    fn a_read_has_three_outcomes() {
+        assert_eq!(read(0.5, 0.25).outcome(1., 1.), Outcome::Within);
+        assert_eq!(read(0.5, 0.26).outcome(1., 1.), Outcome::Unreadable);
+        assert_eq!(read(1.5, 0.24).outcome(1., 1.), Outcome::Beyond);
+        assert_eq!(read(1.5, 0.25).outcome(1., 1.), Outcome::Unreadable);
+        assert_eq!(read(f64::NAN, 0.).outcome(1., 1.), Outcome::Unreadable);
+        assert_eq!(Read { value: 5., spread: Spread { error: 0.1, groups: 1. } }.outcome(1., 1.), Outcome::Unreadable);
+        assert_eq!((read(-0.5, 0.5).outcome(1., 1.), read(-0.5, 0.51).outcome(1., 1.), read(-5., 0.1).outcome(1., 1.)), (Outcome::Within, Outcome::Unreadable, Outcome::Within));
         assert!((read(-0.5, 0.25).most(1.) - CONFIDENCE * 0.25).abs() < 1e-15 && (read(0.5, 0.25).most(1.) - (0.5 + CONFIDENCE * 0.25)).abs() < 1e-15);
         assert!((read(0.5, 0.25).least(1.) - (0.5 - CONFIDENCE * 0.25)).abs() < 1e-15 && (read(-0.5, 0.25).least(1.) - (-0.5 - CONFIDENCE * 0.25)).abs() < 1e-15);
         assert_eq!((read(f64::NAN, 0.).most(1.), Read { value: 1., spread: Spread::UNREAD }.least(1.)), (f64::INFINITY, f64::NEG_INFINITY));
@@ -123,8 +144,8 @@ mod tests {
         assert!(pays(0., read(1., 0.)) && !pays(0., read(0., 0.)) && !pays(1., read(f64::NAN, 0.)));
     }
 
-    /// Over m looks of pure noise, some read's near end lies above zero by chance no more often than one look's does
-    /// at z (Šidák). A near end is on one side, so each look shows something by chance with half its two-sided tail: of
+    /// Over m looks of pure noise against a zero bound, some read lies beyond by chance no more often than one look
+    /// does at z (Šidák). A read is beyond on one side, so each look refutes by chance with half its two-sided tail: of
     /// 4000 repetitions of 100 independent normal reads, the share with a read beyond the family's interval is
     /// 1 − (1 − q/2)¹⁰⁰ = 0.0230 at Šidák's tail q = 1 − (1 − p)^{1/100}, p = P(|N| > 2) = 0.0455 -- one look's own
     /// p/2 = 0.0228 --, where one look's interval at every read refutes in 1 − (1 − p/2)¹⁰⁰ = 90 % of them; each share
@@ -136,8 +157,8 @@ mod tests {
         let (mut sidak, mut single) = (0, 0);
         for _ in 0..repetitions {
             let draws: Vec<Read> = (0..looks).map(|_| read(stream.normal(), 1.)).collect();
-            sidak += usize::from(draws.iter().any(|r| r.least(looks as f64) > 0.));
-            single += usize::from(draws.iter().any(|r| r.least(1.) > 0.));
+            sidak += usize::from(draws.iter().any(|r| r.outcome(0., looks as f64) == Outcome::Beyond));
+            single += usize::from(draws.iter().any(|r| r.outcome(0., 1.) == Outcome::Beyond));
         }
         let (p, n) = (0.04550026389635842_f64, repetitions as f64);
         let q = -((-p).ln_1p() / looks as f64).exp_m1();
