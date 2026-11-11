@@ -52,7 +52,7 @@ fn shares() -> (f64, f64) {
 
 /// A cluster's photon rate Σ_φ Σ_a ‖u_a‖²/‖ψ‖² of a state at a point.
 fn rate(run: &Run, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
-    run.photons(cluster, at, psi).iter().flat_map(|p| p.amplitudes.iter()).map(|u| norm_sqr(u)).sum::<f64>() / norm_sqr(psi)
+    run.photon_amplitudes(cluster, at, psi).iter().flat_map(|p| p.amplitudes.iter()).map(|u| norm_sqr(u)).sum::<f64>() / norm_sqr(psi)
 }
 
 /// A cluster's generator at a point as a step meets it (step.rs `Middle`): on the path at the point's own velocity, its
@@ -306,7 +306,7 @@ fn a_scene_s_tables_against_its_exact_elimination() {
             worst[0] = worst[0].max(error.0 / near.0);
         }
         force = [force[0].max(error.1), force[1].max(near.1)];
-        let (pe, pf) = (exact.photons(cluster, at, psi), fast.photons(cluster, at, psi));
+        let (pe, pf) = (exact.photon_amplitudes(cluster, at, psi), fast.photon_amplitudes(cluster, at, psi));
         assert_eq!(pe.iter().map(|x| x.landing).collect::<Vec<_>>(), pf.iter().map(|x| x.landing).collect::<Vec<_>>(), "the classes and their order");
         let weight = |x: &Photon| x.amplitudes.iter().map(|u| norm_sqr(u)).sum::<f64>();
         let total: f64 = pe.iter().map(weight).sum();
@@ -409,7 +409,7 @@ fn the_model_s_calls_timed() {
         let tones = each(&mut |k| middles[k].tones(&paths[k], &rhos[k], &mut |omega, f| {
             std::hint::black_box((omega, f));
         }));
-        let photons = both(&|run, s| drop(std::hint::black_box(run.photons(cluster, &s.at, &s.psi))));
+        let photons = both(&|run, s| drop(std::hint::black_box(run.photon_amplitudes(cluster, &s.at, &s.psi))));
         let readout = both(&|run, s| {
             std::hint::black_box(run.readout(cluster, &s.at, &s.psi));
         });
