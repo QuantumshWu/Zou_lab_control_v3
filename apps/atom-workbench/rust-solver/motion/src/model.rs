@@ -133,14 +133,16 @@ pub struct Envelope {
     pub weights: Vec<f64>,
 }
 
-/// The atoms' reach (SPEC §1.8): the sublevel set {r : V_prep(r) − V_min ≤ ln(1/s) k_B T_r} of the prepared potential, with the
-/// momenta of that kinetic energy. Its extrema are provable bounds: interval subdivision of `cell` with Lipschitz remainders.
+/// The atoms' reach (SPEC §1.8): the sublevel set {(r, κ) : V_prep(r) + (ħ/m)κ²/2 − V_min ≤ ln(1/s) k_B T_r} of the prepared
+/// energy. Its extrema are provable bounds over its cells, made side by side (reach.rs, # A cell's sides); what it leaves
+/// out of the initial ensemble is counted on that ensemble (reach.rs `Model::left_out`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reach {
     /// T_r (µK): the temperature the atoms reach (never lowered; the solve's trials read it).
     pub temperature_uk: f64,
-    /// ln(1/s) k_B T_r (rad/µs), s the unsampled share (SPEC §3): the energy above V_min the reach holds, in position and in
-    /// kinetic energy.
+    /// ln(1/s) k_B T_r (rad/µs), s the share the most trajectories of a solve leave unseen (SPEC §3): the energy above
+    /// V_min the reach holds, potential and kinetic together -- the level where the Boltzmann factor is s, not the level
+    /// that leaves the share s of the atoms out (reach.rs, # What the reach leaves out).
     pub energy: f64,
     /// V_min (rad/µs).
     pub minimum: f64,

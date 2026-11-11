@@ -9,6 +9,18 @@
 //! M_l⁻¹ = (w₀²/2)(1 − nnᵀ) + z_R² nnᵀ, bound `Reach::cell`. A level at or above the far value -- or a plane wave in the trap
 //! light -- leaves the reach unbounded: the whole space, its bounds the global ones.
 //!
+//! # What the reach leaves out
+//! E_r = ln(1/s) k_B T_r is the level where the Boltzmann factor is s: the share of a thermal ensemble above it is s for
+//! one quadratic degree of freedom pair alone (a one-dimensional oscillator, Q(1, L) = e^{−L}, L = ln(1/s)). A trapped atom
+//! has six: the share of a harmonic trap's atoms outside the joint-energy set is Q(3, L) = e^{−L}(1 + L + L²/2), 1.07 % at
+//! s = 2.44e-4 (L = 8.32), in a tweezer 35 k_B T deep 1.32 %, and they hold Q(4, L) = 3.4 % of the energy -- not s. The
+//! level stays where it is (the folds are judged and the step's first rung taken over it); what it leaves out is booked
+//! as it is, read off the ensemble the run draws and not off a formula for one trap's shape (`Model::left_out`): of
+//! the initial atoms of the most trajectories a solve runs, the share outside the set -- the count's far end at the
+//! confidence z (estimate.rs `wilson`; with none outside, z²/(N + z²), what was booked whatever the count) --, on what
+//! is shown; and their share of the kinetic energy, on T. A reach grown with the atoms' temperature leaves out less of
+//! the same initial atoms.
+//!
 //! # Provable extrema (`Model::bounds_over`)
 //! A quantity's bound over the reach is the largest of its upper bounds over cells covering the reach's box, a cell taken where
 //! it may meet the reach (a lower bound of V_prep over it at most the level). A quantity is one function of a region (`Region`):
@@ -992,6 +1004,31 @@ impl Model {
             speed: (2.0 * self.hbar_over_mass * energy).sqrt(),
             populations: *p,
         }
+    }
+
+    /// Whether a reach holds an atom at r with the momentum κ (module documentation, # The reach): its prepared energy
+    /// V_prep(r; p) + (ħ/m) κ²/2 at most the level V_min + E_r.
+    pub fn holds(&self, reach: &Reach, r: [f64; 3], kappa: [f64; 3]) -> bool {
+        self.potential(r, &reach.populations, &self.prepared()) + 0.5 * self.hbar_over_mass * crate::linalg::dot3(kappa, kappa) <= reach.minimum + reach.energy
+    }
+
+    /// What a reach leaves out of an ensemble's atoms (r, κ) (module documentation, # What the reach leaves out): the
+    /// share of the atoms outside it, the far end at the confidence z of the count n of the N atoms given (estimate.rs
+    /// `wilson`); and the share of the kinetic energy they hold, R = Σ_out κ²/Σ κ² with z deviations of that ratio's own
+    /// spread over the atoms (linearized: Σ (x_i − R e_i)²/(Σ e)², x the outside atoms' e = κ²) -- no less than the
+    /// atoms' share: an atom outside has more than the mean energy, and where none was seen the unseen share's energy is
+    /// not known to be less.
+    pub fn left_out(&self, reach: &Reach, atoms: impl Iterator<Item = ([f64; 3], [f64; 3])>) -> [f64; 2] {
+        let read: Vec<(f64, bool)> = atoms.map(|(r, kappa)| (crate::linalg::dot3(kappa, kappa), !self.holds(reach, r, kappa))).collect();
+        let count = read.iter().filter(|atom| atom.1).count() as f64;
+        let share = crate::estimate::wilson(count, read.len() as f64);
+        let (all, outside): (f64, f64) = read.iter().fold((0.0, 0.0), |(all, outside), &(e, out)| (all + e, if out { outside + e } else { outside }));
+        if !(all > 0.0) {
+            return [share; 2];
+        }
+        let ratio = outside / all;
+        let spread: f64 = read.iter().map(|&(e, out)| (if out { e } else { 0.0 } - ratio * e).powi(2)).sum::<f64>().sqrt() / all;
+        [share, share.max(ratio + crate::units::CONFIDENCE * spread)]
     }
 
     /// Every beam over a cell (`Span`).

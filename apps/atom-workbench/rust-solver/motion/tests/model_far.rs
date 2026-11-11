@@ -9,7 +9,7 @@ use atom_motion::request::Request;
 use atom_motion::step::Middle as _;
 
 mod model_common;
-use model_common::{decay_rate, scene};
+use model_common::{decay_rate, normal, scene};
 
 /// The scene's model with every unit folded, its initial ground state's populations e_b.
 fn built(name: &str) -> (Request, Light, Model, [f64; GROUND]) {
@@ -211,4 +211,47 @@ fn the_far_scenes_units_fold_within_their_gates() {
             }
         }
     }
+}
+
+/// What a reach leaves out of a thermal ensemble is counted on the ensemble, not taken for its level's Boltzmann factor
+/// (model/reach.rs, # What the reach leaves out). R1_TWEEZER's trap, so cold that it is harmonic over the reach (its depth
+/// 4000 k_B T), a classical thermal ensemble of the most trajectories a solve runs drawn in its three oscillators: the
+/// level ln(1/s) k_B T, s = z²/(N + z²) = 2.44e-4, leaves out Q(3, L) = e^{−L}(1 + L + L²/2) = 1.07 % of the atoms, 44 times
+/// s, and Q(4, L) = 3.4 % of their kinetic energy (six quadratic degrees of freedom: the energy's law is Γ(3), an
+/// atom's share of it Γ(4)). `Model::left_out` gives each within twice z of its count's deviation -- the far ends at z --,
+/// and with no atom outside the share that N draws leave unseen, s: what was booked whatever the count.
+#[test]
+fn the_reach_leaves_out_what_its_ensemble_s_count_says() {
+    use atom_motion::estimate::unseen;
+    use atom_motion::random::{Purpose, Stream};
+    use atom_motion::units::{CONFIDENCE, KT_PER_UK, MOST_TRAJECTORIES};
+    let (_, _, model, p) = built("R1_TWEEZER");
+    let trap = model.trap(&p, &model.prepared()).unwrap();
+    let (n, share) = (MOST_TRAJECTORIES, unseen(MOST_TRAJECTORIES as f64));
+    let kt = -trap.minimum / 4000.0;
+    let reach = model.reach(&trap, &p, kt / KT_PER_UK, share);
+    let level = (1.0 / share).ln();
+    assert!(close(reach.energy, level * kt, 1e-12), "the level ln(1/s) k_B T: {} against {}", reach.energy, level * kt);
+    let hm = model.hbar_over_mass();
+    let atoms: Vec<([f64; 3], [f64; 3])> = (0..n)
+        .map(|index| {
+            let mut stream = Stream::new(23, Purpose::Initial, index, 0);
+            // V = Σ_i ½ (ω_i²/(ħ/m)) x_i² along the principal axes, the kinetic energy ½ (ħ/m) κ².
+            let x: [f64; 3] = std::array::from_fn(|i| normal(&mut stream) * (kt * hm).sqrt() / trap.frequencies[i]);
+            let r = std::array::from_fn(|a| trap.centre[a] + (0..3).map(|i| x[i] * trap.axes[i][a]).sum::<f64>());
+            (r, std::array::from_fn(|_| normal(&mut stream) * (kt / hm).sqrt()))
+        })
+        .collect();
+    let [left, energy] = model.left_out(&reach, atoms.iter().copied());
+    // Q(k, L) = e^{−L} Σ_{j<k} L^j/j!.
+    let q3 = (-level).exp() * (1.0 + level + 0.5 * level * level);
+    let q4 = q3 + (-level).exp() * level.powi(3) / 6.0;
+    assert!((q3 - 0.01072).abs() < 1e-5 && (q4 - 0.0341).abs() < 1e-4 && (share - 2.4408e-4).abs() < 1e-8, "Q(3, L) = {q3}, Q(4, L) = {q4}, s = {share}");
+    let deviation = (q3 * (1.0 - q3) / n as f64).sqrt();
+    println!("outside the reach: {left:.5} of the atoms (Q(3, L) = {q3:.5} ± {deviation:.5}; s = {share:.2e}), {energy:.5} of their kinetic energy (Q(4, L) = {q4:.5})");
+    assert!((left - q3).abs() <= 2.0 * CONFIDENCE * deviation && left > 30.0 * share, "the atoms' share {left} against Q(3, L) = {q3} ± {deviation}");
+    // The energy's share: its count's relative deviation that of the atoms' with the spread of their energies (below √2 of it).
+    assert!((energy - q4).abs() <= 2.0 * CONFIDENCE * q4 * 2.0_f64.sqrt() * deviation / q3 && energy > left, "the energy's share {energy} against Q(4, L) = {q4}");
+    assert!(model.holds(&reach, trap.centre, [0.0; 3]) && !model.holds(&reach, trap.centre, [1.001 * reach.speed / hm, 0.0, 0.0]) && model.holds(&reach, trap.centre, [0.999 * reach.speed / hm, 0.0, 0.0]), "the reach's speed at its centre");
+    assert_eq!(model.left_out(&reach, (0..n).map(|_| (trap.centre, [0.3 * reach.speed / hm, 0.0, 0.0]))), [share; 2], "no atom outside: what N draws leave unseen");
 }
