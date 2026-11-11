@@ -244,12 +244,12 @@ pub trait Dynamics {
     /// The absorbed light's part of a jump's kick (1/µm): the conditional mean of the class of `photon`, one of the
     /// state's photons there, as far as one absorbed photon's momentum goes (`Photon::kick`).
     fn kick(&self, cluster: usize, at: &Point, psi: &[C64], photon: &Photon) -> [f64; 3];
-    /// Where a jump's bare state `f` lands in a cluster at a point: the state the trajectory goes on in and the
-    /// probability p of one more photon at once, before it (a fold's bare state is its slow state and a part that
-    /// decays within the excited state's lifetime; model.rs `Model::landed`). The state itself and p = 0 where the model
-    /// folds nothing of that: then `jump` draws nothing for it.
-    fn landed(&self, _cluster: usize, _at: &Point, f: &[C64]) -> (Internal, f64) {
-        (f.iter().copied().collect(), 0.0)
+    /// Where a jump's bare state `f` lands in a cluster at a point: the state the trajectory goes on in, with the norm
+    /// it goes on with (a fold's bare state is its slow state and a part that is gone within the excited state's
+    /// lifetime; the slow state's norm is the bare state's survival extrapolated back to the jump, below ‖f‖ or above
+    /// it; model.rs `Model::landed`). The state itself where the model folds nothing of that.
+    fn landed(&self, _cluster: usize, _at: &Point, f: &[C64]) -> Internal {
+        f.iter().copied().collect()
     }
 
     /// What the light the state scatters gives the momentum per unit time beside the Ehrenfest force and the jumps'
@@ -1516,11 +1516,15 @@ fn factor(rate: &[[f64; 3]; 3], scale: f64, links: usize) -> [[f64; 3]; 3] {
 /// with no photon to emit -- every class's weight zero, or not a number -- is refused (`Refused::Emission`) with the
 /// trajectory as it was: the model's decay and its photons contradict each other, and no jump is made of that.
 ///
-/// The landing (`Dynamics::landed`): the bare state f/‖f‖ lands with a probability p of one more photon at once. Where
-/// p = 0 the trajectory goes on in the bare state and nothing is drawn. Else one more uniform number of the jump's
-/// stream decides: below p the bare state emits a photon as any state does -- its class, polarization and direction
-/// drawn anew, its recoil and its bounded kick with them -- and lands again; else the trajectory goes on in the slow
-/// state the model gives, normalized.
+/// The landing (`Dynamics::landed`): the trajectory goes on in the state the bare state f/‖f‖ lands in, with that state's
+/// norm, against the threshold as every state is -- one rule, whatever the norm. A norm above the threshold waits: from
+/// one, ‖f‖'s own, as before; from below one, as long as the rest of the threshold's law says; from above one, longer,
+/// by the time its decay takes down to one. A norm at or below the threshold already (only a norm below one meets it
+/// but for the one threshold in 2⁵³ that is one itself) is one more photon at once: the bare state emits it as any
+/// state does -- its class, polarization and direction drawn anew, its recoil and its bounded kick with them --, the
+/// next threshold is drawn anew, and it lands again. So the waiting time after a jump is P(T > t) = min(1, n e^{−γt})
+/// for the landing's norm n and the state's rate γ (model.rs `Model::landed`: the fourth order's statistics for either
+/// sign of 1 − n), and a state that lands as it is draws nothing more.
 pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), Refused> {
     let j = trajectory.jumps + 1;
     let mut stream = Stream::jump(trajectory.seed, trajectory.index, j);
@@ -1577,19 +1581,15 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), R
         trajectory.psi = f.iter().map(|z| *z * scale).collect();
         trajectory.cluster = photon.landing;
         first = false;
-        // The landing: the bare state as it is, its slow state, or one more photon from it.
+        // The landing: the state the trajectory goes on in, its norm against the threshold; at the threshold already,
+        // one more photon from the bare state and the next threshold.
         let at = trajectory.point();
-        let (slow, prompt) = model.landed(trajectory.cluster, &at, &trajectory.psi);
-        if !(prompt > 0.0) {
+        let landed = model.landed(trajectory.cluster, &at, &trajectory.psi);
+        if norm_sqr(&landed) > trajectory.threshold {
+            trajectory.psi = landed;
             break;
         }
-        if stream.uniform() >= prompt {
-            let size = norm_sqr(&slow);
-            if size > 0.0 {
-                trajectory.psi = slow.iter().map(|z| *z * (1.0 / size.sqrt())).collect();
-            }
-            break;
-        }
+        trajectory.threshold = stream.open_uniform();
         (class, polarization) = (stream.uniform(), stream.uniform());
     }
     test_loss(model, trajectory);

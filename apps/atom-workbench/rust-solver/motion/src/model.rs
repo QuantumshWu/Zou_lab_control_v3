@@ -133,14 +133,18 @@ pub struct Envelope {
     pub weights: Vec<f64>,
 }
 
-/// The atoms' reach (SPEC §1.8): the sublevel set {r : V_prep(r) − V_min ≤ ln(1/s) k_B T_r} of the prepared potential, with the
-/// momenta of that kinetic energy. Its extrema are provable bounds: interval subdivision of `cell` with Lipschitz remainders.
+/// The atoms' reach (SPEC §1.8): the sublevel set {(r, κ) : V_prep(r) + (ħ/m)κ²/2 − V_min ≤ L k_B T_r} of the prepared
+/// energy, L the level a thermal ensemble's share s lies above (reach.rs, # The reach's level). Its extrema are provable
+/// bounds over its cells, made side by side (reach.rs, # A cell's sides); what it leaves out of the initial ensemble
+/// beyond that is counted on the ensemble (reach.rs `Model::left_out`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reach {
     /// T_r (µK): the temperature the atoms reach (never lowered; the solve's trials read it).
     pub temperature_uk: f64,
-    /// ln(1/s) k_B T_r (rad/µs), s the unsampled share (SPEC §3): the energy above V_min the reach holds, in position and in
-    /// kinetic energy.
+    /// L k_B T_r (rad/µs): the energy above V_min the reach holds, potential and kinetic together -- the (1 − s) quantile
+    /// of a thermal atom's energy in the trap, s the share the most trajectories of a solve leave unseen (SPEC §3), over
+    /// the trap's quadratic degrees of freedom (reach.rs, # The reach's level: Q(3, L) = s, L = 12.89, where it holds
+    /// along three axes).
     pub energy: f64,
     /// V_min (rad/µs).
     pub minimum: f64,
@@ -160,8 +164,10 @@ pub enum Unit {
     /// levels: its shift and its jumps are constants (far.rs). Kept: its fold takes the levels at the atom (`Unit::Drive`).
     Bare { component: Component, excited: usize, ground: usize },
     /// The same drive folded with the levels at the atom (eliminate.rs: the dressed response, tabulated). Kept: the excited
-    /// state is explicit and the drive enters the generator as it is. Folded into a state another kept drive makes explicit, it
-    /// is a pair of channels through that state, and its error is that pair's (units.rs).
+    /// state is explicit and the drive enters the generator as it is. Folded onto a state another kept drive makes explicit, it
+    /// is one leg of a Raman pair through that state: its value, its gate and its error are that pair's, across the
+    /// two-photon distance (far.rs, # A fold onto an explicit state; units.rs `Model::pair_gate`; eliminate.rs
+    /// `Model::pair_error`) -- at either level, the bare fold's too.
     Drive { component: Component, excited: usize, ground: usize },
     /// The second order of the fold at the atom of the cluster that holds ground state `ground` (assemble.rs, # The fourth
     /// order): its drives folded at the atom leave out the fourth-order light shift and the jumps' next order. Kept: that
@@ -317,8 +323,10 @@ pub struct Model {
     pub(crate) clusters: Vec<Cluster>,
     /// Per ground state its cluster.
     pub(crate) membership: [usize; GROUND],
-    /// The carriers: the co-rotating components with a drive not bare (eliminate.rs).
+    /// The carriers: the co-rotating components with a drive not bare (eliminate.rs); per excited state (less GROUND)
+    /// its kept drives (eliminate.rs `Model::legs_made`).
     pub(crate) carriers: Vec<eliminate::Carrier>,
+    pub(crate) legs: Vec<Vec<(usize, usize)>>,
     /// Per cluster the blocks of the excited states its eliminations can mix (assemble.rs `Model::mix`).
     pub(crate) mixing: Vec<Vec<usize>>,
     /// Per cluster the frequency whose drives folded at the atom are taken to the fourth order (`Unit::Second` kept;
@@ -486,6 +494,7 @@ impl Model {
             clusters: vec![],
             membership: [0; GROUND],
             carriers: vec![],
+            legs: vec![],
             mixing: vec![],
             fourth: vec![],
             sources: vec![],
@@ -507,7 +516,7 @@ impl Model {
         model.beats = model.beats_made();
         // The clusters of the kept edges: the explicit drives and the kept couplings of two states (units.rs `Model::edges`),
         // a coupling's strength its entry's with every drive bare.
-        let bare: Vec<far::Tone> = if kept.iter().any(|u| matches!(u, Unit::Term { .. })) { model.tones.iter().map(|t| t.folded(&|_, _, _| Level::Bare)).collect() } else { vec![] };
+        let bare: Vec<far::Tone> = if kept.iter().any(|u| matches!(u, Unit::Term { .. })) { model.tones.iter().map(|t| t.folded(&|_, _, _| Level::Bare, &model.energies[GROUND..])).collect() } else { vec![] };
         let edges = model.edges(&bare);
         let (mut clusters, membership) = cluster::clusters(STATES, &edges, &model.axes.zero(), &model.no_wave());
         for c in clusters.iter_mut() {
@@ -531,8 +540,10 @@ impl Model {
         // Each frequency's drives folded at their levels (far.rs `Tone::folded`); the carriers, the components with a drive not
         // bare.
         let levels = model.levels.clone();
-        model.tones = model.tones.iter().enumerate().map(|(frequency, tone)| tone.folded(&|side, e, g| levels[2 * frequency + side][(e - GROUND) * GROUND + g])).collect();
+        let read = model.read_made();
+        model.tones = model.tones.iter().enumerate().map(|(frequency, tone)| tone.folded(&|side, e, g| levels[2 * frequency + side][(e - GROUND) * GROUND + g], &read)).collect();
         model.carriers = eliminate::Carrier::all(&model);
+        model.legs = model.legs_made();
         model.spread = model.spread_made();
         // The model's domain: a counter-rotating drive is only ever folded with the bare levels, so that fold must exist --
         // the one gate (units.rs `gate`), every beam at its peak, a ground state's drives together.
@@ -549,6 +560,30 @@ impl Model {
         model.sources = model.all_sources();
         model.classes = (0..model.clusters.len()).map(|c| model.classes(c)).collect();
         Ok(model)
+    }
+
+    /// The energy at which a cluster's ground states read its state at `place`, from the states' levels `levels` (far.rs,
+    /// # A fold onto an explicit state): in the cluster's frames its ground states are slow at E_a − θ_a and its explicit
+    /// excited states follow them, so the excited amplitude at `place` turns at θ_place + (E_a − θ_a) -- the mean over the
+    /// cluster's ground states, which its kept couplings hold near one another (what one of them lies off the mean is in
+    /// the pair's error, eliminate.rs `Model::pair_error`). `value`: the levels are energies (with the frames); else a
+    /// derivative's part of their jet (the frames are constants).
+    pub(crate) fn read(&self, cluster: &Cluster, place: usize, levels: &[f64], value: bool) -> f64 {
+        let frame = |p: usize| if value { self.axes.omega(&cluster.frames[p]) } else { 0.0 };
+        frame(place) + (0..cluster.ground).map(|p| levels[cluster.states[p]] - frame(p)).sum::<f64>() / cluster.ground as f64
+    }
+
+    /// Per excited state (less GROUND) the energy a bare fold onto it is read at (`read`, with the bare levels): an
+    /// explicit state's by its cluster's ground states; another's its own -- no cluster's state reads it, and what folds
+    /// it takes its own energy there (eliminate.rs).
+    fn read_made(&self) -> Vec<f64> {
+        let mut read = self.energies[GROUND..].to_vec();
+        for cluster in self.clusters.iter().filter(|c| c.ground > 0) {
+            for place in cluster.ground..cluster.states.len() {
+                read[cluster.states[place] - GROUND] = self.read(cluster, place, &self.energies, true);
+            }
+        }
+        read
     }
 
     /// A drive's level (`Level`).
@@ -570,23 +605,30 @@ impl Model {
         of.all(|frequency| frequency == first).then_some(first)
     }
 
-    /// Where a jump's bare ground state f lands in a plan's cluster at a point (assemble.rs, # The fourth order). A bare
-    /// state is no slow state: it is the slow state Π f, Π = 1 + ½X − Y in the fold's coordinates, and a fast part that
-    /// decays within 1/Γ by one more photon -- with the probability p = 1 − ‖Π f‖²/‖f‖², about half the landing state's
-    /// share s. The slow state Π f and p; where the cluster's fold is the second order's, f and 0: there the fast part
-    /// is within the fold's own order.
-    pub(crate) fn landed(&self, plan: &assemble::Plan, table: Option<&tabulate::NearTable>, at: &Point, f: &[C64]) -> (Vec<C64>, f64) {
-        let Some(fourth) = &plan.fourth else { return (f.to_vec(), 0.0) };
+    /// Where a jump's bare ground state f lands in a plan's cluster at a point (assemble.rs, # The fourth order): the
+    /// slow state Π f, Π = 1 + ½X − Y in the fold's coordinates, with its norm. A bare state is the slow state and a
+    /// fast part that is gone within 1/Γ, and the norm of what it becomes is ‖e^{−iHt} f‖² → ‖Π f‖² e^{−γt} beyond that
+    /// time, γ the slow state's rate: ‖Π f‖²/‖f‖² = 1 − p is the bare state's survival extrapolated back to the jump.
+    /// On one line p = 2 Re Y − X = (s/2)(Δ² − 3Γ²/4)/(Δ² + Γ²/4) + O(s²), of either sign. Far from the line p > 0, s/2:
+    /// the fast part emits one more photon at once (the ringing). Within 0.866 Γ of it p < 0, −3s/2 on resonance: after
+    /// a photon the atom is in the ground state and its excited amplitude takes 1/Γ to build up -- the next photon is
+    /// late (antibunching). Both are the one statement that the trajectory goes on in Π f as it is, not normalized,
+    /// against the next jump's threshold (step.rs `jump`): the waiting time's law is P(T > t) = min(1, (1 − p) e^{−γt})
+    /// -- a norm below one is at the threshold already with the probability p, a norm above one reaches it ln(1 − p)/γ
+    /// later. The mean interval is (1 − p)/γ for p ≥ 0 and (1 + ln(1 − p))/γ = (1 − p − p²/2 + …)/γ for p < 0, the exact
+    /// one's 1/γ_exact to the fourth order either way (two levels: units.rs `ORDER_RATES`). Clamped at zero, p < 0 left
+    /// the rate too high by −p, 1.52 s on resonance, more than the second order's s. Where the cluster's fold is the
+    /// second order's the slow state is f: there the fast part is within the fold's own order.
+    pub(crate) fn landed(&self, plan: &assemble::Plan, table: Option<&tabulate::NearTable>, at: &Point, f: &[C64]) -> Vec<C64> {
+        let Some(fourth) = &plan.fourth else { return f.to_vec() };
         let (n, size) = (fourth.n, fourth.n * fourth.n);
         let mut site = assemble::Held::<assemble::Site>::take();
         self.light.amplitudes_into(at.r, 1, |_| true, &mut site.beams);
         self.quartic(plan, fourth, table, Some(at.r), &mut site, false);
-        let slow: Vec<C64> = Model::quartic_read(|q| {
+        Model::quartic_read(|q| {
             let (partner, metric) = (&q.data[4 * size..5 * size], &q.data[8 * size..9 * size]);
             (0..n).map(|x| (0..n).fold(f[x], |z, y| z + (metric[x * n + y] * 0.5 - partner[x * n + y]) * f[y])).collect()
-        });
-        let p = 1.0 - crate::linalg::norm_sqr(&slow) / crate::linalg::norm_sqr(f);
-        (slow, p.max(0.0))
+        })
     }
 
     /// A component's exact frequency ν: the co-rotating δ_ω, the counter-rotating −(δ_ω + 2ν_frame).
@@ -755,8 +797,8 @@ impl<'a> Run<'a> {
         self.model.scattering_of(plan, *table, at, psi, populations).0
     }
     /// Where a jump's bare state `f` lands in a cluster at a point (assemble.rs, # The fourth order; `Model::landed`): the
-    /// slow state it continues in and the probability of the prompt photon before it.
-    pub fn landed(&self, cluster: usize, at: &Point, f: &[C64]) -> (Vec<C64>, f64) {
+    /// slow state it continues in, with its norm.
+    pub fn landed(&self, cluster: usize, at: &Point, f: &[C64]) -> Vec<C64> {
         let (plan, table) = &self.plans[cluster];
         self.model.landed(plan, *table, at, f)
     }
@@ -800,9 +842,8 @@ impl crate::step::Dynamics for Run<'_> {
     fn kick(&self, cluster: usize, at: &Point, psi: &[C64], photon: &Photon) -> [f64; 3] {
         self.kick_at(cluster, at, psi, photon)
     }
-    fn landed(&self, cluster: usize, at: &Point, f: &[C64]) -> (crate::step::Internal, f64) {
-        let (slow, prompt) = Run::landed(self, cluster, at, f);
-        (slow.into_iter().collect(), prompt)
+    fn landed(&self, cluster: usize, at: &Point, f: &[C64]) -> crate::step::Internal {
+        Run::landed(self, cluster, at, f).into_iter().collect()
     }
     fn scattering(&self, cluster: usize, at: &Point, psi: &[C64], populations: &[f64]) -> Scattering {
         self.scattering_at(cluster, at, psi, Some(populations))

@@ -99,7 +99,14 @@
 //! - the middle's H⁽⁴⁾ and its gradient, 3 and 6 products of n × n matrices (the commutator's left out where the folded
 //!   excited states share one linewidth, L = Γ X: it is nothing there), and the decay's change: with the generator's own
 //!   decay at the point by its flags -- Λ = Σ J†J, Λ_R = Σ J†J2, Λ_B = Σ J2†J2, read off its dense terms' values --,
-//!   Σ L̃†L̃ − Λ = B†(Λ B + Λ_R N) + N†(Λ_R†B + Λ_B N) − Λ, B = 1 − ½X. Both are held along a step's path as the point's
+//!   Σ L̃†L̃ − Λ = B†(Λ B + Λ_R N) + N†(Λ_R†B + Λ_B N) − Λ, B = 1 − ½X. Each is the anti-Hermitian read of the
+//!   generator's own terms. With the first-order Doppler the response is R − w R2 and the jumps J − w J2, so the terms
+//!   whose absorbed component takes the shift w sum to G_R = ½ V^f†R2 + (i/2) Σ J†J2 and those whose emitted one does to
+//!   G_L = ½ R2†V^f + (i/2) Σ J2†J: the Hermitian coupling's partner ½ V^f†R2 is in both, G_L† = ½ V^f†R2 − (i/2) Λ_R, and
+//!   Λ_R = −i (G_R − G_L†) whatever V^f holds -- as Λ = i (P − P†). (Not G_R less the fold's own Y: a kept pair of two
+//!   frequencies has the other frequency's bare leg in V^f and not in Y, and its Hermitian partner was read as decay --
+//!   on R6_RAMAN_CO with the pair kept the generator's decay 6e-3 off its photons' rate, of either sign by which leg is
+//!   at the atom.) Both are held along a step's path as the point's
 //!   forms are, in the cluster's Doppler frames (`Site::quartic`): a node adds n² numbers, a force n² a lab axis;
 //! - a state's photons: the jumps' matrices on (1 − ½X)ψ and their partners' on Nψ (photon.rs), every jump of the
 //!   cluster on the bent state: the ground amplitude is (1 − ½X) y whatever light it scatters.
@@ -1488,8 +1495,8 @@ impl Model {
 
     /// The blocks of the excited states that an elimination on a cluster can mix, per excited state its block: the classes of
     /// the couplings among them in K + Σ (eliminate.rs) under any light -- the base's, every far form's and the decay's entries,
-    /// and the self-energy's v v† of each folded channel to a ground state outside the cluster. A response's support is a union of
-    /// blocks: the factorization of K + Σ − z and its solves leave every other entry exactly zero.
+    /// and the self-energy's v v† of each folded channel to a ground state outside the cluster and of each kept channel. A
+    /// response's support is a union of blocks: the factorization of K + Σ − z and its solves leave every other entry exactly zero.
     pub(crate) fn mix(&self, cluster: usize) -> Vec<usize> {
         let mut block: Vec<usize> = (0..EXCITED).collect();
         let join = |block: &mut Vec<usize>, a: usize, b: usize| {
@@ -1507,8 +1514,9 @@ impl Model {
             }
         }
         for cc in &self.carriers {
-            for s in (0..GROUND).filter(|&s| self.membership[s] != cluster) {
-                let reached: Vec<usize> = (0..EXCITED).filter(|&e| cc.folded.iter().any(|x| x[(GROUND + e, s)] != C64::ZERO)).collect();
+            for s in 0..GROUND {
+                let outside = self.membership[s] != cluster;
+                let reached: Vec<usize> = (0..EXCITED).filter(|&e| (outside && cc.folded.iter().any(|x| x[(GROUND + e, s)] != C64::ZERO)) || cc.explicit.iter().any(|x| x[(GROUND + e, s)] != C64::ZERO)).collect();
                 for &e in &reached {
                     join(&mut block, reached[0], e);
                 }
@@ -1587,18 +1595,22 @@ impl Model {
         }
         // The explicit states' van Vleck shift by the drives folded at the atom: each half its own drive's denominator there
         // against the other leg's folded coupling (far.rs `second_order`, where the bare drives' halves are),
-        // ½ Σ_b (U^a_k[e,b] U^f_k'[f,b]*/(E_e − E_b − δ) + U^f_k[e,b] U^a_k'[f,b]*/(E_f − E_b − δ)).
+        // ½ Σ_b (U^a_k[e,b] U^f_k'[f,b]*/(z_e − E_b − δ) + U^f_k[e,b] U^a_k'[f,b]*/(z_f − E_b − δ)), each explicit state at
+        // the energy z the cluster's ground states read it at (model.rs `Model::read`, with the levels at the atom): the
+        // two-photon distance of the Raman pair through it (far.rs, # A fold onto an explicit state).
         for (i, &[c, kl, kr, x, y]) in near.shifts.iter().enumerate() {
             let cc = &self.carriers[c];
             let folded = &self.tones[cc.frequency].coupled[0];
             let (e, f) = (states[x], states[y]);
             let mut shift = vec![C64::ZERO; energies.len()];
+            let read = |place: usize| -> Vec<f64> { energies.iter().enumerate().map(|(part, h)| self.read(cluster, place, h, part == 0)).collect() };
+            let read = [read(x), read(y)];
             for b in 0..GROUND {
-                for (s, v) in [(e, cc.basis[kr][(e, b)] * folded[kl][(f, b)].conj()), (f, folded[kr][(e, b)] * cc.basis[kl][(f, b)].conj())] {
+                for (z, v) in [(&read[0], cc.basis[kr][(e, b)] * folded[kl][(f, b)].conj()), (&read[1], folded[kr][(e, b)] * cc.basis[kl][(f, b)].conj())] {
                     if v == C64::ZERO {
                         continue;
                     }
-                    let mut gap: Vec<f64> = energies.iter().map(|h| h[s] - h[b]).collect();
+                    let mut gap: Vec<f64> = z.iter().zip(energies).map(|(z, h)| z - h[b]).collect();
                     gap[0] -= cc.detuning;
                     for (z, r) in shift.iter_mut().zip(jet::reciprocal(&gap)) {
                         *z += v * (0.5 * r);
@@ -1846,7 +1858,7 @@ impl Model {
         let Site { amplitudes, generator, quartic, made, .. } = point;
         sized(quartic, 4 * size);
         made.clear();
-        made.resize(16 * size, C64::ZERO);
+        made.resize(17 * size, C64::ZERO);
         Model::quartic_read(|q| {
             let (near, y, x) = (&q.data[..4 * size], &q.data[4 * size..8 * size], &q.data[8 * size..]);
             let part = |of: &[C64], p: usize| -> std::ops::Range<usize> { let _ = of; p * size..(p + 1) * size };
@@ -1881,9 +1893,10 @@ impl Model {
                 }
             }
             // The generator's decay at the point by its flags, read off its dense terms at rest: Λ = i(P − P†) of the
-            // plain terms' sum P; Λ_R from the terms whose absorbed component takes the Doppler shifts, their sum
-            // ½Y + (i/2)Λ_R; Λ_B from the terms of both, −(i/2)Λ_B. A term that beats in the frames is left out.
-            let (sums, rest) = rest.split_at_mut(3 * size);
+            // plain terms' sum P; Λ_R = −i(G_R − G_L†) of the sums of the terms whose absorbed component takes the Doppler
+            // shifts, G_R, and whose emitted one does, G_L (module documentation, # The fourth order); Λ_B from the
+            // terms of both, −(i/2)Λ_B. A term that beats in the frames is left out.
+            let (sums, rest) = rest.split_at_mut(4 * size);
             let mut scalars = [C64::ZERO; 64];
             for (z, scalar) in scalars.iter_mut().zip(&plan.scalars) {
                 *z = scalar.beams.iter().map(|&(at, c)| (if scalar.conjugate { amplitudes[at][0].conj() } else { amplitudes[at][0] }) * c).sum();
@@ -1898,10 +1911,7 @@ impl Model {
                     BOTH => 2,
                     flag => {
                         let shifted = if flag == RIGHT { block.right } else { block.left };
-                        if shifted.is_some_and(|s| plan.scalars[s].conjugate) {
-                            continue;
-                        }
-                        1
+                        if shifted.is_some_and(|s| plan.scalars[s].conjugate) { 3 } else { 1 }
                     }
                 };
                 let (c, (real, imaginary)) = (side(block.left) * side(block.right), plan.values(term, generator));
@@ -1917,7 +1927,7 @@ impl Model {
                 for b in 0..n {
                     let at = a * n + b;
                     decays[at] = (sums[at] - sums[b * n + a].conj()) * C64::I;
-                    decays[size + at] = (sums[size + at] - y[at] * 0.5) * C64::new(0.0, -2.0);
+                    decays[size + at] = (sums[size + at] - sums[3 * size + b * n + a].conj()) * C64::new(0.0, -1.0);
                     decays[2 * size + at] = sums[2 * size + at] * C64::new(0.0, 2.0);
                     bend[at] = x[at] * -0.5 + if a == b { C64::ONE } else { C64::ZERO };
                 }
@@ -1925,6 +1935,7 @@ impl Model {
             // Σ L̃†L̃ = B†(Λ B + Λ_R N) + N†(Λ_R†B + Λ_B N), into the sums' place.
             let (first, second) = sums.split_at_mut(size);
             let (second, changed) = second.split_at_mut(size);
+            let changed = &mut changed[..size];
             for z in first.iter_mut().chain(second.iter_mut()).chain(changed.iter_mut()) {
                 *z = C64::ZERO;
             }

@@ -531,7 +531,7 @@ fn keep(
     estimates: &[Estimate],
     fixed: &Fixed,
     scales: &Scales,
-    unsampled: f64,
+    unsampled: [f64; 2],
     again: f64,
     barred: &[Unit],
 ) -> Option<(usize, Option<f64>)> {
@@ -612,6 +612,11 @@ fn attempt(
     let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, light, alone(s))).collect::<Result<_, _>>()?;
     let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm)?;
     let row: [f64; STATES] = std::array::from_fn(|s| request.initial_density[(s, s)].re);
+    // What the reach the model was judged over leaves out of the initial ensemble (model/reach.rs `Model::left_out`): of
+    // the atoms and of their kinetic energy, counted on the initial atoms of the most trajectories a solve runs (drawn on
+    // all the cores: 0.4 s of one).
+    let atoms: Vec<(V3, V3)> = (0..MOST_TRAJECTORIES).into_par_iter().map(|index| { let start = ensemble.draw(SEED, index); (start.r, start.kappa) }).collect();
+    let unsampled = model.left_out(&judged, atoms.into_iter());
     let depth = ensemble.depths()[chief];
     let mut ledger = Ledger::default();
     ledger.note = Some(format!("初始系综：各初态在自己的准备阱中的束缚原子（降低的等温分布乘每轴谐振子的 Wigner 因子，T = {} μK），参考态阱深 {:.1} k_BT", request.temperature_uk, depth));
@@ -673,7 +678,6 @@ fn attempt(
         let units = model.units();
         let read = sampled(&model, &units, &tables, &scout, None);
         let measured = Measured { errors: &read.errors, output: &read.at, group: &read.from };
-        let unsampled = unseen(MOST_TRAJECTORIES as f64);
         let fixed = Fixed { model: model_error(&sums(&measured.means(outputs, None), unsampled), None, unsampled), ..context.fixed.clone() };
         if let Some((u, share)) = keep(request, light, kept, &model, reference, trap.centre, &units, &measured, &read.samples, &scout, &estimates, &fixed, &context.scales, unsampled, scout.len() as f64, barred) {
             return Ok(Attempt::Keep(units[u].clone(), tau, share));
@@ -705,7 +709,6 @@ fn attempt(
         let means = measured.means(outputs, None);
         let (population, temperature): (Vec<Vec<f64>>, Vec<Vec<f64>>) =
             means.iter().map(|unit| (unit.iter().map(|m| m[0]).collect(), unit.iter().map(|m| m[1]).collect())).unzip();
-        let unsampled = unseen(MOST_TRAJECTORIES as f64);
         context.fixed.model = model_error(&sums(&means, unsampled), None, unsampled);
         // The tables' errors (SPEC §5.4): each table's whole error against the elimination itself, read at one state of
         // each pilot trajectory (`one_each`) and averaged over them -- a state on another cluster reads none of it. A table
@@ -760,7 +763,8 @@ fn attempt(
         for (u, unit) in units.iter().enumerate() {
             context.ledger.item(&model.label(unit), (1..outputs).map(|k| weighed(u, k)).fold(0., f64::max), FOLD_MEASURED);
         }
-        context.ledger.item("折叠判定之外的未采样份额", unsampled, "计入模型误差");
+        context.ledger.item("可达范围之外的初始原子份额", unsampled[0], "按初始系综计数（Wilson 远端），计入布居的模型误差");
+        context.ledger.item("可达范围之外的初始原子的动能份额", unsampled[1], "按初始系综计数，计入 T 的模型误差");
         Run::tabulated(&model, &tables, reference)
     };
 
@@ -1322,21 +1326,22 @@ impl Measured<'_> {
     }
 }
 
-/// The units' mean errors added up per output (populations, T; SPEC §4), every folded unit's and the unsampled share.
-fn sums(means: &[Vec<[f64; 2]>], unsampled: f64) -> Vec<[f64; 2]> {
+/// The units' mean errors added up per output (populations, T; SPEC §4), every folded unit's and what the reach leaves
+/// out of the initial ensemble (of the atoms, of their kinetic energy; model/reach.rs `Model::left_out`).
+fn sums(means: &[Vec<[f64; 2]>], unsampled: [f64; 2]) -> Vec<[f64; 2]> {
     let outputs = means.first().map_or(0, Vec::len);
-    (0..outputs).map(|k| means.iter().fold([unsampled; 2], |a, m| [a[0] + m[k][0], a[1] + m[k][1]])).collect()
+    (0..outputs).map(|k| means.iter().fold(unsampled, |a, m| [a[0] + m[k][0], a[1] + m[k][1]])).collect()
 }
 
 /// The model's error per output from the sums `whole` of its units' (`sums`), less one unit's where `without` gives its
 /// mean errors and the units' number: none at t = 0, the request's state; a population's at most 1. A read error leaves
 /// the sum by subtraction -- an output's work, not every unit's again; at an output no state was read at, every unit's
 /// error is its bound alike (`Measured::means`), and the others' bounds stand.
-fn model_error(whole: &[[f64; 2]], without: Option<(&[[f64; 2]], usize)>, unsampled: f64) -> Vec<[f64; 2]> {
+fn model_error(whole: &[[f64; 2]], without: Option<(&[[f64; 2]], usize)>, unsampled: [f64; 2]) -> Vec<[f64; 2]> {
     let less = |k: usize, i: usize| match without {
         None => whole[k][i],
         Some((unit, _)) if unit[k][i].is_finite() => whole[k][i] - unit[k][i],
-        Some((_, units)) => if units > 1 { f64::INFINITY } else { unsampled },
+        Some((_, units)) => if units > 1 { f64::INFINITY } else { unsampled[i] },
     };
     (0..whole.len()).map(|k| if k == 0 { [0.; 2] } else { [less(k, 0).min(1.), less(k, 1)] }).collect()
 }
@@ -1398,7 +1403,7 @@ struct Pricing<'a> {
     pilot: &'a [&'a Part],
     fixed: &'a Fixed,
     scales: &'a Scales,
-    unsampled: f64,
+    unsampled: [f64; 2],
     /// The states the rates are read at and the current model's rates there.
     rated: Vec<usize>,
     own: Vec<f64>,
@@ -1423,7 +1428,7 @@ impl<'a> Pricing<'a> {
         pilot: &'a [&'a Part],
         fixed: &'a Fixed,
         scales: &'a Scales,
-        unsampled: f64,
+        unsampled: [f64; 2],
         again: f64,
     ) -> Pricing<'a> {
         let rated = one_each(states, measured.output, fixed.model.len());
@@ -1488,7 +1493,7 @@ impl<'a> Pricing<'a> {
     fn saving_at_all(&self) -> Vec<usize> {
         // No unit's removal saves more than the removal of them all (a look's need falls with the model's error):
         // where even that does not pay for the new pilot, none is tried.
-        if self.need(&self.all.estimates, &vec![[self.unsampled; 2]; self.all.whole.len()], None) + self.again >= self.all.need {
+        if self.need(&self.all.estimates, &vec![self.unsampled; self.all.whole.len()], None) + self.again >= self.all.need {
             return vec![];
         }
         (0..self.units.len()).into_par_iter().filter(|&u| self.need(&self.all.estimates, &self.all.whole, Some(&self.all.means[u])) + self.again < self.all.need).collect()
