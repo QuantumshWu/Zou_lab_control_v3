@@ -96,7 +96,7 @@ use super::assemble::{sized, Middle, NearValues, Plan, Site};
 use super::reach::Region;
 use super::{Lights, Lit, Model, Reach, Sample, UnitError};
 use crate::field::{range, Amplitude, Chart};
-use crate::linalg::{norm3, Mat, C64};
+use crate::linalg::{Mat, C64};
 use crate::request::{GROUND, STATES};
 use crate::table::{Axis, Table};
 use std::ops::Range;
@@ -598,42 +598,41 @@ impl Model {
     }
 
     /// The bound over a region of an intensity coordinate's distance from its focus value `at` (module documentation, # Axes). The
-    /// intensity is a field's squared modulus, |F|²/N with F = Σ_l a_l c_l (a frequency's field, c_l = E_l; a unit's, c_l = κ_l), and a
-    /// modulus does not see a phase common to its beams: with a_l = e^{ik_l·r} b_l (reach.rs `Span`), |F| = |Σ_l e^{i(k_l − k₀)·r} b_l c_l|
-    /// for any k₀, so |∇|F|| ≤ Σ_l |c_l| (|k_l − k₀| max|b_l| + max|∇b_l|) -- the least over the beams' own wave vectors as k₀. (Bounded
-    /// by Σ_l |c_l| max|∇a_l| instead, a plane wave's intensity, the same everywhere, was taken to move by 2kρ over a cell of radius
-    /// ρ, and no cell of the reach was ever small enough for a weight of a hundred half-widths: R2_RECOIL's probe.) |F| lies within
-    /// the region's radius times that of its centre value, at most every beam at its largest amplitude; on a point it is the value.
+    /// intensity is a field's squared modulus over N, the field F = Σ_l a_l c_l (a frequency's, c_l = E_l; a unit's, c_l = κ_l):
+    /// |F|² = Σ_l'l a_l'* a_l c_l'†c_l, each beam pair's coefficient within its radius of its centre value over the region
+    /// (reach.rs `PairSpan`) -- so |F|² lies within Σ |c_l'†c_l| times the pairs' radii of its centre value, at least 0 and at
+    /// most every beam at its largest amplitude and in phase; on a point it is the value. A pair of beams whose fields are
+    /// orthogonal is no term of it, and a plane wave's pair with itself does not move: light whose intensity is the same
+    /// everywhere weighs nothing, on any cell. (Bounded by the field's modulus within the region's radius times Σ_l |c_l|
+    /// (|k_l − k₀| max|b_l| + max|∇b_l|) of its centre value, the intensity of two counter-propagating plane waves of
+    /// orthogonal polarizations -- a constant -- was taken to move by 2kρ: with the lin-perp-lin scene's cooling light on its
+    /// chart no cell of the reach was small enough, the proof had cut 8 million cells in 43 s and went on.)
     fn intensity_moved(&self, c: Coordinate, polarizations: &[Vec<Polarization>], at: f64, region: &Region) -> f64 {
-        // The beams of the coordinate's field with |c_l|, its centre value's modulus, and N.
-        let (beams, centre, norm): (Vec<(&super::reach::Span, f64)>, f64, f64) = match c {
+        // The coordinate's field: its frequency, its beams' places among the frequency's with their c_l, and N.
+        let (frequency, beams, norm): (usize, Vec<(usize, [C64; 3])>, f64) = match c {
             Coordinate::Chart { frequency, .. } => {
                 let f = &self.light.frequencies[frequency];
-                let mut e = [C64::ZERO; 3];
-                let mut beams = vec![];
-                for (&l, field) in f.beams.iter().zip(&f.fields) {
-                    let span = &region.spans[l];
-                    for q in 0..3 {
-                        e[q] += span.centre * field[q];
-                    }
-                    beams.push((span, field.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()));
-                }
-                (beams, e.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt(), f.norm)
+                (frequency, f.fields.iter().copied().enumerate().collect(), f.norm)
             }
             Coordinate::Unit { carrier, unit } => {
                 let p = &polarizations[carrier][unit];
-                let cc = &self.carriers[carrier];
-                let f: C64 = p.beams.iter().zip(&p.kappa).map(|(&l, &k)| region.spans[cc.beams[l]].centre * k).sum();
-                (p.beams.iter().zip(&p.kappa).map(|(&l, k)| (&region.spans[cc.beams[l]], k.abs())).collect(), f.abs(), p.norm)
+                (self.carriers[carrier].frequency, p.beams.iter().zip(&p.kappa).map(|(&l, &k)| (l, [k, C64::ZERO, C64::ZERO])).collect(), p.norm)
             }
         };
-        let blind: f64 = beams.iter().map(|(span, size)| span.most * size).sum();
-        let slope = beams
-            .iter()
-            .map(|(first, _)| beams.iter().map(|(span, size)| size * (norm3(std::array::from_fn(|i| span.wave[i] - first.wave[i])) * span.most + span.slope)).sum::<f64>())
-            .fold(f64::INFINITY, f64::min);
-        let (lo, hi) = if region.rho.is_finite() { ((centre - region.rho * slope).max(0.0), (centre + region.rho * slope).min(blind)) } else { (0.0, blind) };
-        (hi * hi / norm - at).abs().max((at - lo * lo / norm).abs())
+        let f = &self.light.frequencies[frequency];
+        let size = |c: &[C64; 3]| c.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+        let blind: f64 = beams.iter().map(|(l, c)| region.spans[f.beams[*l]].most * size(c)).sum();
+        let (mut centre, mut radius) = (0.0, 0.0);
+        for (j, to) in &beams {
+            for (i, from) in &beams {
+                let weight: C64 = (0..3).map(|q| to[q].conj() * from[q]).sum();
+                let pair = &region.pairs[frequency][j * f.beams.len() + i];
+                centre += (pair.centre * weight).re;
+                radius += pair.radius * weight.abs();
+            }
+        }
+        let (lo, hi) = ((centre - radius).max(0.0), (centre + radius).min(blind * blind));
+        (hi / norm - at).abs().max((at - lo / norm).abs())
     }
 
     /// The near forms at a point from a table (module documentation, # At a point), the sections asked each to its order (0 or

@@ -130,6 +130,32 @@ fn a_table_follows_a_line_through_resonance_across_its_axis() {
     assert!(worst[3] <= shown && forces <= temperature, "the near light's share of the generator {:.2e} and forces {forces:.2e}", worst[3]);
 }
 
+/// Light whose intensity is the same everywhere is no axis, on whatever cells its reach is cut (tabulate.rs, # Axes): the
+/// lin-perp-lin scene's lights of two counter-propagating plane waves of orthogonal polarizations, their dressings kept --
+/// each on its chart, as the solve's pilot keeps the cooling light's at four times the base intensity --, over a reach grown
+/// to 120 µK. Each chart's intensity is the same at every point, its weight nothing on the reach's first cell: the tables
+/// are made, and no axis of theirs is an intensity but the tweezer's. (Bounded by the field's modulus along the two waves'
+/// phases, that weight's proof cut 8 million cells in 43 s and did not end.)
+#[test]
+fn a_light_of_one_intensity_everywhere_is_no_axis() {
+    let request = scene("R4_LIN_4");
+    let light = Light::new(&request);
+    let (folded, mut kept, state, ..) = closed(&request, &light, request.temperature_uk);
+    let dressings: Vec<Unit> = folded.units().into_iter().filter(|u| matches!(u, Unit::Dressing { .. })).collect();
+    assert!(!dressings.is_empty(), "the scene's carriers have dressings to keep");
+    kept.extend(dressings);
+    let model = Model::new(&request, &light, &kept).unwrap();
+    let p = alone(state);
+    let trap = model.trap(&p, &model.prepared()).unwrap();
+    let reach = model.reach(&trap, &p, 120.0, unseen());
+    let tables = model.tabulate(&reach, 1 << 16);
+    let axes: Vec<Coordinate> = tables.tables.iter().flat_map(|t| t.layout.coordinates[..t.axes()].iter().copied()).collect();
+    assert!(axes.iter().any(|c| matches!(c, Coordinate::Chart { index, .. } if *index > 0)), "a kept dressing's light is on its chart: {axes:?}");
+    for c in &axes {
+        assert!(!matches!(c, Coordinate::Chart { frequency, index: 0 } if *frequency != light.trap) && !matches!(c, Coordinate::Unit { .. }), "an intensity that is not the tweezer's is an axis: {c:?}");
+    }
+}
+
 /// R2_RECOIL with its probe near, the atom in |2,2⟩, its reach at the request's temperature and its tables.
 fn r2() -> (Model, [f64; GROUND], Tables) {
     let request = scene("R2_RECOIL");

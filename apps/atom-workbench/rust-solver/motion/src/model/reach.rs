@@ -1265,6 +1265,24 @@ mod tests {
         }
     }
 
+    /// A focused beam's intensity over a cell far along its axis is read from its modulus's range there (`Span::moduli`,
+    /// `pair_span`): R4_LIN_4's tweezer (waist 5 µm, Rayleigh range 92 µm) one and a half Rayleigh ranges from its focus, over
+    /// a cell of 42 µm along the beam by 3 µm across it -- a cell of the gates' proofs over the reach at 120 µK. The pair's
+    /// radius holds at every point of the cell and is within four times the intensity's largest movement over its points
+    /// (bounded through the envelope's derivatives it was 1.16, seven times the intensity itself).
+    #[test]
+    fn a_beam_s_intensity_far_from_its_focus_is_within_its_modulus_s_range() {
+        let model = at_the_atom("R4_LIN_4");
+        let trap = model.light.frequencies[model.light.trap].beams[0];
+        let cell = Cell { centre: [148.128, -1.623, 4.629], half: [21.1611, 1.6232, 0.0127] };
+        let spans = model.spans(&cell);
+        let pair = pair_span(&spans, trap, trap);
+        let moved = points(&cell).iter().map(|&r| (model.light.beams[trap].amplitude(r).value.norm_sqr() - pair.centre.re).abs()).fold(0.0, f64::max);
+        assert!(moved <= pair.radius, "the intensity moves by {moved} beyond its radius {}", pair.radius);
+        assert!(pair.radius <= 4.0 * moved, "the radius {} against the intensity's movement {moved}", pair.radius);
+        assert!(spans[trap].least > 0.0 && spans[trap].most < 1.0, "the modulus within [{}, {}]", spans[trap].least, spans[trap].most);
+    }
+
     /// One tree of cells for many quantities proves each as its own proof would, and so do its rounds' cells halved on all the
     /// cores, the proofs asking ahead of their order: the shared cells and the cells made ahead change no bound (R3_DOPPLER's
     /// cooling pair's drives at the atom: the strongest drive's saturation and sweep from two ground states).
