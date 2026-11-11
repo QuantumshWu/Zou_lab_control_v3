@@ -47,6 +47,7 @@ class Model:
         self.J = np.zeros((self.n, len(keys), N, N), complex)
         self.dJ = np.zeros((self.n, len(keys), N, N), complex)
         self.kphi = np.zeros(len(keys))
+        self.kabs = np.zeros(len(keys))
         self.nz2 = np.array([0.4 if a < 2 else 0.2 for (_, _, a) in keys])
         for i, p in enumerate(pts):
             for ci, c in enumerate(p['clusters']):
@@ -62,6 +63,7 @@ class Model:
                             if sign == 0.0:
                                 self.J[i, q, ol:ol + m, o:o + n] = block
                                 self.kphi[q] = j['k']
+                                self.kabs[q] = j.get('absorbed', 0.0)
                             else:
                                 self.dJ[i, q, ol:ol + m, o:o + n] += sign * block / (2 * eps)
         mask = np.zeros((N, N), bool)
@@ -71,6 +73,10 @@ class Model:
         self.idx = np.flatnonzero(mask.ravel())
         self.nv = len(self.idx)
         self.trace = np.eye(N).ravel()[self.idx]
+
+    def kabs_class(self, classes):
+        """The absorbed light's wave number (the bound of a jump's conditional mean) per class (cluster, class)."""
+        return np.array([max(self.kabs[q] for q, (c, k, _) in enumerate(self.keys) if (c, k) == cl) for cl in classes])
 
     def mat(self, v):
         X = np.zeros(self.dim * self.dim, complex)

@@ -7,7 +7,14 @@ functions, and R4_TW2's constants. Run the scripts from a scratch directory (the
   python <this dir>/pde.py b 500 30 128 64 0.1                   the phase-space equation, second order (repeat to go on)
   python <this dir>/pde.py x 450 30 256 64 0.1 exact             the master equation in the position representation
   python <this dir>/compare.py b,x free_1d,free_3d               T_z(t) against the quantum result
-(`free_1d.json`: `diffusion free R4_TW2 1d 30 0.3125 8192 1000 10 free_1d.json`.)"""
+  python <this dir>/identity.py 0.068 2048 40                    the path identity from the engine's own states
+(`free_1d.json`: `diffusion free R4_TW2 1d 30 0.3125 8192 1000 10 free_1d.json`.)
+The transverse part (`diffusion account`: every change of an axis's kinetic energy booked to its part):
+  diffusion account R4_TW2 1d|free:yz|free:xz|3d 30 0.3125 8192 1000 10 acc_<run>.json   (TEMPS=x,y,z: start temperatures)
+  python <this dir>/account.py 500,1000 acc_yz.json      the parts;  atoms.py: per atom;  flow.py, split.py: against 1D
+  TEMPS=30,30,10 diffusion account R1_TWEEZER free:yz 30 0.3125 8192 1000 10 off_yz.json;  python <this dir>/bare.py
+                                                         the bare exchange against the classical motion (toy2d.py)
+  python <this dir>/old_worker.py old.json               the frozen old engine's own worker on R4_TW2"""
 import subprocess, json, os, sys, numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)

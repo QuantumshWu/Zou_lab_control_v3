@@ -96,6 +96,7 @@ class Run:
         self.dk = self.kappa[1] - self.kappa[0]
         q = 2 * np.pi * np.fft.fftfreq(nk, self.dk)
         cut = float(os.environ.get('PDE_CUT', '1.6' if exact else '1.0')) / K
+        self.share, self.scalar = None, None
         if exact:
             jmax = int(round(cut / (2 * self.dz)))
             Mj, m = exact_generators(self.z, self.dz, jmax)
@@ -106,6 +107,24 @@ class Run:
             M[:, keep] = Mj[:, order[keep] + jmax]
         else:
             L, F, S, m = operators(self.z)
+            # The switch on the first order's traceless part (`PDE_SHARE` = λ; unset: the equation as it is). With c(z) the
+            # force every state shares (the trap's: −tr G/n) and 𝓕' = 𝓕 − c, the force term is taken as
+            #   𝓕_λ[W] = c W + λ 𝓕'[W] + (1 − λ) f̄'(z, κ) W,   f̄' = Tr 𝓕'[W] / Tr W,
+            # the same in its trace at every (z, κ): at λ = 1 the equation itself, at λ = 0 every atom of a phase-space
+            # cell under the cell's mean force -- the first order's traceless part (relative to the cell's own state)
+            # removed and nothing else changed. The mean-force part is nonlinear: it is stepped apart (`advect`).
+            # `PDE_SHARE=trap`: λ = 1 with c itself stepped by `advect` (the equation unchanged: the check of that step).
+            share = os.environ.get('PDE_SHARE')
+            self.share = None if share is None else 1.0 if share == 'trap' else float(share)
+            if self.share is not None:
+                c = -np.real(np.einsum('zaa->z', m.G)) / m.dim
+                Fp = F - c[:, None, None] * np.eye(m.nv)[None]
+                self.row = np.einsum('v,zvw->zw', m.trace, Fp)
+                # No state feels more than the force operator's largest eigenvalue: the cell's mean is held within it
+                # (where the density is its own rounding the quotient is not a force).
+                self.most = max(np.abs(np.linalg.eigvalsh(0.5 * (g + g.conj().T) + ci * np.eye(m.dim))).max() for g, ci in zip(m.G, c))
+                self.scalar = c if share == 'trap' else None
+                F = (0.0 if share == 'trap' else c[:, None, None]) * np.eye(m.nv)[None] + self.share * Fp
             M = L[:, None] - 1j * q[None, :, None, None] * F[:, None] - (q ** 2)[None, :, None, None] * S[:, None]
         self.m = m
         self.growth = max(np.linalg.eigvals(M[i]).real.max() for i in range(0, nz, 8))
@@ -115,6 +134,7 @@ class Run:
         # are left out (a thermal atom's own coherence there is e^{−q²σ_κ²/2} = 10⁻¹⁶ at 30 µK; what the dynamics put
         # there is read by moving the cut).
         self.E[:, np.abs(q) > cut + 1e-12] = 0.0
+        self.iq = (1j * q * (np.abs(q) <= cut + 1e-12))[None, :, None]
         p = 2 * np.pi * np.fft.fftfreq(nz, self.dz)
         self.flight = np.exp(-1j * p[:, None] * HM * self.kappa[None, :] * dt / 2)[:, :, None]
         self.f1 = np.array([n.startswith('ground-1') for n in m.names])
@@ -142,11 +162,34 @@ class Run:
         self.series.append(row)
         return row
 
+    def advect(self, W, dt):
+        """∂_tW = −∂_κ(f(z, κ) W) over dt, f the part of the force stepped apart (`__init__`): fourth-order Runge–Kutta
+        on the spectral derivative (|f| dt q ≤ 1: within its stability)."""
+        tr, weight = self.m.trace, 1.0 - self.share
+        def rate(W):
+            if self.scalar is not None:
+                f = np.broadcast_to(self.scalar[:, None], W.shape[:2])
+            else:
+                density = (W @ tr).real
+                floor = 1e-6 * density.max()
+                f = weight * np.where(density > floor, np.clip(np.einsum('zkv,zv->zk', W, self.row).real / np.maximum(density, floor), -self.most, self.most), 0.0)
+            return -np.fft.ifft(self.iq * np.fft.fft(f[:, :, None] * W, axis=1), axis=1)
+        k1 = rate(W)
+        k2 = rate(W + 0.5 * dt * k1)
+        k3 = rate(W + 0.5 * dt * k2)
+        k4 = rate(W + dt * k3)
+        return W + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+
     def step(self):
+        apart = getattr(self, 'share', None) is not None and (self.share != 1.0 or self.scalar is not None)
         W = np.fft.ifft(np.fft.fft(self.W, axis=0) * self.flight, axis=0)
+        if apart:
+            W = self.advect(W, 0.5 * self.dt)
         Wq = np.fft.fft(W, axis=1)
         Wq = np.einsum('zqab,zqb->zqa', self.E, Wq)
         W = np.fft.ifft(Wq, axis=1)
+        if apart:
+            W = self.advect(W, 0.5 * self.dt)
         self.W = np.fft.ifft(np.fft.fft(W, axis=0) * self.flight, axis=0)
         self.t += self.dt
 
