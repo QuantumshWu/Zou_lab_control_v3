@@ -1,21 +1,21 @@
 //! One constant step for the run (SPEC §2.2).
 //!
 //! # The step
-//! Every trajectory of a run advances by steps of one τ (`step::Midway::attempt`), whatever the times it is read at (# The reads):
-//! a step ends at no output. The last step of the run is its rest; the step before a jump ends at the jump (# The jumps'
-//! times), the next step from there; a step the scheme refuses (`step::Refused`) is taken at its half, and one refused
-//! down to the time's round-off ends the advance with its refusal -- a numerical failure the solve counts and flags,
-//! never a loss. A step that ends at a bin's end of the trajectory's grid (# The Brownian path) ends at that time, so
-//! that a trajectory no jump has moved off the grid stays on it, the sum of its steps' lengths rounding or not. A step
-//! takes its generator's change along the path through its own three nodes, its middle and its ends, whatever its
-//! length (step.rs, # The kick): what that leaves is an error of the step's length like the splitting's, and the
-//! pilot's companion at twice the step checks both at the outputs (solve.rs, # The step). The generator's own frequencies
-//! are no matter of the step's length: they are integrated exactly.
+//! Every trajectory of a run advances by steps of one τ (`step::Midway::attempt`), whatever the times it is read at (# The reads)
+//! and whatever jumps it makes (# The jumps): a step ends at no output and at no jump. The last step of the run is its
+//! rest; a step the scheme refuses (`step::Refused`) is taken at its half, and one refused down to the time's
+//! round-off ends the advance with its refusal -- a numerical failure the solve counts and flags, never a loss. A step
+//! that ends at a bin's end of the trajectory's grid (# The Brownian path) ends at that time, so that a trajectory
+//! stays on its grid, the sum of its steps' lengths rounding or not. A step takes its generator's change along the path
+//! through its own three nodes, its middle and its ends, whatever its length (step.rs, # The kick): what that leaves
+//! is an error of the step's length like the splitting's, and the pilot's companion at twice the step checks both at
+//! the outputs (solve.rs, # The step). The generator's own frequencies are no matter of the step's length: they are
+//! integrated exactly.
 //!
 //! τ is one for the run because the splitting is symplectic in its conservative part and its own inverse: at a constant
 //! step the energy of a trap's motion errs by a bounded amount (measured on the reference traps R1: no drift over 10³
-//! periods), where a step chosen from the last step's error drifts. The steps are then the run's length over τ and
-//! what its jumps cut off the steps before them.
+//! periods), where a step chosen from the last step's error drifts. The steps are then the run's length over τ: one
+//! propagation a step, whatever the jumps.
 //!
 //! # The reads
 //! A trajectory is read at the caller's times (the outputs) where they fall, inside a step, from what the step knows
@@ -24,43 +24,30 @@
 //! step's ends, a time at a step's end the end itself. A read is no part of the trajectory: nothing of it enters the
 //! next step. So the step follows from what the scheme must resolve alone (solve.rs, # The step), and outputs however
 //! dense cost a state at a time each, not a step.
-//! - A time read lies in one step: after its start, at its end at the latest. A jump's step ends at the jump, so the
-//!   times before a jump are read from the step to it and the times after it from the next.
+//! - A time read lies in one step: after its start, at its end at the latest. The times read are stops of the step's
+//!   propagation (`step::Midway::attempt`), each the state as the propagation passes it: after the jumps before it,
+//!   before those after it.
 //! - The loss is a first passage, tested wherever a state of the trajectory is made (SPEC §1.7): at every step's end,
 //!   after every jump, and at every read -- else the loss at a time read inside a step would be the last step's end's,
-//!   late by the step in the first order. A trajectory found lost at a read is lost at that time: the read is its
-//!   last state, and its step counts up to there.
+//!   late by the step in the first order. Inside a step those states are tested in the order of their times, each on
+//!   the trajectory's own place there, the step's path (`step::Segment`). A trajectory found lost at one of them is
+//!   lost at that time: that is its last state, and its step counts up to there.
 //! - Two levels of a trajectory (solve.rs, # The step) are read at the same times, each on its own steps: their
 //!   readings agree as τ → 0, and differ by the scheme's accumulated error, smooth in the time, and by the two reads'
 //!   own terms, of the second order with a factor that depends on the time's place in its step ((h² − u²)/2: its
 //!   mean over the places is τ²/12, so Richardson's factor holds for it in the mean over the outputs, which is where
-//!   the solve takes it). The Brownian path's part of a read is each level's own between its bins' ends, as its part
-//!   of a jump's step is: a difference of zero mean, of the variance of what a step's moments do not tell (at most
-//!   τ/12 of the diffusion's rate), which falls with τ.
+//!   the solve takes it). The Brownian path's part of a read is each level's own between its bins' ends: a difference
+//!   of zero mean, of the variance of what a step's moments do not tell (at most τ/12 of the diffusion's rate), which
+//!   falls with τ.
 //!
-//! # The jumps' times
-//! A jump is made at the end of a step whose own propagation reaches the trajectory's threshold there (SPEC §1.6): the
-//! step that is taken sets the jump's time, so the time's error is that step's own, a part of the step's error like
-//! every other. A step's norm is its own curve -- its generator sits at its middle, half its length ahead on the straight
-//! path through it --, so where a longer step's norm crosses the threshold is not when a shorter step reaches it. Timed
-//! by a step of the nominal length and made at the end of a shorter one, the jumps took the hazard of another phase of
-//! the orbit: at ω τ = 3 a held atom at a standing wave's antinode lost its recoil heating along the wave (R10). So the
-//! step to a jump is the fixed point of "the step of the length L
-//! reaches the threshold at s(L)", L = s(L):
-//! - the length tried first is the time to the threshold at the rate the trajectory has just had -- the last taken
-//!   step's fall of ln‖ψ‖² over its length (`Trajectory::rate`) --, no longer than τ or the interval's rest: where jumps
-//!   are frequent no step of the nominal length is tried and thrown away;
-//! - a step tried says where its own propagation reaches the threshold (`step::Attempt`): nowhere -- it is taken, and
-//!   no jump made; at its end, within the tolerance -- it is taken and the jump made at its end; elsewhere -- before
-//!   its end, or beyond it, where its propagation is followed on its own path for at most its length again and not
-//!   past the nominal end -- it only proposes that length, and the step of that length is tried. Each look at a length
-//!   is the step of that length;
-//! - the lengths found too long and too short bracket the fixed point: a proposal outside the bracket is replaced by the
-//!   bracket's middle, and where the bracket is narrower than the tolerance the step tried is the step taken -- the
-//!   search ends by its tolerance or by its bracket, never by a count.
-//! The tolerance is `units::JUMP_TIMING` of the step's length (derived there: the second order of the step's share of
-//! the tighter target): the time's distance from the fixed point is held at the second order of what the step may
-//! take.
+//! # The jumps
+//! A jump is made inside the step whose own propagation reaches the trajectory's threshold, where it reaches it, from
+//! the state that propagation has there and at the point of the step's path there; and the step goes on from the
+//! state the jump lands in, on the same decomposition (SPEC §1.6; step.rs, # Jumps: the derivation, what a jump inside
+//! a step leaves and of which order). So a jump costs no step: the steps stay on the trajectory's grid, the tree of
+//! its Brownian path is not cut, and the time of a jump, its state and its point are one propagation's -- the step
+//! that is taken. The jump's kick is on the trajectory's path where the jump is (`step::Segment::after`): a step's
+//! path is handed on piece by piece, from its start to its first jump, from each jump to the next, to its end.
 //!
 //! # The Brownian path
 //! The light a trajectory scatters diffuses its momentum (SPEC §1.6; step.rs, # The absorbed light's momentum) along
@@ -77,21 +64,21 @@
 //!   (seed, trajectory, bin), and a bin's part is the sum of its halves' -- a step of 2τ on the grid takes the sum of
 //!   the two steps of τ it spans.
 //! - A trajectory at the step τ reads the tree down to the bins of its own grid, the cell over 2^depth = the multiples
-//!   of τ. A step that ends off the grid -- at a jump, and every step of τ after one -- cuts the bin it ends in: the bridge
-//!   between the bin's ends once more, at the cut, from the stream of the cut's time (`random::Stream::bridge`); the rest
-//!   of the bin is kept for the step that follows (`Cursor`). A step tried at several lengths for its jump cuts at each
-//!   of them, and the one taken moves the trajectory along the path; its norm does not depend on the path.
+//!   of τ. A step that ends off the grid -- a refused step's half, and every step of τ after one -- cuts the bin it
+//!   ends in: the bridge between the bin's ends once more, at the cut, from the stream of the cut's time
+//!   (`random::Stream::bridge`); the rest of the bin is kept for the step that follows (`Cursor`). The jumps cut
+//!   nothing: a step with jumps takes its bin's part whole.
 //! - Every part has the law of a Brownian path's over its stretch, exactly, and parts of stretches that do not overlap
 //!   are independent: nothing of the scheme's law knows the tree. What two levels share is the path at the bins' ends
 //!   of the coarser one; within a bin each level's cuts are its own.
 //! - The tree is read by its branches: the nodes from a cell down to the bin last read are kept, and the next bin's
 //!   branch is made from where it leaves them -- two nodes a bin on average, whatever the depth, and the same parts to
-//!   the bit as a branch made from its cell.
+//!   the bit as a branch made from its cell. The branch's memory is the path's own, made with it: a cell's root and a
+//!   node a level.
 
-use crate::linalg::norm_sqr;
 use crate::random::Stream;
-use crate::step::{jump, step_work, test_loss, Attempt, Brownian, Dynamics, Middle, Midway, Refused, Scratch, Segment, Trajectory};
-use crate::units::{rounding, JUMP_TIMING};
+use crate::step::{step_work, test_loss, Brownian, Dynamics, Middle, Midway, Refused, Scratch, Segment, Trajectory};
+use crate::units::rounding;
 
 /// Where a trajectory stands on its Brownian path (`Path`): the time, the bin of its grid that time lies in, and the
 /// path's part from that time to the bin's end.
@@ -121,7 +108,7 @@ impl Path {
     /// The path of trajectory `index` of the run `seed` from t = 0, in cells of the width `cell`, for a trajectory whose
     /// grid has 2^depth bins a cell.
     pub fn new(seed: u64, index: u64, cell: f64, depth: u32) -> Path {
-        let mut path = Path { seed, index, cell, depth, cursor: Cursor { at: 0.0, bin: 0, rest: Brownian::STILL }, branch: (0, 0, vec![]) };
+        let mut path = Path { seed, index, cell, depth, cursor: Cursor { at: 0.0, bin: 0, rest: Brownian::STILL }, branch: (0, 0, Vec::with_capacity(depth as usize + 1)) };
         path.cursor.rest = path.whole(0);
         path
     }
@@ -150,7 +137,8 @@ impl Path {
         let (last_cell, last_place, parts) = &mut self.branch;
         if parts.is_empty() || *last_cell != cell {
             let root = deviates(0);
-            *parts = vec![Brownian::over(self.cell, &[root[0], root[1]])];
+            parts.clear();
+            parts.push(Brownian::over(self.cell, &[root[0], root[1]]));
         } else {
             let shared = (0..=depth).rev().find(|&level| place >> (depth - level) == *last_place >> (depth - level)).unwrap_or(0);
             parts.truncate(shared as usize + 1);
@@ -189,24 +177,16 @@ impl Path {
     }
 }
 
-/// The trajectory's physical state from the end of a step taken, its counted work kept (a step's end holds its
-/// start's: the steps tried on the way to it are counted on the trajectory).
-fn adopt(trajectory: &mut Trajectory, end: &Trajectory) {
-    let work = trajectory.work;
-    *trajectory = end.clone();
-    trajectory.work = work;
-}
-
 /// Advances a held trajectory to the time `to` (the run's end) by steps of τ, with its jumps and its loss test (module
-/// documentation, # The step, # The jumps' times; the loss is tested at every step's end, after every jump and at every
+/// documentation, # The step, # The jumps; the loss is tested at every step's end, after every jump and at every
 /// read, SPEC §1.7), and reads it at the times `at` (increasing) that lie after its time and no later than `to`, each
 /// inside the step it falls in (# The reads): `read` takes a time's place in `at` and the state there. `each` takes
-/// every step's path with the time the trajectory is on it to -- the step's end, or the read it is found lost at -- (a
-/// jump's step is the one whose own propagation reaches the threshold at its end, the jump there). A trajectory lost
-/// on the way stops at its loss time. Where the scheme refuses a step at every length down to the time's round-off,
-/// the advance ends there with the refusal; so it does where the model gives a jump no photon (`step::jump`).
-/// `scratch` is the trajectory's (`step::Scratch`): its steps' memory, made once with it; `path` its Brownian path,
-/// which it goes along as it is advanced (`Path`).
+/// every piece of every step's path -- from the step's start or a jump of the step -- with the time the trajectory is
+/// on it to: the next jump, the step's end, or the read it is found lost at. A trajectory lost on the way stops at
+/// its loss time. Where the scheme refuses a step at every length down to the time's round-off, the advance ends
+/// there with the refusal; so it does where the model gives a jump no photon (`step::jump`). `scratch` is the
+/// trajectory's (`step::Scratch`): its steps' memory, made once with it; `path` its Brownian path, which it goes along
+/// as it is advanced (`Path`).
 #[allow(clippy::too_many_arguments)]
 pub fn advance<D: Dynamics>(
     model: &D,
@@ -222,86 +202,63 @@ pub fn advance<D: Dynamics>(
     let mut next = at.partition_point(|&time| time <= trajectory.time);
     while trajectory.lost.is_none() && trajectory.time < to {
         let rest = to - trajectory.time;
-        // The step taken from here (module documentation, # The jumps' times): the longest is τ or the run's rest -- the
-        // rest too where a step of τ would end within the grid's rounding of the run's end, which is then no step of
-        // its own --; the first tried no longer than the time to the threshold at the last step's rate; then the length
-        // each step tried proposes, inside the bracket of the lengths found too short and too long, until one is the
-        // step -- none where the threshold is within the time's round-off of the start: the jump is made there. From
-        // half the length where the scheme refuses a step, and no longer than that from then on.
-        let whole = if path.ends(to, trajectory.time + tau) { rest } else { tau.min(rest) };
-        let (mut most, mut bracket) = (whole, (0.0, f64::INFINITY));
-        let ahead = if trajectory.rate > 0.0 { (norm_sqr(&trajectory.psi) / trajectory.threshold).ln() / trajectory.rate } else { f64::INFINITY };
-        let mut length = most.min(ahead);
-        let (from, taken, jumps) = loop {
-            let from = trajectory.clone();
-            if !(trajectory.time + length > trajectory.time) {
-                break (from, None, true);
-            }
-            let slack = if bracket.1 - bracket.0 <= JUMP_TIMING * length { f64::INFINITY } else { JUMP_TIMING * length };
-            // Followed beyond its end for its length again at most (not derived: the search's bracket alone, and what
-            // bounds the one hop of `spectral::Picture::extend`), and not past the longest step.
-            let reach = length.min(most - length);
-            // The step's part of the Brownian path, and where the trajectory stands on it at the step's end.
+        // The step taken from here: τ or the run's rest -- the rest too where a step of τ would end within the grid's
+        // rounding of the run's end, which is then no step of its own --; half the length where the scheme refuses a
+        // step, as far as the time's round-off.
+        let mut length = if path.ends(to, trajectory.time + tau) { rest } else { tau.min(rest) };
+        let (step, end, beyond) = loop {
+            // The step's part of the Brownian path, and where the trajectory stands on it at the step's end: on the
+            // trajectory's clock the run's end where the step spans its rest -- not an ulp short of it (the sum of the
+            // steps' lengths rounds), which would leave a rest of the time's round-off to be stepped --, else where the
+            // path has it: the bin's end it ends at, or its own cut. The times read inside the step go with it.
             let (brownian, beyond) = path.reach(trajectory.time + length);
-            let tried = Midway::new(model, &from, length).and_then(|through| through.attempt(&from, &brownian, slack, reach, scratch));
-            let refusal = match tried {
-                Ok(Attempt::Whole(whole)) => {
-                    trajectory.work += whole.work;
-                    break (from, Some((whole, beyond)), false);
-                }
-                Ok(Attempt::Reached(whole)) => {
-                    trajectory.work += whole.work;
-                    break (from, Some((whole, beyond)), true);
-                }
-                Ok(Attempt::Proposes { length: proposed, work }) => {
-                    trajectory.work += work;
-                    if proposed < length {
-                        bracket.1 = length.min(bracket.1);
-                    } else {
-                        bracket.0 = length.max(bracket.0);
-                    }
-                    length = if proposed > bracket.0 && proposed < bracket.1 || !(trajectory.time + proposed > trajectory.time) { proposed } else { 0.5 * (bracket.0 + bracket.1.min(most)) };
-                    continue;
-                }
-                Err(e) => e,
-            };
-            length *= 0.5;
-            if !(trajectory.time + length > trajectory.time) {
-                return Err(refusal);
-            }
-            (most, bracket) = (length, (0.0, f64::INFINITY));
-        };
-        if let Some((s, beyond)) = &taken {
-            // The step's end on the trajectory's clock: the run's end where the step spanned its rest -- not an ulp
-            // short of it (the sum of the steps' lengths rounds), which would leave a rest of the time's round-off to
-            // be stepped --, else where the path has it: the bin's end it ends at, or its own cut.
             let end = if length == rest { to } else { beyond.at };
-            // The times read inside the step (module documentation, # The reads), each with its loss test.
-            while next < at.len() && at[next] <= end {
-                let mut state = s.at(at[next], scratch);
-                test_loss(model, &mut state);
-                if state.lost.is_some() {
-                    each(&s.segment, state.time);
-                    adopt(trajectory, &state);
-                    return Ok(());
+            let reads = &at[next..next + at[next..].partition_point(|&time| time <= end)];
+            match Midway::new(model, trajectory, length).and_then(|through| through.attempt(trajectory, &brownian, reads, scratch)) {
+                Ok(step) => break (step, end, beyond),
+                Err(Refused::Emission) => return Err(Refused::Emission),
+                Err(refusal) => {
+                    length *= 0.5;
+                    if !(trajectory.time + length > trajectory.time) {
+                        return Err(refusal);
+                    }
                 }
-                read(next, &state);
+            }
+        };
+        // The states made inside the step in the order of their times, each on the step's path with its loss test
+        // (module documentation, # The reads): after a jump on the path that goes on from it, at a time read on the
+        // path it lies on.
+        let mut piece = step.segment;
+        for mut made in step.made {
+            let time = made.state.time;
+            match made.kick {
+                Some(kick) => {
+                    each(&piece, time);
+                    piece = piece.after(time, kick);
+                    (made.state.r, made.state.kappa) = piece.from;
+                }
+                None => piece.place(&mut made.state),
+            }
+            test_loss(model, &mut made.state);
+            if made.state.lost.is_some() {
+                if made.kick.is_none() {
+                    each(&piece, time);
+                }
+                *trajectory = made.state;
+                trajectory.work += step.work;
+                return Ok(());
+            }
+            if made.kick.is_none() {
+                read(next, &made.state);
                 next += 1;
             }
-            each(&s.segment, end);
-            path.cursor = *beyond;
-            let fall = (norm_sqr(&from.psi) / norm_sqr(&s.end.psi)).ln();
-            adopt(trajectory, &s.end);
-            trajectory.time = end;
-            trajectory.rate = fall / s.segment.tau;
-            test_loss(model, trajectory);
         }
-        if trajectory.lost.is_some() {
-            break;
-        }
-        if jumps {
-            jump(model, trajectory)?;
-        }
+        each(&piece, end);
+        path.cursor = beyond;
+        *trajectory = step.end;
+        trajectory.work += step.work;
+        trajectory.time = end;
+        test_loss(model, trajectory);
     }
     Ok(())
 }
