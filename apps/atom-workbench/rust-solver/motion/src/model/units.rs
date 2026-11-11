@@ -97,6 +97,24 @@
 //! the rate's remainder is at most 1.09 Σ_e s_e max(S_b, L_e)²/S_b, the one resonant line's;
 //! motion3d_status/rewrite/booking.status.md.)
 //!
+//! The second order's own error is made of the same two numbers, once each. A line's rate is |R_e|² |1 + λ/D_e + …|²/(1 +
+//! X + …), and the second order takes |R_e|² alone: it errs by 2 Re(a₁/D_e), the level's own term over the line's
+//! distance -- far from every line the rate is high by ⟨L_e⟩ exactly --, and by the shares X and a₂, which on one line
+//! make up the same s. So the second order's s p_b is s_e max(S_b, L_e)/S_b p_b of a drive (`Folded::order`): Σ_e s_e p_b
+//! where the drives are at one distance, more where a near line reads a far one's shift -- a far line that is folded at
+//! the atom too: one folded with the bare levels moves the near one's denominator by its static form, which the levels
+//! at the atom hold. Measured (the same test): at one detuning the rate is high by 1.000 Σs; shares of 0.04 at 3 Γ and at
+//! 30 Γ, by 2.72 Σs (booked 3.21 Σs); 0.01 at 1 Γ with 0.05 at 40 Γ, by 3.10 Σs (5.83); 0.06, 0.006, 0.002 at 20, 64 and
+//! 90 Γ, by 1.19 Σs (1.26). The force's error -- twice the potential's -- stays within Σs at any distances (0.94 Σs at
+//! most there), within what T is booked. (The same emulation: the rate at most 1.000 Σ_e s_e max(S_b, L_e)/S_b, the one
+//! line's, where Σs is exceeded 24 times.)
+//!
+//! L_e/S_b is taken as a ratio of distances, (|N_bb|/|D_e|)/Σ_f (|V_f R_f|/|D_f|) (eliminate.rs `Model::drive_parameters`):
+//! 2|N_bb|/|D_e| over S_b where the responses are V/D, at most one at one distance, and one on a lone line whatever its
+//! response holds beside. (With 2|N_bb|/|D_e| against S_b itself the response's first-order Doppler term, R = (V/D)(1 −
+//! w/D) where the distance is |D + w|, made a lone line read L/S = 1/|1 − (w/D)²| -- 1.35 on R3_DOPPLER's fastest atoms:
+//! the Doppler term's own next order, which its unit books, counted again.)
+//!
 //! # A coupling of two states (`Unit::Term`)
 //! Everything the folds leave between two states a ← b at one exact beat β (∝ e^{iβt}) is one unit: the constant forms'
 //! entry (far.rs `constant`: one frequency's static form at β = 0, with the two states' own coupling when every light is
@@ -207,9 +225,7 @@ pub(crate) fn gate(size: f64, distance: f64, rate: f64) -> Gate {
 /// responses there per component (readout.rs `Model::far_channels`); the state's excitation drive by drive -- Σ |R[e, g]|²
 /// p_g over its folded drives, bare ones and those at the atom, with its explicit states' populations: its rates' measure;
 /// and Σ |V[e, g] R[e, g]| p_g with its kept drives' |V[e, g]| |ψ_e| |ψ_g|: its light shifts' --; per carrier and ground
-/// place of the cluster what that carrier's fold at the atom makes of the state, its excited share S_g = 2 Σ_e |R[e, g]|²
-/// and its level's own second-order term N_gg = Σ_e V[e, g]* R[e, g], its light shift and half its rate (the two numbers
-/// the fold's next order is made of: module documentation, # The fold's order);
+/// place of the cluster what that carrier's fold at the atom makes of the state (`Fold`);
 /// the levels' energies at the atom to first order ([part][state], eliminate.rs `Model::far_energies`); the force on the
 /// state (rad/µs/µm); its populations; and, made when asked, its cluster's photon classes' jump operators' sizes at the
 /// point (photon.rs `Model::class_sizes`), per carrier the first-order Doppler term's size per ground place, and the
@@ -225,7 +241,7 @@ pub(crate) struct Measured<'a> {
     pub(crate) bare: Vec<Channels>,
     pub(crate) rates: f64,
     pub(crate) shifts: f64,
-    pub(crate) folds: Vec<Vec<(f64, C64)>>,
+    pub(crate) folds: Vec<Vec<Fold>>,
     pub(crate) energies: Vec<Vec<f64>>,
     pub(crate) force: [f64; 3],
     pub(crate) populations: [f64; STATES],
@@ -233,6 +249,19 @@ pub(crate) struct Measured<'a> {
     pub(crate) doppler: Vec<OnceCell<Vec<f64>>>,
     pub(crate) kept: OnceCell<Vec<C64>>,
     pub(crate) lifts: OnceCell<[f64; GROUND]>,
+}
+
+/// What a carrier's fold at the atom makes of a ground state g of a sample's cluster (`Measured::folds`; the numbers the
+/// fold's orders' errors are made of, module documentation, # The fold's order): its excited share S_g = 2 Σ_e |R[e, g]|²;
+/// its level's own second-order term N_gg = Σ_e V[e, g]* R[e, g], its light shift and half its rate; each drive's size
+/// in that, |V[e, g] R[e, g]| (by excited state less GROUND); and, made when a drive asks, the sum of those sizes each
+/// across its drive's distance (eliminate.rs `Model::drive_parameters`).
+#[derive(Clone)]
+pub(crate) struct Fold {
+    pub(crate) share: f64,
+    pub(crate) level: C64,
+    pub(crate) terms: [f64; EXCITED],
+    pub(crate) across: OnceCell<f64>,
 }
 
 /// One drive of a ground state in the tail rule's order (module documentation, # The tail rule): its component and excited
@@ -926,7 +955,7 @@ impl Model {
         let populations = self.state_populations(sample);
         let c = &self.clusters[sample.cluster];
         let (mut rates, mut shifts) = (0.0, 0.0);
-        let mut folds = vec![vec![(0.0, C64::ZERO); c.ground]; self.carriers.len()];
+        let mut folds = vec![vec![Fold { share: 0.0, level: C64::ZERO, terms: [0.0; EXCITED], across: OnceCell::new() }; c.ground]; self.carriers.len()];
         for (y, &g) in c.states[..c.ground].iter().enumerate() {
             for x in 0..EXCITED {
                 for channel in &bare {
@@ -943,8 +972,11 @@ impl Model {
                         let coupling: C64 = cc.beams.iter().zip(&cc.folded).map(|(&l, m)| amplitudes[l].value * m[(GROUND + x, g)]).sum();
                         rates += size * size * populations[g];
                         shifts += size * coupling.abs() * populations[g];
-                        fold[y].0 += 2.0 * size * size;
-                        fold[y].1 += coupling.conj() * response;
+                        // (A drive's size the modulus of its own term: one drive's is the level's, to the bit.)
+                        let term = coupling.conj() * response;
+                        fold[y].share += 2.0 * size * size;
+                        fold[y].level += term;
+                        fold[y].terms[x] = term.abs();
                     }
                 }
             }
@@ -1008,8 +1040,10 @@ impl Model {
     }
 
     /// The error at a sample of the second order of a cluster's fold at the atom (`Unit::Second`; module documentation,
-    /// # The errors, # The fold's order): Σ s p_g over the drives folded at the atom from the sample's ground states, s =
-    /// 2|R[e, g]|² each one's share -- on T, the force's relative error of that order; on the populations, the rates'.
+    /// # The errors, # The fold's order): Σ s M/S_g p_g over the drives folded at the atom from the sample's ground
+    /// states -- s = 2|R[e, g]|² each one's share, M the larger of its ground state's share S_g and of that level's own
+    /// term across the drive's distance (eliminate.rs `Folded::order`; at one distance Σ s p_g) -- on the populations,
+    /// the rates' relative error of that order; on T the same, which bounds the force's (Σ s p_g at any distances).
     /// Zero off the cluster, and where its fold is the fourth order's.
     fn order_error(&self, ground: usize, at: &Measured) -> UnitError {
         let cluster = self.membership[ground];
@@ -1019,11 +1053,13 @@ impl Model {
         let component = Component { frequency, counter: false };
         let c = &self.clusters[cluster];
         let (mut sum, mut held) = (0.0, 0.0);
-        if let Some(response) = self.carrier_of(frequency).and_then(|ci| at.responses[ci].as_ref()) {
-            for (y, &g) in c.states.iter().enumerate() {
+        if self.carrier_of(frequency).is_some_and(|ci| at.responses[ci].is_some()) {
+            for &g in &c.states {
                 held += at.populations[g];
-                for x in (0..EXCITED).filter(|&x| self.level(component, GROUND + x, g) == Level::Atom) {
-                    sum += 2.0 * response[(x, y)].norm_sqr() * at.populations[g];
+                for e in (GROUND..STATES).filter(|&e| self.level(component, e, g) == Level::Atom) {
+                    if let Some(drive) = self.drive_parameters(&Unit::Drive { component, excited: e, ground: g }, at) {
+                        sum += drive.order(1) * drive.population;
+                    }
                 }
             }
         }
@@ -1731,6 +1767,11 @@ mod tests {
     /// - Everywhere the remainder is within what the drives' units book (`Model::drive_error`, p_g = 1): the rate's
     ///   within the populations' (1.05 to 4.3 of it where every parameter is small; 26 of it where the far line moves
     ///   the near one by 1.8 of its distance, no small parameter: 0.61 booked), three times the potential's within T's.
+    /// - The same atom with its fold at the second order (`Unit::Second` not kept: its jumps' rate Σ Γ |R|² against the
+    ///   same waiting time, twice the potential's error for the force's): at one detuning the rate is high by Σs to the
+    ///   widths' eight digits, and booked so; at different distances by more -- 2.72 Σs with shares of 0.04 at 3 Γ and
+    ///   at 30 Γ, 3.10 Σs with 0.01 at 1 Γ and 0.05 at 40 Γ, 1.19 Σs at 20, 64 and 90 Γ --, within what the cluster's
+    ///   unit books (`Model::order_error`: 3.21, 5.83, 1.26 Σs); the force's stays within Σs (0.94 Σs at most).
     #[test]
     fn a_ground_state_s_drives_leave_the_fourth_order_one_line_s_remainder() {
         let g = THREE[0];
@@ -1823,6 +1864,30 @@ mod tests {
             }
             if *case == decade {
                 assert!(rate.abs() > 5.0 * ORDER_RATES * sum * sum, "{case:?}: a decade apart (Σs)² is no bound: {:+.3} (Σs)²", rate / (sum * sum));
+            }
+            // The second order's own (no `Unit::Second` kept): its jumps' rate against the exact waiting time, twice the
+            // potential's error, and what the cluster's unit books of them.
+            let second = Model::new(&request, &light, &kept[..kept.len() - 1]).unwrap();
+            let lower = {
+                use crate::step::Middle as _;
+                let middle = second.assemble(second.membership[g], at.r, 0.0, &second.running());
+                let mut h = Mat::zeros(1, 1);
+                middle.generator(&middle.path(at.kappa, [0.0; 3]), 0.0, &mut h);
+                h[(0, 0)]
+            };
+            let state = Sample { cluster: second.membership[g], at, psi: vec![C64::ONE] };
+            let order = second.errors(&[Unit::Second { ground: g }], &[state])[0][0];
+            let (rate, force) = (waiting[0].re * (-2.0 * lower.im) - 1.0, 2.0 * (lower.re - slow.re).abs() / shift);
+            println!("    its second order: the rate {rate:+.3e} = {:+.3} Σs, booked {:.3e}; twice the potential {force:.3e} = {:.3} Σs, booked on T {:.3e}", rate / sum, order.population, force / sum, order.temperature);
+            // (The excited states' widths are one to the scene's eight digits: so are the one line's statements.)
+            let exactly = 1.0 + 1e-6;
+            assert!(rate.abs() <= order.population * exactly, "{case:?}: the second order's rate {rate:+.3e} beyond its booked {:.3e}", order.population);
+            assert!(force <= order.temperature * exactly, "{case:?}: the second order's force {force:.3e} beyond its booked {:.3e} on T", order.temperature);
+            if index < together.len() {
+                assert!((rate - sum).abs() <= 1e-6 * sum && (order.population - sum).abs() <= 1e-6 * sum, "{case:?}: at one detuning the second order is high by Σs exactly, and booked so: {rate:e}, {:e}", order.population);
+            }
+            if *case == decade {
+                assert!(rate > 2.0 * sum, "{case:?}: a decade apart Σs is no bound of the second order: {:+.3} Σs", rate / sum);
             }
         }
     }
