@@ -45,8 +45,9 @@
 //! Between the three nodes m is their quintic: its values there and its rates ṁ = −iD̃₂m (zero at the middle), the
 //! Hermite interpolant. m changes by the slow pairs alone, so its sixth derivative is of the size |ω|⁵ |D₂| with
 //! |ω| |h| < 1, and the quintic errs by no more than (4/27)/720 of h⁶ times it. So the state at any time u of the step
-//! is x(u) = R (1 + X(u)) e^{−iΛ(u + h)} m(u) -- n exponentials and two products of n² (`Picture::at`), no hop --, and
-//! at the step's three nodes it is the hops' own.
+//! is x(u) = R (1 + X(u)) e^{−iΛ(u + h)} m(u) -- n exponentials, the matrix R(1 + X(u)) from its three (R(1 + X₀), RX₁
+//! and RX₂, made once a step) and its product of n² (`Picture::at`), no hop --, and at the step's three nodes it is the
+//! hops' own.
 //!
 //! Where nothing moves (D = 0: an atom at rest, a generator still along every path) X = 0 and m is constant: the state
 //! is e^{−i(c + Λ)(u + h)} on its start, exact at any detuning times step.
@@ -77,10 +78,21 @@
 //! moments above. They would serve where the norm is one, which is no cluster that scatters.) A state there costs n
 //! exponentials and two products of n², against a hop's series and its exponential before.
 //!
+//! # The sums
+//! The picture's products -- the slopes' change of basis (R⁻¹A)R, the following's D X, X D_s and its second pass, the
+//! three matrices of a state at a time, the start's coordinates and a state from its coordinates -- are sums Σ_k c_k x_k
+//! in the order of k, made by the lanes' kernel (`linalg::combine`: fused multiply-adds, a sum held in its place) on
+//! matrices laid for it (`lay`: the rows over the lanes), a product's right factor column by column as the kernel's
+//! weights. Each is the plain sum it stands for within the rounding of its operations, γ of their count times the
+//! terms' moduli (tests: `the_kernel_s_products_are_their_plain_sums_within_their_rounding`); a sum of 3n terms in one
+//! chain is avoided where its latency, not its work, would set the pace (a state's matrix is made first, then one sum
+//! of n). The decomposition (`linalg::Eigen`), the factors of 1 + X and the hops' exponentials are not of that kind and
+//! stay as they are.
+//!
 //! # Towards a defective generator
 //! A state taken through the eigenvectors rounds by κ(R) u (1 + |τ| × the decay rates' spread) relative to its norm
 //! (`linalg::Eigen`), and κ(R) grows without bound towards an exceptional point. There the state is taken without the
-//! decomposition (`Picture::basis` None): from stop to stop of the caller's (`Picture::advance`) by CF4 (Blanes & Moan
+//! decomposition (`Picture::decomposed` false): from stop to stop of the caller's (`Picture::advance`) by CF4 (Blanes & Moan
 //! 2006) of the same Ĥ₀ + uA + u²B, two exponentials on the vector to round-off (`linalg::exp_apply`), whose rounding
 //! does not know κ. It is exact where nothing moves; with D it is of fourth order in the stride's width, which is the
 //! caller's nodes' spacing -- a few radians of Ĥ₀'s bound at most --, so its error is a share of D's own effect, not an
@@ -88,8 +100,31 @@
 //! it rounds no more than through the exponential of Ĥ₀ over the step (`linalg::Chebyshev::rounding`), the exponential
 //! otherwise.
 
-use crate::linalg::{self, C64, Mat};
+use crate::linalg::{self, combine, C64, Mat, LANES};
+use crate::model::assemble::laid;
 use crate::units::UNIT_ROUNDOFF;
+
+/// The reals of one vector of rows of one column laid for the lanes: its real parts and its imaginary parts.
+const PAIR: usize = 2 * LANES;
+
+/// A matrix given row by row (`columns` numbers a row), laid for the lanes (`laid`: its rows over the lanes, as
+/// `linalg::combine` takes its columns and gives its sums).
+fn lay(matrix: &[C64], columns: usize, to: &mut [f64]) {
+    for (row, numbers) in matrix.chunks_exact(columns).enumerate() {
+        for (z, at) in numbers.iter().zip((laid(row, 0, columns)..).step_by(PAIR)) {
+            (to[at], to[at + LANES]) = (z.re, z.im);
+        }
+    }
+}
+
+/// A laid matrix (`lay`) row by row.
+fn unlay(from: &[f64], columns: usize, matrix: &mut [C64]) {
+    for (row, numbers) in matrix.chunks_exact_mut(columns).enumerate() {
+        for (z, at) in numbers.iter_mut().zip((laid(row, 0, columns)..).step_by(PAIR)) {
+            *z = C64::new(from[at], from[at + LANES]);
+        }
+    }
+}
 
 /// A generator along a step's path (module documentation): filled by the caller with Ĥ at the middle (`base`) and at
 /// the two ends (`ends`: at −h, at +h), then prepared (`prepare`) and launched from the step's start state (`launch`);
@@ -103,26 +138,41 @@ pub struct Picture {
     pub ends: [Mat; 2],
     /// A hop's exponent.
     matrix: Mat,
-    /// Ĥ₀'s decomposition of its traceless part, where the state goes through it.
-    basis: Option<linalg::Eigen>,
+    /// Ĥ₀'s decomposition of its traceless part, and whether the state goes through it.
+    basis: linalg::Eigen,
+    through: bool,
     /// Ĥ₀'s eigenvalues, the scalar part with them.
     lambda: Vec<C64>,
-    /// The slow pairs' moments I_p = ∫₀¹ s^p e^{iω_ab w s} ds, p = 0, 1, 2 (3n²), of the hops of the width `width`.
+    /// The slow pairs' moments I_p = ∫₀¹ s^p e^{iω_ab w s} ds, p = 0, 1, 2 (3n²), of the hops of the width `width`,
+    /// and the whole numbers' reciprocals 1/k their series take, as far as a series went (k its index; none at 0).
     moments: Vec<C64>,
     width: f64,
-    /// The exponential's work vectors (2n), a state's coordinates (2n) and the pairs' turns (n).
+    reciprocals: Vec<f64>,
+    /// The exponential's work vectors (2n), a state's coordinates (n) and the pairs' turns (n).
     vectors: Vec<C64>,
     coordinates: Vec<C64>,
     turns: Vec<C64>,
-    /// Work matrices (7n²): D, X and D_s at an end, the second order and D₂ at the two ends, and 1 + X's factors
-    /// at the step's end.
+    /// Work matrices (6n²): X at an end and −D_s at the two ends, column by column (the products' right factors), D₂
+    /// at the two ends, and 1 + X's factors at the step's end.
     product: Vec<C64>,
+    /// Matrices laid for the lanes (`lay`): R and R⁻¹; the slopes A and B of D in the eigenbasis; five work matrices
+    /// (D at the two ends -- the first a product's and R(1 + X(u))'s at a time besides --, X at an end, the second
+    /// order at the two ends); the matrices R(1 + X₀), RX₁ and RX₂ of a state at a time, one after another; and a
+    /// state.
+    right: Vec<f64>,
+    left: Vec<f64>,
+    changes: [Vec<f64>; 2],
+    spare: [Vec<f64>; 5],
+    nodes: Vec<f64>,
+    lanes: Vec<f64>,
     /// Whether D is anything at all, and the step's half h.
     moving: bool,
     half: f64,
-    /// The fast pairs (n²), their following X₀, X₁, X₂ (3n²), whether any pair is followed at all, and 1 + X(−h)
-    /// factored (LU with partial pivoting, n² and its pivots): the start state's way into g.
+    /// The fast pairs (n²) and their 1/ω, their following X₀, X₁, X₂ (3n², each column by column), whether any pair
+    /// is followed at all, and 1 + X(−h) factored (LU with partial pivoting, n² and its pivots): the start state's
+    /// way into g.
     fast: Vec<bool>,
+    inverses: Vec<C64>,
     follow: Vec<C64>,
     followed: bool,
     factors: Vec<C64>,
@@ -161,17 +211,26 @@ impl Default for Picture {
             base: none(),
             ends: [none(), none()],
             matrix: none(),
-            basis: None,
+            basis: linalg::Eigen::default(),
+            through: false,
             lambda: Vec::new(),
             moments: Vec::new(),
             width: f64::NAN,
+            reciprocals: vec![f64::INFINITY],
             vectors: Vec::new(),
             coordinates: Vec::new(),
             turns: Vec::new(),
             product: Vec::new(),
+            right: Vec::new(),
+            left: Vec::new(),
+            changes: Default::default(),
+            spare: Default::default(),
+            nodes: Vec::new(),
+            lanes: Vec::new(),
             moving: false,
             half: 0.0,
             fast: Vec::new(),
+            inverses: Vec::new(),
             follow: Vec::new(),
             followed: false,
             factors: Vec::new(),
@@ -212,62 +271,6 @@ fn quintic(s: f64) -> ([f64; 3], [f64; 2]) {
     ([(1.0 + 3.0 * (s + 1.0)) * m2, middle * middle, (1.0 - 3.0 * (s - 1.0)) * p2], [(s + 1.0) * m2, (s - 1.0) * p2])
 }
 
-/// P A = L U of the n × n matrix in `f`, in its place (L unit lower, U upper; partial pivoting, the pivots' rows).
-fn factor(f: &mut [C64], pivots: &mut [usize], n: usize) {
-    for k in 0..n {
-        let p = (k..n).max_by(|&i, &j| f[i * n + k].abs1().total_cmp(&f[j * n + k].abs1())).unwrap();
-        pivots[k] = p;
-        if p != k {
-            for j in 0..n {
-                f.swap(k * n + j, p * n + j);
-            }
-        }
-        let (above, below) = f.split_at_mut((k + 1) * n);
-        let pivot_row = &above[k * n..];
-        for row in below.chunks_mut(n) {
-            let l = row[k] / pivot_row[k];
-            row[k] = l;
-            for (z, upper) in row[k + 1..].iter_mut().zip(&pivot_row[k + 1..]) {
-                *z -= l * *upper;
-            }
-        }
-    }
-}
-
-/// B ← A⁻¹B by A's factors (`factor`), B of n rows of `columns` numbers, row by row.
-fn solve(f: &[C64], pivots: &[usize], n: usize, b: &mut [C64], columns: usize) {
-    for (k, &p) in pivots.iter().enumerate() {
-        if p != k {
-            for j in 0..columns {
-                b.swap(k * columns + j, p * columns + j);
-            }
-        }
-    }
-    for i in 0..n {
-        let (above, row) = b.split_at_mut(i * columns);
-        for j in 0..i {
-            let l = f[i * n + j];
-            for (z, other) in row[..columns].iter_mut().zip(&above[j * columns..(j + 1) * columns]) {
-                *z -= l * *other;
-            }
-        }
-    }
-    for i in (0..n).rev() {
-        let (rest, below) = b.split_at_mut((i + 1) * columns);
-        let row = &mut rest[i * columns..];
-        for j in i + 1..n {
-            let upper = f[i * n + j];
-            for (z, other) in row.iter_mut().zip(&below[(j - i - 1) * columns..(j - i) * columns]) {
-                *z -= upper * *other;
-            }
-        }
-        let diagonal = f[i * n + i];
-        for z in row.iter_mut() {
-            *z = *z / diagonal;
-        }
-    }
-}
-
 impl Picture {
     /// The picture for n states.
     pub fn fit(&mut self, n: usize) {
@@ -281,9 +284,10 @@ impl Picture {
             for (v, length) in [
                 (&mut self.lambda, n),
                 (&mut self.vectors, 2 * n),
-                (&mut self.coordinates, 2 * n),
+                (&mut self.coordinates, n),
                 (&mut self.turns, n),
-                (&mut self.product, 7 * size),
+                (&mut self.product, 6 * size),
+                (&mut self.inverses, size),
                 (&mut self.follow, 3 * size),
                 (&mut self.moments, 3 * size),
                 (&mut self.factors, size),
@@ -294,6 +298,14 @@ impl Picture {
             }
             self.fast.resize(size, false);
             self.pivots.resize(n, 0);
+            // A laid column: whole vectors of rows. Zero beyond the rows, and kept so: every laid matrix is written on
+            // its rows alone, or as a sum of laid ones.
+            let column = n.div_ceil(LANES) * PAIR;
+            let matrices = [&mut self.right, &mut self.left].into_iter().chain(&mut self.changes).chain(&mut self.spare).map(|v| (v, n));
+            for (v, columns) in matrices.chain([(&mut self.nodes, 3 * n), (&mut self.lanes, 1)]) {
+                v.clear();
+                v.resize(columns * column, 0.0);
+            }
         }
     }
 
@@ -304,7 +316,7 @@ impl Picture {
 
     /// Whether the state goes through Ĥ₀'s decomposition.
     pub fn decomposed(&self) -> bool {
-        self.basis.is_some()
+        self.through
     }
 
     /// Whether the generator changes along the path at all.
@@ -340,39 +352,43 @@ impl Picture {
         let tau = 2.0 * half.abs();
         let exponential = linalg::Chebyshev::plan(rho * tau, gamma * tau).rounding(n);
         let mut rounding = 0.0;
-        self.basis = linalg::eigen(&self.matrix).filter(|e| {
-            let decay = |pick: fn(f64, f64) -> f64, from: f64| e.values.iter().map(|l| l.im).fold(from, pick);
-            rounding = e.condition * UNIT_ROUNDOFF * (1.0 + tau * (decay(f64::max, f64::NEG_INFINITY) - decay(f64::min, f64::INFINITY)));
+        self.through = self.basis.decompose(&self.matrix) && {
+            let decay = |pick: fn(f64, f64) -> f64, from: f64| self.basis.values.iter().map(|l| l.im).fold(from, pick);
+            rounding = self.basis.condition * UNIT_ROUNDOFF * (1.0 + tau * (decay(f64::max, f64::NEG_INFINITY) - decay(f64::min, f64::INFINITY)));
             rounding <= exponential
-        });
-        match &self.basis {
-            Some(e) => {
+        };
+        let e = &self.basis;
+        match self.through {
+            true => {
                 for (l, value) in self.lambda.iter_mut().zip(&e.values) {
                     *l = *value + scalar;
                 }
-                self.bandwidth = self.lambda.iter().flat_map(|a| self.lambda.iter().map(move |b| (a.conj() - *b).abs())).fold(0.0, f64::max);
+                // |λ_a* − λ_b| is the pair's whichever way round.
+                self.bandwidth = self.lambda.iter().enumerate().flat_map(|(a, first)| self.lambda[a..].iter().map(move |second| (first.conj() - *second).abs())).fold(0.0, f64::max);
                 self.rounding = rounding;
                 self.work += e.work;
+                lay(&e.vectors.data, n, &mut self.right);
+                lay(&e.inverse.data, n, &mut self.left);
                 if self.moving {
-                    // A ← R⁻¹AR and B ← R⁻¹BR: two products of n³ each.
-                    for slope in &mut self.ends {
-                        for (row, out) in self.product[..n * n].chunks_mut(n).enumerate() {
-                            for (b, z) in out.iter_mut().enumerate() {
-                                *z = (0..n).map(|k| slope.data[row * n + k] * e.vectors.data[k * n + b]).sum();
+                    // A ← (R⁻¹A)R and B ← (R⁻¹B)R: two products of n³ each, a product's right factor column by column.
+                    let product = &mut self.spare[0];
+                    for (slope, change) in self.ends.iter_mut().zip(&mut self.changes) {
+                        let columns = &mut self.product[..n * n];
+                        for (column, numbers) in columns.chunks_exact_mut(n).enumerate() {
+                            for (z, row) in numbers.iter_mut().zip(slope.data.chunks_exact(n)) {
+                                *z = row[column];
                             }
                         }
-                        for (row, out) in slope.data.chunks_mut(n).enumerate() {
-                            for (b, z) in out.iter_mut().enumerate() {
-                                *z = (0..n).map(|k| e.inverse.data[row * n + k] * self.product[k * n + b]).sum();
-                            }
-                        }
+                        combine(false, columns, n, &self.left, product, n, 0);
+                        combine(false, e.columns(), n, product, change, n, 0);
+                        unlay(change, n, &mut slope.data);
                     }
                     self.work += (4 * n * n * n) as f64;
                 }
             }
-            None => (self.bandwidth, self.rounding) = (2.0 * (rho + gamma), 0.0),
+            false => (self.bandwidth, self.rounding) = (2.0 * (rho + gamma), 0.0),
         }
-        if self.basis.is_some() && self.moving {
+        if self.through && self.moving {
             self.follow();
         }
         self.slopes = if self.moving { [0, 1].map(|i| self.ends[i].data.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()) } else { [0.0; 2] };
@@ -389,26 +405,33 @@ impl Picture {
         let (n, h) = (self.n, self.half);
         let size = n * n;
         let [a, b] = &mut self.ends;
-        // A pair's following of the change uA + u²B: the polynomial X₀ + uX₁ + u²X₂ with ωX − iẊ + uA + u²B = 0.
-        let following = |omega: C64, a: C64, b: C64| {
-            let two = -(b / omega);
-            let one = (C64::I * two * 2.0 - a) / omega;
-            [C64::I * one / omega, one, two]
+        // A pair's following of the change uA + u²B, by its 1/ω: the polynomial X₀ + uX₁ + u²X₂ with
+        // ωX − iẊ + uA + u²B = 0.
+        let following = |inverse: C64, a: C64, b: C64| {
+            let two = -(b * inverse);
+            let one = (C64::I * two * 2.0 - a) * inverse;
+            [C64::I * one * inverse, one, two]
         };
+        // A pair and its reverse turn alike, ω_ba = −ω_ab.
         for row in 0..n {
-            for column in 0..n {
-                let (k, omega) = (row * n + column, self.lambda[row] - self.lambda[column]);
-                let fast = row != column && omega.abs() * h.abs() >= 1.0;
-                self.fast[k] = fast;
-                let mut x = [C64::ZERO; 3];
-                if fast {
-                    x = following(omega, a.data[k], b.data[k]);
-                    self.followed |= a.data[k] != C64::ZERO || b.data[k] != C64::ZERO;
-                } else if row != column {
-                    self.spread = self.spread.max(omega.abs());
+            for column in row..n {
+                let omega = self.lambda[row] - self.lambda[column];
+                let turn = omega.abs();
+                let fast = row != column && turn * h.abs() >= 1.0;
+                if !fast && row != column {
+                    self.spread = self.spread.max(turn);
                 }
-                for (j, x) in x.into_iter().enumerate() {
-                    self.follow[j * size + k] = x;
+                for (k, t, omega) in [(row * n + column, column * n + row, omega), (column * n + row, row * n + column, -omega)] {
+                    self.fast[k] = fast;
+                    let mut x = [C64::ZERO; 3];
+                    if fast {
+                        self.inverses[k] = omega.recip();
+                        x = following(self.inverses[k], a.data[k], b.data[k]);
+                        self.followed |= a.data[k] != C64::ZERO || b.data[k] != C64::ZERO;
+                    }
+                    for (j, x) in x.into_iter().enumerate() {
+                        self.follow[j * size + t] = x;
+                    }
                 }
             }
         }
@@ -416,75 +439,84 @@ impl Picture {
         if !self.followed {
             return;
         }
-        let (work, rest) = self.product.split_at_mut(3 * size);
-        let (d, work) = work.split_at_mut(size);
-        let (x, slow) = work.split_at_mut(size);
-        let (ends, rest) = rest.split_at_mut(2 * size);
-        let (whole, factors) = rest.split_at_mut(size);
-        // D, X and D_s at the time u.
-        let at = |u: f64, follow: &[C64], d: &mut [C64], x: &mut [C64], slow: &mut [C64]| {
-            for k in 0..size {
-                d[k] = a.data[k] * u + b.data[k] * (u * u);
-                x[k] = follow[k] + follow[size + k] * u + follow[2 * size + k] * (u * u);
-                slow[k] = if self.fast[k] { C64::ZERO } else { d[k] };
+        let (x, rest) = self.product.split_at_mut(size);
+        let (slow, rest) = rest.split_at_mut(2 * size);
+        let (ends, factors) = rest.split_at_mut(2 * size);
+        let [first_d, second_d, across, below, above] = &mut self.spare;
+        let (fast, changes, inverses) = (&self.fast, &self.changes, &self.inverses);
+        // X at the time u, column by column.
+        let followed = |u: f64, follow: &[C64], x: &mut [C64]| {
+            let (zero, rest) = follow.split_at(size);
+            let (one, two) = rest.split_at(size);
+            for (((x, zero), one), two) in x.iter_mut().zip(zero).zip(one).zip(two) {
+                *x = *zero + *one * u + *two * (u * u);
             }
         };
-        // The second order D X − X D_s at the two ends (X is on the fast pairs alone, D_s on the slow ones), row by row.
-        for (end, u) in [-h, h].into_iter().enumerate() {
-            at(u, &self.follow, d, x, slow);
-            let out = &mut ends[end * size..(end + 1) * size];
-            out.fill(C64::ZERO);
-            for (row, out) in out.chunks_mut(n).enumerate() {
-                for k in 0..n {
-                    let (left, right) = (d[row * n + k], x[row * n + k]);
-                    for ((z, x), slow) in out.iter_mut().zip(&x[k * n..(k + 1) * n]).zip(&slow[k * n..(k + 1) * n]) {
-                        *z += left * *x - right * *slow;
-                    }
+        // The second order D X − X D_s at the two ends (X is on the fast pairs alone, D_s on the slow ones): D laid, X
+        // column by column and laid, −D_s column by column.
+        for (((u, d), slow), out) in [-h, h].into_iter().zip([&mut *first_d, &mut *second_d]).zip(slow.chunks_exact_mut(size)).zip([&mut *below, &mut *above]) {
+            for ((d, a), b) in d.iter_mut().zip(&changes[0]).zip(&changes[1]) {
+                *d = *a * u + *b * (u * u);
+            }
+            followed(u, &self.follow, x);
+            for column in 0..n {
+                for row in 0..n {
+                    let (k, t, place) = (row * n + column, column * n + row, laid(row, column, n));
+                    (across[place], across[place + LANES]) = (x[t].re, x[t].im);
+                    slow[t] = if fast[k] { C64::ZERO } else { -(a.data[k] * u + b.data[k] * (u * u)) };
                 }
             }
+            combine(false, x, n, d, out, n, 0);
+            combine(true, slow, n, across, out, n, 0);
         }
         // Its fast part through the three nodes, followed: X's second order.
         let (first, second) = (0.5 / h, 0.5 / (h * h));
         for row in 0..n {
             for column in 0..n {
                 let k = row * n + column;
-                if self.fast[k] {
-                    let (minus, plus) = (ends[k], ends[size + k]);
-                    for (j, x) in following(self.lambda[row] - self.lambda[column], (plus - minus) * first, (plus + minus) * second).into_iter().enumerate() {
-                        self.follow[j * size + k] += x;
+                if fast[k] {
+                    let place = laid(row, column, n);
+                    let (minus, plus) = (C64::new(below[place], below[place + LANES]), C64::new(above[place], above[place + LANES]));
+                    for (j, x) in following(inverses[k], (plus - minus) * first, (plus + minus) * second).into_iter().enumerate() {
+                        self.follow[j * size + column * n + row] += x;
                     }
                 }
             }
         }
         // D₂ at the two ends: (1 + X) D₂ = D_s + D X − F, and of it the slow pairs.
         let mut spare = [0; crate::model::STATES];
-        for (end, u) in [-h, h].into_iter().enumerate() {
-            at(u, &self.follow, d, x, slow);
-            let out = &mut ends[end * size..(end + 1) * size];
-            for k in 0..size {
-                whole[k] = if self.fast[k] { -out[k] } else { slow[k] };
-            }
-            for (row, whole) in whole.chunks_mut(n).enumerate() {
-                for k in 0..n {
-                    let left = d[row * n + k];
-                    for (z, x) in whole.iter_mut().zip(&x[k * n..(k + 1) * n]) {
-                        *z += left * *x;
-                    }
+        for (end, (((u, d), slow), out)) in [-h, h].into_iter().zip([&*first_d, &*second_d]).zip(slow.chunks_exact(size)).zip([&mut *below, &mut *above]).enumerate() {
+            followed(u, &self.follow, x);
+            // −F on the fast pairs and D_s on the slow ones, then D X onto them.
+            for row in 0..n {
+                for column in 0..n {
+                    let place = laid(row, column, n);
+                    (out[place], out[place + LANES]) = if fast[row * n + column] { (-out[place], -out[place + LANES]) } else { (-slow[column * n + row].re, -slow[column * n + row].im) };
                 }
             }
+            combine(true, x, n, d, out, n, 0);
+            let whole = &mut ends[end * size..(end + 1) * size];
+            unlay(out, n, whole);
             let (f, pivots) = if end == 0 { (&mut self.factors[..], &mut self.pivots[..]) } else { (&mut factors[..], &mut spare[..n]) };
-            f.copy_from_slice(x);
-            for i in 0..n {
-                f[i * n + i] += C64::ONE;
+            for (row, numbers) in f.chunks_exact_mut(n).enumerate() {
+                for (z, column) in numbers.iter_mut().zip(x.chunks_exact(n)) {
+                    *z = column[row];
+                }
+                numbers[row] += C64::ONE;
             }
-            factor(f, pivots, n);
-            solve(f, pivots, n, whole, n);
-            out.copy_from_slice(whole);
+            linalg::factor(f, pivots, n);
+            linalg::solve(f, pivots, n, whole, n);
         }
         for k in 0..size {
-            (a.data[k], b.data[k]) = if self.fast[k] { (C64::ZERO, C64::ZERO) } else { ((ends[size + k] - ends[k]) * first, (ends[size + k] + ends[k]) * second) };
+            (a.data[k], b.data[k]) = if fast[k] { (C64::ZERO, C64::ZERO) } else { ((ends[size + k] - ends[k]) * first, (ends[size + k] + ends[k]) * second) };
         }
-        self.work += (6 * n * size + 2 * (n * size / 3 + n * size) + 16 * size) as f64;
+        // A state at a time (`at`) is R(1 + X(u)) on its coordinates: R(1 + X₀), RX₁ and RX₂.
+        let matrix = self.right.len();
+        self.nodes[..matrix].copy_from_slice(&self.right);
+        for (j, (x, out)) in self.follow.chunks_exact(size).zip(self.nodes.chunks_exact_mut(matrix)).enumerate() {
+            combine(j == 0, x, n, &self.right, out, n, 0);
+        }
+        self.work += (9 * n * size + 2 * (n * size / 3 + n * size) + 16 * size) as f64;
     }
 
     /// The bound of a hop's exponent from the time u over the width w: ∫‖D‖ at the slopes' norms, D(t) = tA + t²B at the
@@ -513,12 +545,17 @@ impl Picture {
                     }
                     let z = C64::I * (self.lambda[a] - self.lambda[b]) * w;
                     let terms = series(z.abs(), bound);
+                    while self.reciprocals.len() < terms + 3 {
+                        self.reciprocals.push(1.0 / self.reciprocals.len() as f64);
+                    }
                     let (mut power, mut parts) = (C64::ONE, [[C64::ZERO; 3]; 2]);
                     for j in 0..terms {
-                        for (p, moment) in parts[j % 2].iter_mut().enumerate() {
-                            *moment += power * (1.0 / (j + p + 1) as f64);
+                        // 1/(j + p + 1) for the moment p.
+                        let inverse = &self.reciprocals[j + 1..j + 4];
+                        for (moment, inverse) in parts[j % 2].iter_mut().zip(inverse) {
+                            *moment += power * *inverse;
                         }
-                        power = power * z * (1.0 / (j + 1) as f64);
+                        power = power * z * inverse[0];
                     }
                     for p in 0..3 {
                         (self.moments[p * size + k], self.moments[p * size + b * n + a]) = (parts[0][p] + parts[1][p], parts[0][p] - parts[1][p]);
@@ -625,21 +662,20 @@ impl Picture {
     pub fn launch(&mut self, x: &[C64]) {
         let (n, h) = (self.n, self.half);
         (self.far, self.bound) = (h, 0.0);
-        let Some(e) = &self.basis else {
+        if !self.through {
             self.stops[..n].copy_from_slice(x);
             self.stops[n..].copy_from_slice(x);
             self.times = [-h; 2];
             return;
-        };
-        let mut path = std::mem::take(&mut self.path);
-        for (a, d) in path[..n].iter_mut().enumerate() {
-            *d = e.inverse.data[a * n..(a + 1) * n].iter().zip(x).map(|(r, x)| *r * *x).sum();
         }
+        let mut path = std::mem::take(&mut self.path);
+        combine(false, x, n, &self.left, &mut self.lanes, 1, 0);
+        unlay(&self.lanes, 1, &mut path[..n]);
         self.work += (n * n) as f64;
         if self.moving {
             if self.followed {
                 // g = (1 + X(−h))⁻¹ d by the factors.
-                solve(&self.factors, &self.pivots, n, &mut path[..n], 1);
+                linalg::solve(&self.factors, &self.pivots, n, &mut path[..n], 1);
                 self.work += (n * n) as f64;
             }
             let (start, rest) = path.split_at_mut(n);
@@ -660,7 +696,7 @@ impl Picture {
     /// uA + u²B continued: one more hop of m and its rate there. Nothing where the state takes strides or nothing moves.
     pub fn extend(&mut self, far: f64) {
         let (n, h) = (self.n, self.half);
-        if self.basis.is_some() && self.moving && far != h {
+        if self.through && self.moving && far != h {
             let mut path = std::mem::take(&mut self.path);
             let (before, beyond) = path.split_at_mut(6 * n);
             let (m, rate) = beyond.split_at_mut(n);
@@ -678,8 +714,8 @@ impl Picture {
     fn at(&mut self, u: f64, x: &mut [C64]) {
         let (n, h) = (self.n, self.half);
         let size = n * n;
-        let e = self.basis.as_ref().expect("a state through the decomposition");
-        let (d, v) = self.coordinates.split_at_mut(n);
+        assert!(self.through, "a state through the decomposition");
+        let d = &mut self.coordinates[..];
         let path = &self.path;
         let node = |k: usize| &path[k * n..(k + 1) * n];
         if !self.moving {
@@ -703,22 +739,19 @@ impl Picture {
         for (z, l) in d.iter_mut().zip(&self.lambda) {
             *z *= (C64::new(0.0, -(u + h)) * *l).exp();
         }
-        let state: &[C64] = if self.followed {
-            let (x0, rest) = self.follow.split_at(size);
-            let (x1, x2) = rest.split_at(size);
-            let square = u * u;
-            for (a, z) in v.iter_mut().enumerate() {
-                let row = a * n..(a + 1) * n;
-                let followed: C64 = x0[row.clone()].iter().zip(&x1[row.clone()]).zip(&x2[row]).zip(d.iter()).map(|(((x0, x1), x2), d)| (*x0 + *x1 * u + *x2 * square) * *d).sum();
-                *z = d[a] + followed;
+        // R(1 + X(u)) d: the matrix at the time from its three, R(1 + X₀) + u RX₁ + u² RX₂; R where nothing is followed.
+        let matrix = if self.followed {
+            let (first, rest) = self.nodes.split_at(self.right.len());
+            let (second, third) = rest.split_at(self.right.len());
+            for (((m, first), second), third) in self.spare[0].iter_mut().zip(first).zip(second).zip(third) {
+                *m = (u * u).mul_add(*third, u.mul_add(*second, *first));
             }
-            v
+            &self.spare[0]
         } else {
-            d
+            &self.right
         };
-        for (a, x) in x.iter_mut().enumerate() {
-            *x = e.vectors.data[a * n..(a + 1) * n].iter().zip(state).map(|(r, d)| *r * *d).sum();
-        }
+        combine(false, d, n, matrix, &mut self.lanes, 1, 0);
+        unlay(&self.lanes, 1, x);
         self.work += ((if self.followed { 2 } else { 1 }) * size + 4 * n) as f64;
     }
 
@@ -727,7 +760,7 @@ impl Picture {
     /// kept for `between`. Returns the rounding of the exponentials behind it relative to the state's norm.
     pub fn advance(&mut self, u: f64, x: &mut [C64]) -> f64 {
         let n = self.n;
-        if self.basis.is_some() {
+        if self.through {
             self.at(u, x);
             return self.bound;
         }
@@ -746,7 +779,7 @@ impl Picture {
     /// stride from the earlier stop without it.
     pub fn between(&mut self, u: f64, x: &mut [C64]) {
         let n = self.n;
-        if self.basis.is_some() {
+        if self.through {
             return self.at(u, x);
         }
         x.copy_from_slice(&self.stops[..n]);
@@ -761,7 +794,7 @@ impl Picture {
     pub fn price(&self, stops: usize) -> f64 {
         let (n, h) = (self.n, self.half.abs());
         let size = (n * n) as f64;
-        if self.basis.is_none() {
+        if !self.through {
             let w = 2.0 * h / stops as f64;
             let moved = self.moved(h - w, w);
             let plan = linalg::Chebyshev::plan(0.5 * self.bounds[0] * w + moved, 0.5 * self.bounds[1] * w + moved);
@@ -781,7 +814,7 @@ impl Picture {
     fn following(&self) -> f64 {
         let (n, h) = (self.n, self.half);
         let size = n * n;
-        (0..n).map(|a| (0..n).map(|b| (self.follow[a * n + b] + self.follow[size + a * n + b] * h + self.follow[2 * size + a * n + b] * (h * h)).abs()).sum::<f64>()).fold(0.0, f64::max)
+        (0..n).map(|a| (0..n).map(|b| (self.follow[b * n + a] + self.follow[size + b * n + a] * h + self.follow[2 * size + b * n + a] * (h * h)).abs()).sum::<f64>()).fold(0.0, f64::max)
     }
 }
 
@@ -900,6 +933,88 @@ mod tests {
         }
         assert!(found[0].0 < 1e-11, "{found:?}");
         assert!(found[1].0 < found[1].1 * found[1].1 && found[2].0 < 0.4 * found[1].0, "{found:?}");
+    }
+
+    /// The picture's products go through the lanes' kernel (`linalg::combine`: sums by fused multiply-adds, Σ_k c_k x_k
+    /// in the order of k). Each is the plain sum it stands for within the rounding of the operations between them
+    /// (`units::rounding`: γ of their count, times the sum of the terms' moduli):
+    /// - the slopes in the eigenbasis, (R⁻¹A)R -- on a generator whose pairs are all slow, so that the slopes stay as
+    ///   the change of basis leaves them --: two sums of n products, the kernel's and the plain ones' (2n operations
+    ///   each of the four) and their difference: within γ(8n + 1) of |R⁻¹||A||R|, entry by entry;
+    /// - a state at a time, R(1 + X(u)) on its coordinates d -- on a generator with fast pairs and slow ones --: the
+    ///   kernel's matrices R(1 + X₀), RX₁, RX₂ (a sum of n products onto R: 2n + 1), their polynomial in u (2) and its
+    ///   sum on d (n products: 2n) against the plain R(d + X(u)d) (X's polynomial: 4; two sums: 2n + 2n + 1) and their
+    ///   difference: within γ(8n + 9) of |R|(1 + |X₀| + |u||X₁| + u²|X₂|)|d|, state by state.
+    #[test]
+    fn the_kernel_s_products_are_their_plain_sums_within_their_rounding() {
+        use crate::units::rounding;
+        let entry = |seed: f64, i: usize, j: usize| C64::new((seed * (1.0 + i as f64) + 0.7 * j as f64).sin(), (seed * (2.0 + j as f64) - 0.3 * i as f64).cos());
+        let hermitian = |n: usize, seed: f64, size: f64| Mat::from_fn(n, n, |i, j| (entry(seed, i, j) + entry(seed, j, i).conj()) * (0.5 * size));
+        // The slopes: light shifts of five states, none a radian from another over the half step.
+        let (n, half) = (5, 0.08);
+        let mut base = hermitian(n, 1.3, 2.0);
+        for i in 0..n {
+            base[(i, i)] += C64::new(0.0, -0.05 * i as f64);
+        }
+        let (a, b) = (hermitian(n, 2.1, 4.0), hermitian(n, 0.4, 20.0));
+        let picture = pictured(&base, &a, &b, half, true);
+        assert!(picture.decomposed() && picture.moving() && !picture.followed);
+        let (r, inverse) = (&picture.basis.vectors, &picture.basis.inverse);
+        let ends = [-half, half].map(|u| Mat::from_fn(n, n, |i, j| base[(i, j)] + a[(i, j)] * u + b[(i, j)] * (u * u)));
+        // The slopes as `prepare` takes them from the generators at the nodes.
+        let (first, second) = (0.5 / half, 0.5 / (half * half));
+        let slopes = [Mat::from_fn(n, n, |i, j| (ends[1][(i, j)] - ends[0][(i, j)]) * first), Mat::from_fn(n, n, |i, j| (ends[1][(i, j)] + ends[0][(i, j)] - base[(i, j)] * 2.0) * second)];
+        let modulus = |m: &Mat| Mat::from_fn(m.rows, m.cols, |i, j| C64::real(m[(i, j)].abs()));
+        let mut worst = 0.0_f64;
+        for (slope, found) in slopes.iter().zip(&picture.ends) {
+            let (plain, size) = (inverse.product(slope).product(r), modulus(inverse).product(&modulus(slope)).product(&modulus(r)));
+            for k in 0..n * n {
+                let (apart, bound) = ((found.data[k] - plain.data[k]).abs(), rounding(8 * n + 1) * size.data[k].re);
+                assert!(apart <= bound, "a slope's entry {k}: {apart:e} against {bound:e}");
+                worst = worst.max(apart / bound);
+            }
+        }
+        eprintln!("the slopes in the eigenbasis: within {worst:.3} of their rounding's bound");
+        // A state: two ground states and two explicit ones 600 rad/µs off, followed.
+        let (n, half) = (4, 0.05);
+        let mut base = hermitian(n, 1.3, 40.0);
+        for (i, shift) in [0.0, 5.0, -600.0, -620.0].into_iter().enumerate() {
+            base[(i, i)] += C64::new(shift, if i >= 2 { -19.0 } else { 0.0 });
+        }
+        let (a, b) = (hermitian(n, 2.1, 2.0), hermitian(n, 0.4, 20.0));
+        let start: Vec<C64> = (0..n).map(|i| C64::cis(0.9 * i as f64) * 0.5).collect();
+        let mut picture = pictured(&base, &a, &b, half, true);
+        assert!(picture.decomposed() && picture.followed && picture.fast.iter().any(|fast| !fast));
+        picture.launch(&start);
+        let mut worst = 0.0_f64;
+        for u in [-half, -0.6 * half, 0.0, 0.37 * half, half] {
+            let mut x = vec![C64::ZERO; n];
+            picture.at(u, &mut x);
+            let (d, r, size) = (&picture.coordinates[..n], &picture.basis.vectors, n * n);
+            // X(u), row by row, and its terms' moduli.
+            let x_at = |row: usize, column: usize| {
+                let t = column * n + row;
+                let terms = [picture.follow[t], picture.follow[size + t] * u, picture.follow[2 * size + t] * (u * u)];
+                (terms[0] + terms[1] + terms[2], terms[0].abs() + terms[1].abs() + terms[2].abs())
+            };
+            for row in 0..n {
+                let (mut plain, mut scale) = (C64::ZERO, 0.0);
+                for k in 0..n {
+                    let (mut followed, mut moduli) = (d[k], d[k].abs());
+                    for column in 0..n {
+                        let (value, modulus) = x_at(k, column);
+                        followed += value * d[column];
+                        moduli += modulus * d[column].abs();
+                    }
+                    plain += r[(row, k)] * followed;
+                    scale += r[(row, k)].abs() * moduli;
+                }
+                let (apart, bound) = ((x[row] - plain).abs(), rounding(8 * n + 9) * scale);
+                assert!(apart <= bound, "the state {row} at {u}: {apart:e} against {bound:e}");
+                worst = worst.max(apart / bound);
+            }
+        }
+        eprintln!("a state at a time: within {worst:.3} of its rounding's bound");
     }
 
     /// Slow pairs are hopped (module documentation): Ĥ₀ of light shifts that turn less than a radian over a half step,

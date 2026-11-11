@@ -174,7 +174,7 @@
 use std::sync::OnceLock;
 
 use crate::decide::COMPLEX;
-use crate::linalg::{self, inner, norm_sqr, C64, Mat};
+use crate::linalg::{self, inner, norm_sqr, C64, Mat, LANES};
 use crate::model::{Cluster, Photon, Point, Quadratic, Scattering, STATES};
 use crate::random::Stream;
 use crate::spectral::Picture;
@@ -581,15 +581,22 @@ fn rules() -> &'static [Rule] {
     RULES.get_or_init(|| (2..=64).map(Rule::new).collect())
 }
 
-/// The rule and the panels over a width of an entire integrand of bandwidth ν to round-off: the fewest nodes, each panel
-/// of width w within its rule's phase, νw ≤ x_m. Its node count is the propagation's states and the kick's sums
-/// (`propagate`, `count::impulse`).
+/// The rule and the panels over a width of an entire integrand of bandwidth ν to round-off: the fewest nodes (the
+/// smaller rule of two that take as many), each panel of width w within its rule's phase, νw ≤ x_m. Its node count is
+/// the propagation's states and the kick's sums (`propagate`, `count::impulse`). The rules are looked at from the
+/// smallest up as far as the first that takes one panel: every larger rule has more nodes than that one.
 fn plan(width: f64, bandwidth: f64) -> (&'static Rule, usize) {
-    rules()
-        .iter()
-        .map(|rule| (rule, ((bandwidth * width / rule.phase).ceil() as usize).max(1)))
-        .min_by_key(|(rule, panels)| rule.nodes.len() * panels)
-        .unwrap()
+    let mut least: Option<(&'static Rule, usize)> = None;
+    for rule in rules() {
+        let panels = ((bandwidth * width / rule.phase).ceil() as usize).max(1);
+        if least.map_or(true, |(best, most)| rule.nodes.len() * panels < best.nodes.len() * most) {
+            least = Some((rule, panels));
+        }
+        if panels == 1 {
+            break;
+        }
+    }
+    least.expect("a rule")
 }
 
 /// The nodes and weights over [a, b] of an entire integrand of bandwidth ν to round-off (`plan`), in their order from a
@@ -701,29 +708,57 @@ impl<'a, M: Middle> Along<'a, M> {
     }
 }
 
-/// The upper triangles (a ≤ b, row by row in n × n) of Hermitian sums, each with its weight times a state's density
-/// more: sums[j] += w_j |x⟩⟨x|/⟨x|x⟩ (`mirror` makes them whole).
-fn accumulate(x: &[C64], weights: &[f64], sums: &mut [C64]) {
+/// The most sums `accumulate` takes at once: a beating path's three nodes'.
+const SUMS: usize = 3;
+
+/// The reals of a row of n states in whole vectors of `LANES` (zero beyond the states).
+const fn row(n: usize) -> usize {
+    n.div_ceil(LANES) * LANES
+}
+
+/// Hermitian sums, each with its weight times a state's density more: sums[j] += w_j |x⟩⟨x|/⟨x|x⟩ on the entries
+/// a ≤ b (`whole` reads those and mirrors them). A sum is held row by row, a row's real parts and then its imaginary
+/// parts, each of `row(n)` reals. Row a takes x_a/⟨x|x⟩ times the state's conjugate from the vector of its own column
+/// on, lane by lane with fused multiply-adds (as the kernels of linalg.rs): two a real for the product, one a sum.
+fn accumulate(x: &[C64], weights: &[f64], sums: &mut [f64]) {
     let (n, scale) = (x.len(), 1.0 / norm_sqr(x));
-    let mut row = [C64::ZERO; STATES];
+    let width = row(n);
+    let (mut re, mut im) = ([0.0; row(STATES)], [0.0; row(STATES)]);
+    for (z, (re, im)) in x.iter().zip(re.iter_mut().zip(&mut im)) {
+        (*re, *im) = (z.re, z.im);
+    }
     for (a, left) in x.iter().enumerate() {
-        let left = *left * scale;
-        for (z, right) in row[a..n].iter_mut().zip(&x[a..]) {
-            *z = left * right.conj();
-        }
-        for (sum, w) in sums.chunks_mut(n * n).zip(weights) {
-            for (sum, z) in sum[a * n + a..(a + 1) * n].iter_mut().zip(&row[a..n]) {
-                *sum += *z * *w;
+        let (left, from) = (*left * scale, a / LANES * LANES);
+        for (at, (re, im)) in re[from..width].chunks_exact(LANES).zip(im[from..width].chunks_exact(LANES)).enumerate() {
+            // x_a x_b*/⟨x|x⟩ on a vector of columns b.
+            let (mut real, mut imaginary) = ([0.0; LANES], [0.0; LANES]);
+            for l in 0..LANES {
+                real[l] = left.re.mul_add(re[l], left.im * im[l]);
+                imaginary[l] = left.im.mul_add(re[l], -(left.re * im[l]));
+            }
+            let place = 2 * a * width + from + at * LANES;
+            for (sum, w) in sums.chunks_exact_mut(2 * n * width).zip(weights) {
+                let (head, tail) = sum[place..place + width + LANES].split_at_mut(width);
+                for l in 0..LANES {
+                    head[l] = w.mul_add(real[l], head[l]);
+                    tail[l] = w.mul_add(imaginary[l], tail[l]);
+                }
             }
         }
     }
 }
 
-/// A Hermitian matrix whole from its upper triangle.
-fn mirror(sum: &mut [C64], n: usize) {
+/// The Hermitian sum j of those `accumulate` holds, whole and row by row: its entries a ≤ b and their mirror.
+fn whole(sums: &[f64], j: usize, n: usize, sum: &mut [C64]) {
+    let width = row(n);
     for a in 0..n {
-        for b in 0..a {
-            sum[a * n + b] = sum[b * n + a].conj();
+        for b in a..n {
+            let at = (2 * (j * n + a)) * width + b;
+            let z = C64::new(sums[at], sums[at + width]);
+            sum[a * n + b] = z;
+            if b > a {
+                sum[b * n + a] = z.conj();
+            }
         }
     }
 }
@@ -756,31 +791,34 @@ fn shear<M: Middle>(along: &Along<M>, rho: &mut [C64], psi: &[C64], tau: f64) ->
 
 /// A trajectory's scratch memory for its steps, made with it and fitted to each step's cluster (`Scratch::fit`): the
 /// generator's picture along the step's path (`spectral::Picture`: the generator at the step's nodes, its decomposition,
-/// its following, the state's path), and one array carved (`Scratch::carve`) into the middle state's density and the nodes' weighted
-/// sums of theirs (`propagate`). Every use writes what it reads: nothing a step left in it is read by another.
+/// its following, the state's path), one array carved (`Scratch::carve`) into the middle state's density and a
+/// Hermitian sum the model takes, and the nodes' weighted sums of the states' densities as `accumulate` holds them. Every use writes what it reads: nothing a step left in it is read by another.
 #[derive(Default)]
 pub struct Scratch {
     picture: Picture,
     rest: Vec<C64>,
+    sums: Vec<f64>,
 }
 
 struct Carved<'a> {
     picture: &'a mut Picture,
     held: &'a mut [C64],
-    sums: &'a mut [C64],
+    sum: &'a mut [C64],
+    sums: &'a mut [f64],
 }
 
 impl Scratch {
     /// The scratch for a cluster of n states.
     fn fit(&mut self, n: usize) {
         self.picture.fit(n);
-        self.rest.resize(4 * n * n, C64::ZERO);
+        self.rest.resize(2 * n * n, C64::ZERO);
+        self.sums.resize(SUMS * 2 * n * row(n), 0.0);
     }
     /// The scratch's parts.
     fn carve(&mut self) -> Carved<'_> {
         let n = self.picture.states();
-        let (held, sums) = self.rest.split_at_mut(n * n);
-        Carved { picture: &mut self.picture, held, sums }
+        let (held, sum) = self.rest.split_at_mut(n * n);
+        Carved { picture: &mut self.picture, held, sum, sums: &mut self.sums }
     }
 }
 
@@ -885,7 +923,10 @@ fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64) {
 fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [f64; 3], hbar_over_mass: f64, tau: f64, watch: Option<Watch>) -> Result<Propagated, Crossed> {
     let along = Along::new(middle, kappa, kappa.map(|k| hbar_over_mass * k), tau);
     let (n, h, still, model) = (along.n, 0.5 * tau, middle.still(), middle.work());
-    let Carved { picture, held, sums } = scratch.carve();
+    let Carved { picture, held, sum, sums } = scratch.carve();
+    // The nodes' sums: one where Ĥ is still, the three nodes' on a beating path.
+    let count = if still { 1 } else { SUMS };
+    let sums = &mut sums[..count * 2 * n * row(n)];
     pictured(&along, picture, tau);
     let (bandwidth, watch) = (picture.bandwidth, watch.filter(|_| tau > 0.0));
     let mut x = [C64::ZERO; STATES];
@@ -901,7 +942,7 @@ fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [
     };
     let (mut ends, mut weights, mut counted) = ([[C64::ZERO; STATES]; 2], [0.0; 3], 0);
     let (mut at, mut norm, mut reached) = (-h, norm_sqr(psi), false);
-    sums.fill(C64::ZERO);
+    sums.fill(0.0);
     // The stops in the path's order: the quadrature's nodes, each with its weight, and the step's middle and end, where
     // the state is kept -- a node within the time's round-off of the middle (an odd rule's) is the middle.
     let (mut nodes, mut kept) = (quadrature(-h, h, bandwidth).peekable(), [0.0, h].into_iter().enumerate().peekable());
@@ -973,8 +1014,7 @@ fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [
     let [middle, mut end] = ends;
     let mut populations = [0.0; STATES];
     let impulse = if still {
-        let sum = &mut sums[..n * n];
-        mirror(sum, n);
+        whole(sums, 0, n, sum);
         for (s, p) in populations[..n].iter_mut().enumerate() {
             *p = sum[s * n + s].re / tau;
         }
@@ -982,8 +1022,7 @@ fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [
     } else {
         let mut out = shear(&along, held, &middle[..n], tau);
         for (j, at) in [-h, 0.0, h].into_iter().enumerate() {
-            let sum = &mut sums[j * n * n..(j + 1) * n * n];
-            mirror(sum, n);
+            whole(sums, j, n, sum);
             for (s, p) in populations[..n].iter_mut().enumerate() {
                 *p += sum[s * n + s].re / tau;
             }
