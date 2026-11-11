@@ -8,68 +8,107 @@
 //! Y = Σ R'†R over the same pairs (the metric 1 + Y's first order): the populations sum to one exactly, Re tr(Yρ) =
 //! Σ_i (RρR†)_ii. An explicit state's population is its own ρ_ee.
 
-use super::{Beat, Component, Level, Lights, Model, Point, Unit, GROUND, STATES};
+use super::assemble::{Held, Plan, Site};
+use super::far::EXCITED;
+use super::tabulate::NearTable;
+use super::{Beat, Cluster, Component, Level, Lights, Model, Point, Unit, GROUND, STATES};
+use crate::field::Amplitude;
 use crate::linalg::{Mat, C64};
 
-/// A component's folded channels on a cluster at a point: the component, its exact frequency and its response R (EXCITED × the
-/// cluster's ground places) -- its bare drives', or those folded at the atom.
+/// A component's bare drives' channels on a cluster at a point: the component and its response R (EXCITED × the cluster's
+/// ground places).
 pub(crate) struct Channels {
     pub(crate) component: Component,
-    pub(crate) nu: Beat,
     pub(crate) response: Mat,
 }
 
 impl Model {
-    /// The bare drives' responses on a cluster at a point, per component that has one (far.rs `Tone::responses`): R = Σ_l a_l R_l
-    /// (co-rotating) or Σ_l a_l* R_l (counter-rotating), every light in `lights`.
-    pub(crate) fn far_channels(&self, cluster: usize, amplitudes: &[crate::field::Amplitude], lights: &Lights) -> Vec<Channels> {
-        let c = &self.clusters[cluster];
-        let mut out = vec![];
-        for (w, (f, tone)) in self.light.frequencies.iter().zip(&self.tones).enumerate() {
-            if !lights.on(w) {
-                continue;
-            }
-            for side in 0..2 {
-                if !tone.bare[side] {
-                    continue;
+    /// The components with bare drives under a light set, in the frequencies' order: (frequency, side), side 0 the
+    /// co-rotating and 1 the counter-rotating.
+    fn bare_components<'a>(&'a self, lights: &'a Lights) -> impl Iterator<Item = (usize, usize)> + 'a {
+        self.tones.iter().enumerate().filter(move |(w, _)| lights.on(*w)).flat_map(|(w, tone)| (0..2).filter(move |&side| tone.bare[side]).map(move |side| (w, side)))
+    }
+
+    /// A component's bare drives' response on a cluster at a point (far.rs `Tone::responses`), added onto `response`
+    /// (row-major, EXCITED × the cluster's ground places): R = Σ_l a_l R_l (co-rotating) or Σ_l a_l* R_l (counter-rotating).
+    fn bare_response(&self, c: &Cluster, amplitudes: &[Amplitude], frequency: usize, side: usize, response: &mut [C64]) {
+        let (f, tone) = (&self.light.frequencies[frequency], &self.tones[frequency]);
+        for (j, &l) in f.beams.iter().enumerate() {
+            let a = if side == 0 { amplitudes[l].value } else { amplitudes[l].value.conj() };
+            for x in 0..EXCITED {
+                for (y, &b) in c.states[..c.ground].iter().enumerate() {
+                    response[x * c.ground + y] += a * tone.responses[side][j][(x, b)];
                 }
-                let mut response = Mat::zeros(super::far::EXCITED, c.ground);
-                for (j, &l) in f.beams.iter().enumerate() {
-                    let a = if side == 0 { amplitudes[l].value } else { amplitudes[l].value.conj() };
-                    for x in 0..super::far::EXCITED {
-                        for (y, &b) in c.states[..c.ground].iter().enumerate() {
-                            response[(x, y)] += a * tone.responses[side][j][(x, b)];
-                        }
-                    }
-                }
-                let component = Component { frequency: w, counter: side == 1 };
-                out.push(Channels { component, nu: self.frequency(component), response });
             }
         }
-        out
     }
 
-    /// The readout (module documentation): the 32 populations of a cluster's state ψ at a point.
-    pub fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
-        self.readout_with(cluster, at, psi, None)
-    }
-
-    /// The readout with the forms at the atom from their tables where they serve (tabulate.rs `Model::near_tabulated`).
-    pub(crate) fn readout_with(&self, cluster: usize, at: &Point, psi: &[C64], tables: Option<&super::tabulate::Tables>) -> [f64; STATES] {
+    /// The bare drives' responses on a cluster at a point, per component that has one (`bare_response`), every light in
+    /// `lights`.
+    pub(crate) fn far_channels(&self, cluster: usize, amplitudes: &[Amplitude], lights: &Lights) -> Vec<Channels> {
         let c = &self.clusters[cluster];
+        self.bare_components(lights)
+            .map(|(frequency, side)| {
+                let mut response = Mat::zeros(EXCITED, c.ground);
+                self.bare_response(c, amplitudes, frequency, side, &mut response.data);
+                Channels { component: Component { frequency, counter: side == 1 }, response }
+            })
+            .collect()
+    }
+
+    /// The carriers whose drives folded at the atom make a channel on a plan's cluster: the lit ones, where the plan
+    /// holds near forms.
+    fn folded_carriers<'a>(&'a self, plan: &'a Plan) -> impl Iterator<Item = usize> + 'a {
+        (0..self.carriers.len()).filter(move |&d| plan.near.len() > 0 && plan.lights.on(self.carriers[d].frequency))
+    }
+
+    /// The readout (module documentation): the 32 populations of a cluster's state ψ at a point, every light on, the
+    /// forms at the atom from the exact elimination there.
+    pub fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
+        self.readout_of(&self.plan(cluster, &self.running()), None, at, psi)
+    }
+
+    /// The readout of a state of a plan's cluster under the plan's lights, the running ones, the forms at the atom from
+    /// their table where one is given (tabulate.rs `Model::near_responses`). Its channels are the bare drives' per
+    /// component (`bare_components`) and then the carriers' (`folded_carriers`); their responses are a thread's spare's
+    /// (assemble.rs `Held`) -- the beams, a table's responses, the carriers' field components and the channels, each
+    /// written whole here before it is read --, so a readout from a table asks the heap for nothing.
+    pub(crate) fn readout_of(&self, plan: &Plan, table: Option<&NearTable>, at: &Point, psi: &[C64]) -> [f64; STATES] {
+        let c = &self.clusters[plan.cluster];
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
         let mut out = [0.0; STATES];
         for (z, &s) in psi.iter().zip(&c.states) {
             out[s] = z.norm_sqr() / norm;
         }
-        let amplitudes = self.light.amplitudes(at.r);
-        let lights = self.running();
-        let mut channels = self.far_channels(cluster, &amplitudes, &lights);
-        channels.extend(self.near_channels(cluster, at, &amplitudes, &lights, tables));
+        let mut site = Held::<Site>::take();
+        self.light.amplitudes_into(at.r, 0, |_| true, &mut site.beams);
+        // The responses of the drives folded at the atom: their table's at the point, or the exact elimination's.
+        let folded = self.folded_carriers(plan).count();
+        let exact = match table {
+            Some(table) if folded > 0 => {
+                self.near_responses(table, &mut site);
+                None
+            }
+            _ => (folded > 0).then(|| self.near_exact(plan, &site.beams, 0, &self.coherent_dressing())),
+        };
+        let Site { beams: amplitudes, responses, weights, channels, .. } = &mut *site;
+        let (far, size) = (self.bare_components(&plan.lights).count(), EXCITED * c.ground);
+        channels.clear();
+        channels.resize((far + folded) * size, C64::ZERO);
+        for (p, (frequency, side)) in self.bare_components(&plan.lights).enumerate() {
+            self.bare_response(c, amplitudes, frequency, side, &mut channels[p * size..(p + 1) * size]);
+        }
+        if folded > 0 {
+            let start = plan.near.responding().start;
+            let near = |i: usize| exact.as_ref().map_or_else(|| C64::new(responses[2 * i], responses[2 * i + 1]), |values| values.data[start + i]);
+            let place = |carrier: usize| far + self.folded_carriers(plan).take_while(|&d| d < carrier).count();
+            self.responses_each(plan, near, amplitudes, at.kappa, weights, |carrier, e, y, z| channels[place(carrier) * size + e * c.ground + y] += z);
+        }
         // The co-resonant channels and places (p, b1, q, b2), θ_b1 + ν_p = θ_b2 + ν_q: the cluster's own under the running
         // lights, exact, found once.
-        let resonant = self.resonances[cluster].get_or_init(|| {
-            let sums: Vec<Vec<Beat>> = channels.iter().map(|p| c.frames[..c.ground].iter().map(|theta| theta.plus(1, &p.nu)).collect()).collect();
+        let resonant = self.resonances[plan.cluster].get_or_init(|| {
+            let bare = self.bare_components(&plan.lights).map(|(frequency, side)| self.frequency(Component { frequency, counter: side == 1 }));
+            let sums: Vec<Vec<Beat>> = bare.chain(self.folded_carriers(plan).map(|d| self.carriers[d].beat.clone())).map(|nu| c.frames[..c.ground].iter().map(|theta| theta.plus(1, &nu)).collect()).collect();
             let mut pairs = vec![];
             for (p, left) in sums.iter().enumerate() {
                 for (q, right) in sums.iter().enumerate() {
@@ -82,10 +121,10 @@ impl Model {
         });
         for &[p, b1, q, b2] in resonant {
             let r = psi[b2] * psi[b1].conj() / norm;
-            let (left, right) = (&channels[p].response, &channels[q].response);
+            let (left, right) = (&channels[p * size..(p + 1) * size], &channels[q * size..(q + 1) * size]);
             let mut y = C64::ZERO;
-            for i in 0..super::far::EXCITED {
-                let z = left[(i, b1)].conj() * right[(i, b2)];
+            for i in 0..EXCITED {
+                let z = left[i * c.ground + b1].conj() * right[i * c.ground + b2];
                 y += z;
                 out[GROUND + i] += (z * r).re;
             }

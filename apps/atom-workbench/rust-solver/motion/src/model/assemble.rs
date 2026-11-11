@@ -1373,6 +1373,16 @@ pub(crate) struct Site {
     pub(crate) fields: Fields,
     pub(crate) member: Vec<f64>,
     pub(crate) class: Vec<f64>,
+    /// What an explicit state's part of the photons reads (eliminate.rs `Model::explicit_moment`): the carriers'
+    /// dressings and the levels' energies at the point to first order (eliminate.rs `Model::far_energies`).
+    pub(crate) dressing: Vec<bool>,
+    pub(crate) energies: Vec<Vec<f64>>,
+    /// What the readout reads (readout.rs `Model::readout_of`): a table's responses at the point (tabulate.rs
+    /// `Model::near_responses`), the carriers' field components (eliminate.rs `Model::responses_each`), and its channels'
+    /// responses, one after another, each row-major on the excited states and the cluster's ground places.
+    pub(crate) responses: Vec<f64>,
+    pub(crate) weights: Vec<(C64, C64)>,
+    pub(crate) channels: Vec<C64>,
     /// The fourth order's (module documentation, # The fourth order): H⁽⁴⁾ less (i/2) the decay's change on the cluster's
     /// places, then H⁽⁴⁾'s gradient along the three lab axes; and its products' scratch.
     pub(crate) quartic: Vec<C64>,
