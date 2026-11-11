@@ -51,7 +51,7 @@ use super::{jet, Component, Envelope, Gate, Level, Lights, Lit, Model, Quadratic
 use crate::linalg::C64;
 use crate::field::Amplitude;
 use crate::linalg::{dot3, symmetric3_eigen};
-use crate::request::GROUND;
+use crate::request::{GROUND, STATES};
 use crate::units::rounding;
 use std::sync::Arc;
 
@@ -77,15 +77,16 @@ fn contract(m: &crate::linalg::Mat, p: &[f64; GROUND]) -> crate::linalg::C64 {
 }
 
 impl Model {
-    /// The far part of Σ_b p_b [h(r)]_bb of one frequency's light, with its gradient and Hessian: Re Σ_l'l c_l'l(r) [P_l'l]_p
+    /// The far part of one frequency's light in a form `of` of its static forms -- Σ_b p_b [h(r)]_bb of the ground
+    /// populations p (`contract`), or one state's [h(r)]_ss --, with its gradient and Hessian: Re Σ_l'l c_l'l(r) of(P_l'l)
     /// over its beam pairs (far.rs), c_l'l = a_l'* a_l.
-    pub(crate) fn far_potential(&self, frequency: usize, amplitudes: &[Amplitude], p: &[f64; GROUND], lights: &Lights) -> Expansion {
+    pub(crate) fn far_potential(&self, frequency: usize, amplitudes: &[Amplitude], of: &dyn Fn(&crate::linalg::Mat) -> C64, lights: &Lights) -> Expansion {
         let (f, tone) = (&self.light.frequencies[frequency], &self.tones[frequency]);
         let n = f.beams.len();
         let mut out = Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
         for j in 0..n {
             for i in 0..n {
-                let m = contract(&tone.pairs[j * n + i], p);
+                let m = of(&tone.pairs[j * n + i]);
                 if m == crate::linalg::C64::ZERO || !lights.pair(frequency, j, i) {
                     continue;
                 }
@@ -182,7 +183,7 @@ impl Model {
         let lit = |beam: usize| self.light.frequencies.iter().enumerate().any(|(w, f)| lights.on(w) && f.beams.contains(&beam));
         self.light.amplitudes_into(r, order, lit, &mut spare.beams);
         let amplitudes = &spare.beams;
-        let mut out = self.far_potential(trap, amplitudes, p, lights);
+        let mut out = self.far_potential(trap, amplitudes, &|m| contract(m, p), lights);
         let near = self.near_potential(amplitudes, p, lights, order, tables);
         let q = &mut out.quadratic;
         q.value += near.quadratic.value;
@@ -300,6 +301,27 @@ impl Model {
     /// V_L(r; p)'s second-order expansion at r, analytic.
     pub fn expansion(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights) -> Quadratic {
         self.expand(r, p, lights, 2, None).quadratic
+    }
+
+    /// How much stiffer than the reference's the trap light's well of each state of the model basis is at r (rad/µs/µm²;
+    /// reach.rs, # The kick's curvature): the largest eigenvalue of ∂∂(V_s − V_ref) there, V_ref = V_prep(·; p) the
+    /// prepared potential of the reference's populations p. V_s is a ground state's own prepared potential V_prep(·; s);
+    /// an excited state's is the trap light's far form on it -- the well of a state the dynamics hold, not of the
+    /// ground states it decays to (`Model::ground_populations`). Negative where the state's well is the softer one
+    /// along every direction.
+    pub(crate) fn stiffer(&self, r: [f64; 3], p: &[f64; GROUND]) -> [f64; STATES] {
+        let prepared = self.prepared();
+        let reference = self.expansion(r, p, &prepared).hessian;
+        let amplitudes = self.light.amplitudes(r);
+        std::array::from_fn(|s| {
+            let own = if s < GROUND {
+                self.expansion(r, &std::array::from_fn(|b| if b == s { 1.0 } else { 0.0 }), &prepared).hessian
+            } else {
+                self.far_potential(self.light.trap, &amplitudes, &|m| m[(s, s)], &prepared).quadratic.hessian
+            };
+            let more: [[f64; 3]; 3] = std::array::from_fn(|a| std::array::from_fn(|b| own[a][b] - reference[a][b]));
+            symmetric3_eigen(&more).0.into_iter().fold(f64::NEG_INFINITY, f64::max)
+        })
     }
 
     /// The light's shortest length 1/max_l k_l over the lit beams (µm): the scale on which the potential varies (a standing

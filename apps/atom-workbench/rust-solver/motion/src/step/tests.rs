@@ -1506,6 +1506,224 @@ fn a_step_with_light_and_its_reverse_miss_beyond_the_scheme_s_order() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The step's linear map about a minimum (solve.rs `admissible`).
+
+/// The step's trace about a minimum along an axis of the reference's curvature λ, the atom's own well stiffer by μ
+/// there (rad/µs/µm²): 2c₀(x) − (ħ/m)μτ² c₁(x) at x = (ħ/m)λτ² (the Stumpff functions) -- 2 cos ωτ − ω_k²τ² sinc ωτ
+/// where the reference traps. The reference's flow turns (r, κω⁻¹) by ωτ/2 twice; between them the kick takes
+/// −τμ r_h from κ, at the fixed r_h (step.rs, # The kick: a state that does not change is kicked by its shear there).
+fn linear_trace(hm: f64, reference: f64, own: f64, tau: f64) -> f64 {
+    let (c0, c1, _) = step::stumpff(hm * reference * tau * tau);
+    2.0 * c0 - hm * own * tau * tau * c1
+}
+
+/// The first edge of the step's stability in ωτ ∈ (0, π) for a kick of the curvature ω_k² = `ratio` ω² > 0: the root
+/// of (θ/2) tan(θ/2) = ω²/ω_k² (`linear_trace` = −2: 2 cos²(θ/2) = ratio (θ/2) · 2 sin(θ/2) cos(θ/2)), by bisection.
+fn edge(ratio: f64) -> f64 {
+    let (mut lo, mut hi) = (0.0, std::f64::consts::PI);
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if 0.5 * mid * (0.5 * mid).tan() < 1.0 / ratio { lo = mid } else { hi = mid }
+    }
+    0.5 * (lo + hi)
+}
+
+/// The trace of the linear area-preserving map a run of positions along one axis was made by: x_{n+1} + x_{n−1} =
+/// (tr M) x_n (Cayley–Hamilton with det M = 1), by least squares over the run.
+fn run_trace(x: &[f64]) -> f64 {
+    let (mut up, mut down) = (0.0, 0.0);
+    for w in x.windows(3) {
+        up += w[1] * (w[2] + w[0]);
+        down += w[1] * w[1];
+    }
+    up / down
+}
+
+/// The step about a minimum is the map the trap's bound on the step is derived from (solve.rs `admissible`): with the
+/// reference's rate ω along an axis and a kick of the curvature ω_k² = (ħ/m)∂²(V − V_ref) there, tr M = 2 cos ωτ −
+/// ω_k²τ² sin(ωτ)/(ωτ), and the motion is bounded where |tr M| < 2. Two states in harmonic wells of their own atop a
+/// harmonic reference (`Wells`: the step is linear in (r, κ) whatever τ), one state alone and a superposition of both
+/// (the kick is the wells' mean by the populations):
+/// - the trace of the crate's one-step matrix, read off two steps from (1, 0) and (0, 1), is `linear_trace` to
+///   rounding on a trapping, a flat and a hyperbolic axis of the reference, for wells stiffer and softer than it, and
+///   its determinant is one: the kick is taken at the fixed r_h -- the path softens nothing;
+/// - the crate's own edge, the step at which that trace reaches −2, is at ωτ = θ*(ω_k²/ω²) (`edge`): 0.910 π, 0.548 π,
+///   0.468 π and 0.306 π for wells stiffer than the reference's by a tenth, as stiff again, by 1.5 (the stiffness
+///   ratio 2.5) and four times -- below π, the edge of a kick without curvature;
+/// - below the edge a run stays on its invariant ellipse, |x| ≤ |x₀| √(−4bc/(4 − tr²)) of the matrix [[a, b], [c, d]];
+///   above it it grows by e^μ a step, cosh μ = |tr M|/2;
+/// - a softer well (ω_k² < 0) has no edge below π, and is unstable from π on; on a flat reference the edge is the
+///   kick's own, ω_kτ = 2.
+#[test]
+fn a_step_about_a_minimum_is_stable_below_the_edge_of_its_reference_s_turn_and_its_kick_s_curvature() {
+    let hm = RB;
+    let at = |model: &Wells, psi: [C64; 2], axis: usize, x: f64, kappa: f64| {
+        let mut t = Trajectory::new(model, 0, std::array::from_fn(|a| if a == axis { x } else { 0.0 }), std::array::from_fn(|a| if a == axis { kappa } else { 0.0 }), 7, 0);
+        (t.psi, t.threshold) = (psi.into_iter().collect(), f64::MIN_POSITIVE);
+        t
+    };
+    // The one-step matrix [[a, b], [c, d]] on (x, κ) along an axis.
+    let matrix = |model: &Wells, psi: [C64; 2], axis: usize, tau: f64| -> [f64; 4] {
+        let column = |x: f64, kappa: f64| {
+            let end = step_of(model, &at(model, psi, axis, x, kappa), tau, &mut step::Scratch::default()).unwrap().end;
+            (end.r[axis], end.kappa[axis])
+        };
+        let ((a, c), (b, d)) = (column(1.0, 0.0), column(0.0, 1.0));
+        [a, b, c, d]
+    };
+    let alone = [C64::ONE, C64::ZERO];
+    let both = [C64::real(0.6), C64::cis(0.3) * 0.8];
+    // The reference along its three axes: trapping (ω = 0.468 rad/µs), flat, hyperbolic.
+    let reference = [300.0, 0.0, -80.0];
+    let mut worst = 0.0_f64;
+    for own in [[[30.0, 50.0, 20.0], [0.0; 3]], [[450.0, 200.0, 100.0], [-90.0, 40.0, 60.0]], [[-150.0, 500.0, 300.0], [1200.0, 0.0, -10.0]]] {
+        let model = Wells::new(hm, reference, own);
+        for (psi, p) in [(alone, [1.0, 0.0]), (both, [0.36, 0.64])] {
+            for axis in 0..3 {
+                let mean = p[0] * own[0][axis] + p[1] * own[1][axis];
+                for tau in [0.3, 1.5, 4.0, 6.5, 9.0] {
+                    let [a, b, c, d] = matrix(&model, psi, axis, tau);
+                    let expected = linear_trace(hm, reference[axis], mean, tau);
+                    let scale = a.abs() + d.abs() + 2.0;
+                    worst = worst.max((a + d - expected).abs() / scale).max((a * d - b * c - 1.0).abs() / (a * d).abs().max(1.0));
+                    assert!((a + d - expected).abs() < 1e-12 * scale && (a * d - b * c - 1.0).abs() < 1e-11 * (a * d).abs().max(1.0), "wells {own:?}, p {p:?}, axis {axis}, τ {tau}: trace {} against {expected}, determinant {}", a + d, a * d - b * c);
+                }
+            }
+        }
+    }
+    eprintln!("the one-step matrix's trace against 2c₀ − (ħ/m)μτ²c₁, and its determinant against 1: within {worst:.1e}");
+
+    // The crate's edge on the trapping axis, by bisection of its own trace, and the runs on its two sides.
+    let omega = (hm * reference[0]).sqrt();
+    for ratio in [0.1, 1.0, 1.5, 4.0] {
+        let model = Wells::new(hm, reference, [[ratio * reference[0], 0.0, 0.0], [0.0; 3]]);
+        let trace = |tau: f64| {
+            let [a, _, _, d] = matrix(&model, alone, 0, tau);
+            a + d
+        };
+        let (mut lo, mut hi) = (0.0, std::f64::consts::PI / omega * (1.0 - 1e-6));
+        assert!(trace(hi) < -2.0, "ω_k² = {ratio} ω²: the trace just below ωτ = π is {}", trace(hi));
+        for _ in 0..60 {
+            let mid = 0.5 * (lo + hi);
+            if trace(mid) > -2.0 { lo = mid } else { hi = mid }
+        }
+        let (measured, predicted) = (omega * 0.5 * (lo + hi), edge(ratio));
+        // A run of small steps from a displacement, on either side of the edge.
+        let run = |from: f64, tau: f64, steps: usize| -> Vec<f64> {
+            let mut t = at(&model, alone, 0, from, 0.0);
+            let mut x = vec![t.r[0]];
+            for _ in 0..steps {
+                t = step_of(&model, &t, tau, &mut step::Scratch::default()).unwrap().end;
+                x.push(t.r[0]);
+            }
+            x
+        };
+        let (below, above) = (0.98 * predicted / omega, (predicted + 0.3 * (std::f64::consts::PI - predicted)) / omega);
+        let [a, b, c, d] = matrix(&model, alone, 0, below);
+        let ellipse = (-4.0 * b * c / (4.0 - (a + d) * (a + d))).sqrt();
+        let held = run(1e-3, below, 2000).iter().fold(0.0_f64, |m, x| m.max(x.abs())) / 1e-3;
+        // As many steps as grow the run by e²⁰: what of it still shrinks is e⁻⁴⁰ of it by then. From a displacement
+        // that stays small: the wells' two states turn against each other at their potentials' difference there.
+        let mu = (0.5 * trace(above).abs()).acosh();
+        let steps = (20.0 / mu).ceil() as usize;
+        let grown = run(1e-12, above, steps);
+        let rate = (grown[steps] / grown[steps - 1]).abs().ln();
+        eprintln!(
+            "ω_k² = {ratio} ω²: the edge at ωτ = {:.6} π (predicted {:.6} π); at 0.98 of it 2000 steps stay within {held:.3} of the start (the ellipse {ellipse:.3}); {:.3} π into the band a step grows by e^{rate:.6} (predicted e^{mu:.6})",
+            measured / std::f64::consts::PI,
+            predicted / std::f64::consts::PI,
+            omega * above / std::f64::consts::PI
+        );
+        assert!((measured - predicted).abs() < 1e-9, "ω_k² = {ratio} ω²: the crate's edge at ωτ = {measured}, the map's at {predicted}");
+        assert!(held <= ellipse * (1.0 + 1e-6), "ω_k² = {ratio} ω²: below the edge the run reaches {held} of its start, its ellipse {ellipse}");
+        assert!((rate - mu).abs() < 1e-6 * mu, "ω_k² = {ratio} ω²: above the edge a step grows by e^{rate}, the map's e^{mu}");
+    }
+    // A softer well: bounded up to π, growing beyond it.
+    let model = Wells::new(hm, reference, [[-0.5 * reference[0], 0.0, 0.0], [0.0; 3]]);
+    let trace = |tau: f64| {
+        let [a, _, _, d] = matrix(&model, alone, 0, tau);
+        a + d
+    };
+    for share in [0.2, 0.5, 0.8, 0.95, 0.999] {
+        assert!(trace(share * std::f64::consts::PI / omega).abs() < 2.0, "a softer well at ωτ = {share} π: trace {}", trace(share * std::f64::consts::PI / omega));
+    }
+    assert!(trace(1.001 * std::f64::consts::PI / omega) < -2.0, "a softer well beyond π: trace {}", trace(1.001 * std::f64::consts::PI / omega));
+    // A flat reference: the kick's own edge, ω_kτ = 2.
+    let stiff = (hm * 400.0_f64).sqrt();
+    let model = Wells::new(hm, reference, [[0.0, 400.0, 0.0], [0.0; 3]]);
+    let flat = |tau: f64| {
+        let [a, _, _, d] = matrix(&model, alone, 1, tau);
+        a + d
+    };
+    assert!(flat(1.999 / stiff) > -2.0 && flat(2.001 / stiff) < -2.0, "a flat reference: traces {} and {} about ω_kτ = 2", flat(1.999 / stiff), flat(2.001 / stiff));
+}
+
+/// The kick's curvature is the curvature of the potential the internal state follows, whatever makes it: a two-level
+/// atom in a far-detuned standing wave (Γ = 0, |Δ|τ ≈ 10³: its dressed ground state follows the light within a step)
+/// atop a soft harmonic trap that holds both states alike, started beside the bottom of a light well in its dressed
+/// state. The well's curvature is the dressed level's, E″ = 2k²Ω²/√(Δ² + 4|c|²) at its bottom:
+/// - red of the line the wells are at the antinodes, where the coupling's slope vanishes: the level's curvature is
+///   the generator's own second derivative on the dressed state;
+/// - blue of it they are at the nodes, where the coupling vanishes and with it that second derivative on the state
+///   (the ground state alone): the whole curvature is the state's answer to the coupling's slope, 2|c′|²/Δ.
+/// In both the run's trace (`run_trace`) is `linear_trace` at ω_k² = (ħ/m)E″, and its edge is the map's (`edge`),
+/// within the following's own first correction: the admixture answers the motion, of the rate √(ω² + ω_k²), across
+/// the detuning -- that rate over |Δ| of the kick (measured: 10⁻³ of the trace at the node, 10⁻⁶ and less at the
+/// antinode, where the state does not change to the first order in the displacement). A state held as it is at the
+/// node would have no kick and no edge below π (printed beside). The step's quadrature along the path softens
+/// nothing of it: the path is straight and centred on r_h, so what is linear in the displacement along it integrates
+/// to nothing.
+#[test]
+fn a_following_state_s_kick_has_the_curvature_of_the_level_it_follows() {
+    let (hm, rabi, pi) = (RB, 30.0, std::f64::consts::PI);
+    for (name, detuning, phase) in [("red, at an antinode", -300.0_f64, 0.0), ("blue, at a node", 300.0, pi)] {
+        // c = (Ω/2)(e^{ikz} + e^{i(φ − kz)}): Ω cos kz, or i Ω sin kz with φ = π; the well's bottom at z = 0 either way.
+        let beams = vec![Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi, phase }];
+        let bottom = if phase == 0.0 { rabi } else { 0.0 };
+        let level = 2.0 * K * K * rabi * rabi / (detuning * detuning + 4.0 * bottom * bottom).sqrt();
+        for ratio in [1.0, 4.0] {
+            let reference = level / ratio;
+            let trap = Trap::Quadratic { hessian: std::array::from_fn(|a| std::array::from_fn(|b| if a == b { reference } else { 0.0 })), gradient: [0.0; 3] };
+            let model = Atom::new(hm, trap, beams.clone(), detuning, 0.0);
+            let omega = (hm * reference).sqrt();
+            // The following's first correction: the level's admixture turns at the motion's rate against the detuning.
+            let lag = (hm * (reference + level)).sqrt() / detuning.abs();
+            let run = |tau: f64, steps: usize| -> Vec<f64> {
+                let mut t = held(&model, [0.0, 0.0, 1e-7], [0.0; 3]);
+                // The dressed state the ground state goes over into: of [[0, c*], [c, −Δ]].
+                let (c, d) = (model.coupling(0, t.r) + model.coupling(1, t.r), -detuning);
+                let lambda = 0.5 * (d - d.signum() * (d * d + 4.0 * c.norm_sqr()).sqrt());
+                t.psi = [C64::ONE, c / (lambda - d)].into_iter().collect();
+                let mut z = vec![t.r[2]];
+                for _ in 0..steps {
+                    t = step_of(&model, &t, tau, &mut step::Scratch::default()).unwrap().end;
+                    z.push(t.r[2]);
+                }
+                z
+            };
+            let predicted = edge(ratio);
+            let mut worst = 0.0_f64;
+            for share in [0.3, 0.7, 0.95, 1.05, 1.3] {
+                let tau = share * predicted / omega;
+                let (measured, expected) = (run_trace(&run(tau, 6)), linear_trace(hm, reference, level, tau));
+                worst = worst.max((measured - expected).abs());
+                eprintln!("{name}, ω_k² = {ratio} ω², τ = {share} of the edge's ({tau:.3} µs, |Δ|τ = {:.0}): trace {measured:.5} against {expected:.5}; a held state's {:.5}", detuning.abs() * tau, linear_trace(hm, reference, if phase == 0.0 { level } else { 0.0 }, tau));
+                assert!((measured - expected).abs() < hm * level * tau * tau * lag, "{name}, ω_k² = {ratio} ω², τ {tau}: trace {measured} against {expected}");
+            }
+            // The crate's edge: where the run's trace reaches −2.
+            let (mut lo, mut hi) = (0.5 * predicted / omega, (predicted + 0.5 * (pi - predicted)) / omega);
+            for _ in 0..30 {
+                let mid = 0.5 * (lo + hi);
+                if run_trace(&run(mid, 6)) > -2.0 { lo = mid } else { hi = mid }
+            }
+            let measured = omega * 0.5 * (lo + hi);
+            eprintln!("{name}, ω_k² = {ratio} ω²: the edge at ωτ = {:.4} π (predicted {:.4} π); the traces within {worst:.1e}", measured / pi, predicted / pi);
+            assert!((measured / predicted - 1.0).abs() < lag, "{name}, ω_k² = {ratio} ω²: the edge at ωτ = {measured}, the map's at {predicted}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The model's far light (`model::Run`) on the R1 scenes: a conservative trap.
 
 /// A scene's request through the one parser: a reference scene by name (refs/scenes, the app's native request), or any

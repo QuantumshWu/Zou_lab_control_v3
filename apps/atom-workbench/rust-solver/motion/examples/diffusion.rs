@@ -20,7 +20,7 @@ use atom_motion::field::Light;
 use atom_motion::linalg::{C64, Mat};
 use atom_motion::model::{Model, Point, Run, Unit, GROUND};
 use atom_motion::request::Request;
-use atom_motion::step::{Attempt, Brownian, Dynamics, Middle, Midway, Scratch, Trajectory};
+use atom_motion::step::{stumpff, Brownian, Dynamics, Middle, Midway, Scratch, Step, Trajectory};
 
 /// The distance (µm) over which a jump operator's gradient is read as a central difference: the operators change over
 /// 1/k ≈ 0.12 µm, so the difference errs by (kε)²/6 ≈ 10⁻⁷ of the gradient.
@@ -242,13 +242,52 @@ impl Course {
 /// The width of a sample (`held`).
 const WIDTH: usize = 11;
 
-/// One trajectory of the engine held on a course: the model's steps and jumps as the solve takes them (`adapt::advance`'s
-/// loop, on a Brownian path that does not move), the position and the momentum put back on the course before every step
-/// and every jump. What the engine gives the momentum along z is accumulated apart, from the time `burn` on, and
-/// sampled every `every` µs: with the weights w = 1, w₁, w₂ (`Course::weights`, at a step's middle) in turn
-/// [Σ w Δκ of the steps (the Ehrenfest impulse and the scattered light's force), Σ w Δκ of the jumps (the emitted recoil
-/// and the absorbed mean), ∫ w² 2D_zz dt of the Brownian part], then the jumps' count and the population outside the
-/// start's hyperfine level. Beside them the normalized internal state (its cluster and amplitudes) at every sample.
+/// One step of the engine from a trajectory's state, of the length `length` at the most, on the part of a Brownian
+/// path `brownian` gives for a length: `adapt::advance`'s own, its jumps made inside it (step.rs, # Jumps) and its
+/// length halved where the scheme refuses it. The step, the path's part it took, and its length.
+fn stepped(run: &Run, t: &Trajectory, mut length: f64, brownian: &mut dyn FnMut(f64) -> Brownian, scratch: &mut Scratch) -> (Step, Brownian, f64) {
+    loop {
+        let part = brownian(length);
+        match Midway::new(run, t, length).and_then(|through| through.attempt(t, &part, &[], scratch)) {
+            Ok(step) => return (step, part, length),
+            Err(e) => {
+                length *= 0.5;
+                assert!(t.time + length > t.time, "refused at every length: {e:?}");
+            }
+        }
+    }
+}
+
+/// What a step gave the momentum at its middle (step.rs: the reference's half flow, the kick, the half flow): the
+/// point (r_h, κ_h) its first half flow reaches; the whole kick there, the momentum its second half flow starts from
+/// less κ_h; and the jumps' part of it -- a jump's kick δκ, made at the time u from the middle, enters the flow as
+/// δκ cos ωu along each principal axis (step.rs, # Jumps).
+fn kicks(step: &Step) -> ([f64; 3], [f64; 3], [f64; 3], [f64; 3]) {
+    let g = &step.segment;
+    let (start, tau) = g.step;
+    let (r_h, k_h) = g.flow.advance(g.from, 0.5 * tau);
+    let after = g.flow.advance((step.end.r, step.end.kappa), -0.5 * tau).1;
+    let mut jumps = [0.0; 3];
+    for (kick, u) in step.made.iter().filter_map(|made| made.kick.map(|kick| (kick, (made.state.time - start) - 0.5 * tau))) {
+        for (e, lambda) in g.flow.axes.iter().zip(&g.flow.curvatures) {
+            let along = (0..3).map(|a| e[a] * kick[a]).sum::<f64>() * stumpff(g.flow.hbar_over_mass * lambda * u * u).0;
+            for a in 0..3 {
+                jumps[a] += along * e[a];
+            }
+        }
+    }
+    (r_h, k_h, std::array::from_fn(|a| after[a] - k_h[a]), jumps)
+}
+
+/// One trajectory of the engine held on a course: the model's steps as the solve takes them (`stepped`, on a Brownian
+/// path that does not move), their jumps made inside them on the step's own path, the position and the momentum put
+/// back on the course before every step. What the engine gives the momentum along z is accumulated apart, from the
+/// time `burn` on, and sampled every `every` µs: with the weights w = 1, w₁, w₂ (`Course::weights`, at a step's middle;
+/// a jump's at its own time) in turn [Σ w Δκ of the steps (the Ehrenfest impulse and the scattered light's force: the
+/// kick at the step's middle less its jumps' part, `kicks`), Σ w Δκ of the jumps (the emitted recoil and the absorbed
+/// mean, each jump's own kick), ∫ w² 2D_zz dt of the Brownian part (the model's 2D of the step's start state at the
+/// step's middle point)], then the jumps' count and the population outside the start's hyperfine level. Beside them
+/// the normalized internal state (its cluster and amplitudes) at every sample.
 fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64, every: f64, seed: u64, index: u64) -> (Vec<[f64; WIDTH]>, Vec<(usize, Vec<C64>)>) {
     let hm = run.hbar_over_mass();
     let place = |course: &Course, t: &mut Trajectory| {
@@ -266,75 +305,32 @@ fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64,
     let (mut sums, mut out, mut states) = ([0.0; WIDTH], vec![], vec![]);
     let mut next = burn;
     let end = burn + span;
-    // The share of a step's length within which a threshold's root is the step's end (adapt.rs takes its own).
-    let timing = f64::EPSILON.sqrt();
     while t.time < end {
         let rest = next - t.time;
-        let mut most = tau.min(rest);
-        let mut bracket = (0.0, f64::INFINITY);
-        let norm: f64 = t.psi.iter().map(|z| z.norm_sqr()).sum();
-        let ahead = if t.rate > 0.0 { (norm / t.threshold).ln() / t.rate } else { f64::INFINITY };
-        let mut length = most.min(ahead);
+        let length = tau.min(rest);
         if let (Course::Oscillation { phase, .. }, true) = (&mut course, wander > 0.0) {
-            *phase += (wander * most).sqrt() * walk.normals()[0];
+            *phase += (wander * length).sqrt() * walk.normals()[0];
         }
         place(&course, &mut t);
-        let (taken, jumps) = loop {
-            if !(t.time + length > t.time) {
-                break (None, true);
+        let (step, _, taken) = stepped(run, &t, length, &mut |_| Brownian::STILL, &mut scratch);
+        if t.time >= burn {
+            let (r_h, k_h, whole, jumped) = kicks(&step);
+            let spread = taken * run.scattering_at(t.cluster, &Point { r: r_h, kappa: k_h, t: t.time + 0.5 * taken }, &t.psi, None).diffusion[2][2];
+            let w = course.weights(t.time + 0.5 * taken);
+            for (i, w) in [1.0, w[0], w[1]].into_iter().enumerate() {
+                sums[3 * i] += w * (whole[2] - jumped[2]);
+                sums[3 * i + 2] += w * w * spread;
             }
-            let slack = if bracket.1 - bracket.0 <= timing * length { f64::INFINITY } else { timing * length };
-            let reach = length.min(most - length);
-            match Midway::new(run, &t, length).and_then(|through| through.attempt(&t, &Brownian::STILL, slack, reach, &mut scratch)) {
-                Ok(Attempt::Whole(step)) => break (Some(step), false),
-                Ok(Attempt::Reached(step)) => break (Some(step), true),
-                Ok(Attempt::Proposes { length: proposed, .. }) => {
-                    if proposed < length {
-                        bracket.1 = length.min(bracket.1);
-                    } else {
-                        bracket.0 = length.max(bracket.0);
-                    }
-                    length = if proposed > bracket.0 && proposed < bracket.1 || !(t.time + proposed > t.time) { proposed } else { 0.5 * (bracket.0 + bracket.1.min(most)) };
-                }
-                Err(e) => {
-                    length *= 0.5;
-                    assert!(t.time + length > t.time, "refused at every length: {e:?}");
-                    (most, bracket) = (length, (0.0, f64::INFINITY));
-                }
-            }
-        };
-        if let Some(step) = taken {
-            let s = &step.segment;
-            if t.time >= burn {
-                let kick = s.kicked.1[2] - s.flow.advance(s.from, 0.5 * s.tau).1[2];
-                let spread = step.spread[2].iter().map(|l| l * l).sum::<f64>() * s.tau.abs();
-                let w = course.weights(t.time + 0.5 * s.tau);
+            for (kick, time) in step.made.iter().filter_map(|made| made.kick.map(|kick| (kick, made.state.time))) {
+                let w = course.weights(time);
                 for (i, w) in [1.0, w[0], w[1]].into_iter().enumerate() {
-                    sums[3 * i] += w * kick;
-                    sums[3 * i + 2] += w * w * spread;
-                }
-            }
-            let fall = (norm / step.end.psi.iter().map(|z| z.norm_sqr()).sum::<f64>()).ln();
-            t.psi = step.end.psi;
-            t.time = step.end.time;
-            t.rate = fall / s.tau;
-            if !jumps && length == rest {
-                t.time = next;
-            }
-        }
-        if jumps {
-            place(&course, &mut t);
-            let before = t.kappa[2];
-            atom_motion::step::jump(run, &mut t).expect("a jump at the threshold");
-            t.lost = None;
-            if t.time >= burn {
-                let w = course.weights(t.time);
-                for (i, w) in [1.0, w[0], w[1]].into_iter().enumerate() {
-                    sums[3 * i + 1] += w * (t.kappa[2] - before);
+                    sums[3 * i + 1] += w * kick[2];
                 }
                 sums[9] += 1.0;
             }
         }
+        // The step's end on the samples' clock where it spans the rest to the next one.
+        t = Trajectory { time: if taken == rest { next } else { step.end.time }, lost: None, ..step.end };
         if t.time >= next {
             sums[10] = run.cluster(t.cluster).states.iter().zip(t.psi.iter()).filter(|(&s, _)| (s < 3) != (start < 3)).map(|(_, z)| z.norm_sqr()).sum::<f64>() / t.psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
             out.push(sums);
@@ -508,16 +504,18 @@ fn free(name: &str, dimension: &str, temperature: f64, tau: f64, count: u64, spa
 }
 
 /// The parts a kinetic energy's change is accounted by (`account`): the kick's Ehrenfest impulse beyond the reference's
-/// force, the scattered light's continuous force, the Brownian part, the jumps' kicks, and the reference's flow.
+/// force, the scattered light's continuous force, the Brownian part, the jumps' kicks (at the step's middle, as the
+/// flow takes them), and the reference's flow.
 const PARTS: usize = 5;
 
-/// `account`: `free`'s atoms on the same dynamics, stepped here (the step's middle, its attempt for the jump and the
-/// jump, as `adapt::advance`; each step's part of a Brownian path of its own, independent increments) so that every
-/// change of an axis's kinetic energy (ħ/m)κ_a²/2 is booked to the part of the engine that made it. A kick Δκ at the
-/// middle momentum κ_h changes it by (ħ/m)(κ_h + Δκ/2)·Δκ, shared between the kick's parts in proportion: the Brownian
-/// part Λ ΔW (the step's own factor on its increment), the scattered light's force τF_s (of the state at the step's
-/// start), and the rest, the Ehrenfest impulse less the reference's force; a jump by its kick; the reference's two half
-/// flows by the kinetic energy they turn into potential energy or into another axis's.
+/// `account`: `free`'s atoms on the same dynamics, stepped here (`stepped`: the engine's step with its jumps inside it;
+/// each step's part of a Brownian path of its own, independent increments) so that every change of an axis's kinetic
+/// energy (ħ/m)κ_a²/2 is booked to the part of the engine that made it. A kick Δκ at the middle momentum κ_h changes
+/// it by (ħ/m)(κ_h + Δκ/2)·Δκ, shared between the kick's parts in proportion (`kicks`): the Brownian part (the kick
+/// less the same step's on a path that does not move: the propagation and the jumps do not know the path), the
+/// scattered light's force τF_s (of the state at the step's start), the jumps' kicks as they enter the flow at the
+/// middle, and the rest, the Ehrenfest impulse less the reference's force; the reference's two half flows by the
+/// kinetic energy they turn into potential energy or into another axis's.
 /// Per window of `every` µs, means over the atoms: per axis the kinetic energy averaged over the window's steps' ends
 /// and the cumulative work of each part (rad/µs); the squared angular momentum about x, (y κ_z − z κ_y)²; the
 /// cumulative Σ Δκ_a Δκ_b of the jumps and ∫(Λ Λᵀ)_ab dt for ab = yy, zz, yz; the jumps; the standard errors of the
@@ -545,7 +543,6 @@ fn account(name: &str, dimension: &str, temperature: f64, tau: f64, count: u64, 
     };
     let (windows, per) = ((span / every).round() as usize, (every / tau).round() as usize);
     const WIDE: usize = 3 + 3 * PARTS + 1 + 6 + 1;
-    let timing = f64::EPSILON.sqrt();
     let clock = std::time::Instant::now();
     let both: Vec<(Vec<[f64; WIDE]>, [f64; 8])> = (0..count)
         .into_par_iter()
@@ -573,72 +570,25 @@ fn account(name: &str, dimension: &str, temperature: f64, tau: f64, count: u64, 
                     let to = (w * per + s + 1) as f64 * tau;
                     while t.time < to {
                         let rest = to - t.time;
-                        let mut most = rest;
-                        let mut bracket = (0.0, f64::INFINITY);
-                        let norm: f64 = t.psi.iter().map(|z| z.norm_sqr()).sum();
-                        let ahead = if t.rate > 0.0 { (norm / t.threshold).ln() / t.rate } else { f64::INFINITY };
-                        let mut length = most.min(ahead);
-                        let (taken, jumped) = loop {
-                            if !(t.time + length > t.time) {
-                                break (None, true);
-                            }
-                            let slack = if bracket.1 - bracket.0 <= timing * length { f64::INFINITY } else { timing * length };
-                            let reach = length.min(most - length);
-                            let brownian = Brownian::over(length, &[noise.normals(), noise.normals()]);
-                            match Midway::new(&run, &t, length).and_then(|through| through.attempt(&t, &brownian, slack, reach, &mut scratch)) {
-                                Ok(Attempt::Whole(step)) => break (Some((step, brownian)), false),
-                                Ok(Attempt::Reached(step)) => break (Some((step, brownian)), true),
-                                Ok(Attempt::Proposes { length: proposed, .. }) => {
-                                    if proposed < length {
-                                        bracket.1 = length.min(bracket.1);
-                                    } else {
-                                        bracket.0 = length.max(bracket.0);
-                                    }
-                                    length = if proposed > bracket.0 && proposed < bracket.1 || !(t.time + proposed > t.time) { proposed } else { 0.5 * (bracket.0 + bracket.1.min(most)) };
-                                }
-                                Err(e) => {
-                                    length *= 0.5;
-                                    assert!(t.time + length > t.time, "refused at every length: {e:?}");
-                                    (most, bracket) = (length, (0.0, f64::INFINITY));
-                                }
-                            }
-                        };
-                        if let Some((step, brownian)) = taken {
-                            let g = &step.segment;
-                            let (r_h, k_h) = g.flow.advance(g.from, 0.5 * g.tau);
-                            let scattered = run.scattering_at(t.cluster, &Point { r: r_h, kappa: k_h, t: t.time + 0.5 * g.tau }, &t.psi, None).force;
-                            for a in 0..3 {
-                                let kick = g.kicked.1[a] - k_h[a];
-                                let random: f64 = (0..3).map(|c| step.spread[a][c] * brownian.increment[c]).sum();
-                                let force = g.tau * scattered[a];
-                                let middle = hm * (k_h[a] + 0.5 * kick);
-                                work[a][0] += middle * (kick - random - force);
-                                work[a][1] += middle * force;
-                                work[a][2] += middle * random;
-                                work[a][4] += 0.5 * hm * (step.end.kappa[a].powi(2) - g.kicked.1[a].powi(2) + k_h[a].powi(2) - g.from.1[a].powi(2));
-                            }
-                            for (m, (a, b)) in [(1, 1), (2, 2), (1, 2)].into_iter().enumerate() {
-                                moments[3 + m] += g.tau * (0..3).map(|c| step.spread[a][c] * step.spread[b][c]).sum::<f64>();
-                            }
-                            let fall = (norm / step.end.psi.iter().map(|z| z.norm_sqr()).sum::<f64>()).ln();
-                            (t.r, t.kappa, t.psi, t.time) = (step.end.r, step.end.kappa, step.end.psi, step.end.time);
-                            t.rate = fall / g.tau;
-                            if !jumped && length == rest {
-                                t.time = to;
-                            }
+                        let (step, _, taken) = stepped(&run, &t, rest, &mut |length| Brownian::over(length, &[noise.normals(), noise.normals()]), &mut scratch);
+                        let quiet = stepped(&run, &t, taken, &mut |_| Brownian::STILL, &mut scratch).0;
+                        let ((r_h, k_h, whole, jumped), still) = (kicks(&step), kicks(&quiet).2);
+                        let scattering = run.scattering_at(t.cluster, &Point { r: r_h, kappa: k_h, t: t.time + 0.5 * taken }, &t.psi, None);
+                        for a in 0..3 {
+                            let (random, force) = (whole[a] - still[a], taken * scattering.force[a]);
+                            let middle = hm * (k_h[a] + 0.5 * whole[a]);
+                            work[a][0] += middle * (whole[a] - jumped[a] - random - force);
+                            work[a][1] += middle * force;
+                            work[a][2] += middle * random;
+                            work[a][3] += middle * jumped[a];
+                            work[a][4] += 0.5 * hm * (step.end.kappa[a].powi(2) - (k_h[a] + whole[a]).powi(2) + k_h[a].powi(2) - step.segment.from.1[a].powi(2));
                         }
-                        if jumped {
-                            let before = t.kappa;
-                            atom_motion::step::jump(&run, &mut t).expect("a jump at the threshold");
-                            t.lost = None;
-                            for a in 0..3 {
-                                work[a][3] += 0.5 * hm * (t.kappa[a].powi(2) - before[a].powi(2));
-                            }
-                            for (m, (a, b)) in [(1, 1), (2, 2), (1, 2)].into_iter().enumerate() {
-                                moments[m] += (t.kappa[a] - before[a]) * (t.kappa[b] - before[b]);
-                            }
-                            jumps += 1.0;
+                        for (m, (a, b)) in [(1, 1), (2, 2), (1, 2)].into_iter().enumerate() {
+                            moments[3 + m] += taken * scattering.diffusion[a][b];
+                            moments[m] += step.made.iter().filter_map(|made| made.kick).map(|kick| kick[a] * kick[b]).sum::<f64>();
                         }
+                        jumps += step.made.iter().filter(|made| made.kick.is_some()).count() as f64;
+                        t = Trajectory { time: if taken == rest { to } else { step.end.time }, lost: None, ..step.end };
                     }
                     for &axis in &held {
                         (t.r[axis], t.kappa[axis]) = (trap.centre[axis], 0.0);

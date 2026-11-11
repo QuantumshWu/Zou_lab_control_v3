@@ -107,6 +107,43 @@
 //! One whose bound is attained at a centre: the cells not settled above the level at which a centre attains it, for the halves
 //! made hold that centre's value from then on (`Proof::sighted`), every cell is settled against it, and the proof asks ahead no
 //! more. One that ends at a cell whose bound is within the rounding of its centre's value: the cells it had asked for by then.
+//!
+//! # The kick's curvature (`Model::kick_curvature`)
+//! A step is the reference's flow, a kick, the flow again (step.rs); the kick is −τ∇(⟨x|Ĥ_h|x⟩ − V_ref) at the step's
+//! middle point r_h, of the state x held in its cluster's Doppler frames there (step.rs, # The kick: the shear). About a
+//! minimum the step is the linear map R(ωτ/2) K R(ωτ/2) -- along an axis of the reference's rate ω the kick takes
+//! τ w y from κ, w = ∂∂(⟨x|Ĥ_h|x⟩ − V_ref) --, whose trace is 2 cos ωτ − (ħ/m) w τ² sin(ωτ)/(ωτ); the motion is bounded
+//! where the trace lies within ±2 (solve.rs `admissible`; measured on the crate's step, step/tests.rs). The map has the
+//! eigenvalue −1 where det(D − τW) = 0, D the reference's 2ω_i cot(ω_iτ/2) on its axes and W the kick's Hessian, of any
+//! axes: none while (ħ/m) λ_max(W) τ² < 4 (ω_maxτ/2) cot(ω_maxτ/2), which is that trace above −2 at the reference's
+//! largest rate and the kick's largest curvature. (The eigenvalue +1 asks W ≤ −D′, D′ = 2ω_i tan(ω_iτ/2) ≥ ω_i²τ: a
+//! potential of the atom's own that does not hold it -- the motion's instability, not the step's.) So what the step
+//! asks of the model is one number, an upper bound of (ħ/m) λ_max ∂∂(Ĥ_h − V_ref) over the directions and the states
+//! (rad²/µs²). What the model bounds of it:
+//! - the trap light's own form on a state, less the reference's: the two wells' curvatures where the trap is, at its
+//!   centre, as the trap's rates themselves are taken -- exact, with its sign (potential.rs `Model::stiffer`: a softer
+//!   well asks nothing);
+//! - the fringes of the lights folded with the bare levels, and of every other constant term between two ground
+//!   states or two excited states: a matrix times plane waves, each entry's modulus times |q|² of each of its plane
+//!   waves' residual wave vectors in the frames, by Gershgorin's rows (assemble.rs `Plan::fringes`), the beams' moduli
+//!   at most their largest over the reach's box (`Span::most`). Exact for one pair of beams on one state (a
+//!   lattice's wells); blind to the phases between several pairs, which it adds.
+//! What it does not bound, and why (measured on the first version, which held both: edge.status.md):
+//! - the shifts by the drives folded at the atom. Their bound from what the regions hold -- per pair of beams
+//!   |q|² ‖X^f_j[:, a]‖ ‖X^f_i[:, b]‖ over the drives' least distance -- takes the response by its modulus, where the
+//!   shift is its Hermitian part (none on resonance), and adds 36 pairs of six beams on five states blind to their
+//!   phases: 9 rad²/µs² at the trap's centre of six beams' cooling (135 over the reach's box, whose corners the trap's
+//!   light shift carries through the repumper's line) -- a first rung of 0.09 µs where the check lets 0.7 µs stand;
+//! - the couplings of the states a cluster holds explicitly. A state held as a superposition of both is kicked by
+//!   |q|² |c|; the states an atom is in are not that: its excited amplitude is the drive's answer, and the kick is
+//!   the curvature of the level it follows (measured, step/tests.rs), ∂∂E = ⟨∂∂Ĥ_h⟩ + 2 Σ |⟨n|∂Ĥ_h|E⟩|²/(E − E_n) -- of
+//!   the fold's size, |q|² |c|²/Δ, for a far drive: the held state's bound is Δ/|c| times that (6.5 rad²/µs² on the
+//!   D1 gray molasses' forty explicit drives: 0.39 µs where the check lets 0.73 µs stand);
+//! - the envelopes of the lights other than the trap's, the response's own change across the trap, the first-order
+//!   Doppler partner: small against |q|², and of either sign.
+//! A step whose edge these set is the check's to find (solve.rs, # The step), as every error of a step below its
+//! edge is: where a companion lies in such a band its trajectories differ from the run's without bound, and the check
+//! halves.
 
 use super::eliminate::{CellEnergies, Couplings};
 use super::far::EXCITED;
@@ -164,6 +201,14 @@ impl Bends {
 pub(crate) struct Cell {
     pub(crate) centre: [f64; 3],
     pub(crate) half: [f64; 3],
+}
+
+impl Reach {
+    /// The reach's box as a cell (`Reach::cell`): where the proofs' subdivisions start, and the one cell of a bound taken
+    /// over the whole reach at once.
+    pub(crate) fn whole(&self) -> Cell {
+        Cell { centre: self.cell.map(|[lo, hi]| if (hi - lo).is_finite() { 0.5 * (lo + hi) } else { 0.0 }), half: self.cell.map(|[lo, hi]| 0.5 * (hi - lo)) }
+    }
 }
 
 impl Cell {
@@ -1118,6 +1163,23 @@ impl Model {
         ensemble.beyond(&|r| self.room(reach, r, &prepared), most).map(|share| share.value + share.difference)
     }
 
+    /// What the model bounds of the curvature of the kick's potential, (ħ/m) λ_max ∂∂(Ĥ_h − V_ref) of any state held in
+    /// its cluster's frames along any direction (rad²/µs²; module documentation, # The kick's curvature), every light
+    /// on: the largest over the clusters' states of how much stiffer than the reference's the state's trap is at the
+    /// trap's centre (`stiffer`) with the state's row of the constant terms' fringes over the reach's box (assemble.rs
+    /// `Plan::fringes`). Negative where every state's well is softer than the reference's and no such light makes a
+    /// fringe.
+    pub fn kick_curvature(&self, reach: &Reach, trap: &Trap) -> f64 {
+        let most: Vec<f64> = self.spans(&reach.whole()).iter().map(|span| span.most).collect();
+        let stiffer = self.stiffer(trap.centre, &reach.populations);
+        let mut largest = f64::NEG_INFINITY;
+        for (c, cluster) in self.clusters.iter().enumerate() {
+            let rows = self.plan(c, &self.running()).fringes(self, &most);
+            largest = cluster.states.iter().zip(&rows).fold(largest, |most, (&s, row)| most.max(stiffer[s] + row));
+        }
+        self.hbar_over_mass * largest
+    }
+
     /// Every beam over a cell (`Span`).
     pub(crate) fn spans(&self, cell: &Cell) -> Vec<Span> {
         if !cell.bounded() {
@@ -1198,9 +1260,7 @@ impl Model {
     /// pace `P`.
     fn proven_over<Q: Fn(&Region) -> f64 + ?Sized, P: Pace<Q>>(&self, reach: &Reach, rule: Rule, quantities: &[&Q]) -> Vec<f64> {
         let cells = Cells { model: self, reach, prepared: self.prepared(), envelope: self.envelope(&reach.populations) };
-        let half = reach.cell.map(|[lo, hi]| 0.5 * (hi - lo));
-        let start = Cell { centre: reach.cell.map(|[lo, hi]| if (hi - lo).is_finite() { 0.5 * (lo + hi) } else { 0.0 }), half };
-        let first = cells.make(start);
+        let first = cells.make(reach.whole());
         let mut proofs: Vec<Proof> = quantities.iter().map(|q| Proof::new(*q, first.as_ref())).collect();
         let mut nodes: Vec<Node> = first.into_iter().map(|(node, _)| node).collect();
         // Per proof, the halves the round before made for it.
@@ -1472,5 +1532,77 @@ mod tests {
         let alone: Vec<f64> = [&s as &dyn Fn(&Region) -> f64, &a, &other].iter().map(|q| model.bounds_over(&reach, 0.5, &[*q])[0]).collect();
         assert_eq!(together, alone);
         assert_eq!(model.bounds_over_in_parallel(&reach, 0.5, &[&s, &a, &other]), alone);
+    }
+
+    /// A reference scene's request, its light and its model with every drive folded with the bare levels: a generator
+    /// of constant terms alone.
+    fn bare(scene: &str) -> (Request, Light, Model) {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{scene}.json"));
+        let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let request = Request::from_native(&line).unwrap();
+        let light = Light::new(&request);
+        let model = Model::new(&request, &light, &[]).unwrap();
+        (request, light, model)
+    }
+
+    /// The kick's curvature (module documentation, # The kick's curvature) on models whose every drive is folded with
+    /// the bare levels, where the bound holds all of the generator.
+    /// - A σ⁺ tweezer alone, the atoms in the state it holds the least (R1_SIGMA_P, |2,+2⟩): every other ground state's
+    ///   well is the same shape and deeper, so the bound is the largest ω_s² − ω_ref² of the states' own traps' largest
+    ///   rates (potential.rs `Model::trap`), to rounding (printed: a tenth of ω_ref² and more -- the step's edge is
+    ///   below 0.91 π). From the state it holds the most (R1_SIGMA_M, |2,−2⟩) every other well is the softer one: the
+    ///   bound is the reference's own, none.
+    /// - Six beams' cooling light with its repump in a retro-reflected tweezer (R8_R5051, every drive bare): at the
+    ///   trap's centre the second difference of ⟨x|Ĥ_h|x⟩ − V_ref along any direction, of any state of a cluster, is
+    ///   below the bound (16 directions and states a cluster; the largest found is printed beside it).
+    #[test]
+    fn the_kick_s_curvature_is_the_wells_difference_and_bounds_the_fringes() {
+        use crate::step::Middle as _;
+        let alone = |s: usize| -> [f64; GROUND] { std::array::from_fn(|b| if b == s { 1.0 } else { 0.0 }) };
+        let share = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
+        for (scene, state) in [("R1_SIGMA_M", 3), ("R1_SIGMA_P", 7)] {
+            let (request, _, model) = bare(scene);
+            assert!(request.initial_density[(state, state)].re == 1.0, "{scene}: the atoms' state");
+            let trap = model.trap(&alone(state), &model.prepared()).unwrap();
+            let reach = model.reach(&trap, &alone(state), request.temperature_uk, share);
+            let rate = |trap: &Trap| trap.frequencies.iter().copied().fold(0.0, f64::max);
+            let stiffest = (0..GROUND).map(|s| rate(&model.trap(&alone(s), &model.prepared()).unwrap()).powi(2) - rate(&trap).powi(2)).fold(f64::NEG_INFINITY, f64::max);
+            let (kick, own) = (model.kick_curvature(&reach, &trap), rate(&trap).powi(2));
+            eprintln!("{scene}: ω_k² = {:.4} ω²; the traps' {:.4} ω²", kick / own, stiffest / own);
+            assert!((kick - stiffest).abs() <= 1e-9 * own, "{scene}: the bound {kick}, the wells' difference {stiffest}");
+            assert!(if scene == "R1_SIGMA_P" { kick > 0.1 * own } else { kick.abs() <= 1e-9 * own }, "{scene}: {kick} of {own}");
+        }
+        let (request, _, model) = bare("R8_R5051");
+        let reference = alone((0..GROUND).find(|&s| request.initial_density[(s, s)].re > 0.0).unwrap());
+        let trap = model.trap(&reference, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &reference, request.temperature_uk, share);
+        let bound = model.kick_curvature(&reach, &trap) / model.hbar_over_mass;
+        let (lights, prepared) = (model.running(), model.prepared());
+        let mut stream = crate::random::Stream::jump(11, 0, 0);
+        let mut largest = f64::NEG_INFINITY;
+        for cluster in 0..model.clusters.len() {
+            let n = model.clusters[cluster].states.len();
+            for _ in 0..16 {
+                let direction = { let d = stream.normals(); let norm = norm3(d); d.map(|x| x / norm) };
+                let x: Vec<C64> = (0..n).map(|_| { let z = stream.normals(); C64::new(z[0], z[1]) }).collect();
+                let norm = crate::linalg::norm_sqr(&x);
+                // ⟨x|Ĥ_h|x⟩ − V_ref along the direction, and its second difference over a fortieth of the light's
+                // shortest length (its error (qh)²/12 of the curvature: 5·10⁻⁵).
+                let step = model.shortest_length(&lights) / 40.0;
+                let value = |s: f64| {
+                    let r: [f64; 3] = std::array::from_fn(|a| trap.centre[a] + s * direction[a]);
+                    let middle = model.assemble(cluster, r, 0.0, &lights);
+                    let mut h = Mat::zeros(n, n);
+                    middle.generator(&middle.path([0.0; 3], [0.0; 3]), 0.0, &mut h);
+                    let form: C64 = (0..n).flat_map(|a| (0..n).map(move |b| (a, b))).map(|(a, b)| x[a].conj() * h[(a, b)] * x[b]).sum();
+                    form.re / norm - model.potential(r, &reference, &prepared)
+                };
+                let curvature = (value(step) - 2.0 * value(0.0) + value(-step)) / (step * step);
+                largest = largest.max(curvature);
+                assert!(curvature <= bound * (1.0 + 1e-3), "cluster {cluster}: a held state's curvature {curvature} above the bound {bound}");
+            }
+        }
+        eprintln!("R8_R5051, every drive bare: the largest curvature found {largest:.3} rad/µs/µm², the bound {bound:.3}");
+        assert!(largest > 0.0 && bound.is_finite(), "{largest} {bound}");
     }
 }

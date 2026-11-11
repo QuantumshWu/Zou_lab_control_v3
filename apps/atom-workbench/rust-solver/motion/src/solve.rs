@@ -29,12 +29,16 @@
 //! shorter a step than outputs a hundred steps apart. The ladder's rungs are the run's length (`Plan::end`) over the
 //! even numbers, and below a rung its halves: the companion's step is twice the run's, and the run is a whole number of
 //! the companion's steps, so no level's last step is a cut one. A step is
-//! admissible where its nodes resolve what the scheme samples along an atom's path (`admissible`): the reference flow,
-//! ω τ < π at the prepared trap's largest frequency; and the generator, whose change along the path the propagation
+//! admissible where its nodes resolve what the scheme samples along an atom's path (`admissible`): the reference flow
+//! with the kick between its halves, whose linear map about a minimum is bounded below its first edge, cos ωτ −
+//! (ω_k²τ²/2) sin(ωτ)/(ωτ) > −1 at the prepared trap's largest frequency ω and the kick's largest curvature ω_k² as
+//! far as the model bounds it (model/reach.rs `Model::kick_curvature`: the states' own traps and the bare folds'
+//! fringes; the wells of the light folded at the atom and of explicit states are the check's to find) -- ω τ < π for
+//! a kick without curvature, ω_k τ < 2 on a flat reference --; and the generator, whose change along the path the propagation
 //! reads at nodes half a step apart, (|Ω| + |K| v) τ/2 < π for every residual beat Ω and wave vector K of the model's
 //! entries at an atom's speed v. The ladder begins at the largest rung that is admissible for the run and whose double
 //! is for the companion (`first_rung`): the run's step at the largest speed of the reach the model is judged over; the
-//! companion's at the reach's rms speed. An attempt after the first begins at the step the one before stood at, where
+//! companion's at the reach's rms speed, below the same edge. An attempt after the first begins at the step the one before stood at, where
 //! that is the shorter. The first rung is a rung of the ladder, whose bottom is the step of `MOST_STEPS` steps a
 //! trajectory: a request for which no rung down to it is admissible is refused with a message.
 //!
@@ -175,7 +179,7 @@ use crate::ledger::{percent, span, when, Account, Ledger};
 use crate::linalg::V3;
 use crate::model::{Envelope, Lights, Model, Run, Sample, Trap, Unit, GROUND};
 use crate::request::STATES;
-use crate::step::{Dynamics, Scratch, Segment, Trajectory};
+use crate::step::{stumpff, Dynamics, Scratch, Segment, Trajectory};
 use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, ORDER, STEP_SHARE, TEMPERATURE_TARGET};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -383,18 +387,28 @@ impl Well for Prepared<'_> {
 
 /// Whether a step is admissible for an atom of a speed (module documentation, # The step): its nodes resolve what the
 /// scheme samples along the atom's path.
-/// - The reference flow, at the prepared trap's largest frequency ω (rad/µs): ω τ < π -- there the two half flows of a
-///   step turn the motion by π and any kick between them grows. The same for every atom.
+/// - The reference flow and the kick between its halves, at the prepared trap's largest frequency ω (rad/µs) and the
+///   kick's largest curvature `kick` = ω_k² = (ħ/m) λ_max ∂∂(Ĥ_h − V_ref) (rad²/µs²; model/reach.rs
+///   `Model::kick_curvature`, with the derivation, what of it the model bounds and what it leaves to the check).
+///   About a minimum a step is the linear map R(ωτ/2) K R(ωτ/2), its
+///   trace 2 cos ωτ − ω_k²τ² sin(ωτ)/(ωτ) (measured on the crate's step: step/tests.rs), and the motion is bounded
+///   while the trace is above −2: on the first stretch, ωτ < π, the trace over two is above −1. It falls with ω and
+///   with ω_k², so the largest of each stands for every axis and state. A kick without curvature leaves ω τ < π --
+///   there the two half flows turn the motion by π and any kick between them grows --, a softer well than the
+///   reference's (ω_k² < 0) the same; a stiffer one ends the stretch below π, (ωτ/2) tan(ωτ/2) = ω²/ω_k², and on a
+///   flat reference at the kick's own ω_k τ = 2. The same for every atom.
 /// - The generator: the propagation reads its change along the path at three nodes, the step's middle and its two
 ///   ends (step.rs, # The kick), τ/2 apart, and takes it for the parabola through them. An entry that turns at the rate
 ///   ρ along the path -- its residual beat Ω in the cluster's frames and its residual wave vector K at the atom's
 ///   velocity, ρ = |Ω + K·v| ≤ |Ω| + |K| v (`sampled`: the model's own entries, per beat the largest |K|) -- advances by
 ///   ρ τ/2 from node to node; at π the nodes read it as its alias. So (|Ω| + |K| v) τ/2 < π for every entry.
 /// Both are edges -- where the scheme stops meaning anything --, not accuracies within a share: how well a step below
-/// them does is the check's to say (the pilot's two levels). The frequency is the prepared trap's alone: the curvature
-/// of the near light's own wells is no condition here.
-fn admissible(tau: f64, frequency: f64, sampled: &[[f64; 2]], speed: f64) -> bool {
-    frequency * tau < PI && sampled.iter().all(|[beat, wave]| 0.5 * (beat + wave * speed) * tau < PI)
+/// them does is the check's to say (the pilot's two levels).
+fn admissible(tau: f64, frequency: f64, kick: f64, sampled: &[[f64; 2]], speed: f64) -> bool {
+    let turn = frequency * tau;
+    // cos ωτ and sin(ωτ)/(ωτ): the Stumpff functions the reference's flow is made of (step.rs).
+    let (cos, sinc, _) = stumpff(turn * turn);
+    turn < PI && cos - 0.5 * kick * tau * tau * sinc > -1. && sampled.iter().all(|[beat, wave]| 0.5 * (beat + wave * speed) * tau < PI)
 }
 
 /// The ladder's first rung (module documentation, # The step): the largest rung -- the run's length `run` (µs) over an
@@ -403,18 +417,19 @@ fn admissible(tau: f64, frequency: f64, sampled: &[[f64; 2]], speed: f64) -> boo
 /// (Admissibility is a bound on the step from above: the least even number is found by counting up.)
 /// - The run's step is the result's: it is admissible for every atom the model is judged for, at the reach's largest
 ///   speed (model.rs `Reach::speed`) -- one domain for the model's folds and for the step.
-/// - The companion at twice the step is a probe of the step, not a result: it must be stable, which the trap's
-///   resonance decides for every atom alike, and resolve the light for the typical atom, at the reach's rms speed
+/// - The companion at twice the step is a probe of the step, not a result: it must be stable, which the step's edge
+///   decides for every atom alike -- the same edge as the run's, at the same frequency and curvature --, and resolve
+///   the light for the typical atom, at the reach's rms speed
 ///   (`typical_speed`) -- two steps one of which reads the light's alias at most atoms agree or differ for no reason of
 ///   the step, while the few fastest atoms beyond its limit weigh in the difference by their share.
-/// Where the trap's resonance binds, the first rung is the rung below the largest stable one. Half the run at the
+/// Where the step's edge binds, the first rung is the rung below the largest stable one. Half the run at the
 /// most: the companion's step is a rung itself, the run its one step then. Nothing of the outputs enters: they are read
 /// inside the steps (adapt.rs, # The reads). The ladder has one bottom, the step at which a trajectory takes `MOST_STEPS`
 /// steps, and the first rung is a rung of it: none where no rung down to that one is admissible -- the light or the
-/// trap asks for a shorter step than the cap allows, or a frequency or a speed is no number (nothing is admissible
-/// then). The solve refuses such a request (`attempt`): a step that is not admissible computes nothing.
-fn first_rung(run: f64, frequency: f64, sampled: &[[f64; 2]], fastest: f64, typical: f64) -> Option<f64> {
-    (1..=MOST_STEPS / 2).map(|pairs| run / (2 * pairs) as f64).find(|&step| admissible(step, frequency, sampled, fastest) && admissible(2. * step, frequency, sampled, typical))
+/// trap asks for a shorter step than the cap allows, or a frequency, a curvature or a speed is no number (nothing is
+/// admissible then). The solve refuses such a request (`attempt`): a step that is not admissible computes nothing.
+fn first_rung(run: f64, frequency: f64, kick: f64, sampled: &[[f64; 2]], fastest: f64, typical: f64) -> Option<f64> {
+    (1..=MOST_STEPS / 2).map(|pairs| run / (2 * pairs) as f64).find(|&step| admissible(step, frequency, kick, sampled, fastest) && admissible(2. * step, frequency, kick, sampled, typical))
 }
 
 /// The rms speed (µm/µs) of atoms at the temperature T (µK): √(3 (ħ/m) k_BT/ħ), the reach's typical atom at the
@@ -832,12 +847,14 @@ fn attempt(
     // the atoms and of their kinetic energy, by the ensemble's quadrature of its own density -- no atom is drawn --, a
     // level of it with no more evaluations of the potential than the most trajectories a solve runs have initial atoms.
     //
-    // The reported trap, what the reach leaves out and the entries the first rung reads (`admissible`) ask nothing of
-    // one another: the three are made side by side on the pool.
+    // The reported trap, what the reach leaves out and what the first rung reads (`admissible`: the entries, and the
+    // kick's curvature) ask nothing of one another: they are made side by side on the pool.
     let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, light, alone(s))).collect::<Result<_, _>>()?;
     let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm)?;
-    let (reported, (unsampled, entries)) =
-        rayon::join(|| model.trap(&reference, &model.reported()), || rayon::join(|| model.left_out(&judged, &ensemble, MOST_TRAJECTORIES), || model.sampled(&model.running())));
+    let (reported, (unsampled, (entries, kick))) = rayon::join(
+        || model.trap(&reference, &model.reported()),
+        || rayon::join(|| model.left_out(&judged, &ensemble, MOST_TRAJECTORIES), || (model.sampled(&model.running()), model.kick_curvature(&judged, &trap))),
+    );
     let (report, unheld) = match reported {
         Ok(t) => (t, false),
         Err(_) => (trap.clone(), true),
@@ -863,8 +880,8 @@ fn attempt(
     let (momentum, start) = exact(&ensemble.kinetic(0));
     // The ladder's first rung over the reach the model is judged over: an attempt that begins at the step the one
     // before stood at begins no higher than its own first rung (a reach that has grown lowers it).
-    let first_rung = first_rung(plan.end, trap.frequencies.iter().copied().fold(0., f64::max), &entries, judged.speed, typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3.))
-        .ok_or_else(|| format!("时间步长：每条轨迹至多 {MOST_STEPS} 步之内没有可用的步长（阱的共振或光场沿原子路径的变化要求更小的步长；或者阱频、原子速率不是有限数）"))?;
+    let first_rung = first_rung(plan.end, trap.frequencies.iter().copied().fold(0., f64::max), kick, &entries, judged.speed, typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3.))
+        .ok_or_else(|| format!("时间步长：每条轨迹至多 {MOST_STEPS} 步之内没有可用的步长（阱的共振、光场中势阱的曲率或光场沿原子路径的变化要求更小的步长；或者阱频、曲率、原子速率不是有限数）"))?;
     // What the reach's falsifier compares the T read with: the largest kinetic temperature along an axis of the
     // ensemble the reach was made for (model.rs `Reach::kinetic_uk`: T_r where the trap is classical, the zero point's
     // where it is cold) -- no lab axis's T is above it while the atoms are that ensemble.
@@ -955,25 +972,27 @@ fn attempt(
         // The tables' errors (SPEC §5.4): each table's whole error against the elimination itself, its mean over the
         // run's held states read at one state of every pilot trajectory (`one_each`, `over_the_run`) -- a state on another
         // cluster reads none of it. A table
-        // beyond the tables' shares has the axis of its largest read halved and is read again, until it is within them or
-        // its next grid would exceed the work's bound; what it reads then is booked on every output, and flagged where it
-        // still lies beyond.
+        // beyond the tables' shares has the axis of its largest read halved and is read again, until it is within them,
+        // or it has no axis to halve (its coordinates all held at the focus: model/tabulate.rs, # Axes), or its next
+        // grid would exceed the work's bound; what it reads then is booked on every output, and flagged where it still
+        // lies beyond -- with which of the two ended its refinement (`Stuck`).
         let read_at = one_each(&pilot);
         let (shown_share, temperature_share) = crate::model::tabulate::shares();
         drop(run);
-        let mut stuck = vec![false; tables.tables.len()];
+        let mut stuck: Vec<Option<Stuck>> = vec![None; tables.tables.len()];
         let booked = loop {
             let reads: Vec<Vec<crate::model::tabulate::TableRead>> = read_at.par_iter().map(|pick| model.table_reads(&tables, std::slice::from_ref(&pick.state.sample))).collect();
             let mean = |f: &dyn Fn(&crate::model::tabulate::TableRead) -> f64, t: usize| over_the_run(&read_at, reads.iter().map(|r| f(&r[t])), None);
             let whole: Vec<[f64; 2]> = (0..tables.tables.len()).map(|t| [mean(&|r| r.whole[0].population, t), mean(&|r| r.whole[0].temperature, t)]).collect();
-            let beyond = (0..whole.len()).find(|&t| !stuck[t] && (whole[t][0] > shown_share || whole[t][1] > temperature_share));
+            let beyond = (0..whole.len()).find(|&t| stuck[t].is_none() && (whole[t][0] > shown_share || whole[t][1] > temperature_share));
             let Some(t) = beyond else { break whole };
             let axes = tables.tables[t].axes();
             let weight = |f: usize| mean(&|r| r.axes[f][0].population / shown_share + r.axes[f][0].temperature / temperature_share, t);
             let worst = (0..axes).max_by(|&a, &b| weight(a).total_cmp(&weight(b)));
-            match worst.and_then(|f| model.halved(&tables.tables[t], f, most)) {
-                Some(finer) => tables.tables[t].table = finer,
-                None => stuck[t] = true,
+            match worst.map(|f| model.halved(&tables.tables[t], f, most)) {
+                Some(Some(finer)) => tables.tables[t].table = finer,
+                Some(None) => stuck[t] = Some(Stuck::Work),
+                None => stuck[t] = Some(Stuck::Axes),
             }
         };
         for (t, table) in tables.tables.iter().enumerate() {
@@ -986,8 +1005,10 @@ fn attempt(
                 context.fixed.model[k] = [(context.fixed.model[k][0] + booked[t][0]).min(1.), context.fixed.model[k][1] + booked[t][1]];
             }
             context.ledger.item(&label, booked[t][0].max(booked[t][1]), TABLE_MEASURED);
-            if stuck[t] {
-                context.ledger.flag(format!("{label}的误差超出表的份额，而加密已到工作量的界：按实测记账"));
+            match stuck[t] {
+                Some(Stuck::Work) => context.ledger.flag(format!("{label}的误差超出表的份额，而再加密一档的网格就超过工作量的界（{most} 个节点）：按实测记账")),
+                Some(Stuck::Axes) => context.ledger.flag(format!("{label}的误差超出表的份额，而它没有可加密的轴（它依赖的坐标都取在焦点处的值上）：按实测记账")),
+                None => {}
             }
         }
         // The step's check (module documentation, # The step): the clear part of the pilot's difference into the
@@ -1031,6 +1052,14 @@ fn attempt(
         context.ledger.flag("准备势在所取阱底之外还有更深的地方：初始系综按该阱底的深度封顶".into());
     }
     Ok(Attempt::Done(assemble(&context, &e, &l, &c, parts.len() as u64 * GROUP)))
+}
+
+/// Why a table beyond the tables' shares is refined no further (`attempt`): the grid with its worst axis halved would
+/// hold more nodes than the work's bound allows; or the table has no axis -- nothing to halve.
+#[derive(Clone, Copy)]
+enum Stuck {
+    Work,
+    Axes,
 }
 
 /// The flag of a step whose error lies clearly beyond what it may take at the steps' cap (module documentation, # The
@@ -1256,8 +1285,9 @@ impl Plan {
     }
 }
 
-/// Counts over trajectories: the steps taken, and the trajectories the scheme could not advance (adapt.rs `advance`'s
-/// refusal) with the earliest time one stopped at.
+/// Counts over trajectories: the steps taken -- a step with jumps is one step, whatever the pieces its path is handed
+/// on by (adapt.rs, # The jumps) --, and the trajectories the scheme could not advance (adapt.rs `advance`'s refusal)
+/// with the earliest time one stopped at.
 #[derive(Clone, Copy, Debug, Default)]
 struct Counts {
     steps: u64,
@@ -1310,7 +1340,8 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, plan: &Plan, 
     let mut out = vec![Fate::Lost; outputs];
     let mut listed = vec![None; plan.listed.len()];
     let mut samples: Vec<Option<State>> = vec![None; if keep { outputs } else { 0 }];
-    let mut steps = 0;
+    // The steps taken, and the start of the last one counted.
+    let (mut steps, mut counted) = (0, None);
     let mut record = |k: usize, t: &Trajectory, out: &mut Vec<Fate>| {
         // The atom at the output's instant; from the first output on its κ and κ² are its window's means (below).
         out[k] = Fate::Held(Held { rows: model.readout(t.cluster, &t.point(), &t.psi), kappa: t.kappa, kappa2: t.kappa.map(|x| x * x) });
@@ -1330,9 +1361,12 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, plan: &Plan, 
             record(k + 1, t, &mut out);
             reached = k + 2;
         };
-        // A step's path as far as the trajectory is on it, into the windows it cuts.
+        // A step's path as far as the trajectory is on it, into the windows it cuts: piece by piece, from the step's
+        // start and from each of its jumps -- the step is counted at the first of them.
         let mut each = |s: &Segment, until: f64| {
-            steps += 1;
+            if counted != Some(s.step.0) {
+                (steps, counted) = (steps + 1, Some(s.step.0));
+            }
             let (s0, s1) = (s.start, until);
             let first = (((s0 - widest) / interval).floor().max(1.)) as usize;
             let last = (((s1 + widest) / interval).ceil() as usize).min(outputs - 1);
@@ -2178,6 +2212,8 @@ mod tests {
     /// - A pattern of 2k = 16.1 µm⁻¹: the run below 2π/(K v_max) = 1.79 µs, the companion below 4.20 µs, so the run
     ///   below 1.79 µs: the run's length over 6, 1.667 µs. At √10 k the run below 1.13 µs: its length over 10, 1 µs.
     /// - In every case the rung is admissible with its double, and the next larger even part is not.
+    /// - The step's edge with a kick's curvature ω_k² (`admissible`): at ωτ = π without one and for a softer well, below
+    ///   π for a stiffer one, at ω_kτ = 2 on a flat reference.
     /// - The first rung is a rung of the ladder down to `MOST_STEPS` steps: there is none for a run of 10⁹ µs in the
     ///   74.65 kHz trap (3.35 µs at the most: 3·10⁸ steps), nor at a frequency or a speed that is no number or
     ///   unbounded -- and the count ends.
@@ -2188,32 +2224,47 @@ mod tests {
         let fastest = |t: f64| (2. * (MOST_TRAJECTORIES as f64 / (CONFIDENCE * CONFIDENCE) + 1.).ln() * KT_PER_UK * t * hm).sqrt();
         let (fast, typical) = (fastest(30.), typical_speed(hm, 30.));
         assert!((fast - 0.2185).abs() < 5e-4 && (typical - 0.0928).abs() < 5e-4, "{fast} {typical}");
-        assert_eq!(first_rung(10., khz(74.65), &[], fast, typical), Some(2.5));
-        assert_eq!(first_rung(10., khz(1.), &[[0., 0.]], fast, typical), Some(5.));
+        assert_eq!(first_rung(10., khz(74.65), 0., &[], fast, typical), Some(2.5));
+        assert_eq!(first_rung(10., khz(1.), 0., &[[0., 0.]], fast, typical), Some(5.));
         assert!((TAU / (16.1 * fast) - 1.79).abs() < 5e-3 && (TAU / (16.1 * typical) - 4.20).abs() < 1e-2);
-        assert_eq!(first_rung(10., khz(74.65), &[[0., 16.1]], fast, typical), Some(10. / 6.));
+        assert_eq!(first_rung(10., khz(74.65), 0., &[[0., 16.1]], fast, typical), Some(10. / 6.));
         let k = 16.106 / 2. * 10f64.sqrt();
         assert!((TAU / (k * fast) - 1.13).abs() < 5e-3 && (TAU / (k * typical) - 2.66).abs() < 1e-2);
-        assert_eq!(first_rung(10., khz(100.), &[[0., k]], fast, typical), Some(1.));
-        let both = |tau: f64, w: f64, sampled: &[[f64; 2]], fast: f64, typical: f64| admissible(tau, w, sampled, fast) && admissible(2. * tau, w, sampled, typical);
-        for (run, w, sampled, fast, typical) in [
-            (10., khz(910.7), vec![[0., 16.1]], fast, typical),
-            (20., khz(79.), vec![[0., 16.1]], fastest(141.), typical_speed(hm, 141.)),
-            (16., khz(20.3), vec![[0., 32.2]], fast, typical),
-            (10., khz(74.65), vec![[0., 16.1]], 0.0089, 0.0038),
-            (10., khz(74.65), vec![[0., 0.], [2., 16.1], [0.5, 8.]], fast, typical),
-            (100., khz(100.), vec![[0., k]], fast, typical),
+        assert_eq!(first_rung(10., khz(100.), 0., &[[0., k]], fast, typical), Some(1.));
+        let both = |tau: f64, w: f64, kick: f64, sampled: &[[f64; 2]], fast: f64, typical: f64| admissible(tau, w, kick, sampled, fast) && admissible(2. * tau, w, kick, sampled, typical);
+        for (run, w, kick, sampled, fast, typical) in [
+            (10., khz(910.7), 0., vec![[0., 16.1]], fast, typical),
+            (20., khz(79.), 0., vec![[0., 16.1]], fastest(141.), typical_speed(hm, 141.)),
+            (16., khz(20.3), 0., vec![[0., 32.2]], fast, typical),
+            (10., khz(74.65), 0., vec![[0., 16.1]], 0.0089, 0.0038),
+            (10., khz(74.65), 0., vec![[0., 0.], [2., 16.1], [0.5, 8.]], fast, typical),
+            (100., khz(100.), 0., vec![[0., k]], fast, typical),
+            (100., khz(20.), 0.35 * 0.35, vec![[0., 16.1]], 0.05, 0.017),
+            (100., khz(74.65), -0.5 * khz(74.65).powi(2), vec![], fast, typical),
         ] {
-            let tau = first_rung(run, w, &sampled, fast, typical).unwrap();
+            let tau = first_rung(run, w, kick, &sampled, fast, typical).unwrap();
             let pairs = (run / (2. * tau)).round();
-            assert!((run / (2. * pairs) - tau).abs() <= 1e-12 * tau && both(tau, w, &sampled, fast, typical), "{run} {tau}");
-            assert!(pairs == 1. || !both(run / (2. * (pairs - 1.)), w, &sampled, fast, typical), "{run} {tau}: a larger rung is admissible");
+            assert!((run / (2. * pairs) - tau).abs() <= 1e-12 * tau && both(tau, w, kick, &sampled, fast, typical), "{run} {tau}");
+            assert!(pairs == 1. || !both(run / (2. * (pairs - 1.)), w, kick, &sampled, fast, typical), "{run} {tau}: a larger rung is admissible");
         }
-        assert!(admissible(1.25, khz(74.65), &[[0., 16.1]], fast) && !admissible(2.5, khz(74.65), &[[0., 16.1]], fast) && admissible(2.5, khz(74.65), &[[0., 16.1]], typical));
-        assert_eq!(first_rung(1e9, khz(74.65), &[], fast, typical), None);
-        assert_eq!(first_rung(10., f64::NAN, &[], fast, typical), None);
-        assert_eq!(first_rung(10., khz(74.65), &[[0., 16.1]], f64::INFINITY, typical), None);
-        assert_eq!(first_rung(10., khz(74.65), &[[0., 16.1]], fast, f64::NAN), None);
+        assert!(admissible(1.25, khz(74.65), 0., &[[0., 16.1]], fast) && !admissible(2.5, khz(74.65), 0., &[[0., 16.1]], fast) && admissible(2.5, khz(74.65), 0., &[[0., 16.1]], typical));
+        // The step's edge: at π for a kick without curvature and for a softer well; below π for a stiffer one, where
+        // (θ/2) tan(θ/2) = ω²/ω_k² (0.5477 π at ω_k = ω, 0.3056 π at ω_k² = 4 ω²); the kick's own ω_k τ = 2 on a flat
+        // reference.
+        let w = khz(100.);
+        let edge = |kick: f64, lo: f64, hi: f64| admissible(lo * PI / w, w, kick, &[], 0.) && !admissible(hi * PI / w, w, kick, &[], 0.);
+        assert!(edge(0., 0.9999, 1.0001) && edge(-0.5 * w * w, 0.9999, 1.0001) && edge(-9. * w * w, 0.9999, 1.0001));
+        assert!(edge(w * w, 0.5477, 0.5478) && edge(4. * w * w, 0.3056, 0.3057) && edge(0.1 * w * w, 0.9096, 0.9097));
+        assert!(admissible(1.9999 / w, 0., w * w, &[], 0.) && !admissible(2.0001 / w, 0., w * w, &[], 0.));
+        // The constructed example (numbers.status.md §1.1): 1 µK in a tweezer of 20 kHz and a light well of
+        // ω_k = 0.35 rad/µs, K = 16.1 /µm, v_max = 0.050 µm/µs. The trap alone allows 25 µs, the light 7.8 µs; the
+        // step's edge is at 5.5 µs.
+        assert!(admissible(7.7, khz(20.), 0., &[[0., 16.1]], 0.05) && admissible(5.4, khz(20.), 0.35 * 0.35, &[[0., 16.1]], 0.05) && !admissible(5.6, khz(20.), 0.35 * 0.35, &[[0., 16.1]], 0.05));
+        assert_eq!(first_rung(1e9, khz(74.65), 0., &[], fast, typical), None);
+        assert_eq!(first_rung(10., f64::NAN, 0., &[], fast, typical), None);
+        assert_eq!(first_rung(10., khz(74.65), f64::NAN, &[], fast, typical), None);
+        assert_eq!(first_rung(10., khz(74.65), 0., &[[0., 16.1]], f64::INFINITY, typical), None);
+        assert_eq!(first_rung(10., khz(74.65), 0., &[[0., 16.1]], fast, f64::NAN), None);
     }
 
     /// A read on unlimited groups (one look's interval is z of the error), and one on the pilot's eleven.
