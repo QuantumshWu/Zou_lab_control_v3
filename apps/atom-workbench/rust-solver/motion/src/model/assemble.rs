@@ -506,6 +506,10 @@ pub(crate) struct Plan {
     /// Whether the generator is the same at every time along every path: no entry beats in the frames, in time or along a path
     /// (every residual beat and wave vector exactly zero).
     still: bool,
+    /// What a step's nodes sample of the generator along a path: per tone its rate |Ω| (rad/µs) and the largest residual
+    /// wave vector |K| (1/µm) of its entries in the cluster's frames -- an entry of the tone turns at Ω + K·v on a path
+    /// of the velocity v.
+    pub(crate) sampled: Vec<[f64; 2]>,
     /// The complex multiply-adds at a node (module documentation, # Work): of the generator; of the force's form without its
     /// values' slopes; and of those per direction of them.
     node: [f64; 3],
@@ -959,6 +963,8 @@ impl<'a> Builder<'a> {
         let mut tone_index: HashMap<Beat, usize> = HashMap::from([(model.axes.zero(), 0)]);
         let mut tones = vec![0.0];
         let mut still = true;
+        // Per tone the largest residual wave vector of its entries (`Plan::sampled`).
+        let mut waves_sampled = vec![0.0_f64];
         let mut entry_tones: Vec<Vec<usize>> = vec![];
         for d in &self.drafts {
             let waves = |s: Option<usize>| -> Vec<Wave> {
@@ -970,10 +976,18 @@ impl<'a> Builder<'a> {
                 let beat = d.beat.plus(1, &cluster.frames[x]).plus(-1, &cluster.frames[y]);
                 let frames = cluster.waves_exact[x].plus(-1, &cluster.waves_exact[y]);
                 still &= beat.is_zero() && left.iter().all(|l| right.iter().all(|r| l.plus(1, r) == frames));
-                block_tones.push(*tone_index.entry(beat.clone()).or_insert_with(|| {
+                let tone = *tone_index.entry(beat.clone()).or_insert_with(|| {
                     tones.push(model.omega(&beat));
+                    waves_sampled.push(0.0);
                     tones.len() - 1
-                }));
+                });
+                for l in &left {
+                    for r in &right {
+                        let k = model.wave_value(&l.plus(1, r).plus(-1, &frames));
+                        waves_sampled[tone] = waves_sampled[tone].max((k[0] * k[0] + k[1] * k[1] + k[2] * k[2]).sqrt());
+                    }
+                }
+                block_tones.push(tone);
             }
             entry_tones.push(block_tones);
         }
@@ -1165,6 +1179,7 @@ impl<'a> Builder<'a> {
             sums,
             products,
             still,
+            sampled: tones.iter().zip(&waves_sampled).map(|(omega, wave)| [omega.abs(), *wave]).collect(),
             node,
             tones,
             classes,
@@ -1425,6 +1440,12 @@ pub struct Middle<'a> {
 }
 
 impl Model {
+    /// What a step's nodes sample of the clusters' generators along a path under a light set (`Plan::sampled`): per
+    /// residual beat its rate |Ω| (rad/µs) and the largest wave vector |K| (1/µm) that turns with it.
+    pub fn sampled(&self, lights: &Lights) -> Vec<[f64; 2]> {
+        (0..self.clusters.len()).flat_map(|c| self.plan(c, lights).sampled.clone()).collect()
+    }
+
     /// A cluster's plan under a light set, made once.
     pub(crate) fn plan(&self, cluster: usize, lights: &Lights) -> Arc<Plan> {
         let mut plans = self.plans.lock().expect("the plans' lock");

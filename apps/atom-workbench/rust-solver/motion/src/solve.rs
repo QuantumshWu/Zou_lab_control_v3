@@ -18,27 +18,34 @@
 //! 5. The result (contract §2.2, `assemble`).
 //!
 //! # The step (SPEC §2.2)
-//! One step τ for the run (adapt.rs). The ladder's rungs are the output interval over powers of two; its top one the
-//! largest below the reference flow's resonance, ω τ < π at the prepared trap's largest frequency (`top_rung`).
+//! One step τ for the run (adapt.rs). The ladder's rungs are the output interval over powers of two. A step is
+//! admissible where its nodes resolve what the scheme samples along an atom's path (`top_rung`): the reference flow,
+//! ω τ < π at the prepared trap's largest frequency; and the generator, whose change along the path the propagation
+//! reads at nodes half a step apart, (|Ω| + |K| v) τ/2 < π for every residual beat Ω and wave vector K of the model's
+//! entries at the largest speed v of the reach the model is judged over. The top rung is the largest that is.
 //!
 //! The step's convergence is checked on the pilot, as a refinement is checked by hand: the pilot's trajectories run at
 //! τ and, the same trajectory numbers -- the same initial atoms, the same jumps' draws by their number, the same
-//! Brownian path (adapt.rs) --, at 2τ (`Levels`). An output's step error is e(τ) = [Q(2τ) − Q(τ)]/(2^p − 1), its error
-//! the delete-one-group jackknife of the paired difference (estimate.rs `between`): one instrument for the loss, the
-//! rows as shown and T per lab axis, each carried to the output by the dynamics itself.
+//! Brownian path (adapt.rs) --, at 2τ (`Levels`). A quantity's step error is e(τ) = [Q(2τ) − Q(τ)]/(2^p − 1), averaged
+//! over the run's outputs, its error the delete-one-group jackknife of that average (estimate.rs `between`): one number
+//! for the loss, for each row as shown and for T on each lab axis, each carried to the outputs by the dynamics itself.
+//! The step's error is a smooth function of the time, and one question whatever the number of outputs.
 //!
-//! - The first rung is the rung below the top one: its companion at 2τ is then itself below the resonance.
-//! - The screen (`screen`, `settle`), on the scout and on the pilot: the step is halved while some difference lies
-//!   clearly beyond the step's share among all the looks (decide.rs `judge`); the level at τ becomes the companion and
+//! - The first rung is the rung below the top one: its companion at 2τ is then itself admissible -- a comparison of two
+//!   levels says something only where the coarser one still resolves what the scheme samples.
+//! - The screen (`screen`, `settle`), on the scout and on the pilot: the step is halved while some average lies clearly
+//!   beyond the step's share among the family's few looks (decide.rs `judge`); the level at τ becomes the companion and
 //!   only τ/2 is run anew. Down to the step at which a trajectory would take `MOST_STEPS` steps, where the step stands
 //!   as it is, flagged.
-//! - What enters an output's account is the clear part of the pilot's difference, |e| − t·SE where positive, among the
-//!   same looks (`checked`): nothing where no change is seen, at most the step's share where the screen let the step
-//!   stand. It is fixed after the pilot; the product runs one level and reads no step.
-//! - The check's resolution -- the pairs' t·SE at the worst output -- is said in the result's method line beside the
-//!   two steps compared and the number of pairs (`Checked`). It is in no total and raises no flag.
+//! - What enters a quantity's account, at every output alike, is the clear part of its average, |e| − t·SE where
+//!   positive, among the same looks (`checked`): nothing where no change is seen, at most the step's share where the
+//!   screen let the step stand. It is fixed after the pilot; the product runs one level and reads no step.
+//! - The check's resolution -- t·SE of the averages -- is said in the result's method line beside the two steps
+//!   compared and the number of pairs (`Checked`). It is in no total and raises no flag.
 //!
-//! This is a check at the pilot's resolution, not a bound. A bound per output was built and measured (the product at
+//! It is a test of "no change seen", not a bound: an error confined to a short stretch of the run is diluted by the
+//! run's length in the average, and one below the resolution is not seen at all.
+//! A bound per output was built and measured (the product at
 //! both levels, a60231dd): the pairs part within 100 µs in six beams' cooling whatever the noise they share, so the
 //! difference's error at the late outputs is two independent ensembles', and the measurement cost 30 to 240 % of a run
 //! on top of it; pooling it over the outputs books less than the truth where the error grows in time (SPEC §2.2).
@@ -310,43 +317,55 @@ impl Well for Prepared<'_> {
     }
 }
 
-/// The ladder's top rung (module documentation, # The step): the output interval over the least power of two that
-/// brings the step below the reference flow's resonance at the frequency ω (rad/µs), ω τ < π -- there the two half
-/// flows of a step turn the motion by π and any kick between them grows.
-fn top_rung(interval: f64, frequency: f64) -> f64 {
+/// The ladder's top rung (module documentation, # The step): the output interval over the least power of two at which
+/// the step's nodes resolve what the scheme samples along an atom's path.
+/// - The reference flow, at the prepared trap's largest frequency ω (rad/µs): ω τ < π -- there the two half flows of a
+///   step turn the motion by π and any kick between them grows.
+/// - The generator: the propagation reads its change along the path at three nodes, the step's middle and its two
+///   ends (step.rs, # The kick), τ/2 apart, and takes it for the parabola through them. An entry that turns at the rate
+///   ρ along the path -- its residual beat Ω in the cluster's frames and its residual wave vector K at the atom's
+///   velocity, ρ = |Ω + K·v| ≤ |Ω| + |K| v (`sampled`: the model's own entries, per beat the largest |K|) -- advances by
+///   ρ τ/2 from node to node; at π the nodes read it as its alias, and two steps one of which is beyond that agree or
+///   differ for no reason of the step. So (|Ω| + |K| v) τ/2 < π for every entry, at the largest speed v of the reach
+///   the model is judged over (model.rs `Reach::speed`): one domain for the model's folds and for the step.
+fn top_rung(interval: f64, frequency: f64, sampled: &[[f64; 2]], speed: f64) -> f64 {
+    let turn = sampled.iter().map(|[beat, wave]| beat + wave * speed).fold(0., f64::max);
     let mut tau = interval;
-    while frequency * tau >= PI {
+    while frequency * tau >= PI || 0.5 * turn * tau >= PI {
         tau *= 0.5;
     }
     tau
 }
 
-/// The reads a step is judged by (module documentation, # The step), each with the step's share of its target: per
-/// output after t = 0 the loss, every row as shown, and T on each lab axis that is held to its target there (`held`: per
-/// output and axis). One family: what is clear of one of them is clear among them all.
-fn judged(reads: &[Between], held: &[[bool; 3]]) -> Vec<(Read, f64)> {
+/// The outputs each lab axis's T is averaged over between the pilot's levels (estimate.rs `between`), and the axes
+/// that are judged: an axis held to its target somewhere is averaged over the outputs it is held at, and judged; one
+/// held nowhere is averaged over every output, for its accounts alone.
+fn averaged_over(held: &[[bool; 3]]) -> (Vec<[bool; 3]>, [bool; 3]) {
+    let somewhere: [bool; 3] = std::array::from_fn(|a| held.iter().any(|h| h[a]));
+    (held.iter().map(|h| std::array::from_fn(|a| h[a] || !somewhere[a])).collect(), somewhere)
+}
+
+/// The reads a step is judged by (module documentation, # The step), each with the step's share of its target: the
+/// run's averages of the loss, of every row as shown, and of T on each lab axis that is held to its target somewhere
+/// (`held`). One family: what is clear of one of them is clear among them all.
+fn judged(read: &Between, held: [bool; 3]) -> Vec<(Read, f64)> {
     let [sp, st] = step_bound();
-    let mut looks: Vec<(Read, f64)> = vec![];
-    for (k, r) in reads.iter().enumerate().skip(1) {
-        looks.push((r.loss, sp));
-        looks.extend(r.shown.iter().map(|x| (*x, sp)));
-        if let Some(t) = &r.temperature {
-            looks.extend((0..3).filter(|&a| held[k][a]).map(|a| (t[a], st)));
-        }
-    }
+    let mut looks = vec![(read.loss, sp)];
+    looks.extend(read.shown.iter().map(|x| (*x, sp)));
+    looks.extend((0..3).filter(|&a| held[a]).filter_map(|a| read.temperature[a].map(|t| (t, st))));
     looks
 }
 
 /// The screen of a step on the reads between its two levels (module documentation, # The step; decide.rs `judge`):
 /// the family of its reads, each against the step's share. The step is halved where the family is beyond.
-fn screen(reads: &[Between], held: &[[bool; 3]]) -> Judgement {
-    judge(&judged(reads, held), ORDER as f64)
+fn screen(read: &Between, held: [bool; 3]) -> Judgement {
+    judge(&judged(read, held), ORDER as f64)
 }
 
-/// The step's part of one output's accounts (module documentation, # The step): on what is shown -- the largest of the
+/// The step's part of an output's accounts (module documentation, # The step): on what is shown -- the largest of the
 /// rows' and the loss's, a probability's error at most 1 -- and on T per lab axis (relative). The step's share until the
-/// pilot's two levels are read; then the clear part of their difference (`checked`), unbounded on an axis's T where a
-/// level holds fewer than two atoms.
+/// pilot's two levels are read; then the clear part of their difference's average over the run (`checked`), the same
+/// at every output, unbounded on an axis's T that no output reads at both levels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Bound {
     shown: f64,
@@ -361,8 +380,8 @@ impl Bound {
 }
 
 /// The step's check as the result tells it (module documentation, # The step): the companion's step (µs), the pairs
-/// compared, and the check's resolution -- the pairs' interval t·SE at the worst output, on what is shown (absolute) and
-/// on T on the axes held to their target (relative; unbounded where a held T is not read).
+/// compared, and the check's resolution -- the interval t·SE of the pairs' averages over the run, the largest on what is
+/// shown (absolute) and on T on the axes held to their target (relative; unbounded where a held axis's is not read).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Checked {
     companion: f64,
@@ -370,24 +389,16 @@ struct Checked {
     resolution: [f64; 2],
 }
 
-/// The pilot's reads between its two levels as the run takes them (module documentation, # The step): per output the
-/// clear part of each difference among the looks the screen judges -- |e| − t·SE at the family's interval, where
-/// positive --, and the check's resolution, one look's t·SE at the worst output.
-fn checked(reads: &[Between], held: &[[bool; 3]]) -> (Vec<Bound>, [f64; 2]) {
-    let looks = judged(reads, held).len() as f64;
+/// The pilot's reads between its two levels as the run takes them (module documentation, # The step): the clear part
+/// of each average among the looks the screen judges -- |e| − t·SE at the family's interval, where positive --, and the
+/// check's resolution, one look's t·SE.
+fn checked(read: &Between, held: [bool; 3]) -> (Bound, [f64; 2]) {
+    let looks = judged(read, held).len() as f64;
     let clear = |read: &Read| read.clear(looks).max(0.);
-    let step = reads
-        .iter()
-        .map(|r| Bound { shown: r.shown.iter().map(clear).fold(clear(&r.loss), f64::max).min(1.), temperature: r.temperature.as_ref().map_or([f64::INFINITY; 3], |t| t.each_ref().map(clear)) })
-        .collect();
-    let mut resolution = [0_f64; 2];
-    for (k, r) in reads.iter().enumerate().skip(1) {
-        resolution[0] = r.shown.iter().map(|x| x.spread.interval()).fold(resolution[0].max(r.loss.spread.interval()), f64::max);
-        for a in (0..3).filter(|&a| held[k][a]) {
-            resolution[1] = resolution[1].max(r.temperature.as_ref().map_or(f64::INFINITY, |t| t[a].spread.interval()));
-        }
-    }
-    (step, resolution)
+    let step = Bound { shown: read.shown.iter().map(clear).fold(clear(&read.loss), f64::max).min(1.), temperature: read.temperature.map(|t| t.map_or(f64::INFINITY, |t| clear(&t))) };
+    let shown = read.shown.iter().map(|x| x.spread.interval()).fold(read.loss.spread.interval(), f64::max);
+    let temperature = (0..3).filter(|&a| held[a]).map(|a| read.temperature[a].map_or(f64::INFINITY, |t| t.spread.interval())).fold(0., f64::max);
+    (step, [shown, temperature])
 }
 
 /// The estimates, the listed outputs' atoms and the counts of some groups.
@@ -594,14 +605,15 @@ fn attempt(
     // reference flow's, SPEC §2.1), so the quadrature costs no more than the pilot the solve has just run, in any trap;
     // where that budget ends it before its levels agree, their difference is T(0)'s booked error (`Fixed::start`).
     let (momentum, start) = exact(&ensemble.kinetic(0));
-    let top = top_rung(plan.times[1] - plan.times[0], trap.frequencies.iter().copied().fold(0., f64::max));
+    // The ladder's top rung over the reach the model is judged over, and the first rung below it: an attempt that begins
+    // at the step the one before stood at begins no higher than that (a reach that has grown lowers the top).
+    let top = top_rung(plan.times[1] - plan.times[0], trap.frequencies.iter().copied().fold(0., f64::max), &model.sampled(&model.running()), judged.speed);
     let mut context = Context {
         momentum,
         fixed: Fixed { model: vec![[0.; 2]; outputs], temperature: vec![[false; 3]; outputs], start },
         step: vec![Bound::share(); outputs],
         checked: None,
-        // The first rung (module documentation, # The step): the rung below the ladder's top one.
-        tau: step.unwrap_or_else(|| halved(top, 1.)),
+        tau: step.map_or(halved(top, 1.), |step| step.min(halved(top, 1.))),
         plan,
         scales,
         initial: row,
@@ -712,8 +724,9 @@ fn attempt(
         context.fixed.temperature = held_to(&estimates, &report.lab);
         // The step's check (module documentation, # The step): the clear part of the pilot's difference into the
         // accounts, its resolution into the result's words.
-        let (step, resolution) = checked(&between(&pilot, &levels.coarse.iter().collect::<Vec<_>>(), &context.scales), &context.fixed.temperature);
-        (context.step, context.checked) = (step, Some(Checked { companion: 2. * tau, pairs: pilot_size(), resolution }));
+        let (over, held) = averaged_over(&context.fixed.temperature);
+        let (step, resolution) = checked(&between(&pilot, &levels.coarse.iter().collect::<Vec<_>>(), &context.scales, &over), held);
+        (context.step, context.checked) = (vec![step; outputs], Some(Checked { companion: 2. * tau, pairs: pilot_size(), resolution }));
         // A unit to keep at the pilot's states (`keep`): its model then runs a pilot again.
         if let Some((u, share)) = keep(request, light, kept, &model, reference, trap.centre, &units, &measured, &samples, &pilot, &estimates, &context.fixed, &context.scales, unsampled, pilot_size() as f64, barred) {
             return Ok(Attempt::Keep(units[u].clone(), tau, share));
@@ -798,8 +811,8 @@ fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Le
     loop {
         let beyond = {
             let (fine, coarse) = levels.paired();
-            let held = held_to(&pooled(&fine, &context.scales).0, frequencies);
-            matches!(screen(&between(&fine, &coarse, &context.scales), &held), Judgement::Beyond(_))
+            let (over, held) = averaged_over(&held_to(&pooled(&fine, &context.scales).0, frequencies));
+            matches!(screen(&between(&fine, &coarse, &context.scales, &over), held), Judgement::Beyond(_))
         };
         let below = halved(context.tau, 1.);
         if !beyond {
@@ -1526,9 +1539,9 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     if let Some(check) = &c.checked {
         let largest = (1..outputs).flat_map(|k| temperature[k].iter().flatten().map(|a| a.step).chain([population[k].step])).fold(0., f64::max);
         let share = (1 << ORDER) - 1;
-        ledger.item(&format!("时间步长 τ = {} μs（全程不变）", c.tau), largest, &format!("试探的轨迹在 τ 与 2τ 下逐条配对比较：两者之差的 1/{share} 中读清的部分"));
+        ledger.item(&format!("时间步长 τ = {} μs（全程不变）", c.tau), largest, &format!("试探的轨迹在 τ 与 2τ 下逐条配对比较：两者之差的 1/{share} 在全程上的平均中读清的部分"));
         let relative = if check.resolution[1].is_finite() { format!("±{}", percent(check.resolution[1])) } else { "读不出".into() };
-        step = format!("（收敛检查：与 {} μs 在 {} 对同号轨迹上比较，能分辨的差别为布居 ±{}、温度 {relative}；这是检查，不是误差界，未计入总误差）", check.companion, check.pairs, percent(check.resolution[0]));
+        step = format!("（收敛检查：与 {} μs 在 {} 对同号轨迹上比较，全程平均的差别能分辨到布居 ±{}、温度 {relative}；这是检查，不是误差界，未计入总误差）", check.companion, check.pairs, percent(check.resolution[0]));
     }
     ledger.close(times, &population, &temperature, &held);
     // T and the motion at t = 0: exact.
@@ -1651,78 +1664,87 @@ mod tests {
         assert!(n % GROUP == 0 && unseen(n as f64) <= room && unseen((n - GROUP) as f64) > room, "{n}");
     }
 
-    /// The ladder's top rung: the output interval over the least power of two below the reference flow's resonance
-    /// ω τ = π -- of a 10 µs interval, 5 µs at a tweezer's 74.65 kHz (π/ω = 6.7 µs) and 0.3125 µs at a lattice's 910.7 kHz
-    /// (0.55 µs); the interval itself in a slow trap.
+    /// The ladder's top rung: the output interval over the least power of two at which the step's nodes resolve what the
+    /// scheme samples.
+    /// - The reference flow alone (no light sampled): below the resonance ω τ = π -- of a 10 µs interval, 5 µs at a
+    ///   tweezer's 74.65 kHz (π/ω = 6.7 µs) and 0.3125 µs at a lattice's 910.7 kHz (0.55 µs); the interval itself in a
+    ///   slow trap.
+    /// - The light: a standing wave of the D2 line (|K| = 2k = 16.1 /µm) crossed at 0.218 µm/µs -- the reach's speed at
+    ///   30 µK, √(2 ln(1/s) k_BT/m) with the unsampled share s of 2¹⁴ trajectories -- turns at 3.51 rad/µs: τ < 2π/3.51 =
+    ///   1.79 µs, the rung 1.25 µs of a 10 µs interval where the trap alone would give 5 µs. A heavier, colder atom at
+    ///   0.0089 µm/µs leaves the trap's rung. A residual beat counts with the motion, |Ω| + |K| v: 2 rad/µs more take
+    ///   the rung to 0.625 µs. The largest entry decides, whichever its part: a beat of 12 rad/µs alone, 0.3125 µs.
     #[test]
-    fn the_top_rung_lies_below_the_resonance() {
+    fn the_top_rung_resolves_the_trap_and_the_light() {
         let khz = |f: f64| std::f64::consts::TAU * f * 1e-3;
-        assert_eq!(top_rung(10., khz(74.65)), 5.);
-        assert_eq!(top_rung(10., khz(910.7)), 0.3125);
-        assert_eq!(top_rung(10., khz(1.)), 10.);
+        assert_eq!(top_rung(10., khz(74.65), &[], 0.218), 5.);
+        assert_eq!(top_rung(10., khz(910.7), &[[0., 16.1]], 0.218), 0.3125);
+        assert_eq!(top_rung(10., khz(1.), &[[0., 0.]], 0.218), 10.);
+        let speed = (2. * (MOST_TRAJECTORIES as f64 / (CONFIDENCE * CONFIDENCE) + 1.).ln() * KT_PER_UK * 30. * hbar_over_mass(1.4432e-25)).sqrt();
+        assert!((speed - 0.2185).abs() < 5e-4 && (TAU / (16.1 * speed) - 1.79).abs() < 5e-3, "{speed}");
+        assert_eq!(top_rung(10., khz(74.65), &[[0., 16.1]], speed), 1.25);
+        assert_eq!(top_rung(10., khz(74.65), &[[0., 16.1]], 0.0089), 5.);
+        assert_eq!(top_rung(10., khz(74.65), &[[0., 0.], [2., 16.1], [0.5, 8.]], speed), 0.625);
+        assert_eq!(top_rung(10., khz(74.65), &[[12., 0.], [0., 16.1]], speed), 0.3125);
     }
 
-    /// The screen's outcomes on the reads between two levels at one output (unlimited groups: one look's interval is z
-    /// of the error). The step stands where every difference fits its share, where a small one lies under a wide
-    /// interval, and where one lies above its share but not clearly so among all the looks -- that one is a bound to
-    /// book, not a reason to halve; it is halved where a difference is clear of its share: T's on an axis held to its
-    /// target (an axis that is not held is not judged, whatever the others are held to, nor is the output at t = 0),
-    /// the loss's and a row's as shown against the population's share.
+    /// The screen's outcomes on the run's averages between two levels (unlimited groups: one look's interval is z of
+    /// the error). The step stands where every average fits its share, where a small one lies under a wide interval,
+    /// and where one lies above its share but not clearly so among the looks; it is halved where an average is clear of
+    /// its share: T's on an axis held to its target somewhere (an axis held nowhere is not judged, whatever the others
+    /// are), the loss's and a row's as shown against the population's share. The family is the run's few averages: a
+    /// difference of 24 % on T with a standard error of 5 % on eleven groups -- one standing wave's Doppler cooling at
+    /// 2.5 µs against 5 µs -- is clear among them, where no single output's 6 SE was among seven thousand looks.
     #[test]
-    fn the_screen_halves_the_step_on_a_clear_difference_alone() {
+    fn the_screen_halves_the_step_on_a_clear_average_alone() {
         let read = |value: f64, error: f64| Read { value, spread: Spread { error, groups: f64::INFINITY } };
         let quiet = read(0., 0.);
-        let at = |t: Read| Between { loss: quiet, shown: [quiet; STATES], temperature: Some([t, quiet, quiet]) };
-        let halved = |reads: &[Between], held: &[[bool; 3]]| matches!(screen(reads, held), Judgement::Beyond(_));
-        let held = [[false; 3], [true; 3]];
+        let at = |t: Read| Between { loss: quiet, shown: [quiet; STATES], temperature: [Some(t), Some(quiet), None] };
+        let halved = |read: &Between, held: [bool; 3]| matches!(screen(read, held), Judgement::Beyond(_));
         let [sp, st] = step_bound();
-        assert!(!halved(&[at(quiet), at(read(0.5 * st, 0.1 * st))], &held));
-        assert!(!halved(&[at(quiet), at(read(0.5 * st, st))], &held));
-        assert!(!halved(&[at(quiet), at(read(2. * st, st))], &held));
-        assert!(halved(&[at(quiet), at(read(4. * st, 0.01 * st))], &held));
-        assert!(!halved(&[at(quiet), at(read(9. * st, 0.))], &[[false; 3]; 2]));
-        assert!(!halved(&[at(read(9. * st, 0.)), at(quiet)], &[[true; 3]; 2]));
-        assert!(!halved(&[at(quiet), at(read(9. * st, 0.))], &[[false; 3], [false, true, true]]));
-        assert!(halved(&[at(quiet), at(read(9. * st, 0.))], &[[false; 3], [true, false, false]]));
+        assert!(!halved(&at(read(0.5 * st, 0.1 * st)), [true; 3]));
+        assert!(!halved(&at(read(0.5 * st, st)), [true; 3]));
+        assert!(!halved(&at(read(2. * st, st)), [true; 3]));
+        assert!(halved(&at(read(4. * st, 0.01 * st)), [true; 3]));
+        assert!(!halved(&at(read(9. * st, 0.)), [false, true, true]) && halved(&at(read(9. * st, 0.)), [true, false, false]));
         let lost = Between { loss: read(2. * sp, 0.01 * sp), ..at(quiet) };
         let mut row = at(quiet);
         row.shown[3] = read(-2. * sp, 0.01 * sp);
-        assert!(halved(&[at(quiet), lost], &[[false; 3]; 2]) && halved(&[at(quiet), row], &[[false; 3]; 2]));
-        // The pilot's own numbers: a difference of 12 % on T with a standard error of 4 % on eleven groups is no clear
-        // one among a hundred looks (Student's t at ten degrees of freedom and Šidák's tail); 60 % is.
-        let pilot = |value: f64| Between { temperature: Some([Read { value, spread: Spread { error: 0.04, groups: 11. } }, quiet, quiet]), ..at(quiet) };
-        let run = |value: f64| -> Vec<Between> { std::iter::once(at(quiet)).chain(std::iter::repeat_n(pilot(value), 100)).collect() };
-        assert!(!halved(&run(0.12), &[[true; 3]; 101]) && halved(&run(0.6), &[[true; 3]; 101]));
+        assert!(halved(&lost, [false; 3]) && halved(&row, [false; 3]));
+        let pilot = |value: f64, error: f64| at(Read { value, spread: Spread { error, groups: 11. } });
+        assert_eq!(judged(&pilot(0.24, 0.05), [true; 3]).len(), 1 + STATES + 2);
+        assert!(halved(&pilot(0.65, 0.11), [true; 3]) && halved(&pilot(0.32, 0.05), [true; 3]) && !halved(&pilot(0.12, 0.04), [true; 3]));
     }
 
-    /// The step's check on the pilot's reads (`checked`): of a hundred outputs with a difference of 12 % on T_x and a
-    /// standard error of 4 % on eleven groups, nothing is clear among the looks (Student's t at ten degrees of freedom
-    /// and Šidák's tail over the family) and nothing enters the accounts; of a difference of 60 % the clear part does,
-    /// the same number the screen halves the step for where it exceeds the step's share. The resolution is one look's
-    /// t·SE at the worst output: T's on the axes held alone, what is shown from the rows and the loss. An output where
-    /// a level holds fewer than two atoms leaves T's step unbounded, and the resolution too where that axis is held.
+    /// The step's check on the pilot's averages (`checked`): a difference of 12 % on T_x with a standard error of 4 % on
+    /// eleven groups leaves nothing clear among the looks (Student's t at ten degrees of freedom and Šidák's tail over
+    /// the family) and nothing enters the accounts; of 60 % the clear part does, the number the screen halves the step
+    /// for where it exceeds the step's share. The resolution is one look's t·SE: T's on the axes judged alone, what is
+    /// shown from the rows and the loss. An axis no output reads has no bound, and no resolution where it is judged.
+    /// The outputs an axis is averaged over: those it is held at; all of them for an axis held nowhere, which is not
+    /// judged.
     #[test]
     fn the_step_s_check_books_what_is_clear_and_tells_its_resolution() {
         let quiet = Read { value: 0., spread: Spread { error: 0., groups: f64::INFINITY } };
         let pilot = |value: f64, error: f64| Read { value, spread: Spread { error, groups: 11. } };
-        let at = |t: [Read; 3]| Between { loss: quiet, shown: [quiet; STATES], temperature: Some(t) };
-        let run = |x: Read| -> Vec<Between> { std::iter::once(at([quiet; 3])).chain(std::iter::repeat_n(at([x, pilot(0.3, 0.2), quiet]), 100)).collect() };
-        let held = vec![[true, false, true]; 101];
-        let (step, resolution) = checked(&run(pilot(0.12, 0.04)), &held);
-        assert!(step.iter().all(|b| b.shown == 0. && b.temperature == [0.; 3]), "{:?}", step[1]);
+        let at = |x: Read| Between { loss: quiet, shown: [quiet; STATES], temperature: [Some(x), Some(pilot(0.3, 0.2)), Some(quiet)] };
+        let held = [true, false, true];
+        let (step, resolution) = checked(&at(pilot(0.12, 0.04)), held);
+        assert!(step.shown == 0. && step.temperature[0] == 0. && step.temperature[2] == 0., "{step:?}");
         let one = Spread { error: 0.04, groups: 11. }.interval();
         assert!(resolution == [0., one] && one > CONFIDENCE * 0.04, "{resolution:?}");
-        let reads = run(pilot(0.6, 0.04));
-        let (step, _) = checked(&reads, &held);
-        let family = Spread { error: 0.04, groups: 11. }.interval_over(judged(&reads, &held).len() as f64);
-        assert!(step[0].temperature == [0.; 3] && (step[1].temperature[0] - (0.6 - family)).abs() < 1e-15 && step[1].temperature[0] > step_bound()[1], "{:?}", step[1]);
-        assert!(matches!(screen(&reads, &held), Judgement::Beyond(_)));
-        // What is shown: the largest of the rows' and the loss's; an unread T.
-        let mut lossy = at([quiet; 3]);
-        (lossy.loss, lossy.shown[2], lossy.temperature) = (Read { value: -0.2, spread: Spread { error: 0.01, groups: f64::INFINITY } }, pilot(0.01, 0.02), None);
-        let (step, resolution) = checked(&[at([quiet; 3]), lossy], &[[false; 3], [false, true, false]]);
-        assert!(step[1].shown > 0.15 && step[1].shown < 0.2 && step[1].temperature == [f64::INFINITY; 3], "{:?}", step[1]);
+        let read = at(pilot(0.6, 0.04));
+        let (step, _) = checked(&read, held);
+        let family = Spread { error: 0.04, groups: 11. }.interval_over(judged(&read, held).len() as f64);
+        assert!((step.temperature[0] - (0.6 - family)).abs() < 1e-15 && step.temperature[0] > step_bound()[1], "{step:?}");
+        assert!(matches!(screen(&read, held), Judgement::Beyond(_)));
+        let mut lossy = at(quiet);
+        (lossy.loss, lossy.shown[2], lossy.temperature[1]) = (Read { value: -0.2, spread: Spread { error: 0.01, groups: f64::INFINITY } }, pilot(0.01, 0.02), None);
+        let (step, resolution) = checked(&lossy, [false, true, false]);
+        assert!(step.shown > 0.15 && step.shown < 0.2 && step.temperature[1] == f64::INFINITY, "{step:?}");
         assert!((resolution[0] - Spread { error: 0.02, groups: 11. }.interval()).abs() < 1e-15 && resolution[1] == f64::INFINITY, "{resolution:?}");
+        let (over, judged) = averaged_over(&[[false; 3], [true, false, false], [false; 3]]);
+        assert_eq!((over, judged), (vec![[false, true, true], [true; 3], [false, true, true]], [true, false, false]));
     }
 
     /// A look on T at 800 trajectories: the model's error, the step's clear part, the statistics' interval (each

@@ -35,12 +35,15 @@
 //! the same output at twice the step differs by Q(2τ) − Q(τ) = (2^p − 1) e(τ) to the leading order, and
 //! e(τ) = [Q(2τ) − Q(τ)]/(2^p − 1) (decide.rs `richardson` at the ratio ½, less the level's own share). `between` takes it
 //! from two ensembles of the same trajectories -- the same numbers, so the same initial atoms and the same streams -- at
-//! τ and at 2τ: the loss and each row as shown as they are, T per lab axis relative to the finer level's T. Its error is
-//! the delete-one-group jackknife of the difference itself, each group left out of both levels at once: what the two
-//! levels share (the initial atoms, as long as the motion remembers them) cancels in it, and where they have
-//! decorrelated it is the two levels' own errors in quadrature over 2^p − 1 -- at p = 2 and equal numbers √2/3 = 0.47
-//! of the output's own statistical error. Nothing is assumed of how an error is carried from a step to an output: the
-//! two ensembles are carried by the dynamics itself.
+//! τ and at 2τ: the loss and each row as shown as they are, T per lab axis relative to the finer level's T; and it takes
+//! each quantity's average over the outputs after t = 0, one number a quantity. The step's error is a smooth function of
+//! the time, and the outputs' reads of it one question asked at every output: the average answers it once, with the
+//! noise of the run's whole length. Its error is the delete-one-group jackknife of the average itself, each group left
+//! out of both levels and of every output at once, so that the outputs' correlations in time are in it: what the two
+//! levels share (the initial atoms, as long as the motion remembers them) cancels, and where they have decorrelated
+//! it is the two levels' own errors. Nothing is assumed of how an error is carried from a step to an output: the two
+//! ensembles are carried by the dynamics itself. What the average does not see: an error confined to a short stretch
+//! of the run, which the run's length dilutes.
 //!
 //! # Many looks
 //! A decision that acts where any of m reads lies beyond its interval (decide.rs) takes the largest of m noisy reads: at
@@ -457,35 +460,47 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
         .collect()
 }
 
-/// The step's error at one output as two ensembles measure it (module documentation, # The step's error): the loss's
-/// and each row's as shown (absolute), and T's per lab axis relative to T, where both levels hold two atoms at least.
+/// The step's error as two ensembles measure it, averaged over the outputs after t = 0 (module documentation, # The
+/// step's error): the loss's and each row's as shown (absolute), and T's per lab axis relative to T -- none on an axis no
+/// output reads.
 #[derive(Clone, Debug)]
 pub struct Between {
     pub loss: Read,
     pub shown: [Read; STATES],
-    pub temperature: Option<[Read; 3]>,
+    pub temperature: [Option<Read>; 3],
 }
 
-/// The step's error of the level `fine` at every output, from it and the level `coarse` at twice its step on the same
-/// trajectories, group by group in the same order (module documentation, # The step's error).
-pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scales) -> Vec<Between> {
+/// The step's error of the level `fine`, from it and the level `coarse` at twice its step on the same trajectories,
+/// group by group in the same order (module documentation, # The step's error): each quantity's average over the
+/// outputs after t = 0 -- T's on a lab axis over the outputs of `over` (per output and axis) where both levels, and
+/// both without any one group, hold two atoms at least.
+pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scales, over: &[[bool; 3]]) -> Between {
     assert_eq!(fine.len(), coarse.len(), "the two levels hold the same groups");
     let outputs = fine.first().map_or(0, |g| g.borrow().sums.len());
-    let hm = scales.hbar_over_mass;
+    let (hm, groups) = (scales.hbar_over_mass, fine.len());
     // The finer level's share of the difference: 1/(2^p − 1).
     let share = richardson(0.5, ORDER as f64) - 1.;
-    (0..outputs)
-        .into_par_iter()
-        .map(|k| {
-            let j = jackknife(&[fine, coarse], k, hm);
-            let (f, c) = (&j.full[0], &j.full[1]);
-            Between {
-                loss: Read { value: share * (c.loss - f.loss), spread: j.every(|m| share * (m[1].loss - m[0].loss)) },
-                shown: std::array::from_fn(|s| Read { value: share * (c.shown[s] - f.shown[s]), spread: j.every(|m| share * (m[1].shown[s] - m[0].shown[s])) }),
-                temperature: f.temperature.zip(c.temperature).map(|(tf, tc)| std::array::from_fn(|a| Read { value: share * (tc[a] / tf[a] - 1.), spread: j.held(|t| share * (t[1][a] / t[0][a] - 1.)) })),
-            }
+    let each: Vec<Jackknife> = (1..outputs).into_par_iter().map(|k| jackknife(&[fine, coarse], k, hm)).collect();
+    // A quantity's average over some outputs, spread over the groups left out of every one of them.
+    let averaged = |at: &[&Jackknife], f: &dyn Fn(&[Moments]) -> f64, read: f64| -> Read {
+        let mean = |of: &dyn Fn(&Jackknife) -> f64| at.iter().map(|j| of(j)).sum::<f64>() / at.len() as f64;
+        let leave: Vec<f64> = if groups >= 2 { (0..groups).map(|i| mean(&|j| f(&j.leave[i]))).collect() } else { vec![] };
+        Read { value: mean(&|j| f(&j.full)), spread: if leave.is_empty() { Spread::UNREAD } else { spread(leave.iter().copied(), read) } }
+    };
+    let all: Vec<&Jackknife> = each.iter().collect();
+    let temperature = std::array::from_fn(|a| {
+        let read = |m: &[Moments]| m.iter().all(|x| x.temperature.is_some());
+        let at: Vec<&Jackknife> = each.iter().enumerate().filter(|(k, j)| over[k + 1][a] && read(&j.full) && j.leave.iter().all(|l| read(l))).map(|(_, j)| j).collect();
+        (!at.is_empty()).then(|| {
+            let e = |m: &[Moments]| share * (m[1].temperature.map_or(f64::NAN, |t| t[a]) / m[0].temperature.map_or(f64::NAN, |t| t[a]) - 1.);
+            averaged(&at, &e, at.iter().map(|j| j.holding).fold(f64::INFINITY, f64::min))
         })
-        .collect()
+    });
+    Between {
+        loss: averaged(&all, &|m| share * (m[1].loss - m[0].loss), groups as f64),
+        shown: std::array::from_fn(|s| averaged(&all, &|m| share * (m[1].shown[s] - m[0].shown[s]), groups as f64)),
+        temperature,
+    }
 }
 
 #[cfg(test)]
@@ -524,7 +539,7 @@ mod tests {
                     fine.push(group(energies.iter().map(|&(e, _)| Some(atom(0, 0., e))).collect()));
                     coarse.push(group(energies.iter().map(|&(e, other)| Some(atom(0, 0., (1. + 3. * bias) * (rho * e + (1. - rho) * other)))).collect()));
                 }
-                let read = between(&fine, &coarse, &UNIT)[0].temperature.unwrap()[0];
+                let read = between(&twice(&fine), &twice(&coarse), &UNIT, &[[true; 3]; 2]).temperature[0].unwrap();
                 let m = summarize(&fine, &UNIT)[0].motion.unwrap();
                 sum += read.value;
                 squares += read.value * read.value;
@@ -542,8 +557,35 @@ mod tests {
             assert!((error / own / expected - 1.).abs() <= 3. * tolerance, "ρ = {rho}: the error over T's own, {}, against {expected}", error / own);
         }
         let shows = |count: usize| group((0..GROUP as usize).map(|i| Some(atom(usize::from(i >= count), 0., 1.))).collect());
-        let read = &between(&[shows(6), shows(6)], &[shows(3), shows(3)], &UNIT)[0];
+        let read = between(&twice(&[shows(6), shows(6)]), &twice(&[shows(3), shows(3)]), &UNIT, &[[true; 3]; 2]);
         assert!((read.shown[0].value + 0.125).abs() < 1e-15 && (read.shown[1].value - 0.125).abs() < 1e-15 && read.loss.value == 0. && read.shown[0].spread.error == 0.);
+        // The average over the outputs: three outputs after t = 0 whose rows read (3 − 6)/8, (5 − 6)/8 and (4 − 6)/8 a
+        // third each -- their mean; T's on the outputs asked alone, none on an axis asked nowhere.
+        let series = |counts: [usize; 3]| -> Vec<Group> {
+            (0..2)
+                .map(|_| {
+                    let mut g = Group::new(4);
+                    for i in 0..GROUP as usize {
+                        let at = |count: usize| Fate::Held(atom(usize::from(i >= count), 0., 1. + count as f64));
+                        g.add(&[at(6), at(counts[0]), at(counts[1]), at(counts[2])]);
+                    }
+                    g
+                })
+                .collect()
+        };
+        let mut over = [[true, false, false]; 4];
+        over[2][0] = false;
+        let read = between(&series([6; 3]), &series([3, 5, 4]), &UNIT, &over);
+        assert!((read.shown[0].value + (3. + 1. + 2.) / 8. / 3. / 3.).abs() < 1e-15, "{:?}", read.shown[0]);
+        // T is 1 + count at each output on every atom: 7 at the finer level, 4, 6 and 5 at the coarser; x over the
+        // first and the third output.
+        let t = read.temperature[0].expect("x is read where it is asked");
+        assert!((t.value - ((4. / 7. - 1.) + (5. / 7. - 1.)) / 2. / 3.).abs() < 1e-15 && read.temperature[1].is_none(), "{t:?}");
+    }
+
+    /// Groups of one output as groups of two: t = 0 and the output itself.
+    fn twice(groups: &[Group]) -> Vec<Group> {
+        groups.iter().map(|g| Group { sums: vec![g.sums[0].clone(), g.sums[0].clone()] }).collect()
     }
 
     /// Student's t at ν degrees of freedom at the normal's two-sided tail beyond z.
