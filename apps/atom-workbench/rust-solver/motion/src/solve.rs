@@ -5,17 +5,18 @@
 //!    gate fails kept (model.rs, SPEC §1.5); the trap the result reports, the outputs' plan, the initial ensemble and
 //!    what the reach leaves out of it; T(0) by quadrature; the near light's tables over the reach (SPEC §2.3).
 //! 2. The scout: the first member of every pilot group, at the attempt's first step and at twice it (# The step),
-//!    screened. Where its atoms outgrow the reach, or a folded unit is to be kept at its states (`keep`), the attempt
-//!    ends there and the next begins with that model: a model is settled for the price of a few trajectories, not of a
-//!    pilot.
+//!    screened. Where a folded unit is to be kept at its states (`keep`), the attempt ends there and the next begins
+//!    with that model: a model is settled for the price of a few trajectories, not of a pilot.
 //!    The pilot: the scout's groups whole, `pilot_size` trajectories at the run's two levels (the scout's are its
 //!    groups' first members and are not run again). Its groups have numbers of their own, from trajectory
 //!    `MOST_TRAJECTORIES` on: beyond every number a group of the product takes, which is its place in the run's list
 //!    (`product`). It checks the step -- on a third level, or on further pairs, where its first rung does not read
-//!    within the step's share (# The step) --, reads the
-//!    reach's test again, the model's units' errors at the states of the first held member of every group, and the
-//!    tables' errors at one state of every trajectory (SPEC §5.4; `one_each`). Its trajectories at the run's step stay in the result: they are trajectories
-//!    of the run's own model and step.
+//!    within the step's share (# The step) --, reads the reach's falsifier (`outgrown`: where its atoms have outgrown
+//!    the reach the attempt ends, and the next begins with the reach of the temperature read; on the pilot alone -- a
+//!    reach is grown to a temperature, which the scout's eleven atoms tell to √(2/11), and the work goes as its
+//!    root), the model's units' errors at the states of the first held member of every group, and the tables' errors
+//!    at one state of every trajectory (SPEC §5.4; `one_each`). Its trajectories at the run's step stay in the
+//!    result: they are trajectories of the run's own model and step.
 //! 3. The model's decisions (SPEC §5.2; # The model), at the scout's states and again at the pilot's, the step's error
 //!    taken at its share: a unit to keep ends the attempt, and the next begins with its model at the step this one
 //!    stood at; a keep to undo ends it too (# The model).
@@ -656,16 +657,36 @@ fn so_far(context: &Context, have: &[Part], more: &[&Part], messages: &mut Messa
     messages.result(all.len(), n, None, || assemble(context, &e, &l, &c, n));
 }
 
-/// The reach's falsifier (SPEC §1.8; decide.rs: a booked bound that a read can only refute): the pilot's T where it has
-/// outgrown the reach's temperature `reach` (µK: the largest kinetic temperature along an axis of the ensemble the
-/// reach was made for, model.rs `Reach::kinetic_uk`) -- some output's T above it beyond its interval among all the T read
-/// (Šidák over the outputs and axes) --; then the largest T read, the reach's new temperature. A T that reads above the
-/// reach within its interval leaves the reach standing, as every unreadable falsifier's read does.
-fn outgrown(estimates: &[Estimate], reach: f64) -> Option<f64> {
+/// Of the atoms the groups `parts` hold at every listed output: how many lie outside the reach (`Model::holds`), and
+/// how many there are.
+fn outside(model: &Model, reach: &crate::model::Reach, parts: &[&Part]) -> Vec<(f64, f64)> {
+    let listed = parts.first().map_or(0, |p| p.listed.len());
+    (0..listed).map(|j| parts.iter().flat_map(|p| &p.listed[j]).fold((0., 0.), |(outside, all), (r, kappa)| (outside + f64::from(u8::from(!model.holds(reach, *r, *kappa))), all + 1.))).collect()
+}
+
+/// The reach's falsifier (SPEC §1.8; decide.rs: a booked bound that a read can only refute). The reach is made for an
+/// ensemble -- the thermal one at its temperature, of which it leaves out the share `left` -- and the model is judged
+/// over it as holding the atoms. The pilot reads the two things this says of its atoms, as one family of looks
+/// (Šidák over all of them, each one-sided at the confidence z):
+/// - no lab axis's T at an output is above the largest kinetic temperature along an axis of that ensemble, `reach`
+///   (µK; model.rs `Reach::kinetic_uk`): refuted by a T read above it beyond its interval;
+/// - of the atoms held at a listed output, those outside the reach (`outside`: per listed output the count and the
+///   atoms) are a binomial's of the share `left` at the most: refuted by a count whose tail (estimate.rs `at_least`) is
+///   below the look's -- among the six hundred looks of two hundred outputs, three of the pilot's 88. This read
+///   estimates no spread. The T's interval is 6.4 standard errors there, each estimated on eleven groups: a T twice
+///   the reach's passes it wherever that estimate falls high, with a tenth of the atoms outside (measured, SPEC §1.8).
+///
+/// Either refutes; the reach's new temperature is then the largest T read. Where no T read is above `reach` the
+/// atoms outside are no hotter ensemble's (a cloud driven out carries its energy in its mean motion): the falsifier
+/// has no reach to offer them, and the reach stands.
+fn outgrown(outside: &[(f64, f64)], left: f64, estimates: &[Estimate], reach: f64) -> Option<f64> {
     let read: Vec<&crate::estimate::Motion> = estimates.iter().skip(1).filter_map(|e| e.motion.as_ref()).collect();
-    let looks = 3. * read.len() as f64;
-    let beyond = read.iter().any(|m| (0..3).any(|a| m.temperature[a] - m.temperature_errors[a].interval_over(looks) > reach));
-    beyond.then(|| read.iter().flat_map(|m| m.temperature).fold(reach, f64::max))
+    let looks = (3 * read.len() + outside.len()) as f64;
+    let hot = read.iter().any(|m| (0..3).any(|a| m.temperature[a] - m.temperature_errors[a].interval_over(looks) > reach));
+    let tail = 0.5 * crate::estimate::tail_among(looks);
+    let crowded = outside.iter().any(|&(count, atoms)| crate::estimate::at_least(count, atoms, left) < tail);
+    let hottest = read.iter().flat_map(|m| m.temperature).fold(reach, f64::max);
+    ((hot || crowded) && hottest > reach).then_some(hottest)
 }
 
 /// Whether a lab axis's temperature (µK) lies in the validated regime of that axis's frequency (rad/µs), k_BT ≥
@@ -897,6 +918,9 @@ fn attempt(
     // ensemble the reach was made for (model.rs `Reach::kinetic_uk`: T_r where the trap is classical, the zero point's
     // where it is cold) -- no lab axis's T is above it while the atoms are that ensemble.
     let held = judged.kinetic_uk.iter().copied().fold(reach, f64::max);
+    // And the share of its atoms it takes to lie outside the reach: the share the reach is made to leave out of its own
+    // ensemble, and no less than what it is known to leave out of the initial one.
+    let left = unsampled[0].max(unseen(MOST_TRAJECTORIES as f64));
     // The attempt's first step, and whether the rung above a step is a rung of the ladder (`first_rung`'s test at twice
     // the step): the attempt's first step has it where the attempt begins below its own first rung, at the step the
     // attempt before stood at. The check then reads that rung on a third level, at 4τ (`settle`): a cell of the
@@ -935,8 +959,8 @@ fn attempt(
     let mut levels = Levels::default();
 
     // The scout (module documentation, # The pipeline): the first member of every pilot group at both levels, screened;
-    // where its atoms outgrow the reach or a unit is to be kept at its states, the attempt ends here -- for the price of
-    // the scout, not of a pilot. The pilot's read of the same things below stands for the result.
+    // where a unit is to be kept at its states, the attempt ends here -- for the price of the scout, not of a pilot.
+    // The pilot's read of the same below stands for the result.
     if matches!(settle(&run, &ensemble, &mut context, &mut levels, &numbers, 0..1, &above, &dearer, messages), Settled::Dearer) {
         return Ok(Attempt::Undo);
     }
@@ -944,9 +968,6 @@ fn attempt(
         let tau = context.tau;
         let scout: Vec<&Part> = levels.fine.iter().collect();
         let estimates = pooled(&scout, &context.scales).0;
-        if let Some(t) = outgrown(&estimates, held) {
-            return Ok(Attempt::Grow(t, tau));
-        }
         let read = sampled(&model, &reading, &tables, &scout, None);
         let measured = Measured { errors: &read.errors, output: &read.at, group: &read.from, booked: &booking };
         let means = measured.means(outputs, None);
@@ -974,7 +995,7 @@ fn attempt(
     let run = {
         let pilot: Vec<&Part> = levels.fine.iter().collect();
         let (estimates, _, counts) = pooled(&pilot, &context.scales);
-        if let Some(t) = outgrown(&estimates, held) {
+        if let Some(t) = outgrown(&outside(&model, &judged, &pilot), left, &estimates, held) {
             return Ok(Attempt::Grow(t, tau));
         }
         let steps = counts.steps + levels.coarse.iter().map(|p| p.counts.steps).sum::<u64>();
@@ -2506,6 +2527,40 @@ mod tests {
             }),
             failed: 0.,
         }
+    }
+
+    /// The reach's falsifier (`outgrown`) on a pilot of 88 atoms, 200 outputs after t = 0 and 21 listed ones (621
+    /// looks), a reach made for 30.04 µK that leaves out s = 2.44e-4.
+    /// - Every T at the reach's and no atom outside: the reach stands. A T of 75 µK read exactly: refuted, to 75.
+    /// - The T's own read fails where its error is estimated high: 75 ± 12 µK on eleven groups is within 6.4 errors of
+    ///   the reach. The count then: two of 88 outside happen by chance once in 4400 (the tail (88 s)²/2), not rare
+    ///   enough among 621 looks (one-sided 3.7e-5 each); three do not: refuted, to the largest T read.
+    /// - The measured case (R3_DOPPLER, seed 3): the hottest look 38.78 ± 1.79 µK, 6.4 errors reach to 27.3; six of
+    ///   88 outside: refuted.
+    /// - A family of eleven looks (three outputs, two listed; a T of 75 ± 20 µK) is refuted by two of 88.
+    /// - Atoms outside with no T above the reach's -- a cloud driven out -- are offered no reach: it stands.
+    /// - Six of 88 outside a reach that leaves out a twentieth refute nothing.
+    #[test]
+    fn a_reach_is_refuted_by_a_t_above_it_or_by_its_atoms_count_outside() {
+        let s = unseen(MOST_TRAJECTORIES as f64);
+        let run = |outputs: usize, hottest: f64, error: f64| -> Vec<Estimate> {
+            (0..=outputs).map(|k| {
+                let mut e = estimate([20., 20., if k == outputs { hottest } else { 30. }], 0., 88.);
+                e.motion.as_mut().unwrap().temperature_errors = [Spread { error, groups: if error > 0. { 11. } else { f64::INFINITY } }; 3];
+                e
+            }).collect()
+        };
+        let counts = |listed: usize, n: f64| -> Vec<(f64, f64)> { (0..listed).map(|j| (if j + 1 == listed { n } else { 0. }, 88.)).collect() };
+        assert_eq!((outgrown(&counts(21, 0.), s, &run(200, 30., 0.), 30.04), outgrown(&counts(21, 0.), s, &run(200, 75., 0.), 30.04)), (None, Some(75.)));
+        let look = 0.5 * crate::estimate::tail_among(621.);
+        assert!(75. - Spread { error: 12., groups: 11. }.interval_over(621.) < 30.04 && (look / 3.7e-5 - 1.).abs() < 0.02);
+        assert!(crate::estimate::at_least(2., 88., s) > look && crate::estimate::at_least(3., 88., s) < look);
+        assert_eq!((outgrown(&counts(21, 2.), s, &run(200, 75., 12.), 30.04), outgrown(&counts(21, 3.), s, &run(200, 75., 12.), 30.04)), (None, Some(75.)));
+        assert!((38.78 - Spread { error: 1.79, groups: 11. }.interval_over(621.) - 27.3).abs() < 0.1);
+        assert_eq!((outgrown(&counts(21, 0.), s, &run(200, 38.78, 1.79), 30.04), outgrown(&counts(21, 6.), s, &run(200, 38.78, 1.79), 30.04)), (None, Some(38.78)));
+        assert_eq!((outgrown(&counts(2, 1.), s, &run(3, 75., 20.), 30.04), outgrown(&counts(2, 2.), s, &run(3, 75., 20.), 30.04)), (None, Some(75.)));
+        assert_eq!(outgrown(&counts(21, 88.), s, &run(200, 30., 0.), 30.04), None);
+        assert_eq!(outgrown(&counts(21, 6.), 0.05, &run(200, 75., 12.), 30.04), None);
     }
 
     /// The looks and the accounts are of what is shown and of the total T. A pilot that reads 25, 6 and 10 µK on the
