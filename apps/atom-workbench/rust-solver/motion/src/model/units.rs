@@ -55,6 +55,19 @@
 //! shift does, and at 80 mW/cm² of light 20 linewidths off it exceeded the 137 MHz between a cooling and a repump
 //! photon -- a coupling's distance read nothing, its gate ∞, and F=1 and F=2 were made one cluster.
 //!
+//! # The fold's order
+//! The second-order fold leaves out one term of the next order, the fourth-order light shift: a state's potentials are
+//! too deep by s/2 and the force on it too large by s, s = 2 × its excited share; its photons come too fast by s
+//! (exactly, on one line: the force (1 − s + 3/2 s²) and the rate 1/(1 + s) of the second order's). T follows the
+//! potentials' modulation, 0.8 to 0.9 s on a Sisyphus pattern -- the diffusion +0.6 s, the friction −0.2 s, both of the
+//! one term, not two errors to add --: the force's s bounds it, and that is booked, s p_g on T and on the populations.
+//! Where the fold has a fourth order (assemble.rs, # The fourth order; model.rs `Model::fold_frequency`) that part is
+//! its own unit, the cluster's (`Unit::Second`): kept, the fold is the fourth order's, the force's error 3/2 s² p_g and
+//! the levels' spread over the drive's distance times s (W3's one denominator a column), and the rates' s² p_g
+//! with the photon a jump's landing in the bare state draws (model.rs `Model::landed`, step.rs `jump`). A drive's own
+//! unit then carries what only keeping it explicit removes: that residue, and at either order its motion's part, the
+//! sweep a and the Doppler term's next order. Elsewhere a drive's unit carries all of it.
+//!
 //! # A coupling of two states (`Unit::Term`)
 //! Everything the folds leave between two states a ← b at one exact beat β (∝ e^{iβt}) is one unit: the constant forms'
 //! entry (far.rs `constant`: one frequency's static form at β = 0, with the two states' own coupling when every light is
@@ -80,7 +93,7 @@
 //! dressing takes an elimination of its own (the one with its coherent field). A unit's small parameter at the state's
 //! point and momentum is mapped to the outputs by its leading order, the populations and T by the same weight -- the
 //! populations of the states it couples, so that a unit whose states are empty books nothing: a drive's fold its own
-//! share s p_g on the populations and (√2 s + a) p_g on T; a bare one also 2ε times its share of the state's rates, on
+//! share s p_g on the populations and (s + a) p_g on T (# The fold's order); a bare one also 2ε times its share of the state's rates, on
 //! both, and ε times its share of the state's light shifts on T (the relative errors it makes of them, as a dressing's;
 //! the shares of a state's drives, folded and kept, add up to one: beside an explicit line a distant one's rate is a
 //! small part of what moves the populations); a coupling of two states m²(p_a + p_b); a carrier's dressing its relative rate error on the state's rates (eliminate.rs); a photon
@@ -105,6 +118,13 @@ use std::sync::Arc;
 
 /// Where a fold exists (module documentation): S = 2m² < ½ and a < ½.
 pub(crate) const EXISTS: f64 = 0.5;
+
+/// The fourth order's leading errors in a drive's share s (module documentation, # The fold's order; derivation:
+/// fourth.status.md), each the next order's: on the force 3/2 s², the next term of the one line's (1 − s + 3/2 s²); on
+/// the rates s², what the slow state's jumps and the photons its landings draw leave of the exact 1/(1 + s) -- on a
+/// cycling state −0.99 s² at three intensities (the test below), the coefficient one of the order.
+pub(crate) const ORDER_FORCE: f64 = 1.5;
+pub(crate) const ORDER_RATES: f64 = 1.0;
 
 impl Gate {
     /// Whether the fold exists over the reach: both bounds below ½.
@@ -323,7 +343,8 @@ impl Model {
         self.driven.iter().filter(|d| d.0 == component).map(|&(component, excited, ground)| Unit::Bare { component, excited, ground }).collect()
     }
 
-    /// The candidate units of this model (model.rs `Unit`), those it folds: each folded drive at its level; the couplings
+    /// The candidate units of this model (model.rs `Unit`), those it folds: each folded drive at its level; the second
+    /// order of each cluster's fold at the atom that has a fourth (model.rs `Model::fold_frequency`); the couplings
     /// of two ground states, and of an explicit excited state with another excited one, at each of the model's beats
     /// (module documentation, # A coupling of two states) that no cluster holds as they are; the carriers' dressings and the
     /// photon coherences (eliminate.rs, photon.rs).
@@ -334,6 +355,12 @@ impl Model {
                 Level::Bare => out.push(Unit::Bare { component, excited, ground }),
                 Level::Atom => out.push(Unit::Drive { component, excited, ground }),
                 Level::Explicit => {}
+            }
+        }
+        // The second order of a cluster's fold at the atom, where the fold has a next order and is not taken to it.
+        for (c, cluster) in self.clusters.iter().enumerate() {
+            if self.fourth[c].is_none() && self.fold_frequency(c).is_some() {
+                out.push(Unit::Second { ground: cluster.states[0] });
             }
         }
         let mut listed: HashSet<Unit> = HashSet::new();
@@ -646,7 +673,8 @@ impl Model {
                     level.filter(|of| of.1 != Level::Explicit).map_or(Read::Nothing, |(place, level)| Read::Fold { ground, place, bare: level == Level::Bare })
                 }
                 Unit::Term { a, b, ref beat } => self.beat_index(beat).map_or(Read::Nothing, |index| Read::Term { form: self.forms.term(self, a, b, index), a, b, beat: index }),
-                Unit::Dressing { .. } => Read::Nothing,
+                // A dressing folds nothing; a fold's order is no fold of its own: where the fold exists, so does its next order.
+                Unit::Dressing { .. } | Unit::Second { .. } => Read::Nothing,
                 Unit::Coherence { ref first, ref second, .. } => Read::Coherence { unit: u, apart: self.omega(&first.plus(-1, second)).abs() - self.spread() },
             })
             .collect();
@@ -803,6 +831,7 @@ impl Model {
         match unit {
             Unit::Bare { .. } => self.bare_error(unit, at),
             Unit::Drive { .. } => self.drive_error(unit, at),
+            Unit::Second { ground } => self.order_error(*ground, at),
             Unit::Term { a, b, beat } => {
                 let m2 = self.beat_index(beat).map_or(0.0, |index| 0.5 * self.term_bound(&self.forms.term(self, *a, *b, index), *a, *b, index, &at.region).0);
                 let p = &at.populations;
@@ -813,8 +842,31 @@ impl Model {
         }
     }
 
+    /// The error at a sample of the second order of a cluster's fold at the atom (`Unit::Second`; module documentation,
+    /// # The errors, # The fold's order): Σ s p_g over the drives folded at the atom from the sample's ground states, s =
+    /// 2|R[e, g]|² each one's share -- on T, the force's relative error of that order; on the populations, the rates'.
+    /// Zero off the cluster, and where its fold is the fourth order's.
+    fn order_error(&self, ground: usize, at: &Measured) -> UnitError {
+        let cluster = self.membership[ground];
+        let Some(frequency) = self.fold_frequency(cluster).filter(|_| at.sample.cluster == cluster && self.fourth[cluster].is_none()) else {
+            return UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 };
+        };
+        let component = Component { frequency, counter: false };
+        let c = &self.clusters[cluster];
+        let (mut sum, mut held) = (0.0, 0.0);
+        if let Some(response) = self.carrier_of(frequency).and_then(|ci| at.responses[ci].as_ref()) {
+            for (y, &g) in c.states.iter().enumerate() {
+                held += at.populations[g];
+                for x in (0..EXCITED).filter(|&x| self.level(component, GROUND + x, g) == Level::Atom) {
+                    sum += 2.0 * response[(x, y)].norm_sqr() * at.populations[g];
+                }
+            }
+        }
+        UnitError { parameter: if held > 0.0 { sum / held } else { 0.0 }, population: sum, temperature: sum }
+    }
+
     /// The error at a sample of a drive folded with the bare levels (module documentation, # Levels, # The errors): its own
-    /// share s = 2|R⁰[e, g]|² of its ground state, as every fold's -- s p_g on the populations, (√2 s + a) p_g on T, a its
+    /// share s = 2|R⁰[e, g]|² of its ground state, as every fold's -- s p_g on the populations, (s + a) p_g on T, a its
     /// sweep across its denominator at the atom --; and the first order of its denominator, ε = |δΔ|/|Δ₀ − iΓ_e/2|
     /// (eliminate.rs `Model::drive_motion`), the relative error of its response: of the state's rates, quadratic in the
     /// responses, 2ε times its share |R⁰[e, g]|² p_g of them, and of its light shifts, linear, ε times its share
@@ -837,7 +889,7 @@ impl Model {
         let (epsilon, p, held) = (moved.abs() / own, at.populations[ground], at.populations[..GROUND].iter().sum::<f64>());
         let share = |of: f64, all: f64| if all > 0.0 { of * p / all } else { 0.0 };
         let (rates, shifts) = (2.0 * epsilon * share(response.norm_sqr(), at.rates) * held, epsilon * share(response.norm_sqr() * own, at.shifts) * held);
-        UnitError { parameter: epsilon, population: s * p + rates, temperature: (std::f64::consts::SQRT_2 * s + sweep) * p + rates + shifts }
+        UnitError { parameter: epsilon, population: s * p + rates, temperature: (s + sweep) * p + rates + shifts }
     }
 
     /// A sample's populations of the model basis' states on its cluster (|ψ_s|²/‖ψ‖²; zero off its cluster).
@@ -864,9 +916,9 @@ mod tests {
     use crate::model::Point;
     use crate::request::Request;
 
-    /// A reference scene's model closed over its request's reach (solve.rs `attempt`: every unit whose gate fails kept).
+    /// A scene's model (a reference scene by name, or a native request by its path) closed over its request's reach (solve.rs `attempt`: every unit whose gate fails kept).
     fn closed(scene: &str) -> (Model, [f64; 3]) {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{scene}.json"));
+        let path = if scene.ends_with(".json") { std::path::PathBuf::from(scene) } else { std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{scene}.json")) };
         let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let request = Request::from_native(&line).unwrap();
         let light = Light::new(&request);
@@ -942,5 +994,446 @@ mod tests {
         }
         eprintln!("the largest shift {largest:.2} rad/µs, the steepest slope {steepest:.1} rad/µs/µm, the least bound over its shift {tightest:.2}");
         assert!(largest > 20.0 && steepest > 100.0, "the points read a light shift: {largest}, {steepest}");
+    }
+
+    /// The slow states of a cluster's generator at a point, the atom at rest: its eigenvalues nearest the real axis, as
+    /// many as it has ground states, by their real parts.
+    fn slow(model: &Model, cluster: usize, r: [f64; 3]) -> Vec<C64> {
+        use crate::step::Middle as _;
+        let c = &model.clusters[cluster];
+        let middle = model.assemble(cluster, r, 0.0, &model.running());
+        let mut h = Mat::zeros(c.states.len(), c.states.len());
+        middle.generator(&middle.path([0.0; 3], [0.0; 3]), 0.0, &mut h);
+        let mut values = crate::linalg::eigen(&h).expect("a cluster's generator has its eigenvalues").values;
+        values.sort_by(|a, b| b.im.total_cmp(&a.im));
+        values.truncate(c.ground);
+        values.sort_by(|a, b| a.re.total_cmp(&b.re));
+        values
+    }
+
+    /// The exact elimination's slow states at a point, the atom at rest: of the no-jump generator of a cluster's ground
+    /// states with every excited state -- the cluster's own generator without its drives folded at the atom, those
+    /// drives' couplings V, and the excited block K − δ the eliminations take there --, the eigenvalues nearest the real
+    /// axis, by their real parts.
+    fn eliminated(model: &Model, cluster: usize, carrier: usize, r: [f64; 3]) -> Vec<C64> {
+        let n = model.clusters[cluster].ground;
+        let mut values = crate::linalg::eigen(&no_jump(model, cluster, carrier, r)).expect("the generator has its eigenvalues").values;
+        values.sort_by(|a, b| b.im.total_cmp(&a.im));
+        values.truncate(n);
+        values.sort_by(|a, b| a.re.total_cmp(&b.re));
+        values
+    }
+
+    /// The no-jump generator of a cluster's ground states with every excited state at a point, the atom at rest
+    /// (`eliminated`): the ground states first.
+    fn no_jump(model: &Model, cluster: usize, carrier: usize, r: [f64; 3]) -> Mat {
+        use crate::step::Middle as _;
+        let (c, cc) = (&model.clusters[cluster], &model.carriers[carrier]);
+        let n = c.ground;
+        assert!(c.frames.iter().all(|frame| *frame == c.frames[0]), "the cluster's ground states share a frame");
+        let amplitudes = model.light.amplitudes(r);
+        let middle = model.middle_of(&model.plan(cluster, &model.running()), 0.0, &amplitudes, None);
+        let mut ground = Mat::zeros(n, n);
+        middle.generator(&middle.path([0.0; 3], [0.0; 3]), 0.0, &mut ground);
+        let h = &model.far_hamiltonian(&amplitudes, &model.running(), 0, &model.coherent_dressing())[0];
+        let frame = model.omega(&c.frames[0]) + cc.detuning;
+        Mat::from_fn(n + EXCITED, n + EXCITED, |x, y| match (x < n, y < n) {
+            (true, true) => ground[(x, y)],
+            (false, true) => cc.beams.iter().zip(&cc.folded).map(|(&l, m)| amplitudes[l].value * m[(GROUND + x - n, c.states[y])]).sum(),
+            (true, false) => cc.beams.iter().zip(&cc.folded).map(|(&l, m)| amplitudes[l].value * m[(GROUND + y - n, c.states[x])]).sum::<C64>().conj(),
+            (false, false) => h[(GROUND + x - n, GROUND + y - n)] - model.decay[(x - n, y - n)] * C64::new(0.0, 0.5) - if x == y { C64::real(frame) } else { C64::ZERO },
+        })
+    }
+
+    /// Where a jump lands, against the exact elimination (model.rs `Model::landed`; assemble.rs, # The fourth order): the
+    /// lin-perp-lin scenes, the cluster F=2 m = −2, 0, 2 with its D2 drives at the atom at the fourth order. A bare
+    /// ground state f is the slow subspace's part of it and a fast part that decays at once: exactly, the part is
+    /// P (f, 0) with P the spectral projector of the no-jump generator onto its three slow eigenvectors, the prompt
+    /// photon's probability 1 − ‖P (f, 0)‖²/‖f‖², and the slow state's coordinates (1 + ½X) times the part's ground
+    /// amplitudes. The model's p and Π f are these to the next order, s² -- p itself is about half the landing state's
+    /// share --, and the norm is kept on average by construction: ‖Π f‖² + p ‖f‖² = ‖f‖².
+    #[test]
+    fn a_jump_s_landing_is_the_exact_elimination_s_slow_part() {
+        for scene in ["R4_LIN_1", "R4_LIN_2", "R4_LIN_4"] {
+            let (closed, centre) = closed(scene);
+            let states = closed.clusters[closed.membership[3]].states.clone();
+            let cooling = Component { frequency: closed.driven.iter().find(|d| d.2 == 3 && closed.level(d.0, d.1, d.2) == Level::Atom).expect("a drive at the atom").0.frequency, counter: false };
+            let line = closed.driven.iter().filter(|&&(c, e, g)| c == cooling && states.contains(&g) && closed.bare_distance(c, e, g) < 5000.0);
+            let more: Vec<Unit> = line.map(|&(component, excited, ground)| Unit::Bare { component, excited, ground }).chain([Unit::Dressing { carrier: cooling }, Unit::Second { ground: 3 }]).collect();
+            let fourth = closed.rekept(&[closed.kept.clone(), more].concat()).unwrap();
+            let (cluster, carrier) = (fourth.membership[3], fourth.carrier_of(cooling.frequency).unwrap());
+            let plan = fourth.plan(cluster, &fourth.running());
+            assert!(plan.fourth.is_some(), "{scene}: the cluster's fold is the fourth order's");
+            let (mut s, mut worst, mut turned) = (0.0_f64, 0.0_f64, 0.0_f64);
+            for offset in [0.0, 0.05, 0.1, 0.17, 0.26] {
+                let r = [centre[0], centre[1], centre[2] + offset];
+                let at = Point { r, kappa: [0.0; 3], t: 0.0 };
+                let exact = crate::linalg::eigen(&no_jump(&fourth, cluster, carrier, r)).unwrap();
+                let mut order: Vec<usize> = (0..exact.values.len()).collect();
+                order.sort_by(|&a, &b| exact.values[b].im.total_cmp(&exact.values[a].im));
+                for f in [[C64::ONE, C64::ZERO, C64::ZERO], [C64::ZERO, C64::ONE, C64::ZERO], [C64::real(0.6), C64::new(0.0, 0.5), C64::real(-0.4)]] {
+                    let size = crate::linalg::norm_sqr(&f);
+                    // P (f, 0) = Σ_slow r_i (R⁻¹ (f, 0))_i.
+                    let mut part = vec![C64::ZERO; 3 + EXCITED];
+                    for &i in &order[..3] {
+                        let weight: C64 = (0..3).map(|y| exact.inverse[(i, y)] * f[y]).sum();
+                        for (x, z) in part.iter_mut().enumerate() {
+                            *z += exact.vectors[(x, i)] * weight;
+                        }
+                    }
+                    let prompt = 1.0 - crate::linalg::norm_sqr(&part) / size;
+                    let (slow, p) = fourth.landed(&plan, None, &at, &f);
+                    assert!((crate::linalg::norm_sqr(&slow) + p * size - size).abs() <= 1e-12 * size, "{scene}: the norm on average");
+                    worst = worst.max((p - prompt).abs());
+                    s = s.max(2.0 * prompt);
+                    // The slow state's direction: Π f against the exact part's ground amplitudes (to their common first
+                    // order they differ by the metric's half, of the order of p itself; the angle between them is s²).
+                    let overlap: C64 = (0..3).map(|x| slow[x].conj() * part[x]).sum();
+                    let ground: f64 = part[..3].iter().map(|z| z.norm_sqr()).sum();
+                    turned = turned.max(1.0 - overlap.norm_sqr() / (crate::linalg::norm_sqr(&slow) * ground));
+                }
+            }
+            eprintln!("{scene}: the largest prompt photon's probability {:.4}; the model's differs by at most {worst:.2e}; the slow state turned by at most {turned:.2e}", 0.5 * s);
+            assert!(worst <= 1.5 * s * s, "{scene}: p within the next order: {worst} for s = {s}");
+            assert!(turned <= s * s, "{scene}: the slow state within the next order: {turned} for s = {s}");
+        }
+    }
+
+    /// The fold's orders against the exact elimination, the atom frozen (module documentation, # The fold's order;
+    /// assemble.rs, # The fourth order): the lin-perp-lin scenes at 40, 80 and 160 mW/cm² a beam, 20 linewidths red, on
+    /// ⁸⁷Rb's real F′ = 1, 2, 3 in the tweezer. The cluster F=2 m = −2, 0, 2 with every cooling drive into F′=3 folded at
+    /// the atom, at the second order and at the fourth, against the slow eigenvalues of the same ground states with all
+    /// the excited states (`eliminated`; the dressing coherent, so that the levels are the same in both), at points across
+    /// a fringe. Of the three slow states, with s the largest share 2 Σ_e |R[e, g]|² met: the potentials err by s/2 of the
+    /// light's largest shift there at the second order and by s²/2 at the fourth; the force on them (the potentials'
+    /// slope along the fringes, a central difference), relative to the steepest potential met, by s and by 3/2 s²; their
+    /// decay rates by 3/2 s and by the next order. And the fourth order's generator is a Lindblad one as the second's: a
+    /// state's norm falls at its photons' rate.
+    #[test]
+    fn the_fourth_order_s_potentials_forces_and_rates_against_the_exact_elimination() {
+        for scene in ["R4_LIN_1", "R4_LIN_2", "R4_LIN_4"] {
+            let (closed, centre) = closed(scene);
+            let states = closed.clusters[closed.membership[3]].states.clone();
+            assert_eq!(states, [3, 5, 7], "the cluster of F=2 m = −2, 0, 2");
+            // Every cooling drive from the cluster into D2 -- F′ = 1, 2, 3 -- at the atom (the closure leaves the weaker
+            // bare), the dressing coherent.
+            let cooling = Component { frequency: closed.driven.iter().find(|d| d.2 == 3 && closed.level(d.0, d.1, d.2) == Level::Atom).expect("a drive at the atom").0.frequency, counter: false };
+            let line = closed.driven.iter().filter(|&&(c, e, g)| c == cooling && states.contains(&g) && closed.bare_distance(c, e, g) < 5000.0);
+            let more: Vec<Unit> = line.map(|&(component, excited, ground)| Unit::Bare { component, excited, ground }).chain([Unit::Dressing { carrier: cooling }]).collect();
+            let second = closed.rekept(&[closed.kept.clone(), more].concat()).unwrap();
+            let fourth = second.rekept(&[second.kept.clone(), vec![Unit::Second { ground: 3 }]].concat()).unwrap();
+            let (cluster, carrier) = (second.membership[3], second.carrier_of(cooling.frequency).unwrap());
+            assert_eq!(second.fold_frequency(cluster), Some(cooling.frequency));
+            assert_eq!((second.fourth[cluster], fourth.fourth[fourth.membership[3]]), (None, Some(cooling.frequency)));
+            assert!(second.units().contains(&Unit::Second { ground: 3 }) && !fourth.units().contains(&Unit::Second { ground: 3 }));
+            let (mut s, mut largest, mut steepest) = (0.0_f64, 0.0_f64, 0.0_f64);
+            let (mut potential, mut force, mut rate) = ([0.0_f64; 2], [0.0_f64; 2], [0.0_f64; 2]);
+            let step = 1e-4;
+            for offset in [0.0, 0.03, 0.07, 0.1, 0.15, 0.2, 0.26, 0.33] {
+                let r = [centre[0], centre[1], centre[2] + offset];
+                let read = |values: &dyn Fn(f64) -> Vec<C64>| -> (Vec<C64>, Vec<f64>) {
+                    let (up, down) = (values(step), values(-step));
+                    (values(0.0), up.iter().zip(&down).map(|(a, b)| (a.re - b.re) / (2.0 * step)).collect())
+                };
+                let (exact, pull) = read(&|by| eliminated(&second, cluster, carrier, [r[0], r[1], r[2] + by]));
+                let level = {
+                    use crate::step::Middle as _;
+                    let middle = second.middle_of(&second.plan(cluster, &second.running()), 0.0, &second.light.amplitudes(r), None);
+                    let mut h = Mat::zeros(3, 3);
+                    middle.generator(&middle.path([0.0; 3], [0.0; 3]), 0.0, &mut h);
+                    crate::linalg::eigen(&h).unwrap().values
+                };
+                let mean = level.iter().map(|z| z.re).sum::<f64>() / 3.0;
+                let shift = exact.iter().map(|z| (z.re - mean).abs()).fold(0.0, f64::max);
+                let decay = exact.iter().map(|z| z.im.abs()).fold(0.0, f64::max);
+                largest = largest.max(shift);
+                steepest = pull.iter().map(|f| f.abs()).fold(steepest, f64::max);
+                for (order, model) in [&second, &fourth].into_iter().enumerate() {
+                    let (values, slopes) = read(&|by| slow(model, model.membership[3], [r[0], r[1], r[2] + by]));
+                    for i in 0..3 {
+                        potential[order] = potential[order].max((values[i].re - exact[i].re).abs() / shift);
+                        force[order] = force[order].max((slopes[i] - pull[i]).abs());
+                        rate[order] = rate[order].max((values[i].im - exact[i].im).abs() / decay);
+                    }
+                }
+                // The largest share at the point, and the fourth order's hazard identity on a state of the cluster.
+                let psi: Vec<C64> = (0..3).map(|x| C64::cis(1.3 * x as f64) * (0.2 + 0.3 * x as f64)).collect();
+                let here = Point { r, kappa: [0.0; 3], t: 0.0 };
+                let sample = Sample { cluster, at: here, psi: psi.clone() };
+                let at = second.measured(&sample, None);
+                let response = at.responses[carrier].as_ref().unwrap();
+                s = (0..3).map(|y| 2.0 * (0..EXCITED).map(|x| response[(x, y)].norm_sqr()).sum::<f64>()).fold(s, f64::max);
+                let plan = fourth.plan(fourth.membership[3], &fourth.running());
+                let photons: f64 = fourth.photons_of(&plan, None, &here, &psi, crate::model::photon::Gradients::None).0.iter().map(|p| p.amplitudes.iter().map(|u| crate::linalg::norm_sqr(u)).sum::<f64>()).sum();
+                let mut h = Mat::zeros(3, 3);
+                {
+                    use crate::step::Middle as _;
+                    let middle = fourth.assemble(fourth.membership[3], r, 0.0, &fourth.running());
+                    middle.generator(&middle.path([0.0; 3], [0.0; 3]), 0.0, &mut h);
+                }
+                let falls: f64 = (0..3).flat_map(|x| (0..3).map(move |y| (x, y))).map(|(x, y)| (psi[x].conj() * C64::I * (h[(x, y)] - h[(y, x)].conj()) * psi[y]).re).sum();
+                // The potential is the same generator's (V_L is the light set's less the same without the trap light): a
+                // state's potential differs between the orders by the diagonals of what the fourth adds to the two
+                // generators, and its gradient is its own slope.
+                let dark = crate::model::Lights((0..fourth.light.frequencies.len()).map(|w| if w == fourth.light.trap { crate::model::Lit::Off } else { crate::model::Lit::Coherent }).collect());
+                let diagonal = |model: &Model, lights: &crate::model::Lights, place: usize| -> f64 {
+                    use crate::step::Middle as _;
+                    let middle = model.assemble(model.membership[3], r, 0.0, lights);
+                    let mut g = Mat::zeros(3, 3);
+                    middle.generator(&middle.path([0.0; 3], [0.0; 3]), 0.0, &mut g);
+                    g[(place, place)].re
+                };
+                for (place, &state) in states.iter().enumerate() {
+                    let alone: [f64; GROUND] = std::array::from_fn(|s| if s == state { 1.0 } else { 0.0 });
+                    let of = |model: &Model, by: f64| model.potential([r[0], r[1], r[2] + by], &alone, &model.running());
+                    let lit = fourth.running();
+                    let more = diagonal(&fourth, &lit, place) - diagonal(&second, &lit, place) - (diagonal(&fourth, &dark, place) - diagonal(&second, &dark, place));
+                    let added = of(&fourth, 0.0) - of(&second, 0.0);
+                    assert!((added - more).abs() <= 1e-9 * largest.max(1.0), "{scene}: the potential's fourth order {added} against the generator's {more}");
+                    let slope = fourth.expand(r, &alone, &fourth.running(), 1, None).quadratic.gradient[2];
+                    let difference = (of(&fourth, step) - of(&fourth, -step)) / (2.0 * step);
+                    // (The central difference's own error: (2k step)²/6 of the slope, 4e-7.)
+                    assert!((slope - difference).abs() <= 2e-6 * slope.abs() + 1e-6, "{scene}: the potential's gradient {slope} against its slope {difference}");
+                }
+                // To the product of the fourth order and the first-order Doppler term (here the recoil shift, 3e-5 of the
+                // detuning, times s), which the photons' product holds and the middle's decay, made at rest, does not.
+                assert!((falls - photons).abs() <= 1e-5 * photons, "{scene}: the norm falls at {falls}, the photons' rate is {photons}");
+            }
+            let force = force.map(|f| f / steepest);
+            eprintln!("{scene}: s = {s:.4}, the largest shift {largest:.2} rad/µs: potentials {:.2e} (second), {:.2e} (fourth); forces {:.2e}, {:.2e}; decay rates {:.2e}, {:.2e}", potential[0], potential[1], force[0], force[1], rate[0], rate[1]);
+            assert!((0.4 * s..0.6 * s).contains(&potential[0]) && potential[1] <= 0.6 * s * s, "{scene}: the potentials err by s/2 and by s²/2: {potential:?} for s = {s}");
+            assert!((0.5 * s..1.0 * s).contains(&force[0]) && force[1] <= 1.5 * s * s, "{scene}: the forces err by s and by 3/2 s² at most: {force:?} for s = {s}");
+            assert!((1.2 * s..1.8 * s).contains(&rate[0]) && rate[1] <= 2.5 * s * s, "{scene}: the decay rates err by 3/2 s and by the next order: {rate:?} for s = {s}");
+        }
+    }
+
+    /// A lin-perp-lin scene's cycling point: where the cooling light at the trap's axis is σ⁻ alone, F=2 m=−2 is driven
+    /// into F′=3 m′=−3 and nowhere else, and that state decays to it alone -- a two-level atom. The scene's model with
+    /// every cooling drive of m=−2's cluster at the atom and the dressing kept, at the second order and at the fourth;
+    /// the point; and of the no-jump generator there the drive's share s = 2|V|²/(Δ² + Γ²/4), the two-level atom's
+    /// steady photon rate Γ |V|²/(Δ² + Γ²/4 + 2|V|²) with the ground state's own bare scattering, and the line's
+    /// (Γ/2Δ)².
+    fn cycling(scene: &str) -> (Model, Model, Point, [f64; 3]) {
+        let (closed, centre) = closed(scene);
+        let states = closed.clusters[closed.membership[3]].states.clone();
+        let cooling = Component { frequency: closed.driven.iter().find(|d| d.2 == 3 && closed.level(d.0, d.1, d.2) == Level::Atom).expect("a drive at the atom").0.frequency, counter: false };
+        let line = closed.driven.iter().filter(|&&(c, e, g)| c == cooling && states.contains(&g) && closed.bare_distance(c, e, g) < 5000.0);
+        let more: Vec<Unit> = line.map(|&(component, excited, ground)| Unit::Bare { component, excited, ground }).chain([Unit::Dressing { carrier: cooling }]).collect();
+        let second = closed.rekept(&[closed.kept.clone(), more].concat()).unwrap();
+        let fourth = second.rekept(&[second.kept.clone(), vec![Unit::Second { ground: 3 }]].concat()).unwrap();
+        let (cluster, carrier) = (second.membership[3], second.carrier_of(cooling.frequency).unwrap());
+        assert_eq!(second.clusters[cluster].states[0], 3, "the cluster's first place is F=2 m=−2");
+        // The point where the light is σ⁻ alone: where m=−2's coupling is the largest (its σ⁺ part is nothing there).
+        // The excited state it drives (in the request's basis a combination of states), its detuning and its width.
+        let column = |z: f64| -> (f64, Mat) {
+            let g = no_jump(&second, cluster, carrier, [centre[0], centre[1], z]);
+            ((0..EXCITED).map(|e| g[(3 + e, 0)].norm_sqr()).sum(), g)
+        };
+        let grid: Vec<f64> = (0..400).map(|i| centre[2] + 0.4 * i as f64 / 400.0).collect();
+        let best = grid.iter().copied().max_by(|a, b| column(*a).0.total_cmp(&column(*b).0)).unwrap();
+        let (mut lo, mut hi) = (best - 0.001, best + 0.001);
+        for _ in 0..60 {
+            let (a, b) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+            if column(a).0 > column(b).0 { hi = b } else { lo = a }
+        }
+        let z = 0.5 * (lo + hi);
+        let (v2, g) = column(z);
+        let bright: Vec<C64> = (0..EXCITED).map(|e| g[(3 + e, 0)] * (1.0 / v2.sqrt())).collect();
+        let level: C64 = (0..EXCITED * EXCITED).map(|i| bright[i / EXCITED].conj() * g[(3 + i / EXCITED, 3 + i % EXCITED)] * bright[i % EXCITED]).sum();
+        let (gamma, delta) = (-2.0 * level.im, level.re - g[(0, 0)].re);
+        let s = 2.0 * v2 / (delta * delta + 0.25 * gamma * gamma);
+        let exact = gamma * v2 / (delta * delta + 0.25 * gamma * gamma + 2.0 * v2) - 2.0 * g[(0, 0)].im;
+        let at = Point { r: [centre[0], centre[1], z], kappa: [0.0; 3], t: 0.0 };
+        (second, fourth, at, [s, exact, 0.25 * gamma * gamma / (delta * delta)])
+    }
+
+    /// A cycling state's photons per unit time, against the two-level atom's (module documentation, # The fold's order;
+    /// `cycling`). With the drive's share s: the second-order fold's rate is too high by s; the fourth order's jumps
+    /// alone are too low by s/2; with the landing -- every jump back into the bare state followed by one more photon
+    /// with the probability p, and so on: 1/(1 − p) photons a jump -- the rate is right to the next order: low by
+    /// `ORDER_RATES` s², to the order after that.
+    #[test]
+    fn a_cycling_state_s_photon_rate_with_the_landing_is_the_two_level_atom_s() {
+        for scene in ["R4_LIN_1", "R4_LIN_2", "R4_LIN_4"] {
+            let (second, fourth, at, [s, exact, width]) = cycling(scene);
+            let psi = [C64::ONE, C64::ZERO, C64::ZERO];
+            let rate = |model: &Model| -> f64 {
+                let plan = model.plan(model.membership[3], &model.running());
+                model.photons_of(&plan, None, &at, &psi, crate::model::photon::Gradients::None).0.iter().map(|p| p.amplitudes.iter().map(|u| crate::linalg::norm_sqr(u)).sum::<f64>()).sum()
+            };
+            let plan = fourth.plan(fourth.membership[3], &fourth.running());
+            let prompt = fourth.landed(&plan, None, &at, &psi).1;
+            let errors = [rate(&second) / exact - 1.0, rate(&fourth) / exact - 1.0, rate(&fourth) / (1.0 - prompt) / exact - 1.0];
+            // What the comparison cannot resolve: the second order's rate is the two-level atom's times (1 + s) but for
+            // the line's width over its detuning, squared.
+            let floor = (errors[0] - s).abs();
+            let rest = (errors[2] - (errors[0] - s)) / (s * s);
+            eprintln!("{scene}: s = {s:.4}, p = {prompt:.4}: the photon rate against the two-level atom's -- second order {:+.3e} (s {:+.1e}), fourth {:+.3e}, fourth with the landing {:+.3e} ({rest:+.3} s²)", errors[0], errors[0] - s, errors[1], errors[2]);
+            assert!(floor <= width, "{scene}: the second order's rate is too high by s: {} for s = {s}", errors[0]);
+            assert!((errors[1] + 0.5 * s).abs() <= ORDER_RATES * s * s + floor, "{scene}: the fourth order's jumps alone too low by s/2: {} for s = {s}", errors[1]);
+            assert!((rest + ORDER_RATES).abs() <= s, "{scene}: with the landing the rate is low by `ORDER_RATES` s², to the order after: {} for s = {s}", errors[2]);
+        }
+    }
+
+    /// A jump at the fourth order (step.rs `jump`, the landing), on the cycling state at rest (`cycling`): of single jumps
+    /// with their own streams, the photons a jump -- each one's counted work -- are 1/(1 − p) on average, within four of
+    /// their mean's deviations (a geometric number's, √p/(1 − p) a jump); and a second state carried through the jump --
+    /// the trajectory's own, and twice it -- comes out the trajectory's own to the bit: the photons' operators and the
+    /// slow state's projector are one linear map on both.
+    #[test]
+    fn a_jump_at_the_fourth_order_draws_its_landing_s_photons() {
+        use crate::step::{self, Dynamics, Trajectory};
+        for scene in ["R4_LIN_1", "R4_LIN_4"] {
+            let (_, fourth, at, _) = cycling(scene);
+            let mut reference = [0.0; GROUND];
+            reference[3] = 1.0;
+            let run = crate::model::Run::new(&fourth, reference);
+            let prompt = run.landed(fourth.membership[3], &at, &[C64::ONE, C64::ZERO, C64::ZERO]).1;
+            let trials = 4000u64;
+            let mut photons = 0.0;
+            for index in 0..trials {
+                let mut t = Trajectory::new(&run, 3, at.r, [0.0; 3], 7, index);
+                let (mut own, mut twice) = (Some(t.psi.clone()), Some(t.psi.iter().map(|z| *z * 2.0).collect::<step::Internal>()));
+                let mut twin = t.clone();
+                step::jump(&run, &mut t, &mut own).unwrap();
+                step::jump(&run, &mut twin, &mut twice).unwrap();
+                assert_eq!(own.as_ref(), Some(&t.psi), "{scene}: the trajectory's own state, carried through jump {index}");
+                assert_eq!(twice.as_ref(), Some(&t.psi), "{scene}: twice the trajectory's state, carried through jump {index}");
+                photons += (t.work / run.photon_work()).round();
+            }
+            let (mean, expected) = (photons / trials as f64, 1.0 / (1.0 - prompt));
+            let deviation = prompt.sqrt() / (1.0 - prompt) / (trials as f64).sqrt();
+            eprintln!("{scene}: p = {prompt:.4}: {mean:.4} photons a jump of {trials} jumps, 1/(1 − p) = {expected:.4} ± {deviation:.4}");
+            assert!((mean - expected).abs() <= 4.0 * deviation, "{scene}: {mean} photons a jump against {expected} ± {deviation}");
+        }
+    }
+
+    /// A middle made of given near forms carries the fourth order's part made of the same forms (assemble.rs
+    /// `Model::middle_of`): on the lin-perp-lin scene with the cluster of F=2 m=−2 at the fourth order, at points along a
+    /// fringe and off the axis, under the running lights and without the trap's, its generator on a state is the point's
+    /// own middle's (the exact elimination's forms both) to their rounding, and differs from the second order's by the
+    /// fourth order's size. So a table's error read against the exact elimination (tabulate.rs `Model::table_reads`) is
+    /// the table's: of a grid with no axis -- the forms without the trap's light do not vary -- nothing, as it is at the
+    /// second order; of one with axes, its interpolation's.
+    #[test]
+    fn a_middle_of_given_forms_carries_the_fourth_order() {
+        let (closed, centre) = closed("R4_LIN_2");
+        let second = closed.rekept(&closed.kept).unwrap();
+        let fourth = closed.rekept(&[closed.kept.clone(), vec![Unit::Second { ground: 3 }]].concat()).unwrap();
+        let cluster = fourth.membership[3];
+        assert!(fourth.fourth[cluster].is_some() && second.fourth.iter().all(Option::is_none));
+        let running = fourth.running();
+        let mut untrapped = running.clone();
+        untrapped.0[fourth.light.trap] = crate::model::Lit::Off;
+        let n = fourth.clusters[cluster].states.len();
+        let psi: Vec<C64> = (0..n).map(|x| C64::new(1.0 / (1.0 + x as f64), 0.3 * x as f64)).collect();
+        let mut samples = vec![];
+        for offset in [[0.0, 0.0, 0.0], [0.0, 0.0, 0.07], [0.3, 0.0, 0.19], [0.0, 0.4, 0.31]] {
+            let r: [f64; 3] = std::array::from_fn(|i| centre[i] + offset[i]);
+            let sample = Sample { cluster, at: Point { r, kappa: [3.0, -2.0, 5.0], t: 0.0 }, psi: psi.clone() };
+            for lights in [&running, &untrapped] {
+                let amplitudes = fourth.light.amplitudes(r);
+                let plan = fourth.plan(cluster, lights);
+                let own = fourth.action(&sample, &fourth.middle(&plan, r, 0.0, None));
+                let given = fourth.action(&sample, &fourth.middle_of(&plan, 0.0, &amplitudes, Some(&fourth.near_exact(&plan, &amplitudes, 1, &fourth.coherent_dressing()))));
+                let lower = second.action(&sample, &second.middle(&second.plan(cluster, lights), r, 0.0, None));
+                let size = |x: &[C64]| crate::linalg::norm_sqr(x).sqrt();
+                let moved = |x: &[C64], y: &[C64]| size(&x.iter().zip(y).map(|(a, b)| *a - *b).collect::<Vec<_>>());
+                assert!(moved(&own, &given) <= 1e-12 * size(&own), "at {r:?}: a middle of given forms {} from the point's own of {}", moved(&own, &given), size(&own));
+                assert!(moved(&own, &lower) > 1e-4 * size(&own), "at {r:?}: the fourth order's part is in the middle: {} of {}", moved(&own, &lower), size(&own));
+            }
+            samples.push(sample);
+        }
+        let reference: [f64; GROUND] = std::array::from_fn(|s| if s == 7 { 1.0 } else { 0.0 });
+        let trap = fourth.trap(&reference, &fourth.prepared()).unwrap();
+        let reach = fourth.reach(&trap, &reference, 30.0, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
+        let tables = fourth.tabulate(&reach, 1_000_000);
+        let reads = fourth.table_reads(&tables, &samples);
+        let mut read = 0;
+        for (table, of) in tables.tables.iter().zip(&reads) {
+            if table.layout.cluster != cluster {
+                continue;
+            }
+            let whole = of.whole.iter().map(|e| e.population.max(e.temperature)).fold(0.0, f64::max);
+            eprintln!("a table of {} axes: its whole error at the samples {whole:.2e}", table.axes());
+            assert!(whole <= if table.axes() == 0 { 1e-12 } else { 1e-5 }, "a table of {} axes errs by {whole}", table.axes());
+            read += 1;
+        }
+        assert_eq!(read, 2, "the cluster's tables: under the running lights, and without the trap's");
+    }
+
+    /// What the model's part of a step costs at the second order and at the fourth (measured; `SCENE`, default R4_LIN_1):
+    /// per cluster of the closed model whose fold has a fourth order, from the two models' tables, one middle at a
+    /// thermal point, its path, sixteen generators, eight forces, three tones' forms and the state's scattering -- a
+    /// product step's calls --, in µs, with the middle's and the scattering's share; and the tables' reals a node.
+    #[test]
+    #[ignore]
+    fn the_fourth_order_s_cost_a_step() {
+        use crate::model::Run;
+        use crate::step::Middle as _;
+        let name = std::env::var("SCENE").unwrap_or("R4_LIN_1".into());
+        let (closed, centre) = closed(&name);
+        let grounds: Vec<usize> = (0..closed.clusters.len()).filter(|&c| closed.fold_frequency(c).is_some()).map(|c| closed.clusters[c].states[0]).collect();
+        let fourth = closed.rekept(&[closed.kept.clone(), grounds.iter().map(|&ground| Unit::Second { ground }).collect()].concat()).unwrap();
+        let reference: [f64; GROUND] = std::array::from_fn(|s| if s == grounds[0] { 1.0 } else { 0.0 });
+        for (order, model) in [("second", &closed), ("fourth", &fourth)] {
+            let trap = model.trap(&reference, &model.prepared()).unwrap();
+            let reach = model.reach(&trap, &reference, 30.0, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
+            let started = std::time::Instant::now();
+            let tables = model.tabulate(&reach, 1 << 20);
+            let built = started.elapsed();
+            let run = Run::tabulated(model, &tables, reference);
+            for &ground in &grounds {
+                let cluster = model.membership[ground];
+                let n = model.clusters[cluster].states.len();
+                let psi: Vec<C64> = (0..n).map(|x| C64::cis(0.7 * x as f64) * (1.0 / n as f64).sqrt()).collect();
+                let rho: Vec<C64> = (0..n * n).map(|i| psi[i / n] * psi[i % n].conj()).collect();
+                let (rounds, mut h, mut sink) = (20_000, Mat::zeros(n, n), 0.0);
+                let mut times = [std::time::Duration::ZERO; 7];
+                let mut counts = [0.0; 4];
+                for round in 0..rounds {
+                    let r = [centre[0] + 0.01, centre[1], centre[2] + 0.39 * (round % 97) as f64 / 97.0];
+                    let at = Point { r, kappa: [0.3, -0.2, 2.5], t: 0.0 };
+                    let from = std::time::Instant::now();
+                    let middle = run.middle(cluster, r, 0.0);
+                    times[0] += from.elapsed();
+                    let path = middle.path(at.kappa, at.kappa.map(|k| k * model.hbar_over_mass));
+                    let part = std::time::Instant::now();
+                    for node in 0..16 {
+                        middle.generator(&path, 0.004 * (node as f64 - 7.5), &mut h);
+                        sink += h.data[0].re;
+                    }
+                    times[3] += part.elapsed();
+                    let part = std::time::Instant::now();
+                    for node in 0..8 {
+                        sink += middle.force(&path, 0.008 * (node as f64 - 3.5), &rho)[2];
+                    }
+                    times[4] += part.elapsed();
+                    middle.tones(&path, &rho, &mut |_, f| sink += f[2]);
+                    times[1] += from.elapsed();
+                    let work = middle.work();
+                    counts = [middle.work, 16.0 * work[0], 8.0 * work[1], 0.0];
+                    drop(path);
+                    drop(middle);
+                    let scattering = std::time::Instant::now();
+                    let plan = model.plan(cluster, &model.running());
+                    let (scattered, counted) = model.scattering_of(&plan, tables.of(cluster, &model.running()), &at, &psi, None);
+                    sink += scattered.force[2];
+                    counts[3] = counted;
+                    times[2] += scattering.elapsed();
+                    let energy = std::time::Instant::now();
+                    sink += run.model.energy_with(cluster, &at, &psi, Some(&tables));
+                    times[5] += energy.elapsed();
+                }
+                let each = |t: std::time::Duration| t.as_secs_f64() * 1e6 / rounds as f64;
+                let table = tables.of(cluster, &model.running()).map_or(0, |t| t.table.width());
+                let ns = |time: std::time::Duration, count: f64| each(time) * 1e3 / count;
+                eprintln!(
+                    "{name} {order}: cluster of ground state {ground}: ns a counted multiply-add -- middle {:.2} ({:.0}), generators {:.2} ({:.0}), forces {:.2} ({:.0}), scattering {:.2} ({:.0}); an energy {:.2} µs",
+                    ns(times[0], counts[0]), counts[0], ns(times[3], counts[1]), counts[1], ns(times[4], counts[2]), counts[2], ns(times[2], counts[3]), counts[3], each(times[5])
+                );
+                eprintln!("{name} {order}: cluster of ground state {ground} ({n} states): the model's part of a step {:.2} µs (its middle {:.2}, its scattering {:.2}); table {table} reals a node, {} tables in {built:.2?} [{sink:.3e}]", each(times[1]) + each(times[2]), each(times[0]), each(times[2]), tables.tables.len());
+            }
+        }
     }
 }

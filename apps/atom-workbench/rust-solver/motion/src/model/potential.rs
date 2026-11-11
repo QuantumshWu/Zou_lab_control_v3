@@ -253,6 +253,38 @@ impl Model {
                     out.scale += (coefficient[0] * form[0]).abs() * p[c.states[x]];
                     out.terms += 1;
                 }
+                // The fourth order's shift (assemble.rs, # The fourth order): the diagonal of H⁽⁴⁾ = Herm[−Y N + ½[X, N]]
+                // at the point, and its gradient -- the generator's whose gradient the force is. Its second derivatives
+                // are not made: a potential asked to that order (a trap's Hessian) is the second order's.
+                if let (Some(fourth), true) = (&plan.fourth, order <= 1) {
+                    let mut site = super::assemble::Held::<super::assemble::Site>::take();
+                    site.beams.clear();
+                    site.beams.extend_from_slice(amplitudes);
+                    self.quartic(&plan, fourth, tables.and_then(|t| t.of(cluster, lights)), None, &mut site, false);
+                    let (n, size) = (fourth.n, fourth.n * fourth.n);
+                    Model::quartic_read(|q| {
+                        let (near, partner, metric) = (&q.data[..4 * size], &q.data[4 * size..8 * size], &q.data[8 * size..]);
+                        // Re Σ_c (−Y + ½X)[b, c] N[c, b] − ½ N[b, c] X[c, b], the factors' parts as given.
+                        let diagonal = |b: usize, first: usize, second: usize| -> f64 {
+                            (0..n)
+                                .map(|k| {
+                                    let (bk, kb) = (b * n + k, k * n + b);
+                                    ((metric[first * size + bk] * 0.5 - partner[first * size + bk]) * near[second * size + kb] - near[first * size + bk] * metric[second * size + kb] * 0.5).re
+                                })
+                                .sum()
+                        };
+                        for (b, &state) in c.states[..n].iter().enumerate().filter(|of| p[*of.1] != 0.0) {
+                            let (quadratic, w) = (&mut out.quadratic, sign * p[state]);
+                            let value = diagonal(b, 0, 0);
+                            quadratic.value += w * value;
+                            for i in 0..3 * order {
+                                quadratic.gradient[i] += w * (diagonal(b, 1 + i, 0) + diagonal(b, 0, 1 + i));
+                            }
+                            out.scale += value.abs() * p[state];
+                            out.terms += 1;
+                        }
+                    });
+                }
             }
         }
         out

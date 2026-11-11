@@ -323,6 +323,8 @@ impl Model {
         let order = if gradients == Gradients::None { 0 } else { 1 };
         let mut site = Held::<Site>::take();
         self.light.amplitudes_into(at.r, 1, |_| true, &mut site.beams);
+        // The fourth order's matrices at the point (assemble.rs `Model::quartic`): the step's middle's where it made them.
+        let fourth_work = plan.fourth.as_ref().map_or(0.0, |fourth| self.quartic(plan, fourth, table, Some(at.r), &mut site, false));
         // The point's jumps' matrices, to first order with their slopes: a table's, or the exact elimination's.
         let mut work = match table {
             _ if len == 0 => {
@@ -336,12 +338,39 @@ impl Model {
                 near.work
             }
         };
+        // The fourth order's states (assemble.rs, # The fourth order): (1 − ½X)ψ and Nψ, and with the gradients the
+        // three lab axes' −½∂X ψ and ∂N ψ.
+        let bent: Option<[[C64; STATES]; 8]> = plan.fourth.as_ref().map(|fourth| {
+            let (n, size) = (fourth.n, fourth.n * fourth.n);
+            work += fourth_work;
+            crate::model::Model::quartic_read(|q| {
+                let mut out = [[C64::ZERO; STATES]; 8];
+                let (near, metric) = (&q.data[..4 * size], &q.data[8 * size..]);
+                for part in 0..if order >= 1 { 4 } else { 1 } {
+                    for x in 0..n {
+                        let (mut bend, mut shift) = (C64::ZERO, C64::ZERO);
+                        for (y, z) in psi.iter().enumerate().take(n) {
+                            bend += metric[part * size + x * n + y] * *z;
+                            shift += near[part * size + x * n + y] * *z;
+                        }
+                        match part {
+                            0 => (out[0][x], out[1][x]) = (psi[x] - bend * 0.5, shift),
+                            _ => (out[1 + part][x], out[4 + part][x]) = (bend * -0.5, shift),
+                        }
+                    }
+                }
+                work += (2 * size * if order >= 1 { 4 } else { 1 }) as f64;
+                out
+            })
+        });
+        // The lab axes along which the fourth order's matrices change at all (a light along one axis: that one).
+        let live: Vec<usize> = bent.as_ref().map_or(vec![], |b| (0..3).filter(|&a| b[2 + a].iter().chain(&b[5 + a]).any(|z| *z != C64::ZERO)).collect());
         let Site { beams: amplitudes, directions, jumps, jump_slopes, fields, member: vectors, class: sums, .. } = &mut *site;
         self.fields_into(plan, amplitudes, at.kappa, order, fields);
         // Each field component's value (and gradient) from its beams, plain and Doppler-weighted.
         work += plan.scalars.iter().map(|s| (2 * jet::parts(order) * s.beams.len()) as f64).sum::<f64>();
         // A member's vectors: its matrix on the state, a point's with its partner's and each direction's two slopes.
-        const MOST: usize = 2 * (1 + if MOST_AXES > 3 { MOST_AXES } else { 3 });
+        const MOST: usize = 3 * (1 + if MOST_AXES > 3 { MOST_AXES } else { 3 }) + 6;
         let (width, most) = (jumps.len(), plan.classes.iter().map(|class| class.rows).max().unwrap_or(0));
         sized(vectors, MOST * 2 * most);
         sized(sums, 8 * most);
@@ -374,27 +403,69 @@ impl Model {
                 // Its matrices on the state: its jumps', and where they are a point's the partner's and their slopes'.
                 let taken = m.folded && with;
                 let slopes = if taken && m.near { directions.len() } else { 0 };
-                let made = if m.near { 2 * (1 + slopes) } else { 1 };
+                let base = if m.near { 2 * (1 + slopes) } else { 1 };
+                // The fourth order's vectors after them: a point's partner on Nψ with its slopes, and with the gradients
+                // the jumps on −½∂X ψ and the partner on ∂N ψ along each lab axis; a constant member's jumps on −½∂X ψ.
+                let more = match (&bent, m.near) {
+                    (None, _) => 0,
+                    (Some(_), true) => 1 + slopes + if taken { 2 * live.len() } else { 0 },
+                    (Some(_), false) => if taken { live.len() } else { 0 },
+                };
+                let made = base + more;
                 let vectors = &mut vectors[..made * 2 * rows];
+                // A state of the cluster on the member's columns, at its phase.
+                let gathered = |of: &[C64; STATES]| -> [C64; STATES] {
+                    let phase = if m.phase == 0.0 { C64::ONE } else { C64::cis(m.phase * at.t) };
+                    let mut out = [C64::ZERO; STATES];
+                    out.iter_mut().zip(&m.columns).for_each(|(z, &sp)| *z = of[sp] * phase);
+                    out
+                };
+                // The jumps act on the state, or on the fourth order's (1 − ½X)ψ.
+                let bend = bent.as_ref().map(|b| gathered(&b[0]));
+                let on: &[C64] = bend.as_ref().map_or(x, |b| &b[..count]);
                 if m.near {
-                    combine(false, x, count, &jumps[m.at..m.at + matrix], vectors, made, 0);
+                    combine(false, on, count, &jumps[m.at..m.at + matrix], vectors, made, 0);
                     combine(false, x, count, &jumps[m.at + matrix..m.at + 2 * matrix], vectors, made, 1);
                     for f in 0..slopes {
                         let slope = &jump_slopes[f * width + m.at..][..2 * matrix];
-                        combine(false, x, count, &slope[..matrix], vectors, made, 2 + 2 * f);
+                        combine(false, on, count, &slope[..matrix], vectors, made, 2 + 2 * f);
                         combine(false, x, count, &slope[matrix..], vectors, made, 3 + 2 * f);
                     }
+                    if let Some(b) = &bent {
+                        let shift = gathered(&b[1]);
+                        combine(false, &shift[..count], count, &jumps[m.at + matrix..m.at + 2 * matrix], vectors, made, base);
+                        for f in 0..slopes {
+                            combine(false, &shift[..count], count, &jump_slopes[f * width + m.at + matrix..][..matrix], vectors, made, base + 1 + f);
+                        }
+                        for (i, &a) in live.iter().enumerate().filter(|_| taken) {
+                            let (bend, shift) = (gathered(&b[2 + a]), gathered(&b[5 + a]));
+                            combine(false, &bend[..count], count, &jumps[m.at..m.at + matrix], vectors, made, base + 1 + slopes + 2 * i);
+                            combine(false, &shift[..count], count, &jumps[m.at + matrix..m.at + 2 * matrix], vectors, made, base + 2 + slopes + 2 * i);
+                        }
+                    }
                 } else {
-                    combine(false, x, count, &plan.emitted[m.at..m.at + matrix], vectors, 1, 0);
+                    combine(false, on, count, &plan.emitted[m.at..m.at + matrix], vectors, made, 0);
+                    if let (Some(b), true) = (&bent, taken) {
+                        for (i, &a) in live.iter().enumerate() {
+                            let bend = gathered(&b[2 + a]);
+                            combine(false, &bend[..count], count, &plan.emitted[m.at..m.at + matrix], vectors, made, 1 + i);
+                        }
+                    }
                 }
                 // u: the field's component on the jumps' vector, less the Doppler-weighted one on the partner's. ∇u of
                 // a folded member: the components' gradients on the same vectors, and along each direction the
                 // components on the slopes' vectors.
                 let weights = &mut weights[..4 * made];
+                if more > 0 {
+                    weights.iter_mut().for_each(|w| *w = C64::ZERO);
+                }
                 weights[0] = c[0];
                 if m.near {
                     weights[1] = -cw[0];
                     weights[2..made].iter_mut().for_each(|w| *w = C64::ZERO);
+                    if bent.is_some() {
+                        weights[base] = c[0];
+                    }
                 }
                 if taken {
                     for i in 0..3 {
@@ -405,6 +476,24 @@ impl Model {
                         }
                         for (f, direction) in directions.iter().enumerate().take(slopes) {
                             (of[2 + 2 * f], of[3 + 2 * f]) = (c[0] * direction[i], -cw[0] * direction[i]);
+                        }
+                        // The fourth order's: the partner on Nψ as the jumps on the state, and this axis' bent states.
+                        match (bent.is_some(), m.near) {
+                            (true, true) => {
+                                of[base] = c[1 + i];
+                                for (f, direction) in directions.iter().enumerate().take(slopes) {
+                                    of[base + 1 + f] = c[0] * direction[i];
+                                }
+                                if let Some(at) = live.iter().position(|&a| a == i) {
+                                    (of[base + 1 + slopes + 2 * at], of[base + 2 + slopes + 2 * at]) = (c[0], c[0]);
+                                }
+                            }
+                            (true, false) => {
+                                if let Some(at) = live.iter().position(|&a| a == i) {
+                                    of[1 + at] = c[0];
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -419,6 +508,8 @@ impl Model {
                 (first, flat) = (false, flat && !taken);
                 let partner = if m.doppler { 1.0 } else { 0.0 };
                 work += m.entries.len() as f64 * (2.0 + partner + if taken { 3.0 * (3.0 + 2.0 * partner) } else { 0.0 });
+                // The fourth order's vectors: each a matrix on a state more, and its weights.
+                work += (more * (m.entries.len() + 4 * rows)) as f64;
                 // An explicit state's part: its decay rate into the class over its population, `MemberPlan::decay`.
                 if !m.folded && with {
                     let h = energies.get_or_insert_with(|| self.far_energies(amplitudes, &plan.lights, 1, &self.coherent_dressing()).0);

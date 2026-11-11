@@ -197,6 +197,13 @@ pub trait Dynamics {
     /// The absorbed light's part of a jump's kick (1/µm): the conditional mean of the class of `photon`, one of the
     /// state's photons there, as far as one absorbed photon's momentum goes (`Photon::kick`).
     fn kick(&self, cluster: usize, at: &Point, psi: &[C64], photon: &Photon) -> [f64; 3];
+    /// Where a jump's bare state `f` lands in a cluster at a point: the state the trajectory goes on in and the
+    /// probability p of one more photon at once, before it (a fold's bare state is its slow state and a part that
+    /// decays within the excited state's lifetime; model.rs `Model::landed`). The state itself and p = 0 where the model
+    /// folds nothing of that: then `jump` draws nothing for it.
+    fn landed(&self, _cluster: usize, _at: &Point, f: &[C64]) -> (Internal, f64) {
+        (f.iter().copied().collect(), 0.0)
+    }
 
     /// What the light the state scatters gives the momentum per unit time beside the Ehrenfest force and the jumps'
     /// kicks (`Model::scattering_of`): the force and the second moment's rate the jumps do not carry, of the state ψ at
@@ -1330,63 +1337,102 @@ fn factor(rate: &[[f64; 3]; 3], scale: f64, links: usize) -> [[f64; 3]; 3] {
 /// with no photon to emit -- every class's weight zero, or not a number -- is refused (`Refused::Emission`) with the
 /// trajectory as it was: the model's decay and its photons contradict each other, and no jump is made of that.
 ///
+/// The landing (`Dynamics::landed`): the bare state f/‖f‖ lands with a probability p of one more photon at once. Where
+/// p = 0 the trajectory goes on in the bare state and nothing is drawn. Else one more uniform number of the jump's
+/// stream decides: below p the bare state emits a photon as any state does -- its class, polarization and direction
+/// drawn anew, its recoil and its bounded kick with them -- and lands again; else the trajectory goes on in the slow
+/// state the model gives, normalized.
+///
 /// `carried` is a second internal state of the trajectory's cluster taken through the same jump (adapt.rs, # The read):
-/// the picked class's operator into the picked polarization on it, renormalized as ψ is -- the jump is a linear map of
-/// the internal state. One the operator annihilates is dropped (None).
+/// the picked class's operator into the picked polarization on it, renormalized as ψ is; of every further photon the
+/// landing draws, the same; and where the trajectory goes on in its slow state, the model's same map to the slow state
+/// on it. What is drawn -- the classes, the polarizations, whether one more photon -- is drawn of the trajectory's
+/// state alone; the jump is then one linear map of the internal state, the photons' operators and the slow state's
+/// projector, applied to both. One an operator annihilates is dropped (None).
 pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut Option<Internal>) -> Result<(), Refused> {
     let j = trajectory.jumps + 1;
     let mut stream = Stream::jump(trajectory.seed, trajectory.index, j);
     let threshold = stream.open_uniform();
-    let (class, polarization) = (stream.uniform(), stream.uniform());
-    let at = trajectory.point();
-    let photons = model.photons(trajectory.cluster, &at, &trajectory.psi);
+    let (mut class, mut polarization) = (stream.uniform(), stream.uniform());
     let weight = |p: &Photon| -> f64 { p.amplitudes.iter().map(|u| norm_sqr(u)).sum() };
-    let total: f64 = photons.iter().map(weight).sum();
-    if !(total > 0.0) {
-        return Err(Refused::Emission);
-    }
-    trajectory.jumps = j;
-    trajectory.threshold = threshold;
-    trajectory.work += model.photon_work();
-    let mut x = class * total;
-    let mut pick = photons.len() - 1;
-    for (i, w) in photons.iter().map(weight).enumerate() {
-        if x < w {
-            pick = i;
+    let mut first = true;
+    loop {
+        let at = trajectory.point();
+        let photons = model.photons(trajectory.cluster, &at, &trajectory.psi);
+        let total: f64 = photons.iter().map(weight).sum();
+        if !(total > 0.0) {
+            // A norm at its threshold with no photon to emit is refused; a bare state with none goes on as it is.
+            if first {
+                return Err(Refused::Emission);
+            }
             break;
         }
-        x -= w;
-    }
-    let photon = &photons[pick];
-    let u = &photon.amplitudes;
-    let gram: [[f64; 3]; 3] = std::array::from_fn(|a| std::array::from_fn(|b| inner(&u[a], &u[b]).re));
-    let trace = gram[0][0] + gram[1][1] + gram[2][2];
-    let direction = loop {
-        let n = stream.direction();
-        let q: f64 = (0..3).map(|a| (0..3).map(|b| n[a] * gram[a][b] * n[b]).sum::<f64>()).sum();
-        if stream.uniform() * trace <= trace - q {
-            break n;
+        if first {
+            trajectory.jumps = j;
+            trajectory.threshold = threshold;
         }
-    };
-    let (e1, e2) = linalg::perpendicular(direction);
-    let along = |e: [f64; 3]| -> Internal { (0..u[0].len()).map(|i| (0..3).map(|a| u[a][i] * e[a]).sum()).collect() };
-    let (f1, f2) = (along(e1), along(e2));
-    let (w1, w2) = (norm_sqr(&f1), norm_sqr(&f2));
-    let (epsilon, f, w) = if polarization * (w1 + w2) < w1 { (e1, f1, w1) } else { (e2, f2, w2) };
-    let absorbed = model.kick(trajectory.cluster, &at, &trajectory.psi, photon);
-    for a in 0..3 {
-        trajectory.kappa[a] += -photon.wave_number * direction[a] + absorbed[a];
+        trajectory.work += model.photon_work();
+        let mut x = class * total;
+        let mut pick = photons.len() - 1;
+        for (i, w) in photons.iter().map(weight).enumerate() {
+            if x < w {
+                pick = i;
+                break;
+            }
+            x -= w;
+        }
+        let photon = &photons[pick];
+        let u = &photon.amplitudes;
+        let gram: [[f64; 3]; 3] = std::array::from_fn(|a| std::array::from_fn(|b| inner(&u[a], &u[b]).re));
+        let trace = gram[0][0] + gram[1][1] + gram[2][2];
+        let direction = loop {
+            let n = stream.direction();
+            let q: f64 = (0..3).map(|a| (0..3).map(|b| n[a] * gram[a][b] * n[b]).sum::<f64>()).sum();
+            if stream.uniform() * trace <= trace - q {
+                break n;
+            }
+        };
+        let (e1, e2) = linalg::perpendicular(direction);
+        let along = |e: [f64; 3]| -> Internal { (0..u[0].len()).map(|i| (0..3).map(|a| u[a][i] * e[a]).sum()).collect() };
+        let (f1, f2) = (along(e1), along(e2));
+        let (w1, w2) = (norm_sqr(&f1), norm_sqr(&f2));
+        let (epsilon, f, w) = if polarization * (w1 + w2) < w1 { (e1, f1, w1) } else { (e2, f2, w2) };
+        let absorbed = model.kick(trajectory.cluster, &at, &trajectory.psi, photon);
+        for a in 0..3 {
+            trajectory.kappa[a] += -photon.wave_number * direction[a] + absorbed[a];
+        }
+        if let Some(other) = carried.take() {
+            *carried = model.photons(trajectory.cluster, &at, &other).iter().find(|p| p.class == photon.class).and_then(|p| {
+                let g: Internal = (0..p.amplitudes[0].len()).map(|i| (0..3).map(|a| p.amplitudes[a][i] * epsilon[a]).sum()).collect();
+                let size = norm_sqr(&g);
+                (size > 0.0).then(|| g.iter().map(|z| *z * (1.0 / size.sqrt())).collect())
+            });
+        }
+        let scale = 1.0 / w.sqrt();
+        trajectory.psi = f.iter().map(|z| *z * scale).collect();
+        trajectory.cluster = photon.landing;
+        first = false;
+        // The landing: the bare state as it is, its slow state, or one more photon from it.
+        let at = trajectory.point();
+        let (slow, prompt) = model.landed(trajectory.cluster, &at, &trajectory.psi);
+        if !(prompt > 0.0) {
+            break;
+        }
+        if stream.uniform() >= prompt {
+            let normalized = |state: &Internal| -> Option<Internal> {
+                let size = norm_sqr(state);
+                (size > 0.0).then(|| state.iter().map(|z| *z * (1.0 / size.sqrt())).collect())
+            };
+            if let Some(other) = carried.take() {
+                *carried = normalized(&model.landed(trajectory.cluster, &at, &other).0);
+            }
+            if let Some(state) = normalized(&slow) {
+                trajectory.psi = state;
+            }
+            break;
+        }
+        (class, polarization) = (stream.uniform(), stream.uniform());
     }
-    if let Some(other) = carried.take() {
-        *carried = model.photons(trajectory.cluster, &at, &other).iter().find(|p| p.class == photon.class).and_then(|p| {
-            let g: Internal = (0..p.amplitudes[0].len()).map(|i| (0..3).map(|a| p.amplitudes[a][i] * epsilon[a]).sum()).collect();
-            let size = norm_sqr(&g);
-            (size > 0.0).then(|| g.iter().map(|z| *z * (1.0 / size.sqrt())).collect())
-        });
-    }
-    let scale = 1.0 / w.sqrt();
-    trajectory.psi = f.iter().map(|z| *z * scale).collect();
-    trajectory.cluster = photon.landing;
     test_loss(model, trajectory);
     Ok(())
 }
