@@ -160,8 +160,8 @@
 //! least for a spread: groups, of however many members each -- the scout's have one) and on no fewer trajectories than
 //! the attempt's last one -- a pilot's first groups at a finer step are no better than the result before them --; else
 //! the last result goes out again, and nothing where the solve has sent none yet. Between the product's batches each
-//! total is a message, made as the next batch's trajectories begin: in a solve shorter than `CHECKPOINT` the first
-//! message is the product's first total, after the pilot (SPEC §9). What runs no trajectories sends nothing and looks at no clock: the
+//! total is a message: in a solve shorter than `CHECKPOINT` the first message is the product's first total, after the
+//! pilot (SPEC §9). What runs no trajectories sends nothing and looks at no clock: the
 //! model's construction and its gates, the tables and their refinement, the units' reads at the states, the pricing
 //! of keeps, T(0)'s quadrature.
 use crate::adapt;
@@ -264,7 +264,7 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     // The last keep made for its predicted saving (`Attempt::Keep`): the units kept before it, the step then and the
     // saving's share; and the units such a keep has been undone for (`Attempt::Undo`), not priced again.
     let (mut priced, mut barred): (Option<(Vec<Unit>, f64, f64)>, Vec<Unit>) = (None, vec![]);
-    let mut messages = Messages { send: checkpoint, clock: Some(Instant::now()), last: None, least: 0 };
+    let mut messages = Messages { send: checkpoint, clock: Instant::now(), last: None, least: 0 };
     loop {
         // An attempt's results improve on its own last one (module documentation, # Checkpoints).
         messages.least = 0;
@@ -288,8 +288,8 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
 /// The solve's messages to the app (module documentation, # Checkpoints).
 struct Messages<'a> {
     send: &'a mut dyn FnMut(&Solution, Option<f64>),
-    /// The last message's time; none while a message is owed at once (`owe`).
-    clock: Option<Instant>,
+    /// The last message's time.
+    clock: Instant,
     /// The last result sent.
     last: Option<Solution>,
     /// The trajectories a result of this attempt must rest on to be sent.
@@ -304,7 +304,7 @@ impl Messages<'_> {
             self.least = s.trajectories;
             (self.send)(s, remaining);
             self.last = Some(s.clone());
-            self.clock = Some(Instant::now());
+            self.clock = Instant::now();
         } else {
             self.again();
         }
@@ -314,16 +314,11 @@ impl Messages<'_> {
         if let Some(s) = &self.last {
             (self.send)(s, None);
         }
-        self.clock = Some(Instant::now());
-    }
-    /// A message is owed at once: the trajectories about to run send it (`run_groups`), made on the thread that waits
-    /// for them while they run.
-    fn owe(&mut self) {
-        self.clock = None;
+        self.clock = Instant::now();
     }
     /// The time until the next message is due.
     fn due(&self) -> Duration {
-        self.clock.map_or(Duration::ZERO, |clock| CHECKPOINT.saturating_sub(clock.elapsed()))
+        CHECKPOINT.saturating_sub(self.clock.elapsed())
     }
 }
 
@@ -1189,8 +1184,8 @@ fn batch(need: f64, have: u64) -> u64 {
 /// The product (module documentation, # Stopping): batches of whole groups at the run's step, on from the pilot's
 /// groups (their numbers `pilot`; the product's own follow in the list's order), to the number the looks predict
 /// (`batch`), until every look that some number of trajectories can meet is met, or the trajectories reach
-/// `MOST_TRAJECTORIES`. The total before each batch is a checkpoint, sent as the batch begins (`Messages::owe`: this
-/// thread only waits while the batch runs); returns the estimates, the listed atoms and the counts at its end.
+/// `MOST_TRAJECTORIES`. Each batch's result is a checkpoint; returns the estimates, the listed atoms and the counts at
+/// its end.
 fn product(run: &Run, ensemble: &Ensemble, context: &Context, parts: &mut Vec<Part>, pilot: &[u64], messages: &mut Messages) -> (Vec<Estimate>, Vec<Vec<(V3, V3)>>, Counts) {
     let (started, from) = (Instant::now(), parts.len() as u64 * GROUP);
     // The group at the list's place g.
@@ -1207,9 +1202,7 @@ fn product(run: &Run, ensemble: &Ensemble, context: &Context, parts: &mut Vec<Pa
             return (e, l, c);
         }
         let want = batch(chased.iter().map(Look::need).fold(0., f64::max), n);
-        // The total so far is a message (module documentation, # Checkpoints): owed, and made beside the batch's
-        // trajectories.
-        messages.owe();
+        messages.result(&assemble(context, &e, &l, &c, n), all.len(), left(n, want));
         let numbers: Vec<u64> = (n / GROUP..want / GROUP).map(number).collect();
         let new = level(run, ensemble, &context.plan, context.tau, &numbers, 0..GROUP, false, messages, &mut |prefix, messages| {
             let all: Vec<&Part> = parts.iter().chain(prefix.iter().copied()).collect();
@@ -1475,9 +1468,11 @@ impl Hand<'_> {
 /// handed out together (`pair`), the level of the longer trajectories first, so that the threads that wait for the
 /// list's last trajectories wait for its shortest. Each group's records are added in its members' order on this thread
 /// (`Shape::fold`, nothing depends on the threads), each level's groups returned in their order; whenever the solve's
-/// next message is due (`Messages::due`: its interval has passed, or it is owed as the trajectories begin),
-/// `progress` takes the first level's groups finished so far in order and sends the result of what is in with them
-/// (module documentation, # Checkpoints) -- every call of it sets the messages' clock (`Messages::result`).
+/// next message is due (`Messages::due`), `progress` takes the first level's groups finished so far in order and sends
+/// the result of what is in with them (module documentation, # Checkpoints). A message is made on this thread by loops
+/// that run on the pool (`pooled`, `accounts`), whose threads are all in their trajectories: between two trajectories
+/// a thread takes what waits for the pool, so a message waits for the next trajectory to end on any thread and not
+/// for the list's end.
 fn run_groups(levels: &[Hand], messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Vec<Part>> {
     // Where each level's trajectories begin in the list, and the list's length.
     let starts: Vec<u64> = levels.iter().scan(0, |next, level| Some(std::mem::replace(next, *next + level.count()))).collect();
@@ -1505,18 +1500,14 @@ fn run_groups(levels: &[Hand], messages: &mut Messages, progress: &mut dyn FnMut
                 if sender.send((level, k, (levels[level].record)(levels[level].number(k)))).is_err() {
                     break;
                 }
+                // What else waits for the pool: a message's loops (below).
+                rayon::yield_now();
             });
         }
         drop(sender);
         let mut left: usize = levels.iter().map(|level| level.groups.len()).sum();
         while left > 0 {
-            let due = messages.due();
-            if due.is_zero() {
-                let prefix: Vec<&Part> = parts.first().map_or(vec![], |first| first.iter().map_while(Option::as_ref).collect());
-                progress(&prefix, messages);
-                continue;
-            }
-            match receiver.recv_timeout(due) {
+            match receiver.recv_timeout(messages.due()) {
                 Ok((level, k, r)) => {
                     let size = levels[level].size();
                     let (g, m) = ((k / size) as usize, (k % size) as usize);
@@ -1527,7 +1518,10 @@ fn run_groups(levels: &[Hand], messages: &mut Messages, progress: &mut dyn FnMut
                         left -= 1;
                     }
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let prefix: Vec<&Part> = parts.first().map_or(vec![], |first| first.iter().map_while(Option::as_ref).collect());
+                    progress(&prefix, messages);
+                }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
@@ -2466,8 +2460,8 @@ mod tests {
 
     /// The units' errors per output (`Measured::means`), their sums and a unit's removal (`sums`, `model_error_at`).
     /// Three units, the second booked at its bound 1e-5 (a state's row: the two read units' errors); two groups, output 1
-    /// read in both, output 2 in the first
-    /// alone, output 3 in neither. A read unit's error is the mean over the states of the output, of the first group's
+    /// read in both, output 2 in the first alone, output 3 in neither. A read unit's error is the mean over the states of
+    /// the output, of the first group's
     /// with the second left out, and its bound (1, none) where no state is read; the bounded unit's is its bound
     /// everywhere. The sums add what the reach leaves out; a read unit leaves a sum by subtraction; where it was not
     /// read, its population's bound leaves as a read error does, and on T the others' bounds stand -- alone, what the
@@ -2628,26 +2622,31 @@ mod tests {
         assert!((d.probabilities[0].iter().sum::<f64>() - 1.).abs() < 1e-15);
     }
 
-    /// A message owed as a hand-out begins (`Messages::owe`) is asked for once -- what is asked sets the messages' clock --,
-    /// with no group finished or the first ones, and the groups all come back.
+    /// A message that falls due inside a hand-out is made while the trajectories run: its loops run on the pool
+    /// (`pooled`), whose threads take them between two trajectories (`run_groups`) -- not at the list's end, when all
+    /// but the last few trajectories are over. Eight trajectories a thread, each a few milliseconds of waiting; a
+    /// message due from the start, made by a loop on the pool (of two items: one alone runs where it is called) that
+    /// counts the trajectories over by then: not half of them (all but a thread's worth where the threads keep to
+    /// their trajectories: 122 of 128 on 16 threads).
     #[test]
-    fn an_owed_message_is_asked_for_as_the_trajectories_begin() {
+    fn a_message_due_is_made_while_the_trajectories_run() {
         let shape = Shape { outputs: 1, listed: 0, keep: false };
-        let record = |_: u64| Record { outputs: vec![Fate::Lost], listed: vec![], samples: vec![], counts: Counts::default() };
+        let over = AtomicU64::new(0);
+        let record = |_: u64| {
+            std::thread::sleep(Duration::from_millis(3));
+            over.fetch_add(1, Ordering::Relaxed);
+            Record { outputs: vec![Fate::Lost], listed: vec![], samples: vec![], counts: Counts::default() }
+        };
         let mut silent = |_: &Solution, _: Option<f64>| {};
-        let mut messages = Messages { send: &mut silent, clock: Some(Instant::now()), last: None, least: 0 };
-        assert!(!messages.due().is_zero());
-        messages.owe();
-        assert!(messages.due().is_zero());
-        let mut asked = vec![];
-        let hand = Hand { groups: &[4, 5, 6], members: 0..GROUP, shape, record: &record };
-        let levels = run_groups(&[hand], &mut messages, &mut |prefix, messages| {
-            asked.push(prefix.len());
+        let mut messages = Messages { send: &mut silent, clock: Instant::now() - CHECKPOINT, last: None, least: 0 };
+        let numbers: Vec<u64> = (0..rayon::current_num_threads() as u64).collect();
+        let mut seen = vec![];
+        let levels = run_groups(&[Hand { groups: &numbers, members: 0..GROUP, shape, record: &record }], &mut messages, &mut |_, messages| {
+            seen.push((0..2).into_par_iter().map(|_| over.load(Ordering::Relaxed)).max().expect("the loop's two items"));
             messages.again();
         });
-        assert!(asked.len() == 1 && asked[0] <= 3, "{asked:?}");
-        assert_eq!(levels[0].len(), 3);
-        assert!(!messages.due().is_zero());
+        assert_eq!(levels[0].len(), numbers.len());
+        assert!(seen.len() == 1 && 2 * seen[0] < numbers.len() as u64 * GROUP, "{seen:?} of {}", numbers.len() as u64 * GROUP);
     }
 
     /// The groups come back in their order whatever the threads do: 37 groups' records (five of a pilot's numbers, then a
@@ -2664,7 +2663,7 @@ mod tests {
             Record { outputs, listed: vec![Some(([i as f64; 3], [0.; 3]))], samples: vec![], counts: Counts { steps: i, ..Counts::default() } }
         };
         let mut silent = |_: &Solution, _: Option<f64>| {};
-        let mut messages = Messages { send: &mut silent, clock: Some(Instant::now()), last: None, least: 0 };
+        let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0 };
         let numbers: Vec<u64> = (2048..2053).chain(5..37).collect();
         let members = [0..GROUP, 1..3];
         let hands = members.clone().map(|members| Hand { groups: &numbers, members, shape, record: &record });
