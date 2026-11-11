@@ -33,7 +33,7 @@ fn host() -> Option<Host> {
 
 fn request(values: Value, outputs: &[String]) -> RunRequest {
     RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values, devices: [("sampler".to_owned(), "source".to_owned())].into(),
-        shared: Default::default(), origin: Origin::Operator, resources: json!({}), source_signal: None, run_directory: None,
+        shared: Default::default(), reads: Default::default(), origin: Origin::Operator, resources: json!({}), source_signal: None, run_directory: None,
         outputs: outputs.iter().map(|name| (name.clone(), format!("@logic/wave/{name}"))).collect(), record_devices: false }
 }
 

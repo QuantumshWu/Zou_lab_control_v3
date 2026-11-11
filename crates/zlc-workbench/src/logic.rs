@@ -395,7 +395,7 @@ impl Workbench {
         for output in frames.into_iter().filter(|_| only.is_none()) {
             self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Query { node, name, .. } if node == id && name == &format!("{FRAMES_QUERY}:{output}")));
             let ticket = self.ticket(Ticket::Query { node: id.to_owned(), revision, name: format!("{FRAMES_QUERY}:{output}") });
-            self.plugins.query(&node_instance(id), ticket, FRAMES_QUERY, &json!({"values": args["values"], "output_name": output, "source": source}));
+            self.plugins.query(&node_instance(id), ticket, FRAMES_QUERY, &json!({"values": args["values"], "output_name": output, "source": source, "devices": args["devices"]}));
         }
     }
 
@@ -472,6 +472,15 @@ impl Workbench {
     /// it reads and tunes; an editor also every tunable device of the bench). A node that names
     /// one, and every node with an editor, asks again under a new revision, so an answer given
     /// before the change -- a camera not yet open when a layout loaded -- cannot stand after it.
+    /// An open device says what it now states of itself (`Event::Facts`): kept with its working point, and
+    /// every draft that names devices is asked again when it differs from what was known.
+    pub(crate) fn device_facts(&mut self, instance: &str, facts: Value) {
+        let Some(live) = self.devices.get_mut(instance) else { return };
+        if !live.working_point.is_object() || live.working_point["facts"] == facts { return; }
+        live.working_point["facts"] = facts;
+        self.bench_changed();
+    }
+
     pub(crate) fn bench_changed(&mut self) {
         let asking: Vec<String> = self.nodes.iter().filter(|node| !node.draft.device_keys.values().all(String::is_empty)
             || self.catalog.get(&node.type_id).is_some_and(|item| item.node().queries.iter().any(|name| name == "editor_facts")))
@@ -547,7 +556,8 @@ impl Workbench {
             let kind = self.live_type(live);
             (argument.clone(), json!({"instance": key, "role": self.device_role(key), "type_id": kind.map_or(live.entry.type_id.as_str(), |item| item.type_id.as_str()),
                 "capabilities": kind.map(|item| item.capabilities.clone()).unwrap_or_default(),
-                "tunable": live.working_point["tunable"] == true, "reads": live.working_point["reads"].clone(), "units": live.entry.units}))
+                "tunable": live.working_point["tunable"] == true, "reads": live.working_point["reads"].clone(), "units": live.entry.units,
+                "facts": live.working_point["facts"].clone()}))
         })).collect())
     }
 
@@ -853,6 +863,8 @@ impl Workbench {
         for requirement in Self::active_requirements(descriptor, &node.draft.values) {
             let options = self.device_options(&requirement.capability);
             let key = node.draft.device_keys.get(&requirement.argument).map(String::as_str).unwrap_or("");
+            // An optional device that is not there is not asked for: the node is built without it.
+            if requirement.optional && !options.iter().any(|(id, _)| id == key) { continue; }
             // Opening, or closed by an Apply that reopens it with new settings.
             let opening = self.devices.iter().find(|(id, live)| (live.state == crate::apparatus::LiveState::Opening || live.reopen.is_some())
                 && (key.is_empty() || key == id.as_str()) && self.catalog.get(&live.entry.type_id).is_some_and(|item| item.capabilities.contains(&requirement.capability)));
@@ -1152,8 +1164,12 @@ impl Workbench {
                 ("folder", Value::String(path)) if !path.trim().is_empty() => json!(self.workspace.resolve(path.trim())),
                 (_, value) => value.clone(),
             })).collect();
-        let devices: BTreeMap<String, String> = claims.iter().map(|claim| (claim.argument.clone(), claim.device.clone())).collect();
+        let mut devices: BTreeMap<String, String> = claims.iter().map(|claim| (claim.argument.clone(), claim.device.clone())).collect();
         let shared: BTreeSet<String> = claims.iter().filter(|claim| !claim.exclusive).map(|claim| claim.argument.clone()).collect();
+        // A device the run only reads is its argument without a claim, while it is open.
+        let reads: BTreeSet<String> = Self::active_requirements(&descriptor, &frozen.values).into_iter().filter(|requirement| requirement.reads_only)
+            .filter_map(|requirement| draft.device_keys.get(&requirement.argument).filter(|key| self.device_open(key))
+                .map(|key| { devices.insert(requirement.argument.clone(), key.clone()); requirement.argument.clone() })).collect();
         let artifacts: Map<String, Value> = descriptor.node().artifact_inputs.iter().filter_map(|spec| draft.artifact_inputs.get(&spec.name)
             .map(|value| (spec.name.clone(), match value {
                 Value::String(path) => json!(self.workspace.resolve(path)),
@@ -1165,12 +1181,12 @@ impl Workbench {
         Ok(RunSpec { node_name: node.name.clone(), run: String::new(), node_id: id.to_owned(), instance: node_instance(id), type_id: node.type_id.clone(),
             values, source_signal: draft.source_signal.clone(), device_labels: devices.values().map(|key| (key.clone(), self.device_role(key).to_owned())).collect(),
             device_units: devices.values().map(|key| (key.clone(), self.device_units(key))).filter(|(_, units)| !units.is_empty()).collect(),
-            devices, shared, artifacts, resources, directory: None, outputs, origin: origin.to_owned(), prepared: None, record_devices: self.takes_bench(&node.type_id) })
+            devices, shared, reads, artifacts, resources, directory: None, outputs, origin: origin.to_owned(), prepared: None, record_devices: self.takes_bench(&node.type_id) })
     }
 
     fn frozen_claims(&self, type_id: &str, frozen: &Frozen) -> Vec<Claim> {
         let Some(descriptor) = self.catalog.get(type_id) else { return Vec::new() };
-        let mut claims: Vec<Claim> = Self::active_requirements(descriptor, &frozen.values).into_iter().filter_map(|requirement| {
+        let mut claims: Vec<Claim> = Self::active_requirements(descriptor, &frozen.values).into_iter().filter(|requirement| !requirement.reads_only).filter_map(|requirement| {
             frozen.draft.device_keys.get(&requirement.argument).filter(|key| !key.is_empty())
                 .map(|key| Claim { argument: requirement.argument.clone(), device: key.clone(), protected: requirement.protected_fields.clone(), exclusive: true })
         }).collect();

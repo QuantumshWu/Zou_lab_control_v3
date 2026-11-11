@@ -162,6 +162,11 @@ class DcamCameraAdapter:
             camera="qCMOS camera",
         )
 
+    @property
+    def stamps_frames(self) -> bool:
+        # DCAM stamps each frame with the camera's own clock, to the microsecond.
+        return True
+
     def _require_device(self) -> object:
         if self._device is None or not self._open:
             raise RuntimeError("DCAM camera is closed")

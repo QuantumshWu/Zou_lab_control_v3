@@ -314,6 +314,12 @@ class DeviceRequirement:
     argument_name: str
     protected_fields: tuple[str, ...] | None = ()
     enabled_when: tuple[str, tuple[Any, ...]] | None = None
+    #: The run only reads the device: it claims nothing of it and may call only what the device lists
+    #: as reads, beside whoever holds it.  A device the core implements itself is then handed to draft
+    #: queries as what it states of itself (``facts``) and to the build as its key alone.
+    reads_only: bool = False
+    #: A draft may leave it unset or name a device that is not open; the build is then called without it.
+    optional: bool = False
 
 
 #: NodeType callables answered through ``query`` (PLUGIN_PROTOCOL.md §2), each
@@ -334,6 +340,9 @@ QUERY_PARAMETERS: dict[str, tuple[str, ...]] = {
     "estimate_run": ("values", "devices", "resources"),
     "describe_output_frames": ("values", "output_name", "source"),
 }
+#: Facts a query's callable is handed by name when it has a parameter of that name (the v2
+#: callables that never took them are called as before).
+QUERY_OPTIONAL: dict[str, tuple[str, ...]] = {"describe_output_frames": ("devices",)}
 NODE_QUERIES = tuple(QUERY_PARAMETERS)
 #: Every node answers it, from its schema, admit_resources and artifact codecs (host._admit).
 ADMIT = "admit"
@@ -482,7 +491,8 @@ class NodeType:
                             for item in self.outputs],
                 "devices": [{"capability": item.capability_token, "argument": item.argument_name,
                              "protected_fields": None if item.protected_fields is None else list(item.protected_fields),
-                             "enabled_when": plain(item.enabled_when)} for item in self.device_requirements],
+                             "enabled_when": plain(item.enabled_when), "reads_only": bool(item.reads_only),
+                             "optional": bool(item.optional)} for item in self.device_requirements],
                 "previews": previews, "reports_ready": self.reports_ready,
                 "acquisition_input": self.acquisition_input, "acquisition_completion": self.acquisition_completion,
                 "artifact_outputs": [{"name": item.name, "contract": item.contract_id} for item in self.artifact_outputs],

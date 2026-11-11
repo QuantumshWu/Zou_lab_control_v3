@@ -299,6 +299,8 @@ pub struct RunRequest {
     pub device_units: BTreeMap<String, BTreeMap<String, String>>,
     /// The arguments whose device the run shares (a scan's device axis); it takes every other one exclusively.
     pub shared: std::collections::BTreeSet<String>,
+    /// The arguments whose device the run only reads: it takes no claim, and may call only what the device lists as reads.
+    pub reads: std::collections::BTreeSet<String>,
     pub origin: Origin,
     pub resources: Value,
     /// A processor's input: the signal its deliveries come from (§5).
@@ -316,6 +318,8 @@ struct RunState {
     id: String,
     origin: Origin,
     devices: BTreeMap<String, String>,
+    /// The arguments of `devices` it only reads.
+    reads: std::collections::BTreeSet<String>,
     signals: BTreeMap<String, String>,
     generation: Option<Generation>,
     /// The signal its commits derive from: one run of it (a processor's subscription),
@@ -400,6 +404,9 @@ struct Source { feed: Feed, bundle: bool, input: String, generation: GenerationI
 enum Feed { Live(Subscription), Sealed(Vec<Read>) }
 
 struct Inner {
+    /// Per device, the method a run last called of it and how often it has been called again since with
+    /// nothing going wrong (and the slowest of those): what the journal says once instead of every time.
+    repeated: Mutex<HashMap<String, (String, u64, f64)>>,
     config: HostConfig,
     /// What every plugin process gets in its environment ([`plugin_environment`]).
     environment: Vec<(&'static str, std::ffi::OsString)>,
@@ -458,7 +465,7 @@ impl PluginHost {
             let registry = Registry::new(session.clone(), Box::new(move |pid, names| {
                 if let Some(inner) = owner.upgrade() { inner.release_to(pid, names); }
             }));
-            Inner { environment: plugin_environment(&config.python), config, session, runtime, safe, registry, job, catalog: Mutex::new(None),
+            Inner { repeated: Mutex::default(), environment: plugin_environment(&config.python), config, session, runtime, safe, registry, job, catalog: Mutex::new(None),
                     state: Mutex::default(), processes: Mutex::default(), events: Box::new(events), gates: Mutex::default(),
                     device_calls: workers::Workers::new("zlc-plugin-device-call"),
                     service_calls: workers::Workers::new("zlc-plugin-service"), services: Mutex::default(), process_resources: Mutex::default() }
@@ -728,8 +735,11 @@ impl PluginHost {
         // What the core asks of a plugin instance: the operation and, for a device method, which.
         let (began, method) = (Instant::now(), params.get("method").and_then(Value::as_str).map(str::to_owned));
         let answer = self.inner.call(instance, op, params, deadline);
-        zlc_core::journal::note_with("plugins", "call", || json!({"instance": instance, "op": op, "method": method,
-            "ms": began.elapsed().as_secs_f64() * 1e3, "error": answer.as_ref().err().map(|error| error.message.clone())}));
+        // A question a draft or the bench asks changes nothing: said only when it fails.
+        if answer.is_err() || !matches!(op, "query" | "snapshot" | "values" | "fields") {
+            zlc_core::journal::note_with("plugins", "call", || json!({"instance": instance, "op": op, "method": method,
+                "ms": began.elapsed().as_secs_f64() * 1e3, "error": answer.as_ref().err().map(|error| error.message.clone())}));
+        }
         answer
     }
 
@@ -844,16 +854,16 @@ impl PluginHost {
             for (argument, device) in &request.devices {
                 let target = state.instances.get(device).filter(|target| target.descriptor.is_device())
                     .ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{device} is not an open device")))?;
-                let exclusive = !request.shared.contains(argument);
+                let exclusive = !request.shared.contains(argument) && !request.reads.contains(argument);
                 if let Some((owner, _)) = target.claims.iter().find(|(_, held)| exclusive && *held) {
                     return Err(CallError::new(ErrorKind::Refused, format!("{device} is claimed by run {owner}")));
                 }
-                if target.published.is_some() { return Err(published_refusal(device)); }
+                if target.published.is_some() && !request.reads.contains(argument) { return Err(published_refusal(device)); }
                 devices.insert(argument.clone(), json!({"instance": device, "role": request.device_labels.get(device).unwrap_or(device), "type_id": target.descriptor.type_id,
                     "capabilities": target.descriptor.capabilities, "tunable": target.tunable, "reads": target.reads,
                     "units": request.device_units.get(device).cloned().unwrap_or_default()}));
             }
-            for (argument, device) in &request.devices {
+            for (argument, device) in request.devices.iter().filter(|(argument, _)| !request.reads.contains(*argument)) {
                 state.instances.get_mut(device).unwrap().claims.push((run.clone(), !request.shared.contains(argument)));
             }
             let mut native_input = None;
@@ -865,7 +875,7 @@ impl PluginHost {
                 } else { Some(received) }
             });
             state.instances.get_mut(instance).unwrap().run = Some(RunState { id: run.clone(), origin: request.origin.clone(),
-                devices: request.devices.clone(), signals: request.outputs.clone(), generation: None, route, consumer, outputs: HashMap::new(),
+                devices: request.devices.clone(), reads: request.reads.clone(), signals: request.outputs.clone(), generation: None, route, consumer, outputs: HashMap::new(),
                 histories: Vec::new(), apparatus: None, stop: RunStop(Arc::default()), lifecycle: lifecycle::RunLifecycle::default(), core_input: native_input, resources: Default::default() });
             (process, devices, source, following)
         };
@@ -1043,6 +1053,8 @@ impl Inner {
         let pid = hello.message["ok"]["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
             .ok_or("Plugin process handshake has no pid")?;
         process.set_pid(pid);
+        // Which process a plugin is: what the journal says of a process's use of the machine names it by pid.
+        zlc_core::journal::note("plugins", "process", json!({"key": key, "pid": pid}));
         self.processes.lock().unwrap().insert(pid, process.clone());
         Ok(process)
     }
@@ -1218,6 +1230,9 @@ impl Inner {
             "release" => {
                 let names: Vec<String> = params["blocks"].as_array().into_iter().flatten().filter_map(|name| name.as_str().map(str::to_owned)).collect();
                 self.registry.released_by(process.pid(), &names);
+                // Blocks the plugin has given back to the system: the core lets its mapping of each go too.
+                let retired: Vec<String> = params["retired"].as_array().into_iter().flatten().filter_map(|name| name.as_str().map(str::to_owned)).collect();
+                self.registry.retired(process.pid(), &retired);
                 // The reads (and the blocks they free) are dropped after letting the lock go.
                 let released: Vec<_> = {
                     let mut state = self.state.lock().unwrap();
@@ -1629,17 +1644,20 @@ impl Inner {
             // A draft query (no run) reads the devices its draft names, as v2's
             // declare_outputs read `source.outputs`: reads only, nothing claimed.
             let drafted = params["run"].is_null();
+            let mut reading = drafted;
             let device = if drafted {
                 params["device"].as_str().filter(|device| state.instances.get(*device).is_some_and(|entry| entry.descriptor.is_device()))
                     .ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("a draft query names no open device as {argument:?}")))?.to_owned()
             } else {
                 let run = Self::run_of(&mut state, params)?;
+                reading = run.reads.contains(argument);
                 run.devices.get(argument).cloned()
                     .ok_or_else(|| CallError::new(ErrorKind::NotClaimed, format!("this run has no device {argument:?}")))?
             };
             let entry = state.instances.get(&device).ok_or_else(|| CallError::lost(format!("{device} is no longer open")))?;
-            if drafted && !descriptor::method_reads(&method, &entry.reads) {
-                return Err(CallError::new(ErrorKind::Refused, format!("a draft query only reads {device}; {method} is not a read")));
+            if reading && !descriptor::method_reads(&method, &entry.reads) {
+                return Err(CallError::new(ErrorKind::Refused, if drafted { format!("a draft query only reads {device}; {method} is not a read") }
+                    else { format!("this run only reads {device}; {method} is not a read") }));
             }
             (device, entry.serving.clone())
         };
@@ -1649,9 +1667,28 @@ impl Inner {
         let began = Instant::now();
         let reply = serving.request(&self.registry, "spi", json!({"instance": device, "method": method,
             "args": params["args"], "kwargs": params["kwargs"]}), lends, deadline);
-        // What a node's run asks of a device it claims (a draft query's read has no run).
-        zlc_core::journal::note_with("plugins", "device", || json!({"device": device, "method": method, "run": params["run"],
-            "ms": began.elapsed().as_secs_f64() * 1e3, "error": reply.as_ref().err().map(|error| error.message.clone())}));
+        // What a node's run asks of a device it claims (a draft query's read has no run). The same call
+        // made again and again with nothing going wrong -- a capture polling its camera -- is one line when
+        // it begins and one, with how often and its slowest, when something else follows it.
+        let ms = began.elapsed().as_secs_f64() * 1e3;
+        let failed = reply.as_ref().err().map(|error| error.message.clone());
+        let said = {
+            let mut repeated = self.repeated.lock().unwrap_or_else(|error| error.into_inner());
+            match repeated.get_mut(&device) {
+                Some((again, times, slowest)) if failed.is_none() && *again == method => { *times += 1; *slowest = slowest.max(ms); None }
+                held => {
+                    let before = held.filter(|(_, times, _)| *times > 0).map(|(method, times, slowest)| (method.clone(), *times, *slowest));
+                    repeated.insert(device.clone(), (method.clone(), 0, 0.0));
+                    Some(before)
+                }
+            }
+        };
+        if let Some(before) = said {
+            if let Some((again, times, slowest)) = before {
+                zlc_core::journal::note("plugins", "device_repeated", json!({"device": device, "method": again, "times": times, "slowest_ms": slowest}));
+            }
+            zlc_core::journal::note("plugins", "device", json!({"device": device, "method": method, "run": params["run"], "ms": ms, "error": failed}));
+        }
         let reply = reply?;
         let returned: Vec<String> = reply.lends.iter().map(|lend| lend.name().to_owned()).collect();
         for name in &returned { self.registry.hold_for(node.pid(), name)?; }

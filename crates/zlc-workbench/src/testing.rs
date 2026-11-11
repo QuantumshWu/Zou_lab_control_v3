@@ -1019,6 +1019,51 @@ mod tests {
         assert!(last(&calls).1 > opened, "and again when it failed");
     }
 
+    /// A device a node only reads (a camera watching the sequencer that triggers it) is its argument
+    /// without a claim: whoever holds the device keeps it, the node is told what the device states of
+    /// itself and again when that changes, and left unset it is simply not there.
+    #[test]
+    fn a_device_a_node_only_reads_is_never_claimed_and_tells_the_draft_its_facts() {
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "watcher", "kind": "node", "label": "Watcher", "parameters": [],
+            "node": {"node_kind": "measurement", "outputs": [{"name": "frames"}], "queries": ["resolve_field_choices"],
+                     "devices": [{"capability": "camera.adapter", "argument": "camera", "protected_fields": []},
+                                 {"capability": "sequencer.streamer", "argument": "trigger_source", "protected_fields": [], "reads_only": true, "optional": true}]}}));
+        let (_root, mut workbench, calls, mut host) = rig("reads-only", catalog);
+        let lanes = |frames: Value| json!({"trigger_lanes": [{"lane": "ch11", "port": "emCCD", "label": "emCCD", "frames": frames}]});
+        event(&mut workbench, Event::Opened { instance: "sequencer".into(), working_point: json!({"facts": lanes(Value::Null)}) }, &mut host);
+        let node = apply(&mut workbench, &mut host, "add_node", json!({"type_id": "watcher"})).unwrap()["node"].as_str().unwrap().to_owned();
+        event(&mut workbench, Event::Opened { instance: node_instance(&node), working_point: Value::Null }, &mut host);
+        assert_eq!(workbench.node(&node).unwrap().draft.device_keys["trigger_source"], "sequencer", "the first open one, as any requirement's");
+        let asked = |calls: &Rc<RefCell<Calls>>| calls.borrow().2.iter().rev().find(|(query, ..)| query == "resolve_field_choices").cloned().unwrap();
+        let (_, first, args) = asked(&calls);
+        assert_eq!(args["devices"]["trigger_source"]["facts"], lanes(Value::Null), "what the device states of itself reaches the draft");
+        // The board now holds a pulse that triggers the lane three times a shot: the draft is asked again.
+        event(&mut workbench, Event::Facts { instance: "sequencer".into(), facts: lanes(json!(3)) }, &mut host);
+        let (_, second, args) = asked(&calls);
+        assert!(second > first);
+        assert_eq!(args["devices"]["trigger_source"]["facts"]["trigger_lanes"][0]["frames"], 3);
+        event(&mut workbench, Event::Facts { instance: "sequencer".into(), facts: lanes(json!(3)) }, &mut host);
+        assert_eq!(asked(&calls).1, second, "the same facts said again ask nothing");
+        event(&mut workbench, Event::Answered { ticket: second, result: Ok(json!({})) }, &mut host);
+
+        apply(&mut workbench, &mut host, "start_node", json!({"node": node})).unwrap();
+        let prepared = calls.borrow().2.iter().rev().find(|(query, ..)| query == "prepare_run").cloned().unwrap();
+        event(&mut workbench, Event::Answered { ticket: prepared.1, result: Ok(json!({"prepared": "p1"})) }, &mut host);
+        let spec = calls.borrow().1.last().cloned().unwrap();
+        assert_eq!((spec.devices["camera"].as_str(), spec.devices["trigger_source"].as_str()), ("mot_camera", "sequencer"));
+        assert_eq!(spec.reads.iter().collect::<Vec<_>>(), ["trigger_source"], "read, and said so to the plugin host");
+        assert!(workbench.device_claimant("sequencer").is_none(), "whoever plays the board is not kept from it");
+        assert_eq!(workbench.device_claimant("mot_camera").as_deref(), Some("watcher"));
+        apply(&mut workbench, &mut host, "stop_node", json!({"node": node})).unwrap();
+        event(&mut workbench, Event::RunFinished { run: spec.run.clone(), outcome: "stopped".into(), error: None, generation: None }, &mut host);
+
+        // Without the sequencer the node still starts: an optional device that is not there is not asked for.
+        event(&mut workbench, Event::Closed { instance: "sequencer".into(), error: None }, &mut host);
+        let issues = workbench.state(&host)["logic"][0]["issues"].to_string();
+        assert!(!issues.contains("sequencer") && !issues.contains("trigger_source"), "{issues}");
+    }
+
     /// v2 _active_differs: a failed device and changed simulation settings are an Apply, not a Shut down.
     #[test]
     fn a_failed_device_and_changed_simulation_are_applied() {

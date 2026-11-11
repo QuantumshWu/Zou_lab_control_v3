@@ -225,6 +225,9 @@ pub struct PulseHost {
     pub users: zlc_workbench::DeviceUsers,
     /// Each plugin run's use of the board, until it has ended and its replies are in.
     runs: BTreeMap<String, RunUse>,
+    /// What the sequencer device last stated of itself, and the board and revision that was of.
+    facts: Value,
+    facts_of: Option<(usize, u64)>,
 }
 
 /// The preview's front and its axes, as panels report theirs.
@@ -459,7 +462,7 @@ pub fn device_descriptors() -> Vec<Value> {
     // simulated world (the simulation settings reach it like every simulated device).
     let common = |type_id: &str, label: &str, description: &str, simulation: bool, parameters: Value| json!({
         "type_id": type_id, "kind": "device", "family": "sequencer", "label": label, "description": description, "module": "zlc_pulse (native)",
-        "simulation": simulation, "capabilities": ["sequencer.streamer"], "parameters": parameters, "physical_outputs": output, "commands": [],
+        "simulation": simulation, "capabilities": ["sequencer.streamer", "trigger.source"], "parameters": parameters, "physical_outputs": output, "commands": [],
         "addable": true});
     let mut types = vec![
         common("sequencer.virtual", "Virtual sequencer", "The pulse board's memory twin, played at wall time into the simulated world \
@@ -500,7 +503,8 @@ impl PulseHost {
         PulseHost { editor: Editor::new(deployed, pulses.to_path_buf()), device: Lane::new("pulse-command"), safe: Lane::new("pulse-safe"), program: Lane::new("pulse-program"),
                     preview: Lane::new("pulse-preview"), post, safe_actions, plugins, given: None, python, session: Arc::new(Mutex::new(None)),
                     dpr: 1.0, preview_busy: false, preview_key: String::new(), preview_wanted: false, frame: None, frames: 0,
-                    axes: Vec::new(), pointers: Default::default(), pointer_busy: false, users: Default::default(), runs: BTreeMap::new() }
+                    axes: Vec::new(), pointers: Default::default(), pointer_busy: false, users: Default::default(), runs: BTreeMap::new(),
+                    facts: Value::Null, facts_of: None }
     }
 
     /// The pulse section of a state message: the editor's view plus the preview's frame.
@@ -719,6 +723,12 @@ impl PulseHost {
         match action {
             "pulse_describe" => return Handled::Now(describe_document(Path::new(command["document"].as_str().unwrap_or("")))
                 .map(|description| to_value(&description)).map_err(|error| error.message)),
+            // A read whoever holds the board: a camera aligning its frames to the lane that triggers it claims no sequencer.
+            "pulse_schedule" => return Handled::Now(match self.editor.board() {
+                None => Ok(json!({"revision": 0, "state": "none", "lane": command["lane"], "points": []})),
+                Some(board) => board.trigger_schedule(command["lane"].as_str().unwrap_or(""), command["known"].as_u64())
+                    .map(|schedule| to_value(&schedule)).map_err(|error| error.message),
+            }),
             "pulse_run" | "pulse_wait_done" | "pulse_stop" if run.is_some() => {
                 if let Err(error) = self.check_claims(run, &claims) { return Handled::Now(Err(error)); }
             }
@@ -915,8 +925,28 @@ impl PulseHost {
         self.editor.attach_given(board, label);
         self.dispatch();
         // `snapshot`: it reports its state for the bench a Start records (`bench_snapshot`).
+        let facts = self.device_facts().map_or(Value::Null, |(_, facts)| facts);
         Ok(json!({"board": self.editor.board().map(|b| b.name().to_owned()), "ports": description.target.ports.len(),
-                  "clock_hz": description.clock_hz, "snapshot": true}))
+                  "clock_hz": description.clock_hz, "snapshot": true, "facts": facts}))
+    }
+
+    /// What the apparatus' sequencer states of itself, when it differs from what was last said: its
+    /// trigger lanes -- `{trigger_lanes: [{lane, port, label, frames}]}`, `frames` how often the lane rises
+    /// in one shot of what the board holds, null while it holds nothing. Worked out when the board changes
+    /// what it holds, not at every turn; the workbench is told (`Event::Facts`) and asks its drafts again.
+    pub fn device_facts(&mut self) -> Option<(String, Value)> {
+        let instance = self.given.as_ref()?.instance.clone();
+        let board = self.editor.board()?.clone();
+        let key = (std::sync::Arc::as_ptr(&board) as usize, board.revision());
+        if self.facts_of == Some(key) { return None; }
+        self.facts_of = Some(key);
+        let counts = board.trigger_counts().ok().and_then(|(_, counts)| counts);
+        let lanes: Vec<Value> = board.trigger_lanes().into_iter().enumerate().map(|(at, (lane, port, label))| json!({
+            "lane": lane, "port": port, "label": label, "frames": counts.as_ref().and_then(|counts| counts.get(at).copied())})).collect();
+        let facts = json!({"trigger_lanes": lanes});
+        if self.facts == facts { return None; }
+        self.facts = facts.clone();
+        Some((instance, facts))
     }
 
     /// The apparatus board's `snapshot`, read off the window's turn (a pulse server's client waits
@@ -1203,7 +1233,7 @@ mod tests {
         plugins.open("scan","native_scan",json!({}),json!({})).unwrap();
         let spec=json!({"axes":[{"port":"pulse:param:duration:long_before","identity":"duration:long_before","label":"Before","unit":"s",
             "values":[0.000200003,0.000300007],"coordinate_of":null,"host_advanced":false}],"scan_repeats":2,"run_repeats":2,"pulse_path":document});
-        let run=plugins.start_run("scan",RunRequest {prepared:None,device_labels:Default::default(),device_units:Default::default(),devices:Default::default(),shared:Default::default(),
+        let run=plugins.start_run("scan",RunRequest {prepared:None,device_labels:Default::default(),device_units:Default::default(),devices:Default::default(),shared: Default::default(), reads: Default::default(),
             values:json!({"spec":spec.to_string(),"mode":"seamless","configure_first":true,"effective_inner":""}),origin:Origin::Operator,
             resources:json!({}),source_signal:Some("source".into()),run_directory:None,outputs:[("scan".into(),"output".into())].into(),record_devices:false}).unwrap();
         let mut fired=false; let mut saw_load=false;

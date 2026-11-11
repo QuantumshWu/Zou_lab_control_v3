@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import lru_cache
-from time import monotonic
+from time import monotonic, time_ns
 
 import numpy as np
 from zlc_plugin import journal
@@ -36,6 +36,7 @@ from zlc_atom.devices.camera.contract import (
 from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.data import cell_axis_id, snapshot_from_array
 from zlc_atom.nodes._framework.frames import FRAME_AXIS_NAME
+from zlc_atom.nodes.camera.alignment import AlignmentError, Shot, TriggerAlignment, TriggerSchedule, frame_time
 
 
 _CAMERA_FRAME_CONTRACT = "camera.frames"
@@ -185,8 +186,12 @@ def frames_snapshot(
     revision: int,
     working_point: "CameraWorkingPoint | None" = None,
     value_unit: str | None,
+    present: "Sequence[Sequence[bool]] | None" = None,
 ):
     """Cycles of frames as one dataset: (cycle) x (frame) x (y, x).
+
+    ``present`` says, per cycle and frame, whether that frame was taken: given, the dataset carries
+    validity, and a frame that was not is invalid whatever stands in its place.
 
     Every publisher of camera frames -- the finite capture, the monitor slot,
     and the SLM feedback and rearrangement tasks -- means exactly this
@@ -217,8 +222,13 @@ def frames_snapshot(
             dtype=first.dtype,
         )
     )
+    validity = None
+    if present is not None:
+        taken = np.asarray(present, dtype=bool).reshape(len(frames), len(frames[0]), *([1] * first.ndim))
+        validity = np.broadcast_to(taken, (len(frames), len(frames[0]), *first.shape)).copy()
     return snapshot_from_array(
         values.reshape(len(frames), len(frames[0]), *first.shape),
+        validity=validity,
         producer=producer,
         signal=CAMERA_FRAMES_OUTPUT.name,
         point_axes=(_frame_point_axis(producer, len(frames[0])),),
@@ -237,6 +247,9 @@ def _finite_cycle_output(
     node: "CameraMeasurementNode",
     cycle: Sequence[CameraFrameRecord],
     index: int,
+    *,
+    present: Sequence[bool] | None = None,
+    record: dict[str, object] | None = None,
 ) -> LiveDatasetOutput:
     """One new cycle placed in the fixed authored finite run geometry."""
 
@@ -247,6 +260,7 @@ def _finite_cycle_output(
         revision=index + 1,
         working_point=node.actual_working_point,
         value_unit=node.frame_value_unit,
+        present=None if present is None else (present,),
     )
     event_schema = event.block.schema
     # Built once per run: the event schema is one cached object for the whole
@@ -270,14 +284,23 @@ def _finite_cycle_output(
         event,
         canonical_schema=canonical,
         cell_origin=(index, 0),
-        event_record=node._camera_event_record(cycle),
+        event_record={**node._camera_event_record(_taken(cycle, present)), **(record or {})},
     )
+
+
+def _taken(cycle: Sequence[CameraFrameRecord], present: Sequence[bool] | None) -> tuple[CameraFrameRecord, ...]:
+    """The frames of a cycle that were really taken (a stand-in for a missing one is no camera's)."""
+
+    return tuple(cycle) if present is None else tuple(record for record, taken in zip(cycle, present) if taken)
 
 
 def _monitor_cycle_output(
     node: "CameraMeasurementNode",
     cycle: Sequence[CameraFrameRecord],
     revision: int,
+    *,
+    present: Sequence[bool] | None = None,
+    record: dict[str, object] | None = None,
 ) -> LiveDatasetOutput:
     event = frames_snapshot(
         (cycle,),
@@ -286,11 +309,12 @@ def _monitor_cycle_output(
         revision=revision,
         working_point=node.actual_working_point,
         value_unit=node.frame_value_unit,
+        present=None if present is None else (present,),
     )
     return LiveDatasetOutput(
         CAMERA_FRAMES_OUTPUT,
         event,
-        event_record=node._camera_event_record(cycle),
+        event_record={**node._camera_event_record(_taken(cycle, present)), **(record or {})},
     )
 
 
@@ -358,6 +382,9 @@ class CameraMeasurementRequest:
     #: none falls back to raw counts rather than inventing a conversion; the
     #: effective choice rides in the run record.
     photoelectrons: bool = True
+    #: The sequencer lane that triggers this camera (a raw lane, ``ch11``), or None to count frames.
+    #: Named, a cycle is that lane's triggers of one shot and ``frames_per_cycle`` is not read.
+    trigger_channel: str | None = None
 
     def __post_init__(self) -> None:
         camera_key = str(self.camera_key).strip()
@@ -389,6 +416,7 @@ class CameraMeasurementRequest:
         object.__setattr__(self, "repeat", repeat)
         object.__setattr__(self, "frames_per_cycle", frames_per_cycle)
         object.__setattr__(self, "photoelectrons", bool(self.photoelectrons))
+        object.__setattr__(self, "trigger_channel", str(self.trigger_channel or "").strip() or None)
 
 
 class FiniteCapture:
@@ -639,6 +667,164 @@ class MonitorCapture:
         return terminal
 
 
+class AlignedCapture:
+    """A capture whose frames are sorted into shots by the schedule of the lane that triggers the camera.
+
+    The board is asked what it plays whenever frames are read (``schedule(known revision)``); each
+    FIRE is a play of its own, with its own alignment.  A frame at no trigger's time is dropped and
+    said; a shot a trigger of which brought no frame is published with that frame invalid, so every
+    consumer still counts it.  Until a pulse plays, frames belong to nothing and none is published.
+    """
+
+    def __init__(self, node: "CameraMeasurementNode", *, commit_live: Callable[..., object],
+                 schedule: Callable[[int | None], Mapping[str, object]], armed_us: int,
+                 say: Callable[..., object] | None = None) -> None:
+        self.node = node
+        self.camera = node.camera
+        self._commit_live = commit_live
+        self._schedule = schedule
+        self._armed_us = int(armed_us)
+        self._say = say
+        self._revision: int | None = None
+        self._play: tuple[int, int] | None = None
+        self._alignment: TriggerAlignment[CameraFrameRecord] | None = None
+        #: When the last frame of the play in hand was received (ns), for a shot whose end never comes.
+        self._last_frame_ns: int | None = None
+        self.published = 0
+        self.incomplete = 0
+        self.dropped = 0
+        self.closed = False
+        self.terminal: CameraCaptureTerminalRecord | None = None
+
+    @property
+    def finished(self) -> bool:
+        """A finite measurement has published the shots it was asked for."""
+
+        return bool(self.node.repeat) and self.published >= self.node.repeat
+
+    # ------------------------------------------------------------------ which play
+    def _follow_board(self, records: Sequence[CameraFrameRecord]) -> Sequence[CameraFrameRecord]:
+        """Learn what the board plays now; the frames of ``records`` that are the new play's."""
+
+        answer = self._schedule(self._revision)
+        if answer.get("unchanged"):
+            return records
+        schedule = TriggerSchedule.from_answer(answer)
+        self._revision = schedule.revision
+        fired = schedule.command_id is not None and schedule.state in ("playing", "done", "stopped")
+        play = (int(schedule.command_id), schedule.sent_us) if fired else None
+        if play == self._play:
+            return records
+        # Frames this computer received before the new FIRE was sent are the old play's last.
+        mine = [record for record in records if play is not None and record.host_received_at_ns // 1000 >= schedule.sent_us]
+        for record in records[: len(records) - len(mine)]:
+            self._accept(record)
+        self._end_play()
+        self._play = play
+        # A play that had ended before this camera was armed sends it nothing.
+        if play is not None and schedule.points and (schedule.playing or schedule.sent_us >= self._armed_us):
+            frames = schedule.frames
+            if self.node._aligned_frames not in (None, frames):
+                raise AlignmentError(
+                    f"{schedule.lane} now triggers this camera {frames} times a shot; this run publishes cycles of "
+                    f"{self.node._aligned_frames}: restart the measurement for the new pulse"
+                )
+            self.node._aligned_frames = frames
+            exposure = self.node.actual_working_point.exposure_seconds if self.node.actual_working_point is not None else 0.0
+            self._alignment = TriggerAlignment(schedule, from_first_trigger=schedule.sent_us >= self._armed_us,
+                                               separation=float(exposure or 0.0))
+            journal.note("camera", "aligned_to", key=self.node.request.camera_key, lane=schedule.lane, command_id=schedule.command_id,
+                         frames=frames, points=len(schedule.points), from_first_trigger=schedule.sent_us >= self._armed_us)
+        return mine
+
+    def _end_play(self) -> None:
+        """The play in hand is over: its whole shots are out; the one it stopped in the middle of is no shot."""
+
+        alignment, self._alignment = self._alignment, None
+        self._last_frame_ns = None
+        if alignment is None:
+            return
+        for found in alignment.flush():
+            if isinstance(found, Shot) and found.complete:
+                self._publish(found)
+            elif isinstance(found, Shot):
+                journal.note("camera", "shot_abandoned", key=self.node.request.camera_key, shot=found.index,
+                             frames=[None if frame is None else int(frame.source_ordinal) for frame in found.frames])
+            else:
+                self._drop(found.frame, found.reason)
+
+    # ------------------------------------------------------------------ frames
+    def poll(self) -> None:
+        if self.closed:
+            raise RuntimeError("aligned capture is closed")
+        records = self.node.read_records(16, timeout=_CANCEL_RESPONSE_SECONDS, exact=False, group_size=1)
+        for record in self._follow_board(records):
+            self._accept(record)
+        # A shot whose last frames never come is over once its own length has passed since its last frame.
+        alignment = self._alignment
+        if alignment is not None and self._last_frame_ns is not None and alignment.overdue_after is not None \
+                and (time_ns() - self._last_frame_ns) / 1e9 > alignment.overdue_after:
+            self._last_frame_ns = None
+            self._take(alignment.flush())
+
+    def _accept(self, record: CameraFrameRecord) -> None:
+        if self._alignment is None:
+            self._drop(record, "no pulse was playing on its trigger lane")
+            return
+        self._last_frame_ns = int(record.host_received_at_ns) or time_ns()
+        self._take(self._alignment.accept(frame_time(record), record))
+
+    def _take(self, found: Sequence[object]) -> None:
+        for item in found:
+            if isinstance(item, Shot):
+                self._publish(item)
+            else:
+                self._drop(item.frame, item.reason)
+
+    def _drop(self, record: CameraFrameRecord, reason: str) -> None:
+        self.dropped += 1
+        journal.note("camera", "frame_dropped", key=self.node.request.camera_key, ordinal=int(record.source_ordinal), reason=reason)
+        if self._say is not None:
+            self._say(f"frame {int(record.source_ordinal)} is no trigger of the pulse ({reason}); {self.dropped} dropped so far")
+
+    def _publish(self, shot: "Shot[CameraFrameRecord]") -> None:
+        if self.finished:
+            return
+        taken = [frame for frame in shot.frames if frame is not None]
+        # A frame that never came is stood in for by one that did, and marked invalid.
+        cycle = tuple(frame if frame is not None else taken[0] for frame in shot.frames)
+        present = tuple(frame is not None for frame in shot.frames)
+        record = {"trigger_alignment": {"shot": shot.index, "missing": [slot for slot, here in enumerate(present) if not here]}}
+        if not shot.complete:
+            self.incomplete += 1
+            journal.note("camera", "shot_incomplete", key=self.node.request.camera_key, shot=shot.index, missing=record["trigger_alignment"]["missing"])
+            if self._say is not None:
+                self._say(f"shot {shot.index + 1} lacks {len(shot.frames) - len(taken)} of its {len(shot.frames)} frames: published invalid")
+        output = (_finite_cycle_output(self.node, cycle, self.published, present=present, record=record) if self.node.repeat
+                  else _monitor_cycle_output(self.node, cycle, self.published + 1, present=present, record=record))
+        self._commit_live({CAMERA_FRAMES_OUTPUT.name: output})
+        self.published += 1
+
+    def close(self, *, drain: bool = True) -> CameraCaptureTerminalRecord:
+        """Disarm the camera, then give the frames it had already taken their places."""
+
+        if self.terminal is not None:
+            return self.terminal
+        terminal = self.camera.finish_record_capture()
+        self.closed = True
+        if drain:
+            remaining = terminal.produced_count - self.node._next_record_ordinal
+            while remaining > 0:
+                records = self.node.read_records(min(16, remaining), timeout=0.0, exact=True, group_size=1)
+                for record in records:
+                    self._accept(record)
+                remaining -= len(records)
+            self._end_play()
+            terminal = replace(terminal, no_more_frames=True)
+        self.terminal = terminal
+        return terminal
+
+
 class CameraMeasurementNode:
     """Commit each atomic camera cycle to one stable ``frames`` signal."""
 
@@ -669,6 +855,8 @@ class CameraMeasurementNode:
         #: The event schema a finite run's canonical schema was built from,
         #: and that canonical schema (``_finite_cycle_output``).
         self._canonical: tuple[DatasetSchema, DatasetSchema] | None = None
+        #: The frames of one cycle as the trigger lane's pulse has them, once that pulse is known.
+        self._aligned_frames: int | None = None
 
     @property
     def request(self) -> CameraMeasurementRequest:
@@ -716,6 +904,12 @@ class CameraMeasurementNode:
     @property
     def repeat(self) -> int:
         return self.request.repeat
+
+    @property
+    def aligned(self) -> bool:
+        """Whether frames are sorted by the trigger lane's schedule rather than counted."""
+
+        return self.request.trigger_channel is not None
 
     @property
     def frames_per_cycle(self) -> int:
@@ -807,6 +1001,7 @@ class CameraMeasurementNode:
         *,
         timeout: float,
         exact: bool,
+        group_size: int | None = None,
     ) -> tuple[CameraFrameRecord, ...]:
         """Take frames from the camera, in the unit this run publishes.
 
@@ -831,14 +1026,16 @@ class CameraMeasurementNode:
         )
         if records:
             accepted = validate_batch((record.source_ordinal for record in records),
-                                      expected_start=self._next_record_ordinal, group_size=self.frames_per_cycle)
+                                      expected_start=self._next_record_ordinal,
+                                      # A capture that sorts frames by time takes each as a group of its own.
+                                      group_size=self.frames_per_cycle if group_size is None else group_size)
             self._next_record_ordinal = int(accepted["next"])
             self._capture_group_ends = frozenset(accepted["group_ends"])
         for record in records:
             # Every frame as this measurement took it: which, when the camera and the host each
             # say it came, and whether it closes a cycle. The journal's one line per frame.
             journal.note("camera", "frame", key=self.request.camera_key, ordinal=int(record.source_ordinal),
-                         cycle_end=record.source_ordinal in self._capture_group_ends,
+                         cycle_end=record.source_ordinal in self._capture_group_ends if group_size is None else None,
                          frame_stamp=record.frame_stamp, camera_stamp=record.camera_stamp,
                          camera_seconds=record.timestamp_seconds, camera_microseconds=record.timestamp_microseconds,
                          host_received_at_ns=record.host_received_at_ns)
@@ -865,7 +1062,9 @@ class CameraMeasurementNode:
                 "exposure_seconds": self.request.exposure_seconds,
                 "roi_xywh": None if self._run_roi is None else list(self._run_roi),
                 "repeat": self.request.repeat,
-                "frames_per_cycle": self.request.frames_per_cycle,
+                # Aligned to a trigger lane, a cycle's size is the lane's: known when its pulse is.
+                "frames_per_cycle": self._aligned_frames if self.request.trigger_channel else self.request.frames_per_cycle,
+                "trigger_channel": self.request.trigger_channel,
                 PHOTOELECTRONS: photoelectrons,
             },
             "named_devices": {"camera": self.request.camera_key},
@@ -970,6 +1169,8 @@ class CameraMeasurementNode:
         # The run's instance names the signals and the axes, not this node's type.
         self.instance_id = context.instance_id
         self._generation = context.generation
+        if self.aligned:
+            return self._execute_aligned(context)
         if self.repeat == 0:
             capture = self.monitor(commit_live=context.commit_live, after_arm=context.record_devices)
             try:
@@ -1006,6 +1207,45 @@ class CameraMeasurementNode:
 
         capture.read_cycles(commit_cycle)
         return {"cycles": capture.completed_cycles}
+
+    def _execute_aligned(self, context: object) -> dict[str, object]:
+        """The run of a measurement that names its trigger lane: arm, report ready, and publish each shot
+        the lane's pulse plays as it completes -- until Stop, or ``repeat`` shots."""
+
+        lane = str(self.request.trigger_channel)
+        try:
+            point = self._configure_for_run()
+            buffer_frames = self._buffer_frame_count(point)
+            # Every frame is taken as it comes: which shot it is of is found from when it came.
+            self.camera.arm(None, source_group_sizes=None, buffer_frame_count=buffer_frames, timeout=float(self.camera.timeout))
+            armed_us = time_ns() // 1000
+            self._freeze_working_point(self.camera.working_point())
+            self._run_record["acquisition"] = {"buffer_frame_count": buffer_frames}
+            context.record_devices()
+            capture = AlignedCapture(
+                self, commit_live=context.commit_live, armed_us=armed_us,
+                schedule=lambda known: context.core("pulse_schedule", lane=lane, known=known),
+                say=context.report_progress,
+            )
+        except BaseException as error:
+            try:
+                self.camera.finish_record_capture()
+            except BaseException as cleanup:
+                error.add_note(f"camera cleanup also failed: {cleanup}")
+            raise
+        try:
+            self._run_record = context.set_run_record(self.run_record)
+            context.report_ready()
+            while not context.cancel_requested() and not capture.finished:
+                capture.poll()
+        except BaseException as error:
+            try:
+                capture.close(drain=False)
+            except BaseException as cleanup:
+                error.add_note(f"camera cleanup also failed: {cleanup}")
+            raise
+        capture.close()
+        return {"cycles": capture.published, "incomplete_cycles": capture.incomplete, "frames_dropped": capture.dropped}
 
     def monitor(self, *, commit_live: Callable[..., object], after_arm: Callable[[], object] | None = None) -> MonitorCapture:
         """Arm a repeat-zero capture that publishes every complete cycle."""

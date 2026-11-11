@@ -79,6 +79,9 @@ pub enum Event {
     Opened { instance: String, working_point: Value },
     Failed { instance: String, error: String },
     Closed { instance: String, error: Option<String> },
+    /// What an open device states of itself changed (its trigger lanes, what it holds): the drafts
+    /// that name devices are asked again.
+    Facts { instance: String, facts: Value },
     Answered { ticket: u64, result: Result<Value, String> },
     Log { instance: String, line: String },
     RunStarted { run: String },
@@ -101,6 +104,7 @@ impl Event {
             Event::Opened { instance, .. } => json!({"fact": "opened", "instance": instance}),
             Event::Failed { instance, error } => json!({"fact": "failed", "instance": instance, "error": error}),
             Event::Closed { instance, error } => json!({"fact": "closed", "instance": instance, "error": error}),
+            Event::Facts { instance, facts } => json!({"fact": "device_facts", "instance": instance, "facts": facts}),
             Event::Answered { ticket, result } => json!({"fact": "answered", "ticket": ticket, "error": failed(result)}),
             Event::Log { instance, line } => json!({"fact": "log", "instance": instance, "line": line}),
             Event::RunStarted { run } => json!({"fact": "run_started", "run": run}),
@@ -136,6 +140,8 @@ pub struct RunSpec {
     pub device_units: BTreeMap<String, BTreeMap<String, String>>,
     /// The arguments whose device the run shares (a scan's device axis: its fields protected, not the device).
     pub shared: std::collections::BTreeSet<String>,
+    /// The arguments whose device the run only reads: no claim is taken for them.
+    pub reads: std::collections::BTreeSet<String>,
     pub artifacts: Map<String, Value>,
     /// Workspace resources by build argument, resolved (a pulse: its description).
     pub resources: Map<String, Value>,
@@ -178,6 +184,11 @@ pub trait Host {
     /// A signal's dataset schema as `zlc_data.codec` trees: its run's, and its latest
     /// event's (null before one); None while the Runtime has no such signal.
     fn schemas(&self, _signal: &str) -> Option<(Value, Value)> { None }
+    /// What the application adds to a diagnostics archive beside the journal and the board: the data it
+    /// keeps of recent publications, as archive members (name, bytes).
+    fn diagnostic_data(&self) -> Vec<(String, Vec<u8>)> { Vec::new() }
+    /// Keep recent data within `mib` MiB from now on (0: none).
+    fn keep_recent_data(&mut self, _mib: u64) {}
 }
 
 /// What an answered ticket was for.
@@ -267,7 +278,7 @@ pub const COMMANDS: &[&str] = &[
     "read_device", "tune_device", "accept_device_risk", "publish_device",
     "add_node", "rename_node", "edit_node", "check_node", "revert_node", "start_node", "stop_node", "remove_node", "answer_request",
     "order_panels", "rename_panel", "set_panel_interval", "set_panel_overlay", "publish_panel_outputs", "set_board",
-    "save_layout", "load_layout", "clear_board", "run_recipe", "export_diagnostics",
+    "save_layout", "load_layout", "clear_board", "run_recipe", "export_diagnostics", "set_diagnostics",
 ];
 
 /// Commands that leave the result to a later plugin event.
@@ -462,7 +473,13 @@ impl Workbench {
                 let path = self.workspace.resolve(text(params, "path")?);
                 self.load_layout(&path, params["stop_running"].as_bool().unwrap_or(false), host).map(Some)
             }
-            "export_diagnostics" => self.export_diagnostics(host).map(Some),
+            "export_diagnostics" => self.export_diagnostics(params["data"].as_bool().unwrap_or(true), host).map(Some),
+            "set_diagnostics" => {
+                let mib = params["budget_mib"].as_u64().ok_or("budget_mib is required: the memory recent data is kept within, in MiB (0 keeps none)")?;
+                host.keep_recent_data(mib);
+                self.console_report = (if mib == 0 { "diagnostics keep no data".to_owned() } else { format!("diagnostics keep the most recent {mib} MiB of data") }, "task");
+                Ok(Some(json!({"budget_mib": mib})))
+            }
             "clear_board" => self.clear_board(params["stop_running"].as_bool().unwrap_or(false), host).map(Some),
             "run_recipe" => self.run_recipe(text(params, "name")?, &params["parameters"], params["start"].as_bool().unwrap_or(true), &origin_text, host).map(Some),
             _ => Err(format!("{name} is not a workbench command")),
@@ -471,11 +488,13 @@ impl Workbench {
 
     /// One plugin fact, applied on the owner turn.
     pub fn on_event(&mut self, event: Event, host: &mut dyn Host) {
-        zlc_core::journal::note_with("workbench", "event", || event.journal());
+        // An answer that came is what the state then shows; one that failed is said here.
+        if !matches!(&event, Event::Answered { result: Ok(_), .. }) { zlc_core::journal::note_with("workbench", "event", || event.journal()); }
         match event {
             Event::Opened { instance, working_point } => self.instance_opened(&instance, working_point, host),
             Event::Failed { instance, error } => self.instance_failed(&instance, error, host),
             Event::Closed { instance, error } => self.instance_closed(&instance, error, host),
+            Event::Facts { instance, facts } => self.device_facts(&instance, facts),
             Event::Answered { ticket, result } => self.answered(ticket, result, host),
             Event::Lifecycle { current, revision, event } => {
                 if current.load(std::sync::atomic::Ordering::Acquire) == revision { self.on_event(*event, host); }

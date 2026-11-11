@@ -32,7 +32,7 @@ fn host() -> Option<Host> {
 }
 
 fn request(values: Value, source: Option<&str>, outputs: &[(&str, &str)]) -> RunRequest {
-    RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values, devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
+    RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values, devices: Default::default(), shared: Default::default(), reads: Default::default(), origin: Origin::Operator,
         resources: json!({}), source_signal: source.map(str::to_owned), run_directory: None,
         outputs: outputs.iter().map(|(name, signal)| ((*name).to_owned(), (*signal).to_owned())).collect(), record_devices: false }
 }

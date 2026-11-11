@@ -1,7 +1,8 @@
 // A window's lines in the application's flight journal (zlc_core::journal): what the operator did
 // here -- a click and on what, a command key, a popup opened or closed, a window shown or hidden --
-// and what went wrong here (a script error, an unhandled rejection). The core keeps the journal;
-// a window says its lines in batches, each stamped when it happened.
+// and what went wrong here (a script error, an unhandled rejection), and when the page was held up: the
+// tasks the browser itself reports as long, counted per batch. The core keeps the journal; a window says
+// its lines in batches, each stamped when it happened.
 //
 // A line names a control, never what was typed into one: letters and digits are not recorded, and
 // a field's value is not read. What a command changed is in the command the core records itself.
@@ -48,6 +49,26 @@ export function isCommandKey(event: Pick<KeyboardEvent, "key" | "ctrlKey" | "met
   return COMMAND_KEYS.has(event.key) || ((event.ctrlKey || event.metaKey || event.altKey) && event.key.length === 1);
 }
 
+/** The tasks that held this page's thread, as the browser itself reports them (its Long Tasks: 50 ms and
+ * over -- its definition, not one made here): how many since last asked, how long together, the longest. */
+export class HeldUp {
+  private count = 0;
+  private total = 0;
+  private longest = 0;
+
+  add(tasks: readonly { duration: number }[]): void {
+    for (const task of tasks) { this.count++; this.total += task.duration; this.longest = Math.max(this.longest, task.duration); }
+  }
+
+  /** What was added since last asked, and nothing while nothing was. */
+  take(): { count: number; total_ms: number; longest_ms: number } | undefined {
+    if (!this.count) return undefined;
+    const said = { count: this.count, total_ms: Math.round(this.total), longest_ms: Math.round(this.longest) };
+    this.count = this.total = this.longest = 0;
+    return said;
+  }
+}
+
 /** Keep this window's journal: `post` sends a batch to the core. Returns `note`, for a line of the page's own. */
 export function startJournal(post: (command: Command) => void, page: string): (event: string, facts?: Record<string, unknown>) => void {
   let waiting: Line[] = [];
@@ -57,7 +78,13 @@ export function startJournal(post: (command: Command) => void, page: string): (e
     if (waiting.length >= WAITING_LIMIT) { dropped++; return; }
     waiting.push({ us: now(), ev, facts: { page, ...facts } });
   };
+  const held = new HeldUp();
+  if (typeof PerformanceObserver !== "undefined" && PerformanceObserver.supportedEntryTypes?.includes("longtask")) {
+    new PerformanceObserver(list => held.add(list.getEntries())).observe({ type: "longtask", buffered: true });
+  }
   const send = (): void => {
+    const tasks = held.take();
+    if (tasks) waiting.push({ us: now(), ev: "long_tasks", facts: { page, ...tasks } });
     if (dropped) { waiting.push({ us: now(), ev: "dropped", facts: { page, lines: dropped } }); dropped = 0; }
     if (!waiting.length) return;
     const lines = waiting;

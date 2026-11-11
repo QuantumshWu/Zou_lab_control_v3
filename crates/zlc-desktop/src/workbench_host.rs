@@ -104,6 +104,8 @@ impl Host for DesktopHost<'_> {
         }
     }
     fn schemas(&self, signal: &str) -> Option<(Value, Value)> { schemas(self.runtime, signal) }
+    fn diagnostic_data(&self) -> Vec<(String, Vec<u8>)> { crate::recent_export::members(self.runtime) }
+    fn keep_recent_data(&mut self, mib: u64) { crate::recent_export::set_budget_mib(self.runtime, mib); }
 }
 
 /// A signal's dataset schema and its latest event's (`Host::schemas`).
@@ -143,6 +145,8 @@ pub fn decorate(workbench: &Workbench, runtime: &Runtime, bindings: &Panels, tar
     let _span = crate::trace::span("workbench.decorate", || json!({}));
     let view = View { signals: signals(runtime), panels: panel_contents(bindings, state, targets) };
     workbench.decorate(state, &view);
+    // How much recent data is kept for a diagnostics archive, and how far back it goes.
+    state["diagnostics"] = crate::recent_export::state(runtime);
     journal_reports(state);
     tools.publish(workbench.plugin_tools());
 }
@@ -669,10 +673,13 @@ impl Plugins for Builtin {
     fn query(&mut self, instance: &str, ticket: u64, name: &str, args: &Value) {
         let mut params = args.clone();
         params["name"] = json!(name);
-        // A native device (the pulse board) is no plugin's to read: the query sees only plugin devices.
+        // A native device (the pulse board) is no plugin's to call: the query is handed what it states of
+        // itself (`facts`) and nothing to call it by.
         if let Some(devices) = params["devices"].as_object_mut() {
             let stand = self.0.borrow();
-            devices.retain(|_, info| !info["instance"].as_str().is_some_and(|id| stand.native_instances.contains_key(id)));
+            for info in devices.values_mut() {
+                if info["instance"].as_str().is_some_and(|id| stand.native_instances.contains_key(id)) { info["native"] = json!(true); }
+            }
         }
         let instance = instance.to_owned();
         let started = self.spawn("query", move |host| Event::Answered { ticket,
@@ -712,7 +719,7 @@ impl Plugins for Builtin {
         let (devices, native): (Vec<_>, Vec<_>) = { let stand = self.0.borrow(); run.devices.iter()
             .map(|(argument, instance)| (argument.clone(), instance.clone())).partition(|(_, instance)| !stand.native_instances.contains_key(instance)) };
         let keys = native.into_iter().map(|(argument, instance)| (format!("{argument}_key"), json!(instance)));
-        let request = RunRequest { prepared: run.prepared.clone(), values: Value::Object(run.values.clone()), devices: devices.into_iter().collect(), device_labels: run.device_labels.clone(), device_units: run.device_units.clone(), shared: run.shared.clone(), origin: origin(&run.origin),
+        let request = RunRequest { prepared: run.prepared.clone(), values: Value::Object(run.values.clone()), devices: devices.into_iter().collect(), device_labels: run.device_labels.clone(), device_units: run.device_units.clone(), shared: run.shared.clone(), reads: run.reads.clone(), origin: origin(&run.origin),
             // Build arguments beside the values: chosen artifacts and resolved workspace resources.
             resources: Value::Object(run.artifacts.iter().chain(&run.resources).map(|(key, value)| (key.clone(), value.clone())).chain(keys).collect()), source_signal: (!run.source_signal.is_empty()).then(|| run.source_signal.clone()),
             run_directory: run.directory.clone(), outputs: run.outputs.clone(), record_devices: run.record_devices };

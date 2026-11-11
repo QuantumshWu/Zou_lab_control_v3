@@ -166,3 +166,51 @@ fn a_run_plays_a_scan_table_and_its_receipt_says_what_plays_when() {
     assert!(run_document(&board, &document, &[], Some(&wrong), 1, 1).unwrap_err().message.contains("is not a field of this pulse"));
     board.close().unwrap();
 }
+
+#[test]
+fn the_board_says_when_a_lane_rises_in_each_shot_and_which_play_that_is() {
+    let board = Board::virtual_board(None).unwrap();
+    let lanes = board.trigger_lanes();
+    assert!(!lanes.is_empty(), "the target's digital ports");
+    let nothing = board.trigger_schedule(&lanes[0].0, None).unwrap();
+    assert_eq!((nothing.get("state").and_then(Json::as_str), nothing.get("points").and_then(Json::as_array).map(|points| points.len())), (Some("none"), Some(0)));
+    assert_eq!(board.trigger_counts().unwrap().1, None, "nothing held: no count");
+
+    let document = pulses().join("imaging_template.json");
+    let receipt = run_document(&board, &document, &[("duration:long_before".into(), (10.0, "ms".into()))], None, 2, 1).unwrap();
+    let (revision, counts) = board.trigger_counts().unwrap();
+    let counts = counts.expect("a program is held");
+    let at = counts.iter().position(|count| *count > 0).expect("a lane that rises");
+    let schedule = board.trigger_schedule(&lanes[at].0, None).unwrap();
+    assert_eq!(schedule.get("state").and_then(Json::as_str), Some("playing"));
+    assert_eq!(schedule.get("revision").and_then(Json::as_int), Some(revision as i128));
+    assert_eq!(schedule.get("command_id").and_then(Json::as_int), Some(command_id(&receipt) as i128));
+    assert_eq!((schedule.get("run_repeats").and_then(Json::as_int), schedule.get("scan_repeats").and_then(Json::as_int)), (Some(2), Some(1)));
+    let sent = schedule.get("sent_us").and_then(Json::as_int).unwrap();
+    assert!(sent > 0 && sent <= schedule.get("answered_us").and_then(Json::as_int).unwrap(), "when the FIRE was sent and answered");
+    let points = schedule.get("points").and_then(Json::as_array).unwrap();
+    assert_eq!(points.len(), 1, "an unscanned pulse is one point");
+    let rising: Vec<f64> = points[0].get("rising").and_then(Json::as_array).unwrap().iter().map(|edge| edge.as_f64().unwrap()).collect();
+    let duration = points[0].get("duration").and_then(Json::as_f64).unwrap();
+    assert_eq!(rising.len(), counts[at], "one rising edge per trigger the count names");
+    assert!(rising.windows(2).all(|pair| pair[0] < pair[1]) && rising.iter().all(|edge| (0.0..duration).contains(edge)), "{rising:?} in {duration}");
+    let timing = receipt.get("timing").unwrap();
+    let clock = timing.get("clock_hz").and_then(Json::as_f64).unwrap();
+    assert_eq!(duration, timing.get("duration_ticks").and_then(Json::as_int).unwrap() as f64 / clock, "the shot the receipt times");
+    // The port's key names the same lane; a reader that has this revision is told so, not sent it again.
+    let by_key = board.trigger_schedule(&lanes[at].1, None).unwrap();
+    assert_eq!(by_key.get("points"), schedule.get("points"));
+    let same = board.trigger_schedule(&lanes[at].0, Some(revision)).unwrap();
+    assert_eq!((same.get("unchanged").and_then(Json::as_bool), same.get("points")), (Some(true), None));
+
+    // The play ends, and every later change is a new revision.
+    board.wait_done(Some(Duration::from_secs(5)), Some(command_id(&receipt))).unwrap().expect("a report");
+    let done = board.trigger_schedule(&lanes[at].0, Some(revision)).unwrap();
+    assert_eq!(done.get("state").and_then(Json::as_str), Some("done"));
+    assert!(done.get("revision").and_then(Json::as_int).unwrap() > revision as i128);
+    run_document(&board, &document, &[], None, 0, 1).unwrap();
+    assert_eq!(board.trigger_schedule(&lanes[at].0, None).unwrap().get("run_repeats").and_then(Json::as_int), Some(0), "played until stopped");
+    board.safe().unwrap();
+    assert_eq!(board.trigger_schedule(&lanes[at].0, None).unwrap().get("state").and_then(Json::as_str), Some("stopped"));
+    board.close().unwrap();
+}
