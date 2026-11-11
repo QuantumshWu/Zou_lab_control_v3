@@ -721,9 +721,14 @@ struct Node {
 }
 
 /// A cell's regions (module documentation, # Provable extrema): the cell's and its centre point's (none on an unbounded cell).
+/// Each on the heap, not in the frame of the task that holds it: a round's cells are halved by the pool's tasks
+/// (`AtOnce::cells`), a task that waits for a part of the round taken by another thread goes on with other parts on its
+/// own stack, and a halving holds up to fifteen regions -- by value they were 51 kB a level of that nesting, which
+/// grows with the round's cells, and a reach of many cells came to the thread's whole stack (R8_R5051 over a reach of
+/// 271 k_B T: 654 kB at the first closure, the stack overflown at the third).
 struct Regions {
-    over: Region,
-    at: Option<Region>,
+    over: Box<Region>,
+    at: Option<Box<Region>>,
 }
 
 /// A cell in a quantity's queue, ordered by its upper bound: the bound, the cell's node, the quantity's value at its centre, and
@@ -785,8 +790,8 @@ impl Cells<'_> {
 
     /// A node's regions from its cell's beams.
     fn over(&self, node: &Node, spans: Vec<Span>) -> Regions {
-        let at = node.at.map(|speed| self.model.region(spans.iter().map(Span::point).collect(), speed));
-        Regions { over: self.model.region(spans, node.over), at }
+        let at = node.at.map(|speed| Box::new(self.model.region(spans.iter().map(Span::point).collect(), speed)));
+        Regions { over: Box::new(self.model.region(spans, node.over)), at }
     }
 
     /// A node's regions, made again.
@@ -907,7 +912,7 @@ struct Halved {
 
 /// The side a quantity's proof halves a cell along (module documentation, # A cell's sides), from the cell's regions along
 /// each of its sides alone: the side along which the quantity's bound is the highest, of sides alike the longest.
-fn side<Q: Fn(&Region) -> f64 + ?Sized>(q: &Q, cell: &Cell, along: &[Region; 3]) -> usize {
+fn side<Q: Fn(&Region) -> f64 + ?Sized>(q: &Q, cell: &Cell, along: &[Box<Region>; 3]) -> usize {
     let bound = along.each_ref().map(|region| q(region));
     (0..3).max_by(|&i, &j| bound[i].total_cmp(&bound[j]).then(cell.half[i].total_cmp(&cell.half[j]))).expect("a cell has three sides")
 }
@@ -925,7 +930,7 @@ impl<Q: Fn(&Region) -> f64 + ?Sized> Round<'_, Q> {
     fn halve(&self, asked: &Asked) -> Halved {
         let (cells, node) = (self.cells, &self.nodes[asked.node]);
         let amplitudes = cells.model.light.amplitudes(node.cell.centre);
-        let along: [Region; 3] = std::array::from_fn(|a| cells.model.along(&amplitudes, node, a));
+        let along: [Box<Region>; 3] = std::array::from_fn(|a| Box::new(cells.model.along(&amplitudes, node, a)));
         let sides: Vec<usize> = asked.quantities.iter().map(|&q| side(self.quantities[q], &node.cell, &along)).collect();
         let mut made: [Option<[Option<Node>; 2]>; 3] = [None, None, None];
         // Per side asked, each half that meets the reach: whether its centre is in the reach, and its regions.
