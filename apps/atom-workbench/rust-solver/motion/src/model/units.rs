@@ -184,7 +184,9 @@ pub(crate) fn gate(size: f64, distance: f64, rate: f64) -> Gate {
 /// and Σ |V[e, g] R[e, g]| p_g with its kept drives' |V[e, g]| |ψ_e| |ψ_g|: its light shifts' --;
 /// the levels' energies at the atom to first order ([part][state], eliminate.rs `Model::far_energies`); the force on the
 /// state (rad/µs/µm); its populations; and, made when asked, its cluster's photon classes' jump operators' sizes at the
-/// point (photon.rs `Model::class_sizes`) and per carrier the first-order Doppler term's size per ground place.
+/// point (photon.rs `Model::class_sizes`), per carrier the first-order Doppler term's size per ground place, and the
+/// kept drives' couplings at the point with the ground levels' lifts by them (eliminate.rs `Model::kept_at`,
+/// `Model::lifts_at`: what every drive folded onto an explicit state asks of the point, its pairs' legs).
 pub(crate) struct Measured<'a> {
     pub(crate) sample: &'a Sample,
     pub(crate) amplitudes: Vec<Amplitude>,
@@ -200,6 +202,8 @@ pub(crate) struct Measured<'a> {
     pub(crate) populations: [f64; STATES],
     pub(crate) classes: OnceCell<Vec<[f64; 3]>>,
     pub(crate) doppler: Vec<OnceCell<Vec<f64>>>,
+    pub(crate) kept: OnceCell<Vec<C64>>,
+    pub(crate) lifts: OnceCell<[f64; GROUND]>,
 }
 
 /// One drive of a ground state in the tail rule's order (module documentation, # The tail rule): its component and excited
@@ -939,6 +943,8 @@ impl Model {
             populations,
             classes: OnceCell::new(),
             doppler: self.carriers.iter().map(|_| OnceCell::new()).collect(),
+            kept: OnceCell::new(),
+            lifts: OnceCell::new(),
             amplitudes,
             plan,
         }
