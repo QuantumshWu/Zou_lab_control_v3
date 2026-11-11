@@ -392,31 +392,31 @@ impl Model {
     /// table's looks held are looked at once more on the refined one (module documentation, # Axes), and the table is made
     /// again with one that it needs after all. A coordinate the axes' rules refuse (`first_table`: the cost of an
     /// interpolation, the node bound, `table::MOST_AXES`) is held at its focus value like the light ones, whatever its
-    /// weight: the table's whole error at the atoms reads it (`table_reads`).
+    /// weight: the table's whole error at the atoms reads it (`table_reads`). A table asks nothing of another: they are
+    /// made side by side on the pool, and kept in the order of their clusters and light sets.
     pub fn tabulate(&self, reach: &Reach, most: usize) -> Tables {
         let running = self.running();
         let mut untrapped = running.clone();
         untrapped.0[self.light.trap] = Lit::Off;
-        let mut out = Tables { tables: vec![], thermal: crate::units::KT_PER_UK * reach.temperature_uk };
-        for cluster in 0..self.clusters.len() {
-            for lights in [&running, &untrapped] {
-                if lights == &untrapped && !running.on(self.light.trap) {
-                    continue;
-                }
+        let sets: Vec<(usize, &Lights)> = (0..self.clusters.len())
+            .flat_map(|cluster| [&running, &untrapped].map(|lights| (cluster, lights)))
+            .filter(|&(_, lights)| !(lights == &untrapped && !running.on(self.light.trap)))
+            .collect();
+        let tables: Vec<Option<NearTable>> = sets
+            .par_iter()
+            .map(|&(cluster, lights)| {
                 let mut needed = vec![];
                 while let Some(First { table, ranges, held }) = self.first_table(cluster, lights, reach, most, &needed) {
                     let table = self.refined(table, &ranges, reach, most);
                     match held.iter().find(|(coordinate, worst)| self.look(&table, &ranges, *coordinate, &[*worst], reach).0 > 1.0) {
                         Some((coordinate, _)) => needed.push(*coordinate),
-                        None => {
-                            out.tables.push(table);
-                            break;
-                        }
+                        None => return Some(table),
                     }
                 }
-            }
-        }
-        out
+                None
+            })
+            .collect();
+        Tables { tables: tables.into_iter().flatten().collect(), thermal: crate::units::KT_PER_UK * reach.temperature_uk }
     }
 
     /// The range of a table's coordinate (an axis or one held) over the atoms' reach (module documentation, # Refinement).

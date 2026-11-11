@@ -1247,10 +1247,11 @@ impl Model {
     }
 
     /// The provable bounds over the reach of quantities given per region, each to `resolution`: each one's largest upper bound of
-    /// the cells left once it is within the resolution of a value attained at a centre in the reach. The cells are halved one
-    /// after another (`InTurn`).
-    pub(crate) fn extents_over(&self, reach: &Reach, resolution: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
-        self.proven_over::<_, InTurn>(reach, Rule { settled: &|upper, attained| upper - attained <= resolution, scale: resolution }, quantities)
+    /// the cells left once it is within the resolution of a value attained at a centre in the reach. Of quantities any
+    /// thread may ask, proven on all the cores (`AtOnce`): an extent's cells are those of the whole place of its largest
+    /// values, each to be halved whatever the order.
+    pub(crate) fn extents_over(&self, reach: &Reach, resolution: f64, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
+        self.proven_over::<_, AtOnce>(reach, Rule { settled: &|upper, attained| upper - attained <= resolution, scale: resolution }, quantities)
     }
 
     /// The proofs' subdivision (module documentation, # Provable extrema, # Rounds): per quantity the cell of its largest upper
