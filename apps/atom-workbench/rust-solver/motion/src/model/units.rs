@@ -1277,9 +1277,7 @@ mod tests {
 
     /// A jump at the fourth order (step.rs `jump`, the landing), on the cycling state at rest (`cycling`): of single jumps
     /// with their own streams, the photons a jump -- each one's counted work -- are 1/(1 − p) on average, within four of
-    /// their mean's deviations (a geometric number's, √p/(1 − p) a jump); and a second state carried through the jump --
-    /// the trajectory's own, and twice it -- comes out the trajectory's own to the bit: the photons' operators and the
-    /// slow state's projector are one linear map on both.
+    /// their mean's deviations (a geometric number's, √p/(1 − p) a jump).
     #[test]
     fn a_jump_at_the_fourth_order_draws_its_landing_s_photons() {
         use crate::step::{self, Dynamics, Trajectory};
@@ -1293,12 +1291,7 @@ mod tests {
             let mut photons = 0.0;
             for index in 0..trials {
                 let mut t = Trajectory::new(&run, 3, at.r, [0.0; 3], 7, index);
-                let (mut own, mut twice) = (Some(t.psi.clone()), Some(t.psi.iter().map(|z| *z * 2.0).collect::<step::Internal>()));
-                let mut twin = t.clone();
-                step::jump(&run, &mut t, &mut own).unwrap();
-                step::jump(&run, &mut twin, &mut twice).unwrap();
-                assert_eq!(own.as_ref(), Some(&t.psi), "{scene}: the trajectory's own state, carried through jump {index}");
-                assert_eq!(twice.as_ref(), Some(&t.psi), "{scene}: twice the trajectory's state, carried through jump {index}");
+                step::jump(&run, &mut t).unwrap();
                 photons += (t.work / run.photon_work()).round();
             }
             let (mean, expected) = (photons / trials as f64, 1.0 / (1.0 - prompt));

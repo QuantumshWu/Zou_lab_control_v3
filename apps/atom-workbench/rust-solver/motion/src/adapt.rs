@@ -1,4 +1,4 @@
-//! One constant step for the run, and the read of its error (SPEC §2.2).
+//! One constant step for the run (SPEC §2.2).
 //!
 //! # The step
 //! Every trajectory of a run advances by steps of one τ (`step::step`). The last step of an output interval is its rest
@@ -6,8 +6,9 @@
 //! from there; a step the scheme refuses (`step::Refused`) is taken at its half, and one refused down to the time's
 //! round-off ends the advance with its refusal -- a numerical failure the solve counts and flags, never a loss. A step
 //! takes its generator's change along the path through its own three nodes, its middle and its ends, whatever its
-//! length (step.rs, # The kick): what that leaves is an error of the step's length like the splitting's, and one read
-//! holds both. The generator's own frequencies are no matter of the step's length: they are integrated exactly.
+//! length (step.rs, # The kick): what that leaves is an error of the step's length like the splitting's, and the
+//! pilot's companion at twice the step checks both at the outputs (solve.rs, # The step). The generator's own frequencies
+//! are no matter of the step's length: they are integrated exactly.
 //!
 //! τ is one for the run because the splitting is symplectic in its conservative part and its own inverse: at a constant
 //! step the energy of a trap's motion errs by a bounded amount (measured on the reference traps R1: no drift over 10³
@@ -16,12 +17,12 @@
 //!
 //! # The jumps' times
 //! A jump is made at the end of a step whose own propagation reaches the trajectory's threshold there (SPEC §1.6): the
-//! step that is taken sets the jump's time, so the time's error is that step's own, which the read doubles like every
-//! step's. A step's norm is its own curve -- its generator sits at its middle, half its length ahead on the straight
+//! step that is taken sets the jump's time, so the time's error is that step's own, a part of the step's error like
+//! every other. A step's norm is its own curve -- its generator sits at its middle, half its length ahead on the straight
 //! path through it --, so where a longer step's norm crosses the threshold is not when a shorter step reaches it. Timed
 //! by a step of the nominal length and made at the end of a shorter one, the jumps took the hazard of another phase of
-//! the orbit: at ω τ = 3 a held atom at a standing wave's antinode lost its recoil heating along the wave (R10; the read
-//! saw none of it, reading the steps taken). So the step to a jump is the fixed point of "the step of the length L
+//! the orbit: at ω τ = 3 a held atom at a standing wave's antinode lost its recoil heating along the wave (R10). So the
+//! step to a jump is the fixed point of "the step of the length L
 //! reaches the threshold at s(L)", L = s(L):
 //! - the length tried first is the time to the threshold at the rate the trajectory has just had -- the last taken
 //!   step's fall of ln‖ψ‖² over its length (`Trajectory::rate`) --, no longer than τ or the interval's rest: where jumps
@@ -35,202 +36,133 @@
 //!   bracket's middle, and where the bracket is narrower than the tolerance the step tried is the step taken -- the
 //!   search ends by its tolerance or by its bracket, never by a count.
 //! The tolerance is `units::JUMP_TIMING` of the step's length (derived there: the second order of the step's share of
-//! the tighter target). No read is added: the taken step's own error of the hazard is in the read already
-//! (`Mark::hazard_error`), and the time's distance from the fixed point is held at the order the reads leave out.
+//! the tighter target): the time's distance from the fixed point is held at the second order of what the step may
+//! take.
 //!
 //! # The Brownian path
 //! The light a trajectory scatters diffuses its momentum (SPEC §1.6; step.rs, # The absorbed light's momentum) along
-//! the trajectory's own Brownian path, three independent standard ones. The n-th step taken draws its part of the path
-//! from its own stream (`random::Stream::diffusion(seed, index, n)`): two vectors of normal deviates, the path's
-//! increment and its first moment about the step's middle at whatever length the step takes (`step::Brownian::over`)
-//! -- a step tried at several lengths for its jump takes the same deviates at each, and its norm does not depend on
-//! them. A trajectory is a function of its seed, its index and the run's step. Where the step is read, its two halves
-//! take the two halves of the same part (`step::Brownian::halves`, two further vectors from the same stream): the
-//! step's increment is the sum of its halves'. The halves and the carried state's step put them through the step's own
-//! factor of the diffusion (`step::Step::spread`): the three are one realization of the diffusion, and what they differ
-//! by is the scheme's error, not the difference of two draws -- a factor taken anew at each half's middle differs from
-//! the step's by the state's change over the step, which after a jump is all of it, and the difference of the kicks,
-//! of zero mean and of the kicks' own size, would be read as an error of the step. The diffusion's own error is read
-//! by what it puts in: the step's 2D τ against its halves' own (`step::Step::heating`), with the energies' (# The
-//! read).
+//! the trajectory's own Brownian path W, three independent standard ones. The path is one function of the time for a
+//! trajectory, whatever step it is taken at (`Path`): the pilot's two levels (solve.rs, # The step) -- the same
+//! trajectory at τ and at 2τ -- see the same noise, and differ by what the step does and by nothing drawn anew. The
+//! product, at one step, needs the path's law alone; there is one path for both.
 //!
-//! # The read
-//! Where a trajectory is read (the pilot's, solve.rs), every step it takes is doubled: from the same state the step
-//! and two of its halves, the jump-free flows. The scheme's local error is O(τ^{p+1}), p = `units::ORDER`, so the step's
-//! own local error is their difference times 2^p/(2^p − 1) (decide.rs `richardson`). A half step takes its own three
-//! nodes on half the step's spacing, its own generator at its own middle, and predicts its own path's momentum. What
-//! the difference holds, and what it does not (step.rs, # The kick; spectral.rs):
-//! - the splitting's error and the path momentum's prediction, O(τ³) a step: the kick taken at the fixed r_h, the
-//!   straight path where the reference's flow bends it. On a folded cluster this is most of what the difference
-//!   holds (step.rs, # The kick: on six beams' cooling at k·v τ = 0.25 the propagation's own error is 8 % of the
-//!   kick's difference and three tenths of the state's), so the step a run takes there is the splitting's, whatever
-//!   the propagation's order;
-//! - what a hop leaves of the generator's change along the path D, the second Magnus term. Where the hops do not
-//!   resolve Ĥ₀ (an explicit far-detuned state) it is the light shift of the change itself, at most (k·v τ)²/24 of the
-//!   light shift's turn over the step -- O(τ³) a step, the scheme's own order, so the factor takes it whole. Where
-//!   they do (a folded cluster) it is O(τ⁵) a step;
-//! - the three nodes' representation of D and of the gradient, Simpson's rule's: O(τ⁵) a step where the hops resolve
-//!   Ĥ₀. Of an O(τ⁵) error 15/16 is in the difference, which the leading order's factor books at 5/4 of itself -- the
-//!   safe side, and no step is redone on more nodes for it;
-//! - nothing of the generator's own frequencies: a detuning that turns any number of times over the step is integrated
-//!   exactly in the step and in its halves alike, for the state and for the kick (before, an explicit state's ringing
-//!   was sampled at three nodes in both, and the difference read none of an error of 6 to 40 % on T). The one thing of
-//!   theirs that is not exact, a decaying state's kick as a quotient by its ringing norm (10⁻⁷ to 10⁻⁵ of the kick at
-//!   twenty linewidths), is not read either.
-//!
-//! A local error is an error of an output only as far as the dynamics carries it there: to first order the step's
-//! error of an ensemble mean is Σ_n E[∇u(t_n, X_n)·ℓ_n], ℓ_n the local errors and u(t, x) the exact dynamics'
-//! expectation of the output's quantity from the state x at the time t (SPEC §2.2). What carries a local error differs
-//! between the internal state and the motion, and the read follows each (measured on a bright scene, six beams' cooling
-//! in a tweezer: a plain sum of the local errors reads 17 to 21 % on a population whose values at τ, τ/2 and τ/8 agree
-//! within their statistics, and grows with the run's length).
-//!
-//! - **The internal state** is carried by linear maps: along a trajectory's path and jumps, ψ after is a product of
-//!   propagators and jump operators applied to ψ before, whatever ψ is. The read carries a second internal state S
-//!   through the same maps -- each step taken once more from the trajectory's position and momentum with S in ψ's
-//!   place, through the step's own middle (`step::Midway`: the reference flow and the generator do not know the
-//!   internal state, so they are the step's, made once), each jump's operator (the class and the polarization the
-//!   trajectory drew) on S, renormalized as ψ is (`step::jump`) -- and adds every step's local error of ψ to it with
-//!   its sign turned: S is the trajectory's
-//!   internal state with its step errors taken out, to first order, and it forgets them exactly as the internal state
-//!   forgets (optical pumping erases what a step did within a few jumps). The rows' error is the trajectory's rows less
-//!   S's (`Drift::rows`); it is not a sum.
-//! - **The motion** has the three axes' energies for its slow variables. Their local errors are accumulated per lab
-//!   axis (`Mark::error`): the doubling's differences of the principal axes' energies E_i = (ħ/m)k_i²/2 + g_i y_i +
-//!   λ_i y_i²/2 of the step's reference (y_i = e_i·(r − p), k_i = e_i·κ), each mapped by its direction cosine squared
-//!   e_ia² -- T_a is the window mean of (ħ/m)κ_a² over one trap period (SPEC §1.7), which of a harmonic axis is its
-//!   energy, while an error of the orbit's phase moves κ_a by its amplitude and that mean not at all --; and the
-//!   difference between the trajectory's step and S's, the kick an internal error makes. Beside them are accumulated
-//!   the kinetic energy the jumps put in per lab axis (`Mark::input`) and the hazard's integral with its local error
-//!   (`Mark::hazard`, `Mark::hazard_error`): the jump-free doubling sees no recoil, and a hazard off by a share makes
-//!   that share too many or too few of them. Each mark also holds the atom's own part of T (`Mark::level`, `Trail`):
-//!   per lab axis the mean of its kinetic energy (ħ/m)κ_a²/2 over the trap period behind it -- T_a's summand (SPEC
-//!   §1.7), half the axis's energy on a harmonic axis, and bounded and smooth in any trap (the harmonic energy about
-//!   the trap's centre is not: in a crossed trap's arms and across a lattice's sites it is no energy of the atom's).
-//!   The ensemble's regression of them carries the local errors to the outputs (transport.rs).
-//! - **The loss energy** E_s keeps the plain sum of its local errors (`Drift::energy`): a trajectory's loss decision
-//!   is judged against the sum as it stood (solve.rs) -- the safe side for a motion that forgets.
-//!
-//! Left out, each second order in the step's error or bounded by a read above: the shift of a jump's time and of its
-//! outcome's odds by the internal error (S takes the trajectory's jumps; the hazard's share bounds the times'), the
-//! internal error's own part of E_s at an output, and the motion's errors' effect on the rows.
-//!
-//! A step whose halves or whose carried step the scheme refuses is counted unread (`Drift::unread`), and so is a jump
-//! whose operator annihilates S: the trajectory's read is then no number.
+//! - The path is made on a tree. Time is cut into cells, one output interval each; a cell's part of the path (its
+//!   increment and its first moment about its middle, `step::Brownian::over`) is drawn from the cell's stream
+//!   (`random::Stream::brownian`). A cell's two halves are the Brownian bridge between its ends (`step::Brownian::split`)
+//!   from the stream of that node of the tree, and so on down: the part over any bin of any rung's grid is a function of
+//!   (seed, trajectory, bin), and a bin's part is the sum of its halves' -- a step of 2τ on the grid takes the sum of
+//!   the two steps of τ it spans.
+//! - A trajectory at the step τ reads the tree down to the bins of its own grid, the cell over 2^depth = the multiples
+//!   of τ. A step that ends off the grid -- at a jump, or at the τ after one -- cuts the bin it ends in: the bridge
+//!   between the bin's ends once more, at the cut, from the stream of the cut's time (`random::Stream::bridge`); the rest
+//!   of the bin is kept for the step that follows (`Cursor`). A step tried at several lengths for its jump cuts at each
+//!   of them, and the one taken moves the trajectory along the path; its norm does not depend on the path.
+//! - Every part has the law of a Brownian path's over its stretch, exactly, and parts of stretches that do not overlap
+//!   are independent: nothing of the scheme's law knows the tree. What two levels share is the path at the bins' ends
+//!   of the coarser one; within a bin each level's cuts are its own.
+//! - The tree is read by its branches: the nodes from a cell down to the bin last read are kept, and the next bin's
+//!   branch is made from where it leaves them -- two nodes a bin on average, whatever the depth, and the same parts to
+//!   the bit as a branch made from its cell.
 
-use crate::decide::richardson;
-use crate::linalg::{dot3, norm_sqr};
-use crate::model::{Point, STATES};
+use crate::linalg::norm_sqr;
 use crate::random::Stream;
-use crate::step::{jump, step_work, test_loss, Attempt, Brownian, Dynamics, Flow, Internal, Middle, Midway, Refused, Scratch, Segment, Step, Trajectory};
-use crate::transport::Mark;
-use crate::units::{JUMP_TIMING, ORDER};
-use std::collections::VecDeque;
+use crate::step::{jump, step_work, test_loss, Attempt, Brownian, Dynamics, Middle, Midway, Refused, Scratch, Segment, Trajectory};
+use crate::units::{rounding, JUMP_TIMING};
 
-/// The step evaluations a read step takes (module documentation, # The read): the step, its two halves, and the carried
-/// state's step.
-pub const READ_STEPS: u64 = 4;
-
-/// What a read trajectory holds of its step errors at a time (module documentation, # The read): the motion's mark
-/// (transport.rs), the loss energy's accumulated local errors (rad/µs), the displayed rows' error -- the trajectory's
-/// rows less its carried state's --, and the steps and jumps the read could not follow.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Drift {
-    pub mark: Mark,
-    pub energy: f64,
-    pub rows: [f64; STATES],
-    pub unread: f64,
+/// Where a trajectory stands on its Brownian path (`Path`): the time, the bin of its grid that time lies in, and the
+/// path's part from that time to the bin's end.
+#[derive(Clone, Copy, Debug)]
+pub struct Cursor {
+    at: f64,
+    bin: u64,
+    rest: Brownian,
 }
 
-impl Drift {
-    pub const ZERO: Drift = Drift { mark: Mark::ZERO, energy: 0.0, rows: [0.0; STATES], unread: 0.0 };
+/// A trajectory's Brownian path (module documentation, # The Brownian path) as a trajectory at one step goes along it:
+/// the run's seed and the trajectory's number, the cells' width (µs), the depth of the trajectory's grid in a cell's
+/// tree (2^depth bins a cell), where the trajectory stands, and the branch of the tree last read -- its cell, the bin's
+/// place in it, and the parts of the nodes from the cell down to the bin: a bin's branch is read on from where it
+/// leaves the last one's (the next bin's shares all but two nodes with it on average), no part made twice.
+#[derive(Clone, Debug)]
+pub struct Path {
+    seed: u64,
+    index: u64,
+    cell: f64,
+    depth: u32,
+    cursor: Cursor,
+    branch: (u32, u64, Vec<Brownian>),
 }
 
-/// A read trajectory's recent path (module documentation, # The read): per lab axis the window (µs, the axis's trap
-/// period), and the steps' paths back to the longest window behind the last one.
-#[derive(Clone, Debug, PartialEq)]
-struct Trail {
-    windows: [f64; 3],
-    steps: VecDeque<Segment>,
-}
-
-impl Trail {
-    /// The trail a step longer.
-    fn push(&mut self, segment: &Segment) {
-        let end = segment.start + segment.tau;
-        self.steps.push_back(segment.clone());
-        let longest = self.windows.iter().fold(0.0, |a: f64, &b| a.max(b));
-        while self.steps.front().is_some_and(|s| s.start + s.tau <= end - longest) {
-            self.steps.pop_front();
-        }
+impl Path {
+    /// The path of trajectory `index` of the run `seed` from t = 0, in cells of the width `cell`, for a trajectory whose
+    /// grid has 2^depth bins a cell.
+    pub fn new(seed: u64, index: u64, cell: f64, depth: u32) -> Path {
+        let mut path = Path { seed, index, cell, depth, cursor: Cursor { at: 0.0, bin: 0, rest: Brownian::STILL }, branch: (0, 0, vec![]) };
+        path.cursor.rest = path.whole(0);
+        path
     }
 
-    /// The mean of the kinetic energy (ħ/m)κ_a²/2 per lab axis over the axis's window behind the trail's end, the window
-    /// cut where the trail begins (the trajectory's start); exact on the steps' paths (`Segment::moments`: a step that
-    /// lies in the window is asked whole, which it makes once).
-    fn levels(&self, hbar_over_mass: f64) -> [f64; 3] {
-        let Some(end) = self.steps.back().map(|s| s.start + s.tau) else { return [0.0; 3] };
-        std::array::from_fn(|a| {
-            let from = end - self.windows[a];
-            let (mut integral, mut time) = (0.0, 0.0);
-            for s in &self.steps {
-                let (first, last) = (s.start.max(from), s.start + s.tau);
-                if last > from {
-                    integral += s.moments(first, last).1[a];
-                    time += last - first;
+    /// The end of a bin of the grid.
+    fn end(&self, bin: u64) -> f64 {
+        (bin + 1) as f64 * (self.cell / (1u64 << self.depth) as f64)
+    }
+
+    /// Whether a time is a bin's end: within the rounding of the additions that step a trajectory across a cell (a
+    /// time is the sum of its steps' lengths, as many as the bins a cell and two more).
+    fn ends(&self, time: f64, end: f64) -> bool {
+        (time - end).abs() <= rounding((1usize << self.depth) + 2) * end
+    }
+
+    /// The path's part over a whole bin: its cell's, through the halves of the tree's nodes down to it. The node of
+    /// the level l on the bin's branch is the one the first l bits of its place name, the 2^l + (place >> (depth − l))-th
+    /// of the cell's tree; the levels above the first where the place leaves the last branch's are the last branch's.
+    fn whole(&mut self, bin: u64) -> Brownian {
+        let (seed, index, depth) = (self.seed, self.index, self.depth);
+        let (cell, place) = ((bin >> depth) as u32, bin & ((1u64 << depth) - 1));
+        let deviates = |node: u32| {
+            let mut stream = Stream::brownian(seed, index, cell, node);
+            [stream.normals(), stream.normals(), stream.normals()]
+        };
+        let (last_cell, last_place, parts) = &mut self.branch;
+        if parts.is_empty() || *last_cell != cell {
+            let root = deviates(0);
+            *parts = vec![Brownian::over(self.cell, &[root[0], root[1]])];
+        } else {
+            let shared = (0..=depth).rev().find(|&level| place >> (depth - level) == *last_place >> (depth - level)).unwrap_or(0);
+            parts.truncate(shared as usize + 1);
+        }
+        for level in parts.len() as u32 - 1..depth {
+            let (width, node, half) = (self.cell / (1u64 << level) as f64, (1u64 << level) + (place >> (depth - level)), (place >> (depth - level - 1)) & 1);
+            let part = parts[level as usize].split(width, 0.5 * width, &deviates(node as u32))[half as usize];
+            parts.push(part);
+        }
+        (*last_cell, *last_place) = (cell, place);
+        parts[depth as usize]
+    }
+
+    /// The path's part from where the trajectory stands to the time `to`, and where it stands then: the rest of its
+    /// bin and the bins after it, joined, up to the bin `to` lies in, which is cut there.
+    fn reach(&mut self, to: f64) -> (Brownian, Cursor) {
+        let mut cursor = self.cursor;
+        let (mut part, mut length) = (Brownian::STILL, 0.0);
+        loop {
+            let end = self.end(cursor.bin);
+            let rest = end - cursor.at;
+            let ends = self.ends(to, end);
+            if ends || to > end {
+                (part, length) = (part.joined(length, &cursor.rest, rest), length + rest);
+                cursor = Cursor { at: end, bin: cursor.bin + 1, rest: self.whole(cursor.bin + 1) };
+                if ends {
+                    return (part, cursor);
                 }
+            } else {
+                let piece = to - cursor.at;
+                let mut stream = Stream::bridge(self.seed, self.index, to);
+                let [head, tail] = cursor.rest.split(rest, piece, &[stream.normals(), stream.normals(), stream.normals()]);
+                return (part.joined(length, &head, piece), Cursor { at: to, bin: cursor.bin, rest: tail });
             }
-            0.5 * hbar_over_mass * integral / time
-        })
-    }
-}
-
-/// A trajectory's read (module documentation, # The read): what it accumulates (`Reader::drift` gives it with the rows),
-/// its recent path, the carried internal state S on the trajectory's cluster -- none before the first step, where S is
-/// ψ --, and the states its rows' error is read at: the trajectory's and S's at the end of the last step read, on that
-/// step's cluster at its end's point. The rows' error is no sum: it is asked at the outputs alone, and made there.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Reader {
-    drift: Drift,
-    trail: Trail,
-    carried: Option<Internal>,
-    shown: Option<(usize, Point, Internal, Internal)>,
-}
-
-impl Reader {
-    /// A reader whose marks average the kinetic energy of each lab axis over `windows` (µs): the axes' trap periods.
-    pub fn new(windows: [f64; 3]) -> Reader {
-        Reader { drift: Drift::ZERO, trail: Trail { windows, steps: VecDeque::new() }, carried: None, shown: None }
-    }
-    /// What the read holds of the trajectory's step errors: what it accumulated, and the rows' error -- the rows of the
-    /// trajectory's state less those of its carried state as the last step read left them (none read yet: no error).
-    pub fn drift<D: Dynamics>(&self, model: &D) -> Drift {
-        let mut drift = self.drift;
-        if let Some((cluster, at, ours, theirs)) = &self.shown {
-            let (ours, theirs) = (model.readout(*cluster, at, ours), model.readout(*cluster, at, theirs));
-            drift.rows = std::array::from_fn(|q| ours[q] - theirs[q]);
         }
-        drift
     }
-    /// The loss energy's accumulated local errors (`Drift::energy`).
-    pub fn energy(&self) -> f64 {
-        self.drift.energy
-    }
-}
-
-/// What the doubling compares of a state: the principal axes' energies of a reference flow about its expansion point p,
-/// (ħ/m)k_i²/2 + g_i y_i + λ_i y_i²/2, y_i = e_i·(r − p), k_i = e_i·κ.
-fn energies(flow: &Flow, t: &Trajectory) -> [f64; 3] {
-    let d = [t.r[0] - flow.centre[0], t.r[1] - flow.centre[1], t.r[2] - flow.centre[2]];
-    std::array::from_fn(|i| {
-        let (y, k) = (dot3(flow.axes[i], d), dot3(flow.axes[i], t.kappa));
-        0.5 * flow.hbar_over_mass * k * k + flow.gradient[i] * y + 0.5 * flow.curvatures[i] * y * y
-    })
-}
-
-/// Principal axes' quantities per lab axis: each by its direction cosine squared.
-fn lab(flow: &Flow, axes: [f64; 3]) -> [f64; 3] {
-    std::array::from_fn(|a| (0..3).map(|i| flow.axes[i][a] * flow.axes[i][a] * axes[i]).sum())
 }
 
 /// The trajectory's physical state from the end of a step taken, its counters kept and the step counted among those
@@ -250,80 +182,14 @@ fn midway<'a, D: Dynamics>(model: &'a D, trajectory: &mut Trajectory, from: &Tra
     Ok(through)
 }
 
-/// A step of `length` from a state on its part of the Brownian path, through the factor `spread` of the diffusion
-/// (None: its own), counted: the flow between jumps, whatever the threshold.
-fn counted<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, length: f64, brownian: &Brownian, spread: Option<&[[f64; 3]; 3]>, scratch: &mut Scratch) -> Result<Step, Refused> {
-    let s = midway(model, trajectory, from, length)?.step(from, brownian, spread, scratch)?;
-    trajectory.work += s.work;
-    Ok(s)
-}
-
-/// A step read (module documentation, # The read): the step `s` taken from `from` through the middle `through` against
-/// its two halves, by the scheme's Richardson factor; and the carried state's step. The halves go on the two halves of
-/// the step's own part of the Brownian path (the step's part and its stream; module documentation, # The Brownian
-/// path), the carried step on the step's. The carried step goes through the step's own middle: the same start, the same
-/// length, so the same reference flow and the same generator, made once.
-/// Where the scheme refuses a half or the carried step, the step is counted unread and the carried state begins anew
-/// from the trajectory's.
-fn read<D: Dynamics>(model: &D, trajectory: &mut Trajectory, from: &Trajectory, (s, through): (&Step, &Midway<'_, D>), (brownian, stream): (&Brownian, &mut Stream), reader: &mut Reader, scratch: &mut Scratch) {
-    let half = 0.5 * s.segment.tau;
-    let [first, second] = brownian.halves(s.segment.tau, &[stream.normals(), stream.normals()]);
-    let spread = Some(&s.spread);
-    let halves = counted(model, trajectory, from, half, &first, spread, scratch).and_then(|first| counted(model, trajectory, &first.end, half, &second, spread, scratch).map(|second| (first.heating, second)));
-    let carried = match reader.carried.take() {
-        Some(psi) => {
-            trajectory.steps += 1;
-            through.step(&Trajectory { psi, ..from.clone() }, brownian, spread, scratch).map(|c| {
-                trajectory.work += c.work;
-                Some(c)
-            })
-        }
-        None => Ok(None),
-    };
-    let (Ok((first, second)), Ok(carried)) = (halves, carried) else {
-        reader.drift.unread += 1.0;
-        return;
-    };
-    let (on, whole, finer, drift) = (s.segment.flow, &s.end, &second.end, &mut reader.drift);
-    let (axes, size) = (energies(&on, whole), norm_sqr(&whole.psi));
-    drift.mark.hazard += (norm_sqr(&from.psi) / size).ln();
-    // The carried state after the step: S's own step where it differs from ψ, then ψ's local errors taken out.
-    let mut next = match carried {
-        Some(c) => {
-            let kick = lab(&on, std::array::from_fn(|i| axes[i] - energies(&on, &c.end)[i]));
-            for a in 0..3 {
-                drift.mark.error[a] += kick[a];
-            }
-            c.end.psi
-        }
-        None => whole.psi,
-    };
-    // The two halves against the step taken: the finer level's parameter is half. The loss energy's local error is the
-    // difference of its two values, the step's end's and the halves' end's.
-    let factor = richardson(0.5, ORDER as f64);
-    let moved = lab(&on, std::array::from_fn(|i| factor * (axes[i] - energies(&on, finer)[i])));
-    for a in 0..3 {
-        // The diffusion's own error beside it: the step and its halves took one factor, so their energies differ by no
-        // diffusion; what the step's diffusion puts in against what its halves' own would.
-        drift.mark.error[a] += moved[a] + factor * (s.heating[a] - first[a] - second.heating[a]);
-    }
-    drift.energy += factor * (model.energy(whole.cluster, &whole.point(), &whole.psi) - model.energy(finer.cluster, &finer.point(), &finer.psi));
-    drift.mark.hazard_error += factor * (norm_sqr(&finer.psi) / size).ln();
-    for (x, (fine, coarse)) in next.iter_mut().zip(finer.psi.iter().zip(whole.psi.iter())) {
-        *x = *x + (*fine - *coarse) * factor;
-    }
-    reader.shown = Some((whole.cluster, whole.point(), whole.psi, next));
-    reader.carried = Some(next);
-}
-
 /// Advances a held trajectory to the time `to` (the next output time) by steps of τ, with its jumps and its loss test
 /// (module documentation, # The step, # The jumps' times; the loss is tested at every step's end and after every jump,
 /// SPEC §1.7); `each` takes every step's path (a jump's step is the one whose own propagation reaches the threshold at
-/// its end, the jump there). A trajectory lost on the way stops at its loss time. With a reader, every step taken and
-/// every jump is read into it (module documentation, # The read). Where the scheme refuses a step at every length down
-/// to the time's round-off, the advance ends there with the refusal; so it does where the model gives a jump no photon
-/// (`step::jump`). `scratch` is the trajectory's (`step::Scratch`): its steps' memory, made once with it.
-pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, scratch: &mut Scratch, mut reader: Option<&mut Reader>, to: f64, each: &mut dyn FnMut(&Segment)) -> Result<(), Refused> {
+/// its end, the jump there). A trajectory lost on the way stops at its loss time. Where the scheme refuses a step at
+/// every length down to the time's round-off, the advance ends there with the refusal; so it does where the model gives
+/// a jump no photon (`step::jump`). `scratch` is the trajectory's (`step::Scratch`): its steps' memory, made once with
+/// it; `path` its Brownian path, which it goes along as it is advanced (`Path`).
+pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, scratch: &mut Scratch, path: &mut Path, to: f64, each: &mut dyn FnMut(&Segment)) -> Result<(), Refused> {
     trajectory.tau = tau;
     while trajectory.lost.is_none() && trajectory.time < to {
         let rest = to - trajectory.time;
@@ -333,9 +199,6 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, sc
         // where the threshold is within the time's round-off of the start: the jump is made there. From half the
         // length where the scheme refuses a step, and no longer than that from then on.
         let (mut most, mut bracket) = (tau.min(rest), (0.0, f64::INFINITY));
-        // The step's part of the Brownian path: its deviates, the path's shape over whatever length the step takes.
-        let mut stream = Stream::diffusion(trajectory.seed, trajectory.index, trajectory.taken);
-        let deviates = [stream.normals(), stream.normals()];
         let ahead = if trajectory.rate > 0.0 { (norm_sqr(&trajectory.psi) / trajectory.threshold).ln() / trajectory.rate } else { f64::INFINITY };
         let mut length = most.min(ahead);
         let (at, taken, jumps) = loop {
@@ -345,18 +208,19 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, sc
             }
             let slack = if bracket.1 - bracket.0 <= JUMP_TIMING * length { f64::INFINITY } else { JUMP_TIMING * length };
             let reach = length.min(most - length);
-            let brownian = Brownian::over(length, &deviates);
-            let tried = midway(model, trajectory, &from, length).and_then(|through| through.attempt(&from, &brownian, slack, reach, scratch).map(|tried| (tried, through)));
+            // The step's part of the Brownian path, and where the trajectory stands on it at the step's end.
+            let (brownian, beyond) = path.reach(trajectory.time + length);
+            let tried = midway(model, trajectory, &from, length).and_then(|through| through.attempt(&from, &brownian, slack, reach, scratch));
             let refusal = match tried {
-                Ok((Attempt::Whole(whole), through)) => {
+                Ok(Attempt::Whole(whole)) => {
                     trajectory.work += whole.work;
-                    break (from, Some((whole, through, brownian)), false);
+                    break (from, Some((whole, beyond)), false);
                 }
-                Ok((Attempt::Reached(whole), through)) => {
+                Ok(Attempt::Reached(whole)) => {
                     trajectory.work += whole.work;
-                    break (from, Some((whole, through, brownian)), true);
+                    break (from, Some((whole, beyond)), true);
                 }
-                Ok((Attempt::Proposes { length: proposed, work }, _)) => {
+                Ok(Attempt::Proposes { length: proposed, work }) => {
                     trajectory.work += work;
                     if proposed < length {
                         bracket.1 = length.min(bracket.1);
@@ -374,14 +238,9 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, sc
             }
             (most, bracket) = (length, (0.0, f64::INFINITY));
         };
-        if let Some((s, through, brownian)) = &taken {
-            // The step's path to the caller first: the moments it asks of the whole step are then the trail's too.
+        if let Some((s, beyond)) = &taken {
             each(&s.segment);
-            if let Some(reader) = reader.as_deref_mut() {
-                read(model, trajectory, &at, (s, through), (brownian, &mut stream), reader, scratch);
-                reader.trail.push(&s.segment);
-                reader.drift.mark.level = reader.trail.levels(model.hbar_over_mass());
-            }
+            path.cursor = *beyond;
             let fall = (norm_sqr(&at.psi) / norm_sqr(&s.end.psi)).ln();
             adopt(trajectory, &s.end);
             trajectory.rate = fall / s.segment.tau;
@@ -391,21 +250,7 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, sc
             break;
         }
         if jumps {
-            match reader.as_deref_mut() {
-                Some(reader) => {
-                    // The jump read: the kinetic energy it puts in per lab axis; a carried state its operator
-                    // annihilates is no state to carry on.
-                    let (before, followed) = (trajectory.kappa, reader.carried.is_some());
-                    jump(model, trajectory, &mut reader.carried)?;
-                    for a in 0..3 {
-                        reader.drift.mark.input[a] += 0.5 * model.hbar_over_mass() * (trajectory.kappa[a] * trajectory.kappa[a] - before[a] * before[a]);
-                    }
-                    if followed && reader.carried.is_none() {
-                        reader.drift.unread += 1.0;
-                    }
-                }
-                None => jump(model, trajectory, &mut None)?,
-            }
+            jump(model, trajectory)?;
         } else if length == rest {
             // The step spanned the rest of the interval: it ends on the output time, not an ulp short of it (the sum of
             // the steps' times rounds), which would leave an interval of the time's round-off to be stepped.
@@ -421,4 +266,72 @@ pub fn advance<D: Dynamics>(model: &D, tau: f64, trajectory: &mut Trajectory, sc
 /// `assembly_work`.
 pub fn advance_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64) -> (f64, u64) {
     (step_work(middle, kappa, velocity, tau), 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A trajectory goes along its path to the times given, in order: the parts it takes.
+    fn walk(path: &mut Path, times: &[f64]) -> Vec<Brownian> {
+        times
+            .iter()
+            .map(|&to| {
+                let (part, beyond) = path.reach(to);
+                path.cursor = beyond;
+                part
+            })
+            .collect()
+    }
+
+    /// The Brownian path is one function of the time whatever the step (module documentation, # The Brownian path).
+    /// Over three cells of 8 µs, at the steps 1, 2 and 4 µs (depths 3, 2, 1): every step of 2τ on the grid takes the
+    /// two steps of τ it spans, joined, to rounding. A trajectory whose steps end off the grid (a jump's) meets the
+    /// same path again at every bin's end: its parts from one end of a bin to the next, joined, are the bin's own. A
+    /// bin's part is the same to the bit whatever branch was read before it (the bins in a scattered order on one path
+    /// against each on a path of its own). And the parts have a Brownian path's law at any cut: over 4096 trajectories the increment and the first moment of a
+    /// stretch of the length s cut out of a bin have the variances s and s³/12 and no covariance, each within its
+    /// interval at the confidence z over the looks.
+    #[test]
+    fn a_trajectory_s_brownian_path_is_the_same_at_every_step() {
+        let (cell, cells) = (8.0, 3u64);
+        let grid = |depth: u32| -> Vec<f64> { (1..=cells << depth).map(|i| i as f64 * cell / (1u64 << depth) as f64).collect() };
+        let close = |a: &Brownian, b: &Brownian| (0..3).all(|x| (a.increment[x] - b.increment[x]).abs() <= 1e-13 && (a.moment[x] - b.moment[x]).abs() <= 1e-12);
+        for index in 0..16 {
+            let levels: Vec<Vec<Brownian>> = [3, 2, 1].map(|depth| walk(&mut Path::new(5, index, cell, depth), &grid(depth))).into();
+            for (fine, coarse) in levels.iter().zip(&levels[1..]) {
+                let width = cell * cells as f64 / fine.len() as f64;
+                for (i, step) in coarse.iter().enumerate() {
+                    assert!(close(step, &fine[2 * i].joined(width, &fine[2 * i + 1], width)), "trajectory {index}: step {i} of {} against its halves", coarse.len());
+                }
+            }
+            // Steps that end off the grid, between the ends of the bins of 2 µs.
+            let mut times: Vec<f64> = grid(2);
+            times.extend([0.37, 1.999, 2.5, 3.1, 3.3, 7.9, 9.0, 13.25, 20.5, 23.99]);
+            times.sort_by(f64::total_cmp);
+            let parts = walk(&mut Path::new(5, index, cell, 2), &times);
+            let (mut joined, mut length, mut from, mut bin) = (Brownian::STILL, 0.0, 0.0, 0);
+            for (part, &to) in parts.iter().zip(&times) {
+                (joined, length, from) = (joined.joined(length, part, to - from), length + to - from, to);
+                if to == grid(2)[bin] {
+                    assert!(close(&joined, &levels[1][bin]), "trajectory {index}: the bin to {to} from its cut parts");
+                    (joined, length, bin) = (Brownian::STILL, 0.0, bin + 1);
+                }
+            }
+        }
+        let mut one = Path::new(5, 3, cell, 5);
+        for bin in [77, 3, 4, 95, 0, 31, 32, 33, 64, 12, 13, 12] {
+            assert_eq!(one.whole(bin), Path::new(5, 3, cell, 5).whole(bin), "bin {bin} after another branch");
+        }
+        let (n, from, to) = (4096, 2.37, 3.81);
+        let mut sums = [0.0; 3];
+        for index in 0..n {
+            let part = walk(&mut Path::new(9, index, cell, 2), &[from, to])[1];
+            let (w, z) = (part.increment[1] / (to - from).sqrt(), part.moment[1] / ((to - from).powi(3) / 12.0).sqrt());
+            sums = [sums[0] + w * w, sums[1] + z * z, sums[2] + w * z];
+        }
+        let within = |error: f64| crate::estimate::Spread { error, groups: f64::INFINITY }.interval_over(3.0);
+        let [w, z, wz] = sums.map(|s| s / n as f64);
+        assert!((w - 1.0).abs() <= within((2.0 / n as f64).sqrt()) && (z - 1.0).abs() <= within((2.0 / n as f64).sqrt()) && wz.abs() <= within((1.0 / n as f64).sqrt()), "a cut stretch's variances over their own: {w}, {z}; covariance {wz}");
+    }
 }

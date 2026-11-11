@@ -49,11 +49,11 @@ const fn square_root(a: f64) -> f64 {
 ///
 /// Derivation: a jump made δt from where its step's own propagation reaches the threshold is, to first order, the
 /// hazard's integral off by γδt for that waiting time -- a share γδt of a jump too many or too few -- and the jump's
-/// kick taken ωδt away in the orbit's phase. No read measures either: the doubling compares jump-free flows, and the
-/// hazard's error it reads is the taken step's own. What no read measures is admitted at the second order of the error
-/// the solve admits (adapt.rs, # The read: every read is of first order in the step's error, held to its share s·ε of a
-/// target): δt ≤ (s·ε)² L of the step's length L makes the hazard's part at most (s·ε)² of that step's own hazard and
-/// the phase's at most (s·ε)² ω L, ε the tighter of the two targets.
+/// kick taken ωδt away in the orbit's phase. The step's error is checked between the pilot's two levels at the scheme's
+/// order (solve.rs, # The step), which a tolerance does not follow: it is a share of the step's length, of the first
+/// order in it. So it is admitted at the second order of what the step may take, its share s·ε of a target:
+/// δt ≤ (s·ε)² L of the step's length L makes the hazard's part at most (s·ε)² of that step's own hazard and the
+/// phase's at most (s·ε)² ω L, ε the tighter of the two targets.
 pub const JUMP_TIMING: f64 = {
     let share = STEP_SHARE * if POPULATION_TARGET < TEMPERATURE_TARGET { POPULATION_TARGET } else { TEMPERATURE_TARGET };
     share * share
@@ -74,8 +74,8 @@ pub const REGION_INTENSITY: f64 = 1.0 / 20.0;
 /// returns as usual, partial.
 pub const MOST_TRAJECTORIES: u64 = 1 << 14;
 /// The most steps of the run's constant step a trajectory's run may hold (SPEC §2.2; contract §2.3): the step's ladder
-/// goes no further down than the run's length over it; where its error is not within its share there, it is booked as
-/// read and flagged. (A trajectory's jumps and the halves of refused steps come on top; they are not capped.)
+/// goes no further down than the run's length over it; where its error still lies clearly beyond what it may take
+/// there, it is booked as measured and flagged. (A trajectory's jumps and the halves of refused steps come on top; they are not capped.)
 pub const MOST_STEPS: u64 = 1 << 24;
 /// The longest trajectory a request asks for (µs): 10 s (contract §1.3, the population core's `LONGEST_TIME_US`; the
 /// app's translated message names "10 s").

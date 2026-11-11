@@ -5,8 +5,9 @@
 //!
 //! Common random numbers: the j-th jump of a trajectory draws from its own stream (`Stream::jump`), whatever the steps
 //! before it took and however many draws earlier jumps used (a rejection sampler draws as many as it needs), so two runs
-//! that differ only in the step or in the model draw the same numbers at the same jump. Within a stream the draws
-//! are taken in a fixed order.
+//! that differ only in the step or in the model draw the same numbers at the same jump. A trajectory's Brownian path is
+//! likewise one path whatever the step: its nodes draw from their own streams (`Stream::brownian`), and a cut of it off
+//! its nodes from the stream of the cut's time (`Stream::bridge`). Within a stream the draws are taken in a fixed order.
 
 /// Philox4x32's round multipliers and the Weyl key increments (the golden ratio's and √3 − 1's 32-bit fractions):
 /// the generator's definition (Random123 philox.h).
@@ -41,8 +42,11 @@ pub enum Purpose {
     Latin = 2,
     /// A trajectory's jumps: event j ≥ 1 the j-th jump's draws, event 0 the first waiting time's threshold.
     Jump = 3,
-    /// A trajectory's Brownian path (SPEC §1.6: the absorbed light's diffusion): event n the n-th step's deviates.
+    /// A trajectory's Brownian path (SPEC §1.6: the absorbed light's diffusion; adapt.rs `Path`): the event a cell of
+    /// the path, with the node of the cell's tree beside it.
     Diffusion = 4,
+    /// A cut of a trajectory's Brownian path off its tree's nodes (adapt.rs `Path`): counted by the cut's time.
+    Bridge = 5,
 }
 
 /// A stream of uniform 32-bit words: Philox blocks at the counter (block, event, trajectory) under the key
@@ -65,9 +69,23 @@ impl Stream {
     pub fn jump(seed: u64, trajectory: u64, j: u32) -> Stream {
         Stream::new(seed, Purpose::Jump, trajectory, j)
     }
-    /// The stream of a trajectory's n-th step's Brownian deviates (step.rs `Brownian`).
-    pub fn diffusion(seed: u64, trajectory: u64, n: u32) -> Stream {
-        Stream::new(seed, Purpose::Diffusion, trajectory, n)
+    /// The stream of a node of a trajectory's Brownian path (adapt.rs `Path`): the path's cell and the node of that
+    /// cell's tree, in the counter's word that the trajectory's number leaves empty (a number below 2³²: a solve runs
+    /// `units::MOST_TRAJECTORIES`, and the pilot's numbers start there).
+    pub fn brownian(seed: u64, trajectory: u64, cell: u32, node: u32) -> Stream {
+        Stream::beside(seed, Purpose::Diffusion, trajectory, cell, node)
+    }
+    /// The stream of a cut of a trajectory's Brownian path at a time (adapt.rs `Path`): the bits of the time.
+    pub fn bridge(seed: u64, trajectory: u64, time: f64) -> Stream {
+        let bits = time.to_bits();
+        Stream::beside(seed, Purpose::Bridge, trajectory, bits as u32, (bits >> 32) as u32)
+    }
+    /// A stream counted by a second word beside its event, for a trajectory numbered below 2³².
+    fn beside(seed: u64, purpose: Purpose, trajectory: u64, event: u32, second: u32) -> Stream {
+        assert!(trajectory >> 32 == 0, "a trajectory's number is below 2³²");
+        let mut stream = Stream::new(seed, purpose, trajectory, event);
+        stream.counter[3] = second;
+        stream
     }
     /// Three independent standard normal deviates: Box and Muller's (1958) two from a pair of uniforms, r (cos, sin) 2πu
     /// with r² = −2 ln v, v on (0, 1] (`interior`), twice; the fourth is not kept.
