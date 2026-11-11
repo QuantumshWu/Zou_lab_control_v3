@@ -423,6 +423,27 @@ impl Model {
         }
     }
 
+    /// The legs of the Raman pairs that a component's drive e ← b makes folded onto e (far.rs, # A fold onto an explicit
+    /// state): e's kept drives (`legs`) whose channel is another Floquet state than the drive's own (`apart`) -- a fact
+    /// of the model's clusters and frames, the same at every state, made once for the errors read at thousands
+    /// (`pairs_made`).
+    pub(crate) fn pair_legs(&self, component: Component, excited: usize, ground: usize) -> &[(usize, usize)] {
+        &self.pairs[((2 * component.frequency + component.counter as usize) * EXCITED + excited - GROUND) * GROUND + ground]
+    }
+
+    /// Every drive's pairs' legs (`pair_legs`), by component (a frequency's co-rotating one, then its counter-rotating
+    /// one), excited state and ground state.
+    pub(crate) fn pairs_made(&self) -> Vec<Vec<(usize, usize)>> {
+        let components = (0..self.light.frequencies.len()).flat_map(|frequency| [false, true].map(|counter| Component { frequency, counter }));
+        components
+            .flat_map(|component| {
+                let from = self.frequency(component);
+                (0..EXCITED * GROUND).map(move |at| (from.clone(), at / GROUND, at % GROUND))
+            })
+            .map(|(from, x, ground)| self.legs[x].iter().copied().filter(|&(d, a)| self.apart(ground, &from, a, &self.carriers[d].beat)).collect())
+            .collect()
+    }
+
     /// Per excited state (less GROUND) its kept drives: (carrier, ground state) of each explicit drive into it -- the
     /// legs of the Raman pairs a drive folded onto it makes (far.rs, # A fold onto an explicit state).
     pub(crate) fn legs_made(&self) -> Vec<Vec<(usize, usize)>> {
@@ -833,12 +854,9 @@ impl Model {
         let h = &at.energies;
         let v: [f64; 3] = at.sample.at.kappa.map(|k| k * self.hbar_over_mass);
         let mut moved = (h[0][excited] - self.energies[excited]) - (h[0][ground] - self.energies[ground]) + self.hbar_over_mass * (dot3(q, at.sample.at.kappa) + 0.5 * dot3(q, q));
-        let (from, nu) = (self.frequency(component), self.tones[component.frequency].nu[side]);
-        for &(d, a) in &self.legs[excited - GROUND] {
-            let other = &self.carriers[d];
-            if self.apart(ground, &from, a, &other.beat) {
-                moved += self.kept_coupling(d, excited, a, &at.amplitudes).norm_sqr() / (h[0][ground] + nu - h[0][a] - other.detuning);
-            }
+        let nu = self.tones[component.frequency].nu[side];
+        for &(d, a) in self.pair_legs(component, excited, ground) {
+            moved += self.kept_at(at, d, excited, a).norm_sqr() / (h[0][ground] + nu - h[0][a] - self.carriers[d].detuning);
         }
         let rate: f64 = (0..3).map(|i| v[i] * (h[1 + i][excited] - h[1 + i][ground])).sum::<f64>() + self.hbar_over_mass * dot3(q, at.force);
         (moved, rate.abs())
@@ -892,6 +910,39 @@ impl Model {
         cc.beams.iter().zip(&cc.explicit).map(|(&l, m)| amplitudes[l].value * m[(e, a)]).sum()
     }
 
+    /// A kept drive's coupling at a sample's point (`kept_coupling` of one of the model's legs, `Model::legs`): every
+    /// leg's made once for the sample -- each drive folded onto an explicit state asks its pairs' legs' (units.rs
+    /// `Measured`).
+    pub(crate) fn kept_at(&self, at: &Measured, carrier: usize, e: usize, a: usize) -> C64 {
+        let place = |carrier: usize, x: usize, a: usize| (carrier * EXCITED + x) * GROUND + a;
+        let made = at.kept.get_or_init(|| {
+            let mut made = vec![C64::ZERO; self.carriers.len() * EXCITED * GROUND];
+            for (x, legs) in self.legs.iter().enumerate() {
+                for &(d, s) in legs {
+                    made[place(d, x, s)] = self.kept_coupling(d, GROUND + x, s, &at.amplitudes);
+                }
+            }
+            made
+        });
+        made[place(carrier, e - GROUND, a)]
+    }
+
+    /// A ground level's shift by its kept drives at a sample's point, at most: each one's coupling v, and v² across
+    /// its own denominator. Every ground state's made once for the sample.
+    pub(crate) fn lifts_at(&self, at: &Measured, s: usize) -> f64 {
+        let h = &at.energies[0];
+        at.lifts.get_or_init(|| {
+            std::array::from_fn(|s| {
+                let kept = self.legs.iter().enumerate().flat_map(|(x, of)| of.iter().filter(move |leg| leg.1 == s).map(move |leg| (GROUND + x, leg.0)));
+                kept.map(|(x, d)| {
+                    let v = self.kept_at(at, d, x, s).abs();
+                    v.min(v * v / C64::new(h[x] - h[s] - self.carriers[d].detuning, 0.5 * self.decay[(x - GROUND, x - GROUND)].re).abs())
+                })
+                .sum()
+            })
+        })[s]
+    }
+
     /// The error at a sample of the Raman pairs that a drive U (e ← b at ν) folded onto an explicit state e makes with
     /// the kept drives V_a into e (far.rs, # A fold onto an explicit state; SPEC §1.5): the pair's next order, as each of
     /// its two states reads it, `units::PAIR` m².
@@ -914,27 +965,18 @@ impl Model {
     ///   order of its denominator, `drive_motion`).
     pub(crate) fn pair_error(&self, component: Component, excited: usize, ground: usize, response: Option<C64>, at: &Measured) -> UnitError {
         let side = component.counter as usize;
-        let (from, nu, h) = (self.frequency(component), self.tones[component.frequency].nu[side], &at.energies[0]);
-        let legs: Vec<(usize, usize)> = self.legs[excited - GROUND].iter().copied().filter(|&(d, a)| self.apart(ground, &from, a, &self.carriers[d].beat)).collect();
+        let (nu, h) = (self.tones[component.frequency].nu[side], &at.energies[0]);
+        let legs = self.pair_legs(component, excited, ground);
         let mut error = UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 };
         if legs.is_empty() {
             return error;
         }
         let p = &at.populations;
-        // A ground level's shift by its kept drives at the point, at most: each one's coupling v, and v² across its
-        // own denominator.
-        let lift = |s: usize| -> f64 {
-            let kept = self.legs.iter().enumerate().flat_map(|(x, of)| of.iter().filter(move |leg| leg.1 == s).map(move |leg| (GROUND + x, leg.0)));
-            kept.map(|(x, d)| {
-                let v = self.kept_coupling(d, x, s, &at.amplitudes).abs();
-                v.min(v * v / C64::new(h[x] - h[s] - self.carriers[d].detuning, 0.5 * self.decay[(x - GROUND, x - GROUND)].re).abs())
-            })
-            .sum()
-        };
+        let lift = |s: usize| self.lifts_at(at, s);
         if let Some(r) = response {
-            for &(d, a) in &legs {
+            for &(d, a) in legs {
                 let apart = (h[ground] + nu - h[a] - self.carriers[d].detuning).abs() - lift(ground) - lift(a);
-                let s = super::units::PAIR * 0.5 * gate((r * self.kept_coupling(d, excited, a, &at.amplitudes)).abs(), apart.max(0.0), 0.0).saturation;
+                let s = super::units::PAIR * 0.5 * gate((r * self.kept_at(at, d, excited, a)).abs(), apart.max(0.0), 0.0).saturation;
                 error.parameter = error.parameter.max(s);
                 error.population += s * p[ground];
                 error.temperature += s * p[ground];
@@ -953,7 +995,7 @@ impl Model {
             // The kept lines through e: their nearest denominator, and their coupling's energy in the state.
             let gamma = self.decay[(excited - GROUND, excited - GROUND)].re;
             let own = (0..c.ground).map(|pa| C64::new(h[excited] - each(pa), 0.5 * gamma).abs()).fold(f64::INFINITY, f64::min);
-            let kept: f64 = (0..c.ground).map(|pa| self.legs[excited - GROUND].iter().filter(|leg| leg.1 == c.states[pa]).map(|&(d, a)| self.kept_coupling(d, excited, a, &at.amplitudes)).sum::<C64>().abs() * (p[excited] * p[c.states[pa]]).sqrt()).sum();
+            let kept: f64 = (0..c.ground).map(|pa| self.legs[excited - GROUND].iter().filter(|leg| leg.1 == c.states[pa]).map(|&(d, a)| self.kept_at(at, d, excited, a)).sum::<C64>().abs() * (p[excited] * p[c.states[pa]]).sqrt()).sum();
             let epsilon = gate(0.0, nearest, u.norm_sqr() * off).sweep / own;
             let held: f64 = p[..GROUND].iter().sum();
             let share = |of: f64, all: f64| if all > 0.0 { of / all } else { 0.0 };

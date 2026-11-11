@@ -8,6 +8,7 @@ functions, and R4_TW2's constants. Run the scripts from a scratch directory (the
   python <this dir>/pde.py x 450 30 256 64 0.1 exact             the master equation in the position representation
   python <this dir>/compare.py b,x free_1d,free_3d               T_z(t) against the quantum result
   python <this dir>/identity.py 0.068 2048 40                    the path identity from the engine's own states
+The two references of the set (expect/R4D_FORCE.json, judged; expect/R4D_TW2.json, reported): node ../r4d.mjs force | tz
 (`free_1d.json`: `diffusion free R4_TW2 1d 30 0.3125 8192 1000 10 free_1d.json`.)
 The transverse part (`diffusion account`: every change of an axis's kinetic energy booked to its part):
   diffusion account R4_TW2 1d|free:yz|free:xz|3d 30 0.3125 8192 1000 10 acc_<run>.json   (TEMPS=x,y,z: start temperatures)
@@ -34,12 +35,15 @@ def dump(kind, waist, z, kappa, tag):
     os.remove(out); os.remove(pts)
     return m
 
+# The uniform tweezer's residual variation over a wavelength (10⁻⁵ of the light shifts) is not a harmonic of the path: the
+# path's harmonics of 𝓛 below this share of the largest are left out, and the exact rates are uncertain by it.
+TOL = 1e-4
+
 def constant(kind, v, n=32, harmonics=None):
     """The uniform configuration at the constant velocity v: (model, Periodic)."""
     z = -LAM / 2 + LAM * np.arange(n) / n
     m = dump(kind, WIDE, z, v / HM, f'{kind}_v{v}')
-    # The uniform tweezer's residual variation over a wavelength (10⁻⁵ of the light shifts) is not a harmonic of the path.
-    return m, ref.Periodic(m, K * v, harmonics or max(16, int(6 / (K * v))), tol=1e-4)
+    return m, ref.Periodic(m, K * v, harmonics or max(16, int(6 / (K * v))), tol=TOL)
 
 def oscillation(kind, waist, amplitude, omega=OMEGA, centre=0.0, n=128, harmonics=48):
     """The oscillation z = centre + A cos(ωt): (model, Periodic, the weights −sin ωt and cos ωt at the samples)."""

@@ -41,11 +41,12 @@ function held(line,{mass,temperatureUK}=HELD){const m=structuredClone(line);m.mo
  * draw takes a few seconds. */
 export const R8_HELD={mass:100,temperatureUK:0.03};
 
-/** R4: the 1D quantum references' scenes (TW1, TW2; contract §3.5, the 1D GMW engine's LONGREF_TW*.json) rebuilt from
+/** R4: the 1D quantum references' scenes (TW1, TW2; contract §3.5, the 1D GMW engine's LONGREF_TW*.json, kept in
+ * refs/data) rebuilt from
  * their own specification: the app's 1D PGC example (a lin⊥lin D2 cooling pair along ±z, E ∥ x on +z and ∥ y on −z,
  * and a repump pair alike) with the 852 nm tweezer (3.5 mW, waist 1 µm) along +x, π on the quantization axis z (B = 0),
  * |2,+2⟩ at 30 µK. Three ms for TW1 (heats), one for TW2 (cools: its T leaves the validated regime after ~500 µs). */
-export const TW_REFERENCES='C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri--claude-spares-spare-cmNOsa/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/pgc1d/tweezer/refs';
+export const TW_REFERENCES=path.join(here,'data');
 async function twScene(name,durationUs){
   const spec=read(`${TW_REFERENCES}/LONGREF_${name}.json`).spec;
   const s=await base({name:`R4 西西弗斯 ${name}（1D 量子参照的场景）`,fieldG:spec.fieldG,fieldAxis:spec.fieldAxis,initialStateId:spec.initialStateId,temperatureUK:30,durationUs,samples:durationUs/10+1});

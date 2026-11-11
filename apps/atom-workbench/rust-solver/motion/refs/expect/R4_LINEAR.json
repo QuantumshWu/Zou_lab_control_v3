@@ -1,7 +1,7 @@
 {
  "id": "R4_LINEAR",
  "reference": "R4",
- "title": "R4 西西弗斯标度律：T(4I) − 3T(2I) + 2T(I) = 0（lin⊥lin 稳态 T_z 对光强线性）",
+ "title": "R4 西西弗斯标度律：T(4I) − 3T(2I) + 2T(I) = 0（lin⊥lin 稳态 T_z 对光强线性；不检验斜率与 T 本身）",
  "kind": "relation",
  "members": [
   {
@@ -45,12 +45,10 @@
  "scale": 2,
  "value": 0,
  "u": {
-  "relative": 0.07526369984292963
+  "relative": 0.07526277930452788
  },
- "target": {
-  "relative": 0.1
- },
- "derivation": "k_BT = c·ħΩ²/|δ| + O(E_rec) at |δ| ≫ Γ and low saturation: at one detuning T is linear in the intensity, so T(4I) − 3T(2I) + 2T(I) = 0 for the steady states of three scenes that differ in the intensity alone. Judged against 10 % of T(4I) once the requirements hold in all three results.",
+ "target": null,
+ "derivation": "k_BT = c·ħΩ²/|δ| + O(E_rec) at |δ| ≫ Γ and low saturation: at one detuning T is linear in the intensity, so T(4I) − 3T(2I) + 2T(I) = 0 for the steady states of three scenes that differ in the intensity alone. Tested: that the steady T_z rises with I and is an affine function of it, the second difference zero within z·√(SE² + u²) (no user's target: D is no temperature). Not tested: the slope c, the offset, T itself -- every T = a + bI with b > 0 passes, so does a deficit of T that keeps it affine in I.",
  "conditions": [
   {
    "what": "δ from the cycle’s line in the trap / Γ",
@@ -114,12 +112,12 @@
   },
   {
    "what": "(ω_z/Ω_osc)² at I: the tweezer against the oscillation in the light’s wells",
-   "value": 0.014770895050014662,
+   "value": 0.014769974511612905,
    "limit": "≪ 1"
   },
   {
-   "what": "4ħω_z/k_B (µK): T̄ of every member must stay above it",
-   "value": 3.894422896374573
+   "what": "ħω_z/k_B (µK)",
+   "value": 0.9735753855319553
   },
   {
    "what": "κ = δ_LS(0)/U₀ (the line’s shift over the cloud is κk_BT)",
@@ -127,18 +125,19 @@
   },
   {
    "what": "u from the scenes (relative to T(4I))",
-   "value": 0.07526369984292963
+   "value": 0.07526277930452788
   }
  ],
  "requirements": [
-  "classical: k_BT ≥ 4ħω on every axis over the window, in every member",
-  "steady: T̄ over the window’s two halves equal within twice their standard errors, in every member"
+  "classical: every output of the window is one the result calls classical, in every member",
+  "steady: T̄ over the window’s two halves equal within twice their standard errors, in every member",
+  "a rise: T̄(4I) − T̄(I) beyond twice its standard error (a fall beyond it fails)"
  ],
  "info": {
   "k": 8.052823800669486,
   "kappa": 1.1059461375993092,
   "deltaRadPerUs": -762.3399997323784,
-  "trapZ": 0.12746479157431745,
+  "trapZ": 0.12746081963953265,
   "hbarOverMass": 0.0007307375228700509,
   "modulationUK": [
    39.140655282501626,
