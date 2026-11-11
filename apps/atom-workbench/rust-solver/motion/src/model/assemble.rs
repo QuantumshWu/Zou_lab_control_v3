@@ -1614,7 +1614,7 @@ impl Model {
             if key.is_some() && q.key == key {
                 return 0.0;
             }
-            self.quartic_made(plan, fourth, table, point, laid, &mut q);
+            self.quartic_made(plan, fourth, table, None, point, laid, &mut q);
             q.key = key;
             q.work
         })
@@ -1630,17 +1630,19 @@ impl Model {
     /// term and its adjoint (`Term::weight`) -- the shifts' and, where the other is left out, their adjoints; the Doppler
     /// partners' where the absorbed component takes the shifts, and the adjoints of those where the emitted one does;
     /// each with its slopes along the point's directions and the components' gradients. X (and L where it is not Γ X)
-    /// are their pair forms' sums, a table's interpolant with its slopes or the exact elimination's.
-    fn quartic_made(&self, plan: &Plan, fourth: &Fourth, table: Option<&NearTable>, point: &mut Site, laid: bool, q: &mut Quartic) {
+    /// are their pair forms' sums: a table's interpolant with its slopes, the forms `given` (those the point's were
+    /// laid from), or the exact elimination's.
+    fn quartic_made(&self, plan: &Plan, fourth: &Fourth, table: Option<&NearTable>, given: Option<&NearValues>, point: &mut Site, laid: bool, q: &mut Quartic) {
         let (m, n, pairs) = (fourth.m, fourth.n, plan.near.pairs.len());
         let (size, padded) = (n * n, plan.padded);
         let Quartic { data, work, values, slopes, sums, laid: lanes, .. } = q;
         *work = 0.0;
         point.select(plan);
-        // The exact elimination's forms where no table holds them.
-        let exact = table.is_none().then(|| self.near_exact(plan, &point.beams, 1, &self.coherent_dressing()));
+        // The exact elimination's forms where no table holds them and none are given.
+        let made = (table.is_none() && given.is_none()).then(|| self.near_exact(plan, &point.beams, 1, &self.coherent_dressing()));
+        let exact = given.or(made.as_ref());
         if !laid {
-            *work += match (table, &exact) {
+            *work += match (table, exact) {
                 (Some(table), _) => self.near_point(table, point) + plan.values,
                 (None, Some(near)) => {
                     point.formed(plan, Some(near));
@@ -1709,7 +1711,7 @@ impl Model {
         let (first, count) = (2 * pairs, forms * pairs);
         sized(values, 2 * count);
         sized(slopes, dn * 2 * count);
-        match (table, &exact) {
+        match (table, exact) {
             (Some(table), _) => {
                 table.table.eval_range(&point.coordinates, 2 * first, values, Some(slopes));
                 *work += (4usize.pow(dn as u32) * (1 + dn) * 2 * count) as f64 / crate::decide::COMPLEX;
@@ -1717,7 +1719,7 @@ impl Model {
             (None, Some(near)) => {
                 for e in 0..count {
                     (values[2 * e], values[2 * e + 1]) = (near.data[first + e].re, near.data[first + e].im);
-                    for f in 0..3 {
+                    for f in 0..dn {
                         let z = near.data[(1 + f) * near.len + first + e];
                         (slopes[(f * count + e) * 2], slopes[(f * count + e) * 2 + 1]) = (z.re, z.im);
                     }
@@ -1792,10 +1794,20 @@ impl Model {
 
     /// The fourth order's part of a middle (module documentation, # The fourth order) into the point's `quartic`, from
     /// the point's matrices (`quartic`) and its generator's values: H⁽⁴⁾ with its gradient, and the decay's change. With
-    /// the complex multiply-adds that made it (the matrices' where this point made them).
-    fn fourth_site(&self, plan: &Plan, fourth: &Fourth, table: Option<&NearTable>, r: [f64; 3], point: &mut Site) -> f64 {
+    /// the complex multiply-adds that made it (the matrices' where this point made them). The matrices are the position
+    /// `at`'s with the table's forms or the exact elimination's (`quartic`), or made of the forms `given`, the ones the
+    /// point's were laid from.
+    fn fourth_site(&self, plan: &Plan, fourth: &Fourth, table: Option<&NearTable>, given: Option<&NearValues>, at: Option<[f64; 3]>, point: &mut Site) -> f64 {
         let (n, size) = (fourth.n, fourth.n * fourth.n);
-        let matrices = self.quartic(plan, fourth, table, Some(r), point, true);
+        let matrices = match given {
+            None => self.quartic(plan, fourth, table, at, point, true),
+            Some(_) => QUARTIC.with(|kept| {
+                let mut q = kept.borrow_mut();
+                self.quartic_made(plan, fourth, None, given, point, true, &mut q);
+                q.key = None;
+                q.work
+            }),
+        };
         let Site { amplitudes, generator, quartic, made, .. } = point;
         sized(quartic, 4 * size);
         made.clear();
@@ -1964,19 +1976,26 @@ impl Model {
                 near.work + plan.values
             }
         };
-        let work = work + plan.fourth.as_ref().map_or(0.0, |fourth| self.fourth_site(plan, fourth, table, r, &mut point));
+        let work = work + plan.fourth.as_ref().map_or(0.0, |fourth| self.fourth_site(plan, fourth, table, None, Some(r), &mut point));
         Middle { model: self, plan: plan.clone(), t, point, work }
     }
 
-    /// The same from every beam's amplitude and the near forms there (the Hermitian ones to first order; `Site::formed`).
-    /// Without near forms (None): the terms that hold none.
+    /// The same from every beam's amplitude and the near forms there (the Hermitian ones to first order; `Site::formed`),
+    /// the fourth order's part made of the same forms. Without near forms (None): the terms that hold none, and no
+    /// fourth order.
     pub(crate) fn middle_of(&self, plan: &Arc<Plan>, t: f64, amplitudes: &[Amplitude], near: Option<&NearValues>) -> Middle<'_> {
         let mut point = Held::<Site>::take();
         point.beams.clear();
         point.beams.extend_from_slice(amplitudes);
         point.select(plan);
         point.formed(plan, near);
-        Middle { model: self, plan: plan.clone(), t, point, work: near.map_or(0.0, |n| n.work + plan.values) }
+        // A thread's spare point holds its last middle's: the fourth order's part is this point's, or none.
+        point.quartic.clear();
+        let mut work = near.map_or(0.0, |n| n.work + plan.values);
+        if let (Some(fourth), Some(_)) = (plan.fourth.as_ref(), near) {
+            work += self.fourth_site(plan, fourth, None, near, None, &mut point);
+        }
+        Middle { model: self, plan: plan.clone(), t, point, work }
     }
 
     /// The one generator assembly (module documentation): a cluster's generator at a position and a time under a light set, the

@@ -1308,6 +1308,60 @@ mod tests {
         }
     }
 
+    /// A middle made of given near forms carries the fourth order's part made of the same forms (assemble.rs
+    /// `Model::middle_of`): on the lin-perp-lin scene with the cluster of F=2 m=−2 at the fourth order, at points along a
+    /// fringe and off the axis, under the running lights and without the trap's, its generator on a state is the point's
+    /// own middle's (the exact elimination's forms both) to their rounding, and differs from the second order's by the
+    /// fourth order's size. So a table's error read against the exact elimination (tabulate.rs `Model::table_reads`) is
+    /// the table's: of a grid with no axis -- the forms without the trap's light do not vary -- nothing, as it is at the
+    /// second order; of one with axes, its interpolation's.
+    #[test]
+    fn a_middle_of_given_forms_carries_the_fourth_order() {
+        let (closed, centre) = closed("R4_LIN_2");
+        let second = closed.rekept(&closed.kept).unwrap();
+        let fourth = closed.rekept(&[closed.kept.clone(), vec![Unit::Second { ground: 3 }]].concat()).unwrap();
+        let cluster = fourth.membership[3];
+        assert!(fourth.fourth[cluster].is_some() && second.fourth.iter().all(Option::is_none));
+        let running = fourth.running();
+        let mut untrapped = running.clone();
+        untrapped.0[fourth.light.trap] = crate::model::Lit::Off;
+        let n = fourth.clusters[cluster].states.len();
+        let psi: Vec<C64> = (0..n).map(|x| C64::new(1.0 / (1.0 + x as f64), 0.3 * x as f64)).collect();
+        let mut samples = vec![];
+        for offset in [[0.0, 0.0, 0.0], [0.0, 0.0, 0.07], [0.3, 0.0, 0.19], [0.0, 0.4, 0.31]] {
+            let r: [f64; 3] = std::array::from_fn(|i| centre[i] + offset[i]);
+            let sample = Sample { cluster, at: Point { r, kappa: [3.0, -2.0, 5.0], t: 0.0 }, psi: psi.clone() };
+            for lights in [&running, &untrapped] {
+                let amplitudes = fourth.light.amplitudes(r);
+                let plan = fourth.plan(cluster, lights);
+                let own = fourth.action(&sample, &fourth.middle(&plan, r, 0.0, None));
+                let given = fourth.action(&sample, &fourth.middle_of(&plan, 0.0, &amplitudes, Some(&fourth.near_exact(&plan, &amplitudes, 1, &fourth.coherent_dressing()))));
+                let lower = second.action(&sample, &second.middle(&second.plan(cluster, lights), r, 0.0, None));
+                let size = |x: &[C64]| crate::linalg::norm_sqr(x).sqrt();
+                let moved = |x: &[C64], y: &[C64]| size(&x.iter().zip(y).map(|(a, b)| *a - *b).collect::<Vec<_>>());
+                assert!(moved(&own, &given) <= 1e-12 * size(&own), "at {r:?}: a middle of given forms {} from the point's own of {}", moved(&own, &given), size(&own));
+                assert!(moved(&own, &lower) > 1e-4 * size(&own), "at {r:?}: the fourth order's part is in the middle: {} of {}", moved(&own, &lower), size(&own));
+            }
+            samples.push(sample);
+        }
+        let reference: [f64; GROUND] = std::array::from_fn(|s| if s == 7 { 1.0 } else { 0.0 });
+        let trap = fourth.trap(&reference, &fourth.prepared()).unwrap();
+        let reach = fourth.reach(&trap, &reference, 30.0, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
+        let tables = fourth.tabulate(&reach, 1_000_000);
+        let reads = fourth.table_reads(&tables, &samples);
+        let mut read = 0;
+        for (table, of) in tables.tables.iter().zip(&reads) {
+            if table.layout.cluster != cluster {
+                continue;
+            }
+            let whole = of.whole.iter().map(|e| e.population.max(e.temperature)).fold(0.0, f64::max);
+            eprintln!("a table of {} axes: its whole error at the samples {whole:.2e}", table.axes());
+            assert!(whole <= if table.axes() == 0 { 1e-12 } else { 1e-5 }, "a table of {} axes errs by {whole}", table.axes());
+            read += 1;
+        }
+        assert_eq!(read, 2, "the cluster's tables: under the running lights, and without the trap's");
+    }
+
     /// What the model's part of a step costs at the second order and at the fourth (measured; `SCENE`, default R4_LIN_1):
     /// per cluster of the closed model whose fold has a fourth order, from the two models' tables, one middle at a
     /// thermal point, its path, sixteen generators, eight forces, three tones' forms and the state's scattering -- a
