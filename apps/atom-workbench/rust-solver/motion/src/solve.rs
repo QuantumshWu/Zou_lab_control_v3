@@ -155,11 +155,15 @@
 //! The decisions take counts, never the wall clock, so a request gives the same result on any machine. The wall clock only
 //! times the messages (`Messages`): one clock for the whole solve, set at every message; whenever `CHECKPOINT` has passed
 //! since the last one, the trajectories that are running (`run_groups`: the scout's, the pilot's, a batch's) send a
-//! complete result of the groups finished so far in their order (a prefix: whole groups chosen by their number alone).
-//! A result is passed on where it rests on two groups at least (the jackknife's least for a spread) and on no fewer
-//! trajectories than the attempt's last one -- a pilot's first groups at a finer step are no better than the result
-//! before them --; else the last result goes out again, and nothing where the solve has sent none yet. Between the
-//! product's batches each total is a message. What runs no trajectories sends nothing and looks at no clock: the
+//! complete result of what the attempt holds at its step and of the groups finished so far in their order (a prefix:
+//! groups chosen by their number alone). A result is passed on where it rests on two groups at least (the jackknife's
+//! least for a spread: groups, of however many members each -- the scout's have one) and on no fewer trajectories than
+//! the attempt's last one -- a pilot's first groups at a finer step are no better than the result before them --; else
+//! the last result goes out again, and nothing where the solve has sent none yet: the message then stays due (the clock
+//! is set by a message, not by a look) and goes out with the first group that makes a result pass. Between the
+//! product's batches each total is a message: in a solve shorter than `CHECKPOINT` the first message is the product's
+//! first total, after the pilot (SPEC §9). A message is made by loops that run on the trajectories' own pool, between
+//! two trajectories of a thread (`run_groups`). What runs no trajectories sends nothing and looks at no clock: the
 //! model's construction and its gates, the tables and their refinement, the units' reads at the states, the pricing
 //! of keeps, T(0)'s quadrature.
 use crate::adapt;
@@ -169,7 +173,7 @@ use crate::estimate::{between, draws_for, half_window, occupation, spread, summa
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, span, when, Account, Ledger};
 use crate::linalg::V3;
-use crate::model::{Envelope, Lights, Model, Run, Sample, Trap, Unit, UnitError, GROUND};
+use crate::model::{Envelope, Lights, Model, Run, Sample, Trap, Unit, GROUND};
 use crate::request::STATES;
 use crate::step::{Dynamics, Scratch, Segment, Trajectory};
 use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, ORDER, STEP_SHARE, TEMPERATURE_TARGET};
@@ -264,8 +268,8 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     let (mut priced, mut barred): (Option<(Vec<Unit>, f64, f64)>, Vec<Unit>) = (None, vec![]);
     let mut messages = Messages { send: checkpoint, clock: Instant::now(), last: None, least: 0 };
     loop {
-        // An attempt's results improve on its own last one, from two groups on (module documentation, # Checkpoints).
-        messages.least = 2 * GROUP;
+        // An attempt's results improve on its own last one (module documentation, # Checkpoints).
+        messages.least = 0;
         match attempt(request, &light, &mut kept, reach, step, priced.as_ref().map(|p| (p.1, p.2)), &barred, &mut messages)? {
             Attempt::Grow(t, tau) => (reach, step) = (t, Some(tau)),
             Attempt::Keep(u, tau, share) => {
@@ -294,24 +298,29 @@ struct Messages<'a> {
     least: u64,
 }
 impl Messages<'_> {
-    /// A result of the solve so far, with the wall time left (ms) where the run's pace gives one: sent where it improves
-    /// on the attempt's last one, else the last result again.
-    fn result(&mut self, s: &Solution, remaining: Option<f64>) {
-        if s.trajectories >= self.least {
-            self.least = s.trajectories;
-            (self.send)(s, remaining);
-            self.last = Some(s.clone());
+    /// A result of the solve so far, of `groups` groups and `trajectories` trajectories, with the wall time left (ms)
+    /// where the run's pace gives one: made (`made`) and sent where it rests on two groups at least -- the jackknife's
+    /// least for a spread, whatever the members a group has so far (the scout's groups have one) -- and improves on the
+    /// attempt's last one, else the last result again. A result that is not sent is not made: with no group in there is
+    /// none to make.
+    fn result(&mut self, groups: usize, trajectories: u64, remaining: Option<f64>, made: impl FnOnce() -> Solution) {
+        if groups >= 2 && trajectories >= self.least {
+            let s = made();
+            self.least = trajectories;
+            (self.send)(&s, remaining);
+            self.last = Some(s);
             self.clock = Instant::now();
         } else {
             self.again();
         }
     }
-    /// Nothing new: the last result again; with none yet there is nothing to send, and the next look is a full interval on.
+    /// Nothing new: the last result again. With none yet there is nothing to send and the clock stands: the message
+    /// stays due, and goes out with the first result that passes (`run_groups`).
     fn again(&mut self) {
         if let Some(s) = &self.last {
             (self.send)(s, None);
+            self.clock = Instant::now();
         }
-        self.clock = Instant::now();
     }
     /// The time until the next message is due.
     fn due(&self) -> Duration {
@@ -612,12 +621,13 @@ fn pooled(parts: &[&Part], scales: &Scales) -> (Vec<Estimate>, Vec<Vec<(V3, V3)>
 }
 
 /// A message while the pilot's members come in: the result of what is in so far -- the parts in hand and those of the
-/// members now running, each as a group of its own.
+/// members now running, each as a group of its own (the last result again where they are fewer than two groups,
+/// `Messages::result`).
 fn so_far(context: &Context, have: &[Part], more: &[&Part], messages: &mut Messages) {
     let all: Vec<&Part> = have.iter().chain(more.iter().copied()).collect();
     let (e, l, c) = pooled(&all, &context.scales);
     let n = e.first().map_or(0., |x| x.trajectories + x.failed) as u64;
-    messages.result(&assemble(context, &e, &l, &c, n), None);
+    messages.result(all.len(), n, None, || assemble(context, &e, &l, &c, n));
 }
 
 /// The reach's falsifier (SPEC §1.8; decide.rs: a booked bound that a read can only refute): the pilot's T where it has
@@ -644,35 +654,40 @@ fn classical(temperature: f64, frequency: f64) -> bool {
 /// wherever a group has one there --, with each state's output and group, and per state the units' errors in their
 /// order. A state `known` already holds -- the same trajectory at the same output and step, the scout's inside the pilot
 /// -- keeps the errors read there: a unit's error is a function of the state.
+///
+/// The errors are one table (`Measured::errors`): the states' rows one after another, a row the units' errors on the
+/// populations and on T, each row written on the pool where it is read. One block of memory, not one a state: at a
+/// thousand outputs the states are ten thousand, and that many blocks took the calling thread 0.2 to 0.6 s to free.
 struct Sampled {
-    samples: Vec<State>,
+    /// Each state's trajectory and step.
+    of: Vec<(u64, f64)>,
     at: Vec<usize>,
     from: Vec<usize>,
-    errors: Vec<Vec<UnitError>>,
+    errors: Vec<[f64; 2]>,
 }
-fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Tables, parts: &[&Part], known: Option<&Sampled>) -> Sampled {
-    let mut samples: Vec<State> = vec![];
+fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Tables, parts: &[&Part], known: Option<Sampled>) -> Sampled {
+    let mut states: Vec<&State> = vec![];
     let (mut at, mut from) = (vec![], vec![]);
     for (g, p) in parts.iter().enumerate() {
         for (k, s) in p.samples.iter().enumerate() {
             if let Some(state) = s.iter().min_by_key(|x| x.index) {
-                samples.push(state.clone());
+                states.push(state);
                 at.push(k);
                 from.push(g);
             }
         }
     }
+    let key = |index: u64, at: usize, tau: f64| (index, at, tau.to_bits());
     let read: std::collections::HashMap<(u64, usize, u64), usize> =
-        known.map_or_else(Default::default, |k| k.samples.iter().zip(&k.at).enumerate().map(|(j, (s, &at))| ((s.index, at, s.tau.to_bits()), j)).collect());
-    let errors: Vec<Vec<UnitError>> = samples
-        .par_iter()
-        .zip(&at)
-        .map(|(s, &k)| match (known, read.get(&(s.index, k, s.tau.to_bits()))) {
-            (Some(known), Some(&j)) => known.errors[j].clone(),
-            _ => model.errors_at(units, &s.sample, Some(tables)),
-        })
-        .collect();
-    Sampled { samples, at, from, errors }
+        known.iter().flat_map(|k| k.of.iter().zip(&k.at).enumerate().map(|(j, (&(index, tau), &at))| (key(index, at, tau), j))).collect();
+    let width = units.len();
+    let mut errors = vec![[0.; 2]; states.len() * width];
+    // A state's row (the table is empty where no unit is read).
+    errors.par_chunks_mut(width.max(1)).zip(&states).zip(&at).for_each(|((row, state), &k)| match (&known, read.get(&key(state.index, k, state.tau))) {
+        (Some(known), Some(&j)) => row.copy_from_slice(&known.errors[j * width..][..width]),
+        _ => row.iter_mut().zip(model.errors_at(units, &state.sample, Some(tables))).for_each(|(row, e)| *row = [e.population, e.temperature]),
+    });
+    Sampled { of: states.iter().map(|s| (s.index, s.tau)).collect(), at, from, errors }
 }
 
 /// How a folded unit's error is booked (module documentation, # The model): read at the pilot's states -- its place
@@ -791,12 +806,13 @@ fn attempt(
     let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).expect("a validated request's initial state holds a ground state");
     let reference = alone(initial[chief].0);
     // The model: every unit whose fold does not exist over the reach kept (SPEC §1.5), closed again until none fails (a
-    // model lists only what it folds, model.rs `units`).
+    // model lists only what it folds, model.rs `units`). A model's units ask nothing of its trap and reach: the two are
+    // made side by side on the pool.
     let (model, trap, judged, units, gates) = loop {
         let model = Model::new(request, light, kept)?;
-        let trap = model.trap(&reference, &model.prepared())?;
-        let judged = model.reach(&trap, &reference, reach, unseen(MOST_TRAJECTORIES as f64));
-        let units = model.units();
+        let reached = || model.trap(&reference, &model.prepared()).map(|trap| (model.reach(&trap, &reference, reach, unseen(MOST_TRAJECTORIES as f64)), trap));
+        let (reached, units) = rayon::join(reached, || model.units());
+        let (judged, trap) = reached?;
         let gates = model.gates(&units, &judged);
         let failing: Vec<Unit> = units.iter().zip(&gates).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
         if failing.is_empty() {
@@ -811,20 +827,25 @@ fn attempt(
     // windows): the trap light's potential with the other lights' phase-averaged shifts at the reference state
     // (`Model::reported`). Where it has no minimum the descent reaches -- the atoms are not held by the light they run in: a
     // mathematical object that does not exist, not a kind of scene -- the prepared trap's is reported, and flagged.
-    let (report, unheld) = match model.trap(&reference, &model.reported()) {
+    //
+    // What the reach the model was judged over leaves out of the initial ensemble (model/reach.rs `Model::left_out`): of
+    // the atoms and of their kinetic energy, by the ensemble's quadrature of its own density -- no atom is drawn --, a
+    // level of it with no more evaluations of the potential than the most trajectories a solve runs have initial atoms.
+    //
+    // The reported trap, what the reach leaves out and the entries the first rung reads (`admissible`) ask nothing of
+    // one another: the three are made side by side on the pool.
+    let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, light, alone(s))).collect::<Result<_, _>>()?;
+    let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm)?;
+    let (reported, (unsampled, entries)) =
+        rayon::join(|| model.trap(&reference, &model.reported()), || rayon::join(|| model.left_out(&judged, &ensemble, MOST_TRAJECTORIES), || model.sampled(&model.running())));
+    let (report, unheld) = match reported {
         Ok(t) => (t, false),
         Err(_) => (trap.clone(), true),
     };
     let scales = Scales { hbar_over_mass: hm, frequencies: report.lab };
     let plan = Plan::new(&request.times_us, report.lab);
     let outputs = plan.times.len();
-    let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, light, alone(s))).collect::<Result<_, _>>()?;
-    let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm)?;
     let row: [f64; STATES] = std::array::from_fn(|s| request.initial_density[(s, s)].re);
-    // What the reach the model was judged over leaves out of the initial ensemble (model/reach.rs `Model::left_out`): of
-    // the atoms and of their kinetic energy, by the ensemble's quadrature of its own density -- no atom is drawn --, a
-    // level of it with no more evaluations of the potential than the most trajectories a solve runs have initial atoms.
-    let unsampled = model.left_out(&judged, &ensemble, MOST_TRAJECTORIES);
     let depth = ensemble.depths()[chief];
     let mut ledger = Ledger::default();
     ledger.note = Some(format!("初始系综：各初态在自己的准备阱中的束缚原子（降低的等温分布乘每轴谐振子的 Wigner 因子，T = {} μK），参考态阱深 {:.1} k_BT", request.temperature_uk, depth));
@@ -842,7 +863,7 @@ fn attempt(
     let (momentum, start) = exact(&ensemble.kinetic(0));
     // The ladder's first rung over the reach the model is judged over: an attempt that begins at the step the one
     // before stood at begins no higher than its own first rung (a reach that has grown lowers it).
-    let first_rung = first_rung(plan.end, trap.frequencies.iter().copied().fold(0., f64::max), &model.sampled(&model.running()), judged.speed, typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3.))
+    let first_rung = first_rung(plan.end, trap.frequencies.iter().copied().fold(0., f64::max), &entries, judged.speed, typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3.))
         .ok_or_else(|| format!("时间步长：每条轨迹至多 {MOST_STEPS} 步之内没有可用的步长（阱的共振或光场沿原子路径的变化要求更小的步长；或者阱频、原子速率不是有限数）"))?;
     // What the reach's falsifier compares the T read with: the largest kinetic temperature along an axis of the
     // ensemble the reach was made for (model.rs `Reach::kinetic_uk`: T_r where the trap is classical, the zero point's
@@ -927,7 +948,7 @@ fn attempt(
         // The model's errors at the pilot's states (SPEC §5.2): each folded unit's per output, the held atoms' mean over
         // the first member of every group -- one a group keeps every group in the mean's spread, and a unit's error is a
         // function of the state, read as well on eleven states an output as on eighty-eight.
-        let Sampled { at, from, errors, .. } = sampled(&model, &reading, &tables, &pilot, Some(&scouted));
+        let Sampled { at, from, errors, .. } = sampled(&model, &reading, &tables, &pilot, Some(scouted));
         let measured = Measured { errors: &errors, output: &at, group: &from, booked: &booking };
         let means = measured.means(outputs, None);
         context.fixed.model = model_error(&sums(&means, unsampled), unsampled);
@@ -1000,8 +1021,9 @@ fn attempt(
     };
 
     // The product (module documentation, # Stopping): on from the pilot's trajectories at the run's step, the run's
-    // first; the pilot's companions have done their part.
+    // first; the pilot's companions have done their part, and its states have been read.
     let mut parts = levels.fine;
+    forget(&mut parts);
     parts.append(&mut levels.further[0]);
     let (e, l, c) = product(&run, &ensemble, &context, &mut parts, &numbers, messages);
     // A point of the prepared potential below the bottom the ensemble was drawn about (ensemble.rs, # Its draw).
@@ -1040,10 +1062,30 @@ impl Levels {
     }
 }
 
-/// The members `members` of the groups `numbers` at the step `tau`, each trajectory through the plan (`run_groups`).
+/// The members `members` of the groups `numbers` at the step `tau`, each trajectory through the plan: a hand-out of
+/// its own (`run_groups`).
 #[allow(clippy::too_many_arguments)]
 fn level(run: &Run, ensemble: &Ensemble, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Part> {
-    run_groups(numbers, members, Shape::of(plan, keep), &|i| trajectory(run, ensemble, tau, plan, keep, i), messages, progress)
+    let hand = Hand { groups: numbers, members, shape: Shape::of(plan, keep), record: &|i| trajectory(run, ensemble, tau, plan, keep, i) };
+    run_groups(&[hand], messages, progress).pop().expect("the hand-out's one level")
+}
+
+/// The members `members` of the groups `numbers` at the step `tau` (their states kept where `keep`) and at twice it,
+/// the two levels of a check (module documentation, # The step): one hand-out (`run_groups`) -- a check runs both
+/// whatever either shows --, the finer level first, whose trajectories take twice the steps. `progress` takes the finer
+/// level's groups.
+#[allow(clippy::too_many_arguments)]
+fn pair(run: &Run, ensemble: &Ensemble, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> [Vec<Part>; 2] {
+    let fine = Hand { groups: numbers, members: members.clone(), shape: Shape::of(plan, keep), record: &|i| trajectory(run, ensemble, tau, plan, keep, i) };
+    let coarse = Hand { groups: numbers, members, shape: Shape::of(plan, false), record: &|i| trajectory(run, ensemble, 2. * tau, plan, false, i) };
+    let mut levels = run_groups(&[fine, coarse], messages, progress).into_iter();
+    std::array::from_fn(|_| levels.next().expect("the hand-out's two levels"))
+}
+
+/// The states kept in some groups' parts freed, on the pool, a group's by itself: a state is a block of memory of its
+/// own, and a pilot keeps one for every trajectory at every output.
+fn forget(parts: &mut [Part]) {
+    parts.par_iter_mut().for_each(|part| part.samples = vec![]);
 }
 
 /// Some groups' further members joined to those a level holds of them (all of them where it holds none).
@@ -1066,7 +1108,7 @@ enum Settled {
     Dearer,
 }
 
-/// The members `members` of the pilot's groups `numbers` at both levels, joined to those the levels hold, and the
+/// The members `members` of the pilot's groups `numbers` at both levels (`pair`), joined to those the levels hold, and the
 /// step's check (module documentation, # The step), read again at every rung and after every batch of pairs:
 /// - some mean square clearly beyond the square of the step's share among all the looks (`screen`): the step is halved
 ///   -- the level at τ becomes the companion, and the members so far run anew at τ/2 alone. The finer level keeps its
@@ -1082,10 +1124,9 @@ enum Settled {
 /// is undone.
 #[allow(clippy::too_many_arguments)]
 fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, dearer: &dyn Fn(f64) -> bool, messages: &mut Messages) -> Settled {
-    let more = level(run, ensemble, &context.plan, context.tau, numbers, members.clone(), true, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
-    absorb(&mut levels.fine, more);
-    let more = level(run, ensemble, &context.plan, 2. * context.tau, numbers, members.clone(), false, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages));
-    absorb(&mut levels.coarse, more);
+    let [fine, coarse] = pair(run, ensemble, &context.plan, context.tau, numbers, members.clone(), true, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
+    absorb(&mut levels.fine, fine);
+    absorb(&mut levels.coarse, coarse);
     // The read the rung inherits from the rung above.
     let mut inherited: Option<Between> = None;
     loop {
@@ -1104,13 +1145,11 @@ fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Le
             let product = looks(&estimates, &context.fixed, &context.step).into_iter().filter(Look::fits).map(|l| l.need()).fold(0., f64::max).min(MOST_TRAJECTORIES as f64);
             match remedy(unseen, have, product, pilot_size(), !lowest) {
                 Remedy::Pairs(pairs) => {
-                    let tau = context.tau;
                     let next: Vec<u64> = (have / GROUP..pairs / GROUP).collect();
-                    let shown = |levels: &Levels, prefix: &[&Part], messages: &mut Messages| so_far(context, &levels.fine, &levels.further[0].iter().chain(prefix.iter().copied()).collect::<Vec<_>>(), messages);
-                    let more = level(run, ensemble, &context.plan, tau, &next, 0..GROUP, false, messages, &mut |prefix, messages| shown(levels, prefix, messages));
-                    levels.further[0].extend(more);
-                    let more = level(run, ensemble, &context.plan, 2. * tau, &next, 0..GROUP, false, messages, &mut |_, messages| shown(levels, &[], messages));
-                    levels.further[1].extend(more);
+                    let more = pair(run, ensemble, &context.plan, context.tau, &next, 0..GROUP, false, messages, &mut |prefix, messages| {
+                        so_far(context, &levels.fine, &levels.further[0].iter().chain(prefix.iter().copied()).collect::<Vec<_>>(), messages)
+                    });
+                    levels.further.iter_mut().zip(more).for_each(|(further, more)| further.extend(more));
                     continue;
                 }
                 Remedy::Rung => {}
@@ -1124,6 +1163,8 @@ fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Le
         }
         inherited = Some(lowered(&held));
         context.tau = below;
+        // The level at the step is the companion from here on: its states are read no more.
+        forget(&mut levels.fine);
         let finer = level(run, ensemble, &context.plan, below, numbers, 0..members.end, true, messages, &mut |prefix, messages| so_far(context, &[], prefix, messages));
         levels.coarse = std::mem::replace(&mut levels.fine, finer);
         levels.further = Default::default();
@@ -1167,13 +1208,13 @@ fn product(run: &Run, ensemble: &Ensemble, context: &Context, parts: &mut Vec<Pa
             return (e, l, c);
         }
         let want = batch(chased.iter().map(Look::need).fold(0., f64::max), n);
-        messages.result(&assemble(context, &e, &l, &c, n), left(n, want));
+        messages.result(all.len(), n, left(n, want), || assemble(context, &e, &l, &c, n));
         let numbers: Vec<u64> = (n / GROUP..want / GROUP).map(number).collect();
         let new = level(run, ensemble, &context.plan, context.tau, &numbers, 0..GROUP, false, messages, &mut |prefix, messages| {
             let all: Vec<&Part> = parts.iter().chain(prefix.iter().copied()).collect();
             let done = all.len() as u64 * GROUP;
             let (e, l, c) = pooled(&all, &context.scales);
-            messages.result(&assemble(context, &e, &l, &c, done), left(done, want));
+            messages.result(all.len(), done, left(done, want), || assemble(context, &e, &l, &c, done));
         });
         parts.extend(new);
     }
@@ -1401,62 +1442,108 @@ fn trajectory(model: &Run, ensemble: &Ensemble, tau: f64, plan: &Plan, keep: boo
     run(model, ensemble.draw(SEED, index), index, tau, plan, keep)
 }
 
-/// The groups of the numbers `groups`, the members `members` of each (all of them: 0..GROUP), their trajectories run on
-/// the solve's one pool of threads (rayon's: the pool its decisions' loops run on between the trajectories, every core
-/// unless the process is told otherwise; what a thread keeps for the model, model/assemble.rs `Held`, it keeps from one
-/// call to the next) in their numbers' order -- each thread takes the next number as it ends one, so a faster core takes
-/// more of them, the groups finish nearly in order and the first after about one trajectory's time --, each group's
-/// records added in its members' order on this thread (`Shape::fold`, nothing depends on the threads), the groups
-/// returned in their order; whenever the solve's next message is due (`Messages::due`), `progress` takes the groups
-/// finished so far in order and sends their result, or with no group finished the last result goes out again (module
-/// documentation, # Checkpoints).
-fn run_groups(groups: &[u64], members: std::ops::Range<u64>, shape: Shape, record: &(dyn Fn(u64) -> Record + Sync), messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Part> {
-    let size = members.end - members.start;
-    let count = groups.len();
-    let stop = count as u64 * size;
-    // The k-th trajectory run: member k mod size of the k / size-th group.
-    let number = move |k: u64| groups[(k / size) as usize] * GROUP + members.start + k % size;
+/// A level of a hand-out (`run_groups`): the members `members` of the groups of the numbers `groups` (all of them:
+/// 0..GROUP), each trajectory made by `record` from its number, a group's records folded as `shape` says.
+struct Hand<'a> {
+    groups: &'a [u64],
+    members: std::ops::Range<u64>,
+    shape: Shape,
+    record: &'a (dyn Fn(u64) -> Record + Sync),
+}
+impl Hand<'_> {
+    /// The members run of a group.
+    fn size(&self) -> u64 {
+        self.members.end - self.members.start
+    }
+    /// The level's trajectories.
+    fn count(&self) -> u64 {
+        self.groups.len() as u64 * self.size()
+    }
+    /// The number of the level's k-th trajectory: member k mod size of the k / size-th group.
+    fn number(&self, k: u64) -> u64 {
+        self.groups[(k / self.size()) as usize] * GROUP + self.members.start + k % self.size()
+    }
+}
+
+/// One hand-out of trajectories: the levels `levels`, their trajectories in one list -- level after level, each level's
+/// in its numbers' order -- run on the solve's one pool of threads (rayon's: the pool its decisions' loops run on between
+/// the trajectories, every core unless the process is told otherwise; what a thread keeps for the model,
+/// model/assemble.rs `Held`, it keeps from one call to the next). Each thread takes the list's next trajectory as it ends
+/// one, so a faster core takes more of them, the groups finish nearly in order and the first after about one
+/// trajectory's time. The threads have no trajectory left only at the list's end: what is known to be run together is
+/// handed out together (`pair`), the level of the longer trajectories first, so that the threads that wait for the
+/// list's last trajectories wait for its shortest. Each group's records are added in its members' order on this thread
+/// (`Shape::fold`, nothing depends on the threads), each level's groups returned in their order; whenever the solve's
+/// next message is due (`Messages::due`), `progress` takes the first level's groups finished so far in order and sends
+/// the result of what is in with them (module documentation, # Checkpoints); where it has nothing to send the message
+/// stays due, and is asked for again when the next group is in. A message is made on this thread by loops that run on
+/// the pool (`pooled`, `accounts`), whose threads are all in their trajectories: between two trajectories a thread
+/// takes what waits for the pool, so a message waits for the next trajectory to end on any thread and not for the
+/// list's end.
+fn run_groups(levels: &[Hand], messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Vec<Part>> {
+    // Where each level's trajectories begin in the list, and the list's length.
+    let starts: Vec<u64> = levels.iter().scan(0, |next, level| Some(std::mem::replace(next, *next + level.count()))).collect();
+    let stop: u64 = levels.iter().map(Hand::count).sum();
+    // The list's k-th trajectory: its level and its place there.
+    let place = |k: u64| {
+        let level = starts.partition_point(|&start| start <= k) - 1;
+        (level, k - starts[level])
+    };
     let next = AtomicU64::new(0);
     let threads = rayon::current_num_threads().min(stop as usize);
-    let mut waiting: Vec<Vec<Option<Record>>> = (0..count).map(|_| (0..size).map(|_| None).collect()).collect();
-    let mut parts: Vec<Option<Part>> = (0..count).map(|_| None).collect();
+    let mut waiting: Vec<Vec<Vec<Option<Record>>>> = levels.iter().map(|level| (0..level.groups.len()).map(|_| (0..level.size()).map(|_| None).collect()).collect()).collect();
+    let mut parts: Vec<Vec<Option<Part>>> = levels.iter().map(|level| (0..level.groups.len()).map(|_| None).collect()).collect();
     // This thread stays here for the records and the messages; the pool's threads run the trajectories.
     rayon::in_place_scope(|scope| {
-        let (sender, receiver) = mpsc::channel::<(u64, Record)>();
+        let (sender, receiver) = mpsc::channel::<(usize, u64, Record)>();
         for _ in 0..threads {
-            let (sender, next) = (sender.clone(), &next);
+            let (sender, next, place) = (sender.clone(), &next, &place);
             scope.spawn(move |_| loop {
                 let k = next.fetch_add(1, Ordering::Relaxed);
-                if k >= stop || sender.send((k, record(number(k)))).is_err() {
+                if k >= stop {
                     break;
                 }
+                let (level, k) = place(k);
+                if sender.send((level, k, (levels[level].record)(levels[level].number(k)))).is_err() {
+                    break;
+                }
+                // What else waits for the pool: a message's loops (below).
+                rayon::yield_now();
             });
         }
         drop(sender);
-        let mut done = 0;
-        while done < count {
-            match receiver.recv_timeout(messages.due()) {
-                Ok((k, r)) => {
+        let mut left: usize = levels.iter().map(|level| level.groups.len()).sum();
+        // Whether the message that is due was asked for and had nothing to send (`Messages::again`), with no group in
+        // since: it stays due, and is asked for again with the next group.
+        let mut asked = false;
+        while left > 0 {
+            let due = messages.due();
+            if due.is_zero() && !asked {
+                let prefix: Vec<&Part> = parts.first().map_or(vec![], |first| first.iter().map_while(Option::as_ref).collect());
+                progress(&prefix, messages);
+                asked = messages.due().is_zero();
+                continue;
+            }
+            // The next record: until the message is due, or -- due, with nothing to send -- whenever it comes.
+            let received = if due.is_zero() { receiver.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected) } else { receiver.recv_timeout(due) };
+            match received {
+                Ok((level, k, r)) => {
+                    let size = levels[level].size();
                     let (g, m) = ((k / size) as usize, (k % size) as usize);
-                    waiting[g][m] = Some(r);
-                    if waiting[g].iter().all(Option::is_some) {
-                        parts[g] = Some(shape.fold(waiting[g].iter_mut().map(|r| r.take().expect("a member's record"))));
-                        done += 1;
+                    let members = &mut waiting[level][g];
+                    members[m] = Some(r);
+                    if members.iter().all(Option::is_some) {
+                        parts[level][g] = Some(levels[level].shape.fold(members.iter_mut().map(|r| r.take().expect("a member's record"))));
+                        left -= 1;
+                        asked = false;
                     }
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    let prefix: Vec<&Part> = parts.iter().map_while(Option::as_ref).collect();
-                    if prefix.is_empty() {
-                        messages.again();
-                    } else {
-                        progress(&prefix, messages);
-                    }
-                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
     });
-    parts.into_iter().map(|p| p.expect("a group's trajectories ended without their part")).collect()
+    parts.into_iter().map(|level| level.into_iter().map(|p| p.expect("a group's trajectories ended without their part")).collect()).collect()
 }
 
 /// What the pilot fixes for the run (module documentation, # Stopping), per output: the model's error on the held atoms
@@ -1521,17 +1608,21 @@ impl Look {
 /// is on). A T without an account -- one of its parts is unread -- is not met; where it is its statistics that are
 /// unread, its need is predicted from the normal theory of one axis's variance over the N h atoms held, the relative
 /// interval z √(2/(N h)) -- the total's is at most that (three axes' mean; equal where one axis holds all the energy).
+/// The outputs' looks are made on the pool, each output's by itself, and come in the outputs' order.
 fn looks(estimates: &[Estimate], fixed: &Fixed, step: &[Bound]) -> Vec<Look> {
     let (population, temperature) = accounts(estimates, fixed, step);
-    let mut looks = vec![];
-    for (k, e) in estimates.iter().enumerate().skip(1) {
-        let (h, n) = (1. - e.loss, e.trajectories);
-        looks.push(Look { output: k, target: POPULATION_TARGET, account: population[k], interval: e.shown_interval(), trajectories: n, shown: true });
-        let account = temperature[k].unwrap_or(Account { model: h * fixed.model[k][1], step: h * step[k].temperature, statistics: f64::INFINITY });
-        let interval = if account.statistics.is_finite() { account.statistics } else { h * CONFIDENCE * (2. / (n * h)).sqrt() };
-        looks.push(Look { output: k, target: TEMPERATURE_TARGET, account, interval, trajectories: n, shown: false });
-    }
-    looks
+    estimates
+        .par_iter()
+        .enumerate()
+        .skip(1)
+        .flat_map_iter(|(k, e)| {
+            let (h, n) = (1. - e.loss, e.trajectories);
+            let shown = Look { output: k, target: POPULATION_TARGET, account: population[k], interval: e.shown_interval(), trajectories: n, shown: true };
+            let account = temperature[k].unwrap_or(Account { model: h * fixed.model[k][1], step: h * step[k].temperature, statistics: f64::INFINITY });
+            let interval = if account.statistics.is_finite() { account.statistics } else { h * CONFIDENCE * (2. / (n * h)).sqrt() };
+            [shown, Look { output: k, target: TEMPERATURE_TARGET, account, interval, trajectories: n, shown: false }]
+        })
+        .collect()
 }
 
 /// The outputs where some look leaves the statistics no room (SPEC §5.2): no number of trajectories fits.
@@ -1546,10 +1637,11 @@ fn crowded(looks: &[Look]) -> Vec<usize> {
 /// model's error on the rows as shown, and T's whole accounts (module documentation, # Stopping); t = 0 is the
 /// request's state, without error, and the ensemble's moments, T's by quadrature: its accounts are the quadrature's
 /// error alone (`Fixed::start`), in the discretization's part (SPEC §4). The model's error on what is shown is at most
-/// 1, a probability's. T has an account where its statistics, the model's error and its step error are all read.
+/// 1, a probability's. T has an account where its statistics, the model's error and its step error are all read. The
+/// outputs' accounts are made on the pool, each output's by itself.
 fn accounts(estimates: &[Estimate], fixed: &Fixed, step: &[Bound]) -> (Vec<Account>, Vec<Option<Account>>) {
     estimates
-        .iter()
+        .par_iter()
         .zip(&fixed.model)
         .zip(step)
         .enumerate()
@@ -1566,10 +1658,11 @@ fn accounts(estimates: &[Estimate], fixed: &Fixed, step: &[Bound]) -> (Vec<Accou
         .unzip()
 }
 
-/// What the pilot measured of the model's units (SPEC §5.2): per state the errors of the units read there, each state's
+/// What the pilot measured of the model's units (SPEC §5.2): the errors of the units read at the states (`Sampled`: the
+/// states' rows one after another, a row the read units' errors on the populations and on T in their order), each state's
 /// output and group, and how each folded unit is booked (`booked`).
 struct Measured<'a> {
-    errors: &'a [Vec<UnitError>],
+    errors: &'a [[f64; 2]],
     output: &'a [usize],
     group: &'a [usize],
     booked: &'a [Booked],
@@ -1579,27 +1672,31 @@ impl Measured<'_> {
     /// read: the mean over the states of the pilot's groups but `left`; where they hold no atom nothing is measured, and
     /// the error is its bound there, 1 on a population and none on T (the run's atoms at such an output are at most the
     /// share the pilot left unseen, and T has no account without a pilot's T: its look fits no number of trajectories
-    /// and is not chased). A unit booked at its gate's bound: that bound, at every output.
+    /// and is not chased). A unit booked at its gate's bound: that bound, at every output. The outputs are made on the
+    /// pool, each by itself: an output's sums take its states in the states' order.
     fn means(&self, outputs: usize, left: Option<usize>) -> Vec<Vec<[f64; 2]>> {
         let read = self.booked.iter().filter(|b| matches!(b, Booked::Read(_))).count();
-        let (mut sum, mut count) = (vec![vec![[0.; 2]; read]; outputs], vec![0.; outputs]);
-        for ((state, &k), &g) in self.errors.iter().zip(self.output).zip(self.group) {
-            if Some(g) != left {
-                for (s, e) in sum[k].iter_mut().zip(state) {
-                    s[0] += e.population;
-                    s[1] += e.temperature;
-                }
-                count[k] += 1.;
-            }
+        // Each output's states, in their order.
+        let mut states: Vec<Vec<usize>> = vec![vec![]; outputs];
+        for (state, &k) in self.output.iter().enumerate() {
+            states[k].push(state);
         }
-        sum.iter()
-            .zip(&count)
-            .map(|(s, &c)| {
+        states
+            .par_iter()
+            .map(|states| {
+                let (mut sum, mut count) = (vec![[0.; 2]; read], 0.);
+                for &state in states.iter().filter(|&&state| Some(self.group[state]) != left) {
+                    for (s, e) in sum.iter_mut().zip(&self.errors[state * read..][..read]) {
+                        s[0] += e[0];
+                        s[1] += e[1];
+                    }
+                    count += 1.;
+                }
                 self.booked
                     .iter()
                     .map(|b| match *b {
                         Booked::Bound(bound) => [bound; 2],
-                        Booked::Read(place) if c > 0. => [s[place][0] / c, s[place][1] / c],
+                        Booked::Read(place) if count > 0. => [sum[place][0] / count, sum[place][1] / count],
                         Booked::Read(_) => [1., f64::INFINITY],
                     })
                     .collect()
@@ -1831,10 +1928,10 @@ impl<'a> Pricing<'a> {
             .collect()
     }
 
-    /// The jackknife's levels: the pilot's groups but each one in turn. Their pooling runs on the thread pool: made on
-    /// the calling thread, never inside one of the pool's tasks.
+    /// The jackknife's levels: the pilot's groups but each one in turn, the levels made on the pool, each by itself.
     fn leave_one_out(&self) -> Vec<Level<'a>> {
         (0..self.pilot.len())
+            .into_par_iter()
             .map(|left| {
                 let parts: Vec<&Part> = self.pilot.iter().enumerate().filter(|(g, _)| *g != left).map(|(_, p)| *p).collect();
                 Level::new(Some(left), pooled(&parts, self.scales).0.into(), self.measured.means(self.fixed.model.len(), Some(left)).into(), self.fixed, self.unsampled)
@@ -2379,16 +2476,16 @@ mod tests {
     }
 
     /// The units' errors per output (`Measured::means`), their sums and a unit's removal (`sums`, `model_error_at`).
-    /// Three units, the second booked at its bound 1e-5; two groups, output 1 read in both, output 2 in the first
-    /// alone, output 3 in neither. A read unit's error is the mean over the states of the output, of the first group's
+    /// Three units, the second booked at its bound 1e-5 (a state's row: the two read units' errors); two groups, output 1
+    /// read in both, output 2 in the first alone, output 3 in neither. A read unit's error is the mean over the states of
+    /// the output, of the first group's
     /// with the second left out, and its bound (1, none) where no state is read; the bounded unit's is its bound
     /// everywhere. The sums add what the reach leaves out; a read unit leaves a sum by subtraction; where it was not
     /// read, its population's bound leaves as a read error does, and on T the others' bounds stand -- alone, what the
     /// reach leaves out.
     #[test]
     fn the_states_errors_are_the_outputs_means_and_sums() {
-        let e = |population: f64, temperature: f64| UnitError { parameter: 0., population, temperature };
-        let errors = vec![vec![e(0.01, 0.02), e(0.03, 0.04)], vec![e(0.05, 0.06), e(0.07, 0.08)], vec![e(0.02, 0.04), e(0.06, 0.08)]];
+        let errors = [[0.01, 0.02], [0.03, 0.04], [0.05, 0.06], [0.07, 0.08], [0.02, 0.04], [0.06, 0.08]];
         let booking = [Booked::Read(0), Booked::Bound(1e-5), Booked::Read(1)];
         let measured = Measured { errors: &errors, output: &[1, 2, 1], group: &[0, 0, 1], booked: &booking };
         let means = measured.means(4, None);
@@ -2542,9 +2639,80 @@ mod tests {
         assert!((d.probabilities[0].iter().sum::<f64>() - 1.).abs() < 1e-15);
     }
 
+    /// What the messages pass on (`Messages::result`): a result of two groups at least -- of one member each as well as
+    /// of eight -- and of no fewer trajectories than the attempt's last; any other is not made, and the last one goes out
+    /// again (nothing where there is none). With no group in there are no estimates to make one from (`so_far`).
+    #[test]
+    fn a_result_goes_out_from_two_groups_on() {
+        let context = Context {
+            plan: Plan::new(&[0., 1.], [1.; 3]),
+            tau: 0.5,
+            scales: Scales { hbar_over_mass: 1., frequencies: [1.; 3] },
+            initial: [0.; STATES],
+            momentum: [1.; 3],
+            fixed: Fixed { model: vec![[0.; 2]; 2], start: 0. },
+            step: vec![Bound::share(); 2],
+            checked: None,
+            ledger: Ledger::default(),
+            method: String::new(),
+        };
+        let shape = Shape::of(&context.plan, false);
+        let record = |i: u64| {
+            let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3] };
+            Record { outputs: vec![Fate::Held(held.clone()), Fate::Held(held)], listed: vec![Some(([0.; 3], [i as f64; 3])); shape.listed], samples: vec![], counts: Counts::default() }
+        };
+        let whole = [shape.fold((0..GROUP).map(record)), shape.fold((GROUP..2 * GROUP).map(record))];
+        let scout: Vec<Part> = (0..3).map(|i| shape.fold(std::iter::once(record(i)))).collect();
+        let mut sent = vec![];
+        let mut send = |s: &Solution, _: Option<f64>| sent.push(s.trajectories);
+        let mut messages = Messages { send: &mut send, clock: Instant::now() - CHECKPOINT, last: None, least: 0 };
+        // No group, one group: nothing, and the message stays due. Three groups of one member: a result, and the clock is
+        // set. Two of them: fewer trajectories, the last again. Two whole groups, in hand or coming in: results.
+        so_far(&context, &[], &[], &mut messages);
+        so_far(&context, &whole[..1], &[], &mut messages);
+        assert!(messages.due().is_zero());
+        so_far(&context, &scout, &[], &mut messages);
+        assert!(!messages.due().is_zero());
+        so_far(&context, &scout[..2], &[], &mut messages);
+        so_far(&context, &whole, &[], &mut messages);
+        so_far(&context, &whole[..1], &[&whole[1]], &mut messages);
+        messages.result(1, 4 * GROUP, None, || unreachable!("no result is made of one group"));
+        assert_eq!(sent, [3, 3, 2 * GROUP, 2 * GROUP, 2 * GROUP]);
+    }
+
+    /// A message that falls due inside a hand-out is made while the trajectories run: its loops run on the pool
+    /// (`pooled`), whose threads take them between two trajectories (`run_groups`) -- not at the list's end, when all
+    /// but the last few trajectories are over. Eight trajectories a thread, each a few milliseconds of waiting; a
+    /// message due from the start, made by a loop on the pool (of two items: one alone runs where it is called) that
+    /// counts the trajectories over by then: not half of them (all but a thread's worth where the threads keep to
+    /// their trajectories: 122 of 128 on 16 threads).
+    #[test]
+    fn a_message_due_is_made_while_the_trajectories_run() {
+        let shape = Shape { outputs: 1, listed: 0, keep: false };
+        let over = AtomicU64::new(0);
+        let record = |_: u64| {
+            std::thread::sleep(Duration::from_millis(3));
+            over.fetch_add(1, Ordering::Relaxed);
+            Record { outputs: vec![Fate::Lost], listed: vec![], samples: vec![], counts: Counts::default() }
+        };
+        let mut silent = |_: &Solution, _: Option<f64>| {};
+        let mut messages = Messages { send: &mut silent, clock: Instant::now() - CHECKPOINT, last: None, least: 0 };
+        let numbers: Vec<u64> = (0..rayon::current_num_threads() as u64).collect();
+        let mut seen = vec![];
+        let levels = run_groups(&[Hand { groups: &numbers, members: 0..GROUP, shape, record: &record }], &mut messages, &mut |_, messages| {
+            seen.push((0..2).into_par_iter().map(|_| over.load(Ordering::Relaxed)).max().expect("the loop's two items"));
+            messages.again();
+        });
+        assert_eq!(levels[0].len(), numbers.len());
+        assert!(2 * seen[0] < numbers.len() as u64 * GROUP, "{seen:?} of {}", numbers.len() as u64 * GROUP);
+        // Nothing was sent (there is no last result): the message stayed due, and was asked for again as the groups came
+        // in, once a group at the most.
+        assert!(messages.due().is_zero() && seen.len() > 1 && seen.len() <= numbers.len(), "{seen:?}");
+    }
+
     /// The groups come back in their order whatever the threads do: 37 groups' records (five of a pilot's numbers, then a
     /// product's) -- each trajectory's own, its rows marking its number -- folded by `run_groups` equal the same records
-    /// folded one after another.
+    /// folded one after another; so do the levels of one hand-out, each with its own members of the groups.
     #[test]
     fn the_groups_come_back_in_order() {
         let shape = Shape { outputs: 2, listed: 1, keep: false };
@@ -2558,13 +2726,18 @@ mod tests {
         let mut silent = |_: &Solution, _: Option<f64>| {};
         let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0 };
         let numbers: Vec<u64> = (2048..2053).chain(5..37).collect();
-        let parts = run_groups(&numbers, 0..GROUP, shape, &record, &mut messages, &mut |_, _| {});
-        assert_eq!(parts.len(), 37);
-        for (part, number) in parts.iter().zip(&numbers) {
-            let one = shape.fold((0..GROUP).map(|m| record(number * GROUP + m)));
-            assert_eq!(part.sums, one.sums);
-            assert_eq!(part.listed, one.listed);
-            assert_eq!(part.counts.steps, one.counts.steps);
+        let members = [0..GROUP, 1..3];
+        let hands = members.clone().map(|members| Hand { groups: &numbers, members, shape, record: &record });
+        let levels = run_groups(&hands, &mut messages, &mut |_, _| {});
+        assert_eq!(levels.len(), 2);
+        for (parts, members) in levels.iter().zip(members) {
+            assert_eq!(parts.len(), 37);
+            for (part, number) in parts.iter().zip(&numbers) {
+                let one = shape.fold(members.clone().map(|m| record(number * GROUP + m)));
+                assert_eq!(part.sums, one.sums);
+                assert_eq!(part.listed, one.listed);
+                assert_eq!(part.counts.steps, one.counts.steps);
+            }
         }
     }
 
