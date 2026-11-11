@@ -506,3 +506,44 @@ fn the_assembly_s_price_counts_the_elimination_at_the_atom() {
     let factorizations = (GROUND + 1) as f64 * ((n * n * n - n) / 3) as f64 * atom_motion::decide::COMPLEX;
     assert!(run.assembly_work() >= factorizations, "an assembly priced {} below its factorizations' {factorizations}", run.assembly_work());
 }
+
+/// The fourth order's decay is its photons' rate with a kept pair of two frequencies (assemble.rs, # The fourth order:
+/// Λ_R = −i(G_R − G_L†), the anti-Hermitian read of the generator's own Doppler terms). R6_RAMAN_CO, |1,0⟩ and |2,0⟩ joined
+/// by their kept Raman coupling at the two lights' beat, one light's drives folded at the atom and the other's bare, the
+/// cluster's fold at the fourth order: the generator's decay ⟨ψ|i(H − H†)|ψ⟩ on a state of both is the photons'
+/// Σ‖u_a‖² at rest and moving, whichever leg is at the atom (with the fold's own Y subtracted in its stead the other
+/// frequency's bare leg's Hermitian Doppler partner was read as decay: +6.07e-3 and −6.08e-3 of the rate). The same
+/// with no pair kept and each state's fold at the fourth order, one frequency's terms alone, as before.
+#[test]
+fn the_fourth_order_s_decay_is_its_photons_rate_with_a_kept_pair_of_two_frequencies() {
+    let request = scene("R6_RAMAN_CO");
+    let light = Light::new(&request);
+    let (fa, fb) = (frequency_of(&request, &light, "ramanA"), frequency_of(&request, &light, "ramanB"));
+    let exact = |f: usize| -> Vec<i64> { light.frequencies[f].index.iter().map(|&i| i as i64).chain([0]).collect() };
+    let raman = Unit::Term { a: 1, b: 5, beat: Beat(exact(fa).iter().zip(exact(fb)).map(|(x, y)| x - y).collect()) };
+    let rates = |model: &Model, g: usize, kappa: [f64; 3]| -> (f64, f64) {
+        let c = model.cluster_of(g);
+        let psi: Vec<C64> = (0..model.clusters()[c].states.len()).map(|x| C64::cis(0.7 * x as f64) * (0.6 + 0.3 * x as f64)).collect();
+        let at = Point { r: [0.05, -0.03, 0.07], kappa, t: 0.0 };
+        let photons: f64 = model.photons(c, &at, &psi).iter().map(|ph| ph.amplitudes.iter().map(|u| u.iter().map(|z| z.norm_sqr()).sum::<f64>()).sum::<f64>()).sum();
+        (decay_rate(&total(model, c, &at, &model.running()), &psi), photons / psi.iter().map(|z| z.norm_sqr()).sum::<f64>())
+    };
+    for lifted in [fb, fa] {
+        let drives = at_the_atom(&request, &light, &[lifted]);
+        let second = Model::new(&request, &light, &[drives.clone(), vec![raman.clone()]].concat()).unwrap();
+        let fourth = Model::new(&request, &light, &[drives.clone(), vec![raman.clone(), Unit::Second { ground: 1 }]].concat()).unwrap();
+        assert_eq!(fourth.clusters()[fourth.cluster_of(1)].states, vec![1, 5], "the kept pair's cluster");
+        assert!(second.units().contains(&Unit::Second { ground: 1 }) && !fourth.units().contains(&Unit::Second { ground: 1 }), "the cluster's fold has a fourth order, and takes it");
+        let alone = Model::new(&request, &light, &[drives, vec![Unit::Second { ground: 1 }, Unit::Second { ground: 5 }]].concat()).unwrap();
+        for kappa in [[0.0; 3], [3.0, -2.0, 5.0]] {
+            let (generator, photons) = rates(&fourth, 1, kappa);
+            assert!((generator - rates(&second, 1, kappa).0).abs() > 1e-7 * generator, "the fourth order changes the rate");
+            println!("light {lifted} at the atom, κ = {kappa:?}: (generator − photons)/photons {:+.2e}", generator / photons - 1.0);
+            assert!((generator - photons).abs() <= 1e-9 * photons, "light {lifted} at the atom, κ = {kappa:?}: the generator's decay {generator:e} against its photons' {photons:e} ({:+.2e})", generator / photons - 1.0);
+            for g in [1, 5] {
+                let (generator, photons) = rates(&alone, g, kappa);
+                assert!((generator - photons).abs() <= 1e-9 * photons, "no pair, state {g}, κ = {kappa:?}: {generator:e} against {photons:e} ({:+.2e})", generator / photons - 1.0);
+            }
+        }
+    }
+}
