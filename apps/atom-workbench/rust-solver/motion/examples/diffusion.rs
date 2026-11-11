@@ -86,7 +86,8 @@ fn info(name: &str, waist: f64) {
     for (f, b) in request.beams.iter().enumerate() {
         eprintln!("beam {f} {} k {} index {:?}", b.id, b.wave_number, b.frequency_index);
     }
-    // Where a jump's bare state lands (`Run::landed`): the probability of a prompt photon from each basis state.
+    // Where a jump's bare state lands (`Run::landed`: the slow state it continues in, with its norm): the weight that
+    // does not continue -- the probability of a prompt photon -- from each basis state.
     let run = Run::new(&model, p);
     for z in [0.0, 0.05, 0.1] {
         let at = Point { r: [0.0, 0.0, z], kappa: [0.0; 3], t: 0.0 };
@@ -94,7 +95,7 @@ fn info(name: &str, waist: f64) {
             let prompt: Vec<f64> = (0..cluster.states.len())
                 .map(|i| {
                     let f: Vec<C64> = (0..cluster.states.len()).map(|x| if x == i { C64::ONE } else { C64::ZERO }).collect();
-                    run.landed(c, &at, &f).1
+                    1.0 - run.landed(c, &at, &f).iter().map(|z| z.norm_sqr()).sum::<f64>()
                 })
                 .collect();
             eprintln!("z = {z}: cluster {c} lands with a prompt photon at {prompt:?}");

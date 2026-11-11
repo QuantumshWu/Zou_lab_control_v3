@@ -64,12 +64,16 @@
 // marks unjudged are reported, not judged. Kinds "characterization" and "regression-consistency" are reported, never
 // failed. A series marked `reported` (another engine's old numeric result, an axis whose share a symmetry leaves open)
 // is compared and printed like any other, marked *, and never judged: its outputs enter no total and fail nothing.
+// Kind "tool" (R4D_FORCE, R4D_TW2: the engine stepped through the example binary beside an exact tool, r4d.mjs) is run
+// and judged by its own command; here its last verdict is listed.
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const here=path.dirname(fileURLToPath(import.meta.url));
-const KB=1.380649e-23,HBAR=6.62607015e-34/(2*Math.PI),Z=2;
+const KB=1.380649e-23,HBAR=6.62607015e-34/(2*Math.PI);
+/** z, the confidence of the solver's own statistics (SPEC §0). */
+export const Z=2;
 const read=f=>JSON.parse(fs.readFileSync(f,'utf8'));
 const expectationFile=id=>fs.existsSync(id)?id:[path.join(here,'expect',`${id}.json`),path.join(here,'expect','regress',`${id}.json`)].find(f=>fs.existsSync(f));
 const resultOf=v=>v.final?.result??v.result??(v.populations?v:null);
@@ -246,6 +250,9 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
   for(const id of ids){
     const ef=expectationFile(id);if(!ef){console.log(id,'no expectation');continue;}
     const e=read(ef);
+    // A reference the worker cannot run (kind "tool"): its own command runs and judges it, and keeps the verdict.
+    if(e.kind==='tool'){const rf=path.join(here,'out','results',`${e.id}.json`),v=fs.existsSync(rf)?read(rf).verdict:'NO RESULT';
+      console.log(`${e.id} [${e.reference}, ${e.kind}] ${e.title}\n  ${v} (${e.tool.command}${e.reported?'; reported, never judged':''})\n`);summary.push([e.id,v]);if(v==='FAIL')bad++;continue;}
     if(e.kind==='relation'){
       const files=many??e.members.map(m=>path.join(here,'out','results',`${m.id}.json`)),c=relation(e,e.members.map((_,k)=>fs.existsSync(files[k]??'')?resultOf(read(files[k])):null));
       printRelation(e,c);summary.push([e.id,c.verdict]);if(c.verdict==='FAIL')bad++;continue;

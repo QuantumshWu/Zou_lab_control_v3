@@ -32,9 +32,8 @@
    "value": 0.004949834427272948
   },
   {
-   "what": "k_BT ≥ 4ħω_radial at t = 0",
-   "value": 4.399796958480144,
-   "limit": "≥ 4"
+   "what": "k_BT/ħω_radial at t = 0 (the result reports its validated regime per output: `classical`)",
+   "value": 4.399796958480144
   },
   {
    "what": "state-force diffusion: its relative heating over the run, stiffest axis",

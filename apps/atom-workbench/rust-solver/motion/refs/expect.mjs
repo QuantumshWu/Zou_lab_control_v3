@@ -14,7 +14,7 @@ import {ramanNumbers,standingPhase} from './lib/defs.mjs';
 
 const here=path.dirname(fileURLToPath(import.meta.url));
 const read=f=>JSON.parse(fs.readFileSync(path.join(here,f),'utf8'));
-const write=(id,e)=>{const f=path.join(here,'expect',`${id}.json`);fs.mkdirSync(path.dirname(f),{recursive:true});fs.writeFileSync(f,JSON.stringify(e,null,1));console.log(id,e.series?`${e.series.length} series`:`relation of ${e.members.map(m=>m.id).join(', ')}`);};
+const write=(id,e)=>{const f=path.join(here,'expect',`${id}.json`);fs.mkdirSync(path.dirname(f),{recursive:true});fs.writeFileSync(f,JSON.stringify(e,null,1));console.log(id,e.series?`${e.series.length} series`:e.members?`relation of ${e.members.map(m=>m.id).join(', ')}`:e.tool.command);};
 const grid=line=>{const {durationUs:T,samples:n}=line.options;return Array.from({length:n},(_,i)=>T*i/(n-1));};
 const all=line=>grid(line).map((_,i)=>i);
 const beamOf=(line,id)=>line.model.motion.beams.find(b=>b.id===id);
@@ -218,7 +218,7 @@ async function r2(){
   write(id,expectation(id,'R2','R2 二能级辐射压与反冲加热',line,{
     derivation:'Two-level photon rate R = (Γ/2)s/(1+s+(2δ/Γ)²) at the local detuning (cloud average to 2nd order in κV); per photon Var p grows by (ħk)²(1+Q+ξ) along the beam and (ħk)²(1−ξ)/2 across (ξ = 2/5, σ dipole): k_B dT_z/dt = (7/5)E_rec R, k_B dT_x,y/dt = (3/10)E_rec R, with the separable quartic heat capacity, and the trap force’s fluctuation between the two states, κ²ω_a²·ee·k_BT_a/2 (R10); radiation pressure offset z₀ = ħkR/(mω²) (the spring softened by the probe’s light shift), time-averaged over the dephasing oscillation with the anharmonic orbit-centre shift.',
     conditions:[{what:'|δ_b|/Γ',value:Math.abs(p.delta)/gamma,limit:'≫ 1'},{what:'s',value:s},{what:'κ·⟨V⟩/|δ_b| (cloud spread of the detuning)',value:kappa*KT_PER_UK*1.5*T/Math.abs(p.delta),limit:'≪ 1'},
-      {what:'k_BT/U₀ at the end (quartic corrections)',value:KT_PER_UK*Math.max(...Ts.at(-1))/U0,limit:'≪ 1'},{what:'Mandel Q',value:Q},{what:'k_BT ≥ 4ħω_radial at t = 0',value:KT_PER_UK*T/radial,limit:'≥ 4'},
+      {what:'k_BT/U₀ at the end (quartic corrections)',value:KT_PER_UK*Math.max(...Ts.at(-1))/U0,limit:'≪ 1'},{what:'Mandel Q',value:Q},{what:'k_BT/ħω_radial at t = 0 (the result reports its validated regime per output: `classical`)',value:KT_PER_UK*T/radial},
       {what:'state-force diffusion: its relative heating over the run, stiffest axis',value:Math.max(...stateForce(T0))*times.at(-1),limit:'≪ 1'},
       {what:'one beam\'s Doppler damping time m/β (s), β = ħk²|dR/dδ|',value:1/(hbarOverMass(mass)*p.k**2*rbar*8*Math.abs(p.delta)/(gamma*gamma)/(1+s+(2*p.delta/gamma)**2))*1e-6,limit:'≫ the run'},
       ...await trapConditions(line,c.scene,'ground-2-2',run)],
@@ -914,8 +914,35 @@ async function r8(){
     series,info:{source:'refs/data/qrt_R5051_n.jsonl',cutoffs:centre.cutoffs.map(c=>({gamma:c.gamma,D:c.D,Dforce:c.Dforce})),Drecoil:centre.Drecoil}}),kind:'characterization'});
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// R4D: the point particle's friction and its temperature against the exact theory of the same model (tool references).
+
+/** R4D, two references the worker cannot run (kind "tool": refs/r4d.mjs runs them through motion/examples/diffusion.rs
+ * and the exact tools of refs/diffusion; motion3d_status/rewrite/diffusion.status.md §2, §4, §5 holds the measurements).
+ * With 𝓕 the first-order (force) superoperator of the Wigner expansion and F̂ψ = ⟨F̂⟩ψ + χ, χ ⊥ ψ,
+ *   𝓕[|ψ⟩⟨ψ|] = ⟨F̂⟩|ψ⟩⟨ψ| + ½(|χ⟩⟨ψ| + |ψ⟩⟨χ|):
+ * a trajectory (r, p, ψ) that moves by the Ehrenfest force ⟨F̂⟩ takes the first part and has nothing for the second.
+ * The second has no trace, so the ensemble's mean force is exact -- R4D_FORCE, judged: on a prescribed path the
+ * engine's mean force is Tr 𝓕[ρ] of the master equation of its own model, within its statistics --; but it is the
+ * momentum the internal components take apart from each other, and under the internal dynamics and the flight it
+ * comes back as force: the momentum's spread, and with it the temperature a cooling light leaves, is not the exact
+ * one -- R4D_TW2, reported: T_z(t) of the 1D trapped problem against the same model's phase-space equation. The gap
+ * is not small in ħk nor in ħω/k_BT; it vanishes where the jumps leave eigenstates of the force (a closed transition:
+ * R2, R3, R10), not for F = 2 → F′ = 3 in a polarization gradient. The owner has accepted it: it is no part of the
+ * error budget, no reference fails by it, and this pair keeps it in sight. */
+function r4d(){
+  write('R4D_FORCE',{id:'R4D_FORCE',reference:'R4',title:'R4D 沿给定路径的平均力（摩擦）：引擎对它自己模型的主方程',kind:'tool',
+    tool:{command:'node r4d.mjs force',scene:'R4_TW2',velocities:[0.2,0.1,0.07,0.05,0.035,0.02,0.01],trajectories:8192,spanUs:400,tauUs:0.3125},
+    derivation:'An atom carried at a constant velocity v along z through R4_TW2\'s light in the uniform configuration (the tweezer\'s waist 2000 µm: the same light at the focus, nothing changing along the path but the cooling light\'s own pattern). Exact: the master equation of the engine\'s closed model at the atom\'s momentum, its periodic steady state by harmonic balance (diffusion/ref.py), F(v) = the period\'s mean of Tr 𝓕[ρ]. Engine: trajectories held on the same path (diffusion engine), the mean drift of their momentum after a burn-in. The Ehrenfest force drops only a traceless part of 𝓕[|ψ⟩⟨ψ|], so the two are equal: judged, F_engine − F_exact against the trajectories\' standard error and the harmonic balance\'s truncation (check.mjs, rule 0: the count beyond 2σ and the mean deviation). The momentum diffusion of the same runs is printed and not judged: the engine\'s is above exact at low velocity (the slow part of the force\'s correlation; R4D_TW2 reports what it does to T).',
+    conditions:[{what:'thermal v_rms at 30 µK (µm/µs)',value:Math.sqrt(hbarOverMass(read('scenes/R4_TW2.json').model.motion.massKg)*KT_PER_UK*30)}]});
+  write('R4D_TW2',{id:'R4D_TW2',reference:'R4',title:'R4D 一维阱内 T_z(t)：引擎对同一模型的相空间方程（只报告：点粒子模型的已知缺陷）',kind:'tool',reported:true,
+    tool:{command:'node r4d.mjs tz',scene:'R4_TW2',temperatureUK:30,atoms:8192,tauUs:0.3125,spanUs:1000,everyUs:10,shownUs:[100,200,300,400,500,600,700,800,900,1000],data:'data/R4D_TW2.json'},
+    derivation:'T_z(t) of R4_TW2 with x and y held at the trap\'s centre (the 1D problem; a 3D run differs from it by the tweezer\'s own exchange between its two tight axes, which the engine integrates exactly: diffusion.status.md §9) from the thermal start, the engine\'s own dynamics (diffusion free), against the same closed model\'s second-order phase-space (Wigner) equation and its master equation in the position representation (diffusion/pde.py b and x: no trajectories; recorded in data/R4D_TW2.json from the model of the line at 0491ae13, diffusion/export.py). Reported, never judged: the gap is the Ehrenfest mean force\'s dropped traceless part (expect.mjs r4d), measured at 0491ae13 as −2.3 % at 100 µs, −9.7 % at 500 µs, −13.6 % at 1 ms against the second-order equation, which itself is within 2.6 % of the quantum answer; in the steady states of the R4_LIN scenes the coordinator\'s 1D figure is 18–27 %. Accepted by the owner; no part of the error budget.',
+    conditions:[{what:'second-order equation against the same model\'s quantum answer at 100, 500, 1000 µs (relative)',value:(()=>{const d=read('data/R4D_TW2.json');return [10,50,100].map(i=>d.secondOrder.TzUK[i]/d.quantum.TzUK[i]-1);})()}]});
+}
+
 const RUN={R1_TWEEZER:()=>r1('R1_TWEEZER'),R1_RETRO:()=>r1('R1_RETRO'),R1_SIGMA_P:()=>r1('R1_SIGMA_P'),R1_SIGMA_M:()=>r1('R1_SIGMA_M'),R1_CROSSED:()=>r1('R1_CROSSED'),
-  R2_RECOIL:r2,R3_DOPPLER:r3,R5_PUMP:r5,R6_RAMAN_CO:()=>r6('R6_RAMAN_CO'),R6_RAMAN_COUNTER:()=>r6('R6_RAMAN_COUNTER'),R9_PUSH:r9,R4_TW1:()=>r4('R4_TW1'),R4_TW2:()=>r4('R4_TW2'),R4_LINEAR:r4linear,R8_R5051:r8,R9_HEAT:r9heat,
+  R2_RECOIL:r2,R3_DOPPLER:r3,R5_PUMP:r5,R6_RAMAN_CO:()=>r6('R6_RAMAN_CO'),R6_RAMAN_COUNTER:()=>r6('R6_RAMAN_COUNTER'),R9_PUSH:r9,R4_TW1:()=>r4('R4_TW1'),R4_TW2:()=>r4('R4_TW2'),R4_LINEAR:r4linear,R4D:r4d,R8_R5051:r8,R9_HEAT:r9heat,
   ...Object.fromEntries(['ANTINODE','QUARTER','NODE'].flatMap(at=>[`R10_${at}`,`R10_HELD_${at}`]).map(id=>[id,()=>r10(id)]))};
 const ids=process.argv.slice(2);
 for(const [id,f] of Object.entries(RUN))if(!ids.length||ids.includes(id))await f();
