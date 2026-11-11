@@ -466,7 +466,11 @@ fn check_parameters(golden: &Golden, report: &mut Report) {
         report.compare("kind error", &|| case.to_string(), &got, &case["result"]);
     }
     if !golden.data["plot_kinds"].is_null() {
-        report.compare("plot kinds", &|| String::new(), &plot_kinds(), &golden.data["plot_kinds"]);
+        // The scientific package's catalogue states a kind's name, label and input; the facts v3's
+        // other owners read beside them (board, overlay, default window) are checked in kind_facts.rs.
+        let stated = Json::Array(plot_kinds().as_array().unwrap().iter()
+            .map(|kind| json!({"id": kind["id"], "label": kind["label"], "record_input": kind["record_input"]})).collect());
+        report.compare("plot kinds", &|| String::new(), &stated, &golden.data["plot_kinds"]);
     }
     if !golden.data["non_portable"].is_null() {
         let names: Vec<&str> = non_portable_display_names().into_iter().collect();

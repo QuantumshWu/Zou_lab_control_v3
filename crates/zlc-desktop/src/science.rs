@@ -218,8 +218,8 @@ impl Science {
                 }
                 let mut read = held[&key].clone();
                 // A saved Figure keeps the layer it was saved with; a data copy's preview, the one its copy kept.
-                if input.kind == "point_map" {
-                    // The site image owns the overlay resolved from this exact read.
+                if !crate::workbench_host::plot_kind(&input.kind).is_some_and(|facts| facts.overlay) {
+                    // A kind that takes no chosen overlay: a site image owns the one resolved from this exact read.
                     read.overlay = Some(None);
                     self.overlay_errors.remove(&input.panel);
                 } else if job.document != 0 {

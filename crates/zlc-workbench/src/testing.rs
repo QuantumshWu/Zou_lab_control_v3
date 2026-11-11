@@ -72,6 +72,14 @@ pub struct FakeHost { pub signals: Vec<SignalInfo>, pub panels: Vec<PanelContent
                       pub schemas: std::collections::BTreeMap<String, (Value, Value)> }
 
 impl Host for FakeHost {
+    /// The application's table, as the plotting owner states it (`zlc_plot` HANDLERS).
+    fn plot_kind(&self, kind: &str) -> Option<crate::PlotKindFacts> {
+        let (board, default_window, overlay) = match kind {
+            "image" | "facet_grid" => (true, 1, true), "curve" | "histogram" | "point_map" => (true, 1, false),
+            "rolling" => (true, 100, false), "pulse_timeline" => (false, 1, false), _ => return None,
+        };
+        Some(crate::PlotKindFacts { board, default_window, overlay })
+    }
     fn signals(&self) -> Vec<SignalInfo> { self.signals.clone() }
     fn panels(&self) -> Vec<PanelContent> { self.panels.clone() }
     fn reserve_panel_ids(&mut self, count: usize) -> Vec<String> {
@@ -604,6 +612,12 @@ mod tests {
                    (&json!("@logic/occupancy/occupied"), &json!([["@logic/occupancy/occupied", "Occupancy/occupied"]])));
         assert!(apply(&mut workbench, &mut host, "set_panel_overlay", json!({"panel": "panel-11", "signal": "@logic/camera_measurement/frames"}))
             .unwrap_err().contains("judges no sites"));
+        // Which kinds take an Overlay is the plotting owner's fact, read through the host: a curve takes none.
+        host.panels.push(PanelContent { panel: "panel-99".into(), signal: "@logic/camera_measurement/frames".into(), kind: "curve".into(),
+                                        window: 1, target: json!({}), outputs: Vec::new() });
+        assert!(apply(&mut workbench, &mut host, "set_panel_overlay", json!({"panel": "panel-99", "signal": "@logic/occupancy/occupied"}))
+            .unwrap_err().contains("takes no Overlay"));
+        host.panels.pop();
         apply(&mut workbench, &mut host, "set_panel_overlay", json!({"panel": "panel-11", "signal": null})).unwrap();
         assert!(workbench.panel_overlays().is_empty());
         apply(&mut workbench, &mut host, "set_panel_overlay", json!({"panel": "panel-11", "signal": "@logic/occupancy/occupied"})).unwrap();

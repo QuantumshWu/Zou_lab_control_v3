@@ -3,7 +3,7 @@
 // and the Monitor / Logic / Edit pages.  The board, the rows and the pages
 // draw the workbench's state; every button is one §4 command.
 import { ComboBox, Dialog, Field, StatusStrip, TabWidget, command, confirm, element, note, setChecked, setElided, setState, statusDot, switchButton, } from "../fluent/index.js";
-import { PANEL_PLOT_KINDS } from "../protocol.js";
+import { boardKinds } from "../protocol.js";
 import { queueStatus, saveImage } from "../shell.js";
 import { LogicEditorView, LogicRowView, PublisherEditorView, projectRow } from "./logic.js";
 import { PanelEditView } from "./panel_edit.js";
@@ -259,8 +259,7 @@ export class TaskConsoleView {
     updateKinds(latest) {
         // v2 TaskConsoleView: the console's five plot kinds by their own names, the first the
         // default; then each node type by its api name, measurements, processors, tasks.
-        const offered = new Set((latest.plot_kinds ?? []).map(kind => kind.id));
-        const plots = PANEL_PLOT_KINDS.filter(id => offered.has(id)).map(id => ({ value: `plot:${id}`, label: `Plot: ${id}` }));
+        const plots = boardKinds(latest.plot_kinds ?? []).map(({ id }) => ({ value: `plot:${id}`, label: `Plot: ${id}` }));
         const layer = (kind) => ({ measurement: 0, processor: 1, task: 2 }[kind] ?? 3);
         const nodes = [...(latest.node_types ?? [])]
             .sort((a, b) => layer(a.node_kind) - layer(b.node_kind) || a.type_id.localeCompare(b.type_id))

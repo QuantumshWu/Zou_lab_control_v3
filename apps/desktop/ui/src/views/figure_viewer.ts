@@ -10,7 +10,7 @@
 // Task Console's live board runs on.
 import { ComboBox, InfoPane, TabWidget, command, confirm, element, note, type Graph, type InfoTab } from "../fluent/index.js";
 import { confirmPulseDiscard } from "../pulse/widgets.js";
-import { PANEL_PLOT_KINDS, type Panel, type State } from "../protocol.js";
+import { boardKinds, type Panel, type State } from "../protocol.js";
 import { queueStatus, saveImage, type View, type ViewContext } from "../shell.js";
 import type { PanelBoard } from "./board.js";
 import { DataEditorView, saveDataAs, type DataProjection } from "./data_editor.js";
@@ -143,8 +143,7 @@ export class FigureViewerView implements View {
     this.updateEditors();
     this.updatePanelEdits();
     this.updateNodes(state, datasets.length > 0);
-    const offered = new Set((latest.viewer?.plot_kinds ?? latest.plot_kinds ?? []).map(kind => kind.id));
-    const kinds = PANEL_PLOT_KINDS.filter(id => offered.has(id)).map(id => ({ id }));
+    const kinds = boardKinds(latest.viewer?.plot_kinds ?? latest.plot_kinds ?? []);
     this.kind.setChoices(kinds.map(kind => ({ value: kind.id, label: `Plot: ${kind.id}` })));
     if (this.kind.value === null || !kinds.some(kind => kind.id === this.kind.value)) this.kind.value = kinds[0]?.id ?? null;
     // v2 set_panel_kinds: Add panel is there whenever a kind is (a blank panel, its signal chosen in Setting).

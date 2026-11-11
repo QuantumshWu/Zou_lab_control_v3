@@ -11,9 +11,13 @@ export type Axis = Readonly<{ bounds: readonly [number, number, number, number];
 /** `bound`: where a live panel's Window (its binding's row) stands among the display rows. */
 export type Control = FieldSpec & { section: "binding" | "semantic" | "display" | "board"; bound?: boolean };
 export type Signal = { id: string; label: string; available: boolean; reason?: string };
-export type PlotKind = { id: string; label: string };
-/** Display order shared by the live board and the Figure Viewer. */
-export const PANEL_PLOT_KINDS = ["image", "curve", "rolling", "histogram", "facet_grid", "point_map"];
+/** A plot kind as the plotting owner states it: `board` its place among the kinds a board
+ * offers for a new panel (null: none adds it), `overlay` whether a panel of it is drawn with
+ * a chosen judgement, `default_window` the shots a new panel of it reads. */
+export type PlotKind = { id: string; label: string; board?: number | null; overlay?: boolean; default_window?: number };
+/** The kinds a board offers, in the order the plotting owner gives them (the live board's and the Figure Viewer's). */
+export const boardKinds = (kinds: readonly PlotKind[]): PlotKind[] =>
+  kinds.filter(kind => typeof kind.board === "number").sort((left, right) => left.board! - right.board!);
 export type Panel = {
   id: string;
   title: string;

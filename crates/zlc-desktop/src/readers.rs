@@ -317,7 +317,7 @@ pub fn read_signal(runtime: &Runtime, params: &Value) -> Result<ToolOutput, Stri
 pub fn plot_catalog(params: &Value) -> Result<ToolOutput, String> {
     use zlc_plot::configuration::{semantics, spec, HANDLERS};
     let details = params["details"] == true;
-    let kinds: Vec<Value> = HANDLERS.iter().filter(|handler| handler.kind.value() != "pulse_timeline").map(|handler| json!({
+    let kinds: Vec<Value> = HANDLERS.iter().filter(|handler| handler.board.is_some()).map(|handler| json!({
         "kind": handler.kind.value(), "label": handler.display_name, "semantic_fields": handler.semantic_fields,
         "fit_target": handler.fit_target.map(|target| target.value()), "record_input": handler.record_input})).collect();
     let models: Vec<Value> = zlc_plot::fit::builtin_fit_models().iter().map(|model| {

@@ -1,2 +1,2 @@
-/** Display order shared by the live board and the Figure Viewer. */
-export const PANEL_PLOT_KINDS = ["image", "curve", "rolling", "histogram", "facet_grid", "point_map"];
+/** The kinds a board offers, in the order the plotting owner gives them (the live board's and the Figure Viewer's). */
+export const boardKinds = (kinds) => kinds.filter(kind => typeof kind.board === "number").sort((left, right) => left.board - right.board);
