@@ -2651,7 +2651,7 @@ fn a_diffusion_s_energy_input_does_not_know_the_trap() {
 
 /// What the split of the propagation's pairs does to a scene's step (run by name, alone: `SCENE=<a reference scene's
 /// name or a native request's path> TAU=<µs> SPLITS=<`rule`, and the turns to force in the rule's place, comma separated> …
-/// a_scene_s_step_error_by_the_split -- --ignored --nocapture`), per cluster on the atoms of `scene_clusters`, held:
+/// a_scene_s_step_error_by_the_split -- --ignored --nocapture`), per cluster on the atoms of `scene_clusters`:
 /// - what the split meets: the pairs of the middle's generator by their turn x = |ω| h, and the sizes of their change
 ///   over a half step, its slope's and its curvature's parts (`spectral::Picture::pairs`), at τ, τ/2 and τ/4;
 /// - the propagation's own error: the frame's state over the span τ on the step's path (the path of the step of τ:
@@ -2661,7 +2661,13 @@ fn a_diffusion_s_energy_input_does_not_know_the_trap() {
 ///   and what those states' errors make of the path's impulse: the force's form (`Middle::force`) on the picture's
 ///   state less on the flow's at the sixteenths, by Simpson's weights, relative to the atom's momentum;
 /// - what a check reads: one step of the engine against its two halves, at τ, τ/2 and τ/4 -- the state's difference
-///   and the momentum's, relative to the momentum.
+///   and the momentum's, relative to the momentum --, from states a run holds: the atom's state on the ground states
+///   alone, as a jump leaves it (no jump lands in an explicit excited state), and that state a step of τ on. Not from
+///   the cluster's random state: an excited share of that size (five of GMD1C's thirteen amplitudes) is none a
+///   trajectory holds. It decays within 1/Γ of the step's start and takes the far light's force on the excited
+///   states the while, a kick the step reads with the light at its middle -- the first order of what a state does
+///   within 1/Γ (step.rs, # Jumps) --, and a step against its halves then falls twofold a halving where the scheme's
+///   falls eightfold.
 /// Each the mean over the atoms, and the falls from a level to the next.
 #[test]
 #[ignore = "a measurement, not a check: run by name"]
@@ -2717,12 +2723,21 @@ fn a_scene_s_step_error_by_the_split() {
         for &split in &splits {
             let mut pairs = [[0usize; 5]; 3];
             let mut sizes = [[[0.0_f64; 2]; 5]; 3];
-            let (mut own, mut inside, mut impulse, mut state, mut momentum) = ([0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3]);
+            let (mut own, mut inside, mut impulse) = ([0.0; 3], [0.0; 3], [0.0; 3]);
+            // What a check reads, the state's difference and the momentum's, from each of its two states.
+            let mut read = [([0.0; 3], [0.0; 3]); 2];
             let size = |k: [f64; 3]| dot3(k, k).sqrt();
             let mut rho = vec![C64::ZERO; n * n];
             SPLIT.set(split);
             for ((s, (along, start, exact)), through) in starts.iter().zip(&cases).zip(&middles) {
                 let still = through.generator.still();
+                // The states a check reads from: the atom's on the ground states alone, and that state a step of τ on.
+                let mut scratch = step::Scratch::default();
+                let mut landed = s.clone();
+                landed.psi[ground..].fill(C64::ZERO);
+                let norm = crate::linalg::norm_sqr(&landed.psi).sqrt();
+                landed.psi.iter_mut().for_each(|z| *z = *z / norm);
+                let later = step_of(run, &landed, tau, &mut scratch).unwrap().end;
                 for level in 0..3 {
                     let steps = 1 << level;
                     let (t, mut x, marks) = (tau / steps as f64, start.clone(), exact.len());
@@ -2764,12 +2779,13 @@ fn a_scene_s_step_error_by_the_split() {
                     }
                     own[level] += apart(&x, &exact[marks - 1]) / count;
                     impulse[level] += size(kick) / size(s.kappa) / count;
-                    let mut scratch = step::Scratch::default();
-                    let whole = step_of(run, s, t, &mut scratch).unwrap().end;
-                    let half = step_of(run, s, 0.5 * t, &mut scratch).unwrap().end;
-                    let halves = step_of(run, &half, 0.5 * t, &mut scratch).unwrap().end;
-                    state[level] += apart(&whole.psi, &halves.psi) / count;
-                    momentum[level] += size(std::array::from_fn(|a| whole.kappa[a] - halves.kappa[a])) / size(s.kappa) / count;
+                    for (from, (state, momentum)) in [&landed, &later].into_iter().zip(&mut read) {
+                        let whole = step_of(run, from, t, &mut scratch).unwrap().end;
+                        let half = step_of(run, from, 0.5 * t, &mut scratch).unwrap().end;
+                        let halves = step_of(run, &half, 0.5 * t, &mut scratch).unwrap().end;
+                        state[level] += apart(&whole.psi, &halves.psi) / crate::linalg::norm_sqr(&from.psi).sqrt() / count;
+                        momentum[level] += size(std::array::from_fn(|a| whole.kappa[a] - halves.kappa[a])) / size(from.kappa) / count;
+                    }
                 }
             }
             SPLIT.set(None);
@@ -2781,8 +2797,10 @@ fn a_scene_s_step_error_by_the_split() {
             eprintln!("  the propagation's own error over the span in 1, 2, 4 steps: {}", falls(&own));
             eprintln!("  the propagation's own error inside those steps (at the span's sixteenths): {}", falls(&inside));
             eprintln!("  the path's impulse by those states against the flow's, relative to the momentum: {}", falls(&impulse));
-            eprintln!("  a step against its halves at τ, τ/2, τ/4: the state {}", falls(&state));
-            eprintln!("  a step against its halves at τ, τ/2, τ/4: the momentum {}", falls(&momentum));
+            for (from, (state, momentum)) in ["as a jump leaves it", "a step of τ on"].into_iter().zip(&read) {
+                eprintln!("  a step against its halves at τ, τ/2, τ/4, from a state {from}: the state {}", falls(state));
+                eprintln!("  a step against its halves at τ, τ/2, τ/4, from a state {from}: the momentum {}", falls(momentum));
+            }
         }
     });
 }

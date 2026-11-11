@@ -166,6 +166,16 @@
 //! run of its own order in τ; h = τ/2, a the acceleration, f the force beside the reference's):
 //! - the photons' Doppler weights are the path's, κ_m for κ_m + a u*: first order and odd in u*, so of zero mean over
 //!   the jumps' places in their steps; the position is the path's, a(u*² + h²)/2 off: second order;
+//! - the lights' amplitudes are the middle's: B is taken at r_h, and along the path the plane waves' phases alone
+//!   turn. What the state does within 1/Γ of a jump -- its excited amplitudes rising to what they follow, a bare
+//!   state's fast part going -- takes its kick K with every light's envelope and gradient at r_h for r_h + v_m u*:
+//!   u* (v_m·∇)K off, first order and odd in u*, of zero mean. (At its largest on a state no trajectory holds, at a
+//!   step's start: thirteen random amplitudes on GMD1C's eight ground and five excited states lose the excited 40 %
+//!   in 1/Γ = 0.03 µs under the trap's force on the excited states, a kick of 1.5 % of the momentum whatever the
+//!   step; a step of 0.5 µs then differs from its two halves by (τ/4)(v·∇)K = 9·10⁻⁴ of the momentum, falling 2.2
+//!   and 2.7 on halving and linear in the speed, and by nothing of that at rest, without the decay, with the excited
+//!   states' force the ground states', or on the states of a run -- an excited share of 3·10⁻⁴, a difference of
+//!   8·10⁻⁵ of the momentum falling 7.7 to 7.9; tests, `a_scene_s_step_error_by_the_split`.)
 //! - the state's errors inside a step -- ∂_κH·a(u² − h²)/2, zero at its ends (# The path between a step's ends) -- no
 //!   longer cancel across the jump: their commutator with the jump, second order, of the sign of a·∂_κH;
 //! - the force changes at the jump and is still one kick at the middle: the position at the step's end errs by
