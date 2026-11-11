@@ -800,6 +800,10 @@ impl crate::step::Dynamics for Run<'_> {
     fn kick(&self, cluster: usize, at: &Point, psi: &[C64], photon: &Photon) -> [f64; 3] {
         self.kick_at(cluster, at, psi, photon)
     }
+    fn landed(&self, cluster: usize, at: &Point, f: &[C64]) -> (crate::step::Internal, f64) {
+        let (slow, prompt) = Run::landed(self, cluster, at, f);
+        (slow.into_iter().collect(), prompt)
+    }
     fn scattering(&self, cluster: usize, at: &Point, psi: &[C64], populations: &[f64]) -> Scattering {
         self.scattering_at(cluster, at, psi, Some(populations))
     }

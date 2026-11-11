@@ -63,10 +63,10 @@
 //! one term, not two errors to add --: the force's s bounds it, and that is booked, s p_g on T and on the populations.
 //! Where the fold has a fourth order (assemble.rs, # The fourth order; model.rs `Model::fold_frequency`) that part is
 //! its own unit, the cluster's (`Unit::Second`): kept, the fold is the fourth order's, the force's error 3/2 s² p_g and
-//! the levels' spread over the drive's distance times s (W3's one denominator a column), and the rates' s/2 -- the
-//! prompt photon after a jump, not drawn. A drive's own unit then carries what only keeping it explicit removes: that
-//! residue, and at either order its motion's part, the sweep a and the Doppler term's next order. Elsewhere a drive's
-//! unit carries all of it.
+//! the levels' spread over the drive's distance times s (W3's one denominator a column), and the rates' s² p_g
+//! with the photon a jump's landing in the bare state draws (model.rs `Model::landed`, step.rs `jump`). A drive's own
+//! unit then carries what only keeping it explicit removes: that residue, and at either order its motion's part, the
+//! sweep a and the Doppler term's next order. Elsewhere a drive's unit carries all of it.
 //!
 //! # A coupling of two states (`Unit::Term`)
 //! Everything the folds leave between two states a ← b at one exact beat β (∝ e^{iβt}) is one unit: the constant forms'
@@ -120,10 +120,11 @@ use std::sync::Arc;
 pub(crate) const EXISTS: f64 = 0.5;
 
 /// The fourth order's leading errors in a drive's share s (module documentation, # The fold's order; derivation:
-/// fourth.status.md): on the force 3/2 s², the next term of the exact (1 − s + 3/2 s²); on the rates s/2, the prompt
-/// photon a jump's landing in the bare state leaves, which the step does not draw.
+/// fourth.status.md), each the next order's: on the force 3/2 s², the next term of the one line's (1 − s + 3/2 s²); on
+/// the rates s², what the slow state's jumps and the photons its landings draw leave of the exact 1/(1 + s) -- on a
+/// cycling state −0.99 s² at three intensities (the test below), the coefficient one of the order.
 pub(crate) const ORDER_FORCE: f64 = 1.5;
-pub(crate) const ORDER_RATES: f64 = 0.5;
+pub(crate) const ORDER_RATES: f64 = 1.0;
 
 impl Gate {
     /// Whether the fold exists over the reach: both bounds below ½.
@@ -843,9 +844,8 @@ impl Model {
 
     /// The error at a sample of the second order of a cluster's fold at the atom (`Unit::Second`; module documentation,
     /// # The errors, # The fold's order): Σ s p_g over the drives folded at the atom from the sample's ground states, s =
-    /// 2|R[e, g]|² each one's share -- on T, the force's relative error of that order; on the populations, what of the
-    /// rates' error s the fourth order takes away, s less its own (`ORDER_RATES` s). Zero off the cluster, and where its
-    /// fold is the fourth order's.
+    /// 2|R[e, g]|² each one's share -- on T, the force's relative error of that order; on the populations, the rates'.
+    /// Zero off the cluster, and where its fold is the fourth order's.
     fn order_error(&self, ground: usize, at: &Measured) -> UnitError {
         let cluster = self.membership[ground];
         let Some(frequency) = self.fold_frequency(cluster).filter(|_| at.sample.cluster == cluster && self.fourth[cluster].is_none()) else {
@@ -862,7 +862,7 @@ impl Model {
                 }
             }
         }
-        UnitError { parameter: if held > 0.0 { sum / held } else { 0.0 }, population: (1.0 - ORDER_RATES) * sum, temperature: sum }
+        UnitError { parameter: if held > 0.0 { sum / held } else { 0.0 }, population: sum, temperature: sum }
     }
 
     /// The error at a sample of a drive folded with the bare levels (module documentation, # Levels, # The errors): its own
@@ -1204,6 +1204,107 @@ mod tests {
             assert!((0.4 * s..0.6 * s).contains(&potential[0]) && potential[1] <= 0.6 * s * s, "{scene}: the potentials err by s/2 and by s²/2: {potential:?} for s = {s}");
             assert!((0.5 * s..1.0 * s).contains(&force[0]) && force[1] <= 1.5 * s * s, "{scene}: the forces err by s and by 3/2 s² at most: {force:?} for s = {s}");
             assert!((1.2 * s..1.8 * s).contains(&rate[0]) && rate[1] <= 2.5 * s * s, "{scene}: the decay rates err by 3/2 s and by the next order: {rate:?} for s = {s}");
+        }
+    }
+
+    /// A lin-perp-lin scene's cycling point: where the cooling light at the trap's axis is σ⁻ alone, F=2 m=−2 is driven
+    /// into F′=3 m′=−3 and nowhere else, and that state decays to it alone -- a two-level atom. The scene's model with
+    /// every cooling drive of m=−2's cluster at the atom and the dressing kept, at the second order and at the fourth;
+    /// the point; and of the no-jump generator there the drive's share s = 2|V|²/(Δ² + Γ²/4), the two-level atom's
+    /// steady photon rate Γ |V|²/(Δ² + Γ²/4 + 2|V|²) with the ground state's own bare scattering, and the line's
+    /// (Γ/2Δ)².
+    fn cycling(scene: &str) -> (Model, Model, Point, [f64; 3]) {
+        let (closed, centre) = closed(scene);
+        let states = closed.clusters[closed.membership[3]].states.clone();
+        let cooling = Component { frequency: closed.driven.iter().find(|d| d.2 == 3 && closed.level(d.0, d.1, d.2) == Level::Atom).expect("a drive at the atom").0.frequency, counter: false };
+        let line = closed.driven.iter().filter(|&&(c, e, g)| c == cooling && states.contains(&g) && closed.bare_distance(c, e, g) < 5000.0);
+        let more: Vec<Unit> = line.map(|&(component, excited, ground)| Unit::Bare { component, excited, ground }).chain([Unit::Dressing { carrier: cooling }]).collect();
+        let second = closed.rekept(&[closed.kept.clone(), more].concat()).unwrap();
+        let fourth = second.rekept(&[second.kept.clone(), vec![Unit::Second { ground: 3 }]].concat()).unwrap();
+        let (cluster, carrier) = (second.membership[3], second.carrier_of(cooling.frequency).unwrap());
+        assert_eq!(second.clusters[cluster].states[0], 3, "the cluster's first place is F=2 m=−2");
+        // The point where the light is σ⁻ alone: where m=−2's coupling is the largest (its σ⁺ part is nothing there).
+        // The excited state it drives (in the request's basis a combination of states), its detuning and its width.
+        let column = |z: f64| -> (f64, Mat) {
+            let g = no_jump(&second, cluster, carrier, [centre[0], centre[1], z]);
+            ((0..EXCITED).map(|e| g[(3 + e, 0)].norm_sqr()).sum(), g)
+        };
+        let grid: Vec<f64> = (0..400).map(|i| centre[2] + 0.4 * i as f64 / 400.0).collect();
+        let best = grid.iter().copied().max_by(|a, b| column(*a).0.total_cmp(&column(*b).0)).unwrap();
+        let (mut lo, mut hi) = (best - 0.001, best + 0.001);
+        for _ in 0..60 {
+            let (a, b) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+            if column(a).0 > column(b).0 { hi = b } else { lo = a }
+        }
+        let z = 0.5 * (lo + hi);
+        let (v2, g) = column(z);
+        let bright: Vec<C64> = (0..EXCITED).map(|e| g[(3 + e, 0)] * (1.0 / v2.sqrt())).collect();
+        let level: C64 = (0..EXCITED * EXCITED).map(|i| bright[i / EXCITED].conj() * g[(3 + i / EXCITED, 3 + i % EXCITED)] * bright[i % EXCITED]).sum();
+        let (gamma, delta) = (-2.0 * level.im, level.re - g[(0, 0)].re);
+        let s = 2.0 * v2 / (delta * delta + 0.25 * gamma * gamma);
+        let exact = gamma * v2 / (delta * delta + 0.25 * gamma * gamma + 2.0 * v2) - 2.0 * g[(0, 0)].im;
+        let at = Point { r: [centre[0], centre[1], z], kappa: [0.0; 3], t: 0.0 };
+        (second, fourth, at, [s, exact, 0.25 * gamma * gamma / (delta * delta)])
+    }
+
+    /// A cycling state's photons per unit time, against the two-level atom's (module documentation, # The fold's order;
+    /// `cycling`). With the drive's share s: the second-order fold's rate is too high by s; the fourth order's jumps
+    /// alone are too low by s/2; with the landing -- every jump back into the bare state followed by one more photon
+    /// with the probability p, and so on: 1/(1 − p) photons a jump -- the rate is right to the next order: low by
+    /// `ORDER_RATES` s², to the order after that.
+    #[test]
+    fn a_cycling_state_s_photon_rate_with_the_landing_is_the_two_level_atom_s() {
+        for scene in ["R4_LIN_1", "R4_LIN_2", "R4_LIN_4"] {
+            let (second, fourth, at, [s, exact, width]) = cycling(scene);
+            let psi = [C64::ONE, C64::ZERO, C64::ZERO];
+            let rate = |model: &Model| -> f64 {
+                let plan = model.plan(model.membership[3], &model.running());
+                model.photons_of(&plan, None, &at, &psi, crate::model::photon::Gradients::None).0.iter().map(|p| p.amplitudes.iter().map(|u| crate::linalg::norm_sqr(u)).sum::<f64>()).sum()
+            };
+            let plan = fourth.plan(fourth.membership[3], &fourth.running());
+            let prompt = fourth.landed(&plan, None, &at, &psi).1;
+            let errors = [rate(&second) / exact - 1.0, rate(&fourth) / exact - 1.0, rate(&fourth) / (1.0 - prompt) / exact - 1.0];
+            // What the comparison cannot resolve: the second order's rate is the two-level atom's times (1 + s) but for
+            // the line's width over its detuning, squared.
+            let floor = (errors[0] - s).abs();
+            let rest = (errors[2] - (errors[0] - s)) / (s * s);
+            eprintln!("{scene}: s = {s:.4}, p = {prompt:.4}: the photon rate against the two-level atom's -- second order {:+.3e} (s {:+.1e}), fourth {:+.3e}, fourth with the landing {:+.3e} ({rest:+.3} s²)", errors[0], errors[0] - s, errors[1], errors[2]);
+            assert!(floor <= width, "{scene}: the second order's rate is too high by s: {} for s = {s}", errors[0]);
+            assert!((errors[1] + 0.5 * s).abs() <= ORDER_RATES * s * s + floor, "{scene}: the fourth order's jumps alone too low by s/2: {} for s = {s}", errors[1]);
+            assert!((rest + ORDER_RATES).abs() <= s, "{scene}: with the landing the rate is low by `ORDER_RATES` s², to the order after: {} for s = {s}", errors[2]);
+        }
+    }
+
+    /// A jump at the fourth order (step.rs `jump`, the landing), on the cycling state at rest (`cycling`): of single jumps
+    /// with their own streams, the photons a jump -- each one's counted work -- are 1/(1 − p) on average, within four of
+    /// their mean's deviations (a geometric number's, √p/(1 − p) a jump); and a second state carried through the jump --
+    /// the trajectory's own, and twice it -- comes out the trajectory's own to the bit: the photons' operators and the
+    /// slow state's projector are one linear map on both.
+    #[test]
+    fn a_jump_at_the_fourth_order_draws_its_landing_s_photons() {
+        use crate::step::{self, Dynamics, Trajectory};
+        for scene in ["R4_LIN_1", "R4_LIN_4"] {
+            let (_, fourth, at, _) = cycling(scene);
+            let mut reference = [0.0; GROUND];
+            reference[3] = 1.0;
+            let run = crate::model::Run::new(&fourth, reference);
+            let prompt = run.landed(fourth.membership[3], &at, &[C64::ONE, C64::ZERO, C64::ZERO]).1;
+            let trials = 4000u64;
+            let mut photons = 0.0;
+            for index in 0..trials {
+                let mut t = Trajectory::new(&run, 3, at.r, [0.0; 3], 7, index);
+                let (mut own, mut twice) = (Some(t.psi.clone()), Some(t.psi.iter().map(|z| *z * 2.0).collect::<step::Internal>()));
+                let mut twin = t.clone();
+                step::jump(&run, &mut t, &mut own).unwrap();
+                step::jump(&run, &mut twin, &mut twice).unwrap();
+                assert_eq!(own.as_ref(), Some(&t.psi), "{scene}: the trajectory's own state, carried through jump {index}");
+                assert_eq!(twice.as_ref(), Some(&t.psi), "{scene}: twice the trajectory's state, carried through jump {index}");
+                photons += (t.work / run.photon_work()).round();
+            }
+            let (mean, expected) = (photons / trials as f64, 1.0 / (1.0 - prompt));
+            let deviation = prompt.sqrt() / (1.0 - prompt) / (trials as f64).sqrt();
+            eprintln!("{scene}: p = {prompt:.4}: {mean:.4} photons a jump of {trials} jumps, 1/(1 − p) = {expected:.4} ± {deviation:.4}");
+            assert!((mean - expected).abs() <= 4.0 * deviation, "{scene}: {mean} photons a jump against {expected} ± {deviation}");
         }
     }
 
