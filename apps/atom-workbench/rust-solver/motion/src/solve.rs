@@ -1273,8 +1273,9 @@ impl Plan {
     }
 }
 
-/// Counts over trajectories: the steps taken, and the trajectories the scheme could not advance (adapt.rs `advance`'s
-/// refusal) with the earliest time one stopped at.
+/// Counts over trajectories: the steps taken -- a step with jumps is one step, whatever the pieces its path is handed
+/// on by (adapt.rs, # The jumps) --, and the trajectories the scheme could not advance (adapt.rs `advance`'s refusal)
+/// with the earliest time one stopped at.
 #[derive(Clone, Copy, Debug, Default)]
 struct Counts {
     steps: u64,
@@ -1327,7 +1328,8 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, plan: &Plan, 
     let mut out = vec![Fate::Lost; outputs];
     let mut listed = vec![None; plan.listed.len()];
     let mut samples: Vec<Option<State>> = vec![None; if keep { outputs } else { 0 }];
-    let mut steps = 0;
+    // The steps taken, and the start of the last one counted.
+    let (mut steps, mut counted) = (0, None);
     let mut record = |k: usize, t: &Trajectory, out: &mut Vec<Fate>| {
         // The atom at the output's instant; from the first output on its κ and κ² are its window's means (below).
         out[k] = Fate::Held(Held { rows: model.readout(t.cluster, &t.point(), &t.psi), kappa: t.kappa, kappa2: t.kappa.map(|x| x * x) });
@@ -1347,9 +1349,12 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, plan: &Plan, 
             record(k + 1, t, &mut out);
             reached = k + 2;
         };
-        // A step's path as far as the trajectory is on it, into the windows it cuts.
+        // A step's path as far as the trajectory is on it, into the windows it cuts: piece by piece, from the step's
+        // start and from each of its jumps -- the step is counted at the first of them.
         let mut each = |s: &Segment, until: f64| {
-            steps += 1;
+            if counted != Some(s.step.0) {
+                (steps, counted) = (steps + 1, Some(s.step.0));
+            }
             let (s0, s1) = (s.start, until);
             let first = (((s0 - widest) / interval).floor().max(1.)) as usize;
             let last = (((s1 + widest) / interval).ceil() as usize).min(outputs - 1);
