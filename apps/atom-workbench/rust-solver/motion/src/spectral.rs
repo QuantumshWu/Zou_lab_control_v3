@@ -178,14 +178,15 @@ pub struct Picture {
     moving: bool,
     half: f64,
     /// The fast pairs (n²) and their 1/ω, their following X₀, X₁, X₂ (3n², each column by column), whether any pair
-    /// is followed at all, and 1 + X factored at the launch's time (LU with partial pivoting, n² and its pivots): the
-    /// launched state's way into g.
+    /// is followed at all, and 1 + X factored (LU with partial pivoting, n² and its pivots) at the time `factored`:
+    /// a launched state's way into g -- the following leaves the step's start's, a launch elsewhere makes its own.
     fast: Vec<bool>,
     inverses: Vec<C64>,
     follow: Vec<C64>,
     followed: bool,
     factors: Vec<C64>,
     pivots: Vec<usize>,
+    factored: f64,
     /// The path: m and ṁ at its three stops (6n) -- the launch's time `origin`, `centre` = origin + `spacing` and the
     /// step's end, centre + spacing --, and the rounding of the hops' exponentials relative to the state's norm.
     path: Vec<C64>,
@@ -244,6 +245,7 @@ impl Default for Picture {
             followed: false,
             factors: Vec::new(),
             pivots: Vec::new(),
+            factored: f64::NAN,
             path: Vec::new(),
             origin: 0.0,
             centre: 0.0,
@@ -332,7 +334,7 @@ impl Picture {
     pub fn prepare(&mut self, half: f64, still: bool) {
         let n = self.n;
         (self.work, self.width, self.moving) = (0.0, f64::NAN, false);
-        (self.half, self.followed, self.spread) = (half, false, 0.0);
+        (self.half, self.followed, self.spread, self.factored) = (half, false, 0.0, f64::NAN);
         if !still {
             let [minus, plus] = &mut self.ends;
             let (first, second) = (0.5 / half, 0.5 / (half * half));
@@ -401,7 +403,7 @@ impl Picture {
     /// - At the two ends the second order D X − X D_s. Its fast part F is followed in its turn (X's second order: the
     ///   same polynomial of F through the three nodes -- F is zero at the middle, as D is).
     /// - At the two ends D₂ whole, (1 + X) D₂ = D_s + D X − F by the factors of 1 + X there, and of it the slow pairs,
-    ///   through the three nodes (zero at the middle).
+    ///   through the three nodes (zero at the middle). The factors at −h are kept: the start state's way into g.
     fn follow(&mut self) {
         let (n, h) = (self.n, self.half);
         let size = n * n;
@@ -498,7 +500,7 @@ impl Picture {
             combine(true, x, n, d, out, n, 0);
             let whole = &mut ends[end * size..(end + 1) * size];
             unlay(out, n, whole);
-            let (f, pivots) = (&mut factors[..], &mut spare[..n]);
+            let (f, pivots) = if end == 0 { (&mut self.factors[..], &mut self.pivots[..]) } else { (&mut factors[..], &mut spare[..n]) };
             for (row, numbers) in f.chunks_exact_mut(n).enumerate() {
                 for (z, column) in numbers.iter_mut().zip(x.chunks_exact(n)) {
                     *z = column[row];
@@ -511,6 +513,7 @@ impl Picture {
         for k in 0..size {
             (a.data[k], b.data[k]) = if fast[k] { (C64::ZERO, C64::ZERO) } else { ((ends[size + k] - ends[k]) * first, (ends[size + k] + ends[k]) * second) };
         }
+        self.factored = -h;
         // A state at a time (`at`) is R(1 + X(u)) on its coordinates: R(1 + X₀), RX₁ and RX₂.
         let matrix = self.right.len();
         self.nodes[..matrix].copy_from_slice(&self.right);
@@ -669,20 +672,25 @@ impl Picture {
         self.work += (n * n) as f64;
         if self.moving {
             if self.followed {
-                // g = (1 + X(from))⁻¹ d: X at the time row by row, one more on its diagonal, factored.
+                // g = (1 + X(from))⁻¹ d by the factors of 1 + X there: X at the time row by row, one more on its
+                // diagonal, factored -- unless they are the ones kept (the following's, at the step's start).
                 let size = n * n;
-                let (zero, rest) = self.follow.split_at(size);
-                let (one, two) = rest.split_at(size);
-                for (row, numbers) in self.factors.chunks_exact_mut(n).enumerate() {
-                    for (column, z) in numbers.iter_mut().enumerate() {
-                        let t = column * n + row;
-                        *z = zero[t] + one[t] * from + two[t] * (from * from);
+                if self.factored != from {
+                    let (zero, rest) = self.follow.split_at(size);
+                    let (one, two) = rest.split_at(size);
+                    for (row, numbers) in self.factors.chunks_exact_mut(n).enumerate() {
+                        for (column, z) in numbers.iter_mut().enumerate() {
+                            let t = column * n + row;
+                            *z = zero[t] + one[t] * from + two[t] * (from * from);
+                        }
+                        numbers[row] += C64::ONE;
                     }
-                    numbers[row] += C64::ONE;
+                    linalg::factor(&mut self.factors, &mut self.pivots, n);
+                    self.factored = from;
+                    self.work += (n * size / 3 + 2 * size) as f64;
                 }
-                linalg::factor(&mut self.factors, &mut self.pivots, n);
                 linalg::solve(&self.factors, &self.pivots, n, &mut path[..n], 1);
-                self.work += (n * size / 3 + 3 * size) as f64;
+                self.work += size as f64;
             }
             let spacing = 0.5 * (h - from);
             (self.centre, self.spacing) = (from + spacing, spacing);
