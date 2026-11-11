@@ -74,13 +74,16 @@ fn errors(name: &str, model: &Model, units: &[Unit], centre: [f64; 3], temperatu
 }
 
 /// A scene's closure (solve.rs `attempt`, from no unit kept, the reach at the request's temperature): its gates' digest and its
-/// closed model's errors' digest, and on stderr each pass's times.
+/// closed model's errors' digest, and on stderr each pass's times. With `GATES_REACH_UK` the closure then goes on with the
+/// reach at that temperature (µK), from the units kept so far -- an attempt of the solve after its reach has grown.
 fn closure(name: &str) -> [String; 2] {
     let request = scene(name);
     let light = Light::new(&request);
     let reference = reference(&request);
     let mut kept: Vec<Unit> = vec![];
     let mut digest = String::new();
+    let grown: Option<f64> = std::env::var("GATES_REACH_UK").ok().map(|uk| uk.parse().expect("GATES_REACH_UK: µK"));
+    let mut at = request.temperature_uk;
     for pass in 0.. {
         let mut times = vec![];
         let mut timed = |what: &'static str, from: Instant| times.push(format!("{what} {:.3} s", from.elapsed().as_secs_f64()));
@@ -91,7 +94,7 @@ fn closure(name: &str) -> [String; 2] {
         let trap = model.trap(&reference, &model.prepared()).unwrap();
         timed("trap", s);
         let s = Instant::now();
-        let reach = model.reach(&trap, &reference, request.temperature_uk, unseen(MOST_TRAJECTORIES as f64));
+        let reach = model.reach(&trap, &reference, at, unseen(MOST_TRAJECTORIES as f64));
         timed("reach", s);
         let s = Instant::now();
         let units = model.units();
@@ -107,8 +110,11 @@ fn closure(name: &str) -> [String; 2] {
         for (u, g) in units.iter().zip(&gates) {
             writeln!(digest, "{} | {u:?} | exists {} | S {:e} {:016x} | a {:e} {:016x}", model.label(u), g.exists(), g.saturation, g.saturation.to_bits(), g.sweep, g.sweep.to_bits()).unwrap();
         }
-        if failing.is_empty() {
+        if failing.is_empty() && grown.is_none_or(|uk| uk == at) {
             return [digest, errors(name, &model, &units, trap.centre, request.temperature_uk)];
+        }
+        if failing.is_empty() {
+            at = grown.expect("a grown reach");
         }
         kept.extend(failing);
     }
@@ -159,7 +165,7 @@ fn a_far_detuned_light_stays_folded_beside_an_explicit_line() {
 
 /// The closures of the scenes `GATES_SCENES` names (reference scenes by name or native requests by path, `;` between them):
 /// each one's digests written to the folder `GATES_DIGESTS` as `<the scene's file stem>.txt` (the gates) and `.errors.txt` (the
-/// closed model's errors), the times on stderr.
+/// closed model's errors), the times on stderr; with `GATES_REACH_UK` each closure goes on over a reach grown to it (`closure`).
 #[test]
 #[ignore]
 fn the_closure_s_gates() {

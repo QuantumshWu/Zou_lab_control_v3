@@ -23,13 +23,16 @@
 //! quantity's true largest value is the expensive question: every cell along the place of that value has to shrink to their
 //! difference. A range is asked as an extent, never by thresholds closing in on it.)
 //!
-//! All the quantities of a model share one tree of cells: a cell's beams, beam pairs and the parts the units' bounds have in
-//! common (the constant forms' energies and their slopes, the carriers' couplings, resolvents and dressings, the clusters'
-//! force bounds, each ground state's drives' gates, the levels' slope and the atoms' acceleration) are made once, for
-//! whichever quantity asks first, and each quantity halves only the cells it still needs -- one decided on the coarse cells
-//! costs nothing further. A cell has one pair of halves a side (# A cell's sides), each made when a quantity first asks for
-//! it. What the bounds read of the model itself -- its forms' entries that are not zero, with their moduli (`Forms`) -- is
-//! made once for the model.
+//! All the quantities of a model share one tree of cells, and each quantity halves only the cells it still needs -- one
+//! decided on the coarse cells costs nothing further. A cell has one pair of halves a side (# A cell's sides), each made when
+//! a quantity first asks for it. The tree holds of a cell what the reach says of it (`Node`), a few numbers: a cell's regions
+//! -- its beams, beam pairs and the parts the units' bounds have in common (the constant forms' energies and their slopes,
+//! the carriers' couplings, resolvents and dressings, the clusters' force bounds, each ground state's drives' gates, the
+//! levels' slope and the atoms' acceleration) -- are made where a round reads them, once for all the quantities that ask
+//! there, and let go with the round's cell (# Rounds): functions of the cell alone, they are the same whenever made. (Kept in
+//! the tree they were 28 kB a cell: the lin-perp-lin scene's 464 215 cells over a reach of 120 µK held 13 GB, and letting
+//! them go took 39 s of the proof's 55.) What the bounds read of the model itself -- its forms' entries that are not zero,
+//! with their moduli (`Forms`) -- is made once for the model.
 //!
 //! # A cell's sides
 //! The light does not change alike along a cell's three sides. A beam's amplitude is a = e^{ik·r} b: its plane wave turns by
@@ -67,7 +70,7 @@
 use super::eliminate::{CellEnergies, Couplings};
 use super::far::EXCITED;
 use super::{Component, Envelope, Level, Lights, Model, Reach, Trap};
-use crate::field::Geometry;
+use crate::field::{Amplitude, Geometry};
 use crate::linalg::{norm3, Mat, C64};
 use crate::request::{GROUND, STATES};
 use crate::units::{rounding, KT_PER_UK};
@@ -643,14 +646,21 @@ impl Region {
     }
 }
 
-/// A cell of the proofs' tree: its box, its region and its centre point's (none on an unbounded cell), whether its centre is in
-/// the reach, and per side its halves along it once made (none where a half cannot meet the reach).
+/// A cell of the proofs' tree: its box, the bounds of the reach's speeds over it and at its centre (none on an unbounded
+/// cell), whether its centre is in the reach, and per side its halves along it once made (none where a half cannot meet the
+/// reach).
 struct Node {
     cell: Cell,
-    over: Region,
-    at: Option<Region>,
+    over: f64,
+    at: Option<f64>,
     inside: bool,
     halves: [Option<[Option<usize>; 2]>; 3],
+}
+
+/// A cell's regions (module documentation, # Provable extrema): the cell's and its centre point's (none on an unbounded cell).
+struct Regions {
+    over: Region,
+    at: Option<Region>,
 }
 
 /// A cell in a quantity's queue, ordered by its upper bound: the bound, the cell's node, the quantity's value at its centre, and
@@ -688,23 +698,37 @@ struct Cells<'a> {
 }
 
 impl Cells<'_> {
-    /// A cell's node, none where the cell cannot meet the reach: a lower bound of V_prep over it above the reach's level.
-    fn make(&self, cell: Cell) -> Option<Node> {
+    /// A cell's node with its regions, none where the cell cannot meet the reach: a lower bound of V_prep over it above the
+    /// reach's level.
+    fn make(&self, cell: Cell) -> Option<(Node, Regions)> {
         let (model, reach) = (self.model, self.reach);
         let level = reach.minimum + reach.energy;
         // The reach's speeds where V_prep is at least v.
         let speed = |v: f64| reach.speed.min((2.0 * model.hbar_over_mass * (level - v).max(0.0)).sqrt());
         let spans = model.spans(&cell);
-        if !cell.bounded() {
-            return Some(Node { cell, over: model.region(spans, reach.speed), at: None, inside: false, halves: [None; 3] });
-        }
-        let centre = model.potential(cell.centre, &reach.populations, &self.prepared);
-        let below = centre - prepared_slack(&self.envelope, &spans);
-        if below > level {
-            return None;
-        }
-        let at = model.region(spans.iter().map(Span::point).collect(), speed(centre));
-        Some(Node { cell, over: model.region(spans, speed(below)), at: Some(at), inside: centre <= level, halves: [None; 3] })
+        let node = if cell.bounded() {
+            let centre = model.potential(cell.centre, &reach.populations, &self.prepared);
+            let below = centre - prepared_slack(&self.envelope, &spans);
+            if below > level {
+                return None;
+            }
+            Node { cell, over: speed(below), at: Some(speed(centre)), inside: centre <= level, halves: [None; 3] }
+        } else {
+            Node { cell, over: reach.speed, at: None, inside: false, halves: [None; 3] }
+        };
+        let regions = self.over(&node, spans);
+        Some((node, regions))
+    }
+
+    /// A node's regions from its cell's beams.
+    fn over(&self, node: &Node, spans: Vec<Span>) -> Regions {
+        let at = node.at.map(|speed| self.model.region(spans.iter().map(Span::point).collect(), speed));
+        Regions { over: self.model.region(spans, node.over), at }
+    }
+
+    /// A node's regions, made again.
+    fn regions(&self, node: &Node) -> Regions {
+        self.over(node, self.model.spans(&node.cell))
     }
 }
 
@@ -725,8 +749,8 @@ fn prepared_slack(envelope: &Envelope, spans: &[Span]) -> f64 {
 }
 
 /// A quantity on a cell: its value at the centre (−∞ on an unbounded cell, which has none) and its upper bound over the cell.
-fn valued<Q: Fn(&Region) -> f64 + ?Sized>(q: &Q, node: &Node) -> (f64, f64) {
-    (node.at.as_ref().map_or(f64::NEG_INFINITY, |r| q(r)), q(&node.over))
+fn valued<Q: Fn(&Region) -> f64 + ?Sized>(q: &Q, cell: &Regions) -> (f64, f64) {
+    (cell.at.as_ref().map_or(f64::NEG_INFINITY, |r| q(r)), q(&cell.over))
 }
 
 /// What ends a proof (`Model::proven_over`): `settled(the largest upper bound of the cells left, the largest value attained at a
@@ -753,12 +777,12 @@ struct Proof {
 impl Proof {
     /// A quantity's proof at the proofs' first cell (none: no cell meets the reach, the bound is 0); on an unbounded cell, which
     /// is not halved, the bound is the quantity's over it.
-    fn new<Q: Fn(&Region) -> f64 + ?Sized>(q: &Q, first: Option<&Node>) -> Proof {
+    fn new<Q: Fn(&Region) -> f64 + ?Sized>(q: &Q, first: Option<&(Node, Regions)>) -> Proof {
         let mut proof = Proof { queue: BinaryHeap::new(), attained: f64::NEG_INFINITY, halved: HashMap::new(), sighted: f64::NEG_INFINITY, asked: HashSet::new(), bound: None };
         match first {
             None => proof.bound = Some(0.0),
-            Some(node) => {
-                let (centre, upper) = valued(q, node);
+            Some((node, regions)) => {
+                let (centre, upper) = valued(q, regions);
                 if node.cell.bounded() {
                     proof.push(Queued { upper, node: 0, centre, inside: node.inside });
                 } else {
@@ -812,10 +836,9 @@ struct Asked {
 
 /// A cell halved in a round: per side its halves where this round made them (none where a half cannot meet the reach), and
 /// per quantity asking the side it halves the cell along (`side`), whether each half's centre is in the reach, and its values
-/// on each half (`valued`). The halves are on the heap: a round's cells go through the pool's recursion by value, and six
-/// nodes a cell at each level of it took 1.2 to 1.7 MB of a worker's 2 MB stack on 7700 cells (0.3 MB so).
+/// on each half (`valued`).
 struct Halved {
-    made: [Option<[Option<Box<Node>>; 2]>; 3],
+    made: [Option<[Option<Node>; 2]>; 3],
     of: Vec<(usize, [bool; 2], [Option<(f64, f64)>; 2])>,
 }
 
@@ -835,23 +858,31 @@ struct Round<'a, Q: ?Sized> {
 
 impl<Q: Fn(&Region) -> f64 + ?Sized> Round<'_, Q> {
     /// A cell halved for the quantities asking, each along its own side: the halves made where they are not yet, and those
-    /// quantities' values on theirs.
+    /// quantities' values on theirs -- each half's regions made once for them all, those of an earlier round's halves again.
     fn halve(&self, asked: &Asked) -> Halved {
-        let node = &self.nodes[asked.node];
-        let along: [Region; 3] = std::array::from_fn(|a| self.cells.model.along(&node.over, a));
+        let (cells, node) = (self.cells, &self.nodes[asked.node]);
+        let amplitudes = cells.model.light.amplitudes(node.cell.centre);
+        let along: [Region; 3] = std::array::from_fn(|a| cells.model.along(&amplitudes, node, a));
         let sides: Vec<usize> = asked.quantities.iter().map(|&q| side(self.quantities[q], &node.cell, &along)).collect();
-        let made: [Option<[Option<Box<Node>>; 2]>; 3] =
-            std::array::from_fn(|a| (node.halves[a].is_none() && sides.contains(&a)).then(|| node.cell.halves(a).map(|half| self.cells.make(half).map(Box::new))));
+        let mut made: [Option<[Option<Node>; 2]>; 3] = [None, None, None];
+        // Per side asked, each half that meets the reach: whether its centre is in the reach, and its regions.
+        let halves: [Option<[Option<(bool, Regions)>; 2]>; 3] = std::array::from_fn(|a| {
+            sides.contains(&a).then(|| match node.halves[a] {
+                Some(halves) => halves.map(|half| half.map(|half| (self.nodes[half].inside, cells.regions(&self.nodes[half])))),
+                None => {
+                    let [(lower, first), (upper, second)] = node.cell.halves(a).map(|half| cells.make(half).map(|(half, regions)| ((half.inside, regions), half)).unzip());
+                    made[a] = Some([first, second]);
+                    [lower, upper]
+                }
+            })
+        });
         let of = asked
             .quantities
             .iter()
             .zip(&sides)
             .map(|(&q, &a)| {
-                let halves: [Option<&Node>; 2] = match &made[a] {
-                    Some(made) => made.each_ref().map(Option::as_deref),
-                    None => node.halves[a].expect("the halves made in an earlier round").map(|at| at.map(|at| &self.nodes[at])),
-                };
-                (a, halves.map(|half| half.is_some_and(|half| half.inside)), halves.map(|half| half.map(|half| valued(self.quantities[q], half))))
+                let halves = halves[a].as_ref().expect("the halves of a side asked").each_ref().map(Option::as_ref);
+                (a, halves.map(|half| half.is_some_and(|half| half.0)), halves.map(|half| half.map(|half| valued(self.quantities[q], &half.1))))
             })
             .collect();
         Halved { made, of }
@@ -860,12 +891,11 @@ impl<Q: Fn(&Region) -> f64 + ?Sized> Round<'_, Q> {
 
 /// The pace of a proving (module documentation, # Rounds): whether its proofs ask for cells ahead of their order, and how a
 /// round's independent pieces are gone through -- the proofs' own steps (each with what the round before made for it), the
-/// halving of the cells asked for --, and the cells let go in the end.
+/// halving of the cells asked for.
 trait Pace<Q: ?Sized> {
     const AHEAD: bool;
     fn proofs<T: Send, R: Send>(proofs: &mut [Proof], made: Vec<T>, step: impl Fn(&mut Proof, T) -> R + Sync) -> Vec<R>;
     fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved>;
-    fn release(nodes: Vec<Node>);
 }
 
 /// One after another, no cell ahead of a proof's order: the pace of quantities that only their own thread may ask.
@@ -879,9 +909,6 @@ impl<Q: Fn(&Region) -> f64 + ?Sized> Pace<Q> for InTurn {
     fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved> {
         asked.iter().map(|cell| round.halve(cell)).collect()
     }
-    fn release(nodes: Vec<Node>) {
-        drop(nodes)
-    }
 }
 
 /// On all the cores at once, each proof asking ahead of its order: the pace of quantities that any thread may ask.
@@ -894,9 +921,6 @@ impl<Q: Fn(&Region) -> f64 + Sync + ?Sized> Pace<Q> for AtOnce {
     }
     fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved> {
         asked.par_iter().map(|cell| round.halve(cell)).collect()
-    }
-    fn release(nodes: Vec<Node>) {
-        nodes.into_par_iter().for_each(drop)
     }
 }
 
@@ -951,12 +975,12 @@ impl Model {
         self.light.beams.iter().zip(&amplitudes).map(|(beam, a)| Span::over(beam, a.value, a.gradient, cell.half)).collect()
     }
 
-    /// A bounded cell's region along its side `a` alone: the same centre and speeds, its two other half-widths nothing (module
-    /// documentation, # A cell's sides).
-    fn along(&self, over: &Region, a: usize) -> Region {
+    /// A bounded cell's region along its side `a` alone, from the beams' amplitudes at its centre: the same centre and speeds,
+    /// its two other half-widths nothing (module documentation, # A cell's sides).
+    fn along(&self, amplitudes: &[Amplitude], node: &Node, a: usize) -> Region {
         let mut half = [0.0; 3];
-        half[a] = over.half[a];
-        self.region(self.light.beams.iter().zip(&over.spans).map(|(beam, span)| Span::over(beam, span.centre, span.gradient, half)).collect(), over.speed)
+        half[a] = node.cell.half[a];
+        self.region(self.light.beams.iter().zip(amplitudes).map(|(beam, at)| Span::over(beam, at.value, at.gradient, half)).collect(), node.over)
     }
 
     /// A region of the beams `spans` at speeds up to `speed` (`Region`): its beam pairs made, the rest when asked.
@@ -1024,8 +1048,9 @@ impl Model {
         let cells = Cells { model: self, reach, prepared: self.prepared(), envelope: self.envelope(&reach.populations) };
         let half = reach.cell.map(|[lo, hi]| 0.5 * (hi - lo));
         let start = Cell { centre: reach.cell.map(|[lo, hi]| if (hi - lo).is_finite() { 0.5 * (lo + hi) } else { 0.0 }), half };
-        let mut nodes: Vec<Node> = cells.make(start).into_iter().collect();
-        let mut proofs: Vec<Proof> = quantities.iter().map(|q| Proof::new(*q, nodes.first())).collect();
+        let first = cells.make(start);
+        let mut proofs: Vec<Proof> = quantities.iter().map(|q| Proof::new(*q, first.as_ref())).collect();
+        let mut nodes: Vec<Node> = first.into_iter().map(|(node, _)| node).collect();
         // Per proof, the halves the round before made for it.
         let nothing = || -> Vec<Vec<(usize, [Option<Queued>; 2])>> { quantities.iter().map(|_| vec![]).collect() };
         let mut made = nothing();
@@ -1051,7 +1076,7 @@ impl Model {
                     if let Some(new) = new {
                         let at = new.map(|half| {
                             half.map(|half| {
-                                nodes.push(*half);
+                                nodes.push(half);
                                 nodes.len() - 1
                             })
                         });
@@ -1065,7 +1090,6 @@ impl Model {
                 }
             }
         }
-        P::release(nodes);
         proofs.into_iter().map(|proof| proof.bound.expect("a proof left open asks for a cell")).collect()
     }
 }
