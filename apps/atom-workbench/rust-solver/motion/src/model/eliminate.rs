@@ -18,6 +18,12 @@
 //! Ẽ_a = E_a + Σ_d ΔE_a^d. The other carriers dress b's energy (Brillouin–Wigner: in the denominator, to all orders); the folded
 //! channels to the ground states of other clusters (a ∉ C) are the self-energy of the excited states (a strong beam's Autler–Townes
 //! dressing of a probe through a folded Raman pair); the channels to the cluster's own states are its dynamics', none of Σ.
+//! A kept drive's channel is in Σ as a folded one's is, with its explicit coupling for V_d^f: an excited state another
+//! drive V makes explicit is dressed by it wherever b's channel is another Floquet state than that drive's own
+//! (`Model::apart`: a in another cluster, or the two a residual beat apart in one cluster's frames) -- b's response through
+//! it is U/(β̃ − |V|²/d_R), d_R = z − Ẽ_a − δ_d the two-photon distance of the Raman pair (far.rs, # A fold onto an
+//! explicit state). Without it the folded channel's shift is wrong by |V|²/(β d_R) and its rate by twice that (three
+//! levels, V = 2Γ, β = 27.4Γ, on resonance: −0.53 % and −1.06 %; with it 1.6e-4), without a bound at d_R → 0.
 //! Within a carrier the dressing takes T̄_d, the beams' coherence kept within a polarization unit (beams of parallel fields:
 //! a standing wave's intensity pattern) and averaged between units (SPEC §1.4): V_d V_d† → Σ_u v_u v_u†, v_u = Σ_{l∈u} a_l X^f_l,
 //! and of its frequency's constant form in H the beam pairs of one unit alone -- everything its light does to the
@@ -108,6 +114,10 @@ pub(crate) struct Carrier {
     /// The same on its field's basis (field.rs), U^f_k (STATES × STATES): X^f_l = Σ_k γ_lk U^f_k, the responses' sources.
     pub(crate) basis: Vec<Mat>,
     pub(crate) units: Vec<usize>,
+    /// Its explicit drives' couplings per beam (STATES × STATES), and per ground state whether it has one from it: the
+    /// kept channels of the excited states' self-energy (module documentation, # The response).
+    pub(crate) explicit: Vec<Mat>,
+    pub(crate) kept: [bool; GROUND],
 }
 
 impl Carrier {
@@ -121,7 +131,9 @@ impl Carrier {
                 continue;
             }
             let f = &model.light.frequencies[frequency];
-            let at_the_atom = |m: &Mat| Mat::from_fn(STATES, STATES, |e, g| if e >= GROUND && g < GROUND && model.level(component, e, g) == Level::Atom { m[(e, g)] } else { C64::ZERO });
+            let at_level = |m: &Mat, level: Level| Mat::from_fn(STATES, STATES, |e, g| if e >= GROUND && g < GROUND && model.level(component, e, g) == level { m[(e, g)] } else { C64::ZERO });
+            let at_the_atom = |m: &Mat| at_level(m, Level::Atom);
+            let explicit: Vec<Mat> = tone.couplings[0].iter().map(|m| at_level(m, Level::Explicit)).collect();
             let mut units: Vec<usize> = vec![];
             for (j, e) in f.fields.iter().enumerate() {
                 let unit = (0..j).find(|&i| crate::field::parallel(&f.fields[i], e)).map_or(j, |i| units[i]);
@@ -136,6 +148,8 @@ impl Carrier {
                 folded: tone.couplings[0].iter().map(at_the_atom).collect(),
                 basis: tone.basis[0].iter().map(at_the_atom).collect(),
                 units,
+                kept: std::array::from_fn(|g| explicit.iter().any(|m| (GROUND..STATES).any(|e| m[(e, g)] != C64::ZERO))),
+                explicit,
             });
         }
         out
@@ -309,7 +323,6 @@ impl Model {
             }
             e
         };
-        let outside: Vec<usize> = (0..GROUND).filter(|&a| self.membership[a] != cluster).collect();
         let (mut first, mut second) = (vec![], vec![]);
         for (ci, carrier) in self.carriers.iter().enumerate() {
             let n = carrier.basis.len();
@@ -324,12 +337,17 @@ impl Model {
                 let mut z = dressed(b, Some(ci));
                 z[0] += carrier.detuning;
                 let mut m = shifted(&k, &z);
-                // The self-energy of the folded channels to the other clusters' ground states.
+                // The self-energy of the folded channels to the other clusters' ground states, and of the kept ones that are
+                // another Floquet state than this response's (module documentation, # The response).
                 for (d, other) in self.carriers.iter().enumerate() {
                     if !lit[d] {
                         continue;
                     }
-                    for &a in &outside {
+                    for a in 0..GROUND {
+                        let (folded, explicit) = (self.membership[a] != cluster, other.kept[a] && self.apart(b, &carrier.beat, a, &other.beat));
+                        if !folded && !explicit {
+                            continue;
+                        }
                         let mut den: Vec<f64> = z.iter().zip(dressed(a, None)).map(|(x, y)| x - y).collect();
                         den[0] -= other.detuning;
                         let inverse = jet::reciprocal(&den);
@@ -339,7 +357,7 @@ impl Model {
                             for &l in &group {
                                 let a_l = coefficient(other.beams[l]);
                                 for x in 0..EXCITED {
-                                    let xv = other.folded[l][(GROUND + x, a)];
+                                    let xv = if folded { other.folded[l][(GROUND + x, a)] } else { C64::ZERO } + if explicit { other.explicit[l][(GROUND + x, a)] } else { C64::ZERO };
                                     if xv != C64::ZERO {
                                         for p in 0..np {
                                             v[p][x] += a_l[p] * xv;
@@ -391,6 +409,29 @@ impl Model {
             second.push(out2);
         }
         Responses { first, second, work }
+    }
+
+    /// Whether the channel of a component at the exact frequency `to` into ground state a is another Floquet state than
+    /// the one a component at `from` drives ground state b from (module documentation, # The response): the two states in
+    /// different clusters -- no frame joins them --, or in one cluster's frames a residual beat θ_b + ν − θ_a − ν' that is
+    /// not exactly zero apart. Where it is zero the channel is the cluster's own dynamics.
+    pub(crate) fn apart(&self, b: usize, from: &Beat, a: usize, to: &Beat) -> bool {
+        let c = &self.clusters[self.membership[b]];
+        match (c.states.iter().position(|&s| s == b), c.states.iter().position(|&s| s == a)) {
+            (Some(pb), Some(pa)) => c.frames[pb].plus(1, from) != c.frames[pa].plus(1, to),
+            _ => true,
+        }
+    }
+
+    /// Per excited state (less GROUND) its kept drives: (carrier, ground state) of each explicit drive into it -- the
+    /// legs of the Raman pairs a drive folded onto it makes (far.rs, # A fold onto an explicit state).
+    pub(crate) fn legs_made(&self) -> Vec<Vec<(usize, usize)>> {
+        (GROUND..STATES)
+            .map(|e| {
+                let kept = self.carriers.iter().enumerate().flat_map(|(d, cc)| (0..GROUND).filter(move |&a| cc.explicit.iter().any(|m| m[(e, a)] != C64::ZERO)).map(move |a| (d, a)));
+                kept.collect()
+            })
+            .collect()
     }
 
     /// A frequency's carrier, where its co-rotating component is one.
@@ -778,9 +819,12 @@ impl Model {
     }
 
     /// A drive's motion at a sample (SPEC §1.5; units.rs `Measured`): how far its two levels are there from the bare ones,
-    /// δΔ = (E_e − E_b)(r) − (E_e − E_b)₀ + w, with its strongest beam's Doppler shift w = (ħ/m)(q·κ + q²/2) at the sample's
-    /// momentum (module documentation, # First-order Doppler; q = k_l, a counter-rotating component's −k_l); and the rate
-    /// |v·∇(E_e − E_b) + q·v̇| at which its detuning moves, v̇ the force on the state at the point over m.
+    /// δΔ = (E_e − E_b)(r) − (E_e − E_b)₀ + w + Σ_ee, with its strongest beam's Doppler shift w = (ħ/m)(q·κ + q²/2) at the
+    /// sample's momentum (module documentation, # First-order Doppler; q = k_l, a counter-rotating component's −k_l) and
+    /// its excited state's self-energy by the kept drives into it, Σ_ee = Σ |V[e, a]|²/(E_b + ν − E_a − δ_d) over those
+    /// whose channel is another Floquet state (# The response: what a bare fold's constant response leaves out of the
+    /// Raman pair, its series' first order with the rest); and the rate |v·∇(E_e − E_b) + q·v̇| at which its detuning
+    /// moves, v̇ the force on the state at the point over m.
     pub(crate) fn drive_motion(&self, component: Component, excited: usize, ground: usize, at: &Measured) -> (f64, f64) {
         let side = component.counter as usize;
         let beams = &self.light.frequencies[component.frequency].beams;
@@ -788,7 +832,14 @@ impl Model {
         let q = self.light.beams[strongest].wave_vector().map(|k| if component.counter { -k } else { k });
         let h = &at.energies;
         let v: [f64; 3] = at.sample.at.kappa.map(|k| k * self.hbar_over_mass);
-        let moved = (h[0][excited] - self.energies[excited]) - (h[0][ground] - self.energies[ground]) + self.hbar_over_mass * (dot3(q, at.sample.at.kappa) + 0.5 * dot3(q, q));
+        let mut moved = (h[0][excited] - self.energies[excited]) - (h[0][ground] - self.energies[ground]) + self.hbar_over_mass * (dot3(q, at.sample.at.kappa) + 0.5 * dot3(q, q));
+        let (from, nu) = (self.frequency(component), self.tones[component.frequency].nu[side]);
+        for &(d, a) in &self.legs[excited - GROUND] {
+            let other = &self.carriers[d];
+            if self.apart(ground, &from, a, &other.beat) {
+                moved += self.kept_coupling(d, excited, a, &at.amplitudes).norm_sqr() / (h[0][ground] + nu - h[0][a] - other.detuning);
+            }
+        }
         let rate: f64 = (0..3).map(|i| v[i] * (h[1 + i][excited] - h[1 + i][ground])).sum::<f64>() + self.hbar_over_mass * dot3(q, at.force);
         (moved, rate.abs())
     }
@@ -796,8 +847,9 @@ impl Model {
     /// A drive folded with the levels at the atom, its small parameters at a sample (SPEC §1.5; units.rs `Measured`): its own
     /// saturation s = 2|R_c[e,b]|² at the point (R = Σ_l a_l T̃_l), its sweep a = |v·∇(E_e − E_b) + k·v̇|/|ΔE|² (ΔE its
     /// denominator there, `drive_motion`; the one gate, units.rs `gate`), its Doppler order's (w‖T2‖/‖T‖)², and its ground
-    /// state's population p_b; None where the sample's cluster does not hold its ground state or the model no such fold.
-    pub(crate) fn drive_parameters(&self, unit: &Unit, at: &Measured) -> Option<(f64, f64, f64, f64)> {
+    /// state's population p_b, with the response R_c[e,b] itself; None where the sample's cluster does not hold its ground
+    /// state or the model no such fold.
+    pub(crate) fn drive_parameters(&self, unit: &Unit, at: &Measured) -> Option<(f64, f64, f64, f64, C64)> {
         let Unit::Drive { component, excited, ground } = *unit else { return None };
         let c = &self.clusters[at.sample.cluster];
         let pb = c.states[..c.ground].iter().position(|&s| s == ground)?;
@@ -807,7 +859,7 @@ impl Model {
         let (moved, rate) = self.drive_motion(component, excited, ground, at);
         let own = C64::new(self.energies[excited] - self.energies[ground] - self.carriers[ci].detuning + moved, 0.5 * self.decay[(excited - GROUND, excited - GROUND)].re).abs();
         let doppler = at.doppler[ci].get_or_init(|| self.doppler_sizes(&at.plan, &at.near, ci, at.sample.at.kappa))[pb];
-        Some((s, gate(0.0, own, rate).sweep, doppler * doppler, at.populations[ground]))
+        Some((s, gate(0.0, own, rate).sweep, doppler * doppler, at.populations[ground], r))
     }
 
     /// The error at a sample of a drive folded with the levels at the atom (SPEC §1.5; units.rs, # The fold's order): its
@@ -815,9 +867,9 @@ impl Model {
     /// the populations and on T, where its cluster's fold has no other order; where it has, nothing at the second order
     /// (the order is the cluster's own unit's, `Unit::Second`), and at the fourth what it leaves: `ORDER_RATES` s² p_b on
     /// the populations and (`ORDER_FORCE` s² + the cluster's ground levels' spread over the drive's distance times s)
-    /// p_b on T.
-    pub(crate) fn drive_error(&self, unit: &Unit, at: &Measured) -> UnitError {
-        let Some((s, sweep, doppler, p)) = self.drive_parameters(unit, at) else { return UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 } };
+    /// p_b on T. With the drive's response there, where the cluster holds it (`pair_error` reads it).
+    pub(crate) fn drive_error(&self, unit: &Unit, at: &Measured) -> (UnitError, Option<C64>) {
+        let Some((s, sweep, doppler, p, response)) = self.drive_parameters(unit, at) else { return (UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 }, None) };
         let cluster = at.sample.cluster;
         let (rates, force) = match (self.fourth[cluster], self.fold_frequency(cluster)) {
             (Some(_), _) => {
@@ -831,7 +883,86 @@ impl Model {
             (None, Some(_)) => (0.0, 0.0),
             (None, None) => (s, s),
         };
-        UnitError { parameter: s, population: rates * p, temperature: (force + doppler + sweep) * p }
+        (UnitError { parameter: s, population: rates * p, temperature: (force + doppler + sweep) * p }, Some(response))
+    }
+
+    /// A carrier's explicit coupling e ← a at a point, Σ_l a_l X_l[e, a].
+    pub(crate) fn kept_coupling(&self, carrier: usize, e: usize, a: usize, amplitudes: &[Amplitude]) -> C64 {
+        let cc = &self.carriers[carrier];
+        cc.beams.iter().zip(&cc.explicit).map(|(&l, m)| amplitudes[l].value * m[(e, a)]).sum()
+    }
+
+    /// The error at a sample of the Raman pairs that a drive U (e ← b at ν) folded onto an explicit state e makes with
+    /// the kept drives V_a into e (far.rs, # A fold onto an explicit state; SPEC §1.5): the pair's next order, as each of
+    /// its two states reads it, `units::PAIR` m².
+    /// - The sample in e's cluster: the cluster's state holds b's dressed state by m² = |U|² p_e/d_R² -- the excited
+    ///   amplitude times U across the two-photon distance d_R = z_e − E_b − ν of the ground states that read e, the
+    ///   nearest of them. The self-energy is |U|²/(d_R + λ) at the reading state's own eigenvalue λ = −|V|²/ε̃, ε̃ =
+    ///   ε − iΓ/2, of which the generator's |U|²/d_R is the first term: the kept line's response −|V|²/(ε̃ + Σ) is off by
+    ///   |U V|² |V|²/(ε̃³ d_R²), its rate by m² (3ε² − Γ²/4)/(ε² + Γ²/4) of itself and its shift by m² (ε² − 3Γ²/4)/(ε² +
+    ///   Γ²/4), both at most 3 m² (`units::PAIR`), booked on the populations and on T (three levels, V = 0.5Γ, ε = Γ,
+    ///   U = 0.2Γ: the rate within it wherever the gate holds, units.rs' test). The distance is what is left of |d_R|
+    ///   by the kept drives' own shifts of the two ground levels (`kept_lift`: λ, as the gate takes it, units.rs
+    ///   `Model::pair_gate`). The shift is read at the cluster's mean (model.rs
+    ///   `Model::read`): a ground state `off` from it reads |U|² off/d_R² too much or too little of e's level, a
+    ///   relative error of the kept lines' response of that over their nearest denominator |ε̃| -- 2 of it times e's
+    ///   share of the state's rates, on the populations and T, and one of it times the kept drives' share of its
+    ///   light shifts, on T, as a bare fold's denominator's first order is booked (units.rs `Model::bare_error`).
+    /// - The sample in b's cluster: b's response R[e, b] continues through each kept drive into a's dressed state,
+    ///   m² = |R[e, b]|² |V_a|²/d_a², d_a = E_b + ν − E_a − δ_d, by the same bound `units::PAIR` m² p_b (the response's
+    ///   own value, with the levels at the atom, has the pair in its self-energy; with the bare ones, in the first
+    ///   order of its denominator, `drive_motion`).
+    pub(crate) fn pair_error(&self, component: Component, excited: usize, ground: usize, response: Option<C64>, at: &Measured) -> UnitError {
+        let side = component.counter as usize;
+        let (from, nu, h) = (self.frequency(component), self.tones[component.frequency].nu[side], &at.energies[0]);
+        let legs: Vec<(usize, usize)> = self.legs[excited - GROUND].iter().copied().filter(|&(d, a)| self.apart(ground, &from, a, &self.carriers[d].beat)).collect();
+        let mut error = UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 };
+        if legs.is_empty() {
+            return error;
+        }
+        let p = &at.populations;
+        // A ground level's shift by its kept drives at the point, at most: each one's coupling v, and v² across its
+        // own denominator.
+        let lift = |s: usize| -> f64 {
+            let kept = self.legs.iter().enumerate().flat_map(|(x, of)| of.iter().filter(move |leg| leg.1 == s).map(move |leg| (GROUND + x, leg.0)));
+            kept.map(|(x, d)| {
+                let v = self.kept_coupling(d, x, s, &at.amplitudes).abs();
+                v.min(v * v / C64::new(h[x] - h[s] - self.carriers[d].detuning, 0.5 * self.decay[(x - GROUND, x - GROUND)].re).abs())
+            })
+            .sum()
+        };
+        if let Some(r) = response {
+            for &(d, a) in &legs {
+                let apart = (h[ground] + nu - h[a] - self.carriers[d].detuning).abs() - lift(ground) - lift(a);
+                let s = super::units::PAIR * 0.5 * gate((r * self.kept_coupling(d, excited, a, &at.amplitudes)).abs(), apart.max(0.0), 0.0).saturation;
+                error.parameter = error.parameter.max(s);
+                error.population += s * p[ground];
+                error.temperature += s * p[ground];
+            }
+        }
+        let c = &self.clusters[at.sample.cluster];
+        if let Some(pe) = c.states.iter().position(|&s| s == excited).filter(|_| c.ground > 0 && p[excited] > 0.0) {
+            let beams = &self.light.frequencies[component.frequency].beams;
+            let u: C64 = beams.iter().zip(&self.tones[component.frequency].couplings[side]).map(|(&l, x)| if component.counter { at.amplitudes[l].value.conj() } else { at.amplitudes[l].value } * x[(excited, ground)]).sum();
+            let frame = |place: usize| self.axes.omega(&c.frames[place]);
+            let read = self.read(c, pe, h, true);
+            let each = |pa: usize| frame(pe) - frame(pa) + h[c.states[pa]];
+            let nearest = (0..c.ground).map(|pa| ((each(pa) - h[ground] - nu).abs() - lift(c.states[pa]) - lift(ground)).max(0.0)).fold(f64::INFINITY, f64::min);
+            let off = (0..c.ground).map(|pa| (each(pa) - read).abs()).fold(0.0, f64::max);
+            let s = super::units::PAIR * 0.5 * gate(u.abs() * p[excited].sqrt(), nearest, 0.0).saturation;
+            // The kept lines through e: their nearest denominator, and their coupling's energy in the state.
+            let gamma = self.decay[(excited - GROUND, excited - GROUND)].re;
+            let own = (0..c.ground).map(|pa| C64::new(h[excited] - each(pa), 0.5 * gamma).abs()).fold(f64::INFINITY, f64::min);
+            let kept: f64 = (0..c.ground).map(|pa| self.legs[excited - GROUND].iter().filter(|leg| leg.1 == c.states[pa]).map(|&(d, a)| self.kept_coupling(d, excited, a, &at.amplitudes)).sum::<C64>().abs() * (p[excited] * p[c.states[pa]]).sqrt()).sum();
+            let epsilon = gate(0.0, nearest, u.norm_sqr() * off).sweep / own;
+            let held: f64 = p[..GROUND].iter().sum();
+            let share = |of: f64, all: f64| if all > 0.0 { of / all } else { 0.0 };
+            let (rates, shifts) = (2.0 * epsilon * share(p[excited], at.rates) * held, epsilon * share(kept, at.shifts) * held);
+            error.parameter = error.parameter.max(s);
+            error.population += s + rates;
+            error.temperature += s + rates + shifts;
+        }
+        error
     }
 
     /// An explicit state's part of a class's second moment's rate (photon.rs, # The absorbed light's momentum): its photons'
@@ -977,7 +1108,7 @@ mod tests {
         let sample = Sample { cluster, at, psi: vec![C64::ONE] };
         let unit = Unit::Drive { component: Component { frequency: probe, counter: false }, excited: e, ground: b };
         let measured = model.measured(&sample, None);
-        let (_, sweep, _, _) = model.drive_parameters(&unit, &measured).unwrap();
+        let (_, sweep, _, _, _) = model.drive_parameters(&unit, &measured).unwrap();
         let force = measured.force;
         let k = model.light.beams[model.carriers[0].beams[0]].wave_vector();
         let shift = model.hbar_over_mass * (dot3(k, at.kappa) + 0.5 * dot3(k, k));

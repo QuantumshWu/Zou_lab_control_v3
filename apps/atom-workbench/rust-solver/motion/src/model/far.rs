@@ -21,15 +21,36 @@
 //!
 //! ```text
 //! ground   (a ← b):  −½ (A†R_B + R_A†B)_ab            the elimination's contraction of the two legs (eliminate.rs `shift`)
-//! excited  (f ← e):  ½ Σ_b B_fb A_eb* [1/(E_e − E_b − ν_A) + 1/(E_f − E_b − ν_B)]
+//! excited  (f ← e):  ½ Σ_b B_fb A_eb* [1/(z_e − E_b − ν_A) + 1/(z_f − E_b − ν_B)]
 //! ```
 //!
-//! -- the excited block the van Vleck mean through the ground states, which do not decay (real denominators). The ground
+//! -- the excited block the van Vleck mean through the ground states, which do not decay (real denominators), each
+//! excited state at the energy z it is read at (# A fold onto an explicit state). The ground
 //! block holds the width: on a line of detuning Δ it is the dispersive −|V|²Δ/(Δ² + Γ²/4), which the real-denominator form
 //! −|V|²/Δ misses by (Γ/2Δ)² of itself; the two legs' responses are the jumps' own (below), so a fold's shift and its
 //! scattering are one response's. Both blocks are Hermitian forms: C(A, B)† = C(B, A), at the opposite beat. One component,
 //! A = B at ν: its static shift C(V, V). Its error is the fold's: O(m²) of the shift (m its size over its distance,
 //! units.rs), and what its bare levels leave out.
+//!
+//! # A fold onto an explicit state
+//! Eliminating the ground state b of a folded drive U (e ← b at ν) gives the excited state the self-energy
+//! |U|²/(z − E_b − ν) at the energy z of the state that reads it (the exact second order in U is the reading states'
+//! resolvent at b's dressed energy). An excited state that is folded itself is read at its own energy, z = E_e: the
+//! distance is the drive's one-photon β = E_e − E_b − ν. An explicit one is read by its cluster: its amplitude follows the
+//! cluster's ground states a, which a kept drive at ν_V holds ε = E_e − E_a − ν_V from it, and turns with them,
+//! z = E_a + ν_V -- the distance is the two-photon one of the Raman pair (a, b) through e,
+//!
+//! ```text
+//! d_R = E_a + ν_V − E_b − ν = β − ε          z_e = θ_e + ⟨E_a − θ_a⟩_a   (model.rs `Model::read`)
+//! ```
+//!
+//! not β. On three levels (g –V→ e ←U– b, Γ = 1, V = 0.5, ε = 1, U = 0.2; exact: the 3 × 3 spectrum) the kept line's
+//! rate with |U|²/β is 14 % low at β = 0.5, 38 % at 0.1, 82 % at 0.02, with a pole at β = 0 where nothing is resonant;
+//! with the complex one-photon |U|²/(β − iΓ/2) -- the reading of the transient, z = E_e − iΓ/2, which lives 1/Γ -- 16 to
+//! 18 % low; with |U|²/d_R within 0.1 to 3.8 %, the pair's own next order. The pole of 1/d_R is the Raman resonance, where
+//! the pair is no fold: the drive's gate is the pair's there, of size |U V| over the nearer one-photon distance across
+//! |d_R| (units.rs `Model::pair_gate`), and its error the pair's (eliminate.rs `Model::pair_error`). Where |β| ≫ |ε| the
+//! two distances are one.
 //!
 //! # The static form of a frequency, per pair of beams
 //! The outside form O(E) = Σ_pq E_p* E_q O_pq (the request's nine matrices as a Hermitian form in the spherical components:
@@ -134,8 +155,10 @@ pub(crate) struct Fold<'a> {
 /// the bare levels), on all the states (STATES × STATES): the ground block the contraction of the two legs' folded couplings
 /// with their bare responses (eliminate.rs `shift` -- the responses at the atom of the drives folded there contract with the
 /// same couplings, assemble.rs); the excited block through the ground states with the bare energies `e`, each bare drive's
-/// own denominator against the other leg's folded coupling (the drives folded at the atom bring theirs there, assemble.rs).
-pub(crate) fn second_order(e: &[f64], a: Fold, nu_a: f64, b: Fold, nu_b: f64) -> Mat {
+/// own denominator against the other leg's folded coupling (the drives folded at the atom bring theirs there, assemble.rs),
+/// its excited state at the energy it is read at (`read`, per excited state less GROUND; module documentation, # A fold
+/// onto an explicit state).
+pub(crate) fn second_order(e: &[f64], read: &[f64], a: Fold, nu_a: f64, b: Fold, nu_b: f64) -> Mat {
     let mut out = Mat::zeros(STATES, STATES);
     for x in 0..GROUND {
         for y in 0..GROUND {
@@ -149,11 +172,11 @@ pub(crate) fn second_order(e: &[f64], a: Fold, nu_a: f64, b: Fold, nu_b: f64) ->
                 // Each half holds one drive's own denominator: the emitted leg's g ← w, the absorbed leg's f ← w.
                 let emitted = b.coupled[(f, w)] * a.bare[(g, w)].conj();
                 if emitted != C64::ZERO {
-                    z += emitted * (0.5 / (e[g] - e[w] - nu_a));
+                    z += emitted * (0.5 / (read[g - GROUND] - e[w] - nu_a));
                 }
                 let absorbed = b.bare[(f, w)] * a.coupled[(g, w)].conj();
                 if absorbed != C64::ZERO {
-                    z += absorbed * (0.5 / (e[f] - e[w] - nu_b));
+                    z += absorbed * (0.5 / (read[f - GROUND] - e[w] - nu_b));
                 }
             }
             out[(f, g)] = z;
@@ -277,6 +300,8 @@ pub(crate) struct Tone {
     k0: Mat,
     energies: Vec<f64>,
     emission: [Mat; 3],
+    /// Per excited state (less GROUND) the energy its folds' excited block is read at (model.rs `Model::read_made`).
+    read: Vec<f64>,
 }
 
 /// The bare energies E_s: H0's diagonal (H0 is diagonal in the model basis, request.rs).
@@ -356,14 +381,17 @@ impl Tone {
             k0,
             energies: energies(request),
             emission: request.emission.clone(),
+            read: energies(request)[GROUND..].to_vec(),
         };
         tone.couplings = [0, 1].map(|c| tone.per_beam(c, &tone.basis[c]));
         Ok(tone)
     }
 
-    /// The same light with each drive (component [co, counter], excited, ground) at its level (model.rs `Level`).
-    pub(crate) fn folded(&self, level: &dyn Fn(usize, usize, usize) -> Level) -> Tone {
+    /// The same light with each drive (component [co, counter], excited, ground) at its level (model.rs `Level`), each
+    /// excited state read at `read` (model.rs `Model::read_made`).
+    pub(crate) fn folded(&self, level: &dyn Fn(usize, usize, usize) -> Level, read: &[f64]) -> Tone {
         let mut tone = self.clone();
+        tone.read = read.to_vec();
         tone.fold(level);
         tone
     }
@@ -405,8 +433,8 @@ impl Tone {
         let mut a = self.plain.clone();
         for k in 0..r {
             for kk in 0..r {
-                a[k * r + kk].add_scaled(C64::ONE, &second_order(&self.energies, self.leg(0, k), self.nu[0], self.leg(0, kk), self.nu[0]));
-                a[k * r + kk].add_scaled(C64::ONE, &second_order(&self.energies, self.leg(1, kk), self.nu[1], self.leg(1, k), self.nu[1]));
+                a[k * r + kk].add_scaled(C64::ONE, &second_order(&self.energies, &self.read, self.leg(0, k), self.nu[0], self.leg(0, kk), self.nu[0]));
+                a[k * r + kk].add_scaled(C64::ONE, &second_order(&self.energies, &self.read, self.leg(1, kk), self.nu[1], self.leg(1, k), self.nu[1]));
             }
         }
         self.pairs = per_pair(self, self, &a);
@@ -439,8 +467,8 @@ pub(crate) fn constant(to: &Tone, from: &Tone) -> Vec<Mat> {
                     }
                 }
             }
-            m.add_scaled(C64::ONE, &second_order(&to.energies, to.leg(0, k), to.nu[0], from.leg(0, kk), from.nu[0]));
-            m.add_scaled(C64::ONE, &second_order(&to.energies, from.leg(1, kk), from.nu[1], to.leg(1, k), to.nu[1]));
+            m.add_scaled(C64::ONE, &second_order(&to.energies, &to.read, to.leg(0, k), to.nu[0], from.leg(0, kk), from.nu[0]));
+            m.add_scaled(C64::ONE, &second_order(&to.energies, &to.read, from.leg(1, kk), from.nu[1], to.leg(1, k), to.nu[1]));
             m
         })
         .collect()
@@ -528,7 +556,7 @@ mod tests {
             let v = coupling(scale, 7);
             let r = response(&k0, &e, &v, nu);
             let leg = Fold { coupled: &v, bare: &v, response: &r };
-            let f = second_order(&e, leg, nu, leg, nu);
+            let f = second_order(&e, &e[GROUND..], leg, nu, leg, nu);
             let floquet = Mat::from_fn(STATES, STATES, |x, y| {
                 let d = if x == y { C64::real(if x < GROUND { e[x] } else { e[x] - nu }) } else { C64::ZERO };
                 d + if x >= GROUND && y < GROUND { v[(x, y)] } else if x < GROUND && y >= GROUND { v[(y, x)].conj() } else { C64::ZERO }
@@ -574,7 +602,7 @@ mod tests {
         let (nu_a, nu_b) = (310.0, 345.0);
         let (ra, rb) = (response(&k0, &e, &a, nu_a), response(&k0, &e, &b, nu_b));
         let (la, lb) = (Fold { coupled: &a, bare: &a, response: &ra }, Fold { coupled: &b, bare: &b, response: &rb });
-        let form = second_order(&e, la, nu_a, lb, nu_b);
+        let form = second_order(&e, &e[GROUND..], la, nu_a, lb, nu_b);
         for x in 0..GROUND {
             for y in 0..GROUND {
                 let (mut closed, mut size) = (C64::ZERO, 0.0);
@@ -587,7 +615,7 @@ mod tests {
                 assert!((form[(x, y)] - closed).abs() <= rounding(2 * EXCITED + 6) * size, "({x}, {y}): {:?} against {closed:?}", form[(x, y)]);
             }
         }
-        let own = second_order(&e, lb, nu_b, lb, nu_b);
+        let own = second_order(&e, &e[GROUND..], lb, nu_b, lb, nu_b);
         let (mut dispersive, mut real) = (0.0, 0.0);
         for w in 0..EXCITED {
             let (delta, v2) = (e[GROUND + w] - e[0] - nu_b, b[(GROUND + w, 0)].norm_sqr());

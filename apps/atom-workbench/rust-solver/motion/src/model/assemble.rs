@@ -1488,8 +1488,8 @@ impl Model {
 
     /// The blocks of the excited states that an elimination on a cluster can mix, per excited state its block: the classes of
     /// the couplings among them in K + Σ (eliminate.rs) under any light -- the base's, every far form's and the decay's entries,
-    /// and the self-energy's v v† of each folded channel to a ground state outside the cluster. A response's support is a union of
-    /// blocks: the factorization of K + Σ − z and its solves leave every other entry exactly zero.
+    /// and the self-energy's v v† of each folded channel to a ground state outside the cluster and of each kept channel. A
+    /// response's support is a union of blocks: the factorization of K + Σ − z and its solves leave every other entry exactly zero.
     pub(crate) fn mix(&self, cluster: usize) -> Vec<usize> {
         let mut block: Vec<usize> = (0..EXCITED).collect();
         let join = |block: &mut Vec<usize>, a: usize, b: usize| {
@@ -1507,8 +1507,9 @@ impl Model {
             }
         }
         for cc in &self.carriers {
-            for s in (0..GROUND).filter(|&s| self.membership[s] != cluster) {
-                let reached: Vec<usize> = (0..EXCITED).filter(|&e| cc.folded.iter().any(|x| x[(GROUND + e, s)] != C64::ZERO)).collect();
+            for s in 0..GROUND {
+                let outside = self.membership[s] != cluster;
+                let reached: Vec<usize> = (0..EXCITED).filter(|&e| (outside && cc.folded.iter().any(|x| x[(GROUND + e, s)] != C64::ZERO)) || cc.explicit.iter().any(|x| x[(GROUND + e, s)] != C64::ZERO)).collect();
                 for &e in &reached {
                     join(&mut block, reached[0], e);
                 }
@@ -1587,18 +1588,22 @@ impl Model {
         }
         // The explicit states' van Vleck shift by the drives folded at the atom: each half its own drive's denominator there
         // against the other leg's folded coupling (far.rs `second_order`, where the bare drives' halves are),
-        // ½ Σ_b (U^a_k[e,b] U^f_k'[f,b]*/(E_e − E_b − δ) + U^f_k[e,b] U^a_k'[f,b]*/(E_f − E_b − δ)).
+        // ½ Σ_b (U^a_k[e,b] U^f_k'[f,b]*/(z_e − E_b − δ) + U^f_k[e,b] U^a_k'[f,b]*/(z_f − E_b − δ)), each explicit state at
+        // the energy z the cluster's ground states read it at (model.rs `Model::read`, with the levels at the atom): the
+        // two-photon distance of the Raman pair through it (far.rs, # A fold onto an explicit state).
         for (i, &[c, kl, kr, x, y]) in near.shifts.iter().enumerate() {
             let cc = &self.carriers[c];
             let folded = &self.tones[cc.frequency].coupled[0];
             let (e, f) = (states[x], states[y]);
             let mut shift = vec![C64::ZERO; energies.len()];
+            let read = |place: usize| -> Vec<f64> { energies.iter().enumerate().map(|(part, h)| self.read(cluster, place, h, part == 0)).collect() };
+            let read = [read(x), read(y)];
             for b in 0..GROUND {
-                for (s, v) in [(e, cc.basis[kr][(e, b)] * folded[kl][(f, b)].conj()), (f, folded[kr][(e, b)] * cc.basis[kl][(f, b)].conj())] {
+                for (z, v) in [(&read[0], cc.basis[kr][(e, b)] * folded[kl][(f, b)].conj()), (&read[1], folded[kr][(e, b)] * cc.basis[kl][(f, b)].conj())] {
                     if v == C64::ZERO {
                         continue;
                     }
-                    let mut gap: Vec<f64> = energies.iter().map(|h| h[s] - h[b]).collect();
+                    let mut gap: Vec<f64> = z.iter().zip(energies).map(|(z, h)| z - h[b]).collect();
                     gap[0] -= cc.detuning;
                     for (z, r) in shift.iter_mut().zip(jet::reciprocal(&gap)) {
                         *z += v * (0.5 * r);

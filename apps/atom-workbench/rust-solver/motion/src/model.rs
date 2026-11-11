@@ -160,8 +160,10 @@ pub enum Unit {
     /// levels: its shift and its jumps are constants (far.rs). Kept: its fold takes the levels at the atom (`Unit::Drive`).
     Bare { component: Component, excited: usize, ground: usize },
     /// The same drive folded with the levels at the atom (eliminate.rs: the dressed response, tabulated). Kept: the excited
-    /// state is explicit and the drive enters the generator as it is. Folded into a state another kept drive makes explicit, it
-    /// is a pair of channels through that state, and its error is that pair's (units.rs).
+    /// state is explicit and the drive enters the generator as it is. Folded onto a state another kept drive makes explicit, it
+    /// is one leg of a Raman pair through that state: its value, its gate and its error are that pair's, across the
+    /// two-photon distance (far.rs, # A fold onto an explicit state; units.rs `Model::pair_gate`; eliminate.rs
+    /// `Model::pair_error`) -- at either level, the bare fold's too.
     Drive { component: Component, excited: usize, ground: usize },
     /// The second order of the fold at the atom of the cluster that holds ground state `ground` (assemble.rs, # The fourth
     /// order): its drives folded at the atom leave out the fourth-order light shift and the jumps' next order. Kept: that
@@ -317,8 +319,10 @@ pub struct Model {
     pub(crate) clusters: Vec<Cluster>,
     /// Per ground state its cluster.
     pub(crate) membership: [usize; GROUND],
-    /// The carriers: the co-rotating components with a drive not bare (eliminate.rs).
+    /// The carriers: the co-rotating components with a drive not bare (eliminate.rs); per excited state (less GROUND)
+    /// its kept drives (eliminate.rs `Model::legs_made`).
     pub(crate) carriers: Vec<eliminate::Carrier>,
+    pub(crate) legs: Vec<Vec<(usize, usize)>>,
     /// Per cluster the blocks of the excited states its eliminations can mix (assemble.rs `Model::mix`).
     pub(crate) mixing: Vec<Vec<usize>>,
     /// Per cluster the frequency whose drives folded at the atom are taken to the fourth order (`Unit::Second` kept;
@@ -486,6 +490,7 @@ impl Model {
             clusters: vec![],
             membership: [0; GROUND],
             carriers: vec![],
+            legs: vec![],
             mixing: vec![],
             fourth: vec![],
             sources: vec![],
@@ -507,7 +512,7 @@ impl Model {
         model.beats = model.beats_made();
         // The clusters of the kept edges: the explicit drives and the kept couplings of two states (units.rs `Model::edges`),
         // a coupling's strength its entry's with every drive bare.
-        let bare: Vec<far::Tone> = if kept.iter().any(|u| matches!(u, Unit::Term { .. })) { model.tones.iter().map(|t| t.folded(&|_, _, _| Level::Bare)).collect() } else { vec![] };
+        let bare: Vec<far::Tone> = if kept.iter().any(|u| matches!(u, Unit::Term { .. })) { model.tones.iter().map(|t| t.folded(&|_, _, _| Level::Bare, &model.energies[GROUND..])).collect() } else { vec![] };
         let edges = model.edges(&bare);
         let (mut clusters, membership) = cluster::clusters(STATES, &edges, &model.axes.zero(), &model.no_wave());
         for c in clusters.iter_mut() {
@@ -531,8 +536,10 @@ impl Model {
         // Each frequency's drives folded at their levels (far.rs `Tone::folded`); the carriers, the components with a drive not
         // bare.
         let levels = model.levels.clone();
-        model.tones = model.tones.iter().enumerate().map(|(frequency, tone)| tone.folded(&|side, e, g| levels[2 * frequency + side][(e - GROUND) * GROUND + g])).collect();
+        let read = model.read_made();
+        model.tones = model.tones.iter().enumerate().map(|(frequency, tone)| tone.folded(&|side, e, g| levels[2 * frequency + side][(e - GROUND) * GROUND + g], &read)).collect();
         model.carriers = eliminate::Carrier::all(&model);
+        model.legs = model.legs_made();
         model.spread = model.spread_made();
         // The model's domain: a counter-rotating drive is only ever folded with the bare levels, so that fold must exist --
         // the one gate (units.rs `gate`), every beam at its peak, a ground state's drives together.
@@ -549,6 +556,30 @@ impl Model {
         model.sources = model.all_sources();
         model.classes = (0..model.clusters.len()).map(|c| model.classes(c)).collect();
         Ok(model)
+    }
+
+    /// The energy at which a cluster's ground states read its state at `place`, from the states' levels `levels` (far.rs,
+    /// # A fold onto an explicit state): in the cluster's frames its ground states are slow at E_a − θ_a and its explicit
+    /// excited states follow them, so the excited amplitude at `place` turns at θ_place + (E_a − θ_a) -- the mean over the
+    /// cluster's ground states, which its kept couplings hold near one another (what one of them lies off the mean is in
+    /// the pair's error, eliminate.rs `Model::pair_error`). `value`: the levels are energies (with the frames); else a
+    /// derivative's part of their jet (the frames are constants).
+    pub(crate) fn read(&self, cluster: &Cluster, place: usize, levels: &[f64], value: bool) -> f64 {
+        let frame = |p: usize| if value { self.axes.omega(&cluster.frames[p]) } else { 0.0 };
+        frame(place) + (0..cluster.ground).map(|p| levels[cluster.states[p]] - frame(p)).sum::<f64>() / cluster.ground as f64
+    }
+
+    /// Per excited state (less GROUND) the energy a bare fold onto it is read at (`read`, with the bare levels): an
+    /// explicit state's by its cluster's ground states; another's its own -- no cluster's state reads it, and what folds
+    /// it takes its own energy there (eliminate.rs).
+    fn read_made(&self) -> Vec<f64> {
+        let mut read = self.energies[GROUND..].to_vec();
+        for cluster in self.clusters.iter().filter(|c| c.ground > 0) {
+            for place in cluster.ground..cluster.states.len() {
+                read[cluster.states[place] - GROUND] = self.read(cluster, place, &self.energies, true);
+            }
+        }
+        read
     }
 
     /// A drive's level (`Level`).
