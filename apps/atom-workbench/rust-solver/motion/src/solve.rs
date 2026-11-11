@@ -296,14 +296,17 @@ struct Messages<'a> {
     least: u64,
 }
 impl Messages<'_> {
-    /// A result of the solve so far, of `groups` groups, with the wall time left (ms) where the run's pace gives one:
-    /// sent where it rests on two groups at least -- the jackknife's least for a spread, whatever the members a group has
-    /// so far (the scout's groups have one) -- and improves on the attempt's last one, else the last result again.
-    fn result(&mut self, s: &Solution, groups: usize, remaining: Option<f64>) {
-        if groups >= 2 && s.trajectories >= self.least {
-            self.least = s.trajectories;
-            (self.send)(s, remaining);
-            self.last = Some(s.clone());
+    /// A result of the solve so far, of `groups` groups and `trajectories` trajectories, with the wall time left (ms)
+    /// where the run's pace gives one: made (`made`) and sent where it rests on two groups at least -- the jackknife's
+    /// least for a spread, whatever the members a group has so far (the scout's groups have one) -- and improves on the
+    /// attempt's last one, else the last result again. A result that is not sent is not made: with no group in there is
+    /// none to make.
+    fn result(&mut self, groups: usize, trajectories: u64, remaining: Option<f64>, made: impl FnOnce() -> Solution) {
+        if groups >= 2 && trajectories >= self.least {
+            let s = made();
+            self.least = trajectories;
+            (self.send)(&s, remaining);
+            self.last = Some(s);
             self.clock = Instant::now();
         } else {
             self.again();
@@ -621,7 +624,7 @@ fn so_far(context: &Context, have: &[Part], more: &[&Part], messages: &mut Messa
     let all: Vec<&Part> = have.iter().chain(more.iter().copied()).collect();
     let (e, l, c) = pooled(&all, &context.scales);
     let n = e.first().map_or(0., |x| x.trajectories + x.failed) as u64;
-    messages.result(&assemble(context, &e, &l, &c, n), all.len(), None);
+    messages.result(all.len(), n, None, || assemble(context, &e, &l, &c, n));
 }
 
 /// The reach's falsifier (SPEC §1.8; decide.rs: a booked bound that a read can only refute): the pilot's T where it has
@@ -1202,13 +1205,13 @@ fn product(run: &Run, ensemble: &Ensemble, context: &Context, parts: &mut Vec<Pa
             return (e, l, c);
         }
         let want = batch(chased.iter().map(Look::need).fold(0., f64::max), n);
-        messages.result(&assemble(context, &e, &l, &c, n), all.len(), left(n, want));
+        messages.result(all.len(), n, left(n, want), || assemble(context, &e, &l, &c, n));
         let numbers: Vec<u64> = (n / GROUP..want / GROUP).map(number).collect();
         let new = level(run, ensemble, &context.plan, context.tau, &numbers, 0..GROUP, false, messages, &mut |prefix, messages| {
             let all: Vec<&Part> = parts.iter().chain(prefix.iter().copied()).collect();
             let done = all.len() as u64 * GROUP;
             let (e, l, c) = pooled(&all, &context.scales);
-            messages.result(&assemble(context, &e, &l, &c, done), all.len(), left(done, want));
+            messages.result(all.len(), done, left(done, want), || assemble(context, &e, &l, &c, done));
         });
         parts.extend(new);
     }
@@ -2620,6 +2623,45 @@ mod tests {
         assert_eq!(d.grid[1], 0.);
         assert_eq!(d.probabilities[1], d.probabilities[0]);
         assert!((d.probabilities[0].iter().sum::<f64>() - 1.).abs() < 1e-15);
+    }
+
+    /// What the messages pass on (`Messages::result`): a result of two groups at least -- of one member each as well as
+    /// of eight -- and of no fewer trajectories than the attempt's last; any other is not made, and the last one goes out
+    /// again (nothing where there is none). With no group in there are no estimates to make one from (`so_far`).
+    #[test]
+    fn a_result_goes_out_from_two_groups_on() {
+        let context = Context {
+            plan: Plan::new(&[0., 1.], [1.; 3]),
+            tau: 0.5,
+            scales: Scales { hbar_over_mass: 1., frequencies: [1.; 3] },
+            initial: [0.; STATES],
+            momentum: [1.; 3],
+            fixed: Fixed { model: vec![[0.; 2]; 2], start: 0. },
+            step: vec![Bound::share(); 2],
+            checked: None,
+            ledger: Ledger::default(),
+            method: String::new(),
+        };
+        let shape = Shape::of(&context.plan, false);
+        let record = |i: u64| {
+            let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3] };
+            Record { outputs: vec![Fate::Held(held.clone()), Fate::Held(held)], listed: vec![Some(([0.; 3], [i as f64; 3])); shape.listed], samples: vec![], counts: Counts::default() }
+        };
+        let whole = [shape.fold((0..GROUP).map(record)), shape.fold((GROUP..2 * GROUP).map(record))];
+        let scout: Vec<Part> = (0..3).map(|i| shape.fold(std::iter::once(record(i)))).collect();
+        let mut sent = vec![];
+        let mut send = |s: &Solution, _: Option<f64>| sent.push(s.trajectories);
+        let mut messages = Messages { send: &mut send, clock: Instant::now(), last: None, least: 0 };
+        // No group, one group: nothing. Three groups of one member: a result. Two of them: fewer trajectories, the last
+        // again. Two whole groups, in hand or coming in: results.
+        so_far(&context, &[], &[], &mut messages);
+        so_far(&context, &whole[..1], &[], &mut messages);
+        so_far(&context, &scout, &[], &mut messages);
+        so_far(&context, &scout[..2], &[], &mut messages);
+        so_far(&context, &whole, &[], &mut messages);
+        so_far(&context, &whole[..1], &[&whole[1]], &mut messages);
+        messages.result(1, 4 * GROUP, None, || unreachable!("no result is made of one group"));
+        assert_eq!(sent, [3, 3, 2 * GROUP, 2 * GROUP, 2 * GROUP]);
     }
 
     /// A message that falls due inside a hand-out is made while the trajectories run: its loops run on the pool
