@@ -76,7 +76,15 @@ pub fn automatic_cell(kind: &str, mut target: Value) -> Value {
     target
 }
 
+/// What the plotting owner says of a plot kind (`Host::plot_kind`): the one table every part
+/// of the application reads.
+pub fn plot_kind(kind: &str) -> Option<zlc_workbench::PlotKindFacts> {
+    let handler = zlc_plot::configuration::handler(zlc_plot::kinds::PlotKind::parse(kind)?);
+    Some(zlc_workbench::PlotKindFacts { board: handler.board.is_some(), default_window: handler.kind.default_window() as u64, overlay: handler.overlay })
+}
+
 impl Host for DesktopHost<'_> {
+    fn plot_kind(&self, kind: &str) -> Option<zlc_workbench::PlotKindFacts> { plot_kind(kind) }
     fn signals(&self) -> Vec<SignalInfo> { signals(self.runtime) }
     fn panels(&self) -> Vec<PanelContent> { panel_contents(self.bindings, self.accepted, self.targets) }
     fn reserve_panel_ids(&mut self, count: usize) -> Vec<String> { self.bindings.reserve_ids(count).unwrap_or_default() }
@@ -110,6 +118,7 @@ pub fn schemas(runtime: &Runtime, signal: &str) -> Option<(Value, Value)> {
 struct View { signals: Vec<SignalInfo>, panels: Vec<PanelContent> }
 
 impl Host for View {
+    fn plot_kind(&self, kind: &str) -> Option<zlc_workbench::PlotKindFacts> { plot_kind(kind) }
     fn signals(&self) -> Vec<SignalInfo> { self.signals.clone() }
     fn panels(&self) -> Vec<PanelContent> { self.panels.clone() }
     fn reserve_panel_ids(&mut self, _: usize) -> Vec<String> { Vec::new() }

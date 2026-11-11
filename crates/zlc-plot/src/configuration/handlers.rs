@@ -39,16 +39,23 @@ pub struct KindHandler {
     pub fit_target: Option<FitTargetKind>,
     pub semantic_fields: &'static [&'static str],
     pub record_input: bool,
+    /// Its place among the kinds a board offers for a new panel; None for a kind no board adds
+    /// (the pulse editor's timeline).
+    pub board: Option<usize>,
+    /// Whether a panel of it is drawn with the site rings of a judgement its operator chooses
+    /// (v2 paints_images): an Image, or a grid of cells. A Point Map draws the geometry
+    /// recorded with its own signal instead.
+    pub overlay: bool,
 }
 
 pub const HANDLERS: [KindHandler; 7] = [
-    KindHandler { kind: PlotKind::Curve, display_name: "Curve", fit_target: Some(FitTargetKind::Series), semantic_fields: &["kind", "x", "group", "reduction"], record_input: false },
-    KindHandler { kind: PlotKind::Image, display_name: "Image", fit_target: Some(FitTargetKind::Image), semantic_fields: &["kind", "x", "y", "reduction"], record_input: false },
-    KindHandler { kind: PlotKind::PointMap, display_name: "Point Map", fit_target: None, semantic_fields: &["kind", "site", "reduction"], record_input: false },
-    KindHandler { kind: PlotKind::Histogram, display_name: "Histogram", fit_target: Some(FitTargetKind::Histogram), semantic_fields: &["kind", "group", "reduction"], record_input: false },
-    KindHandler { kind: PlotKind::Rolling, display_name: "Rolling", fit_target: Some(FitTargetKind::Series), semantic_fields: &["kind", "group", "reduction"], record_input: true },
-    KindHandler { kind: PlotKind::FacetGrid, display_name: "Facet grid", fit_target: None, semantic_fields: &["kind", "facet"], record_input: false },
-    KindHandler { kind: PlotKind::PulseTimeline, display_name: "Pulse timeline", fit_target: None, semantic_fields: &["kind"], record_input: false },
+    KindHandler { kind: PlotKind::Curve, display_name: "Curve", fit_target: Some(FitTargetKind::Series), semantic_fields: &["kind", "x", "group", "reduction"], record_input: false, board: Some(1), overlay: false },
+    KindHandler { kind: PlotKind::Image, display_name: "Image", fit_target: Some(FitTargetKind::Image), semantic_fields: &["kind", "x", "y", "reduction"], record_input: false, board: Some(0), overlay: true },
+    KindHandler { kind: PlotKind::PointMap, display_name: "Point Map", fit_target: None, semantic_fields: &["kind", "site", "reduction"], record_input: false, board: Some(5), overlay: false },
+    KindHandler { kind: PlotKind::Histogram, display_name: "Histogram", fit_target: Some(FitTargetKind::Histogram), semantic_fields: &["kind", "group", "reduction"], record_input: false, board: Some(3), overlay: false },
+    KindHandler { kind: PlotKind::Rolling, display_name: "Rolling", fit_target: Some(FitTargetKind::Series), semantic_fields: &["kind", "group", "reduction"], record_input: true, board: Some(2), overlay: false },
+    KindHandler { kind: PlotKind::FacetGrid, display_name: "Facet grid", fit_target: None, semantic_fields: &["kind", "facet"], record_input: false, board: Some(4), overlay: true },
+    KindHandler { kind: PlotKind::PulseTimeline, display_name: "Pulse timeline", fit_target: None, semantic_fields: &["kind"], record_input: false, board: None, overlay: false },
 ];
 
 pub fn handler(kind: PlotKind) -> &'static KindHandler { HANDLERS.iter().find(|handler| handler.kind == kind).expect("registered kind") }

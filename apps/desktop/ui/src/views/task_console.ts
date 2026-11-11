@@ -6,7 +6,7 @@ import {
   ComboBox, Dialog, Field, StatusStrip, TabWidget, command, confirm, element, note, setChecked, setElided, setState, statusDot, switchButton,
   type StatusWord, type Value, type Command as Button,
 } from "../fluent/index.js";
-import { PANEL_PLOT_KINDS, type Control, type Panel, type State } from "../protocol.js";
+import { boardKinds, type Control, type Panel, type State } from "../protocol.js";
 import { queueStatus, saveImage, type View, type ViewContext } from "../shell.js";
 import type { Board, LogicRow, NodeType, RunRow } from "../workbench.js";
 import type { PanelBoard } from "./board.js";
@@ -237,8 +237,7 @@ export class TaskConsoleView implements View {
   private updateKinds(latest: State): void {
     // v2 TaskConsoleView: the console's five plot kinds by their own names, the first the
     // default; then each node type by its api name, measurements, processors, tasks.
-    const offered = new Set((latest.plot_kinds ?? []).map(kind => kind.id));
-    const plots = PANEL_PLOT_KINDS.filter(id => offered.has(id)).map(id => ({ value: `plot:${id}`, label: `Plot: ${id}` }));
+    const plots = boardKinds(latest.plot_kinds ?? []).map(({ id }) => ({ value: `plot:${id}`, label: `Plot: ${id}` }));
     const layer = (kind: string): number => ({ measurement: 0, processor: 1, task: 2 } as Record<string, number>)[kind] ?? 3;
     const nodes = [...((latest.node_types as NodeType[] | undefined) ?? [])]
       .sort((a, b) => layer(a.node_kind) - layer(b.node_kind) || a.type_id.localeCompare(b.type_id))

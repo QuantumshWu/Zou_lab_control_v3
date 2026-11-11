@@ -134,8 +134,16 @@ pub struct SignalInfo { pub name: String, pub generation: String, pub owner: Str
 /// `outputs`: what it can publish, (name, label): its region's catalogue and its fit's parameters.
 pub struct PanelContent { pub panel: String, pub signal: String, pub kind: String, pub window: u64, pub target: Value, pub outputs: Vec<(String, String)> }
 
+/// What the plotting owner says of one plot kind. The workbench keeps no table of kinds:
+/// `board`: a board may add a panel of it; `default_window`: how many recent shots a new
+/// panel of it reads; `overlay`: a panel of it is drawn with a judgement its operator chooses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlotKindFacts { pub board: bool, pub default_window: u64, pub overlay: bool }
+
 /// What the application provides: signals and the panels it shows.
 pub trait Host {
+    /// The plotting owner's facts of `kind`; None for a name it has no kind of.
+    fn plot_kind(&self, kind: &str) -> Option<PlotKindFacts>;
     fn signals(&self) -> Vec<SignalInfo>;
     fn panels(&self) -> Vec<PanelContent>;
     /// Panel ids the application will use for the next panels it adds.

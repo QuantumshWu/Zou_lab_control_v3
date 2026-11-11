@@ -14,7 +14,6 @@ use crate::logic::{Draft, Instance, Node, name_problem, name_text, signal_key, s
 use crate::{Host, Workbench, fields, workspace};
 
 pub const FORMAT: &str = "zlc.console-board";
-const KINDS: [&str; 6] = ["image", "curve", "rolling", "histogram", "facet_grid", "point_map"];
 /// v2's panel update intervals (live_policy.refresh_intervals_ms); the first is the default and the board's beat.
 pub const INTERVALS: [u64; 4] = [100, 200, 400, 800];
 /// v2 panel fields the board keeps as written (v3 reads them as selectors).
@@ -86,13 +85,13 @@ fn string(value: Option<&Value>, default: &str, where_: &str) -> Result<String, 
 }
 
 /// A saved panel's id and entry, when it can be a panel of this board (v2 `_panel_from_tree`); Err says why not.
-fn panel_entry<'a>(entry: &'a Value, kept: &[(String, &Map<String, Value>)]) -> Result<(String, &'a Map<String, Value>), String> {
+fn panel_entry<'a>(entry: &'a Value, kept: &[(String, &Map<String, Value>)], host: &dyn Host) -> Result<(String, &'a Map<String, Value>), String> {
     let entry = object(entry, "it")?;
     let id = string(entry.get("panel_id"), "", "its panel_id")?.trim().to_owned();
     if id.is_empty() { return Err("it requires panel_id".into()); }
     if kept.iter().any(|(other, _)| *other == id) { return Err(format!("another panel entry is also {id}")); }
     let kind = entry.get("kind").and_then(Value::as_str).ok_or("panel state requires a text kind")?;
-    if !KINDS.contains(&kind) { return Err(format!("{kind:?} is not a Task Console plot kind")); }
+    if !host.plot_kind(kind).is_some_and(|facts| facts.board) { return Err(format!("{kind:?} is not a Task Console plot kind")); }
     for key in ["title", "signal", "cell_kind", "overlay_signal"] { string(entry.get(key), "", &format!("its {key}"))?; }
     Ok((id, entry))
 }
@@ -167,7 +166,7 @@ impl Workbench {
         let mut notes = Vec::new();
         let mut kept: Vec<(String, &Map<String, Value>)> = Vec::new();
         for (index, entry) in panels.iter().enumerate() {
-            match panel_entry(entry, &kept) {
+            match panel_entry(entry, &kept, &*host) {
                 Ok(panel) => kept.push(panel),
                 Err(reason) => notes.push(format!("panel entry {}: {reason}; it is left out", index + 1)),
             }
@@ -213,7 +212,7 @@ impl Workbench {
             if !cell_kind.is_empty() { semantic.insert("cell_kind".into(), json!(cell_kind)); }
             let mut parameters = entry.get("display").and_then(Value::as_object).cloned().unwrap_or_default();
             let window = parameters.remove("window").and_then(|window| window.as_u64()).filter(|window| *window > 0)
-                .unwrap_or(if kind == "rolling" { 100 } else { 1 });
+                .unwrap_or_else(|| host.plot_kind(&kind).map_or(1, |facts| facts.default_window));
             let interval = entry.get("interval_ms").and_then(Value::as_u64).unwrap_or(100);
             if !INTERVALS.contains(&interval) { notes.push(format!("{who}: update interval {interval} ms is not one of 100/200/400/800; it is 100")); }
             let selectors = match entry.get("selectors") {
@@ -482,8 +481,8 @@ impl Workbench {
         let content = contents.iter().find(|content| content.panel == panel).ok_or_else(|| format!("No panel {panel:?} on the board"))?;
         // A Task-protected panel keeps its source, the Overlay with it (v2 science_locked).
         if let Some(reason) = self.panel_frozen(panel, &content.signal) { return Err(reason); }
-        if content.kind == "point_map" && !signal.is_empty() {
-            return Err("Point Map uses the site geometry recorded with its signal".into());
+        if !signal.is_empty() && !host.plot_kind(&content.kind).is_some_and(|facts| facts.overlay) {
+            return Err(format!("A {} panel takes no Overlay: it is drawn from its own signal alone", content.kind));
         }
         if !signal.is_empty() && !self.overlay_choices(&content.signal, &contents).iter().any(|(choice, _)| choice == signal) {
             return Err(format!("{} judges no sites of this panel's image", self.signal_label(signal)));

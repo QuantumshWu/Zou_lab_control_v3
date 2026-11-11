@@ -46,6 +46,7 @@ pub fn split_failed(event: &HostEvent) -> Option<Vec<HostEvent>> {
 pub struct Scope<'a> { pub runtime: &'a Runtime, pub offers: &'a dyn Fn(&str) -> bool }
 
 impl Host for Scope<'_> {
+    fn plot_kind(&self, kind: &str) -> Option<zlc_workbench::PlotKindFacts> { workbench_host::plot_kind(kind) }
     fn signals(&self) -> Vec<SignalInfo> { workbench_host::offered_signals(self.runtime, self.offers) }
     fn panels(&self) -> Vec<PanelContent> { Vec::new() }
     fn reserve_panel_ids(&mut self, _: usize) -> Vec<String> { Vec::new() }

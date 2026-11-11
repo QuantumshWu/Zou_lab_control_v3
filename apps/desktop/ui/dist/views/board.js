@@ -989,13 +989,12 @@ export class PanelView {
         }
     }
     updateSettings(panel, request, failed = false) {
-        // v2 _form_spec: no Plot kind row (a panel's kind is chosen when it is added), and a
-        // Window only where v2's kinds declare one (curve, histogram, rolling).
-        const windowed = ["curve", "histogram", "rolling"].includes(panel.kind);
-        const window = panel.binding && windowed
+        // v2 _form_spec: no Plot kind row (a panel's kind is chosen when it is added). A Window
+        // stands where the plot's own spec declares one (its `bound` display row: a curve, a
+        // histogram, a rolling, and a grid of curve or histogram cells), and only there: which
+        // kinds have one is the plotting owner's to say, never a list kept here.
+        const window = panel.binding && (panel.controls ?? []).some(control => control.bound)
             ? { section: "binding", name: "window", label: "Window", kind: "integer", value: panel.binding.window, minimum: 1, required: true } : null;
-        // The binding's Window stands where the plot's spec holds it (a `bound` display row), else last.
-        const held = (panel.controls ?? []).some(control => control.bound);
         const controls = [
             ...(panel.binding ? [
                 { section: "binding", name: "signal", label: "Signal", kind: "choice", value: panel.binding.signal,
@@ -1013,7 +1012,6 @@ export class PanelView {
                 const kinds = (control.choices ?? []).filter(([value]) => value !== "").map(([value]) => [value, String(value)]);
                 return [{ ...control, choices: [["", "automatic (from data)"], ...kinds] }];
             }),
-            ...(window && !held ? [window] : []),
         ];
         // The board's own rows of this panel (workbench board.panels): its name and refresh.
         const entry = this.board.boardPanel(this.subject);
@@ -1024,7 +1022,7 @@ export class PanelView {
         // v2's Overlay (paints_images): a panel whose surfaces are images -- an Image,
         // or a grid of image cells -- is drawn with the site rings of a judgement of
         // its measurement; its display rows then hold the rings' Point labels.
-        if (entry && panel.kind !== "point_map" && (panel.controls ?? []).some(control => control.name === "show_point_labels")) {
+        if (entry && this.board.plotKinds.find(kind => kind.id === panel.kind)?.overlay && (panel.controls ?? []).some(control => control.name === "show_point_labels")) {
             // No overlay is the box's none row, "Off" in MUTED_INK, as v2's.
             controls.push({ section: "board", name: "overlay_signal", label: "Overlay", kind: "choice", value: entry.overlay_signal || null,
                 allow_none: true, placeholder: "Off", tree: entry.overlay_tree });
