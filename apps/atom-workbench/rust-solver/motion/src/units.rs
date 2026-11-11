@@ -53,7 +53,8 @@ const fn square_root(a: f64) -> f64 {
 /// order (solve.rs, # The step), which a tolerance does not follow: it is a share of the step's length, of the first
 /// order in it. So it is admitted at the second order of what the step may take, its share s·ε of a target:
 /// δt ≤ (s·ε)² L of the step's length L makes the hazard's part at most (s·ε)² of that step's own hazard and the
-/// phase's at most (s·ε)² ω L, ε the tighter of the two targets.
+/// phase's at most (s·ε)² ω L, ε the tighter of the two targets. The power two is chosen, not derived: the argument
+/// holds for any power above one, and a smaller tolerance costs the search's steps alone.
 pub const JUMP_TIMING: f64 = {
     let share = STEP_SHARE * if POPULATION_TARGET < TEMPERATURE_TARGET { POPULATION_TARGET } else { TEMPERATURE_TARGET };
     share * share
@@ -63,19 +64,22 @@ pub const JUMP_TIMING: f64 = {
 // The contract's definitions and caps.
 
 /// The validated regime's boundary (SPEC §0, §3): k_BT ≥ CLASSICAL·ħω, axis by axis, mirrored in the app (the result's
-/// `classical`: every axis's; the UI's grey band, src/model-notes.ts `SEMICLASSICAL_REGIME`). It decides one thing in
-/// the solve, the outputs where each lab axis's T is held to its target (solve.rs `classical`), and tunes no other decision.
+/// `classical`: every axis's; the UI's grey band, src/model-notes.ts `SEMICLASSICAL_REGIME`). Reported per output and
+/// axis (solve.rs `classical`); it decides nothing in the solve. An empirical boundary, not a derived one.
 pub const CLASSICAL: f64 = 4.0;
 /// The trap's region (SPEC §1.3, §1.7): an atom is outside it where every focused beam's intensity at the atom is
 /// below this share of its value at the focus -- the contract's definition of a lost atom, the UI's text word for word
 /// (src/model-notes.ts: "每束聚焦光在原子处的强度都低于焦点处的 1/20").
 pub const REGION_INTENSITY: f64 = 1.0 / 20.0;
 /// The most trajectories a solve runs (SPEC §3; contract §2.3, whose reason text names 16384): reached, the solve
-/// returns as usual, partial.
+/// returns as usual, partial. A cap of the contract, not derived; beside the work it sets the least statistics a
+/// solve books, z²/(N + z²) (estimate.rs `unseen`), and through it the reach's share and the tables' shares
+/// (model/tabulate.rs `shares`).
 pub const MOST_TRAJECTORIES: u64 = 1 << 14;
 /// The most steps of the run's constant step a trajectory's run may hold (SPEC §2.2; contract §2.3): the step's ladder
 /// goes no further down than the run's length over it; where its error still lies clearly beyond what it may take
-/// there, it is booked as measured and flagged. (A trajectory's jumps and the halves of refused steps come on top; they are not capped.)
+/// there, it is booked as measured and flagged. (A trajectory's jumps and the halves of refused steps come on top;
+/// they are not capped.) A cap of the contract, not derived: it bounds the work alone.
 pub const MOST_STEPS: u64 = 1 << 24;
 /// The longest trajectory a request asks for (µs): 10 s (contract §1.3, the population core's `LONGEST_TIME_US`; the
 /// app's translated message names "10 s").

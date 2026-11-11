@@ -36,7 +36,7 @@
 //! state's tail; failing, the drive is kept as any other.
 //!
 //! A drive has exactly one level, the highest its kept units give it, and one more where its two states are one cluster's
-//! at a residual beat of exactly zero (`Model::new`); a carrier is a component with a drive not bare, never listed.
+//! at a residual beat of exactly zero (model.rs `Model::settled`); a carrier is a component with a drive not bare, never listed.
 //!
 //! # The tail rule
 //! The folds of one ground state's drives share its population: the fold of a set of them exists where their shares'
@@ -136,8 +136,12 @@ pub(crate) const EXISTS: f64 = 0.5;
 /// right to this order (+0.00 s²), and the landing's norm 1 − p = 1 + 3s/2 held against the threshold waits
 /// ln(1 − p)/γ where that mean has −p/γ: the rate is high by p²/2 = (3/2)²/2 s² (two levels: +1.07 s² at s = 0.03,
 /// between the two at the detunings between, the test below).
-pub(crate) const ORDER_FORCE: f64 = 1.5;
-pub(crate) const ORDER_RATES: f64 = 1.125;
+pub(crate) const ORDER_FORCE: f64 = 3.0 / 2.0;
+pub(crate) const ORDER_RATES: f64 = {
+    // −p/s on resonance, p = (s/2)(Δ² − 3Γ²/4)/(Δ² + Γ²/4) at Δ = 0; then p²/2.
+    let landing = 3.0 / 2.0;
+    landing * landing / 2.0
+};
 
 /// The leading error of a Raman pair's fold in its mixing m² (eliminate.rs `Model::pair_error`): the kept line reads
 /// the folded leg's self-energy |U|²/(d_R + λ) at λ = 0, and its response's next term makes its rate m² (3ε² − Γ²/4)/(ε² +

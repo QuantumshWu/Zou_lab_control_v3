@@ -1,7 +1,7 @@
 //! One constant step for the run (SPEC §2.2).
 //!
 //! # The step
-//! Every trajectory of a run advances by steps of one τ (`step::step`), whatever the times it is read at (# The reads):
+//! Every trajectory of a run advances by steps of one τ (`step::Midway::attempt`), whatever the times it is read at (# The reads):
 //! a step ends at no output. The last step of the run is its rest; the step before a jump ends at the jump (# The jumps'
 //! times), the next step from there; a step the scheme refuses (`step::Refused`) is taken at its half, and one refused
 //! down to the time's round-off ends the advance with its refusal -- a numerical failure the solve counts and flags,
@@ -69,8 +69,9 @@
 //! trajectory at τ and at 2τ -- see the same noise, and differ by what the step does and by nothing drawn anew. The
 //! product, at one step, needs the path's law alone; there is one path for both.
 //!
-//! - The path is made on a tree. Time is cut into cells of one width, the caller's (the companion's step at the ladder's first rung, solve.rs); a cell's part of the path (its
-//!   increment and its first moment about its middle, `step::Brownian::over`) is drawn from the cell's stream
+//! - The path is made on a tree. Time is cut into cells of one width, the caller's (the companion's step at the
+//!   ladder's first rung, solve.rs); a cell's part of the path (its increment and its first moment about its middle,
+//!   `step::Brownian::over`) is drawn from the cell's stream
 //!   (`random::Stream::brownian`). A cell's two halves are the Brownian bridge between its ends (`step::Brownian::split`)
 //!   from the stream of that node of the tree, and so on down: the part over any bin of any rung's grid is a function of
 //!   (seed, trajectory, bin), and a bin's part is the sum of its halves' -- a step of 2τ on the grid takes the sum of
@@ -188,18 +189,17 @@ impl Path {
     }
 }
 
-/// The trajectory's physical state from the end of a step taken, its counters kept and the step counted among those
-/// taken: the next step's part of the Brownian path is the next one's (module documentation, # The Brownian path).
+/// The trajectory's physical state from the end of a step taken, its counters kept (a step's end holds its start's:
+/// the steps tried on the way to it are counted on the trajectory).
 fn adopt(trajectory: &mut Trajectory, end: &Trajectory) {
-    let (tau, steps, capped, work, assemblies, taken) = (trajectory.tau, trajectory.steps, trajectory.capped, trajectory.work, trajectory.assemblies, trajectory.taken);
+    let (work, assemblies) = (trajectory.work, trajectory.assemblies);
     *trajectory = end.clone();
-    (trajectory.tau, trajectory.steps, trajectory.capped, trajectory.work, trajectory.assemblies, trajectory.taken) = (tau, steps, capped, work, assemblies, taken + 1);
+    (trajectory.work, trajectory.assemblies) = (work, assemblies);
 }
 
-/// The middle of a step of `length` from a state (`step::Midway`), counted: a step evaluation, and a middle of the model
-/// where the step's fixed point holds.
+/// The middle of a step of `length` from a state (`step::Midway`), counted: a middle of the model where the step's
+/// fixed point holds.
 fn midway<'a, D: Dynamics>(model: &'a D, trajectory: &mut Trajectory, from: &Trajectory, length: f64) -> Result<Midway<'a, D>, Refused> {
-    trajectory.steps += 1;
     let through = Midway::new(model, from, length)?;
     trajectory.assemblies += 1;
     Ok(through)
@@ -227,7 +227,6 @@ pub fn advance<D: Dynamics>(
     read: &mut dyn FnMut(usize, &Trajectory),
     each: &mut dyn FnMut(&Segment, f64),
 ) -> Result<(), Refused> {
-    trajectory.tau = tau;
     let mut next = at.partition_point(|&time| time <= trajectory.time);
     while trajectory.lost.is_none() && trajectory.time < to {
         let rest = to - trajectory.time;
@@ -247,6 +246,8 @@ pub fn advance<D: Dynamics>(
                 break (from, None, true);
             }
             let slack = if bracket.1 - bracket.0 <= JUMP_TIMING * length { f64::INFINITY } else { JUMP_TIMING * length };
+            // Followed beyond its end for its length again at most (not derived: the search's bracket alone, and what
+            // bounds the one hop of `spectral::Picture::extend`), and not past the longest step.
             let reach = length.min(most - length);
             // The step's part of the Brownian path, and where the trajectory stands on it at the step's end.
             let (brownian, beyond) = path.reach(trajectory.time + length);

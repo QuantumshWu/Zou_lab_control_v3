@@ -371,12 +371,12 @@ impl Model {
                             work += (EXCITED * EXCITED) as f64 * (2.0 * jet::product_work(np) + np as f64);
                             // The excited states the channel reaches: the others' rows and columns of v v† are zero.
                             let reached: Vec<usize> = (0..EXCITED).filter(|&x| v.iter().any(|part| part[x] != C64::ZERO)).collect();
-                            let weight: [C64; 10] = std::array::from_fn(|p| inverse.get(p).map_or(C64::ZERO, |&r| C64::real(r)));
-                            let of = |x: usize, conjugate: bool| -> [C64; 10] { std::array::from_fn(|p| v.get(p).map_or(C64::ZERO, |part| if conjugate { part[x].conj() } else { part[x] })) };
+                            let weight: [C64; jet::WHOLE] = std::array::from_fn(|p| inverse.get(p).map_or(C64::ZERO, |&r| C64::real(r)));
+                            let of = |x: usize, conjugate: bool| -> [C64; jet::WHOLE] { std::array::from_fn(|p| v.get(p).map_or(C64::ZERO, |part| if conjugate { part[x].conj() } else { part[x] })) };
                             for &x in &reached {
                                 let vx = of(x, false);
                                 for &y in &reached {
-                                    let (mut outer, mut term) = ([C64::ZERO; 10], [C64::ZERO; 10]);
+                                    let (mut outer, mut term) = ([C64::ZERO; jet::WHOLE], [C64::ZERO; jet::WHOLE]);
                                     jet::multiply(&vx[..np], &of(y, true)[..np], &mut outer[..np]);
                                     jet::multiply(&outer[..np], &weight[..np], &mut term[..np]);
                                     for p in 0..np {

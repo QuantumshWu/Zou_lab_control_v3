@@ -1,8 +1,9 @@
 //! Clusters and their frames (SPEC §1.4).
 //!
 //! # Clusters
-//! The states the kept couplings join (`Edge`: a kept drive, a kept coupling between two ground states, a kept static coupling
-//! of two excited states, a kept channel into an explicit state) form a cluster: a trajectory's state space between two jumps.
+//! The states the kept couplings join (`Edge`, units.rs `Model::edges`: a kept drive at the atom, or a kept coupling of two
+//! states at a beat -- two ground states, or an explicit excited state and another excited one) form a cluster: a trajectory's
+//! state space between two jumps.
 //! Every ground state is in one, alone where nothing joins it; an excited state is in one where a kept coupling joins it, then
 //! explicit. Its basis: its ground states, then its explicit excited states, each in increasing order.
 //!

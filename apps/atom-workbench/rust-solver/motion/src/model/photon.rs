@@ -370,6 +370,10 @@ impl Model {
         // Each field component's value (and gradient) from its beams, plain and Doppler-weighted.
         work += plan.scalars.iter().map(|s| (2 * jet::parts(order) * s.beams.len()) as f64).sum::<f64>();
         // A member's vectors: its matrix on the state, a point's with its partner's and each direction's two slopes.
+        // The most a member makes (below: `base + more` of a near member with the fourth order and the gradients), s
+        // the directions' slopes, a table's axes or the three lab axes: 2(1 + s) its jumps' and its partner's with their
+        // slopes, 1 + s the fourth order's partner on Nψ with its slopes, and along each of the three lab axes the jumps
+        // on −½∂Xψ and the partner on ∂Nψ: 3(1 + s) + 6.
         const MOST: usize = 3 * (1 + if MOST_AXES > 3 { MOST_AXES } else { 3 }) + 6;
         let (width, most) = (jumps.len(), plan.classes.iter().map(|class| class.rows).max().unwrap_or(0));
         sized(vectors, MOST * 2 * most);

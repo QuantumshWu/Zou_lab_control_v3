@@ -518,7 +518,7 @@ pub(crate) fn response(k0: &Mat, e: &[f64], u: &Mat, nu: f64) -> Mat {
 /// The product a_l'* a_l of two beams' amplitudes (`first` = l', `second` = l) with its gradient and Hessian (jet.rs
 /// `multiply`): the coefficient of a beam pair's term, of wave vector k_l − k_l'.
 pub(crate) fn pair(first: &Amplitude, second: &Amplitude) -> Amplitude {
-    let mut out = [C64::ZERO; 10];
+    let mut out = [C64::ZERO; super::jet::WHOLE];
     super::jet::multiply(&super::jet::whole(first).map(|z| z.conj()), &super::jet::whole(second), &mut out);
     super::jet::amplitude(&out)
 }

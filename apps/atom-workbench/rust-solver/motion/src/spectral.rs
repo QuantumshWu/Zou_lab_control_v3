@@ -11,7 +11,7 @@
 //! takes its own three nodes on half the spacing.
 //!
 //! # The state at any time of the step
-//! With Ĥ₀ = c + RΛR⁻¹ (its scalar part c apart, `linalg::eigen`) and x = R d, i ḋ = (Λ + Dᵉ(u)) d, Dᵉ = R⁻¹DR,
+//! With Ĥ₀ = c + RΛR⁻¹ (its scalar part c apart, `linalg::Eigen`) and x = R d, i ḋ = (Λ + Dᵉ(u)) d, Dᵉ = R⁻¹DR,
 //! ω_ab = λ_a − λ_b. What D does to a pair of states depends on how far the pair turns between the step's nodes.
 //!
 //! **A fast pair, |ω_ab| |h| ≥ 1** -- it turns a radian and more between two nodes: an explicit state's detuning, its
@@ -39,8 +39,8 @@
 //!   J_ab = e^{iω_ab(u + h)} w [A_ab (u I₀ + w I₁) + B_ab (u² I₀ + 2uw I₁ + w² I₂)],  I_p = ∫₀¹ s^p e^{zs} ds,  z = iω_ab w,
 //! the moments by their series Σ_j z^j/(j!(j + p + 1)) -- |z| < 1 for a slow pair over a half step: no cancellation,
 //! and summed until its terms are within the round-off of the state the exponent acts on or of the exponent's own
-//! first term (`series`, `Picture::exponent`). A hop asked wider than a turn of the slow pairs (beyond the step's
-//! end: `Picture::extend`) is taken in the fewest equal parts within it.
+//! first term (`series`, `Picture::exponent`). The one hop beyond the step's end (`Picture::extend`) is no wider than
+//! the step, 2|h|: |z| < 2 there, and the series still loses no more than e² of the round-off to cancellation.
 //!
 //! Between the three nodes m is their quintic: its values there and its rates ṁ = −iD̃₂m (zero at the middle), the
 //! Hermite interpolant. m changes by the slow pairs alone, so its sixth derivative is of the size |ω|⁵ |D₂| with
@@ -67,7 +67,10 @@
 //! A radian between nodes is where the two treatments meet: a pair slower than that is resolved by the nodes (its
 //! moments' series converge without cancellation, its quintic holds), a pair faster is followed more closely than a
 //! hop over a half step would take it (|X| ≤ |D| |h| there, the size of the hop's own exponent). A half step takes
-//! the pairs by its own nodes.
+//! the pairs by its own nodes. The radian is where the two sizes meet, not where the two errors do: a hopped pair
+//! leaves (|D| h)² |ω| h/60 (the second Magnus term), a followed one a part c of (|D| h)²/(|ω| h)² (c measured an
+//! order below one), equal at |ω| h = (60 c)^{1/3} -- about two for c = 0.1, and no number without c. The split is
+//! not derived.
 //!
 //! # What follows the generator's own frequencies, and what does not
 //! The propagation's own work -- the decomposition, the following, two hops -- is the same whatever Ĥ₀'s frequencies
@@ -92,7 +95,7 @@
 //! # Towards a defective generator
 //! A state taken through the eigenvectors rounds by κ(R) u (1 + |τ| × the decay rates' spread) relative to its norm
 //! (`linalg::Eigen`), and κ(R) grows without bound towards an exceptional point. There the state is taken without the
-//! decomposition (`Picture::decomposed` false): from stop to stop of the caller's (`Picture::advance`) by CF4 (Blanes & Moan
+//! decomposition (`Picture::through` false): from stop to stop of the caller's (`Picture::advance`) by CF4 (Blanes & Moan
 //! 2006) of the same Ĥ₀ + uA + u²B, two exponentials on the vector to round-off (`linalg::exp_apply`), whose rounding
 //! does not know κ. It is exact where nothing moves; with D it is of fourth order in the stride's width, which is the
 //! caller's nodes' spacing -- a few radians of Ĥ₀'s bound at most --, so its error is a share of D's own effect, not an
@@ -199,8 +202,6 @@ pub struct Picture {
     pub rounding: f64,
     /// The complex multiply-adds counted so far (`decide::Work` counts them four real ones each).
     pub work: f64,
-    /// The hops taken since `prepare` (through the decomposition: of m; without it: the strides between stops).
-    pub hops: usize,
 }
 
 impl Default for Picture {
@@ -246,7 +247,6 @@ impl Default for Picture {
             bandwidth: 0.0,
             rounding: 0.0,
             work: 0.0,
-            hops: 0,
         }
     }
 }
@@ -314,23 +314,13 @@ impl Picture {
         self.n
     }
 
-    /// Whether the state goes through Ĥ₀'s decomposition.
-    pub fn decomposed(&self) -> bool {
-        self.through
-    }
-
-    /// Whether the generator changes along the path at all.
-    pub fn moving(&self) -> bool {
-        self.moving
-    }
-
     /// Prepares the picture of a step of 2h from `base` and, unless the generator is `still` along the path (then they
     /// are not read), `ends`: the slopes, Ĥ₀'s decomposition and the route of the state (module documentation, #
     /// Towards a defective generator); through the decomposition the fast pairs' following and the slow pairs' slopes
     /// (`follow`). `work` begins anew with what this counted.
     pub fn prepare(&mut self, half: f64, still: bool) {
         let n = self.n;
-        (self.work, self.width, self.moving, self.hops) = (0.0, f64::NAN, false, 0);
+        (self.work, self.width, self.moving) = (0.0, f64::NAN, false);
         (self.half, self.followed, self.spread) = (half, false, 0.0);
         if !still {
             let [minus, plus] = &mut self.ends;
@@ -516,6 +506,9 @@ impl Picture {
         for (j, (x, out)) in self.follow.chunks_exact(size).zip(self.nodes.chunks_exact_mut(matrix)).enumerate() {
             combine(j == 0, x, n, &self.right, out, n, 0);
         }
+        // Nine products of n³ (D X and X D_s at the two ends, D X again at the two ends, the three matrices of a state
+        // at a time), two factorizations of 1 + X (n³/3) each with its n columns solved (n³), and per entry D at the
+        // two ends (2 each), X at a time four times (2 each) and −D_s at the two ends (2 each): 16.
         self.work += (9 * n * size + 2 * (n * size / 3 + n * size) + 16 * size) as f64;
     }
 
@@ -599,23 +592,15 @@ impl Picture {
         self.work += (2 * n * n) as f64;
     }
 
-    /// One hop of m from the time u over the width w, either sign (module documentation): m ← e^{−iJ} m, in the fewest
-    /// equal parts within a turn of the slow pairs. Returns the rounding of its exponentials relative to the state's
-    /// norm (`linalg::Chebyshev::rounding`).
+    /// One hop of m from the time u over the width w, either sign (module documentation): m ← e^{−iJ} m. Returns the
+    /// rounding of its exponential relative to the state's norm (`linalg::Chebyshev::rounding`).
     fn hop(&mut self, m: &mut [C64], u: f64, w: f64) -> f64 {
         let n = self.n;
-        let parts = ((self.spread * w.abs() / std::f64::consts::TAU).ceil() as usize).max(1);
-        let (part, mut bound) = (w / parts as f64, 0.0);
-        for k in 0..parts {
-            let from = u + k as f64 * part;
-            self.exponent(from, part);
-            self.turn(from + self.half);
-            let plan = linalg::exp_apply(&mut self.matrix, C64::new(0.0, -1.0), m, &mut self.vectors);
-            bound += plan.rounding(n);
-            self.work += (plan.parts * plan.terms * n * n) as f64;
-        }
-        self.hops += parts;
-        bound
+        self.exponent(u, w);
+        self.turn(u + self.half);
+        let plan = linalg::exp_apply(&mut self.matrix, C64::new(0.0, -1.0), m, &mut self.vectors);
+        self.work += (plan.parts * plan.terms * n * n) as f64;
+        plan.rounding(n)
     }
 
     /// ṁ = −i D̃₂(u) m at the time u, into `rate`.
@@ -652,7 +637,6 @@ impl Picture {
             bound += plan.rounding(n);
             self.work += ((3 + plan.parts * plan.terms) * n * n) as f64;
         }
-        self.hops += 1;
         bound
     }
 
@@ -694,6 +678,8 @@ impl Picture {
 
     /// Follows the path beyond the step's end as far as the time `far` (from the middle), on the same generator
     /// uA + u²B continued: one more hop of m and its rate there. Nothing where the state takes strides or nothing moves.
+    /// `far` − h is at most the step's length 2|h| (the caller's reach, adapt.rs, # The jumps' times): a slow pair turns
+    /// less than two radians over the hop (module documentation).
     pub fn extend(&mut self, far: f64) {
         let (n, h) = (self.n, self.half);
         if self.through && self.moving && far != h {
@@ -887,7 +873,7 @@ mod tests {
                 let (a, b) = (slope(2.0), slope(30.0));
                 let exact = flow(&base, &a, &b, half, &start, 100_000);
                 let mut picture = pictured(&base, &a, &b, half, moving);
-                assert_eq!(picture.decomposed(), decomposed, "{off} off the exceptional point");
+                assert_eq!(picture.through, decomposed, "{off} off the exceptional point");
                 let mut x = [C64::ZERO; 2];
                 picture.launch(&start);
                 let w = 2.0 * half / stops as f64;
@@ -924,11 +910,11 @@ mod tests {
             let (a, b) = (hermitian(2.1, 2.0 * scale), hermitian(0.4, 20.0 * scale));
             let moving = scale > 0.0;
             let mut picture = pictured(&base, &a, &b, half, moving);
-            assert!(picture.decomposed() && picture.moving() == moving);
+            assert!(picture.through && picture.moving == moving);
             assert!(!moving || picture.fast.iter().enumerate().all(|(k, fast)| *fast || k / n == k % n), "a slow pair");
             picture.launch(&start);
             let error = errors(&mut picture, &base, &a, &b, half, &start, &[half, 0.37 * half, -0.6 * half], 400_000);
-            eprintln!("slopes × {scale}: the state's error {error:e}, the following's size {:e}, {} hops", picture.following(), picture.hops);
+            eprintln!("slopes × {scale}: the state's error {error:e}, the following's size {:e}", picture.following());
             found.push((error, picture.following()));
         }
         assert!(found[0].0 < 1e-11, "{found:?}");
@@ -958,7 +944,7 @@ mod tests {
         }
         let (a, b) = (hermitian(n, 2.1, 4.0), hermitian(n, 0.4, 20.0));
         let picture = pictured(&base, &a, &b, half, true);
-        assert!(picture.decomposed() && picture.moving() && !picture.followed);
+        assert!(picture.through && picture.moving && !picture.followed);
         let (r, inverse) = (&picture.basis.vectors, &picture.basis.inverse);
         let ends = [-half, half].map(|u| Mat::from_fn(n, n, |i, j| base[(i, j)] + a[(i, j)] * u + b[(i, j)] * (u * u)));
         // The slopes as `prepare` takes them from the generators at the nodes.
@@ -984,7 +970,7 @@ mod tests {
         let (a, b) = (hermitian(n, 2.1, 2.0), hermitian(n, 0.4, 20.0));
         let start: Vec<C64> = (0..n).map(|i| C64::cis(0.9 * i as f64) * 0.5).collect();
         let mut picture = pictured(&base, &a, &b, half, true);
-        assert!(picture.decomposed() && picture.followed && picture.fast.iter().any(|fast| !fast));
+        assert!(picture.through && picture.followed && picture.fast.iter().any(|fast| !fast));
         picture.launch(&start);
         let mut worst = 0.0_f64;
         for u in [-half, -0.6 * half, 0.0, 0.37 * half, half] {
@@ -1036,10 +1022,10 @@ mod tests {
         let mut found = Vec::new();
         for half in [0.08, 0.04] {
             let mut picture = pictured(&base, &a, &b, half, true);
-            assert!(picture.decomposed() && !picture.followed, "a fast pair at the half {half}");
+            assert!(picture.through && !picture.followed, "a fast pair at the half {half}");
             picture.launch(&start);
             let error = errors(&mut picture, &base, &a, &b, half, &start, &[half, 0.0, -0.41 * half, 0.73 * half], 100_000);
-            eprintln!("half {half}: the state's error {error:e}, {} hops", picture.hops);
+            eprintln!("half {half}: the state's error {error:e}");
             found.push(error);
         }
         assert!(found[0] < 1e-4 && found[1] < found[0] / 24.0, "{found:?}");
