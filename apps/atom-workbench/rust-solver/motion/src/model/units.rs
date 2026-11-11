@@ -149,6 +149,22 @@ impl Gate {
     pub fn exists(&self) -> bool {
         self.saturation < EXISTS && self.sweep < EXISTS
     }
+
+    /// The error of the unit this is the gate of, at most, at any state the reach holds -- where the unit's error is its
+    /// gate's own parameter at the state (module documentation, # The errors), on the populations and on T alike. A
+    /// coupling's (`Unit::Term`) is m²(p_a + p_b), m² = S/2 its mixing at the state's point and speed, which the gate
+    /// bounds over the reach, and the two states' populations: together at most 1, and 2 p_a where a = b (a level's
+    /// beating shift counts its one state on both sides). A photon coherence's is m²√(w_i w_j), m² = S/2 of its two
+    /// classes' sizes there and w the largest population among a class's sources, at most 1. None for the others: a
+    /// drive's error carries the first order of its denominator and its pair's mixing, which no gate of its own bounds;
+    /// a dressing and a fold's order have no gate.
+    pub fn error_bound(&self, unit: &Unit) -> Option<f64> {
+        match unit {
+            Unit::Term { a, b, .. } => Some(0.5 * self.saturation * if a == b { 2.0 } else { 1.0 }),
+            Unit::Coherence { .. } => Some(0.5 * self.saturation),
+            Unit::Bare { .. } | Unit::Drive { .. } | Unit::Second { .. } | Unit::Dressing { .. } => None,
+        }
+    }
 }
 
 /// The one gate (module documentation, # One rule): of a fold of a coupling of size `size` across a distance `distance`
@@ -844,12 +860,18 @@ impl Model {
     pub fn errors_with(&self, units: &[Unit], samples: &[Sample], tables: Option<&Tables>) -> Vec<Vec<UnitError>> {
         let mut out: Vec<Vec<UnitError>> = units.iter().map(|_| Vec::with_capacity(samples.len())).collect();
         for sample in samples {
-            let at = self.measured(sample, tables);
-            for (unit, errors) in units.iter().zip(out.iter_mut()) {
-                errors.push(self.unit_error(unit, &at));
+            for (errors, error) in out.iter_mut().zip(self.errors_at(units, sample, tables)) {
+                errors.push(error);
             }
         }
         out
+    }
+
+    /// The units' errors at one sample (`errors_with`), in the units' order: what the sample's units share made once
+    /// (`Measured`), then each unit's arithmetic.
+    pub fn errors_at(&self, units: &[Unit], sample: &Sample, tables: Option<&Tables>) -> Vec<UnitError> {
+        let at = self.measured(sample, tables);
+        units.iter().map(|unit| self.unit_error(unit, &at)).collect()
     }
 
     /// What the units' errors at a sample share (`Measured`).
@@ -1035,6 +1057,58 @@ mod tests {
                 return (model, trap.centre);
             }
             kept.extend(failing);
+        }
+    }
+
+    /// A gate's bound of its unit's error (`Gate::error_bound`) at states the reach holds. On the closed models of
+    /// R6_RAMAN_CO (couplings at a Raman pair's beats, photon coherences) and R4_LIN_1 (a lin-perp-lin lattice's): 200
+    /// atoms each drawn in the reach's box with a momentum of a speed up to the reach's and kept where the reach holds
+    /// them (`Model::holds`); on every cluster a random state there and each of its basis states (the populations'
+    /// extremes). Every bounded unit's error on the populations and on T is within its bound, to the rounding of the
+    /// few operations that make both. The bound is attained: on R6_RAMAN_CO a level's beating shift at its own state
+    /// (p_a = 1, the coupling's size the same at every point) reads more than half of it.
+    #[test]
+    fn a_gate_bounds_its_unit_s_error_at_the_states_the_reach_holds() {
+        for (scene, attained) in [("R6_RAMAN_CO", 0.5), ("R4_LIN_1", 0.0)] {
+            let (model, _) = closed(scene);
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{scene}.json"));
+            let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
+            let state = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
+            let reference: [f64; GROUND] = std::array::from_fn(|s| if s == state { 1.0 } else { 0.0 });
+            let trap = model.trap(&reference, &model.prepared()).unwrap();
+            let reach = model.reach(&trap, &reference, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
+            let units = model.units();
+            let gates = model.gates(&units, &reach);
+            let bounds: Vec<Option<f64>> = units.iter().zip(&gates).map(|(u, g)| g.error_bound(u)).collect();
+            assert!(bounds.iter().flatten().count() > 0, "{scene}: no bounded unit");
+            let mut stream = crate::random::Stream::new(0, crate::random::Purpose::Initial, 0, 0);
+            let (mut held, mut largest) = (0, 0.0_f64);
+            while held < 200 {
+                let r: [f64; 3] = std::array::from_fn(|a| reach.cell[a][0] + (reach.cell[a][1] - reach.cell[a][0]) * stream.uniform());
+                let (direction, speed) = (stream.normals(), reach.speed * stream.uniform());
+                let kappa = direction.map(|x| x / norm3(direction) * speed / model.hbar_over_mass);
+                if !model.holds(&reach, r, kappa) {
+                    continue;
+                }
+                held += 1;
+                for (cluster, c) in model.clusters.iter().enumerate() {
+                    let n = c.states.len();
+                    let random: Vec<C64> = (0..n).map(|_| { let z = stream.normals(); C64::new(z[0], z[1]) }).collect();
+                    let basis = (0..n).map(|i| (0..n).map(|j| if i == j { C64::real(1.0) } else { C64::ZERO }).collect::<Vec<C64>>());
+                    for psi in std::iter::once(random).chain(basis) {
+                        let sample = Sample { cluster, at: Point { r, kappa, t: 0.0 }, psi };
+                        for ((unit, error), bound) in units.iter().zip(model.errors_at(&units, &sample, None)).zip(&bounds) {
+                            let Some(bound) = bound else { continue };
+                            let most = error.population.max(error.temperature);
+                            assert!(most <= bound * (1.0 + rounding(8)), "{scene}: {unit:?} reads {most:e} beyond its bound {bound:e} at {r:?}");
+                            if *bound > 0.0 {
+                                largest = largest.max(most / bound);
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(largest > attained, "{scene}: the largest error over its bound {largest}");
         }
     }
 
