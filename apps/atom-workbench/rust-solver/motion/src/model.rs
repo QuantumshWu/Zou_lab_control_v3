@@ -231,11 +231,11 @@ pub struct Cluster {
     /// Each state's frame θ_s, exactly: ψ_s = e^{−iθ_s t} x_s, so that x_s holds E_s − θ_s on the diagonal and a term a ← b of
     /// beat Ω (∝ e^{iΩt}) is at Ω + θ_a − θ_b.
     pub frames: Vec<Beat>,
-    /// Each state's Doppler frame K_s (1/µm): on a path r_h + v(t − t_m) the state is ψ_s = e^{iK_s·v(t − t_m)} x_s, so that x_s
-    /// holds K_s·v on the diagonal and a term a ← b of wave vector q is at q − (K_a − K_b). Exact where every pair of its states
-    /// holds one wave vector; the rest are path beats.
+    /// Each state's Doppler frame along the kept edges' tree (1/µm; cluster.rs, # Doppler frames): the frames K_s where every
+    /// pair of its states holds one wave vector and the loops close -- on a path r_h + v(t − t_m) the state is
+    /// ψ_s = e^{iK_s·v(t − t_m)} x_s --, and what a plan's frames correct (assemble.rs `Plan::waves`) where they do not.
     pub waves: Vec<[f64; 3]>,
-    /// The Doppler frames exactly (`Wave`).
+    /// The tree's Doppler frames exactly (`Wave`).
     pub(crate) waves_exact: Vec<Beat>,
 }
 

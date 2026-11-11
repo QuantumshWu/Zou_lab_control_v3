@@ -503,6 +503,11 @@ pub(crate) struct Plan {
     /// The distinct residual beats of the terms' entries in the cluster's frames (rad/µs; the first is zero): at a fixed point
     /// the generator is Σ_m (its entries of tone m) e^{iΩ_m t}.
     tones: Vec<f64>,
+    /// Each state's Doppler frame K_s (1/µm; cluster.rs, # Doppler frames): on a path r_h + v(t − t_m) the state is
+    /// ψ_s = e^{iK_s·v(t − t_m)} x_s, so that x_s holds K_s·v on the diagonal and a plane wave q of an entry a ← b turns at
+    /// q − (K_a − K_b). The frames of the least mean square of these under the plan's lights; exact where every pair of
+    /// states holds one wave vector and the loops close.
+    pub(crate) waves: Vec<[f64; 3]>,
     /// Whether the generator is the same at every time along every path: no entry beats in the frames, in time or along a path
     /// (every residual beat and wave vector exactly zero).
     still: bool,
@@ -958,38 +963,46 @@ impl<'a> Builder<'a> {
             }
         }
         let near = self.near;
-        // The entries' tones; and whether anything beats -- a residual beat in time, or along a path the residual wave vector
-        // of a pair of the two components' beams in the entry's Doppler frames.
+        // The entries' tones, and every plane wave of every entry at a tone, once: (x, y, tone, its residual wave vector in
+        // the tree's frames, exactly) -- the wave vector of a pair of the block's two components' beams.
         let mut tone_index: HashMap<Beat, usize> = HashMap::from([(model.axes.zero(), 0)]);
         let mut tones = vec![0.0];
-        let mut still = true;
-        // Per tone the largest residual wave vector of its entries (`Plan::sampled`).
-        let mut waves_sampled = vec![0.0_f64];
+        let mut held: Vec<(usize, usize, usize, Wave)> = vec![];
         let mut entry_tones: Vec<Vec<usize>> = vec![];
         for d in &self.drafts {
             let waves = |s: Option<usize>| -> Vec<Wave> {
                 s.map_or(vec![model.no_wave()], |i| self.scalars[i].beams.iter().map(|&(at, _)| model.no_wave().plus(if self.scalars[i].conjugate { -1 } else { 1 }, &model.beam_wave(self.beams[at]))).collect())
             };
             let (left, right) = (waves(d.left), waves(d.right));
+            let mut pairs: Vec<Wave> = left.iter().flat_map(|l| right.iter().map(move |r| l.plus(1, r))).collect();
+            pairs.sort();
+            pairs.dedup();
             let mut block_tones = vec![];
             for &(x, y) in &d.entries {
                 let beat = d.beat.plus(1, &cluster.frames[x]).plus(-1, &cluster.frames[y]);
                 let frames = cluster.waves_exact[x].plus(-1, &cluster.waves_exact[y]);
-                still &= beat.is_zero() && left.iter().all(|l| right.iter().all(|r| l.plus(1, r) == frames));
                 let tone = *tone_index.entry(beat.clone()).or_insert_with(|| {
                     tones.push(model.omega(&beat));
-                    waves_sampled.push(0.0);
                     tones.len() - 1
                 });
-                for l in &left {
-                    for r in &right {
-                        let k = model.wave_value(&l.plus(1, r).plus(-1, &frames));
-                        waves_sampled[tone] = waves_sampled[tone].max((k[0] * k[0] + k[1] * k[1] + k[2] * k[2]).sqrt());
-                    }
-                }
+                held.extend(pairs.iter().map(|q| (x, y, tone, q.plus(-1, &frames))));
                 block_tones.push(tone);
             }
             entry_tones.push(block_tones);
+        }
+        held.sort();
+        held.dedup();
+        // The Doppler frames (cluster.rs, # Doppler frames): the tree's with the least squares' correction of what it leaves;
+        // whether anything beats -- a residual beat in time, or along a path a residual wave vector --; and per tone the
+        // largest residual wave vector of its entries (`Plan::sampled`).
+        let correction = super::cluster::correction(n, held.iter().map(|h| (h.0, h.1, &h.3)), &model.no_wave(), |w| model.wave_value(w));
+        let waves: Vec<[f64; 3]> = cluster.waves.iter().zip(&correction).map(|(k, more)| std::array::from_fn(|i| k[i] + more[i])).collect();
+        let still = held.iter().all(|h| h.2 == 0 && h.3.is_zero());
+        let mut waves_sampled = vec![0.0_f64; tones.len()];
+        for (x, y, tone, residual) in &held {
+            let (q, k) = (model.wave_value(residual), [correction[*x], correction[*y]]);
+            let left: [f64; 3] = std::array::from_fn(|i| q[i] - (k[0][i] - k[1][i]));
+            waves_sampled[*tone] = waves_sampled[*tone].max(dot3(left, left).sqrt());
         }
         // The Hermitian blocks' adjoints (`Term::weight`): the block of the two components' conjugates at the negated beat.
         let conjugate = |s: Option<usize>| match s {
@@ -1178,6 +1191,7 @@ impl<'a> Builder<'a> {
             links,
             sums,
             products,
+            waves,
             still,
             sampled: tones.iter().zip(&waves_sampled).map(|(omega, wave)| [omega.abs(), *wave]).collect(),
             node,
@@ -2079,7 +2093,7 @@ impl crate::step::Middle for Middle<'_> {
         path.clear();
         path.extend(plan.beams.iter().map(|&l| dot3(model.light.beams[l].wave_vector(), velocity)));
         gauge.clear();
-        gauge.extend(model.clusters[plan.cluster].waves.iter().map(|k| dot3(*k, velocity)));
+        gauge.extend(plan.waves.iter().map(|k| dot3(*k, velocity)));
         Path { turning: gauge.iter().any(|rate| *rate != 0.0), rates }
     }
 
