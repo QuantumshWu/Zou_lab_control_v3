@@ -11,16 +11,29 @@
 //! light -- leaves the reach unbounded: the whole space, its bounds the global ones.
 //!
 //! # The reach's level
-//! The reach is the set that holds all but the share s of the ensemble: its level is the (1 − s) quantile of a thermal
-//! atom's energy above the trap's bottom. Each quadratic degree of freedom holds ½ k_B T x² with x a standard normal, so
-//! the energy of n of them over k_B T follows Γ(n/2) and the share above L is the regularized upper incomplete gamma
-//! function Q(n/2, L): the level is the L with Q(n/2, L) = s (`quantile`, by bisection to the format's resolution; Q
-//! falls monotonically). The degrees of freedom are counted on the trap itself: the three momenta, and each principal
-//! axis of the prepared trap's Hessian along which it holds the atom (a frequency above zero, model.rs `Trap`); an axis
-//! along which the trap is free adds a momentum's degree alone and no potential's. A trap that holds along its three
-//! axes has six, Q(3, L) = e^{−L}(1 + L + L²/2): L = 12.89 at s = 2.44e-4. (ln(1/s) = 8.32, the level where the
-//! Boltzmann factor is s, is the quantile of two degrees, one oscillator: Q(1, L) = e^{−L}. Six degrees leave 1.07 % of
-//! the atoms above it, with 3.4 % of the energy.)
+//! The reach is the set that holds all but the share s of the initial ensemble: its level is the (1 − s) quantile of an
+//! atom's energy above the trap's bottom in the ensemble as it is drawn (ensemble.rs: the thermal distribution times
+//! each axis's harmonic-oscillator Wigner factor), in the trap's harmonic form. Along a principal axis i of the
+//! prepared trap that holds the atom (frequency ω_i > 0, model.rs `Trap`) the oscillator's two quadratic degrees of
+//! freedom hold k_B T E_i classically, E_i a unit exponential, and the Wigner factor scales both by
+//! s_i² = x_i coth x_i, x_i = ħω_i/2k_BT (the oscillator's own mean energy over k_B T: one where ħω_i ≪ k_BT, x_i --
+//! the zero point's ½ħω_i -- where it is cold); along an axis the trap does not hold there is the momentum's degree
+//! alone, ½ k_BT x² with x a standard normal, of Γ(½). So the energy over k_B T is
+//!
+//! ```text
+//! X = Y + Σ_held s_i² E_i,   Y of Γ(f/2), f the axes not held;          P(X > L) = s          (`quantile`)
+//! ```
+//!
+//! one statement for every temperature: with every s_i = 1 it is Γ(n/2) of the n = 6 − f quadratic degrees of freedom,
+//! P(X > L) = Q(n/2, L), for a trap that holds along its three axes Q(3, L) = e^{−L}(1 + L + L²/2): L = 12.89 at
+//! s = 2.44e-4. (ln(1/s) = 8.32, the level where the Boltzmann factor is s, is one oscillator's quantile; six degrees
+//! leave 1.07 % of the atoms above it. And a level of 12.89 k_B T holds none of an ensemble whose zero point is above
+//! it: at ħω = 14, 14, 61 k_BT, s² = 7.2, 7.2, 30.6, the quantile is 271 k_BT.) The tail of X is the convolution of its
+//! terms, one exponential after another from the smallest scale, P(Y + aE > L) = e^{−L/a} + (1/a)∫₀^L e^{−(L−u)/a}
+//! P(Y > u) du, each integral by Gauss–Legendre with its nodes doubled until two levels' difference stops falling
+//! (`tail`) -- no difference of exponentials, so scales that are equal or nearly so (a round trap's) are no case of
+//! their own --, and the level by bisection to the format's resolution (the tail falls monotonically). The ensemble's
+//! kinetic temperature along axis i is s_i² T (`Reach::kinetic_uk`): its speeds' and the reach's falsifier's scale.
 //!
 //! # What the reach leaves out
 //! The level's quantile is the harmonic trap's. What the real trap adds -- the tweezer's anharmonic flanks, the lowered
@@ -980,12 +993,47 @@ fn decided(threshold: f64) -> impl Fn(f64, f64) -> bool + Sync {
     move |upper, attained| upper < threshold || attained >= threshold
 }
 
-/// The L with Q(a, L) = share, 0 < share < 1: the level, in units of k_B T, that the share `share` of a thermal ensemble
-/// of 2a quadratic degrees of freedom lies above (module documentation, # The reach's level). Q falls monotonically
-/// from 1 at L = 0: the bracket's top is doubled from one until Q is below the share, then halved until its two ends are
-/// neighbours in the format.
-fn quantile(a: f64, share: f64) -> f64 {
-    let above = |level: f64| crate::special::upper(a, level) > share;
+/// P(Y + Σ_k a_k E_k > level) at a level above zero: Y of Γ(`shape`) (nothing at shape zero), E_k unit exponentials of
+/// the scales `scales` (module documentation, # The reach's level), by the convolution's recursion over the scales from
+/// the last one in -- e^{−L/a} + (1/a)∫₀^L e^{−(L−u)/a} P(rest > u) du on the Gauss–Legendre nodes `nodes` of [−1, 1] in
+/// v, u = L v² (a Γ of half-integer shape has its tail entire in √u, not in u); with nothing left the integrand is
+/// nothing.
+fn tail_at(shape: f64, scales: &[f64], level: f64, nodes: &[(f64, f64)]) -> f64 {
+    let Some((&a, rest)) = scales.split_last() else {
+        return if shape > 0.0 { crate::special::upper(shape, level) } else { 0.0 };
+    };
+    let within: f64 = if shape > 0.0 || !rest.is_empty() {
+        nodes.iter().map(|&(x, w)| { let v = 0.5 * (x + 1.0); let u = level * v * v; w * level * v / a * (-(level - u) / a).exp() * tail_at(shape, rest, u, nodes) }).sum()
+    } else {
+        0.0
+    };
+    (-level / a).exp() + within
+}
+
+/// P(Y + Σ_k a_k E_k > level) (`tail_at`), its nodes doubled from two until two levels' difference stops falling: the
+/// integrands are entire, the rule converges geometrically, and a difference no smaller than the one before is the
+/// round-off's floor (or nothing).
+fn tail(shape: f64, scales: &[f64], level: f64) -> f64 {
+    let mut n = 2;
+    let mut last = tail_at(shape, scales, level, &crate::special::gauss_legendre(n));
+    let mut before = f64::INFINITY;
+    loop {
+        n *= 2;
+        let next = tail_at(shape, scales, level, &crate::special::gauss_legendre(n));
+        let difference = (next - last).abs();
+        if !(difference < before) {
+            return last;
+        }
+        (last, before) = (next, difference);
+    }
+}
+
+/// The L with P(Y + Σ_k a_k E_k > L) = share, 0 < share < 1 (`tail`; the scales ascending): the level, in units of
+/// k_B T, that the share `share` of the ensemble lies above (module documentation, # The reach's level). The tail falls
+/// monotonically from 1 at L = 0: the bracket's top is doubled from one until it is below the share, then halved until
+/// its two ends are neighbours in the format.
+fn quantile(shape: f64, scales: &[f64], share: f64) -> f64 {
+    let above = |level: f64| tail(shape, scales, level) > share;
     let (mut lo, mut hi) = (0.0, 1.0);
     while above(hi) {
         (lo, hi) = (hi, 2.0 * hi);
@@ -1001,11 +1049,15 @@ fn quantile(a: f64, share: f64) -> f64 {
 
 impl Model {
     /// The reach of a trap at temperature T_r (µK) that leaves out the share s (module documentation, # The reach's
-    /// level): its level the (1 − s) quantile of the energy of the trap's quadratic degrees of freedom -- three momenta
-    /// and the principal axes along which the trap holds the atom.
+    /// level): its level the (1 − s) quantile of an atom's energy in the ensemble as drawn at T_r -- per principal axis
+    /// along which the trap holds the atom an exponential scaled by the Wigner factor's s_i² = x_i coth x_i,
+    /// x_i = ħω_i/2k_BT_r, per axis it does not hold the momentum's degree alone.
     pub fn reach(&self, trap: &Trap, p: &[f64; GROUND], temperature_uk: f64, share: f64) -> Reach {
-        let degrees = 3 + trap.frequencies.iter().filter(|omega| **omega > 0.0).count();
-        let energy = quantile(0.5 * degrees as f64, share) * KT_PER_UK * temperature_uk;
+        let kt = KT_PER_UK * temperature_uk;
+        let squares = trap.frequencies.map(|omega| { let x = 0.5 * omega / kt; if x > 0.0 { x / x.tanh() } else { 1.0 } });
+        let mut held: Vec<f64> = (0..3).filter(|&i| trap.frequencies[i] > 0.0).map(|i| squares[i]).collect();
+        held.sort_by(f64::total_cmp);
+        let energy = quantile(0.5 * (3 - held.len()) as f64, &held, share) * kt;
         let level = trap.minimum + energy;
         let envelope = self.envelope(p);
         let b = envelope.peak();
@@ -1030,6 +1082,7 @@ impl Model {
         }
         Reach {
             temperature_uk,
+            kinetic_uk: squares.map(|square| square * temperature_uk),
             energy,
             minimum: trap.minimum,
             cell: std::array::from_fn(|a| [-extent[a], extent[a]]),
@@ -1242,20 +1295,33 @@ mod tests {
     /// gradient within its slope; every carrier's coherent coupling |Σ_l a_l X^f_l[e,s]|, its columns and its units' columns within
     /// their bounds; the far light's energies within their slack and their differences' gradients within `energy_slope_over` --
     /// and on a cell a thousand times smaller the couplings' bounds within that factor of the centre's values.
-    /// The reach's level is the quantile of its trap's degrees of freedom (module documentation, # The reach's level):
-    /// Q(n/2, L) = s to the format's resolution for two to six degrees; one oscillator's is ln(1/s), a trap's that holds
-    /// along three axes 12.89 at s = z²/(2¹⁴ + z²), where ln(1/s) = 8.32 left Q(3, 8.32) = 1.07 % above it; and a trap
-    /// free along an axis has five, its level between the two.
+    /// The reach's level is the quantile of its ensemble's energy (module documentation, # The reach's level). Classical
+    /// (every scale one): Q(n/2, L) = s to the format's resolution for the n = 3 to 6 degrees of a trap that holds along
+    /// none to three of its axes; one oscillator's is ln(1/s); three axes' 12.89 at s = z²/(2¹⁴ + z²), where
+    /// ln(1/s) = 8.32 left Q(3, 8.32) = 1.07 % above it; scales equal to nine digits are the same level. With the Wigner
+    /// factor (two axes of one scale a, one of b): P(X > L) = e^{−L/a}(1 + L/a) + e^{−L/b}(1 − e^{−cL}(1 + cL))/(a c)²,
+    /// c = 1/a − 1/b, is s at the level -- at s² = 1.66, 1.66, 1.04 and at R8_R5051's 7.2, 7.2, 30.6 (271 k_BT). On
+    /// R2_RECOIL's tweezer at 30 µK the reach's level is that of its own three scales, a trap free along an axis has
+    /// five degrees, and the ensemble's kinetic temperatures are s_i² T.
     #[test]
     fn the_reach_s_level_is_the_quantile_of_its_trap_s_degrees_of_freedom() {
         let share = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
-        for degrees in 2..=6 {
-            let level = quantile(0.5 * degrees as f64, share);
-            let above = crate::special::upper(0.5 * degrees as f64, level);
-            assert!((above - share).abs() <= 1e-12 * share, "{degrees} degrees: Q({}, {level}) = {above} against s = {share}", 0.5 * degrees as f64);
+        for held in 0..=3 {
+            let (shape, scales) = (0.5 * (3 - held) as f64, vec![1.0; held]);
+            let level = quantile(shape, &scales, share);
+            let above = crate::special::upper(shape + held as f64, level);
+            assert!((above - share).abs() <= 1e-11 * share, "{held} axes held: Q({}, {level}) = {above} against s = {share}", shape + held as f64);
         }
-        assert!((quantile(1.0, share) - (1.0 / share).ln()).abs() <= 1e-12 * (1.0 / share).ln(), "one oscillator's level is ln(1/s)");
-        assert!((quantile(3.0, share) - 12.89).abs() < 0.005 && (crate::special::upper(3.0, (1.0 / share).ln()) - 0.01072).abs() < 1e-5, "six degrees: {}", quantile(3.0, share));
+        assert!((quantile(0.0, &[1.0], share) - (1.0 / share).ln()).abs() <= 1e-12 * (1.0 / share).ln(), "one oscillator's level is ln(1/s)");
+        let classical = quantile(0.0, &[1.0; 3], share);
+        assert!((classical - 12.89).abs() < 0.005 && (crate::special::upper(3.0, (1.0 / share).ln()) - 0.01072).abs() < 1e-5, "six degrees: {classical}");
+        assert!((quantile(0.0, &[1.0, 1.0 + 1e-9, 1.0 + 2e-9], share) - classical).abs() <= 1e-8 * classical, "scales equal to nine digits");
+        for (a, b, expected) in [(1.657, 1.041, None), (7.2, 30.6, Some(271.0))] {
+            let level = quantile(0.0, &if a < b { [a, a, b] } else { [b, a, a] }, share);
+            let c = 1.0 / a - 1.0 / b;
+            let closed = (-level / a).exp() * (1.0 + level / a) + (-level / b).exp() * (1.0 - (-c * level).exp() * (1.0 + c * level)) / (a * c).powi(2);
+            assert!((closed - share).abs() <= 1e-10 * share && expected.is_none_or(|l: f64| (level - l).abs() < 1.0), "scales {a}, {a}, {b}: the closed form's {closed} at L = {level} against s = {share}");
+        }
         let model = at_the_atom("R2_RECOIL");
         let p = { let mut p = [0.0; GROUND]; p[7] = 1.0; p };
         let trap = model.trap(&p, &model.prepared()).unwrap();
@@ -1263,8 +1329,14 @@ mod tests {
         let kt = KT_PER_UK * 30.0;
         let held = model.reach(&trap, &p, 30.0, share);
         let free = model.reach(&Trap { frequencies: [trap.frequencies[0], trap.frequencies[1], 0.0], ..trap.clone() }, &p, 30.0, share);
-        assert!((held.energy - quantile(3.0, share) * kt).abs() <= 1e-12 * held.energy && (free.energy - quantile(2.5, share) * kt).abs() <= 1e-12 * free.energy, "the degrees are the trap's: {} and {}", held.energy / kt, free.energy / kt);
-        assert!((held.speed / (2.0 * model.hbar_over_mass * (1.0 / share).ln() * kt).sqrt() - 1.245).abs() < 0.001, "the reach's speed, 1.245 of the Boltzmann factor's level's");
+        let squares = trap.frequencies.map(|omega| { let x = 0.5 * omega / kt; x / x.tanh() });
+        let mut scales = squares.to_vec();
+        scales.sort_by(f64::total_cmp);
+        assert!(squares.iter().all(|s| *s > 1.0 && *s < 1.01) && held.kinetic_uk == squares.map(|s| s * 30.0), "a tweezer at 30 µK is nearly classical: s² = {squares:?}");
+        let across: Vec<f64> = { let mut two = vec![squares[0], squares[1]]; two.sort_by(f64::total_cmp); two };
+        assert!((held.energy - quantile(0.0, &scales, share) * kt).abs() <= 1e-12 * held.energy && (free.energy - quantile(0.5, &across, share) * kt).abs() <= 1e-12 * free.energy, "the degrees are the trap's: {} and {}", held.energy / kt, free.energy / kt);
+        assert!(held.energy / kt > classical && held.energy / kt < 1.01 * classical && free.energy < held.energy, "the levels: {} and {} k_BT against the classical {classical}", held.energy / kt, free.energy / kt);
+        assert!((held.speed / (2.0 * model.hbar_over_mass * (1.0 / share).ln() * kt).sqrt() - 1.245).abs() < 0.005, "the reach's speed, 1.245 of the Boltzmann factor's level's");
     }
 
     #[test]

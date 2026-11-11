@@ -380,7 +380,7 @@ fn first_rung(run: f64, frequency: f64, sampled: &[[f64; 2]], fastest: f64, typi
 }
 
 /// The rms speed (µm/µs) of atoms at the temperature T (µK): √(3 (ħ/m) k_BT/ħ), the reach's typical atom at the
-/// reach's own temperature.
+/// mean kinetic temperature of the ensemble the reach is made for (model.rs `Reach::kinetic_uk`).
 fn typical_speed(hbar_over_mass: f64, temperature_uk: f64) -> f64 {
     (3. * hbar_over_mass * KT_PER_UK * temperature_uk).sqrt()
 }
@@ -560,7 +560,8 @@ fn so_far(context: &Context, have: &[Part], more: &[&Part], messages: &mut Messa
 }
 
 /// The reach's falsifier (SPEC §1.8; decide.rs: a booked bound that a read can only refute): the pilot's T where it has
-/// outgrown the reach's temperature `reach` (µK) -- some output's T above it beyond its interval among all the T read
+/// outgrown the reach's temperature `reach` (µK: the largest kinetic temperature along an axis of the ensemble the
+/// reach was made for, model.rs `Reach::kinetic_uk`) -- some output's T above it beyond its interval among all the T read
 /// (Šidák over the outputs and axes) --; then the largest T read, the reach's new temperature. A T that reads above the
 /// reach within its interval leaves the reach standing, as every unreadable falsifier's read does.
 fn outgrown(estimates: &[Estimate], reach: f64) -> Option<f64> {
@@ -781,7 +782,11 @@ fn attempt(
     let (momentum, start) = exact(&ensemble.kinetic(0));
     // The ladder's first rung over the reach the model is judged over: an attempt that begins at the step the one
     // before stood at begins no higher than its own first rung (a reach that has grown lowers it).
-    let first_rung = first_rung(plan.end, trap.frequencies.iter().copied().fold(0., f64::max), &model.sampled(&model.running()), judged.speed, typical_speed(hm, judged.temperature_uk));
+    let first_rung = first_rung(plan.end, trap.frequencies.iter().copied().fold(0., f64::max), &model.sampled(&model.running()), judged.speed, typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3.));
+    // What the reach's falsifier compares the T read with: the largest kinetic temperature along an axis of the
+    // ensemble the reach was made for (model.rs `Reach::kinetic_uk`: T_r where the trap is classical, the zero point's
+    // where it is cold) -- no lab axis's T is above it while the atoms are that ensemble.
+    let held = judged.kinetic_uk.iter().copied().fold(reach, f64::max);
     let mut context = Context {
         momentum,
         fixed: Fixed { model: vec![[0.; 2]; outputs], start },
@@ -819,7 +824,7 @@ fn attempt(
         let tau = context.tau;
         let scout: Vec<&Part> = levels.fine.iter().collect();
         let estimates = pooled(&scout, &context.scales).0;
-        if let Some(t) = outgrown(&estimates, reach) {
+        if let Some(t) = outgrown(&estimates, held) {
             return Ok(Attempt::Grow(t, tau));
         }
         let read = sampled(&model, &reading, &tables, &scout, None);
@@ -841,7 +846,7 @@ fn attempt(
     let run = {
         let pilot: Vec<&Part> = levels.fine.iter().collect();
         let (estimates, _, counts) = pooled(&pilot, &context.scales);
-        if let Some(t) = outgrown(&estimates, reach) {
+        if let Some(t) = outgrown(&estimates, held) {
             return Ok(Attempt::Grow(t, tau));
         }
         let steps = counts.steps + levels.coarse.iter().map(|p| p.counts.steps).sum::<u64>();
