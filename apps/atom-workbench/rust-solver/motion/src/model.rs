@@ -327,6 +327,9 @@ pub struct Model {
     /// its kept drives (eliminate.rs `Model::legs_made`).
     pub(crate) carriers: Vec<eliminate::Carrier>,
     pub(crate) legs: Vec<Vec<(usize, usize)>>,
+    /// Per component, excited state and ground state the legs of the Raman pairs that component's drive makes folded
+    /// onto the excited state (eliminate.rs `Model::pairs_made`, read by `Model::pair_legs`).
+    pub(crate) pairs: Vec<Vec<(usize, usize)>>,
     /// Per cluster the blocks of the excited states its eliminations can mix (assemble.rs `Model::mix`).
     pub(crate) mixing: Vec<Vec<usize>>,
     /// Per cluster the frequency whose drives folded at the atom are taken to the fourth order (`Unit::Second` kept;
@@ -495,6 +498,7 @@ impl Model {
             membership: [0; GROUND],
             carriers: vec![],
             legs: vec![],
+            pairs: vec![],
             mixing: vec![],
             fourth: vec![],
             sources: vec![],
@@ -544,6 +548,7 @@ impl Model {
         model.tones = model.tones.iter().enumerate().map(|(frequency, tone)| tone.folded(&|side, e, g| levels[2 * frequency + side][(e - GROUND) * GROUND + g], &read)).collect();
         model.carriers = eliminate::Carrier::all(&model);
         model.legs = model.legs_made();
+        model.pairs = model.pairs_made();
         model.spread = model.spread_made();
         // The model's domain: a counter-rotating drive is only ever folded with the bare levels, so that fold must exist --
         // the one gate (units.rs `gate`), every beam at its peak, a ground state's drives together.
