@@ -24,11 +24,12 @@
 //!
 //! # What the reach leaves out
 //! The level's quantile is the harmonic trap's. What the real trap adds -- the tweezer's anharmonic flanks, the lowered
-//! isothermal's cut, the Wigner factors' widths -- is read off the ensemble the run draws, not off a formula for one
-//! trap's shape (`Model::left_out`): of the initial atoms of the most trajectories a solve runs, the share outside the
-//! set -- the count's far end at the confidence z (estimate.rs `wilson`; with none outside, z²/(N + z²), s itself) --,
-//! booked on what is shown; and their share of the kinetic energy, on T. A reach grown with the atoms' temperature
-//! leaves out less of the same initial atoms.
+//! isothermal's cut, the Wigner factors' widths -- is read off the initial ensemble's own density, not off a formula for
+//! one trap's shape, and by no draw of an atom (`Model::left_out`; ensemble.rs, # What a level leaves out): the share of
+//! the atoms beyond the set, the momenta above the kinetic energy A(r) = V_min + E_r − V_prep(r) the set holds at each
+//! place integrated over the places, booked on what is shown; and the share of the kinetic energy they hold, on T --
+//! each with its quadrature's own difference between its last two levels. A reach grown with the atoms' temperature
+//! leaves out less of the same ensemble.
 //!
 //! # Provable extrema (`Model::bounds_over`)
 //! A quantity's bound over the reach is the largest of its upper bounds over cells covering the reach's box, a cell taken where
@@ -1037,29 +1038,26 @@ impl Model {
         }
     }
 
-    /// Whether a reach holds an atom at r with the momentum κ (module documentation, # The reach): its prepared energy
-    /// V_prep(r; p) + (ħ/m) κ²/2 at most the level V_min + E_r.
-    pub fn holds(&self, reach: &Reach, r: [f64; 3], kappa: [f64; 3]) -> bool {
-        self.potential(r, &reach.populations, &self.prepared()) + 0.5 * self.hbar_over_mass * crate::linalg::dot3(kappa, kappa) <= reach.minimum + reach.energy
+    /// The kinetic energy a reach holds at r (rad/µs; module documentation, # The reach), under the prepared lights
+    /// `prepared`: A(r) = V_min + E_r − V_prep(r; p) -- an atom at r is in the reach with (ħ/m) κ²/2 ≤ A(r), none where A
+    /// is negative.
+    pub fn room(&self, reach: &Reach, r: [f64; 3], prepared: &Lights) -> f64 {
+        reach.minimum + reach.energy - self.potential(r, &reach.populations, prepared)
     }
 
-    /// What a reach leaves out of an ensemble's atoms (r, κ) (module documentation, # What the reach leaves out): the
-    /// share of the atoms outside it, the far end at the confidence z of the count n of the N atoms given (estimate.rs
-    /// `wilson`); and the share of the kinetic energy they hold, R = Σ_out κ²/Σ κ² with z deviations of that ratio's own
-    /// spread over the atoms (linearized: Σ (x_i − R e_i)²/(Σ e)², x the outside atoms' e = κ²) -- no less than the
-    /// atoms' share: an atom outside has more than the mean energy, and where none was seen the unseen share's energy is
-    /// not known to be less.
-    pub fn left_out(&self, reach: &Reach, atoms: impl Iterator<Item = ([f64; 3], [f64; 3])>) -> [f64; 2] {
-        let read: Vec<(f64, bool)> = atoms.map(|(r, kappa)| (crate::linalg::dot3(kappa, kappa), !self.holds(reach, r, kappa))).collect();
-        let count = read.iter().filter(|atom| atom.1).count() as f64;
-        let share = crate::estimate::wilson(count, read.len() as f64);
-        let (all, outside): (f64, f64) = read.iter().fold((0.0, 0.0), |(all, outside), &(e, out)| (all + e, if out { outside + e } else { outside }));
-        if !(all > 0.0) {
-            return [share; 2];
-        }
-        let ratio = outside / all;
-        let spread: f64 = read.iter().map(|&(e, out)| (if out { e } else { 0.0 } - ratio * e).powi(2)).sum::<f64>().sqrt() / all;
-        [share, share.max(ratio + crate::units::CONFIDENCE * spread)]
+    /// Whether a reach holds an atom at r with the momentum κ: its kinetic energy (ħ/m) κ²/2 within the reach's `room`
+    /// there.
+    pub fn holds(&self, reach: &Reach, r: [f64; 3], kappa: [f64; 3]) -> bool {
+        0.5 * self.hbar_over_mass * dot3(kappa, kappa) <= self.room(reach, r, &self.prepared())
+    }
+
+    /// What a reach leaves out of an initial ensemble (module documentation, # What the reach leaves out): the share of
+    /// its atoms and the share of their kinetic energy beyond the reach, by the ensemble's quadrature of its own density
+    /// with at most `most` evaluations of a component's potential a level (ensemble.rs `Ensemble::beyond`), each with
+    /// the quadrature's difference between its last two levels added: the share as far as it is known.
+    pub fn left_out(&self, reach: &Reach, ensemble: &crate::ensemble::Ensemble, most: u64) -> [f64; 2] {
+        let prepared = self.prepared();
+        ensemble.beyond(&|r| self.room(reach, r, &prepared), most).map(|share| share.value + share.difference)
     }
 
     /// Every beam over a cell (`Span`).

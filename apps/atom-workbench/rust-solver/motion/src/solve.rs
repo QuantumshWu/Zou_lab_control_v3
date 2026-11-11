@@ -665,10 +665,9 @@ fn attempt(
     let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm)?;
     let row: [f64; STATES] = std::array::from_fn(|s| request.initial_density[(s, s)].re);
     // What the reach the model was judged over leaves out of the initial ensemble (model/reach.rs `Model::left_out`): of
-    // the atoms and of their kinetic energy, counted on the initial atoms of the most trajectories a solve runs (drawn on
-    // all the cores: 0.4 s of one).
-    let atoms: Vec<(V3, V3)> = (0..MOST_TRAJECTORIES).into_par_iter().map(|index| { let start = ensemble.draw(SEED, index); (start.r, start.kappa) }).collect();
-    let unsampled = model.left_out(&judged, atoms.into_iter());
+    // the atoms and of their kinetic energy, by the ensemble's quadrature of its own density -- no atom is drawn --, a
+    // level of it with no more evaluations of the potential than the most trajectories a solve runs have initial atoms.
+    let unsampled = model.left_out(&judged, &ensemble, MOST_TRAJECTORIES);
     let depth = ensemble.depths()[chief];
     let mut ledger = Ledger::default();
     ledger.note = Some(format!("初始系综：各初态在自己的准备阱中的束缚原子（降低的等温分布乘每轴谐振子的 Wigner 因子，T = {} μK），参考态阱深 {:.1} k_BT", request.temperature_uk, depth));
@@ -818,8 +817,8 @@ fn attempt(
         for ((unit, most), how) in units.iter().zip(largest).zip(&booking) {
             context.ledger.item(&model.label(unit), most, if matches!(how, Booked::Read(_)) { FOLD_MEASURED } else { FOLD_BOUNDED });
         }
-        context.ledger.item("可达范围之外的初始原子份额", unsampled[0], "按初始系综计数（Wilson 远端），计入布居的模型误差");
-        context.ledger.item("可达范围之外的初始原子的动能份额", unsampled[1], "按初始系综计数，计入 T 的模型误差");
+        context.ledger.item("可达范围之外的初始原子份额", unsampled[0], "按初始系综的密度求积（含求积两级之差），计入布居的模型误差");
+        context.ledger.item("可达范围之外的初始原子的动能份额", unsampled[1], "按初始系综的密度求积（含求积两级之差），计入 T 的模型误差");
         Run::tabulated(&model, &tables, reference)
     };
 
@@ -2140,6 +2139,43 @@ mod tests {
     /// error as the solve books it for T(0), its last two levels' relative difference (`Fixed::start`), here on 2¹⁶
     /// evaluations, fewer than a pilot's steps in these traps (88 trajectories of 800 steps or more). η lies in (0, 1]:
     /// the lowered isothermal's kinetic temperature, below the Boltzmann one.
+    /// What the reach leaves out of a tweezer's ensemble by quadrature (model/reach.rs `Model::left_out`, ensemble.rs
+    /// `Ensemble::beyond`) is what a count over its drawn atoms finds -- drawn here alone, for the test. R4_TW2 (one
+    /// component, 30 µK, its tweezer 35 k_BT deep), the reach at the request's temperature: of the initial atoms of the
+    /// most trajectories a solve runs, the share outside the reach (`Model::holds`) and their share of Σκ² are the
+    /// quadrature's within z of the count's own deviations (the atoms' binomial; the energy's ratio linearized) and the
+    /// quadrature's difference between its last two levels.
+    #[test]
+    fn the_reach_s_share_by_quadrature_is_the_count_of_its_drawn_atoms() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R4_TW2.json");
+        let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let request = Request::from_native(&line).unwrap();
+        let light = Light::new(&request);
+        let model = Model::new(&request, &light, &[]).unwrap();
+        let initial = components(&request);
+        assert_eq!(initial.len(), 1, "one initial component");
+        let reference = alone(initial[0].0);
+        let trap = model.trap(&reference, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &reference, request.temperature_uk, unseen(MOST_TRAJECTORIES as f64));
+        let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, &light, alone(s)).unwrap()).collect();
+        let hm = hbar_over_mass(request.mass_kg);
+        let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm).unwrap();
+        let prepared = model.prepared();
+        let [atoms, energy] = ensemble.beyond(&|r| model.room(&reach, r, &prepared), MOST_TRAJECTORIES);
+        let booked = model.left_out(&reach, &ensemble, MOST_TRAJECTORIES);
+        assert_eq!(booked, [atoms.value + atoms.difference, energy.value + energy.difference], "the booked shares are the quadrature's with its differences");
+        let n = MOST_TRAJECTORIES;
+        let read: Vec<(f64, bool)> = (0..n).into_par_iter().map(|index| { let start = ensemble.draw(SEED, index); (start.kappa.iter().map(|k| k * k).sum(), !model.holds(&reach, start.r, start.kappa)) }).collect();
+        let count = read.iter().filter(|atom| atom.1).count() as f64;
+        let (all, outside): (f64, f64) = read.iter().fold((0., 0.), |(all, outside), &(e, out)| (all + e, if out { outside + e } else { outside }));
+        let ratio = outside / all;
+        let spread: f64 = read.iter().map(|&(e, out)| (if out { e } else { 0. } - ratio * e).powi(2)).sum::<f64>().sqrt() / all;
+        eprintln!("outside the reach: {count} of {n} atoms drawn ({:.3e}) against the quadrature's {:.3e} ± {:.1e}; their kinetic energy's share {ratio:.3e} ± {spread:.1e} against {:.3e} ± {:.1e}", count / n as f64, atoms.value, atoms.difference, energy.value, energy.difference);
+        assert!(count > 0., "some atoms are drawn outside the reach");
+        assert!((count / n as f64 - atoms.value).abs() <= CONFIDENCE * count.sqrt() / n as f64 + atoms.difference, "the atoms' share: {} drawn of {n} against {:e} ± {:e}", count, atoms.value, atoms.difference);
+        assert!((ratio - energy.value).abs() <= CONFIDENCE * spread + energy.difference, "the kinetic energy's share: {ratio:e} ± {spread:e} drawn against {:e} ± {:e}", energy.value, energy.difference);
+    }
+
     #[test]
     fn the_reference_traps_draw_their_exact_moments() {
         let names = ["R1_TWEEZER", "R1_RETRO", "R1_CROSSED", "R1_SIGMA_P"];
