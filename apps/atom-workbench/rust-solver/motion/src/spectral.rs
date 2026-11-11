@@ -263,6 +263,21 @@ impl Default for Picture {
     }
 }
 
+/// The turn |ω| |h| of a pair between two of the step's nodes from which the pair is followed (module documentation:
+/// not derived). The tests force it either way (`SPLIT`) to read the two treatments on the same pair.
+fn split() -> f64 {
+    #[cfg(test)]
+    return SPLIT.get();
+    #[cfg(not(test))]
+    1.0
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `split` in a test's thread: zero follows every pair, infinity hops every pair.
+    pub(crate) static SPLIT: std::cell::Cell<f64> = const { std::cell::Cell::new(1.0) };
+}
+
 /// The terms of ∫₀¹ t^p e^{zt} dt's series Σ_j z^j/(j!(j + p + 1)) at |z| ≤ x for an integral of the size `size` at
 /// most: the least T with x^T/T! times the size within the unit round-off, the size no more than one -- the terms from T
 /// on are within the round-off of the state the integral acts on, or of its own first term where that is more.
@@ -420,7 +435,7 @@ impl Picture {
             for column in row..n {
                 let omega = self.lambda[row] - self.lambda[column];
                 let turn = omega.abs();
-                let fast = row != column && turn * h.abs() >= 1.0;
+                let fast = row != column && turn * h.abs() >= split();
                 if !fast && row != column {
                     self.spread = self.spread.max(turn);
                 }
@@ -1109,5 +1124,76 @@ mod tests {
             found.push(error);
         }
         assert!(found[0] < 1e-4 && found[1] < found[0] / 24.0, "{found:?}");
+    }
+
+    /// One pair under the two treatments, the split forced either way (`SPLIT`): Ĥ₀ = diag(0, −ω) with the change
+    /// uA + u²B on the pair alone, x = |ω| h from 0.5 to 4 and the change's size s = (|A| h + |B| h²) h from 0.01 to
+    /// 0.3 -- A and B in equal parts (their phases 1.1 rad apart), A alone, B alone --, from three states; the state's
+    /// largest error at the step's end and inside it (u = ±h/2) against the flow. A measurement of the two remainders.
+    fn a_pair_s_remainders(parts: [f64; 2], size: f64, x: f64) -> [[f64; 2]; 2] {
+        let half = 1.0;
+        let starts = [[C64::ONE, C64::ZERO], [C64::real(0.5_f64.sqrt()); 2], [C64::real(0.6), C64::new(0.0, 0.8)]];
+        let base = Mat::from_fn(2, 2, |i, j| if i == 1 && j == 1 { C64::real(-x / half) } else { C64::ZERO });
+        let pair = |z: C64| Mat::from_fn(2, 2, |i, j| if i == j { C64::ZERO } else if i < j { z } else { z.conj() });
+        let (a, b) = (pair(C64::cis(0.7) * (parts[0] * size / half.powi(2))), pair(C64::cis(-0.4) * (parts[1] * size / half.powi(3))));
+        let mut found = [[0.0_f64; 2]; 2];
+        for (treatment, split) in [f64::INFINITY, 0.0].into_iter().enumerate() {
+            SPLIT.set(split);
+            let mut picture = pictured(&base, &a, &b, half, true);
+            SPLIT.set(1.0);
+            assert!(picture.through && picture.followed == (treatment == 1));
+            for start in &starts {
+                picture.launch(-half, start);
+                for (place, times) in [&[half][..], &[-0.5 * half, 0.5 * half][..]].into_iter().enumerate() {
+                    found[treatment][place] = found[treatment][place].max(errors(&mut picture, &base, &a, &b, half, start, times, 20_000));
+                }
+            }
+        }
+        found
+    }
+
+    /// What the two treatments leave of one pair, read in the crate (`a_pair_s_remainders`; the table is printed):
+    /// - hopped, at the step's end: the second Magnus term of the two hops, x (|A| h²)²/15 for a slope alone while the
+    ///   nodes resolve the pair (x ≤ 1: within a twentieth);
+    /// - followed, at the step's end: in the second order of the change the three nodes' parabola of D₂ misses the
+    ///   quartic of the change's own light shift, u⁴|B|²/ω, and nothing else -- (4/15)(|B| h³)²/x, within a fiftieth at
+    ///   the size 0.01 from x = 1 on; a slope alone leaves the third order;
+    /// - so where the two are equal is no number of x: at x = 1 the followed pair errs ten times less than the hopped
+    ///   one for a slope alone and ten times more for a curvature alone (they cross at 0.6 … 1.3, at 2.1 for equal
+    ///   parts, at 4 for a curvature alone).
+    #[test]
+    fn a_pair_hopped_and_followed_against_its_flow() {
+        for (name, parts) in [("A and B", [0.5, 0.5]), ("A alone", [1.0, 0.0]), ("B alone", [0.0, 1.0])] {
+            for size in [0.01, 0.1, 0.3] {
+                for x in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0] {
+                    let [hop, follow] = a_pair_s_remainders(parts, size, x);
+                    if size == 0.01 {
+                        let (slope, curvature) = (parts[0] * size, parts[1] * size);
+                        if parts[1] == 0.0 && x <= 1.0 {
+                            let second = x * slope * slope / 15.0;
+                            assert!((hop[0] / second - 1.0).abs() < 0.05, "{name}, x {x}: hopped {:e} against {second:e}", hop[0]);
+                        }
+                        if parts[1] > 0.0 && x >= 1.0 {
+                            let quartic = 4.0 / 15.0 * curvature * curvature / x;
+                            assert!((follow[0] / quartic - 1.0).abs() < 0.02, "{name}, x {x}: followed {:e} against {quartic:e}", follow[0]);
+                        }
+                        if x == 1.0 && parts[0] * parts[1] == 0.0 {
+                            assert!(if parts[1] == 0.0 { follow[0] < 0.2 * hop[0] } else { follow[0] > 5.0 * hop[0] }, "{name}, x {x}: hopped {:e}, followed {:e}", hop[0], follow[0]);
+                        }
+                    }
+                    eprintln!(
+                        "{name}, size {size:4}, x {x:4}: end hop {:.3e} follow {:.3e} (follow/hop {:8.3}; hop/size² {:.4}, follow x/size² {:.4}) | inside hop {:.3e} follow {:.3e} ({:8.3})",
+                        hop[0],
+                        follow[0],
+                        follow[0] / hop[0],
+                        hop[0] / (size * size),
+                        follow[0] * x / (size * size),
+                        hop[1],
+                        follow[1],
+                        follow[1] / hop[1]
+                    );
+                }
+            }
+        }
     }
 }
