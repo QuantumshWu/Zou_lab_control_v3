@@ -345,6 +345,20 @@ impl Model {
         Some(emitted.expect("the drawn class at the state it was drawn at"))
     }
 
+    /// The complex multiply-adds of a jump's photon (`emission_of`) of a cluster's state at a point, every light on:
+    /// the site once, to first order (`sited`); every class's amplitudes, for the rates; and one class made alone
+    /// with its gradients -- the dearest of the cluster's, whichever a jump draws. Counted where `emission_of` makes
+    /// them (`sited`, `classes_on`), the site's in the first pass alone.
+    pub(crate) fn emission_counted(&self, cluster: usize, at: &Point, psi: &[C64], tables: Option<&super::tabulate::Tables>) -> f64 {
+        let lights = self.running();
+        let (plan, table) = (self.plan(cluster, &lights), tables.and_then(|t| t.of(cluster, &lights)));
+        let mut site = Held::<Site>::take();
+        let made = self.sited(&plan, table, at, 1, &mut site);
+        let rates = self.classes_on(&plan, at, psi, None, Gradients::None, &mut site, made, &mut |_, _, _, _, _| {});
+        let drawn = (0..plan.classes.len()).map(|place| self.classes_on(&plan, at, psi, None, Gradients::Of(place), &mut site, 0.0, &mut |_, _, _, _, _| {})).fold(0.0, f64::max);
+        rates + drawn
+    }
+
     /// What `photons_at` makes, class by class to `each` as it is made (`classes_on`), on the point's site made to the
     /// order the gradients ask (`sited`); and the complex multiply-adds, counted as the definition's entries (assemble.rs,
     /// # Work).
@@ -359,9 +373,10 @@ impl Model {
     /// photons at a point), whatever the state: every beam's amplitude with its gradient; the fourth order's matrices
     /// (assemble.rs `Model::quartic`: the step's middle's where it made them); the jumps' matrices to `order` -- 0, or 1
     /// with their slopes: a table's, or the exact elimination's --; and the plan's field components to that order at
-    /// the point's momentum. What lies within an order is the same numbers at every order. Returns the counted work of
-    /// the jumps' matrices and of the fourth order's.
-    fn sited(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, order: usize, site: &mut Site) -> (f64, f64) {
+    /// the point's momentum. What lies within an order is the same numbers at every order. Returns the site's counted
+    /// work: the jumps' matrices', the fourth order's, and each field component's value (and gradient) from its
+    /// beams, plain and Doppler-weighted.
+    fn sited(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, order: usize, site: &mut Site) -> f64 {
         self.light.amplitudes_into(at.r, 1, |_| true, &mut site.beams);
         let fourth = plan.fourth.as_ref().map_or(0.0, |fourth| self.quartic(plan, fourth, table, Some(at.r), site, false));
         let near = match table {
@@ -378,7 +393,7 @@ impl Model {
         };
         let Site { beams, fields, .. } = site;
         self.fields_into(plan, beams, at.kappa, order, fields);
-        (near, fourth)
+        near + fourth + plan.scalars.iter().map(|s| (2 * jet::parts(order) * s.beams.len()) as f64).sum::<f64>()
     }
 
     /// The classes of a state's photons on a point's site (`sited`: its work `made`), class by class to `each` as each
@@ -391,15 +406,14 @@ impl Model {
     /// reads, and a step's scattering (`scattering_of`) and a jump's photon (`emission_of`) read them where they are
     /// made and ask the heap for nothing.
     #[allow(clippy::too_many_arguments)]
-    fn classes_on(&self, plan: &Arc<Plan>, at: &Point, psi: &[C64], populations: Option<&[f64]>, gradients: Gradients, site: &mut Site, made: (f64, f64), each: &mut dyn FnMut(usize, &ClassPlan, &[f64], bool, &[[f64; 3]; 3])) -> f64 {
+    fn classes_on(&self, plan: &Arc<Plan>, at: &Point, psi: &[C64], populations: Option<&[f64]>, gradients: Gradients, site: &mut Site, made: f64, each: &mut dyn FnMut(usize, &ClassPlan, &[f64], bool, &[[f64; 3]; 3])) -> f64 {
         let cluster = plan.cluster;
         let order = if gradients == Gradients::None { 0 } else { 1 };
-        let (mut work, fourth_work) = made;
+        let mut work = made;
         // The fourth order's states (assemble.rs, # The fourth order): (1 − ½X)ψ and Nψ, and with the gradients the
         // three lab axes' −½∂X ψ and ∂N ψ.
         let bent: Option<[[C64; STATES]; 8]> = plan.fourth.as_ref().map(|fourth| {
             let (n, size) = (fourth.n, fourth.n * fourth.n);
-            work += fourth_work;
             crate::model::Model::quartic_read(|q| {
                 let mut out = [[C64::ZERO; STATES]; 8];
                 let (near, metric) = (&q.data[..4 * size], &q.data[8 * size..]);
@@ -429,8 +443,6 @@ impl Model {
         }
         let live = &axes[..count];
         let Site { beams: amplitudes, directions, jumps, jump_slopes, fields, member: vectors, class: sums, dressing, energies, .. } = site;
-        // Each field component's value (and gradient) from its beams, plain and Doppler-weighted.
-        work += plan.scalars.iter().map(|s| (2 * jet::parts(order) * s.beams.len()) as f64).sum::<f64>();
         // A member's vectors: its matrix on the state, a point's with its partner's and each direction's two slopes.
         // The most a member makes (below: `base + more` of a near member with the fourth order and the gradients), s
         // the directions' slopes, a table's axes or the three lab axes: 2(1 + s) its jumps' and its partner's with their

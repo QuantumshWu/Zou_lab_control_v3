@@ -220,10 +220,14 @@ pub struct UnitError {
     /// The small parameter measured: s (a drive's share of its ground state), ε (a bare fold's denominator's first order),
     /// m² (a coupling's mixing), a carrier's dressing's relative rate error.
     pub parameter: f64,
-    /// The absolute error it makes on the display rows' populations: s p_g; ε times its part of the state's rates;
-    /// m²(p_a + p_b); m²√(p_i p_j).
+    /// The absolute error it makes on the display rows' populations: s p_g -- where its cluster's fold is the fourth
+    /// order's, its ground state's line's remainder on its part of the state's excitation, `ORDER_RATES` s M²/S_b p_g
+    /// (eliminate.rs `Model::drive_error`) --; ε times its part of the state's rates; m²(p_a + p_b); m²√(p_i p_j).
     pub population: f64,
-    /// The relative error it makes on T: s (the fourth order's 3/2 s²); a; (w/σ)².
+    /// The relative error it makes on T: s -- at the fourth order `ORDER_FORCE` s M²/S_b and the cluster's ground
+    /// levels' spread over the drive's distance times s, M the larger of its ground state's excited share S_b and of
+    /// twice its level's own second-order term over the drive's distance (eliminate.rs `Model::drive_error`) --; a;
+    /// (w/σ)².
     pub temperature: f64,
 }
 
@@ -757,9 +761,10 @@ pub struct Run<'a> {
     prepared: Lights,
     plans: Vec<(Arc<assemble::Plan>, Option<&'a tabulate::NearTable>)>,
     /// The counted real multiply-adds of one middle (`decide::COMPLEX` per complex one, assemble.rs # Work) with its state's
-    /// scattering (photon.rs `Model::scattering_of`: every class's photons with their gradients, once a step), and of one
-    /// jump's photons (photon.rs `Model::photons_counted`): the largest over the clusters at the focus, every light on, made
-    /// once.
+    /// scattering (photon.rs `Model::scattering_of`: every class's photons with their gradients, once a step:
+    /// `Model::photons_counted`), and of one jump's photon (photon.rs `Model::emission_of`: the site once, every class's
+    /// rate, the class drawn alone with its gradients: `Model::emission_counted`): each the largest over the clusters at
+    /// the focus, every light on, made once.
     assembly: f64,
     photons: f64,
 }
@@ -778,14 +783,11 @@ impl<'a> Run<'a> {
         let at = Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 };
         let plans = (0..model.clusters.len()).map(|c| (model.plan(c, &running), tables.and_then(|t| t.of(c, &running)))).collect();
         let plans: Vec<(Arc<assemble::Plan>, Option<&tabulate::NearTable>)> = plans;
-        let photons = (0..model.clusters.len())
-            .map(|c| {
-                let psi: Vec<C64> = (0..model.clusters[c].states.len()).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
-                model.photons_counted(c, &at, &psi, tables).1
-            })
-            .fold(0.0, f64::max)
-            * crate::decide::COMPLEX;
-        let assembly = plans.iter().map(|(plan, table)| model.middle(plan, at.r, at.t, *table).work).fold(0.0, f64::max) * crate::decide::COMPLEX + photons;
+        let first = |c: usize| -> Vec<C64> { (0..model.clusters[c].states.len()).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect() };
+        let largest = |count: &dyn Fn(usize) -> f64| (0..model.clusters.len()).map(count).fold(0.0, f64::max) * crate::decide::COMPLEX;
+        let scattering = largest(&|c| model.photons_counted(c, &at, &first(c), tables).1);
+        let photons = largest(&|c| model.emission_counted(c, &at, &first(c), tables));
+        let assembly = plans.iter().map(|(plan, table)| model.middle(plan, at.r, at.t, *table).work).fold(0.0, f64::max) * crate::decide::COMPLEX + scattering;
         Run { model, tables, reference, prepared: model.prepared(), plans, assembly, photons }
     }
     /// The photon classes of a cluster's state at a point with their amplitudes alone (photon.rs `Gradients::None`): the
